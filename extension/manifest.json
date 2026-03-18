@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "npu-webhook 知识库助手",
+  "version": "0.1.0",
+  "description": "个人知识库 + 记忆增强：自动捕获 AI 对话，无感注入相关知识",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "activeTab",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://localhost:18900/*",
+    "http://127.0.0.1:18900/*"
+  ],
+  "background": {
+    "service_worker": "dist/background/worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*"
+      ],
+      "js": ["dist/content/index.js"],
+      "css": ["dist/content/indicator.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "dist/sidepanel/index.html"
+  },
+  "action": {
+    "default_popup": "dist/popup/index.html",
+    "default_icon": {
+      "16": "assets/icon-16.png",
+      "48": "assets/icon-48.png",
+      "128": "assets/icon-128.png"
+    }
+  },
+  "options_ui": {
+    "page": "dist/options/index.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "assets/icon-16.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  }
+}

@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+*.db
+*.db-journal
+chroma_data/
+models/
+*.onnx
+*.bin
+*.xml
+
+# Node
+node_modules/
+extension/dist/
+
+# Packaging
+*.AppImage
+*.exe
+*.spec.bak
+
+# Logs
+*.log
+logs/
+
+# Config (local overrides)
+config.local.yaml
+
+# Environment
+.env
+.env.local

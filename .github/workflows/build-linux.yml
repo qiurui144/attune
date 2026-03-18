@@ -1,0 +1,44 @@
+name: Build Linux AppImage
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*.*.*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Build extension
+        working-directory: extension
+        run: npm ci && npm run build
+
+      - name: Install Python dependencies
+        run: pip install -e ".[dev]" pyinstaller
+
+      - name: PyInstaller build
+        run: pyinstaller packaging/npu_webhook.spec
+
+      - name: Build AppImage
+        run: |
+          mkdir -p npu-webhook.AppDir/usr/bin
+          cp -r dist/npu-webhook/* npu-webhook.AppDir/usr/bin/
+          cp packaging/linux/AppRun npu-webhook.AppDir/
+          cp packaging/linux/npu-webhook.desktop npu-webhook.AppDir/
+          chmod +x npu-webhook.AppDir/AppRun
+          # TODO: download appimagetool and build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npu-webhook-linux
+          path: npu-webhook.AppDir/

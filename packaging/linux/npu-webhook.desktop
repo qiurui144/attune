@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=npu-webhook
+Comment=个人知识库 + 记忆增强系统
+Exec=npu-webhook
+Icon=npu-webhook
+Categories=Utility;
+Terminal=false

@@ -1,0 +1,6 @@
+#!/bin/bash
+# AppImage 入口脚本
+SELF=$(readlink -f "$0")
+HERE=${SELF%/*}
+export PATH="${HERE}/usr/bin:${PATH}"
+exec "${HERE}/usr/bin/npu-webhook" "$@"

@@ -1,0 +1,17 @@
+/* 状态指示器样式 */
+.npu-webhook-indicator {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  z-index: 99999;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+.npu-webhook-indicator--disabled { background-color: #9ca3af; }
+.npu-webhook-indicator--processing { background-color: #eab308; }
+.npu-webhook-indicator--captured { background-color: #22c55e; }
+.npu-webhook-indicator--offline { background-color: #ef4444; }

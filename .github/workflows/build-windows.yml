@@ -1,0 +1,40 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*.*.*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Build extension
+        working-directory: extension
+        run: npm ci && npm run build
+
+      - name: Install Python dependencies
+        run: pip install -e ".[dev]" pyinstaller
+
+      - name: PyInstaller build
+        run: pyinstaller packaging/npu_webhook.spec
+
+      - name: Build NSIS installer
+        uses: joncloud/makensis-action@v4
+        with:
+          script-file: packaging/windows/installer.nsi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npu-webhook-windows
+          path: "*.exe"
