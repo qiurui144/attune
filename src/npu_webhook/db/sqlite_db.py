@@ -497,18 +497,18 @@ class SQLiteDB:
             score = 1.0  # 无反馈时保持默认
         else:
             useful_rate = useful / rated
-            score = useful_rate * math.log(rated + 1) / math.log(11)  # 归一化到 0~1
+            # log(rated+1)/log(11) 当 rated>10 时超过 1.0，用 min 限制上界
+            score = min(useful_rate * math.log(rated + 1) / math.log(11), 1.0)
         self.conn.execute(
             "UPDATE knowledge_items SET quality_score = ? WHERE id = ?",
             (round(score, 3), item_id),
         )
 
-    def list_stale_items(self, days: int = 30, min_use: int = 0, limit: int = 50) -> list[dict]:
+    def list_stale_items(self, days: int = 30, limit: int = 50) -> list[dict]:
         """查找过期/冷知识条目
 
-        条件：
+        条件（任一满足即列出）：
         - 超过 N 天未被使用
-        - 使用次数低于阈值
         - 质量分数低于 0.3
         """
         cutoff = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -520,10 +520,9 @@ class SQLiteDB:
                    OR (last_used_at IS NOT NULL AND julianday(?) - julianday(last_used_at) > ?)
                    OR quality_score < 0.3
                )
-               AND use_count <= ?
                ORDER BY quality_score ASC, created_at ASC
                LIMIT ?""",
-            (cutoff, days, cutoff, days, min_use, limit),
+            (cutoff, days, cutoff, days, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
