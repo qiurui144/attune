@@ -103,4 +103,24 @@ def load_settings() -> Settings:
     return s
 
 
+def save_settings(s: Settings) -> None:
+    """将当前设置持久化回 YAML 配置文件"""
+    config_file = s.config_dir / "config.yaml"
+
+    # 读取已有 YAML，保留未知字段
+    existing: dict = {}
+    if config_file.exists():
+        with open(config_file) as f:
+            existing = yaml.safe_load(f) or {}
+
+    # 覆盖可写字段（只写会变的 section）
+    for section_name in ("server", "embedding", "auth", "ingest", "logging", "search", "chunk"):
+        section = getattr(s, section_name, None)
+        if isinstance(section, BaseModel):
+            existing[section_name] = section.model_dump()
+
+    with open(config_file, "w") as f:
+        yaml.safe_dump(existing, f, allow_unicode=True, default_flow_style=False)
+
+
 settings = load_settings()

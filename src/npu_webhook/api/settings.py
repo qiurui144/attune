@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from npu_webhook.config import settings
+from npu_webhook.config import save_settings, settings
 from npu_webhook.models.schemas import SettingsResponse, SettingsUpdateRequest
 
 router = APIRouter(prefix="/api/v1", tags=["settings"])
@@ -33,4 +33,5 @@ async def update_settings(req: SettingsUpdateRequest) -> dict:
         settings.ingest.min_content_length = req.ingest_min_length
     if req.excluded_domains is not None:
         settings.ingest.excluded_domains = req.excluded_domains
+    save_settings(settings)
     return {"status": "ok"}
