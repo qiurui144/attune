@@ -158,11 +158,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: 允许 Chrome 扩展 + localhost
+# CORS: 仅允许 Chrome 扩展 + localhost（移除 * 通配符，避免任意域名跨域凭据请求）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_origin_regex=r"^(chrome-extension://.*|http://localhost:\d+|http://127\.0\.0\.1:\d+)$",
+    allow_origins=[],
+    allow_origin_regex=r"^(chrome-extension://.*|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

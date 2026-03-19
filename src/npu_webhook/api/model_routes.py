@@ -1,5 +1,6 @@
 """/models - 模型管理 + 预置检查"""
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -56,10 +57,10 @@ def _check_onnx_model(model_name: str) -> dict:
     return {"available": False, "path": str(candidates[0]), "backend": "onnx"}
 
 
-def _check_ollama_model(model_name: str) -> dict:
-    """检查 Ollama 模型是否已拉取"""
-    import urllib.request
+def _check_ollama_model_sync(model_name: str) -> dict:
+    """检查 Ollama 模型是否已拉取（同步，供 asyncio.to_thread 调用）"""
     import json
+    import urllib.request
 
     ollama_name = SUPPORTED_MODELS.get(model_name, {}).get("ollama_name", model_name)
     try:
@@ -72,6 +73,11 @@ def _check_ollama_model(model_name: str) -> dict:
         return {"available": False, "backend": "ollama", "ollama_name": ollama_name, "error": "Ollama not reachable"}
 
 
+async def _check_ollama_model(model_name: str) -> dict:
+    """异步包装，避免阻塞 event loop"""
+    return await asyncio.to_thread(_check_ollama_model_sync, model_name)
+
+
 @router.get("/models")
 async def list_models() -> dict:
     """列出支持的模型及其状态"""
@@ -82,7 +88,7 @@ async def list_models() -> dict:
     models = []
     for name, info in SUPPORTED_MODELS.items():
         onnx_status = _check_onnx_model(name)
-        ollama_status = _check_ollama_model(name)
+        ollama_status = await _check_ollama_model(name)
         models.append({
             "name": name,
             "description": info["description"],
@@ -163,7 +169,7 @@ async def check_deployment() -> dict:
     })
 
     # 5. Ollama 可达性
-    ollama_status = _check_ollama_model(model)
+    ollama_status = await _check_ollama_model(model)
     ollama_ok = ollama_status.get("available", False)
     checks.append({
         "name": "ollama",
@@ -233,23 +239,28 @@ async def download_model(model_name: str = "bge-m3", backend: str = "ollama") ->
         return {"status": "error", "message": f"不支持的模型: {model_name}"}
 
     if backend == "ollama":
-        import urllib.request
         import json
+        import urllib.request
+
         ollama_name = SUPPORTED_MODELS[model_name].get("ollama_name", model_name)
-        try:
+
+        def _pull() -> dict:
             data = json.dumps({"name": ollama_name}).encode()
             req = urllib.request.Request(
                 "http://localhost:11434/api/pull",
                 data=data,
                 headers={"Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                # Ollama pull 是流式响应
-                last_line = ""
-                for line in resp:
-                    last_line = line.decode().strip()
-            return {"status": "ok", "backend": "ollama", "model": ollama_name, "detail": last_line}
-        except Exception as e:
-            return {"status": "error", "backend": "ollama", "message": str(e)}
+            try:
+                with urllib.request.urlopen(req, timeout=600) as resp:
+                    # Ollama pull 是流式响应，读取最后一行
+                    last_line = ""
+                    for line in resp:
+                        last_line = line.decode().strip()
+                return {"status": "ok", "backend": "ollama", "model": ollama_name, "detail": last_line}
+            except Exception as e:
+                return {"status": "error", "backend": "ollama", "message": str(e)}
+
+        return await asyncio.to_thread(_pull)
 
     return {"status": "error", "message": f"ONNX 下载需要 optimum，建议使用 ollama 后端"}
