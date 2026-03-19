@@ -1,5 +1,7 @@
 """GET /search + POST /search/relevant + POST /feedback - 搜索 + 注入反馈"""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -20,7 +22,10 @@ async def search(
         raise HTTPException(status_code=503, detail="Search engine not initialized")
 
     types = source_types.split(",") if source_types else None
-    results = state.search_engine.search(q, top_k=top_k, source_types=types)
+    # asyncio.to_thread: embed() 是同步阻塞 HTTP 调用（OllamaEmbedding），避免阻塞 event loop
+    results = await asyncio.to_thread(
+        state.search_engine.search, q, top_k=top_k, source_types=types
+    )
 
     return SearchResponse(
         results=[
@@ -48,7 +53,8 @@ async def search_relevant(req: RelevantRequest) -> SearchResponse:
     if not state.search_engine:
         raise HTTPException(status_code=503, detail="Search engine not initialized")
 
-    results = state.search_engine.search(
+    results = await asyncio.to_thread(
+        state.search_engine.search,
         req.query,
         top_k=req.top_k,
         source_types=req.source_types,
