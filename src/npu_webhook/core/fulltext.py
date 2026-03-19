@@ -22,11 +22,12 @@ def tokenize_for_search(text: str) -> str:
 def build_fts_query(query: str) -> str:
     """将用户查询转换为 FTS5 查询语法
 
-    对每个分词结果加 * 前缀匹配，用 OR 连接。
+    对每个分词结果用双引号包裹（精确词匹配），用 OR 连接。
+    注：双引号内的词做短语匹配，适合 jieba 已分好的语义词元。
     """
     words = jieba.cut_for_search(query)
-    terms = [w.strip() for w in words if len(w.strip()) > 1]
+    # 去除词中的双引号，避免破坏 FTS5 语法（如 "Python"3" 是非法查询）
+    terms = [w.strip().replace('"', "") for w in words if len(w.strip()) > 1]
     if not terms:
         return query
-    # 使用 OR 连接，每个词加引号避免特殊字符问题
-    return " OR ".join(f'"{t}"' for t in terms)
+    return " OR ".join(f'"{t}"' for t in terms if t)
