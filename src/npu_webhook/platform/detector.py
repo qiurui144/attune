@@ -165,7 +165,10 @@ def _run_cmd(cmd: list[str], timeout: int = 5) -> str:
 
 
 def _check_kernel_module(module: str) -> bool:
-    return module in _run_cmd(["lsmod"])
+    """检查内核模块是否已加载（匹配行首，避免短名称误匹配子串）"""
+    output = _run_cmd(["lsmod"])
+    # lsmod 每行格式: "<module_name> <size> <refcount> ..."，匹配行首
+    return bool(re.search(rf"^{re.escape(module)}\s", output, re.MULTILINE))
 
 
 def _kernel_version_tuple(ver: str) -> tuple:
@@ -457,10 +460,12 @@ def _identify_amd_npu_chip(lspci: str, kernel: str) -> ChipMatch | None:
         missing.append(f"NPU 固件 {info['firmware']}")
         cmds.append("sudo apt-get install -y linux-firmware")
 
-    # 检查 IOMMU SVA
-    iommu_ok = "iommu" in _run_cmd(["dmesg"]).lower() if platform.system() == "Linux" else True
-    if not iommu_ok:
-        missing.append("IOMMU SVA（BIOS 中启用）")
+    # 检查 IOMMU SVA（通过 sysfs 而非 dmesg，避免读取大量内核日志）
+    if platform.system() == "Linux":
+        iommu_path = Path("/sys/class/iommu")
+        iommu_ok = iommu_path.exists() and any(True for _ in iommu_path.iterdir())
+        if not iommu_ok:
+            missing.append("IOMMU SVA（BIOS 中启用）")
 
     # 已知问题警告
     known_issues = info.get("known_issues")
@@ -571,7 +576,7 @@ def check_amd_drivers() -> list[DriverCheck]:
             required_by="AMD Ryzen AI NPU",
         ))
         rocm = Path("/opt/rocm").exists()
-        rocm_ver = _run_cmd(["cat", "/opt/rocm/.info/version"]) if rocm else ""
+        rocm_ver = Path("/opt/rocm/.info/version").read_text().strip() if rocm else ""
         checks.append(DriverCheck(
             name="ROCm", installed=rocm, version=rocm_ver,
             message="已安装" if rocm else "未安装",
