@@ -343,9 +343,12 @@ class TestTimelinePage:
         page.goto(f"chrome-extension://{ext_id}/dist/sidepanel/index.html")
         page.wait_for_selector(".sp-tabs", timeout=5000)
         page.click("text=时间线")
-        time.sleep(3)
+        # 等待加载完成：有数据卡片或显示空状态提示（最多 10s）
+        page.wait_for_function(
+            "() => document.querySelector('.sp-card') !== null || document.body.innerText.includes('暂无知识条目')",
+            timeout=10000,
+        )
         body = page.text_content("body")
-        # 有数据 → 显示日期分组和卡片；无数据 → 显示"暂无知识条目"
         has_data = page.query_selector(".sp-card") is not None
         has_empty = "暂无知识条目" in body
         assert has_data or has_empty, f"时间线状态异常: {body[:200]}"
@@ -393,7 +396,11 @@ class TestStatusPage:
         page.goto(f"chrome-extension://{ext_id}/dist/sidepanel/index.html")
         page.wait_for_selector(".sp-tabs", timeout=5000)
         page.click("text=状态")
-        time.sleep(3)
+        # 等待状态数据加载完成（出现"连接状态"字段，最多 10s）
+        page.wait_for_function(
+            "() => document.body.innerText.includes('连接状态') && !document.body.innerText.includes('加载中')",
+            timeout=10000,
+        )
         body = page.text_content("body")
         for field in ["连接状态", "版本", "设备", "模型", "知识条目", "向量数", "待处理 Embedding", "监控目录"]:
             assert field in body, f"缺少字段: {field}"
@@ -403,7 +410,11 @@ class TestStatusPage:
         page.goto(f"chrome-extension://{ext_id}/dist/sidepanel/index.html", wait_until="load", timeout=10000)
         page.wait_for_selector(".sp-tabs", timeout=5000)
         page.click("text=状态")
-        time.sleep(3)
+        # 等待连接状态确定（在线或离线，最多 10s）
+        page.wait_for_function(
+            "() => document.body.innerText.includes('在线') || document.body.innerText.includes('离线')",
+            timeout=10000,
+        )
         body = page.text_content("body")
         assert "在线" in body
 
