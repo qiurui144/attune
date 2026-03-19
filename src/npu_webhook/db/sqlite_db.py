@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,9 @@ CREATE TABLE IF NOT EXISTS embedding_queue (
 
 CREATE INDEX IF NOT EXISTS idx_eq_status_priority
     ON embedding_queue(status, priority, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_eq_item_id
+    ON embedding_queue(item_id);
 
 CREATE INDEX IF NOT EXISTS idx_ki_created_at
     ON knowledge_items(created_at DESC) WHERE is_deleted = 0;
@@ -348,20 +352,19 @@ class SQLiteDB:
         self.conn.commit()
 
     def fail_embedding(self, queue_id: int, max_attempts: int = 3) -> None:
-        """标记任务失败，超过最大重试次数后标记为 abandoned"""
-        row = self.conn.execute("SELECT attempts FROM embedding_queue WHERE id = ?", (queue_id,)).fetchone()
-        attempts = (row[0] if row else 0) + 1
-        if attempts >= max_attempts:
-            self.conn.execute(
-                "UPDATE embedding_queue SET status = 'abandoned', attempts = ? WHERE id = ?",
-                (attempts, queue_id),
-            )
-            logger.warning("Embedding task %d abandoned after %d attempts", queue_id, attempts)
-        else:
-            self.conn.execute(
-                "UPDATE embedding_queue SET status = 'pending', attempts = ? WHERE id = ?",
-                (attempts, queue_id),
-            )
+        """标记任务失败，超过最大重试次数后标记为 abandoned（原子 UPDATE 避免竞态）"""
+        self.conn.execute(
+            """UPDATE embedding_queue
+               SET attempts = attempts + 1,
+                   status = CASE WHEN attempts + 1 >= ? THEN 'abandoned' ELSE 'pending' END
+               WHERE id = ?""",
+            (max_attempts, queue_id),
+        )
+        row = self.conn.execute(
+            "SELECT attempts, status FROM embedding_queue WHERE id = ?", (queue_id,)
+        ).fetchone()
+        if row and row["status"] == "abandoned":
+            logger.warning("Embedding task %d abandoned after %d attempts", queue_id, row["attempts"])
         self.conn.commit()
 
     def pending_embedding_count(self) -> int:
@@ -489,7 +492,6 @@ class SQLiteDB:
 
     def _recalc_quality(self, item_id: str) -> None:
         """重新计算条目质量分数: useful_rate * log(use_count+1)"""
-        import math
         row = self.conn.execute(
             """SELECT
                 COUNT(*) as total,
@@ -596,6 +598,11 @@ class SQLiteDB:
             return []
 
         placeholders = ",".join("?" * len(archived_ids))
+        # 取消已归档条目的 pending embedding 任务，避免 worker 在清理向量后重写幽灵向量
+        self.conn.execute(
+            f"UPDATE embedding_queue SET status = 'abandoned' WHERE item_id IN ({placeholders}) AND status IN ('pending', 'processing')",
+            archived_ids,
+        )
         self.conn.execute(
             f"UPDATE knowledge_items SET is_deleted = 1, updated_at = ? WHERE id IN ({placeholders})",
             [now, *archived_ids],

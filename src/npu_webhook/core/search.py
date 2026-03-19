@@ -239,7 +239,12 @@ class HybridSearchEngine:
                     quality = 1.0
                 scores[item_id] *= (0.8 + 0.2 * quality)
 
-        sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:top_k]
+        # 只保留 DB 中存在的条目（排除软删除/已归档的幽灵向量）
+        sorted_ids = sorted(
+            (iid for iid in scores if iid in db_rows),
+            key=lambda x: scores[x],
+            reverse=True,
+        )[:top_k]
         results = []
         for item_id in sorted_ids:
             data = item_data.get(item_id, {"id": item_id})

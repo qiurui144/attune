@@ -105,6 +105,96 @@ def test_bulk_archive_stale():
         db.close()
 
 
+def test_rrf_merge_excludes_deleted_items():
+    """_rrf_merge 必须过滤软删除/已归档条目（即使向量库中仍有对应向量）"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = SQLiteDB(Path(tmpdir) / "test.db")
+        chroma = ChromaDB(Path(tmpdir) / "chroma")
+        vs = VectorStore(chroma, engine=None)
+        engine = HybridSearchEngine(db=db, vector_store=vs)
+
+        # 插入正常条目
+        good_id = db.insert_item(title="正常条目", content="这是一个正常的知识条目", source_type="note")
+        # 插入后立即软删除（模拟归档），但不清理向量（模拟清理失败场景）
+        deleted_id = db.insert_item(title="已删除条目", content="这是一个已被删除的条目", source_type="note")
+        db.delete_item(deleted_id)
+
+        # 模拟向量库中仍存在已删除条目的向量
+        dummy_emb = [0.1] * 10
+        chroma.add(f"{deleted_id}:0", dummy_emb, metadata={"item_id": deleted_id}, document="已删除内容")
+        chroma.add(f"{good_id}:0", dummy_emb, metadata={"item_id": good_id}, document="正常内容")
+
+        # _rrf_merge 需过滤已删除条目（仅来自 FTS 的结果，因为 vs 无 embedding 引擎）
+        results = engine.search("条目")
+        result_ids = {r["id"] for r in results}
+        assert deleted_id not in result_ids, "已软删除的条目不应出现在搜索结果中"
+
+        db.close()
+
+
+def test_bulk_archive_cancels_pending_embeddings():
+    """bulk_archive_stale 应同时取消被归档条目的 pending embedding 任务"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = SQLiteDB(Path(tmpdir) / "test.db")
+
+        item_id = db.insert_item(
+            title="旧对话", content="这是一段很老的对话内容。" * 10, source_type="ai_chat"
+        )
+        db.conn.execute(
+            "UPDATE knowledge_items SET created_at = datetime('now', '-31 days') WHERE id = ?",
+            (item_id,),
+        )
+        db.conn.commit()
+
+        # 模拟有 pending embedding 任务
+        queue_id = db.enqueue_embedding(item_id, chunk_text="旧内容")
+        assert db.pending_embedding_count() == 1
+
+        # 批量归档应同时取消 embedding 任务
+        archived = db.bulk_archive_stale(quality_threshold=0.2, unused_days=60, chat_unused_days=30)
+        assert item_id in archived
+        assert db.pending_embedding_count() == 0
+
+        # 确认任务已被标记为 abandoned
+        row = db.conn.execute(
+            "SELECT status FROM embedding_queue WHERE id = ?", (queue_id,)
+        ).fetchone()
+        assert row is not None and row["status"] == "abandoned"
+
+        db.close()
+
+
+def test_fail_embedding_atomic_increment():
+    """fail_embedding 应原子递增 attempts，超过阈值后标记为 abandoned"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = SQLiteDB(Path(tmpdir) / "test.db")
+
+        item_id = db.insert_item(title="测试", content="内容", source_type="note")
+        queue_id = db.enqueue_embedding(item_id, chunk_text="内容")
+
+        # 前 2 次失败 → 保持 pending
+        db.fail_embedding(queue_id, max_attempts=3)
+        row = db.conn.execute(
+            "SELECT status, attempts FROM embedding_queue WHERE id = ?", (queue_id,)
+        ).fetchone()
+        assert row["status"] == "pending" and row["attempts"] == 1
+
+        db.fail_embedding(queue_id, max_attempts=3)
+        row = db.conn.execute(
+            "SELECT status, attempts FROM embedding_queue WHERE id = ?", (queue_id,)
+        ).fetchone()
+        assert row["status"] == "pending" and row["attempts"] == 2
+
+        # 第 3 次失败 → abandoned
+        db.fail_embedding(queue_id, max_attempts=3)
+        row = db.conn.execute(
+            "SELECT status, attempts FROM embedding_queue WHERE id = ?", (queue_id,)
+        ).fetchone()
+        assert row["status"] == "abandoned" and row["attempts"] == 3
+
+        db.close()
+
+
 def test_chroma_delete_by_item_ids():
     """ChromaDB 按 item_id 元数据删除所有 chunk，防止孤立向量"""
     with tempfile.TemporaryDirectory() as tmpdir:
