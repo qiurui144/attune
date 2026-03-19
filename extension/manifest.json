@@ -11,9 +11,8 @@
     "contextMenus"
   ],
   "host_permissions": [
-    "http://localhost:18900/*",
-    "http://127.0.0.1:18900/*",
-    "http://localhost:11434/*"
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "dist/background/worker.js",
