@@ -233,7 +233,10 @@ class HybridSearchEngine:
                 data.setdefault("url", db_item.get("url"))
                 data.setdefault("source_type", db_item["source_type"])
                 data.setdefault("created_at", db_item["created_at"])
-                quality = db_item.get("quality_score") or 1.0
+                # NULL 未评分 → 不降权(1.0)；0.0 真实低质量 → 按实际值降权
+                quality = db_item.get("quality_score")
+                if quality is None:
+                    quality = 1.0
                 scores[item_id] *= (0.8 + 0.2 * quality)
 
         sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:top_k]
