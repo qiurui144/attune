@@ -16,7 +16,7 @@ function getSessionId() {
 }
 
 export default function FilePage() {
-  const [files, setFiles] = useState([]);   // [{name, id, status, chunks}]
+  const [files, setFiles] = useState([]);   // [{uid, name, id, status, chunks}]
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const inputRef = useRef(null);
@@ -27,13 +27,15 @@ export default function FilePage() {
       alert(`不支持的格式：${ext}。支持：${ALLOWED_TYPES.join(' ')}`);
       return;
     }
+    const uid = crypto.randomUUID();  // 唯一 ID，避免同名文件混淆
     setUploading(true);
-    setFiles((prev) => [...prev, { name: file.name, id: null, status: 'uploading', chunks: 0 }]);
+    setFiles((prev) => [...prev, { uid, name: file.name, id: null, status: 'uploading', chunks: 0 }]);
     try {
+      // NOTE: api.uploadFile() 由 Task 11 (api.js 更新) 添加，此处假设已存在
       const result = await api.uploadFile(file, getSessionId());
       setFiles((prev) =>
         prev.map((f) =>
-          f.name === file.name && f.status === 'uploading'
+          f.uid === uid   // 通过 uid 匹配，而非 name
             ? { ...f, id: result.id, status: 'done', chunks: result.chunks_queued }
             : f,
         ),
@@ -41,7 +43,7 @@ export default function FilePage() {
     } catch (err) {
       setFiles((prev) =>
         prev.map((f) =>
-          f.name === file.name && f.status === 'uploading' ? { ...f, status: 'error' } : f,
+          f.uid === uid ? { ...f, status: 'error' } : f,  // 通过 uid 匹配
         ),
       );
     } finally {
@@ -86,8 +88,8 @@ export default function FilePage() {
 
       {files.length > 0 && (
         <ul class="fp-list">
-          {files.map((f, i) => (
-            <li key={i} class="fp-item">
+          {files.map((f) => (
+            <li key={f.uid} class="fp-item">
               <span class={`fp-status fp-status--${f.status}`}>
                 {f.status === 'uploading' ? '上传中...' : f.status === 'done' ? '✓' : '✗'}
               </span>
