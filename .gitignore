@@ -48,3 +48,4 @@ config.local.yaml
 # Environment
 .env
 .env.local
+.worktrees/
