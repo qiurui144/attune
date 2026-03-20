@@ -19,7 +19,6 @@ function getSessionId() {
 export default function FilePage() {
   const [files, setFiles] = useState([]);   // [{uid, name, id, status, chunks}]
   const [dragging, setDragging] = useState(false);
-  const [uploading, setUploading] = useState(false);
   const inputRef = useRef(null);
 
   async function uploadFile(file) {
@@ -29,7 +28,6 @@ export default function FilePage() {
       return;
     }
     const uid = crypto.randomUUID();  // 唯一 ID，避免同名文件混淆
-    setUploading(true);
     setFiles((prev) => [...prev, { uid, name: file.name, id: null, status: 'uploading', chunks: 0 }]);
     try {
       // NOTE: api.uploadFile() 由 Task 11 (api.js 更新) 添加，此处假设已存在
@@ -51,8 +49,6 @@ export default function FilePage() {
           f.uid === uid ? { ...f, status: 'error' } : f,  // 通过 uid 匹配
         ),
       );
-    } finally {
-      setUploading(false);
     }
   }
 
