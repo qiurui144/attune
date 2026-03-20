@@ -208,3 +208,19 @@ def test_chroma_delete_by_item_ids():
         assert chroma.count() == 3
         chroma.delete_by_item_ids(["item1"])
         assert chroma.count() == 1  # 只剩 item2:0
+
+
+def test_enqueue_embedding_with_level():
+    """enqueue_embedding 接受 level / section_idx 参数"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = SQLiteDB(Path(tmpdir) / "test.db")
+        item_id = db.insert_item(title="t", content="c" * 200, source_type="file")
+        qid = db.enqueue_embedding(
+            item_id, chunk_index=0, chunk_text="text", priority=1, level=1, section_idx=2
+        )
+        row = db.conn.execute(
+            "SELECT level, section_idx FROM embedding_queue WHERE id = ?", (qid,)
+        ).fetchone()
+        assert row["level"] == 1
+        assert row["section_idx"] == 2
+        db.close()

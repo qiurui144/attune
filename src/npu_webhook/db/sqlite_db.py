@@ -146,6 +146,15 @@ class SQLiteDB:
                 self.conn.execute(f"ALTER TABLE knowledge_items ADD COLUMN {col} REAL DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass  # 列已存在
+        # embedding_queue 增量迁移（两层索引元数据）
+        for col_def in [
+            "level INTEGER NOT NULL DEFAULT 2",
+            "section_idx INTEGER NOT NULL DEFAULT 0",
+        ]:
+            try:
+                self.conn.execute(f"ALTER TABLE embedding_queue ADD COLUMN {col_def}")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
         self.conn.commit()
 
     def close(self) -> None:
@@ -317,11 +326,13 @@ class SQLiteDB:
         chunk_index: int = 0,
         chunk_text: str = "",
         priority: int = 1,
+        level: int = 2,
+        section_idx: int = 0,
     ) -> int:
         cur = self.conn.execute(
-            """INSERT INTO embedding_queue (item_id, chunk_index, chunk_text, priority)
-               VALUES (?, ?, ?, ?)""",
-            (item_id, chunk_index, chunk_text, priority),
+            """INSERT INTO embedding_queue (item_id, chunk_index, chunk_text, priority, level, section_idx)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (item_id, chunk_index, chunk_text, priority, level, section_idx),
         )
         self.conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
