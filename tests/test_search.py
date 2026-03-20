@@ -224,3 +224,38 @@ def test_enqueue_embedding_with_level():
         assert row["level"] == 1
         assert row["section_idx"] == 2
         db.close()
+
+
+def test_queue_worker_writes_level_metadata():
+    """queue worker 处理时 ChromaDB metadata 包含 level 和 section_idx"""
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import MagicMock
+    from npu_webhook.db.sqlite_db import SQLiteDB
+    from npu_webhook.scheduler.queue import EmbeddingQueueWorker
+    from npu_webhook.core.vectorstore import VectorStore
+    from npu_webhook.db.chroma_db import ChromaDB
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = SQLiteDB(Path(tmpdir) / "test.db")
+        chroma = ChromaDB(Path(tmpdir) / "chroma")
+
+        # Mock embedding engine 返回固定向量
+        mock_engine = MagicMock()
+        mock_engine.embed.return_value = [[0.1] * 256]
+
+        vs = VectorStore(chroma, engine=mock_engine)
+        worker = EmbeddingQueueWorker(db=db, vector_store=vs)
+
+        item_id = db.insert_item(title="t", content="c" * 200, source_type="file")
+        db.enqueue_embedding(item_id, chunk_index=0, chunk_text="章节内容",
+                             priority=1, level=1, section_idx=3)
+
+        worker._process_batch()
+
+        # 验证 ChromaDB 中存储了 level 和 section_idx
+        results = chroma.query([0.1] * 256, top_k=1)
+        assert results["metadatas"][0][0]["level"] == 1
+        assert results["metadatas"][0][0]["section_idx"] == 3
+
+        db.close()

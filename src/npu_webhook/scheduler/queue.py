@@ -98,6 +98,8 @@ class EmbeddingQueueWorker:
                 "chunk_index": chunk_index,
                 "source_type": item["source_type"] if item else "",
                 "created_at": item["created_at"] if item else "",
+                "level": task.get("level", 2),             # 两层索引：摘要层(1) / 细节层(2)
+                "section_idx": task.get("section_idx", 0), # 所属章节编号
             })
             task_ids.append(task["id"])
 
