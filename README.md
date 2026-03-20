@@ -7,12 +7,15 @@
 ## 功能
 
 - **自动捕获** — MutationObserver 监听 ChatGPT / Claude / Gemini 对话，user+assistant 配对后自动入库
-- **无感注入** — 发送提问时自动搜索知识库，将相关知识按类型（笔记 / 历史对话 / 网页）以前缀拼接
+- **无感注入** — 发送提问时自动搜索知识库，将相关知识按类型（笔记 / 历史对话 / 网页）以前缀拼接；动态预算 2000 字，按相关性分配
+- **层级语义分块** — 两层粒度（章节 ~1500 字 / 段落块 512 字），两阶段层级检索（章节召回 → 段落精排 → 父章节上下文），语义完整性显著优于固定截断
+- **文件直传** — Side Panel 拖拽上传 PDF / DOCX / MD / TXT / 代码，后端自动解析入库，会话内上传文件优先检索
 - **混合搜索** — 向量语义搜索（ChromaDB）+ FTS5 全文搜索（jieba 分词），RRF 融合排序
 - **本地目录索引** — 绑定文件夹，watchdog 实时监听变更，自动解析 MD / TXT / 代码 / PDF / DOCX
 - **多后端 Embedding** — Ollama HTTP API（推荐）/ ONNX Runtime / OpenVINO（Intel NPU/iGPU）
 - **芯片级检测** — 自动识别 Intel Meteor/Lunar/Arrow Lake、AMD Phoenix/Hawk/Strix Point，精确匹配驱动
-- **知识管理 UI** — Side Panel（搜索 / 时间线 / 状态）+ Popup 快速操作 + Options 设置
+- **知识管理 UI** — Side Panel（搜索 / 时间线 / 文件 / 状态）+ Popup 快速操作 + Options 设置
+- **系统托盘** — pystray 系统托盘常驻，uvicorn 后台线程，双击图标自动启动
 - **跨平台** — Linux + Windows，AppImage / EXE 一键安装
 
 ## 快速开始
@@ -62,7 +65,7 @@ curl -s -X POST http://localhost:18900/api/v1/models/check | python3 -m json.too
 ### 5. 测试
 
 ```bash
-pytest tests/ -v    # 62 个测试（20 后端 + 42 扩展 E2E）
+pytest tests/ -v    # 78 个测试（36 后端单元 + 42 扩展 E2E）
 ```
 
 ## 使用手册
@@ -106,6 +109,7 @@ pytest tests/ -v    # 62 个测试（20 后端 + 42 扩展 E2E）
 |------|------|
 | 搜索 | 输入关键词 + source_type 过滤，点击展开详情 |
 | 时间线 | 按日期分组，分页加载，支持删除 |
+| 文件 | 拖拽上传 PDF/DOCX/MD/TXT/代码，进度显示，会话内优先检索 |
 | 状态 | 8 项指标（连接/版本/设备/模型/条目/向量/待处理/监控目录） |
 
 ### 本地目录索引
@@ -173,6 +177,7 @@ search:
 
 ingest:
   min_content_length: 100
+  max_upload_mb: 20           # 文件上传大小限制（MB）
   excluded_domains: ["mail.google.com", "web.whatsapp.com"]
 ```
 
@@ -184,9 +189,10 @@ ingest:
 
 | 方法 | 路径 | 用途 |
 |------|------|------|
-| POST | `/ingest` | 知识注入 |
+| POST | `/ingest` | 知识注入（纯文本） |
+| POST | `/upload` | 文件直传（multipart，PDF/DOCX/MD/TXT/代码） |
 | GET | `/search?q=&top_k=` | 混合搜索 |
-| POST | `/search/relevant` | 相关知识搜索（注入用） |
+| POST | `/search/relevant` | 相关知识搜索（注入用，层级检索 + 动态预算） |
 | GET/PATCH/DELETE | `/items[/{id}]` | 知识条目 CRUD |
 | POST/DELETE/GET | `/index/bind\|unbind\|status` | 目录索引管理 |
 | GET | `/status` | 系统状态 |

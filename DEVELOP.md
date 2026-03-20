@@ -16,7 +16,7 @@ cd extension && npm install --registry https://registry.npmmirror.com && cd ..
 curl -fsSL https://ollama.com/install.sh | sh && ollama pull bge-m3
 
 # 验证
-pytest tests/ -v    # 62 个测试全部通过
+pytest tests/ -v    # 78 个测试全部通过
 ruff check src/ tests/
 ```
 
@@ -28,23 +28,24 @@ src/npu_webhook/
 ├── config.py               # Pydantic Settings + YAML 配置
 ├── app_state.py            # 全局状态容器
 ├── api/                    # API 路由
-│   ├── ingest.py           # POST /ingest
-│   ├── search.py           # GET /search + POST /search/relevant
+│   ├── ingest.py           # POST /ingest（两层入队：章节+段落块）
+│   ├── upload.py           # POST /upload multipart 文件直传
+│   ├── search.py           # GET /search + POST /search/relevant（层级检索）
 │   ├── items.py            # CRUD /items
 │   ├── index.py            # /index 目录绑定
 │   ├── status.py           # /status 系统状态
 │   ├── settings.py         # /settings 配置
 │   ├── model_routes.py     # /models 模型管理 + 部署检查
-│   ├── skills.py           # /skills (Phase 3)
+│   ├── skills.py           # /skills
 │   ├── ws.py               # WebSocket
 │   └── setup.py            # /setup 安装引导
 ├── core/                   # 核心引擎
 │   ├── embedding.py        # OllamaEmbedding / ONNXEmbedding / OpenVINO
 │   ├── vectorstore.py      # ChromaDB 向量检索
-│   ├── search.py           # RRF 混合搜索
+│   ├── search.py           # RRF 混合搜索 + 两阶段层级检索 + 动态预算
 │   ├── fulltext.py         # jieba + FTS5
-│   ├── chunker.py          # 滑动窗口分块
-│   └── parser.py           # 文件解析
+│   ├── chunker.py          # 滑动窗口分块 + extract_sections() 语义章节切割
+│   └── parser.py           # 文件解析 + parse_bytes() 内存解析
 ├── db/                     # 数据库
 │   ├── sqlite_db.py        # SQLite (schema/CRUD/FTS5/队列)
 │   └── chroma_db.py        # ChromaDB 封装
@@ -58,6 +59,7 @@ src/npu_webhook/
 │   ├── detector.py         # 硬件检测 + 芯片匹配 + 驱动检查
 │   ├── linux.py / windows.py / paths.py
 │   └── ...
+├── tray.py                 # 系统托盘入口（pystray + uvicorn 后台线程）
 └── models/schemas.py       # Pydantic 模型
 
 extension/                  # Chrome 扩展 (Manifest V3 + Preact + Vite)
@@ -65,14 +67,19 @@ extension/                  # Chrome 扩展 (Manifest V3 + Preact + Vite)
 │   ├── content/            # Content Script
 │   │   ├── detector.js     # 平台适配器 (ChatGPT/Claude/Gemini)
 │   │   ├── capture.js      # MutationObserver 对话捕获
-│   │   ├── injector.js     # 无感前缀注入
+│   │   ├── injector.js     # 无感前缀注入（动态预算）
 │   │   ├── indicator.js    # 状态指示器
 │   │   └── index.js        # 入口整合
-│   ├── background/worker.js    # 消息路由 + 去重 + 健康检查
-│   ├── sidepanel/          # Side Panel (搜索/时间线/状态)
+│   ├── background/worker.js    # 消息路由 + 去重 + 健康检查 + 会话感知加权
+│   ├── sidepanel/
+│   │   ├── pages/SearchPage.jsx
+│   │   ├── pages/TimelinePage.jsx
+│   │   ├── pages/FilePage.jsx   # 文件拖拽上传（uid 并发安全）
+│   │   ├── pages/StatusPage.jsx
+│   │   └── App.jsx             # 四标签路由
 │   ├── popup/Popup.jsx     # 快速操作面板
 │   ├── options/Options.jsx # 设置页面
-│   └── shared/             # messages.js / api.js / storage.js
+│   └── shared/             # messages.js（FILE_UPLOADED）/ api.js（uploadFile）/ storage.js
 ├── vite.config.js          # 多阶段构建 (IIFE/ESM/HTML)
 └── manifest.json
 ```
@@ -129,12 +136,15 @@ Content Script 必须是 IIFE（Chrome 不支持 ES module content script），B
 ## 测试
 
 ```bash
-pytest tests/ -v                          # 全部 62 个
-pytest tests/test_api.py -v               # API 端点 (8)
+pytest tests/ -v                          # 全部 78 个
+pytest tests/test_api.py -v               # API 端点 (13)
 pytest tests/test_extension.py -v         # 扩展 E2E (42, 需要后端运行)
-pytest tests/test_search.py -v            # 搜索 (2)
+pytest tests/test_search.py -v            # 搜索引擎 + 层级检索 (12)
+pytest tests/test_chunker.py -v           # 分块 + extract_sections (4)
+pytest tests/test_parser.py -v            # parse_bytes (3)
+pytest tests/test_upload.py -v            # 文件上传 API (4)
 pytest tests/test_indexer.py -v           # 索引管道 (6)
-pytest tests/test_platform.py -v          # 平台检测 (3)
+pytest tests/test_platform.py -v          # 平台检测 (6)
 pytest tests/test_embedding.py -v         # Embedding (1)
 ```
 
@@ -159,11 +169,33 @@ ruff format src/ tests/
 |---|------|
 | `knowledge_items` | 知识条目 |
 | `knowledge_fts` | FTS5 全文索引 |
-| `embedding_queue` | Embedding 任务队列（P0-P3） |
+| `embedding_queue` | Embedding 任务队列（P0-P3），含 `level`/`section_idx` |
 | `bound_directories` | 绑定目录 |
 | `indexed_files` | 文件索引记录（路径/hash） |
 
-ChromaDB collection: `knowledge_embeddings`（cosine 相似度）。
+`embedding_queue` 关键字段：`level`（1=章节, 2=段落块）、`section_idx`（所属章节序号，Stage 2 检索用）。
+
+ChromaDB collection: `knowledge_embeddings`（cosine 相似度）。metadata 包含 `level`、`section_idx`、`item_id`、`source_type`。
+
+## 两层索引机制
+
+入库时每个文档产生两层向量：
+
+```
+content → extract_sections()
+    ├── Level 1 (章节, ~1500字): priority=max(1, p-1)，先处理
+    └── Level 2 (段落块, 512字): priority=p，标准处理
+```
+
+检索时三阶段层级检索（`search_relevant()`）：
+
+```
+Stage 1: ChromaDB(level=1) → top-5 候选章节（召回）
+Stage 2: ChromaDB(level=2, section_idx IN [...], item_id IN [...]) → top-K 段落（精排）
+Stage 3: 取每个命中段落的父章节文本作为注入内容（语义完整）
+```
+
+动态预算分配（`_allocate_budget()`）：按 score 权重将 2000 字预算分配给各结果，最低 100 字/条。
 
 ## 认证
 

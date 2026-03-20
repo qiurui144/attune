@@ -2,6 +2,37 @@
 
 ## 已发布
 
+### v0.3.0 — Phase 3：长文本质量提升 + 文件直传 + 系统托盘
+
+**长文本语义索引：**
+- `extract_sections()` 语义章节切割（Markdown 标题边界 / 代码 def|class / 纯文本 1500 字段落）
+- 两层 embedding 队列：Level 1 章节（priority 高 1 级）+ Level 2 段落块（现有 512 字滑动窗口）
+- ChromaDB metadata 新增 `level` / `section_idx` 字段（向后兼容）
+- 两阶段层级检索（`search_relevant()`）：章节召回 → 段落精排 → 父章节上下文扩展
+- Stage 2 加入 `item_id` 约束，防止跨文档 section_idx 污染
+- 动态注入预算（`_allocate_budget()`）：2000 字 score 加权分配，替代固定 300 字截断
+
+**文件直传 API：**
+- `POST /api/v1/upload` multipart 端点，支持 PDF / DOCX / MD / TXT / 代码
+- `parse_bytes(data, filename)` 内存解析，无落盘 I/O
+- 大小限制（默认 20MB）：`file.size` 预检 + 读后二次验证（双重防护）
+- 上传后同步 FTS5 可搜、向量 embedding 后台异步处理
+
+**Chrome 扩展 — 文件标签：**
+- Side Panel 新增「文件」标签页（FilePage.jsx），拖拽 / 点击上传
+- `crypto.randomUUID()` uid 跟踪并发上传状态，避免同名文件冲突
+- 会话感知加权：Worker 记录本次会话上传的 item_id，SEARCH_RELEVANT 结果 score × 1.5
+- `api.uploadFile()` FormData + session_id 透传
+
+**系统托盘：**
+- `tray.py`：pystray 系统托盘 + uvicorn daemon 线程
+- 64×64 Pillow 绘制圆形图标，菜单含退出选项
+- `pyproject.toml` 新增可选依赖组 `[tray]`
+
+**测试：** 78 个（36 后端单元 + 42 扩展 E2E）
+
+---
+
 ### v0.2.0 — Phase 0-2：后端核心 + Chrome 扩展 + Embedding
 
 **后端（Phase 0-1）：**
@@ -35,13 +66,6 @@
 
 ## 路线图
 
-### v0.3.0 — 技能系统
-
-- Skill CRUD API + Jinja2 模板渲染
-- URL glob 匹配自动触发
-- 技能与知识库联动
-- Side Panel 技能管理界面
-
 ### v0.4.0 — xPU 原生加速
 
 - Intel NPU：OpenVINO 集成 + ONNX→IR 转换 + INT8 量化
@@ -53,7 +77,6 @@
 
 - PyInstaller + AppImage（Linux）
 - PyInstaller + NSIS EXE（Windows）
-- 系统托盘图标（pystray）
 - /setup 首次安装引导页
 - 模型内嵌 + WebSocket 下载进度
 - 开机自启（systemd user service / Windows Service）
