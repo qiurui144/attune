@@ -192,6 +192,7 @@ from npu_webhook.api.model_routes import router as models_router
 from npu_webhook.api.skills import router as skills_router
 from npu_webhook.api.ws import router as ws_router
 from npu_webhook.api.setup import router as setup_router
+from npu_webhook.api.upload import router as upload_router
 
 app.include_router(ingest_router)
 app.include_router(search_router)
@@ -203,6 +204,7 @@ app.include_router(models_router)
 app.include_router(skills_router)
 app.include_router(ws_router)
 app.include_router(setup_router)
+app.include_router(upload_router)
 
 
 @app.get("/api/v1/status/health")
