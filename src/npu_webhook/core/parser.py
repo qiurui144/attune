@@ -91,3 +91,61 @@ def _parse_docx(path: Path) -> tuple[str, str]:
         title = doc.core_properties.title
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     return title, "\n\n".join(paragraphs)
+
+
+def parse_bytes(data: bytes, filename: str) -> tuple[str, str]:
+    """从内存 bytes 解析文件，返回 (title, content)。
+
+    filename 仅用于类型检测（扩展名），不做磁盘操作。
+    复用现有各格式解析逻辑。
+    """
+    suffix = Path(filename).suffix.lower()
+    name_stem = Path(filename).stem
+
+    try:
+        if suffix == ".pdf":
+            return _parse_pdf_bytes(data, name_stem)
+        elif suffix == ".docx":
+            return _parse_docx_bytes(data, name_stem)
+        elif suffix == ".md":
+            content = data.decode("utf-8", errors="replace")
+            title = name_stem
+            for line in content.splitlines():
+                if line.strip().startswith("# "):
+                    title = line.strip()[2:].strip()
+                    break
+            return title, content
+        elif suffix in CODE_EXTENSIONS:
+            return filename, data.decode("utf-8", errors="replace")
+        else:
+            content = data.decode("utf-8", errors="replace")
+            title = content.strip().split("\n", 1)[0][:100] if content.strip() else name_stem
+            return title or name_stem, content
+    except Exception:
+        logger.exception("Failed to parse bytes for: %s", filename)
+        return name_stem, ""
+
+
+def _parse_pdf_bytes(data: bytes, name_stem: str) -> tuple[str, str]:
+    """从内存 bytes 解析 PDF（使用 PyMuPDF）"""
+    import io
+
+    import pymupdf
+
+    doc = pymupdf.open(stream=io.BytesIO(data), filetype="pdf")
+    title = doc.metadata.get("title", "") or name_stem
+    pages = [page.get_text() for page in doc if page.get_text().strip()]
+    doc.close()
+    return title, "\n\n".join(pages)
+
+
+def _parse_docx_bytes(data: bytes, name_stem: str) -> tuple[str, str]:
+    """从内存 bytes 解析 DOCX"""
+    import io
+
+    from docx import Document
+
+    doc = Document(io.BytesIO(data))
+    title = doc.core_properties.title or name_stem
+    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+    return title, "\n\n".join(paragraphs)
