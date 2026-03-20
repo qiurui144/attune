@@ -33,11 +33,18 @@ async def upload_file(
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=415, detail=f"Unsupported file type: {suffix}")
 
+    # 大小前置检查（file.size 在 multipart 上传中由 Content-Length 或 chunk 头部填充，不保证总有值）
+    max_bytes = settings.ingest.max_upload_mb * 1024 * 1024
+    if getattr(file, "size", None) is not None and file.size > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {settings.ingest.max_upload_mb}MB)",
+        )
+
     # 读取文件内容
     data = await file.read()
 
-    # 大小检查
-    max_bytes = settings.ingest.max_upload_mb * 1024 * 1024
+    # 大小后置兜底检查（处理 size 不可用的情况）
     if len(data) > max_bytes:
         raise HTTPException(
             status_code=413,
@@ -80,7 +87,7 @@ async def upload_file(
                 )
                 chunks_queued += 1
 
-        # Level 2: 段落块
+        # Level 2: 段落块（优先级低于 Level 1，章节 embedding 先行处理）
         chunk_counter = 0
         for section_idx, section_text in sections:
             chunks = state.chunker.chunk(section_text)
@@ -89,7 +96,7 @@ async def upload_file(
                     item_id=item_id,
                     chunk_index=chunk_counter,
                     chunk_text=chunk_text,
-                    priority=1,
+                    priority=2,
                     level=2,
                     section_idx=section_idx,
                 )
