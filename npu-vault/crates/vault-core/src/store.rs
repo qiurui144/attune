@@ -177,6 +177,30 @@ impl Store {
         Ok(next)
     }
 
+    /// 在单个事务中批量写入 vault_meta（用于 change_password 原子更新）
+    pub fn set_meta_batch(&self, entries: &[(&str, &[u8])]) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        let result: Result<()> = (|| {
+            for (key, value) in entries {
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![key, value],
+                )?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(_) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     // --- items (加密 CRUD) ---
 
     pub fn insert_item(

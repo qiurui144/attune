@@ -211,11 +211,18 @@ impl Vault {
         let new_salt = crypto::generate_salt();
         let new_mk = crypto::derive_master_key(new_password.as_bytes(), &device_secret_bytes, &new_salt)?;
 
-        // 用新 MK 重新加密 DEK
-        self.store.set_meta("salt", &new_salt)?;
-        self.store.set_meta("encrypted_dek_db", &crypto::encrypt_dek(&new_mk, &keys.dek_db)?)?;
-        self.store.set_meta("encrypted_dek_idx", &crypto::encrypt_dek(&new_mk, &keys.dek_idx)?)?;
-        self.store.set_meta("encrypted_dek_vec", &crypto::encrypt_dek(&new_mk, &keys.dek_vec)?)?;
+        // 预计算新加密 DEK（在事务外计算，避免持锁时 argon2 长耗时）
+        let new_enc_dek_db = crypto::encrypt_dek(&new_mk, &keys.dek_db)?;
+        let new_enc_dek_idx = crypto::encrypt_dek(&new_mk, &keys.dek_idx)?;
+        let new_enc_dek_vec = crypto::encrypt_dek(&new_mk, &keys.dek_vec)?;
+
+        // 在单个 SQLite 事务中原子写入 salt + 3 个 DEK，防止中途失败导致数据不一致
+        self.store.set_meta_batch(&[
+            ("salt", new_salt.as_ref()),
+            ("encrypted_dek_db", new_enc_dek_db.as_slice()),
+            ("encrypted_dek_idx", new_enc_dek_idx.as_slice()),
+            ("encrypted_dek_vec", new_enc_dek_vec.as_slice()),
+        ])?;
 
         // 注意：需要释放 guard 后再更新内存中的 MK
         drop(guard);
