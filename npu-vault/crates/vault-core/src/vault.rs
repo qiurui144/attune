@@ -318,8 +318,9 @@ impl Vault {
         }
 
         // 检查 nonce：token 中的 nonce 必须等于当前存储的 nonce
-        drop(guard); // 释放 unlocked 锁后再访问 store
+        // 在持有 unlocked guard 期间读取 nonce，消除 TOCTOU 竞态窗口
         let current_nonce = self.store.get_token_nonce()?;
+        drop(guard); // 释放 unlocked 锁（nonce 已读取，无 TOCTOU）
         if token_nonce != current_nonce {
             return Err(VaultError::SessionInvalid);
         }
