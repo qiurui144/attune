@@ -24,11 +24,8 @@ struct Cli {
     /// Path to TLS private key (PEM)
     #[arg(long)]
     tls_key: Option<String>,
-    /// Require Bearer token authentication (default: enabled).
-    /// Use --no-auth to disable for local development only.
-    #[arg(long, default_value = "true")]
-    require_auth: bool,
-    /// Disable Bearer token authentication (local dev only, overrides --require-auth)
+    /// Disable Bearer token authentication (local dev only).
+    /// WARNING: Never use on network-accessible hosts.
     #[arg(long)]
     no_auth: bool,
 }
@@ -80,12 +77,6 @@ async fn main() {
     let require_auth = if cli.no_auth {
         tracing::warn!(
             "⚠  Authentication DISABLED via --no-auth. \
-             Do NOT use in production or on network-accessible hosts."
-        );
-        false
-    } else if !cli.require_auth {
-        tracing::warn!(
-            "⚠  Authentication DISABLED via --require-auth false. \
              Do NOT use in production or on network-accessible hosts."
         );
         false
