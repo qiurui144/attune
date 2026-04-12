@@ -158,6 +158,25 @@ async fn main() {
         .layer(cors)
         .with_state(shared_state);
 
+    // NAS 模式安全告警：非 loopback host 且无 TLS 时提醒用户
+    let is_loopback = cli.host == "127.0.0.1" || cli.host == "localhost" || cli.host == "::1";
+    let has_tls = cli.tls_cert.is_some() && cli.tls_key.is_some();
+    if !is_loopback && !has_tls {
+        tracing::warn!(
+            "⚠  WARNING: Server bound to non-loopback address '{}' without TLS. \
+             All traffic (including tokens and vault data) is transmitted in plaintext. \
+             Enable TLS with --tls-cert and --tls-key for NAS/remote access.",
+            cli.host
+        );
+    }
+    if !is_loopback && !require_auth {
+        tracing::warn!(
+            "⚠  WARNING: Authentication is DISABLED on a non-loopback interface '{}'. \
+             Any host on the network can access your vault without credentials.",
+            cli.host
+        );
+    }
+
     let addr: std::net::SocketAddr = format!("{}:{}", cli.host, cli.port)
         .parse()
         .expect("invalid address");
