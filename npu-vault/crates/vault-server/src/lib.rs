@@ -50,6 +50,12 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Chat (RAG)
         .route("/api/v1/chat", post(routes::chat::chat))
         .route("/api/v1/chat/history", get(routes::chat::chat_history))
+        // Chat Sessions
+        .route("/api/v1/chat/sessions", get(routes::chat_sessions::list_sessions))
+        .route(
+            "/api/v1/chat/sessions/{id}",
+            get(routes::chat_sessions::get_session).delete(routes::chat_sessions::delete_session),
+        )
         // Ingest + Items + Search
         .route("/api/v1/ingest", post(routes::ingest::ingest))
         .route("/api/v1/feedback", post(routes::feedback::submit_feedback))

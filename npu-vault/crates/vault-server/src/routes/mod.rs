@@ -1,5 +1,6 @@
 pub mod behavior;
 pub mod chat;
+pub mod chat_sessions;
 pub mod feedback;
 pub mod classify;
 pub mod clusters;
