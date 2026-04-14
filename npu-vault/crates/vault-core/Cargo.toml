@@ -33,7 +33,7 @@ serde_yaml = "0.9"
 tempfile = "3"
 pdf-extract = "0.8"
 zip = "2"
-ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+ort = { version = "2.0.0-rc.12", features = ["cuda", "ndarray"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 hf-hub = "0.3"
 ndarray = "0.16"
