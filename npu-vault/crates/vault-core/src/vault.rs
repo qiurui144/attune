@@ -187,6 +187,9 @@ impl Vault {
 
     /// 更改密码（重新加密 DEK，数据不变）
     pub fn change_password(&self, old_password: &str, new_password: &str) -> Result<()> {
+        if new_password.is_empty() {
+            return Err(VaultError::Crypto("new password must not be empty".into()));
+        }
         if self.state() != VaultState::Unlocked {
             return Err(VaultError::Locked);
         }

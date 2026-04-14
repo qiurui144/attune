@@ -628,27 +628,24 @@ impl Store {
     }
 
     /// 标记队列任务为失败，超过最大尝试次数则标记为 abandoned
+    /// 三步操作包裹在事务中保证原子性，防止并发 worker 导致 attempts 计数错误
     pub fn mark_embedding_failed(&self, id: i64, max_attempts: i32) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "UPDATE embed_queue SET attempts = attempts + 1 WHERE id = ?1",
             params![id],
         )?;
-        let attempts: i32 = self.conn.query_row(
+        let attempts: i32 = tx.query_row(
             "SELECT attempts FROM embed_queue WHERE id = ?1",
             params![id],
             |row| row.get(0),
         )?;
-        if attempts >= max_attempts {
-            self.conn.execute(
-                "UPDATE embed_queue SET status = 'abandoned' WHERE id = ?1",
-                params![id],
-            )?;
-        } else {
-            self.conn.execute(
-                "UPDATE embed_queue SET status = 'pending' WHERE id = ?1",
-                params![id],
-            )?;
-        }
+        let new_status = if attempts >= max_attempts { "abandoned" } else { "pending" };
+        tx.execute(
+            "UPDATE embed_queue SET status = ?1 WHERE id = ?2",
+            params![new_status, id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 

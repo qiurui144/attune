@@ -23,7 +23,7 @@ pub async fn vault_guard(
         return next.run(request).await;
     }
 
-    let vault_state = state.vault.lock().unwrap().state();
+    let vault_state = state.vault.lock().unwrap_or_else(|e| e.into_inner()).state();
     match vault_state {
         VaultState::Unlocked => next.run(request).await,
         VaultState::Locked => {
@@ -96,7 +96,7 @@ pub async fn bearer_auth_guard(
     };
 
     let verify_result = {
-        let vault = state.vault.lock().unwrap();
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         vault.verify_session(&token).map_err(|e| e.to_string())
     };
 
