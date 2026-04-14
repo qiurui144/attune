@@ -192,7 +192,9 @@ impl Store {
     pub fn get_token_nonce(&self) -> Result<u64> {
         match self.get_meta("token_nonce")? {
             Some(bytes) if bytes.len() == 8 => {
-                Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+                let arr: [u8; 8] = bytes.as_slice().try_into()
+                    .map_err(|_| VaultError::Crypto("token nonce size mismatch".into()))?;
+                Ok(u64::from_le_bytes(arr))
             }
             _ => Ok(0u64),
         }
@@ -594,8 +596,10 @@ impl Store {
     }
 
     /// 从队列中取出一批 pending 任务，标记为 processing
+    /// SELECT + UPDATE 在同一事务中执行，防止并发 worker 重复拾取同一任务。
     pub fn dequeue_embeddings(&self, batch_size: usize) -> Result<Vec<QueueTask>> {
-        let mut stmt = self.conn.prepare(
+        let tx = self.conn.unchecked_transaction()?;
+        let mut stmt = tx.prepare(
             "SELECT id, item_id, chunk_idx, chunk_text, level, section_idx, priority, attempts, task_type
              FROM embed_queue WHERE status = 'pending'
              ORDER BY priority ASC, created_at ASC LIMIT ?1",
@@ -618,13 +622,15 @@ impl Store {
         for row in rows {
             tasks.push(row?);
         }
-        // 批量标记为 processing
+        drop(stmt);
+        // 批量标记为 processing（与 SELECT 在同一事务内，防止并发重复拾取）
         for task in &tasks {
-            self.conn.execute(
+            tx.execute(
                 "UPDATE embed_queue SET status = 'processing' WHERE id = ?1",
                 params![task.id],
             )?;
         }
+        tx.commit()?;
         Ok(tasks)
     }
 

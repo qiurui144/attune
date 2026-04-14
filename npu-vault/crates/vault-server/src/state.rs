@@ -91,7 +91,7 @@ impl AppState {
             if let Ok(ft) = FulltextIndex::open(&tantivy_dir) {
                 // Rebuild fulltext index from all items (ensures consistency after unlock)
                 {
-                    let vault_guard = self.vault.lock().unwrap();
+                    let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
                     if let Ok(dek) = vault_guard.dek_db() {
                         if let Ok(ids) = vault_guard.store().list_all_item_ids() {
                             for id in &ids {
@@ -102,7 +102,7 @@ impl AppState {
                         }
                     }
                 }
-                *self.fulltext.lock().unwrap() = Some(ft);
+                *self.fulltext.lock().unwrap_or_else(|e| e.into_inner()) = Some(ft);
             }
         }
 
@@ -144,7 +144,7 @@ impl AppState {
         let llm_result: Option<Arc<dyn LlmProvider>> = {
             // 级别 1：读取 settings 中的 llm 配置
             let configured_llm = {
-                let vault_guard = self.vault.lock().unwrap();
+                let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
                 vault_guard.store().get_meta("app_settings").ok().flatten()
                     .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
                     .and_then(|settings| {
@@ -194,22 +194,22 @@ impl AppState {
             }
             let tax_arc = Arc::new(tax);
 
-            *self.classifier.lock().unwrap() =
+            *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(Arc::new(Classifier::new(tax_arc.clone(), llm_arc.clone())));
-            *self.taxonomy.lock().unwrap() = Some(tax_arc);
-            *self.llm.lock().unwrap() = Some(llm_arc);
+            *self.taxonomy.lock().unwrap_or_else(|e| e.into_inner()) = Some(tax_arc);
+            *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(llm_arc);
         }
 
         // TagIndex (built from existing items.tags)
         let tag_index_result = {
-            let vault_guard = self.vault.lock().unwrap();
+            let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
             if let Ok(dek) = vault_guard.dek_db() {
                 TagIndex::build(vault_guard.store(), &dek).ok()
             } else {
                 None
             }
         };
-        *self.tag_index.lock().unwrap() = tag_index_result;
+        *self.tag_index.lock().unwrap_or_else(|e| e.into_inner()) = tag_index_result;
     }
 
     /// 手动处理一批 classify 任务（供 /classify/drain 端点调用）
@@ -219,14 +219,14 @@ impl AppState {
     /// 最后标记任务为 done。非 classify 的任务会被重新标记为 pending。
     pub fn drain_classify_batch(&self, batch_size: usize) -> vault_core::error::Result<usize> {
         // 1. 检查 classifier 是否可用
-        let classifier = match self.classifier.lock().unwrap().as_ref().cloned() {
+        let classifier = match self.classifier.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
             Some(c) => c,
             None => return Ok(0),
         };
 
         // 2. Dequeue 一批任务并按 task_type 分区
         let (classify_tasks, dek) = {
-            let vault = self.vault.lock().unwrap();
+            let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
             let dek = vault.dek_db()?;
             let tasks = vault.store().dequeue_embeddings(batch_size)?;
             let (classify, other): (Vec<_>, Vec<_>) = tasks
@@ -245,7 +245,7 @@ impl AppState {
 
         // 3. 获取任务对应 item 的 (title, content)
         let items_info: Vec<(String, String, String, i64)> = {
-            let vault = self.vault.lock().unwrap();
+            let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
             classify_tasks
                 .iter()
                 .filter_map(|t| match vault.store().get_item(&dek, &t.item_id) {
@@ -271,7 +271,7 @@ impl AppState {
             Ok(r) => r,
             Err(e) => {
                 // 失败时标记所有任务为 failed（会根据 attempts 决定重试或 abandon）
-                let vault = self.vault.lock().unwrap();
+                let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
                 for task in &classify_tasks {
                     let _ = vault.store().mark_embedding_failed(task.id, 3);
                 }
@@ -289,12 +289,12 @@ impl AppState {
             let tags_json = serde_json::to_string(result)?;
 
             {
-                let vault = self.vault.lock().unwrap();
+                let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
                 vault.store().update_tags(&dek, item_id, &tags_json)?;
                 vault.store().mark_embedding_done(*task_id)?;
             }
 
-            if let Some(index) = self.tag_index.lock().unwrap().as_mut() {
+            if let Some(index) = self.tag_index.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                 index.upsert(item_id, result);
             }
             processed += 1;
@@ -306,7 +306,7 @@ impl AppState {
     /// 启动后台分类 worker（需要在 init_search_engines 之后调用）
     /// 使用 AtomicBool 防止重复启动；vault lock 时自动退出并重置标志。
     pub fn start_classify_worker(state: std::sync::Arc<AppState>) {
-        if state.classifier.lock().unwrap().is_none() {
+        if state.classifier.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
             return; // No classifier, no worker
         }
 
@@ -322,7 +322,7 @@ impl AppState {
             loop {
                 // Check if vault is still unlocked
                 {
-                    let vault = state.vault.lock().unwrap();
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     if !matches!(vault.state(), vault_core::vault::VaultState::Unlocked) {
                         break;
                     }
@@ -360,7 +360,7 @@ impl AppState {
 
                 // Check vault still unlocked
                 let (dek, dirs) = {
-                    let vault = state.vault.lock().unwrap();
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     if !matches!(vault.state(), vault_core::vault::VaultState::Unlocked) {
                         break;
                     }
@@ -389,7 +389,7 @@ impl AppState {
                         .filter(|s| !s.is_empty())
                         .collect();
 
-                    let vault = state.vault.lock().unwrap();
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     match vault_core::scanner::scan_directory(
                         vault.store(),
                         &dek,
@@ -436,7 +436,7 @@ impl AppState {
             loop {
                 // 检查 vault 是否仍处于 unlocked 状态
                 let vault_unlocked = {
-                    let vault = state.vault.lock().unwrap();
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     matches!(vault.state(), vault_core::vault::VaultState::Unlocked)
                 };
                 if !vault_unlocked {
@@ -444,9 +444,9 @@ impl AppState {
                 }
 
                 // 检查 embedding + vectors + fulltext 是否就绪
-                let embedding = state.embedding.lock().unwrap().clone();
-                let vectors_ready = state.vectors.lock().unwrap().is_some();
-                let fulltext_ready = state.fulltext.lock().unwrap().is_some();
+                let embedding = state.embedding.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let vectors_ready = state.vectors.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+                let fulltext_ready = state.fulltext.lock().unwrap_or_else(|e| e.into_inner()).is_some();
 
                 if embedding.is_none() || !vectors_ready || !fulltext_ready {
                     std::thread::sleep(POLL_INTERVAL);
@@ -461,7 +461,7 @@ impl AppState {
 
                 // 取一批任务
                 let tasks_result = {
-                    let vault = state.vault.lock().unwrap();
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     vault.store().dequeue_embeddings(BATCH_SIZE)
                 };
                 let tasks = match tasks_result {
@@ -483,7 +483,7 @@ impl AppState {
                     tasks.into_iter().partition(|t| t.task_type == "embed");
 
                 if !other_tasks.is_empty() {
-                    let vault = state.vault.lock().unwrap();
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     for task in &other_tasks {
                         let _ = vault.store().mark_task_pending(task.id);
                     }
@@ -499,7 +499,7 @@ impl AppState {
                     Ok(e) => e,
                     Err(e) => {
                         tracing::warn!("Embedding failed: {}", e);
-                        let vault = state.vault.lock().unwrap();
+                        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                         for task in &embed_tasks {
                             let _ = vault.store().mark_embedding_failed(task.id, MAX_ATTEMPTS);
                         }
@@ -543,7 +543,7 @@ impl AppState {
 
                 // 循环外：一次性标记完成（单次加锁，避免批量锁竞争）
                 if !done_ids.is_empty() {
-                    let vault = state.vault.lock().unwrap();
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     for id in &done_ids {
                         let _ = vault.store().mark_embedding_done(*id);
                     }
@@ -560,16 +560,16 @@ impl AppState {
 
     /// 清除搜索引擎 + 分类引擎 (lock 前调用)
     pub fn clear_search_engines(&self) {
-        *self.fulltext.lock().unwrap() = None;
-        *self.vectors.lock().unwrap() = None;
-        *self.embedding.lock().unwrap() = None;
-        *self.reranker.lock().unwrap() = None;
-        *self.llm.lock().unwrap() = None;
-        *self.tag_index.lock().unwrap() = None;
-        *self.cluster_snapshot.lock().unwrap() = None;
-        *self.taxonomy.lock().unwrap() = None;
-        *self.classifier.lock().unwrap() = None;
-        self.search_cache.lock().unwrap().clear();
+        *self.fulltext.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.vectors.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.embedding.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.reranker.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.tag_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.cluster_snapshot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.taxonomy.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
         // 重置初始化标志，确保再次 unlock 后能重新初始化搜索引擎
         self.engines_initialized.store(false, Ordering::SeqCst);
     }

@@ -1,12 +1,19 @@
 use std::path::PathBuf;
 
 pub fn data_dir() -> PathBuf {
-    let base = dirs::data_local_dir().expect("cannot determine data directory");
+    // 容器/headless 环境中 dirs::data_local_dir() 可能返回 None（无 HOME 变量）；
+    // 回退到 $HOME/.local/share 或当前目录，确保不 panic。
+    let base = dirs::data_local_dir()
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."));
     base.join("npu-vault")
 }
 
 pub fn config_dir() -> PathBuf {
-    let base = dirs::config_dir().expect("cannot determine config directory");
+    // 同上，回退到 $HOME/.config 或当前目录
+    let base = dirs::config_dir()
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."));
     base.join("npu-vault")
 }
 
