@@ -15,7 +15,7 @@ pub async fn list(
             "name": p.name,
             "version": p.version,
             "description": p.description,
-            "source": if ["tech", "law"].contains(&p.id.as_str()) { "builtin" } else { "user" },
+            "source": if ["tech", "law", "presales"].contains(&p.id.as_str()) { "builtin" } else { "user" },
             "dimensions": p.dimensions.iter().map(|d| serde_json::json!({
                 "name": d.name,
                 "label": d.label,

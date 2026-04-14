@@ -25,6 +25,8 @@ pub struct HistoryMessage {
 /// POST /api/v1/chat -- RAG 对话（非流式）
 /// 消息最大字节数（与 MAX_SEQ_LEN 对齐，防止 LLM 请求体过大）
 const MAX_MESSAGE_LEN: usize = 32_768;
+/// 历史消息单条 content 最大字节数（防止绕过 message 限制的大负载攻击）
+const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 /// 历史消息最大条数（超限则截断至最近 N 条）
 const MAX_HISTORY_DEPTH: usize = 20;
 
@@ -49,6 +51,14 @@ pub async fn chat(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "error": format!("invalid role '{}': must be 'user' or 'assistant'", h.role)
+                })),
+            ));
+        }
+        if h.content.len() > MAX_HISTORY_CONTENT_LEN {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("history message content too long (max {MAX_HISTORY_CONTENT_LEN} bytes)")
                 })),
             ));
         }

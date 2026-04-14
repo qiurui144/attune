@@ -148,6 +148,11 @@ impl OllamaLlmProvider {
         let available: Vec<String> = llm_block_on(async move {
             let resp = client.get(&url).send().await
                 .map_err(|e| VaultError::LlmUnavailable(format!("ollama unreachable: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!("ollama HTTP {status}: {body}")));
+            }
             let tags: TagsResponse = resp.json().await
                 .map_err(|e| VaultError::LlmUnavailable(format!("parse tags: {e}")))?;
             Ok(tags.models.into_iter().map(|m| m.name).collect())
@@ -186,6 +191,11 @@ impl OllamaLlmProvider {
                 .body(body_json)
                 .send().await
                 .map_err(|e| VaultError::LlmUnavailable(format!("chat request: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!("ollama HTTP {status}: {body}")));
+            }
             let parsed: OllamaChatResponse = resp.json().await
                 .map_err(|e| VaultError::Classification(format!("parse chat response: {e}")))?;
             Ok(parsed.message.content)
@@ -216,6 +226,11 @@ impl LlmProvider for OllamaLlmProvider {
                 .header("Content-Type", "application/json")
                 .body(body_bytes).send().await
                 .map_err(|e| VaultError::LlmUnavailable(format!("chat: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!("ollama HTTP {status}: {body}")));
+            }
             let parsed: OllamaChatResponse = resp.json().await
                 .map_err(|e| VaultError::Classification(format!("parse: {e}")))?;
             Ok(parsed.message.content)
@@ -298,6 +313,11 @@ impl OpenAiLlmProvider {
                 .body(body_bytes)
                 .send().await
                 .map_err(|e| VaultError::LlmUnavailable(format!("openai request: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!("openai HTTP {status}: {body}")));
+            }
             let parsed: OpenAiResponse = resp.json().await
                 .map_err(|e| VaultError::Classification(format!("parse openai response: {e}")))?;
             parsed.choices.into_iter().next()
