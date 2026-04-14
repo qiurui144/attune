@@ -209,30 +209,18 @@ impl Store {
     }
 
     /// 在单个事务中批量写入 vault_meta（用于 change_password 原子更新）
+    /// 使用 unchecked_transaction 与 dequeue_embeddings/append_conversation_turn 保持一致，
+    /// 避免与 rusqlite 内部事务状态机冲突。
     pub fn set_meta_batch(&self, entries: &[(&str, &[u8])]) -> Result<()> {
-        self.conn.execute_batch("BEGIN")?;
-        let exec_result: Result<()> = (|| {
-            for (key, value) in entries {
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![key, value],
-                )?;
-            }
-            Ok(())
-        })();
-        match exec_result {
-            Ok(_) => {
-                if let Err(e) = self.conn.execute_batch("COMMIT") {
-                    let _ = self.conn.execute_batch("ROLLBACK");
-                    return Err(e.into());
-                }
-                Ok(())
-            }
-            Err(e) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
+        let tx = self.conn.unchecked_transaction()?;
+        for (key, value) in entries {
+            tx.execute(
+                "INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key, value],
+            )?;
         }
+        tx.commit()?;
+        Ok(())
     }
 
     // --- items (加密 CRUD) ---
@@ -547,7 +535,7 @@ impl Store {
         }
     }
 
-    /// 插入或更新已索引文件记录
+    /// 插入或更新已索引文件记录（INSERT OR REPLACE 原子操作，消除 check-then-act 竞态）
     pub fn upsert_indexed_file(
         &self,
         dir_id: &str,
@@ -556,21 +544,17 @@ impl Store {
         item_id: &str,
     ) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        // 先检查是否已存在
-        if let Some(existing) = self.get_indexed_file(path)? {
-            self.conn.execute(
-                "UPDATE indexed_files SET dir_id = ?1, file_hash = ?2, item_id = ?3, indexed_at = ?4
-                 WHERE id = ?5",
-                params![dir_id, file_hash, item_id, now, existing.id],
-            )?;
-        } else {
-            let id = uuid::Uuid::new_v4().simple().to_string();
-            self.conn.execute(
-                "INSERT INTO indexed_files (id, dir_id, path, file_hash, item_id, indexed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, dir_id, path, file_hash, item_id, now],
-            )?;
-        }
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        self.conn.execute(
+            "INSERT INTO indexed_files (id, dir_id, path, file_hash, item_id, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(path) DO UPDATE SET
+               dir_id = excluded.dir_id,
+               file_hash = excluded.file_hash,
+               item_id = excluded.item_id,
+               indexed_at = excluded.indexed_at",
+            params![id, dir_id, path, file_hash, item_id, now],
+        )?;
         Ok(())
     }
 
@@ -728,7 +712,8 @@ impl Store {
             Some(blob) if blob.is_empty() => Ok(None),
             Some(blob) => {
                 let decrypted = crypto::decrypt(dek, &blob)?;
-                Ok(Some(String::from_utf8_lossy(&decrypted).to_string()))
+                Ok(Some(String::from_utf8(decrypted)
+                    .map_err(|e| VaultError::Crypto(format!("tags utf8: {e}")))?))
             }
         }
     }
@@ -785,9 +770,15 @@ impl Store {
         let mut results = Vec::new();
         for row in rows {
             let (id, encrypted_query, count, created_at) = row?;
-            let decrypted = crypto::decrypt(dek, &encrypted_query)
-                .unwrap_or_else(|_| Vec::new());
-            let query = String::from_utf8_lossy(&decrypted).to_string();
+            let decrypted = match crypto::decrypt(dek, &encrypted_query) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("recent_searches: decrypt failed for row {id}: {e}");
+                    continue;
+                }
+            };
+            let query = String::from_utf8(decrypted)
+                .map_err(|e| VaultError::Crypto(format!("search history utf8: {e}")))?;
             results.push(SearchHistoryRow {
                 id,
                 query,
@@ -855,7 +846,8 @@ impl Store {
         let mut results = Vec::new();
         for row in rows {
             let (id, enc_title, created_at, updated_at) = row.map_err(VaultError::Database)?;
-            let title = String::from_utf8(crypto::decrypt(dek, &enc_title)?).unwrap_or_default();
+            let title = String::from_utf8(crypto::decrypt(dek, &enc_title)?)
+                .map_err(|e| VaultError::Crypto(format!("conversation title utf8: {e}")))?;
             results.push(ConversationSummary { id, title, created_at, updated_at });
         }
         Ok(results)
@@ -882,7 +874,7 @@ impl Store {
         for row in rows {
             let (id, role, enc_content, citations_json, created_at) = row.map_err(VaultError::Database)?;
             let content = String::from_utf8(crypto::decrypt(dek, &enc_content)?)
-                .unwrap_or_default();
+                .map_err(|e| VaultError::Crypto(format!("conversation message utf8: {e}")))?;
             let citations: Vec<Citation> = citations_json
                 .and_then(|j| serde_json::from_str::<Vec<Citation>>(&j).ok())
                 .unwrap_or_default();
@@ -990,7 +982,8 @@ impl Store {
             .map_err(VaultError::Database)?;
         match row {
             Some((id, enc_title, created_at, updated_at)) => {
-                let title = String::from_utf8(crypto::decrypt(dek, &enc_title)?).unwrap_or_default();
+                let title = String::from_utf8(crypto::decrypt(dek, &enc_title)?)
+                .map_err(|e| VaultError::Crypto(format!("conversation title utf8: {e}")))?;
                 Ok(Some(ConversationSummary { id, title, created_at, updated_at }))
             }
             None => Ok(None),

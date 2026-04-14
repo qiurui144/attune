@@ -64,7 +64,7 @@ impl Vault {
 
     /// 当前状态
     pub fn state(&self) -> VaultState {
-        if self.unlocked.lock().unwrap().is_some() {
+        if self.unlocked.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             return VaultState::Unlocked;
         }
         match self.store.has_meta("salt") {
@@ -109,7 +109,7 @@ impl Vault {
         self.store.set_meta("vault_version", b"1")?;
 
         // 自动解锁
-        *self.unlocked.lock().unwrap() = Some(UnlockedKeys {
+        *self.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = Some(UnlockedKeys {
             master_key: mk,
             dek_db,
             dek_idx,
@@ -165,7 +165,7 @@ impl Vault {
         let token = self.create_session_token(&mk)?;
 
         // 存入内存
-        *self.unlocked.lock().unwrap() = Some(UnlockedKeys {
+        *self.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = Some(UnlockedKeys {
             master_key: mk,
             dek_db,
             dek_idx,
@@ -180,7 +180,7 @@ impl Vault {
         // 先递增 nonce，使所有已签发 token 失效
         self.store.increment_token_nonce()?;
         // 再清零内存密钥（UnlockedKeys 内的 Key32 实现了 ZeroizeOnDrop）
-        let mut guard = self.unlocked.lock().unwrap();
+        let mut guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
         *guard = None;
         Ok(())
     }
@@ -191,7 +191,7 @@ impl Vault {
             return Err(VaultError::Locked);
         }
 
-        let guard = self.unlocked.lock().unwrap();
+        let guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
         let keys = guard.as_ref().ok_or(VaultError::Locked)?;
 
         // 验证旧密码（重新派生 MK 比对）
@@ -235,21 +235,21 @@ impl Vault {
 
     /// 获取 DEK_db（仅 UNLOCKED 状态）
     pub fn dek_db(&self) -> Result<Key32> {
-        let guard = self.unlocked.lock().unwrap();
+        let guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
         let keys = guard.as_ref().ok_or(VaultError::Locked)?;
         Ok(keys.dek_db.clone())
     }
 
     /// 获取 DEK_idx（仅 UNLOCKED 状态）
     pub fn dek_idx(&self) -> Result<Key32> {
-        let guard = self.unlocked.lock().unwrap();
+        let guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
         let keys = guard.as_ref().ok_or(VaultError::Locked)?;
         Ok(keys.dek_idx.clone())
     }
 
     /// 获取 DEK_vec（仅 UNLOCKED 状态）
     pub fn dek_vec(&self) -> Result<Key32> {
-        let guard = self.unlocked.lock().unwrap();
+        let guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
         let keys = guard.as_ref().ok_or(VaultError::Locked)?;
         Ok(keys.dek_vec.clone())
     }
@@ -297,7 +297,7 @@ impl Vault {
 
     /// 验证 session token
     pub fn verify_session(&self, token: &str) -> Result<()> {
-        let guard = self.unlocked.lock().unwrap();
+        let guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
         let keys = guard.as_ref().ok_or(VaultError::Locked)?;
 
         // 分离签名与 payload
