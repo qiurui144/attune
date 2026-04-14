@@ -2,6 +2,24 @@
 
 ## 已发布
 
+## Chat Session Management (2026-04-14)
+
+### Chat Session Management
+
+- POST /api/v1/chat 新增可选 `session_id` 字段，不传时自动创建新会话并返回 `session_id`
+- GET /api/v1/chat/sessions — 分页获取会话列表（按 updated_at DESC）
+- GET /api/v1/chat/sessions/:id — 获取会话详情 + 消息历史（内容字段级解密）
+- DELETE /api/v1/chat/sessions/:id — 删除会话及其消息（CASCADE）
+- 修复 chat.rs 中 search_with_context 管道；reranker 条件逻辑修复
+- 消息内容字段级 AES-256-GCM 加密存储
+
+### 测试
+
+- 新增 3 个 Session CRUD 集成测试（`vault-server/tests/session_test.rs`）：lifecycle / pagination / updated_at 时序
+- 总计 **213 tests**（vault-core: 174 + vault-server 各测试套件合计 39）
+
+---
+
 ## Search Enhancement + Queue Worker + WebSocket (2026-04-14)
 
 ### 搜索增强
