@@ -8,7 +8,9 @@
 
 import { detectPlatform } from './detector.js';
 import { ConversationCapture } from './capture.js';
-import { PrefixInjector } from './injector.js';
+// 2026-04-12: injector 已弃用，产品方向转为内置 Chat + RAG
+// 不再向 AI 网站 DOM 注入内容
+// import { PrefixInjector } from './injector.js';
 import { StatusIndicator } from './indicator.js';
 import { MSG, sendToWorker } from '../shared/messages.js';
 
@@ -18,7 +20,6 @@ if (platform) {
 
   const indicator = new StatusIndicator();
   const capture = new ConversationCapture(platform);
-  const injector = new PrefixInjector(platform);
 
   // 防止 content script 被重复注入时重复绑定
   let _messageListenerAttached = false;
@@ -27,38 +28,26 @@ if (platform) {
     indicator.mount();
     indicator.setState('processing');
 
-    // 检查后端连接（失败不阻断 capture/injector 启动）
+    // 检查后端连接（失败不阻断 capture 启动）
     try {
       const status = await sendToWorker(MSG.GET_STATUS);
       indicator.setState(status?.online ? 'captured' : 'offline');
-      if (status?.injection_enabled === false) {
-        injector.toggle(false);
-      }
     } catch {
       indicator.setState('offline');
     }
 
-    // 启动捕获（失败不阻断注入器）
+    // 启动捕获（被动收集，不再注入）
     try {
       capture.start();
     } catch (err) {
       console.error('[npu-webhook] Capture start failed:', err);
     }
 
-    // 启动注入器（失败不影响已启动的捕获）
-    try {
-      injector.attach();
-    } catch (err) {
-      console.error('[npu-webhook] Injector attach failed:', err);
-    }
-
     // 绑定消息监听器（去重防止重复绑定）
     if (!_messageListenerAttached) {
       _messageListenerAttached = true;
       chrome.runtime.onMessage.addListener((msg) => {
-        if (msg.type === MSG.TOGGLE_INJECTION) {
-          injector.toggle(msg.enabled);
-        } else if (msg.type === MSG.SETTINGS_UPDATED) {
+        if (msg.type === MSG.SETTINGS_UPDATED) {
           sendToWorker(MSG.GET_STATUS)
             .then((status) => indicator.setState(status?.online ? 'captured' : 'offline'))
             .catch(() => indicator.setState('offline'));

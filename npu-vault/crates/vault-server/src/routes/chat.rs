@@ -28,7 +28,9 @@ pub async fn chat(
     Json(body): Json<ChatRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Check LLM availability
-    let llm = state.llm.lock().unwrap().as_ref().cloned();
+    let llm = state.llm.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "llm lock poisoned"}))))?
+        .as_ref().cloned();
     let llm = match llm {
         Some(l) => l,
         None => {
@@ -43,7 +45,8 @@ pub async fn chat(
     };
 
     let dek = {
-        let vault = state.vault.lock().unwrap();
+        let vault = state.vault.lock()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
         vault.dek_db().map_err(|e| {
             (
                 StatusCode::FORBIDDEN,
@@ -81,7 +84,7 @@ pub async fn chat(
             dek: &dek,
         };
         vault_core::search::search_with_context(&ctx, &body.message, &search_params)
-            .unwrap_or_default()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
     };
 
     let knowledge: Vec<serde_json::Value> = search_results
@@ -147,40 +150,45 @@ pub async fn chat(
 
     // 5. Persist to conversation session
     let session_id = {
-        let vault = state.vault.lock().unwrap();
+        let vault = state.vault.lock()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
         let title: String = body.message.chars().take(50).collect();
-        // 取已有或新建 session
-        let sid = match &body.session_id {
+        // 取已有或新建 session；create_conversation 失败时跳过消息持久化（不插入孤悬消息）
+        let sid_opt: Option<String> = match &body.session_id {
             Some(id) => {
                 // 验证 session 存在；不存在则自动创建（保证 append_message 外键约束成功）
                 match vault.store().get_conversation_by_id(&dek, id) {
-                    Ok(Some(_)) => id.clone(),
+                    Ok(Some(_)) => Some(id.clone()),
                     _ => {
                         tracing::warn!("session_id {id} not found, creating new session");
                         vault.store().create_conversation(&dek, &title)
-                            .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
+                            .map_err(|e| tracing::warn!("create_conversation failed: {e}"))
+                            .ok()
                     }
                 }
             }
             None => vault.store().create_conversation(&dek, &title)
-                .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string()),
+                .map_err(|e| tracing::warn!("create_conversation failed: {e}"))
+                .ok(),
         };
-        // 构造引用列表
-        let citations_for_session: Vec<vault_core::store::Citation> = knowledge
-            .iter()
-            .map(|k| vault_core::store::Citation {
-                item_id: k.get("item_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                title: k.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                relevance: k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
-            })
-            .collect();
-        if let Err(e) = vault.store().append_message(&dek, &sid, "user", &body.message, &[]) {
-            tracing::warn!("failed to persist user message to session {sid}: {e}");
+        if let Some(sid) = sid_opt.as_ref() {
+            // 构造引用列表
+            let citations_for_session: Vec<vault_core::store::Citation> = knowledge
+                .iter()
+                .map(|k| vault_core::store::Citation {
+                    item_id: k.get("item_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    title: k.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    relevance: k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                })
+                .collect();
+            if let Err(e) = vault.store().append_message(&dek, sid, "user", &body.message, &[]) {
+                tracing::warn!("failed to persist user message to session {sid}: {e}");
+            }
+            if let Err(e) = vault.store().append_message(&dek, sid, "assistant", &response, &citations_for_session) {
+                tracing::warn!("failed to persist assistant message to session {sid}: {e}");
+            }
         }
-        if let Err(e) = vault.store().append_message(&dek, &sid, "assistant", &response, &citations_for_session) {
-            tracing::warn!("failed to persist assistant message to session {sid}: {e}");
-        }
-        sid
+        sid_opt.unwrap_or_default()
     };
 
     // 6. Build citations

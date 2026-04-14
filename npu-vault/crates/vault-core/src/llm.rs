@@ -52,7 +52,8 @@ struct OllamaChatRequest<'a> {
     model: &'a str,
     messages: Vec<OllamaChatMessage<'a>>,
     stream: bool,
-    format: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -151,7 +152,9 @@ impl OllamaLlmProvider {
                 OllamaChatMessage { role: "user", content: user },
             ],
             stream: false,
-            format: "json",
+            // format 不强制为 json：分类场景通过 system prompt 要求 JSON 输出，
+            // 避免 format:"json" 破坏通用对话响应
+            format: None,
         };
         let client = self.client.clone();
         let body_json = serde_json::to_vec(&body)?;

@@ -4,6 +4,12 @@
 
 通过 Chrome 扩展在 AI 对话（ChatGPT / Claude / Gemini）和日常浏览中自动捕获知识，利用 Ollama / NPU / iGPU / CPU 闲置算力处理 embedding，实现可检索的知识积累和无感前缀注入。
 
+> **两条产品线**：
+> - **Python 原型**（本目录 `src/npu_webhook/`）— 用于快速验证功能和算法，持续迭代实验性特性
+> - **Rust 商用线**（`npu-vault/`）— 产品级实现，1Password 式加密、跨平台、NAS 模式、纯 Rust 零依赖
+>
+> Chrome 扩展协议相同，两个后端可任意切换。参考 [`npu-vault/README.md`](npu-vault/README.md) 了解 Rust 产品线。
+
 ## 功能
 
 - **自动捕获** — MutationObserver 监听 ChatGPT / Claude / Gemini 对话，user+assistant 配对后自动入库

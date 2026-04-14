@@ -78,14 +78,14 @@ pub fn ensure_models(
     let tokenizer_path = cache_dir.join(tokenizer_basename);
 
     if model_path.exists() && tokenizer_path.exists() {
-        // 校验已缓存文件完整性
-        if verify_or_record_sha256(&model_path).is_ok()
-            && verify_or_record_sha256(&tokenizer_path).is_ok()
-        {
+        // 独立校验两个文件，避免短路运算导致一个文件损坏时另一个被跳过
+        let model_ok = verify_or_record_sha256(&model_path).is_ok();
+        let tokenizer_ok = verify_or_record_sha256(&tokenizer_path).is_ok();
+        if model_ok && tokenizer_ok {
             return Ok((model_path, tokenizer_path));
         }
-        // 校验失败（文件已被删除）：继续走下载流程
-        log::warn!("model integrity check failed, re-downloading");
+        // 至少一个校验失败（损坏文件已被删除）：继续走下载流程
+        log::warn!("model integrity check failed (model_ok={model_ok}, tokenizer_ok={tokenizer_ok}), re-downloading affected files");
     }
 
     let api = hf_hub::api::sync::Api::new()

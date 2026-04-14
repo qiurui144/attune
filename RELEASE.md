@@ -1,5 +1,30 @@
 # 版本计划
 
+> **双产品线**：本文档记录 **Python 原型线** 的迭代历史。
+> **Rust 商用线** 在 [`npu-vault/RELEASE.md`](npu-vault/RELEASE.md) 独立跟踪。
+
+## 产品线分离（2026-04）
+
+自 2026-04-09 起，项目明确分为两条产品线：
+
+**Python 原型线**（`src/npu_webhook/`）：
+- 快速验证新算法和功能设计
+- ChromaDB + FTS5 混合搜索
+- 用途：特性探索、性能对比、教学演示
+- 持续迭代中，不追求产品级
+
+**Rust 商用线**（`npu-vault/`）：
+- 1Password 式端到端加密
+- tantivy + usearch 纯 Rust 搜索栈
+- Axum HTTP Server + TLS + Bearer auth + 嵌入式 Web UI
+- 跨平台单二进制（Linux / Windows / NAS / Android）
+- 用途：生产部署、商用发布、NAS 远程访问
+- 最新版本 v0.3.0，78 tests
+
+两条线共享 Chrome 扩展协议（`/api/v1/*`），Python 原型验证的特性择优迁移到 Rust 商用线。
+
+---
+
 ## 已发布
 
 ### v0.3.0 — Phase 3：长文本质量提升 + 文件直传 + 系统托盘
