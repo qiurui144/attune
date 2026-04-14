@@ -7,7 +7,7 @@ use std::sync::{
 use std::time::Duration;
 
 use crate::embed::EmbeddingProvider;
-use crate::error::Result;
+use crate::error::{Result, VaultError};
 use crate::index::FulltextIndex;
 use crate::store::{QueueTask, Store};
 use crate::vectors::{VectorIndex, VectorMeta};
@@ -79,7 +79,8 @@ impl QueueWorker {
 
         // 获取一批 pending 任务
         let tasks = {
-            let s = store.lock().unwrap();
+            let s = store.lock()
+                .map_err(|_| VaultError::Crypto("store lock poisoned".into()))?;
             s.dequeue_embeddings(BATCH_SIZE)?
         };
 
@@ -101,11 +102,12 @@ impl QueueWorker {
         if !other_tasks.is_empty() {
             // classify 等任务在 core 层无法处理（需要 Classifier / Taxonomy，属于 server 层），
             // 将其重新标记为 pending，留在队列中等待上层消费者处理。
-            let s = store.lock().unwrap();
+            // 注意：归还任务不计入 total，避免调用方误认为已处理而进入忙等。
+            let s = store.lock()
+                .map_err(|_| VaultError::Crypto("store lock poisoned".into()))?;
             for task in &other_tasks {
                 s.mark_task_pending(task.id)?;
             }
-            total += other_tasks.len();
         }
 
         Ok(total)
@@ -143,7 +145,8 @@ impl QueueWorker {
 
             // 添加到向量索引
             {
-                let mut vecs = vectors.lock().unwrap();
+                let mut vecs = vectors.lock()
+                    .map_err(|_| VaultError::Crypto("vectors lock poisoned".into()))?;
                 vecs.add(
                     &embeddings[i],
                     VectorMeta {
@@ -157,12 +160,14 @@ impl QueueWorker {
 
             // 添加到全文索引（仅 Level 1 章节加入全文）
             if task.level == 1 {
-                let ft = fulltext.lock().unwrap();
+                let ft = fulltext.lock()
+                    .map_err(|_| VaultError::Crypto("fulltext lock poisoned".into()))?;
                 ft.add_document(&task.item_id, "", &task.chunk_text, "file")?;
             }
 
             // 标记完成
-            let s = store.lock().unwrap();
+            let s = store.lock()
+                .map_err(|_| VaultError::Crypto("store lock poisoned".into()))?;
             s.mark_embedding_done(task.id)?;
         }
 

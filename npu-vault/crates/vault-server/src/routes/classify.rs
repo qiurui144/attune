@@ -111,23 +111,25 @@ pub async fn drain(
 pub async fn status(
     State(state): State<SharedState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let (pending, classifier_ready, model) = {
-        let vault = state.vault.lock().unwrap();
+    let pending = {
+        let vault = state.vault.lock()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
         let _ = vault.dek_db().map_err(|e| {
             (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
         })?;
-        let pending = vault.store().pending_embedding_count()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
-        drop(vault);
-        let classifier_ready = state.classifier.lock().unwrap().is_some();
-        let model = state.llm.lock().unwrap()
-            .as_ref()
-            .map(|l| l.model_name().to_string())
-            .unwrap_or_default();
-        (pending, classifier_ready, model)
+        vault.store().pending_embedding_count()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
     };
-
-    let tag_count = state.tag_index.lock().unwrap()
+    let classifier_ready = state.classifier.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "classifier lock poisoned"}))))?
+        .is_some();
+    let model = state.llm.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "llm lock poisoned"}))))?
+        .as_ref()
+        .map(|l| l.model_name().to_string())
+        .unwrap_or_default();
+    let tag_count = state.tag_index.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "tag_index lock poisoned"}))))?
         .as_ref()
         .map(|i| i.item_count())
         .unwrap_or(0);

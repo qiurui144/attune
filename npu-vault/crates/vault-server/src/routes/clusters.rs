@@ -7,9 +7,15 @@ use crate::state::SharedState;
 pub async fn list(
     State(state): State<SharedState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let snapshot = state.cluster_snapshot.lock().unwrap().clone();
+    let snapshot = state.cluster_snapshot.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "lock poisoned"}))))?
+        .clone();
     match snapshot {
-        Some(s) => Ok(Json(serde_json::to_value(&s).unwrap())),
+        Some(s) => {
+            let val = serde_json::to_value(&s)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+            Ok(Json(val))
+        }
         None => Ok(Json(serde_json::json!({
             "clusters": [],
             "note": "no cluster snapshot yet, POST /clusters/rebuild to generate"
@@ -22,11 +28,16 @@ pub async fn detail(
     State(state): State<SharedState>,
     Path(id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let snapshot = state.cluster_snapshot.lock().unwrap();
+    let snapshot = state.cluster_snapshot.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "lock poisoned"}))))?;
     match snapshot.as_ref() {
         Some(s) => {
             match s.clusters.iter().find(|c| c.id == id) {
-                Some(c) => Ok(Json(serde_json::to_value(c).unwrap())),
+                Some(c) => {
+                    let val = serde_json::to_value(c)
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+                    Ok(Json(val))
+                }
                 None => Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "cluster not found"})))),
             }
         }
@@ -38,7 +49,9 @@ pub async fn detail(
 pub async fn rebuild(
     State(state): State<SharedState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let _ = state.vault.lock().unwrap().dek_db().map_err(|e| {
+    let vault = state.vault.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+    let _ = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
     })?;
 
