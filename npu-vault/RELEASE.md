@@ -2,6 +2,28 @@
 
 ## 已发布
 
+## Search Enhancement + Queue Worker + WebSocket (2026-04-14)
+
+### 搜索增强
+
+- **Reranker**：`VectorIndex::get_vector()` 取 item 均值向量，`rerank()` 以 `0.7×cosine + 0.3×rrf` 二次排序，当 `top_k <= 20` 时自动启用
+- **LRU 搜索缓存**：256 条目、30s TTL，djb2 哈希键，命中时响应含 `"cached": true`；ingest 时自动清空
+- **GET /api/v1/items/stale**：按 `days`（默认30）返回超期未更新条目，路由顺序在 `{id}` 之前
+- **GET /api/v1/items/{id}/stats**：返回 chunk_count / embedding_pending / embedding_done 统计（无需解密内容）
+- **POST /api/v1/feedback**：接收 `relevant/irrelevant/correction` 三种反馈，写入 feedback 表（含 CHECK 约束）
+
+### Queue Worker + WebSocket
+
+- **QueueWorker 自动启动**：vault setup/unlock 后通过 AtomicBool CAS 保证单实例启动，vault lock 后退出并重置 flag
+- **WebSocket /ws/scan-progress**：每 2 秒推送 `{vault_state, pending_embeddings, pending_classify, bound_dirs}`，vault 锁定时持续推送锁定状态
+- **Web UI 进度卡**：首页状态页新增实时进度显示，WebSocket 断线自动重连（clearTimeout + 3s 回退）
+
+### 测试
+
+- 新增约 17 个测试，总计 **156 tests**（vault-core: 144 + vault-server: 12）
+
+---
+
 ## Security Hardening (2026-04-13)
 
 ### 安全修复
