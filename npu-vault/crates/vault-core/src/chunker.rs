@@ -9,6 +9,8 @@ pub const SECTION_TARGET_SIZE: usize = 1500;
 
 /// 滑动窗口分块（字符级，句子边界感知）
 pub fn chunk(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
+    // overlap 必须 < chunk_size，否则滑动步长 <= 0 导致无限循环
+    let overlap = overlap.min(chunk_size.saturating_sub(1));
     if text.len() <= chunk_size {
         return vec![text.to_string()];
     }

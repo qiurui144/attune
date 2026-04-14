@@ -111,6 +111,17 @@ impl Clusterer {
     }
 
     fn run_hdbscan(&self, inputs: &[ClusterInput]) -> Result<Vec<i32>> {
+        // 验证所有向量维度一致，防止新旧模型混入时 hdbscan panic
+        if let Some(first_dim) = inputs.first().map(|i| i.embedding.len()) {
+            let mismatch = inputs.iter().enumerate()
+                .find(|(_, i)| i.embedding.len() != first_dim);
+            if let Some((idx, bad)) = mismatch {
+                return Err(VaultError::Classification(format!(
+                    "embedding dimension mismatch at index {idx}: expected {first_dim}, got {}",
+                    bad.embedding.len()
+                )));
+            }
+        }
         let dataset: Vec<Vec<f32>> = inputs.iter().map(|i| i.embedding.clone()).collect();
         let clusterer = hdbscan::Hdbscan::default_hyper_params(&dataset);
         let labels = clusterer

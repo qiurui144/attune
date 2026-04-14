@@ -18,11 +18,13 @@ pub async fn list_items(
     State(state): State<SharedState>,
     Query(params): Query<ListQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let vault = state.vault.lock().unwrap();
+    let vault = state.vault.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
     let _ = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
     })?;
-    let items = vault.store().list_items(params.limit, params.offset).map_err(|e| {
+    let limit = params.limit.min(200);
+    let items = vault.store().list_items(limit, params.offset).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
     })?;
     Ok(Json(serde_json::json!({"items": items, "count": items.len()})))
@@ -32,7 +34,8 @@ pub async fn get_item(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let vault = state.vault.lock().unwrap();
+    let vault = state.vault.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
     let dek = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
     })?;
@@ -54,7 +57,8 @@ pub async fn update_item(
     Path(id): Path<String>,
     Json(body): Json<UpdateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let vault = state.vault.lock().unwrap();
+    let vault = state.vault.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
     let dek = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
     })?;
@@ -70,7 +74,8 @@ pub async fn delete_item(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let vault = state.vault.lock().unwrap();
+    let vault = state.vault.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
     match vault.store().delete_item(&id) {
         Ok(true) => Ok(Json(serde_json::json!({"status": "ok"}))),
         Ok(false) => Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"})))),
@@ -93,11 +98,13 @@ pub async fn list_stale_items(
     State(state): State<SharedState>,
     Query(params): Query<StaleQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let vault = state.vault.lock().unwrap();
+    let vault = state.vault.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
     let _ = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
     })?;
-    let items = vault.store().list_stale_items(params.days, params.limit).map_err(|e| {
+    let limit = params.limit.min(200);
+    let items = vault.store().list_stale_items(params.days, limit).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
     })?;
     let count = items.len();
@@ -108,7 +115,8 @@ pub async fn get_item_stats(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let vault = state.vault.lock().unwrap();
+    let vault = state.vault.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
     let _ = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
     })?;

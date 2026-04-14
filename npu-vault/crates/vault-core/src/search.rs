@@ -155,7 +155,10 @@ pub fn search_with_context(
 ) -> crate::error::Result<Vec<SearchResult>> {
     // 1. 全文搜索（initial_k）
     let ft_results = ctx.fulltext
-        .map(|ft| ft.search(query, params.initial_k).unwrap_or_default())
+        .map(|ft| ft.search(query, params.initial_k).unwrap_or_else(|e| {
+            log::warn!("fulltext search error: {e}");
+            vec![]
+        }))
         .unwrap_or_default();
 
     // 2. 向量搜索（initial_k）

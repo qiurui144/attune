@@ -57,7 +57,9 @@ pub fn scan_directory(
         })
         .collect();
 
-    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+    for entry in walker.into_iter().filter_map(|e| {
+        e.map_err(|err| { log::warn!("WalkDir error: {err}"); }).ok()
+    }) {
         let path = entry.path();
         if !path.is_file() {
             continue;
