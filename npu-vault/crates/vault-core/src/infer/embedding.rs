@@ -89,8 +89,8 @@ impl OrtEmbeddingProvider {
         let valid: f32 = attn[..seq_len].iter().filter(|&&m| m == 1).count()
             .max(1) as f32;
 
-        for t in 0..seq_len {
-            if attn[t] == 1 {
+        for (t, &mask) in attn.iter().enumerate().take(seq_len) {
+            if mask == 1 {
                 let offset = t * hidden_dim;
                 for d in 0..hidden_dim {
                     mean[d] += flat[offset + d];

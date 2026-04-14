@@ -130,7 +130,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// 原地修改 `results` 的 `score` 字段并重新排序。
 pub fn rerank(
     query_vec: &[f32],
-    results: &mut Vec<SearchResult>,
+    results: &mut [SearchResult],
     vector_index: &VectorIndex,
 ) {
     for result in results.iter_mut() {

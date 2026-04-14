@@ -24,6 +24,25 @@
 
 ---
 
+## Phase 4 增量：搜索质量提升 + 本地推理层 (2026-04-14)
+
+### Phase 4 增量：搜索质量提升 + 本地推理层
+
+- `vault-core/src/infer/`: 新增本地 ONNX 推理模块（ort 2.x）
+  - `OrtEmbeddingProvider`: Qwen3-Embedding-0.6B INT8，mean-pool + L2 归一化
+  - `OrtRerankProvider`: bge-reranker-v2-m3 INT8，cross-encoder sigmoid 评分
+  - `model_store`: hf-hub 自动下载，`~/.local/share/npu-vault/models/` 缓存
+  - `provider`: EP 自动选择（CUDA > CPU，`NPU_VAULT_EP` 环境变量覆盖）
+- `platform.rs`: 新增 `models_dir()`, `NpuKind`, `detect_npu()`
+- `search.rs`: `SearchParams` + `SearchContext` + `search_with_context` 三阶段管道
+  - 修复：向量搜索硬编码 10 的 bug
+  - Chat 和 Search 路径统一使用 `search_with_context`
+- `llm.rs`: 新增 `OpenAiLlmProvider`（OpenAI-compat，支持 Ollama/OpenAI/LM Studio/vLLM）
+- `routes/search.rs`: 新增 `initial_k` / `intermediate_k` 可选 query 参数
+- `routes/chat.rs`: 修复 500 字符截断 bug（RAG 上下文不再被强制截断）
+
+---
+
 ## Test Coverage Expansion (2026-04-14)
 
 ### 测试覆盖补全
