@@ -327,5 +327,6 @@ async fn test_chat_history_endpoint() {
     let (state, _tmp) = make_unlocked_state();
     let (status, body) = do_get(state, "/api/v1/chat/history").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["conversations"].is_array());
+    // /chat/history 已统一为与 /chat/sessions 相同的响应格式
+    assert!(body["sessions"].is_array());
 }

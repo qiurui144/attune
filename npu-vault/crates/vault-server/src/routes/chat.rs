@@ -119,11 +119,17 @@ pub async fn chat(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
     };
 
+    // 按 INJECTION_BUDGET 分配每条文档的注入字符数，防止超出 LLM context window
+    let mut search_results = search_results;
+    vault_core::search::allocate_budget(&mut search_results, vault_core::search::INJECTION_BUDGET);
+
     let knowledge: Vec<serde_json::Value> = search_results
         .iter()
         .map(|r| serde_json::json!({
             "item_id": r.item_id,
             "title": r.title,
+            // inject_content 是预算截断后的内容；content 保留全文用于 citations
+            "inject_content": r.inject_content,
             "content": r.content,
             "score": r.score,
             "source_type": r.source_type,
@@ -141,7 +147,10 @@ pub async fn chat(
         system_prompt.push_str("=== 知识库相关文档 ===\n\n");
         for (i, k) in knowledge.iter().enumerate() {
             let title = k.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-            let content = k.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            // 优先使用 inject_content（预算截断版），回退到 content（全文）
+            let content = k.get("inject_content").and_then(|v| v.as_str())
+                .or_else(|| k.get("content").and_then(|v| v.as_str()))
+                .unwrap_or("");
             let score = k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
             system_prompt.push_str(&format!(
                 "[{}] 《{}》(相关度: {:.0}%)\n{}\n\n",
@@ -244,7 +253,8 @@ pub async fn chat(
     })))
 }
 
-/// GET /api/v1/chat/history -- 对话历史（从 conversations 表分页获取）
+/// GET /api/v1/chat/history -- 已废弃，返回与 /chat/sessions 一致的格式
+/// @deprecated 请使用 GET /api/v1/chat/sessions?limit=50&offset=0
 pub async fn chat_history(
     State(state): State<SharedState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -268,17 +278,6 @@ pub async fn chat_history(
         )
     })?;
 
-    let chat_items: Vec<serde_json::Value> = sessions
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "id": s.id,
-                "title": s.title,
-                "created_at": s.created_at,
-                "updated_at": s.updated_at,
-            })
-        })
-        .collect();
-
-    Ok(Json(serde_json::json!({"conversations": chat_items})))
+    // 返回与 /chat/sessions 相同的 key 结构，保持 API 一致性
+    Ok(Json(serde_json::json!({"sessions": sessions, "total": sessions.len()})))
 }
