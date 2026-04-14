@@ -537,6 +537,16 @@ impl Store {
         Ok(count as usize)
     }
 
+    /// 按 task_type 查询 pending 状态任务数量（用于进度推送）
+    pub fn pending_count_by_type(&self, task_type: &str) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM embed_queue WHERE status = 'pending' AND task_type = ?1",
+            [task_type],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// 为 item 入队一个分类任务 (task_type='classify')
     pub fn enqueue_classify(&self, item_id: &str, priority: i32) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
