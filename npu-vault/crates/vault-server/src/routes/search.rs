@@ -19,6 +19,14 @@ fn default_top_k() -> usize {
     10
 }
 
+fn hash_query(query: &str) -> u64 {
+    let mut hash: u64 = 5381;
+    for b in query.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(b as u64);
+    }
+    hash
+}
+
 type ApiError = (StatusCode, Json<serde_json::Value>);
 
 fn err_500(msg: &str) -> ApiError {
@@ -76,6 +84,21 @@ pub async fn search(
     State(state): State<SharedState>,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let cache_key = hash_query(&params.q);
+    {
+        let mut cache = state.search_cache.lock().map_err(|_| err_500("cache lock poisoned"))?;
+        if let Some(entry) = cache.get(&cache_key) {
+            if !entry.is_expired() {
+                return Ok(Json(serde_json::json!({
+                    "query": params.q,
+                    "results": entry.results,
+                    "total": entry.results.len(),
+                    "cached": true
+                })));
+            }
+        }
+    }
+
     let dek = {
         let vault = state.vault.lock().map_err(|_| err_500("vault lock poisoned"))?;
         vault.dek_db().map_err(|e| {
@@ -125,6 +148,14 @@ pub async fn search(
                 rerank(&qvec, &mut results, vecs);
             }
         }
+    }
+
+    {
+        let mut cache = state.search_cache.lock().map_err(|_| err_500("cache lock poisoned"))?;
+        cache.put(cache_key, crate::state::CachedSearch {
+            results: results.clone(),
+            created_at: std::time::Instant::now(),
+        });
     }
 
     Ok(Json(serde_json::json!({
@@ -209,4 +240,20 @@ pub struct RelevantRequest {
     pub injection_budget: Option<usize>,
     #[allow(dead_code)]
     pub source_types: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_query_deterministic() {
+        assert_eq!(hash_query("hello"), hash_query("hello"));
+        assert_ne!(hash_query("hello"), hash_query("world"));
+    }
+
+    #[test]
+    fn hash_query_empty() {
+        let _ = hash_query("");
+    }
 }

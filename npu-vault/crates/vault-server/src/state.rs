@@ -1,5 +1,8 @@
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use vault_core::classifier::Classifier;
 use vault_core::clusterer::ClusterSnapshot;
 use vault_core::embed::{EmbeddingProvider, OllamaProvider};
@@ -9,6 +12,20 @@ use vault_core::tag_index::TagIndex;
 use vault_core::taxonomy::Taxonomy;
 use vault_core::vault::Vault;
 use vault_core::vectors::VectorIndex;
+
+const SEARCH_CACHE_CAPACITY: usize = 256;
+const SEARCH_CACHE_TTL_SECS: u64 = 30;
+
+pub struct CachedSearch {
+    pub results: Vec<vault_core::search::SearchResult>,
+    pub created_at: Instant,
+}
+
+impl CachedSearch {
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed().as_secs() >= SEARCH_CACHE_TTL_SECS
+    }
+}
 
 pub type SharedState = Arc<AppState>;
 
@@ -25,6 +42,7 @@ pub struct AppState {
     pub require_auth: bool,
     /// 防止重复启动 QueueWorker 后台线程
     pub queue_worker_running: AtomicBool,
+    pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
 }
 
 impl AppState {
@@ -41,6 +59,9 @@ impl AppState {
             classifier: Mutex::new(None),
             require_auth,
             queue_worker_running: AtomicBool::new(false),
+            search_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(SEARCH_CACHE_CAPACITY).unwrap()
+            )),
         }
     }
 
@@ -449,5 +470,6 @@ impl AppState {
         *self.cluster_snapshot.lock().unwrap() = None;
         *self.taxonomy.lock().unwrap() = None;
         *self.classifier.lock().unwrap() = None;
+        self.search_cache.lock().unwrap().clear();
     }
 }
