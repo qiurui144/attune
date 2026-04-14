@@ -89,8 +89,11 @@ impl OrtEmbeddingProvider {
         // 复用已截断的 masks（Vec<i64>），避免再次从 encoding 取全长 mask 造成歧义
         let mut mean = vec![0.0f32; hidden_dim];
         let valid: f32 = masks.iter().filter(|&&m| m == 1).count().max(1) as f32;
+        // 用 model_seq_len（shape[1]）限制迭代范围，防止 flat 越界（ONNX 模型可能在内部截断）
+        let model_seq_len = shape[1] as usize;
+        let iter_len = masks.len().min(model_seq_len);
 
-        for (t, &mask) in masks.iter().enumerate() {
+        for (t, &mask) in masks[..iter_len].iter().enumerate() {
             if mask == 1 {
                 let offset = t * hidden_dim;
                 for d in 0..hidden_dim {

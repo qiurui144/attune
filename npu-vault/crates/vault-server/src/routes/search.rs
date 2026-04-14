@@ -40,11 +40,20 @@ pub async fn search(
     State(state): State<SharedState>,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // top_k = 0 会导致搜索始终返回空结果，提前拒绝
+    if params.top_k == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "top_k must be > 0"})),
+        ));
+    }
+
     let cache_key = hash_query(&params.q);
     {
         let mut cache = state.search_cache.lock().map_err(|_| err_500("cache lock poisoned"))?;
         if let Some(entry) = cache.get(&cache_key) {
-            if !entry.is_expired() {
+            // 验证原始 query 字符串防止哈希碰撞返回错误结果
+            if entry.query == params.q && !entry.is_expired() {
                 return Ok(Json(serde_json::json!({
                     "query": params.q,
                     "results": entry.results,
@@ -95,6 +104,7 @@ pub async fn search(
     {
         let mut cache = state.search_cache.lock().map_err(|_| err_500("cache lock poisoned"))?;
         cache.put(cache_key, crate::state::CachedSearch {
+            query: params.q.clone(),
             results: results.clone(),
             created_at: std::time::Instant::now(),
         });

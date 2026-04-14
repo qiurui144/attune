@@ -17,6 +17,7 @@ const SEARCH_CACHE_CAPACITY: usize = 256;
 const SEARCH_CACHE_TTL_SECS: u64 = 30;
 
 pub struct CachedSearch {
+    pub query: String,
     pub results: Vec<vault_core::search::SearchResult>,
     pub created_at: Instant,
 }
