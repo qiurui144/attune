@@ -22,6 +22,12 @@ pub async fn bind_remote(
     State(state): State<SharedState>,
     Json(body): Json<BindRemoteRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if body.depth > 2 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "depth must be <= 2 to prevent runaway directory traversal"})),
+        ));
+    }
     let config = WebDavConfig {
         url: body.url.clone(),
         username: body.username.clone(),

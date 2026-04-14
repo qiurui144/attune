@@ -1,6 +1,7 @@
 // npu-vault/crates/vault-core/src/index.rs
 
 use std::path::Path;
+use std::sync::Mutex;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
@@ -10,6 +11,9 @@ use crate::error::{Result, VaultError};
 
 const HEAP_SIZE: usize = 50_000_000; // 50 MB writer heap
 
+/// FulltextIndex 持久持有唯一 IndexWriter，避免多线程并发重复创建 writer 导致 panic。
+/// Tantivy 规定：同一 Index 同时只能有一个活跃 IndexWriter；
+/// 用 Mutex<IndexWriter> 保护，所有写操作共享该 writer。
 pub struct FulltextIndex {
     index: Index,
     #[allow(dead_code)]
@@ -20,6 +24,7 @@ pub struct FulltextIndex {
     f_content: Field,
     #[allow(dead_code)]
     f_source_type: Field,
+    writer: Mutex<IndexWriter>,
 }
 
 impl FulltextIndex {
@@ -32,7 +37,9 @@ impl FulltextIndex {
         let f_title = schema.get_field("title").unwrap();
         let f_content = schema.get_field("content").unwrap();
         let f_source_type = schema.get_field("source_type").unwrap();
-        Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type })
+        let writer = index.writer(HEAP_SIZE)
+            .map_err(|e| VaultError::Crypto(format!("tantivy writer: {e}")))?;
+        Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type, writer: Mutex::new(writer) })
     }
 
     /// 打开持久化索引
@@ -51,7 +58,9 @@ impl FulltextIndex {
         let f_title = schema.get_field("title").unwrap();
         let f_content = schema.get_field("content").unwrap();
         let f_source_type = schema.get_field("source_type").unwrap();
-        Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type })
+        let writer = index.writer(HEAP_SIZE)
+            .map_err(|e| VaultError::Crypto(format!("tantivy writer: {e}")))?;
+        Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type, writer: Mutex::new(writer) })
     }
 
     fn build_schema() -> Schema {
@@ -80,8 +89,7 @@ impl FulltextIndex {
 
     /// 添加文档到索引（upsert 语义：先删除同 item_id 的旧文档再添加）
     pub fn add_document(&self, item_id: &str, title: &str, content: &str, source_type: &str) -> Result<()> {
-        let mut writer: IndexWriter = self.index.writer(HEAP_SIZE)
-            .map_err(|e| VaultError::Crypto(format!("tantivy writer: {e}")))?;
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         // Delete existing document with same item_id (upsert semantics)
         let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
         writer.delete_term(term);
@@ -93,16 +101,12 @@ impl FulltextIndex {
         )).map_err(|e| VaultError::Crypto(format!("tantivy add: {e}")))?;
         writer.commit()
             .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
-        // Wait for merging threads to finish to ensure segments are available
-        writer.wait_merging_threads()
-            .map_err(|e| VaultError::Crypto(format!("tantivy wait: {e}")))?;
         Ok(())
     }
 
     /// 删除文档（by item_id）
     pub fn delete_document(&self, item_id: &str) -> Result<()> {
-        let mut writer: IndexWriter = self.index.writer(HEAP_SIZE)
-            .map_err(|e| VaultError::Crypto(format!("tantivy writer: {e}")))?;
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
         writer.delete_term(term);
         writer.commit()

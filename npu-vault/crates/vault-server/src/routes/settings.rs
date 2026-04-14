@@ -43,10 +43,15 @@ pub async fn update_settings(
         None => default_settings(),
     };
 
-    // Merge incoming fields
+    // 白名单校验：只允许写入已知配置键，防止任意键污染 vault_meta
+    const ALLOWED_KEYS: &[&str] = &[
+        "injection_mode", "injection_budget", "excluded_domains", "search", "embedding",
+    ];
     if let (Some(current_obj), Some(body_obj)) = (current.as_object_mut(), body.as_object()) {
         for (k, v) in body_obj {
-            current_obj.insert(k.clone(), v.clone());
+            if ALLOWED_KEYS.contains(&k.as_str()) {
+                current_obj.insert(k.clone(), v.clone());
+            }
         }
     }
 
