@@ -13,6 +13,7 @@ pub struct ChatRequest {
     pub message: String,
     #[serde(default)]
     pub history: Vec<HistoryMessage>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -144,15 +145,29 @@ pub async fn chat(
             )
         })?;
 
-    // 5. Auto-save conversation
-    {
+    // 5. Persist to conversation session
+    let session_id = {
         let vault = state.vault.lock().unwrap();
         let title: String = body.message.chars().take(50).collect();
-        let content = format!("用户: {}\n\n助手: {}", body.message, response);
-        let _ = vault
-            .store()
-            .insert_item(&dek, &title, &content, None, "ai_chat", None, None);
-    }
+        // 取已有或新建 session
+        let sid = match &body.session_id {
+            Some(id) => id.clone(),
+            None => vault.store().create_conversation(&dek, &title)
+                .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string()),
+        };
+        // 构造引用列表
+        let citations_for_session: Vec<vault_core::store::Citation> = knowledge
+            .iter()
+            .map(|k| vault_core::store::Citation {
+                item_id: k.get("item_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                title: k.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                relevance: k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            })
+            .collect();
+        let _ = vault.store().append_message(&dek, &sid, "user", &body.message, &[]);
+        let _ = vault.store().append_message(&dek, &sid, "assistant", &response, &citations_for_session);
+        sid
+    };
 
     // 6. Build citations
     let citations: Vec<serde_json::Value> = knowledge
@@ -170,6 +185,7 @@ pub async fn chat(
         "content": response,
         "citations": citations,
         "knowledge_count": knowledge.len(),
+        "session_id": session_id,
     })))
 }
 
