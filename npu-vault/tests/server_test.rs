@@ -330,3 +330,82 @@ async fn test_chat_history_endpoint() {
     // /chat/history 已统一为与 /chat/sessions 相同的响应格式
     assert!(body["sessions"].is_array());
 }
+
+// ─── search 输入校验 ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_search_top_k_zero_returns_400() {
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_get(state, "/api/v1/search?q=hello&top_k=0").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap_or("").contains("top_k"));
+}
+
+#[tokio::test]
+async fn test_search_cache_hit_returns_cached_flag() {
+    let (state, _tmp) = make_unlocked_state();
+    // 第一次请求写入 cache
+    do_get(state.clone(), "/api/v1/search?q=cache_probe_query").await;
+    // 第二次相同 query 应命中 cache
+    let (status, body) = do_get(state, "/api/v1/search?q=cache_probe_query").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["cached"], true, "second identical query must be served from cache");
+}
+
+// ─── ingest 大小限制 ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_ingest_content_over_2mb_returns_413() {
+    // Axum 默认 2MB body limit 会在 handler 之前拦截；我们的 handler 校验
+    // 是第二道防线（在 content-type 解析成功的情况下再次校验）。
+    // 只验证状态码 413，不约束具体错误信息格式。
+    let (state, _tmp) = make_unlocked_state();
+    let large_content = "x".repeat(2 * 1024 * 1024 + 1);
+    let (status, _body) = do_post(
+        state,
+        "/api/v1/ingest",
+        serde_json::json!({"title": "big", "content": large_content}),
+    ).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn test_ingest_title_over_500_bytes_returns_413() {
+    let (state, _tmp) = make_unlocked_state();
+    let long_title = "t".repeat(501);
+    let (status, _) = do_post(
+        state,
+        "/api/v1/ingest",
+        serde_json::json!({"title": long_title, "content": "normal"}),
+    ).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+// ─── chat history content 长度 ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_chat_history_content_too_long_returns_400() {
+    let (state, _tmp) = make_unlocked_state();
+    let long_content = "h".repeat(8193); // MAX_HISTORY_CONTENT_LEN = 8192
+    let (status, body) = do_post(
+        state,
+        "/api/v1/chat",
+        serde_json::json!({"message": "hi", "history": [{"role": "user", "content": long_content}]}),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap_or("").contains("history message content too long"));
+}
+
+// ─── WebDAV bind-remote depth 校验 ───────────────────────────────────────────
+
+#[tokio::test]
+async fn test_bind_remote_depth_over_2_returns_400() {
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_post(
+        state,
+        "/api/v1/index/bind-remote",
+        serde_json::json!({"url": "http://localhost:8080/webdav/", "depth": 3}),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap_or("").contains("depth"));
+}

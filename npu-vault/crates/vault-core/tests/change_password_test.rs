@@ -32,4 +32,17 @@ mod tests {
         let result = vault.change_password("wrong_password", "new_password");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn change_password_with_empty_new_password_fails() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("vault.db");
+        let vault = Vault::open(&db_path, tmp.path()).unwrap();
+
+        vault.setup("correct_password").unwrap();
+        let result = vault.change_password("correct_password", "");
+        assert!(result.is_err(), "change_password with empty new_password must return Err");
+        // 确保失败后 vault 仍处于 Unlocked 状态且 DEK 未损坏
+        assert!(vault.dek_db().is_ok(), "vault must remain unlocked after rejection");
+    }
 }
