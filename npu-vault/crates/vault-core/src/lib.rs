@@ -20,6 +20,7 @@ pub mod tag_index;
 pub mod taxonomy;
 pub mod vault;
 pub mod vectors;
+pub mod skill_evolution;
 pub mod web_search;
 
 pub fn version() -> &'static str {

@@ -97,6 +97,20 @@ pub async fn chat(
         })?
     };
 
+    // 1a. 读取 app_settings（用于查询扩展 + web_search 配置）
+    let app_settings: serde_json::Value = {
+        let vault = state.vault.lock()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock"}))))?;
+        vault.store().get_meta("app_settings")
+            .ok()
+            .flatten()
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_else(|| serde_json::json!({}))
+    };
+
+    // 1b. 用 learned_expansions 自动扩展查询词（语义扩展，透明无感）
+    let expanded_query = vault_core::skill_evolution::expand_query(&body.message, &app_settings);
+
     // 1. Search knowledge base via three-stage pipeline (initial_k → rerank → top_k)
     let search_params = vault_core::search::SearchParams::with_defaults(5);
     let reranker = state.reranker.lock().map_err(|_| {
@@ -125,7 +139,7 @@ pub async fn chat(
             store: vault_guard.store(),
             dek: &dek,
         };
-        vault_core::search::search_with_context(&ctx, &body.message, &search_params)
+        vault_core::search::search_with_context(&ctx, &expanded_query, &search_params)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
     };
 
@@ -133,7 +147,19 @@ pub async fn chat(
     let mut search_results = search_results;
     vault_core::search::allocate_budget(&mut search_results, vault_core::search::INJECTION_BUDGET);
 
-    // 2a. 若本地无结果，尝试网络搜索 fallback
+    // 2a. 本地无结果时记录失败信号（后台技能进化的驱动数据），非阻塞
+    if search_results.is_empty() {
+        let signal_state = state.clone();
+        let signal_query = body.message.clone();
+        tokio::spawn(async move {
+            let vault = signal_state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = vault.store().record_skill_signal(&signal_query, 0, false) {
+                tracing::debug!("record_skill_signal failed (non-fatal): {e}");
+            }
+        });
+    }
+
+    // 2b. 若本地无结果，尝试网络搜索 fallback
     let web_search_used;
     let knowledge: Vec<serde_json::Value> = if search_results.is_empty() {
         let ws = state.web_search.lock().unwrap_or_else(|e| e.into_inner()).clone();

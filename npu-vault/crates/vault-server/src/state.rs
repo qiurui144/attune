@@ -52,6 +52,8 @@ pub struct AppState {
     pub rescan_worker_running: AtomicBool,
     /// 防止并发 unlock 重复初始化搜索引擎（重建索引会清空内存向量）
     pub engines_initialized: AtomicBool,
+    /// 防止重复启动 SkillEvolver 后台线程
+    pub evolve_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
 }
 
@@ -73,6 +75,7 @@ impl AppState {
             queue_worker_running: AtomicBool::new(false),
             classify_worker_running: AtomicBool::new(false),
             rescan_worker_running: AtomicBool::new(false),
+            evolve_worker_running: AtomicBool::new(false),
             engines_initialized: AtomicBool::new(false),
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).unwrap()
@@ -573,6 +576,58 @@ impl AppState {
             // 退出时重置标志
             state.queue_worker_running.store(false, Ordering::SeqCst);
             tracing::info!("Queue worker stopped (vault locked or engines cleared)");
+        });
+    }
+
+    /// 启动后台技能进化 worker（在 init_search_engines 之后调用）
+    ///
+    /// 每 4 小时检查一次未处理信号数；达到阈值（默认 10 条）时调用 LLM 分析失败查询
+    /// 并将扩展词静默写入 app_settings，无任何用户通知或新 UI 入口。
+    pub fn start_skill_evolver(state: std::sync::Arc<AppState>) {
+        // 需要 LLM 才能运行
+        if state.llm.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            return;
+        }
+
+        if state.evolve_worker_running.compare_exchange(
+            false, true, Ordering::SeqCst, Ordering::SeqCst,
+        ).is_err() {
+            tracing::debug!("Skill evolver already running, skipping");
+            return;
+        }
+
+        std::thread::spawn(move || {
+            tracing::info!("Skill evolver started (runs every 4h or at {} signals)",
+                vault_core::skill_evolution::EVOLVE_THRESHOLD);
+            const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
+
+            loop {
+                std::thread::sleep(CHECK_INTERVAL);
+
+                // 检查 vault 是否仍处于 unlocked 状态
+                let vault_unlocked = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    matches!(vault.state(), vault_core::vault::VaultState::Unlocked)
+                };
+                if !vault_unlocked {
+                    break;
+                }
+
+                let llm = match state.llm.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+                    Some(l) => l,
+                    None => break,
+                };
+
+                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                match vault_core::skill_evolution::run_evolution_cycle(vault.store(), llm.as_ref()) {
+                    Ok(0) => {} // 信号不足或无变化
+                    Ok(n) => tracing::info!("Skill evolver: {} expansion entries updated", n),
+                    Err(e) => tracing::warn!("Skill evolver error: {}", e),
+                }
+            }
+
+            state.evolve_worker_running.store(false, Ordering::SeqCst);
+            tracing::info!("Skill evolver stopped (vault locked)");
         });
     }
 

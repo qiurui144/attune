@@ -48,6 +48,7 @@ pub async fn vault_setup(
     crate::state::AppState::start_classify_worker(state.clone());
     crate::state::AppState::start_rescan_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
+    crate::state::AppState::start_skill_evolver(state.clone());
     Ok(Json(serde_json::json!({"status": "ok", "state": "unlocked"})))
 }
 
@@ -66,6 +67,7 @@ pub async fn vault_unlock(
     crate::state::AppState::start_classify_worker(state.clone());
     crate::state::AppState::start_rescan_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
+    crate::state::AppState::start_skill_evolver(state.clone());
     Ok(Json(serde_json::json!({"status": "ok", "token": token})))
 }
 
