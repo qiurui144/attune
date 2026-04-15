@@ -7,6 +7,7 @@ use crate::llm::{ChatMessage, LlmProvider};
 use crate::search::{allocate_budget, SearchResult, INJECTION_BUDGET};
 use crate::store::Store;
 use crate::vectors::VectorIndex;
+use crate::web_search::WebSearchProvider;
 use std::sync::{Arc, Mutex};
 
 /// RAG 对话引擎
@@ -17,6 +18,8 @@ pub struct ChatEngine {
     vectors: Arc<Mutex<Option<VectorIndex>>>,
     embedding: Arc<Mutex<Option<Arc<dyn crate::embed::EmbeddingProvider>>>>,
     reranker: Arc<Mutex<Option<Arc<dyn crate::infer::RerankProvider>>>>,
+    /// 可选网络搜索提供者：本地知识库无结果时作为 fallback
+    web_search: Option<Arc<dyn WebSearchProvider>>,
 }
 
 /// 对话响应
@@ -25,6 +28,8 @@ pub struct ChatResponse {
     pub content: String,
     pub citations: Vec<Citation>,
     pub knowledge_count: usize,
+    /// 本次回答是否使用了网络搜索补充
+    pub web_search_used: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -43,32 +48,63 @@ impl ChatEngine {
         embedding: Arc<Mutex<Option<Arc<dyn crate::embed::EmbeddingProvider>>>>,
         reranker: Arc<Mutex<Option<Arc<dyn crate::infer::RerankProvider>>>>,
     ) -> Self {
-        Self { llm, store, fulltext, vectors, embedding, reranker }
+        Self { llm, store, fulltext, vectors, embedding, reranker, web_search: None }
     }
 
-    /// RAG 对话：搜索知识库 -> 构建 prompt -> 调用 LLM -> 返回带引用的回答
+    /// 设置网络搜索提供者（链式调用）
+    pub fn with_web_search(mut self, ws: Arc<dyn WebSearchProvider>) -> Self {
+        self.web_search = Some(ws);
+        self
+    }
+
+    /// RAG 对话：搜索知识库 -> (可选) 网络搜索 fallback -> 构建 prompt -> 调用 LLM
     pub fn chat(
         &self,
         user_message: &str,
         history: &[ChatMessage],
         dek: &Key32,
     ) -> Result<ChatResponse> {
-        // 1. 搜索知识库
-        let knowledge = self.search_for_context(user_message, dek, 5)?;
+        // 1. 搜索本地知识库
+        let local_knowledge = self.search_for_context(user_message, dek, 5)?;
 
-        // 2. 构建 system prompt
-        let system = build_rag_system_prompt(&knowledge);
+        // 2. 若本地无结果，尝试网络搜索 fallback
+        let (knowledge, web_search_used) = if local_knowledge.is_empty() {
+            if let Some(ws) = &self.web_search {
+                match ws.search(user_message, 3) {
+                    Ok(web_results) if !web_results.is_empty() => {
+                        let synthetic: Vec<SearchResult> = web_results.into_iter().map(|r| SearchResult {
+                            item_id: format!("web:{}", r.url),
+                            score: 0.55,
+                            title: r.title,
+                            content: r.snippet.clone(),
+                            source_type: "web".into(),
+                            inject_content: Some(r.snippet),
+                        }).collect();
+                        (synthetic, true)
+                    }
+                    // 网络搜索失败或无结果时降级：继续用空知识库（不报错）
+                    Ok(_) | Err(_) => (local_knowledge, false),
+                }
+            } else {
+                (local_knowledge, false)
+            }
+        } else {
+            (local_knowledge, false)
+        };
 
-        // 3. 组装完整消息列表
+        // 3. 构建 system prompt
+        let system = build_rag_system_prompt(&knowledge, web_search_used);
+
+        // 4. 组装完整消息列表
         let mut messages = Vec::new();
         messages.push(ChatMessage::system(&system));
         messages.extend_from_slice(history);
         messages.push(ChatMessage::user(user_message));
 
-        // 4. 调用 LLM
+        // 5. 调用 LLM
         let response = self.llm.chat_with_history(&messages)?;
 
-        // 5. 提取引用
+        // 6. 提取引用
         let citations: Vec<Citation> = knowledge.iter().map(|k| Citation {
             item_id: k.item_id.clone(),
             title: k.title.clone(),
@@ -77,10 +113,10 @@ impl ChatEngine {
 
         let knowledge_count = knowledge.len();
 
-        // 6. 自动保存对话到知识库
+        // 7. 自动保存对话到知识库
         self.auto_save_conversation(user_message, &response, dek)?;
 
-        Ok(ChatResponse { content: response, citations, knowledge_count })
+        Ok(ChatResponse { content: response, citations, knowledge_count, web_search_used })
     }
 
     fn search_for_context(&self, query: &str, dek: &Key32, top_k: usize) -> Result<Vec<SearchResult>> {
@@ -113,28 +149,48 @@ impl ChatEngine {
     }
 }
 
-fn build_rag_system_prompt(knowledge: &[SearchResult]) -> String {
+fn build_rag_system_prompt(knowledge: &[SearchResult], from_web: bool) -> String {
     if knowledge.is_empty() {
-        return "你是用户的个人知识助手。知识库中暂无与此问题相关的文档。请正常回答。".into();
+        return "你是用户的个人知识助手。知识库中暂无与此问题相关的文档，网络搜索也未返回结果。\
+                请凭借自身知识正常回答，不要编造引用。".into();
     }
 
-    let mut prompt = String::from(
-        "你是用户的个人知识助手。以下是从用户本地知识库中检索到的相关文档。\n\
-         请基于这些知识回答用户的问题。如果引用了某个文档，请标注 [文档标题]。\n\
-         如果知识库中没有相关信息，正常回答即可，不要编造引用。\n\n"
-    );
+    let (section_label, intro) = if from_web {
+        (
+            "=== 网络搜索结果（本地知识库无结果，自动补充）===",
+            "你是用户的个人知识助手。本地知识库暂无相关内容，以下来自实时网络搜索。\n\
+             请基于这些搜索结果回答用户的问题，并在回答末尾标注「来源：[URL]」。\n\
+             如果搜索结果不够可靠，请明确说明并补充你自己的判断。\n\n",
+        )
+    } else {
+        (
+            "=== 知识库相关文档 ===",
+            "你是用户的个人知识助手。以下是从用户本地知识库中检索到的相关文档。\n\
+             请基于这些知识回答用户的问题。如果引用了某个文档，请标注 [文档标题]。\n\
+             如果知识库中没有相关信息，正常回答即可，不要编造引用。\n\n",
+        )
+    };
 
-    prompt.push_str("=== 知识库相关文档 ===\n\n");
+    let mut prompt = intro.to_string();
+    prompt.push_str(section_label);
+    prompt.push_str("\n\n");
     for (i, item) in knowledge.iter().enumerate() {
         let content = item.inject_content.as_deref().unwrap_or(&item.content);
-        prompt.push_str(&format!(
-            "[{}] 《{}》(来源: {}, 相关度: {:.0}%)\n{}\n\n",
-            i + 1, item.title, item.source_type,
-            item.score * 100.0,
-            content
-        ));
+        if from_web {
+            prompt.push_str(&format!(
+                "[{}] 《{}》\nURL: {}\n{}\n\n",
+                i + 1, item.title, item.item_id.trim_start_matches("web:"), content
+            ));
+        } else {
+            prompt.push_str(&format!(
+                "[{}] 《{}》(来源: {}, 相关度: {:.0}%)\n{}\n\n",
+                i + 1, item.title, item.source_type,
+                item.score * 100.0,
+                content
+            ));
+        }
     }
-    prompt.push_str("=== 知识库结束 ===\n");
+    prompt.push_str("=== 参考内容结束 ===\n");
     prompt
 }
 
@@ -146,7 +202,7 @@ mod tests {
 
     #[test]
     fn build_rag_prompt_empty_knowledge() {
-        let prompt = build_rag_system_prompt(&[]);
+        let prompt = build_rag_system_prompt(&[], false);
         assert!(prompt.contains("暂无"));
     }
 
@@ -160,10 +216,26 @@ mod tests {
             source_type: "file".into(),
             inject_content: Some("合同内容...".into()),
         }];
-        let prompt = build_rag_system_prompt(&results);
+        let prompt = build_rag_system_prompt(&results, false);
         assert!(prompt.contains("合同A"));
         assert!(prompt.contains("85%"));
         assert!(prompt.contains("知识库"));
+    }
+
+    #[test]
+    fn build_rag_prompt_from_web_uses_web_label() {
+        let results = vec![SearchResult {
+            item_id: "web:https://example.com".into(),
+            score: 0.55,
+            title: "Example Article".into(),
+            content: "Some web content.".into(),
+            source_type: "web".into(),
+            inject_content: Some("Some web content.".into()),
+        }];
+        let prompt = build_rag_system_prompt(&results, true);
+        assert!(prompt.contains("网络搜索"));
+        assert!(prompt.contains("Example Article"));
+        assert!(!prompt.contains("相关度"));
     }
 
     #[test]
@@ -193,6 +265,7 @@ mod tests {
 
         assert_eq!(resp.content, "LLM回答");
         assert_eq!(resp.knowledge_count, 0);
+        assert!(!resp.web_search_used);
         assert!(resp.citations.is_empty());
     }
 }

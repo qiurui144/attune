@@ -45,7 +45,7 @@ pub async fn update_settings(
 
     // 白名单校验：只允许写入已知配置键，防止任意键污染 vault_meta
     const ALLOWED_KEYS: &[&str] = &[
-        "injection_mode", "injection_budget", "excluded_domains", "search", "embedding",
+        "injection_mode", "injection_budget", "excluded_domains", "search", "embedding", "web_search",
     ];
     if let (Some(current_obj), Some(body_obj)) = (current.as_object_mut(), body.as_object()) {
         for (k, v) in body_obj {
@@ -76,6 +76,12 @@ fn default_settings() -> serde_json::Value {
         "embedding": {
             "model": "bge-m3",
             "ollama_url": "http://localhost:11434"
+        },
+        "web_search": {
+            "enabled": false,
+            "provider": "brave",
+            "api_key": "",
+            "base_url": ""
         }
     })
 }

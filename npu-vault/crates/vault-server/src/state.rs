@@ -12,6 +12,7 @@ use vault_core::tag_index::TagIndex;
 use vault_core::taxonomy::Taxonomy;
 use vault_core::vault::Vault;
 use vault_core::vectors::VectorIndex;
+use vault_core::web_search::WebSearchProvider;
 
 const SEARCH_CACHE_CAPACITY: usize = 256;
 const SEARCH_CACHE_TTL_SECS: u64 = 30;
@@ -37,6 +38,7 @@ pub struct AppState {
     pub embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     pub reranker: Mutex<Option<Arc<dyn vault_core::infer::RerankProvider>>>,
     pub llm: Mutex<Option<Arc<dyn LlmProvider>>>,
+    pub web_search: Mutex<Option<Arc<dyn WebSearchProvider>>>,
     pub tag_index: Mutex<Option<TagIndex>>,
     pub cluster_snapshot: Mutex<Option<ClusterSnapshot>>,
     pub taxonomy: Mutex<Option<Arc<Taxonomy>>>,
@@ -62,6 +64,7 @@ impl AppState {
             embedding: Mutex::new(None),
             reranker: Mutex::new(None),
             llm: Mutex::new(None),
+            web_search: Mutex::new(None),
             tag_index: Mutex::new(None),
             cluster_snapshot: Mutex::new(None),
             taxonomy: Mutex::new(None),
@@ -199,6 +202,20 @@ impl AppState {
                 Some(Arc::new(Classifier::new(tax_arc.clone(), llm_arc.clone())));
             *self.taxonomy.lock().unwrap_or_else(|e| e.into_inner()) = Some(tax_arc);
             *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(llm_arc);
+        }
+
+        // Web search provider（从 app_settings.web_search 加载）
+        {
+            let ws_provider = {
+                let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+                vault_guard.store().get_meta("app_settings").ok().flatten()
+                    .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+                    .and_then(|settings| vault_core::web_search::from_settings(&settings))
+            };
+            if let Some(ws) = ws_provider {
+                tracing::info!("Web search: {} provider enabled", ws.provider_name());
+                *self.web_search.lock().unwrap_or_else(|e| e.into_inner()) = Some(ws);
+            }
         }
 
         // TagIndex (built from existing items.tags)
@@ -566,6 +583,7 @@ impl AppState {
         *self.embedding.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.reranker.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.web_search.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.tag_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.cluster_snapshot.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.taxonomy.lock().unwrap_or_else(|e| e.into_inner()) = None;

@@ -133,44 +133,83 @@ pub async fn chat(
     let mut search_results = search_results;
     vault_core::search::allocate_budget(&mut search_results, vault_core::search::INJECTION_BUDGET);
 
-    let knowledge: Vec<serde_json::Value> = search_results
-        .iter()
-        .map(|r| serde_json::json!({
+    // 2a. 若本地无结果，尝试网络搜索 fallback
+    let web_search_used;
+    let knowledge: Vec<serde_json::Value> = if search_results.is_empty() {
+        let ws = state.web_search.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(ws_provider) = ws {
+            let query = body.message.clone();
+            let web_results = tokio::task::spawn_blocking(move || {
+                ws_provider.search(&query, 3)
+            })
+            .await
+            .unwrap_or(Ok(vec![]))
+            .unwrap_or_default();
+
+            if !web_results.is_empty() {
+                web_search_used = true;
+                web_results.into_iter().map(|r| serde_json::json!({
+                    "item_id": format!("web:{}", r.url),
+                    "title": r.title,
+                    "inject_content": r.snippet,
+                    "content": r.snippet,
+                    "score": 0.55,
+                    "source_type": "web",
+                    "url": r.url,
+                })).collect()
+            } else {
+                web_search_used = false;
+                vec![]
+            }
+        } else {
+            web_search_used = false;
+            vec![]
+        }
+    } else {
+        web_search_used = false;
+        search_results.iter().map(|r| serde_json::json!({
             "item_id": r.item_id,
             "title": r.title,
-            // inject_content 是预算截断后的内容；content 保留全文用于 citations
             "inject_content": r.inject_content,
             "content": r.content,
             "score": r.score,
             "source_type": r.source_type,
-        }))
-        .collect();
+        })).collect()
+    };
 
-    // 2. Build RAG system prompt
-    let mut system_prompt = String::from(
+    // 2b. Build RAG system prompt（根据来源调整措辞）
+    let mut system_prompt = if web_search_used {
+        "你是用户的个人知识助手。本地知识库暂无相关内容，以下来自实时网络搜索。\n\
+         请基于这些搜索结果回答用户的问题，并在回答末尾标注「来源：[URL]」。\n\
+         如果搜索结果不够可靠，请明确说明并补充你自己的判断。\n\n".to_string()
+    } else {
         "你是用户的个人知识助手。以下是从用户本地知识库中检索到的相关文档。\n\
          请基于这些知识回答用户的问题。如果引用了某个文档，请标注 [文档标题]。\n\
-         如果知识库中没有相关信息，正常回答即可，不要编造引用。\n\n",
-    );
+         如果知识库中没有相关信息，正常回答即可，不要编造引用。\n\n".to_string()
+    };
 
     if !knowledge.is_empty() {
-        system_prompt.push_str("=== 知识库相关文档 ===\n\n");
+        let section_label = if web_search_used {
+            "=== 网络搜索结果 ==="
+        } else {
+            "=== 知识库相关文档 ==="
+        };
+        system_prompt.push_str(section_label);
+        system_prompt.push_str("\n\n");
         for (i, k) in knowledge.iter().enumerate() {
             let title = k.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-            // 优先使用 inject_content（预算截断版），回退到 content（全文）
             let content = k.get("inject_content").and_then(|v| v.as_str())
                 .or_else(|| k.get("content").and_then(|v| v.as_str()))
                 .unwrap_or("");
-            let score = k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            system_prompt.push_str(&format!(
-                "[{}] 《{}》(相关度: {:.0}%)\n{}\n\n",
-                i + 1,
-                title,
-                score.max(0.0) * 100.0,
-                content
-            ));
+            if web_search_used {
+                let url = k.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                system_prompt.push_str(&format!("[{}] 《{}》\nURL: {}\n{}\n\n", i + 1, title, url, content));
+            } else {
+                let score = k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                system_prompt.push_str(&format!("[{}] 《{}》(相关度: {:.0}%)\n{}\n\n", i + 1, title, score.max(0.0) * 100.0, content));
+            }
         }
-        system_prompt.push_str("=== 知识库结束 ===\n");
+        system_prompt.push_str("=== 参考内容结束 ===\n");
     }
 
     // 3. Build messages with history
@@ -260,6 +299,7 @@ pub async fn chat(
         "citations": citations,
         "knowledge_count": knowledge.len(),
         "session_id": session_id,
+        "web_search_used": web_search_used,
     })))
 }
 
