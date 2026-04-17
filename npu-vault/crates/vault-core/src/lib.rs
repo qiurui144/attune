@@ -22,6 +22,7 @@ pub mod vault;
 pub mod vectors;
 pub mod skill_evolution;
 pub mod web_search;
+pub mod web_search_engines;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

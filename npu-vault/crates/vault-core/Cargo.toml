@@ -39,3 +39,4 @@ hf-hub = "0.3"
 ndarray = "0.16"
 chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }
 scraper = "0.21"
+urlencoding = "2"
