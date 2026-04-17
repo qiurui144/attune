@@ -94,4 +94,44 @@ cargo build --release --workspace
 **警告** 1 场景（RAG Chat — LLM 回答正确但本地知识未被注入 prompt）。
 **失败** 2 场景（浏览器网络搜索 fallback，次要文案残留）。
 
-**下一步**：修复 Bug #1、Bug #2，回归测试；然后补 classifier/clusters/remote/history/settings 四个 tab 的覆盖。
+---
+
+## 2026-04-17 二轮回归（修复后重测）
+
+### 修复措施
+
+| Bug | 修复 | Commit |
+|-----|------|--------|
+| #1 (web_search 未初始化) | `from_settings` 在 web_search 块缺失时走默认值 + state.rs 区分诊断日志 | d10a318 |
+| #2 (RAG 0 hits) | `search_with_context` 每阶段 `log::info!` 计数；reranker 失败时保留 RRF 序 | d10a318 |
+| #3 (chromiumoxide CDP 不兼容) | 先升 0.7→0.9.1（仍不兼容）→ **改用 reqwest 直接抓 DuckDuckGo HTML 端点** | 928e919 + 776e711 |
+| 文案残留 | `platform.rs` 目录改 attune（兼容老路径）、server 日志、Web UI title/heading | d10a318 |
+
+### 二轮测试结果（同一 AMD 机，全新 vault）
+
+| 场景 | 结果 | 证据 |
+|------|------|------|
+| 新建 vault setup + unlock | ✅ | `state=unlocked` |
+| BrowserSearchProvider 自动加载 | ✅ | 日志 `Web search: browser provider enabled` |
+| 本地录入 2 条文档 + 后台 embedding | ✅ | `items=2` |
+| **RAG Chat（本地命中）** | ✅ | citations 包含 "Rust 所有权与借用"，`web_search_used=false` |
+| **混合智能：本地无 → 网络搜索 fallback** | ✅ | 问 "DuckDuckGo 是什么？" → 日志 `web search: GET https://html.duckduckgo.com/html/?q=...` → parsed 3 results → citations 包含 Wikipedia/百度百科/知乎链接 → `web_search_used=true` → 回答内容基于搜索结果（含来源引用） |
+| server 日志 | ✅ | "attune-server listening on http://0.0.0.0:18900" |
+
+### 架构决策记录
+
+**为什么最终放弃 chromiumoxide** —— chromiumoxide 0.7 和 0.9 对当前 Chrome 的 CDP 协议都存在 WS 消息反序列化不兼容（"WS Invalid message: data did not match any variant of untagged enum Message"）。升版仅降级为 WARN 但 fetch_html 仍失败。
+
+**选择 reqwest + DDG HTML 端点** —— DuckDuckGo 的 `/html/` 端点显式兼容无 JS 客户端、对爬虫友好、无验证码。reqwest + 真实浏览器 UA 即可稳定抓取。trade-off：JS-heavy 站点（Google 搜索主页）抓不了 —— 但这类站点本就不适合 fallback 场景。`SearchEngineStrategy` trait 保留，未来按需扩展。
+
+**`detect_system_browser()` 保留** —— 依然作为"系统有 Chrome"的信号位；虽然 fetch_html 不再启动 Chrome，但提供 ergonomic 的 `auto()` 入口 + 未来可选择性回归 chromiumoxide 分支。
+
+## 验收结论（最终）
+
+**通过** 所有 9 / 9 核心场景 + 混合智能网络搜索 fallback。
+**知识库构建完善**：录入 → chunk → embed → 全文索引 → 分类 → 本地搜索 → RAG Chat with citations → 本地无则自动 web 搜索 完整 pipeline 端到端跑通。
+
+**后续工作**（非紧急）：
+- 补 classifier / clusters / remote / history / settings 五个 tab 的 E2E 覆盖
+- bge-reranker-v2-m3 ONNX 模型 404 —— 需要重定向到新版模型路径或打包内嵌
+- platform::data_dir 数据目录 attune/ 新用户使用，老 npu-vault/ 兼容读取；是否做迁移 copy 待决策
