@@ -1,28 +1,66 @@
 # npu-vault
 
-**本地优先、端到端加密的个人知识库引擎。** 跨 Linux / Windows / NAS（HTTPS 远程），通过 Chrome 扩展、本地文件扫描、文件上传自动积累知识，让云端 AI 更懂你。
+**私有 AI 知识伙伴** — 本地决定，全网增强，越用越懂你的专业。
 
-单一静态 Rust 二进制，零运行时依赖，28 MB 含完整 Web UI、TLS 和加密搜索引擎。
+npu-vault 是为知识密集型专业人士打造的本地 AI 知识伙伴。你的专业领域它会越用越懂；本地知识够用时在本地决定，不够用时主动上网补全；所有数据加密存在你自己的设备上，换设备、换工作都能带走。
 
-## 功能
+单一静态 Rust 二进制约 28 MB，含完整 Web UI、TLS 和加密搜索引擎。
 
-- **1Password 式加密** — Master Password + Device Secret → Argon2id(64MB/3轮) → Master Key → 三把 DEK（数据库/全文索引/向量），AES-256-GCM 字段级加密
-- **层级语义搜索** — tantivy BM25（中文 jieba 分词）+ usearch HNSW 向量检索 + RRF 融合 + 动态注入预算 2000 字
-- **本地文件扫描** — walkdir 全量 + notify 实时增量，SHA-256 hash 变更检测，只读源文件
-- **文件直传 API** — multipart 上传 MD / TXT / 代码，自动解析 → 两层分块 → 加密存储 → 入队 embedding
-- **Embedding 队列 Worker** — 后台异步通过 Ollama HTTP API 批量 embedding，结果写入 tantivy + usearch
-- **NAS 模式** — `--host 0.0.0.0` + rustls TLS + Bearer token 认证，手机浏览器通过 HTTPS Web UI 访问
-- **嵌入式 Web UI** — 单页 HTML + vanilla JS，`include_str!` 编译进二进制，响应式移动友好
-- **Device Secret 迁移** — 导出/导入 API 支持多设备同步（类似 1Password Secret Key）
-- **Chrome 扩展兼容** — 18 个 API 端点全覆盖，扩展改后端地址即可切换（Python 原型 → Rust 商用）
-- **跨平台** — 纯 Rust 栈，交叉编译到 x86_64-linux / x86_64-windows / aarch64-android
-- **AI 自动分类** — 基于 Ollama 本地 LLM（qwen2.5 等）对每条知识生成 5 核心维度 + 3 通用维度标签，支持编程/法律等行业插件
-- **HDBSCAN 智能聚类** — 自动发现知识主题群组，LLM 命名，类似相册的"回忆"功能
-- **标签直方图 + 浏览** — Web UI 按维度筛选，点击标签查看所有匹配条目
-- **行为画像** — 搜索历史 + 点击追踪 + 热门条目统计
-- **画像导出/导入** — `.vault-profile` JSON 格式，支持跨设备迁移
-- **WebDAV 远程目录** — 绑定 NAS WebDAV 目录，PROPFIND 列表 + 自动下载入库
-- **运行时插件加载** — 用户可在 `{config_dir}/plugins/*.yaml` 放置自定义行业插件
+## 三大支柱
+
+### 主动进化
+它从每次查询中学习，不需要你配置。本地无命中的查询自动沉淀为信号，后台定期让 LLM 分析并生成同义词扩展，静默生效 —— 三个月后搜同一个词结果明显更准。
+
+### 对话伙伴
+RAG Chat 为主界面，每条回答带可追溯的引用源；会话持久化并可搜索，跨时间、跨项目的知识能顺着对话接上。
+
+### 混合智能
+本地知识库优先；本地无结果时自动通过**后台浏览器自动化**补充（驱动系统已装 Chrome / Edge，零 API 费用）；回答明确标注来源。专业积累留在本地、加密；公开信息现查现用。
+
+## 主权与透明
+
+- Argon2id(64MB/3轮) + AES-256-GCM 字段级加密 + Device Secret 多因子，所有数据本地持有
+- 单二进制分发，零运行时依赖
+- 换设备通过加密导出/导入无损迁移
+- **你只付两样钱**：软件本身 + 你自己的 LLM token（如果你用云端 LLM）。无中间商、无搜索 API 订阅、无隐藏费用
+
+## 核心能力
+
+### 主动进化
+- 失败信号自动沉淀 + 后台 SkillEvolver 进化（4h 或累积 10 条信号触发）
+- 查询词自动扩展（learned_expansions 静默生效）
+
+### 对话伙伴
+- RAG Chat + 引用源追溯（本地文档 / 网络）
+- 三阶段检索：vector（usearch HNSW）+ BM25（tantivy + jieba 中文分词）→ rerank → top-k
+- 会话持久化 + 跨会话知识联动
+- HDBSCAN 聚类"回忆"，自动发现知识主题群组
+
+### 混合智能
+- 本地全文 + 向量混合检索
+- 浏览器自动化网络搜索（后台驱动系统已装 Chrome / Edge，零 API 成本）
+- 可插拔 Embedding（Ollama / ONNX）和 LLM（Ollama / OpenAI 兼容端点）
+- 领域插件（patent / law / tech / presales + 运行时加载用户自定义 YAML）
+- USPTO 专利实时检索（`POST /api/v1/patent/search`）
+
+### 数据主权与透明
+- 加密本地存储（Argon2id + AES-256-GCM + Device Secret）
+- 单二进制分发，零运行时依赖
+- NAS 模式（`--host 0.0.0.0` + rustls TLS + Bearer token 认证）
+- 加密导出 / 导入跨设备迁移
+- Chrome 扩展兼容 18 个 API 端点
+- 嵌入式 Web UI（单页 HTML，`include_str!` 编译进二进制，移动响应式）
+
+## 谁适合用
+
+| 用户 | 主要价值 |
+|------|---------|
+| **律师 / 专利代理** | 案件、判例、技术交底长期加密积累；专利 / 法律领域插件；换律所可携带 |
+| **研究员 / 学者** | 对话式检索跨课题文献，引用可追溯到原文段落 |
+| **独立顾问 / 分析师** | 行业插件 + 本地 + 网络融合检索，跨项目复用方法论 |
+| **AI 重度用户 / 技术 Prosumer** | 私有版 AI 记忆：本地加密 + 可插拔 LLM + 自托管 |
+
+详细场景见 [产品定位设计文档](../docs/superpowers/specs/2026-04-17-product-positioning-design.md)。
 
 ## 快速开始
 
@@ -114,7 +152,7 @@ Master Password (用户记忆)  +  Device Secret (设备文件, 256-bit 随机)
 | 字段 | 加密 | 理由 |
 |------|------|------|
 | `id`, `created_at`, `source_type`, `url`, `domain` | 明文 | 列表/过滤不需解锁 |
-| `title` | 明文 | LOCKED 状态下可展示条目名（同 1Password）|
+| `title` | 明文 | LOCKED 状态下可展示条目名（锁定态可浏览列表）|
 | `content`, `tags`, `metadata` | AES-256-GCM (DEK_db) | 核心敏感数据 |
 | tantivy 索引 | 内存持有（DEK_idx 预留）| 全文索引等同明文 |
 | usearch 向量 | 文件级加密（DEK_vec 预留）| 向量可反推原文 |
