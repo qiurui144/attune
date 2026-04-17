@@ -55,6 +55,18 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
+    // 硬件画像检测 + 默认启用平台优化（在打开 vault / 加载模型之前，
+    // 这样 env var 对后续的 ORT / reqwest / Ollama 子进程都生效）
+    let hw = attune_core::platform::HardwareProfile::detect();
+    tracing::info!("hardware: {}", hw.summary());
+    let applied = hw.apply_recommended_env();
+    for (key, reason) in &applied {
+        tracing::info!("hardware: set {}={} — {}", key, std::env::var(key).unwrap_or_default(), reason);
+    }
+    if applied.is_empty() && (hw.has_amd_gpu || hw.has_nvidia_gpu) {
+        tracing::debug!("hardware: GPU detected but env vars already set by user/system");
+    }
+
     let cli = Cli::parse();
 
     let vault = attune_core::vault::Vault::open_default()

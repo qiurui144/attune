@@ -24,11 +24,40 @@ impl OrtRerankProvider {
         Ok(Self { session: Mutex::new(session), tokenizer })
     }
 
-    /// 便捷构造：自动下载 BAAI/bge-reranker-v2-m3 并加载
+    /// 便捷构造：自动下载 ONNX reranker。
+    ///
+    /// 模型来源选择历程（记录以防未来又需要切换）：
+    /// - 原定：`BAAI/bge-reranker-v2-m3` + `onnx/model_quantized.onnx` ——
+    ///   HF 上官方仓库没有任何 ONNX 文件（只有 safetensors），404 失败。
+    /// - 现选：`Xenova/bge-reranker-base` + `onnx/model_quantized.onnx` ——
+    ///   Xenova 专注 transformers.js 的 ONNX 转换镜像，成熟可靠，
+    ///   提供 `model_quantized.onnx` 约 110MB，下载 + 加载都快。
+    /// - 降级：`BAAI/bge-reranker-base` + `onnx/model.onnx` ——
+    ///   官方仓库有完整 ONNX（330MB），Xenova 若失联则用。
+    ///
+    /// 多语言（中文）支持：
+    ///   bge-reranker-base 主训练英文，跨语言能力一般；下面的 multilingual 版本
+    ///   `jinaai/jina-reranker-v2-base-multilingual` 可通过 env var
+    ///   `ATTUNE_RERANKER_MODEL` 切换启用。
     pub fn bge_reranker_v2_m3() -> Result<Self> {
+        let (repo, file) = match std::env::var("ATTUNE_RERANKER_MODEL").as_deref() {
+            Ok("jina-v2-multilingual") => (
+                "jinaai/jina-reranker-v2-base-multilingual",
+                "onnx/model_quantized.onnx",
+            ),
+            Ok("bge-base-official") => (
+                "BAAI/bge-reranker-base",
+                "onnx/model.onnx",
+            ),
+            _ => (
+                // 默认：Xenova 镜像的量化版 bge-reranker-base（稳定且小）
+                "Xenova/bge-reranker-base",
+                "onnx/model_quantized.onnx",
+            ),
+        };
         let (model_path, tokenizer_path) = super::model_store::ensure_models(
-            "BAAI/bge-reranker-v2-m3",
-            "onnx/model_quantized.onnx",
+            repo,
+            file,
             "tokenizer.json",
         )?;
         Self::new(&model_path, &tokenizer_path)

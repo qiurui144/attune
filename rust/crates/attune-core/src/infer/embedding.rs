@@ -26,14 +26,41 @@ impl OrtEmbeddingProvider {
         Ok(Self { session: Mutex::new(session), tokenizer, dims })
     }
 
-    /// 便捷构造：自动下载 Qwen3-Embedding-0.6B 并加载
+    /// 便捷构造：自动下载 ONNX embedding 模型。
+    ///
+    /// 模型来源选择：
+    /// - 原定：`Qwen/Qwen3-Embedding-0.6B` + `onnx/model_quantized.onnx` ——
+    ///   HF 上官方仓库没有 ONNX 目录，404 失败。
+    /// - 现选：`Xenova/bge-m3` + `onnx/model_quantized.onnx` ——
+    ///   bge-m3 是多语言（中英兼优）的 1024 维 embedding，
+    ///   Xenova 镜像提供可靠的 ONNX 转换 + 多种量化。
+    ///
+    /// 函数名保留 `qwen3_embedding_0_6b` 以不破坏调用方；实际模型已换为 bge-m3。
     pub fn qwen3_embedding_0_6b() -> Result<Self> {
+        let (repo, file, dims) = match std::env::var("ATTUNE_EMBEDDING_MODEL").as_deref() {
+            Ok("multilingual-e5-small") => (
+                "Xenova/multilingual-e5-small",
+                "onnx/model_quantized.onnx",
+                384usize,
+            ),
+            Ok("multilingual-e5-base") => (
+                "Xenova/multilingual-e5-base",
+                "onnx/model_quantized.onnx",
+                768usize,
+            ),
+            _ => (
+                // 默认：Xenova/bge-m3 量化版，多语言 1024 维，与 Ollama bge-m3 兼容
+                "Xenova/bge-m3",
+                "onnx/model_quantized.onnx",
+                1024usize,
+            ),
+        };
         let (model_path, tokenizer_path) = super::model_store::ensure_models(
-            "Qwen/Qwen3-Embedding-0.6B",
-            "onnx/model_quantized.onnx",
+            repo,
+            file,
             "tokenizer.json",
         )?;
-        Self::new(&model_path, &tokenizer_path, 1024)
+        Self::new(&model_path, &tokenizer_path, dims)
     }
 
     fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
