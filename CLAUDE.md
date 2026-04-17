@@ -13,7 +13,8 @@
 
 2. **Rust 商用线** (`npu-vault/`) — 生产/发布
    - Axum + rusqlite + tantivy + usearch + hdbscan
-   - 1Password 式加密（Argon2id + AES-256-GCM + Device Secret）
+   - 加密模型：Argon2id + AES-256-GCM + Device Secret
+   - 定位：**私有 AI 知识伙伴**（主动进化 + 对话式 + 混合智能，详见 `docs/superpowers/specs/2026-04-17-product-positioning-design.md`）
    - TLS NAS 模式 + 嵌入式 Web UI (8 标签页) + Chrome 扩展兼容
    - AI 自动分类 + HDBSCAN 聚类 + 编程/法律行业插件
    - 行为画像 + 画像导出/导入 + WebDAV 远程目录
