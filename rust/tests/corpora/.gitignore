@@ -1,0 +1,3 @@
+# Ignore cloned corpora but keep the README / gitignore tracked
+*/
+!README.md

@@ -15,11 +15,15 @@
    - Axum + rusqlite + tantivy + usearch + hdbscan
    - 加密模型：Argon2id + AES-256-GCM + Device Secret
    - 定位：**私有 AI 知识伙伴**（主动进化 + 对话式 + 混合智能，详见 `docs/superpowers/specs/2026-04-17-product-positioning-design.md`）
-   - TLS NAS 模式 + 嵌入式 Web UI (8 标签页) + Chrome 扩展兼容
-   - AI 自动分类 + HDBSCAN 聚类 + 编程/法律行业插件
+   - TLS NAS 模式 + 嵌入式 Web UI (9 标签页) + Chrome 扩展兼容
+   - AI 自动分类 + HDBSCAN 聚类 + 编程/法律/专利/售前行业插件
+   - 浏览器自动化网络搜索（chromiumoxide 驱动系统 Chrome，零 API 费用）
+   - SkillClaw 风格后台自动技能进化（失败信号 → LLM 扩展词 → 静默生效）
    - 行为画像 + 画像导出/导入 + WebDAV 远程目录
-   - 120 tests，独立 README/DEVELOP/RELEASE
-   - 最新里程碑：v0.5.0 全量子系统完成
+   - 237+ tests（210 attune-core + 27 attune-server），独立 README/DEVELOP/RELEASE
+   - 最新里程碑：v0.5.x 改名为 Attune + 浏览器搜索重构完成
+
+**测试策略**：`docs/TESTING.md` 固化了产品级测试方案 — 六层测试金字塔、GitHub 真实知识仓库作为语料（rust-lang/book、CyC2018/CS-Notes 等版本固化）、golden set 质量回归、禁止随机测试数据。添加任何 feature 前先参考该文档的测试矩阵。
 
 Python 验证后，择优特性迁移到 Rust 商用线。对应开发时根据任务选择目录：
 - 涉及算法实验、ML 集成、快速原型 → 改 Python 端

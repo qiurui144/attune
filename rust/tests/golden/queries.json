@@ -1,0 +1,66 @@
+{
+  "_doc": "Quality regression golden set. Each entry is a (query, expected top-K docs) pair that search should satisfy. Run by `cargo run --bin quality-eval` (not yet implemented — this is the baseline data).",
+  "_version": "2026-04-17",
+  "_corpus_pins": {
+    "rust-book": "tag:1.75.0",
+    "cs-notes": "commit:c47a2a7"
+  },
+  "queries": [
+    {
+      "id": "rust_ownership",
+      "query": "rust ownership and borrowing",
+      "corpus": "rust-book",
+      "expected_docs": [
+        "ch04-01-what-is-ownership",
+        "ch04-02-references-and-borrowing",
+        "ch04-03-slices"
+      ],
+      "min_precision_at_3": 0.66,
+      "min_recall_at_10": 1.0,
+      "notes": "Baseline: rust book has a canonical 3-chapter ownership section. All 3 must appear in top-10."
+    },
+    {
+      "id": "rust_lifetime",
+      "query": "rust 生命周期",
+      "corpus": "rust-book",
+      "expected_docs": [
+        "ch10-03-lifetime-syntax"
+      ],
+      "min_precision_at_3": 0.33,
+      "min_recall_at_10": 1.0,
+      "notes": "Bilingual query — Chinese phrase + English term. Tests multilingual embedding."
+    },
+    {
+      "id": "dynamic_programming_cn",
+      "query": "动态规划",
+      "corpus": "cs-notes",
+      "expected_docs_contain_any": [
+        "算法 - 动态规划",
+        "Leetcode 题解 - 动态规划"
+      ],
+      "min_precision_at_3": 0.33,
+      "notes": "Pure Chinese query, jieba tokenization path."
+    },
+    {
+      "id": "error_handling",
+      "query": "error handling in rust",
+      "corpus": "rust-book",
+      "expected_docs": [
+        "ch09-00-error-handling",
+        "ch09-01-unrecoverable-errors-with-panic",
+        "ch09-02-recoverable-errors-with-result"
+      ],
+      "min_precision_at_3": 0.66,
+      "notes": "Multi-word query, synonym-rich domain."
+    },
+    {
+      "id": "no_match_obvious",
+      "query": "量子力学 schrodinger equation",
+      "corpus": "rust-book",
+      "expected_docs": [],
+      "max_results": 10,
+      "max_top_score_if_no_match": 0.5,
+      "notes": "Negative test: unrelated query must not surface false positives with high confidence."
+    }
+  ]
+}
