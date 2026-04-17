@@ -1,7 +1,7 @@
 # 版本计划
 
 > **双产品线**：本文档记录 **Python 原型线** 的迭代历史。
-> **Rust 商用线** 在 [`npu-vault/RELEASE.md`](npu-vault/RELEASE.md) 独立跟踪。
+> **Rust 商用线** 在 [`rust/RELEASE.md`](rust/RELEASE.md) 独立跟踪。
 
 ## 产品线分离（2026-04）
 
@@ -13,7 +13,7 @@
 - 用途：特性探索、性能对比、教学演示
 - 持续迭代中，不追求产品级
 
-**Rust 商用线**（`npu-vault/`）：
+**Rust 商用线**（`rust/`）：
 - 端到端加密（Argon2id + AES-256-GCM + Device Secret）
 - tantivy + usearch 纯 Rust 搜索栈
 - Axum HTTP Server + TLS + Bearer auth + 嵌入式 Web UI

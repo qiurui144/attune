@@ -2,13 +2,13 @@
 
 > **双产品线说明**：
 > - 本文档覆盖 **Python 原型线**（`src/npu_webhook/`），用于快速验证和算法实验
-> - **Rust 商用线**位于 [`npu-vault/`](npu-vault/)，有独立的 [`DEVELOP.md`](npu-vault/DEVELOP.md)
+> - **Rust 商用线**位于 [`rust/`](rust/)，有独立的 [`DEVELOP.md`](rust/DEVELOP.md)
 > - 两者共享 API 协议（`/api/v1/*`），Chrome 扩展可任意切换后端
 
 ## 环境搭建
 
 ```bash
-git clone <repo-url> && cd npu-webhook
+git clone <repo-url> && cd attune
 
 # Python 后端
 python -m venv .venv && source .venv/bin/activate
