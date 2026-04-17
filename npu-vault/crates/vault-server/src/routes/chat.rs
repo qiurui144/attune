@@ -319,14 +319,27 @@ pub async fn chat(
         })
         .collect();
 
-    // session_id 为 null 表示会话持久化失败（不影响本次 AI 响应）
-    Ok(Json(serde_json::json!({
+    // 6. Build response with optional hint when web search unavailable
+    let mut response_json = serde_json::json!({
         "content": response,
         "citations": citations,
         "knowledge_count": knowledge.len(),
         "session_id": session_id,
         "web_search_used": web_search_used,
-    })))
+    });
+
+    // 本地无结果 + 浏览器不可用：明确告知用户而非静默失败
+    if knowledge.is_empty() {
+        let ws_available = state.web_search.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        if !ws_available {
+            response_json["hint"] = serde_json::Value::String(
+                "本地知识库无相关内容；网络搜索不可用（未检测到 Chrome 或 Edge 浏览器）。\
+                 请安装 Chromium 内核浏览器后重试，或手动录入相关知识。".into(),
+            );
+        }
+    }
+
+    Ok(Json(response_json))
 }
 
 /// GET /api/v1/chat/history -- 已废弃，返回与 /chat/sessions 一致的格式
