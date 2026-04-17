@@ -1,8 +1,13 @@
-# npu-webhook
+# attune
 
-本地优先的个人知识库 + 记忆增强系统。
+个人 AI 知识库 + 记忆增强系统。
 
-通过 Chrome 扩展在 AI 对话（ChatGPT / Claude / Gemini）和日常浏览中自动捕获知识，利用 Ollama / NPU / iGPU / CPU 闲置算力处理 embedding，实现可检索的知识积累和无感前缀注入。
+本仓库包含两条并行的产品线：
+
+- **Python 原型线**（本目录 `src/npu_webhook/`）— 快速验证算法与实验特性。基于 FastAPI + ChromaDB + SQLite FTS5
+- **Rust 商用线**（`rust/`）— 面向知识密集型专业人士的**私有 AI 知识伙伴**：主动进化、对话式、混合智能、本地加密。详见 [`rust/README.md`](rust/README.md)
+
+Chrome 扩展协议相同，两个后端可任意切换。
 
 ## 功能
 
@@ -23,7 +28,7 @@
 ### 1. 后端
 
 ```bash
-git clone <repo-url> && cd npu-webhook
+git clone <repo-url> && cd attune
 python -m venv .venv && source .venv/bin/activate
 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[dev]"
 uvicorn npu_webhook.main:app --reload --port 18900
@@ -42,7 +47,7 @@ ollama pull bge-m3
 
 后端默认 `device: auto`，自动连接 Ollama bge-m3（1024 维）。无 Ollama 时回退 ONNX，无模型时回退 FTS5 全文搜索。
 
-**ONNX（可选）：** 将 `model.onnx` + `tokenizer.json` 放到 `~/.local/share/npu-webhook/models/bge-m3/`。
+**ONNX（可选）：** 将 `model.onnx` + `tokenizer.json` 放到 `~/.local/share/attune/models/bge-m3/`。
 
 ### 3. Chrome 扩展
 
@@ -163,7 +168,7 @@ curl -fsSL https://ollama.com/install.sh | sh && ollama pull bge-m3
 
 ## 配置
 
-配置文件：Linux `~/.config/npu-webhook/config.yaml`，Windows `%APPDATA%\npu-webhook\config.yaml`
+配置文件：Linux `~/.config/attune/config.yaml`，Windows `%APPDATA%\attune\config.yaml`
 
 ```yaml
 embedding:
@@ -205,10 +210,10 @@ ingest:
 
 | 数据 | Linux | Windows |
 |------|-------|---------|
-| 数据库 | `~/.local/share/npu-webhook/knowledge.db` | `%LOCALAPPDATA%\npu-webhook\knowledge.db` |
-| 向量库 | `~/.local/share/npu-webhook/chroma/` | `%LOCALAPPDATA%\npu-webhook\chroma\` |
-| 模型 | `~/.local/share/npu-webhook/models/` | `%LOCALAPPDATA%\npu-webhook\models\` |
-| 配置 | `~/.config/npu-webhook/config.yaml` | `%APPDATA%\npu-webhook\config.yaml` |
+| 数据库 | `~/.local/share/attune/knowledge.db` | `%LOCALAPPDATA%\attune\knowledge.db` |
+| 向量库 | `~/.local/share/attune/chroma/` | `%LOCALAPPDATA%\attune\chroma\` |
+| 模型 | `~/.local/share/attune/models/` | `%LOCALAPPDATA%\attune\models\` |
+| 配置 | `~/.config/attune/config.yaml` | `%APPDATA%\attune\config.yaml` |
 
 ## License
 

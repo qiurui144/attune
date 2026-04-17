@@ -1,0 +1,31 @@
+// Template for vault-tauri main.rs
+// This file is NOT compiled until the crate is added to workspace.
+//
+// When activated:
+// 1. Rename to main.rs
+// 2. Add to workspace members
+// 3. Run `cargo build -p vault-tauri`
+//
+// Expected structure:
+
+// fn main() {
+//     tauri::Builder::default()
+//         .plugin(tauri_plugin_shell::init())
+//         .setup(|app| {
+//             // Spawn vault-server as child process
+//             let sidecar = app.shell().sidecar("npu-vault-server")?
+//                 .args(["--port", "18900"])
+//                 .spawn()?;
+//
+//             // Create system tray
+//             // ...
+//
+//             Ok(())
+//         })
+//         .run(tauri::generate_context!())
+//         .expect("error running tauri application");
+// }
+
+fn main() {
+    println!("vault-tauri scaffold placeholder");
+}

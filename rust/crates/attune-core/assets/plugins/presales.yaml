@@ -1,0 +1,74 @@
+id: presales
+name: 售前/标书
+version: "1.0"
+description: 投标、方案撰写、售前支持相关知识
+dimensions:
+  - name: bid_stage
+    label: 投标阶段
+    description: 当前所处的投标流程阶段
+    cardinality:
+      type: Single
+    value_type:
+      type: Closed
+    suggested_values:
+      - 需求分析
+      - 方案编写
+      - 技术评审
+      - 商务报价
+      - 答辩演示
+      - 中标执行
+      - 复盘总结
+
+  - name: client_sector
+    label: 客户行业
+    description: 客户所属的行业领域
+    cardinality:
+      type: Single
+    value_type:
+      type: Hybrid
+    suggested_values:
+      - 政府/公共事业
+      - 金融/银行
+      - 电信/运营商
+      - 制造/工业
+      - 医疗/卫生
+      - 教育/科研
+      - 能源/电力
+      - 交通/物流
+      - 互联网/科技
+
+  - name: solution_type
+    label: 方案类型
+    description: 技术方案的类型或方向
+    cardinality:
+      type: Multi
+      max: 3
+    value_type:
+      type: Hybrid
+    suggested_values:
+      - 系统集成
+      - 软件开发
+      - 数据平台
+      - 云计算
+      - 网络安全
+      - AI/大模型
+      - IoT/物联网
+      - 运维服务
+
+  - name: bid_result
+    label: 中标结果
+    description: 该项目/方案的最终结果
+    cardinality:
+      type: Single
+    value_type:
+      type: Closed
+    suggested_values:
+      - 中标
+      - 未中标
+      - 进行中
+      - 放弃
+      - 未知
+
+prompt_hint: |
+  这是投标/售前相关的内容。请识别投标阶段、客户行业、方案类型和中标结果。
+  注意区分需求分析文档、技术方案、商务报价和答辩材料。

@@ -1,0 +1,78 @@
+id: patent
+name: 专利
+version: "1.0"
+description: 专利申请书、权利要求书、技术交底书及现有技术检索文档
+dimensions:
+  - name: ipc_class
+    label: IPC分类号
+    description: 国际专利分类号（大类字母或完整子类，如 G06F 或 H04L 41/00）
+    cardinality:
+      type: Multi
+      max: 5
+    value_type:
+      type: Hybrid
+    suggested_values:
+      - A（人类生活需求）
+      - B（作业运输）
+      - C（化学冶金）
+      - D（纺织造纸）
+      - E（固定建筑物）
+      - F（机械工程）
+      - G（物理）
+      - H（电学）
+
+  - name: claim_type
+    label: 权利要求类型
+    description: 文档中涉及的权利要求书类型（仅对权利要求书文档有效）
+    cardinality:
+      type: Multi
+      max: 3
+    value_type:
+      type: Closed
+    suggested_values:
+      - 独立权利要求
+      - 从属权利要求
+      - 方法权利要求
+      - 装置权利要求
+      - 用途权利要求
+      - 不含权利要求
+
+  - name: filing_stage
+    label: 申请阶段
+    description: 该专利文档在申请生命周期中的当前阶段
+    cardinality:
+      type: Single
+    value_type:
+      type: Closed
+    suggested_values:
+      - 技术交底书
+      - 撰写草稿
+      - 提交申请
+      - 实质审查
+      - 答复OA
+      - 授权
+      - 无效宣告
+      - 现有技术参考
+
+  - name: patent_db
+    label: 来源数据库
+    description: 专利文献的检索来源或申请局别
+    cardinality:
+      type: Single
+    value_type:
+      type: Hybrid
+    suggested_values:
+      - CNIPA（国知局）
+      - USPTO（美国专利局）
+      - EPO（欧洲专利局）
+      - WIPO（PCT国际申请）
+      - 本地上传
+      - 其他
+
+prompt_hint: |
+  这是专利领域的技术文档。请识别以下内容：
+  1. IPC国际专利分类（到大类字母即可，如 G、H），若有更具体子类更好；
+  2. 是否包含权利要求书内容，若有请判断独立/从属/方法/装置类型；
+  3. 当前所处的申请阶段（技术交底书是发明人提交给代理人的原始技术描述，尚未格式化为专利申请书）；
+  4. 文献的来源数据库或申请局别。
+  注意：判例、法条分析类文档应归入 law 插件而非 patent 插件。

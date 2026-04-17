@@ -92,6 +92,7 @@ async function handleMessage(msg, sender) {
       return handleSummarizeAndSave(msg.data);
 
     case MSG.PREFETCH: {
+      // [deprecated] 2026-04-12: injector 已弃用，PREFETCH 仅保留供 API 兼容
       // 打字时后台预取，结果存入缓存供注入使用（不阻塞用户）
       const prefetchKey = djb2((msg.query || '') + JSON.stringify(msg.source_types || null));
       if (!prefetchCache.has(prefetchKey) && backendOnline) {
@@ -109,6 +110,7 @@ async function handleMessage(msg, sender) {
     }
 
     case MSG.SEARCH_RELEVANT: {
+      // [deprecated] 2026-04-12: injector 已弃用，SEARCH_RELEVANT 保留供 sidepanel/API 使用
       // 先查预取缓存，命中则直接返回（<1ms）
       const cacheKey = djb2((msg.query || '') + JSON.stringify(msg.source_types || null));
       const cached = prefetchCache.get(cacheKey);

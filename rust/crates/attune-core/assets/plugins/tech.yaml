@@ -1,0 +1,56 @@
+id: tech
+name: 编程/技术
+version: "1.0"
+description: 软件开发、架构、工程实践相关知识
+dimensions:
+  - name: stack_layer
+    label: 技术栈层次
+    description: 内容所属的技术栈层级
+    cardinality:
+      type: Multi
+      max: 3
+    value_type:
+      type: Hybrid
+    suggested_values:
+      - 前端
+      - 后端
+      - 数据库
+      - 基础设施
+      - DevOps
+      - 客户端
+      - 嵌入式
+      - AI/ML
+
+  - name: language_tech
+    label: 语言技术
+    description: 涉及的编程语言、框架、工具
+    cardinality:
+      type: Multi
+      max: 5
+    value_type:
+      type: Hybrid
+    suggested_values:
+      - Rust
+      - Python
+      - JavaScript
+      - TypeScript
+      - Go
+      - Java
+      - Kotlin
+      - C
+      - C++
+      - SQL
+      - Shell
+
+  - name: design_pattern
+    label: 设计实践
+    description: 涉及的架构模式、设计模式、工程实践
+    cardinality:
+      type: Multi
+      max: 3
+    value_type:
+      type: Open
+    suggested_values: []
+
+prompt_hint: |
+  这是软件工程相关的内容。请识别技术栈层次、涉及的具体语言或框架、以及相关的架构或实践模式。

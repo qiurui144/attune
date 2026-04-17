@@ -1,0 +1,17 @@
+# Template for vault-tauri (not yet active)
+# To activate: rename this file to Cargo.toml and add "crates/vault-tauri" to workspace members
+
+[package]
+name = "vault-tauri"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

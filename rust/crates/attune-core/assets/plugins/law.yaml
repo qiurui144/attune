@@ -1,0 +1,90 @@
+id: law
+name: 法律
+version: "1.0"
+description: 法律条文、案例、合同、咨询相关知识
+dimensions:
+  - name: law_branch
+    label: 法律部门
+    description: 所属的法律部门分支
+    cardinality:
+      type: Single
+    value_type:
+      type: Hybrid
+    suggested_values:
+      - 民法
+      - 刑法
+      - 行政法
+      - 商事法
+      - 知识产权法
+      - 劳动法
+      - 诉讼法
+      - 国际私法
+      - 税法
+      - 合规
+
+  - name: doc_type
+    label: 文档类型
+    description: 法律文档的类型
+    cardinality:
+      type: Single
+    value_type:
+      type: Closed
+    suggested_values:
+      - 法条引用
+      - 判例
+      - 合同范本
+      - 咨询意见
+      - 案情分析
+      - 备忘录
+      - 政策解读
+      - 权利要求书
+      - 专利说明书
+      - 专利摘要
+      - 意见陈述书
+      - OA答复
+
+  - name: jurisdiction
+    label: 管辖区
+    description: 适用的法域
+    cardinality:
+      type: Multi
+      max: 2
+    value_type:
+      type: Hybrid
+    suggested_values:
+      - 中国大陆
+      - 香港
+      - 澳门
+      - 台湾
+      - 美国
+      - 欧盟
+      - 英国
+      - 新加坡
+      - 国际公约
+
+  - name: risk_level
+    label: 风险等级
+    description: 合规或法律风险评估
+    cardinality:
+      type: Single
+    value_type:
+      type: Closed
+    suggested_values:
+      - 高风险
+      - 中风险
+      - 低风险
+      - 已规避
+      - 不适用
+
+  - name: client_matter
+    label: 客户/案件
+    description: 所属的客户或案件名称
+    cardinality:
+      type: Single
+    value_type:
+      type: Open
+    suggested_values: []
+
+prompt_hint: |
+  这是法律相关的内容。请识别所属的法律部门分支、文档类型、适用管辖区以及风险等级。
+  注意区分法律条文引用、判例分析、合同范本和实务咨询意见。
