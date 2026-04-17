@@ -193,21 +193,28 @@ impl HardwareProfile {
     }
 }
 
-/// Linux 下通过读 /sys 获取 AMD GPU 的 gfx target（形如 "gfx1103"）
+/// Linux 下通过 KFD topology 获取 AMD GPU 的 gfx target（形如 "gfx1103"）
 ///
-/// 通常 card1 是集显（APU），card0 为独显；两个都扫一遍，返回首个有效值。
+/// 路径：`/sys/class/kfd/kfd/topology/nodes/*/properties`
+/// properties 是多行 key/value，形如 `gfx_target_version 110003` → gfx1103。
+/// 节点 0 通常是 CPU（gfx_target_version=0），节点 1+ 才是 GPU；扫全部，
+/// 返回首个非零值。
 #[cfg(target_os = "linux")]
 fn detect_amd_gfx_target() -> Option<String> {
-    for card in ["card0", "card1"] {
-        let p = format!("/sys/class/drm/{card}/device/gfx_target_version");
-        if let Ok(s) = std::fs::read_to_string(&p) {
-            // 值是十进制版本号，如 "110300" → gfx1103
-            let s = s.trim();
-            if let Ok(n) = s.parse::<u32>() {
-                let major = n / 10000;
-                let minor = (n / 100) % 100;
-                let step = n % 100;
-                return Some(format!("gfx{}{:x}{:x}", major, minor, step));
+    let nodes_dir = "/sys/class/kfd/kfd/topology/nodes";
+    let entries = std::fs::read_dir(nodes_dir).ok()?;
+    for entry in entries.flatten() {
+        let props_path = entry.path().join("properties");
+        let Ok(content) = std::fs::read_to_string(&props_path) else { continue };
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("gfx_target_version ") {
+                if let Ok(n) = val.trim().parse::<u32>() {
+                    if n == 0 { continue; }  // CPU 行
+                    let major = n / 10000;
+                    let minor = (n / 100) % 100;
+                    let step = n % 100;
+                    return Some(format!("gfx{}{:x}{:x}", major, minor, step));
+                }
             }
         }
     }

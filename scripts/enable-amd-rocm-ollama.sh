@@ -30,24 +30,26 @@ if [ "${1:-}" = "--revert" ]; then
   exit 0
 fi
 
-# 1. 获取 gfx target
+# 1. 获取 gfx target（KFD topology，跳过 CPU 节点即 gfx_target_version=0 的）
 GFX=""
-for card in /sys/class/drm/card0/device/gfx_target_version \
-            /sys/class/drm/card1/device/gfx_target_version; do
-  if [ -r "$card" ]; then
-    V=$(cat "$card")
-    # 形如 110300 → 11.0.3（gfx1103），100301 → 10.3.1
+V=""
+for props in /sys/class/kfd/kfd/topology/nodes/*/properties; do
+  [ -r "$props" ] || continue
+  NODE_V=$(awk '/^gfx_target_version / {print $2; exit}' "$props")
+  if [ -n "$NODE_V" ] && [ "$NODE_V" != "0" ]; then
+    V=$NODE_V
     MAJOR=$((V / 10000))
     MINOR=$(((V / 100) % 100))
     STEP=$((V % 100))
     GFX=$(printf "gfx%d%x%x" "$MAJOR" "$MINOR" "$STEP")
-    echo "[detect] $card → $V → $GFX"
+    echo "[detect] $props → $V → $GFX"
     break
   fi
 done
 
 if [ -z "$GFX" ]; then
-  echo "error: no AMD GPU gfx_target_version found. Is this an AMD system with AMDGPU driver?" >&2
+  echo "error: no AMD GPU gfx_target_version found under /sys/class/kfd/kfd/topology/nodes/*/properties" >&2
+  echo "       Is this an AMD system with AMDGPU + amdkfd kernel modules loaded?" >&2
   exit 1
 fi
 
