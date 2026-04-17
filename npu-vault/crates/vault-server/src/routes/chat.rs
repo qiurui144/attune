@@ -203,7 +203,7 @@ pub async fn chat(
         })).collect()
     };
 
-    // 2b. Build RAG system prompt（根据来源调整措辞）
+    // 2c. Build RAG system prompt（根据来源调整措辞）
     let mut system_prompt = if web_search_used {
         "你是用户的个人知识助手。本地知识库暂无相关内容，以下来自实时网络搜索。\n\
          请基于这些搜索结果回答用户的问题，并在回答末尾标注「来源：[URL]」。\n\

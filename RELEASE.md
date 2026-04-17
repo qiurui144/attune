@@ -14,7 +14,7 @@
 - 持续迭代中，不追求产品级
 
 **Rust 商用线**（`npu-vault/`）：
-- 1Password 式端到端加密
+- 端到端加密（Argon2id + AES-256-GCM + Device Secret）
 - tantivy + usearch 纯 Rust 搜索栈
 - Axum HTTP Server + TLS + Bearer auth + 嵌入式 Web UI
 - 跨平台单二进制（Linux / Windows / NAS / Android）
