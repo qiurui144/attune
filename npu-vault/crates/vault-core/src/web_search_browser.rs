@@ -82,6 +82,168 @@ fn candidate_paths() -> Vec<PathBuf> {
     paths
 }
 
+// ── BrowserSearchProvider ────────────────────────────────────────────────────
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::error::{Result, VaultError};
+use crate::web_search::{WebSearchProvider, WebSearchResult};
+use crate::web_search_engines::{DuckDuckGoEngine, SearchEngineStrategy};
+
+/// 默认速率限制：连续两次搜索最小间隔
+const DEFAULT_MIN_INTERVAL_MS: u64 = 2000;
+
+/// 浏览器启动超时
+const BROWSER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 页面加载超时
+const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(20);
+
+pub struct BrowserSearchProvider {
+    browser_path: PathBuf,
+    engine: Arc<dyn SearchEngineStrategy>,
+    min_interval: Duration,
+    last_query_at: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl BrowserSearchProvider {
+    /// 使用系统检测到的浏览器 + DuckDuckGo 引擎创建 provider。
+    /// 返回 None 表示系统无 Chromium 内核浏览器。
+    pub fn auto() -> Option<Self> {
+        let path = detect_system_browser()?;
+        Some(Self::new(path, Arc::new(DuckDuckGoEngine)))
+    }
+
+    pub fn new(browser_path: PathBuf, engine: Arc<dyn SearchEngineStrategy>) -> Self {
+        Self {
+            browser_path,
+            engine,
+            min_interval: Duration::from_millis(DEFAULT_MIN_INTERVAL_MS),
+            last_query_at: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn with_min_interval_ms(mut self, ms: u64) -> Self {
+        self.min_interval = Duration::from_millis(ms);
+        self
+    }
+
+    /// 速率限制：若距离上次查询太近则 sleep
+    fn rate_limit(&self) {
+        let mut guard = self.last_query_at.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(last) = *guard {
+            let elapsed = last.elapsed();
+            if elapsed < self.min_interval {
+                std::thread::sleep(self.min_interval - elapsed);
+            }
+        }
+        *guard = Some(std::time::Instant::now());
+    }
+
+    /// 异步核心：启动浏览器、加载页面、抓取 HTML、关闭
+    async fn fetch_html(&self, url: String) -> Result<String> {
+        use chromiumoxide::browser::{Browser, BrowserConfig};
+        use futures::StreamExt;
+
+        let config = BrowserConfig::builder()
+            .chrome_executable(&self.browser_path)
+            .build()
+            .map_err(|e| VaultError::LlmUnavailable(format!("browser config: {e}")))?;
+
+        let (mut browser, mut handler) = tokio::time::timeout(
+            BROWSER_LAUNCH_TIMEOUT,
+            Browser::launch(config),
+        )
+        .await
+        .map_err(|_| VaultError::LlmUnavailable("browser launch timed out".into()))?
+        .map_err(|e| VaultError::LlmUnavailable(format!("browser launch: {e}")))?;
+
+        // handler 任务必须持续 poll，否则 CDP 通道会阻塞
+        let handler_task = tokio::spawn(async move {
+            while let Some(res) = handler.next().await {
+                if res.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let result = async {
+            let page = browser.new_page(&url).await
+                .map_err(|e| VaultError::LlmUnavailable(format!("new_page: {e}")))?;
+            tokio::time::timeout(PAGE_LOAD_TIMEOUT, page.wait_for_navigation())
+                .await
+                .map_err(|_| VaultError::LlmUnavailable("page load timed out".into()))?
+                .map_err(|e| VaultError::LlmUnavailable(format!("wait_for_navigation: {e}")))?;
+            let html = page.content().await
+                .map_err(|e| VaultError::LlmUnavailable(format!("get content: {e}")))?;
+            Ok::<String, VaultError>(html)
+        }
+        .await;
+
+        let _ = browser.close().await;
+        handler_task.abort();
+        result
+    }
+}
+
+impl WebSearchProvider for BrowserSearchProvider {
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<WebSearchResult>> {
+        if query.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        self.rate_limit();
+
+        let url = self.engine.build_url(query);
+        let engine = self.engine.clone();
+        let path = self.browser_path.clone();
+
+        // 在 spawn_blocking 上下文内没有 tokio runtime，需要自建一个
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| VaultError::LlmUnavailable(format!("runtime build: {e}")))?;
+
+        let html = rt.block_on(async {
+            // 重新构造一个短命 provider 调用 fetch_html；
+            // 不共用 self 防止 Mutex/Arc 跨 runtime 语义问题
+            let tmp = BrowserSearchProvider::new(path, engine.clone());
+            tmp.fetch_html(url).await
+        })?;
+
+        Ok(engine.parse(&html, limit.min(10).max(1)))
+    }
+
+    fn provider_name(&self) -> &str { "browser" }
+    fn is_configured(&self) -> bool { self.browser_path.exists() }
+}
+
+// ── 集成测试（需要系统装 Chrome，默认 ignored） ──────────────────────────────
+
+#[cfg(test)]
+mod browser_integration {
+    use super::*;
+
+    #[test]
+    #[ignore] // 运行：cargo test -p vault-core -- --ignored browser_integration
+    fn real_duckduckgo_search() {
+        let provider = match BrowserSearchProvider::auto() {
+            Some(p) => p,
+            None => {
+                eprintln!("skip: no chromium browser on this system");
+                return;
+            }
+        };
+        let results = provider.search("rust programming language", 3)
+            .expect("search should succeed on a live system");
+        assert!(!results.is_empty(), "DuckDuckGo should return at least 1 result");
+        for r in &results {
+            assert!(!r.title.is_empty());
+            assert!(r.url.starts_with("http"));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

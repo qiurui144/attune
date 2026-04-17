@@ -4861,6 +4861,7 @@ dependencies = [
  "chromiumoxide",
  "chrono",
  "dirs 6.0.0",
+ "futures",
  "hdbscan",
  "hex",
  "hf-hub",
