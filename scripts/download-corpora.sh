@@ -17,6 +17,9 @@ declare -A CORPORA=(
   [rust-book]="https://github.com/rust-lang/book.git|trpl-v0.3.0|src"
   [cs-notes]="https://github.com/CyC2018/CS-Notes.git|c47a2a7|notes"
   [openai-cookbook]="https://github.com/openai/openai-cookbook.git|main|examples"
+  # TIM168/technical_books 整仓 5.6 GB，master 分支（无 tag）；
+  # 用 sparse-checkout 抽子目录 Python/ + Go/ + 人工智能&机器学习/ 已够场景 B 测试
+  [technical-books]="https://github.com/TIM168/technical_books.git|master|."
 )
 
 fetch_corpus() {
@@ -32,8 +35,15 @@ fetch_corpus() {
   fi
 
   echo "[fetch] $name @ $pin"
-  git clone --depth=50 "$url" "$dest"
-  (cd "$dest" && git checkout "$pin")
+  # 大仓（如 technical-books 5.6GB）用 sparse-checkout 只抽关键子目录
+  if [ "$name" = "technical-books" ]; then
+    git clone --depth=1 --filter=blob:none --sparse "$url" "$dest"
+    (cd "$dest" && git sparse-checkout set \
+        "Python" "Go" "人工智能&机器学习" "数据库" "算法")
+  else
+    git clone --depth=50 "$url" "$dest"
+    (cd "$dest" && git checkout "$pin")
+  fi
   echo "[ok]    $name content at $dest/$subdir"
 }
 

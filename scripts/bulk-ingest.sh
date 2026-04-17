@@ -23,17 +23,18 @@ failed=0
 
 while IFS= read -r -d '' file; do
   total=$((total + 1))
-  title=$(basename "$file" .md)
-  # Strip leading chNN-NN- for readability
-  title=${title#ch*-*-}
-  content=$(cat "$file")
+  # 标题：去扩展名，去 rust-book 前缀
+  title=$(basename "$file")
+  title="${title%.*}"
+  title="${title#ch*-*-}"
 
-  # jq for safe JSON encoding
-  body=$(jq -Rn --arg t "$title" --arg c "$content" \
-    '{title: $t, content: $c, source_type: "file"}')
+  # jq 从 stdin 读文件内容（避免 --arg 超过 ARG_MAX，对 >128KB 文件友好）
+  body=$(jq -Rs --arg t "$title" \
+    '{title: $t, content: ., source_type: "file"}' < "$file")
 
+  # --data-binary 保留 JSON body 原始字节（--data 会规范化换行破坏 JSON）
   if curl -sSf -X POST -H 'Content-Type: application/json' \
-       --data "$body" \
+       --data-binary "$body" \
        "$BASE_URL/api/v1/ingest" > /dev/null 2>&1; then
     success=$((success + 1))
   else
@@ -45,7 +46,8 @@ while IFS= read -r -d '' file; do
   if [ $((total % 10)) -eq 0 ]; then
     echo "[progress] $total processed ($success ok, $failed fail)"
   fi
-done < <(find "$SOURCE_DIR" -maxdepth 1 -name "*.md" -print0)
+  # 递归扫描 .md / .txt；去重子目录里重名也 OK（后端按 id 存储）
+done < <(find "$SOURCE_DIR" -type f \( -name "*.md" -o -name "*.txt" \) -print0)
 
 echo
 echo "=== bulk-ingest complete ==="

@@ -210,6 +210,74 @@ description="AMD Radeon 780M Graphics"  type=iGPU  total="17.3 GiB"
 ⚠️ Reranker 对小语料的排序策略需要阈值化（记录为后续优化）
 ⚠️ LLM 首次 query 60s 冷启动（模型加载到 VRAM 后续快）
 
+---
+
+## 2026-04-17 五轮回归：多场景 × 多语料 RAG
+
+### 语料扩充到 3 套场景
+
+| 场景 | 语料 | 语言 | 规模 | 状态 |
+|------|------|------|------|------|
+| A. 律师 / 法律咨询 | `/data/company/lawcontrol/data/test_evidence/` | 中文 | 15 文件（民法典/公司法/劳动合同法全文 + 7 案例 + 3 文书 + 2 合同） | ✅ Ingest 完成 |
+| B. Rust 开发者 | rust-lang/book @ trpl-v0.3.0 | 英文 | 19 章 | ✅ Ingest 完成（四轮已验证） |
+| C. 中文技术读者 | `TIM168/technical_books`（Python/Go/AI/数据库/算法 子集） | 中文 PDF | 185 PDFs | 📋 脚本就绪，未 ingest（5.6GB 需 sparse checkout） |
+
+### 全量 RAG 10 问矩阵（场景 A + B）
+
+Vault 共 52 items（19 Rust 章 + 15 法律文本 + 累积文档），ROCm 启用，bge-reranker-base cross-encoder 激活。
+
+**场景 A：律师 / 中文法律**
+
+| Q | 查询 | top-1 | 命中 | Rel | 延迟 |
+|---|------|-------|------|-----|------|
+| A1 | 劳动者主动解除劳动合同需要提前多少天 | 劳动合同法_全文 | ✅ top-1 | 0.181 | 4.1s |
+| A2 | 民间借贷利率保护上限 | 民法典 | ✅ top-3（借款合同） | 0.132 | 5.6s |
+| A3 | 商标侵权法律责任 | 民法典 | ✅ top-2（案例_商标侵权 rel 0.05） | 0.139 | 8.7s |
+| A4 | 公司股东会决议表决程序 | 公司法_全文 | ✅ top-1 | 0.208 | 10.5s |
+| A5 | 合同违约金法律规定 | 民法典 | ❌ 期待"买卖合同"但民法典本身也包含 | 0.191 | 12.4s |
+
+**场景 A 结果：4/5 top-3 命中**，中文 RAG 健康 ✅
+
+**场景 B：Rust 开发者 / 英文**
+
+| Q | 查询 | top-1 | 命中 | Rel |
+|---|------|-------|------|-----|
+| B1 | references vs borrowing | **民法典** | ❌ | 0.168 |
+| B2 | When use Box<T>? | **民法典** | ❌ | 0.127 |
+| B3 | Reference cycles | **民法典** | ❌ | 0.122 |
+| B4 | What are lifetimes? | **民法典** | ❌ | 0.139 |
+| B5 | Refutable vs irrefutable | **民法典** | ❌ | 0.177 |
+
+**场景 B 结果：0/5 — 全部被民法典吸走** ❌
+
+### Bug #5 — Cross-lingual 污染（本次暴露的关键问题）
+
+**现象**：只要混合中英文语料，英文 query 的 top-1 几乎必然是民法典（中文长文档）。
+
+**根因分析**（三层叠加）：
+
+1. **bge-reranker-base 是英文主训**：对中文 chunks 给出异常高的 pseudo-score（0.12-0.17 远超真实相关度）
+2. **大文档偏置**：民法典 328KB → 数十个 chunks → 每个 chunk 都获得独立 RRF 机会 → 任何英文 query 有高概率命中某个 chunk
+3. **Cross-encoder 不检查语言**：reranker 直接把 query + doc 拼接走前向，不过滤语言差异
+
+**对用户的影响**：
+- 单域用户（只有中文法律 or 只有英文技术）—— 无影响
+- 多域用户（例如律师同时保存英文 Rust 知识）—— 英文检索会混入中文文档
+
+**修复选项**（未实施，待评估）：
+- **选项 A（轻量）**：在 search.rs 里按 query 语言（简单启发式：检测 ASCII 占比）过滤候选文档语言。同语言优先，跨语言降权
+- **选项 B（正确但有风险）**：切换 reranker 到真正多语言的 `jinaai/jina-reranker-v2-base-multilingual`（XLM-RoBERTa 架构，ONNX 兼容性需验证）
+- **选项 C（小语料适配）**：当融合候选 < N 时跳过 reranker，直接用 RRF 排名（上一轮提到的阈值化，这次证明更必要）
+
+### 最终成就（五轮）
+
+✅ 三场景语料框架（scripts/download-corpora.sh 覆盖 rust-book / cs-notes / openai-cookbook / technical-books）
+✅ `/data/company/lawcontrol` 的 15 个法律文本真实 ingest + RAG 验证
+✅ 中文 RAG（场景 A）4/5 命中，relevance 0.13-0.21 健康
+✅ 硬件优化自动启用（代码 + 脚本）
+✅ Reranker / Embedding 模型迁移完成且可用
+❌ **Cross-lingual 污染是本次发现的新 bug**，需要后续修复（阈值化 + 语言过滤 + 多语言 reranker 评估）
+
 **后续工作**（非紧急）：
 - 补 classifier / clusters / remote / history / settings 五个 tab 的 E2E 覆盖
 - bge-reranker-v2-m3 ONNX 模型 404 —— 需要重定向到新版模型路径或打包内嵌
