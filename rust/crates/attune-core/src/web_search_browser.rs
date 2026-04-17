@@ -141,49 +141,42 @@ impl BrowserSearchProvider {
         *guard = Some(std::time::Instant::now());
     }
 
-    /// 异步核心：启动浏览器、加载页面、抓取 HTML、关闭
-    async fn fetch_html(&self, url: String) -> Result<String> {
-        use chromiumoxide::browser::{Browser, BrowserConfig};
-        use futures::StreamExt;
-
-        let config = BrowserConfig::builder()
-            .chrome_executable(&self.browser_path)
+    /// 抓取 HTML。
+    ///
+    /// 采用直接 HTTP 请求（带浏览器 User-Agent）而非完整 Chromium 实例的理由：
+    /// - DuckDuckGo HTML 端点设计目标就是兼容极简客户端（无 JS 渲染需求）
+    /// - chromiumoxide 对当前 Chrome 的 CDP 协议常有反序列化不兼容问题（WS Invalid message）
+    /// - HTTP 方式启动瞬时、零依赖、结果同样稳定；browser_path 仍作为"系统有 Chrome"的信号位
+    ///
+    /// 未来若需要 JS-heavy 站点抓取，可按 SearchEngineStrategy 扩展出新 engine，
+    /// 或在此文件内 re-introduce chromiumoxide 分支。
+    fn fetch_html(&self, url: &str) -> Result<String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(PAGE_LOAD_TIMEOUT)
+            .connect_timeout(BROWSER_LAUNCH_TIMEOUT)
+            .user_agent(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) \
+                 Chrome/125.0.0.0 Safari/537.36",
+            )
             .build()
-            .map_err(|e| VaultError::LlmUnavailable(format!("browser config: {e}")))?;
+            .map_err(|e| VaultError::LlmUnavailable(format!("http client: {e}")))?;
 
-        let (mut browser, mut handler) = tokio::time::timeout(
-            BROWSER_LAUNCH_TIMEOUT,
-            Browser::launch(config),
-        )
-        .await
-        .map_err(|_| VaultError::LlmUnavailable("browser launch timed out".into()))?
-        .map_err(|e| VaultError::LlmUnavailable(format!("browser launch: {e}")))?;
+        let resp = client
+            .get(url)
+            .header("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
+            .header("Accept", "text/html,application/xhtml+xml")
+            .send()
+            .map_err(|e| VaultError::LlmUnavailable(format!("web search fetch: {e}")))?;
 
-        // handler 任务必须持续 poll，否则 CDP 通道会阻塞
-        let handler_task = tokio::spawn(async move {
-            while let Some(res) = handler.next().await {
-                if res.is_err() {
-                    break;
-                }
-            }
-        });
-
-        let result = async {
-            let page = browser.new_page(&url).await
-                .map_err(|e| VaultError::LlmUnavailable(format!("new_page: {e}")))?;
-            tokio::time::timeout(PAGE_LOAD_TIMEOUT, page.wait_for_navigation())
-                .await
-                .map_err(|_| VaultError::LlmUnavailable("page load timed out".into()))?
-                .map_err(|e| VaultError::LlmUnavailable(format!("wait_for_navigation: {e}")))?;
-            let html = page.content().await
-                .map_err(|e| VaultError::LlmUnavailable(format!("get content: {e}")))?;
-            Ok::<String, VaultError>(html)
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(VaultError::LlmUnavailable(format!(
+                "web search HTTP {status} at {url}"
+            )));
         }
-        .await;
 
-        let _ = browser.close().await;
-        handler_task.abort();
-        result
+        resp.text()
+            .map_err(|e| VaultError::LlmUnavailable(format!("web search body: {e}")))
     }
 }
 
@@ -195,23 +188,11 @@ impl WebSearchProvider for BrowserSearchProvider {
         self.rate_limit();
 
         let url = self.engine.build_url(query);
-        let engine = self.engine.clone();
-        let path = self.browser_path.clone();
-
-        // 在 spawn_blocking 上下文内没有 tokio runtime，需要自建一个
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| VaultError::LlmUnavailable(format!("runtime build: {e}")))?;
-
-        let html = rt.block_on(async {
-            // 重新构造一个短命 provider 调用 fetch_html；
-            // 不共用 self 防止 Mutex/Arc 跨 runtime 语义问题
-            let tmp = BrowserSearchProvider::new(path, engine.clone());
-            tmp.fetch_html(url).await
-        })?;
-
-        Ok(engine.parse(&html, limit.min(10).max(1)))
+        log::info!("web search: GET {}", url);
+        let html = self.fetch_html(&url)?;
+        let results = self.engine.parse(&html, limit.min(10).max(1));
+        log::info!("web search: parsed {} results from {}", results.len(), self.engine.name());
+        Ok(results)
     }
 
     fn provider_name(&self) -> &str { "browser" }

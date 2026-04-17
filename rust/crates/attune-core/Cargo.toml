@@ -37,7 +37,6 @@ ort = { version = "2.0.0-rc.12", features = ["cuda", "ndarray"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 hf-hub = "0.3"
 ndarray = "0.16"
-chromiumoxide = "0.9"
 scraper = "0.21"
 urlencoding = "2"
 futures = "0.3"
