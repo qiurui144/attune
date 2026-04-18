@@ -24,3 +24,6 @@ export type { ChatMessageProps } from './ChatMessage';
 
 export { ChatInput } from './ChatInput';
 export type { ChatInputProps } from './ChatInput';
+
+export { Reader } from './Reader';
+export type { ReaderProps } from './Reader';

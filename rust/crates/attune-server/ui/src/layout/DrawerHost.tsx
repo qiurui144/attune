@@ -3,7 +3,7 @@
  */
 
 import type { JSX } from 'preact';
-import { Drawer } from '../components';
+import { Drawer, Reader } from '../components';
 import { drawerContent } from '../store/signals';
 
 export function DrawerHost(): JSX.Element | null {
@@ -38,14 +38,7 @@ function titleFor(c: NonNullable<typeof drawerContent.value>): string {
 function renderContent(c: NonNullable<typeof drawerContent.value>): JSX.Element {
   switch (c.type) {
     case 'reader':
-      return (
-        <div>
-          <p style={{ color: 'var(--color-text-secondary)' }}>
-            Item id: <code>{c.itemId}</code>
-          </p>
-          <p>Reader view 将在 Phase 5 接入实际条目内容。</p>
-        </div>
-      );
+      return <Reader itemId={c.itemId} />;
     case 'citation':
       return (
         <div>
