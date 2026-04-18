@@ -47,3 +47,28 @@ jobs:
       - name: Build
         working-directory: extension
         run: npm run build
+
+  rust-test:
+    # Rust 商用线 CI — attune-core + attune-server + attune-cli workspace
+    # MockLlmProvider 驱动，无 Ollama 依赖
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-v1-${{ hashFiles('rust/Cargo.lock') }}
+      - name: cargo test workspace
+        working-directory: rust
+        run: cargo test --workspace --release
+      - name: cargo clippy (non-blocking)
+        working-directory: rust
+        run: cargo clippy --workspace --release -- -D warnings
+        continue-on-error: true

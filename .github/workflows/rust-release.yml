@@ -1,0 +1,177 @@
+name: Rust Release
+
+# 触发：推 v*.*.* tag（如 v0.6.0、v1.0.0）
+# 产物：跨平台 attune-server + attune-cli 二进制 + SHA256 + changelog → GitHub Release
+#
+# 平台矩阵：
+#   - linux x86_64 (GNU) — 面向 Ubuntu / Debian / Arch / Fedora 桌面 + NAS
+#   - linux aarch64 (GNU) — 面向树莓派 / ARM NAS
+#   - macos x86_64 (Intel)
+#   - macos aarch64 (Apple Silicon M 系列)
+#   - windows x86_64 (MSVC)
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            asset_suffix: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            asset_suffix: linux-aarch64
+            cross: true
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            asset_suffix: macos-x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            asset_suffix: macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset_suffix: windows-x86_64
+    env:
+      TARGET: ${{ matrix.target }}
+      ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross compiler (aarch64-linux only)
+        if: matrix.cross == true
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-release-${{ matrix.target }}-${{ hashFiles('rust/Cargo.lock') }}
+
+      - name: Build release binaries
+        working-directory: rust
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+        run: |
+          cargo build --release --target "$TARGET" -p attune-server -p attune-cli
+
+      - name: Stage artifacts (POSIX)
+        if: matrix.runner != 'windows-latest'
+        shell: bash
+        working-directory: rust
+        run: |
+          mkdir -p staged
+          cp "target/${TARGET}/release/attune-server" staged/
+          cp "target/${TARGET}/release/attune" staged/
+          cp ../LICENSE ../NOTICE ./README.md staged/
+          cd staged
+          tar -czf "../attune-${ASSET_SUFFIX}.tar.gz" ./*
+          cd ..
+          shasum -a 256 "attune-${ASSET_SUFFIX}.tar.gz" > "attune-${ASSET_SUFFIX}.tar.gz.sha256"
+
+      - name: Stage artifacts (Windows)
+        if: matrix.runner == 'windows-latest'
+        shell: pwsh
+        working-directory: rust
+        run: |
+          New-Item -ItemType Directory -Force staged | Out-Null
+          Copy-Item "target/$env:TARGET/release/attune-server.exe" staged/
+          Copy-Item "target/$env:TARGET/release/attune.exe" staged/
+          Copy-Item "../LICENSE" staged/
+          Copy-Item "../NOTICE" staged/
+          Copy-Item "README.md" staged/
+          $zipName = "attune-$env:ASSET_SUFFIX.zip"
+          Compress-Archive -Path staged/* -DestinationPath $zipName
+          $hash = (Get-FileHash -Algorithm SHA256 $zipName).Hash.ToLower()
+          "$hash  $zipName" | Out-File -Encoding ascii "$zipName.sha256"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: attune-${{ matrix.asset_suffix }}
+          path: |
+            rust/attune-${{ matrix.asset_suffix }}.*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Create GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    env:
+      TAG_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" \) -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Compose release notes
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          cat > release-notes.md <<'BODY'
+          ## Attune TAG_PLACEHOLDER
+
+          **安装**：按平台下载对应归档，解压后将 `attune` 与 `attune-server` 放入 `PATH`。
+
+          | 平台 | 文件 |
+          |------|------|
+          | Linux x86_64 | `attune-linux-x86_64.tar.gz` |
+          | Linux ARM64 | `attune-linux-aarch64.tar.gz` |
+          | macOS Intel | `attune-macos-x86_64.tar.gz` |
+          | macOS Apple Silicon | `attune-macos-aarch64.tar.gz` |
+          | Windows x86_64 | `attune-windows-x86_64.zip` |
+
+          **校验**：每个归档附 `.sha256`；`shasum -a 256 -c file.sha256` 核对。
+
+          **macOS** 首次运行若提示"无法打开"，系统偏好 → 安全性 → 允许（未买 Apple 开发者签名证书）。
+
+          **Windows** 首次运行 SmartScreen 可能拦，"更多信息" → "仍要运行"（未买代码签名证书）。
+
+          ---
+
+          **许可**：开源核心遵循 Apache-2.0（见仓库 LICENSE）。律师 / 售前等商业插件及云服务**不在本发布中**，见 NOTICE。
+          BODY
+          sed -i "s/TAG_PLACEHOLDER/${TAG_NAME}/g" release-notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body_path: release-notes.md
+          files: |
+            release/*
