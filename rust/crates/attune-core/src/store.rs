@@ -124,6 +124,55 @@ CREATE TABLE IF NOT EXISTS skill_signals (
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_skill_sig_processed ON skill_signals(processed, created_at);
+
+-- Chunk 摘要缓存 —— 上下文压缩流水线（Batch B.1）
+--
+-- 成本/触发契约：摘要由 💰 LLM 生成，但入缓存后永久复用。chat 流程命中缓存即免费。
+-- 按 (chunk_hash, strategy) 组合主键：同一 chunk 在 economical/accurate 两策略下各有一份摘要。
+-- item_id 冗余存，用于 item 软删除时级联清理。
+--
+-- 字段：
+--   chunk_hash —— sha256(chunk_text) hex，决定性；内容变 → hash 变 → 缓存自然失效
+--   strategy   —— 'economical' (~150 字) | 'accurate' (~300 字)
+--   model      —— 生成摘要所用的 LLM 模型名（便于调试质量退化）
+--   summary    —— 加密的摘要文本
+--   orig_chars —— 原 chunk 字符数（统计用）
+CREATE TABLE IF NOT EXISTS chunk_summaries (
+    chunk_hash  TEXT NOT NULL,
+    strategy    TEXT NOT NULL CHECK(strategy IN ('economical','accurate')),
+    item_id     TEXT NOT NULL,
+    model       TEXT NOT NULL,
+    summary     BLOB NOT NULL,
+    orig_chars  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (chunk_hash, strategy)
+);
+CREATE INDEX IF NOT EXISTS idx_chunk_sum_item ON chunk_summaries(item_id);
+
+-- 批注表：用户手动标注 + 未来 AI 分析批注。
+--
+-- 设计决策（详见 memory/project_attune_annotation_model.md）：
+--   · source = 状态（user/ai）而非分类；用户再手动编辑 → 回到 user
+--   · 字符偏移 + snippet 双锚点：offset_start/offset_end 是首选定位，snippet 是 fallback，
+--     供文档更新后重新定位（lawcontrol 风格的 location_confidence 后续版本再加）
+--   · 5 个预设 emoji 标签由前端枚举：⭐重点 / 📍待深入 / 🤔存疑 / ❓不懂 / 🗑过时
+--   · content 字段加密（放个人思考），snippet 不加密（用于定位恢复）
+CREATE TABLE IF NOT EXISTS annotations (
+    id           TEXT PRIMARY KEY,
+    item_id      TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    offset_start INTEGER NOT NULL,
+    offset_end   INTEGER NOT NULL,
+    text_snippet TEXT NOT NULL,
+    label        TEXT,
+    color        TEXT NOT NULL DEFAULT 'yellow',
+    content      BLOB,
+    source       TEXT NOT NULL DEFAULT 'user' CHECK(source IN ('user', 'ai')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_annotations_item ON annotations(item_id);
+CREATE INDEX IF NOT EXISTS idx_annotations_source ON annotations(source);
+CREATE INDEX IF NOT EXISTS idx_annotations_created ON annotations(created_at);
 "#;
 
 pub struct Store {
@@ -259,6 +308,16 @@ impl Store {
             params![id, title, encrypted_content, url, source_type, domain, encrypted_tags, now, now],
         )?;
         Ok(id)
+    }
+
+    /// 廉价的存在性检查（不解密 content），用于外键前置校验，给出比 SQL 错误更清晰的 404
+    pub fn item_exists(&self, id: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM items WHERE id = ?1 AND is_deleted = 0",
+            params![id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
     }
 
     pub fn get_item(&self, dek: &Key32, id: &str) -> Result<Option<DecryptedItem>> {
@@ -453,6 +512,19 @@ impl Store {
             "UPDATE items SET is_deleted = 1, updated_at = ?1 WHERE id = ?2 AND is_deleted = 0",
             params![chrono::Utc::now().to_rfc3339(), id],
         )?;
+        // 软删除语义：用户"忘记这条知识"同时要忘记其批注 + 摘要缓存。items 是 soft-delete，
+        // ON DELETE CASCADE 永远不会触发，所以这里显式连坐。
+        // 注意：这是硬删除 —— 批注/摘要不可恢复。与 item 软删除不对称，但与"忘记"语义一致。
+        if affected > 0 {
+            self.conn.execute(
+                "DELETE FROM annotations WHERE item_id = ?1",
+                params![id],
+            )?;
+            self.conn.execute(
+                "DELETE FROM chunk_summaries WHERE item_id = ?1",
+                params![id],
+            )?;
+        }
         Ok(affected > 0)
     }
 
@@ -1247,6 +1319,241 @@ impl Store {
     }
 }
 
+// ── Chunk 摘要缓存 ─────────────────────────────────────────────────────────────
+//
+// 成本/触发契约：这层缓存让 💰 LLM 摘要只跑一次；chat 流程命中缓存后属 🆓 层。
+// 压缩逻辑放在 `attune_core::context_compress`，此处只负责持久化。
+
+impl Store {
+    /// 按 (chunk_hash, strategy) 查缓存；缺失返回 None。
+    /// 命中 → 返回解密后的摘要文本。
+    pub fn get_chunk_summary(
+        &self,
+        dek: &Key32,
+        chunk_hash: &str,
+        strategy: &str,
+    ) -> Result<Option<String>> {
+        let row: Option<Vec<u8>> = self.conn.query_row(
+            "SELECT summary FROM chunk_summaries WHERE chunk_hash = ?1 AND strategy = ?2",
+            params![chunk_hash, strategy],
+            |r| r.get(0),
+        ).map(Some).or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?;
+        match row {
+            Some(enc) => {
+                let plain = crypto::decrypt(dek, &enc)
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .ok();
+                Ok(plain)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// 存摘要。重复的 (chunk_hash, strategy) 走 REPLACE 覆盖（同策略不应产生多条）。
+    pub fn put_chunk_summary(
+        &self,
+        dek: &Key32,
+        chunk_hash: &str,
+        strategy: &str,
+        item_id: &str,
+        model: &str,
+        summary: &str,
+        orig_chars: usize,
+    ) -> Result<()> {
+        if !matches!(strategy, "economical" | "accurate") {
+            return Err(VaultError::InvalidInput(format!("unknown strategy: {strategy}")));
+        }
+        let enc = crypto::encrypt(dek, summary.as_bytes())?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO chunk_summaries
+                (chunk_hash, strategy, item_id, model, summary, orig_chars, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
+            params![chunk_hash, strategy, item_id, model, enc, orig_chars as i64],
+        )?;
+        Ok(())
+    }
+
+    /// 统计缓存命中率用
+    pub fn chunk_summary_count(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunk_summaries",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+}
+
+// ── 批注（annotations）CRUD ────────────────────────────────────────────────────
+//
+// 成本/触发契约：所有批注 CRUD 都是 🆓 零成本 / 用户显式操作。不在建库流水线里
+// 自动生成批注。AI 批注（source='ai'）由独立的"AI 分析"按钮触发，属于 💰 层，
+// 本批暂不实现（后续 Batch A.2）。
+
+/// 批注记录 — content 已解密
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Annotation {
+    pub id: String,
+    pub item_id: String,
+    pub offset_start: i64,
+    pub offset_end: i64,
+    pub text_snippet: String,
+    pub label: Option<String>,
+    pub color: String,
+    /// 批注内容（用户自由输入），空 = 纯高亮无附注
+    pub content: String,
+    /// user | ai
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 创建/更新批注时的字段（id + 时间戳由服务器填充）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnnotationInput {
+    pub offset_start: i64,
+    pub offset_end: i64,
+    pub text_snippet: String,
+    pub label: Option<String>,
+    pub color: String,
+    pub content: String,
+    /// 默认 "user"；AI 路径会传 "ai"
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+impl Store {
+    /// 创建批注。生成 UUID，content 字段加密保存（保护个人思考）。
+    /// offset_start/offset_end 由调用方验证不越界（routes 层做 item 长度校验）。
+    pub fn create_annotation(
+        &self,
+        dek: &Key32,
+        item_id: &str,
+        input: &AnnotationInput,
+    ) -> Result<String> {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let source = input.source.as_deref().unwrap_or("user");
+        if !matches!(source, "user" | "ai") {
+            return Err(VaultError::InvalidInput(format!(
+                "source must be 'user' or 'ai', got: {source}"
+            )));
+        }
+        let content_enc = crypto::encrypt(dek, input.content.as_bytes())?;
+        self.conn.execute(
+            "INSERT INTO annotations
+                (id, item_id, offset_start, offset_end, text_snippet,
+                 label, color, content, source, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'), datetime('now'))",
+            params![
+                id,
+                item_id,
+                input.offset_start,
+                input.offset_end,
+                input.text_snippet,
+                input.label,
+                input.color,
+                content_enc,
+                source,
+            ],
+        )?;
+        Ok(id)
+    }
+
+    /// 列出某条目的所有批注（按 offset 升序；越靠前的段落先显示）。
+    /// 过滤软删除的 item —— 虽然 delete_item 现在会连坐删批注，但历史遗留数据可能存在
+    /// 孤立批注（或未来测试路径绕过 delete_item），JOIN-filter 保底。
+    pub fn list_annotations(&self, dek: &Key32, item_id: &str) -> Result<Vec<Annotation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, a.item_id, a.offset_start, a.offset_end, a.text_snippet,
+                    a.label, a.color, a.content, a.source, a.created_at, a.updated_at
+             FROM annotations a
+             JOIN items i ON i.id = a.item_id
+             WHERE a.item_id = ?1 AND i.is_deleted = 0
+             ORDER BY a.offset_start ASC, a.created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![item_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Vec<u8>>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, item_id, os, oe, snippet, label, color, content_enc, source, created, updated) = r?;
+            let content = crypto::decrypt(dek, &content_enc)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+            out.push(Annotation {
+                id, item_id,
+                offset_start: os, offset_end: oe,
+                text_snippet: snippet, label, color, content, source,
+                created_at: created, updated_at: updated,
+            });
+        }
+        Ok(out)
+    }
+
+    /// 编辑批注。用户手动编辑会把 source 强制置回 'user'（契约：
+    /// 任何人类介入都抹掉 AI 标记，避免让用户误以为 AI 参与了最终版本）。
+    pub fn update_annotation(
+        &self,
+        dek: &Key32,
+        id: &str,
+        input: &AnnotationInput,
+    ) -> Result<()> {
+        let content_enc = crypto::encrypt(dek, input.content.as_bytes())?;
+        // 若调用方明确传 source='ai'（AI 工作流的第二次写入），尊重之；否则回到 user
+        let source = input.source.as_deref().unwrap_or("user");
+        if !matches!(source, "user" | "ai") {
+            return Err(VaultError::InvalidInput(format!(
+                "source must be 'user' or 'ai', got: {source}"
+            )));
+        }
+        let n = self.conn.execute(
+            "UPDATE annotations
+             SET label = ?1, color = ?2, content = ?3, source = ?4,
+                 updated_at = datetime('now')
+             WHERE id = ?5",
+            params![input.label, input.color, content_enc, source, id],
+        )?;
+        if n == 0 {
+            return Err(VaultError::InvalidInput(format!("annotation {id} not found")));
+        }
+        Ok(())
+    }
+
+    /// 删除批注（硬删除，不走软删除 — 个人场景无合规留痕需求）
+    pub fn delete_annotation(&self, id: &str) -> Result<()> {
+        let n = self.conn.execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
+        if n == 0 {
+            return Err(VaultError::InvalidInput(format!("annotation {id} not found")));
+        }
+        Ok(())
+    }
+
+    /// 统计某条目的批注数（用于 UI 指示，避免拉全部内容）
+    pub fn count_annotations(&self, item_id: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM annotations WHERE item_id = ?1",
+            params![item_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1890,5 +2197,207 @@ mod tests_embed_queue {
             .unwrap();
         let tasks = store.dequeue_embeddings(1).unwrap();
         assert_eq!(tasks[0].chunk_text, text);
+    }
+}
+
+#[cfg(test)]
+mod tests_annotations {
+    use super::*;
+    use crate::crypto::Key32;
+
+    fn setup() -> (Store, Key32, String) {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let item_id = store
+            .insert_item(&dek, "test item", "hello world body", None, "note", None, None)
+            .unwrap();
+        (store, dek, item_id)
+    }
+
+    fn make_input(offset_start: i64, offset_end: i64, text: &str, label: Option<&str>) -> AnnotationInput {
+        AnnotationInput {
+            offset_start,
+            offset_end,
+            text_snippet: text.to_string(),
+            label: label.map(|s| s.to_string()),
+            color: "yellow".to_string(),
+            content: format!("note about {text}"),
+            source: None,
+        }
+    }
+
+    #[test]
+    fn create_and_list_roundtrip() {
+        let (store, dek, item_id) = setup();
+        let input = make_input(0, 5, "hello", Some("important"));
+        let id = store.create_annotation(&dek, &item_id, &input).unwrap();
+        assert!(!id.is_empty());
+
+        let anns = store.list_annotations(&dek, &item_id).unwrap();
+        assert_eq!(anns.len(), 1);
+        assert_eq!(anns[0].id, id);
+        assert_eq!(anns[0].offset_start, 0);
+        assert_eq!(anns[0].offset_end, 5);
+        assert_eq!(anns[0].text_snippet, "hello");
+        assert_eq!(anns[0].label.as_deref(), Some("important"));
+        assert_eq!(anns[0].color, "yellow");
+        assert_eq!(anns[0].content, "note about hello");
+        assert_eq!(anns[0].source, "user");
+    }
+
+    #[test]
+    fn list_orders_by_offset() {
+        let (store, dek, item_id) = setup();
+        // 故意乱序插入，断言返回按 offset 升序
+        store.create_annotation(&dek, &item_id, &make_input(6, 11, "world", None)).unwrap();
+        store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None)).unwrap();
+        let anns = store.list_annotations(&dek, &item_id).unwrap();
+        assert_eq!(anns.len(), 2);
+        assert_eq!(anns[0].offset_start, 0);
+        assert_eq!(anns[1].offset_start, 6);
+    }
+
+    #[test]
+    fn content_is_encrypted_on_disk() {
+        let (store, dek, item_id) = setup();
+        let secret = "my private thought 隐私思考";
+        let input = AnnotationInput {
+            offset_start: 0, offset_end: 5,
+            text_snippet: "hello".into(),
+            label: None,
+            color: "red".into(),
+            content: secret.into(),
+            source: None,
+        };
+        store.create_annotation(&dek, &item_id, &input).unwrap();
+        // 直接读取密文
+        let enc: Vec<u8> = store.conn.query_row(
+            "SELECT content FROM annotations LIMIT 1",
+            [], |r| r.get(0),
+        ).unwrap();
+        // 密文不应包含明文
+        assert!(!enc.windows(secret.as_bytes().len()).any(|w| w == secret.as_bytes()),
+            "encrypted content must not contain plaintext");
+        // 解密 list 回读应该还原
+        let anns = store.list_annotations(&dek, &item_id).unwrap();
+        assert_eq!(anns[0].content, secret);
+    }
+
+    #[test]
+    fn update_defaults_source_to_user() {
+        let (store, dek, item_id) = setup();
+        // 先以 AI 身份写入
+        let mut input = make_input(0, 5, "hello", None);
+        input.source = Some("ai".into());
+        let id = store.create_annotation(&dek, &item_id, &input).unwrap();
+
+        // 用户"手动编辑"：不指定 source → 应回到 user
+        let mut edited = make_input(0, 5, "hello", Some("edited"));
+        edited.content = "user revised".into();
+        edited.source = None;  // 默认 user
+        store.update_annotation(&dek, &id, &edited).unwrap();
+
+        let anns = store.list_annotations(&dek, &item_id).unwrap();
+        assert_eq!(anns[0].source, "user", "human edit must reset source to user");
+        assert_eq!(anns[0].content, "user revised");
+        assert_eq!(anns[0].label.as_deref(), Some("edited"));
+    }
+
+    #[test]
+    fn update_respects_explicit_ai_source() {
+        let (store, dek, item_id) = setup();
+        let id = store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None)).unwrap();
+
+        // AI 工作流：显式写 source='ai'
+        let mut ai_input = make_input(0, 5, "hello", Some("风险条款"));
+        ai_input.source = Some("ai".into());
+        store.update_annotation(&dek, &id, &ai_input).unwrap();
+
+        let anns = store.list_annotations(&dek, &item_id).unwrap();
+        assert_eq!(anns[0].source, "ai");
+    }
+
+    #[test]
+    fn invalid_source_rejected() {
+        let (store, dek, item_id) = setup();
+        let mut input = make_input(0, 5, "hello", None);
+        input.source = Some("malicious".into());
+        let err = store.create_annotation(&dek, &item_id, &input);
+        assert!(err.is_err(), "should reject unknown source");
+    }
+
+    #[test]
+    fn delete_removes_annotation() {
+        let (store, dek, item_id) = setup();
+        let id = store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None)).unwrap();
+        assert_eq!(store.count_annotations(&item_id).unwrap(), 1);
+        store.delete_annotation(&id).unwrap();
+        assert_eq!(store.count_annotations(&item_id).unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_cascades_on_item_delete() {
+        let (store, dek, item_id) = setup();
+        store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None)).unwrap();
+        assert_eq!(store.count_annotations(&item_id).unwrap(), 1);
+        // items 表硬删除会触发 ON DELETE CASCADE
+        store.conn.execute("DELETE FROM items WHERE id = ?1", params![item_id]).unwrap();
+        assert_eq!(store.count_annotations(&item_id).unwrap(), 0,
+            "annotation should cascade-delete when item is removed");
+    }
+
+    #[test]
+    fn delete_nonexistent_returns_err() {
+        let (store, _, _) = setup();
+        assert!(store.delete_annotation("no-such-id").is_err());
+    }
+
+    #[test]
+    fn update_nonexistent_returns_err() {
+        let (store, dek, _) = setup();
+        let err = store.update_annotation(&dek, "no-such-id", &make_input(0, 5, "x", None));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn count_returns_zero_for_item_without_annotations() {
+        let (store, _, item_id) = setup();
+        assert_eq!(store.count_annotations(&item_id).unwrap(), 0);
+    }
+
+    #[test]
+    fn soft_deleting_item_cascades_to_annotations() {
+        // 用户软删除 item 后：annotations 也应被清除（delete_item 级联 + list 过滤双保险）
+        let (store, dek, item_id) = setup();
+        store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", Some("⭐重点"))).unwrap();
+        assert_eq!(store.list_annotations(&dek, &item_id).unwrap().len(), 1);
+
+        let deleted = store.delete_item(&item_id).unwrap();
+        assert!(deleted);
+
+        // list 过滤软删除 → 返回空
+        let anns = store.list_annotations(&dek, &item_id).unwrap();
+        assert_eq!(anns.len(), 0, "soft-deleted item's annotations must not be returned");
+
+        // DELETE 语义：实际也被硬删掉了（"忘记"）
+        assert_eq!(store.count_annotations(&item_id).unwrap(), 0,
+            "delete_item should cascade-delete annotations");
+    }
+
+    #[test]
+    fn list_filters_orphaned_annotations_from_soft_deleted_items() {
+        // 即便绕过 delete_item 路径直接 UPDATE is_deleted=1（模拟历史遗留 / 未来测试路径），
+        // list_annotations 的 JOIN 过滤也应挡住。
+        let (store, dek, item_id) = setup();
+        store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None)).unwrap();
+        // 直接 UPDATE 跳过 delete_item 的级联
+        store.conn.execute(
+            "UPDATE items SET is_deleted = 1 WHERE id = ?1",
+            params![item_id],
+        ).unwrap();
+        // 批注还在表里但不应被 list 出
+        assert_eq!(store.list_annotations(&dek, &item_id).unwrap().len(), 0);
+        // count 是裸 SQL 查表 —— 还能看到（作为内部指标），但外部不可见
+        assert_eq!(store.count_annotations(&item_id).unwrap(), 1);
     }
 }

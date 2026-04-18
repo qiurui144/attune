@@ -1,3 +1,4 @@
+pub mod ai_annotator;
 pub mod chat;
 pub mod chunker;
 pub mod plugin_loader;

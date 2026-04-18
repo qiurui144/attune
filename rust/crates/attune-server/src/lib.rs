@@ -59,6 +59,15 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Ingest + Items + Search
         .route("/api/v1/ingest", post(routes::ingest::ingest))
         .route("/api/v1/feedback", post(routes::feedback::submit_feedback))
+        // 批注（annotations）CRUD — 所有调用都是用户显式操作，不在建库流水线里自动触发
+        .route("/api/v1/annotations",
+            get(routes::annotations::list_annotations)
+                .post(routes::annotations::create_annotation))
+        // AI 分析 — 💰 层：用户显式点"🤖 AI 分析"才触发。不走建库管道。
+        .route("/api/v1/annotations/ai", post(routes::annotations::ai_analyze))
+        .route("/api/v1/annotations/{id}",
+            axum::routing::patch(routes::annotations::update_annotation)
+                .delete(routes::annotations::delete_annotation))
         .route("/api/v1/items", get(routes::items::list_items))
         .route("/api/v1/items/stale", get(routes::items::list_stale_items))
         .route("/api/v1/items/{id}", get(routes::items::get_item).delete(routes::items::delete_item).patch(routes::items::update_item))
@@ -90,8 +99,13 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/index/bind-remote", post(routes::remote::bind_remote))
         .route("/api/v1/index/unbind", delete(routes::index::unbind_directory))
         .route("/api/v1/index/status", get(routes::index::index_status))
-        // File upload
-        .route("/api/v1/upload", post(routes::upload::upload_file))
+        // File upload（multipart body limit 匹配 MAX_UPLOAD_BYTES 100MB；
+        // axum 默认 2MB 对扫描版 PDF 不够）。
+        // ⚠ 100MB 必须与 routes::upload::MAX_UPLOAD_BYTES 同步。两处都存在是有意设计
+        // （此处是框架层拦截 + upload.rs 是应用层第二道防线），见 upload.rs 注释。
+        .route("/api/v1/upload",
+            post(routes::upload::upload_file)
+                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)))
         // WebSocket endpoints (no vault_guard needed)
         .route("/ws/scan-progress", get(routes::ws::scan_progress))
         // Web UI (embedded single-page HTML)

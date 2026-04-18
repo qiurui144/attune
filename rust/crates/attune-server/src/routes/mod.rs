@@ -1,3 +1,4 @@
+pub mod annotations;
 pub mod behavior;
 pub mod chat;
 pub mod chat_sessions;
