@@ -1,0 +1,24 @@
+{
+  "name": "attune-ui",
+  "version": "0.1.0",
+  "description": "Attune 前端 — Preact + Vite 单文件构建，嵌入 attune-server 二进制",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@preact/signals": "^2.9.0",
+    "preact": "^10.29.1"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.5",
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.8",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}

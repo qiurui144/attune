@@ -4,6 +4,8 @@ __pycache__/
 *$py.class
 *.egg-info/
 dist/
+# 例外：Attune UI 的 dist 是 Rust include_str! 依赖，必须入仓
+!rust/crates/attune-server/ui/dist/
 build/
 *.egg
 .venv/
