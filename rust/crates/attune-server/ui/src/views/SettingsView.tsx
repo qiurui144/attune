@@ -1,9 +1,14 @@
-/** Settings 视图 · C 方案（左 tab + 右内容面板）
- * 见 spec §4 "关于 Settings · C 混合方案"
- */
+/** Settings 视图 · Phase 6 · 真接 API（C 方案 左 tab + 右内容） */
 
 import type { JSX } from 'preact';
-import { useSignal } from '@preact/signals';
+import { useEffect } from 'preact/hooks';
+import { useSignal, useComputed } from '@preact/signals';
+import { Button } from '../components';
+import { toast } from '../components/Toast';
+import { theme, vaultState, hardware, settings } from '../store/signals';
+import { setLocale, currentLocale } from '../i18n';
+import { loadSettings, patchSettings } from '../hooks/useSettings';
+import { api, clearToken } from '../store/api';
 
 type SettingsTab = 'general' | 'ai' | 'data' | 'privacy' | 'about';
 
@@ -18,14 +23,17 @@ const TABS: Array<{ key: SettingsTab; icon: string; label: string }> = [
 export function SettingsView(): JSX.Element {
   const activeTab = useSignal<SettingsTab>('general');
 
+  useEffect(() => {
+    void loadSettings();
+    // 同时刷新 hardware
+    void api
+      .get<Record<string, unknown>>('/status/diagnostics')
+      .then((d) => (hardware.value = d))
+      .catch(() => {});
+  }, []);
+
   return (
-    <div
-      style={{
-        height: '100%',
-        display: 'flex',
-      }}
-    >
-      {/* 左 tab 栏 */}
+    <div style={{ height: '100%', display: 'flex' }}>
       <nav
         aria-label="Settings sections"
         style={{
@@ -81,7 +89,6 @@ export function SettingsView(): JSX.Element {
         })}
       </nav>
 
-      {/* 右 内容面板 */}
       <div
         style={{
           flex: 1,
@@ -99,7 +106,6 @@ export function SettingsView(): JSX.Element {
   );
 }
 
-// ── Panel 占位 ─────────────────────────────────────────────
 function Section({
   title,
   children,
@@ -129,30 +135,86 @@ function Section({
 function GeneralPanel(): JSX.Element {
   return (
     <>
-      <Section title="通用">
-        <SettingRow label="主题" value="跟随系统" />
-        <SettingRow label="语言" value="中文" />
-      </Section>
-      <Section title="界面">
-        <SettingRow label="Sidebar 默认折叠" value="否" />
-        <SettingRow label="减少动效" value="跟随系统" />
+      <Section title="外观">
+        <SettingRow label="主题">
+          <select
+            value={theme.value}
+            onChange={(e) => (theme.value = e.currentTarget.value as 'light' | 'dark' | 'auto')}
+            style={selectStyle}
+          >
+            <option value="auto">跟随系统</option>
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
+        </SettingRow>
+        <SettingRow label="语言">
+          <select
+            value={currentLocale.value}
+            onChange={(e) => {
+              setLocale(e.currentTarget.value as 'zh' | 'en');
+              toast('success', '已切换语言');
+            }}
+            style={selectStyle}
+          >
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </SettingRow>
       </Section>
     </>
   );
 }
 
 function AIPanel(): JSX.Element {
+  const llm = useComputed(() => (settings.value?.llm as Record<string, unknown>) ?? {});
+  const emb = useComputed(() => (settings.value?.embedding as Record<string, unknown>) ?? {});
+
   return (
     <>
-      <Section title="AI 大脑">
-        <SettingRow label="后端" value="本地 Ollama" />
-        <SettingRow label="Chat 模型" value="qwen2.5:3b" />
-        <SettingRow label="Embedding" value="bge-m3" />
-        <SettingRow label="摘要模型" value="qwen2.5:3b" />
+      <Section title="LLM 后端">
+        <SettingRow label="Endpoint">
+          <code style={codeStyle}>
+            {(llm.value.endpoint as string) ?? '（本地 Ollama）'}
+          </code>
+        </SettingRow>
+        <SettingRow label="Chat 模型">
+          <code style={codeStyle}>{(llm.value.model as string) ?? '—'}</code>
+        </SettingRow>
+        <SettingRow label="API Key">
+          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+            {llm.value.api_key_set ? '●●●●● 已配置' : '未配置'}
+          </span>
+        </SettingRow>
       </Section>
+
+      <Section title="Embedding">
+        <SettingRow label="模型">
+          <code style={codeStyle}>{(emb.value.model as string) ?? '—'}</code>
+        </SettingRow>
+        <SettingRow label="Ollama URL">
+          <code style={codeStyle}>{(emb.value.ollama_url as string) ?? '—'}</code>
+        </SettingRow>
+      </Section>
+
       <Section title="网络搜索">
-        <SettingRow label="启用" value="是（浏览器自动化）" />
-        <SettingRow label="引擎" value="DuckDuckGo" />
+        <SettingRow label="启用">
+          <Toggle
+            value={
+              Boolean(
+                (settings.value?.web_search as { enabled?: boolean })?.enabled,
+              )
+            }
+            onChange={async (v) => {
+              await patchSettings({
+                web_search: {
+                  ...(settings.value?.web_search as Record<string, unknown>),
+                  enabled: v,
+                },
+              });
+              toast('success', v ? '已启用网络搜索' : '已关闭网络搜索');
+            }}
+          />
+        </SettingRow>
       </Section>
     </>
   );
@@ -162,12 +224,34 @@ function DataPanel(): JSX.Element {
   return (
     <>
       <Section title="数据源">
-        <SettingRow label="已绑定文件夹" value="0" />
-        <SettingRow label="远程目录" value="0" />
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+          完整管理见左栏「远程目录」视图。
+        </p>
       </Section>
-      <Section title="备份">
-        <SettingRow label="自动备份" value="每日 03:00" />
-        <SettingRow label="保留策略" value="7 日 + 4 周" />
+      <Section title="导入 / 导出">
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={async () => {
+            try {
+              const res = await api.get<Record<string, unknown>>('/profile/export');
+              const blob = new Blob([JSON.stringify(res, null, 2)], {
+                type: 'application/json',
+              });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `attune-profile-${Date.now()}.vault-profile`;
+              a.click();
+              URL.revokeObjectURL(url);
+              toast('success', '已导出 profile');
+            } catch (e) {
+              toast('error', `导出失败：${e instanceof Error ? e.message : String(e)}`);
+            }
+          }}
+        >
+          📥 导出 .vault-profile
+        </Button>
       </Section>
     </>
   );
@@ -177,31 +261,103 @@ function PrivacyPanel(): JSX.Element {
   return (
     <>
       <Section title="安全">
-        <SettingRow label="Vault 状态" value="已解锁" />
-        <SettingRow label="Device Secret" value="—" />
+        <SettingRow label="Vault 状态">
+          <span style={{ fontSize: 'var(--text-sm)' }}>
+            {vaultState.value === 'unlocked' ? '✓ 已解锁' : '🔒 已锁定'}
+          </span>
+        </SettingRow>
+        <SettingRow label="" >
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={async () => {
+              if (!confirm('锁定后需要重新输入 Master Password 解锁。')) return;
+              try {
+                await api.post('/vault/lock');
+                clearToken();
+                location.reload();
+              } catch (e) {
+                toast('error', `锁定失败：${e instanceof Error ? e.message : String(e)}`);
+              }
+            }}
+          >
+            🔒 锁定 vault
+          </Button>
+        </SettingRow>
       </Section>
       <Section title="遥测">
-        <SettingRow label="匿名使用统计" value="关闭（默认）" />
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+          Attune 默认关闭所有遥测。后续版本可 opt-in 匿名使用统计。
+        </p>
       </Section>
     </>
   );
 }
 
 function AboutPanel(): JSX.Element {
+  const hw = hardware.value;
   return (
     <>
       <Section title="Attune">
-        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+        <p
+          style={{
+            fontSize: 'var(--text-sm)',
+            color: 'var(--color-text-secondary)',
+            margin: 0,
+            lineHeight: 1.6,
+          }}
+        >
           私有 AI 知识伙伴 · 本地决定，全网增强，越用越懂你的专业。
         </p>
-        <SettingRow label="版本" value="0.6.0-dev" />
-        <SettingRow label="许可" value="Apache-2.0" />
+        <SettingRow label="版本">
+          <code style={codeStyle}>0.6.0-dev</code>
+        </SettingRow>
+        <SettingRow label="许可">
+          <code style={codeStyle}>Apache-2.0</code>
+        </SettingRow>
       </Section>
+      {hw && (
+        <Section title="硬件">
+          <SettingRow label="CPU">
+            <code style={codeStyle}>{String(hw.cpu_model ?? '—')}</code>
+          </SettingRow>
+          <SettingRow label="GPU">
+            <code style={codeStyle}>{String(hw.gpu_model ?? '—')}</code>
+          </SettingRow>
+          <SettingRow label="RAM">
+            <code style={codeStyle}>{String(hw.total_ram_gb ?? 0)} GB</code>
+          </SettingRow>
+        </Section>
+      )}
     </>
   );
 }
 
-function SettingRow({ label, value }: { label: string; value: string }): JSX.Element {
+// ── 共享组件 ─────────────────────────────────────────────────
+const selectStyle: JSX.CSSProperties = {
+  padding: '4px var(--space-2)',
+  fontSize: 'var(--text-sm)',
+  background: 'var(--color-surface)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-sm)',
+};
+
+const codeStyle: JSX.CSSProperties = {
+  padding: '2px 6px',
+  fontFamily: 'var(--font-mono)',
+  fontSize: 'var(--text-xs)',
+  background: 'var(--color-bg)',
+  borderRadius: 'var(--radius-sm)',
+  color: 'var(--color-text-secondary)',
+};
+
+function SettingRow({
+  label,
+  children,
+}: {
+  label: string;
+  children?: JSX.Element | string;
+}): JSX.Element {
   return (
     <div
       style={{
@@ -214,10 +370,53 @@ function SettingRow({ label, value }: { label: string; value: string }): JSX.Ele
         borderRadius: 'var(--radius-md)',
       }}
     >
-      <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)' }}>{label}</span>
-      <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
-        {value}
-      </span>
+      {label && (
+        <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)' }}>
+          {label}
+        </span>
+      )}
+      {children}
     </div>
+  );
+}
+
+function Toggle({
+  value,
+  onChange,
+}: {
+  value: boolean;
+  onChange: (v: boolean) => void;
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={value}
+      onClick={() => onChange(!value)}
+      style={{
+        width: 40,
+        height: 22,
+        background: value ? 'var(--color-accent)' : 'var(--color-border)',
+        borderRadius: 11,
+        border: 'none',
+        position: 'relative',
+        cursor: 'pointer',
+        transition: 'background var(--duration-fast) var(--ease-out)',
+      }}
+    >
+      <span
+        style={{
+          position: 'absolute',
+          top: 2,
+          left: value ? 20 : 2,
+          width: 18,
+          height: 18,
+          borderRadius: '50%',
+          background: 'white',
+          transition: 'left var(--duration-fast) var(--ease-out)',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+        }}
+      />
+    </button>
   );
 }

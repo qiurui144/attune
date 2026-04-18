@@ -16,11 +16,14 @@ import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { useSignal, useSignalEffect } from '@preact/signals';
 import { ToastContainer } from './components';
+import { CommandPalette } from './components/CommandPalette';
 import { Wizard, LoginScreen } from './wizard';
 import { MainShell } from './layout';
+import { useShortcut } from './hooks/useShortcut';
 import { api } from './store/api';
-import { theme, vaultState } from './store/signals';
+import { theme, vaultState, sidebarCollapsed } from './store/signals';
 import { startConnectionMonitor } from './store/connection';
+import { startProgressWS } from './store/ws';
 
 type VaultStatusResponse = {
   state: 'sealed' | 'locked' | 'unlocked';
@@ -42,6 +45,7 @@ type AppPhase =
 
 export function App(): JSX.Element {
   const phase = useSignal<AppPhase>({ kind: 'booting' });
+  const paletteOpen = useSignal(false);
   const [bootError, setBootError] = useState<string | null>(null);
 
   // 主题 attribute 跟随 signal
@@ -49,9 +53,26 @@ export function App(): JSX.Element {
     document.documentElement.setAttribute('data-theme', theme.value);
   });
 
+  // 全局快捷键：⌘K 打开 palette，⌘B 折叠 sidebar
+  useShortcut({
+    key: 'k',
+    meta: true,
+    when: () => phase.value.kind === 'main',
+    handler: () => (paletteOpen.value = true),
+    description: 'shortcut.search',
+  });
+  useShortcut({
+    key: 'b',
+    meta: true,
+    when: () => phase.value.kind === 'main',
+    handler: () => (sidebarCollapsed.value = !sidebarCollapsed.value),
+    description: 'shortcut.toggle_sidebar',
+  });
+
   // 启动
   useEffect(() => {
     startConnectionMonitor();
+    startProgressWS();
     void bootstrap();
   }, []);
 
@@ -177,10 +198,11 @@ export function App(): JSX.Element {
     );
   }
 
-  // Phase 4：Main 布局（Sidebar + Views + Drawer）
+  // Phase 4+：Main 布局（Sidebar + Views + Drawer + CommandPalette）
   return (
     <>
       <MainShell />
+      <CommandPalette open={paletteOpen.value} onClose={() => (paletteOpen.value = false)} />
       <ToastContainer />
     </>
   );
