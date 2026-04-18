@@ -88,6 +88,7 @@ pub struct HardwareProfile {
     pub amd_gfx_target: Option<String>,  // e.g. "gfx1103" (Radeon 780M)，用于 ROCm 匹配
     pub has_amd_xdna_npu: bool,      // /dev/accel/accel0 + amdxdna 模块（Ryzen AI）
     pub has_intel_npu: bool,         // /dev/accel/accel0 + intel_vpu 模块
+    pub total_ram_bytes: u64,        // 总内存字节；硬件档位匹配用
     pub os: &'static str,            // "linux" | "macos" | "windows"
 }
 
@@ -132,7 +133,88 @@ impl HardwareProfile {
             }
         }
 
+        // 总内存 + CPU（平台相关）
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(info) = std::fs::read_to_string("/proc/meminfo") {
+                for line in info.lines().take(5) {
+                    if let Some(rest) = line.strip_prefix("MemTotal:") {
+                        if let Some(kb_str) = rest.split_whitespace().next() {
+                            if let Ok(kb) = kb_str.parse::<u64>() {
+                                p.total_ram_bytes = kb * 1024;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // macOS：sysctl hw.memsize（总内存）+ machdep.cpu.brand_string（CPU 型号）
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(ram) = sysctl_u64("hw.memsize") {
+                p.total_ram_bytes = ram;
+            }
+            if let Some(model) = sysctl_string("machdep.cpu.brand_string") {
+                p.cpu_model = model;
+            }
+            // Apple Silicon 的 vendor 统一为 "Apple"，Intel Mac 可通过 sysctl 得到
+            p.cpu_vendor = sysctl_string("machdep.cpu.vendor")
+                .unwrap_or_else(|| "Apple".to_string());
+        }
+
+        // Windows：wmic memorychip + cpu name（两个命令，失败保持 0/empty）
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(ram) = wmic_total_physical_memory() {
+                p.total_ram_bytes = ram;
+            }
+            if let Some((vendor, model)) = wmic_cpu_info() {
+                p.cpu_vendor = vendor;
+                p.cpu_model = model;
+            }
+            // Windows 下 NVIDIA 探测：通过 PowerShell 查 Win32_VideoController（非 /dev/nvidia0）
+            if has_nvidia_on_windows() {
+                p.has_nvidia_gpu = true;
+            }
+        }
+
         p
+    }
+
+    /// 是否有任何硬件加速（GPU/NPU）— 决定是否能跑稍大的模型
+    pub fn has_accelerator(&self) -> bool {
+        self.has_nvidia_gpu || self.has_amd_gpu || self.has_amd_xdna_npu || self.has_intel_npu
+    }
+
+    /// 根据 RAM + 加速器档位，推荐默认本地摘要模型。
+    ///
+    /// 推荐档位（详见 CLAUDE.md "硬件感知的默认模型"）：
+    /// | RAM    | 加速器   | 模型            |
+    /// |--------|---------|-----------------|
+    /// | ≥32 GB | 独显/NPU | qwen2.5:7b      |
+    /// | 16-32  | 有     | qwen2.5:3b      |
+    /// | 8-16   | 有/无    | qwen2.5:1.5b    |
+    /// | <8 GB  | -       | llama3.2:1b     |
+    ///
+    /// RAM 为 0（检测失败）→ 保守退到 qwen2.5:1.5b
+    pub fn recommended_summary_model(&self) -> &'static str {
+        const GB: u64 = 1024 * 1024 * 1024;
+        let gb = self.total_ram_bytes / GB;
+        let accel = self.has_accelerator();
+
+        if self.total_ram_bytes == 0 {
+            // 检测失败：保守默认
+            return "qwen2.5:1.5b";
+        }
+        match (gb, accel) {
+            (32.., true) => "qwen2.5:7b",
+            (32.., false) => "qwen2.5:3b",  // 大内存但纯 CPU，3b 还是能跑
+            (16..=31, _) => "qwen2.5:3b",
+            (8..=15, _) => "qwen2.5:1.5b",
+            _ => "llama3.2:1b",
+        }
     }
 
     /// 人类可读的诊断报告（一行一特性）
@@ -140,6 +222,10 @@ impl HardwareProfile {
         let mut parts = vec![format!("OS={}", self.os)];
         if !self.cpu_model.is_empty() {
             parts.push(format!("CPU={} ({})", self.cpu_model, self.cpu_vendor));
+        }
+        if self.total_ram_bytes > 0 {
+            const GB: u64 = 1024 * 1024 * 1024;
+            parts.push(format!("RAM={} GB", self.total_ram_bytes / GB));
         }
         if self.has_nvidia_gpu { parts.push("NVIDIA GPU (/dev/nvidia0)".into()); }
         if self.has_amd_gpu {
@@ -224,6 +310,77 @@ fn detect_amd_gfx_target() -> Option<String> {
 #[cfg(not(target_os = "linux"))]
 fn detect_amd_gfx_target() -> Option<String> { None }
 
+/// macOS sysctl 辅助：读取 u64 类型的系统参数（hw.memsize 等）
+#[cfg(target_os = "macos")]
+fn sysctl_u64(key: &str) -> Option<u64> {
+    use std::process::Command;
+    let out = Command::new("sysctl").args(["-n", key]).output().ok()?;
+    if !out.status.success() { return None; }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// macOS sysctl 辅助：读取字符串参数（machdep.cpu.brand_string 等）
+#[cfg(target_os = "macos")]
+fn sysctl_string(key: &str) -> Option<String> {
+    use std::process::Command;
+    let out = Command::new("sysctl").args(["-n", key]).output().ok()?;
+    if !out.status.success() { return None; }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Windows 物理内存：wmic computersystem 的 TotalPhysicalMemory 字段（bytes）
+#[cfg(target_os = "windows")]
+fn wmic_total_physical_memory() -> Option<u64> {
+    use std::process::Command;
+    let out = Command::new("wmic")
+        .args(["computersystem", "get", "TotalPhysicalMemory", "/value"])
+        .output().ok()?;
+    if !out.status.success() { return None; }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("TotalPhysicalMemory=") {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+/// Windows CPU 厂商+型号：wmic cpu get Manufacturer,Name
+#[cfg(target_os = "windows")]
+fn wmic_cpu_info() -> Option<(String, String)> {
+    use std::process::Command;
+    let out = Command::new("wmic")
+        .args(["cpu", "get", "Manufacturer,Name", "/value"])
+        .output().ok()?;
+    if !out.status.success() { return None; }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut vendor = String::new();
+    let mut model = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("Manufacturer=") { vendor = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("Name=") { model = v.trim().to_string(); }
+    }
+    if vendor.is_empty() && model.is_empty() { None } else { Some((vendor, model)) }
+}
+
+/// Windows NVIDIA 探测：扫描 Win32_VideoController 是否含 "NVIDIA"
+#[cfg(target_os = "windows")]
+fn has_nvidia_on_windows() -> bool {
+    use std::process::Command;
+    let out = match Command::new("wmic")
+        .args(["path", "win32_VideoController", "get", "Name", "/value"])
+        .output() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    if !out.status.success() { return false; }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.to_lowercase().contains("nvidia")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +455,85 @@ mod tests {
         std::env::remove_var("CUDA_VISIBLE_DEVICES");
         let applied = p.apply_recommended_env();
         assert!(applied.is_empty(), "bare system should apply no env vars: {applied:?}");
+    }
+
+    #[test]
+    fn summary_model_picks_7b_on_32gb_with_accel() {
+        let mut p = HardwareProfile::default();
+        p.total_ram_bytes = 32 * 1024 * 1024 * 1024;
+        p.has_amd_xdna_npu = true;
+        assert_eq!(p.recommended_summary_model(), "qwen2.5:7b");
+    }
+
+    #[test]
+    fn summary_model_picks_3b_on_16_31gb() {
+        let mut p = HardwareProfile::default();
+        p.total_ram_bytes = 16 * 1024 * 1024 * 1024;
+        p.has_amd_gpu = true;
+        assert_eq!(p.recommended_summary_model(), "qwen2.5:3b");
+
+        p.total_ram_bytes = 31 * 1024 * 1024 * 1024;
+        assert_eq!(p.recommended_summary_model(), "qwen2.5:3b");
+    }
+
+    #[test]
+    fn summary_model_picks_1_5b_on_8_15gb() {
+        let mut p = HardwareProfile::default();
+        p.total_ram_bytes = 8 * 1024 * 1024 * 1024;
+        assert_eq!(p.recommended_summary_model(), "qwen2.5:1.5b");
+
+        p.total_ram_bytes = 15 * 1024 * 1024 * 1024;
+        assert_eq!(p.recommended_summary_model(), "qwen2.5:1.5b");
+    }
+
+    #[test]
+    fn summary_model_8gb_with_or_without_accel_returns_same_tier() {
+        // 规格：8-16 GB 档位下有/无加速器行为一致（均为 1.5b） — 回归测试
+        let mut p = HardwareProfile::default();
+        p.total_ram_bytes = 8 * 1024 * 1024 * 1024;
+        p.has_nvidia_gpu = true;
+        assert_eq!(p.recommended_summary_model(), "qwen2.5:1.5b",
+            "8GB + accel should still pick 1.5b (RAM-bound)");
+    }
+
+    #[test]
+    fn summary_model_picks_tiny_on_lowend() {
+        let mut p = HardwareProfile::default();
+        p.total_ram_bytes = 4 * 1024 * 1024 * 1024;
+        assert_eq!(p.recommended_summary_model(), "llama3.2:1b");
+    }
+
+    #[test]
+    fn summary_model_conservative_on_unknown_ram() {
+        // 检测失败 (total_ram_bytes = 0) → 保守 1.5b，避免跑爆小机器
+        let p = HardwareProfile::default();
+        assert_eq!(p.total_ram_bytes, 0);
+        assert_eq!(p.recommended_summary_model(), "qwen2.5:1.5b");
+    }
+
+    #[test]
+    fn summary_model_big_ram_no_accel_drops_one_tier() {
+        // 32GB+ 纯 CPU → 3b (不是 7b)，避免 CPU 推理龟速
+        let mut p = HardwareProfile::default();
+        p.total_ram_bytes = 64 * 1024 * 1024 * 1024;
+        assert_eq!(p.recommended_summary_model(), "qwen2.5:3b");
+    }
+
+    #[test]
+    fn has_accelerator_checks_all_kinds() {
+        let mut p = HardwareProfile::default();
+        assert!(!p.has_accelerator());
+        p.has_nvidia_gpu = true;
+        assert!(p.has_accelerator());
+        p.has_nvidia_gpu = false;
+        p.has_amd_xdna_npu = true;
+        assert!(p.has_accelerator());
+    }
+
+    #[test]
+    fn ram_reflected_in_summary() {
+        let mut p = HardwareProfile::default();
+        p.total_ram_bytes = 16 * 1024 * 1024 * 1024;
+        assert!(p.summary().contains("RAM=16 GB"), "summary should include RAM: {}", p.summary());
     }
 }

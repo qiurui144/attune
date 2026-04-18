@@ -28,47 +28,56 @@ const SETTINGS_KEY: &str = "app_settings";
 ///
 /// 返回本次新增/更新的扩展词条数（0 = 无变化或信号不足）。
 pub fn run_evolution_cycle(store: &Store, llm: &dyn LlmProvider) -> Result<usize> {
-    // 1. 检查累积信号是否达到阈值
+    // 保持便于测试的单调用 API；生产路径应该用下面 prepare / generate / apply 三阶段
+    // 拆分，避免 vault lock 在 LLM 调用期间被持有（见 state.rs::start_skill_evolver）。
+    let Some(signals) = prepare_evolution_cycle(store)? else { return Ok(0); };
+    let expansions = generate_expansions(llm, &signals)?;
+    apply_evolution_result(store, &signals, &expansions)
+}
+
+/// Phase 1：检查阈值 + 读取未处理信号。**需 vault 锁。**
+/// 返回 None 表示不需要本周期（信号不足或空），返回 Some(signals) 继续。
+pub fn prepare_evolution_cycle(store: &Store) -> Result<Option<Vec<SkillSignal>>> {
     let count = store.count_unprocessed_signals()?;
     if count < EVOLVE_THRESHOLD {
-        return Ok(0);
+        return Ok(None);
     }
-
-    // 2. 读取未处理信号
     let signals = store.get_unprocessed_signals(MAX_SIGNALS_PER_CYCLE)?;
     if signals.is_empty() {
-        return Ok(0);
+        return Ok(None);
     }
+    Ok(Some(signals))
+}
 
-    // 3. 构建 LLM prompt
-    let prompt = build_evolution_prompt(&signals);
+/// Phase 2：调 LLM 生成扩展词。**无需 vault 锁**（纯 LLM + 解析）。
+/// 返回空 Vec 表示 LLM 返回无法解析 —— 调用方决定是否仍标记信号已处理。
+pub fn generate_expansions(
+    llm: &dyn LlmProvider,
+    signals: &[SkillSignal],
+) -> Result<Vec<(String, Vec<String>)>> {
+    let prompt = build_evolution_prompt(signals);
     let messages = vec![crate::llm::ChatMessage::user(&prompt)];
-
     let raw_response = llm.chat_with_history(&messages).map_err(|e| {
         VaultError::LlmUnavailable(format!("skill evolution LLM call: {e}"))
     })?;
+    Ok(parse_expansion_response(&raw_response))
+}
 
-    // 4. 解析 LLM 返回的 JSON 扩展词组
-    let expansions = parse_expansion_response(&raw_response);
+/// Phase 3：把扩展词合并进 settings + 标记信号已处理。**需 vault 锁。**
+/// 返回本次更新的扩展词条数。
+pub fn apply_evolution_result(
+    store: &Store,
+    signals: &[SkillSignal],
+    expansions: &[(String, Vec<String>)],
+) -> Result<usize> {
+    let ids: Vec<i64> = signals.iter().map(|s| s.id).collect();
     if expansions.is_empty() {
-        // LLM 返回无法解析，标记信号已处理避免重复
-        let ids: Vec<i64> = signals.iter().map(|s| s.id).collect();
+        // LLM 无有效输出 —— 仍标记信号已处理避免反复触发
         let _ = store.mark_signals_processed(&ids);
         return Ok(0);
     }
-
-    // 5. 合并到现有 app_settings
-    let merged = merge_expansions_into_settings(store, &expansions)?;
-
-    // 6. 标记信号为已处理
-    let ids: Vec<i64> = signals.iter().map(|s| s.id).collect();
+    let merged = merge_expansions_into_settings(store, expansions)?;
     store.mark_signals_processed(&ids)?;
-
-    eprintln!(
-        "[skill_evolution] processed {} signals, {merged} expansion entries updated",
-        signals.len()
-    );
-
     Ok(merged)
 }
 

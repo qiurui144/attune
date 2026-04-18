@@ -44,6 +44,10 @@ pub struct AppState {
     pub taxonomy: Mutex<Option<Arc<Taxonomy>>>,
     pub classifier: Mutex<Option<Arc<Classifier>>>,
     pub require_auth: bool,
+    /// 启动时检测一次的硬件画像；之后 settings/diagnostics 都读这份缓存，
+    /// 避免每次请求都同步读 /proc、调 sysctl/wmic 阻塞 async worker。
+    /// 见 platform.rs HardwareProfile::detect()。
+    pub hardware: attune_core::platform::HardwareProfile,
     /// 防止重复启动 QueueWorker 后台线程
     pub queue_worker_running: AtomicBool,
     /// 防止重复启动 ClassifyWorker 后台线程
@@ -80,6 +84,8 @@ impl AppState {
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).unwrap()
             )),
+            // 启动时检测一次硬件，后续复用（避免每次 GET/PATCH 都同步读 /proc 等）
+            hardware: attune_core::platform::HardwareProfile::detect(),
         }
     }
 
@@ -457,6 +463,10 @@ impl AppState {
                         .filter(|s| !s.is_empty())
                         .collect();
 
+                    // NOTE: 持锁执行 scan_directory —— 每个目录典型 <5s（文件 hash 增量 diff）。
+                    // 对比 skill_evolver 的 LLM 调用（15s+，已拆三阶段），此处仍在可接受
+                    // 范围内，不拆解。如未来扫描变慢（大目录 / 慢 HDD），可把文件遍历放锁
+                    // 外，仅 DB 写操作持锁。
                     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     match attune_core::scanner::scan_directory(
                         vault.store(),
@@ -702,11 +712,39 @@ impl AppState {
                     None => break,
                 };
 
-                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                match attune_core::skill_evolution::run_evolution_cycle(vault.store(), llm.as_ref()) {
-                    Ok(0) => {} // 信号不足或无变化
-                    Ok(n) => tracing::info!("Skill evolver: {} expansion entries updated", n),
-                    Err(e) => tracing::warn!("Skill evolver error: {}", e),
+                // 三阶段锁释放（CRITICAL fix：旧版在 LLM 调用期间持有 vault 锁 15s+，
+                // 阻塞所有并发 route）。Phase 1 锁读信号 → Phase 2 无锁跑 LLM →
+                // Phase 3 锁写回。与 chat.rs 的上下文压缩路径同构。
+                let signals = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    match attune_core::skill_evolution::prepare_evolution_cycle(vault.store()) {
+                        Ok(Some(s)) => s,
+                        Ok(None) => continue, // 信号不足
+                        Err(e) => {
+                            tracing::warn!("Skill evolver prepare error: {}", e);
+                            continue;
+                        }
+                    }
+                    // vault 在此处 drop，释放锁
+                };
+
+                // Phase 2（无锁）：LLM 调用，可能耗时 15s+
+                let expansions = match attune_core::skill_evolution::generate_expansions(llm.as_ref(), &signals) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!("Skill evolver LLM error: {}", e);
+                        continue;
+                    }
+                };
+
+                // Phase 3（锁）：合并 + 标记已处理
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    match attune_core::skill_evolution::apply_evolution_result(vault.store(), &signals, &expansions) {
+                        Ok(0) => tracing::debug!("Skill evolver: no new expansions"),
+                        Ok(n) => tracing::info!("Skill evolver: {} expansion entries updated", n),
+                        Err(e) => tracing::warn!("Skill evolver apply error: {}", e),
+                    }
                 }
             }
 

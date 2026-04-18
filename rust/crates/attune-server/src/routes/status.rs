@@ -77,6 +77,11 @@ pub async fn diagnostics(
         "unavailable"
     };
 
+    // 硬件画像：启动时已在 AppState 里检测过，这里零成本复用。
+    // 前端用 hardware 字段显示"根据你的硬件推荐 xxx"并决定默认摘要模型。
+    let hw = &state.hardware;
+    const GB: u64 = 1024 * 1024 * 1024;
+
     Json(serde_json::json!({
         "vault_state": vault_state,
         "ai_status": ai_status,
@@ -87,6 +92,19 @@ pub async fn diagnostics(
         "vector_ready": vector_ready,
         "tag_index_items": tag_index_count,
         "pending_tasks": pending_tasks,
+        "hardware": {
+            "os": hw.os,
+            "cpu_model": hw.cpu_model,
+            "cpu_vendor": hw.cpu_vendor,
+            "total_ram_gb": hw.total_ram_bytes / GB,
+            "has_nvidia_gpu": hw.has_nvidia_gpu,
+            "has_amd_gpu": hw.has_amd_gpu,
+            "amd_gfx_target": hw.amd_gfx_target,
+            "has_amd_xdna_npu": hw.has_amd_xdna_npu,
+            "has_intel_npu": hw.has_intel_npu,
+            "has_accelerator": hw.has_accelerator(),
+            "recommended_summary_model": hw.recommended_summary_model(),
+        },
         "hint": if ai_status == "unavailable" {
             "安装 Ollama 获取 AI 分类能力: curl -fsSL https://ollama.com/install.sh | sh && ollama pull qwen2.5:3b"
         } else { "" }
