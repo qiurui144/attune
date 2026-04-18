@@ -47,6 +47,9 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Status (health check bypasses guard)
         .route("/api/v1/status/health", get(routes::status::health))
         .route("/api/v1/status/diagnostics", get(routes::status::diagnostics))
+        // LLM 运维端点（Wizard + Settings）
+        .route("/api/v1/llm/test", post(routes::llm::test_llm))
+        .route("/api/v1/models/pull", post(routes::llm::pull_model))
         // Chat (RAG)
         .route("/api/v1/chat", post(routes::chat::chat))
         .route("/api/v1/chat/history", get(routes::chat::chat_history))

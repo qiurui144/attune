@@ -53,7 +53,7 @@ export function Step4Hardware({
       setScanSteps([...steps]);
 
       try {
-        const diag = await api.get<HardwareInfo>('/diagnostics');
+        const diag = await api.get<HardwareInfo>('/status/diagnostics');
         if (cancelled) return;
 
         // 每 400ms tick 一阶段，视觉"扫描感"

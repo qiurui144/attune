@@ -38,7 +38,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
     setOllamaStatus('checking');
     setScanning(true);
     try {
-      const d = await api.get<Diagnostics>('/diagnostics');
+      const d = await api.get<Diagnostics>('/status/diagnostics');
       if (d.ollama_status === 'ready') {
         setOllamaStatus('ready');
         setOllamaModels(d.ollama_models ?? []);

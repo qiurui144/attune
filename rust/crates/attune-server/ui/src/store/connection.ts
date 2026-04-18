@@ -11,7 +11,7 @@
 import { apiCall, RETRY_POLICIES } from './api';
 import { connectionState } from './signals';
 
-const HEALTH_ENDPOINT = '/health';
+const HEALTH_ENDPOINT = '/status/health';
 const HEARTBEAT_INTERVAL = 5_000;
 const INITIAL_BACKOFF = 500;
 const MAX_BACKOFF = 30_000;

@@ -75,7 +75,7 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
       if (exportSecret) {
         try {
           const secretRes = await api.get<{ device_secret: string }>(
-            '/vault/device-secret',
+            '/vault/device-secret/export',
           );
           downloadText('attune-device-secret.txt', secretRes.device_secret);
           toast('info', '已下载 Device Secret（妥善保管，可用于其他设备导入）');
