@@ -1,0 +1,71 @@
+Attune — Private AI Knowledge Companion
+Copyright 2026 Attune Contributors
+
+This product includes software developed by Attune Contributors
+(https://github.com/<your-org>/attune).
+
+================================================================================
+ Licensing
+================================================================================
+
+This repository contains two categories of software:
+
+1. **Open Source Core** — Licensed under Apache-2.0 (see LICENSE file)
+   - All Rust workspace crates: `rust/crates/attune-core`,
+     `rust/crates/attune-server`, `rust/crates/attune-cli`
+   - Chrome extension source: `extension/`
+   - Python prototype: `src/npu_webhook/`
+   - Embedded web UI: `rust/crates/attune-server/assets/`
+   - Free plugins (programming/tech): `plugins/free/`
+   - Plugin loader + signature verification: `rust/crates/attune-core/src/plugin*`
+
+2. **Commercial Plugins & Services** — Proprietary, NOT covered by Apache-2.0
+   Distributed separately under commercial license terms:
+   - Lawyer plugin: contract-review / legal-citation / drafting templates
+   - Pre-sales plugin: bid-matrix / BANT / POC templates
+   - Other industry plugins (medical, finance, academic) released in future
+   - Cloud backup / sync service
+   - Official plugin registry & signature keys
+   - Managed LLM proxy service
+   - Activation / subscription system
+
+   These components are not included in this repository.
+   Access requires an active Attune Pro / Pro+ / Team subscription.
+
+================================================================================
+ Third-Party Notices
+================================================================================
+
+This project depends on numerous open-source libraries. Each retains its
+original license and copyright as declared in their respective `Cargo.toml`
+/ `package.json` / `pyproject.toml`. Key dependencies include:
+
+- Tokio, Axum, Serde, rusqlite (MIT / Apache-2.0)
+- tantivy-jieba (Apache-2.0 / BSD)
+- usearch (Apache-2.0)
+- argon2, aes-gcm, zeroize (MIT / Apache-2.0)
+- ort (MIT)
+- tesseract (Apache-2.0) — external binary dependency for OCR
+
+For the complete dependency tree run `cargo tree` in `rust/`.
+
+================================================================================
+ Trademark Notice
+================================================================================
+
+"Attune" is a trademark of Attune Contributors. Forks and derivative works
+must either remove the "Attune" name from user-facing surfaces or obtain
+a separate trademark license. Apache-2.0 does not grant trademark rights
+(see LICENSE §6).
+
+================================================================================
+ AI Output Disclaimer
+================================================================================
+
+Outputs from Large Language Models (LLMs) used with Attune may be inaccurate,
+incomplete, or misleading. Attune, its contributors, and distributors make
+NO WARRANTY regarding the correctness of AI-generated content. Users bear
+sole responsibility for validating outputs before relying on them for any
+purpose — especially for legal, medical, financial, or safety-critical
+decisions. See LICENSE §7 (Disclaimer of Warranty) and §8 (Limitation of
+Liability) for full terms.
