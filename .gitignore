@@ -23,6 +23,12 @@ Thumbs.db
 # Project
 *.db
 *.db-journal
+
+# Dev screenshots（根目录临时截图；已归档的走 docs/screenshots/ 由仓库管理）
+/*.png
+
+# Playwright MCP runtime
+.playwright-mcp/
 chroma_data/
 models/
 *.onnx

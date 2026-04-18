@@ -465,9 +465,108 @@ CREATE TABLE sessions (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+
+-- 批注（Batch A.1/A.2）
+-- content 加密（个人思考）；snippet 明文（文档更新后可用于恢复定位）
+CREATE TABLE annotations (
+    id TEXT PRIMARY KEY,
+    item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    offset_start INTEGER NOT NULL,   -- UTF-16 code unit 索引（与 JS String.length 对齐）
+    offset_end INTEGER NOT NULL,
+    text_snippet TEXT NOT NULL,      -- 明文，用于 fallback 定位
+    label TEXT,
+    color TEXT NOT NULL DEFAULT 'yellow',
+    content BLOB,                     -- AES-256-GCM 加密
+    source TEXT NOT NULL DEFAULT 'user' CHECK(source IN ('user', 'ai')),
+    created_at TEXT,
+    updated_at TEXT
+);
+
+-- Chunk 摘要缓存（Batch B.1）
+-- 首次摘要 💰 LLM 成本；命中后 🆓 永久复用
+CREATE TABLE chunk_summaries (
+    chunk_hash TEXT NOT NULL,          -- sha256(chunk_text) hex
+    strategy TEXT NOT NULL CHECK(strategy IN ('economical','accurate')),
+    item_id TEXT NOT NULL,             -- 冗余存，用于 soft-delete 级联
+    model TEXT NOT NULL,
+    summary BLOB NOT NULL,             -- AES-256-GCM 加密
+    orig_chars INTEGER NOT NULL,
+    created_at TEXT,
+    PRIMARY KEY (chunk_hash, strategy)
+);
 ```
 
 `PRAGMA journal_mode=WAL` + `PRAGMA foreign_keys=ON` + `PRAGMA busy_timeout=5000`。
+
+**软删除级联**：`delete_item` 把 `items.is_deleted` 置 1 后**显式**`DELETE FROM annotations WHERE item_id = ?` 和 `DELETE FROM chunk_summaries WHERE item_id = ?`。items 是软删除，FK `ON DELETE CASCADE` 永不触发，必须应用层级联。
+
+## 批注 + AI 分析（Batch A）
+
+### 数据模型
+
+见上表 `annotations`。关键设计：
+
+- **字符偏移 + snippet 双锚点**：`offset_start` / `offset_end` 是首选；文档内容更新导致 offset 失配时，可用 `text_snippet` 字符串搜索恢复（Batch A.1 实现 primary，恢复逻辑在未来批）
+- **UTF-16 code unit 索引**：与前端 JS `String.length` 对齐。后端 Rust 用 `char.len_utf16()` 累积
+- **source = 状态而非分类**：user（默认）/ ai。用户手动 PATCH 不传 `source` 时强制回到 `user`（人类介入抹掉 AI 标记）
+- **5 个预设 user 标签 + 4 个 AI 角度**：user 用 ⭐重点 / 📍待深入 / 🤔存疑 / ❓不懂 / 🗑过时；AI 用 ⭐ 要点 / 🤔 疑点 / ⚠️ 风险 / 🕰 过时
+
+### AI 批注生成（`attune_core::ai_annotator`）
+
+LLM 返回 JSON `{"findings":[{"snippet":"...", "reason":"..."}]}`，backend 在原文里做**三阶段 snippet 定位**：
+
+1. Phase 1 **verbatim**：`content.find(snippet)`
+2. Phase 2 **relaxed**：归一化空白 + 全角半角标点 → 再搜
+3. Phase 3 **prefix-anchor**：snippet ≥20 字时用前 10 字作 anchor 定位，段落边界（`\n\n`）截断防越界
+
+解析容错：提取 `{` 到 `}` 区间 → 整体解析失败时栈扫描 `{...}` pairs 逐个尝试（对抗 LLM JSON 截断）。字段 alias 兼容：`snippet` / `snpshot` / `text` / `quote` 都接收。
+
+## 上下文压缩 + Token Chip（Batch B）
+
+### 流水线（chat route 内）
+
+```
+RAG 检索 → allocate_budget
+         ↓
+批注加权（annotation_weight）
+  · 🆓 零成本：仅 DB 读 + 算数
+  · label 精确白名单匹配（子串匹配有 "非过时" footgun，已修）
+  · 🗑/🕰 过时 → Drop
+  · ⭐/要点/风险 → ×1.5
+  · 🤔/📍/❓/疑点 → ×1.2
+  · 多批注取 MAX 不累乘
+         ↓
+上下文压缩（context_compress）
+  · 三阶段锁释放：
+    Phase 1（锁）: 查 chunk_summaries cache
+    Phase 2（无锁）: 对 miss 调 LLM 生成摘要（可能 15s/chunk）
+    Phase 3（锁）: 批量写回新生成的摘要
+  · hash 源用全量 content（非 inject_content）—— 后者被 allocate_budget
+    按分数截断，每次查询长度不同 → hash 变 → 缓存永不命中
+         ↓
+Chat LLM 调用 + 返响应
+  · 响应含 weight_stats + compression_stats 供 UI token chip 展开
+```
+
+### Strategy
+
+- `raw` — 原文透传，纯本地模式推荐（免费）
+- `economical`（默认）— ~150 字摘要；云端模式节省 70-85% token
+- `accurate` — ~300 字摘要 + 原文前 100 字，长文场景
+
+### Token 估算（Rust + JS 双侧镜像）
+
+CJK 按 **1.2 tok/char**、ASCII 按 **0.25 tok/char**。这是 BPE 实测校正值 —— 旧估算 0.75/CJK 会让云端账单比 chip 显示多 2× 的惊吓。
+
+### 成本 / 触发契约
+
+项目级最高优先原则（见 CLAUDE.md "成本感知与触发契约"）：
+
+| 层级 | 资源 | 触发策略 | 本批次的例子 |
+|------|------|---------|-------------|
+| 🆓 零成本 | CPU / 毫秒 | 随便跑 | 批注加权、cache 命中、OCR tesseract |
+| ⚡ 本地算力 | GPU / 秒 | 建库阶段后台跑 | embedding、首次摘要、classify |
+| 💰 时间 / 金钱 | LLM / 秒到分钟 | **必须用户显式触发**，永不后台偷跑 | Chat、AI 批注分析、云端 API |
 
 ## 测试策略
 

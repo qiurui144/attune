@@ -2,6 +2,100 @@
 
 ## 已发布
 
+## 深度阅读 + 批注 + 上下文压缩 (2026-04-18)
+
+本次包含 **6 个连续 batch**，每批经过 **2 轮独立 code review** + **Playwright E2E 回归**
+（最终 10 phase / 57 断言全过）。总测试数 213 → **299 tests（+86）**。
+
+### Batch 1：Settings 重构 · 硬件感知默认 · OCR 兜底
+
+- **Settings UI 简化**：7 张卡 14 字段 → 4 张主卡 + 1 折叠"高级"
+- **硬件感知摘要模型**：启动检测 CPU/RAM/GPU/NPU → `recommended_summary_model()` 按档位推荐
+  （≥32GB+加速器 → qwen2.5:7b · 16-32GB → qwen2.5:3b · 8-16GB → qwen2.5:1.5b · <8GB → llama3.2:1b）
+- **非 Linux RAM/CPU 检测**：macOS (sysctl) + Windows (wmic) + NVIDIA Windows 探测
+- **扫描版 PDF OCR**：pdf_extract 失败或文字层 < 100 字 → 自动走 tesseract CLI + pdftoppm，中英双语
+  `scripts/install-ocr-deps.sh` 一键装依赖（apt / dnf / pacman / brew）
+- **上传 body limit** 20 → 100 MB，支持整本扫描版 PDF
+- `AppState.hardware` 启动时检测一次并缓存，避免每次 `/settings` 请求重复读 `/proc` / sysctl
+
+### Batch 2：顶栏 + 模态 Settings + 模型 chip
+
+- 全局顶栏：logo · 🔒 锁定按钮 · 👤 头像菜单（设置 / 导出画像 / 导出设备密钥 / 锁定）
+- Settings 从 tab 变成 ChatGPT 式模态对话框（对话模型 + 网络搜索 + 数据备份 + 高级）
+- Chat tab 头部的 **模型 chip**：🟢 本地 / 🔵 云端 颜色区分，点击下拉切模型，"配置更多模型..." 直达设置
+- 对话模型 provider radio（本地 Ollama / OpenAI / Claude / 自定义 OpenAI 兼容端点）条件展示 Key 字段
+- provider 切换即时同步 token chip 颜色与成本估算
+- 移除 Settings tab 中重复的 `btn-lock`（三入口收敛到两个）
+- ESC 关模态（优先级：popup > reader > modal > dropdown）
+
+### Batch A.1：用户批注 CRUD
+
+- **新表** `annotations`：字符偏移 + snippet 双锚点 · content 加密 BLOB · `ON DELETE CASCADE`
+- 5 个预设标签：⭐重点 / 📍待深入 / 🤔存疑 / ❓不懂 / 🗑过时
+- 4 色高亮：yellow / red / green / blue
+- **4 个 REST 路由**：POST / GET list / PATCH / DELETE
+- **Reader 模态**：1080px 宽，左正文按偏移切片渲染高亮 + 右栏批注卡片（source dot 🔵 user / 🟣 ai 区分）
+- **选中文字触发 popup**：5 标签按钮 + 4 色圆点 + 附注文本框 + 保存/取消
+- 点高亮定位右栏卡片（scrollIntoView）
+
+### Batch A.2：AI 批注（4 角度）
+
+- 新模块 `attune_core::ai_annotator` —— LLM 驱动的批注生成器
+- 4 个角度：⚠️ 风险 / 🕰 过时 / ⭐ 要点 / 🤔 疑点，各自独立 prompt + 默认色
+- **三阶段 snippet 定位**：verbatim → 空白/全角半角归一化 → 前 10 字 prefix anchor（段落边界截断防越界）
+- **JSON salvage 解析**：对 Ollama 截断响应，栈扫描 `{...}` pairs 逐个尝试 `serde_json::from_str::<RawFinding>`
+- 字段 alias 兼容：`snippet` / `snpshot` / `text` / `quote` 都接收
+- UTF-16 code unit 偏移（与前端 JS `String.length` 对齐）
+- **Reader 模态新增** "🤖 AI 分析 ▾" 下拉：4 角度各标注"本地 · 约 15s"，分析中显示 loading 条
+- AI 分析期间用户关 reader → 服务端批注仍落库；UI 静默无错误 toast（pinnedItemId 闭包保护）
+
+### Batch B.1：上下文压缩流水线 + Token Chip
+
+- **新表** `chunk_summaries`：`(chunk_hash, strategy)` 复合主键 · 加密 summary BLOB · 冗余 item_id 支持 soft-delete 级联
+- 新模块 `attune_core::context_compress` —— Chat 前的 chunk 摘要化
+- 3 种 strategy：`raw`（透传）/ `economical`（~150 字）/ `accurate`（~300 字+原文头）
+- **三阶段锁释放**（chat route）：Phase 1 持锁查 cache → Phase 2 **无锁**跑 LLM → Phase 3 持锁批量写回
+- **hash 源修复**：用全量 `content` 而非 `allocate_budget` 截断后的 `inject_content`（否则每次查询 hash 都不同，缓存永不命中）
+- `needs_writeback` 标记只回写新生成摘要，跳过 cache hit 的冗余 REPLACE
+- **Token Chip**：Chat 输入框旁常驻，实时估算 input token + 云端 $ 价格
+  - 本地绿 🟢 免费 · 云端琥珀 🟡 带 $ 金额
+  - CJK 1.2 tok/char（BPE 实测校正）· ASCII 0.25 tok/char
+  - Tooltip 明示"仅 input · 2026-04 参考价 · 以 provider 账单为准"
+
+### Batch B.2：批注加权 RAG + Token Chip 展开
+
+- 新模块 `attune_core::annotation_weight` —— 🆓 零成本层（仅 DB 读 + 算数）
+- `ScoreAdjust { Drop | Multiply(f32) }` + `compute_adjust(&[Annotation])`
+- **精确 label 白名单**（避免子串匹配 footgun，如 "非过时" 触发 Drop）：
+  - DROP: "过时" / "🗑过时" / "🕰 过时"
+  - STRONG ×1.5: "重点" / "⭐重点" / "要点" / "⭐ 要点" / "风险" / "⚠️ 风险"
+  - MEDIUM ×1.2: "待深入" / "存疑" / "不懂" / "疑点"（含对应 emoji 前缀变体）
+- 多批注取 MAX 不累乘
+- Chat 响应新增 `weight_stats { items_total, items_boosted, items_dropped, items_kept }` + `compression_stats`
+- **Token Chip 展开 popover**：点击 chip 显示上次对话的"检索候选 / 最终注入 / boost / 剔除 / 压缩策略 / 缓存命中 / 原文字符"明细
+- `items_kept = items_total - items_dropped` 解决"检索到 5 条但 chat 看到 3 条"的 UI 歧义
+
+### 测试 / 回归
+
+- 单元测试 **213 → 299**（+86），零回归
+- 完整 Playwright 回归：**10 Phase / 57 显式断言 / 100% 通过**
+  （报告：`docs/regression-report-2026-04-18.md`）
+- 每个 batch 两轮独立 code review，共 **12 轮审查**
+  - 关闭 6 轮审查中的 **34+ 个 CRITICAL/IMPORTANT 问题**
+  - 包括：prefix-anchor 终点越界 · soft-delete 孤立批注 · 子串匹配 footgun · vault 锁饥饿 · spawn_blocking silent drop · allocate_budget 导致缓存永不命中 · CJK token 2× 低估 · 等
+
+### 契约守护
+
+本次实现**贯彻**"成本感知与触发契约"（新增至 CLAUDE.md）：
+- 🆓 层：批注 CRUD · 批注加权 · cache 命中 · OCR · RAG 检索
+- ⚡ 层：embedding / 基础 classify / 首次摘要（建库阶段后台跑）
+- 💰 层：Chat / AI 批注分析 / 深度分析（**必须用户显式触发**，永不后台偷跑）
+
+所有 LLM 调用点全部审查：确认仅由用户点击路径触发（Chat 发送按钮 / AI 分析下拉），
+**建库管道（ingest / upload / 文件夹监听 / classify worker / skill evolver）零 LLM 调用新路径**。
+
+---
+
 ## Chat Session Management (2026-04-14)
 
 ### Chat Session Management
