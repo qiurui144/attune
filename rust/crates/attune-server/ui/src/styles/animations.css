@@ -1,0 +1,171 @@
+/* Attune · 动效 CSS（L1-L4 通用 util class）
+ * 见 spec §2 "动效分层"
+ *
+ * 使用：
+ *   - JSX 里加 className="fade-in" 等
+ *   - 组件内动效用 CSS transition + tokens
+ *   - 尊重 prefers-reduced-motion（tokens.css 已处理）
+ */
+
+/* ─── L1 微反馈 ─────────────────────────────────────────── */
+.interactive {
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+/* ─── L2 转场 ───────────────────────────────────────────── */
+.fade-in {
+  animation: fade-in var(--duration-base) var(--ease-out);
+}
+
+.fade-slide-in {
+  animation: fade-slide-in var(--duration-base) var(--ease-out);
+}
+
+.modal-in {
+  animation: modal-in var(--duration-base) var(--ease-spring);
+}
+
+.modal-out {
+  animation: modal-out var(--duration-fast) var(--ease-out);
+}
+
+.drawer-in-right {
+  animation: drawer-in-right var(--duration-base) var(--ease-out);
+}
+
+.drawer-out-right {
+  animation: drawer-out-right var(--duration-fast) var(--ease-out);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fade-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes modal-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@keyframes drawer-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes drawer-out-right {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* ─── L3 加载 ───────────────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-border) 0%,
+    var(--color-surface-hover) 50%,
+    var(--color-border) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-pulse 1200ms ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+
+@keyframes skeleton-pulse {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: spinner-rotate 800ms linear infinite;
+}
+
+@keyframes spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ─── 状态点（静态不闪） ────────────────────────────────── */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.online {
+  background: var(--color-success);
+}
+
+.status-dot.reconnecting {
+  background: var(--color-warning);
+  animation: pulse-slow 2s ease-in-out infinite;
+}
+
+.status-dot.offline {
+  background: var(--color-error);
+}
+
+@keyframes pulse-slow {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}

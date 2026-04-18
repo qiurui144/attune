@@ -1,5 +1,6 @@
 /* Attune · Global Reset + Base */
 @import './tokens.css';
+@import './animations.css';
 
 *,
 *::before,
