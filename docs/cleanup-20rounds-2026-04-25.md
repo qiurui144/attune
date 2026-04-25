@@ -1413,7 +1413,7 @@ main | 2026-04-19 | 7 days ago | feat: populate commercial plugins + build/sign/
 ## R20 — 最终验证 + 总结
 
 **Status**: DONE
-**Commit**: <填入 final commit SHA>
+**Commit**: `0d11016`
 
 ### Step 1-4 验证结果
 - workspace tests: **377 passed, 0 failed, 5 ignored**（与 R1 起 baseline 一致）
