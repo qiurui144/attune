@@ -21,12 +21,10 @@ CREATE TABLE IF NOT EXISTS items (
     source_type TEXT NOT NULL DEFAULT 'note',
     domain      TEXT,
     tags        BLOB,
-    metadata    BLOB,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     is_deleted  INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_items_source ON items(source_type);
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
 CREATE INDEX IF NOT EXISTS idx_items_deleted ON items(is_deleted);
 
@@ -94,8 +92,8 @@ CREATE TABLE IF NOT EXISTS feedback (
     query        TEXT,
     created_at   TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_feedback_item ON feedback(item_id);
-CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at);
+-- 注：feedback 表当前只 INSERT 写入（来自 POST /api/v1/feedback），
+-- 暂无 SELECT 读取路径；待将来加分析/重排时再加索引。
 
 CREATE TABLE IF NOT EXISTS conversations (
     id          TEXT PRIMARY KEY,
@@ -1180,15 +1178,6 @@ pub struct ItemStats {
     pub chunk_count: i64,
     pub embedding_pending: i64,
     pub embedding_done: i64,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct FeedbackEntry {
-    pub id: i64,
-    pub item_id: String,
-    pub feedback_type: String,
-    pub query: Option<String>,
-    pub created_at: String,
 }
 
 /// Embedding 队列任务

@@ -1125,3 +1125,81 @@ Python **独有**（Rust 没有）：`/index/reindex`, `/skills*`, `/setup`, `/m
 - ❌ 不补 RelevantRequest.context 到 Rust — 这是 feature 工作不是 cleanup，归 Sprint 1 backlog
 
 ---
+
+## R16 — Schema 冗余 audit
+
+**Status**: DONE
+**Commit**: <填充>
+
+### Schema 规模
+
+- tables: 14（vault_meta, items, embed_queue, bound_dirs, indexed_files, sessions, search_history, click_events, feedback, conversations, conversation_messages, skill_signals, chunk_summaries, annotations）+ FTS5 虚拟表
+- 字段总数：约 90 列
+- indexes: 17 个 CREATE INDEX
+
+### Rust struct fields
+
+- pub struct fields 总数：约 70 个公开字段
+- never read warnings：cargo check 仅报 12 个 struct/fn 未用警告（chat、queue、plugin_sig 模块），均为 R1 已识别的"模块级"未用，**字段级 dead_code 没有新增**
+
+### Enum variants 抽样
+
+| Enum | Variants | 全部 match 过 |
+|------|----------|---------------|
+| `Trust` | Official / ThirdParty / Unsigned | ❌ ThirdParty 未构造（已注释为 Pro 预留） |
+| `AiAngle` | Risk / Outdated / Highlights / Questions | ✅ 全部覆盖 |
+| `PatentDatabase` | Uspto | ✅（占位 enum，未来扩 Espacenet/CNIPA） |
+| `VaultState` / `Lang` / `ScoreAdjust` / `Cardinality` / `ValueType` / `ContextStrategy` / `NpuKind` | — | 未深查（属设计预留枚举） |
+
+### 候选清单 + 决策
+
+| 候选 | 类别 | 决策 | 理由 |
+|------|------|------|------|
+| `items.metadata` BLOB 列 | A 真未用 | **删** | 全仓库 0 引用，INSERT/SELECT 列表都不含 metadata |
+| `idx_items_source` index | A 真未用 | **删** | 没有任何 `WHERE source_type =` 查询；`source_types` filter 仅是请求 struct 字段且已标 `#[allow(dead_code)]` |
+| `idx_feedback_item` index | A 真未用 | **删** | feedback 表只 INSERT，无 SELECT 路径 |
+| `idx_feedback_created` index | A 真未用 | **删** | 同上 |
+| `pub struct FeedbackEntry` | A 真未用 | **删** | 完全无消费者；feedback 路由直接返回 id+status，不 SELECT |
+| `RelevantRequest.source_types` | B 设计预留 | 保留 | 已有 `#[allow(dead_code)]` 注释，预留给未来过滤 API |
+| `Trust::ThirdParty` | B 设计预留 | 保留 | 注释明确"未来 Pro 支持" |
+| `PatentDatabase::Uspto` 单 variant | B 设计预留 | 保留 | 占位 enum，扩展 Espacenet/CNIPA 时直接加 |
+| `embed_queue.attempts/task_type` | C 真使用 | 保留 | 重试 / 队列分类逻辑直接读 |
+| `chunk_summaries.orig_chars` | C 真使用 | 保留 | summary 缓存元数据，统计可见 |
+| `bound_dirs.last_scan/file_types/is_active/recursive` | C 真使用 | 保留 | scanner 全用 |
+| `indexed_files.indexed_at/file_hash` | C 真使用 | 保留 | scanner 增量逻辑用 |
+| `conversation_messages.citations` | C 真使用 | 保留 | INSERT/SELECT 都包含 |
+| `skill_signals.knowledge_count/web_used/processed` | C 真使用 | 保留 | skill evolution 全用 |
+
+### Fix（已应用）
+
+```diff
+-- store.rs 中删除以下：
+-    metadata    BLOB,                          -- items 表
+-CREATE INDEX IF NOT EXISTS idx_items_source ON items(source_type);
+-CREATE INDEX IF NOT EXISTS idx_feedback_item ON feedback(item_id);
+-CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback(created_at);
+-pub struct FeedbackEntry { ... }              -- 6 字段全删
++ feedback CREATE INDEX 处加注释：当前只 INSERT，待加 SELECT 时再补索引
+```
+
+由于 attune 未发版，无需 migration —— `CREATE TABLE IF NOT EXISTS items` 对已存在的库是 noop（不会改字段），但**所有现网都是开发库**，可激进重建。已建库的开发者升级时 metadata 字段保留无害。
+
+### Backlog（待将来）
+
+- `RelevantRequest.source_types` 真接进 search 流水线（Sprint 1+ filter 功能）
+- `Trust::ThirdParty` 接 Pro 第三方插件白名单（Pro 版）
+- 若加 feedback 分析路径（重排序训练），重建 `idx_feedback_item` + `idx_feedback_created`
+
+### Tests
+
+| Phase | 命令 | 结果 |
+|-------|------|------|
+| Pre-fix | `cargo test --workspace` | 377 passed（baseline） |
+| Post-fix | `cargo test --workspace` | **377 passed** ✅ |
+
+### Skip 理由
+
+- ❌ 未深查 8 个 enum 的全部 variants — 抽样 3 个发现 1 个预留 variant 已有注释，估计低产；正式版本前可补
+- ❌ 未删 `idx_history_created`、`idx_click_item`、`idx_click_created` 等 — 这些索引对应的查询路径有（recent_searches / popular_items），保留
+
+---
