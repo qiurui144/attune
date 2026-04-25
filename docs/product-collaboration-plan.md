@@ -1,6 +1,14 @@
-# Attune × lawcontrol 产品协同规划
+# Attune × lawcontrol 产品协同规划（已废弃）
 
-**版本**：v1 draft · 2026-04-18
+> **DEPRECATED 2026-04-25** — 本文档描述的「共用 PluginHub / SSO / 商业捆绑 / 数据流互通」方案**已废弃**。
+>
+> 新方向：attune 是**独立应用**，不调用 lawcontrol 任何 API、不复用其代码。可参考其 plugin / RPA / Intent Router 设计模式，但实现完全独立。详见 [`CLAUDE.md`](../CLAUDE.md) 的「独立应用边界」章节。
+>
+> 本文件保留仅作历史参考，不再指导新开发。
+
+---
+
+**版本**：v1 draft · 2026-04-18 （已废弃 2026-04-25）
 **范围**：两个产品的定位分工、共用云管平台、商业协同、数据流边界
 **产品**：
 - **lawcontrol** — 律所级 B2B，多人协作、案件管理、43+ 法律 skill 插件
