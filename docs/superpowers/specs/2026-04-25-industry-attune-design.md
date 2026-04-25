@@ -20,6 +20,8 @@
 
 **核心价值**：律师丢一张借条照片，attune 5 秒内告诉他"这是王某诉李某案 · 第 3 份证据 · 与已有借款合同金额一致 · 与微信记录时间冲突 · 建议补充资金到账银行流水"。
 
+**核心承诺（成本边界）**：用户的 LLM token 开销仅用于他自己的业务调用（chat / AI 批注）；Teacher Engine 由 attune 团队预算承担。"让 AI 替你做更准，不让 AI 替你花钱。"详见 §15。
+
 ---
 
 ## 1. 三层架构
@@ -769,6 +771,235 @@ attune-pro 现有 9 capabilities（5 law + 4 presales）按本 spec 升级：
 ## 14. 实施前提
 
 - 本 spec 通过用户 review（待）
+- 调用 `superpowers:writing-plans` 出每个 Sprint 的实现 plan
+- 每个 Sprint 用 `superpowers:subagent-driven-development` 执行
+- 用 `superpowers:using-git-worktrees` 隔离开发分支
+
+---
+
+## 15. Teacher Engine — 无感化能力进化（v0.7+）
+
+### 15.1 心智约束（产品承诺）
+
+> **Teacher Engine 由 attune 团队预算承担，用户订阅费即包含。**
+> 用户的 LLM token 开销仅用于他自己的业务调用（chat / AI 批注 / RPA-LLM 解析等）。
+> 这是产品承诺：**"让 AI 替你做更准，不让 AI 替你花钱。"**
+
+UI 顶栏的"成本 chip"只展示用户业务那一层（`~1.2K tok · ¥0.0008`），Teacher 引擎的钱**不在 chip 里出现**——团队后台账上记。
+
+### 15.2 三层成本边界（叠加 §13.x 现有原则）
+
+| 层 | 谁付 | 触发 | UI 体现 |
+|:---|:---|:---|:---|
+| 🆓 本地（N1 / N4 / N6） | 零 | 永远跑 | 看不见的进化 |
+| 💰 远端教授（N3 / N5 / N7） | **attune 团队 gateway** | 隐式信号触发 | 用户无感知（透明面板可查） |
+| 💵 用户业务（contract_review / chat / AI 批注） | **用户自带 token** | 用户主动 | 顶栏 cost chip |
+
+### 15.3 七机制（N1-N7）
+
+#### N1. 隐式失败信号（替代 👍/👎）
+
+用户行为本身就是评分，**不再求显式按钮**。`feedback_log` 表自动记录：
+
+| 用户行为 | 信号 |
+|:---|:---|
+| 复制 AI 输出某段到外部 | ✅ 该段被采纳 |
+| 编辑 AI 输出 ≥ 30% | ⚠ 不满意 |
+| 关掉对话不 follow-up | ⚠ 弱不满 |
+| 批注里改写 AI 提的 risk | ⚠ 强不满 |
+| AI 提的某条款被引用到最终交付 | ✅ 高质量 |
+
+数据 schema：
+
+```rust
+// crates/attune-core/src/feedback_log.rs
+pub struct SkillOutcome {
+    pub skill_id: String,
+    pub call_id: Uuid,
+    pub input_hash: [u8; 32],          // 不存原文，只存 hash
+    pub output_size: usize,
+    pub user_final_size: Option<usize>,
+    pub edit_distance: Option<f32>,    // 0.0-1.0
+    pub copied_to_external: bool,
+    pub time_to_save_ms: u64,
+    pub final_acceptance: AcceptanceLevel,  // High/Medium/Low/Unknown
+    pub created_at: DateTime<Utc>,
+}
+```
+
+落 vault 加密表 `skill_outcomes`，永远不出本地。
+
+#### N2. Drift 检测（被动周期）
+
+每周一凌晨低负载时，对比**AI 当时给的初稿** vs **用户最终交付**：
+- 编辑距离 / token 改动率 = 客观指标
+- 7 天滑动窗口；某 skill 改动率持续 ≥ 25% → 触发 N3 / N5
+- 比 N1 更慢但更可靠（有"成品"做 ground truth）
+
+#### N3. 隐形 A/B（不弹窗）
+
+后台并行跑新旧两个 prompt，**只展示主 prompt 输出**：
+- 候选 prompt 的输出存 vault 不显示
+- 用户改动的是主版本，编辑距离对比候选
+- 候选改动率 < 主版本 90% 持续 100 次调用 → 静默升为主，旧降为候选
+- 流量占比：**15-20%**（团队预算允许，加速收敛）
+- **用户从头到尾不知道自己在 A/B**
+
+#### N4. 同侪学习（纯本地，零外发）
+
+用户**自己跑过的成功 case** 教自己：
+- 已采纳的 (input, output) 对入 `examples` 库
+- 下次相似 input → top-3 examples 自动 inject 当 few-shot
+- 完全本地、零隐私问题、零成本
+- 缺点：上限是用户已会做的
+
+#### N5. 异步差分 hints（minimal 外发）
+
+每次 skill 调用结束后，**异步队列**发一条**脱敏摘要**给团队 gateway：
+
+```json
+{
+  "skill": "contract_review",
+  "input_size": 2400,
+  "output_size": 800,
+  "user_final_size": 1100,
+  "edit_distance": 0.27,
+  "anon_entities": ["甲方", "乙方"],
+  "clause_types": ["付款", "违约"],
+  "industry": "labor_dispute"
+}
+```
+
+Gateway 后端调 DeepSeek V3 拿 generic hints（"对付款类合同强调违约金"），hints 累积到本地 `hint_pool`，下次相似 input 进来自动 inject。
+
+**用户在透明面板**看本月发了多少条、内容是啥、可一键关。
+
+#### N6. 后台 ablation（实验自跑）
+
+每天凌晨低负载（用户不在线）跑 ablation testing：
+- 拿用户最近 100 次 skill 调用做"回放数据"
+- 自动尝试微改动（"删 prompt 第 3 段" / "把第 5 段挪前" / "加 disclaimer"）
+- 用 N1 / N2 信号衡量改动后失败率
+- 删了不变 → 该段冗余，**精简 prompt**；加了变好 → 保留
+- 用户感知：每周 skill 都更准、prompt 更短（=> 用户业务调用 token 更少）
+
+#### N7. 飞轮升级（团队 OTA）
+
+**月度**多用户匿名 stats 汇总到 attune 团队（脱敏 + 用户授权）→ 团队基于全网失败模式调出厂 prompt → 下个 minor 版本所有用户受益：
+- 用户体验 = "升级了 attune，新版更聪明"
+- 团队季度用 Claude 4.5 跑全网 stats 评估，决定 attune-pro baseline 升级
+
+### 15.4 团队 Gateway 架构
+
+```
+用户 attune-desktop / attune-server
+        │
+        │ HTTPS POST  (按 N5/N7 schema)
+        ▼
+https://teacher.attune.ai/api/v1/teach
+        │
+        ├─ 鉴权（attune license key 验证）
+        ├─ 配额检查（当月 cap 500K tok / 用户）
+        ├─ PII 二次验扫（客户端已脱敏，gateway 再扫一遍兜底）
+        ├─ 调度
+        │   ├─ 90% → DeepSeek V3 系列（主力，¥0.5/1M tok）
+        │   ├─ 5% → Qwen-Plus / GLM-4（备份，主模型挂时切换）
+        │   └─ 5%（季度精校时）→ Claude 4.5（团队评估用，非用户实时调用）
+        ├─ 异常检测（突发 100x 调用 → 抑流 + alert）
+        └─ 返回 hints / new_prompt diff
+```
+
+**主模型选型**：
+- **DeepSeek V3 系列**（推荐）—— 中文好、便宜、与教授任务（prompt 评判）品质相当
+- **Claude 4.5 季度兜底**—— 团队 review 时跑全网脱敏 stats，**不**进用户实时路径
+- 用户看不见底层模型选择
+
+### 15.5 配额护栏
+
+| 单用户月度配额 | 500K teacher tokens | 约 ¥0.25 / 月（DeepSeek V3） |
+|:---|:---|:---|
+| 突发抑流 | 1 用户 1h 内 > 100 次远端调用 | 限流 + 内部 alert |
+| 软降级 | 配额耗尽（500K 用完）| 停 N5/N3 远端，仍跑 N4/N6 本地，月底重置 |
+| 滥用检测 | ghost 反复触发但永不收敛 | 暂停该用户 teacher，logs 回团队 review |
+| BYO endpoint 用户 | 走自己 API key | 不消耗团队配额，cap 不适用 |
+
+预算估算：
+
+| 用户规模 | 团队月度成本 |
+|:---|:---|
+| 100 测试 | ¥25/月 |
+| 1000 内测 | ¥250/月 |
+| 1 万付费 | ¥2,500/月 |
+| 10 万付费 | ¥25,000/月（< 订阅收入 5%）|
+
+季度顶级模型（Claude 4.5）：每季 ¥250 — 总额可控。
+
+### 15.6 BYO endpoint（用户自带，opt-in）
+
+合规敏感企业 / 极客本地 Ollama 用户场景：
+
+- Settings → Teacher tab → "BYO Teacher endpoint"
+- 输入 OpenAI 兼容 endpoint + API key（加密存 vault）
+- attune 不走团队 gateway，直接调用户 endpoint
+- 默认**关**，纯 opt-in
+- 数据流：100% 用户控制，team 看不到
+
+### 15.7 隐私护栏（默认安全 → 可以无感开启）
+
+1. **PII 客户端脱敏**（客户端先扫）：人名 / 案号 / 公司名 / 金额 → 占位符
+2. **Gateway 二次扫描**：兜底防止客户端漏扫的 PII
+3. **统计性摘要而非原文**：永远不发 prompt 输入正文 / 用户编辑后的最终版本
+4. **透明面板**（Settings → Teacher tab）展示：
+   - 本月发出 N 条 metadata
+   - 收到 M 条 hints
+   - 当前 prompt diff vs 出厂版（含一键回滚）
+   - 月度团队飞轮 stats 上报开关
+   - "BYO endpoint" 切换
+
+### 15.8 安装时一次性同意（仅一次打扰）
+
+首次启动 attune-desktop（vault 解锁后）弹一次：
+
+> Attune 会观察你的使用习惯（编辑距离 / 复制范围）来自动改进 AI skill。
+>
+> - **本地学习**永远开（同侪 / ablation，零成本零外发）
+> - **云端教授**月度发不超过 ~¥0.3 等值的脱敏摘要给 attune 团队 gateway 获取改进建议——**团队预算承担**，不发原文，不收你额外费用
+>
+> Settings 可随时调整。
+>
+> **[同意 → 全开] [仅本地，不云端] [详细设置]**
+
+之后**永远无感**。
+
+### 15.9 Sprint 节奏（合并到 §9 主路径）
+
+不影响 v0.6 主线（attune-law-personal v0.1 GA）。Teacher 是 v0.7+ 增强：
+
+| Sprint | 周 | 交付 |
+|:---|:---|:---|
+| **8** | 2 | **Phase 1 Feedback 底座**（N1 信号采集 + skill_outcomes 表 + 透明面板雏形）|
+| **9** | 3 | **Mode A** — N3 隐形 A/B + N5 异步 hints + 团队 gateway MVP（DeepSeek V3 + 配额）|
+| **10** | 4 | **Mode B + C** — N4 同侪 + N6 ablation + N7 飞轮 + Claude 4.5 季度评估流水线 |
+
+总额外 9 周到 v0.7+ 完整 Teacher Engine 上线（v0.7 = Phase 1, v0.8 = Mode A, v0.9 = Mode B+C）。
+
+### 15.10 关键风险
+
+| 风险 | 缓解 |
+|:---|:---|
+| DeepSeek V3 中文法律领域 prompt 改写品质不达预期 | 季度跑 Claude 4.5 评估抽样 + golden set 退化检测 |
+| PII 脱敏漏（客户端 + gateway 两道仍漏） | 严格 schema 限制（只允许预定义字段，未在白名单的 key 全 drop） + 红队定期审计 |
+| 用户体验静默退化（A/B ghost 选错版本）| ghost 阶段限定 100 次调用 + 退化阈值 < 90% 才升 + 用户可一键回滚出厂版 |
+| 团队预算超支（10 万用户 × 异常调用） | hard cap + 异常检测 + 监控 dashboard |
+| 滥用做"知识窃取"（用户故意触发大量 teacher 想反向蒸馏 attune 的 skill） | 单用户月度 hard cap + 反复触发 ghost 不收敛 → 暂停该用户 teacher |
+
+---
+
+## 16. 实施前提（替代旧 §14）
+
+- 本 spec 通过用户 review（v1.1 加 §15 Teacher Engine 完）
+- v0.6 主线（§1-§14）按 Sprint 0/0.5/1-7 节奏推进
+- v0.7+（§15）作为单独 spec 拆分时机：v0.6 GA 后 + 100 个真实用户产生 skill_outcomes 数据 → 才启动 Sprint 8
 - 调用 `superpowers:writing-plans` 出每个 Sprint 的实现 plan
 - 每个 Sprint 用 `superpowers:subagent-driven-development` 执行
 - 用 `superpowers:using-git-worktrees` 隔离开发分支
