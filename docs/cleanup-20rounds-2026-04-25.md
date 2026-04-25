@@ -165,3 +165,32 @@
 - Post: 377 passed, 0 failed
 
 ---
+
+## R4 — stale comment 清洗
+
+**Status**: DONE
+**Commit**: 0fe715f
+
+### Findings
+- 总 marker 数 pre: 5 (rust/crates UI 源码; 排除 `dist/`、`node_modules/`、`target/`)
+- 分布: TODO 5 / FIXME 0 / XXX 0 / HACK 0 / TBD 0
+- apps/attune-desktop/src 0 markers
+- `deprecated/已废弃/废弃` 命中 2（chat.rs `/chat/history` doc）— 属事实 API alias 标记，非过时注释
+- `removed/Removed` 命中 3 — 全是变量名 / 测试断言字符串，非历史 changelog
+
+### Removed (5)
+- `rust/crates/attune-server/ui/src/layout/Sidebar.tsx:125` TODO `Phase 6: Cmd+K palette` — palette 已在 `App.tsx` `useShortcut` 实现，stub 改为 `dispatchEvent KeyboardEvent('k', meta)` 触发已有快捷键，TODO 同步删除
+- `rust/crates/attune-server/ui/src/layout/Sidebar.tsx:445` TODO `lock vault` — 模糊 backlog，无 sprint owner，按用户原则删
+- `rust/crates/attune-server/ui/src/layout/Sidebar.tsx:448` TODO `theme toggle` — 同上
+- `rust/crates/attune-server/ui/src/layout/Sidebar.tsx:452` TODO `about` — 同上
+- `rust/crates/attune-server/ui/src/views/ChatView.tsx:115` TODO `Phase 6: 展开模型切换菜单` — 模糊 phase 标记无具体 sprint owner，删；onClick 退化为 noop，feature gap 待 R5/R6 覆盖
+
+### Kept (2)
+- `rust/crates/attune-server/ui/src/views/ChatView.tsx:147` 占位文案字符串 `'搜索关于 XXX 的所有内容'` — i18n 示例占位（EmptyState examples），非注释
+- `rust/crates/attune-server/src/routes/chat.rs:599-600` `/// 已废弃 / @deprecated` doc — `/chat/history` 是 `/chat/sessions` 的事实别名，doc 表达 API 状态而非历史；端点本身去留属 R5 死代码清理范畴
+
+### Tests
+- Pre: 377 passed
+- Post: 377 passed, 0 failed
+
+---
