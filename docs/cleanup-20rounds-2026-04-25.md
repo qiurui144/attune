@@ -1203,3 +1203,73 @@ Python **独有**（Rust 没有）：`/index/reindex`, `/skills*`, `/setup`, `/m
 - ❌ 未删 `idx_history_created`、`idx_click_item`、`idx_click_created` 等 — 这些索引对应的查询路径有（recent_searches / popular_items），保留
 
 ---
+
+## R17 — 主仓 develop 分支 dirty 状态审查
+
+**Status**: DONE
+**Commits**:
+- 主仓 develop: `ff903a7` chore: fix lawcontrol path references + untrack session pid
+- 主仓 develop: `9647466` docs(k3): K3 AI 推理服务文档（CLAUDE.md 已引用）
+- 本日志: 见末尾 git log（worktree 上 cleanup-r17 docs commit）
+
+### 主仓 pre-state
+
+- branch: `develop`
+- HEAD: `ae8bbe5` docs(plan): Sprint 0 + 0.5 implementation plan (Tauri shell + auto-update)
+- dirty files: 6（4 modified + 2 untracked dir）
+  ```
+  M .remember/tmp/save-session.pid
+  M docs/e2e-test-report.md
+  M rust/crates/attune-core/src/plugin_loader.rs
+  M rust/tests/golden/queries.json
+  ?? docs/k3-ai-service/
+  ?? tmp/
+  ```
+
+### 决策表
+
+| 文件 | 改动摘要 | 类别 | 决策 | 主仓动作 |
+|------|---------|------|------|---------|
+| `.remember/tmp/save-session.pid` | session manager 写 pid（每次 session save 自动改） | D - generated artifact | discard 改动 + `git rm --cached` | 入 `ff903a7` |
+| `docs/e2e-test-report.md` | `/data/company/lawcontrol` → `/data/company/project/lawcontrol`（2 处） | B - 真实未提交工作 | commit | 入 `ff903a7` |
+| `rust/crates/attune-core/src/plugin_loader.rs` | 同上路径修正（注释） | B | commit | 入 `ff903a7` |
+| `rust/tests/golden/queries.json` | 同上路径修正（`_corpus_pins.lawcontrol`） | B | commit | 入 `ff903a7` |
+| `docs/k3-ai-service/` (5 files) | K3 RISC-V AI 推理服务文档（CLAUDE.md 多处引用） | B - 正式子文档 | commit | 入 `9647466` |
+| `tmp/k3_benchmark.{py,json,log}` | K3 性能 benchmark 调试脚本（4/19 用过） | C - 调试代码 | `rm -rf tmp/`（CLAUDE.md 规则：调试代码用后删除） | discard |
+
+### 验证：路径修正是真实需要的工作
+
+`grep -n /data/company/lawcontrol` 在 worktree 三个文件中仍有 4 处 hits（worktree 没修），证明 develop 上从未做过修正。主仓 dirty 是**真实的修正工作**，不是冗余覆盖；commit 后将通过 develop 流入未来的 sprint merge。
+
+### Discarded（4 项）
+
+1. `.remember/tmp/save-session.pid` 改动（pid 数字滚动） — generated artifact
+2. `.remember/tmp/save-session.pid` 跟踪状态 — `git rm --cached`，让 `.remember/.gitignore` (`*`) 接管
+3. `tmp/k3_benchmark.py` — 调试代码，已使用
+4. `tmp/k3_benchmark_result.json` + `tmp/k3_benchmark_stdout.log` — 调试代码产物
+
+### Committed to develop
+
+`ff903a7` chore: fix lawcontrol path references + untrack session pid
+- 4 files changed, 4 insertions(+), 5 deletions(-)
+- 含 `delete mode 100644 .remember/tmp/save-session.pid`
+
+`9647466` docs(k3): K3 AI 推理服务文档（CLAUDE.md 已引用）
+- 5 files changed, 653 insertions(+)
+- 新增 docs/k3-ai-service/{README,K3_AI_SERVICE_DEPLOY,K3_AI_SERVICE_DEVELOP}.md
+- 新增 docs/k3-ai-service/achievements/{RISC-V,SpacemiT}_*_Optimization_Results.md
+
+### 主仓 post-state
+
+- branch: `develop`
+- HEAD: `9647466`
+- `git status -s`: **完全干净**（0 行）
+
+### 与 worktree 的关系
+
+- worktree（sprint-0-tauri）的 `CLAUDE.md` / `e2e-test-report.md` 都是 newer 版本，未被本 round 触碰
+- worktree 上的 lawcontrol 路径未修正 4 处会在 sprint 0 merge 到 develop 时自动 resolve（worktree 是 newer，覆盖 develop 的 r17 修正 — 需要在 finishing-branch 阶段手动确认 merge resolution；如发生冲突走"以 worktree 为准 + 把路径修正再叠一次"）
+- 不存在主仓与 worktree 同时改 CLAUDE.md 的风险（主仓的 CLAUDE.md 不 dirty）
+
+---
+
