@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Attune",
+  "version": "0.6.0",
+  "identifier": "ai.attune.desktop",
+  "build": {
+    "frontendDist": "../../rust/crates/attune-server/ui/dist",
+    "beforeBuildCommand": "cd ../../rust/crates/attune-server/ui && npm run build",
+    "beforeDevCommand": "cd ../../rust/crates/attune-server/ui && npm run dev",
+    "devUrl": "http://localhost:5173"
+  },
+  "app": {
+    "windows": [],
+    "security": { "csp": null },
+    "trayIcon": { "iconPath": "icons/icon.png", "iconAsTemplate": false }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi", "deb", "appimage"],
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "publisher": "Attune",
+    "category": "Productivity",
+    "shortDescription": "私有 AI 知识伙伴",
+    "longDescription": "Attune 是一款私有 AI 知识伙伴，主动进化、对话式、混合智能。"
+  }
+}

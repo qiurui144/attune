@@ -1,0 +1,30 @@
+# 独立 workspace：Cargo 不允许 workspace member 路径在 root 之上，
+# 而 rust/Cargo.toml 是 root，apps/ 在它的同级。所以 attune-desktop
+# 用自己的 workspace，通过 path 依赖 attune-server。
+[workspace]
+
+[package]
+name = "attune-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Attune 桌面应用（Tauri 2 shell + 内嵌 attune-server）"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = { version = "2" }
+tauri-plugin-updater = { version = "2" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+attune-server = { path = "../../rust/crates/attune-server" }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+default = ["custom-protocol"]
