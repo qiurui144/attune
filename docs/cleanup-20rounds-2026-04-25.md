@@ -87,7 +87,7 @@
 ## R2 — unused dependencies 扫除
 
 **Status**: DONE
-**Commit**: 55da874
+**Commit**: 34e1c23
 **Tool**: `cargo-machete v0.9.2`
 
 ### Findings (machete report)
