@@ -129,3 +129,39 @@
 - `cargo machete`（两个 workspace）: 0 unused
 
 ---
+
+## R3 — clippy auto-fix
+
+**Status**: DONE
+**Commit**: dc973b2
+
+### Pre/Post warning count
+- rust/ workspace: pre 45 / post 24（净减 21）
+- apps/attune-desktop: pre 0 / post 0（本来就干净）
+
+### Auto-fixed categories
+- `redundant_closure` — `.map_err(|e| VaultError::Io(e))` → `.map_err(VaultError::Io)`（ocr.rs / parser.rs / plugin_sig.rs / scanner.rs / store.rs / chat.rs 共 9 处）
+- `useless_conversion` — `.into()` 在 `&str` 已是目标类型（chat.rs / llm.rs 测试用例）
+- `manual_div_ceil` — `(a + 99) / 100` → `a.div_ceil(100)`（context_compress.rs）
+- `manual_saturating_arithmetic` — `if x > y { x - y } else { 0 }` → `x.saturating_sub(y)`（chunker.rs）
+- `length_comparison` — `assert!(chunks.len() >= 1)` → `assert!(!chunks.is_empty())`（chunker.rs）
+- `bool_comparison` — `== false` → `!`（store.rs）
+- `useless_conversion` — `weighted_results.drain(..).collect()` → `std::mem::take(&mut weighted_results)`（routes/chat.rs）
+- `io_other_error` — `Error::new(ErrorKind::Other, ...)` → `Error::other(...)`（ocr.rs / scanner.rs 3 处）
+- `new_without_default` — 为 `QueueWorker` 加 `impl Default`（queue.rs）
+- 其它 idiom 微调（store.rs `secret.as_bytes().len()` → `secret.len()`）
+
+### Manual review deferred to R4-R5
+- `field_reassign_with_default`（8 处） — Default + 后续赋值，需要看每处是否能整合到 struct literal；R4 注释清洗 / R5 文件粒度审查处理
+- `manual_clamp`（4 处） — `.min(M).max(1)` → `.clamp(1, M)`，需要确认 min < max 不会 panic（patent.rs / 类似路由）；R5 处理
+- `too_many_arguments`（2 处，8/7） — 设计层 lint，需要重构签名；不在 R3-R5 自动 fix 范围
+- `should_implement_trait`（2 处） — `default()` 函数被误认为 trait 方法；需要重命名或加 `#[allow]`；R5
+- `clone_on_ref_ptr`（1 处，`std::slice::from_ref`） — 需要 review 上下文；R5
+- `for_kv_map` / `manual_find` / `empty_line_after_doc_comments`（各 1 处） — 单点小改；R5
+- attune-core lib test 中 18 warnings（10 是主代码 dup） — 测试代码 idiom 待 R5 文件粒度处理
+
+### Tests
+- Pre: 377 passed
+- Post: 377 passed, 0 failed
+
+---
