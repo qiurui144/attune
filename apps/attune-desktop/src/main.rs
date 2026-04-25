@@ -2,7 +2,7 @@
 
 mod embedded_server;
 
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -13,6 +13,15 @@ fn main() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // 重复双击：激活已有主窗口（unminimize + show + focus），第二个进程立即退出
+            tracing::info!("single-instance: another launch detected, focusing existing window");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .setup(|app| {
             // 1. spawn 内嵌 axum
             let _server_handle = embedded_server::spawn_server();
