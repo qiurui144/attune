@@ -72,9 +72,9 @@ extension/                  # Chrome 扩展 (Manifest V3 + Preact + Vite)
 │   ├── content/            # Content Script
 │   │   ├── detector.js     # 平台适配器 (ChatGPT/Claude/Gemini)
 │   │   ├── capture.js      # MutationObserver 对话捕获
-│   │   ├── injector.js     # 无感前缀注入（动态预算）
 │   │   ├── indicator.js    # 状态指示器
 │   │   └── index.js        # 入口整合
+│   │   # 注：injector.js 于 cleanup-r15 删除（2026-04-12 转 RAG 后弃用）
 │   ├── background/worker.js    # 消息路由 + 去重 + 健康检查 + 会话感知加权
 │   ├── sidepanel/
 │   │   ├── pages/SearchPage.jsx

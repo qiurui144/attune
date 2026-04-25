@@ -9,8 +9,7 @@
 import { detectPlatform } from './detector.js';
 import { ConversationCapture } from './capture.js';
 // 2026-04-12: injector 已弃用，产品方向转为内置 Chat + RAG
-// 不再向 AI 网站 DOM 注入内容
-// import { PrefixInjector } from './injector.js';
+// 不再向 AI 网站 DOM 注入内容；injector.js 已于 cleanup-r15 删除
 import { StatusIndicator } from './indicator.js';
 import { MSG, sendToWorker } from '../shared/messages.js';
 

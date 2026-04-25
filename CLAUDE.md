@@ -83,8 +83,8 @@ Attune 是**独立应用**，不依赖任何外部系统在线。硬约束：
 ### Chrome 扩展
 - `content/detector.js` — 平台适配器 (ChatGPT/Claude/Gemini, extractMessage/isComplete/setInputContent)
 - `content/capture.js` — MutationObserver 对话捕获 (djb2 去重, 2s debounce)
-- `content/injector.js` — 无感前缀注入 (capture phase 拦截，动态预算)
 - `content/indicator.js` — 4 状态指示器 (disabled/processing/captured/offline)
+  - 注：原 `content/injector.js`（前缀注入）于 cleanup-r15 删除，产品 2026-04-12 转向内置 Chat + RAG，不再向 AI 网站 DOM 注入
 - `background/worker.js` — 消息路由 + 去重缓存 (session storage) + 30s 健康检查 + 会话感知加权
 - `popup/Popup.jsx` — 连接状态 / 统计 / 注入开关
 - `options/Options.jsx` — 后端地址 / 注入模式 / 排除域名 / 测试连接

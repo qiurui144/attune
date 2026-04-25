@@ -1,12 +1,17 @@
 """Chrome 扩展 E2E 测试 — Playwright Chromium"""
 
+import os
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import sync_playwright
 
-EXT_PATH = "/data/company/project/npu-webhook/extension"
+# cleanup-r15: 旧硬编码 /data/company/project/npu-webhook/extension 已失效（项目改名 attune）
+# 默认相对仓库根目录的 extension/，可用 ATTUNE_EXT_PATH 覆盖
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+EXT_PATH = os.environ.get("ATTUNE_EXT_PATH", str(_REPO_ROOT / "extension"))
 BACKEND_URL = "http://localhost:18900"
 
 # ---------------------------------------------------------------------------
