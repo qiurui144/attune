@@ -578,3 +578,128 @@ bearer_auth_guard 公共白名单（仅 require_auth=true 模式下生效）：`
 - 不立刻给 profile/lock 加 always-auth：当前 require_auth=true 已覆盖 95% 场景；商用前再补
 
 ---
+
+## R10 — 测试覆盖 gap audit
+
+**Status**: DONE (audit-only)
+**Commit**: <填充于 commit 后>
+
+### 测试规模
+
+| 维度 | 数据 |
+|------|------|
+| 总 `#[test]` / `#[tokio::test]` 标注数 | **341** |
+| Unit (内嵌 src/) | 323 |
+| Integration (`crates/*/tests/*.rs`) | 18（6 个文件，363 行） |
+| `cargo test --workspace` baseline | **377 passed**（含 release 测试 + ignored 5）|
+| 源码总行数（剔除 target / tests） | 17,407 |
+| Integration 测试行数 | 363 |
+| 比例 | integration ≈ **2.1%** of src（unit 在源文件 `#[cfg(test)] mod` 中无法直接 wc，估约 25-30% 是 test code） |
+
+`341` 标注 vs `377 passed` 的差异：part of 标注展开为多个 case（参数化）+ 部分位于 release-only / external-only feature gate。
+
+### 测试 / 源码比 — top 10 (按 unit test 数排序)
+
+| 模块 | 源行 | unit test 数 | 状态 |
+|------|------|--------------|------|
+| `attune-core/src/store.rs` | 2403 | 62 | 王者 — happy + error path 全覆盖 |
+| `attune-core/src/annotation_weight.rs` | 266 | 20 | 充分 |
+| `attune-core/src/ai_annotator.rs` | 628 | 20 | **覆盖最完整** — utf16 / cjk / emoji / 截断 json / 段落锚点边界 |
+| `attune-core/src/platform.rs` | 539 | 18 | 充分（chip 匹配表全枚举） |
+| `attune-core/src/vault.rs` | 594 | 16 | 充分 — sealed/unlock/wrong_password/tampered_token/import_invalid_hex |
+| `attune-core/src/search.rs` | 561 | 16 | 充分 — RRF empty/zero_scores/cross-lang/fallback |
+| `attune-core/src/context_compress.rs` | 441 | 16 | 充分 — cache scoping/llm_unavailable/batch_failure |
+| `attune-core/src/parser.rs` | 394 | 11 | OK |
+| `attune-core/src/crypto.rs` | 269 | 11 | OK |
+| `attune-core/src/vectors.rs` | 400 | 10 | OK |
+
+### 完全无任何 `#[test]` 的模块（≥100 行）
+
+按行数倒序排列。**全部都在 `attune-server` crate**，且 17 个 routes 文件全军覆没（没有 inline test）：
+
+| 行 | 文件 | gap 类型 |
+|---:|------|---------|
+| 789 | `attune-server/src/state.rs` | **核心 AppState** — DEK 注入 / Vault 状态机切换 / 锁释放 |
+| 626 | `attune-server/src/routes/chat.rs` | RAG 路由 / 引用拼装 / WebSocket 广播 |
+| 369 | `attune-server/src/routes/annotations.rs` | CRUD + AI 自动批注调度 |
+| 216 | `attune-server/src/lib.rs` | runtime 启动、TLS 初始化（已有 1 个 integration `lib_runtime_test.rs`） |
+| 202 | `attune-server/src/routes/index.rs` | 索引/扫描/状态切换 |
+| 199 | `attune-server/src/routes/search.rs` | 搜索 endpoint 入口 |
+| 172 | `attune-server/src/routes/llm.rs` | provider 切换 + 健康检查 |
+| 170 | `attune-server/src/routes/settings.rs` | 设置读写（含模式切换） |
+| 151 | `attune-server/src/routes/profile.rs` | 行为画像 export / import |
+| 146 | `attune-server/src/routes/patent.rs` | 专利插件路由 |
+| 143 | `attune-server/src/routes/classify.rs` | 分类调度 |
+| 140 | `attune-server/src/routes/upload.rs` | 文件上传（multipart） |
+| 132 | `attune-server/src/routes/clusters.rs` | 聚类结果 endpoint |
+| 131 | `attune-server/src/routes/vault.rs` | unlock / lock / setup |
+| 128 | `attune-server/src/routes/items.rs` | items CRUD |
+| 127 | `attune-server/src/routes/ingest.rs` | ingest endpoint（Chrome 扩展协议） |
+| 117 | `attune-cli/src/main.rs` | CLI 入口 |
+| 112 | `attune-server/src/routes/status.rs` | 状态 endpoint |
+
+合计 **3,431 行 routes 代码无 unit / inline test**。当前唯一覆盖 routes 的是 4 个 integration test 文件（共 18 tests）：
+- `session_test.rs` (120 行) — auth 相关
+- `store_queue_test.rs` (63 行) — store + queue 集成
+- `index_path_test.rs` (52 行) — 索引路径
+- `lib_runtime_test.rs` (35 行) — runtime 烟雾测试
+
+**结论**：`attune-server` 的端到端覆盖严重不足，依赖 manual / Playwright 验证。
+
+### 仅 happy path 的关键 module 抽查
+
+抽查 5 个核心 module 的 test fn 名（看是否有 error / edge case 命名）：
+
+- **vault** — 16 tests，含 `unlock_with_wrong_password_fails` / `setup_twice_fails` / `session_token_tampered_fails` / `import_invalid_hex_fails` / `dek_access_requires_unlock`：✅ **error path 充分**
+- **search** — 16 tests，含 `rrf_fuse_empty` / `rrf_fuse_single_source` / `allocate_budget_zero_scores` / `rerank_fallback_when_no_vector` / `search_with_context_fts_only_fallback`：✅ **edge case 充分**
+- **store** — 62 tests，含 `*_nonexistent_*_fails` / `_returns_none_for_unknown` / `_failed_abandons_after_max`：✅ **error path 充分**
+- **chunker** — **仅 6 tests**：`short_text_single` / `long_text_multiple` / `markdown` / `code` / `empty` / `chinese`。✗ **缺**：overlap 边界、UTF-8 多字节字符在分块边界、超长行（无空格 / 无标点）、混合 RTL（阿拉伯文）边界、二进制污染。
+- **classifier** — 5 tests，含 `invalid_json_errors` / `empty_batch_returns_empty`：基本 error path 有，但缺 LLM 超时 / 部分失败 / schema 不匹配场景
+
+### Gap 清单（按 sprint 推荐）
+
+| 优先级 | 模块 / 端点 | gap 类型 | 推荐 sprint |
+|--------|-------------|---------|------------|
+| **P0** | `attune-server/src/state.rs` (789 行) | 核心状态机零 unit test | Sprint 1（与 Tauri shell 整合同期，state 行为可能变） |
+| **P0** | `attune-server/src/routes/vault.rs` | unlock/lock/setup integration 测试缺 | Sprint 1 |
+| **P0** | `attune-server/src/routes/chat.rs` (626 行) | RAG 路由 / 引用 / 错误传播 | Sprint 1 - 2 |
+| **P0** | `attune-server/src/routes/annotations.rs` | CRUD + AI 批注异步链路 | Sprint 1 |
+| **P1** | `attune-core/src/chunker.rs` | overlap / UTF-8 边界 / 长无空格 case | Sprint 1（小成本，~5 测试） |
+| **P1** | `attune-server/src/routes/upload.rs` | multipart 边界 / 大文件 / 错误格式 | Sprint 2 |
+| **P1** | `attune-server/src/routes/search.rs` | API 错误路径 + 加密 vault 锁定时行为 | Sprint 2 |
+| **P1** | `attune-core/src/classifier.rs` | LLM 超时 / 部分失败 / schema mismatch | Sprint 2 |
+| **P1** | `attune-server/src/routes/ingest.rs` | Chrome 扩展协议向前/向后兼容 | Sprint 2 |
+| **P2** | 其他 routes (settings/llm/profile/patent/clusters/items/status) | 基础 happy path integration | Sprint 3 |
+| **P2** | `attune-cli/src/main.rs` | CLI 子命令 smoke test | Sprint 3 |
+| **P3** | Quality regression suite (`tests/golden/queries.json`) 已存在但未跑 CI | 接 CI 工作流 | Sprint 3+ |
+| **P3** | Performance benchmark layer (criterion) | 缺第 5 层（Performance） | Sprint 4+ |
+
+### 用户语料库测试规范回顾
+
+CLAUDE.md / `docs/TESTING.md` 要求：
+1. ✅ **零随机数据** — 抽查未发现 `rand::gen` / 随机断言（store/vault/search 都用固定 seed/固定输入）
+2. ✅ **真实 GitHub 语料 + 版本固化** — `tests/golden/queries.json` 存在（R8 中改过），`scripts/download-corpora.sh` 应已落地
+3. ⚠️ **六层金字塔** — 当前覆盖：
+   - Unit ✅（323）
+   - Integration ✅（18，但偏少）
+   - **Corpus Integration** ⚠️（golden set 存在但是否在 CI 跑、是否真的拉了 rust-lang/book 待 R8 确认）
+   - **E2E** ⚠️（Playwright 报告在 `docs/e2e-test-report.md`，无自动化 spec 文件）
+   - **Performance** ✗ —— 缺
+   - **Quality Regression** ⚠（golden set 比对脚本未发现）
+4. ✅ **Golden set 存在** — `rust/tests/golden/queries.json`（R8 中也改了一次）
+
+### 缺口结论 + 推荐补丁
+
+**最大盲点**：`attune-server` crate 17 个 routes 全部无 inline test，3,431 行只靠 4 个集成 test 文件（共 18 tests）覆盖。Sprint 1 应至少给 P0 4 项补 axum-test integration test，把 chat/vault/annotations/state 提升到 happy + 1-2 error path 覆盖。
+
+**轻量低成本补刀**：`chunker.rs` 仅 6 tests + 138 行（不含 test 部分），加 5 个边界用例（overlap / utf-8 / 超长无空格 / 极短输入）成本不到 1 小时。
+
+**质量回归 CI 化**：golden set 已有但很可能没接 CI workflow（`.github/workflows/`）。Sprint 2 内可以加一个 `quality-regression.yml`，pull request 触发，对比 precision@K 与 baseline，回归 > 5% 标失败。
+
+### Skip 理由（R10 不做）
+
+- ❌ 不立即补任何测试 — 写新测试是大工作量，违反"R10 audit-only"约束
+- ❌ 不接 tarpaulin / cargo-llvm-cov — 安装编译耗时长（>10 min），结果与 grep 估计差异不大
+- ❌ 不重写 `attune-server/tests/` — Sprint 1 + 2 才合适做
+
+---
