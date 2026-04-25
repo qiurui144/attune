@@ -61,11 +61,11 @@ pub fn detect_ocr_backend() -> Option<OcrBackend> {
 }
 
 fn which_bin(name: &str) -> Option<String> {
-    let out = Command::new("which").arg(name).output().ok()?;
-    if !out.status.success() { return None; }
-    let s = String::from_utf8(out.stdout).ok()?;
-    let s = s.trim();
-    if s.is_empty() { None } else { Some(s.to_string()) }
+    // 跨平台 PATH 查找：Linux/macOS 等价 `which`，Windows 等价 `where`，
+    // 使用 `which` crate 避免 Win 上 `Command::new("which")` 失败。
+    which::which(name)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 fn list_tesseract_languages(tesseract: &str) -> Result<Vec<String>> {

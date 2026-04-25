@@ -803,3 +803,81 @@ prod-path bare unwrap() 剩余总数：0
 - ❌ 不改测试模块内的 unwrap — 测试 panic 即测试失败，是 idiom
 
 ---
+
+## R12 — 跨平台 gap audit（Windows readiness）
+
+**Status**: DONE
+**Commit**: <pending>
+
+R4 已审查 `cfg(unix)` syscall 边界，本轮扩展到全部 6 个跨平台维度，覆盖 Win build 在静态层面的所有已知风险点。
+
+### 6 维度 audit 结果
+
+| 维度 | 扫描命令 | finding | 决策 |
+|------|---------|---------|------|
+| **路径分隔符** | `grep -rnE '"/(home\|tmp\|usr\|...)"'` | prod 仅 `web_search_browser.rs` 5 处 `/usr/bin/...` + `ocr.rs` 测试 fixture 2 处 `/usr/bin/tesseract` — 全部已被 `#[cfg(target_os = "linux")]` / Win 分支 `format!("{pf}\\Google\\Chrome\\...")` 完整覆盖 | ✅ 已合规 |
+| **临时目录 `/tmp`** | `grep -rnE '"/tmp"'` | 仅出现在 `store.rs` `#[cfg(test)]` 模块和 `attune-server/tests/index_path_test.rs` 测试中 — 都是 opaque test fixture，不做 fs IO；prod 代码使用 `tempfile::TempDir`（如 `vault.rs` 测试） | ✅ 已合规 |
+| **行尾 `\n` vs `\r\n`** | `grep -rnE '"\\\\n"'` 排除 println | prod 代码无硬编码 `"\n"` 期望；解析路径使用 `.lines()`（自动处理 `\r\n`）；`String::from_utf8_lossy` 容错 | ✅ 已合规 |
+| **`Command::new(...)` 子进程** | `grep -rnE 'Command::new\('` | 12 处调用：`vault.rs:icacls`(Win cfg)、`platform.rs:sysctl`(macOS cfg×2)、`platform.rs:wmic`(Win cfg×3)、`ocr.rs:which`(**未 cfg — Win 上 fail**)、`ocr.rs:tesseract/pdftoppm`(用配置路径 OK)、`llm.rs:ollama`(跨平台 binary OK) | 1 处需修复 |
+| **文件权限 0o600** | (R4 已审) `std::os::unix` 在 vault.rs:361 `#[cfg(unix)]` 内；Win 走 icacls | ✅ 已合规（R4 验证） |
+| **autocrlf / `.gitattributes`** | `cat .gitattributes` | **不存在 `.gitattributes`** — 若 Win 开发者设置 `core.autocrlf=true`，Rust 源码 `\n` → `\r\n` 转换不影响编译（rustc 容忍 BOM/CRLF），但脚本和 yaml 模板可能受影响 | ⚠ Backlog（低优先） |
+
+### Fix（最小 patch）
+
+**ocr.rs:64 `Command::new("which")` → `which::which()` crate**
+
+R4 implementer 提到的唯一 prod 跨平台缺陷：Win 上 `which` 可执行不存在（Win 用 `where`）。最小修复用 `which` crate（跨平台 PATH 查找，内部按 OS 分发到 `which`/`where` 等价行为）：
+
+- `rust/crates/attune-core/Cargo.toml`：新增 `which = "6"` 依赖
+- `rust/crates/attune-core/src/ocr.rs`：`fn which_bin` 从 `Command::new("which")` 改为 `which::which(name)`
+
+```rust
+fn which_bin(name: &str) -> Option<String> {
+    // 跨平台 PATH 查找：Linux/macOS 等价 `which`，Windows 等价 `where`，
+    // 使用 `which` crate 避免 Win 上 `Command::new("which")` 失败。
+    which::which(name)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+```
+
+**好处**：
+- Win/Linux/macOS 行为完全一致
+- 不再依赖系统 PATH 工具（部分 minimal Win 容器无 `where`）
+- Library 内部处理 PATHEXT / `.exe` 后缀
+
+### Backlog（非阻塞 Win build）
+
+| Item | 说明 | 推荐 sprint |
+|------|------|-------------|
+| `.gitattributes` for line endings | 添加 `* text=auto eol=lf` + `*.{ps1,bat,cmd} text eol=crlf` 防止 Win checkout 转换破坏 shell 脚本 / yaml | Sprint 1（Win 安装包构建期再补，影响范围小） |
+| Tauri shell 集成中的 Linux `desktop-entry` 路径 | `apps/attune-desktop/src-tauri/tauri.conf.json` 若涉及 Linux .desktop 文件路径，Win 时由 Tauri 自动跳过 | 已自动处理（Tauri 内置） |
+| Win MSVC C++ 工具链验证（`usearch`/`rusqlite-bundled`） | 静态分析无法验证 — 需 Win 实际跑 `cargo build` | Sprint 1 / Task 11（CI matrix） |
+
+### Win build 静态评估
+
+| 风险点 | 状态 |
+|--------|------|
+| 路径分隔符 | ✅ 已 cfg 隔离 |
+| `/tmp` 硬编码 | ✅ prod 全用 `tempfile::TempDir` |
+| Unix 权限 (`0o600`) | ✅ R4 已验证 cfg(unix) 隔离 |
+| Unix 命令 (`which`) | ✅ 本轮 fix |
+| Win 命令 (`icacls`/`wmic`) | ✅ 已 cfg(windows) |
+| C/C++ 依赖编译 | ⚠ 需 Win 实跑（Sprint 1 CI matrix） |
+| `\r\n` git checkout | ⚠ 添加 `.gitattributes` 即可（backlog） |
+
+**结论**：纯 Rust 源码层面 attune 应能在 Windows 上 cargo build 成功。剩余风险全部在工具链层（MSVC + git autocrlf），由 Sprint 1 的 CI matrix（Task 11）实测验证。
+
+### Tests
+
+| Phase | 命令 | 结果 |
+|-------|------|------|
+| Pre-fix | `cargo test --workspace` | 377 passed |
+| Post-fix | `cargo test --workspace` | **377 passed**（`which` crate 不改变 Linux 上的 fn 行为） |
+
+### Skip 理由
+
+- ❌ 不添加 `.gitattributes` — Sprint 0 worktree 仍在 Linux 单平台，Win 实跑前没法验证规则正确性，留给 Sprint 1 CI matrix 一起做
+- ❌ 不重写 ocr.rs / parser.rs 跨平台逻辑 — 静态分析未发现其他缺陷，过度重写引入新 bug 风险高于收益
+
+---
