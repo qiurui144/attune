@@ -271,7 +271,7 @@ dependencies = [
  "axum",
  "axum-server",
  "clap",
- "dirs 5.0.1",
+ "dirs 6.0.0",
  "lru",
  "reqwest",
  "serde",

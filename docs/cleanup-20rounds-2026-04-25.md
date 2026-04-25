@@ -357,3 +357,49 @@ Sprint 0（Tauri shell）/ Sprint 0.5（行业版定位）/ Sprint 1（进行中
 - `cargo test --release --workspace -- --test-threads=2`：**377 passed, 0 failed**（与 baseline 一致）
 
 ---
+
+## R7 — workspace 一致性 audit
+
+**目标**：4 维度一致性扫描 + 保守 fix（不为 OCD 全提取，仅 ≥3 处重复 dep）。
+
+### 4 维度审查结果
+
+| 维度 | 现状 | 决策 |
+|------|------|------|
+| edition / rust-version | rust 工作区 3 个 crate 已经 `workspace.package` 继承 `2021` / `1.75`；apps/attune-desktop 独立 manifest 但值相同 | ✅ skip — 已一致 |
+| `[workspace.dependencies]` | 不存在该 section。跨 crate 重复声明：tokio×5, serde_json×5, serde×3, reqwest×3 | 🔧 fix — 提取这 4 个高频 dep |
+| `[workspace.lints]` | 不存在该 section | 🔧 fix — 加最小集（rust.unsafe_code=warn + clippy.all=warn priority=-1）；不上 deny 避免阻塞现有 16 个 warning |
+| version pinning 风格 | 全 caret（隐式 `^X.Y`，无 `=` 无 `~`） | ✅ skip — 已一致 |
+
+### 顺手修的不一致（bonus）
+
+- `dirs` 版本不一致：attune-core 用 `"6"`，attune-server 用 `"5"` → 通过 workspace.dependencies 统一到 `"6"`（attune-server 实际只 import `dirs::config_dir` 类常用 API，5→6 升级无 breaking）
+
+### Fix 项
+
+1. `rust/Cargo.toml`：新增 `[workspace.dependencies]`（5 项：tokio / serde / serde_json / reqwest / dirs）+ `[workspace.lints.rust]`（unsafe_code=warn）+ `[workspace.lints.clippy]`（all=warn priority=-1）
+2. `rust/crates/attune-core/Cargo.toml`：tokio / serde / serde_json / reqwest / dirs 改 `workspace = true`；reqwest 保留 crate 内追加 `["blocking"]` feature；新增 `[lints] workspace = true`
+3. `rust/crates/attune-server/Cargo.toml`：tokio / serde / serde_json / dirs 改 `workspace = true`；dev-deps 的 reqwest / tokio 同步；`dirs` 从 `"5"` 升级到 workspace `"6"`；新增 `[lints] workspace = true`
+4. `rust/crates/attune-cli/Cargo.toml`：serde_json 改 `workspace = true`；新增 `[lints] workspace = true`
+5. `rust/Cargo.toml` (root crate dev-deps)：tokio / serde_json 改 `workspace = true`
+
+### Skip 项
+
+- 不提取仅 1-2 处用的 dep（如 axum / tower-http / clap / tracing 等）— 避免 workspace.toml 膨胀
+- 不动 apps/attune-desktop 的独立 workspace 结构（spec §6.5.3 决策保留，且独立 lock 是有意为之）
+- attune-core 内部独有的 dep（rusqlite / usearch / tantivy / ort 等大头）— 不是跨 crate 重复，无需提取
+- 不上严格 clippy / rust deny — 现有 16 个 warning 都是 R3 之后剩余的 dead_code / unused_imports，下沉到 R8 backlog 单独清
+
+### 验证
+
+- `cargo check --workspace --all-targets`：通过，**16 warning**（clippy.all=warn 把已有的 dead_code / unused 显式化，无新增结构性 warn）
+- `cargo build --release --workspace`：通过
+- `cargo build --release` (apps/attune-desktop)：通过
+- `cargo test --release --workspace -- --test-threads=2`：**377 passed, 0 failed, 5 ignored**（baseline 完全保住）
+
+### R8 backlog
+
+- 16 个剩余 warning 中 dead_code 部分（chat::with_web_search / queue::start/stop/process_batch/process_embed_batch）— R6 已降级到 pub(crate)，可在 R8 直接删
+- 评估是否上 `clippy::pedantic` 子集（如 `needless_pass_by_value` / `redundant_clone`）作为 warn
+
+---

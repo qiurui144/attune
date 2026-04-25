@@ -10,6 +10,29 @@ edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
 
+# 跨 crate 重复声明 ≥ 3 处的高频 dep 在此统一版本与 feature。
+# 各 crate 用 `dep.workspace = true` 引用；如需追加 feature，使用
+# `dep = { workspace = true, features = [...] }`。
+# 仅提取真正重复的，单 crate 用的 dep 不放这里（避免 workspace.toml 膨胀）。
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+# dirs：原 attune-core=6 / attune-server=5 不一致，统一到 6
+dirs = "6"
+
+# Lints：所有 crate 共用一份，避免每 crate 重复声明。
+# 当前 baseline：R3 后剩余 24 个 clippy warning，先用 default deny 级别保留现状，
+# 不引入新硬性禁令避免触发额外 warn → R8 按需逐项收紧。
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+# 默认开 clippy::all（warn 级别），不升 deny 避免现有 warning 阻塞 build
+# 业务代码新增禁令应通过 PR 单独评估
+all = { level = "warn", priority = -1 }
+
 [package]
 name = "attune"
 version = "0.1.0"
@@ -19,12 +42,12 @@ publish = false
 [dev-dependencies]
 attune-core = { path = "crates/attune-core" }
 attune-server = { path = "crates/attune-server" }
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }
 axum = { version = "0.8", features = ["json"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
-serde_json = "1"
+serde_json = { workspace = true }
 
 [[test]]
 name = "server_test"
