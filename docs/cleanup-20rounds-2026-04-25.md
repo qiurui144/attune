@@ -1210,7 +1210,7 @@ Python **独有**（Rust 没有）：`/index/reindex`, `/skills*`, `/setup`, `/m
 **Commits**:
 - 主仓 develop: `ff903a7` chore: fix lawcontrol path references + untrack session pid
 - 主仓 develop: `9647466` docs(k3): K3 AI 推理服务文档（CLAUDE.md 已引用）
-- 本日志: 见末尾 git log（worktree 上 cleanup-r17 docs commit）
+- 本日志（worktree feature/sprint-0-tauri-shell）: `6a7c974` docs(cleanup-r17): main repo dirty state audit + cleanup
 
 ### 主仓 pre-state
 
