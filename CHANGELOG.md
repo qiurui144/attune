@@ -19,11 +19,7 @@
 ### Planned
 - 插件签名校验骨架（ed25519）— 为商业插件 registry 铺路
 - 激活码离线校验（HMAC-SHA256(plan, expiry, device_fp)）— 为 Pro/Pro+ 订阅铺路
-- **产品协同落地**（与 lawcontrol 共用 PluginHub / SSO / 官网，详见 `docs/product-collaboration-plan.md`）
-  - PluginHub 扩 `product_line` 字段
-  - Attune CLI `plugin install` 命令对接 PluginHub API
-  - Keycloak SSO 打通两产品账号
-  - 律师插件 output schema 对齐 lawcontrol `contract_review`
+- 律师 vertical 落地（参考 lawcontrol 的 plugin / RPA / Intent Router 设计模式，独立实现，不调其 API；详见 `CLAUDE.md` 「独立应用边界」段落与 `docs/superpowers/specs/2026-04-25-industry-attune-design.md`）
 
 ## [0.5.x] — 2026-04-18
 
@@ -59,9 +55,7 @@
 
 ### Docs
 
-- 新增 `docs/regression-report-2026-04-18.md`（10 phase · 57 断言 · 全过）
-- 新增 `docs/audit-20-rounds-2026-04-18.md`（20 轮全项目审计）
-- README / DEVELOP / RELEASE 同步更新
+- README / DEVELOP / RELEASE 同步更新（10 phase · 57 断言 Playwright 回归全过 + 20 轮全项目审计原始记录见 git history）
 
 ### License
 

@@ -78,8 +78,7 @@
 ### 测试 / 回归
 
 - 单元测试 **213 → 299**（+86），零回归
-- 完整 Playwright 回归：**10 Phase / 57 显式断言 / 100% 通过**
-  （报告：`docs/regression-report-2026-04-18.md`）
+- 完整 Playwright 回归：**10 Phase / 57 显式断言 / 100% 通过**（最新报告见 `docs/e2e-test-report.md`）
 - 每个 batch 两轮独立 code review，共 **12 轮审查**
   - 关闭 6 轮审查中的 **34+ 个 CRITICAL/IMPORTANT 问题**
   - 包括：prefix-anchor 终点越界 · soft-delete 孤立批注 · 子串匹配 footgun · vault 锁饥饿 · spawn_blocking silent drop · allocate_budget 导致缓存永不命中 · CJK token 2× 低估 · 等

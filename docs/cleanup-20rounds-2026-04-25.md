@@ -403,3 +403,55 @@ Sprint 0（Tauri shell）/ Sprint 0.5（行业版定位）/ Sprint 1（进行中
 - 评估是否上 `clippy::pedantic` 子集（如 `needless_pass_by_value` / `redundant_clone`）作为 warn
 
 ---
+
+## R8 — docs/ 目录冗余清理
+
+### 目标
+
+`docs/` 31 个 .md 经过盘点：spec / plan 全保留（工程产物）；删一次性运营文档与已被取代的 spec；不新增 .md（用户原则）。
+
+### 决策表
+
+| 文件 | 行数 | 决策 | 理由 |
+|------|------|------|------|
+| docs/audit-20-rounds-2026-04-18.md | 213 | delete | 04-18 一次性审计，问题已落到 cleanup-2026-04-25 与 sprint-0 plan，git history 可追溯 |
+| docs/regression-report-2026-04-18.md | 29 | delete | 一次性回归快照；e2e-test-report.md 是持续主报告 |
+| docs/session-handoff-2026-04-18.md | 149 | delete | 一次性交接备忘，已远过期（提到旧 npu-webhook 路径） |
+| docs/product-collaboration-plan.md | 371 | delete | 已 DEPRECATED；CLAUDE.md「独立应用边界」段落覆盖；保留 = 噪音 |
+| docs/superpowers/specs/2026-04-12-desktop-app-architecture.md | 1048 | delete | 旧 vault-desktop subprocess 架构，已被 04-25 industry-attune-design §1 + sprint-0-tauri-shell plan 完全取代（当前已实施 Tauri 2 单进程） |
+| docs/superpowers/specs/2026-04-12-project-integrity-assessment.md | 402 | delete | 一次性评估报告（0-5 自评分），非 spec；问题已被 04-18 审计与 cleanup-2026-04-25 取代 |
+| 其余 25 个文件 | — | keep | spec / plan / TESTING / cleanup log / e2e-report / k3 资料全保留 |
+
+### 删除项
+
+```
+git rm docs/audit-20-rounds-2026-04-18.md
+git rm docs/regression-report-2026-04-18.md
+git rm docs/session-handoff-2026-04-18.md
+git rm docs/product-collaboration-plan.md
+git rm docs/superpowers/specs/2026-04-12-desktop-app-architecture.md
+git rm docs/superpowers/specs/2026-04-12-project-integrity-assessment.md
+```
+
+### 链接修复（防止 broken link）
+
+- `CHANGELOG.md` L22：`docs/product-collaboration-plan.md` → `CLAUDE.md` 独立应用边界 + `docs/superpowers/specs/2026-04-25-industry-attune-design.md`
+- `CHANGELOG.md` L62-63：移除"新增 regression-report / audit"两行（信息已在 e2e-test-report.md + git history）
+- `rust/RELEASE.md` L82：`docs/regression-report-2026-04-18.md` → `docs/e2e-test-report.md`
+
+### 验证
+
+```
+find docs -name '*.md' | wc -l
+# pre: 31  post: 25
+grep -rn 'product-collaboration-plan\|regression-report-2026-04-18\|audit-20-rounds-2026-04-18\|session-handoff-2026-04-18\|2026-04-12-desktop-app-architecture\|2026-04-12-project-integrity-assessment' --include='*.md' --include='*.rs' --include='*.toml' /data/company/project/attune/.worktrees/sprint-0-tauri
+# → 0 hit（broken link 全清）
+```
+
+### Skip 项
+
+- 不删任何 plan（用户明确：保留每个 spec / plan 文件作历史路线图）
+- 不删 docs/superpowers/specs/2026-03-* 与 2026-04-1[14] 早期 spec — 是 plan 的 design spec，与 plan 配对存在
+- 不合并主题相近的 spec（每个 spec 是独立时间点决策快照，合并会丢失上下文）
+
+---
