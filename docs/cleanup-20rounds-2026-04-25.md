@@ -582,7 +582,7 @@ bearer_auth_guard 公共白名单（仅 require_auth=true 模式下生效）：`
 ## R10 — 测试覆盖 gap audit
 
 **Status**: DONE (audit-only)
-**Commit**: <填充于 commit 后>
+**Commit**: `f27e231`
 
 ### 测试规模
 
