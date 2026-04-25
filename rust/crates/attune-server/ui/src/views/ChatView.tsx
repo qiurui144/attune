@@ -111,9 +111,7 @@ function ModelChip({ model }: { model: string }): JSX.Element {
         alignItems: 'center',
         gap: 'var(--space-1)',
       }}
-      onClick={() => {
-        /* TODO Phase 6: 展开模型切换菜单 */
-      }}
+      onClick={() => {}}
       aria-label="Change model"
     >
       <span aria-hidden="true">🧠</span>

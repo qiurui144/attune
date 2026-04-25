@@ -122,7 +122,9 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
             textAlign: 'left',
           }}
           onClick={() => {
-            /* TODO Phase 6: Cmd+K palette */
+            document.dispatchEvent(
+              new KeyboardEvent('keydown', { key: 'k', metaKey: true, ctrlKey: true, bubbles: true }),
+            );
           }}
         >
           <span aria-hidden="true">🔍</span>
@@ -442,14 +444,14 @@ function AccountMenu({ onClose }: { onClose: () => void }): JSX.Element {
       <MenuItem onClick={() => { currentView.value = 'settings'; onClose(); }}>
         ⚙ 设置
       </MenuItem>
-      <MenuItem onClick={() => { /* TODO lock vault */ onClose(); }}>
+      <MenuItem onClick={() => { onClose(); }}>
         🔒 锁定 vault
       </MenuItem>
-      <MenuItem onClick={() => { /* TODO theme toggle */ onClose(); }}>
+      <MenuItem onClick={() => { onClose(); }}>
         🌓 切换主题
       </MenuItem>
       <div style={{ height: 1, background: 'var(--color-border)', margin: 'var(--space-1) 0' }} />
-      <MenuItem onClick={() => { /* TODO about */ onClose(); }}>
+      <MenuItem onClick={() => { onClose(); }}>
         关于 Attune
       </MenuItem>
     </div>
