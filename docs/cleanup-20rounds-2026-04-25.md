@@ -1273,3 +1273,74 @@ Python **独有**（Rust 没有）：`/index/reindex`, `/skills*`, `/setup`, `/m
 
 ---
 
+## R18 — 旧 worktree 清理
+
+**Status**: DONE
+
+### worktree pre-state
+
+```
+/data/company/project/attune                              9647466 [develop]
+/data/company/project/attune/.worktrees/phase3-long-text  233e6f8 [feature/phase3-long-text]
+/data/company/project/attune/.worktrees/sprint-0-tauri    5c2dd9b [feature/sprint-0-tauri-shell]
+```
+
+### phase3-long-text 状态
+
+- 分支: `feature/phase3-long-text`
+- HEAD: `233e6f8` (`feat: add system tray entry point (pystray + uvicorn thread)`)
+- 上次 commit: **2026-03-20 11:11**（停滞 36 天）
+- ahead of develop: **15 commits**
+- behind develop: **157 commits**
+- merged into develop?: **NO**
+- merged into main?: **NO**
+- working tree dirty?: **NO**（`git status -s` 空）
+- stash: 1 个（`stash@{0}: On feature/search-rerank-infer: session pid` — 字面量 `session pid`，是 PID 文件残留，无价值）
+
+### 内容性质
+
+15 个 ahead commits 全是 **Python 原型线**早期工作：
+- sidepanel file tab + uploadFile API
+- session-aware score weighting
+- system tray (pystray + uvicorn thread)
+- FilePage uid 防同名冲突
+
+主线 develop 的里程碑（v0.5.x 改名 Attune + 浏览器搜索重构 + 双语 README + Sprint 0 Tauri shell）已经超过这些早期实验，且产品定位已转向 Rust 商用线 + 内置 Chat（见 feedback_product_direction.md）。Python 原型 sidepanel 的早期分支在新方向下不再有价值。
+
+### 决策
+
+**Case B — 未 merge + 有 commits + 停滞 > 1 个月 + 工作区干净**
+
+按用户原则"开发期不留兼容包袱" + "调试代码使用后删除" + 产品方向已切换 → **删除 worktree，保留分支**。
+
+`git worktree remove` 默认不删 ref，15 commits 仍可通过 `feature/phase3-long-text` 分支恢复，零数据丢失。
+
+风险接受：stash 内容是 `session pid` 字面（PID 文件残留），不是有价值的代码改动 — 一并随 worktree 释放。
+
+### 应用
+
+```bash
+git worktree remove .worktrees/phase3-long-text   # 无 --force，git 自然检查通过
+```
+
+退出码 `0`，未触发任何强制清理。
+
+### post-state
+
+```
+/data/company/project/attune                            9647466 [develop]
+/data/company/project/attune/.worktrees/sprint-0-tauri  5c2dd9b [feature/sprint-0-tauri-shell]
+```
+
+`.worktrees/` 目录只剩 `sprint-0-tauri/`（活动 worktree），`phase3-long-text/` 已被 git 完全清除。分支 `feature/phase3-long-text` 仍在本地 ref 中（`git branch --list` 验证），可需要时 checkout 恢复。
+
+### 不变量
+
+- **绝对未碰** `.worktrees/sprint-0-tauri/`
+- **绝对未** `git worktree remove --force`
+- **绝对未** push
+- 主仓 develop HEAD 不变（`9647466`）
+- 分支 ref 未删，15 commits 可恢复
+
+---
+
