@@ -33,7 +33,7 @@ serde_yaml = "0.9"
 tempfile = "3"
 pdf-extract = "0.8"
 zip = "2"
-ort = { version = "2.0.0-rc.12", features = ["cuda", "ndarray"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "tracing", "tls-native", "copy-dylibs", "api-24", "download-binaries"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 hf-hub = "0.3"
 ndarray = "0.16"
@@ -43,3 +43,9 @@ futures = "0.3"
 # P1: 插件签名校验 (ed25519) —— 预留，PluginHub 上线前官方公钥占位
 ed25519-dalek = "2"
 base64 = "0.22"
+
+[features]
+default = []
+cuda = ["ort/cuda"]
+directml = ["ort/directml"]
+coreml = ["ort/coreml"]
