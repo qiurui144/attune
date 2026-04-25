@@ -55,7 +55,7 @@
 ## R1 — dead_code warning 扫除
 
 **Status**: DONE
-**Commit**: <pending>
+**Commit**: 5fa6105c27baf01411d35245ba3f747cc8bf415c
 
 ### Findings
 - `rust/crates/attune-core/src/embed.rs:48` — `struct EmbedRequest<'a>` never constructed — **删除**（已被第 113 行 `serde_json::json!()` 内联构造取代，是历史遗留）
