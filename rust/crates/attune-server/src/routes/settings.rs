@@ -72,6 +72,7 @@ pub async fn update_settings(
         "injection_mode", "injection_budget", "excluded_domains",
         "search", "embedding", "web_search", "llm",
         "summary_model", "context_strategy", "theme", "language",
+        "skills",  // Sprint 2 Skills Router: { disabled: string[] }
     ];
     // URL 字段白名单 scheme 校验（防 javascript: / data: 注入成 XSS 种子）
     if let Some(body_obj) = body.as_object() {
@@ -90,6 +91,17 @@ pub async fn update_settings(
                 if bp.starts_with('-') {
                     return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
                         "error": "web_search.browser_path cannot start with '-' (argv injection risk)"
+                    }))));
+                }
+            }
+        }
+        // Sprint 2 Skills Router: 校验 skills.disabled 必须是 string[]
+        if let Some(skills_obj) = body_obj.get("skills").and_then(|v| v.as_object()) {
+            if let Some(d) = skills_obj.get("disabled") {
+                let arr_ok = d.as_array().map(|arr| arr.iter().all(|x| x.is_string())).unwrap_or(false);
+                if !arr_ok {
+                    return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                        "error": "skills.disabled must be an array of strings"
                     }))));
                 }
             }
@@ -155,6 +167,9 @@ fn default_settings(recommended_summary: &str) -> serde_json::Value {
         "embedding": {
             "model": "bge-m3",
             "ollama_url": "http://localhost:11434"
+        },
+        "skills": {
+            "disabled": []
         },
 
         // ── 不在 UI 暴露（保留后端行为）──
