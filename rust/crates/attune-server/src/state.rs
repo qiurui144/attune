@@ -59,10 +59,14 @@ pub struct AppState {
     /// 防止重复启动 SkillEvolver 后台线程
     pub evolve_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
+    /// Sprint 1 Phase B: project recommendation broadcast channel.
+    /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
+    pub recommendation_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 
 impl AppState {
     pub fn new(vault: Vault, require_auth: bool) -> Self {
+        let (recommendation_tx, _rx) = tokio::sync::broadcast::channel::<serde_json::Value>(64);
         Self {
             vault: Mutex::new(vault),
             fulltext: Mutex::new(None),
@@ -86,6 +90,7 @@ impl AppState {
             )),
             // 启动时检测一次硬件，后续复用（避免每次 GET/PATCH 都同步读 /proc 等）
             hardware: attune_core::platform::HardwareProfile::detect(),
+            recommendation_tx,
         }
     }
 
