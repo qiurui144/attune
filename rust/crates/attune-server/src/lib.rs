@@ -95,6 +95,20 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/patent/databases", get(routes::patent::databases))
         .route("/api/v1/profile/export", get(routes::profile::export))
         .route("/api/v1/profile/import", post(routes::profile::import))
+        // Projects / Case 卷宗（Sprint 1 Phase B）
+        .route(
+            "/api/v1/projects",
+            get(routes::projects::list_projects).post(routes::projects::create_project),
+        )
+        .route("/api/v1/projects/{id}", get(routes::projects::get_project))
+        .route(
+            "/api/v1/projects/{id}/files",
+            get(routes::projects::list_project_files).post(routes::projects::add_file_to_project),
+        )
+        .route(
+            "/api/v1/projects/{id}/timeline",
+            get(routes::projects::list_project_timeline),
+        )
         .route("/api/v1/behavior/click", post(routes::behavior::log_click))
         .route("/api/v1/behavior/history", get(routes::behavior::history))
         .route("/api/v1/behavior/popular", get(routes::behavior::popular))

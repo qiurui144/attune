@@ -12,6 +12,7 @@ pub mod llm;
 pub mod patent;
 pub mod plugins;
 pub mod profile;
+pub mod projects;
 pub mod remote;
 pub mod search;
 pub mod settings;
