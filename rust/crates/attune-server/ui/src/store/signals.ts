@@ -27,6 +27,7 @@ export const wizardState = signal<WizardState | null>(null);
 export type View =
   | 'chat'
   | 'items'
+  | 'projects'
   | 'remote'
   | 'knowledge'
   | 'settings';
@@ -88,6 +89,46 @@ export type BackgroundTask = {
   message: string;
 };
 export const backgroundTasks = signal<BackgroundTask[]>([]);
+
+// ── Sprint 1 Phase D-2: ws 推送的推荐 / workflow 完成通知 ──────────
+export type RecommendationCandidate = {
+  project_id: string;
+  project_title: string;
+  score: number;
+  overlapping_entities: string[];
+};
+
+export type RecommendationPayload =
+  | {
+      type: 'project_recommendation';
+      trigger: 'file_uploaded';
+      file_id: string;
+      candidates: RecommendationCandidate[];
+    }
+  | {
+      type: 'project_recommendation';
+      trigger: 'chat_keyword';
+      matched_keywords?: string[];
+      suggestion?: string;
+    };
+
+export type WorkflowCompletePayload = {
+  type: 'workflow_complete';
+  workflow_id: string;
+  file_id: string;
+  project_id?: string;
+};
+
+/** 队列：每条推荐作为右下角浮窗显示，用户点接受 / 忽略消失 */
+export const recommendations = signal<RecommendationPayload[]>([]);
+
+export function pushRecommendation(payload: RecommendationPayload): void {
+  recommendations.value = [...recommendations.value, payload];
+}
+
+export function dismissRecommendation(index: number): void {
+  recommendations.value = recommendations.value.filter((_, i) => i !== index);
+}
 
 // ── Computed ────────────────────────────────────────────────────
 export const canChat = computed(

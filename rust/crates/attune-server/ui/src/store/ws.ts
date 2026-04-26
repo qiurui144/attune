@@ -4,8 +4,16 @@
  * 自动重连（指数回退 500 → 30s），写入 backgroundTasks signal 供 sidebar 显示。
  */
 
-import { backgroundTasks } from './signals';
-import type { BackgroundTask } from './signals';
+import {
+  backgroundTasks,
+  pushRecommendation,
+} from './signals';
+import type {
+  BackgroundTask,
+  RecommendationPayload,
+  WorkflowCompletePayload,
+} from './signals';
+import { toast } from '../components';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -48,7 +56,7 @@ function connect(): void {
   ws.onmessage = (ev) => {
     try {
       const payload = JSON.parse(ev.data);
-      applyProgress(payload);
+      dispatch(payload);
     } catch {
       /* ignore malformed */
     }
@@ -66,6 +74,37 @@ function scheduleReconnect(): void {
     if (!stopped) connect();
   }, backoff);
   backoff = Math.min(backoff * 2, MAX_BACKOFF);
+}
+
+/**
+ * Sprint 1 Phase D-2: 按 payload.type 分流。
+ *
+ * - "progress"               → applyProgress（沿用旧逻辑）
+ * - "project_recommendation" → 推入 recommendations 信号，UI 出右下角气泡
+ * - "workflow_complete"      → 走 toast 系统短暂提示
+ * - 无 type 字段             → 兼容旧汇总格式（pending_embeddings…）
+ */
+function dispatch(payload: Record<string, unknown>): void {
+  const ty = typeof payload.type === 'string' ? payload.type : undefined;
+  if (ty === 'project_recommendation') {
+    pushRecommendation(payload as unknown as RecommendationPayload);
+    return;
+  }
+  if (ty === 'workflow_complete') {
+    const wf = payload as unknown as WorkflowCompletePayload;
+    const fileTail =
+      typeof wf.file_id === 'string' && wf.file_id.length >= 8
+        ? wf.file_id.slice(0, 8)
+        : (wf.file_id ?? '');
+    toast(
+      'success',
+      `工作流 ${wf.workflow_id} 已完成 · file ${fileTail}`,
+      5000,
+    );
+    return;
+  }
+  // type === 'progress' 或无 type → 旧 progress 处理路径
+  applyProgress(payload);
 }
 
 function applyProgress(payload: Record<string, unknown>): void {

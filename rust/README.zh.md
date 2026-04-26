@@ -254,6 +254,15 @@ Master Password (用户记忆)  +  Device Secret (设备文件, 256-bit 随机)
 - WS 推送：`{"type": "workflow_complete", ...}` 跑完后通知前端
 - Sprint 2 将通过 Intent Router 接真实 LLM，并把 yaml 外提到 attune-law plugin
 
+### UI 通知（Sprint 1 Phase D）
+
+WebSocket `/ws/scan-progress` 现在复用三种消息类型：
+- `progress` — embedding 队列 / classifier 计数（已有）
+- `project_recommendation` — 文件上传触发候选 Project 列表（含 overlap 分数）；chat 关键词触发归类提示
+- `workflow_complete` — Sprint 2 plugin 注册的 workflow 跑完时下发；右上角 banner toast
+
+前端在右下角渲染 RecommendationOverlay（接受 / 忽略），workflow 完成复用 Toast。
+
 ### 索引与系统
 
 | 方法 | 路径 | 说明 |

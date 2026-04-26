@@ -1,13 +1,13 @@
 //! ProjectRecommender 集成测试 — 用 in-memory Store 模拟现实推荐。
 
 use attune_core::project_recommender::{recommend_for_chat, recommend_for_file};
-use attune_core::store::{ProjectKind, Store};
+use attune_core::store::Store;
 
 /// 工具：在 in-memory store 上建一个 project 并放入若干文件归属（mock：file 内容由调用方传 entities）。
 fn setup_store_with_project(project_title: &str, file_ids: Vec<&str>) -> (Store, String) {
     let store = Store::open_memory().expect("open memory store");
     let p = store
-        .create_project(project_title, ProjectKind::Case)
+        .create_project(project_title, "generic")
         .expect("create project");
     for file_id in &file_ids {
         store

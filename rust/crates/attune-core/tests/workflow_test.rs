@@ -96,14 +96,14 @@ fn runner_fails_fast_on_unknown_op() {
 // Task 3: deterministic ops 集成测试（find_overlap）
 // ---------------------------------------------------------------------------
 
-use attune_core::store::{ProjectKind, Store};
+use attune_core::store::Store;
 use attune_core::workflow::ops::run_deterministic;
 
 #[test]
 fn deterministic_op_find_overlap_lists_project_files() {
     let store = Store::open_memory().expect("open memory store");
     let p = store
-        .create_project("案件 A", ProjectKind::Case)
+        .create_project("Project A", "generic")
         .expect("create project");
     store
         .add_file_to_project(&p.id, "file-001", "evidence")
@@ -145,37 +145,3 @@ fn deterministic_op_find_overlap_missing_project_id() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Task 4: builtin evidence_chain_inference workflow 端到端
-// ---------------------------------------------------------------------------
-
-#[test]
-fn builtin_evidence_chain_loads_and_runs() {
-    use attune_core::workflow::evidence_chain_inference_workflow;
-
-    let store = Store::open_memory().expect("open");
-    let p = store
-        .create_project("案件 X", ProjectKind::Case)
-        .expect("create");
-
-    let wf = evidence_chain_inference_workflow();
-    assert_eq!(wf.id, "law-pro/evidence_chain_inference");
-    assert_eq!(wf.steps.len(), 4);
-
-    let mut data = BTreeMap::new();
-    data.insert("file_id".into(), json!("file-1"));
-    data.insert("project_id".into(), json!(p.id));
-    let event = WorkflowEvent {
-        event_type: "file_added".into(),
-        data,
-    };
-
-    let result = run_workflow(&wf, &event, Some(&store)).expect("run");
-    assert_eq!(result.workflow_id, "law-pro/evidence_chain_inference");
-    // 应有 entities (skill mock) + related_files (find_overlap real)
-    assert!(result.outputs.contains_key("entities"));
-    assert!(result.outputs.contains_key("related_files"));
-    // inference 是 skill mock，存为 'inference' key
-    assert!(result.outputs.contains_key("inference"));
-    // render 没 output 字段，所以 state 里不会有它
-}

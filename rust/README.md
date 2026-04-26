@@ -249,6 +249,15 @@ All endpoints are prefixed with `/api/v1/`. Localhost access is auth-free; remot
 - WS push: `{"type": "workflow_complete", "workflow_id": "...", "file_id": "...", "project_id": "..."}` after run.
 - Sprint 2 will wire real LLM via Intent Router and externalize the workflow yaml to attune-law plugin.
 
+### UI Notifications (Sprint 1 Phase D)
+
+WebSocket `/ws/scan-progress` now multiplexes three message types:
+- `progress` — embedding queue / classifier counts (existing)
+- `project_recommendation` — file_uploaded triggers candidate list with overlap score; chat keyword triggers hint suggestion
+- `workflow_complete` — Sprint 2 plugin-registered workflows complete; banner toast top-right
+
+The frontend renders a bottom-right RecommendationOverlay (accept/dismiss) and reuses Toast for workflow completion.
+
 ### Chat & sessions
 
 | Method | Path | Description |

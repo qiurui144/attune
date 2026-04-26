@@ -653,7 +653,7 @@ directml = ["ort/directml"]          # Windows 核显/独显
 |:---|:---|:---|:---|:---|
 | **0** | 0.5 | 跨平台编译卫生（ort feature 拆 / cfg 补全 / Win MSVC build 通） | — | — |
 | **0.5** | 1.5 | **Tauri 2 桌面壳**（apps/attune-desktop）+ 内嵌 axum + 托盘 + 单实例 + 拖拽 + Win/Linux Tauri bundler 出包成功 | S0 | — |
-| **1** | 1.5 | Project / Case 数据模型 + AI 推荐归类 + 跨证据链 workflow（Phase A+B+C ✅ 2026-04-25） | S0 | 与 S0.5 并行 |
+| **1** | 1.5 | Project / Case 数据模型 + AI 推荐归类 + 跨证据链 workflow（Phase A+B+C+D ✅ 2026-04-25） | S0 | 与 S0.5 并行 |
 | **2** | 2 | Intent Router + 9 个 attune-pro skill 加 chat_trigger（5 law + 4 presales）| S1 | — |
 | **3** | 2 | RPA 自研：flk_npc + wechat_article + 异步后台框架 + 顶栏进度面板 | S2 | 与 S4 并行 |
 | **4** | 1 | 扩展行业化：白名单 + 浮窗 + 三档默认 + 检索捕获 | S2 | 与 S3 并行 |
@@ -723,6 +723,20 @@ attune-pro 现有 9 capabilities（5 law + 4 presales）按本 spec 升级：
 - 加 attune-law plugin 把 Project 渲染为 Case
 
 **不重写**，只加配置 + 升级。预计 attune-pro 这部分工作量 1-2 天。
+
+### 行业耦合修订（2026-04-25 Phase D-0 cleanup）
+
+attune-core 是**通用底座**，行业功能（律师 / 售前 / 学术等）全部在 attune-pro。
+原 Phase A+B+C 错误把 `law-pro/evidence_chain_inference` workflow 编入 attune-core builtins.rs，已于 Phase D-0 移除。
+
+当前 attune-core 状态：
+- `Project.kind: String` 自由字符串（不预定义 Case / Deal / Topic enum）
+- 无 builtin workflow（attune-core/src/workflow/builtins.rs 已删）
+- file_added 不自动触发 workflow（Sprint 2 plugin loader 后由 attune-pro 接管）
+
+Sprint 2 必做（plugin loader）：
+- attune-pro 仓的 plugin.yaml 注册 workflow → attune-core 加载 → file_added 时按 trigger 匹配
+- attune-pro 的 evidence_chain_inference workflow 通过 plugin 动态加载（不再 hardcode）
 
 ---
 

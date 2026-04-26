@@ -8,6 +8,7 @@ import { DrawerHost } from './DrawerHost';
 import {
   ChatView,
   ItemsView,
+  ProjectsView,
   RemoteView,
   KnowledgeView,
   SettingsView,
@@ -36,6 +37,7 @@ export function MainShell(): JSX.Element {
       >
         {view === 'chat' && <ChatView />}
         {view === 'items' && <ItemsView />}
+        {view === 'projects' && <ProjectsView />}
         {view === 'remote' && <RemoteView />}
         {view === 'knowledge' && <KnowledgeView />}
         {view === 'settings' && <SettingsView />}

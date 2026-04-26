@@ -15,7 +15,7 @@
 import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { ToastContainer } from './components';
+import { ToastContainer, RecommendationOverlay } from './components';
 import { CommandPalette } from './components/CommandPalette';
 import { Wizard, LoginScreen } from './wizard';
 import { MainShell } from './layout';
@@ -200,6 +200,7 @@ export function App(): JSX.Element {
     <>
       <MainShell />
       <CommandPalette open={paletteOpen.value} onClose={() => (paletteOpen.value = false)} />
+      <RecommendationOverlay />
       <ToastContainer />
     </>
   );

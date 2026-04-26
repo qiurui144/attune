@@ -27,3 +27,5 @@ export type { ChatInputProps } from './ChatInput';
 
 export { Reader } from './Reader';
 export type { ReaderProps } from './Reader';
+
+export { RecommendationOverlay } from './RecommendationOverlay';

@@ -16,7 +16,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use attune_core::store::{Project, ProjectFile, ProjectKind, ProjectTimelineEntry};
+use attune_core::store::{Project, ProjectFile, ProjectTimelineEntry};
 use attune_core::vault::VaultState;
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +25,8 @@ use crate::state::SharedState;
 #[derive(Debug, Deserialize)]
 pub struct CreateProjectRequest {
     pub title: String,
-    /// 'case' / 'deal' / 'topic' / 'generic'（未知值降级为 generic）
+    /// 'generic' / 'case' / 'deal' / 'topic' / 任意 plugin 自定义类型 —
+    /// attune-core 不约束。未指定时默认 'generic'。
     #[serde(default)]
     pub kind: Option<String>,
 }
@@ -33,8 +34,8 @@ pub struct CreateProjectRequest {
 #[derive(Debug, Deserialize)]
 pub struct AddFileRequest {
     pub file_id: String,
-    /// 行业层语义（律师 = 'evidence' / 'pleading' / 'reference' 等；
-    /// 售前 = 'rfp' / 'proposal' / 'reference'；空字符串/None 表示未分类）
+    /// 文件在该 project 中的角色，由 plugin / 调用方自由约定。
+    /// 空字符串/None 表示未分类，attune-core 不约束取值集合。
     #[serde(default)]
     pub role: Option<String>,
 }
@@ -78,10 +79,7 @@ pub async fn create_project(
     if !matches!(vault.state(), VaultState::Unlocked) {
         return Err(vault_locked_error());
     }
-    let kind = match req.kind.as_deref() {
-        Some(s) => ProjectKind::from_str(s),
-        None => ProjectKind::Generic,
-    };
+    let kind = req.kind.as_deref().unwrap_or("generic");
     let title = req.title.trim();
     if title.is_empty() {
         return Err((

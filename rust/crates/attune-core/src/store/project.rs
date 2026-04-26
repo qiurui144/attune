@@ -1,8 +1,9 @@
 //! Project / ProjectFile / ProjectTimeline 卷宗模型
 //!
-//! 实施 spec §2.1：通用 Project 层（kind = case/deal/topic/generic）。
-//! 行业层（如 attune-law 的 Case 反序列化）通过 metadata_encrypted 持有 opaque blob，
-//! attune-core 不解析它的内部结构，只负责存取 + 时间线 + 文件归属。
+//! 实施 spec §2.1：通用 Project 层（kind = 自由字符串，由调用方约定）。
+//! attune-core 不约束 kind 取值集合 — 行业层（attune-pro 系列插件）通过
+//! metadata_encrypted 持有 opaque blob，attune-core 不解析它的内部结构，
+//! 只负责存取 + 时间线 + 文件归属。
 
 use chrono::Utc;
 use rusqlite::params;
@@ -15,18 +16,18 @@ use crate::store::Store;
 impl Store {
     // --- project ---
 
-    pub fn create_project(&self, title: &str, kind: ProjectKind) -> Result<Project> {
+    pub fn create_project(&self, title: &str, kind: &str) -> Result<Project> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().timestamp();
         self.conn.execute(
             "INSERT INTO project (id, title, kind, metadata_encrypted, created_at, updated_at, archived) \
              VALUES (?1, ?2, ?3, NULL, ?4, ?4, 0)",
-            params![&id, title, kind.as_str(), now],
+            params![&id, title, kind, now],
         )?;
         Ok(Project {
             id,
             title: title.to_string(),
-            kind,
+            kind: kind.to_string(),
             metadata_encrypted: None,
             created_at: now,
             updated_at: now,
@@ -43,7 +44,7 @@ impl Store {
                 Ok(Project {
                     id: row.get(0)?,
                     title: row.get(1)?,
-                    kind: ProjectKind::from_str(&row.get::<_, String>(2)?),
+                    kind: row.get::<_, String>(2)?,
                     metadata_encrypted: row.get(3)?,
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
@@ -71,7 +72,7 @@ impl Store {
             Ok(Project {
                 id: row.get(0)?,
                 title: row.get(1)?,
-                kind: ProjectKind::from_str(&row.get::<_, String>(2)?),
+                kind: row.get::<_, String>(2)?,
                 metadata_encrypted: row.get(3)?,
                 created_at: row.get(4)?,
                 updated_at: row.get(5)?,
@@ -155,15 +156,15 @@ mod tests {
     fn create_and_get_project() {
         let store = Store::open_memory().expect("open memory store");
         let p = store
-            .create_project("王某 vs 李某 民间借贷", ProjectKind::Case)
+            .create_project("Project Alpha", "generic")
             .expect("create project");
-        assert_eq!(p.title, "王某 vs 李某 民间借贷");
-        assert_eq!(p.kind, ProjectKind::Case);
+        assert_eq!(p.title, "Project Alpha");
+        assert_eq!(p.kind, "generic");
 
         let fetched = store.get_project(&p.id).expect("get").expect("some");
         assert_eq!(fetched.id, p.id);
-        assert_eq!(fetched.title, "王某 vs 李某 民间借贷");
-        assert_eq!(fetched.kind, ProjectKind::Case);
+        assert_eq!(fetched.title, "Project Alpha");
+        assert_eq!(fetched.kind, "generic");
         assert!(!fetched.archived);
     }
 
@@ -171,10 +172,10 @@ mod tests {
     fn list_projects_excludes_archived_by_default() {
         let store = Store::open_memory().expect("open");
         let p1 = store
-            .create_project("Active", ProjectKind::Generic)
+            .create_project("Active", "generic")
             .expect("c1");
         let _p2 = store
-            .create_project("Other", ProjectKind::Topic)
+            .create_project("Other", "topic")
             .expect("c2");
 
         let active = store.list_projects(false).expect("list");
@@ -199,7 +200,7 @@ mod tests {
     fn add_file_and_list() {
         let store = Store::open_memory().expect("open");
         let p = store
-            .create_project("案件 A", ProjectKind::Case)
+            .create_project("Project A", "generic")
             .expect("c");
         store
             .add_file_to_project(&p.id, "file-uuid-001", "evidence")
@@ -219,7 +220,7 @@ mod tests {
     fn timeline_append_and_list() {
         let store = Store::open_memory().expect("open");
         let p = store
-            .create_project("案件 B", ProjectKind::Case)
+            .create_project("Project B", "generic")
             .expect("c");
         store
             .append_timeline(&p.id, "evidence_added", None)

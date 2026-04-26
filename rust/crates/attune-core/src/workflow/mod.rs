@@ -1,18 +1,18 @@
-//! Workflow 引擎（spec §3.3）— 跨证据链推理等多步任务编排。
+//! Workflow 引擎（spec §3.3）— 多步任务编排通用底座。
 //!
-//! Phase C 范围：
+//! 范围：
 //! - schema 解析（schema.rs）
-//! - WorkflowRunner 执行引擎（runner.rs，Task 2）
-//! - deterministic ops（ops.rs，Task 3）
-//! - 内置 workflow（builtins.rs，Task 4）
+//! - WorkflowRunner 执行引擎（runner.rs）
+//! - deterministic ops（ops.rs）
+//!
+//! 行业相关 workflow（如 law-pro 的 evidence_chain_inference）由 attune-pro 在
+//! Sprint 2 plugin loader 中通过 plugin.yaml 注册，attune-core 不内置。
 
 pub mod schema;
 pub mod runner;
 pub mod ops;
-pub mod builtins;
 
 pub use schema::{
     parse_workflow_yaml, DeterministicStep, SkillStep, Workflow, WorkflowStep, WorkflowTrigger,
 };
 pub use runner::{run_workflow, WorkflowError, WorkflowEvent, WorkflowResult};
-pub use builtins::{builtin_workflows, evidence_chain_inference_workflow};

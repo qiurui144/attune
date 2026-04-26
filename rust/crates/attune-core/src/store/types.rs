@@ -215,48 +215,17 @@ pub struct AnnotationInput {
 // Project / Case 卷宗（spec §2.1）
 // ============================================================================
 
-/// 通用 Project 类型：行业层（attune-law / attune-sales / ...）通过 metadata_encrypted
-/// 持有自己 schema 的 opaque blob。attune-core 仅负责 kind 路由 + 时间线 + 文件归属。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectKind {
-    /// 律师案件（attune-law 反序列化 metadata 为 Case）
-    Case,
-    /// 售前/销售交易（attune-sales 反序列化 metadata 为 Deal）
-    Deal,
-    /// 学术研究主题
-    Topic,
-    /// 通用项目（未指定行业）
-    Generic,
-}
-
-impl ProjectKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ProjectKind::Case => "case",
-            ProjectKind::Deal => "deal",
-            ProjectKind::Topic => "topic",
-            ProjectKind::Generic => "generic",
-        }
-    }
-
-    /// 容错解析：未知值降级为 Generic（不返回 Result，便于在 SQL 行解码时使用）
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "case" => ProjectKind::Case,
-            "deal" => ProjectKind::Deal,
-            "topic" => ProjectKind::Topic,
-            _ => ProjectKind::Generic,
-        }
-    }
-}
-
+/// 通用 Project 类型：行业层（attune-pro 系列插件）通过 metadata_encrypted
+/// 持有自己 schema 的 opaque blob。attune-core 仅负责 kind 路由 + 时间线 + 文件归属，
+/// **不约束** kind 的取值集合 — 任意行业字符串（'generic' / 'case' / 'deal' / 'topic' /
+/// 插件自定义）都被允许，由调用方自行约定。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
     pub title: String,
-    pub kind: ProjectKind,
-    /// 行业层在此存 opaque blob（如 attune-law 的 case_no/parties/court 序列化 + AES-GCM 加密）。
+    /// 'generic' / 'case' / 'deal' / 'topic' / 任意 plugin 自定义类型 — attune-core 不约束。
+    pub kind: String,
+    /// 行业层在此存 opaque blob（如 attune-pro/law 的 case_no/parties/court 序列化 + AES-GCM 加密）。
     /// attune-core 不解析。
     pub metadata_encrypted: Option<Vec<u8>>,
     pub created_at: i64,
@@ -268,8 +237,8 @@ pub struct Project {
 pub struct ProjectFile {
     pub project_id: String,
     pub file_id: String,
-    /// 行业层语义（律师 = 'evidence' / 'pleading' / 'reference'；
-    /// 售前 = 'rfp' / 'proposal' / 'reference'；空字符串表示未分类）
+    /// 文件在该 project 中的角色，由 plugin / 调用方约定。空字符串表示未分类。
+    /// attune-core 不约束取值集合。
     pub role: String,
     pub added_at: i64,
 }
