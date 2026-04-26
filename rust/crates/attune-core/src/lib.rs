@@ -17,6 +17,7 @@ pub mod llm;
 pub(crate) mod ocr;
 pub mod parser;
 pub mod platform;
+pub mod project_recommender;
 pub(crate) mod queue;
 pub mod scanner;
 pub mod scanner_patent;
