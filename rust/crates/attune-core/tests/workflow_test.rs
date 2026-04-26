@@ -91,3 +91,56 @@ fn runner_fails_fast_on_unknown_op() {
     let result = run_workflow(&wf, &event, None);
     assert!(result.is_err(), "unknown op should fail");
 }
+
+// ---------------------------------------------------------------------------
+// Task 3: deterministic ops 集成测试（find_overlap）
+// ---------------------------------------------------------------------------
+
+use attune_core::store::{ProjectKind, Store};
+use attune_core::workflow::ops::run_deterministic;
+
+#[test]
+fn deterministic_op_find_overlap_lists_project_files() {
+    let store = Store::open_memory().expect("open memory store");
+    let p = store
+        .create_project("案件 A", ProjectKind::Case)
+        .expect("create project");
+    store
+        .add_file_to_project(&p.id, "file-001", "evidence")
+        .expect("add file 1");
+    store
+        .add_file_to_project(&p.id, "file-002", "pleading")
+        .expect("add file 2");
+
+    let mut inputs = BTreeMap::new();
+    inputs.insert("project_id".to_string(), json!(p.id));
+
+    let result = run_deterministic("find_overlap", inputs, Some(&store)).expect("op succeeds");
+    let obj = result.as_object().expect("object");
+    assert!(obj.contains_key("related_files"));
+    assert!(obj.contains_key("summary"));
+
+    let related = obj["related_files"].as_array().expect("array");
+    assert_eq!(related.len(), 2);
+    let roles: Vec<&str> = related
+        .iter()
+        .map(|v| v["role"].as_str().expect("role str"))
+        .collect();
+    assert!(roles.contains(&"evidence"));
+    assert!(roles.contains(&"pleading"));
+
+    let summary = obj["summary"].as_str().expect("summary str");
+    assert!(summary.contains("2"), "summary should mention count: {summary}");
+}
+
+#[test]
+fn deterministic_op_find_overlap_missing_project_id() {
+    let store = Store::open_memory().expect("open");
+    let inputs = BTreeMap::new(); // 空：缺 project_id
+    let result = run_deterministic("find_overlap", inputs, Some(&store));
+    let err = result.expect_err("must fail without project_id");
+    assert!(
+        err.contains("project_id"),
+        "error should mention project_id: {err}"
+    );
+}
