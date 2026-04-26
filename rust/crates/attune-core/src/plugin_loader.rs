@@ -280,4 +280,32 @@ label_prefix: "X"
         let c = AnnotationAngleConfig::from_loaded(&p).unwrap();
         assert!(c.output_schema.is_some());
     }
+
+    #[test]
+    fn parses_workflow_type_manifest() {
+        let yaml = r#"
+id: law-pro/evidence_chain
+name: 跨证据链推理
+type: workflow
+version: "1.0.0"
+author: attune-pro
+description: 律师上传新证据时跨证据链联想（行业层）
+"#;
+        let manifest: PluginManifest = serde_yaml::from_str(yaml).expect("parse workflow manifest");
+        assert_eq!(manifest.id, "law-pro/evidence_chain");
+        assert_eq!(manifest.plugin_type, "workflow");
+        assert_eq!(manifest.version, "1.0.0");
+    }
+
+    #[test]
+    fn parses_skill_type_manifest() {
+        let yaml = r#"
+id: law-pro/contract_review
+name: 合同风险审查
+type: skill
+version: "0.1.0"
+"#;
+        let manifest: PluginManifest = serde_yaml::from_str(yaml).expect("parse skill manifest");
+        assert_eq!(manifest.plugin_type, "skill");
+    }
 }
