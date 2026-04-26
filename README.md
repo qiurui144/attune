@@ -56,15 +56,23 @@ Local knowledge first. When the local vault has no match, a headless Chrome (or 
 
 ## Quick start
 
-### Rust production line (recommended)
+### 5 steps from download to first use
+
+1. **Download** the binary from the [Releases](../../releases) page (or `cargo build --release` from source — see below).
+2. **Run** `./attune-server --host 127.0.0.1 --port 18900` (Linux) or double-click `attune-server.exe` (Windows). The first launch creates `~/.local/share/attune/` (or `%LOCALAPPDATA%\attune\`).
+3. **Open** `http://localhost:18900/` in your browser. The first-run wizard appears automatically.
+4. **Set Master Password** + pick an LLM backend on step 3 (see "AI model platforms" table below for `base_url` / model / pricing). API key is stored encrypted with your master password.
+5. **Bind data** in the wizard's last step: drop a file, point at a folder, or skip and use the Items / Reader UI later.
+
+That's it. The Cmd+K palette jumps between Chat, Items, Reader, Sessions, and Settings. Lock the vault from the top bar at any time.
+
+### Rust production line (build from source)
 
 ```bash
 cd rust
 cargo build --release
 ./target/release/attune-server --host 127.0.0.1 --port 18900
 ```
-
-Then open `http://localhost:18900/` in your browser to go through the 5-step first-run wizard (Welcome → Master Password → LLM Backend → Hardware Detection → First Data).
 
 Full documentation: [`rust/README.md`](rust/README.md).
 
@@ -75,6 +83,26 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 uvicorn npu_webhook.main:app --reload --port 18900
 ```
+
+---
+
+## AI model platforms
+
+Attune speaks the **OpenAI-compatible chat protocol**, so you can plug in any provider that exposes `/v1/chat/completions`. The Settings → AI tab includes a "Quick preset" dropdown that pre-fills `endpoint` + `model` for the providers below — you only paste the API key.
+
+| Provider | base_url | Recommended model | Price (input)* | Get a key |
+|----------|----------|-------------------|----------------|-----------|
+| **DeepSeek** | `https://api.deepseek.com/v1` | `deepseek-chat` | ¥1 / M tok | [platform.deepseek.com](https://platform.deepseek.com/api_keys) |
+| **Aliyun Qwen** (DashScope) | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` | ¥4 / M tok | [bailian.console.aliyun.com](https://bailian.console.aliyun.com/?apiKey=1) |
+| **Zhipu GLM** | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-plus` | ¥50 / M tok | [open.bigmodel.cn](https://open.bigmodel.cn/usercenter/apikeys) |
+| **Moonshot Kimi** | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` | ¥12 / M tok | [platform.moonshot.cn](https://platform.moonshot.cn/console/api-keys) |
+| **Baichuan** | `https://api.baichuan-ai.com/v1` | `Baichuan4-Turbo` | ¥15 / M tok | [platform.baichuan-ai.com](https://platform.baichuan-ai.com/console/apikey) |
+| **Ollama (local)** | `http://localhost:11434/v1` | `qwen2.5:7b` | free / local | `curl -fsSL https://ollama.com/install.sh \| sh && ollama pull qwen2.5:7b` |
+| **OpenAI** | `https://api.openai.com/v1` | `gpt-4o-mini` | ~¥3 / M tok | [platform.openai.com](https://platform.openai.com/api-keys) |
+
+*Pricing is the input-token rate at the time of writing. Check each provider's pricing page for current rates and output-token rates.
+
+**Recommendation**: DeepSeek for daily use (cheapest non-local), Ollama if you have a 16 GB+ GPU, OpenAI when you need maximum quality.
 
 ---
 

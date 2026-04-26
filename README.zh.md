@@ -32,7 +32,37 @@ Chrome 扩展协议相同，两个后端可任意切换。
 
 ## 快速开始
 
-### 1. 后端
+### 5 步上手（Rust 商用线，推荐）
+
+1. **下载** 二进制：从 [Releases](../../releases) 页拿对应平台的包，或源码 `cargo build --release`（见下文「源码编译」）
+2. **运行** Linux：`./attune-server --host 127.0.0.1 --port 18900`；Windows：双击 `attune-server.exe`。首次运行会创建 `~/.local/share/attune/`（或 `%LOCALAPPDATA%\attune\`）
+3. **打开** 浏览器访问 `http://localhost:18900/`，自动进入 5 步首次运行向导
+4. **设主密码 + 选 LLM 后端**（向导第 3 步）：参考下文「AI 模型平台」表格选 endpoint + model 并粘贴 API key（用主密码加密存储）
+5. **绑定数据**（向导最后一步）：拖文件、绑文件夹，或先跳过，之后用 Items / Reader 操作
+
+完成。Cmd+K 在 Chat / Items / Reader / 会话 / 设置之间跳转，全局顶栏可随时锁定 vault。
+
+### AI 模型平台
+
+Attune 走 **OpenAI 兼容 chat 协议**，任何暴露 `/v1/chat/completions` 的服务都能接。Settings → AI 大脑 tab 有「快捷预设」下拉，自动填 endpoint + model，你只需粘贴 API key。
+
+| 厂商 | base_url | 推荐模型 | 价格（输入）* | 拿 key |
+|------|----------|---------|--------------|--------|
+| **DeepSeek** | `https://api.deepseek.com/v1` | `deepseek-chat` | ¥1/M tok | [platform.deepseek.com](https://platform.deepseek.com/api_keys) |
+| **阿里百炼 / Qwen** | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` | ¥4/M tok | [bailian.console.aliyun.com](https://bailian.console.aliyun.com/?apiKey=1) |
+| **智谱 GLM** | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-plus` | ¥50/M tok | [open.bigmodel.cn](https://open.bigmodel.cn/usercenter/apikeys) |
+| **月之暗面 Kimi** | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` | ¥12/M tok | [platform.moonshot.cn](https://platform.moonshot.cn/console/api-keys) |
+| **百川** | `https://api.baichuan-ai.com/v1` | `Baichuan4-Turbo` | ¥15/M tok | [platform.baichuan-ai.com](https://platform.baichuan-ai.com/console/apikey) |
+| **Ollama 本地** | `http://localhost:11434/v1` | `qwen2.5:7b` | 免费 / 本地算力 | `curl -fsSL https://ollama.com/install.sh \| sh && ollama pull qwen2.5:7b` |
+| **OpenAI** | `https://api.openai.com/v1` | `gpt-4o-mini` | ~¥3/M tok | [platform.openai.com](https://platform.openai.com/api-keys) |
+
+*以上为各家输入 token 价格估算（写作时点）；具体以官方价格页为准（含输出 token 价、首充优惠等）。
+
+**推荐**：日常用 DeepSeek（性价比最高），有 16 GB+ GPU 选 Ollama 本地，重要场景上 OpenAI。
+
+### Python 原型线
+
+#### 1. 后端
 
 ```bash
 git clone <repo-url> && cd attune
@@ -43,7 +73,7 @@ uvicorn npu_webhook.main:app --reload --port 18900
 
 验证：`curl http://localhost:18900/api/v1/status/health` → `{"status":"ok"}`
 
-### 2. Embedding 模型
+#### 2. Embedding 模型
 
 **Ollama（推荐）：**
 
@@ -56,7 +86,7 @@ ollama pull bge-m3
 
 **ONNX（可选）：** 将 `model.onnx` + `tokenizer.json` 放到 `~/.local/share/attune/models/bge-m3/`。
 
-### 3. Chrome 扩展
+#### 3. Chrome 扩展
 
 ```bash
 cd extension
@@ -66,7 +96,7 @@ npm run build
 
 Chrome → `chrome://extensions` → 开发者模式 → 加载已解压的扩展 → 选择 `extension/` 目录。
 
-### 4. 部署检查
+#### 4. 部署检查
 
 ```bash
 curl -s -X POST http://localhost:18900/api/v1/models/check | python3 -m json.tool
@@ -74,7 +104,7 @@ curl -s -X POST http://localhost:18900/api/v1/models/check | python3 -m json.too
 
 返回内核 / 芯片 / 驱动 / 模型 / 依赖完整报告和一键安装命令。
 
-### 5. 测试
+#### 5. 测试
 
 ```bash
 pytest tests/ -v    # 78 个测试（36 后端单元 + 42 扩展 E2E）
