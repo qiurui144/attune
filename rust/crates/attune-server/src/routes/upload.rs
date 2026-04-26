@@ -195,6 +195,75 @@ pub async fn upload_file(
     // 行业 workflow trigger（如 law-pro/evidence_chain_inference）由 attune-pro 在
     // Sprint 2 plugin loader 注册到运行时 trigger map，不在 attune-core/server 内置。
 
+    // Sprint 2 Phase A: file_added trigger — 基于 plugin_registry 匹配 workflow
+    let item_id_for_wf = item_id.clone();
+    let state_for_wf = state.clone();
+    tokio::spawn(async move {
+        let vault_guard = state_for_wf.vault.lock();
+        let vault_guard = vault_guard.unwrap_or_else(|e| e.into_inner());
+        if !matches!(vault_guard.state(), attune_core::vault::VaultState::Unlocked) {
+            return;
+        }
+        // 找该 file_id 归属的 project
+        let projects = match vault_guard.store().list_projects(false) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let mut matched_project: Option<String> = None;
+        for p in &projects {
+            if let Ok(files) = vault_guard.store().list_files_for_project(&p.id) {
+                if files.iter().any(|f| f.file_id == item_id_for_wf) {
+                    matched_project = Some(p.id.clone());
+                    break;
+                }
+            }
+        }
+        let Some(pid) = matched_project else {
+            return; // 未归 project，不触发任何 workflow
+        };
+        // 从 registry 取所有匹配的 workflow（clone 出来避免 borrow 跨 await）
+        let registry = state_for_wf.plugin_registry.clone();
+        let matched: Vec<(String, attune_core::workflow::Workflow)> = registry
+            .workflows_by_trigger("file_added")
+            .into_iter()
+            .map(|lwf| (lwf.plugin_id.clone(), lwf.workflow.clone()))
+            .collect();
+        if matched.is_empty() {
+            return; // 没装任何 file_added workflow plugin
+        }
+        for (plugin_id, workflow) in matched {
+            let mut data = std::collections::BTreeMap::new();
+            data.insert("file_id".into(), serde_json::json!(item_id_for_wf));
+            data.insert("project_id".into(), serde_json::json!(pid));
+            let event = attune_core::workflow::WorkflowEvent {
+                event_type: "file_added".into(),
+                data,
+            };
+            match attune_core::workflow::run_workflow(
+                &workflow,
+                &event,
+                Some(vault_guard.store()),
+            ) {
+                Ok(_result) => {
+                    let payload = serde_json::json!({
+                        "type": "workflow_complete",
+                        "workflow_id": workflow.id,
+                        "plugin_id": plugin_id,
+                        "file_id": item_id_for_wf,
+                        "project_id": pid,
+                    });
+                    let _ = state_for_wf.recommendation_tx.send(payload);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "workflow {} (plugin {}) failed: {}",
+                        workflow.id, plugin_id, e
+                    );
+                }
+            }
+        }
+    });
+
     Ok(Json(serde_json::json!({
         "id": item_id,
         "title": title,
