@@ -27,6 +27,7 @@ export const wizardState = signal<WizardState | null>(null);
 export type View =
   | 'chat'
   | 'items'
+  | 'projects'
   | 'remote'
   | 'knowledge'
   | 'settings';

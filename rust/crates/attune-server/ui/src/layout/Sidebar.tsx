@@ -278,6 +278,7 @@ function SessionItem({ session: s }: { session: { id: string; title: string } })
 type NavItem = { view: View; icon: string; label: string };
 const NAV_ITEMS: NavItem[] = [
   { view: 'items', icon: '📄', label: '条目' },
+  { view: 'projects', icon: '🗂', label: 'Projects' },
   { view: 'remote', icon: '🔗', label: '远程目录' },
   { view: 'knowledge', icon: '📊', label: '知识全景' },
   { view: 'settings', icon: '⚙', label: '设置' },
