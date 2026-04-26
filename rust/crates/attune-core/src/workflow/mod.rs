@@ -7,7 +7,11 @@
 //! - 内置 workflow（builtins.rs，Task 4）
 
 pub mod schema;
+pub mod runner;
+pub mod ops;
+// pub mod builtins;   // Task 4
 
 pub use schema::{
     parse_workflow_yaml, DeterministicStep, SkillStep, Workflow, WorkflowStep, WorkflowTrigger,
 };
+pub use runner::{run_workflow, WorkflowError, WorkflowEvent, WorkflowResult};
