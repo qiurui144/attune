@@ -69,6 +69,19 @@ pub async fn chat(
         body.history.drain(..drop);
     }
 
+    // Sprint 1 Phase B: chat keyword trigger for project recommendation
+    // 纯 observer：检测当前 user message 中的项目相关关键词，命中即通过 broadcast 推 ws hint，
+    // 不影响主流程（错误静默忽略，broadcast 无订阅者也只返回 Err 不 panic）
+    if let Some(hint) = attune_core::project_recommender::recommend_for_chat(&body.message) {
+        let payload = serde_json::json!({
+            "type": "project_recommendation",
+            "trigger": "chat_keyword",
+            "matched_keywords": hint.matched_keywords,
+            "suggestion": hint.suggestion,
+        });
+        let _ = state.recommendation_tx.send(payload);
+    }
+
     // Check LLM availability
     let llm = state.llm.lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "llm lock poisoned"}))))?
