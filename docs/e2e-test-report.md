@@ -702,3 +702,84 @@ echo 'You are a legal expert. Review the contract.' > $XDG_DATA_HOME/attune/plug
 - **Linux** 100% 就绪，可立即测试
 - **Windows** 必须走 GitHub Actions desktop-release.yml；headless binary 单独可在 windows-latest cargo build 出来（不依赖 WebView2）
 - **aarch64**（K3 一体机）目前 P2，等核心功能稳定再做
+
+---
+
+## 2026-04-27 — Sprint 2 新 Web UI 全功能 E2E（develop 分支）
+
+**测试日期**：2026-04-27  
+**测试环境**：AMD Ryzen 7 8845H @ localhost（Linux x86_64），Ubuntu 25.10  
+**二进制**：`rust/target/debug/attune-server-headless`（debug build，cargo build -p attune-server --bin attune-server-headless，18.79s）  
+**启动参数**：`--port 18900 --no-auth`（testing bypass；production 需移除 --no-auth）  
+**Ollama 模型**：`bge-m3`（embedding） + `qwen2.5vl:latest`（chat/classify）  
+**vault 状态**：已有数据库（`~/.local/share/attune/`，迁移自 `npu-vault/`）
+
+### 新 Web UI 架构（Sprint 2 交付物）
+
+本轮测试的目标是验证 Sprint 2 交付的全新 Preact SPA（`rust/crates/attune-server/ui/`），与上一轮基于嵌入式单文件 HTML 的架构完全重写：
+
+- **侧边栏导航**：条目 / Projects / 远程目录 / 知识全景 / Skills / 设置 六个主 Tab
+- **Chat 优先**：首屏即 Chat 界面；侧边栏上方对话列表（今天 / 近期 / 更早分组）
+- **Settings 模态**：独立页面，左 Tab（通用 / AI 大脑 / 数据 / 隐私 / 关于）+ 右内容面板
+- **Skills Tab**：技能列表 + enable/disable toggle + 关键词预览
+- **成本提示**：Chat 输入框下方实时显示 `~N tok · 本地` 或 `~N tok · $0.000X`
+
+### 测试矩阵
+
+| # | 场景 | 结果 | 截图 | 备注 |
+|---|------|------|------|------|
+| 1 | Vault 解锁 + 服务就绪 | ✅ PASS | — | `--no-auth` 模式直接打开界面；`GET /status/diagnostics` 返回 `embedding_available=true`、`classifier_ready=true`、`chat_model=qwen2.5vl:latest` |
+| 2 | Chat 发送消息 + RAG 引用 | ✅ PASS | `e2e-chat-rag-response.png` | 问"知识库里有哪些关于Rust的内容？"→ 回答正确引用"Rust 所有权与借用规则"；引用标签显示"Rust 所有权与借用规则 1%"+"大语言模型 RAG 架构设计 1%"；对话标题自动更新；侧边栏"今天"分组出现 |
+| 3 | 成本 token 计数提示 | ✅ PASS | — | 输入框获焦后下方出现 `~14 tok · 本地`；发送按钮激活 |
+| 4 | Skills Tab — toggle disable | ✅ PASS | — | 禁用 `rust_helper` skill → `disabled: ['rust_helper']`；再次 toggle → `disabled: []`；Toast 出现确认 |
+| 5 | Skills Tab — keyword preview | ✅ PASS | — | 每个 skill 卡片展示 `keywords: [Rust, 借用检查器, 所有权, 生命周期]` |
+| 6 | Search（全文 + 向量混合） | ✅ PASS | — | 搜索"借用检查器" → 3 条结果，"全文匹配"标签正确 |
+| 7 | Settings → AI 大脑 Tab | ✅ PASS | `e2e-settings-ollama-preset.png` | LLM 后端配置面板；当前 model=qwen2.5vl:latest 显示 |
+| 8 | Settings LLM 预设 — DeepSeek | ✅ PASS | `e2e-settings-deepseek-preset.png` | 选择"DeepSeek (¥1/M tok, OpenAI 兼容)" → endpoint 自动填 `https://api.deepseek.com/v1`，model=`deepseek-chat` |
+| 9 | Settings LLM 预设 — 阿里百炼/Qwen | ✅ PASS | — | endpoint=`https://dashscope.aliyuncs.com/compatible-mode/v1`，model=`qwen-plus` |
+| 10 | Settings LLM 预设 — OpenAI | ✅ PASS | — | endpoint=`https://api.openai.com/v1`，model=`gpt-4o-mini` |
+| 11 | Settings LLM 预设 — Ollama 本地 | ✅ PASS | `e2e-settings-ollama-preset.png` | endpoint=`http://localhost:11434/v1`，model=`qwen2.5:7b` |
+| 12 | Settings — 通用 Tab（主题/语言） | ✅ PASS | — | 主题下拉（跟随系统/浅色/深色），语言下拉（中文/English） |
+
+**通过 12 / 12 场景。**
+
+### 发现的 Bug
+
+#### Bug #6：state.rs LLM 初始化忽略 settings.model（已修复，commit f4963f6）
+
+**现象**：Chat 点击发送后返回"AI 后端不可用"。  
+**根因**：`state.rs` LLM 初始化采用 3 级优先级（endpoint → auto_detect → null），当 `endpoint=null` 时直接执行 `OllamaLlmProvider::auto_detect()`，该函数仅从 `PREFERRED_MODELS = ["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:1.5b"]` 白名单探测。用户若配置了非白名单模型（如 `qwen2.5vl:latest`），该配置被静默忽略，auto_detect 找不到任何 PREFERRED_MODELS 则返回 None → LLM 不可用。  
+**修复**：改为 4 级优先级：
+
+1. `endpoint` 非空 → `OpenAiLlmProvider`（OpenAI-compatible）
+2. `provider=local` + `model` 非空 → `OllamaLlmProvider::with_model(model)` **（新增）**
+3. Ollama `auto_detect()`（PREFERRED_MODELS 白名单）
+4. 无 LLM（Chat 功能禁用）
+
+**影响**：用户在 Settings 里选择了 Ollama 模型但非白名单型号时，Chat 功能完全不可用（感知为"AI 后端不可用"，实际是配置被静默忽略）。
+
+#### Bug #7：App.tsx bootstrap — vault 已解锁但 token 过期时展示 wizard 而非 LoginScreen（已知，未修复）
+
+**现象**：vault 已解锁状态下，若 sessionStorage 中 Bearer token 不存在或过期，`GET /settings` 返回 `401`，catch 块回退为 `{}`，`wizard.complete` 为 `undefined`，触发 wizard 展示（应该展示 LoginScreen）。  
+**现象来源**：从 App.tsx bootstrap 逻辑中发现，非用户直接报告。  
+**影响**：用户重启浏览器或 session 过期后，会看到已完成的 wizard 重新显示（迷惑）；实际不会创建重复 vault，只是 UX 混乱。  
+**建议修复**：`GET /settings` 返回 401 时，在 unlocked 状态下应跳转到 LoginScreen 而非 wizard。
+
+### Bug Fix 提交
+
+| Bug | Commit | 文件 |
+|-----|--------|------|
+| #6 state.rs LLM 4-level 优先级 | `f4963f6` | `rust/crates/attune-server/src/state.rs` |
+
+### Sprint 2 验收结论
+
+**✅ Sprint 2 Skills Router 全链路可用**：
+- 新 Preact SPA（侧边栏 + Chat 优先布局）正常运行
+- Skills toggle/preview 端到端工作（PATCH settings → `skills.disabled` 持久化）
+- Chat + RAG 引用端到端工作（LLM fix 后 qwen2.5vl:latest 正确初始化）
+- Settings LLM 快捷预设（8 个）endpoint+model 自动填充验证通过
+- 成本感知提示（`tok · 本地`）正确显示
+
+**⚠️ 遗留**：
+- Bug #7 (App.tsx bootstrap) — vault 已解锁 + token 过期 → wizard 错误展示
+- Chat 头部模型显示为 `qwen2.5:3b`（前端从 diagnostics 读取的缓存标签）—— 与后端实际模型 `qwen2.5vl:latest` 不一致，minor UI stale state

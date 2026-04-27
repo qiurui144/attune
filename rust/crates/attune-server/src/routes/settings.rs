@@ -73,6 +73,7 @@ pub async fn update_settings(
         "search", "embedding", "web_search", "llm",
         "summary_model", "context_strategy", "theme", "language",
         "skills",  // Sprint 2 Skills Router: { disabled: string[] }
+        "wizard",  // wizard completion state: { complete: bool, current_step: int }
     ];
     // URL 字段白名单 scheme 校验（防 javascript: / data: 注入成 XSS 种子）
     if let Some(body_obj) = body.as_object() {

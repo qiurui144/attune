@@ -45,6 +45,32 @@ pub async fn status(
     })))
 }
 
+/// Probe Ollama at localhost:11434, return (status, model_names).
+async fn probe_ollama() -> (&'static str, Vec<String>) {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+    match client.get("http://localhost:11434/api/tags").send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let models: Vec<String> = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("models").cloned())
+                .and_then(|m| serde_json::from_value(m).ok())
+                .map(|arr: Vec<serde_json::Value>| {
+                    arr.iter()
+                        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ("ready", models)
+        }
+        _ => ("missing", vec![]),
+    }
+}
+
 /// GET /api/v1/status/diagnostics — AI 后端健康检查
 pub async fn diagnostics(
     State(state): State<SharedState>,
@@ -82,6 +108,8 @@ pub async fn diagnostics(
     let hw = &state.hardware;
     const GB: u64 = 1024 * 1024 * 1024;
 
+    let (ollama_status, ollama_models) = probe_ollama().await;
+
     Json(serde_json::json!({
         "vault_state": vault_state,
         "ai_status": ai_status,
@@ -92,6 +120,8 @@ pub async fn diagnostics(
         "vector_ready": vector_ready,
         "tag_index_items": tag_index_count,
         "pending_tasks": pending_tasks,
+        "ollama_status": ollama_status,
+        "ollama_models": ollama_models,
         "hardware": {
             "os": hw.os,
             "cpu_model": hw.cpu_model,
