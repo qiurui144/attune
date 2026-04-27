@@ -71,6 +71,22 @@ export class API {
 
   // --- 索引 ---
   indexStatus() { return this.request('/index/status'); }
+
+  // --- G1 浏览信号 (W3 batch B, 2026-04-27) ---
+  // per spec docs/superpowers/specs/2026-04-27-w3-batch-b-design.md §3
+  recordBrowseSignals(signals) {
+    return this.request('/browse_signals', {
+      method: 'POST',
+      body: JSON.stringify({ signals }),
+    });
+  }
+  listBrowseSignals(limit = 20) {
+    return this.request(`/browse_signals?limit=${limit}`);
+  }
+  clearBrowseSignals(domain) {
+    const q = domain ? `?domain=${encodeURIComponent(domain)}` : '';
+    return this.request(`/browse_signals${q}`, { method: 'DELETE' });
+  }
 }
 
 export const api = new API();

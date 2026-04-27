@@ -35,6 +35,17 @@ For full software-license attribution of dependencies, see `Cargo.lock` (Rust) a
 | [mem0ai/mem0](https://github.com/mem0ai/mem0) (Apache-2.0) | "Memory layer for AI" framing; episodic memory as a discrete data model above raw chunks |
 | [skill_evolution.rs] (attune internal, 2026-03) | Three-stage lock release pattern (prepare → generate → apply) was already established by SkillEvolver; A1 mirrors it directly |
 
+### W3 Batch B — G1 / G2 / G5 / F3 (2026-04-27)
+
+| Source | What we adopted |
+|--------|----------------|
+| [linkwarden/linkwarden](https://github.com/linkwarden/linkwarden) (AGPL-3.0) | G1 浏览状态 capture pattern — fetch-on-engagement + privacy 默认 opt-out |
+| [ArchiveBox/ArchiveBox](https://github.com/ArchiveBox/ArchiveBox) (MIT) | G1 信号建模思路 — URL + dwell + engagement 作为元数据，非全量内容 |
+| [standardnotes/app](https://github.com/standardnotes/app) (AGPL-3.0) | G5 隐私控制面板 UX — "数据仅本机不上传" + per-domain 控制 + 显式 opt-out |
+| [bitwarden/clients](https://github.com/bitwarden/clients) (GPL-3.0) | G5 默认 opt-out 模式 — 用户必须显式启用每个 domain，非默认开启 |
+| 行业 SRE 常识 | HARD_BLACKLIST 域名清单（banks / medical / gov / password managers / OAuth） — 无单一来源，行业共识 |
+| attune 自有 `MockLlmProvider` | F3 secondary retrieval E2E 测试 mocking pattern |
+
 ### W3 Batch A — F1 / F2 / F4 / C1 (2026-04-27)
 
 | Source | What we adopted |

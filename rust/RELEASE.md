@@ -2,6 +2,52 @@
 
 ## 开发中
 
+## W3 Batch B: G1 + G2 + G5 + F3 (2026-04-27)
+
+12-week 战略 v4 Phase 1 W3 F-P0c batch B 全栈交付。**Chrome 扩展从"AI 对话捕获器"升级为"通用浏览状态知识源"** + 隐私控制面板 + W2 batch 1 followup F3 关闭。所有抄袭点登记到 [`ACKNOWLEDGMENTS.md`](../ACKNOWLEDGMENTS.md)。
+
+### G1 浏览信号捕获（后端 + 扩展全栈）
+- 新表 `browse_signals`：url/title DEK 加密 + domain_hash HMAC-SHA256(pepper, domain) + dwell/scroll/copy/visit + ts，带索引
+- `Store` API：record / list / count / clear_for_domain / clear_all
+- attune-server 路由 `/api/v1/browse_signals` 三 method（POST batch / GET diagnostics / DELETE）
+- Chrome 扩展 `extension/src/content/browse_capture.js`：visibilitychange dwell + IntersectionObserver scroll + copy 监听 + whitelist + HARD_BLACKLIST
+- 30 秒周期 flush + 失败重入队 + 500 上限保护（先裁尾老数据再 unshift 新失败批，per reviewer I4）
+- **隐私默认 opt-out**：用户必须在 popup 显式加 domain 才捕获。HARD_BLACKLIST 双层正则（hostname 银行/政府/密码管理器 + pathname /login //signin /password 等，per reviewer S2）
+- **Incognito 硬阻断**：`chrome.extension.inIncognitoContext` 显式检查（per reviewer S1）
+- 字段长度上限：URL ≤2048 / title ≤512 char，防恶意页面 1MB title 拖慢加密（per reviewer I3）
+
+### G2 高 engagement 评分
+- `is_high_engagement`：dwell ≥3 分钟 + scroll ≥50% + copy ≥1
+- W3 batch B 仅计数返回 `high_engagement`，不创建 placeholder item（避免无内容污染知识库）
+- W5-6 G3 引入 page extraction 后再 auto-bookmark with body
+
+### G5 隐私控制面板
+- 新组件 `extension/src/popup/Privacy.jsx`（Preact）
+- per-domain whitelist 增删 + 全局 Pause toggle + 已捕获计数 + 清除按钮（全清/per-domain）
+- "默认 opt-out / 数据仅本机 / 硬黑名单覆盖"三段式提示
+
+### F3 J5 secondary retrieval E2E（关闭 W2 batch 1 followup）
+- `tests/rag_w3_batch_b_integration.rs` 5 测试：高/低/默认 confidence + 中英 marker + serde 字段
+- 关闭 W2 batch 1 reviewer P2 #5 留的 followup
+
+### 遗留代码清理（per 用户 2026-04-27 要求"开源方案获取后做好遗留代码检查"）
+- W3 batch B 引入的 3 项 warning 全清零（chunker doc / dead write / store unused imports）
+- 删 `worker.js` 2 处 dev console.log
+- 累积老死代码 + Chrome 扩展 console.log 5+4 项记入 `tmp/w3-batch-b-followups.md` → W4 单独"代码卫生"批次
+
+### 工程
+- 测试：attune-core lib 431 → **438** (+7 browse_signals) + W3 batch B 集成 5 = +12 测试
+- attune-server lib: 3（零回归）
+- **R1 单轮 review**（W3 节奏紧）：reviewer 找 2 严重（incognito + HARD_BLACKLIST 误报）+ 4 重要 + 7 建议；本批次修 6 项必修（S1 / S2 / I1 / I3 / I4 / N4 / N6），其余进 followup
+
+### 不做（推到 W3 batch C / W4）
+- ❌ G3 页面内容抽取（Readability.js）— W5-6
+- ❌ G4 跨 session topic cluster — W7-8
+- ❌ G5 角色化预设白名单 — W7-8
+- ❌ Domain hash 完整 vault salt（当前用编译期 pepper）— W4
+- ❌ Chrome 扩展 console.log 全清 + DEBUG 守护 — W4
+- ❌ K2 Parse Golden Set — W3 batch C
+
 ## W3 Batch A: F1 + F2 + F4 + C1 (2026-04-27)
 
 12-week 战略 v4 Phase 1 W3 F-P0c batch A 后端深做。**关闭 W2 batch 1 的 Citation placeholder 状态** + 加 web search 缓存层 + 关键可观测性日志。所有抄袭点登记到 [`ACKNOWLEDGMENTS.md`](../ACKNOWLEDGMENTS.md)。

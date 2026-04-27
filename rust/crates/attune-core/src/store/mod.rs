@@ -13,6 +13,7 @@ mod project;
 mod memories;
 mod web_search_cache;
 mod chunk_breadcrumbs;
+pub mod browse_signals;  // pub: BrowseSignalInput / BrowseSignalRow 给 attune-server route 用
 
 pub use types::*;
 
@@ -22,6 +23,10 @@ pub use web_search_cache::DEFAULT_TTL_SECS as DEFAULT_WEB_SEARCH_TTL_SECS;
 use rusqlite::{params, Connection};
 use std::path::Path;
 
+// crypto + Key32 仅 tests 内引用 (#[cfg(test)] 子模块经常重新 use 它们)；
+// 顶部 import 保留是为防未来 mod.rs 主体加 dek 字段时不必再补 import。
+// per W3 batch B 遗留代码扫描：标记 allow 不算回归。
+#[allow(unused_imports)]
 use crate::crypto::{self, Key32};
 use crate::error::{Result, VaultError};
 
@@ -277,6 +282,24 @@ CREATE TABLE IF NOT EXISTS chunk_breadcrumbs (
     PRIMARY KEY (item_id, chunk_idx)
 );
 -- per reviewer G5：删除冗余 idx_chunk_breadcrumbs_item，PK 前缀已可用
+
+-- G1 浏览状态信号 (W3 batch B, 2026-04-27)
+-- per spec docs/superpowers/specs/2026-04-27-w3-batch-b-design.md §3
+-- url + title 加密（用户浏览历史属隐私）；engagement 数值明文便于聚合查询。
+-- domain_hash = SHA-256(domain) 让"按域名聚合 / 删除"无需暴露域名明文索引
+CREATE TABLE IF NOT EXISTS browse_signals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    url_enc         BLOB NOT NULL,
+    title_enc       BLOB NOT NULL,
+    domain_hash     TEXT NOT NULL,
+    dwell_ms        INTEGER NOT NULL,
+    scroll_pct      INTEGER NOT NULL,
+    copy_count      INTEGER NOT NULL,
+    visit_count     INTEGER NOT NULL,
+    created_at_secs INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_browse_signals_domain ON browse_signals(domain_hash, created_at_secs DESC);
+CREATE INDEX IF NOT EXISTS idx_browse_signals_created ON browse_signals(created_at_secs DESC);
 "#;
 
 pub struct Store {

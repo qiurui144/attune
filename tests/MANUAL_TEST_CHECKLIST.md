@@ -51,6 +51,33 @@
 - [ ] chat API 响应 JSON 含 `confidence` + `secondary_retrieval_used` + `citations[].breadcrumb` + `citations[].chunk_offset_start/end` 字段（即使 breadcrumb=[] / offset=null）
 - [ ] **Known limitation 验证**：当前 `breadcrumb` 总为空 array、`offset` 总为 null（W3 batch 2 才透传）— 前端不应假设有值
 
+## W3 Batch B: G1 + G2 + G5 + F3（2026-04-27）
+
+### G1 浏览信号捕获 — 默认 opt-out 验证（核心隐私）
+- [ ] 装好扩展后立即访问任何网站 → `attune --diag` 或 `GET /api/v1/browse_signals` 应显示 `count=0`（默认不捕获）
+- [ ] 打开扩展 popup → Privacy tab → whitelist 列表为空
+- [ ] **隐私模式硬阻断**：开 Chrome incognito 窗口 → 添加 example.com 到 whitelist → 访问 example.com 浏览 5 分钟 → count 仍 0（incognito 不捕获）
+- [ ] **HARD_BLACKLIST 双层验证**：手动加 `github.com` 到 whitelist → 访问 `github.com/login` 5 分钟 + 滚动 → count 增加；访问 `github.com/some-page` 5 分钟 → 受 path 黑名单覆盖**不应**捕获 login
+
+### G1 信号上报 + 加密
+- [ ] whitelist 加 `github.com` → 浏览 github 任意页面 5 分钟 → 30 秒后 attune 日志看到 POST /api/v1/browse_signals 200 → count 增加
+- [ ] `sqlite3 vault.sqlite "SELECT hex(url_enc) FROM browse_signals LIMIT 1"` 输出非可读（DEK 加密）
+- [ ] `sqlite3 ... "SELECT domain_hash FROM browse_signals LIMIT 1"` 输出 64 hex 字符（HMAC-SHA256 with pepper）
+
+### G2 高 engagement 评分
+- [ ] 浏览某页 1 分钟（不达 3 分钟）→ POST 响应 `high_engagement: 0`
+- [ ] 浏览某页 4 分钟 + 滚动 80% + 复制一段文字 → POST 响应 `high_engagement: 1`
+- [ ] G2 v1 仅计数不创建 item（W5-6 G3 才会真正抓内容）— 知识库不应出现"github.com"占位条目
+
+### G5 隐私控制面板
+- [ ] popup 显示已捕获信号数 + Pause toggle + whitelist 增删
+- [ ] 全局 Pause 后浏览 whitelist 域名 → count 不增（content script 检查 browsePaused）
+- [ ] "清除所有已捕获" 按钮 → DELETE /api/v1/browse_signals → count 归零
+- [ ] per-domain "清除" 按钮 → 仅清该域名 signals
+
+### F3 J5 secondary retrieval
+- [ ] 自动化测试 `cargo test -p attune-core --test rag_w3_batch_b_integration` 全绿（5 测试）
+
 ## W3 Batch A: F2 + C1 + F1 + F4（2026-04-27）
 
 ### F2 Citation breadcrumb 透传

@@ -8,11 +8,13 @@
     "sidePanel",
     "activeTab",
     "tabs",
-    "contextMenus"
+    "contextMenus",
+    "webNavigation"
   ],
   "host_permissions": [
     "http://localhost/*",
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "dist/background/worker.js",
@@ -27,6 +29,19 @@
       ],
       "js": ["dist/content/index.js"],
       "css": ["dist/content/indicator.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "exclude_matches": [
+        "*://*/login*",
+        "*://*/signin*",
+        "*://*1password*/*",
+        "*://*lastpass*/*",
+        "*://*bitwarden*/*",
+        "*://accounts.google.com/*"
+      ],
+      "js": ["dist/content/browse_capture.js"],
       "run_at": "document_idle"
     }
   ],

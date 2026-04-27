@@ -12,6 +12,14 @@ const api = new API();
 const dedup = new Map();
 const DEDUP_TTL = 60 * 60 * 1000; // 1h
 
+// --- G1 浏览信号队列 (W3 batch B, 2026-04-27) ---
+// per spec docs/superpowers/specs/2026-04-27-w3-batch-b-design.md §4
+// 30s 周期 flush；失败重试入队前端
+const browseQueue = [];
+const BROWSE_FLUSH_INTERVAL_MS = 30 * 1000;
+const BROWSE_BATCH_MAX = 50;
+let browseFlushInFlight = false;
+
 // --- 预取缓存 (queryHash -> {results, ts}) ---
 const prefetchCache = new Map();
 const PREFETCH_TTL = 30 * 1000; // 30s，覆盖"打字→发送"时间窗口
@@ -22,7 +30,6 @@ let injectionEnabled = true;
 
 // --- 初始化 ---
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('[npu-webhook] Extension installed');
   // 创建右键菜单
   chrome.contextMenus.create({
     id: 'npu-save-selection',
@@ -67,7 +74,6 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
     try {
       await handleCapture(data);
-      console.log('[npu-webhook] Selection saved:', data.title);
     } catch (err) {
       console.error('[npu-webhook] Save selection failed:', err);
     }
@@ -87,6 +93,14 @@ async function handleMessage(msg, sender) {
   switch (msg.type) {
     case MSG.CAPTURE_CONVERSATION:
       return handleCapture(msg.data);
+
+    case 'BROWSE_SIGNAL':
+      // G1 W3 batch B：入队，由 30s 周期 flush 上报后端
+      // payload 已被 content script 验证过 whitelist + HARD_BLACKLIST + pause
+      if (msg.payload && typeof msg.payload === 'object') {
+        browseQueue.push(msg.payload);
+      }
+      return { ok: true };
 
     case MSG.SUMMARIZE_AND_SAVE:
       return handleSummarizeAndSave(msg.data);
@@ -269,6 +283,29 @@ function persistDedup() {
   const obj = Object.fromEntries(dedup);
   chrome.storage.session.set({ dedup: obj }).catch(() => {});
 }
+
+// G1 W3 batch B：周期 flush 浏览信号到后端
+async function flushBrowseSignals() {
+  if (browseFlushInFlight) return;
+  if (browseQueue.length === 0) return;
+  browseFlushInFlight = true;
+  const batch = browseQueue.splice(0, BROWSE_BATCH_MAX);
+  try {
+    await api.recordBrowseSignals(batch);
+  } catch (e) {
+    // 失败重新入队头部 — 下次重试。
+    // per reviewer I4：上限保护必须先裁尾老数据，再 unshift 新失败批次，
+    // 否则刚重入队的失败批就被自己挤出去（顺序倒置）。
+    if (browseQueue.length + batch.length > 500) {
+      browseQueue.splice(500 - batch.length); // drop tail (older)
+    }
+    browseQueue.unshift(...batch);
+    console.warn('[npu-webhook] G1 flush failed (will retry):', e?.message || e);
+  } finally {
+    browseFlushInFlight = false;
+  }
+}
+setInterval(flushBrowseSignals, BROWSE_FLUSH_INTERVAL_MS);
 
 // --- 定期健康检查 + 缓存清理 ---
 async function healthCheck() {

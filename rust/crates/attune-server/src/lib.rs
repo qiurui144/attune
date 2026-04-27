@@ -113,6 +113,12 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/behavior/click", post(routes::behavior::log_click))
         .route("/api/v1/behavior/history", get(routes::behavior::history))
         .route("/api/v1/behavior/popular", get(routes::behavior::popular))
+        // G1 Browse signals (W3 batch B, 2026-04-27)
+        // per spec docs/superpowers/specs/2026-04-27-w3-batch-b-design.md §3
+        .route("/api/v1/browse_signals",
+               post(routes::browse_signals::record_batch)
+                   .get(routes::browse_signals::list)
+                   .delete(routes::browse_signals::delete))
         // Status (full status requires vault access)
         .route("/api/v1/status", get(routes::status::status))
         // Index management

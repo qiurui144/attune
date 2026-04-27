@@ -1,7 +1,7 @@
 // npu-vault/crates/vault-core/src/chunker.rs
 
-/// 滑动窗口分块 + 语义章节切割
-/// 复用 npu-webhook Python 实现的逻辑
+// 滑动窗口分块 + 语义章节切割
+// 复用 npu-webhook Python 实现的逻辑
 
 pub const DEFAULT_CHUNK_SIZE: usize = 512;
 pub const DEFAULT_OVERLAP: usize = 128;
@@ -146,7 +146,9 @@ pub fn extract_sections_with_path(content: &str) -> Vec<SectionWithPath> {
                 });
                 section_idx += 1;
                 current_section.clear();
-                path_for_pending_section_set = false;
+                // path_for_pending_section_set = false 之前是显式 reset，
+                // 但下一行就会重新赋 true（line 160），是 dead write
+                // (per W3 batch B 遗留代码扫描清理)
             }
             // 维护栈：dedent 到 depth-1，再 push（per spec §J1 path stack maintenance）
             // 防御性：depth >= 1 已由 heading_depth_and_text 保证（H1-H6 + 代码 boundary
