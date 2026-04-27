@@ -165,6 +165,50 @@ pub fn is_available() -> bool {
     detect_asr_backend().is_some()
 }
 
+/// 自动下载 whisper.cpp ggml 模型文件（按 tier）。
+///
+/// 来源：HuggingFace `ggerganov/whisper.cpp` 仓（ggml-{tiny/base/small/medium}-q8_0.bin）。
+/// HF_ENDPOINT 环境变量已由 state.rs 按 region 设好（China → hf-mirror.com）。
+///
+/// 模型保存到 ~/.local/share/attune/models/whisper/{filename}，让 detect_asr_backend
+/// 之后能找到。
+///
+/// 返回: 下载好的模型文件路径
+pub fn ensure_whisper_model(ggml_filename: &str) -> crate::error::Result<std::path::PathBuf> {
+    use crate::error::VaultError;
+
+    let target_dir = crate::platform::data_dir().join("models").join("whisper");
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| VaultError::ModelLoad(format!("create whisper dir: {e}")))?;
+    let target = target_dir.join(ggml_filename);
+
+    if target.exists() {
+        // 已存在跳过（不做 SHA 校验避免破坏用户自己放的 ggml；用户想换重新下载就删除文件）
+        return Ok(target);
+    }
+
+    let api = hf_hub::api::sync::Api::new()
+        .map_err(|e| VaultError::ModelLoad(format!("hf-hub init: {e}")))?;
+    let repo = api.model("ggerganov/whisper.cpp".to_string());
+    let src = repo
+        .get(ggml_filename)
+        .map_err(|e| VaultError::ModelLoad(format!("download {ggml_filename}: {e}")))?;
+    std::fs::copy(&src, &target)
+        .map_err(|e| VaultError::ModelLoad(format!("copy ggml file: {e}")))?;
+    Ok(target)
+}
+
+/// 启动时根据硬件 tier 后台拉取对应大小的 whisper ggml 模型。
+///
+/// 由 state.rs::init_search_engines spawn 在 tokio runtime 中调用。
+/// 失败不阻塞启动，仅 warn 日志（用户可以晚点用 ASR 时再 retry）。
+pub fn fetch_for_tier(tier: crate::platform::Tier) -> crate::error::Result<std::path::PathBuf> {
+    let rec = crate::platform::ModelRecommendation::for_tier(tier).ok_or_else(|| {
+        crate::error::VaultError::InvalidInput(format!("tier {} not supported", tier.label()))
+    })?;
+    ensure_whisper_model(rec.asr_ggml)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

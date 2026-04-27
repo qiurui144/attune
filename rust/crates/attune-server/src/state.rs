@@ -134,6 +134,17 @@ impl AppState {
         {
             return; // 已初始化，跳过
         }
+
+        // v0.6.0-rc.4: 按 region 自动设 HF_ENDPOINT，让 ONNX 模型从国内镜像下载
+        // hf-hub crate 读 HF_ENDPOINT 环境变量；未设走默认 huggingface.co
+        if std::env::var_os("HF_ENDPOINT").is_none() {
+            let region = attune_core::platform::detect_region();
+            let endpoint = region.hf_endpoint();
+            // SAFETY: 启动时一次性设置（init_search_engines 由 compare_exchange 保证幂等）
+            // 不会有并发 set_var 竞争。
+            unsafe { std::env::set_var("HF_ENDPOINT", endpoint) };
+            tracing::info!("Region detected: {} → HF_ENDPOINT={endpoint}", region.label());
+        }
         // Fulltext index (persistent on disk)
         {
             let tantivy_dir = attune_core::platform::data_dir().join("tantivy");
@@ -210,6 +221,27 @@ impl AppState {
                     tracing::info!("Reranker unavailable ({e}), will use vector cosine fallback");
                 }
             }
+        }
+
+        // v0.6.0-rc.4: 按 tier 后台拉取 whisper ggml 模型（不阻塞启动）
+        // 失败仅 warn — 用户上传音频时若 detect_asr_backend 仍返 None 会在 ai_stack
+        // status note 给出再次下载提示。
+        let tier = attune_core::platform::classify_hardware(&self.hardware);
+        if tier.is_supported() {
+            std::thread::spawn(move || {
+                match attune_core::asr::fetch_for_tier(tier) {
+                    Ok(path) => {
+                        tracing::info!(
+                            "ASR ggml ready at {} (tier={})",
+                            path.display(),
+                            tier.label()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("ASR ggml auto-fetch failed (tier={}): {e}", tier.label());
+                    }
+                }
+            });
         }
 
         // LLM 四级优先级：1. 配置文件 llm.endpoint（OpenAI-compatible）

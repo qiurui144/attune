@@ -18,6 +18,29 @@ type HardwareInfo = {
   recommended_summary?: string;
 };
 
+type AiStackTier = {
+  tier: 'unsupported' | 'low' | 'mid' | 'high' | 'flagship';
+  supported: boolean;
+  cpu_passmark?: number | null;
+  npu_tops?: number | null;
+};
+
+type AiStackRecommendation = {
+  embedding_repo: string;
+  embedding_size_mb: number;
+  reranker_repo: string;
+  reranker_size_mb: number;
+  asr_ggml: string;
+  asr_size_mb: number;
+  total_download_mb: number;
+};
+
+type AiStackResponse = {
+  hardware: AiStackTier & { ram_gb?: number; has_gpu?: boolean };
+  region: { detected: string; hf_endpoint: string };
+  recommendation: AiStackRecommendation | null;
+};
+
 type ScanStep = {
   label: string;
   done: boolean;
@@ -35,6 +58,7 @@ export function Step4Hardware({
   onContinue,
 }: Step4Props): JSX.Element {
   const [hw, setHw] = useState<HardwareInfo | null>(null);
+  const [aiStack, setAiStack] = useState<AiStackResponse | null>(null);
   const [scanSteps, setScanSteps] = useState<ScanStep[]>([]);
   const [autoDownload, setAutoDownload] = useState(true);
   const [applying, setApplying] = useState(false);
@@ -53,8 +77,12 @@ export function Step4Hardware({
       setScanSteps([...steps]);
 
       try {
-        const diag = await api.get<HardwareInfo>('/status/diagnostics');
+        const [diag, stack] = await Promise.all([
+          api.get<HardwareInfo>('/status/diagnostics'),
+          api.get<AiStackResponse>('/ai_stack'),
+        ]);
         if (cancelled) return;
+        setAiStack(stack);
 
         // 每 400ms tick 一阶段，视觉"扫描感"
         for (let i = 0; i < steps.length; i++) {
@@ -122,11 +150,96 @@ export function Step4Hardware({
     onContinue();
   }
 
+  // v0.6.0-rc.4: Tier 0 (unsupported) 拒绝继续，显示明确错误信息
+  const tierUnsupported = aiStack?.hardware?.supported === false;
+
+  if (tierUnsupported && aiStack) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+        <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0, color: 'var(--color-danger)' }}>
+          ⚠️ 设备规格不支持运行 Attune
+        </h2>
+        <div
+          style={{
+            background: 'var(--color-bg)',
+            border: '1px solid var(--color-danger)',
+            borderRadius: 'var(--radius-md)',
+            padding: 'var(--space-4)',
+            fontSize: 'var(--text-sm)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 'var(--space-2)',
+          }}
+        >
+          <div>
+            <strong>检测结果：</strong>
+          </div>
+          <div>· CPU: <code>{hw?.cpu_model ?? '-'}</code></div>
+          {aiStack.hardware.cpu_passmark != null && (
+            <div>· Passmark: <code>{aiStack.hardware.cpu_passmark}</code> (要求 ≥ 4000)</div>
+          )}
+          <div>· RAM: <code>{aiStack.hardware.ram_gb ?? '-'} GB</code> (要求 ≥ 4 GB)</div>
+        </div>
+        <div
+          style={{
+            background: 'var(--color-bg)',
+            borderRadius: 'var(--radius-md)',
+            padding: 'var(--space-4)',
+            fontSize: 'var(--text-sm)',
+          }}
+        >
+          <strong>推荐方案：</strong>
+          <ul style={{ marginTop: 'var(--space-2)', paddingLeft: 'var(--space-4)' }}>
+            <li>使用 K3 一体机（开箱即用，配本地 AI 全套）</li>
+            <li>更换设备：8 核近代 CPU (Passmark ≥ 9000) + 8GB RAM</li>
+          </ul>
+        </div>
+        <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+          <Button onClick={() => window.close?.()} variant="ghost">
+            退出
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
       <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
         {t('wizard.hw.heading')}
       </h2>
+
+      {/* Tier + 推荐摘要（如果 ai_stack 已加载） */}
+      {aiStack?.recommendation && (
+        <div
+          style={{
+            background: 'var(--color-bg)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-md)',
+            padding: 'var(--space-4)',
+            fontSize: 'var(--text-sm)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 'var(--space-2)',
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>
+            硬件档位: <code>{aiStack.hardware.tier}</code>
+            {' · '}
+            区域: <code>{aiStack.region.detected.split(' (')[0]}</code>
+          </div>
+          <div style={{ color: 'var(--color-text-secondary)' }}>
+            将自动下载（首次启动后台执行，~{aiStack.recommendation.total_download_mb} MB）：
+          </div>
+          <div style={{ paddingLeft: 'var(--space-3)' }}>
+            · Embedding: <code>{aiStack.recommendation.embedding_repo}</code> (~{aiStack.recommendation.embedding_size_mb} MB)
+            <br />
+            · Reranker: <code>{aiStack.recommendation.reranker_repo}</code> (~{aiStack.recommendation.reranker_size_mb} MB)
+            <br />
+            · ASR: <code>{aiStack.recommendation.asr_ggml}</code> (~{aiStack.recommendation.asr_size_mb} MB)
+          </div>
+        </div>
+      )}
 
       {/* 扫描进度 */}
       <div
