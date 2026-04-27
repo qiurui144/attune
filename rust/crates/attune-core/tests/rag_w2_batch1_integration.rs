@@ -162,6 +162,7 @@ fn b1_citation_serializes_with_breadcrumb_offsets() {
 #[test]
 fn b1_citation_web_source_has_no_offsets() {
     // Web 搜索结果无源 item，offset 必须 None
+    // W3 batch A reviewer S2: skip_serializing_if 让 None 不出现在 JSON（前端不必处理 null）
     let citation = Citation {
         item_id: "web:https://example.com/article".into(),
         title: "Web Article".into(),
@@ -171,8 +172,9 @@ fn b1_citation_web_source_has_no_offsets() {
         breadcrumb: vec![],
     };
     let json = serde_json::to_string(&citation).unwrap();
-    assert!(json.contains("\"chunk_offset_start\":null"));
-    assert!(json.contains("\"chunk_offset_end\":null"));
+    assert!(!json.contains("chunk_offset_start"), "None offset 字段不应出现在 JSON: {json}");
+    assert!(!json.contains("chunk_offset_end"), "None offset 字段不应出现在 JSON: {json}");
+    assert!(!json.contains("breadcrumb"), "空 breadcrumb 不应出现在 JSON: {json}");
 }
 
 #[test]
