@@ -120,10 +120,15 @@ impl Vault {
     }
 
     /// 解锁 vault
+    ///
+    /// 已解锁状态下重复调用：如果密码正确，签发一个全新 session token（同样的 MK，
+    /// 内存密钥保持不变）。用于浏览器重启 / sessionStorage 被清 / token 过期等
+    /// "服务端 vault 已解锁但客户端没有有效 token" 的场景，避免用户被迫先 lock 再 unlock。
+    /// 密码错误时仍抛 AEAD 认证错误，行为与首次 unlock 一致。
     pub fn unlock(&self, password: &str) -> Result<String> {
         match self.state() {
             VaultState::Sealed => return Err(VaultError::Sealed),
-            VaultState::Unlocked => return Err(VaultError::AlreadyUnlocked),
+            VaultState::Unlocked => return self.reissue_token(password),
             VaultState::Locked => {}
         }
 
@@ -338,6 +343,23 @@ impl Vault {
         Ok(())
     }
 
+    /// 已解锁 vault 的 token 重发：用密码再认证 + 签发新 token
+    /// 成功条件：派生 MK 能通过 AES-GCM 认证标签解密 dek_db（密码正确）。
+    /// 不修改内存中的 UnlockedKeys。
+    fn reissue_token(&self, password: &str) -> Result<String> {
+        let ds_path = self.config_dir.join("device.key");
+        let device_secret_bytes = std::fs::read(&ds_path)
+            .map_err(|_| VaultError::DeviceSecretMissing(ds_path.display().to_string()))?;
+        let salt = self.store.get_meta("salt")?
+            .ok_or(VaultError::Crypto("missing salt".into()))?;
+        let mk = crypto::derive_master_key(password.as_bytes(), &device_secret_bytes, &salt)?;
+        // AEAD 标签校验提供常数时间密码验证（解密失败 = 密码错）
+        let enc_dek_db = self.store.get_meta("encrypted_dek_db")?
+            .ok_or(VaultError::Crypto("missing dek_db".into()))?;
+        let _ = crypto::decrypt_dek(&mk, &enc_dek_db)?;
+        self.create_session_token(&mk)
+    }
+
     fn create_session_token(&self, mk: &Key32) -> Result<String> {
         let session_id = uuid::Uuid::new_v4().simple().to_string();
         let expires = chrono::Utc::now().timestamp() + SESSION_TTL_SECS;
@@ -448,6 +470,41 @@ mod tests {
         let result = vault.unlock("wrong");
         assert!(result.is_err());
         assert_eq!(vault.state(), VaultState::Locked);
+    }
+
+    #[test]
+    fn unlock_when_already_unlocked_reissues_token() {
+        // 模拟"vault 已解锁但客户端 token 失效"的场景：
+        // 同一密码再次 unlock 不应失败，而是签发新 token；MK / 内存密钥保持原样。
+        let (vault, _tmp) = test_vault();
+        vault.setup("pw").unwrap();
+        assert_eq!(vault.state(), VaultState::Unlocked);
+        let dek_before = vault.dek_db().unwrap();
+
+        let new_token = vault.unlock("pw").unwrap();
+        assert!(!new_token.is_empty(), "new token issued");
+        assert_eq!(vault.state(), VaultState::Unlocked, "still unlocked");
+        vault.verify_session(&new_token).unwrap();
+
+        // 内存 DEK 未被替换（Drop / Zeroize 不应触发）
+        let dek_after = vault.dek_db().unwrap();
+        assert_eq!(dek_before.as_bytes(), dek_after.as_bytes());
+    }
+
+    #[test]
+    fn unlock_when_already_unlocked_wrong_password_fails() {
+        // 已解锁状态下用错误密码 unlock 必须失败，且不影响当前会话状态
+        let (vault, _tmp) = test_vault();
+        vault.setup("correct").unwrap();
+        let dek_before = vault.dek_db().unwrap();
+
+        let result = vault.unlock("wrong");
+        assert!(result.is_err(), "wrong password rejected");
+        assert_eq!(vault.state(), VaultState::Unlocked, "still unlocked");
+
+        // 原 DEK 仍可访问（内存未被破坏）
+        let dek_after = vault.dek_db().unwrap();
+        assert_eq!(dek_before.as_bytes(), dek_after.as_bytes());
     }
 
     #[test]

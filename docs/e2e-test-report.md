@@ -781,5 +781,33 @@ echo 'You are a legal expert. Review the contract.' > $XDG_DATA_HOME/attune/plug
 - 成本感知提示（`tok · 本地`）正确显示
 
 **⚠️ 遗留**：
-- Bug #7 (App.tsx bootstrap) — vault 已解锁 + token 过期 → wizard 错误展示
+- ~~Bug #7 (App.tsx bootstrap)~~ ✅ 已修复（见下文）
 - Chat 头部模型显示为 `qwen2.5:3b`（前端从 diagnostics 读取的缓存标签）—— 与后端实际模型 `qwen2.5vl:latest` 不一致，minor UI stale state
+
+### Bug #7 修复（同日补丁）
+
+**问题**：vault server 端已解锁，但客户端 sessionStorage 无 token（浏览器重启 / token 过期）时，`GET /settings` 返回 401，App.tsx 的 `.catch(() => ({}))` 把 401 压成空对象，导致 `wizard.complete=undefined` → 错误展示 wizard。
+
+**根因**：双向问题
+1. **前端**（App.tsx）—— bootstrap 把 401 与 5xx/网络错误混为一谈
+2. **后端**（vault.unlock）—— 已解锁状态下重复 unlock 直接 `Err(AlreadyUnlocked)`，即便密码正确也无法补发 token，用户只能先 lock 再 unlock
+
+**修复方案**：
+
+| 层 | 文件 | 改动 |
+|----|------|------|
+| 前端 | `App.tsx` | bootstrap 捕获 `ApiError.status === 401` 时跳 LoginScreen（而非 wizard） |
+| 后端 | `attune-core/src/vault.rs` | `unlock` 在 already-unlocked 状态下走 `reissue_token`：派生 MK + AEAD 解密 dek_db 验密码 + 签发新 token；密码错则正常报错；内存 UnlockedKeys 不动 |
+| 测试 | `attune-core/src/vault.rs` | 新增 `unlock_when_already_unlocked_reissues_token` + `unlock_when_already_unlocked_wrong_password_fails` |
+
+**验证**：
+
+| 场景 | 结果 | 截图 |
+|------|------|------|
+| 后端：unlock(unlocked, 正确密码) → 新 token，状态仍 unlocked | ✅ | curl 验证 token1 ≠ token2 |
+| 后端：unlock(unlocked, 错误密码) → 401，状态仍 unlocked | ✅ | curl 返回 `{"error":"invalid password"}` |
+| 后端单元测试：reissue + wrong-pwd reject | ✅ 2/2 PASS | `cargo test -p attune-core vault::tests::unlock` 4/4 |
+| 前端：vault unlocked + 清空 sessionStorage + reload → LoginScreen | ✅ | `e2e-bug7-fix-loginscreen.png` |
+| 前端：LoginScreen 输入正确密码 → backend reissue → MainShell | ✅ | `e2e-bug7-fix-after-reauth.png` |
+
+**关键设计点**：`reissue_token` 不修改内存 `UnlockedKeys`（避免 Drop/Zeroize 触发），只验证密码并签发新 token。AEAD 认证标签提供常数时间密码校验，不引入额外依赖。

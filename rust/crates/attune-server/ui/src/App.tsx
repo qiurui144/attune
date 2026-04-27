@@ -20,7 +20,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { Wizard, LoginScreen } from './wizard';
 import { MainShell } from './layout';
 import { useShortcut } from './hooks/useShortcut';
-import { api } from './store/api';
+import { api, ApiError } from './store/api';
 import { vaultState, sidebarCollapsed } from './store/signals';
 import { startConnectionMonitor } from './store/connection';
 import { startProgressWS } from './store/ws';
@@ -89,7 +89,20 @@ export function App(): JSX.Element {
       }
 
       // unlocked → 检查 wizard 是否完成
-      const settings = await api.get<SettingsResponse>('/settings').catch(() => ({}) as SettingsResponse);
+      // 注意：unlocked + 401 说明服务端 vault 已解锁但客户端没有有效 session token
+      // （浏览器重启 / token 过期）。此时必须跳 LoginScreen 让用户重新输入密码取 token，
+      // 否则后续所有 API 调用都会 401 失败。不能把 401 catch 成空对象然后误判 wizard 未完成。
+      let settings: SettingsResponse;
+      try {
+        settings = await api.get<SettingsResponse>('/settings');
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          phase.value = { kind: 'login' };
+          return;
+        }
+        // 其他错误（网络/5xx）→ 回退为空 settings，按 wizard 未完成处理
+        settings = {};
+      }
       if (settings.wizard?.complete) {
         phase.value = { kind: 'main' };
       } else {
