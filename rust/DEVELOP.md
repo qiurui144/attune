@@ -439,6 +439,34 @@ std::thread::spawn(move || {
 
 **已 retrofit 的 worker**（W1）：`attune-server::state` 中 `start_classify_worker` / `start_rescan_worker` / `start_queue_worker` / `start_skill_evolver`，均参考 `state.rs` 实际代码。
 
+## A1 Memory Consolidation（2026-04-27）
+
+`attune_core::memory_consolidation` 把 `chunk_summaries` 按时间窗口（默认 1 天）聚合成 episodic memory。设计稿：[`docs/superpowers/specs/2026-04-27-memory-consolidation-design.md`](../docs/superpowers/specs/2026-04-27-memory-consolidation-design.md)。
+
+**三阶段 API（与 skill_evolution 同构）**：
+
+```rust
+// Phase 1（持 vault 锁）：扫 chunk_summaries → 按天分桶 → 解密 → 过滤已 consolidated
+let bundles = prepare_consolidation_cycle(store, dek, now_secs)?;
+
+// Phase 2（无锁）：每 bundle 单独 LLM 调用 — 生产路径必须用 generate_one + 配额 check
+for bundle in &bundles {
+    if !governor.allow_llm_call() { break; }
+    summaries.push(generate_one_episodic_memory(llm, bundle));
+}
+
+// Phase 3（重新持 vault 锁 + 复查 unlocked + 重新取 dek）：幂等 INSERT OR IGNORE
+apply_consolidation_result(store, &fresh_dek, &bundles, &summaries, model, now_secs)?;
+```
+
+**幂等性保证**：唯一索引 `uq_memories_source(kind, source_chunk_hashes)` — 相同 chunk 集合二次跑 `INSERT OR IGNORE` 返回 0 不重复。
+
+**生产 worker**：`attune-server::state::start_memory_consolidator`（6h 周期）。
+
+**MVP 边界**：仅 episodic、不做 chat 检索集成、不做 conflict detection、CHECK 已预放宽支持 semantic 但 W1 不写入。
+
+**测试 helper**：`Store::__test_seed_chunk_summary` 仅在 `#[cfg(any(test, feature = "test-utils"))]` 下编译。`attune-core` 自 dev-dep 启用 `test-utils`，`cargo test` 无需 `--features` 即可跑集成测试。
+
 ## 数据库 Schema
 
 ```sql

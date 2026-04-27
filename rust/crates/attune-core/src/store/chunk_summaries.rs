@@ -73,4 +73,29 @@ impl Store {
         )?;
         Ok(n as usize)
     }
+
+    /// 仅供集成测试用：seed 一条 chunk_summary 并指定 created_at（ISO8601 字符串）。
+    /// 生产路径走 [`Self::put_chunk_summary`]，由 SQLite `datetime('now')` 自动填时间。
+    ///
+    /// **Feature-gated**：仅在启用 `test-utils` feature 时编译。生产二进制不暴露。
+    /// 集成测试在 `Cargo.toml` 加 `attune-core = { features = ["test-utils"] }` 即可调用。
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn __test_seed_chunk_summary(
+        &self,
+        dek: &Key32,
+        chunk_hash: &str,
+        item_id: &str,
+        summary: &str,
+        created_at_iso: &str,
+    ) -> Result<()> {
+        let enc = crypto::encrypt(dek, summary.as_bytes())?;
+        self.conn.execute(
+            "INSERT INTO chunk_summaries \
+                (chunk_hash, strategy, item_id, model, summary, orig_chars, created_at) \
+             VALUES (?1, 'economical', ?2, 'test-model', ?3, ?4, ?5)",
+            params![chunk_hash, item_id, enc, summary.len() as i64, created_at_iso],
+        )?;
+        Ok(())
+    }
 }

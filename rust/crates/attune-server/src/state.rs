@@ -59,6 +59,8 @@ pub struct AppState {
     pub engines_initialized: AtomicBool,
     /// 防止重复启动 SkillEvolver 后台线程
     pub evolve_worker_running: AtomicBool,
+    /// 防止重复启动 MemoryConsolidator 后台线程（A1，2026-04-27）
+    pub memory_consolidator_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
     /// Sprint 1 Phase B: project recommendation broadcast channel.
     /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
@@ -111,6 +113,7 @@ impl AppState {
             classify_worker_running: AtomicBool::new(false),
             rescan_worker_running: AtomicBool::new(false),
             evolve_worker_running: AtomicBool::new(false),
+            memory_consolidator_running: AtomicBool::new(false),
             engines_initialized: AtomicBool::new(false),
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
@@ -832,6 +835,132 @@ impl AppState {
 
             state.evolve_worker_running.store(false, Ordering::SeqCst);
             tracing::info!("Skill evolver stopped (vault locked)");
+        });
+    }
+
+    /// A1：启动 Memory Consolidator 后台 worker（2026-04-27）。
+    ///
+    /// 每 6 小时跑一次：扫 chunk_summaries 按天聚合 → LLM 总结成 episodic memory。
+    /// 三阶段锁释放（与 skill_evolver 同构），每周期最多 4 个 bundle / 4 次 LLM 调用。
+    /// 受 H1 [`TaskKind::MemoryConsolidation`] governor 治理 + LLM 配额限制。
+    pub fn start_memory_consolidator(state: std::sync::Arc<AppState>) {
+        // 需要 LLM 才能运行
+        if state.llm.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            return;
+        }
+
+        if state.memory_consolidator_running.compare_exchange(
+            false, true, Ordering::SeqCst, Ordering::SeqCst,
+        ).is_err() {
+            tracing::debug!("Memory consolidator already running, skipping");
+            return;
+        }
+
+        let governor = global_registry().register(TaskKind::MemoryConsolidation);
+
+        std::thread::spawn(move || {
+            tracing::info!("Memory consolidator started (runs every 6h)");
+            const CYCLE: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+            loop {
+                std::thread::sleep(CYCLE);
+
+                let vault_unlocked = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    matches!(vault.state(), attune_core::vault::VaultState::Unlocked)
+                };
+                if !vault_unlocked {
+                    break;
+                }
+
+                if !governor.should_run() {
+                    continue;
+                }
+
+                let llm = match state.llm.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+                    Some(l) => l,
+                    None => break,
+                };
+
+                // 用 std time 避免引入 chrono 到 attune-server。SystemTime 之后转 secs。
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+
+                // I4：Phase 1 同步记下 LLM model 名，避免 Phase 3 写入时与实际生成 LLM 不一致。
+                let model_name = llm.model_name().to_string();
+
+                // Phase 1（持锁）：prepare bundles。Phase 1 dek 不带出锁外，
+                // Phase 3 重新取 dek 避免使用已注销的密钥（S2 修复）。
+                let bundles = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    let dek = match vault.dek_db() {
+                        Ok(d) => d,
+                        Err(_) => break,
+                    };
+                    match attune_core::memory_consolidation::prepare_consolidation_cycle(
+                        vault.store(), &dek, now_secs,
+                    ) {
+                        Ok(Some(b)) => Some(b),
+                        Ok(None) => None,
+                        Err(e) => {
+                            tracing::warn!("Memory consolidator prepare error: {}", e);
+                            None
+                        }
+                    }
+                };
+                let Some(bundles) = bundles else { continue };
+
+                // Phase 2（无锁）：每 bundle 单独 check 配额 + LLM 调用（S1 修复）。
+                // 配额耗尽时剩余 bundle 留 None，下周期 INSERT OR IGNORE 保证幂等不丢失。
+                let mut summaries: Vec<Option<String>> = Vec::with_capacity(bundles.len());
+                let mut deferred = 0usize;
+                for bundle in &bundles {
+                    if !governor.allow_llm_call() {
+                        deferred = bundles.len() - summaries.len();
+                        for _ in 0..deferred { summaries.push(None); }
+                        break;
+                    }
+                    summaries.push(
+                        attune_core::memory_consolidation::generate_one_episodic_memory(
+                            llm.as_ref(), bundle,
+                        ),
+                    );
+                }
+                if deferred > 0 {
+                    tracing::info!(
+                        "Memory consolidator LLM quota exhausted mid-cycle, {} bundle(s) deferred",
+                        deferred
+                    );
+                }
+
+                // Phase 3（持锁）：幂等写 memories — 复查 vault 状态 + 重新取 dek（S2 修复）
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        tracing::info!(
+                            "Vault locked during consolidation, discarding {} bundle result(s)",
+                            bundles.len()
+                        );
+                        break;
+                    }
+                    let dek = match vault.dek_db() {
+                        Ok(d) => d,
+                        Err(_) => break,
+                    };
+                    match attune_core::memory_consolidation::apply_consolidation_result(
+                        vault.store(), &dek, &bundles, &summaries, &model_name, now_secs,
+                    ) {
+                        Ok(0) => tracing::debug!("Memory consolidator: no new memories"),
+                        Ok(n) => tracing::info!("Memory consolidator: {} new episodic memories", n),
+                        Err(e) => tracing::warn!("Memory consolidator apply error: {}", e),
+                    }
+                }
+            }
+
+            state.memory_consolidator_running.store(false, Ordering::SeqCst);
+            tracing::info!("Memory consolidator stopped (vault locked)");
         });
     }
 

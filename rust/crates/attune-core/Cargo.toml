@@ -52,6 +52,13 @@ default = []
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
 coreml = ["ort/coreml"]
+# 集成测试用：暴露 __test_seed_* 等内部 fixture helper。生产构建不开。
+test-utils = []
+
+# Self-dev-dependency：让 `cargo test -p attune-core` 自动启用 test-utils feature，
+# 集成测试无需 --features 显式开启。生产 `cargo build` 不受影响（仅 dev profile）。
+[dev-dependencies]
+attune-core = { path = ".", features = ["test-utils"] }
 
 [lints]
 workspace = true

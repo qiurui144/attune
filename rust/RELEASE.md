@@ -2,6 +2,20 @@
 
 ## 开发中
 
+## A1 Memory Consolidation MVP (2026-04-27)
+
+12-week 战略 v2 Phase 1 W1。引入**周期性 episodic memory** 数据模型 — chunk_summaries 按时间窗口聚合成"用户那天学了什么"的高层记忆，是 attune"自进化记忆"叙事（mem0 参考）的数据基石。详见 [`docs/superpowers/specs/2026-04-27-memory-consolidation-design.md`](../docs/superpowers/specs/2026-04-27-memory-consolidation-design.md)。
+
+- **`memories` 表新增**：id / kind / window_start/end / source_chunk_hashes (JSON, sorted) / summary_encrypted / model / created_at；唯一索引 `uq_memories_source(kind, source_chunk_hashes)` 保证幂等
+- **CHECK 约束已预先支持** `('episodic', 'semantic')`，W5+ 加 semantic 时无需 schema migration
+- **`attune_core::memory_consolidation`** 新模块：三阶段 API（prepare/generate/apply）+ `generate_one_episodic_memory` 单 bundle helper（供 worker 按 bundle check H1 LLM 配额）
+- **MVP 边界**：仅 episodic（按 1 天时间窗口）；semantic / chat 检索集成 / conflict detection / 用户面 UI 都明示推迟到 W5+
+- **生产 worker** `attune-server::state::start_memory_consolidator`：6h 周期，三阶段锁释放（与 skill_evolver 同构），Phase 2 按 bundle 取 LLM 配额，Phase 3 重新 lock 复查 vault state + 重新取 dek 防 stale 密钥
+- **30 天 lookback**：超过 30 天的老 chunk 当前不会被 consolidate（设计：留给 W5+ semantic memory）；现存 vault 升级时老历史不会自动 backfill
+- **测试**：6 store CRUD（含幂等验证）+ 10 单元（prepare/generate/apply 三阶段 + 边界）+ 4 集成（真 Store + tempfile + MockLlm 完整周期）。attune-core 总测试 378 → 394
+- **Test helper feature gate**：`__test_seed_chunk_summary` 用 `#[cfg(any(test, feature = "test-utils"))]` 守护，生产二进制不暴露；attune-core 自身 dev-dep 启用 test-utils，`cargo test` 无需额外 flag
+- **Two rounds of code review**：R1 5 issues 全修（LLM 配额超发、Phase 3 stale dek、test helper 暴露、model name race、CHECK 约束等）；R2 conditional pass + P1-1 dev-dep fix
+
 ## H1 资源治理框架 (2026-04-27)
 
 12-week 战略 v2 Phase 1 W1。引入**任务级协作式资源治理**，所有后台 worker 的"系统好公民"基础设施。详见 [`docs/system-impact.md`](../docs/system-impact.md)。

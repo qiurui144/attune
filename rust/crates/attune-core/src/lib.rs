@@ -19,6 +19,7 @@ pub mod llm;
 pub(crate) mod ocr;
 pub mod parser;
 pub mod platform;
+pub mod memory_consolidation;
 pub mod project_recommender;
 pub(crate) mod queue;
 pub mod resource_governor;

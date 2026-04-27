@@ -10,6 +10,7 @@ mod signals;
 mod chunk_summaries;
 mod annotations;
 mod project;
+mod memories;
 
 pub use types::*;
 
@@ -214,6 +215,28 @@ CREATE TABLE IF NOT EXISTS project_timeline (
     FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_project_timeline_pid ON project_timeline(project_id, ts);
+
+-- A1 Memory Consolidation (2026-04-27)
+-- 周期性把 chunk_summaries 按时间窗口聚合成 episodic memory（情景记忆）。
+-- 幂等键 = (kind, source_chunk_hashes JSON)，重跑相同 chunk 集合不重复入库。
+-- summary_encrypted 存 LLM 总结正文（DEK 加密）。kind 当前仅 'episodic'，
+-- W5+ 加 'semantic'（按主题聚合）。
+CREATE TABLE IF NOT EXISTS memories (
+    id                    TEXT PRIMARY KEY,
+    -- W1 仅用 'episodic'；'semantic' 已预先放入 CHECK 集合，避免 W5+ 时
+    -- SQLite 麻烦的 ALTER TABLE … DROP CHECK（设计稿 §3 + reviewer I5）
+    kind                  TEXT NOT NULL CHECK(kind IN ('episodic', 'semantic')),
+    window_start          INTEGER NOT NULL,
+    window_end            INTEGER NOT NULL,
+    source_chunk_hashes   TEXT NOT NULL,
+    source_chunk_count    INTEGER NOT NULL,
+    summary_encrypted     BLOB NOT NULL,
+    model                 TEXT NOT NULL,
+    created_at            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memories_window ON memories(window_start, window_end);
+CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_source ON memories(kind, source_chunk_hashes);
 "#;
 
 pub struct Store {

@@ -252,3 +252,16 @@ pub struct ProjectTimelineEntry {
     pub event_type: String,
     pub payload_encrypted: Option<Vec<u8>>,
 }
+
+/// A1 Memory Consolidation：聚合的情景记忆行（解密后）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryRow {
+    pub id: String,
+    pub kind: String,            // 'episodic'（W5+ 加 'semantic'）
+    pub window_start: i64,       // unix epoch 秒
+    pub window_end: i64,
+    pub source_chunk_hashes: Vec<String>,  // 升序
+    pub summary: String,         // 已解密
+    pub model: String,
+    pub created_at: i64,
+}
