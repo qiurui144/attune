@@ -1,5 +1,12 @@
 use std::path::PathBuf;
 
+pub mod cpu_db;
+pub mod region;
+pub mod tier;
+
+pub use region::{detect_region, Region};
+pub use tier::{classify_hardware, ModelRecommendation, Tier};
+
 const APP_DIR: &str = "attune";
 const LEGACY_APP_DIR: &str = "npu-vault";
 

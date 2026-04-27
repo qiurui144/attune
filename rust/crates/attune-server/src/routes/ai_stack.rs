@@ -16,7 +16,7 @@ fn note(available: bool, msg: &str) -> Option<String> {
     if available { None } else { Some(msg.to_string()) }
 }
 
-/// GET /api/v1/ai_stack — 返各底座状态
+/// GET /api/v1/ai_stack — 返各底座状态 + 硬件 tier + 模型推荐 + region
 pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let embedding_loaded = state.embedding.lock().ok().map(|g| g.is_some()).unwrap_or(false);
     let rerank_loaded = state.reranker.lock().ok().map(|g| g.is_some()).unwrap_or(false);
@@ -30,7 +30,39 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     let asr_available = asr_backend.is_some();
     let asr_model: Option<String> = asr_backend.as_ref().map(|b| b.model_name.clone());
 
+    // v0.6.0-rc.4: 硬件 tier + 模型推荐 + region
+    let hw = &state.hardware;
+    let tier = attune_core::platform::classify_hardware(hw);
+    let recommendation = attune_core::platform::ModelRecommendation::for_tier(tier);
+    let region = attune_core::platform::detect_region();
+    let passmark = attune_core::platform::cpu_db::lookup(&hw.cpu_model)
+        .map(|e| e.passmark);
+    let npu_tops = attune_core::platform::cpu_db::lookup(&hw.cpu_model)
+        .and_then(|e| e.npu_tops);
+
     Json(json!({
+        "hardware": {
+            "tier": tier.label(),
+            "supported": tier.is_supported(),
+            "cpu_model": &hw.cpu_model,
+            "cpu_passmark": passmark,
+            "npu_tops": npu_tops,
+            "ram_gb": hw.total_ram_bytes / (1024 * 1024 * 1024),
+            "has_gpu": hw.has_nvidia_gpu || hw.has_amd_gpu,
+        },
+        "region": {
+            "detected": region.label(),
+            "hf_endpoint": region.hf_endpoint(),
+        },
+        "recommendation": recommendation.as_ref().map(|r| json!({
+            "embedding_repo": r.embedding_repo,
+            "embedding_size_mb": r.embedding_size_mb,
+            "reranker_repo": r.reranker_repo,
+            "reranker_size_mb": r.reranker_size_mb,
+            "asr_ggml": r.asr_ggml,
+            "asr_size_mb": r.asr_size_mb,
+            "total_download_mb": r.total_download_mb(),
+        })),
         "embedding": {
             "available": embedding_loaded,
             "model": "bge-m3",
