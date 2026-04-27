@@ -20,7 +20,8 @@ pub mod error;
 pub mod index;
 pub mod intent_router;
 pub mod llm;
-pub(crate) mod ocr;
+pub mod ocr;  // v0.6.0-rc.3: pub for ai_stack status API
+pub mod asr;
 pub mod parser;
 pub mod platform;
 pub mod memory_consolidation;

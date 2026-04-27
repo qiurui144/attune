@@ -142,14 +142,17 @@ pub async fn update_settings(
     Ok(Json(current))
 }
 
-/// 默认设置。`recommended_summary` 应由调用方从 `AppState.hardware` 传入，
-/// 避免每次请求都重新检测硬件（阻塞 async worker + 浪费 I/O）。
-fn default_settings(recommended_summary: &str) -> serde_json::Value {
+/// 默认设置。`recommended_summary` 仅作为"用户主动选本地"时的硬件推荐 fallback；
+/// **v0.6.0-rc.3 起 LLM 默认走远端 token**（per CLAUDE.md M2 决策 + 用户反馈），
+/// 避免本地 3B 模型在大多数硬件上 OOM 或效果差。
+fn default_settings(_recommended_summary: &str) -> serde_json::Value {
     serde_json::json!({
         // ── 普通用户可见 ──
         "theme": "system",         // system / dark / light
         "language": "zh-CN",
-        "summary_model": recommended_summary,  // 本地摘要模型，按硬件推荐
+        // 摘要模型 null = 用户主动选 (Settings UI 引导填 LLM endpoint 后启用)；
+        // 想用本地的可填 "qwen2.5:1.5b" 等 (recommended_summary 给硬件推荐建议)
+        "summary_model": null,
         "context_strategy": "economical",      // economical(150字) / accurate(300字+片段) / raw(不压缩，仅本地)
         "web_search": {
             "enabled": true,
@@ -158,17 +161,34 @@ fn default_settings(recommended_summary: &str) -> serde_json::Value {
             "min_interval_ms": 2000
         },
         "llm": {
-            "provider": "local",   // local / openai / claude / custom
-            "endpoint": null,
-            "model": null,         // null = 跟随 provider 的默认
+            // 默认远端 token (per CLAUDE.md "M2 决策"：本地不预装 LLM，避免 OOM / 3B 效果差)
+            // 用户首次启动 Settings UI 引导填 endpoint + api_key
+            "provider": "openai_compat",   // openai_compat / anthropic / deepseek / qwen / ollama / claude
+            "endpoint": null,              // null → UI 引导填 (e.g. https://api.openai.com/v1)
+            "model": null,                 // null → UI 引导填 (e.g. gpt-4o-mini / claude-3-5-haiku / deepseek-chat)
             "api_key": null
         },
 
-        // ── 高级用户可见 ──
+        // ── 本地 AI 底座（per CLAUDE.md "本地仅捆绑必要底座"决策）──
+        // Embedding / Rerank / OCR / ASR 都是本地零费用，自动加载，用户无需配置。
+        // 状态查询: GET /api/v1/ai_stack
         "embedding": {
             "model": "bge-m3",
             "ollama_url": "http://localhost:11434"
         },
+        "rerank": {
+            "enabled": true,                  // bge-reranker-v2-m3 自动从 HuggingFace 拉取
+            "model_repo": "Xenova/bge-reranker-base"  // 想换可填 jina-v2-multilingual / bge-base-official
+        },
+        "ocr": {
+            "enabled": true,                  // tesseract + pdftoppm 系统 PATH 自动检测
+            "languages": "chi_sim+eng"
+        },
+        "asr": {
+            "enabled": false,                 // v0.6: whisper.cpp 集成中；v0.6.x 启用
+            "model": "whisper-small-q8"       // 中文 WER < 20% 实测满足
+        },
+
         "skills": {
             "disabled": []
         },

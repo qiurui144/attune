@@ -124,6 +124,38 @@ export const zh = {
   'shortcut.send': '发送消息',
   'shortcut.close': '关闭',
 
+  // ─── Sidebar 导航（v0.6.0-rc.3 i18n 补全）──────────────
+  'sidebar.new_chat': '新对话',
+  'sidebar.no_sessions': '还没有对话',
+  'sidebar.untitled_session': '未命名对话',
+  'sidebar.nav.items': '条目',
+  'sidebar.nav.projects': '项目',
+  'sidebar.nav.remote': '远程目录',
+  'sidebar.nav.knowledge': '知识全景',
+  'sidebar.nav.skills': '技能',
+  'sidebar.nav.settings': '设置',
+  'sidebar.vault.unlocked': '已解锁',
+  'sidebar.vault.locked': '已锁定',
+  'sidebar.session.today': '今天',
+  'sidebar.session.yesterday': '昨天',
+  'sidebar.session.this_week': '本周',
+  'sidebar.session.older': '更早',
+  'sidebar.menu.settings': '⚙ 设置',
+  'sidebar.menu.lock_vault': '🔒 锁定 vault',
+  'sidebar.menu.toggle_theme': '🌓 切换主题',
+  'sidebar.menu.about': '关于 Attune',
+
+  // ─── SettingsView ────────────────────────────────────
+  'settings.section.appearance': '外观',
+  'settings.row.theme': '主题',
+  'settings.row.language': '语言',
+  'settings.theme.auto': '跟随系统',
+  'settings.theme.light': '浅色',
+  'settings.theme.dark': '深色',
+  'settings.lang.zh': '中文',
+  'settings.lang.en': 'English',
+  'settings.toast.lang_switched': '已切换语言',
+
   // ─── Plural 示例 ──────────────────────────────────────
   'items.count': { one: '{count} 条', other: '{count} 条' }, // 中文单复数同形
 } as const;

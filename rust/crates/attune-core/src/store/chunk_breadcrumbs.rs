@@ -319,10 +319,10 @@ mod tests {
 
     #[test]
     fn breadcrumb_encrypted_at_rest() {
-        // per R04 P0-1：breadcrumb 落盘必须加密
+        // per R04 P0-1：breadcrumb 落盘必须加密。用通用文档结构（与行业无关）。
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
-        let content = "# 案件分析\n\n## 原告主张\n\n详情";
+        let content = "# 项目分析\n\n## 重点观察\n\n详情";
         let item_id = seed_item(&store, &dek, content);
         store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content).unwrap();
         let raw: Vec<u8> = store
@@ -334,7 +334,7 @@ mod tests {
             )
             .unwrap();
         let raw_str = String::from_utf8_lossy(&raw);
-        assert!(!raw_str.contains("案件分析"), "breadcrumb 必须加密落盘 (P0-1)");
-        assert!(!raw_str.contains("原告"), "breadcrumb 必须加密落盘 (P0-1)");
+        assert!(!raw_str.contains("项目分析"), "breadcrumb 必须加密落盘 (P0-1)");
+        assert!(!raw_str.contains("重点观察"), "breadcrumb 必须加密落盘 (P0-1)");
     }
 }

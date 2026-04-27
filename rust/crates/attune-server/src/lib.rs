@@ -128,6 +128,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/web_search_cache",
                get(routes::web_search_cache::count)
                    .delete(routes::web_search_cache::delete))
+        // AI 底座状态（v0.6.0-rc.3, 2026-04-27）— Embedding / Rerank / OCR / ASR / LLM 可用性
+        .route("/api/v1/ai_stack", get(routes::ai_stack::status))
         // G2 Auto bookmark candidates (W4, 2026-04-27)
         // POST 不暴露：仅由 routes::browse_signals::record_batch high_engagement 路径写
         .route("/api/v1/auto_bookmarks",

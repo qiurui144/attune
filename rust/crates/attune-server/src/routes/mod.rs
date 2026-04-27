@@ -1,3 +1,4 @@
+pub mod ai_stack;
 pub mod annotations;
 pub mod auto_bookmarks;
 pub mod behavior;

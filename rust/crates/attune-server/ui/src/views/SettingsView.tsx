@@ -6,7 +6,7 @@ import { useSignal, useComputed } from '@preact/signals';
 import { Button } from '../components';
 import { toast } from '../components/Toast';
 import { theme, vaultState, hardware, settings } from '../store/signals';
-import { setLocale, currentLocale } from '../i18n';
+import { setLocale, currentLocale, t } from '../i18n';
 import { loadSettings, patchSettings } from '../hooks/useSettings';
 import { api, clearToken } from '../store/api';
 
@@ -191,29 +191,29 @@ function Section({
 function GeneralPanel(): JSX.Element {
   return (
     <>
-      <Section title="外观">
-        <SettingRow label="主题">
+      <Section title={t('settings.section.appearance')}>
+        <SettingRow label={t('settings.row.theme')}>
           <select
             value={theme.value}
             onChange={(e) => (theme.value = e.currentTarget.value as 'light' | 'dark' | 'auto')}
             style={selectStyle}
           >
-            <option value="auto">跟随系统</option>
-            <option value="light">浅色</option>
-            <option value="dark">深色</option>
+            <option value="auto">{t('settings.theme.auto')}</option>
+            <option value="light">{t('settings.theme.light')}</option>
+            <option value="dark">{t('settings.theme.dark')}</option>
           </select>
         </SettingRow>
-        <SettingRow label="语言">
+        <SettingRow label={t('settings.row.language')}>
           <select
             value={currentLocale.value}
             onChange={(e) => {
               setLocale(e.currentTarget.value as 'zh' | 'en');
-              toast('success', '已切换语言');
+              toast('success', t('settings.toast.lang_switched'));
             }}
             style={selectStyle}
           >
-            <option value="zh">中文</option>
-            <option value="en">English</option>
+            <option value="zh">{t('settings.lang.zh')}</option>
+            <option value="en">{t('settings.lang.en')}</option>
           </select>
         </SettingRow>
       </Section>

@@ -188,9 +188,14 @@ impl HardwareProfile {
         self.has_nvidia_gpu || self.has_amd_gpu || self.has_amd_xdna_npu || self.has_intel_npu
     }
 
-    /// 根据 RAM + 加速器档位，推荐默认本地摘要模型。
+    /// 根据 RAM + 加速器档位，推荐默认本地摘要模型（仅"用户主动想用本地时"的建议）。
     ///
-    /// 推荐档位（详见 CLAUDE.md "硬件感知的默认模型"）：
+    /// **v0.6.0-rc.3 行为变化**（per CLAUDE.md "M2 决策" + 用户 2026-04-27 反馈）：
+    /// - LLM 默认走**远端 token**（不在本地预装），settings.rs::default_settings.llm.provider 默认引导用户填远端 endpoint
+    /// - 本函数仅在用户**显式选本地** Ollama 后给"硬件推荐"用，不再被 default_settings 用作 hardcode 默认
+    /// - K3 一体机形态可选装本地 LLM；普通桌面用户应避免本地 chat（避免 OOM / 3B 效果差）
+    ///
+    /// 推荐档位（用户显式选本地时）：
     /// | RAM    | 加速器   | 模型            |
     /// |--------|---------|-----------------|
     /// | ≥32 GB | 独显/NPU | qwen2.5:7b      |

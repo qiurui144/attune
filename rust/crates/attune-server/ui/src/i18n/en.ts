@@ -131,6 +131,38 @@ export const en = {
   'shortcut.send': 'Send message',
   'shortcut.close': 'Close',
 
+  // ─── Sidebar nav (v0.6.0-rc.3 i18n) ─────────────────
+  'sidebar.new_chat': 'New chat',
+  'sidebar.no_sessions': 'No sessions yet',
+  'sidebar.untitled_session': 'Untitled',
+  'sidebar.nav.items': 'Items',
+  'sidebar.nav.projects': 'Projects',
+  'sidebar.nav.remote': 'Remote',
+  'sidebar.nav.knowledge': 'Knowledge',
+  'sidebar.nav.skills': 'Skills',
+  'sidebar.nav.settings': 'Settings',
+  'sidebar.vault.unlocked': 'Unlocked',
+  'sidebar.vault.locked': 'Locked',
+  'sidebar.session.today': 'Today',
+  'sidebar.session.yesterday': 'Yesterday',
+  'sidebar.session.this_week': 'This week',
+  'sidebar.session.older': 'Earlier',
+  'sidebar.menu.settings': '⚙ Settings',
+  'sidebar.menu.lock_vault': '🔒 Lock vault',
+  'sidebar.menu.toggle_theme': '🌓 Toggle theme',
+  'sidebar.menu.about': 'About Attune',
+
+  // ─── SettingsView ────────────────────────────────────
+  'settings.section.appearance': 'Appearance',
+  'settings.row.theme': 'Theme',
+  'settings.row.language': 'Language',
+  'settings.theme.auto': 'Auto',
+  'settings.theme.light': 'Light',
+  'settings.theme.dark': 'Dark',
+  'settings.lang.zh': '中文',
+  'settings.lang.en': 'English',
+  'settings.toast.lang_switched': 'Language switched',
+
   // ─── Plural ─────────────────────────────────────────
   'items.count': { one: '{count} item', other: '{count} items' },
 } as const;
