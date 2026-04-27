@@ -73,15 +73,22 @@ v0.6.0-rc.2 边界瘦身已删除：
 
 ## Git push 权限（本仓库特例）
 
-**全局规则禁止 git push，但本仓库（attune-core 开源主线）允许 push**（用户 2026-04-26 授权）：
+**全局规则禁止 git push，但本仓库（attune-core 开源主线）+ attune-pro 私有商业仓都允许 push**：
 
-- ✅ 允许：`git push origin develop` / `git push origin <feature-branch>` / `git push origin <tag>`
+授权记录：
+- 2026-04-26 attune 公开仓允许 push（开源主线）
+- 2026-04-27 **attune-pro 私有仓也允许 push**（商业线接收 OSS 边界瘦身后，需要主动同步远端备份）
+
+允许的 push 操作（attune + attune-pro 都适用）：
+- ✅ 允许：`git push origin develop` / `git push origin main` / `git push origin <feature-branch>` / `git push origin <tag>`
 - ✅ 允许：`git push` PR 用的 feature 分支
-- ❌ **不允许**：`git push --force` / `git push --force-with-lease` 到 main 或 develop（其他分支按需问用户）
-- ❌ **不允许**：push 到 attune-pro 仓库（私有商业线，全局规则继续生效）
-- ❌ **不允许**：push 任何 lawcontrol 仓库（独立项目）
 
-push 前一律 `git status` + `git log --oneline origin/develop..HEAD` 复核要推什么；推完报告 commit SHA + 远端 URL。
+不允许的（任一仓都拒绝）：
+- ❌ **不允许**：`git push --force` / `git push --force-with-lease` 到 main 或 develop（其他分支按需问用户）
+- ❌ **不允许**：`git push --no-verify` 跳过 pre-commit hook
+- ❌ **不允许**：push 任何 lawcontrol 仓库（独立项目，未授权）
+
+push 前一律 `git status` + `git log --oneline origin/<branch>..HEAD` 复核要推什么；推完报告 commit SHA + 远端 URL。
 
 
 ## 技术栈（Python 原型线）
