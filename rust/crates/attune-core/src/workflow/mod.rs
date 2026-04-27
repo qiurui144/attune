@@ -5,8 +5,9 @@
 //! - WorkflowRunner 执行引擎（runner.rs）
 //! - deterministic ops（ops.rs）
 //!
-//! 行业相关 workflow（如 law-pro 的 evidence_chain_inference）由 attune-pro 在
-//! Sprint 2 plugin loader 中通过 plugin.yaml 注册，attune-core 不内置。
+//! 行业相关 workflow（如各 vertical 的跨实体推理 / 合同审查 / BANT 评估等）由对应
+//! vertical 插件在 plugin.yaml 中注册并通过 plugin loader 加载，attune-core 不内置任何
+//! 行业 workflow — 本文件仅提供通用引擎。
 
 pub mod schema;
 pub mod runner;

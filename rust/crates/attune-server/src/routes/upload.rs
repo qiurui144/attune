@@ -199,8 +199,8 @@ pub async fn upload_file(
         });
     }
 
-    // 行业 workflow trigger（如 law-pro/evidence_chain_inference）由 attune-pro 在
-    // Sprint 2 plugin loader 注册到运行时 trigger map，不在 attune-core/server 内置。
+    // 行业 workflow trigger（各 vertical 的跨实体推理 / 行业自动化）由对应 vertical
+    // 插件通过 plugin loader 注册到运行时 trigger map，不在 attune-core/server 内置。
 
     // Sprint 2 Phase A: file_added trigger — 基于 plugin_registry 匹配 workflow
     let item_id_for_wf = item_id.clone();

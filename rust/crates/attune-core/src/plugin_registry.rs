@@ -4,12 +4,12 @@
 //!
 //! ```text
 //! ~/.local/share/attune/plugins/
-//! ├── law-pro/
+//! ├── <vertical-pack>/         # 例：medical-pro / academic-pro / 用户自研
 //! │   ├── plugin.yaml          # type: industry / 名称 / 版本
 //! │   ├── workflows/
-//! │   │   └── evidence_chain_inference.yaml
+//! │   │   └── <workflow_name>.yaml
 //! │   └── capabilities/
-//! │       └── contract_review/
+//! │       └── <capability_name>/
 //! │           ├── plugin.yaml  # type: skill
 //! │           └── prompt.md
 //! └── user-custom/
@@ -17,7 +17,7 @@
 //! ```
 //!
 //! 启动时 `PluginRegistry::scan(plugins_root)` 扫所有子目录加载。
-//! attune-pro .attunepkg 解压到 `~/.local/share/attune/plugins/<plugin_id>/`。
+//! 商业插件包 (`.attunepkg`) 解压到 `~/.local/share/attune/plugins/<plugin_id>/`。
 
 use crate::error::{Result, VaultError};
 use crate::plugin_loader::LoadedPlugin;

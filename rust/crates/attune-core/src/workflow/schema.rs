@@ -55,8 +55,8 @@ pub fn parse_workflow_yaml(yaml: &str) -> Result<Workflow, String> {
 mod tests {
     use super::*;
 
-    const EVIDENCE_CHAIN_YAML: &str = r#"
-id: law-pro/evidence_chain_inference
+    const CROSS_ENTITY_WORKFLOW_YAML: &str = r#"
+id: examples/cross_entity_inference
 type: workflow
 trigger:
   on: file_added
@@ -64,7 +64,7 @@ trigger:
 steps:
   - id: extract_entities
     type: skill
-    skill: law-pro/entity_extraction
+    skill: examples/entity_extraction
     input:
       file_id: $event.file_id
     output: entities
@@ -87,9 +87,9 @@ steps:
 "#;
 
     #[test]
-    fn parse_evidence_chain_workflow() {
-        let wf = parse_workflow_yaml(EVIDENCE_CHAIN_YAML).expect("parse");
-        assert_eq!(wf.id, "law-pro/evidence_chain_inference");
+    fn parse_cross_entity_workflow() {
+        let wf = parse_workflow_yaml(CROSS_ENTITY_WORKFLOW_YAML).expect("parse");
+        assert_eq!(wf.id, "examples/cross_entity_inference");
         assert_eq!(wf.kind, "workflow");
         assert_eq!(wf.trigger.on, "file_added");
         assert_eq!(wf.trigger.scope, "project");
@@ -98,7 +98,7 @@ steps:
         match &wf.steps[0] {
             WorkflowStep::Skill(s) => {
                 assert_eq!(s.id, "extract_entities");
-                assert_eq!(s.skill, "law-pro/entity_extraction");
+                assert_eq!(s.skill, "examples/entity_extraction");
                 assert_eq!(s.output, "entities");
             }
             _ => panic!("step 0 should be skill"),

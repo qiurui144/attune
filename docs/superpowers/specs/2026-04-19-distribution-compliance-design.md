@@ -580,7 +580,8 @@ Wizard 末尾：引用链接，用户可点查看但不强制阅读
 ## 1. 授权
 
 Attune Core（attune-core / attune-server / attune-cli）依 **Apache License 2.0** 开源。
-商业插件（标识为 "Pro"）依**专有许可**，见各插件附带声明。
+第三方插件按各自 license 分发；signed `.attunepkg` 商业插件依其附带声明（详见
+`docs/oss-pro-strategy.md`）。
 
 ## 2. 用户责任
 
@@ -721,7 +722,7 @@ check your local regulations.
    - **决策**：MVP 做但默认关闭 + 简单版（只 5 类事件）
 2. **Windows EV 证书时机**？
    - 发布后观察 SmartScreen 警告是否阻止用户（反馈渠道）
-   - Pro 订阅上线后考虑买（能分摊成本）
+   - 未来如有持续运营预算可考虑买（能分摊证书成本）
 3. **更新源自托管 vs GitHub Releases**？
    - GitHub Releases：免费、可靠，但国内访问慢
    - 自托管：快但要维护

@@ -347,15 +347,15 @@ label_prefix: "X"
     #[test]
     fn parses_workflow_type_manifest() {
         let yaml = r#"
-id: law-pro/evidence_chain
-name: 跨证据链推理
+id: examples/cross_entity_chain
+name: 跨实体推理示例
 type: workflow
 version: "1.0.0"
-author: attune-pro
-description: 律师上传新证据时跨证据链联想（行业层）
+author: attune-examples
+description: 通用示例 — 文件上传后跨实体联想（行业层各 vertical 用此 schema 实现）
 "#;
         let manifest: PluginManifest = serde_yaml::from_str(yaml).expect("parse workflow manifest");
-        assert_eq!(manifest.id, "law-pro/evidence_chain");
+        assert_eq!(manifest.id, "examples/cross_entity_chain");
         assert_eq!(manifest.plugin_type, "workflow");
         assert_eq!(manifest.version, "1.0.0");
     }
@@ -363,8 +363,8 @@ description: 律师上传新证据时跨证据链联想（行业层）
     #[test]
     fn parses_skill_type_manifest() {
         let yaml = r#"
-id: law-pro/contract_review
-name: 合同风险审查
+id: examples/skill_demo
+name: 技能示例
 type: skill
 version: "0.1.0"
 "#;
@@ -375,8 +375,8 @@ version: "0.1.0"
     #[test]
     fn parses_skill_with_chat_trigger() {
         let yaml = r#"
-id: law-pro/contract_review
-name: 合同风险审查
+id: examples/skill_with_trigger
+name: 含 chat_trigger 的技能示例
 type: skill
 version: "0.1.0"
 chat_trigger:
@@ -384,12 +384,12 @@ chat_trigger:
   needs_confirm: true
   priority: 5
   patterns:
-    - '帮我.*审查.*合同'
-  keywords: ['审查合同', '合同风险']
+    - '帮我.*处理.*文档'
+  keywords: ['处理文档', '文档分析']
   min_keyword_match: 1
   exclude_patterns: ['起草']
   requires_document: true
-  description: AI 审查合同条款风险
+  description: 通用 chat_trigger 示例（具体行业实现见各 vertical 插件）
 "#;
         let m: PluginManifest = serde_yaml::from_str(yaml).expect("parse");
         let ct = m.chat_trigger.expect("should have chat_trigger");
