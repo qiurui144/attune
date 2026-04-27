@@ -119,6 +119,11 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
                post(routes::browse_signals::record_batch)
                    .get(routes::browse_signals::list)
                    .delete(routes::browse_signals::delete))
+        // C1 Web search cache (W4-002, 2026-04-27) — close C1 loop
+        // Settings UI "清空 Web 搜索缓存" 入口
+        .route("/api/v1/web_search_cache",
+               get(routes::web_search_cache::count)
+                   .delete(routes::web_search_cache::delete))
         // Status (full status requires vault access)
         .route("/api/v1/status", get(routes::status::status))
         // Index management

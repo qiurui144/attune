@@ -106,7 +106,8 @@
 - [ ] 关闭网络 → chat 询问知识库无结果但需 web search 的问题 → 报错（无缓存）
 - [ ] 联网 → 同问题 → web search 触发 → 答案显示 + 日志 `C1: web_search cache HIT` 缺失（首次 miss）
 - [ ] 30 秒内重问同问题 → 日志显示 `C1: web_search cache HIT (saved network call)`，无网络请求
-- [ ] **W3 batch A 已知缺口**：web 缓存清理 route 暂未加（`Store::clear_web_search_cache` 函数已实现但未挂 HTTP），W4 加 `DELETE /api/v1/web_search_cache` + Settings UI clear 按钮后再覆盖此项
+- [ ] **C1 闭环 (W4-002, 2026-04-27)**：`curl -X DELETE http://localhost:18900/api/v1/web_search_cache` 返回 `{"deleted": N}`；`curl http://localhost:18900/api/v1/web_search_cache` 返回 `{"count": 0}`；后续相同 query → 必须重新触发 web search（缓存已清）
+- [ ] **C1 vault locked 防御**：lock vault 后 `curl -X DELETE /api/v1/web_search_cache` 返回 403，不泄露 cache count
 - [ ] 加密验证：`sqlite3 vault.sqlite "SELECT hex(results_json_enc) FROM web_search_cache LIMIT 1"` 输出二进制非可读 JSON
 
 ### F1 二次检索可观测性
