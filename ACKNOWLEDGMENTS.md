@@ -35,6 +35,14 @@ For full software-license attribution of dependencies, see `Cargo.lock` (Rust) a
 | [mem0ai/mem0](https://github.com/mem0ai/mem0) (Apache-2.0) | "Memory layer for AI" framing; episodic memory as a discrete data model above raw chunks |
 | [skill_evolution.rs] (attune internal, 2026-03) | Three-stage lock release pattern (prepare → generate → apply) was already established by SkillEvolver; A1 mirrors it directly |
 
+### W3 Batch A — F1 / F2 / F4 / C1 (2026-04-27)
+
+| Source | What we adopted |
+|--------|----------------|
+| [吴师兄 article](https://mp.weixin.qq.com/s/YNcfSN0uv1c1LsLPzgB0jw) §6 高频 query 缓存 | C1 web_search_cache table — SHA-256(query) key + DEK encrypted results + 30-day TTL pattern |
+| [linkwarden/linkwarden](https://github.com/linkwarden/linkwarden) (AGPL-3.0) | "Snapshot at fetch time" mental model — once a query is cached, treat it as immutable for the TTL window |
+| attune internal `chunk_summaries` table | F2 sidecar pattern — independent table keyed on `(item_id, chunk_idx)` rather than extending core schemas (avoids `.encbin` migration risk for existing vaults). Pioneered for chunk_summaries (W2 ago), reused for chunk_breadcrumbs (W3 batch A) |
+
 ### J Series — RAG Production Quality (W2-W4 in progress)
 
 | Source | What we adopted |

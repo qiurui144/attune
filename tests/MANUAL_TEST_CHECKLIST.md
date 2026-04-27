@@ -51,6 +51,26 @@
 - [ ] chat API 响应 JSON 含 `confidence` + `secondary_retrieval_used` + `citations[].breadcrumb` + `citations[].chunk_offset_start/end` 字段（即使 breadcrumb=[] / offset=null）
 - [ ] **Known limitation 验证**：当前 `breadcrumb` 总为空 array、`offset` 总为 null（W3 batch 2 才透传）— 前端不应假设有值
 
+## W3 Batch A: F2 + C1 + F1 + F4（2026-04-27）
+
+### F2 Citation breadcrumb 透传
+- [ ] 上传一份 4 级标题 markdown → chat 询问深节内容 → API 响应 `citations[0].breadcrumb` 数组非空
+- [ ] **Known limitation v1 验证**：breadcrumb 是 item 顶层路径（item 第一个 chunk），不是具体命中段；offset 是 sidecar 累计 char 不严格对齐原文 — 前端 Reader 跳转 W3v1 仅顶层导航，精确高亮等 W5+
+- [ ] WebDAV 同步进来的 item 也有 breadcrumb（验证 scanner_webdav 接入）
+- [ ] 文件夹监听扫描的 item 也有 breadcrumb（验证 scanner.rs 接入）
+- [ ] **软删除安全**：删除 item 后再问相同问题 → Citation 不应再引用已删 item 的 breadcrumb（reviewer R2 P0-1 验收）
+
+### C1 Web search local cache
+- [ ] 关闭网络 → chat 询问知识库无结果但需 web search 的问题 → 报错（无缓存）
+- [ ] 联网 → 同问题 → web search 触发 → 答案显示 + 日志 `C1: web_search cache HIT` 缺失（首次 miss）
+- [ ] 30 秒内重问同问题 → 日志显示 `C1: web_search cache HIT (saved network call)`，无网络请求
+- [ ] Settings → "清空 web 缓存" (route 待 batch B) → 重问同问题应再次走网络
+- [ ] 加密验证：`sqlite3 vault.sqlite "SELECT hex(results_json_enc) FROM web_search_cache LIMIT 1"` 输出二进制非可读 JSON
+
+### F1 二次检索可观测性
+- [ ] chat 询问知识库无答案的问题 → 日志看到 `J5 F1: secondary retrieval result` 行，`local_was_empty=true broader_count=0` 或类似
+- [ ] 询问含模糊词的本地问题（confidence 1-2/5）→ 日志 `J5 F1` 显示 `broader_count > pre_count`，触发二次 LLM 调用
+
 ## A1 Memory Consolidation（2026-04-27）
 
 设计稿：`docs/superpowers/specs/2026-04-27-memory-consolidation-design.md`

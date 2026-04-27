@@ -254,6 +254,14 @@ impl Store {
                 "DELETE FROM chunk_summaries WHERE item_id = ?1",
                 params![id],
             )?;
+            // F2 (W3 batch A, per reviewer R2 P0-1)：与 annotations / chunk_summaries
+            // 对称清理 chunk_breadcrumbs。否则用户软删除 item 后 ChatEngine 仍可能
+            // 透传 stale breadcrumb 到 Citation — "引用已忘记的文档"漏洞。
+            // FK CASCADE 仅在硬删除时触发，软删除路径必须显式处理。
+            self.conn.execute(
+                "DELETE FROM chunk_breadcrumbs WHERE item_id = ?1",
+                params![id],
+            )?;
         }
         Ok(affected > 0)
     }

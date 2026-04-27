@@ -47,14 +47,16 @@ pub struct Citation {
     // ── B1 (W2, 2026-04-27)：deep-link 数据 ───────────────────────────────
     /// 字符级 offset 到源 item content（含 start，不含 end）。
     /// web 搜索结果为 None（无源 item 可定位）。
-    /// 供未来 Reader 模态滚动 + 高亮使用。
-    #[serde(default)]
+    /// **Known limitation (W3 batch A v1)**：当前 offset 是 sidecar 内累计 char，
+    /// 不严格对齐原文 char index — 适合顶层导航不适合精确 Reader 高亮（W5+ 修）。
+    /// per reviewer S2：skip_serializing_if 让 None 不出现在 JSON，前端不必处理 null。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_offset_start: Option<usize>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_offset_end: Option<usize>,
     /// 来自 J1 chunker 面包屑路径，例如 ["公司手册", "第三章 福利", "3.2 假期"]。
     /// 无章节切分的源（plain notes）为空 Vec。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub breadcrumb: Vec<String>,
 }
 
@@ -91,22 +93,66 @@ impl ChatEngine {
         // 1. 搜索本地知识库（默认阈值 0.65）
         let local_knowledge = self.search_for_context(user_message, dek, 5, None)?;
 
-        // 2. 若本地无结果，尝试网络搜索 fallback
+        // 2. 若本地无结果，尝试网络搜索 fallback（C1 W3 batch A：先查本地缓存）
         let (mut knowledge, web_search_used) = if local_knowledge.is_empty() {
             if let Some(ws) = &self.web_search {
-                match ws.search(user_message, 3) {
-                    Ok(web_results) if !web_results.is_empty() => {
-                        let synthetic: Vec<SearchResult> = web_results.into_iter().map(|r| SearchResult {
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+
+                // C1: 先查 web_search_cache（避免重复网络调用）
+                let cached = self
+                    .store
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.get_web_search_cached(dek, user_message, now_secs).ok().flatten());
+
+                let web_results = match cached {
+                    Some(hits) => {
+                        log::info!("C1: web_search cache HIT (saved network call)");
+                        Ok(hits)
+                    }
+                    None => match ws.search(user_message, 3) {
+                        Ok(fresh) => {
+                            // 写入缓存（默认 30 天 TTL）— per reviewer I6：空结果也缓存，
+                            // 否则偏门 query 反复浪费网络。靠 TTL 自然过期。per reviewer I1：
+                            // 错误显式 log 而非吞掉，便于排查 SQLite 满 / DEK 错。
+                            if let Ok(s) = self.store.lock() {
+                                if let Err(e) = s.put_web_search_cached(
+                                    dek,
+                                    user_message,
+                                    &fresh,
+                                    crate::store::DEFAULT_WEB_SEARCH_TTL_SECS,
+                                    now_secs,
+                                ) {
+                                    log::warn!(
+                                        "C1: write cache failed (next call will refetch): {e}"
+                                    );
+                                }
+                            }
+                            Ok(fresh)
+                        }
+                        Err(e) => Err(e),
+                    },
+                };
+
+                match web_results {
+                    Ok(web) if !web.is_empty() => {
+                        let synthetic: Vec<SearchResult> = web.into_iter().map(|r| SearchResult {
                             item_id: format!("web:{}", r.url),
                             score: 0.55,
                             title: r.title,
                             content: r.snippet.clone(),
                             source_type: "web".into(),
                             inject_content: Some(r.snippet),
+                            breadcrumb: Vec::new(),         // F2: web 无源 item 路径
+                            chunk_offset_start: None,
+                            chunk_offset_end: None,
                         }).collect();
                         (synthetic, true)
                     }
-                    Ok(_) | Err(_) => (local_knowledge, false),
+                    _ => (local_knowledge, false),
                 }
             } else {
                 (local_knowledge, false)
@@ -129,8 +175,15 @@ impl ChatEngine {
                 confidence_1
             );
             // 阈值 0.65 → 0.55 扩大本地召回（始终走本地，不重跑 web）
+            let pre_count = knowledge.len();
+            let was_empty = pre_count == 0;
             match self.search_for_context(user_message, dek, 5, Some(0.55)) {
                 Ok(broader) if broader.len() > knowledge.len() => {
+                    // F1 (W3 batch A) 可观测性：区分"fallback 召回更多"vs"同样空"
+                    log::info!(
+                        "J5 F1: secondary retrieval result — local_was_empty={}, pre_count={}, broader_count={}",
+                        was_empty, pre_count, broader.len()
+                    );
                     knowledge = broader;
                     // 二次 LLM 调用：因为 broader 是本地结果，web_search_used 强制 false
                     match self.run_llm_once(user_message, history, &knowledge, false) {
@@ -142,7 +195,18 @@ impl ChatEngine {
                         }
                     }
                 }
-                _ => (raw_response_1, confidence_1, false),
+                Ok(broader) => {
+                    // F1: broader 没召回更多 → no-op 路径，记录但不重跑 LLM
+                    log::info!(
+                        "J5 F1: secondary retrieval no-op — local_was_empty={}, pre_count={}, broader_count={} (no improvement)",
+                        was_empty, pre_count, broader.len()
+                    );
+                    (raw_response_1, confidence_1, false)
+                }
+                Err(e) => {
+                    log::warn!("J5 F1: secondary retrieval search failed: {e}");
+                    (raw_response_1, confidence_1, false)
+                }
             }
         } else {
             (raw_response_1, confidence_1, false)
@@ -151,20 +215,16 @@ impl ChatEngine {
         // 5. 剥离 confidence 标记后给用户
         let display_response = strip_confidence_marker(&final_response);
 
-        // 6. 提取引用（含 J1 breadcrumb + B1 offset）
+        // 6. 提取引用 — F2 (W3 batch A) 已透传 SearchResult.breadcrumb / offset 真值
+        // per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §4
+        // 关闭了 W2 batch 1 的 placeholder 状态。老 vault / web 无 sidecar 时优雅降级为空。
         let citations: Vec<Citation> = knowledge.iter().map(|k| Citation {
             item_id: k.item_id.clone(),
             title: k.title.clone(),
             relevance: k.score,
-            // B1 backend：当前 SearchResult 未携带 chunk-level offset；
-            // 待 W5-6 扩 VectorMeta(offset_start, offset_end) 后再填入。
-            // 此处先放 None，前端展示时仅用 breadcrumb 显示路径。
-            chunk_offset_start: None,
-            chunk_offset_end: None,
-            // breadcrumb 同理：J1 已在 chunker 输出，但 SearchResult/store 链路
-            // 还未透传到 ChatEngine，W5 J2 动态窗口时一并补；
-            // 当前先放空 Vec 保持 API 形状，避免未来加字段时破坏 serde 兼容。
-            breadcrumb: Vec::new(),
+            chunk_offset_start: k.chunk_offset_start,
+            chunk_offset_end: k.chunk_offset_end,
+            breadcrumb: k.breadcrumb.clone(),
         }).collect();
 
         let knowledge_count = knowledge.len();
@@ -384,6 +444,7 @@ mod tests {
             content: "合同内容...".into(),
             source_type: "file".into(),
             inject_content: Some("合同内容...".into()),
+            ..Default::default()
         }];
         let prompt = build_rag_system_prompt(&results, false);
         assert!(prompt.contains("合同A"));
@@ -400,6 +461,7 @@ mod tests {
             content: "Some web content.".into(),
             source_type: "web".into(),
             inject_content: Some("Some web content.".into()),
+            ..Default::default()
         }];
         let prompt = build_rag_system_prompt(&results, true);
         assert!(prompt.contains("网络搜索"));
@@ -432,6 +494,7 @@ mod tests {
             content: "条款".into(),
             source_type: "file".into(),
             inject_content: Some("条款".into()),
+            ..Default::default()
         }];
         let prompt = build_rag_system_prompt(&results, false);
         // 强约束的关键 marker
@@ -449,6 +512,7 @@ mod tests {
             content: "C".into(),
             source_type: "web".into(),
             inject_content: Some("C".into()),
+            ..Default::default()
         }];
         let prompt = build_rag_system_prompt(&results, true);
         assert!(prompt.contains("【置信度: N/5】"), "web 路径也必须置信度");

@@ -79,7 +79,7 @@ pub fn apply_cross_lang_penalty(results: &mut [SearchResult], query_lang: Lang) 
 }
 
 /// 搜索结果
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SearchResult {
     pub item_id: String,
     pub score: f32,
@@ -87,6 +87,23 @@ pub struct SearchResult {
     pub content: String,
     pub source_type: String,
     pub inject_content: Option<String>,
+    // ── F2 (W3 batch A, 2026-04-27)：breadcrumb + offset 透传 ─────────────
+    // per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §4
+    // 关闭 W2 batch 1 的 Citation 占位状态；search 阶段 join chunk_breadcrumbs
+    // sidecar 表填入数据，ChatEngine 后续映射到 Citation。
+    /// 启发式：F2 v1 用 item 第一个 chunk 的 path（W5+ 切换到精确 chunk 命中）。
+    /// per reviewer S2：skip_serializing_if 让空 Vec 不出现在 JSON，
+    /// 保持 Chrome 扩展旧客户端契约（之前不存在此字段）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub breadcrumb: Vec<String>,
+    /// chunk 在 item.content 的 char-level 区间。无 sidecar 数据时 None。
+    /// **Known limitation (W3 batch A v1, per reviewer S1)**：当前 offset 是 sidecar
+    /// 内累计 char count，不一定对齐原文 char index（行末 `\n` 处理 + `\r\n` 剥离会
+    /// 引入漂移）。适合 item 顶层导航；W5+ 真正按行号映射回原文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_offset_start: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_offset_end: Option<usize>,
 }
 
 /// 三阶段搜索参数
@@ -299,10 +316,18 @@ pub fn search_with_context(
     let fused = rrf_fuse(&vec_results, &ft_results, DEFAULT_VECTOR_WEIGHT, DEFAULT_FULLTEXT_WEIGHT, params.intermediate_k);
     log::info!("search stages: rrf_fused={}", fused.len());
 
-    // 4. 获取并解密 items
+    // 4. 获取并解密 items + F2 (W3 batch A) 拉 breadcrumb sidecar
     let mut results: Vec<SearchResult> = Vec::new();
     for (item_id, score) in &fused {
         if let Ok(Some(item)) = ctx.store.get_item(ctx.dek, item_id) {
+            // F2：用 item 第一个 chunk 的 breadcrumb 作启发式（W5+ 切精确 chunk）
+            let (breadcrumb, off_start, off_end) = ctx
+                .store
+                .get_first_chunk_breadcrumb(&item.id)
+                .ok()
+                .flatten()
+                .map(|(p, s, e)| (p, Some(s), Some(e)))
+                .unwrap_or_default();
             results.push(SearchResult {
                 item_id: item.id,
                 score: *score,
@@ -310,6 +335,9 @@ pub fn search_with_context(
                 content: item.content,
                 source_type: item.source_type,
                 inject_content: None,
+                breadcrumb,
+                chunk_offset_start: off_start,
+                chunk_offset_end: off_end,
             });
         }
     }
@@ -396,13 +424,11 @@ mod tests {
             SearchResult {
                 item_id: "1".into(), score: 0.2, title: "references-and-borrowing".into(),
                 content: "In Rust, references allow you to refer to a value without taking ownership.".into(),
-                source_type: "file".into(), inject_content: None,
-            },
+                source_type: "file".into(), inject_content: None, ..Default::default() },
             SearchResult {
                 item_id: "2".into(), score: 0.3, title: "民法典".into(),
                 content: "中华人民共和国民法典第一编 总则".into(),
-                source_type: "file".into(), inject_content: None,
-            },
+                source_type: "file".into(), inject_content: None, ..Default::default() },
         ];
         apply_cross_lang_penalty(&mut results, Lang::En);
         assert_eq!(results[0].score, 0.2, "英文文档不降权");
@@ -416,8 +442,7 @@ mod tests {
             SearchResult {
                 item_id: "1".into(), score: 0.5, title: "rust 所有权".into(),
                 content: "Rust ownership system...".into(),
-                source_type: "file".into(), inject_content: None,
-            },
+                source_type: "file".into(), inject_content: None, ..Default::default() },
         ];
         apply_cross_lang_penalty(&mut results, Lang::Mixed);
         assert_eq!(results[0].score, 0.5, "Mixed query 不应降权任何结果");
@@ -459,12 +484,10 @@ mod tests {
         let mut results = vec![
             SearchResult {
                 item_id: "a".into(), score: 0.8, title: "A".into(),
-                content: "A".repeat(3000), source_type: "note".into(), inject_content: None,
-            },
+                content: "A".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
             SearchResult {
                 item_id: "b".into(), score: 0.2, title: "B".into(),
-                content: "B".repeat(3000), source_type: "note".into(), inject_content: None,
-            },
+                content: "B".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
         ];
         allocate_budget(&mut results, 2000);
 
@@ -480,12 +503,10 @@ mod tests {
         let mut results = vec![
             SearchResult {
                 item_id: "a".into(), score: 0.0, title: "A".into(),
-                content: "A".repeat(3000), source_type: "note".into(), inject_content: None,
-            },
+                content: "A".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
             SearchResult {
                 item_id: "b".into(), score: 0.0, title: "B".into(),
-                content: "B".repeat(3000), source_type: "note".into(), inject_content: None,
-            },
+                content: "B".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
         ];
         allocate_budget(&mut results, 2000);
         // Equal distribution when scores are 0
@@ -510,8 +531,8 @@ mod tests {
         idx.add(&[0.0, 1.0], VectorMeta { item_id: "far".into(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
 
         let mut results = vec![
-            SearchResult { item_id: "far".into(),   score: 0.9, title: "Far".into(),   content: "c".into(), source_type: "note".into(), inject_content: None },
-            SearchResult { item_id: "close".into(), score: 0.5, title: "Close".into(), content: "c".into(), source_type: "note".into(), inject_content: None },
+            SearchResult { item_id: "far".into(),   score: 0.9, title: "Far".into(),   content: "c".into(), source_type: "note".into(), inject_content: None, ..Default::default() },
+            SearchResult { item_id: "close".into(), score: 0.5, title: "Close".into(), content: "c".into(), source_type: "note".into(), inject_content: None, ..Default::default() },
         ];
 
         rerank(&[1.0, 0.0], &mut results, &idx);
@@ -524,8 +545,8 @@ mod tests {
 
         let idx = VectorIndex::new(2).unwrap();
         let mut results = vec![
-            SearchResult { item_id: "a".into(), score: 0.8, title: "A".into(), content: "c".into(), source_type: "note".into(), inject_content: None },
-            SearchResult { item_id: "b".into(), score: 0.3, title: "B".into(), content: "c".into(), source_type: "note".into(), inject_content: None },
+            SearchResult { item_id: "a".into(), score: 0.8, title: "A".into(), content: "c".into(), source_type: "note".into(), ..Default::default() },
+            SearchResult { item_id: "b".into(), score: 0.3, title: "B".into(), content: "c".into(), source_type: "note".into(), ..Default::default() },
         ];
         rerank(&[1.0, 0.0], &mut results, &idx);
         assert!(results[0].score >= results[1].score);

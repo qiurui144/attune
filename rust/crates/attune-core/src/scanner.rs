@@ -127,6 +127,13 @@ fn process_single_file(store: &Store, dek: &Key32, dir_id: &str, path: &Path) ->
     // 插入知识条目
     let item_id = store.insert_item(dek, &title, &content, None, "file", None, None)?;
 
+    // F2 (W3 batch A, 2026-04-27)：写 chunk_breadcrumbs sidecar 让 Citation 透传 path。
+    // per reviewer I4：scanner / webdav 路径同步覆盖，避免文件夹监听 / WebDAV 来源
+    // 的 item 永远 placeholder。
+    if let Err(e) = store.upsert_chunk_breadcrumbs_from_content(&item_id, &content) {
+        log::warn!("F2 upsert_chunk_breadcrumbs failed for item {item_id}: {e}");
+    }
+
     // 提取章节 + 分块，加入 embedding 队列
     let sections = chunker::extract_sections(&content);
     let mut chunk_counter = 0;

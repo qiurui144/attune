@@ -11,8 +11,13 @@ mod chunk_summaries;
 mod annotations;
 mod project;
 mod memories;
+mod web_search_cache;
+mod chunk_breadcrumbs;
 
 pub use types::*;
+
+// re-export 子模块的关键常量（避免 `crate::store::web_search_cache::DEFAULT_TTL_SECS` 长路径）
+pub use web_search_cache::DEFAULT_TTL_SECS as DEFAULT_WEB_SEARCH_TTL_SECS;
 
 use rusqlite::{params, Connection};
 use std::path::Path;
@@ -237,6 +242,41 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_window ON memories(window_start, window_end);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_source ON memories(kind, source_chunk_hashes);
+
+-- C1 Web search cache (W3 batch A, 2026-04-27)
+-- per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §3
+-- per ACKNOWLEDGMENTS.md C series — 吴师兄 §6 高频 query 缓存模式
+--
+-- query_hash = SHA-256(query) hex 作为查找键；query_text + results JSON 字段加密。
+-- 30 天默认 TTL，过期由查询时过滤（不主动 GC，与 chunk_summaries 一致的惰性策略）。
+CREATE TABLE IF NOT EXISTS web_search_cache (
+    query_hash       TEXT PRIMARY KEY,
+    query_text_enc   BLOB NOT NULL,
+    results_json_enc BLOB NOT NULL,
+    created_at_secs  INTEGER NOT NULL,
+    ttl_secs         INTEGER NOT NULL DEFAULT 2592000
+);
+CREATE INDEX IF NOT EXISTS idx_web_cache_created ON web_search_cache(created_at_secs);
+
+-- F2 Chunk breadcrumb 元数据 (W3 batch A, 2026-04-27)
+-- per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §4
+--
+-- 独立于 embed_queue 的辅助表，避免改 VectorMeta serde / 老 .encbin 兼容。
+-- 老 vault 升级时 IF NOT EXISTS 创建空表 → ChatEngine 查不到时返回空 Vec 优雅降级。
+-- breadcrumb 是 chunker SectionWithPath.path 的 JSON 序列化（升序数组）。
+-- 明文存储：标题来自文档结构，非用户笔记内容。
+-- offset_start/end 是 chunk 在 item.content 的 char-level 区间。
+CREATE TABLE IF NOT EXISTS chunk_breadcrumbs (
+    -- per reviewer I3：FK CASCADE 与 annotations 表对称（item 硬删除时清理；
+    -- 软删除模型下还需在 store::delete_item 显式清理，与 annotations 一致）
+    item_id          TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    chunk_idx        INTEGER NOT NULL,
+    breadcrumb_json  TEXT NOT NULL,
+    offset_start     INTEGER NOT NULL,
+    offset_end       INTEGER NOT NULL,
+    PRIMARY KEY (item_id, chunk_idx)
+);
+-- per reviewer G5：删除冗余 idx_chunk_breadcrumbs_item，PK 前缀已可用
 "#;
 
 pub struct Store {

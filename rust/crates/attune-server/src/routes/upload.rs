@@ -95,6 +95,13 @@ pub async fn upload_file(
         }
     }
 
+    // F2 (W3 batch A, 2026-04-27)：写 chunk_breadcrumbs sidecar 表，让 ChatEngine
+    // 后续能透传 path 到 Citation。失败不阻塞上传 — 但记 warn 防 silent loss。
+    // per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §4 + reviewer I2
+    if let Err(e) = vault.store().upsert_chunk_breadcrumbs_from_content(&item_id, &content) {
+        tracing::warn!("F2 upsert_chunk_breadcrumbs failed for item {item_id}: {e}");
+    }
+
     // Enqueue for embedding: Level 1 (sections) + Level 2 (chunks)
     let sections = chunker::extract_sections(&content);
     let mut chunk_counter: usize = 0;

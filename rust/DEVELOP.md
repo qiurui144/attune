@@ -427,7 +427,34 @@ if conf_1 < 3 {
 let display = strip_confidence_marker(&response);  // 用户看不到 marker
 ```
 
-**B1 后端字段**：`Citation` 已加 `chunk_offset_start/end` + `breadcrumb`，但 W2 batch 1 中是占位（永远空）；W3 batch 2 透传 indexer → SearchResult 后才有真值。
+**B1 后端字段（W3 batch A 已透传真值）**：`Citation.chunk_offset_start/end` + `breadcrumb` 由 indexer 写入 `chunk_breadcrumbs` sidecar 表，search 时 join 填到 `SearchResult` → ChatEngine 映射到 `Citation`。空数据（老 vault / web 来源）优雅降级为 `None` / `vec![]`，serde `skip_serializing_if` 让空字段不出现在 JSON 保持 Chrome 扩展旧客户端契约。Offset 当前是 sidecar 累计 char count（v1 启发式），W5+ 真正按行号映射回原文。
+
+**Sidecar 表 6 步检查清单**（`chunk_breadcrumbs` / `chunk_summaries` / `annotations` 同模式）：
+1. `mod.rs` schema 加 `FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE`
+2. 独立 `store/<table>.rs` 模块写 CRUD（注意 dek 加密敏感字段）
+3. 在 `store/items.rs::delete_item` 显式 `DELETE FROM <table> WHERE item_id = ?1`（软删除路径，FK CASCADE 仅硬删除生效）
+4. 单元测试覆盖 `fk_cascade_*` + `soft_delete_clears_*` 双场景
+5. indexer pipeline（routes/upload + ingest + scanner + scanner_webdav）写入时同步调 `upsert_*`，错误用 `tracing::warn!` 不阻塞主流程
+6. ChatEngine 等读路径优雅降级（无 sidecar 行返回 None / 空 Vec）
+
+## W3 batch A：Web search 缓存（C1, 2026-04-27）
+
+详见 [`docs/superpowers/specs/2026-04-27-w3-batch-a-design.md`](../docs/superpowers/specs/2026-04-27-w3-batch-a-design.md) §3。
+
+```rust
+// chat.rs web fallback 流程：
+let cached = store.get_web_search_cached(dek, query, now_secs)?;
+let results = match cached {
+    Some(hits) => hits,                                                       // C1 命中（🆓）
+    None => {
+        let fresh = ws.search(query, 3)?;                                     // 网络（💰）
+        let _ = store.put_web_search_cached(dek, query, &fresh, 30天TTL, now); // 含空结果
+        fresh
+    }
+};
+```
+
+**抄袭来源**：[吴师兄 §6](https://mp.weixin.qq.com/s/YNcfSN0uv1c1LsLPzgB0jw) 高频 query 缓存模式。
 
 **Attribution 规范**（强制）：
 - 每个抄袭外部 pattern 的代码段必须含 `// per <Source> §<Section>` 内联注释

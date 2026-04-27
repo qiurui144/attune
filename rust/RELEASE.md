@@ -2,6 +2,45 @@
 
 ## 开发中
 
+## W3 Batch A: F1 + F2 + F4 + C1 (2026-04-27)
+
+12-week 战略 v4 Phase 1 W3 F-P0c batch A 后端深做。**关闭 W2 batch 1 的 Citation placeholder 状态** + 加 web search 缓存层 + 关键可观测性日志。所有抄袭点登记到 [`ACKNOWLEDGMENTS.md`](../ACKNOWLEDGMENTS.md)。
+
+### F2 关闭 W2 batch 1 placeholder（核心）
+**之前**：`Citation.breadcrumb = Vec::new()` + `chunk_offset_* = None` 始终占位。
+**现在**：从 indexer 透传到 Citation 真值。
+
+- 新增 `chunk_breadcrumbs` sidecar 表（FK CASCADE + 软删除路径显式清理）
+- `Store::upsert_chunk_breadcrumbs_from_content` 在 indexer pipeline 4 个调用点全部接入：`routes/upload.rs` / `routes/ingest.rs` / `scanner.rs` / `scanner_webdav.rs`
+- `SearchResult` 加 `breadcrumb` / `chunk_offset_start/end` 字段（serde `skip_serializing_if` 保持 Chrome 扩展旧客户端兼容）
+- `search_with_context` 在 item 解密后查 sidecar 填充
+- `ChatEngine.chat()` 透传 SearchResult → Citation
+- **Known limitation (v1)**：当前 offset 是 sidecar 内累计 char count，不严格对齐原文 char index — 适合 item 顶层导航；W5+ 真正按行号映射回原文。前端 Reader 精确高亮请等 W5
+- `delete_item` (软删除) 同步清理 breadcrumbs，防止 stale data 透传
+
+### C1 Web search 本地缓存
+- 新增 `web_search_cache` 表：query_hash (SHA-256) 主键 + DEK 加密 query/results + 30 天默认 TTL
+- `Store::get_web_search_cached / put_web_search_cached / clear_web_search_cache / web_search_cache_count`
+- `ChatEngine.chat()` web fallback 路径：先查 cache miss 才发网络请求；fetch 后立即写 cache（含空结果 — TTL 自然失效）
+- 用户后续可在 Settings 清空 web 缓存（route 待 batch B 加）
+- **来源**：[吴师兄文章](https://mp.weixin.qq.com/s/YNcfSN0uv1c1LsLPzgB0jw) §6 高频 query 缓存 + Readwise/Linkwarden "fetch 时快照"模式
+
+### F1 J5 二次检索可观测性
+chat.rs 加 `J5 F1` 前缀日志区分 fallback 召回更多 / no-op / 失败三类，便于线上诊断。
+
+### F4 RELEASE notes 同步
+W2 batch 1 placeholder 状态 → 标记 RESOLVED in W3 batch A（本批次）。
+
+### 工程
+- 测试：attune-core lib 415 → **431** (+16)，新增 W3 集成测试 7（共 18 集成）
+- **Two rounds of code review**：R1 找 2 严重 + 5 重要 + 6 建议（10 项必修，全修）；R2 找 P0-1 软删除漏 breadcrumbs（修，加 `soft_delete_clears_breadcrumbs` 产品安全测试）
+
+### W3 batch A 不做（推到 batch B/C）
+- ❌ G1 / G5 Chrome 扩展浏览捕获 — 全栈跨会话深做
+- ❌ K2 Parse Golden Set 200 篇 — 语料采集 + CI 流水线
+- ❌ J5 secondary retrieval E2E 测试（F3 推到 batch B 与 ChatEngine 完整构造一起做）
+- ❌ Cache GC daemon / 空结果短 TTL / scanner 增量 file_hash 短路 — W4 backlog
+
 ## W2 Batch 1: J1 + J3 + J5 + B1 backend (2026-04-27)
 
 12-week 战略 v4 Phase 1 W2，**第一波用户感知 RAG 质量**改造。配合 6 维度开源生态调研后明确"抄 vs 自研"边界，全部抄袭点登记到 [`ACKNOWLEDGMENTS.md`](../ACKNOWLEDGMENTS.md)。
@@ -30,7 +69,7 @@
 
 ### B1 backend: Citation 加 deep-link 数据
 - `Citation` 加字段：`chunk_offset_start: Option<usize>` / `chunk_offset_end: Option<usize>` / `breadcrumb: Vec<String>`
-- **Known limitation**：当前 Citation.breadcrumb 永远 `vec![]`，offset 永远 `None` —— W3 batch 2 透传 indexer pipeline → VectorMeta → SearchResult → Citation 后填充。前端可绑 UI 但需做空兜底
+- ~~**Known limitation**：当前 Citation.breadcrumb 永远 `vec![]`，offset 永远 `None`~~ **RESOLVED in W3 batch A**（per F2，indexer 透传完整闭环；offset 当前是 sidecar 累计 char，W5+ 真正按行号映射）
 - 前端 Reader 模态高亮 / 滚动到 offset 是单独 PR（下次 Tauri/Preact 会话）
 
 ### 工程
