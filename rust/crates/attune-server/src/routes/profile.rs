@@ -2,6 +2,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use crate::routes::errors::{internal, vault_locked, RouteError};
 use crate::state::SharedState;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -147,5 +148,36 @@ pub async fn import(
         "merged": merged,
         "skipped": skipped,
         "note": "skipped items are tags for item_ids not present in this vault"
+    })))
+}
+
+/// GET /api/v1/profile/topic_distribution — F1 主题分布查询（W4，2026-04-27）
+///
+/// 简化版 F1: 按 source_type 聚合 items，返回 [(source_type, count)] 数组。
+/// 给桌面"我的画像"页一个最小可用的后端 API，前端可基于此画饼图/条形图。
+/// 真正的"主题分布雷达 + 知识盲区识别"需要读 classification_result.core，留 W5+ 增强。
+pub async fn topic_distribution(
+    State(state): State<SharedState>,
+) -> Result<Json<serde_json::Value>, RouteError> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = vault.dek_db().map_err(|_| vault_locked())?;
+    let pairs = vault
+        .store()
+        .aggregate_items_by_source_type()
+        .map_err(|e| internal("aggregate_items_by_source_type", e))?;
+    let total: i64 = pairs.iter().map(|(_, c)| *c).sum();
+    let distribution: Vec<serde_json::Value> = pairs
+        .into_iter()
+        .map(|(source, count)| {
+            serde_json::json!({
+                "source_type": source,
+                "count": count,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "total_items": total,
+        "distribution": distribution,
+        "note": "v1 aggregates by source_type. Future versions will include classification.core dimensions.",
     })))
 }

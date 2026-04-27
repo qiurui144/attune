@@ -172,6 +172,9 @@ fn default_settings(recommended_summary: &str) -> serde_json::Value {
         "skills": {
             "disabled": []
         },
+        "plugins": {
+            "disabled": []  // W4 E1: marketplace 禁用列表，list 用于 enabled 字段
+        },
 
         // ── 不在 UI 暴露（保留后端行为）──
         "injection_mode": "auto",

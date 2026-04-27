@@ -91,11 +91,15 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/clusters/rebuild", post(routes::clusters::rebuild))
         .route("/api/v1/clusters/{id}", get(routes::clusters::detail))
         .route("/api/v1/plugins", get(routes::plugins::list))
+        // E1 marketplace toggle (W4, 2026-04-27)
+        .route("/api/v1/plugins/{id}/toggle", post(routes::plugins::toggle))
         .route("/api/v1/skills", get(routes::skills::list_skills))
         .route("/api/v1/patent/search", post(routes::patent::search))
         .route("/api/v1/patent/databases", get(routes::patent::databases))
         .route("/api/v1/profile/export", get(routes::profile::export))
         .route("/api/v1/profile/import", post(routes::profile::import))
+        // F1 topic distribution (W4, 2026-04-27) — 桌面"我的画像"页后端
+        .route("/api/v1/profile/topic_distribution", get(routes::profile::topic_distribution))
         // Projects / Case 卷宗（Sprint 1 Phase B）
         .route(
             "/api/v1/projects",

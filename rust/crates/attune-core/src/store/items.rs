@@ -325,6 +325,25 @@ impl Store {
         }
     }
 
+    /// W4 F1: 按 source_type 聚合（饼图 / 主题分布）。
+    /// 返回 (source_type, count) 数组按 count DESC 排序。is_deleted 行排除。
+    pub fn aggregate_items_by_source_type(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_type, COUNT(*) FROM items
+             WHERE is_deleted = 0
+             GROUP BY source_type
+             ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// 列出所有未删除 item 的 id（用于 TagIndex 构建和 reclassify_all）
     pub fn list_all_item_ids(&self) -> Result<Vec<String>> {
         let mut stmt = self
