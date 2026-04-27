@@ -11,6 +11,25 @@
 
 Chrome 扩展协议相同，两个后端可任意切换。
 
+---
+
+## 三产品矩阵（Attune 在哪里）
+
+> 决策性定位（2026-04-27）：Attune（本仓 OSS）是**通用个人知识库**，**零行业绑定**。行业深度（律师 / 医生 / 学者 / 售前 / 工程师 / 专利代理）由商业插件包 `attune-pro` 交付。律所 B2B 小团队场景由单独产品 `lawcontrol` 处理。
+
+| 产品 | License | 形态 | 用户群 |
+|------|---------|------|--------|
+| **`attune`**（本仓） | Apache-2.0 | Tauri 桌面 / Chrome 扩展 | **个人通用用户** — 通用 RAG / 加密 vault / 浏览捕获 / MCP outlet |
+| **`attune-pro`**（私有） | Proprietary | Plugin packs (.attunepkg signed) 装载到 attune | **个人行业用户** — 律师 / 售前 / 专利 / 技术 / 医疗 / 学术 纵向 packs |
+| **`lawcontrol`**（独立产品） | Proprietary | Django + Vue B2B SaaS | **律所小团队** — 多租户 RBAC + 案件分配 + 多人协作 |
+
+**等式**：
+- 个人通用用户 = `attune (OSS)`
+- 个人行业用户 = `attune (OSS)` + `attune-pro/<vertical>-pro` plugin pack
+- 行业小团队 = `lawcontrol`
+
+三者技术上独立运行（无跨产品运行时依赖），战略上配套（同团队不同用户群）。完整战略 + 准入规则见 [`docs/oss-pro-strategy.zh.md`](docs/oss-pro-strategy.zh.md)（双语）。
+
 > **2026-04 更新**：Rust 线新增 6 大能力 — 用户批注 + AI 批注（4 角度分析）、
 > 上下文压缩流水线（摘要缓存 70-85% token 节省）、批注加权 RAG、Token Chip 成本透明、
 > 硬件感知默认摘要模型、扫描版 PDF OCR 兜底。完整回归 57 断言 100% 通过，总测试 299。
