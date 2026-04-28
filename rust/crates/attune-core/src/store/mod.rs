@@ -746,14 +746,19 @@ mod tests {
 
     #[test]
     fn task_type_column_migration() {
+        // v0.6 fix: dequeue_embeddings 现在过滤 task_type='embed'，避免 worker 饥饿循环
+        // (per F-Pro 修复，详见 queue.rs::dequeue_embeddings 注释)。
+        // classify 任务静默 pending，由独立 server 层 classify_worker 处理。
+        // 这里验证：(a) classify 任务能入队 (b) dequeue_embeddings 正确过滤
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
         let id = store.insert_item(&dek, "T", "C", None, "note", None, None).unwrap();
         store.enqueue_classify(&id, 3).unwrap();
+        // dequeue_embeddings 只看 embed 任务 → 应返回空
         let tasks = store.dequeue_embeddings(10).unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].task_type, "classify");
-        assert_eq!(tasks[0].item_id, id);
+        assert!(tasks.is_empty(), "dequeue_embeddings 不应返回 classify 任务");
+        // 但 pending_count_by_type 能看到这条 classify
+        assert_eq!(store.pending_count_by_type("classify").unwrap(), 1);
     }
 
     #[test]
