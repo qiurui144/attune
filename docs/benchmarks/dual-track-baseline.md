@@ -103,6 +103,38 @@ Per-dimension:
   on_topic     : ?.??/5
 ```
 
+## 第二轮：bge-m3 Ollama F16 vs ORT 量化版（2026-04-28）
+
+切换 `ATTUNE_EMBEDDING_BACKEND=ollama` 后，**同一 corpus 同一 query** A/B 对比：
+
+| 维度 | ORT bge-m3 量化 | Ollama bge-m3 F16 | Δ |
+|------|----------------|-------------------|---|
+| Scen A 法律 Hit@10 | **0.80** | **0.80** | = |
+| Scen A 法律 MRR | 0.67 | 0.43 | **-0.24** ⚠️ |
+| Scen B Rust Hit@10 | 0.60 | 0.60 | = |
+| Scen B Rust MRR | 0.37 | 0.60 | **+0.23** ✓ |
+| Embed 速度 (chunks/s) | 6.4 (CPU) | 23 (GPU) | **3.6×** ✓ |
+
+**反直觉发现**：
+1. **Hit@10 完全一样** — 两个模型在 top-10 都能找到相同的相关文档，差异仅在排名顺序
+2. **跨语言污染**：Ollama F16 在中文 query 下 top-3 出现英文 Rust 章节（劳动合同 → ch17-04-streams）；ORT 量化版反而能保持 top-3 都是中文法律
+3. **Ollama 速度优势 3.6×**（GPU 加速 + F16），但需要 Ollama 进程
+
+**结论**：模型升级不是 Pro 级别的关键路径。**真正瓶颈是 corpus 覆盖 + 跨语言污染**。
+
+## "Pro 级别" 的真实路径（基于双轮 benchmark）
+
+| 路径 | 预期收益 | 工作量 |
+|------|---------|--------|
+| ① 分域索引（per-domain vault）| 法律 Hit@10 → 1.00, 通用 → 0.85+ | 1-2 天 (D1 多 vault 设计) |
+| ② 法律 corpus 扩到 10K 全集 | shareholder 等冷门题被覆盖 | 3-5 小时 (worker bug 修后) |
+| ③ Rust 补 ch10 lifetimes / ch19 patterns | Scen B → ≥0.80 | 5 min (cp 章节) |
+| ④ 修 queue worker 批处理饥饿 bug | 全集 ingest 不再卡 tail | 1-2 h |
+| ⑤ 切 Ollama bge-m3 默认 | 速度 3.6× / 英文 MRR +0.23 / 但中文 MRR -0.24 | 已实现 env var |
+
+**当前已达成**：法律 Hit@10 = 0.80 ✅ 即"基线 Pro"。
+**升级到 0.95+ 路径**：路径 ② + ③ + ④（不需要换模型）。
+
 ## Reproducing this baseline
 
 ```bash

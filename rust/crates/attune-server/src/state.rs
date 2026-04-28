@@ -194,19 +194,30 @@ impl AppState {
             };
         }
 
-        // Try ONNX embedding first; fall back to Ollama if model not available
+        // Embedding 提供者选择：
+        // - 默认 ONNX (Xenova/bge-m3 quantized, CPU) — 自包含、零外部依赖
+        // - ATTUNE_EMBEDDING_BACKEND=ollama 强制走 Ollama bge-m3 (full precision, GPU 可用)
+        //   benchmark / Pro 部署用，质量更好但需要 Ollama 运行
         if let Ok(mut guard) = self.embedding.lock() {
-            let provider: Arc<dyn EmbeddingProvider> =
+            let prefer_ollama = std::env::var("ATTUNE_EMBEDDING_BACKEND")
+                .map(|v| v.eq_ignore_ascii_case("ollama"))
+                .unwrap_or(false);
+
+            let provider: Arc<dyn EmbeddingProvider> = if prefer_ollama {
+                tracing::info!("Embedding: Ollama bge-m3 (ATTUNE_EMBEDDING_BACKEND=ollama)");
+                Arc::new(OllamaProvider::default())
+            } else {
                 match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
                     Ok(p) => {
-                        tracing::info!("Embedding: OrtEmbeddingProvider (Qwen3-Embedding-0.6B)");
+                        tracing::info!("Embedding: OrtEmbeddingProvider (Xenova/bge-m3 ONNX quantized)");
                         Arc::new(p)
                     }
                     Err(e) => {
                         tracing::info!("ONNX embedding unavailable ({e}), falling back to Ollama bge-m3");
                         Arc::new(OllamaProvider::default())
                     }
-                };
+                }
+            };
             *guard = Some(provider);
         }
 
