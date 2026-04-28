@@ -106,6 +106,7 @@ fn f2_search_result_has_breadcrumb_field() {
         breadcrumb: vec!["A".into(), "B".into()],
         chunk_offset_start: Some(0),
         chunk_offset_end: Some(100),
+        corpus_domain: String::new(),  // F-Pro Stage 1 新增字段
     };
     assert_eq!(sr.breadcrumb.len(), 2);
     assert_eq!(sr.chunk_offset_start, Some(0));
