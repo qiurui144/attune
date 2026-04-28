@@ -1,0 +1,32 @@
+token: 678cef0929b34882a6416d35a2f90e...
+====================================================================================================
+[Phase B-3] 检索 baseline (Hit@10 / MRR / Recall@10)
+====================================================================================================
+A/labor_notice               ERROR: HTTP Error 401: Unauthorized
+A/loan_rate                  ERROR: HTTP Error 401: Unauthorized
+A/trademark                  ERROR: HTTP Error 401: Unauthorized
+A/shareholder_resolution     ERROR: HTTP Error 401: Unauthorized
+A/breach_of_contract         ERROR: HTTP Error 401: Unauthorized
+B/rust_references            ERROR: HTTP Error 401: Unauthorized
+B/rust_box                   ERROR: HTTP Error 401: Unauthorized
+B/rust_cycles                ERROR: HTTP Error 401: Unauthorized
+B/rust_lifetimes             ERROR: HTTP Error 401: Unauthorized
+B/rust_patterns              ERROR: HTTP Error 401: Unauthorized
+C/python_list_tuple          ERROR: HTTP Error 401: Unauthorized
+C/overfitting                ERROR: HTTP Error 401: Unauthorized
+C/python_decorator           ERROR: HTTP Error 401: Unauthorized
+C/probability                ERROR: HTTP Error 401: Unauthorized
+C/gradient_descent           ERROR: HTTP Error 401: Unauthorized
+
+====================================================================================================
+[Phase B-evidence] Chat citation 流验证
+====================================================================================================
+A/labor_notice               CHAT ERROR: HTTP Error 401: Unauthorized
+B/rust_references            CHAT ERROR: HTTP Error 401: Unauthorized
+C/python_list_tuple          CHAT ERROR: HTTP Error 401: Unauthorized
+
+📊 Saved: docs/benchmarks/phase-b-final.json
+
+====================================================================================================
+Pro 级别评估
+====================================================================================================

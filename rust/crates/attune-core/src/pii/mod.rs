@@ -19,6 +19,7 @@
 
 pub mod patterns;
 pub mod dictionary;
+pub mod ner;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

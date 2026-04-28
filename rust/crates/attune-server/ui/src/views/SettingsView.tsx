@@ -410,6 +410,36 @@ function DataPanel(): JSX.Element {
 }
 
 function PrivacyPanel(): JSX.Element {
+  // v0.6 Phase A.5.5：Privacy tier 状态拉取
+  const privacyTier = useSignal<{
+    hardware_tier?: string;
+    available_layers?: string[];
+    l1_regex_available?: boolean;
+    l2_ner_available?: boolean;
+    l3_llm_available?: boolean;
+    upgrade_hint?: string | null;
+  } | null>(null);
+  const protectedItems = useSignal<{ count?: number; items?: string[] } | null>(null);
+  const auditCount = useSignal<number>(0);
+
+  const refreshPrivacy = async () => {
+    try {
+      const t = await api.get<typeof privacyTier.value>('/privacy/tier');
+      privacyTier.value = t;
+      const p = await api.get<{ count: number; items: string[] }>('/items/protected');
+      protectedItems.value = p;
+      const a = await api.get<{ total: number }>('/audit/outbound?limit=1');
+      auditCount.value = a.total || 0;
+    } catch (e) {
+      // best-effort, silent
+    }
+  };
+
+  // 首次挂载拉取
+  if (privacyTier.value === null && vaultState.value === 'unlocked') {
+    refreshPrivacy();
+  }
+
   return (
     <>
       <Section title="安全">
@@ -437,6 +467,62 @@ function PrivacyPanel(): JSX.Element {
           </Button>
         </SettingRow>
       </Section>
+
+      {/* v0.6 Phase A.5.5: 隐私分级状态 */}
+      <Section title="隐私分级 (Phase A.5)">
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 12px 0', lineHeight: 1.5 }}>
+          Attune 的"成本/隐私三层模型"：
+        </p>
+        <SettingRow label="L1 正则脱敏">
+          <span style={{ fontSize: 'var(--text-sm)', color: privacyTier.value?.l1_regex_available ? 'var(--color-success)' : 'var(--color-text-secondary)' }}>
+            {privacyTier.value?.l1_regex_available ? '✓ 默认启用 (12 类格式化 PII)' : '— 未就绪'}
+          </span>
+        </SettingRow>
+        <SettingRow label="L2 NER">
+          <span style={{ fontSize: 'var(--text-sm)' }}>
+            {privacyTier.value?.l2_ner_available ? '✓ 可用' : '🟡 v0.6 排期 (~300MB ONNX 模型)'}
+          </span>
+        </SettingRow>
+        <SettingRow label="L3 LLM 脱敏">
+          <span style={{ fontSize: 'var(--text-sm)' }}>
+            {privacyTier.value?.l3_llm_available ? '✓ 可用 (Tier T3+/K3)' : '🟡 v0.7 排期，需高端硬件'}
+          </span>
+        </SettingRow>
+        {privacyTier.value?.upgrade_hint ? (
+          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', margin: '8px 0 0 0', fontStyle: 'italic' }}>
+            💡 {privacyTier.value.upgrade_hint}
+          </p>
+        ) : <></>}
+      </Section>
+
+      <Section title="🔒 受保护文件 (per-file L0)">
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 8px 0', lineHeight: 1.5 }}>
+          标记为 L0 的文件 chunk 永不出现在云端 LLM context 里（强制本地 LLM）。
+          目前已标记: <strong>{protectedItems.value?.count ?? 0}</strong> 个文件。
+        </p>
+        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', margin: 0, lineHeight: 1.5 }}>
+          标记方法：在文件列表右键文件 → "标记为机密" 或 PATCH /api/v1/items/{'{id}'}/privacy_tier。
+        </p>
+      </Section>
+
+      <Section title="出网审计日志">
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 12px 0', lineHeight: 1.5 }}>
+          每次云端 LLM 调用都本地落 audit log（SHA256 hash + 模型 + token 数 + 脱敏统计，<strong>0 用户原文落库</strong>）。
+          已记录: <strong>{auditCount.value}</strong> 条。
+        </p>
+        <SettingRow label="导出 CSV">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => {
+              window.open('/api/v1/audit/outbound/export.csv', '_blank');
+            }}
+          >
+            📥 下载 CSV
+          </Button>
+        </SettingRow>
+      </Section>
+
       <Section title="遥测">
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
           Attune 默认关闭所有遥测。后续版本可 opt-in 匿名使用统计。
