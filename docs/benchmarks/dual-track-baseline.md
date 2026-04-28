@@ -179,6 +179,59 @@ Scen A labor_notice citation:
 **当前已达成**：法律 Hit@10 = 0.80 ✅ 即"基线 Pro"。
 **升级到 0.95+ 路径**：路径 ② + ③ + ④（不需要换模型）。
 
+## 第四轮：F-Pro 跨域污染防御（2026-04-28，🎯 法律达 PRO）
+
+执行用户决策的 F-Pro 组合 (commit `605e14b`):
+- Stage 1: items.corpus_domain + bound_dirs.corpus_domain 字段
+- Stage 2: chunk_text 头部注入 `[领域: legal]` / `[领域: tech]` prefix
+- Stage 3: CROSS_DOMAIN_PENALTY = 0.4，跨域文档降权
+- Stage 4: detect_query_domain（关键词，零 LLM 调用）
+
+| 维度 | 第三轮 (无 F-Pro) | 第四轮 (F-Pro) | Δ |
+|------|----------------|---------------|---|
+| **Scen A 法律 Hit@10** | 0.60 | **0.80 ✅ PRO** | **+0.20** |
+| **Scen A 法律 MRR** | 0.50 | **0.54 ✅ PRO** | +0.04 |
+| **Scen A 命中 4/5** | 3 题命中 | **4 题命中** ✓ | **breach_of_contract 转命中** |
+| **Scen B Rust Hit@10** | 1.00 | **1.00** | = |
+| **Scen B Rust MRR** | 0.87 | **1.00 满分** | **+0.13** |
+| **Scen B 全 top-1** | 3/5 | **5/5** ✓ | 全部 top-1 命中 |
+| Scen C 中文技术 | 0.00 | 0.00 | = (corpus title 错位独立问题) |
+
+### 跨域窜段消失（人眼检验）
+
+**第三轮 Scen A breach_of_contract top-3**：
+```
+1. 分布式 (cs-notes)  ← 跨域污染
+2. 数据库系统原理 (cs-notes)  ← 跨域污染
+3. 最高人民法院关于解除劳动合同... (legal)
+```
+
+**第四轮 Scen A trademark top-3**：
+```
+1. 最高人民法院关于产品侵权案件的受害人能否... (legal) ✓
+2. 贵州省人民检察院发布6件打击治理侵犯消费... (legal) ✓
+3. 黄某等人假冒注册商标案 (legal) ✓
+```
+
+3/3 全相关。同样模式覆盖 Scen A 4 题命中题全 top-3 都是法律内容。
+
+### 副作用：Scen B Rust 也涨
+
+F-Pro 设计目标是法律提升，**意外发现 Rust scenarios 也从 MRR 0.87 → 1.00**：
+- query "How does Rust handle reference cycles?" → detect=tech
+- 跨域 (legal) 法律案例被降权 0.4
+- Rust 文档不被冲淡，全部 top-1 命中
+
+这是"分域索引"心智模型在共享 vault 上的优雅实现 — **物理共享，逻辑分域**。
+
+### Pro 级别评估（第四轮）
+
+| Scenario | Hit@10 | MRR | Pro 阈值 | 状态 |
+|----------|--------|-----|----------|------|
+| A 法律/中文 | **0.80** | **0.54** | ≥ 0.80 / ≥ 0.50 | ✅ **PRO** |
+| B Rust/英文 | **1.00** | **1.00** | ≥ 0.80 / ≥ 0.50 | ✅ **PRO 满分** |
+| C 中文技术 | 0.00 | 0.00 | ≥ 0.80 | ⚠️ corpus 设计错位 |
+
 ## Reproducing this baseline
 
 ```bash

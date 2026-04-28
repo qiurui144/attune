@@ -3,16 +3,16 @@
     "A": {
       "name": "律师 / 中文法律",
       "n": 5,
-      "hit_at_10": 0.6,
-      "mrr": 0.5,
-      "recall": 0.4333333333333333
+      "hit_at_10": 0.8,
+      "mrr": 0.54,
+      "recall": 0.5
     },
     "B": {
       "name": "Rust 开发者 / 英文",
       "n": 5,
       "hit_at_10": 1.0,
-      "mrr": 0.8666666666666666,
-      "recall": 0.7666666666666667
+      "mrr": 1.0,
+      "recall": 0.8333333333333334
     },
     "C": {
       "name": "中文技术读者",
@@ -46,7 +46,7 @@
       "citations_count": 5,
       "confidence": 3,
       "secondary_retrieval": false,
-      "has_inline_marker": true,
+      "has_inline_marker": false,
       "has_breadcrumb": true,
       "has_offset": true
     }
