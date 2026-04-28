@@ -169,8 +169,15 @@ pub async fn chat(
     // 1b. 用 learned_expansions 自动扩展查询词（语义扩展，透明无感）
     let expanded_query = attune_core::skill_evolution::expand_query(&body.message, &app_settings);
 
+    // v0.6 Phase B F-Pro Stage 4：query 意图 detect → cross-domain penalty
+    let detected_domain = attune_core::search::detect_query_domain(&expanded_query);
+
     // 1. Search knowledge base via three-stage pipeline (initial_k → rerank → top_k)
-    let search_params = attune_core::search::SearchParams::with_defaults(5);
+    let mut search_params = attune_core::search::SearchParams::with_defaults(5);
+    if let Some(d) = detected_domain.as_ref() {
+        search_params.domain_hint = Some(d.clone());
+        tracing::info!("F-Pro: query='{}' → detected_domain={d}", body.message.chars().take(40).collect::<String>());
+    }
     let reranker = state.reranker.lock().map_err(|_| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "reranker lock"})))
     })?.clone();

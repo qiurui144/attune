@@ -113,12 +113,13 @@ AUTH=(-H "Authorization: Bearer $TOKEN")
 bind_corpus() {
     local path="$1"
     local label="$2"
-    log "Binding $label: $path"
+    local corpus_domain="${3:-general}"
+    log "Binding $label (domain=$corpus_domain): $path"
     local resp
     resp=$(curl -sS -X POST "$BASE_URL/api/v1/index/bind" \
         "${AUTH[@]}" \
         -H 'Content-Type: application/json' \
-        -d "{\"path\":\"$path\",\"recursive\":true,\"file_types\":[\"md\",\"txt\"]}" \
+        -d "{\"path\":\"$path\",\"recursive\":true,\"file_types\":[\"md\",\"txt\"],\"corpus_domain\":\"$corpus_domain\"}" \
         || echo '{"error":"curl failed"}')
     echo "  → $resp" | head -c 200
     echo
@@ -126,20 +127,20 @@ bind_corpus() {
 
 case "$TARGET" in
     legal|all)
-        bind_corpus "$BENCH_HOME/legal-sample/regulation" "legal_regulation"
-        bind_corpus "$BENCH_HOME/legal-sample/case" "legal_case"
+        # F-Pro: 法律 corpus 标记 corpus_domain=legal 让跨域 penalty 生效
+        bind_corpus "$BENCH_HOME/legal-sample/regulation" "legal_regulation" "legal"
+        bind_corpus "$BENCH_HOME/legal-sample/case" "legal_case" "legal"
         ;;
 esac
 
 case "$TARGET" in
     general|all)
-        # 全量 rust-book src/ 112 chapters (worker bug 修后可完整 ingest)
+        # F-Pro: rust-book / cs-notes 标记 corpus_domain=tech
         if [[ -e "$BENCH_HOME/general/rust-book/src" ]]; then
-            bind_corpus "$BENCH_HOME/general/rust-book/src" "rust-book-full"
+            bind_corpus "$BENCH_HOME/general/rust-book/src" "rust-book-full" "tech"
         fi
-        # 全量 cs-notes notes/ 175 md (中文计算机基础八股)
         if [[ -e "$BENCH_HOME/general/cs-notes/notes" ]]; then
-            bind_corpus "$BENCH_HOME/general/cs-notes/notes" "cs-notes-full"
+            bind_corpus "$BENCH_HOME/general/cs-notes/notes" "cs-notes-full" "tech"
         fi
         ;;
 esac

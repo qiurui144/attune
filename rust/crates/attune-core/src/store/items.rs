@@ -359,6 +359,41 @@ impl Store {
     }
 
     // ============================================================
+    // v0.6 Phase B F-Pro — corpus domain
+    // ============================================================
+
+    /// 设置 item 的 corpus_domain（legal / tech / medical / patent / general）。
+    /// search 阶段按 query intent 跨域降权防止"反洗钱"被 cs-notes 顶占。
+    pub fn set_item_corpus_domain(&self, item_id: &str, corpus_domain: &str) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE items SET corpus_domain = ?1, updated_at = ?2 WHERE id = ?3 AND is_deleted = 0",
+            params![corpus_domain, chrono::Utc::now().to_rfc3339(), item_id],
+        )?;
+        if n == 0 {
+            return Err(VaultError::NotFound(format!("item {item_id}")));
+        }
+        Ok(())
+    }
+
+    /// 读取 item 的 corpus_domain。item 不存在返回 NotFound。
+    pub fn get_item_corpus_domain(&self, item_id: &str) -> Result<String> {
+        let s: String = self
+            .conn
+            .query_row(
+                "SELECT corpus_domain FROM items WHERE id = ?1 AND is_deleted = 0",
+                params![item_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    VaultError::NotFound(format!("item {item_id}"))
+                }
+                other => VaultError::Database(other),
+            })?;
+        Ok(s)
+    }
+
+    // ============================================================
     // v0.6 Phase A.5.4 — per-file 隐私分级
     // ============================================================
 

@@ -78,6 +78,90 @@ pub fn apply_cross_lang_penalty(results: &mut [SearchResult], query_lang: Lang) 
     }
 }
 
+fn default_corpus_domain() -> String { "general".into() }
+
+/// v0.6 Phase B F-Pro: cross-domain 降权系数 (与 CROSS_LANG_PENALTY 共用机制)。
+/// query domain 已知（如 'legal'）但 doc.corpus_domain 不同（如 'tech'）→ score *= 该系数。
+/// 0.4 比 cross-lang 0.3 略高 — 同语种跨领域比跨语言保留更多召回（专业术语共享）。
+pub const CROSS_DOMAIN_PENALTY: f32 = 0.4;
+
+/// v0.6 Phase B F-Pro Stage 4：从 query 文本检测领域意图（零 LLM 调用）。
+/// 关键词命中策略：每个 domain 维护一组特征词，统计命中数最多的 domain 返回。
+/// 返回 None = 未明确意图（不应用 cross-domain penalty，保持现状）。
+///
+/// 关键词集建议来源：vertical plugin.yaml::chat_trigger.project_keywords。
+/// 当 plugin loader 已加载 vertical plugin 时调用方应优先用 plugin 数据；
+/// 这里仅提供 hardcoded fallback 让 OSS 裸装也能用基础识别能力。
+pub fn detect_query_domain(query: &str) -> Option<String> {
+    use std::collections::HashMap;
+
+    // hardcoded fallback：覆盖 attune-pro 6 vertical 的核心特征词
+    // 每个 domain 选 12-20 个高判别性词（避免泛词如"问题/可以"）
+    let keywords_by_domain: &[(&str, &[&str])] = &[
+        ("legal", &[
+            "法律", "法条", "法规", "法院", "判决", "案件", "案号", "诉讼", "起诉", "判例",
+            "民法", "刑法", "民法典", "合同法", "公司法", "商标法", "专利法",
+            "借贷", "商标", "股东", "股权", "侵权", "违约", "赔偿", "仲裁",
+            "反洗钱", "劳动合同", "工伤", "婚姻", "继承",
+        ]),
+        ("tech", &[
+            // Rust / 系统编程
+            "Rust", "ownership", "borrow", "lifetime",
+            // Python / 通用
+            "Python", "decorator", "tuple", "list comprehension",
+            // 算法 / 数据结构
+            "算法", "数据结构", "动态规划", "二叉树", "哈希", "梯度下降", "过拟合",
+            // 系统 / 分布式
+            "Linux", "Docker", "kubernetes", "k8s", "Redis", "MySQL", "PostgreSQL",
+            "分布式", "TCP", "HTTP", "Socket",
+            // 数据库
+            "SQL", "索引", "事务",
+        ]),
+        ("medical", &[
+            "病历", "诊断", "症状", "用药", "处方", "手术", "病人", "患者",
+            "临床", "医院", "禁忌", "副作用", "剂量",
+        ]),
+        ("patent", &[
+            "专利", "权利要求", "申请号", "IPC", "OA", "审查", "优先权", "新颖性",
+            "创造性", "实用新型", "外观设计", "PCT",
+        ]),
+    ];
+
+    let q = query.to_lowercase();
+    let mut hit_counts: HashMap<&str, usize> = HashMap::new();
+    for (domain, kws) in keywords_by_domain {
+        for kw in *kws {
+            // 中文命中按子串；英文命中按子串（lowercase 已处理大小写）
+            if q.contains(&kw.to_lowercase()) {
+                *hit_counts.entry(*domain).or_insert(0) += 1;
+            }
+        }
+    }
+    // 至少 1 个命中才返回（避免误识别），同分则按表序优先
+    hit_counts
+        .into_iter()
+        .max_by_key(|(_, c)| *c)
+        .filter(|(_, c)| *c >= 1)
+        .map(|(d, _)| d.to_string())
+}
+
+/// 跨领域降权：query 有 domain hint（如 "legal"）时，doc.corpus_domain 不匹配的降权。
+/// query domain="general" 或 None：跳过（保持现有行为，向后兼容）。
+/// query domain="legal" + doc.corpus_domain="tech": score *= CROSS_DOMAIN_PENALTY。
+/// query domain="legal" + doc.corpus_domain="legal" / "general": 保持原分。
+pub fn apply_cross_domain_penalty(results: &mut [SearchResult], query_domain: Option<&str>) {
+    let qd = match query_domain {
+        Some(d) if !d.is_empty() && d != "general" => d,
+        _ => return,
+    };
+    for r in results.iter_mut() {
+        // doc.corpus_domain == 'general' 不降权（默认 corpus 不强制归类）
+        if r.corpus_domain != "general" && r.corpus_domain != qd {
+            r.score *= CROSS_DOMAIN_PENALTY;
+        }
+    }
+}
+
 /// 搜索结果
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SearchResult {
@@ -87,6 +171,11 @@ pub struct SearchResult {
     pub content: String,
     pub source_type: String,
     pub inject_content: Option<String>,
+    /// v0.6 Phase B F-Pro：item.corpus_domain（legal/tech/medical/.../general）。
+    /// search 阶段按 query intent 跨域降权防止"反洗钱"被 cs-notes 顶占。
+    /// 默认 "general"（无标签 corpus）。
+    #[serde(default = "default_corpus_domain")]
+    pub corpus_domain: String,
     // ── F2 (W3 batch A, 2026-04-27)：breadcrumb + offset 透传 ─────────────
     // per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §4
     // 关闭 W2 batch 1 的 Citation 占位状态；search 阶段 join chunk_breadcrumbs
@@ -127,6 +216,11 @@ pub struct SearchParams {
     // None = 不过滤（向后兼容，初版调用方未传时不破行为）。
     /// vector 召回 cosine 阈值。Some(0.65) 默认；低于此分数的 vector 结果在 RRF 前丢弃。
     pub min_score: Option<f32>,
+
+    /// v0.6 Phase B F-Pro：query 意图领域提示。Some("legal") → 跨领域文档降权。
+    /// None / Some("general") = 不应用 cross-domain penalty（默认行为，保留召回多样性）。
+    /// 由 detect_query_domain (Stage 4) 自动从 query 推断 + plugin keywords 判断。
+    pub domain_hint: Option<String>,
 }
 
 impl SearchParams {
@@ -142,7 +236,17 @@ impl SearchParams {
             initial_k,
             intermediate_k,
             min_score: None,
+            domain_hint: None,
         }
+    }
+
+    /// v0.6 Phase B F-Pro：链式设置 domain_hint
+    pub fn with_domain_hint(mut self, hint: impl Into<String>) -> Self {
+        let s = hint.into();
+        if !s.is_empty() && s != "general" {
+            self.domain_hint = Some(s);
+        }
+        self
     }
 
     /// **RAG / chat 专用**默认 — 启用 J3 cosine 阈值 0.65 过滤噪音
@@ -328,6 +432,11 @@ pub fn search_with_context(
                 .flatten()
                 .map(|(p, s, e)| (p, Some(s), Some(e)))
                 .unwrap_or_default();
+            // v0.6 Phase B F-Pro：拉 corpus_domain；item 不存在 / 列缺时回退 'general'
+            let corpus_domain = ctx
+                .store
+                .get_item_corpus_domain(&item.id)
+                .unwrap_or_else(|_| "general".to_string());
             results.push(SearchResult {
                 item_id: item.id,
                 score: *score,
@@ -338,6 +447,7 @@ pub fn search_with_context(
                 breadcrumb,
                 chunk_offset_start: off_start,
                 chunk_offset_end: off_end,
+                corpus_domain,
             });
         }
     }
@@ -382,6 +492,10 @@ pub fn search_with_context(
 
     // 语言匹配降权：任何排序策略之后统一应用，不改变同语言相对顺序
     apply_cross_lang_penalty(&mut results, query_lang);
+
+    // v0.6 Phase B F-Pro：跨领域降权（同语种跨领域污染防御）
+    // 如 query="反洗钱"（domain_hint=legal）+ doc.corpus_domain=tech → score *= 0.4
+    apply_cross_domain_penalty(&mut results, params.domain_hint.as_deref());
 
     // 最终排序
     results.sort_by(|a, b| b.score.partial_cmp(&a.score)

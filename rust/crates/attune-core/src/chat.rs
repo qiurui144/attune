@@ -149,6 +149,7 @@ impl ChatEngine {
                             breadcrumb: Vec::new(),         // F2: web 无源 item 路径
                             chunk_offset_start: None,
                             chunk_offset_end: None,
+                            corpus_domain: "general".into(),
                         }).collect();
                         (synthetic, true)
                     }

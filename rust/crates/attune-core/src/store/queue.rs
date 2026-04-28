@@ -109,9 +109,11 @@ impl Store {
     }
 
     /// 查询 pending 状态的队列任务数量
+    /// 仅统计 embed 任务的 pending 数。classify 任务不计入（由独立 worker 处理，
+    /// 在 classifier 未加载时会静默 pending；如果计入会导致 indexer status 永远不为 0）。
     pub fn pending_embedding_count(&self) -> Result<usize> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM embed_queue WHERE status = 'pending'",
+            "SELECT COUNT(*) FROM embed_queue WHERE status = 'pending' AND task_type = 'embed'",
             [],
             |row| row.get(0),
         )?;

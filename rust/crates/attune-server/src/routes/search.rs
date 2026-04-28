@@ -64,10 +64,16 @@ pub async fn search(
         }
     }
 
+    // v0.6 Phase B F-Pro Stage 4：从 query 自动 detect 领域意图，driving cross-domain penalty。
+    // 命中 'legal' / 'tech' / 'medical' / 'patent' → 跨领域文档 score *= 0.4
+    // 未命中（None）→ 不应用 penalty（保持向后兼容）
+    let detected_domain = attune_core::search::detect_query_domain(&params.q);
+
     let search_params = {
         let mut p = attune_core::search::SearchParams::with_defaults(params.top_k);
         if let Some(ik) = params.initial_k { p.initial_k = ik; }
         if let Some(imk) = params.intermediate_k { p.intermediate_k = imk; }
+        if let Some(d) = detected_domain.as_ref() { p.domain_hint = Some(d.clone()); }
         p
     };
 
@@ -125,10 +131,12 @@ pub async fn search_relevant(
     let top_k = body.top_k.unwrap_or(5);
     let budget = body.injection_budget.unwrap_or(INJECTION_BUDGET);
 
+    let detected_domain = attune_core::search::detect_query_domain(&body.query);
     let search_params = {
         let mut p = attune_core::search::SearchParams::with_defaults(top_k);
         if let Some(ik) = body.initial_k { p.initial_k = ik; }
         if let Some(imk) = body.intermediate_k { p.intermediate_k = imk; }
+        if let Some(d) = detected_domain.as_ref() { p.domain_hint = Some(d.clone()); }
         p
     };
 

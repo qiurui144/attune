@@ -11,16 +11,41 @@ use crate::store::types::*;
 impl Store {
     // --- bound_dirs ---
 
-    /// 绑定监控目录，返回 dir_id
+    /// 绑定监控目录，返回 dir_id（默认 corpus_domain='general'）
     pub fn bind_directory(&self, path: &str, recursive: bool, file_types: &[&str]) -> Result<String> {
+        self.bind_directory_with_domain(path, recursive, file_types, "general")
+    }
+
+    /// v0.6 Phase B F-Pro：bind 时声明 corpus 领域（legal / tech / medical / patent / general）。
+    /// scanner 后续 ingest 时把 items.corpus_domain = 该领域，driving cross-domain penalty。
+    pub fn bind_directory_with_domain(
+        &self,
+        path: &str,
+        recursive: bool,
+        file_types: &[&str],
+        corpus_domain: &str,
+    ) -> Result<String> {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let ft_json = serde_json::to_string(file_types)?;
         self.conn.execute(
-            "INSERT OR REPLACE INTO bound_dirs (id, path, recursive, file_types, is_active)
-             VALUES (?1, ?2, ?3, ?4, 1)",
-            params![id, path, recursive as i32, ft_json],
+            "INSERT OR REPLACE INTO bound_dirs (id, path, recursive, file_types, is_active, corpus_domain)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+            params![id, path, recursive as i32, ft_json, corpus_domain],
         )?;
         Ok(id)
+    }
+
+    /// 读取 bound_dir 的 corpus_domain；找不到回退 'general'
+    pub fn get_dir_corpus_domain(&self, dir_id: &str) -> Result<String> {
+        let domain: String = self
+            .conn
+            .query_row(
+                "SELECT corpus_domain FROM bound_dirs WHERE id = ?1",
+                params![dir_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "general".to_string());
+        Ok(domain)
     }
 
     /// 解绑监控目录（标记为非活跃）

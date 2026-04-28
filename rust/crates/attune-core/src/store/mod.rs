@@ -51,7 +51,12 @@ CREATE TABLE IF NOT EXISTS items (
     is_deleted   INTEGER NOT NULL DEFAULT 0,
     -- v0.6 Phase A.5.4 隐私分级（per 用户决策 2026-04-28）
     -- L0 = 标记为🔒，永不出网（强制本地 LLM）；L1 = 默认（脱敏 → 云）；L3 = 高敏感（LLM 脱敏 → 云）
-    privacy_tier TEXT NOT NULL DEFAULT 'L1'
+    privacy_tier TEXT NOT NULL DEFAULT 'L1',
+    -- v0.6 Phase B F-Pro 跨域污染防御（per 用户决策 2026-04-28）
+    -- 旧 `domain` 字段历史用作"网站域名"（来自 chrome 扩展），与本字段语义冲突
+    -- → 新建 corpus_domain 字段表示"领域分类"（legal/tech/general/medical/...）
+    -- search 阶段按 query intent 跨领域降权，防止"反洗钱"被 cs-notes 顶占
+    corpus_domain TEXT NOT NULL DEFAULT 'general'
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
 CREATE INDEX IF NOT EXISTS idx_items_deleted ON items(is_deleted);
@@ -72,12 +77,15 @@ CREATE INDEX IF NOT EXISTS idx_eq_status ON embed_queue(status, priority, create
 CREATE INDEX IF NOT EXISTS idx_eq_item ON embed_queue(item_id);
 
 CREATE TABLE IF NOT EXISTS bound_dirs (
-    id         TEXT PRIMARY KEY,
-    path       TEXT UNIQUE NOT NULL,
-    recursive  INTEGER NOT NULL DEFAULT 1,
-    file_types TEXT NOT NULL,
-    is_active  INTEGER NOT NULL DEFAULT 1,
-    last_scan  TEXT
+    id            TEXT PRIMARY KEY,
+    path          TEXT UNIQUE NOT NULL,
+    recursive     INTEGER NOT NULL DEFAULT 1,
+    file_types    TEXT NOT NULL,
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    last_scan     TEXT,
+    -- v0.6 Phase B F-Pro: bind 时声明 corpus 领域，scanner 写入 items.corpus_domain
+    -- 'legal' / 'tech' / 'medical' / 'patent' / 'general'（默认）
+    corpus_domain TEXT NOT NULL DEFAULT 'general'
 );
 
 CREATE TABLE IF NOT EXISTS indexed_files (
@@ -374,6 +382,7 @@ impl Store {
             [],
         );
         Self::migrate_items_privacy_tier(&conn)?;
+        Self::migrate_corpus_domain(&conn)?;
         Ok(Self { conn })
     }
 
@@ -385,7 +394,36 @@ impl Store {
         Self::migrate_task_type(&conn)?;
         Self::migrate_breadcrumbs_encrypt(&conn)?;
         Self::migrate_items_privacy_tier(&conn)?;
+        Self::migrate_corpus_domain(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// 迁移：items 新增 corpus_domain 列 + bound_dirs 新增 corpus_domain 列
+    /// (v0.6 Phase B F-Pro 跨域污染防御，幂等)
+    fn migrate_corpus_domain(conn: &Connection) -> Result<()> {
+        let has_items_col: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('items') WHERE name = 'corpus_domain'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_items_col == 0 {
+            conn.execute(
+                "ALTER TABLE items ADD COLUMN corpus_domain TEXT NOT NULL DEFAULT 'general'",
+                [],
+            )?;
+        }
+        let has_dirs_col: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('bound_dirs') WHERE name = 'corpus_domain'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_dirs_col == 0 {
+            conn.execute(
+                "ALTER TABLE bound_dirs ADD COLUMN corpus_domain TEXT NOT NULL DEFAULT 'general'",
+                [],
+            )?;
+        }
+        Ok(())
     }
 
     /// 迁移：items 新增 privacy_tier 列（v0.6 Phase A.5.4，幂等）

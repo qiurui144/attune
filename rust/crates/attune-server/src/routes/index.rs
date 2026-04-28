@@ -13,6 +13,14 @@ pub struct BindRequest {
     pub recursive: bool,
     #[serde(default = "default_file_types")]
     pub file_types: Vec<String>,
+    /// v0.6 Phase B F-Pro：bind 时声明 corpus 领域用于跨域 retrieval 防污染。
+    /// 'legal' / 'tech' / 'medical' / 'patent' / 'academic' / 'general'(默认)。
+    #[serde(default = "default_corpus_domain")]
+    pub corpus_domain: String,
+}
+
+fn default_corpus_domain() -> String {
+    "general".to_string()
 }
 
 fn default_true() -> bool {
@@ -106,7 +114,7 @@ pub async fn bind_directory(
     let file_type_strs: Vec<&str> = body.file_types.iter().map(|s| s.as_str()).collect();
     let dir_id = vault
         .store()
-        .bind_directory(&canonical_str, body.recursive, &file_type_strs)
+        .bind_directory_with_domain(&canonical_str, body.recursive, &file_type_strs, &body.corpus_domain)
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
