@@ -18,7 +18,7 @@ license = "Apache-2.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # dirs：原 attune-core=6 / attune-server=5 不一致，统一到 6
 dirs = "6"
 
