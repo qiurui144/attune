@@ -22,6 +22,79 @@
 - **`vX.Y.Z-rc.N`**：候选发布，准备合入 `main`
 - **`vX.Y.Z`**：正式发布。**只在 `main` 分支打**。tag message 列出累积 commit 数 + 核心能力清单 + 测试统计
 
+### Tag 双轨制（v0.7+ 起明确）
+
+attune 的发布产物分两条独立线，对应**两个独立 tag 命名空间 + 两个独立 CI workflow**：
+
+| Tag 前缀 | 触发的 workflow | 产物 | 适用场景 |
+|---------|----------------|------|---------|
+| `vX.Y.Z[-alpha/beta/rc.N]` | `.github/workflows/rust-release.yml` | **server / cli 二进制 tarball**（attune-server-headless + attune CLI），跨 Linux x86_64/aarch64 + macOS x86_64/arm64 + Windows x86_64 | 开发者、NAS 部署、服务端、headless 场景 |
+| `desktop-vX.Y.Z[-alpha/beta/rc.N]` | `.github/workflows/desktop-release.yml` | **Tauri 桌面安装器**（NSIS / MSI / .deb / AppImage） | 终端用户桌面安装（含 Web UI） |
+
+**两条线版本号必须保持一致**（如同时发 v0.6.0 + desktop-v0.6.0），用同一份 RELEASE.md changelog。
+
+### Release Checklist（GA 发布流程）
+
+候选 release（rc.N）通过 dogfood 后，正式 GA 流程严格按以下顺序：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. develop 端验收                                             │
+│    □ 6 层测试金字塔全绿（unit/integration/smoke/corpus/       │
+│       quality/e2e — 共 1235+ 测试）                            │
+│    □ 20 轮全面健康检查 ≥ 17/20 PASS                           │
+│    □ Playwright E2E 主流程绿（参照 docs/e2e-test-report.md）  │
+│    □ rc.N 已跑过 ≥ 24h 无 regression                          │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 2. develop → main 合入                                        │
+│    git checkout main                                          │
+│    git pull origin main                                       │
+│    git merge develop --no-ff -m "merge: develop → main for vX │
+│    # 预期无冲突（main 永远是 develop 的祖先）                  │
+│    git push origin main                                       │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 3. 在 main 上打两个 GA tag（双轨同时）                        │
+│    git checkout main                                          │
+│    git tag -a vX.Y.Z -m "vX.Y.Z: <核心能力> + <测试统计>"      │
+│    git tag -a desktop-vX.Y.Z -m "desktop vX.Y.Z: <安装器变更>" │
+│    git push origin vX.Y.Z desktop-vX.Y.Z                      │
+│    # 上述两条 push 自动触发对应 workflow                      │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 4. 验证 CI 产物                                                │
+│    □ rust-release.yml ✅ 5 平台二进制 tarball 上传 GitHub      │
+│      Releases (vX.Y.Z 页面)                                   │
+│    □ desktop-release.yml ✅ Win+Linux 安装器上传 GitHub        │
+│      Releases (desktop-vX.Y.Z 页面)                           │
+│    □ 校验 SHA256（rust-release.yml 自动生成 *.sha256）        │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 5. README + 官网更新                                           │
+│    □ README.md / README.zh.md Download 表格更新到 vX.Y.Z      │
+│    □ official-web (cloud/) v 号更新                            │
+│    □ wiki-web 跟进 (release notes)                             │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 6. develop 起新版本周期                                        │
+│    git checkout develop                                       │
+│    # 接下来的 commits 自然进入下一个 vX.Y+1 周期              │
+│    # （不需要手动 bump 版本号，rc.N tag 即标记节奏）          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**关键不变量**：
+- ❌ **永不**在 develop 上打 `vX.Y.Z` 无后缀 tag — 那是 main 专属
+- ❌ **永不** force-push main 或 develop —（CLAUDE.md 已禁）
+- ❌ **永不**直接 commit 到 main — 必须经 develop 合入
+- ✅ **永远**两条 tag 同步 push（`vX.Y.Z` + `desktop-vX.Y.Z`），让 GA 用户能同时拿到 server 和 desktop 产物
+
 ### 远端清理
 
 feature 分支 squash merge 后**立刻删远端**，避免分支墓地：

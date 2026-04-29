@@ -85,7 +85,9 @@ jobs:
         working-directory: rust
         run: |
           mkdir -p staged
-          cp "target/${TARGET}/release/attune-server" staged/
+          # attune-server crate 配置 [[bin]] name = "attune-server-headless"
+          # cargo 实际输出的二进制名是 attune-server-headless（不是 attune-server）
+          cp "target/${TARGET}/release/attune-server-headless" staged/
           cp "target/${TARGET}/release/attune" staged/
           cp ../LICENSE ../NOTICE ./README.md staged/
           cd staged
@@ -99,7 +101,7 @@ jobs:
         working-directory: rust
         run: |
           New-Item -ItemType Directory -Force staged | Out-Null
-          Copy-Item "target/$env:TARGET/release/attune-server.exe" staged/
+          Copy-Item "target/$env:TARGET/release/attune-server-headless.exe" staged/
           Copy-Item "target/$env:TARGET/release/attune.exe" staged/
           Copy-Item "../LICENSE" staged/
           Copy-Item "../NOTICE" staged/

@@ -8,6 +8,19 @@
 
 Attune is a personal AI knowledge base designed for knowledge-intensive professionals (lawyers, patent agents, researchers, consultants). Your professional domain becomes clearer the more you use it; local knowledge answers first, and the system reaches out to the web only when needed. All data is encrypted on your own device — portable across machines, portable across jobs.
 
+## 📥 Download
+
+Latest preview: **v0.6.0-alpha.3** ([Release page](https://github.com/qiurui144/attune/releases/tag/desktop-v0.6.0-alpha.3))
+
+| Platform | File | Size | Notes |
+|----------|------|------|-------|
+| Windows | [`Attune_0.6.0_x64-setup.exe`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0-alpha.3/Attune_0.6.0_x64-setup.exe) | 16 MB | NSIS installer (recommended) |
+| Windows | [`Attune_0.6.0_x64_en-US.msi`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0-alpha.3/Attune_0.6.0_x64_en-US.msi) | 31 MB | MSI for enterprise |
+| Linux deb | [`Attune_0.6.0_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0-alpha.3/Attune_0.6.0_amd64.deb) | 27 MB | Debian/Ubuntu |
+| Linux AppImage | [`Attune_0.6.0_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0-alpha.3/Attune_0.6.0_amd64.AppImage) | 96 MB | Generic Linux |
+
+> ⚠️ alpha preview for dogfood. Official v0.6.0 GA pending tag on `main`.
+
 ## v0.6.0-rc.5 highlights (2026-04-28)
 
 🎯 **Three-track PRO benchmark** — verified end-to-end RAG quality on legal + general English + Chinese fundamentals:

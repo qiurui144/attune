@@ -6,6 +6,19 @@
 
 个人 AI 知识库 + 记忆增强系统。**私有 AI 知识伙伴** — 本地优先、全网增强、越用越懂你的专业。
 
+## 📥 下载安装包
+
+最新预览版：**v0.6.0-alpha.3** ([Release 页面](https://github.com/qiurui144/attune/releases/tag/desktop-v0.6.0-alpha.3))
+
+| 平台 | 文件 | 大小 | 说明 |
+|------|------|------|------|
+| Windows | [`Attune_0.6.0_x64-setup.exe`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0-alpha.3/Attune_0.6.0_x64-setup.exe) | 16 MB | NSIS 安装器（推荐）|
+| Windows | [`Attune_0.6.0_x64_en-US.msi`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0-alpha.3/Attune_0.6.0_x64_en-US.msi) | 31 MB | MSI 企业部署 |
+| Linux deb | [`Attune_0.6.0_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0-alpha.3/Attune_0.6.0_amd64.deb) | 27 MB | Debian/Ubuntu |
+| Linux AppImage | [`Attune_0.6.0_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0-alpha.3/Attune_0.6.0_amd64.AppImage) | 96 MB | 通用 Linux |
+
+> ⚠️ alpha 预览版供 dogfood 测试，正式 v0.6.0 GA 待 main 分支打 tag 发布。
+
 ## v0.6.0-rc.5 亮点（2026-04-28）
 
 🎯 **三赛道 PRO 级 benchmark** — 法律 + 通用英文 + 中文八股双赛道端到端验证：
