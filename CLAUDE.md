@@ -91,6 +91,75 @@ v0.6.0-rc.2 边界瘦身已删除：
 push 前一律 `git status` + `git log --oneline origin/<branch>..HEAD` 复核要推什么；推完报告 commit SHA + 远端 URL。
 
 
+## Git 分支管理标准（GitFlow Lite）
+
+attune + attune-pro 双仓共用，详细规则见 `DEVELOP.md`「分支模型」。**这是行为标准，不是建议**。
+
+### 两条长期分支
+
+| 分支 | 角色 | 写入方式 | 谁能直接 push |
+|------|------|---------|--------------|
+| **`main`** | 稳定发布线，对外用户克隆默认看到这条；每个 GA tag 在此打 | **只通过 `develop → main` merge**（`--no-ff`） | ❌ 不直接开发 |
+| **`develop`** | 集成线，日常开发汇总；alpha/beta/rc tag 在此打 | feature/* squash merge 进入 | ✅ 小修可直接 commit + push |
+| `feature/<name>` | 短期特性，sprint 内用；merge 后**立即删远端 + 本地** | 直接 commit + push + PR → squash merge develop | ✅ |
+
+**铁律**：`main` 上**永远不出现非 merge commit**。所有进 main 的代码必须先经 develop。`git log origin/main` 上看到非 `merge:` 前缀的 commit 就是异常。
+
+### develop → main 的两类合理时机
+
+| 类型 | 触发场景 | 是否打 tag |
+|------|---------|----------|
+| **发布型 merge** | 准备发新 release（GA / patch / minor） | ✅ 必须，打 `vX.Y.Z` + `desktop-vX.Y.Z` |
+| **治理对齐型 merge**（attune 仓允许） | 大量文档/小特性累积，对外 README 与 develop 漂移 | ❌ 不打 tag |
+
+历史先例：`ee8035e` / `4b2c162` / `fdc3ac9` / `364445f` 都是治理对齐型 merge（不打 tag），是允许的模式。判断标准：**对外文档（README / oss-pro-strategy / 定位 spec）的 develop 与 main 漂移已经会让 GitHub 默认分支访客读到错误信息时，即应触发治理对齐 merge**。
+
+### Tag 双轨制（v0.7+ 起明确）
+
+| Tag 前缀 | 触发的 workflow | 产物 |
+|---------|----------------|------|
+| `vX.Y.Z[-alpha/beta/rc.N]` | `.github/workflows/rust-release.yml` | server/CLI 二进制 tarball（多平台） |
+| `desktop-vX.Y.Z[-alpha/beta/rc.N]` | `.github/workflows/desktop-release.yml` | Tauri 桌面安装器（NSIS / MSI / .deb / AppImage） |
+
+**两条线版本号必须保持一致**（如同时发 `v0.6.0` + `desktop-v0.6.0`），共用同一份 `RELEASE.md` changelog。
+
+### Tag 打在哪条分支
+
+- **正式版（`vX.Y.Z` 无后缀）**：**只在 `main`** 打。
+- **预发版（`-alpha.N` / `-beta.N` / `-rc.N`）**：在 `develop` 打。
+- 历史 tag 状态见 `git tag --sort=-creatordate`；最新 GA 是 `v0.6.0` + `desktop-v0.6.0`（2026-04-28）。
+
+### Merge commit 形态（develop → main 必须 `--no-ff`）
+
+正确：
+```bash
+git checkout main
+git merge --no-ff develop -m "merge: develop → main (<原因>)"
+git push origin main
+```
+
+**禁止 fast-forward merge**（默认 `git merge` 在历史线性时会 ff-only），会丢失 develop / main 边界。在 attune 仓 `git config merge.ff false` 已配置，但本规则仍是行为标准，避免 CLI override。
+
+### "main 比 develop 多 N 个 commit" 不一定是异常
+
+由 `--no-ff` 产生的 merge commit 本身只在 main 上存在，不在 develop 上。这意味着：
+- `git rev-list --count origin/main` 通常 ≥ `develop`
+- `git log origin/develop..origin/main` 看到的应该**全部是 `merge:` 前缀** — 没有则异常
+- 真正衡量"main 是否同步"的是 `git log origin/main..origin/develop` —— 这里有 commit 说明 develop 领先未 merge
+
+### 我的执行纪律
+
+任何 git 操作前后：
+
+1. **push 前**：`git status` + `git log --oneline origin/<branch>..HEAD` 复核
+2. **push 后**：报告 commit SHA + 远端 URL
+3. **不在 main 直接 commit**：哪怕一行 typo 也走 develop → merge
+4. **feature 分支用完即删**：squash merge 后 `git push origin --delete feature/<name>` + `git branch -d`
+5. **打正式 tag 前必 merge develop → main**：tag 永远在 main 上，不在 develop
+6. **tag 一旦 push 视为不可撤销**：除非用户明确同意 + 远端无 release 引用，否则不删 tag
+7. **检测异常状态**：`git log origin/develop..origin/main` 看到非 `merge:` commit 立刻报警
+
+
 ## 技术栈（Python 原型线）
 
 - 后端: FastAPI + Uvicorn, Python 3.11+
