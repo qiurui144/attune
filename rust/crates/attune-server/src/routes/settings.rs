@@ -227,3 +227,61 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use attune_core::platform::FormFactor;
+
+    /// Laptop 形态：LLM 默认走远端 token (openai_compat + null endpoint/model)
+    /// — 这是 v0.6.0 GA 既有行为，v0.6.1 必须保持兼容。
+    #[test]
+    fn laptop_form_factor_uses_remote_token() {
+        let s = default_settings("qwen2.5:3b", FormFactor::Laptop);
+        let llm = s.get("llm").expect("llm key");
+        assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
+        assert!(llm.get("endpoint").map_or(true, |v| v.is_null()),
+            "Laptop endpoint must be null (UI 引导填), got: {:?}", llm.get("endpoint"));
+        assert!(llm.get("model").map_or(true, |v| v.is_null()),
+            "Laptop model must be null (UI 引导填), got: {:?}", llm.get("model"));
+        assert!(llm.get("api_key").map_or(true, |v| v.is_null()));
+    }
+
+    /// K3 一体机形态：LLM 默认走本地 Ollama (qwen2.5:3b 预装)
+    /// — v0.6.1 新增的形态分裂路径。
+    #[test]
+    fn k3_form_factor_uses_local_ollama() {
+        let s = default_settings("qwen2.5:3b", FormFactor::K3Appliance);
+        let llm = s.get("llm").expect("llm key");
+        assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("ollama"));
+        assert_eq!(llm.get("endpoint").and_then(|v| v.as_str()), Some("http://localhost:11434/v1"));
+        assert_eq!(llm.get("model").and_then(|v| v.as_str()), Some("qwen2.5:3b"));
+    }
+
+    /// Server / Unknown 形态：与 Laptop 同行为（远端 token 默认）
+    #[test]
+    fn server_and_unknown_fallback_to_remote_token() {
+        for ff in [FormFactor::Server, FormFactor::Unknown] {
+            let s = default_settings("qwen2.5:3b", ff);
+            let llm = s.get("llm").expect("llm key");
+            assert_eq!(
+                llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"),
+                "FormFactor::{:?} should fall back to openai_compat", ff
+            );
+        }
+    }
+
+    /// 关键不变量：除 llm 之外的字段在所有形态下保持一致
+    /// （form_factor 只影响 LLM 默认路径，不影响 web_search / embedding / reranker 等本地底座）
+    #[test]
+    fn non_llm_settings_invariant_across_form_factors() {
+        let laptop = default_settings("qwen2.5:3b", FormFactor::Laptop);
+        let k3 = default_settings("qwen2.5:3b", FormFactor::K3Appliance);
+
+        // Embedding / web_search / rerank / OCR 这些"本地底座"应该完全相同
+        for key in &["web_search", "embedding", "rerank", "ocr", "asr"] {
+            assert_eq!(laptop.get(key), k3.get(key),
+                "{} should be identical across form factors (only LLM differs)", key);
+        }
+    }
+}

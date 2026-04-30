@@ -66,16 +66,13 @@ pub fn models_dir() -> PathBuf {
 /// 1. 环境变量 `ATTUNE_FORM_FACTOR` (k3 / laptop / server) — 显式 override，K3 镜像构建时设置
 /// 2. DMI / `/sys/class/dmi/id/product_name` 包含已知 K3 关键字（"K3", "Jetson", 等）
 /// 3. 默认 Laptop
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormFactor {
+    #[default]
     Laptop,
     K3Appliance,
     Server,
     Unknown,
-}
-
-impl Default for FormFactor {
-    fn default() -> Self { FormFactor::Laptop }
 }
 
 impl FormFactor {
@@ -616,5 +613,80 @@ mod tests {
         let mut p = HardwareProfile::default();
         p.total_ram_bytes = 16 * 1024 * 1024 * 1024;
         assert!(p.summary().contains("RAM=16 GB"), "summary should include RAM: {}", p.summary());
+    }
+
+    // ── FormFactor 测试（v0.6.1 新增） ────────────────────────────────────────
+    //
+    // 注意：这些测试必须在同一个 #[test] 函数里串行操作 ATTUNE_FORM_FACTOR，
+    // 因为 cargo test 默认并行；多个测试同时 set/unset 同一 env var 会冲突。
+    // 参考 detect_npu_respects_env_var 的同样模式。
+
+    #[test]
+    fn form_factor_default_is_laptop() {
+        // Default impl 必须返回 Laptop（笔电形态：远端 token 默认）
+        // 这条不变量是 settings.rs::default_settings() form_factor 分支的前提。
+        assert_eq!(FormFactor::default(), FormFactor::Laptop);
+    }
+
+    #[test]
+    fn prefers_local_llm_only_for_k3() {
+        // K3 一体机预装本地 Ollama → 主推本地；其他形态走远端 token
+        assert!(FormFactor::K3Appliance.prefers_local_llm());
+        assert!(!FormFactor::Laptop.prefers_local_llm());
+        assert!(!FormFactor::Server.prefers_local_llm());
+        assert!(!FormFactor::Unknown.prefers_local_llm());
+    }
+
+    #[test]
+    fn detect_form_factor_respects_env_override() {
+        // ATTUNE_FORM_FACTOR env var 是最高优先级 override（K3 镜像构建时用）
+        std::env::set_var("ATTUNE_FORM_FACTOR", "k3");
+        assert_eq!(detect_form_factor(), FormFactor::K3Appliance);
+
+        std::env::set_var("ATTUNE_FORM_FACTOR", "k3appliance");
+        assert_eq!(detect_form_factor(), FormFactor::K3Appliance);
+
+        std::env::set_var("ATTUNE_FORM_FACTOR", "appliance");
+        assert_eq!(detect_form_factor(), FormFactor::K3Appliance);
+
+        std::env::set_var("ATTUNE_FORM_FACTOR", "laptop");
+        assert_eq!(detect_form_factor(), FormFactor::Laptop);
+
+        std::env::set_var("ATTUNE_FORM_FACTOR", "desktop");
+        assert_eq!(detect_form_factor(), FormFactor::Laptop);
+
+        std::env::set_var("ATTUNE_FORM_FACTOR", "server");
+        assert_eq!(detect_form_factor(), FormFactor::Server);
+
+        std::env::set_var("ATTUNE_FORM_FACTOR", "headless");
+        assert_eq!(detect_form_factor(), FormFactor::Server);
+
+        // 大小写无关
+        std::env::set_var("ATTUNE_FORM_FACTOR", "K3");
+        assert_eq!(detect_form_factor(), FormFactor::K3Appliance);
+
+        std::env::set_var("ATTUNE_FORM_FACTOR", "  K3  ");
+        assert_eq!(detect_form_factor(), FormFactor::K3Appliance, "trim whitespace");
+
+        // 未识别 → fallback 到 Laptop（不 panic）
+        std::env::set_var("ATTUNE_FORM_FACTOR", "garbage_value");
+        assert_eq!(detect_form_factor(), FormFactor::Laptop, "unknown value falls back to Laptop");
+
+        // 测试结束清理 env var，避免污染其他测试
+        std::env::remove_var("ATTUNE_FORM_FACTOR");
+    }
+
+    #[test]
+    fn form_factor_in_hardware_profile_detect() {
+        // detect() 调用链路验证：HardwareProfile 应正确填充 form_factor 字段
+        std::env::set_var("ATTUNE_FORM_FACTOR", "k3");
+        let p = HardwareProfile::detect();
+        assert_eq!(p.form_factor, FormFactor::K3Appliance);
+
+        std::env::remove_var("ATTUNE_FORM_FACTOR");
+        let p = HardwareProfile::detect();
+        // 默认 Laptop（除非系统 DMI 显示 K3/Jetson，CI 环境正常不会）
+        assert!(matches!(p.form_factor, FormFactor::Laptop | FormFactor::K3Appliance),
+            "default form_factor should be Laptop or detected K3, got {:?}", p.form_factor);
     }
 }
