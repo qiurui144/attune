@@ -89,6 +89,39 @@ Chrome 扩展协议相同，两个后端可任意切换。
 > 硬件感知默认摘要模型、扫描版 PDF OCR 兜底。完整回归 57 断言 100% 通过，总测试 299。
 > 详见 `rust/RELEASE.md`。
 
+## 三大支柱（Rust 线）
+
+### 主动进化
+无需配置即可从每次查询中学习。本地未命中作为信号，后台 `SkillEvolver` 周期性请 LLM 生成同义词扩展，悄悄提升召回率。三个月后同样的 query 返回明显更相关的结果——无"重新训练"按钮。
+
+### 对话式伙伴
+RAG Chat 是主界面。每个回答都带可点的 citation chip 在侧栏打开原文。会话持久化且可跨时间搜索——三周前的讨论从断点续聊。
+
+### 混合智能
+本地知识优先。本地 vault 没命中时，无头 Chrome（或 Edge）自动浏览网页——**零 API key、零订阅费**。每个回答都明确标注来源（本地 / 网络）。专业数据加密在本地，公开信息现取现用。
+
+---
+
+## 自主可控 & 透明
+
+- **零绑定定价**：你只为软件本身 + 自己的 LLM token 付费（如选云端模型）。无中间商、无搜索 API 订阅、无隐藏费用。
+- Argon2id(64MB/3r) + AES-256-GCM 字段级加密 + Device Secret 多重防护，所有数据本地保存。
+- 单个 ~30 MB 静态 Rust 二进制——零运行时依赖。
+- 跨设备迁移：加密 `.vault-profile` 导出/导入。
+
+---
+
+## 适合人群
+
+| 用户 | 主要价值 |
+|------|---------|
+| **律师 / 专利代理** | 私密积累案例、判例、技术披露；法律/专利行业插件；换律所时带走自己的 vault |
+| **研究人员 / 学者** | 跨主题对话式检索，引用可追溯到源段落 |
+| **独立咨询 / 分析师** | 行业插件 + 本地 + 网络混合检索，跨项目复用方法论 |
+| **AI 重度用户 / Prosumer** | 私有版 AI 记忆：本地加密 + 可插拔 LLM + 自托管 |
+
+---
+
 ## 功能
 
 - **自动捕获** — MutationObserver 监听 ChatGPT / Claude / Gemini 对话，user+assistant 配对后自动入库
@@ -366,6 +399,24 @@ chat_trigger:
 
 **分发给别人**：把目录打包为 `<plugin-id>.attunepkg`，对方解压到同样的 plugins 目录即装即用。Pro 版的行业 skill 集（律师 / 售前 / 学术）走完全一样的路径，只是出厂预装。
 
+## 贡献
+
+- 见 [CONTRIBUTING.md](CONTRIBUTING.md)（待补）和 [NOTICE](NOTICE)
+- 商业插件（attune-pro、医师 / 学者 / 律师 Pro 包）开发由 [attune-pro 仓](https://github.com/qiurui144/attune-pro) 独立处理（闭源）
+- bug 报告 / 特性请求：[GitHub Issues](https://github.com/qiurui144/attune/issues)
+
+## 文档
+
+- [产品定位设计](docs/superpowers/specs/2026-04-17-product-positioning-design.md)
+- [前端重设计 spec](docs/superpowers/specs/2026-04-19-frontend-redesign-design.md)
+- [UX 质量基础设施](docs/superpowers/specs/2026-04-19-ux-quality-design.md)
+- [数据基础设施](docs/superpowers/specs/2026-04-19-data-infrastructure-design.md)
+- [分发 & 合规](docs/superpowers/specs/2026-04-19-distribution-compliance-design.md)
+- [测试金字塔](docs/TESTING.md)
+- [OSS × Pro 战略](docs/oss-pro-strategy.zh.md)（双语）
+
 ## License
 
-MIT
+- 本仓（attune 开源核心）：[Apache-2.0](LICENSE)
+- 商业插件（attune-pro）：[闭源专有](https://github.com/qiurui144/attune-pro)，会员制订阅
+- 详见 [NOTICE](NOTICE)
