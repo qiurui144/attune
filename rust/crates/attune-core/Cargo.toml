@@ -18,7 +18,7 @@ zeroize = { version = "1", features = ["derive"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
-usearch = "2"
+usearch = "2.25"  # 升至 2.25+ 修 Windows MAP_FAILED build 失败 (2.24.0 用了 POSIX-only mman.h)
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { workspace = true, features = ["blocking"] }
@@ -33,9 +33,9 @@ serde_yaml = "0.9"
 tempfile = "3"
 pdf-extract = "0.8"
 zip = "2"
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "tracing", "tls-native", "copy-dylibs", "api-24", "download-binaries"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "tracing", "tls-rustls", "copy-dylibs", "api-24", "download-binaries"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
-hf-hub = "0.3"
+hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }  # 0.5 起加 rustls-tls 路径; 这里用 ureq (默认 rustls), 不引入 native-tls/openssl-sys
 scraper = "0.21"
 urlencoding = "2"
 # 跨平台 PATH 二进制查找（替代 `which`/`where`，Win/Linux/macOS 一致行为）

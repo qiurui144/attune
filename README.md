@@ -117,7 +117,7 @@ Local knowledge first. When the local vault has no match, a headless Chrome (or 
 ### 5 steps from download to first use
 
 1. **Download** the binary from the [Releases](../../releases) page (or `cargo build --release` from source — see below).
-2. **Run** `./attune-server --host 127.0.0.1 --port 18900` (Linux) or double-click `attune-server.exe` (Windows). The first launch creates `~/.local/share/attune/` (or `%LOCALAPPDATA%\attune\`).
+2. **Run** `./attune-server-headless --host 127.0.0.1 --port 18900` (Linux) or double-click `attune-server-headless.exe` (Windows). The first launch creates `~/.local/share/attune/` (or `%LOCALAPPDATA%\attune\`).
 3. **Open** `http://localhost:18900/` in your browser. The first-run wizard appears automatically.
 4. **Set Master Password** + pick an LLM backend on step 3 (see "AI model platforms" table below for `base_url` / model / pricing). API key is stored encrypted with your master password.
 5. **Bind data** in the wizard's last step: drop a file, point at a folder, or skip and use the Items / Reader UI later.
@@ -129,7 +129,7 @@ That's it. The Cmd+K palette jumps between Chat, Items, Reader, Sessions, and Se
 ```bash
 cd rust
 cargo build --release
-./target/release/attune-server --host 127.0.0.1 --port 18900
+./target/release/attune-server-headless --host 127.0.0.1 --port 18900
 ```
 
 Full documentation: [`rust/README.md`](rust/README.md).
