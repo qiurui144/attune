@@ -6,7 +6,9 @@
 
 **Private AI Knowledge Companion** — Local-first, globally augmented, increasingly attuned to your expertise.
 
-Attune is a personal AI knowledge base designed for knowledge-intensive professionals (lawyers, patent agents, researchers, consultants). Your professional domain becomes clearer the more you use it; local knowledge answers first, and the system reaches out to the web only when needed. All data is encrypted on your own device — portable across machines, portable across jobs.
+Attune is a generic personal AI knowledge base for **any individual knowledge worker** — students, independent developers, researchers, writers, AI power users. Your interests become clearer the more you use it; local knowledge answers first, and the system reaches out to the web only when needed. All data is encrypted on your own device — portable across machines, portable across jobs.
+
+**Industry-vertical users** (lawyers / patent agents / doctors / scholars / sales engineers) install Attune (this OSS) and add the matching `attune-pro/<vertical>-pro` plugin pack — see the three-product matrix below.
 
 ## 📥 Download
 
@@ -65,7 +67,7 @@ This repository contains two parallel product lines sharing the Chrome extension
 | Line | Path | Purpose |
 |------|------|---------|
 | **Python prototype** | `src/npu_webhook/` | Fast iteration for algorithms and experimental features. FastAPI + ChromaDB + SQLite FTS5 |
-| **Rust production** | [`rust/`](rust/README.md) | Production-grade Private AI Knowledge Companion. Axum + rusqlite + tantivy + usearch + Preact UI |
+| **Rust production** | [`rust/`](rust/README.md) | Production-grade generic personal knowledge base. Axum + rusqlite + tantivy + usearch + Preact UI |
 
 Validated Python features get promoted to the Rust line. See [`rust/README.md`](rust/README.md) for the full Rust documentation.
 
@@ -114,12 +116,23 @@ Local knowledge first. When the local vault has no match, a headless Chrome (or 
 
 ## Who it's for
 
+**OSS attune** is for **any individual knowledge worker**, regardless of field:
+
 | User | Primary value |
 |------|--------------|
-| **Lawyers / Patent agents** | Accumulate cases, precedents, and technical disclosures privately; law/patent industry plugins; bring your vault when you change firms |
-| **Researchers / Academics** | Conversational retrieval across topics, citations traceable to source paragraphs |
-| **Independent consultants / Analysts** | Industry plugins + local + web hybrid retrieval, reuse methodologies across projects |
+| **Students / Independent developers** | Personal RAG over reading notes, code repos, blog drafts; sessions persist across topics |
+| **Researchers / Writers** | Conversational retrieval across topics, citations traceable to source paragraphs |
 | **AI power users / Prosumers** | A private version of AI memory: local encryption + pluggable LLM + self-hosted |
+| **Knowledge workers in any domain** | Universal vault + browse capture + auto-bookmark + cross-session continuity |
+
+**Industry users** — install OSS attune **and** the matching `attune-pro/<vertical>-pro` plugin pack:
+
+| Vertical | Adds (via attune-pro) |
+|----------|----------------------|
+| **Lawyers** | `law-pro`: contract review / risk matrix / drafting / OA reply / clause lookup + CaseNo extractor + Case dossier workflow |
+| **Patent agents** | `patent-pro` (M3+): FTO search workflow + USPTO/EPO automation + patent-number extractor |
+| **Sales / Presales** | `presales-pro`: competitor analysis / BANT scoring / quotes / demo scripts |
+| **Doctors / Scholars** | `medical-pro` / `academic-pro` (planned): medical terminology / case templates; citation graphs / paper-writing assistant |
 
 ---
 

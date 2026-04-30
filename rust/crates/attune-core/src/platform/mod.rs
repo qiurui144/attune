@@ -54,6 +54,37 @@ pub fn models_dir() -> PathBuf {
     data_dir().join("models")
 }
 
+/// 设备形态 — 决定默认 LLM 路径与若干默认配置。
+///
+/// **背景**：attune 在两类形态上有不同的"默认体验"：
+/// - **Laptop**（默认）：本地不预装 LLM，default `llm.provider = "openai_compat"`，wizard 引导用户填远端 endpoint + API key
+/// - **K3Appliance**：K3 一体机镜像预装 Ollama + qwen2.5:1.5b/3b，default `llm.provider = "ollama"`，wizard Ollama 卡片为主推
+/// - **Server**：headless 服务器，行为同 Laptop（远端 token 默认）
+/// - **Unknown**：检测失败，按 Laptop 处理
+///
+/// 检测顺序（优先级递减）：
+/// 1. 环境变量 `ATTUNE_FORM_FACTOR` (k3 / laptop / server) — 显式 override，K3 镜像构建时设置
+/// 2. DMI / `/sys/class/dmi/id/product_name` 包含已知 K3 关键字（"K3", "Jetson", 等）
+/// 3. 默认 Laptop
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormFactor {
+    Laptop,
+    K3Appliance,
+    Server,
+    Unknown,
+}
+
+impl Default for FormFactor {
+    fn default() -> Self { FormFactor::Laptop }
+}
+
+impl FormFactor {
+    /// 是否应该默认走本地 Ollama（K3 一体机）
+    pub fn prefers_local_llm(&self) -> bool {
+        matches!(self, FormFactor::K3Appliance)
+    }
+}
+
 /// 可用的硬件加速后端
 #[derive(Debug, Clone, PartialEq)]
 pub enum NpuKind {
@@ -97,6 +128,7 @@ pub struct HardwareProfile {
     pub has_intel_npu: bool,         // /dev/accel/accel0 + intel_vpu 模块
     pub total_ram_bytes: u64,        // 总内存字节；硬件档位匹配用
     pub os: &'static str,            // "linux" | "macos" | "windows"
+    pub form_factor: FormFactor,     // Laptop / K3Appliance / Server / Unknown — 决定 LLM 默认路径
 }
 
 impl HardwareProfile {
@@ -139,6 +171,9 @@ impl HardwareProfile {
                 if mods.contains("intel_vpu") { p.has_intel_npu = true; }
             }
         }
+
+        // 设备形态（env var override 优先，否则 DMI 关键字匹配，否则默认 Laptop）
+        p.form_factor = detect_form_factor();
 
         // 总内存 + CPU（平台相关）
         #[cfg(target_os = "linux")]
@@ -289,6 +324,40 @@ impl HardwareProfile {
 
         applied
     }
+}
+
+/// 检测设备形态：env var > DMI 关键字 > Laptop 默认
+///
+/// 1. `ATTUNE_FORM_FACTOR=k3|laptop|server` env var（K3 镜像构建时通过 systemd unit 设置）
+/// 2. Linux DMI: `/sys/class/dmi/id/product_name` 包含 "K3"/"Jetson"/"NUC" 等已知关键字
+/// 3. Default: `Laptop`
+///
+/// 不依赖 GPU/NPU 检测 — 形态决定的是"用户预期"，不是"硬件能力"。一台带 NVIDIA 的桌面
+/// 仍是 Laptop 形态（用户主动配置 K3 路径需显式 env var）。
+fn detect_form_factor() -> FormFactor {
+    // 1. env var override（最高优先）
+    if let Ok(v) = std::env::var("ATTUNE_FORM_FACTOR") {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "k3" | "k3appliance" | "appliance" => return FormFactor::K3Appliance,
+            "laptop" | "desktop" => return FormFactor::Laptop,
+            "server" | "headless" => return FormFactor::Server,
+            _ => {}  // 未识别值，继续 fallback
+        }
+    }
+
+    // 2. Linux DMI 关键字（K3 / Jetson 一体机）
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(name) = std::fs::read_to_string("/sys/class/dmi/id/product_name") {
+            let n = name.trim().to_ascii_lowercase();
+            if n.contains("k3") || n.contains("jetson") {
+                return FormFactor::K3Appliance;
+            }
+        }
+    }
+
+    // 3. 默认 Laptop（远端 token 路径）
+    FormFactor::Laptop
 }
 
 /// Linux 下通过 KFD topology 获取 AMD GPU 的 gfx target（形如 "gfx1103"）

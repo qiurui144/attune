@@ -148,7 +148,7 @@ key payload: `lite` / `pro` / `pro_plus` / `team` / `enterprise`).
 
 | Plan | Price | Includes | Target user |
 |------|-------|----------|-------------|
-| **Lite** | ¥0 (OSS) | All of `attune`, all 4 builtin basic plugins, MCP outlet, browser extension | Individual users, developers, evaluators |
+| **Lite** | ¥0 (OSS) | All of `attune` (RAG / vault / browse capture / MCP / benchmark — generic only, **zero industry plugins** per Decision 2 v2), browser extension | Individual users, developers, evaluators |
 | **Pro** | ¥99 / year | Lite + **one** vertical pack (e.g. law-pro), single device | Solo lawyer, solo presales engineer |
 | **Pro+** | ¥299 / year | Lite + **all** vertical packs + cloud-sync, 3 devices | Cross-discipline freelancers, power users |
 | **Team** | ¥999 / month, per-seat | Pro+ + plugin-registry (private plugins) + audit log + team collaboration | Small-to-mid law firms, presales teams (5–50 seats) |
@@ -187,6 +187,7 @@ decision changes; everyone references it.
 | Profile | Topic distribution API (W4 F1), import/export | ✅ |
 | Builtin industry plugins | **none** (v0.6.0-rc.2 onwards — moved to attune-pro per Decision 2 v2) | ❌ |
 | Generic Entity extractors | Person / Money / Date / Organization (no industry-specific) | ✅ |
+| Persona system | 4 generic personas (Developer / Researcher / Writer / Custom) + plugin-extensible role registry (`provides_role` schema) — **no industry roles** | 🟡 v0.7+ |
 | Distribution | Tauri desktop (Linux deb/AppImage, Windows MSI/NSIS), Chrome extension | ✅ |
 | MCP integration | Python stdio shim (`tools/attune_mcp_shim.py`) wrapping REST | ✅ |
 | Quality | RAGAS-style benchmark harness + bilingual methodology doc | ✅ |
@@ -202,6 +203,7 @@ decision changes; everyone references it.
 | Vertical plugins | `patent-pro` (scaffolded v0.6.0-rc.2): builtin/dimensions.yaml + capabilities (M3+) | Pro |
 | Vertical plugins | `tech-pro` (scaffolded v0.6.0-rc.2): builtin/dimensions.yaml + capabilities (M3+) | Pro |
 | Vertical plugins | `medical-pro`, `academic-pro` (planned M3+) | Pro |
+| Industry personas | Lawyer / Doctor / PatentAgent / Scholar / SalesEngineer — provided by vertical plugin pack via `provides_role: <name>` + bundled domain whitelist yaml (e.g. Lawyer = supreme-court / bar-association / Westlaw / pkulaw / ...) | Pro |
 | Multi-vertical | All vertical packs in one license | Pro+ |
 | Sync service | `cloud-sync` — DEK never leaves device, only encrypted blobs synced | Pro+ |
 | Plugin marketplace | `plugin-registry` — signed third-party plugin distribution + private internal plugins | Team |

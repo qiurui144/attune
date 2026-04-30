@@ -2,8 +2,30 @@
 
 **日期**：2026-04-17
 **作者**：产品定位 brainstorming 流程产出
-**状态**：待实施
+**状态**：§1-§4 三大支柱表述仍 active；§5 用户/场景已迁移
 **范围**：Rust 商用线 npu-vault（不涉及 Python 原型线）
+
+---
+
+> **⚠️ 边界更新（2026-04-30）**：
+>
+> 本 spec 写于 2026-04-17，当时把"律师/专利代理"列为核心用户、"跨证据链联想"列为核心场景。**此后产品边界已升级为三产品矩阵**（详见 [`docs/oss-pro-strategy.md`](../../oss-pro-strategy.md) v2，2026-04-27）：
+>
+> - **OSS attune** = 通用个人知识工作者基座（**零行业绑定**）
+> - **attune-pro** = 行业垂直 plugin pack（律师/医生/专利/学者等）
+> - **lawcontrol** = B2B 律所小团队 SaaS
+>
+> **§5 那 4 个场景按以下方式移交**：
+> - 场景 1（专利 FTO）→ `attune-pro/docs/specs/patent-pro-vertical-workflow-design.md`
+> - 场景 2（律师跨年案件 + 跨证据链联想）→ `attune-pro/docs/specs/law-pro-vertical-workflow-design.md`
+> - 场景 3（研究员论文对比）→ `attune-pro/docs/specs/academic-pro-vertical-workflow-design.md`（M5+ 推迟）
+> - 场景 4（顾问跨项目复用）→ 留 OSS 作通用 Project 例子
+>
+> **§3 LLM 表述待修订**：原文"Embedding 和 Chat 默认走本地 Ollama"在三产品矩阵下需细分为"Embedding 本地 / LLM 笔电默认远端 token / K3 默认本地"（详见 plan `tingly-knitting-zephyr.md` 冲突 #6）。
+>
+> **§1-§4 三大支柱**（主动进化 / 对话伙伴 / 混合智能）+ **§7-§8 文档与代码改动清单**仍是 active 表述。
+>
+> 写新 feature 时优先参考 `oss-pro-strategy.md v2`；本 spec 仅作为产品价值面（"是什么"）的参考。
 
 ---
 
@@ -94,7 +116,10 @@
 除此之外，**无任何隐藏费用**：
 
 - 网络搜索默认走浏览器自动化，**不需要 Brave / Tavily 这类搜索 API 密钥**
-- Embedding 和 Chat 默认走本地 Ollama，**无云端依赖**
+- Embedding / Rerank / OCR / ASR 默认走本地（自动加载，无云端依赖）；**LLM 默认按形态分裂**：
+  - 笔电 / 服务器形态：默认远端 token（首次启动 wizard 引导填 OpenAI 兼容 endpoint + API key），避免本地 3B 模型在大多数硬件上 OOM/效果差
+  - K3 一体机形态：默认本地 Ollama qwen2.5:3b（K3 镜像预装）
+  - 形态切换：环境变量 `ATTUNE_FORM_FACTOR=k3` override 或 DMI 关键字自动检测
 - 存储在你自己的设备上，**没有云端订阅费**
 - 所有数据加密可导出，**不锁定**
 

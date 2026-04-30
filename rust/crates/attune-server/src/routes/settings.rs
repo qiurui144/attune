@@ -9,6 +9,7 @@ pub async fn get_settings(
     State(state): State<SharedState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let recommended_summary = state.hardware.recommended_summary_model();
+    let form_factor = state.hardware.form_factor;
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
@@ -19,8 +20,8 @@ pub async fn get_settings(
 
     let mut json: serde_json::Value = match settings {
         Some(data) => serde_json::from_slice(&data)
-            .unwrap_or_else(|_| default_settings(recommended_summary)),
-        None => default_settings(recommended_summary),
+            .unwrap_or_else(|_| default_settings(recommended_summary, form_factor)),
+        None => default_settings(recommended_summary, form_factor),
     };
     // 🔐 安全：redact api_key —— 即便 vault 已解锁，GET 响应也不该回传明文密钥。
     // 前端检测 `api_key_set: true` 表示已配置，显示占位 "●●●●●" 而非实际值。
@@ -52,6 +53,7 @@ pub async fn update_settings(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let recommended_summary = state.hardware.recommended_summary_model();
+    let form_factor = state.hardware.form_factor;
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
@@ -63,8 +65,8 @@ pub async fn update_settings(
 
     let mut current: serde_json::Value = match existing {
         Some(data) => serde_json::from_slice(&data)
-            .unwrap_or_else(|_| default_settings(recommended_summary)),
-        None => default_settings(recommended_summary),
+            .unwrap_or_else(|_| default_settings(recommended_summary, form_factor)),
+        None => default_settings(recommended_summary, form_factor),
     };
 
     // 白名单校验：只允许写入已知配置键，防止任意键污染 vault_meta
@@ -143,9 +145,34 @@ pub async fn update_settings(
 }
 
 /// 默认设置。`recommended_summary` 仅作为"用户主动选本地"时的硬件推荐 fallback；
+/// `form_factor` 决定 LLM 默认 provider 路径：
+/// - `Laptop` / `Server` / `Unknown` → `openai_compat`（远端 token，wizard 引导填 endpoint + key）
+/// - `K3Appliance` → `ollama`（K3 镜像预装 qwen2.5:3b，开箱即用本地）
+///
 /// **v0.6.0-rc.3 起 LLM 默认走远端 token**（per CLAUDE.md M2 决策 + 用户反馈），
-/// 避免本地 3B 模型在大多数硬件上 OOM 或效果差。
-fn default_settings(_recommended_summary: &str) -> serde_json::Value {
+/// 避免本地 3B 模型在大多数硬件上 OOM 或效果差；K3 一体机形态例外（硬件预选过、镜像预装模型）。
+fn default_settings(_recommended_summary: &str, form_factor: attune_core::platform::FormFactor) -> serde_json::Value {
+    use attune_core::platform::FormFactor;
+
+    // 形态分裂的 LLM 默认配置
+    let llm_default = if form_factor == FormFactor::K3Appliance {
+        // K3 一体机：本地 Ollama 优先，预装 qwen2.5:3b
+        serde_json::json!({
+            "provider": "ollama",
+            "endpoint": "http://localhost:11434/v1",
+            "model": "qwen2.5:3b",
+            "api_key": null
+        })
+    } else {
+        // Laptop / Server / Unknown：远端 token 默认，wizard 引导填
+        serde_json::json!({
+            "provider": "openai_compat",   // openai_compat / anthropic / deepseek / qwen / ollama / claude
+            "endpoint": null,              // null → UI 引导填 (e.g. https://api.openai.com/v1)
+            "model": null,                 // null → UI 引导填 (e.g. gpt-4o-mini / claude-3-5-haiku / deepseek-chat)
+            "api_key": null
+        })
+    };
+
     serde_json::json!({
         // ── 普通用户可见 ──
         "theme": "system",         // system / dark / light
@@ -160,14 +187,7 @@ fn default_settings(_recommended_summary: &str) -> serde_json::Value {
             "browser_path": null,
             "min_interval_ms": 2000
         },
-        "llm": {
-            // 默认远端 token (per CLAUDE.md "M2 决策"：本地不预装 LLM，避免 OOM / 3B 效果差)
-            // 用户首次启动 Settings UI 引导填 endpoint + api_key
-            "provider": "openai_compat",   // openai_compat / anthropic / deepseek / qwen / ollama / claude
-            "endpoint": null,              // null → UI 引导填 (e.g. https://api.openai.com/v1)
-            "model": null,                 // null → UI 引导填 (e.g. gpt-4o-mini / claude-3-5-haiku / deepseek-chat)
-            "api_key": null
-        },
+        "llm": llm_default,
 
         // ── 本地 AI 底座（per CLAUDE.md "本地仅捆绑必要底座"决策）──
         // Embedding / Rerank / OCR / ASR 都是本地零费用，自动加载，用户无需配置。
