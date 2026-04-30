@@ -134,6 +134,14 @@ pub async fn diagnostics(
             "has_intel_npu": hw.has_intel_npu,
             "has_accelerator": hw.has_accelerator(),
             "recommended_summary_model": hw.recommended_summary_model(),
+            // form_factor 决定 LLM 默认路径：Laptop/Server/Unknown → 远端 token；K3Appliance → 本地 Ollama
+            "form_factor": match hw.form_factor {
+                attune_core::platform::FormFactor::Laptop => "laptop",
+                attune_core::platform::FormFactor::K3Appliance => "k3",
+                attune_core::platform::FormFactor::Server => "server",
+                attune_core::platform::FormFactor::Unknown => "unknown",
+            },
+            "prefers_local_llm": hw.form_factor.prefers_local_llm(),
         },
         "hint": if ai_status == "unavailable" {
             "安装 Ollama 获取 AI 分类能力: curl -fsSL https://ollama.com/install.sh | sh && ollama pull qwen2.5:3b"

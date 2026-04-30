@@ -116,8 +116,15 @@ pub struct OllamaLlmProvider {
     model: String,
 }
 
-/// 按优先级排列的默认 chat 模型候选。
-/// 用户可用 `ATTUNE_CHAT_MODEL` env var 覆盖。
+/// **Ollama auto-detect 的 fallback 优先列表 — 不是默认行为**。
+///
+/// 何时使用本列表：
+/// - 笔电形态默认 LLM provider = `openai_compat`（远端 token），见 `settings.rs::default_settings()` 注释；
+///   **本列表只在用户在 wizard 主动选 Ollama 模式或 settings.llm.provider="ollama" 时使用**
+/// - K3 一体机形态默认 provider = `ollama`，本列表用于挑预装的本地模型（典型 qwen2.5:1.5b/3b）
+/// - `OllamaLlmProvider::auto_detect()` 是入口，遍历本列表与 Ollama 已下载模型匹配
+/// - 用户可用 `ATTUNE_CHAT_MODEL` env var 直接覆盖（跳过本列表探测）
+///
 /// 顺序原则: 小→中→大。Ollama 加载大模型 (≥14B) 第一次推理慢 (>30s)，
 /// 长上下文 chunk summary 串行调用容易 timeout。优先选小模型让基础链路稳定。
 const PREFERRED_MODELS: &[&str] = &[

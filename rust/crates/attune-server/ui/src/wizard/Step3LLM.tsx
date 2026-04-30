@@ -13,6 +13,10 @@ type OllamaStatus = 'checking' | 'ready' | 'missing';
 type Diagnostics = {
   ollama_status?: string;
   ollama_models?: string[];
+  hardware?: {
+    form_factor?: 'laptop' | 'k3' | 'server' | 'unknown';
+    prefers_local_llm?: boolean;
+  };
 };
 
 export type Step3Props = {
@@ -25,6 +29,8 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus>('checking');
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [scanning, setScanning] = useState(true);
+  // 形态分裂：K3 一体机优先本地 Ollama；Laptop/Server 默认远端 token
+  const [prefersLocal, setPrefersLocal] = useState<boolean>(false);
 
   // 云端 API 表单
   const [provider, setProvider] = useState<string>('openai');
@@ -45,6 +51,8 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
       } else {
         setOllamaStatus('missing');
       }
+      // 读形态：K3 → 主推 Ollama；Laptop/其他 → 主推云端
+      setPrefersLocal(d.hardware?.prefers_local_llm === true);
     } catch {
       setOllamaStatus('missing');
     } finally {
@@ -121,6 +129,22 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
         {t('wizard.llm.heading')}
       </h2>
 
+      {/* 形态分裂提示：K3 一体机推荐本地 Ollama；笔电/服务器推荐云端 token */}
+      <div
+        style={{
+          fontSize: 'var(--text-sm)',
+          color: 'var(--color-text-secondary)',
+          padding: 'var(--space-2) var(--space-3)',
+          background: 'var(--color-surface)',
+          borderLeft: '3px solid var(--color-accent)',
+          borderRadius: 'var(--radius-sm)',
+        }}
+      >
+        {prefersLocal
+          ? '★ K3 一体机：推荐使用本地 Ollama（已预装 qwen2.5:3b）'
+          : '★ 笔电/服务器形态：推荐配置云端 API（远端 token，避免本地 OOM）'}
+      </div>
+
       <div
         style={{
           display: 'grid',
@@ -133,11 +157,12 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
           selected={ctx.llmMode === 'ollama'}
           onClick={ollamaStatus === 'ready' ? selectOllama : undefined}
           disabled={ollamaStatus !== 'ready'}
+          recommended={prefersLocal}
         >
           <CardHeader
             icon="🟢"
             title={t('wizard.llm.ollama.title')}
-            tag={t('wizard.llm.ollama.tag')}
+            tag={prefersLocal ? '★ ' + t('wizard.llm.ollama.tag') : t('wizard.llm.ollama.tag')}
           />
           <div style={{ fontSize: 'var(--text-sm)', minHeight: 60 }}>
             {scanning && (
@@ -197,11 +222,12 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
         {/* 云端 API 卡片 */}
         <Card
           selected={ctx.llmMode === 'cloud'}
+          recommended={!prefersLocal}
         >
           <CardHeader
             icon="☁"
             title={t('wizard.llm.cloud.title')}
-            tag={t('wizard.llm.cloud.tag')}
+            tag={!prefersLocal ? '★ ' + t('wizard.llm.cloud.tag') : t('wizard.llm.cloud.tag')}
           />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
             <select
@@ -307,13 +333,21 @@ function Card({
   selected,
   onClick,
   disabled,
+  recommended,
   children,
 }: {
   selected?: boolean;
   onClick?: () => void;
   disabled?: boolean;
+  recommended?: boolean;
   children: JSX.Element | JSX.Element[];
 }): JSX.Element {
+  // recommended 卡用更亮的边框色（即使未 selected 也提示）
+  const borderColor = selected
+    ? 'var(--color-accent)'
+    : recommended
+    ? 'var(--color-accent)'
+    : 'var(--color-border)';
   return (
     <div
       onClick={disabled ? undefined : onClick}
@@ -321,7 +355,7 @@ function Card({
       style={{
         padding: 'var(--space-4)',
         background: 'var(--color-surface)',
-        border: `2px solid ${selected ? 'var(--color-accent)' : 'var(--color-border)'}`,
+        border: `${recommended && !selected ? '2px dashed' : '2px solid'} ${borderColor}`,
         borderRadius: 'var(--radius-lg)',
         cursor: disabled ? 'not-allowed' : onClick ? 'pointer' : 'default',
         opacity: disabled ? 0.6 : 1,
