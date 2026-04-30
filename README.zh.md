@@ -97,7 +97,7 @@ Chrome 扩展协议相同，两个后端可任意切换。
 ### 5 步上手（Rust 商用线，推荐）
 
 1. **下载** 二进制：从 [Releases](../../releases) 页拿对应平台的包，或源码 `cargo build --release`（见下文「源码编译」）
-2. **运行** Linux：`./attune-server --host 127.0.0.1 --port 18900`；Windows：双击 `attune-server.exe`。首次运行会创建 `~/.local/share/attune/`（或 `%LOCALAPPDATA%\attune\`）
+2. **运行** Linux：`./attune-server-headless --host 127.0.0.1 --port 18900`；Windows：双击 `attune-server-headless.exe`。首次运行会创建 `~/.local/share/attune/`（或 `%LOCALAPPDATA%\attune\`）
 3. **打开** 浏览器访问 `http://localhost:18900/`，自动进入 5 步首次运行向导
 4. **设主密码 + 选 LLM 后端**（向导第 3 步）：参考下文「AI 模型平台」表格选 endpoint + model 并粘贴 API key（用主密码加密存储）
 5. **绑定数据**（向导最后一步）：拖文件、绑文件夹，或先跳过，之后用 Items / Reader 操作

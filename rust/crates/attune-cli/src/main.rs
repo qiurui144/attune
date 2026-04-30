@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use attune_core::vault::Vault;
 
 #[derive(Parser)]
-#[command(name = "npu-vault", version, about = "Encrypted personal knowledge vault")]
+#[command(name = "attune", version, about = "Attune CLI — Private AI Knowledge Companion")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
