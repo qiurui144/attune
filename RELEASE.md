@@ -137,6 +137,31 @@ vMAJOR.MINOR.PATCH[-PRERELEASE.N]
 
 正式版（无后缀）只在 `main` 分支打 tag。详见 `DEVELOP.md` 的「分支模型 / Tag 时机」。
 
+## v0.6 GA 路径
+
+### v0.6.1（2026-04-30）— 边界收敛 + form_factor patch
+
+`develop` → `main` 治理对齐 merge 后的 patch GA。**0 breaking change** — v0.6.0 笔电用户体验完全不变。
+
+**新增**：
+- `FormFactor` axis（Laptop / K3Appliance / Server / Unknown），K3 镜像默认走本地 Ollama，笔电保持远端 token 默认
+- `/status/diagnostics` 暴露 `form_factor` + `prefers_local_llm` 字段
+- Wizard Step 3 形态感知：K3 主推 Ollama / 笔电主推 Cloud + ★ Recommended 提示
+
+**文档收敛**（6 处）：README 双语 tagline + Who it's for / oss-pro-strategy §3 Decision 3 Lite 行 / §4.1 §4.2 加 Persona system row / 4-17 spec banner / CLAUDE.md GitFlow Lite 标准入库 / attune-pro 仓 3 份 vertical workflow design spec（共 508 行）。
+
+**安全**：`rustls-webpki` 0.103.10 → 0.103.13，修 3 个 RUSTSEC（CVE-2026-009X）。
+
+**测试**：622 passed / 0 failed / 3 ignored，含 8 个新 form_factor unit test。
+
+详细 release notes：[`docs/v0.6.1-release-notes.md`](docs/v0.6.1-release-notes.md) ([中文](docs/v0.6.1-release-notes.zh.md))。
+
+### v0.6.0（2026-04-28）GA
+
+详见 [`docs/v0.6-release-notes.md`](docs/v0.6-release-notes.md) ([中文](docs/v0.6-release-notes.zh.md))。
+
+---
+
 ## v0.6 alpha 路径
 
 ### v0.6.0-alpha.1（2026-04-26）
