@@ -4,20 +4,17 @@
 
 **Private AI Knowledge Companion** — Local-first, globally augmented, increasingly attuned to your expertise.
 
-Attune is the Rust production build — a single ~30 MB static binary containing the encrypted knowledge vault, RAG engine, HTTP server with TLS, and embedded Preact UI. No runtime dependencies.
+Attune is a generic personal AI knowledge base for **any individual knowledge worker** (OSS Apache-2.0, zero industry binding). Industry users (lawyers / doctors / patent agents / scholars) load the corresponding `attune-pro/<vertical>-pro` plugin pack for vertical capabilities — see [`docs/oss-pro-strategy.md`](../docs/oss-pro-strategy.md).
+
+This directory is the Rust production build — a single ~30 MB static binary containing the encrypted vault, RAG engine, HTTP server with TLS, and embedded Preact UI. No runtime dependencies.
 
 ---
 
-## Three pillars
+## What's in this directory
 
-### Active Evolution
-Every local miss is silently recorded as a signal. A background `SkillEvolver` periodically sends the accumulated signals to an LLM to generate synonym expansions, which improve future recall without any user intervention.
+This is the Rust production source. The three product pillars (**Active Evolution** / **Conversational Companion** / **Hybrid Intelligence**) are introduced at a high level in the [top-level README](../README.md#three-pillars-rust-line); their concrete implementation details live below in the [Core capabilities](#core-capabilities) section, followed by the security model, API endpoints, build instructions, and testing matrix.
 
-### Conversational Companion
-RAG chat is the primary interaction. Each assistant response carries citation chips that open the original source in a side drawer. Sessions are persisted and searchable — past discussions can be resumed seamlessly.
-
-### Hybrid Intelligence
-Local vault first. When the vault has no match, a headless Chrome (or Edge) is driven to search public web content — **no external API keys, no subscription fees**. Every answer carries an explicit "from local" or "from web" label.
+For the OSS × attune-pro feature boundary, see [`docs/oss-pro-strategy.md`](../docs/oss-pro-strategy.md).
 
 ---
 

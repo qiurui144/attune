@@ -125,7 +125,7 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 
 | 档位 | 价格 | 包含 | 目标用户 |
 |------|------|------|---------|
-| **Lite** | ¥0 (OSS) | `attune` 全部、4 内置 basic 插件、MCP outlet、浏览器扩展 | 个人用户、开发者、评估期 |
+| **Lite** | ¥0 (OSS) | `attune` 全部 (RAG / vault / 浏览捕获 / MCP / benchmark — 仅通用能力，**零行业插件** per Decision 2 v2)、浏览器扩展 | 个人用户、开发者、评估期 |
 | **Pro** | ¥99 / 年 | Lite + **一个**纵向插件包 (如 law-pro)，单设备 | 单独执业律师、个人售前 |
 | **Pro+** | ¥299 / 年 | Lite + **全部**纵向插件包 + cloud-sync，3 设备 | 跨学科自由职业者、深度用户 |
 | **Team** | ¥999 / 月起，按席位 | Pro+ + plugin-registry (内部插件) + audit log + 团队协作 | 中小律所、售前团队 (5–50 人) |
@@ -160,6 +160,7 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 | 画像 | Topic distribution API (W4 F1)、import/export | ✅ |
 | Builtin 行业插件 | **无** (v0.6.0-rc.2 起 — 全部迁到 attune-pro per Decision 2 v2) | ❌ |
 | 通用 Entity extractors | Person / Money / Date / Organization (无行业专属) | ✅ |
+| Persona 系统 | 4 个通用角色（Developer / Researcher / Writer / Custom）+ 插件可扩展角色注册（`provides_role` schema）— **无行业角色** | 🟡 v0.7+ |
 | 分发 | Tauri 桌面 (Linux deb/AppImage、Windows MSI/NSIS)、Chrome 扩展 | ✅ |
 | MCP 集成 | Python stdio shim (`tools/attune_mcp_shim.py`) 包装 REST | ✅ |
 | 质量 | RAGAS-style benchmark harness + 双语方法学文档 | ✅ |
@@ -175,6 +176,7 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 | 纵向插件 | `patent-pro` (v0.6.0-rc.2 scaffold)：builtin/dimensions.yaml + capabilities (M3+) | Pro |
 | 纵向插件 | `tech-pro` (v0.6.0-rc.2 scaffold)：builtin/dimensions.yaml + capabilities (M3+) | Pro |
 | 纵向插件 | `medical-pro`、`academic-pro` (M3+ 计划) | Pro |
+| 行业 Persona | Lawyer / Doctor / PatentAgent / Scholar / SalesEngineer — 由 vertical plugin pack 通过 `provides_role: <name>` 注入 + 自带行业域名白名单 yaml（如 Lawyer = 最高法 / 律协 / Westlaw / pkulaw / ...） | Pro |
 | 多纵向 | 全部纵向包打包 | Pro+ |
 | 同步服务 | `cloud-sync` — DEK 永不离机，仅同步加密 blob | Pro+ |
 | 插件市场 | `plugin-registry` — 签名第三方插件分发 + 私有内部插件 | Team |
