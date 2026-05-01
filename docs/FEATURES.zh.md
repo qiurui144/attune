@@ -377,7 +377,7 @@ build-time features。本矩阵是**什么硬件被加速到哪里**的唯一真
 
 2. **whisper.cpp GPU 检测**：v0.6.3 加 `AsrBackend.gpu_capable` 字段，跑 `whisper-cli --help` 检测 `--no-gpu`/`gpu-device` flags。`/api/v1/ai_stack` 暴露此字段让 Settings UI 在 CPU-only build 时警示用户（10x 转写速度差异）。
 
-3. **Ollama runtime GPU 验证**：🟡 部分 — `/status/diagnostics` 报 `ollama_status: "ready"` 仅证明 HTTP 探测成功，未确认 Ollama 是用 GPU 还是 fallback 到 CPU。v0.7+ 增强：probe `ollama ps` 读 VRAM 使用。
+3. **Ollama runtime GPU 验证**：✅ v0.6.3 — `/status/diagnostics` 暴露 `ollama_gpu_active: Option<bool>` 字段。Probe `/api/ps` 解析每个 model 的 `size_vram`。返回：`null` 当前没模型加载（无法推断），`true` 至少一个模型有 VRAM 分配（GPU 激活），`false` 模型加载了但所有 `size_vram = 0`（CPU fallback — 用户可调查）。Settings UI 可警示用户 Ollama 在静默 fallback 到 CPU。
 
 4. **HardwareProfile → ort EP linkage**：`provider::build_session()` 用独立的 `detect_npu()` 调用（env var `NPU_VAULT_EP`）而非读 `state.hardware` 缓存。这部分是有意的（env var override 是文档化的逃生口），但意味着 `state.hardware.has_intel_npu = true` 不会自动触发 OpenVINO。v0.7+ 工作：把 `&HardwareProfile` 透传 `build_session()` 让检测默认驱动 EP 选择。
 

@@ -71,6 +71,43 @@ async fn probe_ollama() -> (&'static str, Vec<String>) {
     }
 }
 
+/// F-16 hardware utilization: probe Ollama `/api/ps` to detect actual GPU usage.
+///
+/// `/api/ps` returns models currently loaded in memory, with `size_vram` field
+/// indicating VRAM allocation. If any model has `size_vram > 0`, the Ollama
+/// runtime is using GPU acceleration. If all loaded models have `size_vram = 0`,
+/// Ollama is falling back to CPU (the user may have expected GPU).
+///
+/// Returns:
+/// - `None` — Ollama unreachable, or no models currently loaded (can't infer)
+/// - `Some(true)` — at least one loaded model uses GPU VRAM
+/// - `Some(false)` — Ollama is loaded but no model uses GPU (CPU fallback)
+///
+/// This complements `probe_ollama()` (which only checks HTTP reachability +
+/// installed model list) — actual GPU vs CPU is only knowable when a model
+/// is in memory, which happens after the first chat request.
+async fn probe_ollama_gpu_active() -> Option<bool> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+    let resp = client.get("http://localhost:11434/api/ps").send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let models = body.get("models")?.as_array()?;
+    if models.is_empty() {
+        // No model currently loaded — can't infer GPU usage. Return None.
+        return None;
+    }
+    // any model with size_vram > 0 → GPU active
+    let any_gpu = models
+        .iter()
+        .any(|m| m.get("size_vram").and_then(|v| v.as_u64()).unwrap_or(0) > 0);
+    Some(any_gpu)
+}
+
 /// GET /api/v1/status/diagnostics — AI 后端健康检查
 pub async fn diagnostics(
     State(state): State<SharedState>,
@@ -109,6 +146,8 @@ pub async fn diagnostics(
     const GB: u64 = 1024 * 1024 * 1024;
 
     let (ollama_status, ollama_models) = probe_ollama().await;
+    // F-16: probe actual GPU usage (only meaningful when a model is currently loaded)
+    let ollama_gpu_active = probe_ollama_gpu_active().await;
 
     Json(serde_json::json!({
         "vault_state": vault_state,
@@ -122,6 +161,11 @@ pub async fn diagnostics(
         "pending_tasks": pending_tasks,
         "ollama_status": ollama_status,
         "ollama_models": ollama_models,
+        // F-16 hardware utilization: actual GPU usage probe
+        // - null: Ollama unreachable OR no model currently loaded (probe inconclusive)
+        // - true: at least one loaded model has size_vram > 0 (GPU acceleration confirmed)
+        // - false: model(s) loaded but all size_vram = 0 (CPU fallback — user may want to investigate)
+        "ollama_gpu_active": ollama_gpu_active,
         "hardware": {
             "os": hw.os,
             "cpu_model": hw.cpu_model,

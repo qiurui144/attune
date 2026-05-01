@@ -380,7 +380,7 @@ single source of truth for **what gets accelerated where**:
 
 2. **whisper.cpp GPU detection**: v0.6.3 added `AsrBackend.gpu_capable` field that probes `whisper-cli --help` for `--no-gpu`/`gpu-device` flags. Exposed via `/api/v1/ai_stack` so Settings UI warns the user when CPU-only build limits ASR to ~10x slower transcription.
 
-3. **Ollama runtime GPU verification**: 🟡 partial — `/status/diagnostics` reports `ollama_status: "ready"` if HTTP probe succeeds, but doesn't confirm Ollama is using GPU vs falling back to CPU. v0.7+ enhancement: probe `ollama ps` to read VRAM usage.
+3. **Ollama runtime GPU verification**: ✅ v0.6.3 — `/status/diagnostics` exposes `ollama_gpu_active: Option<bool>` field. Probes `/api/ps` and parses `size_vram` per model. Returns: `null` if no model loaded (probe inconclusive), `true` if any loaded model has VRAM allocated (GPU active), `false` if model(s) loaded but all `size_vram = 0` (CPU fallback — user may investigate). Settings UI can warn the user when Ollama is silently falling back to CPU.
 
 4. **HardwareProfile → ort EP linkage**: `provider::build_session()` uses an isolated `detect_npu()` call (env var `NPU_VAULT_EP`) instead of reading the cached `state.hardware`. This is partly intentional (env var override is the documented escape hatch), but means `state.hardware.has_intel_npu = true` does not trigger OpenVINO automatically. v0.7+ work: thread `&HardwareProfile` through `build_session()` so detection drives EP selection by default.
 
