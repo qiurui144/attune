@@ -186,7 +186,7 @@ git push origin main
 - Web UI: 嵌入式单页 HTML + vanilla JS（`include_str!`）
 - CLI: clap + rpassword
 - AI 分类: Ollama chat (qwen2.5) + hdbscan 聚类 + 编程/法律插件
-- 分发: Rust 主二进制 ~30 MB（静态链接，含 TLS + 搜索引擎 + Web UI + 分类引擎）；Win MSI / Linux deb 安装包 ~150-200 MB（捆绑 Ollama runtime + whisper.cpp + tesseract + 必要底座模型，**不捆绑 LLM 模型** — LLM 走远端 token 默认）
+- 分发: Rust 主二进制 ~47 MB stripped / 59 MB unstripped（静态链接，含 TLS + 搜索引擎 + Web UI + 分类引擎；R32 实测 2026-05-01 x86_64-linux）；Win MSI / Linux deb 安装包 ~150-200 MB（捆绑 Ollama runtime + whisper.cpp + tesseract + 必要底座模型，**不捆绑 LLM 模型** — LLM 走远端 token 默认）
 
 ## 已实现模块（Phase 0-3）
 

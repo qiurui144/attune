@@ -104,6 +104,23 @@ attune 采用工业经典 5 层分类（Unit / Integration / System / E2E / Smok
 
 **核心原则**：语料**版本固化**（tag 或 commit SHA），保证任何时间跑出来的结果可比。
 
+#### 测试数据分级（R16）
+
+| Tier | 大小 | 是否入仓 | 何时跑 | 内容 |
+|------|------|---------|--------|------|
+| **Tier 0：内嵌 fixtures** | < 100 KB | ✅ 跟代码走 | 单元测试 / golden | `rust/crates/attune-core/tests/fixtures/` 5 篇手写 MD（中/英/代码/法律/学术） |
+| **Tier 1：小语料** | < 100 MB | ❌ 下载 | 默认集成测试（pre-PR） | rust-book + cs-notes（共 ~160 MB） |
+| **Tier 2：大语料** | > 1 GB | ❌ 下载 sparse | nightly / pre-release | technical-books（sparse-checkout 5 子目录） |
+
+**判定规则**：
+- 测试运行时间 < 10 s → 必须用 Tier 0
+- 验证检索/分词质量 → Tier 1（rust-book 英文 + cs-notes 中文）
+- 验证大规模索引/查询 throughput → Tier 2
+
+CI 默认只跑 Tier 0 + Tier 1；Tier 2 用 `cargo test --test '*' -- --ignored --include-ignored` 手动触发。
+
+**Tier 0 多样性现状（R17 audit 2026-05-01）**：5 篇 fixture 覆盖中/英/代码/法律/学术/新闻/技术博客，4 主类齐全。已知 gap：`rust/tests/fixtures/edge_cases/` 目录创建但未填充（空文档 / 10 MB / 非 UTF-8 / 全 emoji / 恶意 HTML），为 **v0.7+ 待补**。
+
 #### 语料库清单
 
 | Corpus | 来源 | 固化版本 | 内容 | 用途 |
@@ -388,9 +405,69 @@ jobs:
 | M3 | System 测试 (wizard 完整链路) | 🚧 B.3 推进中 |
 | M4 | E2E Playwright + 3 golden flow | 🚧 C.2 + C.3 推进中 |
 | M5 | Smoke 升级覆盖 v0.6.1 新能力 | 🚧 C.1 推进中 |
-| M6 | CI 矩阵跨 Linux + Windows 全绿 | 🟡 部分 (Linux ✅，Windows 待) |
+| M6 | CI 矩阵跨 Linux + Windows 全绿 | 🟡 部分 (Linux ✅，Windows 待 — R18 实测：`ci.yml` 仅 ubuntu-latest；`rust-release.yml` 4 target 但只 build 不 test) |
+| M6.1 | 慢测试拆 nightly 通道 | ❌ 待做 — R19 实测 `attune-server::form_factor_integration` ~250s / `system_wizard_full_flow_test` ~71s / `vault_setup_test` ~64s（生产强度 Argon2id 不可降），合计 ~6 min；建议加 `#[ignore]` 标记走 nightly，PR CI 跑 attune-core lib (587 tests / 2.18s) + attune-server fast tests |
+| M6.2 | Flakiness baseline | ✅ R20 实测 — attune-core lib 587 tests × 5 runs / attune-server session_test 6 tests × 5 runs = 0 失败；runtime 变异 < 2× 属系统噪声 |
 | M7 | Performance baseline + 跨版本对比 | ❌ 待做 |
 | M8 | 发版前强制 M1-M5 全绿 | ❌ 待做 |
+
+---
+
+## 附录 D：4h × 40 轮深度审视发现登记（R15-R40，2026-05-01）
+
+> 这是一次系统性"代码 + 测试 + 产品质量"全面体检的产出，作为 v0.7+ backlog 锚点。
+
+### 测试质量（R15-R20，已落 M6.1/M6.2）
+
+| Round | 维度 | 发现 |
+|-------|------|------|
+| R15 | vault 并发 | Vault `!Sync` (rusqlite RefCell) 必须外层 `Mutex<Vault>`；2 新 concurrent test 已加 |
+| R16 | 测试数据分级 | Tier 0/1/2 表已加 |
+| R17 | golden corpus | 4 主类齐全；edge_cases/ 空待 v0.7+ |
+| R18 | CI 矩阵 | ci.yml 仅 ubuntu-latest，Windows test 缺 |
+| R19 | P95 runtime | 慢测试 ~6 min；建议拆 nightly |
+| R20 | flakiness | 0 失败 in 30 runs |
+
+### 代码质量（R21-R30）
+
+| Round | 维度 | 发现 | 行动 |
+|-------|------|------|------|
+| R21 | unsafe 审计 | 仅 1 处 (state.rs:145 `set_var`) — 极佳 | 保持 |
+| R22 | clippy::pedantic | ~500 风格 warning，**0 correctness** | v0.8+ 风格清理 |
+| R23 | dead_code | 6 项（QueueWorker / is_allowed / 等） | v0.7+ 接入或删除 |
+| R24 | error chain | 单一 `VaultError` thiserror 一致 | ✅ 保持 |
+| R25 | lock map | Store mutex 写读串行化 — 已知 contention | v0.7+ 拆 read pool |
+| R26 | alloc hot path | chunker 26.63 MB/s 证实非瓶颈 | ✅ |
+| R27 | Send+Sync | 0 unsafe impl，全自动推导 | ✅ |
+| R28 | log 风格 | tracing×92 + log×65 双栈混用 | v0.7+ 统一 tracing |
+| R29 | async timeout | HTTP 客户端全带 timeout | ✅ |
+| R30 | panic-free | 生产 unwrap < 10/file，865 总数大部分在 #[cfg(test)] | ✅ |
+
+### 产品质量（R31-R40）
+
+| Round | 维度 | 实测 | 行动 |
+|-------|------|------|------|
+| R31 | startup time | ~18 ms cold start | ✅ |
+| R32 | binary size | **47 MB stripped / 59 MB unstripped**（与 README "~30 MB" 不符） | ✅ 已修文档 |
+| R33 | memory peak | governor 已实装 cpu_pct_max + Budget | ✅ |
+| R34 | CPU caps | 同上 governor 路径 | ✅ |
+| R35 | shutdown graceful | ❌ 无 ctrl_c/with_graceful_shutdown，SIGTERM 直接 kill | **v0.7+ P0** |
+| R36 | config validation | settings.rs 无 validate() | v0.7+ 加白名单 |
+| R37 | log persistence | 仅 stdout，无文件 rotation | v0.7+ tracing_appender |
+| R38 | backup/restore | ❌ 无 vault export/import CLI | v0.7+ 加 |
+| R39 | doc consistency | "~30 MB" → 47 MB stripped | ✅ 已修 README + CLAUDE.md |
+| R40 | synthesis | 本表 | — |
+
+### v0.7+ 产品级 P0 backlog（来自 R15-R40）— 2026-05-01 全部修复
+
+| # | 项 | Round | 落地 |
+|---|----|-------|------|
+| 1 | **graceful shutdown** | R35 | ✅ `lib.rs` SIGINT/SIGTERM oneshot + axum_server::Handle.graceful_shutdown(30s) — 实测 `exit=0` |
+| 2 | **CI Windows job** | R18 | ✅ `ci.yml` rust-test 加 matrix [ubuntu-latest, windows-latest] |
+| 3 | **慢测试 #[ignore]** | R19 | ✅ 6 tests 加 `#[ignore]` (form_factor×4 + wizard×1 + vault_setup×1)；attune-server 测试时间 6 min → 18s（20× 加速）+ nightly schedule |
+| 4 | **vault backup/restore CLI** | R38 | ✅ `attune vault-export <dest>` + `attune vault-import <src> [--force]`，含 vault 状态守卫 |
+| 5 | **log file rotation** | R37 | ✅ `tracing_appender::rolling::daily` → `data_dir/logs/attune-server.YYYY-MM-DD`，stdout 同步 |
+| 6 | **dead_code 接入** | R23 | ✅ 抽 `attune_core::queue::embed_and_index_batch` 共享函数；server `start_queue_worker` 与 core `QueueWorker::process_embed_batch` 共用一份 batch logic，消除 ~50 行重复 |
 
 ---
 

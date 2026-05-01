@@ -6,7 +6,7 @@
 
 Attune is a generic personal AI knowledge base for **any individual knowledge worker** (OSS Apache-2.0, zero industry binding). Industry users (lawyers / doctors / patent agents / scholars) load the corresponding `attune-pro/<vertical>-pro` plugin pack for vertical capabilities — see [`docs/oss-pro-strategy.md`](../docs/oss-pro-strategy.md).
 
-This directory is the Rust production build — a single ~30 MB static binary containing the encrypted vault, RAG engine, HTTP server with TLS, and embedded Preact UI. No runtime dependencies.
+This directory is the Rust production build — a single ~47 MB stripped binary (59 MB unstripped, x86_64-linux release) containing the encrypted vault, RAG engine, HTTP server with TLS, and embedded Preact UI. No runtime dependencies.
 
 ---
 
@@ -119,7 +119,7 @@ cd rust
 cargo build --release
 # Artifacts:
 # target/release/attune         (CLI, 4.2 MB)
-# target/release/attune-server-headless  (HTTP server, ~30 MB)
+# target/release/attune-server-headless  (HTTP server, ~47 MB stripped)
 ```
 
 ### 2. Start Ollama (optional, for semantic search)
@@ -322,7 +322,7 @@ The frontend renders a bottom-right RecommendationOverlay (accept/dismiss) and r
 | Binary | Size | Purpose |
 |--------|------|---------|
 | `attune` | 4.2 MB | CLI tool (7 subcommands) |
-| `attune-server-headless` | ~30 MB | HTTP API server (TLS + Preact UI + search engine) |
+| `attune-server-headless` | ~47 MB stripped | HTTP API server (TLS + Preact UI + search engine) |
 
 Size breakdown: rustls crypto stack + tantivy full-text + usearch C++ bindings + Tokio + Axum + Preact UI.
 
