@@ -232,11 +232,16 @@ impl Vault {
             ("encrypted_dek_vec", new_enc_dek_vec.as_slice()),
         ])?;
 
-        // 注意：需要释放 guard 后再更新内存中的 MK
+        // OSS-S6 fix (2026-05-02): MK 也是 session token 的 HMAC 签名 key（见
+        // verify_session 第 317 行），不只是用于解密 DEK。change_password 后必须把
+        // 内存里的 MK 同步换成 new_mk，否则 reissue_token 用 new_mk 签 / verify_session
+        // 用 old_mk 验 → 全部新 token 都返 401 "session invalid"，直到下次 lock+unlock
+        // 才能恢复。原注释 "DEK 不变 MK 不需更新" 漏看了 HMAC 用途。
         drop(guard);
-        // MK 更新需要在 unlocked 中替换 — 但当前 DEK 不变，所以简化处理：
-        // 在下次 lock/unlock 周期中 MK 会自然更新。这里不需要替换内存 MK，
-        // 因为 DEK 是不变的，MK 只在 unlock 时用于解密 DEK。
+        let mut guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(keys) = guard.as_mut() {
+            keys.master_key = new_mk;
+        }
 
         Ok(())
     }
@@ -575,6 +580,26 @@ mod tests {
         let dek_new = vault.dek_db().unwrap();
         let item = vault.store().get_item(&dek_new, &id).unwrap().unwrap();
         assert_eq!(item.content, "Secret", "Data should survive password change");
+    }
+
+    /// Regression test for OSS-S6 (2026-05-02):
+    /// change_password 之前不更新内存 MK → reissue_token 签新 MK / verify_session 验旧 MK → 401。
+    /// 修复后：change_password 必须同步内存 MK，使后续 reissue → verify 链路正确。
+    #[test]
+    fn change_password_keeps_session_alive_without_lock_unlock_cycle() {
+        let (vault, _tmp) = test_vault();
+        vault.setup("old-pw").unwrap();
+
+        // 在 unlocked 状态下改密码（不 lock）
+        vault.change_password("old-pw", "new-pw").unwrap();
+
+        // 不做 lock+unlock，直接调 reissue_token（即在 unlocked 状态下 unlock("new-pw")）
+        let new_token = vault.unlock("new-pw").expect("reissue_token after change_password");
+
+        // verify_session 必须接受这个 token — 之前会 401 SessionInvalid，因为
+        // 内存 MK 还是 old_mk 但 token 用 new_mk 签
+        vault.verify_session(&new_token)
+            .expect("REGRESSION (OSS-S6): verify_session must accept token issued post-change_password");
     }
 
     #[test]
