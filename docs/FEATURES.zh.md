@@ -372,16 +372,19 @@ Project 是用户定义的 item 分组（文件、对话、笔记），含可选
   验证 ChatEngine 接入 Redactor：user_message 在 LLM 调用前 redact、placeholder 在响应里 restore、
   多种 PII（phone+email+api_key）独立 round-trip、无 PII 消息原样穿过。
 
-**成熟度**：🟡 部分 — **v0.6.2 接入主链路**（cb5baa3 + 本 commit）：
+**成熟度**：🟢 **大部分 Active — chat 全路径在 v0.6.3 接入完成**：
 - L0 chunk 隔离：✅ Active
-- L1 PII 模块：🟡 **部分接入** —
-  - `ChatEngine::run_llm_once` ✅ 在 LLM 调用前 redact `user_message`，
-    响应里 restore placeholder（v0.6.2）
-  - `outbound_audit` 日志通过 `log::info!` target 输出 ✅
-  - **暂未接入**: `history.content`, `knowledge.inject_content/content`
-    （需要跨 redact 调用全局 mappings counter 合并 — v0.7+）
+- L1 PII 模块 — **chat 出网路径** ✅：
+  - `Redactor::redact_batch` ✅（v0.6.3）：基于 separator 的批量 redact，
+    placeholder 全局唯一索引 — 同一 placeholder 在 user/history/knowledge
+    各段中始终指向同一原值
+  - `ChatEngine::run_llm_once` ✅（v0.6.3）：redact `[system_prompt,
+    user_message, history[*]]` — system_prompt 嵌入了 knowledge 所以
+    knowledge PII 也被 transitively 覆盖
+  - `outbound_audit` 日志通过 `log::info!` 输出（v0.6.2）✅
   - **暂未接入**: `context_compress` LLM 摘要调用、`ai_annotator`、
-    `web_search` query（v0.7+ 单独 patch）
+    `web_search_browser` query（这些是与 chat 并行的 LLM call sites，
+    每个需要独立 redact wrapper — v0.7+ 单独 patch）
   - 审计日志持久化到 `store::audit_log`（当前仅 log）— v0.7+
 - F-Pro 跨域防御：✅ Active
 - L3 LLM 脱敏：❌ Designed（v0.7+）
@@ -460,7 +463,7 @@ Project 是用户定义的 item 分组（文件、对话、笔记），含可选
 | F-14-ENTITIES | ✅ | ✅ | ❌ | ❌ | ❌ |
 | F-15-MCP | ❌ | ❌ | ❌ | ❌ | ❌ 人工 |
 | F-16-DISTRIBUTION | ✅ | ✅ | ✅ | ❌ | ✅ |
-| F-17-PRIVACY | ✅ | ✅（chat 路径，v0.6.2） | ❌ | ❌ | ❌ |
+| F-17-PRIVACY | ✅ | ✅（chat 全路径，v0.6.3） | ❌ | ❌ | ❌ |
 | F-18-QUALITY | ✅ | ✅ corpus | ✅ | ❌ | ❌ |
 
 **缺口**（驱动 B.1 / B.2 / B.3 / C.1 / C.3 任务定义）：

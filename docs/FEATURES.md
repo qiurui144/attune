@@ -373,16 +373,19 @@ Two complementary systems. **Phase A.5 three-tier privacy**: **L0** per-file fla
   restored in response, multi-kind PII (phone+email+api_key) round-trips correctly,
   PII-free messages pass through unchanged.
 
-**Maturity**: 🟡 Partial — **wiring landed in v0.6.2 (cb5baa3 + this commit)**:
+**Maturity**: 🟢 **mostly Active — full chat path wired in v0.6.3**:
 - L0 chunk-isolation: ✅ Active
-- L1 PII module: 🟡 **partial wiring** —
-  - `ChatEngine::run_llm_once` ✅ redacts `user_message` before LLM call,
-    restores placeholders in response (v0.6.2)
-  - `outbound_audit` log emitted via `log::info!` target ✅
-  - **Not yet wired**: `history.content`, `knowledge.inject_content/content`
-    (requires global mappings counter merge across redact calls — v0.7+)
+- L1 PII module — **chat outbound path** ✅:
+  - `Redactor::redact_batch` ✅ (v0.6.3): separator-based batch redact with
+    globally unique `[KIND_N]` indices — same placeholder always points to
+    same original value across user/history/knowledge segments
+  - `ChatEngine::run_llm_once` ✅ (v0.6.3): redacts `[system_prompt,
+    user_message, history[*]]` — system_prompt embeds knowledge so knowledge
+    PII is covered transitively
+  - `outbound_audit` log emitted via `log::info!` (v0.6.2) ✅
   - **Not yet wired**: `context_compress` LLM summary call, `ai_annotator`,
-    `web_search` query (separate v0.7+ patches)
+    `web_search_browser` query (separate v0.7+ patches — these are LLM call
+    sites parallel to chat, each needs its own redact wrapper)
   - Audit log persistence to `store::audit_log` (currently log-only) — v0.7+
 - F-Pro cross-domain defense: ✅ Active
 - L3 LLM redaction: ❌ Designed (v0.7+)
@@ -461,7 +464,7 @@ This is the inverse view of `TESTING.md`'s test pyramid. For each test layer, wh
 | F-14-ENTITIES | ✅ | ✅ | ❌ | ❌ | ❌ |
 | F-15-MCP | ❌ | ❌ | ❌ | ❌ | ❌ manual |
 | F-16-DISTRIBUTION | ✅ | ✅ | ✅ | ❌ | ✅ |
-| F-17-PRIVACY | ✅ | ✅ (chat path, v0.6.2) | ❌ | ❌ | ❌ |
+| F-17-PRIVACY | ✅ | ✅ (full chat path, v0.6.3) | ❌ | ❌ | ❌ |
 | F-18-QUALITY | ✅ | ✅ corpus | ✅ | ❌ | ❌ |
 
 **Gaps** (drive B.1 / B.2 / B.3 / C.1 / C.3 task definitions):

@@ -162,3 +162,43 @@ fn pii_free_message_passes_through_unchanged() {
     // Response is exactly the mock response (after confidence stripping)
     assert!(result.content.contains("Hello back!"), "got: {}", result.content);
 }
+
+/// covers F-17-PRIVACY v0.6.3 全路径接入: history.content 中的 PII 也被 redact + restore.
+/// 这是 v0.6.2 的后续 — v0.6.2 仅覆盖 user_message，v0.6.3 通过 redact_batch
+/// 让 history 也走 redact 路径。
+#[test]
+fn history_with_pii_is_redacted_and_restored() {
+    let tmp = TempDir::new().expect("tmp");
+
+    // Mock LLM 响应包含 history phone 的 placeholder（即 LLM 看到了 redacted history
+    // 然后 echo placeholder 回来）。restore 应能还原。
+    // 注意 redact_batch 全局唯一索引：segments 顺序是 [system, user, history[0]],
+    // 不同 phone 会得 [PHONE_1] / [PHONE_2]。具体映射由 redact_batch 决定。
+    let mock_response = "Recall: earlier said [PHONE_2], now you ask [PHONE_1]\n[置信度: 4/5]";
+    let engine = setup_engine_with_echo_llm(&tmp, mock_response);
+
+    let history = vec![
+        attune_core::llm::ChatMessage::user("My old number was 13987654321"),
+        attune_core::llm::ChatMessage::assistant("Got it"),
+    ];
+    let user_msg = "I'm now using 13812345678 instead";
+
+    let result = engine.chat(user_msg, &history, &test_dek()).expect("chat ok");
+
+    // 两个 phone 都应该 restore 回原值（不再含 placeholder）
+    assert!(
+        result.content.contains("13987654321"),
+        "history phone should be restored, got: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("13812345678"),
+        "user phone should be restored, got: {}",
+        result.content
+    );
+    assert!(
+        !result.content.contains("[PHONE_"),
+        "no PHONE placeholder should leak to user, got: {}",
+        result.content
+    );
+}

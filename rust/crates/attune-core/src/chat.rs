@@ -278,19 +278,20 @@ impl ChatEngine {
 
     /// 单次 LLM 调用，封装 prompt 构建 + 调用。返回 (raw response, confidence)。
     ///
-    /// ## F-17-PRIVACY wiring (v0.6.2)
+    /// ## F-17-PRIVACY 全路径接入 (v0.6.3)
     ///
-    /// 出网前 `pii::Redactor` 替换 user_message 中的 PII 为 `[KIND_N]` placeholder；
-    /// LLM 响应回来 `restore()` 反向替换让用户看到原值。这兑现 v0.6.1 release notes
-    /// 公开承诺的 "L1 placeholder before any cloud API call"。
+    /// 出网前 `pii::Redactor::redact_batch` 批量替换 PII 为 `[KIND_N]` placeholder，
+    /// **全局唯一索引**（同一 placeholder 在 user/history/knowledge 中指向同一原值）；
+    /// LLM 响应回来 `restore()` 反向替换让用户看到原值。
     ///
-    /// **当前覆盖**：user_message ✅
-    /// **v0.7+ 增强**：history.content + knowledge.inject_content/content（需要全局
-    /// mappings 合并 — 不同 Redactor 调用之间 placeholder 计数器需贯通，避免
-    /// `[PHONE_1]` 在 user_message 和 knowledge 中指向不同原值）。
+    /// **覆盖范围 (v0.6.3)**：
+    /// - `user_message` ✅ — 用户输入（最高频 PII 源）
+    /// - `history.content` ✅ — 历史对话（含已往轮次的 PII）
+    /// - `system_prompt` ✅ — 含 knowledge.inject_content / breadcrumb / title
+    ///   （build_rag_system_prompt 拼出的完整字符串一起 redact）
     ///
-    /// 替代设计被否决：把 user+history+knowledge join 然后整体 redact —
-    /// separator 选择困难（短易冲突、长污染 prompt）。
+    /// 全局唯一性由 `redact_batch` 的 separator-based 实现保证：所有段拼接后
+    /// 一次 redact，placeholder 索引连续不冲突。
     fn run_llm_once(
         &self,
         user_message: &str,
@@ -298,29 +299,59 @@ impl ChatEngine {
         knowledge: &[SearchResult],
         web_search_used: bool,
     ) -> Result<(String, u8)> {
-        // ── F-17 redact user_message before outbound LLM call ──────────────
-        let redacted_user = self.redactor.redact(user_message);
+        // ── F-17 全路径 redact ────────────────────────────────────────────
+        // 收集所有出网内容到 segments[]，一次 redact_batch 保证 placeholder 全局唯一
+        let system_prompt = build_rag_system_prompt(knowledge, web_search_used);
 
-        // F-17 audit log（v0.6.2 用 log::info；v0.7+ 持久化到 store::audit_log）
-        if !redacted_user.mappings.is_empty() {
+        // segments order: [system_prompt, user_message, history[0], history[1], ...]
+        let mut segments: Vec<&str> = Vec::with_capacity(2 + history.len());
+        segments.push(&system_prompt);
+        segments.push(user_message);
+        for h in history {
+            segments.push(&h.content);
+        }
+
+        let (redacted_segments, all_mappings) = self.redactor.redact_batch(&segments);
+
+        // F-17 audit log（v0.6.3：覆盖全路径；v0.7+ 持久化到 store::audit_log）
+        if !all_mappings.is_empty() {
+            // 统计 by_kind
+            let mut by_kind: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for m in &all_mappings {
+                let prefix = m.kind.placeholder_prefix().to_string().to_uppercase();
+                *by_kind.entry(prefix).or_insert(0) += 1;
+            }
             log::info!(
                 target: "outbound_audit",
-                "F-17: PII redacted in chat outbound — kinds={:?} chars={} model={}",
-                redacted_user.stats.by_kind,
-                redacted_user.stats.total_chars_redacted,
+                "F-17: PII redacted in chat outbound (full path) — kinds={:?} total={} segments={} model={}",
+                by_kind,
+                all_mappings.len(),
+                segments.len(),
                 self.llm.model_name()
             );
         }
 
-        let system = build_rag_system_prompt(knowledge, web_search_used);
-        let mut messages = Vec::new();
-        messages.push(ChatMessage::system(&system));
-        messages.extend_from_slice(history);
-        messages.push(ChatMessage::user(&redacted_user.redacted_text));
+        // 构建 messages，使用 redacted 版本
+        let redacted_system = &redacted_segments[0];
+        let redacted_user = &redacted_segments[1];
+        let redacted_history: Vec<ChatMessage> = history
+            .iter()
+            .enumerate()
+            .map(|(i, h)| ChatMessage {
+                role: h.role.clone(),
+                content: redacted_segments[2 + i].clone(),
+            })
+            .collect();
+
+        let mut messages = Vec::with_capacity(2 + redacted_history.len());
+        messages.push(ChatMessage::system(redacted_system));
+        messages.extend(redacted_history);
+        messages.push(ChatMessage::user(redacted_user));
+
         let raw_response = self.llm.chat_with_history(&messages)?;
 
-        // ── F-17 restore: LLM 响应里的 placeholder 还原回原值给用户 ──────
-        let restored = self.redactor.restore(&raw_response, &redacted_user.mappings);
+        // ── F-17 restore: LLM 响应里的所有 placeholder 还原 ──────────────
+        let restored = self.redactor.restore(&raw_response, &all_mappings);
         let conf = parse_confidence(&restored);
         Ok((restored, conf))
     }
