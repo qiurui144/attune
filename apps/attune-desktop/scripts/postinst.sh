@@ -96,11 +96,49 @@ EOF
 fi
 
 # ─── 4. Ollama 服务启用 ─────────────────────────────────────────────
-if [ -e /etc/systemd/system/ollama.service ] || [ -e /lib/systemd/system/ollama.service ] || [ -e /usr/lib/systemd/system/ollama.service ]; then
+# 兜底：新版 Ollama install.sh 在某些发行版（Ubuntu 25.10+/26.04）跳过 systemd 配置。
+# 我们检测到 binary 但无 unit 时自己写一份最小化 unit，保证服务可启。
+if command -v ollama >/dev/null 2>&1; then
+  HAS_UNIT=0
+  for cand in /etc/systemd/system/ollama.service /lib/systemd/system/ollama.service /usr/lib/systemd/system/ollama.service; do
+    [ -e "$cand" ] && HAS_UNIT=1 && break
+  done
+
+  if [ "$HAS_UNIT" = "0" ]; then
+    log "Ollama systemd unit missing — writing minimal unit (install.sh skipped systemd setup)"
+    # 确保 ollama user/group 存在
+    if ! getent group ollama >/dev/null; then groupadd -r ollama; fi
+    if ! id ollama >/dev/null 2>&1; then
+      useradd -r -s /bin/false -g ollama -d /usr/share/ollama -m ollama 2>/dev/null || true
+    fi
+    # render/video group 给 GPU 访问权（AMD/NVIDIA 都需要）
+    usermod -aG render ollama 2>/dev/null || true
+    usermod -aG video ollama 2>/dev/null || true
+
+    cat > /etc/systemd/system/ollama.service <<UNIT
+[Unit]
+Description=Ollama Service
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ollama serve
+User=ollama
+Group=ollama
+Restart=always
+RestartSec=3
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=default.target
+UNIT
+    log "wrote /etc/systemd/system/ollama.service"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+
   systemctl enable --now ollama >/dev/null 2>&1 || log "WARN: systemctl enable ollama failed"
-  # 等 API 上线（最多 10s）
+  # 等 API 上线（最多 15s — 首次启动 + AMD ROCm 加载稍慢）
   i=0
-  while [ "$i" -lt 10 ]; do
+  while [ "$i" -lt 15 ]; do
     if curl -sf http://localhost:11434/api/version >/dev/null 2>&1; then
       log "Ollama API ready @ localhost:11434"
       break
@@ -110,9 +148,58 @@ if [ -e /etc/systemd/system/ollama.service ] || [ -e /lib/systemd/system/ollama.
   done
 fi
 
-# ─── 5. 总结 ───────────────────────────────────────────────────────
-log "post-install complete."
-log "next: launch 'Attune' (model pull happens in first-run wizard with progress UI)"
+# ─── 5. 模型拉取（按 RAM + GPU tier 自适应）─────────────────────────
+# 用户拍板：必须 .deb 安装时一次性完成，不留"首次启动 wizard 再拉"的环节
+RAM_GB=$(free -g 2>/dev/null | awk '/^Mem:/{print $2}' || echo 0)
+HAS_NVIDIA=0
+[ -e /dev/nvidia0 ] && HAS_NVIDIA=1
+HAS_AMD=0
+[ -n "${GFX:-}" ] && HAS_AMD=1
+
+# 决策矩阵：与 scripts/deploy-linux.sh 的 tier 表保持一致
+if [ "$RAM_GB" -ge 16 ] && [ "$HAS_NVIDIA" = "1" ]; then
+  EMBED_MODEL="bge-m3"; CHAT_MODEL="qwen2.5:7b"; TIER="high"
+elif [ "$RAM_GB" -ge 16 ] && [ "$HAS_AMD" = "1" ]; then
+  EMBED_MODEL="bge-m3"; CHAT_MODEL="qwen2.5:3b"; TIER="mid"
+elif [ "$RAM_GB" -ge 8 ]; then
+  EMBED_MODEL="bge-small"; CHAT_MODEL="qwen2.5:1.5b"; TIER="low"
+else
+  EMBED_MODEL="bge-small"; CHAT_MODEL="qwen2.5:0.5b"; TIER="minimal"
+fi
+
+log "Hardware tier: RAM=${RAM_GB}GB NVIDIA=$HAS_NVIDIA AMD=$HAS_AMD → tier=$TIER"
+log "Selected models: embed=$EMBED_MODEL chat=$CHAT_MODEL"
+
+# 仅在 Ollama API 上线时拉模型；否则留下 hint 让用户后续 attune deploy 补
+if curl -sf http://localhost:11434/api/version >/dev/null 2>&1; then
+  for m in "$EMBED_MODEL" "$CHAT_MODEL"; do
+    if ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$m" \
+       || ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${m}:latest"; then
+      log "  $m already pulled — skipping"
+    else
+      log "  pulling $m (~minutes; progress in syslog: 'journalctl -t attune-postinst -f')..."
+      # ollama pull 在非 TTY 下输出 newline-separated progress；管到 logger 异步记
+      if ollama pull "$m" 2>&1 | while IFS= read -r line; do
+           # 只记关键转换（避免 1000 行 progress noise 灌爆 syslog）
+           case "$line" in
+             *success*|*verifying*|*"writing manifest"*|*error*|*Error*)
+               logger -t "$LOG_TAG" -- "[pull $m] $line"
+               ;;
+           esac
+         done; then
+        log "  $m pulled OK"
+      else
+        log "  WARN: $m pull failed (network?). User can retry: ollama pull $m"
+      fi
+    fi
+  done
+else
+  log "WARN: Ollama API not ready, skipping model pull. User can later: attune deploy"
+fi
+
+# ─── 6. 总结 ───────────────────────────────────────────────────────
+log "post-install complete. Models: $EMBED_MODEL + $CHAT_MODEL"
+log "next: launch 'Attune' from desktop menu — fully ready out of the box"
 
 # 永不让 postinst 失败 — 阻塞 dpkg/rpm 比 Ollama 缺失更糟
 exit 0
