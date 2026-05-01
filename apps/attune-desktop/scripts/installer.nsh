@@ -26,34 +26,38 @@
 !macro NSIS_HOOK_POSTINSTALL
   DetailPrint "Checking Ollama installation..."
 
-  ; 检查 ollama 是否在 PATH
+  ; 检查 ollama 是否在 PATH（where 是 Windows builtin）
   nsExec::ExecToStack 'where ollama'
   Pop $0  ; exit code
   Pop $1  ; output
   ${If} $0 == 0
     DetailPrint "Ollama already installed: $1"
   ${Else}
-    DetailPrint "Ollama not found. Downloading installer..."
-    ; 下载 OllamaSetup.exe 到 %TEMP%
-    NSISdl::download "https://ollama.com/download/OllamaSetup.exe" "$TEMP\OllamaSetup.exe"
-    Pop $R0
-    ${If} $R0 == "success"
+    DetailPrint "Ollama not found. Downloading installer (~600 MB)..."
+    ; 用 inetc plugin (NSIS 标配) 替代过时的 NSISdl
+    ; /SILENT 隐藏进度框；/RESUME 失败可恢复；/CAPTION 显示自定义标题
+    inetc::get /CAPTION "Downloading Ollama" /POPUP "ollama.com" \
+      "https://ollama.com/download/OllamaSetup.exe" "$TEMP\OllamaSetup.exe" /END
+    Pop $R0  ; "OK" 或错误描述
+    ${If} $R0 == "OK"
       DetailPrint "Running Ollama installer (silent)..."
-      ; OllamaSetup.exe /silent /verysilent /supress 静默装
-      ExecWait '"$TEMP\OllamaSetup.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART' $0
+      ; OllamaSetup.exe 是 NSIS 自身打的包，支持 /S = silent
+      ExecWait '"$TEMP\OllamaSetup.exe" /S' $0
       Delete "$TEMP\OllamaSetup.exe"
       ${If} $0 == 0
         DetailPrint "Ollama installed successfully."
       ${Else}
-        DetailPrint "WARNING: Ollama installer exited with code $0. User can install manually later."
+        DetailPrint "WARNING: Ollama installer exited with code $0."
+        DetailPrint "  attune-desktop first-run wizard will offer manual install instructions."
       ${EndIf}
     ${Else}
-      DetailPrint "WARNING: Ollama download failed ($R0). User can install via 'attune deploy' (CLI) later."
+      DetailPrint "WARNING: Ollama download failed: $R0"
+      DetailPrint "  attune-desktop first-run wizard will display install command for manual run."
     ${EndIf}
   ${EndIf}
 
-  ; 启动 Ollama 服务（Windows: Ollama 装完会自启）
-  DetailPrint "Ollama service should auto-start on next boot."
+  ; Windows 没有 AMD HSA override 这种通用问题（CUDA / DirectML 自动）
+  DetailPrint "Ollama service should auto-start (Windows service)."
   DetailPrint "First-run wizard will pull recommended models with progress UI."
 !macroend
 

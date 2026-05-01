@@ -1,10 +1,10 @@
 #!/bin/sh
 #
-# attune .deb post-install hook — Ollama 自动安装 + 硬件自适应
+# attune Linux package post-install hook — Ollama 自动安装 + 硬件自适应
 # (R-deploy / 2026-05-01)
 #
-# 触发时机：apt install attune-desktop_*.deb 解压完成后由 dpkg 调用。
-# 失败时 dpkg 会回滚安装，所以这里要：
+# 触发时机：apt install attune-desktop_*.{deb,rpm} 解压完成后由 dpkg/rpm 调用。
+# 失败时 dpkg/rpm 会回滚安装，所以这里要：
 #   - 不交互（无 stdin/tty）
 #   - 单一可恢复路径（每步带 || true 退化）
 #   - 网络失败不阻断（首次启动 attune 时 wizard 再补）
@@ -16,7 +16,7 @@
 
 set -e
 
-# dpkg postinst 使用 /bin/sh + 受限 PATH (/usr/sbin:/usr/bin:/sbin:/bin)，
+# dpkg/rpm postinst 使用 /bin/sh + 受限 PATH (/usr/sbin:/usr/bin:/sbin:/bin)，
 # 不含 /usr/local/bin。Ollama install.sh 默认装到 /usr/local/bin/ollama —
 # 必须显式扩展 PATH，否则 `command -v ollama` 永远找不到，重复触发 install.sh。
 PATH="/usr/local/bin:/usr/local/sbin:$PATH"
@@ -43,7 +43,7 @@ else
       log "WARN: ollama install failed (network?). User can re-run via 'attune deploy' later."
     fi
   else
-    log "WARN: curl missing; cannot install Ollama. apt install curl + re-run dpkg-reconfigure attune-desktop"
+    log "WARN: curl missing; cannot install Ollama. apt install curl + re-run dpkg/rpm-reconfigure attune-desktop"
   fi
 fi
 
@@ -114,5 +114,5 @@ fi
 log "post-install complete."
 log "next: launch 'Attune' (model pull happens in first-run wizard with progress UI)"
 
-# 永不让 postinst 失败 — 阻塞 dpkg 比 Ollama 缺失更糟
+# 永不让 postinst 失败 — 阻塞 dpkg/rpm 比 Ollama 缺失更糟
 exit 0

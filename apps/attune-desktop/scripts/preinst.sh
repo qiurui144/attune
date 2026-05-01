@@ -1,7 +1,7 @@
 #!/bin/sh
 #
-# attune .deb pre-install hook
-# 触发：dpkg 解压 attune-desktop_*.deb 之前。
+# attune Linux package pre-install hook
+# 触发：dpkg/rpm 解压 attune-desktop_*.{deb,rpm} 之前。
 # 任务：保证升级时干净停 — 阻止"装了一半但旧版还在跑"竞态。
 #
 

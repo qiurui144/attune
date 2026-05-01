@@ -14,7 +14,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi", "deb", "appimage"],
+    "targets": ["nsis", "deb", "rpm", "appimage"],
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "publisher": "Attune",
     "category": "Productivity",
@@ -24,6 +24,15 @@
       "deb": {
         "depends": ["curl"],
         "recommends": ["systemd"],
+        "preInstallScript": "scripts/preinst.sh",
+        "postInstallScript": "scripts/postinst.sh",
+        "preRemoveScript": "scripts/prerm.sh",
+        "postRemoveScript": "scripts/postrm.sh"
+      },
+      "rpm": {
+        "depends": ["curl"],
+        "epoch": 0,
+        "release": "1",
         "preInstallScript": "scripts/preinst.sh",
         "postInstallScript": "scripts/postinst.sh",
         "preRemoveScript": "scripts/prerm.sh",

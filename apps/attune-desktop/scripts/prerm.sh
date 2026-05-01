@@ -1,7 +1,7 @@
 #!/bin/sh
 #
-# attune .deb pre-remove hook
-# 触发：apt remove / apt purge 解除安装前。
+# attune Linux package pre-remove hook
+# 触发：apt remove / dnf remove / apt purge 解除安装前。
 # 任务：停止 attune 进程，但 **不动 Ollama**（用户可能还需要）。
 #
 

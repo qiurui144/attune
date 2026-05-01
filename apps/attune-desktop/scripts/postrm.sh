@@ -1,7 +1,7 @@
 #!/bin/sh
 #
-# attune .deb post-remove hook
-# 触发：apt remove (action=remove) 或 apt purge (action=purge)
+# attune Linux package post-remove hook
+# 触发：apt remove (action=remove or rpm equivalent) 或 apt purge (action=purge)
 #
 # remove → 仅清 binary，保留用户数据 + Ollama（默认 apt 行为）
 # purge  → 用户主动清完整状态：删 ~/.local/share/attune（用户数据）
@@ -27,7 +27,7 @@ case "$ACTION" in
     log "remove complete (data + Ollama preserved)"
     ;;
   *)
-    # upgrade / failed-upgrade / disappear — 都是 dpkg 内部状态，不做实际清理
+    # upgrade / failed-upgrade / disappear — 都是 dpkg/rpm 内部状态，不做实际清理
     log "no-op for action=$ACTION"
     ;;
 esac
