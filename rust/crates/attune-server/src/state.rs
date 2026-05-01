@@ -684,61 +684,48 @@ impl AppState {
                     continue;
                 }
 
-                // 批量 embed
-                let texts: Vec<&str> = embed_tasks.iter().map(|t| t.chunk_text.as_str()).collect();
-                let embeddings = match embedding.embed(&texts) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!("Embedding failed: {}", e);
-                        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                        for task in &embed_tasks {
-                            let _ = vault.store().mark_embedding_failed(task.id, MAX_ATTEMPTS);
-                        }
+                // R23 (2026-05-01): 调 attune-core::queue::embed_and_index_batch 共享批处理。
+                // 锁顺序：vault → vectors → fulltext，全程持锁直到 done_ids 取出。
+                let done_ids: Vec<i64> = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut vecs_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+                    let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+
+                    let (Some(vi), Some(ft)) = (vecs_guard.as_mut(), ft_guard.as_ref()) else {
+                        tracing::debug!("Queue worker: vectors/fulltext index unavailable mid-batch");
+                        drop(ft_guard);
+                        drop(vecs_guard);
+                        drop(vault);
                         std::thread::sleep(POLL_INTERVAL);
                         continue;
+                    };
+
+                    match attune_core::queue::embed_and_index_batch(
+                        vault.store(),
+                        embedding.as_ref(),
+                        vi,
+                        ft,
+                        &embed_tasks,
+                    ) {
+                        Ok(ids) => {
+                            for id in &ids {
+                                let _ = vault.store().mark_embedding_done(*id);
+                            }
+                            ids
+                        }
+                        Err(e) => {
+                            tracing::warn!("Embedding batch failed: {}", e);
+                            for task in &embed_tasks {
+                                let _ = vault.store().mark_embedding_failed(task.id, MAX_ATTEMPTS);
+                            }
+                            drop(ft_guard);
+                            drop(vecs_guard);
+                            drop(vault);
+                            std::thread::sleep(POLL_INTERVAL);
+                            continue;
+                        }
                     }
                 };
-
-                // 写入向量索引 + 全文索引，收集成功处理的 task id
-                let mut done_ids: Vec<i64> = Vec::new();
-                for (i, task) in embed_tasks.iter().enumerate() {
-                    if i >= embeddings.len() {
-                        break;
-                    }
-                    {
-                        if let Ok(mut vecs) = state.vectors.lock() {
-                            if let Some(ref mut vi) = *vecs {
-                                let _ = vi.add(
-                                    &embeddings[i],
-                                    attune_core::vectors::VectorMeta {
-                                        item_id: task.item_id.clone(),
-                                        chunk_idx: task.chunk_idx as usize,
-                                        level: task.level as u8,
-                                        section_idx: task.section_idx as usize,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    if task.level == 1 {
-                        if let Ok(ft_guard) = state.fulltext.lock() {
-                            if let Some(ref ft) = *ft_guard {
-                                let _ = ft.add_document(
-                                    &task.item_id, "", &task.chunk_text, "file",
-                                );
-                            }
-                        }
-                    }
-                    done_ids.push(task.id);
-                }
-
-                // 循环外：一次性标记完成（单次加锁，避免批量锁竞争）
-                if !done_ids.is_empty() {
-                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                    for id in &done_ids {
-                        let _ = vault.store().mark_embedding_done(*id);
-                    }
-                }
 
                 // 定期把 vector index flush 到加密磁盘文件
                 // 条件：每累计 FLUSH_BATCH_THRESHOLD 个新向量 or 距上次 flush 超过 FLUSH_INTERVAL

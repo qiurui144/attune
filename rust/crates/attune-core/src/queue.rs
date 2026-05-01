@@ -137,7 +137,7 @@ impl QueueWorker {
         Ok(total)
     }
 
-    /// 处理一批 embedding 任务（由 process_batch 分派）
+    /// 处理一批 embedding 任务（由 process_batch 分派）— 内部走共享 `embed_and_index_batch`。
     fn process_embed_batch(
         store: &Arc<Mutex<Store>>,
         embedding: &Arc<dyn EmbeddingProvider>,
@@ -145,57 +145,31 @@ impl QueueWorker {
         fulltext: &Arc<Mutex<FulltextIndex>>,
         tasks: Vec<QueueTask>,
     ) -> Result<usize> {
-        let texts: Vec<&str> = tasks.iter().map(|t| t.chunk_text.as_str()).collect();
+        let count = tasks.len();
 
-        // 批量 embedding
-        let embeddings = match embedding.embed(&texts) {
-            Ok(embs) => embs,
+        // 锁顺序：vectors → fulltext → store（与 server::start_queue_worker 一致）
+        let mut vecs = vectors.lock()
+            .map_err(|_| VaultError::Crypto("vectors lock poisoned".into()))?;
+        let ft = fulltext.lock()
+            .map_err(|_| VaultError::Crypto("fulltext lock poisoned".into()))?;
+        let s = store.lock()
+            .map_err(|_| VaultError::Crypto("store lock poisoned".into()))?;
+
+        let result = embed_and_index_batch(&s, embedding.as_ref(), &mut vecs, &ft, &tasks);
+        match result {
+            Ok(done_ids) => {
+                for id in done_ids {
+                    s.mark_embedding_done(id)?;
+                }
+                Ok(count)
+            }
             Err(e) => {
-                // 标记为失败
-                let s = store.lock().unwrap_or_else(|e| e.into_inner());
                 for task in &tasks {
                     let _ = s.mark_embedding_failed(task.id, MAX_ATTEMPTS);
                 }
-                return Err(e);
+                Err(e)
             }
-        };
-
-        // 存储结果
-        let count = tasks.len();
-        for (i, task) in tasks.iter().enumerate() {
-            if i >= embeddings.len() {
-                break;
-            }
-
-            // 添加到向量索引
-            {
-                let mut vecs = vectors.lock()
-                    .map_err(|_| VaultError::Crypto("vectors lock poisoned".into()))?;
-                vecs.add(
-                    &embeddings[i],
-                    VectorMeta {
-                        item_id: task.item_id.clone(),
-                        chunk_idx: task.chunk_idx as usize,
-                        level: task.level as u8,
-                        section_idx: task.section_idx as usize,
-                    },
-                )?;
-            }
-
-            // 添加到全文索引（仅 Level 1 章节加入全文）
-            if task.level == 1 {
-                let ft = fulltext.lock()
-                    .map_err(|_| VaultError::Crypto("fulltext lock poisoned".into()))?;
-                ft.add_document(&task.item_id, "", &task.chunk_text, "file")?;
-            }
-
-            // 标记完成
-            let s = store.lock()
-                .map_err(|_| VaultError::Crypto("store lock poisoned".into()))?;
-            s.mark_embedding_done(task.id)?;
         }
-
-        Ok(count)
     }
 
     /// 同步处理所有 pending 任务（用于测试）
@@ -211,31 +185,59 @@ impl QueueWorker {
             if tasks.is_empty() {
                 break;
             }
-            let texts: Vec<&str> = tasks.iter().map(|t| t.chunk_text.as_str()).collect();
-            let embeddings = embedding.embed(&texts)?;
-
-            for (i, task) in tasks.iter().enumerate() {
-                if i >= embeddings.len() {
-                    break;
-                }
-                vectors.add(
-                    &embeddings[i],
-                    VectorMeta {
-                        item_id: task.item_id.clone(),
-                        chunk_idx: task.chunk_idx as usize,
-                        level: task.level as u8,
-                        section_idx: task.section_idx as usize,
-                    },
-                )?;
-                if task.level == 1 {
-                    fulltext.add_document(&task.item_id, "", &task.chunk_text, "file")?;
-                }
-                store.mark_embedding_done(task.id)?;
+            let done = embed_and_index_batch(store, embedding, vectors, fulltext, &tasks)?;
+            for id in done {
+                store.mark_embedding_done(id)?;
             }
             total += tasks.len();
         }
         Ok(total)
     }
+}
+
+/// R23 (2026-05-01): 共享批处理函数 — `attune-core::queue::QueueWorker` 与
+/// `attune-server::start_queue_worker` 的统一入口，消除两处重复的
+/// "embed → 写 vectors → 写 fulltext (Level 1 only)" 逻辑。
+///
+/// 调用方负责：
+///   - 已加好 `store` / `vectors` / `fulltext` 的锁（外层 Mutex 已 lock）
+///   - 拿到返回的成功 task id 列表后调 `store.mark_embedding_done(id)`
+///   - flush（vector 持久化、fulltext commit）由调用方按节流策略决定
+///
+/// 返回成功处理的 task id；批量 embed 失败抛错（调用方决定是否 mark_failed）。
+pub fn embed_and_index_batch(
+    _store: &Store,
+    embedding: &dyn EmbeddingProvider,
+    vectors: &mut VectorIndex,
+    fulltext: &FulltextIndex,
+    tasks: &[QueueTask],
+) -> Result<Vec<i64>> {
+    if tasks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let texts: Vec<&str> = tasks.iter().map(|t| t.chunk_text.as_str()).collect();
+    let embeddings = embedding.embed(&texts)?;
+
+    let mut done_ids = Vec::with_capacity(tasks.len());
+    for (i, task) in tasks.iter().enumerate() {
+        if i >= embeddings.len() {
+            break;
+        }
+        vectors.add(
+            &embeddings[i],
+            VectorMeta {
+                item_id: task.item_id.clone(),
+                chunk_idx: task.chunk_idx as usize,
+                level: task.level as u8,
+                section_idx: task.section_idx as usize,
+            },
+        )?;
+        if task.level == 1 {
+            fulltext.add_document(&task.item_id, "", &task.chunk_text, "file")?;
+        }
+        done_ids.push(task.id);
+    }
+    Ok(done_ids)
 }
 
 #[cfg(test)]

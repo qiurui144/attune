@@ -27,7 +27,7 @@ pub mod pii;
 pub mod platform;
 pub mod memory_consolidation;
 pub mod project_recommender;
-pub(crate) mod queue;
+pub mod queue;
 pub mod resource_governor;
 pub mod scanner;
 pub mod scanner_patent;
