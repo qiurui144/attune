@@ -382,4 +382,83 @@ steps:
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("broken.yaml"));
     }
+
+    // ── R11 v0.6.4: chat_trigger.project_keywords 聚合 — chat 路由入口 ──────
+
+    #[test]
+    fn all_chat_trigger_project_keywords_empty_oss_default() {
+        // OSS 裸装无 plugin → 关键词列表为空 → recommend_for_chat 永不触发.
+        // 这是 oss-pro-strategy v2 §4.3 边界规则的代码层验证.
+        let reg = PluginRegistry::new();
+        let kws = reg.all_chat_trigger_project_keywords();
+        assert!(kws.is_empty(), "OSS-only registry must have no keywords, got: {:?}", kws);
+    }
+
+    #[test]
+    fn all_chat_trigger_project_keywords_aggregated_from_plugins() {
+        // attune-pro plugin 装上后, keywords 从 plugin.yaml chat_trigger 段聚合.
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师插件
+type: industry
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  needs_confirm: true
+  priority: 5
+  project_keywords:
+    - 案件
+    - 诉讼
+    - 合同
+"#,
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "patent-pro",
+            r#"
+id: patent-pro
+name: 专利插件
+type: industry
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  needs_confirm: true
+  priority: 5
+  project_keywords:
+    - 专利
+    - 申请
+    - 案件
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(errs.is_empty(), "scan should not fail: {:?}", errs);
+
+        let kws = reg.all_chat_trigger_project_keywords();
+        // dedupe: "案件" 在两个 plugin 中, 只应出现一次
+        let unique: std::collections::HashSet<&str> = kws.iter().copied().collect();
+        assert_eq!(unique.len(), 5, "5 unique keywords (诉讼/合同/案件/专利/申请), got: {:?}", kws);
+        assert!(kws.contains(&"案件"));
+        assert!(kws.contains(&"诉讼"));
+        assert!(kws.contains(&"专利"));
+        assert!(kws.contains(&"申请"));
+        // dedupe 验证: 总长度 == unique 大小
+        assert_eq!(kws.len(), unique.len(), "no duplicates allowed");
+    }
+
+    #[test]
+    fn get_plugin_returns_none_for_unknown_id() {
+        let reg = PluginRegistry::new();
+        assert!(reg.get_plugin("nonexistent").is_none());
+    }
+
+    #[test]
+    fn workflows_by_trigger_returns_empty_for_unknown_event() {
+        let reg = PluginRegistry::new();
+        let wfs = reg.workflows_by_trigger("nonexistent_event");
+        assert!(wfs.is_empty());
+    }
 }

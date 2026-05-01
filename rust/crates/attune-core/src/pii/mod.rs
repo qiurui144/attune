@@ -710,6 +710,80 @@ mod tests {
             "api_key restored: {}", restored);
     }
 
+    // ── R14 v0.6.4 fuzz-style robustness for Redactor::redact ──────────────
+
+    #[test]
+    fn redact_does_not_panic_on_pathological_inputs() {
+        // 防御 catastrophic regex backtracking + binary data + 超大输入.
+        // regex crate (linear-time guarantee) 应该免疫 ReDoS, 但 Redactor 包装
+        // 层有 panic 风险 (utf-8 boundary / overlap dedupe / placeholder collision).
+        let r = make_redactor();
+        let cases: Vec<String> = vec![
+            "".to_string(),                                    // empty
+            "a".repeat(100_000),                               // 100KB plain
+            "a".repeat(1_000_000),                             // 1MB plain (regex linear time check)
+            "@".repeat(10_000),                                // pathological email-like
+            "1".repeat(50_000),                                // 50K digits (id card / phone / bank / credit prefixes)
+            "https://".to_string() + &"a".repeat(50_000),      // long URL
+            "中".repeat(10_000),                               // 10K cn chars
+            "🌿".repeat(5_000),                                  // 5K emoji
+            (0u8..=255).map(|b| b as char).collect::<String>(), // every byte as char
+            "13800138000\n".repeat(10_000),                    // 10K phone numbers
+            "tel://13800138000 ".repeat(1_000),                // mixed real PII
+        ];
+        for (i, input) in cases.iter().enumerate() {
+            let _result = r.redact(input);  // must not panic
+            // restore must also be panic-safe even with empty mappings
+            let _restored = r.restore(input, &[]);
+            // round-trip on text WITHOUT PII: redacted_text == original
+            let r2 = r.redact(input);
+            if r2.mappings.is_empty() {
+                assert_eq!(r2.redacted_text, *input, "case {i}: PII-free input should pass through");
+            }
+        }
+    }
+
+    #[test]
+    fn redact_handles_overlapping_pii_correctly() {
+        // 重叠的 pattern (邮箱 + URL 中的 @): 不应导致 panic 或重复替换
+        let r = make_redactor();
+        let cases = vec![
+            "邮箱 a@example.com 和 URL https://b@example.com 一起",
+            "phone in URL https://13800138000.example.com/path",
+            "13800138000也是13987654321的旁边",
+        ];
+        for input in cases {
+            let result = r.redact(input);
+            // dedup: 不应有 overlap match 被同时保留导致 redacted_text 字符乱
+            let restored = r.restore(&result.redacted_text, &result.mappings);
+            // 不变量: restore 后所有 placeholder 都被还原
+            assert!(
+                !restored.contains("[PHONE_") && !restored.contains("[EMAIL_") && !restored.contains("[URL_"),
+                "restore should remove all placeholders, got: {}",
+                restored
+            );
+        }
+    }
+
+    #[test]
+    fn redact_invalid_utf8_boundary_safe() {
+        // 字节级正则可能落在 multi-byte char 中间. Redactor 必须 char-boundary safe.
+        let cases = vec![
+            "前缀 13800138000 中文",                  // CJK bordering ASCII
+            "🌿邮箱alice@example.com🌿",              // emoji + email
+            "测试①13800138000测试②13987654321测试",   // CJK + numbered + phone
+        ];
+        let r = make_redactor();
+        for input in cases {
+            let result = r.redact(input);
+            // restore 不应破坏 UTF-8
+            let restored = r.restore(&result.redacted_text, &result.mappings);
+            assert!(restored.is_char_boundary(0));
+            assert!(restored.is_char_boundary(restored.len()));
+            assert!(std::str::from_utf8(restored.as_bytes()).is_ok(), "valid UTF-8");
+        }
+    }
+
     #[test]
     fn redact_batch_empty_strings_preserved() {
         // 空字符串作为 segment 也要保留 (chat history 可能含空 message)

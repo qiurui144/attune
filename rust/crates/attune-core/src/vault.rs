@@ -648,4 +648,83 @@ mod tests {
         assert!(vault.store().delete_item(&id).unwrap());
         assert!(vault.store().get_item(&dek2, &id).unwrap().is_none());
     }
+
+    // ── R15 v0.6.4: vault 并发竞态防御 ────────────────────────────────
+    //
+    // Vault 内部 store::Store 持有 rusqlite::Connection (含 !Sync 的 RefCell<StatementCache>),
+    // 因此 Vault 类型本身 !Sync。生产环境通过 AppState.vault: Mutex<Vault> 串行化访问
+    // (rust/crates/attune-server/src/state.rs)。这两个测试模拟该生产模式:
+    // Arc<Mutex<Vault>> 多线程争用,验证 lock/unlock 在外部 Mutex 序列化下
+    // 保持一致状态 + token 有效。
+
+    #[test]
+    fn concurrent_lock_unlock_no_race_via_mutex() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let (vault, _tmp) = test_vault();
+        vault.setup("test-password-12345").unwrap();
+        let vault = Arc::new(Mutex::new(vault));
+
+        // Note: each unlock invokes argon2id (~1-2s by design); keep iteration count low
+        // to keep test under ~30s while still covering races. Threads = 4, ops = 3.
+        let mut handles = vec![];
+        for thread_id in 0..4 {
+            let v = Arc::clone(&vault);
+            handles.push(thread::spawn(move || {
+                for _ in 0..3 {
+                    let g = v.lock().unwrap();
+                    if thread_id % 2 == 0 {
+                        let _ = g.lock();
+                    } else {
+                        let _ = g.unlock("test-password-12345");
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread didn't panic");
+        }
+
+        let g = vault.lock().unwrap();
+        let state = g.state();
+        assert!(
+            matches!(state, VaultState::Locked | VaultState::Unlocked),
+            "vault must be in valid state after concurrent ops, got {:?}",
+            state
+        );
+    }
+
+    #[test]
+    fn concurrent_unlock_tokens_valid_via_mutex() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let (vault, _tmp) = test_vault();
+        vault.setup("test-password-concurrent").unwrap();
+        let vault = Arc::new(Mutex::new(vault));
+        let tokens: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = vec![];
+        for _ in 0..5 {
+            let v = Arc::clone(&vault);
+            let t = Arc::clone(&tokens);
+            handles.push(thread::spawn(move || {
+                let g = v.lock().unwrap();
+                if let Ok(token) = g.unlock("test-password-concurrent") {
+                    t.lock().unwrap().push(token);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let tokens = tokens.lock().unwrap();
+        assert!(!tokens.is_empty(), "at least one unlock should succeed");
+        for token in tokens.iter() {
+            assert!(!token.is_empty(), "token must be non-empty");
+            assert!(token.len() >= 32, "token too short: len={}", token.len());
+        }
+    }
 }

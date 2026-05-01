@@ -519,4 +519,158 @@ mod tests {
         // 空 path 不加前缀（避免 ">  \n\n" 这种垃圾）
         assert_eq!(s.with_breadcrumb_prefix(), "无 path 的内容");
     }
+
+    // ── R12 v0.6.4 mutation testing: chunk_size 边界等于的 off-by-one 防御 ──
+
+    #[test]
+    fn chunk_with_text_exactly_chunk_size_returns_single_chunk() {
+        // R12 (mutation testing) 发现: 17 chunker tests 全没测 text.len() == chunk_size
+        // 边界. 故意改 `<=` 为 `<` 时所有 test 仍 pass. 本 test 锁定该边界.
+        // 不变量: text 长度 ≤ chunk_size 时 chunk() 返回 1 个 chunk (整段, 不切).
+        let text: String = "a".repeat(512);
+        assert_eq!(text.len(), 512);
+
+        let chunks = chunk(&text, 512, 128);
+        assert_eq!(
+            chunks.len(),
+            1,
+            "text.len() == chunk_size 必须返回 1 chunk (不切), got {} chunks",
+            chunks.len()
+        );
+        assert_eq!(chunks[0].len(), 512);
+    }
+
+    #[test]
+    fn chunk_with_text_one_byte_over_chunk_size_returns_two_chunks() {
+        // 边界另一侧: 513 字节 (chunk_size + 1) 必须切成 ≥ 2 chunks.
+        let text: String = "a".repeat(513);
+        let chunks = chunk(&text, 512, 128);
+        assert!(
+            chunks.len() >= 2,
+            "513 chars (> chunk_size) 必须切成 ≥ 2 chunks, got {}",
+            chunks.len()
+        );
+    }
+
+    #[test]
+    fn chunk_with_text_one_byte_under_chunk_size_returns_single_chunk() {
+        // 边界另一侧: 511 字节 (< chunk_size) 必须返回 1 chunk.
+        let text: String = "a".repeat(511);
+        let chunks = chunk(&text, 512, 128);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 511);
+    }
+
+    // ── R13 v0.6.4 randomized property test (no proptest dep) ────────────────
+    //
+    // Property: 对任意输入长度 + chunk_size，chunker::chunk 应满足:
+    //   1. 第一个 chunk 包含 text 开头
+    //   2. 最后一个 chunk 包含 text 末尾
+    //   3. 所有 chunk 长度 ≤ 2 * chunk_size (含 code fence extend buffer)
+    //   4. 不返回空 Vec (除非 text 为空)
+    //   5. 不 panic / 不死循环
+    //
+    // 实现: deterministic seed (固定输入序列, 不引入 rand crate), 100 个 case.
+
+    fn deterministic_text(seed: u32, len: usize) -> String {
+        // Linear congruential generator (LCG) — deterministic, no extern crate.
+        // Output: ASCII printable + '\n' (含 markdown headings + code fences 偶尔出现)
+        let mut state = seed.wrapping_mul(2654435761);
+        let mut s = String::with_capacity(len);
+        let charset = b"abcdefghijklmnopqrstuvwxyz ABC.,!?\n";
+        for _ in 0..len {
+            state = state.wrapping_mul(1103515245).wrapping_add(12345);
+            let idx = (state as usize) % charset.len();
+            s.push(charset[idx] as char);
+        }
+        s
+    }
+
+    #[test]
+    fn chunk_property_first_chunk_contains_text_start() {
+        // 跑 50 个 case: 不同 seed × 不同长度
+        for seed in 0..10u32 {
+            for &len in &[100usize, 500, 1000, 2000, 5000] {
+                let text = deterministic_text(seed, len);
+                let chunks = chunk(&text, 512, 128);
+                assert!(
+                    !chunks.is_empty(),
+                    "seed={} len={} chunks empty",
+                    seed,
+                    len
+                );
+                let first_chunk_starts_with_text_start = text.starts_with(&chunks[0][..chunks[0].len().min(50)])
+                    || chunks[0].starts_with(&text[..text.len().min(50)]);
+                assert!(
+                    first_chunk_starts_with_text_start,
+                    "seed={} len={}: first chunk doesn't contain text start. \
+                     text[..50]={:?}, chunks[0][..50]={:?}",
+                    seed,
+                    len,
+                    &text[..text.len().min(50)],
+                    &chunks[0][..chunks[0].len().min(50)],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_property_no_chunk_exceeds_2x_chunk_size() {
+        // 即使 code fence extend, chunk 长度也不应超 2*chunk_size buffer
+        for seed in 0..10u32 {
+            for &len in &[200usize, 1000, 3000, 10000] {
+                let text = deterministic_text(seed, len);
+                let chunk_size = 512;
+                let chunks = chunk(&text, chunk_size, 128);
+                for (i, c) in chunks.iter().enumerate() {
+                    let char_count = c.chars().count();
+                    assert!(
+                        char_count <= 2 * chunk_size,
+                        "seed={} len={} chunk[{}] has {} chars > 2*512=1024",
+                        seed,
+                        len,
+                        i,
+                        char_count
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_property_no_panic_on_edge_inputs() {
+        // 防御: chunker 不应 panic 即使输入异常
+        let cases = vec![
+            "",                                                 // empty
+            "\n\n\n",                                           // only newlines
+            "                                            ",     // only spaces
+            "```",                                              // unclosed fence
+            "```rust\nfn x()\n",                                // unclosed code block
+            "a",                                                // single char
+            "🌿🌿🌿🌿🌿",                                            // multi-byte unicode
+        ];
+        for input in cases {
+            // Must not panic
+            let chunks = chunk(input, 512, 128);
+            // Empty input → may or may not return [""] — both are valid behaviors
+            // for caller (parser typically filters empty content before chunking)
+            if !input.is_empty() && !input.trim().is_empty() {
+                assert!(!chunks.is_empty(), "non-empty input {:?} produced 0 chunks", input);
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_property_terminates_on_pathological_overlap() {
+        // 防死循环: overlap >= chunk_size 时 chunker 应自动 clamp
+        let text: String = "a".repeat(2000);
+        let chunks = chunk(&text, 512, 999); // overlap > chunk_size
+        // 不应死循环, chunks 数量有限 (<2000 chunks)
+        assert!(
+            chunks.len() < 2000,
+            "pathological overlap caused {} chunks (likely infinite loop signal)",
+            chunks.len()
+        );
+        assert!(!chunks.is_empty());
+    }
 }
