@@ -4,6 +4,7 @@ use crate::crypto::Key32;
 use crate::error::Result;
 use crate::index::FulltextIndex;
 use crate::llm::{ChatMessage, LlmProvider};
+use crate::pii::Redactor;
 use crate::search::{allocate_budget, SearchResult, INJECTION_BUDGET};
 use crate::store::Store;
 use crate::vectors::VectorIndex;
@@ -20,6 +21,11 @@ pub struct ChatEngine {
     reranker: Arc<Mutex<Option<Arc<dyn crate::infer::RerankProvider>>>>,
     /// 可选网络搜索提供者：本地知识库无结果时作为 fallback
     web_search: Option<Arc<dyn WebSearchProvider>>,
+    /// F-17-PRIVACY: PII redactor wires `pii::Redactor` into the chat outbound path.
+    /// `user_message` is redacted before LLM call; placeholders restored in response.
+    /// Default: 12 builtin PII patterns (phone/email/api_key/id_card/ipv4/ipv6/...).
+    /// attune-pro plugins can inject industry PII via `with_redactor()`.
+    redactor: Arc<Redactor>,
 }
 
 /// 对话响应
@@ -69,12 +75,28 @@ impl ChatEngine {
         embedding: Arc<Mutex<Option<Arc<dyn crate::embed::EmbeddingProvider>>>>,
         reranker: Arc<Mutex<Option<Arc<dyn crate::infer::RerankProvider>>>>,
     ) -> Self {
-        Self { llm, store, fulltext, vectors, embedding, reranker, web_search: None }
+        Self {
+            llm,
+            store,
+            fulltext,
+            vectors,
+            embedding,
+            reranker,
+            web_search: None,
+            redactor: Arc::new(Redactor::default()),
+        }
     }
 
     /// 设置网络搜索提供者（链式调用）
     pub fn with_web_search(mut self, ws: Arc<dyn WebSearchProvider>) -> Self {
         self.web_search = Some(ws);
+        self
+    }
+
+    /// F-17-PRIVACY: 注入自定义 Redactor（attune-pro plugin 用，可附加行业 PII 规则）。
+    /// OSS 默认 `Redactor::default()` 包含 12 类内置正则。
+    pub fn with_redactor(mut self, redactor: Arc<Redactor>) -> Self {
+        self.redactor = redactor;
         self
     }
 
@@ -255,6 +277,20 @@ impl ChatEngine {
     }
 
     /// 单次 LLM 调用，封装 prompt 构建 + 调用。返回 (raw response, confidence)。
+    ///
+    /// ## F-17-PRIVACY wiring (v0.6.2)
+    ///
+    /// 出网前 `pii::Redactor` 替换 user_message 中的 PII 为 `[KIND_N]` placeholder；
+    /// LLM 响应回来 `restore()` 反向替换让用户看到原值。这兑现 v0.6.1 release notes
+    /// 公开承诺的 "L1 placeholder before any cloud API call"。
+    ///
+    /// **当前覆盖**：user_message ✅
+    /// **v0.7+ 增强**：history.content + knowledge.inject_content/content（需要全局
+    /// mappings 合并 — 不同 Redactor 调用之间 placeholder 计数器需贯通，避免
+    /// `[PHONE_1]` 在 user_message 和 knowledge 中指向不同原值）。
+    ///
+    /// 替代设计被否决：把 user+history+knowledge join 然后整体 redact —
+    /// separator 选择困难（短易冲突、长污染 prompt）。
     fn run_llm_once(
         &self,
         user_message: &str,
@@ -262,14 +298,31 @@ impl ChatEngine {
         knowledge: &[SearchResult],
         web_search_used: bool,
     ) -> Result<(String, u8)> {
+        // ── F-17 redact user_message before outbound LLM call ──────────────
+        let redacted_user = self.redactor.redact(user_message);
+
+        // F-17 audit log（v0.6.2 用 log::info；v0.7+ 持久化到 store::audit_log）
+        if !redacted_user.mappings.is_empty() {
+            log::info!(
+                target: "outbound_audit",
+                "F-17: PII redacted in chat outbound — kinds={:?} chars={} model={}",
+                redacted_user.stats.by_kind,
+                redacted_user.stats.total_chars_redacted,
+                self.llm.model_name()
+            );
+        }
+
         let system = build_rag_system_prompt(knowledge, web_search_used);
         let mut messages = Vec::new();
         messages.push(ChatMessage::system(&system));
         messages.extend_from_slice(history);
-        messages.push(ChatMessage::user(user_message));
-        let response = self.llm.chat_with_history(&messages)?;
-        let conf = parse_confidence(&response);
-        Ok((response, conf))
+        messages.push(ChatMessage::user(&redacted_user.redacted_text));
+        let raw_response = self.llm.chat_with_history(&messages)?;
+
+        // ── F-17 restore: LLM 响应里的 placeholder 还原回原值给用户 ──────
+        let restored = self.redactor.restore(&raw_response, &redacted_user.mappings);
+        let conf = parse_confidence(&restored);
+        Ok((restored, conf))
     }
 
     fn search_for_context(
