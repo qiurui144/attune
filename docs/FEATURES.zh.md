@@ -42,7 +42,7 @@ OSS attune 包含 **18 条核心能力**（本文档）。行业纵向（律师 
 | **F-14-ENTITIES** | 通用 entity extractor（Person / Money / Date / Organization） | 🧩 NLP | ✅ |
 | **F-15-MCP** | Python stdio shim 包装 REST，对接 MCP 客户端 | 🔧 集成 | ✅ |
 | **F-16-DISTRIBUTION** | Tauri 2 桌面（Win MSI/NSIS、Linux deb/AppImage）+ NAS HTTPS + 硬件画像 | 📦 分发 | ✅ |
-| **F-17-PRIVACY** | Phase A.5 三层隐私（L0 chunk 隔离 / L1 PII 占位符 / L3 v0.7+）+ F-Pro 跨域防御 | 🔒 隐私 | 🟡 |
+| **F-17-PRIVACY** | Phase A.5 三层隐私（L0 chunk 隔离 / L1 PII 占位符 / L3 v0.7+）+ F-Pro 跨域防御 | 🔒 隐私 | 🟡 ⚠️ |
 | **F-18-QUALITY** | K2 Parse golden set（CI 门控）+ RAGAS 风格 benchmark harness | 📊 质量 | ✅ |
 
 ---
@@ -367,10 +367,22 @@ Project 是用户定义的 item 分组（文件、对话、笔记），含可选
 - 跨域逻辑在 `attune-core::search`
 
 **测试覆盖**：
-- Unit：`pii::patterns::tests`（每 PII 类的正则覆盖）
-- Integration：B.2 计划 — `tests/pii_chat_integration.rs`（验证 L1 placeholder 可逆 + chat 路径不泄露）
+- Unit：`pii::patterns::tests`（每 PII 类的正则覆盖 — 50 个测试）
+- Integration：`tests/pii_chat_path_locking_test.rs`（anti-feature locking test，见下方成熟度）
 
-**成熟度**：🟡 部分 — L0 ✅、L1 ✅、F-Pro ✅、L3 ❌（v0.7+）。
+**成熟度**：🟡 部分 — 2026-05-01 审计发现**接入空白**：
+- L0 chunk 隔离：✅ Active
+- L1 PII 模块：🟡 **模块代码 shipped 但未接入出网路径** —
+  `pii::Redactor` 有完整单元测试（50 正则 ✅）但**生产代码路径中调用次数为 0**。
+  具体未在 `ChatEngine::chat()`、`routes::chat`、`context_compress`、
+  `ai_annotator`、`web_search_browser` 中调用。release notes 承诺的
+  "在任何云 API 调用前替换" **暂未实现**。`pii_chat_path_locking_test.rs`
+  锁定此差距直到接入。
+- F-Pro 跨域防御：✅ Active
+- L3 LLM 脱敏：❌ Designed（v0.7+）
+
+**v0.6.x 补丁待办**：把 `Redactor::redact()` 接入 chat 路径在 LLM 调用前；
+LLM 响应后 `restore()` 还原 placeholder；每次出网调用写审计日志。
 
 ---
 
@@ -446,7 +458,7 @@ Project 是用户定义的 item 分组（文件、对话、笔记），含可选
 | F-14-ENTITIES | ✅ | ✅ | ❌ | ❌ | ❌ |
 | F-15-MCP | ❌ | ❌ | ❌ | ❌ | ❌ 人工 |
 | F-16-DISTRIBUTION | ✅ | ✅ | ✅ | ❌ | ✅ |
-| F-17-PRIVACY | ✅ | 🟡（B.2 计划） | ❌ | ❌ | ❌ |
+| F-17-PRIVACY | ✅ | 🟡 anti-feature lock | ❌ | ❌ | ❌ |
 | F-18-QUALITY | ✅ | ✅ corpus | ✅ | ❌ | ❌ |
 
 **缺口**（驱动 B.1 / B.2 / B.3 / C.1 / C.3 任务定义）：

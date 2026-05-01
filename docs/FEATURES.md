@@ -42,7 +42,7 @@ OSS attune ships with **18 core capabilities** (this document). Industry vertica
 | **F-14-ENTITIES** | Generic entity extractors (Person / Money / Date / Organization) | 🧩 NLP | ✅ |
 | **F-15-MCP** | Python stdio shim wrapping REST for MCP clients | 🔧 Integration | ✅ |
 | **F-16-DISTRIBUTION** | Tauri 2 desktop (Win MSI/NSIS, Linux deb/AppImage) + NAS HTTPS + hardware profile | 📦 Delivery | ✅ |
-| **F-17-PRIVACY** | Phase A.5 three-tier privacy (L0 chunk-isolation / L1 PII placeholder / L3 v0.7+) + F-Pro cross-domain defense | 🔒 Privacy | 🟡 |
+| **F-17-PRIVACY** | Phase A.5 three-tier privacy (L0 chunk-isolation / L1 PII placeholder / L3 v0.7+) + F-Pro cross-domain defense | 🔒 Privacy | 🟡 ⚠️ |
 | **F-18-QUALITY** | K2 Parse golden set (CI gate) + RAGAS-style benchmark harness | 📊 Quality | ✅ |
 
 ---
@@ -367,10 +367,23 @@ Two complementary systems. **Phase A.5 three-tier privacy**: **L0** per-file fla
 - Cross-domain logic in `attune-core::search`
 
 **Test Coverage**:
-- Unit: `pii::patterns::tests` (regex coverage per PII class)
-- Integration: planned B.2 — `tests/pii_chat_integration.rs` (verify L1 placeholder reversibility + chat path doesn't leak)
+- Unit: `pii::patterns::tests` (regex coverage per PII class — 50 tests)
+- Integration: `tests/pii_chat_path_locking_test.rs` (anti-feature locking test, see Maturity below)
 
-**Maturity**: 🟡 Partial — L0 ✅, L1 ✅, F-Pro ✅, L3 ❌ (v0.7+).
+**Maturity**: 🟡 Partial with **wiring gap** discovered 2026-05-01:
+- L0 chunk-isolation: ✅ Active
+- L1 PII module: 🟡 **module shipped but NOT wired into outbound paths** —
+  `pii::Redactor` is unit-tested (50 patterns ✅) but **invoked in zero
+  production code paths**. Specifically NOT called in `ChatEngine::chat()`,
+  `routes::chat`, `context_compress`, `ai_annotator`, or `web_search_browser`.
+  The release-notes promise "replaced before any cloud API call" is **not
+  yet kept**. Locked by `pii_chat_path_locking_test.rs` until wired.
+- F-Pro cross-domain defense: ✅ Active
+- L3 LLM redaction: ❌ Designed (v0.7+)
+
+**v0.6.x patch needed**: wire `Redactor::redact()` into chat call path before
+LLM invocation; persist `mappings` for `restore()` after response; write audit
+log entry per outbound call.
 
 ---
 
@@ -446,7 +459,7 @@ This is the inverse view of `TESTING.md`'s test pyramid. For each test layer, wh
 | F-14-ENTITIES | ✅ | ✅ | ❌ | ❌ | ❌ |
 | F-15-MCP | ❌ | ❌ | ❌ | ❌ | ❌ manual |
 | F-16-DISTRIBUTION | ✅ | ✅ | ✅ | ❌ | ✅ |
-| F-17-PRIVACY | ✅ | 🟡 (B.2 planned) | ❌ | ❌ | ❌ |
+| F-17-PRIVACY | ✅ | 🟡 anti-feature lock | ❌ | ❌ | ❌ |
 | F-18-QUALITY | ✅ | ✅ corpus | ✅ | ❌ | ❌ |
 
 **Gaps** (drive B.1 / B.2 / B.3 / C.1 / C.3 task definitions):
