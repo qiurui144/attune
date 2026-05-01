@@ -278,7 +278,13 @@ log "Reranker (Xenova/bge-reranker-base ~120 MB): will be downloaded by attune-s
 # 4 个文件合计 ~16 MB，首次安装时下载到 ~/.local/share/attune/models/ppocr/
 HOME_DIR="${SUDO_USER:+/home/$SUDO_USER}"
 [ -z "$HOME_DIR" ] && HOME_DIR="$HOME"
-PPOCR_DIR="$HOME_DIR/.local/share/attune/models/ppocr"
+ATTUNE_DATA_ROOT="$HOME_DIR/.local/share/attune"
+PPOCR_DIR="$ATTUNE_DATA_ROOT/models/ppocr"
+
+# 创建 attune data root 时立刻 chown — postinst 跑 root，模型目录默认归 root，
+# attune-server-headless 跑用户态时无法 mkdir 子目录（如 logs/）。
+mkdir -p "$ATTUNE_DATA_ROOT/models" "$ATTUNE_DATA_ROOT/logs"
+[ -n "$SUDO_USER" ] && chown -R "$SUDO_USER:$SUDO_USER" "$ATTUNE_DATA_ROOT" 2>/dev/null
 # 模型源决策（2026-05-01 修）:
 # - PP-OCRv5 ONNX 字典在社区版 (bukuroo) 与 kreuzberg-paddle-ocr 期望格式不匹配
 #   (v5 字典以　全角空格 + emoji 收尾，但 kreuzberg 期望 # 起始 + 空格收尾)
@@ -359,7 +365,14 @@ else
   log "  LLM: NOT preinstalled by design — first-run wizard offers cloud API key or local Ollama"
 fi
 
-# ─── 8. 总结 ───────────────────────────────────────────────────────
+# ─── 8. 最终 chown — 保证 attune-server (user mode) 能写 logs / vault.db ─
+# postinst 跑 root，创建/chmod 各种 subdir；最后一次 chown -R 保证整棵
+# attune data tree 归用户所有
+if [ -n "$SUDO_USER" ] && [ -d "$ATTUNE_DATA_ROOT" ]; then
+  chown -R "$SUDO_USER:$SUDO_USER" "$ATTUNE_DATA_ROOT" 2>/dev/null
+fi
+
+# ─── 9. 总结 ───────────────────────────────────────────────────────
 log "post-install complete."
 log "next: launch 'Attune' → first-run wizard configures LLM (cloud token recommended, Ollama optional)"
 
