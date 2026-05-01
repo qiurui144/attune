@@ -19,7 +19,22 @@
     "publisher": "Attune",
     "category": "Productivity",
     "shortDescription": "私有 AI 知识伙伴",
-    "longDescription": "Attune 是一款私有 AI 知识伙伴，主动进化、对话式、混合智能。"
+    "longDescription": "Attune 是一款私有 AI 知识伙伴，主动进化、对话式、混合智能。",
+    "linux": {
+      "deb": {
+        "depends": ["curl"],
+        "recommends": ["systemd"],
+        "preInstallScript": "scripts/preinst.sh",
+        "postInstallScript": "scripts/postinst.sh",
+        "preRemoveScript": "scripts/prerm.sh",
+        "postRemoveScript": "scripts/postrm.sh"
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "scripts/installer.nsh"
+      }
+    }
   },
   "plugins": {
     "updater": {
