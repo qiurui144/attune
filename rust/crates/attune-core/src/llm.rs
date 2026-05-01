@@ -74,20 +74,9 @@ pub trait LlmProvider: Send + Sync {
     fn model_name(&self) -> &str;
 }
 
-#[derive(Serialize)]
-struct OllamaChatRequest<'a> {
-    model: &'a str,
-    messages: Vec<OllamaChatMessage<'a>>,
-    stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct OllamaChatMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
+// OllamaChatRequest / OllamaChatMessage structs removed v0.6.4 — both chat_sync
+// and chat_with_history now use serde_json::json!() directly to include keep_alive
+// (per F-16 Ollama 模型驻留 fix).
 
 #[derive(Deserialize)]
 struct OllamaChatResponse {
@@ -199,17 +188,18 @@ impl OllamaLlmProvider {
 
     fn chat_sync(&self, system: &str, user: &str) -> Result<String> {
         let url = format!("{}/api/chat", self.base_url);
-        let body = OllamaChatRequest {
-            model: &self.model,
-            messages: vec![
-                OllamaChatMessage { role: "system", content: system },
-                OllamaChatMessage { role: "user", content: user },
+        // F-16 Ollama 模型驻留: keep_alive=1h. 见 embed.rs 同款注释.
+        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
+            .unwrap_or_else(|_| "1h".to_string());
+        let body = serde_json::json!({
+            "model": &self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
-            stream: false,
-            // format 不强制为 json：分类场景通过 system prompt 要求 JSON 输出，
-            // 避免 format:"json" 破坏通用对话响应
-            format: None,
-        };
+            "stream": false,
+            "keep_alive": keep_alive,
+        });
         let client = self.client.clone();
         let body_json = serde_json::to_vec(&body)?;
 
@@ -241,10 +231,14 @@ impl LlmProvider for OllamaLlmProvider {
         let ollama_messages: Vec<serde_json::Value> = messages.iter()
             .map(|m| serde_json::json!({"role": &m.role, "content": &m.content}))
             .collect();
+        // F-16 Ollama 模型驻留: keep_alive=1h. 见 embed.rs 同款注释.
+        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
+            .unwrap_or_else(|_| "1h".to_string());
         let body = serde_json::json!({
             "model": &self.model,
             "messages": ollama_messages,
             "stream": false,
+            "keep_alive": keep_alive,
         });
         let client = self.client.clone();
         let body_bytes = serde_json::to_vec(&body)?;

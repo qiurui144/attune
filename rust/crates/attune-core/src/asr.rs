@@ -124,13 +124,34 @@ fn find_default_model() -> Option<(String, String)> {
         }
     }
     // 2-N. 标准路径，优先 small（中文 WER 满足）
+    //
+    // R10 fix (v0.6.4): Tier-recommended downloads use Q8 quantization
+    // (`ggml-{size}-q8_0.bin`, per platform/tier.rs ModelRecommendation), but the
+    // original candidates list only mentioned non-quantized `ggml-{size}.bin`.
+    // Result: a user with a Tier-installed Q8 model would have ASR fall through
+    // to "no model found" and fail. Fix: list both quantization variants in
+    // priority order — Q8 first (smaller, faster, same WER), then full precision.
     let home = std::env::var("HOME").ok()?;
+    let attune_models = format!("{home}/.local/share/attune/models/whisper");
+    let cache_dir = format!("{home}/.cache/whisper");
     let candidates = [
-        format!("{home}/.local/share/attune/models/whisper/ggml-small.bin"),
-        format!("{home}/.local/share/attune/models/whisper/ggml-medium.bin"),
-        format!("{home}/.local/share/attune/models/whisper/ggml-base.bin"),
-        format!("{home}/.cache/whisper/ggml-small.bin"),
-        format!("{home}/.cache/whisper/ggml-base.bin"),
+        // Tier-installed Q8 quantized (per ModelRecommendation in platform/tier.rs)
+        format!("{attune_models}/ggml-small-q8_0.bin"),
+        format!("{attune_models}/ggml-medium-q5_0.bin"),
+        format!("{attune_models}/ggml-medium-q8_0.bin"),
+        format!("{attune_models}/ggml-base-q8_0.bin"),
+        format!("{attune_models}/ggml-tiny-q8_0.bin"),
+        // Non-quantized full precision (manual installs from upstream)
+        format!("{attune_models}/ggml-small.bin"),
+        format!("{attune_models}/ggml-medium.bin"),
+        format!("{attune_models}/ggml-base.bin"),
+        // ~/.cache/whisper standard locations (Q8 first, then non-quant)
+        format!("{cache_dir}/ggml-small-q8_0.bin"),
+        format!("{cache_dir}/ggml-base-q8_0.bin"),
+        format!("{cache_dir}/ggml-small.bin"),
+        format!("{cache_dir}/ggml-base.bin"),
+        // System-wide
+        "/usr/share/whisper/ggml-small-q8_0.bin".to_string(),
         "/usr/share/whisper/ggml-small.bin".to_string(),
     ];
     for path in &candidates {
