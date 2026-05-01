@@ -364,7 +364,7 @@ fi
 log "─── 4 foundation stack final check ──"
 log "  Embedding: $(ollama list 2>/dev/null | grep -q bge && echo "OK ($EMBED_MODEL via Ollama)" || echo "MISSING")"
 log "  Reranker:  lazy-load on first search (Xenova/bge-reranker-base ~120 MB via hf_hub)"
-log "  ASR:       $(command -v whisper-cli >/dev/null && [ -f "$ASR_MODEL_FILE" ] && echo "OK (whisper-cli + ggml-small-q8)" || echo "PARTIAL (re-run apt or attune deploy)")"
+log "  ASR:       $(command -v whisper-cli >/dev/null && [ -f "$ASR_MODEL_FILE" ] && echo "OK (whisper-cli + large-v3-turbo-q5, 中文 WER 5-7%)" || ([ -f "$LEGACY_SMALL" ] && echo "PARTIAL (legacy small-q8 fallback)" || echo "MISSING"))"
 log "  OCR:       $([ -f "$PPOCR_DIR/ch_PP-OCRv5_rec_mobile.onnx" ] && command -v pdftoppm >/dev/null && echo "OK (PP-OCRv5 mobile, 4 ONNX models + pdftoppm)" || echo "MISSING (re-run: apt install --reinstall attune)")"
 if [ "$FORM_FACTOR" = "k3" ]; then
   log "─── LLM (K3 form factor — preinstalled) ──"
