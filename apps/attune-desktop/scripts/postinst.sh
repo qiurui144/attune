@@ -148,53 +148,47 @@ UNIT
   done
 fi
 
-# ─── 5. 模型拉取（按 RAM + GPU tier 自适应）─────────────────────────
-# 用户拍板：必须 .deb 安装时一次性完成，不留"首次启动 wizard 再拉"的环节
+# ─── 5. Embedding 模型拉取（必要底座之一）──────────────────────────
+# 设计原则（CLAUDE.md "硬件感知的默认底座"）：
+#   本地必装的 4 底座 = Embedding + Reranker + ASR + OCR
+#   LLM **不本地预装** — 笔电默认走远端 token，用户在首次启动 wizard 配置
+#                       cloud API key 或选择 Ollama (用户主动 ollama pull)
+#                       K3 一体机镜像才另行预装 qwen2.5:1.5b/3b
+#
+# Embedding 按 RAM tier 选 bge-m3 (≥16GB) 或 bge-small (<16GB)
 RAM_GB=$(free -g 2>/dev/null | awk '/^Mem:/{print $2}' || echo 0)
-HAS_NVIDIA=0
-[ -e /dev/nvidia0 ] && HAS_NVIDIA=1
-HAS_AMD=0
-[ -n "${GFX:-}" ] && HAS_AMD=1
-
-# 决策矩阵：与 scripts/deploy-linux.sh 的 tier 表保持一致
-if [ "$RAM_GB" -ge 16 ] && [ "$HAS_NVIDIA" = "1" ]; then
-  EMBED_MODEL="bge-m3"; CHAT_MODEL="qwen2.5:7b"; TIER="high"
-elif [ "$RAM_GB" -ge 16 ] && [ "$HAS_AMD" = "1" ]; then
-  EMBED_MODEL="bge-m3"; CHAT_MODEL="qwen2.5:3b"; TIER="mid"
-elif [ "$RAM_GB" -ge 8 ]; then
-  EMBED_MODEL="bge-small"; CHAT_MODEL="qwen2.5:1.5b"; TIER="low"
+if [ "$RAM_GB" -ge 16 ]; then
+  EMBED_MODEL="bge-m3"
+  EMBED_TIER="full (bge-m3, 1024-dim, 多语言)"
 else
-  EMBED_MODEL="bge-small"; CHAT_MODEL="qwen2.5:0.5b"; TIER="minimal"
+  EMBED_MODEL="bge-small"
+  EMBED_TIER="lite (bge-small, 384-dim, 中英)"
 fi
 
-log "Hardware tier: RAM=${RAM_GB}GB NVIDIA=$HAS_NVIDIA AMD=$HAS_AMD → tier=$TIER"
-log "Selected models: embed=$EMBED_MODEL chat=$CHAT_MODEL"
+log "Embedding tier: RAM=${RAM_GB}GB → $EMBED_TIER"
+log "LLM: NOT preinstalled by design — user picks cloud API or local Ollama in first-run wizard"
 
-# 仅在 Ollama API 上线时拉模型；否则留下 hint 让用户后续 attune deploy 补
+# 仅在 Ollama API 上线时拉 embedding；否则留 hint
 if curl -sf http://localhost:11434/api/version >/dev/null 2>&1; then
-  for m in "$EMBED_MODEL" "$CHAT_MODEL"; do
-    if ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$m" \
-       || ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${m}:latest"; then
-      log "  $m already pulled — skipping"
+  if ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$EMBED_MODEL" \
+     || ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${EMBED_MODEL}:latest"; then
+    log "  $EMBED_MODEL already pulled — skipping"
+  else
+    log "  pulling $EMBED_MODEL (~minutes; progress in syslog: 'journalctl -t attune-postinst -f')..."
+    if ollama pull "$EMBED_MODEL" 2>&1 | while IFS= read -r line; do
+         case "$line" in
+           *success*|*verifying*|*"writing manifest"*|*error*|*Error*)
+             logger -t "$LOG_TAG" -- "[pull $EMBED_MODEL] $line"
+             ;;
+         esac
+       done; then
+      log "  $EMBED_MODEL pulled OK"
     else
-      log "  pulling $m (~minutes; progress in syslog: 'journalctl -t attune-postinst -f')..."
-      # ollama pull 在非 TTY 下输出 newline-separated progress；管到 logger 异步记
-      if ollama pull "$m" 2>&1 | while IFS= read -r line; do
-           # 只记关键转换（避免 1000 行 progress noise 灌爆 syslog）
-           case "$line" in
-             *success*|*verifying*|*"writing manifest"*|*error*|*Error*)
-               logger -t "$LOG_TAG" -- "[pull $m] $line"
-               ;;
-           esac
-         done; then
-        log "  $m pulled OK"
-      else
-        log "  WARN: $m pull failed (network?). User can retry: ollama pull $m"
-      fi
+      log "  WARN: $EMBED_MODEL pull failed (network?). User can retry: ollama pull $EMBED_MODEL"
     fi
-  done
+  fi
 else
-  log "WARN: Ollama API not ready, skipping model pull. User can later: attune deploy"
+  log "WARN: Ollama API not ready, skipping embedding pull. User can later: ollama pull $EMBED_MODEL"
 fi
 
 # ─── 6. 底座底层：ASR (whisper.cpp) + Reranker ──────────────────────
@@ -285,17 +279,21 @@ if [ "$PPOCR_OK" = "1" ]; then
   log "  PP-OCR: 4 model files ready at $PPOCR_DIR"
 fi
 
-# ─── 7. 验证底座完整性 ─────────────────────────────────────────────
-log "─── foundation stack final check ──"
-log "  Embedding: $(ollama list 2>/dev/null | grep -q bge && echo "OK ($EMBED_MODEL)" || echo "MISSING")"
-log "  LLM:       $(ollama list 2>/dev/null | grep -q qwen && echo "OK ($CHAT_MODEL)" || echo "MISSING")"
-log "  ASR:       $(command -v whisper-cli >/dev/null && [ -f "$ASR_MODEL_FILE" ] && echo "OK (whisper-cli + small-q8)" || echo "PARTIAL (re-run apt or attune deploy)")"
-log "  OCR:       $([ -f "$PPOCR_DIR/ch_PP-OCRv5_rec_mobile.onnx" ] && command -v pdftoppm >/dev/null && echo "OK (PP-OCRv5 mobile, 4 ONNX models)" || echo "MISSING (re-run: apt install --reinstall attune)")"
-log "  Reranker:  preload deferred (lazy on first query)"
+# ─── 7. 验证 4 必要底座完整性 ──────────────────────────────────────
+# 设计契约（CLAUDE.md "硬件感知的默认底座" + "成本感知与触发契约"）：
+#   本地必装 4 底座 = Embedding + Reranker + ASR + OCR
+#   LLM 不在底座清单（远端 token 默认 / K3 镜像例外）
+log "─── 4 foundation stack final check ──"
+log "  Embedding: $(ollama list 2>/dev/null | grep -q bge && echo "OK ($EMBED_MODEL via Ollama)" || echo "MISSING")"
+log "  Reranker:  lazy-load on first search (Xenova/bge-reranker-base ~120 MB via hf_hub)"
+log "  ASR:       $(command -v whisper-cli >/dev/null && [ -f "$ASR_MODEL_FILE" ] && echo "OK (whisper-cli + ggml-small-q8)" || echo "PARTIAL (re-run apt or attune deploy)")"
+log "  OCR:       $([ -f "$PPOCR_DIR/ch_PP-OCRv5_rec_mobile.onnx" ] && command -v pdftoppm >/dev/null && echo "OK (PP-OCRv5 mobile, 4 ONNX models + pdftoppm)" || echo "MISSING (re-run: apt install --reinstall attune)")"
+log "─── LLM (not a foundation; user choice in wizard)──"
+log "  LLM: NOT preinstalled by design — first-run wizard offers cloud API key or local Ollama"
 
 # ─── 8. 总结 ───────────────────────────────────────────────────────
 log "post-install complete."
-log "next: launch 'Attune' from desktop menu — full foundation stack (embed+rerank+asr+ocr) ready"
+log "next: launch 'Attune' → first-run wizard configures LLM (cloud token recommended, Ollama optional)"
 
 # 永不让 postinst 失败 — 阻塞 dpkg/rpm 比 Ollama 缺失更糟
 exit 0

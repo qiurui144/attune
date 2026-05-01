@@ -11,11 +11,10 @@
 #   - AMD 独显         → 同上（gfx1100 等可能不需要 override）
 #   - CPU only         → Ollama CPU 后端
 #
-# 模型按 (RAM, VRAM) tier 选：
-#   ≥16GB RAM + dGPU/独立 VRAM ≥8GB  → bge-m3 + qwen2.5:7b
-#   ≥16GB RAM + iGPU/共享 VRAM       → bge-m3 + qwen2.5:3b
-#   ≥8GB RAM   仅 CPU                → bge-small + qwen2.5:1.5b
-#   <8GB RAM                         → bge-small + qwen2.5:0.5b（提示精度低）
+# 模型按 RAM tier 选（**仅 Embedding，LLM 不本地预装**）：
+#   ≥16GB RAM → bge-m3 (多语言 1024-dim)
+#   <16GB RAM → bge-small (中英 384-dim)
+# LLM 走远端 token 默认，K3 一体机镜像才单独预装 qwen2.5:1.5b/3b
 #
 # 用法：
 #   ./scripts/deploy-linux.sh              # full auto
@@ -118,14 +117,16 @@ log "  RAM: ${RAM_GB} GB"
 log "  GPU: $GPU_KIND${GFX_TARGET:+ ($GFX_TARGET)}"
 log "  tier: $HW_TIER"
 
-# ─── 3. 模型选择 ────────────────────────────────────────────────────
+# ─── 3. Embedding 模型选择 ──────────────────────────────────────────
+# 设计契约（CLAUDE.md "硬件感知的默认底座" + "成本感知与触发契约"）：
+#   本地必装 4 底座 = Embedding + Reranker + ASR + OCR（不含 LLM）
+#   LLM 走远端 token 默认 — 用户在 wizard 自配；K3 镜像才另装本地 LLM
 case "$HW_TIER" in
-  high)    EMBED_MODEL="bge-m3";          CHAT_MODEL="qwen2.5:7b" ;;
-  mid)     EMBED_MODEL="bge-m3";          CHAT_MODEL="qwen2.5:3b" ;;
-  low)     EMBED_MODEL="bge-small";       CHAT_MODEL="qwen2.5:1.5b" ;;
-  minimal) EMBED_MODEL="bge-small";       CHAT_MODEL="qwen2.5:0.5b"; warn "<8GB RAM — chat 精度会受限" ;;
+  high|mid)     EMBED_MODEL="bge-m3" ;;     # 16GB+ → 多语言 1024-dim
+  low|minimal)  EMBED_MODEL="bge-small" ;;  # <16GB → 中英 384-dim
 esac
-log "  models: embed=$EMBED_MODEL  chat=$CHAT_MODEL"
+log "  embedding: $EMBED_MODEL"
+log "  LLM: skipped — 默认远端 token；在 attune 首次启动 wizard 配 cloud API 或选 Ollama"
 
 # ─── 4. Ollama 安装 ─────────────────────────────────────────────────
 log "step 3/6: Ollama install check"
@@ -186,22 +187,20 @@ if [ "$DRY_RUN" = "0" ]; then
   done
 fi
 
-# ─── 7. 拉模型 ──────────────────────────────────────────────────────
+# ─── 7. 拉 Embedding 模型（不拉 LLM）──────────────────────────────
+# LLM 不在本地必装清单 — 用户在 attune wizard 自配 cloud API 或 Ollama
 if [ "$SKIP_MODELS" = "1" ]; then
-  log "step 6/6: skipping model pull (--no-models)"
+  log "step 6/6: skipping embedding pull (--no-models)"
 else
-  log "step 6/6: pull recommended models"
-  for model in "$EMBED_MODEL" "$CHAT_MODEL"; do
-    log "  pulling $model ..."
-    if [ "$DRY_RUN" = "1" ]; then
-      log "[dry-run] ollama pull $model"
-    else
-      if ! ollama pull "$model"; then
-        err "ollama pull $model failed"
-        exit 4
-      fi
+  log "step 6/6: pull embedding model ($EMBED_MODEL)"
+  if [ "$DRY_RUN" = "1" ]; then
+    log "[dry-run] ollama pull $EMBED_MODEL"
+  else
+    if ! ollama pull "$EMBED_MODEL"; then
+      err "ollama pull $EMBED_MODEL failed"
+      exit 4
     fi
-  done
+  fi
 
   # 验证 embed call 真的工作
   log "  verify: embedding round-trip"
@@ -223,10 +222,15 @@ fi
 log "─── deployment summary ───"
 log "  hardware:    $GPU_KIND${GFX_TARGET:+ ($GFX_TARGET)} | RAM ${RAM_GB} GB | tier=$HW_TIER"
 log "  ollama:      $(ollama --version 2>&1 | head -1)"
-log "  models:      $EMBED_MODEL + $CHAT_MODEL"
+log "  embedding:   $EMBED_MODEL (本地必装底座之一)"
+log "  LLM:         走远端 token 默认；用户在 attune 首次启动 wizard 配置"
 log "  endpoint:    http://localhost:11434"
 log ""
-log "next: run attune-server-headless and point it at Ollama:"
-log "  ATTUNE_OLLAMA_HOST=http://localhost:11434 ./attune-server-headless --port 18900"
+log "其他底座（也由 .deb postinst 装好，本脚本仅辅助）："
+log "  Reranker:  Xenova/bge-reranker-base (lazy load on first search)"
+log "  ASR:       whisper-cli + ggml-small-q8 (走 attune .deb bundle 路径)"
+log "  OCR:       PP-OCRv5 mobile (4 ONNX models in ~/.local/share/attune/models/ppocr)"
+log ""
+log "next: run attune-desktop or attune-server-headless"
 log ""
 log "deploy-linux.sh: done."
