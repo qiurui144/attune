@@ -36,6 +36,24 @@ enum Commands {
         #[arg(short, long, default_value = "20")]
         limit: usize,
     },
+    /// R38 (2026-05-01): Export vault data files to a backup directory.
+    /// Copies vault.db (encrypted SQLite), tantivy/ (full-text index), vectors.encbin (if present).
+    /// Vault MUST be locked first (this command verifies and refuses if unlocked, to avoid WAL corruption).
+    /// Note: device.key (master secret) is NOT exported — user must back that up separately.
+    VaultExport {
+        /// Destination directory (will be created if missing)
+        dest: std::path::PathBuf,
+    },
+    /// R38: Import a previously exported vault into data_dir.
+    /// Vault MUST be sealed (no setup yet) OR locked; refuses if any vault.db exists.
+    /// Use --force to overwrite (DANGEROUS — will replace current vault).
+    VaultImport {
+        /// Source directory containing vault.db (and optional tantivy/ + vectors.encbin)
+        src: std::path::PathBuf,
+        /// Overwrite existing vault data (DANGEROUS)
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -106,6 +124,89 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             let _ = vault.dek_db()?;
             let items = vault.store().list_items(limit, 0)?;
             println!("{}", serde_json::to_string_pretty(&items).expect("Vec<Item> is serializable"));
+        }
+        Commands::VaultExport { dest } => {
+            // R38: 必须 locked，否则 SQLite WAL 文件可能不一致
+            if matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                eprintln!("Refusing to export while vault is UNLOCKED — please run `attune lock` first.");
+                eprintln!("Reason: SQLite WAL must be checkpointed; locking forces a consistent snapshot.");
+                std::process::exit(1);
+            }
+            let data = attune_core::platform::data_dir();
+            std::fs::create_dir_all(&dest).map_err(attune_core::error::VaultError::Io)?;
+            let mut copied = 0u32;
+            for name in &["vault.db", "vault.db-shm", "vault.db-wal", "vectors.encbin"] {
+                let src = data.join(name);
+                if src.exists() {
+                    let target = dest.join(name);
+                    std::fs::copy(&src, &target).map_err(attune_core::error::VaultError::Io)?;
+                    copied += 1;
+                }
+            }
+            // tantivy directory recursive copy
+            let ftx_src = data.join("tantivy");
+            if ftx_src.is_dir() {
+                let ftx_dst = dest.join("tantivy");
+                copy_dir_recursive(&ftx_src, &ftx_dst).map_err(attune_core::error::VaultError::Io)?;
+                copied += 1;
+            }
+            println!("Exported {copied} entries to {}", dest.display());
+            println!("IMPORTANT: separately back up your device.key at {}",
+                attune_core::platform::device_secret_path().display());
+        }
+        Commands::VaultImport { src, force } => {
+            let data = attune_core::platform::data_dir();
+            let target_db = data.join("vault.db");
+            if target_db.exists() && !force {
+                eprintln!("Refusing to import — {} already exists.", target_db.display());
+                eprintln!("Use --force to overwrite (DANGEROUS, replaces current vault).");
+                std::process::exit(1);
+            }
+            if !src.is_dir() {
+                eprintln!("Source not a directory: {}", src.display());
+                std::process::exit(1);
+            }
+            let src_db = src.join("vault.db");
+            if !src_db.exists() {
+                eprintln!("Source missing vault.db: {}", src_db.display());
+                std::process::exit(1);
+            }
+            std::fs::create_dir_all(&data).map_err(attune_core::error::VaultError::Io)?;
+            let mut copied = 0u32;
+            for name in &["vault.db", "vault.db-shm", "vault.db-wal", "vectors.encbin"] {
+                let s = src.join(name);
+                if s.exists() {
+                    std::fs::copy(&s, data.join(name)).map_err(attune_core::error::VaultError::Io)?;
+                    copied += 1;
+                }
+            }
+            let ftx_src = src.join("tantivy");
+            if ftx_src.is_dir() {
+                let ftx_dst = data.join("tantivy");
+                let _ = std::fs::remove_dir_all(&ftx_dst);
+                copy_dir_recursive(&ftx_src, &ftx_dst).map_err(attune_core::error::VaultError::Io)?;
+                copied += 1;
+            }
+            println!("Imported {copied} entries from {}", src.display());
+            println!("Run `attune unlock` to verify with the matching master password.");
+            println!("If unlock fails, ensure device.key matches: {}",
+                attune_core::platform::device_secret_path().display());
+        }
+    }
+    Ok(())
+}
+
+/// 递归复制目录 — 用于 vault export/import 的 tantivy/ 子目录
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if ft.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else if ft.is_file() {
+            std::fs::copy(entry.path(), dst_path)?;
         }
     }
     Ok(())
