@@ -31,6 +31,7 @@ export type View =
   | 'remote'
   | 'knowledge'
   | 'skills'
+  | 'marketplace'  // G3 (2026-05-01): PluginHub 插件市场
   | 'settings';
 export const currentView = signal<View>('chat');
 

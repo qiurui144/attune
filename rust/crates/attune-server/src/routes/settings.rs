@@ -76,6 +76,7 @@ pub async fn update_settings(
         "summary_model", "context_strategy", "theme", "language",
         "skills",  // Sprint 2 Skills Router: { disabled: string[] }
         "wizard",  // wizard completion state: { complete: bool, current_step: int }
+        "pluginhub", // G2 (2026-05-01): { url, license_key }
     ];
     // URL 字段白名单 scheme 校验（防 javascript: / data: 注入成 XSS 种子）
     if let Some(body_obj) = body.as_object() {
@@ -138,6 +139,15 @@ pub async fn update_settings(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
     vault.store().set_meta(SETTINGS_KEY, &data)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+
+    // G2 (2026-05-01) — pluginhub 字段变化时热切 provider
+    if body.get("pluginhub").is_some() {
+        let url = current.get("pluginhub").and_then(|p| p.get("url")).and_then(|v| v.as_str());
+        let key = current.get("pluginhub").and_then(|p| p.get("license_key")).and_then(|v| v.as_str());
+        // 释放 vault lock 让 reload 能拿 plugin_hub mutex
+        drop(vault);
+        state.reload_plugin_hub(url, key);
+    }
 
     // 返回前先 redact（防 API key 回流）
     redact_api_key(&mut current);
@@ -214,6 +224,14 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
         },
         "plugins": {
             "disabled": []  // W4 E1: marketplace 禁用列表，list 用于 enabled 字段
+        },
+
+        // G2 (2026-05-01) — PluginHub 远端市场对接
+        // null = 走内嵌 Mock provider（默认离线，看到 4 个 attune-pro 试用卡）
+        // 配 url + license_key 后切到 HttpPluginHubProvider，调真 hub.attune.ai
+        "pluginhub": {
+            "url": null,                  // 例: "https://hub.attune.ai"
+            "license_key": null           // 同 attune Pro 会员 license key（与 LLM Gateway 共享）
         },
 
         // ── 不在 UI 暴露（保留后端行为）──

@@ -67,8 +67,9 @@ pub struct AppState {
     pub recommendation_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
     /// Sprint 2: 启动时加载的 plugins（attune-pro / 用户 / 社区）
     pub plugin_registry: std::sync::Arc<attune_core::plugin_registry::PluginRegistry>,
-    /// E2/E4 (2026-05-01): PluginHub 客户端（默认 Mock，attune-pro 注入真 hub-client）
-    pub plugin_hub: std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>,
+    /// E2/E4 (2026-05-01): PluginHub 客户端 (Mutex 让 PATCH /settings 能热更新)
+    /// 默认 Mock；settings.pluginhub.url + license_key 配齐后切到 HttpPluginHubProvider
+    pub plugin_hub: Mutex<std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>>,
 }
 
 impl AppState {
@@ -124,11 +125,30 @@ impl AppState {
             hardware: attune_core::platform::HardwareProfile::detect(),
             recommendation_tx,
             plugin_registry,
-            // E2/E4: 默认 Mock — 用户在 wizard 配 PluginHub URL 后由 attune-pro
-            // hub-client 替换为真 HTTP 客户端
-            plugin_hub: std::sync::Arc::new(
+            // E2/E4 + G2: 默认 Mock；settings.pluginhub.url + license_key 配齐后
+            // 由 reload_plugin_hub() 切到 HttpPluginHubProvider
+            plugin_hub: Mutex::new(std::sync::Arc::new(
                 attune_core::plugin_hub::MockPluginHubProvider::default(),
-            ),
+            )),
+        }
+    }
+
+    /// G2 (2026-05-01) — 按 settings 切换 PluginHub provider
+    /// 由 PATCH /api/v1/settings 在 pluginhub 字段变化时调
+    pub fn reload_plugin_hub(&self, url: Option<&str>, license_key: Option<&str>) {
+        let new_provider: std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider> =
+            match (url, license_key) {
+                (Some(u), Some(k)) if !u.is_empty() && !k.is_empty() => {
+                    tracing::info!("plugin_hub: switching to HttpPluginHubProvider @ {u}");
+                    std::sync::Arc::new(attune_core::plugin_hub::HttpPluginHubProvider::new(u, k))
+                }
+                _ => {
+                    tracing::info!("plugin_hub: using MockPluginHubProvider (no url/license configured)");
+                    std::sync::Arc::new(attune_core::plugin_hub::MockPluginHubProvider::default())
+                }
+            };
+        if let Ok(mut guard) = self.plugin_hub.lock() {
+            *guard = new_provider;
         }
     }
 

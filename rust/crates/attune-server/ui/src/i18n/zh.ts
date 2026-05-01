@@ -133,6 +133,7 @@ export const zh = {
   'sidebar.nav.remote': '远程目录',
   'sidebar.nav.knowledge': '知识全景',
   'sidebar.nav.skills': '技能',
+  'sidebar.nav.marketplace': '插件市场',
   'sidebar.nav.settings': '设置',
   'sidebar.vault.unlocked': '已解锁',
   'sidebar.vault.locked': '已锁定',

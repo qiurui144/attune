@@ -1,7 +1,12 @@
 //! PluginHub Provider trait — attune-server 通过此接口与插件市场交互
 //!
-//! OSS 端只定义 trait + Mock 实现（用于测试）。
-//! 真实 HTTP 客户端在 attune-pro/crates/hub-client/ 实现 trait。
+//! 实现：
+//! - `MockPluginHubProvider` — 内嵌固定 listing，无网络依赖（默认 + 测试）
+//! - `HttpPluginHubProvider` — HTTP 调 cloud/pluginhub /api/v1/* (v0.7+)
+//!
+//! 选用：attune-server 启动时按 settings.pluginhub_url 决定：
+//! - URL 未配 → Mock
+//! - URL + license_key 已配 → HttpPluginHubProvider
 //!
 //! 使用：
 //! ```rust,no_run
@@ -205,6 +210,202 @@ impl PluginHubProvider for MockPluginHubProvider {
     }
 }
 
+// ── HTTP 实装（v0.7+，调 cloud/pluginhub /api/v1/* 真服务）───────────
+
+/// HTTP PluginHub provider — 阻塞 HTTP（与 hf_hub 风格一致）。
+/// attune-server 在 spawn_blocking 里调，避免引入 async runtime 复杂度。
+pub struct HttpPluginHubProvider {
+    base_url: String,
+    license_key: String,
+    client: reqwest::blocking::Client,
+}
+
+impl HttpPluginHubProvider {
+    pub fn new(base_url: impl Into<String>, license_key: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            license_key: license_key.into(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .expect("reqwest blocking build never fails"),
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    }
+
+    fn auth_header(&self) -> String {
+        format!("Bearer {}", self.license_key)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerIndexEntry {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    plugin_type: String,
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    latest_version: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default = "_default_min_plan")]
+    min_plan: String,
+    #[serde(default)]
+    available: bool,
+    #[serde(default)]
+    trial_available: bool,
+    #[serde(default)]
+    trial_days: i32,
+}
+
+fn _default_min_plan() -> String {
+    "individual".into()
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerIndexResponse {
+    #[serde(default = "_default_hub_version")]
+    hub_version: String,
+    #[serde(default = "_default_min_plan")]
+    user_plan: String,
+    #[serde(default = "_default_upgrade_url")]
+    upgrade_url: String,
+    plugins: Vec<ServerIndexEntry>,
+}
+
+fn _default_hub_version() -> String {
+    "1.0".into()
+}
+fn _default_upgrade_url() -> String {
+    "https://accounts.attune.ai/upgrade".into()
+}
+
+#[derive(Debug, Serialize)]
+struct InstallReq<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_fp: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerInstallResp {
+    install_id: i64,
+    plugin_id: String,
+    version: String,
+    #[serde(default)]
+    sha256: String,
+    #[serde(default)]
+    trial_started: Option<String>,
+    #[serde(default)]
+    trial_expires: Option<String>,
+    download_url: String,
+}
+
+impl PluginHubProvider for HttpPluginHubProvider {
+    fn list_plugins(&self) -> Result<PluginListingResponse> {
+        let resp: ServerIndexResponse = self
+            .client
+            .get(self.url("/api/v1/index.json"))
+            .header("Authorization", self.auth_header())
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.json())
+            .map_err(|e| VaultError::ModelLoad(format!("hub list_plugins: {e}")))?;
+
+        let plugins = resp
+            .plugins
+            .into_iter()
+            .map(|e| PluginListing {
+                id: e.id,
+                name: e.name,
+                plugin_type: e.plugin_type,
+                category: e.category,
+                description: e.description,
+                latest_version: e.latest_version,
+                tags: e.tags,
+                min_plan: e.min_plan,
+                available: e.available,
+                trial_available: e.trial_available,
+                trial_days: e.trial_days,
+            })
+            .collect();
+
+        Ok(PluginListingResponse {
+            hub_version: resp.hub_version,
+            user_plan: resp.user_plan,
+            upgrade_url: resp.upgrade_url,
+            plugins,
+        })
+    }
+
+    fn install_plugin(&self, plugin_id: &str, device_fp: Option<&str>) -> Result<InstallResponse> {
+        let url = self.url(&format!("/api/v1/plugins/{plugin_id}/install"));
+        let body = InstallReq { device_fp };
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .map_err(|e| VaultError::ModelLoad(format!("hub install send: {e}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().unwrap_or_default();
+            let prefix = if status == reqwest::StatusCode::FORBIDDEN
+                || status == reqwest::StatusCode::PAYMENT_REQUIRED
+            {
+                "plan_required"
+            } else if status == reqwest::StatusCode::NOT_FOUND {
+                "not found"
+            } else {
+                "hub install"
+            };
+            return Err(VaultError::ModelLoad(format!(
+                "{prefix}: HTTP {status} — {text}"
+            )));
+        }
+
+        let r: ServerInstallResp = response
+            .json()
+            .map_err(|e| VaultError::ModelLoad(format!("hub install parse: {e}")))?;
+
+        Ok(InstallResponse {
+            install_id: r.install_id,
+            plugin_id: r.plugin_id,
+            version: r.version,
+            sha256: r.sha256,
+            trial_started: r.trial_started,
+            trial_expires: r.trial_expires,
+            download_url: r.download_url,
+        })
+    }
+
+    fn download_plugin(&self, plugin_id: &str, version: &str) -> Result<Vec<u8>> {
+        let url = self.url(&format!("/api/v1/packages/{plugin_id}-{version}.tar.gz"));
+        let bytes = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.bytes())
+            .map_err(|e| VaultError::ModelLoad(format!("hub download: {e}")))?;
+        Ok(bytes.to_vec())
+    }
+
+    fn name(&self) -> &str {
+        "http-pluginhub"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +452,25 @@ mod tests {
     fn mock_provider_name() {
         let hub = MockPluginHubProvider::default();
         assert_eq!(hub.name(), "mock");
+    }
+
+    #[test]
+    fn http_provider_url_join() {
+        let h = HttpPluginHubProvider::new("https://hub.attune.ai/", "key");
+        assert_eq!(h.url("/api/v1/index.json"), "https://hub.attune.ai/api/v1/index.json");
+        let h2 = HttpPluginHubProvider::new("https://hub.attune.ai", "key");
+        assert_eq!(h2.url("/api/v1/index.json"), "https://hub.attune.ai/api/v1/index.json");
+    }
+
+    #[test]
+    fn http_provider_auth_header() {
+        let h = HttpPluginHubProvider::new("https://x", "abc");
+        assert_eq!(h.auth_header(), "Bearer abc");
+    }
+
+    #[test]
+    fn http_provider_name_distinguishes_from_mock() {
+        let h = HttpPluginHubProvider::new("https://x", "k");
+        assert_eq!(h.name(), "http-pluginhub");
     }
 }

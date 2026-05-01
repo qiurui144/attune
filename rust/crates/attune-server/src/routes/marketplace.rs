@@ -27,10 +27,20 @@ pub struct InstallRequest {
     pub device_fp: Option<String>,
 }
 
+fn _hub_arc(
+    state: &SharedState,
+) -> Result<std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>, (StatusCode, String)> {
+    state
+        .plugin_hub
+        .lock()
+        .map(|g| g.clone())
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "plugin_hub lock poisoned".into()))
+}
+
 pub async fn list_plugins(
     State(state): State<SharedState>,
 ) -> Result<Json<ListResponse>, (StatusCode, String)> {
-    let hub = state.plugin_hub.clone();
+    let hub = _hub_arc(&state)?;
     let resp = hub.list_plugins().map_err(|e| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -51,7 +61,7 @@ pub async fn install_plugin(
     Path(plugin_id): Path<String>,
     Json(req): Json<InstallRequest>,
 ) -> Result<Json<attune_core::plugin_hub::InstallResponse>, (StatusCode, String)> {
-    let hub = state.plugin_hub.clone();
+    let hub = _hub_arc(&state)?;
     let resp = hub
         .install_plugin(&plugin_id, req.device_fp.as_deref())
         .map_err(|e| {

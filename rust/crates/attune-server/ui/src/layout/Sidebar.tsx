@@ -282,6 +282,7 @@ const NAV_ITEMS: NavItem[] = [
   { view: 'remote', icon: '🔗', labelKey: 'sidebar.nav.remote' },
   { view: 'knowledge', icon: '📊', labelKey: 'sidebar.nav.knowledge' },
   { view: 'skills', icon: '🧠', labelKey: 'sidebar.nav.skills' },
+  { view: 'marketplace', icon: '🏪', labelKey: 'sidebar.nav.marketplace' },
   { view: 'settings', icon: '⚙', labelKey: 'sidebar.nav.settings' },
 ];
 

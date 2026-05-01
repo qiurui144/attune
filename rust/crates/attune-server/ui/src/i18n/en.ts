@@ -140,6 +140,7 @@ export const en = {
   'sidebar.nav.remote': 'Remote',
   'sidebar.nav.knowledge': 'Knowledge',
   'sidebar.nav.skills': 'Skills',
+  'sidebar.nav.marketplace': 'Marketplace',
   'sidebar.nav.settings': 'Settings',
   'sidebar.vault.unlocked': 'Unlocked',
   'sidebar.vault.locked': 'Locked',
