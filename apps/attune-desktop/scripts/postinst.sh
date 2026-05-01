@@ -246,12 +246,52 @@ fi
 # 这里只提示用户首次查询会延迟，不主动 preload（避免 root 写到 user 缓存的权限问题）
 log "Reranker (Xenova/bge-reranker-base ~120 MB): will be downloaded by attune-server on first search query (~5-10s one-time)"
 
+# 6.4 PP-OCR (PaddleOCR) ONNX 模型 — 比 tesseract 中文准确率高 ~10-20%
+# 4 个文件合计 ~16 MB，首次安装时下载到 ~/.local/share/attune/models/ppocr/
+HOME_DIR="${SUDO_USER:+/home/$SUDO_USER}"
+[ -z "$HOME_DIR" ] && HOME_DIR="$HOME"
+PPOCR_DIR="$HOME_DIR/.local/share/attune/models/ppocr"
+# bukuroo/PPOCRv5-ONNX 是公开的 PP-OCRv5 ONNX 转换版（社区维护）
+PPOCR_BASE="https://huggingface.co/bukuroo/PPOCRv5-ONNX/resolve/main"
+
+# 文件名映射：HF source name → 本地存放名（attune-core::ocr::ppocr 期望的名）
+PPOCR_OK=1
+mkdir -p "$PPOCR_DIR"
+download_one() {
+  local src="$1" dest="$2" desc="$3"
+  if [ -s "$PPOCR_DIR/$dest" ]; then
+    log "  PP-OCR: $dest already present ($(du -h "$PPOCR_DIR/$dest" | cut -f1))"
+    return 0
+  fi
+  log "  PP-OCR: downloading $dest ($desc)..."
+  if curl -fsSL --connect-timeout 10 -o "$PPOCR_DIR/${dest}.tmp" "$PPOCR_BASE/$src" 2>/dev/null; then
+    mv "$PPOCR_DIR/${dest}.tmp" "$PPOCR_DIR/$dest"
+    [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$PPOCR_DIR/$dest"
+    return 0
+  else
+    rm -f "$PPOCR_DIR/${dest}.tmp"
+    log "  PP-OCR: WARN $dest download failed; tesseract fallback will be used"
+    PPOCR_OK=0
+    return 1
+  fi
+}
+
+download_one "ppocrv5-mobile-det.onnx"  "ch_PP-OCRv5_det_mobile.onnx"      "~5 MB det"
+download_one "ppocrv5-cls.onnx"          "ch_ppocr_mobile_v2.0_cls.onnx"   "~1 MB cls"
+download_one "ppocrv5-mobile-rec.onnx"   "ch_PP-OCRv5_rec_mobile.onnx"     "~10 MB rec"
+download_one "ppocrv5_dict.txt"          "ppocr_keys_v1.txt"               "~50 KB 6627-char dict"
+[ -n "$SUDO_USER" ] && chown -R "$SUDO_USER:$SUDO_USER" "$PPOCR_DIR" 2>/dev/null
+if [ "$PPOCR_OK" = "1" ]; then
+  log "  PP-OCR: 4 model files ready at $PPOCR_DIR"
+fi
+
 # ─── 7. 验证底座完整性 ─────────────────────────────────────────────
 log "─── foundation stack final check ──"
 log "  Embedding: $(ollama list 2>/dev/null | grep -q bge && echo "OK ($EMBED_MODEL)" || echo "MISSING")"
 log "  LLM:       $(ollama list 2>/dev/null | grep -q qwen && echo "OK ($CHAT_MODEL)" || echo "MISSING")"
 log "  ASR:       $(command -v whisper-cli >/dev/null && [ -f "$ASR_MODEL_FILE" ] && echo "OK (whisper-cli + small-q8)" || echo "PARTIAL (re-run apt or attune deploy)")"
-log "  OCR:       $(command -v tesseract >/dev/null && command -v pdftoppm >/dev/null && echo "OK (tesseract + pdftoppm + chi_sim/eng)" || echo "MISSING (apt deps not satisfied)")"
+log "  OCR (legacy): $(command -v tesseract >/dev/null && command -v pdftoppm >/dev/null && echo "OK (tesseract+pdftoppm+chi_sim/eng) — fallback" || echo "MISSING")"
+log "  OCR (default): $([ -f "$PPOCR_DIR/ch_PP-OCRv5_rec_mobile.onnx" ] && echo "OK (PP-OCRv5 mobile, 4 models) — primary engine" || echo "MISSING (will use tesseract fallback)")"
 log "  Reranker:  preload deferred (lazy on first query)"
 
 # ─── 8. 总结 ───────────────────────────────────────────────────────
