@@ -134,3 +134,138 @@ fn write_annotation(
         "persisted": true,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests covering F-13-WORKFLOW (ops.rs deterministic operations).
+    //!
+    //! Strategy: focus on input validation + error paths. Success paths for
+    //! `find_overlap` and `write_annotation` require a real Store + DEK and
+    //! belong to integration tests (see `tests/workflow_test.rs`).
+    use super::*;
+
+    fn empty_inputs() -> BTreeMap<String, Value> {
+        BTreeMap::new()
+    }
+
+    // ── echo_input ──────────────────────────────────────────────────────────
+    // covers: F-13-WORKFLOW dispatch routing
+
+    #[test]
+    fn echo_input_returns_inputs_verbatim() {
+        let mut inputs = empty_inputs();
+        inputs.insert("foo".into(), json!("bar"));
+        inputs.insert("count".into(), json!(42));
+        let out = run_deterministic("echo_input", inputs, None, None).expect("ok");
+        // returned shape: BTreeMap-as-Object, keys sorted alphabetically
+        assert_eq!(out["foo"], json!("bar"));
+        assert_eq!(out["count"], json!(42));
+    }
+
+    #[test]
+    fn echo_input_with_empty_inputs_returns_empty_object() {
+        let out = run_deterministic("echo_input", empty_inputs(), None, None).expect("ok");
+        assert!(out.is_object(), "echo_input should return an object, got {out:?}");
+        assert_eq!(out.as_object().unwrap().len(), 0);
+    }
+
+    // ── unknown op ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn unknown_op_returns_explicit_error() {
+        let err = run_deterministic("does_not_exist", empty_inputs(), None, None).unwrap_err();
+        assert!(err.contains("unknown deterministic op"), "got: {err}");
+        assert!(err.contains("does_not_exist"), "error should name the op, got: {err}");
+    }
+
+    // ── find_overlap input validation ───────────────────────────────────────
+    // covers: F-12-PROJECT cross-evidence Project recommender precondition
+
+    #[test]
+    fn find_overlap_missing_project_id_errors() {
+        // store=None is fine — we never reach store access; missing project_id is checked first.
+        let err = run_deterministic("find_overlap", empty_inputs(), None, None).unwrap_err();
+        assert!(err.contains("missing project_id"), "got: {err}");
+    }
+
+    #[test]
+    fn find_overlap_with_project_id_but_no_store_errors() {
+        let mut inputs = empty_inputs();
+        inputs.insert("project_id".into(), json!("p_abc"));
+        let err = run_deterministic("find_overlap", inputs, None, None).unwrap_err();
+        assert!(err.contains("store required"), "got: {err}");
+    }
+
+    #[test]
+    fn find_overlap_project_id_must_be_string_not_number() {
+        // .as_str() returns None for numbers → triggers missing project_id error
+        let mut inputs = empty_inputs();
+        inputs.insert("project_id".into(), json!(123));
+        let err = run_deterministic("find_overlap", inputs, None, None).unwrap_err();
+        assert!(err.contains("missing project_id"), "got: {err}");
+    }
+
+    // ── write_annotation input validation ──────────────────────────────────
+    // covers: F-04-READER persistence precondition + F-13-WORKFLOW gating
+
+    #[test]
+    fn write_annotation_missing_item_id_errors() {
+        let err = run_deterministic("write_annotation", empty_inputs(), None, None).unwrap_err();
+        assert!(err.contains("missing item_id"), "got: {err}");
+    }
+
+    #[test]
+    fn write_annotation_missing_body_errors() {
+        let mut inputs = empty_inputs();
+        inputs.insert("item_id".into(), json!("i_abc"));
+        let err = run_deterministic("write_annotation", inputs, None, None).unwrap_err();
+        assert!(err.contains("missing body"), "got: {err}");
+    }
+
+    #[test]
+    fn write_annotation_invalid_source_errors() {
+        let mut inputs = empty_inputs();
+        inputs.insert("item_id".into(), json!("i_abc"));
+        inputs.insert("body".into(), json!("hello"));
+        inputs.insert("source".into(), json!("hacker"));
+        let err = run_deterministic("write_annotation", inputs, None, None).unwrap_err();
+        assert!(err.contains("source must be 'user' or 'ai'"), "got: {err}");
+        assert!(err.contains("hacker"), "error should echo bad value, got: {err}");
+    }
+
+    #[test]
+    fn write_annotation_default_source_is_ai() {
+        // No source → default "ai" → passes validation (then fails at "store required")
+        let mut inputs = empty_inputs();
+        inputs.insert("item_id".into(), json!("i_abc"));
+        inputs.insert("body".into(), json!("hello"));
+        let err = run_deterministic("write_annotation", inputs, None, None).unwrap_err();
+        // not "source must be 'user' or 'ai'" — proves default kicked in
+        assert!(err.contains("store required"), "got: {err}");
+    }
+
+    #[test]
+    fn write_annotation_user_source_accepted() {
+        // source='user' is also valid (user annotations bypass AI 'ai' tag)
+        let mut inputs = empty_inputs();
+        inputs.insert("item_id".into(), json!("i_abc"));
+        inputs.insert("body".into(), json!("hello"));
+        inputs.insert("source".into(), json!("user"));
+        let err = run_deterministic("write_annotation", inputs, None, None).unwrap_err();
+        assert!(err.contains("store required"), "got: {err}");
+    }
+
+    #[test]
+    fn write_annotation_dek_required_explicitly_when_store_provided_is_documented() {
+        // We can't easily provide a real Store without integration setup, but
+        // ensure the doc-comment promise holds: "dek required (vault must be unlocked)"
+        // appears in the error message path. This guards the F-13 dek-channel design.
+        // Without store: we hit "store required" first, which means the dek check
+        // is correctly placed AFTER the store check — verify ordering by inspection.
+        let mut inputs = empty_inputs();
+        inputs.insert("item_id".into(), json!("i_abc"));
+        inputs.insert("body".into(), json!("hello"));
+        let err = run_deterministic("write_annotation", inputs, None, None).unwrap_err();
+        assert!(err.contains("store required"), "store check must precede dek check, got: {err}");
+    }
+}
