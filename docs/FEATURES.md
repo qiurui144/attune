@@ -358,6 +358,32 @@ Desktop installer via Tauri 2 + tauri-plugin-updater (auto-updates). **Windows**
 
 **Maturity**: ✅ Active on Windows (P0) + Linux (P1). macOS deferred (per CLAUDE.md platform priority).
 
+#### Hardware utilization matrix (v0.6.3 audit)
+
+attune detects hardware (HardwareProfile) but the actual utilization in each
+inference backend depends on the build-time features. This matrix is the
+single source of truth for **what gets accelerated where**:
+
+| Backend | NVIDIA CUDA | AMD ROCm/HIP | AMD XDNA NPU | Intel NPU/iGPU | Apple Metal | CPU |
+|---------|:-----------:|:------------:|:------------:|:--------------:|:-----------:|:---:|
+| `embed::OllamaProvider` (bge-m3) | ✅ via Ollama runtime | ✅ via Ollama (ROCm) | ❌ Ollama 不支持 | ❌ Ollama 不支持 | ✅ via Ollama (Metal) | ✅ fallback |
+| `infer::reranker` (ort) | ✅ CUDA EP | ❌ ROCm EP not compiled | ❌ DirectML EP not compiled | ❌ OpenVINO EP not compiled | ❌ CoreML EP not compiled | ✅ default |
+| `infer::embedding` (ort, ONNX models) | ✅ CUDA EP | ❌ same as reranker | ❌ same | ❌ same | ❌ same | ✅ default |
+| `asr` (whisper.cpp subprocess) | ✅ if user installs **GPU build** | ✅ if Vulkan/ROCm build | ❌ no XDNA support | ❌ no NPU support | ✅ if Metal build | ✅ default (CPU-only build) |
+| `llm` (Ollama HTTP) | ✅ via Ollama runtime | ✅ via Ollama | ❌ same | ❌ same | ✅ via Ollama | ✅ fallback |
+| `llm` (OpenAI-compat HTTP) | N/A (remote) | N/A | N/A | N/A | N/A | N/A |
+| `ocr` (tesseract subprocess) | ❌ tesseract is CPU-only | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+**Gap analysis** (v0.6.3 → v0.7+):
+
+1. **ort EP coverage**: Cargo.toml `ort = { features = ["std", "ndarray", "tracing", "tls-rustls"] }` only compiles **CUDA + CPU EPs**. To enable Intel NPU/iGPU we'd need `features += ["openvino"]`; AMD NPU needs `["directml"]` (Windows only); Apple Silicon needs `["coreml"]`. Each adds ~30-100MB to the binary. Status: 📋 v0.7+ (cross-platform CI matrix work).
+
+2. **whisper.cpp GPU detection**: v0.6.3 added `AsrBackend.gpu_capable` field that probes `whisper-cli --help` for `--no-gpu`/`gpu-device` flags. Exposed via `/api/v1/ai_stack` so Settings UI warns the user when CPU-only build limits ASR to ~10x slower transcription.
+
+3. **Ollama runtime GPU verification**: 🟡 partial — `/status/diagnostics` reports `ollama_status: "ready"` if HTTP probe succeeds, but doesn't confirm Ollama is using GPU vs falling back to CPU. v0.7+ enhancement: probe `ollama ps` to read VRAM usage.
+
+4. **HardwareProfile → ort EP linkage**: `provider::build_session()` uses an isolated `detect_npu()` call (env var `NPU_VAULT_EP`) instead of reading the cached `state.hardware`. This is partly intentional (env var override is the documented escape hatch), but means `state.hardware.has_intel_npu = true` does not trigger OpenVINO automatically. v0.7+ work: thread `&HardwareProfile` through `build_session()` so detection drives EP selection by default.
+
 ---
 
 ### F-17-PRIVACY — Three-tier privacy model + cross-domain defense

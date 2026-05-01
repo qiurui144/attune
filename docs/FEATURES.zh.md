@@ -356,6 +356,31 @@ Project 是用户定义的 item 分组（文件、对话、笔记），含可选
 
 **成熟度**：✅ Active on Windows（P0）+ Linux（P1）。macOS 推迟（per CLAUDE.md 平台优先级）。
 
+#### 硬件利用矩阵（v0.6.3 审计）
+
+attune 检测了硬件（HardwareProfile），但每个推理 backend 实际利用情况取决于
+build-time features。本矩阵是**什么硬件被加速到哪里**的唯一真源：
+
+| Backend | NVIDIA CUDA | AMD ROCm/HIP | AMD XDNA NPU | Intel NPU/iGPU | Apple Metal | CPU |
+|---------|:-----------:|:------------:|:------------:|:--------------:|:-----------:|:---:|
+| `embed::OllamaProvider` (bge-m3) | ✅ via Ollama runtime | ✅ via Ollama (ROCm) | ❌ Ollama 不支持 | ❌ Ollama 不支持 | ✅ via Ollama (Metal) | ✅ fallback |
+| `infer::reranker` (ort) | ✅ CUDA EP | ❌ ROCm EP 未编译 | ❌ DirectML EP 未编译 | ❌ OpenVINO EP 未编译 | ❌ CoreML EP 未编译 | ✅ default |
+| `infer::embedding` (ort, ONNX models) | ✅ CUDA EP | ❌ 同 reranker | ❌ 同上 | ❌ 同上 | ❌ 同上 | ✅ default |
+| `asr` (whisper.cpp subprocess) | ✅ 用户装 **GPU build** 时 | ✅ Vulkan/ROCm build 时 | ❌ XDNA 不支持 | ❌ NPU 不支持 | ✅ Metal build 时 | ✅ default (CPU-only build) |
+| `llm` (Ollama HTTP) | ✅ via Ollama runtime | ✅ via Ollama | ❌ 同上 | ❌ 同上 | ✅ via Ollama | ✅ fallback |
+| `llm` (OpenAI-兼容 HTTP) | N/A (远端) | N/A | N/A | N/A | N/A | N/A |
+| `ocr` (tesseract subprocess) | ❌ tesseract 是 CPU-only | ❌ | ❌ | ❌ | ❌ | ✅ |
+
+**差距分析**（v0.6.3 → v0.7+）：
+
+1. **ort EP 覆盖**：Cargo.toml `ort = { features = ["std", "ndarray", "tracing", "tls-rustls"] }` 只编译 **CUDA + CPU EPs**。要启用 Intel NPU/iGPU 需要 `features += ["openvino"]`；AMD NPU 需要 `["directml"]`（仅 Windows）；Apple Silicon 需要 `["coreml"]`。每个加 ~30-100MB 到二进制。状态：📋 v0.7+（跨平台 CI 矩阵工作）。
+
+2. **whisper.cpp GPU 检测**：v0.6.3 加 `AsrBackend.gpu_capable` 字段，跑 `whisper-cli --help` 检测 `--no-gpu`/`gpu-device` flags。`/api/v1/ai_stack` 暴露此字段让 Settings UI 在 CPU-only build 时警示用户（10x 转写速度差异）。
+
+3. **Ollama runtime GPU 验证**：🟡 部分 — `/status/diagnostics` 报 `ollama_status: "ready"` 仅证明 HTTP 探测成功，未确认 Ollama 是用 GPU 还是 fallback 到 CPU。v0.7+ 增强：probe `ollama ps` 读 VRAM 使用。
+
+4. **HardwareProfile → ort EP linkage**：`provider::build_session()` 用独立的 `detect_npu()` 调用（env var `NPU_VAULT_EP`）而非读 `state.hardware` 缓存。这部分是有意的（env var override 是文档化的逃生口），但意味着 `state.hardware.has_intel_npu = true` 不会自动触发 OpenVINO。v0.7+ 工作：把 `&HardwareProfile` 透传 `build_session()` 让检测默认驱动 EP 选择。
+
 ---
 
 ### F-17-PRIVACY — 三层隐私模型 + 跨域防御

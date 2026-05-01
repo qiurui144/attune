@@ -126,19 +126,37 @@ cd rust && cargo test --test corpus_integration -- --ignored
 
 ### 2.2 Performance Bench（性能基准）
 
-| ID | 测试 | 指标 | 阈值 |
-|----|------|------|------|
-| P-001 | Corpus A 全量注入吞吐 | docs/s | > 20 |
-| P-002 | 单次向量检索（10k chunks） | p95 latency | < 100 ms |
-| P-003 | RAG Chat 端到端（本地 LLM） | p95 total | < 3 s |
-| P-004 | 并发 10 个查询 | p99 | < 500 ms |
-| P-005 | Tantivy 索引写入吞吐 | chunks/s | > 500 |
+| ID | 测试 | 指标 | 阈值 | v0.6.3 baseline (i9-14900K) | 实装位置 |
+|----|------|------|------|--------------------------|---------|
+| P-001 | Corpus A 全量注入吞吐 | docs/s | > 20 | TBD (依赖 embedding) | tests/corpus_integration_test.rs |
+| P-002 | 单次向量检索（10k chunks） | p95 latency | < 100 ms | TBD | TBD (v0.7+) |
+| P-003 | RAG Chat 端到端（本地 LLM） | p95 total | < 3 s | TBD (依赖 LLM) | TBD (v0.7+) |
+| P-004 | 并发 10 个查询 | p99 | < 500 ms | TBD | TBD (v0.7+) |
+| P-005 | Tantivy 索引写入吞吐 | chunks/s | > 500 | TBD (依赖 index) | TBD (v0.7+) |
+| **P-006** | **chunker::chunk (sliding window)** | **docs/s** | **> 50** | **2,535** ✅ | **tests/perf_chunker_bench.rs** |
+| **P-007** | **chunker::chunk** | **MB/s** | — | **26.63** ✅ | 同上 |
+| **P-008** | **chunker::extract_sections** | **docs/s** | **> 50** | **37,615** ✅ | 同上 |
+| **P-009** | **chunker::extract_sections_with_path** (J1) | **docs/s** | **> 50** | **38,116** ✅ | 同上 |
+
+#### 跑 perf bench
 
 ```bash
-cd rust && cargo bench
-# 报告：target/criterion/report/index.html
-# 历史对比：每个 release commit 的 bench 快照
+# Phase 1 (实装) — chunker hot path
+cd rust && cargo test -p attune-core --test perf_chunker_bench --release -- --ignored --nocapture
+
+# Phase 2+ (规划)
+# cargo bench  # 加 criterion dev-dep 后启用
 ```
+
+#### 解读 baseline 数字
+
+- **chunker 不是瓶颈**：26.63 MB/s 意味着 100 MB corpus chunk 完成只需 ~3.8s。生产 ingest 时间几乎全在 embedding (Ollama bge-m3 ~5-50 docs/s on GPU) + 索引写入。
+- **extract_sections 比 chunk 快 14x**（345k vs 24k sections-or-chunks/s）：因为 sections 走 Markdown heading 边界，比滑动窗口少状态。
+- **J1 path-prefix 和 plain extract_sections 同 throughput**（38k vs 37k docs/s）：ancestor stack 维护几乎零成本。
+
+#### 阈值断言（防退化）
+
+每个 perf test 内置 `assert!(throughput > N)` — N 是当前 baseline 50% 防回归。CI 跑 `--ignored` 时自动检测。重大优化 PR 提升 baseline + 同步更新阈值。
 
 ### 2.3 Quality Regression（质量回归）
 

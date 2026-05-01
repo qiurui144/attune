@@ -29,6 +29,9 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     let asr_backend = attune_core::asr::detect_asr_backend();
     let asr_available = asr_backend.is_some();
     let asr_model: Option<String> = asr_backend.as_ref().map(|b| b.model_name.clone());
+    // F-16 hardware utilization: expose whisper.cpp GPU build status so Settings
+    // UI can warn user when CPU-only build limits ASR throughput (10x slower).
+    let asr_gpu_capable: Option<bool> = asr_backend.as_ref().map(|b| b.gpu_capable);
 
     // v0.6.0-rc.4: 硬件 tier + 模型推荐 + region
     let hw = &state.hardware;
@@ -83,7 +86,14 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "available": asr_available,
             "engine": "whisper.cpp",
             "model": asr_model,
-            "note": note(asr_available, "装 whisper.cpp + 下载 ggml-small.bin 到 ~/.local/share/attune/models/whisper/")
+            // F-16 GPU build flag — false 时 60s 音频转写 ~60s, true 时 GPU build ~5s (10x)
+            "gpu_capable": asr_gpu_capable,
+            "note": note(asr_available, "装 whisper.cpp + 下载 ggml-small.bin 到 ~/.local/share/attune/models/whisper/"),
+            "gpu_note": match asr_gpu_capable {
+                Some(false) => Some("⚠ whisper.cpp 是 CPU-only build, 60s 音频可能耗时 60s+. 装 GPU build (CUDA/Metal/Vulkan) 可获 10x 加速.".to_string()),
+                Some(true) => None,
+                None => None,
+            }
         },
         "llm": {
             "configured": llm_configured,
