@@ -290,8 +290,7 @@ log "─── foundation stack final check ──"
 log "  Embedding: $(ollama list 2>/dev/null | grep -q bge && echo "OK ($EMBED_MODEL)" || echo "MISSING")"
 log "  LLM:       $(ollama list 2>/dev/null | grep -q qwen && echo "OK ($CHAT_MODEL)" || echo "MISSING")"
 log "  ASR:       $(command -v whisper-cli >/dev/null && [ -f "$ASR_MODEL_FILE" ] && echo "OK (whisper-cli + small-q8)" || echo "PARTIAL (re-run apt or attune deploy)")"
-log "  OCR (legacy): $(command -v tesseract >/dev/null && command -v pdftoppm >/dev/null && echo "OK (tesseract+pdftoppm+chi_sim/eng) — fallback" || echo "MISSING")"
-log "  OCR (default): $([ -f "$PPOCR_DIR/ch_PP-OCRv5_rec_mobile.onnx" ] && echo "OK (PP-OCRv5 mobile, 4 models) — primary engine" || echo "MISSING (will use tesseract fallback)")"
+log "  OCR:       $([ -f "$PPOCR_DIR/ch_PP-OCRv5_rec_mobile.onnx" ] && command -v pdftoppm >/dev/null && echo "OK (PP-OCRv5 mobile, 4 ONNX models)" || echo "MISSING (re-run: apt install --reinstall attune)")"
 log "  Reranker:  preload deferred (lazy on first query)"
 
 # ─── 8. 总结 ───────────────────────────────────────────────────────

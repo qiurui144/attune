@@ -103,10 +103,10 @@ pub fn parse_bytes(data: &[u8], filename: &str) -> Result<(String, String)> {
     }
 }
 
-/// 把 PDF 字节写到临时文件并调用 OCR 后端。OCR 完成后临时文件随 tmp 变量 drop
-/// 自动清理。OCR 后端不可用或识别失败返回 None。
+/// 把 PDF 字节写到临时文件并调用 OCR provider。OCR 完成后临时文件随 tmp 变量
+/// drop 自动清理。Provider 不可用或识别失败返回 None。
 fn try_ocr_from_bytes(data: &[u8]) -> Option<String> {
-    let backend = crate::ocr::detect_ocr_backend()?;
+    let provider = crate::ocr::detect_default_provider()?;
     let mut tmp = tempfile::Builder::new()
         .suffix(".pdf")
         .tempfile()
@@ -114,7 +114,7 @@ fn try_ocr_from_bytes(data: &[u8]) -> Option<String> {
     use std::io::Write;
     tmp.write_all(data).ok()?;
     tmp.flush().ok()?;
-    match crate::ocr::ocr_pdf(&backend, tmp.path()) {
+    match crate::ocr::extract_text_from_pdf(provider.as_ref(), tmp.path()) {
         Ok(text) if !text.trim().is_empty() => Some(text),
         Ok(_) => {
             log::warn!("OCR returned empty text for uploaded PDF");
@@ -138,8 +138,8 @@ fn parse_pdf_file(path: &Path, stem: &str) -> Result<(String, String)> {
         Ok(text) => text,
         Err(e) => {
             log::info!("pdf_extract failed for {} ({e}); trying OCR directly", path.display());
-            if let Some(backend) = crate::ocr::detect_ocr_backend() {
-                match crate::ocr::ocr_pdf(&backend, path) {
+            if let Some(provider) = crate::ocr::detect_default_provider() {
+                match crate::ocr::extract_text_from_pdf(provider.as_ref(), path) {
                     Ok(ocr_text) if !ocr_text.trim().is_empty() => {
                         let title = first_line_title(&ocr_text, stem);
                         return Ok((title, ocr_text));
@@ -157,11 +157,11 @@ fn parse_pdf_file(path: &Path, stem: &str) -> Result<(String, String)> {
 
     // 2b. 成功但文字量 < 100 字符（扫描版文字层空）→ 尝试 OCR
     if crate::ocr::needs_ocr(&content) {
-        if let Some(backend) = crate::ocr::detect_ocr_backend() {
+        if let Some(provider) = crate::ocr::detect_default_provider() {
             log::info!("PDF text layer thin ({} chars); falling back to OCR ({})",
                 content.chars().filter(|c| !c.is_whitespace()).count(),
-                backend.lang_arg());
-            match crate::ocr::ocr_pdf(&backend, path) {
+                provider.name());
+            match crate::ocr::extract_text_from_pdf(provider.as_ref(), path) {
                 Ok(ocr_text) if !ocr_text.trim().is_empty() => {
                     let title = first_line_title(&ocr_text, stem);
                     return Ok((title, ocr_text));
@@ -170,8 +170,8 @@ fn parse_pdf_file(path: &Path, stem: &str) -> Result<(String, String)> {
                 Err(e) => log::warn!("OCR failed for {}: {}", path.display(), e),
             }
         } else {
-            log::debug!("PDF has no text layer but OCR backend not available; \
-                returning thin text. Install tesseract + pdftoppm to enable OCR.");
+            log::debug!("PDF has no text layer but OCR provider not available; \
+                returning thin text. Re-run apt install / attune deploy to fix.");
         }
     }
 

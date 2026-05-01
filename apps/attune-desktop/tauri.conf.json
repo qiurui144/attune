@@ -25,27 +25,15 @@
     "longDescription": "Attune 是一款私有 AI 知识伙伴，主动进化、对话式、混合智能。",
     "linux": {
       "deb": {
-        "depends": [
-          "curl",
-          "tesseract-ocr",
-          "tesseract-ocr-eng",
-          "tesseract-ocr-chi-sim",
-          "poppler-utils"
-        ],
-        "recommends": ["systemd", "tesseract-ocr-chi-tra"],
+        "depends": ["curl", "poppler-utils"],
+        "recommends": ["systemd"],
         "preInstallScript": "scripts/preinst.sh",
         "postInstallScript": "scripts/postinst.sh",
         "preRemoveScript": "scripts/prerm.sh",
         "postRemoveScript": "scripts/postrm.sh"
       },
       "rpm": {
-        "depends": [
-          "curl",
-          "tesseract",
-          "tesseract-langpack-eng",
-          "tesseract-langpack-chi_sim",
-          "poppler-utils"
-        ],
+        "depends": ["curl", "poppler-utils"],
         "epoch": 0,
         "release": "1",
         "preInstallScript": "scripts/preinst.sh",

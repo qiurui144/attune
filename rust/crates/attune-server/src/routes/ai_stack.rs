@@ -22,9 +22,12 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     let rerank_loaded = state.reranker.lock().ok().map(|g| g.is_some()).unwrap_or(false);
     let llm_configured = state.llm.lock().ok().map(|g| g.is_some()).unwrap_or(false);
 
-    let ocr_backend = attune_core::ocr::detect_ocr_backend();
-    let ocr_available = ocr_backend.is_some();
-    let ocr_languages: Vec<String> = ocr_backend.as_ref().map(|b| b.languages.clone()).unwrap_or_default();
+    let ocr_provider = attune_core::ocr::detect_default_provider();
+    let ocr_available = ocr_provider.is_some();
+    let ocr_engine: String = ocr_provider
+        .as_ref()
+        .map(|p| p.name().to_string())
+        .unwrap_or_else(|| "none".into());
 
     let asr_backend = attune_core::asr::detect_asr_backend();
     let asr_available = asr_backend.is_some();
@@ -78,9 +81,8 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         },
         "ocr": {
             "available": ocr_available,
-            "engine": "tesseract + pdftoppm",
-            "languages": ocr_languages,
-            "note": note(ocr_available, "装 tesseract + poppler-utils: apt install tesseract-ocr tesseract-ocr-chi-sim poppler-utils")
+            "engine": ocr_engine,
+            "note": note(ocr_available, "PP-OCR 模型缺失 — 重新跑 attune deploy 或 apt install --reinstall attune")
         },
         "asr": {
             "available": asr_available,
