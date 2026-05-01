@@ -54,6 +54,20 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// R-deploy (2026-05-01): Linux 一键部署 — 自动安装 Ollama + 硬件自适应 + 拉模型。
+    /// 检测 NVIDIA / AMD / CPU；AMD APU 注入 HSA_OVERRIDE_GFX_VERSION；按 RAM 选模型 tier。
+    /// 调底层 scripts/deploy-linux.sh（必须与二进制在同一仓库部署）。
+    Deploy {
+        /// 不拉模型（只装 Ollama runtime + 配 GPU 路径）
+        #[arg(long)]
+        no_models: bool,
+        /// 只打印计划不执行
+        #[arg(long)]
+        dry_run: bool,
+        /// 自定义 deploy script 路径（默认: ./scripts/deploy-linux.sh）
+        #[arg(long)]
+        script: Option<std::path::PathBuf>,
+    },
 }
 
 fn main() {
@@ -153,6 +167,36 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             println!("Exported {copied} entries to {}", dest.display());
             println!("IMPORTANT: separately back up your device.key at {}",
                 attune_core::platform::device_secret_path().display());
+        }
+        Commands::Deploy { no_models, dry_run, script } => {
+            // R-deploy: 调底层 bash 脚本。Linux-only。
+            if !cfg!(target_os = "linux") {
+                eprintln!("attune deploy 当前仅支持 Linux（当前平台 = {}）。", std::env::consts::OS);
+                eprintln!("Windows: 用 MSI 安装包；macOS: 暂不支持。");
+                std::process::exit(2);
+            }
+            let script_path = script.unwrap_or_else(|| {
+                std::path::PathBuf::from("scripts/deploy-linux.sh")
+            });
+            if !script_path.exists() {
+                eprintln!("deploy script 不存在: {}", script_path.display());
+                eprintln!("请从源码仓库根目录运行 `attune deploy`，或用 --script <path> 指定。");
+                std::process::exit(2);
+            }
+            let mut cmd = std::process::Command::new("bash");
+            cmd.arg(&script_path);
+            if no_models { cmd.arg("--no-models"); }
+            if dry_run { cmd.arg("--dry-run"); }
+            let status = cmd.status().map_err(attune_core::error::VaultError::Io)?;
+            if !status.success() {
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            // 部署后给一条提示让用户启动 attune-server-headless
+            println!();
+            println!("✓ deploy 完成。下一步：");
+            println!("  1. 初始化 vault:        attune setup");
+            println!("  2. 启动 server:         attune-server-headless --port 18900");
+            println!("  3. 浏览器访问:          http://localhost:18900");
         }
         Commands::VaultImport { src, force } => {
             let data = attune_core::platform::data_dir();
