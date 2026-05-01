@@ -42,16 +42,74 @@ test.describe('Wizard golden flow (F-01-VAULT + F-09-FORMFACTOR)', () => {
     });
   });
 
-  test.fixme('walks through all 5 wizard steps and reaches dashboard', async ({ page }) => {
-    // TODO (v0.6.x): full automation requires stable wizard selectors.
-    // Steps to implement:
-    //   1. Master password input → click Next
-    //   2. Confirm device secret backup → click Next (acknowledge)
-    //   3. LLM card: select "Cloud" or "Skip" (don't depend on real Ollama)
-    //   4. Data import: click "Skip" (ingest tested separately in chat.spec)
-    //   5. Verify dashboard loaded (chat input visible / sidebar present)
+  test('Step 1 Welcome → click 开始设置 → Step 2 Password visible', async ({ page }) => {
+    // covers F-01-VAULT (vault setup precondition: arrives on password step)
+    await page.goto(server.baseUrl);
+
+    // Wait for Step 1 Welcome heading + CTA button. Default locale is zh-CN
+    // (per CLAUDE.md). Locator chain matches both zh "开始设置" and en "Get started"
+    // by using button role with text contains.
+    const cta = page.getByRole('button', { name: /开始设置|Get started/i });
+    await expect(cta).toBeVisible({ timeout: 10_000 });
+    await cta.click();
+
+    // Step 2 Password heading visible (zh "设置 Master Password" / en "Set Master Password")
+    await expect(
+      page.getByText(/设置 Master Password|Set Master Password/i)
+    ).toBeVisible({ timeout: 5_000 });
+
+    // Two password inputs visible (Password + Confirm)
+    const pwdInputs = page.locator('input[type=password]');
+    await expect(pwdInputs).toHaveCount(2, { timeout: 5_000 });
+  });
+
+  test('Step 1 → Step 2: password inputs render after CTA click', async ({ page }) => {
+    // covers F-01-VAULT precondition (Step 2 form renders correctly)
     //
-    // Blocker: wizard selectors are subject to redesign in v0.6.x per the
-    // 2026-04-17 product-positioning-design.md §6.7 "Tab 减法" rule.
+    // Note: this test intentionally stops at Step 2 form render (does NOT submit).
+    // Reason: form submit triggers /vault/setup which mutates server-side state
+    // (vault SEALED → UNLOCKED). Tests in this file share a single server
+    // (beforeAll), so submitting from one test affects others non-deterministically.
+    //
+    // The submit + state-transition path is covered by Rust integration tests:
+    // - crates/attune-server/tests/vault_setup_test.rs (HTTP-level)
+    // - crates/attune-server/tests/system_wizard_full_flow_test.rs (8-step sequence)
+    // E2E only verifies the UI form renders + accepts input.
+
+    await page.goto(server.baseUrl);
+
+    // Step 1: click CTA
+    await page.getByRole('button', { name: /开始设置|Get started/i }).click();
+
+    // Step 2 form: 2 password inputs + Submit button reachable
+    const pwdInputs = page.locator('input[type=password]');
+    await expect(pwdInputs).toHaveCount(2, { timeout: 5_000 });
+
+    // Verify input is editable (UI not in disabled/loading state)
+    const strongPwd = 'AttuneE2E!Test-Password-2026';
+    await pwdInputs.nth(0).fill(strongPwd);
+    await pwdInputs.nth(1).fill(strongPwd);
+
+    // Submit button visible + enabled (button can take action — not stuck)
+    const submitButton = page.getByRole('button', { name: /下一步|Next/i });
+    await expect(submitButton.first()).toBeEnabled({ timeout: 5_000 });
+
+    await page.screenshot({
+      path: 'screenshots/c3-wizard-step2-form.png',
+      fullPage: true,
+    });
+  });
+
+  test.fixme('Step 3-5 + WizardDone → dashboard', async () => {
+    // TODO (v0.6.x): Step 3 LLM card selection (Skip) → Step 4 Hardware →
+    // Step 5 Data (Skip) → WizardDone → dashboard chat input visible.
+    //
+    // Step 3 has 3 cards (Ollama / Cloud / Skip). Selector relies on i18n text
+    // ("跳过" / "Skip later"). Step 4 hardware detection is async + has its own
+    // continue button. Step 5 has tri-mode card UI. WizardDone auto-redirects
+    // after a brief delay.
+    //
+    // This is a 3-4 minute test if all steps wait realistic timeouts. Defer to
+    // v0.6.x once Step 3-5 selectors are stabilized post-UI-revision.
   });
 });
