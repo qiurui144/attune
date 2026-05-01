@@ -15,6 +15,9 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "deb", "rpm", "appimage"],
+    "resources": {
+      "resources/bin/whisper-cli": "bin/whisper-cli"
+    },
     "icon": ["icons/icon.png", "icons/icon.ico"],
     "publisher": "Attune",
     "category": "Productivity",
@@ -22,15 +25,27 @@
     "longDescription": "Attune 是一款私有 AI 知识伙伴，主动进化、对话式、混合智能。",
     "linux": {
       "deb": {
-        "depends": ["curl"],
-        "recommends": ["systemd"],
+        "depends": [
+          "curl",
+          "tesseract-ocr",
+          "tesseract-ocr-eng",
+          "tesseract-ocr-chi-sim",
+          "poppler-utils"
+        ],
+        "recommends": ["systemd", "tesseract-ocr-chi-tra"],
         "preInstallScript": "scripts/preinst.sh",
         "postInstallScript": "scripts/postinst.sh",
         "preRemoveScript": "scripts/prerm.sh",
         "postRemoveScript": "scripts/postrm.sh"
       },
       "rpm": {
-        "depends": ["curl"],
+        "depends": [
+          "curl",
+          "tesseract",
+          "tesseract-langpack-eng",
+          "tesseract-langpack-chi_sim",
+          "poppler-utils"
+        ],
         "epoch": 0,
         "release": "1",
         "preInstallScript": "scripts/preinst.sh",

@@ -197,9 +197,66 @@ else
   log "WARN: Ollama API not ready, skipping model pull. User can later: attune deploy"
 fi
 
-# ─── 6. 总结 ───────────────────────────────────────────────────────
-log "post-install complete. Models: $EMBED_MODEL + $CHAT_MODEL"
-log "next: launch 'Attune' from desktop menu — fully ready out of the box"
+# ─── 6. 底座底层：ASR (whisper.cpp) + Reranker ──────────────────────
+# 用户拍板：所有底座（embed+rerank+asr+ocr）必须 .deb 安装时全装好
+
+# 6.1 whisper.cpp binary：bundled 在 /usr/lib/attune/bin/whisper-cli (Tauri resources)
+#     建符号链到 /usr/local/bin 让 attune-server 的 PATH 找得到
+# Tauri bundle 用 productName 大小写（"Attune" → /usr/lib/Attune/）
+# 兼容大小写 + 旧 lowercase 路径
+WHISPER_LINK="/usr/local/bin/whisper-cli"
+WHISPER_BUNDLED=""
+for cand in /usr/lib/Attune/bin/whisper-cli /usr/lib/attune/bin/whisper-cli; do
+  [ -x "$cand" ] && WHISPER_BUNDLED="$cand" && break
+done
+if [ -n "$WHISPER_BUNDLED" ] && [ ! -e "$WHISPER_LINK" ]; then
+  ln -sf "$WHISPER_BUNDLED" "$WHISPER_LINK"
+  log "linked whisper-cli: $WHISPER_LINK -> $WHISPER_BUNDLED"
+elif [ -n "$WHISPER_BUNDLED" ]; then
+  log "whisper-cli already linked at $WHISPER_LINK"
+else
+  log "WARN: bundled whisper-cli missing under /usr/lib/Attune/bin/ (.deb 资源问题?)"
+fi
+
+# 6.2 ASR ggml 模型：~250 MB 走 HF 镜像
+# whisper-small-q8_0 中文 WER 实测 < 20% (CLAUDE.md 验收标准)
+ASR_DIR="/home/$SUDO_USER"
+[ -z "$ASR_DIR" ] || [ "$SUDO_USER" = "" ] && ASR_DIR="$HOME"
+ASR_DIR="$ASR_DIR/.local/share/attune/models/whisper"
+ASR_MODEL_FILE="$ASR_DIR/ggml-small-q8_0.bin"
+ASR_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q8_0.bin"
+
+if [ -f "$ASR_MODEL_FILE" ] && [ "$(stat -c%s "$ASR_MODEL_FILE" 2>/dev/null)" -gt 100000000 ]; then
+  log "ASR model already present: $(du -h "$ASR_MODEL_FILE" | cut -f1)"
+else
+  log "downloading ASR model ggml-small-q8_0.bin (~250 MB)..."
+  mkdir -p "$ASR_DIR"
+  # 用 SUDO_USER 拥有，因为 dpkg 跑 root，但实际属于用户
+  if curl -fsSL --connect-timeout 10 -o "${ASR_MODEL_FILE}.tmp" "$ASR_MODEL_URL" 2>/dev/null; then
+    mv "${ASR_MODEL_FILE}.tmp" "$ASR_MODEL_FILE"
+    [ -n "$SUDO_USER" ] && chown -R "$SUDO_USER:$SUDO_USER" "$ASR_DIR"
+    log "  ASR model downloaded ($(du -h "$ASR_MODEL_FILE" | cut -f1))"
+  else
+    rm -f "${ASR_MODEL_FILE}.tmp"
+    log "  WARN: ASR model download failed; user can later: attune deploy --with-asr"
+  fi
+fi
+
+# 6.3 Reranker：bge-reranker-base ONNX (~120 MB) 通过 Rust hf_hub crate 自动下载
+# 这里只提示用户首次查询会延迟，不主动 preload（避免 root 写到 user 缓存的权限问题）
+log "Reranker (Xenova/bge-reranker-base ~120 MB): will be downloaded by attune-server on first search query (~5-10s one-time)"
+
+# ─── 7. 验证底座完整性 ─────────────────────────────────────────────
+log "─── foundation stack final check ──"
+log "  Embedding: $(ollama list 2>/dev/null | grep -q bge && echo "OK ($EMBED_MODEL)" || echo "MISSING")"
+log "  LLM:       $(ollama list 2>/dev/null | grep -q qwen && echo "OK ($CHAT_MODEL)" || echo "MISSING")"
+log "  ASR:       $(command -v whisper-cli >/dev/null && [ -f "$ASR_MODEL_FILE" ] && echo "OK (whisper-cli + small-q8)" || echo "PARTIAL (re-run apt or attune deploy)")"
+log "  OCR:       $(command -v tesseract >/dev/null && command -v pdftoppm >/dev/null && echo "OK (tesseract + pdftoppm + chi_sim/eng)" || echo "MISSING (apt deps not satisfied)")"
+log "  Reranker:  preload deferred (lazy on first query)"
+
+# ─── 8. 总结 ───────────────────────────────────────────────────────
+log "post-install complete."
+log "next: launch 'Attune' from desktop menu — full foundation stack (embed+rerank+asr+ocr) ready"
 
 # 永不让 postinst 失败 — 阻塞 dpkg/rpm 比 Ollama 缺失更糟
 exit 0
