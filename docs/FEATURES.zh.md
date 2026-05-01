@@ -328,10 +328,14 @@ Project 是用户定义的 item 分组（文件、对话、笔记），含可选
 - 规范：`docs/mcp-integration.md`（双语）
 
 **测试覆盖**：
-- 人工：`tests/MANUAL_TEST_CHECKLIST.md` MCP 段
-- Integration：🟡 未自动化（需要跨语言 harness）
+- 人工：`tests/MANUAL_TEST_CHECKLIST.md` MCP 段（与 Claude Desktop / Cursor / Cline 真实后端集成）
+- Protocol：`tests/mcp/test_mcp_shim.py` ✅（7 测试，v0.6.3）：subprocess +
+  JSON-RPC 2.0 over stdio. 覆盖 initialize 握手 / notifications / tools/list /
+  unknown tool 错误 / unknown method 错误 / 损坏 JSON 韧性 / dead backend 结构化错误.
+- 真实后端集成：🟡 部分 — 协议层 ✅ 但实际工具执行（attune_search 命中真实索引、
+  attune_chat 命中真实 LLM）仍是人工测试.
 
-**成熟度**：✅ Active。
+**成熟度**：✅ Active。协议层自动化测试 v0.6.3.
 
 ---
 
@@ -461,7 +465,7 @@ Project 是用户定义的 item 分组（文件、对话、笔记），含可选
 | F-12-PROJECT | ✅ | ✅ | ❌ | ❌ | ❌ |
 | F-13-WORKFLOW | ✅ | ✅ | ❌ | ❌ | ❌ |
 | F-14-ENTITIES | ✅ | ✅ | ❌ | ❌ | ❌ |
-| F-15-MCP | ❌ | ❌ | ❌ | ❌ | ❌ 人工 |
+| F-15-MCP | ❌ | ✅ 协议（v0.6.3，7 测试） | ❌ | ❌ | ❌ 人工 |
 | F-16-DISTRIBUTION | ✅ | ✅ | ✅ | ❌ | ✅ |
 | F-17-PRIVACY | ✅ | ✅（chat 全路径，v0.6.3） | ❌ | ❌ | ❌ |
 | F-18-QUALITY | ✅ | ✅ corpus | ✅ | ❌ | ❌ |

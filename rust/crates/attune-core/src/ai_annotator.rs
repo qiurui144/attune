@@ -156,7 +156,9 @@ pub fn generate_annotations(
     // System prompt 直接用插件 prompt（不再动态拼接说明，插件 prompt.md 是完整的）
     let system = &cfg.prompt;
     let user = format!("笔记内容:\n{truncated}");
-    let raw = llm.chat(system, &user)?;
+    // F-17-PRIVACY: redact note content before LLM (item content from user-ingested docs may contain PII)
+    let redactor = crate::pii::Redactor::default();
+    let raw = crate::pii::llm_chat_redacted(llm, &redactor, system, &user, "ai_annotator")?;
     let parsed = parse_response(&raw)?;
 
     let mut located = Vec::new();

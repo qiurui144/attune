@@ -21,6 +21,57 @@ pub mod patterns;
 pub mod dictionary;
 pub mod ner;
 
+// ── F-17 LLM call wrapper helpers ──────────────────────────────────────────
+//
+// 给非 ChatEngine 的 LLM call sites (context_compress / ai_annotator /
+// web_search_browser query 等) 提供统一的 redact + LLM call + restore 包装，
+// 避免每个 caller 重复 redact_batch + restore 模板代码。
+
+/// Wrap a single-message LLM `chat(system, user)` call with PII redact +
+/// restore. Use for non-chat LLM call sites where a stable [system, user]
+/// API is already in place.
+///
+/// 行为：
+/// 1. `redact_batch` 处理 [system, user]，placeholder 全局唯一
+/// 2. 调 LLM 用 redacted_system + redacted_user
+/// 3. `restore` 反向 LLM 响应里的所有 placeholder
+///
+/// audit log 用 `log::info!(target: "outbound_audit", ...)` 输出，与
+/// `ChatEngine::run_llm_once` 一致。
+///
+/// 适用 call sites:
+/// - `context_compress::compress_chunk` — chunk → summary (chunk 含 PII 不出云)
+/// - `context_compress::generate_summary` — 同上 cacheless 版本
+/// - `ai_annotator::generate_annotations` — chunk → 4 角度批注 JSON
+pub fn llm_chat_redacted(
+    llm: &dyn crate::llm::LlmProvider,
+    redactor: &Redactor,
+    system: &str,
+    user: &str,
+    call_site: &str,
+) -> crate::error::Result<String> {
+    let (redacted, mappings) = redactor.redact_batch(&[system, user]);
+
+    if !mappings.is_empty() {
+        let mut by_kind: HashMap<String, usize> = HashMap::new();
+        for m in &mappings {
+            let prefix = m.kind.placeholder_prefix().to_string().to_uppercase();
+            *by_kind.entry(prefix).or_insert(0) += 1;
+        }
+        log::info!(
+            target: "outbound_audit",
+            "F-17: PII redacted in {} outbound — kinds={:?} total={} model={}",
+            call_site,
+            by_kind,
+            mappings.len(),
+            llm.model_name()
+        );
+    }
+
+    let raw = llm.chat(&redacted[0], &redacted[1])?;
+    Ok(redactor.restore(&raw, &mappings))
+}
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;

@@ -328,10 +328,16 @@ Built-in extractors for `Person`, `Money`, `Date`, `Organization` — plus the t
 - Spec: `docs/mcp-integration.md` (bilingual)
 
 **Test Coverage**:
-- Manual: `tests/MANUAL_TEST_CHECKLIST.md` MCP section
-- Integration: 🟡 not automated (cross-language harness needed)
+- Manual: `tests/MANUAL_TEST_CHECKLIST.md` MCP section (live backend integration with Claude Desktop / Cursor / Cline)
+- Protocol: `tests/mcp/test_mcp_shim.py` ✅ (7 tests, v0.6.3): subprocess +
+  JSON-RPC 2.0 over stdio. Covers initialize handshake / notifications /
+  tools/list / unknown tool error / unknown method error / malformed JSON
+  resilience / dead backend structured error.
+- Integration with live backend: 🟡 partial — protocol layer ✅ but actual
+  tool execution (attune_search hits real index, attune_chat hits real LLM)
+  remains manual.
 
-**Maturity**: ✅ Active.
+**Maturity**: ✅ Active. Protocol-layer auto-test in v0.6.3.
 
 ---
 
@@ -462,7 +468,7 @@ This is the inverse view of `TESTING.md`'s test pyramid. For each test layer, wh
 | F-12-PROJECT | ✅ | ✅ | ❌ | ❌ | ❌ |
 | F-13-WORKFLOW | ✅ | ✅ | ❌ | ❌ | ❌ |
 | F-14-ENTITIES | ✅ | ✅ | ❌ | ❌ | ❌ |
-| F-15-MCP | ❌ | ❌ | ❌ | ❌ | ❌ manual |
+| F-15-MCP | ❌ | ✅ protocol (v0.6.3, 7 tests) | ❌ | ❌ | ❌ manual |
 | F-16-DISTRIBUTION | ✅ | ✅ | ✅ | ❌ | ✅ |
 | F-17-PRIVACY | ✅ | ✅ (full chat path, v0.6.3) | ❌ | ❌ | ❌ |
 | F-18-QUALITY | ✅ | ✅ corpus | ✅ | ❌ | ❌ |

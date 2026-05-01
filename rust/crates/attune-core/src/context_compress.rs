@@ -145,7 +145,9 @@ pub fn compress_chunk(
 
     let prompt = build_compression_prompt(strategy);
     let user_msg = format!("段落：\n{chunk_text}");
-    let summary = llm.chat(&prompt, &user_msg)?;
+    // F-17-PRIVACY: redact chunk_text before LLM (chunk may contain PII from user-ingested docs)
+    let redactor = crate::pii::Redactor::default();
+    let summary = crate::pii::llm_chat_redacted(llm, &redactor, &prompt, &user_msg, "context_compress")?;
     let summary = summary.trim();
 
     // LLM 偶尔会返超过目标字数的摘要 —— 截断保底
@@ -187,7 +189,9 @@ pub fn generate_summary(
     }
     let prompt = build_compression_prompt(strategy);
     let user_msg = format!("段落：\n{chunk_text}");
-    let raw = llm.chat(&prompt, &user_msg)?;
+    // F-17-PRIVACY: redact chunk_text before LLM (per `compress_chunk` doc — same threat model)
+    let redactor = crate::pii::Redactor::default();
+    let raw = crate::pii::llm_chat_redacted(llm, &redactor, &prompt, &user_msg, "context_compress.generate_summary")?;
     let summary = raw.trim();
     if summary.is_empty() {
         return Err(crate::error::VaultError::InvalidInput("empty summary from LLM".into()));
