@@ -148,13 +148,24 @@ UNIT
   done
 fi
 
-# ─── 5. Embedding 模型拉取（必要底座之一）──────────────────────────
+# ─── 5. Embedding 模型拉取（必要底座之一）+ K3 路径分支 ─────────────
 # 设计原则（CLAUDE.md "硬件感知的默认底座"）：
 #   本地必装的 4 底座 = Embedding + Reranker + ASR + OCR
-#   LLM **不本地预装** — 笔电默认走远端 token，用户在首次启动 wizard 配置
-#                       cloud API key 或选择 Ollama (用户主动 ollama pull)
-#                       K3 一体机镜像才另行预装 qwen2.5:1.5b/3b
+#   LLM **不本地预装** — 笔电默认走远端 token；K3 一体机镜像例外
 #
+# Form factor 检测（与 attune-core::platform::detect_form_factor 同源）:
+# - ATTUNE_FORM_FACTOR=k3 env var override（K3 镜像构建时 systemd-environment.d 写入）
+# - /sys/class/dmi/id/product_name 含 k3 / jetson 关键字
+FORM_FACTOR="laptop"
+if [ "${ATTUNE_FORM_FACTOR:-}" = "k3" ] || [ "${ATTUNE_FORM_FACTOR:-}" = "k3appliance" ]; then
+  FORM_FACTOR="k3"
+elif [ -r /sys/class/dmi/id/product_name ]; then
+  PROD=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_name 2>/dev/null)
+  case "$PROD" in
+    *k3*|*jetson*) FORM_FACTOR="k3" ;;
+  esac
+fi
+
 # Embedding 按 RAM tier 选 bge-m3 (≥16GB) 或 bge-small (<16GB)
 RAM_GB=$(free -g 2>/dev/null | awk '/^Mem:/{print $2}' || echo 0)
 if [ "$RAM_GB" -ge 16 ]; then
@@ -165,30 +176,53 @@ else
   EMBED_TIER="lite (bge-small, 384-dim, 中英)"
 fi
 
+log "Form factor: $FORM_FACTOR (set ATTUNE_FORM_FACTOR=k3 to force K3 path on non-DMI boxes)"
 log "Embedding tier: RAM=${RAM_GB}GB → $EMBED_TIER"
-log "LLM: NOT preinstalled by design — user picks cloud API or local Ollama in first-run wizard"
 
-# 仅在 Ollama API 上线时拉 embedding；否则留 hint
-if curl -sf http://localhost:11434/api/version >/dev/null 2>&1; then
-  if ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$EMBED_MODEL" \
-     || ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${EMBED_MODEL}:latest"; then
-    log "  $EMBED_MODEL already pulled — skipping"
+# K3 路径：预装本地 LLM（笔电不走这条）
+LOCAL_LLM=""
+if [ "$FORM_FACTOR" = "k3" ]; then
+  if [ "$RAM_GB" -ge 8 ]; then
+    LOCAL_LLM="qwen2.5:3b"
   else
-    log "  pulling $EMBED_MODEL (~minutes; progress in syslog: 'journalctl -t attune-postinst -f')..."
-    if ollama pull "$EMBED_MODEL" 2>&1 | while IFS= read -r line; do
-         case "$line" in
-           *success*|*verifying*|*"writing manifest"*|*error*|*Error*)
-             logger -t "$LOG_TAG" -- "[pull $EMBED_MODEL] $line"
-             ;;
-         esac
-       done; then
-      log "  $EMBED_MODEL pulled OK"
-    else
-      log "  WARN: $EMBED_MODEL pull failed (network?). User can retry: ollama pull $EMBED_MODEL"
-    fi
+    LOCAL_LLM="qwen2.5:1.5b"
+  fi
+  log "K3 form factor → preinstall local LLM: $LOCAL_LLM (~2 GB)"
+else
+  log "Laptop form factor → LLM 走远端 token 默认；用户在 wizard 配置 cloud API 或 Ollama"
+fi
+
+# 拉模型（embedding + K3-only LLM）
+pull_one_model() {
+  local m="$1"
+  if ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$m" \
+     || ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "${m}:latest"; then
+    log "  $m already pulled — skipping"
+    return 0
+  fi
+  log "  pulling $m (progress: journalctl -t attune-postinst -f)..."
+  if ollama pull "$m" 2>&1 | while IFS= read -r line; do
+       case "$line" in
+         *success*|*verifying*|*"writing manifest"*|*error*|*Error*)
+           logger -t "$LOG_TAG" -- "[pull $m] $line"
+           ;;
+       esac
+     done; then
+    log "  $m pulled OK"
+    return 0
+  fi
+  log "  WARN: $m pull failed (network?). User can retry: ollama pull $m"
+  return 1
+}
+
+# 仅在 Ollama API 上线时拉模型；否则留 hint
+if curl -sf http://localhost:11434/api/version >/dev/null 2>&1; then
+  pull_one_model "$EMBED_MODEL"
+  if [ -n "$LOCAL_LLM" ]; then
+    pull_one_model "$LOCAL_LLM"
   fi
 else
-  log "WARN: Ollama API not ready, skipping embedding pull. User can later: ollama pull $EMBED_MODEL"
+  log "WARN: Ollama API not ready, skipping model pull. User can later: ollama pull $EMBED_MODEL${LOCAL_LLM:+ + ollama pull $LOCAL_LLM}"
 fi
 
 # ─── 6. 底座底层：ASR (whisper.cpp) + Reranker ──────────────────────
@@ -245,35 +279,64 @@ log "Reranker (Xenova/bge-reranker-base ~120 MB): will be downloaded by attune-s
 HOME_DIR="${SUDO_USER:+/home/$SUDO_USER}"
 [ -z "$HOME_DIR" ] && HOME_DIR="$HOME"
 PPOCR_DIR="$HOME_DIR/.local/share/attune/models/ppocr"
-# bukuroo/PPOCRv5-ONNX 是公开的 PP-OCRv5 ONNX 转换版（社区维护）
-PPOCR_BASE="https://huggingface.co/bukuroo/PPOCRv5-ONNX/resolve/main"
+# 模型源决策（2026-05-01 修）:
+# - PP-OCRv5 ONNX 字典在社区版 (bukuroo) 与 kreuzberg-paddle-ocr 期望格式不匹配
+#   (v5 字典以　全角空格 + emoji 收尾，但 kreuzberg 期望 # 起始 + 空格收尾)
+# - 降级到 RapidOCR/PP-OCRv4：paddle-ocr-rs 设计目标，标准 6623 字符字典格式
+# - 字典格式与 kreuzberg crnn_net.rs init_keys 匹配（# CTC blank + 6623 chars + ' '）
+RAPIDOCR_BASE="https://huggingface.co/SWHL/RapidOCR/resolve/main"
+DICT_URL="https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/release/2.7/ppocr/utils/ppocr_keys_v1.txt"
 
-# 文件名映射：HF source name → 本地存放名（attune-core::ocr::ppocr 期望的名）
 PPOCR_OK=1
 mkdir -p "$PPOCR_DIR"
-download_one() {
+download_with_dict_prep() {
   local src="$1" dest="$2" desc="$3"
   if [ -s "$PPOCR_DIR/$dest" ]; then
     log "  PP-OCR: $dest already present ($(du -h "$PPOCR_DIR/$dest" | cut -f1))"
     return 0
   fi
   log "  PP-OCR: downloading $dest ($desc)..."
-  if curl -fsSL --connect-timeout 10 -o "$PPOCR_DIR/${dest}.tmp" "$PPOCR_BASE/$src" 2>/dev/null; then
+  if curl -fsSL --connect-timeout 10 -o "$PPOCR_DIR/${dest}.tmp" "$src" 2>/dev/null; then
     mv "$PPOCR_DIR/${dest}.tmp" "$PPOCR_DIR/$dest"
     [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$PPOCR_DIR/$dest"
     return 0
   else
     rm -f "$PPOCR_DIR/${dest}.tmp"
-    log "  PP-OCR: WARN $dest download failed; tesseract fallback will be used"
+    log "  PP-OCR: WARN $dest download failed"
     PPOCR_OK=0
     return 1
   fi
 }
 
-download_one "ppocrv5-mobile-det.onnx"  "ch_PP-OCRv5_det_mobile.onnx"      "~5 MB det"
-download_one "ppocrv5-cls.onnx"          "ch_ppocr_mobile_v2.0_cls.onnx"   "~1 MB cls"
-download_one "ppocrv5-mobile-rec.onnx"   "ch_PP-OCRv5_rec_mobile.onnx"     "~10 MB rec"
-download_one "ppocrv5_dict.txt"          "ppocr_keys_v1.txt"               "~50 KB 6627-char dict"
+download_with_dict_prep "$RAPIDOCR_BASE/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx" \
+  "ch_PP-OCRv5_det_mobile.onnx" "~5 MB det (PP-OCRv4)"
+download_with_dict_prep "$RAPIDOCR_BASE/PP-OCRv1/ch_ppocr_mobile_v2.0_cls_infer.onnx" \
+  "ch_ppocr_mobile_v2.0_cls.onnx" "~1 MB cls"
+download_with_dict_prep "$RAPIDOCR_BASE/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx" \
+  "ch_PP-OCRv5_rec_mobile.onnx" "~10 MB rec (PP-OCRv4)"
+
+# 字典：PaddleOCR 官方 6623 字符 + kreuzberg 要求 prefix # / suffix ' '
+# 处理：下载后用 awk 加 # 头 + 空格尾
+DICT_PATH="$PPOCR_DIR/ppocr_keys_v1.txt"
+if [ -s "$DICT_PATH" ] && head -c 1 "$DICT_PATH" | grep -q '#'; then
+  log "  PP-OCR: ppocr_keys_v1.txt already prepared"
+else
+  log "  PP-OCR: downloading + preparing ppocr_keys_v1.txt (6623 chars + # / ' ')..."
+  if curl -fsSL --connect-timeout 10 -o "$DICT_PATH.tmp" "$DICT_URL" 2>/dev/null; then
+    # 在文件首尾加 # 和空格，匹配 kreuzberg-paddle-ocr CTC blank 格式
+    {
+      printf '#\n'
+      cat "$DICT_PATH.tmp"
+      printf ' \n'
+    } > "$DICT_PATH"
+    rm -f "$DICT_PATH.tmp"
+    [ -n "$SUDO_USER" ] && chown "$SUDO_USER:$SUDO_USER" "$DICT_PATH"
+  else
+    rm -f "$DICT_PATH.tmp"
+    log "  PP-OCR: WARN dict download failed"
+    PPOCR_OK=0
+  fi
+fi
 [ -n "$SUDO_USER" ] && chown -R "$SUDO_USER:$SUDO_USER" "$PPOCR_DIR" 2>/dev/null
 if [ "$PPOCR_OK" = "1" ]; then
   log "  PP-OCR: 4 model files ready at $PPOCR_DIR"
@@ -288,8 +351,13 @@ log "  Embedding: $(ollama list 2>/dev/null | grep -q bge && echo "OK ($EMBED_MO
 log "  Reranker:  lazy-load on first search (Xenova/bge-reranker-base ~120 MB via hf_hub)"
 log "  ASR:       $(command -v whisper-cli >/dev/null && [ -f "$ASR_MODEL_FILE" ] && echo "OK (whisper-cli + ggml-small-q8)" || echo "PARTIAL (re-run apt or attune deploy)")"
 log "  OCR:       $([ -f "$PPOCR_DIR/ch_PP-OCRv5_rec_mobile.onnx" ] && command -v pdftoppm >/dev/null && echo "OK (PP-OCRv5 mobile, 4 ONNX models + pdftoppm)" || echo "MISSING (re-run: apt install --reinstall attune)")"
-log "─── LLM (not a foundation; user choice in wizard)──"
-log "  LLM: NOT preinstalled by design — first-run wizard offers cloud API key or local Ollama"
+if [ "$FORM_FACTOR" = "k3" ]; then
+  log "─── LLM (K3 form factor — preinstalled) ──"
+  log "  LLM: $(ollama list 2>/dev/null | grep -q qwen && echo "OK ($LOCAL_LLM via Ollama)" || echo "MISSING — user can: ollama pull $LOCAL_LLM")"
+else
+  log "─── LLM (Laptop form factor — user choice in wizard) ──"
+  log "  LLM: NOT preinstalled by design — first-run wizard offers cloud API key or local Ollama"
+fi
 
 # ─── 8. 总结 ───────────────────────────────────────────────────────
 log "post-install complete."

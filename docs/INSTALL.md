@@ -1,16 +1,31 @@
 # Attune 安装指南
 
-> 跨平台安装路径速查。每条路径都包含 Ollama 自动安装 + 硬件自适应。
+> 跨平台安装路径速查。每条路径都包含 Ollama 自动安装 + 硬件自适应 + 4 必要底座（Embedding / Reranker / ASR / OCR）。**LLM 不在本地必装清单**——笔电默认走远端 token，K3 一体机镜像例外。
 
 ## 总览
 
-| 平台 | 包格式 | 自动 Ollama 安装 | 自动硬件配置 | 备注 |
-|------|--------|------------------|--------------|------|
-| **Ubuntu / Debian** | `.deb` | ✅ postinst 自动 curl install.sh | ✅ AMD APU 自动注入 HSA_OVERRIDE | **推荐** |
-| **Fedora / RHEL** | `.rpm` | ✅ postinst 共用 deb hook 脚本 | ✅ 同上 | 推荐 |
-| **任何 Linux** | AppImage | ⚠️ 首次启动 wizard 引导 | ⚠️ 同上 | 便携 / 沙箱场景 |
-| **Windows 10/11** | NSIS `.exe` | ✅ installer.nsh 下载 OllamaSetup.exe | N/A (CUDA / DirectML 自动) | **推荐** |
-| **macOS** | — | — | — | 暂不支持 (per CLAUDE.md) |
+| 平台 | 包格式 | 自动 Ollama | 自动 GPU 配置 | 4 底座自动装 |
+|------|--------|------------|---------------|------------|
+| **Ubuntu / Debian** | `.deb` | ✅ postinst | ✅ AMD HSA_OVERRIDE | ✅ Embedding/Reranker/ASR/OCR 全装 |
+| **Fedora / RHEL** | `.rpm` | ✅ 共用 hook | ✅ 同上 | ✅ 同上 |
+| **任何 Linux** | AppImage | ⚠️ wizard 引导 | ⚠️ 手动 attune deploy | ⚠️ 用户运行后端动 |
+| **Windows 10/11** | NSIS `.exe` | ✅ installer.nsh | N/A（CUDA/DirectML 自动） | ✅ 同上 |
+| **macOS** | — | — | — | 暂不支持 |
+
+## 4 必要底座（CLAUDE.md "硬件感知的默认底座"）
+
+attune 装包后立刻就绪以下底座：
+
+| 底座 | 模型 | 体积 | 来源 |
+|------|------|------|------|
+| **Embedding** | bge-m3 (≥16GB) / bge-small (<16GB) | 1.2 GB / 200 MB | postinst 调 `ollama pull` |
+| **Reranker** | Xenova/bge-reranker-base ONNX | ~120 MB | 首次搜索 lazy 下载（5-10s 一次性延迟） |
+| **ASR** | whisper-cli + ggml-small-q8 | 2.6 MB binary + 250 MB 模型 | binary 进 .deb bundle，模型 postinst 下载 |
+| **OCR** | PP-OCRv5 mobile (det+cls+rec+dict) | 4 ONNX 文件 ~21 MB | postinst 从 HF `bukuroo/PPOCRv5-ONNX` 下载 |
+
+**LLM**（**不**在底座清单）：
+- **笔电**：远端 token 默认。首次启动 wizard 让用户配 OpenAI/Anthropic/Qwen 兼容 API key 或选 Ollama 本地
+- **K3 一体机**：镜像构建时 `ATTUNE_FORM_FACTOR=k3` 让 postinst 预装 qwen2.5:1.5b/3b（~2 GB）
 
 ## Linux
 
@@ -30,14 +45,23 @@ attune-desktop                   # 启动 GUI
 
 **安装时自动做的事**：
 - preinst：停止任何在跑的旧版 attune 进程（30s 优雅 + 强杀）
-- postinst：
-  - 检查 Ollama，缺失则 `curl -fsSL https://ollama.com/install.sh | sh`
-  - 检测 AMD GPU（`/sys/class/kfd/kfd/topology/nodes`），按 `gfx_target_version` 写 `HSA_OVERRIDE_GFX_VERSION` systemd drop-in：
-    - gfx1103 / 1102 / 1150 / 1151（Phoenix / Hawk Point / Strix）→ `11.0.0`
-    - gfx103x（Rembrandt / Yellow Carp）→ `10.3.0`
-    - gfx900 / 906 / 908 / 90a / 940 / 942 / 1100 / 1101 / 1200 / 1201 → 原生支持，无 override
-  - 启用 ollama systemd 服务 + API ready 探测（10s 超时）
-  - **不**拉模型（留给首次启动 wizard，progress UI 友好）
+- postinst（按顺序）：
+  1. **Ollama**：缺失则 `curl -fsSL https://ollama.com/install.sh | sh`
+  2. **AMD GPU**：检测 `/sys/class/kfd/kfd/topology/nodes` → `gfx_target_version` 写 `HSA_OVERRIDE_GFX_VERSION` systemd drop-in：
+     - gfx1103 / 1102 / 1150 / 1151（Phoenix / Hawk Point / Strix）→ `11.0.0`
+     - gfx103x（Rembrandt / Yellow Carp）→ `10.3.0`
+     - gfx900 / 906 / 908 / 90a / 940 / 942 / 1100 / 1101 / 1200 / 1201 → 原生支持，无 override
+  3. **systemd 服务**：启用 ollama systemd 单元 + API ready 探测（15s 超时）；如果 Ollama 安装跳过 systemd（新版 install.sh 在 Ubuntu 25.10+ 默认 user-mode），自己写最小化 unit + 创建 user/group
+  4. **Embedding 底座**：`ollama pull bge-m3` 或 `bge-small`（按 RAM tier）
+  5. **K3 路径** (form factor 检测命中)：再 `ollama pull qwen2.5:3b` 或 `1.5b`（**笔电不走这条**）
+  6. **ASR 底座**：whisper-cli symlink 到 /usr/local/bin + 下载 ggml-small-q8.bin
+  7. **OCR 底座**：下载 PP-OCRv5 mobile 4 个 ONNX 文件到 `~/.local/share/attune/models/ppocr/`
+  8. **Reranker**：lazy（首次搜索查询时 hf_hub 自动下载）
+
+**Form factor 检测**（决定是否 K3 路径）：
+- `ATTUNE_FORM_FACTOR=k3` env var override（K3 镜像构建时 systemd-environment.d 写）
+- `/sys/class/dmi/id/product_name` 含 `k3` 或 `jetson` 关键字
+- 否则默认 `laptop`（不预装 LLM）
 
 **卸载**：
 ```bash

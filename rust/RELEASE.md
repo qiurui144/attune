@@ -1,5 +1,48 @@
 # attune 版本记录
 
+## v0.6.x patch 流（2026-05-01）— 部署 + 4 必要底座
+
+**4 必要底座（CLAUDE.md "硬件感知的默认底座" 实装）**：
+
+| 底座 | 默认引擎 | 体积 | 来源 |
+|------|---------|------|------|
+| Embedding | bge-m3 / bge-small (Ollama) | 1.2 GB / 200 MB | postinst `ollama pull` |
+| Reranker | Xenova/bge-reranker-base (ONNX) | ~120 MB | 首查 lazy hf_hub 下载 |
+| ASR | whisper-cli + ggml-small-q8 | 2.6 MB binary + 250 MB model | binary 进 .deb bundle，model postinst 下载 |
+| OCR | PP-OCRv5 mobile (DBNet+CRNN+CLS+dict) | ~21 MB ONNX | postinst HF `bukuroo/PPOCRv5-ONNX` |
+
+**LLM 不在底座**：笔电默认远端 token；K3 一体机镜像 (form_factor=k3) 才预装 qwen2.5:1.5b/3b。
+
+**Form factor 检测** (`detect_form_factor()` in `attune-core::platform`)：
+1. `ATTUNE_FORM_FACTOR=k3` env var override（K3 镜像构建时 systemd-environment.d）
+2. `/sys/class/dmi/id/product_name` 含 `k3` / `jetson`
+3. 默认 `laptop`
+
+**安装路径全平台覆盖**：
+- `.deb` (Ubuntu/Debian) — preinst+postinst+prerm+postrm 4 hooks
+- `.rpm` (Fedora/RHEL) — 共用 4 个 .sh hook
+- `.AppImage` (universal Linux) — 无 hooks，运行时 wizard
+- NSIS `.exe` (Windows) — installer.nsh 4 macros + inetc::get OllamaSetup.exe
+
+**关键变更**：
+- 单引擎 OCR — 删 tesseract，PP-OCRv5 mobile 唯一引擎（中文准确率 70-85% → 94-96%）
+- LLM 不本地预装（笔电）— 用户在 wizard 配 cloud API 或 Ollama；K3 镜像例外
+- whisper.cpp 2.6 MB 静态 binary 进 Tauri bundle resources（替代 apt 包）
+- ROCm gfx1103 自动 HSA_OVERRIDE_GFX_VERSION=11.0.0 写 systemd drop-in
+- graceful shutdown via SIGINT/SIGTERM oneshot（R35）
+- 日志 daily rotation `~/.local/share/attune/logs/`（R37）
+- vault export/import CLI（R38）
+- Windows + Linux CI matrix（R18）+ 慢测试 nightly（R19）
+
+**实测在 Ubuntu 26.04 LTS + AMD Ryzen 7 8845H + Radeon 780M (gfx1103)**：
+- TRUE zero-state 安装 149 秒（含 600 MB Ollama install + 1.2 GB bge-m3 + 21 MB PP-OCR + 250 MB ASR）
+- HSA_OVERRIDE_GFX_VERSION=11.0.0 自动注入 systemd Environment
+- bge-m3 embed: 冷 1.6s / 热 74ms
+- qwen2.5:3b（用户 wizard 后装）: 47.2 tokens/s（确认 ROCm 加速）
+- 1024-dim embed + 端到端 RAG chat 跑通（24.7 t/s 稳定）
+
+---
+
 ## v0.6.0 GA（2026-04-30）— 私有 AI 知识伙伴正式发版 🎉
 
 **发布产物**（双轨）：

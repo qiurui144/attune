@@ -36,6 +36,12 @@ enum Commands {
         #[arg(short, long, default_value = "20")]
         limit: usize,
     },
+    /// Run PP-OCRv5 on an image file (PNG/JPG) and print extracted text.
+    /// Useful for testing OCR setup or quick screenshot OCR without going through ingest.
+    Ocr {
+        /// Image path (PNG / JPG / etc supported by `image` crate)
+        image: std::path::PathBuf,
+    },
     /// R38 (2026-05-01): Export vault data files to a backup directory.
     /// Copies vault.db (encrypted SQLite), tantivy/ (full-text index), vectors.encbin (if present).
     /// Vault MUST be locked first (this command verifies and refuses if unlocked, to avoid WAL corruption).
@@ -167,6 +173,20 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             println!("Exported {copied} entries to {}", dest.display());
             println!("IMPORTANT: separately back up your device.key at {}",
                 attune_core::platform::device_secret_path().display());
+        }
+        Commands::Ocr { image } => {
+            // 直接用 attune-core::ocr::detect_default_provider 跑 PP-OCR
+            // 不开 vault — OCR provider 不需要 vault 状态
+            let provider = attune_core::ocr::detect_default_provider().ok_or_else(|| {
+                attune_core::error::VaultError::ModelLoad(
+                    "PP-OCR models missing — run `attune deploy` or apt install --reinstall attune".into(),
+                )
+            })?;
+            eprintln!("[attune ocr] engine: {} | image: {}", provider.name(), image.display());
+            let start = std::time::Instant::now();
+            let text = provider.extract_text_from_image(&image)?;
+            eprintln!("[attune ocr] {:?} elapsed", start.elapsed());
+            println!("{text}");
         }
         Commands::Deploy { no_models, dry_run, script } => {
             // R-deploy: 调底层 bash 脚本。Linux-only。
