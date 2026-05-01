@@ -70,7 +70,9 @@ pub async fn bearer_auth_guard(
         && (path == "/api/v1/status/health"
             || path == "/health"
             || path == "/"
+            || path == "/favicon.ico"
             || path.starts_with("/ui/")
+            || path.starts_with("/assets/")
             || path == "/api/v1/vault/setup"
             || path == "/api/v1/vault/unlock"
             || path == "/api/v1/vault/status")

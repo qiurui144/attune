@@ -119,6 +119,7 @@ export const en = {
   // ─── Empty states ───────────────────────────────────
   'empty.chat.title': 'Ask something',
   'empty.chat.desc': 'Based on your knowledge base, or search the web',
+  'chat.input.placeholder': 'Ask your knowledge base… (⌘↵ to send)',
   'empty.items.title': 'No items yet',
   'empty.items.desc': 'Drag files or bind a folder',
   'empty.sessions.title': 'Start your first conversation',
@@ -150,8 +151,11 @@ export const en = {
   'sidebar.session.older': 'Earlier',
   'sidebar.menu.settings': '⚙ Settings',
   'sidebar.menu.lock_vault': '🔒 Lock vault',
+  'sidebar.menu.lock_vault.confirm': 'Locking the vault will require Master Password to unlock again. Continue?',
+  'sidebar.menu.lock_vault.error': 'Lock failed',
   'sidebar.menu.toggle_theme': '🌓 Toggle theme',
   'sidebar.menu.about': 'About Attune',
+  'sidebar.menu.about.toast': 'Attune · Private AI Knowledge Companion · see README.md',
 
   // ─── SettingsView ────────────────────────────────────
   'settings.section.appearance': 'Appearance',

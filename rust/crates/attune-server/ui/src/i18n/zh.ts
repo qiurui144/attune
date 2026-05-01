@@ -112,6 +112,7 @@ export const zh = {
   // ─── 空状态 ───────────────────────────────────────────
   'empty.chat.title': '问点什么吧',
   'empty.chat.desc': '基于你的知识库，或搜索全网',
+  'chat.input.placeholder': '问问你的知识库… (⌘↵ 发送)',
   'empty.items.title': '还没有录入内容',
   'empty.items.desc': '拖拽文件或绑定文件夹',
   'empty.sessions.title': '开始第一次对话',
@@ -143,8 +144,11 @@ export const zh = {
   'sidebar.session.older': '更早',
   'sidebar.menu.settings': '⚙ 设置',
   'sidebar.menu.lock_vault': '🔒 锁定 vault',
+  'sidebar.menu.lock_vault.confirm': '锁定后需要重新输入 Master Password 解锁。继续？',
+  'sidebar.menu.lock_vault.error': '锁定失败',
   'sidebar.menu.toggle_theme': '🌓 切换主题',
   'sidebar.menu.about': '关于 Attune',
+  'sidebar.menu.about.toast': 'Attune · 私有 AI 知识伙伴 · 详见 README.md',
 
   // ─── SettingsView ────────────────────────────────────
   'settings.section.appearance': '外观',
