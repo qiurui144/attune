@@ -876,3 +876,74 @@ echo 'You are a legal expert. Review the contract.' > $XDG_DATA_HOME/attune/plug
 
 继续做 v0.7 商业化（accounts / marketplace / gateway）的前置条件：✅ 已满足。
 
+
+---
+
+# 2026-05-02 OSS Playwright UI 端到端验证（develop HEAD AMD）
+
+**目的**：用 Playwright MCP 驱动真实 Chrome 对 AMD 笔电真实部署的 attune-server-headless 做完整 UI walk-through，通过 debug 找出仅 curl 测不到的 UI / 交互层问题。
+
+**环境（Phase 1 / Bash setup before Playwright）**：
+- AMD `attune-server-headless` running on AMD :18900 (systemd-run --user)
+- SSH tunnel localhost:18900 → AMD:18900
+- Vault zero-state, password=`TestPass123!`，LLM=Ollama qwen2.5:3b
+- **真实语料 12 doc**：rust-lang/book@trpl-v0.3.0（6 个 Rust 章节）+ CyC2018/CS-Notes@c47a2a7（6 个中文设计模式 / Leetcode / 网络章节）
+- 854 chunks 入 vector + tantivy 索引（embedding worker drain ~30s）
+- **Playwright phase 期间禁用 Bash**（per CLAUDE.md "Playwright E2E 规则"）
+
+**Chrome MCP** 驱动 16 个截图：`docs/screenshots-2026-05-02/amd-01..16.png`
+
+## 走查路径（pass）
+
+| # | 操作 | 结果 |
+|---|------|------|
+| 01 | 访问 / | LoginScreen 渲染（"Vault 已锁定 · 请输入 Master Password"）|
+| 02 | unlock + Welcome | onboarding wizard 出现（5 步骤）— 见 UI-S3 |
+| 03 | "I have a vault — import backup" | 跳过 wizard 进入 MainShell（侧边 7 nav + 顶部 ⌘K 搜索 + 模型 chip）|
+| 04 | Items 标签 | 12 docs 全列出，github source badge + "今天" 时间戳 + 上传/刷新按钮 + 共 12 条 · 加载 12 条 |
+| 05 | Reader 模态 | 点 doc 滑出右侧 Reader，4 AI 分析按钮（风险/过时/亮点/疑问）就位 |
+| 06 | ⌘K Command palette | 输入 "ownership" → 6 results，第一是 "What Is Ownership?"（标题命中），后续 5 个全文匹配 |
+| 11 | Settings 通用 | Theme=Auto / Language=English |
+| 12 | Settings AI 大脑 | LLM endpoint=http://127.0.0.1:11434/v1 ✓ model=qwen2.5:3b ✓ embedding=bge-m3 ✓ 网络搜索=enabled |
+| 14 | Skills tab | 空状态 "还没装 skill" + 友好 hint |
+| 15 | Projects tab | 空状态 + "新建 Project" 按钮 |
+| 16 | Remote tab | 空状态 + "添加本地文件夹 / 添加 WebDAV" 按钮 |
+
+## 🔴 发现的 UI 问题（按严重度排序）
+
+| ID | 严重度 | 现象 | 影响 | 建议修复 |
+|----|--------|------|------|---------|
+| **UI-S8** | 🔴 **CRITICAL** | "Lock vault" 菜单点击后 UI 仍显示 "Unlocked"；**网络抓包确认 0 个 POST /api/v1/vault/lock 请求**；server 端 vault.state=unlocked 不变 | 用户以为锁定了 vault，实际 attacker 持浏览器 session 继续访问全部数据 — 直接违反 1Password 式私密承诺 | 在 Account menu Lock vault `onClick` 加 `await api.vaultLock()` + 清 sessionStorage + redirect to LoginScreen |
+| **UI-S6** | 🟠 high | 发送 chat 后 UI 静止 >180s，无 spinner / 无 streaming / 无 "thinking" 指示器 / 无 abort 按钮；用户无法判断卡住 vs 思考中 | 在大语料场景（854 chunks RAG）下，3B 本地模型 + reranker 全链路确实会跑很久；UI 没反馈用户必然以为崩了 | 加 `<MessagePending isStreaming={pending}>` spinner + 30s 超时弹 abort 按钮 |
+| **UI-S8** **server-side** | 🟠 high | 同次测试 chat POST 在 server 端持续 pending >180s 不返回（不止 UI）— 854 chunks corpus + 中文 Q + qwen2.5:3b on AMD ROCm | RAG 在大语料 + 3B 模型 + AMD ROCm 上的实际性能可能不达 CLAUDE.md 期望的"本地 0.6B-3B 响应快" | 探查 reranker top-K（rerank 1.1GB ONNX × 大量 chunk 太慢）+ context 截断策略 |
+| **UI-S3** | 🟡 medium | 后端 vault 已 setup'd（API `state=unlocked`）+ unlocked 之后，UI 仍展示 5 步 onboarding wizard（Welcome / Password / AI / Hardware / Data）；走 wizard Step 2 会要求重设密码，**有覆盖现有 vault 风险** | 通过 API 提前 setup 的用户首次开 UI 会被强制走 wizard，普通用户点 "Get started" 会重置数据 | wizard 触发条件应基于 `vault.is_initialized` 而非客户端 localStorage 标志；已 setup'd → 直接跳 MainShell |
+| **UI-S5** | 🟡 medium | Chat input 显示 raw i18n key `chat.input.placeholder`（中文 locale 下没翻译键命中）；底部 "⌘↵ 发送" 是混合中英 | i18n 资源缺失或键不匹配；普通用户看到原始 key 觉得未完工 | 补 zh-CN / en 两份 i18n 表里 `chat.input.placeholder` 键 |
+| **UI-S7** | 🟡 medium | Marketplace 点 "免费试用 7 天" → backend 200 OK（mock provider）+ list 重新加载，但 **UI 卡片状态不更新**（仍显示"免费试用 7 天"按钮，不显示"试用至 YYYY-MM-DD"或"已安装"）；Skills tab 也没出现新插件 | 用户以为安装失败；mock provider + UI 不显示 mock 提示也是误导 | 卡片在 trial response 里读 `trial.expires_at` 切按钮文案；mock 模式下 banner 提示 "demo mode — install is not real" |
+| **UI-S4** | 🟢 low | "I have a vault — import backup" 按钮实际行为是**跳过 wizard**进 MainShell，并不打开任何"导入 backup"对话框 | 文案误导用户预期 | 按钮改名为 "Skip — vault already configured" 或真的实现 backup import 对话框 |
+| **UI-S2** | 🟢 low | LoginScreen 阶段 WebSocket `/ws/scan-progress` 重试连接 4-15 次，每次 401（无 auth token）;未登录时不该尝试 WS | 浏览器 console 警告噪音 | WS connect 加 `if (!hasAuthToken()) return` 守卫 |
+| **UI-S1** | 🟢 low | `/favicon.ico` 返回 401（被 auth middleware 拦），浏览器 tab 上是默认图标 | 体验小瑕疵 + console error | 把 `/favicon.ico` 加进 `lib.rs` 中 middleware bypass 列表 |
+
+## 🔴 紧急建议（v0.6.2 阻断）
+
+**UI-S8 必须修**。"Lock vault is no-op" 是直接违反 1Password 式私密承诺的 critical bug。若 v0.6.1 GA 已发，强烈建议立即出 v0.6.2 patch + release notes 写 `[SECURITY] vault lock previously did not actually clear server session — please update`。
+
+**UI-S6 + 性能** 也要修：大语料 chat 卡住不仅 UI 锁，server 端真的在跑 RAG 不返回，建议至少 (a) chat 加 30s 超时降级到 fallback prompt + (b) reranker 限 top-K=20 + (c) UI 加 spinner。
+
+## 通过项
+
+- ✓ Login screen Argon2id 解锁正确
+- ✓ 12 doc 真实语料 ingest + indexing
+- ✓ Reader modal 渲染正确
+- ✓ ⌘K command palette 三路检索（标题精确 + 全文匹配）
+- ✓ Items / Skills / Projects / Remote 四个 empty/data state UI 都 OK
+- ✓ Settings AI 大脑 LLM/embedding/web search 字段全显示
+- ✓ Marketplace 显示 4 个 attune-pro plugin（Law/Patent/Presales/Tech Pro），Pro badge + 试用按钮 + "升级到 Pro" 链接
+- ✓ Account menu 4 项（Settings / Lock vault / Toggle theme / About）
+- ✓ Sidebar 顶栏 "Unlocked" + "Connected" 状态指示器
+
+## 不在本次范围
+
+- ❌ Chat 功能（卡住，单独 reproducible bug）
+- ❌ Tauri GUI 窗口（headless 路径，下次桌面 session 测）
+- ❌ Login screen 错误密码 retry / 多设备同步 / device.key 导入 / ASR / OCR UI
+
