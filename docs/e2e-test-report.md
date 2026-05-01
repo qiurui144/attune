@@ -811,3 +811,68 @@ echo 'You are a legal expert. Review the contract.' > $XDG_DATA_HOME/attune/plug
 | 前端：LoginScreen 输入正确密码 → backend reissue → MainShell | ✅ | `e2e-bug7-fix-after-reauth.png` |
 
 **关键设计点**：`reissue_token` 不修改内存 `UnlockedKeys`（避免 Drop/Zeroize 触发），只验证密码并签发新 token。AEAD 认证标签提供常数时间密码校验，不引入额外依赖。
+
+---
+
+# 2026-05-02 OSS 稳定性回归验证（develop HEAD）
+
+**目的**：在做 v0.7-alpha 商业化之前，先把 OSS 主干（develop）的基础工作流在真实 AMD 笔电上端到端跑一遍，确认体系框架稳定。
+
+**验证基线**：
+- 代码：`develop` HEAD `7b5fb77`（v0.6.1 GA tag 之上叠 10 个 v0.7-alpha commit）
+- 二进制：`attune-server-headless` 65 MB（不含 GUI shell，专测 server 路径）
+- 部署目标：AMD Ryzen 7 8845H + Radeon 780M (gfx1103) + XDNA NPU @ Ubuntu 26.04
+- 数据：`~/.local/share/attune` zero-state（vault.db / tantivy 全清）
+- 4 底座模型：复用 AMD 现存 `~/.local/share/attune/models/`（embedding bge-m3 / reranker bge-base / ASR turbo-q5 / OCR PP-OCRv5 mobile）
+
+## 验证矩阵 — 8/8 通过
+
+| 阶段 | 验证项 | 结果 | 关键证据 |
+|------|--------|------|---------|
+| **B 构建** | `cargo build --release -p attune-server --bin attune-server-headless` | ✅ | 65 MB ELF / cache hit，缘 develop HEAD 已构建 |
+| **D 部署** | scp + systemd-run --user --unit=attune-headless | ✅ | 启动 ~50ms，listening 127.0.0.1:18900 |
+| **F 4 底座** | `/api/v1/ai_stack` + `/diagnostics` 全 available | ✅ | embedding ✓ rerank ✓ ASR (large turbo q5) ✓ OCR (pp-ocr-v5-mobile) ✓ |
+| **F 硬件感知** | gfx1103 检测 + HSA_OVERRIDE_GFX_VERSION=11.0.0 + form_factor=laptop + prefers_local_llm=false | ✅ | 与 CLAUDE.md "硬件感知的默认底座" 一致 |
+| **V Vault** | setup → lock → unlock → wrong-pwd reject 完整周期 | ✅ | 四步全过；session token 在 lock 后失效；invalid_password 正确拒绝 |
+| **W1 Ingest** | 3 个混合中英文档 → parse → chunk → embed → store | ✅ | 6 chunk（每文档 level1+level2）入队，embedding worker 立即 drain 完，pending=0，items=3 |
+| **W2 Search** | BM25 / vector / RRF / rerank 三路融合 | ✅ | "tokio runtime" → Rust 第一（关键词命中）；"高阶函数包装" → Python 第一（语义命中）；"卡波那" → 意大利面第一（跨语言语义）|
+| **W2 search/relevant** | rerank-active path + inject_content 构建 | ✅ | 30 ms 全链路（含 reranker 1.1 GB ONNX 推理）|
+| **W3 Chat+RAG** | LLM 配置 → ping → RAG 知识库注入 → 引用回链 | ✅ | qwen2.5:3b ping 3.7s warm-up；"Future 是惰性的吗"答正确 + cite[1]→Rust async；"装饰器要几层"答"三层"+ cite→Python |
+| **R 重启** | systemctl stop（graceful SIGTERM）→ start | ✅ | 数据完整：vault.db 解锁后 items=3，tantivy 索引重开，settings 持久化（llm.provider=ollama / model=qwen2.5:3b）|
+
+## 性能数据（AMD Ryzen 7 8845H, develop HEAD）
+
+| 操作 | 延迟 | 备注 |
+|------|------|------|
+| 启动 → listening :18900 | ~50 ms | 含 hardware detection / vault open / 0 plugins load |
+| Vault setup (Argon2id 派生 + AEAD wrap) | ~600 ms | 默认 m_cost / t_cost |
+| Vault unlock | ~200 ms | 已派生过则更快 |
+| Ingest 1 doc (parse + chunk + queue) | ~50 ms | 不含 embed (异步队列) |
+| Embedding 1 chunk (bge-m3 via Ollama) | ~200 ms | 含 HTTP roundtrip |
+| Search BM25 + vector + RRF (3 docs) | ~10 ms | top_k=5 |
+| search/relevant + rerank (3 chunk) | 30 ms | reranker ONNX CPU 推理 |
+| Chat (RAG retrieval + qwen2.5:3b 推理) | ~7 s | 短答案，warm 状态 |
+| LLM ping (qwen2.5:3b cold start) | 3.7 s | 模型加载 |
+
+## 已知问题（**非阻断**，记录待修）
+
+| ID | 严重度 | 现象 | 影响 |
+|----|-------|------|------|
+| **OSS-S1** | low | `confidence` 字段在知识库未命中场景仍返 3（最高）— 测了"如何安装 macOS Sonoma"，回答正确说"未在文档中找到"，但 confidence=3 与文本语义不符 | UI 上 confidence badge 会误导用户，建议 J5 strict prompt 增加 "no-relevant-knowledge → confidence=0" 分支 |
+| **OSS-S2** | low | `/api/v1/chat` 响应字段是 `content`，不是 `reply`；首次发现时调用方误读字段名导致看似空回复 | 文档 / OpenAPI schema 应固定字段为 `content` 并标注 |
+| **OSS-S3** | info | search top-K 较小（top_k=3，库存 3 doc）时 RRF 分数压缩到 ~0.026，重启后某些查询降到 0.006 — 顺序仍正确，但分数稳定性可改进 | 不影响排序质量，可后续 J6 调 RRF k 常数 |
+
+## 不在本次验证范围（v0.7-alpha 商业化路径）
+
+- ❌ Marketplace UI 安装 attune-pro plugin
+- ❌ accounts.attune.ai signup → license 签发链
+- ❌ LLM Gateway 跨服务路由
+- ❌ K3 一体机形态差异化
+- ❌ Tauri GUI（headless 验证 server-side 路径，UI 渲染下次再测）
+
+## 结论
+
+**OSS develop HEAD（含 v0.7-alpha 半成品 commits）的 server 端基础工作流在 AMD Ryzen 笔电上完整可用**。3 个 low-severity 问题不阻断 v0.6.1 GA 路径，作为 v0.6.2 patch 候选。
+
+继续做 v0.7 商业化（accounts / marketplace / gateway）的前置条件：✅ 已满足。
+
