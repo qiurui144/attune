@@ -23,9 +23,21 @@ attune 装包后立刻就绪以下底座：
 | **ASR** | whisper-cli + ggml-small-q8 | 2.6 MB binary + 250 MB 模型 | binary 进 .deb bundle，模型 postinst 下载 |
 | **OCR** | PP-OCRv5 mobile (det+cls+rec+dict) | 4 ONNX 文件 ~21 MB | postinst 从 HF `bukuroo/PPOCRv5-ONNX` 下载 |
 
-**LLM**（**不**在底座清单）：
-- **笔电**：远端 token 默认。首次启动 wizard 让用户配 OpenAI/Anthropic/Qwen 兼容 API key 或选 Ollama 本地
-- **K3 一体机**：镜像构建时 `ATTUNE_FORM_FACTOR=k3` 让 postinst 预装 qwen2.5:1.5b/3b（~2 GB）
+**LLM**（**不**在底座清单 — 云端为主，本地为辅；本地 LLM 当前研发成本高，暂时不主推）：
+
+笔电 wizard 推荐顺序：
+1. **★ Attune Pro Membership**（登录即用）— 默认推荐
+   - Endpoint: `https://gateway.attune.ai/v1`
+   - 月费会员，token 配额由 attune 计费追踪
+   - Gateway 路由到 OpenAI / Anthropic / Gemini（对用户透明）
+2. **BYOK：用户已有的 API key**
+   - OpenAI（ChatGPT Plus/Team 用户）
+   - Anthropic（Claude Pro 用户）
+   - Gemini（Gemini Advanced / Google AI Studio）
+   - DeepSeek / Qwen / 其他 OpenAI 兼容
+3. **本地 Ollama**（advanced）— 当前不主推，研发成本高
+   - K3 一体机镜像构建时 `ATTUNE_FORM_FACTOR=k3` 让 postinst 预装 qwen2.5:1.5b/3b
+   - 笔电用户选 Ollama 时手动 `ollama pull qwen2.5:3b`
 
 ## Linux
 

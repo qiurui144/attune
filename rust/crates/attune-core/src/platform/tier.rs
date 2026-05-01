@@ -107,14 +107,19 @@ impl ModelRecommendation {
     pub fn for_tier(tier: Tier) -> Option<Self> {
         match tier {
             Tier::Unsupported => None,
+            // ASR 全 tier 用 large-v3-turbo-q5_0（用户拍板：不轻易降级到 small）
+            // - 中文 WER 5-7% 远优于 small 的 15-20%
+            // - turbo 比 large-v3 快 8x，CPU 30s 音频推理 ~30s 可接受
+            // - q5_0 量化 574 MB，平衡准确率/体积/速度最佳点
+            // - 低 tier 笔电（< 16GB）下载可选 medium-q5 (480 MB) 作 fallback
             Tier::Low => Some(Self {
                 tier,
                 embedding_repo: "BAAI/bge-small-zh-v1.5",
                 embedding_size_mb: 100,
                 reranker_repo: "Xenova/bge-reranker-base",
                 reranker_size_mb: 50,
-                asr_ggml: "ggml-tiny-q8_0.bin",
-                asr_size_mb: 75,
+                asr_ggml: "ggml-medium-q5_0.bin",
+                asr_size_mb: 480,
             }),
             Tier::Mid => Some(Self {
                 tier,
@@ -122,8 +127,8 @@ impl ModelRecommendation {
                 embedding_size_mb: 400,
                 reranker_repo: "Xenova/bge-reranker-base",
                 reranker_size_mb: 50,
-                asr_ggml: "ggml-base-q8_0.bin",
-                asr_size_mb: 150,
+                asr_ggml: "ggml-large-v3-turbo-q5_0.bin",
+                asr_size_mb: 574,
             }),
             Tier::High => Some(Self {
                 tier,
@@ -131,8 +136,8 @@ impl ModelRecommendation {
                 embedding_size_mb: 1200,
                 reranker_repo: "BAAI/bge-reranker-v2-m3",
                 reranker_size_mb: 570,
-                asr_ggml: "ggml-small-q8_0.bin",
-                asr_size_mb: 487,
+                asr_ggml: "ggml-large-v3-turbo-q5_0.bin",
+                asr_size_mb: 574,
             }),
             Tier::Flagship => Some(Self {
                 tier,
@@ -140,8 +145,8 @@ impl ModelRecommendation {
                 embedding_size_mb: 1200,
                 reranker_repo: "BAAI/bge-reranker-v2-m3",
                 reranker_size_mb: 570,
-                asr_ggml: "ggml-medium-q5_0.bin",
-                asr_size_mb: 530,
+                asr_ggml: "ggml-large-v3-turbo-q5_0.bin",
+                asr_size_mb: 574,
             }),
         }
     }
@@ -278,8 +283,14 @@ mod tests {
     fn model_recommendation_low_uses_small_models() {
         let rec = ModelRecommendation::for_tier(Tier::Low).unwrap();
         assert!(rec.embedding_repo.contains("small"));
-        assert!(rec.asr_ggml.contains("tiny"));
-        // Total 应小（<300MB），适合低端机
-        assert!(rec.total_download_mb() < 300);
+        // ASR 即使 Low tier 也用 medium（用户拍板：尽可能不降级到 small/tiny）
+        assert!(rec.asr_ggml.contains("medium"));
+    }
+
+    #[test]
+    fn model_recommendation_high_uses_turbo_asr() {
+        // 用户拍板（2026-05-01）：High/Mid 都升 large-v3-turbo（中文 WER 5-7%）
+        let rec = ModelRecommendation::for_tier(Tier::High).unwrap();
+        assert!(rec.asr_ggml.contains("large-v3-turbo"));
     }
 }

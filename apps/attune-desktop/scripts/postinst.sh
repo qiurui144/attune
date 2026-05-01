@@ -246,27 +246,36 @@ else
   log "WARN: bundled whisper-cli missing under /usr/lib/Attune/bin/ (.deb 资源问题?)"
 fi
 
-# 6.2 ASR ggml 模型：~250 MB 走 HF 镜像
-# whisper-small-q8_0 中文 WER 实测 < 20% (CLAUDE.md 验收标准)
+# 6.2 ASR ggml 模型：large-v3-turbo-q5_0 ~574 MB
+# 用户拍板：不轻易降级到 small。large-v3-turbo 是 OpenAI 2024-10 优化版本，
+#   - 中文 WER 5-7%（small 的 15-20% 远不够）
+#   - 比 large-v3 快 8x，CPU 推理 30s 音频 ~30s 可接受
+#   - q5_0 量化 574 MB（vs full large-v3 1.5 GB）平衡准确率+体积+速度
 ASR_DIR="/home/$SUDO_USER"
 [ -z "$ASR_DIR" ] || [ "$SUDO_USER" = "" ] && ASR_DIR="$HOME"
 ASR_DIR="$ASR_DIR/.local/share/attune/models/whisper"
-ASR_MODEL_FILE="$ASR_DIR/ggml-small-q8_0.bin"
-ASR_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q8_0.bin"
+ASR_MODEL_FILE="$ASR_DIR/ggml-large-v3-turbo-q5_0.bin"
+ASR_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
 
-if [ -f "$ASR_MODEL_FILE" ] && [ "$(stat -c%s "$ASR_MODEL_FILE" 2>/dev/null)" -gt 100000000 ]; then
-  log "ASR model already present: $(du -h "$ASR_MODEL_FILE" | cut -f1)"
+# 兼容：如果存在旧版 small-q8 模型，保留作 fallback（不删，省得用户重下载）
+LEGACY_SMALL="$ASR_DIR/ggml-small-q8_0.bin"
+
+if [ -f "$ASR_MODEL_FILE" ] && [ "$(stat -c%s "$ASR_MODEL_FILE" 2>/dev/null)" -gt 400000000 ]; then
+  log "ASR model already present: $(du -h "$ASR_MODEL_FILE" | cut -f1) (large-v3-turbo-q5)"
 else
-  log "downloading ASR model ggml-small-q8_0.bin (~250 MB)..."
+  log "downloading ASR model ggml-large-v3-turbo-q5_0.bin (~574 MB, 中文 WER ~5-7%)..."
   mkdir -p "$ASR_DIR"
-  # 用 SUDO_USER 拥有，因为 dpkg 跑 root，但实际属于用户
   if curl -fsSL --connect-timeout 10 -o "${ASR_MODEL_FILE}.tmp" "$ASR_MODEL_URL" 2>/dev/null; then
     mv "${ASR_MODEL_FILE}.tmp" "$ASR_MODEL_FILE"
     [ -n "$SUDO_USER" ] && chown -R "$SUDO_USER:$SUDO_USER" "$ASR_DIR"
     log "  ASR model downloaded ($(du -h "$ASR_MODEL_FILE" | cut -f1))"
   else
     rm -f "${ASR_MODEL_FILE}.tmp"
-    log "  WARN: ASR model download failed; user can later: attune deploy --with-asr"
+    if [ -f "$LEGACY_SMALL" ]; then
+      log "  WARN: turbo download failed; legacy small-q8 fallback present"
+    else
+      log "  WARN: turbo download failed; ASR unavailable until next attune deploy"
+    fi
   fi
 fi
 

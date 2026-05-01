@@ -8,10 +8,20 @@
 |------|---------|------|------|
 | Embedding | bge-m3 / bge-small (Ollama) | 1.2 GB / 200 MB | postinst `ollama pull` |
 | Reranker | Xenova/bge-reranker-base (ONNX) | ~120 MB | 首查 lazy hf_hub 下载 |
-| ASR | whisper-cli + ggml-small-q8 | 2.6 MB binary + 250 MB model | binary 进 .deb bundle，model postinst 下载 |
-| OCR | PP-OCRv5 mobile (DBNet+CRNN+CLS+dict) | ~21 MB ONNX | postinst HF `bukuroo/PPOCRv5-ONNX` |
+| ASR | whisper-cli + ggml-large-v3-turbo-q5_0 | 2.6 MB binary + 574 MB model | binary 进 .deb bundle，model postinst 下载（中文 WER 5-7%） |
+| OCR | PP-OCRv4 mobile (DBNet+CRNN+CLS+dict) | ~21 MB ONNX | postinst HF `SWHL/RapidOCR/PP-OCRv4/...` |
 
-**LLM 不在底座**：笔电默认远端 token；K3 一体机镜像 (form_factor=k3) 才预装 qwen2.5:1.5b/3b。
+**LLM 不在底座**（2026-05-01 用户拍板，澄清版）：
+
+核心原则：**云端为主，本地为辅；本地 LLM 当前研发成本过高，暂时不主推**。
+
+Wizard 推荐顺序：
+1. ★ **Attune Pro Membership**（默认）— `https://gateway.attune.ai/v1`，登录即用 token 配额
+2. **BYOK**：用户已有付费会员 API key — OpenAI / Anthropic / Gemini / DeepSeek / Qwen
+3. **本地 Ollama**（advanced，K3 一体机预装 qwen2.5:1.5b/3b 走本地）
+
+不走第三方 "free API tier"（Gemini Free / Groq 等），避免误导用户。
+不走 MCP backbone，至少 v0.7 不做，简化产品形态。
 
 **Form factor 检测** (`detect_form_factor()` in `attune-core::platform`)：
 1. `ATTUNE_FORM_FACTOR=k3` env var override（K3 镜像构建时 systemd-environment.d）

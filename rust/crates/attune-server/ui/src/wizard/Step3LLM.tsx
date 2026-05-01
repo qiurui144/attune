@@ -33,10 +33,13 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   const [prefersLocal, setPrefersLocal] = useState<boolean>(false);
 
   // 云端 API 表单
-  const [provider, setProvider] = useState<string>('openai');
+  // Default: attune-pro membership — 登录即用，token 配额由 attune 计费追踪
+  // 用户拍板（2026-05-01）：attune Pro 会员 + 用户已有 BYOK 支撑；
+  // 不预设第三方 free API tier（避免误导）；本地 LLM 暂时不主推（研发成本高）
+  const [provider, setProvider] = useState<string>('attune-pro');
   const [apiKey, setApiKey] = useState('');
-  const [endpoint, setEndpoint] = useState('https://api.openai.com/v1');
-  const [cloudModel, setCloudModel] = useState('gpt-4o-mini');
+  const [endpoint, setEndpoint] = useState('https://gateway.attune.ai/v1');
+  const [cloudModel, setCloudModel] = useState('auto');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
 
@@ -235,9 +238,18 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               onChange={(e) => {
                 setProvider(e.currentTarget.value);
                 // 预填常见 provider endpoint
+                // 设计（2026-05-01 用户拍板，澄清版）：
+                //   - 笔电暂时不走本地 LLM（研发成本高，云端更准确，等本地解决不了再上）
+                //   - 主推 attune Pro 会员（登录即用，token 配额由 attune 计费跟踪）
+                //   - 用户已有的 web 会员（ChatGPT Plus / Claude Pro / Gemini Advanced）→ 走 BYOK API key
+                //   - 不预设第三方 "free API tier"（避免误导，用户的"免费"指浏览器 web 会话）
                 const presets: Record<string, { endpoint: string; model: string }> = {
+                  // ── ★ 主推：attune Pro 会员 gateway ──
+                  'attune-pro': { endpoint: 'https://gateway.attune.ai/v1', model: 'auto' },
+                  // ── BYOK：用户已有付费会员的 API key ──
                   openai: { endpoint: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
                   anthropic: { endpoint: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-20241022' },
+                  gemini: { endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash' },
                   deepseek: { endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
                   qwen: { endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
                 };
@@ -256,11 +268,17 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                 fontSize: 'var(--text-sm)',
               }}
             >
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="qwen">Qwen (阿里)</option>
-              <option value="custom">自定义</option>
+              <optgroup label="★ 推荐：Attune Pro 会员（登录即用）">
+                <option value="attune-pro">Attune Pro Membership（Gateway，token 配额）</option>
+              </optgroup>
+              <optgroup label="BYOK：用你已有的 API key">
+                <option value="openai">OpenAI（ChatGPT Plus/Team 用户）</option>
+                <option value="anthropic">Anthropic（Claude Pro 用户）</option>
+                <option value="gemini">Gemini（Google AI Studio）</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">Qwen (阿里通义)</option>
+                <option value="custom">自定义（OpenAI 兼容）</option>
+              </optgroup>
             </select>
             <Input
               type="password"

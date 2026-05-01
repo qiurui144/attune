@@ -123,35 +123,44 @@ fn find_default_model() -> Option<(String, String)> {
             return Some((env_path, name));
         }
     }
-    // 2-N. 标准路径，优先 small（中文 WER 满足）
+    // 2-N. 标准路径 — large-v3-turbo 优先（中文 WER 5-7%，OpenAI 2024-10 sota）
     //
-    // R10 fix (v0.6.4): Tier-recommended downloads use Q8 quantization
-    // (`ggml-{size}-q8_0.bin`, per platform/tier.rs ModelRecommendation), but the
-    // original candidates list only mentioned non-quantized `ggml-{size}.bin`.
-    // Result: a user with a Tier-installed Q8 model would have ASR fall through
-    // to "no model found" and fail. Fix: list both quantization variants in
-    // priority order — Q8 first (smaller, faster, same WER), then full precision.
+    // 候选优先级（用户拍板：尽可能不降级到 small）:
+    //   1. large-v3-turbo-q5（574 MB, WER 5-7%, 推理 ~30s/30s 音频）★ 默认
+    //   2. large-v3-q5_0（934 MB, 比 turbo 慢 8x 但准）
+    //   3. medium-q5_0（480 MB, WER 10-12%）
+    //   4. medium-q8_0（750 MB, WER 8-10%）
+    //   5. small-q8_0（250 MB, WER 15-20%）— legacy fallback，不主动下载
+    //   6. base / tiny — 极差路径，仅探测兼容
     let home = std::env::var("HOME").ok()?;
     let attune_models = format!("{home}/.local/share/attune/models/whisper");
     let cache_dir = format!("{home}/.cache/whisper");
     let candidates = [
-        // Tier-installed Q8 quantized (per ModelRecommendation in platform/tier.rs)
-        format!("{attune_models}/ggml-small-q8_0.bin"),
+        // ★ Tier 1: large-v3-turbo (default by postinst since 2026-05-01 B1 upgrade)
+        format!("{attune_models}/ggml-large-v3-turbo-q5_0.bin"),
+        format!("{attune_models}/ggml-large-v3-turbo.bin"),
+        // Tier 2: large (full)
+        format!("{attune_models}/ggml-large-v3-q5_0.bin"),
+        format!("{attune_models}/ggml-large-v3.bin"),
+        // Tier 3: medium (mid quality)
         format!("{attune_models}/ggml-medium-q5_0.bin"),
         format!("{attune_models}/ggml-medium-q8_0.bin"),
+        format!("{attune_models}/ggml-medium.bin"),
+        // Tier 4: small (legacy / low-tier fallback only)
+        format!("{attune_models}/ggml-small-q8_0.bin"),
+        format!("{attune_models}/ggml-small.bin"),
+        // Tier 5: base/tiny (极差路径，仅作存在性 fallback)
         format!("{attune_models}/ggml-base-q8_0.bin"),
         format!("{attune_models}/ggml-tiny-q8_0.bin"),
-        // Non-quantized full precision (manual installs from upstream)
-        format!("{attune_models}/ggml-small.bin"),
-        format!("{attune_models}/ggml-medium.bin"),
         format!("{attune_models}/ggml-base.bin"),
-        // ~/.cache/whisper standard locations (Q8 first, then non-quant)
+        // ~/.cache/whisper（whisper.cpp 默认下载路径）
+        format!("{cache_dir}/ggml-large-v3-turbo-q5_0.bin"),
+        format!("{cache_dir}/ggml-large-v3-q5_0.bin"),
+        format!("{cache_dir}/ggml-medium-q5_0.bin"),
         format!("{cache_dir}/ggml-small-q8_0.bin"),
-        format!("{cache_dir}/ggml-base-q8_0.bin"),
         format!("{cache_dir}/ggml-small.bin"),
-        format!("{cache_dir}/ggml-base.bin"),
         // System-wide
-        "/usr/share/whisper/ggml-small-q8_0.bin".to_string(),
+        "/usr/share/whisper/ggml-large-v3-turbo-q5_0.bin".to_string(),
         "/usr/share/whisper/ggml-small.bin".to_string(),
     ];
     for path in &candidates {
