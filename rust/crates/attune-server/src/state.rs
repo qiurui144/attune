@@ -67,6 +67,8 @@ pub struct AppState {
     pub recommendation_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
     /// Sprint 2: 启动时加载的 plugins（attune-pro / 用户 / 社区）
     pub plugin_registry: std::sync::Arc<attune_core::plugin_registry::PluginRegistry>,
+    /// E2/E4 (2026-05-01): PluginHub 客户端（默认 Mock，attune-pro 注入真 hub-client）
+    pub plugin_hub: std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>,
 }
 
 impl AppState {
@@ -122,6 +124,11 @@ impl AppState {
             hardware: attune_core::platform::HardwareProfile::detect(),
             recommendation_tx,
             plugin_registry,
+            // E2/E4: 默认 Mock — 用户在 wizard 配 PluginHub URL 后由 attune-pro
+            // hub-client 替换为真 HTTP 客户端
+            plugin_hub: std::sync::Arc::new(
+                attune_core::plugin_hub::MockPluginHubProvider::default(),
+            ),
         }
     }
 
