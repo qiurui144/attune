@@ -9,6 +9,7 @@ use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 pub fn is_allowed_origin(s: &str) -> bool {
     s.starts_with("chrome-extension://")
@@ -203,8 +204,21 @@ impl Default for ServerConfig {
 pub async fn run_in_runtime(
     config: ServerConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // R37 (2026-05-01): 双 sink — stdout (人类可读) + 文件 daily rotation (生产排障)。
+    // 文件位于 data_dir()/logs/attune-server.YYYY-MM-DD（tracing-appender 自动加日期）。
+    // 默认保留 7 天 — 由用户手动清理（tracing-appender 0.2 没有自动清理）。
+    let log_dir = attune_core::platform::data_dir().join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "attune-server");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    // guard 必须 leak 让 worker thread 在进程整个生命周期内存活；正常退出会刷盘。
+    Box::leak(Box::new(guard));
+
+    let env_filter = EnvFilter::from_default_env()
+        .add_directive("info".parse().expect("'info' is a valid log directive"));
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().expect("'info' is a valid log directive")))
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stdout.and(non_blocking))
         .try_init();
 
     let hw = attune_core::platform::HardwareProfile::detect();
@@ -246,21 +260,59 @@ pub async fn run_in_runtime(
 
     let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
 
+    // R35: 安装信号 stream **同步在 spawn 之前**，确保 SIGTERM/SIGINT 不被默认 handler 抢走。
+    // tokio::signal::unix::signal 必须在收到信号前调，且要 hold stream 不被 drop。
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    tracing::info!("shutdown signal handlers installed (SIGINT + SIGTERM)");
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<&'static str>();
+    tokio::spawn(async move {
+        let reason: &'static str;
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => reason = "SIGINT (Ctrl-C)",
+                _ = sigterm.recv() => reason = "SIGTERM",
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.expect("ctrl_c");
+            reason = "Ctrl-C";
+        }
+        tracing::info!("received {reason}, graceful shutdown initiated");
+        let _ = shutdown_tx.send(reason);
+    });
+
     match (config.tls_cert.as_ref(), config.tls_key.as_ref()) {
         (Some(cert), Some(key)) => {
             tracing::info!("attune-server listening on https://{addr}");
             let tls_config =
                 axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+            // R35: graceful shutdown via axum_server Handle，等 oneshot 收到信号后 30s 内 drain
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            tokio::spawn(async move {
+                let _ = shutdown_rx.await;
+                shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+            });
             axum_server::bind_rustls(addr, tls_config)
+                .handle(handle)
                 .serve(app.into_make_service())
                 .await?;
         }
         _ => {
             tracing::info!("attune-server listening on http://{addr}");
             let listener = tokio::net::TcpListener::bind(&addr).await?;
-            axum::serve(listener, app).await?;
+            tokio::select! {
+                res = axum::serve(listener, app) => { res?; }
+                _ = &mut shutdown_rx => {}
+            }
         }
     }
 
+    tracing::info!("attune-server shut down cleanly");
     Ok(())
 }
+
