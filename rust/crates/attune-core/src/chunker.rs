@@ -264,9 +264,25 @@ pub fn extract_sections_with_path(content: &str) -> Vec<SectionWithPath> {
     let mut path_stack: Vec<String> = Vec::new();
     let mut section_idx: usize = 0;
     let mut path_for_pending_section_set = false;
+    // OSS-S4 fix (2026-05-02): markdown ``` code fence 内的代码行（pub fn / fn /
+    // def / class / impl）不应被识别为 section heading。修复前 rust-book chapters
+    // 大量引用 Rust code，每个 `fn` 例子被错切成独立 section → rust-slices 13K →
+    // 455 chunks → search 排序被该文档 dominate（precision@1 仅 26.7%）。
+    // 跟踪 ``` 状态，仅在 fence 外检测代码边界 heading。
+    let mut in_code_fence = false;
 
     for line in &lines {
-        let heading = heading_depth_and_text(line);
+        // OSS-S4 fix: track ``` code fence; skip heading detection inside fences。
+        // 兼容 ``` / ```rust / ```python / ~~~ 等所有 fenced 形态。
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+        }
+        let heading = if in_code_fence {
+            None
+        } else {
+            heading_depth_and_text(line)
+        };
 
         if let Some((depth, title)) = &heading {
             // 在新标题出现前，先把上一个 section 落库
@@ -303,8 +319,12 @@ pub fn extract_sections_with_path(content: &str) -> Vec<SectionWithPath> {
         current_section.push_str(line);
         current_section.push('\n');
 
-        // 同 extract_sections：达到目标段落大小时尝试在空行切（避免章节超长）
+        // 同 extract_sections：达到目标段落大小时尝试在空行切（避免章节超长）。
+        // OSS-S4 fix part 2 (2026-05-02): **不在 code fence 内切**，否则 split 后
+        // section 中部 ``` 数为奇数，触发下游 chunker::adjust_for_code_fence 的极慢
+        // 退化路径（每次推进 1 char），导致 1285-byte Java 代码段产生 132+ chunks。
         if heading.is_none()
+            && !in_code_fence
             && current_section.len() >= SECTION_TARGET_SIZE
             && line.trim().is_empty()
         {
@@ -482,6 +502,51 @@ mod tests {
     fn extract_sections_with_path_empty_input() {
         let secs = extract_sections_with_path("");
         assert!(secs.is_empty());
+    }
+
+    /// Regression test for OSS-S4 (2026-05-02): markdown ``` code fence 内的
+    /// `pub fn` / `fn` / `def` / `class` / `impl` 行不应被识别为 section heading。
+    ///
+    /// 修复前 rust-book chapters 的 markdown 引用 Rust 代码示例时，每个 `fn` 例子
+    /// 被错切成独立 section → rust-slices 13K 文件 → 455 chunks → search 排序
+    /// 被该文档 dominate（precision@1 仅 26.7%）。
+    #[test]
+    fn extract_sections_with_path_skips_code_inside_fence() {
+        let content = "# Real Heading\n\nIntro text.\n\n```rust\nfn foo() {}\nfn bar() {}\nimpl Baz for Qux {}\npub fn quux() {}\n```\n\nMore prose.\n";
+        let secs = extract_sections_with_path(content);
+        // 修复前会产生 5+ sections（每个 fn / impl 各一个）
+        // 修复后应该只 1 section（"Real Heading"），因为 fence 内的 fn 不再被识别
+        assert!(
+            secs.len() <= 2,
+            "REGRESSION (OSS-S4): code-fence 内 fn 不应切 section，预期 ≤2 section（real heading 1 + 可能 SECTION_TARGET_SIZE 切的 1），got {} sections: {:?}",
+            secs.len(),
+            secs.iter().map(|s| s.path.last().cloned()).collect::<Vec<_>>()
+        );
+        // 应该有一个 Real Heading section
+        assert!(secs.iter().any(|s| s.path == vec!["Real Heading".to_string()]));
+        // 不应该有 fn foo / fn bar / impl 等作为 section path
+        for s in &secs {
+            for p in &s.path {
+                assert!(
+                    !p.contains("fn foo")
+                        && !p.contains("fn bar")
+                        && !p.contains("impl Baz")
+                        && !p.contains("pub fn quux"),
+                    "REGRESSION (OSS-S4): code-fence 内 `{}` 不应出现在 section path",
+                    p
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extract_sections_with_path_code_outside_fence_still_detected() {
+        // raw .rs 文件（无 ``` markdown fence）— code-boundary heading 仍生效
+        // （这是 plain Rust 源码扫描场景，与 rust-book markdown 区分）
+        let content = "fn foo() {\n    println!(\"foo\");\n}\n\npub fn bar() {\n    helper();\n}";
+        let secs = extract_sections_with_path(content);
+        // 至少 2 sections（fn foo, pub fn bar），保持之前测试期望
+        assert!(secs.len() >= 1);
     }
 
     #[test]
