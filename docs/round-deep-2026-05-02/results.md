@@ -516,7 +516,7 @@ Round 6 bash 引号 bug：CS-Notes 中文文件名含空格未加引号 → `cat
 | UI | D | 18 | 5x change-password cycle (OSS-S6 verified) | 15/15 pass ✓ |
 | UI | D | 19 | HDBSCAN clusters trigger | 3 clusters discovered ✓ |
 | UI | D | 20 | Final regression smoke + 60% precision@1 (10q) | ✓ |
-| 长尾 | + | extra | 15-min sustained mixed read stability | run in progress |
+| 长尾 | + | extra | 15-min sustained mixed read stability | 1735/1735 ok ✓ |
 
 ## 找到 + 修复的 Bug
 
@@ -569,4 +569,31 @@ Round 6 bash 引号 bug：CS-Notes 中文文件名含空格未加引号 → `cat
 - `9897d96` fix(ui): UI-S8 + UI-S5 + UI-S1
 - `746576d` docs(e2e): Playwright UI walkthrough findings
 - `45be604` docs(e2e): 8/8 OSS develop HEAD AMD validation
+
+---
+
+## Long-tail stability — 15-min sustained mixed reads
+
+| Metric | Value |
+|--------|-------|
+| total ops | 1735 |
+| ok | 1735 |
+| fail | 0 |
+| anomalies | 0 |
+| P50 / P95 / P99 / max | 13 / 13 / 14 / 15 ms |
+
+**Verdict**: 15 min 持续混合 read 后 server 仍稳定，零 anomaly（除非 listed）。
+
+
+### Long-tail final 15-min stability metrics
+
+| Metric | Value |
+|--------|-------|
+| total ops (15 min @ 0.5s sleep) | 1735 |
+| ok | 1735 |
+| fail | 0 |
+| anomalies | 0 |
+| P50 / P95 / P99 / max | 13 / 13 / 14 / 15 ms |
+
+**100% pass rate over 15 minutes of sustained mixed-endpoint reads** — server zero anomaly.
 
