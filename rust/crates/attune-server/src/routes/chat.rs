@@ -668,6 +668,25 @@ pub async fn chat(
     let confidence = attune_core::parse_confidence(&response);
     let response = attune_core::strip_confidence_marker(&response).to_string();
 
+    // OSS-S12 fix: confident hallucination 防御。当所有 citation 的 relevance 都接近零
+    // (max < 0.001) 时，说明 RAG 检索到的文档与 query 实质无关，LLM 在用预训练知识
+    // "权威地" 编造答案。强制在前面加 disclaimer 让用户知晓答案非来自知识库。
+    // R5/R18 反复确认此现象（古希腊伊壁鸠鲁/量子退火等 out-of-corpus query）。
+    let response = {
+        let max_rel: f64 = citations
+            .iter()
+            .filter_map(|c| c.get("relevance").and_then(|v| v.as_f64()))
+            .fold(0.0_f64, f64::max);
+        if !citations.is_empty() && max_rel < 0.001 && !response.trim().is_empty() {
+            format!(
+                "⚠️ 知识库中未找到与你问题强相关的内容（最高引用相关度 {:.4}），以下回答主要来自模型预训练知识，仅供参考：\n\n{}",
+                max_rel, response
+            )
+        } else {
+            response
+        }
+    };
+
     // 6. Build response with optional hint when web search unavailable
     // v0.6 Phase B fix: 透传 confidence (parsed from LLM 末尾 marker)
     let mut response_json = serde_json::json!({
