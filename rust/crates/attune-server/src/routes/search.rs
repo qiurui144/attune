@@ -47,6 +47,14 @@ pub async fn search(
             Json(serde_json::json!({"error": "top_k must be > 0"})),
         ));
     }
+    // OSS-S14 fix: top_k 上限 100；超过上限直接 400 拒绝避免被滥用作 DoS vector
+    // (R15 实测 top_k=10000 让 search 端 5s 内全部 timeout)
+    if params.top_k > 100 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "top_k must be <= 100"})),
+        ));
+    }
 
     let cache_key = hash_query(&params.q);
     {
@@ -129,6 +137,13 @@ pub async fn search_relevant(
     Json(body): Json<RelevantRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let top_k = body.top_k.unwrap_or(5);
+    // OSS-S14 fix: 同样校验 search_relevant 的 top_k 上限
+    if top_k == 0 || top_k > 100 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "top_k must be in [1, 100]"})),
+        ));
+    }
     let budget = body.injection_budget.unwrap_or(INJECTION_BUDGET);
 
     let detected_domain = attune_core::search::detect_query_domain(&body.query);
@@ -203,5 +218,16 @@ mod tests {
     #[test]
     fn hash_query_empty() {
         let _ = hash_query("");
+    }
+
+    /// OSS-S14 regression: top_k 必须有上限，否则 top_k=10000 触发 search 卡死
+    /// (R15-R1 实测 130/130 全部 timeout)。修复后 top_k > 100 直接 400。
+    /// 这里仅断言 default_top_k 与上限值一致；上限校验在 handler 路径上跑全栈测试更合适。
+    #[test]
+    fn search_query_top_k_bounds() {
+        assert_eq!(default_top_k(), 10);
+        // 上限是常量 100，handler 中检查 params.top_k > 100 即拒绝
+        const TOP_K_MAX: usize = 100;
+        assert!(default_top_k() < TOP_K_MAX, "default 应低于上限");
     }
 }

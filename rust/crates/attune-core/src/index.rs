@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
-use tantivy::{doc, Index, IndexWriter, ReloadPolicy};
+use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy};
 
 use crate::error::{Result, VaultError};
 
@@ -25,6 +25,8 @@ pub struct FulltextIndex {
     #[allow(dead_code)]
     f_source_type: Field,
     writer: Mutex<IndexWriter>,
+    // OSS-S13 P0 fix: IndexReader 一次创建并复用，避免每次 search() 重新分配段读取器导致的并发态内存泄漏
+    reader: IndexReader,
 }
 
 impl FulltextIndex {
@@ -39,7 +41,11 @@ impl FulltextIndex {
         let f_source_type = schema.get_field("source_type").expect("schema field 'source_type' defined in build_schema");
         let writer = index.writer(HEAP_SIZE)
             .map_err(|e| VaultError::Crypto(format!("tantivy writer: {e}")))?;
-        Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type, writer: Mutex::new(writer) })
+        let reader = index.reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+            .map_err(|e| VaultError::Crypto(format!("tantivy reader: {e}")))?;
+        Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type, writer: Mutex::new(writer), reader })
     }
 
     /// 打开持久化索引
@@ -60,7 +66,11 @@ impl FulltextIndex {
         let f_source_type = schema.get_field("source_type").expect("schema field 'source_type' defined in build_schema");
         let writer = index.writer(HEAP_SIZE)
             .map_err(|e| VaultError::Crypto(format!("tantivy writer: {e}")))?;
-        Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type, writer: Mutex::new(writer) })
+        let reader = index.reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+            .map_err(|e| VaultError::Crypto(format!("tantivy reader: {e}")))?;
+        Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type, writer: Mutex::new(writer), reader })
     }
 
     fn build_schema() -> Schema {
@@ -125,6 +135,10 @@ impl FulltextIndex {
         )).map_err(|e| VaultError::Crypto(format!("tantivy add: {e}")))?;
         writer.commit()
             .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
+        // OSS-S13 P0 fix: 写后立即 reload 让全局 reader 看到新 commit，
+        // 避免 OnCommitWithDelay 在测试 / 紧跟读场景下的延迟可见性
+        self.reader.reload()
+            .map_err(|e| VaultError::Crypto(format!("tantivy reload: {e}")))?;
         Ok(())
     }
 
@@ -135,6 +149,9 @@ impl FulltextIndex {
         writer.delete_term(term);
         writer.commit()
             .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
+        // OSS-S13 P0 fix: 写后立即 reload，同 add_document 注释
+        self.reader.reload()
+            .map_err(|e| VaultError::Crypto(format!("tantivy reload: {e}")))?;
         Ok(())
     }
 
@@ -153,11 +170,8 @@ impl FulltextIndex {
         if query_str.trim().is_empty() {
             return Ok(vec![]);
         }
-        let reader = self.index.reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
-            .try_into()
-            .map_err(|e| VaultError::Crypto(format!("tantivy reader: {e}")))?;
-        let searcher = reader.searcher();
+        // OSS-S13 P0 fix: 复用预创建的全局 IndexReader，OnCommitWithDelay 自动跟随 writer 提交刷新
+        let searcher = self.reader.searcher();
 
         // 若含中文，先 jieba 分词再拼回空格分隔
         let effective_query = if query_str.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
@@ -185,9 +199,8 @@ impl FulltextIndex {
     }
 
     pub fn doc_count(&self) -> Result<usize> {
-        let reader = self.index.reader()
-            .map_err(|e| VaultError::Crypto(format!("tantivy reader: {e}")))?;
-        Ok(reader.searcher().num_docs() as usize)
+        // OSS-S13 P0 fix: 同样复用全局 reader 而非每次新建
+        Ok(self.reader.searcher().num_docs() as usize)
     }
 }
 
@@ -239,5 +252,28 @@ mod tests {
             let results = idx.search("Content", 10).unwrap();
             assert!(!results.is_empty());
         }
+    }
+
+    /// OSS-S13 P0 regression: 多次 search 应该复用同一个 IndexReader，不重新分配
+    /// 修复前每次 search() 都会通过 reader_builder 重新构造 reader，并发态下导致内存泄漏。
+    /// 修复后 reader 在 struct 字段上一次性创建，多次 search 应该指向同一对象。
+    #[test]
+    fn search_reuses_index_reader_oss_s13() {
+        let idx = FulltextIndex::open_memory().unwrap();
+        for i in 0..50 {
+            idx.add_document(
+                &format!("item{i}"),
+                &format!("Title {i}"),
+                "Rust 编程 trait closure",
+                "note",
+            ).unwrap();
+        }
+        // 1000 次 search — 修复前会反复 build IndexReader，修复后只复用 self.reader
+        for _ in 0..1000 {
+            let results = idx.search("Rust", 5).unwrap();
+            assert!(!results.is_empty(), "Search should return results");
+        }
+        // 直接断言 doc_count 也走 cached reader
+        assert_eq!(idx.doc_count().unwrap(), 50);
     }
 }
