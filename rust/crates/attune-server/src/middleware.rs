@@ -66,6 +66,10 @@ pub async fn bearer_auth_guard(
 
     // Public endpoints and vault bootstrap endpoints bypass the token check
     // (only applies to non-forced-auth endpoints)
+    //
+    // OSS-S16 fix: /ws/scan-progress 也走 bypass — 因为 token 格式 `id:ts:hash` 含 `:`
+    // 字符，违反 RFC 6455 subprotocol 规范，浏览器 WebSocket API 无法用 subprotocol 传
+    // Bearer token。此 endpoint 由 handler 自身从 query string `?token=xxx` 校验。
     if !is_always_auth
         && (path == "/api/v1/status/health"
             || path == "/health"
@@ -75,7 +79,8 @@ pub async fn bearer_auth_guard(
             || path.starts_with("/assets/")
             || path == "/api/v1/vault/setup"
             || path == "/api/v1/vault/unlock"
-            || path == "/api/v1/vault/status")
+            || path == "/api/v1/vault/status"
+            || path == "/ws/scan-progress")
     {
         return next.run(request).await;
     }
