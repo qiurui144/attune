@@ -312,12 +312,24 @@ impl AppState {
                     })
             };
 
-            // 级别 3：Ollama 自动探测
+            // 级别 3：Ollama 自动探测 — OSS-S19 fix: 仅 K3 一体机形态允许 silent fallback。
+            // 笔电 / 服务器形态 + 无 cloud config → 直接 None (Chat 拒绝)，避免违反
+            // CLAUDE.md M2 边界 (笔电默认 LLM 走云端 token，本地不预装 LLM)。
+            // 历史上此处 silent fallback 到 Ollama qwen2.5:3b 让所有 R3-R23 chat 测试
+            // 都跑了 fallback path 而非 production cloud，掩盖了 cloud config 缺失问题。
             configured_llm.or_else(|| {
-                OllamaLlmProvider::auto_detect().ok().map(|llm| {
-                    tracing::info!("LLM: using Ollama auto-detect");
-                    Arc::new(llm) as Arc<dyn LlmProvider>
-                })
+                if self.hardware.form_factor.prefers_local_llm() {
+                    OllamaLlmProvider::auto_detect().ok().map(|llm| {
+                        tracing::info!("LLM (K3 form factor): using Ollama auto-detect");
+                        Arc::new(llm) as Arc<dyn LlmProvider>
+                    })
+                } else {
+                    tracing::warn!(
+                        "LLM: form_factor={:?} + no cloud endpoint configured → no LLM (chat 将返回 400 提示用户配置 cloud API key per CLAUDE.md M2)",
+                        self.hardware.form_factor
+                    );
+                    None
+                }
             })
             // 级别 4：None（Chat 功能禁用）
         };
