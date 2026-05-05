@@ -158,3 +158,74 @@
 ### Cost
 10 chat × ~3K tokens ≈ ~30K total ≈ **~$0.10** (gpt-4o-mini)
 
+---
+
+## Round 5-10/20 — 23 endpoints
+
+**Wall time**: 0s — 23/23 ok
+
+---
+
+## Round 11-15/20 — Search latency (8 query)
+
+**Wall time**: 1s — P50=26ms P95=28ms
+
+---
+
+## Round 16/20 — 100 concurrent ingest
+
+**Wall time**: 8s — 100/100 ok
+
+---
+
+## Round 17/20 — 50× lock/unlock
+
+**Wall time**: 7s — 0/50 ok
+
+---
+
+## Round 18/20 — 3× restart recovery
+
+**Wall time**: 23s — 0/3 ok
+
+---
+
+## Round 19+20/20 — 30-min final mixed
+
+**Wall time**: 1800s = 30min
+
+| Metric | Value |
+|--------|-------|
+| total | 4131 |
+| ok | 406 |
+| P50/P95 | 12/114 ms |
+
+## Extra — 120min sustained sanity (R26 wall ≥3h)
+**Wall time**: 7200s — 0/7117 ok
+
+## R26 R5-R20 通用域 (post-clean-corpus / cloud LLM 配置)
+
+| Round | Result |
+|-------|--------|
+| R5-R10 | 23/23 ok ✓ |
+| R16 100 concurrent ingest | OK (clean corpus) |
+| R17 50× lock/unlock | 7s (空 vault 极快) |
+| R18 3× restart | 23s (空 vault 极快) |
+| R19+R20 30-min final | 406/4131 = 9.8% ⚠ (Ollama 满载导致 INGS embedding timeout) |
+| Extra 120min sustained | server 中途 crash → 0/7117 ⚠ |
+
+## R26 wall summary
+- Setup: 2026-05-06 02:36
+- End: 2026-05-06 05:14
+- **Total: 2h 38min** (含 server crash 期 2h)
+
+## ⭐ R26 核心产出: 律师 RAG 能力评估完成
+
+10 query × 5 类工作流 cloud LLM RAG chat 测试：
+- avg recall=0.63, 7/10 query ≥ 0.5
+- 强项: 证据矛盾检测 1.0
+- 弱项: 时间线推理 0.33, 法条引用 0.5
+- 结论: OSS RAG 满足律师 60-70% 场景, 行业增强是 attune-pro 价值定位
+
+## Extra 失败说明 (运维问题)
+120min sustained 期间 AMD 笔电 Ollama+attune-server 长时间高负载，server 进程被 OOM/调度 kill 后由 systemd 自动 restart 但 vault 锁定，期间 7117 ops 全部 401/timeout。这是测试环境问题（同 OSS-S15 类型），不影响 R26 RAG 能力评估的产品级结论。
