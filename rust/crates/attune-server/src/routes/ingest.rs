@@ -25,6 +25,11 @@ fn default_source_type() -> String {
 const MAX_INGEST_CONTENT: usize = 2 * 1024 * 1024; // 2 MB
 const MAX_INGEST_TITLE: usize = 500;
 
+/// OSS-S15 fix: embedding 队列深度上限。R18 复现 5p mixed 60min 后累积 30K+ pending
+/// embeddings，server 进入 5min hung（后台 worker 串行 drain Ollama HTTP，前端读路径
+/// 锁竞争阻塞）。超过此阈值 ingest 入口返回 503 backpressure 强制客户端 retry-after。
+const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
+
 pub async fn ingest(
     State(state): State<SharedState>,
     Json(body): Json<IngestRequest>,
@@ -43,6 +48,19 @@ pub async fn ingest(
     }
     let vault = state.vault.lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+    // OSS-S15 fix: 检查 embedding 队列深度，超阈值返回 503 强制 backpressure
+    if let Ok(pending) = vault.store().pending_count_by_type("embed") {
+        if pending > EMBEDDING_QUEUE_BACKPRESSURE_LIMIT {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": format!("embedding queue backpressure ({pending} pending > {EMBEDDING_QUEUE_BACKPRESSURE_LIMIT} limit), retry later"),
+                    "pending_embeddings": pending,
+                    "retry_after_seconds": 30,
+                })),
+            ));
+        }
+    }
     let dek = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
     })?;
