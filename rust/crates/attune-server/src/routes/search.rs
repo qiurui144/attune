@@ -115,6 +115,23 @@ pub async fn search(
             .map_err(|e| err_500(&e.to_string()))?
     };
 
+    // OSS-S17 fix: score 阈值 cutoff。当 corpus 被低质量内容污染时，BM25+vector+RRF 退化为
+    // fallback default score（实测 0.000638-0.000828）让真实相关内容无法浮出。R19-R3 复现：
+    // 22K 测试 garbage 主导 corpus 后，新 ingest 的 5 真实 rust md 文件 10 query 全部 top hit
+    // 是 garbage 同分。
+    //
+    // R20 实测分数尺度：真实命中 ~0.98 / fallback noise ~0.0006-0.0008，cutoff 0.001 完美分离。
+    const SCORE_CUTOFF: f32 = 0.001;
+    let cutoff_filtered: Vec<_> = results.iter().filter(|r| r.score >= SCORE_CUTOFF).cloned().collect();
+    let total_before_cutoff = results.len();
+    let total_after_cutoff = cutoff_filtered.len();
+    let results = if cutoff_filtered.is_empty() && !results.is_empty() {
+        // 全部低于阈值 → 视为 no-match
+        Vec::new()
+    } else {
+        cutoff_filtered
+    };
+
     {
         let mut cache = state.search_cache.lock().map_err(|_| err_500("cache lock poisoned"))?;
         cache.put(cache_key, crate::state::CachedSearch {
@@ -127,7 +144,8 @@ pub async fn search(
     Ok(Json(serde_json::json!({
         "query": params.q,
         "results": results,
-        "total": results.len()
+        "total": results.len(),
+        "cutoff_filtered": total_before_cutoff - total_after_cutoff
     })))
 }
 
