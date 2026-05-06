@@ -130,3 +130,9 @@ OSS RAG 在律师证据链场景的可行性结论 (基于 R26 + R28 数据):
 ✅ 累计 ~85h 真实测试 wall time, 无误报无漏报
 
 🎯 **v0.6.2-rc.1 进入 GA 流程就绪** (待用户审批)
+
+## R30 Extra — 180min final sustained (post-7-fixes baseline 收官)
+
+**Wall time**: 10800s — 10419/10651 ok
+
+**结论**: 7 fixes 部署后 server 长期稳定运行 production-grade.
