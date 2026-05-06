@@ -29,3 +29,47 @@
 | S19 chat fallback | af782a8 | ✅ NEW |
 
 OSS-S20 (corpus 信噪比崩塌) 已记录, 暂不修 (设计层维护工具范畴)。
+---
+
+## Round 5-10/20 — 23 endpoints
+
+**Wall time**: 0s — 23/23 ok
+
+---
+
+## Round 11-15/20 — Search latency (8 query)
+
+**Wall time**: 1s — P50=27ms P95=128ms
+
+---
+
+## Round 16/20 — 100 concurrent ingest
+
+**Wall time**: 5s — 100/100 ok
+
+---
+
+## Round 17/20 — 50× lock/unlock
+
+**Wall time**: 163s — 25/50 ok
+
+---
+
+## Round 18/20 — 3× restart recovery
+
+**Wall time**: 54s — 3/3 ok
+
+---
+
+## Round 19+20/20 — 30-min final mixed
+
+**Wall time**: 1800s = 30min
+
+| Metric | Value |
+|--------|-------|
+| total | 3918 |
+| ok | 3918 |
+| P50/P95 | 13/169 ms |
+
+## R5-R20 + Extra 150min sustained sanity (post-S19 fix)
+**Wall time**: 9000s — 8884/8884 ok
