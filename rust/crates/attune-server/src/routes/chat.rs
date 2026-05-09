@@ -672,12 +672,46 @@ pub async fn chat(
     // (max < 0.001) 时，说明 RAG 检索到的文档与 query 实质无关，LLM 在用预训练知识
     // "权威地" 编造答案。强制在前面加 disclaimer 让用户知晓答案非来自知识库。
     // R5/R18 反复确认此现象（古希腊伊壁鸠鲁/量子退火等 out-of-corpus query）。
+    //
+    // OSS-S25 fix (任其坤案件 2026-05-09): 进一步强化对**结构化数据计算 query** 的拒绝。
+    // 律师真实场景中"多少元/合计/求和/总计/笔数/对账/转账明细"这类问题 RAG chat 完全
+    // 不能 hallucinate（金额错一元都可能直接影响诉讼标的额）。当 max_rel < 0.001 且
+    // query 命中结构化计算关键词时，直接 reject 而非加 disclaimer，明确指引用户走
+    // 对应 capability（attune-pro/law-pro::bank_statement_aggregator 等 Tool-using 路径）。
     let response = {
         let max_rel: f64 = citations
             .iter()
             .filter_map(|c| c.get("relevance").and_then(|v| v.as_f64()))
             .fold(0.0_f64, f64::max);
-        if !citations.is_empty() && max_rel < 0.001 && !response.trim().is_empty() {
+
+        // 结构化计算关键词（律师 / 财务 / 数据分析常见）
+        const COMPUTE_KEYWORDS: &[&str] = &[
+            "多少元", "多少钱", "合计", "求和", "总计", "总金额", "总额",
+            "笔数", "几笔", "对账", "明细", "应付", "应收", "净流入",
+            "转账明细", "交易明细", "本息", "利息计算",
+        ];
+        let q_lower = body.message.to_lowercase();
+        // 数字 + 元/万/笔/张 模式 (简化检测，无需 regex 依赖)
+        let has_amount_pattern = body.message.chars().enumerate().any(|(i, c)| {
+            c.is_ascii_digit() && body.message.chars().skip(i + 1).take(3)
+                .any(|nc| nc == '元' || nc == '万' || nc == '笔' || nc == '张')
+        });
+        let is_compute_query = COMPUTE_KEYWORDS.iter().any(|k| q_lower.contains(k))
+            || has_amount_pattern;
+
+        if !citations.is_empty() && max_rel < 0.001 && is_compute_query {
+            // 结构化计算 + 无强相关引用 → 强制 reject (OSS-S25)
+            "⚠️ 此问题涉及结构化数据计算（金额求和 / 笔数统计 / 对账等），但当前知识库\
+             检索结果与你的问题相关度极低（max relevance < 0.001），LLM 在此场景下若强行\
+             回答会产生数字 hallucination 风险（金额错一元可直接影响诉讼标的额）。\n\n\
+             建议:\n\
+             1. 如查询银行流水交易计算，请使用 attune-pro/law-pro::bank_statement_aggregator capability \
+             （命令行: `cargo run --release -p law-pro --bin run_bank_aggregator -- --pdf=... --counterparty=...`）\n\
+             2. 如知识库中确有相关文档，请检查文档是否已被 ingest 且 embedding 已处理完成 \
+             （/api/v1/status 看 pending_embeddings）\n\
+             3. 或换更具体的提问方式（如指定文件名 / 当事方姓名 / 时间范围）".to_string()
+        } else if !citations.is_empty() && max_rel < 0.001 && !response.trim().is_empty() {
+            // 普通 query + 低相关 → 加 disclaimer (OSS-S12 既有行为)
             format!(
                 "⚠️ 知识库中未找到与你问题强相关的内容（最高引用相关度 {:.4}），以下回答主要来自模型预训练知识，仅供参考：\n\n{}",
                 max_rel, response
