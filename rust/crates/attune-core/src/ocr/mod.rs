@@ -32,13 +32,26 @@ pub trait OcrProvider: Send + Sync {
 }
 
 /// 选择默认 OCR provider —
-/// PP-OCR 模型不在 → None（attune-server diagnostics 会提示用户重跑 postinst）。
+/// 选择默认 OCR provider — **不触发运行时下载**。
+///
+/// 设计原则（标准应用规范）:
+/// - 模型下载是**安装时**职责（postinst.sh 或 `attune --bootstrap-models` flag）
+/// - server 启动路径**不偷偷下载** — 否则用户首次启动等 30s+ 以为卡死
+/// - 模型缺失 → 返回 None + diagnostics 端点提示用户跑 bootstrap
+///
+/// 部署方式覆盖:
+/// - apt install attune.deb → postinst.sh 自动下载 (主路径)
+/// - cargo binary / 源码部署 → 用户跑 `attune-server-headless --bootstrap-models`
+/// - 一键工具 ensure_models_downloaded() 仍在 ppocr.rs (供 bootstrap 调用)
 pub fn detect_default_provider() -> Option<Box<dyn OcrProvider>> {
     if let Some(p) = ppocr::detect() {
         log::info!("OCR provider: PP-OCRv5 mobile (ORT)");
         return Some(Box::new(p));
     }
-    log::warn!("OCR provider: PP-OCR models missing — apt install --reinstall attune or run attune deploy");
+    log::warn!(
+        "OCR provider: PP-OCR models missing. Run `attune-server-headless --bootstrap-models` \
+         (cargo) or `apt install --reinstall attune` (deb) to download (~21 MB)."
+    );
     None
 }
 

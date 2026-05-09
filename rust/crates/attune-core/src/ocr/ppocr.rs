@@ -57,6 +57,88 @@ impl PpOcrProvider {
         need.iter().all(|f| d.join(f).exists())
     }
 
+    /// 一键化部署: 模型缺失时**自动下载**（任何部署方式 — deb/cargo/源码 都生效）。
+    ///
+    /// 替代 postinst.sh 单一渠道下载的限制。AMD 等 cargo binary 部署的 server 启动
+    /// 即可触发模型下载，避免用户手动 apt install --reinstall.
+    ///
+    /// 数据源 (与 postinst.sh 一致):
+    /// - 3 ONNX from HuggingFace SWHL/RapidOCR (~16 MB)
+    /// - 字典 from PaddlePaddle GitHub (6627 chars + # / space wrap)
+    ///
+    /// HF_ENDPOINT 环境变量支持 (e.g. hf-mirror.com 国内镜像).
+    pub fn ensure_models_downloaded() -> Result<()> {
+        if Self::models_present() {
+            return Ok(());
+        }
+        let d = Self::models_dir();
+        std::fs::create_dir_all(&d).map_err(|e| {
+            VaultError::ModelLoad(format!("create ppocr dir {}: {e}", d.display()))
+        })?;
+        log::info!("PP-OCR: models missing, auto-downloading (~16 MB)...");
+
+        // HF endpoint (支持国内镜像)
+        let hf_endpoint = std::env::var("HF_ENDPOINT")
+            .unwrap_or_else(|_| "https://huggingface.co".to_string());
+        let rapidocr_base = format!("{}/SWHL/RapidOCR/resolve/main", hf_endpoint.trim_end_matches('/'));
+
+        let downloads: &[(&str, &str, &str)] = &[
+            (
+                "PP-OCRv4/ch_PP-OCRv4_det_infer.onnx",
+                "ch_PP-OCRv5_det_mobile.onnx",
+                "~5 MB det (PP-OCRv4)",
+            ),
+            (
+                "PP-OCRv1/ch_ppocr_mobile_v2.0_cls_infer.onnx",
+                "ch_ppocr_mobile_v2.0_cls.onnx",
+                "~1 MB cls",
+            ),
+            (
+                "PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx",
+                "ch_PP-OCRv5_rec_mobile.onnx",
+                "~10 MB rec (PP-OCRv4)",
+            ),
+        ];
+
+        for (src_path, dst_name, desc) in downloads {
+            let dst = d.join(dst_name);
+            if dst.exists() {
+                log::info!("  PP-OCR: {} already present", dst_name);
+                continue;
+            }
+            let url = format!("{}/{}", rapidocr_base, src_path);
+            log::info!("  PP-OCR: downloading {dst_name} ({desc}) from {url}");
+            download_file(&url, &dst)?;
+        }
+
+        // 字典 (需 # prefix + ' ' suffix 满足 kreuzberg-paddle-ocr CTC blank 格式)
+        let dict_path = d.join("ppocr_keys_v1.txt");
+        if !dict_path.exists() {
+            let dict_url =
+                "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/release/2.7/ppocr/utils/ppocr_keys_v1.txt";
+            log::info!("  PP-OCR: downloading + preparing ppocr_keys_v1.txt");
+            let tmp_path = d.join("ppocr_keys_v1.txt.tmp");
+            download_file(dict_url, &tmp_path)?;
+            // wrap with # prefix + ' ' suffix
+            let raw = std::fs::read_to_string(&tmp_path).map_err(|e| {
+                VaultError::ModelLoad(format!("read ppocr dict tmp: {e}"))
+            })?;
+            std::fs::write(&dict_path, format!("#\n{}\n ", raw.trim_end())).map_err(|e| {
+                VaultError::ModelLoad(format!("write ppocr_keys_v1.txt: {e}"))
+            })?;
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+
+        if Self::models_present() {
+            log::info!("PP-OCR: all 4 models downloaded ✓");
+            Ok(())
+        } else {
+            Err(VaultError::ModelLoad(
+                "PP-OCR: download attempted but models still missing".into(),
+            ))
+        }
+    }
+
     /// 构造 provider — 假定模型已下载。失败返回 None。
     pub fn new() -> Option<Self> {
         let d = Self::models_dir();
@@ -103,6 +185,40 @@ fn num_cpus_safe() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get().min(8))
         .unwrap_or(4)
+}
+
+/// 同步下载 URL 到目标路径 (一键化部署用 — 替代 postinst.sh curl)。
+///
+/// 用 reqwest blocking client (复用 attune-core 已有 reqwest 依赖, 不增加 dep)。
+/// 60s 超时 + atomic rename (.tmp → 最终文件) 防止半下载状态。
+fn download_file(url: &str, dst: &std::path::Path) -> Result<()> {
+    let tmp = dst.with_extension("tmp");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))  // 大 ONNX 文件慢网慢
+        .build()
+        .map_err(|e| VaultError::ModelLoad(format!("build http client: {e}")))?;
+    let mut resp = client.get(url).send().map_err(|e| {
+        VaultError::ModelLoad(format!("download GET {url}: {e}"))
+    })?;
+    if !resp.status().is_success() {
+        return Err(VaultError::ModelLoad(format!(
+            "download {url} returned status {}",
+            resp.status()
+        )));
+    }
+    let mut out = std::fs::File::create(&tmp).map_err(|e| {
+        VaultError::ModelLoad(format!("create tmp file {}: {e}", tmp.display()))
+    })?;
+    resp.copy_to(&mut out).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        VaultError::ModelLoad(format!("copy_to {} from {url}: {e}", tmp.display()))
+    })?;
+    drop(out);
+    std::fs::rename(&tmp, dst).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        VaultError::ModelLoad(format!("rename {} -> {}: {e}", tmp.display(), dst.display()))
+    })?;
+    Ok(())
 }
 
 impl OcrProvider for PpOcrProvider {
