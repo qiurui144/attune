@@ -54,6 +54,27 @@ pub async fn upload_file(
         ));
     }
 
+    // OSS-S15 fix v2 (任其坤案件 2026-05-09): upload 路径 backpressure
+    // 之前仅 ingest 接了 backpressure (commit 20decfb)，但 upload 单次可塞 3500+ chunks
+    // (实测 14 张 jpg 塞 30K chunks 让 server hung 5min)。两条入口都必须接同款防御。
+    const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
+    {
+        let vault = state.vault.lock()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+        if let Ok(pending) = vault.store().pending_count_by_type("embed") {
+            if pending > EMBEDDING_QUEUE_BACKPRESSURE_LIMIT {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": format!("embedding queue backpressure ({pending} pending > {EMBEDDING_QUEUE_BACKPRESSURE_LIMIT} limit), retry later"),
+                        "pending_embeddings": pending,
+                        "retry_after_seconds": 30,
+                    })),
+                ));
+            }
+        }
+    }
+
     let (title, content) = parser::parse_bytes(&data, &filename).map_err(|e| {
         (
             StatusCode::UNPROCESSABLE_ENTITY,
