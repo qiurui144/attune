@@ -8,6 +8,7 @@ pub mod chat;
 pub mod chat_sessions;
 pub mod errors;
 pub mod feedback;
+pub mod forms;
 pub mod classify;
 pub mod clusters;
 pub mod index;

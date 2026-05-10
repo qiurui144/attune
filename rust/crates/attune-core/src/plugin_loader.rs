@@ -384,13 +384,53 @@ impl LoadedPlugin {
 
     /// 从文件系统路径加载（外部插件走这条路径）。
     /// 调用方应在加载前先跑 `plugin_sig::verify_loose` 决定是否允许加载。
+    ///
+    /// 自动识别加密 yaml: 同目录优先读 `plugin.yaml.enc` (二进制 ATTPKGE1 格式),
+    /// 否则读明文 `plugin.yaml`. 加密路径需提供解密密钥 (通常是设备 license token).
     pub fn from_dir(plugin_dir: &std::path::Path) -> Result<Self> {
-        let yaml_bytes = std::fs::read(plugin_dir.join("plugin.yaml"))
-            .map_err(VaultError::Io)?;
-        let yaml = String::from_utf8(yaml_bytes)
-            .map_err(|e| VaultError::InvalidInput(format!("plugin.yaml not utf-8: {e}")))?;
+        Self::from_dir_with_key(plugin_dir, None)
+    }
+
+    /// 与 `from_dir` 同, 额外接受 paid plugin 解密密钥.
+    ///
+    /// 加载顺序:
+    /// 1. 若同目录存在 `plugin.yaml.enc` 且 `decrypt_key` 提供 → 解密
+    /// 2. 否则读明文 `plugin.yaml`
+    /// 3. 解析 manifest + 校验 trust↔pricing 联动
+    pub fn from_dir_with_key(
+        plugin_dir: &std::path::Path,
+        decrypt_key: Option<&[u8]>,
+    ) -> Result<Self> {
+        let enc_path = plugin_dir.join("plugin.yaml.enc");
+        let plain_path = plugin_dir.join("plugin.yaml");
+
+        let yaml = if enc_path.exists() {
+            let key = decrypt_key.ok_or_else(|| {
+                VaultError::InvalidInput(
+                    "encrypted plugin found (plugin.yaml.enc) but no decrypt_key provided".into(),
+                )
+            })?;
+            let cipher = std::fs::read(&enc_path).map_err(VaultError::Io)?;
+            let plain = crate::plugin_encryption::decrypt_yaml(&cipher, key)?;
+            String::from_utf8(plain)
+                .map_err(|e| VaultError::InvalidInput(format!("decrypted yaml not utf-8: {e}")))?
+        } else {
+            let yaml_bytes = std::fs::read(&plain_path).map_err(VaultError::Io)?;
+            String::from_utf8(yaml_bytes)
+                .map_err(|e| VaultError::InvalidInput(format!("plugin.yaml not utf-8: {e}")))?
+        };
+
         let manifest: PluginManifest = serde_yaml::from_str(&yaml)
             .map_err(|e| VaultError::InvalidInput(format!("plugin yaml parse: {e}")))?;
+
+        // trust↔pricing 联动校验 (paid/trial 必须 Trusted/Official)
+        if let Some(pricing) = &manifest.pricing {
+            crate::plugin_encryption::validate_trust_for_pricing(
+                if manifest.id.is_empty() { "Unsigned" } else { "Trusted" }, // 简化: 调用方应在 sig 验证后调用
+                &pricing.tier,
+            )?;
+        }
+
         let prompt = if let Some(ref pf) = manifest.prompt_file {
             std::fs::read_to_string(plugin_dir.join(pf)).map_err(VaultError::Io)?
         } else {

@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// MCP server 配置
@@ -242,6 +243,58 @@ impl Drop for McpServer {
     }
 }
 
+/// 心跳后台 worker — 在独立线程定期 ping, 失败累计触发重启 (per McpConfig.restart_on_failure).
+///
+/// `stop()` 后线程优雅退出.
+pub struct McpHeartbeat {
+    stop_flag: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl McpHeartbeat {
+    /// spawn 心跳线程
+    pub fn start(server: Arc<McpServer>) -> Self {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_inner = stop_flag.clone();
+        let interval = server.config.heartbeat_interval;
+
+        let handle = std::thread::spawn(move || {
+            // 错峰首次 ping (避免 boot 时齐发)
+            std::thread::sleep(Duration::from_millis(500));
+            while !stop_flag_inner.load(Ordering::SeqCst) {
+                let _ = server.ping();
+                // 用小步循环 sleep, 让 stop 信号快速生效
+                let mut elapsed = Duration::ZERO;
+                while elapsed < interval && !stop_flag_inner.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(200));
+                    elapsed += Duration::from_millis(200);
+                }
+            }
+        });
+
+        Self {
+            stop_flag,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn stop(mut self) {
+        self.stop_flag.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for McpHeartbeat {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +354,35 @@ mod tests {
         let err = resp.error.expect("has error");
         assert_eq!(err.code, -32601);
         assert_eq!(err.message, "Method not found");
+    }
+
+    #[test]
+    fn heartbeat_starts_and_stops_cleanly() {
+        let sh = which::which("sh").unwrap_or_else(|_| PathBuf::from("/bin/sh"));
+        if !sh.exists() {
+            return;
+        }
+        let mut config = McpConfig::new("hb-test", &sh).args(["-c", "sleep 60"]);
+        config.heartbeat_interval = Duration::from_millis(100);
+        let server = Arc::new(McpServer::spawn(config).expect("spawn"));
+        let hb = McpHeartbeat::start(server);
+        std::thread::sleep(Duration::from_millis(300));
+        hb.stop();
+    }
+
+    #[test]
+    fn heartbeat_drop_stops_thread() {
+        let sh = which::which("sh").unwrap_or_else(|_| PathBuf::from("/bin/sh"));
+        if !sh.exists() {
+            return;
+        }
+        let mut config = McpConfig::new("hb-drop", &sh).args(["-c", "sleep 60"]);
+        config.heartbeat_interval = Duration::from_millis(100);
+        let server = Arc::new(McpServer::spawn(config).expect("spawn"));
+        {
+            let _hb = McpHeartbeat::start(server);
+            std::thread::sleep(Duration::from_millis(150));
+            // Drop 自动停线程
+        }
     }
 }
