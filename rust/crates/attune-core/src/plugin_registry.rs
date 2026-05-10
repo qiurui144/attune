@@ -32,7 +32,7 @@ pub struct LoadedWorkflow {
     pub workflow: Workflow,
 }
 
-/// v0.6.2: chat 消息匹配到的 plugin trigger 结果
+/// chat 消息匹配到的 plugin trigger 结果
 #[derive(Debug, Clone)]
 pub struct ChatTriggerMatch {
     /// plugin id (e.g. "law-pro")
@@ -167,7 +167,7 @@ impl PluginRegistry {
         out
     }
 
-    /// 按 case_kind 过滤 agents (律师选案件类型 → attune 提示该 kind 下的 agents)
+    /// 按 case_kind 过滤 agents (调用方按业务场景选 kind, 拿到该 kind 下的 agents)
     pub fn agents_by_case_kind(&self, kind: &str) -> Vec<(&str, &crate::plugin_loader::AgentSpec)> {
         self.list_agents()
             .into_iter()
@@ -175,8 +175,8 @@ impl PluginRegistry {
             .collect()
     }
 
-    /// 聚合所有 plugin 注册的 case kinds → 用作 attune UI"案件类型选择"下拉
-    /// OSS 裸装无 plugin → 空 Vec → 律师选不了案件类型 (符合 §1 原则 4)
+    /// 聚合所有 plugin 注册的 case kinds → UI"案件类型选择"下拉数据源.
+    /// OSS 裸装无 plugin → 空 Vec.
     pub fn all_registered_case_kinds(&self) -> Vec<&crate::plugin_loader::CaseKindRegistration> {
         let mut out = Vec::new();
         for p in self.plugins.values() {
@@ -187,7 +187,7 @@ impl PluginRegistry {
         out
     }
 
-    /// v0.6.2 新增 (2026-05-10): 匹配用户 chat 消息到 plugin trigger.
+    /// 匹配用户 chat 消息到 plugin trigger.
     ///
     /// 实现 chat 消息 → capability 路由的 OSS 侧入口. attune-pro 装载 capability 后,
     /// chat.rs 调此 API 决定是否提示用户触发 capability (而非走纯 RAG path).
@@ -584,7 +584,7 @@ chat_trigger:
         assert!(wfs.is_empty());
     }
 
-    /// v0.6.2: match_chat_trigger 路由 API
+    /// match_chat_trigger 路由 API
     #[test]
     fn match_chat_trigger_oss_default_returns_none() {
         // OSS 裸装无 plugin → 永远 None
@@ -690,7 +690,7 @@ chat_trigger:
         assert!(reg.match_chat_trigger("本息计算").is_none());
     }
 
-    /// v2 协议 — list_skills / list_agents / list_mcp_servers / case_kind 查询
+    /// list_skills / list_agents / list_mcp_servers / case_kind 查询
     #[test]
     fn list_skills_aggregates_across_plugins() {
         let tmp = TempDir::new().expect("tmp");

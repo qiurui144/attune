@@ -1,20 +1,17 @@
-//! Capability subprocess dispatcher (M3 P0.B 基础设施)
+//! Plugin subprocess dispatcher.
 //!
-//! 用户拍板 2026-05-10: chat plugin handler 路由 ✅ 已实装 (plugin_registry::match_chat_trigger),
-//! 但 chat 路径缺输入资源 (PDF / 借条 / 微信片段 — 这些是 UI 表单收集), 无法直接 dispatch.
+//! 给上层 (chat handler / Web UI) 提供调用 plugin 二进制的统一 API.
 //!
-//! 此模块提供 dispatch 基础设施: 给 Web UI / chat handler 一般 API 调 plugin binary.
-//!
-//! 设计原则:
+//! 设计:
 //! - subprocess 隔离 (attune-core 不 link plugin lib, 保持 OSS-pro 边界)
-//! - JSON I/O 协议 (stdin/stdout) — 跨语言友好
-//! - 红线 exit code 透传 (capability binary exit 2 → CapabilityResult::RedLineViolation)
-//! - 超时控制 (默认 60s, 大容量 PDF OCR 需 300s)
+//! - JSON I/O 协议 (stdin/stdout) 跨语言友好
+//! - exit code 透传: 0 success / 2 业务红线 / 其他业务定义
+//! - 超时控制 (默认 60s, 大容量 OCR 等场景调高)
 //!
-//! 不做的事:
-//! - 不维护 plugin 进程池 / 不缓存 (capability 通常 stateless)
-//! - 不解析 capability 业务输出 (调用方根据 plugin schema 解析)
-//! - 不 sandbox (用户已信任 plugin 装载, sandbox 是签名验证 plugin_sig.rs 的事)
+//! 不做:
+//! - 进程池 / 缓存 (调用方按需)
+//! - 业务输出解析 (调用方按 plugin schema)
+//! - sandbox (信任已装载, sandbox 是签名验证 plugin_sig.rs 的事)
 
 use crate::error::{Result, VaultError};
 use std::path::{Path, PathBuf};
@@ -24,7 +21,7 @@ use std::time::Duration;
 /// Capability binary 调用结果
 #[derive(Debug, Clone)]
 pub struct CapabilityResult {
-    /// 进程 exit code (0 成功 / 1 错误 / 2 律师红线 / 其他业务定义)
+    /// 进程 exit code (0 成功 / 1 错误 / 2 业务红线 / 其他业务定义)
     pub exit_code: i32,
     /// stdout (通常 JSON 业务输出)
     pub stdout: String,
@@ -222,7 +219,7 @@ mod tests {
 
     #[test]
     fn dispatch_propagates_exit_code_2_red_line() {
-        // 用 sh -c 'exit 2' 模拟律师红线退出码
+        // 用 sh -c 'exit 2' 模拟业务红线退出码
         let sh = which::which("sh").unwrap_or_else(|_| PathBuf::from("/bin/sh"));
         if !sh.exists() {
             eprintln!("skip: sh not found");

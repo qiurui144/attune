@@ -84,40 +84,35 @@ pub struct PluginManifest {
     #[serde(default)]
     pub pii_patterns: Vec<PiiPatternSpec>,
 
-    // === 新协议字段 (per docs/specs/attune-plugin-protocol.md, 2026-05-10) ===
-    // 向后兼容追加: OSS 现有 plugin 不填这些字段也能继续装载.
-
-    /// 定价层级 (free / trial / paid). free → yaml 明文; paid/trial → yaml 加密.
+    /// 定价层级. free → yaml 明文; paid/trial → yaml 加密.
     #[serde(default)]
     pub pricing: Option<PluginPricing>,
 
-    /// 资源声明 (hint 形式, 不强制硬限制 — 用户拍板). 用于 UI 透明显示成本.
+    /// 资源声明 (hint, UI 显示成本; 不强制硬限制).
     #[serde(default)]
     pub resources: Option<PluginResources>,
 
-    /// 案件类型注册 (付费插件声明 kind→agent 映射, 让 attune UI 显示给律师选).
-    /// OSS attune 永不内置 case kinds — 这是行业能力, 全在付费 plugin.
+    /// 案件类型注册 (kind → agent 映射, UI 选择源). OSS 不内置 case kinds.
     #[serde(default)]
     pub registers_case_kinds: Vec<CaseKindRegistration>,
 
-    /// Skills (原子能力, 纯函数). 输入→输出确定, 可缓存. plugin 可声明 0..N 个.
+    /// Skills — 原子能力 (纯函数, 可缓存).
     #[serde(default)]
     pub skills: Vec<SkillSpec>,
 
-    /// Agents (场景专家, 编排器). 多步推理 + 调多个 skill + LLM. plugin 可声明 0..N 个.
+    /// Agents — 场景专家 (多步推理 + 编排 skill + LLM).
     #[serde(default)]
     pub agents: Vec<AgentSpec>,
 
-    /// MCP Servers (外部数据源, 实现 Model Context Protocol). plugin 可声明 0..N 个.
+    /// MCP Servers — 外部数据源 (Model Context Protocol).
     #[serde(default)]
     pub mcp_servers: Vec<McpServerSpec>,
 
-    /// UI 组件 (Stage 3 律师补全表单等). plugin 可声明 0..N 个.
+    /// UI 组件 (表单等).
     #[serde(default)]
     pub ui_components: Vec<UiComponentSpec>,
 }
 
-/// 定价层级 (per protocol §4)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginPricing {
     /// "free" | "trial" | "paid"
@@ -137,7 +132,7 @@ pub struct PluginResources {
     pub total_max_llm_tokens_per_call: Option<u64>,
     #[serde(default)]
     pub total_max_cpu_seconds: Option<u64>,
-    /// 外部 API 列表 (仅 hint, 数量不限制 — 用户拍板)
+    /// 外部 API 列表 (仅 hint, 数量不限制)
     #[serde(default)]
     pub external_apis: Vec<String>,
 }
