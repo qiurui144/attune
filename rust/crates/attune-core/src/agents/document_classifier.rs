@@ -38,6 +38,26 @@ pub struct ClassificationOutput {
 
 pub type Output = super::AgentOutput<ClassificationOutput>;
 
+/// Agent trait 适配器 (内部 agent 走直调; 外部 plugin agent 走 capability_dispatch subprocess)
+pub struct DocumentClassifierAgent;
+
+impl super::Agent for DocumentClassifierAgent {
+    type Input = Vec<(String, String)>; // (file, text) pairs (owned for trait object compat)
+    type Output = ClassificationOutput;
+
+    fn id(&self) -> &str { "document_classifier_agent" }
+    fn description(&self) -> &str { "文档分类 + 简单理解 (内置, 不碰行业)" }
+    fn case_kinds(&self) -> &[&str] { &[] } // 通用, 不限定 case_kind
+
+    fn run(&self, input: Self::Input) -> crate::error::Result<super::AgentOutput<Self::Output>> {
+        let docs: Vec<DocumentInput<'_>> = input
+            .iter()
+            .map(|(f, t)| DocumentInput { file: f.as_str(), text: t.as_str() })
+            .collect();
+        Ok(run(&docs))
+    }
+}
+
 /// 主入口: 批量分类 + 实体抽取
 pub fn run(inputs: &[DocumentInput<'_>]) -> Output {
     let mut classified = Vec::with_capacity(inputs.len());

@@ -388,18 +388,22 @@ impl LoadedPlugin {
     /// 自动识别加密 yaml: 同目录优先读 `plugin.yaml.enc` (二进制 ATTPKGE1 格式),
     /// 否则读明文 `plugin.yaml`. 加密路径需提供解密密钥 (通常是设备 license token).
     pub fn from_dir(plugin_dir: &std::path::Path) -> Result<Self> {
-        Self::from_dir_with_key(plugin_dir, None)
+        Self::from_dir_with_key(plugin_dir, None, None)
     }
 
-    /// 与 `from_dir` 同, 额外接受 paid plugin 解密密钥.
+    /// 与 `from_dir` 同, 额外接受 paid plugin 解密密钥 + 调用方已确认的 trust 级别.
     ///
     /// 加载顺序:
     /// 1. 若同目录存在 `plugin.yaml.enc` 且 `decrypt_key` 提供 → 解密
     /// 2. 否则读明文 `plugin.yaml`
-    /// 3. 解析 manifest + 校验 trust↔pricing 联动
+    /// 3. 解析 manifest + 校验 verified_trust↔pricing 联动 (paid/trial 必须 Trusted/Official)
+    ///
+    /// `verified_trust` 必须是调用方在 sig 验证 (plugin_sig::verify_*) 后得到的字符串
+    /// "Official" / "Trusted" / "Unsigned". 不传则按 "Unsigned" 处理.
     pub fn from_dir_with_key(
         plugin_dir: &std::path::Path,
         decrypt_key: Option<&[u8]>,
+        verified_trust: Option<&str>,
     ) -> Result<Self> {
         let enc_path = plugin_dir.join("plugin.yaml.enc");
         let plain_path = plugin_dir.join("plugin.yaml");
@@ -423,12 +427,10 @@ impl LoadedPlugin {
         let manifest: PluginManifest = serde_yaml::from_str(&yaml)
             .map_err(|e| VaultError::InvalidInput(format!("plugin yaml parse: {e}")))?;
 
-        // trust↔pricing 联动校验 (paid/trial 必须 Trusted/Official)
+        // trust↔pricing 联动 — 调用方传入实际验证后的 trust 级别
         if let Some(pricing) = &manifest.pricing {
-            crate::plugin_encryption::validate_trust_for_pricing(
-                if manifest.id.is_empty() { "Unsigned" } else { "Trusted" }, // 简化: 调用方应在 sig 验证后调用
-                &pricing.tier,
-            )?;
+            let trust = verified_trust.unwrap_or("Unsigned");
+            crate::plugin_encryption::validate_trust_for_pricing(trust, &pricing.tier)?;
         }
 
         let prompt = if let Some(ref pf) = manifest.prompt_file {

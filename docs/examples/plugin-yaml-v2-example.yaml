@@ -1,0 +1,112 @@
+# Plugin Protocol v2 完整示例 (per docs/specs/attune-plugin-protocol.md)
+#
+# 此文件演示所有 v2 字段的标准用法. 实际付费 plugin 应该用 plugin.yaml.enc
+# 加密分发 (Argon2id + AES-256-GCM, 见 attune-core::plugin_encryption).
+#
+# 装载:
+#   - 明文: LoadedPlugin::from_dir(plugin_dir)
+#   - 加密: LoadedPlugin::from_dir_with_key(plugin_dir, Some(key), Some("Trusted"))
+
+# === 元数据 ===
+id: example-pro
+name: Example Pro Plugin
+type: industry
+vendor: example-vendor
+license: LicenseRef-Proprietary
+version: "0.1.0"
+attune_min_version: "0.6.2"
+maturity: alpha          # alpha | beta | stable
+description: "示例 plugin, 演示 v2 协议全字段"
+
+# === 定价 (paid 必须 Trusted/Official 信任级别才允许装载) ===
+pricing:
+  tier: paid             # free | trial | paid
+  trial_quota: 10        # paid: 试用次数; free: 忽略
+  price_url: https://example.com/pricing
+
+# === 信任级别 (运行时由 plugin_sig 验证后传入 from_dir_with_key) ===
+trust: Trusted           # Official | Trusted | Unsigned
+
+# === 资源声明 (hint, UI 显示成本; 不强制硬限制) ===
+resources:
+  total_max_llm_tokens_per_call: 10000
+  total_max_cpu_seconds: 30
+  external_apis:
+    - https://api.example.com
+
+# === 案件类型注册 (UI 案件类型选择源) ===
+registers_case_kinds:
+  - kind: civil-loan
+    label: 民事-借贷纠纷
+    default_agent: civil_loan_agent
+
+# === Skills (原子能力, 纯函数) ===
+skills:
+  - id: extract_loan_terms
+    description: "从借条 OCR 文本提取本金/利率/起算日"
+    inputs:
+      text:
+        type: string
+        required: true
+    outputs:
+      principal: number
+      rate_value: number
+      rate_type: string
+      start_date: string
+    runtime: rust_binary       # rust_binary | wasm | python_subprocess
+    binary: bin/skill_extract_loan_terms
+    cost:
+      llm_tokens: 500
+      cpu_seconds: 2
+    cacheable: true            # 同样输入 cache 输出
+
+# === Agents (场景专家, 编排器) ===
+agents:
+  - id: civil_loan_agent
+    description: "民事借贷纠纷 — 强证据型, 公式严格执行"
+    case_kinds: [civil-loan]
+    consumes_evidence_kinds:
+      - 借条
+      - 银行流水
+      - 微信记录
+      - 收据
+    hard_red_lines:
+      - "borrowing_relationship_established"
+    soft_followups:
+      - "interest_rate_specific_value"
+      - "start_date_explicit"
+    runtime: rust_binary
+    binary: bin/agent_civil_loan
+    requires_skills: [extract_loan_terms]
+    requires_mcps: [lpr_history]
+    cost:
+      llm_tokens: 5000
+      cpu_seconds: 8
+    chat_trigger:
+      enabled: true
+      keywords: [本金, 利息, 借贷, 应付, 应收]
+      min_keyword_match: 1
+      priority: 10
+      description: "借贷纠纷本息合规计算"
+      exclude_patterns:
+        - "利息税"
+
+# === MCP Servers (外部数据源, Model Context Protocol) ===
+mcp_servers:
+  - id: lpr_history
+    description: "中国央行 LPR 历史数据"
+    transport: stdio                          # stdio | http
+    command: ["bin/mcp_lpr_history"]
+    tools_exposed:
+      - get_lpr_at_date
+      - list_lpr_changes_in_year
+    lifecycle: eager                          # eager (默认, 启动时常驻) | lazy
+    heartbeat_interval_seconds: 30
+    restart_on_failure: 3
+
+# === UI 组件 (Stage 3 律师补全表单等) ===
+ui_components:
+  - id: civil_loan_stage3_form
+    target: agent:civil_loan_agent
+    html: ui/civil_loan_stage3.html
+    description: "借贷案件事实补全表单"

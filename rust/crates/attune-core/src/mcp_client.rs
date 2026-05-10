@@ -62,7 +62,7 @@ struct JsonRpcRequest<'a> {
 struct JsonRpcResponse {
     #[allow(dead_code)]
     jsonrpc: String,
-    #[allow(dead_code)]
+    /// 必须匹配请求 id, call_tool 内做 id 校验
     id: u64,
     #[serde(default)]
     result: Option<serde_json::Value>,
@@ -82,6 +82,8 @@ pub struct McpServer {
     child: Mutex<Option<Child>>,
     stdin: Mutex<Option<ChildStdin>>,
     stdout: Mutex<Option<BufReader<ChildStdout>>>,
+    /// 整笔事务锁 (写请求 + 读响应必须原子) — 否则并发 call_tool 响应会错位.
+    transaction: Mutex<()>,
     next_id: AtomicU64,
     last_heartbeat: Mutex<Instant>,
     failure_count: Mutex<u32>,
@@ -95,6 +97,7 @@ impl McpServer {
             child: Mutex::new(None),
             stdin: Mutex::new(None),
             stdout: Mutex::new(None),
+            transaction: Mutex::new(()),
             next_id: AtomicU64::new(1),
             last_heartbeat: Mutex::new(Instant::now()),
             failure_count: Mutex::new(0),
@@ -123,8 +126,11 @@ impl McpServer {
         Ok(())
     }
 
-    /// 调用一个 MCP tool
+    /// 调用一个 MCP tool. 整笔事务串行 (写请求 + 读响应原子, 防并发响应错位).
     pub fn call_tool(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        // 整笔事务锁: 防止 thread A 写完 stdin → thread B 抢先写, 导致 A 读到 B 的响应
+        let _txn = self.transaction.lock().unwrap_or_else(|e| e.into_inner());
+
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -146,10 +152,17 @@ impl McpServer {
             stdin.flush().map_err(VaultError::Io)?;
         }
 
-        // 读取响应
+        // 读取响应 (持 transaction 锁内, 保证响应属于本次请求)
         let response_body = self.read_framed_message()?;
         let resp: JsonRpcResponse = serde_json::from_str(&response_body)
             .map_err(|e| VaultError::Io(std::io::Error::other(format!("parse mcp resp: {e}"))))?;
+
+        // id 校验: 响应必须匹配请求 id (即便 transaction 锁住, 仍是额外保险)
+        if resp.id != id {
+            return Err(VaultError::Io(std::io::Error::other(format!(
+                "mcp response id mismatch: req={id} resp={}", resp.id
+            ))));
+        }
 
         if let Some(err) = resp.error {
             return Err(VaultError::Io(std::io::Error::other(format!(

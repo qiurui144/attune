@@ -14,11 +14,13 @@ pub fn summarize(llm: &dyn LlmProvider, text: &str) -> Result<String> {
     summarize_with_prompt(llm, text, DEFAULT_SYSTEM_PROMPT)
 }
 
+/// 输入超长截断阈值 (字符数, 不是 tokens). 经验值: 20K 字符 ≈ 5K-10K tokens.
+const MAX_INPUT_CHARS: usize = 20_000;
+
 pub fn summarize_with_prompt(llm: &dyn LlmProvider, text: &str, system: &str) -> Result<String> {
     if text.trim().is_empty() {
         return Err(VaultError::Crypto("empty input to summarize".into()));
     }
-    let MAX_INPUT_CHARS: usize = 20_000;
     let input = if text.chars().count() > MAX_INPUT_CHARS {
         text.chars().take(MAX_INPUT_CHARS).collect::<String>()
     } else {
