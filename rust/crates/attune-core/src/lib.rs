@@ -10,6 +10,9 @@ pub mod context_compress;
 pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;
+// v0.6.2 P0.B (2026-05-10): capability subprocess dispatcher 基础设施.
+// 给 chat handler / Web UI 调 plugin binary, JSON I/O 协议, 红线 exit code 透传.
+pub mod capability_dispatch;
 pub(crate) mod plugin_sig;
 pub mod classifier;
 pub mod clusterer;
