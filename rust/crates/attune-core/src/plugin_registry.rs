@@ -134,6 +134,59 @@ impl PluginRegistry {
         out
     }
 
+    /// 列出所有 plugin 的全部 skills (附带 plugin_id)
+    pub fn list_skills(&self) -> Vec<(&str, &crate::plugin_loader::SkillSpec)> {
+        let mut out = Vec::new();
+        for (pid, p) in &self.plugins {
+            for s in &p.manifest.skills {
+                out.push((pid.as_str(), s));
+            }
+        }
+        out
+    }
+
+    /// 列出所有 plugin 的全部 agents (附带 plugin_id)
+    pub fn list_agents(&self) -> Vec<(&str, &crate::plugin_loader::AgentSpec)> {
+        let mut out = Vec::new();
+        for (pid, p) in &self.plugins {
+            for a in &p.manifest.agents {
+                out.push((pid.as_str(), a));
+            }
+        }
+        out
+    }
+
+    /// 列出所有 plugin 的全部 MCP servers (附带 plugin_id)
+    pub fn list_mcp_servers(&self) -> Vec<(&str, &crate::plugin_loader::McpServerSpec)> {
+        let mut out = Vec::new();
+        for (pid, p) in &self.plugins {
+            for m in &p.manifest.mcp_servers {
+                out.push((pid.as_str(), m));
+            }
+        }
+        out
+    }
+
+    /// 按 case_kind 过滤 agents (律师选案件类型 → attune 提示该 kind 下的 agents)
+    pub fn agents_by_case_kind(&self, kind: &str) -> Vec<(&str, &crate::plugin_loader::AgentSpec)> {
+        self.list_agents()
+            .into_iter()
+            .filter(|(_, a)| a.case_kinds.iter().any(|k| k == kind))
+            .collect()
+    }
+
+    /// 聚合所有 plugin 注册的 case kinds → 用作 attune UI"案件类型选择"下拉
+    /// OSS 裸装无 plugin → 空 Vec → 律师选不了案件类型 (符合 §1 原则 4)
+    pub fn all_registered_case_kinds(&self) -> Vec<&crate::plugin_loader::CaseKindRegistration> {
+        let mut out = Vec::new();
+        for p in self.plugins.values() {
+            for k in &p.manifest.registers_case_kinds {
+                out.push(k);
+            }
+        }
+        out
+    }
+
     /// v0.6.2 新增 (2026-05-10): 匹配用户 chat 消息到 plugin trigger.
     ///
     /// 实现 chat 消息 → capability 路由的 OSS 侧入口. attune-pro 装载 capability 后,
@@ -635,6 +688,162 @@ chat_trigger:
         let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
         // enabled=false → 不参与匹配
         assert!(reg.match_chat_trigger("本息计算").is_none());
+    }
+
+    /// v2 协议 — list_skills / list_agents / list_mcp_servers / case_kind 查询
+    #[test]
+    fn list_skills_aggregates_across_plugins() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师插件
+type: industry
+version: "1.0.0"
+skills:
+  - id: extract_loan_terms
+    description: "借条 OCR → 本金/利率"
+    runtime: rust_binary
+    binary: bin/skill_extract_loan_terms
+  - id: parse_case_no
+    description: "案号结构化"
+    runtime: rust_binary
+"#,
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "patent-pro",
+            r#"
+id: patent-pro
+name: 专利插件
+type: industry
+version: "1.0.0"
+skills:
+  - id: extract_patent_claims
+    runtime: rust_binary
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let skills = reg.list_skills();
+        assert_eq!(skills.len(), 3);
+        let ids: Vec<&str> = skills.iter().map(|(_, s)| s.id.as_str()).collect();
+        assert!(ids.contains(&"extract_loan_terms"));
+        assert!(ids.contains(&"parse_case_no"));
+        assert!(ids.contains(&"extract_patent_claims"));
+    }
+
+    #[test]
+    fn list_agents_and_filter_by_case_kind() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师
+type: industry
+version: "1.0.0"
+agents:
+  - id: civil_loan_agent
+    case_kinds: [civil-loan]
+    runtime: rust_binary
+  - id: marriage_property_agent
+    case_kinds: [civil-marriage]
+    runtime: rust_binary
+  - id: criminal_defense_agent
+    case_kinds: [criminal-defense]
+    runtime: rust_binary
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert_eq!(reg.list_agents().len(), 3);
+
+        let civil = reg.agents_by_case_kind("civil-loan");
+        assert_eq!(civil.len(), 1);
+        assert_eq!(civil[0].1.id, "civil_loan_agent");
+
+        let nonexistent = reg.agents_by_case_kind("admin-litigation");
+        assert!(nonexistent.is_empty());
+    }
+
+    #[test]
+    fn list_mcp_servers_aggregates() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师
+type: industry
+version: "1.0.0"
+mcp_servers:
+  - id: lpr_history
+    transport: stdio
+    command: ["bin/mcp_lpr_history"]
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let mcps = reg.list_mcp_servers();
+        assert_eq!(mcps.len(), 1);
+        assert_eq!(mcps[0].1.id, "lpr_history");
+        assert_eq!(mcps[0].1.transport, "stdio");
+        assert_eq!(mcps[0].1.lifecycle, "eager");  // 默认值
+        assert_eq!(mcps[0].1.heartbeat_interval_seconds, 30);
+    }
+
+    #[test]
+    fn all_registered_case_kinds_aggregates() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师
+type: industry
+version: "1.0.0"
+registers_case_kinds:
+  - kind: civil-loan
+    label: 民事-借贷纠纷
+    default_agent: civil_loan_agent
+  - kind: civil-marriage
+    label: 婚姻-财产分割
+    default_agent: marriage_property_agent
+"#,
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "patent-pro",
+            r#"
+id: patent-pro
+name: 专利
+type: industry
+version: "1.0.0"
+registers_case_kinds:
+  - kind: patent-infringement
+    label: 知产-专利侵权
+    default_agent: patent_infringement_agent
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let kinds = reg.all_registered_case_kinds();
+        assert_eq!(kinds.len(), 3);
+        let labels: Vec<&str> = kinds.iter().map(|k| k.label.as_str()).collect();
+        assert!(labels.contains(&"民事-借贷纠纷"));
+        assert!(labels.contains(&"婚姻-财产分割"));
+        assert!(labels.contains(&"知产-专利侵权"));
+    }
+
+    #[test]
+    fn oss_default_no_plugins_returns_empty_lists() {
+        let reg = PluginRegistry::new();
+        assert!(reg.list_skills().is_empty());
+        assert!(reg.list_agents().is_empty());
+        assert!(reg.list_mcp_servers().is_empty());
+        assert!(reg.all_registered_case_kinds().is_empty());
     }
 
     #[test]

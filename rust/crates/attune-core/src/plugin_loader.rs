@@ -83,7 +83,190 @@ pub struct PluginManifest {
     /// 例：law-pro 提供 case_no、medical-pro 提供 medical_record_no、patent-pro 提供 patent_no。
     #[serde(default)]
     pub pii_patterns: Vec<PiiPatternSpec>,
+
+    // === 新协议字段 (per docs/specs/attune-plugin-protocol.md, 2026-05-10) ===
+    // 向后兼容追加: OSS 现有 plugin 不填这些字段也能继续装载.
+
+    /// 定价层级 (free / trial / paid). free → yaml 明文; paid/trial → yaml 加密.
+    #[serde(default)]
+    pub pricing: Option<PluginPricing>,
+
+    /// 资源声明 (hint 形式, 不强制硬限制 — 用户拍板). 用于 UI 透明显示成本.
+    #[serde(default)]
+    pub resources: Option<PluginResources>,
+
+    /// 案件类型注册 (付费插件声明 kind→agent 映射, 让 attune UI 显示给律师选).
+    /// OSS attune 永不内置 case kinds — 这是行业能力, 全在付费 plugin.
+    #[serde(default)]
+    pub registers_case_kinds: Vec<CaseKindRegistration>,
+
+    /// Skills (原子能力, 纯函数). 输入→输出确定, 可缓存. plugin 可声明 0..N 个.
+    #[serde(default)]
+    pub skills: Vec<SkillSpec>,
+
+    /// Agents (场景专家, 编排器). 多步推理 + 调多个 skill + LLM. plugin 可声明 0..N 个.
+    #[serde(default)]
+    pub agents: Vec<AgentSpec>,
+
+    /// MCP Servers (外部数据源, 实现 Model Context Protocol). plugin 可声明 0..N 个.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerSpec>,
+
+    /// UI 组件 (Stage 3 律师补全表单等). plugin 可声明 0..N 个.
+    #[serde(default)]
+    pub ui_components: Vec<UiComponentSpec>,
 }
+
+/// 定价层级 (per protocol §4)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginPricing {
+    /// "free" | "trial" | "paid"
+    pub tier: String,
+    /// trial 试用次数
+    #[serde(default)]
+    pub trial_quota: Option<usize>,
+    /// 商业页 URL
+    #[serde(default)]
+    pub price_url: Option<String>,
+}
+
+/// 资源声明 (hint, UI 透明显示成本; 不强制硬限制)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginResources {
+    #[serde(default)]
+    pub total_max_llm_tokens_per_call: Option<u64>,
+    #[serde(default)]
+    pub total_max_cpu_seconds: Option<u64>,
+    /// 外部 API 列表 (仅 hint, 数量不限制 — 用户拍板)
+    #[serde(default)]
+    pub external_apis: Vec<String>,
+}
+
+/// 案件类型注册 (付费插件 → 案件类型 → agent 映射)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseKindRegistration {
+    /// 唯一 kind id (如 "civil-loan", "civil-marriage", "criminal-defense")
+    pub kind: String,
+    /// UI 显示标签 (如 "民事-借贷纠纷")
+    pub label: String,
+    /// 默认 agent id (该 plugin 的 agents 列表内某 id)
+    pub default_agent: String,
+}
+
+/// Skill 声明 (原子能力)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSpec {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    /// inputs schema (JSON Schema 简化版, 字段名 → 类型描述)
+    #[serde(default)]
+    pub inputs: serde_json::Value,
+    /// outputs schema
+    #[serde(default)]
+    pub outputs: serde_json::Value,
+    /// 执行运行时: "rust_binary" | "wasm" | "python_subprocess"
+    pub runtime: String,
+    /// runtime=rust_binary 时, 二进制相对路径
+    #[serde(default)]
+    pub binary: Option<String>,
+    /// 成本 hint
+    #[serde(default)]
+    pub cost: SkillCost,
+    /// 是否可缓存 (同样输入 cache 输出)
+    #[serde(default)]
+    pub cacheable: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillCost {
+    #[serde(default)]
+    pub llm_tokens: Option<u64>,
+    #[serde(default)]
+    pub cpu_seconds: Option<u64>,
+    #[serde(default)]
+    pub external_calls_per_invocation: Option<u32>,
+}
+
+/// Agent 声明 (场景专家)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSpec {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    /// 处理哪些案件类型 (与 registers_case_kinds 配套)
+    #[serde(default)]
+    pub case_kinds: Vec<String>,
+    /// info 级声明: 该 agent 能消费哪些证据类型 (不强制清单)
+    #[serde(default)]
+    pub consumes_evidence_kinds: Vec<String>,
+    /// 硬红线 (任一不满足 → reject 输出)
+    #[serde(default)]
+    pub hard_red_lines: Vec<String>,
+    /// 软追问 (缺则 missing_evidence 提示, 不阻塞)
+    #[serde(default)]
+    pub soft_followups: Vec<String>,
+    /// 执行运行时: "rust_binary" | "wasm" | "python_subprocess"
+    pub runtime: String,
+    #[serde(default)]
+    pub binary: Option<String>,
+    /// 依赖的 skill id 列表 (本 plugin 或其他 plugin 暴露)
+    #[serde(default)]
+    pub requires_skills: Vec<String>,
+    /// 依赖的 mcp server id 列表
+    #[serde(default)]
+    pub requires_mcps: Vec<String>,
+    /// 成本 hint
+    #[serde(default)]
+    pub cost: SkillCost,
+    /// 该 agent 自身的 chat trigger (per-agent, 替代 plugin 级 chat_trigger)
+    #[serde(default)]
+    pub chat_trigger: Option<ChatTrigger>,
+}
+
+/// MCP Server 声明
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerSpec {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    /// "stdio" | "http"
+    pub transport: String,
+    /// stdio 模式启动命令 (含参数)
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// http 模式 URL
+    #[serde(default)]
+    pub url: Option<String>,
+    /// 暴露的 tool 名列表 (info, MCP server 启动后实际通过 list_tools 获取)
+    #[serde(default)]
+    pub tools_exposed: Vec<String>,
+    /// 生命周期: "eager" (启动时常驻, 默认) | "lazy" (调用时启动)
+    #[serde(default = "default_eager")]
+    pub lifecycle: String,
+    /// 心跳间隔秒 (默认 30s)
+    #[serde(default = "default_heartbeat_seconds")]
+    pub heartbeat_interval_seconds: u64,
+    /// 失败重启阈值 (默认 3 次)
+    #[serde(default = "default_restart_on_failure")]
+    pub restart_on_failure: u32,
+}
+
+/// UI 组件声明 (Stage 3 律师表单等)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiComponentSpec {
+    pub id: String,
+    /// 组件挂载目标, 如 "agent:civil_loan_agent"
+    pub target: String,
+    /// HTML 文件相对 plugin dir 的路径
+    pub html: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+fn default_eager() -> String { "eager".into() }
+fn default_heartbeat_seconds() -> u64 { 30 }
+fn default_restart_on_failure() -> u32 { 3 }
 
 /// vertical plugin 在 plugin.yaml 中声明的 PII 正则。
 ///

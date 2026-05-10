@@ -13,6 +13,9 @@ pub mod plugin_registry;
 // v0.6.2 P0.B (2026-05-10): capability subprocess dispatcher 基础设施.
 // 给 chat handler / Web UI 调 plugin binary, JSON I/O 协议, 红线 exit code 透传.
 pub mod capability_dispatch;
+// v0.6.2 (2026-05-10): OSS 内部 skills (per attune-plugin-protocol §2).
+// 不暴露独立 agent — document_classifier_agent 内部调用.
+pub mod skills;
 pub(crate) mod plugin_sig;
 pub mod classifier;
 pub mod clusterer;
