@@ -705,17 +705,14 @@ pub async fn chat(
             || has_amount_pattern;
 
         if let Some(m) = &plugin_match {
-            // Plugin 命中 — 提示用户触发 capability (优先于 RAG / hard-code reject)
+            // Plugin 命中 — 提示用户触发 agent (避免纯 RAG 数字 hallucination)
             format!(
-                "🔌 检测到此问题适合 **{}** capability 处理 ({}).\n\n\
-                 attune Chat 当前走纯 RAG 检索 + LLM, 不会**精确**计算金额 / 笔数 / 对账等结构化数字 \
-                 (有 hallucination 风险, 律师场景金额错一元可影响诉讼标的额).\n\n\
-                 建议路径:\n\
-                 1. 走 capability binary (命令行精确计算 + 律师红线 + 公式可审计):\n\
-                 `cargo run --release -p {} --bin run_<capability_id> -- <args>`\n\
-                 2. 或律师 UI (Stage 3 表单已实装) 触发 capability 并人工确认 null 字段.\n\n\
+                "🔌 检测到此问题适合 **{}** 处理 ({}).\n\n\
+                 attune Chat 走 RAG + LLM, 不做精确数值计算 (避免数字 hallucination).\n\n\
+                 建议: 通过 attune UI / agent dispatch 触发, 输出含 audit_trail + 业务红线 \
+                 enforce, 比 chat 直接回答更可靠.\n\n\
                  命中关键词数: {}, priority: {}",
-                m.plugin_id, m.description, m.plugin_id, m.keyword_hits, m.priority
+                m.plugin_id, m.description, m.keyword_hits, m.priority
             )
         } else if !citations.is_empty() && max_rel < 0.001 && is_compute_query {
             // 兜底: OSS 裸装无 plugin + 结构化计算 + 弱引用 → reject (原 OSS-S25 行为)

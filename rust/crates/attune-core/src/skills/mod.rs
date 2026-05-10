@@ -8,3 +8,4 @@
 pub mod parse_chinese_date;
 pub mod extract_entities;
 pub mod classify_chunk_kind;
+pub mod summarize_text;
