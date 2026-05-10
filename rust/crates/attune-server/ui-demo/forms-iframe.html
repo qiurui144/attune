@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<!--
+  Plugin form iframe 集成 demo.
+
+  attune-server 暴露 /api/v1/forms/{plugin_id}/{form_id} 返回 plugin 提供的
+  Stage 3 表单 HTML. 前端通过 iframe 嵌入即可, 提交逻辑由 plugin 内 form HTML
+  控制 (postMessage 通信), 主前端只负责装载.
+
+  使用:
+    1. 在主 SPA 中放一个 <iframe id="plugin-form" /> 元素
+    2. JS: iframe.src = `/api/v1/forms/${pluginId}/${formId}`
+    3. 监听 message: window.addEventListener('message', e => { ... })
+       表单提交后 plugin form HTML 应 postMessage 回主窗口
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Attune Plugin Form Demo</title>
+  <style>
+    body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; }
+    .controls { background: #f5f5f5; padding: 12px; border-radius: 6px; margin-bottom: 16px; }
+    label { display: inline-block; margin-right: 8px; }
+    input { width: 200px; padding: 4px 6px; }
+    button { padding: 6px 14px; background: #1976d2; color: white; border: 0; border-radius: 3px; cursor: pointer; margin-left: 8px; }
+    button.secondary { background: #888; }
+    iframe { width: 100%; height: 600px; border: 1px solid #ddd; border-radius: 4px; }
+    .response { margin-top: 16px; background: #f5f5f5; padding: 12px; border-radius: 4px; font-family: monospace; font-size: 12px; white-space: pre-wrap; overflow-x: auto; }
+    .row { margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Plugin Form Demo</h1>
+  <p>演示 attune Web UI 如何调 <code>/api/v1/forms/&lt;plugin&gt;/&lt;form&gt;</code> 集成 Stage 3 律师补全表单.</p>
+
+  <div class="controls">
+    <div class="row">
+      <label>Server URL: <input id="server" value="http://127.0.0.1:18900"></label>
+    </div>
+    <div class="row">
+      <label>Plugin ID: <input id="plugin" value="law-pro"></label>
+      <label>Form ID: <input id="form" value="civil_loan_stage3_form"></label>
+      <button onclick="loadForm()">加载表单</button>
+    </div>
+    <div class="row">
+      <button class="secondary" onclick="testSubmit()">测试 POST /submit (示例 JSON)</button>
+    </div>
+  </div>
+
+  <iframe id="plugin-form" src="about:blank"></iframe>
+
+  <h3>API 响应</h3>
+  <pre class="response" id="response">等待操作...</pre>
+
+  <script>
+    function loadForm() {
+      const server = document.getElementById('server').value;
+      const plugin = document.getElementById('plugin').value;
+      const form = document.getElementById('form').value;
+      const url = `${server}/api/v1/forms/${plugin}/${form}`;
+      document.getElementById('plugin-form').src = url;
+      document.getElementById('response').textContent = `iframe src 已设置为:\n${url}\n\n监听 message 事件等待 form postMessage 提交...`;
+    }
+
+    async function testSubmit() {
+      const server = document.getElementById('server').value;
+      const plugin = document.getElementById('plugin').value;
+      const form = document.getElementById('form').value;
+      const url = `${server}/api/v1/forms/${plugin}/${form}/submit`;
+      const sample = {
+        parties: { plaintiff_name: "张三", defendant_name: "李四", our_client_is: "plaintiff" },
+        principal: 500000,
+        loan_doc_exists: true
+      };
+      try {
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(sample),
+        });
+        const text = await r.text();
+        document.getElementById('response').textContent =
+          `POST ${url}\nstatus: ${r.status}\nbody:\n${text}`;
+      } catch (e) {
+        document.getElementById('response').textContent = `Error: ${e.message}`;
+      }
+    }
+
+    // 监听 plugin form HTML postMessage 提交事件
+    window.addEventListener('message', (e) => {
+      if (e.data && e.data.type === 'attune:form_submit') {
+        document.getElementById('response').textContent =
+          `[postMessage 收到] form_id=${e.data.form_id}\nfields:\n${JSON.stringify(e.data.fields, null, 2)}`;
+      }
+    });
+  </script>
+</body>
+</html>

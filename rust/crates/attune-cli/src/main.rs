@@ -74,6 +74,34 @@ enum Commands {
         #[arg(long)]
         script: Option<std::path::PathBuf>,
     },
+    /// 加密 plugin.yaml: free → paid 分发前的最后一步.
+    /// 输入 plugin dir + key (env ATTUNE_PLUGIN_KEY), 写出 plugin.yaml.enc.
+    PluginEncrypt {
+        /// 包含 plugin.yaml 的目录
+        plugin_dir: std::path::PathBuf,
+        /// 加密密钥 (默认从 ATTUNE_PLUGIN_KEY env 读)
+        #[arg(long)]
+        key: Option<String>,
+        /// 加密后是否删除明文 plugin.yaml (默认 false 保留两份方便 diff)
+        #[arg(long)]
+        delete_plain: bool,
+    },
+    /// 解密 plugin.yaml.enc → plugin.yaml (用于本地调试 / 验证 key 正确)
+    PluginDecrypt {
+        plugin_dir: std::path::PathBuf,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// 验证 plugin 装载链路: 解密 (如有) → schema 解析 → trust↔pricing 联动校验
+    PluginVerify {
+        plugin_dir: std::path::PathBuf,
+        /// paid plugin 的 key (free plugin 不需)
+        #[arg(long)]
+        key: Option<String>,
+        /// 模拟 trust 级别 (默认 Unsigned)
+        #[arg(long, default_value = "Unsigned")]
+        trust: String,
+    },
 }
 
 fn main() {
@@ -85,6 +113,19 @@ fn main() {
 }
 
 fn run(cli: Cli) -> attune_core::error::Result<()> {
+    // Plugin pack 子命令组不需要 vault — 早 return
+    match &cli.command {
+        Commands::PluginEncrypt { plugin_dir, key, delete_plain } => {
+            return run_plugin_encrypt(plugin_dir, key.as_deref(), *delete_plain);
+        }
+        Commands::PluginDecrypt { plugin_dir, key } => {
+            return run_plugin_decrypt(plugin_dir, key.as_deref());
+        }
+        Commands::PluginVerify { plugin_dir, key, trust } => {
+            return run_plugin_verify(plugin_dir, key.as_deref(), trust);
+        }
+        _ => {}
+    }
     // OCR / Deploy 子命令不需要 vault — 早 return 避免 zero-state 报错
     if let Commands::Ocr { image } = &cli.command {
         let provider = attune_core::ocr::detect_default_provider().ok_or_else(|| {
@@ -258,6 +299,10 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             println!("If unlock fails, ensure device.key matches: {}",
                 attune_core::platform::device_secret_path().display());
         }
+        // Plugin pack 子命令在 run() 头部已 handle, 这里 unreachable
+        Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. } => {
+            unreachable!("plugin commands handled before vault open")
+        }
     }
     Ok(())
 }
@@ -281,4 +326,90 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 fn read_password(prompt: &str) -> attune_core::error::Result<String> {
     eprint!("{prompt}");
     rpassword::read_password().map_err(attune_core::error::VaultError::Io)
+}
+
+
+fn read_plugin_key(arg_key: Option<&str>) -> attune_core::error::Result<Vec<u8>> {
+    if let Some(k) = arg_key {
+        return Ok(k.as_bytes().to_vec());
+    }
+    if let Ok(k) = std::env::var("ATTUNE_PLUGIN_KEY") {
+        return Ok(k.into_bytes());
+    }
+    Err(attune_core::error::VaultError::InvalidInput(
+        "plugin key required (--key or env ATTUNE_PLUGIN_KEY)".into(),
+    ))
+}
+
+fn run_plugin_encrypt(
+    plugin_dir: &std::path::Path,
+    key: Option<&str>,
+    delete_plain: bool,
+) -> attune_core::error::Result<()> {
+    let key = read_plugin_key(key)?;
+    let yaml_path = plugin_dir.join("plugin.yaml");
+    let enc_path = plugin_dir.join("plugin.yaml.enc");
+    if !yaml_path.exists() {
+        return Err(attune_core::error::VaultError::InvalidInput(format!(
+            "plugin.yaml not found at {}",
+            yaml_path.display()
+        )));
+    }
+    let plain = std::fs::read(&yaml_path).map_err(attune_core::error::VaultError::Io)?;
+    let cipher = attune_core::plugin_encryption::encrypt_yaml(&plain, &key)?;
+    std::fs::write(&enc_path, &cipher).map_err(attune_core::error::VaultError::Io)?;
+    eprintln!("✓ encrypted to {} ({} bytes)", enc_path.display(), cipher.len());
+    if delete_plain {
+        std::fs::remove_file(&yaml_path).map_err(attune_core::error::VaultError::Io)?;
+        eprintln!("✓ removed plaintext plugin.yaml");
+    }
+    Ok(())
+}
+
+fn run_plugin_decrypt(
+    plugin_dir: &std::path::Path,
+    key: Option<&str>,
+) -> attune_core::error::Result<()> {
+    let key = read_plugin_key(key)?;
+    let enc_path = plugin_dir.join("plugin.yaml.enc");
+    let yaml_path = plugin_dir.join("plugin.yaml");
+    if !enc_path.exists() {
+        return Err(attune_core::error::VaultError::InvalidInput(format!(
+            "plugin.yaml.enc not found at {}",
+            enc_path.display()
+        )));
+    }
+    let cipher = std::fs::read(&enc_path).map_err(attune_core::error::VaultError::Io)?;
+    let plain = attune_core::plugin_encryption::decrypt_yaml(&cipher, &key)?;
+    std::fs::write(&yaml_path, &plain).map_err(attune_core::error::VaultError::Io)?;
+    eprintln!("✓ decrypted to {} ({} bytes)", yaml_path.display(), plain.len());
+    Ok(())
+}
+
+fn run_plugin_verify(
+    plugin_dir: &std::path::Path,
+    key: Option<&str>,
+    trust: &str,
+) -> attune_core::error::Result<()> {
+    let key_bytes: Option<Vec<u8>> = if plugin_dir.join("plugin.yaml.enc").exists() {
+        Some(read_plugin_key(key)?)
+    } else {
+        None
+    };
+    let plugin = attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(
+        plugin_dir,
+        key_bytes.as_deref(),
+        Some(trust),
+    )?;
+    eprintln!("✓ plugin loaded: id={}, version={}, type={}",
+        plugin.manifest.id, plugin.manifest.version, plugin.manifest.plugin_type);
+    if let Some(p) = &plugin.manifest.pricing {
+        eprintln!("  pricing: tier={}", p.tier);
+    }
+    eprintln!("  skills: {}", plugin.manifest.skills.len());
+    eprintln!("  agents: {}", plugin.manifest.agents.len());
+    eprintln!("  mcp_servers: {}", plugin.manifest.mcp_servers.len());
+    eprintln!("  case_kinds: {}", plugin.manifest.registers_case_kinds.len());
+    eprintln!("  trust verified: {trust}");
+    Ok(())
 }

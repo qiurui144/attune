@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/attune-core", "crates/attune-cli", "crates/attune-server"]
+members = ["crates/attune-core", "crates/attune-cli", "crates/attune-server", "crates/attune-accounts"]
 
 [workspace.metadata.features]
 note = "Use --features='attune-core/cuda' (Linux NVIDIA), 'attune-core/directml' (Win), 'attune-core/coreml' (Mac) to enable GPU EP. Default = CPU only."

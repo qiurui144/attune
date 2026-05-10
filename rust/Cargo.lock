@@ -223,6 +223,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "attune-accounts"
+version = "0.1.0"
+dependencies = [
+ "attune-core",
+ "axum",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "uuid",
+]
+
+[[package]]
 name = "attune-cli"
 version = "0.1.0"
 dependencies = [
