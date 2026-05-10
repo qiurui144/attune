@@ -32,6 +32,21 @@ pub struct LoadedWorkflow {
     pub workflow: Workflow,
 }
 
+/// v0.6.2: chat 消息匹配到的 plugin trigger 结果
+#[derive(Debug, Clone)]
+pub struct ChatTriggerMatch {
+    /// plugin id (e.g. "law-pro")
+    pub plugin_id: String,
+    /// 多 plugin 同时命中时优先级 (高优先)
+    pub priority: i32,
+    /// 短描述 (UI 提示用户用)
+    pub description: String,
+    /// 是否需用户确认才执行 (默认 true)
+    pub needs_confirm: bool,
+    /// 关键词命中数
+    pub keyword_hits: usize,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct PluginRegistry {
     plugins: HashMap<String, LoadedPlugin>,
@@ -117,6 +132,60 @@ impl PluginRegistry {
             }
         }
         out
+    }
+
+    /// v0.6.2 新增 (2026-05-10): 匹配用户 chat 消息到 plugin trigger.
+    ///
+    /// 实现 chat 消息 → capability 路由的 OSS 侧入口. attune-pro 装载 capability 后,
+    /// chat.rs 调此 API 决定是否提示用户触发 capability (而非走纯 RAG path).
+    ///
+    /// 匹配规则:
+    /// - 任一 pattern (regex) 命中 → match
+    /// - keywords 命中数 >= min_keyword_match → match
+    /// - 任一 exclude_pattern 命中 → 否决
+    /// - 多 plugin 同时命中按 priority desc 取最高
+    ///
+    /// OSS attune 裸装无 plugin → 永远返 None.
+    pub fn match_chat_trigger(&self, user_msg: &str) -> Option<ChatTriggerMatch> {
+        use regex::Regex;
+        let mut best: Option<ChatTriggerMatch> = None;
+        for (plugin_id, p) in &self.plugins {
+            let Some(ct) = p.manifest.chat_trigger.as_ref() else { continue };
+            if !ct.enabled {
+                continue;
+            }
+
+            // 否决检查
+            let excluded = ct.exclude_patterns.iter().any(|pat| {
+                Regex::new(pat).map(|r| r.is_match(user_msg)).unwrap_or(false)
+            });
+            if excluded {
+                continue;
+            }
+
+            // pattern 命中
+            let pattern_hit = ct.patterns.iter().any(|pat| {
+                Regex::new(pat).map(|r| r.is_match(user_msg)).unwrap_or(false)
+            });
+
+            // keywords 命中数
+            let kw_hits = ct.keywords.iter().filter(|kw| user_msg.contains(kw.as_str())).count();
+            let kw_match = kw_hits >= ct.min_keyword_match.max(1);
+
+            if pattern_hit || kw_match {
+                let m = ChatTriggerMatch {
+                    plugin_id: plugin_id.clone(),
+                    priority: ct.priority,
+                    description: ct.description.clone(),
+                    needs_confirm: ct.needs_confirm,
+                    keyword_hits: kw_hits,
+                };
+                if best.as_ref().map(|b| m.priority > b.priority).unwrap_or(true) {
+                    best = Some(m);
+                }
+            }
+        }
+        best
     }
 
     /// 扫描 plugins_root 下每个一级子目录作为一个 plugin。
@@ -460,5 +529,139 @@ chat_trigger:
         let reg = PluginRegistry::new();
         let wfs = reg.workflows_by_trigger("nonexistent_event");
         assert!(wfs.is_empty());
+    }
+
+    /// v0.6.2: match_chat_trigger 路由 API
+    #[test]
+    fn match_chat_trigger_oss_default_returns_none() {
+        // OSS 裸装无 plugin → 永远 None
+        let reg = PluginRegistry::new();
+        assert!(reg.match_chat_trigger("梁素燕vs任其坤本息计算").is_none());
+    }
+
+    #[test]
+    fn match_chat_trigger_keyword_hits() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师插件
+type: industry
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  needs_confirm: true
+  priority: 10
+  description: "律师本息合规计算"
+  keywords:
+    - 本金
+    - 利息
+    - 应付
+  min_keyword_match: 1
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+
+        // 命中 1 个关键词 → match (min_keyword_match=1)
+        let m = reg.match_chat_trigger("我想问问任其坤应付多少利息").expect("match");
+        assert_eq!(m.plugin_id, "law-pro");
+        assert_eq!(m.priority, 10);
+        assert!(m.keyword_hits >= 2); // "应付" + "利息"
+        assert_eq!(m.description, "律师本息合规计算");
+
+        // 不含关键词 → None
+        assert!(reg.match_chat_trigger("今天天气怎么样").is_none());
+    }
+
+    #[test]
+    fn match_chat_trigger_priority_picks_highest() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "low-pro",
+            r#"
+id: low-pro
+name: low
+type: industry
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  priority: 1
+  keywords: ["案件"]
+  min_keyword_match: 1
+"#,
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "high-pro",
+            r#"
+id: high-pro
+name: high
+type: industry
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  priority: 100
+  keywords: ["案件"]
+  min_keyword_match: 1
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let m = reg.match_chat_trigger("帮我看下这个案件").expect("match");
+        assert_eq!(m.plugin_id, "high-pro");
+        assert_eq!(m.priority, 100);
+    }
+
+    #[test]
+    fn match_chat_trigger_disabled_plugin_skipped() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师插件
+type: industry
+version: "1.0.0"
+chat_trigger:
+  enabled: false
+  priority: 10
+  keywords: ["本息"]
+  min_keyword_match: 1
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        // enabled=false → 不参与匹配
+        assert!(reg.match_chat_trigger("本息计算").is_none());
+    }
+
+    #[test]
+    fn match_chat_trigger_exclude_pattern_vetos() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师插件
+type: industry
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  priority: 10
+  keywords: ["利息"]
+  min_keyword_match: 1
+  exclude_patterns:
+    - "利息税"
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+
+        // 一般 query 命中
+        assert!(reg.match_chat_trigger("利息怎么算").is_some());
+        // 含 exclude pattern → 否决
+        assert!(reg.match_chat_trigger("利息税应该咨询税务师").is_none());
     }
 }
