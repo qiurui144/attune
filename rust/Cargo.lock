@@ -243,6 +243,7 @@ version = "0.1.0"
 dependencies = [
  "attune-core",
  "clap",
+ "hex",
  "rpassword",
  "serde_json",
 ]

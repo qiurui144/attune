@@ -20,7 +20,7 @@ pub mod device_binding;
 pub mod accounts_client;
 pub mod ui_runtime;
 pub mod agent_runner;
-pub(crate) mod plugin_sig;
+pub mod plugin_sig;
 pub mod classifier;
 pub mod clusterer;
 pub mod crypto;

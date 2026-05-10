@@ -102,6 +102,28 @@ enum Commands {
         #[arg(long, default_value = "Unsigned")]
         trust: String,
     },
+    /// 生成 Ed25519 keypair (32-byte 私钥 hex + 32-byte 公钥 hex).
+    /// 私钥**必须离线安全保管**, 公钥可嵌入 OFFICIAL_PUBLIC_KEYS 或公开发布.
+    PluginKeygen {
+        /// 私钥写入路径 (默认 stdout)
+        #[arg(long)]
+        out_priv: Option<std::path::PathBuf>,
+    },
+    /// 用私钥签名 plugin_dir (写 plugin.sig).
+    /// 私钥来源: --priv-key=<hex> 或 env ATTUNE_PLUGIN_SIGN_KEY 或 --priv-file=<path>
+    PluginSign {
+        plugin_dir: std::path::PathBuf,
+        #[arg(long)]
+        priv_key: Option<String>,
+        #[arg(long)]
+        priv_file: Option<std::path::PathBuf>,
+    },
+    /// 用公钥校验 plugin_dir 的 plugin.sig (与 OFFICIAL_PUBLIC_KEYS 内嵌列表无关)
+    PluginVerifySig {
+        plugin_dir: std::path::PathBuf,
+        /// 公钥 hex (32-byte)
+        pubkey: String,
+    },
 }
 
 fn main() {
@@ -123,6 +145,15 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
         Commands::PluginVerify { plugin_dir, key, trust } => {
             return run_plugin_verify(plugin_dir, key.as_deref(), trust);
+        }
+        Commands::PluginKeygen { out_priv } => {
+            return run_plugin_keygen(out_priv.as_deref());
+        }
+        Commands::PluginSign { plugin_dir, priv_key, priv_file } => {
+            return run_plugin_sign(plugin_dir, priv_key.as_deref(), priv_file.as_deref());
+        }
+        Commands::PluginVerifySig { plugin_dir, pubkey } => {
+            return run_plugin_verify_sig(plugin_dir, pubkey);
         }
         _ => {}
     }
@@ -299,8 +330,9 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             println!("If unlock fails, ensure device.key matches: {}",
                 attune_core::platform::device_secret_path().display());
         }
-        // Plugin pack 子命令在 run() 头部已 handle, 这里 unreachable
-        Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. } => {
+        // Plugin 子命令在 run() 头部已 handle, 这里 unreachable
+        Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. }
+        | Commands::PluginKeygen { .. } | Commands::PluginSign { .. } | Commands::PluginVerifySig { .. } => {
             unreachable!("plugin commands handled before vault open")
         }
     }
@@ -412,4 +444,79 @@ fn run_plugin_verify(
     eprintln!("  case_kinds: {}", plugin.manifest.registers_case_kinds.len());
     eprintln!("  trust verified: {trust}");
     Ok(())
+}
+
+fn run_plugin_keygen(out_priv: Option<&std::path::Path>) -> attune_core::error::Result<()> {
+    let sk = attune_core::plugin_sig::generate_signing_key();
+    let pk_hex = attune_core::plugin_sig::derive_verifying_key_hex(&sk);
+    let sk_hex = hex::encode(sk);
+
+    if let Some(path) = out_priv {
+        std::fs::write(path, &sk_hex).map_err(attune_core::error::VaultError::Io)?;
+        // 限制权限 600 (Unix)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        eprintln!("✓ private key written to {} (chmod 600 on Unix)", path.display());
+    } else {
+        println!("PRIVATE_KEY={sk_hex}");
+        eprintln!("⚠️  Private key printed to stdout — save it offline immediately and clear shell history.");
+    }
+    println!("PUBLIC_KEY={pk_hex}");
+    eprintln!("Public key (embed in OFFICIAL_PUBLIC_KEYS or distribute): {pk_hex}");
+    Ok(())
+}
+
+fn read_signing_key(
+    priv_key_arg: Option<&str>,
+    priv_file_arg: Option<&std::path::Path>,
+) -> attune_core::error::Result<[u8; 32]> {
+    let hex_str = if let Some(k) = priv_key_arg {
+        k.to_string()
+    } else if let Some(p) = priv_file_arg {
+        std::fs::read_to_string(p)
+            .map_err(attune_core::error::VaultError::Io)?
+            .trim()
+            .to_string()
+    } else if let Ok(k) = std::env::var("ATTUNE_PLUGIN_SIGN_KEY") {
+        k
+    } else {
+        return Err(attune_core::error::VaultError::InvalidInput(
+            "signing key required (--priv-key / --priv-file / env ATTUNE_PLUGIN_SIGN_KEY)".into(),
+        ));
+    };
+    let bytes = hex::decode(hex_str.trim())
+        .map_err(|e| attune_core::error::VaultError::InvalidInput(format!("bad hex: {e}")))?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| attune_core::error::VaultError::InvalidInput("private key must be 32 bytes".into()))
+}
+
+fn run_plugin_sign(
+    plugin_dir: &std::path::Path,
+    priv_key: Option<&str>,
+    priv_file: Option<&std::path::Path>,
+) -> attune_core::error::Result<()> {
+    let sk = read_signing_key(priv_key, priv_file)?;
+    let sig = attune_core::plugin_sig::sign_plugin(plugin_dir, &sk)?;
+    eprintln!("✓ plugin.sig written to {}", plugin_dir.join("plugin.sig").display());
+    eprintln!("  signature (base64): {sig}");
+    Ok(())
+}
+
+fn run_plugin_verify_sig(
+    plugin_dir: &std::path::Path,
+    pubkey: &str,
+) -> attune_core::error::Result<()> {
+    let ok = attune_core::plugin_sig::verify_with_key(plugin_dir, pubkey)?;
+    if ok {
+        eprintln!("✓ signature VALID");
+        Ok(())
+    } else {
+        eprintln!("✗ signature INVALID");
+        std::process::exit(1);
+    }
 }
