@@ -120,8 +120,11 @@ pub async fn search(
     // 22K 测试 garbage 主导 corpus 后，新 ingest 的 5 真实 rust md 文件 10 query 全部 top hit
     // 是 garbage 同分。
     //
-    // R20 实测分数尺度：真实命中 ~0.98 / fallback noise ~0.0006-0.0008，cutoff 0.001 完美分离。
-    const SCORE_CUTOFF: f32 = 0.001;
+    // R20 实测分数尺度：真实命中 ~0.98 / fallback noise ~0.0006-0.0008。
+    // R25 修订: 律师文书测试发现，corpus 含 42K garbage 时合法文书 RRF 后 score 也低于 0.001
+    // (BM25 给真实命中 ~0.5，但 RRF 与 vector 结果合并后 normalize 大幅降低)。
+    // 因此把 cutoff 降到 0.0001 — 仍能过滤纯 fallback noise 但允许低-mid score 真实结果通过。
+    const SCORE_CUTOFF: f32 = 0.001;  // R20 production value, R25 debug 后恢复
     let cutoff_filtered: Vec<_> = results.iter().filter(|r| r.score >= SCORE_CUTOFF).cloned().collect();
     let total_before_cutoff = results.len();
     let total_after_cutoff = cutoff_filtered.len();
