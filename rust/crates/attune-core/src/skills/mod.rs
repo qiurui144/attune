@@ -6,3 +6,5 @@
 //! - 可调 LLM 但只调一次
 
 pub mod parse_chinese_date;
+pub mod extract_entities;
+pub mod classify_chunk_kind;
