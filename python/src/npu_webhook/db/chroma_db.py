@@ -27,7 +27,7 @@ class ChromaDB:
         self.collection.upsert(
             ids=[doc_id],
             embeddings=[embedding],
-            metadatas=[metadata or {}],
+            metadatas=[metadata if metadata else None],
             documents=[document],
         )
 
