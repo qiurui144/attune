@@ -1,7 +1,7 @@
 /** Items 视图 · Phase 6 · 真实列表 + 筛选 + Reader drawer 触发 */
 
 import type { JSX } from 'preact';
-import { useEffect } from 'preact/hooks';
+import { useEffect, useRef } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
 import { Button, EmptyState } from '../components';
 import { t } from '../i18n';
@@ -141,6 +141,44 @@ export function ItemsView(): JSX.Element {
 }
 
 function ItemsHeader(): JSX.Element {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploading = useSignal(false);
+
+  const onUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    uploading.value = true;
+    let successCount = 0;
+    let failCount = 0;
+    for (const file of Array.from(files)) {
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        const resp = await fetch('/api/v1/upload', {
+          method: 'POST',
+          body: form,
+          headers: {
+            Authorization: `Bearer ${sessionStorage.getItem('attune_token') ?? ''}`,
+          },
+        });
+        if (resp.ok) {
+          successCount++;
+        } else {
+          failCount++;
+        }
+      } catch {
+        failCount++;
+      }
+    }
+    uploading.value = false;
+    if (successCount > 0) {
+      toast('success', `已上传 ${successCount} 个文件`);
+      void loadItems(100, 0);
+    }
+    if (failCount > 0) {
+      toast('error', `${failCount} 个文件上传失败`);
+    }
+  };
+
   return (
     <header
       style={{
@@ -153,12 +191,21 @@ function ItemsHeader(): JSX.Element {
         📄 条目
       </h2>
       <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept=".pdf,.md,.txt,.docx,.png,.jpg,.jpeg"
+          style={{ display: 'none' }}
+          onChange={(e) => void onUpload((e.target as HTMLInputElement).files)}
+        />
         <Button
           variant="secondary"
           size="sm"
-          onClick={() => toast('info', '上传文件（Phase 6 续集）')}
+          disabled={uploading.value}
+          onClick={() => fileInputRef.current?.click()}
         >
-          上传文件
+          {uploading.value ? '上传中…' : '上传文件'}
         </Button>
         <Button
           variant="secondary"

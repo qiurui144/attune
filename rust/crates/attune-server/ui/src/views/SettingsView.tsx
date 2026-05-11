@@ -5,9 +5,27 @@ import { useEffect } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
 import { Button } from '../components';
 import { toast } from '../components/Toast';
-import { theme, vaultState, hardware, settings } from '../store/signals';
+import {
+  theme,
+  vaultState,
+  hardware,
+  settings,
+  memberState,
+  settingsLocks,
+  ocrProfiles,
+  folderLinks,
+  type OcrProfile,
+} from '../store/signals';
 import { setLocale, currentLocale, t } from '../i18n';
 import { loadSettings, patchSettings } from '../hooks/useSettings';
+import { loadMemberState, loadSettingsLocks, memberLogout } from '../hooks/useMember';
+import {
+  loadOcrProfiles,
+  createOcrProfile,
+  updateOcrProfile,
+  deleteOcrProfile,
+} from '../hooks/useOcrProfiles';
+import { loadFolderLinks } from '../hooks/useFolderLinks';
 import { api, clearToken } from '../store/api';
 
 /** LLM 厂商快捷预设 — 选中后自动填 endpoint + model，用户只需贴 API key。 */
@@ -66,12 +84,14 @@ const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
   },
 };
 
-type SettingsTab = 'general' | 'ai' | 'data' | 'privacy' | 'about';
+type SettingsTab = 'general' | 'ai' | 'data' | 'ocr' | 'member' | 'privacy' | 'about';
 
 const TABS: Array<{ key: SettingsTab; icon: string; label: string }> = [
   { key: 'general', icon: '⚙', label: '通用' },
   { key: 'ai', icon: '🤖', label: 'AI 大脑' },
+  { key: 'ocr', icon: '📷', label: 'OCR 场景' },
   { key: 'data', icon: '📂', label: '数据' },
+  { key: 'member', icon: '👤', label: '会员' },
   { key: 'privacy', icon: '🔐', label: '隐私' },
   { key: 'about', icon: 'ℹ', label: '关于' },
 ];
@@ -154,7 +174,9 @@ export function SettingsView(): JSX.Element {
       >
         {activeTab.value === 'general' && <GeneralPanel />}
         {activeTab.value === 'ai' && <AIPanel />}
+        {activeTab.value === 'ocr' && <OcrPanel />}
         {activeTab.value === 'data' && <DataPanel />}
+        {activeTab.value === 'member' && <MemberPanel />}
         {activeTab.value === 'privacy' && <PrivacyPanel />}
         {activeTab.value === 'about' && <AboutPanel />}
       </div>
@@ -164,10 +186,12 @@ export function SettingsView(): JSX.Element {
 
 function Section({
   title,
+  desc,
   children,
 }: {
   title: string;
-  children: JSX.Element | JSX.Element[];
+  desc?: string;
+  children?: JSX.Element | JSX.Element[] | (JSX.Element | false | null)[] | false | null;
 }): JSX.Element {
   return (
     <section style={{ marginBottom: 'var(--space-6)' }}>
@@ -176,11 +200,16 @@ function Section({
           fontSize: 'var(--text-lg)',
           fontWeight: 600,
           margin: 0,
-          marginBottom: 'var(--space-3)',
+          marginBottom: desc ? 'var(--space-1)' : 'var(--space-3)',
         }}
       >
         {title}
       </h3>
+      {desc && (
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 var(--space-3) 0' }}>
+          {desc}
+        </p>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
         {children}
       </div>
@@ -380,6 +409,7 @@ function DataPanel(): JSX.Element {
           完整管理见左栏「远程目录」视图。
         </p>
       </Section>
+      <FolderLinksSection />
       <Section title="导入 / 导出">
         <Button
           variant="secondary"
@@ -667,5 +697,345 @@ function Toggle({
         }}
       />
     </button>
+  );
+}
+
+// ============ OCR Panel ============
+
+function OcrPanel(): JSX.Element {
+  const editing = useSignal<OcrProfile | null>(null);
+  const saving = useSignal(false);
+
+  useEffect(() => {
+    void loadOcrProfiles();
+    void loadSettingsLocks();
+    void loadSettings();
+  }, []);
+
+  const locks = settingsLocks.value;
+  const canWrite = locks ? locks.ocr_profiles === 'editable' : true;
+  const activeProfile =
+    ((settings.value?.ocr as Record<string, unknown> | undefined)?.active_profile as string) ??
+    'contract';
+
+  const onSetActive = async (id: string) => {
+    const ok = await patchSettings({ ocr: { active_profile: id } });
+    if (ok) toast('success', `默认 OCR 场景已切换为 ${id}`);
+    else toast('error', '切换失败 (会员锁?)');
+  };
+
+  const onSave = async () => {
+    const p = editing.value;
+    if (!p) return;
+    saving.value = true;
+    const isNew = !ocrProfiles.value.some((x) => x.id === p.id);
+    const ok = isNew ? !!(await createOcrProfile(p)) : await updateOcrProfile(p);
+    saving.value = false;
+    if (ok) {
+      editing.value = null;
+      toast('success', isNew ? '已创建' : '已更新');
+    } else {
+      toast('error', '保存失败');
+    }
+  };
+
+  const onDelete = async (id: string) => {
+    if (!confirm(`确认删除 OCR profile "${id}"？`)) return;
+    const ok = await deleteOcrProfile(id);
+    if (ok) toast('success', '已删除');
+    else toast('error', '删除失败 (builtin 不可删?)');
+  };
+
+  return (
+    <div>
+      <Section
+        title="OCR 场景预设"
+        desc="按文档类型选不同 DPI / 标签 — 票据(200) / 合同(300) / 古籍(600). builtin 预设不可改不可删."
+      >
+        {!canWrite && (
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-warning)' }}>
+            ⚠ 当前会员等级已锁定 OCR profile 修改 (GET /api/v1/member/locks)
+          </p>
+        )}
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
+          <thead>
+            <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--color-border)' }}>
+              <th style={{ padding: 8 }}>ID</th>
+              <th style={{ padding: 8 }}>名称</th>
+              <th style={{ padding: 8 }}>DPI</th>
+              <th style={{ padding: 8 }}>类型</th>
+              <th style={{ padding: 8 }}>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ocrProfiles.value.map((p) => (
+              <tr key={p.id} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
+                <td style={{ padding: 8, fontFamily: 'monospace' }}>
+                  {p.id}
+                  {activeProfile === p.id && (
+                    <span style={{ color: 'var(--color-accent)', marginLeft: 6 }}>● 默认</span>
+                  )}
+                </td>
+                <td style={{ padding: 8 }}>{p.name}</td>
+                <td style={{ padding: 8 }}>{p.dpi}</td>
+                <td style={{ padding: 8 }}>{p.builtin ? '🔒 builtin' : '✏️ custom'}</td>
+                <td style={{ padding: 8 }}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={!canWrite || activeProfile === p.id}
+                    onClick={() => void onSetActive(p.id)}
+                  >
+                    设默认
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={p.builtin || !canWrite}
+                    onClick={() => (editing.value = { ...p })}
+                  >
+                    编辑
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={p.builtin || !canWrite}
+                    onClick={() => void onDelete(p.id)}
+                  >
+                    删除
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ marginTop: 12 }}>
+          <Button
+            variant="primary"
+            disabled={!canWrite}
+            onClick={() =>
+              (editing.value = {
+                id: '',
+                name: '',
+                description: '',
+                languages: 'chi_sim+eng',
+                dpi: 300,
+                tags: [],
+                builtin: false,
+              })
+            }
+          >
+            + 新建场景
+          </Button>
+        </div>
+      </Section>
+
+      {editing.value && (
+        <Section title={editing.value.id ? `编辑: ${editing.value.id}` : '新建 OCR 场景'}>
+          <div style={{ display: 'grid', gap: 8, maxWidth: 520 }}>
+            <label>
+              ID (slug, e.g. medical-x) —{' '}
+              <input
+                disabled={!!editing.value.builtin}
+                value={editing.value.id}
+                onInput={(e) =>
+                  (editing.value = { ...editing.value!, id: (e.target as HTMLInputElement).value })
+                }
+              />
+            </label>
+            <label>
+              名称 —{' '}
+              <input
+                value={editing.value.name}
+                onInput={(e) =>
+                  (editing.value = { ...editing.value!, name: (e.target as HTMLInputElement).value })
+                }
+              />
+            </label>
+            <label>
+              说明 —{' '}
+              <input
+                value={editing.value.description}
+                onInput={(e) =>
+                  (editing.value = {
+                    ...editing.value!,
+                    description: (e.target as HTMLInputElement).value,
+                  })
+                }
+              />
+            </label>
+            <label>
+              语言 (chi_sim+eng / chi_sim / eng) —{' '}
+              <input
+                value={editing.value.languages}
+                onInput={(e) =>
+                  (editing.value = {
+                    ...editing.value!,
+                    languages: (e.target as HTMLInputElement).value,
+                  })
+                }
+              />
+            </label>
+            <label>
+              DPI [72-1200] —{' '}
+              <input
+                type="number"
+                value={editing.value.dpi}
+                min={72}
+                max={1200}
+                onInput={(e) =>
+                  (editing.value = {
+                    ...editing.value!,
+                    dpi: parseInt((e.target as HTMLInputElement).value, 10) || 300,
+                  })
+                }
+              />
+            </label>
+            <label>
+              标签 (逗号分隔) —{' '}
+              <input
+                value={editing.value.tags.join(',')}
+                onInput={(e) =>
+                  (editing.value = {
+                    ...editing.value!,
+                    tags: (e.target as HTMLInputElement).value
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  })
+                }
+              />
+            </label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button variant="primary" disabled={saving.value} onClick={() => void onSave()}>
+                {saving.value ? '保存中...' : '保存'}
+              </Button>
+              <Button variant="ghost" onClick={() => (editing.value = null)}>
+                取消
+              </Button>
+            </div>
+          </div>
+        </Section>
+      )}
+    </div>
+  );
+}
+
+// ============ Member Panel ============
+
+function MemberPanel(): JSX.Element {
+  useEffect(() => {
+    void loadMemberState();
+    void loadSettingsLocks();
+  }, []);
+
+  const m = memberState.value;
+  const l = settingsLocks.value;
+
+  return (
+    <div>
+      <Section title="会员状态" desc="对接 cloud accounts; CLI: attune login <email>">
+        {!m && <p style={{ color: 'var(--color-text-secondary)' }}>加载中...</p>}
+        {m && (
+          <>
+            <p>
+              状态:{' '}
+              <strong style={{ color: m.is_paid ? 'var(--color-accent)' : 'var(--color-text)' }}>
+                {m.kind === 'paid' ? '付费会员' : m.kind === 'free' ? '免费会员' : '未登录'}
+              </strong>
+            </p>
+            {m.account_id && <p>账号: <code>{m.account_id}</code></p>}
+            {m.license_id && <p>License: <code>{m.license_id}</code></p>}
+            {m.is_logged_in && (
+              <Button
+                variant="ghost"
+                onClick={async () => {
+                  if (await memberLogout()) toast('success', '已登出');
+                  else toast('error', '登出失败');
+                }}
+              >
+                登出
+              </Button>
+            )}
+          </>
+        )}
+      </Section>
+
+      <Section title="设置锁定矩阵" desc="GET /api/v1/member/locks — 决定 UI 哪些字段可改">
+        {!l && <p style={{ color: 'var(--color-text-secondary)' }}>加载中...</p>}
+        {l && (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
+            <tbody>
+              {(
+                [
+                  ['vault_password', 'Vault 主密码'],
+                  ['local_folder_links', '本地知识库目录'],
+                  ['cloud_llm', '云端大模型 API'],
+                  ['plugin_install', '插件装载'],
+                  ['plugin_uninstall', '插件卸载'],
+                  ['ocr_profiles', 'OCR 场景预设'],
+                ] as const
+              ).map(([k, label]) => (
+                <tr key={k} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
+                  <td style={{ padding: 6 }}>{label}</td>
+                  <td style={{ padding: 6, fontFamily: 'monospace' }}>{k}</td>
+                  <td style={{ padding: 6 }}>
+                    {l[k] === 'locked' ? (
+                      <span style={{ color: 'var(--color-warning)' }}>🔒 locked</span>
+                    ) : (
+                      <span style={{ color: 'var(--color-accent)' }}>✏️ editable</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Section>
+    </div>
+  );
+}
+
+// ============ Folder Links Panel (注入 DataPanel 用, 这里也单独 export) ============
+
+export function FolderLinksSection(): JSX.Element {
+  useEffect(() => {
+    void loadFolderLinks();
+  }, []);
+  const links = folderLinks.value;
+  return (
+    <Section
+      title="本地知识库目录"
+      desc="GET /api/v1/folder-links (只读). 写入用 CLI: attune link-folder <path>"
+    >
+      {links.length === 0 && (
+        <p style={{ color: 'var(--color-text-secondary)' }}>
+          尚未关联任何本地目录. 在终端运行 <code>attune link-folder /path/to/docs</code> 添加.
+        </p>
+      )}
+      {links.length > 0 && (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
+          <thead>
+            <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--color-border)' }}>
+              <th style={{ padding: 8 }}>路径</th>
+              <th style={{ padding: 8 }}>Project</th>
+              <th style={{ padding: 8 }}>添加时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {links.map((fl, idx) => (
+              <tr
+                key={fl.id ?? `${fl.path}-${idx}`}
+                style={{ borderBottom: '1px solid var(--color-border-subtle)' }}
+              >
+                <td style={{ padding: 8, fontFamily: 'monospace' }}>{fl.path}</td>
+                <td style={{ padding: 8 }}>{fl.project_id ?? 'default'}</td>
+                <td style={{ padding: 8 }}>{fl.added_at ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Section>
   );
 }

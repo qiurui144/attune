@@ -71,6 +71,29 @@ export function App(): JSX.Element {
     startConnectionMonitor();
     startProgressWS();
     void bootstrap();
+
+    // Tauri 桌面模式：监听 OS 文件拖拽事件，调用 Tauri command 上传文件
+    type TauriGlobal = {
+      event?: { listen?: (event: string, handler: (payload: { payload: string[] }) => void) => Promise<() => void> };
+    };
+    const tauri = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
+    if (!tauri?.event?.listen) return;
+
+    let unlisten: (() => void) | null = null;
+    tauri.event.listen('attune-file-drop', async (event) => {
+      const paths: string[] = event.payload ?? [];
+      if (paths.length === 0) return;
+      try {
+        const invoke = (window as unknown as { __TAURI__?: { core?: { invoke?: <T>(cmd: string, args: unknown) => Promise<T> } } }).__TAURI__?.core?.invoke;
+        if (invoke) {
+          await invoke<string[]>('upload_dropped_paths', { paths });
+        }
+      } catch (e) {
+        console.warn('[attune-file-drop] invoke failed:', e);
+      }
+    }).then((fn) => { unlisten = fn; });
+
+    return () => { if (unlisten) unlisten(); };
   }, []);
 
   async function bootstrap() {

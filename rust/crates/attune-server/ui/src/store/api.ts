@@ -180,6 +180,13 @@ export const api = {
       retry: retry ?? RETRY_POLICIES.nonIdempotentWrite,
     });
   },
+  put<T>(path: string, body: unknown, retry?: RetryPolicy): Promise<T> {
+    return apiCall<T>(path, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+      retry: retry ?? RETRY_POLICIES.nonIdempotentWrite,
+    });
+  },
   delete<T>(path: string, retry?: RetryPolicy): Promise<T> {
     return apiCall<T>(path, {
       method: 'DELETE',
