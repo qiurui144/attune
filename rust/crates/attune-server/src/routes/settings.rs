@@ -116,8 +116,6 @@ pub async fn update_settings(
     // 字段映射: settings JSON key → SettingsLocks field name
     let member_state = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let locks = attune_core::member_session::SettingsLocks::for_state(&member_state);
-    // 简化: 当前不区分企业 admin (需要专门角色字段, 留待 enterprise UI)
-    let is_enterprise_admin = false;
     if let Some(body_obj) = body.as_object() {
         let lock_map: &[(&str, &str)] = &[
             ("llm", "llm_endpoint"),            // 整个 llm 对象更新触发 llm_endpoint lock
@@ -125,9 +123,7 @@ pub async fn update_settings(
             ("embedding", "embedding_model"),
         ];
         for (settings_key, lock_field) in lock_map {
-            if body_obj.contains_key(*settings_key)
-                && !locks.can_edit(lock_field, is_enterprise_admin)
-            {
+            if body_obj.contains_key(*settings_key) && !locks.can_edit(lock_field) {
                 return Err((
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({

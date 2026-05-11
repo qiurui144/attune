@@ -39,17 +39,51 @@ pub async fn get_form(
             )
         })?;
 
-    // 简化: 假设 plugin 提供的 yaml 形式 form schema 在 ui_components.html 路径上
-    // 实际生产环境: form schema 应从 plugin dir 读取并解析
-    // 这里先返 minimal stub schema 演示 endpoint 链路
-    let schema = FormSchema {
-        id: component.id.clone(),
-        title: format!("Form: {}", component.id),
-        description: component.description.clone(),
-        submit_target: component.target.clone(),
-        fields: vec![],
+    // 真实读 plugin 目录下的 form yaml schema (per protocol §2 ui_components.html 字段).
+    // component.html 可以是:
+    //   - "forms/<form_id>.yaml" — 标准 FormSchema yaml (优先)
+    //   - "ui/civil_loan_stage3.html" — 静态 HTML 文件
+    let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
+        .map_err(|e| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("plugins_dir: {e}")})),
+        ))?;
+    let component_path = plugins_root.join(&plugin_id).join(&component.html);
+
+    let html = if component_path.exists()
+        && component_path.extension().and_then(|s| s.to_str()) == Some("yaml")
+    {
+        // 真读 yaml 渲染
+        let yaml_str = std::fs::read_to_string(&component_path).map_err(|e| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("read form yaml: {e}")})),
+        ))?;
+        let schema: FormSchema = serde_yaml::from_str(&yaml_str).map_err(|e| (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": format!("parse form yaml: {e}")})),
+        ))?;
+        render_html(&schema)
+    } else if component_path.exists() {
+        // HTML 文件直接返
+        std::fs::read_to_string(&component_path).map_err(|e| (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("read html: {e}")})),
+        ))?
+    } else {
+        // Fallback: 返 stub schema (开发期 plugin 还没提供 form 文件)
+        let schema = FormSchema {
+            id: component.id.clone(),
+            title: format!("Form: {}", component.id),
+            description: format!(
+                "{} (stub — plugin dir 未提供 {})",
+                component.description,
+                component.html
+            ),
+            submit_target: component.target.clone(),
+            fields: vec![],
+        };
+        render_html(&schema)
     };
-    let html = render_html(&schema);
 
     Ok((
         StatusCode::OK,

@@ -74,6 +74,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/member/locks", get(routes::member::get_locks))
         .route("/api/v1/member/login-token", post(routes::member::login_token))
         .route("/api/v1/member/logout", post(routes::member::logout))
+        // Folder links — 只读 (写入由 attune-cli link-folder)
+        .route("/api/v1/folder-links", get(routes::folder_links::list_folder_links))
         // 批注（annotations）CRUD — 所有调用都是用户显式操作，不在建库流水线里自动触发
         .route("/api/v1/annotations",
             get(routes::annotations::list_annotations)

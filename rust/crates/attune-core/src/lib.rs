@@ -21,6 +21,7 @@ pub mod accounts_client;
 pub mod ui_runtime;
 pub mod agent_runner;
 pub mod license;
+pub mod license_cache;
 pub mod member_session;
 pub mod cloud_client;
 pub mod plugin_sync;

@@ -28,11 +28,10 @@ pub async fn get_locks(State(state): State<SharedState>) -> Json<SettingsLocks> 
 #[derive(serde::Deserialize)]
 pub struct LoginTokenReq {
     pub account_id: String,
+    /// "free" | "paid"
     pub tier: String,
     #[serde(default)]
     pub license_id: Option<String>,
-    #[serde(default)]
-    pub team_id: Option<String>,
     #[serde(default)]
     pub llm_quota_remaining: u64,
 }
@@ -42,8 +41,8 @@ pub async fn login_token(
     Json(req): Json<LoginTokenReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let new_state = match req.tier.as_str() {
-        "free" => MemberState::Free { account_id: req.account_id.clone() },
-        "paid" | "trial" => {
+        "free" => MemberState::Free { account_id: req.account_id },
+        "paid" => {
             let lic = req.license_id.unwrap_or_default();
             if lic.is_empty() {
                 return Err((
@@ -51,26 +50,10 @@ pub async fn login_token(
                     Json(serde_json::json!({"error": "paid tier requires license_id"})),
                 ));
             }
-            MemberState::Member {
+            MemberState::Paid {
                 account_id: req.account_id,
-                tier: req.tier,
                 license_id: lic,
                 llm_quota_remaining: req.llm_quota_remaining,
-            }
-        }
-        "enterprise" => {
-            let lic = req.license_id.unwrap_or_default();
-            let team = req.team_id.unwrap_or_default();
-            if lic.is_empty() || team.is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "enterprise tier requires license_id + team_id"})),
-                ));
-            }
-            MemberState::Enterprise {
-                account_id: req.account_id,
-                team_id: team,
-                license_id: lic,
             }
         }
         other => {
