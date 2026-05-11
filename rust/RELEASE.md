@@ -2,6 +2,26 @@
 
 ## v0.6.x patch 流（2026-05-01）— 部署 + 4 必要底座
 
+### 最新变更（b5b837f，2026-05-xx）— UI 构建修复 + Tauri 拖拽上传
+
+**UI TypeScript 修复**：
+- `store/api.ts`：补充 `put<T>(path, body, retry?)` 方法，支持 HTTP PUT（useOcrProfiles.updateOcrProfile 需要）
+- `views/SettingsView.tsx`：修复全部 `toast.success/error()` → `toast('success'/'error', msg)` 调用（8 处）；`Section` 组件增加 `desc?: string` prop，relaxed children 类型（支持 `false | null`）
+- `App.tsx`：修复 useEffect 代码路径返回值问题（early return 模式）
+
+**Tauri 桌面拖拽上传**：
+- `apps/attune-desktop/src/main.rs`：新增 `upload_dropped_paths(paths: Vec<String>)` Tauri command，读取本地文件路径 → multipart POST `http://127.0.0.1:18900/api/v1/upload`
+- `apps/attune-desktop/Cargo.toml`：添加 `reqwest 0.12`（rustls-tls + multipart + json features）
+- `App.tsx`：启动时检测 `window.__TAURI__?.event?.listen`，若在桌面模式则注册 `attune-file-drop` 监听器 → 调用 `upload_dropped_paths` command
+- FileDrop 事件路径：系统文件拖入窗口 → Tauri 发出 FileDrop 事件 → main.rs emit `attune-file-drop` 至 WebView → App.tsx 调用 `upload_dropped_paths` → 文件上传至 `/api/v1/upload`
+
+**Items 页面真实上传**：
+- `views/ItemsView.tsx`：ItemsHeader 上传按钮接入隐藏 `<input type=file multiple>`，multipart FormData + Bearer token POST 至 `/api/v1/upload`（PDF/MD/TXT/DOCX/PNG/JPG）
+
+**UI dist 重新构建**：171.80 kB（gzip: 48.62 kB），71 个模块，TypeScript 严格检查通过
+
+---
+
 **4 必要底座（CLAUDE.md "硬件感知的默认底座" 实装）**：
 
 | 底座 | 默认引擎 | 体积 | 来源 |

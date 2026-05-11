@@ -84,13 +84,23 @@ rust/
 │   │   └── src/
 │   │       └── main.rs               # clap: setup/unlock/lock/insert/get/list/status
 │   │
-│   └── attune-tauri/                  # bin (脚手架，待激活)
+│   └── attune-tauri/                  # bin (脚手架模板，已由 apps/attune-desktop 取代)
 │       ├── README.md
 │       ├── Cargo.toml.template
-│       └── src/main.rs.template
+│       └── src/main.rs.template      # 模板仅供参考
 │
 └── tests/
     └── integration_test.rs           # 端到端集成测试
+
+# 桌面应用（独立 Cargo workspace）
+apps/attune-desktop/
+├── Cargo.toml                        # 独立 workspace，依赖 reqwest 0.12 (rustls-tls + multipart + json)
+├── tauri.conf.json
+├── src/
+│   ├── main.rs                       # Tauri 入口：spawn 内嵌 server + 系统托盘 + upload_dropped_paths command
+│   ├── embedded_server.rs            # 子进程启动 attune-server-headless --port 18900
+│   └── tray.rs                       # 系统托盘菜单（Show/Hide/Quit）
+└── resources/                        # 打包资源（server 二进制等）
 ```
 
 ## 分层架构

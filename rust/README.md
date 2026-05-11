@@ -86,7 +86,7 @@ At startup, Attune detects CPU / RAM / GPU / NPU and recommends a local summary 
 | <8 GB | `llama3.2:1b` |
 
 ### Scanned PDF OCR fallback (Batch 1)
-When `pdf_extract` returns empty or too-little text, Attune automatically runs OCR via `tesseract` + `pdftoppm` (Chinese + English). One-shot install: `scripts/install-ocr-deps.sh` (apt/dnf/pacman/brew).
+When `pdf_extract` returns empty or too-little text, Attune automatically runs OCR via **PP-OCRv5 mobile** (DBNet+CRNN+CLS, ~21 MB ONNX, Chinese accuracy 94–96%) + `pdftoppm`. Tesseract removed since v0.6.x (replaced by PP-OCR as single engine). One-shot install: `scripts/install-ocr-deps.sh` (apt/dnf/pacman/brew).
 
 ### Front-end UX (Batch 1–2, rewritten in Preact)
 - Two-column chat-first layout (ChatGPT-like), sidebar collapsible to 64 px icon bar
@@ -350,8 +350,8 @@ rust/
     │       │   ├── layout/       # Sidebar + MainShell + DrawerHost
     │       │   ├── views/        # Chat / Items / Remote / Knowledge / Settings
     │       │   ├── components/   # Button / Input / Modal / Drawer / ChatMessage / Reader / CommandPalette ...
-    │       │   ├── hooks/        # useChat / useItems / useAnnotations / useRemote / useSettings / useShortcut
-    │       │   ├── store/        # signals / api / connection / ws
+    │       │   ├── hooks/        # useChat / useItems / useAnnotations / useRemote / useSettings / useOcrProfiles / useMember / useFolderLinks / useShortcut
+    │       │   ├── store/        # signals / api (get/post/patch/put/delete) / connection / ws
     │       │   └── i18n/         # core + zh + en
     │       └── dist/index.html   # single-file bundle (committed, referenced by include_str!)
     └── attune-cli/               # bin: command-line tool

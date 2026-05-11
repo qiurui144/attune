@@ -67,6 +67,18 @@
 | ID | 模块 | 功能 | 测试 |
 |----|------|------|------|
 | **UI-FORM** | `ui_runtime.rs` | yaml FormSchema → HTML (text/number/date/select/textarea/checkbox + XSS escape) | 4 unit |
+| **UI-API** | `store/api.ts` | Preact 前端 HTTP client (get/post/patch/delete/**put**) + RetryPolicy + Bearer token 自动附加 | - |
+| **UI-TAURI-BRIDGE** | `App.tsx` | 检测 `window.__TAURI__`，监听 `attune-file-drop` 事件 → 调用 Tauri `upload_dropped_paths` command，将拖入文件路径列表发到服务器 | - |
+| **UI-ITEMS-UPLOAD** | `views/ItemsView.tsx` | Items 页面文件上传按钮：隐藏 `<input type=file multiple>` + Bearer token FormData POST `/api/v1/upload`，支持 PDF/MD/TXT/DOCX/PNG/JPG | - |
+
+## 5a. Tauri 桌面 app (apps/attune-desktop)
+
+| ID | 模块 | 功能 | 测试 |
+|----|------|------|------|
+| **TAURI-EMBED** | `main.rs::spawn_embedded_server()` | 子进程启动 `attune-server-headless --port 18900`，Tauri 主窗口打开 `http://127.0.0.1:18900` | - |
+| **TAURI-TRAY** | `main.rs` | 系统托盘图标 + 菜单（Show / Hide / Quit），单实例检测 | - |
+| **TAURI-DROP** | `main.rs` | FileDrop 事件监听 → emit `attune-file-drop` 自定义事件到前端 WebView | - |
+| **TAURI-UPLOAD** | `main.rs::upload_dropped_paths` | Tauri command：读取本地文件路径 → multipart POST `http://127.0.0.1:18900/api/v1/upload`（reqwest 0.12 rustls-tls + multipart + json） | - |
 
 ## 6. attune-server 路由
 
