@@ -159,6 +159,18 @@ enum Commands {
         #[arg(long, default_value = "https://accounts.attune.ai")]
         cloud_url: String,
     },
+    /// 打包 + 上传 plugin 到 pluginhub (开发者侧分发流程)
+    /// 流程: 1) tar plugin dir → .attunepkg  2) POST 到 pluginhub /admin/plugins
+    PluginPublish {
+        /// plugin 源目录 (含 plugin.yaml / bin/ / plugin.sig)
+        plugin_dir: std::path::PathBuf,
+        /// pluginhub base URL (lawcontrol/pluginhub 部署)
+        #[arg(long, default_value = "https://hub.attune.ai")]
+        hub_url: String,
+        /// admin token (env PLUGINHUB_ADMIN_TOKEN)
+        #[arg(long)]
+        admin_token: Option<String>,
+    },
     /// 给当前 vault 关联一个本地知识库目录 (会员/免费用户都可用 — 用户隐私)
     LinkFolder {
         /// 本地目录绝对路径
@@ -215,6 +227,9 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
         Commands::LinkFolder { folder, project } => {
             return run_link_folder(folder, project);
+        }
+        Commands::PluginPublish { plugin_dir, hub_url, admin_token } => {
+            return run_plugin_publish(plugin_dir, hub_url, admin_token.as_deref());
         }
         _ => {}
     }
@@ -395,7 +410,8 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. }
         | Commands::PluginKeygen { .. } | Commands::PluginSign { .. } | Commands::PluginVerifySig { .. }
         | Commands::PluginInstall { .. } | Commands::PluginUninstall { .. } | Commands::PluginList
-        | Commands::Login { .. } | Commands::SyncPlugins { .. } | Commands::LinkFolder { .. } => {
+        | Commands::Login { .. } | Commands::SyncPlugins { .. } | Commands::LinkFolder { .. }
+        | Commands::PluginPublish { .. } => {
             unreachable!("plugin/cloud commands handled before vault open")
         }
     }
@@ -717,11 +733,26 @@ fn run_login(email: &str, cloud_url: &str) -> attune_core::error::Result<()> {
                 }
             }
             eprintln!();
-            eprintln!("运行 `attune sync-plugins --cloud-url {cloud_url}` 自动装 entitled pro 插件");
+            eprintln!("运行 `attune sync-plugins` 自动装 entitled pro 插件");
+
+            // 写 license cache (取第一个 active license, 多 license 场景调用方可手动管理)
+            if let Some(first) = licenses.iter().find(|l| !l.license_code.is_empty()) {
+                match attune_core::license::SignedLicense::from_code(&first.license_code) {
+                    Ok(signed) => {
+                        let cache = attune_core::license_cache::LicenseCache::from_signed(
+                            signed,
+                            cloud_url.to_string(),
+                        )?;
+                        let path = attune_core::license_cache::LicenseCache::default_path();
+                        cache.save(&path)?;
+                        eprintln!("  ✓ license cache written to {}", path.display());
+                    }
+                    Err(e) => eprintln!("⚠️  license code decode failed: {e}"),
+                }
+            }
         }
         Err(e) => eprintln!("⚠️  list licenses failed: {e}"),
     }
-    // 实际生产: 写 ~/.config/attune/cloud.json 缓存 session token
     Ok(())
 }
 
@@ -797,4 +828,76 @@ struct FolderLink {
     project: String,
     folder: String,
     linked_at: String,
+}
+
+fn run_plugin_publish(
+    plugin_dir: &std::path::Path,
+    hub_url: &str,
+    admin_token_arg: Option<&str>,
+) -> attune_core::error::Result<()> {
+    let admin_token = admin_token_arg
+        .map(String::from)
+        .or_else(|| std::env::var("PLUGINHUB_ADMIN_TOKEN").ok())
+        .ok_or_else(|| attune_core::error::VaultError::InvalidInput(
+            "admin token required (--admin-token or env PLUGINHUB_ADMIN_TOKEN)".into(),
+        ))?;
+
+    // 1. 解析 manifest 拿 id + version
+    let plugin = attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(
+        plugin_dir, None, Some("Trusted"),
+    )?;
+    let id = plugin.manifest.id.clone();
+    let version = plugin.manifest.version.clone();
+    eprintln!("✓ plugin: id={id}, version={version}");
+
+    // 2. tar plugin dir → .attunepkg (临时文件)
+    let tmp = tempfile::tempdir().map_err(attune_core::error::VaultError::Io)?;
+    let pkg_path = tmp.path().join(format!("{id}-{version}.attunepkg"));
+    let status = std::process::Command::new("tar")
+        .args(["czf"])
+        .arg(&pkg_path)
+        .args(["-C", plugin_dir.parent().unwrap_or(std::path::Path::new(".")).to_string_lossy().as_ref()])
+        .arg(plugin_dir.file_name().unwrap_or_default())
+        .status()
+        .map_err(attune_core::error::VaultError::Io)?;
+    if !status.success() {
+        return Err(attune_core::error::VaultError::Io(std::io::Error::other(format!(
+            "tar exit {:?}", status.code()
+        ))));
+    }
+    let size = std::fs::metadata(&pkg_path).map(|m| m.len()).unwrap_or(0);
+    eprintln!("✓ packaged: {} ({} bytes)", pkg_path.display(), size);
+
+    // 3. POST 到 pluginhub /api/v1/admin/plugins (multipart)
+    // (pluginhub API 由 lawcontrol/pluginhub FastAPI 提供, 此处仅 reference 调用)
+    let client = reqwest::blocking::Client::new();
+    let url = format!("{}/api/v1/admin/plugins", hub_url.trim_end_matches('/'));
+    let bytes = std::fs::read(&pkg_path).map_err(attune_core::error::VaultError::Io)?;
+    let form = reqwest::blocking::multipart::Form::new()
+        .text("plugin_id", id.clone())
+        .text("version", version.clone())
+        .part(
+            "file",
+            reqwest::blocking::multipart::Part::bytes(bytes)
+                .file_name(format!("{id}-{version}.attunepkg"))
+                .mime_str("application/octet-stream")
+                .unwrap(),
+        );
+    eprintln!("→ POST {url}");
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {admin_token}"))
+        .multipart(form)
+        .send()
+        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!("upload: {e}"))))?;
+    let status = resp.status();
+    let body = resp.text().unwrap_or_default();
+    if !status.is_success() {
+        return Err(attune_core::error::VaultError::Io(std::io::Error::other(format!(
+            "publish failed: {status} body={body}"
+        ))));
+    }
+    eprintln!("✓ published: status={status}");
+    eprintln!("  response: {body}");
+    Ok(())
 }

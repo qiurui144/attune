@@ -706,13 +706,22 @@ pub async fn chat(
 
         if let Some(m) = &plugin_match {
             // Plugin 命中 — 提示用户触发 agent (避免纯 RAG 数字 hallucination)
+            // 提供 form URL 让前端直接跳转 (per attune-plugin-protocol §3 Stage 3 工作流)
+            let form_hint = state
+                .plugin_registry
+                .get_plugin(&m.plugin_id)
+                .and_then(|p| p.manifest.ui_components.first())
+                .map(|c| format!(
+                    "\n\n📋 表单地址: `/api/v1/forms/{}/{}` (前端 iframe 加载, 律师补全 → POST /submit 触发 agent)",
+                    m.plugin_id, c.id
+                ))
+                .unwrap_or_default();
             format!(
                 "🔌 检测到此问题适合 **{}** 处理 ({}).\n\n\
                  attune Chat 走 RAG + LLM, 不做精确数值计算 (避免数字 hallucination).\n\n\
-                 建议: 通过 attune UI / agent dispatch 触发, 输出含 audit_trail + 业务红线 \
-                 enforce, 比 chat 直接回答更可靠.\n\n\
+                 建议: 通过 agent dispatch 触发, 输出含 audit_trail + 业务红线 enforce.{}\n\n\
                  命中关键词数: {}, priority: {}",
-                m.plugin_id, m.description, m.keyword_hits, m.priority
+                m.plugin_id, m.description, form_hint, m.keyword_hits, m.priority
             )
         } else if !citations.is_empty() && max_rel < 0.001 && is_compute_query {
             // 兜底: OSS 裸装无 plugin + 结构化计算 + 弱引用 → reject (原 OSS-S25 行为)

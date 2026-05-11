@@ -78,8 +78,16 @@ pub struct AppState {
 impl AppState {
     pub fn new(vault: Vault, require_auth: bool) -> Self {
         let (recommendation_tx, _rx) = tokio::sync::broadcast::channel::<serde_json::Value>(64);
+        // 启动时尝试读 license cache, 用 license_code 作为 paid plugin 解密 key.
+        // 没 cache 或读失败 → 等价于明文 scan (paid plugin 装载会失败, 但 free plugin OK).
+        let license_cache_path = attune_core::license_cache::LicenseCache::default_path();
+        let cached_license_key: Option<Vec<u8>> =
+            attune_core::license_cache::LicenseCache::load(&license_cache_path)
+                .ok()
+                .flatten()
+                .map(|c| c.as_decrypt_key().to_vec());
         let plugin_registry = match attune_core::plugin_registry::PluginRegistry::default_plugins_dir() {
-            Ok(dir) => match attune_core::plugin_registry::PluginRegistry::scan(&dir) {
+            Ok(dir) => match attune_core::plugin_registry::PluginRegistry::scan_with_key(&dir, cached_license_key.as_deref()) {
                 Ok((reg, errs)) => {
                     tracing::info!(
                         "loaded {} plugins, {} workflows from {}",
