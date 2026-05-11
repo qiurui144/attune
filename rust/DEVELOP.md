@@ -12,7 +12,7 @@ cd attune
 cargo build --workspace
 
 # 运行测试
-cargo test --workspace    # 120 tests 全部通过
+cargo test --workspace    # 237+ tests 全部通过 (attune-core 210 + attune-server 27)
 
 # 格式化 + lint
 cargo fmt --all
@@ -35,7 +35,7 @@ rust/
 │   │       ├── store.rs              # rusqlite + 加密 CRUD
 │   │       ├── vault.rs              # 状态机 + Session Token
 │   │       ├── chunker.rs            # 滑动窗口 + extract_sections
-│   │       ├── parser.rs             # 文件解析 (MD/TXT/代码) + SHA-256
+│   │       ├── parser.rs             # 多格式解析 (MD/TXT/PDF/DOCX/HTML/EPUB/XLSX/PPTX/RTF/CSV/图片OCR/音频ASR/代码) + SHA-256 + is_supported()
 │   │       ├── embed.rs              # Ollama HTTP client (reqwest)
 │   │       ├── index.rs              # tantivy 封装 (jieba tokenizer)
 │   │       ├── vectors.rs            # usearch 封装 (HNSW + f16)
@@ -44,13 +44,23 @@ rust/
 │   │       ├── scanner_webdav.rs     # WebDAV 远程目录扫描
 │   │       ├── queue.rs              # Embedding 队列 Worker
 │   │       ├── llm.rs                # Ollama chat client (LlmProvider trait + OllamaLlmProvider + MockLlmProvider)
-│   │       ├── taxonomy.rs           # 维度定义 + 插件 YAML 加载 + prompt 构建
-│   │       ├── classifier.rs         # LLM 分类 pipeline (批量 + 容错)
-│   │       ├── clusterer.rs          # HDBSCAN 聚类 + LLM 命名
-│   │       └── tag_index.rs          # 内存反向索引
-│   │   └── assets/plugins/
-│   │       ├── tech.yaml             # 编程/技术插件
-│   │       └── law.yaml              # 法律插件
+│       ├── taxonomy.rs           # 维度定义 + 插件 YAML 加载 + prompt 构建
+│       ├── classifier.rs         # LLM 分类 pipeline (批量 + 容错)
+│       ├── clusterer.rs          # HDBSCAN 聚类 + LLM 命名
+│       ├── tag_index.rs          # 内存反向索引
+│       ├── ocr.rs                # OCR provider trait + PP-OCRv5 + OcrProfile (7 内置场景)
+│       ├── asr.rs                # ASR backend trait + whisper.cpp subprocess
+│       ├── pii.rs                # PII 检测/脱敏（邮箱/电话/身份证号）
+│       ├── ai_annotator.rs       # AI 批注生成 (AiAngle: insight/question/summary/critique)
+│       ├── context_compress.rs   # 上下文压缩（超长 history 裁剪）
+│       ├── memory_consolidation.rs # episodic memory 聚合 (1d 时间窗口)
+│       ├── resource_governor.rs  # 协作式调度 (CPU/RAM/IO 节流)
+│       ├── intent_router.rs      # 意图路由（chat/search/project 分流）
+│       ├── skill_evolution.rs    # 失败信号 → LLM 扩展词 → 静默生效（SkillClaw 模式）
+│       ├── agents/               # 网络搜索自动化 (chromiumoxide)
+│       └── workflow/             # 工作流引擎框架
+│   └── assets/plugins/
+│       └── (行业 yaml 已移至 attune-pro — v0.6.0-rc.2 OSS 边界)
 │   │
 │   ├── attune-server/                 # bin crate
 │   │   ├── Cargo.toml
@@ -77,7 +87,15 @@ rust/
 │   │           ├── behavior.rs       # /behavior/click|history|popular
 │   │           ├── profile.rs        # /profile/export|import
 │   │           ├── remote.rs         # /index/bind-remote (WebDAV)
-│   │           └── ui.rs             # Web UI 页面
+│   │           ├── annotations.rs    # /annotations CRUD + AI 批注触发
+│   │           ├── projects.rs       # /projects CRUD + 项目关联
+│   │           ├── auto_bookmarks.rs # /auto-bookmarks (行为驱动推荐)
+│   │           ├── ai_stack.rs       # /ai-stack (LLM 提供商配置)
+│   │           ├── member.rs         # /member (会员状态/配额)
+│   │           ├── audit.rs          # /audit-log (操作日志)
+│   │           ├── privacy.rs        # /privacy (PII 扫描/脱敏)
+│   │           ├── ocr_profiles.rs   # /ocr/profiles CRUD
+│   │           └── ui.rs             # Web UI 页面 (8 标签页 + Settings 模态 + Reader 模态)
 │   │
 │   ├── attune-cli/                    # bin crate
 │   │   ├── Cargo.toml
@@ -115,7 +133,7 @@ apps/attune-desktop/
 │  ├── CORS middleware                             │
 │  ├── bearer_auth_guard (optional Bearer token)   │
 │  ├── vault_guard (UNLOCKED 检查)                │
-│  └── Routes: 20+ endpoints                       │
+│  └── Routes: 70+ endpoints (38 route files)       │
 ├─────────────────────────────────────────────────┤
 │  Core Engine (Rust lib)          [attune-core]    │
 │  ├── Vault    — 状态机 + DEK 管理 + session       │
@@ -127,7 +145,7 @@ apps/attune-desktop/
 │  ├── Scanner  — walkdir + notify-rs              │
 │  ├── ScannerWebDav — WebDAV PROPFIND + GET 远程文件扫描     │
 │  ├── Chunker  — 滑动窗口 + extract_sections      │
-│  ├── Parser   — MD/TXT/代码 + SHA-256            │
+│  ├── Parser   — PDF/DOCX/HTML/EPUB/XLSX/CSV/PPTX/RTF/图片OCR/音频ASR/代码 │
 │  ├── Embed    — Ollama HTTP client               │
 │  └── Queue    — Embedding 队列 Worker            │
 └─────────────────────────────────────────────────┘

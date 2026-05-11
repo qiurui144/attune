@@ -46,7 +46,14 @@ pub fn parse_file_with_profile(
             parse_audio_file(path, &stem)
         }
         _ => {
-            // Text-based files (md, txt, json, xml, code, etc.)
+            // 允许作为纯文本处理的扩展名：代码文件 + 通用文本格式
+            let is_code = CODE_EXTENSIONS.iter().any(|e| *e == ext.as_str());
+            let is_plain_text = matches!(ext.as_str(), ".md" | ".txt" | "");
+            if !is_code && !is_plain_text {
+                return Err(VaultError::InvalidInput(format!(
+                    "unsupported file format '{ext}': only text, code, documents, spreadsheets, images and audio are accepted"
+                )));
+            }
             let content = std::fs::read_to_string(path)
                 .map_err(VaultError::Io)?;
             parse_content(&content, &filename)
@@ -201,6 +208,15 @@ pub fn parse_bytes_with_profile(
             Ok((title, content))
         }
         _ => {
+            // 允许作为纯文本处理的扩展名：代码文件 + 通用文本格式
+            // 已知二进制格式（video/archive/executable 等）拒绝，避免乱码入库
+            let is_code = CODE_EXTENSIONS.iter().any(|e| *e == ext.as_str());
+            let is_plain_text = matches!(ext.as_str(), ".md" | ".txt" | "");
+            if !is_code && !is_plain_text {
+                return Err(VaultError::InvalidInput(format!(
+                    "unsupported file format '{ext}': only text, code, documents, spreadsheets, images and audio are accepted"
+                )));
+            }
             let content = String::from_utf8_lossy(data).to_string();
             parse_content(&content, filename)
         }
@@ -880,6 +896,20 @@ mod tests {
             let path = format!("file.{ext}");
             assert!(!is_supported(Path::new(&path)), ".{ext} should NOT be supported");
         }
+    }
+
+    #[test]
+    fn parse_bytes_unsupported_format_returns_error() {
+        // .mp4 and .zip must be rejected — not silently treated as text
+        for filename in &["clip.mp4", "archive.zip", "photo.exe"] {
+            let result = parse_bytes(b"binary content", filename);
+            assert!(result.is_err(), "{filename} should return error");
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("unsupported"), "error should mention 'unsupported': {err}");
+        }
+        // .json (CODE_EXTENSION) must still pass
+        let result = parse_bytes(b"{\"key\": \"value\"}", "config.json");
+        assert!(result.is_ok(), ".json should be accepted as code/text");
     }
 
     // ─── strip_xml_tags edge cases ────────────────────────────────────────────

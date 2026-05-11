@@ -522,12 +522,15 @@ async fn test_upload_no_file_field_returns_400() {
 }
 
 #[tokio::test]
-async fn test_upload_unknown_extension_treated_as_text() {
+async fn test_upload_unsupported_format_returns_422() {
     let (state, _tmp) = make_unlocked_state();
-    // Unknown binary extensions fall through to plain-text parse — no hard reject
-    let (status, _body) = do_upload(state, "archive.xyz", b"some content bytes").await;
-    // Server either accepts (200) or rejects (400/422) — either is valid; must not panic/500
-    assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR, "unknown extension must not 500");
+    // .mp4 is not in is_supported() — parse_bytes_with_profile now returns InvalidInput
+    let (status, body) = do_upload(state, "video.mp4", b"fake video bytes").await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "unsupported format should return 422: {body}"
+    );
 }
 
 #[tokio::test]
@@ -566,4 +569,171 @@ async fn test_upload_stores_item_retrievable_from_items_list() {
         items.iter().any(|i| i["title"].as_str().unwrap_or("").contains("Retrievable Upload")),
         "uploaded item title should appear in list: {items:?}"
     );
+}
+
+// ─── annotations ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_annotations_list_empty_for_unknown_item() {
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_get(state, "/api/v1/annotations?item_id=nonexistent").await;
+    assert_eq!(status, StatusCode::OK);
+    let annotations = body["annotations"].as_array().expect("annotations field");
+    assert_eq!(annotations.len(), 0);
+}
+
+#[tokio::test]
+async fn test_annotation_create_and_list() {
+    let (state, _tmp) = make_unlocked_state();
+    // 先入库一条 item
+    let (_, ingest_body) = do_post(
+        state.clone(),
+        "/api/v1/ingest",
+        serde_json::json!({"title": "Annotatable Note", "content": "Paragraph one. Paragraph two."}),
+    ).await;
+    let item_id = ingest_body["id"].as_str().expect("item id").to_string();
+
+    // 创建批注
+    let (create_status, create_body) = do_post(
+        state.clone(),
+        "/api/v1/annotations",
+        serde_json::json!({
+            "item_id": item_id,
+            "offset_start": 0,
+            "offset_end": 13,
+            "text_snippet": "Paragraph one",
+            "color": "yellow",
+            "content": "Important opening"
+        }),
+    ).await;
+    assert_eq!(create_status, StatusCode::OK, "create annotation: {create_body}");
+    let annotation_id = create_body["id"].as_str().expect("annotation id");
+    assert!(!annotation_id.is_empty());
+
+    // 列表包含该批注
+    let (list_status, list_body) = do_get(
+        state.clone(),
+        &format!("/api/v1/annotations?item_id={item_id}"),
+    ).await;
+    assert_eq!(list_status, StatusCode::OK);
+    let anns = list_body["annotations"].as_array().expect("annotations array");
+    assert_eq!(anns.len(), 1);
+    assert_eq!(anns[0]["text_snippet"], "Paragraph one");
+}
+
+#[tokio::test]
+async fn test_annotation_invalid_color_returns_400() {
+    let (state, _tmp) = make_unlocked_state();
+    let (_, ingest_body) = do_post(
+        state.clone(),
+        "/api/v1/ingest",
+        serde_json::json!({"title": "Note", "content": "Content"}),
+    ).await;
+    let item_id = ingest_body["id"].as_str().expect("item id").to_string();
+
+    let (status, body) = do_post(
+        state,
+        "/api/v1/annotations",
+        serde_json::json!({
+            "item_id": item_id,
+            "offset_start": 0,
+            "offset_end": 4,
+            "text_snippet": "Note",
+            "color": "purple"  // not in ALLOWED_COLORS
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "invalid color: {body}");
+}
+
+#[tokio::test]
+async fn test_annotation_snippet_too_long_returns_400() {
+    let (state, _tmp) = make_unlocked_state();
+    let (_, ingest_body) = do_post(
+        state.clone(),
+        "/api/v1/ingest",
+        serde_json::json!({"title": "Note", "content": "Content"}),
+    ).await;
+    let item_id = ingest_body["id"].as_str().expect("item id").to_string();
+    let long_snippet = "x".repeat(2001); // MAX_SNIPPET_LEN = 2000
+
+    let (status, _) = do_post(
+        state,
+        "/api/v1/annotations",
+        serde_json::json!({
+            "item_id": item_id,
+            "offset_start": 0,
+            "offset_end": 100,
+            "text_snippet": long_snippet
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ─── tags ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_tags_all_dimensions_returns_ok() {
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_get(state, "/api/v1/tags").await;
+    // 空库仍然应该返回 200 with empty dimensions map (or 403 if tag_index not built)
+    assert!(
+        status == StatusCode::OK || status == StatusCode::FORBIDDEN,
+        "tags endpoint should return 200 or 403 (locked): {body}"
+    );
+    if status == StatusCode::OK {
+        assert!(body["dimensions"].is_object(), "dimensions should be an object: {body}");
+    }
+}
+
+#[tokio::test]
+async fn test_tags_dimension_histogram_returns_ok() {
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_get(state, "/api/v1/tags/topic").await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::FORBIDDEN,
+        "tag dimension endpoint should return 200 or 403: {body}"
+    );
+    if status == StatusCode::OK {
+        assert!(body["values"].is_array(), "values should be an array: {body}");
+    }
+}
+
+// ─── status ───────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_status_endpoint_returns_version_and_build() {
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_get(state, "/api/v1/status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["version"].as_str().is_some(), "status should have version: {body}");
+}
+
+// ─── behavior signals ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_behavior_list_returns_ok_or_forbidden() {
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_get(state, "/api/v1/behavior").await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "behavior endpoint should return 200/403/404: {status} {body}"
+    );
+}
+
+// ─── clusters ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_clusters_list_returns_ok_or_service_unavailable() {
+    let (state, _tmp) = make_unlocked_state();
+    // 空库：向量不够 HDBSCAN 跑，应返回 200 空列表或 503 (no vector)
+    let (status, body) = do_get(state, "/api/v1/clusters").await;
+    assert!(
+        status == StatusCode::OK
+            || status == StatusCode::SERVICE_UNAVAILABLE
+            || status == StatusCode::FORBIDDEN,
+        "clusters endpoint should return 200/503/403: {status} {body}"
+    );
+    if status == StatusCode::OK {
+        assert!(body["clusters"].is_array(), "clusters should be an array: {body}");
+    }
 }

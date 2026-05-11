@@ -2,7 +2,24 @@
 
 ## v0.6.x patch 流（2026-05-01）— 部署 + 4 必要底座
 
-### 最新变更（b5b837f，2026-05-xx）— UI 构建修复 + Tauri 拖拽上传
+### 最新变更（多格式解析 + 全面测试覆盖 + 格式校验强化）
+
+**多格式文件解析（parse_bytes_with_profile 扩展）**：
+- 新增格式支持：`.html/.htm` (scraper strip-tags) / `.epub` (ZIP 内 XHTML 拼接) / `.xlsx/.xls` (calamine 电子表格) / `.pptx` (ZIP 内 slide XML) / `.rtf` (去标记提取) / `.csv` (原文 UTF-8)
+- OCR 格式：`.png/.jpg/.jpeg/.webp/.bmp/.tiff/.gif` → PP-OCRv5 mobile（7 内置场景 profile：contract/receipt/screenshot/ancient/table/form/card）
+- ASR 格式：`.mp3/.wav/.m4a/.flac/.ogg/.aac/.opus/.wma` → whisper.cpp subprocess
+- **格式校验强化**：`parse_bytes_with_profile` 和 `parse_file_with_profile` 的 catch-all 分支现在对已知不支持的二进制格式（`.mp4`/`.zip`/`.exe` 等）返回 `VaultError::InvalidInput("unsupported file format")` 而非静默当文本处理。只有代码文件（CODE_EXTENSIONS）和 `.md/.txt` 才走文本兜底。
+
+**测试覆盖大幅提升（commit 7661daa）**：
+- **parser.rs 单元测试 +30**：覆盖 HTML roundtrip、EPUB/PPTX/RTF/CSV bytes 解析、is_supported 校验、不支持格式返回错误等
+- **server_test.rs 集成测试 +20**：upload API 10 个测试（成功路径 + 422 校验 + 403 锁仓 + 400 无字段 + 重复上传 + 可检索性）；annotations CRUD 4 个（创建/列表/颜色校验/snippet 长度）；tags/status/behavior/clusters 端点 6 个
+- **OCR profile 计数修正**：内置 profile 数由旧断言 4 → 修正为 7
+
+**当前测试基线**：237+ 全部通过（attune-core 210 + attune-server 27）
+
+---
+
+### b5b837f（2026-05-xx）— UI 构建修复 + Tauri 拖拽上传
 
 **UI TypeScript 修复**：
 - `store/api.ts`：补充 `put<T>(path, body, retry?)` 方法，支持 HTTP PUT（useOcrProfiles.updateOcrProfile 需要）
