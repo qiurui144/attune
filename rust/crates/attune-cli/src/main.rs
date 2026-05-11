@@ -993,6 +993,8 @@ fn run_ocr_profile_create(
         dpi,
         tags,
         builtin: false,
+        deskew: false,
+        reconstruct_tables: false,
     };
     let mut reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
     reg.upsert(p)?;

@@ -88,6 +88,21 @@ At startup, Attune detects CPU / RAM / GPU / NPU and recommends a local summary 
 ### Scanned PDF OCR fallback (Batch 1)
 When `pdf_extract` returns empty or too-little text, Attune automatically runs OCR via **PP-OCRv5 mobile** (DBNet+CRNN+CLS, ~21 MB ONNX, Chinese accuracy 94–96%) + `pdftoppm`. Tesseract removed since v0.6.x (replaced by PP-OCR as single engine). One-shot install: `scripts/install-ocr-deps.sh` (apt/dnf/pacman/brew).
 
+### Multi-format ingestion
+
+Attune parses 20+ file types natively. Unknown binary formats (video, archives, executables) are rejected with 422 rather than being silently treated as text.
+
+| Category | Formats |
+|----------|---------|
+| Document | `.md` `.txt` `.pdf` `.docx` `.epub` `.rtf` |
+| Web / Presentation | `.html` `.htm` `.pptx` |
+| Spreadsheet / Data | `.xlsx` `.xls` `.csv` |
+| Image → OCR | `.png` `.jpg` `.jpeg` `.webp` `.bmp` `.tiff` `.tif` `.gif` |
+| Audio → ASR | `.mp3` `.wav` `.m4a` `.flac` `.ogg` `.aac` `.opus` `.wma` |
+| Code / Config | `.py` `.js` `.ts` `.rs` `.go` `.java` `.c` `.cpp` `.h` `.rb` `.php` `.swift` `.kt` `.sh` `.toml` `.yaml` `.json` `.xml` and more |
+
+OCR uses 7 built-in scene profiles (contract / receipt / screenshot / ancient / table / form / card). Upload images or PDFs to `/api/v1/upload?ocr_profile=receipt` to activate a specific profile.
+
 ### Front-end UX (Batch 1–2, rewritten in Preact)
 - Two-column chat-first layout (ChatGPT-like), sidebar collapsible to 64 px icon bar
 - Global top bar: logo + 🔒 lock + 👤 account menu (settings / export profile / export device secret / lock)
