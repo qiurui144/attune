@@ -18,26 +18,39 @@
 - 默认开箱即用, 不需要任何技术配置
 - 唯一暴露给用户的"配置"是 plugin (开源标准 MCP / skill / agents)
 
-### 1.3 默认底座 (全部 hidden, 随二进制打包)
+### 1.3 默认底座
+
+#### 随二进制打包 (全配高精度, hidden 不暴露)
 
 | 能力 | 默认引擎 | 用户可改? |
 |------|---------|---------|
-| Embedding | bge-m3 (高精度) | ❌ |
+| Embedding | bge-m3 | ❌ |
 | Reranker | bge-reranker-v2-m3 | ❌ |
 | OCR | PP-OCRv5 | ❌ (但可选**场景预设**, 不暴露引擎) |
 | ASR | whisper-large-v3-turbo (中文 WER 5-7%) | ❌ |
-| Local LLM | qwen2.5:14b / 32b (硬件适配) | ❌ |
 | 数据目录 | `~/.local/share/attune` (Linux) / `%APPDATA%\attune` (Win) | ❌ |
 
-**用户拍板: 默认配置全配高精度, 不降级 — 降级 = 无法使用.**
+#### LLM 大模型 — 主要走云端
+
+**默认不打包本地 LLM**. attune 大模型能力**主要使用云版本**:
+- 普通免费用户: 自己配云端大模型 API key (OpenAI / Anthropic / DeepSeek / Qwen 兼容)
+- 付费用户: 云端 gateway 自动下发 (用户不持 raw key)
+
+**本地 LLM (可选, 仅部署指导)**: 如用户出于隐私 / 离线需求自行装 Ollama, 见
+`docs/local-llm-setup.md`. attune **不内置 Ollama / 不打包模型权重**, 由用户自己装.
+
+用户拍板: 默认配置全配高精度, 不降级 — 降级 = 无法使用. LLM 主云端.
 
 ## 2. 用户形态
 
 | 形态 | 标识 | 网络要求 | LLM 来源 |
 |------|------|---------|---------|
-| **离线 self-host** | LoggedOut | 永不联网也能用 | 默认本地 LLM (二进制打包) |
-| **免费会员** | Free (云端账号) | 仅注册/登录联网 | 默认本地 LLM **或** 自配云端大模型 API key |
-| **付费会员** | Paid (云端 license) | 30 天离线缓存 | 云端 LLM gateway 自动 (Pro 高级模型) |
+| **离线 self-host** | LoggedOut | 永不联网仅 RAG / 搜索可用; LLM Chat 需配自己的云端 API 或自装本地 LLM (Ollama) | 自配 (云 / 本地) |
+| **免费会员** | Free (云端账号) | 注册/登录 + Chat 时联网 | **自己配云端大模型 API key** (默认) |
+| **付费会员** | Paid (云端 license) | Chat 时联网; 30 天 license 离线缓存 | **云端 gateway 自动** (Pro 高级模型, 用户不持 raw key) |
+
+**LLM 主云端定位** — attune 不假设用户机器能跑本地大模型. 本地 LLM 是可选高级能力, 由
+用户按 `docs/local-llm-setup.md` 自行部署 Ollama.
 
 ## 3. 用户可配置项 (应用窗口暴露的仅 6 项)
 
@@ -84,11 +97,14 @@
 
 | 平台 | 包格式 | 内含 |
 |------|-------|------|
-| Linux | AppImage (单文件) + deb (apt 包) | attune binary + 所有底座模型 + 依赖 |
+| Linux | AppImage (单文件) + deb (apt 包) | attune binary + 底座模型 (embedding/reranker/OCR/ASR) + poppler-utils |
 | Windows | MSI installer | 同上 + Windows runtime |
 | macOS (未来) | dmg + brew tap | 同上 |
 
-**不需要单独装 Ollama / poppler / whisper.cpp** — 一键包内含全部.
+**包含**: PP-OCRv5 / whisper.cpp / bge-m3 / bge-reranker-v2-m3 等底座模型 + poppler-utils + 依赖 runtime.
+
+**不包含**: Ollama 本地 LLM (用户需用时自行装, 见 `docs/local-llm-setup.md`).
+默认 attune 走云端大模型, 无需 Ollama 也能完整使用.
 
 ## 8. 日志 / 监控 (用开源高可用库)
 
