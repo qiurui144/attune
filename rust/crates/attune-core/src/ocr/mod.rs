@@ -13,6 +13,8 @@
 //!   `needs_ocr(text)` → 文字层薄判定（保留旧 API）
 
 pub mod ppocr;
+pub mod profile;
+pub mod profile_registry;
 
 use crate::error::{Result, VaultError};
 use std::path::Path;
@@ -57,7 +59,22 @@ pub fn detect_default_provider() -> Option<Box<dyn OcrProvider>> {
 
 /// 抽取 PDF 文字 — 用 pdftoppm 切页 + provider 逐页 OCR。
 /// `pdftoppm` 来自 poppler-utils，由 .deb 自动装。
+///
+/// 等价于 `extract_text_from_pdf_with_dpi(provider, pdf_path, 300)`. 300 DPI 是 PP-OCR
+/// 在普通合同/判决书上的最佳实测值；若要换不同 DPI (200 票据 / 600 古籍) 用
+/// `extract_text_from_pdf_with_dpi`.
 pub fn extract_text_from_pdf(provider: &dyn OcrProvider, pdf_path: &Path) -> Result<String> {
+    extract_text_from_pdf_with_dpi(provider, pdf_path, 300)
+}
+
+/// 用指定 DPI 抽取 PDF 文字. dpi 通常由 OcrProfile 决定 (200/300/600).
+/// 越界值 (< 72 或 > 1200) 退回 300.
+pub fn extract_text_from_pdf_with_dpi(
+    provider: &dyn OcrProvider,
+    pdf_path: &Path,
+    dpi: u32,
+) -> Result<String> {
+    let dpi = if (72..=1200).contains(&dpi) { dpi } else { 300 };
     let pdftoppm = which::which("pdftoppm").map_err(|_| {
         VaultError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -74,9 +91,10 @@ pub fn extract_text_from_pdf(provider: &dyn OcrProvider, pdf_path: &Path) -> Res
         ))
     })?;
 
-    // PDF → 多页 PNG（300 DPI，PP-OCR 在此分辨率上准确率最佳）
+    // PDF → 多页 PNG (DPI 由 profile 决定: 200 票据 / 300 合同 / 600 古籍)
+    let dpi_str = dpi.to_string();
     let status = Command::new(&pdftoppm)
-        .args(["-r", "300", "-png"])
+        .args(["-r", dpi_str.as_str(), "-png"])
         .arg(pdf_path)
         .arg(prefix_str)
         .status()
@@ -127,6 +145,21 @@ pub fn extract_text_from_pdf(provider: &dyn OcrProvider, pdf_path: &Path) -> Res
     Ok(all)
 }
 
+/// 从注册表按 profile_id 取 DPI. None / 不存在 / load 失败均返回 300 (默认合同 DPI).
+///
+/// 这是 OCR pipeline 与 profile 系统的对接点 — 调用方拿到 profile_id 后用此函数
+/// 决定 DPI, 再调 `extract_text_from_pdf_with_dpi`.
+pub fn dpi_for_profile(profile_id: Option<&str>) -> u32 {
+    let id = match profile_id {
+        Some(s) if !s.is_empty() => s,
+        _ => return 300,
+    };
+    match profile_registry::ProfileRegistry::load_default() {
+        Ok(reg) => reg.get(id).map(|p| p.dpi).unwrap_or(300),
+        Err(_) => 300,
+    }
+}
+
 /// 判断 PDF 是否需要 OCR（pdf_extract 产出文字量低于阈值）
 pub fn needs_ocr(extracted_text: &str) -> bool {
     extracted_text.chars().filter(|c| !c.is_whitespace()).count() < 100
@@ -150,5 +183,20 @@ mod tests {
     fn detect_default_provider_returns_none_when_pp_ocr_missing() {
         // CI 环境无 PP-OCR 模型 → 应返回 None；本测试只确保不 panic
         let _ = detect_default_provider();
+    }
+
+    #[test]
+    fn dpi_for_profile_empty_returns_default() {
+        assert_eq!(dpi_for_profile(None), 300);
+        assert_eq!(dpi_for_profile(Some("")), 300);
+    }
+
+    #[test]
+    fn dpi_for_profile_unknown_returns_default() {
+        // unknown profile id → 300 (registry 加载得到 4 builtin 但无此 id)
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        std::env::set_var("HOME", tmp.path());
+        std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
+        assert_eq!(dpi_for_profile(Some("does-not-exist")), 300);
     }
 }

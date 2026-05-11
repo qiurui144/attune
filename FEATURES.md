@@ -19,7 +19,8 @@
 | **C-CLUSTER** | `clusterer.rs` | HDBSCAN 聚类 | unit |
 | **C-CLASSIFIER** | `classifier.rs` | LLM 文档分类 | unit |
 | **C-INDEX** | `index.rs` | tantivy + usearch | unit + integration |
-| **C-OCR** | `ocr/` | PP-OCRv5 + pdftoppm + extract_text_from_pdf | unit + ignored e2e |
+| **C-OCR** | `ocr/` | PP-OCRv5 + pdftoppm + extract_text_from_pdf + `_with_dpi` | unit + ignored e2e |
+| **C-OCR-PROFILE** | `ocr/profile.rs` + `ocr/profile_registry.rs` | OcrProfile (id/name/lang/dpi/tags) + 4 builtin (contract/receipt/screenshot/ancient) + 持久化 CRUD + `dpi_for_profile` | 17 unit |
 | **C-ASR** | `asr.rs` | whisper.cpp subprocess | unit |
 | **C-WORKFLOW** | `workflow.rs` | YAML workflow + 事件触发 | unit + integration |
 
@@ -79,6 +80,7 @@
 | **R-PLUGIN** | `/api/v1/plugins` | 列出已装 plugin + match_trigger | unit |
 | **R-FORM** | `/api/v1/forms/{plugin}/{form}` | GET HTML 表单 + POST 提交 → agent | 1 integration |
 | **R-MEMBER** | `/api/v1/member/{state,locks,login-token,logout}` | 会员状态 + lock 决策源 | 1 integration |
+| **R-OCR-PROFILE** | `/api/v1/ocr/profiles[/{id}]` (GET/POST/PUT/DELETE) | OCR 场景预设 CRUD, builtin 拒删拒改, 受 SettingsLocks::ocr_profiles lock | 2 integration |
 
 ## 7. attune-cli 子命令
 

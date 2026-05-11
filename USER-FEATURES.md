@@ -75,6 +75,10 @@ attune 不为每个 provider 写独立 SDK — 一个 OpenAI client 走天下.
 
 **OCR 场景预设说明**: 不同场景 (合同 / 票据 / 截图 / 古籍) 可用不同 OCR profile. 用户在 UI 看到的是**场景名称**, 不是引擎/模型/DPI 等技术参数. 应用窗口可同时配置**多个** profile.
 
+- 4 个内置: `contract` (合同/法律 300dpi) / `receipt` (票据 200dpi) / `screenshot` (截图 200dpi) / `ancient` (古籍 600dpi); 内置不可删, 用户可自建任意数量自定义 profile
+- API: `GET /api/v1/ocr/profiles` (列表) / `POST` (新建) / `PUT /:id` (更新) / `DELETE /:id` (删除)
+- 持久化: `<data_dir>/ocr_profiles.json`
+
 ## 4. 形态切换路径
 
 ### 4.1 离线 → 免费会员

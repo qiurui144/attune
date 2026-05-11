@@ -22,6 +22,9 @@ pub async fn vault_guard(
         || path.starts_with("/ui/")
         // /api/v1/member/* — 会员状态 + lock 决策, 不读 vault, 不需 unlock
         || path.starts_with("/api/v1/member")
+        // /api/v1/ocr/profiles — 用户场景预设 (持久化磁盘文件, 不读 vault).
+        // 写操作仍由 handler 里 SettingsLocks::ocr_profiles 控制.
+        || path.starts_with("/api/v1/ocr/profiles")
     {
         return next.run(request).await;
     }

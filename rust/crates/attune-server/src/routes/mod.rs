@@ -11,6 +11,7 @@ pub mod feedback;
 pub mod folder_links;
 pub mod forms;
 pub mod member;
+pub mod ocr_profiles;
 pub mod classify;
 pub mod clusters;
 pub mod index;

@@ -74,6 +74,13 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/member/locks", get(routes::member::get_locks))
         .route("/api/v1/member/login-token", post(routes::member::login_token))
         .route("/api/v1/member/logout", post(routes::member::logout))
+        // OCR 场景预设 (CRUD, builtin 不可删/改)
+        .route("/api/v1/ocr/profiles",
+            get(routes::ocr_profiles::list_profiles)
+                .post(routes::ocr_profiles::create_profile))
+        .route("/api/v1/ocr/profiles/{id}",
+            axum::routing::put(routes::ocr_profiles::update_profile)
+                .delete(routes::ocr_profiles::delete_profile))
         // Folder links — 只读 (写入由 attune-cli link-folder)
         .route("/api/v1/folder-links", get(routes::folder_links::list_folder_links))
         // 批注（annotations）CRUD — 所有调用都是用户显式操作，不在建库流水线里自动触发
