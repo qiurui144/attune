@@ -112,6 +112,35 @@ pub async fn update_settings(
         }
     }
 
+    // SettingsLocks enforce — 会员锁定字段拒绝更新.
+    // 字段映射: settings JSON key → SettingsLocks field name
+    let member_state = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let locks = attune_core::member_session::SettingsLocks::for_state(&member_state);
+    // 简化: 当前不区分企业 admin (需要专门角色字段, 留待 enterprise UI)
+    let is_enterprise_admin = false;
+    if let Some(body_obj) = body.as_object() {
+        let lock_map: &[(&str, &str)] = &[
+            ("llm", "llm_endpoint"),            // 整个 llm 对象更新触发 llm_endpoint lock
+            ("pluginhub", "plugin_install"),    // pluginhub 配置变 → plugin_install lock
+            ("embedding", "embedding_model"),
+        ];
+        for (settings_key, lock_field) in lock_map {
+            if body_obj.contains_key(*settings_key)
+                && !locks.can_edit(lock_field, is_enterprise_admin)
+            {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "setting_locked_by_member_tier",
+                        "field": settings_key,
+                        "lock_reason": format!("'{lock_field}' is locked under current membership tier"),
+                        "hint": "GET /api/v1/member/locks 看完整锁定矩阵",
+                    })),
+                ));
+            }
+        }
+    }
+
     // 嵌套对象键：这些字段的子字段支持 deep merge（客户端省略某子字段时保留原值）。
     // 主要为了 `llm.api_key` —— GET 响应已 redact，客户端若只改 model/provider 而不重填 key，
     // 我们不应把 key 抹成 null。

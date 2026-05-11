@@ -20,6 +20,8 @@ pub async fn vault_guard(
         || path == "/"
         || path == "/ui"
         || path.starts_with("/ui/")
+        // /api/v1/member/* — 会员状态 + lock 决策, 不读 vault, 不需 unlock
+        || path.starts_with("/api/v1/member")
     {
         return next.run(request).await;
     }

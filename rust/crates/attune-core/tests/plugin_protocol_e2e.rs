@@ -279,6 +279,33 @@ fn agent_runner_unknown_agent_errors() {
     assert!(result.is_err());
 }
 
+/// scan_with_key 装载加密 paid plugin
+#[test]
+fn registry_scan_with_key_loads_encrypted_paid_plugin() {
+    let tmp = TempDir::new().expect("tmp");
+
+    // 写一个加密 paid plugin
+    let p = tmp.path().join("law-pro");
+    fs::create_dir_all(&p).expect("mkdir");
+    let key = b"device-license-key";
+    let cipher = encrypt_yaml(PAID_PLUGIN_YAML.as_bytes(), key).expect("encrypt");
+    fs::write(p.join("plugin.yaml.enc"), &cipher).expect("write enc");
+
+    // scan() 无 key → 装载失败 (encrypted plugin found but no key)
+    let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+    assert!(reg.plugins().count() == 0);
+    assert!(!errs.is_empty());
+    assert!(errs[0].contains("encrypted plugin") || errs[0].contains("decrypt_key"));
+
+    // scan_with_key() 提供 key → 装载成功
+    let (reg, errs) = PluginRegistry::scan_with_key(tmp.path(), Some(key)).expect("scan");
+    assert_eq!(reg.plugins().count(), 1);
+    assert!(errs.is_empty(), "errors: {errs:?}");
+    let p = reg.plugins().next().unwrap();
+    assert_eq!(p.manifest.id, "law-pro");
+    assert_eq!(p.manifest.agents.len(), 1);
+}
+
 #[test]
 fn agent_runner_subprocess_e2e_with_mock_binary() {
     use attune_core::agent_runner::format_agent_result_for_chat;

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<!-- 演示: GET /api/v1/member/locks → 灰显 disabled fields. -->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Attune Settings — Member Lock 演示</title>
+  <style>
+    body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; color: #222; }
+    .controls { background: #f5f5f5; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; }
+    label { display: block; margin: 12px 0 4px; font-size: 13px; font-weight: 500; }
+    input, select { width: 100%; padding: 6px 8px; box-sizing: border-box; font-size: 13px; border: 1px solid #ccc; border-radius: 3px; }
+    input:disabled, select:disabled { background: #eee; color: #999; cursor: not-allowed; }
+    .badge { display: inline-block; font-size: 10px; color: white; padding: 1px 6px; border-radius: 3px; margin-left: 4px; vertical-align: middle; }
+    .badge.locked { background: #f5a623; }
+    .badge.admin-only { background: #9c27b0; }
+    .badge.hidden { display: none; }
+    button { background: #1976d2; color: white; border: 0; padding: 8px 16px; border-radius: 3px; cursor: pointer; margin-right: 8px; }
+    .response { background: #f5f5f5; padding: 12px; margin-top: 16px; border-radius: 4px; font-family: monospace; font-size: 12px; white-space: pre-wrap; max-height: 300px; overflow-y: auto; }
+    h2 { font-size: 15px; margin-top: 24px; padding-bottom: 4px; border-bottom: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <h1>Attune 设置 — Member Lock 演示</h1>
+  <p>演示 GET <code>/api/v1/member/locks</code> 灰显被锁字段. 会员登录后大多数配置由云端下发, UI 自动 disabled.</p>
+
+  <div class="controls">
+    <label>Server URL</label>
+    <input id="server" value="http://127.0.0.1:18900">
+    <div style="margin-top: 12px;">
+      <button onclick="loadLocks()">1. 拉 locks</button>
+      <button onclick="simulateFree()">2. 模拟免费</button>
+      <button onclick="simulateMember()">3. 模拟付费</button>
+      <button onclick="simulateEnterprise()">4. 模拟企业</button>
+      <button onclick="simulateLogout()" style="background:#666">登出</button>
+    </div>
+  </div>
+
+  <h2>状态</h2>
+  <div id="status" style="font-size: 12px; color: #666;">未拉取</div>
+
+  <h2>设置项</h2>
+  <label>LLM Endpoint <span class="badge hidden" id="badge-llm_endpoint"></span></label>
+  <input id="setting-llm_endpoint" placeholder="https://gateway.attune.ai/v1">
+
+  <label>LLM Model <span class="badge hidden" id="badge-llm_model"></span></label>
+  <input id="setting-llm_model" placeholder="gpt-4o-mini">
+
+  <label>LLM API Key <span class="badge hidden" id="badge-llm_api_key"></span></label>
+  <input id="setting-llm_api_key" type="password" placeholder="sk-...">
+
+  <label>Embedding Model <span class="badge hidden" id="badge-embedding_model"></span></label>
+  <input id="setting-embedding_model" placeholder="bge-m3">
+
+  <label>OCR Engine <span class="badge hidden" id="badge-ocr_engine"></span></label>
+  <select id="setting-ocr_engine">
+    <option value="ppocr">PP-OCR mobile</option>
+    <option value="tesseract">Tesseract</option>
+  </select>
+
+  <label>本地数据目录 <span class="badge hidden" id="badge-data_dir"></span></label>
+  <input id="setting-data_dir" placeholder="~/.local/share/attune">
+
+  <label>本地知识库目录关联 (隐私自管) <span class="badge hidden" id="badge-local_folder_links"></span></label>
+  <input id="setting-local_folder_links" placeholder="/home/user/Documents/cases">
+
+  <label>Plugin 安装 / 卸载 <span class="badge hidden" id="badge-plugin_install"></span></label>
+  <input id="setting-plugin_install" placeholder="(plugin 列表)">
+
+  <label>Vault 密码 <span class="badge hidden" id="badge-vault_password"></span></label>
+  <input id="setting-vault_password" type="password" placeholder="(改密码)">
+
+  <label>设备绑定 <span class="badge hidden" id="badge-device_binding"></span></label>
+  <input id="setting-device_binding" placeholder="(已绑设备)">
+
+  <h2>API 响应</h2>
+  <div class="response" id="response">等待操作...</div>
+
+  <script>
+    const ALL_FIELDS = [
+      'llm_endpoint', 'llm_model', 'llm_api_key',
+      'embedding_model', 'ocr_engine', 'data_dir',
+      'local_folder_links', 'plugin_install', 'vault_password',
+      'device_binding',
+    ];
+
+    async function loadLocks() {
+      const server = document.getElementById('server').value;
+      try {
+        const resp = await fetch(`${server}/api/v1/member/locks`);
+        const locks = await resp.json();
+        applyLocks(locks);
+        document.getElementById('response').textContent =
+          `✓ GET /member/locks (status ${resp.status})\n\n${JSON.stringify(locks, null, 2)}`;
+      } catch (e) {
+        document.getElementById('response').textContent = `❌ ${e.message}`;
+      }
+    }
+
+    function applyLocks(locks) {
+      for (const f of ALL_FIELDS) {
+        const input = document.getElementById(`setting-${f}`);
+        const badge = document.getElementById(`badge-${f}`);
+        if (!input || !badge) continue;
+        const lock = locks[f];
+        // 重置 class + text
+        badge.classList.remove('locked', 'admin-only', 'hidden');
+        badge.textContent = '';
+        if (lock === 'editable') {
+          input.disabled = false;
+          badge.classList.add('hidden');
+        } else if (lock === 'locked') {
+          input.disabled = true;
+          badge.classList.add('locked');
+          badge.textContent = '🔒 锁定';
+        } else if (lock === 'enterprise_admin_only') {
+          input.disabled = true;
+          badge.classList.add('admin-only');
+          badge.textContent = '👑 仅管理员';
+        }
+      }
+    }
+
+    async function setMemberState(tier, extras) {
+      const server = document.getElementById('server').value;
+      try {
+        const body = { account_id: 'demo-user', tier, ...extras };
+        const resp = await fetch(`${server}/api/v1/member/login-token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        document.getElementById('status').textContent =
+          `状态: tier=${tier}, http=${resp.status}`;
+        if (!resp.ok) {
+          document.getElementById('response').textContent =
+            `POST /member/login-token failed:\n${JSON.stringify(data, null, 2)}`;
+          return;
+        }
+        await loadLocks();
+      } catch (e) {
+        document.getElementById('response').textContent = `❌ ${e.message}`;
+      }
+    }
+
+    function simulateFree() { setMemberState('free', {}); }
+    function simulateMember() { setMemberState('paid', { license_id: 'lic-demo', llm_quota_remaining: 1000000 }); }
+    function simulateEnterprise() { setMemberState('enterprise', { license_id: 'lic-demo', team_id: 'team-acme' }); }
+    async function simulateLogout() {
+      const server = document.getElementById('server').value;
+      await fetch(`${server}/api/v1/member/logout`, { method: 'POST' });
+      document.getElementById('status').textContent = '状态: logged_out';
+      await loadLocks();
+    }
+
+    window.addEventListener('DOMContentLoaded', loadLocks);
+  </script>
+</body>
+</html>

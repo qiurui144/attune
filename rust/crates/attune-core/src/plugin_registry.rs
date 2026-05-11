@@ -241,11 +241,22 @@ impl PluginRegistry {
         best
     }
 
+    /// 扫描 plugins_root, 自动解密 paid plugin (如提供 key) — 后续扩展用.
+    ///
+    /// 调用方典型: 在 attune-server 启动时, 从用户 license 拿 decrypt_key 透传.
+    pub fn scan_with_key(plugins_root: &Path, decrypt_key: Option<&[u8]>) -> Result<(Self, Vec<String>)> {
+        Self::scan_impl(plugins_root, decrypt_key)
+    }
+
     /// 扫描 plugins_root 下每个一级子目录作为一个 plugin。
     /// 每个 plugin dir 必须有 `plugin.yaml`；可选 `workflows/*.yaml` 和 `capabilities/<cap_id>/plugin.yaml`。
     ///
     /// **best-effort 加载** — 单个 plugin 失败不影响其他。返回错误数量供 caller 决定是否告警。
     pub fn scan(plugins_root: &Path) -> Result<(Self, Vec<String>)> {
+        Self::scan_impl(plugins_root, None)
+    }
+
+    fn scan_impl(plugins_root: &Path, decrypt_key: Option<&[u8]>) -> Result<(Self, Vec<String>)> {
         let mut reg = Self::new();
         let mut errors: Vec<String> = Vec::new();
 
@@ -265,7 +276,7 @@ impl PluginRegistry {
                 // 装到 plugins/ 目录的 plugin 视为用户已通过 attune-cli plugin-install 装载
                 // (CLI 已校验签名 + 解密). server 装载时给 Some("Trusted"), 不再二次拒绝.
                 // 真实加密 paid plugin 在 scan 中**当前不解密** — 调用方按需扩展.
-                match LoadedPlugin::from_dir_with_key(&path, None, Some("Trusted")) {
+                match LoadedPlugin::from_dir_with_key(&path, decrypt_key, Some("Trusted")) {
                     Ok(p) => {
                         let pid = p.manifest.id.clone();
                         reg.plugins.insert(pid.clone(), p);
