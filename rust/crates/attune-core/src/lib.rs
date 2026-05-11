@@ -20,6 +20,7 @@ pub mod device_binding;
 pub mod accounts_client;
 pub mod ui_runtime;
 pub mod agent_runner;
+pub mod license;
 pub mod plugin_sig;
 pub mod classifier;
 pub mod clusterer;
