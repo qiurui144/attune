@@ -21,7 +21,7 @@ hex = "0.4"
 usearch = "2.25"  # 升至 2.25+ 修 Windows MAP_FAILED build 失败 (2.24.0 用了 POSIX-only mman.h)
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { workspace = true, features = ["blocking"] }
+reqwest = { workspace = true, features = ["blocking", "cookies"] }
 tokio = { workspace = true }
 tantivy = "0.22"
 tantivy-jieba = "0.11"

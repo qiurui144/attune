@@ -146,6 +146,27 @@ enum Commands {
     },
     /// 列出已装载 plugins (~/.local/share/attune/plugins/)
     PluginList,
+    /// 登录云端账号 (走 cloud accounts /api/v1/users/login)
+    /// 登录后 settings 大多数项锁定 (云端下发), 并触发 pro 插件自动同步.
+    Login {
+        email: String,
+        /// 云端 accounts base URL (默认 https://accounts.attune.ai)
+        #[arg(long, default_value = "https://accounts.attune.ai")]
+        cloud_url: String,
+    },
+    /// 拉云端 entitled pro 插件清单, 自动下载 + 装载缺的
+    SyncPlugins {
+        #[arg(long, default_value = "https://accounts.attune.ai")]
+        cloud_url: String,
+    },
+    /// 给当前 vault 关联一个本地知识库目录 (会员/免费用户都可用 — 用户隐私)
+    LinkFolder {
+        /// 本地目录绝对路径
+        folder: std::path::PathBuf,
+        /// 关联到的 Project id (默认 default)
+        #[arg(long, default_value = "default")]
+        project: String,
+    },
 }
 
 fn main() {
@@ -185,6 +206,15 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
         Commands::PluginList => {
             return run_plugin_list();
+        }
+        Commands::Login { email, cloud_url } => {
+            return run_login(email, cloud_url);
+        }
+        Commands::SyncPlugins { cloud_url } => {
+            return run_sync_plugins(cloud_url);
+        }
+        Commands::LinkFolder { folder, project } => {
+            return run_link_folder(folder, project);
         }
         _ => {}
     }
@@ -364,8 +394,9 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         // Plugin 子命令在 run() 头部已 handle, 这里 unreachable
         Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. }
         | Commands::PluginKeygen { .. } | Commands::PluginSign { .. } | Commands::PluginVerifySig { .. }
-        | Commands::PluginInstall { .. } | Commands::PluginUninstall { .. } | Commands::PluginList => {
-            unreachable!("plugin commands handled before vault open")
+        | Commands::PluginInstall { .. } | Commands::PluginUninstall { .. } | Commands::PluginList
+        | Commands::Login { .. } | Commands::SyncPlugins { .. } | Commands::LinkFolder { .. } => {
+            unreachable!("plugin/cloud commands handled before vault open")
         }
     }
     Ok(())
@@ -661,4 +692,109 @@ fn run_plugin_list() -> attune_core::error::Result<()> {
     }
     println!("{count} plugin(s) installed at {} ({errors} errors)", plugins_root.display());
     Ok(())
+}
+
+fn run_login(email: &str, cloud_url: &str) -> attune_core::error::Result<()> {
+    let password = read_password(&format!("Password for {email}: "))?;
+    let mut client = attune_core::cloud_client::CloudClient::new(cloud_url);
+    let user = client.login(email, &password)?;
+    eprintln!("✓ logged in as {} (tier={}, active={})", user.email, user.tier, user.is_active);
+
+    // 拿 licenses + entitled plugins, 提示是否自动同步
+    match client.list_licenses() {
+        Ok(licenses) => {
+            eprintln!("  你有 {} 个 license:", licenses.len());
+            for lic in &licenses {
+                eprintln!(
+                    "  - {} (tier={}, max_devices={}, quota={})",
+                    lic.id, lic.tier, lic.max_devices, lic.llm_monthly_quota
+                );
+                if !lic.entitled_plugins.is_empty() {
+                    eprintln!("    entitled plugins:");
+                    for ep in &lic.entitled_plugins {
+                        eprintln!("    · {} (v{})", ep.plugin_id, ep.version);
+                    }
+                }
+            }
+            eprintln!();
+            eprintln!("运行 `attune sync-plugins --cloud-url {cloud_url}` 自动装 entitled pro 插件");
+        }
+        Err(e) => eprintln!("⚠️  list licenses failed: {e}"),
+    }
+    // 实际生产: 写 ~/.config/attune/cloud.json 缓存 session token
+    Ok(())
+}
+
+fn run_sync_plugins(cloud_url: &str) -> attune_core::error::Result<()> {
+    let client = attune_core::cloud_client::CloudClient::new(cloud_url);
+    let report = attune_core::plugin_sync::sync_plugins(&client)?;
+    eprintln!("=== plugin sync report ===");
+    eprintln!("  ✓ installed: {}", report.installed.len());
+    for p in &report.installed {
+        eprintln!("    + {p}");
+    }
+    eprintln!("  · skipped (already installed): {}", report.skipped_already_installed.len());
+    for p in &report.skipped_already_installed {
+        eprintln!("    = {p}");
+    }
+    if !report.failed.is_empty() {
+        eprintln!("  ❌ failed: {}", report.failed.len());
+        for (p, reason) in &report.failed {
+            eprintln!("    ✗ {p}: {reason}");
+        }
+    }
+    eprintln!();
+    eprintln!("Restart attune-server for newly installed plugins to be picked up.");
+    Ok(())
+}
+
+fn run_link_folder(folder: &std::path::Path, project: &str) -> attune_core::error::Result<()> {
+    if !folder.exists() {
+        return Err(attune_core::error::VaultError::InvalidInput(format!(
+            "folder does not exist: {}",
+            folder.display()
+        )));
+    }
+    if !folder.is_dir() {
+        return Err(attune_core::error::VaultError::InvalidInput(format!(
+            "not a directory: {}",
+            folder.display()
+        )));
+    }
+    let abs = std::fs::canonicalize(folder).map_err(attune_core::error::VaultError::Io)?;
+
+    // 把 link 写到 ~/.config/attune/folder-links.json (UI/server 启动时读)
+    let config_dir = attune_core::platform::config_dir();
+    std::fs::create_dir_all(&config_dir).map_err(attune_core::error::VaultError::Io)?;
+    let links_path = config_dir.join("folder-links.json");
+    let mut links: Vec<FolderLink> = if links_path.exists() {
+        let s = std::fs::read_to_string(&links_path).map_err(attune_core::error::VaultError::Io)?;
+        serde_json::from_str(&s).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let new_link = FolderLink {
+        project: project.to_string(),
+        folder: abs.to_string_lossy().to_string(),
+        linked_at: chrono::Utc::now().to_rfc3339(),
+    };
+    // 去重 (按 folder)
+    links.retain(|l| l.folder != new_link.folder);
+    links.push(new_link.clone());
+    std::fs::write(
+        &links_path,
+        serde_json::to_string_pretty(&links).expect("ser"),
+    ).map_err(attune_core::error::VaultError::Io)?;
+
+    eprintln!("✓ linked {} to project '{}'", abs.display(), project);
+    eprintln!("  link saved to {}", links_path.display());
+    eprintln!("  total links: {}", links.len());
+    Ok(())
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct FolderLink {
+    project: String,
+    folder: String,
+    linked_at: String,
 }
