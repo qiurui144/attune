@@ -7,6 +7,12 @@
 //! - **postinst 自动下载 4 个 ONNX 模型 (~21 MB)** — 装包即可用
 //! - PDF → 多页 PNG 经 `pdftoppm` (poppler-utils 自动装)；每页走 PP-OCR
 //!
+//! 场景自动选择（2026-05-09）：
+//! - `auto_detect_scene(path)` 按文件名/内容启发式推荐 profile_id
+//! - OcrProfile 新增 `reconstruct_tables` / `deskew` 字段
+//! - OcrProvider trait 新增 `extract_structured()` 方法返回 `OcrOutput`
+//! - 表格场景输出 Markdown 格式；扫描件场景自动去斜
+//!
 //! 调用层 (parser.rs / ai_stack.rs) 用：
 //!   `detect_default_provider()` → `Box<dyn OcrProvider>`
 //!   `extract_text_from_pdf(provider, path)` → 全文
@@ -17,8 +23,19 @@ pub mod profile;
 pub mod profile_registry;
 
 use crate::error::{Result, VaultError};
+use profile::OcrProfile;
 use std::path::Path;
 use std::process::Command;
+
+/// OCR 输出 — 除纯文本外还携带可选的结构化信息。
+#[derive(Debug, Clone)]
+pub struct OcrOutput {
+    /// 纯文本（始终存在，供全文搜索/摘要）
+    pub text: String,
+    /// Markdown 表格（仅当 profile.reconstruct_tables=true 且检测到表格布局时填入）
+    /// 格式示例：`| 列A | 列B |\n|---|---|\n| v1 | v2 |`
+    pub table_markdown: Option<String>,
+}
 
 /// OCR provider 抽象 — 当前只有 PP-OCRv5 一个实现。
 /// trait 仍然保留是为了：测试用 mock + 未来可能的 K3 远程 provider。
@@ -29,8 +46,16 @@ pub trait OcrProvider: Send + Sync {
     /// 是否支持中文
     fn has_chinese(&self) -> bool;
 
-    /// 抽取单张图片的文字
+    /// 抽取单张图片的文字（plain text，不做表格重建 / 去斜）
     fn extract_text_from_image(&self, image_path: &Path) -> Result<String>;
+
+    /// 带布局结构的 OCR — 支持去斜预处理 + 表格重建。
+    /// 默认实现调用 `extract_text_from_image()` 返回纯文本。
+    /// `PpOcrProvider` 重写以支持完整的场景能力。
+    fn extract_structured(&self, image_path: &Path, _profile: &OcrProfile) -> Result<OcrOutput> {
+        let text = self.extract_text_from_image(image_path)?;
+        Ok(OcrOutput { text, table_markdown: None })
+    }
 }
 
 /// 选择默认 OCR provider —
@@ -145,19 +170,189 @@ pub fn extract_text_from_pdf_with_dpi(
     Ok(all)
 }
 
+/// PDF → 结构化 OCR（带表格重建 + 去斜），按 profile 设置决定行为。
+/// 每页单独处理，表格行之间用 `---` 分隔。
+pub fn extract_text_from_pdf_with_profile(
+    provider: &dyn OcrProvider,
+    pdf_path: &Path,
+    profile: &OcrProfile,
+) -> Result<String> {
+    let dpi = if (72..=1200).contains(&profile.dpi) { profile.dpi } else { 300 };
+    let pdftoppm = which::which("pdftoppm").map_err(|_| {
+        VaultError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "pdftoppm not found (poppler-utils 应由 .deb 自动装；apt install poppler-utils 修复)",
+        ))
+    })?;
+    let tmp = tempfile::TempDir::new().map_err(VaultError::Io)?;
+    let prefix = tmp.path().join("page");
+    let prefix_str = prefix.to_str().ok_or_else(|| {
+        VaultError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "non-UTF8 temp path",
+        ))
+    })?;
+    let dpi_str = dpi.to_string();
+    let status = Command::new(&pdftoppm)
+        .args(["-r", dpi_str.as_str(), "-png"])
+        .arg(pdf_path)
+        .arg(prefix_str)
+        .status()
+        .map_err(VaultError::Io)?;
+    if !status.success() {
+        return Err(VaultError::Io(std::io::Error::other(format!(
+            "pdftoppm failed: exit {}",
+            status.code().unwrap_or(-1)
+        ))));
+    }
+    let mut pages: Vec<_> = std::fs::read_dir(tmp.path())
+        .map_err(VaultError::Io)?
+        .filter_map(|r| r.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("png"))
+        .collect();
+    pages.sort();
+    if pages.is_empty() {
+        return Err(VaultError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pdftoppm produced no pages",
+        )));
+    }
+    let mut all = String::with_capacity(pages.len() * 2000);
+    let mut failed = 0usize;
+    for (idx, png) in pages.iter().enumerate() {
+        match provider.extract_structured(png, profile) {
+            Ok(out) => {
+                if let Some(tbl) = &out.table_markdown {
+                    all.push_str(tbl.trim());
+                } else {
+                    all.push_str(out.text.trim());
+                }
+                all.push_str("\n\n");
+            }
+            Err(e) => {
+                log::warn!("{} page {} error: {}", provider.name(), idx + 1, e);
+                failed += 1;
+            }
+        }
+    }
+    log::info!(
+        "{} PDF structured pipeline: {} pages ok, {} failed, {} bytes text",
+        provider.name(), pages.len() - failed, failed, all.len()
+    );
+    Ok(all)
+}
+
+/// 从注册表按 profile_id 取 OcrProfile. None / 不存在均返回 contract 默认 profile.
+pub fn profile_for_id(profile_id: Option<&str>) -> OcrProfile {
+    let id = match profile_id {
+        Some(s) if !s.is_empty() => s,
+        _ => OcrProfile::DEFAULT_ID,
+    };
+    match profile_registry::ProfileRegistry::load_default() {
+        Ok(reg) => reg.get(id).cloned().unwrap_or_else(|| {
+            OcrProfile::builtins()
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap_or_else(|| default_contract_profile())
+        }),
+        Err(_) => default_contract_profile(),
+    }
+}
+
 /// 从注册表按 profile_id 取 DPI. None / 不存在 / load 失败均返回 300 (默认合同 DPI).
 ///
 /// 这是 OCR pipeline 与 profile 系统的对接点 — 调用方拿到 profile_id 后用此函数
 /// 决定 DPI, 再调 `extract_text_from_pdf_with_dpi`.
 pub fn dpi_for_profile(profile_id: Option<&str>) -> u32 {
-    let id = match profile_id {
-        Some(s) if !s.is_empty() => s,
-        _ => return 300,
-    };
-    match profile_registry::ProfileRegistry::load_default() {
-        Ok(reg) => reg.get(id).map(|p| p.dpi).unwrap_or(300),
-        Err(_) => 300,
+    profile_for_id(profile_id).dpi
+}
+
+fn default_contract_profile() -> OcrProfile {
+    OcrProfile::builtins()
+        .into_iter()
+        .find(|p| p.id == "contract")
+        .expect("contract builtin always present")
+}
+
+/// 自动场景推断 — 按文件名和扩展名启发式推荐 profile_id。
+///
+/// 规则优先级（低索引优先）：
+/// 1. 文件名含表格关键词 → "table"
+/// 2. 文件名含表单/申请 → "form"
+/// 3. 文件名含票据/发票 → "receipt"
+/// 4. 文件名含截图/screenshot → "screenshot"
+/// 5. 文件名含证件/名片 → "card"
+/// 6. 文件名含古籍/碑文 → "ancient"
+/// 7. 无命中 → "contract"（通用高精度扫描件默认）
+///
+/// 返回值是 profile_id（`&'static str`）。调用方可用 `profile_for_id(Some(id))` 取完整 profile。
+pub fn auto_detect_scene(filename: &str) -> &'static str {
+    let lower = filename.to_lowercase();
+    // 表格
+    if lower.contains("table")
+        || lower.contains("表格")
+        || lower.contains("报表")
+        || lower.contains("数据表")
+        || lower.contains("excel")
+        || lower.contains(".xlsx")
+        || lower.contains("sheet")
+    {
+        return "table";
     }
+    // 表单
+    if lower.contains("form")
+        || lower.contains("表单")
+        || lower.contains("申请")
+        || lower.contains("登记")
+        || lower.contains("问卷")
+        || lower.contains("填写")
+    {
+        return "form";
+    }
+    // 票据
+    if lower.contains("receipt")
+        || lower.contains("invoice")
+        || lower.contains("票据")
+        || lower.contains("发票")
+        || lower.contains("收据")
+        || lower.contains("流水")
+        || lower.contains("账单")
+    {
+        return "receipt";
+    }
+    // 截图
+    if lower.contains("screenshot")
+        || lower.contains("screen")
+        || lower.contains("截图")
+        || lower.contains("屏幕")
+        || lower.contains("capture")
+    {
+        return "screenshot";
+    }
+    // 证件 / 名片
+    if lower.contains("card")
+        || lower.contains("证件")
+        || lower.contains("身份证")
+        || lower.contains("营业执照")
+        || lower.contains("名片")
+        || lower.contains("执照")
+        || lower.contains("license")
+        || lower.contains("passport")
+    {
+        return "card";
+    }
+    // 古籍
+    if lower.contains("ancient")
+        || lower.contains("古籍")
+        || lower.contains("碑文")
+        || lower.contains("拓片")
+        || lower.contains("善本")
+    {
+        return "ancient";
+    }
+    // 默认：合同 / 通用扫描件（高精度，含去斜）
+    "contract"
 }
 
 /// 判断 PDF 是否需要 OCR（pdf_extract 产出文字量低于阈值）
@@ -193,10 +388,65 @@ mod tests {
 
     #[test]
     fn dpi_for_profile_unknown_returns_default() {
-        // unknown profile id → 300 (registry 加载得到 4 builtin 但无此 id)
+        // unknown profile id → 300 (registry 加载得到 7 builtin 但无此 id)
         let tmp = tempfile::TempDir::new().expect("tmp");
         std::env::set_var("HOME", tmp.path());
         std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
         assert_eq!(dpi_for_profile(Some("does-not-exist")), 300);
+    }
+
+    #[test]
+    fn auto_detect_scene_table_keywords() {
+        assert_eq!(auto_detect_scene("财务报表2024.pdf"), "table");
+        assert_eq!(auto_detect_scene("数据表汇总.pdf"), "table");
+        assert_eq!(auto_detect_scene("sales_sheet.xlsx"), "table");
+        assert_eq!(auto_detect_scene("Q3_excel_export.pdf"), "table");
+    }
+
+    #[test]
+    fn auto_detect_scene_form_keywords() {
+        assert_eq!(auto_detect_scene("入职申请.pdf"), "form");
+        assert_eq!(auto_detect_scene("用户登记表.jpg"), "form");
+        assert_eq!(auto_detect_scene("questionnaire_form.pdf"), "form");
+    }
+
+    #[test]
+    fn auto_detect_scene_receipt_keywords() {
+        assert_eq!(auto_detect_scene("发票20240501.jpg"), "receipt");
+        assert_eq!(auto_detect_scene("银行流水.pdf"), "receipt");
+        assert_eq!(auto_detect_scene("invoice_2024.pdf"), "receipt");
+    }
+
+    #[test]
+    fn auto_detect_scene_screenshot_keywords() {
+        assert_eq!(auto_detect_scene("screenshot_20240501.png"), "screenshot");
+        assert_eq!(auto_detect_scene("微信截图_001.png"), "screenshot");
+    }
+
+    #[test]
+    fn auto_detect_scene_card_keywords() {
+        assert_eq!(auto_detect_scene("身份证正面.jpg"), "card");
+        assert_eq!(auto_detect_scene("营业执照.pdf"), "card");
+        assert_eq!(auto_detect_scene("business_card.png"), "card");
+        assert_eq!(auto_detect_scene("passport_scan.jpg"), "card");
+    }
+
+    #[test]
+    fn auto_detect_scene_ancient_keywords() {
+        assert_eq!(auto_detect_scene("宋刻古籍.jpg"), "ancient");
+        assert_eq!(auto_detect_scene("碑文拓片.png"), "ancient");
+    }
+
+    #[test]
+    fn auto_detect_scene_default_contract() {
+        assert_eq!(auto_detect_scene("劳动合同.pdf"), "contract");
+        assert_eq!(auto_detect_scene("扫描件001.pdf"), "contract");
+        assert_eq!(auto_detect_scene("document.pdf"), "contract");
+    }
+
+    #[test]
+    fn auto_detect_scene_case_insensitive() {
+        assert_eq!(auto_detect_scene("SCREENSHOT_001.PNG"), "screenshot");
+        assert_eq!(auto_detect_scene("Invoice_Q1.PDF"), "receipt");
     }
 }

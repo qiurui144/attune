@@ -116,9 +116,9 @@ mod tests {
     }
 
     #[test]
-    fn first_load_writes_four_builtins() {
+    fn first_load_writes_seven_builtins() {
         let (tmp, reg) = fresh_registry();
-        assert_eq!(reg.list().len(), 4);
+        assert_eq!(reg.list().len(), 7);
         assert!(tmp.path().join("ocr_profiles.json").exists());
     }
 
@@ -137,11 +137,12 @@ mod tests {
             dpi: 300,
             tags: vec![],
             builtin: false,
+            ..Default::default()
         })
         .expect("upsert");
-        // 再 load 一次, 应该看到 5 条
+        // 再 load 一次, 应该看到 8 条（7 builtins + 1 custom）
         let reg3 = ProfileRegistry::load_from(&path).expect("load3");
-        assert_eq!(reg3.list().len(), 5);
+        assert_eq!(reg3.list().len(), 8);
         assert!(reg3.get("mine").is_some());
     }
 
@@ -163,6 +164,7 @@ mod tests {
             dpi: 200,
             tags: vec![],
             builtin: false,
+            ..Default::default()
         })
         .expect("upsert");
         assert!(reg.get("custom").is_some());
@@ -182,6 +184,7 @@ mod tests {
                 dpi: 100,
                 tags: vec![],
                 builtin: false,
+                ..Default::default()
             })
             .expect_err("must reject");
         assert!(format!("{err}").contains("builtin"));
@@ -198,6 +201,7 @@ mod tests {
             dpi: 200,
             tags: vec![],
             builtin: true, // 攻击者尝试声明 builtin
+            ..Default::default()
         })
         .expect("upsert");
         assert!(!reg.get("fake_builtin").unwrap().builtin);
@@ -214,6 +218,7 @@ mod tests {
             dpi: 10,
             tags: vec![],
             builtin: false,
+            ..Default::default()
         };
         assert!(reg.upsert(bad).is_err());
     }

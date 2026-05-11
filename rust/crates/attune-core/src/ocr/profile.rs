@@ -1,15 +1,15 @@
 //! OCR 场景预设 (OcrProfile) — 用户可见的"场景预设"概念.
 //!
-//! USER-FEATURES.md §3 承诺: 用户看到的是**场景名** (合同 / 票据 / 截图 / 古籍),
+//! USER-FEATURES.md §3 承诺: 用户看到的是**场景名** (合同 / 票据 / 截图 / 古籍 / 表格…),
 //! 不是引擎/模型/DPI 等技术参数. 同时可配置多个 profile.
 //!
 //! 当前唯一引擎是 PP-OCRv5 mobile, profile 真正能调的参数是 PDF 渲染 DPI
-//! (200 普通文档 / 300 标准合同 / 600 古籍高分辨率).
+//! (200 普通文档 / 300 标准合同 / 600 古籍高分辨率) 及表格重建开关.
 
 use serde::{Deserialize, Serialize};
 
 /// OCR 场景预设. `builtin = true` 的预设不可删不可改.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct OcrProfile {
     /// slug id, e.g. "contract" / "receipt"
     pub id: String,
@@ -26,10 +26,20 @@ pub struct OcrProfile {
     pub tags: Vec<String>,
     /// 内置预设, 不允许通过 API 删除或修改
     pub builtin: bool,
+    /// 是否尝试重建表格结构（输出 Markdown 表格）。
+    /// 开启时 OCR pipeline 按文本块坐标分析行列关系，在 `OcrOutput::table_markdown` 填入
+    /// `| 列1 | 列2 |` 格式。table / form / receipt 场景默认开启；其他场景默认关闭。
+    #[serde(default)]
+    pub reconstruct_tables: bool,
+    /// 是否在 OCR 前做文档去斜（Deskew）预处理。
+    /// 扫描件偏斜 > 0.5° 时自动旋转校正，提升识别精度。
+    /// contract / ancient / table 等扫描类场景默认开启；截图类默认关闭。
+    #[serde(default)]
+    pub deskew: bool,
 }
 
 impl OcrProfile {
-    /// 返回 4 个内置场景预设 (合同 / 票据 / 截图 / 古籍).
+    /// 返回 7 个内置场景预设 (合同 / 票据 / 截图 / 古籍 / 表格 / 表单 / 证件).
     pub fn builtins() -> Vec<OcrProfile> {
         vec![
             OcrProfile {
@@ -40,6 +50,8 @@ impl OcrProfile {
                 dpi: 300,
                 tags: vec!["合同".to_string(), "判决书".to_string(), "起诉状".to_string()],
                 builtin: true,
+                reconstruct_tables: false,
+                deskew: true,
             },
             OcrProfile {
                 id: "receipt".to_string(),
@@ -49,6 +61,8 @@ impl OcrProfile {
                 dpi: 200,
                 tags: vec!["票据".to_string(), "发票".to_string(), "流水".to_string()],
                 builtin: true,
+                reconstruct_tables: true,
+                deskew: false,
             },
             OcrProfile {
                 id: "screenshot".to_string(),
@@ -58,6 +72,8 @@ impl OcrProfile {
                 dpi: 200,
                 tags: vec!["聊天截图".to_string(), "网页截图".to_string()],
                 builtin: true,
+                reconstruct_tables: false,
+                deskew: false,
             },
             OcrProfile {
                 id: "ancient".to_string(),
@@ -67,6 +83,41 @@ impl OcrProfile {
                 dpi: 600,
                 tags: vec!["古籍".to_string(), "碑文".to_string()],
                 builtin: true,
+                reconstruct_tables: false,
+                deskew: true,
+            },
+            OcrProfile {
+                id: "table".to_string(),
+                name: "表格 / 报表".to_string(),
+                description: "适合 Excel 导出表格、财务报表、数据汇总等规整表格文档，输出 Markdown 表格格式".to_string(),
+                languages: "chi_sim+eng".to_string(),
+                dpi: 300,
+                tags: vec!["表格".to_string(), "报表".to_string(), "数据".to_string(), "财务".to_string()],
+                builtin: true,
+                reconstruct_tables: true,
+                deskew: true,
+            },
+            OcrProfile {
+                id: "form".to_string(),
+                name: "表单 / 填写项".to_string(),
+                description: "适合申请表、问卷、登记表等有填写字段的表单，识别字段名与填写内容".to_string(),
+                languages: "chi_sim+eng".to_string(),
+                dpi: 200,
+                tags: vec!["表单".to_string(), "申请表".to_string(), "问卷".to_string()],
+                builtin: true,
+                reconstruct_tables: true,
+                deskew: false,
+            },
+            OcrProfile {
+                id: "card".to_string(),
+                name: "证件 / 名片".to_string(),
+                description: "适合身份证、营业执照、名片等小尺寸证件类图片".to_string(),
+                languages: "chi_sim+eng".to_string(),
+                dpi: 300,
+                tags: vec!["身份证".to_string(), "营业执照".to_string(), "名片".to_string()],
+                builtin: true,
+                reconstruct_tables: false,
+                deskew: false,
             },
         ]
     }
@@ -97,11 +148,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_count_is_four() {
+    fn builtins_count_is_seven() {
         let bs = OcrProfile::builtins();
-        assert_eq!(bs.len(), 4);
+        assert_eq!(bs.len(), 7);
         let ids: Vec<&str> = bs.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["contract", "receipt", "screenshot", "ancient"]);
+        assert_eq!(ids, vec!["contract", "receipt", "screenshot", "ancient", "table", "form", "card"]);
     }
 
     #[test]
@@ -150,5 +201,37 @@ mod tests {
         let j = serde_json::to_string(&p).expect("ser");
         let back: OcrProfile = serde_json::from_str(&j).expect("de");
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn reconstruct_tables_flag_on_table_profile() {
+        let bs = OcrProfile::builtins();
+        let table = bs.iter().find(|p| p.id == "table").unwrap();
+        assert!(table.reconstruct_tables, "table profile must have reconstruct_tables=true");
+        let form = bs.iter().find(|p| p.id == "form").unwrap();
+        assert!(form.reconstruct_tables, "form profile must have reconstruct_tables=true");
+        let contract = bs.iter().find(|p| p.id == "contract").unwrap();
+        assert!(!contract.reconstruct_tables, "contract profile should not force table reconstruction");
+    }
+
+    #[test]
+    fn deskew_flag_on_scan_profiles() {
+        let bs = OcrProfile::builtins();
+        let contract = bs.iter().find(|p| p.id == "contract").unwrap();
+        assert!(contract.deskew, "contract (scanned) should deskew");
+        let screenshot = bs.iter().find(|p| p.id == "screenshot").unwrap();
+        assert!(!screenshot.deskew, "screenshot should not deskew");
+    }
+
+    #[test]
+    fn serde_roundtrip_new_fields_default_false_on_missing() {
+        // Legacy JSON without reconstruct_tables / deskew fields should deserialize with false
+        let legacy_json = r#"{
+            "id":"contract","name":"合同","description":"desc",
+            "languages":"chi_sim","dpi":300,"tags":[],"builtin":true
+        }"#;
+        let p: OcrProfile = serde_json::from_str(legacy_json).expect("deserialize legacy");
+        assert!(!p.reconstruct_tables);
+        assert!(!p.deskew);
     }
 }

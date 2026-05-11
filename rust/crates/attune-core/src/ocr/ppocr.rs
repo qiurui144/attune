@@ -266,11 +266,300 @@ impl OcrProvider for PpOcrProvider {
         }
         Ok(all)
     }
+
+    /// 带布局结构的 OCR — 支持去斜预处理 + 表格重建。
+    ///
+    /// 流程：
+    ///   1. profile.deskew=true → 检测倾斜角，> 0.5° 时旋转校正后再推理
+    ///   2. PP-OCR 推理，拿到带 box_points 的 text_blocks
+    ///   3. profile.reconstruct_tables=true → 按文本块坐标重建 Markdown 表格
+    fn extract_structured(
+        &self,
+        image_path: &Path,
+        profile: &super::profile::OcrProfile,
+    ) -> super::super::error::Result<super::OcrOutput> {
+        // Step 1: deskew preprocessing（如 profile 开启）
+        let deskewed_tmp: Option<tempfile::NamedTempFile>;
+        let effective_path: &Path = if profile.deskew {
+            if let Some(tmp) = deskew_image(image_path) {
+                deskewed_tmp = Some(tmp);
+                deskewed_tmp.as_ref().unwrap().path()
+            } else {
+                deskewed_tmp = None;
+                image_path
+            }
+        } else {
+            deskewed_tmp = None;
+            image_path
+        };
+
+        let path_str = effective_path.to_str().ok_or_else(|| {
+            VaultError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "non-UTF8 image path after deskew",
+            ))
+        })?;
+
+        // Step 2: PP-OCR 推理（拿完整 text_blocks 含 box_points）
+        let result = {
+            let lock = self
+                .inner
+                .lock()
+                .map_err(|_| VaultError::Crypto("PP-OCR session lock poisoned".into()))?;
+            lock.detect_from_path(path_str, 50, 2048, 0.6, 0.3, 1.6, true, true)
+                .map_err(|e| VaultError::ModelLoad(format!("PP-OCR detect (structured): {e}")))?
+        };
+        // temp 文件在此 drop（lock 先 drop，避免重叠）
+        drop(deskewed_tmp);
+
+        // Step 3: 拼接文本
+        let mut plain = String::with_capacity(1024);
+        for block in &result.text_blocks {
+            if !block.text.is_empty() {
+                plain.push_str(&block.text);
+                plain.push('\n');
+            }
+        }
+
+        // Step 4: 表格重建（如 profile 开启）
+        let table_markdown = if profile.reconstruct_tables {
+            reconstruct_table_md(&result.text_blocks)
+        } else {
+            None
+        };
+
+        Ok(super::OcrOutput { text: plain, table_markdown })
+    }
 }
 
 /// 工厂 — `mod.rs::detect_default_provider()` 调这里。
 pub fn detect() -> Option<PpOcrProvider> {
     PpOcrProvider::new()
+}
+
+// ── 去斜（Deskew）预处理 ─────────────────────────────────────────────────────
+
+/// 检测图片倾斜角并在必要时旋转校正。
+///
+/// 算法：水平投影法（Projection Profile Method）
+///   - 对图片二值化（< 128 → 暗像素）
+///   - 在 -10° ~ +10°（0.5° 步长）枚举旋转角
+///   - 计算每个角度下水平投影曲线的方差
+///   - 方差最大的角度 = 文字行最对齐 = 真实倾斜角
+///   - 仅当 |angle| > 0.5° 才实际旋转（避免无谓损失）
+///
+/// 采样优化：每 4 像素采样一次（2000×3000 → 500×750），约 15M 操作/角度，
+/// 41 个角度总计 ~600M 简单操作，通常 < 200ms。
+///
+/// 返回 NamedTempFile（调用方持有生命期；drop 时自动删除）。
+pub fn deskew_image(image_path: &Path) -> Option<tempfile::NamedTempFile> {
+    let img = image::open(image_path).ok()?;
+    let luma = img.to_luma8();
+    let angle_deg = estimate_skew_deg(&luma)?; // > 0.5° 才 Some
+    // 用 imageproc::geometric_transformations::rotate_about_center 做旋转
+    // 注：旋转是顺时针为负角度（图像坐标系 Y 向下），我们纠正倾斜需取反
+    let rad = (-angle_deg).to_radians() as f32;
+    let rotated = imageproc::geometric_transformations::rotate_about_center(
+        &luma,
+        rad,
+        imageproc::geometric_transformations::Interpolation::Bilinear,
+        image::Luma([255u8]),
+    );
+    let dynamic = image::DynamicImage::ImageLuma8(rotated);
+    let mut tmp = tempfile::Builder::new()
+        .prefix("attune_deskew_")
+        .suffix(".png")
+        .tempfile()
+        .ok()?;
+    dynamic
+        .write_to(tmp.as_file_mut(), image::ImageFormat::Png)
+        .ok()?;
+    log::debug!("deskew: {:.1}° correction applied to {}", angle_deg, image_path.display());
+    Some(tmp)
+}
+
+/// 水平投影法估计文档倾斜角（-10° ~ +10°，0.5° 步长）。
+/// 返回 None 当 |angle| ≤ 0.5°（无需校正）。
+/// 返回 None 当图像过小（< 100×100），避免投影统计无意义。
+fn estimate_skew_deg(gray: &image::GrayImage) -> Option<f32> {
+    let (w, h) = gray.dimensions();
+    if w < 100 || h < 100 {
+        return None;
+    }
+    let cx = w as f32 / 2.0;
+    let cy = h as f32 / 2.0;
+    let mut best_angle = 0.0f32;
+    let mut best_score = 0.0f64; // only update if variance > 0 (blank/no-text → stays 0.0 → returns None)
+
+    // -10° to +10° in 0.5° steps (41 angles)
+    for i in -20i32..=20 {
+        let angle = i as f32 * 0.5;
+        let rad = angle.to_radians();
+        let cos = rad.cos();
+        let sin = rad.sin();
+
+        // 采样每 4 像素（宽高均），减少计算量
+        let mut profile = vec![0u32; h as usize];
+        let mut y = 0u32;
+        while y < h {
+            let mut x = 0u32;
+            while x < w {
+                if gray.get_pixel(x, y)[0] < 128 {
+                    // 旋转该点，取旋转后的 Y 坐标
+                    let dx = x as f32 - cx;
+                    let dy = y as f32 - cy;
+                    let ry = (-sin * dx + cos * dy + cy).round() as i32;
+                    if ry >= 0 && (ry as u32) < h {
+                        profile[ry as usize] += 1;
+                    }
+                }
+                x += 4;
+            }
+            y += 4;
+        }
+
+        // 投影曲线方差（文字行对齐时，有文字的行计数高，无文字行接近0，方差最大）
+        let n = profile.len() as f64;
+        let mean = profile.iter().map(|&v| v as f64).sum::<f64>() / n;
+        let variance = profile
+            .iter()
+            .map(|&v| {
+                let d = v as f64 - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n;
+
+        if variance > best_score {
+            best_score = variance;
+            best_angle = angle;
+        }
+    }
+
+    if best_angle.abs() > 0.5 {
+        Some(best_angle)
+    } else {
+        None
+    }
+}
+
+// ── 表格重建 ──────────────────────────────────────────────────────────────────
+
+/// 按文字块坐标重建 Markdown 表格。
+///
+/// 策略：
+///   1. 从 box_points 计算每个块的中心 (cx, cy)
+///   2. 按中心 Y 分行（容差 = 平均块高的 50%）
+///   3. 每行按中心 X 排序
+///   4. 若 ≥ 2 行 × ≥ 2 列 → 输出 Markdown 表格
+///   5. 否则返回 None（调用方 fall back 到 plain text）
+fn reconstruct_table_md(blocks: &[kreuzberg_paddle_ocr::TextBlock]) -> Option<String> {
+    if blocks.len() < 4 {
+        return None; // 少于 4 个块，不可能是表格
+    }
+
+    // 计算每个块的中心坐标和高度
+    struct BlockInfo<'a> {
+        text: &'a str,
+        cx: f32, // center x
+        cy: f32, // center y
+        height: f32,
+    }
+
+    let infos: Vec<BlockInfo<'_>> = blocks
+        .iter()
+        .filter(|b| !b.text.is_empty())
+        .map(|b| {
+            // box_points: Vec<Point> — 4 corners [tl, tr, br, bl], Point { x: u32, y: u32 }
+            let pts = &b.box_points;
+            let n = pts.len().max(1) as f32;
+            let cx = pts.iter().map(|p| p.x as f32).sum::<f32>() / n;
+            let cy = pts.iter().map(|p| p.y as f32).sum::<f32>() / n;
+            // height = avg of left and right side heights (need ≥4 pts)
+            let left_h = if pts.len() >= 4 { (pts[3].y as f32 - pts[0].y as f32).abs() } else { 20.0 };
+            let right_h = if pts.len() >= 4 { (pts[2].y as f32 - pts[1].y as f32).abs() } else { 20.0 };
+            let height = ((left_h + right_h) / 2.0).max(1.0);
+            BlockInfo { text: &b.text, cx, cy, height }
+        })
+        .collect();
+
+    if infos.is_empty() {
+        return None;
+    }
+
+    // 平均块高 → 行分组容差
+    let avg_height: f32 = infos.iter().map(|b| b.height).sum::<f32>() / infos.len() as f32;
+    let row_tol = avg_height * 0.5;
+
+    // 按 cy 升序排列，分行（贪心聚类：cy 差值 ≤ row_tol 属同行）
+    let mut sorted: Vec<usize> = (0..infos.len()).collect();
+    sorted.sort_by(|&a, &b| infos[a].cy.partial_cmp(&infos[b].cy).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    for idx in sorted {
+        let cy = infos[idx].cy;
+        if let Some(last_row) = rows.last_mut() {
+            let last_cy = infos[*last_row.last().unwrap()].cy;
+            if (cy - last_cy).abs() <= row_tol {
+                last_row.push(idx);
+                continue;
+            }
+        }
+        rows.push(vec![idx]);
+    }
+
+    // 每行按 cx 排序
+    for row in &mut rows {
+        row.sort_by(|&a, &b| infos[a].cx.partial_cmp(&infos[b].cx).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    // 检验是否像表格：≥ 2 行 × ≥ 2 列
+    if rows.len() < 2 || rows.iter().map(|r| r.len()).max().unwrap_or(0) < 2 {
+        return None;
+    }
+
+    // 确定最大列数
+    let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+
+    // 生成 Markdown 表格
+    let mut md = String::with_capacity(rows.len() * max_cols * 20);
+
+    // header row
+    let header: Vec<&str> = rows[0].iter().map(|&i| infos[i].text).collect();
+    md.push('|');
+    for cell in &header {
+        md.push(' ');
+        md.push_str(cell.trim().replace('|', "\\|").as_str());
+        md.push_str(" |");
+    }
+    // pad to max_cols
+    for _ in header.len()..max_cols {
+        md.push_str("  |");
+    }
+    md.push('\n');
+
+    // separator
+    md.push('|');
+    for _ in 0..max_cols {
+        md.push_str("---|");
+    }
+    md.push('\n');
+
+    // data rows
+    for row in rows.iter().skip(1) {
+        md.push('|');
+        for &i in row {
+            md.push(' ');
+            md.push_str(infos[i].text.trim().replace('|', "\\|").as_str());
+            md.push_str(" |");
+        }
+        for _ in row.len()..max_cols {
+            md.push_str("  |");
+        }
+        md.push('\n');
+    }
+
+    Some(md)
 }
 
 #[cfg(test)]
@@ -306,5 +595,101 @@ mod tests {
     fn num_cpus_safe_caps_at_8() {
         let n = num_cpus_safe();
         assert!(n >= 1 && n <= 8, "got {n}");
+    }
+
+    // ── deskew tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn estimate_skew_deg_small_image_returns_none() {
+        // 图像过小（< 100×100）不做倾斜估计
+        let tiny = image::GrayImage::new(50, 50);
+        assert!(estimate_skew_deg(&tiny).is_none());
+    }
+
+    #[test]
+    fn estimate_skew_deg_blank_image_returns_none() {
+        // 全白图像无暗像素，投影全零方差相等 → best_angle=0° → None
+        let blank = image::GrayImage::from_pixel(200, 200, image::Luma([255u8]));
+        assert!(estimate_skew_deg(&blank).is_none());
+    }
+
+    #[test]
+    fn estimate_skew_deg_horizontal_lines_zero_skew() {
+        // 在 200×200 白底上画精确水平黑线 → 估计偏转角应接近 0（不超过 0.5°）
+        let mut img = image::GrayImage::from_pixel(200, 200, image::Luma([255u8]));
+        for row in [30u32, 60, 90, 120, 150] {
+            for x in 10u32..190 {
+                img.put_pixel(x, row, image::Luma([0u8]));
+            }
+        }
+        // 期望：skew = 0 → returns None（不校正）
+        let result = estimate_skew_deg(&img);
+        if let Some(angle) = result {
+            // 容差 1.5°（合成图可能因量化而有小偏差）
+            assert!(angle.abs() <= 1.5, "expected near-zero skew but got {angle}°");
+        }
+        // None 也是可接受的（0° 不需要校正）
+    }
+
+    // ── table reconstruction tests ────────────────────────────────────────
+
+    #[test]
+    fn reconstruct_table_md_empty_returns_none() {
+        assert!(reconstruct_table_md(&[]).is_none());
+    }
+
+    fn mk_block(text: &str, x: u32, y: u32) -> kreuzberg_paddle_ocr::TextBlock {
+        kreuzberg_paddle_ocr::TextBlock {
+            text: text.to_string(),
+            box_points: vec![
+                kreuzberg_paddle_ocr::Point { x, y },
+                kreuzberg_paddle_ocr::Point { x: x + 80, y },
+                kreuzberg_paddle_ocr::Point { x: x + 80, y: y + 20 },
+                kreuzberg_paddle_ocr::Point { x, y: y + 20 },
+            ],
+            box_score: 0.9,
+            angle_index: 0,
+            angle_score: 0.0,
+            text_score: 0.9,
+        }
+    }
+
+    #[test]
+    fn reconstruct_table_md_too_few_blocks_returns_none() {
+        // 3 个块不够构成表格
+        let blocks = vec![mk_block("A", 0, 0), mk_block("B", 100, 0), mk_block("C", 0, 30)];
+        assert!(reconstruct_table_md(&blocks).is_none());
+    }
+
+    #[test]
+    fn reconstruct_table_md_2x2_grid() {
+        // 2行 × 2列 的表格 → 应得到 Markdown 表格
+        let blocks = vec![
+            mk_block("姓名", 0, 5),
+            mk_block("年龄", 100, 5),
+            mk_block("张三", 0, 35),
+            mk_block("28", 100, 35),
+        ];
+        let md = reconstruct_table_md(&blocks);
+        assert!(md.is_some(), "2x2 grid should produce table");
+        let md = md.unwrap();
+        assert!(md.contains("姓名"), "header missing 姓名");
+        assert!(md.contains("年龄"), "header missing 年龄");
+        assert!(md.contains("张三"), "data row missing 张三");
+        assert!(md.contains("28"), "data row missing 28");
+        assert!(md.contains("|---|"), "markdown separator missing");
+    }
+
+    #[test]
+    fn reconstruct_table_md_pipe_escaped() {
+        // 文本含 | 符号 → 应转义为 \|
+        let blocks = vec![
+            mk_block("A|B", 0, 5),
+            mk_block("C", 100, 5),
+            mk_block("D|E", 0, 35),
+            mk_block("F", 100, 35),
+        ];
+        let md = reconstruct_table_md(&blocks).unwrap();
+        assert!(md.contains(r"A\|B"), "pipe in cell should be escaped");
     }
 }
