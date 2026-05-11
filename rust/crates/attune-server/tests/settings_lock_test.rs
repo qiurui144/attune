@@ -62,11 +62,11 @@ async fn settings_locked_after_member_login() {
         .expect("GET locks");
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.expect("json");
-    let llm_lock = body
-        .get("llm_endpoint")
+    let cloud_llm_lock = body
+        .get("cloud_llm")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    assert_eq!(llm_lock, "locked", "member tier 应该 llm_endpoint locked");
+    assert_eq!(cloud_llm_lock, "locked", "paid tier 应该 cloud_llm locked");
 
     handle.abort();
 }

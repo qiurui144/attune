@@ -117,10 +117,11 @@ pub async fn update_settings(
     let member_state = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let locks = attune_core::member_session::SettingsLocks::for_state(&member_state);
     if let Some(body_obj) = body.as_object() {
+        // 仅 enforce 用户在应用窗口能改的字段; 底座配置 (embedding/ocr/data_dir 等) 由
+        // 二进制打包默认装配, 不接受 PATCH (server 不在此 lock_map enforce).
         let lock_map: &[(&str, &str)] = &[
-            ("llm", "llm_endpoint"),            // 整个 llm 对象更新触发 llm_endpoint lock
+            ("llm", "cloud_llm"),               // 普通用户改云端 LLM, 付费锁
             ("pluginhub", "plugin_install"),    // pluginhub 配置变 → plugin_install lock
-            ("embedding", "embedding_model"),
         ];
         for (settings_key, lock_field) in lock_map {
             if body_obj.contains_key(*settings_key) && !locks.can_edit(lock_field) {

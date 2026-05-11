@@ -52,86 +52,74 @@ pub enum SettingLock {
     Locked,
 }
 
-/// 客户端所有可锁的 setting 字段 + 当前 lock 状态
+/// 应用窗口 (Tauri 桌面 GUI) 暴露给用户的可配置项.
+///
+/// 产品定义:
+/// - 应用面向非专业用户, 不暴露技术配置 (LLM 底座 / embedding / reranker / OCR 引擎 / 数据目录)
+/// - 底座模型随二进制打包, 默认高精度, 不降级
+/// - 用户唯一可改:
+///   1. vault 主密码 (改密码)
+///   2. 本地知识库目录关联 (隐私自管)
+///   3. plugin 装载 (开源标准 MCP / skill / agents)
+///   4. 云端大模型配置 — 仅普通免费用户 (自己 API key); 付费 hidden (gateway 下发)
+///   5. OCR 多场景预设 (场景化, 不暴露引擎参数)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsLocks {
-    pub llm_endpoint: SettingLock,
-    pub llm_model: SettingLock,
-    pub llm_api_key: SettingLock,
-    pub embedding_model: SettingLock,
-    pub ocr_engine: SettingLock,
-    pub data_dir: SettingLock,
-    pub local_folder_links: SettingLock,
-    pub plugin_install: SettingLock,
-    pub plugin_uninstall: SettingLock,
+    /// vault 主密码 (始终可改, 用户自管)
     pub vault_password: SettingLock,
-    pub device_binding: SettingLock,
-    pub backup_destination: SettingLock,
+    /// 本地知识库目录关联 (始终可改, 隐私自管)
+    pub local_folder_links: SettingLock,
+    /// 装 plugin (社区免费 / 开发者本地). 付费用户锁 — 云端按 license 自动 sync.
+    pub plugin_install: SettingLock,
+    /// 卸载 plugin. 付费用户锁 — 防误删自动装的 pro plugin.
+    pub plugin_uninstall: SettingLock,
+    /// 云端大模型配置 (普通免费用户配自己 API key + endpoint).
+    /// 付费用户锁 — gateway 自动下发, 用户不持 raw key.
+    pub cloud_llm: SettingLock,
+    /// OCR 场景预设 (用户选不同预设给不同场景: 合同 / 票据 / 截图 / ...)
+    /// 不暴露引擎 / 模型 / DPI 等技术参数.
+    pub ocr_profiles: SettingLock,
 }
 
 impl SettingsLocks {
     /// 按 MemberState 推导锁定规则.
-    /// 个人应用: 只有 LoggedOut/Free 全可改, Paid 锁 LLM+插件 (云端下发).
+    ///
+    /// 离线 / 免费: 全可改 (含云端 LLM — 普通用户配自己 API key).
+    /// 付费:        plugin install/uninstall 锁 (云端 sync) + cloud_llm 锁 (gateway 下发).
+    ///              其他不变: 主密码 + 本地目录 + OCR profile 仍可改.
     pub fn for_state(state: &MemberState) -> Self {
         let all_editable = Self {
-            llm_endpoint: SettingLock::Editable,
-            llm_model: SettingLock::Editable,
-            llm_api_key: SettingLock::Editable,
-            embedding_model: SettingLock::Editable,
-            ocr_engine: SettingLock::Editable,
-            data_dir: SettingLock::Editable,
+            vault_password: SettingLock::Editable,
             local_folder_links: SettingLock::Editable,
             plugin_install: SettingLock::Editable,
             plugin_uninstall: SettingLock::Editable,
-            vault_password: SettingLock::Editable,
-            device_binding: SettingLock::Editable,
-            backup_destination: SettingLock::Editable,
+            cloud_llm: SettingLock::Editable,
+            ocr_profiles: SettingLock::Editable,
         };
         match state {
-            MemberState::LoggedOut => all_editable,
-            MemberState::Free { .. } => Self {
-                device_binding: SettingLock::Locked, // 云端绑定, 防共享
-                ..all_editable
-            },
-            // 付费会员: pluginhub 配什么就是什么 — LLM/插件锁, 用户隐私保留
+            MemberState::LoggedOut | MemberState::Free { .. } => all_editable,
             MemberState::Paid { .. } => Self {
-                llm_endpoint: SettingLock::Locked,
-                llm_model: SettingLock::Locked,
-                llm_api_key: SettingLock::Locked,
-                embedding_model: SettingLock::Locked,
-                ocr_engine: SettingLock::Editable, // 本地装载, 可换
-                data_dir: SettingLock::Locked,
-                local_folder_links: SettingLock::Editable, // 隐私自管
                 plugin_install: SettingLock::Locked,
                 plugin_uninstall: SettingLock::Locked,
-                vault_password: SettingLock::Editable,
-                device_binding: SettingLock::Locked,
-                backup_destination: SettingLock::Editable,
+                cloud_llm: SettingLock::Locked, // gateway 自动下发, 用户不持 raw key
+                ..all_editable
             },
         }
     }
 
-    /// 检查具体字段是否可改 — 给 PATCH /settings handler 用
+    /// 检查具体字段是否可改 — 给 PATCH /settings handler 用.
+    /// 未知字段默认放行 (向后兼容: 不在此 6 字段内的设置 server 不 enforce lock).
     pub fn can_edit(&self, field: &str) -> bool {
         let lock = match field {
-            "llm_endpoint" => self.llm_endpoint,
-            "llm_model" => self.llm_model,
-            "llm_api_key" => self.llm_api_key,
-            "embedding_model" => self.embedding_model,
-            "ocr_engine" => self.ocr_engine,
-            "data_dir" => self.data_dir,
+            "vault_password" => self.vault_password,
             "local_folder_links" => self.local_folder_links,
             "plugin_install" => self.plugin_install,
             "plugin_uninstall" => self.plugin_uninstall,
-            "vault_password" => self.vault_password,
-            "device_binding" => self.device_binding,
-            "backup_destination" => self.backup_destination,
-            _ => return true, // 未知字段默认放行 (向后兼容)
+            "cloud_llm" => self.cloud_llm,
+            "ocr_profiles" => self.ocr_profiles,
+            _ => return true,
         };
-        match lock {
-            SettingLock::Editable => true,
-            SettingLock::Locked => false,
-        }
+        matches!(lock, SettingLock::Editable)
     }
 }
 
@@ -140,42 +128,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logged_out_can_edit_everything() {
+    fn logged_out_can_edit_all_6_fields() {
         let locks = SettingsLocks::for_state(&MemberState::LoggedOut);
-        assert!(locks.can_edit("llm_endpoint"));
-        assert!(locks.can_edit("plugin_install"));
-        assert!(locks.can_edit("data_dir"));
+        for f in ["vault_password", "local_folder_links", "plugin_install",
+                  "plugin_uninstall", "cloud_llm", "ocr_profiles"] {
+            assert!(locks.can_edit(f), "logged_out should edit {f}");
+        }
     }
 
     #[test]
-    fn free_user_blocked_from_device_binding() {
+    fn free_user_can_edit_all_6_fields() {
         let locks = SettingsLocks::for_state(&MemberState::Free {
             account_id: "u1".into(),
         });
-        assert!(!locks.can_edit("device_binding"));
-        // 但 LLM / 模型 / 插件 仍可改 (自己 API 自己选)
-        assert!(locks.can_edit("llm_endpoint"));
-        assert!(locks.can_edit("plugin_install"));
+        // 普通免费用户: 仍配自己的云端 LLM API key
+        for f in ["vault_password", "local_folder_links", "plugin_install",
+                  "plugin_uninstall", "cloud_llm", "ocr_profiles"] {
+            assert!(locks.can_edit(f), "free user should edit {f}");
+        }
     }
 
     #[test]
-    fn paid_locked_on_llm_and_plugin() {
+    fn paid_locks_plugin_and_cloud_llm_only() {
         let locks = SettingsLocks::for_state(&MemberState::Paid {
             account_id: "u1".into(),
             license_id: "l1".into(),
             llm_quota_remaining: 1_000_000,
         });
-        // LLM 全锁 (pluginhub 配什么就是什么)
-        assert!(!locks.can_edit("llm_endpoint"));
-        assert!(!locks.can_edit("llm_model"));
-        assert!(!locks.can_edit("llm_api_key"));
-        // 插件锁 (云端按 license 自动装)
+        // 付费锁: cloud_llm (gateway 下发) + plugin install/uninstall (云端 sync)
+        assert!(!locks.can_edit("cloud_llm"));
         assert!(!locks.can_edit("plugin_install"));
         assert!(!locks.can_edit("plugin_uninstall"));
-        // 用户隐私部分仍可改
-        assert!(locks.can_edit("local_folder_links"));
+        // 仍可改: 主密码 + 本地目录 + OCR profile
         assert!(locks.can_edit("vault_password"));
-        assert!(locks.can_edit("backup_destination"));
+        assert!(locks.can_edit("local_folder_links"));
+        assert!(locks.can_edit("ocr_profiles"));
     }
 
     #[test]
@@ -210,10 +197,19 @@ mod tests {
 
     #[test]
     fn settings_locks_serde_roundtrip() {
-        let s = SettingsLocks::for_state(&MemberState::Free { account_id: "a".into() });
+        let s = SettingsLocks::for_state(&MemberState::Paid {
+            account_id: "a".into(),
+            license_id: "l".into(),
+            llm_quota_remaining: 0,
+        });
         let json = serde_json::to_string(&s).unwrap();
         let back: SettingsLocks = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.device_binding, SettingLock::Locked);
-        assert_eq!(back.llm_endpoint, SettingLock::Editable);
+        // paid 锁: plugin + cloud_llm
+        assert_eq!(back.plugin_install, SettingLock::Locked);
+        assert_eq!(back.cloud_llm, SettingLock::Locked);
+        // 仍可改
+        assert_eq!(back.vault_password, SettingLock::Editable);
+        assert_eq!(back.local_folder_links, SettingLock::Editable);
+        assert_eq!(back.ocr_profiles, SettingLock::Editable);
     }
 }
