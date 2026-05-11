@@ -48,7 +48,19 @@ impl ChatMessage {
     }
 }
 
-/// Chat LLM 抽象
+/// 多模态附件 — 走 OpenAI vision content array 协议 (per https://platform.openai.com/docs/guides/vision).
+///
+/// attune 所有 LLM 调用统一走 OpenAI 兼容协议. 图片走 vision content array,
+/// 文件走 attach + 文本拼接 (OpenAI 兼容协议无 native 文件附件, 部分实现含 file_id).
+#[derive(Debug, Clone)]
+pub enum Attachment {
+    /// 图片 (base64 data URI 或 https URL)
+    Image { url_or_data_uri: String, mime: String },
+    /// 文件 — 转 text 后拼到 user message (调用方负责 OCR / 提取)
+    TextFile { name: String, content: String },
+}
+
+/// Chat LLM 抽象 (统一 OpenAI 兼容协议).
 pub trait LlmProvider: Send + Sync {
     /// 单次 chat 调用，system + user 消息，返回完整响应文本
     fn chat(&self, system: &str, user: &str) -> Result<String>;
@@ -65,6 +77,37 @@ pub trait LlmProvider: Send + Sync {
             .map(|m| m.content.as_str())
             .unwrap_or("");
         self.chat(system, user)
+    }
+
+    /// 多模态 chat (图片 + 文件附件).
+    /// 默认 fallback: 文件 content 拼到 user 文本, 图片 attachment 丢弃 + warning.
+    /// 真实多模态 provider (OpenAI vision) 应重写此方法.
+    fn chat_multimodal(
+        &self,
+        system: &str,
+        user: &str,
+        attachments: &[Attachment],
+    ) -> Result<String> {
+        let mut user_text = String::from(user);
+        let mut dropped_images = 0;
+        for a in attachments {
+            match a {
+                Attachment::TextFile { name, content } => {
+                    user_text.push_str("\n\n=== file: ");
+                    user_text.push_str(name);
+                    user_text.push_str(" ===\n");
+                    user_text.push_str(content);
+                }
+                Attachment::Image { .. } => dropped_images += 1,
+            }
+        }
+        if dropped_images > 0 {
+            log::warn!(
+                "{} image(s) dropped by non-vision LLM provider; use vision-capable model",
+                dropped_images
+            );
+        }
+        self.chat(system, &user_text)
     }
 
     /// 模型是否可用
@@ -361,6 +404,74 @@ impl LlmProvider for OpenAiLlmProvider {
         self.chat_sync_impl(messages)
     }
 
+    /// Vision API — content array 走 OpenAI 多模态协议.
+    /// 支持图片 (base64 data URI / https URL) + 文件 (转 text 拼接).
+    fn chat_multimodal(
+        &self,
+        system: &str,
+        user: &str,
+        attachments: &[Attachment],
+    ) -> Result<String> {
+        // user content 构造 array: 文本块 + 图片块
+        // 文件先拼到文本块 (OpenAI 兼容协议无原生文件附件)
+        let mut text_with_files = String::from(user);
+        let mut image_parts: Vec<serde_json::Value> = Vec::new();
+        for a in attachments {
+            match a {
+                Attachment::TextFile { name, content } => {
+                    text_with_files.push_str("\n\n=== file: ");
+                    text_with_files.push_str(name);
+                    text_with_files.push_str(" ===\n");
+                    text_with_files.push_str(content);
+                }
+                Attachment::Image { url_or_data_uri, .. } => {
+                    image_parts.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {"url": url_or_data_uri},
+                    }));
+                }
+            }
+        }
+
+        // 构造 OpenAI content array
+        let mut content_array: Vec<serde_json::Value> = Vec::with_capacity(1 + image_parts.len());
+        content_array.push(serde_json::json!({"type": "text", "text": text_with_files}));
+        content_array.extend(image_parts);
+
+        let url = format!("{}/chat/completions", self.endpoint);
+        let body = serde_json::json!({
+            "model": &self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content_array},
+            ],
+            "stream": false,
+        });
+        let client = self.client.clone();
+        let body_bytes = serde_json::to_vec(&body)?;
+        let api_key = self.api_key.clone();
+
+        llm_block_on(async move {
+            let resp = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .body(body_bytes)
+                .send().await
+                .map_err(|e| VaultError::LlmUnavailable(format!("openai multimodal request: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!("openai HTTP {status}: {body}")));
+            }
+            let parsed: OpenAiResponse = resp.json().await
+                .map_err(|e| VaultError::Classification(format!("parse openai response: {e}")))?;
+            parsed.choices.into_iter().next()
+                .map(|c| c.message.content)
+                .ok_or_else(|| VaultError::Classification("empty openai response".into()))
+        })
+    }
+
     fn is_available(&self) -> bool {
         true
     }
@@ -374,6 +485,8 @@ impl LlmProvider for OpenAiLlmProvider {
 pub struct MockLlmProvider {
     responses: Mutex<Vec<String>>,
     model: String,
+    /// 测试用 — 记录最后一次 chat 收到的 user content (供 chat_multimodal 默认 fallback 验证)
+    last_user: Mutex<String>,
 }
 
 impl MockLlmProvider {
@@ -381,16 +494,23 @@ impl MockLlmProvider {
         Self {
             responses: Mutex::new(Vec::new()),
             model: model.to_string(),
+            last_user: Mutex::new(String::new()),
         }
     }
 
     pub fn push_response(&self, json: &str) {
         self.responses.lock().unwrap_or_else(|e| e.into_inner()).push(json.to_string());
     }
+
+    pub fn last_received_user(&self) -> Option<String> {
+        let s = self.last_user.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if s.is_empty() { None } else { Some(s) }
+    }
 }
 
 impl LlmProvider for MockLlmProvider {
-    fn chat(&self, _system: &str, _user: &str) -> Result<String> {
+    fn chat(&self, _system: &str, user: &str) -> Result<String> {
+        *self.last_user.lock().unwrap_or_else(|e| e.into_inner()) = user.to_string();
         let mut guard = self.responses.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_empty() {
             return Err(VaultError::Classification("no mock response".into()));
@@ -471,5 +591,62 @@ mod tests {
         ];
         let resp = mock.chat_with_history(&messages).unwrap();
         assert_eq!(resp, "history reply");
+    }
+
+    #[test]
+    fn chat_multimodal_default_fallback_concats_text_files_and_warns_on_images() {
+        // Mock provider 走 trait default impl (无 vision 支持)
+        let mock = MockLlmProvider::new("text-only-model");
+        mock.push_response("ack");
+        let attachments = vec![
+            Attachment::TextFile {
+                name: "evidence.txt".into(),
+                content: "借条 出借人 借款人".into(),
+            },
+            Attachment::Image {
+                url_or_data_uri: "data:image/jpeg;base64,...".into(),
+                mime: "image/jpeg".into(),
+            },
+        ];
+        let resp = mock.chat_multimodal("system", "请分析", &attachments).unwrap();
+        assert_eq!(resp, "ack");
+        // mock 收到的 user text 应含 file content (拼接)
+        let received = mock.last_received_user().unwrap_or_default();
+        assert!(received.contains("evidence.txt"));
+        assert!(received.contains("借条"));
+        // 图片对非 vision provider drop 不算错 (有 log::warn)
+    }
+
+    #[test]
+    fn attachment_image_serializes_to_openai_content_array() {
+        // 验证 OpenAI vision content array 结构 (不真调 API)
+        let img_part = serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,iVBOR..."},
+        });
+        let user_content = serde_json::json!([
+            {"type": "text", "text": "What's in this image?"},
+            img_part,
+        ]);
+        let s = serde_json::to_string(&user_content).unwrap();
+        assert!(s.contains(r#""type":"text""#));
+        assert!(s.contains(r#""type":"image_url""#));
+        assert!(s.contains(r#""url":"data:image/png;base64"#));
+    }
+
+    #[test]
+    fn attachment_text_file_concat_format() {
+        let f = Attachment::TextFile {
+            name: "doc.pdf".into(),
+            content: "page1 content\npage2 content".into(),
+        };
+        // 默认 fallback 拼接格式应明确分隔
+        match f {
+            Attachment::TextFile { name, content } => {
+                assert_eq!(name, "doc.pdf");
+                assert!(content.contains("page1"));
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

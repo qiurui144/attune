@@ -37,12 +37,34 @@ brew install ollama
 
 低于 14b 的本地模型在长法律推理 / 复杂 RAG 场景**质量不如云端**, 仅建议轻量场景.
 
-## 3. 配 attune 走本地 LLM
+## 3. 配 attune 走本地 LLM (统一 OpenAI 兼容协议)
+
+attune 所有 LLM 调用统一走 OpenAI 兼容协议. Ollama 自带 OpenAI 兼容 endpoint, 无需任何 adapter.
 
 应用窗口 → 设置 → 云端大模型:
-- Endpoint: `http://127.0.0.1:11434/v1` (Ollama 默认)
+- Endpoint: `http://127.0.0.1:11434/v1` (Ollama OpenAI 兼容)
 - Model: `qwen2.5:7b` (与上一步 pull 一致)
-- API key: 任意 (Ollama 不校验)
+- API key: 任意非空 (Ollama 不校验, 但 attune 客户端要求字段非空)
+
+### 3.1 多模态 (vision) 本地
+
+若用 vision 模型 (如 `llava:7b` / `qwen2.5-vl:7b`), Ollama 也走 OpenAI vision
+content array 协议. attune 多模态 chat 自动构造:
+
+```json
+{
+  "model": "qwen2.5-vl:7b",
+  "messages": [
+    {"role": "user", "content": [
+      {"type": "text", "text": "图里是什么"},
+      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+    ]}
+  ]
+}
+```
+
+文件 (PDF / DOCX) 由 attune 客户端先 OCR/解析 → 拼到 user 文本块, 不走原生
+文件附件 API (OpenAI 兼容协议无原生文件支持).
 
 ## 4. 验证
 
@@ -66,13 +88,21 @@ brew install ollama
 | GPU 没用上 | `nvidia-smi` / `rocm-smi` 检查驱动 |
 | 中文生成质量差 | 升级模型 (qwen2.5:7b → 14b) 或回云端 |
 
-## 7. 与云端切换
+## 7. 与云端切换 — 统一 OpenAI 兼容协议
 
-随时可在应用窗口设置面板切换:
-- Endpoint = `http://127.0.0.1:11434/v1` → 本地
-- Endpoint = `https://api.openai.com/v1` → OpenAI
-- Endpoint = `https://api.deepseek.com/v1` → DeepSeek
-- 付费用户: 设置面板锁定, gateway 自动选 (用户不持 raw key)
+所有 LLM 调用走相同协议, 切换只是改 endpoint + key + model:
+
+| 后端 | Endpoint | Model 示例 |
+|------|---------|-----------|
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` / `gpt-4o` (vision) |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` / `glm-4v-flash` (vision) |
+| 通义 Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` / `qwen-vl-max` (vision) |
+| 月之暗面 | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
+| Anthropic 代理 | (用 OpenAI 兼容代理服务) | `claude-3-5-sonnet` |
+| Ollama 本地 | `http://127.0.0.1:11434/v1` | `qwen2.5:7b` / `qwen2.5-vl:7b` (vision) |
+
+**付费用户**: 设置面板锁定, gateway 自动选 (用户不持 raw key, 仍走 OpenAI 兼容).
 
 ## 8. 不要做的事
 

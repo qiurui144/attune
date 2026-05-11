@@ -30,16 +30,26 @@
 | ASR | whisper-large-v3-turbo (中文 WER 5-7%) | ❌ |
 | 数据目录 | `~/.local/share/attune` (Linux) / `%APPDATA%\attune` (Win) | ❌ |
 
-#### LLM 大模型 — 主要走云端
+#### LLM 大模型 — 主云端 + 统一 OpenAI 兼容协议
+
+**所有 LLM 调用统一走 OpenAI 兼容协议** (`POST /v1/chat/completions`),
+不论后端是云端 OpenAI / DeepSeek / 智谱 / 通义 / Anthropic 兼容代理 / Ollama 本地.
+attune 不为每个 provider 写独立 SDK — 一个 OpenAI client 走天下.
 
 **默认不打包本地 LLM**. attune 大模型能力**主要使用云版本**:
-- 普通免费用户: 自己配云端大模型 API key (OpenAI / Anthropic / DeepSeek / Qwen 兼容)
+- 普通免费用户: 自己配云端大模型 API key (在应用窗口设置面板)
 - 付费用户: 云端 gateway 自动下发 (用户不持 raw key)
+- 本地 LLM (可选): Ollama 自行装 (`docs/local-llm-setup.md`), 同样走 OpenAI 兼容
+  endpoint `http://127.0.0.1:11434/v1`
 
-**本地 LLM (可选, 仅部署指导)**: 如用户出于隐私 / 离线需求自行装 Ollama, 见
-`docs/local-llm-setup.md`. attune **不内置 Ollama / 不打包模型权重**, 由用户自己装.
+**多模态支持** (per OpenAI Vision API):
+- 文件 (PDF / DOCX / TXT / 代码): attune 自动 OCR/解析 → 拼到 user message 文本
+- 图片 (PNG / JPG / WEBP): 走 OpenAI vision `content array` (`{type: image_url, image_url: {url}}`)
+  · 支持 base64 data URI 或 https URL
+  · 模型需支持 vision (gpt-4o / claude-3.5-sonnet / qwen-vl-max / ...)
+  · 非 vision 模型: 图片自动 drop + log warning (代码 fallback 行为)
 
-用户拍板: 默认配置全配高精度, 不降级 — 降级 = 无法使用. LLM 主云端.
+用户拍板: 默认配置全配高精度, 不降级. LLM 主云端 + OpenAI 统一协议.
 
 ## 2. 用户形态
 
