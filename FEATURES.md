@@ -13,7 +13,7 @@
 | **C-CHUNKER** | `chunker.rs` | 滑窗分块 + 章节切割 | unit |
 | **C-PARSER** | `parser.rs` | PDF/DOCX/MD/code 解析 + bytes 入口 | unit + integration |
 | **C-EMBED** | `embed.rs` | Ollama / ONNX / openai_compat embedding provider | unit + ignored e2e |
-| **C-LLM** | `llm.rs` | LlmProvider trait + OpenAI compat + Ollama | unit + ignored e2e |
+| **C-LLM** | `llm.rs` | LlmProvider trait (chat / chat_with_history / **chat_multimodal**) + OpenAI compat (统一协议 + vision content array) + Ollama + Attachment (Image/TextFile) | unit + 3 multimodal + ignored e2e |
 | **C-CHAT** | `chat.rs` (pub(crate)) | ChatEngine / Citation / confidence parse | unit + integration |
 | **C-CHUNKER** | `chunker.rs` | DEFAULT_CHUNK_SIZE / DEFAULT_OVERLAP | unit |
 | **C-CLUSTER** | `clusterer.rs` | HDBSCAN 聚类 | unit |
@@ -58,7 +58,8 @@
 | **DEV-CLIENT** | `accounts_client.rs` | HTTP client → cloud accounts (register/deactivate/verify) | 3 unit |
 | **CLOUD-CLIENT** | `cloud_client.rs` | login/signup/me/list_licenses (FastAPI) + cookie 自动管理 | 4 unit |
 | **LICENSE** | `license.rs` | LicenseClaims + Ed25519 签名 + base64 code + 离线校验 | 9 unit |
-| **MEMBER** | `member_session.rs` | MemberState (LoggedOut/Free/Member/Enterprise) + SettingsLocks 12 字段细粒度 | 7 unit |
+| **MEMBER** | `member_session.rs` | MemberState 3 档 (LoggedOut/Free/Paid) + SettingsLocks 6 字段 (vault_password/local_folder_links/cloud_llm/plugin_install/plugin_uninstall/ocr_profiles) | 6 unit |
+| **LIC-CACHE** | `license_cache.rs` | ~/.config/npu-vault/license.json 持久化 (chmod 600), attune-server 启动读 + scan_with_key 自动解密 paid plugin | 5 unit |
 
 ## 5. UI runtime
 
