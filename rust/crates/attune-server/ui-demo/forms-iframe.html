@@ -52,19 +52,63 @@
   <pre class="response" id="response">等待操作...</pre>
 
   <script>
-    function loadForm() {
+    // 先 probe server + vault 状态, 给出友好提示, 再决定是否加载 iframe
+    async function preflight(server) {
+      try {
+        const vaultResp = await fetch(`${server}/api/v1/vault/status`);
+        if (!vaultResp.ok) {
+          return { ok: false, reason: `vault status ${vaultResp.status}` };
+        }
+        const vaultData = await vaultResp.json();
+        const state = vaultData.state || vaultData;
+        if (state !== 'Unlocked') {
+          return {
+            ok: false,
+            reason: `Vault state = ${state}. 请先解锁: POST ${server}/api/v1/vault/unlock with password`,
+          };
+        }
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, reason: `server unreachable: ${e.message}` };
+      }
+    }
+
+    async function loadForm() {
       const server = document.getElementById('server').value;
       const plugin = document.getElementById('plugin').value;
       const form = document.getElementById('form').value;
+      const responseEl = document.getElementById('response');
+      const iframeEl = document.getElementById('plugin-form');
+
+      responseEl.textContent = '正在 preflight 检查 server + vault 状态...';
+      const pre = await preflight(server);
+      if (!pre.ok) {
+        responseEl.textContent = `❌ Preflight 失败:\n${pre.reason}\n\n` +
+          `提示:\n- 如果 server 没启动: cargo run --release -p attune-server --bin attune-server-headless\n` +
+          `- 如果 vault locked: 先 cargo run -p attune-cli -- setup (首次) 或 unlock\n` +
+          `- iframe 不加载, 避免显示 raw vault locked JSON 给用户`;
+        iframeEl.src = 'about:blank';
+        return;
+      }
+
       const url = `${server}/api/v1/forms/${plugin}/${form}`;
-      document.getElementById('plugin-form').src = url;
-      document.getElementById('response').textContent = `iframe src 已设置为:\n${url}\n\n监听 message 事件等待 form postMessage 提交...`;
+      iframeEl.src = url;
+      responseEl.textContent = `✓ preflight OK, iframe src 已设置:\n${url}\n\n监听 message 事件等待 form postMessage 提交...`;
     }
 
     async function testSubmit() {
       const server = document.getElementById('server').value;
       const plugin = document.getElementById('plugin').value;
       const form = document.getElementById('form').value;
+      const responseEl = document.getElementById('response');
+
+      responseEl.textContent = '正在 preflight 检查...';
+      const pre = await preflight(server);
+      if (!pre.ok) {
+        responseEl.textContent = `❌ Preflight 失败 (提交跳过):\n${pre.reason}`;
+        return;
+      }
+
       const url = `${server}/api/v1/forms/${plugin}/${form}/submit`;
       const sample = {
         parties: { plaintiff_name: "张三", defendant_name: "李四", our_client_is: "plaintiff" },
@@ -78,10 +122,14 @@
           body: JSON.stringify(sample),
         });
         const text = await r.text();
-        document.getElementById('response').textContent =
-          `POST ${url}\nstatus: ${r.status}\nbody:\n${text}`;
+        let icon = r.ok ? '✓' : '⚠️';
+        let extra = '';
+        if (r.status === 404) extra = '\n→ plugin / form 未装载. 用 attune plugin-install <dir> 装载后重启 server';
+        else if (r.status === 403) extra = '\n→ vault locked. 先 attune unlock';
+        responseEl.textContent =
+          `${icon} POST ${url}\nstatus: ${r.status}\nbody:\n${text}${extra}`;
       } catch (e) {
-        document.getElementById('response').textContent = `Error: ${e.message}`;
+        responseEl.textContent = `❌ Network error: ${e.message}`;
       }
     }
 

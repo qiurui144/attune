@@ -124,6 +124,28 @@ enum Commands {
         /// 公钥 hex (32-byte)
         pubkey: String,
     },
+    /// 装载 plugin 到 attune 默认 plugins 目录 (~/.local/share/attune/plugins/<id>/).
+    /// 接受 plugin 源目录 — 解析 manifest 拿 id, 复制到目标位置.
+    /// 装载前自动校验 (签名 / 加密 / trust↔pricing 联动).
+    PluginInstall {
+        /// plugin 源目录 (含 plugin.yaml 或 plugin.yaml.enc)
+        src: std::path::PathBuf,
+        /// paid plugin 的解密密钥 (或 env ATTUNE_PLUGIN_KEY)
+        #[arg(long)]
+        key: Option<String>,
+        /// 签名校验 — 提供 pubkey hex 才校验 plugin.sig
+        #[arg(long)]
+        pubkey: Option<String>,
+        /// 覆盖已装载的同 id plugin
+        #[arg(long)]
+        force: bool,
+    },
+    /// 卸载 plugin (从 plugins 目录删除)
+    PluginUninstall {
+        plugin_id: String,
+    },
+    /// 列出已装载 plugins (~/.local/share/attune/plugins/)
+    PluginList,
 }
 
 fn main() {
@@ -154,6 +176,15 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
         Commands::PluginVerifySig { plugin_dir, pubkey } => {
             return run_plugin_verify_sig(plugin_dir, pubkey);
+        }
+        Commands::PluginInstall { src, key, pubkey, force } => {
+            return run_plugin_install(src, key.as_deref(), pubkey.as_deref(), *force);
+        }
+        Commands::PluginUninstall { plugin_id } => {
+            return run_plugin_uninstall(plugin_id);
+        }
+        Commands::PluginList => {
+            return run_plugin_list();
         }
         _ => {}
     }
@@ -332,7 +363,8 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
         // Plugin 子命令在 run() 头部已 handle, 这里 unreachable
         Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. }
-        | Commands::PluginKeygen { .. } | Commands::PluginSign { .. } | Commands::PluginVerifySig { .. } => {
+        | Commands::PluginKeygen { .. } | Commands::PluginSign { .. } | Commands::PluginVerifySig { .. }
+        | Commands::PluginInstall { .. } | Commands::PluginUninstall { .. } | Commands::PluginList => {
             unreachable!("plugin commands handled before vault open")
         }
     }
@@ -519,4 +551,114 @@ fn run_plugin_verify_sig(
         eprintln!("✗ signature INVALID");
         std::process::exit(1);
     }
+}
+
+fn run_plugin_install(
+    src: &std::path::Path,
+    key: Option<&str>,
+    pubkey: Option<&str>,
+    force: bool,
+) -> attune_core::error::Result<()> {
+    // 1. 签名校验先行 (用于推导 trust 级别, paid plugin 装载校验需要)
+    let trust = if let Some(pk) = pubkey {
+        let ok = attune_core::plugin_sig::verify_with_key(src, pk)?;
+        if !ok {
+            return Err(attune_core::error::VaultError::InvalidInput(
+                "plugin.sig verification FAILED".into(),
+            ));
+        }
+        eprintln!("✓ signature verified with provided pubkey → trust=Trusted");
+        "Trusted"
+    } else {
+        eprintln!("⚠️  no --pubkey: trust=Unsigned (paid plugin will be rejected)");
+        "Unsigned"
+    };
+
+    // 2. 解析 src plugin.yaml 拿 id (paid plugin 需提供 key + 合格 trust)
+    let key_bytes: Option<Vec<u8>> = if src.join("plugin.yaml.enc").exists() {
+        Some(read_plugin_key(key)?)
+    } else {
+        None
+    };
+    let plugin = attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(
+        src,
+        key_bytes.as_deref(),
+        Some(trust),
+    )?;
+    let plugin_id = plugin.manifest.id.clone();
+    eprintln!("✓ parsed plugin: id={plugin_id}, version={}", plugin.manifest.version);
+
+    // 3. 解析目标安装目录
+    let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()?;
+    std::fs::create_dir_all(&plugins_root).map_err(attune_core::error::VaultError::Io)?;
+    let dst = plugins_root.join(&plugin_id);
+
+    // 4. 检查冲突
+    if dst.exists() {
+        if !force {
+            return Err(attune_core::error::VaultError::InvalidInput(format!(
+                "plugin '{plugin_id}' already installed at {} (use --force to overwrite)",
+                dst.display()
+            )));
+        }
+        eprintln!("⚠️  removing existing {} (--force)", dst.display());
+        std::fs::remove_dir_all(&dst).map_err(attune_core::error::VaultError::Io)?;
+    }
+
+    // 5. 复制源目录到目标
+    copy_dir_recursive(src, &dst)?;
+    eprintln!("✓ installed to {}", dst.display());
+    eprintln!("Restart attune-server for the new plugin to be loaded.");
+    Ok(())
+}
+
+fn run_plugin_uninstall(plugin_id: &str) -> attune_core::error::Result<()> {
+    let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()?;
+    let dst = plugins_root.join(plugin_id);
+    if !dst.exists() {
+        return Err(attune_core::error::VaultError::InvalidInput(format!(
+            "plugin '{plugin_id}' not installed at {}",
+            dst.display()
+        )));
+    }
+    std::fs::remove_dir_all(&dst).map_err(attune_core::error::VaultError::Io)?;
+    eprintln!("✓ uninstalled {plugin_id}");
+    Ok(())
+}
+
+fn run_plugin_list() -> attune_core::error::Result<()> {
+    let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()?;
+    if !plugins_root.exists() {
+        println!("No plugins installed (dir does not exist: {})", plugins_root.display());
+        return Ok(());
+    }
+    let mut count = 0usize;
+    let mut errors = 0usize;
+    for entry in std::fs::read_dir(&plugins_root).map_err(attune_core::error::VaultError::Io)? {
+        let entry = entry.map_err(attune_core::error::VaultError::Io)?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // list 是诊断命令, 不强制 trust 校验 (绕开 paid+Unsigned 联动). 真实装载时
+        // attune-server scan 仍会按 trust 拒绝.
+        match attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(&path, None, Some("Official")) {
+            Ok(plugin) => {
+                count += 1;
+                let m = &plugin.manifest;
+                let tier = m.pricing.as_ref().map(|p| p.tier.as_str()).unwrap_or("?");
+                println!(
+                    "  {} (v{}, type={}, tier={}, agents={}, skills={}, mcps={})",
+                    m.id, m.version, m.plugin_type, tier,
+                    m.agents.len(), m.skills.len(), m.mcp_servers.len()
+                );
+            }
+            Err(e) => {
+                errors += 1;
+                eprintln!("  [error] {}: {e}", path.display());
+            }
+        }
+    }
+    println!("{count} plugin(s) installed at {} ({errors} errors)", plugins_root.display());
+    Ok(())
 }
