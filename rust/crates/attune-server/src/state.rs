@@ -67,6 +67,9 @@ pub struct AppState {
     pub recommendation_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
     /// Sprint 2: 启动时加载的 plugins（attune-pro / 用户 / 社区）
     pub plugin_registry: std::sync::Arc<attune_core::plugin_registry::PluginRegistry>,
+    /// 会员登录状态 — 控制 SettingsLocks 灰显 / 锁定 PATCH /settings 字段.
+    /// 默认 LoggedOut (本地 self-host). login 后由 cloud_client.me() 推导.
+    pub member_state: Mutex<attune_core::member_session::MemberState>,
     /// E2/E4 (2026-05-01): PluginHub 客户端 (Mutex 让 PATCH /settings 能热更新)
     /// 默认 Mock；settings.pluginhub.url + license_key 配齐后切到 HttpPluginHubProvider
     pub plugin_hub: Mutex<std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>>,
@@ -130,6 +133,8 @@ impl AppState {
             plugin_hub: Mutex::new(std::sync::Arc::new(
                 attune_core::plugin_hub::MockPluginHubProvider::default(),
             )),
+            // 默认未登录 — 本地 self-host 模式. login 后通过 /member/login endpoint 更新.
+            member_state: Mutex::new(attune_core::member_session::MemberState::LoggedOut),
         }
     }
 

@@ -69,6 +69,11 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Plugin UI form runtime
         .route("/api/v1/forms/{plugin_id}/{form_id}", get(routes::forms::get_form))
         .route("/api/v1/forms/{plugin_id}/{form_id}/submit", post(routes::forms::submit_form))
+        // Member state + settings locks (UI 灰显决策源)
+        .route("/api/v1/member/state", get(routes::member::get_state))
+        .route("/api/v1/member/locks", get(routes::member::get_locks))
+        .route("/api/v1/member/login-token", post(routes::member::login_token))
+        .route("/api/v1/member/logout", post(routes::member::logout))
         // 批注（annotations）CRUD — 所有调用都是用户显式操作，不在建库流水线里自动触发
         .route("/api/v1/annotations",
             get(routes::annotations::list_annotations)

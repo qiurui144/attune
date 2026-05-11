@@ -41,6 +41,7 @@ impl AccountsState {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // license/activated_at 待 GET /licenses/{id}/status endpoint 实装时使用
 struct ActivatedLicense {
     license: SignedLicense,
     activated_at: chrono::DateTime<chrono::Utc>,
