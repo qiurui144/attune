@@ -260,8 +260,12 @@ impl PluginRegistry {
                 continue;
             }
             let plugin_yaml = path.join("plugin.yaml");
-            if plugin_yaml.exists() {
-                match LoadedPlugin::from_dir(&path) {
+            let plugin_yaml_enc = path.join("plugin.yaml.enc");
+            if plugin_yaml.exists() || plugin_yaml_enc.exists() {
+                // 装到 plugins/ 目录的 plugin 视为用户已通过 attune-cli plugin-install 装载
+                // (CLI 已校验签名 + 解密). server 装载时给 Some("Trusted"), 不再二次拒绝.
+                // 真实加密 paid plugin 在 scan 中**当前不解密** — 调用方按需扩展.
+                match LoadedPlugin::from_dir_with_key(&path, None, Some("Trusted")) {
                     Ok(p) => {
                         let pid = p.manifest.id.clone();
                         reg.plugins.insert(pid.clone(), p);
