@@ -10,8 +10,16 @@ const CODE_EXTENSIONS: &[&str] = &[
     ".toml", ".yaml", ".yml", ".json", ".xml", ".html", ".css",
 ];
 
-/// 解析文件 → (title, content)
+/// 解析文件 → (title, content). 等价于 `parse_file_with_profile(path, None)`.
 pub fn parse_file(path: &Path) -> Result<(String, String)> {
+    parse_file_with_profile(path, None)
+}
+
+/// 解析文件, 指定 OCR profile (PDF 扫描件走自定义 DPI). None = 走默认 300 DPI.
+pub fn parse_file_with_profile(
+    path: &Path,
+    profile_id: Option<&str>,
+) -> Result<(String, String)> {
     let ext = path.extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
         .unwrap_or_default();
@@ -23,7 +31,7 @@ pub fn parse_file(path: &Path) -> Result<(String, String)> {
         .unwrap_or_else(|| filename.clone());
 
     match ext.as_str() {
-        ".pdf" => parse_pdf_file(path, &stem),
+        ".pdf" => parse_pdf_file_with_dpi(path, &stem, crate::ocr::dpi_for_profile(profile_id)),
         ".docx" => parse_docx_file(path, &stem),
         _ => {
             // Text-based files (md, txt, code)
@@ -34,8 +42,17 @@ pub fn parse_file(path: &Path) -> Result<(String, String)> {
     }
 }
 
-/// 从内存解析 → (title, content)
+/// 从内存解析 → (title, content). 等价于 `parse_bytes_with_profile(data, filename, None)`.
 pub fn parse_bytes(data: &[u8], filename: &str) -> Result<(String, String)> {
+    parse_bytes_with_profile(data, filename, None)
+}
+
+/// 从内存解析, 指定 OCR profile.
+pub fn parse_bytes_with_profile(
+    data: &[u8],
+    filename: &str,
+    profile_id: Option<&str>,
+) -> Result<(String, String)> {
     let ext = Path::new(filename)
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
@@ -44,6 +61,7 @@ pub fn parse_bytes(data: &[u8], filename: &str) -> Result<(String, String)> {
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| filename.to_string());
+    let dpi = crate::ocr::dpi_for_profile(profile_id);
 
     match ext.as_str() {
         ".pdf" => {
@@ -53,7 +71,7 @@ pub fn parse_bytes(data: &[u8], filename: &str) -> Result<(String, String)> {
             let content = match extract_result {
                 Ok(text) if !crate::ocr::needs_ocr(&text) => text,
                 Ok(thin_text) => {
-                    if let Some(ocr_text) = try_ocr_from_bytes(data) {
+                    if let Some(ocr_text) = try_ocr_from_bytes_with_dpi(data, dpi) {
                         let title = first_line_title(&ocr_text, &stem);
                         return Ok((title, ocr_text));
                     }
@@ -61,7 +79,7 @@ pub fn parse_bytes(data: &[u8], filename: &str) -> Result<(String, String)> {
                 }
                 Err(e) => {
                     log::info!("pdf_extract failed for uploaded bytes ({e}); trying OCR");
-                    if let Some(ocr_text) = try_ocr_from_bytes(data) {
+                    if let Some(ocr_text) = try_ocr_from_bytes_with_dpi(data, dpi) {
                         let title = first_line_title(&ocr_text, &stem);
                         return Ok((title, ocr_text));
                     }
@@ -103,9 +121,9 @@ pub fn parse_bytes(data: &[u8], filename: &str) -> Result<(String, String)> {
     }
 }
 
-/// 把 PDF 字节写到临时文件并调用 OCR provider。OCR 完成后临时文件随 tmp 变量
-/// drop 自动清理。Provider 不可用或识别失败返回 None。
-fn try_ocr_from_bytes(data: &[u8]) -> Option<String> {
+/// 把 PDF 字节写到临时文件并调用 OCR provider, 指定 DPI (200 / 300 / 600).
+/// dpi 由调用方按 OcrProfile 决定 — 默认走 `dpi_for_profile(None) = 300`.
+fn try_ocr_from_bytes_with_dpi(data: &[u8], dpi: u32) -> Option<String> {
     let provider = crate::ocr::detect_default_provider()?;
     let mut tmp = tempfile::Builder::new()
         .suffix(".pdf")
@@ -114,7 +132,7 @@ fn try_ocr_from_bytes(data: &[u8]) -> Option<String> {
     use std::io::Write;
     tmp.write_all(data).ok()?;
     tmp.flush().ok()?;
-    match crate::ocr::extract_text_from_pdf(provider.as_ref(), tmp.path()) {
+    match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), tmp.path(), dpi) {
         Ok(text) if !text.trim().is_empty() => Some(text),
         Ok(_) => {
             log::warn!("OCR returned empty text for uploaded PDF");
@@ -127,7 +145,7 @@ fn try_ocr_from_bytes(data: &[u8]) -> Option<String> {
     }
 }
 
-fn parse_pdf_file(path: &Path, stem: &str) -> Result<(String, String)> {
+fn parse_pdf_file_with_dpi(path: &Path, stem: &str, dpi: u32) -> Result<(String, String)> {
     // 1. 先尝试 pdf_extract 直接取文字层
     let bytes = std::fs::read(path)?;
     let extract_result = pdf_extract::extract_text_from_mem(&bytes);
@@ -139,7 +157,7 @@ fn parse_pdf_file(path: &Path, stem: &str) -> Result<(String, String)> {
         Err(e) => {
             log::info!("pdf_extract failed for {} ({e}); trying OCR directly", path.display());
             if let Some(provider) = crate::ocr::detect_default_provider() {
-                match crate::ocr::extract_text_from_pdf(provider.as_ref(), path) {
+                match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), path, dpi) {
                     Ok(ocr_text) if !ocr_text.trim().is_empty() => {
                         let title = first_line_title(&ocr_text, stem);
                         return Ok((title, ocr_text));
@@ -161,7 +179,7 @@ fn parse_pdf_file(path: &Path, stem: &str) -> Result<(String, String)> {
             log::info!("PDF text layer thin ({} chars); falling back to OCR ({})",
                 content.chars().filter(|c| !c.is_whitespace()).count(),
                 provider.name());
-            match crate::ocr::extract_text_from_pdf(provider.as_ref(), path) {
+            match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), path, dpi) {
                 Ok(ocr_text) if !ocr_text.trim().is_empty() => {
                     let title = first_line_title(&ocr_text, stem);
                     return Ok((title, ocr_text));
@@ -361,7 +379,7 @@ mod tests {
         //
         // 注：此测试在有 tesseract 的开发机上可能返回 Some(err_text)（OCR 在错误 PDF 上
         // 失败并返回 None），两种都是"正确不崩"；断言只看"不 panic"。
-        let _ = try_ocr_from_bytes(b"garbage data");
+        let _ = try_ocr_from_bytes_with_dpi(b"garbage data", 300);
         // 到这里就代表没 panic 了
     }
 

@@ -11,7 +11,7 @@
 | **C-CRYPTO** | `crypto.rs` | Argon2id 派生 / AES-256-GCM / 字段加密 / zeroize | unit |
 | **C-STORE** | `store.rs` | rusqlite + 字段级加密 / item CRUD / FTS5 队列 | unit + integration |
 | **C-CHUNKER** | `chunker.rs` | 滑窗分块 + 章节切割 | unit |
-| **C-PARSER** | `parser.rs` | PDF/DOCX/MD/code 解析 + bytes 入口 | unit + integration |
+| **C-PARSER** | `parser.rs` | PDF/DOCX/MD/code 解析 + bytes 入口 + `parse_file_with_profile` / `parse_bytes_with_profile` (传 OCR profile_id) | unit + integration |
 | **C-EMBED** | `embed.rs` | Ollama / ONNX / openai_compat embedding provider | unit + ignored e2e |
 | **C-LLM** | `llm.rs` | LlmProvider trait (chat / chat_with_history / **chat_multimodal**) + OpenAI compat (统一协议 + vision content array) + Ollama + Attachment (Image/TextFile) | unit + 3 multimodal + ignored e2e |
 | **C-CHAT** | `chat.rs` (pub(crate)) | ChatEngine / Citation / confidence parse | unit + integration |
@@ -73,7 +73,7 @@
 | ID | endpoint | 功能 | 测试 |
 |----|---------|------|------|
 | **R-VAULT** | `/api/v1/vault/*` | setup/unlock/lock/change_password/device-secret | unit + integration |
-| **R-UPLOAD** | `/api/v1/upload` | multipart + 100MB 限制 + backpressure | unit + integration |
+| **R-UPLOAD** | `/api/v1/upload?profile=<id>` | multipart + 100MB 限制 + backpressure + 可选 OCR profile (DPI 按 profile 选) | unit + integration |
 | **R-INGEST** | `/api/v1/ingest` | text 写入 + 队列入 | unit + integration |
 | **R-SEARCH** | `/api/v1/search` | RRF + cutoff + 黑名单 | unit + integration |
 | **R-CHAT** | `/api/v1/chat` | RAG + plugin route 提示 + 三层 hallu 防御 | unit + integration |
@@ -101,6 +101,7 @@
 | **CLI-LOGIN** | login <email> | 登录 cloud accounts |
 | **CLI-SYNC** | sync-plugins | 自动装 entitled pro 插件 |
 | **CLI-LINK** | link-folder <path> | 关联本地知识库目录 |
+| **CLI-OCR-PROF** | ocr-profile-{list,show,create,delete} | 管理 OCR 场景预设 (本地文件操作, 不依赖 server) |
 
 ## 8. 一键部署 / 安装脚本
 

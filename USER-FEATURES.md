@@ -78,6 +78,9 @@ attune 不为每个 provider 写独立 SDK — 一个 OpenAI client 走天下.
 - 4 个内置: `contract` (合同/法律 300dpi) / `receipt` (票据 200dpi) / `screenshot` (截图 200dpi) / `ancient` (古籍 600dpi); 内置不可删, 用户可自建任意数量自定义 profile
 - API: `GET /api/v1/ocr/profiles` (列表) / `POST` (新建) / `PUT /:id` (更新) / `DELETE /:id` (删除)
 - 持久化: `<data_dir>/ocr_profiles.json`
+- 默认: `ocr.active_profile = "contract"` (settings PATCH 可改, 受 ocr_profiles lock; 普通/付费用户都能改)
+- 上传时按 profile 选 DPI: `POST /api/v1/upload?profile=ancient` (高分辨率扫描走 600 DPI)
+- CLI: `attune ocr-profile-list / -show <id> / -create <id> --name ... / -delete <id>` (本地文件操作, 无需 server 运行)
 
 ## 4. 形态切换路径
 

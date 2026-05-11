@@ -179,6 +179,36 @@ enum Commands {
         #[arg(long, default_value = "default")]
         project: String,
     },
+    /// 列出所有 OCR 场景预设 (builtin + 用户自定义)
+    OcrProfileList,
+    /// 查看指定 OCR profile 详情 (JSON)
+    OcrProfileShow {
+        id: String,
+    },
+    /// 新建 OCR profile (用户自定义, builtin=false)
+    OcrProfileCreate {
+        /// slug id, e.g. medical-scan
+        id: String,
+        /// 显示名, e.g. "医学影像"
+        #[arg(long)]
+        name: String,
+        /// 用户可见说明
+        #[arg(long, default_value = "")]
+        description: String,
+        /// 语言代码 (元信息, PP-OCRv5 内置中英)
+        #[arg(long, default_value = "chi_sim+eng")]
+        languages: String,
+        /// PDF 渲染 DPI [72-1200]
+        #[arg(long, default_value_t = 300)]
+        dpi: u32,
+        /// 适用场景标签 (逗号分隔)
+        #[arg(long, default_value = "")]
+        tags: String,
+    },
+    /// 删除 OCR profile (builtin 拒绝)
+    OcrProfileDelete {
+        id: String,
+    },
 }
 
 fn main() {
@@ -231,6 +261,12 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         Commands::PluginPublish { plugin_dir, hub_url, admin_token } => {
             return run_plugin_publish(plugin_dir, hub_url, admin_token.as_deref());
         }
+        Commands::OcrProfileList => return run_ocr_profile_list(),
+        Commands::OcrProfileShow { id } => return run_ocr_profile_show(id),
+        Commands::OcrProfileCreate { id, name, description, languages, dpi, tags } => {
+            return run_ocr_profile_create(id, name, description, languages, *dpi, tags);
+        }
+        Commands::OcrProfileDelete { id } => return run_ocr_profile_delete(id),
         _ => {}
     }
     // OCR / Deploy 子命令不需要 vault — 早 return 避免 zero-state 报错
@@ -406,13 +442,15 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             println!("If unlock fails, ensure device.key matches: {}",
                 attune_core::platform::device_secret_path().display());
         }
-        // Plugin 子命令在 run() 头部已 handle, 这里 unreachable
+        // Plugin / cloud / OCR profile 子命令在 run() 头部已 handle, 这里 unreachable
         Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. }
         | Commands::PluginKeygen { .. } | Commands::PluginSign { .. } | Commands::PluginVerifySig { .. }
         | Commands::PluginInstall { .. } | Commands::PluginUninstall { .. } | Commands::PluginList
         | Commands::Login { .. } | Commands::SyncPlugins { .. } | Commands::LinkFolder { .. }
-        | Commands::PluginPublish { .. } => {
-            unreachable!("plugin/cloud commands handled before vault open")
+        | Commands::PluginPublish { .. }
+        | Commands::OcrProfileList | Commands::OcrProfileShow { .. }
+        | Commands::OcrProfileCreate { .. } | Commands::OcrProfileDelete { .. } => {
+            unreachable!("plugin/cloud/ocr-profile commands handled before vault open")
         }
     }
     Ok(())
@@ -899,5 +937,72 @@ fn run_plugin_publish(
     }
     eprintln!("✓ published: status={status}");
     eprintln!("  response: {body}");
+    Ok(())
+}
+
+// ============ OCR Profile 子命令 ============
+// 直接操作本地 <data_dir>/ocr_profiles.json — 不依赖 attune-server 运行,
+// vault 锁定状态也能用.
+
+fn run_ocr_profile_list() -> attune_core::error::Result<()> {
+    let reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
+    println!("{:<14} {:<6} {:<5} {:<14} {}", "id", "type", "dpi", "tags", "name");
+    println!("{}", "-".repeat(70));
+    for p in reg.list() {
+        let t = if p.builtin { "builtin" } else { "custom" };
+        let tags = p.tags.join(",");
+        // 中文 UTF-8 边界安全: 按 char 截断 (避免字节中切)
+        let tags_short: String = tags.chars().take(14).collect();
+        println!("{:<14} {:<6} {:<5} {:<14} {}", p.id, t, p.dpi, tags_short, p.name);
+    }
+    Ok(())
+}
+
+fn run_ocr_profile_show(id: &str) -> attune_core::error::Result<()> {
+    let reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
+    match reg.get(id) {
+        Some(p) => {
+            let body = serde_json::to_string_pretty(p)
+                .map_err(|e| attune_core::error::VaultError::InvalidInput(e.to_string()))?;
+            println!("{body}");
+            Ok(())
+        }
+        None => Err(attune_core::error::VaultError::NotFound(format!("profile {id}"))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_ocr_profile_create(
+    id: &str,
+    name: &str,
+    description: &str,
+    languages: &str,
+    dpi: u32,
+    tags_csv: &str,
+) -> attune_core::error::Result<()> {
+    let tags: Vec<String> = tags_csv
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let p = attune_core::ocr::profile::OcrProfile {
+        id: id.to_string(),
+        name: name.to_string(),
+        description: description.to_string(),
+        languages: languages.to_string(),
+        dpi,
+        tags,
+        builtin: false,
+    };
+    let mut reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
+    reg.upsert(p)?;
+    eprintln!("✓ profile {id} 已写入 {}", attune_core::ocr::profile_registry::ProfileRegistry::default_path().display());
+    Ok(())
+}
+
+fn run_ocr_profile_delete(id: &str) -> attune_core::error::Result<()> {
+    let mut reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
+    reg.delete(id)?;
+    eprintln!("✓ profile {id} 已删除");
     Ok(())
 }

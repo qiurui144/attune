@@ -110,6 +110,18 @@ pub async fn update_settings(
                 }
             }
         }
+        // 校验 ocr.active_profile 必须是已存在的 profile id (避免用户输错导致 OCR 回退)
+        if let Some(ocr_obj) = body_obj.get("ocr").and_then(|v| v.as_object()) {
+            if let Some(prof) = ocr_obj.get("active_profile").and_then(|v| v.as_str()) {
+                let reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+                if reg.get(prof).is_none() {
+                    return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                        "error": format!("ocr.active_profile '{prof}' 不存在 (用 GET /api/v1/ocr/profiles 查看可用 id)")
+                    }))));
+                }
+            }
+        }
     }
 
     // SettingsLocks enforce — 会员锁定字段拒绝更新.
@@ -122,6 +134,7 @@ pub async fn update_settings(
         let lock_map: &[(&str, &str)] = &[
             ("llm", "cloud_llm"),               // 普通用户改云端 LLM, 付费锁
             ("pluginhub", "plugin_install"),    // pluginhub 配置变 → plugin_install lock
+            ("ocr", "ocr_profiles"),            // ocr.active_profile 改受 ocr_profiles lock
         ];
         for (settings_key, lock_field) in lock_map {
             if body_obj.contains_key(*settings_key) && !locks.can_edit(lock_field) {
@@ -141,7 +154,7 @@ pub async fn update_settings(
     // 嵌套对象键：这些字段的子字段支持 deep merge（客户端省略某子字段时保留原值）。
     // 主要为了 `llm.api_key` —— GET 响应已 redact，客户端若只改 model/provider 而不重填 key，
     // 我们不应把 key 抹成 null。
-    const DEEP_MERGE_KEYS: &[&str] = &["llm"];
+    const DEEP_MERGE_KEYS: &[&str] = &["llm", "ocr"];
     if let (Some(current_obj), Some(body_obj)) = (current.as_object_mut(), body.as_object()) {
         for (k, v) in body_obj {
             if !ALLOWED_KEYS.contains(&k.as_str()) { continue; }
@@ -237,8 +250,9 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
             "model_repo": "Xenova/bge-reranker-base"  // 想换可填 jina-v2-multilingual / bge-base-official
         },
         "ocr": {
-            "enabled": true,                  // tesseract + pdftoppm 系统 PATH 自动检测
-            "languages": "chi_sim+eng"
+            "enabled": true,                  // PP-OCRv5 + pdftoppm 自动检测
+            "languages": "chi_sim+eng",
+            "active_profile": attune_core::ocr::profile::OcrProfile::DEFAULT_ID
         },
         "asr": {
             "enabled": false,                 // v0.6: whisper.cpp 集成中；v0.6.x 启用
