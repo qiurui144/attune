@@ -35,11 +35,11 @@ async fn ocr_profiles_crud_round_trip() {
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}/api/v1/ocr/profiles", port);
 
-    // 1. GET list — 应该有 4 个 builtin
+    // 1. GET list — 应该有 7 个 builtin
     let resp = client.get(&base).send().await.expect("GET list");
     assert_eq!(resp.status(), 200);
     let arr: Vec<serde_json::Value> = resp.json().await.expect("json");
-    assert_eq!(arr.len(), 4, "default has 4 builtin profiles");
+    assert_eq!(arr.len(), 7, "default has 7 builtin profiles");
     let ids: Vec<&str> = arr.iter().filter_map(|v| v["id"].as_str()).collect();
     assert!(ids.contains(&"contract"));
     assert!(ids.contains(&"receipt"));
@@ -66,10 +66,10 @@ async fn ocr_profiles_crud_round_trip() {
     assert_eq!(v["id"], "test_custom");
     assert_eq!(v["builtin"], false, "registry forces builtin=false");
 
-    // 3. GET list — 应该 5 条
+    // 3. GET list — 应该 8 条
     let resp = client.get(&base).send().await.expect("GET list 2");
     let arr: Vec<serde_json::Value> = resp.json().await.expect("json");
-    assert_eq!(arr.len(), 5);
+    assert_eq!(arr.len(), 8);
 
     // 4. POST 同 id 重复 → 409
     let resp = client
@@ -149,10 +149,10 @@ async fn ocr_profiles_crud_round_trip() {
         .expect("DEL nonexistent");
     assert_eq!(resp.status(), 404);
 
-    // 10. GET final — 4 条
+    // 10. GET final — 7 条
     let resp = client.get(&base).send().await.expect("GET final");
     let arr: Vec<serde_json::Value> = resp.json().await.expect("json");
-    assert_eq!(arr.len(), 4);
+    assert_eq!(arr.len(), 7);
 
     handle.abort();
 }

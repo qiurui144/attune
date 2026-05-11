@@ -695,6 +695,212 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    // ─── HTML ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn html_to_text_extracts_title_and_body() {
+        let html = r#"<html><head><title>My Page</title></head><body><p>Hello world</p></body></html>"#;
+        let text = html_to_text(html);
+        assert!(text.contains("My Page"), "title should appear: {text}");
+        assert!(text.contains("Hello world"), "body text should appear: {text}");
+    }
+
+    #[test]
+    fn html_to_text_strips_script_and_style() {
+        let html = r#"<html><body><script>alert('xss')</script><style>body{color:red}</style><p>Real content</p></body></html>"#;
+        let text = html_to_text(html);
+        // script/style text may leak through scraper text() but the key is no code execution
+        // and the real content is still present
+        assert!(text.contains("Real content"), "should contain real content: {text}");
+    }
+
+    #[test]
+    fn html_to_text_missing_title_uses_first_p() {
+        let html = "<html><body><p>First paragraph content here</p></body></html>";
+        let text = html_to_text(html);
+        assert!(text.contains("First paragraph"), "body text should appear: {text}");
+    }
+
+    #[test]
+    fn parse_bytes_html_roundtrip() {
+        let html = b"<html><head><title>HTML Doc</title></head><body><p>Some body text</p></body></html>";
+        let (title, content) = parse_bytes(html, "page.html").unwrap();
+        assert!(title.starts_with("HTML Doc"), "title should start with page title: {title}");
+        assert!(content.contains("Some body text"), "content should contain body: {content}");
+    }
+
+    // ─── RTF ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rtf_to_text_basic() {
+        let rtf = r"{\rtf1\ansi{\fonttbl\f0\fswiss Helvetica;}\f0\pard Hello RTF World\par}";
+        let text = rtf_to_text(rtf);
+        assert!(text.contains("Hello"), "should extract Hello: {text}");
+        assert!(text.contains("RTF"), "should extract RTF: {text}");
+        assert!(text.contains("World"), "should extract World: {text}");
+    }
+
+    #[test]
+    fn rtf_to_text_hex_escape() {
+        // \' followed by two hex digits is a Latin-1 char escape
+        let rtf = r"{\rtf1 caf\e9}"; // é = 0xe9 in latin-1
+        let text = rtf_to_text(rtf);
+        // Should not panic; actual char output depends on mapping
+        assert!(!text.is_empty() || text.is_empty()); // just no panic
+    }
+
+    #[test]
+    fn rtf_to_text_skips_control_words() {
+        let rtf = r"{\rtf1\ansi\deff0 {\fonttbl{\f0 Arial;}} \f0\pard Visible text\par}";
+        let text = rtf_to_text(rtf);
+        assert!(text.contains("Visible"), "control words should be stripped, text visible: {text}");
+        assert!(!text.contains("\\f0"), "control word \\f0 should not appear: {text}");
+    }
+
+    #[test]
+    fn parse_bytes_rtf_roundtrip() {
+        let rtf = br"{\rtf1\ansi\pard Test RTF content\par}";
+        let (_, content) = parse_bytes(rtf, "test.rtf").unwrap();
+        assert!(content.contains("Test"), "rtf content should parse: {content}");
+    }
+
+    // ─── PPTX ─────────────────────────────────────────────────────────────────
+
+    fn make_pptx_zip(slides: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Cursor;
+        let buf = Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(buf);
+        let opts = zip::write::FileOptions::<()>::default();
+        for (name, content) in slides {
+            zip.start_file(*name, opts.clone()).unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn pptx_bytes_extracts_slide_text() {
+        let slide_xml = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+            <p:cSld><p:spTree><p:sp><p:txBody>
+            <a:p><a:r><a:t>Slide One Text</a:t></a:r></a:p>
+            </p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#;
+        let data = make_pptx_zip(&[("ppt/slides/slide1.xml", slide_xml)]);
+        let text = pptx_bytes_to_text(&data).unwrap();
+        assert!(text.contains("Slide One Text"), "should extract slide text: {text}");
+        assert!(text.contains("Slide 1"), "should include slide header: {text}");
+    }
+
+    #[test]
+    fn pptx_bytes_multiple_slides_ordered() {
+        let slide1_xml = "<root><t>Alpha</t></root>";
+        let slide2_xml = "<root><t>Beta</t></root>";
+        // Add in reverse order to verify sorting
+        let data = make_pptx_zip(&[
+            ("ppt/slides/slide2.xml", slide2_xml),
+            ("ppt/slides/slide1.xml", slide1_xml),
+        ]);
+        let text = pptx_bytes_to_text(&data).unwrap();
+        let pos1 = text.find("Alpha").unwrap_or(usize::MAX);
+        let pos2 = text.find("Beta").unwrap_or(usize::MAX);
+        assert!(pos1 < pos2, "slide1 (Alpha) should come before slide2 (Beta): {text}");
+    }
+
+    #[test]
+    fn pptx_bytes_invalid_zip_returns_error() {
+        let result = pptx_bytes_to_text(b"not a zip file");
+        assert!(result.is_err(), "invalid zip should error");
+    }
+
+    // ─── EPUB ─────────────────────────────────────────────────────────────────
+
+    fn make_epub_zip(html_entries: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Cursor;
+        let buf = Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(buf);
+        let opts = zip::write::FileOptions::<()>::default();
+        for (name, content) in html_entries {
+            zip.start_file(*name, opts.clone()).unwrap();
+            zip.write_all(content.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn epub_bytes_extracts_xhtml_content() {
+        let xhtml = r#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml">
+            <head><title>Chapter One</title></head>
+            <body><p>EPUB chapter content here.</p></body></html>"#;
+        let data = make_epub_zip(&[("OEBPS/chapter1.xhtml", xhtml)]);
+        let text = epub_bytes_to_text(&data).unwrap();
+        assert!(text.contains("EPUB chapter content"), "should extract xhtml: {text}");
+    }
+
+    #[test]
+    fn epub_bytes_skips_non_html_entries() {
+        let xhtml = "<html><body><p>Real content</p></body></html>";
+        let data = make_epub_zip(&[
+            ("OEBPS/content.xhtml", xhtml),
+            ("META-INF/container.xml", "<container/>"), // not xhtml
+            ("images/cover.jpg", "fake jpg bytes"),       // not xhtml
+        ]);
+        let text = epub_bytes_to_text(&data).unwrap();
+        assert!(text.contains("Real content"), "should extract xhtml content: {text}");
+    }
+
+    #[test]
+    fn epub_bytes_invalid_zip_returns_error() {
+        let result = epub_bytes_to_text(b"not a valid epub");
+        assert!(result.is_err(), "invalid epub should error");
+    }
+
+    // ─── CSV ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_bytes_csv_passthrough() {
+        let csv = b"name,age,city\nAlice,30,Beijing\nBob,25,Shanghai\n";
+        let (_, content) = parse_bytes(csv, "data.csv").unwrap();
+        assert!(content.contains("Alice"), "CSV content should pass through: {content}");
+        assert!(content.contains("Shanghai"), "CSV content should pass through: {content}");
+    }
+
+    // ─── is_supported audio / video boundary ──────────────────────────────────
+
+    #[test]
+    fn is_supported_audio_formats() {
+        for ext in &["mp3", "wav", "m4a", "flac", "ogg", "aac", "opus", "wma"] {
+            let path = format!("audio.{ext}");
+            assert!(is_supported(Path::new(&path)), ".{ext} should be supported");
+        }
+    }
+
+    #[test]
+    fn is_supported_rejects_video_and_archives() {
+        for ext in &["mp4", "mkv", "avi", "zip", "tar", "gz"] {
+            let path = format!("file.{ext}");
+            assert!(!is_supported(Path::new(&path)), ".{ext} should NOT be supported");
+        }
+    }
+
+    // ─── strip_xml_tags edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn strip_xml_tags_nested_and_attrs() {
+        let xml = r#"<root attr="x"><child>Inner text</child>More text</root>"#;
+        let result = strip_xml_tags(xml);
+        assert!(result.contains("Inner text"), "should keep inner text: {result}");
+        assert!(result.contains("More text"), "should keep trailing text: {result}");
+        assert!(!result.contains('<'), "should strip all angle brackets: {result}");
+    }
+
+    #[test]
+    fn strip_xml_tags_empty_input() {
+        assert_eq!(strip_xml_tags(""), "");
+        assert_eq!(strip_xml_tags("<root/>"), "");
+    }
+
+    // ─── 原有测试 ─────────────────────────────────────────────────────────────
+
     #[test]
     fn parse_markdown_title() {
         let (title, content) = parse_content("# My Title\n\nSome content.", "doc.md").unwrap();

@@ -409,3 +409,161 @@ async fn test_bind_remote_depth_over_2_returns_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap_or("").contains("depth"));
 }
+
+// ─── /upload multipart 端点 ───────────────────────────────────────────────────
+
+/// 构建 multipart/form-data body（模拟浏览器上传）
+fn make_multipart_body(filename: &str, content: &[u8]) -> (String, Vec<u8>) {
+    let boundary = "test_boundary_xyz";
+    let mut body = Vec::new();
+    // part header
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n").as_bytes(),
+    );
+    body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+    body.extend_from_slice(content);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (
+        format!("multipart/form-data; boundary={boundary}"),
+        body,
+    )
+}
+
+async fn do_upload(state: Arc<AppState>, filename: &str, content: &[u8]) -> (StatusCode, Value) {
+    let (content_type, body_bytes) = make_multipart_body(filename, content);
+    let router = attune_server::build_router(state);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/upload")
+        .header("content-type", content_type)
+        .body(Body::from(body_bytes))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, json)
+}
+
+#[tokio::test]
+async fn test_upload_markdown_returns_ok_with_id() {
+    let (state, _tmp) = make_unlocked_state();
+    let md = b"# Upload Test\n\nThis is markdown content uploaded via multipart.";
+    let (status, body) = do_upload(state, "test.md", md).await;
+    assert_eq!(status, StatusCode::OK, "upload markdown should succeed: {body}");
+    assert!(
+        body["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "response should contain non-empty id: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_html_bytes_parsed() {
+    let (state, _tmp) = make_unlocked_state();
+    let html = b"<html><head><title>Web Page</title></head><body><p>Page content</p></body></html>";
+    let (status, body) = do_upload(state, "page.html", html).await;
+    assert_eq!(status, StatusCode::OK, "upload html should succeed: {body}");
+    assert!(body["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false));
+}
+
+#[tokio::test]
+async fn test_upload_csv_bytes_parsed() {
+    let (state, _tmp) = make_unlocked_state();
+    let csv = b"header1,header2,header3\nval1,val2,val3\nval4,val5,val6\n";
+    let (status, body) = do_upload(state, "data.csv", csv).await;
+    assert_eq!(status, StatusCode::OK, "upload csv should succeed: {body}");
+    assert!(body["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false));
+}
+
+#[tokio::test]
+async fn test_upload_txt_bytes_parsed() {
+    let (state, _tmp) = make_unlocked_state();
+    let txt = b"Plain text file.\nSecond line.\nThird line.";
+    let (status, body) = do_upload(state, "notes.txt", txt).await;
+    assert_eq!(status, StatusCode::OK, "upload txt should succeed: {body}");
+    assert!(body["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false));
+}
+
+#[tokio::test]
+async fn test_upload_rtf_bytes_parsed() {
+    let (state, _tmp) = make_unlocked_state();
+    let rtf = br"{\rtf1\ansi\pard RTF upload test content\par}";
+    let (status, body) = do_upload(state, "document.rtf", rtf).await;
+    assert_eq!(status, StatusCode::OK, "upload rtf should succeed: {body}");
+    assert!(body["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false));
+}
+
+#[tokio::test]
+async fn test_upload_when_locked_returns_403() {
+    let (state, _tmp) = make_unlocked_state();
+    // lock first
+    do_post(state.clone(), "/api/v1/vault/lock", serde_json::json!({})).await;
+
+    let (status, _) = do_upload(state, "test.md", b"content").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "upload while locked should be 403");
+}
+
+#[tokio::test]
+async fn test_upload_no_file_field_returns_400() {
+    let (state, _tmp) = make_unlocked_state();
+    // Empty multipart body (no fields at all) — just the boundary markers
+    let boundary = "empty_boundary_abc";
+    let body = format!("--{boundary}--\r\n");
+    let router = attune_server::build_router(state);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/upload")
+        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .body(Body::from(body))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "missing file field should be 400");
+}
+
+#[tokio::test]
+async fn test_upload_unknown_extension_treated_as_text() {
+    let (state, _tmp) = make_unlocked_state();
+    // Unknown binary extensions fall through to plain-text parse — no hard reject
+    let (status, _body) = do_upload(state, "archive.xyz", b"some content bytes").await;
+    // Server either accepts (200) or rejects (400/422) — either is valid; must not panic/500
+    assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR, "unknown extension must not 500");
+}
+
+#[tokio::test]
+async fn test_upload_duplicate_returns_ok_with_duplicate_status() {
+    let (state, _tmp) = make_unlocked_state();
+    let content = b"# Dedup Test\n\nThis content will be uploaded twice to test deduplication.";
+    // First upload
+    let (status1, body1) = do_upload(state.clone(), "dedup.md", content).await;
+    assert_eq!(status1, StatusCode::OK, "first upload should succeed: {body1}");
+
+    // Second upload — same content
+    let (status2, body2) = do_upload(state, "dedup.md", content).await;
+    assert_eq!(status2, StatusCode::OK, "duplicate upload should not error: {body2}");
+    // status may be "ok" or "duplicate" depending on implementation
+    // Server accepts duplicate uploads — status reflects current processing state
+    let s = body2["status"].as_str().unwrap_or("");
+    assert!(
+        !s.is_empty(),
+        "duplicate upload response should contain status field: {body2}"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_stores_item_retrievable_from_items_list() {
+    let (state, _tmp) = make_unlocked_state();
+    let content = b"# Retrievable Upload\n\nThis note should appear in /items after upload.";
+    let (status, body) = do_upload(state.clone(), "retrieval.md", content).await;
+    assert_eq!(status, StatusCode::OK, "upload should succeed: {body}");
+
+    // Verify item appears in list
+    let (list_status, list_body) = do_get(state, "/api/v1/items").await;
+    assert_eq!(list_status, StatusCode::OK);
+    let items = list_body["items"].as_array().expect("items should be array");
+    assert!(!items.is_empty(), "items list should contain the uploaded item");
+    assert!(
+        items.iter().any(|i| i["title"].as_str().unwrap_or("").contains("Retrievable Upload")),
+        "uploaded item title should appear in list: {items:?}"
+    );
+}
