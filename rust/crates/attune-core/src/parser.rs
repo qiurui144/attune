@@ -33,8 +33,20 @@ pub fn parse_file_with_profile(
     match ext.as_str() {
         ".pdf" => parse_pdf_file_with_dpi(path, &stem, crate::ocr::dpi_for_profile(profile_id)),
         ".docx" => parse_docx_file(path, &stem),
+        ".html" | ".htm" => parse_html_file(path, &stem),
+        ".epub" => parse_epub_file(path, &stem),
+        ".xlsx" | ".xls" => parse_xlsx_file(path, &stem),
+        ".pptx" => parse_pptx_file(path, &stem),
+        ".rtf" => parse_rtf_file(path, &stem),
+        ".csv" => parse_csv_file(path, &stem),
+        ".png" | ".jpg" | ".jpeg" | ".webp" | ".bmp" | ".tiff" | ".tif" | ".gif" => {
+            parse_image_file(path, &stem)
+        }
+        ".mp3" | ".wav" | ".m4a" | ".flac" | ".ogg" | ".aac" | ".opus" | ".wma" => {
+            parse_audio_file(path, &stem)
+        }
         _ => {
-            // Text-based files (md, txt, code)
+            // Text-based files (md, txt, json, xml, code, etc.)
             let content = std::fs::read_to_string(path)
                 .map_err(VaultError::Io)?;
             parse_content(&content, &filename)
@@ -111,6 +123,80 @@ pub fn parse_bytes_with_profile(
                 )));
             }
             let content = strip_xml_tags(&doc_xml);
+            let title = first_line_title(&content, &stem);
+            Ok((title, content))
+        }
+        ".html" | ".htm" => {
+            let html = String::from_utf8_lossy(data).to_string();
+            let content = html_to_text(&html);
+            let title = first_line_title(&content, &stem);
+            Ok((title, content))
+        }
+        ".epub" => {
+            let content = epub_bytes_to_text(data)?;
+            let title = first_line_title(&content, &stem);
+            Ok((title, content))
+        }
+        ".xlsx" | ".xls" => {
+            let content = xlsx_bytes_to_text(data, &ext)?;
+            let title = first_line_title(&content, &stem);
+            Ok((title, content))
+        }
+        ".pptx" => {
+            let content = pptx_bytes_to_text(data)?;
+            let title = first_line_title(&content, &stem);
+            Ok((title, content))
+        }
+        ".rtf" => {
+            let content = rtf_to_text(&String::from_utf8_lossy(data));
+            let title = first_line_title(&content, &stem);
+            Ok((title, content))
+        }
+        ".csv" => {
+            let content = String::from_utf8_lossy(data).to_string();
+            let title = first_line_title(&content, &stem);
+            Ok((title, content))
+        }
+        ".png" | ".jpg" | ".jpeg" | ".webp" | ".bmp" | ".tiff" | ".tif" | ".gif" => {
+            let Some(provider) = crate::ocr::detect_default_provider() else {
+                return Err(VaultError::InvalidInput("OCR provider unavailable".to_string()));
+            };
+            let scene = crate::ocr::auto_detect_scene(filename);
+            let profile = crate::ocr::profile_for_id(Some(scene));
+            // bytes path: write to temp file (OCR expects a Path)
+            let mut tmp = tempfile::Builder::new()
+                .suffix(&ext)
+                .tempfile()
+                .map_err(VaultError::Io)?;
+            {
+                use std::io::Write;
+                tmp.write_all(data).map_err(VaultError::Io)?;
+                tmp.flush().map_err(VaultError::Io)?;
+            }
+            let output = provider.extract_structured(tmp.path(), &profile)?;
+            let content = if let Some(table) = output.table_markdown {
+                format!("{}\n\n{}", output.text, table)
+            } else {
+                output.text
+            };
+            let title = first_line_title(&content, &stem);
+            Ok((title, content))
+        }
+        ".mp3" | ".wav" | ".m4a" | ".flac" | ".ogg" | ".aac" | ".opus" | ".wma" => {
+            let Some(backend) = crate::asr::detect_asr_backend() else {
+                return Err(VaultError::InvalidInput("ASR backend unavailable".to_string()));
+            };
+            let mut tmp = tempfile::Builder::new()
+                .suffix(&ext)
+                .tempfile()
+                .map_err(VaultError::Io)?;
+            use std::io::Write;
+            tmp.write_all(data).map_err(VaultError::Io)?;
+            tmp.flush().map_err(VaultError::Io)?;
+            let diarization = crate::asr::detect_diarization_backend();
+            let (_, content) = crate::asr::transcribe_with_diarization(
+                &backend, tmp.path(), diarization.as_ref(),
+            )?;
             let title = first_line_title(&content, &stem);
             Ok((title, content))
         }
@@ -297,8 +383,18 @@ pub fn is_supported(path: &Path) -> bool {
     let ext = path.extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
         .unwrap_or_default();
-    matches!(ext.as_str(), ".md" | ".txt" | ".pdf" | ".docx")
-        || CODE_EXTENSIONS.iter().any(|e| *e == ext)
+    matches!(
+        ext.as_str(),
+        // 文档
+        ".md" | ".txt" | ".pdf" | ".docx" | ".html" | ".htm" | ".epub"
+        | ".rtf" | ".pptx"
+        // 数据/表格
+        | ".csv" | ".xlsx" | ".xls"
+        // 图片 → OCR
+        | ".png" | ".jpg" | ".jpeg" | ".webp" | ".bmp" | ".tiff" | ".tif" | ".gif"
+        // 音频 → ASR
+        | ".mp3" | ".wav" | ".m4a" | ".flac" | ".ogg" | ".aac" | ".opus" | ".wma"
+    ) || CODE_EXTENSIONS.iter().any(|e| *e == ext)
 }
 
 /// 计算文件的 SHA-256 hash
@@ -307,6 +403,291 @@ pub fn file_hash(path: &Path) -> Result<String> {
     let data = std::fs::read(path)?;
     let hash = Sha256::digest(&data);
     Ok(hex::encode(hash))
+}
+
+// ── 新格式处理函数 ────────────────────────────────────────────────────────────
+
+/// HTML 文件 → 纯文本（scraper strip tags，保留段落空行）
+fn parse_html_file(path: &Path, stem: &str) -> Result<(String, String)> {
+    let html = std::fs::read_to_string(path).map_err(VaultError::Io)?;
+    let content = html_to_text(&html);
+    let title = first_line_title(&content, stem);
+    Ok((title, content))
+}
+
+/// HTML 字符串 → 可读文本（title tag 优先，body 内联文本拼接）
+fn html_to_text(html: &str) -> String {
+    use scraper::{Html, Selector};
+    let document = Html::parse_document(html);
+
+    // 尝试提取 <title>
+    let title_text = Selector::parse("title").ok()
+        .and_then(|sel| document.select(&sel).next())
+        .map(|el| el.text().collect::<String>())
+        .unwrap_or_default();
+
+    // body 文本：排除 script/style 节点
+    let body_text = if let Ok(body_sel) = Selector::parse("body") {
+        document.select(&body_sel).next().map(|body| {
+            body.text()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }).unwrap_or_default()
+    } else {
+        document.root_element().text().collect::<Vec<_>>().join(" ")
+    };
+
+    // 合并并规范空白
+    let raw = if title_text.is_empty() {
+        body_text
+    } else {
+        format!("{}\n\n{}", title_text, body_text)
+    };
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// EPUB 文件 → 纯文本（解压 zip，合并所有 XHTML/HTML 条目）
+fn parse_epub_file(path: &Path, stem: &str) -> Result<(String, String)> {
+    let data = std::fs::read(path).map_err(VaultError::Io)?;
+    let content = epub_bytes_to_text(&data)?;
+    let title = first_line_title(&content, stem);
+    Ok((title, content))
+}
+
+fn epub_bytes_to_text(data: &[u8]) -> Result<String> {
+    use std::io::{Cursor, Read};
+    let cursor = Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| VaultError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("EPUB zip open failed: {e}"),
+        )))?;
+
+    let mut parts: Vec<String> = Vec::new();
+    let count = archive.len();
+    for i in 0..count {
+        let mut entry = archive.by_index(i)
+            .map_err(|e| VaultError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData, format!("{e}"),
+            )))?;
+        let name = entry.name().to_lowercase();
+        if !name.ends_with(".xhtml") && !name.ends_with(".html") && !name.ends_with(".htm") {
+            continue;
+        }
+        let mut buf = String::new();
+        let _ = entry.read_to_string(&mut buf);
+        if !buf.is_empty() {
+            parts.push(html_to_text(&buf));
+        }
+    }
+    Ok(parts.join("\n\n"))
+}
+
+/// XLSX / XLS 文件 → 纯文本（calamine 读取所有 sheet，每行 tab 分隔）
+fn parse_xlsx_file(path: &Path, stem: &str) -> Result<(String, String)> {
+    let data = std::fs::read(path).map_err(VaultError::Io)?;
+    let content = xlsx_bytes_to_text(&data, &path.extension()
+        .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+        .unwrap_or_default())?;
+    let title = first_line_title(&content, stem);
+    Ok((title, content))
+}
+
+fn xlsx_bytes_to_text(data: &[u8], ext: &str) -> Result<String> {
+    use calamine::{Reader, open_workbook_from_rs, Xls, Xlsx, Data};
+    use std::io::Cursor;
+
+    let cursor = Cursor::new(data.to_vec());
+    let mut parts: Vec<String> = Vec::new();
+
+    // calamine 根据 ext 选解析器
+    macro_rules! read_sheets {
+        ($wb:expr) => {{
+            let mut wb = $wb.map_err(|e| VaultError::InvalidInput(format!("Excel read failed: {e}")))?;
+            for sheet_name in wb.sheet_names().to_vec() {
+                if let Ok(range) = wb.worksheet_range(&sheet_name) {
+                    parts.push(format!("## {sheet_name}"));
+                    for row in range.rows() {
+                        let cells: Vec<String> = row.iter().map(|cell| match cell {
+                            Data::Empty => String::new(),
+                            Data::String(s) => s.clone(),
+                            Data::Float(f) => format!("{f}"),
+                            Data::Int(i) => format!("{i}"),
+                            Data::Bool(b) => format!("{b}"),
+                            Data::Error(e) => format!("#ERR"),
+                            Data::DateTime(dt) => format!("{dt}"),
+                            Data::DateTimeIso(s) => s.clone(),
+                            Data::DurationIso(s) => s.clone(),
+                        }).collect();
+                        parts.push(cells.join("\t"));
+                    }
+                }
+            }
+        }};
+    }
+
+    if ext == ".xls" {
+        read_sheets!(open_workbook_from_rs::<Xls<_>, _>(cursor));
+    } else {
+        read_sheets!(open_workbook_from_rs::<Xlsx<_>, _>(cursor));
+    }
+
+    Ok(parts.join("\n"))
+}
+
+/// PPTX 文件 → 纯文本（解压 zip，提取所有 slide XML 的文本节点）
+fn parse_pptx_file(path: &Path, stem: &str) -> Result<(String, String)> {
+    let data = std::fs::read(path).map_err(VaultError::Io)?;
+    let content = pptx_bytes_to_text(&data)?;
+    let title = first_line_title(&content, stem);
+    Ok((title, content))
+}
+
+fn pptx_bytes_to_text(data: &[u8]) -> Result<String> {
+    use std::io::{Cursor, Read};
+    let cursor = Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| VaultError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("PPTX zip open failed: {e}"),
+        )))?;
+
+    let mut slides: Vec<(String, String)> = Vec::new();
+    let count = archive.len();
+    for i in 0..count {
+        let name = {
+            let entry = archive.by_index(i)
+                .map_err(|e| VaultError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData, format!("{e}"),
+                )))?;
+            entry.name().to_string()
+        };
+        // ppt/slides/slide1.xml, slide2.xml, ...
+        if !name.starts_with("ppt/slides/slide") || !name.ends_with(".xml") {
+            continue;
+        }
+        let mut entry = archive.by_index(i)
+            .map_err(|e| VaultError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData, format!("{e}"),
+            )))?;
+        let mut buf = String::new();
+        let _ = entry.read_to_string(&mut buf);
+        let text = strip_xml_tags(&buf);
+        if !text.trim().is_empty() {
+            slides.push((name, text));
+        }
+    }
+    // Sort slides by natural order (slide1, slide2, ...)
+    slides.sort_by(|(a, _), (b, _)| {
+        let num_a: u32 = a.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+        let num_b: u32 = b.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+        num_a.cmp(&num_b)
+    });
+
+    Ok(slides.iter().enumerate().map(|(i, (_, text))| {
+        format!("## Slide {}\n{}", i + 1, text)
+    }).collect::<Vec<_>>().join("\n\n"))
+}
+
+/// RTF 文件 → 纯文本（去除控制字序列和分组括号）
+fn parse_rtf_file(path: &Path, stem: &str) -> Result<(String, String)> {
+    let raw = std::fs::read_to_string(path).map_err(VaultError::Io)?;
+    let content = rtf_to_text(&raw);
+    let title = first_line_title(&content, stem);
+    Ok((title, content))
+}
+
+fn rtf_to_text(rtf: &str) -> String {
+    let mut result = String::with_capacity(rtf.len() / 2);
+    let mut depth = 0i32;
+    let mut chars = rtf.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '{' => depth += 1,
+            '}' => { if depth > 0 { depth -= 1; } }
+            '\\' => {
+                // control word or symbol
+                if let Some(&next) = chars.peek() {
+                    if next == '\\' || next == '{' || next == '}' {
+                        chars.next();
+                        if depth == 1 { result.push(next); }
+                    } else if next == '\'' {
+                        // hex-encoded char: \'XX
+                        chars.next();
+                        let h1 = chars.next().unwrap_or('0');
+                        let h2 = chars.next().unwrap_or('0');
+                        if depth == 1 {
+                            if let Ok(b) = u8::from_str_radix(&format!("{h1}{h2}"), 16) {
+                                result.push(b as char);
+                            }
+                        }
+                    } else if next == '\n' || next == '\r' {
+                        chars.next();
+                    } else {
+                        // skip control word + optional numeric parameter
+                        while chars.peek().map_or(false, |c| c.is_alphanumeric() || *c == '-') {
+                            chars.next();
+                        }
+                        // skip optional trailing space
+                        if chars.peek() == Some(&' ') { chars.next(); }
+                    }
+                }
+            }
+            '\n' | '\r' => {
+                if depth <= 1 { result.push('\n'); }
+            }
+            _ => {
+                if depth == 1 { result.push(ch); }
+            }
+        }
+    }
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// CSV 文件 → 保留原始文本（已由 `_` 分支 fallthrough, 但也可精确处理）
+fn parse_csv_file(path: &Path, stem: &str) -> Result<(String, String)> {
+    let content = std::fs::read_to_string(path).map_err(VaultError::Io)?;
+    let title = first_line_title(&content, stem);
+    Ok((title, content))
+}
+
+/// 图片文件 → OCR 提取文本（自动场景检测）
+fn parse_image_file(path: &Path, stem: &str) -> Result<(String, String)> {
+    let filename = path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| stem.to_string());
+
+    let provider = crate::ocr::detect_default_provider()
+        .ok_or_else(|| VaultError::InvalidInput("OCR provider unavailable — install PP-OCR".to_string()))?;
+    let scene = crate::ocr::auto_detect_scene(&filename);
+    let profile = crate::ocr::profile_for_id(Some(scene));
+    let output = provider.extract_structured(path, &profile)?;
+
+    let content = if let Some(table) = output.table_markdown {
+        format!("{}\n\n{}", output.text, table)
+    } else {
+        output.text
+    };
+    if content.trim().is_empty() {
+        return Err(VaultError::InvalidInput("OCR returned empty text".to_string()));
+    }
+    let title = first_line_title(&content, stem);
+    Ok((title, content))
+}
+
+/// 音频文件 → ASR 转写（自动检测 diarization 后端）
+fn parse_audio_file(path: &Path, stem: &str) -> Result<(String, String)> {
+    let backend = crate::asr::detect_asr_backend()
+        .ok_or_else(|| VaultError::InvalidInput("ASR backend unavailable — install whisper.cpp".to_string()))?;
+    let diarization = crate::asr::detect_diarization_backend();
+    let (_, content) = crate::asr::transcribe_with_diarization(
+        &backend, path, diarization.as_ref(),
+    )?;
+    if content.trim().is_empty() {
+        return Err(VaultError::InvalidInput("ASR returned empty transcript".to_string()));
+    }
+    let title = first_line_title(&content, stem);
+    Ok((title, content))
 }
 
 #[cfg(test)]
@@ -347,7 +728,11 @@ mod tests {
         assert!(is_supported(Path::new("code.py")));
         assert!(is_supported(Path::new("data.txt")));
         assert!(is_supported(Path::new("app.rs")));
-        assert!(!is_supported(Path::new("image.png")));
+        assert!(is_supported(Path::new("image.png")));
+        assert!(is_supported(Path::new("photo.jpg")));
+        assert!(is_supported(Path::new("doc.html")));
+        assert!(is_supported(Path::new("data.xlsx")));
+        assert!(is_supported(Path::new("audio.mp3")));
         assert!(!is_supported(Path::new("video.mp4")));
     }
 

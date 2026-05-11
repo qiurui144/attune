@@ -45,15 +45,32 @@ if (platform) {
     // 绑定消息监听器（去重防止重复绑定）
     if (!_messageListenerAttached) {
       _messageListenerAttached = true;
-      chrome.runtime.onMessage.addListener((msg) => {
+      chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (msg.type === MSG.SETTINGS_UPDATED) {
           sendToWorker(MSG.GET_STATUS)
             .then((status) => indicator.setState(status?.online ? 'captured' : 'offline'))
             .catch(() => indicator.setState('offline'));
+        }
+        if (msg.type === MSG.GET_PAGE_CONTENT) {
+          sendResponse(extractPageContent());
+          return true;
         }
       });
     }
   }
 
   init();
+}
+
+/** 提取当前页面可读文本（AI 对话页面 fallback） */
+function extractPageContent() {
+  const title = document.title || '';
+  const url = location.href;
+  const domain = location.hostname;
+
+  // 尝试抓取主内容区
+  const mainEl = document.querySelector('main,[role="main"],article') || document.body;
+  const content = (mainEl.innerText || '').trim().slice(0, 200_000);
+
+  return { title, content, url, domain };
 }

@@ -124,4 +124,18 @@
       }
     });
   }
+
+  // ── GET_PAGE_CONTENT 响应器 ──────────────────────────────────────────────
+  // 供 background worker 在收到 CAPTURE_PAGE 时调用，返回当前页面可读文本
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg.type !== 'GET_PAGE_CONTENT') return false;
+    const title = document.title || '';
+    const url = location.href;
+    const domain = location.hostname;
+    // 优先取 <main>/<article> 等语义区，去除导航/页脚噪音
+    const mainEl = document.querySelector('main,[role="main"],article,[role="article"]') || document.body;
+    const content = (mainEl.innerText || '').trim().slice(0, 200_000);
+    sendResponse({ title, content, url, domain });
+    return true; // 保持通道开放直到 sendResponse 调用
+  });
 })();

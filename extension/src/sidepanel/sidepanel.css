@@ -80,3 +80,17 @@ body { font-family: system-ui, -apple-system, sans-serif; font-size: 14px; color
 
 /* 搜索按钮禁用 */
 .sp-search button:disabled { opacity: 0.5; cursor: default; }
+
+/* 保存当前页面栏 */
+.sp-savebar {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  background: #f0f9ff; border-bottom: 1px solid #bae6fd;
+}
+.sp-savebar__btn {
+  padding: 5px 12px; border: 1px solid #38bdf8; border-radius: 6px;
+  background: #fff; cursor: pointer; font-size: 12px; white-space: nowrap;
+  color: #0369a1;
+}
+.sp-savebar__btn:hover:not(:disabled) { background: #e0f2fe; }
+.sp-savebar__btn:disabled { opacity: 0.6; cursor: default; }
+.sp-savebar__msg { font-size: 11px; color: #0369a1; flex: 1; }
