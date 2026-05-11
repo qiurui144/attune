@@ -3,4 +3,4 @@
 SELF=$(readlink -f "$0")
 HERE=${SELF%/*}
 export PATH="${HERE}/usr/bin:${PATH}"
-exec "${HERE}/usr/bin/npu-webhook" "$@"
+exec "${HERE}/usr/bin/attune" "$@"

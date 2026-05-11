@@ -2,7 +2,7 @@
 """PyInstaller 打包配置"""
 
 a = Analysis(
-    ['../src/npu_webhook/main.py'],
+    ['../python/src/npu_webhook/main.py'],
     pathex=[],
     binaries=[],
     datas=[
@@ -36,7 +36,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='npu-webhook',
+    name='attune-python',
     debug=False,
     strip=False,
     upx=True,
@@ -49,5 +49,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    name='npu-webhook',
+    name='attune-python',
 )

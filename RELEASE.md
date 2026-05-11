@@ -7,7 +7,7 @@
 
 自 2026-04-09 起，项目明确分为两条产品线：
 
-**Python 原型线**（`src/npu_webhook/`）：
+**Python 原型线**（`python/src/npu_webhook/`）：
 - 快速验证新算法和功能设计
 - ChromaDB + FTS5 混合搜索
 - 用途：特性探索、性能对比、教学演示

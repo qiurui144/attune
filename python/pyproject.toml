@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "npu-webhook"
+name = "attune-python"
 version = "0.1.0"
-description = "个人知识库 + 记忆增强系统"
+description = "个人知识库 + 记忆增强系统（Python 原型线）"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
@@ -40,7 +40,7 @@ dev = [
 ]
 
 [project.scripts]
-npu-webhook = "npu_webhook.main:main"
+attune-python = "npu_webhook.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/npu_webhook"]

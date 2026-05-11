@@ -66,7 +66,7 @@ This repository contains two parallel product lines sharing the Chrome extension
 
 | Line | Path | Purpose |
 |------|------|---------|
-| **Python prototype** | `src/npu_webhook/` | Fast iteration for algorithms and experimental features. FastAPI + ChromaDB + SQLite FTS5 |
+| **Python prototype** | `python/src/npu_webhook/` | Fast iteration for algorithms and experimental features. FastAPI + ChromaDB + SQLite FTS5 |
 | **Rust production** | [`rust/`](rust/README.md) | Production-grade generic personal knowledge base. Axum + rusqlite + tantivy + usearch + Preact UI |
 
 Validated Python features get promoted to the Rust line. See [`rust/README.md`](rust/README.md) for the full Rust documentation.
@@ -161,6 +161,7 @@ Full documentation: [`rust/README.md`](rust/README.md).
 ### Python prototype
 
 ```bash
+cd python
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 uvicorn npu_webhook.main:app --reload --port 18900
@@ -268,7 +269,7 @@ Intel Meteor/Lunar/Arrow Lake NPU, AMD Phoenix/Hawk Point/Strix Point NPU, and N
 - `rust/crates/*` (attune-core / attune-server / attune-cli)
 - `extension/` (Chrome extension)
 - `rust/crates/attune-server/ui/` (Preact UI)
-- `src/npu_webhook/` (Python prototype)
+- `python/src/npu_webhook/` (Python prototype)
 - `plugins/free/*` (free community plugins: tech, patent, presales baseline)
 
 Free to fork, modify, and use commercially. Apache-2.0 includes a patent grant (§3).

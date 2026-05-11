@@ -1,7 +1,7 @@
 # 开发指南
 
 > **双产品线说明**：
-> - 本文档覆盖 **Python 原型线**（`src/npu_webhook/`），用于快速验证和算法实验
+> - 本文档覆盖 **Python 原型线**（`python/src/npu_webhook/`），用于快速验证和算法实验
 > - **Rust 商用线**位于 [`rust/`](rust/)，有独立的 [`DEVELOP.md`](rust/DEVELOP.md)
 > - 两者共享 API 协议（`/api/v1/*`），Chrome 扩展可任意切换后端
 
@@ -202,7 +202,7 @@ ruff check src/ tests/
 ## 项目结构
 
 ```
-src/npu_webhook/
+python/src/npu_webhook/
 ├── main.py                 # FastAPI 入口 + lifespan 初始化
 ├── config.py               # Pydantic Settings + YAML 配置
 ├── app_state.py            # 全局状态容器

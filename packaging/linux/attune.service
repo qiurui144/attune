@@ -1,10 +1,10 @@
 [Unit]
-Description=npu-webhook 个人知识库服务
+Description=Attune 个人知识库服务
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/npu-webhook
+ExecStart=%h/.local/bin/attune
 Restart=on-failure
 RestartSec=5
 Environment=DISPLAY=:0
