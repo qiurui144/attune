@@ -4,20 +4,20 @@ import platform
 
 
 def test_get_platform_provider():
-    from npu_webhook.platform.paths import get_platform_provider
+    from attune_python.platform.paths import get_platform_provider
 
     provider = get_platform_provider()
     system = platform.system()
     if system == "Linux":
-        from npu_webhook.platform.linux import LinuxPlatformProvider
+        from attune_python.platform.linux import LinuxPlatformProvider
         assert isinstance(provider, LinuxPlatformProvider)
     elif system == "Windows":
-        from npu_webhook.platform.windows import WindowsPlatformProvider
+        from attune_python.platform.windows import WindowsPlatformProvider
         assert isinstance(provider, WindowsPlatformProvider)
 
 
 def test_detect_best_device():
-    from npu_webhook.platform.detector import detect_best_device
+    from attune_python.platform.detector import detect_best_device
 
     device = detect_best_device()
     # 根据环境不同，可能是 ollama/igpu/cpu 等
@@ -26,18 +26,18 @@ def test_detect_best_device():
 
 
 def test_data_dir_exists():
-    from npu_webhook.platform.paths import get_platform_provider
+    from attune_python.platform.paths import get_platform_provider
 
     provider = get_platform_provider()
     data_dir = provider.get_data_dir()
     assert data_dir is not None
-    assert str(data_dir).endswith("npu-webhook")
+    assert str(data_dir).endswith("attune")
 
 
 def test_check_kernel_module_no_false_positive():
     """回归测试：_check_kernel_module 不应将子串当作模块名（如 'xe' 不应匹配 'xenfs'）"""
     from unittest.mock import patch
-    from npu_webhook.platform.detector import _check_kernel_module
+    from attune_python.platform.detector import _check_kernel_module
 
     fake_lsmod = (
         "Module                  Size  Used by\n"
@@ -45,7 +45,7 @@ def test_check_kernel_module_no_false_positive():
         "amdxdna               131072  0\n"
         "i915                 2916352  5\n"
     )
-    with patch("npu_webhook.platform.detector._run_cmd", return_value=fake_lsmod):
+    with patch("attune_python.platform.detector._run_cmd", return_value=fake_lsmod):
         assert _check_kernel_module("i915") is True       # 完整匹配
         assert _check_kernel_module("amdxdna") is True    # 完整匹配
         assert _check_kernel_module("xe") is False        # 只有 xenfs，不含独立 xe 模块
@@ -54,7 +54,7 @@ def test_check_kernel_module_no_false_positive():
 
 def test_kernel_version_comparison():
     """内核版本比较逻辑验证"""
-    from npu_webhook.platform.detector import _kernel_ge
+    from attune_python.platform.detector import _kernel_ge
 
     assert _kernel_ge("6.14.0-27-generic", "6.14") is True
     assert _kernel_ge("6.3.0", "6.14") is False
@@ -64,7 +64,7 @@ def test_kernel_version_comparison():
 
 def test_full_platform_check_runs():
     """full_platform_check 应正常执行不抛异常"""
-    from npu_webhook.platform.detector import full_platform_check
+    from attune_python.platform.detector import full_platform_check
 
     report = full_platform_check()
     assert report.os != ""

@@ -40,10 +40,10 @@ dev = [
 ]
 
 [project.scripts]
-attune-python = "npu_webhook.main:main"
+attune-python = "attune_python.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/npu_webhook"]
+packages = ["src/attune_python"]
 
 [tool.ruff]
 target-version = "py311"

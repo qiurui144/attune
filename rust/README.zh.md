@@ -498,7 +498,7 @@ Apache License 2.0 —— 见仓库根目录 [LICENSE](../LICENSE)。覆盖：
 - `rust/crates/*`（attune-core / attune-server / attune-cli）
 - `extension/`（Chrome 扩展）
 - `rust/crates/attune-server/assets/`（嵌入式 Web UI）
-- `src/npu_webhook/`（Python 原型）
+- `python/src/attune_python/`（Python 原型）
 - `plugins/free/*`（免费行业插件：编程、技术类）
 
 你可以自由 fork、修改、商用。Apache-2.0 包含专利授权条款（§3），使用者可放心。

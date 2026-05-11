@@ -3,10 +3,10 @@
 import tempfile
 from pathlib import Path
 
-from npu_webhook.core.chunker import Chunker
-from npu_webhook.core.parser import parse_file
-from npu_webhook.db.sqlite_db import SQLiteDB
-from npu_webhook.indexer.pipeline import IndexPipeline
+from attune_python.core.chunker import Chunker
+from attune_python.core.parser import parse_file
+from attune_python.db.sqlite_db import SQLiteDB
+from attune_python.indexer.pipeline import IndexPipeline
 
 
 def test_chunker_short_text():

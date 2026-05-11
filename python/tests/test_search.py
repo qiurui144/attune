@@ -3,10 +3,10 @@
 import tempfile
 from pathlib import Path
 
-from npu_webhook.core.search import HybridSearchEngine
-from npu_webhook.core.vectorstore import VectorStore
-from npu_webhook.db.chroma_db import ChromaDB
-from npu_webhook.db.sqlite_db import SQLiteDB
+from attune_python.core.search import HybridSearchEngine
+from attune_python.core.vectorstore import VectorStore
+from attune_python.db.chroma_db import ChromaDB
+from attune_python.db.sqlite_db import SQLiteDB
 
 
 def test_hybrid_search_basic():

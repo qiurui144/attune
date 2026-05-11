@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from npu_webhook.app_state import state
-from npu_webhook.core.chunker import Chunker
-from npu_webhook.core.search import HybridSearchEngine
-from npu_webhook.core.vectorstore import VectorStore
-from npu_webhook.db.chroma_db import ChromaDB
-from npu_webhook.db.sqlite_db import SQLiteDB
+from attune_python.app_state import state
+from attune_python.core.chunker import Chunker
+from attune_python.core.search import HybridSearchEngine
+from attune_python.core.vectorstore import VectorStore
+from attune_python.db.chroma_db import ChromaDB
+from attune_python.db.sqlite_db import SQLiteDB
 
 
 @pytest.fixture(autouse=True)

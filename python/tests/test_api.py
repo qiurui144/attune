@@ -3,7 +3,7 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from npu_webhook.main import app
+from attune_python.main import app
 
 
 @pytest.mark.asyncio
@@ -178,7 +178,7 @@ async def test_patch_settings_fields():
 async def test_auth_middleware_empty_token_fail_closed():
     """token 模式下，未配置 token 时应 fail-closed（空 token 不得通过鉴权）"""
     from unittest.mock import patch
-    from npu_webhook.config import settings, AuthConfig
+    from attune_python.config import settings, AuthConfig
 
     transport = ASGITransport(app=app)
     orig_mode = settings.auth.mode
@@ -209,7 +209,7 @@ async def test_auth_middleware_empty_token_fail_closed():
 @pytest.mark.asyncio
 async def test_auth_middleware_valid_token_passes():
     """token 模式下，配置了有效 token 时正确的 token 应通过鉴权"""
-    from npu_webhook.config import settings
+    from attune_python.config import settings
 
     orig_mode = settings.auth.mode
     orig_token = settings.auth.token

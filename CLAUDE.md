@@ -6,10 +6,10 @@
 
 本仓库包含两条并行的产品线，共享 Chrome 扩展协议（`/api/v1/*`）：
 
-1. **Python 原型线** (`src/npu_webhook/`) — 实验/验证
+1. **Python 原型线** (`python/src/attune_python/`) — 实验/验证
    - FastAPI + ChromaDB + SQLite FTS5
    - 快速迭代新特性和算法
-   - 78 tests，持续增长
+   - 73 tests，持续增长
 
 2. **Rust 商用线** (`rust/`) — 生产/发布
    - Axum + rusqlite + tantivy + usearch + hdbscan
@@ -310,7 +310,7 @@ Settings UI 采用 ChatGPT/Gemini/Claude 共同范式：模态对话框（左 ta
 
 ## 项目结构
 
-- `src/npu_webhook/` — Python 后端
+- `python/src/attune_python/` — Python 后端
 - `extension/` — Chrome 扩展（Manifest V3 + Preact + Vite）
 - `packaging/` — 打包配置（PyInstaller/AppImage/NSIS）
 - `.github/workflows/` — CI/CD

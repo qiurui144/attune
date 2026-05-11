@@ -67,14 +67,14 @@ class TestOllamaEmbedding:
     @requires_ollama
     def test_dimension_detected(self) -> None:
         """bge-m3 维度应为 1024"""
-        from npu_webhook.core.embedding import OllamaEmbedding
+        from attune_python.core.embedding import OllamaEmbedding
         engine = OllamaEmbedding(model="bge-m3")
         assert engine.get_dimension() == 1024
 
     @requires_ollama
     def test_embed_single_text(self) -> None:
         """单文本 embed 返回长度正确的向量"""
-        from npu_webhook.core.embedding import OllamaEmbedding
+        from attune_python.core.embedding import OllamaEmbedding
         engine = OllamaEmbedding(model="bge-m3")
         result = engine.embed(["Python 编程语言"])
         assert len(result) == 1
@@ -83,7 +83,7 @@ class TestOllamaEmbedding:
     @requires_ollama
     def test_embed_batch(self) -> None:
         """批量 embed 返回数量与输入一致"""
-        from npu_webhook.core.embedding import OllamaEmbedding
+        from attune_python.core.embedding import OllamaEmbedding
         engine = OllamaEmbedding(model="bge-m3")
         texts = ["机器学习", "深度学习", "自然语言处理", "知识图谱"]
         result = engine.embed(texts)
@@ -94,7 +94,7 @@ class TestOllamaEmbedding:
     def test_semantic_similarity_ordering(self) -> None:
         """语义相近的词向量余弦相似度高于语义无关的词"""
         import numpy as np
-        from npu_webhook.core.embedding import OllamaEmbedding
+        from attune_python.core.embedding import OllamaEmbedding
         engine = OllamaEmbedding(model="bge-m3")
         vecs = engine.embed(["猫", "猫咪", "飞机"])
         v_cat = np.array(vecs[0])
@@ -106,7 +106,7 @@ class TestOllamaEmbedding:
 
     def test_connection_error_on_bad_url(self) -> None:
         """Ollama 不可达时抛出 ConnectionError"""
-        from npu_webhook.core.embedding import OllamaEmbedding
+        from attune_python.core.embedding import OllamaEmbedding
         with pytest.raises(ConnectionError):
             OllamaEmbedding(model="bge-m3", base_url="http://localhost:19999")
 
@@ -117,19 +117,19 @@ class TestOllamaEmbedding:
 
 class TestCreateEmbeddingEngine:
     def test_returns_none_for_missing_onnx_model(self, tmp_path: Path) -> None:
-        from npu_webhook.core.embedding import create_embedding_engine
+        from attune_python.core.embedding import create_embedding_engine
         engine = create_embedding_engine(model_name="no-such-model", device="cpu", data_dir=tmp_path)
         assert engine is None
 
     @requires_ollama
     def test_auto_returns_ollama_engine(self) -> None:
-        from npu_webhook.core.embedding import create_embedding_engine, OllamaEmbedding
+        from attune_python.core.embedding import create_embedding_engine, OllamaEmbedding
         engine = create_embedding_engine(model_name="bge-m3", device="auto")
         assert isinstance(engine, OllamaEmbedding)
 
     @requires_ollama
     def test_ollama_device_explicit(self) -> None:
-        from npu_webhook.core.embedding import create_embedding_engine, OllamaEmbedding
+        from attune_python.core.embedding import create_embedding_engine, OllamaEmbedding
         engine = create_embedding_engine(model_name="bge-m3", device="ollama")
         assert isinstance(engine, OllamaEmbedding)
 
@@ -140,14 +140,14 @@ class TestCreateEmbeddingEngine:
 
 class TestChromaDB:
     def test_add_and_count(self, tmp_path: Path) -> None:
-        from npu_webhook.db.chroma_db import ChromaDB
+        from attune_python.db.chroma_db import ChromaDB
         db = ChromaDB(tmp_path / "chroma")
         assert db.count() == 0
         db.add("id1", [0.1, 0.2, 0.3], metadata={"source": "test"}, document="hello")
         assert db.count() == 1
 
     def test_upsert_idempotent(self, tmp_path: Path) -> None:
-        from npu_webhook.db.chroma_db import ChromaDB
+        from attune_python.db.chroma_db import ChromaDB
         db = ChromaDB(tmp_path / "chroma")
         vec = [0.1, 0.9]
         db.add("dup", vec, document="first")
@@ -155,7 +155,7 @@ class TestChromaDB:
         assert db.count() == 1
 
     def test_add_batch(self, tmp_path: Path) -> None:
-        from npu_webhook.db.chroma_db import ChromaDB
+        from attune_python.db.chroma_db import ChromaDB
         db = ChromaDB(tmp_path / "chroma")
         ids = [f"doc{i}" for i in range(5)]
         vecs = [[float(i) * 0.1, float(i) * 0.2] for i in range(5)]
@@ -163,7 +163,7 @@ class TestChromaDB:
         assert db.count() == 5
 
     def test_query_returns_nearest(self, tmp_path: Path) -> None:
-        from npu_webhook.db.chroma_db import ChromaDB
+        from attune_python.db.chroma_db import ChromaDB
         import numpy as np
         db = ChromaDB(tmp_path / "chroma")
         # 两个方向明显不同的单位向量
@@ -173,7 +173,7 @@ class TestChromaDB:
         assert results["ids"][0][0] == "near"
 
     def test_delete_by_item_ids(self, tmp_path: Path) -> None:
-        from npu_webhook.db.chroma_db import ChromaDB
+        from attune_python.db.chroma_db import ChromaDB
         db = ChromaDB(tmp_path / "chroma")
         db.add("a1", [1.0, 0.0], metadata={"item_id": "item_a"}, document="a1")
         db.add("a2", [0.9, 0.1], metadata={"item_id": "item_a"}, document="a2")
@@ -182,7 +182,7 @@ class TestChromaDB:
         assert db.count() == 1
 
     def test_delete_empty_list_no_error(self, tmp_path: Path) -> None:
-        from npu_webhook.db.chroma_db import ChromaDB
+        from attune_python.db.chroma_db import ChromaDB
         db = ChromaDB(tmp_path / "chroma")
         db.delete_by_item_ids([])  # should not raise
 
@@ -193,8 +193,8 @@ class TestChromaDB:
 
 class TestVectorStore:
     def _make_store(self, tmp_path: Path):
-        from npu_webhook.db.chroma_db import ChromaDB
-        from npu_webhook.core.vectorstore import VectorStore
+        from attune_python.db.chroma_db import ChromaDB
+        from attune_python.core.vectorstore import VectorStore
         chroma = ChromaDB(tmp_path / "chroma")
         engine = FixedEmbedding()
         return VectorStore(chroma, engine)
@@ -204,8 +204,8 @@ class TestVectorStore:
         assert vs.available is True
 
     def test_unavailable_without_engine(self, tmp_path: Path) -> None:
-        from npu_webhook.db.chroma_db import ChromaDB
-        from npu_webhook.core.vectorstore import VectorStore
+        from attune_python.db.chroma_db import ChromaDB
+        from attune_python.core.vectorstore import VectorStore
         chroma = ChromaDB(tmp_path / "chroma")
         vs = VectorStore(chroma, engine=None)
         assert vs.available is False
@@ -228,15 +228,15 @@ class TestVectorStore:
         assert any(r["id"] == "d1" for r in results)
 
     def test_search_with_no_engine_returns_empty(self, tmp_path: Path) -> None:
-        from npu_webhook.db.chroma_db import ChromaDB
-        from npu_webhook.core.vectorstore import VectorStore
+        from attune_python.db.chroma_db import ChromaDB
+        from attune_python.core.vectorstore import VectorStore
         chroma = ChromaDB(tmp_path / "chroma")
         vs = VectorStore(chroma, engine=None)
         assert vs.search("anything") == []
 
     def test_add_returns_false_without_engine(self, tmp_path: Path) -> None:
-        from npu_webhook.db.chroma_db import ChromaDB
-        from npu_webhook.core.vectorstore import VectorStore
+        from attune_python.db.chroma_db import ChromaDB
+        from attune_python.core.vectorstore import VectorStore
         chroma = ChromaDB(tmp_path / "chroma")
         vs = VectorStore(chroma, engine=None)
         assert vs.add("id", "text") is False
@@ -269,9 +269,9 @@ class TestVectorStore:
     @requires_ollama
     def test_ollama_embedding_roundtrip(self, tmp_path: Path) -> None:
         """使用真实 bge-m3 做 add+search，相关文档排在第一"""
-        from npu_webhook.db.chroma_db import ChromaDB
-        from npu_webhook.core.vectorstore import VectorStore
-        from npu_webhook.core.embedding import OllamaEmbedding
+        from attune_python.db.chroma_db import ChromaDB
+        from attune_python.core.vectorstore import VectorStore
+        from attune_python.core.embedding import OllamaEmbedding
         engine = OllamaEmbedding(model="bge-m3")
         chroma = ChromaDB(tmp_path / "chroma")
         vs = VectorStore(chroma, engine)
@@ -288,10 +288,10 @@ class TestVectorStore:
 
 class TestHybridSearchEngine:
     def _make_engine(self, tmp_path: Path, use_embedding: bool = True):
-        from npu_webhook.db.sqlite_db import SQLiteDB
-        from npu_webhook.db.chroma_db import ChromaDB
-        from npu_webhook.core.vectorstore import VectorStore
-        from npu_webhook.core.search import HybridSearchEngine
+        from attune_python.db.sqlite_db import SQLiteDB
+        from attune_python.db.chroma_db import ChromaDB
+        from attune_python.core.vectorstore import VectorStore
+        from attune_python.core.search import HybridSearchEngine
         db = SQLiteDB(tmp_path / "test.db")
         chroma = ChromaDB(tmp_path / "chroma")
         engine = FixedEmbedding() if use_embedding else None
@@ -347,11 +347,11 @@ class TestHybridSearchEngine:
     @requires_ollama
     def test_real_embedding_hybrid_search(self, tmp_path: Path) -> None:
         """真实 bge-m3 向量 + FTS5 混合搜索，语义相关文档排前"""
-        from npu_webhook.db.sqlite_db import SQLiteDB
-        from npu_webhook.db.chroma_db import ChromaDB
-        from npu_webhook.core.vectorstore import VectorStore
-        from npu_webhook.core.search import HybridSearchEngine
-        from npu_webhook.core.embedding import OllamaEmbedding
+        from attune_python.db.sqlite_db import SQLiteDB
+        from attune_python.db.chroma_db import ChromaDB
+        from attune_python.core.vectorstore import VectorStore
+        from attune_python.core.search import HybridSearchEngine
+        from attune_python.core.embedding import OllamaEmbedding
 
         db = SQLiteDB(tmp_path / "test.db")
         chroma = ChromaDB(tmp_path / "chroma")
@@ -383,7 +383,7 @@ class TestReranker:
     @requires_ollama
     def test_rerank_changes_order(self) -> None:
         """精排后语义最相关的文档应排首位"""
-        from npu_webhook.core.search import Reranker
+        from attune_python.core.search import Reranker
         reranker = Reranker(model="bge-m3")
         if not reranker.available:
             pytest.skip("Reranker probe failed")
@@ -399,7 +399,7 @@ class TestReranker:
 
     def test_rerank_unavailable_returns_original(self) -> None:
         """Reranker 不可用时返回原始顺序（降级）"""
-        from npu_webhook.core.search import Reranker
+        from attune_python.core.search import Reranker
         reranker = Reranker(base_url="http://localhost:19999")  # 不可达
         docs = [
             {"id": "a", "document": "first doc", "score": 0.9},
@@ -410,7 +410,7 @@ class TestReranker:
 
     def test_rerank_top_k_limits(self) -> None:
         """top_k 截断：返回条数不超过 top_k"""
-        from npu_webhook.core.search import Reranker
+        from attune_python.core.search import Reranker
         reranker = Reranker(base_url="http://localhost:19999")
         docs = [{"id": str(i), "content": f"doc {i}", "score": float(i)} for i in range(10)]
         result = reranker.rerank("query", docs, top_k=3)
@@ -423,24 +423,24 @@ class TestReranker:
 
 class TestFulltextTokenizer:
     def test_chinese_tokenization(self) -> None:
-        from npu_webhook.core.fulltext import tokenize_for_search
+        from attune_python.core.fulltext import tokenize_for_search
         tokens = tokenize_for_search("机器学习是人工智能的一个分支")
         assert "机器学习" in tokens or "机器" in tokens
 
     def test_build_fts_query_produces_or_terms(self) -> None:
-        from npu_webhook.core.fulltext import build_fts_query
+        from attune_python.core.fulltext import build_fts_query
         q = build_fts_query("深度学习神经网络")
         assert " OR " in q
         assert '"' in q
 
     def test_empty_string_fallback(self) -> None:
-        from npu_webhook.core.fulltext import build_fts_query
+        from attune_python.core.fulltext import build_fts_query
         result = build_fts_query("")
         assert isinstance(result, str)
 
     def test_no_injection_in_fts_query(self) -> None:
         """双引号不应出现在 term 内部（防止 FTS5 语法注入）"""
-        from npu_webhook.core.fulltext import build_fts_query
+        from attune_python.core.fulltext import build_fts_query
         q = build_fts_query('他说"你好"然后离开了')
         # 每个 term 本身不含双引号（外层引号正常）
         import re
