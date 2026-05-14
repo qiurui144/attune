@@ -213,10 +213,12 @@ Master Password (用户记忆)  +  Device Secret (设备文件, 256-bit 随机)
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/vault/status` | vault 状态 (sealed/locked/unlocked) + 条目数 |
-| POST | `/vault/setup` | 首次设置密码 |
+| POST | `/vault/setup` | 首次设置密码，响应携带 `recovery_key`（一次性，务必离线保存）|
 | POST | `/vault/unlock` | 解锁 vault，返回 session token |
 | POST | `/vault/lock` | 手动锁定（清零内存密钥）|
 | POST | `/vault/change-password` | 修改主密码（重新加密 DEK）|
+| POST | `/vault/reset-with-recovery-key` | 忘记密码时用恢复密钥重置，数据零丢失 |
+| POST | `/vault/forgot-password-reset` | 无恢复密钥最后兜底：清空本地数据重置（需发送 `"confirm":"RESET"`）|
 | GET | `/vault/device-secret/export` | 导出 device secret（迁移用）|
 | POST | `/vault/device-secret/import` | 导入 device secret（新设备）|
 

@@ -64,6 +64,7 @@ fn main() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // 重复双击：激活已有主窗口（unminimize + show + focus），第二个进程立即退出
             tracing::info!("single-instance: another launch detected, focusing existing window");

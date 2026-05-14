@@ -229,10 +229,12 @@ All endpoints are prefixed with `/api/v1/`. Localhost access is auth-free; remot
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/vault/status` | Vault state (sealed/locked/unlocked) + item count |
-| POST | `/vault/setup` | First-time password setup |
+| POST | `/vault/setup` | First-time password setup — response includes `recovery_key` (one-time, save offline) |
 | POST | `/vault/unlock` | Unlock vault, returns session token |
 | POST | `/vault/lock` | Manual lock (zero in-memory keys) |
 | POST | `/vault/change-password` | Change master password |
+| POST | `/vault/reset-with-recovery-key` | Reset password using recovery key — data preserved |
+| POST | `/vault/forgot-password-reset` | Last-resort destructive reset (requires `"confirm":"RESET"`) |
 | GET | `/vault/device-secret/export` | Export device secret (for migration) |
 | POST | `/vault/device-secret/import` | Import device secret (new device) |
 

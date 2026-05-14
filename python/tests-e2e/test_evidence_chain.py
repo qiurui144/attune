@@ -185,7 +185,7 @@ class TestEvidenceChain:
             - runner_resolves_step_ref_chain
             - runner_fails_fast_on_unknown_op
         本 e2e 步骤只是声明"已验证"。"""
-        unit_test_path = Path(__file__).resolve().parents[1] / \
+        unit_test_path = Path(__file__).resolve().parents[2] / \
             "rust/crates/attune-core/tests/workflow_test.rs"
         assert unit_test_path.exists(), \
             f"workflow_test.rs 必须存在: {unit_test_path}"

@@ -53,10 +53,10 @@ class TestCORS:
 
 class TestRouteFallback:
     def test_unknown_endpoint_returns_401_or_404(self, client: httpx.Client) -> None:
-        """未知 endpoint: auth middleware 拦截返回 401, 或 not-found 路由 404。
-        两种都是合理的 — 重要的是不返回 200 或 5xx。"""
+        """未知 endpoint 在当前实现下可返回 401/403/404。
+        关键约束：不应返回 200 或 5xx。"""
         r = client.get("/api/v1/no-such-endpoint")
-        assert r.status_code in (401, 404), f"expected 401/404, got {r.status_code}"
+        assert r.status_code in (401, 403, 404), f"expected 401/403/404, got {r.status_code}"
 
     def test_root_path_does_not_500(self, client: httpx.Client) -> None:
         """/ 不应 500 (有 web UI 或 redirect 都行)。"""

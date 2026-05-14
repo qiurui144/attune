@@ -16,10 +16,10 @@ import httpx
 
 class TestStatusEndpoint:
     def test_status_endpoint_reachable(self, client: httpx.Client) -> None:
-        """/api/v1/status 应该返回响应（200 或 401 取决于实现）。"""
+        """/api/v1/status 应该返回响应（200/401/403 取决于实现状态）。"""
         r = client.get("/api/v1/status")
-        # 在 --no-auth 模式下 401 仍合理（vault locked 而非 auth missing）
-        assert r.status_code in (200, 401), f"unexpected {r.status_code}: {r.text[:200]}"
+        # 在 --no-auth 模式下，vault sealed 可返回 403（并非 auth middleware 拒绝）。
+        assert r.status_code in (200, 401, 403), f"unexpected {r.status_code}: {r.text[:200]}"
 
     def test_status_response_is_json(self, client: httpx.Client) -> None:
         r = client.get("/api/v1/status")

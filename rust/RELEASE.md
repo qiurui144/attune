@@ -2,7 +2,39 @@
 
 ## v0.6.x patch 流（2026-05-01）— 部署 + 4 必要底座
 
-### 最新变更（多格式解析 + 全面测试覆盖 + 格式校验强化）
+### 最新变更（摘要 LLM 拆分 + 密码恢复机制 + 会员账号登录）
+
+**摘要 LLM 拆分（2026-05-12 完成）**：
+- **核心目标**：从 chat LLM 中独立出专用的 summarizer LLM，摘要不再占用云端 token
+- **新字段**：`settings.summary_model` (Option<String>，默认 `"qwen2.5:3b"`)，用户可 PATCH 修改
+- **自动探测**：启动时若未配置 summary_model，自动探测 Ollama（按 `SUMMARIZER_MODELS` 梯队顺序）；探测失败时回退到 chat LLM
+- **新状态字段**：`AppState::summary_llm: Mutex<Option<Arc<dyn LlmProvider>>>`，初始化完全独立于 chat_llm
+- **Phase 2 调用改动**：上下文压缩阶段优先用 `summary_llm`；若不可用则回退到 chat_llm；都不可用则原文透传
+- **压缩策略推荐**：鼓励用户用 `"accurate"` 策略（300字摘要 + 100字原文头），降低数据丢失风险
+- **快速失败**：第 1 个 chunk 摘要生成失败后，后续 chunks 跳过 LLM，直接原文（避免串行卡住）
+- **硬件推荐表** (per `HardwareProfile::recommended_summary_model()`)：
+  - ≥32 GB + 加速器 → qwen2.5:7b
+  - 16-32 GB → qwen2.5:3b
+  - 8-16 GB → qwen2.5:1.5b
+  - <8 GB → llama3.2:1b
+- **向后兼容**：旧 vault/settings 无 `summary_model` 字段 → 启动时用默认值；现有 context_strategy 配置保留
+- **测试**：10 个单元测试全部通过，settings 端点兼容性验证通过
+
+**Vault 密码恢复（非破坏性重置）**：
+- `vault/setup` 响应新增 `recovery_key` 字段，格式 `ATN-{16hex}-{16hex}`；Web UI 首次安装自动下载 `attune-recovery-key.txt`，CLI 打印到终端
+- 新端点 `POST /api/v1/vault/reset-with-recovery-key`：使用恢复密钥重置主密码，DEK 保持不变，所有知识库数据零丢失
+- 新端点 `POST /api/v1/vault/forgot-password-reset`：最后兜底方案，需 vault 处于 LOCKED 状态 + 发送 `"confirm":"RESET"` 确认，清空所有本地数据
+- LoginScreen 新增"使用恢复密钥重置密码"和"无恢复密钥？清空并重置"两个操作入口，提示文案从"忘记密码无法找回"改为恢复路径说明
+
+**会员账号密码登录**：
+- 新端点 `POST /api/v1/member/login-password`：邮箱 + 密码登录 Attune cloud 账号，自动拉取 license，设置 MemberState
+- Settings → 会员 Tab：未登录时展示邮箱 + 密码表单（支持 Enter 提交）；登录后展示账号、License、等级、登出按钮
+
+**测试**：新增 `vault_recovery_test.rs` 集成测试（3 个 E2E 场景）验证 recovery_key 格式、旧密码失效、新密码解锁
+
+---
+
+### v0.6.x 历史变更（多格式解析 + 全面测试覆盖 + 格式校验强化）
 
 **多格式文件解析（parse_bytes_with_profile 扩展）**：
 - 新增格式支持：`.html/.htm` (scraper strip-tags) / `.epub` (ZIP 内 XHTML 拼接) / `.xlsx/.xls` (calamine 电子表格) / `.pptx` (ZIP 内 slide XML) / `.rtf` (去标记提取) / `.csv` (原文 UTF-8)

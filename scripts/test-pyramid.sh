@@ -9,7 +9,7 @@
 #   3. Smoke         — scripts/smoke-test.sh  (~30s, 必跑)
 #   4. Corpus        — scripts/run-benchmark-corpus.sh  (~5min, 可选 --with-corpus)
 #   5. Quality       — cargo test --release rag_quality_benchmark  (~10s, 必跑)
-#   6. E2E (browser) — Playwright via tests/e2e_rust/ (~5min, 可选 --with-e2e)
+#   6. E2E (browser) — pytest python/tests-e2e/ (~5min, 可选 --with-e2e)
 #
 # 默认: 跑 1+2+3+5（必跑层），合计 ~3-4 min。
 # 可选: --with-corpus 加第 4 层；--with-e2e 加第 6 层。
@@ -90,7 +90,8 @@ run_layer() {
             awk '{sum += $1} END {print sum+0}')
         local pytest_count2=$(grep -oE "==+ [0-9]+ passed" "$logfile" 2>/dev/null | \
             awk '{sum += $2} END {print sum+0}')
-        local smoke_count=$(grep -cE "^\[OK\] Test [0-9]+/[0-9]+:" "$logfile" 2>/dev/null)
+        # smoke-test.sh 会输出彩色前缀，不能锚定 ^[OK]；直接按 Test x/y 计数更稳健。
+        local smoke_count=$(grep -cE "Test [0-9]+/[0-9]+:" "$logfile" 2>/dev/null)
         local count=$((${cargo_count:-0} + ${pytest_count:-0} + ${pytest_count2:-0} + ${smoke_count:-0}))
         COUNTS[$name]="${count:-N/A}"
         ok "$name: ${COUNTS[$name]} 测试通过, ${TIMINGS[$name]}"
@@ -135,7 +136,7 @@ fi
 # ── 6. E2E Browser Tests (httpx + Playwright via Python) ──────
 if [ "$WITH_E2E" = "true" ]; then
     run_layer "e2e" "Layer 6: E2E (server binary + httpx + browser)" \
-        "cd $PROJECT_DIR && python3 -m pytest tests-e2e/ -v --tb=short"
+    "cd $PROJECT_DIR && python3 -m pytest python/tests-e2e/ -v --tb=short"
 else
     RESULTS[e2e]="⏭️ SKIP"
     TIMINGS[e2e]="-"
@@ -147,7 +148,7 @@ fi
 {
     echo "| 1. Unit          | ${RESULTS[unit]} | ${COUNTS[unit]} | ${TIMINGS[unit]} | cargo test --lib |"
     echo "| 2. Integration   | ${RESULTS[integration]} | ${COUNTS[integration]} | ${TIMINGS[integration]} | cargo test --tests |"
-    echo "| 3. Smoke         | ${RESULTS[smoke]} | 5 | ${TIMINGS[smoke]} | binary + API ping |"
+    echo "| 3. Smoke         | ${RESULTS[smoke]} | ${COUNTS[smoke]} | ${TIMINGS[smoke]} | binary + API ping |"
     echo "| 4. Corpus        | ${RESULTS[corpus]} | ${COUNTS[corpus]} | ${TIMINGS[corpus]} | real GitHub corpus |"
     echo "| 5. Quality       | ${RESULTS[quality]} | ${COUNTS[quality]} | ${TIMINGS[quality]} | golden set MRR |"
     echo "| 6. E2E           | ${RESULTS[e2e]} | ${COUNTS[e2e]} | ${TIMINGS[e2e]} | Playwright Chrome |"

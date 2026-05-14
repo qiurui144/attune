@@ -20,7 +20,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
+PROJECT_DIR = Path(__file__).resolve().parents[2]
 BINARY = PROJECT_DIR / "rust" / "target" / "release" / "attune-server-headless"
 TEST_PORT = int(os.environ.get("ATTUNE_E2E_PORT", "18901"))
 TEST_HOST = "127.0.0.1"
