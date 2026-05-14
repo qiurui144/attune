@@ -61,7 +61,11 @@ pub fn validate_bind_path(
         ));
     }
 
-    let canonical = path.canonicalize().map_err(|_| {
+    // dunce::canonicalize == std::fs::canonicalize 在 Unix 上完全等价,
+    // 在 Windows 上自动剥 \\?\ UNC 前缀, 让后续 starts_with(home) 正常工作.
+    // 不剥 UNC 会导致 Windows 用户连 home 目录本身都加不进 vault (canonical
+    // 是 \\?\C:\Users\xxx, home 参数是 C:\Users\xxx, starts_with 失败).
+    let canonical = dunce::canonicalize(path).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "directory not found or inaccessible"})),

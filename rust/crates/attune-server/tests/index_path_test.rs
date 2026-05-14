@@ -17,19 +17,23 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn rejects_path_outside_home() {
-        // /tmp typically exists and is a directory on Linux; on Windows it isn't
-        // even an absolute path (Path::is_absolute 要求 drive prefix), 所以这个
-        // 断言形态 Unix-only. Windows 路径校验逻辑由 validate_bind_path 单测覆盖.
+        // Linux: "/tmp" 存在且在 home 外 → 校验拒绝, body 含 "home directory"
+        // Windows: "/tmp" 不带 drive prefix, Path::is_absolute() = false → body 含 "absolute"
+        // 也算"正确拒绝" — 关键是 result 必须是 Err. 用宽断言覆盖三平台.
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/home/test"));
         let result = validate_bind_path("/tmp", &home);
-        if let Err((status, body)) = result {
-            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
-            let body_str = serde_json::to_string(&body.0).unwrap();
-            assert!(body_str.contains("home directory") || body_str.contains("not found"));
-        }
-        // If home happens to be / or contains /tmp (unlikely), test is vacuously ok
+        assert!(result.is_err(), "path outside home should be rejected: {result:?}");
+        let (status, body) = result.unwrap_err();
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        let body_str = serde_json::to_string(&body.0).unwrap();
+        // 各平台的拒绝理由不同: absolute / home directory / not found 任一即可
+        assert!(
+            body_str.contains("home directory")
+                || body_str.contains("not found")
+                || body_str.contains("absolute"),
+            "unexpected rejection reason: {body_str}"
+        );
     }
 
     #[test]
@@ -42,12 +46,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn accepts_home_directory_itself() {
-        // Unix-only: Windows canonicalize() 给 home 返回 UNC \\?\C:\Users\xxx 前缀,
-        // 但 home 参数仍是 C:\Users\xxx — canonical.starts_with(home) 失败.
-        // 这是 Windows 路径系统的真实行为, 应在 validate_bind_path 里处理 UNC 前缀
-        // 或换更稳健的 path containment 算法; 暂以 cfg(unix) 隔离测试.
+        // 三平台都应通过 — validate_bind_path 改用 dunce::canonicalize 后,
+        // Windows 上不再返回 \\?\ UNC 前缀, canonical.starts_with(home) 正常工作.
+        // 历史: Windows 用 std::fs::canonicalize 时 starts_with 失败 → 用户连
+        // home 目录本身都加不进 vault, prod bug 被 cfg(unix) 测试 mask 过一阵.
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
         if home.exists() && home.is_dir() {
             let result = validate_bind_path(home.to_str().unwrap(), &home);

@@ -32,6 +32,10 @@ lru = "0.12"
 uuid = { version = "1", features = ["v4"] }
 reqwest = { workspace = true, features = ["json"] }
 local-ip-address = "0.6"
+# dunce: Windows 上 std::fs::canonicalize 返回 \\?\C:\... UNC 前缀,
+# 导致 PathBuf::starts_with(home) 失败. dunce::canonicalize 自动剥
+# UNC 前缀, 跨平台行为一致. 见 routes/index.rs::validate_bind_path
+dunce = "1"
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json"] }
