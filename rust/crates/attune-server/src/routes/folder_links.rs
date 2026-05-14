@@ -15,8 +15,11 @@ pub struct FolderLink {
 
 pub async fn list_folder_links() -> Json<serde_json::Value> {
     let p = attune_core::platform::config_dir().join("folder-links.json");
-    let links: Vec<FolderLink> = if p.exists() {
-        std::fs::read_to_string(&p)
+    // OPT-7: async_fs 包装 spawn_blocking, 防 Axum worker 阻塞
+    let exists = attune_core::async_fs::try_exists(&p).await.unwrap_or(false);
+    let links: Vec<FolderLink> = if exists {
+        attune_core::async_fs::read_to_string(&p)
+            .await
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()

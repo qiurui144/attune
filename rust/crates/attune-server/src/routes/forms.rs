@@ -50,25 +50,33 @@ pub async fn get_form(
         ))?;
     let component_path = plugins_root.join(&plugin_id).join(&component.html);
 
-    let html = if component_path.exists()
+    // OPT-7: 避免 std::Path::exists 在 async 内阻塞 stat 调用
+    let exists = attune_core::async_fs::try_exists(&component_path)
+        .await
+        .unwrap_or(false);
+    let html = if exists
         && component_path.extension().and_then(|s| s.to_str()) == Some("yaml")
     {
-        // 真读 yaml 渲染
-        let yaml_str = std::fs::read_to_string(&component_path).map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("read form yaml: {e}")})),
-        ))?;
+        // 真读 yaml 渲染 (async_fs 包装 spawn_blocking, 防 Axum worker 阻塞)
+        let yaml_str = attune_core::async_fs::read_to_string(&component_path)
+            .await
+            .map_err(|e| (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("read form yaml: {e}")})),
+            ))?;
         let schema: FormSchema = serde_yaml::from_str(&yaml_str).map_err(|e| (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({"error": format!("parse form yaml: {e}")})),
         ))?;
         render_html(&schema)
-    } else if component_path.exists() {
+    } else if exists {
         // HTML 文件直接返
-        std::fs::read_to_string(&component_path).map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("read html: {e}")})),
-        ))?
+        attune_core::async_fs::read_to_string(&component_path)
+            .await
+            .map_err(|e| (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("read html: {e}")})),
+            ))?
     } else {
         // Fallback: 返 stub schema (开发期 plugin 还没提供 form 文件)
         let schema = FormSchema {

@@ -152,19 +152,31 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/behavior/popular", get(routes::behavior::popular))
         // G1 Browse signals (W3 batch B, 2026-04-27)
         // per spec docs/superpowers/specs/2026-04-27-w3-batch-b-design.md §3
+        // OPT-5 kebab unification: /browse-signals 是新 canonical, /browse_signals 旧 alias 留 1 release
+        .route("/api/v1/browse-signals",
+               post(routes::browse_signals::record_batch)
+                   .get(routes::browse_signals::list)
+                   .delete(routes::browse_signals::delete))
         .route("/api/v1/browse_signals",
                post(routes::browse_signals::record_batch)
                    .get(routes::browse_signals::list)
                    .delete(routes::browse_signals::delete))
         // C1 Web search cache (W4-002, 2026-04-27) — close C1 loop
         // Settings UI "清空 Web 搜索缓存" 入口
+        .route("/api/v1/web-search-cache",
+               get(routes::web_search_cache::count)
+                   .delete(routes::web_search_cache::delete))
         .route("/api/v1/web_search_cache",
                get(routes::web_search_cache::count)
                    .delete(routes::web_search_cache::delete))
         // AI 底座状态（v0.6.0-rc.3, 2026-04-27）— Embedding / Rerank / OCR / ASR / LLM 可用性
+        .route("/api/v1/ai-stack", get(routes::ai_stack::status))
         .route("/api/v1/ai_stack", get(routes::ai_stack::status))
         // G2 Auto bookmark candidates (W4, 2026-04-27)
         // POST 不暴露：仅由 routes::browse_signals::record_batch high_engagement 路径写
+        .route("/api/v1/auto-bookmarks",
+               get(routes::auto_bookmarks::list)
+                   .delete(routes::auto_bookmarks::delete))
         .route("/api/v1/auto_bookmarks",
                get(routes::auto_bookmarks::list)
                    .delete(routes::auto_bookmarks::delete))
