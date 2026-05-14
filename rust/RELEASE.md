@@ -21,7 +21,12 @@
 - 4 vertical (law-pro / patent-pro / presales-pro / tech-pro) 全 marketplace 可见; loaded 9 plugins log
 - 暗色 / 设置 / About 5 节 round-trip 全过
 
-**未验证 / 已知**：cloud accounts/pluginhub/llm-gateway docker 部署 + Reader / 项目卷宗 round-trip 仍 pending（独立工作单元）。
+**Cloud 自部署可用性**：AMD 笔电 (Docker 29 + Compose v2) 跑通 pluginhub:9100 / accounts:8002 / llm-gateway:8001 三服务 + /health ✓。修了上游 cloud 仓 2 个 bug（Dockerfile copy 顺序 + alembic 0002 down_revision 链断，本地 commit 558df7c 待 push）。
+
+**已知限制 (v0.7 候选)**：
+- attune-desktop Settings/Wizard 没字段配置自定义 accounts/pluginhub URL — 默认硬编码 `attune.ai` 云端。私有 cloud 部署（自托管 / dev 环境）目前只能 SQL 直改 `app_settings`。`state.reload_plugin_hub` 后端已支持热切，缺 UI 入口
+- Reader / 项目卷宗 round-trip 未在本轮 Playwright E2E 覆盖
+- CI Python lint-and-test + Windows cargo 在 commit 6421de9 修复后转绿（修了 `models/` gitignore 误吞 Python 包 + Windows 浏览器路径假设）
 
 ---
 
