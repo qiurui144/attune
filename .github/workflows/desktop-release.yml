@@ -25,7 +25,9 @@ jobs:
             bundles: deb,rpm,appimage
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            bundles: nsis
+            # nsis + msi: 历史 desktop-v0.6.0 / v0.6.1 都含 MSI (企业部署
+            # 场景需要), rc.4 暂只产 NSIS = regression. 加回 msi.
+            bundles: nsis,msi
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
