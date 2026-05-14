@@ -298,15 +298,47 @@ Settings UI 采用 ChatGPT/Gemini/Claude 共同范式：模态对话框（左 ta
 
 ## 开发规范
 
+### Python 原型线
 - Python 代码使用 ruff 格式化和 lint（line-length=120）
 - 类型注解: 所有公开函数必须有类型注解
-- 测试放 `tests/` 目录, 使用 pytest（当前 78 个测试: 36 后端单元 + 42 扩展 E2E）
-- 扩展 E2E 测试使用 Playwright Chromium（非 Google Chrome）
+- 测试放 `tests/` 目录, 使用 pytest
+- **扩展 E2E 测试使用 Playwright 真 Chrome (`channel="chrome"`), 禁止退化到 Chromium** (per CLAUDE.md MCP 限制, FIX-4 已落实)
 - 调试代码放 `tmp/`, 使用后删除
-- API 路径前缀: `/api/v1/`
-- 后端端口: 18900
 - 使用 venv 管理 Python 依赖
 - pip 使用清华源
+
+### 通用
+- API 路径前缀: `/api/v1/`
+- 后端端口: 18900
+- **API path 命名 kebab-case** (per OPT-5). 新 path 必须 kebab; 旧 snake path 保留 alias 1 release 周期后删
+
+### Rust 商用线约定 (v0.6.3 sprint 确立)
+
+**错误处理**:
+- 新 routes 用 `attune_server::error::{AppError, AppResult}` + `?` 链, 统一返回 `{"error": msg, "code": kebab}` JSON shape
+- 旧 routes `(StatusCode, Json)` tuple-style 渐进 migration, 不阻塞 build
+- `AppError::From<VaultError>` 自动映射 `Locked → 401 / NotFound → 404 / Sealed → 503 / AlreadyInitialized → 409` 等; 客户端 `code` 字段稳定可针对处理
+
+**Async-safe fs**:
+- async handler 内禁止直接调 `std::fs::*` (会阻塞 tokio worker)
+- 用 `attune_core::async_fs::{read, read_to_string, write, create_dir_all, try_exists, remove_file_if_exists}` (spawn_blocking 包装)
+- sync 上下文 (CLI / 启动 init / long-running worker thread) 可继续用 `std::fs`
+
+**State 访问**:
+- AppState 19 个 ML provider / 索引字段, 新代码用 accessor 方法 `state.embedding()` / `state.llm()` / `state.set_embedding()` 等 (lock+clone Arc, µs 临界区)
+- 不直接调 `state.embedding.lock()` — 后续 v0.7 字段类型会改 `ArcSwap`, accessor 不变, 直接 .lock() 调用会编译失败
+
+**SQL prepare cache**:
+- 写新 rusqlite 查询用 `conn.prepare_cached(static_sql)` (rusqlite stmt cache, 复用编译过的 stmt object)
+- 动态 SQL (含变量拼接) 必须 `conn.prepare(&sql)` 不能 cache
+
+**测试隔离**:
+- 集成测试 (`crates/*/tests/*.rs`) 涉及 sysinfo / 系统负载 / 平台路径 / timing → 用 mock / `cfg(unix)` 隔离 / 显式 `MockMonitor`. CI 高负载 runner 上踩过坑 (governor_integration / index_path_test)
+- timing-sensitive 测试 (`thread::sleep`) 用 retry-with-deadline 而非 fixed sleep
+
+**Build profile**:
+- workspace [profile.dev.package."*"] opt-level=1 — dev test 速度 5x
+- workspace [profile.release] lto=thin codegen-units=1 strip=symbols — 二进制 -15%, perf +5%
 
 ## 项目结构
 
