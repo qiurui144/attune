@@ -15,7 +15,49 @@
 
 ---
 
-## v0.6.3（2026-05-14）— LLM 热重载 + Plugins 数据源 + PII 全路径 + Pro Vertical 验收
+## v0.6.3（2026-05-14）— LLM 热重载 + Plugins 数据源 + PII 全路径 + Pro Vertical 验收 + 架构与质量 sprint
+
+发布定位：bug fix patch + UI polish + 4 vertical 端到端验证 + 7 路 CI 修复 + 20 轮全量 quality review + 6 项架构优化 + 2 项产品化 feature。
+
+### rc.2 → rc.5 sprint (2026-05-14) — 7 路 CI 修复 + 20 轮 quality + 架构优化
+
+**CI / Windows 平台 7 路修复**（rc.1 desktop installer 失败一路追到底）:
+- `6421de9` `.gitignore models/` 无锚误吞 Python 包子目录 → CI ImportError; web_search_browser Linux 路径假设, Windows fail
+- `8291f6c` NSIS installer 删 install-time Ollama 下载 (inetc plugin 在 GHA runner 缺) → Wizard 接管检测
+- `51be338` governor_integration 用 MockMonitor 绕开 GHA Windows 高负载 (SysinfoMonitor CPU% > budget 全 worker stuck)
+- `35d593e` index_path_test Windows 路径语义 cfg(unix) (治标)
+- `6c0ef83` validate_bind_path 改 `dunce::canonicalize` 修 Windows UNC `\\?\` 真因 (Windows 用户加 vault 路径首破)
+- `86f1534` tauri.conf.json version 0.6.0 → 0.6.3 + desktop-release.yml softprops/action-gh-release@v2 自动 publish
+- `f828d35` desktop-release.yml 补 `permissions: contents: write` (rc.3 403 fix)
+- `0752294` Windows matrix `bundles: nsis,msi` (rc.4 MSI 缺失 regression fix)
+
+**20 轮全量 quality review**（覆盖文档 / 测试 / 代码 / 安全 / 技术债 / 对抗视角）:
+- 16 项 issue 按 RICE 排序, P0/P1 已落地（FIX-1 ~ FIX-8 + 安全补 `OsRng`, lru 0.13 修 RUSTSEC-2026-0002, Node 24 opt-in, chrome channel 等）
+- P2 长期项留 v0.7 follow-up
+
+**架构 sprint — 第二轮深度分析 + 6 项优化**:
+- D1 AppState `std::sync::Mutex` 19 字段 → 加 lock-free accessor (read+clone Arc, µs 级临界区); ArcSwap 实际替换留 v0.7
+- D5 `store/items.rs` 7 处 `prepare()` → `prepare_cached()`, 热查询 SQL 解析省去
+- D3 `attune-core/src/async_fs.rs` 新模块 (read / write / create_dir_all / try_exists 等 spawn_blocking 包装); 路由 3 处 `std::fs` 改 async_fs
+- D6 workspace `[profile.dev.package."*"] opt-level=1` + `[profile.release] lto=thin codegen-units=1 strip=symbols` + workspace.deps 扩 chrono/uuid/tracing
+- D7 API path snake → kebab + alias 双 mount 后向兼容
+- ARCH-A `attune-server/src/error.rs` `AppError` enum 10 variant + IntoResponse + From<io::Error>/<serde_json::Error>/<VaultError>; 38 routes 渐进 migration
+
+**FEAT-1 cloud endpoint UI gap 关闭**:
+- backend `settings.cloud.{accounts_url, gateway_url}` 字段 + UI Settings 会员 tab "高级 · 自部署 cloud 后端" 折叠区 + 3 URL 输入 + 保存即热重载 pluginhub
+- 关闭前次 Cloud-Integ-1 发现的自部署用户 UX gap (硬编码 attune.ai 没法切到私有 cloud)
+
+**FEAT-2 浏览器 fallback (FIX-9 阶段 1)**:
+- `attune-core/web_search_browser.rs` 加 `browser_cache_dir()` / `cached_browser_path()` / `resolve_browser()` 三段式 API + `BrowserResolution` enum (System / Cached / NeedsDownload)
+- 阶段 1 ship cache 路径 + 解析 API; 阶段 2-3 (实际下载逻辑 + wizard UI) 留 v0.7
+
+**Release 产物**:
+- Server `v0.6.3-rc.2` ✓ — 4 平台 tarball (Linux x86_64/aarch64 + macOS aarch64 + Windows x86_64) + sha256
+- Desktop `desktop-v0.6.3-rc.4` ✓ — 4 installer (NSIS exe / AppImage / deb / rpm), prerelease=true; rc.5 后含 MSI 完成 5 installer 矩阵
+
+---
+
+### 原 v0.6.3 release-blocker fixes
 
 发布定位：bug fix patch + UI polish + 4 vertical 端到端验证。
 
