@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use attune_core::llm::ChatMessage;
+use attune_core::pii::Redactor;
 
 use crate::state::SharedState;
 
@@ -571,18 +572,45 @@ pub async fn chat(
         system_prompt.push_str("=== 参考内容结束 ===\n");
     }
 
-    // 3. Build messages with history
-    let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system_prompt)];
+    // ── F-17 PII redact 全路径拦截 (修复 v0.6.3 BUG: 之前 server chat 路径直接发原文) ──
+    // 收集所有出网内容到 segments[], 一次 redact_batch 保证 placeholder 全局唯一
+    let redactor = Redactor::default();
+    let mut segments: Vec<&str> = Vec::with_capacity(2 + body.history.len());
+    segments.push(&system_prompt);
+    segments.push(&body.message);
     for h in &body.history {
+        segments.push(&h.content);
+    }
+    let (redacted_segments, all_mappings) = redactor.redact_batch(&segments);
+
+    // outbound_audit 日志
+    if !all_mappings.is_empty() {
+        let mut by_kind: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for m in &all_mappings {
+            let prefix = m.kind.placeholder_prefix().to_string().to_uppercase();
+            *by_kind.entry(prefix).or_insert(0) += 1;
+        }
+        tracing::info!(
+            target: "outbound_audit",
+            "F-17 server: PII redacted in chat outbound — kinds={:?} total={} segments={}",
+            by_kind, all_mappings.len(), segments.len()
+        );
+    }
+
+    // 3. Build messages with REDACTED content
+    let redacted_system = redacted_segments[0].clone();
+    let redacted_user = redacted_segments[1].clone();
+    let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&redacted_system)];
+    for (i, h) in body.history.iter().enumerate() {
         messages.push(ChatMessage {
             role: h.role.clone(),
-            content: h.content.clone(),
+            content: redacted_segments[2 + i].clone(),
         });
     }
-    messages.push(ChatMessage::user(&body.message));
+    messages.push(ChatMessage::user(&redacted_user));
 
     // 4. Call LLM (blocking via spawn_blocking)
-    let response = tokio::task::spawn_blocking(move || llm.chat_with_history(&messages))
+    let raw_response = tokio::task::spawn_blocking(move || llm.chat_with_history(&messages))
         .await
         .map_err(|e| {
             (
@@ -596,6 +624,9 @@ pub async fn chat(
                 Json(serde_json::json!({"error": e.to_string()})),
             )
         })?;
+
+    // F-17 restore: LLM 响应里的所有 placeholder 还原成原值给用户看
+    let response = redactor.restore(&raw_response, &all_mappings);
 
     // 5. Persist to conversation session
     let session_id = {

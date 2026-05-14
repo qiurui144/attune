@@ -576,6 +576,40 @@ function PrivacyPanel(): JSX.Element {
 
 function AboutPanel(): JSX.Element {
   const hw = hardware.value;
+  const m = memberState.value;
+  // 调 ai_stack 看底座 + cloud 状态 (一次性, AboutPanel 挂载时)
+  const aiStack = useSignal<Record<string, unknown> | null>(null);
+  useEffect(() => {
+    void api.get<Record<string, unknown>>('/ai_stack').then((d) => (aiStack.value = d)).catch(() => {});
+    void loadMemberState();
+  }, []);
+
+  const stackStatus = (key: string): { ok: boolean; note?: string } => {
+    const obj = aiStack.value?.[key] as { available?: boolean; note?: string } | undefined;
+    return { ok: !!obj?.available, note: obj?.note };
+  };
+  const emb = stackStatus('embedding');
+  const rer = stackStatus('rerank');
+  const ocr = stackStatus('ocr');
+  const asr = stackStatus('asr');
+  const ws = stackStatus('web_search');
+
+  // 数据目录: Linux/macOS = ~/.local/share/attune, Windows = %APPDATA%\attune
+  const dataDir = (() => {
+    if (typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('win')) {
+      return '%APPDATA%\\attune';
+    }
+    return '~/.local/share/attune';
+  })();
+
+  const memberLabel = !m
+    ? '未登录'
+    : m.kind === 'paid'
+      ? `付费会员 · ${m.account_id ?? '-'}`
+      : m.kind === 'free'
+        ? `免费会员 · ${m.account_id ?? '-'}`
+        : '未登录';
+
   return (
     <>
       <Section title="Attune">
@@ -595,7 +629,38 @@ function AboutPanel(): JSX.Element {
         <SettingRow label="开源协议">
           <code style={codeStyle}>Apache-2.0</code>
         </SettingRow>
+        <SettingRow label="会员">
+          <span style={{ fontSize: 'var(--text-sm)' }}>{memberLabel}</span>
+        </SettingRow>
       </Section>
+
+      <Section title="本地服务">
+        <SettingRow label="向量索引">
+          <ServiceStatus ok={emb.ok} note={emb.note} />
+        </SettingRow>
+        <SettingRow label="重排引擎">
+          <ServiceStatus ok={rer.ok} note={rer.note} />
+        </SettingRow>
+        <SettingRow label="OCR 识别">
+          <ServiceStatus ok={ocr.ok} note={ocr.note} />
+        </SettingRow>
+        <SettingRow label="语音转写">
+          <ServiceStatus ok={asr.ok} note={asr.note} />
+        </SettingRow>
+        <SettingRow label="网络搜索">
+          <ServiceStatus ok={ws.ok} note={ws.note} />
+        </SettingRow>
+      </Section>
+
+      <Section title="存储位置">
+        <SettingRow label="数据目录">
+          <code style={codeStyle}>{dataDir}</code>
+        </SettingRow>
+        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', margin: 0, lineHeight: 1.5 }}>
+          所有知识库、配置、缓存均存储于此目录，可用作整体备份。
+        </p>
+      </Section>
+
       {hw && (
         <Section title="硬件">
           <SettingRow label="CPU">
@@ -604,12 +669,48 @@ function AboutPanel(): JSX.Element {
           <SettingRow label="GPU">
             <code style={codeStyle}>{String(hw.gpu_model ?? '—')}</code>
           </SettingRow>
-          <SettingRow label="RAM">
+          <SettingRow label="内存">
             <code style={codeStyle}>{String(hw.total_ram_gb ?? 0)} GB</code>
           </SettingRow>
         </Section>
       )}
+
+      <Section title="帮助与反馈">
+        <SettingRow label="文档">
+          <a href="https://github.com/qiurui144/attune#readme" target="_blank" rel="noopener noreferrer"
+             style={{ color: 'var(--color-accent)', fontSize: 'var(--text-sm)' }}>
+            GitHub README
+          </a>
+        </SettingRow>
+        <SettingRow label="反馈问题">
+          <a href="https://github.com/qiurui144/attune/issues" target="_blank" rel="noopener noreferrer"
+             style={{ color: 'var(--color-accent)', fontSize: 'var(--text-sm)' }}>
+            提交 Issue
+          </a>
+        </SettingRow>
+        <SettingRow label="源代码">
+          <a href="https://github.com/qiurui144/attune" target="_blank" rel="noopener noreferrer"
+             style={{ color: 'var(--color-accent)', fontSize: 'var(--text-sm)' }}>
+            github.com/qiurui144/attune
+          </a>
+        </SettingRow>
+      </Section>
     </>
+  );
+}
+
+function ServiceStatus({ ok, note }: { ok: boolean; note?: string }): JSX.Element {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--text-sm)' }}>
+      {ok ? (
+        <span style={{ color: 'var(--color-success)' }}>✓ 已就绪</span>
+      ) : (
+        <span style={{ color: 'var(--color-warning)' }}>⚠ 未就绪</span>
+      )}
+      {note && !ok && (
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>{note}</span>
+      )}
+    </span>
   );
 }
 
