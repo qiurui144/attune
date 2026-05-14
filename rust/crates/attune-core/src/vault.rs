@@ -75,6 +75,12 @@ impl Vault {
 
     /// 首次设置：生成 device secret + DEK，用密码保护
     pub fn setup(&self, password: &str) -> Result<()> {
+        let _ = self.setup_with_recovery_key(password)?;
+        Ok(())
+    }
+
+    /// 首次设置 + 返回一次性恢复密钥（用于忘记主密码时重置，不丢数据）。
+    pub fn setup_with_recovery_key(&self, password: &str) -> Result<String> {
         if self.state() != VaultState::Sealed {
             return Err(VaultError::AlreadyInitialized);
         }
@@ -95,11 +101,29 @@ impl Vault {
         let dek_idx = Key32::generate();
         let dek_vec = Key32::generate();
 
+        // 生成恢复密钥（仅此处明文返回给调用方，库内不持久化明文）
+        let recovery_key = generate_recovery_key();
+        let recovery_salt = crypto::generate_salt();
+        let recovery_mk = crypto::derive_master_key(
+            recovery_key.as_bytes(),
+            device_secret.as_ref(),
+            &recovery_salt,
+        )?;
+
         // 用 MK 加密 DEK 并存储
         self.store.set_meta("salt", &salt)?;
         self.store.set_meta("encrypted_dek_db", &crypto::encrypt_dek(&mk, &dek_db)?)?;
         self.store.set_meta("encrypted_dek_idx", &crypto::encrypt_dek(&mk, &dek_idx)?)?;
         self.store.set_meta("encrypted_dek_vec", &crypto::encrypt_dek(&mk, &dek_vec)?)?;
+
+        // 额外保存"恢复密钥路径"加密副本：忘记主密码时可用 recovery_key 解 DEK。
+        self.store.set_meta("recovery_salt", &recovery_salt)?;
+        self.store
+            .set_meta("encrypted_dek_db_recovery", &crypto::encrypt_dek(&recovery_mk, &dek_db)?)?;
+        self.store
+            .set_meta("encrypted_dek_idx_recovery", &crypto::encrypt_dek(&recovery_mk, &dek_idx)?)?;
+        self.store
+            .set_meta("encrypted_dek_vec_recovery", &crypto::encrypt_dek(&recovery_mk, &dek_vec)?)?;
 
         // 存储 device secret hash（验证用）
         let ds_hash = sha2_hash(device_secret.as_ref());
@@ -115,6 +139,81 @@ impl Vault {
             dek_idx,
             dek_vec,
         });
+
+        Ok(recovery_key)
+    }
+
+    /// 使用恢复密钥重置主密码（保留数据，不需要旧密码）。
+    pub fn reset_password_with_recovery_key(
+        &self,
+        recovery_key: &str,
+        new_password: &str,
+    ) -> Result<()> {
+        if new_password.is_empty() {
+            return Err(VaultError::InvalidInput("new password must not be empty".into()));
+        }
+        if self.state() == VaultState::Sealed {
+            return Err(VaultError::Sealed);
+        }
+
+        let ds_path = self.config_dir.join("device.key");
+        let device_secret_bytes = std::fs::read(&ds_path)
+            .map_err(|_| VaultError::DeviceSecretMissing(ds_path.display().to_string()))?;
+
+        let recovery_salt = self
+            .store
+            .get_meta("recovery_salt")?
+            .ok_or_else(|| VaultError::InvalidInput("recovery key is not configured for this vault".into()))?;
+        let recovery_mk = crypto::derive_master_key(
+            recovery_key.as_bytes(),
+            &device_secret_bytes,
+            &recovery_salt,
+        )?;
+
+        // 用恢复密钥路径解出 DEK（若 recovery_key 错误，这里会返回 InvalidPassword）
+        let enc_dek_db = self
+            .store
+            .get_meta("encrypted_dek_db_recovery")?
+            .ok_or_else(|| VaultError::InvalidInput("recovery key material missing".into()))?;
+        let dek_db = crypto::decrypt_dek(&recovery_mk, &enc_dek_db)?;
+
+        let enc_dek_idx = self
+            .store
+            .get_meta("encrypted_dek_idx_recovery")?
+            .ok_or_else(|| VaultError::InvalidInput("recovery key material missing".into()))?;
+        let dek_idx = crypto::decrypt_dek(&recovery_mk, &enc_dek_idx)?;
+
+        let enc_dek_vec = self
+            .store
+            .get_meta("encrypted_dek_vec_recovery")?
+            .ok_or_else(|| VaultError::InvalidInput("recovery key material missing".into()))?;
+        let dek_vec = crypto::decrypt_dek(&recovery_mk, &enc_dek_vec)?;
+
+        // 换主密码：只重写主路径 salt + DEK 包装；恢复路径保持不变。
+        let new_salt = crypto::generate_salt();
+        let new_mk = crypto::derive_master_key(new_password.as_bytes(), &device_secret_bytes, &new_salt)?;
+        let new_enc_dek_db = crypto::encrypt_dek(&new_mk, &dek_db)?;
+        let new_enc_dek_idx = crypto::encrypt_dek(&new_mk, &dek_idx)?;
+        let new_enc_dek_vec = crypto::encrypt_dek(&new_mk, &dek_vec)?;
+
+        self.store.set_meta_batch(&[
+            ("salt", new_salt.as_ref()),
+            ("encrypted_dek_db", new_enc_dek_db.as_slice()),
+            ("encrypted_dek_idx", new_enc_dek_idx.as_slice()),
+            ("encrypted_dek_vec", new_enc_dek_vec.as_slice()),
+        ])?;
+
+        // 失效旧 token
+        let _ = self.store.increment_token_nonce()?;
+
+        // 若当前恰好是 UNLOCKED（例如本地调试误触），同步内存密钥，避免状态漂移。
+        let mut guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(keys) = guard.as_mut() {
+            keys.master_key = new_mk;
+            keys.dek_db = dek_db;
+            keys.dek_idx = dek_idx;
+            keys.dek_vec = dek_vec;
+        }
 
         Ok(())
     }
@@ -232,11 +331,16 @@ impl Vault {
             ("encrypted_dek_vec", new_enc_dek_vec.as_slice()),
         ])?;
 
-        // 注意：需要释放 guard 后再更新内存中的 MK
+        // OSS-S6 fix (2026-05-02): MK 也是 session token 的 HMAC 签名 key（见
+        // verify_session 第 317 行），不只是用于解密 DEK。change_password 后必须把
+        // 内存里的 MK 同步换成 new_mk，否则 reissue_token 用 new_mk 签 / verify_session
+        // 用 old_mk 验 → 全部新 token 都返 401 "session invalid"，直到下次 lock+unlock
+        // 才能恢复。原注释 "DEK 不变 MK 不需更新" 漏看了 HMAC 用途。
         drop(guard);
-        // MK 更新需要在 unlocked 中替换 — 但当前 DEK 不变，所以简化处理：
-        // 在下次 lock/unlock 周期中 MK 会自然更新。这里不需要替换内存 MK，
-        // 因为 DEK 是不变的，MK 只在 unlock 时用于解密 DEK。
+        let mut guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(keys) = guard.as_mut() {
+            keys.master_key = new_mk;
+        }
 
         Ok(())
     }
@@ -369,11 +473,62 @@ impl Vault {
         let sig = crypto::hmac_sign(mk, payload.as_bytes());
         Ok(format!("{payload}.{}", hex::encode(sig)))
     }
+
+    /// 忘记密码后的本地重置：清空 vault 数据并回到 SEALED。
+    ///
+    /// 安全边界：
+    /// - 仅允许在 LOCKED/SEALED 状态触发（UNLOCKED 时拒绝，避免误触）。
+    /// - 必须携带固定确认串 "RESET"。
+    ///
+    /// 重置后结果：
+    /// - sqlite 所有业务表清空（含 vault_meta，故 state 回到 sealed）
+    /// - 删除 device.key（旧密码不可再用于解锁）
+    /// - 删除本地全文/向量索引文件（避免残留泄漏）
+    pub fn forgot_password_reset(&self, confirmation: &str) -> Result<()> {
+        if confirmation != "RESET" {
+            return Err(VaultError::InvalidInput(
+                "confirmation must be exactly 'RESET'".into(),
+            ));
+        }
+        if self.state() == VaultState::Unlocked {
+            return Err(VaultError::InvalidInput(
+                "reset requires locked state (lock vault first)".into(),
+            ));
+        }
+
+        // 保险起见：清零内存密钥
+        *self.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        self.store.wipe_all_user_data()?;
+
+        let ds_path = self.config_dir.join("device.key");
+        if ds_path.exists() {
+            std::fs::remove_file(&ds_path)?;
+        }
+
+        let data_dir = platform::data_dir();
+        let tantivy_dir = data_dir.join("tantivy");
+        if tantivy_dir.exists() {
+            let _ = std::fs::remove_dir_all(&tantivy_dir);
+        }
+        let vectors = data_dir.join("vectors.encbin");
+        if vectors.exists() {
+            let _ = std::fs::remove_file(&vectors);
+        }
+
+        Ok(())
+    }
 }
 
 fn sha2_hash(data: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     Sha256::digest(data).to_vec()
+}
+
+fn generate_recovery_key() -> String {
+    let a = uuid::Uuid::new_v4().simple().to_string();
+    let b = uuid::Uuid::new_v4().simple().to_string();
+    format!("ATN-{}-{}", &a[..16], &b[..16]).to_uppercase()
 }
 
 /// 跨平台文件权限限制: Unix 设 0600, Windows 设 NTFS ACL 仅当前用户可访问
@@ -577,6 +732,26 @@ mod tests {
         assert_eq!(item.content, "Secret", "Data should survive password change");
     }
 
+    /// Regression test for OSS-S6 (2026-05-02):
+    /// change_password 之前不更新内存 MK → reissue_token 签新 MK / verify_session 验旧 MK → 401。
+    /// 修复后：change_password 必须同步内存 MK，使后续 reissue → verify 链路正确。
+    #[test]
+    fn change_password_keeps_session_alive_without_lock_unlock_cycle() {
+        let (vault, _tmp) = test_vault();
+        vault.setup("old-pw").unwrap();
+
+        // 在 unlocked 状态下改密码（不 lock）
+        vault.change_password("old-pw", "new-pw").unwrap();
+
+        // 不做 lock+unlock，直接调 reissue_token（即在 unlocked 状态下 unlock("new-pw")）
+        let new_token = vault.unlock("new-pw").expect("reissue_token after change_password");
+
+        // verify_session 必须接受这个 token — 之前会 401 SessionInvalid，因为
+        // 内存 MK 还是 old_mk 但 token 用 new_mk 签
+        vault.verify_session(&new_token)
+            .expect("REGRESSION (OSS-S6): verify_session must accept token issued post-change_password");
+    }
+
     #[test]
     fn export_device_secret_requires_unlocked() {
         let (vault, _tmp) = test_vault();
@@ -619,6 +794,76 @@ mod tests {
     }
 
     #[test]
+    fn forgot_password_reset_requires_confirmation_and_locked_state() {
+        let (vault, _tmp) = test_vault();
+        vault.setup("pw").unwrap();
+
+        let err = vault.forgot_password_reset("RESET").unwrap_err();
+        assert!(
+            matches!(err, VaultError::InvalidInput(_)),
+            "unlocked state must be rejected"
+        );
+
+        vault.lock().unwrap();
+        let err = vault.forgot_password_reset("WRONG").unwrap_err();
+        assert!(matches!(err, VaultError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn forgot_password_reset_clears_vault_and_returns_to_sealed() {
+        let (vault, tmp) = test_vault();
+        vault.setup("pw").unwrap();
+        let dek = vault.dek_db().unwrap();
+        let _ = vault
+            .store()
+            .insert_item(&dek, "Title", "Secret", None, "note", None, None)
+            .unwrap();
+        vault.lock().unwrap();
+
+        // 模拟已有索引文件
+        vault.forgot_password_reset("RESET").unwrap();
+
+        assert_eq!(vault.state(), VaultState::Sealed);
+        assert!(vault.unlock("pw").is_err(), "old password must be unusable");
+        assert!(!tmp.path().join("config/device.key").exists());
+    }
+
+    #[test]
+    fn setup_with_recovery_key_returns_key_and_can_reset_password() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("vault.db");
+        let config_dir = tmp.path().join("config");
+        let vault = Vault::open(&db_path, &config_dir).unwrap();
+
+        let recovery_key = vault.setup_with_recovery_key("old-pass").unwrap();
+        assert!(recovery_key.starts_with("ATN-"));
+        vault.lock().unwrap();
+
+        vault
+            .reset_password_with_recovery_key(&recovery_key, "new-pass")
+            .unwrap();
+
+        assert!(vault.unlock("old-pass").is_err(), "old password must fail");
+        assert!(vault.unlock("new-pass").is_ok(), "new password must work");
+    }
+
+    #[test]
+    fn reset_password_with_wrong_recovery_key_fails() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("vault.db");
+        let config_dir = tmp.path().join("config");
+        let vault = Vault::open(&db_path, &config_dir).unwrap();
+
+        let _recovery_key = vault.setup_with_recovery_key("old-pass").unwrap();
+        vault.lock().unwrap();
+
+        let err = vault
+            .reset_password_with_recovery_key("ATN-WRONG-KEY", "new-pass")
+            .unwrap_err();
+        assert!(matches!(err, VaultError::InvalidPassword));
+    }
+
+    #[test]
     fn full_lifecycle_encrypted_crud() {
         let (vault, _tmp) = test_vault();
         vault.setup("password123").unwrap();
@@ -647,5 +892,84 @@ mod tests {
         // Delete
         assert!(vault.store().delete_item(&id).unwrap());
         assert!(vault.store().get_item(&dek2, &id).unwrap().is_none());
+    }
+
+    // ── R15 v0.6.4: vault 并发竞态防御 ────────────────────────────────
+    //
+    // Vault 内部 store::Store 持有 rusqlite::Connection (含 !Sync 的 RefCell<StatementCache>),
+    // 因此 Vault 类型本身 !Sync。生产环境通过 AppState.vault: Mutex<Vault> 串行化访问
+    // (rust/crates/attune-server/src/state.rs)。这两个测试模拟该生产模式:
+    // Arc<Mutex<Vault>> 多线程争用,验证 lock/unlock 在外部 Mutex 序列化下
+    // 保持一致状态 + token 有效。
+
+    #[test]
+    fn concurrent_lock_unlock_no_race_via_mutex() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let (vault, _tmp) = test_vault();
+        vault.setup("test-password-12345").unwrap();
+        let vault = Arc::new(Mutex::new(vault));
+
+        // Note: each unlock invokes argon2id (~1-2s by design); keep iteration count low
+        // to keep test under ~30s while still covering races. Threads = 4, ops = 3.
+        let mut handles = vec![];
+        for thread_id in 0..4 {
+            let v = Arc::clone(&vault);
+            handles.push(thread::spawn(move || {
+                for _ in 0..3 {
+                    let g = v.lock().unwrap();
+                    if thread_id % 2 == 0 {
+                        let _ = g.lock();
+                    } else {
+                        let _ = g.unlock("test-password-12345");
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread didn't panic");
+        }
+
+        let g = vault.lock().unwrap();
+        let state = g.state();
+        assert!(
+            matches!(state, VaultState::Locked | VaultState::Unlocked),
+            "vault must be in valid state after concurrent ops, got {:?}",
+            state
+        );
+    }
+
+    #[test]
+    fn concurrent_unlock_tokens_valid_via_mutex() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let (vault, _tmp) = test_vault();
+        vault.setup("test-password-concurrent").unwrap();
+        let vault = Arc::new(Mutex::new(vault));
+        let tokens: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = vec![];
+        for _ in 0..5 {
+            let v = Arc::clone(&vault);
+            let t = Arc::clone(&tokens);
+            handles.push(thread::spawn(move || {
+                let g = v.lock().unwrap();
+                if let Ok(token) = g.unlock("test-password-concurrent") {
+                    t.lock().unwrap().push(token);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let tokens = tokens.lock().unwrap();
+        assert!(!tokens.is_empty(), "at least one unlock should succeed");
+        for token in tokens.iter() {
+            assert!(!token.is_empty(), "token must be non-empty");
+            assert!(token.len() >= 32, "token too short: len={}", token.len());
+        }
     }
 }

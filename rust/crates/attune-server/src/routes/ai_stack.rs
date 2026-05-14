@@ -22,13 +22,19 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     let rerank_loaded = state.reranker.lock().ok().map(|g| g.is_some()).unwrap_or(false);
     let llm_configured = state.llm.lock().ok().map(|g| g.is_some()).unwrap_or(false);
 
-    let ocr_backend = attune_core::ocr::detect_ocr_backend();
-    let ocr_available = ocr_backend.is_some();
-    let ocr_languages: Vec<String> = ocr_backend.as_ref().map(|b| b.languages.clone()).unwrap_or_default();
+    let ocr_provider = attune_core::ocr::detect_default_provider();
+    let ocr_available = ocr_provider.is_some();
+    let ocr_engine: String = ocr_provider
+        .as_ref()
+        .map(|p| p.name().to_string())
+        .unwrap_or_else(|| "none".into());
 
     let asr_backend = attune_core::asr::detect_asr_backend();
     let asr_available = asr_backend.is_some();
     let asr_model: Option<String> = asr_backend.as_ref().map(|b| b.model_name.clone());
+    // F-16 hardware utilization: expose whisper.cpp GPU build status so Settings
+    // UI can warn user when CPU-only build limits ASR throughput (10x slower).
+    let asr_gpu_capable: Option<bool> = asr_backend.as_ref().map(|b| b.gpu_capable);
 
     // v0.6.0-rc.4: 硬件 tier + 模型推荐 + region
     let hw = &state.hardware;
@@ -75,15 +81,21 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         },
         "ocr": {
             "available": ocr_available,
-            "engine": "tesseract + pdftoppm",
-            "languages": ocr_languages,
-            "note": note(ocr_available, "装 tesseract + poppler-utils: apt install tesseract-ocr tesseract-ocr-chi-sim poppler-utils")
+            "engine": ocr_engine,
+            "note": note(ocr_available, "PP-OCR 模型缺失 — 重新跑 attune deploy 或 apt install --reinstall attune")
         },
         "asr": {
             "available": asr_available,
             "engine": "whisper.cpp",
             "model": asr_model,
-            "note": note(asr_available, "装 whisper.cpp + 下载 ggml-small.bin 到 ~/.local/share/attune/models/whisper/")
+            // F-16 GPU build flag — false 时 60s 音频转写 ~60s, true 时 GPU build ~5s (10x)
+            "gpu_capable": asr_gpu_capable,
+            "note": note(asr_available, "装 whisper.cpp + 下载 ggml-small.bin 到 ~/.local/share/attune/models/whisper/"),
+            "gpu_note": match asr_gpu_capable {
+                Some(false) => Some("⚠ whisper.cpp 是 CPU-only build, 60s 音频可能耗时 60s+. 装 GPU build (CUDA/Metal/Vulkan) 可获 10x 加速.".to_string()),
+                Some(true) => None,
+                None => None,
+            }
         },
         "llm": {
             "configured": llm_configured,

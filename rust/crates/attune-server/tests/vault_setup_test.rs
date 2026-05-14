@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow E2E (~64s, full Argon2id setup); R19 nightly only — run with --include-ignored"]
 async fn vault_setup_returns_session_token() {
     // 隔离 vault 数据目录：dirs crate 依赖 XDG_DATA_HOME / XDG_CONFIG_HOME / HOME，
     // 三个都重定向到独立 tempdir，避免污染开发者 home 下的真实 vault.db。

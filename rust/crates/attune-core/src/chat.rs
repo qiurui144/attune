@@ -4,6 +4,7 @@ use crate::crypto::Key32;
 use crate::error::Result;
 use crate::index::FulltextIndex;
 use crate::llm::{ChatMessage, LlmProvider};
+use crate::pii::Redactor;
 use crate::search::{allocate_budget, SearchResult, INJECTION_BUDGET};
 use crate::store::Store;
 use crate::vectors::VectorIndex;
@@ -20,6 +21,11 @@ pub struct ChatEngine {
     reranker: Arc<Mutex<Option<Arc<dyn crate::infer::RerankProvider>>>>,
     /// 可选网络搜索提供者：本地知识库无结果时作为 fallback
     web_search: Option<Arc<dyn WebSearchProvider>>,
+    /// F-17-PRIVACY: PII redactor wires `pii::Redactor` into the chat outbound path.
+    /// `user_message` is redacted before LLM call; placeholders restored in response.
+    /// Default: 12 builtin PII patterns (phone/email/api_key/id_card/ipv4/ipv6/...).
+    /// attune-pro plugins can inject industry PII via `with_redactor()`.
+    redactor: Arc<Redactor>,
 }
 
 /// 对话响应
@@ -69,12 +75,28 @@ impl ChatEngine {
         embedding: Arc<Mutex<Option<Arc<dyn crate::embed::EmbeddingProvider>>>>,
         reranker: Arc<Mutex<Option<Arc<dyn crate::infer::RerankProvider>>>>,
     ) -> Self {
-        Self { llm, store, fulltext, vectors, embedding, reranker, web_search: None }
+        Self {
+            llm,
+            store,
+            fulltext,
+            vectors,
+            embedding,
+            reranker,
+            web_search: None,
+            redactor: Arc::new(Redactor::default()),
+        }
     }
 
     /// 设置网络搜索提供者（链式调用）
     pub fn with_web_search(mut self, ws: Arc<dyn WebSearchProvider>) -> Self {
         self.web_search = Some(ws);
+        self
+    }
+
+    /// F-17-PRIVACY: 注入自定义 Redactor（attune-pro plugin 用，可附加行业 PII 规则）。
+    /// OSS 默认 `Redactor::default()` 包含 12 类内置正则。
+    pub fn with_redactor(mut self, redactor: Arc<Redactor>) -> Self {
+        self.redactor = redactor;
         self
     }
 
@@ -255,6 +277,21 @@ impl ChatEngine {
     }
 
     /// 单次 LLM 调用，封装 prompt 构建 + 调用。返回 (raw response, confidence)。
+    ///
+    /// ## F-17-PRIVACY 全路径接入 (v0.6.3)
+    ///
+    /// 出网前 `pii::Redactor::redact_batch` 批量替换 PII 为 `[KIND_N]` placeholder，
+    /// **全局唯一索引**（同一 placeholder 在 user/history/knowledge 中指向同一原值）；
+    /// LLM 响应回来 `restore()` 反向替换让用户看到原值。
+    ///
+    /// **覆盖范围 (v0.6.3)**：
+    /// - `user_message` ✅ — 用户输入（最高频 PII 源）
+    /// - `history.content` ✅ — 历史对话（含已往轮次的 PII）
+    /// - `system_prompt` ✅ — 含 knowledge.inject_content / breadcrumb / title
+    ///   （build_rag_system_prompt 拼出的完整字符串一起 redact）
+    ///
+    /// 全局唯一性由 `redact_batch` 的 separator-based 实现保证：所有段拼接后
+    /// 一次 redact，placeholder 索引连续不冲突。
     fn run_llm_once(
         &self,
         user_message: &str,
@@ -262,14 +299,61 @@ impl ChatEngine {
         knowledge: &[SearchResult],
         web_search_used: bool,
     ) -> Result<(String, u8)> {
-        let system = build_rag_system_prompt(knowledge, web_search_used);
-        let mut messages = Vec::new();
-        messages.push(ChatMessage::system(&system));
-        messages.extend_from_slice(history);
-        messages.push(ChatMessage::user(user_message));
-        let response = self.llm.chat_with_history(&messages)?;
-        let conf = parse_confidence(&response);
-        Ok((response, conf))
+        // ── F-17 全路径 redact ────────────────────────────────────────────
+        // 收集所有出网内容到 segments[]，一次 redact_batch 保证 placeholder 全局唯一
+        let system_prompt = build_rag_system_prompt(knowledge, web_search_used);
+
+        // segments order: [system_prompt, user_message, history[0], history[1], ...]
+        let mut segments: Vec<&str> = Vec::with_capacity(2 + history.len());
+        segments.push(&system_prompt);
+        segments.push(user_message);
+        for h in history {
+            segments.push(&h.content);
+        }
+
+        let (redacted_segments, all_mappings) = self.redactor.redact_batch(&segments);
+
+        // F-17 audit log（v0.6.3：覆盖全路径；v0.7+ 持久化到 store::audit_log）
+        if !all_mappings.is_empty() {
+            // 统计 by_kind
+            let mut by_kind: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            for m in &all_mappings {
+                let prefix = m.kind.placeholder_prefix().to_string().to_uppercase();
+                *by_kind.entry(prefix).or_insert(0) += 1;
+            }
+            log::info!(
+                target: "outbound_audit",
+                "F-17: PII redacted in chat outbound (full path) — kinds={:?} total={} segments={} model={}",
+                by_kind,
+                all_mappings.len(),
+                segments.len(),
+                self.llm.model_name()
+            );
+        }
+
+        // 构建 messages，使用 redacted 版本
+        let redacted_system = &redacted_segments[0];
+        let redacted_user = &redacted_segments[1];
+        let redacted_history: Vec<ChatMessage> = history
+            .iter()
+            .enumerate()
+            .map(|(i, h)| ChatMessage {
+                role: h.role.clone(),
+                content: redacted_segments[2 + i].clone(),
+            })
+            .collect();
+
+        let mut messages = Vec::with_capacity(2 + redacted_history.len());
+        messages.push(ChatMessage::system(redacted_system));
+        messages.extend(redacted_history);
+        messages.push(ChatMessage::user(redacted_user));
+
+        let raw_response = self.llm.chat_with_history(&messages)?;
+
+        // ── F-17 restore: LLM 响应里的所有 placeholder 还原 ──────────────
+        let restored = self.redactor.restore(&raw_response, &all_mappings);
+        let conf = parse_confidence(&restored);
+        Ok((restored, conf))
     }
 
     fn search_for_context(

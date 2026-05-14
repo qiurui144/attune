@@ -1,7 +1,7 @@
 /** Items 视图 · Phase 6 · 真实列表 + 筛选 + Reader drawer 触发 */
 
 import type { JSX } from 'preact';
-import { useEffect } from 'preact/hooks';
+import { useEffect, useRef } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
 import { Button, EmptyState } from '../components';
 import { t } from '../i18n';
@@ -9,6 +9,15 @@ import { items, drawerContent } from '../store/signals';
 import type { Item } from '../store/signals';
 import { loadItems, deleteItem } from '../hooks/useItems';
 import { toast } from '../components/Toast';
+
+/** 把后端 source_type 字段 (web/file/note/chat/upload) 翻译为用户友好标签. */
+function sourceLabel(st: string): string {
+  // 走 i18n 字典, 未知值保留原文 (避免硬编码英文显示给中文用户)
+  const k = `items.source.${st}`;
+  const translated = t(k);
+  // t() 没命中时会返回 key 本身, 此时回退到原值
+  return translated === k ? st : translated;
+}
 
 export function ItemsView(): JSX.Element {
   const filterSource = useSignal<string>('all');
@@ -44,8 +53,8 @@ export function ItemsView(): JSX.Element {
           description={t('empty.items.desc')}
           actions={[
             {
-              label: '绑定文件夹',
-              onClick: () => toast('info', '跳转到远程绑定（Phase 6.3 接入）'),
+              label: t('items.empty.bind_folder'),
+              onClick: () => toast('info', t('items.empty.bind_folder_toast')),
               variant: 'primary',
             },
           ]}
@@ -70,7 +79,7 @@ export function ItemsView(): JSX.Element {
       <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
         <input
           type="text"
-          placeholder="🔍 按标题搜索…"
+          placeholder={t('items.search.placeholder')}
           value={search.value}
           onInput={(e) => (search.value = e.currentTarget.value)}
           style={{
@@ -96,7 +105,7 @@ export function ItemsView(): JSX.Element {
         >
           {sourceTypes.value.map((st) => (
             <option key={st} value={st}>
-              {st === 'all' ? '全部来源' : st}
+              {st === 'all' ? t('items.source.all') : sourceLabel(st)}
             </option>
           ))}
         </select>
@@ -120,7 +129,7 @@ export function ItemsView(): JSX.Element {
               color: 'var(--color-text-secondary)',
             }}
           >
-            没有匹配的条目
+            {t('items.no_match')}
           </div>
         ) : (
           filtered.value.map((it) => <ItemRow key={it.id} item={it} />)
@@ -134,13 +143,51 @@ export function ItemsView(): JSX.Element {
           textAlign: 'right',
         }}
       >
-        共 {filtered.value.length} 条 · 加载 {items.value.length} 条
+        {t('items.summary', { filtered: filtered.value.length, total: items.value.length })}
       </div>
     </div>
   );
 }
 
 function ItemsHeader(): JSX.Element {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploading = useSignal(false);
+
+  const onUpload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    uploading.value = true;
+    let successCount = 0;
+    let failCount = 0;
+    for (const file of Array.from(files)) {
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        const resp = await fetch('/api/v1/upload', {
+          method: 'POST',
+          body: form,
+          headers: {
+            Authorization: `Bearer ${sessionStorage.getItem('attune_token') ?? ''}`,
+          },
+        });
+        if (resp.ok) {
+          successCount++;
+        } else {
+          failCount++;
+        }
+      } catch {
+        failCount++;
+      }
+    }
+    uploading.value = false;
+    if (successCount > 0) {
+      toast('success', t('items.upload.success', { count: successCount }));
+      void loadItems(100, 0);
+    }
+    if (failCount > 0) {
+      toast('error', t('items.upload.fail', { count: failCount }));
+    }
+  };
+
   return (
     <header
       style={{
@@ -150,22 +197,31 @@ function ItemsHeader(): JSX.Element {
       }}
     >
       <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
-        📄 条目
+        {`📄 ${t('sidebar.nav.items')}`}
       </h2>
       <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept=".pdf,.md,.txt,.docx,.png,.jpg,.jpeg"
+          style={{ display: 'none' }}
+          onChange={(e) => void onUpload((e.target as HTMLInputElement).files)}
+        />
         <Button
           variant="secondary"
           size="sm"
-          onClick={() => toast('info', '上传文件（Phase 6 续集）')}
+          disabled={uploading.value}
+          onClick={() => fileInputRef.current?.click()}
         >
-          上传文件
+          {uploading.value ? t('items.upload.uploading') : t('items.upload.button')}
         </Button>
         <Button
           variant="secondary"
           size="sm"
           onClick={() => void loadItems(100, 0)}
         >
-          ⟳ 刷新
+          {t('items.refresh')}
         </Button>
       </div>
     </header>
@@ -207,7 +263,7 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
           flexShrink: 0,
         }}
       >
-        {it.source_type}
+        {sourceLabel(it.source_type)}
       </span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
@@ -220,7 +276,7 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
             textOverflow: 'ellipsis',
           }}
         >
-          {it.title || '(无标题)'}
+          {it.title || t('items.untitled')}
         </div>
         {it.domain && (
           <div
@@ -248,10 +304,10 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          if (confirm(`删除条目 "${it.title}"？`)) {
+          if (confirm(t('items.delete.confirm', { title: it.title || t('items.untitled') }))) {
             void deleteItem(it.id).then((ok) => {
-              if (ok) toast('success', '已删除');
-              else toast('error', '删除失败');
+              if (ok) toast('success', t('items.delete.success'));
+              else toast('error', t('items.delete.fail'));
             });
           }
         }}
@@ -281,9 +337,9 @@ function formatDate(iso: string): string {
     const d = new Date(iso);
     const now = Date.now();
     const diff = now - d.getTime();
-    if (diff < 86_400_000) return '今天';
-    if (diff < 2 * 86_400_000) return '昨天';
-    if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+    if (diff < 86_400_000) return t('items.date.today');
+    if (diff < 2 * 86_400_000) return t('items.date.yesterday');
+    if (diff < 7 * 86_400_000) return t('items.date.days_ago', { days: Math.floor(diff / 86_400_000) });
     return d.toLocaleDateString();
   } catch {
     return iso.slice(0, 10);

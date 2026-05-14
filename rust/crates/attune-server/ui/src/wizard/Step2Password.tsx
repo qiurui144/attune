@@ -1,11 +1,12 @@
 /** Wizard Step 2 · Master Password（唯一硬门槛） */
 
 import type { JSX } from 'preact';
-import { useState, useMemo } from 'preact/hooks';
-import { Button, Input } from '../components';
+import { useState, useMemo, useEffect } from 'preact/hooks';
+import { Button, Input, Tooltip } from '../components';
 import { t } from '../i18n';
 import { api, setToken, RETRY_POLICIES } from '../store/api';
 import { toast } from '../components/Toast';
+import type { WizardContext } from './types';
 
 type Strength = 'weak' | 'medium' | 'strong';
 
@@ -28,16 +29,50 @@ const STRENGTH_COLORS: Record<Strength, string> = {
 };
 
 export type Step2Props = {
+  ctx: WizardContext;
+  onUpdate: (partial: Partial<WizardContext>) => void;
   onContinue: () => void;
 };
 
-export function Step2Password({ onContinue }: Step2Props): JSX.Element {
+export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.Element {
   const [pwd, setPwd] = useState('');
   const [confirm, setConfirm] = useState('');
   const [show, setShow] = useState(false);
   const [exportSecret, setExportSecret] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // submitStage 让按钮文案 / aria-live 提示能反映"正在派生主密钥"vs"正在解锁"vs"提交中".
+  // Argon2id 派生在 setup 路径上耗时 ~10s, 静默会被误认为"卡住".
+  const [submitStage, setSubmitStage] = useState<'idle' | 'deriving' | 'unlocking'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [vaultState, setVaultState] = useState<'checking' | 'sealed' | 'locked' | 'unlocked'>('checking');
+  const [memberEmail, setMemberEmail] = useState(ctx.memberEmail ?? '');
+  const [memberPassword, setMemberPassword] = useState(ctx.memberPassword ?? '');
+  const [memberLicenseCode, setMemberLicenseCode] = useState(ctx.memberLicenseCode ?? '');
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const status = await api.get<{ state?: 'sealed' | 'locked' | 'unlocked' }>('/vault/status');
+        if (!active) return;
+        setVaultState(status.state ?? 'sealed');
+      } catch {
+        if (!active) return;
+        setVaultState('sealed');
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    onUpdate({
+      memberEmail: memberEmail.trim() || null,
+      memberPassword: memberPassword || null,
+      memberLicenseCode: memberLicenseCode.trim() || null,
+    });
+  }, [memberEmail, memberPassword, memberLicenseCode, onUpdate]);
 
   const strength = evalStrength(pwd);
 
@@ -45,12 +80,16 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
   const tooWeak =
     pwd.length >= 12 && (!/[a-zA-Z]/.test(pwd) || !/\d/.test(pwd));
   const mismatch = confirm.length > 0 && pwd !== confirm;
-  const canSubmit =
-    pwd.length >= 12 &&
-    /[a-zA-Z]/.test(pwd) &&
-    /\d/.test(pwd) &&
-    pwd === confirm &&
-    !submitting;
+  const isSetupMode = vaultState === 'sealed';
+  const canSubmit = isSetupMode
+    ? (
+      pwd.length >= 12 &&
+      /[a-zA-Z]/.test(pwd) &&
+      /\d/.test(pwd) &&
+      pwd === confirm &&
+      !submitting
+    )
+    : (!submitting && (vaultState === 'unlocked' || pwd.length > 0));
 
   const pwdError = useMemo(() => {
     if (tooShort) return t('wizard.pwd.err.too_short');
@@ -65,33 +104,67 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
     setSubmitting(true);
     setError(null);
     try {
-      // Important 2.3：密码 setup 不走自动重试
-      const res = await api.post<{ status: string; state?: string; token?: string }>(
-        '/vault/setup',
-        { password: pwd },
-        RETRY_POLICIES.destructive,
-      );
-      if (res.token) setToken(res.token);
-
-      // 可选：生成 device secret 文件（后端有端点 export_device_secret）
-      if (exportSecret) {
-        try {
-          const secretRes = await api.get<{ device_secret: string }>(
-            '/vault/device-secret/export',
-          );
-          downloadText('attune-device-secret.txt', secretRes.device_secret);
-          toast('info', '已下载 Device Secret（妥善保管，可用于其他设备导入）');
-        } catch {
-          toast('warning', 'Device Secret 导出失败，可以稍后在 Settings 里再生成');
+      if (isSetupMode) {
+        // Argon2id 派生 ~10s, 提前给用户"正在派生主密钥"的视觉信号 + toast.
+        setSubmitStage('deriving');
+        toast('info', t('wizard.pwd.toast_deriving'));
+        // Important 2.3：密码 setup 不走自动重试
+        const res = await api.post<{ status: string; state?: string; token?: string; recovery_key?: string }>(
+          '/vault/setup',
+          { password: pwd },
+          RETRY_POLICIES.destructive,
+        );
+        if (res.token) setToken(res.token);
+        if (res.recovery_key) {
+          downloadText('attune-recovery-key.txt', res.recovery_key);
+          toast('warning', t('wizard.pwd.recovery_downloaded'));
         }
+
+        // 可选：生成 device secret 文件（后端有端点 export_device_secret）
+        if (exportSecret) {
+          try {
+            const secretRes = await api.get<{ device_secret: string }>(
+              '/vault/device-secret/export',
+            );
+            downloadText('attune-device-secret.txt', secretRes.device_secret);
+            toast('info', t('wizard.pwd.device_secret_downloaded'));
+          } catch {
+            toast('warning', t('wizard.pwd.device_secret_failed'));
+          }
+        }
+      } else if (vaultState === 'locked') {
+        setSubmitStage('unlocking');
+        const unlock = await api.post<{ token?: string }>('/vault/unlock', { password: pwd });
+        if (unlock.token) setToken(unlock.token);
       }
 
       onContinue();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+
+      // setup 和状态刷新可能存在竞争：后端已初始化时自动回退到 unlock 流程，避免卡死。
+      if (isSetupMode && msg.includes('already initialized') && pwd.length > 0) {
+        try {
+          const unlock = await api.post<{ token?: string }>('/vault/unlock', { password: pwd });
+          if (unlock.token) setToken(unlock.token);
+          onContinue();
+          return;
+        } catch {
+          // fall through to show original error
+        }
+      }
+
+      setError(msg);
       setSubmitting(false);
+      setSubmitStage('idle');
     }
   }
+
+  // 按钮文案: idle 时显示 "Next →", 派生/解锁中显示对应进度文案.
+  const submitLabel =
+    submitStage === 'deriving' ? t('wizard.pwd.btn_deriving') :
+    submitStage === 'unlocking' ? t('wizard.pwd.btn_unlocking') :
+    `${t('common.next')} →`;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
@@ -102,37 +175,43 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
             fontWeight: 600,
             margin: 0,
             marginBottom: 'var(--space-2)',
+            display: 'flex',
+            alignItems: 'center',
           }}
         >
           {t('wizard.pwd.heading')}
+          <Tooltip text={t('wizard.help.master_password')} />
         </h2>
-        <div
-          role="alert"
-          style={{
-            padding: 'var(--space-3)',
-            background: 'rgba(212, 165, 116, 0.1)',
-            border: '1px solid var(--color-warning)',
-            borderRadius: 'var(--radius-md)',
-            fontSize: 'var(--text-sm)',
-            color: 'var(--color-text)',
-          }}
-        >
-          {t('wizard.pwd.warning')}
-        </div>
       </header>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+        {!isSetupMode && (
+          <div
+            style={{
+              padding: 'var(--space-2) var(--space-3)',
+              background: 'var(--color-surface)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 'var(--text-sm)',
+              color: 'var(--color-text-secondary)',
+            }}
+          >
+            {vaultState === 'unlocked'
+              ? t('wizard.pwd.unlocked_hint')
+              : t('wizard.pwd.locked_hint')}
+          </div>
+        )}
         <div>
           <Input
             label={t('wizard.pwd.field')}
             type={show ? 'text' : 'password'}
             value={pwd}
             onInput={(e) => setPwd(e.currentTarget.value)}
-            error={pwdError}
+            error={isSetupMode ? pwdError : undefined}
             autoFocus
-            required
+            required={vaultState !== 'unlocked'}
           />
-          {strength && (
+          {isSetupMode && strength && (
             <div
               style={{
                 display: 'flex',
@@ -173,14 +252,16 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
           )}
         </div>
 
-        <Input
-          label={t('wizard.pwd.confirm')}
-          type={show ? 'text' : 'password'}
-          value={confirm}
-          onInput={(e) => setConfirm(e.currentTarget.value)}
-          error={confirmError}
-          required
-        />
+        {isSetupMode && (
+          <Input
+            label={t('wizard.pwd.confirm')}
+            type={show ? 'text' : 'password'}
+            value={confirm}
+            onInput={(e) => setConfirm(e.currentTarget.value)}
+            error={confirmError}
+            required
+          />
+        )}
 
         <label
           style={{
@@ -200,24 +281,87 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
           {show ? t('wizard.pwd.hide') : t('wizard.pwd.show')}
         </label>
 
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 'var(--space-2)',
-            fontSize: 'var(--text-sm)',
-            color: 'var(--color-text-secondary)',
-            cursor: 'pointer',
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={exportSecret}
-            onChange={(e) => setExportSecret(e.currentTarget.checked)}
-          />
-          {t('wizard.pwd.export_secret')}
-        </label>
       </div>
+
+      {isSetupMode && (
+        <details style={{ marginTop: 'var(--space-2)' }}>
+          <summary
+            style={{
+              cursor: 'pointer',
+              fontSize: 'var(--text-sm)',
+              color: 'var(--color-text-secondary)',
+              padding: 'var(--space-2) 0',
+              userSelect: 'none',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+            }}
+          >
+            ▸ {t('wizard.advanced.toggle')}
+            <Tooltip text={t('wizard.help.advanced_options')} size="sm" />
+          </summary>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', paddingTop: 'var(--space-3)' }}>
+            {/* Device Secret 导出 (多设备同步用, 新手可跳) */}
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)',
+                fontSize: 'var(--text-sm)',
+                color: 'var(--color-text-secondary)',
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={exportSecret}
+                onChange={(e) => setExportSecret(e.currentTarget.checked)}
+              />
+              {t('wizard.pwd.export_secret')}
+              <Tooltip text={t('wizard.help.device_secret')} size="sm" />
+            </label>
+
+            {/* 会员账号 (可选, 不填保持 LoggedOut) */}
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 'var(--space-2)',
+                padding: 'var(--space-3)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-md)',
+                background: 'var(--color-bg)',
+              }}
+            >
+              <div style={{ fontWeight: 600, fontSize: 'var(--text-sm)', display: 'flex', alignItems: 'center' }}>
+                {t('wizard.member.heading')}
+                <Tooltip text={t('wizard.help.member_account')} size="sm" />
+              </div>
+              <Input
+                type="text"
+                label={t('wizard.member.email')}
+                value={memberEmail}
+                onInput={(e) => setMemberEmail(e.currentTarget.value)}
+                placeholder={t('wizard.member.email_placeholder')}
+              />
+              <Input
+                type="password"
+                label={t('wizard.member.password')}
+                value={memberPassword}
+                onInput={(e) => setMemberPassword(e.currentTarget.value)}
+                placeholder={t('wizard.member.password_placeholder')}
+              />
+              <Input
+                type="text"
+                label={t('wizard.member.license_code')}
+                value={memberLicenseCode}
+                onInput={(e) => setMemberLicenseCode(e.currentTarget.value)}
+                placeholder={t('wizard.member.license_code_placeholder')}
+              />
+            </div>
+          </div>
+        </details>
+      )}
 
       {error && (
         <div
@@ -235,6 +379,24 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
         </div>
       )}
 
+      {/* 派生过程 aria-live 通知, 屏幕阅读器 + 视觉双通道 */}
+      {submitStage !== 'idle' && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            padding: 'var(--space-2) var(--space-3)',
+            background: 'var(--color-surface)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-sm)',
+            fontSize: 'var(--text-sm)',
+            color: 'var(--color-text-secondary)',
+          }}
+        >
+          ⏳ {submitLabel}
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <Button
           variant="primary"
@@ -243,7 +405,7 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
           loading={submitting}
           onClick={handleSubmit}
         >
-          {t('common.next')} →
+          {submitLabel}
         </Button>
       </div>
     </div>

@@ -20,6 +20,17 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
+#[derive(Deserialize)]
+pub struct ForgotPasswordResetRequest {
+    pub confirmation: String,
+}
+
+#[derive(Deserialize)]
+pub struct ResetWithRecoveryKeyRequest {
+    pub recovery_key: String,
+    pub new_password: String,
+}
+
 pub async fn vault_status(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let vault_state = vault.state();
@@ -39,9 +50,9 @@ pub async fn vault_setup(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // setup 成功后内部走一次 lock+unlock，复用 unlock 的 token 颁发路径，
     // 让首次安装直接拿到可用 token（避免客户端必须 restart server 再 unlock）。
-    let token = {
+    let (token, recovery_key) = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        vault.setup(&body.password).map_err(|e| {
+        let recovery_key = vault.setup_with_recovery_key(&body.password).map_err(|e| {
             (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()})))
         })?;
         // setup 自动 Unlocked；先 lock 再 unlock，复用 unlock token 颁发路径。
@@ -49,9 +60,10 @@ pub async fn vault_setup(
         vault.lock().map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
         })?;
-        vault.unlock(&body.password).map_err(|e| {
+        let token = vault.unlock(&body.password).map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
-        })?
+        })?;
+        (token, recovery_key)
     };
     // Initialize search engines after vault setup (vault mutex released)
     state.init_search_engines();
@@ -63,6 +75,7 @@ pub async fn vault_setup(
         "status": "ok",
         "state": "unlocked",
         "token": token,
+        "recovery_key": recovery_key,
     })))
 }
 
@@ -142,4 +155,53 @@ pub async fn vault_change_password(
         (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()})))
     })?;
     Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+pub async fn vault_forgot_password_reset(
+    State(state): State<SharedState>,
+    Json(body): Json<ForgotPasswordResetRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // reset 前先清理内存索引，避免残留状态继续服务。
+    state.clear_search_engines();
+    {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        vault.forgot_password_reset(&body.confirmation).map_err(|e| {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()})))
+        })?;
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "state": "sealed",
+        "message": "vault reset complete, run setup again"
+    })))
+}
+
+pub async fn vault_reset_with_recovery_key(
+    State(state): State<SharedState>,
+    Json(body): Json<ResetWithRecoveryKeyRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let token = {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        vault
+            .reset_password_with_recovery_key(&body.recovery_key, &body.new_password)
+            .map_err(|e| {
+                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()})))
+            })?;
+        vault.unlock(&body.new_password).map_err(|e| {
+            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()})))
+        })?
+    };
+
+    state.init_search_engines();
+    crate::state::AppState::start_classify_worker(state.clone());
+    crate::state::AppState::start_rescan_worker(state.clone());
+    crate::state::AppState::start_queue_worker(state.clone());
+    crate::state::AppState::start_skill_evolver(state.clone());
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "state": "unlocked",
+        "token": token,
+    })))
 }

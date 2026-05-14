@@ -21,6 +21,57 @@ pub mod patterns;
 pub mod dictionary;
 pub mod ner;
 
+// ── F-17 LLM call wrapper helpers ──────────────────────────────────────────
+//
+// 给非 ChatEngine 的 LLM call sites (context_compress / ai_annotator /
+// web_search_browser query 等) 提供统一的 redact + LLM call + restore 包装，
+// 避免每个 caller 重复 redact_batch + restore 模板代码。
+
+/// Wrap a single-message LLM `chat(system, user)` call with PII redact +
+/// restore. Use for non-chat LLM call sites where a stable [system, user]
+/// API is already in place.
+///
+/// 行为：
+/// 1. `redact_batch` 处理 [system, user]，placeholder 全局唯一
+/// 2. 调 LLM 用 redacted_system + redacted_user
+/// 3. `restore` 反向 LLM 响应里的所有 placeholder
+///
+/// audit log 用 `log::info!(target: "outbound_audit", ...)` 输出，与
+/// `ChatEngine::run_llm_once` 一致。
+///
+/// 适用 call sites:
+/// - `context_compress::compress_chunk` — chunk → summary (chunk 含 PII 不出云)
+/// - `context_compress::generate_summary` — 同上 cacheless 版本
+/// - `ai_annotator::generate_annotations` — chunk → 4 角度批注 JSON
+pub fn llm_chat_redacted(
+    llm: &dyn crate::llm::LlmProvider,
+    redactor: &Redactor,
+    system: &str,
+    user: &str,
+    call_site: &str,
+) -> crate::error::Result<String> {
+    let (redacted, mappings) = redactor.redact_batch(&[system, user]);
+
+    if !mappings.is_empty() {
+        let mut by_kind: HashMap<String, usize> = HashMap::new();
+        for m in &mappings {
+            let prefix = m.kind.placeholder_prefix().to_string().to_uppercase();
+            *by_kind.entry(prefix).or_insert(0) += 1;
+        }
+        log::info!(
+            target: "outbound_audit",
+            "F-17: PII redacted in {} outbound — kinds={:?} total={} model={}",
+            call_site,
+            by_kind,
+            mappings.len(),
+            llm.model_name()
+        );
+    }
+
+    let raw = llm.chat(&redacted[0], &redacted[1])?;
+    Ok(redactor.restore(&raw, &mappings))
+}
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -185,6 +236,50 @@ impl Redactor {
             mappings,
             stats,
         }
+    }
+
+    /// 批量 redact：对多段文本分别 redact，**placeholder 全局唯一**。
+    ///
+    /// 用 separator-based 方案：把所有段 join 成一个 megastring 再 redact，
+    /// 让内部 `assign_placeholders` 自然产生全局连续的 [KIND_N] 索引；
+    /// 然后按 separator split 回各段。Separator 选用极低冲突字符串
+    /// `<<<ATTUNE_PII_SEPARATOR_NONCE_42424242>>>`（含等号 / 大写 / 高熵 nonce），
+    /// 用户输入命中概率可忽略。
+    ///
+    /// 返回 `(redacted_segments, all_mappings)`：
+    /// - `redacted_segments[i]` 对应输入 `segments[i]` 的 redacted 版本
+    /// - `all_mappings` 是全局 mappings，可直接 `restore()` 任何含 placeholder 的文本
+    ///
+    /// 用例：F-17-PRIVACY 多段出网内容（user_message + history + knowledge）
+    /// 需要全局唯一 placeholder 索引，否则 [PHONE_1] 在 user 和 knowledge 中
+    /// 指向不同原值，restore 时无法区分。
+    ///
+    /// 边界：如果某段含 separator 字面量（极不可能），split 会切错。当前不防御
+    /// 这种攻击 — F-17 redact 是出网安全增强，不是恶意输入抗性层。
+    pub fn redact_batch<S: AsRef<str>>(&self, segments: &[S]) -> (Vec<String>, Vec<PiiMatch>) {
+        const SEP: &str = "<<<ATTUNE_PII_SEPARATOR_NONCE_42424242>>>";
+
+        if segments.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let joined: String = segments
+            .iter()
+            .map(|s| s.as_ref())
+            .collect::<Vec<_>>()
+            .join(SEP);
+
+        let result = self.redact(&joined);
+        let redacted_segments: Vec<String> = result
+            .redacted_text
+            .split(SEP)
+            .map(String::from)
+            .collect();
+
+        // mappings 中的 byte_start/byte_end 是相对 joined 字符串的，对调用方来说
+        // 通常只用于 restore（按 placeholder 字面量替换，不依赖 offset），所以
+        // 即使 offset 跨段也不影响 restore 正确性。
+        (redacted_segments, result.mappings)
     }
 
     /// 反向替换：把 LLM 返回的答案中的 placeholder 还原回原值。
@@ -486,5 +581,218 @@ mod tests {
         r.add_pattern("custom_thing", r"FOO\d+").unwrap();
         let result = r.redact("see FOO123 here");
         assert!(result.redacted_text.contains("[CUSTOM_THING_1]"));
+    }
+
+    // ── redact_batch (F-17 全路径接入) ──────────────────────────────────────
+
+    #[test]
+    fn redact_batch_empty_input_returns_empty() {
+        let r = make_redactor();
+        let segments: Vec<&str> = Vec::new();
+        let (redacted, mappings) = r.redact_batch(&segments);
+        assert!(redacted.is_empty());
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn redact_batch_single_segment_equivalent_to_redact() {
+        let r = make_redactor();
+        let one = "phone 13812345678";
+        let (redacted, mappings) = r.redact_batch(&[one]);
+        assert_eq!(redacted.len(), 1);
+        assert!(redacted[0].contains("[PHONE_1]"));
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].original, "13812345678");
+    }
+
+    #[test]
+    fn redact_batch_global_unique_placeholders_across_segments() {
+        // 关键不变量: user_message 中的 [PHONE_1] 与 knowledge 中的 [PHONE_2]
+        // 必须指向不同原值, 否则 restore 时 ambiguous.
+        let r = make_redactor();
+        let user_msg = "my phone 13812345678";
+        let knowledge = "客户联系方式 13987654321";
+        let history = "alt phone 13755554444";
+
+        let (redacted, mappings) = r.redact_batch(&[user_msg, history, knowledge]);
+
+        assert_eq!(redacted.len(), 3, "3 segments → 3 redacted strings");
+
+        // 各段都被 redact (含 placeholder)
+        for (i, seg) in redacted.iter().enumerate() {
+            assert!(
+                seg.contains("[PHONE_"),
+                "segment {} should contain PHONE placeholder, got: {}",
+                i,
+                seg
+            );
+        }
+
+        // 全局共 3 个不同 phone → 3 个 mappings (placeholder 1/2/3)
+        let phone_mappings: Vec<&PiiMatch> = mappings
+            .iter()
+            .filter(|m| matches!(m.kind, PiiKind::Phone))
+            .collect();
+        assert_eq!(phone_mappings.len(), 3);
+        let placeholders: std::collections::HashSet<&str> = phone_mappings
+            .iter()
+            .map(|m| m.placeholder.as_str())
+            .collect();
+        assert_eq!(
+            placeholders.len(),
+            3,
+            "3 distinct phones → 3 unique placeholders, got: {:?}",
+            placeholders
+        );
+
+        // 每个 phone 对应正确的 placeholder (按 segments order)
+        let originals: std::collections::HashMap<String, String> = phone_mappings
+            .iter()
+            .map(|m| (m.placeholder.clone(), m.original.clone()))
+            .collect();
+        assert!(originals.values().any(|v| v == "13812345678"));
+        assert!(originals.values().any(|v| v == "13987654321"));
+        assert!(originals.values().any(|v| v == "13755554444"));
+    }
+
+    #[test]
+    fn redact_batch_same_value_in_different_segments_shares_placeholder() {
+        // 设计语义: 同一 PHONE 在多段中出现也共享 placeholder (per assign_placeholders
+        // value_to_placeholder 缓存语义). 这是有意的 — 让 LLM 看到同值时知道是同人.
+        let r = make_redactor();
+        let segments = vec!["alice 13812345678", "13812345678 confirmed"];
+        let (redacted, mappings) = r.redact_batch(&segments);
+
+        let phone_mappings: Vec<&PiiMatch> = mappings
+            .iter()
+            .filter(|m| matches!(m.kind, PiiKind::Phone))
+            .collect();
+        // 2 个命中 (一个 phone 在两段各出现一次), 但 placeholder 只 1 个 (同值共享)
+        assert_eq!(phone_mappings.len(), 2);
+        let placeholders: std::collections::HashSet<&str> = phone_mappings
+            .iter()
+            .map(|m| m.placeholder.as_str())
+            .collect();
+        assert_eq!(placeholders.len(), 1, "same value → same placeholder");
+
+        // 两段都含同一 placeholder
+        for seg in &redacted {
+            assert!(seg.contains("[PHONE_1]"));
+        }
+    }
+
+    #[test]
+    fn redact_batch_restore_works_across_all_segments() {
+        // 端到端验证: redact_batch 产出的 mappings 能 restore 全部段落.
+        let r = make_redactor();
+        let user = "phone 13812345678 email alice@example.com";
+        let history = "earlier message with 13987654321";
+        let knowledge = "context: api_key sk-1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF";
+
+        let (redacted, mappings) = r.redact_batch(&[user, history, knowledge]);
+
+        // 模拟 LLM 把所有 placeholder 都 echo 回来
+        let llm_response = format!(
+            "User reports {} and {}. Earlier said {}. Key={}",
+            redacted[0].split_whitespace().nth(1).unwrap_or(""),  // [PHONE_1]
+            redacted[0].split_whitespace().last().unwrap_or(""),   // [EMAIL_1]
+            redacted[1].split_whitespace().last().unwrap_or(""),   // [PHONE_2]
+            redacted[2].split_whitespace().last().unwrap_or(""),   // [APIKEY_1]
+        );
+
+        let restored = r.restore(&llm_response, &mappings);
+
+        // 所有原始 PII 都应该在 restored 中
+        assert!(restored.contains("13812345678"), "user phone restored: {}", restored);
+        assert!(restored.contains("alice@example.com"), "user email restored: {}", restored);
+        assert!(restored.contains("13987654321"), "history phone restored: {}", restored);
+        assert!(restored.contains("sk-1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF"),
+            "api_key restored: {}", restored);
+    }
+
+    // ── R14 v0.6.4 fuzz-style robustness for Redactor::redact ──────────────
+
+    #[test]
+    fn redact_does_not_panic_on_pathological_inputs() {
+        // 防御 catastrophic regex backtracking + binary data + 超大输入.
+        // regex crate (linear-time guarantee) 应该免疫 ReDoS, 但 Redactor 包装
+        // 层有 panic 风险 (utf-8 boundary / overlap dedupe / placeholder collision).
+        let r = make_redactor();
+        let cases: Vec<String> = vec![
+            "".to_string(),                                    // empty
+            "a".repeat(100_000),                               // 100KB plain
+            "a".repeat(1_000_000),                             // 1MB plain (regex linear time check)
+            "@".repeat(10_000),                                // pathological email-like
+            "1".repeat(50_000),                                // 50K digits (id card / phone / bank / credit prefixes)
+            "https://".to_string() + &"a".repeat(50_000),      // long URL
+            "中".repeat(10_000),                               // 10K cn chars
+            "🌿".repeat(5_000),                                  // 5K emoji
+            (0u8..=255).map(|b| b as char).collect::<String>(), // every byte as char
+            "13800138000\n".repeat(10_000),                    // 10K phone numbers
+            "tel://13800138000 ".repeat(1_000),                // mixed real PII
+        ];
+        for (i, input) in cases.iter().enumerate() {
+            let _result = r.redact(input);  // must not panic
+            // restore must also be panic-safe even with empty mappings
+            let _restored = r.restore(input, &[]);
+            // round-trip on text WITHOUT PII: redacted_text == original
+            let r2 = r.redact(input);
+            if r2.mappings.is_empty() {
+                assert_eq!(r2.redacted_text, *input, "case {i}: PII-free input should pass through");
+            }
+        }
+    }
+
+    #[test]
+    fn redact_handles_overlapping_pii_correctly() {
+        // 重叠的 pattern (邮箱 + URL 中的 @): 不应导致 panic 或重复替换
+        let r = make_redactor();
+        let cases = vec![
+            "邮箱 a@example.com 和 URL https://b@example.com 一起",
+            "phone in URL https://13800138000.example.com/path",
+            "13800138000也是13987654321的旁边",
+        ];
+        for input in cases {
+            let result = r.redact(input);
+            // dedup: 不应有 overlap match 被同时保留导致 redacted_text 字符乱
+            let restored = r.restore(&result.redacted_text, &result.mappings);
+            // 不变量: restore 后所有 placeholder 都被还原
+            assert!(
+                !restored.contains("[PHONE_") && !restored.contains("[EMAIL_") && !restored.contains("[URL_"),
+                "restore should remove all placeholders, got: {}",
+                restored
+            );
+        }
+    }
+
+    #[test]
+    fn redact_invalid_utf8_boundary_safe() {
+        // 字节级正则可能落在 multi-byte char 中间. Redactor 必须 char-boundary safe.
+        let cases = vec![
+            "前缀 13800138000 中文",                  // CJK bordering ASCII
+            "🌿邮箱alice@example.com🌿",              // emoji + email
+            "测试①13800138000测试②13987654321测试",   // CJK + numbered + phone
+        ];
+        let r = make_redactor();
+        for input in cases {
+            let result = r.redact(input);
+            // restore 不应破坏 UTF-8
+            let restored = r.restore(&result.redacted_text, &result.mappings);
+            assert!(restored.is_char_boundary(0));
+            assert!(restored.is_char_boundary(restored.len()));
+            assert!(std::str::from_utf8(restored.as_bytes()).is_ok(), "valid UTF-8");
+        }
+    }
+
+    #[test]
+    fn redact_batch_empty_strings_preserved() {
+        // 空字符串作为 segment 也要保留 (chat history 可能含空 message)
+        let r = make_redactor();
+        let segments = vec!["phone 13812345678", "", "another no pii"];
+        let (redacted, _) = r.redact_batch(&segments);
+        assert_eq!(redacted.len(), 3);
+        assert!(redacted[0].contains("[PHONE_1]"));
+        assert_eq!(redacted[1], "", "empty segment preserved as empty");
+        assert_eq!(redacted[2], "another no pii", "no-PII segment unchanged");
     }
 }

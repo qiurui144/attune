@@ -5,6 +5,16 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  schedule:
+    # R19 nightly slow-test gate (02:00 UTC = 10:00 CST)
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+# 2026-06-02 GitHub Actions 默认切 Node 24 (Node 20 deprecated 2025-09).
+# 提前 opt-in 验证 actions/checkout@v4 / actions/setup-node@v4 等在 Node 24 兼容.
+# 此 env 仅设静态字符串 "true", 不引入 untrusted input.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   lint-and-test:
@@ -17,21 +27,26 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        working-directory: python
         run: pip install -e ".[dev]"
 
       - name: Lint (non-blocking — Python prototype line, see CLAUDE.md)
+        working-directory: python
         run: ruff check src/ tests/
         continue-on-error: true
 
       - name: Format check (non-blocking)
+        working-directory: python
         run: ruff format --check src/ tests/
         continue-on-error: true
 
       - name: Type check (non-blocking)
+        working-directory: python
         run: mypy src/
         continue-on-error: true
 
       - name: Test (跳过 test_extension — Playwright e2e 需 chromium，本地手工跑)
+        working-directory: python
         run: pytest tests/ -v --ignore=tests/test_extension.py
 
   extension-build:
@@ -71,7 +86,13 @@ jobs:
   rust-test:
     # Rust 商用线 CI — attune-core + attune-server + attune-cli workspace
     # MockLlmProvider 驱动，无 Ollama 依赖
-    runs-on: ubuntu-latest
+    # R18 (2026-05-01): 跨 Linux + Windows 矩阵，CLAUDE.md P0 平台守门
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: rust-test-${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -84,14 +105,36 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             rust/target
-          key: cargo-v1-${{ hashFiles('rust/Cargo.lock') }}
+          key: cargo-v1-${{ matrix.os }}-${{ hashFiles('rust/Cargo.lock') }}
       - name: K2 Parse Golden Gate (W3 batch C, gate <95% blocks PR)
         working-directory: rust
         run: cargo test --release -p attune-core --test parse_golden_set_regression
-      - name: cargo test workspace
+      - name: cargo test workspace lib + fast integration
         working-directory: rust
+        # R19 (2026-05-01): 慢 attune-server integration tests 加 #[ignore] 走 nightly,
+        # PR-time CI 跑 lib 全 + 不带 --include-ignored 的 integration（自动跳过 #[ignore]）
         run: cargo test --workspace --release
       - name: cargo clippy (non-blocking)
         working-directory: rust
         run: cargo clippy --workspace --release -- -D warnings
         continue-on-error: true
+
+  rust-test-slow-nightly:
+    # R19 (2026-05-01): 慢 E2E 走 schedule 通道，每天 02:00 UTC 跑一次
+    # form_factor_integration / system_wizard_full_flow_test / vault_setup_test (~6 min)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-v1-ubuntu-latest-${{ hashFiles('rust/Cargo.lock') }}
+      - name: cargo test slow E2E (with --include-ignored)
+        working-directory: rust
+        run: cargo test --workspace --release -- --include-ignored

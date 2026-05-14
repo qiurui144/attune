@@ -35,27 +35,63 @@ fn load_disabled_plugin_ids(state: &SharedState) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// GET /api/v1/plugins — 列出所有可用插件（内置 + 用户）+ enabled 状态
+/// GET /api/v1/plugins — 列出所有可用插件（内置 taxonomy + plugin_registry 装载）+ enabled 状态
 pub async fn list(
     State(state): State<SharedState>,
 ) -> Result<Json<serde_json::Value>, RouteError> {
     let disabled = load_disabled_plugin_ids(&state);
     let is_enabled = |id: &str| !disabled.iter().any(|d| d == id);
 
+    // 收集两个数据源:
+    // 1. taxonomy.plugins (内置 dimensions yaml)
+    // 2. plugin_registry (用户从 plugins/ 目录加载的, e.g. law-pro)
+    let mut list: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     if let Some(tax) = state.taxonomy.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        let list: Vec<serde_json::Value> = tax.plugins.iter().map(|p| serde_json::json!({
-            "id": p.id,
-            "name": p.name,
-            "version": p.version,
-            "description": p.description,
-            "source": if ["tech", "law", "presales", "patent"].contains(&p.id.as_str()) { "builtin" } else { "user" },
-            "enabled": is_enabled(&p.id),
-            "dimensions": p.dimensions.iter().map(|d| serde_json::json!({
-                "name": d.name,
-                "label": d.label,
-                "description": d.description,
-            })).collect::<Vec<_>>(),
-        })).collect();
+        for p in &tax.plugins {
+            seen.insert(p.id.clone());
+            list.push(serde_json::json!({
+                "id": p.id,
+                "name": p.name,
+                "version": p.version,
+                "description": p.description,
+                "source": if ["tech", "law", "presales", "patent"].contains(&p.id.as_str()) { "builtin" } else { "user" },
+                "enabled": is_enabled(&p.id),
+                "type": "taxonomy",
+                "dimensions": p.dimensions.iter().map(|d| serde_json::json!({
+                    "name": d.name,
+                    "label": d.label,
+                    "description": d.description,
+                })).collect::<Vec<_>>(),
+            }));
+        }
+    }
+
+    // plugin_registry: 用户安装的 plugins (attune-pro vertical 等)
+    for plugin in state.plugin_registry.plugins() {
+        let m = &plugin.manifest;
+        if seen.contains(&m.id) {
+            continue; // 避免重复
+        }
+        let agents = m.agents.iter().map(|a| serde_json::json!({
+            "id": a.id,
+            "description": a.description,
+        })).collect::<Vec<_>>();
+        list.push(serde_json::json!({
+            "id": m.id,
+            "name": m.name,
+            "version": m.version,
+            "description": m.description,
+            "source": "user",
+            "enabled": is_enabled(&m.id),
+            "type": m.plugin_type.clone(),
+            "agents": agents,
+            "tier": m.pricing.as_ref().map(|p| p.tier.clone()).unwrap_or_else(|| "free".into()),
+        }));
+    }
+
+    if !list.is_empty() {
         return Ok(Json(serde_json::json!({"plugins": list})));
     }
 

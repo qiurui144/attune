@@ -106,7 +106,12 @@ impl EmbeddingProvider for OllamaProvider {
         let client = self.client.clone();
 
         let response = embed_block_on(async move {
-            let body = serde_json::json!({"model": model, "input": input});
+            // F-16 Ollama 模型驻留: keep_alive=1h 让 GPU 加载的模型保留 1 小时,
+            // 避免默认 5min 后卸载导致下次 chat 重新加载 (7B 模型 5-10s 重启延迟).
+            // 用户可通过 ATTUNE_OLLAMA_KEEP_ALIVE env var override (e.g. "-1" 永久 / "30m" 短驻留).
+            let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
+                .unwrap_or_else(|_| "1h".to_string());
+            let body = serde_json::json!({"model": model, "input": input, "keep_alive": keep_alive});
             client
                 .post(&url)
                 .json(&body)

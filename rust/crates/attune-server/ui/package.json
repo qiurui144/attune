@@ -13,6 +13,7 @@
   "dependencies": {
     "@preact/signals": "^2.9.0",
     "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "preact": "^10.29.1"
   },
   "devDependencies": {

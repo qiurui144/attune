@@ -28,6 +28,15 @@ const MESSAGE_MAP: Record<Locale, Messages> = {
 export const currentLocale = signal<Locale>(detectInitialLocale());
 
 function detectInitialLocale(): Locale {
+  // 优先级: localStorage 用户偏好 > navigator.language > 默认 zh
+  // 让用户切语言后下次 reload (vault lock / reset / setup) 不丢偏好.
+  try {
+    const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('attune.locale') : null;
+    if (stored === 'zh-CN' || stored === 'zh') return 'zh';
+    if (stored === 'en' || stored === 'en-US') return 'en';
+  } catch {
+    // localStorage 访问失败 (SSR / privacy mode) 走 fallback
+  }
   if (typeof navigator === 'undefined') return 'zh';
   const lang = (navigator.language || 'zh').toLowerCase();
   if (lang.startsWith('en')) return 'en';
@@ -41,6 +50,11 @@ export function setLocale(locale: Locale): void {
   }
   currentLocale.value = locale;
   document.documentElement.setAttribute('lang', locale === 'zh' ? 'zh-CN' : 'en');
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('attune.locale', locale === 'zh' ? 'zh-CN' : 'en');
+    }
+  } catch { /* ignore */ }
 }
 
 /**
@@ -83,11 +97,17 @@ export function plural(
 }
 
 function lookup(key: string, locale: Locale): Message {
-  const primary = MESSAGE_MAP[locale]?.[key];
+  const normalized = normalizeKey(key);
+  const primary = MESSAGE_MAP[locale]?.[normalized];
   if (primary !== undefined) return primary;
-  const fallback = MESSAGE_MAP.zh?.[key];
+  const fallback = MESSAGE_MAP.zh?.[normalized];
   if (fallback !== undefined) return fallback;
-  return key; // 最终 fallback：key 本身（开发期能看到缺哪个）
+  return normalized; // 最终 fallback：key 本身（开发期能看到缺哪个）
+}
+
+function normalizeKey(key: string): string {
+  // 防御性归一化：去掉首尾空白与常见零宽字符，避免出现“看起来相同但查不到”的 key。
+  return key.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
 }
 
 function interpolate(

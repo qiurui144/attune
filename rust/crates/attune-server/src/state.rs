@@ -39,6 +39,7 @@ pub struct AppState {
     pub embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     pub reranker: Mutex<Option<Arc<dyn attune_core::infer::RerankProvider>>>,
     pub llm: Mutex<Option<Arc<dyn LlmProvider>>>,
+    pub summary_llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub web_search: Mutex<Option<Arc<dyn WebSearchProvider>>>,
     pub tag_index: Mutex<Option<TagIndex>>,
     pub cluster_snapshot: Mutex<Option<ClusterSnapshot>>,
@@ -67,13 +68,27 @@ pub struct AppState {
     pub recommendation_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
     /// Sprint 2: 启动时加载的 plugins（attune-pro / 用户 / 社区）
     pub plugin_registry: std::sync::Arc<attune_core::plugin_registry::PluginRegistry>,
+    /// 会员登录状态 — 控制 SettingsLocks 灰显 / 锁定 PATCH /settings 字段.
+    /// 默认 LoggedOut (本地 self-host). login 后由 cloud_client.me() 推导.
+    pub member_state: Mutex<attune_core::member_session::MemberState>,
+    /// E2/E4 (2026-05-01): PluginHub 客户端 (Mutex 让 PATCH /settings 能热更新)
+    /// 默认 Mock；settings.pluginhub.url + license_key 配齐后切到 HttpPluginHubProvider
+    pub plugin_hub: Mutex<std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>>,
 }
 
 impl AppState {
     pub fn new(vault: Vault, require_auth: bool) -> Self {
         let (recommendation_tx, _rx) = tokio::sync::broadcast::channel::<serde_json::Value>(64);
+        // 启动时尝试读 license cache, 用 license_code 作为 paid plugin 解密 key.
+        // 没 cache 或读失败 → 等价于明文 scan (paid plugin 装载会失败, 但 free plugin OK).
+        let license_cache_path = attune_core::license_cache::LicenseCache::default_path();
+        let cached_license_key: Option<Vec<u8>> =
+            attune_core::license_cache::LicenseCache::load(&license_cache_path)
+                .ok()
+                .flatten()
+                .map(|c| c.as_decrypt_key().to_vec());
         let plugin_registry = match attune_core::plugin_registry::PluginRegistry::default_plugins_dir() {
-            Ok(dir) => match attune_core::plugin_registry::PluginRegistry::scan(&dir) {
+            Ok(dir) => match attune_core::plugin_registry::PluginRegistry::scan_with_key(&dir, cached_license_key.as_deref()) {
                 Ok((reg, errs)) => {
                     tracing::info!(
                         "loaded {} plugins, {} workflows from {}",
@@ -103,6 +118,7 @@ impl AppState {
             embedding: Mutex::new(None),
             reranker: Mutex::new(None),
             llm: Mutex::new(None),
+            summary_llm: Mutex::new(None),
             web_search: Mutex::new(None),
             tag_index: Mutex::new(None),
             cluster_snapshot: Mutex::new(None),
@@ -122,6 +138,60 @@ impl AppState {
             hardware: attune_core::platform::HardwareProfile::detect(),
             recommendation_tx,
             plugin_registry,
+            // E2/E4 + G2: 默认 Mock；settings.pluginhub.url + license_key 配齐后
+            // 由 reload_plugin_hub() 切到 HttpPluginHubProvider
+            plugin_hub: Mutex::new(std::sync::Arc::new(
+                attune_core::plugin_hub::MockPluginHubProvider::default(),
+            )),
+            // 默认未登录 — 本地 self-host 模式. login 后通过 /member/login endpoint 更新.
+            member_state: Mutex::new(attune_core::member_session::MemberState::LoggedOut),
+        }
+    }
+
+    /// G2 (2026-05-01) — 按 settings 切换 PluginHub provider
+    /// 由 PATCH /api/v1/settings 在 pluginhub 字段变化时调
+    pub fn reload_plugin_hub(&self, url: Option<&str>, license_key: Option<&str>) {
+        let new_provider: std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider> =
+            match (url, license_key) {
+                (Some(u), Some(k)) if !u.is_empty() && !k.is_empty() => {
+                    tracing::info!("plugin_hub: switching to HttpPluginHubProvider @ {u}");
+                    std::sync::Arc::new(attune_core::plugin_hub::HttpPluginHubProvider::new(u, k))
+                }
+                _ => {
+                    tracing::info!("plugin_hub: using MockPluginHubProvider (no url/license configured)");
+                    std::sync::Arc::new(attune_core::plugin_hub::MockPluginHubProvider::default())
+                }
+            };
+        if let Ok(mut guard) = self.plugin_hub.lock() {
+            *guard = new_provider;
+        }
+    }
+
+    /// 仅重建 state.llm + classifier，按当前 settings 重新选 provider。
+    /// 用于 wizard / Settings PATCH 修改 llm.* 字段后热切，避免要求重启。
+    /// 由 settings.rs 在 body.get("llm").is_some() 时调用。
+    pub fn reload_llm(&self) {
+        let settings_json = {
+            let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+            vault_guard.store().get_meta("app_settings").ok().flatten()
+                .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        };
+        let llm_result = build_llm_from_settings(&settings_json, &self.hardware);
+        match llm_result {
+            Some(llm_arc) => {
+                tracing::info!("LLM hot-reload: provider rebuilt from settings");
+                // 同时刷新 classifier (它持有 llm Arc 复本，需要更新)
+                if let Some(tax_arc) = self.taxonomy.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                    *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(std::sync::Arc::new(Classifier::new(tax_arc, llm_arc.clone())));
+                }
+                *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(llm_arc);
+            }
+            None => {
+                tracing::warn!("LLM hot-reload: settings yielded no LLM provider — chat will be disabled");
+                *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
         }
     }
 
@@ -255,44 +325,33 @@ impl AppState {
             });
         }
 
-        // LLM 四级优先级：1. 配置文件 llm.endpoint（OpenAI-compatible）
-        //                  2. provider=local + 明确指定 model → OllamaLlmProvider::with_model
-        //                  3. Ollama 自动探测（PREFERRED_MODELS 列表）
-        //                  4. 无 LLM（Chat 功能禁用）
-        let llm_result: Option<Arc<dyn LlmProvider>> = {
-            let configured_llm = {
-                let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-                vault_guard.store().get_meta("app_settings").ok().flatten()
-                    .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
-                    .and_then(|settings| {
-                        let llm = settings.get("llm")?;
-                        let endpoint = llm.get("endpoint").and_then(|v| v.as_str()).map(|s| s.to_string());
-                        let api_key = llm.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let model = llm.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let provider = llm.get("provider").and_then(|v| v.as_str()).unwrap_or("local");
+        // LLM 四级优先级见 build_llm_from_settings 文档
+        let settings_json = {
+            let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+            vault_guard.store().get_meta("app_settings").ok().flatten()
+                .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        };
 
-                        if let Some(ep) = endpoint {
-                            // 级别 1：明确配置了 endpoint → OpenAI-compatible（含 Qwen/DeepSeek 等）
-                            tracing::info!("LLM: using configured endpoint {ep}");
-                            Some(Arc::new(OpenAiLlmProvider::new(&ep, &api_key, &model)) as Arc<dyn LlmProvider>)
-                        } else if provider == "local" && !model.is_empty() {
-                            // 级别 2：local provider + 明确指定 model → Ollama with_model
-                            tracing::info!("LLM: using Ollama with configured model {model}");
-                            Some(Arc::new(OllamaLlmProvider::with_model(&model)) as Arc<dyn LlmProvider>)
-                        } else {
-                            None
-                        }
-                    })
-            };
+        let llm_result = build_llm_from_settings(&settings_json, &self.hardware);
 
-            // 级别 3：Ollama 自动探测
-            configured_llm.or_else(|| {
-                OllamaLlmProvider::auto_detect().ok().map(|llm| {
-                    tracing::info!("LLM: using Ollama auto-detect");
-                    Arc::new(llm) as Arc<dyn LlmProvider>
-                })
-            })
-            // 级别 4：None（Chat 功能禁用）
+        let summary_llm_result: Option<Arc<dyn LlmProvider>> = {
+            let summary_model = settings_json.as_ref()
+                .and_then(|settings| settings.get("summary_model").and_then(|v| v.as_str()))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| self.hardware.recommended_summary_model())
+                .to_string();
+
+            let preferred_models = [summary_model.as_str(), "qwen2.5:7b", "qwen2.5:3b", "qwen2.5:1.5b", "llama3.2:1b"];
+            match OllamaLlmProvider::auto_detect_with_preferred(&preferred_models) {
+                Ok(llm) => {
+                    tracing::info!("Summary LLM: using Ollama auto-detect with preferred model {summary_model}");
+                    Some(Arc::new(llm) as Arc<dyn LlmProvider>)
+                }
+                Err(e) => {
+                    tracing::warn!("Summary LLM unavailable ({summary_model}): {e}");
+                    None
+                }
+            }
         };
 
         if let Some(llm_arc) = llm_result {
@@ -313,6 +372,10 @@ impl AppState {
                 Some(Arc::new(Classifier::new(tax_arc.clone(), llm_arc.clone())));
             *self.taxonomy.lock().unwrap_or_else(|e| e.into_inner()) = Some(tax_arc);
             *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(llm_arc);
+        }
+
+        if let Some(summary_llm_arc) = summary_llm_result {
+            *self.summary_llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(summary_llm_arc);
         }
 
         // Web search provider（从 app_settings.web_search 加载；缺省时尝试默认）
@@ -684,61 +747,48 @@ impl AppState {
                     continue;
                 }
 
-                // 批量 embed
-                let texts: Vec<&str> = embed_tasks.iter().map(|t| t.chunk_text.as_str()).collect();
-                let embeddings = match embedding.embed(&texts) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!("Embedding failed: {}", e);
-                        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                        for task in &embed_tasks {
-                            let _ = vault.store().mark_embedding_failed(task.id, MAX_ATTEMPTS);
-                        }
+                // R23 (2026-05-01): 调 attune-core::queue::embed_and_index_batch 共享批处理。
+                // 锁顺序：vault → vectors → fulltext，全程持锁直到 done_ids 取出。
+                let done_ids: Vec<i64> = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut vecs_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+                    let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+
+                    let (Some(vi), Some(ft)) = (vecs_guard.as_mut(), ft_guard.as_ref()) else {
+                        tracing::debug!("Queue worker: vectors/fulltext index unavailable mid-batch");
+                        drop(ft_guard);
+                        drop(vecs_guard);
+                        drop(vault);
                         std::thread::sleep(POLL_INTERVAL);
                         continue;
+                    };
+
+                    match attune_core::queue::embed_and_index_batch(
+                        vault.store(),
+                        embedding.as_ref(),
+                        vi,
+                        ft,
+                        &embed_tasks,
+                    ) {
+                        Ok(ids) => {
+                            for id in &ids {
+                                let _ = vault.store().mark_embedding_done(*id);
+                            }
+                            ids
+                        }
+                        Err(e) => {
+                            tracing::warn!("Embedding batch failed: {}", e);
+                            for task in &embed_tasks {
+                                let _ = vault.store().mark_embedding_failed(task.id, MAX_ATTEMPTS);
+                            }
+                            drop(ft_guard);
+                            drop(vecs_guard);
+                            drop(vault);
+                            std::thread::sleep(POLL_INTERVAL);
+                            continue;
+                        }
                     }
                 };
-
-                // 写入向量索引 + 全文索引，收集成功处理的 task id
-                let mut done_ids: Vec<i64> = Vec::new();
-                for (i, task) in embed_tasks.iter().enumerate() {
-                    if i >= embeddings.len() {
-                        break;
-                    }
-                    {
-                        if let Ok(mut vecs) = state.vectors.lock() {
-                            if let Some(ref mut vi) = *vecs {
-                                let _ = vi.add(
-                                    &embeddings[i],
-                                    attune_core::vectors::VectorMeta {
-                                        item_id: task.item_id.clone(),
-                                        chunk_idx: task.chunk_idx as usize,
-                                        level: task.level as u8,
-                                        section_idx: task.section_idx as usize,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    if task.level == 1 {
-                        if let Ok(ft_guard) = state.fulltext.lock() {
-                            if let Some(ref ft) = *ft_guard {
-                                let _ = ft.add_document(
-                                    &task.item_id, "", &task.chunk_text, "file",
-                                );
-                            }
-                        }
-                    }
-                    done_ids.push(task.id);
-                }
-
-                // 循环外：一次性标记完成（单次加锁，避免批量锁竞争）
-                if !done_ids.is_empty() {
-                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                    for id in &done_ids {
-                        let _ = vault.store().mark_embedding_done(*id);
-                    }
-                }
 
                 // 定期把 vector index flush 到加密磁盘文件
                 // 条件：每累计 FLUSH_BATCH_THRESHOLD 个新向量 or 距上次 flush 超过 FLUSH_INTERVAL
@@ -1040,4 +1090,128 @@ impl AppState {
         // 重置初始化标志，确保再次 unlock 后能重新初始化搜索引擎
         self.engines_initialized.store(false, Ordering::SeqCst);
     }
+
+    // ── ML provider accessor 方法 (OPT-3 ArcSwap migration prep) ───────────
+    //
+    // 当前实现: lock+clone Arc 然后立即放锁 → 临界区毫秒内, 比正常 .lock() 短 1000x.
+    // 后续 PR (v0.7): 把字段类型从 `Mutex<Option<Arc<dyn T>>>` 改成
+    // `arc_swap::ArcSwap<Option<Arc<dyn T>>>`, 这些方法签名不变, 调用方代码无需改.
+    //
+    // 新代码 (route / async handler) 强烈建议用这些 accessor 而非 .lock() 直接访问 —
+    // 准备一并 migrate 到 ArcSwap 时, 旧 .lock() 调用会编译失败 (字段类型不再是 Mutex).
+
+    /// 读 embedding provider — lock-free clone of Arc. 适合 async handler 内调.
+    pub fn embedding(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embedding.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// 写 embedding provider. settings hot-reload 路径会调.
+    pub fn set_embedding(&self, p: Option<Arc<dyn EmbeddingProvider>>) {
+        if let Ok(mut g) = self.embedding.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 LLM provider — 主 chat 用.
+    pub fn llm(&self) -> Option<Arc<dyn LlmProvider>> {
+        self.llm.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_llm(&self, p: Option<Arc<dyn LlmProvider>>) {
+        if let Ok(mut g) = self.llm.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 summary LLM (摘要/分类轻量 path, 与主 chat 模型可不同).
+    pub fn summary_llm(&self) -> Option<Arc<dyn LlmProvider>> {
+        self.summary_llm.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_summary_llm(&self, p: Option<Arc<dyn LlmProvider>>) {
+        if let Ok(mut g) = self.summary_llm.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 reranker provider — search rerank 阶段用.
+    pub fn reranker(&self) -> Option<Arc<dyn attune_core::infer::RerankProvider>> {
+        self.reranker.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_reranker(&self, p: Option<Arc<dyn attune_core::infer::RerankProvider>>) {
+        if let Ok(mut g) = self.reranker.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 web search provider — chat web augmentation 用.
+    pub fn web_search(&self) -> Option<Arc<dyn WebSearchProvider>> {
+        self.web_search.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_web_search(&self, p: Option<Arc<dyn WebSearchProvider>>) {
+        if let Ok(mut g) = self.web_search.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 classifier — items 自动分类 (热路径, ingest pipeline 调).
+    pub fn classifier(&self) -> Option<Arc<Classifier>> {
+        self.classifier.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_classifier(&self, p: Option<Arc<Classifier>>) {
+        if let Ok(mut g) = self.classifier.lock() {
+            *g = p;
+        }
+    }
+}
+
+/// 按 settings + 硬件构建 LLM provider。
+///
+/// 四级优先级：
+/// 1. settings.llm.endpoint 非空 → OpenAI-compatible（hiapi / DeepSeek / Qwen 等）
+/// 2. settings.llm.provider == "local" + model 非空 → OllamaLlmProvider::with_model
+/// 3. form_factor.prefers_local_llm() (K3 一体机) → Ollama auto-detect
+/// 4. 其他笔电 / 服务器 + 无 cloud config → None（chat 返回 503 引导配置）
+///
+/// 抽出为自由函数后，可以同时被 init_search_engines (启动 unlock 一次)
+/// 和 reload_llm (settings 改 llm 字段后热切) 复用。
+fn build_llm_from_settings(
+    settings_json: &Option<serde_json::Value>,
+    hardware: &attune_core::platform::HardwareProfile,
+) -> Option<Arc<dyn LlmProvider>> {
+    let configured_llm = settings_json.as_ref().and_then(|settings| {
+        let llm = settings.get("llm")?;
+        let endpoint = llm.get("endpoint").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let api_key = llm.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let model = llm.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let provider = llm.get("provider").and_then(|v| v.as_str()).unwrap_or("local");
+
+        if let Some(ep) = endpoint.filter(|s| !s.is_empty()) {
+            tracing::info!("LLM: using configured endpoint {ep}");
+            Some(Arc::new(OpenAiLlmProvider::new(&ep, &api_key, &model)) as Arc<dyn LlmProvider>)
+        } else if provider == "local" && !model.is_empty() {
+            tracing::info!("LLM: using Ollama with configured model {model}");
+            Some(Arc::new(OllamaLlmProvider::with_model(&model)) as Arc<dyn LlmProvider>)
+        } else {
+            None
+        }
+    });
+
+    configured_llm.or_else(|| {
+        if hardware.form_factor.prefers_local_llm() {
+            OllamaLlmProvider::auto_detect().ok().map(|llm| {
+                tracing::info!("LLM (K3 form factor): using Ollama auto-detect");
+                Arc::new(llm) as Arc<dyn LlmProvider>
+            })
+        } else {
+            tracing::warn!(
+                "LLM: form_factor={:?} + no cloud endpoint configured → no LLM (chat 将返回 503 提示用户配置 cloud API key per CLAUDE.md M2)",
+                hardware.form_factor
+            );
+            None
+        }
+    })
 }

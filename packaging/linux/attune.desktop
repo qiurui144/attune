@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Attune
+Comment=个人知识库 + 记忆增强系统
+Exec=attune
+Icon=attune
+Categories=Utility;
+Terminal=false

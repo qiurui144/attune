@@ -71,8 +71,8 @@ export function SkillsView(): JSX.Element {
       ) : skills.value.length === 0 ? (
         <EmptyState
           icon="🧠"
-          title="还没装 skill"
-          description="参考 README.md 的 Skill 开发段落写一个，或下载社区 .attunepkg 解压即用。"
+          title="还没安装任何技能"
+          description="在插件市场可以浏览并安装社区分享的技能与智能助手。"
         />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>

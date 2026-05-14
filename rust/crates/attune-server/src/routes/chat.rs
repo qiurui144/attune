@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use attune_core::llm::ChatMessage;
+use attune_core::pii::Redactor;
 
 use crate::state::SharedState;
 
@@ -138,7 +139,7 @@ pub async fn chat(
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({
                     "error": "AI 后端不可用",
-                    "hint": "请安装 Ollama 并下载 chat 模型: ollama pull qwen2.5:3b"
+                    "hint": "请安装 Ollama，并在本机下载一个 chat 模型（例如轻量模型）"
                 })),
             ))
         }
@@ -381,6 +382,10 @@ pub async fn chat(
                     let llm_arc = state_compress.llm.lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .as_ref().cloned();
+                    let summary_llm_arc = state_compress.summary_llm.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref().cloned()
+                        .or_else(|| llm_arc.clone());
                     let target = strategy.target_chars();
                     let strategy_str = strategy.as_str();
 
@@ -429,7 +434,7 @@ pub async fn chat(
                         if s.is_short || s.was_cache_hit || s.item_id.is_empty() {
                             continue;
                         }
-                        let Some(ref llm) = llm_arc else {
+                        let Some(ref llm) = summary_llm_arc else {
                             continue; // LLM 不可用 → 降级原文（summary 保持 None）
                         };
                         if llm_unavailable {
@@ -462,7 +467,7 @@ pub async fn chat(
                     {
                         let vault_guard = state_compress.vault.lock().unwrap_or_else(|e| e.into_inner());
                         let store = vault_guard.store();
-                        let model_name = llm_arc.as_ref().map(|l| l.model_name().to_string()).unwrap_or_default();
+                        let model_name = summary_llm_arc.as_ref().map(|l| l.model_name().to_string()).unwrap_or_default();
                         for s in slots.iter() {
                             if !s.needs_writeback { continue; }
                             if let Some(ref sum) = s.summary {
@@ -567,18 +572,45 @@ pub async fn chat(
         system_prompt.push_str("=== 参考内容结束 ===\n");
     }
 
-    // 3. Build messages with history
-    let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&system_prompt)];
+    // ── F-17 PII redact 全路径拦截 (修复 v0.6.3 BUG: 之前 server chat 路径直接发原文) ──
+    // 收集所有出网内容到 segments[], 一次 redact_batch 保证 placeholder 全局唯一
+    let redactor = Redactor::default();
+    let mut segments: Vec<&str> = Vec::with_capacity(2 + body.history.len());
+    segments.push(&system_prompt);
+    segments.push(&body.message);
     for h in &body.history {
+        segments.push(&h.content);
+    }
+    let (redacted_segments, all_mappings) = redactor.redact_batch(&segments);
+
+    // outbound_audit 日志
+    if !all_mappings.is_empty() {
+        let mut by_kind: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for m in &all_mappings {
+            let prefix = m.kind.placeholder_prefix().to_string().to_uppercase();
+            *by_kind.entry(prefix).or_insert(0) += 1;
+        }
+        tracing::info!(
+            target: "outbound_audit",
+            "F-17 server: PII redacted in chat outbound — kinds={:?} total={} segments={}",
+            by_kind, all_mappings.len(), segments.len()
+        );
+    }
+
+    // 3. Build messages with REDACTED content
+    let redacted_system = redacted_segments[0].clone();
+    let redacted_user = redacted_segments[1].clone();
+    let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&redacted_system)];
+    for (i, h) in body.history.iter().enumerate() {
         messages.push(ChatMessage {
             role: h.role.clone(),
-            content: h.content.clone(),
+            content: redacted_segments[2 + i].clone(),
         });
     }
-    messages.push(ChatMessage::user(&body.message));
+    messages.push(ChatMessage::user(&redacted_user));
 
     // 4. Call LLM (blocking via spawn_blocking)
-    let response = tokio::task::spawn_blocking(move || llm.chat_with_history(&messages))
+    let raw_response = tokio::task::spawn_blocking(move || llm.chat_with_history(&messages))
         .await
         .map_err(|e| {
             (
@@ -592,6 +624,9 @@ pub async fn chat(
                 Json(serde_json::json!({"error": e.to_string()})),
             )
         })?;
+
+    // F-17 restore: LLM 响应里的所有 placeholder 还原成原值给用户看
+    let response = redactor.restore(&raw_response, &all_mappings);
 
     // 5. Persist to conversation session
     let session_id = {
@@ -667,6 +702,81 @@ pub async fn chat(
     // v0.6 Phase B fix: 解析 confidence + 剥离 marker（J5 strict prompt 要求 LLM 末尾输出）
     let confidence = attune_core::parse_confidence(&response);
     let response = attune_core::strip_confidence_marker(&response).to_string();
+
+    // OSS-S12 fix: confident hallucination 防御。当所有 citation 的 relevance 都接近零
+    // (max < 0.001) 时，说明 RAG 检索到的文档与 query 实质无关，LLM 在用预训练知识
+    // "权威地" 编造答案。强制在前面加 disclaimer 让用户知晓答案非来自知识库。
+    // R5/R18 反复确认此现象（古希腊伊壁鸠鲁/量子退火等 out-of-corpus query）。
+    //
+    // OSS-S25 fix (任其坤案件 2026-05-09): 进一步强化对**结构化数据计算 query** 的拒绝。
+    // 律师真实场景中"多少元/合计/求和/总计/笔数/对账/转账明细"这类问题 RAG chat 完全
+    // 不能 hallucinate（金额错一元都可能直接影响诉讼标的额）。当 max_rel < 0.001 且
+    // query 命中结构化计算关键词时，直接 reject 而非加 disclaimer，明确指引用户走
+    // 对应 capability（attune-pro/law-pro::bank_statement_aggregator 等 Tool-using 路径）。
+    //
+    // v0.6.2 升级 (2026-05-10): plugin_registry::match_chat_trigger() 动态路由替代 hard-code
+    // COMPUTE_KEYWORDS. attune-pro 装载 capability 后, 关键词由 plugin.yaml 提供, OSS 不需 hard-code.
+    // 兜底: 若无 plugin 命中且仍是结构化计算 query, 保留 hard-code 关键词检查 (OSS 单独使用时不丢防御).
+    let plugin_match = state.plugin_registry.match_chat_trigger(&body.message);
+
+    let response = {
+        let max_rel: f64 = citations
+            .iter()
+            .filter_map(|c| c.get("relevance").and_then(|v| v.as_f64()))
+            .fold(0.0_f64, f64::max);
+
+        // 兜底关键词 (OSS 裸装无 plugin 时仍检测结构化计算 query)
+        const FALLBACK_COMPUTE_KEYWORDS: &[&str] = &[
+            "多少元", "多少钱", "合计", "求和", "总计", "总金额", "总额",
+            "笔数", "几笔", "对账", "明细", "应付", "应收", "净流入",
+            "转账明细", "交易明细", "本息", "利息计算",
+        ];
+        let q_lower = body.message.to_lowercase();
+        let has_amount_pattern = body.message.chars().enumerate().any(|(i, c)| {
+            c.is_ascii_digit() && body.message.chars().skip(i + 1).take(3)
+                .any(|nc| nc == '元' || nc == '万' || nc == '笔' || nc == '张')
+        });
+        let is_compute_query = FALLBACK_COMPUTE_KEYWORDS.iter().any(|k| q_lower.contains(k))
+            || has_amount_pattern;
+
+        if let Some(m) = &plugin_match {
+            // Plugin 命中 — 提示用户触发 agent (避免纯 RAG 数字 hallucination)
+            // 提供 form URL 让前端直接跳转 (per attune-plugin-protocol §3 Stage 3 工作流)
+            let form_hint = state
+                .plugin_registry
+                .get_plugin(&m.plugin_id)
+                .and_then(|p| p.manifest.ui_components.first())
+                .map(|c| format!(
+                    "\n\n📋 表单地址: `/api/v1/forms/{}/{}` (前端 iframe 加载, 律师补全 → POST /submit 触发 agent)",
+                    m.plugin_id, c.id
+                ))
+                .unwrap_or_default();
+            format!(
+                "🔌 检测到此问题适合 **{}** 处理 ({}).\n\n\
+                 attune Chat 走 RAG + LLM, 不做精确数值计算 (避免数字 hallucination).\n\n\
+                 建议: 通过 agent dispatch 触发, 输出含 audit_trail + 业务红线 enforce.{}\n\n\
+                 命中关键词数: {}, priority: {}",
+                m.plugin_id, m.description, form_hint, m.keyword_hits, m.priority
+            )
+        } else if !citations.is_empty() && max_rel < 0.001 && is_compute_query {
+            // 兜底: OSS 裸装无 plugin + 结构化计算 + 弱引用 → reject (原 OSS-S25 行为)
+            "⚠️ 此问题涉及结构化数据计算（金额求和 / 笔数统计 / 对账等），但当前知识库\
+             检索结果与你的问题相关度极低（max relevance < 0.001），LLM 在此场景下若强行\
+             回答会产生数字 hallucination 风险（金额错一元可直接影响诉讼标的额）。\n\n\
+             建议:\n\
+             1. 装载 attune-pro/law-pro 等行业 plugin pack 后, 通过 capability 精确计算\n\
+             2. 或检查知识库 ingest + embedding 是否完成（/api/v1/status 看 pending_embeddings）\n\
+             3. 或换更具体的提问方式（指定文件名 / 当事方姓名 / 时间范围）".to_string()
+        } else if !citations.is_empty() && max_rel < 0.001 && !response.trim().is_empty() {
+            // 普通 query + 低相关 → 加 disclaimer (OSS-S12 既有行为)
+            format!(
+                "⚠️ 知识库中未找到与你问题强相关的内容（最高引用相关度 {:.4}），以下回答主要来自模型预训练知识，仅供参考：\n\n{}",
+                max_rel, response
+            )
+        } else {
+            response
+        }
+    };
 
     // 6. Build response with optional hint when web search unavailable
     // v0.6 Phase B fix: 透传 confidence (parsed from LLM 末尾 marker)

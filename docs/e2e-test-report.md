@@ -519,6 +519,81 @@ OLLAMA_KEEP_ALIVE:         默认(5min) → 24h（消除 60s 冷启动）
 
 ## 2026-04-17 三轮回归（真实语料规模测试）
 
+---
+
+## 2026-05-13 视觉回归（真实 GitHub 语料，聚焦中英一致性）
+
+### 测试目标
+
+- 使用真实 GitHub 文档而非合成样本，验证 Web UI 在真实使用路径下的语言一致性与基础可用性。
+- 明确复现用户反馈的“中英混杂”问题，并给出可执行修复方向。
+
+### 测试环境
+
+- URL: `http://127.0.0.1:18904`
+- 服务: `attune-server-headless --no-auth`
+- 浏览器: Playwright MCP (Chrome)
+- 语料来源: `scripts/download-corpora.sh`（rust-book / cs-notes / openai-cookbook / technical-books）
+
+### 实际执行路径（视觉端到端）
+
+1. 完成 Wizard → 进入主界面
+2. `Items` 上传真实 GitHub 文件：
+  - `rust/tests/corpora/rust-book/src/ch04-02-references-and-borrowing.md`
+  - `rust/tests/corpora/rust-book/src/ch10-03-lifetime-syntax.md`
+3. 刷新后条目列表出现 2 条文档（上传链路正常）
+4. 在 `Chat` 发英文/中文问题各 1 次（均可复现 503）
+5. 在 `Settings -> 通用` 切换语言 `English <-> 中文` 并观察全局文案
+
+### 结果矩阵
+
+| 场景 | 结果 | 备注 |
+|------|------|------|
+| Wizard + 主界面进入 | ✅ PASS | 基础路由与布局正常 |
+| 真实 GitHub 文件上传 | ✅ PASS | Toast 显示“已上传 2 个文件”，列表可见 |
+| 远程目录绑定（本地绝对路径） | ❌ FAIL | “绑定失败”，前端仅显示 400，无可诊断错误细节 |
+| Chat 英文提问 | ⚠️ BLOCKED | 503：`AI 后端不可用`（本机无可用 chat 模型） |
+| Chat 中文提问 | ⚠️ BLOCKED | 同上 503 |
+| 中文模式语言一致性 | ❌ FAIL | 中文模式下仍有英文文案（如 `Search...`） |
+| 英文模式语言一致性 | ❌ FAIL | 英文模式下仍有中文文案（如设置侧栏“设置/通用/AI 大脑”） |
+
+### 关键问题（本轮新增）
+
+#### P1 - 国际化状态不一致（中英混杂）
+
+**复现**：
+- 切到中文后，左上搜索框仍为 `Search...`
+- 切回英文后，设置页左侧仍保留中文标签（`设置/通用/AI 大脑/...`）
+
+**影响**：
+- 用户第一感知直接受损，产品“语言切换”可信度不足。
+- 会在 onboarding 和演示场景中被立即感知为质量问题。
+
+**推测根因**：
+- 存在未接入 i18n 的硬编码文案。
+- 语言切换后，部分组件未跟随 locale 响应式刷新（状态缓存或组件树更新不完整）。
+
+#### P1 - 远程目录绑定错误缺少可诊断信息
+
+**复现**：
+- `远程目录 -> 添加本地 -> 输入绝对路径 -> 绑定`
+- UI 仅提示“绑定失败”，控制台显示 400，但无后端错误正文透出。
+
+**影响**：
+- 用户无法自助定位（路径权限、沙箱限制、路径不存在、策略拒绝等）。
+
+**建议**：
+- 前端 toast 透传后端 `error` 字段。
+- 后端 400 细分错误码（`path_not_found` / `permission_denied` / `policy_blocked`）。
+
+### 修复优先级建议
+
+1. P1: 统一梳理 UI 文案来源，清理硬编码并确保全部走 i18n 字典。
+2. P1: 语言切换后触发全局重渲染（或 locale store 订阅）并覆盖侧栏/设置页。
+3. P1: 目录绑定错误信息端到端可视化（后端错误码 + 前端映射）。
+4. P2: 为本地无模型场景增加“可点击修复动作”（一键检测/安装提示），降低 503 负反馈。
+
+
 ### 规模
 
 - 19 个 rust-book 章节（trpl-v0.3.0 tag）—— ch04（所有权）+ ch10（泛型）+ ch15（智能指针）+ ch19（模式）
@@ -811,3 +886,213 @@ echo 'You are a legal expert. Review the contract.' > $XDG_DATA_HOME/attune/plug
 | 前端：LoginScreen 输入正确密码 → backend reissue → MainShell | ✅ | `e2e-bug7-fix-after-reauth.png` |
 
 **关键设计点**：`reissue_token` 不修改内存 `UnlockedKeys`（避免 Drop/Zeroize 触发），只验证密码并签发新 token。AEAD 认证标签提供常数时间密码校验，不引入额外依赖。
+
+---
+
+# 2026-05-02 OSS 稳定性回归验证（develop HEAD）
+
+**目的**：在做 v0.7-alpha 商业化之前，先把 OSS 主干（develop）的基础工作流在真实 AMD 笔电上端到端跑一遍，确认体系框架稳定。
+
+**验证基线**：
+- 代码：`develop` HEAD `7b5fb77`（v0.6.1 GA tag 之上叠 10 个 v0.7-alpha commit）
+- 二进制：`attune-server-headless` 65 MB（不含 GUI shell，专测 server 路径）
+- 部署目标：AMD Ryzen 7 8845H + Radeon 780M (gfx1103) + XDNA NPU @ Ubuntu 26.04
+- 数据：`~/.local/share/attune` zero-state（vault.db / tantivy 全清）
+- 4 底座模型：复用 AMD 现存 `~/.local/share/attune/models/`（embedding bge-m3 / reranker bge-base / ASR turbo-q5 / OCR PP-OCRv5 mobile）
+
+## 验证矩阵 — 8/8 通过
+
+| 阶段 | 验证项 | 结果 | 关键证据 |
+|------|--------|------|---------|
+| **B 构建** | `cargo build --release -p attune-server --bin attune-server-headless` | ✅ | 65 MB ELF / cache hit，缘 develop HEAD 已构建 |
+| **D 部署** | scp + systemd-run --user --unit=attune-headless | ✅ | 启动 ~50ms，listening 127.0.0.1:18900 |
+| **F 4 底座** | `/api/v1/ai_stack` + `/diagnostics` 全 available | ✅ | embedding ✓ rerank ✓ ASR (large turbo q5) ✓ OCR (pp-ocr-v5-mobile) ✓ |
+| **F 硬件感知** | gfx1103 检测 + HSA_OVERRIDE_GFX_VERSION=11.0.0 + form_factor=laptop + prefers_local_llm=false | ✅ | 与 CLAUDE.md "硬件感知的默认底座" 一致 |
+| **V Vault** | setup → lock → unlock → wrong-pwd reject 完整周期 | ✅ | 四步全过；session token 在 lock 后失效；invalid_password 正确拒绝 |
+| **W1 Ingest** | 3 个混合中英文档 → parse → chunk → embed → store | ✅ | 6 chunk（每文档 level1+level2）入队，embedding worker 立即 drain 完，pending=0，items=3 |
+| **W2 Search** | BM25 / vector / RRF / rerank 三路融合 | ✅ | "tokio runtime" → Rust 第一（关键词命中）；"高阶函数包装" → Python 第一（语义命中）；"卡波那" → 意大利面第一（跨语言语义）|
+| **W2 search/relevant** | rerank-active path + inject_content 构建 | ✅ | 30 ms 全链路（含 reranker 1.1 GB ONNX 推理）|
+| **W3 Chat+RAG** | LLM 配置 → ping → RAG 知识库注入 → 引用回链 | ✅ | qwen2.5:3b ping 3.7s warm-up；"Future 是惰性的吗"答正确 + cite[1]→Rust async；"装饰器要几层"答"三层"+ cite→Python |
+| **R 重启** | systemctl stop（graceful SIGTERM）→ start | ✅ | 数据完整：vault.db 解锁后 items=3，tantivy 索引重开，settings 持久化（llm.provider=ollama / model=qwen2.5:3b）|
+
+## 性能数据（AMD Ryzen 7 8845H, develop HEAD）
+
+| 操作 | 延迟 | 备注 |
+|------|------|------|
+| 启动 → listening :18900 | ~50 ms | 含 hardware detection / vault open / 0 plugins load |
+| Vault setup (Argon2id 派生 + AEAD wrap) | ~600 ms | 默认 m_cost / t_cost |
+| Vault unlock | ~200 ms | 已派生过则更快 |
+| Ingest 1 doc (parse + chunk + queue) | ~50 ms | 不含 embed (异步队列) |
+| Embedding 1 chunk (bge-m3 via Ollama) | ~200 ms | 含 HTTP roundtrip |
+| Search BM25 + vector + RRF (3 docs) | ~10 ms | top_k=5 |
+| search/relevant + rerank (3 chunk) | 30 ms | reranker ONNX CPU 推理 |
+| Chat (RAG retrieval + qwen2.5:3b 推理) | ~7 s | 短答案，warm 状态 |
+| LLM ping (qwen2.5:3b cold start) | 3.7 s | 模型加载 |
+
+## 已知问题（**非阻断**，记录待修）
+
+| ID | 严重度 | 现象 | 影响 |
+|----|-------|------|------|
+| **OSS-S1** | low | `confidence` 字段在知识库未命中场景仍返 3（最高）— 测了"如何安装 macOS Sonoma"，回答正确说"未在文档中找到"，但 confidence=3 与文本语义不符 | UI 上 confidence badge 会误导用户，建议 J5 strict prompt 增加 "no-relevant-knowledge → confidence=0" 分支 |
+| **OSS-S2** | low | `/api/v1/chat` 响应字段是 `content`，不是 `reply`；首次发现时调用方误读字段名导致看似空回复 | 文档 / OpenAPI schema 应固定字段为 `content` 并标注 |
+| **OSS-S3** | info | search top-K 较小（top_k=3，库存 3 doc）时 RRF 分数压缩到 ~0.026，重启后某些查询降到 0.006 — 顺序仍正确，但分数稳定性可改进 | 不影响排序质量，可后续 J6 调 RRF k 常数 |
+
+## 不在本次验证范围（v0.7-alpha 商业化路径）
+
+- ❌ Marketplace UI 安装 attune-pro plugin
+- ❌ accounts.attune.ai signup → license 签发链
+- ❌ LLM Gateway 跨服务路由
+- ❌ K3 一体机形态差异化
+- ❌ Tauri GUI（headless 验证 server-side 路径，UI 渲染下次再测）
+
+## 结论
+
+**OSS develop HEAD（含 v0.7-alpha 半成品 commits）的 server 端基础工作流在 AMD Ryzen 笔电上完整可用**。3 个 low-severity 问题不阻断 v0.6.1 GA 路径，作为 v0.6.2 patch 候选。
+
+继续做 v0.7 商业化（accounts / marketplace / gateway）的前置条件：✅ 已满足。
+
+
+---
+
+# 2026-05-02 OSS Playwright UI 端到端验证（develop HEAD AMD）
+
+**目的**：用 Playwright MCP 驱动真实 Chrome 对 AMD 笔电真实部署的 attune-server-headless 做完整 UI walk-through，通过 debug 找出仅 curl 测不到的 UI / 交互层问题。
+
+**环境（Phase 1 / Bash setup before Playwright）**：
+- AMD `attune-server-headless` running on AMD :18900 (systemd-run --user)
+- SSH tunnel localhost:18900 → AMD:18900
+- Vault zero-state, password=`TestPass123!`，LLM=Ollama qwen2.5:3b
+- **真实语料 12 doc**：rust-lang/book@trpl-v0.3.0（6 个 Rust 章节）+ CyC2018/CS-Notes@c47a2a7（6 个中文设计模式 / Leetcode / 网络章节）
+- 854 chunks 入 vector + tantivy 索引（embedding worker drain ~30s）
+- **Playwright phase 期间禁用 Bash**（per CLAUDE.md "Playwright E2E 规则"）
+
+**Chrome MCP** 驱动 16 个截图：`docs/screenshots-2026-05-02/amd-01..16.png`
+
+## 走查路径（pass）
+
+| # | 操作 | 结果 |
+|---|------|------|
+| 01 | 访问 / | LoginScreen 渲染（"Vault 已锁定 · 请输入 Master Password"）|
+| 02 | unlock + Welcome | onboarding wizard 出现（5 步骤）— 见 UI-S3 |
+| 03 | "I have a vault — import backup" | 跳过 wizard 进入 MainShell（侧边 7 nav + 顶部 ⌘K 搜索 + 模型 chip）|
+| 04 | Items 标签 | 12 docs 全列出，github source badge + "今天" 时间戳 + 上传/刷新按钮 + 共 12 条 · 加载 12 条 |
+| 05 | Reader 模态 | 点 doc 滑出右侧 Reader，4 AI 分析按钮（风险/过时/亮点/疑问）就位 |
+| 06 | ⌘K Command palette | 输入 "ownership" → 6 results，第一是 "What Is Ownership?"（标题命中），后续 5 个全文匹配 |
+| 11 | Settings 通用 | Theme=Auto / Language=English |
+| 12 | Settings AI 大脑 | LLM endpoint=http://127.0.0.1:11434/v1 ✓ model=qwen2.5:3b ✓ embedding=bge-m3 ✓ 网络搜索=enabled |
+| 14 | Skills tab | 空状态 "还没装 skill" + 友好 hint |
+| 15 | Projects tab | 空状态 + "新建 Project" 按钮 |
+| 16 | Remote tab | 空状态 + "添加本地文件夹 / 添加 WebDAV" 按钮 |
+
+## 🔴 发现的 UI 问题（按严重度排序）
+
+| ID | 严重度 | 现象 | 影响 | 建议修复 |
+|----|--------|------|------|---------|
+| **UI-S8** | 🔴 **CRITICAL** | "Lock vault" 菜单点击后 UI 仍显示 "Unlocked"；**网络抓包确认 0 个 POST /api/v1/vault/lock 请求**；server 端 vault.state=unlocked 不变 | 用户以为锁定了 vault，实际 attacker 持浏览器 session 继续访问全部数据 — 直接违反 1Password 式私密承诺 | 在 Account menu Lock vault `onClick` 加 `await api.vaultLock()` + 清 sessionStorage + redirect to LoginScreen |
+| **UI-S6** | 🟠 high | 发送 chat 后 UI 静止 >180s，无 spinner / 无 streaming / 无 "thinking" 指示器 / 无 abort 按钮；用户无法判断卡住 vs 思考中 | 在大语料场景（854 chunks RAG）下，3B 本地模型 + reranker 全链路确实会跑很久；UI 没反馈用户必然以为崩了 | 加 `<MessagePending isStreaming={pending}>` spinner + 30s 超时弹 abort 按钮 |
+| **UI-S8** **server-side** | 🟠 high | 同次测试 chat POST 在 server 端持续 pending >180s 不返回（不止 UI）— 854 chunks corpus + 中文 Q + qwen2.5:3b on AMD ROCm | RAG 在大语料 + 3B 模型 + AMD ROCm 上的实际性能可能不达 CLAUDE.md 期望的"本地 0.6B-3B 响应快" | 探查 reranker top-K（rerank 1.1GB ONNX × 大量 chunk 太慢）+ context 截断策略 |
+| **UI-S3** | 🟡 medium | 后端 vault 已 setup'd（API `state=unlocked`）+ unlocked 之后，UI 仍展示 5 步 onboarding wizard（Welcome / Password / AI / Hardware / Data）；走 wizard Step 2 会要求重设密码，**有覆盖现有 vault 风险** | 通过 API 提前 setup 的用户首次开 UI 会被强制走 wizard，普通用户点 "Get started" 会重置数据 | wizard 触发条件应基于 `vault.is_initialized` 而非客户端 localStorage 标志；已 setup'd → 直接跳 MainShell |
+| **UI-S5** | 🟡 medium | Chat input 显示 raw i18n key `chat.input.placeholder`（中文 locale 下没翻译键命中）；底部 "⌘↵ 发送" 是混合中英 | i18n 资源缺失或键不匹配；普通用户看到原始 key 觉得未完工 | 补 zh-CN / en 两份 i18n 表里 `chat.input.placeholder` 键 |
+| **UI-S7** | 🟡 medium | Marketplace 点 "免费试用 7 天" → backend 200 OK（mock provider）+ list 重新加载，但 **UI 卡片状态不更新**（仍显示"免费试用 7 天"按钮，不显示"试用至 YYYY-MM-DD"或"已安装"）；Skills tab 也没出现新插件 | 用户以为安装失败；mock provider + UI 不显示 mock 提示也是误导 | 卡片在 trial response 里读 `trial.expires_at` 切按钮文案；mock 模式下 banner 提示 "demo mode — install is not real" |
+| **UI-S4** | 🟢 low | "I have a vault — import backup" 按钮实际行为是**跳过 wizard**进 MainShell，并不打开任何"导入 backup"对话框 | 文案误导用户预期 | 按钮改名为 "Skip — vault already configured" 或真的实现 backup import 对话框 |
+| **UI-S2** | 🟢 low | LoginScreen 阶段 WebSocket `/ws/scan-progress` 重试连接 4-15 次，每次 401（无 auth token）;未登录时不该尝试 WS | 浏览器 console 警告噪音 | WS connect 加 `if (!hasAuthToken()) return` 守卫 |
+| **UI-S1** | 🟢 low | `/favicon.ico` 返回 401（被 auth middleware 拦），浏览器 tab 上是默认图标 | 体验小瑕疵 + console error | 把 `/favicon.ico` 加进 `lib.rs` 中 middleware bypass 列表 |
+
+## 🔴 紧急建议（v0.6.2 阻断）
+
+**UI-S8 必须修**。"Lock vault is no-op" 是直接违反 1Password 式私密承诺的 critical bug。若 v0.6.1 GA 已发，强烈建议立即出 v0.6.2 patch + release notes 写 `[SECURITY] vault lock previously did not actually clear server session — please update`。
+
+**UI-S6 + 性能** 也要修：大语料 chat 卡住不仅 UI 锁，server 端真的在跑 RAG 不返回，建议至少 (a) chat 加 30s 超时降级到 fallback prompt + (b) reranker 限 top-K=20 + (c) UI 加 spinner。
+
+## 通过项
+
+- ✓ Login screen Argon2id 解锁正确
+- ✓ 12 doc 真实语料 ingest + indexing
+- ✓ Reader modal 渲染正确
+- ✓ ⌘K command palette 三路检索（标题精确 + 全文匹配）
+- ✓ Items / Skills / Projects / Remote 四个 empty/data state UI 都 OK
+- ✓ Settings AI 大脑 LLM/embedding/web search 字段全显示
+- ✓ Marketplace 显示 4 个 attune-pro plugin（Law/Patent/Presales/Tech Pro），Pro badge + 试用按钮 + "升级到 Pro" 链接
+- ✓ Account menu 4 项（Settings / Lock vault / Toggle theme / About）
+- ✓ Sidebar 顶栏 "Unlocked" + "Connected" 状态指示器
+
+## 不在本次范围
+
+- ❌ Chat 功能（卡住，单独 reproducible bug）
+- ❌ Tauri GUI 窗口（headless 路径，下次桌面 session 测）
+- ❌ Login screen 错误密码 retry / 多设备同步 / device.key 导入 / ASR / OCR UI
+
+---
+
+## 2026-05-14 AMD 笔电真机完整 E2E (c2d2cea)
+
+**测试环境**: AMD Ryzen 7 8845H + Radeon 780M + XDNA NPU + Ubuntu 25.10 kernel 7.0
+**部署**: deb 路径 (vite build + cargo tauri build + scp + dpkg -i, **不走 cargo run**)
+**LLM**: hiapi.online + gpt-4o-mini (BYOK 路径, 等价 Pro Gateway 协议层)
+**Playwright MCP**: 本机 Chrome via SSH -L 18900 tunnel
+**前端语言**: 中文 (UI 切换 zh-CN, B2 locale 响应式修复验证)
+
+### A 部署阶段
+- Attune_0.6.0_amd64.deb 30MB scp + dpkg -i 5 次重打 (含 G/F/F+/F++ 系列修复)
+- attune-desktop pid 启动 + embedded server bind 127.0.0.1:18900
+- access_log middleware (B4 修复) 生产中跑通: `access: GET ... member=logged_out account=-`
+
+### B Wizard 5 步 + Settings 6 tab
+| 截图 | 验证项 |
+|------|--------|
+| b00-login-screen.png | LoginScreen 中文 "数据库已锁定 · 主密码" |
+| b01-wizard-step1-welcome.png | Wizard Step1 |
+| b02..b03-step2-password-* | Argon2id 10s 派生 + B3 进度文案 |
+| b04..b06-step3-hiapi-* | Cloud API "自定义" + hiapi 测试连接 200 OK 3288ms |
+| b07-step4-hardware-detected.png | AMD Ryzen 8845H + Radeon 780M + NPU 检测 ✓ |
+| b08-step5-data-en.png | Step5 "Bind a folder" (B1 i18n 修复) |
+| b09-mainshell-en.png | MainShell 进入 |
+| b10-cmdpalette-en.png + b11-cmdpalette-zh-after-fix.png | **B2 locale 切换响应式** ✓ 视图名跟随 |
+| b12-ocr-7-builtin.png | 7 builtin OCR profiles (后删) |
+| b13-member-tab.png | Member 状态 LoggedOut |
+| b14-data-tab-folder-links.png | FolderLinks |
+| fplus-final-{6tab}.png | Settings 6 tab (无 OCR, F+ 删 OCR tab 验证) |
+| fpp-{items,projects,remote,skills,marketplace,chat}-zh.png | 6 视图全中文 |
+| f-final-{login-clean,settings-no-ocr}.png | F 修复后清洁状态 |
+
+### C RAG Chat 完整链路 (hiapi.online)
+- RESET vault → wipe 真清 (sqlite3 验 bound_dirs/indexed_files/items 全 0) — G1 修复后 wipe assert 工作
+- bind rust-book (4 .md) + personal-notes (3 笔记) → 200, 7 items
+- **re-bind rust-book (G1 修复后)**: 200 skipped=4 (UPDATE 路径, 不再 FK 失败)
+- 搜索 "ownership" → 5 hit, top1 ch04-01-what-is-ownership 0.115 relevance
+- chat "What is ownership in Rust?" → **191s** 返回:
+  - 4 citations + breadcrumb (What Is Ownership? / References and Borrowing / The Slice Type / Understanding Ownership)
+  - chunk_offset 元数据完整
+  - LLM 答案含原文引用 "Rust通过所有权机制实现无需垃圾回收的内存回收"
+  - compression_stats: 4 chunks / 49271 chars / economical
+  - confidence: 3, items_kept: 4
+
+### D law-pro 证据链 E2E (civil_loan_agent subprocess)
+- scp plugin 文件 + agent_civil_loan binary 到 ~/.local/share/attune/plugins/law-pro/
+- attune-server "loaded 2 plugins" 启动扫描成功
+- subprocess 协议测试 (虚构案件 张三 vs 李四, ¥100K 24% 1 年):
+  - **stdout AgentOutput JSON**: formula=simple_interest_year, computed_interest=¥24065.75, remaining_balance=¥124065.75
+  - **stderr audit_trail**: 14 行人类可读, parties+ rate+ 公式+ claim_direction 全字段标注证据来源
+  - exit=0 (无业务红线)
+  - missing_evidence 软追问 (案件库 kind 字段不匹配 graceful fallback)
+  - 3 证据 evidence linkage: 借条→本金 / 转账截图→起算日 / 还款承诺→截止日
+  - confidence: 0.9
+- golden set 固化: `attune-pro/plugins/law-pro/tests/golden/civil_loan_zhang_li_100k_24pct.json`
+
+### Bug 发现 + 修复 (3 commits)
+- **`58f8e6d` (F 阶段)**: 5 处 API endpoint UI 暴露 + 删 OCR tab + 删 CLI 引导 + Vault/Master Password 术语清理
+- **`88670e1` (F+ 阶段)**: 删 Embedding section + Phase A.5/L0 术语 + ProjectsView 英文表头
+- **`ad18e19` (F++ 阶段)**: ItemsView source_type 字典翻译 + ChatInput aria-label i18n
+- **`c2d2cea` (G 阶段)**: reset wipe 后置 assert + bind_directory UPDATE 路径 + 错误信息脱敏
+
+### Memory 沉淀 (9 条 feedback, 跨会话纪律)
+- feedback_i18n_runtime_reactivity (B2)
+- feedback_long_compute_progress (B3 Argon2id)
+- feedback_request_audit_log (B4)
+- feedback_utf8_boundary_panic (CLI bug)
+- feedback_test_global_env_serialization (TEST_MUTEX)
+- feedback_linux_deb_only_testing
+- feedback_ui_cli_separation
+- feedback_ui_minimalism 规则 B/C (引擎参数禁暴露 + OCR 全自动)
+- feedback_reset_vault_incomplete_wipe
+

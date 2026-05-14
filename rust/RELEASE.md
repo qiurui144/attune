@@ -1,5 +1,214 @@
 # attune 版本记录
 
+## v0.6.1（2026-04-30）— 边界收敛 + FormFactor 形态分裂 + RUSTSEC patch
+
+发布定位：v0.6.0 GA 后第一个 minor — 治理 + 安全 + 形态感知，非用户可见功能新增。
+
+**核心变更**（commit 94b57ec merge → main）：
+- **OSS × Pro 边界一致性收敛**（ee859a4）：三产品矩阵叙事正式落地 — attune (OSS 通用) / attune-pro (个人行业增强) / lawcontrol (B2B 律所)；删除 OSS attune 内 4 个 builtin 行业 yaml + EntityKind::CaseNo + CHAT_TRIGGER_KEYWORDS 律师专属 const，全部迁到 attune-pro/plugins/<vertical>-pro/。
+- **FormFactor 形态感知**（461c4c7）：检测启动环境（Laptop / Server / K3Appliance / Unknown），分裂 LLM 默认路径 — Laptop/Server/Unknown → 远端 token，K3Appliance → 本地 Ollama。8 个新 unit test 覆盖端到端（4b6e205）。
+- **rustls-webpki 0.103.10 → 0.103.13**（b4c7351）：修 3 个 RUSTSEC CVE（TLS 验证链路相关）。
+- **GitFlow Lite 写入 CLAUDE.md**（eded077 / 07f57d0）：分支模型 + tag 双轨 + `--first-parent` 检查命令固化为行为标准。
+- **文档同步**（f5152b8 / f006aed）：README.zh 补 4 章，RELEASE 版本号同步。
+
+**Server 产物**：[v0.6.1](https://github.com/qiurui144/attune/releases/tag/v0.6.1) — Linux x86_64/aarch64 + macOS aarch64 + Windows x86_64 tarball + sha256。**Desktop 此版未发**（沿用 desktop-v0.6.0 安装包；v0.6.1 改动均不影响桌面侧体验）。
+
+---
+
+## v0.6.3（2026-05-14）— LLM 热重载 + Plugins 数据源 + PII 全路径 + Pro Vertical 验收 + 架构与质量 sprint
+
+发布定位：bug fix patch + UI polish + 4 vertical 端到端验证 + 7 路 CI 修复 + 20 轮全量 quality review + 6 项架构优化 + 2 项产品化 feature。
+
+### rc.2 → rc.5 sprint (2026-05-14) — 7 路 CI 修复 + 20 轮 quality + 架构优化
+
+**CI / Windows 平台 7 路修复**（rc.1 desktop installer 失败一路追到底）:
+- `6421de9` `.gitignore models/` 无锚误吞 Python 包子目录 → CI ImportError; web_search_browser Linux 路径假设, Windows fail
+- `8291f6c` NSIS installer 删 install-time Ollama 下载 (inetc plugin 在 GHA runner 缺) → Wizard 接管检测
+- `51be338` governor_integration 用 MockMonitor 绕开 GHA Windows 高负载 (SysinfoMonitor CPU% > budget 全 worker stuck)
+- `35d593e` index_path_test Windows 路径语义 cfg(unix) (治标)
+- `6c0ef83` validate_bind_path 改 `dunce::canonicalize` 修 Windows UNC `\\?\` 真因 (Windows 用户加 vault 路径首破)
+- `86f1534` tauri.conf.json version 0.6.0 → 0.6.3 + desktop-release.yml softprops/action-gh-release@v2 自动 publish
+- `f828d35` desktop-release.yml 补 `permissions: contents: write` (rc.3 403 fix)
+- `0752294` Windows matrix `bundles: nsis,msi` (rc.4 MSI 缺失 regression fix)
+
+**20 轮全量 quality review**（覆盖文档 / 测试 / 代码 / 安全 / 技术债 / 对抗视角）:
+- 16 项 issue 按 RICE 排序, P0/P1 已落地（FIX-1 ~ FIX-8 + 安全补 `OsRng`, lru 0.13 修 RUSTSEC-2026-0002, Node 24 opt-in, chrome channel 等）
+- P2 长期项留 v0.7 follow-up
+
+**架构 sprint — 第二轮深度分析 + 6 项优化**:
+- D1 AppState `std::sync::Mutex` 19 字段 → 加 lock-free accessor (read+clone Arc, µs 级临界区); ArcSwap 实际替换留 v0.7
+- D5 `store/items.rs` 7 处 `prepare()` → `prepare_cached()`, 热查询 SQL 解析省去
+- D3 `attune-core/src/async_fs.rs` 新模块 (read / write / create_dir_all / try_exists 等 spawn_blocking 包装); 路由 3 处 `std::fs` 改 async_fs
+- D6 workspace `[profile.dev.package."*"] opt-level=1` + `[profile.release] lto=thin codegen-units=1 strip=symbols` + workspace.deps 扩 chrono/uuid/tracing
+- D7 API path snake → kebab + alias 双 mount 后向兼容
+- ARCH-A `attune-server/src/error.rs` `AppError` enum 10 variant + IntoResponse + From<io::Error>/<serde_json::Error>/<VaultError>; 38 routes 渐进 migration
+
+**FEAT-1 cloud endpoint UI gap 关闭**:
+- backend `settings.cloud.{accounts_url, gateway_url}` 字段 + UI Settings 会员 tab "高级 · 自部署 cloud 后端" 折叠区 + 3 URL 输入 + 保存即热重载 pluginhub
+- 关闭前次 Cloud-Integ-1 发现的自部署用户 UX gap (硬编码 attune.ai 没法切到私有 cloud)
+
+**FEAT-2 浏览器 fallback (FIX-9 阶段 1)**:
+- `attune-core/web_search_browser.rs` 加 `browser_cache_dir()` / `cached_browser_path()` / `resolve_browser()` 三段式 API + `BrowserResolution` enum (System / Cached / NeedsDownload)
+- 阶段 1 ship cache 路径 + 解析 API; 阶段 2-3 (实际下载逻辑 + wizard UI) 留 v0.7
+
+**Release 产物**:
+- Server `v0.6.3-rc.2` ✓ — 4 平台 tarball (Linux x86_64/aarch64 + macOS aarch64 + Windows x86_64) + sha256
+- Desktop `desktop-v0.6.3-rc.4` ✓ — 4 installer (NSIS exe / AppImage / deb / rpm), prerelease=true; rc.5 后含 MSI 完成 5 installer 矩阵
+
+---
+
+### 原 v0.6.3 release-blocker fixes
+
+发布定位：bug fix patch + UI polish + 4 vertical 端到端验证。
+
+**Release-blocker fixes**（commit 508b49c + d388282 在 origin/develop）：
+
+| ID | 修复 | 影响 |
+|----|------|------|
+| LLM-1 | `AppState::reload_llm()` + settings.rs PATCH 在 `body.get("llm")` 时触发热切；抽出 `build_llm_from_settings` 自由函数复用 | 之前 wizard 配云端 LLM → 必须重启 server 才能 chat。修复后即时生效 |
+| PLG-1 | `GET /api/v1/plugins` 合并 `state.taxonomy.plugins` + `state.plugin_registry.plugins()`, HashSet 去重 | 之前 attune-pro 4 vertical 装在 plugins/ 目录但 marketplace UI 完全不可见 |
+| PII-1 | routes/chat.rs 自己拼 messages 直调 `llm.chat_with_history`, 完全绕过 ChatEngine redact。加 `Redactor::default()` 全路径拦截 + outbound_audit 日志 | 隐私功能 UI ✓ 但服务端真发原文给云端 LLM。修复后 audit log 实见 F-17 触发 |
+| VLT-1 | `forgot-password-reset` 未清 bound_dirs/indexed_files, 重绑 FK 失败。`wipe_all_user_data` 加 WAL checkpoint + post-assert, `bind_directory_with_domain` 改 UPDATE-or-INSERT | 重置后再绑文件夹直接报 SQL 错 |
+
+**UI / UX**：About 5 节信息齐 / Settings 锁定 warning 集中 / Wizard 5 步信息密度优化 + ? Tooltip / 暗色模式 token / 中英双语 locale 持久化。
+
+**Verified on AMD laptop (Ryzen 7 8845H, NPU+iGPU)** — deb-only 部署：
+- 重置 vault → Wizard 5 步全中文无英文泄漏
+- hiapi.online + gpt-4o-mini 真接通 (响应附 web search 3 引用)
+- 4 vertical (law-pro / patent-pro / presales-pro / tech-pro) 全 marketplace 可见; loaded 9 plugins log
+- 暗色 / 设置 / About 5 节 round-trip 全过
+
+**Cloud 自部署可用性**：AMD 笔电 (Docker 29 + Compose v2) 跑通 pluginhub:9100 / accounts:8002 / llm-gateway:8001 三服务 + /health ✓。修了上游 cloud 仓 2 个 bug（Dockerfile copy 顺序 + alembic 0002 down_revision 链断，本地 commit 558df7c 待 push）。
+
+**已知限制 (v0.7 候选)**：
+- attune-desktop Settings/Wizard 没字段配置自定义 accounts/pluginhub URL — 默认硬编码 `attune.ai` 云端。私有 cloud 部署（自托管 / dev 环境）目前只能 SQL 直改 `app_settings`。`state.reload_plugin_hub` 后端已支持热切，缺 UI 入口
+- Reader / 项目卷宗 round-trip 未在本轮 Playwright E2E 覆盖
+- CI Python lint-and-test + Windows cargo 在 commit 6421de9 修复后转绿（修了 `models/` gitignore 误吞 Python 包 + Windows 浏览器路径假设）
+
+---
+
+## v0.6.x patch 流（2026-05-01）— 部署 + 4 必要底座
+
+### 最新变更（摘要 LLM 拆分 + 密码恢复机制 + 会员账号登录）
+
+**摘要 LLM 拆分（2026-05-12 完成）**：
+- **核心目标**：从 chat LLM 中独立出专用的 summarizer LLM，摘要不再占用云端 token
+- **新字段**：`settings.summary_model` (Option<String>，默认 `"qwen2.5:3b"`)，用户可 PATCH 修改
+- **自动探测**：启动时若未配置 summary_model，自动探测 Ollama（按 `SUMMARIZER_MODELS` 梯队顺序）；探测失败时回退到 chat LLM
+- **新状态字段**：`AppState::summary_llm: Mutex<Option<Arc<dyn LlmProvider>>>`，初始化完全独立于 chat_llm
+- **Phase 2 调用改动**：上下文压缩阶段优先用 `summary_llm`；若不可用则回退到 chat_llm；都不可用则原文透传
+- **压缩策略推荐**：鼓励用户用 `"accurate"` 策略（300字摘要 + 100字原文头），降低数据丢失风险
+- **快速失败**：第 1 个 chunk 摘要生成失败后，后续 chunks 跳过 LLM，直接原文（避免串行卡住）
+- **硬件推荐表** (per `HardwareProfile::recommended_summary_model()`)：
+  - ≥32 GB + 加速器 → qwen2.5:7b
+  - 16-32 GB → qwen2.5:3b
+  - 8-16 GB → qwen2.5:1.5b
+  - <8 GB → llama3.2:1b
+- **向后兼容**：旧 vault/settings 无 `summary_model` 字段 → 启动时用默认值；现有 context_strategy 配置保留
+- **测试**：10 个单元测试全部通过，settings 端点兼容性验证通过
+
+**Vault 密码恢复（非破坏性重置）**：
+- `vault/setup` 响应新增 `recovery_key` 字段，格式 `ATN-{16hex}-{16hex}`；Web UI 首次安装自动下载 `attune-recovery-key.txt`，CLI 打印到终端
+- 新端点 `POST /api/v1/vault/reset-with-recovery-key`：使用恢复密钥重置主密码，DEK 保持不变，所有知识库数据零丢失
+- 新端点 `POST /api/v1/vault/forgot-password-reset`：最后兜底方案，需 vault 处于 LOCKED 状态 + 发送 `"confirm":"RESET"` 确认，清空所有本地数据
+- LoginScreen 新增"使用恢复密钥重置密码"和"无恢复密钥？清空并重置"两个操作入口，提示文案从"忘记密码无法找回"改为恢复路径说明
+
+**会员账号密码登录**：
+- 新端点 `POST /api/v1/member/login-password`：邮箱 + 密码登录 Attune cloud 账号，自动拉取 license，设置 MemberState
+- Settings → 会员 Tab：未登录时展示邮箱 + 密码表单（支持 Enter 提交）；登录后展示账号、License、等级、登出按钮
+
+**测试**：新增 `vault_recovery_test.rs` 集成测试（3 个 E2E 场景）验证 recovery_key 格式、旧密码失效、新密码解锁
+
+---
+
+### v0.6.x 历史变更（多格式解析 + 全面测试覆盖 + 格式校验强化）
+
+**多格式文件解析（parse_bytes_with_profile 扩展）**：
+- 新增格式支持：`.html/.htm` (scraper strip-tags) / `.epub` (ZIP 内 XHTML 拼接) / `.xlsx/.xls` (calamine 电子表格) / `.pptx` (ZIP 内 slide XML) / `.rtf` (去标记提取) / `.csv` (原文 UTF-8)
+- OCR 格式：`.png/.jpg/.jpeg/.webp/.bmp/.tiff/.gif` → PP-OCRv5 mobile（7 内置场景 profile：contract/receipt/screenshot/ancient/table/form/card）
+- ASR 格式：`.mp3/.wav/.m4a/.flac/.ogg/.aac/.opus/.wma` → whisper.cpp subprocess
+- **格式校验强化**：`parse_bytes_with_profile` 和 `parse_file_with_profile` 的 catch-all 分支现在对已知不支持的二进制格式（`.mp4`/`.zip`/`.exe` 等）返回 `VaultError::InvalidInput("unsupported file format")` 而非静默当文本处理。只有代码文件（CODE_EXTENSIONS）和 `.md/.txt` 才走文本兜底。
+
+**测试覆盖大幅提升（commit 7661daa）**：
+- **parser.rs 单元测试 +30**：覆盖 HTML roundtrip、EPUB/PPTX/RTF/CSV bytes 解析、is_supported 校验、不支持格式返回错误等
+- **server_test.rs 集成测试 +20**：upload API 10 个测试（成功路径 + 422 校验 + 403 锁仓 + 400 无字段 + 重复上传 + 可检索性）；annotations CRUD 4 个（创建/列表/颜色校验/snippet 长度）；tags/status/behavior/clusters 端点 6 个
+- **OCR profile 计数修正**：内置 profile 数由旧断言 4 → 修正为 7
+
+**当前测试基线**：237+ 全部通过（attune-core 210 + attune-server 27）
+
+---
+
+### b5b837f（2026-05-xx）— UI 构建修复 + Tauri 拖拽上传
+
+**UI TypeScript 修复**：
+- `store/api.ts`：补充 `put<T>(path, body, retry?)` 方法，支持 HTTP PUT（useOcrProfiles.updateOcrProfile 需要）
+- `views/SettingsView.tsx`：修复全部 `toast.success/error()` → `toast('success'/'error', msg)` 调用（8 处）；`Section` 组件增加 `desc?: string` prop，relaxed children 类型（支持 `false | null`）
+- `App.tsx`：修复 useEffect 代码路径返回值问题（early return 模式）
+
+**Tauri 桌面拖拽上传**：
+- `apps/attune-desktop/src/main.rs`：新增 `upload_dropped_paths(paths: Vec<String>)` Tauri command，读取本地文件路径 → multipart POST `http://127.0.0.1:18900/api/v1/upload`
+- `apps/attune-desktop/Cargo.toml`：添加 `reqwest 0.12`（rustls-tls + multipart + json features）
+- `App.tsx`：启动时检测 `window.__TAURI__?.event?.listen`，若在桌面模式则注册 `attune-file-drop` 监听器 → 调用 `upload_dropped_paths` command
+- FileDrop 事件路径：系统文件拖入窗口 → Tauri 发出 FileDrop 事件 → main.rs emit `attune-file-drop` 至 WebView → App.tsx 调用 `upload_dropped_paths` → 文件上传至 `/api/v1/upload`
+
+**Items 页面真实上传**：
+- `views/ItemsView.tsx`：ItemsHeader 上传按钮接入隐藏 `<input type=file multiple>`，multipart FormData + Bearer token POST 至 `/api/v1/upload`（PDF/MD/TXT/DOCX/PNG/JPG）
+
+**UI dist 重新构建**：171.80 kB（gzip: 48.62 kB），71 个模块，TypeScript 严格检查通过
+
+---
+
+**4 必要底座（CLAUDE.md "硬件感知的默认底座" 实装）**：
+
+| 底座 | 默认引擎 | 体积 | 来源 |
+|------|---------|------|------|
+| Embedding | bge-m3 / bge-small (Ollama) | 1.2 GB / 200 MB | postinst `ollama pull` |
+| Reranker | Xenova/bge-reranker-base (ONNX) | ~120 MB | 首查 lazy hf_hub 下载 |
+| ASR | whisper-cli + ggml-large-v3-turbo-q5_0 | 2.6 MB binary + 574 MB model | binary 进 .deb bundle，model postinst 下载（中文 WER 5-7%） |
+| OCR | PP-OCRv4 mobile (DBNet+CRNN+CLS+dict) | ~21 MB ONNX | postinst HF `SWHL/RapidOCR/PP-OCRv4/...` |
+
+**LLM 不在底座**（2026-05-01 用户拍板，澄清版）：
+
+核心原则：**云端为主，本地为辅；本地 LLM 当前研发成本过高，暂时不主推**。
+
+Wizard 推荐顺序：
+1. ★ **Attune Pro Membership**（默认）— `https://gateway.attune.ai/v1`，登录即用 token 配额
+2. **BYOK**：用户已有付费会员 API key — OpenAI / Anthropic / Gemini / DeepSeek / Qwen
+3. **本地 Ollama**（advanced，K3 一体机预装 qwen2.5:1.5b/3b 走本地）
+
+不走第三方 "free API tier"（Gemini Free / Groq 等），避免误导用户。
+不走 MCP backbone，至少 v0.7 不做，简化产品形态。
+
+**Form factor 检测** (`detect_form_factor()` in `attune-core::platform`)：
+1. `ATTUNE_FORM_FACTOR=k3` env var override（K3 镜像构建时 systemd-environment.d）
+2. `/sys/class/dmi/id/product_name` 含 `k3` / `jetson`
+3. 默认 `laptop`
+
+**安装路径全平台覆盖**：
+- `.deb` (Ubuntu/Debian) — preinst+postinst+prerm+postrm 4 hooks
+- `.rpm` (Fedora/RHEL) — 共用 4 个 .sh hook
+- `.AppImage` (universal Linux) — 无 hooks，运行时 wizard
+- NSIS `.exe` (Windows) — installer.nsh 4 macros + inetc::get OllamaSetup.exe
+
+**关键变更**：
+- 单引擎 OCR — 删 tesseract，PP-OCRv5 mobile 唯一引擎（中文准确率 70-85% → 94-96%）
+- LLM 不本地预装（笔电）— 用户在 wizard 配 cloud API 或 Ollama；K3 镜像例外
+- whisper.cpp 2.6 MB 静态 binary 进 Tauri bundle resources（替代 apt 包）
+- ROCm gfx1103 自动 HSA_OVERRIDE_GFX_VERSION=11.0.0 写 systemd drop-in
+- graceful shutdown via SIGINT/SIGTERM oneshot（R35）
+- 日志 daily rotation `~/.local/share/attune/logs/`（R37）
+- vault export/import CLI（R38）
+- Windows + Linux CI matrix（R18）+ 慢测试 nightly（R19）
+
+**实测在 Ubuntu 26.04 LTS + AMD Ryzen 7 8845H + Radeon 780M (gfx1103)**：
+- TRUE zero-state 安装 149 秒（含 600 MB Ollama install + 1.2 GB bge-m3 + 21 MB PP-OCR + 250 MB ASR）
+- HSA_OVERRIDE_GFX_VERSION=11.0.0 自动注入 systemd Environment
+- bge-m3 embed: 冷 1.6s / 热 74ms
+- qwen2.5:3b（用户 wizard 后装）: 47.2 tokens/s（确认 ROCm 加速）
+- 1024-dim embed + 端到端 RAG chat 跑通（24.7 t/s 稳定）
+
+---
+
 ## v0.6.0 GA（2026-04-30）— 私有 AI 知识伙伴正式发版 🎉
 
 **发布产物**（双轨）：

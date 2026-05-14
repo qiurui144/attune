@@ -12,10 +12,13 @@ import {
   chatSessions,
   activeSessionId,
   vaultState,
+  theme,
 } from '../store/signals';
 import type { View } from '../store/signals';
 import { loadSessions, clearActiveSession } from '../hooks/useChat';
 import { t } from '../i18n';
+import { api, clearToken } from '../store/api';
+import { toast } from '../components/Toast';
 
 const SIDEBAR_WIDTH = 280;
 const SIDEBAR_COLLAPSED_WIDTH = 64;
@@ -87,7 +90,7 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
         <button
           type="button"
           onClick={() => (sidebarCollapsed.value = !collapsed)}
-          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={collapsed ? t('sidebar.action.expand') : t('sidebar.action.collapse')}
           className="interactive"
           style={{
             padding: '4px 6px',
@@ -105,7 +108,7 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
       {!collapsed && (
         <button
           type="button"
-          aria-label="Global search (Cmd+K)"
+          aria-label={t('sidebar.action.search')}
           className="interactive"
           style={{
             display: 'flex',
@@ -128,7 +131,7 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
           }}
         >
           <span aria-hidden="true">🔍</span>
-          <span style={{ flex: 1 }}>Search…</span>
+          <span style={{ flex: 1 }}>{t('shortcut.search')}…</span>
           <kbd
             style={{
               fontSize: 'var(--text-xs)',
@@ -153,7 +156,7 @@ function NewChatButton({ collapsed }: { collapsed: boolean }): JSX.Element {
     <div style={{ padding: 'var(--space-3) var(--space-4)' }}>
       <button
         type="button"
-        aria-label="New chat"
+        aria-label={t('sidebar.action.new_chat')}
         onClick={() => {
           clearActiveSession();
           currentView.value = 'chat';
@@ -282,6 +285,7 @@ const NAV_ITEMS: NavItem[] = [
   { view: 'remote', icon: '🔗', labelKey: 'sidebar.nav.remote' },
   { view: 'knowledge', icon: '📊', labelKey: 'sidebar.nav.knowledge' },
   { view: 'skills', icon: '🧠', labelKey: 'sidebar.nav.skills' },
+  { view: 'marketplace', icon: '🏪', labelKey: 'sidebar.nav.marketplace' },
   { view: 'settings', icon: '⚙', labelKey: 'sidebar.nav.settings' },
 ];
 
@@ -365,7 +369,7 @@ function StatusBar({ collapsed }: { collapsed: boolean }): JSX.Element {
         <button
           type="button"
           onClick={() => (menuOpen.value = !menuOpen.value)}
-          aria-label="Account menu"
+          aria-label="账号菜单"
           aria-expanded={menuOpen.value}
           className="interactive"
           style={{
@@ -446,14 +450,34 @@ function AccountMenu({ onClose }: { onClose: () => void }): JSX.Element {
       <MenuItem onClick={() => { currentView.value = 'settings'; onClose(); }}>
         {t('sidebar.menu.settings')}
       </MenuItem>
-      <MenuItem onClick={() => { onClose(); }}>
+      <MenuItem onClick={async () => {
+        // UI-S8 fix (2026-05-02): 之前仅关闭菜单，**未实际锁定 vault**。
+        // 现在走与 SettingsView 同一路径：调 /vault/lock + 清 token + reload。
+        onClose();
+        if (!confirm(t('sidebar.menu.lock_vault.confirm'))) return;
+        try {
+          await api.post('/vault/lock');
+          clearToken();
+          location.reload();
+        } catch (e) {
+          toast('error', `${t('sidebar.menu.lock_vault.error')}：${e instanceof Error ? e.message : String(e)}`);
+        }
+      }}>
         {t('sidebar.menu.lock_vault')}
       </MenuItem>
-      <MenuItem onClick={() => { onClose(); }}>
+      <MenuItem onClick={() => {
+        // 在 light → dark → auto 之间循环
+        const next = theme.value === 'light' ? 'dark' : theme.value === 'dark' ? 'auto' : 'light';
+        theme.value = next;
+        onClose();
+      }}>
         {t('sidebar.menu.toggle_theme')}
       </MenuItem>
       <div style={{ height: 1, background: 'var(--color-border)', margin: 'var(--space-1) 0' }} />
-      <MenuItem onClick={() => { onClose(); }}>
+      <MenuItem onClick={() => {
+        toast('info', t('sidebar.menu.about.toast'));
+        onClose();
+      }}>
         {t('sidebar.menu.about')}
       </MenuItem>
     </div>

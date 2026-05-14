@@ -83,7 +83,185 @@ pub struct PluginManifest {
     /// 例：law-pro 提供 case_no、medical-pro 提供 medical_record_no、patent-pro 提供 patent_no。
     #[serde(default)]
     pub pii_patterns: Vec<PiiPatternSpec>,
+
+    /// 定价层级. free → yaml 明文; paid/trial → yaml 加密.
+    #[serde(default)]
+    pub pricing: Option<PluginPricing>,
+
+    /// 资源声明 (hint, UI 显示成本; 不强制硬限制).
+    #[serde(default)]
+    pub resources: Option<PluginResources>,
+
+    /// 案件类型注册 (kind → agent 映射, UI 选择源). OSS 不内置 case kinds.
+    #[serde(default)]
+    pub registers_case_kinds: Vec<CaseKindRegistration>,
+
+    /// Skills — 原子能力 (纯函数, 可缓存).
+    #[serde(default)]
+    pub skills: Vec<SkillSpec>,
+
+    /// Agents — 场景专家 (多步推理 + 编排 skill + LLM).
+    #[serde(default)]
+    pub agents: Vec<AgentSpec>,
+
+    /// MCP Servers — 外部数据源 (Model Context Protocol).
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerSpec>,
+
+    /// UI 组件 (表单等).
+    #[serde(default)]
+    pub ui_components: Vec<UiComponentSpec>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginPricing {
+    /// "free" | "trial" | "paid"
+    pub tier: String,
+    /// trial 试用次数
+    #[serde(default)]
+    pub trial_quota: Option<usize>,
+    /// 商业页 URL
+    #[serde(default)]
+    pub price_url: Option<String>,
+}
+
+/// 资源声明 (hint, UI 透明显示成本; 不强制硬限制)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginResources {
+    #[serde(default)]
+    pub total_max_llm_tokens_per_call: Option<u64>,
+    #[serde(default)]
+    pub total_max_cpu_seconds: Option<u64>,
+    /// 外部 API 列表 (仅 hint, 数量不限制)
+    #[serde(default)]
+    pub external_apis: Vec<String>,
+}
+
+/// 案件类型注册 (付费插件 → 案件类型 → agent 映射)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseKindRegistration {
+    /// 唯一 kind id (如 "civil-loan", "civil-marriage", "criminal-defense")
+    pub kind: String,
+    /// UI 显示标签 (如 "民事-借贷纠纷")
+    pub label: String,
+    /// 默认 agent id (该 plugin 的 agents 列表内某 id)
+    pub default_agent: String,
+}
+
+/// Skill 声明 (原子能力)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillSpec {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    /// inputs schema (JSON Schema 简化版, 字段名 → 类型描述)
+    #[serde(default)]
+    pub inputs: serde_json::Value,
+    /// outputs schema
+    #[serde(default)]
+    pub outputs: serde_json::Value,
+    /// 执行运行时: "rust_binary" | "wasm" | "python_subprocess"
+    pub runtime: String,
+    /// runtime=rust_binary 时, 二进制相对路径
+    #[serde(default)]
+    pub binary: Option<String>,
+    /// 成本 hint
+    #[serde(default)]
+    pub cost: SkillCost,
+    /// 是否可缓存 (同样输入 cache 输出)
+    #[serde(default)]
+    pub cacheable: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillCost {
+    #[serde(default)]
+    pub llm_tokens: Option<u64>,
+    #[serde(default)]
+    pub cpu_seconds: Option<u64>,
+    #[serde(default)]
+    pub external_calls_per_invocation: Option<u32>,
+}
+
+/// Agent 声明 (场景专家)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSpec {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    /// 处理哪些案件类型 (与 registers_case_kinds 配套)
+    #[serde(default)]
+    pub case_kinds: Vec<String>,
+    /// info 级声明: 该 agent 能消费哪些证据类型 (不强制清单)
+    #[serde(default)]
+    pub consumes_evidence_kinds: Vec<String>,
+    /// 硬红线 (任一不满足 → reject 输出)
+    #[serde(default)]
+    pub hard_red_lines: Vec<String>,
+    /// 软追问 (缺则 missing_evidence 提示, 不阻塞)
+    #[serde(default)]
+    pub soft_followups: Vec<String>,
+    /// 执行运行时: "rust_binary" | "wasm" | "python_subprocess"
+    pub runtime: String,
+    #[serde(default)]
+    pub binary: Option<String>,
+    /// 依赖的 skill id 列表 (本 plugin 或其他 plugin 暴露)
+    #[serde(default)]
+    pub requires_skills: Vec<String>,
+    /// 依赖的 mcp server id 列表
+    #[serde(default)]
+    pub requires_mcps: Vec<String>,
+    /// 成本 hint
+    #[serde(default)]
+    pub cost: SkillCost,
+    /// 该 agent 自身的 chat trigger (per-agent, 替代 plugin 级 chat_trigger)
+    #[serde(default)]
+    pub chat_trigger: Option<ChatTrigger>,
+}
+
+/// MCP Server 声明
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerSpec {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    /// "stdio" | "http"
+    pub transport: String,
+    /// stdio 模式启动命令 (含参数)
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// http 模式 URL
+    #[serde(default)]
+    pub url: Option<String>,
+    /// 暴露的 tool 名列表 (info, MCP server 启动后实际通过 list_tools 获取)
+    #[serde(default)]
+    pub tools_exposed: Vec<String>,
+    /// 生命周期: "eager" (启动时常驻, 默认) | "lazy" (调用时启动)
+    #[serde(default = "default_eager")]
+    pub lifecycle: String,
+    /// 心跳间隔秒 (默认 30s)
+    #[serde(default = "default_heartbeat_seconds")]
+    pub heartbeat_interval_seconds: u64,
+    /// 失败重启阈值 (默认 3 次)
+    #[serde(default = "default_restart_on_failure")]
+    pub restart_on_failure: u32,
+}
+
+/// UI 组件声明 (Stage 3 律师表单等)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiComponentSpec {
+    pub id: String,
+    /// 组件挂载目标, 如 "agent:civil_loan_agent"
+    pub target: String,
+    /// HTML 文件相对 plugin dir 的路径
+    pub html: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+fn default_eager() -> String { "eager".into() }
+fn default_heartbeat_seconds() -> u64 { 30 }
+fn default_restart_on_failure() -> u32 { 3 }
 
 /// vertical plugin 在 plugin.yaml 中声明的 PII 正则。
 ///
@@ -206,13 +384,55 @@ impl LoadedPlugin {
 
     /// 从文件系统路径加载（外部插件走这条路径）。
     /// 调用方应在加载前先跑 `plugin_sig::verify_loose` 决定是否允许加载。
+    ///
+    /// 自动识别加密 yaml: 同目录优先读 `plugin.yaml.enc` (二进制 ATTPKGE1 格式),
+    /// 否则读明文 `plugin.yaml`. 加密路径需提供解密密钥 (通常是设备 license token).
     pub fn from_dir(plugin_dir: &std::path::Path) -> Result<Self> {
-        let yaml_bytes = std::fs::read(plugin_dir.join("plugin.yaml"))
-            .map_err(VaultError::Io)?;
-        let yaml = String::from_utf8(yaml_bytes)
-            .map_err(|e| VaultError::InvalidInput(format!("plugin.yaml not utf-8: {e}")))?;
+        Self::from_dir_with_key(plugin_dir, None, None)
+    }
+
+    /// 与 `from_dir` 同, 额外接受 paid plugin 解密密钥 + 调用方已确认的 trust 级别.
+    ///
+    /// 加载顺序:
+    /// 1. 若同目录存在 `plugin.yaml.enc` 且 `decrypt_key` 提供 → 解密
+    /// 2. 否则读明文 `plugin.yaml`
+    /// 3. 解析 manifest + 校验 verified_trust↔pricing 联动 (paid/trial 必须 Trusted/Official)
+    ///
+    /// `verified_trust` 必须是调用方在 sig 验证 (plugin_sig::verify_*) 后得到的字符串
+    /// "Official" / "Trusted" / "Unsigned". 不传则按 "Unsigned" 处理.
+    pub fn from_dir_with_key(
+        plugin_dir: &std::path::Path,
+        decrypt_key: Option<&[u8]>,
+        verified_trust: Option<&str>,
+    ) -> Result<Self> {
+        let enc_path = plugin_dir.join("plugin.yaml.enc");
+        let plain_path = plugin_dir.join("plugin.yaml");
+
+        let yaml = if enc_path.exists() {
+            let key = decrypt_key.ok_or_else(|| {
+                VaultError::InvalidInput(
+                    "encrypted plugin found (plugin.yaml.enc) but no decrypt_key provided".into(),
+                )
+            })?;
+            let cipher = std::fs::read(&enc_path).map_err(VaultError::Io)?;
+            let plain = crate::plugin_encryption::decrypt_yaml(&cipher, key)?;
+            String::from_utf8(plain)
+                .map_err(|e| VaultError::InvalidInput(format!("decrypted yaml not utf-8: {e}")))?
+        } else {
+            let yaml_bytes = std::fs::read(&plain_path).map_err(VaultError::Io)?;
+            String::from_utf8(yaml_bytes)
+                .map_err(|e| VaultError::InvalidInput(format!("plugin.yaml not utf-8: {e}")))?
+        };
+
         let manifest: PluginManifest = serde_yaml::from_str(&yaml)
             .map_err(|e| VaultError::InvalidInput(format!("plugin yaml parse: {e}")))?;
+
+        // trust↔pricing 联动 — 调用方传入实际验证后的 trust 级别
+        if let Some(pricing) = &manifest.pricing {
+            let trust = verified_trust.unwrap_or("Unsigned");
+            crate::plugin_encryption::validate_trust_for_pricing(trust, &pricing.tier)?;
+        }
+
         let prompt = if let Some(ref pf) = manifest.prompt_file {
             std::fs::read_to_string(plugin_dir.join(pf)).map_err(VaultError::Io)?
         } else {

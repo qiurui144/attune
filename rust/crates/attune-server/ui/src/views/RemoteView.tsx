@@ -5,6 +5,7 @@ import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
 import { Button, EmptyState, Modal, Input } from '../components';
 import { toast } from '../components/Toast';
+import { t } from '../i18n';
 import {
   listBoundDirs,
   bindLocalDir,
@@ -29,13 +30,13 @@ export function RemoteView(): JSX.Element {
   }, []);
 
   async function handleUnbind(d: BoundDir) {
-    if (!confirm(`解绑 ${d.path}？已索引的内容保留，但不再监听变化。`)) return;
+    if (!confirm(t('remote.confirm.unbind', { path: d.path }))) return;
     const ok = await unbindDir(d.id);
     if (ok) {
-      toast('success', '已解绑');
+      toast('success', t('remote.toast.unbind_success'));
       await refresh();
     } else {
-      toast('error', '解绑失败');
+      toast('error', t('remote.toast.unbind_fail'));
     }
   }
 
@@ -57,28 +58,28 @@ export function RemoteView(): JSX.Element {
         }}
       >
         <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
-          🔗 远程目录
+          {`🔗 ${t('sidebar.nav.remote')}`}
         </h2>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
           <Button variant="secondary" size="sm" onClick={() => (modal.value = 'local')}>
-            📂 添加本地
+            {`📂 ${t('remote.action.add_local')}`}
           </Button>
           <Button variant="primary" size="sm" onClick={() => (modal.value = 'webdav')}>
-            ☁ 添加 WebDAV
+            {`☁ ${t('remote.action.add_webdav')}`}
           </Button>
         </div>
       </header>
 
       {loading.value ? (
-        <div style={{ color: 'var(--color-text-secondary)' }}>加载中…</div>
+        <div style={{ color: 'var(--color-text-secondary)' }}>{t('common.loading')}</div>
       ) : dirs.value.length === 0 ? (
         <EmptyState
           icon="🔗"
-          title="还没绑定任何目录"
-          description="绑定本地文件夹或 WebDAV，Attune 会自动监听变化索引进知识库"
+          title={t('remote.empty.title')}
+          description={t('remote.empty.desc')}
           actions={[
-            { label: '添加本地文件夹', onClick: () => (modal.value = 'local'), variant: 'primary' },
-            { label: '添加 WebDAV', onClick: () => (modal.value = 'webdav'), variant: 'secondary' },
+            { label: t('remote.action.add_local_folder'), onClick: () => (modal.value = 'local'), variant: 'primary' },
+            { label: t('remote.action.add_webdav'), onClick: () => (modal.value = 'webdav'), variant: 'secondary' },
           ]}
         />
       ) : (
@@ -92,16 +93,16 @@ export function RemoteView(): JSX.Element {
       <Modal
         open={modal.value === 'local'}
         onClose={() => (modal.value = null)}
-        title="绑定本地文件夹"
+        title={t('remote.modal.local.title')}
       >
         <LocalForm
-          onDone={async (ok) => {
+          onDone={async (result) => {
             modal.value = null;
-            if (ok) {
-              toast('success', '已绑定，后台开始索引');
+            if (result.ok) {
+              toast('success', t('remote.toast.bind_local_success'));
               await refresh();
             } else {
-              toast('error', '绑定失败');
+              toast('error', t('remote.toast.bind_local_fail', { error: result.error ?? t('remote.error.unknown') }));
             }
           }}
         />
@@ -110,17 +111,17 @@ export function RemoteView(): JSX.Element {
       <Modal
         open={modal.value === 'webdav'}
         onClose={() => (modal.value = null)}
-        title="绑定 WebDAV 远程目录"
+        title={t('remote.modal.webdav.title')}
         maxWidth={520}
       >
         <WebdavForm
-          onDone={async (ok) => {
+          onDone={async (result) => {
             modal.value = null;
-            if (ok) {
-              toast('success', '已绑定，开始首次同步');
+            if (result.ok) {
+              toast('success', t('remote.toast.bind_webdav_success'));
               await refresh();
             } else {
-              toast('error', 'WebDAV 绑定失败，检查 URL / 凭据');
+              toast('error', t('remote.toast.bind_webdav_fail', { error: result.error ?? t('remote.error.check_url_credential') }));
             }
           }}
         />
@@ -171,12 +172,12 @@ function DirRow({
             marginTop: 2,
           }}
         >
-          {d.recursive ? '递归' : '非递归'} · 类型：{d.file_types}
-          {d.last_scan && ` · 上次扫描：${new Date(d.last_scan).toLocaleString()}`}
+          {d.recursive ? t('remote.row.recursive') : t('remote.row.non_recursive')} · {t('remote.row.type')}: {d.file_types}
+          {d.last_scan && ` · ${t('remote.row.last_scan')}: ${new Date(d.last_scan).toLocaleString()}`}
         </div>
       </div>
       <Button variant="ghost" size="sm" onClick={onUnbind}>
-        解绑
+        {t('remote.row.unbind')}
       </Button>
     </div>
   );
@@ -185,7 +186,7 @@ function DirRow({
 function LocalForm({
   onDone,
 }: {
-  onDone: (ok: boolean) => void;
+  onDone: (result: { ok: boolean; error?: string }) => void;
 }): JSX.Element {
   const path = useSignal('');
   const submitting = useSignal(false);
@@ -193,25 +194,25 @@ function LocalForm({
   async function submit() {
     if (!path.value.trim()) return;
     submitting.value = true;
-    const ok = await bindLocalDir(path.value.trim());
+    const result = await bindLocalDir(path.value.trim());
     submitting.value = false;
-    onDone(ok);
+    onDone(result);
   }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
       <Input
-        label="路径"
+        label={t('remote.local.path_label')}
         value={path.value}
         onInput={(e) => (path.value = e.currentTarget.value)}
-        placeholder="/home/user/Documents/knowledge"
+        placeholder="例：/home/qiurui/Documents/我的资料"
         autoFocus
         required
-        hint="服务器可访问的绝对路径；Attune 会监听变化自动索引"
+        hint={t('remote.local.path_hint')}
       />
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
-        <Button variant="ghost" onClick={() => onDone(false)}>
-          取消
+        <Button variant="ghost" onClick={() => onDone({ ok: false })}>
+          {t('common.cancel')}
         </Button>
         <Button
           variant="primary"
@@ -219,7 +220,7 @@ function LocalForm({
           loading={submitting.value}
           disabled={!path.value.trim()}
         >
-          绑定
+          {t('remote.local.bind')}
         </Button>
       </div>
     </div>
@@ -229,7 +230,7 @@ function LocalForm({
 function WebdavForm({
   onDone,
 }: {
-  onDone: (ok: boolean) => void;
+  onDone: (result: { ok: boolean; error?: string }) => void;
 }): JSX.Element {
   const url = useSignal('');
   const username = useSignal('');
@@ -239,14 +240,14 @@ function WebdavForm({
 
   async function submit() {
     submitting.value = true;
-    const ok = await bindWebdav({
+    const result = await bindWebdav({
       url: url.value.trim(),
       username: username.value,
       password: password.value,
       remote_path: remotePath.value,
     });
     submitting.value = false;
-    onDone(ok);
+    onDone(result);
   }
 
   const canSubmit =
@@ -263,27 +264,27 @@ function WebdavForm({
         required
       />
       <Input
-        label="用户名"
+        label={t('remote.webdav.username')}
         value={username.value}
         onInput={(e) => (username.value = e.currentTarget.value)}
         required
       />
       <Input
-        label="密码"
+        label={t('remote.webdav.password')}
         type="password"
         value={password.value}
         onInput={(e) => (password.value = e.currentTarget.value)}
         required
       />
       <Input
-        label="远端路径"
+        label={t('remote.webdav.remote_path')}
         value={remotePath.value}
         onInput={(e) => (remotePath.value = e.currentTarget.value)}
-        hint="相对 WebDAV 根目录；/ 表示根目录"
+        hint={t('remote.webdav.remote_path_hint')}
       />
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
-        <Button variant="ghost" onClick={() => onDone(false)}>
-          取消
+        <Button variant="ghost" onClick={() => onDone({ ok: false })}>
+          {t('common.cancel')}
         </Button>
         <Button
           variant="primary"
@@ -291,7 +292,7 @@ function WebdavForm({
           loading={submitting.value}
           disabled={!canSubmit}
         >
-          绑定
+          {t('remote.webdav.bind')}
         </Button>
       </div>
     </div>

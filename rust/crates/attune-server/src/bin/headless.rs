@@ -19,11 +19,41 @@ struct Cli {
     tls_key: Option<String>,
     #[arg(long)]
     no_auth: bool,
+    /// 一键化部署: 启动前下载 PP-OCR 必需模型 (~16 MB)，下载完后继续启动 server。
+    /// 标准应用安装时跑此 flag (postinst.sh 调用)，cargo/源码部署也用此一次性补齐。
+    /// HF_ENDPOINT=https://hf-mirror.com 加速 CN 镜像。
+    #[arg(long)]
+    bootstrap_models: bool,
+    /// 仅下载模型, 完成后退出（不启动 server）。适合 CI / postinst 场景。
+    #[arg(long)]
+    bootstrap_only: bool,
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // 一键化部署: bootstrap models 路径 (postinst.sh 或开发者首次部署)
+    if cli.bootstrap_models || cli.bootstrap_only {
+        eprintln!("=== Attune bootstrap-models: 下载必需模型 ===");
+        match attune_core::ocr::ppocr::PpOcrProvider::ensure_models_downloaded() {
+            Ok(()) => eprintln!("✓ PP-OCR models ready"),
+            Err(e) => {
+                eprintln!("✗ PP-OCR bootstrap failed: {e}");
+                eprintln!("  CN 镜像: HF_ENDPOINT=https://hf-mirror.com {} --bootstrap-only",
+                    std::env::current_exe()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "attune-server-headless".into()));
+                std::process::exit(1);
+            }
+        }
+        if cli.bootstrap_only {
+            eprintln!("=== bootstrap-only 完成 ===");
+            return;
+        }
+        eprintln!("=== bootstrap 完成, 继续启动 server ===");
+    }
+
     let config = ServerConfig {
         host: cli.host,
         port: cli.port,

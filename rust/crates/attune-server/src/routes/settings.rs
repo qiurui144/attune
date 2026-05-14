@@ -76,6 +76,8 @@ pub async fn update_settings(
         "summary_model", "context_strategy", "theme", "language",
         "skills",  // Sprint 2 Skills Router: { disabled: string[] }
         "wizard",  // wizard completion state: { complete: bool, current_step: int }
+        "pluginhub", // G2 (2026-05-01): { url, license_key }
+        "cloud", // FEAT-1 (2026-05-14): { accounts_url } — 自部署 / 私有 cloud 环境覆盖默认 attune.ai
     ];
     // URL 字段白名单 scheme 校验（防 javascript: / data: 注入成 XSS 种子）
     if let Some(body_obj) = body.as_object() {
@@ -109,12 +111,51 @@ pub async fn update_settings(
                 }
             }
         }
+        // 校验 ocr.active_profile 必须是已存在的 profile id (避免用户输错导致 OCR 回退)
+        if let Some(ocr_obj) = body_obj.get("ocr").and_then(|v| v.as_object()) {
+            if let Some(prof) = ocr_obj.get("active_profile").and_then(|v| v.as_str()) {
+                let reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+                if reg.get(prof).is_none() {
+                    return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                        "error": format!("ocr.active_profile '{prof}' 不存在 (用 GET /api/v1/ocr/profiles 查看可用 id)")
+                    }))));
+                }
+            }
+        }
+    }
+
+    // SettingsLocks enforce — 会员锁定字段拒绝更新.
+    // 字段映射: settings JSON key → SettingsLocks field name
+    let member_state = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let locks = attune_core::member_session::SettingsLocks::for_state(&member_state);
+    if let Some(body_obj) = body.as_object() {
+        // 仅 enforce 用户在应用窗口能改的字段; 底座配置 (embedding/ocr/data_dir 等) 由
+        // 二进制打包默认装配, 不接受 PATCH (server 不在此 lock_map enforce).
+        let lock_map: &[(&str, &str)] = &[
+            ("llm", "cloud_llm"),               // 普通用户改云端 LLM, 付费锁
+            ("pluginhub", "plugin_install"),    // pluginhub 配置变 → plugin_install lock
+            ("ocr", "ocr_profiles"),            // ocr.active_profile 改受 ocr_profiles lock
+        ];
+        for (settings_key, lock_field) in lock_map {
+            if body_obj.contains_key(*settings_key) && !locks.can_edit(lock_field) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "setting_locked_by_member_tier",
+                        "field": settings_key,
+                        "lock_reason": format!("'{lock_field}' is locked under current membership tier"),
+                        "hint": "请升级会员或在「设置 → 会员」查看锁定矩阵",
+                    })),
+                ));
+            }
+        }
     }
 
     // 嵌套对象键：这些字段的子字段支持 deep merge（客户端省略某子字段时保留原值）。
     // 主要为了 `llm.api_key` —— GET 响应已 redact，客户端若只改 model/provider 而不重填 key，
     // 我们不应把 key 抹成 null。
-    const DEEP_MERGE_KEYS: &[&str] = &["llm"];
+    const DEEP_MERGE_KEYS: &[&str] = &["llm", "ocr"];
     if let (Some(current_obj), Some(body_obj)) = (current.as_object_mut(), body.as_object()) {
         for (k, v) in body_obj {
             if !ALLOWED_KEYS.contains(&k.as_str()) { continue; }
@@ -139,6 +180,26 @@ pub async fn update_settings(
     vault.store().set_meta(SETTINGS_KEY, &data)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
+    // 准备热切参数（仍持 vault lock），值复制完释放再触发 reload，避免死锁
+    let pluginhub_url = body.get("pluginhub").and_then(|_| {
+        current.get("pluginhub").and_then(|p| p.get("url")).and_then(|v| v.as_str()).map(|s| s.to_string())
+    });
+    let pluginhub_key = body.get("pluginhub").and_then(|_| {
+        current.get("pluginhub").and_then(|p| p.get("license_key")).and_then(|v| v.as_str()).map(|s| s.to_string())
+    });
+    let need_llm_reload = body.get("llm").is_some();
+    drop(vault);
+
+    // G2 (2026-05-01) — pluginhub 字段变化时热切 provider
+    if body.get("pluginhub").is_some() {
+        state.reload_plugin_hub(pluginhub_url.as_deref(), pluginhub_key.as_deref());
+    }
+    // 2026-05-14 — llm 字段变化时热切 LLM provider, 避免要求重启 server。
+    // 修复 wizard 5 步保存云端 LLM 后, state.llm 仍是 None 导致 chat 503 的 bug。
+    if need_llm_reload {
+        state.reload_llm();
+    }
+
     // 返回前先 redact（防 API key 回流）
     redact_api_key(&mut current);
     Ok(Json(current))
@@ -147,7 +208,7 @@ pub async fn update_settings(
 /// 默认设置。`recommended_summary` 仅作为"用户主动选本地"时的硬件推荐 fallback；
 /// `form_factor` 决定 LLM 默认 provider 路径：
 /// - `Laptop` / `Server` / `Unknown` → `openai_compat`（远端 token，wizard 引导填 endpoint + key）
-/// - `K3Appliance` → `ollama`（K3 镜像预装 qwen2.5:3b，开箱即用本地）
+/// - `K3Appliance` → `ollama`（K3 镜像默认本地 Ollama，但不预设具体 chat 模型）
 ///
 /// **v0.6.0-rc.3 起 LLM 默认走远端 token**（per CLAUDE.md M2 决策 + 用户反馈），
 /// 避免本地 3B 模型在大多数硬件上 OOM 或效果差；K3 一体机形态例外（硬件预选过、镜像预装模型）。
@@ -156,11 +217,11 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
 
     // 形态分裂的 LLM 默认配置
     let llm_default = if form_factor == FormFactor::K3Appliance {
-        // K3 一体机：本地 Ollama 优先，预装 qwen2.5:3b
+        // K3 一体机：本地 Ollama 优先，但不预设具体 chat 模型
         serde_json::json!({
             "provider": "ollama",
             "endpoint": "http://localhost:11434/v1",
-            "model": "qwen2.5:3b",
+                "model": null,
             "api_key": null
         })
     } else {
@@ -177,9 +238,8 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
         // ── 普通用户可见 ──
         "theme": "system",         // system / dark / light
         "language": "zh-CN",
-        // 摘要模型 null = 用户主动选 (Settings UI 引导填 LLM endpoint 后启用)；
-        // 想用本地的可填 "qwen2.5:1.5b" 等 (recommended_summary 给硬件推荐建议)
-        "summary_model": null,
+        // 摘要模型默认固定为本地可运行且效果较稳的 qwen2.5:3b；可在 Settings 中覆盖。
+        "summary_model": "qwen2.5:3b",
         "context_strategy": "economical",      // economical(150字) / accurate(300字+片段) / raw(不压缩，仅本地)
         "web_search": {
             "enabled": true,
@@ -201,8 +261,9 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
             "model_repo": "Xenova/bge-reranker-base"  // 想换可填 jina-v2-multilingual / bge-base-official
         },
         "ocr": {
-            "enabled": true,                  // tesseract + pdftoppm 系统 PATH 自动检测
-            "languages": "chi_sim+eng"
+            "enabled": true,                  // PP-OCRv5 + pdftoppm 自动检测
+            "languages": "chi_sim+eng",
+            "active_profile": attune_core::ocr::profile::OcrProfile::DEFAULT_ID
         },
         "asr": {
             "enabled": false,                 // v0.6: whisper.cpp 集成中；v0.6.x 启用
@@ -214,6 +275,24 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
         },
         "plugins": {
             "disabled": []  // W4 E1: marketplace 禁用列表，list 用于 enabled 字段
+        },
+
+        // G2 (2026-05-01) — PluginHub 远端市场对接
+        // null = 走内嵌 Mock provider（默认离线，看到 4 个 attune-pro 试用卡）
+        // 配 url + license_key 后切到 HttpPluginHubProvider，调真 hub.attune.ai
+        "pluginhub": {
+            "url": null,                  // 例: "https://hub.attune.ai"
+            "license_key": null           // 同 attune Pro 会员 license key（与 LLM Gateway 共享）
+        },
+
+        // FEAT-1 (2026-05-14) — 自部署 cloud cluster 入口
+        // null = 默认 attune.ai 公共 cloud (accounts.attune.ai / hub.attune.ai / gateway.attune.ai)
+        // 自部署: 填入私有 cluster URL, 三个 endpoint 分别对应不同微服务.
+        // 用户场景: 企业内网部署 attune-cloud-* 容器后, 在 Settings UI 填入这三个地址
+        "cloud": {
+            "accounts_url": null,         // 例: "https://accounts.your-company.com" (member login / license)
+            "gateway_url": null,          // 例: "https://gateway.your-company.com" (LLM token gateway)
+                                          // pluginhub URL 仍走上方 pluginhub.url (历史命名保留)
         },
 
         // ── 不在 UI 暴露（保留后端行为）──
@@ -247,7 +326,7 @@ mod tests {
         assert!(llm.get("api_key").map_or(true, |v| v.is_null()));
     }
 
-    /// K3 一体机形态：LLM 默认走本地 Ollama (qwen2.5:3b 预装)
+    /// K3 一体机形态：LLM 默认走本地 Ollama，但不预设具体 chat 模型。
     /// — v0.6.1 新增的形态分裂路径。
     #[test]
     fn k3_form_factor_uses_local_ollama() {
@@ -255,7 +334,8 @@ mod tests {
         let llm = s.get("llm").expect("llm key");
         assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("ollama"));
         assert_eq!(llm.get("endpoint").and_then(|v| v.as_str()), Some("http://localhost:11434/v1"));
-        assert_eq!(llm.get("model").and_then(|v| v.as_str()), Some("qwen2.5:3b"));
+            assert!(llm.get("model").map_or(true, |v| v.is_null()),
+                "K3 model must stay unset so runtime can auto-detect a lighter local model, got: {:?}", llm.get("model"));
     }
 
     /// Server / Unknown 形态：与 Laptop 同行为（远端 token 默认）

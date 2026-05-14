@@ -1,5 +1,8 @@
 pub mod ai_annotator;
 pub mod annotation_weight;
+// async_fs: D3 review 引入 — async-safe fs helpers (spawn_blocking 包装).
+// 新代码默认走 async_fs::*, 防止 future async handler 误调用 sync std::fs.
+pub mod async_fs;
 // chat 模块整体 pub(crate) — ChatEngine 只能内部构造（依赖 Vault/Store internal types）。
 // 外部消费者（attune-server route）通过本 crate re-export 拿到 Citation / ChatResponse /
 // parse_confidence / strip_confidence_marker 这些公开 API（per reviewer I3）。
@@ -7,9 +10,25 @@ pub(crate) mod chat;
 pub use chat::{parse_confidence, strip_confidence_marker, Citation, ChatEngine, ChatResponse};
 pub mod chunker;
 pub mod context_compress;
+pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;
-pub(crate) mod plugin_sig;
+pub mod capability_dispatch;
+pub mod skills;
+pub mod agents;
+pub mod mcp_client;
+pub mod case_metadata;
+pub mod plugin_encryption;
+pub mod device_binding;
+pub mod accounts_client;
+pub mod ui_runtime;
+pub mod agent_runner;
+pub mod license;
+pub mod license_cache;
+pub mod member_session;
+pub mod cloud_client;
+pub mod plugin_sync;
+pub mod plugin_sig;
 pub mod classifier;
 pub mod clusterer;
 pub mod crypto;
@@ -27,7 +46,7 @@ pub mod pii;
 pub mod platform;
 pub mod memory_consolidation;
 pub mod project_recommender;
-pub(crate) mod queue;
+pub mod queue;
 pub mod resource_governor;
 pub mod scanner;
 pub mod scanner_patent;

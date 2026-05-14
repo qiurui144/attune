@@ -1,0 +1,13 @@
+[Unit]
+Description=Attune 个人知识库服务
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/attune
+Restart=on-failure
+RestartSec=5
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=default.target

@@ -42,7 +42,7 @@ export function ChatView(): JSX.Element {
         flexDirection: 'column',
       }}
     >
-      <ChatHeader title={session?.title ?? '新对话'} model={getCurrentModel()} />
+      <ChatHeader title={session?.title ?? t('chat.new_session_title')} model={getCurrentModel()} />
       <MessageList />
       <ChatInput
         onSend={async (text) => {
@@ -58,7 +58,11 @@ export function ChatView(): JSX.Element {
 function getCurrentModel(): string {
   const s = settings.value;
   const llm = s?.llm as { model?: string } | undefined;
-  return llm?.model ?? 'qwen2.5:3b';
+  const model = llm?.model?.trim();
+  if (!model || model === 'auto') {
+    return t('chat.model.auto');
+  }
+  return model;
 }
 
 // ── Chat 顶栏 ────────────────────────────────────────────────
@@ -112,7 +116,7 @@ function ModelChip({ model }: { model: string }): JSX.Element {
         gap: 'var(--space-1)',
       }}
       onClick={() => {}}
-      aria-label="Change model"
+      aria-label={t('chat.model.change')}
     >
       <span aria-hidden="true">🧠</span>
       <span>{model}</span>
@@ -143,9 +147,9 @@ function MessageList(): JSX.Element {
           title={t('empty.chat.title')}
           description={t('empty.chat.desc')}
           examples={[
-            '帮我总结最近上传的文件',
-            '搜索关于 XXX 的所有内容',
-            '我上次讨论了什么话题？',
+            t('chat.sample.summarize_recent'),
+            t('chat.sample.search_topic'),
+            t('chat.sample.last_topic'),
           ]}
           onExampleClick={(ex) => {
             void sendMessage(ex);

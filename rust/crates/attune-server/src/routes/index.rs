@@ -61,7 +61,11 @@ pub fn validate_bind_path(
         ));
     }
 
-    let canonical = path.canonicalize().map_err(|_| {
+    // dunce::canonicalize == std::fs::canonicalize 在 Unix 上完全等价,
+    // 在 Windows 上自动剥 \\?\ UNC 前缀, 让后续 starts_with(home) 正常工作.
+    // 不剥 UNC 会导致 Windows 用户连 home 目录本身都加不进 vault (canonical
+    // 是 \\?\C:\Users\xxx, home 参数是 C:\Users\xxx, starts_with 失败).
+    let canonical = dunce::canonicalize(path).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "directory not found or inaccessible"})),
@@ -116,9 +120,21 @@ pub async fn bind_directory(
         .store()
         .bind_directory_with_domain(&canonical_str, body.recursive, &file_type_strs, &body.corpus_domain)
         .map_err(|e| {
+            // 错误信息脱敏: Rust/SQLite 原文不能直接给用户看
+            let msg = e.to_string();
+            let user_msg = if msg.contains("FOREIGN KEY") || msg.contains("constraint failed") {
+                "添加目录失败：数据状态异常，请尝试在「设置 → 数据」中先解绑同名目录后重试".to_string()
+            } else if msg.contains("UNIQUE") {
+                "该目录已绑定，无需重复添加".to_string()
+            } else if msg.contains("locked") || msg.contains("Locked") {
+                "本地数据已锁定，请先解锁".to_string()
+            } else {
+                "添加目录失败，请稍后重试".to_string()
+            };
+            tracing::error!(target: "access", "bind_directory failed for {canonical_str}: {msg}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
+                Json(serde_json::json!({"error": user_msg})),
             )
         })?;
 
@@ -126,9 +142,16 @@ pub async fn bind_directory(
     let scan_result =
         scanner::scan_directory(vault.store(), &dek, &dir_id, &canonical, body.recursive, &body.file_types)
             .map_err(|e| {
+                let msg = e.to_string();
+                tracing::error!(target: "access", "scan_directory failed for {canonical_str}: {msg}");
+                let user_msg = if msg.contains("Permission denied") {
+                    "无法读取该目录：请检查访问权限".to_string()
+                } else {
+                    "扫描目录失败，请稍后重试".to_string()
+                };
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": e.to_string()})),
+                    Json(serde_json::json!({"error": user_msg})),
                 )
             })?;
 

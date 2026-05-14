@@ -2,6 +2,29 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.6.3] — 2026-05-14
+
+### Fixed
+
+- **(release-blocker) LLM 热重载** — Wizard / Settings 修改 LLM endpoint 后, state.llm 仍 None, chat 返 503 必须重启。抽出 `build_llm_from_settings` 自由函数 + 加 `AppState::reload_llm()` + `settings.rs` PATCH 在 `body.get("llm")` 时触发热切。实测 AMD 笔电 wizard 配 hiapi.online → 第一次 chat 立即返 cloud 响应 (commit d388282)
+- **Plugins API 数据源合并** — `GET /api/v1/plugins` 只读 taxonomy.plugins, 用户从 plugins/ 目录安装的 attune-pro vertical (law-pro/patent-pro/presales-pro/tech-pro) 完全不可见; 合并 plugin_registry 数据源 + HashSet 去重, marketplace UI 4 vertical 正确展示 (commit 508b49c)
+- **PII Redact 服务端绕过** — routes/chat.rs 自己拼 messages 直调 `llm.chat_with_history`, 完全绕过 attune-core::ChatEngine 的 redact_batch + restore 路径; 加 `Redactor::default()` 全路径拦截 + outbound_audit 日志, 实测 PHONE/EMAIL/CARD 真触发
+- **Reset-vault 残留** — `forgot-password-reset` 未清 bound_dirs/indexed_files, 重绑文件夹 FK constraint failed; `wipe_all_user_data` 加 WAL checkpoint + post-assert, `bind_directory_with_domain` 改 UPDATE-or-INSERT, 错误消息脱敏
+
+### Changed
+
+- **About 页面信息密度** — 增加 "会员 / 本地服务 / 存储位置 / 帮助与反馈" 5 节, ServiceStatus 用 ✓ / ⚠ 指示
+- **Settings 锁定 UI** — `cloud_llm` 锁定时禁用字段 + 顶部 warning box (不再分散在多个 panel)
+- **Wizard 信息密度** — Step 2 Device Secret/会员账号收进 details, Step 3 Ollama/K3 卡片收进 "其他选项" toggle, Step 4 删除多余 Pill, Step 5 加 ? Tooltip
+- **按钮色系增强** — Primary/danger 加 baseline boxShadow + hover 加深; 新增 `color-accent-active/on`, `color-surface-muted/strong`, `color-on-surface-muted` tokens
+- **i18n locale 持久化** — `localStorage.attune.locale` 跨 session 持久化, hoist 进 component 订阅 reactive source (修 module-level snapshot stale 问题)
+
+### Verified
+
+- AMD 笔电 (Ryzen 7 8845H) deb-only 部署路径全闭环: 重置 vault → wizard 5 步 → 解锁 → 4 vertical 装载 (9 plugin manifest, "loaded 9 plugins" log) → chat 接通 hiapi gpt-4o-mini (附 web search 3 引用) → 暗色模式切换 → About 5 节
+- attune-server release 测试套件全通过 (10 + 多 integration 测试 0 failed)
+- 浏览器自动化 Playwright Chrome (channel) 通过 SSH tunnel 18900 完成 E2E
+
 ## [Unreleased]
 
 计划中（未发版）：

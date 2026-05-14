@@ -1,9 +1,18 @@
-use axum::extract::{Multipart, State};
+use axum::extract::{Multipart, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
+use serde::Deserialize;
 
 use crate::state::SharedState;
 use attune_core::{chunker, parser};
+
+#[derive(Debug, Deserialize, Default)]
+pub struct UploadQuery {
+    /// OCR profile id (contract / receipt / screenshot / ancient / custom).
+    /// 不传 = 走默认 300 DPI; 不存在 = registry 自动回退默认.
+    #[serde(default)]
+    pub profile: Option<String>,
+}
 
 /// Upload size cap. 提到 100 MB：扫描版 PDF 常在 30-80MB，整本 OCR 很合理。
 /// 超过此值通常是高清扫描+彩图，建议用户预处理（pdftoppm 降 DPI、jpeg 压缩）。
@@ -15,6 +24,7 @@ const MAX_UPLOAD_BYTES: usize = 100 * 1024 * 1024; // 100 MB
 
 pub async fn upload_file(
     State(state): State<SharedState>,
+    Query(q): Query<UploadQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // First, read multipart data without holding any locks
@@ -54,7 +64,28 @@ pub async fn upload_file(
         ));
     }
 
-    let (title, content) = parser::parse_bytes(&data, &filename).map_err(|e| {
+    // OSS-S15 fix v2 (任其坤案件 2026-05-09): upload 路径 backpressure
+    // 之前仅 ingest 接了 backpressure (commit 20decfb)，但 upload 单次可塞 3500+ chunks
+    // (实测 14 张 jpg 塞 30K chunks 让 server hung 5min)。两条入口都必须接同款防御。
+    const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
+    {
+        let vault = state.vault.lock()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+        if let Ok(pending) = vault.store().pending_count_by_type("embed") {
+            if pending > EMBEDDING_QUEUE_BACKPRESSURE_LIMIT {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": format!("embedding queue backpressure ({pending} pending > {EMBEDDING_QUEUE_BACKPRESSURE_LIMIT} limit), retry later"),
+                        "pending_embeddings": pending,
+                        "retry_after_seconds": 30,
+                    })),
+                ));
+            }
+        }
+    }
+
+    let (title, content) = parser::parse_bytes_with_profile(&data, &filename, q.profile.as_deref()).map_err(|e| {
         (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({"error": e.to_string()})),

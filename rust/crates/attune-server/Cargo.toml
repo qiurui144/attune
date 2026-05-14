@@ -20,15 +20,28 @@ tokio = { workspace = true }
 tower-http = { version = "0.6", features = ["cors"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 # dirs：原 5，统一到 workspace = 6
 dirs = { workspace = true }
-lru = "0.12"
+lru = "0.13"  # 升级修 RUSTSEC-2026-0002 (0.12 IterMut Stacked Borrows unsound)
 uuid = { version = "1", features = ["v4"] }
 reqwest = { workspace = true, features = ["json"] }
+local-ip-address = "0.6"
+# dunce: Windows 上 std::fs::canonicalize 返回 \\?\C:\... UNC 前缀,
+# 导致 PathBuf::starts_with(home) 失败. dunce::canonicalize 自动剥
+# UNC 前缀, 跨平台行为一致. 见 routes/index.rs::validate_bind_path
+dunce = "1"
+# thiserror: 统一 AppError derive (OPT-3 / ARCH-A). 各 route 复用 IntoResponse.
+thiserror = "2"
+# arc-swap: lock-free atomic Arc swap, 用于 AppState 里 read-heavy 的 ML provider
+# trait object (embedding / llm / reranker / web_search / classifier). 写少读多场景,
+# 比 std::sync::Mutex<Arc<dyn>> 快得多 + 无 async/blocking 风险.
+arc-swap = "1"
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json"] }

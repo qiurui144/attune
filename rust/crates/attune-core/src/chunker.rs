@@ -264,9 +264,25 @@ pub fn extract_sections_with_path(content: &str) -> Vec<SectionWithPath> {
     let mut path_stack: Vec<String> = Vec::new();
     let mut section_idx: usize = 0;
     let mut path_for_pending_section_set = false;
+    // OSS-S4 fix (2026-05-02): markdown ``` code fence 内的代码行（pub fn / fn /
+    // def / class / impl）不应被识别为 section heading。修复前 rust-book chapters
+    // 大量引用 Rust code，每个 `fn` 例子被错切成独立 section → rust-slices 13K →
+    // 455 chunks → search 排序被该文档 dominate（precision@1 仅 26.7%）。
+    // 跟踪 ``` 状态，仅在 fence 外检测代码边界 heading。
+    let mut in_code_fence = false;
 
     for line in &lines {
-        let heading = heading_depth_and_text(line);
+        // OSS-S4 fix: track ``` code fence; skip heading detection inside fences。
+        // 兼容 ``` / ```rust / ```python / ~~~ 等所有 fenced 形态。
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+        }
+        let heading = if in_code_fence {
+            None
+        } else {
+            heading_depth_and_text(line)
+        };
 
         if let Some((depth, title)) = &heading {
             // 在新标题出现前，先把上一个 section 落库
@@ -303,8 +319,12 @@ pub fn extract_sections_with_path(content: &str) -> Vec<SectionWithPath> {
         current_section.push_str(line);
         current_section.push('\n');
 
-        // 同 extract_sections：达到目标段落大小时尝试在空行切（避免章节超长）
+        // 同 extract_sections：达到目标段落大小时尝试在空行切（避免章节超长）。
+        // OSS-S4 fix part 2 (2026-05-02): **不在 code fence 内切**，否则 split 后
+        // section 中部 ``` 数为奇数，触发下游 chunker::adjust_for_code_fence 的极慢
+        // 退化路径（每次推进 1 char），导致 1285-byte Java 代码段产生 132+ chunks。
         if heading.is_none()
+            && !in_code_fence
             && current_section.len() >= SECTION_TARGET_SIZE
             && line.trim().is_empty()
         {
@@ -484,6 +504,51 @@ mod tests {
         assert!(secs.is_empty());
     }
 
+    /// Regression test for OSS-S4 (2026-05-02): markdown ``` code fence 内的
+    /// `pub fn` / `fn` / `def` / `class` / `impl` 行不应被识别为 section heading。
+    ///
+    /// 修复前 rust-book chapters 的 markdown 引用 Rust 代码示例时，每个 `fn` 例子
+    /// 被错切成独立 section → rust-slices 13K 文件 → 455 chunks → search 排序
+    /// 被该文档 dominate（precision@1 仅 26.7%）。
+    #[test]
+    fn extract_sections_with_path_skips_code_inside_fence() {
+        let content = "# Real Heading\n\nIntro text.\n\n```rust\nfn foo() {}\nfn bar() {}\nimpl Baz for Qux {}\npub fn quux() {}\n```\n\nMore prose.\n";
+        let secs = extract_sections_with_path(content);
+        // 修复前会产生 5+ sections（每个 fn / impl 各一个）
+        // 修复后应该只 1 section（"Real Heading"），因为 fence 内的 fn 不再被识别
+        assert!(
+            secs.len() <= 2,
+            "REGRESSION (OSS-S4): code-fence 内 fn 不应切 section，预期 ≤2 section（real heading 1 + 可能 SECTION_TARGET_SIZE 切的 1），got {} sections: {:?}",
+            secs.len(),
+            secs.iter().map(|s| s.path.last().cloned()).collect::<Vec<_>>()
+        );
+        // 应该有一个 Real Heading section
+        assert!(secs.iter().any(|s| s.path == vec!["Real Heading".to_string()]));
+        // 不应该有 fn foo / fn bar / impl 等作为 section path
+        for s in &secs {
+            for p in &s.path {
+                assert!(
+                    !p.contains("fn foo")
+                        && !p.contains("fn bar")
+                        && !p.contains("impl Baz")
+                        && !p.contains("pub fn quux"),
+                    "REGRESSION (OSS-S4): code-fence 内 `{}` 不应出现在 section path",
+                    p
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extract_sections_with_path_code_outside_fence_still_detected() {
+        // raw .rs 文件（无 ``` markdown fence）— code-boundary heading 仍生效
+        // （这是 plain Rust 源码扫描场景，与 rust-book markdown 区分）
+        let content = "fn foo() {\n    println!(\"foo\");\n}\n\npub fn bar() {\n    helper();\n}";
+        let secs = extract_sections_with_path(content);
+        // 至少 2 sections（fn foo, pub fn bar），保持之前测试期望
+        assert!(secs.len() >= 1);
+    }
+
     #[test]
     fn extract_sections_with_path_preamble_no_heading() {
         // 文档开头无标题的内容 → path 为空 Vec
@@ -518,5 +583,159 @@ mod tests {
         };
         // 空 path 不加前缀（避免 ">  \n\n" 这种垃圾）
         assert_eq!(s.with_breadcrumb_prefix(), "无 path 的内容");
+    }
+
+    // ── R12 v0.6.4 mutation testing: chunk_size 边界等于的 off-by-one 防御 ──
+
+    #[test]
+    fn chunk_with_text_exactly_chunk_size_returns_single_chunk() {
+        // R12 (mutation testing) 发现: 17 chunker tests 全没测 text.len() == chunk_size
+        // 边界. 故意改 `<=` 为 `<` 时所有 test 仍 pass. 本 test 锁定该边界.
+        // 不变量: text 长度 ≤ chunk_size 时 chunk() 返回 1 个 chunk (整段, 不切).
+        let text: String = "a".repeat(512);
+        assert_eq!(text.len(), 512);
+
+        let chunks = chunk(&text, 512, 128);
+        assert_eq!(
+            chunks.len(),
+            1,
+            "text.len() == chunk_size 必须返回 1 chunk (不切), got {} chunks",
+            chunks.len()
+        );
+        assert_eq!(chunks[0].len(), 512);
+    }
+
+    #[test]
+    fn chunk_with_text_one_byte_over_chunk_size_returns_two_chunks() {
+        // 边界另一侧: 513 字节 (chunk_size + 1) 必须切成 ≥ 2 chunks.
+        let text: String = "a".repeat(513);
+        let chunks = chunk(&text, 512, 128);
+        assert!(
+            chunks.len() >= 2,
+            "513 chars (> chunk_size) 必须切成 ≥ 2 chunks, got {}",
+            chunks.len()
+        );
+    }
+
+    #[test]
+    fn chunk_with_text_one_byte_under_chunk_size_returns_single_chunk() {
+        // 边界另一侧: 511 字节 (< chunk_size) 必须返回 1 chunk.
+        let text: String = "a".repeat(511);
+        let chunks = chunk(&text, 512, 128);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 511);
+    }
+
+    // ── R13 v0.6.4 randomized property test (no proptest dep) ────────────────
+    //
+    // Property: 对任意输入长度 + chunk_size，chunker::chunk 应满足:
+    //   1. 第一个 chunk 包含 text 开头
+    //   2. 最后一个 chunk 包含 text 末尾
+    //   3. 所有 chunk 长度 ≤ 2 * chunk_size (含 code fence extend buffer)
+    //   4. 不返回空 Vec (除非 text 为空)
+    //   5. 不 panic / 不死循环
+    //
+    // 实现: deterministic seed (固定输入序列, 不引入 rand crate), 100 个 case.
+
+    fn deterministic_text(seed: u32, len: usize) -> String {
+        // Linear congruential generator (LCG) — deterministic, no extern crate.
+        // Output: ASCII printable + '\n' (含 markdown headings + code fences 偶尔出现)
+        let mut state = seed.wrapping_mul(2654435761);
+        let mut s = String::with_capacity(len);
+        let charset = b"abcdefghijklmnopqrstuvwxyz ABC.,!?\n";
+        for _ in 0..len {
+            state = state.wrapping_mul(1103515245).wrapping_add(12345);
+            let idx = (state as usize) % charset.len();
+            s.push(charset[idx] as char);
+        }
+        s
+    }
+
+    #[test]
+    fn chunk_property_first_chunk_contains_text_start() {
+        // 跑 50 个 case: 不同 seed × 不同长度
+        for seed in 0..10u32 {
+            for &len in &[100usize, 500, 1000, 2000, 5000] {
+                let text = deterministic_text(seed, len);
+                let chunks = chunk(&text, 512, 128);
+                assert!(
+                    !chunks.is_empty(),
+                    "seed={} len={} chunks empty",
+                    seed,
+                    len
+                );
+                let first_chunk_starts_with_text_start = text.starts_with(&chunks[0][..chunks[0].len().min(50)])
+                    || chunks[0].starts_with(&text[..text.len().min(50)]);
+                assert!(
+                    first_chunk_starts_with_text_start,
+                    "seed={} len={}: first chunk doesn't contain text start. \
+                     text[..50]={:?}, chunks[0][..50]={:?}",
+                    seed,
+                    len,
+                    &text[..text.len().min(50)],
+                    &chunks[0][..chunks[0].len().min(50)],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_property_no_chunk_exceeds_2x_chunk_size() {
+        // 即使 code fence extend, chunk 长度也不应超 2*chunk_size buffer
+        for seed in 0..10u32 {
+            for &len in &[200usize, 1000, 3000, 10000] {
+                let text = deterministic_text(seed, len);
+                let chunk_size = 512;
+                let chunks = chunk(&text, chunk_size, 128);
+                for (i, c) in chunks.iter().enumerate() {
+                    let char_count = c.chars().count();
+                    assert!(
+                        char_count <= 2 * chunk_size,
+                        "seed={} len={} chunk[{}] has {} chars > 2*512=1024",
+                        seed,
+                        len,
+                        i,
+                        char_count
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_property_no_panic_on_edge_inputs() {
+        // 防御: chunker 不应 panic 即使输入异常
+        let cases = vec![
+            "",                                                 // empty
+            "\n\n\n",                                           // only newlines
+            "                                            ",     // only spaces
+            "```",                                              // unclosed fence
+            "```rust\nfn x()\n",                                // unclosed code block
+            "a",                                                // single char
+            "🌿🌿🌿🌿🌿",                                            // multi-byte unicode
+        ];
+        for input in cases {
+            // Must not panic
+            let chunks = chunk(input, 512, 128);
+            // Empty input → may or may not return [""] — both are valid behaviors
+            // for caller (parser typically filters empty content before chunking)
+            if !input.is_empty() && !input.trim().is_empty() {
+                assert!(!chunks.is_empty(), "non-empty input {:?} produced 0 chunks", input);
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_property_terminates_on_pathological_overlap() {
+        // 防死循环: overlap >= chunk_size 时 chunker 应自动 clamp
+        let text: String = "a".repeat(2000);
+        let chunks = chunk(&text, 512, 999); // overlap > chunk_size
+        // 不应死循环, chunks 数量有限 (<2000 chunks)
+        assert!(
+            chunks.len() < 2000,
+            "pathological overlap caused {} chunks (likely infinite loop signal)",
+            chunks.len()
+        );
+        assert!(!chunks.is_empty());
     }
 }

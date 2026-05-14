@@ -12,6 +12,7 @@ import {
   RemoteView,
   KnowledgeView,
   SkillsView,
+  MarketplaceView,
   SettingsView,
 } from '../views';
 import { currentView } from '../store/signals';
@@ -24,7 +25,8 @@ export function MainShell(): JSX.Element {
       style={{
         height: '100vh',
         display: 'flex',
-        background: 'var(--color-bg)',
+        background:
+          'radial-gradient(120% 100% at 100% 0%, rgba(127, 165, 165, 0.12) 0%, var(--color-bg) 45%)',
         overflow: 'hidden',
       }}
     >
@@ -32,6 +34,7 @@ export function MainShell(): JSX.Element {
       <main
         style={{
           flex: 1,
+          minWidth: 0,
           overflow: 'auto',
           background: 'var(--color-surface)',
         }}
@@ -42,6 +45,7 @@ export function MainShell(): JSX.Element {
         {view === 'remote' && <RemoteView />}
         {view === 'knowledge' && <KnowledgeView />}
         {view === 'skills' && <SkillsView />}
+        {view === 'marketplace' && <MarketplaceView />}
         {view === 'settings' && <SettingsView />}
       </main>
       <DrawerHost />

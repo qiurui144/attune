@@ -28,11 +28,14 @@ export function Stepper({
   return (
     <nav
       aria-label="Setup progress"
+      className="wizard-stepper-scroll"
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 'var(--space-3)',
-        padding: 'var(--space-3) 0',
+        gap: 'var(--space-2)',
+        padding: 'var(--space-2) 0',
+        width: 'max-content',
+        minWidth: '100%',
       }}
     >
       {STEPS.map((step, idx) => {
@@ -58,6 +61,8 @@ export function Stepper({
                 background: 'transparent',
                 border: 'none',
                 cursor: isClickable ? 'pointer' : 'default',
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
               }}
             >
               <span
@@ -85,8 +90,9 @@ export function Stepper({
                 {isCompleted && !isCurrent ? '✓' : step.n}
               </span>
               <span
+                className="wizard-step-label"
                 style={{
-                  fontSize: 'var(--text-sm)',
+                  fontSize: 'clamp(12px, 1.3vw, var(--text-sm))',
                   fontWeight: isCurrent ? 600 : 400,
                   color: isCurrent
                     ? 'var(--color-text)'
@@ -102,13 +108,12 @@ export function Stepper({
               <span
                 aria-hidden="true"
                 style={{
-                  flex: 1,
+                  width: 'clamp(12px, 2vw, 32px)',
+                  flexShrink: 0,
                   height: 2,
                   background: completedSteps.has(step.n)
                     ? 'var(--color-accent)'
                     : 'var(--color-border)',
-                  minWidth: 24,
-                  maxWidth: 48,
                   borderRadius: 1,
                   transition: 'background var(--duration-base) var(--ease-out)',
                 }}

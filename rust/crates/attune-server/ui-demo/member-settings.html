@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<!--
+  ⚠️ 此文件**仅供测试**, 非产品 UI.
+  产品 UI 在 attune-tauri 桌面应用窗口实装.
+
+  仅 6 个用户可见配置项 (per 产品定义):
+  - vault_password / local_folder_links / cloud_llm / plugin_install / plugin_uninstall / ocr_profiles
+  底座模型 (LLM/embedding/reranker/ASR 引擎) 跟二进制打包, 不暴露.
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Attune Settings Locks — 测试用</title>
+  <style>
+    body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 640px; margin: 24px auto; padding: 0 16px; color: #222; }
+    .warn { background: #fff8e1; border-left: 3px solid #f5a623; padding: 8px 12px; font-size: 12px; margin-bottom: 12px; }
+    .controls { background: #f5f5f5; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; }
+    label { display: block; margin: 12px 0 4px; font-size: 13px; font-weight: 500; }
+    input, select { width: 100%; padding: 6px 8px; box-sizing: border-box; font-size: 13px; border: 1px solid #ccc; border-radius: 3px; }
+    input:disabled, select:disabled { background: #eee; color: #999; cursor: not-allowed; }
+    .badge { display: inline-block; font-size: 10px; color: white; padding: 1px 6px; border-radius: 3px; margin-left: 4px; }
+    .badge.locked { background: #f5a623; }
+    .badge.hidden { display: none; }
+    button { background: #1976d2; color: white; border: 0; padding: 8px 16px; border-radius: 3px; cursor: pointer; margin-right: 8px; }
+    .response { background: #f5f5f5; padding: 12px; margin-top: 16px; border-radius: 4px; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+    h2 { font-size: 15px; margin-top: 24px; padding-bottom: 4px; border-bottom: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <div class="warn">⚠️ 测试页面 — 产品 UI 在 attune-tauri 桌面窗口实装. Web 仅用于服务器端 API 调试.</div>
+  <h1>Attune Settings — 6 项可配置</h1>
+  <p>仅 6 项用户可见. 底座模型 (LLM/embedding/reranker/ASR/OCR 引擎) 随二进制打包高精度装配, 不暴露给用户.</p>
+
+  <div class="controls">
+    <label>Server URL</label>
+    <input id="server" value="http://127.0.0.1:18900">
+    <div style="margin-top: 12px;">
+      <button onclick="loadLocks()">拉 locks</button>
+      <button onclick="simulateFree()">模拟免费用户</button>
+      <button onclick="simulatePaid()">模拟付费</button>
+      <button onclick="simulateLogout()" style="background:#666">登出</button>
+    </div>
+  </div>
+
+  <h2>状态</h2>
+  <div id="status" style="font-size: 12px; color: #666;">未拉取</div>
+
+  <h2>用户可配置项 (仅 6 项)</h2>
+
+  <label>vault 主密码 <span class="badge hidden" id="badge-vault_password"></span></label>
+  <input id="setting-vault_password" type="password" placeholder="(改主密码)">
+
+  <label>本地知识库目录关联 <span class="badge hidden" id="badge-local_folder_links"></span></label>
+  <input id="setting-local_folder_links" placeholder="/home/user/Documents/cases (隐私自管)">
+
+  <label>云端大模型 (普通用户配自己 API key) <span class="badge hidden" id="badge-cloud_llm"></span></label>
+  <input id="setting-cloud_llm" type="password" placeholder="sk-... (付费用户由云端 gateway 下发, hidden)">
+
+  <label>Plugin 装载 (agents/skills/MCP) <span class="badge hidden" id="badge-plugin_install"></span></label>
+  <input id="setting-plugin_install" placeholder="(plugin 列表)">
+
+  <label>Plugin 卸载 <span class="badge hidden" id="badge-plugin_uninstall"></span></label>
+  <input id="setting-plugin_uninstall" placeholder="(plugin 列表)">
+
+  <label>OCR 场景预设 (合同 / 票据 / 截图 ...) <span class="badge hidden" id="badge-ocr_profiles"></span></label>
+  <select id="setting-ocr_profiles">
+    <option>(场景预设, 不暴露引擎参数)</option>
+    <option>合同 / 法律文书</option>
+    <option>票据 / 收据</option>
+    <option>屏幕截图</option>
+  </select>
+
+  <h2>API 响应</h2>
+  <div class="response" id="response">等待操作...</div>
+
+  <script>
+    const ALL_FIELDS = [
+      'vault_password', 'local_folder_links', 'cloud_llm',
+      'plugin_install', 'plugin_uninstall', 'ocr_profiles',
+    ];
+
+    async function loadLocks() {
+      const server = document.getElementById('server').value;
+      try {
+        const resp = await fetch(`${server}/api/v1/member/locks`);
+        const locks = await resp.json();
+        applyLocks(locks);
+        document.getElementById('response').textContent =
+          `✓ GET /member/locks (status ${resp.status})\n\n${JSON.stringify(locks, null, 2)}`;
+      } catch (e) {
+        document.getElementById('response').textContent = `❌ ${e.message}`;
+      }
+    }
+
+    function applyLocks(locks) {
+      for (const f of ALL_FIELDS) {
+        const input = document.getElementById(`setting-${f}`);
+        const badge = document.getElementById(`badge-${f}`);
+        if (!input || !badge) continue;
+        const lock = locks[f];
+        badge.classList.remove('locked', 'hidden');
+        badge.textContent = '';
+        if (lock === 'editable') {
+          input.disabled = false;
+          badge.classList.add('hidden');
+        } else {
+          input.disabled = true;
+          badge.classList.add('locked');
+          badge.textContent = '🔒 锁定';
+        }
+      }
+    }
+
+    async function setState(tier, extras) {
+      const server = document.getElementById('server').value;
+      const body = { account_id: 'demo', tier, ...extras };
+      const resp = await fetch(`${server}/api/v1/member/login-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      document.getElementById('status').textContent = `状态: tier=${tier}, http=${resp.status}`;
+      if (resp.ok) await loadLocks();
+    }
+
+    function simulateFree() { setState('free', {}); }
+    function simulatePaid() { setState('paid', { license_id: 'l1', llm_quota_remaining: 1000000 }); }
+    async function simulateLogout() {
+      const server = document.getElementById('server').value;
+      await fetch(`${server}/api/v1/member/logout`, { method: 'POST' });
+      document.getElementById('status').textContent = '状态: logged_out';
+      await loadLocks();
+    }
+    window.addEventListener('DOMContentLoaded', loadLocks);
+  </script>
+</body>
+</html>

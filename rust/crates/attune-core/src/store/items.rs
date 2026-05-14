@@ -52,7 +52,9 @@ impl Store {
     }
 
     pub fn get_item(&self, dek: &Key32, id: &str) -> Result<Option<DecryptedItem>> {
-        let mut stmt = self.conn.prepare(
+        // prepare_cached: rusqlite stmt cache (RefCell 内部可变), 复用编译过的 stmt.
+        // 热路径单 item 查询频繁调用, 比 prepare 快 5-20%. Static SQL 才能 cache.
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, title, content, url, source_type, domain, tags, created_at, updated_at
              FROM items WHERE id = ?1 AND is_deleted = 0",
         )?;
@@ -80,7 +82,7 @@ impl Store {
 
     /// 列出条目（仅标题和元数据，不解密 content）
     pub fn list_items(&self, limit: usize, offset: usize) -> Result<Vec<ItemSummary>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, title, source_type, domain, created_at
              FROM items WHERE is_deleted = 0
              ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
@@ -109,7 +111,7 @@ impl Store {
             .format("%Y-%m-%dT%H:%M:%S")
             .to_string();
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, title, source_type, updated_at, created_at
              FROM items
              WHERE is_deleted = 0 AND updated_at < ?1
@@ -278,7 +280,7 @@ impl Store {
 
     /// 按 URL 查找未删除 item，用于入库前去重（例如专利记录重复检查）。
     pub fn find_item_by_url(&self, url: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id FROM items WHERE url = ?1 AND is_deleted = 0 LIMIT 1",
         )?;
         let result = stmt.query_row(params![url], |row| row.get::<_, String>(0));
@@ -329,7 +331,7 @@ impl Store {
     /// W4 F1: 按 source_type 聚合（饼图 / 主题分布）。
     /// 返回 (source_type, count) 数组按 count DESC 排序。is_deleted 行排除。
     pub fn aggregate_items_by_source_type(&self) -> Result<Vec<(String, i64)>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT source_type, COUNT(*) FROM items
              WHERE is_deleted = 0
              GROUP BY source_type
@@ -349,7 +351,7 @@ impl Store {
     pub fn list_all_item_ids(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id FROM items WHERE is_deleted = 0 ORDER BY created_at")?;
+            .prepare_cached("SELECT id FROM items WHERE is_deleted = 0 ORDER BY created_at")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut ids = Vec::new();
         for row in rows {
@@ -456,7 +458,7 @@ impl Store {
 
     /// 列出当前所有标记为 L0 的 item id（Settings UI "受保护文件" 列表）
     pub fn list_l0_item_ids(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id FROM items WHERE is_deleted = 0 AND privacy_tier = 'L0' \
              ORDER BY updated_at DESC",
         )?;

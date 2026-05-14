@@ -12,7 +12,8 @@ Attune is a generic personal AI knowledge base for **any individual knowledge wo
 
 ## 📥 Download
 
-Latest stable: **v0.6.0 GA** 🎉
+Latest stable: **server v0.6.1** · **desktop v0.6.0**
+Latest pre-release: **v0.6.3-rc.1** (server tarball; desktop installer pending NSIS fix)
 
 ### Desktop app (Web UI + system tray) — [desktop-v0.6.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.6.0)
 
@@ -23,14 +24,14 @@ Latest stable: **v0.6.0 GA** 🎉
 | Linux deb | [`Attune_0.6.0_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.deb) | 27 MB | Debian/Ubuntu |
 | Linux AppImage | [`Attune_0.6.0_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.AppImage) | 94 MB | Generic Linux |
 
-### Server / CLI binaries (headless / NAS / server) — [v0.6.0 Release](https://github.com/qiurui144/attune/releases/tag/v0.6.0)
+### Server / CLI binaries (headless / NAS / server) — [v0.6.1 Release](https://github.com/qiurui144/attune/releases/tag/v0.6.1)
 
-| Platform | File | Size |
-|----------|------|------|
-| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-linux-x86_64.tar.gz) | 33.5 MB |
-| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-linux-aarch64.tar.gz) | 34.1 MB |
-| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-macos-aarch64.tar.gz) | 21.7 MB |
-| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-windows-x86_64.zip) | 28.3 MB |
+| Platform | File |
+|----------|------|
+| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-x86_64.tar.gz) |
+| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-aarch64.tar.gz) |
+| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-macos-aarch64.tar.gz) |
+| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-windows-x86_64.zip) |
 
 > macOS Intel: build from source with `cargo build --release` (Apple Silicon already covers modern Mac users). SHA256 checksum file ships with each archive.
 
@@ -66,7 +67,7 @@ This repository contains two parallel product lines sharing the Chrome extension
 
 | Line | Path | Purpose |
 |------|------|---------|
-| **Python prototype** | `src/npu_webhook/` | Fast iteration for algorithms and experimental features. FastAPI + ChromaDB + SQLite FTS5 |
+| **Python prototype** | `python/src/attune_python/` | Fast iteration for algorithms and experimental features. FastAPI + ChromaDB + SQLite FTS5 |
 | **Rust production** | [`rust/`](rust/README.md) | Production-grade generic personal knowledge base. Axum + rusqlite + tantivy + usearch + Preact UI |
 
 Validated Python features get promoted to the Rust line. See [`rust/README.md`](rust/README.md) for the full Rust documentation.
@@ -161,9 +162,10 @@ Full documentation: [`rust/README.md`](rust/README.md).
 ### Python prototype
 
 ```bash
+cd python
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-uvicorn npu_webhook.main:app --reload --port 18900
+uvicorn attune_python.main:app --reload --port 18900
 ```
 
 ---
@@ -268,7 +270,7 @@ Intel Meteor/Lunar/Arrow Lake NPU, AMD Phoenix/Hawk Point/Strix Point NPU, and N
 - `rust/crates/*` (attune-core / attune-server / attune-cli)
 - `extension/` (Chrome extension)
 - `rust/crates/attune-server/ui/` (Preact UI)
-- `src/npu_webhook/` (Python prototype)
+- `python/src/attune_python/` (Python prototype)
 - `plugins/free/*` (free community plugins: tech, patent, presales baseline)
 
 Free to fork, modify, and use commercially. Apache-2.0 includes a patent grant (§3).

@@ -1,9 +1,9 @@
 ; NSIS 安装器脚本
 !include "MUI2.nsh"
 
-Name "npu-webhook"
-OutFile "npu-webhook-setup-x64.exe"
-InstallDir "$LOCALAPPDATA\npu-webhook"
+Name "Attune"
+OutFile "attune-setup-x64.exe"
+InstallDir "$LOCALAPPDATA\Attune"
 RequestExecutionLevel user
 
 !insertmacro MUI_PAGE_DIRECTORY
@@ -12,12 +12,12 @@ RequestExecutionLevel user
 
 Section "Install"
   SetOutPath "$INSTDIR"
-  File /r "dist\npu-webhook\*.*"
-  CreateShortcut "$DESKTOP\npu-webhook.lnk" "$INSTDIR\npu-webhook.exe"
+  File /r "dist\attune-python\*.*"
+  CreateShortcut "$DESKTOP\Attune.lnk" "$INSTDIR\attune-python.exe"
   ; TODO Phase 5: 注册服务 + 开机自启
 SectionEnd
 
 Section "Uninstall"
   RMDir /r "$INSTDIR"
-  Delete "$DESKTOP\npu-webhook.lnk"
+  Delete "$DESKTOP\Attune.lnk"
 SectionEnd

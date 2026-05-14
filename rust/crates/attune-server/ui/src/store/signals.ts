@@ -31,6 +31,7 @@ export type View =
   | 'remote'
   | 'knowledge'
   | 'skills'
+  | 'marketplace'  // G3 (2026-05-01): PluginHub 插件市场
   | 'settings';
 export const currentView = signal<View>('chat');
 
@@ -54,6 +55,50 @@ export const connectionState = signal<ConnectionState>('online');
 export const settings = signal<Record<string, unknown> | null>(null);
 export const hardware = signal<Record<string, unknown> | null>(null);
 export const ollamaStatus = signal<'checking' | 'ready' | 'missing'>('checking');
+
+// ── 会员状态 (调 /api/v1/member/state) ────────────────────────────
+export type MemberStateKind = 'logged_out' | 'free' | 'paid';
+export type MemberSnapshot = {
+  kind: MemberStateKind;
+  account_id?: string | null;
+  license_id?: string | null;
+  is_logged_in: boolean;
+  is_paid: boolean;
+};
+export const memberState = signal<MemberSnapshot | null>(null);
+
+// SettingsLocks (调 /api/v1/member/locks) — 6 字段, 决定 UI 灰显
+export type LockState = 'editable' | 'locked';
+export type SettingsLocksMap = {
+  vault_password: LockState;
+  local_folder_links: LockState;
+  cloud_llm: LockState;
+  plugin_install: LockState;
+  plugin_uninstall: LockState;
+  ocr_profiles: LockState;
+};
+export const settingsLocks = signal<SettingsLocksMap | null>(null);
+
+// ── OCR Profile (调 /api/v1/ocr/profiles) ─────────────────────────
+export type OcrProfile = {
+  id: string;
+  name: string;
+  description: string;
+  languages: string;
+  dpi: number;
+  tags: string[];
+  builtin: boolean;
+};
+export const ocrProfiles = signal<OcrProfile[]>([]);
+
+// ── Folder Links (调 /api/v1/folder-links GET) ───────────────────
+export type FolderLink = {
+  id?: string;
+  path: string;
+  project_id?: string;
+  added_at?: string;
+};
+export const folderLinks = signal<FolderLink[]>([]);
 
 export type ChatSession = {
   id: string;

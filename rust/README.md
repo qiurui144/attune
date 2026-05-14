@@ -6,7 +6,7 @@
 
 Attune is a generic personal AI knowledge base for **any individual knowledge worker** (OSS Apache-2.0, zero industry binding). Industry users (lawyers / doctors / patent agents / scholars) load the corresponding `attune-pro/<vertical>-pro` plugin pack for vertical capabilities — see [`docs/oss-pro-strategy.md`](../docs/oss-pro-strategy.md).
 
-This directory is the Rust production build — a single ~30 MB static binary containing the encrypted vault, RAG engine, HTTP server with TLS, and embedded Preact UI. No runtime dependencies.
+This directory is the Rust production build — a single ~47 MB stripped binary (59 MB unstripped, x86_64-linux release) containing the encrypted vault, RAG engine, HTTP server with TLS, and embedded Preact UI. No runtime dependencies.
 
 ---
 
@@ -86,7 +86,22 @@ At startup, Attune detects CPU / RAM / GPU / NPU and recommends a local summary 
 | <8 GB | `llama3.2:1b` |
 
 ### Scanned PDF OCR fallback (Batch 1)
-When `pdf_extract` returns empty or too-little text, Attune automatically runs OCR via `tesseract` + `pdftoppm` (Chinese + English). One-shot install: `scripts/install-ocr-deps.sh` (apt/dnf/pacman/brew).
+When `pdf_extract` returns empty or too-little text, Attune automatically runs OCR via **PP-OCRv5 mobile** (DBNet+CRNN+CLS, ~21 MB ONNX, Chinese accuracy 94–96%) + `pdftoppm`. Tesseract removed since v0.6.x (replaced by PP-OCR as single engine). One-shot install: `scripts/install-ocr-deps.sh` (apt/dnf/pacman/brew).
+
+### Multi-format ingestion
+
+Attune parses 20+ file types natively. Unknown binary formats (video, archives, executables) are rejected with 422 rather than being silently treated as text.
+
+| Category | Formats |
+|----------|---------|
+| Document | `.md` `.txt` `.pdf` `.docx` `.epub` `.rtf` |
+| Web / Presentation | `.html` `.htm` `.pptx` |
+| Spreadsheet / Data | `.xlsx` `.xls` `.csv` |
+| Image → OCR | `.png` `.jpg` `.jpeg` `.webp` `.bmp` `.tiff` `.tif` `.gif` |
+| Audio → ASR | `.mp3` `.wav` `.m4a` `.flac` `.ogg` `.aac` `.opus` `.wma` |
+| Code / Config | `.py` `.js` `.ts` `.rs` `.go` `.java` `.c` `.cpp` `.h` `.rb` `.php` `.swift` `.kt` `.sh` `.toml` `.yaml` `.json` `.xml` and more |
+
+OCR uses 7 built-in scene profiles (contract / receipt / screenshot / ancient / table / form / card). Upload images or PDFs to `/api/v1/upload?ocr_profile=receipt` to activate a specific profile.
 
 ### Front-end UX (Batch 1–2, rewritten in Preact)
 - Two-column chat-first layout (ChatGPT-like), sidebar collapsible to 64 px icon bar
@@ -119,7 +134,7 @@ cd rust
 cargo build --release
 # Artifacts:
 # target/release/attune         (CLI, 4.2 MB)
-# target/release/attune-server-headless  (HTTP server, ~30 MB)
+# target/release/attune-server-headless  (HTTP server, ~47 MB stripped)
 ```
 
 ### 2. Start Ollama (optional, for semantic search)
@@ -214,10 +229,12 @@ All endpoints are prefixed with `/api/v1/`. Localhost access is auth-free; remot
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/vault/status` | Vault state (sealed/locked/unlocked) + item count |
-| POST | `/vault/setup` | First-time password setup |
+| POST | `/vault/setup` | First-time password setup — response includes `recovery_key` (one-time, save offline) |
 | POST | `/vault/unlock` | Unlock vault, returns session token |
 | POST | `/vault/lock` | Manual lock (zero in-memory keys) |
 | POST | `/vault/change-password` | Change master password |
+| POST | `/vault/reset-with-recovery-key` | Reset password using recovery key — data preserved |
+| POST | `/vault/forgot-password-reset` | Last-resort destructive reset (requires `"confirm":"RESET"`) |
 | GET | `/vault/device-secret/export` | Export device secret (for migration) |
 | POST | `/vault/device-secret/import` | Import device secret (new device) |
 
@@ -322,7 +339,7 @@ The frontend renders a bottom-right RecommendationOverlay (accept/dismiss) and r
 | Binary | Size | Purpose |
 |--------|------|---------|
 | `attune` | 4.2 MB | CLI tool (7 subcommands) |
-| `attune-server-headless` | ~30 MB | HTTP API server (TLS + Preact UI + search engine) |
+| `attune-server-headless` | ~47 MB stripped | HTTP API server (TLS + Preact UI + search engine) |
 
 Size breakdown: rustls crypto stack + tantivy full-text + usearch C++ bindings + Tokio + Axum + Preact UI.
 
@@ -350,8 +367,8 @@ rust/
     │       │   ├── layout/       # Sidebar + MainShell + DrawerHost
     │       │   ├── views/        # Chat / Items / Remote / Knowledge / Settings
     │       │   ├── components/   # Button / Input / Modal / Drawer / ChatMessage / Reader / CommandPalette ...
-    │       │   ├── hooks/        # useChat / useItems / useAnnotations / useRemote / useSettings / useShortcut
-    │       │   ├── store/        # signals / api / connection / ws
+    │       │   ├── hooks/        # useChat / useItems / useAnnotations / useRemote / useSettings / useOcrProfiles / useMember / useFolderLinks / useShortcut
+    │       │   ├── store/        # signals / api (get/post/patch/put/delete) / connection / ws
     │       │   └── i18n/         # core + zh + en
     │       └── dist/index.html   # single-file bundle (committed, referenced by include_str!)
     └── attune-cli/               # bin: command-line tool

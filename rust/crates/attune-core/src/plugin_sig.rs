@@ -157,6 +157,70 @@ pub fn is_allowed(trust: Trust, strict: bool) -> bool {
     }
 }
 
+// ── 签名 API (供 CI / attune-cli 用) ──────────────────────
+
+/// 生成 32-byte Ed25519 私钥 (signing key).
+/// 调用方负责把私钥**离线安全存储**, 公钥嵌入 OFFICIAL_PUBLIC_KEYS.
+///
+/// 使用 OsRng (crypto-secure 系统熵源). 不用 thread_rng — Ed25519 私钥
+/// 一旦泄露或预测就毁掉整个签名信任链, 必须密码学保证级 RNG.
+pub fn generate_signing_key() -> [u8; 32] {
+    use aes_gcm::aead::{OsRng, rand_core::RngCore};
+    let mut seed = [0u8; 32];
+    OsRng.fill_bytes(&mut seed);
+    seed
+}
+
+/// 从 32-byte 种子派生 verifying key (公钥). 公钥可公开.
+pub fn derive_verifying_key_hex(signing_key_bytes: &[u8; 32]) -> String {
+    use ed25519_dalek::SigningKey;
+    let sk = SigningKey::from_bytes(signing_key_bytes);
+    hex::encode(sk.verifying_key().to_bytes())
+}
+
+/// 用 signing key 签名 plugin_dir, 写入 plugin.sig (base64).
+pub fn sign_plugin(plugin_dir: &Path, signing_key_bytes: &[u8; 32]) -> Result<String> {
+    use ed25519_dalek::{Signer, SigningKey};
+    let sk = SigningKey::from_bytes(signing_key_bytes);
+    let digest = compute_plugin_digest(plugin_dir)?;
+    let signature = sk.sign(&digest);
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+    let sig_path = plugin_dir.join("plugin.sig");
+    std::fs::write(&sig_path, &sig_b64).map_err(VaultError::Io)?;
+    Ok(sig_b64)
+}
+
+/// 用任意 verifying key (hex) 校验 plugin_dir 的 plugin.sig.
+/// 与 verify_loose 的区别: 不依赖 OFFICIAL_PUBLIC_KEYS 内嵌列表, 用调用方提供的 key.
+pub fn verify_with_key(plugin_dir: &Path, verifying_key_hex: &str) -> Result<bool> {
+    let sig_path = plugin_dir.join("plugin.sig");
+    if !sig_path.exists() {
+        return Ok(false);
+    }
+    let sig_b64 = std::fs::read_to_string(&sig_path).map_err(VaultError::Io)?;
+    let sig_b64 = sig_b64.trim();
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(sig_b64)
+        .map_err(|e| VaultError::InvalidInput(format!("bad signature base64: {e}")))?;
+    if sig_bytes.len() != 64 {
+        return Ok(false);
+    }
+    let signature = Signature::from_slice(&sig_bytes)
+        .map_err(|e| VaultError::InvalidInput(format!("bad signature: {e}")))?;
+
+    let pub_bytes = hex::decode(verifying_key_hex)
+        .map_err(|e| VaultError::InvalidInput(format!("bad pubkey hex: {e}")))?;
+    let pub_arr: [u8; 32] = pub_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| VaultError::InvalidInput("pubkey must be 32 bytes".into()))?;
+    let vk = VerifyingKey::from_bytes(&pub_arr)
+        .map_err(|e| VaultError::InvalidInput(format!("bad verifying key: {e}")))?;
+
+    let digest = compute_plugin_digest(plugin_dir)?;
+    Ok(vk.verify(&digest, &signature).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +321,58 @@ mod tests {
         let r = verify_loose(dir.path()).unwrap();
         assert_eq!(r.trust, Trust::Unsigned);
         assert!(r.reason.contains("64 bytes"));
+    }
+
+    #[test]
+    fn sign_then_verify_with_key_succeeds() {
+        let dir = make_plugin_dir("id: signed\n", Some("# prompt"));
+        let sk = generate_signing_key();
+        let pk_hex = derive_verifying_key_hex(&sk);
+
+        sign_plugin(dir.path(), &sk).expect("sign");
+        let ok = verify_with_key(dir.path(), &pk_hex).expect("verify");
+        assert!(ok, "signature should verify with matching key");
+
+        // 不同 key 验证应失败
+        let other_sk = generate_signing_key();
+        let other_pk = derive_verifying_key_hex(&other_sk);
+        let ok = verify_with_key(dir.path(), &other_pk).expect("verify");
+        assert!(!ok, "different key must not verify");
+    }
+
+    #[test]
+    fn verify_with_key_unsigned_dir_returns_false() {
+        let dir = make_plugin_dir("id: unsigned\n", None);
+        let sk = generate_signing_key();
+        let pk = derive_verifying_key_hex(&sk);
+        let ok = verify_with_key(dir.path(), &pk).expect("verify");
+        assert!(!ok);
+    }
+
+    #[test]
+    fn verify_with_key_tampered_yaml_fails() {
+        let dir = make_plugin_dir("id: original\n", None);
+        let sk = generate_signing_key();
+        let pk = derive_verifying_key_hex(&sk);
+        sign_plugin(dir.path(), &sk).expect("sign");
+        // 篡改 yaml 后签名应失败
+        std::fs::write(dir.path().join("plugin.yaml"), "id: tampered\n").unwrap();
+        let ok = verify_with_key(dir.path(), &pk).expect("verify");
+        assert!(!ok, "tampered content must not verify");
+    }
+
+    #[test]
+    fn generate_signing_key_is_random() {
+        let k1 = generate_signing_key();
+        let k2 = generate_signing_key();
+        assert_ne!(k1, k2, "each call must produce different key");
+    }
+
+    #[test]
+    fn derive_verifying_key_hex_is_64_chars() {
+        let sk = [42u8; 32];
+        let pk = derive_verifying_key_hex(&sk);
+        assert_eq!(pk.len(), 64);
+        assert!(pk.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

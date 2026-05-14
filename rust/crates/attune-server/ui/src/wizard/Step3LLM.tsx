@@ -2,7 +2,7 @@
 
 import type { JSX } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
-import { Button, Input } from '../components';
+import { Button, Input, Tooltip } from '../components';
 import { t } from '../i18n';
 import { api } from '../store/api';
 import { toast } from '../components/Toast';
@@ -19,6 +19,19 @@ type Diagnostics = {
   };
 };
 
+type AiStackGate = {
+  hardware?: {
+    tier?: 'unsupported' | 'low' | 'mid' | 'high' | 'flagship';
+    supported?: boolean;
+  };
+};
+
+type ProbeK3Response = {
+  found: boolean;
+  endpoint?: string | null;
+  checked: string[];
+};
+
 export type Step3Props = {
   ctx: WizardContext;
   onUpdate: (partial: Partial<WizardContext>) => void;
@@ -31,20 +44,35 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   const [scanning, setScanning] = useState(true);
   // 形态分裂：K3 一体机优先本地 Ollama；Laptop/Server 默认远端 token
   const [prefersLocal, setPrefersLocal] = useState<boolean>(false);
+  const [localChatAllowed, setLocalChatAllowed] = useState<boolean>(false);
+  const [localBlockReason, setLocalBlockReason] = useState<string>('当前硬件规格不建议本地对话');
+  const [k3Endpoint, setK3Endpoint] = useState('http://192.168.100.166:8080/v1');
+  const [k3Detecting, setK3Detecting] = useState(false);
+  const [k3DetectResult, setK3DetectResult] = useState<string | null>(null);
 
   // 云端 API 表单
-  const [provider, setProvider] = useState<string>('openai');
+  // Default: attune-pro membership — 登录即用，token 配额由 attune 计费追踪
+  // 用户拍板（2026-05-01）：attune Pro 会员 + 用户已有 BYOK 支撑；
+  // 不预设第三方 free API tier（避免误导）；本地 LLM 暂时不主推（研发成本高）
+  const [provider, setProvider] = useState<string>('attune-pro');
   const [apiKey, setApiKey] = useState('');
-  const [endpoint, setEndpoint] = useState('https://api.openai.com/v1');
-  const [cloudModel, setCloudModel] = useState('gpt-4o-mini');
+  const [endpoint, setEndpoint] = useState('https://gateway.attune.ai/v1');
+  const [cloudModel, setCloudModel] = useState('auto');
+  const [memberLoggingIn, setMemberLoggingIn] = useState(false);
+  const [memberReady, setMemberReady] = useState(false);
   const [testing, setTesting] = useState(false);
+  // 默认隐藏 Ollama / K3 (这两个面向高级用户). 用户主动展开"其他选项"才看到.
+  const [showAdvancedProviders, setShowAdvancedProviders] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
 
   async function scanOllama() {
     setOllamaStatus('checking');
     setScanning(true);
     try {
-      const d = await api.get<Diagnostics>('/status/diagnostics');
+      const [d, gate] = await Promise.all([
+        api.get<Diagnostics>('/status/diagnostics'),
+        api.get<AiStackGate>('/ai_stack'),
+      ]);
       if (d.ollama_status === 'ready') {
         setOllamaStatus('ready');
         setOllamaModels(d.ollama_models ?? []);
@@ -53,8 +81,17 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
       }
       // 读形态：K3 → 主推 Ollama；Laptop/其他 → 主推云端
       setPrefersLocal(d.hardware?.prefers_local_llm === true);
+
+      const tier = gate.hardware?.tier ?? 'unsupported';
+      const allow = gate.hardware?.supported === true && (tier === 'high' || tier === 'flagship');
+      setLocalChatAllowed(allow);
+      if (!allow) {
+        setLocalBlockReason('当前硬件规格下默认禁用本地对话，请选择云端或 K3 一体机。');
+      }
     } catch {
       setOllamaStatus('missing');
+      setLocalChatAllowed(false);
+      setLocalBlockReason('硬件检测失败，默认禁用本地对话。');
     } finally {
       setScanning(false);
     }
@@ -62,9 +99,47 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
 
   useEffect(() => {
     void scanOllama();
+    void autoDetectK3(true);
   }, []);
 
+  async function autoDetectK3(silent = false) {
+    setK3Detecting(true);
+    if (!silent) {
+      setK3DetectResult(null);
+    }
+    try {
+      const res = await api.post<ProbeK3Response>('/llm/probe-k3', {});
+      if (res.found && res.endpoint) {
+        setK3Endpoint(res.endpoint);
+        const msg = `已检测到 K3：${res.endpoint}`;
+        setK3DetectResult(msg);
+        if (!silent) {
+          toast('success', msg);
+        }
+      } else {
+        const msg = '未检测到可用 K3，已保留手动输入。';
+        setK3DetectResult(msg);
+        if (!silent) {
+          toast('error', msg);
+        }
+      }
+    } catch (e) {
+      const msg = `自动检测失败：${e instanceof Error ? e.message : String(e)}`;
+      setK3DetectResult(msg);
+      if (!silent) {
+        toast('error', msg);
+      }
+    } finally {
+      setK3Detecting(false);
+    }
+  }
+
   async function testCloudConnection() {
+    if (provider === 'attune-pro') {
+      const ok = await loginMember();
+      setTestResult(ok ? '✓ 会员登录验证通过' : '✗ 会员登录验证失败');
+      return;
+    }
     setTesting(true);
     setTestResult(null);
     try {
@@ -85,10 +160,35 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   }
 
   async function selectOllama() {
+    if (!localChatAllowed) {
+      toast('error', localBlockReason);
+      return;
+    }
     onUpdate({ llmMode: 'ollama' });
     try {
       await api.patch('/settings', {
-        llm: { endpoint: null, api_key: '', model: ollamaModels[0] ?? 'qwen2.5:3b' },
+        llm: { endpoint: null, api_key: '', model: ollamaModels[0] ?? null },
+      });
+    } catch {
+      /* 保存失败不阻塞流程 */
+    }
+    onContinue();
+  }
+
+  async function selectK3() {
+    if (!k3Endpoint.trim()) {
+      toast('error', '请填写 K3 地址');
+      return;
+    }
+    onUpdate({ llmMode: 'k3' });
+    try {
+      await api.patch('/settings', {
+        llm: {
+          endpoint: k3Endpoint.trim(),
+          api_key: '',
+          model: 'auto',
+          provider: 'openai_compat',
+        },
       });
     } catch {
       /* 保存失败不阻塞流程 */
@@ -97,19 +197,67 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   }
 
   async function selectCloud() {
-    if (!apiKey || !endpoint || !cloudModel) {
+    if (!endpoint || !cloudModel) {
+      toast('error', '请填完地址和模型名');
+      return;
+    }
+
+    if (provider === 'custom' && !apiKey) {
+      toast('error', '自定义配置需要填写 URL 和 Token');
+      return;
+    }
+
+    if (provider === 'attune-pro' && !memberReady) {
+      if (!ctx.memberEmail || !ctx.memberPassword) {
+        toast('error', '请先回到第二步填写会员账号密码');
+        return;
+      }
+      const ok = await loginMember();
+      if (!ok) return;
+    }
+
+    if (provider !== 'attune-pro' && !apiKey) {
       toast('error', '请填完 API Key / Endpoint / Model');
       return;
     }
     onUpdate({ llmMode: 'cloud' });
     try {
       await api.patch('/settings', {
-        llm: { endpoint, api_key: apiKey, model: cloudModel, provider },
+        llm: {
+          endpoint,
+          api_key: provider === 'attune-pro' ? '' : apiKey,
+          model: cloudModel,
+          provider,
+        },
       });
     } catch {
       /* 保存失败不阻塞 */
     }
     onContinue();
+  }
+
+  async function loginMember(): Promise<boolean> {
+    if (!ctx.memberEmail || !ctx.memberPassword) {
+      toast('error', '第二步未填写会员账号密码');
+      return false;
+    }
+    setMemberLoggingIn(true);
+    try {
+      await api.post('/member/login-password', {
+        email: ctx.memberEmail,
+        password: ctx.memberPassword,
+        license_code: ctx.memberLicenseCode?.trim() || null,
+      });
+      setMemberReady(true);
+      toast('success', '会员账号登录成功');
+      return true;
+    } catch (e) {
+      setMemberReady(false);
+      toast('error', `会员登录失败：${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    } finally {
+      setMemberLoggingIn(false);
+    }
   }
 
   function selectSkip() {
@@ -124,39 +272,31 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
           fontSize: 'var(--text-xl)',
           fontWeight: 600,
           margin: 0,
+          display: 'flex',
+          alignItems: 'center',
         }}
       >
         {t('wizard.llm.heading')}
+        <Tooltip text={t('wizard.help.llm_provider')} />
       </h2>
 
-      {/* 形态分裂提示：K3 一体机推荐本地 Ollama；笔电/服务器推荐云端 token */}
-      <div
-        style={{
-          fontSize: 'var(--text-sm)',
-          color: 'var(--color-text-secondary)',
-          padding: 'var(--space-2) var(--space-3)',
-          background: 'var(--color-surface)',
-          borderLeft: '3px solid var(--color-accent)',
-          borderRadius: 'var(--radius-sm)',
-        }}
-      >
-        {prefersLocal
-          ? '★ K3 一体机：推荐使用本地 Ollama（已预装 qwen2.5:3b）'
-          : '★ 笔电/服务器形态：推荐配置云端 API（远端 token，避免本地 OOM）'}
-      </div>
-
+      {/* 默认显示: 云端 + 暂不配置 两张 */}
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '1fr 1fr 1fr',
-          gap: 'var(--space-3)',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+          gap: 'var(--space-4)',
+          alignItems: 'start',
         }}
       >
-        {/* Ollama 卡片 */}
+        {/* Ollama + K3 默认隐藏, 用户点 "其他选项" 才显示 (面向高级用户) */}
+        {showAdvancedProviders && (
+          <>
+            {/* Ollama 卡片 */}
         <Card
           selected={ctx.llmMode === 'ollama'}
-          onClick={ollamaStatus === 'ready' ? selectOllama : undefined}
-          disabled={ollamaStatus !== 'ready'}
+          onClick={ollamaStatus === 'ready' && localChatAllowed ? selectOllama : undefined}
+          disabled={ollamaStatus !== 'ready' || !localChatAllowed}
           recommended={prefersLocal}
         >
           <CardHeader
@@ -164,22 +304,29 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
             title={t('wizard.llm.ollama.title')}
             tag={prefersLocal ? '★ ' + t('wizard.llm.ollama.tag') : t('wizard.llm.ollama.tag')}
           />
-          <div style={{ fontSize: 'var(--text-sm)', minHeight: 60 }}>
+          <div style={{ fontSize: 'var(--text-sm)', minHeight: 56 }}>
             {scanning && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
                 <span className="spinner" />
-                {t('wizard.llm.ollama.detecting')}
+                扫描本机 Ollama
               </div>
             )}
             {!scanning && ollamaStatus === 'ready' && (
-              <div style={{ color: 'var(--color-success)' }}>
-                {t('wizard.llm.ollama.found', { models: ollamaModels.length })}
-              </div>
+              <>
+                <div style={{ color: 'var(--color-success)' }}>
+                  已发现 {ollamaModels.length} 个模型
+                </div>
+                {!localChatAllowed && (
+                  <div style={{ color: 'var(--color-warning)', marginTop: 'var(--space-2)' }}>
+                    {localBlockReason}
+                  </div>
+                )}
+              </>
             )}
             {!scanning && ollamaStatus === 'missing' && (
               <div>
                 <div style={{ color: 'var(--color-warning)', marginBottom: 'var(--space-2)' }}>
-                  {t('wizard.llm.ollama.missing')}
+                  未检测到本地 Ollama
                 </div>
                 <code
                   style={{
@@ -197,7 +344,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                     toast('success', '已复制到剪贴板');
                   }}
                 >
-                  curl -fsSL https://ollama.com/install.sh | sh
+                    curl -fsSL https://ollama.com/install.sh | sh
                 </code>
                 <button
                   type="button"
@@ -219,7 +366,36 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
           </div>
         </Card>
 
-        {/* 云端 API 卡片 */}
+        {/* K3 第三方设备卡片 */}
+        <Card selected={ctx.llmMode === 'k3'}>
+          <CardHeader icon="🧩" title="第三方设备（K3）" tag="自动扫描局域网" />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+              自动读取本机网段并探测可用 K3，未命中时保留手动输入。
+            </div>
+            <Button size="sm" variant="secondary" onClick={() => void autoDetectK3()} loading={k3Detecting}>
+              自动检测 K3
+            </Button>
+            <Input
+              type="text"
+              placeholder="K3 URL（如 http://192.168.100.166:8080/v1）"
+              value={k3Endpoint}
+              onInput={(e) => setK3Endpoint(e.currentTarget.value)}
+            />
+            {k3DetectResult && (
+              <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+                {k3DetectResult}
+              </div>
+            )}
+            <Button size="sm" variant="primary" onClick={selectK3} disabled={!k3Endpoint.trim()}>
+              使用 K3
+            </Button>
+          </div>
+        </Card>
+          </>
+        )}
+
+        {/* 云端 API 卡片 (默认显示) */}
         <Card
           selected={ctx.llmMode === 'cloud'}
           recommended={!prefersLocal}
@@ -235,9 +411,18 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               onChange={(e) => {
                 setProvider(e.currentTarget.value);
                 // 预填常见 provider endpoint
+                // 设计（2026-05-01 用户拍板，澄清版）：
+                //   - 笔电暂时不走本地 LLM（研发成本高，云端更准确，等本地解决不了再上）
+                //   - 主推 attune Pro 会员（登录即用，token 配额由 attune 计费跟踪）
+                //   - 用户已有的 web 会员（ChatGPT Plus / Claude Pro / Gemini Advanced）→ 走 BYOK API key
+                //   - 不预设第三方 "free API tier"（避免误导，用户的"免费"指浏览器 web 会话）
                 const presets: Record<string, { endpoint: string; model: string }> = {
+                  // ── ★ 主推：attune Pro 会员 gateway ──
+                  'attune-pro': { endpoint: 'https://gateway.attune.ai/v1', model: 'auto' },
+                  // ── BYOK：用户已有付费会员的 API key ──
                   openai: { endpoint: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
                   anthropic: { endpoint: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-20241022' },
+                  gemini: { endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash' },
                   deepseek: { endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
                   qwen: { endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
                 };
@@ -256,21 +441,66 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                 fontSize: 'var(--text-sm)',
               }}
             >
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="qwen">Qwen (阿里)</option>
-              <option value="custom">自定义</option>
+              <optgroup label="★ 推荐：Attune Pro 会员（登录即用）">
+                <option value="attune-pro">Attune Pro Membership（Gateway，token 配额）</option>
+              </optgroup>
+              <optgroup label="BYOK：用你已有的 API key">
+                <option value="openai">OpenAI（ChatGPT Plus/Team 用户）</option>
+                <option value="anthropic">Anthropic（Claude Pro 用户）</option>
+                <option value="gemini">Gemini（Google AI Studio）</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">Qwen (阿里通义)</option>
+                <option value="custom">自定义（OpenAI 兼容）</option>
+              </optgroup>
             </select>
-            <Input
-              type="password"
-              placeholder="API Key"
-              value={apiKey}
-              onInput={(e) => setApiKey(e.currentTarget.value)}
-            />
+            {provider === 'attune-pro' && (
+              <>
+                <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+                  <StatusChip
+                    tone={memberReady ? 'success' : 'muted'}
+                    title="会员"
+                    value={memberReady ? '已登录' : '待登录'}
+                  />
+                  <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+                    账号密码只在此处输入一次，后续自动复用。
+                  </div>
+                </div>
+                <Input
+                  type="text"
+                  placeholder="服务地址（默认可直接用）"
+                  value={endpoint}
+                  onInput={(e) => setEndpoint(e.currentTarget.value)}
+                />
+                <Button
+                  size="sm"
+                  variant={memberReady ? 'secondary' : 'primary'}
+                  onClick={loginMember}
+                  loading={memberLoggingIn}
+                  disabled={!ctx.memberEmail || !ctx.memberPassword}
+                >
+                  {memberReady ? '会员已登录 ✓' : '登录会员账号'}
+                </Button>
+              </>
+            )}
+            {provider !== 'attune-pro' && (
+              <>
+                <Input
+                  type="text"
+                  placeholder={provider === 'custom' ? 'URL 地址（OpenAI 兼容）' : 'Endpoint URL'}
+                  value={endpoint}
+                  onInput={(e) => setEndpoint(e.currentTarget.value)}
+                />
+                <Input
+                  type="password"
+                  placeholder={provider === 'custom' ? 'Token / API Key' : 'API Key'}
+                  value={apiKey}
+                  onInput={(e) => setApiKey(e.currentTarget.value)}
+                />
+              </>
+            )}
             <Input
               type="text"
-              placeholder="Model"
+              placeholder="模型名（默认 auto 自动选择）"
               value={cloudModel}
               onInput={(e) => setCloudModel(e.currentTarget.value)}
             />
@@ -279,9 +509,11 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               variant="secondary"
               onClick={testCloudConnection}
               loading={testing}
-              disabled={!apiKey}
+              disabled={provider === 'attune-pro'
+                ? (!ctx.memberEmail || !ctx.memberPassword)
+                : (!apiKey || !endpoint)}
             >
-              {t('wizard.llm.cloud.test')}
+              {provider === 'attune-pro' ? '验证登录' : t('wizard.llm.cloud.test')}
             </Button>
             {testResult && (
               <div
@@ -299,7 +531,12 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               size="sm"
               variant="primary"
               onClick={selectCloud}
-              disabled={!apiKey || testResult?.startsWith('✗')}
+              disabled={
+                (provider === 'attune-pro'
+                  ? (!ctx.memberEmail || !ctx.memberPassword)
+                  : (!apiKey || !endpoint))
+                || testResult?.startsWith('✗')
+              }
             >
               使用云端
             </Button>
@@ -324,6 +561,25 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
           </p>
         </Card>
       </div>
+
+      {/* "其他选项" toggle — 默认折叠, 展开后显示 Ollama + K3 */}
+      {!showAdvancedProviders && (
+        <button
+          type="button"
+          onClick={() => setShowAdvancedProviders(true)}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: 'var(--color-text-secondary)',
+            fontSize: 'var(--text-sm)',
+            cursor: 'pointer',
+            padding: 'var(--space-2) 0',
+            alignSelf: 'flex-start',
+          }}
+        >
+          ▸ 其他选项（本地 Ollama / K3 一体机）
+        </button>
+      )}
     </div>
   );
 }
@@ -362,7 +618,7 @@ function Card({
         display: 'flex',
         flexDirection: 'column',
         gap: 'var(--space-3)',
-        minHeight: 200,
+        minHeight: 0,
       }}
     >
       {children}
@@ -395,6 +651,40 @@ function CardHeader({
       >
         {tag}
       </span>
+    </div>
+  );
+}
+
+function StatusChip({
+  title,
+  value,
+  tone,
+}: {
+  title: string;
+  value: string;
+  tone: 'accent' | 'success' | 'muted';
+}): JSX.Element {
+  const palette =
+    tone === 'success'
+      ? { border: 'var(--color-success)', bg: 'rgba(34, 197, 94, 0.08)', fg: 'var(--color-success)' }
+      : tone === 'accent'
+        ? { border: 'var(--color-accent)', bg: 'rgba(14, 165, 233, 0.08)', fg: 'var(--color-accent)' }
+        : { border: 'var(--color-border)', bg: 'var(--color-bg)', fg: 'var(--color-text-secondary)' };
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${palette.border}`,
+        background: palette.bg,
+        borderRadius: 'var(--radius-md)',
+        padding: 'var(--space-3)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--space-1)',
+      }}
+    >
+      <div style={{ fontSize: 'var(--text-xs)', color: palette.fg, fontWeight: 600 }}>{title}</div>
+      <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)' }}>{value}</div>
     </div>
   );
 }

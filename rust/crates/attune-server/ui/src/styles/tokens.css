@@ -15,6 +15,8 @@
   /* Brand accent · Fjord Teal */
   --color-accent: #5E8B8B;
   --color-accent-hover: #4A7272;
+  --color-accent-active: #3D5F5F;
+  --color-accent-on: #FFFFFF;            /* 主色按钮上的文字 */
 
   /* Semantic */
   --color-success: #6B9080;
@@ -22,8 +24,13 @@
   --color-error: #C97070;
   --color-info: #7A9CC6;
 
+  /* 中性灰阶 (按钮 disabled / 锁定态 / 次按钮) */
+  --color-surface-muted: #F0F2F5;        /* 灰色背景 (disabled input) */
+  --color-surface-strong: #E5E8EE;       /* 更深一层灰 */
+  --color-on-surface-muted: #8B95A4;     /* 灰色背景上的文字 */
+
   /* ─── Typography ─────────────────────────────────────────────── */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+  --font-sans: 'Manrope', 'Source Han Sans SC', 'PingFang SC', 'Segoe UI',
     'Microsoft YaHei', sans-serif;
   --font-mono: 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 
@@ -74,21 +81,27 @@
 /* ─── Dark mode ──────────────────────────────────────────────────── */
 :root[data-theme='dark'],
 :root[data-theme='auto']:not([data-theme='light']) {
-  --color-bg: #1C1F26;
-  --color-surface: #262A33;
-  --color-surface-hover: #2E323C;
-  --color-border: #363B47;
-  --color-text: #E6E6E6;
-  --color-text-secondary: #9CA3AF;
+  --color-bg: #181C24;
+  --color-surface: #212634;
+  --color-surface-hover: #2A3140;
+  --color-border: #3B4458;
+  --color-text: #F1F5F9;
+  --color-text-secondary: #B4BECD;
   --color-text-disabled: #5C6578;
 
-  --color-accent: #7FA5A5;
-  --color-accent-hover: #93B8B8;
+  --color-accent: #87B2B2;
+  --color-accent-hover: #9CC4C4;
+  --color-accent-active: #6F9C9C;
+  --color-accent-on: #181C24;
 
   --color-success: #85AB9B;
   --color-warning: #E5BB8D;
   --color-error: #DB8B8B;
   --color-info: #94B5DD;
+
+  --color-surface-muted: #2A3040;
+  --color-surface-strong: #353D4F;
+  --color-on-surface-muted: #8595A8;
 }
 
 /* Auto dark mode when data-theme not set manually */

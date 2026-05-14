@@ -1,3 +1,4 @@
+pub mod error;
 pub mod routes;
 pub mod state;
 pub(crate) mod middleware;
@@ -9,6 +10,7 @@ use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 pub fn is_allowed_origin(s: &str) -> bool {
     s.starts_with("chrome-extension://")
@@ -44,7 +46,9 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/vault/setup", post(routes::vault::vault_setup))
         .route("/api/v1/vault/unlock", post(routes::vault::vault_unlock))
         .route("/api/v1/vault/lock", post(routes::vault::vault_lock))
+        .route("/api/v1/vault/reset-with-recovery-key", post(routes::vault::vault_reset_with_recovery_key))
         .route("/api/v1/vault/change-password", post(routes::vault::vault_change_password))
+        .route("/api/v1/vault/forgot-password-reset", post(routes::vault::vault_forgot_password_reset))
         .route("/api/v1/vault/device-secret/export", get(routes::vault::export_device_secret))
         .route("/api/v1/vault/device-secret/import", post(routes::vault::import_device_secret))
         // Status (health check bypasses guard)
@@ -52,6 +56,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/status/diagnostics", get(routes::status::diagnostics))
         // LLM 运维端点（Wizard + Settings）
         .route("/api/v1/llm/test", post(routes::llm::test_llm))
+        .route("/api/v1/llm/probe-k3", post(routes::llm::probe_k3))
         .route("/api/v1/models/pull", post(routes::llm::pull_model))
         // Chat (RAG)
         .route("/api/v1/chat", post(routes::chat::chat))
@@ -65,6 +70,24 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Ingest + Items + Search
         .route("/api/v1/ingest", post(routes::ingest::ingest))
         .route("/api/v1/feedback", post(routes::feedback::submit_feedback))
+        // Plugin UI form runtime
+        .route("/api/v1/forms/{plugin_id}/{form_id}", get(routes::forms::get_form))
+        .route("/api/v1/forms/{plugin_id}/{form_id}/submit", post(routes::forms::submit_form))
+        // Member state + settings locks (UI 灰显决策源)
+        .route("/api/v1/member/state", get(routes::member::get_state))
+        .route("/api/v1/member/locks", get(routes::member::get_locks))
+        .route("/api/v1/member/login-token", post(routes::member::login_token))
+        .route("/api/v1/member/login-password", post(routes::member::login_password))
+        .route("/api/v1/member/logout", post(routes::member::logout))
+        // OCR 场景预设 (CRUD, builtin 不可删/改)
+        .route("/api/v1/ocr/profiles",
+            get(routes::ocr_profiles::list_profiles)
+                .post(routes::ocr_profiles::create_profile))
+        .route("/api/v1/ocr/profiles/{id}",
+            axum::routing::put(routes::ocr_profiles::update_profile)
+                .delete(routes::ocr_profiles::delete_profile))
+        // Folder links — 只读 (写入由 attune-cli link-folder)
+        .route("/api/v1/folder-links", get(routes::folder_links::list_folder_links))
         // 批注（annotations）CRUD — 所有调用都是用户显式操作，不在建库流水线里自动触发
         .route("/api/v1/annotations",
             get(routes::annotations::list_annotations)
@@ -100,6 +123,9 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/plugins", get(routes::plugins::list))
         // E1 marketplace toggle (W4, 2026-04-27)
         .route("/api/v1/plugins/{id}/toggle", post(routes::plugins::toggle))
+        // E4 (2026-05-01) — PluginHub marketplace (默认 Mock provider；attune-pro 注入 hub-client)
+        .route("/api/v1/marketplace/plugins", get(routes::marketplace::list_plugins))
+        .route("/api/v1/marketplace/plugins/{id}/install", post(routes::marketplace::install_plugin))
         .route("/api/v1/skills", get(routes::skills::list_skills))
         .route("/api/v1/patent/search", post(routes::patent::search))
         .route("/api/v1/patent/databases", get(routes::patent::databases))
@@ -126,19 +152,31 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/behavior/popular", get(routes::behavior::popular))
         // G1 Browse signals (W3 batch B, 2026-04-27)
         // per spec docs/superpowers/specs/2026-04-27-w3-batch-b-design.md §3
+        // OPT-5 kebab unification: /browse-signals 是新 canonical, /browse_signals 旧 alias 留 1 release
+        .route("/api/v1/browse-signals",
+               post(routes::browse_signals::record_batch)
+                   .get(routes::browse_signals::list)
+                   .delete(routes::browse_signals::delete))
         .route("/api/v1/browse_signals",
                post(routes::browse_signals::record_batch)
                    .get(routes::browse_signals::list)
                    .delete(routes::browse_signals::delete))
         // C1 Web search cache (W4-002, 2026-04-27) — close C1 loop
         // Settings UI "清空 Web 搜索缓存" 入口
+        .route("/api/v1/web-search-cache",
+               get(routes::web_search_cache::count)
+                   .delete(routes::web_search_cache::delete))
         .route("/api/v1/web_search_cache",
                get(routes::web_search_cache::count)
                    .delete(routes::web_search_cache::delete))
         // AI 底座状态（v0.6.0-rc.3, 2026-04-27）— Embedding / Rerank / OCR / ASR / LLM 可用性
+        .route("/api/v1/ai-stack", get(routes::ai_stack::status))
         .route("/api/v1/ai_stack", get(routes::ai_stack::status))
         // G2 Auto bookmark candidates (W4, 2026-04-27)
         // POST 不暴露：仅由 routes::browse_signals::record_batch high_engagement 路径写
+        .route("/api/v1/auto-bookmarks",
+               get(routes::auto_bookmarks::list)
+                   .delete(routes::auto_bookmarks::delete))
         .route("/api/v1/auto_bookmarks",
                get(routes::auto_bookmarks::list)
                    .delete(routes::auto_bookmarks::delete))
@@ -170,6 +208,9 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Guard middleware for all other routes
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::vault_guard))
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::bearer_auth_guard))
+        // 访问日志 — 放最外层 (axum middleware 调用顺序: 外 -> 内 -> handler -> 内 -> 外),
+        // 保证 4xx 也能记 (即便 vault_guard 拒了请求, access_log 仍记 status).
+        .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::access_log))
         .layer(cors)
         .with_state(shared_state)
 }
@@ -203,8 +244,21 @@ impl Default for ServerConfig {
 pub async fn run_in_runtime(
     config: ServerConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // R37 (2026-05-01): 双 sink — stdout (人类可读) + 文件 daily rotation (生产排障)。
+    // 文件位于 data_dir()/logs/attune-server.YYYY-MM-DD（tracing-appender 自动加日期）。
+    // 默认保留 7 天 — 由用户手动清理（tracing-appender 0.2 没有自动清理）。
+    let log_dir = attune_core::platform::data_dir().join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "attune-server");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    // guard 必须 leak 让 worker thread 在进程整个生命周期内存活；正常退出会刷盘。
+    Box::leak(Box::new(guard));
+
+    let env_filter = EnvFilter::from_default_env()
+        .add_directive("info".parse().expect("'info' is a valid log directive"));
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().expect("'info' is a valid log directive")))
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stdout.and(non_blocking))
         .try_init();
 
     let hw = attune_core::platform::HardwareProfile::detect();
@@ -246,21 +300,59 @@ pub async fn run_in_runtime(
 
     let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
 
+    // R35: 安装信号 stream **同步在 spawn 之前**，确保 SIGTERM/SIGINT 不被默认 handler 抢走。
+    // tokio::signal::unix::signal 必须在收到信号前调，且要 hold stream 不被 drop。
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    tracing::info!("shutdown signal handlers installed (SIGINT + SIGTERM)");
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<&'static str>();
+    tokio::spawn(async move {
+        let reason: &'static str;
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => reason = "SIGINT (Ctrl-C)",
+                _ = sigterm.recv() => reason = "SIGTERM",
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.expect("ctrl_c");
+            reason = "Ctrl-C";
+        }
+        tracing::info!("received {reason}, graceful shutdown initiated");
+        let _ = shutdown_tx.send(reason);
+    });
+
     match (config.tls_cert.as_ref(), config.tls_key.as_ref()) {
         (Some(cert), Some(key)) => {
             tracing::info!("attune-server listening on https://{addr}");
             let tls_config =
                 axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+            // R35: graceful shutdown via axum_server Handle，等 oneshot 收到信号后 30s 内 drain
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            tokio::spawn(async move {
+                let _ = shutdown_rx.await;
+                shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+            });
             axum_server::bind_rustls(addr, tls_config)
+                .handle(handle)
                 .serve(app.into_make_service())
                 .await?;
         }
         _ => {
             tracing::info!("attune-server listening on http://{addr}");
             let listener = tokio::net::TcpListener::bind(&addr).await?;
-            axum::serve(listener, app).await?;
+            tokio::select! {
+                res = axum::serve(listener, app) => { res?; }
+                _ = &mut shutdown_rx => {}
+            }
         }
     }
 
+    tracing::info!("attune-server shut down cleanly");
     Ok(())
 }
+

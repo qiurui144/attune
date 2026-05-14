@@ -5,6 +5,56 @@ mod tray;
 
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
+/// Tauri command: upload local file paths to the embedded server's /api/v1/upload endpoint.
+/// Called by the web UI after receiving an `attune-file-drop` event.
+#[tauri::command]
+async fn upload_dropped_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::new();
+    let token = std::env::var("ATTUNE_DEV_TOKEN").unwrap_or_default();
+    let mut results = Vec::new();
+    for path_str in paths {
+        let path = std::path::Path::new(&path_str);
+        if !path.exists() || !path.is_file() {
+            results.push(format!("skip:{path_str}"));
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".to_string());
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                results.push(format!("error:{path_str}:{e}"));
+                continue;
+            }
+        };
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name.clone())
+            .mime_str("application/octet-stream")
+            .map_err(|e| e.to_string())?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let mut req = client
+            .post("http://127.0.0.1:18900/api/v1/upload")
+            .multipart(form);
+        if !token.is_empty() {
+            req = req.bearer_auth(&token);
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                results.push(format!("ok:{file_name}"));
+            }
+            Ok(resp) => {
+                results.push(format!("fail:{file_name}:{}", resp.status()));
+            }
+            Err(e) => {
+                results.push(format!("error:{file_name}:{e}"));
+            }
+        }
+    }
+    Ok(results)
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -14,6 +64,7 @@ fn main() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // 重复双击：激活已有主窗口（unminimize + show + focus），第二个进程立即退出
             tracing::info!("single-instance: another launch detected, focusing existing window");
@@ -24,6 +75,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![upload_dropped_paths])
         .setup(|app| {
             // 1. spawn 内嵌 axum
             let _server_handle = embedded_server::spawn_server();

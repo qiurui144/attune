@@ -5,9 +5,19 @@ import { useEffect } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
 import { Button } from '../components';
 import { toast } from '../components/Toast';
-import { theme, vaultState, hardware, settings } from '../store/signals';
+import {
+  theme,
+  vaultState,
+  hardware,
+  settings,
+  memberState,
+  settingsLocks,
+  folderLinks,
+} from '../store/signals';
 import { setLocale, currentLocale, t } from '../i18n';
 import { loadSettings, patchSettings } from '../hooks/useSettings';
+import { loadMemberState, loadSettingsLocks, memberLogout, memberLoginPassword } from '../hooks/useMember';
+import { loadFolderLinks } from '../hooks/useFolderLinks';
 import { api, clearToken } from '../store/api';
 
 /** LLM 厂商快捷预设 — 选中后自动填 endpoint + model，用户只需贴 API key。 */
@@ -57,7 +67,7 @@ const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
   ollama: {
     label: 'Ollama 本地（免费）',
     endpoint: 'http://localhost:11434/v1',
-    model: 'qwen2.5:7b',
+    model: 'auto',
   },
   openai: {
     label: 'OpenAI (~¥3/M tok)',
@@ -66,14 +76,15 @@ const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
   },
 };
 
-type SettingsTab = 'general' | 'ai' | 'data' | 'privacy' | 'about';
+type SettingsTab = 'general' | 'ai' | 'data' | 'member' | 'privacy' | 'about';
 
-const TABS: Array<{ key: SettingsTab; icon: string; label: string }> = [
-  { key: 'general', icon: '⚙', label: '通用' },
-  { key: 'ai', icon: '🤖', label: 'AI 大脑' },
-  { key: 'data', icon: '📂', label: '数据' },
-  { key: 'privacy', icon: '🔐', label: '隐私' },
-  { key: 'about', icon: 'ℹ', label: '关于' },
+const TABS: Array<{ key: SettingsTab; icon: string; labelKey: string }> = [
+  { key: 'general', icon: '⚙', labelKey: 'settings.tab.general' },
+  { key: 'ai', icon: '🤖', labelKey: 'settings.tab.ai' },
+  { key: 'data', icon: '📂', labelKey: 'settings.tab.data' },
+  { key: 'member', icon: '👤', labelKey: 'settings.tab.member' },
+  { key: 'privacy', icon: '🔐', labelKey: 'settings.tab.privacy' },
+  { key: 'about', icon: 'ℹ', labelKey: 'settings.tab.about' },
 ];
 
 export function SettingsView(): JSX.Element {
@@ -89,15 +100,16 @@ export function SettingsView(): JSX.Element {
   }, []);
 
   return (
-    <div style={{ height: '100%', display: 'flex' }}>
+    <div style={{ height: '100%', display: 'flex', minWidth: 0 }}>
       <nav
         aria-label="Settings sections"
         style={{
-          width: 200,
+          width: 'clamp(170px, 22vw, 220px)',
           flexShrink: 0,
           borderRight: '1px solid var(--color-border)',
           padding: 'var(--space-5) 0',
           background: 'var(--color-bg)',
+          overflow: 'auto',
         }}
       >
         <h2
@@ -109,7 +121,7 @@ export function SettingsView(): JSX.Element {
             marginBottom: 'var(--space-4)',
           }}
         >
-          设置
+          {t('settings.title')}
         </h2>
         {TABS.map((tab) => {
           const active = activeTab.value === tab.key;
@@ -139,7 +151,7 @@ export function SettingsView(): JSX.Element {
               }}
             >
               <span aria-hidden="true">{tab.icon}</span>
-              <span>{tab.label}</span>
+              <span>{t(tab.labelKey)}</span>
             </button>
           );
         })}
@@ -148,15 +160,19 @@ export function SettingsView(): JSX.Element {
       <div
         style={{
           flex: 1,
+          minWidth: 0,
           overflow: 'auto',
-          padding: 'var(--space-6) var(--space-7)',
+          padding: 'clamp(var(--space-4), 3vw, var(--space-6)) clamp(var(--space-4), 4vw, var(--space-7))',
         }}
       >
-        {activeTab.value === 'general' && <GeneralPanel />}
-        {activeTab.value === 'ai' && <AIPanel />}
-        {activeTab.value === 'data' && <DataPanel />}
-        {activeTab.value === 'privacy' && <PrivacyPanel />}
-        {activeTab.value === 'about' && <AboutPanel />}
+        <div style={{ maxWidth: 980, width: '100%' }}>
+          {activeTab.value === 'general' && <GeneralPanel />}
+          {activeTab.value === 'ai' && <AIPanel />}
+          {activeTab.value === 'data' && <DataPanel />}
+          {activeTab.value === 'member' && <MemberPanel />}
+          {activeTab.value === 'privacy' && <PrivacyPanel />}
+          {activeTab.value === 'about' && <AboutPanel />}
+        </div>
       </div>
     </div>
   );
@@ -164,10 +180,12 @@ export function SettingsView(): JSX.Element {
 
 function Section({
   title,
+  desc,
   children,
 }: {
   title: string;
-  children: JSX.Element | JSX.Element[];
+  desc?: string;
+  children?: JSX.Element | JSX.Element[] | (JSX.Element | false | null)[] | false | null;
 }): JSX.Element {
   return (
     <section style={{ marginBottom: 'var(--space-6)' }}>
@@ -176,11 +194,16 @@ function Section({
           fontSize: 'var(--text-lg)',
           fontWeight: 600,
           margin: 0,
-          marginBottom: 'var(--space-3)',
+          marginBottom: desc ? 'var(--space-1)' : 'var(--space-3)',
         }}
       >
         {title}
       </h3>
+      {desc && (
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 var(--space-3) 0' }}>
+          {desc}
+        </p>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
         {children}
       </div>
@@ -223,7 +246,6 @@ function GeneralPanel(): JSX.Element {
 
 function AIPanel(): JSX.Element {
   const llm = useComputed(() => (settings.value?.llm as Record<string, unknown>) ?? {});
-  const emb = useComputed(() => (settings.value?.embedding as Record<string, unknown>) ?? {});
 
   // 编辑态（草稿值，保存按钮才下发）
   const presetKey = useSignal<LlmPresetKey>('custom');
@@ -231,6 +253,10 @@ function AIPanel(): JSX.Element {
   const draftModel = useSignal<string>('');
   const draftApiKey = useSignal<string>('');
   const saving = useSignal(false);
+
+  // 锁定联动 — Paid 会员锁 cloud_llm 字段
+  useEffect(() => { void loadSettingsLocks(); }, []);
+  const llmLocked = settingsLocks.value?.cloud_llm === 'locked';
 
   // 同步 server 值到草稿（首次加载 / 外部更新时）
   useEffect(() => {
@@ -263,23 +289,41 @@ function AIPanel(): JSX.Element {
       const ok = await patchSettings(patch);
       if (ok) {
         draftApiKey.value = ''; // 清空输入框（key 已加密落盘）
-        toast('success', '已保存 LLM 配置');
+        toast('success', t('settings.ai.llm.saved_toast'));
       } else {
-        toast('error', '保存失败');
+        toast('error', t('settings.ai.llm.save_failed_toast'));
       }
     } finally {
       saving.value = false;
     }
   };
 
+  const lockedInputStyle: Record<string, string | number> = llmLocked
+    ? { ...(inputStyle as Record<string, string | number>), background: 'var(--color-surface-muted, #f4f5f7)', color: 'var(--color-text-secondary)', cursor: 'not-allowed' }
+    : (inputStyle as Record<string, string | number>);
+
   return (
     <>
-      <Section title="LLM 后端">
-        <SettingRow label="快捷预设">
+      <Section title={t('settings.ai.llm.title')}>
+        {llmLocked && (
+          <div style={{
+            padding: 'var(--space-3)',
+            background: 'rgba(212, 165, 116, 0.12)',
+            border: '1px solid var(--color-warning)',
+            borderRadius: 'var(--radius-md)',
+            fontSize: 'var(--text-sm)',
+            color: 'var(--color-text)',
+            marginBottom: 'var(--space-3)',
+          }}>
+            🔒 当前会员等级已锁定大模型配置（付费会员由云端 Gateway 自动下发，无需手动配置）
+          </div>
+        )}
+        <SettingRow label={t('settings.ai.llm.preset')}>
           <select
             value={presetKey.value}
+            disabled={llmLocked}
             onChange={(e) => onPresetChange(e.currentTarget.value as LlmPresetKey)}
-            style={{ ...selectStyle, minWidth: 240 }}
+            style={{ ...selectStyle, minWidth: 240, ...(llmLocked ? { background: 'var(--color-surface-muted, #f4f5f7)', cursor: 'not-allowed' } : {}) }}
             aria-label="LLM 厂商快捷预设"
           >
             {(Object.keys(LLM_PRESETS) as LlmPresetKey[]).map((k) => (
@@ -289,32 +333,35 @@ function AIPanel(): JSX.Element {
             ))}
           </select>
         </SettingRow>
-        <SettingRow label="Endpoint">
+        <SettingRow label={t('settings.ai.llm.endpoint')}>
           <input
             type="text"
             value={draftEndpoint.value}
+            disabled={llmLocked}
             onInput={(e) => (draftEndpoint.value = e.currentTarget.value)}
-            placeholder="https://api.example.com/v1"
-            style={inputStyle}
+            placeholder="例：https://api.openai.com/v1"
+            style={lockedInputStyle}
           />
         </SettingRow>
-        <SettingRow label="Chat 模型">
+        <SettingRow label={t('settings.ai.llm.model')}>
           <input
             type="text"
             value={draftModel.value}
+            disabled={llmLocked}
             onInput={(e) => (draftModel.value = e.currentTarget.value)}
             placeholder="例：deepseek-chat / qwen-plus / gpt-4o-mini"
-            style={inputStyle}
+            style={lockedInputStyle}
           />
         </SettingRow>
-        <SettingRow label="API Key">
+        <SettingRow label={t('settings.ai.llm.api_key')}>
           <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
             <input
               type="password"
               value={draftApiKey.value}
+              disabled={llmLocked}
               onInput={(e) => (draftApiKey.value = e.currentTarget.value)}
-              placeholder={llm.value.api_key_set ? '已配置（留空保留）' : '粘贴 sk-... '}
-              style={inputStyle}
+              placeholder={llm.value.api_key_set ? t('settings.ai.llm.api_key_keep') : t('settings.ai.llm.api_key_placeholder')}
+              style={lockedInputStyle}
             />
             <span
               style={{
@@ -332,24 +379,15 @@ function AIPanel(): JSX.Element {
             variant="primary"
             size="sm"
             onClick={() => void onSave()}
-            disabled={saving.value}
+            disabled={saving.value || llmLocked}
           >
-            {saving.value ? '保存中…' : '💾 保存 LLM 配置'}
+            {saving.value ? t('settings.ai.llm.saving') : t('settings.ai.llm.save')}
           </Button>
         </SettingRow>
       </Section>
 
-      <Section title="Embedding">
-        <SettingRow label="模型">
-          <code style={codeStyle}>{(emb.value.model as string) ?? '—'}</code>
-        </SettingRow>
-        <SettingRow label="Ollama URL">
-          <code style={codeStyle}>{(emb.value.ollama_url as string) ?? '—'}</code>
-        </SettingRow>
-      </Section>
-
-      <Section title="网络搜索">
-        <SettingRow label="启用">
+      <Section title={t('settings.ai.web_search.title')}>
+        <SettingRow label={t('settings.ai.web_search.enabled')}>
           <Toggle
             value={
               Boolean(
@@ -363,7 +401,7 @@ function AIPanel(): JSX.Element {
                   enabled: v,
                 },
               });
-              toast('success', v ? '已启用网络搜索' : '已关闭网络搜索');
+              toast('success', v ? t('settings.ai.web_search.enabled_toast') : t('settings.ai.web_search.disabled_toast'));
             }}
           />
         </SettingRow>
@@ -380,7 +418,11 @@ function DataPanel(): JSX.Element {
           完整管理见左栏「远程目录」视图。
         </p>
       </Section>
-      <Section title="导入 / 导出">
+      <FolderLinksSection />
+      <Section title="备份与迁移">
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 8px 0' }}>
+          导出后可用于换设备或备份。
+        </p>
         <Button
           variant="secondary"
           size="sm"
@@ -393,16 +435,16 @@ function DataPanel(): JSX.Element {
               const url = URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = url;
-              a.download = `attune-profile-${Date.now()}.vault-profile`;
+              a.download = `attune-backup-${Date.now()}.json`;
               a.click();
               URL.revokeObjectURL(url);
-              toast('success', '已导出 profile');
+              toast('success', '已导出备份文件');
             } catch (e) {
               toast('error', `导出失败：${e instanceof Error ? e.message : String(e)}`);
             }
           }}
         >
-          📥 导出 .vault-profile
+          📥 导出备份
         </Button>
       </Section>
     </>
@@ -443,7 +485,7 @@ function PrivacyPanel(): JSX.Element {
   return (
     <>
       <Section title="安全">
-        <SettingRow label="Vault 状态">
+        <SettingRow label="状态">
           <span style={{ fontSize: 'var(--text-sm)' }}>
             {vaultState.value === 'unlocked' ? '✓ 已解锁' : '🔒 已锁定'}
           </span>
@@ -453,7 +495,7 @@ function PrivacyPanel(): JSX.Element {
             variant="danger"
             size="sm"
             onClick={async () => {
-              if (!confirm('锁定后需要重新输入 Master Password 解锁。')) return;
+              if (!confirm('锁定后需要重新输入主密码解锁。')) return;
               try {
                 await api.post('/vault/lock');
                 clearToken();
@@ -463,29 +505,29 @@ function PrivacyPanel(): JSX.Element {
               }
             }}
           >
-            🔒 锁定 vault
+            🔒 锁定知识库
           </Button>
         </SettingRow>
       </Section>
 
       {/* v0.6 Phase A.5.5: 隐私分级状态 */}
-      <Section title="隐私分级 (Phase A.5)">
+      <Section title="数据脱敏">
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 12px 0', lineHeight: 1.5 }}>
-          Attune 的"成本/隐私三层模型"：
+          在发送到云端大模型前，会自动剔除敏感信息（手机号、身份证号、地址等）。
         </p>
-        <SettingRow label="L1 正则脱敏">
+        <SettingRow label="基础脱敏">
           <span style={{ fontSize: 'var(--text-sm)', color: privacyTier.value?.l1_regex_available ? 'var(--color-success)' : 'var(--color-text-secondary)' }}>
-            {privacyTier.value?.l1_regex_available ? '✓ 默认启用 (12 类格式化 PII)' : '— 未就绪'}
+            {privacyTier.value?.l1_regex_available ? '✓ 已启用（12 类常见敏感信息）' : '— 未就绪'}
           </span>
         </SettingRow>
-        <SettingRow label="L2 NER">
+        <SettingRow label="增强脱敏">
           <span style={{ fontSize: 'var(--text-sm)' }}>
-            {privacyTier.value?.l2_ner_available ? '✓ 可用' : '🟡 v0.6 排期 (~300MB ONNX 模型)'}
+            {privacyTier.value?.l2_ner_available ? '✓ 已启用' : '🟡 后续版本启用'}
           </span>
         </SettingRow>
-        <SettingRow label="L3 LLM 脱敏">
+        <SettingRow label="智能脱敏">
           <span style={{ fontSize: 'var(--text-sm)' }}>
-            {privacyTier.value?.l3_llm_available ? '✓ 可用 (Tier T3+/K3)' : '🟡 v0.7 排期，需高端硬件'}
+            {privacyTier.value?.l3_llm_available ? '✓ 已启用' : '🟡 需高端硬件或一体机'}
           </span>
         </SettingRow>
         {privacyTier.value?.upgrade_hint ? (
@@ -495,22 +537,22 @@ function PrivacyPanel(): JSX.Element {
         ) : <></>}
       </Section>
 
-      <Section title="🔒 受保护文件 (per-file L0)">
+      <Section title="🔒 机密文件">
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 8px 0', lineHeight: 1.5 }}>
-          标记为 L0 的文件 chunk 永不出现在云端 LLM context 里（强制本地 LLM）。
+          标记为机密的文件不会发送到云端大模型，仅本地处理。
           目前已标记: <strong>{protectedItems.value?.count ?? 0}</strong> 个文件。
         </p>
         <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', margin: 0, lineHeight: 1.5 }}>
-          标记方法：在文件列表右键文件 → "标记为机密" 或 PATCH /api/v1/items/{'{id}'}/privacy_tier。
+          标记方法：在文件列表右键文件 → "标记为机密"。
         </p>
       </Section>
 
-      <Section title="出网审计日志">
+      <Section title="云端调用记录">
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 12px 0', lineHeight: 1.5 }}>
-          每次云端 LLM 调用都本地落 audit log（SHA256 hash + 模型 + token 数 + 脱敏统计，<strong>0 用户原文落库</strong>）。
+          每次调用云端大模型都会在本地记录摘要（模型名 + 调用时长 + 脱敏统计），<strong>不保存原文</strong>。
           已记录: <strong>{auditCount.value}</strong> 条。
         </p>
-        <SettingRow label="导出 CSV">
+        <SettingRow label="导出记录">
           <Button
             variant="primary"
             size="sm"
@@ -534,6 +576,40 @@ function PrivacyPanel(): JSX.Element {
 
 function AboutPanel(): JSX.Element {
   const hw = hardware.value;
+  const m = memberState.value;
+  // 调 ai_stack 看底座 + cloud 状态 (一次性, AboutPanel 挂载时)
+  const aiStack = useSignal<Record<string, unknown> | null>(null);
+  useEffect(() => {
+    void api.get<Record<string, unknown>>('/ai_stack').then((d) => (aiStack.value = d)).catch(() => {});
+    void loadMemberState();
+  }, []);
+
+  const stackStatus = (key: string): { ok: boolean; note?: string } => {
+    const obj = aiStack.value?.[key] as { available?: boolean; note?: string } | undefined;
+    return { ok: !!obj?.available, note: obj?.note };
+  };
+  const emb = stackStatus('embedding');
+  const rer = stackStatus('rerank');
+  const ocr = stackStatus('ocr');
+  const asr = stackStatus('asr');
+  const ws = stackStatus('web_search');
+
+  // 数据目录: Linux/macOS = ~/.local/share/attune, Windows = %APPDATA%\attune
+  const dataDir = (() => {
+    if (typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('win')) {
+      return '%APPDATA%\\attune';
+    }
+    return '~/.local/share/attune';
+  })();
+
+  const memberLabel = !m
+    ? '未登录'
+    : m.kind === 'paid'
+      ? `付费会员 · ${m.account_id ?? '-'}`
+      : m.kind === 'free'
+        ? `免费会员 · ${m.account_id ?? '-'}`
+        : '未登录';
+
   return (
     <>
       <Section title="Attune">
@@ -550,10 +626,41 @@ function AboutPanel(): JSX.Element {
         <SettingRow label="版本">
           <code style={codeStyle}>0.6.0-dev</code>
         </SettingRow>
-        <SettingRow label="许可">
+        <SettingRow label="开源协议">
           <code style={codeStyle}>Apache-2.0</code>
         </SettingRow>
+        <SettingRow label="会员">
+          <span style={{ fontSize: 'var(--text-sm)' }}>{memberLabel}</span>
+        </SettingRow>
       </Section>
+
+      <Section title="本地服务">
+        <SettingRow label="向量索引">
+          <ServiceStatus ok={emb.ok} note={emb.note} />
+        </SettingRow>
+        <SettingRow label="重排引擎">
+          <ServiceStatus ok={rer.ok} note={rer.note} />
+        </SettingRow>
+        <SettingRow label="OCR 识别">
+          <ServiceStatus ok={ocr.ok} note={ocr.note} />
+        </SettingRow>
+        <SettingRow label="语音转写">
+          <ServiceStatus ok={asr.ok} note={asr.note} />
+        </SettingRow>
+        <SettingRow label="网络搜索">
+          <ServiceStatus ok={ws.ok} note={ws.note} />
+        </SettingRow>
+      </Section>
+
+      <Section title="存储位置">
+        <SettingRow label="数据目录">
+          <code style={codeStyle}>{dataDir}</code>
+        </SettingRow>
+        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', margin: 0, lineHeight: 1.5 }}>
+          所有知识库、配置、缓存均存储于此目录，可用作整体备份。
+        </p>
+      </Section>
+
       {hw && (
         <Section title="硬件">
           <SettingRow label="CPU">
@@ -562,12 +669,48 @@ function AboutPanel(): JSX.Element {
           <SettingRow label="GPU">
             <code style={codeStyle}>{String(hw.gpu_model ?? '—')}</code>
           </SettingRow>
-          <SettingRow label="RAM">
+          <SettingRow label="内存">
             <code style={codeStyle}>{String(hw.total_ram_gb ?? 0)} GB</code>
           </SettingRow>
         </Section>
       )}
+
+      <Section title="帮助与反馈">
+        <SettingRow label="文档">
+          <a href="https://github.com/qiurui144/attune#readme" target="_blank" rel="noopener noreferrer"
+             style={{ color: 'var(--color-accent)', fontSize: 'var(--text-sm)' }}>
+            GitHub README
+          </a>
+        </SettingRow>
+        <SettingRow label="反馈问题">
+          <a href="https://github.com/qiurui144/attune/issues" target="_blank" rel="noopener noreferrer"
+             style={{ color: 'var(--color-accent)', fontSize: 'var(--text-sm)' }}>
+            提交 Issue
+          </a>
+        </SettingRow>
+        <SettingRow label="源代码">
+          <a href="https://github.com/qiurui144/attune" target="_blank" rel="noopener noreferrer"
+             style={{ color: 'var(--color-accent)', fontSize: 'var(--text-sm)' }}>
+            github.com/qiurui144/attune
+          </a>
+        </SettingRow>
+      </Section>
     </>
+  );
+}
+
+function ServiceStatus({ ok, note }: { ok: boolean; note?: string }): JSX.Element {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--text-sm)' }}>
+      {ok ? (
+        <span style={{ color: 'var(--color-success)' }}>✓ 已就绪</span>
+      ) : (
+        <span style={{ color: 'var(--color-warning)' }}>⚠ 未就绪</span>
+      )}
+      {note && !ok && (
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>{note}</span>
+      )}
+    </span>
   );
 }
 
@@ -667,5 +810,320 @@ function Toggle({
         }}
       />
     </button>
+  );
+}
+
+// ============ Member Panel ============
+
+function MemberPanel(): JSX.Element {
+  useEffect(() => {
+    void loadMemberState();
+    void loadSettingsLocks();
+  }, []);
+
+  const m = memberState.value;
+
+  const email = useSignal('');
+  const password = useSignal('');
+  const logging = useSignal(false);
+
+  // FEAT-1: 自部署 cloud endpoint 配置 (UX gap 关闭).
+  // 默认 attune.ai, 自部署用户填入私有 cluster URL.
+  const showAdvancedCloud = useSignal(false);
+  const cloudAccountsUrl = useSignal('');
+  const cloudGatewayUrl = useSignal('');
+  const cloudPluginhubUrl = useSignal('');
+
+  useEffect(() => {
+    // 初始化时把 settings 已有的 cloud config 显示到 input
+    const s = settings.value as Record<string, unknown> | null;
+    if (s && typeof s === 'object') {
+      const cloud = s['cloud'] as Record<string, string | null> | undefined;
+      const pluginhub = s['pluginhub'] as Record<string, string | null> | undefined;
+      if (cloud?.accounts_url) cloudAccountsUrl.value = cloud.accounts_url ?? '';
+      if (cloud?.gateway_url) cloudGatewayUrl.value = cloud.gateway_url ?? '';
+      if (pluginhub?.url) cloudPluginhubUrl.value = pluginhub.url ?? '';
+    }
+  }, [settings.value]);
+
+  async function saveCloudConfig() {
+    const patch: Record<string, unknown> = {
+      cloud: {
+        accounts_url: cloudAccountsUrl.value.trim() || null,
+        gateway_url: cloudGatewayUrl.value.trim() || null,
+      },
+    };
+    if (cloudPluginhubUrl.value.trim()) {
+      patch.pluginhub = { url: cloudPluginhubUrl.value.trim() };
+    }
+    const ok = await patchSettings(patch);
+    if (ok) toast('success', '已保存 cloud 后端配置, plugin hub 已热重载');
+    else toast('error', '保存失败');
+  }
+
+  return (
+    <div>
+      <Section title="会员状态">
+        {!m && <p style={{ color: 'var(--color-text-secondary)' }}>加载中...</p>}
+        {m && m.is_logged_in && (
+          <>
+            <p>
+              状态:{' '}
+              <strong style={{ color: m.is_paid ? 'var(--color-accent)' : 'var(--color-text)' }}>
+                {m.kind === 'paid' ? '付费会员' : '免费会员'}
+              </strong>
+            </p>
+            {m.account_id && <p>账号: <code>{m.account_id}</code></p>}
+            {m.license_id && <p>License: <code>{m.license_id}</code></p>}
+            <Button
+              variant="ghost"
+              onClick={async () => {
+                if (await memberLogout()) toast('success', '已登出');
+                else toast('error', '登出失败');
+              }}
+            >
+              登出
+            </Button>
+          </>
+        )}
+        {m && !m.is_logged_in && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 320 }}>
+            <p style={{ color: 'var(--color-text-secondary)', margin: '0 0 4px' }}>
+              登录 Attune 账号以激活会员权益
+            </p>
+            <input
+              type="email"
+              placeholder="邮箱"
+              value={email.value}
+              onInput={(e) => { email.value = (e.target as HTMLInputElement).value; }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <input
+              type="password"
+              placeholder="密码"
+              value={password.value}
+              onInput={(e) => { password.value = (e.target as HTMLInputElement).value; }}
+              onKeyDown={async (e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  await doLogin();
+                }
+              }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <Button
+              variant="primary"
+              disabled={logging.value || !email.value || !password.value}
+              onClick={doLogin}
+            >
+              {logging.value ? '登录中...' : '登录'}
+            </Button>
+          </div>
+        )}
+      </Section>
+
+      {/* 锁定状态体现在各 tab 的实际字段位置 (灰色 + 🔒), 不再单独矩阵显示 */}
+
+      {/* FEAT-1: 自部署 cloud 后端地址 (折叠, 默认隐藏 — 仅自部署 / 企业内网用户需要) */}
+      <Section title="高级 · 自部署 cloud 后端">
+        <button
+          onClick={() => { showAdvancedCloud.value = !showAdvancedCloud.value; }}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--color-accent)',
+            cursor: 'pointer',
+            padding: 0,
+            fontSize: 'var(--text-sm)',
+            marginBottom: 8,
+          }}
+        >
+          {showAdvancedCloud.value ? '▼ 隐藏' : '▶ 展开'} · 默认使用 attune.ai 公共云
+        </button>
+        {showAdvancedCloud.value && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 480 }}>
+            <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)', margin: '0 0 4px' }}>
+              企业内网 / 自部署 attune-cloud-* 容器时填入这三个 URL. 留空走 attune.ai 公共云.
+            </p>
+            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+              accounts (会员登录 / license)
+            </label>
+            <input
+              type="url"
+              placeholder="https://accounts.your-company.com"
+              value={cloudAccountsUrl.value}
+              onInput={(e) => { cloudAccountsUrl.value = (e.target as HTMLInputElement).value; }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+              gateway (LLM token gateway)
+            </label>
+            <input
+              type="url"
+              placeholder="https://gateway.your-company.com"
+              value={cloudGatewayUrl.value}
+              onInput={(e) => { cloudGatewayUrl.value = (e.target as HTMLInputElement).value; }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+              pluginhub (plugin 市场)
+            </label>
+            <input
+              type="url"
+              placeholder="https://hub.your-company.com"
+              value={cloudPluginhubUrl.value}
+              onInput={(e) => { cloudPluginhubUrl.value = (e.target as HTMLInputElement).value; }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <Button variant="primary" onClick={saveCloudConfig}>
+              保存 cloud 后端配置
+            </Button>
+          </div>
+        )}
+      </Section>
+    </div>
+  );
+
+  async function doLogin() {
+    if (!email.value || !password.value) return;
+    logging.value = true;
+    const result = await memberLoginPassword(email.value.trim(), password.value);
+    logging.value = false;
+    if (result.ok) {
+      toast('success', '登录成功');
+      email.value = '';
+      password.value = '';
+    } else {
+      toast('error', `登录失败：${result.error ?? '未知错误'}`);
+    }
+  }
+}
+
+// ============ Folder Links Panel (注入 DataPanel 用, 这里也单独 export) ============
+
+export function FolderLinksSection(): JSX.Element {
+  const picking = useSignal(false);
+  const canPickFolder = typeof window !== 'undefined'
+    && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+
+  useEffect(() => {
+    void loadFolderLinks();
+  }, []);
+
+  async function onAddFolder(): Promise<void> {
+    if (!canPickFolder) {
+      toast('warning', '请在桌面应用窗口中添加本地目录');
+      return;
+    }
+    picking.value = true;
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({ directory: true, multiple: true, title: '选择要关联的文件夹' });
+      const chosen = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      let added = 0;
+      for (const path of chosen) {
+        try {
+          await api.post('/index/bind', { path, recursive: true });
+          added += 1;
+        } catch {
+          // 单个失败不阻塞其它
+        }
+      }
+      if (added > 0) {
+        toast('success', `已添加 ${added} 个目录，开始自动入库`);
+        await loadFolderLinks();
+      }
+    } catch (e) {
+      toast('error', e instanceof Error ? e.message : '添加失败');
+    } finally {
+      picking.value = false;
+    }
+  }
+
+  const links = folderLinks.value;
+  return (
+    <Section
+      title="本地知识库目录"
+      desc="已关联的本地文件夹会被自动监听、自动入库"
+    >
+      <div style={{ marginBottom: 'var(--space-3)' }}>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={picking.value || !canPickFolder}
+          onClick={() => void onAddFolder()}
+        >
+          {picking.value ? '正在打开文件夹选择…' : '+ 添加本地目录'}
+        </Button>
+        {!canPickFolder && (
+          <span style={{ marginLeft: 'var(--space-3)', fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+            （仅桌面应用窗口内可用；浏览器调试模式无文件夹弹窗）
+          </span>
+        )}
+      </div>
+      {links.length === 0 && (
+        <p style={{ color: 'var(--color-text-secondary)' }}>
+          尚未关联任何本地目录。
+        </p>
+      )}
+      {links.length > 0 && (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
+          <thead>
+            <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--color-border)' }}>
+              <th style={{ padding: 8 }}>路径</th>
+              <th style={{ padding: 8 }}>项目</th>
+              <th style={{ padding: 8 }}>添加时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {links.map((fl, idx) => (
+              <tr
+                key={fl.id ?? `${fl.path}-${idx}`}
+                style={{ borderBottom: '1px solid var(--color-border-subtle)' }}
+              >
+                <td style={{ padding: 8, fontFamily: 'monospace' }}>{fl.path}</td>
+                <td style={{ padding: 8 }}>{fl.project_id ?? '默认'}</td>
+                <td style={{ padding: 8 }}>{fl.added_at ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Section>
   );
 }

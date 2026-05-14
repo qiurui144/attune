@@ -1,0 +1,32 @@
+[package]
+name = "attune-accounts"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Attune accounts service — reference SaaS impl for device 1:2 binding"
+
+[[bin]]
+name = "attune-accounts"
+path = "src/main.rs"
+
+[lib]
+name = "attune_accounts"
+path = "src/lib.rs"
+
+[dependencies]
+attune-core = { path = "../attune-core" }
+axum = { version = "0.8", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+hex = "0.4"
+
+[dev-dependencies]
+reqwest = { workspace = true, features = ["json", "blocking"] }
+tower = "0.5"
+
+[lints]
+workspace = true

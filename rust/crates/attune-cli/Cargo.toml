@@ -13,7 +13,12 @@ path = "src/main.rs"
 attune-core = { path = "../attune-core" }
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
+serde = { workspace = true }
 serde_json = { workspace = true }
+hex = "0.4"
+chrono = "0.4"
+reqwest = { workspace = true, features = ["blocking", "json", "multipart"] }
+tempfile = "3"
 
 [lints]
 workspace = true

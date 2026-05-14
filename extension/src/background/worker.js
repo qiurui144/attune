@@ -94,6 +94,9 @@ async function handleMessage(msg, sender) {
     case MSG.CAPTURE_CONVERSATION:
       return handleCapture(msg.data);
 
+    case MSG.CAPTURE_PAGE:
+      return handleCapturePage(sender);
+
     case 'BROWSE_SIGNAL':
       // G1 W3 batch B：入队，由 30s 周期 flush 上报后端
       // payload 已被 content script 验证过 whitelist + HARD_BLACKLIST + pause
@@ -218,6 +221,37 @@ async function handleCapture(data) {
     dedup.delete(hash);
     throw err;
   }
+}
+
+// --- 主动保存当前页面 ---
+async function handleCapturePage(sender) {
+  // 获取当前激活 tab（sidepanel 场景 sender.tab 为 undefined）
+  let tab = sender?.tab;
+  if (!tab) {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    tab = activeTab;
+  }
+  if (!tab?.id) return { error: 'No active tab' };
+
+  // 向当前页 content script 请求页面内容
+  let pageData;
+  try {
+    pageData = await chrome.tabs.sendMessage(tab.id, { type: MSG.GET_PAGE_CONTENT });
+  } catch (err) {
+    return { error: `Content script not available: ${err.message}` };
+  }
+
+  if (!pageData?.content?.trim()) return { error: 'Page has no readable content' };
+
+  const data = {
+    title: pageData.title || tab.title || pageData.url,
+    content: pageData.content,
+    source_type: 'webpage',
+    url: pageData.url || tab.url || '',
+    domain: pageData.domain || (tab.url ? new URL(tab.url).hostname : ''),
+  };
+
+  return handleCapture(data);
 }
 
 // --- 对话摘要后入库 ---
