@@ -28,7 +28,7 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
 
   async function pickFolder() {
     if (!canPickFolder) {
-      toast('warning', '请在桌面版中使用文件夹弹窗');
+      toast('warning', t('wizard.data.folder.toast_browser_only'));
       return;
     }
 
@@ -38,7 +38,7 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
       const selected = await open({
         directory: true,
         multiple: true,
-        title: '选择要绑定的文件夹',
+        title: t('wizard.data.folder.dialog_title'),
       });
       const chosen = Array.isArray(selected) ? selected : selected ? [selected] : [];
       const normalized = chosen
@@ -64,11 +64,11 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
 
   async function handleFinish() {
     if (!mode) {
-      toast('warning', '请选择一个选项');
+      toast('warning', t('wizard.data.toast.choose_mode'));
       return;
     }
     if (mode === 'folder' && folderPaths.length === 0) {
-      toast('warning', '请先选择至少一个要绑定的文件夹');
+      toast('warning', t('wizard.data.toast.need_folder'));
       return;
     }
     onUpdate({ dataMode: mode });
@@ -78,21 +78,21 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
       if (mode === 'folder' && folderPaths.length > 0) {
         await Promise.all(folderPaths.map((path) => api.post('/index/bind', { path, recursive: true })));
         onUpdate({ boundFolders: folderPaths });
-        toast('success', `已绑定 ${folderPaths.length} 个文件夹，后台开始索引`);
+        toast('success', t('wizard.data.toast.bound_n', { count: folderPaths.length }));
       } else if (mode === 'import') {
         const file = fileInputRef.current?.files?.[0];
         if (file) {
           // Critical 1.3 修复：文件大小 + shape 校验，防恶意 profile 打挂后端
           const MAX_SIZE = 50 * 1024 * 1024; // 50 MB
           if (file.size > MAX_SIZE) {
-            throw new Error(`文件过大（>${(MAX_SIZE / 1024 / 1024).toFixed(0)}MB）`);
+            throw new Error(t('wizard.data.err.file_too_large', { mb: (MAX_SIZE / 1024 / 1024).toFixed(0) }));
           }
           const text = await file.text();
           let profile: unknown;
           try {
             profile = JSON.parse(text);
           } catch {
-            throw new Error('文件不是有效 JSON');
+            throw new Error(t('wizard.data.err.invalid_json'));
           }
           if (
             !profile ||
@@ -100,11 +100,11 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
             Array.isArray(profile) ||
             !('version' in (profile as object))
           ) {
-            throw new Error('不是合法的 .vault-profile 文件（缺 version 字段）');
+            throw new Error(t('wizard.data.err.invalid_profile'));
           }
           await api.post('/profile/import', profile);
           onUpdate({ importedProfile: file.name });
-          toast('success', `已导入 ${file.name}`);
+          toast('success', t('wizard.data.toast.imported', { name: file.name }));
         }
       }
       onFinish();
@@ -131,7 +131,7 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
         <Option
           icon="📂"
           title={t('wizard.data.folder.title')}
-          desc={canPickFolder ? t('wizard.data.folder.desc') : '请在桌面版中使用文件夹弹窗绑定目录'}
+          desc={canPickFolder ? t('wizard.data.folder.desc') : t('wizard.data.folder.desc_browser_only')}
           selected={mode === 'folder'}
           onClick={() => setMode('folder')}
         >
@@ -168,7 +168,7 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
                   fontWeight: 600,
                 }}
               >
-                {folderPicking ? '打开文件夹选择器…' : '添加文件夹'}
+                {folderPicking ? t('wizard.data.folder.btn_picking') : t('wizard.data.folder.btn_add')}
               </div>
               <div
                 style={{
@@ -197,7 +197,7 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
                     ))}
                   </div>
                 ) : (
-                  '尚未选择文件夹'
+                  t('wizard.data.folder.empty')
                 )}
               </div>
             </div>
@@ -337,7 +337,7 @@ function FolderChip({ path, onRemove }: { path: string; onRemove: () => void }):
       <span
         role="button"
         tabIndex={0}
-        aria-label={`移除 ${path}`}
+        aria-label={t('wizard.data.folder.aria_remove', { path })}
         onClick={(e) => {
           e.stopPropagation();
           onRemove();

@@ -195,6 +195,9 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Guard middleware for all other routes
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::vault_guard))
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::bearer_auth_guard))
+        // 访问日志 — 放最外层 (axum middleware 调用顺序: 外 -> 内 -> handler -> 内 -> 外),
+        // 保证 4xx 也能记 (即便 vault_guard 拒了请求, access_log 仍记 status).
+        .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::access_log))
         .layer(cors)
         .with_state(shared_state)
 }

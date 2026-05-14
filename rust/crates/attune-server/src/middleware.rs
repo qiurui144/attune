@@ -47,6 +47,72 @@ pub async fn vault_guard(
     }
 }
 
+/// 请求维度访问日志 — 用户审计 "UI 操作 ↔ API 调用" 对应必备.
+///
+/// 为何不用 tower_http::TraceLayer:
+/// - 我们想记 **member_state** (LoggedOut / Free / Paid + account_id), TraceLayer 只能记 HTTP 元信息
+/// - 我们想统一格式 (`access: <method> <path> <status> <duration_ms> member=<kind> ...`),
+///   方便 grep / shipper / 审计回放
+/// - sensitive endpoints 路径里可能含 id (e.g. `/api/v1/items/<uuid>`), 这里只记完整 path 不抓 body
+///
+/// 输出走 `tracing::info!` (target=access), 便于 `RUST_LOG=access=info` 过滤.
+pub async fn access_log(
+    State(state): State<SharedState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let start = std::time::Instant::now();
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let query = request.uri().query().map(|q| q.to_string());
+
+    // 抓 member_state 快照 (要 release lock 才能调 next)
+    let (member_kind, account_id) = {
+        let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let kind = match &m {
+            attune_core::member_session::MemberState::LoggedOut => "logged_out",
+            attune_core::member_session::MemberState::Free { .. } => "free",
+            attune_core::member_session::MemberState::Paid { .. } => "paid",
+        };
+        let acct = m.account_id().map(|s| s.to_string());
+        (kind, acct)
+    };
+
+    let response = next.run(request).await;
+    let status = response.status().as_u16();
+    let dur_ms = start.elapsed().as_millis();
+
+    // 健康检查类高频路径降级为 debug, 其他走 info; 4xx/5xx 升级为 warn
+    let acct_disp = account_id.as_deref().unwrap_or("-");
+    let query_disp = query.as_deref().unwrap_or("");
+    if status >= 500 {
+        tracing::warn!(
+            target: "access",
+            "{method} {path}{} {status} {dur_ms}ms member={member_kind} account={acct_disp}",
+            if query_disp.is_empty() { "".to_string() } else { format!("?{query_disp}") }
+        );
+    } else if status >= 400 {
+        tracing::info!(
+            target: "access",
+            "{method} {path}{} {status} {dur_ms}ms member={member_kind} account={acct_disp}",
+            if query_disp.is_empty() { "".to_string() } else { format!("?{query_disp}") }
+        );
+    } else if path == "/health" || path == "/api/v1/status/health" {
+        tracing::debug!(
+            target: "access",
+            "{method} {path} {status} {dur_ms}ms"
+        );
+    } else {
+        tracing::info!(
+            target: "access",
+            "{method} {path}{} {status} {dur_ms}ms member={member_kind} account={acct_disp}",
+            if query_disp.is_empty() { "".to_string() } else { format!("?{query_disp}") }
+        );
+    }
+
+    response
+}
+
 /// Bearer auth guard: optional, enabled by `require_auth` flag on AppState.
 /// Certain high-sensitivity endpoints always require Bearer token regardless of the flag.
 pub async fn bearer_auth_guard(

@@ -40,6 +40,9 @@ export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.El
   const [show, setShow] = useState(false);
   const [exportSecret, setExportSecret] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // submitStage 让按钮文案 / aria-live 提示能反映"正在派生主密钥"vs"正在解锁"vs"提交中".
+  // Argon2id 派生在 setup 路径上耗时 ~10s, 静默会被误认为"卡住".
+  const [submitStage, setSubmitStage] = useState<'idle' | 'deriving' | 'unlocking'>('idle');
   const [error, setError] = useState<string | null>(null);
   const [vaultState, setVaultState] = useState<'checking' | 'sealed' | 'locked' | 'unlocked'>('checking');
   const [memberEmail, setMemberEmail] = useState(ctx.memberEmail ?? '');
@@ -102,6 +105,9 @@ export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.El
     setError(null);
     try {
       if (isSetupMode) {
+        // Argon2id 派生 ~10s, 提前给用户"正在派生主密钥"的视觉信号 + toast.
+        setSubmitStage('deriving');
+        toast('info', t('wizard.pwd.toast_deriving'));
         // Important 2.3：密码 setup 不走自动重试
         const res = await api.post<{ status: string; state?: string; token?: string; recovery_key?: string }>(
           '/vault/setup',
@@ -111,7 +117,7 @@ export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.El
         if (res.token) setToken(res.token);
         if (res.recovery_key) {
           downloadText('attune-recovery-key.txt', res.recovery_key);
-          toast('warning', '已下载恢复密钥：忘记主密码时可用它重置密码并保留数据');
+          toast('warning', t('wizard.pwd.recovery_downloaded'));
         }
 
         // 可选：生成 device secret 文件（后端有端点 export_device_secret）
@@ -121,12 +127,13 @@ export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.El
               '/vault/device-secret/export',
             );
             downloadText('attune-device-secret.txt', secretRes.device_secret);
-            toast('info', '已下载 Device Secret（妥善保管，可用于其他设备导入）');
+            toast('info', t('wizard.pwd.device_secret_downloaded'));
           } catch {
-            toast('warning', 'Device Secret 导出失败，可以稍后在 Settings 里再生成');
+            toast('warning', t('wizard.pwd.device_secret_failed'));
           }
         }
       } else if (vaultState === 'locked') {
+        setSubmitStage('unlocking');
         const unlock = await api.post<{ token?: string }>('/vault/unlock', { password: pwd });
         if (unlock.token) setToken(unlock.token);
       }
@@ -149,8 +156,15 @@ export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.El
 
       setError(msg);
       setSubmitting(false);
+      setSubmitStage('idle');
     }
   }
+
+  // 按钮文案: idle 时显示 "Next →", 派生/解锁中显示对应进度文案.
+  const submitLabel =
+    submitStage === 'deriving' ? t('wizard.pwd.btn_deriving') :
+    submitStage === 'unlocking' ? t('wizard.pwd.btn_unlocking') :
+    `${t('common.next')} →`;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
@@ -353,6 +367,24 @@ export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.El
         </div>
       )}
 
+      {/* 派生过程 aria-live 通知, 屏幕阅读器 + 视觉双通道 */}
+      {submitStage !== 'idle' && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            padding: 'var(--space-2) var(--space-3)',
+            background: 'var(--color-surface)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-sm)',
+            fontSize: 'var(--text-sm)',
+            color: 'var(--color-text-secondary)',
+          }}
+        >
+          ⏳ {submitLabel}
+        </div>
+      )}
+
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <Button
           variant="primary"
@@ -361,7 +393,7 @@ export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.El
           loading={submitting}
           onClick={handleSubmit}
         >
-          {t('common.next')} →
+          {submitLabel}
         </Button>
       </div>
     </div>

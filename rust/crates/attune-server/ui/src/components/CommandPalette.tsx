@@ -5,7 +5,7 @@ import { useEffect, useRef } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
 import { api } from '../store/api';
 import { useFocusTrap } from '../hooks/useFocusTrap';
-import { t } from '../i18n';
+import { t, currentLocale } from '../i18n';
 import {
   chatSessions,
   items,
@@ -22,13 +22,17 @@ type SearchResult = {
   action: () => void;
 };
 
-const VIEW_SHORTCUTS: SearchResult[] = [
-  { kind: 'view', id: 'v-chat', title: `💬 ${t('cmd.view.chat')}`, action: () => (currentView.value = 'chat') },
-  { kind: 'view', id: 'v-items', title: `📄 ${t('cmd.view.items')}`, action: () => (currentView.value = 'items') },
-  { kind: 'view', id: 'v-remote', title: `🔗 ${t('cmd.view.remote')}`, action: () => (currentView.value = 'remote') },
-  { kind: 'view', id: 'v-knowledge', title: `📊 ${t('cmd.view.knowledge')}`, action: () => (currentView.value = 'knowledge') },
-  { kind: 'view', id: 'v-settings', title: `⚙ ${t('cmd.view.settings')}`, action: () => (currentView.value = 'settings') },
-];
+// Build view shortcuts inside the component (locale-reactive) — module-level
+// const would snapshot the initial locale and never refresh on setLocale().
+function buildViewShortcuts(): SearchResult[] {
+  return [
+    { kind: 'view', id: 'v-chat',       title: `💬 ${t('cmd.view.chat')}`,       action: () => (currentView.value = 'chat') },
+    { kind: 'view', id: 'v-items',      title: `📄 ${t('cmd.view.items')}`,      action: () => (currentView.value = 'items') },
+    { kind: 'view', id: 'v-remote',     title: `🔗 ${t('cmd.view.remote')}`,     action: () => (currentView.value = 'remote') },
+    { kind: 'view', id: 'v-knowledge',  title: `📊 ${t('cmd.view.knowledge')}`,  action: () => (currentView.value = 'knowledge') },
+    { kind: 'view', id: 'v-settings',   title: `⚙ ${t('cmd.view.settings')}`,   action: () => (currentView.value = 'settings') },
+  ];
+}
 
 export type CommandPaletteProps = {
   open: boolean;
@@ -86,12 +90,15 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps): JSX.Elem
   }, [query.value, open]);
 
   const results = useComputed<SearchResult[]>(() => {
+    // Subscribe to locale changes so titles re-render on setLocale().
+    void currentLocale.value;
+    const shortcuts = buildViewShortcuts();
     const q = query.value.trim().toLowerCase();
     const out: SearchResult[] = [];
 
     // 视图（前缀匹配）
     if (!q || 'views'.includes(q) || q.length < 2) {
-      out.push(...VIEW_SHORTCUTS.filter((v) => !q || v.title.toLowerCase().includes(q)));
+      out.push(...shortcuts.filter((v) => !q || v.title.toLowerCase().includes(q)));
     }
 
     // 会话
