@@ -77,6 +77,7 @@ pub async fn update_settings(
         "skills",  // Sprint 2 Skills Router: { disabled: string[] }
         "wizard",  // wizard completion state: { complete: bool, current_step: int }
         "pluginhub", // G2 (2026-05-01): { url, license_key }
+        "cloud", // FEAT-1 (2026-05-14): { accounts_url } — 自部署 / 私有 cloud 环境覆盖默认 attune.ai
     ];
     // URL 字段白名单 scheme 校验（防 javascript: / data: 注入成 XSS 种子）
     if let Some(body_obj) = body.as_object() {
@@ -282,6 +283,16 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
         "pluginhub": {
             "url": null,                  // 例: "https://hub.attune.ai"
             "license_key": null           // 同 attune Pro 会员 license key（与 LLM Gateway 共享）
+        },
+
+        // FEAT-1 (2026-05-14) — 自部署 cloud cluster 入口
+        // null = 默认 attune.ai 公共 cloud (accounts.attune.ai / hub.attune.ai / gateway.attune.ai)
+        // 自部署: 填入私有 cluster URL, 三个 endpoint 分别对应不同微服务.
+        // 用户场景: 企业内网部署 attune-cloud-* 容器后, 在 Settings UI 填入这三个地址
+        "cloud": {
+            "accounts_url": null,         // 例: "https://accounts.your-company.com" (member login / license)
+            "gateway_url": null,          // 例: "https://gateway.your-company.com" (LLM token gateway)
+                                          // pluginhub URL 仍走上方 pluginhub.url (历史命名保留)
         },
 
         // ── 不在 UI 暴露（保留后端行为）──

@@ -827,6 +827,40 @@ function MemberPanel(): JSX.Element {
   const password = useSignal('');
   const logging = useSignal(false);
 
+  // FEAT-1: 自部署 cloud endpoint 配置 (UX gap 关闭).
+  // 默认 attune.ai, 自部署用户填入私有 cluster URL.
+  const showAdvancedCloud = useSignal(false);
+  const cloudAccountsUrl = useSignal('');
+  const cloudGatewayUrl = useSignal('');
+  const cloudPluginhubUrl = useSignal('');
+
+  useEffect(() => {
+    // 初始化时把 settings 已有的 cloud config 显示到 input
+    const s = settings.value as Record<string, unknown> | null;
+    if (s && typeof s === 'object') {
+      const cloud = s['cloud'] as Record<string, string | null> | undefined;
+      const pluginhub = s['pluginhub'] as Record<string, string | null> | undefined;
+      if (cloud?.accounts_url) cloudAccountsUrl.value = cloud.accounts_url ?? '';
+      if (cloud?.gateway_url) cloudGatewayUrl.value = cloud.gateway_url ?? '';
+      if (pluginhub?.url) cloudPluginhubUrl.value = pluginhub.url ?? '';
+    }
+  }, [settings.value]);
+
+  async function saveCloudConfig() {
+    const patch: Record<string, unknown> = {
+      cloud: {
+        accounts_url: cloudAccountsUrl.value.trim() || null,
+        gateway_url: cloudGatewayUrl.value.trim() || null,
+      },
+    };
+    if (cloudPluginhubUrl.value.trim()) {
+      patch.pluginhub = { url: cloudPluginhubUrl.value.trim() };
+    }
+    const ok = await patchSettings(patch);
+    if (ok) toast('success', '已保存 cloud 后端配置, plugin hub 已热重载');
+    else toast('error', '保存失败');
+  }
+
   return (
     <div>
       <Section title="会员状态">
@@ -903,6 +937,85 @@ function MemberPanel(): JSX.Element {
       </Section>
 
       {/* 锁定状态体现在各 tab 的实际字段位置 (灰色 + 🔒), 不再单独矩阵显示 */}
+
+      {/* FEAT-1: 自部署 cloud 后端地址 (折叠, 默认隐藏 — 仅自部署 / 企业内网用户需要) */}
+      <Section title="高级 · 自部署 cloud 后端">
+        <button
+          onClick={() => { showAdvancedCloud.value = !showAdvancedCloud.value; }}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--color-accent)',
+            cursor: 'pointer',
+            padding: 0,
+            fontSize: 'var(--text-sm)',
+            marginBottom: 8,
+          }}
+        >
+          {showAdvancedCloud.value ? '▼ 隐藏' : '▶ 展开'} · 默认使用 attune.ai 公共云
+        </button>
+        {showAdvancedCloud.value && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 480 }}>
+            <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)', margin: '0 0 4px' }}>
+              企业内网 / 自部署 attune-cloud-* 容器时填入这三个 URL. 留空走 attune.ai 公共云.
+            </p>
+            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+              accounts (会员登录 / license)
+            </label>
+            <input
+              type="url"
+              placeholder="https://accounts.your-company.com"
+              value={cloudAccountsUrl.value}
+              onInput={(e) => { cloudAccountsUrl.value = (e.target as HTMLInputElement).value; }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+              gateway (LLM token gateway)
+            </label>
+            <input
+              type="url"
+              placeholder="https://gateway.your-company.com"
+              value={cloudGatewayUrl.value}
+              onInput={(e) => { cloudGatewayUrl.value = (e.target as HTMLInputElement).value; }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+              pluginhub (plugin 市场)
+            </label>
+            <input
+              type="url"
+              placeholder="https://hub.your-company.com"
+              value={cloudPluginhubUrl.value}
+              onInput={(e) => { cloudPluginhubUrl.value = (e.target as HTMLInputElement).value; }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <Button variant="primary" onClick={saveCloudConfig}>
+              保存 cloud 后端配置
+            </Button>
+          </div>
+        )}
+      </Section>
     </div>
   );
 
