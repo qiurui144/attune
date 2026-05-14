@@ -12,7 +12,8 @@ Attune 是面向**任何领域个人知识工作者**的通用 AI 知识库 — 
 
 ## 📥 下载安装包
 
-最新正式版：**v0.6.0 GA** 🎉
+最新正式版：**server v0.6.1** · **desktop v0.6.0**
+最新预发版：**v0.6.3-rc.1**（仅 server tarball；desktop 安装包待 NSIS 修复后发版）
 
 ### 桌面应用（含 Web UI + 系统托盘） — [desktop-v0.6.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.6.0)
 
@@ -23,14 +24,14 @@ Attune 是面向**任何领域个人知识工作者**的通用 AI 知识库 — 
 | Linux deb | [`Attune_0.6.0_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.deb) | 27 MB | Debian/Ubuntu |
 | Linux AppImage | [`Attune_0.6.0_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.AppImage) | 94 MB | 通用 Linux |
 
-### Server / CLI 二进制（headless / NAS / 服务器） — [v0.6.0 Release](https://github.com/qiurui144/attune/releases/tag/v0.6.0)
+### Server / CLI 二进制（headless / NAS / 服务器） — [v0.6.1 Release](https://github.com/qiurui144/attune/releases/tag/v0.6.1)
 
-| 平台 | 文件 | 大小 |
-|------|------|------|
-| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-linux-x86_64.tar.gz) | 33.5 MB |
-| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-linux-aarch64.tar.gz) | 34.1 MB |
-| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-macos-aarch64.tar.gz) | 21.7 MB |
-| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-windows-x86_64.zip) | 28.3 MB |
+| 平台 | 文件 |
+|------|------|
+| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-x86_64.tar.gz) |
+| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-aarch64.tar.gz) |
+| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-macos-aarch64.tar.gz) |
+| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-windows-x86_64.zip) |
 
 > macOS Intel 走源码编译: `cargo build --release` (Apple Silicon Mac 已覆盖现代用户)。SHA256 校验文件随每个归档发布。
 

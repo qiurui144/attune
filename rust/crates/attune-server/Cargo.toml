@@ -28,7 +28,7 @@ tracing-appender = "0.2"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 # dirs：原 5，统一到 workspace = 6
 dirs = { workspace = true }
-lru = "0.12"
+lru = "0.13"  # 升级修 RUSTSEC-2026-0002 (0.12 IterMut Stacked Borrows unsound)
 uuid = { version = "1", features = ["v4"] }
 reqwest = { workspace = true, features = ["json"] }
 local-ip-address = "0.6"

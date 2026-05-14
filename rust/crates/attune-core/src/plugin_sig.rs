@@ -161,10 +161,13 @@ pub fn is_allowed(trust: Trust, strict: bool) -> bool {
 
 /// 生成 32-byte Ed25519 私钥 (signing key).
 /// 调用方负责把私钥**离线安全存储**, 公钥嵌入 OFFICIAL_PUBLIC_KEYS.
+///
+/// 使用 OsRng (crypto-secure 系统熵源). 不用 thread_rng — Ed25519 私钥
+/// 一旦泄露或预测就毁掉整个签名信任链, 必须密码学保证级 RNG.
 pub fn generate_signing_key() -> [u8; 32] {
-    use rand::RngCore;
+    use aes_gcm::aead::{OsRng, rand_core::RngCore};
     let mut seed = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut seed);
+    OsRng.fill_bytes(&mut seed);
     seed
 }
 

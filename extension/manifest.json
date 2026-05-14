@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Attune 私有 AI 知识伙伴",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Private AI Knowledge Companion — Local-first, globally augmented, increasingly attuned to your expertise. 自动捕获 AI 对话 + 浏览状态信号 + 注入个人知识库。",
   "_comment_incognito": "per R04 P1-4: incognito 强制不加载，防御 content script JS 检查被绕过的攻击路径",
   "incognito": "not_allowed",

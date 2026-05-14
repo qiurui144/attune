@@ -1,5 +1,20 @@
 # attune 版本记录
 
+## v0.6.1（2026-04-30）— 边界收敛 + FormFactor 形态分裂 + RUSTSEC patch
+
+发布定位：v0.6.0 GA 后第一个 minor — 治理 + 安全 + 形态感知，非用户可见功能新增。
+
+**核心变更**（commit 94b57ec merge → main）：
+- **OSS × Pro 边界一致性收敛**（ee859a4）：三产品矩阵叙事正式落地 — attune (OSS 通用) / attune-pro (个人行业增强) / lawcontrol (B2B 律所)；删除 OSS attune 内 4 个 builtin 行业 yaml + EntityKind::CaseNo + CHAT_TRIGGER_KEYWORDS 律师专属 const，全部迁到 attune-pro/plugins/<vertical>-pro/。
+- **FormFactor 形态感知**（461c4c7）：检测启动环境（Laptop / Server / K3Appliance / Unknown），分裂 LLM 默认路径 — Laptop/Server/Unknown → 远端 token，K3Appliance → 本地 Ollama。8 个新 unit test 覆盖端到端（4b6e205）。
+- **rustls-webpki 0.103.10 → 0.103.13**（b4c7351）：修 3 个 RUSTSEC CVE（TLS 验证链路相关）。
+- **GitFlow Lite 写入 CLAUDE.md**（eded077 / 07f57d0）：分支模型 + tag 双轨 + `--first-parent` 检查命令固化为行为标准。
+- **文档同步**（f5152b8 / f006aed）：README.zh 补 4 章，RELEASE 版本号同步。
+
+**Server 产物**：[v0.6.1](https://github.com/qiurui144/attune/releases/tag/v0.6.1) — Linux x86_64/aarch64 + macOS aarch64 + Windows x86_64 tarball + sha256。**Desktop 此版未发**（沿用 desktop-v0.6.0 安装包；v0.6.1 改动均不影响桌面侧体验）。
+
+---
+
 ## v0.6.3（2026-05-14）— LLM 热重载 + Plugins 数据源 + PII 全路径 + Pro Vertical 验收
 
 发布定位：bug fix patch + UI polish + 4 vertical 端到端验证。

@@ -4,7 +4,7 @@
 //! 复用 vault.rs 的 Argon2id 参数 (与用户主密钥派生兼容).
 
 use crate::error::{Result, VaultError};
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use rand::RngCore;
 
@@ -18,10 +18,12 @@ const MAGIC: &[u8] = b"ATTPKGE1"; // attune-pkg encrypted v1
 /// `password`: 通常是 plugin 装载时验证的设备绑定密钥 (跨 device 不通用),
 /// 或商业分发的 plugin license token.
 pub fn encrypt_yaml(plaintext: &[u8], password: &[u8]) -> Result<Vec<u8>> {
+    // OsRng (crypto-secure, 系统熵源) — 不用 thread_rng (非密码学保证).
+    // salt + nonce 都是加密关键参数, 必须用 OsRng.
     let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    OsRng.fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut nonce_bytes);
 
     let key = derive_key(password, &salt)?;
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));

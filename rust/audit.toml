@@ -1,0 +1,14 @@
+# cargo-audit 配置 — 标记已知 transitive 依赖问题, 主线已修部分.
+# 用法: cargo audit (会自动读 audit.toml)
+# 文档: https://docs.rs/cargo-audit/latest/cargo_audit/
+
+[advisories]
+# transitive only — 不阻塞 release. 跟踪上游升级时 review.
+ignore = [
+  # lru 0.12.5 IterMut Stacked Borrows unsound (RUSTSEC-2026-0002).
+  # 我方直接依赖已升 0.13 (Cargo.toml: attune-server). transitive 通过
+  # tantivy 0.22.1 仍引 0.12.5. 等 tantivy 上游升级再清理.
+  "RUSTSEC-2026-0002",
+  # rand unsound — 仅 custom logger 用 rand::rng() 场景触发, 我方未触发.
+  "RUSTSEC-2026-0097",
+]

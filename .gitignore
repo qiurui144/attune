@@ -37,11 +37,17 @@ chroma_data/
 # 锚定到仓库根 — 仅忽略 /models 顶层目录 (ML 模型缓存), 不影响
 # python/src/attune_python/models/ 等 Python 包目录. 历史 bug: 无锚的
 # models/ 让 CI 装出的 wheel 缺 schemas 子包导致 ImportError
+# ML 模型 + 二进制权重 — 同样需要全 glob (避免锚定不一致, R19 adv reviewer 提)
 /models/
 ai-models/
 *.onnx
-*.bin
-*.xml
+# *.bin / *.xml: 锚到 ML 数据目录, 避免误伤源码里的 .bin/.xml (如 Tauri icons,
+# 配置示例). 实际 ML 权重均在 models/ai-models/ 下, 这两条 glob 也已被这两个
+# 目录的 ignore 规则覆盖, 留作显式保险.
+models/**/*.bin
+models/**/*.xml
+ai-models/**/*.bin
+ai-models/**/*.xml
 
 # Node
 node_modules/

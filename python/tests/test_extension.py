@@ -1,4 +1,9 @@
-"""Chrome 扩展 E2E 测试 — Playwright Chromium"""
+"""Chrome 扩展 E2E 测试 — Playwright 系统 Chrome (per CLAUDE.md MCP 限制)
+
+CLAUDE.md 全局规则: 只允许使用 Chrome (channel="chrome"), 禁止 Chromium / Firefox /
+WebKit. 历史原因: Chromium 与生产 Chrome 在 MV3 + 扩展加载行为不完全一致, 测试通过
+不保证真 Chrome 行为.
+"""
 
 import os
 import subprocess
@@ -46,10 +51,13 @@ def _ensure_backend():
 
 @pytest.fixture(scope="module")
 def browser_ctx(_ensure_built, _ensure_backend):
-    """启动 Chromium + 加载扩展，模块级复用"""
+    """启动系统 Chrome + 加载扩展, 模块级复用. channel='chrome' 强制走真 Chrome,
+    不退化到 Chromium (per CLAUDE.md 全局规则).
+    """
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(
             user_data_dir="",  # 空字符串 = 临时目录
+            channel="chrome",  # CLAUDE.md 硬约束: 禁止 Chromium / Firefox / WebKit
             headless=False,
             args=[
                 f"--disable-extensions-except={EXT_PATH}",

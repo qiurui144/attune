@@ -1,4 +1,6 @@
-// H1 集成测试：验证真 std::thread worker 在 governor 控制下能：
+// H1 multi-thread worker x governor 集成测试. **"integration" 这里指"多线程
+// worker 与 governor 的真实交互", 不是"真 SysinfoMonitor 系统采样"** — 后者由
+// monitor.rs 单测覆盖. 验证目标:
 // (1) 全局 pause 后所有 worker 在 ≤ 1s 内停止处理
 // (2) 切档后 budget 立即生效（影响 should_run 决策）
 // (3) 多 worker 并发注册不丢失任何一个

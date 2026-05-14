@@ -12,7 +12,8 @@ Attune is a generic personal AI knowledge base for **any individual knowledge wo
 
 ## 📥 Download
 
-Latest stable: **v0.6.0 GA** 🎉
+Latest stable: **server v0.6.1** · **desktop v0.6.0**
+Latest pre-release: **v0.6.3-rc.1** (server tarball; desktop installer pending NSIS fix)
 
 ### Desktop app (Web UI + system tray) — [desktop-v0.6.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.6.0)
 
@@ -23,14 +24,14 @@ Latest stable: **v0.6.0 GA** 🎉
 | Linux deb | [`Attune_0.6.0_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.deb) | 27 MB | Debian/Ubuntu |
 | Linux AppImage | [`Attune_0.6.0_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.AppImage) | 94 MB | Generic Linux |
 
-### Server / CLI binaries (headless / NAS / server) — [v0.6.0 Release](https://github.com/qiurui144/attune/releases/tag/v0.6.0)
+### Server / CLI binaries (headless / NAS / server) — [v0.6.1 Release](https://github.com/qiurui144/attune/releases/tag/v0.6.1)
 
-| Platform | File | Size |
-|----------|------|------|
-| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-linux-x86_64.tar.gz) | 33.5 MB |
-| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-linux-aarch64.tar.gz) | 34.1 MB |
-| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-macos-aarch64.tar.gz) | 21.7 MB |
-| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.6.0/attune-windows-x86_64.zip) | 28.3 MB |
+| Platform | File |
+|----------|------|
+| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-x86_64.tar.gz) |
+| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-aarch64.tar.gz) |
+| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-macos-aarch64.tar.gz) |
+| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-windows-x86_64.zip) |
 
 > macOS Intel: build from source with `cargo build --release` (Apple Silicon already covers modern Mac users). SHA256 checksum file ships with each archive.
 
