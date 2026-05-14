@@ -1,6 +1,7 @@
 //! /api/v1/member — 会员状态 / settings locks endpoint.
 
 use crate::state::SharedState;
+use attune_core::cloud_client::CloudClient;
 use attune_core::member_session::{MemberState, SettingsLocks};
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -67,6 +68,90 @@ pub async fn login_token(
     Ok(Json(serde_json::json!({
         "status": "ok",
         "state": new_state,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct LoginPasswordReq {
+    pub email: String,
+    pub password: String,
+    #[serde(default)]
+    pub cloud_url: Option<String>,
+    #[serde(default)]
+    pub license_code: Option<String>,
+}
+
+/// POST /api/v1/member/login-password — 账号密码登录 cloud accounts，回填 member_state。
+///
+/// 说明：
+/// - 密码只用于本次请求，不持久化到磁盘。
+/// - 默认 cloud_url 为 https://accounts.attune.ai，可由请求覆盖。
+pub async fn login_password(
+    State(state): State<SharedState>,
+    Json(req): Json<LoginPasswordReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if req.email.trim().is_empty() || req.password.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "email/password required"})),
+        ));
+    }
+
+    let cloud_url = req
+        .cloud_url
+        .unwrap_or_else(|| "https://accounts.attune.ai".to_string());
+    let mut client = CloudClient::new(cloud_url);
+
+    let user = client.login(req.email.trim(), &req.password).map_err(|e| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": format!("login failed: {e}")})),
+        )
+    })?;
+
+    let new_state = match user.tier.as_str() {
+        "paid" => {
+            let licenses = client.list_licenses().map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": format!("list licenses failed: {e}")})),
+                )
+            })?;
+            let selected = if let Some(code) = req.license_code.as_deref() {
+                let code = code.trim();
+                if code.is_empty() {
+                    licenses.first()
+                } else {
+                    licenses
+                        .iter()
+                        .find(|lic| lic.license_code == code || lic.id == code)
+                }
+            } else {
+                licenses.first()
+            }
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "paid user has no matching license"})),
+                )
+            })?;
+            MemberState::Paid {
+                account_id: user.id.clone(),
+                license_id: selected.id.clone(),
+                llm_quota_remaining: selected.llm_monthly_quota,
+            }
+        }
+        _ => MemberState::Free {
+            account_id: user.id.clone(),
+        },
+    };
+
+    *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "state": new_state,
+        "email": user.email,
+        "tier": user.tier,
     })))
 }
 

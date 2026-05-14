@@ -233,7 +233,7 @@ async fn k3_form_factor_drives_settings_llm_default() {
     assert_eq!(settings_resp.status().as_u16(), 200);
     let settings: serde_json::Value = settings_resp.json().await.expect("json");
 
-    // K3 form_factor → llm.provider="ollama" + endpoint preset + qwen2.5:3b model
+    // K3 form_factor → llm.provider="ollama" + endpoint preset, but no pinned chat model
     let llm = settings.get("llm").expect("llm key in settings");
     assert_eq!(
         llm["provider"].as_str(),
@@ -247,12 +247,9 @@ async fn k3_form_factor_drives_settings_llm_default() {
         "K3 form factor should preset Ollama endpoint, got: {:?}",
         llm["endpoint"]
     );
-    assert_eq!(
-        llm["model"].as_str(),
-        Some("qwen2.5:3b"),
-        "K3 form factor should preset qwen2.5:3b model, got: {:?}",
-        llm["model"]
-    );
+    assert!(llm["model"].is_null(),
+        "K3 form factor should leave chat model unset so runtime can auto-detect a lighter local model, got: {:?}",
+        llm["model"]);
 
     handle.abort();
     std::env::remove_var("ATTUNE_FORM_FACTOR");

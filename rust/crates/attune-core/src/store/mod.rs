@@ -563,6 +563,33 @@ impl Store {
         Ok(())
     }
 
+    /// 擦除数据库中所有业务表数据（用于"忘记密码"后的本地重置流程）。
+    ///
+    /// 实现策略：遍历 sqlite_master 里的用户表，逐表 DELETE。
+    /// 这样不依赖硬编码表名，后续新增表也会自动纳入清空范围。
+    pub fn wipe_all_user_data(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM sqlite_master \
+             WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        )?;
+        let table_names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        self.conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        let tx = self.conn.unchecked_transaction()?;
+        for table in table_names {
+            // 双引号转义，避免异常表名破坏 SQL 语句。
+            let safe = table.replace('"', "\"\"");
+            let sql = format!("DELETE FROM \"{safe}\"");
+            tx.execute(&sql, [])?;
+        }
+        tx.commit()?;
+        self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        Ok(())
+    }
+
 }
 
 #[cfg(test)]

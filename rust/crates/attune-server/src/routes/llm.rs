@@ -6,6 +6,9 @@
 //! 见 spec `2026-04-19-frontend-redesign-design.md §6`。
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use std::collections::HashSet;
+use std::net::IpAddr;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -87,6 +90,166 @@ pub async fn test_llm(
             error: Some(e.to_string()),
         })),
     }
+}
+
+// ── POST /api/v1/llm/probe-k3 ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ProbeK3Request {
+    pub endpoints: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+pub struct ProbeK3Response {
+    pub found: bool,
+    pub endpoint: Option<String>,
+    pub checked: Vec<String>,
+}
+
+pub async fn probe_k3(
+    Json(body): Json<ProbeK3Request>,
+) -> Result<Json<ProbeK3Response>, ApiError> {
+    let mut candidates = Vec::new();
+    let mut dedup = HashSet::new();
+
+    // 1) 用户显式传入的地址优先探测
+    for raw in body.endpoints.unwrap_or_default() {
+        if let Some(ep) = normalize_probe_endpoint(&raw) {
+            if dedup.insert(ep.clone()) {
+                candidates.push(ep);
+            }
+        }
+    }
+
+    // 2) 本机回环兜底
+    for ep in ["http://127.0.0.1:8080/v1", "http://localhost:8080/v1"] {
+        let ep = ep.to_string();
+        if dedup.insert(ep.clone()) {
+            candidates.push(ep);
+        }
+    }
+
+    // 3) 动态读取本机私有网段并扫描
+    for ep in discover_local_subnet_candidates() {
+        if dedup.insert(ep.clone()) {
+            candidates.push(ep);
+        }
+    }
+
+    let checked = candidates.clone();
+    if candidates.is_empty() {
+        return Ok(Json(ProbeK3Response {
+            found: false,
+            endpoint: None,
+            checked,
+        }));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(350))
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("probe client init failed: {e}")})),
+            )
+        })?;
+
+    let mut set = tokio::task::JoinSet::new();
+    for endpoint in &candidates {
+        let ep = endpoint.clone();
+        let client = client.clone();
+        set.spawn(async move {
+            let ok = probe_openai_compat_models(&client, &ep).await;
+            (ep, ok)
+        });
+    }
+
+    while let Some(joined) = set.join_next().await {
+        if let Ok((ep, ok)) = joined {
+            if ok {
+                set.abort_all();
+                return Ok(Json(ProbeK3Response {
+                    found: true,
+                    endpoint: Some(ep),
+                    checked,
+                }));
+            }
+        }
+    }
+
+    Ok(Json(ProbeK3Response {
+        found: false,
+        endpoint: None,
+        checked,
+    }))
+}
+
+fn normalize_probe_endpoint(input: &str) -> Option<String> {
+    let mut ep = input.trim().trim_end_matches('/').to_string();
+    if !(ep.starts_with("http://") || ep.starts_with("https://")) {
+        return None;
+    }
+    if !ep.ends_with("/v1") {
+        ep.push_str("/v1");
+    }
+    Some(ep)
+}
+
+fn discover_local_subnet_candidates() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    let ifaces = match local_ip_address::list_afinet_netifas() {
+        Ok(m) => m,
+        Err(_) => return out,
+    };
+
+    for (_name, ip) in ifaces {
+        let IpAddr::V4(v4) = ip else {
+            continue;
+        };
+        if !v4.is_private() || v4.is_loopback() || v4.is_link_local() {
+            continue;
+        }
+
+        let oct = v4.octets();
+        let my_host = oct[3];
+        for host in 1u8..=254u8 {
+            if host == my_host {
+                continue;
+            }
+            let ep = format!("http://{}.{}.{}.{}:8080/v1", oct[0], oct[1], oct[2], host);
+            if seen.insert(ep.clone()) {
+                out.push(ep);
+            }
+        }
+    }
+
+    out
+}
+
+async fn probe_openai_compat_models(client: &reqwest::Client, endpoint: &str) -> bool {
+    let url = format!("{endpoint}/models");
+    let res = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+
+    if !res.status().is_success() {
+        return false;
+    }
+
+    let value = match res.json::<serde_json::Value>().await {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    value
+        .get("data")
+        .and_then(|v| v.as_array())
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false)
 }
 
 // ── POST /api/v1/models/pull ────────────────────────────────────────────────

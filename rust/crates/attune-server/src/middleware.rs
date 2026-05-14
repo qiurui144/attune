@@ -85,6 +85,9 @@ pub async fn bearer_auth_guard(
             || path == "/api/v1/vault/setup"
             || path == "/api/v1/vault/unlock"
             || path == "/api/v1/vault/status"
+            || path == "/api/v1/vault/reset-with-recovery-key"
+            || path == "/api/v1/vault/forgot-password-reset"
+            || path.starts_with("/api/v1/member")
             || path == "/ws/scan-progress")
     {
         return next.run(request).await;

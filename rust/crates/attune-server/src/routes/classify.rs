@@ -11,10 +11,12 @@ pub async fn classify_one(
     let classifier_arc = state.classifier.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned();
     let classifier = match classifier_arc {
         Some(c) => c,
-        None => return Err((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-            "error": "classification unavailable",
-            "hint": "install ollama chat model: ollama pull qwen2.5:3b"
-        })))),
+        None => {
+            return Err((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+                "error": "classification unavailable",
+                "hint": "install Ollama and a local chat model suitable for your hardware"
+            }))));
+        }
     };
 
     let (title, content) = {

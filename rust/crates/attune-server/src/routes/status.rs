@@ -173,6 +173,8 @@ pub async fn diagnostics(
             "total_ram_gb": hw.total_ram_bytes / GB,
             "has_nvidia_gpu": hw.has_nvidia_gpu,
             "has_amd_gpu": hw.has_amd_gpu,
+            "has_intel_igpu": hw.has_intel_igpu,
+            "gpu_label": hw.gpu_label,
             "amd_gfx_target": hw.amd_gfx_target,
             "has_amd_xdna_npu": hw.has_amd_xdna_npu,
             "has_intel_npu": hw.has_intel_npu,
@@ -188,7 +190,7 @@ pub async fn diagnostics(
             "prefers_local_llm": hw.form_factor.prefers_local_llm(),
         },
         "hint": if ai_status == "unavailable" {
-            "安装 Ollama 获取 AI 分类能力: curl -fsSL https://ollama.com/install.sh | sh && ollama pull qwen2.5:3b"
+            "安装 Ollama 获取 AI 分类能力: curl -fsSL https://ollama.com/install.sh | sh && ollama pull <轻量本地模型>"
         } else { "" }
     }))
 }

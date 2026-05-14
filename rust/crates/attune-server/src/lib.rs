@@ -45,7 +45,9 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/vault/setup", post(routes::vault::vault_setup))
         .route("/api/v1/vault/unlock", post(routes::vault::vault_unlock))
         .route("/api/v1/vault/lock", post(routes::vault::vault_lock))
+        .route("/api/v1/vault/reset-with-recovery-key", post(routes::vault::vault_reset_with_recovery_key))
         .route("/api/v1/vault/change-password", post(routes::vault::vault_change_password))
+        .route("/api/v1/vault/forgot-password-reset", post(routes::vault::vault_forgot_password_reset))
         .route("/api/v1/vault/device-secret/export", get(routes::vault::export_device_secret))
         .route("/api/v1/vault/device-secret/import", post(routes::vault::import_device_secret))
         // Status (health check bypasses guard)
@@ -53,6 +55,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/status/diagnostics", get(routes::status::diagnostics))
         // LLM 运维端点（Wizard + Settings）
         .route("/api/v1/llm/test", post(routes::llm::test_llm))
+        .route("/api/v1/llm/probe-k3", post(routes::llm::probe_k3))
         .route("/api/v1/models/pull", post(routes::llm::pull_model))
         // Chat (RAG)
         .route("/api/v1/chat", post(routes::chat::chat))
@@ -73,6 +76,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/member/state", get(routes::member::get_state))
         .route("/api/v1/member/locks", get(routes::member::get_locks))
         .route("/api/v1/member/login-token", post(routes::member::login_token))
+        .route("/api/v1/member/login-password", post(routes::member::login_password))
         .route("/api/v1/member/logout", post(routes::member::logout))
         // OCR 场景预设 (CRUD, builtin 不可删/改)
         .route("/api/v1/ocr/profiles",

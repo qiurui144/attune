@@ -75,6 +75,12 @@ impl Vault {
 
     /// 首次设置：生成 device secret + DEK，用密码保护
     pub fn setup(&self, password: &str) -> Result<()> {
+        let _ = self.setup_with_recovery_key(password)?;
+        Ok(())
+    }
+
+    /// 首次设置 + 返回一次性恢复密钥（用于忘记主密码时重置，不丢数据）。
+    pub fn setup_with_recovery_key(&self, password: &str) -> Result<String> {
         if self.state() != VaultState::Sealed {
             return Err(VaultError::AlreadyInitialized);
         }
@@ -95,11 +101,29 @@ impl Vault {
         let dek_idx = Key32::generate();
         let dek_vec = Key32::generate();
 
+        // 生成恢复密钥（仅此处明文返回给调用方，库内不持久化明文）
+        let recovery_key = generate_recovery_key();
+        let recovery_salt = crypto::generate_salt();
+        let recovery_mk = crypto::derive_master_key(
+            recovery_key.as_bytes(),
+            device_secret.as_ref(),
+            &recovery_salt,
+        )?;
+
         // 用 MK 加密 DEK 并存储
         self.store.set_meta("salt", &salt)?;
         self.store.set_meta("encrypted_dek_db", &crypto::encrypt_dek(&mk, &dek_db)?)?;
         self.store.set_meta("encrypted_dek_idx", &crypto::encrypt_dek(&mk, &dek_idx)?)?;
         self.store.set_meta("encrypted_dek_vec", &crypto::encrypt_dek(&mk, &dek_vec)?)?;
+
+        // 额外保存"恢复密钥路径"加密副本：忘记主密码时可用 recovery_key 解 DEK。
+        self.store.set_meta("recovery_salt", &recovery_salt)?;
+        self.store
+            .set_meta("encrypted_dek_db_recovery", &crypto::encrypt_dek(&recovery_mk, &dek_db)?)?;
+        self.store
+            .set_meta("encrypted_dek_idx_recovery", &crypto::encrypt_dek(&recovery_mk, &dek_idx)?)?;
+        self.store
+            .set_meta("encrypted_dek_vec_recovery", &crypto::encrypt_dek(&recovery_mk, &dek_vec)?)?;
 
         // 存储 device secret hash（验证用）
         let ds_hash = sha2_hash(device_secret.as_ref());
@@ -115,6 +139,81 @@ impl Vault {
             dek_idx,
             dek_vec,
         });
+
+        Ok(recovery_key)
+    }
+
+    /// 使用恢复密钥重置主密码（保留数据，不需要旧密码）。
+    pub fn reset_password_with_recovery_key(
+        &self,
+        recovery_key: &str,
+        new_password: &str,
+    ) -> Result<()> {
+        if new_password.is_empty() {
+            return Err(VaultError::InvalidInput("new password must not be empty".into()));
+        }
+        if self.state() == VaultState::Sealed {
+            return Err(VaultError::Sealed);
+        }
+
+        let ds_path = self.config_dir.join("device.key");
+        let device_secret_bytes = std::fs::read(&ds_path)
+            .map_err(|_| VaultError::DeviceSecretMissing(ds_path.display().to_string()))?;
+
+        let recovery_salt = self
+            .store
+            .get_meta("recovery_salt")?
+            .ok_or_else(|| VaultError::InvalidInput("recovery key is not configured for this vault".into()))?;
+        let recovery_mk = crypto::derive_master_key(
+            recovery_key.as_bytes(),
+            &device_secret_bytes,
+            &recovery_salt,
+        )?;
+
+        // 用恢复密钥路径解出 DEK（若 recovery_key 错误，这里会返回 InvalidPassword）
+        let enc_dek_db = self
+            .store
+            .get_meta("encrypted_dek_db_recovery")?
+            .ok_or_else(|| VaultError::InvalidInput("recovery key material missing".into()))?;
+        let dek_db = crypto::decrypt_dek(&recovery_mk, &enc_dek_db)?;
+
+        let enc_dek_idx = self
+            .store
+            .get_meta("encrypted_dek_idx_recovery")?
+            .ok_or_else(|| VaultError::InvalidInput("recovery key material missing".into()))?;
+        let dek_idx = crypto::decrypt_dek(&recovery_mk, &enc_dek_idx)?;
+
+        let enc_dek_vec = self
+            .store
+            .get_meta("encrypted_dek_vec_recovery")?
+            .ok_or_else(|| VaultError::InvalidInput("recovery key material missing".into()))?;
+        let dek_vec = crypto::decrypt_dek(&recovery_mk, &enc_dek_vec)?;
+
+        // 换主密码：只重写主路径 salt + DEK 包装；恢复路径保持不变。
+        let new_salt = crypto::generate_salt();
+        let new_mk = crypto::derive_master_key(new_password.as_bytes(), &device_secret_bytes, &new_salt)?;
+        let new_enc_dek_db = crypto::encrypt_dek(&new_mk, &dek_db)?;
+        let new_enc_dek_idx = crypto::encrypt_dek(&new_mk, &dek_idx)?;
+        let new_enc_dek_vec = crypto::encrypt_dek(&new_mk, &dek_vec)?;
+
+        self.store.set_meta_batch(&[
+            ("salt", new_salt.as_ref()),
+            ("encrypted_dek_db", new_enc_dek_db.as_slice()),
+            ("encrypted_dek_idx", new_enc_dek_idx.as_slice()),
+            ("encrypted_dek_vec", new_enc_dek_vec.as_slice()),
+        ])?;
+
+        // 失效旧 token
+        let _ = self.store.increment_token_nonce()?;
+
+        // 若当前恰好是 UNLOCKED（例如本地调试误触），同步内存密钥，避免状态漂移。
+        let mut guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(keys) = guard.as_mut() {
+            keys.master_key = new_mk;
+            keys.dek_db = dek_db;
+            keys.dek_idx = dek_idx;
+            keys.dek_vec = dek_vec;
+        }
 
         Ok(())
     }
@@ -374,11 +473,62 @@ impl Vault {
         let sig = crypto::hmac_sign(mk, payload.as_bytes());
         Ok(format!("{payload}.{}", hex::encode(sig)))
     }
+
+    /// 忘记密码后的本地重置：清空 vault 数据并回到 SEALED。
+    ///
+    /// 安全边界：
+    /// - 仅允许在 LOCKED/SEALED 状态触发（UNLOCKED 时拒绝，避免误触）。
+    /// - 必须携带固定确认串 "RESET"。
+    ///
+    /// 重置后结果：
+    /// - sqlite 所有业务表清空（含 vault_meta，故 state 回到 sealed）
+    /// - 删除 device.key（旧密码不可再用于解锁）
+    /// - 删除本地全文/向量索引文件（避免残留泄漏）
+    pub fn forgot_password_reset(&self, confirmation: &str) -> Result<()> {
+        if confirmation != "RESET" {
+            return Err(VaultError::InvalidInput(
+                "confirmation must be exactly 'RESET'".into(),
+            ));
+        }
+        if self.state() == VaultState::Unlocked {
+            return Err(VaultError::InvalidInput(
+                "reset requires locked state (lock vault first)".into(),
+            ));
+        }
+
+        // 保险起见：清零内存密钥
+        *self.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+        self.store.wipe_all_user_data()?;
+
+        let ds_path = self.config_dir.join("device.key");
+        if ds_path.exists() {
+            std::fs::remove_file(&ds_path)?;
+        }
+
+        let data_dir = platform::data_dir();
+        let tantivy_dir = data_dir.join("tantivy");
+        if tantivy_dir.exists() {
+            let _ = std::fs::remove_dir_all(&tantivy_dir);
+        }
+        let vectors = data_dir.join("vectors.encbin");
+        if vectors.exists() {
+            let _ = std::fs::remove_file(&vectors);
+        }
+
+        Ok(())
+    }
 }
 
 fn sha2_hash(data: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     Sha256::digest(data).to_vec()
+}
+
+fn generate_recovery_key() -> String {
+    let a = uuid::Uuid::new_v4().simple().to_string();
+    let b = uuid::Uuid::new_v4().simple().to_string();
+    format!("ATN-{}-{}", &a[..16], &b[..16]).to_uppercase()
 }
 
 /// 跨平台文件权限限制: Unix 设 0600, Windows 设 NTFS ACL 仅当前用户可访问
@@ -641,6 +791,76 @@ mod tests {
         let vault = Vault::open(&tmp.path().join("vault.db"), &tmp.path().join("config")).unwrap();
         assert!(vault.import_device_secret("not-hex").is_err());
         assert!(vault.import_device_secret("aa").is_err()); // wrong length
+    }
+
+    #[test]
+    fn forgot_password_reset_requires_confirmation_and_locked_state() {
+        let (vault, _tmp) = test_vault();
+        vault.setup("pw").unwrap();
+
+        let err = vault.forgot_password_reset("RESET").unwrap_err();
+        assert!(
+            matches!(err, VaultError::InvalidInput(_)),
+            "unlocked state must be rejected"
+        );
+
+        vault.lock().unwrap();
+        let err = vault.forgot_password_reset("WRONG").unwrap_err();
+        assert!(matches!(err, VaultError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn forgot_password_reset_clears_vault_and_returns_to_sealed() {
+        let (vault, tmp) = test_vault();
+        vault.setup("pw").unwrap();
+        let dek = vault.dek_db().unwrap();
+        let _ = vault
+            .store()
+            .insert_item(&dek, "Title", "Secret", None, "note", None, None)
+            .unwrap();
+        vault.lock().unwrap();
+
+        // 模拟已有索引文件
+        vault.forgot_password_reset("RESET").unwrap();
+
+        assert_eq!(vault.state(), VaultState::Sealed);
+        assert!(vault.unlock("pw").is_err(), "old password must be unusable");
+        assert!(!tmp.path().join("config/device.key").exists());
+    }
+
+    #[test]
+    fn setup_with_recovery_key_returns_key_and_can_reset_password() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("vault.db");
+        let config_dir = tmp.path().join("config");
+        let vault = Vault::open(&db_path, &config_dir).unwrap();
+
+        let recovery_key = vault.setup_with_recovery_key("old-pass").unwrap();
+        assert!(recovery_key.starts_with("ATN-"));
+        vault.lock().unwrap();
+
+        vault
+            .reset_password_with_recovery_key(&recovery_key, "new-pass")
+            .unwrap();
+
+        assert!(vault.unlock("old-pass").is_err(), "old password must fail");
+        assert!(vault.unlock("new-pass").is_ok(), "new password must work");
+    }
+
+    #[test]
+    fn reset_password_with_wrong_recovery_key_fails() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("vault.db");
+        let config_dir = tmp.path().join("config");
+        let vault = Vault::open(&db_path, &config_dir).unwrap();
+
+        let _recovery_key = vault.setup_with_recovery_key("old-pass").unwrap();
+        vault.lock().unwrap();
+
+        let err = vault
+            .reset_password_with_recovery_key("ATN-WRONG-KEY", "new-pass")
+            .unwrap_err();
+        assert!(matches!(err, VaultError::InvalidPassword));
     }
 
     #[test]

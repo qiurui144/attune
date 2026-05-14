@@ -196,7 +196,7 @@ pub async fn update_settings(
 /// 默认设置。`recommended_summary` 仅作为"用户主动选本地"时的硬件推荐 fallback；
 /// `form_factor` 决定 LLM 默认 provider 路径：
 /// - `Laptop` / `Server` / `Unknown` → `openai_compat`（远端 token，wizard 引导填 endpoint + key）
-/// - `K3Appliance` → `ollama`（K3 镜像预装 qwen2.5:3b，开箱即用本地）
+/// - `K3Appliance` → `ollama`（K3 镜像默认本地 Ollama，但不预设具体 chat 模型）
 ///
 /// **v0.6.0-rc.3 起 LLM 默认走远端 token**（per CLAUDE.md M2 决策 + 用户反馈），
 /// 避免本地 3B 模型在大多数硬件上 OOM 或效果差；K3 一体机形态例外（硬件预选过、镜像预装模型）。
@@ -205,11 +205,11 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
 
     // 形态分裂的 LLM 默认配置
     let llm_default = if form_factor == FormFactor::K3Appliance {
-        // K3 一体机：本地 Ollama 优先，预装 qwen2.5:3b
+        // K3 一体机：本地 Ollama 优先，但不预设具体 chat 模型
         serde_json::json!({
             "provider": "ollama",
             "endpoint": "http://localhost:11434/v1",
-            "model": "qwen2.5:3b",
+                "model": null,
             "api_key": null
         })
     } else {
@@ -226,9 +226,8 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
         // ── 普通用户可见 ──
         "theme": "system",         // system / dark / light
         "language": "zh-CN",
-        // 摘要模型 null = 用户主动选 (Settings UI 引导填 LLM endpoint 后启用)；
-        // 想用本地的可填 "qwen2.5:1.5b" 等 (recommended_summary 给硬件推荐建议)
-        "summary_model": null,
+        // 摘要模型默认固定为本地可运行且效果较稳的 qwen2.5:3b；可在 Settings 中覆盖。
+        "summary_model": "qwen2.5:3b",
         "context_strategy": "economical",      // economical(150字) / accurate(300字+片段) / raw(不压缩，仅本地)
         "web_search": {
             "enabled": true,
@@ -305,7 +304,7 @@ mod tests {
         assert!(llm.get("api_key").map_or(true, |v| v.is_null()));
     }
 
-    /// K3 一体机形态：LLM 默认走本地 Ollama (qwen2.5:3b 预装)
+    /// K3 一体机形态：LLM 默认走本地 Ollama，但不预设具体 chat 模型。
     /// — v0.6.1 新增的形态分裂路径。
     #[test]
     fn k3_form_factor_uses_local_ollama() {
@@ -313,7 +312,8 @@ mod tests {
         let llm = s.get("llm").expect("llm key");
         assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("ollama"));
         assert_eq!(llm.get("endpoint").and_then(|v| v.as_str()), Some("http://localhost:11434/v1"));
-        assert_eq!(llm.get("model").and_then(|v| v.as_str()), Some("qwen2.5:3b"));
+            assert!(llm.get("model").map_or(true, |v| v.is_null()),
+                "K3 model must stay unset so runtime can auto-detect a lighter local model, got: {:?}", llm.get("model"));
     }
 
     /// Server / Unknown 形态：与 Laptop 同行为（远端 token 默认）

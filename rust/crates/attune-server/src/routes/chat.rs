@@ -138,7 +138,7 @@ pub async fn chat(
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({
                     "error": "AI 后端不可用",
-                    "hint": "请安装 Ollama 并下载 chat 模型: ollama pull qwen2.5:3b"
+                    "hint": "请安装 Ollama，并在本机下载一个 chat 模型（例如轻量模型）"
                 })),
             ))
         }
@@ -381,6 +381,10 @@ pub async fn chat(
                     let llm_arc = state_compress.llm.lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .as_ref().cloned();
+                    let summary_llm_arc = state_compress.summary_llm.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref().cloned()
+                        .or_else(|| llm_arc.clone());
                     let target = strategy.target_chars();
                     let strategy_str = strategy.as_str();
 
@@ -429,7 +433,7 @@ pub async fn chat(
                         if s.is_short || s.was_cache_hit || s.item_id.is_empty() {
                             continue;
                         }
-                        let Some(ref llm) = llm_arc else {
+                        let Some(ref llm) = summary_llm_arc else {
                             continue; // LLM 不可用 → 降级原文（summary 保持 None）
                         };
                         if llm_unavailable {
@@ -462,7 +466,7 @@ pub async fn chat(
                     {
                         let vault_guard = state_compress.vault.lock().unwrap_or_else(|e| e.into_inner());
                         let store = vault_guard.store();
-                        let model_name = llm_arc.as_ref().map(|l| l.model_name().to_string()).unwrap_or_default();
+                        let model_name = summary_llm_arc.as_ref().map(|l| l.model_name().to_string()).unwrap_or_default();
                         for s in slots.iter() {
                             if !s.needs_writeback { continue; }
                             if let Some(ref sum) = s.summary {

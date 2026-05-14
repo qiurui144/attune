@@ -120,12 +120,14 @@ pub struct HardwareProfile {
     pub cpu_model: String,           // e.g. "AMD Ryzen 7 8845H..."
     pub has_nvidia_gpu: bool,        // /dev/nvidia0
     pub has_amd_gpu: bool,           // /dev/kfd + /dev/dri/renderD*（AMD 集显或独显）
+    pub has_intel_igpu: bool,        // Intel iGPU（/dev/dri/renderD* vendor=0x8086）
     pub amd_gfx_target: Option<String>,  // e.g. "gfx1103" (Radeon 780M)，用于 ROCm 匹配
     pub has_amd_xdna_npu: bool,      // /dev/accel/accel0 + amdxdna 模块（Ryzen AI）
     pub has_intel_npu: bool,         // /dev/accel/accel0 + intel_vpu 模块
     pub total_ram_bytes: u64,        // 总内存字节；硬件档位匹配用
     pub os: &'static str,            // "linux" | "macos" | "windows"
     pub form_factor: FormFactor,     // Laptop / K3Appliance / Server / Unknown — 决定 LLM 默认路径
+    pub gpu_label: Option<String>,   // 统一给 UI 的 GPU 描述
 }
 
 impl HardwareProfile {
@@ -152,9 +154,25 @@ impl HardwareProfile {
         // NVIDIA GPU
         p.has_nvidia_gpu = std::path::Path::new("/dev/nvidia0").exists();
 
-        // AMD GPU（集显或独显），通过 /dev/kfd + /dev/dri/renderD128 判定
-        p.has_amd_gpu = std::path::Path::new("/dev/kfd").exists()
-            && std::path::Path::new("/dev/dri/renderD128").exists();
+        #[cfg(target_os = "linux")]
+        {
+            let (has_amd_render, has_intel_render, gpu_label) = detect_linux_render_gpu_vendors();
+            p.has_amd_gpu = has_amd_render
+                || (std::path::Path::new("/dev/kfd").exists()
+                    && std::path::Path::new("/dev/dri").exists());
+            p.has_intel_igpu = has_intel_render;
+            p.gpu_label = if p.has_nvidia_gpu {
+                Some("NVIDIA GPU".to_string())
+            } else {
+                gpu_label
+            };
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            p.has_amd_gpu = false;
+            p.has_intel_igpu = false;
+        }
 
         // AMD gfx target（识别 Radeon 780M / 780M = gfx1103 等；用于 ROCm HSA 覆盖）
         if p.has_amd_gpu {
@@ -213,10 +231,26 @@ impl HardwareProfile {
                 p.cpu_vendor = vendor;
                 p.cpu_model = model;
             }
-            // Windows 下 NVIDIA 探测：通过 PowerShell 查 Win32_VideoController（非 /dev/nvidia0）
-            if has_nvidia_on_windows() {
-                p.has_nvidia_gpu = true;
+            let (has_nv, has_amd, has_intel, label) = detect_windows_gpu_vendors();
+            p.has_nvidia_gpu = p.has_nvidia_gpu || has_nv;
+            p.has_amd_gpu = p.has_amd_gpu || has_amd;
+            p.has_intel_igpu = p.has_intel_igpu || has_intel;
+            if p.gpu_label.is_none() {
+                p.gpu_label = label;
             }
+        }
+
+        // 通用 fallback label（如果上面还没给）
+        if p.gpu_label.is_none() {
+            p.gpu_label = if p.has_nvidia_gpu {
+                Some("NVIDIA GPU".to_string())
+            } else if p.has_amd_gpu {
+                Some("AMD GPU".to_string())
+            } else if p.has_intel_igpu {
+                Some("Intel iGPU".to_string())
+            } else {
+                None
+            };
         }
 
         p
@@ -224,7 +258,11 @@ impl HardwareProfile {
 
     /// 是否有任何硬件加速（GPU/NPU）— 决定是否能跑稍大的模型
     pub fn has_accelerator(&self) -> bool {
-        self.has_nvidia_gpu || self.has_amd_gpu || self.has_amd_xdna_npu || self.has_intel_npu
+        self.has_nvidia_gpu
+            || self.has_amd_gpu
+            || self.has_intel_igpu
+            || self.has_amd_xdna_npu
+            || self.has_intel_npu
     }
 
     /// 根据 RAM + 加速器档位，推荐默认本地摘要模型（仅"用户主动想用本地时"的建议）。
@@ -276,6 +314,7 @@ impl HardwareProfile {
             let gfx = self.amd_gfx_target.as_deref().unwrap_or("unknown");
             parts.push(format!("AMD GPU (gfx={})", gfx));
         }
+        if self.has_intel_igpu { parts.push("Intel iGPU (/dev/dri/renderD*)".into()); }
         if self.has_amd_xdna_npu { parts.push("AMD XDNA NPU (Ryzen AI)".into()); }
         if self.has_intel_npu { parts.push("Intel NPU (VPU)".into()); }
         parts.join(" | ")
@@ -385,6 +424,50 @@ fn detect_amd_gfx_target() -> Option<String> {
     None
 }
 
+/// Linux 渲染设备 vendor 扫描：识别 AMD / Intel iGPU。
+#[cfg(target_os = "linux")]
+fn detect_linux_render_gpu_vendors() -> (bool, bool, Option<String>) {
+    let mut has_amd = false;
+    let mut has_intel = false;
+
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return (false, false, None);
+    };
+
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("renderD") {
+            continue;
+        }
+        let vendor_path = e.path().join("device").join("vendor");
+        let Ok(vendor) = std::fs::read_to_string(vendor_path) else { continue };
+        let v = vendor.trim().to_ascii_lowercase();
+        if v == "0x1002" {
+            has_amd = true;
+        } else if v == "0x8086" {
+            has_intel = true;
+        }
+    }
+
+    let label = if has_amd && has_intel {
+        Some("AMD GPU + Intel iGPU".to_string())
+    } else if has_amd {
+        Some("AMD GPU".to_string())
+    } else if has_intel {
+        Some("Intel iGPU".to_string())
+    } else {
+        None
+    };
+
+    (has_amd, has_intel, label)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_linux_render_gpu_vendors() -> (bool, bool, Option<String>) {
+    (false, false, None)
+}
+
 #[cfg(not(target_os = "linux"))]
 fn detect_amd_gfx_target() -> Option<String> { None }
 
@@ -446,17 +529,31 @@ fn wmic_cpu_info() -> Option<(String, String)> {
 
 /// Windows NVIDIA 探测：扫描 Win32_VideoController 是否含 "NVIDIA"
 #[cfg(target_os = "windows")]
-fn has_nvidia_on_windows() -> bool {
+fn detect_windows_gpu_vendors() -> (bool, bool, bool, Option<String>) {
     use std::process::Command;
     let out = match Command::new("wmic")
         .args(["path", "win32_VideoController", "get", "Name", "/value"])
         .output() {
         Ok(o) => o,
-        Err(_) => return false,
+        Err(_) => return (false, false, false, None),
     };
-    if !out.status.success() { return false; }
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.to_lowercase().contains("nvidia")
+    if !out.status.success() {
+        return (false, false, false, None);
+    }
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    let has_nv = text.contains("nvidia");
+    let has_amd = text.contains("amd") || text.contains("radeon");
+    let has_intel = text.contains("intel");
+    let label = if has_nv {
+        Some("NVIDIA GPU".to_string())
+    } else if has_amd {
+        Some("AMD GPU".to_string())
+    } else if has_intel {
+        Some("Intel iGPU".to_string())
+    } else {
+        None
+    };
+    (has_nv, has_amd, has_intel, label)
 }
 
 #[cfg(test)]

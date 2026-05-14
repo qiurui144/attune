@@ -294,10 +294,12 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
                 eprintln!("Passwords do not match.");
                 std::process::exit(1);
             }
-            vault.setup(&password)?;
+            let recovery_key = vault.setup_with_recovery_key(&password)?;
             println!("Vault initialized and unlocked.");
             println!("Device secret saved to: {}", attune_core::platform::device_secret_path().display());
             println!("IMPORTANT: Back up your device.key file — you need it to unlock on other devices.");
+            println!("Recovery key (store offline, needed for password reset without data loss):");
+            println!("{recovery_key}");
         }
         Commands::Unlock => {
             let password = read_password("Enter master password: ")?;
