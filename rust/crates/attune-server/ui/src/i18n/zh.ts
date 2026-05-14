@@ -119,7 +119,7 @@ export const zh = {
   'wizard.data.import.title': '导入 .vault-profile',
   'wizard.data.import.desc': '来自旧设备或备份',
   'wizard.data.skip.title': '跳过，先看看',
-  'wizard.data.skip.desc': '之后随时在 Settings 添加',
+  'wizard.data.skip.desc': '之后随时在设置中添加',
   'wizard.data.finish': '完成 · 进入 Attune',
 
   // ─── Wizard · 完成页 ──────────────────────────────────

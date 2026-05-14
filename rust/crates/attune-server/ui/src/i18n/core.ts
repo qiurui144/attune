@@ -28,6 +28,15 @@ const MESSAGE_MAP: Record<Locale, Messages> = {
 export const currentLocale = signal<Locale>(detectInitialLocale());
 
 function detectInitialLocale(): Locale {
+  // 优先级: localStorage 用户偏好 > navigator.language > 默认 zh
+  // 让用户切语言后下次 reload (vault lock / reset / setup) 不丢偏好.
+  try {
+    const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('attune.locale') : null;
+    if (stored === 'zh-CN' || stored === 'zh') return 'zh';
+    if (stored === 'en' || stored === 'en-US') return 'en';
+  } catch {
+    // localStorage 访问失败 (SSR / privacy mode) 走 fallback
+  }
   if (typeof navigator === 'undefined') return 'zh';
   const lang = (navigator.language || 'zh').toLowerCase();
   if (lang.startsWith('en')) return 'en';
@@ -41,6 +50,11 @@ export function setLocale(locale: Locale): void {
   }
   currentLocale.value = locale;
   document.documentElement.setAttribute('lang', locale === 'zh' ? 'zh-CN' : 'en');
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('attune.locale', locale === 'zh' ? 'zh-CN' : 'en');
+    }
+  } catch { /* ignore */ }
 }
 
 /**
