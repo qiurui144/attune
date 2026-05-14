@@ -2,7 +2,7 @@
 
 import type { JSX } from 'preact';
 import { useState, useRef } from 'preact/hooks';
-import { Button } from '../components';
+import { Button, Tooltip } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api } from '../store/api';
@@ -116,8 +116,9 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
-      <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
+      <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0, display: 'flex', alignItems: 'center' }}>
         {t('wizard.data.heading')}
+        <Tooltip text={t('wizard.help.data_bind_folder')} />
       </h2>
 
       <div

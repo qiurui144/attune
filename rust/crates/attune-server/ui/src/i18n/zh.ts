@@ -40,6 +40,23 @@ export const zh = {
 
   // ─── Wizard Step 2 · Master Password ──────────────────
   'wizard.pwd.heading': '设置主密码（本地数据加密）',
+
+  // ─── Wizard 帮助 tooltip 文案 ───
+  'wizard.help.master_password': '主密码用于本地加密你的知识库。设置后必须记住，忘记可用恢复密钥重置（但会丢失数据）。',
+  'wizard.help.member_account': '可选：用云端账号同步设备 / 享受会员功能。不登录也能使用全部本地功能。',
+  'wizard.help.device_secret': '导出后保存到 U 盘等离线介质。多设备同步时需要它。新手可跳过，事后随时在设置里再导出。',
+  'wizard.help.llm_provider': '大模型用于对话与分析。云端服务质量好但费 token，本地 Ollama 免费但需自己装。',
+  'wizard.help.api_key': '从你的大模型服务商获取。所有 key 仅保存在本机，不发到我们的服务器。',
+  'wizard.help.advanced_options': '默认配置已对大多数用户合理。展开这里可改高级选项（仅有经验时使用）。',
+  'wizard.help.hardware_auto': '已根据你的硬件自动选择最佳模型与索引策略。无需调整。',
+  'wizard.help.data_bind_folder': '关联本地文件夹后，新增 / 修改的文件会自动入库索引。仅本地处理，不上传。',
+  'wizard.help.data_import': '从老设备导出的备份文件中恢复数据。文件名通常以 .json 结尾。',
+
+  // ─── Wizard 折叠区标签 ───
+  'wizard.advanced.toggle': '高级选项',
+  'wizard.advanced.collapse': '收起',
+  'wizard.hardware.show_details': '查看详情',
+  'wizard.data.show_filetypes': '查看支持的文件类型',
   'wizard.pwd.warning': '⚠ 这是本地主密码，用于加密你的知识库；会员用户名/密码请在下一步填写。',
   'wizard.pwd.field': '主密码',
   'wizard.pwd.confirm': '再次输入',
@@ -77,7 +94,7 @@ export const zh = {
   'wizard.llm.cloud.test': '测试连接',
   'wizard.llm.skip.title': '暂不配置',
   'wizard.llm.skip.tag': '演示模式',
-  'wizard.llm.skip.desc': 'Chat 禁用，可浏览界面',
+  'wizard.llm.skip.desc': '对话禁用，可浏览界面',
 
   // ─── Wizard Step 4 · 硬件 ─────────────────────────────
   'wizard.hw.heading': '认识你的设备',

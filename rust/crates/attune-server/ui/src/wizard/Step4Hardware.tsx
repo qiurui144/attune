@@ -2,7 +2,7 @@
 
 import type { JSX } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
-import { Button } from '../components';
+import { Button, Tooltip } from '../components';
 import { t } from '../i18n';
 import { api } from '../store/api';
 import type { WizardContext } from './types';
@@ -226,117 +226,80 @@ export function Step4Hardware({
     );
   }
 
+  const allScanDone = scanSteps.length > 0 && scanSteps.every((s) => s.done);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
-      <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
+      <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0, display: 'flex', alignItems: 'center' }}>
         {t('wizard.hw.heading')}
+        <Tooltip text={t('wizard.help.hardware_auto')} />
       </h2>
 
-      {aiStack && (
-        <div
-          style={{
-            background: 'linear-gradient(180deg, var(--color-surface) 0%, var(--color-bg) 100%)',
-            border: '1px solid var(--color-border)',
-            borderRadius: 'var(--radius-md)',
-            padding: 'var(--space-4)',
-            fontSize: 'var(--text-sm)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 'var(--space-2)',
-          }}
-        >
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-            <Pill label="硬件档位" value={aiStack.hardware.tier} />
-            <Pill label="区域" value={aiStack.region.detected.split(' (')[0]} />
-            <Pill label="底座" value="自动配置" />
-          </div>
-          <div style={{ color: 'var(--color-text-secondary)' }}>
-            Embedding / Reranker / ASR / OCR 在后台完成，不占用你的注意力。
-          </div>
-        </div>
-      )}
-
+      {/* 简洁成功提示 — 一行说明 + 简短硬件摘要 */}
       <div
+        className="fade-in"
         style={{
-          background: 'var(--color-surface)',
-          borderRadius: 'var(--radius-md)',
           padding: 'var(--space-4)',
+          background: allScanDone ? 'rgba(34, 197, 94, 0.06)' : 'var(--color-surface)',
+          border: `1px solid ${allScanDone ? 'var(--color-success)' : 'var(--color-border)'}`,
+          borderRadius: 'var(--radius-md)',
           display: 'flex',
           flexDirection: 'column',
-          gap: 'var(--space-3)',
-          border: '1px solid var(--color-border)',
+          gap: 'var(--space-2)',
+          fontSize: 'var(--text-sm)',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
-            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>扫描进行中</div>
-            <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>检测硬件并匹配底座策略</div>
+        {!allScanDone ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+            <span className="spinner" />
+            正在检测你的硬件…
           </div>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
-            {scanSteps.filter((s) => s.done).length}/{scanSteps.length}
-          </div>
-        </div>
-        <div
-          style={{
-            height: 8,
-            borderRadius: 999,
-            background: 'var(--color-bg)',
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            style={{
-              height: '100%',
-              width: `${scanSteps.length ? (scanSteps.filter((s) => s.done).length / scanSteps.length) * 100 : 0}%`,
-              background: 'linear-gradient(90deg, var(--color-accent) 0%, var(--color-success) 100%)',
-              transition: 'width var(--duration-base) var(--ease-out)',
-            }}
-          />
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 'var(--space-2)' }}>
-          {scanSteps.map((s, i) => (
-            <div
-              key={i}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 'var(--space-2)',
-                padding: 'var(--space-2) var(--space-3)',
-                borderRadius: 'var(--radius-sm)',
-                border: `1px solid ${s.done ? 'var(--color-success)' : 'var(--color-border)'}`,
-                background: s.done ? 'rgba(34, 197, 94, 0.08)' : 'var(--color-bg)',
-                color: s.done ? 'var(--color-success)' : 'var(--color-text-secondary)',
-                fontSize: 'var(--text-xs)',
-              }}
-            >
-              <span style={{ fontSize: 12 }}>{s.done ? '✓' : '·'}</span>
-              <span>{s.label.replace('检测', '')}</span>
+        ) : (
+          <>
+            <div style={{ fontWeight: 600, color: 'var(--color-success)' }}>
+              ✓ 已自动检测你的硬件并选择最佳配置
             </div>
-          ))}
-        </div>
+            {hw && (
+              <div style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-xs)' }}>
+                {[hw.cpu_model, hw.gpu_model ?? '纯 CPU', `${hw.total_ram_gb ?? 0} GB 内存`].filter(Boolean).join(' · ')}
+              </div>
+            )}
+          </>
+        )}
       </div>
 
-      {hw && (
-        <div
-          className="fade-in"
-          style={{
-            padding: 'var(--space-4)',
-            background: 'linear-gradient(180deg, var(--color-surface) 0%, var(--color-bg) 100%)',
-            border: '1px solid var(--color-border)',
-            borderRadius: 'var(--radius-md)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 'var(--space-2)',
-            fontSize: 'var(--text-sm)',
-          }}
-        >
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 'var(--space-2)' }}>
+      {/* 详情折叠区: 完整 CPU/GPU/NPU/RAM/底座 信息 */}
+      {hw && allScanDone && (
+        <details>
+          <summary
+            style={{
+              cursor: 'pointer',
+              fontSize: 'var(--text-sm)',
+              color: 'var(--color-text-secondary)',
+              padding: 'var(--space-2) 0',
+              userSelect: 'none',
+            }}
+          >
+            ▸ {t('wizard.hardware.show_details')}
+          </summary>
+          <div
+            style={{
+              marginTop: 'var(--space-3)',
+              padding: 'var(--space-4)',
+              background: 'linear-gradient(180deg, var(--color-surface) 0%, var(--color-bg) 100%)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-md)',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+              gap: 'var(--space-2)',
+            }}
+          >
             <MiniStat label="CPU" value={hw.cpu_model ?? '—'} />
             <MiniStat label="GPU" value={hw.gpu_model ?? '纯 CPU 模式'} />
             <MiniStat label="NPU" value={hw.npu_type ?? '—'} />
             <MiniStat label="RAM" value={`${hw.total_ram_gb ?? 0} GB`} />
           </div>
-        </div>
+        </details>
       )}
 
       {localChatBlocked && (
@@ -350,7 +313,7 @@ export function Step4Hardware({
             fontSize: 'var(--text-sm)',
           }}
         >
-          当前硬件规格不建议本地 Chat，流程已切换为云端 / K3 优先。
+          当前硬件规格不建议本地对话，流程已切换为云端 / K3 优先。
         </div>
       )}
 

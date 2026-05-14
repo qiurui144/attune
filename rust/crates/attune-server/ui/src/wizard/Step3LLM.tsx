@@ -2,7 +2,7 @@
 
 import type { JSX } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
-import { Button, Input } from '../components';
+import { Button, Input, Tooltip } from '../components';
 import { t } from '../i18n';
 import { api } from '../store/api';
 import { toast } from '../components/Toast';
@@ -61,6 +61,8 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   const [memberLoggingIn, setMemberLoggingIn] = useState(false);
   const [memberReady, setMemberReady] = useState(false);
   const [testing, setTesting] = useState(false);
+  // 默认隐藏 Ollama / K3 (这两个面向高级用户). 用户主动展开"其他选项"才看到.
+  const [showAdvancedProviders, setShowAdvancedProviders] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
 
   async function scanOllama() {
@@ -270,35 +272,15 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
           fontSize: 'var(--text-xl)',
           fontWeight: 600,
           margin: 0,
+          display: 'flex',
+          alignItems: 'center',
         }}
       >
         {t('wizard.llm.heading')}
+        <Tooltip text={t('wizard.help.llm_provider')} />
       </h2>
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-          gap: 'var(--space-2)',
-        }}
-      >
-        <StatusChip
-          tone={prefersLocal ? 'accent' : 'muted'}
-          title="本地"
-          value={prefersLocal ? 'K3 / Ollama 推荐' : '默认关闭'}
-        />
-        <StatusChip
-          tone={k3DetectResult?.startsWith('已检测到') ? 'success' : 'muted'}
-          title="K3"
-          value={k3Detecting ? '自动检测中…' : k3DetectResult ?? '待检测'}
-        />
-        <StatusChip
-          tone={provider === 'attune-pro' ? 'success' : 'muted'}
-          title="云端"
-          value="账号 / Token 最小输入"
-        />
-      </div>
-
+      {/* 默认显示: 云端 + 暂不配置 两张 */}
       <div
         style={{
           display: 'grid',
@@ -307,7 +289,10 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
           alignItems: 'start',
         }}
       >
-        {/* Ollama 卡片 */}
+        {/* Ollama + K3 默认隐藏, 用户点 "其他选项" 才显示 (面向高级用户) */}
+        {showAdvancedProviders && (
+          <>
+            {/* Ollama 卡片 */}
         <Card
           selected={ctx.llmMode === 'ollama'}
           onClick={ollamaStatus === 'ready' && localChatAllowed ? selectOllama : undefined}
@@ -407,8 +392,10 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
             </Button>
           </div>
         </Card>
+          </>
+        )}
 
-        {/* 云端 API 卡片 */}
+        {/* 云端 API 卡片 (默认显示) */}
         <Card
           selected={ctx.llmMode === 'cloud'}
           recommended={!prefersLocal}
@@ -574,6 +561,25 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
           </p>
         </Card>
       </div>
+
+      {/* "其他选项" toggle — 默认折叠, 展开后显示 Ollama + K3 */}
+      {!showAdvancedProviders && (
+        <button
+          type="button"
+          onClick={() => setShowAdvancedProviders(true)}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: 'var(--color-text-secondary)',
+            fontSize: 'var(--text-sm)',
+            cursor: 'pointer',
+            padding: 'var(--space-2) 0',
+            alignSelf: 'flex-start',
+          }}
+        >
+          ▸ 其他选项（本地 Ollama / K3 一体机）
+        </button>
+      )}
     </div>
   );
 }

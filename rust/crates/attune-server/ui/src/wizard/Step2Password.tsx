@@ -2,7 +2,7 @@
 
 import type { JSX } from 'preact';
 import { useState, useMemo, useEffect } from 'preact/hooks';
-import { Button, Input } from '../components';
+import { Button, Input, Tooltip } from '../components';
 import { t } from '../i18n';
 import { api, setToken, RETRY_POLICIES } from '../store/api';
 import { toast } from '../components/Toast';
@@ -175,23 +175,13 @@ export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.El
             fontWeight: 600,
             margin: 0,
             marginBottom: 'var(--space-2)',
+            display: 'flex',
+            alignItems: 'center',
           }}
         >
           {t('wizard.pwd.heading')}
+          <Tooltip text={t('wizard.help.master_password')} />
         </h2>
-        <div
-          role="alert"
-          style={{
-            padding: 'var(--space-3)',
-            background: 'rgba(212, 165, 116, 0.1)',
-            border: '1px solid var(--color-warning)',
-            borderRadius: 'var(--radius-md)',
-            fontSize: 'var(--text-sm)',
-            color: 'var(--color-text)',
-          }}
-        >
-          {t('wizard.pwd.warning')}
-        </div>
       </header>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
@@ -291,65 +281,87 @@ export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.El
           {show ? t('wizard.pwd.hide') : t('wizard.pwd.show')}
         </label>
 
-        {isSetupMode && (
-          <label
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 'var(--space-2)',
-              fontSize: 'var(--text-sm)',
-              color: 'var(--color-text-secondary)',
-              cursor: 'pointer',
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={exportSecret}
-              onChange={(e) => setExportSecret(e.currentTarget.checked)}
-            />
-            {t('wizard.pwd.export_secret')}
-          </label>
-        )}
       </div>
 
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 'var(--space-2)',
-          marginTop: 'var(--space-2)',
-          padding: 'var(--space-3)',
-          border: '1px solid var(--color-border)',
-          borderRadius: 'var(--radius-md)',
-          background: 'var(--color-bg)',
-        }}
-      >
-        <div style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>{t('wizard.member.heading')}</div>
-        <div style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-xs)' }}>
-          {t('wizard.member.desc')}
-        </div>
-        <Input
-          type="text"
-          label={t('wizard.member.email')}
-          value={memberEmail}
-          onInput={(e) => setMemberEmail(e.currentTarget.value)}
-          placeholder={t('wizard.member.email_placeholder')}
-        />
-        <Input
-          type="password"
-          label={t('wizard.member.password')}
-          value={memberPassword}
-          onInput={(e) => setMemberPassword(e.currentTarget.value)}
-          placeholder={t('wizard.member.password_placeholder')}
-        />
-        <Input
-          type="text"
-          label={t('wizard.member.license_code')}
-          value={memberLicenseCode}
-          onInput={(e) => setMemberLicenseCode(e.currentTarget.value)}
-          placeholder={t('wizard.member.license_code_placeholder')}
-        />
-      </div>
+      {isSetupMode && (
+        <details style={{ marginTop: 'var(--space-2)' }}>
+          <summary
+            style={{
+              cursor: 'pointer',
+              fontSize: 'var(--text-sm)',
+              color: 'var(--color-text-secondary)',
+              padding: 'var(--space-2) 0',
+              userSelect: 'none',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+            }}
+          >
+            ▸ {t('wizard.advanced.toggle')}
+            <Tooltip text={t('wizard.help.advanced_options')} size="sm" />
+          </summary>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', paddingTop: 'var(--space-3)' }}>
+            {/* Device Secret 导出 (多设备同步用, 新手可跳) */}
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)',
+                fontSize: 'var(--text-sm)',
+                color: 'var(--color-text-secondary)',
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={exportSecret}
+                onChange={(e) => setExportSecret(e.currentTarget.checked)}
+              />
+              {t('wizard.pwd.export_secret')}
+              <Tooltip text={t('wizard.help.device_secret')} size="sm" />
+            </label>
+
+            {/* 会员账号 (可选, 不填保持 LoggedOut) */}
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 'var(--space-2)',
+                padding: 'var(--space-3)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-md)',
+                background: 'var(--color-bg)',
+              }}
+            >
+              <div style={{ fontWeight: 600, fontSize: 'var(--text-sm)', display: 'flex', alignItems: 'center' }}>
+                {t('wizard.member.heading')}
+                <Tooltip text={t('wizard.help.member_account')} size="sm" />
+              </div>
+              <Input
+                type="text"
+                label={t('wizard.member.email')}
+                value={memberEmail}
+                onInput={(e) => setMemberEmail(e.currentTarget.value)}
+                placeholder={t('wizard.member.email_placeholder')}
+              />
+              <Input
+                type="password"
+                label={t('wizard.member.password')}
+                value={memberPassword}
+                onInput={(e) => setMemberPassword(e.currentTarget.value)}
+                placeholder={t('wizard.member.password_placeholder')}
+              />
+              <Input
+                type="text"
+                label={t('wizard.member.license_code')}
+                value={memberLicenseCode}
+                onInput={(e) => setMemberLicenseCode(e.currentTarget.value)}
+                placeholder={t('wizard.member.license_code_placeholder')}
+              />
+            </div>
+          </div>
+        </details>
+      )}
 
       {error && (
         <div

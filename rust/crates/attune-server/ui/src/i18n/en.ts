@@ -45,6 +45,23 @@ export const en = {
 
   // ─── Wizard Step 2 · Master Password ────────────────
   'wizard.pwd.heading': 'Set Vault Master Password (Local)',
+
+  // ─── Wizard help tooltips ───
+  'wizard.help.master_password': 'Master password encrypts your local knowledge base. Memorize it — you can reset with the recovery key, but data will be wiped.',
+  'wizard.help.member_account': 'Optional: link a cloud account to sync devices and use membership features. All local features work without login.',
+  'wizard.help.device_secret': 'Export to USB or offline media. Required when syncing across devices. Skip for now if unsure — you can export later from Settings.',
+  'wizard.help.llm_provider': 'AI brain handles chat and analysis. Cloud is best quality (costs tokens), local Ollama is free but needs setup.',
+  'wizard.help.api_key': 'Get from your AI provider dashboard. Keys are stored locally, never sent to our servers.',
+  'wizard.help.advanced_options': 'Defaults work for most users. Expand to change advanced options (only if you know what you are doing).',
+  'wizard.help.hardware_auto': 'Best models and indexing strategy are auto-selected based on your hardware. No adjustment needed.',
+  'wizard.help.data_bind_folder': 'After binding a local folder, new/modified files auto-index. All local, never uploaded.',
+  'wizard.help.data_import': 'Restore from a backup file exported by an old device. Filename usually ends with .json.',
+
+  // ─── Wizard collapse labels ───
+  'wizard.advanced.toggle': 'Advanced options',
+  'wizard.advanced.collapse': 'Collapse',
+  'wizard.hardware.show_details': 'Show details',
+  'wizard.data.show_filetypes': 'Show supported file types',
   'wizard.pwd.warning':
     '⚠ This is your local Vault password; member username/password are entered in the next step. Data is encrypted locally with Argon2id + AES-256-GCM.',
   'wizard.pwd.field': 'Vault Password',
