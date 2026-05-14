@@ -34,7 +34,11 @@ Thumbs.db
 # Playwright MCP runtime
 .playwright-mcp/
 chroma_data/
-models/
+# 锚定到仓库根 — 仅忽略 /models 顶层目录 (ML 模型缓存), 不影响
+# python/src/attune_python/models/ 等 Python 包目录. 历史 bug: 无锚的
+# models/ 让 CI 装出的 wheel 缺 schemas 子包导致 ImportError
+/models/
+ai-models/
 *.onnx
 *.bin
 *.xml

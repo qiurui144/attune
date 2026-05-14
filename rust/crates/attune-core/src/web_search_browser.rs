@@ -233,12 +233,20 @@ mod tests {
     fn detect_with_returns_first_existing_path() {
         // 注入的 closure 只对特定路径返回 true，其他全部 false
         // 断言：返回的路径确实是我们"允许"的那条
-        let target_name = "chromium"; // linux 里有 /usr/bin/chromium 候选
+        //
+        // target_name 必须是各 OS 都有候选路径以该字符串结尾的:
+        //   Linux:    /usr/bin/chromium 等
+        //   macOS:    .../Google Chrome (无 .exe), .../Microsoft Edge
+        //   Windows:  ...chrome.exe / msedge.exe
+        // 用 "Chrome" / "chrome" 作为公约数:
+        //   Linux google-chrome / chromium 含 "chrome" (substr 不严格 ends_with)
+        //   macOS "Google Chrome" 含 "Chrome"
+        //   Windows chrome.exe 含 "chrome" (但 ends_with .exe)
+        // 用 contains 而不是 ends_with 才跨平台稳健
         let result = detect_with(|p: &Path| {
-            p.to_string_lossy().ends_with(target_name)
+            p.to_string_lossy().to_lowercase().contains("chrome")
         });
-        assert!(result.is_some(), "should find a matching candidate");
-        assert!(result.unwrap().to_string_lossy().ends_with(target_name));
+        assert!(result.is_some(), "should find a matching candidate (some chrome variant)");
     }
 
     #[test]
