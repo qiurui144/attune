@@ -1,5 +1,30 @@
 # attune 版本记录
 
+## v0.6.3（2026-05-14）— LLM 热重载 + Plugins 数据源 + PII 全路径 + Pro Vertical 验收
+
+发布定位：bug fix patch + UI polish + 4 vertical 端到端验证。
+
+**Release-blocker fixes**（commit 508b49c + d388282 在 origin/develop）：
+
+| ID | 修复 | 影响 |
+|----|------|------|
+| LLM-1 | `AppState::reload_llm()` + settings.rs PATCH 在 `body.get("llm")` 时触发热切；抽出 `build_llm_from_settings` 自由函数复用 | 之前 wizard 配云端 LLM → 必须重启 server 才能 chat。修复后即时生效 |
+| PLG-1 | `GET /api/v1/plugins` 合并 `state.taxonomy.plugins` + `state.plugin_registry.plugins()`, HashSet 去重 | 之前 attune-pro 4 vertical 装在 plugins/ 目录但 marketplace UI 完全不可见 |
+| PII-1 | routes/chat.rs 自己拼 messages 直调 `llm.chat_with_history`, 完全绕过 ChatEngine redact。加 `Redactor::default()` 全路径拦截 + outbound_audit 日志 | 隐私功能 UI ✓ 但服务端真发原文给云端 LLM。修复后 audit log 实见 F-17 触发 |
+| VLT-1 | `forgot-password-reset` 未清 bound_dirs/indexed_files, 重绑 FK 失败。`wipe_all_user_data` 加 WAL checkpoint + post-assert, `bind_directory_with_domain` 改 UPDATE-or-INSERT | 重置后再绑文件夹直接报 SQL 错 |
+
+**UI / UX**：About 5 节信息齐 / Settings 锁定 warning 集中 / Wizard 5 步信息密度优化 + ? Tooltip / 暗色模式 token / 中英双语 locale 持久化。
+
+**Verified on AMD laptop (Ryzen 7 8845H, NPU+iGPU)** — deb-only 部署：
+- 重置 vault → Wizard 5 步全中文无英文泄漏
+- hiapi.online + gpt-4o-mini 真接通 (响应附 web search 3 引用)
+- 4 vertical (law-pro / patent-pro / presales-pro / tech-pro) 全 marketplace 可见; loaded 9 plugins log
+- 暗色 / 设置 / About 5 节 round-trip 全过
+
+**未验证 / 已知**：cloud accounts/pluginhub/llm-gateway docker 部署 + Reader / 项目卷宗 round-trip 仍 pending（独立工作单元）。
+
+---
+
 ## v0.6.x patch 流（2026-05-01）— 部署 + 4 必要底座
 
 ### 最新变更（摘要 LLM 拆分 + 密码恢复机制 + 会员账号登录）
