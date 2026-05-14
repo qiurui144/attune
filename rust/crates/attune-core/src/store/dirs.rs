@@ -25,10 +25,27 @@ impl Store {
         file_types: &[&str],
         corpus_domain: &str,
     ) -> Result<String> {
-        let id = uuid::Uuid::new_v4().simple().to_string();
         let ft_json = serde_json::to_string(file_types)?;
+
+        // path UNIQUE: 已绑定 → 走 UPDATE 路径而非 REPLACE
+        // (REPLACE = DELETE + INSERT, 会让 indexed_files.dir_id FK 失败,
+        //  per feedback_reset_vault_incomplete_wipe)
+        if let Ok(existing_id) = self.conn.query_row(
+            "SELECT id FROM bound_dirs WHERE path = ?1",
+            params![path],
+            |r| r.get::<_, String>(0),
+        ) {
+            self.conn.execute(
+                "UPDATE bound_dirs SET recursive=?1, file_types=?2, is_active=1, corpus_domain=?3 WHERE id=?4",
+                params![recursive as i32, ft_json, corpus_domain, existing_id],
+            )?;
+            return Ok(existing_id);
+        }
+
+        // 新增
+        let id = uuid::Uuid::new_v4().simple().to_string();
         self.conn.execute(
-            "INSERT OR REPLACE INTO bound_dirs (id, path, recursive, file_types, is_active, corpus_domain)
+            "INSERT INTO bound_dirs (id, path, recursive, file_types, is_active, corpus_domain)
              VALUES (?1, ?2, ?3, ?4, 1, ?5)",
             params![id, path, recursive as i32, ft_json, corpus_domain],
         )?;

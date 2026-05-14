@@ -579,14 +579,30 @@ impl Store {
 
         self.conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
         let tx = self.conn.unchecked_transaction()?;
-        for table in table_names {
+        for table in &table_names {
             // 双引号转义，避免异常表名破坏 SQL 语句。
             let safe = table.replace('"', "\"\"");
             let sql = format!("DELETE FROM \"{safe}\"");
             tx.execute(&sql, [])?;
         }
         tx.commit()?;
+        // WAL 模式下 DELETE 是逻辑删除, 必须 checkpoint+VACUUM 才能保证物理擦除
+        // (不然下次 open conn 看到 WAL 残留, 触发 FK violation 等异常状态)
+        let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;");
         self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+
+        // 后置 assert: 所有表必须 0 行 (per feedback_reset_vault_incomplete_wipe)
+        for table in &table_names {
+            let safe = table.replace('"', "\"\"");
+            let sql = format!("SELECT COUNT(*) FROM \"{safe}\"");
+            let count: i64 = self.conn.query_row(&sql, [], |r| r.get(0)).unwrap_or(0);
+            if count > 0 {
+                return Err(VaultError::InvalidInput(format!(
+                    "wipe_all_user_data 完成但表 '{}' 仍有 {} 行残留 (请重启 attune-desktop)",
+                    table, count
+                )));
+            }
+        }
         Ok(())
     }
 
