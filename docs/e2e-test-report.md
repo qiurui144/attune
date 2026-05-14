@@ -1022,3 +1022,77 @@ echo 'You are a legal expert. Review the contract.' > $XDG_DATA_HOME/attune/plug
 - ❌ Tauri GUI 窗口（headless 路径，下次桌面 session 测）
 - ❌ Login screen 错误密码 retry / 多设备同步 / device.key 导入 / ASR / OCR UI
 
+---
+
+## 2026-05-14 AMD 笔电真机完整 E2E (c2d2cea)
+
+**测试环境**: AMD Ryzen 7 8845H + Radeon 780M + XDNA NPU + Ubuntu 25.10 kernel 7.0
+**部署**: deb 路径 (vite build + cargo tauri build + scp + dpkg -i, **不走 cargo run**)
+**LLM**: hiapi.online + gpt-4o-mini (BYOK 路径, 等价 Pro Gateway 协议层)
+**Playwright MCP**: 本机 Chrome via SSH -L 18900 tunnel
+**前端语言**: 中文 (UI 切换 zh-CN, B2 locale 响应式修复验证)
+
+### A 部署阶段
+- Attune_0.6.0_amd64.deb 30MB scp + dpkg -i 5 次重打 (含 G/F/F+/F++ 系列修复)
+- attune-desktop pid 启动 + embedded server bind 127.0.0.1:18900
+- access_log middleware (B4 修复) 生产中跑通: `access: GET ... member=logged_out account=-`
+
+### B Wizard 5 步 + Settings 6 tab
+| 截图 | 验证项 |
+|------|--------|
+| b00-login-screen.png | LoginScreen 中文 "数据库已锁定 · 主密码" |
+| b01-wizard-step1-welcome.png | Wizard Step1 |
+| b02..b03-step2-password-* | Argon2id 10s 派生 + B3 进度文案 |
+| b04..b06-step3-hiapi-* | Cloud API "自定义" + hiapi 测试连接 200 OK 3288ms |
+| b07-step4-hardware-detected.png | AMD Ryzen 8845H + Radeon 780M + NPU 检测 ✓ |
+| b08-step5-data-en.png | Step5 "Bind a folder" (B1 i18n 修复) |
+| b09-mainshell-en.png | MainShell 进入 |
+| b10-cmdpalette-en.png + b11-cmdpalette-zh-after-fix.png | **B2 locale 切换响应式** ✓ 视图名跟随 |
+| b12-ocr-7-builtin.png | 7 builtin OCR profiles (后删) |
+| b13-member-tab.png | Member 状态 LoggedOut |
+| b14-data-tab-folder-links.png | FolderLinks |
+| fplus-final-{6tab}.png | Settings 6 tab (无 OCR, F+ 删 OCR tab 验证) |
+| fpp-{items,projects,remote,skills,marketplace,chat}-zh.png | 6 视图全中文 |
+| f-final-{login-clean,settings-no-ocr}.png | F 修复后清洁状态 |
+
+### C RAG Chat 完整链路 (hiapi.online)
+- RESET vault → wipe 真清 (sqlite3 验 bound_dirs/indexed_files/items 全 0) — G1 修复后 wipe assert 工作
+- bind rust-book (4 .md) + personal-notes (3 笔记) → 200, 7 items
+- **re-bind rust-book (G1 修复后)**: 200 skipped=4 (UPDATE 路径, 不再 FK 失败)
+- 搜索 "ownership" → 5 hit, top1 ch04-01-what-is-ownership 0.115 relevance
+- chat "What is ownership in Rust?" → **191s** 返回:
+  - 4 citations + breadcrumb (What Is Ownership? / References and Borrowing / The Slice Type / Understanding Ownership)
+  - chunk_offset 元数据完整
+  - LLM 答案含原文引用 "Rust通过所有权机制实现无需垃圾回收的内存回收"
+  - compression_stats: 4 chunks / 49271 chars / economical
+  - confidence: 3, items_kept: 4
+
+### D law-pro 证据链 E2E (civil_loan_agent subprocess)
+- scp plugin 文件 + agent_civil_loan binary 到 ~/.local/share/attune/plugins/law-pro/
+- attune-server "loaded 2 plugins" 启动扫描成功
+- subprocess 协议测试 (虚构案件 张三 vs 李四, ¥100K 24% 1 年):
+  - **stdout AgentOutput JSON**: formula=simple_interest_year, computed_interest=¥24065.75, remaining_balance=¥124065.75
+  - **stderr audit_trail**: 14 行人类可读, parties+ rate+ 公式+ claim_direction 全字段标注证据来源
+  - exit=0 (无业务红线)
+  - missing_evidence 软追问 (案件库 kind 字段不匹配 graceful fallback)
+  - 3 证据 evidence linkage: 借条→本金 / 转账截图→起算日 / 还款承诺→截止日
+  - confidence: 0.9
+- golden set 固化: `attune-pro/plugins/law-pro/tests/golden/civil_loan_zhang_li_100k_24pct.json`
+
+### Bug 发现 + 修复 (3 commits)
+- **`58f8e6d` (F 阶段)**: 5 处 API endpoint UI 暴露 + 删 OCR tab + 删 CLI 引导 + Vault/Master Password 术语清理
+- **`88670e1` (F+ 阶段)**: 删 Embedding section + Phase A.5/L0 术语 + ProjectsView 英文表头
+- **`ad18e19` (F++ 阶段)**: ItemsView source_type 字典翻译 + ChatInput aria-label i18n
+- **`c2d2cea` (G 阶段)**: reset wipe 后置 assert + bind_directory UPDATE 路径 + 错误信息脱敏
+
+### Memory 沉淀 (9 条 feedback, 跨会话纪律)
+- feedback_i18n_runtime_reactivity (B2)
+- feedback_long_compute_progress (B3 Argon2id)
+- feedback_request_audit_log (B4)
+- feedback_utf8_boundary_panic (CLI bug)
+- feedback_test_global_env_serialization (TEST_MUTEX)
+- feedback_linux_deb_only_testing
+- feedback_ui_cli_separation
+- feedback_ui_minimalism 规则 B/C (引擎参数禁暴露 + OCR 全自动)
+- feedback_reset_vault_incomplete_wipe
+

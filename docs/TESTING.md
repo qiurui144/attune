@@ -84,6 +84,17 @@ attune 采用工业经典 5 层分类（Unit / Integration / System / E2E / Smok
 
 **驱动当前任务定义**：B.1 / B.2 / B.3 / C.1 / C.3 都从这张表的"空白" + "部分"格倒推。
 
+### 1.4 真机 E2E (Linux deb)
+
+第 5 层 (System E2E) 含一条独立子线: **AMD 笔电 deb 路径真机验收** (per [[feedback_linux_deb_only_testing]]).
+
+- 主机: 192.168.100.201 (Ryzen 7 8845H + Radeon 780M + XDNA NPU + Ubuntu 25.10)
+- 部署: `cargo tauri build --bundles deb` → scp → `dpkg -i` (不走 cargo run)
+- 测试驱动: 本机 Playwright MCP Chrome + SSH -L 18900 tunnel
+- 验收脚本: `rust/crates/attune-server/tests/amd_laptop_e2e_smoke.rs` (默认 #[ignore], 跑前设 `ATTUNE_E2E_HOST` + `ATTUNE_E2E_TOKEN`)
+- 报告: `docs/e2e-test-report.md`#2026-05-14 章节累积截图与 bug 修复记录
+- 跑 trigger: 每次 release-candidate 重 deb 后必跑一次 (覆盖 wizard 5 步 + 6 tab + RAG chat + law-pro 证据链)
+
 ---
 
 ## 2. 跨层质量门 — attune 特化
