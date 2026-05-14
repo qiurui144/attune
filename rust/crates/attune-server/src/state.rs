@@ -167,6 +167,34 @@ impl AppState {
         }
     }
 
+    /// 仅重建 state.llm + classifier，按当前 settings 重新选 provider。
+    /// 用于 wizard / Settings PATCH 修改 llm.* 字段后热切，避免要求重启。
+    /// 由 settings.rs 在 body.get("llm").is_some() 时调用。
+    pub fn reload_llm(&self) {
+        let settings_json = {
+            let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+            vault_guard.store().get_meta("app_settings").ok().flatten()
+                .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        };
+        let llm_result = build_llm_from_settings(&settings_json, &self.hardware);
+        match llm_result {
+            Some(llm_arc) => {
+                tracing::info!("LLM hot-reload: provider rebuilt from settings");
+                // 同时刷新 classifier (它持有 llm Arc 复本，需要更新)
+                if let Some(tax_arc) = self.taxonomy.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                    *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(std::sync::Arc::new(Classifier::new(tax_arc, llm_arc.clone())));
+                }
+                *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(llm_arc);
+            }
+            None => {
+                tracing::warn!("LLM hot-reload: settings yielded no LLM provider — chat will be disabled");
+                *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+        }
+    }
+
     /// 初始化搜索引擎 + 分类引擎 (unlock 后调用)
     /// 使用 compare_exchange 保证幂等：并发 unlock 只有第一个线程真正执行初始化。
     pub fn init_search_engines(&self) {
@@ -297,58 +325,14 @@ impl AppState {
             });
         }
 
-        // LLM 四级优先级：1. 配置文件 llm.endpoint（OpenAI-compatible）
-        //                  2. provider=local + 明确指定 model → OllamaLlmProvider::with_model
-        //                  3. Ollama 自动探测（PREFERRED_MODELS 列表）
-        //                  4. 无 LLM（Chat 功能禁用）
+        // LLM 四级优先级见 build_llm_from_settings 文档
         let settings_json = {
             let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
             vault_guard.store().get_meta("app_settings").ok().flatten()
                 .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
         };
 
-        let llm_result: Option<Arc<dyn LlmProvider>> = {
-            let configured_llm = settings_json.as_ref().and_then(|settings| {
-                let llm = settings.get("llm")?;
-                let endpoint = llm.get("endpoint").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let api_key = llm.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let model = llm.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let provider = llm.get("provider").and_then(|v| v.as_str()).unwrap_or("local");
-
-                if let Some(ep) = endpoint {
-                    // 级别 1：明确配置了 endpoint → OpenAI-compatible（含 Qwen/DeepSeek 等）
-                    tracing::info!("LLM: using configured endpoint {ep}");
-                    Some(Arc::new(OpenAiLlmProvider::new(&ep, &api_key, &model)) as Arc<dyn LlmProvider>)
-                } else if provider == "local" && !model.is_empty() {
-                    // 级别 2：local provider + 明确指定 model → Ollama with_model
-                    tracing::info!("LLM: using Ollama with configured model {model}");
-                    Some(Arc::new(OllamaLlmProvider::with_model(&model)) as Arc<dyn LlmProvider>)
-                } else {
-                    None
-                }
-            });
-
-            // 级别 3：Ollama 自动探测 — OSS-S19 fix: 仅 K3 一体机形态允许 silent fallback。
-            // 笔电 / 服务器形态 + 无 cloud config → 直接 None (Chat 拒绝)，避免违反
-            // CLAUDE.md M2 边界 (笔电默认 LLM 走云端 token，本地不预装 LLM)。
-            // 历史上此处会静默回退到本地 Ollama，导致 chat 测试绕过了真实 cloud 配置路径。
-            // 现在只在 K3 形态允许 silent fallback，避免普通设备误走本地大模型路径。
-            configured_llm.or_else(|| {
-                if self.hardware.form_factor.prefers_local_llm() {
-                    OllamaLlmProvider::auto_detect().ok().map(|llm| {
-                        tracing::info!("LLM (K3 form factor): using Ollama auto-detect");
-                        Arc::new(llm) as Arc<dyn LlmProvider>
-                    })
-                } else {
-                    tracing::warn!(
-                        "LLM: form_factor={:?} + no cloud endpoint configured → no LLM (chat 将返回 400 提示用户配置 cloud API key per CLAUDE.md M2)",
-                        self.hardware.form_factor
-                    );
-                    None
-                }
-            })
-            // 级别 4：None（Chat 功能禁用）
-        };
+        let llm_result = build_llm_from_settings(&settings_json, &self.hardware);
 
         let summary_llm_result: Option<Arc<dyn LlmProvider>> = {
             let summary_model = settings_json.as_ref()
@@ -1106,4 +1090,52 @@ impl AppState {
         // 重置初始化标志，确保再次 unlock 后能重新初始化搜索引擎
         self.engines_initialized.store(false, Ordering::SeqCst);
     }
+}
+
+/// 按 settings + 硬件构建 LLM provider。
+///
+/// 四级优先级：
+/// 1. settings.llm.endpoint 非空 → OpenAI-compatible（hiapi / DeepSeek / Qwen 等）
+/// 2. settings.llm.provider == "local" + model 非空 → OllamaLlmProvider::with_model
+/// 3. form_factor.prefers_local_llm() (K3 一体机) → Ollama auto-detect
+/// 4. 其他笔电 / 服务器 + 无 cloud config → None（chat 返回 503 引导配置）
+///
+/// 抽出为自由函数后，可以同时被 init_search_engines (启动 unlock 一次)
+/// 和 reload_llm (settings 改 llm 字段后热切) 复用。
+fn build_llm_from_settings(
+    settings_json: &Option<serde_json::Value>,
+    hardware: &attune_core::platform::HardwareProfile,
+) -> Option<Arc<dyn LlmProvider>> {
+    let configured_llm = settings_json.as_ref().and_then(|settings| {
+        let llm = settings.get("llm")?;
+        let endpoint = llm.get("endpoint").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let api_key = llm.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let model = llm.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let provider = llm.get("provider").and_then(|v| v.as_str()).unwrap_or("local");
+
+        if let Some(ep) = endpoint.filter(|s| !s.is_empty()) {
+            tracing::info!("LLM: using configured endpoint {ep}");
+            Some(Arc::new(OpenAiLlmProvider::new(&ep, &api_key, &model)) as Arc<dyn LlmProvider>)
+        } else if provider == "local" && !model.is_empty() {
+            tracing::info!("LLM: using Ollama with configured model {model}");
+            Some(Arc::new(OllamaLlmProvider::with_model(&model)) as Arc<dyn LlmProvider>)
+        } else {
+            None
+        }
+    });
+
+    configured_llm.or_else(|| {
+        if hardware.form_factor.prefers_local_llm() {
+            OllamaLlmProvider::auto_detect().ok().map(|llm| {
+                tracing::info!("LLM (K3 form factor): using Ollama auto-detect");
+                Arc::new(llm) as Arc<dyn LlmProvider>
+            })
+        } else {
+            tracing::warn!(
+                "LLM: form_factor={:?} + no cloud endpoint configured → no LLM (chat 将返回 503 提示用户配置 cloud API key per CLAUDE.md M2)",
+                hardware.form_factor
+            );
+            None
+        }
+    })
 }

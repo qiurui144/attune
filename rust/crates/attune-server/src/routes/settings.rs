@@ -179,13 +179,24 @@ pub async fn update_settings(
     vault.store().set_meta(SETTINGS_KEY, &data)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
+    // 准备热切参数（仍持 vault lock），值复制完释放再触发 reload，避免死锁
+    let pluginhub_url = body.get("pluginhub").and_then(|_| {
+        current.get("pluginhub").and_then(|p| p.get("url")).and_then(|v| v.as_str()).map(|s| s.to_string())
+    });
+    let pluginhub_key = body.get("pluginhub").and_then(|_| {
+        current.get("pluginhub").and_then(|p| p.get("license_key")).and_then(|v| v.as_str()).map(|s| s.to_string())
+    });
+    let need_llm_reload = body.get("llm").is_some();
+    drop(vault);
+
     // G2 (2026-05-01) — pluginhub 字段变化时热切 provider
     if body.get("pluginhub").is_some() {
-        let url = current.get("pluginhub").and_then(|p| p.get("url")).and_then(|v| v.as_str());
-        let key = current.get("pluginhub").and_then(|p| p.get("license_key")).and_then(|v| v.as_str());
-        // 释放 vault lock 让 reload 能拿 plugin_hub mutex
-        drop(vault);
-        state.reload_plugin_hub(url, key);
+        state.reload_plugin_hub(pluginhub_url.as_deref(), pluginhub_key.as_deref());
+    }
+    // 2026-05-14 — llm 字段变化时热切 LLM provider, 避免要求重启 server。
+    // 修复 wizard 5 步保存云端 LLM 后, state.llm 仍是 None 导致 chat 503 的 bug。
+    if need_llm_reload {
+        state.reload_llm();
     }
 
     // 返回前先 redact（防 API key 回流）
