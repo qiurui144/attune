@@ -784,7 +784,7 @@ function MemberPanel(): JSX.Element {
             <tbody>
               {(
                 [
-                  ['vault_password', 'Vault 主密码'],
+                  ['vault_password', '主密码'],
                   ['local_folder_links', '本地知识库目录'],
                   ['cloud_llm', '云端大模型 API'],
                   ['plugin_install', '插件装载'],

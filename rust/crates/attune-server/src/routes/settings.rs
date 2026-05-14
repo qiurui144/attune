@@ -144,7 +144,7 @@ pub async fn update_settings(
                         "error": "setting_locked_by_member_tier",
                         "field": settings_key,
                         "lock_reason": format!("'{lock_field}' is locked under current membership tier"),
-                        "hint": "GET /api/v1/member/locks 看完整锁定矩阵",
+                        "hint": "请升级会员或在「设置 → 会员」查看锁定矩阵",
                     })),
                 ));
             }
