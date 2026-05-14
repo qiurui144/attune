@@ -480,7 +480,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                 </div>
                 <Input
                   type="text"
-                  placeholder="Gateway URL（默认可直接用）"
+                  placeholder="服务地址（默认可直接用）"
                   value={endpoint}
                   onInput={(e) => setEndpoint(e.currentTarget.value)}
                 />

@@ -369,7 +369,7 @@ function StatusBar({ collapsed }: { collapsed: boolean }): JSX.Element {
         <button
           type="button"
           onClick={() => (menuOpen.value = !menuOpen.value)}
-          aria-label="Account menu"
+          aria-label="账号菜单"
           aria-expanded={menuOpen.value}
           className="interactive"
           style={{

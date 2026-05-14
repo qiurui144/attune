@@ -246,7 +246,6 @@ function GeneralPanel(): JSX.Element {
 
 function AIPanel(): JSX.Element {
   const llm = useComputed(() => (settings.value?.llm as Record<string, unknown>) ?? {});
-  const emb = useComputed(() => (settings.value?.embedding as Record<string, unknown>) ?? {});
 
   // 编辑态（草稿值，保存按钮才下发）
   const presetKey = useSignal<LlmPresetKey>('custom');
@@ -317,7 +316,7 @@ function AIPanel(): JSX.Element {
             type="text"
             value={draftEndpoint.value}
             onInput={(e) => (draftEndpoint.value = e.currentTarget.value)}
-            placeholder="https://api.example.com/v1"
+            placeholder="例：https://api.openai.com/v1"
             style={inputStyle}
           />
         </SettingRow>
@@ -362,15 +361,6 @@ function AIPanel(): JSX.Element {
         </SettingRow>
       </Section>
 
-      <Section title={t('settings.ai.embedding.title')}>
-        <SettingRow label={t('settings.ai.embedding.model')}>
-          <code style={codeStyle}>{(emb.value.model as string) ?? '—'}</code>
-        </SettingRow>
-        <SettingRow label={t('settings.ai.embedding.ollama_url')}>
-          <code style={codeStyle}>{(emb.value.ollama_url as string) ?? '—'}</code>
-        </SettingRow>
-      </Section>
-
       <Section title={t('settings.ai.web_search.title')}>
         <SettingRow label={t('settings.ai.web_search.enabled')}>
           <Toggle
@@ -404,7 +394,10 @@ function DataPanel(): JSX.Element {
         </p>
       </Section>
       <FolderLinksSection />
-      <Section title="导入 / 导出">
+      <Section title="备份与迁移">
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 8px 0' }}>
+          导出后可用于换设备或备份。
+        </p>
         <Button
           variant="secondary"
           size="sm"
@@ -417,16 +410,16 @@ function DataPanel(): JSX.Element {
               const url = URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = url;
-              a.download = `attune-profile-${Date.now()}.vault-profile`;
+              a.download = `attune-backup-${Date.now()}.json`;
               a.click();
               URL.revokeObjectURL(url);
-              toast('success', '已导出 profile');
+              toast('success', '已导出备份文件');
             } catch (e) {
               toast('error', `导出失败：${e instanceof Error ? e.message : String(e)}`);
             }
           }}
         >
-          📥 导出 .vault-profile
+          📥 导出备份
         </Button>
       </Section>
     </>
@@ -467,7 +460,7 @@ function PrivacyPanel(): JSX.Element {
   return (
     <>
       <Section title="安全">
-        <SettingRow label="Vault 状态">
+        <SettingRow label="状态">
           <span style={{ fontSize: 'var(--text-sm)' }}>
             {vaultState.value === 'unlocked' ? '✓ 已解锁' : '🔒 已锁定'}
           </span>
@@ -487,29 +480,29 @@ function PrivacyPanel(): JSX.Element {
               }
             }}
           >
-            🔒 锁定 vault
+            🔒 锁定知识库
           </Button>
         </SettingRow>
       </Section>
 
       {/* v0.6 Phase A.5.5: 隐私分级状态 */}
-      <Section title="隐私分级 (Phase A.5)">
+      <Section title="数据脱敏">
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 12px 0', lineHeight: 1.5 }}>
-          Attune 的"成本/隐私三层模型"：
+          在发送到云端大模型前，会自动剔除敏感信息（手机号、身份证号、地址等）。
         </p>
-        <SettingRow label="L1 正则脱敏">
+        <SettingRow label="基础脱敏">
           <span style={{ fontSize: 'var(--text-sm)', color: privacyTier.value?.l1_regex_available ? 'var(--color-success)' : 'var(--color-text-secondary)' }}>
-            {privacyTier.value?.l1_regex_available ? '✓ 默认启用 (12 类格式化 PII)' : '— 未就绪'}
+            {privacyTier.value?.l1_regex_available ? '✓ 已启用（12 类常见敏感信息）' : '— 未就绪'}
           </span>
         </SettingRow>
-        <SettingRow label="L2 NER">
+        <SettingRow label="增强脱敏">
           <span style={{ fontSize: 'var(--text-sm)' }}>
-            {privacyTier.value?.l2_ner_available ? '✓ 可用' : '🟡 v0.6 排期 (~300MB ONNX 模型)'}
+            {privacyTier.value?.l2_ner_available ? '✓ 已启用' : '🟡 后续版本启用'}
           </span>
         </SettingRow>
-        <SettingRow label="L3 LLM 脱敏">
+        <SettingRow label="智能脱敏">
           <span style={{ fontSize: 'var(--text-sm)' }}>
-            {privacyTier.value?.l3_llm_available ? '✓ 可用 (Tier T3+/K3)' : '🟡 v0.7 排期，需高端硬件'}
+            {privacyTier.value?.l3_llm_available ? '✓ 已启用' : '🟡 需高端硬件或一体机'}
           </span>
         </SettingRow>
         {privacyTier.value?.upgrade_hint ? (
@@ -519,9 +512,9 @@ function PrivacyPanel(): JSX.Element {
         ) : <></>}
       </Section>
 
-      <Section title="🔒 受保护文件 (per-file L0)">
+      <Section title="🔒 机密文件">
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 8px 0', lineHeight: 1.5 }}>
-          标记为 L0 的文件 chunk 永不出现在云端 LLM context 里（强制本地 LLM）。
+          标记为机密的文件不会发送到云端大模型，仅本地处理。
           目前已标记: <strong>{protectedItems.value?.count ?? 0}</strong> 个文件。
         </p>
         <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', margin: 0, lineHeight: 1.5 }}>
@@ -529,12 +522,12 @@ function PrivacyPanel(): JSX.Element {
         </p>
       </Section>
 
-      <Section title="出网审计日志">
+      <Section title="云端调用记录">
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 12px 0', lineHeight: 1.5 }}>
-          每次云端 LLM 调用都本地落 audit log（SHA256 hash + 模型 + token 数 + 脱敏统计，<strong>0 用户原文落库</strong>）。
+          每次调用云端大模型都会在本地记录摘要（模型名 + 调用时长 + 脱敏统计），<strong>不保存原文</strong>。
           已记录: <strong>{auditCount.value}</strong> 条。
         </p>
-        <SettingRow label="导出 CSV">
+        <SettingRow label="导出记录">
           <Button
             variant="primary"
             size="sm"
@@ -574,7 +567,7 @@ function AboutPanel(): JSX.Element {
         <SettingRow label="版本">
           <code style={codeStyle}>0.6.0-dev</code>
         </SettingRow>
-        <SettingRow label="许可">
+        <SettingRow label="开源协议">
           <code style={codeStyle}>Apache-2.0</code>
         </SettingRow>
       </Section>
@@ -711,7 +704,7 @@ function MemberPanel(): JSX.Element {
 
   return (
     <div>
-      <Section title="会员状态" desc="对接 cloud accounts; CLI: attune login <email>">
+      <Section title="会员状态">
         {!m && <p style={{ color: 'var(--color-text-secondary)' }}>加载中...</p>}
         {m && m.is_logged_in && (
           <>

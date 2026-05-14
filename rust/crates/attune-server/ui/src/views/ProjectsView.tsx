@@ -2,7 +2,7 @@
  *
  * 通用 Project 卷宗管理（不带行业字眼，kind 是自由字符串由 plugin 定义）：
  *   - 列出所有 Project（title + kind + 创建/更新时间）
- *   - 新建 Project（modal: title + kind 输入）
+ *   - 新建项目（modal: title + kind 输入）
  *   - 选中后右侧展示 files + timeline
  *
  * attune-core 边界：UI 不约束 kind 取值，纯路由透传。
@@ -138,10 +138,10 @@ export function ProjectsView(): JSX.Element {
         <EmptyState
           icon="🗂"
           title="暂无 Project"
-          description="点击「新建 Project」开始整理资料、证据与思路。"
+          description="点击「新建项目」开始整理资料、证据与思路"
           actions={[
             {
-              label: '新建 Project',
+              label: '新建项目',
               onClick: () => (showCreate.value = true),
               variant: 'primary',
             },
@@ -276,7 +276,7 @@ function ProjectsHeader({
       </h2>
       <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
         <Button variant="primary" size="sm" onClick={onCreate}>
-          + 新建 Project
+          + 新建项目
         </Button>
         <Button variant="secondary" size="sm" onClick={onReload} disabled={loading}>
           {loading ? '加载中…' : '⟳ 刷新'}
@@ -400,9 +400,9 @@ function ProjectDetail({
           >
             <thead>
               <tr>
-                <th style={th}>File ID</th>
-                <th style={th}>Role</th>
-                <th style={th}>Added</th>
+                <th style={th}>文件</th>
+                <th style={th}>角色</th>
+                <th style={th}>添加时间</th>
               </tr>
             </thead>
             <tbody>
@@ -429,7 +429,7 @@ function ProjectDetail({
             color: 'var(--color-text)',
           }}
         >
-          Timeline ({timeline.length})
+          时间线（{timeline.length}）
         </h3>
         {timeline.length === 0 ? (
           <div
@@ -496,7 +496,7 @@ function CreateProjectModal({
   onConfirm: () => void;
 }): JSX.Element {
   return (
-    <Modal open onClose={onCancel} title="新建 Project">
+    <Modal open onClose={onCancel} title="新建项目">
       <div
         style={{
           display: 'flex',
@@ -506,7 +506,7 @@ function CreateProjectModal({
         }}
       >
         <label style={labelStyle}>
-          <span>Title</span>
+          <span>名称</span>
           <input
             type="text"
             value={title.value}
@@ -517,12 +517,12 @@ function CreateProjectModal({
           />
         </label>
         <label style={labelStyle}>
-          <span>Kind（自由字符串，由 plugin 定义；默认 generic）</span>
+          <span>类型（默认通用）</span>
           <input
             type="text"
             value={kind.value}
             onInput={(e) => (kind.value = (e.currentTarget as HTMLInputElement).value)}
-            placeholder="generic / deal / topic / ..."
+            placeholder="通用 / 案件 / 论文 / ..."
             style={inputStyle}
           />
         </label>
