@@ -36,6 +36,12 @@ local-ip-address = "0.6"
 # 导致 PathBuf::starts_with(home) 失败. dunce::canonicalize 自动剥
 # UNC 前缀, 跨平台行为一致. 见 routes/index.rs::validate_bind_path
 dunce = "1"
+# thiserror: 统一 AppError derive (OPT-3 / ARCH-A). 各 route 复用 IntoResponse.
+thiserror = "2"
+# arc-swap: lock-free atomic Arc swap, 用于 AppState 里 read-heavy 的 ML provider
+# trait object (embedding / llm / reranker / web_search / classifier). 写少读多场景,
+# 比 std::sync::Mutex<Arc<dyn>> 快得多 + 无 async/blocking 风险.
+arc-swap = "1"
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json"] }

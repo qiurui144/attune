@@ -1090,6 +1090,82 @@ impl AppState {
         // 重置初始化标志，确保再次 unlock 后能重新初始化搜索引擎
         self.engines_initialized.store(false, Ordering::SeqCst);
     }
+
+    // ── ML provider accessor 方法 (OPT-3 ArcSwap migration prep) ───────────
+    //
+    // 当前实现: lock+clone Arc 然后立即放锁 → 临界区毫秒内, 比正常 .lock() 短 1000x.
+    // 后续 PR (v0.7): 把字段类型从 `Mutex<Option<Arc<dyn T>>>` 改成
+    // `arc_swap::ArcSwap<Option<Arc<dyn T>>>`, 这些方法签名不变, 调用方代码无需改.
+    //
+    // 新代码 (route / async handler) 强烈建议用这些 accessor 而非 .lock() 直接访问 —
+    // 准备一并 migrate 到 ArcSwap 时, 旧 .lock() 调用会编译失败 (字段类型不再是 Mutex).
+
+    /// 读 embedding provider — lock-free clone of Arc. 适合 async handler 内调.
+    pub fn embedding(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embedding.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// 写 embedding provider. settings hot-reload 路径会调.
+    pub fn set_embedding(&self, p: Option<Arc<dyn EmbeddingProvider>>) {
+        if let Ok(mut g) = self.embedding.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 LLM provider — 主 chat 用.
+    pub fn llm(&self) -> Option<Arc<dyn LlmProvider>> {
+        self.llm.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_llm(&self, p: Option<Arc<dyn LlmProvider>>) {
+        if let Ok(mut g) = self.llm.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 summary LLM (摘要/分类轻量 path, 与主 chat 模型可不同).
+    pub fn summary_llm(&self) -> Option<Arc<dyn LlmProvider>> {
+        self.summary_llm.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_summary_llm(&self, p: Option<Arc<dyn LlmProvider>>) {
+        if let Ok(mut g) = self.summary_llm.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 reranker provider — search rerank 阶段用.
+    pub fn reranker(&self) -> Option<Arc<dyn attune_core::infer::RerankProvider>> {
+        self.reranker.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_reranker(&self, p: Option<Arc<dyn attune_core::infer::RerankProvider>>) {
+        if let Ok(mut g) = self.reranker.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 web search provider — chat web augmentation 用.
+    pub fn web_search(&self) -> Option<Arc<dyn WebSearchProvider>> {
+        self.web_search.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_web_search(&self, p: Option<Arc<dyn WebSearchProvider>>) {
+        if let Ok(mut g) = self.web_search.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 classifier — items 自动分类 (热路径, ingest pipeline 调).
+    pub fn classifier(&self) -> Option<Arc<Classifier>> {
+        self.classifier.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_classifier(&self, p: Option<Arc<Classifier>>) {
+        if let Ok(mut g) = self.classifier.lock() {
+            *g = p;
+        }
+    }
 }
 
 /// 按 settings + 硬件构建 LLM provider。
