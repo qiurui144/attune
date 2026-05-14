@@ -1,22 +1,28 @@
-// H1 集成测试：验证真 sysinfo monitor + 真 std::thread worker 在 governor
-// 控制下能：
+// H1 集成测试：验证真 std::thread worker 在 governor 控制下能：
 // (1) 全局 pause 后所有 worker 在 ≤ 1s 内停止处理
 // (2) 切档后 budget 立即生效（影响 should_run 决策）
 // (3) 多 worker 并发注册不丢失任何一个
 //
-// 注意：不用 MockMonitor — 这是真集成路径。CI 上可能有 sysinfo 抖动，
-// 所以断言用足够宽的边界。
+// monitor 用 MockMonitor (cpu=0) 而非 SysinfoMonitor —— 这些测试验证的是
+// pause/profile/registry 语义, 不是 sysinfo 采样行为. 用 SysinfoMonitor
+// 在 GHA 高负载 runner 上会因为系统 CPU% > budget 导致 should_run() 永远 false,
+// counter 全 0, 测试失败 (历史 fail: rust-test-windows-latest run 25850300599).
+// SysinfoMonitor 本身的单元测试见 src/resource_governor/monitor.rs.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use attune_core::resource_governor::{global_registry, GovernorRegistry, Profile, SysinfoMonitor, TaskKind};
+use attune_core::resource_governor::{
+    global_registry, GovernorRegistry, MockMonitor, Profile, Sample, TaskKind,
+};
 
-/// 一个用 SysinfoMonitor 的"私有"registry — 不污染全局单例（其他测试可能并行跑）。
+/// 私有 registry, 用 MockMonitor 注入 cpu=0 sample → should_run 只受 pause/budget 影响.
+/// Sample::default() 即 cpu_pct=0 (captured_secs 是 crate-private, 不可外部构造).
 fn fresh_registry() -> GovernorRegistry {
-    GovernorRegistry::with_monitor(Arc::new(SysinfoMonitor::new()))
+    let mock = MockMonitor::new(Sample::default());
+    GovernorRegistry::with_monitor(Arc::new(mock))
 }
 
 /// 启动一个 cooperative worker，模拟生产代码模式：
