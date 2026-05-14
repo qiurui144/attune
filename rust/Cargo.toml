@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# crates/attune-tauri 是历史 stub (含 Cargo.toml.template + README + 空 src/),
+# 不放进 members. Tauri 实际位置 apps/attune-desktop. 不要把 stub 推进 workspace.
 members = ["crates/attune-core", "crates/attune-cli", "crates/attune-server", "crates/attune-accounts"]
 
 [workspace.metadata.features]
@@ -21,6 +23,13 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # dirs：原 attune-core=6 / attune-server=5 不一致，统一到 6
 dirs = "6"
+# 跨 crate 高频 dep — 之前重复声明 ≥3 次, 提取统一版本 (D6 build perf):
+# chrono 在 attune-core/server/accounts 都用, features 之前不一致 (有的带 serde 有的不带) → 统一 serde
+chrono = { version = "0.4", features = ["serde"] }
+# uuid 同上, 之前 v4 vs v4+serde 混用
+uuid = { version = "1", features = ["v4", "serde"] }
+# tracing 3 处 (core/server/accounts), 统一 0.1
+tracing = "0.1"
 
 # Lints：所有 crate 共用一份，避免每 crate 重复声明。
 # 当前 baseline：R3 后剩余 24 个 clippy warning，先用 default deny 级别保留现状，
@@ -52,3 +61,28 @@ serde_json = { workspace = true }
 [[test]]
 name = "server_test"
 path = "tests/server_test.rs"
+
+# Build profile 调优 (D6 quick-win). 改 dev/release/test 三种 profile.
+[profile.dev]
+# split-debuginfo 加快 link (Linux/macOS 默认 packaged 慢); Windows 上 cargo 自动忽略.
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+# 让所有 dep crate 在 dev profile 也用 O1 (而非默认 O0).
+# 收益: dev test 速度 5x (大头是 serde/regex/tantivy/usearch 这些热 dep).
+# 代价: 第一次 build dep 时间 +30%, 之后增量 build 无影响.
+opt-level = 1
+
+[profile.release]
+# thin LTO + 单 codegen unit: 二进制 -15%, perf +5%, build +30%.
+# 我们 release 是 binary distribution, 不是 lib, build 时间不是热路径.
+lto = "thin"
+codegen-units = 1
+# strip symbols 减小二进制 (~3-5 MB), 不影响 panic backtrace (panic=unwind 仍保留).
+strip = "symbols"
+
+[profile.test]
+# 测试中 dep 也走 O1, 大幅减少 cargo test 时间. 测试代码本身仍 O0.
+opt-level = 0
+[profile.test.package."*"]
+opt-level = 1

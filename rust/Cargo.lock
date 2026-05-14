@@ -306,6 +306,7 @@ dependencies = [
 name = "attune-server"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "attune-core",
  "axum",
  "axum-server",
@@ -319,6 +320,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tower-http",
  "tracing",
