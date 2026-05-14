@@ -4,12 +4,12 @@
 import { api } from '../store/api';
 import { folderLinks, type FolderLink } from '../store/signals';
 
-type Response = { folder_links?: FolderLink[] } | FolderLink[];
+type Response = { folder_links?: FolderLink[]; links?: FolderLink[] } | FolderLink[];
 
 export async function loadFolderLinks(): Promise<void> {
   try {
     const raw = await api.get<Response>('/folder-links');
-    folderLinks.value = Array.isArray(raw) ? raw : raw.folder_links ?? [];
+    folderLinks.value = Array.isArray(raw) ? raw : raw.links ?? raw.folder_links ?? [];
   } catch {
     folderLinks.value = [];
   }

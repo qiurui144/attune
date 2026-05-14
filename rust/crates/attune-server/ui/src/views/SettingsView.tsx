@@ -18,7 +18,7 @@ import {
 } from '../store/signals';
 import { setLocale, currentLocale, t } from '../i18n';
 import { loadSettings, patchSettings } from '../hooks/useSettings';
-import { loadMemberState, loadSettingsLocks, memberLogout } from '../hooks/useMember';
+import { loadMemberState, loadSettingsLocks, memberLogout, memberLoginPassword } from '../hooks/useMember';
 import {
   loadOcrProfiles,
   createOcrProfile,
@@ -75,7 +75,7 @@ const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
   ollama: {
     label: 'Ollama 本地（免费）',
     endpoint: 'http://localhost:11434/v1',
-    model: 'qwen2.5:7b',
+    model: 'auto',
   },
   openai: {
     label: 'OpenAI (~¥3/M tok)',
@@ -86,14 +86,14 @@ const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
 
 type SettingsTab = 'general' | 'ai' | 'data' | 'ocr' | 'member' | 'privacy' | 'about';
 
-const TABS: Array<{ key: SettingsTab; icon: string; label: string }> = [
-  { key: 'general', icon: '⚙', label: '通用' },
-  { key: 'ai', icon: '🤖', label: 'AI 大脑' },
-  { key: 'ocr', icon: '📷', label: 'OCR 场景' },
-  { key: 'data', icon: '📂', label: '数据' },
-  { key: 'member', icon: '👤', label: '会员' },
-  { key: 'privacy', icon: '🔐', label: '隐私' },
-  { key: 'about', icon: 'ℹ', label: '关于' },
+const TABS: Array<{ key: SettingsTab; icon: string; labelKey: string }> = [
+  { key: 'general', icon: '⚙', labelKey: 'settings.tab.general' },
+  { key: 'ai', icon: '🤖', labelKey: 'settings.tab.ai' },
+  { key: 'ocr', icon: '📷', labelKey: 'settings.tab.ocr' },
+  { key: 'data', icon: '📂', labelKey: 'settings.tab.data' },
+  { key: 'member', icon: '👤', labelKey: 'settings.tab.member' },
+  { key: 'privacy', icon: '🔐', labelKey: 'settings.tab.privacy' },
+  { key: 'about', icon: 'ℹ', labelKey: 'settings.tab.about' },
 ];
 
 export function SettingsView(): JSX.Element {
@@ -109,15 +109,16 @@ export function SettingsView(): JSX.Element {
   }, []);
 
   return (
-    <div style={{ height: '100%', display: 'flex' }}>
+    <div style={{ height: '100%', display: 'flex', minWidth: 0 }}>
       <nav
         aria-label="Settings sections"
         style={{
-          width: 200,
+          width: 'clamp(170px, 22vw, 220px)',
           flexShrink: 0,
           borderRight: '1px solid var(--color-border)',
           padding: 'var(--space-5) 0',
           background: 'var(--color-bg)',
+          overflow: 'auto',
         }}
       >
         <h2
@@ -129,7 +130,7 @@ export function SettingsView(): JSX.Element {
             marginBottom: 'var(--space-4)',
           }}
         >
-          设置
+          {t('settings.title')}
         </h2>
         {TABS.map((tab) => {
           const active = activeTab.value === tab.key;
@@ -159,7 +160,7 @@ export function SettingsView(): JSX.Element {
               }}
             >
               <span aria-hidden="true">{tab.icon}</span>
-              <span>{tab.label}</span>
+              <span>{t(tab.labelKey)}</span>
             </button>
           );
         })}
@@ -168,17 +169,20 @@ export function SettingsView(): JSX.Element {
       <div
         style={{
           flex: 1,
+          minWidth: 0,
           overflow: 'auto',
-          padding: 'var(--space-6) var(--space-7)',
+          padding: 'clamp(var(--space-4), 3vw, var(--space-6)) clamp(var(--space-4), 4vw, var(--space-7))',
         }}
       >
-        {activeTab.value === 'general' && <GeneralPanel />}
-        {activeTab.value === 'ai' && <AIPanel />}
-        {activeTab.value === 'ocr' && <OcrPanel />}
-        {activeTab.value === 'data' && <DataPanel />}
-        {activeTab.value === 'member' && <MemberPanel />}
-        {activeTab.value === 'privacy' && <PrivacyPanel />}
-        {activeTab.value === 'about' && <AboutPanel />}
+        <div style={{ maxWidth: 980, width: '100%' }}>
+          {activeTab.value === 'general' && <GeneralPanel />}
+          {activeTab.value === 'ai' && <AIPanel />}
+          {activeTab.value === 'ocr' && <OcrPanel />}
+          {activeTab.value === 'data' && <DataPanel />}
+          {activeTab.value === 'member' && <MemberPanel />}
+          {activeTab.value === 'privacy' && <PrivacyPanel />}
+          {activeTab.value === 'about' && <AboutPanel />}
+        </div>
       </div>
     </div>
   );
@@ -292,9 +296,9 @@ function AIPanel(): JSX.Element {
       const ok = await patchSettings(patch);
       if (ok) {
         draftApiKey.value = ''; // 清空输入框（key 已加密落盘）
-        toast('success', '已保存 LLM 配置');
+        toast('success', t('settings.ai.llm.saved_toast'));
       } else {
-        toast('error', '保存失败');
+        toast('error', t('settings.ai.llm.save_failed_toast'));
       }
     } finally {
       saving.value = false;
@@ -303,8 +307,8 @@ function AIPanel(): JSX.Element {
 
   return (
     <>
-      <Section title="LLM 后端">
-        <SettingRow label="快捷预设">
+      <Section title={t('settings.ai.llm.title')}>
+        <SettingRow label={t('settings.ai.llm.preset')}>
           <select
             value={presetKey.value}
             onChange={(e) => onPresetChange(e.currentTarget.value as LlmPresetKey)}
@@ -318,7 +322,7 @@ function AIPanel(): JSX.Element {
             ))}
           </select>
         </SettingRow>
-        <SettingRow label="Endpoint">
+        <SettingRow label={t('settings.ai.llm.endpoint')}>
           <input
             type="text"
             value={draftEndpoint.value}
@@ -327,7 +331,7 @@ function AIPanel(): JSX.Element {
             style={inputStyle}
           />
         </SettingRow>
-        <SettingRow label="Chat 模型">
+        <SettingRow label={t('settings.ai.llm.model')}>
           <input
             type="text"
             value={draftModel.value}
@@ -336,13 +340,13 @@ function AIPanel(): JSX.Element {
             style={inputStyle}
           />
         </SettingRow>
-        <SettingRow label="API Key">
+        <SettingRow label={t('settings.ai.llm.api_key')}>
           <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
             <input
               type="password"
               value={draftApiKey.value}
               onInput={(e) => (draftApiKey.value = e.currentTarget.value)}
-              placeholder={llm.value.api_key_set ? '已配置（留空保留）' : '粘贴 sk-... '}
+              placeholder={llm.value.api_key_set ? t('settings.ai.llm.api_key_keep') : t('settings.ai.llm.api_key_placeholder')}
               style={inputStyle}
             />
             <span
@@ -363,22 +367,22 @@ function AIPanel(): JSX.Element {
             onClick={() => void onSave()}
             disabled={saving.value}
           >
-            {saving.value ? '保存中…' : '💾 保存 LLM 配置'}
+            {saving.value ? t('settings.ai.llm.saving') : t('settings.ai.llm.save')}
           </Button>
         </SettingRow>
       </Section>
 
-      <Section title="Embedding">
-        <SettingRow label="模型">
+      <Section title={t('settings.ai.embedding.title')}>
+        <SettingRow label={t('settings.ai.embedding.model')}>
           <code style={codeStyle}>{(emb.value.model as string) ?? '—'}</code>
         </SettingRow>
-        <SettingRow label="Ollama URL">
+        <SettingRow label={t('settings.ai.embedding.ollama_url')}>
           <code style={codeStyle}>{(emb.value.ollama_url as string) ?? '—'}</code>
         </SettingRow>
       </Section>
 
-      <Section title="网络搜索">
-        <SettingRow label="启用">
+      <Section title={t('settings.ai.web_search.title')}>
+        <SettingRow label={t('settings.ai.web_search.enabled')}>
           <Toggle
             value={
               Boolean(
@@ -392,7 +396,7 @@ function AIPanel(): JSX.Element {
                   enabled: v,
                 },
               });
-              toast('success', v ? '已启用网络搜索' : '已关闭网络搜索');
+              toast('success', v ? t('settings.ai.web_search.enabled_toast') : t('settings.ai.web_search.disabled_toast'));
             }}
           />
         </SettingRow>
@@ -932,32 +936,82 @@ function MemberPanel(): JSX.Element {
   const m = memberState.value;
   const l = settingsLocks.value;
 
+  const email = useSignal('');
+  const password = useSignal('');
+  const logging = useSignal(false);
+
   return (
     <div>
       <Section title="会员状态" desc="对接 cloud accounts; CLI: attune login <email>">
         {!m && <p style={{ color: 'var(--color-text-secondary)' }}>加载中...</p>}
-        {m && (
+        {m && m.is_logged_in && (
           <>
             <p>
               状态:{' '}
               <strong style={{ color: m.is_paid ? 'var(--color-accent)' : 'var(--color-text)' }}>
-                {m.kind === 'paid' ? '付费会员' : m.kind === 'free' ? '免费会员' : '未登录'}
+                {m.kind === 'paid' ? '付费会员' : '免费会员'}
               </strong>
             </p>
             {m.account_id && <p>账号: <code>{m.account_id}</code></p>}
             {m.license_id && <p>License: <code>{m.license_id}</code></p>}
-            {m.is_logged_in && (
-              <Button
-                variant="ghost"
-                onClick={async () => {
-                  if (await memberLogout()) toast('success', '已登出');
-                  else toast('error', '登出失败');
-                }}
-              >
-                登出
-              </Button>
-            )}
+            <Button
+              variant="ghost"
+              onClick={async () => {
+                if (await memberLogout()) toast('success', '已登出');
+                else toast('error', '登出失败');
+              }}
+            >
+              登出
+            </Button>
           </>
+        )}
+        {m && !m.is_logged_in && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 320 }}>
+            <p style={{ color: 'var(--color-text-secondary)', margin: '0 0 4px' }}>
+              登录 Attune 账号以激活会员权益
+            </p>
+            <input
+              type="email"
+              placeholder="邮箱"
+              value={email.value}
+              onInput={(e) => { email.value = (e.target as HTMLInputElement).value; }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <input
+              type="password"
+              placeholder="密码"
+              value={password.value}
+              onInput={(e) => { password.value = (e.target as HTMLInputElement).value; }}
+              onKeyDown={async (e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  await doLogin();
+                }
+              }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <Button
+              variant="primary"
+              disabled={logging.value || !email.value || !password.value}
+              onClick={doLogin}
+            >
+              {logging.value ? '登录中...' : '登录'}
+            </Button>
+          </div>
         )}
       </Section>
 
@@ -994,6 +1048,20 @@ function MemberPanel(): JSX.Element {
       </Section>
     </div>
   );
+
+  async function doLogin() {
+    if (!email.value || !password.value) return;
+    logging.value = true;
+    const result = await memberLoginPassword(email.value.trim(), password.value);
+    logging.value = false;
+    if (result.ok) {
+      toast('success', '登录成功');
+      email.value = '';
+      password.value = '';
+    } else {
+      toast('error', `登录失败：${result.error ?? '未知错误'}`);
+    }
+  }
 }
 
 // ============ Folder Links Panel (注入 DataPanel 用, 这里也单独 export) ============

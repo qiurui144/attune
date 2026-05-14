@@ -1,5 +1,6 @@
 /** useRemote · 已绑定目录（本地 + WebDAV）管理 */
 import { api } from '../store/api';
+import { ApiError } from '../store/api';
 
 export type BoundDir = {
   id: string;
@@ -8,6 +9,11 @@ export type BoundDir = {
   file_types: string;
   last_scan?: string;
   kind: 'local' | 'webdav';
+};
+
+export type RemoteActionResult = {
+  ok: boolean;
+  error?: string;
 };
 
 type ListResponse = { directories: BoundDir[] };
@@ -21,12 +27,15 @@ export async function listBoundDirs(): Promise<BoundDir[]> {
   }
 }
 
-export async function bindLocalDir(path: string): Promise<boolean> {
+export async function bindLocalDir(path: string): Promise<RemoteActionResult> {
   try {
     await api.post('/index/bind', { path, recursive: true });
-    return true;
-  } catch {
-    return false;
+    return { ok: true };
+  } catch (e: unknown) {
+    if (e instanceof ApiError) {
+      return { ok: false, error: extractErrorMessage(e.body) };
+    }
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -37,12 +46,15 @@ export type WebdavInput = {
   remote_path: string;
 };
 
-export async function bindWebdav(input: WebdavInput): Promise<boolean> {
+export async function bindWebdav(input: WebdavInput): Promise<RemoteActionResult> {
   try {
     await api.post('/index/bind-remote', input);
-    return true;
-  } catch {
-    return false;
+    return { ok: true };
+  } catch (e: unknown) {
+    if (e instanceof ApiError) {
+      return { ok: false, error: extractErrorMessage(e.body) };
+    }
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -52,5 +64,14 @@ export async function unbindDir(id: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+function extractErrorMessage(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: string };
+    return parsed.error?.trim() || body;
+  } catch {
+    return body;
   }
 }

@@ -5,7 +5,7 @@ import { useState } from 'preact/hooks';
 import { Button, Input } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
-import { api, setToken, RETRY_POLICIES } from '../store/api';
+import { api, clearToken, setToken, RETRY_POLICIES } from '../store/api';
 
 export type LoginScreenProps = {
   onUnlock: () => void;
@@ -34,6 +34,58 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setSubmitting(false);
+    }
+  }
+
+  async function handleForgotPasswordReset() {
+    const first = window.confirm(
+      '忘记密码后无法恢复原数据。是否重置本地 Vault 并清空本地数据？',
+    );
+    if (!first) return;
+
+    const typed = window.prompt('请输入 RESET 确认重置：');
+    if (typed !== 'RESET') {
+      toast('error', '未输入 RESET，已取消重置');
+      return;
+    }
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.post<{ status: string }>(
+        '/vault/forgot-password-reset',
+        { confirmation: 'RESET' },
+        RETRY_POLICIES.destructive,
+      );
+      clearToken();
+      toast('success', '本地 Vault 已重置，请重新设置密码');
+      window.location.reload();
+    } catch (e) {
+      setSubmitting(false);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function handleResetWithRecoveryKey() {
+    const recoveryKey = window.prompt('请输入恢复密钥（形如 ATN-...）：');
+    if (!recoveryKey) return;
+    const newPassword = window.prompt('请输入新的 Master Password（至少 12 位，含字母和数字）：');
+    if (!newPassword) return;
+
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await api.post<{ status: string; token?: string }>(
+        '/vault/reset-with-recovery-key',
+        { recovery_key: recoveryKey.trim(), new_password: newPassword },
+        RETRY_POLICIES.destructive,
+      );
+      if (res.token) setToken(res.token);
+      toast('success', '密码已重置并自动解锁');
+      onUnlock();
+    } catch (e) {
+      setSubmitting(false);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -123,8 +175,26 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
             margin: 0,
           }}
         >
-          忘记密码无法找回。密码本身从未离开你的设备。
+          忘记密码可先用恢复密钥重置并保留数据；仅在无恢复密钥时再清空重置。
         </p>
+
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={submitting}
+          onClick={() => handleResetWithRecoveryKey()}
+        >
+          使用恢复密钥重置密码
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={submitting}
+          onClick={() => handleForgotPasswordReset()}
+        >
+          无恢复密钥？清空并重置本地 Vault
+        </Button>
       </form>
     </div>
   );

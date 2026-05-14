@@ -34,6 +34,10 @@ export function ChatInput({
 
   const tokens = estimateTokens(text);
   const canSend = text.trim().length > 0 && !submitting && !disabled;
+  const resolvedPlaceholder =
+    placeholder && placeholder.includes('.')
+      ? t(placeholder)
+      : (placeholder ?? t('chat.input.placeholder'));
 
   // Auto-grow
   useEffect(() => {
@@ -94,7 +98,7 @@ export function ChatInput({
           value={text}
           onInput={(e) => setText(e.currentTarget.value)}
           onKeyDown={handleKeyDown}
-          placeholder={placeholder ?? t('chat.input.placeholder')}
+          placeholder={resolvedPlaceholder}
           aria-label="Chat input"
           disabled={disabled || submitting}
           rows={1}
@@ -134,7 +138,7 @@ export function ChatInput({
         >
           ⌘↵
         </kbd>{' '}
-        发送
+        {t('shortcut.send')}
       </div>
     </div>
   );
@@ -147,7 +151,7 @@ function TokenChip({ tokens, isLocal }: { tokens: number; isLocal: boolean }): J
       : tokens >= 1000
         ? `~${(tokens / 1000).toFixed(1)}K`
         : `~${tokens}`;
-  const suffix = isLocal ? '本地' : `$${((tokens / 1000) * 0.0005).toFixed(4)}`;
+  const suffix = isLocal ? t('chat.token.local') : `$${((tokens / 1000) * 0.0005).toFixed(4)}`;
   return (
     <div
       aria-label={`Estimated tokens: ${tokens}`}

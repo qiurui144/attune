@@ -1,11 +1,12 @@
 /** Wizard Step 2 · Master Password（唯一硬门槛） */
 
 import type { JSX } from 'preact';
-import { useState, useMemo } from 'preact/hooks';
+import { useState, useMemo, useEffect } from 'preact/hooks';
 import { Button, Input } from '../components';
 import { t } from '../i18n';
 import { api, setToken, RETRY_POLICIES } from '../store/api';
 import { toast } from '../components/Toast';
+import type { WizardContext } from './types';
 
 type Strength = 'weak' | 'medium' | 'strong';
 
@@ -28,16 +29,47 @@ const STRENGTH_COLORS: Record<Strength, string> = {
 };
 
 export type Step2Props = {
+  ctx: WizardContext;
+  onUpdate: (partial: Partial<WizardContext>) => void;
   onContinue: () => void;
 };
 
-export function Step2Password({ onContinue }: Step2Props): JSX.Element {
+export function Step2Password({ ctx, onUpdate, onContinue }: Step2Props): JSX.Element {
   const [pwd, setPwd] = useState('');
   const [confirm, setConfirm] = useState('');
   const [show, setShow] = useState(false);
   const [exportSecret, setExportSecret] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [vaultState, setVaultState] = useState<'checking' | 'sealed' | 'locked' | 'unlocked'>('checking');
+  const [memberEmail, setMemberEmail] = useState(ctx.memberEmail ?? '');
+  const [memberPassword, setMemberPassword] = useState(ctx.memberPassword ?? '');
+  const [memberLicenseCode, setMemberLicenseCode] = useState(ctx.memberLicenseCode ?? '');
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const status = await api.get<{ state?: 'sealed' | 'locked' | 'unlocked' }>('/vault/status');
+        if (!active) return;
+        setVaultState(status.state ?? 'sealed');
+      } catch {
+        if (!active) return;
+        setVaultState('sealed');
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    onUpdate({
+      memberEmail: memberEmail.trim() || null,
+      memberPassword: memberPassword || null,
+      memberLicenseCode: memberLicenseCode.trim() || null,
+    });
+  }, [memberEmail, memberPassword, memberLicenseCode, onUpdate]);
 
   const strength = evalStrength(pwd);
 
@@ -45,12 +77,16 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
   const tooWeak =
     pwd.length >= 12 && (!/[a-zA-Z]/.test(pwd) || !/\d/.test(pwd));
   const mismatch = confirm.length > 0 && pwd !== confirm;
-  const canSubmit =
-    pwd.length >= 12 &&
-    /[a-zA-Z]/.test(pwd) &&
-    /\d/.test(pwd) &&
-    pwd === confirm &&
-    !submitting;
+  const isSetupMode = vaultState === 'sealed';
+  const canSubmit = isSetupMode
+    ? (
+      pwd.length >= 12 &&
+      /[a-zA-Z]/.test(pwd) &&
+      /\d/.test(pwd) &&
+      pwd === confirm &&
+      !submitting
+    )
+    : (!submitting && (vaultState === 'unlocked' || pwd.length > 0));
 
   const pwdError = useMemo(() => {
     if (tooShort) return t('wizard.pwd.err.too_short');
@@ -65,30 +101,53 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
     setSubmitting(true);
     setError(null);
     try {
-      // Important 2.3：密码 setup 不走自动重试
-      const res = await api.post<{ status: string; state?: string; token?: string }>(
-        '/vault/setup',
-        { password: pwd },
-        RETRY_POLICIES.destructive,
-      );
-      if (res.token) setToken(res.token);
-
-      // 可选：生成 device secret 文件（后端有端点 export_device_secret）
-      if (exportSecret) {
-        try {
-          const secretRes = await api.get<{ device_secret: string }>(
-            '/vault/device-secret/export',
-          );
-          downloadText('attune-device-secret.txt', secretRes.device_secret);
-          toast('info', '已下载 Device Secret（妥善保管，可用于其他设备导入）');
-        } catch {
-          toast('warning', 'Device Secret 导出失败，可以稍后在 Settings 里再生成');
+      if (isSetupMode) {
+        // Important 2.3：密码 setup 不走自动重试
+        const res = await api.post<{ status: string; state?: string; token?: string; recovery_key?: string }>(
+          '/vault/setup',
+          { password: pwd },
+          RETRY_POLICIES.destructive,
+        );
+        if (res.token) setToken(res.token);
+        if (res.recovery_key) {
+          downloadText('attune-recovery-key.txt', res.recovery_key);
+          toast('warning', '已下载恢复密钥：忘记主密码时可用它重置密码并保留数据');
         }
+
+        // 可选：生成 device secret 文件（后端有端点 export_device_secret）
+        if (exportSecret) {
+          try {
+            const secretRes = await api.get<{ device_secret: string }>(
+              '/vault/device-secret/export',
+            );
+            downloadText('attune-device-secret.txt', secretRes.device_secret);
+            toast('info', '已下载 Device Secret（妥善保管，可用于其他设备导入）');
+          } catch {
+            toast('warning', 'Device Secret 导出失败，可以稍后在 Settings 里再生成');
+          }
+        }
+      } else if (vaultState === 'locked') {
+        const unlock = await api.post<{ token?: string }>('/vault/unlock', { password: pwd });
+        if (unlock.token) setToken(unlock.token);
       }
 
       onContinue();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+
+      // setup 和状态刷新可能存在竞争：后端已初始化时自动回退到 unlock 流程，避免卡死。
+      if (isSetupMode && msg.includes('already initialized') && pwd.length > 0) {
+        try {
+          const unlock = await api.post<{ token?: string }>('/vault/unlock', { password: pwd });
+          if (unlock.token) setToken(unlock.token);
+          onContinue();
+          return;
+        } catch {
+          // fall through to show original error
+        }
+      }
+
+      setError(msg);
       setSubmitting(false);
     }
   }
@@ -122,17 +181,33 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
       </header>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+        {!isSetupMode && (
+          <div
+            style={{
+              padding: 'var(--space-2) var(--space-3)',
+              background: 'var(--color-surface)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 'var(--text-sm)',
+              color: 'var(--color-text-secondary)',
+            }}
+          >
+            {vaultState === 'unlocked'
+              ? t('wizard.pwd.unlocked_hint')
+              : t('wizard.pwd.locked_hint')}
+          </div>
+        )}
         <div>
           <Input
             label={t('wizard.pwd.field')}
             type={show ? 'text' : 'password'}
             value={pwd}
             onInput={(e) => setPwd(e.currentTarget.value)}
-            error={pwdError}
+            error={isSetupMode ? pwdError : undefined}
             autoFocus
-            required
+            required={vaultState !== 'unlocked'}
           />
-          {strength && (
+          {isSetupMode && strength && (
             <div
               style={{
                 display: 'flex',
@@ -173,14 +248,16 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
           )}
         </div>
 
-        <Input
-          label={t('wizard.pwd.confirm')}
-          type={show ? 'text' : 'password'}
-          value={confirm}
-          onInput={(e) => setConfirm(e.currentTarget.value)}
-          error={confirmError}
-          required
-        />
+        {isSetupMode && (
+          <Input
+            label={t('wizard.pwd.confirm')}
+            type={show ? 'text' : 'password'}
+            value={confirm}
+            onInput={(e) => setConfirm(e.currentTarget.value)}
+            error={confirmError}
+            required
+          />
+        )}
 
         <label
           style={{
@@ -200,23 +277,64 @@ export function Step2Password({ onContinue }: Step2Props): JSX.Element {
           {show ? t('wizard.pwd.hide') : t('wizard.pwd.show')}
         </label>
 
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 'var(--space-2)',
-            fontSize: 'var(--text-sm)',
-            color: 'var(--color-text-secondary)',
-            cursor: 'pointer',
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={exportSecret}
-            onChange={(e) => setExportSecret(e.currentTarget.checked)}
-          />
-          {t('wizard.pwd.export_secret')}
-        </label>
+        {isSetupMode && (
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 'var(--space-2)',
+              fontSize: 'var(--text-sm)',
+              color: 'var(--color-text-secondary)',
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={exportSecret}
+              onChange={(e) => setExportSecret(e.currentTarget.checked)}
+            />
+            {t('wizard.pwd.export_secret')}
+          </label>
+        )}
+      </div>
+
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 'var(--space-2)',
+          marginTop: 'var(--space-2)',
+          padding: 'var(--space-3)',
+          border: '1px solid var(--color-border)',
+          borderRadius: 'var(--radius-md)',
+          background: 'var(--color-bg)',
+        }}
+      >
+        <div style={{ fontWeight: 600, fontSize: 'var(--text-sm)' }}>{t('wizard.member.heading')}</div>
+        <div style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-xs)' }}>
+          {t('wizard.member.desc')}
+        </div>
+        <Input
+          type="text"
+          label={t('wizard.member.email')}
+          value={memberEmail}
+          onInput={(e) => setMemberEmail(e.currentTarget.value)}
+          placeholder={t('wizard.member.email_placeholder')}
+        />
+        <Input
+          type="password"
+          label={t('wizard.member.password')}
+          value={memberPassword}
+          onInput={(e) => setMemberPassword(e.currentTarget.value)}
+          placeholder={t('wizard.member.password_placeholder')}
+        />
+        <Input
+          type="text"
+          label={t('wizard.member.license_code')}
+          value={memberLicenseCode}
+          onInput={(e) => setMemberLicenseCode(e.currentTarget.value)}
+          placeholder={t('wizard.member.license_code_placeholder')}
+        />
       </div>
 
       {error && (

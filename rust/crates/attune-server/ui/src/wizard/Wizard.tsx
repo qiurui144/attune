@@ -24,6 +24,7 @@ export type WizardProps = {
 export function Wizard({ onComplete, onSkipAll }: WizardProps): JSX.Element {
   const [ctx, setCtx] = useState<WizardContext>(initialWizardContext);
   const [doneShown, setDoneShown] = useState(false);
+  const panelMaxWidth = ctx.step === 3 ? 1160 : 900;
 
   const goNext = useCallback(() => {
     setCtx((prev) => {
@@ -83,10 +84,11 @@ export function Wizard({ onComplete, onSkipAll }: WizardProps): JSX.Element {
       {/* 顶栏：品牌 + stepper + 跳过全部 */}
       <header
         style={{
-          padding: 'var(--space-4) var(--space-6)',
+          padding: 'clamp(var(--space-3), 2.5vw, var(--space-4)) clamp(var(--space-3), 4vw, var(--space-6))',
           display: 'flex',
           alignItems: 'center',
-          gap: 'var(--space-6)',
+          gap: 'var(--space-4)',
+          flexWrap: 'wrap',
           borderBottom: '1px solid transparent',
         }}
       >
@@ -95,11 +97,22 @@ export function Wizard({ onComplete, onSkipAll }: WizardProps): JSX.Element {
             fontWeight: 600,
             fontSize: 'var(--text-base)',
             color: 'var(--color-text)',
+            flexShrink: 0,
           }}
         >
-          🌿 {t('app.name')}
+          🌿 <span className="wizard-brand-text">{t('app.name')}</span>
         </span>
-        <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+        <div
+          className="wizard-stepper-scroll"
+          style={{
+            flex: 1,
+            display: 'flex',
+            justifyContent: 'center',
+            minWidth: 0,
+            overflowX: 'auto',
+            overflowY: 'hidden',
+          }}
+        >
           <Stepper
             currentStep={ctx.step}
             completedSteps={ctx.completedSteps}
@@ -129,9 +142,9 @@ export function Wizard({ onComplete, onSkipAll }: WizardProps): JSX.Element {
         style={{
           flex: 1,
           display: 'flex',
-          alignItems: 'center',
+          alignItems: 'flex-start',
           justifyContent: 'center',
-          padding: 'var(--space-5)',
+          padding: 'clamp(var(--space-3), 3vw, var(--space-5))',
         }}
       >
         <div
@@ -141,10 +154,9 @@ export function Wizard({ onComplete, onSkipAll }: WizardProps): JSX.Element {
             background: 'var(--color-surface)',
             borderRadius: 'var(--radius-xl)',
             boxShadow: 'var(--shadow-lg)',
-            padding: 'var(--space-7) var(--space-6)',
-            maxWidth: 640,
-            width: '100%',
-            minHeight: 400,
+            padding: 'clamp(var(--space-4), 3vw, var(--space-7)) clamp(var(--space-4), 3vw, var(--space-6))',
+            width: `min(96vw, ${panelMaxWidth}px)`,
+            minHeight: 'min(70vh, 560px)',
             display: 'flex',
             flexDirection: 'column',
           }}
@@ -153,7 +165,13 @@ export function Wizard({ onComplete, onSkipAll }: WizardProps): JSX.Element {
             {ctx.step === 1 && (
               <Step1Welcome onContinue={goNext} onImport={onSkipAll ?? onComplete} />
             )}
-            {ctx.step === 2 && <Step2Password onContinue={goNext} />}
+            {ctx.step === 2 && (
+              <Step2Password
+                ctx={ctx}
+                onUpdate={updateCtx}
+                onContinue={goNext}
+              />
+            )}
             {ctx.step === 3 && (
               <Step3LLM
                 ctx={ctx}

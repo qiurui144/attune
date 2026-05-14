@@ -81,3 +81,24 @@ select {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-text-disabled);
 }
+
+/* Wizard 顶部 stepper：保留横向滚动能力但隐藏滚动条，避免视觉噪音 */
+.wizard-stepper-scroll::-webkit-scrollbar {
+  height: 0;
+}
+
+.wizard-stepper-scroll {
+  -ms-overflow-style: none;
+}
+
+@media (max-width: 760px) {
+  .wizard-step-label {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .wizard-brand-text {
+    display: none;
+  }
+}

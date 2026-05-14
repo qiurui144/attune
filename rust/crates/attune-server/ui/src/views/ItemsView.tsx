@@ -44,8 +44,8 @@ export function ItemsView(): JSX.Element {
           description={t('empty.items.desc')}
           actions={[
             {
-              label: '绑定文件夹',
-              onClick: () => toast('info', '跳转到远程绑定（Phase 6.3 接入）'),
+              label: t('items.empty.bind_folder'),
+              onClick: () => toast('info', t('items.empty.bind_folder_toast')),
               variant: 'primary',
             },
           ]}
@@ -70,7 +70,7 @@ export function ItemsView(): JSX.Element {
       <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
         <input
           type="text"
-          placeholder="🔍 按标题搜索…"
+          placeholder={t('items.search.placeholder')}
           value={search.value}
           onInput={(e) => (search.value = e.currentTarget.value)}
           style={{
@@ -96,7 +96,7 @@ export function ItemsView(): JSX.Element {
         >
           {sourceTypes.value.map((st) => (
             <option key={st} value={st}>
-              {st === 'all' ? '全部来源' : st}
+              {st === 'all' ? t('items.source.all') : st}
             </option>
           ))}
         </select>
@@ -120,7 +120,7 @@ export function ItemsView(): JSX.Element {
               color: 'var(--color-text-secondary)',
             }}
           >
-            没有匹配的条目
+            {t('items.no_match')}
           </div>
         ) : (
           filtered.value.map((it) => <ItemRow key={it.id} item={it} />)
@@ -134,7 +134,7 @@ export function ItemsView(): JSX.Element {
           textAlign: 'right',
         }}
       >
-        共 {filtered.value.length} 条 · 加载 {items.value.length} 条
+        {t('items.summary', { filtered: filtered.value.length, total: items.value.length })}
       </div>
     </div>
   );
@@ -171,11 +171,11 @@ function ItemsHeader(): JSX.Element {
     }
     uploading.value = false;
     if (successCount > 0) {
-      toast('success', `已上传 ${successCount} 个文件`);
+      toast('success', t('items.upload.success', { count: successCount }));
       void loadItems(100, 0);
     }
     if (failCount > 0) {
-      toast('error', `${failCount} 个文件上传失败`);
+      toast('error', t('items.upload.fail', { count: failCount }));
     }
   };
 
@@ -188,7 +188,7 @@ function ItemsHeader(): JSX.Element {
       }}
     >
       <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
-        📄 条目
+        {`📄 ${t('sidebar.nav.items')}`}
       </h2>
       <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
         <input
@@ -205,14 +205,14 @@ function ItemsHeader(): JSX.Element {
           disabled={uploading.value}
           onClick={() => fileInputRef.current?.click()}
         >
-          {uploading.value ? '上传中…' : '上传文件'}
+          {uploading.value ? t('items.upload.uploading') : t('items.upload.button')}
         </Button>
         <Button
           variant="secondary"
           size="sm"
           onClick={() => void loadItems(100, 0)}
         >
-          ⟳ 刷新
+          {t('items.refresh')}
         </Button>
       </div>
     </header>
@@ -267,7 +267,7 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
             textOverflow: 'ellipsis',
           }}
         >
-          {it.title || '(无标题)'}
+          {it.title || t('items.untitled')}
         </div>
         {it.domain && (
           <div
@@ -295,10 +295,10 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          if (confirm(`删除条目 "${it.title}"？`)) {
+          if (confirm(t('items.delete.confirm', { title: it.title || t('items.untitled') }))) {
             void deleteItem(it.id).then((ok) => {
-              if (ok) toast('success', '已删除');
-              else toast('error', '删除失败');
+              if (ok) toast('success', t('items.delete.success'));
+              else toast('error', t('items.delete.fail'));
             });
           }
         }}
@@ -328,9 +328,9 @@ function formatDate(iso: string): string {
     const d = new Date(iso);
     const now = Date.now();
     const diff = now - d.getTime();
-    if (diff < 86_400_000) return '今天';
-    if (diff < 2 * 86_400_000) return '昨天';
-    if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+    if (diff < 86_400_000) return t('items.date.today');
+    if (diff < 2 * 86_400_000) return t('items.date.yesterday');
+    if (diff < 7 * 86_400_000) return t('items.date.days_ago', { days: Math.floor(diff / 86_400_000) });
     return d.toLocaleDateString();
   } catch {
     return iso.slice(0, 10);

@@ -73,6 +73,22 @@ export async function loadSettingsLocks(): Promise<void> {
   }
 }
 
+export async function memberLoginPassword(
+  email: string,
+  password: string,
+  cloudUrl?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await api.post('/member/login-password', { email, password, cloud_url: cloudUrl ?? null });
+    await loadMemberState();
+    await loadSettingsLocks();
+    return { ok: true };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg };
+  }
+}
+
 export async function memberLogout(): Promise<boolean> {
   try {
     await api.post('/member/logout', {});

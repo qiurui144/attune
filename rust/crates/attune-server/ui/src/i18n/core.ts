@@ -83,11 +83,17 @@ export function plural(
 }
 
 function lookup(key: string, locale: Locale): Message {
-  const primary = MESSAGE_MAP[locale]?.[key];
+  const normalized = normalizeKey(key);
+  const primary = MESSAGE_MAP[locale]?.[normalized];
   if (primary !== undefined) return primary;
-  const fallback = MESSAGE_MAP.zh?.[key];
+  const fallback = MESSAGE_MAP.zh?.[normalized];
   if (fallback !== undefined) return fallback;
-  return key; // 最终 fallback：key 本身（开发期能看到缺哪个）
+  return normalized; // 最终 fallback：key 本身（开发期能看到缺哪个）
+}
+
+function normalizeKey(key: string): string {
+  // 防御性归一化：去掉首尾空白与常见零宽字符，避免出现“看起来相同但查不到”的 key。
+  return key.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
 }
 
 function interpolate(

@@ -13,9 +13,24 @@ type HardwareInfo = {
   gpu_model?: string | null;
   npu_type?: string | null;
   total_ram_gb?: number;
-  recommended_chat?: string;
+  recommended_chat?: string | null;
   recommended_embedding?: string;
-  recommended_summary?: string;
+  recommended_summary?: string | null;
+};
+
+type DiagnosticsPayload = {
+  hardware?: {
+    os?: string;
+    cpu_model?: string;
+    total_ram_gb?: number;
+    has_nvidia_gpu?: boolean;
+    has_amd_gpu?: boolean;
+    has_intel_igpu?: boolean;
+    gpu_label?: string | null;
+    has_amd_xdna_npu?: boolean;
+    has_intel_npu?: boolean;
+    recommended_summary_model?: string;
+  };
 };
 
 type AiStackTier = {
@@ -53,14 +68,13 @@ export type Step4Props = {
 };
 
 export function Step4Hardware({
-  ctx: _ctx,
+  ctx,
   onUpdate,
   onContinue,
 }: Step4Props): JSX.Element {
   const [hw, setHw] = useState<HardwareInfo | null>(null);
   const [aiStack, setAiStack] = useState<AiStackResponse | null>(null);
   const [scanSteps, setScanSteps] = useState<ScanStep[]>([]);
-  const [autoDownload, setAutoDownload] = useState(true);
   const [applying, setApplying] = useState(false);
 
   useEffect(() => {
@@ -78,7 +92,7 @@ export function Step4Hardware({
 
       try {
         const [diag, stack] = await Promise.all([
-          api.get<HardwareInfo>('/status/diagnostics'),
+          api.get<DiagnosticsPayload>('/status/diagnostics'),
           api.get<AiStackResponse>('/ai_stack'),
         ]);
         if (cancelled) return;
@@ -92,25 +106,39 @@ export function Step4Hardware({
           setScanSteps([...steps]);
         }
 
+        const h = diag.hardware ?? {};
+        const detectedGpu = h.has_nvidia_gpu
+          ? 'NVIDIA GPU'
+          : h.has_amd_gpu
+            ? 'AMD GPU'
+            : h.has_intel_igpu
+              ? 'Intel iGPU'
+            : null;
+        const detectedNpu = h.has_amd_xdna_npu
+          ? 'AMD XDNA'
+          : h.has_intel_npu
+            ? 'Intel NPU'
+            : null;
+
         // 结果填充
         setHw({
-          os: diag.os,
-          cpu_model: diag.cpu_model ?? 'Unknown',
-          gpu_model: diag.gpu_model ?? null,
-          npu_type: diag.npu_type ?? null,
-          total_ram_gb: diag.total_ram_gb,
-          recommended_chat: diag.recommended_chat ?? 'qwen2.5:3b',
-          recommended_embedding: diag.recommended_embedding ?? 'bge-m3',
-          recommended_summary: diag.recommended_summary ?? 'qwen2.5:3b',
+          os: h.os,
+          cpu_model: h.cpu_model ?? 'Unknown',
+          gpu_model: h.gpu_label ?? detectedGpu,
+          npu_type: detectedNpu,
+          total_ram_gb: h.total_ram_gb,
+          recommended_chat: null,
+          recommended_embedding: 'bge-m3',
+          recommended_summary: normalizeSummaryModel(h.recommended_summary_model),
         });
       } catch {
         // 失败时 fallback
         setHw({
           cpu_model: 'Unknown',
           total_ram_gb: 0,
-          recommended_chat: 'qwen2.5:1.5b',
+          recommended_chat: null,
           recommended_embedding: 'bge-m3',
-          recommended_summary: 'qwen2.5:1.5b',
+          recommended_summary: null,
         });
       }
     }
@@ -124,7 +152,7 @@ export function Step4Hardware({
     if (!hw) return;
     setApplying(true);
     onUpdate({
-      chatModel: hw.recommended_chat ?? null,
+      chatModel: null,
       embeddingModel: hw.recommended_embedding ?? null,
       summaryModel: hw.recommended_summary ?? null,
     });
@@ -138,20 +166,15 @@ export function Step4Hardware({
       /* 保存失败不阻塞 */
     }
 
-    // 后台触发模型下载（可选）
-    if (autoDownload && hw.recommended_chat) {
-      try {
-        await api.post('/models/pull', { model: hw.recommended_chat });
-      } catch {
-        /* 下载失败只是后台任务问题，不阻塞 wizard */
-      }
-    }
-
     onContinue();
   }
 
   // v0.6.0-rc.4: Tier 0 (unsupported) 拒绝继续，显示明确错误信息
   const tierUnsupported = aiStack?.hardware?.supported === false;
+  const localChatBlocked =
+    ctx.llmMode === 'ollama'
+    && aiStack != null
+    && (aiStack.hardware.tier === 'unsupported' || aiStack.hardware.tier === 'low' || aiStack.hardware.tier === 'mid');
 
   if (tierUnsupported && aiStack) {
     return (
@@ -209,11 +232,10 @@ export function Step4Hardware({
         {t('wizard.hw.heading')}
       </h2>
 
-      {/* Tier + 推荐摘要（如果 ai_stack 已加载） */}
-      {aiStack?.recommendation && (
+      {aiStack && (
         <div
           style={{
-            background: 'var(--color-bg)',
+            background: 'linear-gradient(180deg, var(--color-surface) 0%, var(--color-bg) 100%)',
             border: '1px solid var(--color-border)',
             borderRadius: 'var(--radius-md)',
             padding: 'var(--space-4)',
@@ -223,58 +245,83 @@ export function Step4Hardware({
             gap: 'var(--space-2)',
           }}
         >
-          <div style={{ fontWeight: 600 }}>
-            硬件档位: <code>{aiStack.hardware.tier}</code>
-            {' · '}
-            区域: <code>{aiStack.region.detected.split(' (')[0]}</code>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
+            <Pill label="硬件档位" value={aiStack.hardware.tier} />
+            <Pill label="区域" value={aiStack.region.detected.split(' (')[0]} />
+            <Pill label="底座" value="自动配置" />
           </div>
           <div style={{ color: 'var(--color-text-secondary)' }}>
-            将自动下载（首次启动后台执行，~{aiStack.recommendation.total_download_mb} MB）：
-          </div>
-          <div style={{ paddingLeft: 'var(--space-3)' }}>
-            · Embedding: <code>{aiStack.recommendation.embedding_repo}</code> (~{aiStack.recommendation.embedding_size_mb} MB)
-            <br />
-            · Reranker: <code>{aiStack.recommendation.reranker_repo}</code> (~{aiStack.recommendation.reranker_size_mb} MB)
-            <br />
-            · ASR: <code>{aiStack.recommendation.asr_ggml}</code> (~{aiStack.recommendation.asr_size_mb} MB)
+            Embedding / Reranker / ASR / OCR 在后台完成，不占用你的注意力。
           </div>
         </div>
       )}
 
-      {/* 扫描进度 */}
       <div
         style={{
-          background: 'var(--color-bg)',
+          background: 'var(--color-surface)',
           borderRadius: 'var(--radius-md)',
           padding: 'var(--space-4)',
-          fontFamily: 'var(--font-mono)',
-          fontSize: 'var(--text-sm)',
           display: 'flex',
           flexDirection: 'column',
-          gap: 'var(--space-1)',
+          gap: 'var(--space-3)',
+          border: '1px solid var(--color-border)',
         }}
       >
-        {scanSteps.map((s, i) => (
-          <div
-            key={i}
-            style={{
-              color: s.done ? 'var(--color-success)' : 'var(--color-text-secondary)',
-              opacity: s.done ? 1 : 0.6,
-              transition: 'all var(--duration-base) var(--ease-out)',
-            }}
-          >
-            {s.done ? '✓' : '·'} {s.label}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>扫描进行中</div>
+            <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>检测硬件并匹配底座策略</div>
           </div>
-        ))}
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+            {scanSteps.filter((s) => s.done).length}/{scanSteps.length}
+          </div>
+        </div>
+        <div
+          style={{
+            height: 8,
+            borderRadius: 999,
+            background: 'var(--color-bg)',
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              height: '100%',
+              width: `${scanSteps.length ? (scanSteps.filter((s) => s.done).length / scanSteps.length) * 100 : 0}%`,
+              background: 'linear-gradient(90deg, var(--color-accent) 0%, var(--color-success) 100%)',
+              transition: 'width var(--duration-base) var(--ease-out)',
+            }}
+          />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 'var(--space-2)' }}>
+          {scanSteps.map((s, i) => (
+            <div
+              key={i}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)',
+                padding: 'var(--space-2) var(--space-3)',
+                borderRadius: 'var(--radius-sm)',
+                border: `1px solid ${s.done ? 'var(--color-success)' : 'var(--color-border)'}`,
+                background: s.done ? 'rgba(34, 197, 94, 0.08)' : 'var(--color-bg)',
+                color: s.done ? 'var(--color-success)' : 'var(--color-text-secondary)',
+                fontSize: 'var(--text-xs)',
+              }}
+            >
+              <span style={{ fontSize: 12 }}>{s.done ? '✓' : '·'}</span>
+              <span>{s.label.replace('检测', '')}</span>
+            </div>
+          ))}
+        </div>
       </div>
 
-      {/* 识别结果 */}
       {hw && (
         <div
           className="fade-in"
           style={{
             padding: 'var(--space-4)',
-            background: 'var(--color-surface)',
+            background: 'linear-gradient(180deg, var(--color-surface) 0%, var(--color-bg) 100%)',
             border: '1px solid var(--color-border)',
             borderRadius: 'var(--radius-md)',
             display: 'flex',
@@ -283,41 +330,38 @@ export function Step4Hardware({
             fontSize: 'var(--text-sm)',
           }}
         >
-          <Row label="CPU" value={hw.cpu_model ?? '—'} />
-          <Row label="GPU" value={hw.gpu_model ?? '纯 CPU 模式'} />
-          <Row label="NPU" value={hw.npu_type ?? '—'} />
-          <Row label="RAM" value={`${hw.total_ram_gb ?? 0} GB`} />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 'var(--space-2)' }}>
+            <MiniStat label="CPU" value={hw.cpu_model ?? '—'} />
+            <MiniStat label="GPU" value={hw.gpu_model ?? '纯 CPU 模式'} />
+            <MiniStat label="NPU" value={hw.npu_type ?? '—'} />
+            <MiniStat label="RAM" value={`${hw.total_ram_gb ?? 0} GB`} />
+          </div>
         </div>
       )}
 
-      {/* 模型推荐 */}
-      {hw && (
-        <div className="fade-slide-in" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-          <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
-            {t('wizard.hw.recommend')}
-          </h3>
-          <ModelRow icon="💬" label="Chat" model={hw.recommended_chat ?? '—'} />
-          <ModelRow icon="🧮" label="Embedding" model={hw.recommended_embedding ?? '—'} />
-          <ModelRow icon="📄" label="Summary" model={hw.recommended_summary ?? '—'} />
+      {localChatBlocked && (
+        <div
+          style={{
+            padding: 'var(--space-3)',
+            border: '1px solid var(--color-warning)',
+            background: 'rgba(245, 158, 11, 0.08)',
+            borderRadius: 'var(--radius-md)',
+            color: 'var(--color-text-secondary)',
+            fontSize: 'var(--text-sm)',
+          }}
+        >
+          当前硬件规格不建议本地 Chat，流程已切换为云端 / K3 优先。
+        </div>
+      )}
 
-          <label
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 'var(--space-2)',
-              fontSize: 'var(--text-sm)',
-              color: 'var(--color-text-secondary)',
-              cursor: 'pointer',
-              marginTop: 'var(--space-2)',
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={autoDownload}
-              onChange={(e) => setAutoDownload(e.currentTarget.checked)}
-            />
-            {t('wizard.hw.auto_download')}
-          </label>
+      {hw && !localChatBlocked && (
+        <div className="fade-slide-in" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+          <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>自动配置结果</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
+            <Pill label="Chat" value="不自动配置" />
+            <Pill label="Embedding" value={hw.recommended_embedding ?? '—'} />
+            <Pill label="Summary" value={displaySummaryLabel(hw.recommended_summary ?? null)} />
+          </div>
         </div>
       )}
 
@@ -326,7 +370,7 @@ export function Step4Hardware({
           variant="primary"
           size="lg"
           loading={applying}
-          disabled={!hw}
+          disabled={!hw || localChatBlocked}
           onClick={applyRecommendation}
         >
           {t('wizard.hw.apply')} →
@@ -336,62 +380,55 @@ export function Step4Hardware({
   );
 }
 
-function Row({ label, value }: { label: string; value: string }): JSX.Element {
+function normalizeSummaryModel(model?: string | null): string | null {
+  const v = model?.trim();
+  if (!v) return null;
+  // 大模型只做候选，不在 wizard 里直接展示为默认结果。
+  if (/(:7b|:8b|:14b|:32b|35b|70b)/i.test(v)) {
+    return null;
+  }
+  return v;
+}
+
+function displaySummaryLabel(model: string | null): string {
+  return model ?? '自动（按硬件）';
+}
+
+function Pill({ label, value }: { label: string; value: string }): JSX.Element {
   return (
-    <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
-      <span
-        style={{
-          width: 60,
-          color: 'var(--color-text-secondary)',
-          fontSize: 'var(--text-xs)',
-          fontWeight: 500,
-        }}
-      >
-        {label}
-      </span>
-      <span style={{ flex: 1, color: 'var(--color-text)' }}>{value}</span>
+    <div
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 'var(--space-2)',
+        padding: 'var(--space-2) var(--space-3)',
+        borderRadius: '999px',
+        background: 'var(--color-bg)',
+        border: '1px solid var(--color-border)',
+        fontSize: 'var(--text-xs)',
+      }}
+    >
+      <span style={{ color: 'var(--color-text-secondary)', fontWeight: 600 }}>{label}</span>
+      <span style={{ color: 'var(--color-text)' }}>{value}</span>
     </div>
   );
 }
 
-function ModelRow({
-  icon,
-  label,
-  model,
-}: {
-  icon: string;
-  label: string;
-  model: string;
-}): JSX.Element {
+function MiniStat({ label, value }: { label: string; value: string }): JSX.Element {
   return (
     <div
       style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 'var(--space-3)',
-        padding: 'var(--space-2) var(--space-3)',
-        background: 'var(--color-bg)',
+        padding: 'var(--space-3)',
         borderRadius: 'var(--radius-sm)',
+        background: 'var(--color-bg)',
+        border: '1px solid var(--color-border)',
       }}
     >
-      <span aria-hidden="true" style={{ fontSize: 18 }}>
-        {icon}
-      </span>
-      <span style={{ flex: 1, fontSize: 'var(--text-sm)', fontWeight: 500 }}>
+      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', marginBottom: 'var(--space-1)' }}>
         {label}
-      </span>
-      <code
-        style={{
-          fontFamily: 'var(--font-mono)',
-          fontSize: 'var(--text-xs)',
-          color: 'var(--color-accent)',
-          background: 'var(--color-surface)',
-          padding: '2px var(--space-2)',
-          borderRadius: 'var(--radius-sm)',
-        }}
-      >
-        {model}
-      </code>
+      </div>
+      <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)' }}>{value}</div>
     </div>
   );
 }
+

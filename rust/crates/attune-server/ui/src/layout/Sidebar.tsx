@@ -90,7 +90,7 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
         <button
           type="button"
           onClick={() => (sidebarCollapsed.value = !collapsed)}
-          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={collapsed ? t('sidebar.action.expand') : t('sidebar.action.collapse')}
           className="interactive"
           style={{
             padding: '4px 6px',
@@ -108,7 +108,7 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
       {!collapsed && (
         <button
           type="button"
-          aria-label="Global search (Cmd+K)"
+          aria-label={t('sidebar.action.search')}
           className="interactive"
           style={{
             display: 'flex',
@@ -131,7 +131,7 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
           }}
         >
           <span aria-hidden="true">🔍</span>
-          <span style={{ flex: 1 }}>Search…</span>
+          <span style={{ flex: 1 }}>{t('shortcut.search')}…</span>
           <kbd
             style={{
               fontSize: 'var(--text-xs)',
@@ -156,7 +156,7 @@ function NewChatButton({ collapsed }: { collapsed: boolean }): JSX.Element {
     <div style={{ padding: 'var(--space-3) var(--space-4)' }}>
       <button
         type="button"
-        aria-label="New chat"
+        aria-label={t('sidebar.action.new_chat')}
         onClick={() => {
           clearActiveSession();
           currentView.value = 'chat';

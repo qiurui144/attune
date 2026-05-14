@@ -5,6 +5,7 @@ import { useEffect, useRef } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
 import { api } from '../store/api';
 import { useFocusTrap } from '../hooks/useFocusTrap';
+import { t } from '../i18n';
 import {
   chatSessions,
   items,
@@ -22,11 +23,11 @@ type SearchResult = {
 };
 
 const VIEW_SHORTCUTS: SearchResult[] = [
-  { kind: 'view', id: 'v-chat', title: '💬 对话', action: () => (currentView.value = 'chat') },
-  { kind: 'view', id: 'v-items', title: '📄 条目', action: () => (currentView.value = 'items') },
-  { kind: 'view', id: 'v-remote', title: '🔗 远程目录', action: () => (currentView.value = 'remote') },
-  { kind: 'view', id: 'v-knowledge', title: '📊 知识全景', action: () => (currentView.value = 'knowledge') },
-  { kind: 'view', id: 'v-settings', title: '⚙ 设置', action: () => (currentView.value = 'settings') },
+  { kind: 'view', id: 'v-chat', title: `💬 ${t('cmd.view.chat')}`, action: () => (currentView.value = 'chat') },
+  { kind: 'view', id: 'v-items', title: `📄 ${t('cmd.view.items')}`, action: () => (currentView.value = 'items') },
+  { kind: 'view', id: 'v-remote', title: `🔗 ${t('cmd.view.remote')}`, action: () => (currentView.value = 'remote') },
+  { kind: 'view', id: 'v-knowledge', title: `📊 ${t('cmd.view.knowledge')}`, action: () => (currentView.value = 'knowledge') },
+  { kind: 'view', id: 'v-settings', title: `⚙ ${t('cmd.view.settings')}`, action: () => (currentView.value = 'settings') },
 ];
 
 export type CommandPaletteProps = {
@@ -101,8 +102,8 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps): JSX.Elem
       out.push({
         kind: 'session',
         id: s.id,
-        title: s.title || '未命名对话',
-        subtitle: '会话',
+        title: s.title || t('cmd.session.untitled'),
+        subtitle: t('cmd.session.subtitle'),
         action: () => {
           activeSessionId.value = s.id;
           currentView.value = 'chat';
@@ -118,8 +119,8 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps): JSX.Elem
       out.push({
         kind: 'item',
         id: it.id,
-        title: it.title || '(无标题)',
-        subtitle: `条目 · ${it.source_type}`,
+        title: it.title || t('cmd.item.untitled'),
+        subtitle: t('cmd.item.subtitle.loaded', { source: it.source_type }),
         action: () => {
           drawerContent.value = { type: 'reader', itemId: it.id };
         },
@@ -132,8 +133,8 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps): JSX.Elem
       out.push({
         kind: 'item',
         id: r.id,
-        title: r.title || '(无标题)',
-        subtitle: '条目 · 全文匹配',
+        title: r.title || t('cmd.item.untitled'),
+        subtitle: t('cmd.item.subtitle.fulltext'),
         action: () => {
           drawerContent.value = { type: 'reader', itemId: r.id };
         },
@@ -190,7 +191,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps): JSX.Elem
         className="modal-in"
         role="dialog"
         aria-modal="true"
-        aria-label="Command palette"
+        aria-label={t('cmd.aria.dialog')}
         style={{
           width: '90%',
           maxWidth: 560,
@@ -210,8 +211,8 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps): JSX.Elem
             query.value = e.currentTarget.value;
             activeIdx.value = 0;
           }}
-          placeholder="搜索对话、条目、视图…"
-          aria-label="Search"
+          placeholder={t('cmd.search.placeholder')}
+          aria-label={t('cmd.aria.search')}
           style={{
             padding: 'var(--space-4) var(--space-5)',
             border: 'none',
@@ -232,7 +233,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps): JSX.Elem
                 textAlign: 'center',
               }}
             >
-              没有匹配结果
+              {t('cmd.search.no_match')}
             </div>
           ) : (
             results.value.map((r, i) => (
@@ -291,9 +292,9 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps): JSX.Elem
             gap: 'var(--space-4)',
           }}
         >
-          <span>↑↓ 导航</span>
-          <span>↵ 选择</span>
-          <span>Esc 关闭</span>
+          <span>{t('cmd.footer.navigate')}</span>
+          <span>{t('cmd.footer.select')}</span>
+          <span>{t('cmd.footer.close')}</span>
         </footer>
       </div>
     </div>

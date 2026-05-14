@@ -25,7 +25,8 @@ export function MainShell(): JSX.Element {
       style={{
         height: '100vh',
         display: 'flex',
-        background: 'var(--color-bg)',
+        background:
+          'radial-gradient(120% 100% at 100% 0%, rgba(127, 165, 165, 0.12) 0%, var(--color-bg) 45%)',
         overflow: 'hidden',
       }}
     >
@@ -33,6 +34,7 @@ export function MainShell(): JSX.Element {
       <main
         style={{
           flex: 1,
+          minWidth: 0,
           overflow: 'auto',
           background: 'var(--color-surface)',
         }}
