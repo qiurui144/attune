@@ -10,6 +10,15 @@ import type { Item } from '../store/signals';
 import { loadItems, deleteItem } from '../hooks/useItems';
 import { toast } from '../components/Toast';
 
+/** 把后端 source_type 字段 (web/file/note/chat/upload) 翻译为用户友好标签. */
+function sourceLabel(st: string): string {
+  // 走 i18n 字典, 未知值保留原文 (避免硬编码英文显示给中文用户)
+  const k = `items.source.${st}`;
+  const translated = t(k);
+  // t() 没命中时会返回 key 本身, 此时回退到原值
+  return translated === k ? st : translated;
+}
+
 export function ItemsView(): JSX.Element {
   const filterSource = useSignal<string>('all');
   const search = useSignal('');
@@ -96,7 +105,7 @@ export function ItemsView(): JSX.Element {
         >
           {sourceTypes.value.map((st) => (
             <option key={st} value={st}>
-              {st === 'all' ? t('items.source.all') : st}
+              {st === 'all' ? t('items.source.all') : sourceLabel(st)}
             </option>
           ))}
         </select>
@@ -254,7 +263,7 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
           flexShrink: 0,
         }}
       >
-        {it.source_type}
+        {sourceLabel(it.source_type)}
       </span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div

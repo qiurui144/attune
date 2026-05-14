@@ -205,7 +205,7 @@ function LocalForm({
         label={t('remote.local.path_label')}
         value={path.value}
         onInput={(e) => (path.value = e.currentTarget.value)}
-        placeholder="/home/user/Documents/knowledge"
+        placeholder="例：/home/qiurui/Documents/我的资料"
         autoFocus
         required
         hint={t('remote.local.path_hint')}

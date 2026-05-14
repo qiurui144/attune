@@ -80,7 +80,7 @@ export function MarketplaceView(): JSX.Element {
         {},
       );
       const trialMsg = resp.trial_expires
-        ? ` — Trial 至 ${new Date(resp.trial_expires).toLocaleDateString('zh-CN')}`
+        ? ` — 试用至 ${new Date(resp.trial_expires).toLocaleDateString('zh-CN')}`
         : '';
       toast('success', `${plugin.name} v${resp.version} 已安装${trialMsg}`);
       // Reload listing 让 trial 状态更新
