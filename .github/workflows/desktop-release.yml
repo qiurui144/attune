@@ -8,6 +8,12 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
+# softprops/action-gh-release 需要 contents:write 才能 create/update GitHub
+# Release. 没声明 permissions 时 GITHUB_TOKEN 走 default 仅 contents:read,
+# 导致 "Resource not accessible by integration" (403). 历史 rc.3 fail 修.
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
