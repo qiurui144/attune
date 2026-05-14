@@ -12,19 +12,11 @@ import {
   settings,
   memberState,
   settingsLocks,
-  ocrProfiles,
   folderLinks,
-  type OcrProfile,
 } from '../store/signals';
 import { setLocale, currentLocale, t } from '../i18n';
 import { loadSettings, patchSettings } from '../hooks/useSettings';
 import { loadMemberState, loadSettingsLocks, memberLogout, memberLoginPassword } from '../hooks/useMember';
-import {
-  loadOcrProfiles,
-  createOcrProfile,
-  updateOcrProfile,
-  deleteOcrProfile,
-} from '../hooks/useOcrProfiles';
 import { loadFolderLinks } from '../hooks/useFolderLinks';
 import { api, clearToken } from '../store/api';
 
@@ -84,12 +76,11 @@ const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
   },
 };
 
-type SettingsTab = 'general' | 'ai' | 'data' | 'ocr' | 'member' | 'privacy' | 'about';
+type SettingsTab = 'general' | 'ai' | 'data' | 'member' | 'privacy' | 'about';
 
 const TABS: Array<{ key: SettingsTab; icon: string; labelKey: string }> = [
   { key: 'general', icon: '⚙', labelKey: 'settings.tab.general' },
   { key: 'ai', icon: '🤖', labelKey: 'settings.tab.ai' },
-  { key: 'ocr', icon: '📷', labelKey: 'settings.tab.ocr' },
   { key: 'data', icon: '📂', labelKey: 'settings.tab.data' },
   { key: 'member', icon: '👤', labelKey: 'settings.tab.member' },
   { key: 'privacy', icon: '🔐', labelKey: 'settings.tab.privacy' },
@@ -177,7 +168,6 @@ export function SettingsView(): JSX.Element {
         <div style={{ maxWidth: 980, width: '100%' }}>
           {activeTab.value === 'general' && <GeneralPanel />}
           {activeTab.value === 'ai' && <AIPanel />}
-          {activeTab.value === 'ocr' && <OcrPanel />}
           {activeTab.value === 'data' && <DataPanel />}
           {activeTab.value === 'member' && <MemberPanel />}
           {activeTab.value === 'privacy' && <PrivacyPanel />}
@@ -487,7 +477,7 @@ function PrivacyPanel(): JSX.Element {
             variant="danger"
             size="sm"
             onClick={async () => {
-              if (!confirm('锁定后需要重新输入 Master Password 解锁。')) return;
+              if (!confirm('锁定后需要重新输入主密码解锁。')) return;
               try {
                 await api.post('/vault/lock');
                 clearToken();
@@ -535,7 +525,7 @@ function PrivacyPanel(): JSX.Element {
           目前已标记: <strong>{protectedItems.value?.count ?? 0}</strong> 个文件。
         </p>
         <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', margin: 0, lineHeight: 1.5 }}>
-          标记方法：在文件列表右键文件 → "标记为机密" 或 PATCH /api/v1/items/{'{id}'}/privacy_tier。
+          标记方法：在文件列表右键文件 → "标记为机密"。
         </p>
       </Section>
 
@@ -704,227 +694,6 @@ function Toggle({
   );
 }
 
-// ============ OCR Panel ============
-
-function OcrPanel(): JSX.Element {
-  const editing = useSignal<OcrProfile | null>(null);
-  const saving = useSignal(false);
-
-  useEffect(() => {
-    void loadOcrProfiles();
-    void loadSettingsLocks();
-    void loadSettings();
-  }, []);
-
-  const locks = settingsLocks.value;
-  const canWrite = locks ? locks.ocr_profiles === 'editable' : true;
-  const activeProfile =
-    ((settings.value?.ocr as Record<string, unknown> | undefined)?.active_profile as string) ??
-    'contract';
-
-  const onSetActive = async (id: string) => {
-    const ok = await patchSettings({ ocr: { active_profile: id } });
-    if (ok) toast('success', `默认 OCR 场景已切换为 ${id}`);
-    else toast('error', '切换失败 (会员锁?)');
-  };
-
-  const onSave = async () => {
-    const p = editing.value;
-    if (!p) return;
-    saving.value = true;
-    const isNew = !ocrProfiles.value.some((x) => x.id === p.id);
-    const ok = isNew ? !!(await createOcrProfile(p)) : await updateOcrProfile(p);
-    saving.value = false;
-    if (ok) {
-      editing.value = null;
-      toast('success', isNew ? '已创建' : '已更新');
-    } else {
-      toast('error', '保存失败');
-    }
-  };
-
-  const onDelete = async (id: string) => {
-    if (!confirm(`确认删除 OCR profile "${id}"？`)) return;
-    const ok = await deleteOcrProfile(id);
-    if (ok) toast('success', '已删除');
-    else toast('error', '删除失败 (builtin 不可删?)');
-  };
-
-  return (
-    <div>
-      <Section
-        title="OCR 场景预设"
-        desc="按文档类型选不同 DPI / 标签 — 票据(200) / 合同(300) / 古籍(600). builtin 预设不可改不可删."
-      >
-        {!canWrite && (
-          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-warning)' }}>
-            ⚠ 当前会员等级已锁定 OCR profile 修改 (GET /api/v1/member/locks)
-          </p>
-        )}
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
-          <thead>
-            <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--color-border)' }}>
-              <th style={{ padding: 8 }}>ID</th>
-              <th style={{ padding: 8 }}>名称</th>
-              <th style={{ padding: 8 }}>DPI</th>
-              <th style={{ padding: 8 }}>类型</th>
-              <th style={{ padding: 8 }}>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {ocrProfiles.value.map((p) => (
-              <tr key={p.id} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
-                <td style={{ padding: 8, fontFamily: 'monospace' }}>
-                  {p.id}
-                  {activeProfile === p.id && (
-                    <span style={{ color: 'var(--color-accent)', marginLeft: 6 }}>● 默认</span>
-                  )}
-                </td>
-                <td style={{ padding: 8 }}>{p.name}</td>
-                <td style={{ padding: 8 }}>{p.dpi}</td>
-                <td style={{ padding: 8 }}>{p.builtin ? '🔒 builtin' : '✏️ custom'}</td>
-                <td style={{ padding: 8 }}>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={!canWrite || activeProfile === p.id}
-                    onClick={() => void onSetActive(p.id)}
-                  >
-                    设默认
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={p.builtin || !canWrite}
-                    onClick={() => (editing.value = { ...p })}
-                  >
-                    编辑
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={p.builtin || !canWrite}
-                    onClick={() => void onDelete(p.id)}
-                  >
-                    删除
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div style={{ marginTop: 12 }}>
-          <Button
-            variant="primary"
-            disabled={!canWrite}
-            onClick={() =>
-              (editing.value = {
-                id: '',
-                name: '',
-                description: '',
-                languages: 'chi_sim+eng',
-                dpi: 300,
-                tags: [],
-                builtin: false,
-              })
-            }
-          >
-            + 新建场景
-          </Button>
-        </div>
-      </Section>
-
-      {editing.value && (
-        <Section title={editing.value.id ? `编辑: ${editing.value.id}` : '新建 OCR 场景'}>
-          <div style={{ display: 'grid', gap: 8, maxWidth: 520 }}>
-            <label>
-              ID (slug, e.g. medical-x) —{' '}
-              <input
-                disabled={!!editing.value.builtin}
-                value={editing.value.id}
-                onInput={(e) =>
-                  (editing.value = { ...editing.value!, id: (e.target as HTMLInputElement).value })
-                }
-              />
-            </label>
-            <label>
-              名称 —{' '}
-              <input
-                value={editing.value.name}
-                onInput={(e) =>
-                  (editing.value = { ...editing.value!, name: (e.target as HTMLInputElement).value })
-                }
-              />
-            </label>
-            <label>
-              说明 —{' '}
-              <input
-                value={editing.value.description}
-                onInput={(e) =>
-                  (editing.value = {
-                    ...editing.value!,
-                    description: (e.target as HTMLInputElement).value,
-                  })
-                }
-              />
-            </label>
-            <label>
-              语言 (chi_sim+eng / chi_sim / eng) —{' '}
-              <input
-                value={editing.value.languages}
-                onInput={(e) =>
-                  (editing.value = {
-                    ...editing.value!,
-                    languages: (e.target as HTMLInputElement).value,
-                  })
-                }
-              />
-            </label>
-            <label>
-              DPI [72-1200] —{' '}
-              <input
-                type="number"
-                value={editing.value.dpi}
-                min={72}
-                max={1200}
-                onInput={(e) =>
-                  (editing.value = {
-                    ...editing.value!,
-                    dpi: parseInt((e.target as HTMLInputElement).value, 10) || 300,
-                  })
-                }
-              />
-            </label>
-            <label>
-              标签 (逗号分隔) —{' '}
-              <input
-                value={editing.value.tags.join(',')}
-                onInput={(e) =>
-                  (editing.value = {
-                    ...editing.value!,
-                    tags: (e.target as HTMLInputElement).value
-                      .split(',')
-                      .map((s) => s.trim())
-                      .filter(Boolean),
-                  })
-                }
-              />
-            </label>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <Button variant="primary" disabled={saving.value} onClick={() => void onSave()}>
-                {saving.value ? '保存中...' : '保存'}
-              </Button>
-              <Button variant="ghost" onClick={() => (editing.value = null)}>
-                取消
-              </Button>
-            </div>
-          </div>
-        </Section>
-      )}
-    </div>
-  );
-}
-
 // ============ Member Panel ============
 
 function MemberPanel(): JSX.Element {
@@ -1015,7 +784,7 @@ function MemberPanel(): JSX.Element {
         )}
       </Section>
 
-      <Section title="设置锁定矩阵" desc="GET /api/v1/member/locks — 决定 UI 哪些字段可改">
+      <Section title="设置项可编辑性" desc="不同会员等级可修改的设置项不同；锁定项请升级会员后再改">
         {!l && <p style={{ color: 'var(--color-text-secondary)' }}>加载中...</p>}
         {l && (
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
@@ -1067,18 +836,68 @@ function MemberPanel(): JSX.Element {
 // ============ Folder Links Panel (注入 DataPanel 用, 这里也单独 export) ============
 
 export function FolderLinksSection(): JSX.Element {
+  const picking = useSignal(false);
+  const canPickFolder = typeof window !== 'undefined'
+    && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+
   useEffect(() => {
     void loadFolderLinks();
   }, []);
+
+  async function onAddFolder(): Promise<void> {
+    if (!canPickFolder) {
+      toast('warning', '请在桌面应用窗口中添加本地目录');
+      return;
+    }
+    picking.value = true;
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({ directory: true, multiple: true, title: '选择要关联的文件夹' });
+      const chosen = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      let added = 0;
+      for (const path of chosen) {
+        try {
+          await api.post('/index/bind', { path, recursive: true });
+          added += 1;
+        } catch {
+          // 单个失败不阻塞其它
+        }
+      }
+      if (added > 0) {
+        toast('success', `已添加 ${added} 个目录，开始自动入库`);
+        await loadFolderLinks();
+      }
+    } catch (e) {
+      toast('error', e instanceof Error ? e.message : '添加失败');
+    } finally {
+      picking.value = false;
+    }
+  }
+
   const links = folderLinks.value;
   return (
     <Section
       title="本地知识库目录"
-      desc="GET /api/v1/folder-links (只读). 写入用 CLI: attune link-folder <path>"
+      desc="已关联的本地文件夹会被自动监听、自动入库"
     >
+      <div style={{ marginBottom: 'var(--space-3)' }}>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={picking.value || !canPickFolder}
+          onClick={() => void onAddFolder()}
+        >
+          {picking.value ? '正在打开文件夹选择…' : '+ 添加本地目录'}
+        </Button>
+        {!canPickFolder && (
+          <span style={{ marginLeft: 'var(--space-3)', fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+            （仅桌面应用窗口内可用；浏览器调试模式无文件夹弹窗）
+          </span>
+        )}
+      </div>
       {links.length === 0 && (
         <p style={{ color: 'var(--color-text-secondary)' }}>
-          尚未关联任何本地目录. 在终端运行 <code>attune link-folder /path/to/docs</code> 添加.
+          尚未关联任何本地目录。
         </p>
       )}
       {links.length > 0 && (
@@ -1086,7 +905,7 @@ export function FolderLinksSection(): JSX.Element {
           <thead>
             <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--color-border)' }}>
               <th style={{ padding: 8 }}>路径</th>
-              <th style={{ padding: 8 }}>Project</th>
+              <th style={{ padding: 8 }}>项目</th>
               <th style={{ padding: 8 }}>添加时间</th>
             </tr>
           </thead>
@@ -1097,7 +916,7 @@ export function FolderLinksSection(): JSX.Element {
                 style={{ borderBottom: '1px solid var(--color-border-subtle)' }}
               >
                 <td style={{ padding: 8, fontFamily: 'monospace' }}>{fl.path}</td>
-                <td style={{ padding: 8 }}>{fl.project_id ?? 'default'}</td>
+                <td style={{ padding: 8 }}>{fl.project_id ?? '默认'}</td>
                 <td style={{ padding: 8 }}>{fl.added_at ?? '—'}</td>
               </tr>
             ))}

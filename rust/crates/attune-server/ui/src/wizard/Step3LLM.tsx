@@ -45,7 +45,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   // 形态分裂：K3 一体机优先本地 Ollama；Laptop/Server 默认远端 token
   const [prefersLocal, setPrefersLocal] = useState<boolean>(false);
   const [localChatAllowed, setLocalChatAllowed] = useState<boolean>(false);
-  const [localBlockReason, setLocalBlockReason] = useState<string>('当前硬件规格不建议本地 Chat');
+  const [localBlockReason, setLocalBlockReason] = useState<string>('当前硬件规格不建议本地对话');
   const [k3Endpoint, setK3Endpoint] = useState('http://192.168.100.166:8080/v1');
   const [k3Detecting, setK3Detecting] = useState(false);
   const [k3DetectResult, setK3DetectResult] = useState<string | null>(null);
@@ -84,12 +84,12 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
       const allow = gate.hardware?.supported === true && (tier === 'high' || tier === 'flagship');
       setLocalChatAllowed(allow);
       if (!allow) {
-        setLocalBlockReason('当前硬件规格下默认禁用本地 Chat，请选择云端或 K3。');
+        setLocalBlockReason('当前硬件规格下默认禁用本地对话，请选择云端或 K3 一体机。');
       }
     } catch {
       setOllamaStatus('missing');
       setLocalChatAllowed(false);
-      setLocalBlockReason('硬件检测失败，默认禁用本地 Chat。');
+      setLocalBlockReason('硬件检测失败，默认禁用本地对话。');
     } finally {
       setScanning(false);
     }
@@ -196,7 +196,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
 
   async function selectCloud() {
     if (!endpoint || !cloudModel) {
-      toast('error', '请填完 Endpoint / Model');
+      toast('error', '请填完地址和模型名');
       return;
     }
 
@@ -513,7 +513,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
             )}
             <Input
               type="text"
-              placeholder="Model（尽量保持 auto）"
+              placeholder="模型名（默认 auto 自动选择）"
               value={cloudModel}
               onInput={(e) => setCloudModel(e.currentTarget.value)}
             />

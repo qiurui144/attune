@@ -358,9 +358,9 @@ export function Step4Hardware({
         <div className="fade-slide-in" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
           <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>自动配置结果</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-            <Pill label="Chat" value="不自动配置" />
-            <Pill label="Embedding" value={hw.recommended_embedding ?? '—'} />
-            <Pill label="Summary" value={displaySummaryLabel(hw.recommended_summary ?? null)} />
+            <Pill label="对话模型" value="下一步选择" />
+            <Pill label="向量索引" value="已自动配置" />
+            <Pill label="本地摘要" value={displaySummaryLabel(hw.recommended_summary ?? null)} />
           </div>
         </div>
       )}

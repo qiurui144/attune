@@ -67,14 +67,14 @@ function renderContent(c: NonNullable<typeof drawerContent.value>): JSX.Element 
             {c.selection}
           </blockquote>
           <p style={{ marginTop: 'var(--space-3)' }}>
-            Annotation composer（Phase 5）将接入 POST /annotations。
+            批注编辑器正在开发中，下个版本将支持在此处直接添加批注。
           </p>
         </div>
       );
     case 'help':
       return (
         <div>
-          <p>Help drawer（Phase 4.x）将加载 help/{c.topic}.md。</p>
+          <p>帮助内容正在准备中。</p>
         </div>
       );
   }

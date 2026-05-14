@@ -39,7 +39,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
 
   async function handleForgotPasswordReset() {
     const first = window.confirm(
-      '忘记密码后无法恢复原数据。是否重置本地 Vault 并清空本地数据？',
+      '忘记密码后无法恢复原数据。是否清空本地知识库并重置？',
     );
     if (!first) return;
 
@@ -69,7 +69,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
   async function handleResetWithRecoveryKey() {
     const recoveryKey = window.prompt('请输入恢复密钥（形如 ATN-...）：');
     if (!recoveryKey) return;
-    const newPassword = window.prompt('请输入新的 Master Password（至少 12 位，含字母和数字）：');
+    const newPassword = window.prompt('请输入新的主密码（至少 12 位，含字母和数字）：');
     if (!newPassword) return;
 
     setSubmitting(true);
@@ -138,7 +138,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
               margin: 0,
             }}
           >
-            Vault 已锁定 · 请输入 Master Password
+            数据库已锁定 · 请输入主密码
           </p>
         </div>
 
@@ -150,7 +150,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
             error={error ?? undefined}
             autoFocus
             required
-            aria-label="Master Password"
+            aria-label="主密码"
             placeholder="••••••••••••"
           />
         </div>
@@ -193,7 +193,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
           disabled={submitting}
           onClick={() => handleForgotPasswordReset()}
         >
-          无恢复密钥？清空并重置本地 Vault
+          无恢复密钥？清空并重置本地知识库
         </Button>
       </form>
     </div>
