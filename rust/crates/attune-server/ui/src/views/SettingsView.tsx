@@ -254,6 +254,10 @@ function AIPanel(): JSX.Element {
   const draftApiKey = useSignal<string>('');
   const saving = useSignal(false);
 
+  // 锁定联动 — Paid 会员锁 cloud_llm 字段
+  useEffect(() => { void loadSettingsLocks(); }, []);
+  const llmLocked = settingsLocks.value?.cloud_llm === 'locked';
+
   // 同步 server 值到草稿（首次加载 / 外部更新时）
   useEffect(() => {
     draftEndpoint.value = (llm.value.endpoint as string) ?? '';
@@ -294,14 +298,32 @@ function AIPanel(): JSX.Element {
     }
   };
 
+  const lockedInputStyle: Record<string, string | number> = llmLocked
+    ? { ...(inputStyle as Record<string, string | number>), background: 'var(--color-surface-muted, #f4f5f7)', color: 'var(--color-text-secondary)', cursor: 'not-allowed' }
+    : (inputStyle as Record<string, string | number>);
+
   return (
     <>
       <Section title={t('settings.ai.llm.title')}>
+        {llmLocked && (
+          <div style={{
+            padding: 'var(--space-3)',
+            background: 'rgba(212, 165, 116, 0.12)',
+            border: '1px solid var(--color-warning)',
+            borderRadius: 'var(--radius-md)',
+            fontSize: 'var(--text-sm)',
+            color: 'var(--color-text)',
+            marginBottom: 'var(--space-3)',
+          }}>
+            🔒 当前会员等级已锁定大模型配置（付费会员由云端 Gateway 自动下发，无需手动配置）
+          </div>
+        )}
         <SettingRow label={t('settings.ai.llm.preset')}>
           <select
             value={presetKey.value}
+            disabled={llmLocked}
             onChange={(e) => onPresetChange(e.currentTarget.value as LlmPresetKey)}
-            style={{ ...selectStyle, minWidth: 240 }}
+            style={{ ...selectStyle, minWidth: 240, ...(llmLocked ? { background: 'var(--color-surface-muted, #f4f5f7)', cursor: 'not-allowed' } : {}) }}
             aria-label="LLM 厂商快捷预设"
           >
             {(Object.keys(LLM_PRESETS) as LlmPresetKey[]).map((k) => (
@@ -315,18 +337,20 @@ function AIPanel(): JSX.Element {
           <input
             type="text"
             value={draftEndpoint.value}
+            disabled={llmLocked}
             onInput={(e) => (draftEndpoint.value = e.currentTarget.value)}
             placeholder="例：https://api.openai.com/v1"
-            style={inputStyle}
+            style={lockedInputStyle}
           />
         </SettingRow>
         <SettingRow label={t('settings.ai.llm.model')}>
           <input
             type="text"
             value={draftModel.value}
+            disabled={llmLocked}
             onInput={(e) => (draftModel.value = e.currentTarget.value)}
             placeholder="例：deepseek-chat / qwen-plus / gpt-4o-mini"
-            style={inputStyle}
+            style={lockedInputStyle}
           />
         </SettingRow>
         <SettingRow label={t('settings.ai.llm.api_key')}>
@@ -334,9 +358,10 @@ function AIPanel(): JSX.Element {
             <input
               type="password"
               value={draftApiKey.value}
+              disabled={llmLocked}
               onInput={(e) => (draftApiKey.value = e.currentTarget.value)}
               placeholder={llm.value.api_key_set ? t('settings.ai.llm.api_key_keep') : t('settings.ai.llm.api_key_placeholder')}
-              style={inputStyle}
+              style={lockedInputStyle}
             />
             <span
               style={{
@@ -354,7 +379,7 @@ function AIPanel(): JSX.Element {
             variant="primary"
             size="sm"
             onClick={() => void onSave()}
-            disabled={saving.value}
+            disabled={saving.value || llmLocked}
           >
             {saving.value ? t('settings.ai.llm.saving') : t('settings.ai.llm.save')}
           </Button>
@@ -696,7 +721,6 @@ function MemberPanel(): JSX.Element {
   }, []);
 
   const m = memberState.value;
-  const l = settingsLocks.value;
 
   const email = useSignal('');
   const password = useSignal('');
@@ -777,37 +801,7 @@ function MemberPanel(): JSX.Element {
         )}
       </Section>
 
-      <Section title="设置项可编辑性" desc="不同会员等级可修改的设置项不同；锁定项请升级会员后再改">
-        {!l && <p style={{ color: 'var(--color-text-secondary)' }}>加载中...</p>}
-        {l && (
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-sm)' }}>
-            <tbody>
-              {(
-                [
-                  ['vault_password', '主密码'],
-                  ['local_folder_links', '本地知识库目录'],
-                  ['cloud_llm', '云端大模型 API'],
-                  ['plugin_install', '插件装载'],
-                  ['plugin_uninstall', '插件卸载'],
-                  ['ocr_profiles', 'OCR 场景预设'],
-                ] as const
-              ).map(([k, label]) => (
-                <tr key={k} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
-                  <td style={{ padding: 6 }}>{label}</td>
-                  <td style={{ padding: 6, fontFamily: 'monospace' }}>{k}</td>
-                  <td style={{ padding: 6 }}>
-                    {l[k] === 'locked' ? (
-                      <span style={{ color: 'var(--color-warning)' }}>🔒 locked</span>
-                    ) : (
-                      <span style={{ color: 'var(--color-accent)' }}>✏️ editable</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Section>
+      {/* 锁定状态体现在各 tab 的实际字段位置 (灰色 + 🔒), 不再单独矩阵显示 */}
     </div>
   );
 

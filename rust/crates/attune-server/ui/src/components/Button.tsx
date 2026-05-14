@@ -25,8 +25,9 @@ export type ButtonProps = {
 const VARIANT_STYLES: Record<ButtonVariant, JSX.CSSProperties> = {
   primary: {
     background: 'var(--color-accent)',
-    color: 'white',
-    border: '1px solid transparent',
+    color: 'var(--color-accent-on, white)',
+    border: '1px solid var(--color-accent)',
+    boxShadow: '0 1px 2px rgba(36, 43, 55, 0.06)',
   },
   secondary: {
     background: 'var(--color-surface)',
@@ -41,7 +42,8 @@ const VARIANT_STYLES: Record<ButtonVariant, JSX.CSSProperties> = {
   danger: {
     background: 'var(--color-error)',
     color: 'white',
-    border: '1px solid transparent',
+    border: '1px solid var(--color-error)',
+    boxShadow: '0 1px 2px rgba(36, 43, 55, 0.06)',
   },
 };
 
@@ -88,15 +90,22 @@ export function Button({
       }}
       onMouseEnter={(e) => {
         if (isDisabled) return;
-        if (variant === 'primary')
+        if (variant === 'primary') {
           e.currentTarget.style.background = 'var(--color-accent-hover)';
-        else if (variant === 'secondary')
+          e.currentTarget.style.boxShadow = '0 2px 6px rgba(36, 43, 55, 0.14)';
+        } else if (variant === 'secondary') {
           e.currentTarget.style.background = 'var(--color-surface-hover)';
-        else if (variant === 'ghost')
+          e.currentTarget.style.boxShadow = '0 1px 3px rgba(36, 43, 55, 0.08)';
+        } else if (variant === 'ghost') {
           e.currentTarget.style.background = 'var(--color-surface-hover)';
+        } else if (variant === 'danger') {
+          e.currentTarget.style.background = 'var(--color-error)';
+          e.currentTarget.style.boxShadow = '0 2px 6px rgba(201, 112, 112, 0.25)';
+        }
       }}
       onMouseLeave={(e) => {
         e.currentTarget.style.background = VARIANT_STYLES[variant].background as string;
+        e.currentTarget.style.boxShadow = (VARIANT_STYLES[variant].boxShadow as string) ?? 'none';
       }}
     >
       {loading && <span className="spinner" aria-hidden="true" />}
