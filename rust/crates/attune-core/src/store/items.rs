@@ -287,26 +287,36 @@ impl Store {
 
         let now = chrono::Utc::now().to_rfc3339();
 
+        // R6 P0-1 fix: 无条件 bump updated_at 当 existed=true。
+        // 之前只有 title 分支或 content_changed 分支才写 updated_at，导致
+        // `update_item(id, None, Some(same_content))` 调用永不刷 updated_at — stale-items
+        // 查询基于 updated_at，会把"用户刚刚 touch 过但内容没变"的 item 判为陈旧。
+        // 单独写一次是廉价（无 BLOB），SQLite COMMIT 合并。
+        self.conn.execute(
+            "UPDATE items SET updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+
         if let Some(title) = title {
             self.conn.execute(
-                "UPDATE items SET title = ?1, updated_at = ?2 WHERE id = ?3",
-                params![title, now, id],
+                "UPDATE items SET title = ?1 WHERE id = ?2",
+                params![title, id],
             )?;
         }
 
         if let Some(content) = content {
             let new_hash = compute_content_hash(content);
-            // 短路：内容真没变 → 不刷 BLOB（省加密 + 省 page write），只刷 updated_at。
+            // 短路：内容真没变 → 不刷 BLOB（省加密 + 省 page write），updated_at 已在上面无条件刷过。
             // 但若是老 vault（stored_hash == ""），即便 new content 与 stored 相同 hash
             // 也属于"首次记录 hash" → backfill 不算 content_changed。
             if !stored_hash.is_empty() && stored_hash == new_hash {
-                // 内容未变，不重写 BLOB。仅 updated_at 已在上面 title 分支更新（若有）。
-                // outcome.content_changed = false（默认）
+                // 内容未变，不重写 BLOB。outcome.content_changed = false（默认）
             } else {
                 let encrypted = crypto::encrypt(dek, content.as_bytes())?;
+                // updated_at 上面已无条件刷过，这里只更 BLOB + hash
                 self.conn.execute(
-                    "UPDATE items SET content = ?1, content_hash = ?2, updated_at = ?3 WHERE id = ?4",
-                    params![encrypted, new_hash, now, id],
+                    "UPDATE items SET content = ?1, content_hash = ?2 WHERE id = ?3",
+                    params![encrypted, new_hash, id],
                 )?;
                 if stored_hash.is_empty() {
                     outcome.backfilled_hash = true;
@@ -358,7 +368,18 @@ impl Store {
     /// v0.7 记忆护城河：把一个 item 加入 reindex_queue 让 server 后台 task
     /// 消费做 vectors+FTS 清理。scanner / scanner_webdav 等无法直接持锁的
     /// background worker 用这个路径。
+    ///
+    /// `action` 必须是已知值（防 typo 静默写入 unknown action 让 worker 进死循环）：
+    /// - `"purge"` — 清向量+FTS+queue（item 已 SQL 软删）
+    /// - `"reindex"` — 完整重建（item content 已 update）
+    ///
+    /// 未知 action 返回 InvalidInput（R6 P1-5 fix）。
     pub fn enqueue_reindex(&self, item_id: &str, action: &str) -> Result<()> {
+        if !matches!(action, "purge" | "reindex") {
+            return Err(crate::error::VaultError::Crypto(format!(
+                "unknown reindex_queue action: {action:?} (R6 P1-5 fix: typo guard)"
+            )));
+        }
         self.conn.execute(
             "INSERT INTO reindex_queue (item_id, action, created_at) VALUES (?1, ?2, ?3)",
             params![item_id, action, chrono::Utc::now().to_rfc3339()],
@@ -367,12 +388,21 @@ impl Store {
     }
 
     /// server 后台 reindex worker 用：取出一批待处理任务，调 caller 后再 mark_done。
-    pub fn dequeue_reindex_tasks(&self, limit: usize) -> Result<Vec<(i64, String, String)>> {
+    /// 返回 (id, item_id, action, attempts)。worker 失败时调 [`bump_reindex_attempts`]
+    /// 让 R6 P0-3 fix 的"毒任务"在 5 次后被自动 skip。
+    pub fn dequeue_reindex_tasks(&self, limit: usize) -> Result<Vec<(i64, String, String, i64)>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, item_id, action FROM reindex_queue ORDER BY created_at ASC LIMIT ?1",
+            "SELECT id, item_id, action, attempts FROM reindex_queue
+             WHERE attempts < 5
+             ORDER BY created_at ASC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -380,6 +410,22 @@ impl Store {
     pub fn mark_reindex_done(&self, task_id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM reindex_queue WHERE id = ?1", params![task_id])?;
         Ok(())
+    }
+
+    /// R6 P0-3 fix：worker 失败时调，让 attempts 计数。dequeue 端 WHERE attempts < 5
+    /// 自动跳过毒任务（如已 hard-deleted 的 item_id / typoed action）。
+    /// 达上限的任务保留在表里供运维查询（不静默 DELETE 丢失）。
+    pub fn bump_reindex_attempts(&self, task_id: i64) -> Result<i64> {
+        self.conn.execute(
+            "UPDATE reindex_queue SET attempts = attempts + 1 WHERE id = ?1",
+            params![task_id],
+        )?;
+        let n: i64 = self.conn.query_row(
+            "SELECT attempts FROM reindex_queue WHERE id = ?1",
+            params![task_id],
+            |r| r.get(0),
+        ).unwrap_or(5);
+        Ok(n)
     }
 
     /// v0.7 记忆护城河：单独清 embed_queue 中某 item 的所有任务。

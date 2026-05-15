@@ -602,7 +602,7 @@ impl AppState {
                     }
                 }
 
-                let tasks: Vec<(i64, String, String)> = {
+                let tasks: Vec<(i64, String, String, i64)> = {
                     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     vault.store().dequeue_reindex_tasks(10).unwrap_or_default()
                 };
@@ -613,9 +613,11 @@ impl AppState {
                 }
 
                 // 顺序处理（持锁短，按 task 释放，避免长占 vectors lock 影响 search）
-                for (task_id, item_id, action) in tasks {
+                for (task_id, item_id, action, prior_attempts) in tasks {
                     let result: Result<(), String> = (|| {
+                        // vault → vectors → fulltext lock 顺序（per CLAUDE.md 约定）
                         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                        let dek = vault.dek_db().map_err(|e| e.to_string())?;
                         let mut vectors_g = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
                         let fulltext_g = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
                         let (Some(vectors), Some(fulltext)) = (vectors_g.as_mut(), fulltext_g.as_ref()) else {
@@ -626,6 +628,18 @@ impl AppState {
                                 attune_core::reindex::purge_item_indexes(vault.store(), vectors, fulltext, &item_id)
                                     .map(|_| ())
                                     .map_err(|e| e.to_string())
+                            }
+                            // R6 P1-6 fix: 'reindex' action 实现（schema 文档化但 worker 之前未实现）
+                            "reindex" => {
+                                let item = vault.store().get_item(&dek, &item_id)
+                                    .map_err(|e| e.to_string())?
+                                    .ok_or_else(|| format!("item {item_id} not found for reindex"))?;
+                                attune_core::reindex::reindex_item(
+                                    vault.store(), vectors, fulltext, &item_id,
+                                    &item.title, &item.content, &item.source_type,
+                                )
+                                .map(|_| ())
+                                .map_err(|e| e.to_string())
                             }
                             other => Err(format!("unknown reindex action: {other}")),
                         }
@@ -638,8 +652,22 @@ impl AppState {
                             tracing::info!("reindex_queue: {action} done for item={item_id}");
                         }
                         Err(e) => {
-                            tracing::warn!("reindex_queue: task {task_id} ({action} {item_id}) failed: {e}; will retry next round");
-                            // 不 mark_done，下轮重试。引擎尚未初始化时这是预期路径。
+                            // R6 P0-3 fix: bump attempts → 达 5 次后 dequeue WHERE 自动 skip。
+                            // 之前不计数 → 毒任务 + 无限重试卡 LIMIT 10 队头让新任务永远进不来。
+                            let new_attempts = {
+                                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                                vault.store().bump_reindex_attempts(task_id).unwrap_or(5)
+                            };
+                            if new_attempts >= 5 {
+                                tracing::error!(
+                                    "reindex_queue: task {task_id} ({action} {item_id}) reached {new_attempts} attempts, parking — {e}"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "reindex_queue: task {task_id} ({action} {item_id}) failed (attempt {new_attempts}): {e}"
+                                );
+                            }
+                            let _ = prior_attempts; // 仅用于日志格式化时可用 — 当前用 new_attempts 更准确
                             std::thread::sleep(std::time::Duration::from_secs(2));
                         }
                     }

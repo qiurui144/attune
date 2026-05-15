@@ -514,11 +514,14 @@ impl Store {
                 "ALTER TABLE items ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
                 [],
             )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_items_content_hash ON items(content_hash)",
-                [],
-            )?;
         }
+        // R16 review fix: INDEX CREATE 提出 if 块外。否则用户手动 ALTER 加列 / 历史
+        // 中断的 migration / 测试 fixture 升级时，列存在但索引缺失会得不到补建。
+        // CREATE INDEX IF NOT EXISTS 本身幂等无害。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_items_content_hash ON items(content_hash)",
+            [],
+        )?;
         Ok(())
     }
 

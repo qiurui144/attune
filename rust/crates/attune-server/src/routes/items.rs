@@ -129,6 +129,11 @@ pub async fn delete_item(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let vault = state.vault.lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+    // R9 P1-2 fix: vault Locked/Sealed 时拒绝删除（与 update_item / list_items 等
+    // mutating handler 一致 — "锁着的 vault 不可被改"语义）。
+    let _ = vault.dek_db().map_err(|e| {
+        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+    })?;
 
     // 先清索引（vector + FTS + queue），再 SQL 软删 — 让 search 在删除窗口内
     // 不会读到"DB 已删但向量还在"的 partial 状态

@@ -702,13 +702,22 @@ pub async fn chat(
     // v0.7 自学习闭环 Phase B hook 2：citation_hit 信号喂 skill_evolution。
     // chat 引用的 chunk 说明 search 召回 + chunk 内容**对答案质量真有贡献**，是高
     // 信号量。skill_evolution 用这些 ref_id 反推"哪类 query 召回了什么 chunk"，
-    // 在扩展词学习时优先保留与命中 chunk 同语义的同义词，避免学过头偏离用户真实需求。
+    // 在扩展词学习时优先保留与命中 chunk 同语义的同义词。
+    //
+    // R9 P1-3 fix:
+    // - query 字段截断到 512 字符（用户可能粘 4KB+ prompt，无截断时 5 行 ×4KB
+    //   一年膨胀 skill_signals 表）
+    // - 仅第一条写 query，后 4 条 None — 同一 query 关联多 chunk，evolver 用
+    //   `WHERE query='...' AND created_at` 反查可还原 group，无需重复存储
     // 失败静默忽略（self-learning 永不阻塞主流程）。
     {
+        const MAX_SIGNAL_QUERY_LEN: usize = 512;
+        let truncated: String = body.message.chars().take(MAX_SIGNAL_QUERY_LEN).collect();
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        for k in knowledge.iter().take(5) {
+        for (i, k) in knowledge.iter().take(5).enumerate() {
             if let Some(item_id) = k.get("item_id").and_then(|v| v.as_str()) {
-                let _ = vault.store().record_signal_event("citation_hit", item_id, Some(&body.message));
+                let q = if i == 0 { Some(truncated.as_str()) } else { None };
+                let _ = vault.store().record_signal_event("citation_hit", item_id, q);
             }
         }
     }

@@ -10,6 +10,23 @@ use crate::store::Store;
 #[allow(unused_imports)]
 use crate::store::types::*;
 
+/// R6 P1-4 fix: 已知 skill_signals kind 允许集。新加 kind 必须先入此白名单。
+/// 拒绝 typo 静默写入 unknown kind 让 `count_unprocessed_signals_by_kind` 永远 0.
+const KNOWN_SIGNAL_KINDS: &[&str] = &[
+    "search_miss",
+    "doc_create",
+    "doc_update",
+    "doc_delete",
+    "citation_hit",
+    "annotation_marker",
+    "click_through",
+    "dwell",
+];
+
+fn is_known_signal_kind(kind: &str) -> bool {
+    KNOWN_SIGNAL_KINDS.contains(&kind)
+}
+
 impl Store {
     /// 记录一次本地搜索失败信号（非阻塞写入，失败时静默忽略）。
     /// 内部固定 kind='search_miss'（向后兼容旧调用方）。
@@ -23,7 +40,7 @@ impl Store {
 
     /// v0.7 自学习闭环 Phase B：通用信号事件。
     ///
-    /// `kind` 已知值：
+    /// `kind` 必须从已知集选（拒绝 typo 静默写入 unknown kind 污染 skill_evolution 计数）：
     /// - `search_miss` — 搜索 0 命中（原信号）
     /// - `doc_create` / `doc_update` / `doc_delete` — 文档生命周期
     /// - `citation_hit` — chat 引用某 chunk
@@ -32,7 +49,15 @@ impl Store {
     ///
     /// `ref_id` 通常是 item_id / annotation_id / chunk hash，便于 skill_evolution
     /// 反查上下文。
+    ///
+    /// 未知 kind 返回 `VaultError::InvalidInput`，caller 应保证 kind 在编译期已知
+    /// （建议封装成 const & str 或枚举）。
     pub fn record_signal_event(&self, kind: &str, ref_id: &str, query: Option<&str>) -> Result<()> {
+        if !is_known_signal_kind(kind) {
+            return Err(crate::error::VaultError::Crypto(format!(
+                "unknown skill_signals kind: {kind:?} (R6 P1-4 fix: typo guard)"
+            )));
+        }
         self.conn.execute(
             "INSERT INTO skill_signals (query, knowledge_count, web_used, kind, ref_id)
              VALUES (?1, 0, 0, ?2, ?3)",
@@ -80,17 +105,22 @@ impl Store {
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(|e| e.into())
     }
 
-    /// 标记一批信号为已处理
+    /// 标记一批信号为已处理。
+    ///
+    /// R6 P1-7 fix: 包在 `unchecked_transaction` 里，避免半批失败留下"部分 processed
+    /// + 部分未 processed"的悬而未决状态 — caller 重试会重复处理已 mark 的子集。
     pub fn mark_signals_processed(&self, ids: &[i64]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
         }
+        let tx = self.conn.unchecked_transaction()?;
         for id in ids {
-            self.conn.execute(
+            tx.execute(
                 "UPDATE skill_signals SET processed = 1 WHERE id = ?1",
                 params![id],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 }
