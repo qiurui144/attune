@@ -122,6 +122,19 @@ ALTER TABLE skill_signals ADD COLUMN query_enc BLOB;
 
 **Effort**: 1 天（schema + record_*_event 5 处 caller 改 + migration + evolver 解密）。
 
+### C7 — embed_queue generation 标记（R10 S3 update 竞态根治）
+
+R10 滚动 review 发现 S3 竞态：embed worker 异步处理 embed_queue，与 reindex 并发时：
+- **delete 场景**：item 软删后 embed worker 仍写旧 chunk 向量 → orphan。**已修**（`embed_and_index_batch` 加 `item_exists` 检查，commit R10）。
+- **update 场景**：item 被 PATCH → reindex 清旧 chunk 入新 chunk，但 embed worker 已 dequeue 的旧 chunk 任务（标 processing）继续写**旧内容**向量。`item_exists` 救不了（item 还在）。
+
+**根治方案**：embed_queue 加 `generation INTEGER`，items 加 `index_generation INTEGER`。
+- reindex_item 时 `items.index_generation += 1`
+- enqueue_embedding 写入当前 generation
+- embed worker 写向量前比对 task.generation == items.index_generation，不一致 → 丢弃（旧世代 chunk）
+
+**Effort**: 0.5 天（2 列 + enqueue 签名 + worker 比对）。当前 update 竞态窗口小（embedding 通常快于用户连续编辑），优先级 P2。
+
 ### C5 — embed_model_version 迁移工具链 (基建)
 
 `vectors.VectorMeta` + `embed_queue` 加 `embed_model_version` 字段；升级 bge-m3 → bge-m3-zh-large 时跑 `attune-cli reindex --model=new` 全量迁移。
