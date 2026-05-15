@@ -347,6 +347,46 @@ Settings UI 采用 ChatGPT/Gemini/Claude 共同范式：模态对话框（左 ta
 - `packaging/` — 打包配置（PyInstaller/AppImage/NSIS）
 - `.github/workflows/` — CI/CD
 - `tests/` — 测试代码 + conftest.py
+- `docs/screenshots/<topic>/` — 文档/验证用截图（committed）
+- `.playwright-mcp/` — Playwright MCP 临时工作目录（gitignored）
+- `tmp/` — 临时调试，用完即删（gitignored）
+
+## 截图存放规范（Playwright MCP / 手工截图）
+
+**规则**：截图**禁止**直接写仓库根目录。`/.gitignore` 已锁 `/*.png` + `.playwright-mcp/`，
+但 working tree 60+ 散落 png 仍是 cruft. 新截图按用途分目录：
+
+| 用途 | 位置 | 是否 commit |
+|------|------|-------------|
+| 文档嵌入（doc 引用 ![]） | `docs/screenshots/<topic>/<name>.png` | ✅ commit, kebab-case |
+| E2E 视觉回归 baseline | `tests/screenshots/<test-name>/baselines/` | ✅ commit |
+| 一次性验证（GA verify / FEAT 验收） | `docs/screenshots/<release>-verification/` | ✅ commit, 带 release tag |
+| 调试 / 临时 | `.playwright-mcp/` 或 `tmp/` | ❌ gitignored, 用完删 |
+
+**MCP 工具用法**（避免根目录污染）:
+```js
+// ❌ 错: filename 是相对路径, 写到 cwd = 仓库根目录
+browser_take_screenshot({ filename: "lock-screen.png" })
+
+// ✅ 对: 显式路径到 docs/screenshots/<topic>/ 或 .playwright-mcp/
+browser_take_screenshot({ filename: ".playwright-mcp/lock-screen.png" })
+// 或归档版本
+browser_take_screenshot({ filename: "docs/screenshots/v063-ga-verification/lock-screen.png" })
+```
+
+**示例 — v0.6.3 GA 截图归档**（本会话 7 个）:
+```
+docs/screenshots/v063-ga-verification/
+├── attune-v063-01-lock-screen.png
+├── attune-v063-02-main-chat.png
+├── attune-v063-03-settings-member-cloud.png
+├── attune-v063-FEAT1-cloud-endpoint-expanded.png
+├── attune-v063-main-after-wizard.png
+├── attune-v063-wizard-step1.png
+└── attune-v063-wizard-step2-password.png
+```
+
+`docs/wizard-flow.md` 可 `![](screenshots/v063-ga-verification/attune-v063-wizard-step1.png)` 引用.
 
 ## Rust 商用线跨平台兼容规范
 
