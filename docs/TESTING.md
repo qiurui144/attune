@@ -484,7 +484,7 @@ jobs:
 
 ## 附录 A：人工验收清单
 
-某些 UX / 集成场景无法自动化（需要真实 Chrome 实例 / 真实 USB / 真实账号登录等），这些用 [`tests/MANUAL_TEST_CHECKLIST.md`](../tests/MANUAL_TEST_CHECKLIST.md) 维护勾选式步骤。
+某些 UX / 集成场景无法自动化（需要真实 Chrome 实例 / 真实 USB / 真实账号登录等），这些用 [`python/tests/MANUAL_TEST_CHECKLIST.md`](../python/tests/MANUAL_TEST_CHECKLIST.md) 维护勾选式步骤（含 v0.7 Memory Moat 验收节）。
 
 每次 release 前，必须人工跑一遍清单。
 

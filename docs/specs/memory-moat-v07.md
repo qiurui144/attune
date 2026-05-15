@@ -201,6 +201,24 @@ ALTER TABLE skill_signals ADD COLUMN query_enc BLOB;
 - attempts 达上限任务的运维 reset endpoint
 - citation_hit session_id 关联（v0.8 dedicated consumer）
 
+## 6.6. 9 轮滚动 review 修复（2026-05-15，R1-R9）
+
+30 轮 sprint 后追加 9 轮滚动深度审计，每轮聚焦一个维度：
+
+| 轮 | 维度 | 关键发现 + 修复 |
+|----|------|----------------|
+| R1 | reindex 性能实测 | 100KB reindex=834ms / 500KB=1.95s（agent 静态估算偏 10×）；加 perf_reindex_bench.rs；根因 N×enqueue 串行 → sprint 2 batch API |
+| R2 | SQL/auth/输入校验 | P0 /chat/stream 无长度校验 OOM；P1 PATCH /items 无 body 上限；P1 skill_signals.query 明文落盘（→ §C6） |
+| R3 | error 泄露/日志 | P1 chat 日志打 query 明文 → 改 debug；P2 8 处 signal 静默 → 加 debug 留痕 |
+| R4 | 测试覆盖盲点 | 生产路径无用户可触发 panic ✓；补 7 integration test（vectors_deleted 精确 / 空 section / 白名单全 / ref_id 边界 / 组合分支） |
+| R5 | 资源管理 | **P1 worker panic → flag 永久 true 致 worker 僵死** → WorkerFlagGuard RAII |
+| R6 | 老 vault 升级 | 3 migration 幂等安全；补 2 migration 测试 |
+| R7 | API 向后兼容 | upload dedup 分支 response shape 不一致 → 字段对齐 id；breaking change 仅 update_item，12 caller 全适配 |
+| R8 | 文档死链 | README/TESTING 死链修复；README Documentation 节加 v0.7 spec 链接 |
+| R9 | release readiness | clippy v0.7 文件 doc 缩进修；workspace 933 tests 全过 |
+
+**滚动 review 累计修**：2 P0 + 3 P1（+ R1-R30 sprint 的 1 Critical + 5 P0 + 9 P1）。
+
 ## 7. 验证
 
 每次 v0.7 dot release 必须新增到 `tests/MANUAL_TEST_CHECKLIST.md`：

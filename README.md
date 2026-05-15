@@ -328,10 +328,12 @@ LLM-generated content may be inaccurate, incomplete, or misleading. Attune and i
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) (TBD) and [NOTICE](NOTICE).
+Contribution guidelines are still being drafted. For now, see [DEVELOP.md](DEVELOP.md) for branch model + build commands, and [NOTICE](NOTICE) for third-party attribution.
 
 ## Documentation
 
+- [Memory Moat v0.7 spec](docs/specs/memory-moat-v07.md)
+- [v0.7 gap analysis](docs/v07-gap-analysis.md)
 - [Product positioning design](docs/superpowers/specs/2026-04-17-product-positioning-design.md)
 - [Frontend redesign spec](docs/superpowers/specs/2026-04-19-frontend-redesign-design.md)
 - [UX quality infrastructure](docs/superpowers/specs/2026-04-19-ux-quality-design.md)

@@ -14,13 +14,12 @@
 //!
 //! TODO v0.8 真 LLM stream when trait extended
 //!
-//!   1. Cargo.toml 加 `futures-util = "0.3"` + `tokio-stream = "0.1"`
-//!   2. LlmProvider trait 加：
-//!        fn chat_stream(&self, messages: &[ChatMessage])
-//!            -> Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
-//!      Ollama / OpenAI / Anthropic 三 provider 各自实装
-//!   3. 本端点改用 `axum::response::sse::Sse::new(ReceiverStream::new(rx))`
-//!      逐 token 转发，参考 axum-examples/sse
+//! 1. Cargo.toml 加 `futures-util = "0.3"` + `tokio-stream = "0.1"`
+//! 2. LlmProvider trait 加 `chat_stream` 方法返回
+//!    `Pin<Box<dyn Stream<Item = Result<String>> + Send>>`；
+//!    Ollama / OpenAI / Anthropic 三 provider 各自实装
+//! 3. 本端点改用 `axum::response::sse::Sse::new(ReceiverStream::new(rx))`
+//!    逐 token 转发，参考 axum-examples/sse
 //!
 //! ## Wire format
 //!
