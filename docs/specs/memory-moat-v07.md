@@ -133,6 +133,29 @@ CREATE INDEX idx_versions_item ON item_versions(item_id, snapshot_at DESC);
 
 ---
 
+## 6.4. R1 perf bench 实测（2026-05-15 11:09, release build）
+
+跑 `crates/attune-core/tests/perf_reindex_bench.rs --ignored --nocapture`：
+
+| 文档 | insert_ms | reindex_ms | chunks | purge_ms |
+|------|-----------|------------|--------|----------|
+| 1 KB | 0.92 | 182.51 | 10 | 7.00 |
+| 10 KB | 0.86 | 114.73 | 74 | 7.78 |
+| 50 KB | 2.03 | 425.90 | 360 | 8.23 |
+| **100 KB** | 1.32 | **834.36** | 714 | 7.76 |
+| 500 KB | 3.28 | **1949.39** | 3554 | — |
+
+`update_item` 短路微调测：1.29 / 1.47 / 1.14 ms（content changed / same content / title only）— 短路在 50KB 文档上仅省 1-2ms（不是之前承诺的"~3s/100KB"，那个估算 wrong）。
+
+### 实测结论 → 改 P0 项
+
+- **100KB 文档 reindex 持 vault lock 834ms** 是真 P0（先前 review agent 静态估算 20-80ms 偏离 10 倍）。500KB 1.95s 不可接受。
+- 根因：`reindex_item` 内 `N × store.enqueue_embedding` 串行执行（714 个 SQL INSERT × ~1ms），SQLite WAL 下 batch 化可降 5-10 倍。
+- purge 持锁 ~7-8ms 与文档大小无关 ✓（HNSW remove 是按 meta 表线性扫描全索引，size 影响小）
+- content_hash 短路实际收益 < 5% — 因为 update_item 本身廉价（BLOB 加密 1-2ms 级），短路省不出明显时间；真正价值在于跳过下游 reindex_item 的 800ms+
+
+→ v0.7 sprint 2 加 enqueue_embedding batch API（`enqueue_embedding_batch(Vec<(...)>)`），单 SQL 事务一次 INSERT N 行。
+
 ## 6.5. 30 轮 review sprint 修复（2026-05-15）
 
 5 个并行 code-review agent + 自审 30 轮，识别并修复：
