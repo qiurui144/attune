@@ -75,6 +75,14 @@ def search_count(q):
     return len(d.get("results", []))
 
 
+def keyword_in_hits(q, keyword):
+    """search q，返回命中结果的 content 是否含 keyword 文字。
+    用于"编辑后旧词消失"验证 —— search 是 RRF 混合，向量分量会语义模糊召回
+    同主题文档（score 噪音级），故验"命中内容不含旧词文字"而非 results==0。"""
+    _, d = req("GET", f"/api/v1/search?q={urllib.parse.quote(q)}")
+    return any(keyword in h.get("content", "") for h in d.get("results", []))
+
+
 print("=== v0.7 Memory Moat — 大文档 + 边界文档压力 E2E ===\n")
 req("POST", "/api/v1/vault/unlock", {"password": "e2e-pass-2026"})
 
@@ -105,7 +113,9 @@ patch_ms = (time.time() - t0) * 1000
 check("100KB PATCH reindex 成功", st == 200 and d.get("content_changed") is True,
       f"{patch_ms:.0f}ms, reindex={d.get('reindex')}")
 time.sleep(1.5)
-check("大文档编辑后旧关键词搜不到", search_count("BENCHMARK_KEYWORD_ALPHA") == 0)
+check("大文档编辑后旧关键词文字从命中内容消失",
+      not keyword_in_hits("BENCHMARK_KEYWORD_ALPHA", "BENCHMARK_KEYWORD_ALPHA"),
+      "RRF 向量分量可能模糊召回，验内容不含旧词")
 check("大文档编辑后新关键词搜得到", search_count("BENCHMARK_KEYWORD_BETA") >= 1)
 req("DELETE", f"/api/v1/items/{big_id}")
 
