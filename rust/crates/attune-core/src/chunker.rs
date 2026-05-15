@@ -1,7 +1,17 @@
-// npu-vault/crates/vault-core/src/chunker.rs
-
-// 滑动窗口分块 + 语义章节切割
-// 复用 npu-webhook Python 实现的逻辑
+//! 滑动窗口分块 + 语义章节切割.
+//!
+//! 两个核心 API:
+//! - [`chunk`] — Level 2 段落级滑动窗口, 默认 512 字符 + 128 overlap, 句子边界 +
+//!   Markdown code fence 平衡保持 (不切到 ``` 中间).
+//! - [`extract_sections`] / [`extract_sections_with_path`] — Level 1 章节级,
+//!   按 Markdown header 切, 段落 target 1500 字符.
+//!
+//! 两层产物都进 embedding queue, search 时走 [`crate::search`] 两阶段层级检索
+//! (先 Level 1 找章节, 再 Level 2 在选中章节内精检). Level 1 给 LLM 上下文,
+//! Level 2 给 evidence cite.
+//!
+//! 默认参数依据: [`DEFAULT_CHUNK_SIZE`] 512 对中文 ~256 token / 英文 ~80 token,
+//! 适配 bge-m3 模型. v0.7 候选改 1024 减少 chunk 数 (需 reindex).
 
 pub const DEFAULT_CHUNK_SIZE: usize = 512;
 pub const DEFAULT_OVERLAP: usize = 128;

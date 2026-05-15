@@ -1,3 +1,33 @@
+//! # attune-core
+//!
+//! attune 私有 AI 知识伙伴 — 核心库。
+//!
+//! 提供 vault (Argon2id + AES-256-GCM 加密存储) / store (SQLite + FTS5 全文索引) /
+//! vectors (usearch HNSW + f16) / chunker / parser / embed / chat (含 PII redactor +
+//! evidence chain) / classifier / clusterer / web search 等 ~50 个模块。
+//!
+//! ## 主要 facade
+//!
+//! - [`vault::Vault`] — 加密存储入口, unlock 后暴露 [`store::Store`]
+//! - [`search`] — RRF 混合搜索 (vector + FTS) + 两阶段层级 + 注入预算
+//! - [`chunker`] — 滑动窗口 + 章节切割, code fence balanced
+//! - [`chat::ChatEngine`] — RAG 对话引擎, 含 PII redact + cite extraction
+//! - [`embed::EmbeddingProvider`] — Ollama / ONNX 抽象 trait
+//! - [`classifier::Classifier`] + [`taxonomy::Taxonomy`] — 自动分类
+//! - [`async_fs`] — spawn_blocking 包装 fs ops, async handler 友好
+//!
+//! ## 加密策略
+//!
+//! - 主密码 → Argon2id 派生 KEK → 解 DEK (随机 32B)
+//! - 字段级 AES-256-GCM (items.content / tags / embed_queue.chunk_text)
+//! - title/url/created_at TEXT 明文 (per privacy trade-off, list 性能优先)
+//!
+//! ## 三档隐私 (per Phase A.5)
+//!
+//! - L0 🔒 chunk 永不出网 (强制本地 LLM)
+//! - L1 默认 12 PII 类脱敏 → 云端 LLM
+//! - L3 LLM 语义脱敏 (v0.7, K3 一体机)
+
 pub mod ai_annotator;
 pub mod annotation_weight;
 // async_fs: D3 review 引入 — async-safe fs helpers (spawn_blocking 包装).

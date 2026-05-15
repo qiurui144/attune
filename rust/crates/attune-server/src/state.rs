@@ -1100,12 +1100,14 @@ impl AppState {
     // 新代码 (route / async handler) 强烈建议用这些 accessor 而非 .lock() 直接访问 —
     // 准备一并 migrate 到 ArcSwap 时, 旧 .lock() 调用会编译失败 (字段类型不再是 Mutex).
 
-    /// 读 embedding provider — lock-free clone of Arc. 适合 async handler 内调.
+    /// 读 embedding provider — lock+clone Arc. 后续 v0.7 改 ArcSwap (D-R14 受
+    /// `dyn Trait` 不支持 load_full 阻碍, 需走 Arc<dyn> + ArcSwapAny<Arc<dyn>>
+    /// 直接而非 Option 包装).
     pub fn embedding(&self) -> Option<Arc<dyn EmbeddingProvider>> {
         self.embedding.lock().ok().and_then(|g| g.clone())
     }
 
-    /// 写 embedding provider. settings hot-reload 路径会调.
+    /// 写 embedding provider. settings hot-reload 路径调.
     pub fn set_embedding(&self, p: Option<Arc<dyn EmbeddingProvider>>) {
         if let Ok(mut g) = self.embedding.lock() {
             *g = p;

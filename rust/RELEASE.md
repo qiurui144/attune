@@ -1,5 +1,72 @@
 # attune 版本记录
 
+## v0.6.4 dev (post-GA) — 30 轮深度知识库 + 代码文档评阅 sprint (2026-05-15)
+
+发布定位: **post-v0.6.3 GA 内功** — 知识库核心组件审计 + 文档化 + 5 ADR + 部署/插件/wizard 三文档归并.
+本 sprint 主体不动 prod 代码 (仅 1 reference migration + lib.rs/chunker.rs //! crate doc),
+重在沉淀团队约定 + 决策记录, 为 v0.7 PR 阶段铺路.
+
+**12 轮知识库深度评阅**:
+
+| 轮 | 模块 | 结论 |
+|---|------|------|
+| R1 | chunker.rs (741 LoC) | code fence balance ✓; 改进空间: chunk_size 512→1024 (中文) + sentence boundary 50→100 字符. 留 v0.7 reindex tool |
+| R2 | parser.rs (1033 LoC) | pdf / docx / asr / code / OCR fallback 完整 |
+| R3 | search.rs (RRF) | K=60 + cross-lang + cross-domain penalty + budget allocation. 设计良好 |
+| R4 | vectors.rs (usearch HNSW) | f16 + cos metric; 默认 HNSW params, 可暴露 to settings (v0.7 advanced) |
+| R5 | store/items.rs 加密 | content/tags BLOB 加密 ✓, title/url 明文 (list 性能 trade-off, doc 须明示) |
+| R6 | embed.rs | Ollama HTTP provider; v0.7 候选: ONNX direct (bge-small offline) |
+| R7 | rerank pipeline | bge-reranker-v2-m3 via Ort, lazy hf_hub fallback |
+| R8 | classifier + clusterer | Ollama qwen + hdbscan; min_samples=5/min_cluster=5 暴露 to settings (v0.7) |
+| R9 | context_compress | budget-aware + cite preserve; chat.rs F-Pro evidence flow ✓ |
+| R10 | taxonomy + plugin 融合 | 3 source HashSet 去重 (前 PLG-1 fix). conflict resolution log (v0.7) |
+| R11 | F-17 PII redact | 12 类全覆盖 ✓; audit_log 当前 tracing 占位, v0.7 真持久化 store::audit_log |
+| R12 | web_search 三层 fallback | 系统 / cache / NeedsDownload (FIX-9 stage 1 已 ship API) |
+
+**8 轮代码深度审计 (D-R13~D-R20)**:
+
+| 轮 | 主题 | 结论 |
+|---|------|------|
+| D-R13 | AppError migration | status.rs::status 作 reference migrate; 其余 ~37 routes 渐进 v0.7 |
+| D-R14 | ArcSwap actual swap | 评估 ArcSwapOption&lt;dyn Trait&gt; 不支持 load_full (372 编译错). v0.7 用 ArcSwap&lt;Arc&lt;dyn&gt;&gt; + NoopProvider |
+| D-R15 | 模块归并 ai/ | 100+ import 改写涉及, v0.7 单独 PR |
+| D-R16 | 测试覆盖 | attune-core 1 test/38 LoC, 中等偏上 ✓ |
+| D-R17 | 内存泄漏 | 7 worker loop 通过 AtomicBool flag, broadcast capacity 64 自 drop. 无明显泄漏 ✓ |
+| D-R18 | logging level | 51 info + 47 warn + 11 debug + 2 error 分布合理 ✓ |
+| D-R19 | graceful shutdown | lib.rs:306 SIGTERM+SIGINT handler 已实施 ✓ |
+| D-R20 | SQLite WAL | journal_mode=WAL + busy_timeout=5000 + wipe checkpoint+VACUUM ✓. v0.7 加 startup PRAGMA optimize |
+
+**6 轮文档化 (D-R21~D-R26)**:
+
+- **D-R21**: lib.rs `//!` crate doc 写完 + chunker.rs `//!` 模板. 其余 1127 doc gap 增量 v0.7
+- **D-R22**: docs/adr/ 5 ADR — OSS×Pro / FormFactor / GitFlow Lite / AppError / F-17 PII
+- **D-R23**: cargo doc -p attune-core 通 (15 warning, broken intra-doc 后续修)
+- **D-R24**: docs/wizard-flow.md — 5 步首启 + 失败回退 4 行表
+- **D-R25**: docs/plugin-development.md — yaml schema + signing + encryption + 4 vertical + 本地测试
+- **D-R26**: docs/deploy.md — Laptop / NAS / K3 三形态 + 迁移 + 故障排查
+
+**4 轮 cross-cutting (D-R27~D-R30)**:
+
+- **D-R27**: 安全审计 — Argon2id + AES-GCM + Device Secret 设计优秀 ✓
+- **D-R28**: perf baseline — 已有 perf_chunker_bench.rs (#[ignore]). 完整 criterion 矩阵 v0.7
+- **D-R29**: Observability — tracing_subscriber 在; /metrics + JSON logging 选项 v0.7
+- **D-R30**: 本 sprint 汇总入 RELEASE + commit/push
+
+**v0.7 跟踪清单** (RICE 排序):
+
+| 项 | RICE | Effort | Note |
+|---|------|-------|------|
+| ArcSwap 真 migration (D-R14) | high | 1 day | Arc<dyn>+NoopProvider 占位法 |
+| 37 routes AppError migrate (D-R13) | high | 2 day | reference 已在 status.rs |
+| audit_log 持久化 (R11/F-17) | high | 0.5 day | UI 入口已 wire |
+| 模块归并 ai/ (D-R15) | medium | 1 day | 100+ import |
+| Rustdoc 增量补 (D-R21) | medium | continuous | 每周 100 个 pub item |
+| criterion bench 矩阵 (D-R28) | medium | 1 day | 3 form factor × N config |
+| metrics endpoint (D-R29) | medium | 0.5 day | Prometheus-style |
+| HNSW params expose to settings (D-R4) | low | 0.3 day | advanced 用户 |
+
+---
+
 ## v0.6.1（2026-04-30）— 边界收敛 + FormFactor 形态分裂 + RUSTSEC patch
 
 发布定位：v0.6.0 GA 后第一个 minor — 治理 + 安全 + 形态感知，非用户可见功能新增。
