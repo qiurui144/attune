@@ -1,5 +1,66 @@
 # attune 版本记录
 
+## v0.7.0-dev (2026-05-15 sprint) — 安全有效记忆护城河 Phase A+B
+
+> **「优势不在于模型，而在于以安全有效的记忆」**（per 用户决策 2026-05-15）。
+> 同样的 LLM，挂上 attune 比单跑模型答得更准 — 因为记忆是私有的、可审计的、随用户使用持续变好的。
+
+### Phase A — 文档编辑嵌入功能完全有效（修 3 个 release-blocker）
+
+之前各 update path 各写一份"删旧加新"流程，留下 3 个生产 bug：
+
+| Bug (≤ v0.6.3) | 修法 (v0.7) |
+|----------------|-------------|
+| `routes/items.rs::update_item` 完全不 re-embed → UI 编辑后 search 永远返回旧内容 | UpdateOutcome 三态 + `reindex::reindex_item` 完整 pipeline |
+| `routes/upload.rs` 同名重传不去重 | content_hash dedup 短路 |
+| `routes/items.rs::delete_item` 不调 `vectors::delete_by_item_id` + `fulltext::delete_document` (这两个函数已实现但 0 处调用，**死代码**) | `reindex::purge_item_indexes` 先清后软删 |
+| `scanner.rs` / `scanner_webdav.rs` 文件变更触发 `store.delete_item` 但拿不到 vectors lock | `reindex_queue` 表 + server `start_reindex_worker` 3s 轮询消费 |
+
+**核心架构新增**：
+- `attune-core::reindex` 模块 — 协调 store + vectors + fulltext + queue **事务式** cleanup
+- `items.content_hash` 列（SHA-256 hex）+ migration + index — 短路条件
+- `reindex_queue` 表 — defer 跨层 worker 的清理职责
+- `AppState::start_reindex_worker` — 后台 3s 轮询 worker，vault unlock 时启动
+
+### Phase B — 自学习闭环 3 hook
+
+之前 skill_evolution 仅消费"搜索失败"信号（最低级），批注 / citation / 文档变更 / hit count / feedback 全部 NO。本 sprint 把 5 类信号汇聚到 `skill_signals` 表（kind 列区分）：
+
+| Hook | kind | 写入位点 | 意义 |
+|------|------|----------|------|
+| 1 | `doc_create` | upload.rs | 新文档进入 → 喂入 search 词库 |
+| 1 | `doc_update` | items.rs::update + scanner.rs | 内容改变 → 重新评估同义词 |
+| 1 | `doc_delete` | items.rs::delete | 文档移除 → 清理过期词 |
+| 2 | `citation_hit` | chat.rs (top-5) | chunk 被 LLM 引用 → **高质量信号**，扩展词学习时优先保留语义 |
+| 3 | `annotation_marker` | annotations.rs | 用户标 ⭐ 重点 / 🤔 存疑 → 偏好信号 |
+
+schema：`skill_signals` 加 `kind` + `ref_id` 列 + migration + composite index
+API：`Store::record_signal_event(kind, ref_id, query_opt)` + `count_unprocessed_signals_by_kind`
+向后兼容：老 `record_skill_signal` 内部固定 `kind='search_miss'`，不破坏现有 evolver
+
+### Phase C — spec only（v0.7 后续 sprint）
+
+`docs/specs/memory-moat-v07.md` — RICE 排序 5 项：C1 文档版本化记忆 / C2 编辑触发自动重标注 / C3 失败信号反推 project_recommender / C4 知识衰减曲线 / C5 embed_model_version 迁移工具链
+
+### v0.7 sprint 1（5 agents 并行）— commit 71d82ee
+
+- **attune-core**：cost / tools / demo / query_rewrite / entity_graph / skill_eval / report / reader / capture / sync / vlm / store::audit_log
+- **attune-server** 路由：/audit/log + /audit/log.csv + /demo/load + /chat/stream
+- 修 `parse_this_month_english` 测试硬编码常量错算 4 天 bug
+
+### 验证
+
+- workspace lib tests: **910 passed / 0 failed / 1 ignored**（10 cli + 884 core + 16 server）
+- doc tests: 1 passed / 0 failed / 4 ignored
+- `python/tests/MANUAL_TEST_CHECKLIST.md` 新增 8 条 Memory Moat 验收（Phase A 5 条 + Phase B 3 条）
+
+### Commits (cumulative)
+
+- `71d82ee` feat(v07): 15 P0 缺口模块批量落地
+- `50d994b` feat(memory-moat): v0.7 Phase A+B
+
+---
+
 ## v0.6.4 dev (post-GA) — 30 轮深度知识库 + 代码文档评阅 sprint (2026-05-15)
 
 发布定位: **post-v0.6.3 GA 内功** — 知识库核心组件审计 + 文档化 + 5 ADR + 部署/插件/wizard 三文档归并.

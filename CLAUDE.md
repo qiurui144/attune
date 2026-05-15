@@ -312,6 +312,29 @@ Settings UI 采用 ChatGPT/Gemini/Claude 共同范式：模态对话框（左 ta
 - 后端端口: 18900
 - **API path 命名 kebab-case** (per OPT-5). 新 path 必须 kebab; 旧 snake path 保留 alias 1 release 周期后删
 
+### Rust 商用线约定 (v0.7 sprint 增量：记忆护城河)
+
+**文档生命周期协调（v0.7 新规）**:
+- 任何写 items.content 的 path（upload / update / scanner / webdav / ingest）**必须**通过 `attune-core::reindex` 模块走完整 pipeline，禁止直接调 `store.update_item` 后不 reindex
+- 新加 update path 前先看 `routes/items.rs::update_item` 和 `routes/upload.rs::upload_file` 现有 5 步：（1）算 content_hash（2）短路判断（3）DB update（4）若 content_changed → reindex_item 或 enqueue_reindex（5）写 doc_* 信号到 skill_signals
+- attune-core 后台 worker（scanner / scanner_webdav / 任何拿不到 server lock 的）**不要**自己调 vectors / fulltext API，**必须**通过 `store.enqueue_reindex(item_id, action)` 让 server worker 间接处理
+- `vectors::delete_by_item_id` + `fulltext::delete_document` 现在通过 reindex 模块统一调，**不再单独直调**
+
+**Lock ordering（防死锁）**:
+- 顺序：`vault.lock()` → `vectors.lock()` → `fulltext.lock()` → `embedding.lock()`
+- 反顺序持锁是死锁高风险路径；route handler 同时拿多锁前先 release vault guard，或保证顺序一致
+- `start_reindex_worker` 内部已经按此顺序，新加 worker 沿用相同模式
+
+**自学习信号约定**:
+- 用 `Store::record_signal_event(kind, ref_id, query_opt)` 写新信号；kind 必须从已知集选（doc_create / doc_update / doc_delete / citation_hit / annotation_marker / search_miss）
+- `record_skill_signal(query, knowledge_count, web_used)` 是老 API，仅用于 search_miss 场景（向后兼容）
+- 失败时静默忽略（`let _ = ...`），永不阻塞主流程
+
+**content_hash 短路条件**:
+- update_item 内部已做（hash 相同 → 不重写 BLOB / 不返回 content_changed）
+- upload.rs 入口做（hash 命中 → 返回 status=duplicate 跳过 insert）
+- 老 vault content_hash='' 视为"未 backfill"，update_item 时 lazy 填回；'' 不参与 `find_item_by_content_hash` 命中
+
 ### Rust 商用线约定 (v0.6.3 sprint 确立)
 
 **错误处理**:

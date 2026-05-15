@@ -35,6 +35,40 @@ Latest pre-release: **v0.6.3-rc.1** (server tarball; desktop installer pending N
 
 > macOS Intel: build from source with `cargo build --release` (Apple Silicon already covers modern Mac users). SHA256 checksum file ships with each archive.
 
+## v0.7 sprint highlights (2026-05-15) — Memory Moat Phase A+B
+
+> **"优势不在于模型，而在于以安全有效的记忆"** — 同样的 LLM，挂上 attune 比单跑模型答得更准、更敢用。
+
+### Phase A — 文档编辑嵌入功能完全有效（修 3 个 release-blocker）
+
+之前 `update_item` 仅刷 SQL → 搜索永远返回旧内容；同名重传重复 embed；delete 不清向量。本 sprint 用 **`attune-core::reindex` 协调模块**收敛三资源（DB / VectorIndex / FulltextIndex / embed_queue）事务式 cleanup，同步增加：
+
+- `items.content_hash` 列（SHA-256 hex）+ migration → update / upload 短路省 ~3s/100KB embedding
+- `reindex_queue` 表 + `AppState::start_reindex_worker`（3s 轮询）→ 解锁 `scanner` / `scanner_webdav` 等无法直接持锁的后台 worker
+- `routes/items.rs::update_item` 返回 `UpdateOutcome` 三态（existed / content_changed / backfilled_hash），仅真改才触发 reindex
+
+### Phase B — 自学习闭环 3 hook
+
+`skill_signals` 加 `kind` + `ref_id` 列，5 类信号汇入：
+
+| Hook | kind | 写入位点 |
+|---|---|---|
+| 1 | `doc_create` / `doc_update` / `doc_delete` | upload / items.update / items.delete / scanner |
+| 2 | `citation_hit` | chat.rs 取 top-5 引用 chunk 喂入 |
+| 3 | `annotation_marker` | annotations.rs::create_annotation |
+
+skill_evolution 从"失败驱动"升级为"全谱信号驱动" — 可按 kind 设阈值 / 调权。
+
+### Phase C spec
+
+`docs/specs/memory-moat-v07.md` — 文档版本化 / 编辑触发重标注 / 失败信号反推 project / 衰减曲线 / embed_model_version 迁移工具链，RICE 排序后留 sprint 2+。
+
+📊 **5 agents 并行交付的 v0.7 缺口模块**（commit 71d82ee）：cost / tools / demo / query_rewrite / entity_graph / skill_eval / report / reader / capture(email+telegram) / sync(webdav) / vlm + 4 个 server 路由（audit log + log.csv + demo load + chat stream）
+
+🧪 **验证**：workspace lib tests **910 passed / 0 failed / 1 ignored**；MANUAL_TEST_CHECKLIST 新增 8 条 Memory Moat 验收。
+
+---
+
 ## v0.6.0-rc.5 highlights (2026-04-28)
 
 🎯 **Three-track PRO benchmark** — verified end-to-end RAG quality on legal + general English + Chinese fundamentals:

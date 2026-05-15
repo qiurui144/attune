@@ -3,6 +3,11 @@
 **Date**: 2026-05-15  
 **基线**: v0.6.3 GA (commit ec95619) + D-R 30 轮 sprint (commit 6e4eb96) + screenshot 整理 (commit 32350df)
 
+> **2026-05-15 update**: Sprint 1 (commit 71d82ee) 完成 5 agents 并行交付 15 P0 模块；
+> Memory Moat sprint (commit 50d994b) 完成 Phase A+B（文档编辑嵌入完全有效 + 自学习闭环 3 hook）。
+> 护城河详细 spec 见 [`docs/specs/memory-moat-v07.md`](specs/memory-moat-v07.md)；记忆质量验收清单已写入
+> [`python/tests/MANUAL_TEST_CHECKLIST.md`](../python/tests/MANUAL_TEST_CHECKLIST.md) 「Memory Moat v0.7」节。
+
 按 14 个产品维度评估当前 (v0.6.3) vs 目标. 缺口按 RICE 排序, 标注是否 OSS attune / attune-pro 范围.
 
 ## 0. 决策矩阵 (本 doc 落 v0.7 路线图)
