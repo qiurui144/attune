@@ -592,6 +592,18 @@ impl AppState {
         }
 
         std::thread::spawn(move || {
+            // R5 P1-1 fix: RAII guard 保证任何退出路径（含 reindex_item / usearch FFI
+            // panic）都复位 reindex_worker_running flag。否则 worker thread panic 后
+            // flag 永久 true → start_reindex_worker 的 compare_exchange 永远失败 →
+            // worker 无法重启 → reindex 全停 → search 永久返回 stale 内容。
+            struct WorkerFlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for WorkerFlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _flag_guard = WorkerFlagGuard(&state.reindex_worker_running);
+
             tracing::info!("Reindex worker started");
             loop {
                 // vault lock check
@@ -696,7 +708,7 @@ impl AppState {
                     }
                 }
             }
-            state.reindex_worker_running.store(false, Ordering::SeqCst);
+            // flag 复位由 WorkerFlagGuard::drop 接管（含 panic 路径，R5 P1-1 fix）
             tracing::info!("Reindex worker stopped (vault locked)");
         });
     }

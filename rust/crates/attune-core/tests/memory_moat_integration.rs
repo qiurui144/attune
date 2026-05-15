@@ -150,6 +150,121 @@ fn signal_event_with_truncated_query() {
 }
 
 #[test]
+fn reindex_item_deletes_existing_vectors_precise_count() {
+    // R4 补测：之前 reindex 测试从不验 vectors_deleted（setup 没插向量）。
+    // 先手工 add 3 个该 item 的向量 + 1 个别的 item 的，reindex 应只删自己的 3 个。
+    use attune_core::vectors::VectorMeta;
+    let (_t, store, mut vec, ft, dek) = setup();
+    let id = store.insert_item(&dek, "t", "# H\n\nbody", None, "note", None, None).unwrap();
+    let other = store.insert_item(&dek, "t2", "other", None, "note", None, None).unwrap();
+
+    let v = vec![0.1f32; 1024];
+    for i in 0..3 {
+        vec.add(&v, VectorMeta { item_id: id.clone(), chunk_idx: i, level: 2, section_idx: 0 }).unwrap();
+    }
+    vec.add(&v, VectorMeta { item_id: other.clone(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
+
+    let stats = reindex::reindex_item(&store, &mut vec, &ft, &id, "t", "# H\n\nbody", "note").unwrap();
+    assert_eq!(stats.vectors_deleted, 3, "只删自己 item 的 3 个向量，不碰别的 item");
+}
+
+#[test]
+fn reindex_item_skips_empty_sections() {
+    // R4 补测：reindex.rs 空 section 跳过分支之前 0 覆盖
+    let (_t, store, mut vec, ft, dek) = setup();
+    let content = "# H1\n\n   \n\n# H2\n\nreal content here";
+    let id = store.insert_item(&dek, "t", content, None, "note", None, None).unwrap();
+    let stats = reindex::reindex_item(&store, &mut vec, &ft, &id, "t", content, "note").unwrap();
+    // 空白 section 不应入队，但非空 section 必有 chunk
+    assert!(stats.chunks_enqueued >= 1, "非空 section 必产 chunk");
+}
+
+#[test]
+fn all_known_signal_kinds_accepted() {
+    // R4 补测：白名单 8 值全覆盖（之前集成测试只验 5 个）
+    let (_t, store, _v, _f, _d) = setup();
+    for kind in ["search_miss", "doc_create", "doc_update", "doc_delete",
+                 "citation_hit", "annotation_marker", "click_through", "dwell"] {
+        assert!(store.record_signal_event(kind, "ref", None).is_ok(),
+                "白名单 kind={kind} 必须接受");
+    }
+}
+
+#[test]
+fn signal_ref_id_length_boundary() {
+    // R2 F4 fix 边界验收：ref_id 128 ok / 129 reject
+    let (_t, store, _v, _f, _d) = setup();
+    let id_128 = "a".repeat(128);
+    let id_129 = "a".repeat(129);
+    assert!(store.record_signal_event("doc_update", &id_128, None).is_ok(), "128 字符边界内");
+    assert!(store.record_signal_event("doc_update", &id_129, None).is_err(), "129 超界必拒");
+}
+
+#[test]
+fn update_item_title_and_content_both_changed() {
+    // R4 补测：title + content 同时传的组合分支
+    let (_t, store, _v, _f, dek) = setup();
+    let id = store.insert_item(&dek, "OldTitle", "old body", None, "note", None, None).unwrap();
+    let outcome = store.update_item(&dek, &id, Some("NewTitle"), Some("new body")).unwrap();
+    assert!(outcome.existed);
+    assert!(outcome.content_changed, "content 变了");
+    let item = store.get_item(&dek, &id).unwrap().unwrap();
+    assert_eq!(item.title, "NewTitle", "title 也应更新");
+    assert_eq!(item.content, "new body");
+}
+
+#[test]
+fn v07_migrations_idempotent_across_reopens() {
+    // R6 补测：v0.7 三个 migration (content_hash / skill_signals kind+ref_id /
+    // reindex_queue) 必须幂等 — Store::open 同一文件多次不报错、数据不丢。
+    // 模拟用户多次重启 server / 升级再降级再升级。
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("vault.db");
+    let dek = Key32::generate();
+
+    // 第一次 open + 插数据
+    let id = {
+        let store = Store::open(&db_path).unwrap();
+        let id = store.insert_item(&dek, "t", "body", None, "note", None, None).unwrap();
+        store.record_signal_event("doc_create", &id, Some("t")).unwrap();
+        store.enqueue_reindex(&id, "purge").unwrap();
+        id
+    };
+
+    // 再 open 两次（触发 migration 重跑）— 必须幂等
+    for round in 0..2 {
+        let store = Store::open(&db_path).unwrap();
+        // 老数据仍可读
+        let item = store.get_item(&dek, &id).unwrap();
+        assert!(item.is_some(), "round {round}: 重开后老 item 必须可读");
+        // content_hash 列存在且非空（insert 时已写）
+        let h = store.get_content_hash(&id).unwrap().unwrap();
+        assert_eq!(h.len(), 64, "round {round}: content_hash 是 SHA-256 hex");
+        // skill_signals kind 列可查
+        assert_eq!(store.count_unprocessed_signals_by_kind("doc_create").unwrap(), 1,
+                   "round {round}: doc_create 信号仍在");
+        // reindex_queue 表仍有任务
+        let tasks = store.dequeue_reindex_tasks(10).unwrap();
+        assert_eq!(tasks.len(), 1, "round {round}: reindex_queue 任务仍在");
+    }
+}
+
+#[test]
+fn open_memory_has_all_v07_schema() {
+    // R6 补测：open_memory（测试路径）也注册 v0.7 migration，新列/表齐全
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    // content_hash 路径可用
+    let id = store.insert_item(&dek, "t", "c", None, "note", None, None).unwrap();
+    assert!(store.get_content_hash(&id).unwrap().is_some());
+    // skill_signals kind 路径可用
+    store.record_signal_event("doc_update", &id, None).unwrap();
+    // reindex_queue 表可用
+    store.enqueue_reindex(&id, "reindex").unwrap();
+    assert_eq!(store.dequeue_reindex_tasks(10).unwrap().len(), 1);
+}
+
+#[test]
 fn content_hash_dedup_via_store_api() {
     // 验证 upload route 用的 find_item_by_content_hash 短路路径
     let (_t, store, _v, _f, dek) = setup();

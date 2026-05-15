@@ -114,10 +114,13 @@ pub async fn upload_file(
     let content_hash = attune_core::store::items::compute_content_hash(&content);
     if let Ok(Some(existing_id)) = vault.store().find_item_by_content_hash(&content_hash) {
         tracing::info!("upload content_hash dedup hit: filename={filename} existing_item={existing_id}");
+        // R7 fix: dedup 分支 response shape 与成功分支对齐（id / title / chunks_queued
+        // / status），避免 client 两分支读不同字段名。dedup_reason 是额外兼容字段。
         return Ok(Json(serde_json::json!({
-            "item_id": existing_id,
-            "status": "duplicate",
+            "id": existing_id,
             "title": title,
+            "chunks_queued": 0,
+            "status": "duplicate",
             "dedup_reason": "content_hash",
         })));
     }
