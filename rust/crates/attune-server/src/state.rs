@@ -667,8 +667,12 @@ impl AppState {
 
                     match result {
                         Ok(_) => {
-                            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                            let _ = vault.store().mark_reindex_done(task_id);
+                            {
+                                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                                let _ = vault.store().mark_reindex_done(task_id);
+                            }
+                            // R10 E2E fix (P0): reindex worker 改了向量/FTS → 失效 search 缓存
+                            state.invalidate_search_cache();
                             tracing::info!("reindex_queue: {action} done for item={item_id}");
                         }
                         Err(WorkerErr::Transient(e)) => {
@@ -1232,6 +1236,17 @@ impl AppState {
         self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
         // 重置初始化标志，确保再次 unlock 后能重新初始化搜索引擎
         self.engines_initialized.store(false, Ordering::SeqCst);
+    }
+
+    /// R10 E2E fix (P0): 文档变更后失效 search 结果缓存。
+    ///
+    /// search_cache 按 query hash 缓存结果。之前只有 vault lock (reset) 和 ingest
+    /// 清缓存 — update_item / delete_item / upload / reindex worker 全都不清，导致：
+    /// - 编辑文档后搜旧关键词仍命中（返回编辑前的缓存结果）
+    /// - 删除文档后仍搜得到（缓存假命中）
+    /// 真实 E2E 测试 STEP 4 / STEP 8 实测捕获。任何改动 items / 索引的 path 都必须调。
+    pub fn invalidate_search_cache(&self) {
+        self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     // ── ML provider accessor 方法 (OPT-3 ArcSwap migration prep) ───────────

@@ -122,6 +122,8 @@ pub async fn update_item(
         if let Err(e) = vault.store().record_signal_event("doc_update", &id, None) {
             tracing::debug!(signal = "doc_update", error = %e, "record_signal_event failed (non-fatal)");
         }
+        // R10 E2E fix (P0): 内容变了 → 失效 search 缓存，否则搜旧关键词命中陈旧结果
+        state.invalidate_search_cache();
     }
 
     Ok(Json(serde_json::json!({
@@ -176,6 +178,8 @@ pub async fn delete_item(
             if let Err(e) = vault.store().record_signal_event("doc_delete", &id, None) {
                 tracing::debug!(signal = "doc_delete", error = %e, "record_signal_event failed (non-fatal)");
             }
+            // R10 E2E fix (P0): 删除后失效 search 缓存，否则已删文档仍被缓存命中
+            state.invalidate_search_cache();
             Ok(Json(serde_json::json!({
                 "status": "ok",
                 "purge": purge_stats.map(|s| serde_json::json!({

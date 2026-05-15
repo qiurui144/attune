@@ -194,6 +194,10 @@ pub async fn upload_file(
     // 释放 vault guard，让后续 spawn task 能独立 lock vault
     drop(vault);
 
+    // R10 E2E fix (P0): 新文档入库 → 失效 search 缓存，否则之前搜过的 query
+    // 命中旧缓存，新文档搜不到
+    state.invalidate_search_cache();
+
     // Sprint 1 Phase B: 异步跑 ProjectRecommender，命中阈值通过 ws 推送
     {
         let title_clone = title.clone();
