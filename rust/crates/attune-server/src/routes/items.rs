@@ -66,6 +66,21 @@ pub async fn update_item(
     Path(id): Path<String>,
     Json(body): Json<UpdateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // R2 F2 fix (P1): 输入长度上限。否则恶意 PATCH 500MB content → crypto::encrypt
+    // 在 async handler 同步执行阻塞 tokio worker + 写 500MB BLOB 到 SQLite。
+    const MAX_ID_LEN: usize = 64;
+    const MAX_TITLE_LEN: usize = 1024;
+    const MAX_CONTENT_LEN: usize = 100 * 1024 * 1024; // 100 MB 与 upload 一致
+    if id.len() > MAX_ID_LEN {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "id too long"}))));
+    }
+    if body.title.as_ref().is_some_and(|t| t.len() > MAX_TITLE_LEN) {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "title too long"}))));
+    }
+    if body.content.as_ref().is_some_and(|c| c.len() > MAX_CONTENT_LEN) {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "content too large"}))));
+    }
+
     let vault = state.vault.lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
     let dek = vault.dek_db().map_err(|e| {
@@ -103,7 +118,10 @@ pub async fn update_item(
         drop(vectors_guard);
 
         // Phase B hook 1: doc_update 信号喂 skill_evolution
-        let _ = vault.store().record_signal_event("doc_update", &id, None);
+        // R3 F4 fix: 失败不阻塞主流程但留 debug 痕（schema drift / WAL 故障可诊断）
+        if let Err(e) = vault.store().record_signal_event("doc_update", &id, None) {
+            tracing::debug!(signal = "doc_update", error = %e, "record_signal_event failed (non-fatal)");
+        }
     }
 
     Ok(Json(serde_json::json!({
@@ -127,6 +145,10 @@ pub async fn delete_item(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // R2 F2 fix: id 长度上限（防 Path<String> GB 级输入浪费 query plan）
+    if id.len() > 64 {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "id too long"}))));
+    }
     let vault = state.vault.lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
     // R9 P1-2 fix: vault Locked/Sealed 时拒绝删除（与 update_item / list_items 等
@@ -151,7 +173,9 @@ pub async fn delete_item(
 
     match vault.store().delete_item(&id) {
         Ok(true) => {
-            let _ = vault.store().record_signal_event("doc_delete", &id, None);
+            if let Err(e) = vault.store().record_signal_event("doc_delete", &id, None) {
+                tracing::debug!(signal = "doc_delete", error = %e, "record_signal_event failed (non-fatal)");
+            }
             Ok(Json(serde_json::json!({
                 "status": "ok",
                 "purge": purge_stats.map(|s| serde_json::json!({

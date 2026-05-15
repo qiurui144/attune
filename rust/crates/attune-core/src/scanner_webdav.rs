@@ -282,8 +282,13 @@ pub fn scan_remote(
                 // 文件已变更 — 仿照 scanner.rs (本地 fs) 路径：删旧 + enqueue purge + 信号
                 if let Some(old_item_id) = &existing.item_id {
                     let _ = store.delete_item(old_item_id);
-                    let _ = store.enqueue_reindex(old_item_id, "purge");
-                    let _ = store.record_signal_event("doc_update", old_item_id, None);
+                    // R3 F4 fix: enqueue_reindex 失败 → orphan 向量残留，必须留痕
+                    if let Err(e) = store.enqueue_reindex(old_item_id, "purge") {
+                        log::warn!("webdav scanner: enqueue_reindex(purge) failed for {old_item_id}: {e} — orphan 向量风险");
+                    }
+                    if let Err(e) = store.record_signal_event("doc_update", old_item_id, None) {
+                        log::debug!("webdav scanner: record_signal_event failed for {old_item_id}: {e} (non-fatal)");
+                    }
                     Some(old_item_id.clone())
                 } else {
                     None

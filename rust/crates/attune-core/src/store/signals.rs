@@ -58,6 +58,13 @@ impl Store {
                 "unknown skill_signals kind: {kind:?} (R6 P1-4 fix: typo guard)"
             )));
         }
+        // R2 F4 fix (P2): defense-in-depth — caller 传超长 ref_id 会膨胀 skill_signals 表。
+        // 当前 caller (annotation id / item id) 均 ≤ 64 但加 boundary 防 future caller。
+        if ref_id.len() > 128 {
+            return Err(crate::error::VaultError::Crypto(
+                "ref_id too long (max 128, R2 F4 fix)".into()
+            ));
+        }
         self.conn.execute(
             "INSERT INTO skill_signals (query, knowledge_count, web_used, kind, ref_id)
              VALUES (?1, 0, 0, ?2, ?3)",

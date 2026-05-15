@@ -133,7 +133,9 @@ pub async fn upload_file(
         })?;
 
     // Phase B hook: doc_create 信号喂 skill_evolution
-    let _ = vault.store().record_signal_event("doc_create", &item_id, Some(&title));
+    if let Err(e) = vault.store().record_signal_event("doc_create", &item_id, Some(&title)) {
+        tracing::debug!(signal = "doc_create", error = %e, "record_signal_event failed (non-fatal)");
+    }
 
     // Add to fulltext index immediately (search works without AI)
     {

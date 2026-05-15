@@ -177,7 +177,10 @@ pub async fn chat(
     let mut search_params = attune_core::search::SearchParams::with_defaults(5);
     if let Some(d) = detected_domain.as_ref() {
         search_params.domain_hint = Some(d.clone());
-        tracing::info!("F-Pro: query='{}' → detected_domain={d}", body.message.chars().take(40).collect::<String>());
+        // R3 F2 fix (P1): 不把用户 chat query 明文写日志。日志文件 data_dir()/logs/
+        // 不加密、保留 7 天 — query 是高隐私数据（用户问的法律/医疗/私事）。
+        // 改 debug 级 + 仅打长度与 domain，不打内容。
+        tracing::debug!(domain = %d, query_len = body.message.len(), "F-Pro domain detected");
     }
     let reranker = state.reranker.lock().map_err(|_| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "reranker lock"})))
@@ -717,7 +720,9 @@ pub async fn chat(
         for (i, k) in knowledge.iter().take(5).enumerate() {
             if let Some(item_id) = k.get("item_id").and_then(|v| v.as_str()) {
                 let q = if i == 0 { Some(truncated.as_str()) } else { None };
-                let _ = vault.store().record_signal_event("citation_hit", item_id, q);
+                if let Err(e) = vault.store().record_signal_event("citation_hit", item_id, q) {
+                    tracing::debug!(signal = "citation_hit", error = %e, "record_signal_event failed (non-fatal)");
+                }
             }
         }
     }

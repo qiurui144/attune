@@ -62,6 +62,20 @@ pub async fn chat_stream(
             body,
         );
     }
+    // R2 F1 fix (P0): 长度上限校验，与 chat.rs::MAX_MESSAGE_LEN 一致。
+    // 否则 `String::with_capacity(len * 2 + 256)` 按用户输入预分配 → 单请求 1GB
+    // message 触发 ~2GB 内存预分配 OOM。
+    const MAX_MESSAGE_LEN: usize = 32_768;
+    if req.message.len() > MAX_MESSAGE_LEN {
+        let body = serde_json::json!({
+            "error": format!("message too long: {} bytes (max {})", req.message.len(), MAX_MESSAGE_LEN)
+        }).to_string();
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        );
+    }
 
     // TODO v0.8 真 LLM stream when trait extended
     //

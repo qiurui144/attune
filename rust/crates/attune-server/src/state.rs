@@ -670,7 +670,17 @@ impl AppState {
                             // R6 P0-3 fix: bump attempts → 达 5 次后 dequeue WHERE 自动 skip。
                             let new_attempts = {
                                 let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                                vault.store().bump_reindex_attempts(task_id).unwrap_or(5)
+                                // R3 F3 fix: bump 失败（schema drift / WAL 故障）不应静默
+                                // 当成"到 5 次"，否则无法区分"真毒任务"与"DB 写挂了"。
+                                match vault.store().bump_reindex_attempts(task_id) {
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "reindex_queue: bump_reindex_attempts DB write failed for task {task_id}: {e} — forcing park"
+                                        );
+                                        5
+                                    }
+                                }
                             };
                             if new_attempts >= 5 {
                                 tracing::error!(

@@ -115,9 +115,14 @@ fn process_single_file(store: &Store, dek: &Key32, dir_id: &str, path: &Path) ->
             store.delete_item(item_id)?;
             // 这里用 'purge'：旧 item 已软删，仅需清向量+FTS。
             // 新 item_id 后面 insert，会有自己的 chunk 走 embed_queue 走正常路径。
-            let _ = store.enqueue_reindex(item_id, "purge");
+            // R3 F4 fix: enqueue_reindex 失败会导致 orphan 向量残留 — 必须留痕。
+            if let Err(e) = store.enqueue_reindex(item_id, "purge") {
+                log::warn!("scanner: enqueue_reindex(purge) failed for {item_id}: {e} — orphan 向量风险");
+            }
             // Phase B hook: doc_update 信号
-            let _ = store.record_signal_event("doc_update", item_id, None);
+            if let Err(e) = store.record_signal_event("doc_update", item_id, None) {
+                log::debug!("scanner: record_signal_event(doc_update) failed for {item_id}: {e} (non-fatal)");
+            }
         }
         true
     } else {

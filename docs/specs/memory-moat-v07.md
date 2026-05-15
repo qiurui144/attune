@@ -104,6 +104,24 @@ CREATE INDEX idx_versions_item ON item_versions(item_id, snapshot_at DESC);
 
 **Effort**: 2 天（表 + 索引修改 + UI 提示位）
 
+### C6 — skill_signals.query 字段加密 (R2 F3 隐私 P1)
+
+R2 滚动 review 实测发现：vault 加密策略对 items.content / tags / annotations.content 走 AES-256-GCM，但 **`skill_signals.query` 明文 TEXT 落盘**。chat citation_hit / search_miss 写入路径均把用户原文（截断 512 字）明文存。
+
+**威胁模型**：律师/医生敏感行业 user 在 chat 问"某甲乙丙离婚案策略" → query 落明文 → 攻击者拿到 SQLite 文件（NAS 模式 / 备份 / 磁盘镜像）一律可读 — 违反 Vault 加密承诺。
+
+**实现**：
+```sql
+ALTER TABLE skill_signals ADD COLUMN query_enc BLOB;
+-- query TEXT 列 deprecate 保留向后兼容，新写入只填 query_enc
+```
+- `Store::record_signal_event` 签名加 `dek: &Key32`
+- `Store::record_skill_signal` 同步加 dek
+- get_unprocessed_signals 读取时 dek decrypt
+- migration：老 vault 升级时 query TEXT 不迁移（保留），新信号入 query_enc
+
+**Effort**: 1 天（schema + record_*_event 5 处 caller 改 + migration + evolver 解密）。
+
 ### C5 — embed_model_version 迁移工具链 (基建)
 
 `vectors.VectorMeta` + `embed_queue` 加 `embed_model_version` 字段；升级 bge-m3 → bge-m3-zh-large 时跑 `attune-cli reindex --model=new` 全量迁移。
