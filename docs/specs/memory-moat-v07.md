@@ -1,6 +1,6 @@
 # Memory Moat v0.7 — 安全有效的记忆护城河
 
-**Status**: Spec · Phase A+B 已落地 · Phase C 待开 (v0.7 后续 sprint)
+**Status**: Spec · Phase A+B 已落地 + 30 轮 review sprint 完成 · Phase C 待开 (v0.7 后续 sprint)
 **Owner**: attune-core 维护者
 **Last updated**: 2026-05-15
 **Trigger**: 2026-05-15 用户对话「优势不在于模型，而在于以安全有效的记忆 / 有效的记忆能在相同模型下实现更好的效果」
@@ -132,6 +132,33 @@ CREATE INDEX idx_versions_item ON item_versions(item_id, snapshot_at DESC);
 技术上独立，可参考设计模式但代码不互联（per CLAUDE.md「三产品矩阵 + 边界」§硬约束）。
 
 ---
+
+## 6.5. 30 轮 review sprint 修复（2026-05-15）
+
+5 个并行 code-review agent + 自审 30 轮，识别并修复：
+
+| Sev | 编号 | 问题 | Fix commit |
+|-----|------|------|-----------|
+| **Critical** | R21 S3-1 | scanner_webdav update 完全缺 cleanup → orphan 永久残留 | f6798b9 |
+| **P0** | R6 #1 | update_item title-only 不刷 updated_at | 26b1636 |
+| **P0** | R6 #3 | reindex_queue 无 attempts 计数 → 毒任务卡队头 | 26b1636 |
+| **P0** | R6 #6 | 'reindex' action schema 文档化但 worker 未实现 | 26b1636 |
+| **P0** | R17 S4-Q1 | evolver 拉混合 kind batch 污染 LLM prompt | f6798b9 |
+| **P1** | R6 #4/#5 | record_signal_event / enqueue_reindex 无 kind/action validation | 26b1636 |
+| **P1** | R6 #7 | mark_signals_processed 非事务 | 26b1636 |
+| **P1** | R9 #2 | delete_item 缺 dek_db 校验（vault locked 时可绕过） | 26b1636 |
+| **P1** | R9 #3 | chat citation_hit 5 次 INSERT 串行 + query 字段冗余 | 26b1636 |
+| **P1** | R16 | migrate_items_content_hash INDEX CREATE 嵌在 if 块内 | 26b1636 |
+| **P1** | R17 S1-Q4 | update_item 三条 SQL 无事务 → 并发 PATCH race | f6798b9 |
+| **P1** | R17 S2-Q1+S3-Q2 | reindex_worker 错误分类 Transient vs Task | f6798b9 |
+| **P1** | R21 S2-1 | annotation update/delete 完全无信号 | f6798b9 |
+
+留作 v0.7 后续 sprint（P2）：
+- delete 后历史 chat citation 404 → UI 占位符
+- citation_hit 同 item_id 1h 内 dedup
+- reindex worker 单 task 超时保护
+- attempts 达上限任务的运维 reset endpoint
+- citation_hit session_id 关联（v0.8 dedicated consumer）
 
 ## 7. 验证
 
