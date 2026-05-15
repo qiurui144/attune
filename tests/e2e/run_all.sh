@@ -88,6 +88,7 @@ SCRIPTS=(
   memory_moat_fault_e2e.py
   memory_moat_annotation_e2e.py
   memory_moat_v07routes_e2e.py
+  memory_moat_search_quality_e2e.py
   memory_moat_stress_loop_e2e.py
 )
 [ "$HAS_LLM" = "1" ] && SCRIPTS+=(memory_moat_chat_e2e.py)
