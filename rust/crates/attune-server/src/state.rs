@@ -613,35 +613,43 @@ impl AppState {
                 }
 
                 // 顺序处理（持锁短，按 task 释放，避免长占 vectors lock 影响 search）
-                for (task_id, item_id, action, prior_attempts) in tasks {
-                    let result: Result<(), String> = (|| {
-                        // vault → vectors → fulltext lock 顺序（per CLAUDE.md 约定）
+                for (task_id, item_id, action, _prior_attempts) in tasks {
+                    // R17 P1 fix (S2-Q1 + S3-Q2): 区分 Transient vs Task error。
+                    // Transient（引擎未就绪 / dek 解密失败 / vault 锁定）= 时序 race，
+                    //   不计 attempts 只 sleep；下次 unlock+ready 后正常处理。
+                    // Task（item not found / unknown action）= 任务本身有问题，
+                    //   bump attempts 让毒任务在 5 次后被 park。
+                    //
+                    // 之前所有错误统一 bump → 引擎未 ready 的 5 分钟 race 期内，正常任务会被
+                    // 错误地 park（attempts ≥ 5），需运维手动 reset 才能恢复。
+                    enum WorkerErr { Transient(String), Task(String) }
+                    let result: Result<(), WorkerErr> = (|| {
                         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                        let dek = vault.dek_db().map_err(|e| e.to_string())?;
+                        let dek = vault.dek_db().map_err(|e| WorkerErr::Transient(format!("dek_db: {e}")))?;
                         let mut vectors_g = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
                         let fulltext_g = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
                         let (Some(vectors), Some(fulltext)) = (vectors_g.as_mut(), fulltext_g.as_ref()) else {
-                            return Err("vectors/fulltext not initialized".to_string());
+                            return Err(WorkerErr::Transient("vectors/fulltext not initialized".into()));
                         };
                         match action.as_str() {
                             "purge" => {
                                 attune_core::reindex::purge_item_indexes(vault.store(), vectors, fulltext, &item_id)
                                     .map(|_| ())
-                                    .map_err(|e| e.to_string())
+                                    .map_err(|e| WorkerErr::Task(e.to_string()))
                             }
                             // R6 P1-6 fix: 'reindex' action 实现（schema 文档化但 worker 之前未实现）
                             "reindex" => {
                                 let item = vault.store().get_item(&dek, &item_id)
-                                    .map_err(|e| e.to_string())?
-                                    .ok_or_else(|| format!("item {item_id} not found for reindex"))?;
+                                    .map_err(|e| WorkerErr::Task(e.to_string()))?
+                                    .ok_or_else(|| WorkerErr::Task(format!("item {item_id} not found for reindex")))?;
                                 attune_core::reindex::reindex_item(
                                     vault.store(), vectors, fulltext, &item_id,
                                     &item.title, &item.content, &item.source_type,
                                 )
                                 .map(|_| ())
-                                .map_err(|e| e.to_string())
+                                .map_err(|e| WorkerErr::Task(e.to_string()))
                             }
-                            other => Err(format!("unknown reindex action: {other}")),
+                            other => Err(WorkerErr::Task(format!("unknown reindex action: {other}"))),
                         }
                     })();
 
@@ -651,9 +659,15 @@ impl AppState {
                             let _ = vault.store().mark_reindex_done(task_id);
                             tracing::info!("reindex_queue: {action} done for item={item_id}");
                         }
-                        Err(e) => {
+                        Err(WorkerErr::Transient(e)) => {
+                            // 不 bump attempts；等下轮引擎/dek/vault 就绪
+                            tracing::debug!(
+                                "reindex_queue: task {task_id} ({action} {item_id}) transient: {e}, will retry"
+                            );
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                        Err(WorkerErr::Task(e)) => {
                             // R6 P0-3 fix: bump attempts → 达 5 次后 dequeue WHERE 自动 skip。
-                            // 之前不计数 → 毒任务 + 无限重试卡 LIMIT 10 队头让新任务永远进不来。
                             let new_attempts = {
                                 let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                                 vault.store().bump_reindex_attempts(task_id).unwrap_or(5)
@@ -667,7 +681,6 @@ impl AppState {
                                     "reindex_queue: task {task_id} ({action} {item_id}) failed (attempt {new_attempts}): {e}"
                                 );
                             }
-                            let _ = prior_attempts; // 仅用于日志格式化时可用 — 当前用 new_attempts 更准确
                             std::thread::sleep(std::time::Duration::from_secs(2));
                         }
                     }

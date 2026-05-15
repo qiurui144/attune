@@ -271,13 +271,26 @@ pub fn scan_remote(
             continue;
         }
 
-        // Dedup by href (treat as unique path)
-        if let Ok(Some(existing)) = store.get_indexed_file(&file.href) {
-            if existing.file_hash == file.last_modified {
-                result.skipped_files += 1;
-                continue;
+        // Dedup by href (treat as unique path) + R21 S3-1 Critical fix: update 路径
+        // 之前缺：旧 item 不删 / 旧向量不清 / 不写 doc_update 信号 → orphan 永久残留
+        let was_existing_update: Option<String> = match store.get_indexed_file(&file.href) {
+            Ok(Some(existing)) => {
+                if existing.file_hash == file.last_modified {
+                    result.skipped_files += 1;
+                    continue;
+                }
+                // 文件已变更 — 仿照 scanner.rs (本地 fs) 路径：删旧 + enqueue purge + 信号
+                if let Some(old_item_id) = &existing.item_id {
+                    let _ = store.delete_item(old_item_id);
+                    let _ = store.enqueue_reindex(old_item_id, "purge");
+                    let _ = store.record_signal_event("doc_update", old_item_id, None);
+                    Some(old_item_id.clone())
+                } else {
+                    None
+                }
             }
-        }
+            _ => None,
+        };
 
         match fetch_file(config, &file.href) {
             Ok(bytes) => match parser::parse_bytes(&bytes, &filename) {
@@ -310,7 +323,12 @@ pub fn scan_remote(
                                 &file.last_modified,
                                 &item_id,
                             );
-                            result.new_files += 1;
+                            // R21 S3-1 fix: 区分 update vs new (与 scanner.rs::FileAction 对齐)
+                            if was_existing_update.is_some() {
+                                result.updated_files += 1;
+                            } else {
+                                result.new_files += 1;
+                            }
                         }
                         Err(e) => result.errors.push(format!("{filename}: {e}")),
                     }

@@ -76,21 +76,31 @@ impl Store {
         Ok(count as usize)
     }
 
-    /// 获取未处理的失败信号数量
+    /// 获取未处理的失败信号数量。
+    ///
+    /// R17 P0 fix (S4-Q1): 同 `get_unprocessed_signals` — 仅计 search_miss kind，
+    /// 让 evolver 触发阈值不被 Phase B 信号污染。
     pub fn count_unprocessed_signals(&self) -> Result<usize> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM skill_signals WHERE processed = 0",
+            "SELECT COUNT(*) FROM skill_signals WHERE processed = 0 AND kind = 'search_miss'",
             [],
             |row| row.get(0),
         )?;
         Ok(count as usize)
     }
 
-    /// 取出最近 N 条未处理信号
+    /// 取出最近 N 条未处理 search_miss 信号（evolver 主消费路径）。
+    ///
+    /// R17 P0 fix (S4-Q1): 之前不按 kind 过滤 → Phase B 加 doc_*/citation_hit/
+    /// annotation_marker 后，evolver 会拉到这些 kind 但其 query 字段为空，
+    /// LLM prompt "近期失败查询" 列表充斥空字符串 → 扩展词学习被污染 + 浪费 token。
+    /// 现在强制 `kind='search_miss'` 让 evolver 只看真正的搜索失败信号；
+    /// 其他 kind 信号留给未来 dedicated consumer（如 citation-based skill 强化）。
     pub fn get_unprocessed_signals(&self, limit: usize) -> Result<Vec<SkillSignal>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, query, knowledge_count, web_used, created_at
-             FROM skill_signals WHERE processed = 0
+             FROM skill_signals
+             WHERE processed = 0 AND kind = 'search_miss'
              ORDER BY created_at ASC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
