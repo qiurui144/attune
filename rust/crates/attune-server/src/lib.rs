@@ -99,7 +99,14 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
                 .delete(routes::annotations::delete_annotation))
         .route("/api/v1/items", get(routes::items::list_items))
         .route("/api/v1/items/stale", get(routes::items::list_stale_items))
-        .route("/api/v1/items/{id}", get(routes::items::get_item).delete(routes::items::delete_item).patch(routes::items::update_item))
+        // Round D E2E fix: PATCH content 需与 /upload 同享 100MB body limit。
+        // 否则 axum 默认 2MB 先拦截，update_item 的 MAX_CONTENT_LEN=100MB 检查成死代码，
+        // 且用户能 upload 100MB 文档却无法 PATCH 编辑（2MB 上限）。GET/DELETE 无 body 不受影响。
+        .route("/api/v1/items/{id}",
+            get(routes::items::get_item)
+                .delete(routes::items::delete_item)
+                .patch(routes::items::update_item)
+                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)))
         .route("/api/v1/items/{id}/stats", get(routes::items::get_item_stats))
         // v0.6 Phase A.5.4 per-file 隐私分级
         .route("/api/v1/items/protected", get(routes::items::list_protected_items))
