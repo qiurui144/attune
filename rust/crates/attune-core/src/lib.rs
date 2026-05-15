@@ -88,10 +88,23 @@ pub mod taxonomy;
 pub mod vault;
 pub mod vectors;
 pub mod skill_evolution;
+
+// v0.7 sprint feature modules
+pub mod cost;
+pub mod tools;
+pub mod demo;
+pub mod query_rewrite;
+pub mod entity_graph;
+pub mod skill_eval;
+pub mod report;
+pub mod reader;
 pub mod web_search;
 pub mod web_search_browser;
 pub(crate) mod web_search_engines;
 pub mod workflow;
+pub mod capture;
+pub mod sync;
+pub mod vlm;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
