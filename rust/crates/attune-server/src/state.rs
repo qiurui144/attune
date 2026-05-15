@@ -1242,8 +1242,10 @@ impl AppState {
     ///
     /// search_cache 按 query hash 缓存结果。之前只有 vault lock (reset) 和 ingest
     /// 清缓存 — update_item / delete_item / upload / reindex worker 全都不清，导致：
+    ///
     /// - 编辑文档后搜旧关键词仍命中（返回编辑前的缓存结果）
     /// - 删除文档后仍搜得到（缓存假命中）
+    ///
     /// 真实 E2E 测试 STEP 4 / STEP 8 实测捕获。任何改动 items / 索引的 path 都必须调。
     pub fn invalidate_search_cache(&self) {
         self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
