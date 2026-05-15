@@ -246,7 +246,12 @@ reindex / delete 并发时写 stale / orphan 向量。
 | D | 故障注入 | 13 故障场景 + crash recovery（kill -9 mid-embedding）4/4；抓到 **PATCH body limit 死代码 P1** |
 | E | annotation CRUD | 批注 CRUD + source 状态契约 + annotation_marker 信号三路径 15/15 |
 | F | 持续压力 | 120 轮 600 HTTP 调用，RSS 后半程涨 0.2MB / FD 恒定 — 无泄漏 |
-| G | E2E 套件 runner | `tests/e2e/run_all.sh` 一键跑全套，7 脚本 **71 断言全绿** |
+| G | E2E 套件 runner | `tests/e2e/run_all.sh` 一键跑全套 |
+| J | v0.7 新路由 E2E | demo/load / audit/log / audit/log.csv / chat/stream 11/11 |
+| K | search 召回质量 | RRF 混合检索 6 主题 query top-1 全命中 + 跨主题区分度 8/8 |
+| M | 剩余 UI 标签页 | Knowledge/Skills/Projects/Marketplace/Remote 真 Chrome 验证（8 标签全覆盖）|
+
+最终 E2E 套件：**9 脚本 / 90 断言全绿**（`tests/e2e/run_all.sh` 一键跑）。
 
 **真实场景测试净抓 4 个 bug**（search_cache P0 / S3 竞态 P1 / ws 403 P1 / body limit 死代码 P1），全部静态 review 阶段遗漏 —— 印证 cache 失效、异步竞态、UI 交互、中间件白名单不一致这类问题必须真跑才能暴露。
 
