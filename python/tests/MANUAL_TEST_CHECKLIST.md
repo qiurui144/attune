@@ -143,6 +143,10 @@
 
 每次 v0.7 dot release 必须全过。
 
+> **自动化优先**：本节大部分场景已被 `tests/e2e/` 真实 server E2E 套件覆盖
+> （7 脚本 71 断言）。发版前先跑 `bash tests/e2e/run_all.sh` 确认全绿，
+> 再人工验下面 UI 交互类条目（截图见 `docs/screenshots/v07-memory-moat/`）。
+
 ### Phase A — 文档编辑嵌入功能完全有效
 
 - [ ] **编辑后立刻生效**：上传 docA（内容含 keyword "vintage"）→ 搜 vintage 返回 docA → PATCH /api/v1/items/{id} 改 content 把 vintage 改成 "modern" → 立刻搜 vintage 应返回 0 / 搜 modern 应返回 docA

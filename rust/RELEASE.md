@@ -48,16 +48,37 @@ API：`Store::record_signal_event(kind, ref_id, query_opt)` + `count_unprocessed
 - **attune-server** 路由：/audit/log + /audit/log.csv + /demo/load + /chat/stream
 - 修 `parse_this_month_english` 测试硬编码常量错算 4 天 bug
 
+### 30 轮 sprint + R1-R9 滚动 review（静态审查 + 单元测试）
+
+W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
+`docs/specs/memory-moat-v07.md` §6.5 / §6.6。
+
+### Round A-H 真实场景 E2E（编译真实 server，全程 HTTP）
+
+转向真实运行场景测试 — `tests/e2e/` 7 脚本 71 断言（见 `tests/e2e/README.md`）：
+
+- Round A chat RAG / B Playwright UI / C 回归 / D 故障注入 + crash recovery /
+  E annotation CRUD / F 持续压力泄漏监控 / G 套件 runner
+- 真实测试净抓 4 个静态 review 遗漏的 bug：
+  search_cache 失效 P0 / S3 embed worker 竞态 P1 / ws/scan-progress 403 P1 /
+  PATCH body limit 死代码 P1
+- `bash tests/e2e/run_all.sh` 一键跑全套，实测 **71 断言全绿**
+
 ### 验证
 
-- workspace lib tests: **910 passed / 0 failed / 1 ignored**（10 cli + 884 core + 16 server）
-- doc tests: 1 passed / 0 failed / 4 ignored
-- `python/tests/MANUAL_TEST_CHECKLIST.md` 新增 8 条 Memory Moat 验收（Phase A 5 条 + Phase B 3 条）
+- workspace lib tests: **919 passed / 0 failed / 1 ignored**（10 cli + 893 core + 16 server）
+- integration tests: memory_moat_integration **14 passed**
+- E2E 套件: 7 脚本 **71 断言全绿**（含真实 Ollama RAG / Playwright UI / crash recovery）
+- perf 实测（release）: 100KB reindex 834ms / 500KB 1.95s / 100KB upload ~1.1s
+- `python/tests/MANUAL_TEST_CHECKLIST.md` 含 8 条 Memory Moat 验收
 
-### Commits (cumulative)
+### Commits (cumulative, 21 commits)
 
 - `71d82ee` feat(v07): 15 P0 缺口模块批量落地
 - `50d994b` feat(memory-moat): v0.7 Phase A+B
+- `6c6ce71`..`f022f56` W1-W4 30 轮 sprint（文档 / 代码 review / logic audit / 测试）
+- `9358c02`..`bb2e2ee` R1-R9 滚动 review（perf / 安全 / 错误泄露 / 资源 / 兼容 / 死链）
+- `82cd79d`..`cdd734e` R10 + Round A-G 真实场景 E2E（抓 4 bug + 7 脚本套件）
 
 ---
 

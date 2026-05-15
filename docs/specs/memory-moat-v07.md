@@ -233,6 +233,25 @@ reindex / delete 并发时写 stale / orphan 向量。
 
 **滚动 review 累计修**：2 P0 + 3 P1（+ R1-R30 sprint 的 1 Critical + 5 P0 + 9 P1）。
 
+## 6.7. Round A-H 真实场景 E2E 验证（2026-05-15）
+
+30 轮 sprint + R1-R9 滚动 review（均为静态分析 / 单元测试）后，转向**真实运行场景测试** — 编译 attune-server-headless，隔离 XDG dir 起真实进程，全程走 HTTP。
+
+| Round | 维度 | 关键结果 |
+|-------|------|----------|
+| R10 | 真实 E2E 起步 | 抓到 **search_cache 失效 P0**（编辑/删除后搜旧结果）+ **S3 embed worker 竞态 P1**（异步写 stale 向量）— 静态 review 全漏，一跑就现 |
+| A | chat RAG 端到端 | 真实 qwen2.5:3b + bge-m3，RAG 检索→LLM→citation→信号 全链路 9/9 |
+| B | Playwright Web UI | 真 Chrome 走完整 wizard + 主界面 + Items + Reader；抓到 **ws/scan-progress vault_guard 403 P1** |
+| C | 回归测试 | workspace 919 + integration 14 无回归；修 E2E flaky 断言（RRF 向量语义分量） |
+| D | 故障注入 | 13 故障场景 + crash recovery（kill -9 mid-embedding）4/4；抓到 **PATCH body limit 死代码 P1** |
+| E | annotation CRUD | 批注 CRUD + source 状态契约 + annotation_marker 信号三路径 15/15 |
+| F | 持续压力 | 120 轮 600 HTTP 调用，RSS 后半程涨 0.2MB / FD 恒定 — 无泄漏 |
+| G | E2E 套件 runner | `tests/e2e/run_all.sh` 一键跑全套，7 脚本 **71 断言全绿** |
+
+**真实场景测试净抓 4 个 bug**（search_cache P0 / S3 竞态 P1 / ws 403 P1 / body limit 死代码 P1），全部静态 review 阶段遗漏 —— 印证 cache 失效、异步竞态、UI 交互、中间件白名单不一致这类问题必须真跑才能暴露。
+
+E2E 套件固化在 `tests/e2e/`（见该目录 README.md），纳入回归。
+
 ## 7. 验证
 
 每次 v0.7 dot release 必须新增到 `tests/MANUAL_TEST_CHECKLIST.md`：
