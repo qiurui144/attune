@@ -1,7 +1,7 @@
 // npu-vault/crates/vault-core/src/store.rs
 
 mod types;
-mod items;
+pub mod items;
 mod dirs;
 mod queue;
 mod history;
@@ -56,7 +56,13 @@ CREATE TABLE IF NOT EXISTS items (
     -- 旧 `domain` 字段历史用作"网站域名"（来自 chrome 扩展），与本字段语义冲突
     -- → 新建 corpus_domain 字段表示"领域分类"（legal/tech/general/medical/...）
     -- search 阶段按 query intent 跨领域降权，防止"反洗钱"被 cs-notes 顶占
-    corpus_domain TEXT NOT NULL DEFAULT 'general'
+    corpus_domain TEXT NOT NULL DEFAULT 'general',
+    -- v0.7 记忆护城河（per 用户决策 2026-05-15）：
+    -- content 明文的 SHA-256 hex（content 是密文 BLOB，不便直接 hash 比对），
+    -- 用于 update / re-upload 时短路判断"内容是否变化" → 内容不变跳过 re-embed
+    -- + 用于 chunk-level diff 基础（v0.7 next sprint）。
+    -- 空字符串语义：旧 vault 尚未 backfill（lazy 在 update 时 backfill）。
+    content_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
 CREATE INDEX IF NOT EXISTS idx_items_deleted ON items(is_deleted);
@@ -149,15 +155,40 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 CREATE INDEX IF NOT EXISTS idx_conv_messages_conv_id
     ON conversation_messages(conversation_id);
 
+-- v0.7 记忆护城河 (per 用户决策 2026-05-15)：
+-- attune-core 层的 scanner / scanner_webdav 后台 worker 在文件变更时调
+-- `store.delete_item`，但拿不到 server 层的 VectorIndex / FulltextIndex 锁，
+-- 旧向量与 FTS doc 会残留为孤儿（"删了但搜得到"）。
+-- 解法：scanner 写一条 reindex_queue 行，server 后台 task 周期消费并持锁清理。
+-- action: 'purge'（清向量+FTS，DB 已删）/ 'reindex'（重切+清+重入队，DB 已 update）
+CREATE TABLE IF NOT EXISTS reindex_queue (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id     TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    attempts    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_reindex_queue_created ON reindex_queue(created_at);
+CREATE INDEX IF NOT EXISTS idx_reindex_queue_item ON reindex_queue(item_id);
+
 CREATE TABLE IF NOT EXISTS skill_signals (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     query           TEXT NOT NULL,
     knowledge_count INTEGER NOT NULL DEFAULT 0,
     web_used        INTEGER NOT NULL DEFAULT 0,
     processed       INTEGER NOT NULL DEFAULT 0,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    -- v0.7 自学习闭环 Phase B (per 用户决策 2026-05-15)：
+    -- 信号种类。原表只有"搜索失败"（kind='search_miss'）单一信号源，
+    -- 扩展支持 doc_update / doc_delete / doc_create / citation_hit / annotation_marker
+    -- 让 skill_evolution 从"失败驱动"升级为"全谱信号驱动"。
+    -- ref_id：可选关联对象 ID（如 item_id / annotation_id / citation chunk hash）。
+    -- 老 vault lazy backfill：kind 空字符串视为 search_miss。
+    kind            TEXT NOT NULL DEFAULT 'search_miss',
+    ref_id          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_skill_sig_processed ON skill_signals(processed, created_at);
+CREATE INDEX IF NOT EXISTS idx_skill_sig_kind ON skill_signals(kind, processed, created_at);
 
 -- Chunk 摘要缓存 —— 上下文压缩流水线（Batch B.1）
 --
@@ -383,6 +414,8 @@ impl Store {
         );
         Self::migrate_items_privacy_tier(&conn)?;
         Self::migrate_corpus_domain(&conn)?;
+        Self::migrate_items_content_hash(&conn)?;
+        Self::migrate_skill_signals_v07(&conn)?;
         Ok(Self { conn })
     }
 
@@ -395,6 +428,8 @@ impl Store {
         Self::migrate_breadcrumbs_encrypt(&conn)?;
         Self::migrate_items_privacy_tier(&conn)?;
         Self::migrate_corpus_domain(&conn)?;
+        Self::migrate_items_content_hash(&conn)?;
+        Self::migrate_skill_signals_v07(&conn)?;
         Ok(Self { conn })
     }
 
@@ -420,6 +455,67 @@ impl Store {
         if has_dirs_col == 0 {
             conn.execute(
                 "ALTER TABLE bound_dirs ADD COLUMN corpus_domain TEXT NOT NULL DEFAULT 'general'",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// v0.7 自学习闭环：skill_signals 新增 kind + ref_id 列（幂等）
+    ///
+    /// 老 vault 升级：所有现存信号默认 kind='search_miss'（与原语义一致），
+    /// ref_id 为 NULL。新信号写入时显式指定 kind。
+    fn migrate_skill_signals_v07(conn: &Connection) -> Result<()> {
+        let has_kind: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('skill_signals') WHERE name = 'kind'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_kind == 0 {
+            conn.execute(
+                "ALTER TABLE skill_signals ADD COLUMN kind TEXT NOT NULL DEFAULT 'search_miss'",
+                [],
+            )?;
+        }
+        let has_ref: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('skill_signals') WHERE name = 'ref_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_ref == 0 {
+            conn.execute(
+                "ALTER TABLE skill_signals ADD COLUMN ref_id TEXT",
+                [],
+            )?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_skill_sig_kind ON skill_signals(kind, processed, created_at)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// v0.7 记忆护城河：items 新增 content_hash 列（SHA-256 hex of plaintext，幂等）
+    ///
+    /// 用途：
+    /// 1. update_item / upload 入口短路 — 新 content hash == 旧值时跳过 re-embed
+    /// 2. delete_item → reindex::purge_item_indexes 时无需重新解密验证
+    /// 3. chunk-level diff 的基础（v0.7 next sprint）
+    ///
+    /// 老 vault 升级：列加上后默认 ''，下次 update_item 或 reindex 时 lazy backfill。
+    fn migrate_items_content_hash(conn: &Connection) -> Result<()> {
+        let has_col: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('items') WHERE name = 'content_hash'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_col == 0 {
+            conn.execute(
+                "ALTER TABLE items ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_items_content_hash ON items(content_hash)",
                 [],
             )?;
         }

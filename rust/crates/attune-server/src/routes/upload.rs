@@ -108,6 +108,20 @@ pub async fn upload_file(
         )
     })?;
 
+    // v0.7 记忆护城河 Phase A2：content_hash dedup 短路。
+    // 用户重传完全相同内容（常见场景：拖错文件 / 想"刷新"但其实没改）→ 返回旧
+    // item_id，跳过 100KB 文档约 3s 的 embedding 流水线。
+    let content_hash = attune_core::store::items::compute_content_hash(&content);
+    if let Ok(Some(existing_id)) = vault.store().find_item_by_content_hash(&content_hash) {
+        tracing::info!("upload content_hash dedup hit: filename={filename} existing_item={existing_id}");
+        return Ok(Json(serde_json::json!({
+            "item_id": existing_id,
+            "status": "duplicate",
+            "title": title,
+            "dedup_reason": "content_hash",
+        })));
+    }
+
     let item_id = vault
         .store()
         .insert_item(&dek, &title, &content, None, "file", None, None)
@@ -117,6 +131,9 @@ pub async fn upload_file(
                 Json(serde_json::json!({"error": e.to_string()})),
             )
         })?;
+
+    // Phase B hook: doc_create 信号喂 skill_evolution
+    let _ = vault.store().record_signal_event("doc_create", &item_id, Some(&title));
 
     // Add to fulltext index immediately (search works without AI)
     {

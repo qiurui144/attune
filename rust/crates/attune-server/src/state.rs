@@ -62,6 +62,9 @@ pub struct AppState {
     pub evolve_worker_running: AtomicBool,
     /// 防止重复启动 MemoryConsolidator 后台线程（A1，2026-04-27）
     pub memory_consolidator_running: AtomicBool,
+    /// v0.7 记忆护城河：防止重复启动 ReindexWorker 后台线程（消费 reindex_queue
+    /// 让 scanner / scanner_webdav 等无法持锁的 worker 间接清向量+FTS）。
+    pub reindex_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
     /// Sprint 1 Phase B: project recommendation broadcast channel.
     /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
@@ -130,6 +133,7 @@ impl AppState {
             rescan_worker_running: AtomicBool::new(false),
             evolve_worker_running: AtomicBool::new(false),
             memory_consolidator_running: AtomicBool::new(false),
+            reindex_worker_running: AtomicBool::new(false),
             engines_initialized: AtomicBool::new(false),
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
@@ -567,6 +571,82 @@ impl AppState {
             }
             state.classify_worker_running.store(false, Ordering::SeqCst);
             tracing::info!("Classify worker stopped (vault locked)");
+        });
+    }
+
+    /// v0.7 记忆护城河：启动后台 reindex worker。
+    ///
+    /// 消费 [`reindex_queue`] 表 — scanner / scanner_webdav 在 attune-core 层
+    /// 调 `store.delete_item` 后，无法直接持有 VectorIndex + FulltextIndex 锁
+    /// 清向量与 FTS，于是写信号到此表，由本 worker 周期消费 → 调用
+    /// `attune_core::reindex::purge_item_indexes`。
+    ///
+    /// 轮询周期：3 秒（不繁忙时几乎没开销，繁忙时及时清理 orphan）。
+    /// vault lock / 引擎未初始化时静默退出并重置 atomic flag。
+    pub fn start_reindex_worker(state: std::sync::Arc<AppState>) {
+        if state.reindex_worker_running.compare_exchange(
+            false, true, Ordering::SeqCst, Ordering::SeqCst,
+        ).is_err() {
+            tracing::debug!("Reindex worker already running, skipping");
+            return;
+        }
+
+        std::thread::spawn(move || {
+            tracing::info!("Reindex worker started");
+            loop {
+                // vault lock check
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        break;
+                    }
+                }
+
+                let tasks: Vec<(i64, String, String)> = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    vault.store().dequeue_reindex_tasks(10).unwrap_or_default()
+                };
+
+                if tasks.is_empty() {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    continue;
+                }
+
+                // 顺序处理（持锁短，按 task 释放，避免长占 vectors lock 影响 search）
+                for (task_id, item_id, action) in tasks {
+                    let result: Result<(), String> = (|| {
+                        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut vectors_g = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+                        let fulltext_g = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+                        let (Some(vectors), Some(fulltext)) = (vectors_g.as_mut(), fulltext_g.as_ref()) else {
+                            return Err("vectors/fulltext not initialized".to_string());
+                        };
+                        match action.as_str() {
+                            "purge" => {
+                                attune_core::reindex::purge_item_indexes(vault.store(), vectors, fulltext, &item_id)
+                                    .map(|_| ())
+                                    .map_err(|e| e.to_string())
+                            }
+                            other => Err(format!("unknown reindex action: {other}")),
+                        }
+                    })();
+
+                    match result {
+                        Ok(_) => {
+                            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ = vault.store().mark_reindex_done(task_id);
+                            tracing::info!("reindex_queue: {action} done for item={item_id}");
+                        }
+                        Err(e) => {
+                            tracing::warn!("reindex_queue: task {task_id} ({action} {item_id}) failed: {e}; will retry next round");
+                            // 不 mark_done，下轮重试。引擎尚未初始化时这是预期路径。
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                    }
+                }
+            }
+            state.reindex_worker_running.store(false, Ordering::SeqCst);
+            tracing::info!("Reindex worker stopped (vault locked)");
         });
     }
 

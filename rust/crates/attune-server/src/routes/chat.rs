@@ -699,6 +699,20 @@ pub async fn chat(
         })
         .collect();
 
+    // v0.7 自学习闭环 Phase B hook 2：citation_hit 信号喂 skill_evolution。
+    // chat 引用的 chunk 说明 search 召回 + chunk 内容**对答案质量真有贡献**，是高
+    // 信号量。skill_evolution 用这些 ref_id 反推"哪类 query 召回了什么 chunk"，
+    // 在扩展词学习时优先保留与命中 chunk 同语义的同义词，避免学过头偏离用户真实需求。
+    // 失败静默忽略（self-learning 永不阻塞主流程）。
+    {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        for k in knowledge.iter().take(5) {
+            if let Some(item_id) = k.get("item_id").and_then(|v| v.as_str()) {
+                let _ = vault.store().record_signal_event("citation_hit", item_id, Some(&body.message));
+            }
+        }
+    }
+
     // v0.6 Phase B fix: 解析 confidence + 剥离 marker（J5 strict prompt 要求 LLM 末尾输出）
     let confidence = attune_core::parse_confidence(&response);
     let response = attune_core::strip_confidence_marker(&response).to_string();

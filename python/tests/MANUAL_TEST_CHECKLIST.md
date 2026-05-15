@@ -139,8 +139,33 @@
 - [ ] **Pause 顶栏**：consolidation 周期跑到一半时点顶栏 Pause → 当前 bundle 完成后停止，剩余 bundle 留下次（无超额 LLM 调用）
 - [ ] **Conservative 档**：切到 Conservative → MemoryConsolidation governor LLM 配额降为 5/h → 多 bundle 周期会触发 deferred 日志
 
+## Memory Moat v0.7 — 文档编辑嵌入 + 自学习闭环（per `docs/specs/memory-moat-v07.md`）
+
+每次 v0.7 dot release 必须全过。
+
+### Phase A — 文档编辑嵌入功能完全有效
+
+- [ ] **编辑后立刻生效**：上传 docA（内容含 keyword "vintage"）→ 搜 vintage 返回 docA → PATCH /api/v1/items/{id} 改 content 把 vintage 改成 "modern" → 立刻搜 vintage 应返回 0 / 搜 modern 应返回 docA
+- [ ] **content_hash 短路省 embedding**：观察上一步响应 `content_changed: true, reindex.chunks_enqueued > 0` 字段；再次 PATCH 同 content → 响应 `content_changed: false`（hash 一致跳过 reindex）
+- [ ] **upload 重传 dedup**：上传完全相同 PDF 两次 → 第二次响应 `status: "duplicate", dedup_reason: "content_hash"`，item_id 与第一次相同
+- [ ] **删除清向量+FTS**：DELETE /api/v1/items/{id} → 搜该 doc keyword 返回 0；响应含 `purge.vectors_deleted > 0`
+- [ ] **scanner 文件变更 defer 清理**：bound_dir 里编辑某 .md 文件 → 等下次 scan → SELECT FROM reindex_queue 应有 action='purge' 行 → 3s 后 server 日志 `reindex_queue: purge done for item=...` → 该行从表中消失
+
+### Phase B — 自学习闭环 3 hook
+
+- [ ] **doc 生命周期信号**：执行上述 4 个 Phase A 用例后，`sqlite3 vault.sqlite "SELECT kind, COUNT(*) FROM skill_signals WHERE processed=0 GROUP BY kind"` 应至少包含 `doc_create`, `doc_update`, `doc_delete` 三 kind
+- [ ] **citation_hit 信号**：用 chat 问 "vintage" 相关问题（确保 docA 被引用）→ skill_signals 应新增 `kind='citation_hit'`, ref_id=docA.id 行
+- [ ] **annotation_marker 信号**：在 Reader 给 docA 加 ⭐ 重点 批注 → skill_signals 应新增 `kind='annotation_marker'`, ref_id=docA.id, query=label 行
+
+### 失败时
+
+- 查 server 日志 `tail -100 ~/.local/share/attune/logs/attune-server.YYYY-MM-DD | grep -E "reindex|skill_signal|content_hash"`
+- 验证 reindex_worker 在跑：`grep "Reindex worker started" 同上日志`
+- 若 vectors lock 长持有 → 后续 reindex 任务卡住（看 reindex_queue 行数累积）
+
 ## 注意事项
 
 - 任何一项失败 → 提 issue + 附 `attune --diag` 输出 + 本机 CPU/核数信息
 - "演示场景"是核心，必须每次发版前手动验
 - A1 的 LLM 速率限制依赖 H1 的 governor，验证 A1 前先确认 H1 已工作
+- Memory Moat v0.7 验收必须全过才能打 GA tag（per `docs/specs/memory-moat-v07.md` §7）

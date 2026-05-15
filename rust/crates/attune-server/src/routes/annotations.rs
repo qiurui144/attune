@@ -142,6 +142,13 @@ pub async fn create_annotation(
         (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": e.to_string()})))
     })?;
 
+    // v0.7 自学习闭环 Phase B hook 3：annotation_marker 信号喂 skill_evolution。
+    // 用户标 ⭐ 重点 / 🤔 存疑 / ❓ 不懂 都是高价值偏好信号 — skill_evolution 用
+    // ref_id（item_id）反查附近 chunk 在最近 search 里的命中情况：
+    // - 重点 → 该 chunk 同义词应保留 / 加权
+    // - 存疑/不懂 → query 可能召回了"看起来相关实则用户不满"的 chunk，需扩展词补强
+    let _ = vault.store().record_signal_event("annotation_marker", &body.item_id, input.label.as_deref());
+
     Ok(Json(serde_json::json!({"id": id, "status": "ok"})))
 }
 

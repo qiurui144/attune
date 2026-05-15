@@ -77,6 +77,7 @@ pub mod platform;
 pub mod memory_consolidation;
 pub mod project_recommender;
 pub mod queue;
+pub mod reindex;
 pub mod resource_governor;
 pub mod scanner;
 pub mod scanner_patent;

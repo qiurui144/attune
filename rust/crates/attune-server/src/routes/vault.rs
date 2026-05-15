@@ -69,6 +69,7 @@ pub async fn vault_setup(
     state.init_search_engines();
     crate::state::AppState::start_classify_worker(state.clone());
     crate::state::AppState::start_rescan_worker(state.clone());
+    crate::state::AppState::start_reindex_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
     Ok(Json(serde_json::json!({
@@ -93,6 +94,7 @@ pub async fn vault_unlock(
     state.init_search_engines();
     crate::state::AppState::start_classify_worker(state.clone());
     crate::state::AppState::start_rescan_worker(state.clone());
+    crate::state::AppState::start_reindex_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
     Ok(Json(serde_json::json!({"status": "ok", "token": token})))
@@ -196,6 +198,7 @@ pub async fn vault_reset_with_recovery_key(
     state.init_search_engines();
     crate::state::AppState::start_classify_worker(state.clone());
     crate::state::AppState::start_rescan_worker(state.clone());
+    crate::state::AppState::start_reindex_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
 

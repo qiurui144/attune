@@ -109,9 +109,15 @@ fn process_single_file(store: &Store, dek: &Key32, dir_id: &str, path: &Path) ->
         if existing.file_hash == hash {
             return Ok(FileAction::Skipped);
         }
-        // 文件已变更: 删除旧数据
+        // 文件已变更: 删除旧 DB 数据 + 标记 reindex queue 让 server 清向量+FTS
+        // (scanner 拿不到 VectorIndex / FulltextIndex 锁，必须 defer 到 server worker)
         if let Some(item_id) = &existing.item_id {
             store.delete_item(item_id)?;
+            // 这里用 'purge'：旧 item 已软删，仅需清向量+FTS。
+            // 新 item_id 后面 insert，会有自己的 chunk 走 embed_queue 走正常路径。
+            let _ = store.enqueue_reindex(item_id, "purge");
+            // Phase B hook: doc_update 信号
+            let _ = store.record_signal_event("doc_update", item_id, None);
         }
         true
     } else {
