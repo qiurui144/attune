@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod ai_stack;
 pub mod annotations;
 pub mod audit;
