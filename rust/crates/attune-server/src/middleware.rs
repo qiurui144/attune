@@ -25,6 +25,13 @@ pub async fn vault_guard(
         // /api/v1/ocr/profiles — 用户场景预设 (持久化磁盘文件, 不读 vault).
         // 写操作仍由 handler 里 SettingsLocks::ocr_profiles 控制.
         || path.starts_with("/api/v1/ocr/profiles")
+        // Round B E2E fix: /ws/scan-progress 必须 bypass vault_guard。
+        // ws.rs handler 注释明确"vault locked 时推送 locked 状态后持续等待" —
+        // 该 endpoint 设计上支持 vault 未解锁时连接。之前 vault_guard 白名单漏了它
+        // （auth guard 的 bypass 列表 OSS-S16 已加，两个 middleware 白名单不一致），
+        // 导致 wizard / locked 阶段前端连 WS 收 403 → 无限重连刷 console error。
+        // bypass 后由 handle_scan_progress 自查 vault 状态推 locked JSON。
+        || path == "/ws/scan-progress"
     {
         return next.run(request).await;
     }
