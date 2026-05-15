@@ -86,6 +86,26 @@ impl Store {
         Ok(())
     }
 
+    /// R10 S3 fix (P1)：检查 embed_queue 任务行是否仍存在。
+    ///
+    /// embed worker dequeue 任务后（标 processing，行仍在），到写向量之间有窗口。
+    /// 若期间 reindex / delete 调 `purge_embed_queue_for_item`，会 DELETE 该行
+    /// （含 processing 状态）。worker 写向量前查此函数：
+    /// - 行已不在 → 该 chunk 已被 reindex 作废（item 被 PATCH 重切 / 被删）
+    ///   → 跳过写向量，防 stale 向量（旧内容）/ orphan 向量（已删 item）。
+    /// - 行还在 → 正常写。
+    ///
+    /// 实测：100KB 文档 1278 chunk，PATCH 后 embedding worker 仍在写旧 chunk 向量
+    /// → 编辑后旧关键词仍搜得到。本检查根治该 update 竞态。
+    pub fn embed_task_exists(&self, task_id: i64) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM embed_queue WHERE id = ?1",
+            params![task_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// 标记队列任务为失败，超过最大尝试次数则标记为 abandoned
     /// 三步操作包裹在事务中保证原子性，防止并发 worker 导致 attempts 计数错误
     pub fn mark_embedding_failed(&self, id: i64, max_attempts: i32) -> Result<()> {

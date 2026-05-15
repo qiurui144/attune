@@ -229,6 +229,14 @@ pub fn embed_and_index_batch(
         if i >= embeddings.len() {
             break;
         }
+        // R10 S3 fix (update 场景，P1): chunk 任务行被 reindex/delete 的
+        // purge_embed_queue_for_item DELETE 掉 → 该 chunk 已作废（item 被 PATCH
+        // 重切 / 被删）→ 跳过写向量，防 stale 向量（大文档实测必现）。
+        // task 行已不在表里，不 push done_id（mark_done 也无行可改）。
+        match store.embed_task_exists(task.id) {
+            Ok(false) => continue,
+            _ => {} // 行还在 OR 查询失败（保守继续）
+        }
         let alive = *alive_cache
             .entry(task.item_id.clone())
             // 查询失败时保守视为存活（继续写，宁可暂时 orphan 也不因瞬时 DB
