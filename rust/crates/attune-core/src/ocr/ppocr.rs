@@ -340,7 +340,7 @@ impl OcrProvider for PpOcrProvider {
             None
         };
 
-        // Step 5: 文档级 OCR 置信度（批次1-B2）
+        // Step 5: 文档级 OCR 置信度
         let avg_confidence = compute_avg_confidence(&result.text_blocks);
         if let Some(c) = avg_confidence {
             log::debug!("PP-OCR structured: avg_confidence={c:.3}");
@@ -400,7 +400,7 @@ fn sanitize_max_side(v: u32) -> u32 {
     }
 }
 
-/// 文档级 OCR 置信度（批次1-B2）—— 各文本块 `text_score`（CRNN recognition
+/// 文档级 OCR 置信度—— 各文本块 `text_score`（CRNN recognition
 /// 置信度）按文本字符数加权平均。长文本块权重更大，更能代表整页质量。
 /// 无文本块（空白页 / OCR 全失败）返回 `None`。
 fn compute_avg_confidence(blocks: &[kreuzberg_paddle_ocr::TextBlock]) -> Option<f32> {

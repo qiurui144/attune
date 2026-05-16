@@ -109,7 +109,7 @@ st, d = run_agent(facts(
     recommended_formula="lpr_capped_simple", formula_reason="约定36%超LPR4倍按司法保护上限封顶"))
 cC = d.get("output", {}).get("computation", {})
 check("链C 公式=lpr_capped_simple (利率封顶)", cC.get("formula_used") == "lpr_capped_simple")
-# 批次4-D2：LPR 按起息日(2022-03-01)查表 → 1年期 LPR 3.70% × 4 = 14.8% 封顶
+# LPR 按起息日(2022-03-01)查表 → 1年期 LPR 3.70% × 4 = 14.8% 封顶
 # （旧值基于写死的 2024 LPR×4=13.8%，已随 date-aware LPR 修正）
 check("链C 应付利息=¥469139.73 (2022 LPR×4=14.8% 封顶)",
       cC.get("computed_interest") == 469139.73, str(cC.get("computed_interest")))

@@ -140,7 +140,7 @@ pub async fn upload_file(
         tracing::debug!(signal = "doc_create", error = %e, "record_signal_event failed (non-fatal)");
     }
 
-    // 批次1-A1：留存原始上传文件（AES-GCM 加密），供「查看证据原文」核对 OCR 转录。
+    // 留存原始上传文件（AES-GCM 加密），供「查看证据原文」核对 OCR 转录。
     // items.content 只存解析后的文本；律师须能回看原始扫描/图片核验识别准确度。
     // 失败不阻塞上传 — 但记 warn（原件丢失 = 证据无法回溯核验）。
     if let Err(e) = vault.store().insert_item_blob(

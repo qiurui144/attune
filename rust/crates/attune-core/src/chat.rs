@@ -112,7 +112,7 @@ impl ChatEngine {
         history: &[ChatMessage],
         dek: &Key32,
     ) -> Result<ChatResponse> {
-        // 批次2：按 LLM 上下文窗口裁剪历史（替代依赖调用方写死的固定深度）
+        // 按 LLM 上下文窗口裁剪历史（替代依赖调用方写死的固定深度）
         let trimmed_history = self.trim_history(user_message, history);
         let history: &[ChatMessage] = &trimmed_history;
 
@@ -360,7 +360,7 @@ impl ChatEngine {
         Ok((restored, conf))
     }
 
-    /// 批次2：按 LLM 上下文窗口裁剪历史。
+    /// 按 LLM 上下文窗口裁剪历史。
     /// 超预算时丢弃最旧的若干轮，并在开头插一条省略说明 —— 让模型知道上文被截断，
     /// 而非误以为对话从此开始。预算内则原样返回。
     fn trim_history(&self, user_message: &str, history: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -386,7 +386,7 @@ impl ChatEngine {
             )),
         );
         log::info!(
-            "批次2 context budget: model={} window={} → 丢弃 {} 轮历史, 保留 {}",
+            "context budget: model={} window={} → 丢弃 {} 轮历史, 保留 {}",
             self.llm.model_name(),
             plan.window,
             plan.history_dropped,
@@ -423,7 +423,7 @@ impl ChatEngine {
             params.min_score = Some(threshold);
         }
         let mut results = crate::search::search_with_context(&ctx, query, &params)?;
-        // 批次2：知识注入预算按 LLM 上下文窗口动态计算（替代写死的 INJECTION_BUDGET=2000）
+        // 知识注入预算按 LLM 上下文窗口动态计算（替代写死的 INJECTION_BUDGET=2000）
         let hist_pairs: Vec<(String, String)> = history
             .iter()
             .map(|m| (m.role.clone(), m.content.clone()))

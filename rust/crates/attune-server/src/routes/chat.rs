@@ -29,7 +29,7 @@ const MAX_MESSAGE_LEN: usize = 32_768;
 /// 历史消息单条 content 最大字节数（防止绕过 message 限制的大负载攻击）
 const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 /// 历史消息最大条数 —— 硬上限 backstop（防超大 payload）。
-/// 真正的窗口感知裁剪由批次2 context_budget 在拿到 LLM 后做（见下方）。
+/// 真正的窗口感知裁剪由context_budget 在拿到 LLM 后做（见下方）。
 const MAX_HISTORY_DEPTH: usize = 80;
 
 pub async fn chat(
@@ -146,7 +146,7 @@ pub async fn chat(
         }
     };
 
-    // 批次2：按 LLM 上下文窗口精确裁历史（替代写死的固定深度）。
+    // 按 LLM 上下文窗口精确裁历史（替代写死的固定深度）。
     // 不同 model 窗口差 30×（qwen 32K / gemini 1M）—— 按窗口动态保留最近若干轮，
     // 丢弃的旧轮次插一条省略说明，让模型知道上文被截而非以为对话从头开始。
     {
@@ -199,7 +199,7 @@ pub async fn chat(
             .unwrap_or_else(|| serde_json::json!({}))
     };
 
-    // 批次4-F1：敏感案件强制本地 LLM 开关 —— 开启后注入了本地证据的对话不得外发云端。
+    // 敏感案件强制本地 LLM 开关 —— 开启后注入了本地证据的对话不得外发云端。
     let force_local_for_evidence = app_settings
         .get("force_local_llm_for_evidence")
         .and_then(|v| v.as_bool())
@@ -250,7 +250,7 @@ pub async fn chat(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
     };
 
-    // 批次2：知识注入预算按 LLM 上下文窗口动态计算（替代写死的 INJECTION_BUDGET=2000）
+    // 知识注入预算按 LLM 上下文窗口动态计算（替代写死的 INJECTION_BUDGET=2000）
     let mut search_results = search_results;
     {
         let hist_pairs: Vec<(String, String)> = body
@@ -267,7 +267,7 @@ pub async fn chat(
         attune_core::search::allocate_budget(&mut search_results, plan.knowledge_chars());
     }
 
-    // 批次4-F1：敏感模式 —— 注入了本地证据的对话不得外发第三方云 LLM。
+    // 敏感模式 —— 注入了本地证据的对话不得外发第三方云 LLM。
     if force_local_for_evidence && !search_results.is_empty() && !llm.is_local() {
         return Err((
             StatusCode::FORBIDDEN,
@@ -415,7 +415,7 @@ pub async fn chat(
     } else {
         use attune_core::context_compress::{ContextStrategy, chunk_hash, CompressedChunk};
         let strategy = ContextStrategy::parse(&strategy_str);
-        // 批次4-F1：敏感模式下跳过上下文压缩。压缩会把证据 content 喂给 summary_llm
+        // 敏感模式下跳过上下文压缩。压缩会把证据 content 喂给 summary_llm
         // （可能配置为云端，独立于主 llm），绕过上方 F1 对主 LLM 的拦截。
         // 敏感模式宁可注入原文、不省 token，也不让证据流向云端摘要器。
         if strategy == ContextStrategy::Raw || force_local_for_evidence {

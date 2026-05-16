@@ -18,7 +18,6 @@ async fn forms_endpoints_return_404_for_unknown_plugin() {
         no_auth: true,
     };
     let handle = tokio::spawn(async move { attune_server::run_in_runtime(config).await });
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}/api/v1/forms", port);
@@ -26,7 +25,21 @@ async fn forms_endpoints_return_404_for_unknown_plugin() {
     // GET — 路由注册存在 → 4xx (vault locked 时 vault_guard 返 403, 否则 plugin 不存在 → 404)
     // 关键: 不应是 405 method-not-allowed 或 500
     let get_url = format!("{base}/nonexistent_plugin/some_form");
-    let resp = client.get(&get_url).send().await.expect("GET");
+
+    // 等 server 就绪 —— retry-with-deadline 替代固定 sleep（per CLAUDE.md：server
+    // 启动会加载 ML 模型，耗时不定，固定 500ms 在装了模型 / 高负载的机器上 flaky）。
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let resp = loop {
+        match client.get(&get_url).send().await {
+            Ok(r) => break r,
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    panic!("server not ready within 30s: {e}");
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
     let status = resp.status().as_u16();
     assert!(
         (400..500).contains(&status),
