@@ -72,6 +72,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/feedback", post(routes::feedback::submit_feedback))
         // Plugin UI form runtime
         .route("/api/v1/forms/{plugin_id}/{form_id}", get(routes::forms::get_form))
+        .route("/api/v1/forms/{plugin_id}/{form_id}/schema", get(routes::forms::get_form_schema))
         .route("/api/v1/forms/{plugin_id}/{form_id}/submit", post(routes::forms::submit_form))
         // Member state + settings locks (UI 灰显决策源)
         .route("/api/v1/member/state", get(routes::member::get_state))

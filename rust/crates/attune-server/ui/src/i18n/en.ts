@@ -689,6 +689,17 @@ export const en = {
   // ─── Remote ───────────────────────────────────────────
   'remote.local.path_placeholder': 'e.g. /home/you/Documents/notes',
 
+  // ─── PluginForm · generic plugin form ────────────────
+  'pluginForm.submit': 'Run',
+  'pluginForm.submitting': 'Running…',
+  'pluginForm.noFields': 'This form has no fields',
+  'pluginForm.blocked': 'Calculation blocked by business red lines',
+  'pluginForm.required': 'Please fill required fields: {fields}',
+  'pluginForm.runError': 'Run failed: {msg}',
+  'pluginForm.loadError': 'Failed to load form: {msg}',
+  'projects.agents.title': 'Agents',
+  'projects.agents.run': 'Run',
+
   // ─── Plural ─────────────────────────────────────────
   'items.count': { one: '{count} item', other: '{count} items' },
 } as const;

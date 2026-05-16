@@ -11,7 +11,7 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { Button, EmptyState, Modal, toast } from '../components';
+import { Button, EmptyState, Modal, PluginForm, toast } from '../components';
 import { api } from '../store/api';
 import { t } from '../i18n';
 
@@ -53,6 +53,48 @@ interface TimelineResponse {
   entries: TimelineEntry[];
 }
 
+// ── plugin-form 发现（/api/v1/plugins） ──────────────────────────────────────
+interface PluginAgent {
+  id: string;
+  description: string;
+  case_kinds?: string[];
+}
+interface PluginUiComponent {
+  id: string;
+  target: string;
+  description: string;
+}
+interface PluginInfo {
+  id: string;
+  agents?: PluginAgent[];
+  ui_components?: PluginUiComponent[];
+}
+interface PluginListResp {
+  plugins: PluginInfo[];
+}
+/** 匹配到某 project kind 的 plugin 表单引用 */
+interface FormRef {
+  pluginId: string;
+  formId: string;
+  label: string;
+}
+
+/** 列出 ui_component 的 target agent 的 case_kinds 含 `kind` 的表单。 */
+function matchedForms(plugins: PluginInfo[], kind: string): FormRef[] {
+  const out: FormRef[] = [];
+  for (const p of plugins) {
+    const agents = p.agents ?? [];
+    for (const c of p.ui_components ?? []) {
+      const agentId = c.target.startsWith('agent:') ? c.target.slice('agent:'.length) : c.target;
+      const agent = agents.find((a) => a.id === agentId);
+      if (agent && (agent.case_kinds ?? []).includes(kind)) {
+        out.push({ pluginId: p.id, formId: c.id, label: c.description || agent.description || c.id });
+      }
+    }
+  }
+  return out;
+}
+
 // ── 主视图 ──────────────────────────────────────────────────────────────────
 export function ProjectsView(): JSX.Element {
   const projects = useSignal<Project[]>([]);
@@ -64,6 +106,9 @@ export function ProjectsView(): JSX.Element {
   const selectedId = useSignal<string | null>(null);
   const files = useSignal<ProjectFile[]>([]);
   const timeline = useSignal<TimelineEntry[]>([]);
+  const plugins = useSignal<PluginInfo[]>([]);
+  // 当前打开的 plugin 表单（modal）
+  const openForm = useSignal<FormRef | null>(null);
 
   const reload = async (): Promise<void> => {
     loading.value = true;
@@ -80,6 +125,15 @@ export function ProjectsView(): JSX.Element {
 
   useEffect(() => {
     void reload();
+    // plugin 列表（含 agents.case_kinds + ui_components）—— 用于按项目类型发现可用表单
+    void (async () => {
+      try {
+        const res = await api.get<PluginListResp>('/plugins');
+        plugins.value = res.plugins ?? [];
+      } catch {
+        plugins.value = [];
+      }
+    })();
   }, []);
 
   const onCreate = async (): Promise<void> => {
@@ -160,6 +214,9 @@ export function ProjectsView(): JSX.Element {
     );
   }
 
+  const selProject = projects.value.find((p) => p.id === selectedId.value) ?? null;
+  const projForms = selProject ? matchedForms(plugins.value, selProject.kind) : [];
+
   return (
     <div
       style={{
@@ -236,7 +293,12 @@ export function ProjectsView(): JSX.Element {
               {t('projects.select_hint')}
             </div>
           ) : (
-            <ProjectDetail files={files.value} timeline={timeline.value} />
+            <ProjectDetail
+              files={files.value}
+              timeline={timeline.value}
+              forms={projForms}
+              onRunForm={(f) => (openForm.value = f)}
+            />
           )}
         </section>
       </div>
@@ -248,6 +310,16 @@ export function ProjectsView(): JSX.Element {
           onCancel={() => (showCreate.value = false)}
           onConfirm={() => void onCreate()}
         />
+      )}
+
+      {openForm.value && (
+        <Modal open onClose={() => (openForm.value = null)} title={openForm.value.label}>
+          <PluginForm
+            pluginId={openForm.value.pluginId}
+            formId={openForm.value.formId}
+            onClose={() => (openForm.value = null)}
+          />
+        </Modal>
       )}
     </div>
   );
@@ -358,9 +430,13 @@ function ProjectRow({
 function ProjectDetail({
   files,
   timeline,
+  forms,
+  onRunForm,
 }: {
   files: ProjectFile[];
   timeline: TimelineEntry[];
+  forms: FormRef[];
+  onRunForm: (f: FormRef) => void;
 }): JSX.Element {
   return (
     <div
@@ -370,6 +446,42 @@ function ProjectDetail({
         gap: 'var(--space-4)',
       }}
     >
+      {forms.length > 0 && (
+        <section>
+          <h3
+            style={{
+              fontSize: 'var(--text-base)',
+              fontWeight: 600,
+              margin: '0 0 var(--space-2) 0',
+              color: 'var(--color-text)',
+            }}
+          >
+            {t('projects.agents.title')}
+          </h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            {forms.map((f) => (
+              <div
+                key={`${f.pluginId}/${f.formId}`}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 'var(--space-3)',
+                  padding: 'var(--space-2) var(--space-3)',
+                  background: 'var(--color-surface)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius-md)',
+                }}
+              >
+                <span style={{ fontSize: 'var(--text-sm)' }}>{f.label}</span>
+                <Button variant="primary" size="sm" onClick={() => onRunForm(f)}>
+                  ▶ {t('projects.agents.run')}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       <section>
         <h3
           style={{

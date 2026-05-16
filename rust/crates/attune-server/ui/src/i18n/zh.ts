@@ -682,6 +682,17 @@ export const zh = {
   // ─── Remote ───────────────────────────────────────────
   'remote.local.path_placeholder': '例：/home/you/Documents/notes',
 
+  // ─── PluginForm · 通用 plugin 表单 ─────────────────────
+  'pluginForm.submit': '计算',
+  'pluginForm.submitting': '计算中…',
+  'pluginForm.noFields': '该表单暂无字段',
+  'pluginForm.blocked': '计算被业务红线阻断',
+  'pluginForm.required': '请填写必填项：{fields}',
+  'pluginForm.runError': '运行失败：{msg}',
+  'pluginForm.loadError': '表单加载失败：{msg}',
+  'projects.agents.title': '计算助手',
+  'projects.agents.run': '运行',
+
   // ─── Plural 示例 ──────────────────────────────────────
   'items.count': { one: '{count} 条', other: '{count} 条' }, // 中文单复数同形
 } as const;

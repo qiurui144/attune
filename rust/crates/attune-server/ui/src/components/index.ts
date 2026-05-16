@@ -41,3 +41,6 @@ export type {
   AgentCitation,
   AgentFactSource,
 } from './AgentResultPanel';
+
+export { PluginForm } from './PluginForm';
+export type { PluginFormProps } from './PluginForm';

@@ -77,6 +77,15 @@ pub async fn list(
         let agents = m.agents.iter().map(|a| serde_json::json!({
             "id": a.id,
             "description": a.description,
+            // case_kinds 非空 = 项目级 agent（绑 project.kind）；空 = 独立。
+            // 前端据此把触发入口路由到 Project 详情 vs Skills。
+            "case_kinds": a.case_kinds,
+        })).collect::<Vec<_>>();
+        // ui_components：插件声明的 plugin-form（PluginForm 渲染 + agent-run 触发）
+        let ui_components = m.ui_components.iter().map(|c| serde_json::json!({
+            "id": c.id,
+            "target": c.target,
+            "description": c.description,
         })).collect::<Vec<_>>();
         list.push(serde_json::json!({
             "id": m.id,
@@ -87,6 +96,7 @@ pub async fn list(
             "enabled": is_enabled(&m.id),
             "type": m.plugin_type.clone(),
             "agents": agents,
+            "ui_components": ui_components,
             "tier": m.pricing.as_ref().map(|p| p.tier.clone()).unwrap_or_else(|| "free".into()),
         }));
     }
