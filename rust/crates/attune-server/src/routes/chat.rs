@@ -28,8 +28,9 @@ pub struct HistoryMessage {
 const MAX_MESSAGE_LEN: usize = 32_768;
 /// 历史消息单条 content 最大字节数（防止绕过 message 限制的大负载攻击）
 const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
-/// 历史消息最大条数（超限则截断至最近 N 条）
-const MAX_HISTORY_DEPTH: usize = 20;
+/// 历史消息最大条数 —— 硬上限 backstop（防超大 payload）。
+/// 真正的窗口感知裁剪由批次2 context_budget 在拿到 LLM 后做（见下方）。
+const MAX_HISTORY_DEPTH: usize = 80;
 
 pub async fn chat(
     State(state): State<SharedState>,
@@ -145,6 +146,37 @@ pub async fn chat(
         }
     };
 
+    // 批次2：按 LLM 上下文窗口精确裁历史（替代写死的固定深度）。
+    // 不同 model 窗口差 30×（qwen 32K / gemini 1M）—— 按窗口动态保留最近若干轮，
+    // 丢弃的旧轮次插一条省略说明，让模型知道上文被截而非以为对话从头开始。
+    {
+        let pairs: Vec<(String, String)> = body
+            .history
+            .iter()
+            .map(|h| (h.role.clone(), h.content.clone()))
+            .collect();
+        let plan = attune_core::context_budget::plan_context(
+            llm.model_name(),
+            "",
+            &body.message,
+            &pairs,
+        );
+        if plan.history_dropped > 0 {
+            let drop = plan.history_dropped;
+            body.history.drain(..drop);
+            body.history.insert(
+                0,
+                HistoryMessage {
+                    role: "user".to_string(),
+                    content: format!(
+                        "[此前 {drop} 轮较早对话因超出模型 {} 的上下文窗口已省略]",
+                        llm.model_name()
+                    ),
+                },
+            );
+        }
+    }
+
     let dek = {
         let vault = state.vault.lock()
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
@@ -166,6 +198,12 @@ pub async fn chat(
             .and_then(|data| serde_json::from_slice(&data).ok())
             .unwrap_or_else(|| serde_json::json!({}))
     };
+
+    // 批次4-F1：敏感案件强制本地 LLM 开关 —— 开启后注入了本地证据的对话不得外发云端。
+    let force_local_for_evidence = app_settings
+        .get("force_local_llm_for_evidence")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // 1b. 用 learned_expansions 自动扩展查询词（语义扩展，透明无感）
     let expanded_query = attune_core::skill_evolution::expand_query(&body.message, &app_settings);
@@ -212,9 +250,34 @@ pub async fn chat(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
     };
 
-    // 按 INJECTION_BUDGET 分配每条文档的注入字符数，防止超出 LLM context window
+    // 批次2：知识注入预算按 LLM 上下文窗口动态计算（替代写死的 INJECTION_BUDGET=2000）
     let mut search_results = search_results;
-    attune_core::search::allocate_budget(&mut search_results, attune_core::search::INJECTION_BUDGET);
+    {
+        let hist_pairs: Vec<(String, String)> = body
+            .history
+            .iter()
+            .map(|h| (h.role.clone(), h.content.clone()))
+            .collect();
+        let plan = attune_core::context_budget::plan_context(
+            llm.model_name(),
+            "",
+            &body.message,
+            &hist_pairs,
+        );
+        attune_core::search::allocate_budget(&mut search_results, plan.knowledge_chars());
+    }
+
+    // 批次4-F1：敏感模式 —— 注入了本地证据的对话不得外发第三方云 LLM。
+    if force_local_for_evidence && !search_results.is_empty() && !llm.is_local() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "敏感模式：本次对话会注入本地知识库证据，但当前 LLM 是云端服务，已阻止外发。",
+                "hint": "请在设置中配置本地 LLM（Ollama），或关闭「敏感案件强制本地 LLM」。",
+                "code": "sensitive-evidence-cloud-blocked",
+            })),
+        ));
+    }
 
     // 2a0. 批注加权（Batch B.2）—— 🆓 零成本（仅 DB 读 + 算数）
     //
@@ -352,7 +415,10 @@ pub async fn chat(
     } else {
         use attune_core::context_compress::{ContextStrategy, chunk_hash, CompressedChunk};
         let strategy = ContextStrategy::parse(&strategy_str);
-        if strategy == ContextStrategy::Raw {
+        // 批次4-F1：敏感模式下跳过上下文压缩。压缩会把证据 content 喂给 summary_llm
+        // （可能配置为云端，独立于主 llm），绕过上方 F1 对主 LLM 的拦截。
+        // 敏感模式宁可注入原文、不省 token，也不让证据流向云端摘要器。
+        if strategy == ContextStrategy::Raw || force_local_for_evidence {
             knowledge
         } else {
             // 三阶段压缩，尽量缩短 vault lock 持有时间：

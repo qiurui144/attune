@@ -329,6 +329,28 @@ export const zh = {
   'settings.ai.web_search.enabled_toast': '已启用网络搜索',
   'settings.ai.web_search.disabled_toast': '已关闭网络搜索',
 
+  // ─── 变体 A · agent 结果面板 ───────────────────────────
+  'agentpanel.facts': '基础事实',
+  'agentpanel.required': '必填事实',
+  'agentpanel.ready': '就位',
+  'agentpanel.pending': '待补',
+  'agentpanel.evidence': '依据',
+  'agentpanel.citation': '凭据',
+  'agentpanel.noCitation': '暂无凭据',
+  'agentpanel.source': '来源',
+  'agentpanel.source.ai': 'AI 抽取',
+  'agentpanel.source.lawyer': '律师确认',
+  'agentpanel.source.none': '待确认',
+  'agentpanel.notExtracted': '未提取到',
+  'agentpanel.conflict': '凭据冲突',
+  'agentpanel.correct': '修正',
+  'agentpanel.newValue': '修正值',
+  'agentpanel.note': '修正理由（可选）',
+  'agentpanel.save': '保存并重算',
+  'agentpanel.cancel': '取消',
+  'agentpanel.computation': '计算结果',
+  'agentpanel.blocked': '暂不计算（缺必填项）',
+
   // ─── Plural 示例 ──────────────────────────────────────
   'items.count': { one: '{count} 条', other: '{count} 条' }, // 中文单复数同形
 } as const;

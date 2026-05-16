@@ -997,6 +997,7 @@ fn run_ocr_profile_create(
         builtin: false,
         deskew: false,
         reconstruct_tables: false,
+        max_side_len: attune_core::ocr::profile::OcrProfile::DEFAULT_MAX_SIDE_LEN,
     };
     let mut reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
     reg.upsert(p)?;

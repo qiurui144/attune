@@ -35,6 +35,10 @@ pub struct OcrOutput {
     /// Markdown 表格（仅当 profile.reconstruct_tables=true 且检测到表格布局时填入）
     /// 格式示例：`| 列A | 列B |\n|---|---|\n| v1 | v2 |`
     pub table_markdown: Option<String>,
+    /// 批次1-B2：文档级 OCR 置信度（0.0-1.0），按文本长度加权平均各文本块的
+    /// recognition score。`None` = provider 不提供（非 PP-OCR / 默认实现）。
+    /// 下游（grounded 抽取器 / UI）用它判断证据 OCR 是否可信、是否需律师复核。
+    pub avg_confidence: Option<f32>,
 }
 
 /// OCR provider 抽象 — 当前只有 PP-OCRv5 一个实现。
@@ -54,7 +58,7 @@ pub trait OcrProvider: Send + Sync {
     /// `PpOcrProvider` 重写以支持完整的场景能力。
     fn extract_structured(&self, image_path: &Path, _profile: &OcrProfile) -> Result<OcrOutput> {
         let text = self.extract_text_from_image(image_path)?;
-        Ok(OcrOutput { text, table_markdown: None })
+        Ok(OcrOutput { text, table_markdown: None, avg_confidence: None })
     }
 }
 

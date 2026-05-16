@@ -40,6 +40,7 @@ pub(crate) mod chat;
 pub use chat::{parse_confidence, strip_confidence_marker, Citation, ChatEngine, ChatResponse};
 pub mod chunker;
 pub mod context_compress;
+pub mod context_budget;
 pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;

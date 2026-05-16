@@ -12,11 +12,12 @@
 前置：law-pro 已 plugin-install 接入；server 起在 :18930（XDG 隔离）。
 用法：python3 tests/e2e/lawpro_chains_e2e.py  → 期望 12 PASS / 0 FAIL"""
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
-BASE = "http://localhost:18930"
+BASE = os.environ.get("ATTUNE_BASE_URL", "http://localhost:18930")
 PW = "lawpro-e2e-2026"
 PASS = 0
 FAIL = 0
@@ -108,8 +109,12 @@ st, d = run_agent(facts(
     recommended_formula="lpr_capped_simple", formula_reason="约定36%超LPR4倍按司法保护上限封顶"))
 cC = d.get("output", {}).get("computation", {})
 check("链C 公式=lpr_capped_simple (利率封顶)", cC.get("formula_used") == "lpr_capped_simple")
-check("链C 应付利息=¥437441.1", cC.get("computed_interest") == 437441.1, str(cC.get("computed_interest")))
-check("链C 应收余额扣已还=¥1187441.1", cC.get("remaining_balance") == 1187441.1, str(cC.get("remaining_balance")))
+# 批次4-D2：LPR 按起息日(2022-03-01)查表 → 1年期 LPR 3.70% × 4 = 14.8% 封顶
+# （旧值基于写死的 2024 LPR×4=13.8%，已随 date-aware LPR 修正）
+check("链C 应付利息=¥469139.73 (2022 LPR×4=14.8% 封顶)",
+      cC.get("computed_interest") == 469139.73, str(cC.get("computed_interest")))
+check("链C 应收余额扣已还=¥1219139.73",
+      cC.get("remaining_balance") == 1219139.73, str(cC.get("remaining_balance")))
 
 # 证据链完整性 — 传 classified_evidence 应消除 missing_evidence
 print("\n证据链完整性 — classified_evidence 消除待补提示")

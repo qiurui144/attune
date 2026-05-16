@@ -232,7 +232,11 @@ impl OcrProvider for PpOcrProvider {
     }
 
     fn extract_text_from_image(&self, image_path: &Path) -> Result<String> {
-        let path_str = image_path.to_str().ok_or_else(|| {
+        // EXIF 方向归一 — 手机照片常带 orientation tag, 不摆正会横躺/倒置喂进 OCR
+        let orient_tmp = normalize_orientation(image_path);
+        let oriented: &Path = orient_tmp.as_ref().map_or(image_path, |t| t.path());
+
+        let path_str = oriented.to_str().ok_or_else(|| {
             VaultError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "non-UTF8 image path",
@@ -253,7 +257,16 @@ impl OcrProvider for PpOcrProvider {
         //   do_angle=true         做方向分类
         //   most_angle=true       全图统一方向
         let result = lock
-            .detect_from_path(path_str, 50, 2048, 0.6, 0.3, 1.6, true, true)
+            .detect_from_path(
+                path_str,
+                50,
+                super::profile::OcrProfile::DEFAULT_MAX_SIDE_LEN,
+                0.6,
+                0.3,
+                1.6,
+                true,
+                true,
+            )
             .map_err(|e| VaultError::ModelLoad(format!("PP-OCR detect: {e}")))?;
 
         // 拼接所有文本行（已按 reading order 排序）
@@ -267,31 +280,27 @@ impl OcrProvider for PpOcrProvider {
         Ok(all)
     }
 
-    /// 带布局结构的 OCR — 支持去斜预处理 + 表格重建。
+    /// 带布局结构的 OCR — EXIF 方向归一 + 去斜预处理 + 表格重建。
     ///
     /// 流程：
+    ///   0. EXIF orientation 归一（手机照片摆正，detect 前置）
     ///   1. profile.deskew=true → 检测倾斜角，> 0.5° 时旋转校正后再推理
-    ///   2. PP-OCR 推理，拿到带 box_points 的 text_blocks
+    ///   2. PP-OCR 推理（长边上限 profile.max_side_len），拿到带 box_points 的 text_blocks
     ///   3. profile.reconstruct_tables=true → 按文本块坐标重建 Markdown 表格
     fn extract_structured(
         &self,
         image_path: &Path,
         profile: &super::profile::OcrProfile,
     ) -> super::super::error::Result<super::OcrOutput> {
-        // Step 1: deskew preprocessing（如 profile 开启）
-        let deskewed_tmp: Option<tempfile::NamedTempFile>;
-        let effective_path: &Path = if profile.deskew {
-            if let Some(tmp) = deskew_image(image_path) {
-                deskewed_tmp = Some(tmp);
-                deskewed_tmp.as_ref().unwrap().path()
-            } else {
-                deskewed_tmp = None;
-                image_path
-            }
-        } else {
-            deskewed_tmp = None;
-            image_path
-        };
+        // Step 0: EXIF 方向归一（手机照片 orientation tag）— 必须在 deskew 前先摆正
+        let orient_tmp = normalize_orientation(image_path);
+        let oriented_path: &Path = orient_tmp.as_ref().map_or(image_path, |t| t.path());
+
+        // Step 1: deskew preprocessing（如 profile 开启，在已摆正的图上做）
+        let deskewed_tmp: Option<tempfile::NamedTempFile> =
+            if profile.deskew { deskew_image(oriented_path) } else { None };
+        let effective_path: &Path =
+            deskewed_tmp.as_ref().map_or(oriented_path, |t| t.path());
 
         let path_str = effective_path.to_str().ok_or_else(|| {
             VaultError::Io(std::io::Error::new(
@@ -301,16 +310,19 @@ impl OcrProvider for PpOcrProvider {
         })?;
 
         // Step 2: PP-OCR 推理（拿完整 text_blocks 含 box_points）
+        // 长边上限由 profile.max_side_len 决定 — 法律证据用大值保留小字细节
+        let max_side = sanitize_max_side(profile.max_side_len);
         let result = {
             let lock = self
                 .inner
                 .lock()
                 .map_err(|_| VaultError::Crypto("PP-OCR session lock poisoned".into()))?;
-            lock.detect_from_path(path_str, 50, 2048, 0.6, 0.3, 1.6, true, true)
+            lock.detect_from_path(path_str, 50, max_side, 0.6, 0.3, 1.6, true, true)
                 .map_err(|e| VaultError::ModelLoad(format!("PP-OCR detect (structured): {e}")))?
         };
         // temp 文件在此 drop（lock 先 drop，避免重叠）
         drop(deskewed_tmp);
+        drop(orient_tmp);
 
         // Step 3: 拼接文本
         let mut plain = String::with_capacity(1024);
@@ -328,13 +340,85 @@ impl OcrProvider for PpOcrProvider {
             None
         };
 
-        Ok(super::OcrOutput { text: plain, table_markdown })
+        // Step 5: 文档级 OCR 置信度（批次1-B2）
+        let avg_confidence = compute_avg_confidence(&result.text_blocks);
+        if let Some(c) = avg_confidence {
+            log::debug!("PP-OCR structured: avg_confidence={c:.3}");
+        }
+
+        Ok(super::OcrOutput { text: plain, table_markdown, avg_confidence })
     }
 }
 
 /// 工厂 — `mod.rs::detect_default_provider()` 调这里。
 pub fn detect() -> Option<PpOcrProvider> {
     PpOcrProvider::new()
+}
+
+// ── EXIF 方向归一 + 分辨率上限 ───────────────────────────────────────────────
+
+/// EXIF 方向归一 —— 手机照片常带 orientation tag（像素存传感器原始方向 + 一个
+/// 旋转/翻转标记）。`image::open` 与 PP-OCR 解码默认**不应用**该 tag，导致横躺 /
+/// 倒置的证据图直接喂进 OCR，识别率从 ~93% 掉到接近 0。
+///
+/// 此函数读 tag，若需变换则实际旋转/翻转像素，写出摆正后的临时 PNG。
+/// 返回 `None` = 无需变换（方向正常 / 无 EXIF / 读取失败 → 调用方用原图）。
+fn normalize_orientation(image_path: &Path) -> Option<tempfile::NamedTempFile> {
+    use image::ImageDecoder;
+    let reader = image::ImageReader::open(image_path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = decoder.orientation().ok()?;
+    if orientation == image::metadata::Orientation::NoTransforms {
+        return None; // 方向正常，无需处理
+    }
+    let mut img = image::DynamicImage::from_decoder(decoder).ok()?;
+    img.apply_orientation(orientation);
+    let mut tmp = tempfile::Builder::new()
+        .prefix("attune_exif_")
+        .suffix(".png")
+        .tempfile()
+        .ok()?;
+    img.write_to(tmp.as_file_mut(), image::ImageFormat::Png).ok()?;
+    log::debug!(
+        "EXIF orientation normalized ({orientation:?}): {}",
+        image_path.display()
+    );
+    Some(tmp)
+}
+
+/// 把 profile 的 `max_side_len` 收敛到安全区间。
+/// 0（来自 `Default`）/ 越界值回退到 `DEFAULT_MAX_SIDE_LEN`。
+/// 下限 512（再小 OCR 无意义），上限 8192（再大耗时/内存不可控）。
+fn sanitize_max_side(v: u32) -> u32 {
+    if (512..=8192).contains(&v) {
+        v
+    } else {
+        super::profile::OcrProfile::DEFAULT_MAX_SIDE_LEN
+    }
+}
+
+/// 文档级 OCR 置信度（批次1-B2）—— 各文本块 `text_score`（CRNN recognition
+/// 置信度）按文本字符数加权平均。长文本块权重更大，更能代表整页质量。
+/// 无文本块（空白页 / OCR 全失败）返回 `None`。
+fn compute_avg_confidence(blocks: &[kreuzberg_paddle_ocr::TextBlock]) -> Option<f32> {
+    let mut weighted = 0.0f64;
+    let mut total_len = 0usize;
+    for b in blocks {
+        let len = b.text.chars().count();
+        if len == 0 {
+            continue;
+        }
+        weighted += b.text_score as f64 * len as f64;
+        total_len += len;
+    }
+    if total_len == 0 {
+        None
+    } else {
+        Some((weighted / total_len as f64) as f32)
+    }
 }
 
 // ── 去斜（Deskew）预处理 ─────────────────────────────────────────────────────
@@ -595,6 +679,59 @@ mod tests {
     fn num_cpus_safe_caps_at_8() {
         let n = num_cpus_safe();
         assert!(n >= 1 && n <= 8, "got {n}");
+    }
+
+    #[test]
+    fn sanitize_max_side_clamps_out_of_range() {
+        use crate::ocr::profile::OcrProfile;
+        // 0（Default）/ 太小 / 太大 → 回退默认
+        assert_eq!(sanitize_max_side(0), OcrProfile::DEFAULT_MAX_SIDE_LEN);
+        assert_eq!(sanitize_max_side(100), OcrProfile::DEFAULT_MAX_SIDE_LEN);
+        assert_eq!(sanitize_max_side(99_999), OcrProfile::DEFAULT_MAX_SIDE_LEN);
+        // 合理值原样保留
+        assert_eq!(sanitize_max_side(3200), 3200);
+        assert_eq!(sanitize_max_side(512), 512);
+        assert_eq!(sanitize_max_side(8192), 8192);
+    }
+
+    #[test]
+    fn compute_avg_confidence_weighted_by_text_length() {
+        use kreuzberg_paddle_ocr::{Point, TextBlock};
+        let blk = |text: &str, score: f32| TextBlock {
+            text: text.to_string(),
+            box_points: vec![Point { x: 0, y: 0 }],
+            box_score: 0.9,
+            angle_index: 0,
+            angle_score: 0.0,
+            text_score: score,
+        };
+        // 无文本块 → None
+        assert!(compute_avg_confidence(&[]).is_none());
+        // 全空文本 → None
+        assert!(compute_avg_confidence(&[blk("", 0.5)]).is_none());
+        // 2 字符@1.0 + 8 字符@0.5 → (2×1.0 + 8×0.5) / 10 = 0.6（长度加权）
+        let blocks = vec![blk("ab", 1.0), blk("cdefghij", 0.5)];
+        let c = compute_avg_confidence(&blocks).expect("some");
+        assert!((c - 0.6).abs() < 1e-4, "expected 0.6, got {c}");
+    }
+
+    #[test]
+    fn normalize_orientation_no_exif_returns_none() {
+        // 无 EXIF orientation 的 PNG → 应返回 None（调用方用原图）
+        let tmp = tempfile::Builder::new()
+            .suffix(".png")
+            .tempfile()
+            .expect("tmp");
+        let img = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+            64,
+            64,
+            image::Luma([200u8]),
+        ));
+        img.save(tmp.path()).expect("save png");
+        assert!(
+            normalize_orientation(tmp.path()).is_none(),
+            "PNG without EXIF orientation should return None"
+        );
     }
 
     // ── deskew tests ──────────────────────────────────────────────────────

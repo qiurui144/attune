@@ -36,6 +36,16 @@ pub struct OcrProfile {
     /// contract / ancient / table 等扫描类场景默认开启；截图类默认关闭。
     #[serde(default)]
     pub deskew: bool,
+    /// OCR 推理时长边缩放上限（像素）。PP-OCR 把图片长边缩到此值再识别 ——
+    /// 越大越清晰、越慢。法律证据（合同 / 借条 / 流水）建议 ≥3200 保留小字细节。
+    /// 0 或越界值在 OCR 调用处回退到 `DEFAULT_MAX_SIDE_LEN`。
+    #[serde(default = "default_max_side_len")]
+    pub max_side_len: u32,
+}
+
+/// `max_side_len` 的 serde 默认值 —— 旧 profile JSON 缺该字段时回退。
+fn default_max_side_len() -> u32 {
+    OcrProfile::DEFAULT_MAX_SIDE_LEN
 }
 
 impl OcrProfile {
@@ -52,17 +62,19 @@ impl OcrProfile {
                 builtin: true,
                 reconstruct_tables: false,
                 deskew: true,
+                max_side_len: 3200,
             },
             OcrProfile {
                 id: "receipt".to_string(),
                 name: "票据 / 流水".to_string(),
                 description: "适合发票、银行流水、收据等小尺寸票据".to_string(),
                 languages: "chi_sim+eng".to_string(),
-                dpi: 200,
+                dpi: 300,
                 tags: vec!["票据".to_string(), "发票".to_string(), "流水".to_string()],
                 builtin: true,
                 reconstruct_tables: true,
                 deskew: false,
+                max_side_len: 3200,
             },
             OcrProfile {
                 id: "screenshot".to_string(),
@@ -74,6 +86,7 @@ impl OcrProfile {
                 builtin: true,
                 reconstruct_tables: false,
                 deskew: false,
+                max_side_len: 2048,
             },
             OcrProfile {
                 id: "ancient".to_string(),
@@ -85,6 +98,7 @@ impl OcrProfile {
                 builtin: true,
                 reconstruct_tables: false,
                 deskew: true,
+                max_side_len: 4096,
             },
             OcrProfile {
                 id: "table".to_string(),
@@ -96,6 +110,7 @@ impl OcrProfile {
                 builtin: true,
                 reconstruct_tables: true,
                 deskew: true,
+                max_side_len: 3200,
             },
             OcrProfile {
                 id: "form".to_string(),
@@ -107,6 +122,7 @@ impl OcrProfile {
                 builtin: true,
                 reconstruct_tables: true,
                 deskew: false,
+                max_side_len: 2560,
             },
             OcrProfile {
                 id: "card".to_string(),
@@ -118,12 +134,16 @@ impl OcrProfile {
                 builtin: true,
                 reconstruct_tables: false,
                 deskew: false,
+                max_side_len: 2560,
             },
         ]
     }
 
     /// 默认 profile id (用户没显式指定 profile 时用)
     pub const DEFAULT_ID: &'static str = "contract";
+
+    /// OCR 长边缩放上限默认值 —— profile 未指定 / 越界时回退。
+    pub const DEFAULT_MAX_SIDE_LEN: u32 = 2048;
 
     /// 校验 dpi 合法 (PP-OCR 在 200-600 之间最稳定)
     pub fn validate(&self) -> Result<(), String> {

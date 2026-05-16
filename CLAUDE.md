@@ -312,6 +312,46 @@ Settings UI 采用 ChatGPT/Gemini/Claude 共同范式：模态对话框（左 ta
 - 后端端口: 18900
 - **API path 命名 kebab-case** (per OPT-5). 新 path 必须 kebab; 旧 snake path 保留 alias 1 release 周期后删
 
+### Web UI 国际化（i18n）规范（强制 — 2026-05-15 确立，杜绝中英混杂）
+
+**问题**：`attune-server/ui/src/` 下多个视图把界面文案**硬编码成中文字面量**，绕过 `t()`。
+这些字符串永远显示中文；而 wizard / Sidebar / 组件走 `t()` 会随 locale 切换 —— 当
+locale=en（英文浏览器 / 用户切英文）时就出现「英文外壳 + 中文视图」的中英混杂。
+
+**根因**：i18n key 表（`i18n/zh.ts` + `i18n/en.ts`）本身齐全（key 集合一致），但 `.tsx`
+里大量 `toast('error', '保存失败')` / `title="新建项目"` / `placeholder="如：..."` / JSX
+文本节点 `<span>刷新</span>` 没有进 `t()`。i18n 引擎 `t()` 缺 key 时按 zh→key 兜底，
+所以「漏写一个 locale」也会静默显示错语言。
+
+**铁律（所有 UI 改动强制遵守）**：
+
+1. **任何用户可见字符串必须走 `t()`**，零硬编码。易漏点全覆盖：
+   - JSX 文本节点：`<span>刷新</span>` → `<span>{t('common.refresh')}</span>`
+   - 属性：`title=` / `placeholder=` / `label=` / `description=` / `aria-label=`
+   - `toast(type, msg)` 的 `msg` 参数
+   - 按钮文案、表头 `<th>`、`EmptyState` 的 title/description、`error` 提示文案
+   - 动态拼接用 `{param}` 插值（`t('x.created', {name})`），禁止 `'已创建：' + name`
+2. **新增 key 必须同时写入 `zh.ts` 和 `en.ts`**，两文件 key 集合永远完全一致。
+   只写一个 → 另一 locale 静默 fallback 显示错语言。
+3. **注释不受限** —— `//` `/* */` 里的中文是开发注释、不是 UI，无需处理。
+4. **language-neutral 值例外**：品牌名（Attune）、技术术语（AI/OCR/WebDAV/LPR）、URL、
+   纯数字 —— zh/en 两边值可相同，但**仍必须建 key、走 `t()`**，不可硬编码。
+
+**提交前自检（强制 grep 守卫，两条命令都必须无输出）**：
+```bash
+cd rust/crates/attune-server/ui/src
+# (1) 硬编码中文 UI 字面量（toast / 属性值 / JSX 文本节点）
+grep -rnP "(toast\([^)]*'[^']*[\x{4e00}-\x{9fff}]|(title|placeholder|label|description|aria-label)=\"[^\"]*[\x{4e00}-\x{9fff}]|>[^<{]*[\x{4e00}-\x{9fff}])" --include="*.tsx" . | grep -v "/i18n/"
+# (2) zh / en key 集合必须一致
+diff <(grep -oP "^\s+'[\w.]+'\s*:" i18n/zh.ts | tr -d " ':" | sort) \
+     <(grep -oP "^\s+'[\w.]+'\s*:" i18n/en.ts | tr -d " ':" | sort)
+```
+有输出 = 引入了中英混杂或 key 不齐，必须修掉再提交。
+
+**存量债务**：2026-05-15 审计约 100 处硬编码中文待迁移（ProjectsView / SkillsView /
+MarketplaceView / SettingsView / Step3LLM / Step4Hardware 等）。**新代码严禁再增**；
+存量按视图逐个迁移，迁完一个视图即在该视图内 grep 守卫归零。
+
 ### Rust 商用线约定 (v0.7 sprint 增量：记忆护城河)
 
 **文档生命周期协调（v0.7 新规）**:

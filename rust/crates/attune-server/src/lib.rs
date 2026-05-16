@@ -108,6 +108,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
                 .patch(routes::items::update_item)
                 .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)))
         .route("/api/v1/items/{id}/stats", get(routes::items::get_item_stats))
+        // 批次1-A1：取回原始证据文件（变体 A「查看证据原文」）
+        .route("/api/v1/items/{id}/original", get(routes::items::get_item_original))
         // v0.6 Phase A.5.4 per-file 隐私分级
         .route("/api/v1/items/protected", get(routes::items::list_protected_items))
         .route(

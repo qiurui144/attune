@@ -3,6 +3,7 @@
 import type { JSX } from 'preact';
 import { signal } from '@preact/signals';
 import { useEffect } from 'preact/hooks';
+import { genId } from '../util';
 
 export type ToastKind = 'info' | 'success' | 'warning' | 'error';
 export type ToastItem = {
@@ -16,7 +17,7 @@ export type ToastItem = {
 const toasts = signal<ToastItem[]>([]);
 
 export function toast(kind: ToastKind, message: string, duration = 3000): string {
-  const id = crypto.randomUUID();
+  const id = genId();
   toasts.value = [...toasts.value, { id, kind, message, duration }];
   if (duration > 0) {
     setTimeout(() => dismissToast(id), duration);

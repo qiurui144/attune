@@ -336,6 +336,28 @@ export const en = {
   'settings.ai.web_search.enabled_toast': 'Web search enabled',
   'settings.ai.web_search.disabled_toast': 'Web search disabled',
 
+  // ─── Variant A · agent result panel ─────────────────
+  'agentpanel.facts': 'Facts',
+  'agentpanel.required': 'Required facts',
+  'agentpanel.ready': 'ready',
+  'agentpanel.pending': 'pending',
+  'agentpanel.evidence': 'Evidence',
+  'agentpanel.citation': 'Citations',
+  'agentpanel.noCitation': 'No citation',
+  'agentpanel.source': 'Source',
+  'agentpanel.source.ai': 'AI-extracted',
+  'agentpanel.source.lawyer': 'Lawyer-confirmed',
+  'agentpanel.source.none': 'Unconfirmed',
+  'agentpanel.notExtracted': 'Not extracted',
+  'agentpanel.conflict': 'Citation conflict',
+  'agentpanel.correct': 'Correct',
+  'agentpanel.newValue': 'New value',
+  'agentpanel.note': 'Reason (optional)',
+  'agentpanel.save': 'Save & recompute',
+  'agentpanel.cancel': 'Cancel',
+  'agentpanel.computation': 'Result',
+  'agentpanel.blocked': 'Calculation blocked',
+
   // ─── Plural ─────────────────────────────────────────
   'items.count': { one: '{count} item', other: '{count} items' },
 } as const;

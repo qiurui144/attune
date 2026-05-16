@@ -140,6 +140,19 @@ pub async fn upload_file(
         tracing::debug!(signal = "doc_create", error = %e, "record_signal_event failed (non-fatal)");
     }
 
+    // 批次1-A1：留存原始上传文件（AES-GCM 加密），供「查看证据原文」核对 OCR 转录。
+    // items.content 只存解析后的文本；律师须能回看原始扫描/图片核验识别准确度。
+    // 失败不阻塞上传 — 但记 warn（原件丢失 = 证据无法回溯核验）。
+    if let Err(e) = vault.store().insert_item_blob(
+        &dek,
+        &item_id,
+        &filename,
+        mime_from_filename(&filename),
+        &data[..],
+    ) {
+        tracing::warn!("A1 insert_item_blob failed for item {item_id}: {e}");
+    }
+
     // Add to fulltext index immediately (search works without AI)
     {
         let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
@@ -345,4 +358,34 @@ pub async fn upload_file(
         "chunks_queued": chunk_counter,
         "status": "processing"
     })))
+}
+
+/// 由文件名扩展名推断 MIME —— 用于 A1 原件留存的 Content-Type，
+/// 以及取回路由让浏览器正确内联预览图片 / PDF。
+fn mime_from_filename(filename: &str) -> &'static str {
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tiff" | "tif" => "image/tiff",
+        "gif" => "image/gif",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        "docx" => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+        "doc" => "application/msword",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "flac" => "audio/flac",
+        _ => "application/octet-stream",
+    }
 }

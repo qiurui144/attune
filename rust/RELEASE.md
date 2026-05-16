@@ -1,5 +1,58 @@
 # attune 版本记录
 
+## v0.7.0-dev (2026-05-16 sprint) — law-pro 接入 + 证据可溯源强化
+
+attune-pro 的 law-pro 律师插件接入 attune 主程序并端到端验证（Playwright 真 Chrome
+37 元素 + 复杂证据链金额计算 12 断言全绿；本机 + AMD 部署机双环境）。围绕
+「证据可溯源 / 抽取准确度 / 上下文预算 / 隐私」做 4 批次强化。
+
+### 批次 1 — 证据可溯源地基
+
+| 子项 | 改动 |
+|------|------|
+| A1 原始证据留存 | 新 `item_blobs` 表（AES-GCM 加密存上传原件）+ `GET /api/v1/items/{id}/original` 取回路由 —— 律师可回看原始扫描件核对 OCR。软删除时连坐清理（防"忘记"后原件残留）。 |
+| B2 OCR 置信度 | `OcrOutput.avg_confidence`（长度加权 text_score）—— 下游判断证据 OCR 是否可信 |
+| C1/C2 grounded 抽取 | law-pro `fact_extractor` —— LLM 抽取每字段强制附原文 quote，`verify_grounding` 校验 quote∈原文，幻觉 quote 作废为 null（"无依据不出数字"契约） |
+
+### 批次 2 — 上下文预算管理器
+
+`attune-core::context_budget` —— 按 LLM 模型名查上下文窗口（qwen 32K / gemini 1M /
+claude 200K…），四段（system/知识/历史/消息）总账分配。替代写死的
+`INJECTION_BUDGET=2000` / `MAX_HISTORY_DEPTH=20`，接入 ChatEngine + `/chat` 路由；
+历史超窗按窗口裁剪并插省略说明。
+
+### 批次 3 — 抽取准确度度量框架
+
+law-pro `fact_extractor::accuracy` —— per-field 对/错/漏/多报 → precision/recall，
+对照人工真值。优化抽取前先有度量基线。
+
+### 批次 4 — 计算正确性 + 隐私
+
+| 子项 | 改动 |
+|------|------|
+| D2 LPR date-aware | `interest_calculator` LPR 4 倍司法保护上限按起息日查历史 LPR 表，替代写死 0.138；`lpr_capped` 上限按 `rate_type` 换算到同周期 |
+| F1 敏感案件本地 LLM | `LlmProvider::is_local()` + `/chat` 守卫：开启「强制本地」且注入证据时拦截云端 LLM（含压缩段 `summary_llm` 旁路） |
+
+### 前端 — 变体 A · agent 结果面板
+
+`ui/src/components/AgentResultPanel.tsx` —— 通用 agent 结果面板：基础事实值默认显示、
+依据默认收起可展开（凭据卡片 + 多依据冲突横幅 + 来源标签 + 修正表单）、完整度计数器、
+计算阻断态。接入 Drawer 系统。
+
+### OCR / 前端修复
+
+- `crypto.randomUUID` 仅安全上下文可用 → 新 `genId()` 降级，修复非安全上下文
+  （LAN IP 明文 HTTP）下前端「启动失败」
+- OCR EXIF orientation 归一（手机照片自动摆正再 OCR）+ `max_side_len` 改 `OcrProfile`
+  可配（合同/流水 ≥3200 保留小字细节）
+
+### 验证
+
+- 单测：attune-core **908/0** · law-pro **41/0**
+- 代码审查 2 轮，修复 4 bug（软删除孤儿 blob / 已删 item 原件可取回 / F1 压缩段旁路 /
+  lpr_capped 年化上限 vs 周期利率单位不一致）
+- E2E：复杂证据链 **12/0** · Playwright UI **37/0**
+
 ## v0.7.0-dev (2026-05-15 sprint) — 安全有效记忆护城河 Phase A+B
 
 > **「优势不在于模型，而在于以安全有效的记忆」**（per 用户决策 2026-05-15）。

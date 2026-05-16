@@ -2,6 +2,7 @@
 
 mod types;
 pub mod items;
+pub mod item_blobs;
 mod dirs;
 mod queue;
 mod history;
@@ -66,6 +67,19 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
 CREATE INDEX IF NOT EXISTS idx_items_deleted ON items(is_deleted);
+
+-- 批次1-A1 (2026-05-15)：原始证据文件留存。
+-- items.content 只存 OCR 文本；律师需核对原图判断 OCR 转录是否准确 →
+-- 此表存上传时的原始字节（AES-GCM 加密）。一个 item 至多一份原件。
+-- CREATE TABLE IF NOT EXISTS：老 vault 下次 open 自动获得空表，无需独立 migration。
+CREATE TABLE IF NOT EXISTS item_blobs (
+    item_id     TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    filename    TEXT NOT NULL,
+    mime        TEXT NOT NULL,
+    blob        BLOB NOT NULL,
+    byte_len    INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS embed_queue (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

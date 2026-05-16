@@ -44,7 +44,9 @@ export type DrawerPayload =
   | { type: 'reader'; itemId: string }
   | { type: 'citation'; itemId: string; snippet: string }
   | { type: 'annotation-composer'; itemId: string; offset: number; selection: string }
-  | { type: 'help'; topic: string };
+  | { type: 'help'; topic: string }
+  // 变体 A · agent 结果面板（law-pro 金额计算等）
+  | { type: 'agent-result'; result: import('../components/AgentResultPanel').AgentResult };
 export const drawerContent = signal<DrawerPayload | null>(null);
 
 // ── 连接层（见 store/connection.ts） ─────────────────────────────

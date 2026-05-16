@@ -181,6 +181,9 @@ pub fn parse_bytes_with_profile(
                 tmp.flush().map_err(VaultError::Io)?;
             }
             let output = provider.extract_structured(tmp.path(), &profile)?;
+            if let Some(c) = output.avg_confidence {
+                log::info!("OCR 图片 '{filename}' avg_confidence={c:.3}");
+            }
             let content = if let Some(table) = output.table_markdown {
                 format!("{}\n\n{}", output.text, table)
             } else {

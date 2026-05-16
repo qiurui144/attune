@@ -48,6 +48,44 @@ pub async fn get_item(
     }
 }
 
+/// GET /api/v1/items/{id}/original — 取回 A1 留存的原始证据文件（解密后内联返回）。
+///
+/// 变体 A「查看证据原文」入口：律师点击即在浏览器内联预览原始扫描件 / 图片 / PDF，
+/// 核对 OCR 转录是否准确。404 = 该 item 无留存原件（纯文本笔记 / A1 之前入库的老 item）。
+pub async fn get_item_original(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+    let vault = state.vault.lock()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+    let dek = vault.dek_db().map_err(|e| {
+        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+    })?;
+    match vault.store().get_item_blob(&dek, &id) {
+        Ok(Some(blob)) => {
+            use axum::http::header;
+            // 证据敏感 → no-store 防浏览器缓存落盘；inline → 内联预览不下载
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, blob.mime)
+                .header(header::CONTENT_DISPOSITION, "inline")
+                .header(header::CACHE_CONTROL, "no-store")
+                .body(axum::body::Body::from(blob.bytes))
+                .map_err(|e| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+                })
+        }
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no original file retained for this item"})),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct UpdateRequest {
     pub title: Option<String>,

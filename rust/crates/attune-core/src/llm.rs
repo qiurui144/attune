@@ -115,6 +115,13 @@ pub trait LlmProvider: Send + Sync {
 
     /// 当前使用的模型名（用于 tags.model 记录）
     fn model_name(&self) -> &str;
+
+    /// 是否为本地 LLM（Ollama / localhost endpoint）。批次4-F1 隐私判定用：
+    /// 敏感案件强制本地时，云端 provider 不得处理注入了证据的对话。
+    /// 默认 `false`（保守：未知 provider 视为云端 → F1 拦截，偏安全侧）。
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 // OllamaChatRequest / OllamaChatMessage structs removed v0.6.4 — both chat_sync
@@ -320,6 +327,10 @@ impl LlmProvider for OllamaLlmProvider {
 
     fn model_name(&self) -> &str {
         &self.model
+    }
+
+    fn is_local(&self) -> bool {
+        true // Ollama 始终是本地 runtime
     }
 }
 
@@ -588,6 +599,16 @@ impl LlmProvider for OpenAiLlmProvider {
 
     fn model_name(&self) -> &str {
         &self.model
+    }
+
+    fn is_local(&self) -> bool {
+        // OpenAI 兼容协议既可指向云端也可指向本地（Ollama v1 / LM Studio / vLLM）。
+        // 按 endpoint 主机判定：localhost / 回环地址 = 本地。
+        let e = self.endpoint.to_ascii_lowercase();
+        e.contains("localhost")
+            || e.contains("127.0.0.1")
+            || e.contains("0.0.0.0")
+            || e.contains("[::1]")
     }
 }
 

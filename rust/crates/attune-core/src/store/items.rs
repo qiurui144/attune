@@ -366,6 +366,14 @@ impl Store {
                 "DELETE FROM embed_queue WHERE item_id = ?1",
                 params![id],
             )?;
+            // 批次1-A1：item 软删除时连坐删原始证据 blob。item_blobs 有 FK CASCADE，
+            // 但软删除（is_deleted=1）不触发 CASCADE → 必须显式删。否则用户"忘记"
+            // 敏感证据后，加密原件仍留存、GET /items/{id}/original 仍可取回
+            // —— 法律证据产品的数据留存漏洞。
+            self.conn.execute(
+                "DELETE FROM item_blobs WHERE item_id = ?1",
+                params![id],
+            )?;
         }
         Ok(affected > 0)
     }

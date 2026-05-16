@@ -3,7 +3,7 @@
  */
 
 import type { JSX } from 'preact';
-import { Drawer, Reader } from '../components';
+import { Drawer, Reader, AgentResultPanel } from '../components';
 import { drawerContent } from '../store/signals';
 
 export function DrawerHost(): JSX.Element | null {
@@ -32,6 +32,8 @@ function titleFor(c: NonNullable<typeof drawerContent.value>): string {
       return '创建批注';
     case 'help':
       return `帮助 · ${c.topic}`;
+    case 'agent-result':
+      return c.result.title;
   }
 }
 
@@ -77,5 +79,7 @@ function renderContent(c: NonNullable<typeof drawerContent.value>): JSX.Element 
           <p>帮助内容正在准备中。</p>
         </div>
       );
+    case 'agent-result':
+      return <AgentResultPanel result={c.result} />;
   }
 }
