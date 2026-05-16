@@ -223,6 +223,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Web UI (embedded single-page HTML)
         .route("/", get(routes::ui::index))
         .route("/ui", get(routes::ui::index))
+        // favicon：返回 204 避免浏览器自动请求落空刷 console error
+        .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }))
         // Guard middleware for all other routes
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::vault_guard))
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::bearer_auth_guard))

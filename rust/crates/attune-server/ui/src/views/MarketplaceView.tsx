@@ -11,6 +11,7 @@ import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { api } from '../store/api';
 import { toast } from '../components';
+import { t } from '../i18n';
 
 interface PluginListing {
   id: string;
@@ -43,11 +44,13 @@ interface InstallResponse {
   download_url: string;
 }
 
-const PLAN_LABELS: Record<string, string> = {
-  individual: '免费',
-  pro: 'Pro',
-  enterprise: '企业版',
-};
+/** plan id → 本地化标签；未知 plan 原样返回 */
+function planLabel(plan: string): string {
+  if (plan === 'individual') return t('market.plan.individual');
+  if (plan === 'pro') return t('market.plan.pro');
+  if (plan === 'enterprise') return t('market.plan.enterprise');
+  return plan;
+}
 
 export function MarketplaceView(): JSX.Element {
   const [data, setData] = useState<ListResponse | null>(null);
@@ -80,9 +83,18 @@ export function MarketplaceView(): JSX.Element {
         {},
       );
       const trialMsg = resp.trial_expires
-        ? ` — 试用至 ${new Date(resp.trial_expires).toLocaleDateString('zh-CN')}`
+        ? t('market.toast.trial_until', {
+            date: new Date(resp.trial_expires).toLocaleDateString('zh-CN'),
+          })
         : '';
-      toast('success', `${plugin.name} v${resp.version} 已安装${trialMsg}`);
+      toast(
+        'success',
+        t('market.toast.installed', {
+          name: plugin.name,
+          version: resp.version,
+          trial: trialMsg,
+        }),
+      );
       // Reload listing 让 trial 状态更新
       await load();
     } catch (e) {
@@ -90,10 +102,14 @@ export function MarketplaceView(): JSX.Element {
       if (msg.includes('plan_required') || msg.includes('402')) {
         toast(
           'error',
-          `${plugin.name} 需要 ${PLAN_LABELS[plugin.min_plan] ?? plugin.min_plan} 会员。访问 ${data?.upgrade_url} 升级。`,
+          t('market.toast.plan_required', {
+            name: plugin.name,
+            plan: planLabel(plugin.min_plan),
+            url: data?.upgrade_url ?? '',
+          }),
         );
       } else {
-        toast('error', `安装失败: ${msg}`);
+        toast('error', t('market.toast.install_failed', { message: msg }));
       }
     } finally {
       setInstalling(null);
@@ -103,7 +119,7 @@ export function MarketplaceView(): JSX.Element {
   if (loading) {
     return (
       <div style={{ padding: 'var(--space-5)', textAlign: 'center', color: 'var(--color-text-secondary)' }}>
-        正在加载插件市场...
+        {t('market.loading')}
       </div>
     );
   }
@@ -111,9 +127,11 @@ export function MarketplaceView(): JSX.Element {
   if (error || !data) {
     return (
       <div style={{ padding: 'var(--space-5)' }}>
-        <div style={{ color: 'var(--color-error)' }}>加载失败：{error ?? '无数据'}</div>
+        <div style={{ color: 'var(--color-error)' }}>
+          {t('market.load_failed', { message: error ?? t('market.no_data') })}
+        </div>
         <button onClick={() => void load()} style={{ marginTop: 'var(--space-3)' }}>
-          重试
+          {t('common.retry')}
         </button>
       </div>
     );
@@ -123,13 +141,13 @@ export function MarketplaceView(): JSX.Element {
     <div style={{ padding: 'var(--space-5)', maxWidth: 1200, margin: '0 auto' }}>
       <header style={{ marginBottom: 'var(--space-5)', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <div>
-          <h1 style={{ fontSize: 'var(--text-2xl)', fontWeight: 600, margin: 0 }}>插件市场</h1>
+          <h1 style={{ fontSize: 'var(--text-2xl)', fontWeight: 600, margin: 0 }}>{t('market.title')}</h1>
           <div style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>
-            当前会员：<strong>{PLAN_LABELS[data.user_plan] ?? data.user_plan}</strong>
+            {t('market.current_plan')}<strong>{planLabel(data.user_plan)}</strong>
             {' · '}
-            提供商：<code>{data.provider}</code>
+            {t('market.provider')}<code>{data.provider}</code>
             {' · '}
-            hub v{data.hub_version}
+            {t('market.hub_version', { version: data.hub_version })}
           </div>
         </div>
         {data.user_plan === 'individual' && (
@@ -146,14 +164,16 @@ export function MarketplaceView(): JSX.Element {
               fontSize: 'var(--text-sm)',
             }}
           >
-            升级到 Pro
+            {t('market.upgrade_to_pro')}
           </a>
         )}
       </header>
 
       {data.plugins.length === 0 ? (
         <div style={{ color: 'var(--color-text-secondary)' }}>
-          暂无可用插件。可在 <strong>设置 → PluginHub</strong> 配置 hub URL + license key 接入真实市场。
+          {t('market.empty.before')}
+          <strong>{t('market.empty.config_path')}</strong>
+          {t('market.empty.after')}
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 'var(--space-4)' }}>
@@ -187,8 +207,8 @@ export function MarketplaceView(): JSX.Element {
                   }}
                 >
                   {p.available
-                    ? `${PLAN_LABELS[p.min_plan] ?? p.min_plan} ✓`
-                    : `需 ${PLAN_LABELS[p.min_plan] ?? p.min_plan}`}
+                    ? t('market.plan.available', { plan: planLabel(p.min_plan) })
+                    : t('market.plan.required', { plan: planLabel(p.min_plan) })}
                 </span>
               </div>
 
@@ -230,7 +250,7 @@ export function MarketplaceView(): JSX.Element {
                       opacity: installing === p.id ? 0.6 : 1,
                     }}
                   >
-                    {installing === p.id ? '安装中...' : '安装'}
+                    {installing === p.id ? t('market.installing') : t('market.install')}
                   </button>
                 ) : p.trial_available ? (
                   <button
@@ -247,7 +267,9 @@ export function MarketplaceView(): JSX.Element {
                       opacity: installing === p.id ? 0.6 : 1,
                     }}
                   >
-                    {installing === p.id ? '启动中...' : `免费试用 ${p.trial_days} 天`}
+                    {installing === p.id
+                      ? t('market.trial_starting')
+                      : t('market.trial', { days: p.trial_days })}
                   </button>
                 ) : (
                   <a
@@ -265,7 +287,7 @@ export function MarketplaceView(): JSX.Element {
                       textAlign: 'center',
                     }}
                   >
-                    需升级会员
+                    {t('market.upgrade_required')}
                   </a>
                 )}
               </div>

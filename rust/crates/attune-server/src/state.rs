@@ -246,10 +246,16 @@ impl AppState {
         //   优先从 ~/.local/share/attune/vectors.encbin 加密加载；不存在或损坏
         //   降级为空 HNSW。写入在 start_queue_worker 批次结束时 flush（每 20 次 or
         //   每 10 分钟取近者），clear_search_engines 锁定前再 flush 一次。
+        // 锁序：先取 vault（拿 dek）再取 vectors —— 与文档化全局序
+        // vault → vectors → fulltext → embedding 一致，杜绝 vectors→vault 反序持锁。
+        let vectors_path = attune_core::platform::data_dir().join("vectors.encbin");
+        let dek_opt = self
+            .vault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .dek_db()
+            .ok();
         if let Ok(mut guard) = self.vectors.lock() {
-            let vectors_path = attune_core::platform::data_dir().join("vectors.encbin");
-            let dek_opt = self.vault.lock().unwrap_or_else(|e| e.into_inner())
-                .dek_db().ok();
             *guard = match dek_opt {
                 Some(dek) if vectors_path.exists() => {
                     match VectorIndex::load_encrypted(&dek, &vectors_path, 1024) {

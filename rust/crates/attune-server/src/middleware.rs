@@ -20,6 +20,8 @@ pub async fn vault_guard(
         || path == "/"
         || path == "/ui"
         || path.starts_with("/ui/")
+        // /favicon.ico — 浏览器自动请求；不 bypass 会在 vault locked 时回 403 刷 console error
+        || path == "/favicon.ico"
         // /api/v1/member/* — 会员状态 + lock 决策, 不读 vault, 不需 unlock
         || path.starts_with("/api/v1/member")
         // /api/v1/ocr/profiles — 用户场景预设 (持久化磁盘文件, 不读 vault).

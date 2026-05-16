@@ -734,6 +734,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normalize_orientation_exif_rotate90_swaps_dimensions() {
+        // fixture: 100×60 JPEG, EXIF Orientation=6 (Rotate 90 CW)。
+        // 归一化后旋转 90° → 宽高互换 60×100；证明 EXIF 旋转防误判路径生效。
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/exif_orientation6.jpg"
+        );
+        let tmp = normalize_orientation(std::path::Path::new(fixture))
+            .expect("EXIF Orientation=6 应触发归一化, 返回 Some");
+        let corrected = image::ImageReader::open(tmp.path())
+            .expect("open corrected")
+            .decode()
+            .expect("decode corrected");
+        assert_eq!(
+            (corrected.width(), corrected.height()),
+            (60, 100),
+            "Orientation=6 旋转 90° 后宽高应互换 (100×60 → 60×100)"
+        );
+    }
+
     // ── deskew tests ──────────────────────────────────────────────────────
 
     #[test]

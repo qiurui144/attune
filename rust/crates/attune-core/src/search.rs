@@ -78,8 +78,6 @@ pub fn apply_cross_lang_penalty(results: &mut [SearchResult], query_lang: Lang) 
     }
 }
 
-fn default_corpus_domain() -> String { "general".into() }
-
 /// v0.6 Phase B F-Pro: cross-domain 降权系数 (与 CROSS_LANG_PENALTY 共用机制)。
 /// query domain 已知（如 'legal'）但 doc.corpus_domain 不同（如 'tech'）→ score *= 该系数。
 /// 0.4 比 cross-lang 0.3 略高 — 同语种跨领域比跨语言保留更多召回（专业术语共享）。
@@ -174,7 +172,6 @@ pub struct SearchResult {
     /// v0.6 Phase B F-Pro：item.corpus_domain（legal/tech/medical/.../general）。
     /// search 阶段按 query intent 跨域降权防止"反洗钱"被 cs-notes 顶占。
     /// 默认 "general"（无标签 corpus）。
-    #[serde(default = "default_corpus_domain")]
     pub corpus_domain: String,
     // ── F2 (W3 batch A, 2026-04-27)：breadcrumb + offset 透传 ─────────────
     // per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §4

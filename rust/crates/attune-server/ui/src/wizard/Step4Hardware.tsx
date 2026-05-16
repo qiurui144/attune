@@ -82,11 +82,11 @@ export function Step4Hardware({
     async function run() {
       // 阶段扫描动画
       const steps: ScanStep[] = [
-        { label: '检测 CPU…', done: false },
-        { label: '检测 GPU…', done: false },
-        { label: '检测 NPU…', done: false },
-        { label: '检测 RAM…', done: false },
-        { label: '匹配模型…', done: false },
+        { label: t('wizard.hw.scan.cpu'), done: false },
+        { label: t('wizard.hw.scan.gpu'), done: false },
+        { label: t('wizard.hw.scan.npu'), done: false },
+        { label: t('wizard.hw.scan.ram'), done: false },
+        { label: t('wizard.hw.scan.model'), done: false },
       ];
       setScanSteps([...steps]);
 
@@ -180,7 +180,7 @@ export function Step4Hardware({
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
         <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0, color: 'var(--color-danger)' }}>
-          ⚠️ 设备规格不支持运行 Attune
+          {t('wizard.hw.unsupported.heading')}
         </h2>
         <div
           style={{
@@ -195,13 +195,13 @@ export function Step4Hardware({
           }}
         >
           <div>
-            <strong>检测结果：</strong>
+            <strong>{t('wizard.hw.unsupported.result')}</strong>
           </div>
           <div>· CPU: <code>{hw?.cpu_model ?? '-'}</code></div>
           {aiStack.hardware.cpu_passmark != null && (
-            <div>· Passmark: <code>{aiStack.hardware.cpu_passmark}</code> (要求 ≥ 4000)</div>
+            <div>· Passmark: <code>{aiStack.hardware.cpu_passmark}</code> ({t('wizard.hw.unsupported.passmark')})</div>
           )}
-          <div>· RAM: <code>{aiStack.hardware.ram_gb ?? '-'} GB</code> (要求 ≥ 4 GB)</div>
+          <div>· RAM: <code>{aiStack.hardware.ram_gb ?? '-'} GB</code> ({t('wizard.hw.unsupported.ram')})</div>
         </div>
         <div
           style={{
@@ -211,15 +211,15 @@ export function Step4Hardware({
             fontSize: 'var(--text-sm)',
           }}
         >
-          <strong>推荐方案：</strong>
+          <strong>{t('wizard.hw.unsupported.recommend')}</strong>
           <ul style={{ marginTop: 'var(--space-2)', paddingLeft: 'var(--space-4)' }}>
-            <li>使用 K3 一体机（开箱即用，配本地 AI 全套）</li>
-            <li>更换设备：8 核近代 CPU (Passmark ≥ 9000) + 8GB RAM</li>
+            <li>{t('wizard.hw.unsupported.option_k3')}</li>
+            <li>{t('wizard.hw.unsupported.option_device')}</li>
           </ul>
         </div>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
           <Button onClick={() => window.close?.()} variant="ghost">
-            退出
+            {t('wizard.hw.exit')}
           </Button>
         </div>
       </div>
@@ -252,16 +252,16 @@ export function Step4Hardware({
         {!allScanDone ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
             <span className="spinner" />
-            正在检测你的硬件…
+            {t('wizard.hw.detecting')}
           </div>
         ) : (
           <>
             <div style={{ fontWeight: 600, color: 'var(--color-success)' }}>
-              ✓ 已自动检测你的硬件并选择最佳配置
+              {t('wizard.hw.detected')}
             </div>
             {hw && (
               <div style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-xs)' }}>
-                {[hw.cpu_model, hw.gpu_model ?? '纯 CPU', `${hw.total_ram_gb ?? 0} GB 内存`].filter(Boolean).join(' · ')}
+                {[hw.cpu_model, hw.gpu_model ?? t('wizard.hw.cpu_only'), t('wizard.hw.ram_summary', { gb: hw.total_ram_gb ?? 0 })].filter(Boolean).join(' · ')}
               </div>
             )}
           </>
@@ -295,7 +295,7 @@ export function Step4Hardware({
             }}
           >
             <MiniStat label="CPU" value={hw.cpu_model ?? '—'} />
-            <MiniStat label="GPU" value={hw.gpu_model ?? '纯 CPU 模式'} />
+            <MiniStat label="GPU" value={hw.gpu_model ?? t('wizard.hw.cpu_only_mode')} />
             <MiniStat label="NPU" value={hw.npu_type ?? '—'} />
             <MiniStat label="RAM" value={`${hw.total_ram_gb ?? 0} GB`} />
           </div>
@@ -313,17 +313,17 @@ export function Step4Hardware({
             fontSize: 'var(--text-sm)',
           }}
         >
-          当前硬件规格不建议本地对话，流程已切换为云端 / K3 优先。
+          {t('wizard.hw.local_blocked')}
         </div>
       )}
 
       {hw && !localChatBlocked && (
         <div className="fade-slide-in" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-          <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>自动配置结果</div>
+          <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>{t('wizard.hw.auto_result')}</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-            <Pill label="对话模型" value="下一步选择" />
-            <Pill label="向量索引" value="已自动配置" />
-            <Pill label="本地摘要" value={displaySummaryLabel(hw.recommended_summary ?? null)} />
+            <Pill label={t('wizard.hw.pill.chat_model')} value={t('wizard.hw.pill.next_step')} />
+            <Pill label={t('wizard.hw.pill.vector_index')} value={t('wizard.hw.pill.auto_configured')} />
+            <Pill label={t('wizard.hw.pill.local_summary')} value={displaySummaryLabel(hw.recommended_summary ?? null)} />
           </div>
         </div>
       )}
@@ -354,7 +354,7 @@ function normalizeSummaryModel(model?: string | null): string | null {
 }
 
 function displaySummaryLabel(model: string | null): string {
-  return model ?? '自动（按硬件）';
+  return model ?? t('wizard.hw.summary_auto');
 }
 
 function Pill({ label, value }: { label: string; value: string }): JSX.Element {

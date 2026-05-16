@@ -12,26 +12,26 @@ Attune is a generic personal AI knowledge base for **any individual knowledge wo
 
 ## 📥 Download
 
-Latest stable: **server v0.6.1** · **desktop v0.6.0**
-Latest pre-release: **v0.6.3-rc.1** (server tarball; desktop installer pending NSIS fix)
+Latest stable: **server v0.6.3** · **desktop v0.6.3**
 
-### Desktop app (Web UI + system tray) — [desktop-v0.6.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.6.0)
+### Desktop app (Web UI + system tray) — [desktop-v0.6.3 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.6.3)
 
 | Platform | File | Size | Notes |
 |----------|------|------|-------|
-| Windows | [`Attune_0.6.0_x64-setup.exe`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_x64-setup.exe) | 16 MB | NSIS installer (recommended) |
-| Windows | [`Attune_0.6.0_x64_en-US.msi`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_x64_en-US.msi) | 31 MB | MSI for enterprise |
-| Linux deb | [`Attune_0.6.0_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.deb) | 27 MB | Debian/Ubuntu |
-| Linux AppImage | [`Attune_0.6.0_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.AppImage) | 94 MB | Generic Linux |
+| Windows | [`Attune_0.6.3_x64-setup.exe`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.3/Attune_0.6.3_x64-setup.exe) | 17 MB | NSIS installer (recommended) |
+| Windows | [`Attune_0.6.3_x64_en-US.msi`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.3/Attune_0.6.3_x64_en-US.msi) | 33 MB | MSI for enterprise |
+| Linux deb | [`Attune_0.6.3_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.3/Attune_0.6.3_amd64.deb) | 29 MB | Debian/Ubuntu |
+| Linux rpm | [`Attune-0.6.3-1.x86_64.rpm`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.3/Attune-0.6.3-1.x86_64.rpm) | 29 MB | RHEL/Fedora |
+| Linux AppImage | [`Attune_0.6.3_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.3/Attune_0.6.3_amd64.AppImage) | 97 MB | Generic Linux |
 
-### Server / CLI binaries (headless / NAS / server) — [v0.6.1 Release](https://github.com/qiurui144/attune/releases/tag/v0.6.1)
+### Server / CLI binaries (headless / NAS / server) — [v0.6.3 Release](https://github.com/qiurui144/attune/releases/tag/v0.6.3)
 
 | Platform | File |
 |----------|------|
-| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-x86_64.tar.gz) |
-| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-aarch64.tar.gz) |
-| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-macos-aarch64.tar.gz) |
-| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-windows-x86_64.zip) |
+| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.3/attune-linux-x86_64.tar.gz) |
+| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.3/attune-linux-aarch64.tar.gz) |
+| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.3/attune-macos-aarch64.tar.gz) |
+| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.6.3/attune-windows-x86_64.zip) |
 
 > macOS Intel: build from source with `cargo build --release` (Apple Silicon already covers modern Mac users). SHA256 checksum file ships with each archive.
 

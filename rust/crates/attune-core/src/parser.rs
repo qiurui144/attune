@@ -533,7 +533,7 @@ fn xlsx_bytes_to_text(data: &[u8], ext: &str) -> Result<String> {
                             Data::Float(f) => format!("{f}"),
                             Data::Int(i) => format!("{i}"),
                             Data::Bool(b) => format!("{b}"),
-                            Data::Error(e) => format!("#ERR"),
+                            Data::Error(_) => "#ERR".to_string(),
                             Data::DateTime(dt) => format!("{dt}"),
                             Data::DateTimeIso(s) => s.clone(),
                             Data::DurationIso(s) => s.clone(),

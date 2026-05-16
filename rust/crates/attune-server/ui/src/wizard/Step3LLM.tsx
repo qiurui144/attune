@@ -45,7 +45,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   // 形态分裂：K3 一体机优先本地 Ollama；Laptop/Server 默认远端 token
   const [prefersLocal, setPrefersLocal] = useState<boolean>(false);
   const [localChatAllowed, setLocalChatAllowed] = useState<boolean>(false);
-  const [localBlockReason, setLocalBlockReason] = useState<string>('当前硬件规格不建议本地对话');
+  const [localBlockReason, setLocalBlockReason] = useState<string>(t('wizard.llm.block.default_reason'));
   const [k3Endpoint, setK3Endpoint] = useState('http://192.168.100.166:8080/v1');
   const [k3Detecting, setK3Detecting] = useState(false);
   const [k3DetectResult, setK3DetectResult] = useState<string | null>(null);
@@ -86,12 +86,12 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
       const allow = gate.hardware?.supported === true && (tier === 'high' || tier === 'flagship');
       setLocalChatAllowed(allow);
       if (!allow) {
-        setLocalBlockReason('当前硬件规格下默认禁用本地对话，请选择云端或 K3 一体机。');
+        setLocalBlockReason(t('wizard.llm.block.tier_reason'));
       }
     } catch {
       setOllamaStatus('missing');
       setLocalChatAllowed(false);
-      setLocalBlockReason('硬件检测失败，默认禁用本地对话。');
+      setLocalBlockReason(t('wizard.llm.block.detect_failed'));
     } finally {
       setScanning(false);
     }
@@ -111,20 +111,20 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
       const res = await api.post<ProbeK3Response>('/llm/probe-k3', {});
       if (res.found && res.endpoint) {
         setK3Endpoint(res.endpoint);
-        const msg = `已检测到 K3：${res.endpoint}`;
+        const msg = t('wizard.llm.k3.detected', { endpoint: res.endpoint });
         setK3DetectResult(msg);
         if (!silent) {
           toast('success', msg);
         }
       } else {
-        const msg = '未检测到可用 K3，已保留手动输入。';
+        const msg = t('wizard.llm.k3.not_found');
         setK3DetectResult(msg);
         if (!silent) {
           toast('error', msg);
         }
       }
     } catch (e) {
-      const msg = `自动检测失败：${e instanceof Error ? e.message : String(e)}`;
+      const msg = t('wizard.llm.k3.detect_failed', { message: e instanceof Error ? e.message : String(e) });
       setK3DetectResult(msg);
       if (!silent) {
         toast('error', msg);
@@ -137,7 +137,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   async function testCloudConnection() {
     if (provider === 'attune-pro') {
       const ok = await loginMember();
-      setTestResult(ok ? '✓ 会员登录验证通过' : '✗ 会员登录验证失败');
+      setTestResult(ok ? t('wizard.llm.member.verify_pass') : t('wizard.llm.member.verify_fail'));
       return;
     }
     setTesting(true);
@@ -177,7 +177,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
 
   async function selectK3() {
     if (!k3Endpoint.trim()) {
-      toast('error', '请填写 K3 地址');
+      toast('error', t('wizard.llm.k3.need_endpoint'));
       return;
     }
     onUpdate({ llmMode: 'k3' });
@@ -198,18 +198,18 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
 
   async function selectCloud() {
     if (!endpoint || !cloudModel) {
-      toast('error', '请填完地址和模型名');
+      toast('error', t('wizard.llm.cloud.need_fields'));
       return;
     }
 
     if (provider === 'custom' && !apiKey) {
-      toast('error', '自定义配置需要填写 URL 和 Token');
+      toast('error', t('wizard.llm.cloud.need_custom'));
       return;
     }
 
     if (provider === 'attune-pro' && !memberReady) {
       if (!ctx.memberEmail || !ctx.memberPassword) {
-        toast('error', '请先回到第二步填写会员账号密码');
+        toast('error', t('wizard.llm.member.need_step2'));
         return;
       }
       const ok = await loginMember();
@@ -217,7 +217,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
     }
 
     if (provider !== 'attune-pro' && !apiKey) {
-      toast('error', '请填完 API Key / Endpoint / Model');
+      toast('error', t('wizard.llm.cloud.need_apikey'));
       return;
     }
     onUpdate({ llmMode: 'cloud' });
@@ -238,7 +238,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
 
   async function loginMember(): Promise<boolean> {
     if (!ctx.memberEmail || !ctx.memberPassword) {
-      toast('error', '第二步未填写会员账号密码');
+      toast('error', t('wizard.llm.member.step2_missing'));
       return false;
     }
     setMemberLoggingIn(true);
@@ -249,11 +249,11 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
         license_code: ctx.memberLicenseCode?.trim() || null,
       });
       setMemberReady(true);
-      toast('success', '会员账号登录成功');
+      toast('success', t('wizard.llm.member.login_ok'));
       return true;
     } catch (e) {
       setMemberReady(false);
-      toast('error', `会员登录失败：${e instanceof Error ? e.message : String(e)}`);
+      toast('error', t('wizard.llm.member.login_fail', { message: e instanceof Error ? e.message : String(e) }));
       return false;
     } finally {
       setMemberLoggingIn(false);
@@ -308,13 +308,13 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
             {scanning && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
                 <span className="spinner" />
-                扫描本机 Ollama
+                {t('wizard.llm.ollama.scanning')}
               </div>
             )}
             {!scanning && ollamaStatus === 'ready' && (
               <>
                 <div style={{ color: 'var(--color-success)' }}>
-                  已发现 {ollamaModels.length} 个模型
+                  {t('wizard.llm.ollama.models_found', { count: ollamaModels.length })}
                 </div>
                 {!localChatAllowed && (
                   <div style={{ color: 'var(--color-warning)', marginTop: 'var(--space-2)' }}>
@@ -326,7 +326,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
             {!scanning && ollamaStatus === 'missing' && (
               <div>
                 <div style={{ color: 'var(--color-warning)', marginBottom: 'var(--space-2)' }}>
-                  未检测到本地 Ollama
+                  {t('wizard.llm.ollama.not_detected')}
                 </div>
                 <code
                   style={{
@@ -341,7 +341,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                   onClick={(e) => {
                     const text = e.currentTarget.textContent ?? '';
                     navigator.clipboard?.writeText(text);
-                    toast('success', '已复制到剪贴板');
+                    toast('success', t('wizard.llm.toast.copied'));
                   }}
                 >
                     curl -fsSL https://ollama.com/install.sh | sh
@@ -368,17 +368,17 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
 
         {/* K3 第三方设备卡片 */}
         <Card selected={ctx.llmMode === 'k3'}>
-          <CardHeader icon="🧩" title="第三方设备（K3）" tag="自动扫描局域网" />
+          <CardHeader icon="🧩" title={t('wizard.llm.k3.card_title')} tag={t('wizard.llm.k3.card_tag')} />
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
-              自动读取本机网段并探测可用 K3，未命中时保留手动输入。
+              {t('wizard.llm.k3.card_desc')}
             </div>
             <Button size="sm" variant="secondary" onClick={() => void autoDetectK3()} loading={k3Detecting}>
-              自动检测 K3
+              {t('wizard.llm.k3.detect_btn')}
             </Button>
             <Input
               type="text"
-              placeholder="K3 URL（如 http://192.168.100.166:8080/v1）"
+              placeholder={t('wizard.llm.k3.endpoint_placeholder')}
               value={k3Endpoint}
               onInput={(e) => setK3Endpoint(e.currentTarget.value)}
             />
@@ -388,7 +388,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               </div>
             )}
             <Button size="sm" variant="primary" onClick={selectK3} disabled={!k3Endpoint.trim()}>
-              使用 K3
+              {t('wizard.llm.k3.use_btn')}
             </Button>
           </div>
         </Card>
@@ -441,16 +441,16 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                 fontSize: 'var(--text-sm)',
               }}
             >
-              <optgroup label="★ 推荐：Attune Pro 会员（登录即用）">
-                <option value="attune-pro">Attune Pro Membership（Gateway，token 配额）</option>
+              <optgroup label={t('wizard.llm.cloud.optgroup_recommended')}>
+                <option value="attune-pro">{t('wizard.llm.cloud.opt_attune_pro')}</option>
               </optgroup>
-              <optgroup label="BYOK：用你已有的 API key">
-                <option value="openai">OpenAI（ChatGPT Plus/Team 用户）</option>
-                <option value="anthropic">Anthropic（Claude Pro 用户）</option>
-                <option value="gemini">Gemini（Google AI Studio）</option>
-                <option value="deepseek">DeepSeek</option>
-                <option value="qwen">Qwen (阿里通义)</option>
-                <option value="custom">自定义（OpenAI 兼容）</option>
+              <optgroup label={t('wizard.llm.cloud.optgroup_byok')}>
+                <option value="openai">{t('wizard.llm.cloud.opt_openai')}</option>
+                <option value="anthropic">{t('wizard.llm.cloud.opt_anthropic')}</option>
+                <option value="gemini">{t('wizard.llm.cloud.opt_gemini')}</option>
+                <option value="deepseek">{t('wizard.llm.cloud.opt_deepseek')}</option>
+                <option value="qwen">{t('wizard.llm.cloud.opt_qwen')}</option>
+                <option value="custom">{t('wizard.llm.cloud.opt_custom')}</option>
               </optgroup>
             </select>
             {provider === 'attune-pro' && (
@@ -458,16 +458,16 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                 <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
                   <StatusChip
                     tone={memberReady ? 'success' : 'muted'}
-                    title="会员"
-                    value={memberReady ? '已登录' : '待登录'}
+                    title={t('wizard.llm.member.chip_title')}
+                    value={memberReady ? t('wizard.llm.member.chip_logged_in') : t('wizard.llm.member.chip_pending')}
                   />
                   <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
-                    账号密码只在此处输入一次，后续自动复用。
+                    {t('wizard.llm.member.input_once_hint')}
                   </div>
                 </div>
                 <Input
                   type="text"
-                  placeholder="服务地址（默认可直接用）"
+                  placeholder={t('wizard.llm.cloud.endpoint_default_placeholder')}
                   value={endpoint}
                   onInput={(e) => setEndpoint(e.currentTarget.value)}
                 />
@@ -478,7 +478,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                   loading={memberLoggingIn}
                   disabled={!ctx.memberEmail || !ctx.memberPassword}
                 >
-                  {memberReady ? '会员已登录 ✓' : '登录会员账号'}
+                  {memberReady ? t('wizard.llm.member.logged_in_btn') : t('wizard.llm.member.login_btn')}
                 </Button>
               </>
             )}
@@ -486,13 +486,13 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
               <>
                 <Input
                   type="text"
-                  placeholder={provider === 'custom' ? 'URL 地址（OpenAI 兼容）' : 'Endpoint URL'}
+                  placeholder={provider === 'custom' ? t('wizard.llm.cloud.custom_url_placeholder') : t('wizard.llm.cloud.endpoint_url_placeholder')}
                   value={endpoint}
                   onInput={(e) => setEndpoint(e.currentTarget.value)}
                 />
                 <Input
                   type="password"
-                  placeholder={provider === 'custom' ? 'Token / API Key' : 'API Key'}
+                  placeholder={provider === 'custom' ? t('wizard.llm.cloud.custom_token_placeholder') : t('wizard.llm.cloud.apikey_placeholder')}
                   value={apiKey}
                   onInput={(e) => setApiKey(e.currentTarget.value)}
                 />
@@ -500,7 +500,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
             )}
             <Input
               type="text"
-              placeholder="模型名（默认 auto 自动选择）"
+              placeholder={t('wizard.llm.cloud.model_placeholder')}
               value={cloudModel}
               onInput={(e) => setCloudModel(e.currentTarget.value)}
             />
@@ -513,7 +513,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                 ? (!ctx.memberEmail || !ctx.memberPassword)
                 : (!apiKey || !endpoint)}
             >
-              {provider === 'attune-pro' ? '验证登录' : t('wizard.llm.cloud.test')}
+              {provider === 'attune-pro' ? t('wizard.llm.cloud.verify_login') : t('wizard.llm.cloud.test')}
             </Button>
             {testResult && (
               <div
@@ -538,7 +538,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                 || testResult?.startsWith('✗')
               }
             >
-              使用云端
+              {t('wizard.llm.cloud.use_btn')}
             </Button>
           </div>
         </Card>
@@ -577,7 +577,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
             alignSelf: 'flex-start',
           }}
         >
-          ▸ 其他选项（本地 Ollama / K3 一体机）
+          {t('wizard.llm.advanced_toggle')}
         </button>
       )}
     </div>

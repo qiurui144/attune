@@ -13,6 +13,7 @@
 
 import type { JSX } from 'preact';
 import { useState, useRef, useEffect } from 'preact/hooks';
+import { t } from '../i18n';
 
 export type TooltipProps = {
   /** 解释文案 (短句, 可用 \n 换行) */
@@ -59,7 +60,7 @@ export function Tooltip({ text, size = 'md', learnMoreHref }: TooltipProps): JSX
         onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
-        aria-label="帮助"
+        aria-label={t('common.help')}
         aria-describedby={open ? tipId.current : undefined}
         aria-expanded={open}
         style={{
@@ -119,7 +120,7 @@ export function Tooltip({ text, size = 'md', learnMoreHref }: TooltipProps): JSX
                 rel="noopener noreferrer"
                 style={{ color: 'var(--color-accent, #60a5fa)', textDecoration: 'underline' }}
               >
-                了解更多
+                {t('common.learn_more')}
               </a>
             </>
           )}

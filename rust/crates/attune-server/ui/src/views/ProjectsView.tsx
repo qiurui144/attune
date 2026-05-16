@@ -13,6 +13,7 @@ import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
 import { Button, EmptyState, Modal, toast } from '../components';
 import { api } from '../store/api';
+import { t } from '../i18n';
 
 // ── 类型（与后端 routes/projects.rs ProjectListResponse 等对齐） ─────────────
 interface Project {
@@ -85,7 +86,7 @@ export function ProjectsView(): JSX.Element {
     const title = newTitle.value.trim();
     const kind = newKind.value.trim() || 'generic';
     if (!title) {
-      toast('error', 'Title 必填');
+      toast('error', t('projects.toast.title_required'));
       return;
     }
     try {
@@ -93,12 +94,12 @@ export function ProjectsView(): JSX.Element {
       newTitle.value = '';
       newKind.value = 'generic';
       showCreate.value = false;
-      toast('success', '已创建');
+      toast('success', t('projects.toast.created'));
       await reload();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       error.value = msg;
-      toast('error', `创建失败：${msg}`);
+      toast('error', t('projects.toast.create_failed', { message: msg }));
     }
   };
 
@@ -137,11 +138,11 @@ export function ProjectsView(): JSX.Element {
         />
         <EmptyState
           icon="🗂"
-          title="暂无 Project"
-          description="点击「新建项目」开始整理资料、证据与思路"
+          title={t('projects.empty.title')}
+          description={t('projects.empty.desc')}
           actions={[
             {
-              label: '新建项目',
+              label: t('projects.empty.action'),
               onClick: () => (showCreate.value = true),
               variant: 'primary',
             },
@@ -232,7 +233,7 @@ export function ProjectsView(): JSX.Element {
                 color: 'var(--color-text-secondary)',
               }}
             >
-              选择左侧 Project 查看详情
+              {t('projects.select_hint')}
             </div>
           ) : (
             <ProjectDetail files={files.value} timeline={timeline.value} />
@@ -272,14 +273,14 @@ function ProjectsHeader({
       }}
     >
       <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
-        🗂 Projects
+        {t('projects.title')}
       </h2>
       <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
         <Button variant="primary" size="sm" onClick={onCreate}>
-          + 新建项目
+          {t('projects.create')}
         </Button>
         <Button variant="secondary" size="sm" onClick={onReload} disabled={loading}>
-          {loading ? '加载中…' : '⟳ 刷新'}
+          {loading ? t('common.loading') : t('items.refresh')}
         </Button>
       </div>
     </header>
@@ -324,7 +325,7 @@ function ProjectRow({
           textOverflow: 'ellipsis',
         }}
       >
-        {p.title || '(无标题)'}
+        {p.title || t('projects.untitled')}
       </div>
       <div
         style={{
@@ -378,7 +379,7 @@ function ProjectDetail({
             color: 'var(--color-text)',
           }}
         >
-          Files ({files.length})
+          {t('projects.files.heading', { count: files.length })}
         </h3>
         {files.length === 0 ? (
           <div
@@ -388,7 +389,7 @@ function ProjectDetail({
               fontSize: 'var(--text-sm)',
             }}
           >
-            无文件归档
+            {t('projects.files.empty')}
           </div>
         ) : (
           <table
@@ -400,9 +401,9 @@ function ProjectDetail({
           >
             <thead>
               <tr>
-                <th style={th}>文件</th>
-                <th style={th}>角色</th>
-                <th style={th}>添加时间</th>
+                <th style={th}>{t('projects.files.col_file')}</th>
+                <th style={th}>{t('projects.files.col_role')}</th>
+                <th style={th}>{t('projects.files.col_added')}</th>
               </tr>
             </thead>
             <tbody>
@@ -429,7 +430,7 @@ function ProjectDetail({
             color: 'var(--color-text)',
           }}
         >
-          时间线（{timeline.length}）
+          {t('projects.timeline.heading', { count: timeline.length })}
         </h3>
         {timeline.length === 0 ? (
           <div
@@ -439,7 +440,7 @@ function ProjectDetail({
               fontSize: 'var(--text-sm)',
             }}
           >
-            暂无事件
+            {t('projects.timeline.empty')}
           </div>
         ) : (
           <ul
@@ -496,7 +497,7 @@ function CreateProjectModal({
   onConfirm: () => void;
 }): JSX.Element {
   return (
-    <Modal open onClose={onCancel} title="新建项目">
+    <Modal open onClose={onCancel} title={t('projects.create.modal_title')}>
       <div
         style={{
           display: 'flex',
@@ -506,23 +507,23 @@ function CreateProjectModal({
         }}
       >
         <label style={labelStyle}>
-          <span>名称</span>
+          <span>{t('projects.field.name')}</span>
           <input
             type="text"
             value={title.value}
             onInput={(e) => (title.value = (e.currentTarget as HTMLInputElement).value)}
-            placeholder="如：北京客户A / 论文研究 X / 个人项目"
+            placeholder={t('projects.field.name_placeholder')}
             autoFocus
             style={inputStyle}
           />
         </label>
         <label style={labelStyle}>
-          <span>类型（默认通用）</span>
+          <span>{t('projects.field.kind')}</span>
           <input
             type="text"
             value={kind.value}
             onInput={(e) => (kind.value = (e.currentTarget as HTMLInputElement).value)}
-            placeholder="通用 / 案件 / 论文 / ..."
+            placeholder={t('projects.field.kind_placeholder')}
             style={inputStyle}
           />
         </label>
@@ -535,10 +536,10 @@ function CreateProjectModal({
           }}
         >
           <Button variant="secondary" size="sm" onClick={onCancel}>
-            取消
+            {t('common.cancel')}
           </Button>
           <Button variant="primary" size="sm" onClick={onConfirm}>
-            创建
+            {t('projects.empty.action')}
           </Button>
         </div>
       </div>
@@ -594,14 +595,16 @@ function fmtDate(d: Date): string {
   try {
     const now = Date.now();
     const diff = now - d.getTime();
-    if (diff < 60_000) return '刚刚';
+    if (diff < 60_000) return t('projects.time.just_now');
     if (diff < 86_400_000) {
       const h = d.getHours().toString().padStart(2, '0');
       const m = d.getMinutes().toString().padStart(2, '0');
-      return `今天 ${h}:${m}`;
+      return t('projects.time.today', { time: `${h}:${m}` });
     }
-    if (diff < 2 * 86_400_000) return '昨天';
-    if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+    if (diff < 2 * 86_400_000) return t('projects.time.yesterday');
+    if (diff < 7 * 86_400_000) {
+      return t('projects.time.days_ago', { days: Math.floor(diff / 86_400_000) });
+    }
     return d.toLocaleDateString();
   } catch {
     return d.toISOString().slice(0, 10);

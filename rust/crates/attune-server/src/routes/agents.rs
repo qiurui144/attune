@@ -11,7 +11,8 @@
 //! 错误映射（agent binary exit code，per capability_dispatch 协议）：
 //!   exit 0  → 200 ok=true   计算成功
 //!   exit 2  → 200 ok=false  业务红线触发（red_lines_violated=true，非 HTTP 错误）
-//!   exit 其他 → 500          IO / 解析错误
+//!   exit 3  → 400           客户端输入错误（stdin 空 / JSON 解析失败）
+//!   exit 其他 → 500          内部错误（IO / 序列化）
 //!   timeout → 503
 
 use crate::routes::errors::{internal, RouteError};
@@ -109,6 +110,11 @@ pub async fn run_agent(
             "output": output,
             "audit_trail": result.stderr,
         }))),
+        // exit 3 = 客户端输入错误（畸形 / 空 JSON）—— 是调用方的错，回 400 而非 500。
+        3 => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("agent '{agent_id}' rejected input: {}", result.stderr.trim())})),
+        )),
         other => Err(internal(
             "agent run",
             format!("agent '{agent_id}' exit {other}: {}", result.stderr),

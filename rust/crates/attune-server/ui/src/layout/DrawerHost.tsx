@@ -4,6 +4,7 @@
 
 import type { JSX } from 'preact';
 import { Drawer, Reader, AgentResultPanel } from '../components';
+import { t } from '../i18n';
 import { drawerContent } from '../store/signals';
 
 export function DrawerHost(): JSX.Element | null {
@@ -27,11 +28,11 @@ function titleFor(c: NonNullable<typeof drawerContent.value>): string {
     case 'reader':
       return 'Reader';
     case 'citation':
-      return '引用原文';
+      return t('drawer.citation.title');
     case 'annotation-composer':
-      return '创建批注';
+      return t('drawer.annotation.title');
     case 'help':
-      return `帮助 · ${c.topic}`;
+      return t('drawer.help.title', { topic: c.topic });
     case 'agent-result':
       return c.result.title;
   }
@@ -69,14 +70,14 @@ function renderContent(c: NonNullable<typeof drawerContent.value>): JSX.Element 
             {c.selection}
           </blockquote>
           <p style={{ marginTop: 'var(--space-3)' }}>
-            批注编辑器正在开发中，下个版本将支持在此处直接添加批注。
+            {t('drawer.annotation.composer_wip')}
           </p>
         </div>
       );
     case 'help':
       return (
         <div>
-          <p>帮助内容正在准备中。</p>
+          <p>{t('drawer.help.wip')}</p>
         </div>
       );
     case 'agent-result':
