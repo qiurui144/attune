@@ -186,3 +186,42 @@ fn ingest_with_profile_threads_ocr_profile() {
     let outcome = ingest_document_with_profile(&store, &dek, &doc, None).unwrap();
     assert!(matches!(outcome, IngestOutcome::Inserted { .. }));
 }
+
+#[test]
+fn replacing_with_content_identical_to_third_party_item_inserts_new() {
+    // 防护：replacing 路径下若新内容的 content_hash 命中的是另一个不相关 item，
+    // 不能短路返回那个 item 的 Duplicate（旧 item 已被 caller 软删，outcome 若指向
+    // 第三方 item 会造成不一致）。正确行为：跳过短路继续插入，返回 Updated。
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+
+    // 先插入一个"第三方"item，内容与 v2 相同。
+    let third_party = md_doc("/tmp/other.md", "# Shared\n\nshared body content.");
+    let third_id = match ingest_document(&store, &dek, &third_party).unwrap() {
+        IngestOutcome::Inserted { item_id, .. } => item_id,
+        other => panic!("expected Inserted, got {other:?}"),
+    };
+
+    // 再插入将被"更新"的旧 item，内容不同。
+    let doc_v1 = md_doc("/tmp/b.md", "# Old\n\nold unique body.");
+    let old_id = match ingest_document(&store, &dek, &doc_v1).unwrap() {
+        IngestOutcome::Inserted { item_id, .. } => item_id,
+        other => panic!("expected Inserted, got {other:?}"),
+    };
+
+    // caller 软删旧 item。
+    store.delete_item(&old_id).unwrap();
+
+    // v2 内容与 third_party 完全相同 —— content_hash 会命中 third_party。
+    let doc_v2 = md_doc("/tmp/b.md", "# Shared\n\nshared body content.");
+    let outcome = ingest_document_replacing(&store, &dek, &doc_v2, &old_id).unwrap();
+
+    // 必须返回 Updated（新 item 入库），而非指向 third_party 的 Duplicate。
+    match outcome {
+        IngestOutcome::Updated { item_id, old_item_id } => {
+            assert_eq!(old_item_id, old_id);
+            assert_ne!(item_id, third_id, "不能复用第三方 item 的 id");
+        }
+        other => panic!("expected Updated, got {other:?}"),
+    }
+}

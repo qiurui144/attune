@@ -40,8 +40,8 @@ rust/
 │   │       ├── index.rs              # tantivy 封装 (jieba tokenizer)
 │   │       ├── vectors.rs            # usearch 封装 (HNSW + f16)
 │   │       ├── search.rs             # RRF 融合 + 动态预算
-│   │       ├── scanner.rs            # walkdir + notify-rs
-│   │       ├── scanner_webdav.rs     # WebDAV 远程目录扫描
+│   │       ├── scanner.rs            # 本地目录扫描（LocalFolderConnector 封装）
+│   │       ├── scanner_webdav.rs     # WebDAV 扫描（WebDavConnector + ETag 增量 + 加密凭据）
 │   │       ├── queue.rs              # Embedding 队列 Worker
 │   │       ├── llm.rs                # Ollama chat client (LlmProvider trait + OllamaLlmProvider + MockLlmProvider)
 │       ├── taxonomy.rs           # 维度定义 + 插件 YAML 加载 + prompt 构建
@@ -142,8 +142,7 @@ apps/attune-desktop/
 │  ├── Index    — tantivy + jieba-rs               │
 │  ├── Vectors  — usearch HNSW                     │
 │  ├── Search   — RRF 融合 + allocate_budget       │
-│  ├── Scanner  — walkdir + notify-rs              │
-│  ├── ScannerWebDav — WebDAV PROPFIND + GET 远程文件扫描     │
+│  ├── Ingest   — 统一入库 pipeline（SourceConnector + ingest_document）│
 │  ├── Chunker  — 滑动窗口 + extract_sections      │
 │  ├── Parser   — PDF/DOCX/HTML/EPUB/XLSX/CSV/PPTX/RTF/图片OCR/音频ASR/代码 │
 │  ├── Embed    — Ollama HTTP client               │
@@ -359,40 +358,52 @@ pub fn allocate_budget(results: &mut [SearchResult], budget: usize) {
 
 按 RRF 分数比例分配 2000 字预算，最低 100 字保底。取代固定截断（300 字）。
 
-## 文件扫描流程
+## 采集体系（Ingest）
+
+所有入库路径统一走 `attune-core::ingest`：
+
+- **`SourceConnector` trait** — 抽象一个采集源（本地文件夹 / WebDAV / 未来的邮箱 / RSS），
+  通过回调 sink 逐个交出 `RawDocument`（含 `domain` / `tags` / `corpus_domain` 字段）。
+- **`ingest_document()`** — 唯一入库函数：parse → content_hash 判重 → insert_item（透传
+  domain/tags）→ breadcrumbs sidecar → enqueue_embedding（L1 章节 + L2 段落块，
+  corpus_domain 注入 `[领域: X]` 前缀）→ set_item_corpus_domain → enqueue_classify，
+  返回 `IngestOutcome`（Inserted / Duplicate / Updated / Skipped）。
+
+新增采集源只需实现 `SourceConnector`，不修改 pipeline 内部。
+HTTP API（`/api/v1/upload`、`/api/v1/ingest`、`/api/v1/index/*`）对外行为不变。
+
+### 本地文件夹扫描
 
 ```
 POST /api/v1/index/bind { path, recursive, file_types }
-  ↓
-Vault.store().bind_directory(path, recursive, file_types)
-  → INSERT INTO bound_dirs → 返回 dir_id
-  ↓
-scanner::scan_directory(store, dek, dir_id, path, recursive, file_types)
-  ↓
-WalkDir(path, recursive) → 过滤 file_types
-  ↓
-对每个文件 process_single_file():
-  1. parser::file_hash(path) → SHA-256
-  2. store.get_indexed_file(path) → 比对 hash
-     - 未变: Skipped
-     - 变更: delete_item(旧 item_id) → 继续
-  3. parser::parse_file(path) → (title, content)
-  4. store.insert_item(dek, title, content, source_type="file")
-  5. chunker::extract_sections(content) → Vec<(section_idx, text)>
-  6. 为每个 section enqueue_embedding(level=1)
-  7. 为每个 section chunk() → enqueue_embedding(level=2)
-  8. store.upsert_indexed_file(dir_id, path, hash, item_id)
-  ↓
-store.update_dir_last_scan(dir_id)
-  ↓
-返回 ScanResult { total, new, updated, skipped, errors }
+  → bind_directory() → dir_id
+  → LocalFolderConnector::run(sink)
+    ├── WalkDir → 过滤 file_types
+    ├── SHA-256 hash 比对 indexed_files（未变 → Skipped）
+    ├── 变更 → delete_item(旧) + enqueue purge
+    └── ingest_document_replacing() → Updated / Inserted
+  → update_dir_last_scan(dir_id)
 ```
 
-**只读保证**：`std::fs::File::open(Read)` 打开，永不写入源文件。
+**只读保证**：`std::fs::File::open(Read)`，永不写入源文件。
 
-**增量检测**：SHA-256 hash 比对，未变化直接跳过。
+### WebDAV 远程目录
 
-**两层入队**：Level 1 (章节) 和 Level 2 (512 字段落块) 分别入队，向量索引时 metadata 区分。
+WebDAV remote 配置（含加密凭据）持久化在 `webdav_remotes` 表，`password` 走字段级 AES-256-GCM。
+
+```
+POST /api/v1/index/bind-remote { url, username, password, ... }
+  → upsert_webdav_remote()（password AES-GCM 加密落库）
+  → WebDavConnector::run(sink)
+    ├── PROPFIND 列目录 → 过滤扩展名
+    ├── ETag 比对（未变 → Skipped）
+    ├── GET 下载文件字节
+    └── ingest_document() / ingest_document_replacing()
+```
+
+后台周期同步 worker 每 15 分钟读回凭据，对所有 WebDAV remote 自动增量重扫。
+
+**两层入队**：Level 1（章节）+ Level 2（512 字段落块），向量索引时 metadata 区分层级。
 
 ## Embedding 队列 Worker
 
@@ -462,7 +473,7 @@ let display = strip_confidence_marker(&response);  // 用户看不到 marker
 2. 独立 `store/<table>.rs` 模块写 CRUD（注意 dek 加密敏感字段）
 3. 在 `store/items.rs::delete_item` 显式 `DELETE FROM <table> WHERE item_id = ?1`（软删除路径，FK CASCADE 仅硬删除生效）
 4. 单元测试覆盖 `fk_cascade_*` + `soft_delete_clears_*` 双场景
-5. indexer pipeline（routes/upload + ingest + scanner + scanner_webdav）写入时同步调 `upsert_*`，错误用 `tracing::warn!` 不阻塞主流程
+5. ingest pipeline（`ingest_document` 统一入口，覆盖 upload / ingest / scanner / webdav 所有路径）写入时同步调 `upsert_*`，错误用 `tracing::warn!` 不阻塞主流程
 6. ChatEngine 等读路径优雅降级（无 sidecar 行返回 None / 空 Vec）
 
 ## W3 batch A：Web search 缓存（C1, 2026-04-27）

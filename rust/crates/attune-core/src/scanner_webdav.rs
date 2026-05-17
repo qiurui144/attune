@@ -58,14 +58,12 @@ pub fn resolve_href(config: &WebDavConfig, href: &str) -> String {
 fn validate_same_host(config: &WebDavConfig, abs_url: &str) -> Result<()> {
     let config_host = config
         .url
-        .splitn(2, "://")
-        .nth(1)
-        .and_then(|s| s.split('/').next())
+        .split_once("://")
+        .map(|(_, rest)| rest.split('/').next().unwrap_or(""))
         .unwrap_or("");
     let fetch_host = abs_url
-        .splitn(2, "://")
-        .nth(1)
-        .and_then(|s| s.split('/').next())
+        .split_once("://")
+        .map(|(_, rest)| rest.split('/').next().unwrap_or(""))
         .unwrap_or("");
     if fetch_host != config_host {
         return Err(VaultError::LlmUnavailable(format!(

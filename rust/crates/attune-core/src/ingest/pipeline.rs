@@ -1,16 +1,10 @@
 //! ingest_document — 唯一的统一入库函数。
 //!
 //! 把 0.6 之前散在 4 处（routes/upload · routes/ingest · scanner ·
-//! scanner_webdav）的五步收成一个函数：
-//!   1. parse —— `parser::parse_bytes` 把原始字节解析成 (title, content)
-//!   2. content_hash 短路判重 —— 命中 → 返回 Duplicate，跳过其余四步
-//!   3. insert_item —— 写加密 item 行（domain / tags 从 RawDocument 透传）
-//!   4. upsert_chunk_breadcrumbs_from_content —— 写 Citation sidecar
-//!   5a. enqueue_embedding —— Level-1 章节 + Level-2 段落块两层；
-//!       corpus_domain != "general" 时对每个 chunk_text 注入 `[领域: X] ` 前缀
-//!       （F-Pro 跨域防污染，bge-m3 corpus tagging）
-//!   5b. set_item_corpus_domain —— corpus_domain 非空非 general 时写 item 领域标签
-//!   5c. enqueue_classify —— 自动分类任务
+//! scanner_webdav）的五步收成一个函数：parse → content_hash 判重 →
+//! insert_item（透传 domain/tags）→ breadcrumbs sidecar →
+//! enqueue_embedding（L1 章节 + L2 段落块，corpus_domain 注入前缀）+
+//! set_item_corpus_domain + enqueue_classify。
 //!
 //! 不碰 VectorIndex / FulltextIndex（server AppState 的独立 Mutex）：向量写入
 //! 经 embed_queue defer 给 server 后台 worker。FTS 即时索引由 server 层薄壳
@@ -96,10 +90,15 @@ fn ingest_document_inner(
         raw.title.clone()
     };
 
-    // 2. content_hash 短路判重
+    // 2. content_hash 短路判重（仅非 replacing 路径）。
+    // replacing 路径下 caller 已软删 old_item（is_deleted=1），find_item_by_content_hash
+    // 带 AND is_deleted=0 查不到它；replacing 语义是"用 doc_v2 替换 old_item"，
+    // 即便 doc_v2 内容与第三方 item 的 hash 碰撞也应插入独立新 item，所以整个短路跳过。
     let content_hash = compute_content_hash(&content);
-    if let Some(existing_id) = store.find_item_by_content_hash(&content_hash)? {
-        return Ok(IngestOutcome::Duplicate { item_id: existing_id });
+    if old_item_id.is_none() {
+        if let Some(existing_id) = store.find_item_by_content_hash(&content_hash)? {
+            return Ok(IngestOutcome::Duplicate { item_id: existing_id });
+        }
     }
 
     // 3. insert_item — domain / tags 从 RawDocument 一等字段透传（决策 1）。
