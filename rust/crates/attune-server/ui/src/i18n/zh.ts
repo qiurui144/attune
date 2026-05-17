@@ -212,6 +212,8 @@ export const zh = {
   'chat.sample.search_topic': '搜索关于 XXX 的所有内容',
   'chat.sample.last_topic': '我上次讨论了什么话题？',
   'chat.token.local': '本地',
+  'chat.token.unknown': '—',
+  'chat.cost.unknown': '?$/K',
 
   // ─── ItemsView ──────────────────────────────────────
   'items.empty.bind_folder': '绑定文件夹',

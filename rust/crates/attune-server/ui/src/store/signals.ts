@@ -120,6 +120,18 @@ export type Message = {
 };
 export const messages = signal<Message[]>([]);
 
+// ── Cost & Trigger Contract: LLM 调用费用估算（来自后端响应） ─────
+export type CostEstimate = {
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number | null; // null = 本地模型（无 USD 计费）
+  is_local: boolean;
+  /** input token 单价（USD/1K），来自后端定价表；本地模型或未知模型为 null */
+  input_rate_per_k: number | null;
+};
+/** 最近一次 chat 响应携带的 cost_estimate，供 TokenChip 展示真实费率 */
+export const lastCostEstimate = signal<CostEstimate | null>(null);
+
 export type Item = {
   id: string;
   title: string;

@@ -4,6 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use attune_core::llm::ChatMessage;
 use attune_core::pii::Redactor;
+use attune_core::cost;
 
 use crate::state::SharedState;
 
@@ -678,6 +679,10 @@ pub async fn chat(
     }
     messages.push(ChatMessage::user(&redacted_user));
 
+    // 提前记录 LLM 元信息供响应体使用（llm 即将被 move 进闭包）
+    let llm_model_name = llm.model_name().to_string();
+    let llm_is_local = llm.is_local();
+
     // 4. Call LLM (blocking via spawn_blocking)
     let raw_response = tokio::task::spawn_blocking(move || llm.chat_with_history(&messages))
         .await
@@ -874,6 +879,21 @@ pub async fn chat(
 
     // 6. Build response with optional hint when web search unavailable
     // v0.6 Phase B fix: 透传 confidence (parsed from LLM 末尾 marker)
+    // tokens_in 覆盖实际发给 LLM 的全部内容：system + history[] + user message
+    let mut tokens_in = cost::estimate_tokens(&system_prompt, &llm_model_name)
+        + cost::estimate_tokens(&body.message, &llm_model_name);
+    for h in &body.history {
+        tokens_in += cost::estimate_tokens(&h.content, &llm_model_name);
+    }
+    let tokens_out = cost::estimate_tokens(&response, &llm_model_name);
+    let cost_usd = if llm_is_local { None } else { cost::estimate_cost_usd(tokens_in, tokens_out, &llm_model_name) };
+    // input_rate_per_k：直接从定价表取 input 单价，供前端 TokenChip 用 tokens × rate 展示
+    // 本地模型无定价返回 null，前端按本地逻辑处理
+    let input_rate_per_k: Option<f64> = if llm_is_local {
+        None
+    } else {
+        cost::lookup_pricing(&llm_model_name).map(|p| p.input_per_1k_usd)
+    };
     let mut response_json = serde_json::json!({
         "content": response,
         "citations": citations,
@@ -881,6 +901,14 @@ pub async fn chat(
         "session_id": session_id,
         "web_search_used": web_search_used,
         "confidence": confidence,
+        // Cost & Trigger Contract: Chat 每次响应携带 token/费用估算供前端 chip 展示
+        "cost_estimate": {
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "cost_usd": cost_usd,
+            "is_local": llm_is_local,
+            "input_rate_per_k": input_rate_per_k,
+        },
         // Batch B.2: 批注加权 / 上下文压缩统计 —— token chip 展开时展示
         "weight_stats": {
             "items_total": weight_stats.items_total,

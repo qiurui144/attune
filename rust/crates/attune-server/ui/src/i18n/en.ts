@@ -219,6 +219,8 @@ export const en = {
   'chat.sample.search_topic': 'Search everything about XXX',
   'chat.sample.last_topic': 'What topic did I discuss last time?',
   'chat.token.local': 'Local',
+  'chat.token.unknown': '—',
+  'chat.cost.unknown': '?$/K',
 
   // ─── ItemsView ──────────────────────────────────────
   'items.empty.bind_folder': 'Bind folder',
