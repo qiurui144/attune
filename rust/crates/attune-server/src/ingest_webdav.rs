@@ -1,6 +1,5 @@
 //! WebDAV 增量同步 —— bind-remote route 与周期 worker 共用的入库逻辑。
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use attune_core::ingest::{
@@ -41,11 +40,9 @@ pub fn sync_webdav_dir(
     let mut updated_files = 0usize;
     let mut skipped_files = 0usize;
     let mut errors: Vec<String> = Vec::new();
-    let mut seen_refs: HashSet<String> = HashSet::new();
 
     for mut doc in docs {
         total += 1;
-        seen_refs.insert(doc.source_ref.clone());
         doc.corpus_domain = Some(corpus_domain.to_string());
 
         let source_ref = doc.source_ref.clone();
