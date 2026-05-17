@@ -9,13 +9,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::Key32;
 use crate::error::{Result, VaultError};
-use crate::ingest::{
-    ingest_document, ingest_document_replacing, DocumentSink, RawDocument, SourceConnector,
-    SourceKind,
-};
-use crate::store::Store;
+use crate::ingest::{DocumentSink, RawDocument, SourceConnector, SourceKind};
+
 
 /// WebDAV 采集目录配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,16 +21,6 @@ pub struct WebDavConfig {
     pub password: Option<String>,
     /// PROPFIND depth：0=仅此资源，1=直接子项，2=两层（server 禁止 >2）。
     pub depth: u32,
-}
-
-/// scan_remote 返回给 route 层的统计摘要（JSON 响应字段保持不变）。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RemoteScanResult {
-    pub total_files: usize,
-    pub new_files: usize,
-    pub updated_files: usize,
-    pub skipped_files: usize,
-    pub errors: Vec<String>,
 }
 
 /// WebDAV 单文件下载大小上限（与本地 upload 一致）。
@@ -251,95 +237,6 @@ impl SourceConnector for WebDavConnector {
     fn fetch_documents(&self, sink: &mut DocumentSink<'_>) -> Result<()> {
         self.drive_blocking(sink)
     }
-}
-
-/// POST /api/v1/index/bind-remote 的薄壳入口（保持向后兼容）。
-///
-/// 用 WebDavConnector 驱动采集，每份文档走统一 ingest_document pipeline，
-/// ETag dedup 逻辑内嵌在 scan_remote 自身（比对 indexed_files.file_hash）。
-pub fn scan_remote(
-    config: &WebDavConfig,
-    store: &Store,
-    dek: &Key32,
-    dir_id: &str,
-) -> Result<RemoteScanResult> {
-    let connector = WebDavConnector::new(config.clone());
-
-    // RefCell 让 sink closure 与 result 共享可变访问，同时满足借用检查器。
-    let result = std::cell::RefCell::new(RemoteScanResult::default());
-
-    let mut sink: DocumentSink<'_> = Box::new(|raw: RawDocument| {
-        let source_ref = raw.source_ref.clone();
-        let etag = raw.modified_marker.clone().unwrap_or_default();
-        let filename = source_ref.rsplit('/').next().unwrap_or(&source_ref).to_string();
-
-        result.borrow_mut().total_files += 1;
-
-        // 增量判断：用 ETag 比对 indexed_files.file_hash。
-        let existing = store.get_indexed_file(&source_ref).ok().flatten();
-        if let Some(ref ex) = existing {
-            if ex.file_hash == etag {
-                result.borrow_mut().skipped_files += 1;
-                return;
-            }
-        }
-
-        // 内容已变（或首次）：有旧 item 先删旧 + enqueue purge。
-        let old_item_id: Option<String> = existing.as_ref().and_then(|ex| {
-            ex.item_id.as_ref().map(|id| {
-                let _ = store.delete_item(id);
-                if let Err(e) = store.enqueue_reindex(id, "purge") {
-                    log::warn!(
-                        "webdav scan: enqueue_reindex(purge) failed for {id}: {e} — orphan 风险"
-                    );
-                }
-                if let Err(e) = store.record_signal_event("doc_update", id, None) {
-                    log::debug!(
-                        "webdav scan: record_signal_event failed for {id}: {e} (non-fatal)"
-                    );
-                }
-                id.clone()
-            })
-        });
-
-        // 走统一 ingest_document pipeline（含 L2 embedding + classify）。
-        let outcome = if let Some(ref old_id) = old_item_id {
-            ingest_document_replacing(store, dek, &raw, old_id)
-        } else {
-            ingest_document(store, dek, &raw)
-        };
-
-        match outcome {
-            Ok(crate::ingest::IngestOutcome::Inserted { item_id, .. }) => {
-                // 记录 indexed_files，下次增量用 ETag 短路。
-                let _ = store.upsert_indexed_file(dir_id, &source_ref, &etag, &item_id);
-                let mut r = result.borrow_mut();
-                if old_item_id.is_some() {
-                    r.updated_files += 1;
-                } else {
-                    r.new_files += 1;
-                }
-            }
-            Ok(crate::ingest::IngestOutcome::Updated { item_id, .. }) => {
-                let _ = store.upsert_indexed_file(dir_id, &source_ref, &etag, &item_id);
-                result.borrow_mut().updated_files += 1;
-            }
-            Ok(crate::ingest::IngestOutcome::Duplicate { .. }) => {
-                result.borrow_mut().skipped_files += 1;
-            }
-            Ok(crate::ingest::IngestOutcome::Skipped { .. }) => {
-                result.borrow_mut().skipped_files += 1;
-            }
-            Err(e) => {
-                result.borrow_mut().errors.push(format!("{filename}: ingest {e}"));
-            }
-        }
-    });
-
-    connector.fetch_documents(&mut sink)?;
-    // sink 在此 drop，RefCell 独占引用释放，into_inner 安全。
-    drop(sink);
-    Ok(result.into_inner())
 }
 
 #[cfg(test)]

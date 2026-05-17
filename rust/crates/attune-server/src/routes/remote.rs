@@ -1,9 +1,15 @@
+use std::cell::RefCell;
+
 use crate::state::SharedState;
+use attune_core::ingest::{
+    ingest_document, ingest_document_replacing, DocumentSink, IngestOutcome, RawDocument,
+    SourceConnector,
+};
+use attune_core::scanner_webdav::{WebDavConfig, WebDavConnector};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
-use attune_core::scanner_webdav::{scan_remote, WebDavConfig};
 
 #[derive(Deserialize)]
 pub struct BindRemoteRequest {
@@ -17,7 +23,10 @@ fn default_depth() -> u32 {
     1
 }
 
-/// POST /api/v1/index/bind-remote — 绑定远程 WebDAV 目录并扫描
+/// POST /api/v1/index/bind-remote — 绑定远程 WebDAV 目录并扫描入库。
+///
+/// route 层直接驱动 WebDavConnector，ETag 增量判断在此内联（对应 Task 11 的
+/// sync_webdav_dir 公共函数抽取点）。响应 scan 字段形态与重构前完全一致。
 pub async fn bind_remote(
     State(state): State<SharedState>,
     Json(body): Json<BindRemoteRequest>,
@@ -35,7 +44,7 @@ pub async fn bind_remote(
         depth: body.depth,
     };
 
-    // Create bound_dirs record with special prefix to mark as remote
+    // 创建/复用 bound_dirs 记录（webdav: 前缀标记远程目录）。
     let dir_id = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let _ = vault.dek_db().map_err(|e| {
@@ -56,13 +65,93 @@ pub async fn bind_remote(
             })?
     };
 
-    // Run scan in blocking task (webdav uses blocking reqwest)
+    // WebDAV I/O 是阻塞的 —— 整段在 spawn_blocking 里跑，不阻塞 axum worker。
     let state_clone = state.clone();
     let dir_id_clone = dir_id.clone();
-    let scan_result = tokio::task::spawn_blocking(move || {
+    let scan = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let vault = state_clone.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let dek = vault.dek_db()?;
-        scan_remote(&config, vault.store(), &dek, &dir_id_clone)
+        let dek = vault.dek_db().map_err(|e| e.to_string())?;
+        let store = vault.store();
+        let connector = WebDavConnector::new(config);
+
+        // 统计计数器 —— RefCell 让 sink closure 与外层共享可变访问。
+        let total = RefCell::new(0usize);
+        let new_files = RefCell::new(0usize);
+        let updated_files = RefCell::new(0usize);
+        let skipped_files = RefCell::new(0usize);
+        let errors: RefCell<Vec<String>> = RefCell::new(Vec::new());
+
+        let mut sink: DocumentSink<'_> = Box::new(|raw: RawDocument| {
+            let source_ref = raw.source_ref.clone();
+            let etag = raw.modified_marker.clone().unwrap_or_default();
+            let filename = source_ref.rsplit('/').next().unwrap_or(&source_ref).to_string();
+
+            *total.borrow_mut() += 1;
+
+            // ETag 增量判断：与 indexed_files.file_hash 比对，ETag 未变则跳过。
+            let existing = store.get_indexed_file(&source_ref).ok().flatten();
+            if let Some(ref ex) = existing {
+                if ex.file_hash == etag {
+                    *skipped_files.borrow_mut() += 1;
+                    return;
+                }
+            }
+
+            // 内容已变（或首次入库）：删旧 item + 入队 purge + 记 doc_update 信号。
+            let old_item_id: Option<String> = existing.as_ref().and_then(|ex| {
+                ex.item_id.as_ref().map(|id| {
+                    let _ = store.delete_item(id);
+                    if let Err(e) = store.enqueue_reindex(id, "purge") {
+                        tracing::warn!("bind_remote: enqueue_reindex(purge) failed for {id}: {e}");
+                    }
+                    if let Err(e) = store.record_signal_event("doc_update", id, None) {
+                        tracing::debug!("bind_remote: record_signal_event failed for {id}: {e}");
+                    }
+                    id.clone()
+                })
+            });
+
+            // 走统一 ingest_document pipeline（含 L2 embedding + classify）。
+            let outcome = if let Some(ref old_id) = old_item_id {
+                ingest_document_replacing(store, &dek, &raw, old_id)
+            } else {
+                ingest_document(store, &dek, &raw)
+            };
+
+            match outcome {
+                Ok(IngestOutcome::Inserted { item_id, .. }) => {
+                    let _ = store.upsert_indexed_file(&dir_id_clone, &source_ref, &etag, &item_id);
+                    if old_item_id.is_some() {
+                        *updated_files.borrow_mut() += 1;
+                    } else {
+                        *new_files.borrow_mut() += 1;
+                    }
+                }
+                Ok(IngestOutcome::Updated { item_id, .. }) => {
+                    let _ = store.upsert_indexed_file(&dir_id_clone, &source_ref, &etag, &item_id);
+                    *updated_files.borrow_mut() += 1;
+                }
+                Ok(IngestOutcome::Duplicate { .. }) | Ok(IngestOutcome::Skipped { .. }) => {
+                    *skipped_files.borrow_mut() += 1;
+                }
+                Err(e) => {
+                    errors.borrow_mut().push(format!("{filename}: ingest {e}"));
+                }
+            }
+        });
+
+        connector
+            .fetch_documents(&mut sink)
+            .map_err(|e| e.to_string())?;
+        drop(sink);
+
+        Ok(serde_json::json!({
+            "total_files": *total.borrow(),
+            "new_files": *new_files.borrow(),
+            "updated_files": *updated_files.borrow(),
+            "skipped_files": *skipped_files.borrow(),
+            "errors": *errors.borrow(),
+        }))
     })
     .await
     .map_err(|e| {
@@ -74,13 +163,13 @@ pub async fn bind_remote(
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
+            Json(serde_json::json!({"error": e})),
         )
     })?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
         "dir_id": dir_id,
-        "scan": scan_result
+        "scan": scan,
     })))
 }

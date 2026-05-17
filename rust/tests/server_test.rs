@@ -738,6 +738,32 @@ async fn test_clusters_list_returns_ok_or_service_unavailable() {
     }
 }
 
+// ─── bind-remote WebDavConnector 适配回归 ────────────────────────────────────
+
+#[tokio::test]
+async fn bind_remote_unreachable_returns_structured_error() {
+    // WebDAV 不可达时必须返回结构化 500 JSON，不 panic。
+    // 验证 bind_remote 改用 WebDavConnector 后错误传播形态对外不变。
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_post(
+        state,
+        "/api/v1/index/bind-remote",
+        serde_json::json!({
+            "url": "http://127.0.0.1:1/nonexistent-webdav/",
+            "depth": 1
+        }),
+    )
+    .await;
+    assert!(
+        status.as_u16() >= 400,
+        "不可达 WebDAV 应返回错误状态，got {status}: {body}"
+    );
+    assert!(
+        body.get("error").is_some(),
+        "错误响应必须含 error 字段，got: {body}"
+    );
+}
+
 // ─── ingest unification contract ─────────────────────────────────────────────
 
 #[tokio::test]
