@@ -68,6 +68,7 @@ pub mod entities;
 pub mod infer;
 pub mod error;
 pub mod index;
+pub mod ingest;
 pub mod intent_router;
 pub mod llm;
 pub mod ocr;  // v0.6.0-rc.3: pub for ai_stack status API
