@@ -18,6 +18,9 @@ pub struct BindRemoteRequest {
     pub password: Option<String>,
     #[serde(default = "default_depth")]
     pub depth: u32,
+    /// 语料领域（legal / tech / medical / patent / general），驱动 F-Pro
+    /// 跨域防污染。缺省 general。
+    pub corpus_domain: Option<String>,
 }
 fn default_depth() -> u32 {
     1
@@ -65,7 +68,30 @@ pub async fn bind_remote(
             })?
     };
 
+    // 决策 4：落库加密 remote 配置，让周期 worker 能读回凭据自动重扫。
+    {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let dek = vault.dek_db().map_err(|e| {
+            (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        })?;
+        let input = attune_core::store::webdav_remotes::WebDavRemoteInput {
+            dir_id: dir_id.clone(),
+            url: body.url.clone(),
+            username: body.username.clone(),
+            password: body.password.clone(),
+            depth: body.depth,
+            corpus_domain: body.corpus_domain.clone().unwrap_or_else(|| "general".into()),
+        };
+        if let Err(e) = vault.store().upsert_webdav_remote(&dek, &input) {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("persist webdav remote: {e}")})),
+            ));
+        }
+    }
+
     // WebDAV I/O 是阻塞的 —— 整段在 spawn_blocking 里跑，不阻塞 axum worker。
+    let corpus_domain_for_dir = body.corpus_domain.clone().unwrap_or_else(|| "general".into());
     let state_clone = state.clone();
     let dir_id_clone = dir_id.clone();
     let scan = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
@@ -81,7 +107,10 @@ pub async fn bind_remote(
         let skipped_files = RefCell::new(0usize);
         let errors: RefCell<Vec<String>> = RefCell::new(Vec::new());
 
-        let mut sink: DocumentSink<'_> = Box::new(|raw: RawDocument| {
+        let mut sink: DocumentSink<'_> = Box::new(|mut raw: RawDocument| {
+            // corpus_domain 由 bind-remote 请求参数决定，回填到每份文档。
+            raw.corpus_domain = Some(corpus_domain_for_dir.clone());
+
             let source_ref = raw.source_ref.clone();
             let etag = raw.modified_marker.clone().unwrap_or_default();
             let filename = source_ref.rsplit('/').next().unwrap_or(&source_ref).to_string();

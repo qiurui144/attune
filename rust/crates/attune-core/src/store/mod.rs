@@ -3,6 +3,7 @@
 mod types;
 pub mod items;
 pub mod item_blobs;
+pub mod webdav_remotes;
 mod dirs;
 mod queue;
 mod history;
@@ -117,6 +118,20 @@ CREATE TABLE IF NOT EXISTS indexed_files (
     indexed_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_if_dir ON indexed_files(dir_id);
+
+-- 决策 4：WebDAV remote 配置持久化。bound_dirs(webdav:* path) 只记 URL；
+-- 认证凭据要让周期同步 worker 自动复用 → 此表存完整配置。
+-- password_enc 是 AES-256-GCM 密文 BLOB（dek 加密，与 items.content 同模式）。
+CREATE TABLE IF NOT EXISTS webdav_remotes (
+    dir_id        TEXT PRIMARY KEY REFERENCES bound_dirs(id) ON DELETE CASCADE,
+    url           TEXT NOT NULL,
+    username      TEXT,
+    password_enc  BLOB,
+    depth         INTEGER NOT NULL DEFAULT 1,
+    corpus_domain TEXT NOT NULL DEFAULT 'general',
+    updated_at    TEXT NOT NULL,
+    last_etag_sync TEXT
+);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
