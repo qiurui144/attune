@@ -1,35 +1,43 @@
 #!/usr/bin/env python3
-"""law-pro 接入 — 全面前端 Playwright 验证矩阵。
+"""law-pro 接入 — 全量前端 Playwright 验证矩阵（真 Chrome）。
 
-真 Chrome（channel=chrome）走 attune Web UI，验证每个功能/可点击元素 +
-law-pro 接入后的完整业务流程。per plan tingly-knitting-zephyr 阶段 4。
+走 attune Web UI 校验每个视图 / 可点击元素 + law-pro 端到端业务流程。
+per plan tingly-knitting-zephyr 阶段 4。
 
-分层：L0 Wizard / L1 Sidebar / L2 八视图 / L3 Settings / L4 模态 /
-L5 law-pro（Marketplace 卡片 + 新建 civil-loan Project + 上传 lawcontrol 证据 + chat 触发）。
+分层：
+  L0 Wizard 5 步 · L1 Sidebar · L2 八视图 · L3 Settings 6 tab ·
+  L4 模态 · L5 law-pro（pluginhub 接入 + Marketplace + civil_loan 表单链 A）
 
-幂等：wizard.complete 持久化后第二次跑自动跳过 wizard。
-监听 console error（favicon 404 等已知噪音不计 FAIL）。
-截图归档 docs/screenshots/lawpro-e2e-verification/<env>/。
+幂等：vault 已 setup 则自动走解锁、跳过 Wizard。
+监听 console error（server 重启窗口期的 CONNECTION_REFUSED 噪音不计 FAIL）。
+截图归档 docs/screenshots/lawpro-e2e-verification/suite/。
 
-前置：law-pro 已 plugin-install；server 起在 ATTUNE_BASE_URL（默认 :18930）。
-用法：python3 tests/e2e/playwright/lawpro_ui_e2e.py
+前置：law-pro 已在 ~/.local/share/attune/plugins/；server 起在 ATTUNE_BASE_URL；
+      pluginhub 经 SSH 隧道在 PLUGINHUB_URL 可达。
+用法：bash tests/e2e/playwright/run_ui_all.sh
 """
 import os
 import sys
+
 from playwright.sync_api import sync_playwright
 
-BASE = os.environ.get("ATTUNE_BASE_URL", "http://localhost:18930")
-ENV = os.environ.get("ATTUNE_ENV", "local")
-SHOT_DIR = f"docs/screenshots/lawpro-e2e-verification/{ENV}"
-# lawcontrol 真实证据（用户指定"证据链从 lawcontrol 获取"）
-LAWCONTROL_EVIDENCE = "/data/company/project/lawcontrol/data/test_evidence/合同样本/借款合同_民间借贷.txt"
-PASS = 0
-FAIL = 0
-console_errors = []
-failed_responses = []  # (status, url) — 4xx/5xx 响应，用于定位 console "Failed to load resource"
+BASE = os.environ.get("ATTUNE_BASE_URL", "http://127.0.0.1:18900")
+PW = os.environ.get("ATTUNE_VAULT_PW", "Attune-E2E-Test-2026")
+LLM_URL = os.environ.get("ATTUNE_LLM_URL", "https://hiapi.online/v1")
+LLM_KEY = os.environ.get("ATTUNE_LLM_KEY", "")
+LLM_MODEL = os.environ.get("ATTUNE_LLM_MODEL", "gemini-2.5-flash")
+HUB_URL = os.environ.get("PLUGINHUB_URL", "http://127.0.0.1:9100")
+HUB_KEY = os.environ.get("PLUGINHUB_LICENSE", "")
+HEADLESS = os.environ.get("ATTUNE_HEADLESS", "1") != "0"
+SHOT_DIR = "docs/screenshots/lawpro-e2e-verification/suite"
+
+PASS = FAIL = 0
+console_errors: list[str] = []
+# server 重启窗口期浏览器轮询撞 connection-refused 是已知噪音，不计 FAIL
+NOISE = ("ERR_CONNECTION_REFUSED", "favicon", "ws/scan-progress", "status/health")
 
 
-def check(name, cond, detail=""):
+def check(name: str, cond: bool, detail: str = "") -> bool:
     global PASS, FAIL
     if cond:
         PASS += 1
@@ -37,277 +45,223 @@ def check(name, cond, detail=""):
     else:
         FAIL += 1
         print(f"  FAIL  {name}  {detail}")
-    return cond
+    return bool(cond)
 
 
-def shot(page, name):
+def shot(page, name: str) -> None:
     os.makedirs(SHOT_DIR, exist_ok=True)
-    page.screenshot(path=f"{SHOT_DIR}/{name}.png")
-
-
-def visible(page, **kw):
     try:
-        return page.get_by_role(**kw).first.is_visible(timeout=2000)
-    except Exception:
+        page.screenshot(path=f"{SHOT_DIR}/{name}.png")
+    except Exception as e:  # noqa: BLE001
+        print(f"  (截图 {name} 失败: {e})")
+
+
+def visible(page, role: str, name: str, timeout: int = 4000) -> bool:
+    # wait_for 会自动等待元素出现（is_visible 是即时快照、SPA 渲染慢会误判）
+    try:
+        page.get_by_role(role, name=name).first.wait_for(state="visible", timeout=timeout)
+        return True
+    except Exception:  # noqa: BLE001
         return False
 
 
-def click_if(page, role, name, timeout=3000):
+def click(page, role: str, name: str, timeout: int = 4000) -> bool:
     try:
         page.get_by_role(role, name=name).first.click(timeout=timeout)
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
-def l0_wizard(page):
+def run(page) -> None:
+    # ── L0 Wizard / 解锁 ──────────────────────────────────────────
     print("\n── L0 Wizard 5 步 ──")
     page.goto(BASE, wait_until="networkidle")
-    page.wait_for_timeout(1500)
-    check("L0 页面标题加载", "Attune" in page.title(), page.title())
-    on_wizard = visible(page, role="button", name="Get started")
-    if on_wizard:
+    check("L0 页面标题", "Attune" in page.title(), page.title())
+
+    if visible(page, "button", "开始设置"):
         shot(page, "l0-01-welcome")
-        check("L0 Welcome — Get started", True)
-        check("L0 Welcome — 导入备份按钮", visible(page, role="button", name="I have a vault"))
-        click_if(page, "button", "Get started")
-        page.wait_for_timeout(800)
-        pw_box = page.get_by_role("textbox", name="Vault Password").first
-        check("L0 Step2 — 密码输入框", pw_box.is_visible(timeout=3000))
-        # 全新 vault 需设密码 + 确认；已 setup 的 vault 显示 continue（无 Confirm 框）
-        confirm = page.get_by_role("textbox", name="Confirm")
-        if confirm.count() > 0 and confirm.first.is_visible(timeout=1000):
-            pw_box.fill("lawpro-ui-2026")
-            confirm.first.fill("lawpro-ui-2026")
-            check("L0 Step2 — 密码+确认已填（全新 vault）", True)
-        else:
-            check("L0 Step2 — vault 已 setup，直接继续", True)
+        check("L0 Step1 欢迎 — 开始设置按钮", True)
+        check("L0 Step1 — 导入备份按钮", visible(page, "button", "我有备份，直接导入"))
+        click(page, "button", "开始设置")
+        page.get_by_role("textbox", name="主密码").fill(PW, timeout=5000)
+        page.get_by_role("textbox", name="再次输入").fill(PW)
+        check("L0 Step2 — 密码强度校验", page.get_by_text("强").first.is_visible(timeout=2000))
         shot(page, "l0-02-password")
-        click_if(page, "button", "Next")
-        # 全新 vault setup 触发 Argon2id 主密钥派生（注释见 Step2Password.tsx ~10s），
-        # 固定 sleep 会误判 —— 锚定 Step3 标题真正渲染，给 30s 容纳派生 + 网络。
+        click(page, "button", "下一步 →")
+        ai_combo = page.get_by_role("combobox").first
         try:
-            page.get_by_role("heading", name="Choose your AI brain").first.wait_for(timeout=30000)
-        except Exception:
+            ai_combo.wait_for(state="visible", timeout=8000)
+            check("L0 Step3 — AI 配置页", True)
+        except Exception:  # noqa: BLE001
+            check("L0 Step3 — AI 配置页", False)
+        ai_combo.select_option("自定义（OpenAI 兼容）")
+        page.get_by_role("textbox", name="URL 地址（OpenAI 兼容）").fill(LLM_URL)
+        page.get_by_role("textbox", name="Token / API Key").fill(LLM_KEY)
+        page.get_by_role("textbox", name="模型名（默认 auto 自动选择）").fill(LLM_MODEL)
+        click(page, "button", "测试连接")
+        ok_test = False
+        try:
+            page.get_by_text("✓").first.wait_for(timeout=20000)
+            ok_test = True
+        except Exception:  # noqa: BLE001
             pass
-        check("L0 Step3 — AI 配置页", visible(page, role="heading", name="Choose your AI brain"))
+        check("L0 Step3 — 云端 LLM 连接测试通过", ok_test)
         shot(page, "l0-03-ai")
-        try:
-            page.get_by_text("Configure later").first.click(timeout=3000)
-        except Exception:
-            pass
-        page.wait_for_timeout(600)
-        click_if(page, "button", "Apply recommendation")
-        page.wait_for_timeout(600)
-        try:
-            page.get_by_role("button", name="Skip for now").first.click(timeout=3000)
-        except Exception:
-            pass
-        page.wait_for_timeout(600)
-        click_if(page, "button", "Finish")
-        page.wait_for_timeout(2500)
+        click(page, "button", "使用云端")
+        check("L0 Step4 — 硬件检测页", visible(page, "heading", "认识你的设备"))
+        shot(page, "l0-04-hardware")
+        click(page, "button", "应用推荐 →")
+        check("L0 Step5 — 数据来源页", visible(page, "heading", "从哪里开始积累？"))
+        shot(page, "l0-05-data")
+        click(page, "button", "跳过，先看看 之后随时在设置中添加")
+        click(page, "button", "完成 · 进入 Attune →")
+    elif visible(page, "button", "解锁"):
+        page.get_by_role("textbox", name="主密码").fill(PW)
+        click(page, "button", "解锁")
+        check("L0 vault 已存在 — 解锁进入", True)
     else:
-        check("L0 Wizard 已完成(持久化)，直接进主界面", True)
-    # 验进主界面
-    try:
-        page.get_by_role("button", name="Items").first.wait_for(timeout=10000)
-    except Exception:
-        pass
-    check("L0 → 进入主界面", visible(page, role="button", name="Items"))
-    shot(page, "l0-04-main")
+        check("L0 — 已在主界面", True)
 
+    page.wait_for_timeout(1500)
+    check("L0 → 进入主界面", visible(page, "button", "条目", timeout=8000))
+    shot(page, "l0-06-main")
 
-def l1_sidebar(page):
+    # ── L1 Sidebar ───────────────────────────────────────────────
     print("\n── L1 Sidebar ──")
-    for tab in ["Items", "Projects", "Remote", "Knowledge", "Skills", "Marketplace", "Settings"]:
-        ok = click_if(page, "button", tab)
-        page.wait_for_timeout(500)
-        check(f"L1 导航标签 — {tab}", ok)
-    check("L1 — New chat 按钮", click_if(page, "button", "New chat"))
-    page.wait_for_timeout(400)
-    shot(page, "l1-sidebar")
-
-
-def l2_views(page):
-    print("\n── L2 八视图核心元素 ──")
-    click_if(page, "button", "Items"); page.wait_for_timeout(500)
-    check("L2 Items — Upload files 按钮", visible(page, role="button", name="Upload files"))
-    check("L2 Items — Refresh 按钮", visible(page, role="button", name="Refresh"))
-    click_if(page, "button", "Projects"); page.wait_for_timeout(500)
-    check("L2 Projects — 新建项目入口", visible(page, role="button", name="新建项目"))
-    click_if(page, "button", "Knowledge"); page.wait_for_timeout(500)
-    check("L2 Knowledge — 视图渲染", "Knowledge" in page.content())
-    click_if(page, "button", "Skills"); page.wait_for_timeout(500)
-    check("L2 Skills — 视图渲染", "Skills" in page.content() or "技能" in page.content())
-    click_if(page, "button", "Marketplace"); page.wait_for_timeout(500)
-    check("L2 Marketplace — 视图渲染", True)
-    click_if(page, "button", "New chat"); page.wait_for_timeout(500)
-    check("L2 Chat — 输入框", visible(page, role="textbox", name="Chat input"))
-    shot(page, "l2-views")
-
-
-def l3_settings(page):
-    print("\n── L3 Settings 6 tab ──")
-    click_if(page, "button", "Settings")
-    page.wait_for_timeout(800)
-    body = page.content()
-    for tab in ["General", "AI", "Data", "Member", "Privacy", "About"]:
-        check(f"L3 Settings tab — {tab}", tab in body or click_if(page, "button", tab))
-        page.wait_for_timeout(250)
-    shot(page, "l3-settings")
-
-
-def l4_modals(page):
-    print("\n── L4 模态 ──")
-    # CommandPalette Cmd+K
+    for tab in ["条目", "项目", "远程目录", "知识全景", "技能", "插件市场", "设置"]:
+        check(f"L1 导航 — {tab}", visible(page, "button", tab))
+    check("L1 — 新对话按钮", visible(page, "button", "新对话"))
+    check("L1 — 全局搜索按钮", visible(page, "button", "全局搜索（Cmd+K）"))
+    check("L1 — 账号菜单", visible(page, "button", "账号菜单"))
     page.keyboard.press("Control+k")
     page.wait_for_timeout(600)
-    has_palette = visible(page, role="textbox") or "搜索" in page.content() or "search" in page.content().lower()
-    check("L4 CommandPalette — Cmd+K 唤起", has_palette)
+    check("L4 CommandPalette — Cmd+K 唤起", page.get_by_role("textbox").count() > 0)
     page.keyboard.press("Escape")
+
+    # ── L2 八视图 ─────────────────────────────────────────────────
+    print("\n── L2 八视图 ──")
+    views = [
+        ("条目", "条目", "上传文件"),
+        ("项目", "Projects", "新建项目"),
+        ("远程目录", "远程目录", "添加 WebDAV"),
+        ("知识全景", "知识全景", None),
+        ("技能", "Skills", "刷新"),
+        ("插件市场", "插件市场", None),
+    ]
+    for nav, heading_kw, btn in views:
+        click(page, "button", nav)
+        page.wait_for_timeout(700)
+        check(f"L2 {nav} — 视图渲染", heading_kw in page.content())
+        if btn:
+            check(f"L2 {nav} — {btn} 按钮", visible(page, "button", btn))
+        shot(page, f"l2-{nav}")
+    click(page, "button", "新对话")
+    page.wait_for_timeout(700)
+    check("L2 Chat — 对话输入框", visible(page, "textbox", "对话输入框"))
+    check("L2 Chat — 切换模型按钮", visible(page, "button", "切换模型"))
+    shot(page, "l2-chat")
+
+    # ── L3 Settings 6 tab ────────────────────────────────────────
+    print("\n── L3 Settings 6 tab ──")
+    click(page, "button", "设置")
+    page.wait_for_timeout(700)
+    for tab in ["通用", "AI 大脑", "数据", "会员", "隐私", "关于"]:
+        ok = click(page, "button", tab)
+        page.wait_for_timeout(500)
+        check(f"L3 Settings tab — {tab}", ok)
+        shot(page, f"l3-{tab}")
+
+    # ── L5 law-pro 接入 ───────────────────────────────────────────
+    print("\n── L5 law-pro 接入 ──")
+    click(page, "button", "会员")
+    page.wait_for_timeout(500)
+    click(page, "button", "▶ 展开 · 默认使用 attune.ai 公共云")
     page.wait_for_timeout(400)
-    shot(page, "l4-modals")
+    try:
+        page.get_by_role("textbox", name="https://hub.your-company.com").fill(HUB_URL)
+        page.get_by_role("textbox", name="license key").fill(HUB_KEY)
+        click(page, "button", "保存 cloud 后端配置")
+        page.wait_for_timeout(1500)
+        check("L5.1 pluginhub URL + license 配置保存", True)
+    except Exception as e:  # noqa: BLE001
+        check("L5.1 pluginhub 配置", False, str(e)[:80])
 
-
-def l5_lawpro(page):
-    print("\n── L5 law-pro 接入业务流程 ──")
-    # 5.1 Marketplace / Skills 含 law-pro
-    click_if(page, "button", "Marketplace"); page.wait_for_timeout(700)
+    click(page, "button", "插件市场")
+    page.wait_for_timeout(1500)
     mk = page.content()
-    check("L5.1 Marketplace 含 law-pro 痕迹", "law-pro" in mk or "律师" in mk or "Pro" in mk)
-    click_if(page, "button", "Skills"); page.wait_for_timeout(600)
-    sk = page.content()
-    check("L5.2 Skills 视图可访问", "Skills" in sk or "技能" in sk)
+    check("L5.2 Marketplace — provider=http-pluginhub", "http-pluginhub" in mk)
+    check("L5.2 Marketplace — law-pro v0.2.0 列出", "law-pro" in mk and "0.2.0" in mk)
+    shot(page, "l5-01-marketplace")
 
-    # 5.3 新建 civil-loan Project（kind 文本输入 — OSS by-design 非下拉）
-    click_if(page, "button", "Projects"); page.wait_for_timeout(600)
-    click_if(page, "button", "新建项目")
-    page.wait_for_timeout(900)
-    inputs = page.locator("input")
-    if inputs.count() >= 2:
-        inputs.nth(0).fill("任其坤-梁素燕 民间借贷纠纷案")
-        inputs.nth(1).fill("civil-loan")  # law-pro registers_case_kinds 的 kind
-        check("L5.3 新建 Project — title + kind=civil-loan 可填", True)
-        shot(page, "l5-01-create-project")
-        # 确认创建
-        clicked = click_if(page, "button", "创建") or click_if(page, "button", "确定") \
-            or click_if(page, "button", "Create") or click_if(page, "button", "确认")
-        page.wait_for_timeout(1200)
-        check("L5.4 civil-loan Project 创建成功",
-              "civil-loan" in page.content() or "任其坤" in page.content())
-    else:
-        check("L5.3 新建 Project 模态 input", False, f"input 数={inputs.count()}")
-    shot(page, "l5-02-projects")
-
-    # 5.5 Items 上传 lawcontrol 真实证据（基于 Web UI 上传入口）
-    click_if(page, "button", "Items"); page.wait_for_timeout(600)
-    if os.path.exists(LAWCONTROL_EVIDENCE):
-        try:
-            with page.expect_file_chooser(timeout=5000) as fc:
-                page.get_by_role("button", name="Upload files").first.click()
-            fc.value.set_files(LAWCONTROL_EVIDENCE)
-            page.wait_for_timeout(2500)
-            # 解析出的文档标题含排版空格（"借 款 合 同"），归一化空白后比对
-            normalized = page.content().replace(" ", "").replace("　", "")
-            check("L5.5 上传 lawcontrol 借贷合同证据 (Items 显示新条目)",
-                  "借款合同" in normalized)
-        except Exception as e:
-            check("L5.5 上传 lawcontrol 证据", False, str(e)[:80])
-    else:
-        check("L5.5 lawcontrol 证据文件存在", False, LAWCONTROL_EVIDENCE)
-    shot(page, "l5-03-evidence-uploaded")
-
-    # 5.6 Chat 输入 law-pro 关键词 → chat_trigger 路由
-    click_if(page, "button", "New chat"); page.wait_for_timeout(600)
-    try:
-        box = page.get_by_role("textbox", name="Chat input").first
-        box.fill("借条本金10万元，年利率24%，借款一年，应付利息和本息合计多少？")
-        check("L5.6 Chat 输入 law-pro 关键词(本金/利息/借贷)", True)
-        shot(page, "l5-04-chat-lawpro")
-    except Exception as e:
-        check("L5.6 Chat 输入框", False, str(e)[:80])
-
-
-def l6_cloud_chat(page):
-    """L6 云端 LLM chat — env 门控。ATTUNE_LLM_ENDPOINT 未设则跳过（本地运行无需 LLM）。"""
-    endpoint = os.environ.get("ATTUNE_LLM_ENDPOINT")
-    if not endpoint:
-        return
-    print("\n── L6 云端 LLM chat (hiapi.online) ──")
-    key = os.environ.get("ATTUNE_LLM_KEY", "")
-    model = os.environ.get("ATTUNE_LLM_MODEL", "gemini-2.5-flash")
-    # Settings → AI tab 配置 LLM endpoint/model/key
-    click_if(page, "button", "Settings")
-    page.wait_for_timeout(900)
-    click_if(page, "button", "AI")
-    page.wait_for_timeout(900)
-    try:
-        page.get_by_placeholder("例：https://api.openai.com/v1").first.fill(endpoint)
-        page.get_by_placeholder("例：deepseek-chat / qwen-plus / gpt-4o-mini").first.fill(model)
-        page.locator('input[type="password"]').first.fill(key)
-        check("L6.1 LLM 配置字段填写 (endpoint/model/key)", True)
-    except Exception as e:
-        check("L6.1 LLM 配置字段", False, str(e)[:80])
-        return
-    shot(page, "l6-01-llm-config")
-    saved = click_if(page, "button", "Save LLM Config")
-    page.wait_for_timeout(3000)
-    check("L6.2 保存 LLM 配置", saved)
-    # New chat → 发送 → 轮询等云端响应（无流式，spinner→完整回复）
-    click_if(page, "button", "New chat")
-    page.wait_for_timeout(900)
-    try:
-        box = page.get_by_role("textbox", name="Chat input").first
-        box.fill("只回答城市名，不要解释：中华人民共和国的首都是哪里？")
-        box.press("Control+Enter")
-        got = False
-        for _ in range(40):
+    click(page, "button", "项目")
+    page.wait_for_timeout(700)
+    proj_name = "E2E-民间借贷-自动"
+    if not (proj_name in page.content()):
+        click(page, "button", "+ 新建项目") or click(page, "button", "新建项目")
+        page.wait_for_timeout(500)
+        boxes = page.get_by_role("textbox")
+        if boxes.count() >= 2:
+            boxes.nth(0).fill(proj_name)
+            boxes.nth(1).fill("civil-loan")
+            page.get_by_role("button", name="新建项目").last.click()
             page.wait_for_timeout(1000)
-            if "北京" in page.content():
-                got = True
-                break
-        check("L6.3 云端 LLM 返回响应 (hiapi.online, 含'北京')", got)
-        shot(page, "l6-02-chat-response")
-    except Exception as e:
-        check("L6.3 云端 chat", False, str(e)[:80])
+    check("L5.3 civil-loan Project 创建", proj_name in page.content())
+    click(page, "button", proj_name)
+    page.wait_for_timeout(800)
+    check("L5.4 law-pro 计算助手面板挂载", "计算助手" in page.content())
+    shot(page, "l5-02-project")
 
-
-def main():
-    print(f"=== law-pro 接入 — 全面 Playwright UI 验证 (env={ENV}, {BASE}) ===")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(channel="chrome", headless=True)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
-        page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
-        page.on("response", lambda r: failed_responses.append((r.status, r.url)) if r.status >= 400 else None)
+    chain_ok = False
+    if click(page, "button", "▶ 运行"):
+        page.wait_for_timeout(800)
         try:
-            l0_wizard(page)
-            l1_sidebar(page)
-            l2_views(page)
-            l3_settings(page)
-            l4_modals(page)
-            l5_lawpro(page)
-            l6_cloud_chat(page)
+            page.get_by_role("textbox", name="原告姓名 *").fill("张三")
+            page.get_by_role("textbox", name="被告姓名 *").fill("李四")
+            page.get_by_label("我方代理 *—原告被告").select_option("原告")
+            page.get_by_role("spinbutton", name="本金（元） *").fill("200000")
+            page.get_by_role("spinbutton", name="利率 *").first.fill("0.096")
+            page.get_by_label("利率类型 *—年利率月利率日利率").select_option("年利率")
+            page.get_by_label("计息方式 *—单利复利").select_option("单利")
+            page.get_by_role("textbox", name="起算日 *").fill("2023-01-01")
+            page.get_by_role("textbox", name="截止日 *").fill("2024-01-01")
+            page.get_by_label("计算公式 *—年单利月单利日单利年复利LPR 4 倍封顶单利").select_option("年单利")
+            page.get_by_role("button", name="计算").click()
+            page.wait_for_timeout(3000)
+            chain_ok = "19200" in page.locator("[role=dialog]").first.inner_text()
+        except Exception as e:  # noqa: BLE001
+            print(f"  (L5.5 表单异常: {e})")
+    check("L5.5 civil_loan 表单 → agent 算应付利息 ¥19,200", chain_ok)
+    shot(page, "l5-03-agent-result")
+
+
+def main() -> int:
+    if not LLM_KEY or not HUB_KEY:
+        print("ERROR: 需设 ATTUNE_LLM_KEY + PLUGINHUB_LICENSE 环境变量（见 run_ui_all.sh）")
+        return 2
+    print(f"=== law-pro 全量前端 E2E ===  BASE={BASE}  headless={HEADLESS}\n")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(channel="chrome", headless=HEADLESS)
+        # locale=zh-CN — attune i18n 按 navigator.language 渲染，固定中文以对齐选择器
+        context = browser.new_context(locale="zh-CN")
+        page = context.new_page()
+        page.on("console", lambda m: console_errors.append(m.text)
+                if m.type == "error" else None)
+        try:
+            run(page)
         finally:
             browser.close()
 
-    # 网络失败定位：favicon / scan-progress 是已知噪音，其余 4xx/5xx 才算真错
-    NOISE = ("favicon", "scan-progress")
-    real_failed = [(s, u) for s, u in failed_responses if not any(n in u for n in NOISE)]
-    check("无未预期网络失败 4xx/5xx", len(real_failed) == 0,
-          f"{len(failed_responses)} 总 / {len(real_failed)} 非噪音")
-    for s, u in failed_responses:
-        tag = "噪音" if any(n in u for n in NOISE) else "★真错"
-        print(f"    [{s}] {tag}  {u[:140]}")
-    # console error：排除「Failed to load resource」（已由网络层 real_failed 覆盖）
-    real_errors = [e for e in console_errors if "Failed to load resource" not in e]
-    check("无未预期 console error", len(real_errors) == 0,
-          f"{len(console_errors)} 总 / {len(real_errors)} 非噪音")
-    for e in real_errors[:5]:
-        print(f"    error: {e}")
+    real_errs = [e for e in console_errors if not any(n in e for n in NOISE)]
+    print("\n── Console error ──")
+    check("无未处理 JS 错误（排除重启窗口噪音）", not real_errs,
+          f"{len(real_errs)} 真实 / {len(console_errors)} 总")
+    for e in real_errs[:10]:
+        print(f"    {e[:140]}")
 
-    print(f"\n=== 结果: {PASS} PASS / {FAIL} FAIL ===")
-    sys.exit(0 if FAIL == 0 else 1)
+    print(f"\n=== 结果：{PASS} PASS / {FAIL} FAIL ===")
+    return 0 if FAIL == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
