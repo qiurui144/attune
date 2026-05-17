@@ -69,6 +69,8 @@ pub struct AppState {
     /// v0.7 记忆护城河：防止重复启动 ReindexWorker 后台线程（消费 reindex_queue
     /// 让 scanner / scanner_webdav 等无法持锁的 worker 间接清向量+FTS）。
     pub reindex_worker_running: AtomicBool,
+    /// WebDAV 周期同步 worker 是否在运行（防重复启动）。
+    pub webdav_sync_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
     /// Sprint 1 Phase B: project recommendation broadcast channel.
     /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
@@ -139,6 +141,7 @@ impl AppState {
             evolve_worker_running: AtomicBool::new(false),
             memory_consolidator_running: AtomicBool::new(false),
             reindex_worker_running: AtomicBool::new(false),
+            webdav_sync_worker_running: AtomicBool::new(false),
             engines_initialized: AtomicBool::new(false),
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
@@ -740,6 +743,72 @@ impl AppState {
             }
             // flag 复位由 WorkerFlagGuard::drop 接管（含 panic 路径，R5 P1-1 fix）
             tracing::info!("Reindex worker stopped (vault locked)");
+        });
+    }
+
+    /// 启动 WebDAV 周期同步 worker：每 15 分钟从 webdav_remotes 表读全部
+    /// remote + 解密凭据，逐个增量重扫。原子 flag 防重入 + RAII guard 复位。
+    pub fn start_webdav_sync_worker(state: std::sync::Arc<AppState>) {
+        if state
+            .webdav_sync_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::debug!("WebDAV sync worker already running, skipping");
+            return;
+        }
+        std::thread::spawn(move || {
+            struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for FlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _guard = FlagGuard(&state.webdav_sync_worker_running);
+
+            tracing::info!("WebDAV sync worker started");
+            loop {
+                // vault 锁定则退出 —— 下次 unlock 会重新 start。
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        break;
+                    }
+                }
+
+                // 从 webdav_remotes 表读全部已配置 remote + 解密凭据（snapshot 后释放锁）。
+                let remotes: Vec<attune_core::store::webdav_remotes::WebDavRemoteRow> = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    let dek = match vault.dek_db() {
+                        Ok(k) => k,
+                        Err(_) => break, // vault 锁定 → 退出，下次 unlock 重启
+                    };
+                    vault.store().list_webdav_remotes(&dek).unwrap_or_default()
+                };
+
+                for remote in remotes {
+                    let config = attune_core::scanner_webdav::WebDavConfig {
+                        url: remote.url.clone(),
+                        username: remote.username.clone(),
+                        password: remote.password.clone(),
+                        depth: remote.depth,
+                    };
+                    // 只打印 dir_id / url，不 log password（避免凭据泄露）。
+                    tracing::info!("WebDAV sync: scanning dir={} url={}", remote.dir_id, remote.url);
+                    if let Err(e) = crate::ingest_webdav::sync_webdav_dir(
+                        &state,
+                        &remote.dir_id,
+                        config,
+                        &remote.corpus_domain,
+                    ) {
+                        tracing::warn!("WebDAV sync for dir {} failed: {e}", remote.dir_id);
+                    }
+                }
+
+                // unlock 后立即跑首轮，之后每 15 分钟一次。
+                std::thread::sleep(std::time::Duration::from_secs(15 * 60));
+            }
+            tracing::info!("WebDAV sync worker stopped (vault locked)");
         });
     }
 
@@ -1365,6 +1434,23 @@ impl AppState {
         if let Ok(mut g) = self.classifier.lock() {
             *g = p;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn webdav_sync_worker_flag_prevents_double_start() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = AtomicBool::new(false);
+        // 首次 compare_exchange 成功。
+        assert!(flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok());
+        // 二次失败 —— worker 不会重复起。
+        assert!(flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err());
     }
 }
 

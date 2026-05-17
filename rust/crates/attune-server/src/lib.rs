@@ -2,6 +2,7 @@ pub mod error;
 pub mod routes;
 pub mod state;
 pub(crate) mod middleware;
+pub(crate) mod ingest_webdav;
 
 use axum::middleware as axum_mw;
 use axum::routing::{delete, get, post};
