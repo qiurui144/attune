@@ -330,6 +330,10 @@ export const zh = {
   'settings.ai.web_search.enabled': '启用',
   'settings.ai.web_search.enabled_toast': '已启用网络搜索',
   'settings.ai.web_search.disabled_toast': '已关闭网络搜索',
+  'settings.ai.query_rewrite.title': '检索 Query 改写',
+  'settings.ai.query_rewrite.enabled': '启用（需配置大模型）',
+  'settings.ai.query_rewrite.enabled_toast': '已启用 Query 改写',
+  'settings.ai.query_rewrite.disabled_toast': '已关闭 Query 改写',
 
   // ─── 变体 A · agent 结果面板 ───────────────────────────
   'agentpanel.facts': '基础事实',

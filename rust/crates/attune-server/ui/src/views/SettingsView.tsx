@@ -407,6 +407,28 @@ function AIPanel(): JSX.Element {
           />
         </SettingRow>
       </Section>
+
+      <Section title={t('settings.ai.query_rewrite.title')}>
+        <SettingRow label={t('settings.ai.query_rewrite.enabled')}>
+          <Toggle
+            value={
+              Boolean(
+                ((settings.value?.search as { query_rewrite?: { enabled?: boolean } })
+                  ?.query_rewrite)?.enabled,
+              )
+            }
+            onChange={async (v) => {
+              await patchSettings({
+                search: {
+                  ...(settings.value?.search as Record<string, unknown>),
+                  query_rewrite: { enabled: v },
+                },
+              });
+              toast('success', v ? t('settings.ai.query_rewrite.enabled_toast') : t('settings.ai.query_rewrite.disabled_toast'));
+            }}
+          />
+        </SettingRow>
+      </Section>
     </>
   );
 }

@@ -337,6 +337,10 @@ export const en = {
   'settings.ai.web_search.enabled': 'Enabled',
   'settings.ai.web_search.enabled_toast': 'Web search enabled',
   'settings.ai.web_search.disabled_toast': 'Web search disabled',
+  'settings.ai.query_rewrite.title': 'Search Query Rewrite',
+  'settings.ai.query_rewrite.enabled': 'Enabled (requires LLM configured)',
+  'settings.ai.query_rewrite.enabled_toast': 'Query rewrite enabled',
+  'settings.ai.query_rewrite.disabled_toast': 'Query rewrite disabled',
 
   // ─── Variant A · agent result panel ─────────────────
   'agentpanel.facts': 'Facts',
