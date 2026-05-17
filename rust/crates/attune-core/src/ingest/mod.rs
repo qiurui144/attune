@@ -10,4 +10,4 @@ mod pipeline;
 pub mod local;
 
 pub use connector::{DocumentSink, RawDocument, SourceConnector, SourceKind};
-pub use pipeline::{ingest_document, IngestOutcome};
+pub use pipeline::{ingest_document, ingest_document_replacing, IngestOutcome};

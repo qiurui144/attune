@@ -134,6 +134,16 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM chunk_breadcrumbs", [], |r| r.get(0))?;
         Ok(n as usize)
     }
+
+    /// 测试辅助：统计某 item 的 chunk_breadcrumbs 行数。
+    pub fn chunk_breadcrumb_count(&self, item_id: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM chunk_breadcrumbs WHERE item_id = ?1",
+            rusqlite::params![item_id],
+            |row| row.get(0),
+        )?;
+        Ok(n as usize)
+    }
 }
 
 #[cfg(test)]

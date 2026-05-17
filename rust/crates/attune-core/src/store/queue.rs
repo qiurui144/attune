@@ -180,4 +180,29 @@ impl Store {
         )?;
         Ok(n)
     }
+
+    /// 测试辅助：统计某 level 在 embed_queue 中的 pending 任务数。
+    pub fn count_embed_queue_by_level(&self, level: i32) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM embed_queue WHERE level = ?1 AND task_type = 'embed'",
+            params![level],
+            |row| row.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// 测试辅助：取某 item 的全部 embedding chunk_text 明文列表，按 chunk_idx 排序。
+    /// 只取 task_type='embed' 的任务，跳过 classify 占位行（其 chunk_text 为空字节）。
+    /// embed_queue.chunk_text 存明文字节，此处直接 UTF-8 解码。
+    pub fn peek_embed_queue_chunk_texts(&self, item_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT chunk_text FROM embed_queue WHERE item_id = ?1 AND task_type = 'embed' ORDER BY chunk_idx",
+        )?;
+        let rows = stmt.query_map(params![item_id], |row| row.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for blob in rows {
+            out.push(String::from_utf8_lossy(&blob?).into_owned());
+        }
+        Ok(out)
+    }
 }
