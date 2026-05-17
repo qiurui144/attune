@@ -22,6 +22,9 @@ usearch = "2.25"  # 升至 2.25+ 修 Windows MAP_FAILED build 失败 (2.24.0 用
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { workspace = true, features = ["blocking", "cookies"] }
+# WebDAV 客户端 —— 替手写脆弱 XML PROPFIND parser。reqwest_dav 复用
+# reqwest 的 rustls TLS 栈（纯 Rust，跨平台含 Windows P0，不引系统 OpenSSL）。
+reqwest_dav = { version = "0.3", default-features = false, features = ["rustls-tls"] }
 tokio = { workspace = true }
 tantivy = "0.22"
 tantivy-jieba = "0.11"
