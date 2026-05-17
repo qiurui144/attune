@@ -4,7 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 
 use crate::state::SharedState;
-use attune_core::{chunker, parser};
+use attune_core::ingest::{RawDocument, SourceKind};
 
 #[derive(Debug, Deserialize, Default)]
 pub struct UploadQuery {
@@ -64,9 +64,7 @@ pub async fn upload_file(
         ));
     }
 
-    // OSS-S15 fix v2 (任其坤案件 2026-05-09): upload 路径 backpressure
-    // 之前仅 ingest 接了 backpressure (commit 20decfb)，但 upload 单次可塞 3500+ chunks
-    // (实测 14 张 jpg 塞 30K chunks 让 server hung 5min)。两条入口都必须接同款防御。
+    // upload 单次可塞大量 chunks，接同款 embedding 队列 backpressure 防 server hung
     const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
     {
         let vault = state.vault.lock()
@@ -85,20 +83,6 @@ pub async fn upload_file(
         }
     }
 
-    let (title, content) = parser::parse_bytes_with_profile(&data, &filename, q.profile.as_deref()).map_err(|e| {
-        (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
-
-    if content.trim().is_empty() {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error": "empty content"})),
-        ));
-    }
-
     // Now lock vault for DB operations (no more await points after this)
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|e| {
@@ -108,101 +92,94 @@ pub async fn upload_file(
         )
     })?;
 
-    // v0.7 记忆护城河 Phase A2：content_hash dedup 短路。
-    // 用户重传完全相同内容（常见场景：拖错文件 / 想"刷新"但其实没改）→ 返回旧
-    // item_id，跳过 100KB 文档约 3s 的 embedding 流水线。
-    let content_hash = attune_core::store::items::compute_content_hash(&content);
-    if let Ok(Some(existing_id)) = vault.store().find_item_by_content_hash(&content_hash) {
-        tracing::info!("upload content_hash dedup hit: filename={filename} existing_item={existing_id}");
-        // R7 fix: dedup 分支 response shape 与成功分支对齐（id / title / chunks_queued
-        // / status），避免 client 两分支读不同字段名。dedup_reason 是额外兼容字段。
-        return Ok(Json(serde_json::json!({
-            "id": existing_id,
-            "title": title,
-            "chunks_queued": 0,
-            "status": "duplicate",
-            "dedup_reason": "content_hash",
-        })));
-    }
+    // content_hash 短路 + 入库走统一 pipeline。OCR profile 透传给 parser。
+    // upload 无来源域 / 用户标签 / 语料领域 —— domain/tags/corpus_domain 传 None。
+    let raw = RawDocument {
+        uri: format!("upload://{filename}"),
+        title: String::new(), // 让 parser 从内容提取标题
+        content: data.to_vec(),
+        mime_hint: Some(mime_from_filename(&filename).to_string()),
+        source_kind: SourceKind::LocalFolder,
+        source_ref: format!("upload://{filename}"),
+        modified_marker: None,
+        domain: None,
+        tags: None,
+        corpus_domain: None,
+        metadata: std::collections::HashMap::new(),
+    };
 
-    let item_id = vault
-        .store()
-        .insert_item(&dek, &title, &content, None, "file", None, None)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
+    let outcome = attune_core::ingest::ingest_document_with_profile(
+        vault.store(),
+        &dek,
+        &raw,
+        q.profile.as_deref(),
+    )
+    .map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
-    // Phase B hook: doc_create 信号喂 skill_evolution
-    if let Err(e) = vault.store().record_signal_event("doc_create", &item_id, Some(&title)) {
-        tracing::debug!(signal = "doc_create", error = %e, "record_signal_event failed (non-fatal)");
-    }
+    let (item_id, chunks_queued, is_new) = match &outcome {
+        attune_core::ingest::IngestOutcome::Inserted { item_id, chunks_enqueued } => {
+            (item_id.clone(), *chunks_enqueued, true)
+        }
+        attune_core::ingest::IngestOutcome::Duplicate { item_id } => {
+            tracing::info!("upload content_hash dedup hit: filename={filename} existing_item={item_id}");
+            // dedup 分支 response 与成功分支字段对齐，client 两分支读同名字段。
+            return Ok(Json(serde_json::json!({
+                "id": item_id,
+                "title": filename,
+                "chunks_queued": 0,
+                "status": "duplicate",
+                "dedup_reason": "content_hash",
+            })));
+        }
+        attune_core::ingest::IngestOutcome::Updated { item_id, .. } => {
+            (item_id.clone(), 0usize, true)
+        }
+        attune_core::ingest::IngestOutcome::Skipped { reason } => {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": reason})),
+            ));
+        }
+    };
 
     // 留存原始上传文件（AES-GCM 加密），供「查看证据原文」核对 OCR 转录。
     // items.content 只存解析后的文本；律师须能回看原始扫描/图片核验识别准确度。
     // 失败不阻塞上传 — 但记 warn（原件丢失 = 证据无法回溯核验）。
-    if let Err(e) = vault.store().insert_item_blob(
-        &dek,
-        &item_id,
-        &filename,
-        mime_from_filename(&filename),
-        &data[..],
-    ) {
-        tracing::warn!("A1 insert_item_blob failed for item {item_id}: {e}");
-    }
-
-    // Add to fulltext index immediately (search works without AI)
-    {
-        let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ft) = ft_guard.as_ref() {
-            let _ = ft.add_document(&item_id, &title, &content, "file");
+    if is_new {
+        if let Err(e) = vault.store().insert_item_blob(
+            &dek,
+            &item_id,
+            &filename,
+            mime_from_filename(&filename),
+            &data[..],
+        ) {
+            tracing::warn!("insert_item_blob failed for item {item_id}: {e}");
         }
     }
 
-    // F2 (W3 batch A, 2026-04-27)：写 chunk_breadcrumbs sidecar 表，让 ChatEngine
-    // 后续能透传 path 到 Citation。失败不阻塞上传 — 但记 warn 防 silent loss。
-    // per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §4 + reviewer I2
-    if let Err(e) = vault.store().upsert_chunk_breadcrumbs_from_content(&dek, &item_id, &content) {
-        tracing::warn!("F2 upsert_chunk_breadcrumbs failed for item {item_id}: {e}");
-    }
-
-    // Enqueue for embedding: Level 1 (sections) + Level 2 (chunks)
-    let sections = chunker::extract_sections(&content);
-    let mut chunk_counter: usize = 0;
-
-    for (section_idx, section_text) in &sections {
-        if !section_text.trim().is_empty() {
-            vault
-                .store()
-                .enqueue_embedding(&item_id, chunk_counter, section_text, 1, 1, *section_idx)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": e.to_string()})),
-                    )
-                })?;
-            chunk_counter += 1;
+    // 即时 FTS 索引（搜索不依赖 AI 即可工作）。
+    // ingest_document 不碰 VectorIndex / FulltextIndex（server AppState 独立 Mutex），
+    // FTS 即时写由此 server 薄壳补充（锁顺序与 embed_worker 不相交）。
+    // parsed_title：parser 从内容提取的真实标题（如 Markdown H1），用于响应 + FTS；
+    // get_item 失败时回退原始文件名。
+    let parsed_title = if is_new {
+        if let Ok(Some(item)) = vault.store().get_item(&dek, &item_id) {
+            let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ft) = ft_guard.as_ref() {
+                let _ = ft.add_document(&item_id, &item.title, &item.content, "file");
+            }
+            item.title.clone()
+        } else {
+            filename.clone()
         }
-    }
-    for (section_idx, section_text) in &sections {
-        for chunk_text in chunker::chunk(section_text, chunker::DEFAULT_CHUNK_SIZE, chunker::DEFAULT_OVERLAP) {
-            vault
-                .store()
-                .enqueue_embedding(&item_id, chunk_counter, &chunk_text, 2, 2, *section_idx)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": e.to_string()})),
-                    )
-                })?;
-            chunk_counter += 1;
-        }
-    }
-
-    // Auto-enqueue classification
-    let _ = vault.store().enqueue_classify(&item_id, 3);
+    } else {
+        filename.clone()
+    };
 
     // 释放 vault guard，让后续 spawn task 能独立 lock vault
     drop(vault);
@@ -213,7 +190,7 @@ pub async fn upload_file(
 
     // Sprint 1 Phase B: 异步跑 ProjectRecommender，命中阈值通过 ws 推送
     {
-        let title_clone = title.clone();
+        let filename_clone = filename.clone();
         let item_id_clone = item_id.clone();
         let state_clone = state.clone();
         tokio::spawn(async move {
@@ -222,8 +199,8 @@ pub async fn upload_file(
             if !matches!(vault_guard.state(), attune_core::vault::VaultState::Unlocked) {
                 return;
             }
-            // 抽 entities — 简化：用 title 当样本（chunk-level entities 可在 Phase D 优化）
-            let new_ents = attune_core::entities::extract_entities(&title_clone);
+            // 抽 entities — 用 filename 当样本（chunk-level entities 可在 Phase D 优化）
+            let new_ents = attune_core::entities::extract_entities(&filename_clone);
             if new_ents.is_empty() {
                 return;
             }
@@ -354,8 +331,8 @@ pub async fn upload_file(
 
     Ok(Json(serde_json::json!({
         "id": item_id,
-        "title": title,
-        "chunks_queued": chunk_counter,
+        "title": parsed_title,
+        "chunks_queued": chunks_queued,
         "status": "processing"
     })))
 }

@@ -175,3 +175,14 @@ fn ingest_general_corpus_domain_skips_prefix() {
         assert!(!c.starts_with("[领域:"), "general 不应注入前缀: {c}");
     }
 }
+
+#[test]
+fn ingest_with_profile_threads_ocr_profile() {
+    use attune_core::ingest::ingest_document_with_profile;
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    // 文本文档不触发 OCR；此测试只验证带 profile 入口编译且行为与无 profile 一致。
+    let doc = md_doc("/tmp/p.md", "# Profile\n\nbody text.");
+    let outcome = ingest_document_with_profile(&store, &dek, &doc, None).unwrap();
+    assert!(matches!(outcome, IngestOutcome::Inserted { .. }));
+}

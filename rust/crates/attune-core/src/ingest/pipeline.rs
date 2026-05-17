@@ -48,7 +48,7 @@ pub enum IngestOutcome {
 /// Updated 检测（增量判断 + 旧 item 软删）由 caller 在调用前完成，
 /// 检测到变更时改调 `ingest_document_replacing`。
 pub fn ingest_document(store: &Store, dek: &Key32, raw: &RawDocument) -> Result<IngestOutcome> {
-    ingest_document_inner(store, dek, raw, None)
+    ingest_document_inner(store, dek, raw, None, None)
 }
 
 /// 带已知 `old_item_id` 的入库函数。caller 在调用前已自行完成旧 item 删除 +
@@ -59,7 +59,18 @@ pub fn ingest_document_replacing(
     raw: &RawDocument,
     old_item_id: &str,
 ) -> Result<IngestOutcome> {
-    ingest_document_inner(store, dek, raw, Some(old_item_id.to_string()))
+    ingest_document_inner(store, dek, raw, Some(old_item_id.to_string()), None)
+}
+
+/// 带 OCR profile 的入库入口。扫描版 PDF / 图片上传时由 caller 传 profile id
+/// （contract / receipt / screenshot / ancient / custom），None = 默认 300 DPI。
+pub fn ingest_document_with_profile(
+    store: &Store,
+    dek: &Key32,
+    raw: &RawDocument,
+    profile: Option<&str>,
+) -> Result<IngestOutcome> {
+    ingest_document_inner(store, dek, raw, None, profile)
 }
 
 fn ingest_document_inner(
@@ -67,10 +78,12 @@ fn ingest_document_inner(
     dek: &Key32,
     raw: &RawDocument,
     old_item_id: Option<String>,
+    profile: Option<&str>,
 ) -> Result<IngestOutcome> {
-    // 1. parse
+    // 1. parse — profile 非 None 时走 OCR profile 路径（扫描版 PDF / 图片上传）。
     let filename = raw.parse_filename();
-    let (parsed_title, content) = parser::parse_bytes(&raw.content, &filename)?;
+    let (parsed_title, content) =
+        parser::parse_bytes_with_profile(&raw.content, &filename, profile)?;
     if content.trim().is_empty() {
         return Ok(IngestOutcome::Skipped {
             reason: "empty content after parse".into(),
@@ -163,8 +176,8 @@ fn ingest_document_inner(
         log::warn!("ingest: enqueue_classify failed for {item_id}: {e}");
     }
 
-    // doc_create 信号（失败静默，不阻塞）
-    let _ = store.record_signal_event("doc_create", &item_id, None);
+    // doc_create 信号喂 skill_evolution，传文档名作 query context（失败静默，不阻塞）
+    let _ = store.record_signal_event("doc_create", &item_id, Some(&filename));
 
     match old_item_id {
         Some(old) => Ok(IngestOutcome::Updated { item_id, old_item_id: old }),
