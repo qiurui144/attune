@@ -832,6 +832,8 @@ function MemberPanel(): JSX.Element {
   const cloudAccountsUrl = useSignal('');
   const cloudGatewayUrl = useSignal('');
   const cloudPluginhubUrl = useSignal('');
+  // 自部署 pluginhub 需 url + license_key 两者齐全才切到 HttpPluginHubProvider
+  const cloudPluginhubKey = useSignal('');
 
   useEffect(() => {
     // 初始化时把 settings 已有的 cloud config 显示到 input
@@ -842,6 +844,7 @@ function MemberPanel(): JSX.Element {
       if (cloud?.accounts_url) cloudAccountsUrl.value = cloud.accounts_url ?? '';
       if (cloud?.gateway_url) cloudGatewayUrl.value = cloud.gateway_url ?? '';
       if (pluginhub?.url) cloudPluginhubUrl.value = pluginhub.url ?? '';
+      if (pluginhub?.license_key) cloudPluginhubKey.value = pluginhub.license_key ?? '';
     }
   }, [settings.value]);
 
@@ -853,7 +856,10 @@ function MemberPanel(): JSX.Element {
       },
     };
     if (cloudPluginhubUrl.value.trim()) {
-      patch.pluginhub = { url: cloudPluginhubUrl.value.trim() };
+      patch.pluginhub = {
+        url: cloudPluginhubUrl.value.trim(),
+        license_key: cloudPluginhubKey.value.trim() || null,
+      };
     }
     const ok = await patchSettings(patch);
     if (ok) toast('success', t('settings.member.cloud.save_ok'));
@@ -1000,6 +1006,23 @@ function MemberPanel(): JSX.Element {
               placeholder="https://hub.your-company.com"
               value={cloudPluginhubUrl.value}
               onInput={(e) => { cloudPluginhubUrl.value = (e.target as HTMLInputElement).value; }}
+              style={{
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-input-bg)',
+                color: 'var(--color-text)',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <label style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+              {t('settings.member.cloud.pluginhub_key_label')}
+            </label>
+            <input
+              type="text"
+              placeholder="license key"
+              value={cloudPluginhubKey.value}
+              onInput={(e) => { cloudPluginhubKey.value = (e.target as HTMLInputElement).value; }}
               style={{
                 padding: '6px 10px',
                 borderRadius: 6,

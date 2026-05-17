@@ -53,6 +53,23 @@ law-pro `fact_extractor::accuracy` —— per-field 对/错/漏/多报 → preci
   lpr_capped 年化上限 vs 周期利率单位不一致）
 - E2E：复杂证据链 **12/0** · Playwright UI **37/0**
 
+### Marketplace 安装链路补完（2026-05-17）
+
+law-pro 经「pluginhub 发布 → attune Marketplace 下载」全产品路径接入并端到端验证。
+
+| 子项 | 改动 |
+|------|------|
+| Marketplace 真实安装 | `marketplace::install_plugin` 原仅返回元数据（v0.7 半成品）→ 补完为真实下载落地：`hub.install_plugin` → `hub.download_plugin` → 解压验载落地 `plugins/<id>/`。新增 `plugin_sync::install_plugin_package`（白名单 id 校验 / staging+rename 原子替换）。新插件经一次重启由 registry 装载（B 方案）。 |
+| 跨平台解压 | `extract_tarball` gzip 走纯 Rust `tar`+`flate2`（Windows P0 不依赖系统 tar），其余格式回退系统 tar。新增 `tar` / `flate2` 依赖。 |
+| 自部署 hub license | 设置「自部署 cloud 后端」表单补 `pluginhub license key` 输入框 —— 自部署 pluginhub 需 url + license_key 两者齐全才切到 `HttpPluginHubProvider`。 |
+
+- 单测：`plugin_sync` **11/0**（含 `install_plugin_package` 落地 / 路径穿越 / id 不匹配 / 覆盖安装 4 例）
+- 代码审查 2 轮，修复 6 项（路径穿越白名单 / tar shell-out 跨平台 / 覆盖安装原子性 / magic 短读 / staging 泄漏 / 测试辅助依赖系统 tar）
+- E2E：AMD cloud（pluginhub 真实发布）→ attune Marketplace 下载安装 law-pro → civil_loan_agent
+  端到端；4 组证据链经前端 civil_loan 表单对账（标准 ¥19,200 / golden ¥24,065.75 /
+  砍头息 ¥207,123.29 / 利率红线 LPR 封顶 ¥469,139.73）
+- 全量前端套件 `tests/e2e/playwright/run_ui_all.sh`（真 Chrome，L0 Wizard ~ L5 law-pro）**45/0**
+
 ## v0.7.0-dev (2026-05-15 sprint) — 安全有效记忆护城河 Phase A+B
 
 > **「优势不在于模型，而在于以安全有效的记忆」**（per 用户决策 2026-05-15）。

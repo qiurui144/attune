@@ -33,6 +33,9 @@ serde_yaml = "0.9"
 tempfile = "3"
 pdf-extract = "0.8"
 zip = "2"
+# .attunepkg (tar.gz) 解压 —— 纯 Rust，跨平台含 Windows P0，不依赖系统 tar
+tar = "0.4"
+flate2 = "1"
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "tracing", "tls-rustls", "copy-dylibs", "api-24", "download-binaries"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 # PP-OCR (P2-P4): 用 kreuzberg-paddle-ocr 替代自实现 DBNet+CRNN+CTC。
