@@ -13,6 +13,7 @@ use attune_core::tag_index::TagIndex;
 use attune_core::taxonomy::Taxonomy;
 use attune_core::vault::Vault;
 use attune_core::vectors::VectorIndex;
+use attune_core::vlm::{LlmVlmProvider, VlmProvider};
 use attune_core::web_search::WebSearchProvider;
 
 const SEARCH_CACHE_CAPACITY: usize = 256;
@@ -41,6 +42,9 @@ pub struct AppState {
     pub llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub summary_llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub web_search: Mutex<Option<Arc<dyn WebSearchProvider>>>,
+    /// VLM provider — 图片 caption / VQA。由 init_search_engines 用主 LLM 构造；
+    /// 无 vision-capable LLM 时为 None（caption 静默跳过）。
+    pub vlm: Mutex<Option<Arc<dyn VlmProvider>>>,
     pub tag_index: Mutex<Option<TagIndex>>,
     pub cluster_snapshot: Mutex<Option<ClusterSnapshot>>,
     pub taxonomy: Mutex<Option<Arc<Taxonomy>>>,
@@ -123,6 +127,7 @@ impl AppState {
             llm: Mutex::new(None),
             summary_llm: Mutex::new(None),
             web_search: Mutex::new(None),
+            vlm: Mutex::new(None),
             tag_index: Mutex::new(None),
             cluster_snapshot: Mutex::new(None),
             taxonomy: Mutex::new(None),
@@ -189,12 +194,17 @@ impl AppState {
                     *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(std::sync::Arc::new(Classifier::new(tax_arc, llm_arc.clone())));
                 }
+                // VLM 同步热切（依赖主 LLM，LLM 换了 VLM 也要跟着换）
+                *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Arc::new(LlmVlmProvider::new(llm_arc.clone())) as Arc<dyn VlmProvider>);
                 *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(llm_arc);
             }
             None => {
                 tracing::warn!("LLM hot-reload: settings yielded no LLM provider — chat will be disabled");
-                *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                // 先清依赖 LLM 的 vlm / classifier，再清 llm —— LLM 禁用后二者立即不可用
+                *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
         }
     }
@@ -386,6 +396,16 @@ impl AppState {
 
         if let Some(summary_llm_arc) = summary_llm_result {
             *self.summary_llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(summary_llm_arc);
+        }
+
+        // VLM：用主 LLM 构造薄适配器（vision-capable model 可直接处理图片）
+        {
+            let llm_opt = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(llm_arc) = llm_opt {
+                let vlm: Arc<dyn VlmProvider> = Arc::new(LlmVlmProvider::new(llm_arc));
+                *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) = Some(vlm);
+                tracing::info!("VLM: LlmVlmProvider initialized (backed by main LLM)");
+            }
         }
 
         // Web search provider（从 app_settings.web_search 加载；缺省时尝试默认）
@@ -1234,6 +1254,7 @@ impl AppState {
         *self.embedding.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.reranker.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.web_search.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.tag_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.cluster_snapshot.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1320,6 +1341,17 @@ impl AppState {
 
     pub fn set_web_search(&self, p: Option<Arc<dyn WebSearchProvider>>) {
         if let Ok(mut g) = self.web_search.lock() {
+            *g = p;
+        }
+    }
+
+    /// 读 VLM provider — 图片 caption / VQA 用.
+    pub fn vlm(&self) -> Option<Arc<dyn VlmProvider>> {
+        self.vlm.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_vlm(&self, p: Option<Arc<dyn VlmProvider>>) {
+        if let Ok(mut g) = self.vlm.lock() {
             *g = p;
         }
     }
