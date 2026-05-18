@@ -40,6 +40,14 @@ For the OSS × attune-pro feature boundary, see [`docs/oss-pro-strategy.md`](../
 - Session persistence with cross-session continuity
 - HDBSCAN topic clustering
 
+### Multi-Layer Memory (token-efficient context)
+- Tiered memory — L0 raw chunks · L1 chunk summaries · L2 episodic memory · L3 semantic (topic) memory
+- Tier-aware context assembler routes each query to the cheapest tier that answers it:
+  recall/overview questions answer from compact L2/L3 summaries, precise lookups stay on L0
+- Coverage gate guarantees no regression — weak memory hits fall back to the raw-chunk path
+- Rolling history compaction — overflowed conversation turns roll into one cached summary
+- Measured ~79% median reduction in injected-knowledge tokens on recall/overview queries
+
 ### Hybrid Intelligence
 - Hybrid full-text + vector search
 - Browser-automated web search (driving a local Chrome/Edge, zero API cost)

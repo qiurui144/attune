@@ -1,5 +1,29 @@
 # attune 版本记录
 
+## v0.7.0-dev (2026-05-18 sprint) — 多层记忆系统（token 降本）
+
+为 OSS attune-core 加多层记忆架构，让 chat 上下文装配按 query 形态发对的层、对的
+粒度，而非永远 dump 原始 chunk。设计稿
+`docs/superpowers/plans/2026-05-18-multilayer-memory.md`。
+
+| 阶段 | 改动 |
+|------|------|
+| 数据模型 | `memories` 新增 `topic_key`/`cold`/`superseded_by`（幂等 ALTER 升级老 vault）；新表 `memory_vectors` —— embedding sidecar 让 L2/L3 摘要可向量检索 |
+| L3 语义层 | `memory/semantic.rs` —— 把 episodic（L2）按主题 hdbscan 聚类，每簇 1 次 LLM 总结成 standing "用户对 X 的认知"。`topic_key` 幂等，refresh 时旧 subset 主题 supersede |
+| 检索 | `memory/retrieval.rs` —— `MemoryVectorIndex`（专用 usearch 索引）+ `search_memories`：embed query → 排序 live 记忆 → 时间窗口过滤、冷记忆排除 |
+| Tier-aware 装配 | `memory/assembler.rs` —— `classify_query_shape`（recall/overview/precise 零 LLM 启发式）+ `assemble_context`：recall→L2 / overview→L3 / precise→L0，coverage gate 保证命中弱即退回 L0，无回归 |
+| 历史压缩 | `compact_history` —— 超窗的旧对话轮次不再静默丢弃，滚动摘要成 1 条并按 `sha256(dropped)` 缓存（找回原本丢失的信息 + 降 token） |
+| worker | `start_memory_consolidator` 在 episodic pass 后跑分层：embed L2/L3 → L2→L3 语义周期 → 冷降级（纯 SQL） |
+
+**成本契约**：建库不变（tier 1-2）；L2/L3 摘要 tier 3 + 配额治理；冷降级 tier 0；
+读路径只选已建好的记忆、不触发 LLM。
+
+**实测**（`memory_token_reduction_benchmark`）：recall+overview 子集注入 token 中位降幅
+**78.7%**，precise 子集 0% 变化（precise 永不离开 L0）。
+
+测试：46 unit + 5 集成（`multilayer_memory_integration`）+ 1 benchmark，全绿；
+`cargo test -p attune-core` 28 套件 0 失败。
+
 ## v0.7.0-dev (2026-05-16 sprint) — law-pro 接入 + 证据可溯源强化
 
 attune-pro 的 law-pro 律师插件接入 attune 主程序并端到端验证（Playwright 真 Chrome

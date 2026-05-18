@@ -482,6 +482,33 @@ jobs:
 
 ---
 
+## 多层记忆测试矩阵（2026-05-18）
+
+多层记忆系统（L0 raw → L1 chunk summary → L2 episodic → L3 semantic + tier-aware
+assembler）的测试覆盖。设计稿 `docs/superpowers/plans/2026-05-18-multilayer-memory.md`。
+
+| 层 | 文件 | 覆盖 |
+|----|------|------|
+| Unit — store | `store/memory_vectors.rs`、`store/memories.rs` 内联 | memory_vectors CRUD + 级联删除；insert_semantic_memory topic_key 幂等；mark_memory_superseded；demote_cold_memories |
+| Unit — retrieval | `memory/retrieval.rs` 内联 | MemoryVectorIndex upsert/search/维度防护；search_memories 相关性排序、时间过滤、冷记忆排除 |
+| Unit — semantic | `memory/semantic.rs` 内联 | hdbscan 主题聚类；topic_key 跨重跑幂等；subset 主题 supersede |
+| Unit — assembler | `memory/assembler.rs` 内联 | classify_query_shape（recall/overview/precise）；coverage gate；assembler-off == L0；compact_history 缓存命中 |
+| Integration | `tests/multilayer_memory_integration.rs` | 完整 L0→L1→L2→L3 生命周期；recall/overview/precise 路由；冷降级；assembler on/off 等价 |
+| Benchmark | `tests/memory_token_reduction_benchmark.rs` | §5.3 验收指标 — 注入 token 数 assembler on vs off。实测 recall+overview 子集 median 降幅 78.7%，precise 子集 0% |
+
+跑法：
+
+```bash
+cd rust
+cargo test -p attune-core memory                              # 全部 unit
+cargo test -p attune-core --test multilayer_memory_integration
+cargo test -p attune-core --test memory_token_reduction_benchmark -- --nocapture
+```
+
+benchmark 走确定性 MockEmbeddingProvider，无 LLM / 无网络，进 CI（<1s）。
+
+---
+
 ## 附录 A：人工验收清单
 
 某些 UX / 集成场景无法自动化（需要真实 Chrome 实例 / 真实 USB / 真实账号登录等），这些用 [`python/tests/MANUAL_TEST_CHECKLIST.md`](../python/tests/MANUAL_TEST_CHECKLIST.md) 维护勾选式步骤（含 v0.7 Memory Moat 验收节）。

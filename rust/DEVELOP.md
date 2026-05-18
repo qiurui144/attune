@@ -591,6 +591,41 @@ apply_consolidation_result(store, &fresh_dek, &bundles, &summaries, model, now_s
 
 **测试 helper**：`Store::__test_seed_chunk_summary` 仅在 `#[cfg(any(test, feature = "test-utils"))]` 下编译。`attune-core` 自 dev-dep 启用 `test-utils`，`cargo test` 无需 `--features` 即可跑集成测试。
 
+## 多层记忆（2026-05-18）
+
+`attune_core::memory` 把 A1 的 episodic memory 接入检索路径，新增语义层（L3）+ tier-aware
+上下文装配，让 chat 按 query 形态选最便宜的层应答而非永远 dump 原始 chunk。设计稿：
+[`docs/superpowers/plans/2026-05-18-multilayer-memory.md`](../docs/superpowers/plans/2026-05-18-multilayer-memory.md)。
+
+**分层**：L0 raw chunks · L1 chunk summaries · L2 episodic（A1，1d 时间窗口）·
+L3 semantic（新增，按主题聚类，跨时间）。
+
+**模块**：
+
+- `memory/retrieval.rs` — `MemoryVectorIndex`（专用 usearch 索引，与文档索引分离）+
+  `search_memories`：embed query → 向量排序 live（非冷）记忆 → 可选时间窗口过滤。
+- `memory/semantic.rs` — L2→L3 三阶段：`prepare_semantic_cycle`（hdbscan 主题聚类 +
+  topic_key 幂等过滤）→ `generate_one_semantic_memory`（每簇 1 次 LLM，配额受控）→
+  `apply_semantic_result`（`insert_semantic_memory` + 旧 subset 主题 supersede）。
+- `memory/assembler.rs` — `classify_query_shape`（recall/overview/precise 零 LLM 启发式）+
+  `assemble_context`（coverage gate：记忆层命中弱 / precise → 退回 L0，无回归）+
+  `compact_history`（超窗历史滚动摘要，按 `sha256(dropped)` 缓存进 chunk_summaries）。
+
+**数据模型**（全部增量，老 vault 经幂等 ALTER 升级）：
+- `memories` 新增 `topic_key`（L3 去重键）/ `cold`（降级标志）/ `superseded_by`（L3 refresh）。
+- 新表 `memory_vectors`（embedding sidecar，让 L2/L3 摘要可向量检索）。
+
+**成本契约**：建库阶段不变（tier 1-2）；L2/L3 摘要属 tier 3，由 `MemoryConsolidation`
+配额治理；冷降级是纯 SQL（tier 0）；读路径只 *选择已建好的* 记忆，不触发 LLM。
+
+**生产 worker**：`start_memory_consolidator` 在 episodic pass 后跑 `run_memory_layering`
+（embed L2/L3 → L2→L3 语义周期 → 冷降级）。`MemoryVectorIndex` 在 unlock 时从
+`memory_vectors` 重建。chat 路由经 `assemble_context` 装配；`memory.tiered_assembler_enabled`
+（默认 true）控制，关闭即今日 L0 行为。
+
+**设置键**（`app_settings.memory.*`）：`tiered_assembler_enabled` (bool, 默认 true)、
+`memory_confidence` (float, 默认 0.70 — coverage gate 阈值)。
+
 ## 数据库 Schema
 
 ```sql
