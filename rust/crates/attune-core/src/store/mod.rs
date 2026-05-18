@@ -340,11 +340,30 @@ CREATE TABLE IF NOT EXISTS memories (
     source_chunk_count    INTEGER NOT NULL,
     summary_encrypted     BLOB NOT NULL,
     model                 TEXT NOT NULL,
-    created_at            INTEGER NOT NULL
+    created_at            INTEGER NOT NULL,
+    -- Multi-layer memory (2026-05-18): topic_key dedups semantic (L3) rows,
+    -- cold flags demoted episodic rows, superseded_by points to a refreshed L3 row.
+    topic_key             TEXT,
+    cold                  INTEGER NOT NULL DEFAULT 0,
+    superseded_by         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_window ON memories(window_start, window_end);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_source ON memories(kind, source_chunk_hashes);
+CREATE INDEX IF NOT EXISTS idx_memories_cold ON memories(cold, kind);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_topic ON memories(kind, topic_key) WHERE topic_key IS NOT NULL;
+
+-- Multi-layer memory (2026-05-18) — embedding sidecar so episodic/semantic
+-- summaries are vector-searchable by the tier-aware assembler (rank, not just list).
+-- topic_key/cold/superseded_by on memories above are carried for fresh vaults here
+-- and added on older vaults via the idempotent migrate_memories_multilayer ALTER.
+CREATE TABLE IF NOT EXISTS memory_vectors (
+    memory_id   TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    embedding   BLOB NOT NULL,
+    dim         INTEGER NOT NULL,
+    model       TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
 
 -- C1 Web search cache (W3 batch A, 2026-04-27)
 -- per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §3
