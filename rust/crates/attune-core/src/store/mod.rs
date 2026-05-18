@@ -351,8 +351,9 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_window ON memories(window_start, window_end);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_source ON memories(kind, source_chunk_hashes);
-CREATE INDEX IF NOT EXISTS idx_memories_cold ON memories(cold, kind);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_topic ON memories(kind, topic_key) WHERE topic_key IS NOT NULL;
+-- idx_memories_cold / uq_memories_topic 不在此建 —— cold/topic_key 在老 vault 上由
+-- migrate_memories_multilayer 的 ALTER 补列，两索引随之在该函数内（列就位后）创建。
+-- 放这里会在老 vault 上先于 ALTER 执行 → "no such column: cold"。
 
 -- Multi-layer memory (2026-05-18) — embedding sidecar so episodic/semantic
 -- summaries are vector-searchable by the tier-aware assembler (rank, not just list).
