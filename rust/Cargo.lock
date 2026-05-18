@@ -325,6 +325,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "flate2",
+ "futures",
  "hdbscan",
  "hex",
  "hf-hub",

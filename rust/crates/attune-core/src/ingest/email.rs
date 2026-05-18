@@ -240,6 +240,249 @@ pub trait ImapFetcher {
     fn fetch_since(&self, folder: &str, since_uid: u32) -> Result<Vec<FetchedMail>>;
 }
 
+use std::collections::HashMap;
+
+use crate::ingest::{DocumentSink, RawDocument, SourceConnector, SourceKind};
+
+/// IMAP 邮箱采集源。
+///
+/// 持有一个 `ImapFetcher`（生产 = RealImapFetcher，测试 = mock），逐文件夹按
+/// UID 增量抓取，把每封邮件正文 + 每个文档类附件转成 RawDocument 交给 sink。
+pub struct EmailConnector {
+    config: EmailConfig,
+    fetcher: Box<dyn ImapFetcher>,
+    /// 每文件夹的 IMAP UID 增量起点（fetch_since 只取 UID 严格大于此值的邮件）。
+    /// 由 caller（sync_email_account）在 fetch 前从 email_folder_uids 表注入。
+    since_by_folder: HashMap<String, u32>,
+}
+
+impl EmailConnector {
+    /// 用指定 fetcher 构造（测试注入 mock；生产传 RealImapFetcher）。
+    pub fn with_fetcher(config: EmailConfig, fetcher: Box<dyn ImapFetcher>) -> Self {
+        Self {
+            config,
+            fetcher,
+            since_by_folder: HashMap::new(),
+        }
+    }
+
+    /// 用生产 IMAP 抓取层构造（rustls TLS over async-imap）。
+    pub fn new(config: EmailConfig) -> Self {
+        let fetcher = Box::new(RealImapFetcher {
+            host: config.host.clone(),
+            port: config.port,
+            username: config.username.clone(),
+            password: config.password.clone(),
+        });
+        Self::with_fetcher(config, fetcher)
+    }
+
+    /// 设置某文件夹的 UID 增量起点（caller 从 email_folder_uids 表读出后注入）。
+    pub fn set_folder_since(&mut self, folder: &str, since_uid: u32) {
+        self.since_by_folder.insert(folder.to_string(), since_uid);
+    }
+
+    /// 把一封邮件展开成 RawDocument 列表（正文 1 份 + 每附件 1 份）交给 sink。
+    fn emit_mail(&self, folder: &str, fetched: &FetchedMail, sink: &mut DocumentSink<'_>) {
+        let msg = match parse_email_bytes(&fetched.raw) {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("email: parse uid {} in {folder} failed: {e}", fetched.uid);
+                return;
+            }
+        };
+
+        // Message-ID 缺失时用 folder:uid 兜底作稳定唯一键。
+        let msg_id = if msg.message_id.trim().is_empty() {
+            format!("{folder}:{}", fetched.uid)
+        } else {
+            msg.message_id.clone()
+        };
+        let marker = format!("{folder}:{}", fetched.uid);
+
+        let mut metadata = HashMap::new();
+        if let Some(ref from) = msg.from {
+            metadata.insert("from".to_string(), from.clone());
+        }
+        if let Some(ref date) = msg.date {
+            metadata.insert("date".to_string(), date.clone());
+        }
+        metadata.insert("folder".to_string(), folder.to_string());
+
+        // 正文 RawDocument。source_ref = "{Message-ID}.txt"（跨 folder 去重稳定键）。
+        // .txt 后缀是功能性的、不可省：ingest_document 纯靠 parse_filename 取
+        // source_ref 末段、再用 Path::extension() 推扩展名来选 parser（mime_hint
+        // 不参与路由）。裸 Message-ID 以 "@domain.tld" 结尾，extension() 会解出
+        // 非白名单的 "tld" → 正文整封 ingest 失败。.txt 强制走纯文本分支。
+        if !msg.body.trim().is_empty() {
+            sink(RawDocument {
+                uri: format!("imap://{}/{folder}/{}", self.config.host, fetched.uid),
+                title: msg.subject.clone(),
+                content: msg.body.clone().into_bytes(),
+                mime_hint: Some("text/plain".to_string()),
+                source_kind: SourceKind::Email,
+                source_ref: format!("{msg_id}.txt"),
+                modified_marker: Some(marker.clone()),
+                domain: None,
+                tags: None,
+                corpus_domain: None,
+                metadata: metadata.clone(),
+            });
+        }
+
+        // 每个文档类附件单独一份 RawDocument。source_ref = "{msg_id}#att{idx}/{filename}"：
+        // #att{idx} 后缀避免与正文 / 其它附件碰撞；末段是文件名，让 parse_filename
+        // 取到附件扩展名 → parser 按扩展名选解析器。
+        for (idx, att) in msg.attachments.iter().enumerate() {
+            let mut att_meta = metadata.clone();
+            att_meta.insert("attachment_of".to_string(), msg_id.clone());
+            sink(RawDocument {
+                uri: format!(
+                    "imap://{}/{folder}/{}/att{idx}",
+                    self.config.host, fetched.uid
+                ),
+                title: format!("{} — {}", msg.subject, att.filename),
+                content: att.content.clone(),
+                mime_hint: None,
+                source_kind: SourceKind::Email,
+                source_ref: format!("{msg_id}#att{idx}/{}", att.filename),
+                modified_marker: Some(format!("{marker}#att{idx}")),
+                domain: None,
+                tags: None,
+                corpus_domain: None,
+                metadata: att_meta,
+            });
+        }
+    }
+}
+
+impl SourceConnector for EmailConnector {
+    fn source_kind(&self) -> SourceKind {
+        SourceKind::Email
+    }
+
+    fn fetch_documents(&self, sink: &mut DocumentSink<'_>) -> Result<()> {
+        for folder in self.config.effective_folders() {
+            let since = self.since_by_folder.get(&folder).copied().unwrap_or(0);
+            // 单文件夹抓取失败不致命：记日志、继续下一个文件夹。
+            let mails = match self.fetcher.fetch_since(&folder, since) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!("email: fetch folder {folder} failed: {e}");
+                    continue;
+                }
+            };
+            for fetched in &mails {
+                self.emit_mail(&folder, fetched, sink);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 生产 IMAP 抓取层 —— async-imap over tokio-rustls，单线程 runtime 桥接。
+pub struct RealImapFetcher {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+}
+
+impl RealImapFetcher {
+    /// 建 rustls TLS 配置（webpki 根证书，纯 Rust，不引 native-tls）。
+    fn tls_connector() -> tokio_rustls::TlsConnector {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg))
+    }
+
+    /// 异步连接 + 登录 + 抓取某文件夹 since_uid 之后的邮件。
+    async fn fetch_async(&self, folder: &str, since_uid: u32) -> Result<Vec<FetchedMail>> {
+        use futures::StreamExt;
+
+        let tcp = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
+            .await
+            .map_err(|e| VaultError::LlmUnavailable(format!("imap connect: {e}")))?;
+        let dns = rustls::pki_types::ServerName::try_from(self.host.clone())
+            .map_err(|e| VaultError::LlmUnavailable(format!("imap server name: {e}")))?;
+        let tls = Self::tls_connector()
+            .connect(dns, tcp)
+            .await
+            .map_err(|e| VaultError::LlmUnavailable(format!("imap tls: {e}")))?;
+
+        let client = async_imap::Client::new(tls);
+        let mut session = client
+            .login(&self.username, &self.password)
+            .await
+            .map_err(|(e, _)| VaultError::LlmUnavailable(format!("imap login: {e}")))?;
+
+        // 选文件夹（不存在则视为该文件夹无邮件，返回空而非致命错误）。
+        if session.select(folder).await.is_err() {
+            let _ = session.logout().await;
+            log::warn!("email: select folder {folder} failed, treating as empty");
+            return Ok(Vec::new());
+        }
+
+        // UID SEARCH (since_uid+1):* —— 只要严格大于游标的 UID。
+        let lower = since_uid.saturating_add(1);
+        // uid_search returns a HashSet<Uid> with non-deterministic iteration order; sort ascending
+        // so the caller receives a deterministic stream and UID-checkpoint logic is predictable.
+        let uids = match session.uid_search(format!("UID {lower}:*")).await {
+            Ok(u) => u,
+            Err(e) => {
+                let _ = session.logout().await;
+                return Err(VaultError::LlmUnavailable(format!("imap uid search: {e}")));
+            }
+        };
+        let mut uids: Vec<u32> = uids.into_iter().collect();
+        uids.sort_unstable();
+
+        let mut out = Vec::new();
+        for uid in uids {
+            // IMAP server 对 "lower:*" 在无更高 UID 时会回 lower 自身 —— 二次过滤。
+            if uid <= since_uid {
+                continue;
+            }
+            let mut stream = match session.uid_fetch(uid.to_string(), "RFC822").await {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("email: uid_fetch {uid} in {folder} failed: {e}");
+                    continue;
+                }
+            };
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(fetch) => {
+                        if let Some(body) = fetch.body() {
+                            out.push(FetchedMail { uid, raw: body.to_vec() });
+                        }
+                    }
+                    Err(e) => log::warn!("email: fetch stream uid {uid} error: {e}"),
+                }
+            }
+            // uid_fetch 的 stream 借用 &mut session —— 必须 drop 后才能再调 session 方法。
+            drop(stream);
+        }
+        let _ = session.logout().await;
+        Ok(out)
+    }
+}
+
+impl ImapFetcher for RealImapFetcher {
+    fn fetch_since(&self, folder: &str, since_uid: u32) -> Result<Vec<FetchedMail>> {
+        // SourceConnector::fetch_documents 是同步契约 —— 单线程 tokio runtime
+        // 桥接内部 async I/O（与 WebDavConnector::drive_blocking 同模式）。
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| VaultError::LlmUnavailable(format!("imap runtime: {e}")))?;
+        runtime.block_on(self.fetch_async(folder, since_uid))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,6 +29,8 @@ reqwest_dav = { version = "0.3", default-features = false, features = ["rustls-t
 # 不引第二个 async runtime）；TLS 用 tokio-rustls 自建连接器喂给 async-imap，
 # 避免 async-imap 默认的 async-native-tls → openssl-sys（违反纯 Rust TLS 硬约束）。
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+# async-imap 的 uid_fetch 返回 `impl Stream`；需要 futures 的 StreamExt 来 .next() 消费。
+futures = { version = "0.3", default-features = false, features = ["std"] }
 mail-parser = "0.11"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

@@ -11,4 +11,5 @@ pub mod local;
 pub mod email;
 
 pub use connector::{DocumentSink, RawDocument, SourceConnector, SourceKind};
+pub use email::{EmailConfig, EmailConnector, FetchedMail, ImapFetcher, MailAttachment, MailMessage};
 pub use pipeline::{ingest_document, ingest_document_replacing, ingest_document_with_profile, IngestOutcome};
