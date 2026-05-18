@@ -4,6 +4,7 @@ mod types;
 pub mod items;
 pub mod item_blobs;
 pub mod webdav_remotes;
+pub mod email_accounts;
 mod dirs;
 mod queue;
 mod history;
@@ -131,6 +132,30 @@ CREATE TABLE IF NOT EXISTS webdav_remotes (
     corpus_domain TEXT NOT NULL DEFAULT 'general',
     updated_at    TEXT NOT NULL,
     last_etag_sync TEXT
+);
+
+-- Email IMAP 采集账户持久化。与 webdav_remotes 同模式：
+-- bound_dirs(email:* path) 只记账户标识；周期同步 worker 要复用 IMAP 凭据
+-- → 此表存完整账户配置。password_enc 是 AES-256-GCM 密文 BLOB（dek 加密，
+-- 与 items.content 同模式）；folders 是逗号分隔的文件夹名列表。
+CREATE TABLE IF NOT EXISTS email_accounts (
+    dir_id        TEXT PRIMARY KEY REFERENCES bound_dirs(id) ON DELETE CASCADE,
+    host          TEXT NOT NULL,
+    port          INTEGER NOT NULL DEFAULT 993,
+    username      TEXT NOT NULL,
+    password_enc  BLOB NOT NULL,
+    folders       TEXT NOT NULL DEFAULT 'INBOX,Sent',
+    corpus_domain TEXT NOT NULL DEFAULT 'general',
+    updated_at    TEXT NOT NULL,
+    last_sync     TEXT
+);
+
+-- 每账户每文件夹的 IMAP UID 增量游标。下次 UID SEARCH 从 last_uid+1 起。
+CREATE TABLE IF NOT EXISTS email_folder_uids (
+    dir_id   TEXT NOT NULL REFERENCES email_accounts(dir_id) ON DELETE CASCADE,
+    folder   TEXT NOT NULL,
+    last_uid INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (dir_id, folder)
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
