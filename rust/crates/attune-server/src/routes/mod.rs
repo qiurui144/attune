@@ -9,6 +9,7 @@ pub mod browse_signals;
 pub mod chat;
 pub mod chat_stream;
 pub mod chat_sessions;
+pub mod email;
 pub mod errors;
 pub mod feedback;
 pub mod folder_links;

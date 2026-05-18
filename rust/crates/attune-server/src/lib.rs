@@ -212,6 +212,16 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Index management
         .route("/api/v1/index/bind", post(routes::index::bind_directory))
         .route("/api/v1/index/bind-remote", post(routes::remote::bind_remote))
+        .route("/api/v1/index/email-accounts", get(routes::email::list_email_accounts))
+        .route("/api/v1/index/bind-email", post(routes::email::bind_email))
+        .route(
+            "/api/v1/index/email-accounts/{dir_id}",
+            axum::routing::delete(routes::email::delete_email_account),
+        )
+        .route(
+            "/api/v1/index/email-accounts/{dir_id}/sync",
+            post(routes::email::sync_email_account_now),
+        )
         .route("/api/v1/index/unbind", delete(routes::index::unbind_directory))
         .route("/api/v1/index/status", get(routes::index::index_status))
         // File upload（multipart body limit 匹配 MAX_UPLOAD_BYTES 100MB；
