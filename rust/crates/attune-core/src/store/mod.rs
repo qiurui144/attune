@@ -14,6 +14,7 @@ mod chunk_summaries;
 mod annotations;
 mod project;
 mod memories;
+mod memory_vectors;
 mod web_search_cache;
 mod chunk_breadcrumbs;
 pub mod browse_signals;  // pub: BrowseSignalInput / BrowseSignalRow 给 attune-server route 用
@@ -489,6 +490,7 @@ impl Store {
         Self::migrate_corpus_domain(&conn)?;
         Self::migrate_items_content_hash(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
+        Self::migrate_memories_multilayer(&conn)?;
         Ok(Self { conn })
     }
 
@@ -503,7 +505,54 @@ impl Store {
         Self::migrate_corpus_domain(&conn)?;
         Self::migrate_items_content_hash(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
+        Self::migrate_memories_multilayer(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// 多层记忆（2026-05-18）：memories 表新增 topic_key / cold / superseded_by 列（幂等）。
+    ///
+    /// 老 vault 升级：topic_key/superseded_by 默认 NULL（episodic 行不需要），
+    /// cold 默认 0（hot）。memory_vectors 表由 SCHEMA_SQL 的 CREATE TABLE IF NOT EXISTS
+    /// 自动补建，不需要单独 ALTER。
+    fn migrate_memories_multilayer(conn: &Connection) -> Result<()> {
+        let has_topic: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'topic_key'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_topic == 0 {
+            conn.execute("ALTER TABLE memories ADD COLUMN topic_key TEXT", [])?;
+        }
+        let has_cold: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'cold'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_cold == 0 {
+            conn.execute(
+                "ALTER TABLE memories ADD COLUMN cold INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        let has_superseded: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'superseded_by'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_superseded == 0 {
+            conn.execute("ALTER TABLE memories ADD COLUMN superseded_by TEXT", [])?;
+        }
+        // INDEX CREATE 提出 if 块外（与 content_hash migration 同样的 R16 理由）。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_cold ON memories(cold, kind)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_topic \
+             ON memories(kind, topic_key) WHERE topic_key IS NOT NULL",
+            [],
+        )?;
+        Ok(())
     }
 
     /// 迁移：items 新增 corpus_domain 列 + bound_dirs 新增 corpus_domain 列

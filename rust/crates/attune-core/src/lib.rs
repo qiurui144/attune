@@ -77,6 +77,7 @@ pub mod parser;
 pub mod pii;
 pub mod platform;
 pub mod memory_consolidation;
+pub mod memory;
 pub mod project_recommender;
 pub mod queue;
 pub mod reindex;
