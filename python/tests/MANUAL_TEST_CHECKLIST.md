@@ -139,6 +139,25 @@
 - [ ] **Pause 顶栏**：consolidation 周期跑到一半时点顶栏 Pause → 当前 bundle 完成后停止，剩余 bundle 留下次（无超额 LLM 调用）
 - [ ] **Conservative 档**：切到 Conservative → MemoryConsolidation governor LLM 配额降为 5/h → 多 bundle 周期会触发 deferred 日志
 
+## 多层记忆 — tier-aware 上下文装配（per `docs/superpowers/plans/2026-05-18-multilayer-memory.md`）
+
+前置：知识库已有若干天的对话/文档，consolidation 已跑出 episodic/semantic 记忆。
+
+### Tier 路由验证
+
+- [ ] **Recall query**：问「上周学了什么 / 今天看的 X」→ chat 响应 `context_tier` 为 `L2`，cost chip 显示注入 token 明显低于平时
+- [ ] **Overview query**：问「总结我对 X 的理解 / 我对 X 了解多少」→ `context_tier` 为 `L3`
+- [ ] **Precise query**：问代码符号 / 精确引用（含 `反引号`、`::`、数字）→ `context_tier` 仍为 `L0`，答案精度不降
+- [ ] **Coverage gate**：问一个记忆库覆盖不到的 recall/overview 问题 → 自动退回 `L0`，答案不变（无回归）
+
+### 历史压缩
+
+- [ ] **超窗会话**：连续多轮把上下文撑过模型窗口 → 旧轮次合并成「[此前 N 轮较早对话摘要]」而非「已省略」占位；摘要内容能反映被截轮次的要点
+
+### 开关
+
+- [ ] **关闭 tiered assembler**：Settings 把 `memory.tiered_assembler_enabled` 设 false → 所有 query `context_tier` 恒为 `L0`，行为与旧版一致
+
 ## Memory Moat v0.7 — 文档编辑嵌入 + 自学习闭环（per `docs/specs/memory-moat-v07.md`）
 
 每次 v0.7 dot release 必须全过。
