@@ -25,6 +25,14 @@ reqwest = { workspace = true, features = ["blocking", "cookies"] }
 # WebDAV 客户端 —— 替手写脆弱 XML PROPFIND parser。reqwest_dav 复用
 # reqwest 的 rustls TLS 栈（纯 Rust，跨平台含 Windows P0，不引系统 OpenSSL）。
 reqwest_dav = { version = "0.3", default-features = false, features = ["rustls-tls"] }
+# Email IMAP 采集 —— async-imap 走 tokio runtime（与 WebDavConnector 同 runtime 桥接模式，
+# 不引第二个 async runtime）；TLS 用 tokio-rustls 自建连接器喂给 async-imap，
+# 避免 async-imap 默认的 async-native-tls → openssl-sys（违反纯 Rust TLS 硬约束）。
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+mail-parser = "0.11"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+webpki-roots = "0.26"
 tokio = { workspace = true }
 tantivy = "0.22"
 tantivy-jieba = "0.11"
