@@ -37,6 +37,10 @@ pub struct AppState {
     pub vault: Mutex<Vault>,
     pub fulltext: Mutex<Option<FulltextIndex>>,
     pub vectors: Mutex<Option<VectorIndex>>,
+    /// Multi-layer memory (2026-05-18): dedicated vector index over L2/L3 memory
+    /// summaries so the tier-aware assembler can rank them. Built at unlock from
+    /// `memory_vectors`; `None` until the embedding dimension is known.
+    pub memory_index: Mutex<Option<attune_core::memory::MemoryVectorIndex>>,
     pub embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     pub reranker: Mutex<Option<Arc<dyn attune_core::infer::RerankProvider>>>,
     pub llm: Mutex<Option<Arc<dyn LlmProvider>>>,
@@ -126,6 +130,7 @@ impl AppState {
             vault: Mutex::new(vault),
             fulltext: Mutex::new(None),
             vectors: Mutex::new(None),
+            memory_index: Mutex::new(None),
             embedding: Mutex::new(None),
             reranker: Mutex::new(None),
             llm: Mutex::new(None),
@@ -315,6 +320,32 @@ impl AppState {
                 }
             };
             *guard = Some(provider);
+        }
+
+        // Multi-layer memory (2026-05-18): build the memory vector index from the
+        // memory_vectors sidecar. Dimension = active embedding provider's; rows from
+        // a different model graceful-skip inside build_from_store.
+        {
+            let dims = self
+                .embedding
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|p| p.dimensions()))
+                .filter(|d| *d > 0)
+                .unwrap_or(1024);
+            let built = {
+                let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+                attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), dims)
+            };
+            match built {
+                Ok(idx) => {
+                    tracing::info!("Memory vector index loaded ({} memories)", idx.len());
+                    if let Ok(mut g) = self.memory_index.lock() {
+                        *g = Some(idx);
+                    }
+                }
+                Err(e) => tracing::warn!("Memory vector index build failed ({e}); tiered assembler disabled until rebuilt"),
+            }
         }
 
         // Try loading OrtRerankProvider
@@ -1370,11 +1401,183 @@ impl AppState {
                         Err(e) => tracing::warn!("Memory consolidator apply error: {}", e),
                     }
                 }
+
+                // ── Multi-layer memory: embed L2, build L3, demote cold ─────────
+                // Embedding L2/L3 summaries is cost tier 2 (local). The L2→L3 LLM
+                // pass is tier 3, gated per-call by the same governor quota.
+                Self::run_memory_layering(&state, &governor, &model_name, now_secs);
             }
 
             state.memory_consolidator_running.store(false, Ordering::SeqCst);
             tracing::info!("Memory consolidator stopped (vault locked)");
         });
+    }
+
+    /// One layering pass: embed any not-yet-embedded L2/L3 memories into
+    /// `memory_vectors` + the in-memory index, run the L2→L3 semantic cycle, then
+    /// demote cold episodic memories. Called by the consolidator worker after the
+    /// episodic pass. All steps are best-effort — failures only `warn`.
+    fn run_memory_layering(
+        state: &std::sync::Arc<AppState>,
+        governor: &std::sync::Arc<attune_core::resource_governor::TaskGovernor>,
+        model_name: &str,
+        now_secs: i64,
+    ) {
+        // Embed any memories that have no memory_vectors row yet (covers freshly
+        // inserted episodic rows + previously-deferred ones).
+        Self::embed_pending_memories(state, now_secs);
+
+        // L2→L3 semantic cycle (three-stage, lock discipline mirrors A1).
+        let embeddings: std::collections::HashMap<String, Vec<f32>> = {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            vault
+                .store()
+                .list_all_memory_vectors()
+                .map(|rows| rows.into_iter().map(|r| (r.memory_id, r.embedding)).collect())
+                .unwrap_or_default()
+        };
+        let clusters = {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                return;
+            }
+            let dek = match vault.dek_db() {
+                Ok(d) => d,
+                Err(_) => return,
+            };
+            match attune_core::memory::prepare_semantic_cycle(vault.store(), &dek, &embeddings) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("semantic prepare error: {e}");
+                    None
+                }
+            }
+        };
+
+        if let Some(clusters) = clusters {
+            let llm = match state.llm.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+                Some(l) => l,
+                None => return,
+            };
+            // Per-cluster quota check (each LLM call costs 1 quota — same as A1).
+            let mut summaries: Vec<Option<String>> = Vec::with_capacity(clusters.len());
+            for cluster in &clusters {
+                if !governor.allow_llm_call() {
+                    for _ in summaries.len()..clusters.len() {
+                        summaries.push(None);
+                    }
+                    break;
+                }
+                summaries.push(attune_core::memory::generate_one_semantic_memory(
+                    llm.as_ref(),
+                    cluster,
+                ));
+            }
+            let new_ids: Vec<Option<String>> = {
+                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                    return;
+                }
+                let dek = match vault.dek_db() {
+                    Ok(d) => d,
+                    Err(_) => return,
+                };
+                match attune_core::memory::apply_semantic_result(
+                    vault.store(), &dek, &clusters, &summaries, model_name, now_secs,
+                ) {
+                    Ok((r, ids)) => {
+                        if r.inserted > 0 {
+                            tracing::info!(
+                                "Memory consolidator: {} new semantic memories ({} superseded)",
+                                r.inserted, r.superseded,
+                            );
+                        }
+                        ids
+                    }
+                    Err(e) => {
+                        tracing::warn!("semantic apply error: {e}");
+                        vec![]
+                    }
+                }
+            };
+            // Embed the new semantic summaries so they become searchable.
+            if new_ids.iter().any(|i| i.is_some()) {
+                Self::embed_pending_memories(state, now_secs);
+            }
+        }
+
+        // Cold demotion — pure SQL, zero LLM. COLD_AGE default 180 days (plan §2.2).
+        const COLD_AGE_SECS: i64 = 180 * 24 * 3600;
+        {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                match vault.store().demote_cold_memories(now_secs, COLD_AGE_SECS) {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!("Memory consolidator: {n} episodic memories demoted to cold"),
+                    Err(e) => tracing::warn!("cold demotion error: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Embed every memory that lacks a `memory_vectors` row, write the vector, and
+    /// upsert it into the in-memory `memory_index`. Cost tier 2 (local embedding).
+    fn embed_pending_memories(state: &std::sync::Arc<AppState>, now_secs: i64) {
+        let embedder = match state.embedding.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+            Some(e) if e.is_available() => e,
+            _ => return,
+        };
+        // Collect (memory_id, summary) for memories with no vector yet.
+        let pending: Vec<(String, String)> = {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                return;
+            }
+            let dek = match vault.dek_db() {
+                Ok(d) => d,
+                Err(_) => return,
+            };
+            let store = vault.store();
+            let mut out = Vec::new();
+            for kind in ["episodic", "semantic"] {
+                if let Ok(mems) = store.list_live_memories(&dek, kind, true) {
+                    for m in mems {
+                        if store.get_memory_vector(&m.id).ok().flatten().is_none() {
+                            out.push((m.id, m.summary));
+                        }
+                    }
+                }
+            }
+            out
+        };
+        if pending.is_empty() {
+            return;
+        }
+        // Embedding providers don't expose a model name; the dimension is a stable
+        // proxy — a model switch that changes dims is what makes vectors mismatch,
+        // and same-dim models are interchangeable for cosine ranking.
+        let model = format!("embed-dim{}", embedder.dimensions());
+        for (mem_id, summary) in pending {
+            let vec = match embedder.embed(&[summary.as_str()]) {
+                Ok(mut v) if !v.is_empty() => v.remove(0),
+                _ => continue,
+            };
+            {
+                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                    return;
+                }
+                if let Err(e) = vault.store().put_memory_vector(&mem_id, &vec, &model, now_secs) {
+                    tracing::warn!("put_memory_vector failed for {mem_id}: {e}");
+                    continue;
+                }
+            }
+            if let Ok(mut g) = state.memory_index.lock() {
+                if let Some(idx) = g.as_mut() {
+                    let _ = idx.upsert(&mem_id, &vec);
+                }
+            }
+        }
     }
 
     /// 清除搜索引擎 + 分类引擎 (lock 前调用)

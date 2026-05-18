@@ -338,6 +338,70 @@ pub async fn chat(
         );
     }
 
+    // 2a-. 多层记忆：tier-aware 上下文装配（2026-05-18）
+    //
+    // recall/overview 形态的 query 用紧凑的 L2/L3 记忆摘要替代 L0 原始 chunk，
+    // 显著降低注入 token。coverage gate 保证：记忆层命中弱 / precise query →
+    // 退回今日的 L0 路径，无回归。assembler 仅在 memory.tiered_assembler_enabled
+    // 时介入，且只 *选择已建好的* 记忆，不在读路径触发 LLM（成本契约）。
+    let mut context_tier: &'static str = "L0";
+    {
+        let memory_cfg = attune_core::memory::MemoryConfig {
+            tiered_assembler_enabled: app_settings
+                .get("memory")
+                .and_then(|m| m.get("tiered_assembler_enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            memory_confidence: app_settings
+                .get("memory")
+                .and_then(|m| m.get("memory_confidence"))
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+                .unwrap_or(0.70),
+        };
+        if memory_cfg.tiered_assembler_enabled && !search_results.is_empty() {
+            let state_asm = state.clone();
+            let dek_asm = dek.clone();
+            let query_asm = body.message.clone();
+            let l0_in = search_results.clone();
+            let assembled = tokio::task::spawn_blocking(move || {
+                let idx_guard = state_asm.memory_index.lock().unwrap_or_else(|e| e.into_inner());
+                let idx = idx_guard.as_ref()?;
+                let emb = state_asm.embedding.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+                let vault = state_asm.vault.lock().unwrap_or_else(|e| e.into_inner());
+                attune_core::memory::assemble_context(
+                    vault.store(), &dek_asm, idx, emb.as_ref(),
+                    &query_asm, &l0_in, memory_cfg,
+                )
+                .ok()
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(ctx) = assembled {
+                context_tier = ctx.tier_used;
+                if ctx.tier_used != "L0" {
+                    // 记忆层应答 → 用装配后的 block 替换 search_results。
+                    // 记忆 block item_id 为空 → 下游压缩按 web/临时 chunk passthrough。
+                    search_results = ctx
+                        .blocks
+                        .into_iter()
+                        .map(|b| attune_core::search::SearchResult {
+                            item_id: b.item_id,
+                            score: b.score,
+                            title: b.title,
+                            content: b.content.clone(),
+                            source_type: "memory".to_string(),
+                            inject_content: Some(b.content),
+                            ..Default::default()
+                        })
+                        .collect();
+                    tracing::info!("chat: tiered assembler answered from {}", context_tier);
+                }
+            }
+        }
+    }
+
     // 2a. 本地无结果时记录失败信号（后台技能进化的驱动数据），非阻塞
     if search_results.is_empty() {
         let signal_state = state.clone();
@@ -901,6 +965,9 @@ pub async fn chat(
         "session_id": session_id,
         "web_search_used": web_search_used,
         "confidence": confidence,
+        // 多层记忆：哪一层应答了本次 query — L0 原始 chunk / L2 情景记忆 / L3 主题记忆。
+        // 前端 cost chip tooltip 展示「context: L2 memory」让用户看到 token 省在哪。
+        "context_tier": context_tier,
         // Cost & Trigger Contract: Chat 每次响应携带 token/费用估算供前端 chip 展示
         "cost_estimate": {
             "tokens_in": tokens_in,
