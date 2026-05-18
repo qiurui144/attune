@@ -408,11 +408,17 @@ POST /api/v1/index/bind-remote { url, username, password, ... }
 Email 账号配置（含加密凭据）持久化在 `email_accounts` 表，`password` 走字段级 AES-256-GCM。
 
 ```
-POST /api/v1/email/accounts { host, port, username, password, ... }
-  → upsert_email_account()（password AES-GCM 加密落库）
-  → EmailConnector::run(sink)
-    ├── IMAP LOGIN → 选 INBOX
-    ├── UID 比对 last_seen_uid（已索引 → Skipped）
+GET    /api/v1/index/email-accounts              → 列出已绑定账号
+POST   /api/v1/index/bind-email { host, port, username, password, ... }
+         → upsert_email_account()（password AES-GCM 加密落库）
+         → 首次触发 sync_email_account()
+DELETE /api/v1/index/email-accounts/{dir_id}     → 删除账号
+POST   /api/v1/index/email-accounts/{dir_id}/sync → 手动触发增量同步
+
+sync_email_account() 内部流程：
+  → EmailConnector::fetch_documents(sink)  // 实现 SourceConnector trait
+    ├── IMAP LOGIN → 遍历配置文件夹
+    ├── UID 比对 since_uid 游标（已索引 → Skipped）
     ├── FETCH 邮件正文（HTML → text strip + plain text）
     ├── 解析附件（支持 Parser 全部格式，逐一 ingest_document）
     └── ingest_document()（邮件正文 + 附件各自入库）
