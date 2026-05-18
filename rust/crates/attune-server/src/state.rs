@@ -71,6 +71,8 @@ pub struct AppState {
     pub reindex_worker_running: AtomicBool,
     /// WebDAV 周期同步 worker 是否在运行（防重复启动）。
     pub webdav_sync_worker_running: AtomicBool,
+    /// Email 周期同步 worker 运行标志（防重入）。
+    pub email_sync_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
     /// Sprint 1 Phase B: project recommendation broadcast channel.
     /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
@@ -142,6 +144,7 @@ impl AppState {
             memory_consolidator_running: AtomicBool::new(false),
             reindex_worker_running: AtomicBool::new(false),
             webdav_sync_worker_running: AtomicBool::new(false),
+            email_sync_worker_running: AtomicBool::new(false),
             engines_initialized: AtomicBool::new(false),
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
@@ -809,6 +812,81 @@ impl AppState {
                 std::thread::sleep(std::time::Duration::from_secs(15 * 60));
             }
             tracing::info!("WebDAV sync worker stopped (vault locked)");
+        });
+    }
+
+    /// 启动 Email 周期同步 worker：每 15 分钟从 email_accounts 表读全部账户 +
+    /// 解密凭据，逐个按 UID 增量同步。原子 flag 防重入 + RAII guard 复位。
+    pub fn start_email_sync_worker(state: std::sync::Arc<AppState>) {
+        if state
+            .email_sync_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::debug!("Email sync worker already running, skipping");
+            return;
+        }
+        std::thread::spawn(move || {
+            struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for FlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _guard = FlagGuard(&state.email_sync_worker_running);
+
+            tracing::info!("Email sync worker started");
+            loop {
+                // vault 锁定则退出 —— 下次 unlock 会重新 start。
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        break;
+                    }
+                }
+
+                // 从 email_accounts 表读全部账户 + 解密凭据（snapshot 后释放锁）。
+                let accounts: Vec<attune_core::store::email_accounts::EmailAccountRow> = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    let dek = match vault.dek_db() {
+                        Ok(k) => k,
+                        Err(_) => break,
+                    };
+                    vault.store().list_email_accounts(&dek).unwrap_or_default()
+                };
+
+                for account in accounts {
+                    let config = attune_core::ingest::EmailConfig {
+                        host: account.host.clone(),
+                        port: account.port,
+                        username: account.username.clone(),
+                        password: account.password.clone(),
+                        folders: account.folders.clone(),
+                    };
+                    // 只打印 dir_id / host / username，不 log password。
+                    tracing::info!(
+                        "Email sync: account dir={} host={} user={}",
+                        account.dir_id,
+                        account.host,
+                        account.username
+                    );
+                    if let Err(e) = crate::ingest_email::sync_email_account(
+                        &state,
+                        &account.dir_id,
+                        config,
+                        &account.corpus_domain,
+                    ) {
+                        tracing::warn!(
+                            "Email sync for account {} failed: {e}",
+                            account.dir_id
+                        );
+                    }
+                }
+
+                // unlock 后立即跑首轮，之后每 15 分钟一次。
+                std::thread::sleep(std::time::Duration::from_secs(15 * 60));
+            }
+            tracing::info!("Email sync worker stopped (vault locked)");
         });
     }
 
