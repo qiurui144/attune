@@ -36,7 +36,7 @@ pub fn sync_plugins(cloud: &CloudClient) -> Result<SyncReport> {
                 report.skipped_already_installed.push(ep.plugin_id.clone());
                 continue;
             }
-            match install_one_plugin(ep, &plugins_dir) {
+            match install_one_plugin(ep, &lic.license_key, &plugins_dir) {
                 Ok(()) => report.installed.push(ep.plugin_id.clone()),
                 Err(e) => report.failed.push((ep.plugin_id.clone(), format!("{e}"))),
             }
@@ -66,11 +66,11 @@ fn list_installed_plugin_ids(plugins_dir: &std::path::Path) -> Result<std::colle
     Ok(out)
 }
 
-fn install_one_plugin(ep: &EntitledPlugin, plugins_dir: &std::path::Path) -> Result<()> {
-    // 1. 下载 .attunepkg
+fn install_one_plugin(ep: &EntitledPlugin, license_key: &str, plugins_dir: &std::path::Path) -> Result<()> {
+    // 1. 下载 .attunepkg (PluginHub 要求 Bearer license_key 鉴权)
     let tmp = tempfile::tempdir().map_err(VaultError::Io)?;
     let pkg_path = tmp.path().join(format!("{}.attunepkg", ep.plugin_id));
-    download_to_file(&ep.download_url, &pkg_path)?;
+    download_to_file(&ep.download_url, license_key, &pkg_path)?;
 
     // 2. 解压到临时目录 (假定 .attunepkg 是 tar.gz)
     let extract_dir = tmp.path().join("extracted");
@@ -169,8 +169,17 @@ pub fn install_plugin_package(
     Ok(dst)
 }
 
-fn download_to_file(url: &str, dest: &std::path::Path) -> Result<()> {
-    let resp = reqwest::blocking::get(url)
+fn download_to_file(url: &str, license_key: &str, dest: &std::path::Path) -> Result<()> {
+    // PluginHub requires Bearer authorization; reqwest::blocking::get() is a bare fn with
+    // no header support, so we build a one-shot Client here.
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| VaultError::Io(std::io::Error::other(format!("build client: {e}"))))?;
+    let resp = client
+        .get(url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {license_key}"))
+        .send()
         .map_err(|e| VaultError::Io(std::io::Error::other(format!("download: {e}"))))?;
     if !resp.status().is_success() {
         return Err(VaultError::Io(std::io::Error::other(format!(

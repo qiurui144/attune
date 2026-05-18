@@ -754,16 +754,22 @@ fn run_login(email: &str, cloud_url: &str) -> attune_core::error::Result<()> {
     let password = read_password(&format!("Password for {email}: "))?;
     let mut client = attune_core::cloud_client::CloudClient::new(cloud_url);
     let user = client.login(email, &password)?;
-    eprintln!("✓ logged in as {} (tier={}, active={})", user.email, user.tier, user.is_active);
+    eprintln!("✓ logged in as {} (plan={})", user.email, user.plan);
+
+    // 持久化 session token，供后续 sync-plugins 等跨进程调用使用
+    if let Some(token) = client.session_token() {
+        persist_cloud_session(cloud_url, token)?;
+    }
 
     // 拿 licenses + entitled plugins, 提示是否自动同步
     match client.list_licenses() {
         Ok(licenses) => {
             eprintln!("  你有 {} 个 license:", licenses.len());
             for lic in &licenses {
+                let name_str = lic.name.as_deref().unwrap_or("-");
                 eprintln!(
-                    "  - {} (tier={}, max_devices={}, quota={})",
-                    lic.id, lic.tier, lic.max_devices, lic.llm_monthly_quota
+                    "  - id={} name={} plan={} plugins={}",
+                    lic.id, name_str, lic.plan, lic.entitled_plugins.len()
                 );
                 if !lic.entitled_plugins.is_empty() {
                     eprintln!("    entitled plugins:");
@@ -775,29 +781,68 @@ fn run_login(email: &str, cloud_url: &str) -> attune_core::error::Result<()> {
             eprintln!();
             eprintln!("运行 `attune sync-plugins` 自动装 entitled pro 插件");
 
-            // 写 license cache (取第一个 active license, 多 license 场景调用方可手动管理)
-            if let Some(first) = licenses.iter().find(|l| !l.license_code.is_empty()) {
-                match attune_core::license::SignedLicense::from_code(&first.license_code) {
-                    Ok(signed) => {
-                        let cache = attune_core::license_cache::LicenseCache::from_signed(
-                            signed,
-                            cloud_url.to_string(),
-                        )?;
-                        let path = attune_core::license_cache::LicenseCache::default_path();
-                        cache.save(&path)?;
-                        eprintln!("  ✓ license cache written to {}", path.display());
-                    }
-                    Err(e) => eprintln!("⚠️  license code decode failed: {e}"),
-                }
-            }
+            // accounts 下发的 license_key 是 Bearer token, 不是 SignedLicense code;
+            // 跳过 LicenseCache 写入, 登录目的仅鉴权 + session 持久化.
+            eprintln!("  (info: local license-decrypt cache skipped — accounts uses bearer tokens)");
         }
         Err(e) => eprintln!("⚠️  list licenses failed: {e}"),
     }
     Ok(())
 }
 
+/// 云端 session 持久化文件格式
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CloudSession {
+    cloud_url: String,
+    /// accounts 服务返回的 session cookie 值 (完整 "session=<token>" 或裸 token)
+    session: String,
+}
+
+/// 把 session token 写到 config_dir/cloud-session.json (chmod 600 on Unix)
+fn persist_cloud_session(cloud_url: &str, session_token: &str) -> attune_core::error::Result<()> {
+    use attune_core::error::VaultError;
+    let path = attune_core::platform::config_dir().join("cloud-session.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(VaultError::Io)?;
+    }
+    let data = CloudSession {
+        cloud_url: cloud_url.to_string(),
+        session: session_token.to_string(),
+    };
+    let json = serde_json::to_string_pretty(&data)
+        .map_err(|e| VaultError::Crypto(format!("session ser: {e}")))?;
+    std::fs::write(&path, &json).map_err(VaultError::Io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    eprintln!("  ✓ session persisted to {}", path.display());
+    Ok(())
+}
+
+/// 从 config_dir/cloud-session.json 读回 session, 构造已鉴权的 CloudClient
+fn load_cloud_client_with_session(cloud_url: &str) -> attune_core::error::Result<attune_core::cloud_client::CloudClient> {
+    use attune_core::error::VaultError;
+    let path = attune_core::platform::config_dir().join("cloud-session.json");
+    if !path.exists() {
+        return Err(VaultError::Crypto(
+            "no cloud session found — run `attune login` first".into(),
+        ));
+    }
+    let json = std::fs::read_to_string(&path).map_err(VaultError::Io)?;
+    let sess: CloudSession = serde_json::from_str(&json)
+        .map_err(|e| VaultError::Crypto(format!("cloud session parse: {e}")))?;
+    // cloud_url 参数优先 (CLI flag); 文件里的 url 作为 fallback
+    let effective_url = if !cloud_url.is_empty() { cloud_url } else { &sess.cloud_url };
+    Ok(attune_core::cloud_client::CloudClient::with_session(
+        effective_url,
+        &sess.session,
+    ))
+}
+
 fn run_sync_plugins(cloud_url: &str) -> attune_core::error::Result<()> {
-    let client = attune_core::cloud_client::CloudClient::new(cloud_url);
+    let client = load_cloud_client_with_session(cloud_url)?;
     let report = attune_core::plugin_sync::sync_plugins(&client)?;
     eprintln!("=== plugin sync report ===");
     eprintln!("  ✓ installed: {}", report.installed.len());
@@ -908,37 +953,69 @@ fn run_plugin_publish(
     let size = std::fs::metadata(&pkg_path).map(|m| m.len()).unwrap_or(0);
     eprintln!("✓ packaged: {} ({} bytes)", pkg_path.display(), size);
 
-    // 3. POST 到 pluginhub /api/v1/admin/plugins (multipart)
-    // (pluginhub API 由 lawcontrol/pluginhub FastAPI 提供, 此处仅 reference 调用)
-    let client = reqwest::blocking::Client::new();
-    let url = format!("{}/api/v1/admin/plugins", hub_url.trim_end_matches('/'));
+    // 3a. 创建插件元信息 — POST /api/v1/admin/plugins/ (trailing slash, FastAPI 无重定向)
+    // 409 表示插件已存在，不阻止继续上传新版本。
+    let base = hub_url.trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!("http client: {e}"))))?;
+
+    let meta_url = format!("{base}/api/v1/admin/plugins/");
+    let category = if plugin.manifest.category.is_empty() { "general" } else { &plugin.manifest.category };
+    let meta_form = reqwest::blocking::multipart::Form::new()
+        .text("id", id.clone())
+        .text("name", plugin.manifest.name.clone())
+        .text("type", plugin.manifest.plugin_type.clone())
+        .text("category", category.to_string())
+        .text("description", plugin.manifest.description.clone());
+    eprintln!("→ POST {meta_url}  (create metadata)");
+    let meta_resp = client
+        .post(&meta_url)
+        .header("Authorization", format!("Bearer {admin_token}"))
+        .multipart(meta_form)
+        .send()
+        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!("metadata: {e}"))))?;
+    let meta_status = meta_resp.status();
+    let meta_body = meta_resp.text().unwrap_or_default();
+    if meta_status == reqwest::StatusCode::CONFLICT {
+        eprintln!("  plugin already exists (409), skipping metadata creation");
+    } else if !meta_status.is_success() {
+        return Err(attune_core::error::VaultError::Io(std::io::Error::other(format!(
+            "metadata failed: {meta_status} body={meta_body}"
+        ))));
+    } else {
+        eprintln!("✓ metadata created: {meta_body}");
+    }
+
+    // 3b. 上传版本包 — POST /api/v1/admin/plugins/{id}/versions
+    let ver_url = format!("{base}/api/v1/admin/plugins/{id}/versions");
     let bytes = std::fs::read(&pkg_path).map_err(attune_core::error::VaultError::Io)?;
-    let form = reqwest::blocking::multipart::Form::new()
-        .text("plugin_id", id.clone())
-        .text("version", version.clone())
+    let ver_form = reqwest::blocking::multipart::Form::new()
         .part(
             "file",
             reqwest::blocking::multipart::Part::bytes(bytes)
                 .file_name(format!("{id}-{version}.attunepkg"))
                 .mime_str("application/octet-stream")
                 .unwrap(),
-        );
-    eprintln!("→ POST {url}");
-    let resp = client
-        .post(&url)
+        )
+        .text("changelog", "")
+        .text("min_core_version", "0.4.0");
+    eprintln!("→ POST {ver_url}  (upload version)");
+    let ver_resp = client
+        .post(&ver_url)
         .header("Authorization", format!("Bearer {admin_token}"))
-        .multipart(form)
+        .multipart(ver_form)
         .send()
         .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!("upload: {e}"))))?;
-    let status = resp.status();
-    let body = resp.text().unwrap_or_default();
-    if !status.is_success() {
+    let ver_status = ver_resp.status();
+    let ver_body = ver_resp.text().unwrap_or_default();
+    if !ver_status.is_success() {
         return Err(attune_core::error::VaultError::Io(std::io::Error::other(format!(
-            "publish failed: {status} body={body}"
+            "publish failed: {ver_status} body={ver_body}"
         ))));
     }
-    eprintln!("✓ published: status={status}");
-    eprintln!("  response: {body}");
+    eprintln!("✓ published {id}@{version}: {ver_body}");
     Ok(())
 }
 

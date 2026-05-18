@@ -109,41 +109,43 @@ pub async fn login_password(
         )
     })?;
 
-    let new_state = match user.tier.as_str() {
-        "paid" => {
-            let licenses = client.list_licenses().map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error": format!("list licenses failed: {e}")})),
-                )
-            })?;
-            let selected = if let Some(code) = req.license_code.as_deref() {
-                let code = code.trim();
-                if code.is_empty() {
-                    licenses.first()
-                } else {
-                    licenses
-                        .iter()
-                        .find(|lic| lic.license_code == code || lic.id == code)
-                }
-            } else {
+    // accounts plan → member tier：pro / pro_plus / enterprise 视为 paid，其余 free。
+    let is_paid = matches!(user.plan.as_str(), "pro" | "pro_plus" | "enterprise");
+    let new_state = if is_paid {
+        let licenses = client.list_licenses().map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("list licenses failed: {e}")})),
+            )
+        })?;
+        let selected = if let Some(code) = req.license_code.as_deref() {
+            let code = code.trim();
+            if code.is_empty() {
                 licenses.first()
+            } else {
+                licenses
+                    .iter()
+                    .find(|lic| lic.license_key == code || lic.id.to_string() == code)
             }
-            .ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "paid user has no matching license"})),
-                )
-            })?;
-            MemberState::Paid {
-                account_id: user.id.clone(),
-                license_id: selected.id.clone(),
-                llm_quota_remaining: selected.llm_monthly_quota,
-            }
+        } else {
+            licenses.first()
         }
-        _ => MemberState::Free {
-            account_id: user.id.clone(),
-        },
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "paid user has no matching license"})),
+            )
+        })?;
+        MemberState::Paid {
+            account_id: user.id.to_string(),
+            license_id: selected.id.to_string(),
+            // 新 License 不再携带 per-license LLM 配额 —— 配额由 cloud gateway 侧统计。
+            llm_quota_remaining: 0,
+        }
+    } else {
+        MemberState::Free {
+            account_id: user.id.to_string(),
+        }
     };
 
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
@@ -151,7 +153,7 @@ pub async fn login_password(
         "status": "ok",
         "state": new_state,
         "email": user.email,
-        "tier": user.tier,
+        "tier": user.plan,
     })))
 }
 
