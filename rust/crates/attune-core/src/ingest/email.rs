@@ -198,6 +198,48 @@ pub fn parse_email_bytes(raw: &[u8]) -> Result<MailMessage> {
     })
 }
 
+/// Email 账户连接配置（明文，连接器持有；持久化由 store/email_accounts.rs 负责）。
+#[derive(Debug, Clone)]
+pub struct EmailConfig {
+    /// IMAP 服务器主机名（如 imap.gmail.com）。
+    pub host: String,
+    /// IMAP over TLS 端口（标准 993）。
+    pub port: u16,
+    pub username: String,
+    /// 明文密码 / App Password。
+    pub password: String,
+    /// 要同步的文件夹（默认 INBOX + Sent）。
+    pub folders: Vec<String>,
+}
+
+impl EmailConfig {
+    /// 文件夹列表为空时回退到默认 INBOX + Sent。
+    pub fn effective_folders(&self) -> Vec<String> {
+        if self.folders.is_empty() {
+            vec!["INBOX".to_string(), "Sent".to_string()]
+        } else {
+            self.folders.clone()
+        }
+    }
+}
+
+/// 一封从 IMAP 抓回的邮件原始字节 + 其 UID。
+#[derive(Debug, Clone)]
+pub struct FetchedMail {
+    pub uid: u32,
+    pub raw: Vec<u8>,
+}
+
+/// IMAP 抓取层抽象 —— 把网络 I/O 与连接器逻辑解耦，让连接器离线可测。
+///
+/// 实现者负责连接 / 登录 / 选文件夹 / `UID SEARCH since_uid:* ` / 逐 UID FETCH。
+/// 单封邮件的 FETCH 失败应吞掉记日志继续；只有源级致命错误（连不上 / 鉴权失败 /
+/// 文件夹不存在）才返回 Err。
+pub trait ImapFetcher {
+    /// 抓取 `folder` 内 UID 严格大于 `since_uid` 的全部邮件。
+    fn fetch_since(&self, folder: &str, since_uid: u32) -> Result<Vec<FetchedMail>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
