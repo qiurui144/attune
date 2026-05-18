@@ -276,6 +276,59 @@ pub fn assemble_context(
     })
 }
 
+/// Roll the oldest dropped conversation turns into one cached summary turn.
+///
+/// Plan §3.3 — when `context_budget::plan_context` reports `history_dropped > 0`,
+/// instead of silently discarding the oldest turns (information loss), summarize
+/// them once. The summary is cached in `chunk_summaries` keyed by
+/// `sha256(dropped turns)` with a synthetic `item_id = "conv:<session_id>"`, so a
+/// long session pays one summarization the first time it overflows and every
+/// subsequent call is a cache hit.
+///
+/// `dropped` is the oldest `(role, content)` turns being trimmed. Returns the
+/// rolling summary, or `None` if there is nothing to compact / the LLM is down.
+/// The summarization is cost tier 3 but amortized (one call per overflow point).
+pub fn compact_history(
+    store: &Store,
+    dek: &Key32,
+    llm: &dyn crate::llm::LlmProvider,
+    session_id: &str,
+    dropped: &[(String, String)],
+) -> Option<String> {
+    if dropped.is_empty() {
+        return None;
+    }
+    let joined = dropped
+        .iter()
+        .map(|(role, content)| format!("{role}: {content}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let hash = crate::context_compress::chunk_hash(&joined);
+    let item_id = format!("conv:{session_id}");
+
+    // Cache hit — the rolling summary for this exact dropped span already exists.
+    if let Ok(Some(cached)) = store.get_chunk_summary(dek, &hash, "economical") {
+        return Some(cached);
+    }
+    // Miss — summarize once (tier 3) and cache.
+    let summary = crate::context_compress::generate_summary(
+        llm,
+        &joined,
+        crate::context_compress::ContextStrategy::Economical,
+    )
+    .ok()?;
+    let _ = store.put_chunk_summary(
+        dek,
+        &hash,
+        "economical",
+        &item_id,
+        llm.model_name(),
+        &summary,
+        joined.chars().count(),
+    );
+    Some(summary)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,5 +516,37 @@ mod tests {
         assert_eq!(out.shape, QueryShape::Recall);
         assert_eq!(out.tier_used, "L2");
         assert!(out.blocks.iter().any(|b| b.tier == "L2"));
+    }
+
+    #[test]
+    fn compact_history_caches_rolling_summary() {
+        use crate::llm::MockLlmProvider;
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let llm = MockLlmProvider::new("test-model");
+        // 两次调用都要有 response；第二次应命中缓存不消耗
+        llm.push_response("用户先问了 Rust 所有权，再问了借用规则。");
+        llm.push_response("SHOULD-NOT-BE-USED");
+
+        let dropped = vec![
+            ("user".to_string(), "Rust 的所有权是什么".to_string()),
+            ("assistant".to_string(), "所有权是 Rust 的核心内存模型……".to_string()),
+            ("user".to_string(), "那借用规则呢".to_string()),
+        ];
+        let s1 = compact_history(&store, &dek, &llm, "sess-1", &dropped).unwrap();
+        assert!(!s1.is_empty());
+        // 第二次同样的 dropped → 缓存命中，返回与首次相同（不会用第二个 mock response）
+        let s2 = compact_history(&store, &dek, &llm, "sess-1", &dropped).unwrap();
+        assert_eq!(s1, s2, "second call must be a cache hit");
+        assert_eq!(store.chunk_summary_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn compact_history_empty_returns_none() {
+        use crate::llm::MockLlmProvider;
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let llm = MockLlmProvider::new("m");
+        assert!(compact_history(&store, &dek, &llm, "s", &[]).is_none());
     }
 }

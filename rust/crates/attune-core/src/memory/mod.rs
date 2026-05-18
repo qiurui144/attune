@@ -18,8 +18,8 @@ pub mod retrieval;
 pub mod semantic;
 
 pub use assembler::{
-    assemble_context, classify_query_shape, AssembledContext, ContextBlock, MemoryConfig,
-    QueryShape,
+    assemble_context, classify_query_shape, compact_history, AssembledContext, ContextBlock,
+    MemoryConfig, QueryShape,
 };
 pub use retrieval::{search_memories, MemoryHit, MemoryVectorIndex};
 pub use semantic::{

@@ -149,35 +149,6 @@ pub async fn chat(
 
     // 按 LLM 上下文窗口精确裁历史（替代写死的固定深度）。
     // 不同 model 窗口差 30×（qwen 32K / gemini 1M）—— 按窗口动态保留最近若干轮，
-    // 丢弃的旧轮次插一条省略说明，让模型知道上文被截而非以为对话从头开始。
-    {
-        let pairs: Vec<(String, String)> = body
-            .history
-            .iter()
-            .map(|h| (h.role.clone(), h.content.clone()))
-            .collect();
-        let plan = attune_core::context_budget::plan_context(
-            llm.model_name(),
-            "",
-            &body.message,
-            &pairs,
-        );
-        if plan.history_dropped > 0 {
-            let drop = plan.history_dropped;
-            body.history.drain(..drop);
-            body.history.insert(
-                0,
-                HistoryMessage {
-                    role: "user".to_string(),
-                    content: format!(
-                        "[此前 {drop} 轮较早对话因超出模型 {} 的上下文窗口已省略]",
-                        llm.model_name()
-                    ),
-                },
-            );
-        }
-    }
-
     let dek = {
         let vault = state.vault.lock()
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
@@ -199,6 +170,56 @@ pub async fn chat(
             .and_then(|data| serde_json::from_slice(&data).ok())
             .unwrap_or_else(|| serde_json::json!({}))
     };
+
+    // 历史压缩（多层记忆 §3.3）：超窗的旧轮次不再静默丢弃，而是滚动摘要成 1 条。
+    //
+    // 旧行为：丢弃的轮次插一条「[此前 N 轮已省略]」占位 —— 信息直接丢失。
+    // 新行为：把丢弃的轮次摘要成 1 条（economical），按 sha256(dropped) 缓存在
+    // chunk_summaries（合成 conv:<sid> item_id）。长会话只在首次超窗付一次摘要，
+    // 之后是缓存命中。既省 token 又找回了原本丢失的信息。
+    {
+        let pairs: Vec<(String, String)> = body
+            .history
+            .iter()
+            .map(|h| (h.role.clone(), h.content.clone()))
+            .collect();
+        let plan = attune_core::context_budget::plan_context(
+            llm.model_name(),
+            "",
+            &body.message,
+            &pairs,
+        );
+        if plan.history_dropped > 0 {
+            let drop = plan.history_dropped;
+            let dropped: Vec<(String, String)> = pairs.iter().take(drop).cloned().collect();
+            let sid = body.session_id.clone().unwrap_or_default();
+            // compact_history 持锁 + 可能调 LLM —— 走 spawn_blocking 不阻塞 async worker。
+            let state_hc = state.clone();
+            let dek_hc = dek.clone();
+            let llm_hc = llm.clone();
+            let rolling = tokio::task::spawn_blocking(move || {
+                let vault = state_hc.vault.lock().unwrap_or_else(|e| e.into_inner());
+                attune_core::memory::compact_history(
+                    vault.store(), &dek_hc, llm_hc.as_ref(), &sid, &dropped,
+                )
+            })
+            .await
+            .ok()
+            .flatten();
+            body.history.drain(..drop);
+            let summary_turn = match rolling {
+                Some(s) => format!("[此前 {drop} 轮较早对话摘要]\n{s}"),
+                None => format!(
+                    "[此前 {drop} 轮较早对话因超出模型 {} 的上下文窗口已省略]",
+                    llm.model_name()
+                ),
+            };
+            body.history.insert(
+                0,
+                HistoryMessage { role: "user".to_string(), content: summary_turn },
+            );
+        }
+    }
 
     // 敏感案件强制本地 LLM 开关 —— 开启后注入了本地证据的对话不得外发云端。
     let force_local_for_evidence = app_settings

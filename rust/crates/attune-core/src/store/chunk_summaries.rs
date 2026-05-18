@@ -74,6 +74,16 @@ impl Store {
         Ok(n as usize)
     }
 
+    /// 删除某会话的滚动历史摘要 — 多层记忆 compact_history 把会话历史摘要存进
+    /// chunk_summaries（合成 item_id = `conv:<session_id>`）。会话删除时调此清理。
+    pub fn delete_conv_summaries(&self, session_id: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM chunk_summaries WHERE item_id = ?1",
+            params![format!("conv:{session_id}")],
+        )?;
+        Ok(n)
+    }
+
     /// 仅供集成测试用：seed 一条 chunk_summary 并指定 created_at（ISO8601 字符串）。
     /// 生产路径走 [`Self::put_chunk_summary`]，由 SQLite `datetime('now')` 自动填时间。
     ///
