@@ -90,7 +90,7 @@ When `pdf_extract` returns empty or too-little text, Attune automatically runs O
 
 ### Multi-format ingestion
 
-Attune parses 20+ file types natively. Unknown binary formats (video, archives, executables) are rejected with 422 rather than being silently treated as text.
+Attune parses 20+ file types natively. Unknown binary formats (video, archives, executables) are rejected with 422 rather than being silently treated as text. Remote ingest sources are also supported: **WebDAV** remote directories (ETag-based incremental sync) and **Email IMAP** (email bodies + document attachments auto-indexed, UID-based incremental sync).
 
 | Category | Formats |
 |----------|---------|

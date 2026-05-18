@@ -362,7 +362,7 @@ pub fn allocate_budget(results: &mut [SearchResult], budget: usize) {
 
 所有入库路径统一走 `attune-core::ingest`：
 
-- **`SourceConnector` trait** — 抽象一个采集源（本地文件夹 / WebDAV / 未来的邮箱 / RSS），
+- **`SourceConnector` trait** — 抽象一个采集源（本地文件夹 / WebDAV / Email IMAP / RSS），
   通过回调 sink 逐个交出 `RawDocument`（含 `domain` / `tags` / `corpus_domain` 字段）。
 - **`ingest_document()`** — 唯一入库函数：parse → content_hash 判重 → insert_item（透传
   domain/tags）→ breadcrumbs sidecar → enqueue_embedding（L1 章节 + L2 段落块，
@@ -402,6 +402,23 @@ POST /api/v1/index/bind-remote { url, username, password, ... }
 ```
 
 后台周期同步 worker 每 15 分钟读回凭据，对所有 WebDAV remote 自动增量重扫。
+
+### Email IMAP 采集
+
+Email 账号配置（含加密凭据）持久化在 `email_accounts` 表，`password` 走字段级 AES-256-GCM。
+
+```
+POST /api/v1/email/accounts { host, port, username, password, ... }
+  → upsert_email_account()（password AES-GCM 加密落库）
+  → EmailConnector::run(sink)
+    ├── IMAP LOGIN → 选 INBOX
+    ├── UID 比对 last_seen_uid（已索引 → Skipped）
+    ├── FETCH 邮件正文（HTML → text strip + plain text）
+    ├── 解析附件（支持 Parser 全部格式，逐一 ingest_document）
+    └── ingest_document()（邮件正文 + 附件各自入库）
+```
+
+后台周期同步 worker 每 15 分钟读回凭据，对所有 Email IMAP 账号自动增量拉取（UID 游标）。
 
 **两层入队**：Level 1（章节）+ Level 2（512 字段落块），向量索引时 metadata 区分层级。
 
