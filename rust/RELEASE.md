@@ -4,6 +4,10 @@
 
 ### Bug fixes
 
+- **访问日志 token 脱敏**（安全）：`/ws/scan-progress?token=<session>` 的会话 token 原本
+  以明文写入访问日志。现在日志中间件在输出前对查询参数 `token` 进行 `<redacted>` 替换，
+  其他参数保持不变。(`middleware.rs`)
+
 - **WebSocket 扫描进度连接修复**：`/ws/scan-progress` 握手因缺少 `?token=` 查询参数
   而 401 失败（WebSocket 握手不支持 `Authorization` 头）。现在 `ws.ts` 从
   `sessionStorage` 读取 token 并拼入 URL；无 token 时（vault 未解锁）跳过连接、等
