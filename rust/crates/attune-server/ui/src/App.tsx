@@ -146,11 +146,15 @@ export function App(): JSX.Element {
     } catch {
       /* 失败不阻塞，下次启动仍会跳回 wizard */
     }
+    // Reconnect the progress WebSocket now that a token is available.
+    startProgressWS();
     phase.value = { kind: 'main' };
   }
 
   async function handleUnlock() {
     vaultState.value = 'unlocked';
+    // Reconnect the progress WebSocket now that a token is available.
+    startProgressWS();
     const settings = await api.get<SettingsResponse>('/settings').catch(() => ({}) as SettingsResponse);
     if (settings.wizard?.complete) {
       phase.value = { kind: 'main' };

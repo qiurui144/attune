@@ -1,5 +1,21 @@
 # attune 版本记录
 
+## v0.7.0-dev (2026-05-18 sprint) — Bug fixes + 多层记忆系统（token 降本）
+
+### Bug fixes
+
+- **WebSocket 扫描进度连接修复**：`/ws/scan-progress` 握手因缺少 `?token=` 查询参数
+  而 401 失败（WebSocket 握手不支持 `Authorization` 头）。现在 `ws.ts` 从
+  `sessionStorage` 读取 token 并拼入 URL；无 token 时（vault 未解锁）跳过连接、等
+  解锁后 `handleUnlock` / `handleWizardComplete` 重新调用 `startProgressWS()`。
+  (`ws.ts`, `App.tsx`)
+
+- **Settings → 关于 tab 网络搜索状态修复（outcome a）**：`/api/v1/ai_stack` 响应缺
+  少 `web_search` 字段，导致前端 `stackStatus('web_search').ok` 恒为 `false`、始终
+  显示"未就绪"。现已添加 `web_search.available` 字段，与 chat 路由实际使用的
+  `state.web_search` Arc 一致：系统检测到 Chrome/Edge 则 `true`，否则附上安装提示。
+  (`routes/ai_stack.rs`)
+
 ## v0.7.0-dev (2026-05-18 sprint) — 多层记忆系统（token 降本）
 
 为 OSS attune-core 加多层记忆架构，让 chat 上下文装配按 query 形态发对的层、对的

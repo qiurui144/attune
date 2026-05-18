@@ -14,6 +14,7 @@ import type {
   WorkflowCompletePayload,
 } from './signals';
 import { toast } from '../components';
+import { getToken } from './api';
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -43,7 +44,16 @@ export function stopProgressWS(): void {
 
 function connect(): void {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const url = `${proto}://${location.host}/ws/scan-progress`;
+  // WebSocket handshakes cannot carry an Authorization header (RFC 6455),
+  // so the token is passed as a query param. If no token is available yet
+  // (vault not unlocked / first load), defer until startProgressWS() is
+  // called again after unlock — attempting without a token would 401-loop.
+  const token = getToken();
+  if (!token) {
+    scheduleReconnect();
+    return;
+  }
+  const url = `${proto}://${location.host}/ws/scan-progress?token=${encodeURIComponent(token)}`;
   try {
     ws = new WebSocket(url);
   } catch {
