@@ -326,6 +326,68 @@ LLM-generated content may be inaccurate, incomplete, or misleading. Attune and i
 
 ---
 
+## 致谢 / Acknowledgements
+
+Attune is built on the shoulders of outstanding open-source projects. We are grateful to their authors and contributors.
+
+**后端框架 / Backend**
+
+- [Axum](https://github.com/tokio-rs/axum) — ergonomic async web framework built on Tokio (MIT)
+- [Tokio](https://github.com/tokio-rs/tokio) — the async runtime powering the entire server (MIT)
+- [tower-http](https://github.com/tower-rs/tower-http) — HTTP middleware utilities (CORS, tracing) (MIT)
+- [axum-server](https://github.com/programatik29/axum-server) — TLS integration for Axum via rustls (MIT)
+- [FastAPI](https://github.com/fastapi/fastapi) + [Uvicorn](https://github.com/encode/uvicorn) — Python prototype line HTTP layer (MIT)
+
+**数据库与搜索 / Storage & Search**
+
+- [rusqlite](https://github.com/rusqlite/rusqlite) — SQLite bindings with bundled SQLite for zero-dependency deployment (MIT)
+- [tantivy](https://github.com/quickwit-oss/tantivy) + [tantivy-jieba](https://github.com/meilisearch/tantivy-jieba) — full-text search engine with Chinese word segmentation (MIT)
+- [usearch](https://github.com/unum-cloud/usearch) — high-performance HNSW vector index (Apache-2.0)
+- [hdbscan](https://github.com/genbio-ai/hdbscan) — density-based clustering for automatic topic grouping (MIT)
+- [ChromaDB](https://github.com/chroma-core/chroma) — vector store used in the Python prototype (Apache-2.0)
+- [SQLAlchemy](https://github.com/sqlalchemy/sqlalchemy) + [Alembic](https://github.com/sqlalchemy/alembic) — ORM and migrations for the pluginhub backend (MIT)
+
+**加密与安全 / Cryptography**
+
+- [argon2](https://github.com/RustCrypto/password-hashes/tree/master/argon2) — Argon2id key derivation for master password hashing (MIT / Apache-2.0)
+- [aes-gcm](https://github.com/RustCrypto/AEADs/tree/master/aes-gcm) — AES-256-GCM authenticated encryption for vault fields (MIT / Apache-2.0)
+- [zeroize](https://github.com/RustCrypto/utils/tree/master/zeroize) — secure zeroing of secrets from memory (MIT / Apache-2.0)
+- [rustls](https://github.com/rustls/rustls) — pure-Rust TLS stack; zero system OpenSSL dependency (MIT / Apache-2.0 / ISC)
+- [ed25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek) — Ed25519 signatures for plugin package verification (MIT / Apache-2.0)
+
+**本地 AI 底座 / Local AI**
+
+- [Ollama](https://github.com/ollama/ollama) — local LLM runtime (embedding, chat, rerank); recommended backend (MIT)
+- [ONNX Runtime](https://github.com/microsoft/onnxruntime) (`ort`) — cross-platform inference engine for OCR and embedding models (MIT)
+- [kreuzberg-paddle-ocr](https://github.com/Goldziher/kreuzberg) — PP-OCRv5 bindings via ONNX Runtime for in-process document OCR (MIT)
+- [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — fast on-device ASR; bundled binary in desktop packages (MIT)
+- [HuggingFace Hub](https://github.com/huggingface/hf-hub) (`hf-hub`) — model weight fetching from the HF registry (Apache-2.0)
+
+**文档解析 / Document Parsing**
+
+- [PyMuPDF](https://github.com/pymupdf/PyMuPDF) — PDF rendering and text extraction for the Python line (AGPL-3.0 / commercial)
+- [pdf-extract](https://github.com/jrmuizel/pdf-extract) — pure-Rust PDF text extraction (MIT)
+- [python-docx](https://github.com/python-openxml/python-docx) — .docx reading in the Python prototype (MIT)
+- [calamine](https://github.com/tafia/calamine) — Excel / ODS spreadsheet parsing (MIT / Apache-2.0)
+
+**网络与协议 / Networking**
+
+- [reqwest](https://github.com/seanmonstar/reqwest) — HTTP client (Ollama API, web fetch, WebDAV) (MIT / Apache-2.0)
+- [reqwest_dav](https://github.com/niuhuan/reqwest_dav) — WebDAV client built on reqwest (MIT)
+- [async-imap](https://github.com/async-email/async-imap) — async IMAP email ingestion (Apache-2.0 / MIT)
+
+**前端 / Frontend**
+
+- [Preact](https://github.com/preactjs/preact) — lightweight React-compatible UI library powering the Chrome extension (MIT)
+- [Vite](https://github.com/vitejs/vite) — fast frontend build tooling (MIT)
+
+**打包与工具 / Packaging & Tooling**
+
+- [serde](https://github.com/serde-rs/serde) + [serde_json](https://github.com/serde-rs/json) — ubiquitous Rust serialization framework (MIT / Apache-2.0)
+- [clap](https://github.com/clap-rs/clap) — CLI argument parsing (MIT / Apache-2.0)
+- [tracing](https://github.com/tokio-rs/tracing) — structured application-level logging (MIT)
+- [jieba](https://github.com/fxsjy/jieba) — Chinese tokenizer used in FTS5 pipeline (MIT)
+
 ## Contributing
 
 Contribution guidelines are still being drafted. For now, see [DEVELOP.md](DEVELOP.md) for branch model + build commands, and [NOTICE](NOTICE) for third-party attribution.
