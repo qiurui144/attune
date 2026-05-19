@@ -41,6 +41,7 @@ impl Store {
     }
 
     /// 存摘要。重复的 (chunk_hash, strategy) 走 REPLACE 覆盖（同策略不应产生多条）。
+    #[allow(clippy::too_many_arguments)] // all 8 args are distinct chunk summary fields; grouping adds indirection without clarity
     pub fn put_chunk_summary(
         &self,
         dek: &Key32,
@@ -72,6 +73,16 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(n as usize)
+    }
+
+    /// 删除某会话的滚动历史摘要 — 多层记忆 compact_history 把会话历史摘要存进
+    /// chunk_summaries（合成 item_id = `conv:<session_id>`）。会话删除时调此清理。
+    pub fn delete_conv_summaries(&self, session_id: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM chunk_summaries WHERE item_id = ?1",
+            params![format!("conv:{session_id}")],
+        )?;
+        Ok(n)
     }
 
     /// 仅供集成测试用：seed 一条 chunk_summary 并指定 created_at（ISO8601 字符串）。

@@ -397,4 +397,232 @@ mod tests {
             assert_eq!(AuditDirection::from_str(d.as_str()), d);
         }
     }
+
+    // ---- v0.7 audit_log compat-API tests ----
+
+    fn open_conn() -> rusqlite::Connection {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        ensure_audit_log_table(&c).unwrap();
+        c
+    }
+
+    #[test]
+    fn audit_log_insert_and_count() {
+        let c = open_conn();
+        assert_eq!(count(&c).unwrap(), 0);
+        record(&c, "/api/v1/chat", "outbound", "request", 2, 128).unwrap();
+        record(&c, "/api/v1/chat", "outbound", "response", 0, 256).unwrap();
+        assert_eq!(count(&c).unwrap(), 2);
+    }
+
+    #[test]
+    fn audit_log_list_order_desc() {
+        let c = open_conn();
+        for i in 0..3 {
+            record(&c, &format!("/r/{}", i), "outbound", "request", i, 10 + i).unwrap();
+        }
+        let all = list(&c, 10, 0).unwrap();
+        assert_eq!(all.len(), 3);
+        // newest first (id DESC)
+        assert_eq!(all[0].route, "/r/2");
+        assert_eq!(all[2].route, "/r/0");
+    }
+
+    #[test]
+    fn audit_log_list_since_filters() {
+        let c = open_conn();
+        // 写入 3 条但用脚本控制 ts
+        c.execute(
+            "INSERT INTO audit_log(ts, route, category, kind, redacted_count, original_len)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params!["1970-01-01T00:00:01Z", "/old", "outbound", "request", 0, 1],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO audit_log(ts, route, category, kind, redacted_count, original_len)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params!["2030-01-01T00:00:00Z", "/new", "outbound", "request", 0, 2],
+        )
+        .unwrap();
+        // since = 2026-01-01
+        let recent = list_since(&c, 1_767_225_600).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].route, "/new");
+    }
+
+    #[test]
+    fn audit_log_empty_list() {
+        let c = open_conn();
+        let v = list(&c, 100, 0).unwrap();
+        assert!(v.is_empty());
+        assert_eq!(count(&c).unwrap(), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v0.7: Coordinator-facing simple audit_log API
+//
+// 与上面 `outbound_audit` 表（v0.6 Phase A.5.3 出网详审）并列存在的"简版"日志：
+// - **Schema 字段**: ts(RFC3339) / route / category / kind / redacted_count / original_len
+// - **触发点**: PII redactor + 一般 outbound 中间件，写入由调用方提供 rusqlite::Connection
+// - **用途**: CSV export endpoint `/api/v1/audit/log.csv?since=<unix>` 给合规审计
+//
+// 不在 store/mod.rs 的 SCHEMA_SQL 注册，改为按需 lazy `ensure_audit_log_table()`，
+// 协调者只需在 Store 构造期间或 route handler 入口跑一次。
+// ---------------------------------------------------------------------------
+
+use rusqlite::Connection;
+
+/// 简版审计条目（暴露给 audit route 和 coordinator）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub ts: String,
+    pub route: String,
+    pub category: String,
+    pub kind: String,
+    pub redacted_count: i64,
+    pub original_len: i64,
+}
+
+/// 确保 audit_log 表存在（幂等）。所有 free fn 调用前自动跑一次。
+pub fn ensure_audit_log_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS audit_log (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             ts TEXT NOT NULL,
+             route TEXT NOT NULL,
+             category TEXT NOT NULL,
+             kind TEXT NOT NULL,
+             redacted_count INTEGER NOT NULL,
+             original_len INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);",
+    )?;
+    Ok(())
+}
+
+/// 写入一条 audit_log；ts 自动用当前 UTC RFC3339。
+pub fn record(
+    conn: &Connection,
+    route: &str,
+    category: &str,
+    kind: &str,
+    redacted_count: i64,
+    original_len: i64,
+) -> Result<()> {
+    ensure_audit_log_table(conn)?;
+    let ts = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO audit_log(ts, route, category, kind, redacted_count, original_len)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![ts, route, category, kind, redacted_count, original_len],
+    )?;
+    Ok(())
+}
+
+/// 分页列出（按 id DESC，最新在前）。
+pub fn list(conn: &Connection, limit: usize, offset: usize) -> Result<Vec<AuditEntry>> {
+    ensure_audit_log_table(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT ts, route, category, kind, redacted_count, original_len
+         FROM audit_log
+         ORDER BY id DESC
+         LIMIT ?1 OFFSET ?2",
+    )?;
+    let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
+        Ok(AuditEntry {
+            ts: row.get(0)?,
+            route: row.get(1)?,
+            category: row.get(2)?,
+            kind: row.get(3)?,
+            redacted_count: row.get(4)?,
+            original_len: row.get(5)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// 总条数（给前端分页用）。
+pub fn count(conn: &Connection) -> Result<i64> {
+    ensure_audit_log_table(conn)?;
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))?;
+    Ok(n)
+}
+
+/// 时间过滤（since = Unix epoch seconds）。
+/// 比较前将 RFC3339 `ts` 转 epoch seconds；解析失败的行不返回（容错）。
+pub fn list_since(conn: &Connection, since_unix: i64) -> Result<Vec<AuditEntry>> {
+    ensure_audit_log_table(conn)?;
+    let since_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(since_unix, 0)
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_else(|| "1970-01-01T00:00:00+00:00".to_string());
+    let mut stmt = conn.prepare(
+        "SELECT ts, route, category, kind, redacted_count, original_len
+         FROM audit_log
+         WHERE ts >= ?1
+         ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map(params![since_dt], |row| {
+        Ok(AuditEntry {
+            ts: row.get(0)?,
+            route: row.get(1)?,
+            category: row.get(2)?,
+            kind: row.get(3)?,
+            redacted_count: row.get(4)?,
+            original_len: row.get(5)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+// Store 包装层：暴露给 attune-server（store.conn 是 private，外部 crate 拿不到 &Connection）
+impl Store {
+    pub fn audit_log_record(
+        &self,
+        route: &str,
+        category: &str,
+        kind: &str,
+        redacted_count: i64,
+        original_len: i64,
+    ) -> Result<()> {
+        record(&self.conn, route, category, kind, redacted_count, original_len)
+    }
+
+    pub fn audit_log_list(&self, limit: usize, offset: usize) -> Result<Vec<AuditEntry>> {
+        list(&self.conn, limit, offset)
+    }
+
+    pub fn audit_log_count(&self) -> Result<i64> {
+        count(&self.conn)
+    }
+
+    pub fn audit_log_list_since(&self, since_unix: i64) -> Result<Vec<AuditEntry>> {
+        list_since(&self.conn, since_unix)
+    }
+}
+
+/// 生成 RFC4180 CSV（header + rows）。用于 export endpoint。
+pub fn entries_to_csv(entries: &[AuditEntry]) -> String {
+    let mut out =
+        String::from("timestamp,route,category,kind,redacted_count,original_len\n");
+    for e in entries {
+        out.push_str(&format!(
+            "{},{},{},{},{},{}\n",
+            csv_escape(&e.ts),
+            csv_escape(&e.route),
+            csv_escape(&e.category),
+            csv_escape(&e.kind),
+            e.redacted_count,
+            e.original_len,
+        ));
+    }
+    out
 }

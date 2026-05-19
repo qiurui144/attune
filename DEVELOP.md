@@ -344,6 +344,8 @@ ruff format src/ tests/
 
 ## 数据库 Schema
 
+### Python 原型线（SQLite + ChromaDB）
+
 | 表 | 用途 |
 |---|------|
 | `knowledge_items` | 知识条目 |
@@ -351,6 +353,55 @@ ruff format src/ tests/
 | `embedding_queue` | Embedding 任务队列（P0-P3），含 `level`/`section_idx` |
 | `bound_directories` | 绑定目录 |
 | `indexed_files` | 文件索引记录（路径/hash） |
+
+### Rust 商用线 (rust/) — 关键表 + v0.7 增强
+
+| 表 | 用途 | v0.7 关键字段 |
+|---|------|---------------|
+| `items` | 知识条目，加密 BLOB content | **`content_hash`** SHA-256 hex（短路条件）|
+| `embed_queue` | Embedding 任务（level/section_idx）| `task_type` (embed/classify) |
+| `fts_*` | tantivy 全文索引（独立目录）| — |
+| `skill_signals` | 自学习信号 | **`kind`**（search_miss/doc_create/doc_update/doc_delete/citation_hit/annotation_marker）+ **`ref_id`** |
+| **`reindex_queue`** | scanner 等无法持锁 worker 的 vector+FTS 清理信号 | `action`='purge', server `start_reindex_worker` 3s 轮询消费 |
+| `annotations` | 用户批注 | — |
+| `chunk_breadcrumbs` | F2 透传 path 到 Citation | breadcrumb_enc BLOB |
+| `chunk_summaries` | LLM 摘要缓存 | chunk_hash 主键 |
+
+### v0.7 记忆护城河 — reindex pipeline
+
+`attune-core::reindex` 模块协调三资源事务式 cleanup（避免各 update path 漏一）：
+
+```rust
+pub fn reindex_item(store, vectors, fulltext, item_id, title, content, source_type)
+    -> Result<ReindexStats>
+// 1. vectors.delete_by_item_id  → 2. fulltext.delete_document
+// 3. store.purge_embed_queue_for_item  → 4. fulltext.add_document
+// 5. chunker::extract_sections + chunk → store.enqueue_embedding (Level 1 + 2)
+
+pub fn purge_item_indexes(store, vectors, fulltext, item_id) -> Result<ReindexStats>
+// 仅清向量+FTS+queue, DB 软删由 caller 单独调
+```
+
+**调用约定**：
+- `routes/items.rs::update_item` 仅当 `UpdateOutcome::content_changed=true` 调 `reindex_item`
+- `routes/items.rs::delete_item` 调 `purge_item_indexes`，先清后软删
+- `routes/upload.rs` 用 `find_item_by_content_hash` dedup 短路
+- `scanner.rs` / `scanner_webdav.rs` 调 `store.enqueue_reindex(item_id, "purge")`，由 `AppState::start_reindex_worker` 周期消费
+
+**Lock ordering**（避免死锁）：始终 `vault → vectors → fulltext` 顺序持锁。route handler 拿 vectors guard 时必须先 release vault guard 或者保证顺序一致。
+
+### v0.7 自学习闭环 — skill_signals kind 路径
+
+```
+upload.rs::upload_file        → record_signal_event("doc_create", item_id, Some(&title))
+items.rs::update_item         → record_signal_event("doc_update", item_id, None)  // 仅 content_changed
+items.rs::delete_item         → record_signal_event("doc_delete", item_id, None)
+scanner.rs::process_single    → record_signal_event("doc_update", old_item_id, None)
+chat.rs::chat (after RAG)     → record_signal_event("citation_hit", item_id, Some(&msg))  for top-5
+annotations.rs::create        → record_signal_event("annotation_marker", item_id, label)
+
+skill_evolution worker        → count_unprocessed_signals_by_kind(kind) → 按 kind 阈值触发 LLM 扩展词学习
+```
 
 `embedding_queue` 关键字段：`level`（1=章节, 2=段落块）、`section_idx`（所属章节序号，Stage 2 检索用）。
 

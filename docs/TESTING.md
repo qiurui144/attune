@@ -482,9 +482,80 @@ jobs:
 
 ---
 
+## Email IMAP 采集源 + SourceConnector 抽象测试矩阵（v0.7）
+
+Email IMAP 采集源与 `SourceConnector` 统一抽象（`ingest/connector.rs`）的测试覆盖。
+实现计划：`docs/ingest/email-implementation-plan.md`。
+
+| 层 | 文件 | 覆盖 |
+|----|------|------|
+| Unit — connector | `ingest/connector.rs` 内联 | `SourceKind::as_str` 稳定字符串；`RawDocument` 字段构造；`SourceConnector` trait 驱动 sink 回调 |
+| Unit — email parse | `ingest/email.rs` 内联 | `html_to_text` 剥 HTML 标签；style/script block 过滤 |
+| Unit — pipeline enum | `ingest/pipeline.rs` 内联 | `IngestOutcome` derive 特征（Debug/Clone/PartialEq/Eq）四 variant 全覆盖 |
+| Integration — email | `tests/ingest_email_test.rs` | `parse_email_bytes`（plain/HTML/attachment/invalid）；`EmailConnector` mock fetcher；UID 增量游标；attachment RawDocument 独立产出；正文 RawDocument 可过 `ingest_document` |
+| Integration — pipeline | `tests/ingest_pipeline_test.rs` | `ingest_document` 四态（Inserted/Duplicate/Updated/Skipped）；domain/tags 透传；corpus_domain 前缀；`ingest_document_replacing` + 第三方 hash 防护；`ingest_document_with_profile` 命名 profile；raw.title 优先于 parser title |
+| Manual | `python/tests/MANUAL_TEST_CHECKLIST.md` § "Email IMAP 采集源" | 添加 IMAP 账号、手动同步、UID 游标增量、附件索引 — 需真实 IMAP 账号，不进 CI |
+
+跑法：
+
+```bash
+cd rust
+cargo test -p attune-core --lib ingest                      # unit tests
+cargo test -p attune-core --test ingest_email_test          # email integration
+cargo test -p attune-core --test ingest_pipeline_test       # pipeline integration
+```
+
+## 两级侧边栏导航测试矩阵（v0.7）
+
+两级侧边栏（`rust/crates/attune-server/ui/src/layout/Sidebar.tsx`：主级 PRIMARY_NAV 常驻 +
+次级 MORE_NAV 折叠组）当前无 UI 自动化测试层（E2E Playwright 层在 C.2 后才建立，
+`ui/package.json` 只有 `build`/`typecheck`，无 vitest/jest）。
+
+| 层 | 文件 | 覆盖 |
+|----|------|------|
+| Unit | — | TypeScript 类型检查：`npm run typecheck`（`tsc --noEmit`） |
+| E2E | `tests/e2e_rust/`（C.2 规划后） | 待建立 Playwright 层后补充导航交互测试 |
+| Manual | `python/tests/MANUAL_TEST_CHECKLIST.md` § "两级侧边栏导航" | 主级常驻可见、折叠模式图标、"更多"展开/折叠、激活指示器、活跃视图自动展开、Settings 位置 |
+
+跑法：
+
+```bash
+cd rust/crates/attune-server/ui
+npm run typecheck   # TypeScript 类型检查（覆盖 Sidebar.tsx props/signal 类型）
+```
+
+人工验收在 `python/tests/MANUAL_TEST_CHECKLIST.md` 维护，每次 release 前必须人工跑一遍。
+
+## 多层记忆测试矩阵（2026-05-18）
+
+多层记忆系统（L0 raw → L1 chunk summary → L2 episodic → L3 semantic + tier-aware
+assembler）的测试覆盖。设计稿 `docs/superpowers/plans/2026-05-18-multilayer-memory.md`。
+
+| 层 | 文件 | 覆盖 |
+|----|------|------|
+| Unit — store | `store/memory_vectors.rs`、`store/memories.rs` 内联 | memory_vectors CRUD + 级联删除；insert_semantic_memory topic_key 幂等；mark_memory_superseded；demote_cold_memories |
+| Unit — retrieval | `memory/retrieval.rs` 内联 | MemoryVectorIndex upsert/search/维度防护；search_memories 相关性排序、时间过滤、冷记忆排除 |
+| Unit — semantic | `memory/semantic.rs` 内联 | hdbscan 主题聚类；topic_key 跨重跑幂等；subset 主题 supersede |
+| Unit — assembler | `memory/assembler.rs` 内联 | classify_query_shape（recall/overview/precise）；coverage gate；assembler-off == L0；compact_history 缓存命中 |
+| Integration | `tests/multilayer_memory_integration.rs` | 完整 L0→L1→L2→L3 生命周期；recall/overview/precise 路由；冷降级；assembler on/off 等价 |
+| Benchmark | `tests/memory_token_reduction_benchmark.rs` | §5.3 验收指标 — 注入 token 数 assembler on vs off。实测 recall+overview 子集 median 降幅 78.7%，precise 子集 0% |
+
+跑法：
+
+```bash
+cd rust
+cargo test -p attune-core memory                              # 全部 unit
+cargo test -p attune-core --test multilayer_memory_integration
+cargo test -p attune-core --test memory_token_reduction_benchmark -- --nocapture
+```
+
+benchmark 走确定性 MockEmbeddingProvider，无 LLM / 无网络，进 CI（<1s）。
+
+---
+
 ## 附录 A：人工验收清单
 
-某些 UX / 集成场景无法自动化（需要真实 Chrome 实例 / 真实 USB / 真实账号登录等），这些用 [`tests/MANUAL_TEST_CHECKLIST.md`](../tests/MANUAL_TEST_CHECKLIST.md) 维护勾选式步骤。
+某些 UX / 集成场景无法自动化（需要真实 Chrome 实例 / 真实 USB / 真实账号登录等），这些用 [`python/tests/MANUAL_TEST_CHECKLIST.md`](../python/tests/MANUAL_TEST_CHECKLIST.md) 维护勾选式步骤（含 v0.7 Memory Moat 验收节）。
 
 每次 release 前，必须人工跑一遍清单。
 

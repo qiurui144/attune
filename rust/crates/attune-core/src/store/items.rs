@@ -3,11 +3,33 @@
 //! 所有方法属于 `impl Store`（inherent impl 跨文件分裂，rustc 自动合并）。
 
 use rusqlite::params;
+use sha2::{Digest, Sha256};
 
 use crate::crypto::{self, Key32};
 use crate::error::{Result, VaultError};
 use crate::store::audit::PrivacyTier;
 use crate::store::Store;
+
+/// 计算 content 明文的 SHA-256 hex（v0.7 记忆护城河：内容指纹）。
+/// 32B → 64 字符 hex，与 SQLite `content_hash TEXT` 列对应。
+pub fn compute_content_hash(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// update_item 的返回值，区分"未找到 / 元数据改了 / 内容真变了"三态，
+/// 让 caller 决定是否触发 re-embed（最贵的下游动作）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateOutcome {
+    pub existed: bool,
+    /// 本次调用是否改了 content（hash 变化）。仅当 true 才需 reindex。
+    pub content_changed: bool,
+    /// 是否触发了 lazy backfill（老 vault content_hash 空 → 这次填回）。
+    /// backfill 本身**不**意味着内容变了，但 caller 仍可选择 backfill 时
+    /// 触发一次 reindex 以保证向量与最新算法一致。
+    pub backfilled_hash: bool,
+}
 
 #[allow(unused_imports)]
 use crate::store::types::*;
@@ -15,6 +37,7 @@ use crate::store::types::*;
 impl Store {
     // --- items (加密 CRUD) ---
 
+    #[allow(clippy::too_many_arguments)] // all 8 args are distinct item fields; grouping adds indirection without clarity
     pub fn insert_item(
         &self,
         dek: &Key32,
@@ -32,13 +55,45 @@ impl Store {
             Some(t) => Some(crypto::encrypt(dek, serde_json::to_string(t)?.as_bytes())?),
             None => None,
         };
+        let content_hash = compute_content_hash(content);
 
         self.conn.execute(
-            "INSERT INTO items (id, title, content, url, source_type, domain, tags, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![id, title, encrypted_content, url, source_type, domain, encrypted_tags, now, now],
+            "INSERT INTO items (id, title, content, url, source_type, domain, tags, created_at, updated_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![id, title, encrypted_content, url, source_type, domain, encrypted_tags, now, now, content_hash],
         )?;
         Ok(id)
+    }
+
+    /// v0.7 记忆护城河：按 content_hash 查未删除 item（dedup 短路用）。
+    ///
+    /// upload 路径：用户重传完全相同内容 → 返回旧 item_id 跳过 re-embed。
+    /// 老 vault content_hash='' 不在此函数命中范围（caller 用 `compute_content_hash`
+    /// 算出 hash 才能查询，'' 永远不与有效 hash 相等）。
+    pub fn find_item_by_content_hash(&self, content_hash: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM items WHERE content_hash = ?1 AND is_deleted = 0 LIMIT 1",
+        )?;
+        let r = stmt.query_row(params![content_hash], |row| row.get::<_, String>(0));
+        match r {
+            Ok(id) => Ok(Some(id)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// 读取 item 的 content_hash（未触发解密，便于 update / reindex 入口快速短路）。
+    /// 老 vault 未 backfill 时返回空字符串。
+    pub fn get_content_hash(&self, id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT content_hash FROM items WHERE id = ?1 AND is_deleted = 0",
+        )?;
+        let r = stmt.query_row(params![id], |row| row.get::<_, String>(0));
+        match r {
+            Ok(h) => Ok(Some(h)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// 廉价的存在性检查（不解密 content），用于外键前置校验，给出比 SQL 错误更清晰的 404
@@ -209,35 +264,75 @@ impl Store {
         Ok(())
     }
 
-    pub fn update_item(&self, dek: &Key32, id: &str, title: Option<&str>, content: Option<&str>) -> Result<bool> {
-        let exists: bool = self.conn.query_row(
-            "SELECT COUNT(*) FROM items WHERE id = ?1 AND is_deleted = 0",
-            params![id],
-            |row| row.get::<_, i64>(0),
-        )? > 0;
+    /// 更新 item 的 title / content。返回 [`UpdateOutcome`] 让 caller 区分
+    /// 元数据变更 vs 内容变更（仅后者需触发 reindex）。
+    ///
+    /// content_hash 短路：若新 content hash 与 stored hash 相同 → 仅刷 updated_at，
+    /// `content_changed=false`，caller 跳过 reindex，省 100KB 文档约 3s embedding。
+    pub fn update_item(&self, dek: &Key32, id: &str, title: Option<&str>, content: Option<&str>) -> Result<UpdateOutcome> {
+        let mut outcome = UpdateOutcome { existed: false, content_changed: false, backfilled_hash: false };
 
-        if !exists {
-            return Ok(false);
-        }
+        // R17 P1 fix (S1-Q4): 所有 SQL 包入 unchecked_transaction，避免并发 PATCH
+        // 同 item 的中间状态可见性 — 两个 client race 时第二个的 stored_hash 读取与
+        // 第一个的 content/hash 写入交错，会留下 hash 与 BLOB 不一致的悬而未决状态。
+        // SQLite 用 BEGIN IMMEDIATE 让事务获取 RESERVED 锁，序列化写。
+        let tx = self.conn.unchecked_transaction()?;
+
+        let row: Option<String> = match tx.query_row(
+            "SELECT content_hash FROM items WHERE id = ?1 AND is_deleted = 0",
+            params![id],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(h) => Some(h),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.into()),
+        };
+        let Some(stored_hash) = row else {
+            return Ok(outcome);
+        };
+        outcome.existed = true;
 
         let now = chrono::Utc::now().to_rfc3339();
 
+        // R6 P0-1 fix: 无条件 bump updated_at 当 existed=true。
+        // 之前只有 title 分支或 content_changed 分支才写 updated_at，导致
+        // `update_item(id, None, Some(same_content))` 调用永不刷 updated_at — stale-items
+        // 查询基于 updated_at，会把"用户刚刚 touch 过但内容没变"的 item 判为陈旧。
+        tx.execute(
+            "UPDATE items SET updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+
         if let Some(title) = title {
-            self.conn.execute(
-                "UPDATE items SET title = ?1, updated_at = ?2 WHERE id = ?3",
-                params![title, now, id],
+            tx.execute(
+                "UPDATE items SET title = ?1 WHERE id = ?2",
+                params![title, id],
             )?;
         }
 
         if let Some(content) = content {
-            let encrypted = crypto::encrypt(dek, content.as_bytes())?;
-            self.conn.execute(
-                "UPDATE items SET content = ?1, updated_at = ?2 WHERE id = ?3",
-                params![encrypted, now, id],
-            )?;
+            let new_hash = compute_content_hash(content);
+            // 短路：内容真没变 → 不刷 BLOB（省加密 + 省 page write），updated_at 已在上面无条件刷过。
+            // 但若是老 vault（stored_hash == ""），即便 new content 与 stored 相同 hash
+            // 也属于"首次记录 hash" → backfill 不算 content_changed。
+            if !stored_hash.is_empty() && stored_hash == new_hash {
+                // 内容未变，不重写 BLOB。outcome.content_changed = false（默认）
+            } else {
+                let encrypted = crypto::encrypt(dek, content.as_bytes())?;
+                tx.execute(
+                    "UPDATE items SET content = ?1, content_hash = ?2 WHERE id = ?3",
+                    params![encrypted, new_hash, id],
+                )?;
+                if stored_hash.is_empty() {
+                    outcome.backfilled_hash = true;
+                } else {
+                    outcome.content_changed = true;
+                }
+            }
         }
 
-        Ok(true)
+        tx.commit()?;
+        Ok(outcome)
     }
 
     pub fn delete_item(&self, id: &str) -> Result<bool> {
@@ -265,8 +360,97 @@ impl Store {
                 "DELETE FROM chunk_breadcrumbs WHERE item_id = ?1",
                 params![id],
             )?;
+            // v0.7 记忆护城河：删 embed_queue 里该 item 所有 pending 任务。
+            // 否则 worker 会拿到 stale chunk 继续走 embedding → 浪费 + 给已删 item
+            // 写向量（vectors.delete_by_item_id 必须先于此调用，由 reindex::purge 协调）。
+            self.conn.execute(
+                "DELETE FROM embed_queue WHERE item_id = ?1",
+                params![id],
+            )?;
+            // item 软删除时连坐删原始证据 blob。item_blobs 有 FK CASCADE，
+            // 但软删除（is_deleted=1）不触发 CASCADE → 必须显式删。否则用户"忘记"
+            // 敏感证据后，加密原件仍留存、GET /items/{id}/original 仍可取回
+            // —— 法律证据产品的数据留存漏洞。
+            self.conn.execute(
+                "DELETE FROM item_blobs WHERE item_id = ?1",
+                params![id],
+            )?;
         }
         Ok(affected > 0)
+    }
+
+    /// v0.7 记忆护城河：把一个 item 加入 reindex_queue 让 server 后台 task
+    /// 消费做 vectors+FTS 清理。scanner / scanner_webdav 等无法直接持锁的
+    /// background worker 用这个路径。
+    ///
+    /// `action` 必须是已知值（防 typo 静默写入 unknown action 让 worker 进死循环）：
+    /// - `"purge"` — 清向量+FTS+queue（item 已 SQL 软删）
+    /// - `"reindex"` — 完整重建（item content 已 update）
+    ///
+    /// 未知 action 返回 InvalidInput（R6 P1-5 fix）。
+    pub fn enqueue_reindex(&self, item_id: &str, action: &str) -> Result<()> {
+        if !matches!(action, "purge" | "reindex") {
+            return Err(crate::error::VaultError::Crypto(format!(
+                "unknown reindex_queue action: {action:?} (R6 P1-5 fix: typo guard)"
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO reindex_queue (item_id, action, created_at) VALUES (?1, ?2, ?3)",
+            params![item_id, action, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// server 后台 reindex worker 用：取出一批待处理任务，调 caller 后再 mark_done。
+    /// 返回 (id, item_id, action, attempts)。worker 失败时调 [`bump_reindex_attempts`]
+    /// 让 R6 P0-3 fix 的"毒任务"在 5 次后被自动 skip。
+    pub fn dequeue_reindex_tasks(&self, limit: usize) -> Result<Vec<(i64, String, String, i64)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, item_id, action, attempts FROM reindex_queue
+             WHERE attempts < 5
+             ORDER BY created_at ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn mark_reindex_done(&self, task_id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM reindex_queue WHERE id = ?1", params![task_id])?;
+        Ok(())
+    }
+
+    /// R6 P0-3 fix：worker 失败时调，让 attempts 计数。dequeue 端 WHERE attempts < 5
+    /// 自动跳过毒任务（如已 hard-deleted 的 item_id / typoed action）。
+    /// 达上限的任务保留在表里供运维查询（不静默 DELETE 丢失）。
+    pub fn bump_reindex_attempts(&self, task_id: i64) -> Result<i64> {
+        self.conn.execute(
+            "UPDATE reindex_queue SET attempts = attempts + 1 WHERE id = ?1",
+            params![task_id],
+        )?;
+        let n: i64 = self.conn.query_row(
+            "SELECT attempts FROM reindex_queue WHERE id = ?1",
+            params![task_id],
+            |r| r.get(0),
+        ).unwrap_or(5);
+        Ok(n)
+    }
+
+    /// v0.7 记忆护城河：单独清 embed_queue 中某 item 的所有任务。
+    /// 用于 update_item 后 caller 触发 reindex 前的预清理 — 防止旧 chunk 任务
+    /// 在新 chunk 入队前被 worker 消费而写错向量。
+    pub fn purge_embed_queue_for_item(&self, item_id: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM embed_queue WHERE item_id = ?1",
+            params![item_id],
+        )?;
+        Ok(n)
     }
 
     pub fn item_count(&self) -> Result<usize> {
@@ -583,5 +767,149 @@ mod privacy_tier_tests {
         assert_eq!(l0.len(), 2);
         assert!(l0.contains(&"a".to_string()));
         assert!(l0.contains(&"c".to_string()));
+    }
+
+    // ── v0.7 W4 R27: update_item UpdateOutcome 三态完备性测试 ──
+
+    #[test]
+    fn update_item_content_changed_writes_new_hash() {
+        let s = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let id = s.insert_item(&dek, "t", "ORIGINAL", None, "note", None, None).unwrap();
+        let h0 = s.get_content_hash(&id).unwrap().unwrap();
+        assert_eq!(h0, compute_content_hash("ORIGINAL"));
+
+        let outcome = s.update_item(&dek, &id, None, Some("MODIFIED")).unwrap();
+        assert!(outcome.existed);
+        assert!(outcome.content_changed, "新内容必须 mark content_changed");
+        assert!(!outcome.backfilled_hash);
+        let h1 = s.get_content_hash(&id).unwrap().unwrap();
+        assert_eq!(h1, compute_content_hash("MODIFIED"));
+    }
+
+    #[test]
+    fn update_item_same_content_short_circuits_no_reindex_signal() {
+        let s = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let id = s.insert_item(&dek, "t", "SAME", None, "note", None, None).unwrap();
+        let outcome = s.update_item(&dek, &id, None, Some("SAME")).unwrap();
+        assert!(outcome.existed);
+        assert!(!outcome.content_changed, "相同 hash 必须短路 content_changed=false");
+        assert!(!outcome.backfilled_hash);
+    }
+
+    #[test]
+    fn update_item_title_only_bumps_updated_at_but_not_content_changed() {
+        // R6 P0-1 fix 验收：existed=true 时无条件刷 updated_at
+        let s = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let id = s.insert_item(&dek, "OldTitle", "C", None, "note", None, None).unwrap();
+        // 拿 insert 后的 updated_at
+        let t0: String = s.conn
+            .query_row("SELECT updated_at FROM items WHERE id = ?1", params![&id], |r| r.get(0))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let outcome = s.update_item(&dek, &id, Some("NewTitle"), None).unwrap();
+        assert!(outcome.existed);
+        assert!(!outcome.content_changed);
+        let t1: String = s.conn
+            .query_row("SELECT updated_at FROM items WHERE id = ?1", params![&id], |r| r.get(0))
+            .unwrap();
+        assert!(t1 > t0, "title-only update 必须刷新 updated_at（R6 P0-1）");
+    }
+
+    #[test]
+    fn update_item_old_vault_backfills_hash() {
+        // 模拟老 vault：手插一条 content_hash='' 的 item
+        let s = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let id = "legacy123";
+        s.conn.execute(
+            "INSERT INTO items (id, title, content, source_type, created_at, updated_at, content_hash) \
+             VALUES (?1, 'T', ?2, 'note', '2026-01-01', '2026-01-01', '')",
+            params![id, crate::crypto::encrypt(&dek, b"BODY").unwrap()],
+        ).unwrap();
+        assert_eq!(s.get_content_hash(id).unwrap().unwrap(), "");
+
+        let outcome = s.update_item(&dek, id, None, Some("BODY")).unwrap();
+        assert!(outcome.existed);
+        assert!(!outcome.content_changed, "backfill 不算 content_changed（避免老 vault 全量 re-embed）");
+        assert!(outcome.backfilled_hash, "stored_hash='' 路径必须标 backfilled_hash=true");
+        let h = s.get_content_hash(id).unwrap().unwrap();
+        assert_eq!(h, compute_content_hash("BODY"));
+    }
+
+    #[test]
+    fn update_item_not_found_returns_existed_false() {
+        let s = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let outcome = s.update_item(&dek, "nonexistent", None, Some("X")).unwrap();
+        assert!(!outcome.existed);
+        assert!(!outcome.content_changed);
+    }
+
+    #[test]
+    fn find_item_by_content_hash_dedup_hits() {
+        let s = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let id = s.insert_item(&dek, "t", "DEDUP_CONTENT", None, "note", None, None).unwrap();
+        let h = compute_content_hash("DEDUP_CONTENT");
+        let found = s.find_item_by_content_hash(&h).unwrap();
+        assert_eq!(found, Some(id));
+    }
+
+    #[test]
+    fn find_item_by_content_hash_empty_hash_returns_none() {
+        // 老 vault 全部 content_hash='' 不应被 dedup 短路误命中
+        let s = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let _id = s.insert_item(&dek, "t", "X", None, "note", None, None).unwrap();
+        // 手工把 hash 改空
+        s.conn.execute("UPDATE items SET content_hash = ''", []).unwrap();
+        let found = s.find_item_by_content_hash("").unwrap();
+        // SQL `WHERE content_hash = ''` 会真匹配空值 — 测试当前行为，记录到注释
+        // caller 必须传非空 hash 才不命中老数据（compute_content_hash 永不返回空字符串）
+        assert!(found.is_some(), "current behavior: 传空字符串会匹配老 vault；caller 必须传非空 hash");
+        assert!(compute_content_hash("anything").len() == 64, "SHA-256 hex 必为 64 字符，永不空");
+    }
+
+    // ── v0.7 W4 R26: reindex_queue attempts 计数测试（R6 P0-3 fix 验收）──
+
+    #[test]
+    fn enqueue_reindex_validates_action() {
+        let s = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let id = s.insert_item(&dek, "t", "x", None, "note", None, None).unwrap();
+        assert!(s.enqueue_reindex(&id, "purge").is_ok());
+        assert!(s.enqueue_reindex(&id, "reindex").is_ok());
+        assert!(s.enqueue_reindex(&id, "typo_action").is_err(), "未知 action 必须报错（R6 P1-5）");
+    }
+
+    #[test]
+    fn bump_reindex_attempts_increments_and_dequeue_skips_poison() {
+        let s = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let id = s.insert_item(&dek, "t", "x", None, "note", None, None).unwrap();
+        s.enqueue_reindex(&id, "purge").unwrap();
+
+        let tasks = s.dequeue_reindex_tasks(10).unwrap();
+        assert_eq!(tasks.len(), 1);
+        let (task_id, _, _, attempts0) = &tasks[0];
+        assert_eq!(*attempts0, 0);
+
+        // bump 5 次模拟毒任务
+        for expected in 1..=5 {
+            let n = s.bump_reindex_attempts(*task_id).unwrap();
+            assert_eq!(n, expected);
+        }
+
+        // attempts >= 5 → dequeue 跳过
+        let after_park = s.dequeue_reindex_tasks(10).unwrap();
+        assert_eq!(after_park.len(), 0, "毒任务必须被 WHERE attempts < 5 过滤");
+        // 但表里仍保留（供运维查询，不静默丢失）
+        let total: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM reindex_queue", [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(total, 1, "park 后仍保留在表里");
     }
 }

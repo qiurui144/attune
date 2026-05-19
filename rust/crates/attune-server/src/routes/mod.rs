@@ -1,11 +1,15 @@
+pub mod agents;
 pub mod ai_stack;
 pub mod annotations;
 pub mod audit;
 pub mod auto_bookmarks;
+pub mod demo;
 pub mod behavior;
 pub mod browse_signals;
 pub mod chat;
+pub mod chat_stream;
 pub mod chat_sessions;
+pub mod email;
 pub mod errors;
 pub mod feedback;
 pub mod folder_links;

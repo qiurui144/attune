@@ -18,6 +18,33 @@ pub trait SearchEngineStrategy: Send + Sync {
 /// DuckDuckGo HTML 端点引擎（对爬虫友好）
 pub struct DuckDuckGoEngine;
 
+/// DuckDuckGo HTML 端点的结果链接是重定向形式
+/// `//duckduckgo.com/l/?uddg=<percent-encoded 真实 URL>&rut=...`。
+/// 解出 `uddg` 参数还原真实目标 URL；非重定向形式仅做协议相对前缀归一。
+/// 这样下游（引用展示 / Chat citation）拿到的是干净 `https://` 真实链接。
+fn unwrap_ddg_redirect(href: &str) -> String {
+    let normalized = href
+        .strip_prefix("//")
+        .map(|rest| format!("https://{rest}"))
+        .unwrap_or_else(|| href.to_string());
+    if !normalized.contains("duckduckgo.com/l/") {
+        return normalized;
+    }
+    if let Some(query) = normalized.split('?').nth(1) {
+        for pair in query.split('&') {
+            if let Some(encoded) = pair.strip_prefix("uddg=") {
+                if let Ok(decoded) = urlencoding::decode(encoded) {
+                    let real = decoded.into_owned();
+                    if real.starts_with("http") {
+                        return real;
+                    }
+                }
+            }
+        }
+    }
+    normalized
+}
+
 impl SearchEngineStrategy for DuckDuckGoEngine {
     fn build_url(&self, query: &str) -> String {
         let encoded = urlencoding::encode(query);
@@ -40,8 +67,10 @@ impl SearchEngineStrategy for DuckDuckGoEngine {
                 None => continue,
             };
             let title = title_el.text().collect::<String>().trim().to_string();
-            let url = title_el.value().attr("href").unwrap_or("").to_string();
-            if title.is_empty() || url.is_empty() {
+            let url = unwrap_ddg_redirect(title_el.value().attr("href").unwrap_or(""));
+            // 只接受能还原出的真实 http(s) 链接；相对路径 / 残缺 href 丢弃，
+            // 保证结果 URL 恒以 http 开头（下游引用展示 / citation 契约）。
+            if title.is_empty() || !url.starts_with("http") {
                 continue;
             }
             let snippet = node
@@ -96,5 +125,18 @@ mod tests {
         let url = engine.build_url("rust async");
         assert!(url.starts_with("https://html.duckduckgo.com/html/"));
         assert!(url.contains("q=rust"));
+    }
+
+    #[test]
+    fn unwrap_ddg_redirect_decodes_real_url() {
+        // DDG /l/ 重定向 → 解出 uddg 真实 URL
+        let redirect = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F&rut=abc";
+        assert_eq!(unwrap_ddg_redirect(redirect), "https://www.rust-lang.org/");
+        // 结果必以 http 开头 —— real_duckduckgo_search 的断言契约
+        assert!(unwrap_ddg_redirect(redirect).starts_with("http"));
+        // 直接 URL → 原样返回
+        assert_eq!(unwrap_ddg_redirect("https://example.com/x"), "https://example.com/x");
+        // 协议相对非重定向 → 归一为 https
+        assert_eq!(unwrap_ddg_redirect("//example.com/y"), "https://example.com/y");
     }
 }

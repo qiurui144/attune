@@ -1,7 +1,17 @@
-// npu-vault/crates/vault-core/src/chunker.rs
-
-// 滑动窗口分块 + 语义章节切割
-// 复用 npu-webhook Python 实现的逻辑
+//! 滑动窗口分块 + 语义章节切割.
+//!
+//! 两个核心 API:
+//! - [`chunk`] — Level 2 段落级滑动窗口, 默认 512 字符 + 128 overlap, 句子边界 +
+//!   Markdown code fence 平衡保持 (不切到 ``` 中间).
+//! - [`extract_sections`] / [`extract_sections_with_path`] — Level 1 章节级,
+//!   按 Markdown header 切, 段落 target 1500 字符.
+//!
+//! 两层产物都进 embedding queue, search 时走 [`crate::search`] 两阶段层级检索
+//! (先 Level 1 找章节, 再 Level 2 在选中章节内精检). Level 1 给 LLM 上下文,
+//! Level 2 给 evidence cite.
+//!
+//! 默认参数依据: [`DEFAULT_CHUNK_SIZE`] 512 对中文 ~256 token / 英文 ~80 token,
+//! 适配 bge-m3 模型. v0.7 候选改 1024 减少 chunk 数 (需 reindex).
 
 pub const DEFAULT_CHUNK_SIZE: usize = 512;
 pub const DEFAULT_OVERLAP: usize = 128;
@@ -737,5 +747,52 @@ mod tests {
             chunks.len()
         );
         assert!(!chunks.is_empty());
+    }
+
+    // ── Round I (v0.7 滚动 review): chunker 边界条件回归测试 ──
+    // R11 review agent 报告的边界问题，加测试暴露真相 + 回归保护。
+
+    #[test]
+    fn chunk_inline_triple_backtick_no_oversized_extend() {
+        // R11 Critical-2: 行内 ``` (不在行首) 不应触发 code-fence extend 产生超大 chunk。
+        // 典型场景: API 文档行内引用 "use ``` to start a code fence"。
+        let line = "use ``` to start a code fence in Markdown documents.\n";
+        let text = line.repeat(5); // ~265 chars, > chunk_size 200
+        let chunks = chunk(&text, 200, 50);
+        for (i, c) in chunks.iter().enumerate() {
+            let char_count = c.chars().count();
+            assert!(
+                char_count <= 400,
+                "chunk[{i}] {char_count} chars > 2*200 — 行内 ``` 触发了超大 extend"
+            );
+        }
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn chunk_no_newline_100kb_line_cuts_correctly() {
+        // R11 Critical-1 smoke: 无换行 100KB 长行必须被切割、不 panic、
+        // 每段 ≤ 2*chunk_size（无 fence 不该 extend）。
+        let text = "x".repeat(100_000);
+        let chunks = chunk(&text, 512, 128);
+        assert!(chunks.len() > 1, "100KB 单行应被切割, got {}", chunks.len());
+        for (i, c) in chunks.iter().enumerate() {
+            assert!(
+                c.chars().count() <= 1024,
+                "chunk[{i}] {} chars > 2*512", c.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_multilingual_no_char_boundary_panic() {
+        // R11: 中英日 emoji 阿拉伯文混排 — chunk() 全程基于 Vec<char> 下标，
+        // 不应有 &str 裸字节切片导致的 char boundary panic。
+        let text = "中文 English 日本語 한국어 🚀🔥✨ émojis مرحبا Ω≈ç√∫ ".repeat(40);
+        let chunks = chunk(&text, 128, 32);
+        assert!(!chunks.is_empty());
+        for c in &chunks {
+            assert!(c.chars().count() > 0);
+        }
     }
 }

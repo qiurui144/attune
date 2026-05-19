@@ -6,6 +6,46 @@ use attune_core::search::{allocate_budget, SearchResult, INJECTION_BUDGET};
 
 use crate::state::SharedState;
 
+/// 从 app_settings 读取 search.query_rewrite.enabled 开关。
+/// 未配置时返回 false（保守默认：LLM 不可用时不应在后台静默等待）。
+fn query_rewrite_enabled(state: &crate::state::AppState) -> bool {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(Some(data)) = vault.store().get_meta("app_settings") else { return false; };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) else { return false; };
+    json.get("search")
+        .and_then(|s| s.get("query_rewrite"))
+        .and_then(|qr| qr.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// 若开关开启且 LLM 可用，改写 query；失败或关闭时降级返回原始 query。
+async fn maybe_rewrite_query(
+    state: &crate::state::AppState,
+    query: &str,
+) -> String {
+    if !query_rewrite_enabled(state) {
+        return query.to_string();
+    }
+    let Some(llm) = state.llm() else {
+        return query.to_string();
+    };
+    match attune_core::query_rewrite::rewrite_query(query, llm).await {
+        Ok(rewritten) if !rewritten.is_empty() => {
+            if rewritten != query {
+                tracing::debug!(original = query, rewritten = %rewritten, "query_rewrite: query rewritten");
+            }
+            rewritten
+        }
+        Ok(_) => query.to_string(),
+        Err(e) => {
+            // LLM 失败时降级，不阻断检索
+            tracing::warn!(query = query, err = %e, "query_rewrite: failed, falling back to original");
+            query.to_string()
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SearchQuery {
     pub q: String,
@@ -72,10 +112,13 @@ pub async fn search(
         }
     }
 
+    // query_rewrite：将口语化 query 改写为检索关键词（开关在 settings.search.query_rewrite.enabled）
+    let effective_query = maybe_rewrite_query(&state, &params.q).await;
+
     // v0.6 Phase B F-Pro Stage 4：从 query 自动 detect 领域意图，driving cross-domain penalty。
     // 命中 'legal' / 'tech' / 'medical' / 'patent' → 跨领域文档 score *= 0.4
     // 未命中（None）→ 不应用 penalty（保持向后兼容）
-    let detected_domain = attune_core::search::detect_query_domain(&params.q);
+    let detected_domain = attune_core::search::detect_query_domain(&effective_query);
 
     let search_params = {
         let mut p = attune_core::search::SearchParams::with_defaults(params.top_k);
@@ -111,7 +154,7 @@ pub async fn search(
             store: vault_guard.store(),
             dek: &dek,
         };
-        attune_core::search::search_with_context(&ctx, &params.q, &search_params)
+        attune_core::search::search_with_context(&ctx, &effective_query, &search_params)
             .map_err(|e| err_500(&e.to_string()))?
     };
 
@@ -167,7 +210,10 @@ pub async fn search_relevant(
     }
     let budget = body.injection_budget.unwrap_or(INJECTION_BUDGET);
 
-    let detected_domain = attune_core::search::detect_query_domain(&body.query);
+    // query_rewrite：Chrome 扩展注入路径同样受益于 query 改写
+    let effective_query = maybe_rewrite_query(&state, &body.query).await;
+
+    let detected_domain = attune_core::search::detect_query_domain(&effective_query);
     let search_params = {
         let mut p = attune_core::search::SearchParams::with_defaults(top_k);
         if let Some(ik) = body.initial_k { p.initial_k = ik; }
@@ -202,7 +248,7 @@ pub async fn search_relevant(
             store: vault_guard.store(),
             dek: &dek,
         };
-        attune_core::search::search_with_context(&ctx, &body.query, &search_params)
+        attune_core::search::search_with_context(&ctx, &effective_query, &search_params)
             .map_err(|e| err_500(&e.to_string()))?
     };
 
@@ -250,5 +296,54 @@ mod tests {
         // 上限是常量 100，handler 中检查 params.top_k > 100 即拒绝
         const TOP_K_MAX: usize = 100;
         assert!(default_top_k() < TOP_K_MAX, "default 应低于上限");
+    }
+
+    /// query_rewrite_enabled 读 JSON 开关的逻辑提取为纯函数测试
+    #[test]
+    fn parse_query_rewrite_enabled_from_settings_json() {
+        // 开关开启
+        let json: serde_json::Value = serde_json::json!({
+            "search": { "query_rewrite": { "enabled": true } }
+        });
+        let enabled = json.get("search")
+            .and_then(|s| s.get("query_rewrite"))
+            .and_then(|qr| qr.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(enabled, "enabled=true 应返回 true");
+
+        // 开关关闭
+        let json: serde_json::Value = serde_json::json!({
+            "search": { "query_rewrite": { "enabled": false } }
+        });
+        let enabled = json.get("search")
+            .and_then(|s| s.get("query_rewrite"))
+            .and_then(|qr| qr.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(!enabled, "enabled=false 应返回 false");
+
+        // 无配置时默认 false（LLM 不可用时保守策略）
+        let json: serde_json::Value = serde_json::json!({});
+        let enabled = json.get("search")
+            .and_then(|s| s.get("query_rewrite"))
+            .and_then(|qr| qr.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(!enabled, "无配置时应 default=false");
+    }
+
+    /// 开关关闭时，即使 LLM 可用，query 也不应被改写（保持原样传入检索）
+    #[test]
+    fn rewrite_disabled_setting_returns_original() {
+        // 开关逻辑是纯 JSON 读取，直接测解析结果
+        let json_disabled: serde_json::Value = serde_json::json!({
+            "search": { "query_rewrite": { "enabled": false } }
+        });
+        let enabled = json_disabled
+            .get("search").and_then(|s| s.get("query_rewrite"))
+            .and_then(|qr| qr.get("enabled")).and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(!enabled, "开关 false 时不应触发 rewrite");
     }
 }

@@ -139,8 +139,101 @@
 - [ ] **Pause 顶栏**：consolidation 周期跑到一半时点顶栏 Pause → 当前 bundle 完成后停止，剩余 bundle 留下次（无超额 LLM 调用）
 - [ ] **Conservative 档**：切到 Conservative → MemoryConsolidation governor LLM 配额降为 5/h → 多 bundle 周期会触发 deferred 日志
 
+## 多层记忆 — tier-aware 上下文装配（per `docs/superpowers/plans/2026-05-18-multilayer-memory.md`）
+
+前置：知识库已有若干天的对话/文档，consolidation 已跑出 episodic/semantic 记忆。
+
+### Tier 路由验证
+
+- [ ] **Recall query**：问「上周学了什么 / 今天看的 X」→ chat 响应 `context_tier` 为 `L2`，cost chip 显示注入 token 明显低于平时
+- [ ] **Overview query**：问「总结我对 X 的理解 / 我对 X 了解多少」→ `context_tier` 为 `L3`
+- [ ] **Precise query**：问代码符号 / 精确引用（含 `反引号`、`::`、数字）→ `context_tier` 仍为 `L0`，答案精度不降
+- [ ] **Coverage gate**：问一个记忆库覆盖不到的 recall/overview 问题 → 自动退回 `L0`，答案不变（无回归）
+
+### 历史压缩
+
+- [ ] **超窗会话**：连续多轮把上下文撑过模型窗口 → 旧轮次合并成「[此前 N 轮较早对话摘要]」而非「已省略」占位；摘要内容能反映被截轮次的要点
+
+### 开关
+
+- [ ] **关闭 tiered assembler**：Settings 把 `memory.tiered_assembler_enabled` 设 false → 所有 query `context_tier` 恒为 `L0`，行为与旧版一致
+
+## Memory Moat v0.7 — 文档编辑嵌入 + 自学习闭环（per `docs/specs/memory-moat-v07.md`）
+
+每次 v0.7 dot release 必须全过。
+
+> **自动化优先**：本节大部分场景已被 `tests/e2e/` 真实 server E2E 套件覆盖
+> （7 脚本 71 断言）。发版前先跑 `bash tests/e2e/run_all.sh` 确认全绿，
+> 再人工验下面 UI 交互类条目（截图见 `docs/screenshots/v07-memory-moat/`）。
+
+### Phase A — 文档编辑嵌入功能完全有效
+
+- [ ] **编辑后立刻生效**：上传 docA（内容含 keyword "vintage"）→ 搜 vintage 返回 docA → PATCH /api/v1/items/{id} 改 content 把 vintage 改成 "modern" → 立刻搜 vintage 应返回 0 / 搜 modern 应返回 docA
+- [ ] **content_hash 短路省 embedding**：观察上一步响应 `content_changed: true, reindex.chunks_enqueued > 0` 字段；再次 PATCH 同 content → 响应 `content_changed: false`（hash 一致跳过 reindex）
+- [ ] **upload 重传 dedup**：上传完全相同 PDF 两次 → 第二次响应 `status: "duplicate", dedup_reason: "content_hash"`，item_id 与第一次相同
+- [ ] **删除清向量+FTS**：DELETE /api/v1/items/{id} → 搜该 doc keyword 返回 0；响应含 `purge.vectors_deleted > 0`
+- [ ] **scanner 文件变更 defer 清理**：bound_dir 里编辑某 .md 文件 → 等下次 scan → SELECT FROM reindex_queue 应有 action='purge' 行 → 3s 后 server 日志 `reindex_queue: purge done for item=...` → 该行从表中消失
+
+### Phase B — 自学习闭环 3 hook
+
+- [ ] **doc 生命周期信号**：执行上述 4 个 Phase A 用例后，`sqlite3 vault.sqlite "SELECT kind, COUNT(*) FROM skill_signals WHERE processed=0 GROUP BY kind"` 应至少包含 `doc_create`, `doc_update`, `doc_delete` 三 kind
+- [ ] **citation_hit 信号**：用 chat 问 "vintage" 相关问题（确保 docA 被引用）→ skill_signals 应新增 `kind='citation_hit'`, ref_id=docA.id 行
+- [ ] **annotation_marker 信号**：在 Reader 给 docA 加 ⭐ 重点 批注 → skill_signals 应新增 `kind='annotation_marker'`, ref_id=docA.id, query=label 行
+
+### 失败时
+
+- 查 server 日志 `tail -100 ~/.local/share/attune/logs/attune-server.YYYY-MM-DD | grep -E "reindex|skill_signal|content_hash"`
+- 验证 reindex_worker 在跑：`grep "Reindex worker started" 同上日志`
+- 若 vectors lock 长持有 → 后续 reindex 任务卡住（看 reindex_queue 行数累积）
+
+## Email IMAP 采集源（v0.7 新功能）
+
+Email IMAP 采集源的自动化测试（解析层 + mock fetcher）覆盖于
+`rust/crates/attune-core/tests/ingest_email_test.rs`。以下为需要真实 IMAP 账号的人工验收项。
+
+### 添加 IMAP 账号
+
+- [ ] **添加账号**：Settings → Sources → Add Email Account → 填入 IMAP host / port / username / password → 点 Connect → 状态变为 Connected（无报错）
+- [ ] **文件夹枚举**：Connect 后显示可选文件夹列表（至少含 INBOX）；选择要同步的文件夹后保存成功
+- [ ] **连接失败提示**：填入错误密码 → 点 Connect → 显示 "Authentication failed" 或类似错误提示，不崩溃
+
+### 手动同步与增量游标
+
+- [ ] **首次全量同步**：点 Sync → 进度指示器显示同步中 → 完成后 Items 列表出现邮件条目（至少 1 条）
+- [ ] **增量同步 UID 游标**：记录同步后 Items 总数 N → 收取一封新邮件后再点 Sync → Items 总数变为 N+1，旧邮件不重复导入
+- [ ] **重复同步幂等**：对同一邮箱再点 Sync → Items 总数不变（content_hash 去重生效）
+
+### 附件索引
+
+- [ ] **PDF 附件入库**：向该邮箱发送一封含 PDF 附件（＞ 1 页）的邮件 → Sync → Items 列表中出现该邮件正文条目和附件条目（两个独立 item）
+- [ ] **附件搜索**：在 Chat 或搜索框里查询 PDF 附件中的关键词 → 返回结果包含该附件来源的 item
+- [ ] **无附件邮件不额外创建 item**：发一封纯文本无附件邮件 → Sync → 只新增 1 个 item（邮件正文）
+
+## 两级侧边栏导航（v0.7 新功能）
+
+两级侧边栏无独立 UI 自动化测试层（E2E Playwright 层尚在规划 C.2 后）。以下为人工验收项。
+
+### 主级导航（Primary tier）
+
+- [ ] **条目常驻可见**：侧边栏展开状态下，Items / Projects / Knowledge 三个主级导航条目始终可见，不被"更多"折叠按钮遮盖
+- [ ] **折叠模式图标**：侧边栏折叠（窄栏）时，主级三个条目以图标形式显示，点击可正常切换视图
+- [ ] **激活指示**：点击某主级条目 → 该条目出现左侧蓝色竖线 active 指示器；其他条目无指示器
+
+### 次级导航（Secondary tier — "更多"折叠组）
+
+- [ ] **"更多"折叠/展开**：侧边栏展开时，Remote / Skills / Marketplace 默认在"更多"组内折叠；点击"更多"行 → 三个条目展开；再次点击 → 折叠
+- [ ] **展开状态激活指示**：展开"更多"后点击 Skills → Skills 条目出现 active 指示器；收起"更多"后 toggle 行本身显示 active 状态
+- [ ] **折叠模式展平**：侧边栏折叠（窄栏）时，次级条目不显示"更多"toggle，直接以图标方式与主级条目并列展示
+- [ ] **活跃视图自动展开**：当前视图属于次级组（如 Skills）时，刷新页面后"更多"组自动展开（不需要用户手动点开）
+
+### Settings 入口（Account 菜单）
+
+- [ ] **Settings 位置**：底部 Account 菜单（不是独立顶级导航条目）→ 点击头像/用户名 → 弹出含 Settings 的菜单
+- [ ] **Settings 模态打开**：点 Settings → 模态对话框打开，左侧 tab 栏可见（General / LLM / Sources 等）
+
 ## 注意事项
 
 - 任何一项失败 → 提 issue + 附 `attune --diag` 输出 + 本机 CPU/核数信息
 - "演示场景"是核心，必须每次发版前手动验
 - A1 的 LLM 速率限制依赖 H1 的 governor，验证 A1 前先确认 H1 已工作
+- Memory Moat v0.7 验收必须全过才能打 GA tag（per `docs/specs/memory-moat-v07.md` §7）

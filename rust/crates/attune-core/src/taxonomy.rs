@@ -87,15 +87,17 @@ impl ClassificationResult {
     }
 }
 
-impl Taxonomy {
-    pub fn default() -> Self {
+impl Default for Taxonomy {
+    fn default() -> Self {
         Self {
             core: Self::build_core_dimensions(),
             universal: Self::build_universal_dimensions(),
             plugins: vec![],
         }
     }
+}
 
+impl Taxonomy {
     /// v0.6 OSS 瘦身：返回空列表（行业 builtin 全部迁移到 attune-pro）。
     /// 保留 fn 签名兼容现有 attune-server::state.rs 调用。
     pub fn load_builtin_plugins() -> Result<Vec<Plugin>> {
@@ -220,7 +222,7 @@ impl Taxonomy {
                 return Err(VaultError::Classification(format!("missing universal dimension: {}", d.name)));
             }
             let value = &result.universal[&d.name];
-            self.check_value_type(&d.value_type, &d.suggested_values, &[value.clone()], &d.name)?;
+            self.check_value_type(&d.value_type, &d.suggested_values, std::slice::from_ref(value), &d.name)?;
         }
         Ok(())
     }

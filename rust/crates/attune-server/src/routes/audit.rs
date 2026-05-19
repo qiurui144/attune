@@ -91,3 +91,87 @@ pub async fn export_csv(
         .body(Body::from(buf))
         .map_err(|e| internal("build csv response", e))
 }
+
+// ---------------------------------------------------------------------------
+// v0.7: 简版 audit_log (route + CSV export) — F-17 PII redact 调用入口
+//
+// 路由（待 lib.rs 挂载）：
+//   GET /api/v1/audit/log?since=<unix>&limit=&offset=  → JSON {total, items}
+//   GET /api/v1/audit/log.csv?since=<unix>             → text/csv; charset=utf-8
+// ---------------------------------------------------------------------------
+
+use attune_core::store::audit::{self as audit_log};
+
+#[derive(Deserialize)]
+pub struct LogListQuery {
+    #[serde(default)]
+    pub since: Option<i64>,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+#[derive(Deserialize)]
+pub struct LogExportQuery {
+    #[serde(default)]
+    pub since: Option<i64>,
+}
+
+/// GET /api/v1/audit/log — 简版 audit_log 列表
+pub async fn list_log(
+    State(state): State<SharedState>,
+    Query(q): Query<LogListQuery>,
+) -> Result<Json<serde_json::Value>, RouteError> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = vault.dek_db().map_err(|_| vault_locked())?;
+
+    let store = vault.store();
+    let items = match q.since {
+        Some(s) => store.audit_log_list_since(s).map_err(|e| internal("audit log list_since", e))?,
+        None => store
+            .audit_log_list(q.limit.min(10_000), q.offset)
+            .map_err(|e| internal("audit log list", e))?,
+    };
+    let total = store.audit_log_count().map_err(|e| internal("audit log count", e))?;
+    Ok(Json(serde_json::json!({
+        "total": total,
+        "items": items,
+    })))
+}
+
+/// GET /api/v1/audit/log.csv — 简版 audit_log CSV 导出
+pub async fn export_log_csv(
+    State(state): State<SharedState>,
+    Query(q): Query<LogExportQuery>,
+) -> Result<Response, RouteError> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = vault.dek_db().map_err(|_| vault_locked())?;
+
+    let store = vault.store();
+    let items = match q.since {
+        Some(s) => store.audit_log_list_since(s).map_err(|e| internal("audit log list_since", e))?,
+        None => store
+            .audit_log_list(1_000_000, 0)
+            .map_err(|e| internal("audit log list", e))?,
+    };
+    let csv = audit_log::entries_to_csv(&items);
+    let row_count = items.len();
+
+    let ts_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let filename = format!("attune-audit-log-{ts_secs}.csv");
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .header("X-Audit-Row-Count", row_count.to_string())
+        .body(Body::from(csv))
+        .map_err(|e| internal("build csv response", e))
+}

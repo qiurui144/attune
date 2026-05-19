@@ -64,10 +64,6 @@ impl OllamaProvider {
         }
     }
 
-    pub fn default() -> Self {
-        Self::new("http://localhost:11434", "bge-m3", 1024)
-    }
-
     /// 检查 Ollama 是否可用
     pub fn check_health(&self) -> bool {
         let url = format!("{}/api/tags", self.base_url);
@@ -95,6 +91,12 @@ impl OllamaProvider {
                 rt.block_on(async { self.client.get(&url).send().await.is_ok() })
             }
         }
+    }
+}
+
+impl Default for OllamaProvider {
+    fn default() -> Self {
+        Self::new("http://localhost:11434", "bge-m3", 1024)
     }
 }
 
@@ -132,6 +134,76 @@ impl EmbeddingProvider for OllamaProvider {
 
     fn is_available(&self) -> bool {
         self.check_health()
+    }
+}
+
+/// 确定性 mock embedding provider — 仅供测试。
+///
+/// 把文本按 token（whitespace + 中文逐字）散列成固定维度向量：相同文本得相同向量，
+/// 共享 token 的文本向量靠近。无网络、无模型，CI 友好。
+#[cfg(any(test, feature = "test-utils"))]
+pub struct MockEmbeddingProvider {
+    dims: usize,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl MockEmbeddingProvider {
+    pub fn new(dims: usize) -> Self {
+        Self { dims }
+    }
+
+    fn embed_one(&self, text: &str) -> Vec<f32> {
+        let mut v = vec![0.0f32; self.dims];
+        // token 粒度：英文按空白切，CJK 逐字 — 让"共享词"的文本向量相近。
+        let mut tokens: Vec<String> = Vec::new();
+        for ws in text.to_lowercase().split_whitespace() {
+            let mut latin = String::new();
+            for ch in ws.chars() {
+                if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+                    if !latin.is_empty() {
+                        tokens.push(std::mem::take(&mut latin));
+                    }
+                    tokens.push(ch.to_string());
+                } else {
+                    latin.push(ch);
+                }
+            }
+            if !latin.is_empty() {
+                tokens.push(latin);
+            }
+        }
+        for tok in tokens {
+            let mut h: u64 = 1469598103934665603;
+            for b in tok.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(1099511628211);
+            }
+            let idx = (h % self.dims as u64) as usize;
+            v[idx] += 1.0;
+        }
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in &mut v {
+                *x /= norm;
+            }
+        } else {
+            // 空文本 → 任意非零单位向量，避免 usearch cos 距离 NaN。
+            v[0] = 1.0;
+        }
+        v
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl EmbeddingProvider for MockEmbeddingProvider {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|t| self.embed_one(t)).collect())
+    }
+    fn dimensions(&self) -> usize {
+        self.dims
+    }
+    fn is_available(&self) -> bool {
+        true
     }
 }
 

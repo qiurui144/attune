@@ -32,3 +32,15 @@ export { Reader } from './Reader';
 export type { ReaderProps } from './Reader';
 
 export { RecommendationOverlay } from './RecommendationOverlay';
+
+export { AgentResultPanel } from './AgentResultPanel';
+export type {
+  AgentResultPanelProps,
+  AgentResult,
+  AgentFact,
+  AgentCitation,
+  AgentFactSource,
+} from './AgentResultPanel';
+
+export { PluginForm } from './PluginForm';
+export type { PluginFormProps } from './PluginForm';

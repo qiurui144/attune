@@ -69,7 +69,7 @@ config.local.yaml
 .env
 .env.local
 .worktrees/
-.playwright-mcp/
+# .playwright-mcp/ 已在 line 35 声明, 此处去重
 
 # Tauri signing keys（私钥永不入 git；公钥已嵌进 tauri.conf.json）
 apps/attune-desktop/keys/dev_signing.key

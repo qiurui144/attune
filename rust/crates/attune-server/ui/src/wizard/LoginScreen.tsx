@@ -29,7 +29,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
         RETRY_POLICIES.destructive,
       );
       if (res.token) setToken(res.token);
-      toast('success', '已解锁');
+      toast('success', t('lock.toast.unlocked'));
       onUnlock();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -38,14 +38,12 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
   }
 
   async function handleForgotPasswordReset() {
-    const first = window.confirm(
-      '忘记密码后无法恢复原数据。是否清空本地知识库并重置？',
-    );
+    const first = window.confirm(t('lock.confirm.wipe'));
     if (!first) return;
 
-    const typed = window.prompt('请输入 RESET 确认重置：');
+    const typed = window.prompt(t('lock.prompt.reset_confirm'));
     if (typed !== 'RESET') {
-      toast('error', '未输入 RESET，已取消重置');
+      toast('error', t('lock.toast.reset_cancelled'));
       return;
     }
 
@@ -58,7 +56,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
         RETRY_POLICIES.destructive,
       );
       clearToken();
-      toast('success', '本地 Vault 已重置，请重新设置密码');
+      toast('success', t('lock.toast.vault_reset'));
       window.location.reload();
     } catch (e) {
       setSubmitting(false);
@@ -67,9 +65,9 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
   }
 
   async function handleResetWithRecoveryKey() {
-    const recoveryKey = window.prompt('请输入恢复密钥（形如 ATN-...）：');
+    const recoveryKey = window.prompt(t('lock.prompt.recovery_key'));
     if (!recoveryKey) return;
-    const newPassword = window.prompt('请输入新的主密码（至少 12 位，含字母和数字）：');
+    const newPassword = window.prompt(t('lock.prompt.new_password'));
     if (!newPassword) return;
 
     setSubmitting(true);
@@ -81,7 +79,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
         RETRY_POLICIES.destructive,
       );
       if (res.token) setToken(res.token);
-      toast('success', '密码已重置并自动解锁');
+      toast('success', t('lock.toast.password_reset'));
       onUnlock();
     } catch (e) {
       setSubmitting(false);
@@ -138,7 +136,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
               margin: 0,
             }}
           >
-            数据库已锁定 · 请输入主密码
+            {t('lock.subtitle')}
           </p>
         </div>
 
@@ -150,7 +148,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
             error={error ?? undefined}
             autoFocus
             required
-            aria-label="主密码"
+            aria-label={t('lock.password_label')}
             placeholder="••••••••••••"
           />
         </div>
@@ -164,7 +162,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
           disabled={!pwd}
           onClick={() => handleUnlock()}
         >
-          解锁
+          {t('lock.unlock')}
         </Button>
 
         <p
@@ -175,7 +173,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
             margin: 0,
           }}
         >
-          忘记密码可先用恢复密钥重置并保留数据；仅在无恢复密钥时再清空重置。
+          {t('lock.recovery_hint')}
         </p>
 
         <Button
@@ -184,7 +182,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
           disabled={submitting}
           onClick={() => handleResetWithRecoveryKey()}
         >
-          使用恢复密钥重置密码
+          {t('lock.reset_with_recovery')}
         </Button>
 
         <Button
@@ -193,7 +191,7 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
           disabled={submitting}
           onClick={() => handleForgotPasswordReset()}
         >
-          无恢复密钥？清空并重置本地知识库
+          {t('lock.reset_wipe')}
         </Button>
       </form>
     </div>

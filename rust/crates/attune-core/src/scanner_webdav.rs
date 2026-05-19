@@ -1,328 +1,240 @@
-use crate::chunker;
-use crate::crypto::Key32;
-use crate::error::{Result, VaultError};
-use crate::parser;
-use crate::store::Store;
+//! WebDAV 采集源。
+//!
+//! 用 reqwest_dav 列目录 + 下载，包成 WebDavConnector: SourceConnector。
+//! 旧实现漏抄的 Level-2 embedding 与 enqueue_classify 缺陷，一旦走统一
+//! ingest_document pipeline 就自动消失。
+//! 增量去重用 ETag（不用 last_modified 字符串 —— 不同 server 时区/格式不一致）。
+
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Result, VaultError};
+use crate::ingest::{DocumentSink, RawDocument, SourceConnector, SourceKind};
+
+
+/// WebDAV 采集目录配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebDavConfig {
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
-    pub depth: u32, // PROPFIND depth: 0=only this resource, 1=children, infinity
+    /// PROPFIND depth：0=仅此资源，1=直接子项，2=两层（server 禁止 >2）。
+    pub depth: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteFile {
-    pub href: String,
-    pub size: u64,
-    pub content_type: String,
-    pub last_modified: String,
+/// WebDAV 单文件下载大小上限（与本地 upload 一致）。
+const MAX_REMOTE_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// 远端受支持的扩展名（与 parser 支持集对齐的子集 — 二进制媒体不远程拉取）。
+const SUPPORTED_REMOTE_EXTS: &[&str] = &[
+    "md", "txt", "py", "js", "ts", "rs", "go", "java", "pdf", "docx", "html", "htm", "csv",
+    "rtf", "pptx", "xlsx",
+];
+
+/// 判断文件名扩展名是否属于受支持的远端采集类型。
+pub fn is_supported_remote_ext(filename: &str) -> bool {
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    SUPPORTED_REMOTE_EXTS.contains(&ext.as_str())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteScanResult {
-    pub total_files: usize,
-    pub new_files: usize,
-    pub updated_files: usize,
-    pub skipped_files: usize,
-    pub errors: Vec<String>,
-}
-
-/// List files from WebDAV server via PROPFIND
-pub fn list_remote(config: &WebDavConfig) -> Result<Vec<RemoteFile>> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| VaultError::LlmUnavailable(format!("client build: {e}")))?;
-
-    let propfind_body = r#"<?xml version="1.0" encoding="utf-8"?>
-<D:propfind xmlns:D="DAV:">
-  <D:prop>
-    <D:resourcetype/>
-    <D:getcontentlength/>
-    <D:getcontenttype/>
-    <D:getlastmodified/>
-    <D:displayname/>
-  </D:prop>
-</D:propfind>"#;
-
-    let method = reqwest::Method::from_bytes(b"PROPFIND")
-        .map_err(|e| VaultError::LlmUnavailable(format!("method: {e}")))?;
-
-    let mut req = client
-        .request(method, &config.url)
-        .header("Depth", config.depth.to_string())
-        .header("Content-Type", "application/xml")
-        .body(propfind_body);
-
-    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
-        req = req.basic_auth(user, Some(pass));
+/// 把 PROPFIND 返回的 href（可能是相对路径）解析成绝对 URL。
+/// 已是绝对 URL 则原样返回；否则取 config.url 的 scheme://host 拼接。
+pub fn resolve_href(config: &WebDavConfig, href: &str) -> String {
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return href.to_string();
     }
-
-    let resp = req
-        .send()
-        .map_err(|e| VaultError::LlmUnavailable(format!("webdav request: {e}")))?;
-
-    if !resp.status().is_success() && resp.status().as_u16() != 207 {
-        return Err(VaultError::LlmUnavailable(format!(
-            "webdav status: {}",
-            resp.status()
-        )));
-    }
-
-    let body = resp
-        .text()
-        .map_err(|e| VaultError::LlmUnavailable(format!("webdav body: {e}")))?;
-
-    parse_propfind_response(&body)
+    let mut parts = config.url.splitn(2, "://");
+    let scheme = parts.next().unwrap_or("https");
+    let rest = parts.next().unwrap_or_default();
+    let host = rest.split('/').next().unwrap_or("");
+    format!("{scheme}://{host}{href}")
 }
 
-/// Parse multistatus XML (simplified — handles basic Apache/Nginx/Nextcloud output)
-fn parse_propfind_response(xml: &str) -> Result<Vec<RemoteFile>> {
-    let mut files = Vec::new();
-    let mut current_href: Option<String> = None;
-    let mut current_size: u64 = 0;
-    let mut current_type: String = String::new();
-    let mut current_modified: String = String::new();
-    let mut is_collection = false;
-    let mut in_response = false;
-
-    // Extremely basic XML parsing — sufficient for well-formed WebDAV responses
-    let lines: Vec<&str> = xml.split(['<', '>']).collect();
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i].trim();
-        if line == "d:response" || line == "D:response" || line == "response" {
-            in_response = true;
-            current_href = None;
-            current_size = 0;
-            current_type = String::new();
-            current_modified = String::new();
-            is_collection = false;
-        } else if (line == "/d:response" || line == "/D:response" || line == "/response")
-            && in_response
-        {
-            if let Some(href) = current_href.take() {
-                if !is_collection {
-                    files.push(RemoteFile {
-                        href,
-                        size: current_size,
-                        content_type: current_type.clone(),
-                        last_modified: current_modified.clone(),
-                    });
-                }
-            }
-            in_response = false;
-        } else if in_response && (line == "d:href" || line == "D:href" || line == "href") {
-            if i + 1 < lines.len() {
-                current_href = Some(lines[i + 1].trim().to_string());
-            }
-        } else if in_response
-            && (line == "d:getcontentlength"
-                || line == "D:getcontentlength"
-                || line == "getcontentlength")
-        {
-            if i + 1 < lines.len() {
-                current_size = lines[i + 1].trim().parse().unwrap_or(0);
-            }
-        } else if in_response
-            && (line == "d:getcontenttype"
-                || line == "D:getcontenttype"
-                || line == "getcontenttype")
-        {
-            if i + 1 < lines.len() {
-                current_type = lines[i + 1].trim().to_string();
-            }
-        } else if in_response
-            && (line == "d:getlastmodified"
-                || line == "D:getlastmodified"
-                || line == "getlastmodified")
-        {
-            if i + 1 < lines.len() {
-                current_modified = lines[i + 1].trim().to_string();
-            }
-        } else if in_response {
-            // Handle self-closing collection markers like `<D:collection/>` which split
-            // into `D:collection/` with a trailing slash, as well as plain open tags.
-            let stripped = line.trim_end_matches('/').trim();
-            if stripped == "d:collection"
-                || stripped == "D:collection"
-                || stripped == "collection"
-            {
-                is_collection = true;
-            }
-        }
-        i += 1;
-    }
-
-    Ok(files)
-}
-
-/// WebDAV 单文件下载大小上限（与本地 upload 一致）
-const MAX_REMOTE_FILE_BYTES: u64 = 20 * 1024 * 1024; // 20 MB
-
-/// Download a remote file (GET)
-pub fn fetch_file(config: &WebDavConfig, href: &str) -> Result<Vec<u8>> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| VaultError::LlmUnavailable(format!("client build: {e}")))?;
-
-    // Compose URL: if href is absolute use it, else join with base
-    let url = if href.starts_with("http://") || href.starts_with("https://") {
-        href.to_string()
-    } else {
-        // Extract origin from config.url
-        let base = config.url.split("://").collect::<Vec<_>>();
-        if base.len() < 2 {
-            return Err(VaultError::LlmUnavailable(format!(
-                "invalid base url: {}",
-                config.url
-            )));
-        }
-        let scheme = base[0];
-        let rest = base[1];
-        let host = rest.split('/').next().unwrap_or("");
-        format!("{scheme}://{host}{href}")
-    };
-
-    // SSRF 防护：校验最终请求 URL 的 host 与用户配置的 base URL 一致
-    let config_host = config.url.split("://")
-        .nth(1)
-        .and_then(|s| s.split('/').next())
+/// 防御性 host 一致性校验：拒绝 server 返回的跨域 href（异常服务器可能在 PROPFIND
+/// 响应里植入外部 host）。注意：实际下载走 reqwest_dav::Client::get(href)，
+/// 它内部永远把 href 拼到 config.url 的 host 上，不受 abs 的 host 影响，
+/// 所以本函数不是 SSRF 防护 —— 只是对 RawDocument.uri 写入值做一致性过滤。
+fn validate_same_host(config: &WebDavConfig, abs_url: &str) -> Result<()> {
+    let config_host = config
+        .url
+        .split_once("://")
+        .map(|(_, rest)| rest.split('/').next().unwrap_or(""))
         .unwrap_or("");
-    let fetch_host = url.split("://")
-        .nth(1)
-        .and_then(|s| s.split('/').next())
+    let fetch_host = abs_url
+        .split_once("://")
+        .map(|(_, rest)| rest.split('/').next().unwrap_or(""))
         .unwrap_or("");
     if fetch_host != config_host {
         return Err(VaultError::LlmUnavailable(format!(
             "href host '{fetch_host}' does not match config host '{config_host}'"
         )));
     }
-
-    let mut req = client.get(&url);
-    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
-        req = req.basic_auth(user, Some(pass));
-    }
-
-    let resp = req
-        .send()
-        .map_err(|e| VaultError::LlmUnavailable(format!("fetch: {e}")))?;
-
-    if !resp.status().is_success() {
-        return Err(VaultError::LlmUnavailable(format!(
-            "fetch status: {}",
-            resp.status()
-        )));
-    }
-
-    let bytes = resp.bytes()
-        .map_err(|e| VaultError::LlmUnavailable(format!("fetch body: {e}")))?;
-    if bytes.len() as u64 > MAX_REMOTE_FILE_BYTES {
-        return Err(VaultError::LlmUnavailable(format!(
-            "remote file too large: {} bytes (max {MAX_REMOTE_FILE_BYTES})",
-            bytes.len()
-        )));
-    }
-    Ok(bytes.to_vec())
+    Ok(())
 }
 
-/// Scan remote WebDAV directory: list + download supported files + ingest
-pub fn scan_remote(
-    config: &WebDavConfig,
-    store: &Store,
-    dek: &Key32,
-    dir_id: &str,
-) -> Result<RemoteScanResult> {
-    let files = list_remote(config)?;
+/// list 结果中的一项受支持远端文件（目录和不支持扩展名已过滤）。
+#[derive(Debug, Clone)]
+pub struct RemoteEntry {
+    /// 服务器返回的 href（PROPFIND 原始值，可能是相对路径）。
+    pub href: String,
+    /// ETag 或 last_modified rfc3339 作为增量标记。
+    pub etag: String,
+    pub size: u64,
+}
 
-    let mut result = RemoteScanResult {
-        total_files: files.len(),
-        new_files: 0,
-        updated_files: 0,
-        skipped_files: 0,
-        errors: vec![],
-    };
+/// WebDAV 采集源。
+pub struct WebDavConnector {
+    config: WebDavConfig,
+}
 
-    let supported_exts = [
-        "md", "txt", "py", "js", "ts", "rs", "go", "java", "pdf", "docx",
-    ];
-
-    for file in files {
-        let filename = file
-            .href
-            .rsplit('/')
-            .next()
-            .unwrap_or(&file.href)
-            .to_string();
-        let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
-        if !supported_exts.contains(&ext.as_str()) {
-            result.skipped_files += 1;
-            continue;
-        }
-
-        // size == 0 means server didn't report size; allow through (fetch will enforce limit)
-        if file.size > MAX_REMOTE_FILE_BYTES {
-            result.skipped_files += 1;
-            result.errors.push(format!("{filename}: file too large ({} bytes)", file.size));
-            continue;
-        }
-
-        // Dedup by href (treat as unique path)
-        if let Ok(Some(existing)) = store.get_indexed_file(&file.href) {
-            if existing.file_hash == file.last_modified {
-                result.skipped_files += 1;
-                continue;
-            }
-        }
-
-        match fetch_file(config, &file.href) {
-            Ok(bytes) => match parser::parse_bytes(&bytes, &filename) {
-                Ok((title, content)) if !content.trim().is_empty() => {
-                    match store.insert_item(dek, &title, &content, Some(&file.href), "file", None, None) {
-                        Ok(item_id) => {
-                            // F2 (W3 batch A, per reviewer I4)：WebDAV 路径接入
-                            if let Err(e) = store.upsert_chunk_breadcrumbs_from_content(dek, &item_id, &content) {
-                                log::warn!("F2 upsert_chunk_breadcrumbs failed (webdav) for {item_id}: {e}");
-                            }
-                            // Enqueue embedding
-                            let sections = chunker::extract_sections(&content);
-                            let mut chunk_counter = 0;
-                            for (section_idx, section_text) in &sections {
-                                if !section_text.trim().is_empty() {
-                                    let _ = store.enqueue_embedding(
-                                        &item_id,
-                                        chunk_counter,
-                                        section_text,
-                                        1,
-                                        1,
-                                        *section_idx,
-                                    );
-                                    chunk_counter += 1;
-                                }
-                            }
-                            let _ = store.upsert_indexed_file(
-                                dir_id,
-                                &file.href,
-                                &file.last_modified,
-                                &item_id,
-                            );
-                            result.new_files += 1;
-                        }
-                        Err(e) => result.errors.push(format!("{filename}: {e}")),
-                    }
-                }
-                Ok(_) => result.skipped_files += 1,
-                Err(e) => result.errors.push(format!("{filename}: parse {e}")),
-            },
-            Err(e) => result.errors.push(format!("{filename}: fetch {e}")),
-        }
+impl WebDavConnector {
+    pub fn new(config: WebDavConfig) -> Self {
+        Self { config }
     }
 
-    Ok(result)
+    /// 构造带鉴权的 reqwest_dav 客户端。
+    fn build_client(&self) -> Result<reqwest_dav::Client> {
+        let mut builder =
+            reqwest_dav::ClientBuilder::new().set_host(self.config.url.clone());
+        if let (Some(user), Some(pass)) = (&self.config.username, &self.config.password) {
+            builder =
+                builder.set_auth(reqwest_dav::Auth::Basic(user.clone(), pass.clone()));
+        }
+        builder
+            .build()
+            .map_err(|e| VaultError::LlmUnavailable(format!("webdav client build: {e}")))
+    }
+
+    /// 异步列出远端目录，过滤出受支持文件。
+    pub async fn list(&self) -> Result<Vec<RemoteEntry>> {
+        let client = self.build_client()?;
+        let depth = match self.config.depth {
+            0 => reqwest_dav::Depth::Number(0),
+            1 => reqwest_dav::Depth::Number(1),
+            _ => reqwest_dav::Depth::Infinity,
+        };
+        let listed = client
+            .list("", depth)
+            .await
+            .map_err(|e| VaultError::LlmUnavailable(format!("webdav list: {e}")))?;
+
+        let mut out = Vec::new();
+        for entry in listed {
+            if let reqwest_dav::list_cmd::ListEntity::File(f) = entry {
+                let href = f.href.clone();
+                let filename = href.rsplit('/').next().unwrap_or(&href);
+                if !is_supported_remote_ext(filename) {
+                    continue;
+                }
+                if f.content_length as u64 > MAX_REMOTE_FILE_BYTES {
+                    log::warn!(
+                        "webdav: skip oversized {filename} ({} bytes)",
+                        f.content_length
+                    );
+                    continue;
+                }
+                // ETag 缺失时退回 last_modified rfc3339（仍优于无标记）。
+                // 即便 fallback 值误判"已变"触发重入库，ingest_document 内部的
+                // content_hash 短路会将结果判为 Duplicate，不会重复写入。
+                let etag = f
+                    .tag
+                    .clone()
+                    .unwrap_or_else(|| f.last_modified.to_rfc3339());
+                out.push(RemoteEntry {
+                    href,
+                    etag,
+                    size: f.content_length as u64,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// 异步下载单个文件字节，path 为 href（相对路径，reqwest_dav 内部拼 host）。
+    pub async fn fetch(&self, href: &str) -> Result<Vec<u8>> {
+        let client = self.build_client()?;
+        // reqwest_dav::Client::get() 带鉴权，path 相对于 host。
+        let resp = client
+            .get(href)
+            .await
+            .map_err(|e| VaultError::LlmUnavailable(format!("webdav get {href}: {e}")))?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| VaultError::LlmUnavailable(format!("webdav body {href}: {e}")))?;
+        // content_length 可能缺失（reqwest_dav 对缺失值返回 0 通过 list() 过滤）
+        // 或被服务器谎报，下载后二次校验防止任意大文件整体读入内存。
+        if bytes.len() as u64 > MAX_REMOTE_FILE_BYTES {
+            return Err(VaultError::LlmUnavailable(format!(
+                "webdav file too large: {} bytes (max {MAX_REMOTE_FILE_BYTES})",
+                bytes.len()
+            )));
+        }
+        Ok(bytes.to_vec())
+    }
+
+    /// 同步驱动 list + fetch，逐个把结果交给 sink。
+    ///
+    /// `SourceConnector::fetch_documents` 是同步契约 —— 这里用单线程 tokio
+    /// runtime 桥接内部 async I/O；调用方（route / scheduler）在
+    /// `spawn_blocking` 里调本方法，不阻塞外层 async runtime。
+    fn drive_blocking(&self, sink: &mut DocumentSink<'_>) -> Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| VaultError::LlmUnavailable(format!("webdav runtime: {e}")))?;
+        runtime.block_on(async {
+            let entries = self.list().await?;
+            for entry in entries {
+                let abs = resolve_href(&self.config, &entry.href);
+                let filename = abs.rsplit('/').next().unwrap_or(&abs).to_string();
+                // 过滤跨域 href（防御 server 返回异常 PROPFIND 数据）。
+                if let Err(e) = validate_same_host(&self.config, &abs) {
+                    log::warn!("webdav: skip {filename} — SSRF check failed: {e}");
+                    continue;
+                }
+                match self.fetch(&entry.href).await {
+                    Ok(bytes) => {
+                        let mut metadata = HashMap::new();
+                        metadata.insert("etag".into(), entry.etag.clone());
+                        sink(RawDocument {
+                            uri: abs.clone(),
+                            title: String::new(),
+                            content: bytes,
+                            mime_hint: None,
+                            source_kind: SourceKind::WebDav,
+                            // source_ref 用 href（不含 origin）—— 同一 server 内稳定唯一键。
+                            source_ref: entry.href.clone(),
+                            // ETag 作 modified_marker，驱动增量去重。
+                            modified_marker: Some(entry.etag),
+                            // WebDAV 源无来源域 / 用户标签；corpus_domain 由 route 层
+                            // 从 webdav_remotes 表读出后回填（见 Task 10 / Task 11）。
+                            domain: None,
+                            tags: None,
+                            corpus_domain: None,
+                            metadata,
+                        });
+                    }
+                    Err(e) => {
+                        // 单文件下载失败不致命：记日志、继续下一个。
+                        log::warn!("webdav: fetch {filename} failed: {e}");
+                    }
+                }
+            }
+            Ok::<(), VaultError>(())
+        })
+    }
+}
+
+impl SourceConnector for WebDavConnector {
+    fn source_kind(&self) -> SourceKind {
+        SourceKind::WebDav
+    }
+
+    fn fetch_documents(&self, sink: &mut DocumentSink<'_>) -> Result<()> {
+        self.drive_blocking(sink)
+    }
 }
 
 #[cfg(test)]
@@ -330,59 +242,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_empty_propfind() {
-        let result = parse_propfind_response("").unwrap();
-        assert!(result.is_empty());
+    fn resolve_href_absolute_passthrough() {
+        let cfg = WebDavConfig {
+            url: "https://dav.example.com/remote.php/dav/files/u/".into(),
+            username: None,
+            password: None,
+            depth: 1,
+        };
+        let abs = "https://dav.example.com/remote.php/dav/files/u/notes.md";
+        assert_eq!(resolve_href(&cfg, abs), abs);
     }
 
     #[test]
-    fn parse_propfind_response_basic() {
-        let xml = r#"<?xml version="1.0"?>
-<D:multistatus xmlns:D="DAV:">
-  <D:response>
-    <D:href>/webdav/file1.md</D:href>
-    <D:propstat>
-      <D:prop>
-        <D:getcontentlength>1234</D:getcontentlength>
-        <D:getcontenttype>text/markdown</D:getcontenttype>
-        <D:getlastmodified>Mon, 01 Jan 2024 00:00:00 GMT</D:getlastmodified>
-        <D:resourcetype/>
-      </D:prop>
-    </D:propstat>
-  </D:response>
-</D:multistatus>"#;
-
-        let files = parse_propfind_response(xml).unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].href, "/webdav/file1.md");
-        assert_eq!(files[0].size, 1234);
+    fn resolve_href_relative_joins_origin() {
+        let cfg = WebDavConfig {
+            url: "https://dav.example.com/remote.php/dav/files/u/".into(),
+            username: None,
+            password: None,
+            depth: 1,
+        };
+        assert_eq!(
+            resolve_href(&cfg, "/remote.php/dav/files/u/notes.md"),
+            "https://dav.example.com/remote.php/dav/files/u/notes.md"
+        );
     }
 
     #[test]
-    fn parse_propfind_skips_collections() {
-        let xml = r#"<?xml version="1.0"?>
-<D:multistatus xmlns:D="DAV:">
-  <D:response>
-    <D:href>/webdav/</D:href>
-    <D:propstat>
-      <D:prop>
-        <D:resourcetype><D:collection/></D:resourcetype>
-      </D:prop>
-    </D:propstat>
-  </D:response>
-  <D:response>
-    <D:href>/webdav/file.txt</D:href>
-    <D:propstat>
-      <D:prop>
-        <D:getcontentlength>100</D:getcontentlength>
-        <D:resourcetype/>
-      </D:prop>
-    </D:propstat>
-  </D:response>
-</D:multistatus>"#;
-
-        let files = parse_propfind_response(xml).unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].href, "/webdav/file.txt");
+    fn supported_ext_filters_binaries() {
+        assert!(is_supported_remote_ext("notes.md"));
+        assert!(is_supported_remote_ext("report.pdf"));
+        assert!(!is_supported_remote_ext("movie.mp4"));
+        assert!(!is_supported_remote_ext("archive.zip"));
     }
 }

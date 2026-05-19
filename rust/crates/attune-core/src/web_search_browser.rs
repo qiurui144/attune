@@ -82,12 +82,7 @@ pub enum BrowserResolution {
 
 /// 可测试版本：注入 `exists` 判断函数
 fn detect_with<F: Fn(&Path) -> bool>(exists: F) -> Option<PathBuf> {
-    for path in candidate_paths() {
-        if exists(&path) {
-            return Some(path);
-        }
-    }
-    None
+    candidate_paths().into_iter().find(|path| exists(path))
 }
 
 fn candidate_paths() -> Vec<PathBuf> {
@@ -253,7 +248,7 @@ impl WebSearchProvider for BrowserSearchProvider {
         let url = self.engine.build_url(query);
         log::info!("web search: GET {}", url);
         let html = self.fetch_html(&url)?;
-        let results = self.engine.parse(&html, limit.min(10).max(1));
+        let results = self.engine.parse(&html, limit.clamp(1, 10));
         log::info!("web search: parsed {} results from {}", results.len(), self.engine.name());
         Ok(results)
     }

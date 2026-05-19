@@ -2,8 +2,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use crate::state::SharedState;
-
-const SETTINGS_KEY: &str = "app_settings";
+use attune_core::llm_settings::SETTINGS_META_KEY as SETTINGS_KEY;
 
 pub async fn get_settings(
     State(state): State<SharedState>,
@@ -302,7 +301,12 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
         "search": {
             "default_top_k": 10,
             "vector_weight": 0.6,
-            "fulltext_weight": 0.4
+            "fulltext_weight": 0.4,
+            // 检索 query 改写：LLM 把口语化 query 转为关键词序列，提升 RAG hit rate。
+            // 默认关闭——需要 LLM 配置且用户明确开启；LLM 不可用时自动跳过，不报错。
+            "query_rewrite": {
+                "enabled": false
+            }
         }
     })
 }

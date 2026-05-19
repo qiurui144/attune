@@ -1,5 +1,6 @@
-/** Attune Sidebar · 左栏 5 区 · 可折叠
- * 见 spec §4 "Sidebar（左栏 · 5 区）"
+/** Attune Sidebar · 两层导航 · 可折叠
+ * 主层（固定可见）: items / projects / knowledge
+ * 更多层（可折叠）: remote / skills / marketplace
  */
 
 import type { JSX } from 'preact';
@@ -8,6 +9,7 @@ import { useSignal } from '@preact/signals';
 import {
   currentView,
   sidebarCollapsed,
+  sidebarMoreExpanded,
   connectionState,
   chatSessions,
   activeSessionId,
@@ -279,17 +281,70 @@ function SessionItem({ session: s }: { session: { id: string; title: string } })
 
 // ── ④ 次级导航 ──────────────────────────────────────────────
 type NavItem = { view: View; icon: string; labelKey: string };
-const NAV_ITEMS: NavItem[] = [
+
+// Primary tier — always visible
+const PRIMARY_NAV: NavItem[] = [
   { view: 'items', icon: '📄', labelKey: 'sidebar.nav.items' },
-  { view: 'projects', icon: '🗂', labelKey: 'sidebar.nav.projects' },  // Pinyin-Latin term
-  { view: 'remote', icon: '🔗', labelKey: 'sidebar.nav.remote' },
+  { view: 'projects', icon: '🗂', labelKey: 'sidebar.nav.projects' },
   { view: 'knowledge', icon: '📊', labelKey: 'sidebar.nav.knowledge' },
-  { view: 'skills', icon: '🧠', labelKey: 'sidebar.nav.skills' },
-  { view: 'marketplace', icon: '🏪', labelKey: 'sidebar.nav.marketplace' },
-  { view: 'settings', icon: '⚙', labelKey: 'sidebar.nav.settings' },
 ];
 
+// Secondary tier — inside collapsible "更多" group
+const MORE_NAV: NavItem[] = [
+  { view: 'remote', icon: '🔗', labelKey: 'sidebar.nav.remote' },
+  { view: 'skills', icon: '🧠', labelKey: 'sidebar.nav.skills' },
+  { view: 'marketplace', icon: '🏪', labelKey: 'sidebar.nav.marketplace' },
+];
+
+const MORE_VIEWS = new Set<View>(MORE_NAV.map((i) => i.view));
+
+function NavButton({ item, collapsed }: { item: NavItem; collapsed: boolean }): JSX.Element {
+  const active = currentView.value === item.view;
+  return (
+    <button
+      type="button"
+      onClick={() => (currentView.value = item.view)}
+      aria-current={active ? 'page' : undefined}
+      aria-label={t(item.labelKey)}
+      className="interactive"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--space-3)',
+        padding: collapsed
+          ? 'var(--space-2) 0'
+          : 'var(--space-2) var(--space-4)',
+        background: active ? 'var(--color-surface-hover)' : 'transparent',
+        border: 'none',
+        borderLeftWidth: 2,
+        borderLeftStyle: 'solid',
+        borderLeftColor: active ? 'var(--color-accent)' : 'transparent',
+        color: active ? 'var(--color-text)' : 'var(--color-text-secondary)',
+        fontSize: 'var(--text-sm)',
+        cursor: 'pointer',
+        textAlign: 'left',
+        justifyContent: collapsed ? 'center' : 'flex-start',
+        width: '100%',
+      }}
+    >
+      <span aria-hidden="true" style={{ fontSize: 'var(--text-base)' }}>
+        {item.icon}
+      </span>
+      {!collapsed && <span>{t(item.labelKey)}</span>}
+    </button>
+  );
+}
+
 function SecondaryNav({ collapsed }: { collapsed: boolean }): JSX.Element {
+  const activeInMore = MORE_VIEWS.has(currentView.value);
+  // Auto-expand when active view moves into the "更多" group; signal writes are idempotent
+  useEffect(() => {
+    if (activeInMore) sidebarMoreExpanded.value = true;
+  }, [activeInMore]);
+  const moreExpanded = sidebarMoreExpanded.value;
+  // Show active treatment on the toggle row when its group is collapsed but contains the active view
+  const toggleActive = activeInMore && !moreExpanded;
+
   return (
     <nav
       aria-label="Features"
@@ -301,45 +356,56 @@ function SecondaryNav({ collapsed }: { collapsed: boolean }): JSX.Element {
         gap: 2,
       }}
     >
-      {NAV_ITEMS.map((item) => {
-        const active = currentView.value === item.view;
-        return (
+      {/* Primary items — always visible */}
+      {PRIMARY_NAV.map((item) => (
+        <NavButton key={item.view} item={item} collapsed={collapsed} />
+      ))}
+
+      {/* "更多" group — in collapsed (icon) mode show all MORE items flat, no toggle */}
+      {collapsed ? (
+        MORE_NAV.map((item) => (
+          <NavButton key={item.view} item={item} collapsed={collapsed} />
+        ))
+      ) : (
+        <>
+          {/* Toggle row */}
           <button
-            key={item.view}
             type="button"
-            onClick={() => (currentView.value = item.view)}
-            aria-current={active ? 'page' : undefined}
-            aria-label={t(item.labelKey)}
+            aria-expanded={moreExpanded}
+            aria-current={toggleActive ? 'page' : undefined}
+            aria-label={moreExpanded ? t('sidebar.nav.more.collapse_aria') : t('sidebar.nav.more.aria')}
+            onClick={() => (sidebarMoreExpanded.value = !moreExpanded)}
             className="interactive"
             style={{
               display: 'flex',
               alignItems: 'center',
               gap: 'var(--space-3)',
-              padding: collapsed
-                ? 'var(--space-2) 0'
-                : 'var(--space-2) var(--space-4)',
-              background: active ? 'var(--color-surface-hover)' : 'transparent',
-              borderLeft: active
-                ? '2px solid var(--color-accent)'
-                : '2px solid transparent',
+              padding: 'var(--space-2) var(--space-4)',
+              background: toggleActive ? 'var(--color-surface-hover)' : 'transparent',
               border: 'none',
               borderLeftWidth: 2,
               borderLeftStyle: 'solid',
-              borderLeftColor: active ? 'var(--color-accent)' : 'transparent',
-              color: active ? 'var(--color-text)' : 'var(--color-text-secondary)',
+              borderLeftColor: toggleActive ? 'var(--color-accent)' : 'transparent',
+              color: toggleActive ? 'var(--color-text)' : 'var(--color-text-secondary)',
               fontSize: 'var(--text-sm)',
               cursor: 'pointer',
               textAlign: 'left',
-              justifyContent: collapsed ? 'center' : 'flex-start',
+              width: '100%',
             }}
           >
-            <span aria-hidden="true" style={{ fontSize: 'var(--text-base)' }}>
-              {item.icon}
+            <span aria-hidden="true" style={{ fontSize: 'var(--text-xs)', lineHeight: 1 }}>
+              {moreExpanded ? '▾' : '▸'}
             </span>
-            {!collapsed && <span>{t(item.labelKey)}</span>}
+            <span style={{ flex: 1 }}>{t('sidebar.nav.more')}</span>
           </button>
-        );
-      })}
+
+          {/* Collapsible items */}
+          {moreExpanded &&
+            MORE_NAV.map((item) => (
+              <NavButton key={item.view} item={item} collapsed={false} />
+            ))}
+        </>
+      )}
     </nav>
   );
 }
@@ -369,7 +435,7 @@ function StatusBar({ collapsed }: { collapsed: boolean }): JSX.Element {
         <button
           type="button"
           onClick={() => (menuOpen.value = !menuOpen.value)}
-          aria-label="账号菜单"
+          aria-label={t('sidebar.accountMenu')}
           aria-expanded={menuOpen.value}
           className="interactive"
           style={{

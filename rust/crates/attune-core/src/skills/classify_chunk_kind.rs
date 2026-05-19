@@ -113,7 +113,7 @@ pub fn classify(text: &str) -> Classification {
     }
 
     // 取命中关键词最多的 kind
-    scores.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    scores.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
     let (best_kind, matched) = scores.into_iter().next().unwrap();
     // confidence: 命中数 / 该 kind 关键词总数, 上限 1.0
     let total_kw = KIND_KEYWORDS

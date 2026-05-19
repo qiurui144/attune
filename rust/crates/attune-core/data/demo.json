@@ -1,0 +1,37 @@
+[
+  {
+    "title": "Rust 入门",
+    "source_type": "demo",
+    "domain": "general",
+    "corpus_domain": "general",
+    "content": "# Rust 入门\n\nRust 是一门系统级编程语言，目标是「安全、并发、性能」三者兼得。本文介绍三个最核心的概念。\n\n## 1. Ownership（所有权）\n\n每个值在 Rust 中都有一个**唯一**的所有者。当所有者离开作用域时，值就会被自动释放。\n\n```rust\nfn main() {\n    let s = String::from(\"hello\");\n    takes_ownership(s);\n    // 这里不能再用 s，所有权已经转移\n}\n\nfn takes_ownership(some_string: String) {\n    println!(\"{}\", some_string);\n} // some_string 在这里被 drop\n```\n\n## 2. Borrowing（借用）\n\n通过 `&` 借用可以在不转移所有权的情况下访问值。借用分为可变借用 `&mut T` 和不可变借用 `&T`。\n\n规则：**同一时刻，要么有任意多个不可变借用，要么只有一个可变借用**。\n\n```rust\nfn main() {\n    let s = String::from(\"hello\");\n    let len = calc_length(&s);  // 借用而非转移\n    println!(\"{} (len={})\", s, len);\n}\n\nfn calc_length(s: &String) -> usize {\n    s.len()\n}\n```\n\n## 3. Lifetimes（生命周期）\n\n生命周期标注告诉编译器引用之间的生存关系，防止悬垂指针。\n\n```rust\nfn longest<'a>(x: &'a str, y: &'a str) -> &'a str {\n    if x.len() > y.len() { x } else { y }\n}\n```\n\n上面 `'a` 表明返回值的生命周期不会超过两个入参中较短的那个。\n\n## 小结\n\nOwnership + Borrowing + Lifetimes = 编译期内存安全，零运行时开销。这是 Rust 区别于 C/C++（运行时崩溃）和 GC 语言（运行时停顿）的根本设计。\n"
+  },
+  {
+    "title": "Linux 命令行常用速查",
+    "source_type": "demo",
+    "domain": "general",
+    "corpus_domain": "general",
+    "content": "# Linux 命令行常用速查\n\n## 文件与目录\n\n| 命令 | 作用 | 示例 |\n|------|------|------|\n| `ls -lah` | 列出目录（含隐藏 + 人类可读大小） | `ls -lah /etc` |\n| `cd` | 切换目录 | `cd ~/Documents` |\n| `pwd` | 显示当前路径 | `pwd` |\n| `mkdir -p` | 递归创建目录 | `mkdir -p a/b/c` |\n| `cp -r` | 递归复制 | `cp -r src/ dst/` |\n| `mv` | 移动或重命名 | `mv old.txt new.txt` |\n| `rm -rf` | 强制递归删除（危险） | `rm -rf tmp/` |\n\n## 文本处理\n\n| 命令 | 作用 | 示例 |\n|------|------|------|\n| `cat` | 输出文件 | `cat README.md` |\n| `grep` | 搜索文本 | `grep -rn \"TODO\" src/` |\n| `find` | 查找文件 | `find . -name \"*.rs\"` |\n| `awk` | 列处理 | `awk '{print $1, $3}' data.txt` |\n| `sed` | 替换 | `sed -i 's/foo/bar/g' f.txt` |\n| `sort \\| uniq -c` | 统计去重计数 | `cat log \\| sort \\| uniq -c` |\n\n## 系统与进程\n\n```bash\nps -ef | grep nginx       # 查找进程\ntop                       # 实时资源监控\ndf -h                     # 磁盘使用\nfree -h                   # 内存使用\nuname -a                  # 内核信息\nlscpu                     # CPU 信息\n```\n\n## 网络\n\n```bash\nip a                      # 网卡 IP\nss -tlnp                  # 监听端口\ncurl -I https://x.com    # HTTP HEAD\nping -c 4 8.8.8.8         # 4 次 ping\nnslookup attune.ai        # DNS 查询\n```\n\n## 权限\n\n```bash\nchmod 600 ~/.ssh/id_rsa   # 只所有者读写\nchown user:group file     # 改所有者\nsudo -i                   # 切到 root\n```\n\n记住一句：**Linux 是用纯文本流胶水把小工具粘成大系统的**。\n"
+  },
+  {
+    "title": "Attune 知识库 RAG 架构简介",
+    "source_type": "demo",
+    "domain": "general",
+    "corpus_domain": "general",
+    "content": "# Attune 知识库 RAG 架构简介\n\nAttune 是一个本地优先的个人 AI 知识伙伴。它的核心 RAG（Retrieval-Augmented Generation）管线如下。\n\n## 1. 摄入（Ingestion）\n\n- **文件监听**：watchdog 监听用户指定目录\n- **解析**：MD/TXT/PDF/DOCX 转纯文本\n- **分块**：滑动窗口（默认 512 token，128 overlap）+ 章节切割（Level1）+ 段落块（Level2）\n- **入库**：明文走 FTS5 倒排索引；密文走 AES-256-GCM 存入 SQLite `items` 表\n\n## 2. 向量化（Embedding）\n\n- **后端 1: Ollama (HTTP)**：bge-m3 默认，支持 GPU 加速\n- **后端 2: ONNX Runtime**：bge-base / bge-small，纯 CPU 也可跑\n- **后端 3: K3 推理服务**：一体机形态时所有底座走 :8080，IME INT8 加速\n\n向量存入 usearch HNSW 索引（f16 量化，磁盘 ~30 MB / 万条）。\n\n## 3. 检索（Retrieval）\n\n采用 RRF（Reciprocal Rank Fusion）混合搜索：\n\n```\nfinal_score(d) = Σ 1 / (k + rank_i(d))\n  其中 i ∈ {tantivy BM25, usearch HNSW}\n```\n\n两路检索 top-50 各自取出后融合，再用 reranker（可选 bge-reranker）取 top-K 注入。\n\n## 4. 注入（Augmentation）\n\nChat 端拼装 prompt：`[system instruct] + [top-K chunks with citations] + [user query]`，发给 LLM。\n\n## 5. 生成（Generation）\n\n- **本地**：Ollama 上跑 qwen2.5:3b / qwen2.5:1.5b（K3 IME 可跑 1.5b @ ~15 t/s）\n- **云端**：BYOK（用户提供 OpenAI/Anthropic/Gemini API key）或 Attune Pro Membership Gateway\n\n## 安全 & 隐私\n\n- **数据**：本地 SQLite，字段级 AES-256-GCM，密钥由 Argon2id 从用户密码派生\n- **出网审计**：每次云端调用本地落 audit log，导出 CSV 给合规审计\n- **PII redact**：上行前自动脱敏手机号 / 邮箱 / 身份证号\n\n## 与 ChatGPT 的差异\n\n| | ChatGPT | Attune |\n|---|---------|--------|\n| 数据位置 | OpenAI 云 | 用户本地 |\n| 模型选择 | 仅 OpenAI 系 | 任意（本地 + 云） |\n| 知识库 | session 内 | 持久化 + 向量索引 |\n| 注入透明性 | 黑盒 | 引用可点开 |\n\n这是混合智能 + 本地优先的典型形态。\n"
+  },
+  {
+    "title": "如何写好 Markdown",
+    "source_type": "demo",
+    "domain": "general",
+    "corpus_domain": "general",
+    "content": "# 如何写好 Markdown\n\nMarkdown 几乎是所有现代写作工具的底层语法。掌握它能让你的笔记可读可移植。\n\n## 1. 标题层级\n\n用 `#` 数量表示层级，最多 6 级。**一篇文档只能有一个 `#`**（H1）作为标题。\n\n```markdown\n# 文章标题（H1）\n## 章节（H2）\n### 子章节（H3）\n```\n\n## 2. 列表\n\n无序列表用 `-` 或 `*`：\n\n```markdown\n- 苹果\n- 梨\n  - 雪梨（缩进 2 空格）\n  - 鸭梨\n```\n\n有序列表用数字 + `.`（数字不必递增，渲染会自动）：\n\n```markdown\n1. 第一步\n1. 第二步\n1. 第三步\n```\n\n## 3. 代码\n\n行内代码用反引号 `` `code` ``；代码块用三反引号 + 语言：\n\n````markdown\n```python\ndef hello():\n    print(\"hi\")\n```\n````\n\n指定语言能触发语法高亮。\n\n## 4. 链接与图片\n\n```markdown\n[Attune 项目](https://github.com/qiurui144/attune)\n![Logo](./logo.png)\n```\n\n## 5. 表格\n\n```markdown\n| 列 1 | 列 2 |\n|------|------|\n| A    | B    |\n| C    | D    |\n```\n\n对齐用 `:---` / `:---:` / `---:`。\n\n## 6. 强调\n\n- `*斜体*` 或 `_斜体_`\n- `**粗体**`\n- `***粗斜体***`\n- `~~删除线~~`\n\n## 7. 引用与水平线\n\n```markdown\n> 这是一段引用\n> 多行引用\n\n---\n```\n\n## 8. 最佳实践\n\n1. **一段一空行**：可读性最优\n2. **标题不空着**：标题后立即写内容，别全是空 H2\n3. **代码块标语言**：方便 syntax highlight 和 RAG 检索\n4. **链接用相对路径**：方便仓库内移动\n\n好的 Markdown = 好的文档 = 好的协作起点。\n"
+  },
+  {
+    "title": "个人项目管理基础：GTD 与 OKR",
+    "source_type": "demo",
+    "domain": "general",
+    "corpus_domain": "general",
+    "content": "# 个人项目管理基础：GTD 与 OKR\n\n个人产能的两个关键工具：**GTD 管执行**，**OKR 管方向**。两者搭配能让你既不忙瞎也不空想。\n\n## GTD（Getting Things Done）\n\nDavid Allen 在 2001 年提出的 5 步法，核心是「把所有事情从大脑搬到系统里」。\n\n### 5 个步骤\n\n1. **Capture（捕获）**：任何任务、想法、邮件，立刻写下来。零脑内驻留。\n2. **Clarify（澄清）**：每条 inbox 问自己「这是什么？要采取行动吗？」\n   - 2 分钟内能做完 → 立刻做\n   - 需多步 → 转成项目\n   - 仅信息 → 归档\n   - 不需要做 → 删\n3. **Organize（组织）**：按情境分类（@电脑、@电话、@家、@等待）。\n4. **Reflect（回顾）**：每周一次「Weekly Review」，扫所有任务和项目。\n5. **Engage（执行）**：按情境 + 精力 + 时间挑下一个 action。\n\n### 关键概念\n\n- **Next Action**：每个项目永远有一个明确的「下一步物理动作」，避免「写论文」这种巨型 vague 任务。\n- **Someday/Maybe**：暂时不做但不想忘的，扔进这个清单。\n\n## OKR（Objectives & Key Results）\n\nIntel/Google 推广的目标设定法，核心是「定方向 + 量化结果」。\n\n### 结构\n\n```\nObjective: 提升个人技术影响力\n  KR1: 全年发布 12 篇技术博客（PV > 1000 / 篇）\n  KR2: 参与 3 个开源项目并贡献 ≥ 10 PR\n  KR3: 在 1 场技术大会做主题分享\n```\n\n### 写好 OKR 的原则\n\n1. **Objective 鼓舞人心**：模糊但激动人心（「成为 X 领域 top 10%」）\n2. **KR 必须可量化**：数字 / 日期 / yes-no，不能用「提升」「优化」\n3. **KR 数量 ≤ 5**：聚焦优于贪多\n4. **Stretch 目标**：达成 60-70% 是好的，100% 说明定低了\n\n## GTD × OKR 联动\n\n```\nOKR (季度方向)\n  ↓ 拆解出 Projects\nGTD (日常执行)\n  ↓ 每个 Project → Next Action\n```\n\n每周 Weekly Review 时同时回顾 OKR 进度 + GTD inbox，方向和执行就对齐了。\n\n## 工具推荐\n\n- **轻量**：Markdown + 文件夹（用 Attune 这种知识库系统索引）\n- **专业**：Things 3 / OmniFocus / Todoist\n- **协作**：Notion / Linear（团队 OKR）\n\n记住：**工具不重要，习惯才重要**。每周 30 分钟 Weekly Review 比换 10 次工具有用。\n"
+  }
+]

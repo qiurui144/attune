@@ -3,6 +3,8 @@
  * 见 spec §5 "API 层" + §7 "请求重试矩阵"
  */
 
+import { genId } from '../util';
+
 const API_BASE = '/api/v1';
 const TOKEN_KEY = 'attune_token';
 
@@ -93,7 +95,7 @@ export async function apiCall<T>(
   options: ApiCallOptions = {},
 ): Promise<T> {
   const policy = options.retry ?? RETRY_POLICIES.idempotentRead;
-  const reqId = crypto.randomUUID();
+  const reqId = genId();
   let attempt = 0;
   let delay = policy.initialDelay;
 

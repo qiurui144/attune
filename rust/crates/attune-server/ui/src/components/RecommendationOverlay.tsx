@@ -10,6 +10,7 @@
 import type { JSX } from 'preact';
 import { Button } from './Button';
 import { toast } from './Toast';
+import { t } from '../i18n';
 import { api } from '../store/api';
 import {
   recommendations,
@@ -81,7 +82,7 @@ function RecommendationCard({
       <button
         type="button"
         onClick={() => dismissRecommendation(index)}
-        aria-label="忽略"
+        aria-label={t('reco.dismiss')}
         style={{
           position: 'absolute',
           top: 'var(--space-2)',
@@ -124,7 +125,7 @@ function FileUploadedCard({
           paddingRight: 'var(--space-4)',
         }}
       >
-        新文件可归到已有集合
+        {t('reco.file.heading')}
       </div>
       <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
         {rec.candidates.map((c, ci) => (
@@ -146,7 +147,7 @@ function FileUploadedCard({
                 marginBottom: 'var(--space-1)',
               }}
             >
-              相似度 {(c.score * 100).toFixed(0)}%
+              {t('reco.similarity', { pct: (c.score * 100).toFixed(0) })}
               {c.overlapping_entities.length > 0 && (
                 <span style={{ marginLeft: 'var(--space-2)' }}>
                   · {c.overlapping_entities.slice(0, 2).join(' · ')}
@@ -159,15 +160,15 @@ function FileUploadedCard({
               onClick={async () => {
                 try {
                   await acceptRecommendation(rec, ci);
-                  toast('success', `已归档到「${c.project_title}」`);
+                  toast('success', t('reco.archived', { name: c.project_title }));
                   dismissRecommendation(index);
                 } catch (e) {
                   const msg = e instanceof Error ? e.message : String(e);
-                  toast('error', `归档失败：${msg}`);
+                  toast('error', t('reco.archive_failed', { msg }));
                 }
               }}
             >
-              归档到此集合
+              {t('reco.archive_action')}
             </Button>
           </li>
         ))}
@@ -190,7 +191,7 @@ function ChatKeywordCard({
           paddingRight: 'var(--space-4)',
         }}
       >
-        关键词提示
+        {t('reco.keyword.heading')}
       </div>
       <div
         style={{
@@ -199,7 +200,7 @@ function ChatKeywordCard({
           color: 'var(--color-text-secondary)',
         }}
       >
-        {rec.suggestion ?? '消息中包含可关联到集合的关键词'}
+        {rec.suggestion ?? t('reco.keyword.default')}
       </div>
       {rec.matched_keywords && rec.matched_keywords.length > 0 && (
         <div
@@ -209,7 +210,7 @@ function ChatKeywordCard({
             marginTop: 'var(--space-2)',
           }}
         >
-          匹配：{rec.matched_keywords.join('、')}
+          {t('reco.keyword.matched', { keywords: rec.matched_keywords.join('、') })}
         </div>
       )}
     </div>

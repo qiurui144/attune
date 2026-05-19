@@ -24,7 +24,7 @@ pub async fn read<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<u8>> {
     let path = path.as_ref().to_path_buf();
     spawn_blocking(move || std::fs::read(path))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("spawn_blocking: {e}")))?
+        .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))?
 }
 
 /// 异步读文件为 `String`. 自动处理 BOM + UTF-8 校验.
@@ -32,7 +32,7 @@ pub async fn read_to_string<P: AsRef<Path>>(path: P) -> std::io::Result<String> 
     let path = path.as_ref().to_path_buf();
     spawn_blocking(move || std::fs::read_to_string(path))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("spawn_blocking: {e}")))?
+        .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))?
 }
 
 /// 异步写文件 (覆盖). 调用方负责保证 path 父目录存在.
@@ -40,7 +40,7 @@ pub async fn write<P: AsRef<Path>>(path: P, content: Vec<u8>) -> std::io::Result
     let path = path.as_ref().to_path_buf();
     spawn_blocking(move || std::fs::write(path, content))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("spawn_blocking: {e}")))?
+        .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))?
 }
 
 /// 异步创建目录 (含 mkdir -p 语义).
@@ -48,7 +48,7 @@ pub async fn create_dir_all<P: AsRef<Path>>(path: P) -> std::io::Result<()> {
     let path = path.as_ref().to_path_buf();
     spawn_blocking(move || std::fs::create_dir_all(path))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("spawn_blocking: {e}")))?
+        .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))?
 }
 
 /// 异步删除文件 (不存在不报错, 类似 rm -f).
@@ -60,7 +60,7 @@ pub async fn remove_file_if_exists<P: AsRef<Path>>(path: P) -> std::io::Result<(
         Err(e) => Err(e),
     })
     .await
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("spawn_blocking: {e}")))?
+    .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))?
 }
 
 /// 异步检查 path 是否存在 (canonicalize 友好, 不解析 symlink).
@@ -68,7 +68,7 @@ pub async fn try_exists<P: AsRef<Path>>(path: P) -> std::io::Result<bool> {
     let path = path.as_ref().to_path_buf();
     spawn_blocking(move || path.try_exists())
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("spawn_blocking: {e}")))?
+        .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))?
 }
 
 #[cfg(test)]

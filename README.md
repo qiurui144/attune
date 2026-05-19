@@ -12,28 +12,62 @@ Attune is a generic personal AI knowledge base for **any individual knowledge wo
 
 ## 📥 Download
 
-Latest stable: **server v0.6.1** · **desktop v0.6.0**
-Latest pre-release: **v0.6.3-rc.1** (server tarball; desktop installer pending NSIS fix)
+Latest stable: **server v0.7.0** · **desktop v0.7.0**
 
-### Desktop app (Web UI + system tray) — [desktop-v0.6.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.6.0)
+### Desktop app (Web UI + system tray) — [desktop-v0.7.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.7.0)
 
 | Platform | File | Size | Notes |
 |----------|------|------|-------|
-| Windows | [`Attune_0.6.0_x64-setup.exe`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_x64-setup.exe) | 16 MB | NSIS installer (recommended) |
-| Windows | [`Attune_0.6.0_x64_en-US.msi`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_x64_en-US.msi) | 31 MB | MSI for enterprise |
-| Linux deb | [`Attune_0.6.0_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.deb) | 27 MB | Debian/Ubuntu |
-| Linux AppImage | [`Attune_0.6.0_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.6.0/Attune_0.6.0_amd64.AppImage) | 94 MB | Generic Linux |
+| Windows | [`Attune_0.7.0_x64-setup.exe`](https://github.com/qiurui144/attune/releases/download/desktop-v0.7.0/Attune_0.7.0_x64-setup.exe) | 17 MB | NSIS installer (recommended) |
+| Windows | [`Attune_0.7.0_x64_en-US.msi`](https://github.com/qiurui144/attune/releases/download/desktop-v0.7.0/Attune_0.7.0_x64_en-US.msi) | 33 MB | MSI for enterprise |
+| Linux deb | [`Attune_0.7.0_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.7.0/Attune_0.7.0_amd64.deb) | 29 MB | Debian/Ubuntu |
+| Linux rpm | [`Attune-0.7.0-1.x86_64.rpm`](https://github.com/qiurui144/attune/releases/download/desktop-v0.7.0/Attune-0.7.0-1.x86_64.rpm) | 29 MB | RHEL/Fedora |
+| Linux AppImage | [`Attune_0.7.0_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.7.0/Attune_0.7.0_amd64.AppImage) | 97 MB | Generic Linux |
 
-### Server / CLI binaries (headless / NAS / server) — [v0.6.1 Release](https://github.com/qiurui144/attune/releases/tag/v0.6.1)
+### Server / CLI binaries (headless / NAS / server) — [v0.7.0 Release](https://github.com/qiurui144/attune/releases/tag/v0.7.0)
 
 | Platform | File |
 |----------|------|
-| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-x86_64.tar.gz) |
-| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-linux-aarch64.tar.gz) |
-| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-macos-aarch64.tar.gz) |
-| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.6.1/attune-windows-x86_64.zip) |
+| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.7.0/attune-linux-x86_64.tar.gz) |
+| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.7.0/attune-linux-aarch64.tar.gz) |
+| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.7.0/attune-macos-aarch64.tar.gz) |
+| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.7.0/attune-windows-x86_64.zip) |
 
 > macOS Intel: build from source with `cargo build --release` (Apple Silicon already covers modern Mac users). SHA256 checksum file ships with each archive.
+
+## v0.7 sprint highlights (2026-05-15) — Memory Moat Phase A+B
+
+> **"优势不在于模型，而在于以安全有效的记忆"** — 同样的 LLM，挂上 attune 比单跑模型答得更准、更敢用。
+
+### Phase A — 文档编辑嵌入功能完全有效（修 3 个 release-blocker）
+
+之前 `update_item` 仅刷 SQL → 搜索永远返回旧内容；同名重传重复 embed；delete 不清向量。本 sprint 用 **`attune-core::reindex` 协调模块**收敛三资源（DB / VectorIndex / FulltextIndex / embed_queue）事务式 cleanup，同步增加：
+
+- `items.content_hash` 列（SHA-256 hex）+ migration → update / upload 短路省 ~3s/100KB embedding
+- `reindex_queue` 表 + `AppState::start_reindex_worker`（3s 轮询）→ 解锁 `scanner` / `scanner_webdav` 等无法直接持锁的后台 worker
+- `routes/items.rs::update_item` 返回 `UpdateOutcome` 三态（existed / content_changed / backfilled_hash），仅真改才触发 reindex
+
+### Phase B — 自学习闭环 3 hook
+
+`skill_signals` 加 `kind` + `ref_id` 列，5 类信号汇入：
+
+| Hook | kind | 写入位点 |
+|---|---|---|
+| 1 | `doc_create` / `doc_update` / `doc_delete` | upload / items.update / items.delete / scanner |
+| 2 | `citation_hit` | chat.rs 取 top-5 引用 chunk 喂入 |
+| 3 | `annotation_marker` | annotations.rs::create_annotation |
+
+skill_evolution 从"失败驱动"升级为"全谱信号驱动" — 可按 kind 设阈值 / 调权。
+
+### Phase C spec
+
+`docs/specs/memory-moat-v07.md` — 文档版本化 / 编辑触发重标注 / 失败信号反推 project / 衰减曲线 / embed_model_version 迁移工具链，RICE 排序后留 sprint 2+。
+
+📊 **5 agents 并行交付的 v0.7 缺口模块**（commit 71d82ee）：cost / tools / demo / query_rewrite / entity_graph / skill_eval / report / reader / capture(email+telegram) / sync(webdav) / vlm + 4 个 server 路由（audit log + log.csv + demo load + chat stream）
+
+🧪 **验证**：workspace lib tests **910 passed / 0 failed / 1 ignored**；MANUAL_TEST_CHECKLIST 新增 8 条 Memory Moat 验收。
+
+---
 
 ## v0.6.0-rc.5 highlights (2026-04-28)
 
@@ -292,12 +326,76 @@ LLM-generated content may be inaccurate, incomplete, or misleading. Attune and i
 
 ---
 
+## 致谢 / Acknowledgements
+
+Attune is built on the shoulders of outstanding open-source projects. We are grateful to their authors and contributors.
+
+**后端框架 / Backend**
+
+- [Axum](https://github.com/tokio-rs/axum) — ergonomic async web framework built on Tokio (MIT)
+- [Tokio](https://github.com/tokio-rs/tokio) — the async runtime powering the entire server (MIT)
+- [tower-http](https://github.com/tower-rs/tower-http) — HTTP middleware utilities (CORS, tracing) (MIT)
+- [axum-server](https://github.com/programatik29/axum-server) — TLS integration for Axum via rustls (MIT)
+- [FastAPI](https://github.com/fastapi/fastapi) + [Uvicorn](https://github.com/encode/uvicorn) — Python prototype line HTTP layer (MIT)
+
+**数据库与搜索 / Storage & Search**
+
+- [rusqlite](https://github.com/rusqlite/rusqlite) — SQLite bindings with bundled SQLite for zero-dependency deployment (MIT)
+- [tantivy](https://github.com/quickwit-oss/tantivy) + [tantivy-jieba](https://github.com/meilisearch/tantivy-jieba) — full-text search engine with Chinese word segmentation (MIT)
+- [usearch](https://github.com/unum-cloud/usearch) — high-performance HNSW vector index (Apache-2.0)
+- [hdbscan](https://github.com/genbio-ai/hdbscan) — density-based clustering for automatic topic grouping (MIT)
+- [ChromaDB](https://github.com/chroma-core/chroma) — vector store used in the Python prototype (Apache-2.0)
+- [SQLAlchemy](https://github.com/sqlalchemy/sqlalchemy) + [Alembic](https://github.com/sqlalchemy/alembic) — ORM and migrations for the pluginhub backend (MIT)
+
+**加密与安全 / Cryptography**
+
+- [argon2](https://github.com/RustCrypto/password-hashes/tree/master/argon2) — Argon2id key derivation for master password hashing (MIT / Apache-2.0)
+- [aes-gcm](https://github.com/RustCrypto/AEADs/tree/master/aes-gcm) — AES-256-GCM authenticated encryption for vault fields (MIT / Apache-2.0)
+- [zeroize](https://github.com/RustCrypto/utils/tree/master/zeroize) — secure zeroing of secrets from memory (MIT / Apache-2.0)
+- [rustls](https://github.com/rustls/rustls) — pure-Rust TLS stack; zero system OpenSSL dependency (MIT / Apache-2.0 / ISC)
+- [ed25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/ed25519-dalek) — Ed25519 signatures for plugin package verification (MIT / Apache-2.0)
+
+**本地 AI 底座 / Local AI**
+
+- [Ollama](https://github.com/ollama/ollama) — local LLM runtime (embedding, chat, rerank); recommended backend (MIT)
+- [ONNX Runtime](https://github.com/microsoft/onnxruntime) (`ort`) — cross-platform inference engine for OCR and embedding models (MIT)
+- [kreuzberg-paddle-ocr](https://github.com/Goldziher/kreuzberg) — PP-OCRv5 bindings via ONNX Runtime for in-process document OCR (MIT)
+- [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — fast on-device ASR; bundled binary in desktop packages (MIT)
+- [HuggingFace Hub](https://github.com/huggingface/hf-hub) (`hf-hub`) — model weight fetching from the HF registry (Apache-2.0)
+
+**文档解析 / Document Parsing**
+
+- [PyMuPDF](https://github.com/pymupdf/PyMuPDF) — PDF rendering and text extraction for the Python line (AGPL-3.0 / commercial)
+- [pdf-extract](https://github.com/jrmuizel/pdf-extract) — pure-Rust PDF text extraction (MIT)
+- [python-docx](https://github.com/python-openxml/python-docx) — .docx reading in the Python prototype (MIT)
+- [calamine](https://github.com/tafia/calamine) — Excel / ODS spreadsheet parsing (MIT / Apache-2.0)
+
+**网络与协议 / Networking**
+
+- [reqwest](https://github.com/seanmonstar/reqwest) — HTTP client (Ollama API, web fetch, WebDAV) (MIT / Apache-2.0)
+- [reqwest_dav](https://github.com/niuhuan/reqwest_dav) — WebDAV client built on reqwest (MIT)
+- [async-imap](https://github.com/async-email/async-imap) — async IMAP email ingestion (Apache-2.0 / MIT)
+
+**前端 / Frontend**
+
+- [Preact](https://github.com/preactjs/preact) — lightweight React-compatible UI library powering the Chrome extension (MIT)
+- [Vite](https://github.com/vitejs/vite) — fast frontend build tooling (MIT)
+
+**打包与工具 / Packaging & Tooling**
+
+- [serde](https://github.com/serde-rs/serde) + [serde_json](https://github.com/serde-rs/json) — ubiquitous Rust serialization framework (MIT / Apache-2.0)
+- [clap](https://github.com/clap-rs/clap) — CLI argument parsing (MIT / Apache-2.0)
+- [tracing](https://github.com/tokio-rs/tracing) — structured application-level logging (MIT)
+- [jieba](https://github.com/fxsjy/jieba) — Chinese tokenizer used in FTS5 pipeline (MIT)
+
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) (TBD) and [NOTICE](NOTICE).
+Contribution guidelines are still being drafted. For now, see [DEVELOP.md](DEVELOP.md) for branch model + build commands, and [NOTICE](NOTICE) for third-party attribution.
 
 ## Documentation
 
+- [Memory Moat v0.7 spec](docs/specs/memory-moat-v07.md)
+- [v0.7 gap analysis](docs/v07-gap-analysis.md)
 - [Product positioning design](docs/superpowers/specs/2026-04-17-product-positioning-design.md)
 - [Frontend redesign spec](docs/superpowers/specs/2026-04-19-frontend-redesign-design.md)
 - [UX quality infrastructure](docs/superpowers/specs/2026-04-19-ux-quality-design.md)

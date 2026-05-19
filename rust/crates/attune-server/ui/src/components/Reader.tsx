@@ -15,12 +15,13 @@ import {
   PRESET_TAGS,
 } from '../hooks/useAnnotations';
 import type { Annotation, AnnotationAngle } from '../hooks/useAnnotations';
+import { t } from '../i18n';
 
-const AI_ANGLES: Array<{ key: AnnotationAngle; emoji: string; label: string }> = [
-  { key: 'risk', emoji: '⚠', label: '风险' },
-  { key: 'outdated', emoji: '⏰', label: '过时' },
-  { key: 'highlights', emoji: '✨', label: '亮点' },
-  { key: 'questions', emoji: '❓', label: '疑问' },
+const AI_ANGLES: Array<{ key: AnnotationAngle; emoji: string; labelKey: string }> = [
+  { key: 'risk', emoji: '⚠', labelKey: 'reader.angle.risk' },
+  { key: 'outdated', emoji: '⏰', labelKey: 'reader.angle.outdated' },
+  { key: 'highlights', emoji: '✨', labelKey: 'reader.angle.highlights' },
+  { key: 'questions', emoji: '❓', labelKey: 'reader.angle.questions' },
 ];
 
 export type ReaderProps = {
@@ -80,32 +81,32 @@ export function Reader({ itemId }: ReaderProps): JSX.Element {
     if (!sel || !item.value) return;
     const ann = await createAnnotation({
       item_id: item.value.id,
-      start_offset: sel.start,
-      end_offset: sel.end,
-      snippet: sel.text,
-      tag: tagKey,
+      offset_start: sel.start,
+      offset_end: sel.end,
+      text_snippet: sel.text,
+      label: tagKey,
       color,
     });
     if (ann) {
       annotations.value = [...annotations.value, ann];
-      toast('success', `已添加 ${tagKey} 批注`);
+      toast('success', t('reader.toast.annotation_added', { tag: tagKey }));
       selection.value = null;
       window.getSelection()?.removeAllRanges();
     } else {
-      toast('error', '添加失败');
+      toast('error', t('reader.toast.annotation_add_fail'));
     }
   }
 
   async function runAI(angle: AnnotationAngle) {
     if (!item.value) return;
     aiLoading.value = angle;
-    const newAnns = await analyzeByAI(item.value.id, angle);
+    const { created, annotations: fresh } = await analyzeByAI(item.value.id, angle);
     aiLoading.value = null;
-    if (newAnns.length > 0) {
-      annotations.value = [...annotations.value, ...newAnns];
-      toast('success', `新增 ${newAnns.length} 条 AI 批注`);
+    if (created > 0) {
+      annotations.value = fresh;
+      toast('success', t('reader.toast.ai_annotations_added', { count: created }));
     } else {
-      toast('info', 'AI 未找到匹配片段');
+      toast('info', t('reader.toast.ai_no_match'));
     }
   }
 
@@ -114,15 +115,15 @@ export function Reader({ itemId }: ReaderProps): JSX.Element {
     if (ok) {
       annotations.value = annotations.value.filter((a) => a.id !== id);
     } else {
-      toast('error', '删除失败');
+      toast('error', t('reader.toast.annotation_delete_fail'));
     }
   }
 
   if (loading.value) {
-    return <div style={{ color: 'var(--color-text-secondary)' }}>加载中…</div>;
+    return <div style={{ color: 'var(--color-text-secondary)' }}>{t('common.loading')}</div>;
   }
   if (!item.value) {
-    return <div style={{ color: 'var(--color-error)' }}>条目不存在</div>;
+    return <div style={{ color: 'var(--color-error)' }}>{t('reader.not_found')}</div>;
   }
 
   return (
@@ -137,7 +138,7 @@ export function Reader({ itemId }: ReaderProps): JSX.Element {
             marginBottom: 'var(--space-1)',
           }}
         >
-          {item.value.title || '(无标题)'}
+          {item.value.title || t('reader.untitled')}
         </h2>
         <div
           style={{
@@ -171,7 +172,7 @@ export function Reader({ itemId }: ReaderProps): JSX.Element {
             color: 'var(--color-text-secondary)',
           }}
         >
-          💰 AI 分析（本地 LLM）：
+          {t('reader.ai_analysis_label')}
         </span>
         {AI_ANGLES.map((a) => (
           <Button
@@ -182,7 +183,7 @@ export function Reader({ itemId }: ReaderProps): JSX.Element {
             disabled={aiLoading.value !== null}
             loading={aiLoading.value === a.key}
           >
-            {a.emoji} {a.label}
+            {a.emoji} {t(a.labelKey)}
           </Button>
         ))}
       </div>
@@ -207,16 +208,16 @@ export function Reader({ itemId }: ReaderProps): JSX.Element {
           }}
         >
           <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
-            为选中文本添加批注：
+            {t('reader.add_annotation_label')}
           </span>
-          {PRESET_TAGS.map((t) => (
+          {PRESET_TAGS.map((tag) => (
             <button
-              key={t.key}
+              key={tag.key}
               type="button"
-              onClick={() => void createWith(t.key, t.color)}
+              onClick={() => void createWith(tag.key, tag.color)}
               style={{
                 padding: '4px 10px',
-                background: t.color,
+                background: tag.color,
                 color: 'white',
                 border: 'none',
                 borderRadius: 'var(--radius-sm)',
@@ -225,7 +226,7 @@ export function Reader({ itemId }: ReaderProps): JSX.Element {
                 fontWeight: 500,
               }}
             >
-              {t.emoji} {t.key}
+              {tag.emoji} {tag.key}
             </button>
           ))}
           <button
@@ -283,7 +284,7 @@ export function Reader({ itemId }: ReaderProps): JSX.Element {
               marginBottom: 'var(--space-2)',
             }}
           >
-            批注（{annotations.value.length}）
+            {t('reader.annotations_heading', { count: annotations.value.length })}
           </h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
             {annotations.value.map((a) => (
@@ -307,7 +308,7 @@ function AnnotationRow({
   annotation: Annotation;
   onDelete: () => void;
 }): JSX.Element {
-  const tag = PRESET_TAGS.find((p) => p.key === a.tag);
+  const tag = PRESET_TAGS.find((p) => p.key === a.label);
   return (
     <div
       style={{
@@ -331,7 +332,7 @@ function AnnotationRow({
           flexShrink: 0,
         }}
       >
-        {tag?.emoji ?? '·'} {a.tag}
+        {tag?.emoji ?? '·'} {a.label}
         {a.source === 'ai' && <span style={{ marginLeft: 4, opacity: 0.8 }}>🤖</span>}
       </span>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -345,11 +346,11 @@ function AnnotationRow({
             textOverflow: 'ellipsis',
           }}
         >
-          "{a.snippet}"
+          "{a.text_snippet}"
         </div>
-        {a.note && (
+        {a.content && (
           <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)', marginTop: 2 }}>
-            {a.note}
+            {a.content}
           </div>
         )}
       </div>
@@ -379,20 +380,20 @@ function renderWithAnnotations(
 ): JSX.Element[] {
   if (annotations.length === 0) return [<span key="plain">{content}</span>];
 
-  // 按 start_offset 排序
-  const sorted = [...annotations].sort((a, b) => a.start_offset - b.start_offset);
+  // 按 offset_start 排序
+  const sorted = [...annotations].sort((a, b) => a.offset_start - b.offset_start);
   const out: JSX.Element[] = [];
   let cursor = 0;
 
   for (const a of sorted) {
-    if (a.start_offset > cursor) {
-      out.push(<span key={`p-${cursor}`}>{content.slice(cursor, a.start_offset)}</span>);
+    if (a.offset_start > cursor) {
+      out.push(<span key={`p-${cursor}`}>{content.slice(cursor, a.offset_start)}</span>);
     }
     const color = a.color ?? '#D4A574';
     out.push(
       <mark
         key={`a-${a.id}`}
-        title={`${a.tag}${a.note ? '：' + a.note : ''}`}
+        title={a.content ? t('reader.mark_title', { label: a.label, content: a.content }) : a.label}
         style={{
           background: hexToRgba(color, 0.25),
           borderBottom: `2px solid ${color}`,
@@ -400,10 +401,10 @@ function renderWithAnnotations(
           borderRadius: 2,
         }}
       >
-        {content.slice(a.start_offset, a.end_offset)}
+        {content.slice(a.offset_start, a.offset_end)}
       </mark>,
     );
-    cursor = Math.max(cursor, a.end_offset);
+    cursor = Math.max(cursor, a.offset_end);
   }
   if (cursor < content.length) {
     out.push(<span key={`tail-${cursor}`}>{content.slice(cursor)}</span>);

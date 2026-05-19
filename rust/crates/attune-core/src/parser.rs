@@ -47,7 +47,7 @@ pub fn parse_file_with_profile(
         }
         _ => {
             // 允许作为纯文本处理的扩展名：代码文件 + 通用文本格式
-            let is_code = CODE_EXTENSIONS.iter().any(|e| *e == ext.as_str());
+            let is_code = CODE_EXTENSIONS.contains(&ext.as_str());
             let is_plain_text = matches!(ext.as_str(), ".md" | ".txt" | "");
             if !is_code && !is_plain_text {
                 return Err(VaultError::InvalidInput(format!(
@@ -181,6 +181,9 @@ pub fn parse_bytes_with_profile(
                 tmp.flush().map_err(VaultError::Io)?;
             }
             let output = provider.extract_structured(tmp.path(), &profile)?;
+            if let Some(c) = output.avg_confidence {
+                log::info!("OCR 图片 '{filename}' avg_confidence={c:.3}");
+            }
             let content = if let Some(table) = output.table_markdown {
                 format!("{}\n\n{}", output.text, table)
             } else {
@@ -210,7 +213,7 @@ pub fn parse_bytes_with_profile(
         _ => {
             // 允许作为纯文本处理的扩展名：代码文件 + 通用文本格式
             // 已知二进制格式（video/archive/executable 等）拒绝，避免乱码入库
-            let is_code = CODE_EXTENSIONS.iter().any(|e| *e == ext.as_str());
+            let is_code = CODE_EXTENSIONS.contains(&ext.as_str());
             let is_plain_text = matches!(ext.as_str(), ".md" | ".txt" | "");
             if !is_code && !is_plain_text {
                 return Err(VaultError::InvalidInput(format!(
@@ -530,7 +533,7 @@ fn xlsx_bytes_to_text(data: &[u8], ext: &str) -> Result<String> {
                             Data::Float(f) => format!("{f}"),
                             Data::Int(i) => format!("{i}"),
                             Data::Bool(b) => format!("{b}"),
-                            Data::Error(e) => format!("#ERR"),
+                            Data::Error(_) => "#ERR".to_string(),
                             Data::DateTime(dt) => format!("{dt}"),
                             Data::DateTimeIso(s) => s.clone(),
                             Data::DurationIso(s) => s.clone(),
@@ -641,7 +644,7 @@ fn rtf_to_text(rtf: &str) -> String {
                         chars.next();
                     } else {
                         // skip control word + optional numeric parameter
-                        while chars.peek().map_or(false, |c| c.is_alphanumeric() || *c == '-') {
+                        while chars.peek().is_some_and(|c| c.is_alphanumeric() || *c == '-') {
                             chars.next();
                         }
                         // skip optional trailing space

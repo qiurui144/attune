@@ -1,0 +1,8 @@
+From: Carol <carol@example.com>
+To: Bob <bob@example.com>
+Subject: HTML Newsletter
+Message-ID: <html-002@example.com>
+Date: Mon, 18 May 2026 10:00:00 +0000
+Content-Type: text/html; charset=utf-8
+
+<html><body><h1>Heading</h1><p>Paragraph one.</p><p>Paragraph two.</p></body></html>

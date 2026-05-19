@@ -1,7 +1,10 @@
 // npu-vault/crates/vault-core/src/store.rs
 
 mod types;
-mod items;
+pub mod items;
+pub mod item_blobs;
+pub mod webdav_remotes;
+pub mod email_accounts;
 mod dirs;
 mod queue;
 mod history;
@@ -11,6 +14,7 @@ mod chunk_summaries;
 mod annotations;
 mod project;
 mod memories;
+mod memory_vectors;
 mod web_search_cache;
 mod chunk_breadcrumbs;
 pub mod browse_signals;  // pub: BrowseSignalInput / BrowseSignalRow 给 attune-server route 用
@@ -56,10 +60,29 @@ CREATE TABLE IF NOT EXISTS items (
     -- 旧 `domain` 字段历史用作"网站域名"（来自 chrome 扩展），与本字段语义冲突
     -- → 新建 corpus_domain 字段表示"领域分类"（legal/tech/general/medical/...）
     -- search 阶段按 query intent 跨领域降权，防止"反洗钱"被 cs-notes 顶占
-    corpus_domain TEXT NOT NULL DEFAULT 'general'
+    corpus_domain TEXT NOT NULL DEFAULT 'general',
+    -- v0.7 记忆护城河（per 用户决策 2026-05-15）：
+    -- content 明文的 SHA-256 hex（content 是密文 BLOB，不便直接 hash 比对），
+    -- 用于 update / re-upload 时短路判断"内容是否变化" → 内容不变跳过 re-embed
+    -- + 用于 chunk-level diff 基础（v0.7 next sprint）。
+    -- 空字符串语义：旧 vault 尚未 backfill（lazy 在 update 时 backfill）。
+    content_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
 CREATE INDEX IF NOT EXISTS idx_items_deleted ON items(is_deleted);
+
+-- 原始证据文件留存。
+-- items.content 只存 OCR 文本；律师需核对原图判断 OCR 转录是否准确 →
+-- 此表存上传时的原始字节（AES-GCM 加密）。一个 item 至多一份原件。
+-- CREATE TABLE IF NOT EXISTS：老 vault 下次 open 自动获得空表，无需独立 migration。
+CREATE TABLE IF NOT EXISTS item_blobs (
+    item_id     TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    filename    TEXT NOT NULL,
+    mime        TEXT NOT NULL,
+    blob        BLOB NOT NULL,
+    byte_len    INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS embed_queue (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +120,44 @@ CREATE TABLE IF NOT EXISTS indexed_files (
     indexed_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_if_dir ON indexed_files(dir_id);
+
+-- 决策 4：WebDAV remote 配置持久化。bound_dirs(webdav:* path) 只记 URL；
+-- 认证凭据要让周期同步 worker 自动复用 → 此表存完整配置。
+-- password_enc 是 AES-256-GCM 密文 BLOB（dek 加密，与 items.content 同模式）。
+CREATE TABLE IF NOT EXISTS webdav_remotes (
+    dir_id        TEXT PRIMARY KEY REFERENCES bound_dirs(id) ON DELETE CASCADE,
+    url           TEXT NOT NULL,
+    username      TEXT,
+    password_enc  BLOB,
+    depth         INTEGER NOT NULL DEFAULT 1,
+    corpus_domain TEXT NOT NULL DEFAULT 'general',
+    updated_at    TEXT NOT NULL,
+    last_etag_sync TEXT
+);
+
+-- Email IMAP 采集账户持久化。与 webdav_remotes 同模式：
+-- bound_dirs(email:* path) 只记账户标识；周期同步 worker 要复用 IMAP 凭据
+-- → 此表存完整账户配置。password_enc 是 AES-256-GCM 密文 BLOB（dek 加密，
+-- 与 items.content 同模式）；folders 是逗号分隔的文件夹名列表。
+CREATE TABLE IF NOT EXISTS email_accounts (
+    dir_id        TEXT PRIMARY KEY REFERENCES bound_dirs(id) ON DELETE CASCADE,
+    host          TEXT NOT NULL,
+    port          INTEGER NOT NULL DEFAULT 993,
+    username      TEXT NOT NULL,
+    password_enc  BLOB NOT NULL,
+    folders       TEXT NOT NULL DEFAULT 'INBOX,Sent',
+    corpus_domain TEXT NOT NULL DEFAULT 'general',
+    updated_at    TEXT NOT NULL,
+    last_sync     TEXT
+);
+
+-- 每账户每文件夹的 IMAP UID 增量游标。下次 UID SEARCH 从 last_uid+1 起。
+CREATE TABLE IF NOT EXISTS email_folder_uids (
+    dir_id   TEXT NOT NULL REFERENCES email_accounts(dir_id) ON DELETE CASCADE,
+    folder   TEXT NOT NULL,
+    last_uid INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (dir_id, folder)
+);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
@@ -149,15 +210,40 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 CREATE INDEX IF NOT EXISTS idx_conv_messages_conv_id
     ON conversation_messages(conversation_id);
 
+-- v0.7 记忆护城河 (per 用户决策 2026-05-15)：
+-- attune-core 层的 scanner / scanner_webdav 后台 worker 在文件变更时调
+-- `store.delete_item`，但拿不到 server 层的 VectorIndex / FulltextIndex 锁，
+-- 旧向量与 FTS doc 会残留为孤儿（"删了但搜得到"）。
+-- 解法：scanner 写一条 reindex_queue 行，server 后台 task 周期消费并持锁清理。
+-- action: 'purge'（清向量+FTS，DB 已删）/ 'reindex'（重切+清+重入队，DB 已 update）
+CREATE TABLE IF NOT EXISTS reindex_queue (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id     TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    attempts    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_reindex_queue_created ON reindex_queue(created_at);
+CREATE INDEX IF NOT EXISTS idx_reindex_queue_item ON reindex_queue(item_id);
+
 CREATE TABLE IF NOT EXISTS skill_signals (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     query           TEXT NOT NULL,
     knowledge_count INTEGER NOT NULL DEFAULT 0,
     web_used        INTEGER NOT NULL DEFAULT 0,
     processed       INTEGER NOT NULL DEFAULT 0,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    -- v0.7 自学习闭环 Phase B (per 用户决策 2026-05-15)：
+    -- 信号种类。原表只有"搜索失败"（kind='search_miss'）单一信号源，
+    -- 扩展支持 doc_update / doc_delete / doc_create / citation_hit / annotation_marker
+    -- 让 skill_evolution 从"失败驱动"升级为"全谱信号驱动"。
+    -- ref_id：可选关联对象 ID（如 item_id / annotation_id / citation chunk hash）。
+    -- 老 vault lazy backfill：kind 空字符串视为 search_miss。
+    kind            TEXT NOT NULL DEFAULT 'search_miss',
+    ref_id          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_skill_sig_processed ON skill_signals(processed, created_at);
+CREATE INDEX IF NOT EXISTS idx_skill_sig_kind ON skill_signals(kind, processed, created_at);
 
 -- Chunk 摘要缓存 —— 上下文压缩流水线（Batch B.1）
 --
@@ -255,11 +341,31 @@ CREATE TABLE IF NOT EXISTS memories (
     source_chunk_count    INTEGER NOT NULL,
     summary_encrypted     BLOB NOT NULL,
     model                 TEXT NOT NULL,
-    created_at            INTEGER NOT NULL
+    created_at            INTEGER NOT NULL,
+    -- Multi-layer memory (2026-05-18): topic_key dedups semantic (L3) rows,
+    -- cold flags demoted episodic rows, superseded_by points to a refreshed L3 row.
+    topic_key             TEXT,
+    cold                  INTEGER NOT NULL DEFAULT 0,
+    superseded_by         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_window ON memories(window_start, window_end);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_source ON memories(kind, source_chunk_hashes);
+-- idx_memories_cold / uq_memories_topic 不在此建 —— cold/topic_key 在老 vault 上由
+-- migrate_memories_multilayer 的 ALTER 补列，两索引随之在该函数内（列就位后）创建。
+-- 放这里会在老 vault 上先于 ALTER 执行 → "no such column: cold"。
+
+-- Multi-layer memory (2026-05-18) — embedding sidecar so episodic/semantic
+-- summaries are vector-searchable by the tier-aware assembler (rank, not just list).
+-- topic_key/cold/superseded_by on memories above are carried for fresh vaults here
+-- and added on older vaults via the idempotent migrate_memories_multilayer ALTER.
+CREATE TABLE IF NOT EXISTS memory_vectors (
+    memory_id   TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    embedding   BLOB NOT NULL,
+    dim         INTEGER NOT NULL,
+    model       TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
 
 -- C1 Web search cache (W3 batch A, 2026-04-27)
 -- per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §3
@@ -383,6 +489,9 @@ impl Store {
         );
         Self::migrate_items_privacy_tier(&conn)?;
         Self::migrate_corpus_domain(&conn)?;
+        Self::migrate_items_content_hash(&conn)?;
+        Self::migrate_skill_signals_v07(&conn)?;
+        Self::migrate_memories_multilayer(&conn)?;
         Ok(Self { conn })
     }
 
@@ -395,7 +504,56 @@ impl Store {
         Self::migrate_breadcrumbs_encrypt(&conn)?;
         Self::migrate_items_privacy_tier(&conn)?;
         Self::migrate_corpus_domain(&conn)?;
+        Self::migrate_items_content_hash(&conn)?;
+        Self::migrate_skill_signals_v07(&conn)?;
+        Self::migrate_memories_multilayer(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// 多层记忆（2026-05-18）：memories 表新增 topic_key / cold / superseded_by 列（幂等）。
+    ///
+    /// 老 vault 升级：topic_key/superseded_by 默认 NULL（episodic 行不需要），
+    /// cold 默认 0（hot）。memory_vectors 表由 SCHEMA_SQL 的 CREATE TABLE IF NOT EXISTS
+    /// 自动补建，不需要单独 ALTER。
+    fn migrate_memories_multilayer(conn: &Connection) -> Result<()> {
+        let has_topic: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'topic_key'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_topic == 0 {
+            conn.execute("ALTER TABLE memories ADD COLUMN topic_key TEXT", [])?;
+        }
+        let has_cold: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'cold'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_cold == 0 {
+            conn.execute(
+                "ALTER TABLE memories ADD COLUMN cold INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        let has_superseded: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'superseded_by'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_superseded == 0 {
+            conn.execute("ALTER TABLE memories ADD COLUMN superseded_by TEXT", [])?;
+        }
+        // INDEX CREATE 提出 if 块外（与 content_hash migration 同样的 R16 理由）。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_cold ON memories(cold, kind)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_topic \
+             ON memories(kind, topic_key) WHERE topic_key IS NOT NULL",
+            [],
+        )?;
+        Ok(())
     }
 
     /// 迁移：items 新增 corpus_domain 列 + bound_dirs 新增 corpus_domain 列
@@ -423,6 +581,70 @@ impl Store {
                 [],
             )?;
         }
+        Ok(())
+    }
+
+    /// v0.7 自学习闭环：skill_signals 新增 kind + ref_id 列（幂等）
+    ///
+    /// 老 vault 升级：所有现存信号默认 kind='search_miss'（与原语义一致），
+    /// ref_id 为 NULL。新信号写入时显式指定 kind。
+    fn migrate_skill_signals_v07(conn: &Connection) -> Result<()> {
+        let has_kind: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('skill_signals') WHERE name = 'kind'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_kind == 0 {
+            conn.execute(
+                "ALTER TABLE skill_signals ADD COLUMN kind TEXT NOT NULL DEFAULT 'search_miss'",
+                [],
+            )?;
+        }
+        let has_ref: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('skill_signals') WHERE name = 'ref_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_ref == 0 {
+            conn.execute(
+                "ALTER TABLE skill_signals ADD COLUMN ref_id TEXT",
+                [],
+            )?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_skill_sig_kind ON skill_signals(kind, processed, created_at)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// v0.7 记忆护城河：items 新增 content_hash 列（SHA-256 hex of plaintext，幂等）
+    ///
+    /// 用途：
+    /// 1. update_item / upload 入口短路 — 新 content hash == 旧值时跳过 re-embed
+    /// 2. delete_item → reindex::purge_item_indexes 时无需重新解密验证
+    /// 3. chunk-level diff 的基础（v0.7 next sprint）
+    ///
+    /// 老 vault 升级：列加上后默认 ''，下次 update_item 或 reindex 时 lazy backfill。
+    fn migrate_items_content_hash(conn: &Connection) -> Result<()> {
+        let has_col: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('items') WHERE name = 'content_hash'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_col == 0 {
+            conn.execute(
+                "ALTER TABLE items ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        // R16 review fix: INDEX CREATE 提出 if 块外。否则用户手动 ALTER 加列 / 历史
+        // 中断的 migration / 测试 fixture 升级时，列存在但索引缺失会得不到补建。
+        // CREATE INDEX IF NOT EXISTS 本身幂等无害。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_items_content_hash ON items(content_hash)",
+            [],
+        )?;
         Ok(())
     }
 

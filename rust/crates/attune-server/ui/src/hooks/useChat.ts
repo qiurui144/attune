@@ -13,8 +13,9 @@ import {
   chatSessions,
   activeSessionId,
   messages,
+  lastCostEstimate,
 } from '../store/signals';
-import type { ChatSession, Message } from '../store/signals';
+import type { ChatSession, Message, CostEstimate } from '../store/signals';
 
 // ── 后端响应类型 ─────────────────────────────────────────────
 type SessionsResponse = {
@@ -40,6 +41,7 @@ type ChatResponse = {
   session_id?: string;
   web_search_used?: boolean;
   hint?: string;
+  cost_estimate?: CostEstimate;
 };
 
 // ── Session 管理 ─────────────────────────────────────────────
@@ -132,6 +134,11 @@ export async function sendMessage(
     if (!currentSession && res.session_id) {
       activeSessionId.value = res.session_id;
       void loadSessions();
+    }
+
+    // 更新 cost signal 供 TokenChip 展示真实费率
+    if (res.cost_estimate) {
+      lastCostEstimate.value = res.cost_estimate;
     }
 
     if (res.hint) {

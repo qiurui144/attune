@@ -4,6 +4,7 @@ import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
 import { Button, EmptyState } from '../components';
 import { toast } from '../components/Toast';
+import { t } from '../i18n';
 import {
   listSkills,
   setSkillDisabled,
@@ -27,13 +28,13 @@ export function SkillsView(): JSX.Element {
   async function handleToggle(s: SkillSummary, enable: boolean) {
     const ok = await setSkillDisabled(s.id, !enable);
     if (!ok) {
-      toast('error', '保存失败');
+      toast('error', t('skills.toast.save_failed'));
       return;
     }
     skills.value = skills.value.map((x) =>
       x.id === s.id ? { ...x, disabled_by_user: !enable } : x
     );
-    toast('success', enable ? '已启用' : '已禁用');
+    toast('success', enable ? t('skills.toast.enabled') : t('skills.toast.disabled'));
   }
 
   return (
@@ -54,25 +55,26 @@ export function SkillsView(): JSX.Element {
         }}
       >
         <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
-          🧠 Skills
+          {t('skills.title')}
         </h2>
         <Button variant="secondary" size="sm" onClick={() => void refresh()}>
-          刷新
+          {t('skills.refresh')}
         </Button>
       </header>
 
       <p style={{ color: 'var(--color-text-secondary)', margin: 0, fontSize: 'var(--text-sm)' }}>
-        chat 关键词触发到你安装的 skill。免费版和 Pro 版机制相同；自己写或下载 .attunepkg
-        解压到 <code>~/.local/share/attune/plugins/&lt;name&gt;/</code> 即可。
+        {t('skills.intro.before')}
+        <code>~/.local/share/attune/plugins/&lt;name&gt;/</code>
+        {t('skills.intro.after')}
       </p>
 
       {loading.value ? (
-        <div style={{ color: 'var(--color-text-secondary)' }}>加载中…</div>
+        <div style={{ color: 'var(--color-text-secondary)' }}>{t('common.loading')}</div>
       ) : skills.value.length === 0 ? (
         <EmptyState
           icon="🧠"
-          title="还没安装任何技能"
-          description="在插件市场可以浏览并安装社区分享的技能与智能助手。"
+          title={t('skills.empty.title')}
+          description={t('skills.empty.desc')}
         />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
@@ -134,7 +136,7 @@ function SkillRow({
             alignItems: 'center',
             fontSize: 'var(--text-xs)',
           }}>
-            <span style={{ color: 'var(--color-text-secondary)' }}>关键词触发：</span>
+            <span style={{ color: 'var(--color-text-secondary)' }}>{t('skills.keyword_trigger')}</span>
             {s.keywords.map((k) => (
               <span key={k} style={{
                 background: 'var(--color-surface-hover)',
@@ -147,7 +149,7 @@ function SkillRow({
                 title={s.patterns.join('\n')}
                 style={{ color: 'var(--color-text-secondary)', fontStyle: 'italic' }}
               >
-                + {s.patterns.length} 正则
+                {t('skills.patterns_count', { count: s.patterns.length })}
               </span>
             )}
           </div>
@@ -168,10 +170,10 @@ function SkillRow({
         />
         <span style={{ fontSize: 'var(--text-sm)' }}>
           {lockedOff
-            ? '插件未启用'
+            ? t('skills.status.plugin_disabled')
             : s.disabled_by_user
-              ? '已禁用'
-              : '已启用'}
+              ? t('skills.status.disabled')
+              : t('skills.status.enabled')}
         </span>
       </label>
     </div>

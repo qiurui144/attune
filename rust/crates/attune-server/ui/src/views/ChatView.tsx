@@ -48,7 +48,7 @@ export function ChatView(): JSX.Element {
         onSend={async (text) => {
           await sendMessage(text);
         }}
-        isLocal
+        isLocal={isLlmLocal()}
       />
     </div>
   );
@@ -63,6 +63,18 @@ function getCurrentModel(): string {
     return t('chat.model.auto');
   }
   return model;
+}
+
+// 从 settings 判断当前 LLM 是否本地（Ollama / K3 → true；cloud provider → false）
+// settings 未加载时返回 null（未知），TokenChip 据此显示"—"而非误报"本地"
+function isLlmLocal(): boolean | null {
+  const s = settings.value;
+  if (!s) return null;
+  const llm = s.llm as { provider?: string } | undefined;
+  if (!llm?.provider) return null;
+  // cloud providers: openai / anthropic / gemini / deepseek / qwen / attune_pro / custom
+  const cloudProviders = ['openai', 'anthropic', 'gemini', 'deepseek', 'qwen', 'attune_pro', 'custom'];
+  return !cloudProviders.includes(llm.provider);
 }
 
 // ── Chat 顶栏 ────────────────────────────────────────────────

@@ -206,7 +206,7 @@ impl QueueWorker {
 ///
 /// 返回成功处理的 task id；批量 embed 失败抛错（调用方决定是否 mark_failed）。
 pub fn embed_and_index_batch(
-    _store: &Store,
+    store: &Store,
     embedding: &dyn EmbeddingProvider,
     vectors: &mut VectorIndex,
     fulltext: &FulltextIndex,
@@ -218,10 +218,33 @@ pub fn embed_and_index_batch(
     let texts: Vec<&str> = tasks.iter().map(|t| t.chunk_text.as_str()).collect();
     let embeddings = embedding.embed(&texts)?;
 
+    // R10 S3 fix (P1): item 存活检查缓存。竞态场景 — embed worker dequeue chunk 任务
+    // 时 item 还在，但 embedding 完写向量前 item 已被 delete_item 软删（reindex
+    // worker / HTTP delete 并发）。不检查会写 orphan 向量（已删文档仍被搜到）。
+    // 同 batch 多 chunk 常属同 item → HashMap 缓存避免重复 COUNT 查询。
+    let mut alive_cache: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+
     let mut done_ids = Vec::with_capacity(tasks.len());
     for (i, task) in tasks.iter().enumerate() {
         if i >= embeddings.len() {
             break;
+        }
+        // R10 S3 fix (update 场景，P1): chunk 任务行被 reindex/delete 的
+        // purge_embed_queue_for_item DELETE 掉 → 该 chunk 已作废（item 被 PATCH
+        // 重切 / 被删）→ 跳过写向量，防 stale 向量（大文档实测必现）。
+        // task 行已不在表里，不 push done_id（mark_done 也无行可改）。
+        // 行还在 OR 查询失败（保守继续）
+        if let Ok(false) = store.embed_task_exists(task.id) { continue }
+        let alive = *alive_cache
+            .entry(task.item_id.clone())
+            // 查询失败时保守视为存活（继续写，宁可暂时 orphan 也不因瞬时 DB
+            // 错误丢正常文档的向量；下次 reindex 会纠正）
+            .or_insert_with(|| store.item_exists(&task.item_id).unwrap_or(true));
+        if !alive {
+            // item 已软删 → 跳过写向量防 orphan，但仍 push done_id 让任务出队
+            // （重试一个 item 已删的 embedding 任务无意义）
+            done_ids.push(task.id);
+            continue;
         }
         vectors.add(
             &embeddings[i],

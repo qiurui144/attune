@@ -1,23 +1,21 @@
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::Json;
 use attune_core::vault::VaultState;
 
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
 pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
 }
 
-pub async fn status(
-    State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let vault = state.vault.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "vault lock poisoned"})),
-        )
-    })?;
+/// D-R13 ARCH-A reference migration: 用 AppError + AppResult 代替 (StatusCode, Json)
+/// tuple style. 客户端拿到统一 {"error": msg, "code": kebab} shape.
+pub async fn status(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     let vault_state = vault.state();
 
     let (items, pending) = if matches!(vault_state, VaultState::Unlocked) {

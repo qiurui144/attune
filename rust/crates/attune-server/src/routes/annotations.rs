@@ -142,6 +142,15 @@ pub async fn create_annotation(
         (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": e.to_string()})))
     })?;
 
+    // v0.7 自学习闭环 Phase B hook 3：annotation_marker 信号喂 skill_evolution。
+    // 用户标 ⭐ 重点 / 🤔 存疑 / ❓ 不懂 都是高价值偏好信号 — skill_evolution 用
+    // ref_id（item_id）反查附近 chunk 在最近 search 里的命中情况：
+    // - 重点 → 该 chunk 同义词应保留 / 加权
+    // - 存疑/不懂 → query 可能召回了"看起来相关实则用户不满"的 chunk，需扩展词补强
+    if let Err(e) = vault.store().record_signal_event("annotation_marker", &body.item_id, input.label.as_deref()) {
+        tracing::debug!(signal = "annotation_marker", error = %e, "record_signal_event failed (non-fatal)");
+    }
+
     Ok(Json(serde_json::json!({"id": id, "status": "ok"})))
 }
 
@@ -198,6 +207,14 @@ pub async fn update_annotation(
     vault.store().update_annotation(&dek, &id, &input).map_err(|e| {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e.to_string()})))
     })?;
+
+    // R21 S2-1 fix: 用户改批注（如 ⭐ 重点 → 🤔 存疑）是态度反转，evolver 应可见。
+    // 反查 item_id（annotation update 不带 item_id 字段），写 annotation_marker 信号。
+    if let Ok(Some(item_id)) = vault.store().get_annotation_item_id(&id) {
+        if let Err(e) = vault.store().record_signal_event("annotation_marker", &item_id, input.label.as_deref()) {
+            tracing::debug!(signal = "annotation_marker", error = %e, "record_signal_event failed (non-fatal)");
+        }
+    }
 
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
@@ -362,8 +379,16 @@ pub async fn delete_annotation(
     let _ = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
     })?;
+    // R21 S2-1 fix: 先取 item_id 用于信号；再删。撤回批注（如撤掉之前的 ⭐）也是
+    // evolver 必要的负向信号（防止单方面累积"重点"权重导致 search 偏倚）。
+    let item_id_for_signal = vault.store().get_annotation_item_id(&id).ok().flatten();
     vault.store().delete_annotation(&id).map_err(|e| {
         (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e.to_string()})))
     })?;
+    if let Some(item_id) = item_id_for_signal {
+        if let Err(e) = vault.store().record_signal_event("annotation_marker", &item_id, Some("deleted")) {
+            tracing::debug!(signal = "annotation_marker", error = %e, "record_signal_event failed (non-fatal)");
+        }
+    }
     Ok(Json(serde_json::json!({"status": "ok"})))
 }

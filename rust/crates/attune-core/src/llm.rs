@@ -115,6 +115,13 @@ pub trait LlmProvider: Send + Sync {
 
     /// 当前使用的模型名（用于 tags.model 记录）
     fn model_name(&self) -> &str;
+
+    /// 是否为本地 LLM（Ollama / localhost endpoint）。隐私判定用：
+    /// 敏感案件强制本地时，云端 provider 不得处理注入了证据的对话。
+    /// 默认 `false`（保守：未知 provider 视为云端 → F1 拦截，偏安全侧）。
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 // OllamaChatRequest / OllamaChatMessage structs removed v0.6.4 — both chat_sync
@@ -320,6 +327,10 @@ impl LlmProvider for OllamaLlmProvider {
 
     fn model_name(&self) -> &str {
         &self.model
+    }
+
+    fn is_local(&self) -> bool {
+        true // Ollama 始终是本地 runtime
     }
 }
 
@@ -589,6 +600,27 @@ impl LlmProvider for OpenAiLlmProvider {
     fn model_name(&self) -> &str {
         &self.model
     }
+
+    fn is_local(&self) -> bool {
+        // OpenAI 兼容协议既可指向云端也可指向本地（Ollama v1 / LM Studio / vLLM）。
+        // 按 endpoint 的 **host 精确判定**（解析 URL 取 host，非子串匹配）——
+        // 子串匹配会把 `https://localhost.evil.com/v1` 这类含 "localhost" 的
+        // 云端地址误判为本地, 绕过 F1 隐私守卫使证据对话外发。
+        let Ok(url) = reqwest::Url::parse(&self.endpoint) else {
+            return false; // 解析失败 → 保守视为云端
+        };
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        if host.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        // is_loopback 覆盖 127.0.0.0/8 与 ::1；is_unspecified 覆盖 0.0.0.0 与 ::
+        host.parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback() || ip.is_unspecified())
+            .unwrap_or(false)
+    }
 }
 
 /// 测试专用 Mock，按顺序返回预设响应
@@ -674,6 +706,23 @@ mod tests {
         let p = OpenAiLlmProvider::new("https://api.openai.com/v1", "sk-test", "gpt-4o-mini");
         assert_eq!(p.model_name(), "gpt-4o-mini");
         assert!(p.is_available());
+    }
+
+    #[test]
+    fn openai_is_local_uses_exact_host_not_substring() {
+        let local = |ep: &str| OpenAiLlmProvider::new(ep, "k", "m").is_local();
+        // 真本地 endpoint → true
+        assert!(local("http://localhost:11434/v1"));
+        assert!(local("http://127.0.0.1:1234/v1"));
+        assert!(local("http://[::1]:8080/v1"));
+        assert!(local("http://127.0.0.5/v1"), "127.0.0.0/8 回环段应判本地");
+        // 正常云端 → false
+        assert!(!local("https://api.openai.com/v1"));
+        assert!(!local("https://hiapi.online/v1"));
+        // F1 绕过攻击面：含 "localhost"/"127.0.0.1" 子串的云端地址必须判云端
+        assert!(!local("https://localhost.evil.com/v1"), "子串 localhost 不得绕过");
+        assert!(!local("https://127.0.0.1.evil.com/v1"), "子串 127.0.0.1 不得绕过");
+        assert!(!local("https://api.openai.com/v1?proxy=localhost"), "query 不参与判定");
     }
 
     #[test]

@@ -737,3 +737,58 @@ async fn test_clusters_list_returns_ok_or_service_unavailable() {
         assert!(body["clusters"].is_array(), "clusters should be an array: {body}");
     }
 }
+
+// ─── bind-remote WebDavConnector 适配回归 ────────────────────────────────────
+
+#[tokio::test]
+async fn bind_remote_unreachable_returns_structured_error() {
+    // WebDAV 不可达时必须返回结构化 500 JSON，不 panic。
+    // 验证 bind_remote 改用 WebDavConnector 后错误传播形态对外不变。
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_post(
+        state,
+        "/api/v1/index/bind-remote",
+        serde_json::json!({
+            "url": "http://127.0.0.1:1/nonexistent-webdav/",
+            "depth": 1
+        }),
+    )
+    .await;
+    assert!(
+        status.as_u16() >= 400,
+        "不可达 WebDAV 应返回错误状态，got {status}: {body}"
+    );
+    assert!(
+        body.get("error").is_some(),
+        "错误响应必须含 error 字段，got: {body}"
+    );
+}
+
+// ─── ingest unification contract ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn ingest_route_returns_stable_shape_after_unification() {
+    // 契约回归：迁到 ingest_document 后 /api/v1/ingest 响应必须仍是
+    // { id, status: "ok", chunks_queued } —— 对外形态零变化。
+    let (state, _tmp) = make_unlocked_state();
+    let (status, body) = do_post(
+        state,
+        "/api/v1/ingest",
+        serde_json::json!({
+            "title": "Unification Probe",
+            "content": "# Probe\n\nbody paragraph for chunk.\n\n# Section Two\n\nmore body.",
+            "source_type": "note"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ingest 应成功: {body}");
+    assert!(
+        body.get("id").and_then(|v| v.as_str()).is_some(),
+        "必须返回 id: {body}"
+    );
+    assert_eq!(body["status"], "ok", "status 必须是 ok: {body}");
+    assert!(
+        body["chunks_queued"].as_u64().unwrap_or(0) >= 2,
+        "L1+L2 都应入队 (>=2): {body}"
+    );
+}

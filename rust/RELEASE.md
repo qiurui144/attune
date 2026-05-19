@@ -1,5 +1,341 @@
 # attune 版本记录
 
+## v0.7.0（2026-05-19）— 多层记忆系统 + 云会员链路 + Email 采集 + WebDAV 重构 + ingest 抽象
+
+发布定位：**记忆护城河** — 四层记忆架构（token 降幅 ~78%）+ 云会员登录自配 LLM + Email IMAP 采集源 + SourceConnector 统一采集抽象 + 12 项安全/稳定性修复 + 1260+ tests。
+
+### 多层记忆系统（L0–L3）
+
+为 attune-core 加四层记忆架构，chat 上下文按 query 形态选对的层和粒度，不再一律
+dump 原始 chunk。设计稿：`docs/superpowers/plans/2026-05-18-multilayer-memory.md`。
+
+| 层 | 内容 | 装配时机 |
+|----|------|----------|
+| L0 | 原始 chunk（RAG 检索结果） | precise query，或上层命中不足时退回 |
+| L1 | episodic 记忆（chat 后自动写入） | 日常对话上下文 |
+| L2 | 滚动历史摘要（`compact_history`） | recall / 长对话历史 |
+| L3 | 语义主题摘要（hdbscan 聚类 + LLM） | overview query |
+
+**核心模块**：
+
+| 模块 | 改动 |
+|------|------|
+| 数据模型 | `memories` 新增 `topic_key`/`cold`/`superseded_by`（幂等 ALTER，老 vault 自动升级）；新表 `memory_vectors` —— embedding sidecar，让 L2/L3 摘要可向量检索 |
+| `memory/semantic.rs` | L3 语义层：episodic 按主题 hdbscan 聚类，每簇 1 次 LLM 汇总成 standing "用户对 X 的认知"，`topic_key` 幂等 refresh |
+| `memory/retrieval.rs` | `MemoryVectorIndex`（专用 usearch 索引）+ `search_memories`：embed query → 时间窗口过滤 → 冷记忆排除 |
+| `memory/assembler.rs` | `classify_query_shape`（recall/overview/precise 零 LLM 启发式）+ `assemble_context` tier-aware 装配；coverage gate 命中弱即退回 L0 |
+| `compact_history` | 历史压缩：超窗对话轮次不再静默丢弃，滚动摘要为 1 条并按 `sha256(dropped)` 缓存 |
+| `start_memory_consolidator` | 后台 worker：episodic pass → embed L2/L3 → L2→L3 语义周期 → 冷降级（纯 SQL） |
+
+**成本契约**：建库阶段不变（tier 1-2）；L2/L3 摘要为 tier 3 + 配额治理；冷降级 tier 0；
+读路径仅选已建好的记忆，不触发 LLM。
+
+**实测**（`memory_token_reduction_benchmark`）：recall+overview 子集注入 token 中位降幅
+**78.7%**，precise 子集 0%（precise 永不离开 L0）。
+
+测试：46 unit + 5 集成（`multilayer_memory_integration`）+ 1 benchmark，全绿。
+
+### 云会员登录自配 LLM 网关
+
+成员登录后自动为 LLM 完成云端配置，无需手动填写 API Key。
+
+- `feat(core): cloud_client UserInfo` 携带 `gateway_token` + `gateway_url`
+- `feat(core): llm_settings` merge helper — configure-if-unconfigured 语义，不覆盖用户已有配置
+- `feat(server): member login` 触发 `apply_cloud_llm_if_needed`，热重载 LLM provider
+- `fix(cloud): wire attune↔cloud membership chain end-to-end`
+- code-review P2 修复：LLM reload 竞态、`no expect()`、`dek_db` guard、共享常量
+
+### Email（IMAP）采集源
+
+通过 IMAP UID 增量同步将邮件自动接入知识库。
+
+- `feat(store): email_accounts` 加密持久化表（vault DEK 保护账户密码）
+- `feat(ingest): ImapFetcher` 可注入接口 + `EmailConnector` IMAP UID increment 实现
+- `feat(ingest): parse_email_bytes` 邮件解析层（支持 text/html 正文 + 附件提取）
+- `feat(server): email account CRUD` (`/api/v1/remotes/email/*`) + 手动同步路由
+- `feat(server): periodic email sync worker` — 与 WebDAV worker 共用调度框架
+- `fix(ingest): advance email UID cursor` 仅越过已完整处理的 UID，防重复入库
+- UI：Settings → 远程数据源 → 邮件账户区块（中英双语）
+
+### SourceConnector 统一采集抽象 + WebDAV 重构
+
+把散落的 scanner / upload / ingest 路由收口到统一 pipeline。
+
+- `feat(ingest): SourceConnector trait + RawDocument` — 所有采集源共同接口
+- `feat(ingest): ingest_document` — parse → dedup（content_hash 短路）→ insert → embed → classify 统一入库函数
+- `feat(ingest): LocalFolderConnector` + `WebDavConnector` 各自实现 trait
+- refactor：`/api/v1/upload`、`/api/v1/ingest`、`bind-remote`、`scanner.rs` 全部走 `ingest_document`
+- `feat(ingest): WebDAV 周期增量同步 worker` + 配置加密持久化（`53f4890`）
+
+### UI
+
+- **双层侧边栏导航**：主导航 + 可折叠「更多」二级入口（`feat(ui): two-tier sidebar nav`）
+- **修复**：折叠「更多」时当前页面高亮指示消失（`fix(ui): active indicator on collapsed 更多 toggle`）
+- **Email 账户区块**：远程视图新增邮件账户管理 UI + API hook + i18n key（zh/en）
+
+### WebSocket / AI Stack 修复
+
+- `fix(ws): allow tokenless WS connect for no-auth dev mode` — 无 token 时 `/ws/scan-progress` 不再 401，dev 模式可直连
+- `fix(ws+ai_stack): WebSocket 401 token missing + ai_stack web_search field absent` — WS 握手 token 拼入 URL；`/api/v1/ai_stack` 补 `web_search.available` 字段
+- `fix(server): redact WS session token from access logs` — 访问日志中 `?token=` 参数替换为 `<redacted>`（安全）
+
+### 记忆护城河 Phase A+B（文档编辑嵌入 + 自学习闭环）
+
+修复 ≤v0.6.3 的 3 个 release-blocker，建立自学习信号管道：
+
+| Bug | 修法 |
+|-----|------|
+| `update_item` 不 re-embed → 编辑后搜索返回旧内容 | `UpdateOutcome` 三态 + `reindex::reindex_item` 完整 pipeline |
+| 同名重传不去重 | `content_hash` dedup 短路（SHA-256） |
+| `delete_item` 不清向量/全文索引（死代码路径） | `reindex::purge_item_indexes` 先清后软删 |
+| scanner 变更触发删除但拿不到 vectors lock | `reindex_queue` 表 + `start_reindex_worker` 3s 轮询消费 |
+
+自学习 hook 新增 3 类信号（`doc_create` / `doc_update` / `citation_hit` / `annotation_marker`），
+汇入 `skill_signals` 表，向后兼容旧 `search_miss` 路径。
+
+### 其他功能
+
+- `feat(search): query_rewrite` 模块接线 — 口语 query 改写提升 RAG hit rate
+- `feat(cost): TokenChip` 接线 Chat — 真实 token/费用估算
+- `feat(vlm): LlmVlmProvider` 接线 — 复用 LlmProvider 视觉多模态路径
+- `feat(agents): POST /api/v1/agents/{id}/run` 路由 — 打通前端触发 plugin agent
+- `feat(marketplace): plugin download` 落地 + 自部署 hub license 入口；`plugin_sync::install_plugin_package`（白名单 id 校验 / staging+rename 原子替换）
+- `docs: open-source acknowledgements` — 第三方依赖致谢节
+
+### 代码质量
+
+- `fix(clippy): clear -D warnings lint debt` — attune-core + attune-server 共 39 处 clippy warning 清零
+- `chore(cleanup): 剥离代码内过程标签注释` — 删除「批次 X / Round N / 阶段 Y」等过程标签，符合注释规范
+- `fix: remediate v0.7 review findings` — Reader annotations / i18n / security 若干项
+
+### 验证
+
+- workspace lib tests: 1260+ passed / 0 failed
+- integration tests: `memory_moat_integration` 14 passed + `multilayer_memory_integration` 5 passed
+- E2E 套件: `tests/e2e/run_all.sh` **90 断言全绿**（chat RAG / Playwright UI / crash recovery / annotation CRUD / 持续压力）
+- 全量前端 E2E: `tests/e2e/playwright/run_ui_all.sh`（L0 Wizard ~ law-pro）**45/0**
+
+---
+
+### v0.7.0-dev (2026-05-16 sprint) — law-pro 接入 + 证据可溯源强化
+
+attune-pro 的 law-pro 律师插件接入 attune 主程序并端到端验证（Playwright 真 Chrome
+37 元素 + 复杂证据链金额计算 12 断言全绿；本机 + AMD 部署机双环境）。围绕
+「证据可溯源 / 抽取准确度 / 上下文预算 / 隐私」做 4 批次强化。
+
+#### 批次 1 — 证据可溯源地基
+
+| 子项 | 改动 |
+|------|------|
+| A1 原始证据留存 | 新 `item_blobs` 表（AES-GCM 加密存上传原件）+ `GET /api/v1/items/{id}/original` 取回路由 —— 律师可回看原始扫描件核对 OCR。软删除时连坐清理（防"忘记"后原件残留）。 |
+| B2 OCR 置信度 | `OcrOutput.avg_confidence`（长度加权 text_score）—— 下游判断证据 OCR 是否可信 |
+| C1/C2 grounded 抽取 | law-pro `fact_extractor` —— LLM 抽取每字段强制附原文 quote，`verify_grounding` 校验 quote∈原文，幻觉 quote 作废为 null（"无依据不出数字"契约） |
+
+#### 批次 2 — 上下文预算管理器
+
+`attune-core::context_budget` —— 按 LLM 模型名查上下文窗口（qwen 32K / gemini 1M /
+claude 200K…），四段（system/知识/历史/消息）总账分配。替代写死的
+`INJECTION_BUDGET=2000` / `MAX_HISTORY_DEPTH=20`，接入 ChatEngine + `/chat` 路由；
+历史超窗按窗口裁剪并插省略说明。
+
+#### 批次 3 — 抽取准确度度量框架
+
+law-pro `fact_extractor::accuracy` —— per-field 对/错/漏/多报 → precision/recall，
+对照人工真值。优化抽取前先有度量基线。
+
+#### 批次 4 — 计算正确性 + 隐私
+
+| 子项 | 改动 |
+|------|------|
+| D2 LPR date-aware | `interest_calculator` LPR 4 倍司法保护上限按起息日查历史 LPR 表，替代写死 0.138；`lpr_capped` 上限按 `rate_type` 换算到同周期 |
+| F1 敏感案件本地 LLM | `LlmProvider::is_local()` + `/chat` 守卫：开启「强制本地」且注入证据时拦截云端 LLM（含压缩段 `summary_llm` 旁路） |
+
+#### 前端 — 变体 A · agent 结果面板
+
+`ui/src/components/AgentResultPanel.tsx` —— 通用 agent 结果面板：基础事实值默认显示、
+依据默认收起可展开（凭据卡片 + 多依据冲突横幅 + 来源标签 + 修正表单）、完整度计数器、
+计算阻断态。接入 Drawer 系统。
+
+#### OCR / 前端修复
+
+- `crypto.randomUUID` 仅安全上下文可用 → 新 `genId()` 降级，修复非安全上下文
+  （LAN IP 明文 HTTP）下前端「启动失败」
+- OCR EXIF orientation 归一（手机照片自动摆正再 OCR）+ `max_side_len` 改 `OcrProfile`
+  可配（合同/流水 ≥3200 保留小字细节）
+
+#### 验证
+
+- 单测：attune-core **908/0** · law-pro **41/0**
+- 代码审查 2 轮，修复 4 bug（软删除孤儿 blob / 已删 item 原件可取回 / F1 压缩段旁路 /
+  lpr_capped 年化上限 vs 周期利率单位不一致）
+- E2E：复杂证据链 **12/0** · Playwright UI **37/0**
+
+#### Marketplace 安装链路补完（2026-05-17）
+
+law-pro 经「pluginhub 发布 → attune Marketplace 下载」全产品路径接入并端到端验证。
+
+| 子项 | 改动 |
+|------|------|
+| Marketplace 真实安装 | `marketplace::install_plugin` 原仅返回元数据（v0.7 半成品）→ 补完为真实下载落地：`hub.install_plugin` → `hub.download_plugin` → 解压验载落地 `plugins/<id>/`。新增 `plugin_sync::install_plugin_package`（白名单 id 校验 / staging+rename 原子替换）。新插件经一次重启由 registry 装载（B 方案）。 |
+| 跨平台解压 | `extract_tarball` gzip 走纯 Rust `tar`+`flate2`（Windows P0 不依赖系统 tar），其余格式回退系统 tar。新增 `tar` / `flate2` 依赖。 |
+| 自部署 hub license | 设置「自部署 cloud 后端」表单补 `pluginhub license key` 输入框 —— 自部署 pluginhub 需 url + license_key 两者齐全才切到 `HttpPluginHubProvider`。 |
+
+- 单测：`plugin_sync` **11/0**（含 `install_plugin_package` 落地 / 路径穿越 / id 不匹配 / 覆盖安装 4 例）
+- 代码审查 2 轮，修复 6 项（路径穿越白名单 / tar shell-out 跨平台 / 覆盖安装原子性 / magic 短读 / staging 泄漏 / 测试辅助依赖系统 tar）
+- E2E：AMD cloud（pluginhub 真实发布）→ attune Marketplace 下载安装 law-pro → civil_loan_agent
+  端到端；4 组证据链经前端 civil_loan 表单对账（标准 ¥19,200 / golden ¥24,065.75 /
+  砍头息 ¥207,123.29 / 利率红线 LPR 封顶 ¥469,139.73）
+- 全量前端套件 `tests/e2e/playwright/run_ui_all.sh`（真 Chrome，L0 Wizard ~ L5 law-pro）**45/0**
+
+### v0.7.0-dev (2026-05-15 sprint) — 安全有效记忆护城河 Phase A+B
+
+> **「优势不在于模型，而在于以安全有效的记忆」**（per 用户决策 2026-05-15）。
+> 同样的 LLM，挂上 attune 比单跑模型答得更准 — 因为记忆是私有的、可审计的、随用户使用持续变好的。
+
+#### Phase A — 文档编辑嵌入功能完全有效（修 3 个 release-blocker）
+
+之前各 update path 各写一份"删旧加新"流程，留下 3 个生产 bug：
+
+| Bug (≤ v0.6.3) | 修法 (v0.7) |
+|----------------|-------------|
+| `routes/items.rs::update_item` 完全不 re-embed → UI 编辑后 search 永远返回旧内容 | UpdateOutcome 三态 + `reindex::reindex_item` 完整 pipeline |
+| `routes/upload.rs` 同名重传不去重 | content_hash dedup 短路 |
+| `routes/items.rs::delete_item` 不调 `vectors::delete_by_item_id` + `fulltext::delete_document` (这两个函数已实现但 0 处调用，**死代码**) | `reindex::purge_item_indexes` 先清后软删 |
+| `scanner.rs` / `scanner_webdav.rs` 文件变更触发 `store.delete_item` 但拿不到 vectors lock | `reindex_queue` 表 + server `start_reindex_worker` 3s 轮询消费 |
+
+**核心架构新增**：
+- `attune-core::reindex` 模块 — 协调 store + vectors + fulltext + queue **事务式** cleanup
+- `items.content_hash` 列（SHA-256 hex）+ migration + index — 短路条件
+- `reindex_queue` 表 — defer 跨层 worker 的清理职责
+- `AppState::start_reindex_worker` — 后台 3s 轮询 worker，vault unlock 时启动
+
+#### Phase B — 自学习闭环 3 hook
+
+之前 skill_evolution 仅消费"搜索失败"信号（最低级），批注 / citation / 文档变更 / hit count / feedback 全部 NO。本 sprint 把 5 类信号汇聚到 `skill_signals` 表（kind 列区分）：
+
+| Hook | kind | 写入位点 | 意义 |
+|------|------|----------|------|
+| 1 | `doc_create` | upload.rs | 新文档进入 → 喂入 search 词库 |
+| 1 | `doc_update` | items.rs::update + scanner.rs | 内容改变 → 重新评估同义词 |
+| 1 | `doc_delete` | items.rs::delete | 文档移除 → 清理过期词 |
+| 2 | `citation_hit` | chat.rs (top-5) | chunk 被 LLM 引用 → **高质量信号**，扩展词学习时优先保留语义 |
+| 3 | `annotation_marker` | annotations.rs | 用户标 ⭐ 重点 / 🤔 存疑 → 偏好信号 |
+
+schema：`skill_signals` 加 `kind` + `ref_id` 列 + migration + composite index
+API：`Store::record_signal_event(kind, ref_id, query_opt)` + `count_unprocessed_signals_by_kind`
+向后兼容：老 `record_skill_signal` 内部固定 `kind='search_miss'`，不破坏现有 evolver
+
+#### Phase C — spec only（v0.7 后续 sprint）
+
+`docs/specs/memory-moat-v07.md` — RICE 排序 5 项：C1 文档版本化记忆 / C2 编辑触发自动重标注 / C3 失败信号反推 project_recommender / C4 知识衰减曲线 / C5 embed_model_version 迁移工具链
+
+#### v0.7 sprint 1（5 agents 并行）— commit 71d82ee
+
+- **attune-core**：cost / tools / demo / query_rewrite / entity_graph / skill_eval / report / reader / capture / sync / vlm / store::audit_log
+- **attune-server** 路由：/audit/log + /audit/log.csv + /demo/load + /chat/stream
+- 修 `parse_this_month_english` 测试硬编码常量错算 4 天 bug
+
+#### 30 轮 sprint + R1-R9 滚动 review（静态审查 + 单元测试）
+
+W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
+`docs/specs/memory-moat-v07.md` §6.5 / §6.6。
+
+#### Round A-H 真实场景 E2E（编译真实 server，全程 HTTP）
+
+转向真实运行场景测试 — `tests/e2e/` 9 脚本 90 断言（见 `tests/e2e/README.md`）：
+
+- Round A chat RAG / B Playwright UI / C 回归 / D 故障注入 + crash recovery /
+  E annotation CRUD / F 持续压力泄漏监控 / G 套件 runner
+- 真实测试净抓 4 个静态 review 遗漏的 bug：
+  search_cache 失效 P0 / S3 embed worker 竞态 P1 / ws/scan-progress 403 P1 /
+  PATCH body limit 死代码 P1
+- `bash tests/e2e/run_all.sh` 一键跑全套，实测 **90 断言全绿**
+
+#### 验证
+
+- workspace lib tests: **919 passed / 0 failed / 1 ignored**（10 cli + 893 core + 16 server）
+- integration tests: memory_moat_integration **14 passed**
+- E2E 套件: 9 脚本 **90 断言全绿**（含真实 Ollama RAG / Playwright UI / crash recovery）
+- perf 实测（release）: 100KB reindex 834ms / 500KB 1.95s / 100KB upload ~1.1s
+- `python/tests/MANUAL_TEST_CHECKLIST.md` 含 8 条 Memory Moat 验收
+
+#### Commits (cumulative, 21 commits)
+
+- `71d82ee` feat(v07): 15 P0 缺口模块批量落地
+- `50d994b` feat(memory-moat): v0.7 Phase A+B
+- `6c6ce71`..`f022f56` W1-W4 30 轮 sprint（文档 / 代码 review / logic audit / 测试）
+- `9358c02`..`bb2e2ee` R1-R9 滚动 review（perf / 安全 / 错误泄露 / 资源 / 兼容 / 死链）
+- `82cd79d`..`2159d98` R10 + Round A-N 真实场景 E2E（抓 4 bug + 9 脚本 90 断言套件）
+
+---
+
+## v0.6.4 dev (post-GA) — 30 轮深度知识库 + 代码文档评阅 sprint (2026-05-15)
+
+发布定位: **post-v0.6.3 GA 内功** — 知识库核心组件审计 + 文档化 + 5 ADR + 部署/插件/wizard 三文档归并.
+本 sprint 主体不动 prod 代码 (仅 1 reference migration + lib.rs/chunker.rs //! crate doc),
+重在沉淀团队约定 + 决策记录, 为 v0.7 PR 阶段铺路.
+
+**12 轮知识库深度评阅**:
+
+| 轮 | 模块 | 结论 |
+|---|------|------|
+| R1 | chunker.rs (741 LoC) | code fence balance ✓; 改进空间: chunk_size 512→1024 (中文) + sentence boundary 50→100 字符. 留 v0.7 reindex tool |
+| R2 | parser.rs (1033 LoC) | pdf / docx / asr / code / OCR fallback 完整 |
+| R3 | search.rs (RRF) | K=60 + cross-lang + cross-domain penalty + budget allocation. 设计良好 |
+| R4 | vectors.rs (usearch HNSW) | f16 + cos metric; 默认 HNSW params, 可暴露 to settings (v0.7 advanced) |
+| R5 | store/items.rs 加密 | content/tags BLOB 加密 ✓, title/url 明文 (list 性能 trade-off, doc 须明示) |
+| R6 | embed.rs | Ollama HTTP provider; v0.7 候选: ONNX direct (bge-small offline) |
+| R7 | rerank pipeline | bge-reranker-v2-m3 via Ort, lazy hf_hub fallback |
+| R8 | classifier + clusterer | Ollama qwen + hdbscan; min_samples=5/min_cluster=5 暴露 to settings (v0.7) |
+| R9 | context_compress | budget-aware + cite preserve; chat.rs F-Pro evidence flow ✓ |
+| R10 | taxonomy + plugin 融合 | 3 source HashSet 去重 (前 PLG-1 fix). conflict resolution log (v0.7) |
+| R11 | F-17 PII redact | 12 类全覆盖 ✓; audit_log 当前 tracing 占位, v0.7 真持久化 store::audit_log |
+| R12 | web_search 三层 fallback | 系统 / cache / NeedsDownload (FIX-9 stage 1 已 ship API) |
+
+**8 轮代码深度审计 (D-R13~D-R20)**:
+
+| 轮 | 主题 | 结论 |
+|---|------|------|
+| D-R13 | AppError migration | status.rs::status 作 reference migrate; 其余 ~37 routes 渐进 v0.7 |
+| D-R14 | ArcSwap actual swap | 评估 ArcSwapOption&lt;dyn Trait&gt; 不支持 load_full (372 编译错). v0.7 用 ArcSwap&lt;Arc&lt;dyn&gt;&gt; + NoopProvider |
+| D-R15 | 模块归并 ai/ | 100+ import 改写涉及, v0.7 单独 PR |
+| D-R16 | 测试覆盖 | attune-core 1 test/38 LoC, 中等偏上 ✓ |
+| D-R17 | 内存泄漏 | 7 worker loop 通过 AtomicBool flag, broadcast capacity 64 自 drop. 无明显泄漏 ✓ |
+| D-R18 | logging level | 51 info + 47 warn + 11 debug + 2 error 分布合理 ✓ |
+| D-R19 | graceful shutdown | lib.rs:306 SIGTERM+SIGINT handler 已实施 ✓ |
+| D-R20 | SQLite WAL | journal_mode=WAL + busy_timeout=5000 + wipe checkpoint+VACUUM ✓. v0.7 加 startup PRAGMA optimize |
+
+**6 轮文档化 (D-R21~D-R26)**:
+
+- **D-R21**: lib.rs `//!` crate doc 写完 + chunker.rs `//!` 模板. 其余 1127 doc gap 增量 v0.7
+- **D-R22**: docs/adr/ 5 ADR — OSS×Pro / FormFactor / GitFlow Lite / AppError / F-17 PII
+- **D-R23**: cargo doc -p attune-core 通 (15 warning, broken intra-doc 后续修)
+- **D-R24**: docs/wizard-flow.md — 5 步首启 + 失败回退 4 行表
+- **D-R25**: docs/plugin-development.md — yaml schema + signing + encryption + 4 vertical + 本地测试
+- **D-R26**: docs/deploy.md — Laptop / NAS / K3 三形态 + 迁移 + 故障排查
+
+**4 轮 cross-cutting (D-R27~D-R30)**:
+
+- **D-R27**: 安全审计 — Argon2id + AES-GCM + Device Secret 设计优秀 ✓
+- **D-R28**: perf baseline — 已有 perf_chunker_bench.rs (#[ignore]). 完整 criterion 矩阵 v0.7
+- **D-R29**: Observability — tracing_subscriber 在; /metrics + JSON logging 选项 v0.7
+- **D-R30**: 本 sprint 汇总入 RELEASE + commit/push
+
+**v0.7 跟踪清单** (RICE 排序):
+
+| 项 | RICE | Effort | Note |
+|---|------|-------|------|
+| ArcSwap 真 migration (D-R14) | high | 1 day | Arc<dyn>+NoopProvider 占位法 |
+| 37 routes AppError migrate (D-R13) | high | 2 day | reference 已在 status.rs |
+| audit_log 持久化 (R11/F-17) | high | 0.5 day | UI 入口已 wire |
+| 模块归并 ai/ (D-R15) | medium | 1 day | 100+ import |
+| Rustdoc 增量补 (D-R21) | medium | continuous | 每周 100 个 pub item |
+| criterion bench 矩阵 (D-R28) | medium | 1 day | 3 form factor × N config |
+| metrics endpoint (D-R29) | medium | 0.5 day | Prometheus-style |
+| HNSW params expose to settings (D-R4) | low | 0.3 day | advanced 用户 |
+
+---
+
 ## v0.6.1（2026-04-30）— 边界收敛 + FormFactor 形态分裂 + RUSTSEC patch
 
 发布定位：v0.6.0 GA 后第一个 minor — 治理 + 安全 + 形态感知，非用户可见功能新增。

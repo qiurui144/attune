@@ -21,6 +21,11 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     let embedding_loaded = state.embedding.lock().ok().map(|g| g.is_some()).unwrap_or(false);
     let rerank_loaded = state.reranker.lock().ok().map(|g| g.is_some()).unwrap_or(false);
     let llm_configured = state.llm.lock().ok().map(|g| g.is_some()).unwrap_or(false);
+    // web_search readiness mirrors the actual decision in routes/chat.rs:
+    // state.web_search is Some iff a usable browser was auto-detected (or an
+    // explicit browser_path was set and verified). Checking the same Arc means
+    // the status here stays in sync with whether chat web-search would succeed.
+    let web_search_available = state.web_search.lock().ok().map(|g| g.is_some()).unwrap_or(false);
 
     let ocr_provider = attune_core::ocr::detect_default_provider();
     let ocr_available = ocr_provider.is_some();
@@ -101,6 +106,11 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "configured": llm_configured,
             "default": "remote token (per CLAUDE.md M2: 不在本地预装 LLM)",
             "note": note(llm_configured, "Settings → AI 模型 配 endpoint + api_key")
+        },
+        "web_search": {
+            "available": web_search_available,
+            "engine": "browser (DuckDuckGo)",
+            "note": note(web_search_available, "未检测到 Chrome/Edge — 安装 Chrome 或在 Settings 中指定 browser_path")
         }
     }))
 }

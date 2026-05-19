@@ -312,6 +312,69 @@ Settings UI 采用 ChatGPT/Gemini/Claude 共同范式：模态对话框（左 ta
 - 后端端口: 18900
 - **API path 命名 kebab-case** (per OPT-5). 新 path 必须 kebab; 旧 snake path 保留 alias 1 release 周期后删
 
+### Web UI 国际化（i18n）规范（强制 — 2026-05-15 确立，杜绝中英混杂）
+
+**问题**：`attune-server/ui/src/` 下多个视图把界面文案**硬编码成中文字面量**，绕过 `t()`。
+这些字符串永远显示中文；而 wizard / Sidebar / 组件走 `t()` 会随 locale 切换 —— 当
+locale=en（英文浏览器 / 用户切英文）时就出现「英文外壳 + 中文视图」的中英混杂。
+
+**根因**：i18n key 表（`i18n/zh.ts` + `i18n/en.ts`）本身齐全（key 集合一致），但 `.tsx`
+里大量 `toast('error', '保存失败')` / `title="新建项目"` / `placeholder="如：..."` / JSX
+文本节点 `<span>刷新</span>` 没有进 `t()`。i18n 引擎 `t()` 缺 key 时按 zh→key 兜底，
+所以「漏写一个 locale」也会静默显示错语言。
+
+**铁律（所有 UI 改动强制遵守）**：
+
+1. **任何用户可见字符串必须走 `t()`**，零硬编码。易漏点全覆盖：
+   - JSX 文本节点：`<span>刷新</span>` → `<span>{t('common.refresh')}</span>`
+   - 属性：`title=` / `placeholder=` / `label=` / `description=` / `aria-label=`
+   - `toast(type, msg)` 的 `msg` 参数
+   - 按钮文案、表头 `<th>`、`EmptyState` 的 title/description、`error` 提示文案
+   - 动态拼接用 `{param}` 插值（`t('x.created', {name})`），禁止 `'已创建：' + name`
+2. **新增 key 必须同时写入 `zh.ts` 和 `en.ts`**，两文件 key 集合永远完全一致。
+   只写一个 → 另一 locale 静默 fallback 显示错语言。
+3. **注释不受限** —— `//` `/* */` 里的中文是开发注释、不是 UI，无需处理。
+4. **language-neutral 值例外**：品牌名（Attune）、技术术语（AI/OCR/WebDAV/LPR）、URL、
+   纯数字 —— zh/en 两边值可相同，但**仍必须建 key、走 `t()`**，不可硬编码。
+
+**提交前自检（强制 grep 守卫，两条命令都必须无输出）**：
+```bash
+cd rust/crates/attune-server/ui/src
+# (1) 硬编码中文 UI 字面量（toast / 属性值 / JSX 文本节点）
+grep -rnP "(toast\([^)]*'[^']*[\x{4e00}-\x{9fff}]|(title|placeholder|label|description|aria-label)=\"[^\"]*[\x{4e00}-\x{9fff}]|>[^<{]*[\x{4e00}-\x{9fff}])" --include="*.tsx" . | grep -v "/i18n/"
+# (2) zh / en key 集合必须一致
+diff <(grep -oP "^\s+'[\w.]+'\s*:" i18n/zh.ts | tr -d " ':" | sort) \
+     <(grep -oP "^\s+'[\w.]+'\s*:" i18n/en.ts | tr -d " ':" | sort)
+```
+有输出 = 引入了中英混杂或 key 不齐，必须修掉再提交。
+
+**存量债务**：2026-05-15 审计约 100 处硬编码中文待迁移（ProjectsView / SkillsView /
+MarketplaceView / SettingsView / Step3LLM / Step4Hardware 等）。**新代码严禁再增**；
+存量按视图逐个迁移，迁完一个视图即在该视图内 grep 守卫归零。
+
+### Rust 商用线约定 (v0.7 sprint 增量：记忆护城河)
+
+**文档生命周期协调（v0.7 新规）**:
+- 任何写 items.content 的 path（upload / update / scanner / webdav / ingest）**必须**通过 `attune-core::reindex` 模块走完整 pipeline，禁止直接调 `store.update_item` 后不 reindex
+- 新加 update path 前先看 `routes/items.rs::update_item` 和 `routes/upload.rs::upload_file` 现有 5 步：（1）算 content_hash（2）短路判断（3）DB update（4）若 content_changed → reindex_item 或 enqueue_reindex（5）写 doc_* 信号到 skill_signals
+- attune-core 后台 worker（scanner / scanner_webdav / 任何拿不到 server lock 的）**不要**自己调 vectors / fulltext API，**必须**通过 `store.enqueue_reindex(item_id, action)` 让 server worker 间接处理
+- `vectors::delete_by_item_id` + `fulltext::delete_document` 现在通过 reindex 模块统一调，**不再单独直调**
+
+**Lock ordering（防死锁）**:
+- 顺序：`vault.lock()` → `vectors.lock()` → `fulltext.lock()` → `embedding.lock()`
+- 反顺序持锁是死锁高风险路径；route handler 同时拿多锁前先 release vault guard，或保证顺序一致
+- `start_reindex_worker` 内部已经按此顺序，新加 worker 沿用相同模式
+
+**自学习信号约定**:
+- 用 `Store::record_signal_event(kind, ref_id, query_opt)` 写新信号；kind 必须从已知集选（doc_create / doc_update / doc_delete / citation_hit / annotation_marker / search_miss）
+- `record_skill_signal(query, knowledge_count, web_used)` 是老 API，仅用于 search_miss 场景（向后兼容）
+- 失败时静默忽略（`let _ = ...`），永不阻塞主流程
+
+**content_hash 短路条件**:
+- update_item 内部已做（hash 相同 → 不重写 BLOB / 不返回 content_changed）
+- upload.rs 入口做（hash 命中 → 返回 status=duplicate 跳过 insert）
+- 老 vault content_hash='' 视为"未 backfill"，update_item 时 lazy 填回；'' 不参与 `find_item_by_content_hash` 命中
+
 ### Rust 商用线约定 (v0.6.3 sprint 确立)
 
 **错误处理**:
@@ -347,6 +410,46 @@ Settings UI 采用 ChatGPT/Gemini/Claude 共同范式：模态对话框（左 ta
 - `packaging/` — 打包配置（PyInstaller/AppImage/NSIS）
 - `.github/workflows/` — CI/CD
 - `tests/` — 测试代码 + conftest.py
+- `docs/screenshots/<topic>/` — 文档/验证用截图（committed）
+- `.playwright-mcp/` — Playwright MCP 临时工作目录（gitignored）
+- `tmp/` — 临时调试，用完即删（gitignored）
+
+## 截图存放规范（Playwright MCP / 手工截图）
+
+**规则**：截图**禁止**直接写仓库根目录。`/.gitignore` 已锁 `/*.png` + `.playwright-mcp/`，
+但 working tree 60+ 散落 png 仍是 cruft. 新截图按用途分目录：
+
+| 用途 | 位置 | 是否 commit |
+|------|------|-------------|
+| 文档嵌入（doc 引用 ![]） | `docs/screenshots/<topic>/<name>.png` | ✅ commit, kebab-case |
+| E2E 视觉回归 baseline | `tests/screenshots/<test-name>/baselines/` | ✅ commit |
+| 一次性验证（GA verify / FEAT 验收） | `docs/screenshots/<release>-verification/` | ✅ commit, 带 release tag |
+| 调试 / 临时 | `.playwright-mcp/` 或 `tmp/` | ❌ gitignored, 用完删 |
+
+**MCP 工具用法**（避免根目录污染）:
+```js
+// ❌ 错: filename 是相对路径, 写到 cwd = 仓库根目录
+browser_take_screenshot({ filename: "lock-screen.png" })
+
+// ✅ 对: 显式路径到 docs/screenshots/<topic>/ 或 .playwright-mcp/
+browser_take_screenshot({ filename: ".playwright-mcp/lock-screen.png" })
+// 或归档版本
+browser_take_screenshot({ filename: "docs/screenshots/v063-ga-verification/lock-screen.png" })
+```
+
+**示例 — v0.6.3 GA 截图归档**（本会话 7 个）:
+```
+docs/screenshots/v063-ga-verification/
+├── attune-v063-01-lock-screen.png
+├── attune-v063-02-main-chat.png
+├── attune-v063-03-settings-member-cloud.png
+├── attune-v063-FEAT1-cloud-endpoint-expanded.png
+├── attune-v063-main-after-wizard.png
+├── attune-v063-wizard-step1.png
+└── attune-v063-wizard-step2-password.png
+```
+
+`docs/wizard-flow.md` 可 `![](screenshots/v063-ga-verification/attune-v063-wizard-step1.png)` 引用.
 
 ## Rust 商用线跨平台兼容规范
 

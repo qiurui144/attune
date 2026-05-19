@@ -13,6 +13,7 @@ use attune_core::tag_index::TagIndex;
 use attune_core::taxonomy::Taxonomy;
 use attune_core::vault::Vault;
 use attune_core::vectors::VectorIndex;
+use attune_core::vlm::{LlmVlmProvider, VlmProvider};
 use attune_core::web_search::WebSearchProvider;
 
 const SEARCH_CACHE_CAPACITY: usize = 256;
@@ -36,11 +37,18 @@ pub struct AppState {
     pub vault: Mutex<Vault>,
     pub fulltext: Mutex<Option<FulltextIndex>>,
     pub vectors: Mutex<Option<VectorIndex>>,
+    /// Multi-layer memory (2026-05-18): dedicated vector index over L2/L3 memory
+    /// summaries so the tier-aware assembler can rank them. Built at unlock from
+    /// `memory_vectors`; `None` until the embedding dimension is known.
+    pub memory_index: Mutex<Option<attune_core::memory::MemoryVectorIndex>>,
     pub embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     pub reranker: Mutex<Option<Arc<dyn attune_core::infer::RerankProvider>>>,
     pub llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub summary_llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub web_search: Mutex<Option<Arc<dyn WebSearchProvider>>>,
+    /// VLM provider — 图片 caption / VQA。由 init_search_engines 用主 LLM 构造；
+    /// 无 vision-capable LLM 时为 None（caption 静默跳过）。
+    pub vlm: Mutex<Option<Arc<dyn VlmProvider>>>,
     pub tag_index: Mutex<Option<TagIndex>>,
     pub cluster_snapshot: Mutex<Option<ClusterSnapshot>>,
     pub taxonomy: Mutex<Option<Arc<Taxonomy>>>,
@@ -62,6 +70,13 @@ pub struct AppState {
     pub evolve_worker_running: AtomicBool,
     /// 防止重复启动 MemoryConsolidator 后台线程（A1，2026-04-27）
     pub memory_consolidator_running: AtomicBool,
+    /// v0.7 记忆护城河：防止重复启动 ReindexWorker 后台线程（消费 reindex_queue
+    /// 让 scanner / scanner_webdav 等无法持锁的 worker 间接清向量+FTS）。
+    pub reindex_worker_running: AtomicBool,
+    /// WebDAV 周期同步 worker 是否在运行（防重复启动）。
+    pub webdav_sync_worker_running: AtomicBool,
+    /// Email 周期同步 worker 运行标志（防重入）。
+    pub email_sync_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
     /// Sprint 1 Phase B: project recommendation broadcast channel.
     /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
@@ -115,11 +130,13 @@ impl AppState {
             vault: Mutex::new(vault),
             fulltext: Mutex::new(None),
             vectors: Mutex::new(None),
+            memory_index: Mutex::new(None),
             embedding: Mutex::new(None),
             reranker: Mutex::new(None),
             llm: Mutex::new(None),
             summary_llm: Mutex::new(None),
             web_search: Mutex::new(None),
+            vlm: Mutex::new(None),
             tag_index: Mutex::new(None),
             cluster_snapshot: Mutex::new(None),
             taxonomy: Mutex::new(None),
@@ -130,6 +147,9 @@ impl AppState {
             rescan_worker_running: AtomicBool::new(false),
             evolve_worker_running: AtomicBool::new(false),
             memory_consolidator_running: AtomicBool::new(false),
+            reindex_worker_running: AtomicBool::new(false),
+            webdav_sync_worker_running: AtomicBool::new(false),
+            email_sync_worker_running: AtomicBool::new(false),
             engines_initialized: AtomicBool::new(false),
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
@@ -185,12 +205,17 @@ impl AppState {
                     *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(std::sync::Arc::new(Classifier::new(tax_arc, llm_arc.clone())));
                 }
+                // VLM 同步热切（依赖主 LLM，LLM 换了 VLM 也要跟着换）
+                *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Arc::new(LlmVlmProvider::new(llm_arc.clone())) as Arc<dyn VlmProvider>);
                 *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(llm_arc);
             }
             None => {
                 tracing::warn!("LLM hot-reload: settings yielded no LLM provider — chat will be disabled");
-                *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                // 先清依赖 LLM 的 vlm / classifier，再清 llm —— LLM 禁用后二者立即不可用
+                *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
         }
     }
@@ -212,6 +237,7 @@ impl AppState {
             let endpoint = region.hf_endpoint();
             // SAFETY: 启动时一次性设置（init_search_engines 由 compare_exchange 保证幂等）
             // 不会有并发 set_var 竞争。
+            #[allow(unsafe_code)]
             unsafe { std::env::set_var("HF_ENDPOINT", endpoint) };
             tracing::info!("Region detected: {} → HF_ENDPOINT={endpoint}", region.label());
         }
@@ -242,10 +268,16 @@ impl AppState {
         //   优先从 ~/.local/share/attune/vectors.encbin 加密加载；不存在或损坏
         //   降级为空 HNSW。写入在 start_queue_worker 批次结束时 flush（每 20 次 or
         //   每 10 分钟取近者），clear_search_engines 锁定前再 flush 一次。
+        // 锁序：先取 vault（拿 dek）再取 vectors —— 与文档化全局序
+        // vault → vectors → fulltext → embedding 一致，杜绝 vectors→vault 反序持锁。
+        let vectors_path = attune_core::platform::data_dir().join("vectors.encbin");
+        let dek_opt = self
+            .vault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .dek_db()
+            .ok();
         if let Ok(mut guard) = self.vectors.lock() {
-            let vectors_path = attune_core::platform::data_dir().join("vectors.encbin");
-            let dek_opt = self.vault.lock().unwrap_or_else(|e| e.into_inner())
-                .dek_db().ok();
             *guard = match dek_opt {
                 Some(dek) if vectors_path.exists() => {
                     match VectorIndex::load_encrypted(&dek, &vectors_path, 1024) {
@@ -289,6 +321,32 @@ impl AppState {
                 }
             };
             *guard = Some(provider);
+        }
+
+        // Multi-layer memory (2026-05-18): build the memory vector index from the
+        // memory_vectors sidecar. Dimension = active embedding provider's; rows from
+        // a different model graceful-skip inside build_from_store.
+        {
+            let dims = self
+                .embedding
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|p| p.dimensions()))
+                .filter(|d| *d > 0)
+                .unwrap_or(1024);
+            let built = {
+                let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+                attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), dims)
+            };
+            match built {
+                Ok(idx) => {
+                    tracing::info!("Memory vector index loaded ({} memories)", idx.len());
+                    if let Ok(mut g) = self.memory_index.lock() {
+                        *g = Some(idx);
+                    }
+                }
+                Err(e) => tracing::warn!("Memory vector index build failed ({e}); tiered assembler disabled until rebuilt"),
+            }
         }
 
         // Try loading OrtRerankProvider
@@ -376,6 +434,16 @@ impl AppState {
 
         if let Some(summary_llm_arc) = summary_llm_result {
             *self.summary_llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(summary_llm_arc);
+        }
+
+        // VLM：用主 LLM 构造薄适配器（vision-capable model 可直接处理图片）
+        {
+            let llm_opt = self.llm.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(llm_arc) = llm_opt {
+                let vlm: Arc<dyn VlmProvider> = Arc::new(LlmVlmProvider::new(llm_arc));
+                *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) = Some(vlm);
+                tracing::info!("VLM: LlmVlmProvider initialized (backed by main LLM)");
+            }
         }
 
         // Web search provider（从 app_settings.web_search 加载；缺省时尝试默认）
@@ -567,6 +635,290 @@ impl AppState {
             }
             state.classify_worker_running.store(false, Ordering::SeqCst);
             tracing::info!("Classify worker stopped (vault locked)");
+        });
+    }
+
+    /// v0.7 记忆护城河：启动后台 reindex worker。
+    ///
+    /// 消费 [`reindex_queue`] 表 — scanner / scanner_webdav 在 attune-core 层
+    /// 调 `store.delete_item` 后，无法直接持有 VectorIndex + FulltextIndex 锁
+    /// 清向量与 FTS，于是写信号到此表，由本 worker 周期消费 → 调用
+    /// `attune_core::reindex::purge_item_indexes`。
+    ///
+    /// 轮询周期：3 秒（不繁忙时几乎没开销，繁忙时及时清理 orphan）。
+    /// vault lock / 引擎未初始化时静默退出并重置 atomic flag。
+    pub fn start_reindex_worker(state: std::sync::Arc<AppState>) {
+        if state.reindex_worker_running.compare_exchange(
+            false, true, Ordering::SeqCst, Ordering::SeqCst,
+        ).is_err() {
+            tracing::debug!("Reindex worker already running, skipping");
+            return;
+        }
+
+        std::thread::spawn(move || {
+            // R5 P1-1 fix: RAII guard 保证任何退出路径（含 reindex_item / usearch FFI
+            // panic）都复位 reindex_worker_running flag。否则 worker thread panic 后
+            // flag 永久 true → start_reindex_worker 的 compare_exchange 永远失败 →
+            // worker 无法重启 → reindex 全停 → search 永久返回 stale 内容。
+            struct WorkerFlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for WorkerFlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _flag_guard = WorkerFlagGuard(&state.reindex_worker_running);
+
+            tracing::info!("Reindex worker started");
+            loop {
+                // vault lock check
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        break;
+                    }
+                }
+
+                let tasks: Vec<(i64, String, String, i64)> = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    vault.store().dequeue_reindex_tasks(10).unwrap_or_default()
+                };
+
+                if tasks.is_empty() {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    continue;
+                }
+
+                // 顺序处理（持锁短，按 task 释放，避免长占 vectors lock 影响 search）
+                for (task_id, item_id, action, _prior_attempts) in tasks {
+                    // R17 P1 fix (S2-Q1 + S3-Q2): 区分 Transient vs Task error。
+                    // Transient（引擎未就绪 / dek 解密失败 / vault 锁定）= 时序 race，
+                    //   不计 attempts 只 sleep；下次 unlock+ready 后正常处理。
+                    // Task（item not found / unknown action）= 任务本身有问题，
+                    //   bump attempts 让毒任务在 5 次后被 park。
+                    //
+                    // 之前所有错误统一 bump → 引擎未 ready 的 5 分钟 race 期内，正常任务会被
+                    // 错误地 park（attempts ≥ 5），需运维手动 reset 才能恢复。
+                    enum WorkerErr { Transient(String), Task(String) }
+                    let result: Result<(), WorkerErr> = (|| {
+                        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                        let dek = vault.dek_db().map_err(|e| WorkerErr::Transient(format!("dek_db: {e}")))?;
+                        let mut vectors_g = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+                        let fulltext_g = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+                        let (Some(vectors), Some(fulltext)) = (vectors_g.as_mut(), fulltext_g.as_ref()) else {
+                            return Err(WorkerErr::Transient("vectors/fulltext not initialized".into()));
+                        };
+                        match action.as_str() {
+                            "purge" => {
+                                attune_core::reindex::purge_item_indexes(vault.store(), vectors, fulltext, &item_id)
+                                    .map(|_| ())
+                                    .map_err(|e| WorkerErr::Task(e.to_string()))
+                            }
+                            // R6 P1-6 fix: 'reindex' action 实现（schema 文档化但 worker 之前未实现）
+                            "reindex" => {
+                                let item = vault.store().get_item(&dek, &item_id)
+                                    .map_err(|e| WorkerErr::Task(e.to_string()))?
+                                    .ok_or_else(|| WorkerErr::Task(format!("item {item_id} not found for reindex")))?;
+                                attune_core::reindex::reindex_item(
+                                    vault.store(), vectors, fulltext, &item_id,
+                                    &item.title, &item.content, &item.source_type,
+                                )
+                                .map(|_| ())
+                                .map_err(|e| WorkerErr::Task(e.to_string()))
+                            }
+                            other => Err(WorkerErr::Task(format!("unknown reindex action: {other}"))),
+                        }
+                    })();
+
+                    match result {
+                        Ok(_) => {
+                            {
+                                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                                let _ = vault.store().mark_reindex_done(task_id);
+                            }
+                            // R10 E2E fix (P0): reindex worker 改了向量/FTS → 失效 search 缓存
+                            state.invalidate_search_cache();
+                            tracing::info!("reindex_queue: {action} done for item={item_id}");
+                        }
+                        Err(WorkerErr::Transient(e)) => {
+                            // 不 bump attempts；等下轮引擎/dek/vault 就绪
+                            tracing::debug!(
+                                "reindex_queue: task {task_id} ({action} {item_id}) transient: {e}, will retry"
+                            );
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                        Err(WorkerErr::Task(e)) => {
+                            // R6 P0-3 fix: bump attempts → 达 5 次后 dequeue WHERE 自动 skip。
+                            let new_attempts = {
+                                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                                // R3 F3 fix: bump 失败（schema drift / WAL 故障）不应静默
+                                // 当成"到 5 次"，否则无法区分"真毒任务"与"DB 写挂了"。
+                                match vault.store().bump_reindex_attempts(task_id) {
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "reindex_queue: bump_reindex_attempts DB write failed for task {task_id}: {e} — forcing park"
+                                        );
+                                        5
+                                    }
+                                }
+                            };
+                            if new_attempts >= 5 {
+                                tracing::error!(
+                                    "reindex_queue: task {task_id} ({action} {item_id}) reached {new_attempts} attempts, parking — {e}"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "reindex_queue: task {task_id} ({action} {item_id}) failed (attempt {new_attempts}): {e}"
+                                );
+                            }
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                    }
+                }
+            }
+            // flag 复位由 WorkerFlagGuard::drop 接管（含 panic 路径，R5 P1-1 fix）
+            tracing::info!("Reindex worker stopped (vault locked)");
+        });
+    }
+
+    /// 启动 WebDAV 周期同步 worker：每 15 分钟从 webdav_remotes 表读全部
+    /// remote + 解密凭据，逐个增量重扫。原子 flag 防重入 + RAII guard 复位。
+    pub fn start_webdav_sync_worker(state: std::sync::Arc<AppState>) {
+        if state
+            .webdav_sync_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::debug!("WebDAV sync worker already running, skipping");
+            return;
+        }
+        std::thread::spawn(move || {
+            struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for FlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _guard = FlagGuard(&state.webdav_sync_worker_running);
+
+            tracing::info!("WebDAV sync worker started");
+            loop {
+                // vault 锁定则退出 —— 下次 unlock 会重新 start。
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        break;
+                    }
+                }
+
+                // 从 webdav_remotes 表读全部已配置 remote + 解密凭据（snapshot 后释放锁）。
+                let remotes: Vec<attune_core::store::webdav_remotes::WebDavRemoteRow> = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    let dek = match vault.dek_db() {
+                        Ok(k) => k,
+                        Err(_) => break, // vault 锁定 → 退出，下次 unlock 重启
+                    };
+                    vault.store().list_webdav_remotes(&dek).unwrap_or_default()
+                };
+
+                for remote in remotes {
+                    let config = attune_core::scanner_webdav::WebDavConfig {
+                        url: remote.url.clone(),
+                        username: remote.username.clone(),
+                        password: remote.password.clone(),
+                        depth: remote.depth,
+                    };
+                    // 只打印 dir_id / url，不 log password（避免凭据泄露）。
+                    tracing::info!("WebDAV sync: scanning dir={} url={}", remote.dir_id, remote.url);
+                    if let Err(e) = crate::ingest_webdav::sync_webdav_dir(
+                        &state,
+                        &remote.dir_id,
+                        config,
+                        &remote.corpus_domain,
+                    ) {
+                        tracing::warn!("WebDAV sync for dir {} failed: {e}", remote.dir_id);
+                    }
+                }
+
+                // unlock 后立即跑首轮，之后每 15 分钟一次。
+                std::thread::sleep(std::time::Duration::from_secs(15 * 60));
+            }
+            tracing::info!("WebDAV sync worker stopped (vault locked)");
+        });
+    }
+
+    /// 启动 Email 周期同步 worker：每 15 分钟从 email_accounts 表读全部账户 +
+    /// 解密凭据，逐个按 UID 增量同步。原子 flag 防重入 + RAII guard 复位。
+    pub fn start_email_sync_worker(state: std::sync::Arc<AppState>) {
+        if state
+            .email_sync_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::debug!("Email sync worker already running, skipping");
+            return;
+        }
+        std::thread::spawn(move || {
+            struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for FlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _guard = FlagGuard(&state.email_sync_worker_running);
+
+            tracing::info!("Email sync worker started");
+            loop {
+                // vault 锁定则退出 —— 下次 unlock 会重新 start。
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        break;
+                    }
+                }
+
+                // 从 email_accounts 表读全部账户 + 解密凭据（snapshot 后释放锁）。
+                let accounts: Vec<attune_core::store::email_accounts::EmailAccountRow> = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    let dek = match vault.dek_db() {
+                        Ok(k) => k,
+                        Err(_) => break,
+                    };
+                    vault.store().list_email_accounts(&dek).unwrap_or_default()
+                };
+
+                for account in accounts {
+                    let config = attune_core::ingest::EmailConfig {
+                        host: account.host.clone(),
+                        port: account.port,
+                        username: account.username.clone(),
+                        password: account.password.clone(),
+                        folders: account.folders.clone(),
+                    };
+                    // 只打印 dir_id / host / username，不 log password。
+                    tracing::info!(
+                        "Email sync: account dir={} host={} user={}",
+                        account.dir_id,
+                        account.host,
+                        account.username
+                    );
+                    if let Err(e) = crate::ingest_email::sync_email_account(
+                        &state,
+                        &account.dir_id,
+                        config,
+                        &account.corpus_domain,
+                    ) {
+                        tracing::warn!(
+                            "Email sync for account {} failed: {e}",
+                            account.dir_id
+                        );
+                    }
+                }
+
+                // unlock 后立即跑首轮，之后每 15 分钟一次。
+                std::thread::sleep(std::time::Duration::from_secs(15 * 60));
+            }
+            tracing::info!("Email sync worker stopped (vault locked)");
         });
     }
 
@@ -1050,11 +1402,183 @@ impl AppState {
                         Err(e) => tracing::warn!("Memory consolidator apply error: {}", e),
                     }
                 }
+
+                // ── Multi-layer memory: embed L2, build L3, demote cold ─────────
+                // Embedding L2/L3 summaries is cost tier 2 (local). The L2→L3 LLM
+                // pass is tier 3, gated per-call by the same governor quota.
+                Self::run_memory_layering(&state, &governor, &model_name, now_secs);
             }
 
             state.memory_consolidator_running.store(false, Ordering::SeqCst);
             tracing::info!("Memory consolidator stopped (vault locked)");
         });
+    }
+
+    /// One layering pass: embed any not-yet-embedded L2/L3 memories into
+    /// `memory_vectors` + the in-memory index, run the L2→L3 semantic cycle, then
+    /// demote cold episodic memories. Called by the consolidator worker after the
+    /// episodic pass. All steps are best-effort — failures only `warn`.
+    fn run_memory_layering(
+        state: &std::sync::Arc<AppState>,
+        governor: &std::sync::Arc<attune_core::resource_governor::TaskGovernor>,
+        model_name: &str,
+        now_secs: i64,
+    ) {
+        // Embed any memories that have no memory_vectors row yet (covers freshly
+        // inserted episodic rows + previously-deferred ones).
+        Self::embed_pending_memories(state, now_secs);
+
+        // L2→L3 semantic cycle (three-stage, lock discipline mirrors A1).
+        let embeddings: std::collections::HashMap<String, Vec<f32>> = {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            vault
+                .store()
+                .list_all_memory_vectors()
+                .map(|rows| rows.into_iter().map(|r| (r.memory_id, r.embedding)).collect())
+                .unwrap_or_default()
+        };
+        let clusters = {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                return;
+            }
+            let dek = match vault.dek_db() {
+                Ok(d) => d,
+                Err(_) => return,
+            };
+            match attune_core::memory::prepare_semantic_cycle(vault.store(), &dek, &embeddings) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("semantic prepare error: {e}");
+                    None
+                }
+            }
+        };
+
+        if let Some(clusters) = clusters {
+            let llm = match state.llm.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+                Some(l) => l,
+                None => return,
+            };
+            // Per-cluster quota check (each LLM call costs 1 quota — same as A1).
+            let mut summaries: Vec<Option<String>> = Vec::with_capacity(clusters.len());
+            for cluster in &clusters {
+                if !governor.allow_llm_call() {
+                    for _ in summaries.len()..clusters.len() {
+                        summaries.push(None);
+                    }
+                    break;
+                }
+                summaries.push(attune_core::memory::generate_one_semantic_memory(
+                    llm.as_ref(),
+                    cluster,
+                ));
+            }
+            let new_ids: Vec<Option<String>> = {
+                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                    return;
+                }
+                let dek = match vault.dek_db() {
+                    Ok(d) => d,
+                    Err(_) => return,
+                };
+                match attune_core::memory::apply_semantic_result(
+                    vault.store(), &dek, &clusters, &summaries, model_name, now_secs,
+                ) {
+                    Ok((r, ids)) => {
+                        if r.inserted > 0 {
+                            tracing::info!(
+                                "Memory consolidator: {} new semantic memories ({} superseded)",
+                                r.inserted, r.superseded,
+                            );
+                        }
+                        ids
+                    }
+                    Err(e) => {
+                        tracing::warn!("semantic apply error: {e}");
+                        vec![]
+                    }
+                }
+            };
+            // Embed the new semantic summaries so they become searchable.
+            if new_ids.iter().any(|i| i.is_some()) {
+                Self::embed_pending_memories(state, now_secs);
+            }
+        }
+
+        // Cold demotion — pure SQL, zero LLM. COLD_AGE default 180 days (plan §2.2).
+        const COLD_AGE_SECS: i64 = 180 * 24 * 3600;
+        {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                match vault.store().demote_cold_memories(now_secs, COLD_AGE_SECS) {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!("Memory consolidator: {n} episodic memories demoted to cold"),
+                    Err(e) => tracing::warn!("cold demotion error: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Embed every memory that lacks a `memory_vectors` row, write the vector, and
+    /// upsert it into the in-memory `memory_index`. Cost tier 2 (local embedding).
+    fn embed_pending_memories(state: &std::sync::Arc<AppState>, now_secs: i64) {
+        let embedder = match state.embedding.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+            Some(e) if e.is_available() => e,
+            _ => return,
+        };
+        // Collect (memory_id, summary) for memories with no vector yet.
+        let pending: Vec<(String, String)> = {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                return;
+            }
+            let dek = match vault.dek_db() {
+                Ok(d) => d,
+                Err(_) => return,
+            };
+            let store = vault.store();
+            let mut out = Vec::new();
+            for kind in ["episodic", "semantic"] {
+                if let Ok(mems) = store.list_live_memories(&dek, kind, true) {
+                    for m in mems {
+                        if store.get_memory_vector(&m.id).ok().flatten().is_none() {
+                            out.push((m.id, m.summary));
+                        }
+                    }
+                }
+            }
+            out
+        };
+        if pending.is_empty() {
+            return;
+        }
+        // Embedding providers don't expose a model name; the dimension is a stable
+        // proxy — a model switch that changes dims is what makes vectors mismatch,
+        // and same-dim models are interchangeable for cosine ranking.
+        let model = format!("embed-dim{}", embedder.dimensions());
+        for (mem_id, summary) in pending {
+            let vec = match embedder.embed(&[summary.as_str()]) {
+                Ok(mut v) if !v.is_empty() => v.remove(0),
+                _ => continue,
+            };
+            {
+                let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                    return;
+                }
+                if let Err(e) = vault.store().put_memory_vector(&mem_id, &vec, &model, now_secs) {
+                    tracing::warn!("put_memory_vector failed for {mem_id}: {e}");
+                    continue;
+                }
+            }
+            if let Ok(mut g) = state.memory_index.lock() {
+                if let Some(idx) = g.as_mut() {
+                    let _ = idx.upsert(&mem_id, &vec);
+                }
+            }
+        }
     }
 
     /// 清除搜索引擎 + 分类引擎 (lock 前调用)
@@ -1081,6 +1605,7 @@ impl AppState {
         *self.embedding.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.reranker.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.web_search.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.tag_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.cluster_snapshot.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1089,6 +1614,19 @@ impl AppState {
         self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
         // 重置初始化标志，确保再次 unlock 后能重新初始化搜索引擎
         self.engines_initialized.store(false, Ordering::SeqCst);
+    }
+
+    /// R10 E2E fix (P0): 文档变更后失效 search 结果缓存。
+    ///
+    /// search_cache 按 query hash 缓存结果。之前只有 vault lock (reset) 和 ingest
+    /// 清缓存 — update_item / delete_item / upload / reindex worker 全都不清，导致：
+    ///
+    /// - 编辑文档后搜旧关键词仍命中（返回编辑前的缓存结果）
+    /// - 删除文档后仍搜得到（缓存假命中）
+    ///
+    /// 真实 E2E 测试 STEP 4 / STEP 8 实测捕获。任何改动 items / 索引的 path 都必须调。
+    pub fn invalidate_search_cache(&self) {
+        self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     // ── ML provider accessor 方法 (OPT-3 ArcSwap migration prep) ───────────
@@ -1100,12 +1638,14 @@ impl AppState {
     // 新代码 (route / async handler) 强烈建议用这些 accessor 而非 .lock() 直接访问 —
     // 准备一并 migrate 到 ArcSwap 时, 旧 .lock() 调用会编译失败 (字段类型不再是 Mutex).
 
-    /// 读 embedding provider — lock-free clone of Arc. 适合 async handler 内调.
+    /// 读 embedding provider — lock+clone Arc. 后续 v0.7 改 ArcSwap (D-R14 受
+    /// `dyn Trait` 不支持 load_full 阻碍, 需走 Arc<dyn> + ArcSwapAny<Arc<dyn>>
+    /// 直接而非 Option 包装).
     pub fn embedding(&self) -> Option<Arc<dyn EmbeddingProvider>> {
         self.embedding.lock().ok().and_then(|g| g.clone())
     }
 
-    /// 写 embedding provider. settings hot-reload 路径会调.
+    /// 写 embedding provider. settings hot-reload 路径调.
     pub fn set_embedding(&self, p: Option<Arc<dyn EmbeddingProvider>>) {
         if let Ok(mut g) = self.embedding.lock() {
             *g = p;
@@ -1156,6 +1696,17 @@ impl AppState {
         }
     }
 
+    /// 读 VLM provider — 图片 caption / VQA 用.
+    pub fn vlm(&self) -> Option<Arc<dyn VlmProvider>> {
+        self.vlm.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_vlm(&self, p: Option<Arc<dyn VlmProvider>>) {
+        if let Ok(mut g) = self.vlm.lock() {
+            *g = p;
+        }
+    }
+
     /// 读 classifier — items 自动分类 (热路径, ingest pipeline 调).
     pub fn classifier(&self) -> Option<Arc<Classifier>> {
         self.classifier.lock().ok().and_then(|g| g.clone())
@@ -1165,6 +1716,23 @@ impl AppState {
         if let Ok(mut g) = self.classifier.lock() {
             *g = p;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn webdav_sync_worker_flag_prevents_double_start() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = AtomicBool::new(false);
+        // 首次 compare_exchange 成功。
+        assert!(flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok());
+        // 二次失败 —— worker 不会重复起。
+        assert!(flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err());
     }
 }
 

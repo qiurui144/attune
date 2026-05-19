@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::index::FulltextIndex;
 use crate::llm::{ChatMessage, LlmProvider};
 use crate::pii::Redactor;
-use crate::search::{allocate_budget, SearchResult, INJECTION_BUDGET};
+use crate::search::{allocate_budget, SearchResult};
 use crate::store::Store;
 use crate::vectors::VectorIndex;
 use crate::web_search::WebSearchProvider;
@@ -112,8 +112,12 @@ impl ChatEngine {
         history: &[ChatMessage],
         dek: &Key32,
     ) -> Result<ChatResponse> {
+        // 按 LLM 上下文窗口裁剪历史（替代依赖调用方写死的固定深度）
+        let trimmed_history = self.trim_history(user_message, history);
+        let history: &[ChatMessage] = &trimmed_history;
+
         // 1. 搜索本地知识库（默认阈值 0.65）
-        let local_knowledge = self.search_for_context(user_message, dek, 5, None)?;
+        let local_knowledge = self.search_for_context(user_message, history, dek, 5, None)?;
 
         // 2. 若本地无结果，尝试网络搜索 fallback（C1 W3 batch A：先查本地缓存）
         let (mut knowledge, web_search_used) = if local_knowledge.is_empty() {
@@ -200,7 +204,7 @@ impl ChatEngine {
             // 阈值 0.65 → 0.55 扩大本地召回（始终走本地，不重跑 web）
             let pre_count = knowledge.len();
             let was_empty = pre_count == 0;
-            match self.search_for_context(user_message, dek, 5, Some(0.55)) {
+            match self.search_for_context(user_message, history, dek, 5, Some(0.55)) {
                 Ok(broader) if broader.len() > knowledge.len() => {
                     // F1 (W3 batch A) 可观测性：区分"fallback 召回更多"vs"同样空"
                     log::info!(
@@ -356,9 +360,45 @@ impl ChatEngine {
         Ok((restored, conf))
     }
 
+    /// 按 LLM 上下文窗口裁剪历史。
+    /// 超预算时丢弃最旧的若干轮，并在开头插一条省略说明 —— 让模型知道上文被截断，
+    /// 而非误以为对话从此开始。预算内则原样返回。
+    fn trim_history(&self, user_message: &str, history: &[ChatMessage]) -> Vec<ChatMessage> {
+        let pairs: Vec<(String, String)> = history
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        let plan = crate::context_budget::plan_context(
+            self.llm.model_name(),
+            "",
+            user_message,
+            &pairs,
+        );
+        if plan.history_dropped == 0 {
+            return history.to_vec();
+        }
+        let mut kept: Vec<ChatMessage> = history[plan.history_dropped..].to_vec();
+        kept.insert(
+            0,
+            ChatMessage::user(&format!(
+                "[此前 {} 轮较早对话因超出模型上下文窗口已省略]",
+                plan.history_dropped
+            )),
+        );
+        log::info!(
+            "context budget: model={} window={} → 丢弃 {} 轮历史, 保留 {}",
+            self.llm.model_name(),
+            plan.window,
+            plan.history_dropped,
+            plan.history_keep
+        );
+        kept
+    }
+
     fn search_for_context(
         &self,
         query: &str,
+        history: &[ChatMessage],
         dek: &Key32,
         top_k: usize,
         min_score_override: Option<f32>,
@@ -383,7 +423,18 @@ impl ChatEngine {
             params.min_score = Some(threshold);
         }
         let mut results = crate::search::search_with_context(&ctx, query, &params)?;
-        allocate_budget(&mut results, INJECTION_BUDGET);
+        // 知识注入预算按 LLM 上下文窗口动态计算（替代写死的 INJECTION_BUDGET=2000）
+        let hist_pairs: Vec<(String, String)> = history
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect();
+        let plan = crate::context_budget::plan_context(
+            self.llm.model_name(),
+            "",
+            query,
+            &hist_pairs,
+        );
+        allocate_budget(&mut results, plan.knowledge_chars());
         Ok(results)
     }
 

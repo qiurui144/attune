@@ -152,7 +152,7 @@ struct UsptoIpc {
 /// 向专利数据库发起网络查询，返回专利记录列表。
 /// 使用 blocking reqwest，调用方应在 spawn_blocking 中执行。
 pub fn search_patents(query: &PatentQuery) -> Result<PatentSearchResult> {
-    let limit = query.limit.min(MAX_PER_QUERY).max(1);
+    let limit = query.limit.clamp(1, MAX_PER_QUERY);
     match query.database {
         PatentDatabase::Uspto => search_uspto(query, limit),
     }

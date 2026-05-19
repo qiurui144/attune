@@ -11,8 +11,9 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { Button, EmptyState, Modal, toast } from '../components';
+import { Button, EmptyState, Modal, PluginForm, toast } from '../components';
 import { api } from '../store/api';
+import { t } from '../i18n';
 
 // ── 类型（与后端 routes/projects.rs ProjectListResponse 等对齐） ─────────────
 interface Project {
@@ -52,6 +53,48 @@ interface TimelineResponse {
   entries: TimelineEntry[];
 }
 
+// ── plugin-form 发现（/api/v1/plugins） ──────────────────────────────────────
+interface PluginAgent {
+  id: string;
+  description: string;
+  case_kinds?: string[];
+}
+interface PluginUiComponent {
+  id: string;
+  target: string;
+  description: string;
+}
+interface PluginInfo {
+  id: string;
+  agents?: PluginAgent[];
+  ui_components?: PluginUiComponent[];
+}
+interface PluginListResp {
+  plugins: PluginInfo[];
+}
+/** 匹配到某 project kind 的 plugin 表单引用 */
+interface FormRef {
+  pluginId: string;
+  formId: string;
+  label: string;
+}
+
+/** 列出 ui_component 的 target agent 的 case_kinds 含 `kind` 的表单。 */
+function matchedForms(plugins: PluginInfo[], kind: string): FormRef[] {
+  const out: FormRef[] = [];
+  for (const p of plugins) {
+    const agents = p.agents ?? [];
+    for (const c of p.ui_components ?? []) {
+      const agentId = c.target.startsWith('agent:') ? c.target.slice('agent:'.length) : c.target;
+      const agent = agents.find((a) => a.id === agentId);
+      if (agent && (agent.case_kinds ?? []).includes(kind)) {
+        out.push({ pluginId: p.id, formId: c.id, label: c.description || agent.description || c.id });
+      }
+    }
+  }
+  return out;
+}
+
 // ── 主视图 ──────────────────────────────────────────────────────────────────
 export function ProjectsView(): JSX.Element {
   const projects = useSignal<Project[]>([]);
@@ -63,6 +106,9 @@ export function ProjectsView(): JSX.Element {
   const selectedId = useSignal<string | null>(null);
   const files = useSignal<ProjectFile[]>([]);
   const timeline = useSignal<TimelineEntry[]>([]);
+  const plugins = useSignal<PluginInfo[]>([]);
+  // 当前打开的 plugin 表单（modal）
+  const openForm = useSignal<FormRef | null>(null);
 
   const reload = async (): Promise<void> => {
     loading.value = true;
@@ -79,13 +125,22 @@ export function ProjectsView(): JSX.Element {
 
   useEffect(() => {
     void reload();
+    // plugin 列表（含 agents.case_kinds + ui_components）—— 用于按项目类型发现可用表单
+    void (async () => {
+      try {
+        const res = await api.get<PluginListResp>('/plugins');
+        plugins.value = res.plugins ?? [];
+      } catch {
+        plugins.value = [];
+      }
+    })();
   }, []);
 
   const onCreate = async (): Promise<void> => {
     const title = newTitle.value.trim();
     const kind = newKind.value.trim() || 'generic';
     if (!title) {
-      toast('error', 'Title 必填');
+      toast('error', t('projects.toast.title_required'));
       return;
     }
     try {
@@ -93,12 +148,12 @@ export function ProjectsView(): JSX.Element {
       newTitle.value = '';
       newKind.value = 'generic';
       showCreate.value = false;
-      toast('success', '已创建');
+      toast('success', t('projects.toast.created'));
       await reload();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       error.value = msg;
-      toast('error', `创建失败：${msg}`);
+      toast('error', t('projects.toast.create_failed', { message: msg }));
     }
   };
 
@@ -137,11 +192,11 @@ export function ProjectsView(): JSX.Element {
         />
         <EmptyState
           icon="🗂"
-          title="暂无 Project"
-          description="点击「新建项目」开始整理资料、证据与思路"
+          title={t('projects.empty.title')}
+          description={t('projects.empty.desc')}
           actions={[
             {
-              label: '新建项目',
+              label: t('projects.empty.action'),
               onClick: () => (showCreate.value = true),
               variant: 'primary',
             },
@@ -158,6 +213,9 @@ export function ProjectsView(): JSX.Element {
       </div>
     );
   }
+
+  const selProject = projects.value.find((p) => p.id === selectedId.value) ?? null;
+  const projForms = selProject ? matchedForms(plugins.value, selProject.kind) : [];
 
   return (
     <div
@@ -232,10 +290,15 @@ export function ProjectsView(): JSX.Element {
                 color: 'var(--color-text-secondary)',
               }}
             >
-              选择左侧 Project 查看详情
+              {t('projects.select_hint')}
             </div>
           ) : (
-            <ProjectDetail files={files.value} timeline={timeline.value} />
+            <ProjectDetail
+              files={files.value}
+              timeline={timeline.value}
+              forms={projForms}
+              onRunForm={(f) => (openForm.value = f)}
+            />
           )}
         </section>
       </div>
@@ -247,6 +310,16 @@ export function ProjectsView(): JSX.Element {
           onCancel={() => (showCreate.value = false)}
           onConfirm={() => void onCreate()}
         />
+      )}
+
+      {openForm.value && (
+        <Modal open onClose={() => (openForm.value = null)} title={openForm.value.label}>
+          <PluginForm
+            pluginId={openForm.value.pluginId}
+            formId={openForm.value.formId}
+            onClose={() => (openForm.value = null)}
+          />
+        </Modal>
       )}
     </div>
   );
@@ -272,14 +345,14 @@ function ProjectsHeader({
       }}
     >
       <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
-        🗂 Projects
+        {t('projects.title')}
       </h2>
       <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
         <Button variant="primary" size="sm" onClick={onCreate}>
-          + 新建项目
+          {t('projects.create')}
         </Button>
         <Button variant="secondary" size="sm" onClick={onReload} disabled={loading}>
-          {loading ? '加载中…' : '⟳ 刷新'}
+          {loading ? t('common.loading') : t('items.refresh')}
         </Button>
       </div>
     </header>
@@ -324,7 +397,7 @@ function ProjectRow({
           textOverflow: 'ellipsis',
         }}
       >
-        {p.title || '(无标题)'}
+        {p.title || t('projects.untitled')}
       </div>
       <div
         style={{
@@ -357,9 +430,13 @@ function ProjectRow({
 function ProjectDetail({
   files,
   timeline,
+  forms,
+  onRunForm,
 }: {
   files: ProjectFile[];
   timeline: TimelineEntry[];
+  forms: FormRef[];
+  onRunForm: (f: FormRef) => void;
 }): JSX.Element {
   return (
     <div
@@ -369,6 +446,42 @@ function ProjectDetail({
         gap: 'var(--space-4)',
       }}
     >
+      {forms.length > 0 && (
+        <section>
+          <h3
+            style={{
+              fontSize: 'var(--text-base)',
+              fontWeight: 600,
+              margin: '0 0 var(--space-2) 0',
+              color: 'var(--color-text)',
+            }}
+          >
+            {t('projects.agents.title')}
+          </h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            {forms.map((f) => (
+              <div
+                key={`${f.pluginId}/${f.formId}`}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 'var(--space-3)',
+                  padding: 'var(--space-2) var(--space-3)',
+                  background: 'var(--color-surface)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius-md)',
+                }}
+              >
+                <span style={{ fontSize: 'var(--text-sm)' }}>{f.label}</span>
+                <Button variant="primary" size="sm" onClick={() => onRunForm(f)}>
+                  ▶ {t('projects.agents.run')}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       <section>
         <h3
           style={{
@@ -378,7 +491,7 @@ function ProjectDetail({
             color: 'var(--color-text)',
           }}
         >
-          Files ({files.length})
+          {t('projects.files.heading', { count: files.length })}
         </h3>
         {files.length === 0 ? (
           <div
@@ -388,7 +501,7 @@ function ProjectDetail({
               fontSize: 'var(--text-sm)',
             }}
           >
-            无文件归档
+            {t('projects.files.empty')}
           </div>
         ) : (
           <table
@@ -400,9 +513,9 @@ function ProjectDetail({
           >
             <thead>
               <tr>
-                <th style={th}>文件</th>
-                <th style={th}>角色</th>
-                <th style={th}>添加时间</th>
+                <th style={th}>{t('projects.files.col_file')}</th>
+                <th style={th}>{t('projects.files.col_role')}</th>
+                <th style={th}>{t('projects.files.col_added')}</th>
               </tr>
             </thead>
             <tbody>
@@ -429,7 +542,7 @@ function ProjectDetail({
             color: 'var(--color-text)',
           }}
         >
-          时间线（{timeline.length}）
+          {t('projects.timeline.heading', { count: timeline.length })}
         </h3>
         {timeline.length === 0 ? (
           <div
@@ -439,7 +552,7 @@ function ProjectDetail({
               fontSize: 'var(--text-sm)',
             }}
           >
-            暂无事件
+            {t('projects.timeline.empty')}
           </div>
         ) : (
           <ul
@@ -496,7 +609,7 @@ function CreateProjectModal({
   onConfirm: () => void;
 }): JSX.Element {
   return (
-    <Modal open onClose={onCancel} title="新建项目">
+    <Modal open onClose={onCancel} title={t('projects.create.modal_title')}>
       <div
         style={{
           display: 'flex',
@@ -506,23 +619,23 @@ function CreateProjectModal({
         }}
       >
         <label style={labelStyle}>
-          <span>名称</span>
+          <span>{t('projects.field.name')}</span>
           <input
             type="text"
             value={title.value}
             onInput={(e) => (title.value = (e.currentTarget as HTMLInputElement).value)}
-            placeholder="如：北京客户A / 论文研究 X / 个人项目"
+            placeholder={t('projects.field.name_placeholder')}
             autoFocus
             style={inputStyle}
           />
         </label>
         <label style={labelStyle}>
-          <span>类型（默认通用）</span>
+          <span>{t('projects.field.kind')}</span>
           <input
             type="text"
             value={kind.value}
             onInput={(e) => (kind.value = (e.currentTarget as HTMLInputElement).value)}
-            placeholder="通用 / 案件 / 论文 / ..."
+            placeholder={t('projects.field.kind_placeholder')}
             style={inputStyle}
           />
         </label>
@@ -535,10 +648,10 @@ function CreateProjectModal({
           }}
         >
           <Button variant="secondary" size="sm" onClick={onCancel}>
-            取消
+            {t('common.cancel')}
           </Button>
           <Button variant="primary" size="sm" onClick={onConfirm}>
-            创建
+            {t('projects.empty.action')}
           </Button>
         </div>
       </div>
@@ -594,14 +707,16 @@ function fmtDate(d: Date): string {
   try {
     const now = Date.now();
     const diff = now - d.getTime();
-    if (diff < 60_000) return '刚刚';
+    if (diff < 60_000) return t('projects.time.just_now');
     if (diff < 86_400_000) {
       const h = d.getHours().toString().padStart(2, '0');
       const m = d.getMinutes().toString().padStart(2, '0');
-      return `今天 ${h}:${m}`;
+      return t('projects.time.today', { time: `${h}:${m}` });
     }
-    if (diff < 2 * 86_400_000) return '昨天';
-    if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+    if (diff < 2 * 86_400_000) return t('projects.time.yesterday');
+    if (diff < 7 * 86_400_000) {
+      return t('projects.time.days_ago', { days: Math.floor(diff / 86_400_000) });
+    }
     return d.toLocaleDateString();
   } catch {
     return d.toISOString().slice(0, 10);

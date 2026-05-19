@@ -10,14 +10,15 @@
 import type { JSX } from 'preact';
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { estimateTokens } from '../hooks/useChat';
+import { lastCostEstimate } from '../store/signals';
 import { t } from '../i18n';
 
 export type ChatInputProps = {
   onSend: (text: string) => Promise<void> | void;
   disabled?: boolean;
   placeholder?: string;
-  /** 本地模型显示"~本地"，云端显示估算花费 */
-  isLocal?: boolean;
+  /** 本地模型显示"~本地"，云端显示估算花费；null = settings 未加载，显示"—" */
+  isLocal?: boolean | null;
 };
 
 const MAX_HEIGHT_LINES = 8;
@@ -26,7 +27,7 @@ export function ChatInput({
   onSend,
   disabled = false,
   placeholder,
-  isLocal = true,
+  isLocal = null,
 }: ChatInputProps): JSX.Element {
   const [text, setText] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -144,14 +145,34 @@ export function ChatInput({
   );
 }
 
-function TokenChip({ tokens, isLocal }: { tokens: number; isLocal: boolean }): JSX.Element {
+function TokenChip({ tokens, isLocal }: { tokens: number; isLocal: boolean | null }): JSX.Element {
   const display =
     tokens === 0
       ? ''
       : tokens >= 1000
         ? `~${(tokens / 1000).toFixed(1)}K`
         : `~${tokens}`;
-  const suffix = isLocal ? t('chat.token.local') : `$${((tokens / 1000) * 0.0005).toFixed(4)}`;
+
+  // 后端响应携带的精确 input 单价；优先于 isLocal prop（后者在首次发送前可能为 null）
+  const lastCost = lastCostEstimate.value;
+  const effectiveIsLocal = lastCost ? lastCost.is_local : isLocal;
+  let suffix: string;
+  if (effectiveIsLocal === null) {
+    // settings 未加载，provider 未知 → 显示"—"而非误报本地/费用
+    suffix = t('chat.token.unknown');
+  } else if (effectiveIsLocal) {
+    suffix = t('chat.token.local');
+  } else if (lastCost?.input_rate_per_k != null) {
+    // 直接用后端 input 单价估算（input/output 价差最大 5×，混合均价误差大）
+    suffix = `$${(tokens * lastCost.input_rate_per_k / 1000).toFixed(4)}`;
+  } else if (lastCost && lastCost.cost_usd === null) {
+    // 已知云端但 model 不在定价表
+    suffix = t('chat.cost.unknown');
+  } else {
+    // 无历史记录：通用兜底费率
+    suffix = `$${((tokens / 1000) * 0.0005).toFixed(4)}`;
+  }
+
   return (
     <div
       aria-label={t('chat.tokens.aria', { tokens: String(tokens) })}

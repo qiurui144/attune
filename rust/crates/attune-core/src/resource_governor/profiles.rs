@@ -6,17 +6,12 @@ use serde::{Deserialize, Serialize};
 use super::budget::{Budget, IoPriority};
 
 /// 系统影响档位。Balanced 为默认；Aggressive 适合插电桌面；Conservative 适合电池笔记本。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Profile {
     Conservative,
+    #[default]
     Balanced,
     Aggressive,
-}
-
-impl Default for Profile {
-    fn default() -> Self {
-        Self::Balanced
-    }
 }
 
 /// 后台任务种类 — 决定 governor 如何分配预算。

@@ -19,7 +19,7 @@
 - Axum HTTP Server + TLS + Bearer auth + 嵌入式 Web UI
 - 跨平台单二进制（Linux / Windows / macOS / NAS）+ Tauri 桌面安装器
 - 用途：生产部署、商用发布、NAS 远程访问
-- **最新版本 v0.6.0 GA**（2026-04-30），1240+ tests，详见 [`rust/RELEASE.md`](rust/RELEASE.md)
+- **最新版本 v0.7.0 GA**（2026-05-19），1260+ tests，详见 [`rust/RELEASE.md`](rust/RELEASE.md)
 
 两条线共享 Chrome 扩展协议（`/api/v1/*`），Python 原型验证的特性择优迁移到 Rust 商用线。
 

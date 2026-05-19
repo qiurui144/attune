@@ -6,6 +6,30 @@ use axum::Json;
 use crate::state::SharedState;
 use attune_core::vault::VaultState;
 
+/// Redact the value of a specific query-string key so it does not appear in access logs.
+///
+/// Splits the raw query string on `&`, replaces `<key>=<anything>` with `<key>=<redacted>`,
+/// and rejoins.  Other parameters are left untouched.  An empty or absent query string
+/// passes through unchanged.
+fn redact_query_param(query: &str, key: &str) -> String {
+    if query.is_empty() {
+        return query.to_string();
+    }
+    query
+        .split('&')
+        .map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            let k = parts.next().unwrap_or("");
+            if k == key {
+                format!("{}=<redacted>", k)
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// Vault guard: 未 UNLOCKED 时返回 403
 pub async fn vault_guard(
     State(state): State<SharedState>,
@@ -20,11 +44,20 @@ pub async fn vault_guard(
         || path == "/"
         || path == "/ui"
         || path.starts_with("/ui/")
+        // /favicon.ico — 浏览器自动请求；不 bypass 会在 vault locked 时回 403 刷 console error
+        || path == "/favicon.ico"
         // /api/v1/member/* — 会员状态 + lock 决策, 不读 vault, 不需 unlock
         || path.starts_with("/api/v1/member")
         // /api/v1/ocr/profiles — 用户场景预设 (持久化磁盘文件, 不读 vault).
         // 写操作仍由 handler 里 SettingsLocks::ocr_profiles 控制.
         || path.starts_with("/api/v1/ocr/profiles")
+        // Round B E2E fix: /ws/scan-progress 必须 bypass vault_guard。
+        // ws.rs handler 注释明确"vault locked 时推送 locked 状态后持续等待" —
+        // 该 endpoint 设计上支持 vault 未解锁时连接。之前 vault_guard 白名单漏了它
+        // （auth guard 的 bypass 列表 OSS-S16 已加，两个 middleware 白名单不一致），
+        // 导致 wizard / locked 阶段前端连 WS 收 403 → 无限重连刷 console error。
+        // bypass 后由 handle_scan_progress 自查 vault 状态推 locked JSON。
+        || path == "/ws/scan-progress"
     {
         return next.run(request).await;
     }
@@ -84,7 +117,10 @@ pub async fn access_log(
 
     // 健康检查类高频路径降级为 debug, 其他走 info; 4xx/5xx 升级为 warn
     let acct_disp = account_id.as_deref().unwrap_or("-");
-    let query_disp = query.as_deref().unwrap_or("");
+    // Redact the session token from the query string before logging so it never
+    // lands in plaintext access logs (/ws/scan-progress appends ?token=<session>).
+    let query_redacted = redact_query_param(query.as_deref().unwrap_or(""), "token");
+    let query_disp = query_redacted.as_str();
     if status >= 500 {
         tracing::warn!(
             target: "access",
@@ -195,6 +231,8 @@ pub async fn bearer_auth_guard(
 
 #[cfg(test)]
 mod tests {
+    use super::redact_query_param;
+
     #[test]
     fn always_auth_endpoints_include_device_secret_and_change_password() {
         // 验证敏感端点常量包含 device-secret 相关端点及 change-password
@@ -206,5 +244,43 @@ mod tests {
         assert!(ALWAYS_AUTH_ENDPOINTS.contains(&"/api/v1/vault/device-secret/export"));
         assert!(ALWAYS_AUTH_ENDPOINTS.contains(&"/api/v1/vault/device-secret/import"));
         assert!(ALWAYS_AUTH_ENDPOINTS.contains(&"/api/v1/vault/change-password"));
+    }
+
+    #[test]
+    fn redact_query_param_replaces_token_value() {
+        // Token must be redacted; other params must remain untouched.
+        let q = "foo=bar&token=abc123:1716000000:deadbeef&baz=qux";
+        let out = redact_query_param(q, "token");
+        assert!(
+            !out.contains("abc123"),
+            "token value must not appear in output: {out}"
+        );
+        assert!(
+            out.contains("token=<redacted>"),
+            "token key must be present with <redacted>: {out}"
+        );
+        assert!(out.contains("foo=bar"), "other params must be unchanged: {out}");
+        assert!(out.contains("baz=qux"), "other params must be unchanged: {out}");
+    }
+
+    #[test]
+    fn redact_query_param_no_token_unchanged() {
+        // A query string without the target key must pass through verbatim.
+        let q = "page=1&limit=20";
+        let out = redact_query_param(q, "token");
+        assert_eq!(out, q);
+    }
+
+    #[test]
+    fn redact_query_param_empty_query_unchanged() {
+        assert_eq!(redact_query_param("", "token"), "");
+    }
+
+    #[test]
+    fn redact_query_param_token_only() {
+        // Single-param query containing only the token.
+        let q = "token=secret-value";
+        let out = redact_query_param(q, "token");
+        assert_eq!(out, "token=<redacted>");
     }
 }

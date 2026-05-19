@@ -132,6 +132,21 @@ impl Store {
         Ok(())
     }
 
+    /// R21 S2-1 fix: 反查 annotation 的 item_id（便于 update/delete 路径
+    /// 写 annotation_marker 信号到 skill_signals）。
+    pub fn get_annotation_item_id(&self, id: &str) -> Result<Option<String>> {
+        let r = self.conn.query_row(
+            "SELECT item_id FROM annotations WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        );
+        match r {
+            Ok(s) => Ok(Some(s)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// 统计某条目的批注数（用于 UI 指示，避免拉全部内容）
     pub fn count_annotations(&self, item_id: &str) -> Result<usize> {
         let n: i64 = self.conn.query_row(

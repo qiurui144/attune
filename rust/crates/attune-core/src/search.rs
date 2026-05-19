@@ -78,8 +78,6 @@ pub fn apply_cross_lang_penalty(results: &mut [SearchResult], query_lang: Lang) 
     }
 }
 
-fn default_corpus_domain() -> String { "general".into() }
-
 /// v0.6 Phase B F-Pro: cross-domain 降权系数 (与 CROSS_LANG_PENALTY 共用机制)。
 /// query domain 已知（如 'legal'）但 doc.corpus_domain 不同（如 'tech'）→ score *= 该系数。
 /// 0.4 比 cross-lang 0.3 略高 — 同语种跨领域比跨语言保留更多召回（专业术语共享）。
@@ -174,7 +172,6 @@ pub struct SearchResult {
     /// v0.6 Phase B F-Pro：item.corpus_domain（legal/tech/medical/.../general）。
     /// search 阶段按 query intent 跨域降权防止"反洗钱"被 cs-notes 顶占。
     /// 默认 "general"（无标签 corpus）。
-    #[serde(default = "default_corpus_domain")]
     pub corpus_domain: String,
     // ── F2 (W3 batch A, 2026-04-27)：breadcrumb + offset 透传 ─────────────
     // per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §4
@@ -779,5 +776,250 @@ mod tests {
         let results = search_with_context(&ctx, "any query", &params).unwrap();
         // 无数据源时结果为空，但不应 panic
         assert!(results.is_empty());
+    }
+}
+
+// ============================================================================
+// Time travel search — 自然语言时间表达解析
+// ============================================================================
+//
+// "上周谁说了 X" 类查询。解析 query 中的中英文时间词，返回 unix epoch 区间。
+// 调用方（search pipeline）取出区间后，在 SQL 层加 WHERE captured_at BETWEEN ?
+// 过滤即可。本模块不修改现有检索函数，仅追加新 API。
+
+/// 自然语言时间过滤区间（unix epoch 秒）。
+///
+/// `start_unix` 含入、`end_unix` 含入。"今天" → [今日 00:00, 今日 23:59:59]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeFilter {
+    pub start_unix: i64,
+    pub end_unix: i64,
+}
+
+/// 解析 query 中的时间表达式。
+///
+/// 支持：
+/// - 中文："今天" / "昨天" / "前天" / "本周" / "上周" / "本月" / "上月"
+/// - 相对：N 天前 / N 周前 / N 月前（中文数字 + 阿拉伯数字）
+/// - 英文：today / yesterday / this week / last week / this month / last month
+///
+/// 未识别时返回 None（调用方走全时间检索）。
+///
+/// 实现注：依赖系统 wall clock。为支持测试，内部走 `now_unix()` 抽象，
+/// 测试用 `parse_time_filter_with_now` 注入固定 now。
+pub fn parse_time_filter(query: &str) -> Option<TimeFilter> {
+    let now = chrono::Utc::now().timestamp();
+    parse_time_filter_with_now(query, now)
+}
+
+/// 测试用：注入固定 now（unix epoch 秒）。
+pub fn parse_time_filter_with_now(query: &str, now_unix: i64) -> Option<TimeFilter> {
+    let q = query.to_lowercase();
+
+    // 优先匹配相对表达："N 天前" / "N days ago"
+    if let Some(filter) = parse_n_units_ago(&q, now_unix) {
+        return Some(filter);
+    }
+
+    // 今天 / today
+    if q.contains("今天") || q.contains("today") {
+        return Some(day_range(now_unix, 0));
+    }
+    // 昨天 / yesterday
+    if q.contains("昨天") || q.contains("yesterday") {
+        return Some(day_range(now_unix, -1));
+    }
+    // 前天 (英文无对等词)
+    if q.contains("前天") {
+        return Some(day_range(now_unix, -2));
+    }
+    // 上周 / last week
+    if q.contains("上周") || q.contains("上星期") || q.contains("last week") {
+        return Some(week_range(now_unix, -1));
+    }
+    // 本周 / this week
+    if q.contains("本周") || q.contains("这周") || q.contains("this week") {
+        return Some(week_range(now_unix, 0));
+    }
+    // 上月 / last month
+    if q.contains("上月") || q.contains("上个月") || q.contains("last month") {
+        return Some(month_range(now_unix, -1));
+    }
+    // 本月 / this month
+    if q.contains("本月") || q.contains("这个月") || q.contains("this month") {
+        return Some(month_range(now_unix, 0));
+    }
+
+    None
+}
+
+/// 解析 "3 天前" / "3 days ago" / "三天前" 等相对表达
+fn parse_n_units_ago(q: &str, now_unix: i64) -> Option<TimeFilter> {
+    const DAY: i64 = 86400;
+    let cn_digit = |c: char| -> Option<i64> {
+        match c {
+            '一' => Some(1),
+            '二' | '两' => Some(2),
+            '三' => Some(3),
+            '四' => Some(4),
+            '五' => Some(5),
+            '六' => Some(6),
+            '七' => Some(7),
+            '八' => Some(8),
+            '九' => Some(9),
+            '十' => Some(10),
+            _ => None,
+        }
+    };
+
+    // 找数字 — 阿拉伯优先，否则中文单字
+    let n: Option<i64> = q
+        .chars()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|w| {
+            // 阿拉伯数字（最多 3 位）
+            if w[0].is_ascii_digit() {
+                let s: String = q.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
+                return s.parse::<i64>().ok();
+            }
+            cn_digit(w[0])
+        });
+
+    let n = n?;
+    if n <= 0 || n > 365 {
+        return None;
+    }
+
+    // 单位识别
+    if q.contains("天前") || q.contains("days ago") || q.contains("day ago") {
+        let offset_days = -n;
+        return Some(day_range(now_unix, offset_days));
+    }
+    if q.contains("周前") || q.contains("weeks ago") || q.contains("week ago") {
+        let start = now_unix - n * 7 * DAY;
+        let end = start + 7 * DAY - 1;
+        return Some(TimeFilter { start_unix: start, end_unix: end });
+    }
+    if q.contains("月前") || q.contains("months ago") || q.contains("month ago") {
+        // 近似 30 天
+        let start = now_unix - n * 30 * DAY;
+        let end = start + 30 * DAY - 1;
+        return Some(TimeFilter { start_unix: start, end_unix: end });
+    }
+
+    None
+}
+
+fn day_range(now_unix: i64, offset_days: i64) -> TimeFilter {
+    let day: i64 = 86400;
+    let target = now_unix + offset_days * day;
+    // 对齐 UTC 整日界（简化，不处理时区）
+    let start = (target / day) * day;
+    TimeFilter {
+        start_unix: start,
+        end_unix: start + day - 1,
+    }
+}
+
+fn week_range(now_unix: i64, offset_weeks: i64) -> TimeFilter {
+    let day: i64 = 86400;
+    // 周一为周起点。Unix epoch 1970-01-01 是周四 → 偏移 4 天
+    let days_since_epoch = now_unix / day;
+    let weekday = (days_since_epoch + 4) % 7; // 0=周一
+    let this_week_monday = (days_since_epoch - weekday) * day;
+    let target_monday = this_week_monday + offset_weeks * 7 * day;
+    TimeFilter {
+        start_unix: target_monday,
+        end_unix: target_monday + 7 * day - 1,
+    }
+}
+
+fn month_range(now_unix: i64, offset_months: i64) -> TimeFilter {
+    use chrono::{Datelike, TimeZone, Utc};
+    let now = Utc.timestamp_opt(now_unix, 0).single().unwrap_or_else(Utc::now);
+    let (mut year, mut month) = (now.year(), now.month() as i32);
+    month += offset_months as i32;
+    while month < 1 {
+        month += 12;
+        year -= 1;
+    }
+    while month > 12 {
+        month -= 12;
+        year += 1;
+    }
+    let start = Utc
+        .with_ymd_and_hms(year, month as u32, 1, 0, 0, 0)
+        .single()
+        .map(|d| d.timestamp())
+        .unwrap_or(now_unix);
+    // 月末 = 下月 1 日 - 1 秒
+    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let next_start = Utc
+        .with_ymd_and_hms(next_year, next_month as u32, 1, 0, 0, 0)
+        .single()
+        .map(|d| d.timestamp())
+        .unwrap_or(start + 30 * 86400);
+    TimeFilter {
+        start_unix: start,
+        end_unix: next_start - 1,
+    }
+}
+
+#[cfg(test)]
+mod time_filter_tests {
+    use super::*;
+
+    // 固定 now = 2026-05-12 12:00:00 UTC = 1778587200
+    // 该日为周二。
+    const FIXED_NOW: i64 = 1_778_587_200;
+    const DAY: i64 = 86_400;
+
+    #[test]
+    fn parse_today_chinese() {
+        let f = parse_time_filter_with_now("今天有什么消息", FIXED_NOW).unwrap();
+        // 2026-05-12 00:00 UTC = 1778544000
+        assert_eq!(f.start_unix, 1_778_544_000);
+        assert_eq!(f.end_unix, 1_778_544_000 + DAY - 1);
+    }
+
+    #[test]
+    fn parse_yesterday_english() {
+        let f = parse_time_filter_with_now("what happened yesterday", FIXED_NOW).unwrap();
+        // 2026-05-11 00:00 UTC
+        assert_eq!(f.start_unix, 1_778_544_000 - DAY);
+        assert_eq!(f.end_unix, 1_778_544_000 - 1);
+    }
+
+    #[test]
+    fn parse_last_week_chinese() {
+        let f = parse_time_filter_with_now("上周谁说了 rust async", FIXED_NOW).unwrap();
+        // 区间为 7 天 (周一 00:00 ~ 下周一 00:00 - 1s)
+        assert_eq!(f.end_unix - f.start_unix, 7 * DAY - 1);
+        // 终点 < FIXED_NOW
+        assert!(f.end_unix < FIXED_NOW);
+    }
+
+    #[test]
+    fn parse_this_month_english() {
+        let f = parse_time_filter_with_now("show me this month logs", FIXED_NOW).unwrap();
+        // 2026-05-01 00:00 UTC = 1777593600
+        assert_eq!(f.start_unix, 1_777_593_600);
+        // 2026-05-31 23:59:59 UTC = 2026-06-01 00:00 UTC - 1 = 1780272000 - 1
+        assert_eq!(f.end_unix, 1_780_272_000 - 1);
+    }
+
+    #[test]
+    fn parse_n_days_ago_chinese() {
+        let f = parse_time_filter_with_now("3 天前的笔记", FIXED_NOW).unwrap();
+        // 3 天前 = 2026-05-12 整日
+        assert_eq!(f.start_unix, 1_778_544_000 - 3 * DAY);
+        assert_eq!(f.end_unix, 1_778_544_000 - 3 * DAY + DAY - 1);
+    }
+
+    #[test]
+    fn parse_unrecognized_returns_none() {
+        assert!(parse_time_filter_with_now("rust async runtime", FIXED_NOW).is_none());
+        assert!(parse_time_filter_with_now("", FIXED_NOW).is_none());
     }
 }

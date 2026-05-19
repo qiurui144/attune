@@ -39,12 +39,15 @@ export type Theme = 'light' | 'dark' | 'auto';
 export const theme = signal<Theme>(loadTheme());
 
 export const sidebarCollapsed = signal<boolean>(loadBool('attune.sidebar.collapsed', false));
+export const sidebarMoreExpanded = signal<boolean>(loadBool('attune.sidebar.more_expanded', false));
 
 export type DrawerPayload =
   | { type: 'reader'; itemId: string }
   | { type: 'citation'; itemId: string; snippet: string }
   | { type: 'annotation-composer'; itemId: string; offset: number; selection: string }
-  | { type: 'help'; topic: string };
+  | { type: 'help'; topic: string }
+  // 变体 A · agent 结果面板（law-pro 金额计算等）
+  | { type: 'agent-result'; result: import('../components/AgentResultPanel').AgentResult };
 export const drawerContent = signal<DrawerPayload | null>(null);
 
 // ── 连接层（见 store/connection.ts） ─────────────────────────────
@@ -117,6 +120,18 @@ export type Message = {
   created_at: string;
 };
 export const messages = signal<Message[]>([]);
+
+// ── Cost & Trigger Contract: LLM 调用费用估算（来自后端响应） ─────
+export type CostEstimate = {
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number | null; // null = 本地模型（无 USD 计费）
+  is_local: boolean;
+  /** input token 单价（USD/1K），来自后端定价表；本地模型或未知模型为 null */
+  input_rate_per_k: number | null;
+};
+/** 最近一次 chat 响应携带的 cost_estimate，供 TokenChip 展示真实费率 */
+export const lastCostEstimate = signal<CostEstimate | null>(null);
 
 export type Item = {
   id: string;
@@ -226,6 +241,14 @@ theme.subscribe((v) => {
 sidebarCollapsed.subscribe((v) => {
   try {
     localStorage.setItem('attune.sidebar.collapsed', String(v));
+  } catch {
+    /* noop */
+  }
+});
+
+sidebarMoreExpanded.subscribe((v) => {
+  try {
+    localStorage.setItem('attune.sidebar.more_expanded', String(v));
   } catch {
     /* noop */
   }

@@ -136,3 +136,74 @@ pub async fn submit_form(
         "next_step": "调用方按 component.target 走 agent_runner::run_agent_subprocess",
     })))
 }
+
+/// GET /api/v1/forms/<plugin_id>/<form_id>/schema
+/// 返 FormSchema JSON —— 供 Preact PluginForm 原生渲染（get_form 返服务端 HTML，
+/// 适合非 Preact 宿主；attune 自带 UI 用本端点拿结构化 schema 自行渲染）。
+pub async fn get_form_schema(
+    State(state): State<SharedState>,
+    Path((plugin_id, form_id)): Path<(String, String)>,
+) -> Result<Json<FormSchema>, (StatusCode, Json<serde_json::Value>)> {
+    let registry = state.plugin_registry.clone();
+    let plugin = registry.get_plugin(&plugin_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("plugin '{plugin_id}' not loaded")})),
+        )
+    })?;
+    let component = plugin
+        .manifest
+        .ui_components
+        .iter()
+        .find(|c| c.id == form_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("form '{form_id}' not declared in plugin '{plugin_id}'"),
+                })),
+            )
+        })?;
+
+    let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("plugins_dir: {e}")})),
+            )
+        })?;
+    let component_path = plugins_root.join(&plugin_id).join(&component.html);
+    let exists = attune_core::async_fs::try_exists(&component_path)
+        .await
+        .unwrap_or(false);
+
+    let schema = if exists
+        && component_path.extension().and_then(|s| s.to_str()) == Some("yaml")
+    {
+        let yaml_str = attune_core::async_fs::read_to_string(&component_path)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("read form yaml: {e}")})),
+                )
+            })?;
+        serde_yaml::from_str::<FormSchema>(&yaml_str).map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": format!("parse form yaml: {e}")})),
+            )
+        })?
+    } else {
+        // plugin dir 未提供 yaml schema → 空字段 stub（前端显示"该表单暂无字段"）
+        FormSchema {
+            id: component.id.clone(),
+            title: component.id.clone(),
+            description: component.description.clone(),
+            submit_target: component.target.clone(),
+            fields: vec![],
+        }
+    };
+
+    Ok(Json(schema))
+}

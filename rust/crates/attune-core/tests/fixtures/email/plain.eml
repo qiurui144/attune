@@ -1,0 +1,9 @@
+From: Alice <alice@example.com>
+To: Bob <bob@example.com>
+Subject: Quarterly Notes
+Message-ID: <plain-001@example.com>
+Date: Mon, 18 May 2026 09:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+This is the body of a plain text email.
+It has two lines worth of useful content.

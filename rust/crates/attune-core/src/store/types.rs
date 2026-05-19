@@ -253,15 +253,22 @@ pub struct ProjectTimelineEntry {
     pub payload_encrypted: Option<Vec<u8>>,
 }
 
-/// A1 Memory Consolidation：聚合的情景记忆行（解密后）。
+/// A1 Memory Consolidation：聚合的记忆行（解密后）。
+/// 多层记忆（2026-05-18）：kind 含 'episodic'(L2) / 'semantic'(L3)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRow {
     pub id: String,
-    pub kind: String,            // 'episodic'（W5+ 加 'semantic'）
+    pub kind: String,            // 'episodic' (L2) / 'semantic' (L3)
     pub window_start: i64,       // unix epoch 秒
     pub window_end: i64,
     pub source_chunk_hashes: Vec<String>,  // 升序
     pub summary: String,         // 已解密
     pub model: String,
     pub created_at: i64,
+    /// 语义层去重键（L3）；episodic 行为 None。
+    pub topic_key: Option<String>,
+    /// 已降级为冷归档（默认检索排除）。
+    pub cold: bool,
+    /// 被更新的 L3 行取代后，指向新行 id；live 行为 None。
+    pub superseded_by: Option<String>,
 }

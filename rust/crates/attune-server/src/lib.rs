@@ -2,6 +2,8 @@ pub mod error;
 pub mod routes;
 pub mod state;
 pub(crate) mod middleware;
+pub(crate) mod ingest_webdav;
+pub(crate) mod ingest_email;
 
 use axum::middleware as axum_mw;
 use axum::routing::{delete, get, post};
@@ -72,6 +74,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/feedback", post(routes::feedback::submit_feedback))
         // Plugin UI form runtime
         .route("/api/v1/forms/{plugin_id}/{form_id}", get(routes::forms::get_form))
+        .route("/api/v1/forms/{plugin_id}/{form_id}/schema", get(routes::forms::get_form_schema))
         .route("/api/v1/forms/{plugin_id}/{form_id}/submit", post(routes::forms::submit_form))
         // Member state + settings locks (UI 灰显决策源)
         .route("/api/v1/member/state", get(routes::member::get_state))
@@ -99,8 +102,17 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
                 .delete(routes::annotations::delete_annotation))
         .route("/api/v1/items", get(routes::items::list_items))
         .route("/api/v1/items/stale", get(routes::items::list_stale_items))
-        .route("/api/v1/items/{id}", get(routes::items::get_item).delete(routes::items::delete_item).patch(routes::items::update_item))
+        // Round D E2E fix: PATCH content 需与 /upload 同享 100MB body limit。
+        // 否则 axum 默认 2MB 先拦截，update_item 的 MAX_CONTENT_LEN=100MB 检查成死代码，
+        // 且用户能 upload 100MB 文档却无法 PATCH 编辑（2MB 上限）。GET/DELETE 无 body 不受影响。
+        .route("/api/v1/items/{id}",
+            get(routes::items::get_item)
+                .delete(routes::items::delete_item)
+                .patch(routes::items::update_item)
+                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)))
         .route("/api/v1/items/{id}/stats", get(routes::items::get_item_stats))
+        // 取回原始证据文件（变体 A「查看证据原文」）
+        .route("/api/v1/items/{id}/original", get(routes::items::get_item_original))
         // v0.6 Phase A.5.4 per-file 隐私分级
         .route("/api/v1/items/protected", get(routes::items::list_protected_items))
         .route(
@@ -123,6 +135,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/plugins", get(routes::plugins::list))
         // E1 marketplace toggle (W4, 2026-04-27)
         .route("/api/v1/plugins/{id}/toggle", post(routes::plugins::toggle))
+        // law-pro 接入阶段 2: 前端触发 plugin agent binary（civil_loan_agent 算金额）
+        .route("/api/v1/agents/{agent_id}/run", post(routes::agents::run_agent))
         // E4 (2026-05-01) — PluginHub marketplace (默认 Mock provider；attune-pro 注入 hub-client)
         .route("/api/v1/marketplace/plugins", get(routes::marketplace::list_plugins))
         .route("/api/v1/marketplace/plugins/{id}/install", post(routes::marketplace::install_plugin))
@@ -184,6 +198,13 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // 写入由 attune-core::Store::record_outbound 在 LLM provider hook 中触发，不暴露 POST
         .route("/api/v1/audit/outbound", get(routes::audit::list))
         .route("/api/v1/audit/outbound/export.csv", get(routes::audit::export_csv))
+        // v0.7 F1: 新 audit_log 表 + RFC4180 CSV
+        .route("/api/v1/audit/log", get(routes::audit::list_log))
+        .route("/api/v1/audit/log.csv", get(routes::audit::export_log_csv))
+        // v0.7 F3: demo sample data 一键加载
+        .route("/api/v1/demo/load", post(routes::demo::load_demo))
+        // v0.7 F5: streaming chat (SSE)
+        .route("/api/v1/chat/stream", post(routes::chat_stream::chat_stream))
         // v0.6 Phase A.5.5 隐私 tier 检测（Settings UI Privacy 页用）
         .route("/api/v1/privacy/tier", get(routes::privacy::tier))
         // Status (full status requires vault access)
@@ -191,6 +212,16 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Index management
         .route("/api/v1/index/bind", post(routes::index::bind_directory))
         .route("/api/v1/index/bind-remote", post(routes::remote::bind_remote))
+        .route("/api/v1/index/email-accounts", get(routes::email::list_email_accounts))
+        .route("/api/v1/index/bind-email", post(routes::email::bind_email))
+        .route(
+            "/api/v1/index/email-accounts/{dir_id}",
+            axum::routing::delete(routes::email::delete_email_account),
+        )
+        .route(
+            "/api/v1/index/email-accounts/{dir_id}/sync",
+            post(routes::email::sync_email_account_now),
+        )
         .route("/api/v1/index/unbind", delete(routes::index::unbind_directory))
         .route("/api/v1/index/status", get(routes::index::index_status))
         // File upload（multipart body limit 匹配 MAX_UPLOAD_BYTES 100MB；
@@ -205,6 +236,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Web UI (embedded single-page HTML)
         .route("/", get(routes::ui::index))
         .route("/ui", get(routes::ui::index))
+        // favicon：返回 204 避免浏览器自动请求落空刷 console error
+        .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }))
         // Guard middleware for all other routes
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::vault_guard))
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::bearer_auth_guard))
