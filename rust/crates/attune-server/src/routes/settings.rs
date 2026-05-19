@@ -2,8 +2,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use crate::state::SharedState;
-
-const SETTINGS_KEY: &str = "app_settings";
+use attune_core::llm_settings::SETTINGS_META_KEY as SETTINGS_KEY;
 
 pub async fn get_settings(
     State(state): State<SharedState>,
