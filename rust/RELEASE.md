@@ -1,48 +1,121 @@
 # attune 版本记录
 
-## v0.7.0-dev (2026-05-18 sprint) — Bug fixes + 多层记忆系统（token 降本）
+## v0.7.0（2026-05-19）— 多层记忆系统 + 云会员链路 + Email 采集 + WebDAV 重构 + ingest 抽象
 
-### Bug fixes
+发布定位：**记忆护城河** — 四层记忆架构（token 降幅 ~78%）+ 云会员登录自配 LLM + Email IMAP 采集源 + SourceConnector 统一采集抽象 + 12 项安全/稳定性修复 + 1260+ tests。
 
-- **访问日志 token 脱敏**（安全）：`/ws/scan-progress?token=<session>` 的会话 token 原本
-  以明文写入访问日志。现在日志中间件在输出前对查询参数 `token` 进行 `<redacted>` 替换，
-  其他参数保持不变。(`middleware.rs`)
+### 多层记忆系统（L0–L3）
 
-- **WebSocket 扫描进度连接修复**：`/ws/scan-progress` 握手因缺少 `?token=` 查询参数
-  而 401 失败（WebSocket 握手不支持 `Authorization` 头）。现在 `ws.ts` 从
-  `sessionStorage` 读取 token 并拼入 URL；无 token 时（vault 未解锁）跳过连接、等
-  解锁后 `handleUnlock` / `handleWizardComplete` 重新调用 `startProgressWS()`。
-  (`ws.ts`, `App.tsx`)
+为 attune-core 加四层记忆架构，chat 上下文按 query 形态选对的层和粒度，不再一律
+dump 原始 chunk。设计稿：`docs/superpowers/plans/2026-05-18-multilayer-memory.md`。
 
-- **Settings → 关于 tab 网络搜索状态修复（outcome a）**：`/api/v1/ai_stack` 响应缺
-  少 `web_search` 字段，导致前端 `stackStatus('web_search').ok` 恒为 `false`、始终
-  显示"未就绪"。现已添加 `web_search.available` 字段，与 chat 路由实际使用的
-  `state.web_search` Arc 一致：系统检测到 Chrome/Edge 则 `true`，否则附上安装提示。
-  (`routes/ai_stack.rs`)
+| 层 | 内容 | 装配时机 |
+|----|------|----------|
+| L0 | 原始 chunk（RAG 检索结果） | precise query，或上层命中不足时退回 |
+| L1 | episodic 记忆（chat 后自动写入） | 日常对话上下文 |
+| L2 | 滚动历史摘要（`compact_history`） | recall / 长对话历史 |
+| L3 | 语义主题摘要（hdbscan 聚类 + LLM） | overview query |
 
-## v0.7.0-dev (2026-05-18 sprint) — 多层记忆系统（token 降本）
+**核心模块**：
 
-为 OSS attune-core 加多层记忆架构，让 chat 上下文装配按 query 形态发对的层、对的
-粒度，而非永远 dump 原始 chunk。设计稿
-`docs/superpowers/plans/2026-05-18-multilayer-memory.md`。
-
-| 阶段 | 改动 |
+| 模块 | 改动 |
 |------|------|
-| 数据模型 | `memories` 新增 `topic_key`/`cold`/`superseded_by`（幂等 ALTER 升级老 vault）；新表 `memory_vectors` —— embedding sidecar 让 L2/L3 摘要可向量检索 |
-| L3 语义层 | `memory/semantic.rs` —— 把 episodic（L2）按主题 hdbscan 聚类，每簇 1 次 LLM 总结成 standing "用户对 X 的认知"。`topic_key` 幂等，refresh 时旧 subset 主题 supersede |
-| 检索 | `memory/retrieval.rs` —— `MemoryVectorIndex`（专用 usearch 索引）+ `search_memories`：embed query → 排序 live 记忆 → 时间窗口过滤、冷记忆排除 |
-| Tier-aware 装配 | `memory/assembler.rs` —— `classify_query_shape`（recall/overview/precise 零 LLM 启发式）+ `assemble_context`：recall→L2 / overview→L3 / precise→L0，coverage gate 保证命中弱即退回 L0，无回归 |
-| 历史压缩 | `compact_history` —— 超窗的旧对话轮次不再静默丢弃，滚动摘要成 1 条并按 `sha256(dropped)` 缓存（找回原本丢失的信息 + 降 token） |
-| worker | `start_memory_consolidator` 在 episodic pass 后跑分层：embed L2/L3 → L2→L3 语义周期 → 冷降级（纯 SQL） |
+| 数据模型 | `memories` 新增 `topic_key`/`cold`/`superseded_by`（幂等 ALTER，老 vault 自动升级）；新表 `memory_vectors` —— embedding sidecar，让 L2/L3 摘要可向量检索 |
+| `memory/semantic.rs` | L3 语义层：episodic 按主题 hdbscan 聚类，每簇 1 次 LLM 汇总成 standing "用户对 X 的认知"，`topic_key` 幂等 refresh |
+| `memory/retrieval.rs` | `MemoryVectorIndex`（专用 usearch 索引）+ `search_memories`：embed query → 时间窗口过滤 → 冷记忆排除 |
+| `memory/assembler.rs` | `classify_query_shape`（recall/overview/precise 零 LLM 启发式）+ `assemble_context` tier-aware 装配；coverage gate 命中弱即退回 L0 |
+| `compact_history` | 历史压缩：超窗对话轮次不再静默丢弃，滚动摘要为 1 条并按 `sha256(dropped)` 缓存 |
+| `start_memory_consolidator` | 后台 worker：episodic pass → embed L2/L3 → L2→L3 语义周期 → 冷降级（纯 SQL） |
 
-**成本契约**：建库不变（tier 1-2）；L2/L3 摘要 tier 3 + 配额治理；冷降级 tier 0；
-读路径只选已建好的记忆、不触发 LLM。
+**成本契约**：建库阶段不变（tier 1-2）；L2/L3 摘要为 tier 3 + 配额治理；冷降级 tier 0；
+读路径仅选已建好的记忆，不触发 LLM。
 
 **实测**（`memory_token_reduction_benchmark`）：recall+overview 子集注入 token 中位降幅
-**78.7%**，precise 子集 0% 变化（precise 永不离开 L0）。
+**78.7%**，precise 子集 0%（precise 永不离开 L0）。
 
-测试：46 unit + 5 集成（`multilayer_memory_integration`）+ 1 benchmark，全绿；
-`cargo test -p attune-core` 28 套件 0 失败。
+测试：46 unit + 5 集成（`multilayer_memory_integration`）+ 1 benchmark，全绿。
+
+### 云会员登录自配 LLM 网关
+
+成员登录后自动为 LLM 完成云端配置，无需手动填写 API Key。
+
+- `feat(core): cloud_client UserInfo` 携带 `gateway_token` + `gateway_url`
+- `feat(core): llm_settings` merge helper — configure-if-unconfigured 语义，不覆盖用户已有配置
+- `feat(server): member login` 触发 `apply_cloud_llm_if_needed`，热重载 LLM provider
+- `fix(cloud): wire attune↔cloud membership chain end-to-end`
+- code-review P2 修复：LLM reload 竞态、`no expect()`、`dek_db` guard、共享常量
+
+### Email（IMAP）采集源
+
+通过 IMAP UID 增量同步将邮件自动接入知识库。
+
+- `feat(store): email_accounts` 加密持久化表（vault DEK 保护账户密码）
+- `feat(ingest): ImapFetcher` 可注入接口 + `EmailConnector` IMAP UID increment 实现
+- `feat(ingest): parse_email_bytes` 邮件解析层（支持 text/html 正文 + 附件提取）
+- `feat(server): email account CRUD` (`/api/v1/remotes/email/*`) + 手动同步路由
+- `feat(server): periodic email sync worker` — 与 WebDAV worker 共用调度框架
+- `fix(ingest): advance email UID cursor` 仅越过已完整处理的 UID，防重复入库
+- UI：Settings → 远程数据源 → 邮件账户区块（中英双语）
+
+### SourceConnector 统一采集抽象 + WebDAV 重构
+
+把散落的 scanner / upload / ingest 路由收口到统一 pipeline。
+
+- `feat(ingest): SourceConnector trait + RawDocument` — 所有采集源共同接口
+- `feat(ingest): ingest_document` — parse → dedup（content_hash 短路）→ insert → embed → classify 统一入库函数
+- `feat(ingest): LocalFolderConnector` + `WebDavConnector` 各自实现 trait
+- refactor：`/api/v1/upload`、`/api/v1/ingest`、`bind-remote`、`scanner.rs` 全部走 `ingest_document`
+- `feat(ingest): WebDAV 周期增量同步 worker` + 配置加密持久化（`53f4890`）
+
+### UI
+
+- **双层侧边栏导航**：主导航 + 可折叠「更多」二级入口（`feat(ui): two-tier sidebar nav`）
+- **修复**：折叠「更多」时当前页面高亮指示消失（`fix(ui): active indicator on collapsed 更多 toggle`）
+- **Email 账户区块**：远程视图新增邮件账户管理 UI + API hook + i18n key（zh/en）
+
+### WebSocket / AI Stack 修复
+
+- `fix(ws): allow tokenless WS connect for no-auth dev mode` — 无 token 时 `/ws/scan-progress` 不再 401，dev 模式可直连
+- `fix(ws+ai_stack): WebSocket 401 token missing + ai_stack web_search field absent` — WS 握手 token 拼入 URL；`/api/v1/ai_stack` 补 `web_search.available` 字段
+- `fix(server): redact WS session token from access logs` — 访问日志中 `?token=` 参数替换为 `<redacted>`（安全）
+
+### 记忆护城河 Phase A+B（文档编辑嵌入 + 自学习闭环）
+
+修复 ≤v0.6.3 的 3 个 release-blocker，建立自学习信号管道：
+
+| Bug | 修法 |
+|-----|------|
+| `update_item` 不 re-embed → 编辑后搜索返回旧内容 | `UpdateOutcome` 三态 + `reindex::reindex_item` 完整 pipeline |
+| 同名重传不去重 | `content_hash` dedup 短路（SHA-256） |
+| `delete_item` 不清向量/全文索引（死代码路径） | `reindex::purge_item_indexes` 先清后软删 |
+| scanner 变更触发删除但拿不到 vectors lock | `reindex_queue` 表 + `start_reindex_worker` 3s 轮询消费 |
+
+自学习 hook 新增 3 类信号（`doc_create` / `doc_update` / `citation_hit` / `annotation_marker`），
+汇入 `skill_signals` 表，向后兼容旧 `search_miss` 路径。
+
+### 其他功能
+
+- `feat(search): query_rewrite` 模块接线 — 口语 query 改写提升 RAG hit rate
+- `feat(cost): TokenChip` 接线 Chat — 真实 token/费用估算
+- `feat(vlm): LlmVlmProvider` 接线 — 复用 LlmProvider 视觉多模态路径
+- `feat(agents): POST /api/v1/agents/{id}/run` 路由 — 打通前端触发 plugin agent
+- `feat(marketplace): plugin download` 落地 + 自部署 hub license 入口；`plugin_sync::install_plugin_package`（白名单 id 校验 / staging+rename 原子替换）
+- `docs: open-source acknowledgements` — 第三方依赖致谢节
+
+### 代码质量
+
+- `fix(clippy): clear -D warnings lint debt` — attune-core + attune-server 共 39 处 clippy warning 清零
+- `chore(cleanup): 剥离代码内过程标签注释` — 删除「批次 X / Round N / 阶段 Y」等过程标签，符合注释规范
+- `fix: remediate v0.7 review findings` — Reader annotations / i18n / security 若干项
+
+### 验证
+
+- workspace lib tests: 1260+ passed / 0 failed
+- integration tests: `memory_moat_integration` 14 passed + `multilayer_memory_integration` 5 passed
+- E2E 套件: `tests/e2e/run_all.sh` **90 断言全绿**（chat RAG / Playwright UI / crash recovery / annotation CRUD / 持续压力）
+- 全量前端 E2E: `tests/e2e/playwright/run_ui_all.sh`（L0 Wizard ~ law-pro）**45/0**
+
+---
 
 ## v0.7.0-dev (2026-05-16 sprint) — law-pro 接入 + 证据可溯源强化
 
