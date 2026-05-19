@@ -183,3 +183,79 @@ fn ingest_document_inner(
         None => Ok(IngestOutcome::Inserted { item_id, chunks_enqueued: chunk_counter }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::IngestOutcome;
+
+    // ── IngestOutcome derive trait tests ────────────────────────────────────
+    // These verify the #[derive(Debug, Clone, PartialEq, Eq)] bounds that
+    // callers rely on for matching / asserting outcomes without SQLite.
+
+    #[test]
+    fn ingest_outcome_inserted_equality_and_clone() {
+        let a = IngestOutcome::Inserted { item_id: "id-1".into(), chunks_enqueued: 5 };
+        let b = a.clone();
+        assert_eq!(a, b);
+        assert_ne!(
+            a,
+            IngestOutcome::Inserted { item_id: "id-2".into(), chunks_enqueued: 5 }
+        );
+        assert_ne!(
+            a,
+            IngestOutcome::Inserted { item_id: "id-1".into(), chunks_enqueued: 6 }
+        );
+    }
+
+    #[test]
+    fn ingest_outcome_duplicate_equality_and_clone() {
+        let a = IngestOutcome::Duplicate { item_id: "dup-1".into() };
+        assert_eq!(a.clone(), a);
+        assert_ne!(a, IngestOutcome::Duplicate { item_id: "dup-2".into() });
+    }
+
+    #[test]
+    fn ingest_outcome_updated_equality_and_clone() {
+        let a = IngestOutcome::Updated { item_id: "new-1".into(), old_item_id: "old-1".into() };
+        assert_eq!(a.clone(), a);
+        assert_ne!(
+            a,
+            IngestOutcome::Updated { item_id: "new-1".into(), old_item_id: "old-2".into() }
+        );
+    }
+
+    #[test]
+    fn ingest_outcome_skipped_equality_and_clone() {
+        let a = IngestOutcome::Skipped { reason: "empty content after parse".into() };
+        assert_eq!(a.clone(), a);
+        assert_ne!(a, IngestOutcome::Skipped { reason: "other reason".into() });
+    }
+
+    #[test]
+    fn ingest_outcome_variants_not_equal_across_kinds() {
+        // Guard: different variants never compare equal even when fields look similar.
+        let inserted = IngestOutcome::Inserted { item_id: "x".into(), chunks_enqueued: 0 };
+        let duplicate = IngestOutcome::Duplicate { item_id: "x".into() };
+        let skipped = IngestOutcome::Skipped { reason: "x".into() };
+        assert_ne!(inserted, duplicate);
+        assert_ne!(duplicate, skipped);
+    }
+
+    #[test]
+    fn ingest_outcome_debug_contains_variant_name() {
+        // Callers use {:?} in panic messages — ensure Debug is implemented.
+        let inserted = IngestOutcome::Inserted { item_id: "abc".into(), chunks_enqueued: 3 };
+        let dbg = format!("{inserted:?}");
+        assert!(dbg.contains("Inserted"), "Debug must show variant name: {dbg}");
+        assert!(dbg.contains("abc"), "Debug must include field values: {dbg}");
+
+        let dup = IngestOutcome::Duplicate { item_id: "dup".into() };
+        assert!(format!("{dup:?}").contains("Duplicate"));
+
+        let upd = IngestOutcome::Updated { item_id: "n".into(), old_item_id: "o".into() };
+        assert!(format!("{upd:?}").contains("Updated"));
+
+        let skip = IngestOutcome::Skipped { reason: "empty content after parse".into() };
+        assert!(format!("{skip:?}").contains("Skipped"));
+    }
+}

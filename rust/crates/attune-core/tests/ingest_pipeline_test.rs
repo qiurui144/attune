@@ -188,6 +188,51 @@ fn ingest_with_profile_threads_ocr_profile() {
 }
 
 #[test]
+fn raw_title_takes_priority_over_parser_extracted_title() {
+    // The pipeline uses raw.title when non-empty and falls back to the parser-extracted
+    // title only when raw.title is blank.  Verify both branches.
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+
+    // Branch A: raw.title is non-empty — it must win over the markdown h1.
+    let mut doc_with_title = md_doc("/tmp/titled.md", "# Parser Title\n\ncontent body unique-alpha.");
+    doc_with_title.title = "Explicit Raw Title".into();
+    let id_a = match ingest_document(&store, &dek, &doc_with_title).unwrap() {
+        IngestOutcome::Inserted { item_id, .. } => item_id,
+        other => panic!("expected Inserted, got {other:?}"),
+    };
+    let item_a = store.get_item(&dek, &id_a).unwrap().expect("item must exist");
+    assert_eq!(item_a.title, "Explicit Raw Title", "raw.title must take priority");
+
+    // Branch B: raw.title is empty — parser-extracted h1 is used as fallback.
+    // Use distinct content so content_hash doesn't deduplicate against Branch A.
+    let doc_no_title = md_doc("/tmp/notitle.md", "# Parser Title\n\ncontent body unique-beta.");
+    let id_b = match ingest_document(&store, &dek, &doc_no_title).unwrap() {
+        IngestOutcome::Inserted { item_id, .. } => item_id,
+        other => panic!("expected Inserted, got {other:?}"),
+    };
+    let item_b = store.get_item(&dek, &id_b).unwrap().expect("item must exist");
+    assert!(!item_b.title.is_empty(), "parser-extracted title must be used when raw.title is empty");
+}
+
+#[test]
+fn ingest_with_named_profile_inserts_text_doc_unchanged() {
+    // ingest_document_with_profile with a named profile ("screenshot") must still
+    // produce Inserted for a plain-text document — the profile only affects OCR
+    // dispatch inside parse_bytes_with_profile; text documents are unaffected.
+    use attune_core::ingest::ingest_document_with_profile;
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let doc = md_doc("/tmp/scan.txt", "# Scan Result\n\nsome extracted text from scan.");
+    let outcome = ingest_document_with_profile(&store, &dek, &doc, Some("screenshot")).unwrap();
+    assert!(
+        matches!(outcome, IngestOutcome::Inserted { .. }),
+        "named OCR profile must not break plain-text ingest, got {outcome:?}"
+    );
+    assert_eq!(store.item_count().unwrap(), 1);
+}
+
+#[test]
 fn replacing_with_content_identical_to_third_party_item_inserts_new() {
     // 防护：replacing 路径下若新内容的 content_hash 命中的是另一个不相关 item，
     // 不能短路返回那个 item 的 Duplicate（旧 item 已被 caller 软删，outcome 若指向
