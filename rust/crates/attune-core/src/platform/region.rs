@@ -5,7 +5,7 @@
 //!
 //! 区域分类：
 //! - China: timezone Asia/{Shanghai/Chongqing/Urumqi/Harbin/Hong_Kong/Taipei/Macau}
-//!          OR locale zh-CN / zh_CN / zh-HK / zh-TW
+//!   OR locale zh-CN / zh_CN / zh-HK / zh-TW
 //! - International: 其他
 
 use serde::{Deserialize, Serialize};

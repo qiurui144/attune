@@ -233,9 +233,8 @@ fn locate_snippet(content: &str, snip: &str) -> Option<(usize, usize)> {
 
     let max_chars = snip_chars.len();
     let mut end_byte = orig_s;
-    let mut ch_count = 0usize;
     let mut prev_newline = false;
-    for ch in content[orig_s..].chars() {
+    for (ch_count, ch) in content[orig_s..].chars().enumerate() {
         if ch_count >= max_chars { break; }
         // 段落边界：连续两个 \n 立即停（不含末尾 \n，避免截过短）
         if ch == '\n' && prev_newline && ch_count >= anchor_len {
@@ -243,7 +242,6 @@ fn locate_snippet(content: &str, snip: &str) -> Option<(usize, usize)> {
         }
         prev_newline = ch == '\n';
         end_byte += ch.len_utf8();
-        ch_count += 1;
     }
     log::info!("ai_annotator: prefix-anchor match for snippet starting {anchor:?}");
     Some(byte_range_to_utf16(content, orig_s, end_byte))

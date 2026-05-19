@@ -161,8 +161,8 @@ fn extract_chinese_person(text: &str, out: &mut Vec<Entity>) {
             byte_start,
             byte_end,
         });
-        for k in i..=name_end_idx {
-            consumed[k] = true;
+        for flag in consumed.iter_mut().take(name_end_idx + 1).skip(i) {
+            *flag = true;
         }
     }
 }

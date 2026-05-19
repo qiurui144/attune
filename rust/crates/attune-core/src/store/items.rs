@@ -37,6 +37,7 @@ use crate::store::types::*;
 impl Store {
     // --- items (加密 CRUD) ---
 
+    #[allow(clippy::too_many_arguments)] // all 8 args are distinct item fields; grouping adds indirection without clarity
     pub fn insert_item(
         &self,
         dek: &Key32,

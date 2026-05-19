@@ -87,18 +87,13 @@ async fn handle_scan_progress(mut socket: WebSocket, state: SharedState) {
         }
 
         // 2. 非阻塞拉所有积压的 recommendation 一并推
-        loop {
-            match rx.try_recv() {
-                Ok(rec_payload) => {
-                    if socket
-                        .send(Message::Text(rec_payload.to_string().into()))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                Err(_) => break,
+        while let Ok(rec_payload) = rx.try_recv() {
+            if socket
+                .send(Message::Text(rec_payload.to_string().into()))
+                .await
+                .is_err()
+            {
+                return;
             }
         }
 

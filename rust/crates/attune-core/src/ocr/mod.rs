@@ -258,7 +258,7 @@ pub fn profile_for_id(profile_id: Option<&str>) -> OcrProfile {
             OcrProfile::builtins()
                 .into_iter()
                 .find(|p| p.id == id)
-                .unwrap_or_else(|| default_contract_profile())
+                .unwrap_or_else(default_contract_profile)
         }),
         Err(_) => default_contract_profile(),
     }

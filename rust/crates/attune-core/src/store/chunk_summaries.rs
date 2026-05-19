@@ -41,6 +41,7 @@ impl Store {
     }
 
     /// 存摘要。重复的 (chunk_hash, strategy) 走 REPLACE 覆盖（同策略不应产生多条）。
+    #[allow(clippy::too_many_arguments)] // all 8 args are distinct chunk summary fields; grouping adds indirection without clarity
     pub fn put_chunk_summary(
         &self,
         dek: &Key32,

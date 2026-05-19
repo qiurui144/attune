@@ -18,9 +18,8 @@ pub fn context_window(model: &str) -> usize {
         1_000_000
     } else if m.contains("claude") {
         200_000
-    } else if m.contains("gpt-4o") || m.contains("gpt-4.1") || m.contains("gpt-4-turbo") {
-        128_000
-    } else if m.contains("glm-4") || m.contains("moonshot") || m.contains("kimi") {
+    } else if m.contains("gpt-4o") || m.contains("gpt-4.1") || m.contains("gpt-4-turbo")
+        || m.contains("glm-4") || m.contains("moonshot") || m.contains("kimi") {
         128_000
     } else if m.contains("deepseek") {
         64_000

@@ -54,7 +54,7 @@ pub async fn search(
             Json(serde_json::json!({"error": "query too long (max 500 bytes)"})),
         ));
     }
-    let limit = body.limit.min(MAX_LIMIT).max(1);
+    let limit = body.limit.clamp(1, MAX_LIMIT);
 
     let database = match body.database.to_lowercase().as_str() {
         "uspto" => PatentDatabase::Uspto,

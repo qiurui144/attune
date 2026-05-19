@@ -1025,7 +1025,7 @@ fn run_plugin_publish(
 
 fn run_ocr_profile_list() -> attune_core::error::Result<()> {
     let reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
-    println!("{:<14} {:<6} {:<5} {:<14} {}", "id", "type", "dpi", "tags", "name");
+    println!("{:<14} {:<6} {:<5} {:<14} name", "id", "type", "dpi", "tags");
     println!("{}", "-".repeat(70));
     for p in reg.list() {
         let t = if p.builtin { "builtin" } else { "custom" };

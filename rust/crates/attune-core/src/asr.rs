@@ -459,7 +459,7 @@ fn parse_srt_timestamp_line(line: &str) -> Option<(u32, u32)> {
         return None;
     }
     let start = parse_srt_time(parts[0].trim())?;
-    let end = parse_srt_time(parts[1].trim().splitn(2, ' ').next()?)?; // trim trailing flags
+    let end = parse_srt_time(parts[1].trim().split(' ').next()?)?; // trim trailing flags
     Some((start, end))
 }
 

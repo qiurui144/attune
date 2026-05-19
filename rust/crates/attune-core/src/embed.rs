@@ -64,10 +64,6 @@ impl OllamaProvider {
         }
     }
 
-    pub fn default() -> Self {
-        Self::new("http://localhost:11434", "bge-m3", 1024)
-    }
-
     /// 检查 Ollama 是否可用
     pub fn check_health(&self) -> bool {
         let url = format!("{}/api/tags", self.base_url);
@@ -95,6 +91,12 @@ impl OllamaProvider {
                 rt.block_on(async { self.client.get(&url).send().await.is_ok() })
             }
         }
+    }
+}
+
+impl Default for OllamaProvider {
+    fn default() -> Self {
+        Self::new("http://localhost:11434", "bge-m3", 1024)
     }
 }
 

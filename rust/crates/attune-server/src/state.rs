@@ -237,6 +237,7 @@ impl AppState {
             let endpoint = region.hf_endpoint();
             // SAFETY: 启动时一次性设置（init_search_engines 由 compare_exchange 保证幂等）
             // 不会有并发 set_var 竞争。
+            #[allow(unsafe_code)]
             unsafe { std::env::set_var("HF_ENDPOINT", endpoint) };
             tracing::info!("Region detected: {} → HF_ENDPOINT={endpoint}", region.label());
         }

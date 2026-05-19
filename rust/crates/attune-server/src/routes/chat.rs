@@ -318,8 +318,10 @@ pub async fn chat(
         tokio::task::spawn_blocking(move || {
             let vault_guard = state_clone.vault.lock().unwrap_or_else(|e| e.into_inner());
             let store = vault_guard.store();
-            let mut stats = attune_core::annotation_weight::AnnotationWeightStats::default();
-            stats.items_total = results_in.len();
+            let mut stats = attune_core::annotation_weight::AnnotationWeightStats {
+                items_total: results_in.len(),
+                ..Default::default()
+            };
             let mut kept = Vec::with_capacity(results_in.len());
             for r in results_in.drain(..) {
                 let anns = store.list_annotations(&dek_clone, &r.item_id).unwrap_or_default();
@@ -669,7 +671,7 @@ pub async fn chat(
                         if c.cache_hit { compression_stats.1 += 1; }
                         compression_stats.2 += c.original_chars;
                     }
-                    knowledge.into_iter().zip(compressed.into_iter()).map(|(mut k, c)| {
+                    knowledge.into_iter().zip(compressed).map(|(mut k, c)| {
                         if let Some(obj) = k.as_object_mut() {
                             obj.insert("inject_content".into(), serde_json::Value::String(c.injected));
                             obj.insert("compression_cached".into(), serde_json::Value::Bool(c.cache_hit));

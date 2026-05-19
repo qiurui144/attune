@@ -119,7 +119,7 @@ impl Store {
              LIMIT ?1",
         )?;
         let rows = stmt
-            .query_map(params![limit as i64], |r| Self::row_to_memory(r))?
+            .query_map(params![limit as i64], Self::row_to_memory)?
             .filter_map(|r| r.ok());
         let mut out = Vec::new();
         for raw in rows {
@@ -151,7 +151,7 @@ impl Store {
         };
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt
-            .query_map(params![kind], |r| Self::row_to_memory(r))?
+            .query_map(params![kind], Self::row_to_memory)?
             .filter_map(|r| r.ok());
         let mut out = Vec::new();
         for raw in rows {
@@ -163,6 +163,7 @@ impl Store {
     /// 写入一条 semantic (L3) memory。幂等键 = (kind='semantic', topic_key)：
     /// `uq_memories_topic` 部分唯一索引拒绝重复 → 返回 (id, 0) 表示已存在。
     /// 返回 (新行 id, 受影响行数)。
+    #[allow(clippy::too_many_arguments)] // all 9 args are distinct semantic fields; grouping adds indirection without clarity
     pub fn insert_semantic_memory(
         &self,
         dek: &Key32,

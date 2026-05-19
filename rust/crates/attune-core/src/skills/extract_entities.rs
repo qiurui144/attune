@@ -169,7 +169,7 @@ fn extract_arabic_amounts(text: &str) -> Vec<Amount> {
             _ => 1.0,
         };
         let value = num * multiplier;
-        if value < 0.001 || value > 1e15 {
+        if !(0.001..=1e15).contains(&value) {
             continue;
         }
         let raw = cap.get(0).unwrap().as_str().trim().to_string();
