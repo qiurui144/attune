@@ -39,6 +39,7 @@ export type Theme = 'light' | 'dark' | 'auto';
 export const theme = signal<Theme>(loadTheme());
 
 export const sidebarCollapsed = signal<boolean>(loadBool('attune.sidebar.collapsed', false));
+export const sidebarMoreExpanded = signal<boolean>(loadBool('attune.sidebar.more_expanded', false));
 
 export type DrawerPayload =
   | { type: 'reader'; itemId: string }
@@ -240,6 +241,14 @@ theme.subscribe((v) => {
 sidebarCollapsed.subscribe((v) => {
   try {
     localStorage.setItem('attune.sidebar.collapsed', String(v));
+  } catch {
+    /* noop */
+  }
+});
+
+sidebarMoreExpanded.subscribe((v) => {
+  try {
+    localStorage.setItem('attune.sidebar.more_expanded', String(v));
   } catch {
     /* noop */
   }
