@@ -164,6 +164,12 @@ pub struct UserInfo {
     pub is_admin: bool,
     #[serde(default)]
     pub created_at: Option<String>,
+    /// new-api LLM token（付费会员；free 用户为 None）
+    #[serde(default)]
+    pub gateway_token: Option<String>,
+    /// LLM gateway endpoint（云端公布；如 https://gateway.attune.ai/v1）
+    #[serde(default)]
+    pub gateway_url: Option<String>,
 }
 
 /// accounts `GET /api/v1/licenses` 的单条 license 响应
@@ -279,5 +285,30 @@ mod tests {
         assert_eq!(lic.id, 7);
         assert_eq!(lic.entitled_plugins.len(), 1);
         assert_eq!(lic.entitled_plugins[0].plugin_id, "law-pro");
+    }
+
+    #[test]
+    fn user_info_parses_gateway_fields() {
+        let json = r#"{
+            "id": 5,
+            "email": "gw@example.com",
+            "plan": "pro",
+            "plan_expires": null,
+            "is_admin": false,
+            "created_at": "2026-05-18T00:00:00Z",
+            "gateway_token": "sk-newapi-abc",
+            "gateway_url": "https://gateway.attune.ai/v1"
+        }"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(u.gateway_token.as_deref(), Some("sk-newapi-abc"));
+        assert_eq!(u.gateway_url.as_deref(), Some("https://gateway.attune.ai/v1"));
+    }
+
+    #[test]
+    fn user_info_without_gateway_fields_still_parses() {
+        // older accounts server / free user — fields absent
+        let json = r#"{"id": 1, "email": "free@example.com", "plan": "individual"}"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert!(u.gateway_token.is_none());
     }
 }
