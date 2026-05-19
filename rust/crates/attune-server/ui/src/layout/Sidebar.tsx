@@ -1,5 +1,6 @@
-/** Attune Sidebar · 左栏 5 区 · 可折叠
- * 见 spec §4 "Sidebar（左栏 · 5 区）"
+/** Attune Sidebar · 两层导航 · 可折叠
+ * 主层（固定可见）: items / projects / knowledge
+ * 更多层（可折叠）: remote / skills / marketplace
  */
 
 import type { JSX } from 'preact';
@@ -336,13 +337,13 @@ function NavButton({ item, collapsed }: { item: NavItem; collapsed: boolean }): 
 
 function SecondaryNav({ collapsed }: { collapsed: boolean }): JSX.Element {
   const activeInMore = MORE_VIEWS.has(currentView.value);
-  // Auto-expand when active view is inside the "more" group (effect, not render mutation)
+  // Auto-expand when active view moves into the "更多" group; signal writes are idempotent
   useEffect(() => {
-    if (activeInMore && !sidebarMoreExpanded.value) {
-      sidebarMoreExpanded.value = true;
-    }
+    if (activeInMore) sidebarMoreExpanded.value = true;
   }, [activeInMore]);
   const moreExpanded = sidebarMoreExpanded.value;
+  // Show active treatment on the toggle row when its group is collapsed but contains the active view
+  const toggleActive = activeInMore && !moreExpanded;
 
   return (
     <nav
@@ -371,6 +372,7 @@ function SecondaryNav({ collapsed }: { collapsed: boolean }): JSX.Element {
           <button
             type="button"
             aria-expanded={moreExpanded}
+            aria-current={toggleActive ? 'page' : undefined}
             aria-label={moreExpanded ? t('sidebar.nav.more.collapse_aria') : t('sidebar.nav.more.aria')}
             onClick={() => (sidebarMoreExpanded.value = !moreExpanded)}
             className="interactive"
@@ -379,12 +381,12 @@ function SecondaryNav({ collapsed }: { collapsed: boolean }): JSX.Element {
               alignItems: 'center',
               gap: 'var(--space-3)',
               padding: 'var(--space-2) var(--space-4)',
-              background: 'transparent',
+              background: toggleActive ? 'var(--color-surface-hover)' : 'transparent',
               border: 'none',
               borderLeftWidth: 2,
               borderLeftStyle: 'solid',
-              borderLeftColor: 'transparent',
-              color: 'var(--color-text-secondary)',
+              borderLeftColor: toggleActive ? 'var(--color-accent)' : 'transparent',
+              color: toggleActive ? 'var(--color-text)' : 'var(--color-text-secondary)',
               fontSize: 'var(--text-sm)',
               cursor: 'pointer',
               textAlign: 'left',
