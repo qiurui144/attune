@@ -86,7 +86,7 @@ impl PluginRegistry {
     /// v0.6 新增：聚合所有 plugin 的 PII 正则（按 name 去重；同名仅保留第一个）。
     ///
     /// 调用方典型用法：
-    /// ```ignore
+    /// ```text
     /// let mut redactor = attune_core::pii::Redactor::new();
     /// for spec in registry.all_pii_patterns() {
     ///     redactor.add_dict_entry_from_regex(&spec.name, &spec.regex)?;
@@ -110,7 +110,7 @@ impl PluginRegistry {
     /// v0.6 新增：聚合所有 plugin 的 chat_trigger.project_keywords（去重后返回）
     ///
     /// project_recommender::recommend_for_chat 调用方典型用法：
-    /// ```ignore
+    /// ```text
     /// let kws: Vec<&str> = state.plugin_registry.all_chat_trigger_project_keywords()
     ///     .into_iter()
     ///     .collect();

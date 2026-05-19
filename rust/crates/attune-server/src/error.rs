@@ -6,7 +6,7 @@
 //! sniff. 本模块抽统一 `AppError` enum + `IntoResponse`, route 用 `?` 自动转换.
 //!
 //! 使用模板:
-//! ```ignore
+//! ```text
 //! use crate::error::{AppError, AppResult};
 //!
 //! pub async fn my_route() -> AppResult<Json<MyResponse>> {

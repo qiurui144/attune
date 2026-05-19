@@ -171,73 +171,47 @@ fn global_registry_singleton_smoke() {
     assert!(std::ptr::eq(r1, r2));
 }
 
-/// 真烧 CPU 验证 should_run 在超 budget 时确实变 false。
-/// 标记 #[ignore] 因为：(1) 真负载导致 CI 抖动 (2) 4s 跑时间偏长
-/// 本地调优时跑：`cargo test --test governor_integration --ignored heavy_cpu`
+/// 集成验证：registry → Conservative profile 广播 → governor 在 CPU 超 budget 时
+/// throttle（`should_run()` 变 false、`after_work()` 返回退让时长）。
+///
+/// 历史：旧版本真烧 N 个 CPU burner 线程，但 `fresh_registry()` 注入的是固定
+/// `MockMonitor(cpu_pct=0)`——governor 永远看不到真负载，`should_run()` 恒 true，
+/// `throttled` 恒 0，断言 `throttled > 0` 永不可能成立（任何 runner 上都失败）。
+/// 该 file header 也明确禁止用 `SysinfoMonitor`（GHA 高负载 runner 抖动）。
+/// 现改为通过 `MockMonitor::set()` 直接注入高 CPU sample —— 确定性、零真负载、
+/// 跨平台稳定。budget 阈值的纯单测见 `governor.rs` 的 `governor_with_cpu` 系列。
 #[test]
-#[ignore]
-fn heavy_cpu_load_triggers_throttle() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use sha2::{Digest, Sha256};
-
-    let registry = fresh_registry();
-    // 用 Conservative 档（EmbeddingQueue cpu cap = 15%）+ 多线程烧 CPU
+fn cpu_over_budget_triggers_throttle() {
+    // 保留具体 MockMonitor 句柄以便后续 set()；registry 内部按 trait object 持有。
+    let mock = Arc::new(MockMonitor::new(Sample::default()));
+    let registry = GovernorRegistry::with_monitor(mock.clone());
+    // Conservative 档：EmbeddingQueue cpu cap = 15%，throttle_on_exceed_ms = 2000。
     registry.set_profile(Profile::Conservative);
     let governor = registry.register(TaskKind::EmbeddingQueue);
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let throttled_count = Arc::new(AtomicUsize::new(0));
-    let allowed_count = Arc::new(AtomicUsize::new(0));
-
-    // 烧 CPU 线程数 = 核数（确保归一化后 ≥ 95%，远超 Conservative 15% 上限）。
-    // 单纯 4 个 burner 在多核机（如 32 核 dev box）上只是 12.5%，不会触发 throttle。
-    let n_burners = thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .max(2);
-    let mut burners = Vec::new();
-    for _ in 0..n_burners {
-        let stop = Arc::clone(&stop);
-        burners.push(thread::spawn(move || {
-            let mut h = Sha256::new();
-            let mut buf = [0u8; 64];
-            while !stop.load(Ordering::SeqCst) {
-                for i in 0..buf.len() {
-                    buf[i] = i as u8;
-                }
-                h.update(&buf);
-                let _ = h.clone().finalize();
-            }
-        }));
-    }
-
-    // 让 sysinfo 累积 ≥ REFRESH_INTERVAL，确保第一个 should_run() 拿到非零 cpu_pct
-    thread::sleep(Duration::from_millis(500));
-
-    // 在 3s 内频繁调 should_run，统计 true/false 比例
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut max_cpu_seen: f32 = 0.0;
-    while Instant::now() < deadline {
-        let s = governor.last_sample();
-        if s.cpu_pct > max_cpu_seen { max_cpu_seen = s.cpu_pct; }
-        if governor.should_run() {
-            allowed_count.fetch_add(1, Ordering::SeqCst);
-        } else {
-            throttled_count.fetch_add(1, Ordering::SeqCst);
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    eprintln!("max cpu_pct seen during burn: {max_cpu_seen} (n_burners={n_burners})");
-
-    stop.store(true, Ordering::SeqCst);
-    for h in burners { h.join().unwrap(); }
-
-    let throttled = throttled_count.load(Ordering::SeqCst);
-    let allowed = allowed_count.load(Ordering::SeqCst);
-    eprintln!("heavy_cpu test: throttled={throttled} allowed={allowed}");
-    // 4 线程烧 CPU 应在 Conservative 15% 上限下被 throttle 至少 30% 时间
-    assert!(
-        throttled > 0,
-        "throttle never triggered under heavy load (4 threads vs 15% cap), governor not effective"
+    // 低于 budget（10% < 15% cap）→ 允许运行，after_work 仅最小退让（10ms）。
+    mock.set(Sample::new(10.0, 0));
+    assert!(governor.should_run(), "10% CPU 低于 15% cap，should_run 应为 true");
+    assert_eq!(
+        governor.after_work(),
+        Duration::from_millis(10),
+        "未近 budget 时 after_work 应返回最小退让 10ms"
     );
+
+    // 超过 budget（95% > 15% cap）→ should_run 变 false。
+    mock.set(Sample::new(95.0, 0));
+    assert!(
+        !governor.should_run(),
+        "95% CPU 超 Conservative EmbeddingQueue 15% cap，should_run 必须 throttle 为 false"
+    );
+    // should_run() 已刷新 last_sample，after_work 现应返回完整退让（2000ms）。
+    assert_eq!(
+        governor.after_work(),
+        Duration::from_millis(2000),
+        "CPU 超 budget 时 after_work 应返回 Conservative throttle_on_exceed_ms"
+    );
+
+    // 恢复低负载 → governor 立即放行（无 sticky throttle）。
+    mock.set(Sample::new(5.0, 0));
+    assert!(governor.should_run(), "CPU 回落后 governor 应立即恢复放行");
 }

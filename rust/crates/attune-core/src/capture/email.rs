@@ -4,7 +4,7 @@
 //! v0.8 真 IMAP：用 async-imap crate, OAuth2 for Gmail, App password for IMAP server。
 //!
 //! 使用方式（v0.8 设计）：
-//! ```ignore
+//! ```text
 //! let provider = ImapEmailProvider::new(config).await?;
 //! let messages = provider.list_messages(since_unix).await?;
 //! for msg_meta in messages {
