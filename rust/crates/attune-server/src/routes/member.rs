@@ -136,6 +136,27 @@ pub async fn login_password(
                 Json(serde_json::json!({"error": "paid user has no matching license"})),
             )
         })?;
+        // 付费会员：拿 cloud gateway token, 合并进 vault app_settings,
+        // 桌面 chat 零配置接通云端 LLM。best-effort — 失败不阻断登录。
+        match client.me() {
+            Ok(me) => match (me.gateway_url.as_deref(), me.gateway_token.as_deref()) {
+                (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
+                    if let Err(e) = apply_gateway_to_vault_settings(&state, url, tok) {
+                        tracing::warn!("member login: gateway settings not written: {e}");
+                    } else {
+                        tracing::info!("member login: cloud LLM gateway written to vault settings");
+                    }
+                }
+                _ => {
+                    tracing::info!(
+                        "member login: no gateway token for {} — user keeps current LLM settings",
+                        user.email
+                    );
+                }
+            },
+            Err(e) => tracing::warn!("member login: fetch /me failed: {e}"),
+        }
+
         MemberState::Paid {
             account_id: user.id.to_string(),
             license_id: selected.id.to_string(),
@@ -161,4 +182,61 @@ pub async fn login_password(
 pub async fn logout(State(state): State<SharedState>) -> Json<serde_json::Value> {
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
     Json(serde_json::json!({"status": "ok", "state": "logged_out"}))
+}
+
+const SETTINGS_KEY: &str = "app_settings";
+
+/// 把 cloud gateway endpoint + token 合并写入 vault `app_settings` meta.
+///
+/// 读取现有 meta（若无则从空对象开始），调用 `attune_core::llm_settings::merge_gateway_into_settings`
+/// 后写回。与 `routes/settings.rs::update_settings` 使用同一 sink。
+fn apply_gateway_to_vault_settings(
+    state: &SharedState,
+    endpoint: &str,
+    token: &str,
+) -> Result<(), String> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let existing = vault
+        .store()
+        .get_meta(SETTINGS_KEY)
+        .map_err(|e| format!("get_meta failed: {e}"))?;
+    let current: serde_json::Value = match existing {
+        Some(data) => serde_json::from_slice(&data).unwrap_or_else(|_| serde_json::json!({})),
+        None => serde_json::json!({}),
+    };
+
+    let merged =
+        attune_core::llm_settings::merge_gateway_into_settings(current, endpoint, token);
+    let data = serde_json::to_vec(&merged).map_err(|e| format!("settings ser: {e}"))?;
+    vault
+        .store()
+        .set_meta(SETTINGS_KEY, &data)
+        .map_err(|e| format!("set_meta failed: {e}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use attune_core::llm_settings::merge_gateway_into_settings;
+
+    #[test]
+    fn login_merges_gateway_into_app_settings_meta_shape() {
+        // member login must merge gateway endpoint+token into the same
+        // `app_settings` JSON shape the vault meta stores (provider=openai_compat).
+        let existing = serde_json::json!({"llm": {"model": "qwen2.5:3b"}});
+        let merged = merge_gateway_into_settings(
+            existing,
+            "https://gateway.attune.ai/v1",
+            "sk-newapi-abc",
+        );
+        let llm = merged.get("llm").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
+        assert_eq!(
+            llm.get("endpoint").and_then(|v| v.as_str()),
+            Some("https://gateway.attune.ai/v1")
+        );
+        assert_eq!(llm.get("api_key").and_then(|v| v.as_str()), Some("sk-newapi-abc"));
+        // preexisting fields preserved
+        assert_eq!(llm.get("model").and_then(|v| v.as_str()), Some("qwen2.5:3b"));
+    }
 }
