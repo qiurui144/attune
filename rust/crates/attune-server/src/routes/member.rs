@@ -299,24 +299,4 @@ mod tests {
             serde_json::json!({"llm": {"model": "qwen2.5:3b", "api_key": "", "endpoint": ""}});
         assert!(gateway_should_apply(&settings));
     }
-
-    // ── free-user login must NOT touch app_settings ──────────────────────────
-    // The gateway/me() block is inside `if is_paid { ... }`, so a free user login
-    // never calls apply_gateway_to_vault_settings. Pin this invariant with a
-    // pure-logic check: gateway_should_apply is irrelevant for free users because
-    // the code never reaches that branch.
-    #[test]
-    fn free_user_login_branch_never_calls_apply_gateway() {
-        // Simulate: is_paid = false → the entire gateway block is skipped.
-        // We verify via the helper that even if someone called it, on a
-        // non-object settings it would still return true (apply), but the real
-        // protection is the `if is_paid` guard in login_password.
-        // This test documents the expected branch behaviour.
-        let is_paid = false;
-        let mut gateway_called = false;
-        if is_paid {
-            gateway_called = true;
-        }
-        assert!(!gateway_called, "free-user path must not invoke gateway logic");
-    }
 }
