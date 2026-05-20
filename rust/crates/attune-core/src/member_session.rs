@@ -85,7 +85,12 @@ impl SettingsLocks {
     /// 按 MemberState 推导锁定规则.
     ///
     /// 离线 / 免费: 全可改 (含云端 LLM — 普通用户配自己 API key).
-    /// 付费:        plugin install/uninstall 锁 (云端 sync) + cloud_llm 锁 (gateway 下发).
+    /// 付费:        cloud_llm 锁 (gateway 下发, 用户不持 raw key) + plugin_uninstall 锁
+    ///              (防误删 cloud-sync 自动装的 pro plugin).
+    ///              **plugin_install / pluginhub URL 解锁** — 付费会员是 hub 的目标受众,
+    ///              不应被锁在 Mock provider 上 (per E2E P0 bug fix, 2026-05-20):
+    ///              桌面要能 PATCH `pluginhub.{url,license_key}` 切到 HttpPluginHubProvider
+    ///              才装得到真 pro plugin.
     ///              其他不变: 主密码 + 本地目录 + OCR profile 仍可改.
     pub fn for_state(state: &MemberState) -> Self {
         let all_editable = Self {
@@ -99,9 +104,10 @@ impl SettingsLocks {
         match state {
             MemberState::LoggedOut | MemberState::Free { .. } => all_editable,
             MemberState::Paid { .. } => Self {
-                plugin_install: SettingLock::Locked,
-                plugin_uninstall: SettingLock::Locked,
-                cloud_llm: SettingLock::Locked, // gateway 自动下发, 用户不持 raw key
+                // plugin_install 保持 Editable — 付费会员需要能 PATCH pluginhub.{url,license_key}
+                // 切到 HttpPluginHubProvider 才能装真 pro plugin。
+                plugin_uninstall: SettingLock::Locked, // 防误删 cloud-sync 自动装的 pro plugin
+                cloud_llm: SettingLock::Locked,        // gateway 自动下发, 用户不持 raw key
                 ..all_editable
             },
         }
@@ -149,16 +155,21 @@ mod tests {
     }
 
     #[test]
-    fn paid_locks_plugin_and_cloud_llm_only() {
+    fn paid_locks_cloud_llm_and_plugin_uninstall_only() {
         let locks = SettingsLocks::for_state(&MemberState::Paid {
             account_id: "u1".into(),
             license_id: "l1".into(),
             llm_quota_remaining: 1_000_000,
         });
-        // 付费锁: cloud_llm (gateway 下发) + plugin install/uninstall (云端 sync)
+        // 付费锁: cloud_llm (gateway 下发) + plugin_uninstall (防误删 cloud-sync pro plugin).
         assert!(!locks.can_edit("cloud_llm"));
-        assert!(!locks.can_edit("plugin_install"));
         assert!(!locks.can_edit("plugin_uninstall"));
+        // 付费会员必须能改 plugin_install / pluginhub URL — 切到 HttpPluginHubProvider
+        // 是 entitled 用户的核心权益, 不能锁在 Mock provider 上.
+        assert!(
+            locks.can_edit("plugin_install"),
+            "paid members must be able to configure pluginhub URL to reach real hub"
+        );
         // 仍可改: 主密码 + 本地目录 + OCR profile
         assert!(locks.can_edit("vault_password"));
         assert!(locks.can_edit("local_folder_links"));
@@ -204,10 +215,11 @@ mod tests {
         });
         let json = serde_json::to_string(&s).unwrap();
         let back: SettingsLocks = serde_json::from_str(&json).unwrap();
-        // paid 锁: plugin + cloud_llm
-        assert_eq!(back.plugin_install, SettingLock::Locked);
+        // paid 锁: cloud_llm (gateway 下发) + plugin_uninstall
         assert_eq!(back.cloud_llm, SettingLock::Locked);
-        // 仍可改
+        assert_eq!(back.plugin_uninstall, SettingLock::Locked);
+        // 仍可改 — plugin_install / pluginhub 解锁让付费会员能配真 hub
+        assert_eq!(back.plugin_install, SettingLock::Editable);
         assert_eq!(back.vault_password, SettingLock::Editable);
         assert_eq!(back.local_folder_links, SettingLock::Editable);
         assert_eq!(back.ocr_profiles, SettingLock::Editable);

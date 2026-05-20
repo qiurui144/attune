@@ -68,5 +68,16 @@ async fn settings_locked_after_member_login() {
         .unwrap_or("");
     assert_eq!(cloud_llm_lock, "locked", "paid tier 应该 cloud_llm locked");
 
+    // P0 regression (2026-05-20): paid 会员必须能改 plugin_install / pluginhub URL,
+    // 不能被锁在 Mock provider 上 — 否则 entitled 用户拿不到真 pro plugin.
+    let plugin_install_lock = body
+        .get("plugin_install")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(
+        plugin_install_lock, "editable",
+        "paid tier 必须能配 pluginhub URL 切到真 HttpPluginHubProvider"
+    );
+
     handle.abort();
 }
