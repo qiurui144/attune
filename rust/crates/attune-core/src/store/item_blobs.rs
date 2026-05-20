@@ -116,6 +116,40 @@ mod tests {
         assert!(!store.has_item_blob("no-such-item").expect("has"));
     }
 
+    /// QW-6 (storage cleanup, real bug): `delete_item` 是软删（UPDATE is_deleted=1），
+    /// 不会触发 item_blobs FK CASCADE — 没有显式 DELETE 的话原文证据永远留存。
+    /// 这是隐私 + 存储双 bug。修复后 delete_item 必须把 item_blobs 一并清掉。
+    #[test]
+    fn delete_item_purges_item_blob() {
+        let store = Store::open_memory().expect("open memory");
+        let dek = crypto::Key32::generate();
+        let id = store
+            .insert_item(&dek, "borrow", "OCR text", None, "file", None, None)
+            .expect("insert item");
+        store
+            .insert_item_blob(&dek, &id, "borrow.png", "image/png", b"raw bytes")
+            .expect("insert blob");
+        assert!(store.has_item_blob(&id).unwrap(), "blob exists pre-delete");
+
+        let deleted = store.delete_item(&id).expect("soft-delete item");
+        assert!(deleted);
+
+        // 关键断言：软删 item 后 item_blobs 行也必须被清掉
+        assert!(
+            !store.has_item_blob(&id).unwrap(),
+            "soft-delete must purge item_blobs (QW-6 fix)"
+        );
+        let raw_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM item_blobs WHERE item_id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_count, 0);
+    }
+
     #[test]
     fn reinsert_overwrites() {
         let store = Store::open_memory().expect("open memory");

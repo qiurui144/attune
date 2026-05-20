@@ -85,6 +85,23 @@ impl Store {
         Ok(n)
     }
 
+    /// QW-5 (storage cleanup): 删除某 item 的所有 chunk_summary 行。
+    ///
+    /// 由 `reindex::reindex_item` / `reindex::purge_item_indexes` 在重建索引 / 删除
+    /// item 时调用。原 `delete_item` 路径已经走 `DELETE WHERE item_id` 同样语义，
+    /// 但 reindex（仅 content 变更，item 行还在）之前不删摘要 → 旧 chunk_hash 摘要
+    /// 永远孤悬，作为孤儿占空间且可能在未来 cache 路径误命中。
+    ///
+    /// 命中索引 `idx_chunk_sum_item ON chunk_summaries(item_id)`，O(行数) DELETE。
+    /// 返回删除行数（便于诊断 / 测试断言）。
+    pub fn delete_chunk_summaries_for_item(&self, item_id: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM chunk_summaries WHERE item_id = ?1",
+            params![item_id],
+        )?;
+        Ok(n)
+    }
+
     /// 仅供集成测试用：seed 一条 chunk_summary 并指定 created_at（ISO8601 字符串）。
     /// 生产路径走 [`Self::put_chunk_summary`]，由 SQLite `datetime('now')` 自动填时间。
     ///

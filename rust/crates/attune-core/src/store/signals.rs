@@ -140,4 +140,92 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    /// QW-2 (storage cleanup): 删除已处理且超过指定天数的 skill_signals。
+    ///
+    /// `processed = 1` 信号已经被 skill_evolution 消费写入 expansions / cluster，
+    /// 留在表里没业务用处，但会无限累积膨胀文件。未处理（`processed = 0`）信号
+    /// 永远保留（queued 等下次 evolver 取）。
+    ///
+    /// 默认 90 天（per assessment D2）；caller 可传 `days_threshold` 覆盖（测试用）。
+    ///
+    /// 由后台 cleanup worker 周期调（默认每周）。返回删除行数。
+    pub fn purge_processed_signals_older_than_days(&self, days_threshold: u32) -> Result<usize> {
+        let modifier = format!("-{days_threshold} days");
+        let n = self.conn.execute(
+            "DELETE FROM skill_signals \
+             WHERE processed = 1 AND created_at < datetime('now', ?1)",
+            params![modifier],
+        )?;
+        Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// QW-2: 处理过且 created_at 早于阈值的信号被删，其他保留。
+    #[test]
+    fn purge_processed_old_signals_only_removes_eligible() {
+        let store = Store::open_memory().unwrap();
+
+        // (a) 处理过 + 100 天前 → 应删
+        store
+            .conn
+            .execute(
+                "INSERT INTO skill_signals (query, knowledge_count, web_used, kind, processed, created_at) \
+                 VALUES ('old_processed', 0, 0, 'search_miss', 1, datetime('now', '-100 days'))",
+                [],
+            )
+            .unwrap();
+        // (b) 处理过 + 30 天前 → 保留
+        store
+            .conn
+            .execute(
+                "INSERT INTO skill_signals (query, knowledge_count, web_used, kind, processed, created_at) \
+                 VALUES ('recent_processed', 0, 0, 'search_miss', 1, datetime('now', '-30 days'))",
+                [],
+            )
+            .unwrap();
+        // (c) 未处理 + 100 天前 → 保留（unprocessed 永远保留）
+        store
+            .conn
+            .execute(
+                "INSERT INTO skill_signals (query, knowledge_count, web_used, kind, processed, created_at) \
+                 VALUES ('old_unprocessed', 0, 0, 'search_miss', 0, datetime('now', '-100 days'))",
+                [],
+            )
+            .unwrap();
+        // (d) 未处理 + 现在 → 保留
+        store.record_skill_signal("fresh", 0, false).unwrap();
+
+        let removed = store.purge_processed_signals_older_than_days(90).unwrap();
+        assert_eq!(removed, 1, "只删 (a)");
+
+        let kept: Vec<String> = {
+            let mut stmt = store
+                .conn
+                .prepare("SELECT query FROM skill_signals ORDER BY id")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap();
+            rows.collect::<std::result::Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(kept.len(), 3);
+        assert!(kept.contains(&"recent_processed".to_string()));
+        assert!(kept.contains(&"old_unprocessed".to_string()));
+        assert!(kept.contains(&"fresh".to_string()));
+    }
+
+    /// QW-2: 空表 / 全保留场景下 purge 返回 0、不报错。
+    #[test]
+    fn purge_processed_signals_empty_returns_zero() {
+        let store = Store::open_memory().unwrap();
+        assert_eq!(
+            store.purge_processed_signals_older_than_days(90).unwrap(),
+            0
+        );
+    }
 }
