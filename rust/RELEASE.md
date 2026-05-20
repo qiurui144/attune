@@ -583,6 +583,75 @@ Wizard 推荐顺序：
 **Tag 历史**：alpha.1 → alpha.2 → rc.4 → rc.5 → rc.7 → rc.8 → **v0.6.0 GA**
 （rc.6 因 CI 资源问题 cancel 后重打 rc.7；详见 commit 历史）
 
+### v0.6.0 PRO-level benchmark 数据（2026-04-28，原 v0.6 release-notes 合并）
+
+三场景检索 bench（共享 vault，`bge-m3 (Ollama F16) + BAAI/bge-reranker-base` + 跨域 penalty）：
+
+| 场景 | Hit@10 | MRR | Recall@10 | 评判 |
+|----------|--------|-----|-----------|---------|
+| A 法律 / 中文 (lawcontrol seed.sql) | **0.80** | 0.50 | 0.50 | ✅ PRO |
+| B Rust 开发者 / 英文 (rust-book) | **1.00** | **1.00** | 0.77 | ✅ PRO 满分 |
+| C 中文八股 / cs-notes (Java/算法/计网) | **1.00** | **1.00** | 0.80 | ✅ PRO 满分 |
+
+`attune-pro/law-pro` lawcontrol-compat 5-dim answer-quality（10 cases, deepseek-r1:14b chat + bge-m3 retrieval）: **25.00/25**（5/5 × 5 维度），10/10 cases 全 "excellent" — 对比 lawcontrol B2B SaaS baseline (~17-18/25) +39%。复现：`bash scripts/bench-orchestrator.sh all && python3 scripts/run-final-eval.py`，方法论 + per-query traces 见 `docs/benchmarks/dual-track-baseline.md`。
+
+### v0.6.0 Breaking changes & 迁移说明（原 release-notes 合并）
+
+- **Chrome 扩展权限重新弹窗**：manifest 现请求 `<all_urls>` 启用浏览自动捕获。首次启动会弹标准权限对话框，确认一次即可（也可拒绝，capture 保持关闭）。
+- **Vault 自动迁移**（Store::open 时跑三个幂等 migration）：
+  - `chunk_breadcrumbs.breadcrumb_json`（明文）→ `breadcrumb_enc`（加密）— 旧行删除，indexer 下次 scan 重建
+  - `embed_queue` 加 `task_type` 列（默认 'embed'）
+  - `items` 加 `privacy_tier`（默认 'L1'）+ `corpus_domain`（默认 'general'）
+  - `bound_dirs` 加 `corpus_domain` 列
+- **隐身模式硬阻断**：扩展拒绝在 Chrome 隐身窗口加载（by design）
+- **Chat 响应 shape 扩展**：`/api/v1/chat` JSON 现含 `confidence: u8`（1-5，无 marker 默认 3），citations 含 `breadcrumb` / `chunk_offset_start` / `chunk_offset_end` 字段；老 client 忽略新字段
+- **`/api/v1/index/bind` 接受 `corpus_domain`**：可选字段，默认 `'general'`；设为 `'legal'`/`'tech'`/`'medical'`/`'patent'` 时跨域 penalty 生效
+
+### v0.6.0 已知限制（v0.7 路线图候选）
+
+- Breadcrumb offset 近似（F2 sidecar 字符计数，非严格 in-document offset）— 严格对齐留 v0.7 J2
+- Web cache 清理 UI 在 v0.6.1（backend `DELETE /api/v1/web_search_cache` 已 wired，Settings UI 按钮 v0.6.1 落地）
+- L3 LLM-based PII redactor v0.7（A.5.6，需 T3+/T4+/K3 硬件 + chinese-roberta-NER ONNX ~300MB；trait scaffolding 已在 `attune-core::pii`）
+- Settings → Privacy UI 在 v0.6.1（backend `/api/v1/privacy/tier` + per-file 🔒 toggle 已 live）
+- macOS 暂不支持（Win P0 + Linux P1，macOS 后置）
+- LLM 默认远端 token；本地 LLM 需用户自装 Ollama；`ATTUNE_CHAT_MODEL=<model>` 覆盖自动选
+- Domain-hash pepper 编译时常量（v0.6），v0.7 从 vault salt 派生增强隔离
+- `serde_yaml` 上游 deprecated，无用户可见影响，迁移留 v0.7 W4
+- 122 个 routes 仍用 `e.to_string()`（v0.7 W4-005 迁移完，vault.rs / search.rs / audit.rs / privacy.rs / web_search_cache.rs / auto_bookmarks.rs 已完成）
+
+### v0.6.0 致谢（原 release-notes 合并）
+
+本版本受多位他人工作启发，致谢：
+- **吴师雄 RAG 系列** — breadcrumb + grounded-prompt 模式
+- **CRAG** / **Self-RAG** 论文 — 二次检索设计
+- **RAGAS** — confidence/grounding 评估框架
+- **linkwarden** — 浏览捕获 UX 灵感
+- **Standard Notes** / **Bitwarden** — encryption-first 默认
+- **Readwise Reader** — 高参与度信号
+- **Letta** — episodic-memory 架构（informs K1 in v0.7）
+- **rust-lang/book** / **CyC2018/CS-Notes** / **lawcontrol** team — benchmark 语料
+- **BAAI**（bge-m3 / bge-reranker）/ **DeepSeek**（deepseek-r1）/ **Qwen**（qwen3 family）— 开源 LLM/embedding 基座
+
+### v0.6.0 升级指南
+
+1. **备份 vault**（`~/.attune/vault.db` + `~/.attune/index/`）— 总是先备份
+2. 从 releases 页下载 v0.6.0（Win MSI / Linux deb / Linux AppImage）
+3. 覆盖安装；首次启动自动跑 schema migration（约 1-3 秒）
+4. 打开 Chrome → reload Attune 扩展 → 想用浏览捕获就接受新权限提示，不要就保持关闭
+5. （可选）扩展 popup → **Privacy** tab → review 默认 `HARD_BLACKLIST` + 加自己的域名白名单 / 暂停捕获
+
+Vault unlock 行为完全不变。Chat / search / citations 在迁移期间/之后正常工作。异常请查 `~/.attune/logs/migration.log` 并附 log 提 issue。
+
+### v0.6.1 补充（原 release-notes 合并到上方 v0.6.1 节）
+
+**测试统计**：622 tests passed（lib + integration + binary），0 failed，3 ignored — 比 v0.6.0 GA 报告的 "237+" 增加，因为统计口径含 attune-core lib (535) + attune-server lib (5) + attune-server-headless (3) + 16 integration suites。
+- 4 新 `FormFactor` unit test 覆盖 env-var override / default / `prefers_local_llm` / `HardwareProfile::detect` 集成
+- 4 新 `default_settings` unit test 验证 Laptop → 远端 token，K3 → 本地 Ollama，Server/Unknown → fallback 远端 token，非 LLM settings invariant 跨 form factor 不变
+
+**兼容性**：v0.6.0 笔电用户 zero behavior change；K3 一体机镜像构建方设置 `ATTUNE_FORM_FACTOR=k3` env（或依赖 DMI 关键字检测），wizard 默认本地 Ollama + 预装 `qwen2.5:3b`。无 DB schema 变更，无 vault 迁移。
+
+**安装包**：v0.6.1 desktop installer 5 平台（Win NSIS + MSI / Linux deb + AppImage / macOS aarch64 build-from-source）；server tarball 4 平台（Linux x86_64/aarch64 + macOS aarch64 + Windows x86_64）。复现：`cd rust && cargo build --release` → `target/release/attune` (~32 MB) + `target/release/attune-server-headless` (~63 MB)。
+
 ---
 
 ## v0.6.0-rc.5（2026-04-28）— 三赛道 PRO + 5 维度满分
