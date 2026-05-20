@@ -223,6 +223,21 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/index/email-accounts/{dir_id}/sync",
             post(routes::email::sync_email_account_now),
         )
+        // RSS / Atom 订阅 —— 第三采集源
+        .route("/api/v1/sources/rss/feeds", get(routes::rss::list_feeds))
+        .route("/api/v1/sources/rss/feeds", post(routes::rss::add_feed))
+        .route(
+            "/api/v1/sources/rss/feeds/{id}",
+            axum::routing::delete(routes::rss::delete_feed),
+        )
+        .route(
+            "/api/v1/sources/rss/feeds/{id}",
+            axum::routing::patch(routes::rss::update_feed),
+        )
+        .route(
+            "/api/v1/sources/rss/feeds/{id}/poll",
+            post(routes::rss::poll_feed_now),
+        )
         .route("/api/v1/index/unbind", delete(routes::index::unbind_directory))
         .route("/api/v1/index/status", get(routes::index::index_status))
         // File upload（multipart body limit 匹配 MAX_UPLOAD_BYTES 100MB；

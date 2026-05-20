@@ -526,6 +526,34 @@ npm run typecheck   # TypeScript 类型检查（覆盖 Sidebar.tsx props/signal 
 
 人工验收在 `python/tests/MANUAL_TEST_CHECKLIST.md` 维护，每次 release 前必须人工跑一遍。
 
+## RSS / Atom 采集源测试矩阵（v0.7，2026-05-20）
+
+第三采集源 RSS（继 Email/WebDAV 之后）的测试覆盖。实现 `ingest/rss.rs` +
+`store/rss_feeds.rs` + `ingest_rss.rs`（server-layer sync）+ `start_rss_sync_worker`
+（周期 worker）+ `routes/rss.rs`（5 个 REST endpoint）。
+
+| 层 | 文件 | 覆盖 |
+|----|------|------|
+| Unit — connector | `ingest/rss.rs` 内联 | RSS 2.0 + Atom 解析；HTML body 剥标签；entry dedup（last_entry_guid 命中即 break）；304 路径不 emit；200 last_response 透出 ETag/Last-Modified；垃圾 XML 拒绝 |
+| Unit — store CRUD | `tests/rss_feeds_test.rs` | add/get/list/delete 全流程；URL 加密落盘 + 解密回明文；明文 URL 绝不在 BLOB 里；update_etag_lastmod / touch_polled_at / update_last_entry / update_feed_settings 幂等性 |
+| Integration — connector | `tests/ingest_rss_test.rs` | 端到端 first-poll → 全 emit；conditional-GET 透传 ETag；dedup invariant（cursor 推进后二次 poll → 0 新条目）；fetch Err 传播；空 entry 跳过；RawDocument 真正过 ingest_document |
+| Manual | `python/tests/MANUAL_TEST_CHECKLIST.md` § "RSS 订阅采集源"（待补） | 添加真实 LWN / GitHub releases RSS；poll-now；周期 worker 到期触发；304 路径；删除订阅；禁用订阅 |
+
+跑法：
+
+```bash
+cd rust
+cargo test -p attune-core --lib ingest::rss          # 8 个内联 connector unit test
+cargo test -p attune-core --test rss_feeds_test      # 10 个 store CRUD test
+cargo test -p attune-core --test ingest_rss_test     # 8 个端到端 integration test
+```
+
+全部 release 模式 <1s 完成；无 `#[ignore]`，进 CI。
+
+mailing-list 备注：开源项目邮件列表（LWN / lkml.org / kernel newbies 等）多数发布
+web RSS 镜像 —— 用 RSS 订阅这条路径即可。订阅了真 IMAP 邮件列表的用户走
+EmailConnector（INBOX 文件夹），不在 RSS 这里重复支持。
+
 ## 多层记忆测试矩阵（2026-05-18）
 
 多层记忆系统（L0 raw → L1 chunk summary → L2 episodic → L3 semantic + tier-aware

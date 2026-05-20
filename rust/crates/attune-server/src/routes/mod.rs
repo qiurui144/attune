@@ -29,6 +29,7 @@ pub mod privacy;
 pub mod profile;
 pub mod projects;
 pub mod remote;
+pub mod rss;
 pub mod search;
 pub mod settings;
 pub mod skills;
