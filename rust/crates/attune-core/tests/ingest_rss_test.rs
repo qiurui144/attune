@@ -126,16 +126,16 @@ fn first_poll_emits_all_entries() {
     assert!(docs.iter().all(|d| d.source_kind == SourceKind::Rss));
 }
 
+/// (url, If-None-Match, If-Modified-Since) — fetcher 收到的条件 GET 头三元组。
+type ReceivedHeaders = Vec<(String, Option<String>, Option<String>)>;
+
 #[test]
 fn conditional_get_passes_etag_to_fetcher() {
-    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(
-        String,
-        Option<String>,
-        Option<String>,
-    )>::new()));
+    let received: std::sync::Arc<std::sync::Mutex<ReceivedHeaders>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
     struct CaptureFetcher {
-        received: std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>, Option<String>)>>>,
+        received: std::sync::Arc<std::sync::Mutex<ReceivedHeaders>>,
     }
     impl FeedFetcher for CaptureFetcher {
         fn fetch(
