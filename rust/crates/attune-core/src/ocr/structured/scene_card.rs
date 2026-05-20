@@ -59,7 +59,7 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
             // 取最长的 capture group
             let raw = cap.iter()
                 .skip(1)
-                .filter_map(|m| m)
+                .flatten()
                 .map(|m| m.as_str().to_string())
                 .max_by_key(|s| s.len())
                 .unwrap_or_default();

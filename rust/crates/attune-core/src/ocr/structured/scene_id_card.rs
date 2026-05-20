@@ -244,9 +244,9 @@ fn extract_bank_card(lines: &[RawLine]) -> StructuredFields {
 
     // valid_thru: MM/YY or VALID THRU MM/YY
     let valid_re = regex::Regex::new(r"(\d{2})\s*/\s*(\d{2,4})").unwrap();
+    // 跳过身份证号或卡号那种长数字串 (≥ 8 位连续数字) — 编译一次,循环复用
+    let long_digit = regex::Regex::new(r"\d{8,}").unwrap();
     for (i, l) in lines.iter().enumerate() {
-        // 跳过身份证号或卡号那种长数字串 (≥ 8 位连续数字)
-        let long_digit = regex::Regex::new(r"\d{8,}").unwrap();
         if long_digit.is_match(&l.text) {
             continue;
         }
