@@ -185,14 +185,21 @@ pub async fn post_ocr(
         out.lines.unwrap_or_default()
     };
 
+    // B 档结构化抽取 (D2 起 wired). A 档场景 (screenshot/contract/ancient/form) 返 None.
+    let structured = if !lines.is_empty() {
+        attune_core::ocr::structured::extract(&profile, &lines, id_card_subtype.as_deref())
+            .and_then(|s| serde_json::to_value(s).ok())
+    } else {
+        None
+    };
+
     Ok(Json(OcrResponse {
         envelope_version: "1",
         profile: profile.clone(),
         elapsed_ms: start.elapsed().as_millis() as u64,
         engine: provider.name().to_string(),
         lines,
-        // D1: B 档 structured 抽取留 null；D2 补
-        structured: None,
+        structured,
         warnings,
     }))
 }

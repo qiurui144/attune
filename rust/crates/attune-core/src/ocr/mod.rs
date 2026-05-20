@@ -21,6 +21,7 @@
 pub mod ppocr;
 pub mod profile;
 pub mod profile_registry;
+pub mod structured;
 
 use crate::error::{Result, VaultError};
 use profile::OcrProfile;

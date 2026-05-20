@@ -307,13 +307,23 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         eprintln!("[attune ocr] {elapsed_ms}ms elapsed");
 
         let lines = out.lines.clone().unwrap_or_default();
+        let structured = if !lines.is_empty() {
+            if let Some(p) = profile.as_deref() {
+                attune_core::ocr::structured::extract(p, &lines, id_card_subtype.as_deref())
+                    .and_then(|s| serde_json::to_value(s).ok())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let envelope = serde_json::json!({
             "envelope_version": "1",
             "profile": profile.clone().unwrap_or_else(|| "(plain)".into()),
             "elapsed_ms": elapsed_ms,
             "engine": provider.name(),
             "lines": &lines,
-            "structured": serde_json::Value::Null, // D2 will fill via attune_core::ocr::structured::extract
+            "structured": structured,
             "text": out.text,
         });
         if *json {
@@ -321,7 +331,6 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         } else {
             println!("{}", out.text);
         }
-        let _ = (id_card_subtype,); // D2: route into structured extract once available
         return Ok(());
     }
     if let Commands::Transcribe { audio, diarization, json } = &cli.command {
