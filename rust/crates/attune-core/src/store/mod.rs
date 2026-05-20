@@ -5,6 +5,7 @@ pub mod items;
 pub mod item_blobs;
 pub mod webdav_remotes;
 pub mod email_accounts;
+pub mod rss_feeds;
 mod dirs;
 mod queue;
 mod history;
@@ -158,6 +159,30 @@ CREATE TABLE IF NOT EXISTS email_folder_uids (
     last_uid INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (dir_id, folder)
 );
+
+-- RSS / Atom 订阅持久化。与 webdav_remotes / email_accounts 同模式：
+-- worker 周期对每个 feed 做 HTTP 条件请求（ETag + If-Modified-Since）增量重扫，
+-- 必须能读回配置。url_enc 是 AES-256-GCM 密文 BLOB（dek 加密，与 items.content
+-- 同模式）；entry 级去重靠 last_entry_guid（最后一次成功 ingest 的 guid/link）+
+-- ingest_document 的 content_hash 短路两层保护。
+--
+-- 不挂在 bound_dirs 上：bound_dirs 是 "目录 / 账户" 概念，单个 RSS feed 更近似
+-- 一行书签；UI 通过 /sources 统一看板列出各源。
+CREATE TABLE IF NOT EXISTS rss_feeds (
+    id                    TEXT PRIMARY KEY,
+    name                  TEXT NOT NULL DEFAULT '',
+    url_enc               BLOB NOT NULL,
+    last_entry_guid       TEXT,
+    etag                  TEXT,
+    last_modified         TEXT,
+    last_polled_at        TEXT,
+    poll_interval_minutes INTEGER NOT NULL DEFAULT 60,
+    enabled               INTEGER NOT NULL DEFAULT 1,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rss_feeds_enabled_polled
+    ON rss_feeds(enabled, last_polled_at);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
