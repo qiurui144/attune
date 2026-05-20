@@ -2,12 +2,9 @@
 //!
 //! 与 routes/email.rs 同模式：vault 必须 unlocked（middleware 已守门），写入路径
 //! 解密 URL 落 store，sync 走 spawn_blocking 避免阻塞 axum worker。
-<<<<<<< Updated upstream
-=======
 //!
 //! ⚠ 这些 route 仅注册 HTTP handler；vault auth middleware（require_auth 路径在
 //! lib.rs::build_router 加 vault_guard）保证 Locked vault 不能调到这里。
->>>>>>> Stashed changes
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -23,10 +20,7 @@ pub struct AddFeedRequest {
     pub url: String,
     #[serde(default)]
     pub name: String,
-<<<<<<< Updated upstream
-=======
     /// `None` → 用 store 层 DEFAULT_POLL_INTERVAL_MINUTES (60)。
->>>>>>> Stashed changes
     #[serde(default)]
     pub poll_interval_minutes: Option<u32>,
 }
@@ -52,11 +46,8 @@ pub struct FeedView {
     pub enabled: bool,
 }
 
-<<<<<<< Updated upstream
-=======
 /// 校验 URL：非空 + http/https scheme。
 /// 不校验 DNS / 可达性 —— add-feed 不应因为短暂网络抖动失败；首轮 poll 自然会暴露问题。
->>>>>>> Stashed changes
 fn validate(req: &AddFeedRequest) -> Result<(), AppError> {
     let trimmed = req.url.trim();
     if trimmed.is_empty() {
@@ -77,10 +68,7 @@ fn validate(req: &AddFeedRequest) -> Result<(), AppError> {
     Ok(())
 }
 
-<<<<<<< Updated upstream
-=======
 /// GET /api/v1/sources/rss/feeds —— 列出已订阅 feed（URL 已解密展示给本地 UI）。
->>>>>>> Stashed changes
 pub async fn list_feeds(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db()?;
@@ -102,10 +90,7 @@ pub async fn list_feeds(State(state): State<SharedState>) -> AppResult<Json<serd
     Ok(Json(serde_json::json!({ "feeds": feeds })))
 }
 
-<<<<<<< Updated upstream
-=======
 /// POST /api/v1/sources/rss/feeds —— 新增订阅并立即触发首轮 poll。
->>>>>>> Stashed changes
 pub async fn add_feed(
     State(state): State<SharedState>,
     Json(req): Json<AddFeedRequest>,
@@ -127,10 +112,7 @@ pub async fn add_feed(
             .map_err(|e| AppError::Internal(format!("persist rss feed: {e}")))?
     };
 
-<<<<<<< Updated upstream
-=======
     // 首轮 poll 在 spawn_blocking 跑（HTTP I/O + DB 写）—— 不阻塞 axum worker。
->>>>>>> Stashed changes
     let state_cloned = state.clone();
     let feed_cloned = feed_id.clone();
     let stats = tokio::task::spawn_blocking(move || {
@@ -146,10 +128,7 @@ pub async fn add_feed(
     })))
 }
 
-<<<<<<< Updated upstream
-=======
 /// DELETE /api/v1/sources/rss/feeds/:id —— 删除订阅。已 ingest 的 item 保留。
->>>>>>> Stashed changes
 pub async fn delete_feed(
     State(state): State<SharedState>,
     Path(id): Path<String>,
@@ -163,10 +142,7 @@ pub async fn delete_feed(
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
 
-<<<<<<< Updated upstream
-=======
 /// PATCH /api/v1/sources/rss/feeds/:id —— 切换 enabled / 修改 poll 周期。
->>>>>>> Stashed changes
 pub async fn update_feed(
     State(state): State<SharedState>,
     Path(id): Path<String>,
@@ -188,19 +164,13 @@ pub async fn update_feed(
     Ok(Json(serde_json::json!({ "updated": id })))
 }
 
-<<<<<<< Updated upstream
-=======
 /// POST /api/v1/sources/rss/feeds/:id/poll —— 手动触发一次条件 GET 增量。
 /// 与周期 worker 共用 sync_rss_feed 实现。
->>>>>>> Stashed changes
 pub async fn poll_feed_now(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-<<<<<<< Updated upstream
-=======
     // 存在性校验 + dek 解锁验证（vault 未 unlock 在此就抛 401）。
->>>>>>> Stashed changes
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let dek = vault.dek_db()?;
