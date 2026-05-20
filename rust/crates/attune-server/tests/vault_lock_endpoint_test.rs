@@ -2,7 +2,7 @@
 //!
 //! Sidebar Account menu 的 Lock vault 按钮之前 onClick 仅 onClose()，**不调** /api/v1/vault/lock。
 //! 修复后必须真实调 server endpoint，server vault.state 必须从 unlocked → locked。
-//! 本测试只验后端契约（API），UI 层走 Playwright（docs/screenshots-2026-05-02/amd-fix-01-*.png）。
+//! 本测试只验后端契约（API），UI 层走 Playwright（docs/screenshots/amd-v06-baseline/）。
 
 use std::time::Duration;
 
