@@ -48,7 +48,7 @@ chrono = { workspace = true }
 tempfile = "3"
 
 [dev-dependencies]
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "multipart"] }
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
