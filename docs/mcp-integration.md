@@ -1,145 +1,138 @@
-# MCP Integration — Use Attune as a Knowledge Source from Any MCP Client
+# MCP 集成 — 让任何 MCP 客户端把 Attune 当作知识源
 
-> Status: stable for v0.6 (W4 deliverable, 2026-04-27).
-> Approach: thin stdio shim wrapping Attune's existing REST API. Per strategy decision
-> we do not bundle our own MCP server crate — we wrap with the smallest possible adapter
-> so any MCP-compatible client (Claude Desktop, Cursor, Continue, Cherry Studio, LobeChat,
-> open-webui, or your own scripts) can call Attune.
+> 状态：v0.6 stable（W4 deliverable，2026-04-27）。
+> 路线：薄 stdio shim 包装 Attune 现有 REST API。按 strategy plan 决策不自研 MCP server crate，
+> 用最小可能的适配器让所有 MCP 兼容客户端（Claude Desktop / Cursor / Continue / Cherry Studio /
+> LobeChat / open-webui，或你自己写的脚本）都能调 Attune。
 
-## What you get
+## 你能得到什么
 
-Once configured, your MCP client can:
+配置完成后，MCP 客户端可以：
 
-- `attune_search(query: str, top_k: int = 10)` — hybrid (BM25 + vector) search across your
-  Attune vault. Returns ranked items with title, snippet, citations.
-- `attune_get_item(id: str)` — fetch the full content of one item.
-- `attune_chat(prompt: str)` — RAG-grounded chat answer with citations from your vault.
+- `attune_search(query: str, top_k: int = 10)` — Attune vault 上的混合（BM25 + 向量）搜索。
+  返回排序后的 items + title + snippet + 引用。
+- `attune_get_item(id: str)` — 拿一个 item 的完整内容。
+- `attune_chat(prompt: str)` — 基于 vault 的 RAG-grounded chat 答案，带引用。
 
-All calls hit your **local** Attune server (default `http://localhost:18900`). Your vault
-stays on your machine; the MCP client only sees the search/chat results.
+所有调用打到你**本地**的 Attune server（默认 `http://localhost:18900`）。Vault 留在你的机器上，
+MCP 客户端只看到搜索/chat 结果，不接触原始 vault。
 
-## Quick start (Claude Desktop)
+## 快速开始（Claude Desktop）
 
-1. Make sure Attune server is running and your vault is unlocked:
+1. 确保 Attune server 跑起来 + vault 已解锁：
    ```bash
    cd rust && cargo run --bin attune-server
-   curl http://localhost:18900/api/v1/status   # should return unlocked: true
+   curl http://localhost:18900/api/v1/status   # 应返回 unlocked: true
    ```
 
-2. Drop `tools/attune_mcp_shim.py` (shipped in this repo) somewhere stable — for example
-   `~/.local/share/attune/attune_mcp_shim.py`.
+2. 把 `tools/attune_mcp_shim.py`（仓库内提供）放到稳定位置 — 比如
+   `~/.local/share/attune/attune_mcp_shim.py`。
 
-3. Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or
-   `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+3. 编辑 `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) 或
+   `%APPDATA%\Claude\claude_desktop_config.json` (Windows)：
 
    ```json
    {
      "mcpServers": {
        "attune": {
          "command": "python3",
-         "args": ["/absolute/path/to/attune_mcp_shim.py"],
+         "args": ["/绝对路径/到/attune_mcp_shim.py"],
          "env": {
            "ATTUNE_BASE_URL": "http://localhost:18900",
-           "ATTUNE_API_TOKEN": "your-token-here"
+           "ATTUNE_API_TOKEN": "你的-token"
          }
        }
      }
    }
    ```
 
-4. Restart Claude Desktop. In a new chat, ask: `@attune search "rust ownership"` —
-   you should see your vault hits flow into the answer.
+4. 重启 Claude Desktop。新对话里输入 `@attune search "rust ownership"` —
+   应该看到 vault 命中流入答案。
 
-## Quick start (Cursor)
+## 快速开始（Cursor）
 
-Cursor reads MCP from `~/.cursor/mcp.json`:
+Cursor 读 MCP 配置 `~/.cursor/mcp.json`：
 
 ```json
 {
   "mcpServers": {
     "attune": {
       "command": "python3",
-      "args": ["/absolute/path/to/attune_mcp_shim.py"]
+      "args": ["/绝对路径/到/attune_mcp_shim.py"]
     }
   }
 }
 ```
 
-Then in Cursor: `@attune` triggers the tool list; pick `attune_search`.
+然后在 Cursor: `@attune` 会触发工具列表 → 选 `attune_search`。
 
-## Quick start (Continue / Cherry Studio / LobeChat / open-webui)
+## 快速开始（Continue / Cherry Studio / LobeChat / open-webui）
 
-These clients all support the MCP stdio transport with the same JSON shape — just point
-`command + args` at `attune_mcp_shim.py`. See each client's docs for the exact config file
-location.
+这些客户端都支持 stdio 传输的 MCP，JSON 格式相同 — 只要把 `command + args` 指向
+`attune_mcp_shim.py`。具体配置文件位置见各客户端文档。
 
-## How the shim works
+## Shim 工作原理
 
-`tools/attune_mcp_shim.py` is ~120 lines of Python. It speaks MCP over stdio (`stdin/stdout`
-JSON-RPC 2.0) and translates each tool call into a `requests.get/post` against your local
-Attune REST API. No persistent state, no caching, no server logic — Attune does all the
-work.
+`tools/attune_mcp_shim.py` 约 120 行 Python。在 stdio (`stdin/stdout`) 上说 MCP JSON-RPC 2.0，
+把每个工具调用翻译成 `requests.get/post` 打到本地 Attune REST API。无持久化、无缓存、无业务逻辑，
+真正干活的是 Attune。
 
-This means:
-- ✅ Zero Rust dependency added — shim works with any Python ≥3.9
-- ✅ Hot-swap MCP protocol versions by editing one file
-- ✅ Add new tools (e.g. `attune_create_item`) by adding ~10 lines per tool
-- ⚠️ One Python process per MCP client connection (negligible for personal use)
+意思是：
+- ✅ 零 Rust 依赖增加 — shim 只需 Python ≥3.9
+- ✅ MCP 协议版本变化只改一个文件
+- ✅ 加新工具（如 `attune_create_item`）每个 ~10 行
+- ⚠️ 每个 MCP 客户端连接起一个 Python 进程（个人用毫无影响）
 
-## Configuration reference
+## 配置参考
 
-| Env var | Default | Purpose |
-|---------|---------|---------|
-| `ATTUNE_BASE_URL` | `http://localhost:18900` | Where the server listens |
-| `ATTUNE_API_TOKEN` | _(empty)_ | If you set a server token, paste it here |
-| `ATTUNE_TIMEOUT_SEC` | `30` | Per-call HTTP timeout |
-| `ATTUNE_DEBUG` | _(unset)_ | Set to `1` for verbose stderr logs |
+| 环境变量 | 默认 | 用途 |
+|---------|------|------|
+| `ATTUNE_BASE_URL` | `http://localhost:18900` | server 监听地址 |
+| `ATTUNE_API_TOKEN` | _(空)_ | 配了 server token 就填这里 |
+| `ATTUNE_TIMEOUT_SEC` | `30` | 单次 HTTP 超时 |
+| `ATTUNE_DEBUG` | _(未设置)_ | 设 `1` 开 stderr 详细日志 |
 
-## Authentication
+## 鉴权
 
-The shim sends `Authorization: Bearer $ATTUNE_API_TOKEN` on every request. If your server
-runs without auth (development), leave the env var empty.
+shim 每次请求带 `Authorization: Bearer $ATTUNE_API_TOKEN`。如果 server 跑无 auth 模式（开发期），
+环境变量留空即可。
 
-## Privacy boundary
+## 隐私边界
 
-Per Attune's "private AI knowledge companion" promise:
-- Your vault never leaves your machine — even when used via MCP, the MCP client only sees
-  the **results** of your search/chat, not the raw vault.
-- The shim does not log queries (set `ATTUNE_DEBUG=1` if you want them on stderr for
-  debugging — never in production).
-- All Attune-side encryption (DEK + AES-256-GCM) still applies; the shim is just a translator.
+按 Attune "私有 AI 知识伙伴" 承诺：
+- Vault 永不离开你的机器 — 走 MCP 时 MCP 客户端只看到搜索/chat **结果**，不接触原始 vault
+- shim 不 log 查询（设 `ATTUNE_DEBUG=1` 才会写 stderr，生产环境千万别开）
+- 所有 Attune 端加密（DEK + AES-256-GCM）继续生效；shim 只是翻译层
 
-## Troubleshooting
+## 故障排查
 
-| Symptom | Likely cause | Fix |
-|---------|-------------|-----|
-| `Connection refused` | Server not running | `cd rust && cargo run --bin attune-server` |
-| `403 vault locked or unavailable` | Vault not unlocked | Open Attune desktop or call `/api/v1/vault/unlock` |
-| MCP client doesn't show "attune" | Bad path in config | Use absolute path; check JSON syntax |
-| Empty results | Vault empty / wrong query | Call `/api/v1/items` directly to verify content |
+| 现象 | 原因 | 修复 |
+|------|------|------|
+| `Connection refused` | server 没跑 | `cd rust && cargo run --bin attune-server` |
+| `403 vault locked or unavailable` | vault 没解锁 | 打开 Attune 桌面或调 `/api/v1/vault/unlock` |
+| MCP 客户端不显示 "attune" | 配置路径错 | 用绝对路径 + 检查 JSON 语法 |
+| 结果空 | vault 空 / 查询不对 | 直接调 `/api/v1/items` 验证内容 |
 
-## Versioning policy
+## 版本策略
 
-- v0.6: search / get_item / chat tools (this document).
-- v0.7: add `attune_list_recent`, `attune_create_note` for write operations.
-- The shim's exposed tool names are stable across minor versions; renames will be batched
-  with major version bumps and listed in `RELEASE.md`.
+- v0.6: search / get_item / chat 三个工具（本文档）
+- v0.7: 加 `attune_list_recent`、`attune_create_note` 写操作
+- shim 暴露的工具名跨小版本稳定；改名会与大版本一起放进 `RELEASE.md`
 
-## Why this design (not a Rust MCP crate)
+## 为什么这么设计（而不是 Rust MCP crate）
 
-Per the strategy plan v4: "C2 用 gpt-researcher 现成 MCP server，不要自研" — the value
-is in Attune's vault + RAG quality, not in re-implementing the MCP protocol. A 120-line
-Python shim:
-- Lets the MCP ecosystem evolve without rebuilding Attune
-- Keeps Attune's binary lean (no extra Rust crate, no transitive deps)
-- Demonstrates that any HTTP backend can become MCP-callable in an hour
+按 strategy plan v4: "C2 用 gpt-researcher 现成 MCP server，不要自研" — Attune 的价值
+在 vault + RAG 质量，不在重新实现 MCP 协议。120 行 Python shim：
+- 让 MCP 生态自由演进，不必每次重 build Attune
+- 保持 Attune 二进制精简（不加 Rust crate，不加传递依赖）
+- 证明任何 HTTP 后端都能在一小时内变 MCP 可调
 
-If you need a Rust-native MCP server (e.g. for embedded deployments where Python is
-unavailable), file an issue — `attune-mcp-server` is on the v0.8 roadmap.
+如果你需要 Rust 原生 MCP server（比如嵌入式部署 Python 不可用），提 issue —
+`attune-mcp-server` 在 v0.8 路线图。
 
-## References
+## 参考
 
-- Strategy plan v4 (W4 C2 decision): see `docs/v0.6-release-readiness.md`
-- MCP protocol spec: <https://modelcontextprotocol.io/>
-- gpt-researcher MCP example: <https://github.com/assafelovic/gpt-researcher>
-- Attune REST API: see `rust/RELEASE.md` for endpoint inventory
+- Strategy plan v4 (W4 C2 决策): 见 `docs/v0.6-release-readiness.md`
+- MCP 协议 spec: <https://modelcontextprotocol.io/>
+- gpt-researcher MCP 示例: <https://github.com/assafelovic/gpt-researcher>
+- Attune REST API: 见 `rust/RELEASE.md` endpoint 清单

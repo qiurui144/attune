@@ -1,30 +1,28 @@
-# Memory Consolidation (A1) MVP Design
+# Memory Consolidation (A1) MVP 设计稿
 
-**Date**: 2026-04-27
-**Roadmap**: 12-week strategy v2, Phase 1 W1 F-P0a
-**Depends on**: H1 resource_governor (TaskKind::MemoryConsolidation already defined)
-**Depended by**: future A2 conflict detection, B2 project-aware chat
-
-[English](2026-04-27-memory-consolidation-design.md) · [简体中文](2026-04-27-memory-consolidation-design.zh.md)
+**日期**：2026-04-27
+**对应路线图**：12 周战略 v2 Phase 1 W1 F-P0a
+**依赖**：H1 resource_governor（`TaskKind::MemoryConsolidation` 已定义）
+**被依赖**：未来 A2 conflict detection、B2 project-aware chat
 
 ---
 
-## 1. Why
+## 1. 为什么做
 
-Attune's "self-evolving memory" positioning (mem0 reference) requires a layer above raw chunks: aggregated *episodic* memories that summarize what the user encountered/learned over a time window. Without consolidation, chat retrieval can only see chunk-level fragments; with it, "what did I learn last week?" becomes a single retrieval hit.
+attune 的"自进化记忆"定位（mem0 参考叙事）需要 chunk 之上的一层：把用户在某段时间窗口接触/学到的内容**周期总结**成 *episodic* memory（情景记忆）。没有这层，chat 检索只能见 chunk 级碎片；有了之后，"我上周学了什么"成为单次检索就能命中。
 
-This is **MVP scope** — a foundational data model + a working consolidator. Semantic memory (topic-clustered), conflict detection (A2), and chat retrieval integration are explicitly deferred to W5+.
+这是 **MVP 范围** — 只实现数据模型 + 工作机制。语义记忆（按主题聚合）、冲突检测（A2）、chat 检索集成都明确推迟到 W5+。
 
-## 2. MVP Scope
+## 2. MVP 范围
 
-| In W1 | Deferred (W5+) |
-|-------|---------------|
-| Episodic memory: time-window aggregation (default 1-day window) | Semantic memory: topic/concept clustering across time |
-| Source: `chunk_summaries` table (already has 150-char summaries) | Source: raw chunks (semantic needs more text) |
-| 6-hour worker cycle, 1 LLM call per window bundle | Reactive consolidation on every chunk insert |
-| Idempotent: same chunk-hash set → same memory (no duplicates) | Hierarchical memory (memories of memories) |
-| Three-stage lock release (mirror skill_evolution) | Real-time conflict detection (A2) |
-| H1 governor + LLM quota integration | Chat retrieval surfaces memories (B2) |
+| W1 做 | 推迟到 W5+ |
+|-------|-----------|
+| 情景记忆：按时间窗口聚合（默认 1 天） | 语义记忆：跨时间按主题聚合 |
+| 数据源：`chunk_summaries` 表（已有 150 字摘要） | 数据源：raw chunks（语义需要更多文本） |
+| 6 小时 worker 周期，每 bundle 1 次 LLM | 每个 chunk 插入即触发 |
+| 幂等：相同 chunk_hash 集合 → 同一 memory（不重复） | 层级 memory（memory of memories） |
+| 三阶段锁释放（与 skill_evolution 一致） | 实时 conflict detection（A2） |
+| H1 governor + LLM 配额集成 | chat 检索能浮现 memory（B2） |
 
 ## 3. Schema
 
@@ -32,153 +30,96 @@ This is **MVP scope** — a foundational data model + a working consolidator. Se
 -- 加密的"周期总结"记忆。源 chunk_hash 集合作为幂等键。
 CREATE TABLE IF NOT EXISTS memories (
     id                    TEXT PRIMARY KEY,
-    kind                  TEXT NOT NULL CHECK(kind IN ('episodic')),  -- 'semantic' added in W5+
-    window_start          INTEGER NOT NULL,  -- unix epoch seconds
+    kind                  TEXT NOT NULL CHECK(kind IN ('episodic')),  -- W5+ 加 'semantic'
+    window_start          INTEGER NOT NULL,  -- unix epoch 秒
     window_end            INTEGER NOT NULL,
-    source_chunk_hashes   TEXT NOT NULL,     -- JSON array of chunk_hash, sorted ascending
-    source_chunk_count    INTEGER NOT NULL,  -- == len(source_chunk_hashes), denormalized for indexing
-    summary_encrypted     BLOB NOT NULL,     -- AES-GCM(summary text), DEK-encrypted
-    model                 TEXT NOT NULL,     -- LLM model used (debug provenance)
-    created_at            INTEGER NOT NULL   -- unix epoch seconds
+    source_chunk_hashes   TEXT NOT NULL,     -- chunk_hash 数组 JSON，升序
+    source_chunk_count    INTEGER NOT NULL,  -- == len(source_chunk_hashes)
+    summary_encrypted     BLOB NOT NULL,     -- AES-GCM(摘要正文)，DEK 加密
+    model                 TEXT NOT NULL,     -- 生成所用 LLM 型号（追溯用）
+    created_at            INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memories_window ON memories(window_start, window_end);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
--- 幂等性键：同一组 chunk 不重复生成 memory
+-- 幂等键：同一组 chunk 不重复
 CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_source ON memories(kind, source_chunk_hashes);
 ```
 
-**No backfill migration needed** — new table, additive change. Existing vaults pick it up at next open without data loss.
+**无需 backfill 迁移** — 新表，纯 additive。已有 vault 下次打开时自动创建，零数据丢失风险。
 
 ## 4. Consolidator API
 
 ```rust
 // rust/crates/attune-core/src/memory_consolidation.rs
 
-pub const DEFAULT_WINDOW_SECS: u64 = 24 * 3600;       // 1-day windows
-pub const MIN_CHUNKS_PER_BUNDLE: usize = 5;           // skip windows with < 5 chunks (signal too thin)
-pub const MAX_CHUNKS_PER_BUNDLE: usize = 50;          // LLM prompt budget cap
-pub const MAX_BUNDLES_PER_CYCLE: usize = 4;           // protect against thundering 24-LLM-call cycles
+pub const DEFAULT_WINDOW_SECS: u64 = 24 * 3600;       // 1 天窗口
+pub const MIN_CHUNKS_PER_BUNDLE: usize = 5;           // < 5 chunks 跳过（信号太薄）
+pub const MAX_CHUNKS_PER_BUNDLE: usize = 50;          // LLM prompt 预算
+pub const MAX_BUNDLES_PER_CYCLE: usize = 4;           // 防止单周期 24 次 LLM 风暴
 
-/// Per-window bundle of chunks ready for consolidation.
-pub struct ConsolidationBundle {
-    pub window_start: i64,
-    pub window_end: i64,
-    pub chunks: Vec<BundleChunk>,
-}
+/// 单个时间窗口内待合并的 chunk 集合。
+pub struct ConsolidationBundle { /* ... */ }
 
-pub struct BundleChunk {
-    pub chunk_hash: String,
-    pub summary: String,   // already 150-char summary from chunk_summaries
-    pub item_id: String,
-}
+/// Phase 1（持 vault 锁）：扫 chunk_summaries 找未合并的窗口；按天分桶。
+pub fn prepare_consolidation_cycle(...) -> Result<Option<Vec<ConsolidationBundle>>>;
 
-/// Phase 1 (vault locked): scan chunk_summaries for un-consolidated windows; bucket by day.
-/// Returns None when no eligible bundles (idle cycle).
-pub fn prepare_consolidation_cycle(
-    store: &Store,
-    dek: &Key32,
-    now_secs: i64,
-) -> Result<Option<Vec<ConsolidationBundle>>>;
+/// Phase 2（无锁）：每 bundle 一次 LLM 调用。
+pub fn generate_episodic_memories(...) -> Vec<Option<String>>;
 
-/// Phase 2 (no lock): one LLM call per bundle. Returns one summary per bundle (or None on failure).
-pub fn generate_episodic_memories(
-    llm: &dyn LlmProvider,
-    bundles: &[ConsolidationBundle],
-) -> Vec<Option<String>>;  // parallel to bundles; None = LLM failed for that bundle
+/// Phase 3（持 vault 锁）：幂等 INSERT。返回新增条数。
+pub fn apply_consolidation_result(...) -> Result<usize>;
 
-/// Phase 3 (vault locked): write memories with idempotent INSERT. Returns count of new rows.
-pub fn apply_consolidation_result(
-    store: &Store,
-    dek: &Key32,
-    bundles: &[ConsolidationBundle],
-    summaries: &[Option<String>],
-    model: &str,
-) -> Result<usize>;
-
-/// Convenience for tests: full single-cycle.
-pub fn run_consolidation_cycle(
-    store: &Store,
-    dek: &Key32,
-    llm: &dyn LlmProvider,
-    now_secs: i64,
-    model: &str,
-) -> Result<usize>;
+/// 测试便利：单周期完整跑。
+pub fn run_consolidation_cycle(...) -> Result<usize>;
 ```
 
-## 5. Worker (attune-server)
+## 5. Worker（attune-server）
 
-```rust
-pub fn start_memory_consolidator(state: Arc<AppState>) {
-    if state.llm.lock().unwrap_or_else(|e| e.into_inner()).is_none() { return; }
-    if state.memory_consolidator_running.compare_exchange(false, true, ...).is_err() { return; }
+`start_memory_consolidator(state)`：
+- 6 小时周期
+- 注册 `TaskKind::MemoryConsolidation` governor
+- 三阶段锁释放（与 skill_evolver 同构）
+- LLM 配额检查（H1 `allow_llm_call`）
 
-    let governor = global_registry().register(TaskKind::MemoryConsolidation);
-    const CYCLE: Duration = Duration::from_secs(6 * 3600);
+**配额说明**：MVP 在每周期开始 reserve 1 个 slot，但 Phase 2 可能调 N 次 LLM（每 bundle 1 次，最多 4）。这是 best-effort，按周期计配额；按调用计的精确 quota 推到 W5+。
 
-    std::thread::spawn(move || loop {
-        std::thread::sleep(CYCLE);
-        if vault_locked { break; }
-        if !governor.should_run() { continue; }
+## 6. 幂等性
 
-        // Phase 1 (locked)
-        let (bundles, dek) = { /* prepare_consolidation_cycle */ };
-        if bundles.is_empty() { continue; }
+唯一索引 `uq_memories_source(kind, source_chunk_hashes)` 是硬保证。算法：chunk_hashes 升序排序 → JSON 编码作为 canonical key → `INSERT OR IGNORE`。重跑相同 bundle 返回 0 新增，永不重复。
 
-        // LLM quota check
-        if !governor.allow_llm_call() {
-            tracing::info!("Memory consolidator LLM quota exceeded, skipping");
-            continue;
-        }
+避开了"标记 chunk 已 consolidated" 的复杂方案（需要二级表 + 部分失败 race condition）。
 
-        // Phase 2 (no lock) — N LLM calls, one per bundle
-        let summaries = generate_episodic_memories(llm, &bundles);
+## 7. 测试
 
-        // Phase 3 (locked) — idempotent INSERT
-        let _ = apply_consolidation_result(store, &dek, &bundles, &summaries, model);
-    });
-}
-```
+**Unit**：
+- 空 store → prepare 返回 None
+- 按天边界分桶（t1, t2 跨天 → 2 bundles）
+- 跳过 < MIN_CHUNKS_PER_BUNDLE 的窗口
+- 不超 MAX_BUNDLES_PER_CYCLE
+- generate 用 MockLlm 验证
+- apply 幂等（同 bundle 二次 → 1 行）
+- apply 跳过 None summary
 
-**Quota note**: `allow_llm_call()` reserves one slot per cycle, but Phase 2 may call LLM N times (one per bundle, up to 4). MVP treats this as "best-effort one reservation per cycle" — full per-call accounting deferred to W5+ along with retryable LLM failures.
+**Integration**：
+- 真实 Store + tempfile + MockLlm 完整跑一周期
+- 验证 memories 表填充正确
 
-## 6. Idempotency
+## 8. MVP 不做的事（明示）
 
-The unique index `uq_memories_source(kind, source_chunk_hashes)` is the hard guarantee. Algorithm: sort chunk_hashes ascending → JSON-encode as canonical key → `INSERT OR IGNORE`. Re-running same bundle returns 0 new rows, never duplicates.
+- ❌ 语义记忆（跨时间主题聚合）
+- ❌ chat 检索浮现 memory（B2 in W5）
+- ❌ memory 之间冲突检测（A2 in W5）
+- ❌ 按 LLM 调用计配额（1/周期对 6h 周期足够）
+- ❌ 用户面 memories UI（F1 Profile 在 W4 顺带）
+- ❌ memory 导出导入（B5 在 W11）
+- ❌ 自适应窗口大小（固定 1 天）
 
-This sidesteps the tricky "mark chunks consolidated" approach, which would require a second table + race conditions on partial failures.
+## 9. W1 验收清单
 
-## 7. Tests
-
-**Unit (`memory_consolidation.rs::tests`)**:
-- `prepare returns None when no chunks` (empty store)
-- `prepare buckets chunks by day boundary` (insert chunks at t1, t2 spanning a day → 2 bundles)
-- `prepare skips windows below MIN_CHUNKS_PER_BUNDLE`
-- `prepare caps at MAX_BUNDLES_PER_CYCLE`
-- `generate handles MockLlm returning fixed summary`
-- `apply is idempotent` (same bundle twice → 1 row)
-- `apply with None summary skips that bundle`
-
-**Integration (`tests/memory_consolidation_integration.rs`)**:
-- Full cycle with real Store + tempfile + MockLlmProvider
-- Verify `memories` table populated with expected count + chunk_hash set
-
-## 8. What's NOT Done in MVP (Explicit)
-
-- ❌ Semantic memory (topic clustering across time)
-- ❌ Chat retrieval surfaces memories (B2 in W5)
-- ❌ Conflict detection between memories (A2 in W5)
-- ❌ Per-LLM-call quota accounting (1 reservation per cycle suffices for 6h cycle)
-- ❌ User-facing memories UI (F1 Profile visualization will surface in W4)
-- ❌ Memory export/import (B5 conversation export covers similar ground in W11)
-- ❌ Adaptive window sizing (fixed 1-day window MVP)
-
-## 9. W1 Acceptance Checklist
-
-- [ ] `memories` table created in fresh vault open
-- [ ] `cargo test -p attune-core memory_consolidation::` all green
-- [ ] `cargo test --test memory_consolidation_integration` all green
-- [ ] `attune-server` builds with `start_memory_consolidator` referenced
-- [ ] Manual: with MockLlm, run cycle on a vault with 10 chunks across 2 days → 2 memories created; rerun → 0 new
-- [ ] `rust/RELEASE.md` + `rust/DEVELOP.md` entries
-- [ ] `docs/superpowers/specs/2026-04-27-memory-consolidation-design.md` + `.zh.md`
-- [ ] git commit + push develop, report SHA
+- [ ] `memories` 表在新 vault 打开时创建
+- [ ] `cargo test -p attune-core memory_consolidation::` 全绿
+- [ ] `cargo test --test memory_consolidation_integration` 全绿
+- [ ] `attune-server` 引用 `start_memory_consolidator` 编译通过
+- [ ] 手动：MockLlm 跑一周期 vault（10 chunks 跨 2 天）→ 2 memories；重跑 → 0 新
+- [ ] `rust/RELEASE.md` + `rust/DEVELOP.md` 入口更新
+- [ ] git commit + push develop，报告 SHA

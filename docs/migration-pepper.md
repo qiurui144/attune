@@ -1,101 +1,99 @@
-# Pepper Migration Playbook (browse_signals.domain_hash)
+# Pepper 升级路径手册（browse_signals.domain_hash）
 
-> Status: planned for v0.7 — this document captures the upgrade contract so v0.6
-> users know what will change and v0.7 implementers have a written spec.
+> 状态：v0.7 计划项 — 本文档固化升级契约，让 v0.6 用户提前知道会变什么、
+> v0.7 实施者有可参照的实现规格。
 
-## Current state (v0.6)
+## 当前状态（v0.6）
 
-`browse_signals.domain_hash` is computed as `HMAC-SHA256(DOMAIN_HASH_PEPPER, domain)`
-where `DOMAIN_HASH_PEPPER = b"attune.browse_signals.v1.2026"` is a **compile-time
-constant** baked into every Attune binary.
+`browse_signals.domain_hash` 计算方式：
+`HMAC-SHA256(DOMAIN_HASH_PEPPER, domain)`，其中
+`DOMAIN_HASH_PEPPER = b"attune.browse_signals.v1.2026"` 是**编译期常量**，
+所有 Attune 二进制内置同一份。
 
-Tradeoffs accepted in v0.6:
+v0.6 接受的取舍：
 
-- ✅ Same `attune` binary → same hash for the same domain → "delete all signals
-  for github.com" stays correct across reinstalls
-- ✅ HMAC-SHA256 with any pepper is far stronger than naked SHA-256 (defeats
-  rainbow-table reversal of common domains like `google.com`, `mail.qq.com`)
-- ❌ Two different vaults on two different machines hash the same domain to the
-  same value — an attacker who exfiltrates both `vault.sqlite` files and knows
-  the pepper can correlate browsing across them
-- ❌ The pepper is not user-secret (it ships in the binary)
+- ✅ 同一 attune 二进制 → 同 domain 的 hash 相同 → "清空 github.com 的浏览信号"
+  跨重装仍正确
+- ✅ 任何 pepper 的 HMAC-SHA256 都比裸 SHA-256 强很多（防 google.com / mail.qq.com
+  这类常见域名彩虹表反推）
+- ❌ 两台机器的两个 vault 对同一 domain 算出同一 hash — 攻击者若同时拿到两份
+  vault.sqlite 且知道 pepper，可跨机关联浏览
+- ❌ pepper 不是用户私密的（在二进制里）
 
-## Target state (v0.7)
+## 目标状态（v0.7）
 
-`DOMAIN_HASH_PEPPER` becomes **vault-salt-derived**:
+`DOMAIN_HASH_PEPPER` 改为**vault salt 派生**：
 
 ```rust
 let vault_pepper = hkdf_expand(vault_salt, b"browse_signals.domain_hash.v2", 32);
 let domain_hash = HMAC-SHA256(vault_pepper, domain);
 ```
 
-Properties gained:
-- Per-vault pepper → exfiltrated dual vaults cannot be correlated by domain
-- Pepper rotates whenever vault is re-keyed (change-password flow)
+新增特性：
+- 每个 vault 独立 pepper → 同时被偷的两份 vault 无法按 domain 关联
+- 改密时 pepper 自动轮换
 
-## Migration challenge
+## 升级挑战
 
-Existing rows in `browse_signals` have `domain_hash` computed under the OLD pepper.
-After upgrade, naive lookup `WHERE domain_hash = HMAC(new_pepper, domain)` finds
-nothing — so the per-domain delete button + history filter would silently break.
+`browse_signals` 现有数据的 `domain_hash` 是用旧 pepper 算的。升级后用
+`WHERE domain_hash = HMAC(new_pepper, domain)` 查不到任何东西 — 按域名删除
+按钮 + 历史筛选会静默失效。
 
-## Migration algorithm (planned for v0.7)
+## 升级算法（v0.7 计划）
 
-1. **Schema version tracking**
-   - Add `vault_meta` row: `key = 'pepper_version'`, `value = 'v1'` for legacy vaults
-   - On Store::open, if `pepper_version` ≠ current code version → trigger migration
-   - Single forward direction: `v1 → v2` (no downgrade path)
+1. **Schema 版本追踪**
+   - `vault_meta` 加一行：`key = 'pepper_version'`，老 vault 默认 `'v1'`
+   - Store::open 时检测 `pepper_version` ≠ 当前代码版本 → 触发升级
+   - 单向：`v1 → v2`（不支持降级）
 
-2. **Re-hash pass** (background job, throttled by H1 governor Conservative profile)
-   - Iterate `browse_signals` in batches of 100
-   - For each row:
-     - Decrypt `url_enc` with DEK → extract domain via `host_of()`
-     - Compute new hash: `HMAC(new_pepper, domain)`
+2. **Re-hash 后台扫描**（H1 governor Conservative 档限速）
+   - 100 行一批迭代 `browse_signals`
+   - 每行：
+     - 用 DEK 解密 `url_enc` → `host_of()` 取 domain
+     - 算新 hash：`HMAC(new_pepper, domain)`
      - `UPDATE browse_signals SET domain_hash = ? WHERE rowid = ?`
-   - Commit in transactions of 100 rows (safe to interrupt)
-   - On row decrypt failure (foreign vault leftover): leave row alone, log warning
-     — `list_recent_browse_signals` already silent-skips these (per R15 P1)
+   - 每 100 行一个事务（中断安全）
+   - 解密失败的行（外来 vault 残留）：跳过 + log 警告
+     — `list_recent_browse_signals` 已经 silent-skip 这种（per R15 P1）
 
-3. **Mark complete**
+3. **完成标记**
    - `UPDATE vault_meta SET value = 'v2' WHERE key = 'pepper_version'`
-   - Subsequent opens skip the re-hash pass
+   - 后续 open 跳过 re-hash
 
-4. **User-visible window**
-   - Migration runs on first v0.7 launch when vault unlocks
-   - Per-domain operations may temporarily return mixed/empty results (~seconds-minutes
-     for typical 10K-row vaults, longer for power users)
-   - UI shows "Upgrading browse signals..." toast during the pass
-   - "全清浏览信号" still works (domain_hash agnostic)
+4. **用户可见窗口**
+   - 升级在 v0.7 首次启动 vault unlock 时跑
+   - 期间按域名操作可能短暂返回混合/空结果（10K 行的典型 vault ~秒到分钟级）
+   - UI 显示 "正在升级浏览信号..." toast
+   - "全清浏览信号" 不受影响（与 domain_hash 无关）
 
-## Rollback
+## 回滚
 
-If v0.7 is reverted to v0.6:
-- New rows written under v2 pepper become unreachable to v0.6's v1 pepper lookup
-- "Delete by domain" silently skips them
-- "全清" still works
-- **Recommendation**: do not downgrade across pepper version. v0.7 release notes will mark this as Breaking.
+若 v0.7 回退到 v0.6：
+- v2 pepper 写的新行 v0.6 用 v1 pepper 查不到
+- "按域名删除" 静默跳过
+- "全清" 仍 work
+- **建议**：跨 pepper 版本不要降级。v0.7 release notes 会标 Breaking。
 
-## Testing
+## 测试
 
-Migration tests live in `rust/crates/attune-core/tests/migration_roundtrip_test.rs`
-following the W3 batch A `migrate_breadcrumbs_encrypt` pattern (per R07 P0):
+升级测试在 `rust/crates/attune-core/tests/migration_roundtrip_test.rs`，
+沿用 W3 batch A `migrate_breadcrumbs_encrypt` 模式（per R07 P0）：
 
-- `migration_drops_old_plaintext_breadcrumb_column` — old column gone
-- `migration_is_idempotent_on_second_open` — re-running is no-op
-- `encrypted_breadcrumb_survives_close_and_reopen` — encrypted data round-trips
+- `migration_drops_old_plaintext_breadcrumb_column` — 老列消失
+- `migration_is_idempotent_on_second_open` — 重跑无副作用
+- `encrypted_breadcrumb_survives_close_and_reopen` — 加密数据 round-trip
 
-A `migration_pepper_v1_to_v2_rehashes_all_rows` test will be added when v0.7 ships.
+`migration_pepper_v1_to_v2_rehashes_all_rows` 测试在 v0.7 落地时加。
 
-## Why deferred to v0.7
+## 为什么推到 v0.7
 
-W3 batch B prioritized shipping G1 capture + G5 privacy panel + sidecar encryption
-(R04 P0-1, the immediate at-rest exposure). Pepper-versioning is a defense-in-depth
-hardening with a well-understood migration path — appropriate for v0.7 alongside
-the planned key-rotation work (K5 Items Keys per Standard Notes 004 spec).
+W3 batch B 优先发 G1 捕获 + G5 隐私面板 + sidecar 加密（R04 P0-1，明文落盘的紧急
+风险）。Pepper 版本化是 defense-in-depth 加固，升级路径已写清，适合 v0.7 与
+计划中的密钥轮换（K5 Items Keys per Standard Notes 004 spec）一起做。
 
-## References
+## 参考
 
-- W3 batch B design spec: `docs/superpowers/specs/2026-04-27-w3-batch-b-design.md`
-- R04 P0-1 review (sidecar encryption gap that motivated the broader audit): `tmp/w3-final-review-tracker.md`
-- v0.7 K5 design (Standard Notes 004 items keys): planned, see strategy plan
-- HKDF (RFC 5869) — pepper derivation primitive used above
+- W3 batch B 设计稿：`docs/superpowers/specs/2026-04-27-w3-batch-b-design.zh.md`
+- R04 P0-1 review（推动这次更广 audit 的 sidecar 加密缺口）：`tmp/w3-final-review-tracker.md`
+- v0.7 K5 设计（Standard Notes 004 items keys）：计划中，见 strategy plan
+- HKDF (RFC 5869) — pepper 派生原语
