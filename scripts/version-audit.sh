@@ -77,13 +77,18 @@ audit_repo() {
   if [ "$has_release" -eq 0 ]; then err "$label: 无 RELEASE.md / CHANGELOG.md(违反 VERSIONING §3)"; fi
 
   # 最新 tag 是否在 RELEASE.md 出现
+  # 注意:tag 形态可能含命名空间前缀(cloud-v2.1.0 / desktop-v0.7.0 / law-pro/v0.5.4)
+  # 而 RELEASE.md 节标题通常写无前缀的 "## v2.1.0"。剥前缀后再 grep。
   if [ "$total" -gt 0 ] && [ "$has_release" -eq 1 ]; then
-    local latest
+    local latest stripped
     latest=$(git tag --sort=-creatordate | head -1)
+    # 剥剥前缀:cloud-v / desktop-v / <ns>/v / 单纯 v → 得到 "X.Y.Z"
+    stripped=$(echo "$latest" | sed -E 's,^(cloud-|desktop-)?v,,; s,^[a-z_-]+/v,,')
     local found=0
     for path in RELEASE.md rust/RELEASE.md CHANGELOG.md; do
       [ -f "$path" ] || continue
-      if grep -q "$latest\|${latest#v}" "$path" 2>/dev/null; then found=1; break; fi
+      # 检查原 tag 字面量 OR 剥前缀后的 vX.Y.Z 形态
+      if grep -qE "$latest|v$stripped\b|^## *v$stripped" "$path" 2>/dev/null; then found=1; break; fi
     done
     if [ "$found" -eq 1 ]; then ok "最新 tag ($latest) 已写入 RELEASE doc"
     else warn "$label: 最新 tag ($latest) 未在任何 RELEASE doc 中找到"; fi

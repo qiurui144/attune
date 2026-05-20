@@ -2,6 +2,25 @@
 
 个人知识库 + 记忆增强系统。通过 Chrome 扩展在 AI 对话和日常浏览中自动捕获、检索、注入知识，利用 Ollama / NPU / iGPU 闲置算力处理 embedding。
 
+## ⭐ v1.0 GA Roadmap（2026-05-20 用户拍板，5 天物理时间）
+
+**目标**：**5/25 完成 v1.0 定版，5/26 cloud / wiki-web / official-web 全部上架**。
+
+| 日期 | 版本 | 关键交付 |
+|------|------|---------|
+| **5/20** today | foundation | 文档清理（33+ 违规文件归并 / 删除）+ 双 CLAUDE.md commit + version/doc audit 脚本收口 |
+| **5/21** | **v0.8** | 底层框架固化：**6 现有 law-pro agent 闭环 backfill 全完成**（per "Agent 验证铁律"节）；`agent_golden_gate` 扩展强制 6 类测试下限；cloud 配套基础设施定版 |
+| **5/22-23** | **v0.9.0** | **现有规划 agents 接入**：4 个新 law-pro agent（traffic-accident / divorce / sale-contract / housing-rent），每个完整闭环；defamation 推到 v1.1 |
+| **5/24** | **v0.9.1** | 修复 sprint + E2E + Playwright + wiki/官网内容填充 |
+| **5/25** | **v1.0 GA** | develop → main `--no-ff`；tag `v1.0.0` + `desktop-v1.0.0`；attune-pro `v1.0.0` 配对；cloud `cloud-v2.2.0`（声明兼容 attune v1.0.x） |
+| **5/26** | 上架 | cloud SaaS / wiki-web / official-web（均在 cloud 仓内）全部部署上线 |
+
+**核心硬约束**：
+- 每个新 agent 必须过 "Agent 验证铁律"（≥10 真实 golden + ≥3 prop + ≥5 boundary + ≥3 异常 + ≥1 E2E + 回归 fixture）
+- `agent_golden_gate.rs` 在每个 PR 上跑 1.00 pass rate
+- 5/25 GA 前每条 develop → main `--first-parent` 视角必须纯 `merge:` 前缀
+- 5/26 上架日 cloud 三个组件（accounts / wiki-web / official-web）必须同时 healthcheck 绿
+
 ## 双产品线架构
 
 本仓库包含两条并行的产品线，共享 Chrome 扩展协议（`/api/v1/*`）：
@@ -226,6 +245,61 @@ git push origin main
 - **本地 AI 底座边界**（2026-04-25）：attune 不是"全本地 AI"，是"**降低 token + 数据安全**"。本地仅捆绑必要底座（Embedding / Rerank / ASR / OCR + Ollama runtime），**LLM 模型不捆绑**，LLM 走远端 token 默认；K3 一体机形态可选装本地 LLM。
 - **平台优先级**（2026-04-25）：**Windows P0 → Linux P1 → macOS 暂不做**。aarch64 留作 K3 一体机。Win MSI + Linux deb/AppImage 双轨。
 - **ASR 引擎**（2026-04-25）：whisper.cpp binary + Rust subprocess（与 K3 推理服务一致路径），中文 WER 必须 < 20%（whisper-small Q8 实测满足）才能选默认模型；whisper-tiny WER 35-40% 不可用。
+
+## Agent 验证铁律（强制 — 2026-05-20 用户重申）
+
+**核心定位**：**Agents 是 attune 生态最重要的附加功能，也是核心功能来源之一**。
+任何 agent（无论 free / pro tier，无论 deterministic / LLM-judgement / lawyer-rule）
+shipping 前必须完成**闭环验证**（test → fix → verify），不可仅满足于"有 tests"
+或"clippy 干净"。
+
+**铁律实施基准**：`attune-pro/plugins/law-pro/docs/agent-skill-training-methodology.md`
+（866 行，2026-05-20 落地）+ `attune-pro/CLAUDE.md` 「Agent 验证铁律」节是规则全文。
+本节是 OSS attune 端的执行清单 + 同等纪律承诺。
+
+### 闭环 = 4 步全过，缺一即不合格
+
+1. **覆盖测试**：每 agent ≥10 真实 golden case（YAML in `tests/golden/<prefix>-N.yaml`）
+2. **真实测试发现 bug**：首跑全过 = 八成是 ground truth 由 agent 自己生成 / 测的不是
+   invariant —— 必须深挖
+3. **修复迭代**：bug → 写 reproducer fixture（独立计算 GT，不调 `agent.calculate()`）
+   → 修 agent → 跑 fixture 过 → commit 把 reproducer + fix 一起入库
+4. **验证锁定**：fixture 进 golden set；阈值 ratchet 只升不降；
+   `agent_golden_gate.rs` 是日常 CI 硬门
+
+### 6 类测试覆盖下限（强制）
+
+| 类型 | 下限 | 工具 |
+|------|------|------|
+| Golden case | ≥10 真实 + 1 sentinel | YAML fixture |
+| 属性测试 | ≥3 per agent | `proptest` |
+| 边界 case | ≥5 `#[test]` | inline `#[cfg(test)]` |
+| 异常 / 错误 | ≥3 case | YAML `expected_error` |
+| 集成 E2E | ≥1 subprocess | `tests/<agent>_subprocess.rs` |
+| 回归 fixture | 每修一个 bug 加 1 | golden set 永久 |
+
+**未到下限禁止 PR merge**。
+
+### Free vs Pro 同纪律
+
+OSS attune **当前没有 domain agent**（chat / search / RAG 是 base capability 不是
+agent）。**未来 OSS 加 agent 时同走此纪律**，agent_golden_gate.rs 等价 harness
+应当从 attune-pro 复制到 attune-core。free / pro 共用同一套 reliability framework，
+不存在"free 因为是 OSS 所以纪律松"的合理化空间。
+
+### 反模式（违反即拒绝）
+
+- ❌ "我加了一个 agent 还没写测试" → 同 PR 必须含测试
+- ❌ "测试都过了没发现 bug" → 测试不够难，继续加 case
+- ❌ "这是 free agent 不用走 framework" → 是 free 也要走
+- ❌ "ground truth 用 LLM 生成" → agent 自检自己，gate 形同虚设
+- ❌ 阈值下调绕过失败 → ratchet rule，只升不降
+- ❌ "暂跳过这个失败 case" → 要么修 agent，要么修 GT（后者需 lawyer / domain expert 签字）
+
+### PR 纪律
+
+涉及 agent 的 PR commit msg 必须含 **"test-fix-verify"** + 引用本节 +
+`agent_golden_gate.rs` 在 PR 上 1.00 pass rate（deterministic）或 F1 ≥0.85（LLM）。
 
 ## 成本感知与触发契约（Cost & Trigger Contract）
 
