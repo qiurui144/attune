@@ -44,11 +44,12 @@ thiserror = "2"
 arc-swap = "1"
 # RSS worker 到期判断需要解析 last_polled_at RFC3339 时间戳。
 chrono = { workspace = true }
+# Office helper (v0.7.1): OCR 端点写 multipart bytes 到临时文件喂 PP-OCR provider.
+tempfile = "3"
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["test-util"] }
-tempfile = "3"
 
 [lints]
 workspace = true

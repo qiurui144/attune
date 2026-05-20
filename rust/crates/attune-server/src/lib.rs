@@ -90,6 +90,16 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/ocr/profiles/{id}",
             axum::routing::put(routes::ocr_profiles::update_profile)
                 .delete(routes::ocr_profiles::delete_profile))
+        // Office helper (v0.7.1) — OCR 同步 + ASR 异步 + WS 进度
+        .route("/api/v1/office/ocr",
+            axum::routing::post(routes::office::post_ocr))
+        .route("/api/v1/office/transcribe",
+            axum::routing::post(routes::office::post_transcribe))
+        .route("/api/v1/office/jobs/{job_id}",
+            get(routes::office::get_job)
+                .delete(routes::office::delete_job))
+        .route("/api/v1/office/jobs/ws",
+            get(routes::office::ws_jobs))
         // Folder links — 只读 (写入由 attune-cli link-folder)
         .route("/api/v1/folder-links", get(routes::folder_links::list_folder_links))
         // 批注（annotations）CRUD — 所有调用都是用户显式操作，不在建库流水线里自动触发

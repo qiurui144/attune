@@ -80,6 +80,10 @@ pub struct AppState {
     /// RSS 周期同步 worker 运行标志（防重入）。
     pub rss_sync_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
+    /// Office helper async job registry (v0.7.1) — in-memory ASR transcription
+    /// jobs. Not persisted; restart cancels all in-flight. See
+    /// `attune_core::office_job_queue` + `docs/superpowers/specs/2026-05-20-office-helper-design.md` §1.
+    pub office_jobs: std::sync::Arc<attune_core::office_job_queue::JobRegistry>,
     /// Sprint 1 Phase B: project recommendation broadcast channel.
     /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
     pub recommendation_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
@@ -155,6 +159,7 @@ impl AppState {
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
             )),
+            office_jobs: attune_core::office_job_queue::JobRegistry::new(),
             // 启动时检测一次硬件，后续复用（避免每次 GET/PATCH 都同步读 /proc 等）
             hardware: attune_core::platform::HardwareProfile::detect(),
             recommendation_tx,
