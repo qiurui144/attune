@@ -781,9 +781,10 @@ fn run_login(email: &str, cloud_url: &str) -> attune_core::error::Result<()> {
             eprintln!();
             eprintln!("运行 `attune sync-plugins` 自动装 entitled pro 插件");
 
-            // accounts 下发的 license_key 是 Bearer token, 不是 SignedLicense code;
-            // 跳过 LicenseCache 写入, 登录目的仅鉴权 + session 持久化.
-            eprintln!("  (info: local license-decrypt cache skipped — accounts uses bearer tokens)");
+            // accounts 下发的 license_key 是 Bearer token, 不是 SignedLicense code.
+            // 客户端登录目的: 鉴权 + session 持久化; paid plugin 解密 key 走 plugin_sync
+            // 从 EntitledPlugin.decrypt_key 字段直拿, 不需要本地 cache.
+            eprintln!("  (info: cloud accounts uses bearer tokens — no local license cache needed)");
         }
         Err(e) => eprintln!("⚠️  list licenses failed: {e}"),
     }

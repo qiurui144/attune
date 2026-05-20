@@ -9,8 +9,14 @@
 //! - GET  /api/v1/devices?account_id=...
 //! - POST /api/v1/devices/verify
 
-use attune_core::device_binding::{DeviceFingerprint, DeviceLicense, DeviceSummary};
-use attune_core::license::{sign_license, LicenseClaims, LlmEndpointInfo, SignedLicense};
+// Device + license schemas — moved from attune-core (2026-05-20).
+// They lived there as dead code on the live cloud-Bearer-token path; the only
+// real consumer is this OSS reference SaaS, so we keep them next to it.
+pub mod device_binding;
+pub mod license_protocol;
+
+use crate::device_binding::{DeviceFingerprint, DeviceLicense, DeviceSummary};
+use crate::license_protocol::{sign_license, LicenseClaims, LlmEndpointInfo, SignedLicense};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -479,7 +485,7 @@ fn next_month_start(now_unix: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use attune_core::device_binding::FormFactor;
+    use crate::device_binding::FormFactor;
 
     fn fp(device_id: &str) -> DeviceFingerprint {
         DeviceFingerprint {

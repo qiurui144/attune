@@ -94,14 +94,12 @@ pub struct AppState {
 impl AppState {
     pub fn new(vault: Vault, require_auth: bool) -> Self {
         let (recommendation_tx, _rx) = tokio::sync::broadcast::channel::<serde_json::Value>(64);
-        // 启动时尝试读 license cache, 用 license_code 作为 paid plugin 解密 key.
-        // 没 cache 或读失败 → 等价于明文 scan (paid plugin 装载会失败, 但 free plugin OK).
-        let license_cache_path = attune_core::license_cache::LicenseCache::default_path();
-        let cached_license_key: Option<Vec<u8>> =
-            attune_core::license_cache::LicenseCache::load(&license_cache_path)
-                .ok()
-                .flatten()
-                .map(|c| c.as_decrypt_key().to_vec());
+        // 2026-05-20: 启动时 LicenseCache::load 的 paid-plugin 解密 key fallback 是死路径.
+        // 历史 cloud_client.list_licenses() 下发的 license_key 是 Bearer token, 不是
+        // SignedLicense code — attune-cli 已经跳过写 LicenseCache (see main.rs:784-786);
+        // 这里读出来也永远是 None. 直接走明文 scan; encrypted plugin 走 plugin_sync 路径
+        // (它从 cloud_client.EntitledPlugin.decrypt_key 直接拿 key, 不经此 cache).
+        let cached_license_key: Option<Vec<u8>> = None;
         let plugin_registry = match attune_core::plugin_registry::PluginRegistry::default_plugins_dir() {
             Ok(dir) => match attune_core::plugin_registry::PluginRegistry::scan_with_key(&dir, cached_license_key.as_deref()) {
                 Ok((reg, errs)) => {

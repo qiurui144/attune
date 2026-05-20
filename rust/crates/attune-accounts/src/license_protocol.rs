@@ -1,19 +1,39 @@
-//! 离线激活码 + 云端 LLM gateway license schema.
+//! License protocol — Ed25519-signed license claims + LLM gateway endpoint shape.
 //!
-//! 设计:
-//! - 服务器侧用 Ed25519 私钥签 LicenseClaims (账号 / 设备数 / quota / 过期).
-//! - 客户端用嵌入公钥本地校验 — 不依赖网络.
-//! - 同一 license code 既用于离线激活, 也用于云端 LLM gateway 取 endpoint.
+//! **Quarantined here (2026-05-20)**: previously lived in `attune-core::license` /
+//! `attune-core::license_cache` but were unused by the live cloud-token path
+//! (`cloud_client.rs` treats `license_key` as opaque Bearer token; server verifies HMAC).
+//! Only this OSS reference SaaS reads/writes this schema, so it lives next to its
+//! single consumer instead of polluting `attune-core`.
 //!
-//! 集体授权 (B2B 律所等): 管理员手动生成多个 license code, 分发给团队成员,
-//! 每个成员仍受 max_devices 限制.
+//! Production accounts services should replace this with their real signing /
+//! storage backend; this module exists for the OSS reference deployment and
+//! end-to-end tests only.
 
-use crate::error::{Result, VaultError};
 use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-/// 服务器签的 license claims (未签名版).
+/// Reference SaaS error — narrow enough for the offline reference flow.
+/// (Production SaaS should use its own error taxonomy.)
+#[derive(Debug)]
+pub struct LicenseError(pub String);
+
+impl std::fmt::Display for LicenseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for LicenseError {}
+
+pub type Result<T> = std::result::Result<T, LicenseError>;
+
+fn err(s: impl Into<String>) -> LicenseError {
+    LicenseError(s.into())
+}
+
+/// Server-signed license claims (unsigned form).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LicenseClaims {
     /// 唯一 license id (UUID, 防重放)
@@ -68,9 +88,8 @@ pub struct SignedLicense {
 impl SignedLicense {
     /// 编码为单行 base64 字符串 (CLI / UI 复制粘贴友好)
     pub fn to_code(&self) -> Result<String> {
-        let json = serde_json::to_vec(self).map_err(|e| {
-            VaultError::Crypto(format!("license serialize: {e}"))
-        })?;
+        let json =
+            serde_json::to_vec(self).map_err(|e| err(format!("license serialize: {e}")))?;
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
     }
 
@@ -78,38 +97,37 @@ impl SignedLicense {
     pub fn from_code(code: &str) -> Result<Self> {
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(code.trim())
-            .map_err(|e| VaultError::Crypto(format!("license b64 decode: {e}")))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| VaultError::Crypto(format!("license json parse: {e}")))
+            .map_err(|e| err(format!("license b64 decode: {e}")))?;
+        serde_json::from_slice(&bytes).map_err(|e| err(format!("license json parse: {e}")))
     }
 
     /// 用 verifying key 校验签名 + 检查过期.
     pub fn verify(&self, verifying_key_hex: &str, now_unix: i64) -> Result<()> {
-        let pk_bytes = hex::decode(verifying_key_hex)
-            .map_err(|e| VaultError::Crypto(format!("pubkey hex: {e}")))?;
+        let pk_bytes =
+            hex::decode(verifying_key_hex).map_err(|e| err(format!("pubkey hex: {e}")))?;
         let pk_arr: [u8; 32] = pk_bytes
             .as_slice()
             .try_into()
-            .map_err(|_| VaultError::Crypto("pubkey must be 32 bytes".into()))?;
+            .map_err(|_| err("pubkey must be 32 bytes"))?;
         let vk = VerifyingKey::from_bytes(&pk_arr)
-            .map_err(|e| VaultError::Crypto(format!("bad verifying key: {e}")))?;
+            .map_err(|e| err(format!("bad verifying key: {e}")))?;
 
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.signature_b64)
-            .map_err(|e| VaultError::Crypto(format!("signature b64: {e}")))?;
+            .map_err(|e| err(format!("signature b64: {e}")))?;
         if sig_bytes.len() != 64 {
-            return Err(VaultError::Crypto("signature must be 64 bytes".into()));
+            return Err(err("signature must be 64 bytes"));
         }
-        let sig = Signature::from_slice(&sig_bytes)
-            .map_err(|e| VaultError::Crypto(format!("signature: {e}")))?;
+        let sig = Signature::from_slice(&sig_bytes).map_err(|e| err(format!("signature: {e}")))?;
 
         let payload = self.claims.canonical_bytes();
         vk.verify(&payload, &sig)
-            .map_err(|_| VaultError::Crypto("signature INVALID".into()))?;
+            .map_err(|_| err("signature INVALID"))?;
 
         if self.claims.is_expired(now_unix) {
-            return Err(VaultError::Crypto(format!(
-                "license expired at {} (now {})", self.claims.expires_at, now_unix
+            return Err(err(format!(
+                "license expired at {} (now {})",
+                self.claims.expires_at, now_unix
             )));
         }
         Ok(())
@@ -148,7 +166,7 @@ pub struct LlmEndpointInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin_sig::{derive_verifying_key_hex, generate_signing_key};
+    use attune_core::plugin_sig::{derive_verifying_key_hex, generate_signing_key};
 
     fn sample_claims() -> LicenseClaims {
         LicenseClaims {
@@ -222,7 +240,7 @@ mod tests {
         let code = signed.to_code().expect("encode");
         // license code 必须可粘贴 (无换行 / 不含 /)
         assert!(!code.contains('\n'));
-        assert!(!code.contains('/'));  // URL_SAFE_NO_PAD 用 - _
+        assert!(!code.contains('/')); // URL_SAFE_NO_PAD 用 - _
         let back = SignedLicense::from_code(&code).expect("decode");
         back.verify(&pk, 1_700_001_000).expect("verify after roundtrip");
     }

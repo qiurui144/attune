@@ -1,11 +1,8 @@
-//! 设备绑定 — 1 账号最多 2 设备激活.
+//! Device binding schema — 1 account : N devices (default 2).
 //!
-//! 客户端职责:
-//! - 启动时收集 DeviceFingerprint
-//! - 调 accounts 服务 register / verify
-//! - 离线缓存 license_token (30 天有效)
-//!
-//! 不在此模块: 云端 accounts 服务 (HTTP API + DB schema 在 attune-cloud 仓).
+//! **Quarantined here (2026-05-20)**: previously lived in `attune-core::device_binding`
+//! but was only consumed by this OSS reference SaaS. Live cloud path uses
+//! `cloud_client.rs` (Bearer token over HTTPS), not these structs.
 
 use serde::{Deserialize, Serialize};
 
@@ -123,18 +120,6 @@ pub struct DeviceSummary {
     pub form_factor: String,
 }
 
-/// 客户端启动决策机器
-pub enum BootDecision {
-    /// 在线注册成功, 用此 license
-    Online(DeviceLicense),
-    /// 设备超限, 需要用户选择踢下线某台
-    NeedDeactivation(Vec<DeviceSummary>),
-    /// 离线但 cached license 仍有效
-    OfflineCached(DeviceLicense),
-    /// 离线且 cached 过期, 必须连一次网
-    OfflineExpired,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,25 +181,5 @@ mod tests {
         assert!(json.contains("\"status\":\"ok\""));
         let back: RegisterResponse = serde_json::from_str(&json).expect("de");
         assert!(matches!(back, RegisterResponse::Ok { .. }));
-    }
-
-    #[test]
-    fn register_response_serde_max_devices() {
-        let resp = RegisterResponse::MaxDevicesReached {
-            existing: vec![DeviceSummary {
-                device_id: "d1".into(),
-                hostname: "host1".into(),
-                last_seen_at: "2025-01-01T00:00:00Z".into(),
-                form_factor: "laptop".into(),
-            }],
-        };
-        let json = serde_json::to_string(&resp).expect("ser");
-        assert!(json.contains("max_devices_reached"));
-    }
-
-    #[test]
-    fn form_factor_str() {
-        assert_eq!(FormFactor::Laptop.as_str(), "laptop");
-        assert_eq!(FormFactor::K3Appliance.as_str(), "k3_appliance");
     }
 }

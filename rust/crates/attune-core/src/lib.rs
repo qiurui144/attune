@@ -50,12 +50,12 @@ pub mod agents;
 pub mod mcp_client;
 pub mod case_metadata;
 pub mod plugin_encryption;
-pub mod device_binding;
-pub mod accounts_client;
 pub mod ui_runtime;
 pub mod agent_runner;
-pub mod license;
-pub mod license_cache;
+// 2026-05-20: license / license_cache / accounts_client / device_binding 模块
+// 被移到 attune-accounts (OSS reference SaaS) — live cloud-Bearer-token path
+// 不走 Ed25519 SignedLicense, 这些类型只有 attune-accounts 在用, 留在 attune-core
+// 是 footgun. 删了它们, 同时把 LicenseCache 启动时的死代码也从 state.rs 删掉.
 pub mod member_session;
 pub mod cloud_client;
 pub mod plugin_sync;
