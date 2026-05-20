@@ -4,6 +4,7 @@ pub mod state;
 pub(crate) mod middleware;
 pub(crate) mod ingest_webdav;
 pub(crate) mod ingest_email;
+pub(crate) mod ingest_rss;
 
 use axum::middleware as axum_mw;
 use axum::routing::{delete, get, post};

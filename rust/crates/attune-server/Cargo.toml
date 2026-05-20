@@ -42,6 +42,8 @@ thiserror = "2"
 # trait object (embedding / llm / reranker / web_search / classifier). 写少读多场景,
 # 比 std::sync::Mutex<Arc<dyn>> 快得多 + 无 async/blocking 风险.
 arc-swap = "1"
+# RSS worker 到期判断需要解析 last_polled_at RFC3339 时间戳。
+chrono = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json"] }
