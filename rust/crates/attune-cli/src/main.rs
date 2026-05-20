@@ -41,6 +41,28 @@ enum Commands {
     Ocr {
         /// Image path (PNG / JPG / etc supported by `image` crate)
         image: std::path::PathBuf,
+        /// Office helper scene profile (document/receipt/table/card/id_card/screenshot/ancient/form/contract).
+        /// Default = no structured extraction, plain text output.
+        #[arg(long)]
+        profile: Option<String>,
+        /// For profile=id_card: subtype = id_card_cn | bank_card | business_license
+        #[arg(long)]
+        id_card_subtype: Option<String>,
+        /// Output full JSON envelope (lines + bbox + structured) instead of plain text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Office helper async ASR transcription. Currently runs synchronously in-process
+    /// (no daemon), printing transcript JSON to stdout.
+    Transcribe {
+        /// Audio path (mp3/wav/m4a/flac/ogg)
+        audio: std::path::PathBuf,
+        /// Enable speaker diarization (pyannote / WhisperX subprocess)
+        #[arg(long)]
+        diarization: bool,
+        /// Output as JSON instead of [HH:MM:SS] formatted lines
+        #[arg(long)]
+        json: bool,
     },
     /// R38 (2026-05-01): Export vault data files to a backup directory.
     /// Copies vault.db (encrypted SQLite), tantivy/ (full-text index), vectors.encbin (if present).
@@ -270,17 +292,75 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         _ => {}
     }
     // OCR / Deploy 子命令不需要 vault — 早 return 避免 zero-state 报错
-    if let Commands::Ocr { image } = &cli.command {
+    if let Commands::Ocr { image, profile, id_card_subtype, json } = &cli.command {
         let provider = attune_core::ocr::detect_default_provider().ok_or_else(|| {
             attune_core::error::VaultError::ModelLoad(
                 "PP-OCR models missing — run `attune deploy` or apt install --reinstall attune".into(),
             )
         })?;
-        eprintln!("[attune ocr] engine: {} | image: {}", provider.name(), image.display());
+        eprintln!("[attune ocr] engine: {} | image: {} | profile: {}",
+            provider.name(), image.display(), profile.as_deref().unwrap_or("(plain)"));
         let start = std::time::Instant::now();
-        let text = provider.extract_text_from_image(image)?;
-        eprintln!("[attune ocr] {:?} elapsed", start.elapsed());
-        println!("{text}");
+        let ocr_profile = attune_core::ocr::profile_for_id(profile.as_deref());
+        let out = provider.extract_structured(image, &ocr_profile)?;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        eprintln!("[attune ocr] {elapsed_ms}ms elapsed");
+
+        let lines = out.lines.clone().unwrap_or_default();
+        let envelope = serde_json::json!({
+            "envelope_version": "1",
+            "profile": profile.clone().unwrap_or_else(|| "(plain)".into()),
+            "elapsed_ms": elapsed_ms,
+            "engine": provider.name(),
+            "lines": &lines,
+            "structured": serde_json::Value::Null, // D2 will fill via attune_core::ocr::structured::extract
+            "text": out.text,
+        });
+        if *json {
+            println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+        } else {
+            println!("{}", out.text);
+        }
+        let _ = (id_card_subtype,); // D2: route into structured extract once available
+        return Ok(());
+    }
+    if let Commands::Transcribe { audio, diarization, json } = &cli.command {
+        let backend = attune_core::asr::detect_asr_backend().ok_or_else(|| {
+            attune_core::error::VaultError::ModelLoad(
+                "ASR backend missing — whisper-cli not installed or model not downloaded".into(),
+            )
+        })?;
+        eprintln!("[attune transcribe] model: {} | audio: {}",
+            backend.model_name, audio.display());
+        let diar = if *diarization {
+            attune_core::asr::detect_diarization_backend()
+        } else {
+            None
+        };
+        let start = std::time::Instant::now();
+        let (segments, _legacy_text) =
+            attune_core::asr::transcribe_with_diarization(&backend, audio, diar.as_ref())?;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        eprintln!("[attune transcribe] {elapsed_ms}ms elapsed, {} segments", segments.len());
+        if *json {
+            let value = serde_json::json!({
+                "model": backend.model_name,
+                "language_detected": backend.language,
+                "elapsed_ms": elapsed_ms,
+                "diarization_used": diar.is_some(),
+                "segments": segments.iter().map(|s| serde_json::json!({
+                    "start_sec": s.start_ms as f64 / 1000.0,
+                    "end_sec":   s.end_ms   as f64 / 1000.0,
+                    "text":      s.text,
+                    "speaker":   s.speaker,
+                })).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&value).unwrap());
+        } else {
+            for s in &segments {
+                println!("{}", s.to_display());
+            }
+        }
         return Ok(());
     }
 
@@ -376,6 +456,7 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
                 attune_core::platform::device_secret_path().display());
         }
         Commands::Ocr { .. } => unreachable!("Ocr handled before vault open"),
+        Commands::Transcribe { .. } => unreachable!("Transcribe handled before vault open"),
         Commands::Deploy { no_models, dry_run, script } => {
             // R-deploy: 调底层 bash 脚本。Linux-only。
             if !cfg!(target_os = "linux") {
