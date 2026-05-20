@@ -74,6 +74,7 @@ pub mod llm;
 pub mod llm_settings;
 pub mod ocr;  // v0.6.0-rc.3: pub for ai_stack status API
 pub mod asr;
+pub mod office_job_queue;
 pub mod parser;
 pub mod pii;
 pub mod platform;
