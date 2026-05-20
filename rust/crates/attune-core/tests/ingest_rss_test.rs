@@ -1,11 +1,7 @@
 //! RSS 采集源端到端集成测试。
 //!
 //! 三类覆盖：
-<<<<<<< Updated upstream
-//! 1. parse 层 — feed-rs 对 RSS 2.0 / Atom 解析；HTML 剥标签
-=======
 //! 1. parse 层 — feed-rs 对 RSS 2.0 / Atom / JSON-Feed-style 解析；HTML 剥标签
->>>>>>> Stashed changes
 //! 2. connector 层 — 走 mock FeedFetcher，验证条件 GET / 304 / entry dedup
 //! 3. ingest 层 — connector 产出的 RawDocument 真正过 `ingest_document` 入库
 
@@ -55,29 +51,20 @@ const ATOM_ONE_ENTRY: &[u8] = br#"<?xml version="1.0" encoding="utf-8"?>
   </entry>
 </feed>"#;
 
-<<<<<<< Updated upstream
-struct MockFetcher {
-    responses: HashMap<String, FeedHttpResponse>,
-=======
 /// Mock FeedFetcher：按 url 返回预置响应，并记录上次 fetch 时收到的条件 GET 头，
 /// 让测试验证 conditional GET 语义。
 struct MockFetcher {
     responses: HashMap<String, FeedHttpResponse>,
     /// (url, etag, last_modified) 三元组按顺序追加 —— 多次 fetch 后可校验。
     received: std::sync::Mutex<Vec<(String, Option<String>, Option<String>)>>,
->>>>>>> Stashed changes
 }
 
 impl MockFetcher {
     fn new(responses: HashMap<String, FeedHttpResponse>) -> Self {
-<<<<<<< Updated upstream
-        Self { responses }
-=======
         Self {
             responses,
             received: std::sync::Mutex::new(Vec::new()),
         }
->>>>>>> Stashed changes
     }
 }
 
@@ -85,11 +72,6 @@ impl FeedFetcher for MockFetcher {
     fn fetch(
         &self,
         url: &str,
-<<<<<<< Updated upstream
-        _etag: Option<&str>,
-        _last_modified: Option<&str>,
-    ) -> attune_core::error::Result<FeedHttpResponse> {
-=======
         etag: Option<&str>,
         last_modified: Option<&str>,
     ) -> attune_core::error::Result<FeedHttpResponse> {
@@ -98,7 +80,6 @@ impl FeedFetcher for MockFetcher {
             etag.map(String::from),
             last_modified.map(String::from),
         ));
->>>>>>> Stashed changes
         self.responses.get(url).cloned().ok_or_else(|| {
             attune_core::error::VaultError::LlmUnavailable(format!("mock: no response for {url}"))
         })
@@ -157,18 +138,6 @@ fn first_poll_emits_all_entries() {
     assert!(docs.iter().all(|d| d.source_kind == SourceKind::Rss));
 }
 
-<<<<<<< Updated upstream
-/// (url, If-None-Match, If-Modified-Since) — fetcher 收到的条件 GET 头三元组。
-type ReceivedHeaders = Vec<(String, Option<String>, Option<String>)>;
-
-#[test]
-fn conditional_get_passes_etag_to_fetcher() {
-    let received: std::sync::Arc<std::sync::Mutex<ReceivedHeaders>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    struct CaptureFetcher {
-        received: std::sync::Arc<std::sync::Mutex<ReceivedHeaders>>,
-=======
 #[test]
 fn conditional_get_passes_etag_to_fetcher() {
     // 历史 etag 已存在 → 下次 fetch 必须带 If-None-Match 头。
@@ -183,7 +152,6 @@ fn conditional_get_passes_etag_to_fetcher() {
     // 用闭包式 FeedFetcher，直接捕获 received。
     struct CaptureFetcher {
         received: std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>, Option<String>)>>>,
->>>>>>> Stashed changes
     }
     impl FeedFetcher for CaptureFetcher {
         fn fetch(
@@ -200,10 +168,7 @@ fn conditional_get_passes_etag_to_fetcher() {
             Ok(FeedHttpResponse::NotModified)
         }
     }
-<<<<<<< Updated upstream
-=======
     let _ = fetcher; // 不用
->>>>>>> Stashed changes
     let conn = RssConnector::with_fetcher(
         make_feed(Some("oss-weekly-001"), Some("\"prev-etag\"")),
         Box::new(CaptureFetcher {
@@ -229,10 +194,7 @@ fn conditional_get_passes_etag_to_fetcher() {
 
 #[test]
 fn dedup_invariant_re_poll_returns_zero_new() {
-<<<<<<< Updated upstream
-=======
     // 第一次 poll 全 emit 2 个；记下最新 guid 作 cursor；第二次同源同响应 → 0 个新。
->>>>>>> Stashed changes
     let mut responses = HashMap::new();
     responses.insert(
         "https://ex.com/feed.xml".to_string(),
@@ -250,17 +212,11 @@ fn dedup_invariant_re_poll_returns_zero_new() {
         conn_1.fetch_documents(&mut sink).unwrap();
     }
     assert_eq!(docs_1.len(), 2);
-<<<<<<< Updated upstream
-    let cursor = docs_1[0].modified_marker.clone().unwrap();
-    assert_eq!(cursor, "oss-weekly-001");
-
-=======
     // 第一次最末 ingest 的 guid（worker 实际推进的）是 docs_1[0]（feed 首条 = 最新）
     let cursor = docs_1[0].modified_marker.clone().unwrap();
     assert_eq!(cursor, "oss-weekly-001");
 
     // 第二次：cursor 已推进，同响应回灌。
->>>>>>> Stashed changes
     let fetcher_2 = MockFetcher::new(responses);
     let conn_2 = RssConnector::with_fetcher(make_feed(Some(&cursor), None), Box::new(fetcher_2));
     let mut docs_2: Vec<RawDocument> = Vec::new();
@@ -277,10 +233,7 @@ fn dedup_invariant_re_poll_returns_zero_new() {
 
 #[test]
 fn end_to_end_ingest_rss_entry_into_store() {
-<<<<<<< Updated upstream
-=======
     // 回归守卫：connector 产出的 RawDocument 必须能真正过 ingest_document 入库。
->>>>>>> Stashed changes
     let mut responses = HashMap::new();
     responses.insert(
         "https://ex.com/feed.xml".to_string(),
@@ -314,10 +267,7 @@ fn end_to_end_ingest_rss_entry_into_store() {
 
 #[test]
 fn fetch_error_propagates_to_caller() {
-<<<<<<< Updated upstream
-=======
     // 网络层错误 → fetch_documents 返回 Err，worker 据此 touch_polled_at。
->>>>>>> Stashed changes
     struct ErrFetcher;
     impl FeedFetcher for ErrFetcher {
         fn fetch(
@@ -343,10 +293,7 @@ fn fetch_error_propagates_to_caller() {
 
 #[test]
 fn empty_body_entry_is_skipped() {
-<<<<<<< Updated upstream
-=======
     // 故意空 title + 空 body 的 entry —— 不应 emit。
->>>>>>> Stashed changes
     const EMPTY_BODY_RSS: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel><title>x</title><link>https://e</link><description>x</description>
   <item><guid>empty-1</guid></item>
@@ -367,10 +314,7 @@ fn empty_body_entry_is_skipped() {
         let mut sink: DocumentSink<'_> = Box::new(|d| docs.push(d));
         conn.fetch_documents(&mut sink).unwrap();
     }
-<<<<<<< Updated upstream
-=======
     // 空 entry 跳过，留下 has-title 一份（title 兜底成 body）。
->>>>>>> Stashed changes
     assert_eq!(docs.len(), 1);
     assert_eq!(docs[0].title, "Has title");
 }
