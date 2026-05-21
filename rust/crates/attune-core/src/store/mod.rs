@@ -17,6 +17,8 @@ mod memories;
 mod memory_vectors;
 mod web_search_cache;
 mod chunk_breadcrumbs;
+mod links;               // internal knowledge linker — item_entities + item_links tables
+pub use links::LinkRow;
 pub mod browse_signals;  // pub: BrowseSignalInput / BrowseSignalRow 给 attune-server route 用
 pub mod auto_bookmarks;  // W4 G2: high engagement auto bookmark candidates (G3 staging)
 pub mod audit;            // v0.6 Phase A.5.3: 出网审计日志
@@ -465,6 +467,30 @@ CREATE TABLE IF NOT EXISTS outbound_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_audit_ts ON outbound_audit(ts_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_outbound_audit_session ON outbound_audit(session_id, ts_ms);
+
+-- Internal knowledge linker (per docs/superpowers/specs/2026-05-19-internal-knowledge-linking-design.md)
+-- Two additive tables, CREATE TABLE IF NOT EXISTS — old vaults auto-migrate on next open.
+CREATE TABLE IF NOT EXISTS item_entities (
+    item_id     TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (item_id, kind, value)
+);
+CREATE INDEX IF NOT EXISTS idx_item_entities_kv ON item_entities(kind, value);
+
+CREATE TABLE IF NOT EXISTS item_links (
+    item_a     TEXT NOT NULL,
+    item_b     TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    weight     REAL NOT NULL,
+    directed   INTEGER NOT NULL DEFAULT 0,
+    evidence   TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (item_a, item_b, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_item_links_a ON item_links(item_a, weight DESC);
+CREATE INDEX IF NOT EXISTS idx_item_links_b ON item_links(item_b, weight DESC);
 "#;
 
 pub struct Store {

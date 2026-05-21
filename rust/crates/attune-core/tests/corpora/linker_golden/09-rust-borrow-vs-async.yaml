@@ -1,0 +1,22 @@
+id: 09-rust-borrow-vs-async
+kind: shared_entity
+doc_a:
+  title: Rust 学习笔记 — 借用检查
+  content: |
+    整理人：王五。
+    时间：2024-03-01。
+    所属单位：某科技有限公司。
+    Rust 借用规则三条：一可变 / 多不可变 / 必须有效。
+  url: ''
+doc_b:
+  title: Rust 学习笔记 — async/await
+  content: |
+    整理人：王五。
+    时间：2024-04-15。
+    所属单位：某科技有限公司。
+    Rust 异步函数用 async fn 标记，返回 Future。
+  url: ''
+expected:
+  link_kinds:
+    - shared_entity
+  evidence_substring: 'person:王五'

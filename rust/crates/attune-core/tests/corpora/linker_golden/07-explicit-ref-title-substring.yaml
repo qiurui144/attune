@@ -1,0 +1,20 @@
+id: 07-explicit-ref-title-substring
+kind: explicit_ref
+doc_a:
+  title: 索引文档汇总
+  content: |
+    本月总结。
+    完成《数据库索引原理深度解析》一文的修订。
+    覆盖 B+ 树 / LSM-tree / 倒排索引三种数据结构对比。
+  url: ''
+doc_b:
+  title: 数据库索引原理深度解析
+  content: |
+    本文系统讲解关系型数据库与搜索引擎中常见的索引结构。
+    重点对比 B+ 树（InnoDB） / LSM-tree（RocksDB） / 倒排索引（Lucene）
+    的写放大 / 读放大 / 空间放大特性。
+  url: ''
+expected:
+  link_kinds:
+    - explicit_ref
+  evidence_substring: 'title:数据库索引原理深度解析'

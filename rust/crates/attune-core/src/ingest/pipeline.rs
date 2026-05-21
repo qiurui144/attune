@@ -178,6 +178,22 @@ fn ingest_document_inner(
     // doc_create 信号喂 skill_evolution，传文档名作 query context（失败静默，不阻塞）
     let _ = store.record_signal_event("doc_create", &item_id, Some(&filename));
 
+    // Internal knowledge linker — 🆓/⚡ tier only (entity overlap + URL/title ref).
+    // Per spec §2.4 "Alternative for shared_entity / explicit_ref only": vectors=None,
+    // semantic_near pass runs later in the embed worker when chunk vectors exist.
+    // 失败静默不阻塞入库 — link 缺失只是降级，文档已可被搜到 / 被读到。
+    if let Err(e) = crate::linker::compute_links_for_item(
+        store,
+        None,
+        &item_id,
+        &title,
+        &content,
+        Some(&raw.uri),
+        &crate::linker::LinkThresholds::default(),
+    ) {
+        log::warn!("ingest: linker (entity+ref pass) failed for {item_id}: {e}");
+    }
+
     match old_item_id {
         Some(old) => Ok(IngestOutcome::Updated { item_id, old_item_id: old }),
         None => Ok(IngestOutcome::Inserted { item_id, chunks_enqueued: chunk_counter }),

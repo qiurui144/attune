@@ -1,0 +1,24 @@
+id: 03-shared-multi-entities
+kind: shared_entity
+doc_a:
+  title: 律师函 第一版
+  content: |
+    出函日期：2024-03-15。
+    委托人：张三。
+    被函送达：某科技有限公司。
+    争议金额：¥1,000,000。
+    要求答复期：2024-05-01 前。
+  url: ''
+doc_b:
+  title: 律师函 第二版
+  content: |
+    出函日期：2024-04-25。
+    委托人：张三。
+    被函送达：某科技有限公司。
+    争议金额：¥1,000,000。
+    涉及合同：2024-03-15 签订。
+  url: ''
+expected:
+  link_kinds:
+    - shared_entity
+  evidence_substring: 'person:张三'

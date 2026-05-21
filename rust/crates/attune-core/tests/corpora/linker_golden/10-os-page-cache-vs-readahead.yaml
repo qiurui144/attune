@@ -1,0 +1,24 @@
+id: 10-os-page-cache-vs-readahead
+kind: explicit_ref
+doc_a:
+  title: 操作系统优化思路汇总 — IO 子系统
+  content: |
+    整理人：赵六。
+    时间：2024-03-20。
+    所属单位：某研究所。
+    Linux IO 优化两条主线 — page cache 命中率 / readahead 预读。
+    详细机制参见 [[Linux 内核 page cache 详解]] 一文。
+  url: ''
+doc_b:
+  title: Linux 内核 page cache 详解
+  content: |
+    撰写人：赵六。
+    时间：2024-04-01。
+    所属单位：某研究所。
+    page cache 是 Linux 文件系统加速核心机制。
+    本文覆盖 radix tree / xarray / writeback / readahead 触发条件。
+  url: ''
+expected:
+  link_kinds:
+    - explicit_ref
+  evidence_substring: 'wikiref:Linux 内核 page cache 详解'
