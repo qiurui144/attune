@@ -38,10 +38,14 @@ enum Commands {
     },
     /// Run PP-OCRv5 on an image file (PNG/JPG) and print extracted text.
     /// Useful for testing OCR setup or quick screenshot OCR without going through ingest.
+    ///
+    /// Exit codes (D5.7):
+    ///   0 success | 1 user input (file missing / unknown profile)
+    ///   2 reserved (red-line) | 3 engine failure
     Ocr {
         /// Image path (PNG / JPG / etc supported by `image` crate)
         image: std::path::PathBuf,
-        /// Office helper scene profile (document/receipt/table/card/id_card/screenshot/ancient/form/contract).
+        /// Office helper scene profile (document/receipt/table/card/id_card).
         /// Default = no structured extraction, plain text output.
         #[arg(long)]
         profile: Option<String>,
@@ -51,9 +55,16 @@ enum Commands {
         /// Output full JSON envelope (lines + bbox + structured) instead of plain text.
         #[arg(long)]
         json: bool,
+        /// Include per-line bbox coordinates in JSON envelope (default: true).
+        /// Use `--no-bbox` to strip bbox for compact JSON (lines text-only).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        bbox: bool,
     },
     /// Office helper async ASR transcription. Currently runs synchronously in-process
     /// (no daemon), printing transcript JSON to stdout.
+    ///
+    /// Exit codes (D5.7):
+    ///   0 success | 1 user input (file missing) | 3 engine failure
     Transcribe {
         /// Audio path (mp3/wav/m4a/flac/ogg)
         audio: std::path::PathBuf,
@@ -63,6 +74,10 @@ enum Commands {
         /// Output as JSON instead of [HH:MM:SS] formatted lines
         #[arg(long)]
         json: bool,
+        /// Block until transcription completes (default: true; in-process mode is always sync,
+        /// flag reserved for future async/job-id mode where `--no-wait` returns job_id immediately).
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        wait: bool,
     },
     /// R38 (2026-05-01): Export vault data files to a backup directory.
     /// Copies vault.db (encrypted SQLite), tantivy/ (full-text index), vectors.encbin (if present).
@@ -233,11 +248,37 @@ enum Commands {
     },
 }
 
+/// CLI exit code protocol (D5.7).
+///
+/// | code | meaning                                                    |
+/// |------|------------------------------------------------------------|
+/// | 0    | success                                                    |
+/// | 1    | user input error (file missing, unknown profile, bad arg)  |
+/// | 2    | reserved — red-line warning (file too big but proceed)     |
+/// | 3    | engine / server failure (OCR/ASR model load, transcoding)  |
+/// | 4    | network unreachable (reserved for future REST mode)        |
+///
+/// Most errors today bubble through `VaultError`; this function maps them to
+/// integer exit codes. `VaultError::InvalidInput` / `NotFound` (path / profile)
+/// → 1; `ModelLoad` / engine subprocess crash → 3; anything else → 1 (default).
+fn classify_error_exit_code(err: &attune_core::error::VaultError) -> i32 {
+    use attune_core::error::VaultError;
+    match err {
+        VaultError::InvalidInput(_) | VaultError::NotFound(_) => 1,
+        VaultError::ModelLoad(_) => 3,
+        VaultError::Io(io_err) => match io_err.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput => 1,
+            _ => 3,
+        },
+        _ => 1,
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli) {
         eprintln!("error: {e}");
-        std::process::exit(1);
+        std::process::exit(classify_error_exit_code(&e));
     }
 }
 
@@ -292,7 +333,21 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         _ => {}
     }
     // OCR / Deploy 子命令不需要 vault — 早 return 避免 zero-state 报错
-    if let Commands::Ocr { image, profile, id_card_subtype, json } = &cli.command {
+    if let Commands::Ocr { image, profile, id_card_subtype, json, bbox } = &cli.command {
+        // ── D5.7 pre-validation: friendly errors with structured exit codes ──
+        // (1) Profile id must be known (or None for plain mode). Validated FIRST so typo
+        //     diagnostics surface before file-not-found (user often types wrong flag, not wrong path).
+        validate_ocr_profile_or_suggest(profile.as_deref())?;
+        // (2) Image file must exist (exit 1)
+        if !image.exists() {
+            return Err(attune_core::error::VaultError::InvalidInput(format!(
+                "image file not found: {}\n\
+                 hint: check the path; cwd is {}",
+                image.display(),
+                std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "<unknown>".into()),
+            )));
+        }
+
         let provider = attune_core::ocr::detect_default_provider().ok_or_else(|| {
             attune_core::error::VaultError::ModelLoad(
                 "PP-OCR models missing — run `attune deploy` or apt install --reinstall attune".into(),
@@ -317,12 +372,24 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         } else {
             None
         };
+
+        // D5.7: --no-bbox strips bbox from JSON output (text + confidence only).
+        let lines_json: serde_json::Value = if *bbox {
+            serde_json::to_value(&lines).unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Array(
+                lines.iter()
+                    .map(|l| serde_json::json!({ "text": l.text, "confidence": l.confidence }))
+                    .collect(),
+            )
+        };
+
         let envelope = serde_json::json!({
             "envelope_version": "1",
             "profile": profile.clone().unwrap_or_else(|| "(plain)".into()),
             "elapsed_ms": elapsed_ms,
             "engine": provider.name(),
-            "lines": &lines,
+            "lines": lines_json,
             "structured": structured,
             "text": out.text,
         });
@@ -333,7 +400,24 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
         return Ok(());
     }
-    if let Commands::Transcribe { audio, diarization, json } = &cli.command {
+    if let Commands::Transcribe { audio, diarization, json, wait } = &cli.command {
+        // ── D5.7 pre-validation: friendly errors with structured exit codes ──
+        if !audio.exists() {
+            return Err(attune_core::error::VaultError::InvalidInput(format!(
+                "audio file not found: {}\n\
+                 hint: check the path; cwd is {}",
+                audio.display(),
+                std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "<unknown>".into()),
+            )));
+        }
+        // `--no-wait` (async mode) is reserved for future REST/daemon path; in-process is always sync.
+        if !*wait {
+            eprintln!(
+                "[attune transcribe] WARN: --no-wait ignored (in-process mode is always synchronous; \
+                 flag reserved for future REST daemon mode)"
+            );
+        }
+
         let backend = attune_core::asr::detect_asr_backend().ok_or_else(|| {
             attune_core::error::VaultError::ModelLoad(
                 "ASR backend missing — whisper-cli not installed or model not downloaded".into(),
@@ -546,6 +630,43 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
     }
     Ok(())
+}
+
+/// D5.7: list of valid OCR scene profile ids (mirrors `structured::extract` match arms).
+const VALID_OCR_PROFILES: &[&str] = &["document", "receipt", "table", "card", "id_card"];
+
+/// D5.7: validate `--profile <id>` against known set; on typo, suggest nearest match.
+///
+/// Returns:
+///   - `Ok(())` if `profile_id` is `None` (plain mode) or matches a known scene.
+///   - `Err(VaultError::InvalidInput)` with suggestion if typo, or with full list if no close match.
+fn validate_ocr_profile_or_suggest(profile_id: Option<&str>) -> attune_core::error::Result<()> {
+    let id = match profile_id {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(()), // None or "" → plain mode, no structured extraction
+    };
+    if VALID_OCR_PROFILES.contains(&id) {
+        return Ok(());
+    }
+    // Find nearest match (levenshtein ≤ 2 considered close)
+    let suggestion = VALID_OCR_PROFILES
+        .iter()
+        .map(|valid| (*valid, strsim::levenshtein(id, valid)))
+        .min_by_key(|(_, dist)| *dist);
+    let hint = match suggestion {
+        Some((best, dist)) if dist <= 2 => format!(
+            "unknown profile: '{id}'\n\
+             hint: did you mean '{best}'? (edit distance {dist})\n\
+             valid profiles: {}",
+            VALID_OCR_PROFILES.join(", ")
+        ),
+        _ => format!(
+            "unknown profile: '{id}'\n\
+             valid profiles: {}",
+            VALID_OCR_PROFILES.join(", ")
+        ),
+    };
+    Err(attune_core::error::VaultError::InvalidInput(hint))
 }
 
 /// 递归复制目录 — 用于 vault export/import 的 tantivy/ 子目录
@@ -1178,4 +1299,83 @@ fn run_ocr_profile_delete(id: &str) -> attune_core::error::Result<()> {
     reg.delete(id)?;
     eprintln!("✓ profile {id} 已删除");
     Ok(())
+}
+
+
+#[cfg(test)]
+mod cli_helpers_tests {
+    use super::*;
+
+    // ── D5.7 validate_ocr_profile_or_suggest ────────────────────────────
+
+    #[test]
+    fn validate_profile_accepts_known() {
+        for valid in VALID_OCR_PROFILES {
+            assert!(
+                validate_ocr_profile_or_suggest(Some(valid)).is_ok(),
+                "expected {valid} accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_profile_accepts_none() {
+        assert!(validate_ocr_profile_or_suggest(None).is_ok());
+    }
+
+    #[test]
+    fn validate_profile_accepts_empty_string_as_plain() {
+        assert!(validate_ocr_profile_or_suggest(Some("")).is_ok());
+    }
+
+    #[test]
+    fn validate_profile_suggests_nearest_on_typo() {
+        let err = validate_ocr_profile_or_suggest(Some("recipt")).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("recipt"), "msg should echo bad input: {msg}");
+        assert!(msg.contains("receipt"), "msg should suggest receipt: {msg}");
+    }
+
+    #[test]
+    fn validate_profile_lists_valid_set_when_no_close_match() {
+        let err = validate_ocr_profile_or_suggest(Some("zzzzzzzzzzzz")).unwrap_err();
+        let msg = err.to_string();
+        // No suggestion (edit distance too large); just lists valid set.
+        assert!(msg.contains("valid profiles"), "should list valid set: {msg}");
+        assert!(msg.contains("document"));
+    }
+
+    // ── D5.7 classify_error_exit_code ──────────────────────────────────
+
+    #[test]
+    fn exit_code_invalid_input_maps_to_1() {
+        let err = attune_core::error::VaultError::InvalidInput("bad".into());
+        assert_eq!(classify_error_exit_code(&err), 1);
+    }
+
+    #[test]
+    fn exit_code_not_found_maps_to_1() {
+        let err = attune_core::error::VaultError::NotFound("nope".into());
+        assert_eq!(classify_error_exit_code(&err), 1);
+    }
+
+    #[test]
+    fn exit_code_model_load_maps_to_3() {
+        let err = attune_core::error::VaultError::ModelLoad("no model".into());
+        assert_eq!(classify_error_exit_code(&err), 3);
+    }
+
+    #[test]
+    fn exit_code_io_not_found_maps_to_1() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "x");
+        let err = attune_core::error::VaultError::Io(io_err);
+        assert_eq!(classify_error_exit_code(&err), 1);
+    }
+
+    #[test]
+    fn exit_code_other_io_maps_to_3() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "x");
+        let err = attune_core::error::VaultError::Io(io_err);
+        assert_eq!(classify_error_exit_code(&err), 3);
+    }
 }
