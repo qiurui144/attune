@@ -176,7 +176,7 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
     // 启发式: 取未被 consumed 的行中 — 字号 (bbox.h) 最大 + 内容短 (2-15 字符) + 在卡片上半部.
     let mut max_y = 0u32;
     for l in lines {
-        max_y = max_y.max(l.bbox.y + l.bbox.h);
+        max_y = max_y.max(l.bbox.y.saturating_add(l.bbox.h));
     }
     let half_y = max_y / 2;
     let mut best_name: Option<(usize, u32, f32)> = None;

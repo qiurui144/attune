@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0474f9f4f0daac8525465c9a0fdb58a6358552821217e2b3528bc7e5ae4d05b0 # shrinks to lines = [RawLine { text: "", bbox: BBox { x: 0, y: 2152580908, w: 0, h: 2142386388 }, confidence: 0.0 }]

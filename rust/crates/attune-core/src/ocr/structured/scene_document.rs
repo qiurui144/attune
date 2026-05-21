@@ -78,7 +78,7 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
     if let Some(split_x) = column_split {
         // 双栏: 先左列 top→bottom, 再右列 top→bottom
         blocks.sort_by_key(|b| {
-            let center_x = b.bbox.x + b.bbox.w / 2;
+            let center_x = b.bbox.x.saturating_add(b.bbox.w / 2);
             let col = if center_x < split_x { 0 } else { 1 };
             (col, b.bbox.y)
         });
@@ -132,7 +132,7 @@ fn cluster_paragraphs(lines: &[RawLine]) -> Vec<Paragraph> {
 
     for l in sorted.iter() {
         if let Some(last) = current.last() {
-            let last_y_end = last.bbox.y + last.bbox.h;
+            let last_y_end = last.bbox.y.saturating_add(last.bbox.h);
             // 用较小的字高做 gap 阈值 baseline (避免大字号 title 跨过本应分段的小 gap)
             let line_height = last.bbox.h.min(l.bbox.h);
             let gap = l.bbox.y.saturating_sub(last_y_end);
@@ -146,11 +146,11 @@ fn cluster_paragraphs(lines: &[RawLine]) -> Vec<Paragraph> {
             // 段落必须在 x 范围内大致重叠 (避免双栏的两列被合并成一段)
             let x_overlap_ok = {
                 let l0 = last.bbox.x;
-                let l1 = last.bbox.x + last.bbox.w;
+                let l1 = last.bbox.x.saturating_add(last.bbox.w);
                 let c0 = l.bbox.x;
-                let c1 = l.bbox.x + l.bbox.w;
+                let c1 = l.bbox.x.saturating_add(l.bbox.w);
                 let inter = l1.min(c1).saturating_sub(l0.max(c0));
-                let min_w = (l1 - l0).min(c1 - c0).max(1);
+                let min_w = (l1.saturating_sub(l0)).min(c1.saturating_sub(c0)).max(1);
                 (inter as f32 / min_w as f32) > 0.3
             };
             if same_para && x_overlap_ok && !font_size_jump {
@@ -181,12 +181,12 @@ fn cluster_paragraphs(lines: &[RawLine]) -> Vec<Paragraph> {
             let min_y = p.iter().map(|l| l.bbox.y).min().unwrap_or(0);
             let max_x = p
                 .iter()
-                .map(|l| l.bbox.x + l.bbox.w)
+                .map(|l| l.bbox.x.saturating_add(l.bbox.w))
                 .max()
                 .unwrap_or(0);
             let max_y = p
                 .iter()
-                .map(|l| l.bbox.y + l.bbox.h)
+                .map(|l| l.bbox.y.saturating_add(l.bbox.h))
                 .max()
                 .unwrap_or(0);
             let bbox = BBox {
@@ -216,17 +216,17 @@ fn detect_two_column_split(lines: &[RawLine]) -> Option<u32> {
     let min_x = lines.iter().map(|l| l.bbox.x).min().unwrap_or(0);
     let max_x = lines
         .iter()
-        .map(|l| l.bbox.x + l.bbox.w)
+        .map(|l| l.bbox.x.saturating_add(l.bbox.w))
         .max()
         .unwrap_or(0);
     if max_x <= min_x {
         return None;
     }
-    let mid_x = (min_x + max_x) / 2;
+    let mid_x = min_x.saturating_add(max_x) / 2;
     let mut left = 0;
     let mut right = 0;
     for l in lines {
-        let cx = l.bbox.x + l.bbox.w / 2;
+        let cx = l.bbox.x.saturating_add(l.bbox.w / 2);
         if cx < mid_x {
             left += 1;
         } else {
@@ -241,18 +241,18 @@ fn detect_two_column_split(lines: &[RawLine]) -> Option<u32> {
         // 进一步验证: 左侧 lines 的 max(x+w) 应 ≤ 右侧 lines 的 min(x) + 小容忍
         let left_max_end = lines
             .iter()
-            .filter(|l| (l.bbox.x + l.bbox.w / 2) < mid_x)
-            .map(|l| l.bbox.x + l.bbox.w)
+            .filter(|l| (l.bbox.x.saturating_add(l.bbox.w / 2)) < mid_x)
+            .map(|l| l.bbox.x.saturating_add(l.bbox.w))
             .max()
             .unwrap_or(0);
 
         let right_min_start = lines
             .iter()
-            .filter(|l| (l.bbox.x + l.bbox.w / 2) >= mid_x)
+            .filter(|l| (l.bbox.x.saturating_add(l.bbox.w / 2)) >= mid_x)
             .map(|l| l.bbox.x)
             .min()
             .unwrap_or(0);
-        if left_max_end <= right_min_start + 20 {
+        if left_max_end <= right_min_start.saturating_add(20) {
             return Some(mid_x);
         }
     }
@@ -278,7 +278,7 @@ fn classify_block(p: &Paragraph, lines: &[RawLine]) -> BlockKind {
     // footer: y 在页面下 10% + 含页码模式 ("第 X 页" / 单纯数字)
     let max_y = lines
         .iter()
-        .map(|l| l.bbox.y + l.bbox.h)
+        .map(|l| l.bbox.y.saturating_add(l.bbox.h))
         .max()
         .unwrap_or(1);
     let in_footer_zone = (p.bbox.y as f32) > (max_y as f32 * 0.9);
