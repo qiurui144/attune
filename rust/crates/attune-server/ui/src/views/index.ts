@@ -5,4 +5,5 @@ export { RemoteView } from './RemoteView';
 export { KnowledgeView } from './KnowledgeView';
 export { SkillsView } from './SkillsView';
 export { MarketplaceView } from './MarketplaceView';  // G3 (2026-05-01)
+export { OfficeView } from './OfficeView';            // v0.7.1: Office helper (OCR + ASR)
 export { SettingsView } from './SettingsView';
