@@ -1,0 +1,22 @@
+id: 02-min-signal-gate-excludes-onceoffs
+description: |
+  Verifies min_signal_count=3 gate.
+  Three queries: A x3, B x2, C x1.
+  Only A qualifies; B and C must be filtered out completely.
+  Since A has no co-occurring qualifying bucket, expansions = empty.
+  Record SHOULD NOT be emitted (empty expansions → drop).
+signals:
+  - query: "kubernetes pod scheduling"
+    count: 3
+  - query: "docker container limit"
+    count: 2
+  - query: "linux namespaces"
+    count: 1
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 1
+  records: []
+reviewer:
+  approved: true

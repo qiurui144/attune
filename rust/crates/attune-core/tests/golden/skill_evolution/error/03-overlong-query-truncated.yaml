@@ -1,0 +1,21 @@
+id: error-03-overlong-query-truncated
+description: |
+  Pathological: a query > 256 chars. Store-level guard in upsert_skill_expansion
+  rejects it (returns false). The bucket is still considered (it crossed
+  min_signal_count) but no row is written.
+  Note: the bucket pattern itself is what's compared to 256 chars — same value
+  the agent would emit, lowercased + trimmed.
+signals:
+  - query: "REPEAT_300_CHARS"   # special marker for runner — actual 300-char value computed in fixture
+    count: 3
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 1
+  # The bucket exists (it crossed threshold) but the upsert rejects because
+  # pattern length > 256. Heuristic also produces nothing (isolated bucket).
+  contains_records: []
+  exact_rows_written: 0
+reviewer:
+  approved: true

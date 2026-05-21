@@ -1,0 +1,30 @@
+id: 05-frequency-weighted-ranking
+description: |
+  Verifies the heuristic weights tokens by bucket-occurrence count.
+  Target "elasticsearch" shares "elasticsearch" with all 3 others.
+  - "elasticsearch query dsl" (count 10) → contributes query, dsl with weight 10 each
+  - "elasticsearch rest api" (count 5) → contributes rest, api with weight 5 each
+  - "elasticsearch cluster"   (count 3) → contributes cluster with weight 3
+  Sort by weight desc: 10s come before 5s come before 3s.
+  Within ties, lex asc: (dsl, query) | (api, rest) | (cluster).
+  Final ranked: dsl(10), query(10), api(5), rest(5), cluster(3).
+signals:
+  - query: "elasticsearch"
+    count: 3
+  - query: "elasticsearch query dsl"
+    count: 10
+  - query: "elasticsearch rest api"
+    count: 5
+  - query: "elasticsearch cluster"
+    count: 3
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 4
+  contains_records:
+    - query_pattern: "elasticsearch"
+      expansions: [dsl, query, api, rest, cluster]
+      generated_by: heuristic
+reviewer:
+  approved: true
