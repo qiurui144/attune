@@ -1,0 +1,45 @@
+id: 02-rust-async-fabricated-cite
+description: |
+  Rust async question — LLM cites an item_id that is NOT in the retrieved
+  chunk list. Classic fabricated-citation hallucination. Single fabricated
+  cite, no other signals.
+
+query: async fn 怎么用？
+response: |
+  Rust 的 async fn 标记的函数返回 Future 类型，调用方需要 .await 才能驱动它执行
+  [item:rust-book-ch17-async-NONEXISTENT]。
+
+chunks:
+  - item_id: rust-book-ch17
+    chunk_text: |
+      Rust 异步函数用 async fn 标记，返回类型实际上是一个匿名的 Future。要
+      让 Future 推进必须有运行时驱动，通过 .await 暂停并让出控制权。
+
+expected:
+  citation_grounded:
+    - item_id: rust-book-ch17-async-NONEXISTENT
+      status: fabricated
+  contradictions_count: 0
+  hallucination_kinds: []
+  confidence_range: [0.8, 0.8]
+
+# DERIVATION:
+# 1 inline marker `[item:rust-book-ch17-async-NONEXISTENT]`. No matching
+# item_id in chunks list (real item is `rust-book-ch17`, suffix `-async-
+# NONEXISTENT` was added by the "LLM" → fabricated).
+# → CitationStatus::Fabricated.
+#
+# Response contains no Date / Money entities ("Future", ".await" are not
+# matched by extract_entities). No contradictions, no hallucinations.
+#
+# Formula:
+#   weak=0, fab=1, total=1
+#   citation_penalty      = (0 + 2*1) / 1 = 2.0, capped to min(1.0, 2.0) = 1.0
+#                           → 1.0 * 0.20 = 0.20
+#   contradiction_penalty = 0.0
+#   hallucination_penalty = 0.0
+#   confidence            = 1.0 - 0.20 = 0.80
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE

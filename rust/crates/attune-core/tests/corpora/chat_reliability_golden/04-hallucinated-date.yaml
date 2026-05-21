@@ -1,0 +1,40 @@
+id: 04-hallucinated-date
+description: |
+  Response cites a specific date that does NOT appear in any retrieved
+  chunk. Single Date hallucination. Confidence reflects only the
+  hallucination penalty.
+
+query: Rust 1.0 是什么时候发布的？
+response: |
+  Rust 在 2099-12-31 发布了 1.0 版本。
+
+chunks:
+  - item_id: rust-history
+    chunk_text: |
+      Rust 是一门系统编程语言，强调内存安全。设计目标是替代 C/C++ 在底层
+      基础设施中的应用场景。
+
+expected:
+  citation_grounded: []
+  contradictions_count: 0
+  hallucination_kinds:
+    - date
+  confidence_range: [0.925, 0.925]
+
+# DERIVATION:
+# Response contains date "2099-12-31" (extract_entities → EntityKind::Date).
+# Chunk text union does not contain "2099-12-31" anywhere.
+# → 1 hallucination flag, kind=Date, severity=High.
+#
+# No inline cite markers → no citation checks at all (citation_penalty = 0).
+# No matching date in chunks at the same context → no contradiction.
+#
+# Formula:
+#   citation_penalty      = 0.0 (no cites)
+#   contradiction_penalty = 0.0
+#   hallucination_penalty = min(1.0, 1/4) * 0.30 = 0.25 * 0.30 = 0.075
+#   confidence            = 1.0 - 0.075 = 0.925
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE

@@ -1,0 +1,57 @@
+id: 10-multi-hallucination-saturated
+description: |
+  Heavily hallucinated answer — multiple specific tokens (date + money +
+  org) all absent from chunks. Tests that the hallucination penalty
+  saturates correctly and confidence stays in [0, 1].
+
+query: 这份评估报告说了什么？
+response: |
+  本次评估时间 2099-05-15，金额 ¥99999，由 某不存在科技有限公司 出具，
+  报告编号 REP-2099-XYZ。
+
+chunks:
+  - item_id: real-report
+    chunk_text: |
+      评估时间 2024-03-15。本次评估涉及多家供应商，最终结论为整体合规。
+      报告编号见附录。
+
+expected:
+  citation_grounded: []
+  contradictions_count: 1
+  hallucination_kinds:
+    - date
+    - number
+    - organization
+  confidence_range: [0.525, 0.525]
+
+# DERIVATION:
+# Response entities:
+#   - Date "2099-05-15", context "本次评估时间...金额"
+#   - Money "¥99999",    context "金额...由"
+#   - Organization "某不存在科技有限公司" (matches "X 有限公司")
+#
+# Chunk entities:
+#   - Date "2024-03-15", context "评估时间...本次评估涉及"
+#
+# Date contradiction: both contexts share "评估" / "时间" → context_overlap true,
+# values differ → 1 Date Contradiction.
+# (Money entities don't overlap in context with the chunk's date, no money in
+# chunk → no money contradiction.)
+#
+# Hallucination scan:
+#   "2099-05-15" → not in chunk union → flag (Date, High)
+#   "¥99999"     → not in chunk union → flag (Number, High)
+#   "某不存在科技有限公司" → not in chunk union → flag (Organization, High)
+# → 3 hallucination flags total.
+#
+# No inline cites → citation_penalty = 0.
+#
+# Formula:
+#   citation_penalty      = 0.0
+#   contradiction_penalty = min(1.0, 1/2) * 0.50 = 0.25
+#   hallucination_penalty = min(1.0, 3/4) * 0.30 = 0.75 * 0.30 = 0.225
+#   confidence            = 1.0 - 0.25 - 0.225 = 0.525
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE

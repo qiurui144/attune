@@ -1,0 +1,56 @@
+id: 09-multiple-citations-all-grounded
+description: |
+  Multi-source synthesis answer — three different `[item:<id>]` markers,
+  all matching real chunks with sufficient overlap. Verifies the agent
+  handles multiple cites cleanly and emits no false signals when all
+  cites are good.
+
+query: Rust 内存安全靠什么保证？
+response: |
+  Rust 内存安全主要依赖三个机制：所有权规则约束生命周期 [item:rust-book-ch4]，
+  借用检查器在编译期阻止数据竞争 [item:rust-book-ch5]，以及零成本抽象保证
+  运行时无额外开销 [item:rust-book-ch10]。
+
+chunks:
+  - item_id: rust-book-ch4
+    chunk_text: |
+      所有权规则在 Rust 中由编译器静态检查，约束变量的生命周期范围。
+      每个值都有唯一所有者，作用域结束时被丢弃。
+  - item_id: rust-book-ch5
+    chunk_text: |
+      借用检查器是 Rust 编译器的核心组件，它在编译期分析引用关系，阻止
+      数据竞争与悬空引用问题，从而保证并发安全。
+  - item_id: rust-book-ch10
+    chunk_text: |
+      Rust 的抽象遵循零成本原则：编译期单态化和内联展开使得高层抽象
+      在运行时无额外开销，性能与手写 C 代码相当。
+
+expected:
+  citation_grounded:
+    - item_id: rust-book-ch4
+      status: grounded
+    - item_id: rust-book-ch5
+      status: grounded
+    - item_id: rust-book-ch10
+      status: grounded
+  contradictions_count: 0
+  hallucination_kinds: []
+  confidence_range: [1.0, 1.0]
+
+# DERIVATION:
+# 3 distinct inline markers, all match chunks; tokenize-overlap with each
+# chunk_text exceeds the 3-token floor (shared 2-grams "所有/有权" / "借用/
+# 用检查器" / "编译/期" / "rust" ASCII / "运行" / "抽象" / etc.).
+# → 3 × CitationStatus::Grounded.
+#
+# No date / money / org / person entities → 0 contradictions, 0 hallucinations.
+#
+# Formula:
+#   citation_penalty      = (0 weak + 0 fab) / 3 * 0.20 = 0.0
+#   contradiction_penalty = 0.0
+#   hallucination_penalty = 0.0
+#   confidence            = 1.0
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE

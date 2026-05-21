@@ -1,0 +1,48 @@
+id: 08-mixed-grounded-and-hallucinated
+description: |
+  Realistic mixed-quality answer: one cite is grounded, the response also
+  introduces an extra date that is not in any chunk. Tests that the agent
+  surfaces both signals independently (grounded cite does NOT mask the
+  hallucinated date).
+
+query: openai api 的 context window 默认有多大？
+response: |
+  GPT-3.5-turbo 的 context window 默认为 16K tokens，可以处理较长的上下文
+  [item:openai-cookbook-window]。新版本据传将在 2099-01-01 提升到 1M tokens。
+
+chunks:
+  - item_id: openai-cookbook-window
+    chunk_text: |
+      GPT-3.5-turbo 模型支持 16K tokens 的 context window，足以处理大多数
+      文档问答场景。tokens 包括请求和响应两部分。
+
+expected:
+  citation_grounded:
+    - item_id: openai-cookbook-window
+      status: grounded
+  contradictions_count: 0
+  hallucination_kinds:
+    - date
+  confidence_range: [0.925, 0.925]
+
+# DERIVATION:
+# 1 inline marker `[item:openai-cookbook-window]`, item_id matches a chunk.
+# Tokenize response + chunk_text: shared ASCII tokens "gpt" / "3.5" / "turbo"
+# / "16k" / "context" / "tokens" / "window" / "model" — well over the floor
+# of 3.
+# → CitationStatus::Grounded.
+#
+# Response contains Date "2099-01-01". Chunk has no "2099" anywhere.
+# → 1 Hallucination flag, kind=Date.
+#
+# No money entities, no other dates → no contradictions.
+#
+# Formula:
+#   citation_penalty      = (0 weak + 0 fab) / 1 * 0.20 = 0.0
+#   contradiction_penalty = 0.0
+#   hallucination_penalty = min(1.0, 1/4) * 0.30 = 0.075
+#   confidence            = 1.0 - 0.075 = 0.925
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE

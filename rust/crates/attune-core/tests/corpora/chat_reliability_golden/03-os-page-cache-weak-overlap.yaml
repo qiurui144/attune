@@ -1,0 +1,46 @@
+id: 03-os-page-cache-weak-overlap
+description: |
+  Operating systems Q&A — LLM cites the right item_id but the response
+  text shares fewer than 3 tokens with the chunk → weak-overlap citation
+  (name-drop cite without content support).
+
+query: page cache 是什么？
+response: |
+  Page cache 见参考资料 [item:cs-notes-os-mem].
+
+chunks:
+  - item_id: cs-notes-os-mem
+    chunk_text: |
+      Linux 内核会把最近访问的磁盘块缓存在物理内存中，称为 page cache，
+      命中后避免重新发起 IO，是文件系统性能的关键。readahead 机制可以预取
+      连续块进一步降低延迟。
+
+expected:
+  citation_grounded:
+    - item_id: cs-notes-os-mem
+      status: weak_overlap
+  contradictions_count: 0
+  hallucination_kinds: []
+  confidence_range: [0.8, 0.8]
+
+# DERIVATION:
+# 1 inline marker `[item:cs-notes-os-mem]`. item_id exists in chunks.
+# Token overlap between response ("page cache 见参考资料") and chunk_text
+# yields fewer than 3 shared tokens (chunk has lots of "Linux/内核/磁盘/块/
+# 缓存..." vocabulary, response only has "page/cache/参考资料"; ASCII
+# "page" and "cache" are >=3 chars so both end up in the shared set —
+# total shared ≈ 2, below floor of 3).
+# → CitationStatus::WeakOverlap.
+#
+# No entities in response → no contradictions / hallucinations.
+#
+# Formula:
+#   weak=1, fab=0, total=1
+#   citation_penalty      = (1 + 0) / 1 = 1.0 → 1.0 * 0.20 = 0.20
+#   contradiction_penalty = 0.0
+#   hallucination_penalty = 0.0
+#   confidence            = 1.0 - 0.20 = 0.80
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE

@@ -1,0 +1,50 @@
+id: error-malformed-cite-syntax
+description: |
+  Response contains malformed cite markers — broken brackets, missing
+  prefix, illegal chars. Agent must skip all malformed markers without
+  panic, treating them as plain text. Citation list must be empty.
+
+query: 这份资料怎么解读？
+response: |
+  这份资料关键点见 [item: but missing close bracket,
+  以及 [doc:has spaces inside which break regex],
+  还有 [unknown_prefix:abc-123]，最后还有正常的本文。
+
+chunks:
+  - item_id: abc-123
+    chunk_text: |
+      正文部分 — 任何被 fabricated 检查 hit 的内容都需要 item_id 真的被
+      匹配到，但因为上面的所有 marker 都不合法，本 chunk 不应该出现在
+      任何 CitationCheck 里。
+
+expected:
+  citation_grounded: []
+  contradictions_count: 0
+  hallucination_kinds: []
+  confidence_range: [1.0, 1.0]
+
+# DERIVATION:
+# Regex `\[(?:item|source|doc):([A-Za-z0-9_\-]{1,128})\]` requires:
+#   - one of the three prefixes (item / source / doc), exact lowercase
+#   - colon (no space allowed before id by the bracket policy)
+#   - id chars limited to [A-Za-z0-9_-]
+#   - closing `]`
+#
+# Marker 1: "[item: but..." — id starts with space, not in charset, no `]`
+#           before later chars → no regex match
+# Marker 2: "[doc:has spaces inside which..." — contains space → no match
+# Marker 3: "[unknown_prefix:abc-123]" — prefix not in allow-list → no match
+#
+# → 0 citation markers extracted, citation_grounded = [].
+# Response has no Date / Money / Organization / Person entities.
+# → 0 contradictions, 0 hallucinations.
+#
+# Formula:
+#   citation_penalty      = 0.0 (no cites)
+#   contradiction_penalty = 0.0
+#   hallucination_penalty = 0.0
+#   confidence            = 1.0
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE
