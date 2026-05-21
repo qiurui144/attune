@@ -1,5 +1,88 @@
 # attune 版本记录
 
+## v0.7.1（未发布 / Unreleased）— 办公助理：结构化 OCR + 异步会议转写
+
+发布定位：**Office Helper 入口** — 把 attune-core 已有的 PP-OCRv5 + whisper.cpp
+能力首次暴露成产品化"办公助理"工具入口。结果**不自动入 vault**（用户显式 Save 才入），
+保持工具属性。零 LLM 字段抽取（正则锚点 + bbox 邻近 + GB/Luhn/GB32100 校验位）。
+
+设计稿：`docs/superpowers/specs/2026-05-20-office-helper-design.md` (commit 81a7dae)。
+实施计划：`docs/superpowers/plans/2026-05-20-office-helper.md` (commit fccbf4b)。
+
+### 结构化 OCR — 5 个 scene + 3 个卡证 subtype
+
+| Scene | Schema | 字段 / 输出 | 准确度红线 | 速度红线 (p50 CPU) |
+|-------|--------|------------|-----------|------------------|
+| `document_v1` | title + 阅读顺序 blocks | title + paragraph/list/figure_caption/footer 分类 + 双栏重排 | 字符级 ≥ 92% | A4 ≤ 3s |
+| `receipt_v1` | 增值税普票/专票/电子票 | invoice_no, issue_date, seller, buyer, amount_total, tax_amount, amount_chinese (含交叉校验) | 字段级 ≥ 92% | ≤ 2s |
+| `table_v1` | 通用表格 | headers + 2D cells + row_count + column_count (y 聚类 + 1D 列对齐) | cell ≥ 92% | A4 ≤ 4s |
+| `card_v1` | 名片 (Z 高标杆) | name (字号 + 上半部启发式) + company (后缀字典) + job_title + phone (正则) + email + address | 字段级 ≥ 92% | ≤ 1.5s |
+| `id_card_cn_v1` | 中国居民身份证 | name/gender/nationality/birth_date/address/id_number + GB 11643 校验位 | 字段级 ≥ 95% | ≤ 2s |
+| `bank_card_v1` | 银行卡 | card_number/bank_name/card_type/valid_thru + Luhn 校验位 | 字段级 ≥ 95% | ≤ 2s |
+| `business_license_v1` | 营业执照 | registration_no/company_name/legal_rep/registered_capital/established_date/scope + GB 32100-2015 校验位 | 字段级 ≥ 95% | ≤ 2s |
+
+**Schema 演进策略（路径 Y tagged union）**: `structured.schema = "<name>_v1"` 作 serde tag, 老 client 见未知 schema → fallback 到 A 档 `lines + bbox` (永远兜底)。
+
+### 异步会议转写 (ASR) + WebSocket 进度推送
+
+- 引擎: `whisper.cpp` small Q8 默认 (medium / large-v3-turbo 可选, hardware-aware)
+- 说话人分离: pyannote.audio 子进程 (软降级到无分离 + warning)
+- 异步 job + WS 进度: `POST /transcribe` → `{job_id, ws_url}` → WS push 每 500ms `{state, stage, progress, queue_position, elapsed_ms}`
+- 排队语义 (per spec §2.4 个人助手): 不限并发不 reject, FIFO + 信号量门控, 文件大小不限 (>500MB 软警告)
+- 红线: 中文 WER ≤ 15% / 英文 WER ≤ 10% / 中英混说 WER ≤ 18% / DER ≤ 25% / RTF p50 ≤ 0.5
+
+### 新增 REST + WS 端点 (per spec §3)
+
+```
+POST   /api/v1/office/ocr            sync, multipart, schema-tagged response
+POST   /api/v1/office/transcribe     async, returns {job_id, ws_url}
+GET    /api/v1/office/jobs/{job_id}  poll (state/stage/queue_position/result/error)
+DELETE /api/v1/office/jobs/{job_id}  cancel (409 if Done/Failed/Cancelled)
+WS     /api/v1/office/jobs/ws        progress push every 500ms
+```
+
+错误码契约 (kebab, per CLAUDE.md): `invalid-input` / `empty-file` / `unsupported-format` /
+`id-card-subtype-required` / `profile-not-found` / `not-found` / `job-already-completed` /
+`job-already-cancelled` / `ocr-engine-failed` / `asr-engine-failed` / `internal-error`.
+
+### CLI 扩展
+
+```
+attune ocr <image> [--profile receipt] [--id-card-subtype id_card_cn] [--json]
+attune transcribe <audio> [--diarization] [--json]
+```
+
+`attune ocr` 向后兼容 (不带 `--profile` 仍输出 plain text)。
+
+### 测试矩阵 (六类金字塔, per spec §6 + CLAUDE.md 验证铁律)
+
+| 类别 | 文件 | 测试数 |
+|-----|-----|------|
+| L1 happy path | `office_happy_path.rs` | 7 |
+| L1 error contract | `office_error_contract.rs` | 10 |
+| L1 schema compat | `office_schema_compat.rs` | 14 |
+| L1 OCR golden gate | `office_ocr_golden_gate.rs` | 8 (skip-policy if no images) |
+| L1 ASR golden gate | `office_asr_golden_gate.rs` | 10 (skip-policy if no audio) |
+| L2 concurrent | `office_concurrent_test.rs` | 4 |
+| L2 cancel | `office_cancel_test.rs` | 6 |
+| L2 failure recovery | `office_failure_recovery_test.rs` | 5 |
+| L2 proptest invariants | `office_prop_tests.rs` | 5 (caught 14 u32 overflow bugs in scene_document/card) |
+| Unit (structured) | `attune-core ocr::structured` | 81 |
+| Unit (job queue) | `attune-core office_job_queue` | 11 |
+
+Golden 数据集 (`tests/golden/office/`): 20 synthetic samples (GB/Luhn/GB32100 合规) + 内部脱敏样本预留 (D3.5+)。
+
+### Bug 修复
+
+- u32 BBox 溢出: scene_document.rs 13 处 + scene_card.rs 1 处 `bbox.x + bbox.w` 改 `saturating_add` (proptest 抓出)
+- ingest_rss_test.rs + routes/rss.rs 留在 c8f8948 commit 的 13 处合并冲突标记 — 修复后 CI 重新绿
+
+### Tests 总数
+
+attune-core: 1078 (含 office 92 新 lib tests). attune-server: 70+ office 集成测试。
+
+---
+
 ## v0.7.0（2026-05-19）— 多层记忆系统 + 云会员链路 + Email 采集 + WebDAV 重构 + ingest 抽象
 
 发布定位：**记忆护城河** — 四层记忆架构（token 降幅 ~78%）+ 云会员登录自配 LLM + Email IMAP 采集源 + SourceConnector 统一采集抽象 + 12 项安全/稳定性修复 + 1260+ tests。
