@@ -246,6 +246,47 @@ git push origin main
 - **平台优先级**（2026-04-25）：**Windows P0 → Linux P1 → macOS 暂不做**。aarch64 留作 K3 一体机。Win MSI + Linux deb/AppImage 双轨。
 - **ASR 引擎**（2026-04-25）：whisper.cpp binary + Rust subprocess（与 K3 推理服务一致路径），中文 WER 必须 < 20%（whisper-small Q8 实测满足）才能选默认模型；whisper-tiny WER 35-40% 不可用。
 
+## 磁盘资源管理铁律（强制 — 2026-05-21 用户重申，盘满过踩坑）
+
+**触发场景**:任何 cargo build/test 完成、worktree merge 完成、agent dispatch 完成的时刻,
+**立即检查 + 清理**。盘已经被打到 / 100% + /data 99% 一次,根因是 target/ 累积 184G + 93G + 8 个未清 worktree 65G。
+
+### 红黄绿线(df 检查)
+
+| df `/data` available | 状态 | 行动 |
+|---|---|---|
+| > 200G | 🟢 正常 | 例行操作 |
+| 50-200G | 🟡 黄线 | 完成的 worktree 立即清,陈旧 target 评估 |
+| < 50G | 🔴 红线 | 全停手,清 target + 已 merge worktree + 大文件 audit;无空间时不允许新 dispatch agent |
+
+任何大 sprint(多 agent 并发)之前 + 之后 都跑 `df -h /data` 看。
+
+### target/ 清理
+
+- **cargo build/test 完成后,若未来 1 小时内无再 build 需求 → 立即 `cargo clean`**
+- 主 worktree target/ 可达 100+GB(184G attune / 93G attune-pro 实测)
+- 各 isolated worktree 的 target/ 在 `git worktree remove` 时自动清
+- 不要"留着备用 cache" — cargo incremental 重 build 也快,主 target 200G 不值得占盘
+
+### worktree 清理
+
+- **agent done + branch merged → 立即 `git worktree remove -f -f <path>` + `git worktree prune`**
+- 不积累(每个 3-20GB,8 个 = 100+GB)
+- 周期 `git worktree list` 检查遗留
+- locked worktree 用 `-f -f`(双 force)解锁删除
+
+### staging merge worktrees
+
+- 我自建的 `/tmp/attune-pro-merge*/` 等 staging worktrees,merge commit 完立即 `git worktree remove`
+- 不留累计
+
+### 反模式
+
+- ❌ "下次还要 build,留着 target"(实测 cargo clean 后重 build 才几分钟,vs 占 200GB 盘)
+- ❌ "worktree 留着以后参考"(用 `git log` + `git show` 即可,worktree 不是 history)
+- ❌ "merge 完不清 worktree"(上一个 sprint 累计 100GB 就这样来的)
+- ❌ dispatch 新 agent 前不查 df(空间不够会让 agent 跑到一半 disk full crash)
+
 ## Agent 验证铁律（强制 — 2026-05-20 用户重申）
 
 **核心定位**：**Agents 是 attune 生态最重要的附加功能，也是核心功能来源之一**。
