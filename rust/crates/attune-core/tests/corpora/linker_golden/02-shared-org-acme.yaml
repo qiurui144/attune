@@ -1,0 +1,22 @@
+id: 02-shared-org-acme
+kind: shared_entity
+doc_a:
+  title: 技术调研报告 第一稿
+  content: |
+    报告时间：2024-01-10。
+    评估对象：某科技有限公司。
+    核心负责人：王五。
+    主要结论：架构演进合理。
+  url: ''
+doc_b:
+  title: 产品白皮书 v1
+  content: |
+    发布时间：2024-02-28。
+    主体单位：某科技有限公司。
+    技术负责人：王五。
+    核心产品：分布式存储与计算平台。
+  url: ''
+expected:
+  link_kinds:
+    - shared_entity
+  evidence_substring: 'organization:某科技有限公司'

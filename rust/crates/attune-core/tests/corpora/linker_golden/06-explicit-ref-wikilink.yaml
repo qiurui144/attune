@@ -1,0 +1,19 @@
+id: 06-explicit-ref-wikilink
+kind: explicit_ref
+doc_a:
+  title: 读书笔记 — 进程调度
+  content: |
+    今天复习了进程与线程的区别。
+    详见 [[操作系统笔记]] 第三章。
+    重点：Linux CFS 调度器的 vruntime 平衡机制。
+  url: ''
+doc_b:
+  title: 操作系统笔记
+  content: |
+    本笔记覆盖四大主题：进程管理 / 内存管理 / 文件系统 / IO 调度。
+    第三章详述 Linux CFS 调度器红黑树实现与 vruntime 计算。
+  url: ''
+expected:
+  link_kinds:
+    - explicit_ref
+  evidence_substring: 'wikiref:操作系统笔记'

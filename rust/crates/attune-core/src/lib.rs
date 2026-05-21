@@ -101,6 +101,7 @@ pub mod tools;
 pub mod demo;
 pub mod query_rewrite;
 pub mod entity_graph;
+pub mod linker;
 pub mod skill_eval;
 pub mod report;
 pub mod reader;

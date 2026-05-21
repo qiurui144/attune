@@ -1,0 +1,22 @@
+id: 04-shared-money-and-date
+kind: shared_entity
+doc_a:
+  title: 财务结算单 Q1
+  content: |
+    结算日期：2024-03-31。
+    销售总额：¥2,500,000。
+    主体：某科技有限公司。
+    审批人：王五。
+  url: ''
+doc_b:
+  title: 财务结算单复核
+  content: |
+    复核日期：2024-03-31。
+    销售总额：¥2,500,000。
+    复核主体：某科技有限公司。
+    复核人：王五。
+  url: ''
+expected:
+  link_kinds:
+    - shared_entity
+  evidence_substring: 'organization:某科技有限公司'
