@@ -281,40 +281,155 @@ fn memory_promotion_golden_gate_pass_rate_must_be_one() {
     );
 }
 
+/// Per CLAUDE.md「Agent 验证铁律」§2 (6 类测试覆盖下限) — structural gate.
+///
+/// Equivalent of attune-pro's `agent_golden_gate.rs::six_category_floor_check`
+/// (Phase 2) and attune-server's `office_six_category_floor.rs` (D5.5), adapted
+/// to a single deterministic agent (no multi-scene fan-out needed).
+///
+/// | Category       | Source                                                | Floor |
+/// |----------------|-------------------------------------------------------|-------|
+/// | Golden case    | tests/golden/memory_promotion/*.yaml (approved)       | ≥ 10 real + 1 sentinel |
+/// | Error case     | tests/golden/memory_promotion/error/*.yaml (approved) | ≥ 3   |
+/// | Proptest       | tests/memory_consolidation_agent_proptests.rs         | ≥ 3   |
+/// | Boundary       | src/memory/consolidation_agent.rs `#[cfg(test)]`      | ≥ 5   |
+/// | Integration    | tests/memory_consolidation_agent_integration.rs       | ≥ 1   |
+/// | Regression     | 11-sentinel-*.yaml + case 09 tiebreak-fix             | ≥ 1   |
+///
+/// **ENFORCE mode**: `ATTUNE_ENFORCE_MEMORY_FLOOR=1` → panic on any miss.
+/// Default off, but emits warnings + still asserts on the hard golden counts so
+/// the gate cannot silently regress.
 #[test]
-fn golden_set_meets_six_class_floor() {
-    // Structural assertion — never depend on agent.run() for this.
-    let root = golden_root();
-    let main_cases: Vec<_> = std::fs::read_dir(&root)
+fn memory_consolidation_six_class_floor() {
+    let enforce = std::env::var("ATTUNE_ENFORCE_MEMORY_FLOOR").is_ok();
+    let mut violations: Vec<String> = Vec::new();
+
+    // 1 + 6: Golden + sentinel (sentinel is one of the 11 main YAMLs by convention,
+    // file 11-sentinel-*.yaml).
+    let main_cases = count_yaml(&golden_root());
+    let has_sentinel = std::fs::read_dir(golden_root())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x == "yaml")
-                .unwrap_or(false)
-        })
-        .collect();
-    let error_cases: Vec<_> = std::fs::read_dir(root.join("error"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x == "yaml")
-                .unwrap_or(false)
-        })
-        .collect();
-    assert!(
-        main_cases.len() >= 11,
-        "Golden floor: ≥ 10 real + 1 sentinel; got {}",
-        main_cases.len()
+        .any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .contains("sentinel")
+        });
+    if main_cases < 11 {
+        violations.push(format!(
+            "Golden floor: ≥ 10 real + 1 sentinel = 11; got {}",
+            main_cases
+        ));
+    }
+    if !has_sentinel {
+        violations.push("Sentinel YAML (file named *sentinel*) missing".into());
+    }
+
+    // 2: Error
+    let error_cases = count_yaml(&golden_root().join("error"));
+    if error_cases < 3 {
+        violations.push(format!("Error floor: ≥ 3; got {}", error_cases));
+    }
+
+    // 3: Proptest — count `proptest! { ... fn prop_*(...) }` arms.
+    let prop_count = count_proptest_arms(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/memory_consolidation_agent_proptests.rs"),
     );
-    assert!(
-        error_cases.len() >= 3,
-        "Error case floor: ≥ 3; got {}",
-        error_cases.len()
+    if prop_count < 3 {
+        violations.push(format!("Proptest floor: ≥ 3; got {}", prop_count));
+    }
+
+    // 4: Boundary — `#[test] fn boundary_*` count in src/memory/consolidation_agent.rs.
+    let boundary_count = count_test_arms(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/memory/consolidation_agent.rs"),
+        "boundary_",
     );
+    if boundary_count < 5 {
+        violations.push(format!("Boundary floor: ≥ 5; got {}", boundary_count));
+    }
+
+    // 5: Integration
+    let integ_count = count_test_arms(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/memory_consolidation_agent_integration.rs"),
+        "",
+    );
+    if integ_count < 1 {
+        violations.push(format!("Integration floor: ≥ 1; got {}", integ_count));
+    }
+
+    eprintln!(
+        "memory_consolidation six-class floor:\n  main golden = {}\n  sentinel    = {}\n  error       = {}\n  proptest    = {}\n  boundary    = {}\n  integration = {}",
+        main_cases, has_sentinel, error_cases, prop_count, boundary_count, integ_count
+    );
+
+    if !violations.is_empty() {
+        let msg = format!(
+            "Six-class floor violations ({} total):\n  - {}",
+            violations.len(),
+            violations.join("\n  - ")
+        );
+        if enforce {
+            panic!("{msg}\n(set ATTUNE_ENFORCE_MEMORY_FLOOR=1 was on → CI block)");
+        } else {
+            // Even without ENFORCE we must hold the hard golden+error counts —
+            // those are inviolable contract per "Agent 验证铁律". Tiebreak fix
+            // path counts as ≥1 regression in main golden via case 09.
+            assert!(
+                main_cases >= 11 && error_cases >= 3,
+                "Hard contract: ≥11 main + ≥3 error always required; {msg}"
+            );
+            eprintln!("WARN: {msg}");
+        }
+    } else {
+        eprintln!("memory_consolidation six-class floor: 0 violations ✓");
+    }
+}
+
+// ── Static counters (intentionally don't call agent.run()) ──────────────────
+
+fn count_yaml(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x == "yaml")
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn count_proptest_arms(path: &Path) -> usize {
+    let src = std::fs::read_to_string(path).unwrap_or_default();
+    src.lines().filter(|l| l.trim_start().starts_with("fn prop_")).count()
+}
+
+fn count_test_arms(path: &Path, prefix: &str) -> usize {
+    let src = std::fs::read_to_string(path).unwrap_or_default();
+    let mut count = 0;
+    let mut prev_was_test_attr = false;
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if trimmed == "#[test]" {
+            prev_was_test_attr = true;
+            continue;
+        }
+        if prev_was_test_attr {
+            if trimmed.starts_with("fn ") {
+                let name_start = trimmed.trim_start_matches("fn ").trim_start();
+                if prefix.is_empty() || name_start.starts_with(prefix) {
+                    count += 1;
+                }
+            }
+            prev_was_test_attr = false;
+        }
+    }
+    count
 }
