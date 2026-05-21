@@ -293,6 +293,41 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
     }
     // OCR / Deploy 子命令不需要 vault — 早 return 避免 zero-state 报错
     if let Commands::Ocr { image, profile, id_card_subtype, json } = &cli.command {
+        // D5.7: pre-flight validation (matches REST contract per spec §3.1)
+        const ALLOWED_PROFILES: &[&str] = &[
+            "document", "receipt", "table", "card", "id_card",
+            "screenshot", "ancient", "form", "contract",
+        ];
+        if !image.exists() {
+            eprintln!("[attune ocr] error: file not found: {}", image.display());
+            std::process::exit(2); // exit 2 = invalid input (per CLI convention)
+        }
+        if let Some(p) = profile.as_deref() {
+            if !ALLOWED_PROFILES.contains(&p) {
+                eprintln!(
+                    "[attune ocr] error: unknown profile '{p}' (allowed: {})",
+                    ALLOWED_PROFILES.join(", ")
+                );
+                std::process::exit(2);
+            }
+            if p == "id_card" && id_card_subtype.as_deref().unwrap_or("").is_empty() {
+                eprintln!(
+                    "[attune ocr] error: profile=id_card requires --id-card-subtype \
+                     (id_card_cn / bank_card / business_license)"
+                );
+                std::process::exit(2);
+            }
+        }
+        // Soft warning: file > 50 MB (per spec §2.4 individual-helper semantic)
+        if let Ok(meta) = std::fs::metadata(image) {
+            if meta.len() > 50 * 1024 * 1024 {
+                eprintln!(
+                    "[attune ocr] warning: file is {:.1} MB; OCR may take >30s",
+                    meta.len() as f64 / 1024.0 / 1024.0
+                );
+            }
+        }
+
         let provider = attune_core::ocr::detect_default_provider().ok_or_else(|| {
             attune_core::error::VaultError::ModelLoad(
                 "PP-OCR models missing — run `attune deploy` or apt install --reinstall attune".into(),
@@ -334,6 +369,21 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         return Ok(());
     }
     if let Commands::Transcribe { audio, diarization, json } = &cli.command {
+        // D5.7: pre-flight validation
+        if !audio.exists() {
+            eprintln!("[attune transcribe] error: audio file not found: {}", audio.display());
+            std::process::exit(2);
+        }
+        // Soft warning: file > 500 MB
+        if let Ok(meta) = std::fs::metadata(audio) {
+            if meta.len() > 500 * 1024 * 1024 {
+                eprintln!(
+                    "[attune transcribe] warning: file is {:.1} MB; transcription may take a long time",
+                    meta.len() as f64 / 1024.0 / 1024.0
+                );
+            }
+        }
+
         let backend = attune_core::asr::detect_asr_backend().ok_or_else(|| {
             attune_core::error::VaultError::ModelLoad(
                 "ASR backend missing — whisper-cli not installed or model not downloaded".into(),
