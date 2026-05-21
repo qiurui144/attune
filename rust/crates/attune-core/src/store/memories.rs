@@ -204,6 +204,23 @@ impl Store {
         Ok((id, affected))
     }
 
+    /// 查 (kind='semantic', topic_key) 是否已存在 live 行。`memory_consolidation_agent`
+    /// 用此做"已 promoted"的幂等判定 — 比 `memory_exists` (按 hashes 查) 更精确，
+    /// 因为 deterministic promotion 用一个稳定的 `promoted:<sha>` topic_key 标记每条
+    /// 被提升的 episodic, 与 hdbscan 聚类生成的 topic_key 命名空间完全隔离。
+    pub fn semantic_memory_exists_by_topic_key(&self, topic_key: &str) -> Result<bool> {
+        let exists: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM memories WHERE kind = 'semantic' AND topic_key = ?1 \
+                   AND superseded_by IS NULL LIMIT 1",
+                params![topic_key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(exists.is_some())
+    }
+
     /// 把旧 semantic 行标记为被 `new_id` 取代（L3 refresh）。live 检索随即排除旧行。
     pub fn mark_memory_superseded(&self, old_id: &str, new_id: &str) -> Result<usize> {
         let n = self.conn.execute(
