@@ -437,7 +437,12 @@ impl OpenAiLlmProvider {
 
         llm_block_on(async move {
             let mut model_to_use = configured_model.trim().to_string();
-            if model_to_use.eq_ignore_ascii_case("auto") {
+            // 触发 /v1/models 探测的两种情形:
+            //   (1) 用户显式写 "auto" — 历史默认值
+            //   (2) 空字符串 — paid 用户从 cloud gateway 注入 settings 时 model 字段缺省
+            //       (per v10-ga-cross-repo-e2e.md Finding-A: paid 用户 llm.model 被 SettingsLock
+            //        锁死,UI 无法补,空 model → newapi 拒 400)
+            if model_to_use.is_empty() || model_to_use.eq_ignore_ascii_case("auto") {
                 if let Some(m) = resolve_openai_compat_model(&client, &endpoint, &api_key).await {
                     model_to_use = m;
                 }
