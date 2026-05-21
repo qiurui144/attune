@@ -169,7 +169,7 @@ Finished 1 bundle at:
 | Windows x86_64 | NSIS .exe | ✅ windows-latest runner | ✅ 已发布 | 无（本地无 Windows）| ✅ READY（v0.7.0 已验证）|
 | Windows x86_64 | MSI | ✅ windows-latest runner | ✅ 已发布 | 无（本地无 Windows）| ✅ READY（v0.7.0 已验证）|
 | macOS | .dmg | ❌ workflow 无 macOS runner | ❌ 未发布 | — | ❌ NOT IN SCOPE（CLAUDE.md 暂不做）|
-| Linux aarch64 (K3) | .deb | ❌ workflow 无 aarch64 runner | ❌ 未发布 | — | ⚠️ K3 一体机按需交叉编译 |
+| Linux riscv64 (K3, RVA23) | .deb / 自定义镜像 | ❌ workflow 无 riscv64 runner | ❌ 未发布 | — | ⚠️ K3 一体机走 rv-gcc 15.2 交叉编译,镜像化部署 |
 
 ---
 
@@ -178,7 +178,7 @@ Finished 1 bundle at:
 1. **tauri.conf.json 版本号需手动更新**：Tauri 2.x 不从 Cargo.toml 自动同步 `version` 字段，每次 GA 发布前需将 `apps/attune-desktop/tauri.conf.json` 的 `version` 字段同步更新。
 2. **lintian E 类问题为 Tauri 固有**：embedded-library / malformed-contact / missing-dependency-on-libc / no-copyright / unstripped-binary 是 Tauri 2.x deb bundler 的已知问题，不影响用户安装，无 Tauri 侧修复方案。
 3. **macOS 不在当前 workflow 中**：v1.0 不产出 macOS .dmg，与产品路线图一致（CLAUDE.md: P0 Windows / P1 Linux / macOS 暂不做）。
-4. **Linux aarch64 未自动化**：K3 一体机形态需要单独的交叉编译构建，workflow 中未包含，K3 部署走手动构建路径。
+4. **Linux riscv64 (K3) 未自动化**：K3 一体机 SoC 是 **SpacemiT K3 X100 RVA23 RISC-V**(VLEN=256,不是 aarch64),需走 `/data/RV/rv-gcc/install-15.2/` 交叉编译工具链 + rv-baseos sysroot,workflow 中未包含,K3 一体机走镜像化部署路径(非 .deb)。
 
 ---
 
