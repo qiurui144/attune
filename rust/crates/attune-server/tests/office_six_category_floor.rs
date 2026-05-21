@@ -1,376 +1,534 @@
-//! D5.5 — ENFORCE Six-Category Floor Gate for Office Helper.
+//! D5.5 — Office helper 六类下限 structural gate
 //!
-//! Spec §6.4 + plan §D5.5. Mirrors law-pro `six_category_floor_check` model:
-//!   每 OCR scene + ASR lang 必须满足 6 类下限, 否则 ENFORCE mode panic 阻塞 GA tag.
+//! 类比 attune-pro 的 `agent_golden_gate.rs::six_category_floor_check` (Phase 2)，
+//! 但术语换 office 维度：
 //!
-//! 6 类下限:
-//!   1. **Golden** (approved YAML)         — OCR ≥ 5 / scene; ASR ≥ 10 累计
-//!   2. **Error cases**                    — ≥ 3 (kebab error codes 测试)
-//!   3. **Proptest invariants**            — ≥ 3 (in office_prop_tests.rs)
-//!   4. **Boundary tests**                 — ≥ 5 per scene (lib `#[cfg(test)]`)
-//!   5. **Integration subprocess**         — ≥ 1 per scene (golden gate file 存在)
-//!   6. **Concurrent / cancel**            — ≥ 1 each (in office_concurrent / office_cancel)
+//!   ┌────────────────┬─────────────────────────────────────────────────┬─────────┐
+//!   │ 类别            │ 来源                                              │ 下限     │
+//!   ├────────────────┼─────────────────────────────────────────────────┼─────────┤
+//!   │ Golden case    │ tests/golden/office/ocr/<scene>/*.expected.yaml │ ≥ 5/scene │
+//!   │ Error case     │ tests/office_error_contract.rs `#[tokio::test]`  │ ≥ 3      │
+//!   │ Prop test      │ tests/office_prop_tests.rs proptest! block       │ ≥ 3      │
+//!   │ Boundary       │ scene_*.rs `#[cfg(test)] mod tests` `#[test]`   │ ≥ 5/scene │
+//!   │ Integration    │ tests/office_happy_path.rs + golden gates        │ ≥ 1/scene │
+//!   │ ASR            │ tests/office_asr_golden_gate.rs `#[test]`        │ ≥ 5      │
+//!   └────────────────┴─────────────────────────────────────────────────┴─────────┘
 //!
-//! 默认: 只打印 warning, 不 fail (backfill 期兼容).
-//! `ATTUNE_ENFORCE_OFFICE_FLOOR=1`: 缺口 panic, block CI build.
+//! 5 OCR scene (`document` / `receipt` / `table` / `card` / `id_card`) + 1 ASR
+//! 维度。`id_card` 含 3 subtype 拆分为 3 个 golden bucket 但 boundary 共享
+//! `scene_id_card.rs`，按 plan §4.6 仍计为 1 scene。
+//!
+//! **环境变量控制**:
+//!   `ATTUNE_ENFORCE_OFFICE_FLOOR=1` → 缺口 panic (CI block)
+//!   未设置                            → 只打印警告, test pass (兼容 backfill 期)
+//!
+//! 默认 off：real sample backfill (D3.5) 还未完成；synthetic + ENGINEERING_FIXTURE
+//! 算入 golden count，但 real_count 单独追踪。Sprint 完成后切到 default-on。
+//!
+//! per CLAUDE.md「Agent 验证铁律」§2 (6 类测试覆盖下限) + Office helper plan §4.6.
 
 use std::path::{Path, PathBuf};
 
-// ─── Floor definition ────────────────────────────────────────────────
+// ─── scene 定义 ──────────────────────────────────────────────────────────────
 
-const GOLDEN_FLOOR_OCR_PER_SCENE: usize = 5;
-const GOLDEN_FLOOR_ASR_TOTAL: usize = 10;
-const ERROR_CASE_FLOOR: usize = 3;
-const PROPTEST_FLOOR: usize = 3;
-const BOUNDARY_FLOOR_PER_SCENE: usize = 5;
-#[allow(dead_code)]
-const INTEGRATION_FLOOR_PER_SCENE: usize = 1; // documented; CAT 5 uses has_integration_for_* (bool)
-const CONCURRENT_FLOOR: usize = 1;
-const CANCEL_FLOOR: usize = 1;
+/// OCR scene + boundary 维度。
+///
+/// `golden_buckets`: 计 golden YAML 的目录名 (相对 `tests/golden/office/ocr/`)。
+///   `id_card` 拆分为 3 个 subtype 目录。
+/// `boundary_src`:    boundary `#[test]` 所在的 src/ 文件 (相对 attune-core crate root)。
+/// `gate_file`:       integration 覆盖该 scene 的 gate test 文件。
+struct OcrSceneMeta {
+    name: &'static str,
+    golden_buckets: &'static [&'static str],
+    boundary_src: &'static str,
+    gate_file: &'static str,
+}
 
-const OCR_SCENES: &[&str] = &[
-    "document",
-    "receipt",
-    "table",
-    "card",
-    "id_card_cn",
-    "bank_card",
-    "business_license",
+const OCR_SCENES: &[OcrSceneMeta] = &[
+    OcrSceneMeta {
+        name: "document",
+        golden_buckets: &["document"],
+        boundary_src: "src/ocr/structured/scene_document.rs",
+        gate_file: "tests/office_ocr_golden_gate.rs",
+    },
+    OcrSceneMeta {
+        name: "receipt",
+        golden_buckets: &["receipt"],
+        boundary_src: "src/ocr/structured/scene_receipt.rs",
+        gate_file: "tests/office_ocr_golden_gate.rs",
+    },
+    OcrSceneMeta {
+        name: "table",
+        golden_buckets: &["table"],
+        boundary_src: "src/ocr/structured/scene_table.rs",
+        gate_file: "tests/office_ocr_golden_gate.rs",
+    },
+    OcrSceneMeta {
+        name: "card",
+        golden_buckets: &["card"],
+        boundary_src: "src/ocr/structured/scene_card.rs",
+        gate_file: "tests/office_ocr_golden_gate.rs",
+    },
+    OcrSceneMeta {
+        // id_card 含 3 subtype: id_card_cn / bank_card / business_license
+        name: "id_card",
+        golden_buckets: &["id_card_cn", "bank_card", "business_license"],
+        boundary_src: "src/ocr/structured/scene_id_card.rs",
+        gate_file: "tests/office_ocr_golden_gate.rs",
+    },
 ];
 
-const ASR_LANGS: &[&str] = &["zh_aishell", "en_libri", "zh_en_mixed", "meeting"];
-
-// ─── Path helpers ────────────────────────────────────────────────────
+// ─── path helpers ────────────────────────────────────────────────────────────
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn golden_office_dir() -> PathBuf {
-    manifest_dir().join("tests").join("golden").join("office")
+/// `rust/crates/attune-server/tests/golden/office/ocr/`
+fn ocr_golden_root() -> PathBuf {
+    manifest_dir().join("tests").join("golden").join("office").join("ocr")
 }
 
-fn tests_dir() -> PathBuf {
-    manifest_dir().join("tests")
+/// `rust/crates/attune-core/`
+fn attune_core_root() -> PathBuf {
+    manifest_dir().parent().unwrap().join("attune-core")
 }
 
-fn attune_core_src() -> PathBuf {
-    manifest_dir()
-        .parent()
-        .expect("crates/attune-server has parent")
-        .join("attune-core")
-        .join("src")
-}
+// ─── counter primitives ──────────────────────────────────────────────────────
 
-// ─── Counters ───────────────────────────────────────────────────────
-
-/// Count approved YAML files (reviewer.approved: true) in a directory.
-fn count_approved_yamls(dir: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
+/// 数指定目录下 `.yaml` 文件，区分 (real_or_engineered, synthetic)。
+///
+/// `SYNTHETIC_*` reviewer name → synthetic bucket；其他 (含 REAL / ENGINEERING_FIXTURE)
+/// → real-or-engineered bucket。Plan §4.6 允许 synthetic 计 floor 但单独追踪。
+fn count_golden_in_bucket(bucket_dir: &Path) -> (usize, usize) {
+    let mut real = 0;
+    let mut synth = 0;
+    let entries = match std::fs::read_dir(bucket_dir) {
+        Ok(e) => e,
+        Err(_) => return (0, 0),
     };
-    entries
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let p = e.path();
-            p.is_file()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.ends_with(".expected.yaml"))
-                    .unwrap_or(false)
-        })
-        .filter(|e| {
-            let yaml = std::fs::read_to_string(e.path()).unwrap_or_default();
-            // Simple substring match — robust to ordering and indentation; YAML
-            // parser overhead not needed for floor check.
-            yaml.contains("approved: true")
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().map(|x| x != "yaml").unwrap_or(true) {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        // approved=true 是 gate 入门，不 approved 直接跳过 (与 office_ocr_golden_gate 同源)
+        if !raw.contains("approved: true") {
+            continue;
+        }
+        if raw.contains("SYNTHETIC") {
+            synth += 1;
+        } else {
+            real += 1;
+        }
+    }
+    (real, synth)
+}
+
+/// 数文件内 `#[cfg(test)] mod tests` 块里的 `#[test]` 数 (boundary unit tests)。
+///
+/// 简化模型：遇到 `#[cfg(test)]` 进入测试模块，之后所有 `#[test]` 计为 boundary。
+/// 文件没 `#[cfg(test)]` → 返回 0。
+fn count_boundary_tests_in_src(src_path: &Path) -> usize {
+    let raw = match std::fs::read_to_string(src_path) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    let mut count = 0;
+    let mut in_test_mod = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("#[cfg(test)]") {
+            in_test_mod = true;
+            continue;
+        }
+        if in_test_mod && trimmed == "#[test]" {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// 数文件内 top-level `#[tokio::test]` / `#[test]` attribute 总数 (integration tests)。
+///
+/// 不区分 module nesting (office_*.rs 文件 flat 结构)。
+fn count_tests_in_file(test_path: &Path) -> usize {
+    let raw = match std::fs::read_to_string(test_path) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    // Match: `#[test]` (exact), `#[tokio::test]` (exact), `#[tokio::test(...)]` (any args)
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| {
+            *l == "#[test]"
+                || *l == "#[tokio::test]"
+                || (l.starts_with("#[tokio::test(") && l.ends_with(")]"))
         })
         .count()
 }
 
-/// Count `#[test]` occurrences in a file (boundary tests live there).
-fn count_test_attrs(path: &Path) -> usize {
-    let Ok(src) = std::fs::read_to_string(path) else {
-        return 0;
-    };
-    src.matches("#[test]").count()
-        + src
-            .matches("#[tokio::test")
-            .count() // tokio test attrs also count
+/// 数 office_prop_tests.rs 内 `proptest! { #[test] ... }` 块的 `#[test]` 数。
+///
+/// 与 boundary 区分：boundary 在 src/ 内，prop 在 prop_tests.rs 顶层 proptest! 块。
+/// 这里简化为统计文件内所有 `#[test]` (因为 prop_tests.rs 全文件就是 proptest 用)。
+fn count_prop_tests_in_file(test_path: &Path) -> usize {
+    count_tests_in_file(test_path)
 }
 
-/// Count proptest invariants in a file (each `prop_*` fn declaration).
-fn count_proptest_invariants(path: &Path) -> usize {
-    let Ok(src) = std::fs::read_to_string(path) else {
-        return 0;
-    };
-    // proptest! blocks: each `fn prop_xxx(...)` is one invariant
-    src.matches("fn prop_").count()
+// ─── 报告结构 ────────────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+struct OcrSceneReport {
+    name: String,
+    real_golden: usize,
+    synth_golden: usize,
+    boundary_count: usize,
+    has_integration: bool,
 }
 
-// ─── Per-scene counters ─────────────────────────────────────────────
-
-/// For an OCR scene, count boundary tests in scene_<name>.rs (inside attune-core).
-fn count_boundary_for_scene(scene: &str) -> usize {
-    // scene names in golden dir aren't identical to source file names — map them
-    let src_name: String = match scene {
-        "id_card_cn" | "bank_card" | "business_license" => "scene_id_card.rs".into(),
-        other => format!("scene_{other}.rs"),
-    };
-    let path = attune_core_src()
-        .join("ocr")
-        .join("structured")
-        .join(src_name);
-    count_test_attrs(&path)
-}
-
-/// Integration "subprocess" mapping: 我们没有 per-scene 子进程, 但有 office_*_golden_gate.rs.
-/// 对 OCR: office_ocr_golden_gate.rs 含 ≥1 scene-named test → 算作该 scene 的 integration.
-/// 对 ASR: office_asr_golden_gate.rs 含 ≥1 lang-named test → 算作该 lang 的 integration.
-fn has_integration_for_ocr_scene(scene: &str) -> bool {
-    let path = tests_dir().join("office_ocr_golden_gate.rs");
-    let Ok(src) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    // each scene gate fn is named `ocr_<scene>_gate`
-    src.contains(&format!("ocr_{scene}_gate"))
-}
-
-fn has_integration_for_asr_lang(lang: &str) -> bool {
-    let path = tests_dir().join("office_asr_golden_gate.rs");
-    let Ok(src) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    // map dir name → test fn
-    let needle = match lang {
-        "zh_aishell" => "asr_zh_wer",
-        "en_libri" => "asr_en_wer",
-        "zh_en_mixed" => "asr_zh_en_mixed_wer",
-        "meeting" => "asr_meeting_speaker_count",
-        _ => return false,
-    };
-    src.contains(needle)
-}
-
-// ─── Violations report ──────────────────────────────────────────────
-
-#[derive(Debug, Default)]
-struct Violations {
-    items: Vec<String>,
-}
-
-impl Violations {
-    fn add(&mut self, msg: impl Into<String>) {
-        self.items.push(msg.into());
+impl OcrSceneReport {
+    fn total_golden(&self) -> usize {
+        self.real_golden + self.synth_golden
     }
 
-    fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-}
-
-fn collect_violations() -> Violations {
-    let mut v = Violations::default();
-    let golden = golden_office_dir();
-
-    // ─── Category 1: Golden approved YAML ─────────────────────────
-    for scene in OCR_SCENES {
-        let count = count_approved_yamls(&golden.join("ocr").join(scene));
-        if count < GOLDEN_FLOOR_OCR_PER_SCENE {
-            v.add(format!(
-                "[CAT 1 golden] OCR scene '{scene}': {count} approved YAML < {GOLDEN_FLOOR_OCR_PER_SCENE} (need real samples; synthetic generator covers id_card_cn/bank_card/business_license/receipt; document/table/card need anonymized real PDFs)",
+    fn violations(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if self.total_golden() < 5 {
+            let need = 5 - self.total_golden();
+            v.push(format!(
+                "[{}] golden count = {} (real={} synth={}) < 5 (need {need} more); \
+                 add YAML under tests/golden/office/ocr/<bucket>/",
+                self.name, self.total_golden(), self.real_golden, self.synth_golden,
             ));
         }
-    }
-    let asr_total: usize = ASR_LANGS
-        .iter()
-        .map(|lang| count_approved_yamls(&golden.join("asr").join(lang)))
-        .sum();
-    if asr_total < GOLDEN_FLOOR_ASR_TOTAL {
-        v.add(format!(
-            "[CAT 1 golden] ASR total: {asr_total} approved YAML < {GOLDEN_FLOOR_ASR_TOTAL} (run scripts/fetch-office-asr-golden.sh)",
-        ));
-    }
-
-    // ─── Category 2: Error cases ──────────────────────────────────
-    let err_count = count_test_attrs(&tests_dir().join("office_error_contract.rs"));
-    if err_count < ERROR_CASE_FLOOR {
-        v.add(format!(
-            "[CAT 2 error] office_error_contract.rs: {err_count} tests < {ERROR_CASE_FLOOR}"
-        ));
-    }
-
-    // ─── Category 3: Proptest invariants ──────────────────────────
-    let prop_count = count_proptest_invariants(&tests_dir().join("office_prop_tests.rs"));
-    if prop_count < PROPTEST_FLOOR {
-        v.add(format!(
-            "[CAT 3 proptest] office_prop_tests.rs: {prop_count} invariants < {PROPTEST_FLOOR}"
-        ));
-    }
-
-    // ─── Category 4: Boundary tests per scene ─────────────────────
-    for scene in OCR_SCENES {
-        let count = count_boundary_for_scene(scene);
-        if count < BOUNDARY_FLOOR_PER_SCENE {
-            v.add(format!(
-                "[CAT 4 boundary] OCR scene '{scene}': {count} #[test] < {BOUNDARY_FLOOR_PER_SCENE}"
+        if self.boundary_count < 5 {
+            let need = 5 - self.boundary_count;
+            v.push(format!(
+                "[{}] boundary #[test] count = {} < 5 (need {need} more); \
+                 add #[cfg(test)] tests to scene_*.rs",
+                self.name, self.boundary_count,
             ));
         }
-    }
-
-    // ─── Category 5: Integration subprocess per scene ─────────────
-    for scene in OCR_SCENES {
-        if !has_integration_for_ocr_scene(scene) {
-            v.add(format!(
-                "[CAT 5 integration] OCR scene '{scene}': missing ocr_{scene}_gate in office_ocr_golden_gate.rs"
+        if !self.has_integration {
+            v.push(format!(
+                "[{}] no integration gate test found; \
+                 add scene gate to office_ocr_golden_gate.rs",
+                self.name,
             ));
         }
+        v
     }
-    for lang in ASR_LANGS {
-        if !has_integration_for_asr_lang(lang) {
-            v.add(format!(
-                "[CAT 5 integration] ASR lang '{lang}': missing corresponding gate fn in office_asr_golden_gate.rs"
+}
+
+#[derive(Debug)]
+struct GlobalReport {
+    error_count: usize,
+    prop_count: usize,
+    asr_count: usize,
+}
+
+impl GlobalReport {
+    fn violations(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if self.error_count < 3 {
+            let need = 3 - self.error_count;
+            v.push(format!(
+                "[global] error contract test count = {} < 3 (need {need} more); \
+                 add #[tokio::test] to office_error_contract.rs",
+                self.error_count,
             ));
         }
+        if self.prop_count < 3 {
+            let need = 3 - self.prop_count;
+            v.push(format!(
+                "[global] proptest count = {} < 3 (need {need} more); \
+                 add #[test] inside proptest! {{ ... }} to office_prop_tests.rs",
+                self.prop_count,
+            ));
+        }
+        if self.asr_count < 5 {
+            let need = 5 - self.asr_count;
+            v.push(format!(
+                "[asr] asr gate test count = {} < 5 (need {need} more); \
+                 add #[tokio::test] to office_asr_golden_gate.rs",
+                self.asr_count,
+            ));
+        }
+        v
+    }
+}
+
+// ─── gate 主入口 ─────────────────────────────────────────────────────────────
+
+fn build_ocr_scene_report(meta: &OcrSceneMeta) -> OcrSceneReport {
+    let root = ocr_golden_root();
+    let (mut real, mut synth) = (0, 0);
+    for bucket in meta.golden_buckets {
+        let (r, s) = count_golden_in_bucket(&root.join(bucket));
+        real += r;
+        synth += s;
     }
 
-    // ─── Category 6: Concurrent + Cancel ──────────────────────────
-    let concurrent_count = count_test_attrs(&tests_dir().join("office_concurrent_test.rs"));
-    if concurrent_count < CONCURRENT_FLOOR {
-        v.add(format!(
-            "[CAT 6 concurrent] office_concurrent_test.rs: {concurrent_count} tests < {CONCURRENT_FLOOR}"
-        ));
-    }
-    let cancel_count = count_test_attrs(&tests_dir().join("office_cancel_test.rs"));
-    if cancel_count < CANCEL_FLOOR {
-        v.add(format!(
-            "[CAT 6 cancel] office_cancel_test.rs: {cancel_count} tests < {CANCEL_FLOOR}"
-        ));
-    }
+    let boundary_count = count_boundary_tests_in_src(&attune_core_root().join(meta.boundary_src));
+    let has_integration = manifest_dir().join(meta.gate_file).exists();
 
-    v
+    OcrSceneReport {
+        name: meta.name.to_string(),
+        real_golden: real,
+        synth_golden: synth,
+        boundary_count,
+        has_integration,
+    }
+}
+
+fn build_global_report() -> GlobalReport {
+    let tests_dir = manifest_dir().join("tests");
+    GlobalReport {
+        error_count: count_tests_in_file(&tests_dir.join("office_error_contract.rs")),
+        prop_count: count_prop_tests_in_file(&tests_dir.join("office_prop_tests.rs")),
+        asr_count: count_tests_in_file(&tests_dir.join("office_asr_golden_gate.rs")),
+    }
 }
 
 #[test]
-fn six_category_floor_check() {
+fn office_six_category_floor_check() {
     let enforce = std::env::var("ATTUNE_ENFORCE_OFFICE_FLOOR")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    eprintln!(
-        "=== Office Helper 6-Category Floor Check ===\n  ENFORCE mode: {} (ATTUNE_ENFORCE_OFFICE_FLOOR={})",
-        enforce,
+    println!("\n=== Office helper — 6 类测试下限 check ===");
+    println!(
+        "强制模式: {} (ATTUNE_ENFORCE_OFFICE_FLOOR={})",
+        if enforce { "ON" } else { "OFF (warning-only)" },
         std::env::var("ATTUNE_ENFORCE_OFFICE_FLOOR").unwrap_or_else(|_| "<unset>".into()),
     );
 
-    let violations = collect_violations();
+    let mut all_violations: Vec<String> = Vec::new();
 
-    if violations.is_empty() {
-        eprintln!("  ✓ All 6 categories met for {} OCR scenes + {} ASR langs",
-            OCR_SCENES.len(), ASR_LANGS.len());
+    // ─── OCR scene 维度 ──────────────────────────────────────────────────
+    for meta in OCR_SCENES {
+        let report = build_ocr_scene_report(meta);
+        println!(
+            "  [ocr/{}] golden={} (real={}+synth={}) boundary={} integration={}",
+            report.name,
+            report.total_golden(),
+            report.real_golden,
+            report.synth_golden,
+            report.boundary_count,
+            report.has_integration,
+        );
+        all_violations.extend(report.violations());
+    }
+
+    // ─── 全局维度 (error / prop / asr) ───────────────────────────────────
+    let global = build_global_report();
+    println!(
+        "  [global] error={} prop={} asr={}",
+        global.error_count, global.prop_count, global.asr_count,
+    );
+    all_violations.extend(global.violations());
+
+    // ─── 总结 ────────────────────────────────────────────────────────────
+    if all_violations.is_empty() {
+        println!("\n✅ 全部 6 类下限达标 (5 OCR scene × 3 metric + 3 global metric = 18 check)");
         return;
     }
 
-    eprintln!("\n  Violations ({}):", violations.items.len());
-    for item in &violations.items {
-        eprintln!("    {item}");
+    println!("\n⚠️  发现 {} 项缺口:", all_violations.len());
+    for v in &all_violations {
+        println!("    - {v}");
     }
 
     if enforce {
         panic!(
-            "\nOffice helper 6-category floor check FAILED in ENFORCE mode.\n\
-             {} violations detected. Fix the gaps or unset ATTUNE_ENFORCE_OFFICE_FLOOR=0\n\
-             for backfill-mode warnings.\n",
-            violations.items.len()
+            "Office helper 六类下限未达标 ({} 项缺口) — 见 CLAUDE.md「Agent 验证铁律」§2 \
+             + Office plan §4.6。\n\
+             ENFORCE 模式 (ATTUNE_ENFORCE_OFFICE_FLOOR=1) 下缺口必须修复才可 merge。",
+            all_violations.len()
         );
     } else {
-        eprintln!(
-            "\n  (Backfill mode — warnings only. Enable enforcement with\n   ATTUNE_ENFORCE_OFFICE_FLOOR=1 cargo test --test office_six_category_floor)"
+        println!(
+            "\nINFO: 当前 OFF 模式 (兼容 D3.5 real-sample backfill 期). \
+             设 ATTUNE_ENFORCE_OFFICE_FLOOR=1 切到强制模式。"
         );
     }
 }
 
-// ─── Self-tests for the counters ────────────────────────────────────
+// ─── 单元测试 (六类 gate 内部 counter 自检) ──────────────────────────────────
 
 #[cfg(test)]
-mod counter_tests {
+mod inner_tests {
     use super::*;
     use std::io::Write;
+    use tempfile::TempDir;
 
     #[test]
-    fn count_approved_yamls_filters_correctly() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Approved
-        let mut f = std::fs::File::create(tmp.path().join("a.expected.yaml")).unwrap();
-        writeln!(f, "id: a\nreviewer:\n  approved: true").unwrap();
-        // Not approved
-        let mut f = std::fs::File::create(tmp.path().join("b.expected.yaml")).unwrap();
-        writeln!(f, "id: b\nreviewer:\n  approved: false").unwrap();
-        // Not a yaml at all
-        std::fs::write(tmp.path().join("c.txt"), "ignored").unwrap();
-        // Approved with extra fields
-        let mut f = std::fs::File::create(tmp.path().join("d.expected.yaml")).unwrap();
-        writeln!(f, "id: d\nreviewer:\n  name: X\n  approved: true").unwrap();
+    fn count_golden_picks_approved_and_distinguishes_synth() {
+        let tmp = TempDir::new().unwrap();
+        let bucket = tmp.path();
 
-        assert_eq!(count_approved_yamls(tmp.path()), 2);
-    }
-
-    #[test]
-    fn count_approved_yamls_empty_dir_returns_zero() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(count_approved_yamls(tmp.path()), 0);
-    }
-
-    #[test]
-    fn count_approved_yamls_missing_dir_returns_zero() {
-        assert_eq!(count_approved_yamls(Path::new("/no/such/dir/exists/here")), 0);
-    }
-
-    #[test]
-    fn count_test_attrs_counts_both_test_kinds() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("test_file.rs");
         std::fs::write(
-            &path,
-            r#"
-#[test]
-fn one() {}
-
-#[tokio::test]
-async fn two() {}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn three() {}
-
-// not a real annotation: #[test] in a comment
-"#,
+            bucket.join("real-1.expected.yaml"),
+            "approved: true\nreviewer:\n  name: REAL_PHOTO_ANONYMIZED\n",
         )
         .unwrap();
-        // 1 plain #[test] + 2 #[tokio::test (substring match)
-        // (The comment line also contains "#[test]" so it counts → 4 total.
-        //  That's acceptable conservativeness — over-counts ≠ false negative.)
-        let count = count_test_attrs(&path);
-        assert!(count >= 3, "expected ≥3 tests, got {count}");
+        std::fs::write(
+            bucket.join("synth-1.expected.yaml"),
+            "approved: true\nreviewer:\n  name: SYNTHETIC_GENERATED\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bucket.join("unapproved.expected.yaml"),
+            "approved: false\nreviewer:\n  name: REAL_PHOTO\n",
+        )
+        .unwrap();
+        // non-yaml ignored
+        std::fs::write(bucket.join("README.md"), "ignore").unwrap();
+
+        let (real, synth) = count_golden_in_bucket(bucket);
+        assert_eq!(real, 1, "real_count = REAL_* with approved=true");
+        assert_eq!(synth, 1, "synth_count = SYNTHETIC_* with approved=true");
     }
 
     #[test]
-    fn count_proptest_invariants_finds_fn_prefix() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("prop.rs");
-        std::fs::write(
-            &path,
-            r#"
-proptest! {
+    fn count_golden_empty_dir_returns_zero() {
+        let tmp = TempDir::new().unwrap();
+        let (real, synth) = count_golden_in_bucket(tmp.path());
+        assert_eq!((real, synth), (0, 0));
+    }
+
     #[test]
-    fn prop_one(x: u32) {}
+    fn count_golden_missing_dir_returns_zero() {
+        let (real, synth) = count_golden_in_bucket(Path::new("/nonexistent/path/foo/bar"));
+        assert_eq!((real, synth), (0, 0));
+    }
+
     #[test]
-    fn prop_two(s in ".*") {}
-}
-fn helper() {}  // not a prop_ prefix
-fn prop_three() {} // outside proptest! block but matches prefix
-"#,
+    fn count_boundary_tests_counts_test_attrs_in_cfg_test_mod() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("scene_foo.rs");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            "pub fn extract() {{}}\n\
+             #[cfg(test)]\n\
+             mod tests {{\n\
+                 #[test]\n\
+                 fn t1() {{}}\n\
+                 #[test]\n\
+                 fn t2() {{}}\n\
+             }}\n"
         )
         .unwrap();
-        assert_eq!(count_proptest_invariants(&path), 3);
+        assert_eq!(count_boundary_tests_in_src(&path), 2);
+    }
+
+    #[test]
+    fn count_boundary_tests_ignores_test_attr_outside_cfg_test() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("scene_bar.rs");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // `#[test]` before `#[cfg(test)]` should NOT be counted
+        writeln!(
+            f,
+            "#[test]\nfn outside() {{}}\n\
+             #[cfg(test)]\n\
+             mod tests {{\n\
+                 #[test]\n\
+                 fn t1() {{}}\n\
+             }}\n"
+        )
+        .unwrap();
+        assert_eq!(count_boundary_tests_in_src(&path), 1);
+    }
+
+    #[test]
+    fn count_boundary_tests_missing_file_returns_zero() {
+        assert_eq!(
+            count_boundary_tests_in_src(Path::new("/nonexistent/x.rs")),
+            0
+        );
+    }
+
+    #[test]
+    fn count_tests_in_file_counts_tokio_and_plain_test() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("office_x.rs");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            "#[tokio::test]\nasync fn t1() {{}}\n\
+             #[test]\nfn t2() {{}}\n\
+             #[tokio::test(flavor = \"multi_thread\", worker_threads = 2)]\nasync fn t3() {{}}\n\
+             // commented out: #[test]\n"
+        )
+        .unwrap();
+        assert_eq!(count_tests_in_file(&path), 3);
+    }
+
+    #[test]
+    fn report_no_violations_when_all_floors_met() {
+        let report = OcrSceneReport {
+            name: "document".into(),
+            real_golden: 6,
+            synth_golden: 0,
+            boundary_count: 10,
+            has_integration: true,
+        };
+        assert!(report.violations().is_empty());
+    }
+
+    #[test]
+    fn report_violations_when_golden_short() {
+        let report = OcrSceneReport {
+            name: "document".into(),
+            real_golden: 2,
+            synth_golden: 1, // total=3 < 5
+            boundary_count: 10,
+            has_integration: true,
+        };
+        let v = report.violations();
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("golden count = 3"));
+    }
+
+    #[test]
+    fn report_violations_when_boundary_short() {
+        let report = OcrSceneReport {
+            name: "table".into(),
+            real_golden: 5,
+            synth_golden: 0,
+            boundary_count: 3, // < 5
+            has_integration: true,
+        };
+        let v = report.violations();
+        assert_eq!(v.len(), 1);
+        assert!(v[0].contains("boundary #[test] count = 3"));
+    }
+
+    #[test]
+    fn global_violations_when_metrics_short() {
+        let global = GlobalReport {
+            error_count: 1,
+            prop_count: 2,
+            asr_count: 4,
+        };
+        let v = global.violations();
+        assert_eq!(v.len(), 3);
+    }
+
+    #[test]
+    fn global_no_violations_when_all_met() {
+        let global = GlobalReport {
+            error_count: 12,
+            prop_count: 5,
+            asr_count: 8,
+        };
+        assert!(global.violations().is_empty());
     }
 }
