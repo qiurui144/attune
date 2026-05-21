@@ -1,0 +1,30 @@
+id: 10-dedup-and-confidence
+description: |
+  Multiple distinct queries learn against each other simultaneously.
+  Target A "git rebase" (3) shares "git" with B/C/D.
+  - "git merge conflict" (3) → diff={merge, conflict}, weight 3 each
+  - "git stash apply" (3)   → diff={stash, apply}, weight 3 each
+  - "git cherry pick" (3)   → diff={cherry, pick}, weight 3 each
+  6 candidates all tied at 3, lex asc → [apply, cherry, conflict, merge, pick, stash].
+  Confidence on a fresh heuristic row should be ExpansionSource::Heuristic.default_confidence() = 0.4.
+signals:
+  - query: "git rebase"
+    count: 3
+  - query: "git merge conflict"
+    count: 3
+  - query: "git stash apply"
+    count: 3
+  - query: "git cherry pick"
+    count: 3
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 4
+  contains_records:
+    - query_pattern: "git rebase"
+      expansions: [apply, cherry, conflict, merge, pick, stash]
+      generated_by: heuristic
+      confidence: 0.4
+reviewer:
+  approved: true

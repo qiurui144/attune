@@ -1,0 +1,35 @@
+id: 03-cjk-bigram-coverage
+description: |
+  Pure CJK target. Heuristic tokenizes CJK as bigrams:
+  - "民间借贷" → [民间, 间借, 借贷]
+  - "民间借贷利息" → [民间, 间借, 借贷, 贷利, 利息]
+  - "民间借贷案例" → [民间, 间借, 借贷, 贷案, 案例]
+  Target "民间借贷" shares 3 tokens with each other bucket. The "other"-only
+  tokens are 贷利, 利息, 贷案, 案例.
+  - 贷利 appears in bucket "民间借贷利息" (count 3) → score 3
+  - 利息 appears in bucket "民间借贷利息" (count 3) → score 3
+  - 贷案 appears in bucket "民间借贷案例" (count 3) → score 3
+  - 案例 appears in bucket "民间借贷案例" (count 3) → score 3
+  Sorted: 4 terms all tied at 3, then lex asc (CJK is lex-sorted by codepoint).
+  All four codepoints: 利息=0x5229_0x606F, 案例=0x6848_0x4F8B, 贷利=0x8D37_0x5229, 贷案=0x8D37_0x6848
+  Sorted ascending: 利息 (0x5229_*), 案例 (0x6848_*), 贷利 (0x8D37_*), 贷案 (0x8D37_*).
+  贷利 vs 贷案: 利=0x5229 < 案=0x6848 → 贷利 < 贷案.
+  Final order: [利息, 案例, 贷利, 贷案].
+signals:
+  - query: "民间借贷"
+    count: 3
+  - query: "民间借贷利息"
+    count: 3
+  - query: "民间借贷案例"
+    count: 3
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 3
+  contains_records:
+    - query_pattern: "民间借贷"
+      expansions: [利息, 案例, 贷利, 贷案]
+      generated_by: heuristic
+reviewer:
+  approved: true

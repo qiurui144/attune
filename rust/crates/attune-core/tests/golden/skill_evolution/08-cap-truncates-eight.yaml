@@ -1,0 +1,41 @@
+id: 08-cap-truncates-eight
+description: |
+  Verifies MAX_EXPANSIONS_PER_PATTERN = 8 truncation.
+  Target "rust" tokenizer: 4 chars → 1 ASCII token {rust}.
+  10 co-occurring buckets each contribute 1 unique token. Distinct counts make
+  the ranking unambiguous so the test does not depend on lex tiebreak.
+  Top 8 by weight are kept; the lowest 2 (weights 1,2) are dropped.
+signals:
+  - query: "rust"
+    count: 3
+  - query: "rust tokio"
+    count: 10
+  - query: "rust serde"
+    count: 9
+  - query: "rust async"
+    count: 8
+  - query: "rust cargo"
+    count: 7
+  - query: "rust macro"
+    count: 6
+  - query: "rust trait"
+    count: 5
+  - query: "rust generic"
+    count: 4
+  - query: "rust enum"
+    count: 3
+  - query: "rust derive"
+    count: 2
+  - query: "rust panic"
+    count: 1
+config:
+  window_days: 0
+  min_signal_count: 1
+expected:
+  buckets_count: 11
+  contains_records:
+    - query_pattern: "rust"
+      expansions: [tokio, serde, async, cargo, macro, trait, generic, enum]
+      generated_by: heuristic
+reviewer:
+  approved: true

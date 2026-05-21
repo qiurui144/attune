@@ -1,0 +1,27 @@
+id: 01-rust-co-occurring-borrowed
+description: |
+  3 occurrences of "rust ownership" + 3 of "rust borrow checker" + 3 of "rust lifetime".
+  Heuristic should expand "rust ownership" with tokens co-occurring in the related buckets:
+  - "rust borrow checker" shares token "rust" with target → contributes "borrow", "checker"
+  - "rust lifetime" shares token "rust" with target → contributes "lifetime"
+  Expected expansions for "rust ownership" (after dedup): borrow, checker, lifetime
+  (sorted lex when weights tied; "borrow" + "checker" tied at 3 and "lifetime" at 3 too,
+   so output is [borrow, checker, lifetime])
+signals:
+  - query: "rust ownership"
+    count: 3
+  - query: "rust borrow checker"
+    count: 3
+  - query: "rust lifetime"
+    count: 3
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 3
+  contains_records:
+    - query_pattern: "rust ownership"
+      expansions: [borrow, checker, lifetime]
+      generated_by: heuristic
+reviewer:
+  approved: true

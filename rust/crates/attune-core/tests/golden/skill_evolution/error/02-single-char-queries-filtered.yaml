@@ -1,0 +1,30 @@
+id: error-02-single-char-queries-filtered
+description: |
+  Pathological signals: 1-char queries ("a", "x") MUST be filtered out by
+  the `min_query_chars = 2` guard in group_signals_by_pattern.
+  Otherwise a stray "a" or "x" search 3 times bloats skill_expansions table.
+signals:
+  - query: "a"
+    count: 5
+  - query: "x"
+    count: 5
+  - query: "real query"
+    count: 3
+  - query: "real signal"
+    count: 3
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  # "a", "x" filtered out; "real query" + "real signal" survive.
+  # Both produce a record because they co-occur (share token "real").
+  buckets_count: 2
+  records:
+    - query_pattern: "real query"
+      expansions: [signal]
+      generated_by: heuristic
+    - query_pattern: "real signal"
+      expansions: [query]
+      generated_by: heuristic
+reviewer:
+  approved: true

@@ -1,0 +1,13 @@
+id: error-01-empty-signals
+description: |
+  Vault has no skill_signals. prepare_run must return None (idle cycle).
+  run_cycle wrapper returns EvolutionRunStats::default() — no rows, no error.
+signals: []
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 0
+  records: []
+reviewer:
+  approved: true
