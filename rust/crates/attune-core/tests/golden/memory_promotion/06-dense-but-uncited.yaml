@@ -1,0 +1,26 @@
+id: 06-dense-but-uncited
+description: |
+  An 12-chunk dense episodic with zero citations — even high density does not
+  promote without explicit signal (key product invariant: promotion gates on
+  *signals*, not on mere size).
+  access=0 < min=3 → gated by access.
+episodic_memories:
+  - id: ep-dense-no-signal
+    chunk_hashes: [d-01, d-02, d-03, d-04, d-05, d-06, d-07, d-08, d-09, d-10, d-11, d-12]
+    summary: |
+      用户上传了一份 12 段的内部技术备忘录，
+      内容尚未被引用或讨论。
+    created_at_offset_days: 2
+citation_hits: []
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: []
+  gated_by_access: 1
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true

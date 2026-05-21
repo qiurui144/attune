@@ -1,0 +1,30 @@
+id: 01-rust-ownership-heavily-cited
+description: |
+  rust-lang/book ch4 ownership episodic — recent (1d), 5 chunks, 5 total citations.
+  Independent score: 1.0*5 + 2.0/1.1 + 0.5*ln(5) ≈ 5 + 1.8182 + 0.8047 = 7.6229 → > 4.0 → promote.
+episodic_memories:
+  - id: ep-rust-ownership
+    chunk_hashes: [rust-ch4-001, rust-ch4-002, rust-ch4-003, rust-ch4-004, rust-ch4-005]
+    summary: |
+      用户研究了 Rust ownership 的核心规则、variable scope、String 类型等 chapter 4 主题，
+      重点关注 owner 唯一性与作用域终止的 drop 行为。
+    created_at_offset_days: 1
+citation_hits:
+  - chunk: rust-ch4-001
+    count: 2
+  - chunk: rust-ch4-002
+    count: 2
+  - chunk: rust-ch4-003
+    count: 1
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: [ep-rust-ownership]
+  gated_by_access: 0
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true

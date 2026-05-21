@@ -141,6 +141,36 @@ impl Store {
         Ok(())
     }
 
+    /// `memory_consolidation_agent` 用：统计一组 chunk_hash 累计的 citation_hit 数。
+    ///
+    /// 同一 chunk 被引 N 次累加 N；多个 chunk 各自被引也累加（一条 episodic 的
+    /// access_count = ∑ 所属 chunks 的 citation_hits）。
+    ///
+    /// 空集返回 0，不抛错；单次 query 用 IN 列表，避免 N 次 round-trip。
+    /// per CLAUDE.md (attune-core) — 动态 SQL（占位符数量随 refs.len() 变）必须 `prepare`，
+    /// 不能 `prepare_cached`（缓存只对 stable SQL 字符串有效）。
+    pub fn count_citation_hits_for_refs(&self, refs: &[String]) -> Result<u32> {
+        if refs.is_empty() {
+            return Ok(0);
+        }
+        // Build "?, ?, ..." placeholders. SQLite default SQLITE_MAX_VARIABLE_NUMBER
+        // = 999 (well above MAX_CHUNKS_PER_BUNDLE=50 ceiling on episodic membership).
+        let placeholders = std::iter::repeat("?")
+            .take(refs.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT COUNT(*) FROM skill_signals \
+             WHERE kind = 'citation_hit' AND ref_id IN ({placeholders})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let n: i64 = stmt.query_row(
+            rusqlite::params_from_iter(refs.iter()),
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u32)
+    }
+
     /// QW-2 (storage cleanup): 删除已处理且超过指定天数的 skill_signals。
     ///
     /// `processed = 1` 信号已经被 skill_evolution 消费写入 expansions / cluster，

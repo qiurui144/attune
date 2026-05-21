@@ -85,6 +85,9 @@ test-utils = []
 # 集成测试无需 --features 显式开启。生产 `cargo build` 不受影响（仅 dev profile）。
 [dev-dependencies]
 attune-core = { path = ".", features = ["test-utils"] }
+# memory_consolidation_agent (L2 → L3 deterministic promotion) — 属性测试需要 proptest.
+# 与 attune-server 同版本（workspace 内统一），dev profile only.
+proptest = "1"
 
 [lints]
 workspace = true

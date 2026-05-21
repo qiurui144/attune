@@ -1,0 +1,39 @@
+id: e02-all-uncited
+description: |
+  Error case — 5 episodics, none with any citation. All gated by access.
+  Asserts the agent never promotes purely based on existence; explicit signal
+  (citation_hit) is required.
+episodic_memories:
+  - id: ep-quiet-1
+    chunk_hashes: [q1-1, q1-2]
+    summary: 用户随手保存的文档 1（未被引用）。
+    created_at_offset_days: 1
+  - id: ep-quiet-2
+    chunk_hashes: [q2-1, q2-2]
+    summary: 用户随手保存的文档 2（未被引用）。
+    created_at_offset_days: 1
+  - id: ep-quiet-3
+    chunk_hashes: [q3-1, q3-2, q3-3]
+    summary: 用户随手保存的文档 3（未被引用）。
+    created_at_offset_days: 2
+  - id: ep-quiet-4
+    chunk_hashes: [q4-1]
+    summary: 用户随手保存的文档 4（未被引用）。
+    created_at_offset_days: 3
+  - id: ep-quiet-5
+    chunk_hashes: [q5-1, q5-2, q5-3, q5-4]
+    summary: 用户随手保存的文档 5（未被引用）。
+    created_at_offset_days: 4
+citation_hits: []
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: []
+  gated_by_access: 5
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true
