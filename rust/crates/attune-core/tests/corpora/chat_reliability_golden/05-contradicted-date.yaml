@@ -1,0 +1,43 @@
+id: 05-contradicted-date
+description: |
+  Response asserts a date that DIRECTLY conflicts with a date in a retrieved
+  chunk (same surrounding context window). One Date contradiction + the
+  conflicting response value itself becomes a hallucination flag (since it
+  does not appear in chunks).
+
+query: 报告时间是什么时候？
+response: |
+  报告时间：2024-03-15。本期评估结论合理。
+
+chunks:
+  - item_id: report-doc
+    chunk_text: |
+      报告时间：2025-06-01。评估对象：某科技有限公司。本期审议通过。
+
+expected:
+  citation_grounded: []
+  contradictions_count: 1
+  hallucination_kinds:
+    - date
+  confidence_range: [0.675, 0.675]
+
+# DERIVATION:
+# Response entity: Date "2024-03-15" with surrounding context "报告时间...本期评估".
+# Chunk entity:   Date "2025-06-01" with surrounding context "报告时间...评估对象".
+# Both contexts contain shared CJK 2-grams "报告" / "评估" → context_overlap = true.
+# Values differ ("2024-03-15" vs "2025-06-01") → 1 Contradiction (Date).
+#
+# Hallucination scan: "2024-03-15" not in chunk union (chunk has "2025-06-01")
+# → 1 hallucination flag, kind=Date.
+#
+# No inline cite markers → citation_penalty = 0.
+#
+# Formula:
+#   citation_penalty      = 0.0
+#   contradiction_penalty = min(1.0, 1/2) * 0.50 = 0.5 * 0.50 = 0.25
+#   hallucination_penalty = min(1.0, 1/4) * 0.30 = 0.25 * 0.30 = 0.075
+#   confidence            = 1.0 - 0.25 - 0.075 = 0.675
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE

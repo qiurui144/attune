@@ -1,0 +1,43 @@
+id: error-no-chunks
+description: |
+  Response contains real entities but the chunk list is empty — every
+  date / money / org / person in the response becomes a hallucination
+  flag because there is literally nothing to ground against.
+
+query: 什么都行
+response: |
+  评估时间为 2024-03-15，由 某公司有限公司 出具，金额 ¥10000。
+chunks: []
+
+expected:
+  citation_grounded: []
+  contradictions_count: 0
+  hallucination_kinds:
+    - date
+    - number
+    - organization
+  confidence_range: [0.775, 0.775]
+
+# DERIVATION:
+# chunks = [] → chunk_union_norm = "". Every response entity fails the
+# substring lookup → all flagged.
+#
+# Response entities:
+#   - Date "2024-03-15"
+#   - Money "¥10000"
+#   - Organization "某公司有限公司"
+# → 3 hallucination flags (date, number, organization).
+#
+# No inline cites → citation_penalty = 0. No chunks → no possible
+# contradiction (contradictions require BOTH sides to have an entity at
+# overlapping context).
+#
+# Formula:
+#   citation_penalty      = 0.0
+#   contradiction_penalty = 0.0
+#   hallucination_penalty = min(1.0, 3/4) * 0.30 = 0.75 * 0.30 = 0.225
+#   confidence            = 1.0 - 0.225 = 0.775
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE

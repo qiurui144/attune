@@ -38,6 +38,11 @@ pub mod async_fs;
 // parse_confidence / strip_confidence_marker 这些公开 API（per reviewer I3）。
 pub(crate) mod chat;
 pub use chat::{parse_confidence, strip_confidence_marker, Citation, ChatEngine, ChatResponse};
+// chat_reliability — post-hoc deterministic evaluation agent for LLM chat
+// responses (citation grounding + factual consistency + hallucination flag).
+// Zero LLM cost, designed to run from a background tokio task after each
+// chat turn. See module-level docs for cost contract + verification doctrine.
+pub mod chat_reliability;
 pub mod chunker;
 pub mod context_compress;
 pub mod context_budget;

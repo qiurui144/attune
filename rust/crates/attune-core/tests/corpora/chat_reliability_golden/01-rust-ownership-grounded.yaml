@@ -1,0 +1,46 @@
+id: 01-rust-ownership-grounded
+description: |
+  Rust ownership Q&A — answer cites one chunk, content overlap satisfies the
+  3-token grounding floor. No contradictions, no hallucinations. Confidence
+  must be exactly 1.0.
+
+query: rust 的所有权规则是什么？
+response: |
+  Rust 的所有权有三条规则：每个值有唯一所有者；当所有者离开作用域时值被丢弃；
+  借用必须在所有者作用域内有效 [item:rust-book-ch4]。
+
+chunks:
+  - item_id: rust-book-ch4
+    chunk_text: |
+      所有权规则：每个值在 Rust 中都有一个所有者；同一时刻只能有一个所有者；
+      当所有者离开作用域时，这个值将被丢弃。这套规则是 Rust 内存安全的基础。
+  - item_id: rust-book-ch5
+    chunk_text: |
+      借用允许你引用某个值而不获取其所有权。借用必须在所有者的作用域内有效。
+
+expected:
+  citation_grounded:
+    - item_id: rust-book-ch4
+      status: grounded
+  contradictions_count: 0
+  hallucination_kinds: []
+  confidence_range: [1.0, 1.0]
+
+# DERIVATION:
+# 1 inline marker `[item:rust-book-ch4]`. The chunk with item_id == rust-book-ch4
+# exists. Tokenized response and chunk_text share these CJK 2-grams in common:
+#   "所有", "有权", "规则", "每个", "在 R" (etc.) — well above the 3-token floor.
+# → CitationStatus::Grounded.
+#
+# No date / money entities in response → no possible contradictions or
+# hallucination flags.
+#
+# Formula:
+#   citation_penalty      = (0 weak + 2*0 fab) / 1 * 0.20 = 0.0
+#   contradiction_penalty = min(1.0, 0/2) * 0.50           = 0.0
+#   hallucination_penalty = min(1.0, 0/4) * 0.30           = 0.0
+#   confidence            = 1.0 - 0 - 0 - 0                = 1.0
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE

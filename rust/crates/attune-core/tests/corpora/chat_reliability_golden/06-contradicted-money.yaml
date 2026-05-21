@@ -1,0 +1,41 @@
+id: 06-contradicted-money
+description: |
+  Financial Q&A — response cites a money amount that DIRECTLY conflicts
+  with the amount in the retrieved chunk (same surrounding "借款" context).
+  One Money contradiction + the conflicting value also hallucinates.
+
+query: 借款金额多少？
+response: |
+  根据合同，借款金额为 ¥30000，归还期限为半年。
+
+chunks:
+  - item_id: contract-doc
+    chunk_text: |
+      根据合同，借款金额为 ¥10000，归还期限为半年。利率按 LPR 浮动。
+
+expected:
+  citation_grounded: []
+  contradictions_count: 1
+  hallucination_kinds:
+    - number
+  confidence_range: [0.675, 0.675]
+
+# DERIVATION:
+# Response entity: Money "¥30000" with surrounding context "借款金额...归还".
+# Chunk entity:   Money "¥10000" with surrounding context "借款金额...归还".
+# Contexts share "借款" / "金额" / "归还" → context_overlap = true.
+# Values differ → 1 Contradiction (Money).
+#
+# Hallucination scan: "¥30000" not in chunk union → 1 flag, kind=Number.
+#
+# No inline cites → citation_penalty = 0.
+#
+# Formula:
+#   citation_penalty      = 0.0
+#   contradiction_penalty = 0.50 * min(1.0, 1/2) = 0.25
+#   hallucination_penalty = 0.30 * min(1.0, 1/4) = 0.075
+#   confidence            = 1.0 - 0.25 - 0.075 = 0.675
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE
