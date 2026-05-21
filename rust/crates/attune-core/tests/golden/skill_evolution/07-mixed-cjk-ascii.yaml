@@ -1,0 +1,41 @@
+id: 07-mixed-cjk-ascii
+description: |
+  Mixed CJK + ASCII tokenization. Target "rust 所有权":
+  - ASCII: [rust]
+  - CJK from 所有权 (3 chars): bigrams [所有, 有权]
+  - target_tokens = {rust, 所有, 有权}
+
+  Other buckets:
+  - "rust 借用检查器" → {rust, 借用, 用检, 检查, 查器}, shares "rust"; diff={借用,用检,检查,查器}, weight 3 each.
+  - "rust 生命周期"   → {rust, 生命, 命周, 周期}, shares "rust"; diff={生命,命周,周期}, weight 3 each.
+
+  All 7 candidate tokens tied at weight 3.
+  But MAX_EXPANSIONS_PER_PATTERN = 8, so we keep ALL 7.
+  Lex order (CJK by Unicode codepoint asc):
+  - 借用=0x501F_0x7528
+  - 命周=0x547D_0x5468
+  - 周期=0x5468_0x671F
+  - 检查=0x68C0_0x67E5
+  - 查器=0x67E5_0x5668
+  - 生命=0x751F_0x547D
+  - 用检=0x7528_0x68C0
+  Sorted ascending by codepoint:
+  借用 (0x501F) < 周期 (0x5468) < 命周 (0x547D) < 查器 (0x67E5) < 检查 (0x68C0) < 生命 (0x751F) < 用检 (0x7528)
+signals:
+  - query: "rust 所有权"
+    count: 3
+  - query: "rust 借用检查器"
+    count: 3
+  - query: "rust 生命周期"
+    count: 3
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 3
+  contains_records:
+    - query_pattern: "rust 所有权"
+      expansions: [借用, 周期, 命周, 查器, 检查, 生命, 用检]
+      generated_by: heuristic
+reviewer:
+  approved: true

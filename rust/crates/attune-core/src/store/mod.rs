@@ -20,6 +20,8 @@ mod web_search_cache;
 mod chunk_breadcrumbs;
 mod links;               // internal knowledge linker — item_entities + item_links tables
 pub use links::LinkRow;
+mod skill_expansions;    // self_evolving_skill_agent — per-query learned expansions
+pub use skill_expansions::{ExpansionSource, SkillExpansionRow, MAX_EXPANSIONS_PER_PATTERN};
 pub mod browse_signals;  // pub: BrowseSignalInput / BrowseSignalRow 给 attune-server route 用
 pub mod auto_bookmarks;  // W4 G2: high engagement auto bookmark candidates (G3 staging)
 pub mod audit;            // v0.6 Phase A.5.3: 出网审计日志
@@ -516,6 +518,22 @@ CREATE TABLE IF NOT EXISTS item_links (
 );
 CREATE INDEX IF NOT EXISTS idx_item_links_a ON item_links(item_a, weight DESC);
 CREATE INDEX IF NOT EXISTS idx_item_links_b ON item_links(item_b, weight DESC);
+
+-- self_evolving_skill_agent: per-query learned expansion words (SkillClaw style).
+-- 与 skill_evolution.rs 的 app_settings.search.learned_expansions（按 topic 维度）互补：
+-- 这里是按 *query_pattern*（小写后的原 query 文本）维度，由 self_evolving_skill_agent
+-- 周期 generate。Heuristic 路径零成本，LLM 路径仅在用户开启 + governor 允许时触发。
+-- 应用阶段（search 路由 expansion）会优先匹配 query_pattern 精确命中，再 fallback
+-- 到 learned_expansions topic 模糊命中。
+CREATE TABLE IF NOT EXISTS skill_expansions (
+    query_pattern  TEXT PRIMARY KEY,
+    expansions     TEXT NOT NULL,            -- JSON array of strings, bounded
+    generated_by   TEXT NOT NULL,            -- 'heuristic' | 'llm'
+    confidence     REAL NOT NULL DEFAULT 0.5,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_skill_expansions_updated ON skill_expansions(updated_at DESC);
 "#;
 
 pub struct Store {

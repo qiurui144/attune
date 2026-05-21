@@ -1,0 +1,21 @@
+id: 06-isolated-pattern-no-expansion
+description: |
+  Target "kubernetes ingress" has no co-occurring buckets sharing any token.
+  Other buckets are about totally different topics (rust async, python pandas).
+  Heuristic returns empty → record dropped → no rows written.
+  buckets_count includes all 3 patterns (all crossed threshold).
+signals:
+  - query: "kubernetes ingress"
+    count: 3
+  - query: "rust async runtime"
+    count: 4
+  - query: "python pandas dataframe"
+    count: 5
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 3
+  records: []
+reviewer:
+  approved: true

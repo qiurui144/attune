@@ -1,13 +1,28 @@
-// npu-vault/crates/vault-core/src/skill_evolution.rs
+// npu-vault/crates/vault-core/src/skill_evolution/mod.rs
 //
 // 技能自动进化模块（SkillClaw 启发）
 //
-// 工作流：
+// 工作流（legacy topic-keyed 路径，本文件实现）：
 //   1. 收集本地搜索失败信号（knowledge_count == 0）
 //   2. 当累积信号 >= EVOLVE_THRESHOLD 时触发一次进化周期
 //   3. LLM 分析失败查询 → 提炼主题和同义词扩展词组
 //   4. 将扩展词组写入 app_settings["search"]["learned_expansions"]
 //   5. Chat 检索前自动扩展查询，命中率随时间提升
+//
+// 工作流（新 query-pattern 路径，`agent::SelfEvolvingSkillAgent`）：
+//   1. 同样消费 `skill_signals.kind='search_miss'`
+//   2. 默认零成本 heuristic 路径（co-occurrence + stoplist），LLM 路径仅在用户
+//      开启 + governor 允许时启用
+//   3. 写入 `skill_expansions(query_pattern, ...)` 表（per-query 维度）
+//   4. `expand_query_with_table` 在 chat 路由检索前优先按 exact query_pattern
+//      命中，再 fallback 到 legacy topic-keyed learned_expansions
+
+pub mod agent;
+
+pub use agent::{
+    expand_query_with_table, EvolutionRecord, EvolutionRunStats, GeneratedBy,
+    SelfEvolvingSkillAgent, SkillAgentConfig,
+};
 
 use crate::error::{Result, VaultError};
 use crate::llm::LlmProvider;

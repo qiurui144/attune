@@ -1,0 +1,24 @@
+id: 09-llm-disabled-still-learns
+description: |
+  enable_llm=false + no LLM provider → heuristic path takes over. The 零成本档
+  contract: even LLM-off vaults must learn. This is the same shape as 01- but
+  asserts the agent flag explicitly.
+signals:
+  - query: "ssh tunnel forward"
+    count: 4
+  - query: "ssh port forward"
+    count: 3
+  - query: "ssh reverse tunnel"
+    count: 3
+config:
+  window_days: 0
+  min_signal_count: 3
+  enable_llm: false
+expected:
+  buckets_count: 3
+  contains_records:
+    - query_pattern: "ssh tunnel forward"
+      expansions: [port, reverse]
+      generated_by: heuristic
+reviewer:
+  approved: true
