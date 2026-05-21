@@ -1,0 +1,17 @@
+id: syn-id_card_cn-2
+profile: id_card
+id_card_subtype: id_card_cn
+schema_version: id_card_cn_v1
+expected_fields:
+  name: 合成姓名 2
+  gender: 女
+  nationality: 汉
+  birth_date: '1995-08-26'
+  address: 测试省测试市测试区测试街道 2 号
+  id_number: '310101199508264062'
+expected_lines_count_min: 6
+max_elapsed_ms: 2000
+reviewer:
+  name: SYNTHETIC_GB11643_VALID
+  approved: true
+notes: Synthetic — GB 11643 check digit verified; no real identity.

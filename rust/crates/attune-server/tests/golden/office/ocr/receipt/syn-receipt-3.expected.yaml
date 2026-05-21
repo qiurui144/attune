@@ -1,0 +1,17 @@
+id: syn-receipt-3
+profile: receipt
+schema_version: receipt_v1
+expected_fields:
+  invoice_no: '12955705'
+  issue_date: '2026-05-28'
+  seller: 测试销售方 3 有限公司
+  buyer: 测试购买方 3 有限公司
+  amount_total: '5358.15'
+  tax_amount: '616.42'
+  amount_chinese: 伍仟叁佰伍拾捌元壹角伍分
+expected_lines_count_min: 8
+max_elapsed_ms: 2000
+reviewer:
+  name: SYNTHETIC_GENERATED
+  approved: true
+notes: Synthetic invoice — fake company names, mathematically consistent amounts.
