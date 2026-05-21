@@ -1,0 +1,26 @@
+id: 10-outside-window-filtered
+description: |
+  Episodic created 60 days ago with promotion_window_days=7.
+  Window filter excludes it from candidates *before* the access/score gates run.
+  expected.considered == 1 (live list count includes it) but gated_by_* both 0
+  because it never reached the gate.
+episodic_memories:
+  - id: ep-very-old
+    chunk_hashes: [old-1, old-2, old-3, old-4, old-5]
+    summary: 用户两个月前接触的主题，最近无相关引用。
+    created_at_offset_days: 60
+citation_hits:
+  - chunk: old-1
+    count: 5
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: []
+  gated_by_access: 0
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true

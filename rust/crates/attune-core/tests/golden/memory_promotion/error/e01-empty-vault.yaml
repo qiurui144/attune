@@ -1,0 +1,19 @@
+id: e01-empty-vault
+description: |
+  Error case — empty episodic set. Agent must return cleanly (no panic, no
+  promotion, all counters zero). Verifies the "idle cycle" code path.
+episodic_memories: []
+citation_hits: []
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: []
+  gated_by_access: 0
+  gated_by_score: 0
+  already_promoted: 0
+  considered: 0
+reviewer:
+  approved: true

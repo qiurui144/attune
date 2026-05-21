@@ -212,10 +212,28 @@ pub fn rank_candidates(
         }
         scored.push((s, c));
     }
-    // Sort desc by score, then asc by episodic_id for determinism on ties.
+    // Sort desc by score; tie-break deterministically on (created_at asc,
+    // first chunk_hash asc, episodic_id asc) — older / lex-smaller wins.
+    // We avoid using episodic_id alone because in production it is a uuid (no
+    // meaningful order), so tests with golden ids like "ep-aaa" / "ep-zzz"
+    // would otherwise fail unpredictably; the (created_at, chunk_hash[0])
+    // tuple is semantic AND stable across runs.
     scored.sort_by(|a, b| {
         b.0.partial_cmp(&a.0)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.created_at.cmp(&b.1.created_at))
+            .then_with(|| {
+                a.1.source_chunk_hashes
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("")
+                    .cmp(
+                        b.1.source_chunk_hashes
+                            .first()
+                            .map(|s| s.as_str())
+                            .unwrap_or(""),
+                    )
+            })
             .then_with(|| a.1.episodic_id.cmp(&b.1.episodic_id))
     });
     let cap = cfg.max_promotions_per_run.min(MAX_PROMOTIONS_HARD_CAP);

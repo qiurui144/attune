@@ -1,0 +1,32 @@
+id: 02-civilcode-mid-cited
+description: |
+  中华人民共和国民法典 总则+物权 episodic — 5 days old, 8 chunks, 4 citations.
+  Independent score: 1.0*4 + 2.0/1.5 + 0.5*ln(8) ≈ 4 + 1.3333 + 1.0397 = 6.373 → > 4.0 → promote.
+episodic_memories:
+  - id: ep-civil-code
+    chunk_hashes: [cc-gen-001, cc-gen-002, cc-gen-003, cc-gen-004, cc-prop-001, cc-prop-002, cc-prop-003, cc-prop-004]
+    summary: |
+      用户研究了《中华人民共和国民法典》总则第一章基本规定、第二章自然人，
+      以及物权编通则的主要条款，关注民事主体与权利义务的界定。
+    created_at_offset_days: 5
+citation_hits:
+  - chunk: cc-gen-001
+    count: 1
+  - chunk: cc-gen-002
+    count: 1
+  - chunk: cc-prop-001
+    count: 1
+  - chunk: cc-prop-002
+    count: 1
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: [ep-civil-code]
+  gated_by_access: 0
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true

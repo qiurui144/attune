@@ -1,0 +1,29 @@
+id: 05-news-low-access
+description: |
+  News article episodic — 1d old, 3 chunks, 2 citations.
+  access=2 < min_access_count=3 → gated by access (regardless of score).
+  Verifies the access gate is `<` strict, not `<=`.
+episodic_memories:
+  - id: ep-news
+    chunk_hashes: [news-001, news-002, news-003]
+    summary: |
+      用户浏览了一则关于本周 AI 行业并购事件的新闻报道，
+      简要引用其中两段内容。
+    created_at_offset_days: 1
+citation_hits:
+  - chunk: news-001
+    count: 1
+  - chunk: news-002
+    count: 1
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: []
+  gated_by_access: 1
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true

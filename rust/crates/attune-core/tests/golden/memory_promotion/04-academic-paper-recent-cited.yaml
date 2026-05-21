@@ -1,0 +1,31 @@
+id: 04-academic-paper-recent-cited
+description: |
+  Academic paper episodic — 1d old, 10 chunks, exactly 3 citations.
+  Independent score: 1.0*3 + 2.0/1.1 + 0.5*ln(10) ≈ 3 + 1.8182 + 1.1513 = 5.97 → > 4.0 → promote.
+  Edge case: access == min_access_count (3 == 3) — gate is `<`, so we pass.
+episodic_memories:
+  - id: ep-academic
+    chunk_hashes: [ap-001, ap-002, ap-003, ap-004, ap-005, ap-006, ap-007, ap-008, ap-009, ap-010]
+    summary: |
+      用户阅读了一篇关于 retrieval-augmented generation (RAG) 综述论文，
+      涵盖检索器架构、生成器协同、评测指标三个章节。
+    created_at_offset_days: 1
+citation_hits:
+  - chunk: ap-001
+    count: 1
+  - chunk: ap-005
+    count: 1
+  - chunk: ap-009
+    count: 1
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: [ep-academic]
+  gated_by_access: 0
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true
