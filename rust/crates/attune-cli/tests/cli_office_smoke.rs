@@ -121,3 +121,27 @@ fn binary_is_buildable_and_help_works() {
         .success()
         .stdout(predicate::str::contains("Attune CLI"));
 }
+
+// ─── vault-import smoke (#61 regression) ────────────────────────────────────
+
+/// `attune vault-import <missing-dir>` must NOT print "already exists".
+/// Regression for #61: previously Vault::open_default() ran first, auto-created
+/// an empty vault.db, and the import guard fired even on a fresh HOME.
+///
+/// We use a non-existent src dir so the process exits 1 with "not a directory",
+/// which proves the guard ran BEFORE any vault.db was touched.
+#[test]
+fn vault_import_missing_src_does_not_report_already_exists() {
+    // Isolate data_dir by overriding HOME so platform::data_dir() resolves
+    // to a fresh, empty temp directory (no pre-existing vault.db).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    attune_cmd()
+        .env("HOME", tmp.path())
+        .args(["vault-import", "/definitely/does/not/exist/__attune_import_smoke__"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("not a directory")
+                .and(predicate::str::contains("already exists").not()),
+        );
+}

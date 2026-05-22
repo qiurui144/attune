@@ -330,6 +330,11 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             return run_ocr_profile_create(id, name, description, languages, *dpi, tags);
         }
         Commands::OcrProfileDelete { id } => return run_ocr_profile_delete(id),
+        // VaultImport must run BEFORE Vault::open_default() — open() auto-creates vault.db
+        // via Connection::open(), which would make the "already exists" guard always trigger.
+        Commands::VaultImport { src, force } => {
+            return run_vault_import(src, *force);
+        }
         _ => {}
     }
     // OCR / Deploy 子命令不需要 vault — 早 return 避免 zero-state 报错
@@ -580,43 +585,8 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             println!("  2. 启动 server:         attune-server-headless --port 18900");
             println!("  3. 浏览器访问:          http://localhost:18900");
         }
-        Commands::VaultImport { src, force } => {
-            let data = attune_core::platform::data_dir();
-            let target_db = data.join("vault.db");
-            if target_db.exists() && !force {
-                eprintln!("Refusing to import — {} already exists.", target_db.display());
-                eprintln!("Use --force to overwrite (DANGEROUS, replaces current vault).");
-                std::process::exit(1);
-            }
-            if !src.is_dir() {
-                eprintln!("Source not a directory: {}", src.display());
-                std::process::exit(1);
-            }
-            let src_db = src.join("vault.db");
-            if !src_db.exists() {
-                eprintln!("Source missing vault.db: {}", src_db.display());
-                std::process::exit(1);
-            }
-            std::fs::create_dir_all(&data).map_err(attune_core::error::VaultError::Io)?;
-            let mut copied = 0u32;
-            for name in &["vault.db", "vault.db-shm", "vault.db-wal", "vectors.encbin"] {
-                let s = src.join(name);
-                if s.exists() {
-                    std::fs::copy(&s, data.join(name)).map_err(attune_core::error::VaultError::Io)?;
-                    copied += 1;
-                }
-            }
-            let ftx_src = src.join("tantivy");
-            if ftx_src.is_dir() {
-                let ftx_dst = data.join("tantivy");
-                let _ = std::fs::remove_dir_all(&ftx_dst);
-                copy_dir_recursive(&ftx_src, &ftx_dst).map_err(attune_core::error::VaultError::Io)?;
-                copied += 1;
-            }
-            println!("Imported {copied} entries from {}", src.display());
-            println!("Run `attune unlock` to verify with the matching master password.");
-            println!("If unlock fails, ensure device.key matches: {}",
-                attune_core::platform::device_secret_path().display());
+        Commands::VaultImport { .. } => {
+            unreachable!("VaultImport handled before vault open")
         }
         // Plugin / cloud / OCR profile 子命令在 run() 头部已 handle, 这里 unreachable
         Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. }
@@ -1301,6 +1271,48 @@ fn run_ocr_profile_delete(id: &str) -> attune_core::error::Result<()> {
     Ok(())
 }
 
+/// `attune vault-import <src>` — runs BEFORE Vault::open_default() so that
+/// Connection::open() never auto-creates an empty vault.db that would make
+/// the "already exists" guard always fire (#61).
+fn run_vault_import(src: &std::path::Path, force: bool) -> attune_core::error::Result<()> {
+    let data = attune_core::platform::data_dir();
+    let target_db = data.join("vault.db");
+    if target_db.exists() && !force {
+        eprintln!("Refusing to import — {} already exists.", target_db.display());
+        eprintln!("Use --force to overwrite (DANGEROUS, replaces current vault).");
+        std::process::exit(1);
+    }
+    if !src.is_dir() {
+        eprintln!("Source not a directory: {}", src.display());
+        std::process::exit(1);
+    }
+    let src_db = src.join("vault.db");
+    if !src_db.exists() {
+        eprintln!("Source missing vault.db: {}", src_db.display());
+        std::process::exit(1);
+    }
+    std::fs::create_dir_all(&data).map_err(attune_core::error::VaultError::Io)?;
+    let mut copied = 0u32;
+    for name in &["vault.db", "vault.db-shm", "vault.db-wal", "vectors.encbin"] {
+        let s = src.join(name);
+        if s.exists() {
+            std::fs::copy(&s, data.join(name)).map_err(attune_core::error::VaultError::Io)?;
+            copied += 1;
+        }
+    }
+    let ftx_src = src.join("tantivy");
+    if ftx_src.is_dir() {
+        let ftx_dst = data.join("tantivy");
+        let _ = std::fs::remove_dir_all(&ftx_dst);
+        copy_dir_recursive(&ftx_src, &ftx_dst).map_err(attune_core::error::VaultError::Io)?;
+        copied += 1;
+    }
+    println!("Imported {copied} entries from {}", src.display());
+    println!("Run `attune unlock` to verify with the matching master password.");
+    println!("If unlock fails, ensure device.key matches: {}",
+        attune_core::platform::device_secret_path().display());
+    Ok(())
+}
 
 #[cfg(test)]
 mod cli_helpers_tests {
