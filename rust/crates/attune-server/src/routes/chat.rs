@@ -779,12 +779,7 @@ pub async fn chat(
                 Json(serde_json::json!({"error": e.to_string()})),
             )
         })?
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
+        .map_err(|e| llm_upstream_error(e))?;
 
     // F-17 restore: LLM 响应里的所有 placeholder 还原成原值给用户看
     let response = redactor.restore(&raw_response, &all_mappings);
@@ -1055,4 +1050,65 @@ pub async fn chat_history(
 
     // 返回与 /chat/sessions 相同的 key 结构，保持 API 一致性
     Ok(Json(serde_json::json!({"sessions": sessions, "total": sessions.len()})))
+}
+
+/// 将 LLM provider 返回的 VaultError 映射为客户端可读的 HTTP 响应。
+///
+/// VaultError::LlmUnavailable 的 message 格式为 "openai HTTP <status>: <body>" 或
+/// "ollama HTTP <status>: <body>"。从中提取上游 status 后按以下规则映射：
+/// - 429 → 429 Too Many Requests  — quota 耗尽，告知用户等待
+/// - 503 / 529 / 529 (Anthropic overloaded) → 503 Service Unavailable — 上游不可用
+/// - 其他 5xx → 502 Bad Gateway    — 上游内部错误
+/// - 其他 4xx → 400 Bad Request    — 配置问题（无效 key 等）
+/// - parse 失败 / 其他 → 500        — 未知错误
+fn llm_upstream_error(e: attune_core::error::VaultError) -> ApiError {
+    let msg = e.to_string();
+    // 尝试从 "... HTTP <code>: ..." 中解析上游 status
+    let upstream_status: Option<u16> = msg
+        .split("HTTP ")
+        .nth(1)
+        .and_then(|s| s.splitn(2, ':').next())
+        .and_then(|code| code.trim().parse().ok());
+
+    match upstream_status {
+        Some(429) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "LLM 服务 quota 已耗尽，请稍后再试。",
+                "code": "llm-rate-limited",
+                "upstream_status": 429,
+            })),
+        ),
+        Some(s) if s == 503 || s == 529 => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "LLM 服务暂时不可用，请稍后重试。",
+                "code": "llm-provider-unavailable",
+                "upstream_status": s,
+            })),
+        ),
+        Some(s) if (500..600).contains(&s) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": "LLM 服务内部错误，请稍后重试。",
+                "code": "llm-provider-error",
+                "upstream_status": s,
+            })),
+        ),
+        Some(s) if (400..500).contains(&s) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "LLM 配置错误（API key 无效或权限不足），请检查设置。",
+                "code": "llm-config-error",
+                "upstream_status": s,
+            })),
+        ),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": msg,
+                "code": "llm-error",
+            })),
+        ),
+    }
 }
