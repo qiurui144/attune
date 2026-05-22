@@ -18,6 +18,9 @@ ATTUNE_PRO="${ATTUNE_PRO_REPO:-/data/company/project/attune-pro}"
 PLUGINHUB="${PLUGINHUB_REPO:-/data/company/project/attune-pluginhub}"
 CLOUD="${CLOUD_REPO:-/data/company/cloud}"
 
+# GA 专项检查模式：VERSIONING_GA_CHECK=1 时额外验证三仓版本字段全对齐 v1.0.0
+GA_CHECK="${VERSIONING_GA_CHECK:-0}"
+
 EXIT=0
 WARN=0
 
@@ -120,6 +123,100 @@ check_pair_attune_pro() {
   fi
 }
 
+# ── GA v1.0.0 专项版本字段配对检查 ───────────────────────────────────────────
+# 验证: Cargo.toml workspace version / tauri.conf.json / plugin.yaml version +
+#        attune_min_version / cloud RELEASE.md 节 / cloud-v2.2.0 tag
+# 仅在 VERSIONING_GA_CHECK=1 时启用；或通过 GA_CHECK 变量控制
+
+check_ga_version_fields() {
+  [ "$GA_CHECK" = "1" ] || return 0
+
+  local ga_ver="1.0.0"
+  local cloud_tag="cloud-v2.2.0"
+  local ga_errors=0
+
+  echo
+  bold "════════ GA v${ga_ver} 版本字段对齐审计 ════════"; echo
+
+  # 1. attune Cargo.toml workspace version
+  local acv
+  acv=$(grep -E '^version\s*=' "$ATTUNE/rust/Cargo.toml" 2>/dev/null | head -1 | sed 's/.*"\(.*\)".*/\1/')
+  if [ "$acv" = "$ga_ver" ]; then
+    ok "attune rust/Cargo.toml workspace version = $acv"
+  else
+    err "attune rust/Cargo.toml workspace version=$acv，期望 $ga_ver"; ga_errors=$((ga_errors+1))
+  fi
+
+  # 2. tauri.conf.json version
+  local tauri_conf="$ATTUNE/apps/attune-desktop/tauri.conf.json"
+  if [ -f "$tauri_conf" ]; then
+    local tv
+    tv=$(python3 -c "import json; d=json.load(open('$tauri_conf')); print(d.get('version','') or d.get('package',{}).get('version',''))" 2>/dev/null || echo "")
+    if [ "$tv" = "$ga_ver" ]; then
+      ok "tauri.conf.json version = $tv"
+    else
+      err "tauri.conf.json version=$tv，期望 $ga_ver"; ga_errors=$((ga_errors+1))
+    fi
+  else
+    warn "tauri.conf.json 不存在: $tauri_conf，跳过"
+  fi
+
+  # 3. attune-pro 各 plugin crate 版本（workspace 无顶层 version=，用 law-pro 代表）
+  local pcv
+  pcv=$(grep -E '^version\s*=' "$ATTUNE_PRO/plugins/law-pro/Cargo.toml" 2>/dev/null | head -1 | sed 's/.*"\(.*\)".*/\1/')
+  if [ "$pcv" = "$ga_ver" ]; then
+    ok "attune-pro law-pro crate Cargo.toml version = $pcv"
+  else
+    err "attune-pro law-pro crate Cargo.toml version=$pcv，期望 $ga_ver"; ga_errors=$((ga_errors+1))
+  fi
+
+  # 4. law-pro plugin.yaml version + attune_min_version
+  local plugin_yaml="$ATTUNE_PRO/plugins/law-pro/plugin.yaml"
+  if [ -f "$plugin_yaml" ]; then
+    local pyv pym
+    pyv=$(grep -E '^version:' "$plugin_yaml" | head -1 | sed 's/version: *"\?\([^"]*\)"\?.*/\1/')
+    pym=$(grep -E '^attune_min_version:' "$plugin_yaml" | head -1 | sed 's/attune_min_version: *"\?\([^"]*\)"\?.*/\1/')
+    if [ "$pyv" = "$ga_ver" ]; then
+      ok "law-pro plugin.yaml version = $pyv"
+    else
+      err "law-pro plugin.yaml version=$pyv，期望 $ga_ver"; ga_errors=$((ga_errors+1))
+    fi
+    if [ "$pym" = "$ga_ver" ]; then
+      ok "law-pro plugin.yaml attune_min_version = $pym"
+    else
+      err "law-pro plugin.yaml attune_min_version=$pym，期望 $ga_ver"; ga_errors=$((ga_errors+1))
+    fi
+  else
+    err "law-pro plugin.yaml 不存在: $plugin_yaml"; ga_errors=$((ga_errors+1))
+  fi
+
+  # 5. cloud RELEASE.md 有 cloud-v2.2.0 节
+  if [ -f "$CLOUD/RELEASE.md" ]; then
+    if grep -qE "^## (${cloud_tag}|v2\.2\.0)" "$CLOUD/RELEASE.md" 2>/dev/null; then
+      ok "cloud RELEASE.md 有 ${cloud_tag} / v2.2.0 节"
+    else
+      err "cloud RELEASE.md 缺 ${cloud_tag} 节"; ga_errors=$((ga_errors+1))
+    fi
+  else
+    err "cloud RELEASE.md 不存在: $CLOUD/RELEASE.md"; ga_errors=$((ga_errors+1))
+  fi
+
+  # 6. cloud 仓 cloud-v2.2.0 tag 是否已存在（发版前应未创建；用作可选检查）
+  if git -C "$CLOUD" rev-parse "$cloud_tag" >/dev/null 2>&1; then
+    warn "cloud 仓 $cloud_tag tag 已存在（GA ceremony 已完成或需检查）"
+  else
+    ok "cloud 仓 $cloud_tag tag 尚未创建（ceremony 前正常）"
+  fi
+
+  echo
+  if [ "$ga_errors" -eq 0 ]; then
+    green "✅ GA v${ga_ver} 版本字段全部对齐"; echo
+  else
+    red "❌ GA 版本字段 $ga_errors 处不对齐，请修复"; echo
+    EXIT=2
+  fi
+}
+
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 
 bold "Attune Ecosystem Version Audit — $(date '+%Y-%m-%d %H:%M:%S')"
@@ -131,6 +228,7 @@ audit_repo "attune-pluginhub" "$PLUGINHUB"  "master"
 audit_repo "cloud"            "$CLOUD"      "master"
 
 check_pair_attune_pro
+check_ga_version_fields
 
 echo
 bold "════════ 总结 ════════"; echo
