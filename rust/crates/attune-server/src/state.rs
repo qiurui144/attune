@@ -1810,23 +1810,6 @@ impl AppState {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn webdav_sync_worker_flag_prevents_double_start() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let flag = AtomicBool::new(false);
-        // 首次 compare_exchange 成功。
-        assert!(flag
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok());
-        // 二次失败 —— worker 不会重复起。
-        assert!(flag
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err());
-    }
-}
-
 /// 按 settings + 硬件构建 LLM provider。
 ///
 /// 四级优先级：
@@ -1873,4 +1856,21 @@ fn build_llm_from_settings(
             None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn webdav_sync_worker_flag_prevents_double_start() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = AtomicBool::new(false);
+        // 首次 compare_exchange 成功。
+        assert!(flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok());
+        // 二次失败 —— worker 不会重复起。
+        assert!(flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err());
+    }
 }

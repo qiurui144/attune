@@ -10,6 +10,7 @@ use std::time::Duration;
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
 async fn ocr_profiles_crud_round_trip() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     // 隔离 data_dir
@@ -158,6 +159,7 @@ async fn ocr_profiles_crud_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
 async fn settings_default_includes_active_profile() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     // 隔离 data_dir

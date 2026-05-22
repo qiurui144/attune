@@ -110,9 +110,8 @@ async fn ai_stack_web_search_available_tracks_state() {
             available.is_boolean(),
             "`web_search.available` must be bool: {available}"
         );
-        assert_eq!(
-            available.as_bool().unwrap(),
-            false,
+        assert!(
+            !available.as_bool().unwrap(),
             "available must be false when no provider is loaded"
         );
 
@@ -145,9 +144,8 @@ async fn ai_stack_web_search_available_tracks_state() {
             .expect("`web_search` field missing");
 
         let available = ws.get("available").expect("`web_search.available` missing");
-        assert_eq!(
+        assert!(
             available.as_bool().unwrap_or(false),
-            true,
             "available must be true after injecting a provider — \
              the route must read the live state.web_search Arc"
         );

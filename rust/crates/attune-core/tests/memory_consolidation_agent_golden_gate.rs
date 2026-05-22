@@ -14,7 +14,7 @@
 //!       * Boundary `#[test]` ≥ 5 ...................... lib unit tests
 //!       * Error case ≥ 3 .............................. `error/` subdir
 //!       * Integration E2E ≥ 1 ......................... see separate
-//!                                                       `memory_consolidation_agent_integration.rs`
+//!         `memory_consolidation_agent_integration.rs`
 //!       * Regression fixture .......................... 11-sentinel-*.yaml
 
 use std::collections::BTreeSet;
@@ -31,6 +31,7 @@ use serde::Deserialize;
 struct GoldenCase {
     id: String,
     #[serde(default)]
+    #[allow(dead_code)]
     description: String,
     #[serde(default)]
     episodic_memories: Vec<GoldenEpisodic>,

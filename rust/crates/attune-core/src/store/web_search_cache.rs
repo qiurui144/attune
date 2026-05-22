@@ -199,7 +199,7 @@ mod tests {
             .put_web_search_cached(
                 &dek,
                 "query B",
-                &vec![WebSearchResult {
+                &[WebSearchResult {
                     title: "B 专属".into(),
                     url: "https://b.com".into(),
                     snippet: "different".into(),

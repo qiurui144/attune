@@ -190,11 +190,12 @@ mod tests {
     use super::*;
 
     fn mk_hw(cpu: &str, ram_gb: u64, gpu: bool) -> HardwareProfile {
-        let mut hw = HardwareProfile::default();
-        hw.cpu_model = cpu.to_string();
-        hw.total_ram_bytes = ram_gb * 1024 * 1024 * 1024;
-        hw.has_nvidia_gpu = gpu;
-        hw
+        HardwareProfile {
+            cpu_model: cpu.to_string(),
+            total_ram_bytes: ram_gb * 1024 * 1024 * 1024,
+            has_nvidia_gpu: gpu,
+            ..Default::default()
+        }
     }
 
     #[test]

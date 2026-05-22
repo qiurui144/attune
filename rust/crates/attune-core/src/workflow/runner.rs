@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn event_ref_resolves_to_event_data() {
-        let mut state = BTreeMap::new();
+        let state = BTreeMap::new();
         let mut event = empty_event();
         event.data.insert("file_id".into(), serde_json::json!("f_123"));
 
@@ -278,7 +278,7 @@ mod tests {
         // Missing event field → Null (not panic, not error — "graceful")
         let null_val = resolve_value(
             &serde_yaml::Value::String("$event.missing".into()),
-            &mut state,
+            &state,
             &event,
         );
         assert_eq!(null_val, serde_json::Value::Null);

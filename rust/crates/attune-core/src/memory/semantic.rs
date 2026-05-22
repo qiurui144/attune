@@ -316,7 +316,7 @@ mod tests {
                     "episodic",
                     (i as i64) * 86400,
                     (i as i64 + 1) * 86400,
-                    &[hash.clone()],
+                    std::slice::from_ref(&hash),
                     &summary,
                     "m",
                     (i as i64) * 86400,

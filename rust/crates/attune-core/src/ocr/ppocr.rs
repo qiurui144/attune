@@ -697,7 +697,7 @@ mod tests {
     #[test]
     fn num_cpus_safe_caps_at_8() {
         let n = num_cpus_safe();
-        assert!(n >= 1 && n <= 8, "got {n}");
+        assert!((1..=8).contains(&n), "got {n}");
     }
 
     #[test]

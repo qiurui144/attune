@@ -54,9 +54,7 @@ fn document_v1_serde_roundtrip() {
 
 #[test]
 fn receipt_v1_serde_roundtrip() {
-    let mut fields = ReceiptFields::default();
-    fields.invoice_no = fv("12345678");
-    fields.amount_total = fv("1234.56");
+    let fields = ReceiptFields { invoice_no: fv("12345678"), amount_total: fv("1234.56"), ..Default::default() };
     let v = StructuredFields::ReceiptV1 {
         fields,
         unrecognized_fields: vec!["buyer".into()],
@@ -76,9 +74,7 @@ fn receipt_v1_serde_roundtrip() {
 
 #[test]
 fn table_v1_serde_roundtrip() {
-    let mut fields = TableFields::default();
-    fields.row_count = fv("3");
-    fields.column_count = fv("4");
+    let fields = TableFields { row_count: fv("3"), column_count: fv("4"), ..Default::default() };
     let v = StructuredFields::TableV1 {
         fields,
         unrecognized_fields: vec![],
@@ -97,9 +93,7 @@ fn table_v1_serde_roundtrip() {
 
 #[test]
 fn card_v1_serde_roundtrip() {
-    let mut fields = CardFields::default();
-    fields.name = fv("Alice");
-    fields.email = fv("alice@example.com");
+    let fields = CardFields { name: fv("Alice"), email: fv("alice@example.com"), ..Default::default() };
     let v = StructuredFields::CardV1 {
         fields,
         unrecognized_fields: vec!["address".into()],
@@ -118,9 +112,7 @@ fn card_v1_serde_roundtrip() {
 
 #[test]
 fn id_card_cn_v1_serde_roundtrip() {
-    let mut fields = IdCardCnFields::default();
-    fields.name = fv("张三");
-    fields.id_number = fv("110101199001010015");
+    let fields = IdCardCnFields { name: fv("张三"), id_number: fv("110101199001010015"), ..Default::default() };
     let v = StructuredFields::IdCardCnV1 {
         fields,
         unrecognized_fields: vec![],
@@ -139,9 +131,7 @@ fn id_card_cn_v1_serde_roundtrip() {
 
 #[test]
 fn bank_card_v1_serde_roundtrip() {
-    let mut fields = BankCardFields::default();
-    fields.card_number = fv("4111 1111 1111 1111");
-    fields.bank_name = fv("中国工商银行");
+    let fields = BankCardFields { card_number: fv("4111 1111 1111 1111"), bank_name: fv("中国工商银行"), ..Default::default() };
     let v = StructuredFields::BankCardV1 {
         fields,
         unrecognized_fields: vec![],
@@ -160,9 +150,7 @@ fn bank_card_v1_serde_roundtrip() {
 
 #[test]
 fn business_license_v1_serde_roundtrip() {
-    let mut fields = BusinessLicenseFields::default();
-    fields.registration_no = fv("91110000600000000X");
-    fields.company_name = fv("测试有限公司");
+    let fields = BusinessLicenseFields { registration_no: fv("91110000600000000X"), company_name: fv("测试有限公司"), ..Default::default() };
     let v = StructuredFields::BusinessLicenseV1 {
         fields,
         unrecognized_fields: vec!["scope".into()],

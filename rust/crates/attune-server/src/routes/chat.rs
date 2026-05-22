@@ -779,7 +779,7 @@ pub async fn chat(
                 Json(serde_json::json!({"error": e.to_string()})),
             )
         })?
-        .map_err(|e| llm_upstream_error(e))?;
+        .map_err(llm_upstream_error)?;
 
     // F-17 restore: LLM 响应里的所有 placeholder 还原成原值给用户看
     let response = redactor.restore(&raw_response, &all_mappings);
@@ -1067,7 +1067,7 @@ fn llm_upstream_error(e: attune_core::error::VaultError) -> ApiError {
     let upstream_status: Option<u16> = msg
         .split("HTTP ")
         .nth(1)
-        .and_then(|s| s.splitn(2, ':').next())
+        .and_then(|s| s.split(':').next())
         .and_then(|code| code.trim().parse().ok());
 
     match upstream_status {

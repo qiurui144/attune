@@ -95,7 +95,7 @@ fn pause_all_stops_workers_within_one_second() {
     // 改为最多 wait 2s，每 50ms 采样一次，全部 worker 都开始增长后即通过。
     registry.resume_all();
     let resume_deadline = std::time::Instant::now() + Duration::from_secs(2);
-    let mut after_resume = vec![0usize; 3];
+    let mut after_resume = [0usize; 3];
     let counters = [&c1, &c2, &c3];
     loop {
         for i in 0..3 {

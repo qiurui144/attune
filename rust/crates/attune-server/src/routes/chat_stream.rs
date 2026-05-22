@@ -133,8 +133,8 @@ mod tests {
 
     #[test]
     fn chunk_size_constant_sane() {
-        assert!(CHUNK_CHARS >= 1);
-        assert!(CHUNK_CHARS <= 200);
+        const _: () = { assert!(CHUNK_CHARS >= 1); };
+        const _: () = { assert!(CHUNK_CHARS <= 200); };
     }
 
     #[test]

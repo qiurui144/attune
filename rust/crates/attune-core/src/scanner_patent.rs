@@ -359,7 +359,7 @@ mod tests {
             database: PatentDatabase::Uspto,
             ipc_filter: None,
         };
-        let effective = q.limit.min(MAX_PER_QUERY).max(1);
+        let effective = q.limit.clamp(1, MAX_PER_QUERY);
         assert_eq!(effective, MAX_PER_QUERY, "limit 应被 clamp 至 MAX_PER_QUERY");
     }
 

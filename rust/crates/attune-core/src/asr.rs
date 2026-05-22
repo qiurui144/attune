@@ -889,8 +889,8 @@ World
     fn parse_srt_time_h_m_s_ms() {
         let srt = "1\n01:02:03,456 --> 01:02:05,789\ntest\n\n";
         let segs = parse_srt(srt);
-        assert_eq!(segs[0].start_ms, 1 * 3_600_000 + 2 * 60_000 + 3 * 1000 + 456);
-        assert_eq!(segs[0].end_ms, 1 * 3_600_000 + 2 * 60_000 + 5 * 1000 + 789);
+        assert_eq!(segs[0].start_ms, 3_600_000 + 2 * 60_000 + 3 * 1000 + 456);
+        assert_eq!(segs[0].end_ms, 3_600_000 + 2 * 60_000 + 5 * 1000 + 789);
     }
 
     #[test]

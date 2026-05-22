@@ -56,10 +56,8 @@ fn arb_structured_fields() -> impl Strategy<Value = StructuredFields> {
             validation_warnings: vec![],
         }),
         arb_field_value().prop_map(|fv| {
-            let mut f = ReceiptFields::default();
-            f.invoice_no = fv;
             StructuredFields::ReceiptV1 {
-                fields: f,
+                fields: ReceiptFields { invoice_no: fv, ..Default::default() },
                 unrecognized_fields: vec![],
                 validation_warnings: vec![],
             }
@@ -70,37 +68,29 @@ fn arb_structured_fields() -> impl Strategy<Value = StructuredFields> {
             validation_warnings: vec![],
         }),
         arb_field_value().prop_map(|fv| {
-            let mut f = CardFields::default();
-            f.name = fv;
             StructuredFields::CardV1 {
-                fields: f,
+                fields: CardFields { name: fv, ..Default::default() },
                 unrecognized_fields: vec![],
                 validation_warnings: vec![],
             }
         }),
         arb_field_value().prop_map(|fv| {
-            let mut f = IdCardCnFields::default();
-            f.name = fv;
             StructuredFields::IdCardCnV1 {
-                fields: f,
+                fields: IdCardCnFields { name: fv, ..Default::default() },
                 unrecognized_fields: vec![],
                 validation_warnings: vec![],
             }
         }),
         arb_field_value().prop_map(|fv| {
-            let mut f = BankCardFields::default();
-            f.card_number = fv;
             StructuredFields::BankCardV1 {
-                fields: f,
+                fields: BankCardFields { card_number: fv, ..Default::default() },
                 unrecognized_fields: vec![],
                 validation_warnings: vec![],
             }
         }),
         arb_field_value().prop_map(|fv| {
-            let mut f = BusinessLicenseFields::default();
-            f.company_name = fv;
             StructuredFields::BusinessLicenseV1 {
-                fields: f,
+                fields: BusinessLicenseFields { company_name: fv, ..Default::default() },
                 unrecognized_fields: vec![],
                 validation_warnings: vec![],
             }

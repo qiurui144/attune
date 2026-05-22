@@ -114,7 +114,7 @@ proptest! {
     fn prop_score_finite(
         access in 0u32..1_000_000,
         chunk_count in 0usize..10_000,
-        recency_days in (0.0f64)..3650.0f64,
+        recency_days in 0.0f64..3650.0f64,
     ) {
         let s = compute_score(access, chunk_count, recency_days);
         prop_assert!(s.is_finite(), "non-finite score for ({access},{chunk_count},{recency_days})");

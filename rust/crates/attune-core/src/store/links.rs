@@ -341,13 +341,13 @@ mod tests {
         let s = fresh();
         s.replace_item_entities(
             "a",
-            &vec![
+            &[
                 mk_entity(EntityKind::Person, "张三"),
                 mk_entity(EntityKind::Person, "张三"),
             ],
         )
         .unwrap();
-        s.replace_item_entities("b", &vec![mk_entity(EntityKind::Person, "张三")])
+        s.replace_item_entities("b", &[mk_entity(EntityKind::Person, "张三")])
             .unwrap();
         // 2 items mention 张三, although item `a` lists him twice
         assert_eq!(s.entity_document_frequency("person", "张三").unwrap(), 2);
@@ -358,12 +358,12 @@ mod tests {
         let s = fresh();
         s.replace_item_entities(
             "a",
-            &vec![mk_entity(EntityKind::Person, "张三")],
+            &[mk_entity(EntityKind::Person, "张三")],
         )
         .unwrap();
         s.replace_item_entities(
             "b",
-            &vec![mk_entity(EntityKind::Person, "李四")],
+            &[mk_entity(EntityKind::Person, "李四")],
         )
         .unwrap();
         assert_eq!(s.purge_item_entities("a").unwrap(), 1);

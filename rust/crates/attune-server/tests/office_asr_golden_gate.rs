@@ -23,6 +23,7 @@ struct AsrExpected {
     id: String,
     audio_path: String,
     duration_sec: f64,
+    #[allow(dead_code)]
     language: String,
     expected_transcript: String,
     #[serde(default)]

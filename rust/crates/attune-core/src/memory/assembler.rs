@@ -383,6 +383,7 @@ mod tests {
             .collect()
     }
 
+    #[allow(dead_code)]
     fn seed_episodic(store: &Store, dek: &Key32, hash: &str, summary: &str, win: i64) -> String {
         store
             .insert_memory(dek, "episodic", win, win + 86400, &[hash.into()], summary, "m", win)

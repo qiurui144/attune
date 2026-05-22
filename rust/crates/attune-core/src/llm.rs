@@ -454,6 +454,7 @@ impl LlmProvider for OllamaLlmProvider {
     /// Ollama-native schema-guided JSON.
     ///   - schema=None  → `format: "json"` (free-form valid JSON)
     ///   - schema=Some  → `format: <schema_object>` (Ollama 0.5+ structured output)
+    ///
     /// 不依赖 ATTUNE_OLLAMA_FORMAT_JSON env var (那是 Lever 1 全局开关, 这里是 per-call).
     fn chat_with_format_json(
         &self,

@@ -56,6 +56,7 @@ const ATOM_ONE_ENTRY: &[u8] = br#"<?xml version="1.0" encoding="utf-8"?>
 struct MockFetcher {
     responses: HashMap<String, FeedHttpResponse>,
     /// (url, etag, last_modified) 三元组按顺序追加 —— 多次 fetch 后可校验。
+    #[allow(clippy::type_complexity)]
     received: std::sync::Mutex<Vec<(String, Option<String>, Option<String>)>>,
 }
 
@@ -151,6 +152,7 @@ fn conditional_get_passes_etag_to_fetcher() {
 
     // 用闭包式 FeedFetcher，直接捕获 received。
     struct CaptureFetcher {
+        #[allow(clippy::type_complexity)]
         received: std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>, Option<String>)>>>,
     }
     impl FeedFetcher for CaptureFetcher {

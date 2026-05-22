@@ -634,17 +634,21 @@ mod tests {
 
     #[test]
     fn summary_model_picks_7b_on_32gb_with_accel() {
-        let mut p = HardwareProfile::default();
-        p.total_ram_bytes = 32 * 1024 * 1024 * 1024;
-        p.has_amd_xdna_npu = true;
+        let p = HardwareProfile {
+            total_ram_bytes: 32 * 1024 * 1024 * 1024,
+            has_amd_xdna_npu: true,
+            ..Default::default()
+        };
         assert_eq!(p.recommended_summary_model(), "qwen2.5:7b");
     }
 
     #[test]
     fn summary_model_picks_3b_on_16_31gb() {
-        let mut p = HardwareProfile::default();
-        p.total_ram_bytes = 16 * 1024 * 1024 * 1024;
-        p.has_amd_gpu = true;
+        let mut p = HardwareProfile {
+            total_ram_bytes: 16 * 1024 * 1024 * 1024,
+            has_amd_gpu: true,
+            ..Default::default()
+        };
         assert_eq!(p.recommended_summary_model(), "qwen2.5:3b");
 
         p.total_ram_bytes = 31 * 1024 * 1024 * 1024;
@@ -653,8 +657,7 @@ mod tests {
 
     #[test]
     fn summary_model_picks_1_5b_on_8_15gb() {
-        let mut p = HardwareProfile::default();
-        p.total_ram_bytes = 8 * 1024 * 1024 * 1024;
+        let mut p = HardwareProfile { total_ram_bytes: 8 * 1024 * 1024 * 1024, ..Default::default() };
         assert_eq!(p.recommended_summary_model(), "qwen2.5:1.5b");
 
         p.total_ram_bytes = 15 * 1024 * 1024 * 1024;
@@ -664,17 +667,18 @@ mod tests {
     #[test]
     fn summary_model_8gb_with_or_without_accel_returns_same_tier() {
         // 规格：8-16 GB 档位下有/无加速器行为一致（均为 1.5b） — 回归测试
-        let mut p = HardwareProfile::default();
-        p.total_ram_bytes = 8 * 1024 * 1024 * 1024;
-        p.has_nvidia_gpu = true;
+        let p = HardwareProfile {
+            total_ram_bytes: 8 * 1024 * 1024 * 1024,
+            has_nvidia_gpu: true,
+            ..Default::default()
+        };
         assert_eq!(p.recommended_summary_model(), "qwen2.5:1.5b",
             "8GB + accel should still pick 1.5b (RAM-bound)");
     }
 
     #[test]
     fn summary_model_picks_tiny_on_lowend() {
-        let mut p = HardwareProfile::default();
-        p.total_ram_bytes = 4 * 1024 * 1024 * 1024;
+        let p = HardwareProfile { total_ram_bytes: 4 * 1024 * 1024 * 1024, ..Default::default() };
         assert_eq!(p.recommended_summary_model(), "llama3.2:1b");
     }
 
@@ -689,8 +693,7 @@ mod tests {
     #[test]
     fn summary_model_big_ram_no_accel_drops_one_tier() {
         // 32GB+ 纯 CPU → 3b (不是 7b)，避免 CPU 推理龟速
-        let mut p = HardwareProfile::default();
-        p.total_ram_bytes = 64 * 1024 * 1024 * 1024;
+        let p = HardwareProfile { total_ram_bytes: 64 * 1024 * 1024 * 1024, ..Default::default() };
         assert_eq!(p.recommended_summary_model(), "qwen2.5:3b");
     }
 
@@ -707,8 +710,7 @@ mod tests {
 
     #[test]
     fn ram_reflected_in_summary() {
-        let mut p = HardwareProfile::default();
-        p.total_ram_bytes = 16 * 1024 * 1024 * 1024;
+        let p = HardwareProfile { total_ram_bytes: 16 * 1024 * 1024 * 1024, ..Default::default() };
         assert!(p.summary().contains("RAM=16 GB"), "summary should include RAM: {}", p.summary());
     }
 

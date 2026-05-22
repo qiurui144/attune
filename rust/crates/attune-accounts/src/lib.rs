@@ -608,7 +608,7 @@ mod tests {
 
     fn signing_key() -> [u8; 32] {
         let mut k = [0u8; 32];
-        for i in 0..32 { k[i] = i as u8 + 1; }
+        for (i, slot) in k.iter_mut().enumerate() { *slot = i as u8 + 1; }
         k
     }
 
