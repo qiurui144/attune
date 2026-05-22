@@ -1,6 +1,80 @@
 # attune 版本记录
 
-## v0.7.1（未发布 / Unreleased）— 办公助理：结构化 OCR + 异步会议转写
+## v1.0.0 — 私有 AI 知识伙伴 GA（2026-05-25 计划上架）
+
+> **首个 1.x 正式版**。配对 `desktop-v1.0.0`（Tauri）+ attune-pro `v1.0.0`（law-pro plugin pack）+ cloud `cloud-v2.2.0`（accounts / pluginhub / llm-gateway / proxy）。
+> rc 节奏：`v1.0.0-rc.1`（5/20 paired with attune-pro rc.1）→ `v1.0.0-rc.2`（5/22 重定 HEAD 含补测 sweep）→ GA 5/25。
+
+### Highlights — v0.7.0 → v1.0.0 累积
+
+**记忆护城河 v0.7 完整体（已 GA）**
+
+- 四层记忆架构 L0–L3（episodic / 滚动摘要 / 语义主题），chat 上下文按 query 形态选层，token 中位降幅 78.7%
+- `memory_vectors` sidecar 索引让 L2/L3 摘要可向量检索；冷降级 / 主题 hdbscan 聚类后台 worker
+- 自学习闭环：`doc_create` / `doc_update` / `citation_hit` / `annotation_marker` 信号管道 → SkillClaw 后台扩展词进化
+- v0.7.1 Office 办公助理（OCR + ASR）已并入本 GA：5 scene + 3 卡证 subtype 结构化 OCR、whisper.cpp 异步会议转写 + WS 进度推送
+
+**v1.0 GA 增量（v0.7.0 → v1.0.0-rc.2，本会话 develop 落地）**
+
+| 类别 | 落地内容 |
+|------|---------|
+| **办公助理 (Office Helper)** | OCR 5 scene + 3 卡证 subtype + Luhn/GB 11643/GB 32100 校验位；ASR whisper.cpp 异步 job + WS 进度推送；CLI `attune ocr` / `attune transcribe`；UI `OfficeView`（D1-D5.7） |
+| **OSS Agent 矩阵（4 deterministic / heuristic agent）** | `internal_knowledge_linker_agent`（激活 entity_graph 死代码）/ `memory_consolidation_agent`（L2→L3 promotion 算法）/ `chat_reliability_agent`（citation / contradiction / hallucination 后置评估）/ `self_evolving_skill_agent`（heuristic + LLM expansion，CJK Trad↔Simp 归一） |
+| **Agent 验证铁律（per CLAUDE.md）** | 每个 agent ENFORCE 6 类下限：≥10 真实 golden + ≥3 proptest + ≥5 boundary + ≥3 error fixture + ≥1 E2E subprocess + 回归 fixture；`office_six_category_floor.rs` 结构 gate |
+| **真 LLM 验证 gate** | 4 OSS agent real-LLM run 4/4 PASS（qwen2.5:3b holdout） |
+| **CLI 子命令 smoke gate** | 29 subcommand 端到端冒烟，30/35 PASS（5 deferred 已记） |
+| **跨仓 E2E** | accounts ↔ pluginhub ↔ attune-server LLM gateway ↔ Stripe webhook 端到端串通 + Playwright 全链验证（payment-e2e / fullstack-e2e 截图归档） |
+| **OCR / ASR real run** | 5 + 5 真样本端到端验证（脱敏样本入 `tests/golden/office/`） |
+| **Robust LLM 基础设施** | `fact_extractor` / `divorce` 走 schema-guided array；CJK Trad↔Simp 归一 + LLM expansion dedupe |
+| **桌面 (Tauri) GA** | `tauri.conf.json` v1.0.0；NSIS / MSI / .deb / RPM / AppImage 五形态产物双 workflow |
+| **平台矩阵** | Linux x86_64 / Linux aarch64 / Windows x86_64 / macOS Apple Silicon（4 平台 server + CLI tarball） |
+
+**测试与质量门**
+
+- workspace lib tests **1145+** passed / 0 failed（v0.7.0 基线 1260+ 含 office 92 新增）
+- E2E `tests/e2e/run_all.sh` **49 PASS / 3 WARN / 0 FAIL**（chat / RAG / Playwright / crash recovery / annotation / 持续压力 / cross-repo wiring）
+- Frontend E2E `tests/e2e/playwright/run_ui_all.sh` 45/0
+- `cargo clippy -D warnings` clean / `cargo fmt --check` clean
+- Agent ENFORCE gate：6 类下限 0 violations（office + 4 OSS agent）
+
+### 4 节门通过情况
+
+| 节门 | 状态 | 说明 |
+|------|------|------|
+| **Gate 1 — 文档/版本审计** | ✅ | 本节落地；3 仓 Cargo.toml / plugin.yaml / tauri.conf.json 全 v1.0.0 对齐；README.md / DEVELOP.md 同步；3 仓 RELEASE.md 都有 v1.0.0 节 |
+| **Gate 2 — 代码** | ✅ rc.2 | HEAD `8ef4c68` 1145 tests pass / clippy clean / fmt clean |
+| **Gate 3 — 功能预期** | ✅ rc.2 | OCR/ASR real run + CLI smoke 30/35 + 4 OSS agent real-LLM 4/4 + cross-repo wiring 通 |
+| **Gate 4 — 缺口登记** | ⚠ | defamation F1=0.56 → 推 v1.0.1；macOS Intel 不在 scope；弱模型矩阵 #68 in-flight |
+
+### Breaking changes（v0.7.x → v1.0.0）
+
+无对外协议层 breaking change。`/api/v1/*` Chrome 扩展契约 + plugin pack 加载协议保持向后兼容。
+plugin.yaml `attune_min_version` 升 `1.0.0`，老 plugin pack 仍能加载（attune-server 兼容 `attune_min_version: "0.7.x"`）。
+
+### Migration
+
+- 现有 v0.7.0 vault：自动幂等升级（`memories`/`memory_vectors`/`reindex_queue`/`item_links` 表的幂等 ALTER 已在 v0.7.0 落地）
+- v0.7.1 office helper 数据：office job 结果默认不入 vault（用户显式 Save 才入），无迁移负担
+- 桌面用户：直接安装 desktop-v1.0.0；旧 desktop-v0.7.0 数据目录自动延用
+
+### Known Limitations（v1.0.1 跟进）
+
+- `law-pro::defamation` 真 LLM F1=0.56（goal ≥0.75）— v1.0.1 prompt 强化 + golden 扩展
+- 弱模型矩阵 #68（gemma:2b / phi3:mini holdout）— 排入 v1.0.1
+- macOS Intel `x86_64-apple-darwin` 未列入 Release artifact（开发者可 `cargo build --release` 自构建）
+- Linux ARM64 桌面 .deb 不在 desktop-v1.0.0 产物中（server / CLI tar 已覆盖）
+
+### 配套产品同步
+
+- **attune-pro v1.0.0** — law-pro plugin pack（11 agent + Phase 1/2/3 reliability framework）配对 attune v1.0.0；plugin.yaml `attune_min_version: "1.0.0"` / maturity `stable`
+- **cloud cloud-v2.2.0** — accounts / pluginhub / llm-gateway / proxy / monitor / mailpit 同步上架；声明支持 attune 客户端版本范围 `>= 1.0.0`
+
+---
+
+## v0.7.1 — 办公助理：结构化 OCR + 异步会议转写（已并入 v1.0.0）
+
+> v0.7.1 的"办公助理"内容作为 v1.0.0 的一部分发布，不再独立打 v0.7.1 tag。
+> 原内容保留在下方作为详细 changelog。
 
 发布定位：**Office Helper 入口** — 把 attune-core 已有的 PP-OCRv5 + whisper.cpp
 能力首次暴露成产品化"办公助理"工具入口。结果**不自动入 vault**（用户显式 Save 才入），

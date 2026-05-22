@@ -13,6 +13,7 @@ Attune is a generic personal AI knowledge base for **any individual knowledge wo
 ## 📥 Download
 
 Latest stable: **server v0.7.0** · **desktop v0.7.0**
+In flight: **v1.0.0-rc.2** (2026-05-22) — GA 2026-05-25. See [`rust/RELEASE.md`](rust/RELEASE.md#v100--私有-ai-知识伙伴-ga2026-05-25-计划上架) for v1.0 highlights.
 
 ### Desktop app (Web UI + system tray) — [desktop-v0.7.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.7.0)
 
@@ -34,6 +35,24 @@ Latest stable: **server v0.7.0** · **desktop v0.7.0**
 | Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.7.0/attune-windows-x86_64.zip) |
 
 > macOS Intel: build from source with `cargo build --release` (Apple Silicon already covers modern Mac users). SHA256 checksum file ships with each archive.
+
+## v1.0 GA highlights (in flight, 2026-05-25) — 私有 AI 知识伙伴
+
+> v1.0 = v0.7 记忆护城河 + v0.7.1 办公助理 + 4 个 OSS deterministic / heuristic agent + 真 LLM verification gate。完整 changelog 见 [`rust/RELEASE.md`](rust/RELEASE.md#v100--私有-ai-知识伙伴-ga2026-05-25-计划上架)。
+
+- 📁 **Office Helper** — 5 OCR scene（document / receipt / table / card / id_card_cn / bank_card / business_license）+ 卡证校验位（Luhn / GB 11643 / GB 32100）+ whisper.cpp 异步会议转写（WS 进度推送）；CLI `attune ocr` / `attune transcribe`
+- 🧠 **4 OSS Agent**（all deterministic / heuristic，零 / 低 LLM 成本）
+  - `internal_knowledge_linker_agent` — 激活 `entity_graph` 死代码 → item-to-item 持久化链接
+  - `memory_consolidation_agent` — L2 → L3 promotion 算法 + Store helpers
+  - `chat_reliability_agent` — citation / contradiction / hallucination 后置评估，proptest 256 case invariants
+  - `self_evolving_skill_agent` — heuristic + LLM expansion 学习器，CJK Trad↔Simp 归一 + dedupe
+- 🧪 **真 LLM verification gate** — 4 OSS agent real-LLM holdout 4/4 PASS（qwen2.5:3b）
+- ✅ **Agent 验证铁律 ENFORCE 6 类下限**（per CLAUDE.md）— 每个 agent 必过 ≥10 真实 golden + ≥3 proptest + ≥5 boundary + ≥3 error + ≥1 E2E subprocess + 回归 fixture
+- 🔁 **CLI 子命令 smoke gate** — 29 subcommand 端到端冒烟（30/35 PASS）
+- 🌐 **跨仓 E2E** — accounts ↔ pluginhub ↔ attune-server LLM gateway ↔ Stripe webhook Playwright 全链通
+- 📦 **测试规模** — workspace lib tests **1145+** PASS / E2E run_all.sh 49 PASS 0 FAIL / clippy + fmt clean
+
+配套：**attune-pro v1.0.0** law-pro plugin pack（11 agent）+ **cloud-v2.2.0**（accounts / pluginhub / llm-gateway / proxy / monitor）。
 
 ## v0.7 sprint highlights (2026-05-15) — Memory Moat Phase A+B
 
