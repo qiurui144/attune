@@ -26,7 +26,7 @@
 | **跨仓 E2E** | accounts ↔ pluginhub ↔ attune-server LLM gateway ↔ Stripe webhook 端到端串通 + Playwright 全链验证（payment-e2e / fullstack-e2e 截图归档） |
 | **OCR / ASR real run** | 5 + 5 真样本端到端验证（脱敏样本入 `tests/golden/office/`） |
 | **Robust LLM 基础设施** | `fact_extractor` / `divorce` 走 schema-guided array；CJK Trad↔Simp 归一 + LLM expansion dedupe |
-| **桌面 (Tauri) GA** | `tauri.conf.json` v1.0.0；NSIS / MSI / .deb / RPM / AppImage 五形态产物双 workflow |
+| **桌面 (Tauri) GA** | `tauri.conf.json` v1.0.0；5 形态产物（NSIS / MSI / .deb / RPM / AppImage）× 2 平台（Windows + Linux）双 workflow |
 | **平台矩阵** | Linux x86_64 / Linux aarch64 / Windows x86_64 / macOS Apple Silicon（4 平台 server + CLI tarball） |
 
 **测试与质量门**
@@ -63,6 +63,11 @@ plugin.yaml `attune_min_version` 升 `1.0.0`，老 plugin pack 仍能加载（at
 - 弱模型矩阵 #68（gemma:2b / phi3:mini holdout）— 排入 v1.0.1
 - macOS Intel `x86_64-apple-darwin` 未列入 Release artifact（开发者可 `cargo build --release` 自构建）
 - Linux ARM64 桌面 .deb 不在 desktop-v1.0.0 产物中（server / CLI tar 已覆盖）
+- **桌面产物说明**：desktop-v1.0.0 提供 5 形态 × 2 平台（Windows NSIS exe / MSI；Linux .deb / RPM / AppImage），macOS 暂未列入
+- attune-pro `DEVELOP.md` 待补充（v1.0.1 文档 sprint）
+- nightly real-LLM workflow 待新建（v1.0.1 CI 改善）
+- `doc-audit.sh` 1 ERR + 3 WARN 待清（v1.0.1 文档治理）
+- `docker-publish.yml` 首次 tag 触发后需在 Packages tab 确认 6 个 container image 列表（2 attune + 3 cloud + 1 desktop-installers）
 
 ### 配套产品同步
 
