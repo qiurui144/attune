@@ -103,10 +103,11 @@ check_clean() {
     err "$label: 路径 $dir 不是 git 仓"; return
   fi
   local dirty
-  dirty=$(git -C "$dir" status --porcelain 2>/dev/null)
+  # 只检查已跟踪文件的改动（忽略 untracked），避免 .claude/ / secrets/*.enc 等误触发
+  dirty=$(git -C "$dir" status --porcelain 2>/dev/null | grep -v '^??')
   if [ -n "$dirty" ]; then
     err "$label working tree 不干净 — 请先 commit / stash"
-    git -C "$dir" status --short | head -10
+    git -C "$dir" status --short | grep -v '^??' | head -10
   else
     ok "$label working tree clean"
   fi

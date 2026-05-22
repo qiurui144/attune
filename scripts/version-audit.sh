@@ -106,12 +106,13 @@ check_pair_attune_pro() {
 
   cd "$ATTUNE" || { err "attune 仓不存在"; return; }
   local attune_latest_v
-  # 取 v<X.Y.Z> 形态(排除 desktop-* / -rc.* / -beta.* 预发)
-  attune_latest_v=$(git tag --sort=-creatordate | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+  # 取最新的 v<X.Y.Z>[-rc.N/-beta.N/-alpha.N] 形态(排除 desktop-*)
+  # GA 前 rc 阶段两仓都在同号 rc，用含 rc 的 tag 对比才能正确配对
+  attune_latest_v=$(git tag --sort=-creatordate | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | grep -v '^desktop-' | head -1)
 
   cd "$ATTUNE_PRO" || { err "attune-pro 仓不存在"; return; }
   local pro_latest_v
-  pro_latest_v=$(git tag --sort=-creatordate | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+  pro_latest_v=$(git tag --sort=-creatordate | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | grep -v '^desktop-' | head -1)
 
   if [ -z "$attune_latest_v" ]; then warn "attune 无 vX.Y.Z 正式 tag"; return; fi
   if [ -z "$pro_latest_v" ]; then err "attune-pro 缺失对应 $attune_latest_v tag(违反 VERSIONING §5.1 配对)"; return; fi
