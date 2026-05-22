@@ -494,7 +494,7 @@ Constraints:
 
 /// CJK script classification of a string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CjkScript {
+pub enum CjkScript {
     /// Contains Simplified-only characters (and no Traditional-only characters).
     Simplified,
     /// Contains Traditional-only characters (and no Simplified-only characters).
@@ -513,7 +513,7 @@ pub(crate) enum CjkScript {
 ///
 /// This list is intentionally small — only the most frequent characters in
 /// knowledge-base queries — to avoid false positives. No external crate needed.
-pub(crate) fn detect_cjk_script(s: &str) -> CjkScript {
+pub fn detect_cjk_script(s: &str) -> CjkScript {
     let mut has_trad = false;
     let mut has_simp = false;
     for c in s.chars() {
@@ -561,7 +561,7 @@ pub(crate) fn detect_cjk_script(s: &str) -> CjkScript {
 ///
 /// Only the most frequent ~60 char pairs are covered; rarer characters pass
 /// through unchanged (they are typically shared between both orthographies).
-pub(crate) fn normalize_to_script(term: &str, target: CjkScript) -> String {
+pub fn normalize_to_script(term: &str, target: CjkScript) -> String {
     match target {
         CjkScript::Simplified => term
             .chars()
@@ -632,7 +632,7 @@ fn simp_to_trad(c: char) -> Option<char> {
 /// Extract `terms: [...]` from an LLM response, tolerant of ```json fences```
 /// and trailing prose. Normalizes CJK character set to match the query script,
 /// then deduplicates (case-insensitive + script-normalized key).
-pub(crate) fn parse_llm_terms(raw: &str, query_pattern: &str) -> Vec<String> {
+pub fn parse_llm_terms(raw: &str, query_pattern: &str) -> Vec<String> {
     let json_str = strip_fences(raw);
     let value: serde_json::Value = match serde_json::from_str(&json_str) {
         Ok(v) => v,

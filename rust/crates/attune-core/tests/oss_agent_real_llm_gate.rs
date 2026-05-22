@@ -46,74 +46,12 @@
 //! If real LLM falls below threshold, the v1.0 RELEASE.md must label the agent
 //! "Beta" or defer to v1.1, NOT relax the threshold here.
 
-use std::collections::BTreeSet;
-
 use attune_core::llm::{LlmProvider, OllamaLlmProvider};
 use attune_core::memory_consolidation::{
     generate_one_episodic_memory, BundleChunk, ConsolidationBundle,
 };
-
-// Local reimplementation of `skill_evolution::agent::parse_llm_terms` —
-// upstream is `pub(crate)` so not callable from an integration test. Logic
-// mirrors agent.rs lines 476-509 exactly (tolerant of ```json fences, drops
-// echoes, dedup case-insensitive, cap at 5, length ≤ 60 chars). Drift between
-// this copy and prod parser is itself a verification signal — if upstream
-// changes you must update both.
-fn parse_llm_terms_local(raw: &str, query_pattern: &str) -> Vec<String> {
-    let json_str = strip_fences_local(raw);
-    let value: serde_json::Value = match serde_json::from_str(&json_str) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let arr = match value.get("terms").and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return Vec::new(),
-    };
-    let target_lower = query_pattern.to_lowercase();
-    let mut out: Vec<String> = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    for v in arr {
-        let Some(s) = v.as_str() else { continue };
-        let s = s.trim();
-        if s.is_empty() || s.len() > 60 {
-            continue;
-        }
-        if s.to_lowercase() == target_lower {
-            continue;
-        }
-        let key = s.to_lowercase();
-        if seen.insert(key) {
-            out.push(s.to_string());
-        }
-        if out.len() >= 5 {
-            break;
-        }
-    }
-    out
-}
-
-fn strip_fences_local(raw: &str) -> String {
-    if let Some(start) = raw.find("```json") {
-        let after = &raw[start + 7..];
-        if let Some(end) = after.find("```") {
-            return after[..end].trim().to_string();
-        }
-    }
-    if let Some(start) = raw.find("```") {
-        let after = &raw[start + 3..];
-        if let Some(end) = after.find("```") {
-            return after[..end].trim().to_string();
-        }
-    }
-    if let Some(start) = raw.find('{') {
-        if let Some(end) = raw.rfind('}') {
-            if end > start {
-                return raw[start..=end].to_string();
-            }
-        }
-    }
-    raw.trim().to_string()
-}
+// Use production parser directly — was pub(crate); promoted to pub in #77 fix.
+use attune_core::skill_evolution::agent::parse_llm_terms;
 
 const TEST_MODEL: &str = "qwen2.5:3b";
 
@@ -385,7 +323,7 @@ fn agent_self_evolving_skill_real_llm() {
             .chat_with_history(&[attune_core::llm::ChatMessage::user(&prompt)])
             .unwrap_or_else(|e| format!("__ERROR__: {e}"));
         let preview: String = raw.chars().take(120).collect::<String>().replace('\n', " ");
-        let terms = parse_llm_terms_local(&raw, q);
+        let terms = parse_llm_terms(&raw, q);
         println!("  raw preview: {preview}…");
         println!("  parsed terms: {terms:?}");
 
