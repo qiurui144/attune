@@ -1,0 +1,39 @@
+# Dockerfile.cli — attune CLI (headless, no server)
+# Binary: attune (attune-cli crate)
+# Usage: docker build -f Dockerfile.cli -t attune-cli:local .
+
+# ── Stage 1: builder ──────────────────────────────────────────────────────────
+FROM rust:1.88-bookworm AS builder
+
+WORKDIR /src
+
+# Install build deps for rusqlite (bundled) + usearch (C++)
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev cmake g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+# Cache cargo registry before copying full source
+COPY rust/Cargo.toml rust/Cargo.lock ./rust/
+COPY rust/crates ./rust/crates
+
+WORKDIR /src/rust
+RUN cargo build --release -p attune-cli
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Non-root user
+RUN useradd -r -s /bin/false -d /data attune && \
+    mkdir -p /data && chown attune:attune /data
+
+COPY --from=builder /src/rust/target/release/attune /usr/local/bin/attune
+
+USER attune
+WORKDIR /data
+
+ENTRYPOINT ["attune"]
+CMD ["--help"]

@@ -52,7 +52,7 @@
     "updater": {
       "active": true,
       "endpoints": [
-        "https://updates.attune.ai/desktop/{{target}}/{{current_version}}/latest.json"
+        "https://github.com/qiurui144/attune/releases/latest/download/latest.json"
       ],
       "dialog": false,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYwQUM3OEY1NEEyNTQ3NzAKUldSd1J5Vks5WGlzOElHdExtYWQ0UGNwVnNzR3Bwd2RKNjY0eTcyQThvdDBjZEMyNnNhSjMxLzIK"

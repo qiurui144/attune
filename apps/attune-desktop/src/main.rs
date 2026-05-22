@@ -3,7 +3,83 @@
 mod embedded_server;
 mod tray;
 
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+
+/// Auto-updater 状态机:UI 通过监听 `attune-update-status` 事件获得这些状态.
+/// 维持纯字符串(不引入额外 serde 类型),前端 JS 直接 switch.
+const EV_UPDATE_STATUS: &str = "attune-update-status";
+
+/// Tauri command:UI 主动触发检查更新.成功命中时 (latest > current) 先 emit
+/// `available`,随后下载+安装 (含进度 emit `downloading` / `installing`),完成 emit
+/// `restart-required`,失败 emit `error`.无新版返回 false 不 emit.
+///
+/// 返回 Ok(true) = 有更新且已开始下载; Ok(false) = 无更新; Err = 检查/下载/安装失败.
+#[tauri::command]
+async fn check_for_update_now(app: AppHandle) -> Result<bool, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = match updater.check().await.map_err(|e| e.to_string())? {
+        Some(u) => u,
+        None => {
+            tracing::info!("manual update check: no update available");
+            let _ = app.emit(EV_UPDATE_STATUS, serde_json::json!({"state": "up-to-date"}));
+            return Ok(false);
+        }
+    };
+    let current = update.current_version.clone();
+    let next = update.version.clone();
+    tracing::info!("update available {} -> {}", current, next);
+    let _ = app.emit(
+        EV_UPDATE_STATUS,
+        serde_json::json!({"state": "available", "from": current, "to": next}),
+    );
+
+    // download_and_install 一步走完;进度回调中 emit downloading 比例
+    let app_for_progress = app.clone();
+    update
+        .download_and_install(
+            move |chunk, total| {
+                if let Some(total) = total {
+                    let pct = if total > 0 {
+                        ((chunk as f64 / total as f64) * 100.0) as u32
+                    } else {
+                        0
+                    };
+                    let _ = app_for_progress.emit(
+                        EV_UPDATE_STATUS,
+                        serde_json::json!({"state": "downloading", "percent": pct}),
+                    );
+                }
+            },
+            || {
+                tracing::info!("update downloaded, ready to install");
+            },
+        )
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            let _ = app.emit(
+                EV_UPDATE_STATUS,
+                serde_json::json!({"state": "error", "message": msg.clone()}),
+            );
+            msg
+        })?;
+
+    let _ = app.emit(
+        EV_UPDATE_STATUS,
+        serde_json::json!({"state": "restart-required"}),
+    );
+    tracing::info!("update installed; user must restart");
+    Ok(true)
+}
+
+/// Tauri command:用户在 UI 上点 "重启应用" 后调用此 command 完成重启.
+/// 仅触发 app.restart(),不做其他副作用.
+#[tauri::command]
+fn restart_for_update(app: AppHandle) {
+    tracing::info!("restart-for-update invoked");
+    app.restart();
+}
 
 /// Tauri command: upload local file paths to the embedded server's /api/v1/upload endpoint.
 /// Called by the web UI after receiving an `attune-file-drop` event.
@@ -75,7 +151,11 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![upload_dropped_paths])
+        .invoke_handler(tauri::generate_handler![
+            upload_dropped_paths,
+            check_for_update_now,
+            restart_for_update
+        ])
         .setup(|app| {
             // 1. spawn 内嵌 axum
             let _server_handle = embedded_server::spawn_server();
@@ -135,8 +215,10 @@ fn main() {
                             tracing::error!("failed to build system tray: {e}");
                         }
 
-                        // 启动 30s 后检查更新（gateway 在 Sprint 6 才搭，这里只验证
-                        // plugin 接通 + graceful failure：DNS 不可达 → log warn，不 panic）
+                        // 启动 30s 后被动检查更新:仅 emit "available" 事件让 UI 显示
+                        // banner,**不**自动下载(尊重用户带宽 + 让用户选时机).
+                        // 主动下载/安装走 check_for_update_now command (用户点按钮触发).
+                        // 网络不可达 → 静默 log warn,不弹窗不 panic.
                         let app_handle_for_update = app_handle.clone();
                         tauri::async_runtime::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -149,10 +231,18 @@ fn main() {
                                             update.current_version,
                                             update.version
                                         );
+                                        let _ = app_handle_for_update.emit(
+                                            EV_UPDATE_STATUS,
+                                            serde_json::json!({
+                                                "state": "available",
+                                                "from": update.current_version,
+                                                "to": update.version,
+                                            }),
+                                        );
                                     }
                                     Ok(None) => tracing::info!("no update available"),
                                     Err(e) => tracing::warn!(
-                                        "update check failed (gateway maybe offline): {e}"
+                                        "update check failed (endpoint unreachable): {e}"
                                     ),
                                 },
                                 Err(e) => tracing::warn!("updater handle unavailable: {e}"),

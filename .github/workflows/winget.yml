@@ -1,0 +1,63 @@
+name: winget
+
+# 每次 desktop-v* GA tag (无 -rc/-alpha/-beta 后缀) 自动向 microsoft/winget-pkgs
+# 提交 manifest PR.使用 vedantmgoyal2009/winget-releaser 社区 action,
+# 该 action 内部用 wingetcreate 计算 SHA256 + 生成 manifest YAML + 开 PR.
+#
+# 第一次发版:
+#   1. PR 进 microsoft/winget-pkgs 后人工审 1-7 天
+#   2. 合并后 winget 索引含 qiurui144.Attune
+#   3. 用户 winget install qiurui144.Attune
+#
+# Secrets 依赖:
+#   WINGET_TOKEN — Personal Access Token (classic) with public_repo scope,
+#                  授权 fork microsoft/winget-pkgs 与开 PR.
+#                  注意:不能用 GITHUB_TOKEN(它无法跨仓库 fork/push).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "desktop-vX.Y.Z GA tag (no -rc/-alpha/-beta suffix)"
+        required: true
+  # 故意不订阅 workflow_run / release / push 事件:
+  # WinGet 需要 PR 审核,频繁触发对上游 winget-pkgs 是 noise.
+  # 维护者发 GA 后手动 trigger.
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Extract version from validated tag
+        id: tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -e
+          # 严格 GA 格式校验,拒绝 pre-release 及任何非法字符
+          tag="$INPUT_TAG"
+          case "$tag" in
+            desktop-v*[!0-9.]*) echo "Invalid characters in tag: $tag"; exit 1 ;;
+          esac
+          # 严格 regex
+          if ! printf "%s" "$tag" | grep -qE "^desktop-v[0-9]+\.[0-9]+\.[0-9]+$"; then
+            echo "WinGet 只接 GA tag desktop-vX.Y.Z;不接 pre-release."
+            exit 1
+          fi
+          version="${tag#desktop-v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Submit to winget-pkgs
+        uses: vedantmgoyal2009/winget-releaser@v2
+        with:
+          identifier: qiurui144.Attune
+          version: ${{ steps.tag.outputs.version }}
+          installers-regex: '_x64-setup\.exe$'
+          release-tag: ${{ steps.tag.outputs.tag }}
+          token: ${{ secrets.WINGET_TOKEN }}
+          fork-user: ${{ github.repository_owner }}

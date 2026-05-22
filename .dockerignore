@@ -1,0 +1,31 @@
+# Docker build context exclusions
+# Prevents large directories from being sent to Docker daemon
+
+# Rust build artifacts (can be 100+ GB)
+rust/target/
+
+# Node modules + dev artifacts
+rust/crates/attune-server/ui/node_modules/
+apps/
+
+# Python development
+python/
+*.pyc
+__pycache__/
+
+# Test corpora / large data
+rust/tests/corpora/
+
+# Git history
+.git/
+.github/
+
+# IDE / tooling
+.claude/
+.idea/
+.vscode/
+tmp/
+
+# OS artifacts
+.DS_Store
+*.swp

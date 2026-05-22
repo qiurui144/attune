@@ -130,6 +130,63 @@ A/B 双分区 + signed firmware, OTA 拉新版 image:
 attune-cli k3 upgrade  # 从 attune.ai/firmware/k3 拉最新
 ```
 
+## 4. Docker / GitHub Container Registry (ghcr.io)
+
+**目标用户**: 服务器/NAS 容器化部署、CI/CD 集成、自定义编排。
+
+两个镜像由 `.github/workflows/docker-publish.yml` 在每次 `v*` tag push 时自动构建发布。
+
+### 拉取镜像
+
+```bash
+# CLI（轻量，无 UI）
+docker pull ghcr.io/qiurui144/attune-cli:v1.0.0
+
+# Headless server（含嵌入式 Web UI，端口 18900）
+docker pull ghcr.io/qiurui144/attune-server:v1.0.0
+
+# 或用 latest（跟随最新 GA）
+docker pull ghcr.io/qiurui144/attune-server:latest
+```
+
+### 启动 headless server
+
+```bash
+# 最简启动（vault 数据存容器内，重建会丢失）
+docker run -d -p 18900:18900 ghcr.io/qiurui144/attune-server:v1.0.0
+
+# 推荐：挂载数据卷持久化 vault
+docker run -d \
+  -p 18900:18900 \
+  -v $HOME/.attune:/data \
+  -e ATTUNE_DATA_DIR=/data \
+  ghcr.io/qiurui144/attune-server:v1.0.0
+
+# 带 TLS（Let's Encrypt 证书）
+docker run -d \
+  -p 18900:18900 \
+  -v /etc/letsencrypt:/certs:ro \
+  -v $HOME/.attune:/data \
+  ghcr.io/qiurui144/attune-server:v1.0.0 \
+  --tls-cert /certs/live/attune.example.com/fullchain.pem \
+  --tls-key /certs/live/attune.example.com/privkey.pem
+```
+
+### 与 install pkg（.deb / .exe）的关系
+
+| 形态 | 用途 | UI | Ollama | 推荐场景 |
+|------|------|----|----|------|
+| `.deb` / `.msi` / AppImage | 桌面应用（含系统托盘） | ✅ Tauri WebView | 本机自动检测 | 笔电 / 工作站个人使用 |
+| Docker `attune-server` | Headless server（无桌面） | ✅ 嵌入 Web UI（浏览器访问） | 需宿主机 Ollama 或 K3 推理服务 | NAS / VPS / 团队共享 |
+| Docker `attune-cli` | 命令行工具（无 UI） | ❌ | ❌ | 脚本自动化 / CI 管道 |
+
+> Docker 镜像不含 Ollama、whisper.cpp 和 PP-OCR 底座模型。
+> 启动后在 Web UI Settings → AI 大脑 配置外部 Ollama 地址或云端 token。
+
+### 平台支持
+
+镜像构建矩阵：`linux/amd64` + `linux/arm64`（aarch64，支持 K3 / 树莓派 / NAS）。
+
 ## 切换 / 迁移
 
 老设备 export vault profile, 新设备 wizard import:

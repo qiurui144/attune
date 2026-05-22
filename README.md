@@ -36,6 +36,26 @@ In flight: **v1.0.0-rc.2** (2026-05-22) — GA 2026-05-25. See [`rust/RELEASE.md
 
 > macOS Intel: build from source with `cargo build --release` (Apple Silicon already covers modern Mac users). SHA256 checksum file ships with each archive.
 
+### Package managers (recommended for v1.0+)
+
+From **v1.0.0** onwards, Attune ships through native package managers with auto-update wired in:
+
+```bash
+# Windows
+winget install qiurui144.Attune
+
+# Debian / Ubuntu
+curl -fsSL https://qiurui144.github.io/attune/attune-archive-keyring.gpg | sudo tee /usr/share/keyrings/attune-archive-keyring.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/attune-archive-keyring.gpg] https://qiurui144.github.io/attune/apt stable main" | sudo tee /etc/apt/sources.list.d/attune.list
+sudo apt update && sudo apt install attune
+
+# RHEL / Fedora / openSUSE
+sudo curl -fsSL -o /etc/yum.repos.d/attune.repo https://qiurui144.github.io/attune/rpm/attune.repo
+sudo dnf install attune
+```
+
+The Tauri desktop app also has a **built-in auto-updater** — once installed, new versions arrive in-app without you touching a CLI. Full guide and troubleshooting: [`docs/install-package-managers.md`](docs/install-package-managers.md).
+
 ## v1.0 GA highlights (in flight, 2026-05-25) — 私有 AI 知识伙伴
 
 > v1.0 = v0.7 记忆护城河 + v0.7.1 办公助理 + 4 个 OSS deterministic / heuristic agent + 真 LLM verification gate。完整 changelog 见 [`rust/RELEASE.md`](rust/RELEASE.md#v100--私有-ai-知识伙伴-ga2026-05-25-计划上架)。

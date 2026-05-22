@@ -35,6 +35,26 @@ Attune 是面向**任何领域个人知识工作者**的通用 AI 知识库 — 
 
 > macOS Intel 走源码编译: `cargo build --release` (Apple Silicon Mac 已覆盖现代用户)。SHA256 校验文件随每个归档发布。
 
+### 系统包管理器（v1.0+ 推荐）
+
+**v1.0.0** 起 Attune 接入主流包管理器,一行命令安装 + 自动升级:
+
+```bash
+# Windows
+winget install qiurui144.Attune
+
+# Debian / Ubuntu
+curl -fsSL https://qiurui144.github.io/attune/attune-archive-keyring.gpg | sudo tee /usr/share/keyrings/attune-archive-keyring.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/attune-archive-keyring.gpg] https://qiurui144.github.io/attune/apt stable main" | sudo tee /etc/apt/sources.list.d/attune.list
+sudo apt update && sudo apt install attune
+
+# RHEL / Fedora / openSUSE
+sudo curl -fsSL -o /etc/yum.repos.d/attune.repo https://qiurui144.github.io/attune/rpm/attune.repo
+sudo dnf install attune
+```
+
+桌面应用还内置 **Tauri auto-updater** — 装上一次后,新版本会在应用内静默提示,点 "立即更新" 即可下载升级.完整安装 + 排障指南: [`docs/install-package-managers.md`](docs/install-package-managers.md).
+
 ## v0.6.0-rc.5 亮点（2026-04-28）
 
 🎯 **三赛道 PRO 级 benchmark** — 法律 + 通用英文 + 中文八股双赛道端到端验证：

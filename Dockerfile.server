@@ -1,0 +1,53 @@
+# Dockerfile.server — attune headless server (server + embedded Web UI)
+# Binary: attune-server-headless (attune-server crate)
+# Port: 18900
+# Usage: docker build -f Dockerfile.server -t attune-server:local .
+
+# ── Stage 1: UI build ─────────────────────────────────────────────────────────
+FROM node:20-alpine AS ui-builder
+
+WORKDIR /ui
+COPY rust/crates/attune-server/ui/package*.json ./
+RUN npm ci --prefer-offline
+
+COPY rust/crates/attune-server/ui/ ./
+RUN npm run build
+
+# ── Stage 2: Rust builder ─────────────────────────────────────────────────────
+FROM rust:1.88-bookworm AS builder
+
+WORKDIR /src
+
+# Install build deps for rusqlite (bundled) + usearch (C++)
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev cmake g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY rust/Cargo.toml rust/Cargo.lock ./rust/
+COPY rust/crates ./rust/crates
+
+# Inject pre-built UI dist (server embeds via include_str!)
+COPY --from=ui-builder /ui/dist ./rust/crates/attune-server/ui/dist/
+
+WORKDIR /src/rust
+RUN cargo build --release -p attune-server
+
+# ── Stage 3: runtime ──────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Non-root user
+RUN useradd -r -s /bin/false -d /data attune && \
+    mkdir -p /data && chown attune:attune /data
+
+COPY --from=builder /src/rust/target/release/attune-server-headless /usr/local/bin/attune-server-headless
+
+USER attune
+WORKDIR /data
+
+EXPOSE 18900
+ENTRYPOINT ["attune-server-headless"]
+CMD ["--bind", "0.0.0.0:18900"]
