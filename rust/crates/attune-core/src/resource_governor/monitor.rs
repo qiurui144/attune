@@ -43,6 +43,19 @@ impl Default for Sample {
     }
 }
 
+impl Sample {
+    /// 构造一个用于注入 [`MockMonitor`] 的 sample。`captured_secs` 是 crate-private
+    /// 的内部时间字段，外部 crate 无法用 struct-literal / struct-update 构造 `Sample`，
+    /// 故提供此构造函数让集成测试能注入指定 `cpu_pct` / `rss_bytes`。
+    pub fn new(cpu_pct: f32, rss_bytes: u64) -> Self {
+        Self {
+            cpu_pct,
+            rss_bytes,
+            captured_secs: 0,
+        }
+    }
+}
+
 /// 资源监控 trait。生产用 [`SysinfoMonitor`]，测试用 [`MockMonitor`] 注入固定 sample。
 pub trait ResourceMonitor: Send + Sync {
     /// 返回系统全局 CPU% + 当前进程 RSS。
