@@ -70,17 +70,33 @@ fn extract_id_card_cn(lines: &[RawLine]) -> StructuredFields {
         unrecognized.push("name");
     }
 
-    // 性别
+    // 性别 — anchor 优先; 若 anchor value 未含 男/女 (OCR 把 label+value 串到一行时
+    // find_value_after_anchor 可能取到"民族"标签文本), 退回全文正则扫描.
     let anchor_gender = regex::Regex::new(r"性\s*别").unwrap();
-    if let Some((idx, raw, conf)) = find_value_after_anchor(lines, &anchor_gender, 1) {
-        let g = if raw.contains('男') {
-            "男".to_string()
+    let gender_fallback_re = regex::Regex::new(r"性\s*别\s*[:：]?\s*(男|女)").unwrap();
+    let gender_val = if let Some((idx, raw, conf)) = find_value_after_anchor(lines, &anchor_gender, 1) {
+        if raw.contains('男') {
+            Some(FieldValue::from_line("男".to_string(), conf.min(0.95), &lines[idx], idx))
         } else if raw.contains('女') {
-            "女".to_string()
+            Some(FieldValue::from_line("女".to_string(), conf.min(0.95), &lines[idx], idx))
         } else {
-            raw.trim().to_string()
-        };
-        fields.gender = FieldValue::from_line(g, conf.min(0.95), &lines[idx], idx);
+            // anchor found but value doesn't contain 男/女 — try full-text fallback
+            lines.iter().enumerate().find_map(|(i, l)| {
+                gender_fallback_re.captures(&l.text).map(|cap| {
+                    FieldValue::from_line(cap[1].to_string(), l.confidence.min(0.92), l, i)
+                })
+            })
+        }
+    } else {
+        // no anchor match at all — try full-text fallback
+        lines.iter().enumerate().find_map(|(i, l)| {
+            gender_fallback_re.captures(&l.text).map(|cap| {
+                FieldValue::from_line(cap[1].to_string(), l.confidence.min(0.92), l, i)
+            })
+        })
+    };
+    if let Some(fv) = gender_val {
+        fields.gender = fv;
     } else {
         unrecognized.push("gender");
     }
@@ -497,5 +513,38 @@ mod tests {
             assert!(fields.registration_no.confidence < 0.6);
             assert!(validation_warnings.iter().any(|w| w.contains("校验")));
         }
+    }
+
+    // ── Fix #62: gender label/value confusion regression ────────────────
+
+    /// OCR layout: "性别 男 民族 汉" on one line — anchor finds the whole line as
+    /// value; 男 is present so direct extraction works.
+    #[test]
+    fn id_card_cn_gender_same_line_with_nationality() {
+        let lines = vec![
+            rl("姓名 李四", 0),
+            rl("性别 男 民族 汉", 40),
+        ];
+        let Some(StructuredFields::IdCardCnV1 { fields, .. }) = extract(&lines, "id_card_cn")
+        else { unreachable!() };
+        assert_eq!(fields.gender.value.as_deref(), Some("男"), "should extract 男 from combined line");
+    }
+
+    /// Regression for Finding-B: OCR mis-lines "性别" label with "民族" value text.
+    /// E.g. anchor returns "汉" (民族 value) which has neither 男 nor 女 — the fallback
+    /// regex must scan raw lines and find "性别：女" elsewhere.
+    #[test]
+    fn id_card_cn_gender_fallback_when_anchor_grabs_wrong_value() {
+        let lines = vec![
+            rl("姓名 王五", 0),
+            // anchor "性别" grabs next line "汉" (nationality mis-OCR'd adjacent)
+            rl("性别", 40),
+            rl("汉", 60),
+            // but the full-text fallback regex matches this line
+            rl("性别：女", 80),
+        ];
+        let Some(StructuredFields::IdCardCnV1 { fields, .. }) = extract(&lines, "id_card_cn")
+        else { unreachable!() };
+        assert_eq!(fields.gender.value.as_deref(), Some("女"), "fallback regex should recover 女");
     }
 }

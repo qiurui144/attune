@@ -419,4 +419,33 @@ mod tests {
     fn chinese_amount_garbage_returns_none() {
         assert_eq!(parse_chinese_amount("hello"), None);
     }
+
+    // ── Fix #62: amount_total thousand-separator regression ──────────────
+
+    /// OCR may produce ASCII comma thousand separators (1,234.56) or full-width
+    /// commas (1，234.56) or spaces (1 234.56). normalize_amount must strip all of
+    /// these and return a canonical decimal string.
+    #[test]
+    fn amount_total_ascii_comma_thousand_separator() {
+        let lines = vec![rl("价税合计: ¥1,234.56", 0)];
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        assert_eq!(fields.amount_total.value.as_deref(), Some("1234.56"),
+            "ASCII comma thousand separator should be stripped");
+    }
+
+    #[test]
+    fn amount_total_fullwidth_comma_thousand_separator() {
+        let lines = vec![rl("价税合计: ¥1，234.56", 0)];
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        assert_eq!(fields.amount_total.value.as_deref(), Some("1234.56"),
+            "full-width comma thousand separator should be stripped");
+    }
+
+    #[test]
+    fn amount_total_space_thousand_separator() {
+        let lines = vec![rl("价税合计: 1 234.56", 0)];
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        assert_eq!(fields.amount_total.value.as_deref(), Some("1234.56"),
+            "space thousand separator should be stripped");
+    }
 }
