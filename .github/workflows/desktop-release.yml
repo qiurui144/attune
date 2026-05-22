@@ -13,6 +13,7 @@ env:
 # 导致 "Resource not accessible by integration" (403). 历史 rc.3 fail 修.
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build:
@@ -158,3 +159,85 @@ jobs:
           name: Attune Desktop ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           files: latest.json
+
+  # 所有平台 installer 打包成 OCI image 推送到 ghcr.io/qiurui144/attune-desktop-installers.
+  # 企业 IT / air-gap 部署者可 docker pull 取得任意平台 installer,无需去 GitHub Releases.
+  package-installers:
+    needs: build
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          pattern: attune-desktop-*
+          merge-multiple: false
+
+      # 把各平台产物平铺到 installers/ 目录供 Dockerfile.installers COPY.
+      - name: Assemble installers directory
+        run: |
+          set -euxo pipefail
+          mkdir -p installers
+          # Linux: deb / rpm / AppImage (含 *.sig)
+          if [ -d artifacts/attune-desktop-x86_64-unknown-linux-gnu ]; then
+            find artifacts/attune-desktop-x86_64-unknown-linux-gnu \
+              -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" \) \
+              -exec cp -v {} installers/ \;
+          fi
+          # Windows: NSIS exe (含 *.sig) + MSI
+          if [ -d artifacts/attune-desktop-x86_64-pc-windows-msvc ]; then
+            find artifacts/attune-desktop-x86_64-pc-windows-msvc \
+              -type f \( -name "*.exe" -o -name "*.msi" \) \
+              -exec cp -v {} installers/ \;
+          fi
+          echo "--- installers/ ---"
+          ls -lh installers/
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version tag
+        id: version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          version="${TAG_NAME#desktop-v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/attune-desktop-installers
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=Attune Desktop Installers
+            org.opencontainers.image.description=All-platform desktop install packages: .deb .rpm .AppImage .exe .msi
+            org.opencontainers.image.url=https://github.com/qiurui144/attune
+            org.opencontainers.image.source=https://github.com/qiurui144/attune
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build and push installer image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.installers
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # scratch image 无法跨 arch,仅 linux/amd64 即可 (内容是文件,非二进制)
+          platforms: linux/amd64
+
+      - name: Image digest
+        env:
+          DIGEST: ${{ steps.meta.outputs.digest }}
+        run: echo "Pushed ghcr.io/${{ github.repository_owner }}/attune-desktop-installers digest ${DIGEST}"

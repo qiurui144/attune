@@ -187,6 +187,56 @@ docker run -d \
 
 镜像构建矩阵：`linux/amd64` + `linux/arm64`（aarch64，支持 K3 / 树莓派 / NAS）。
 
+## 5. attune-desktop-installers（企业批量分发）
+
+**目标用户**: 企业 IT 管理员、air-gap 环境、需要批量推送 installer 的 CI/CD 管道。
+
+`attune-desktop-installers` OCI image 把所有平台 installer 打包进一个镜像，
+通过 `.github/workflows/desktop-release.yml` 在每次 `desktop-v*` tag 时自动构建发布。
+Packages tab 可以看到（`ghcr.io/qiurui144/attune-desktop-installers`）。
+
+### 提取 installer
+
+```bash
+# 拉取指定版本
+docker pull ghcr.io/qiurui144/attune-desktop-installers:1.0.0
+
+# 查看镜像内所有 installer 文件
+docker run --rm ghcr.io/qiurui144/attune-desktop-installers:1.0.0 ls /installers/
+
+# 提取 Linux .deb 到当前目录
+docker run --rm \
+  -v "$PWD:/out" \
+  ghcr.io/qiurui144/attune-desktop-installers:1.0.0 \
+  cp /installers/Attune_1.0.0_amd64.deb /out/
+
+# 提取 Windows NSIS installer
+docker run --rm \
+  -v "$PWD:/out" \
+  ghcr.io/qiurui144/attune-desktop-installers:1.0.0 \
+  cp /installers/Attune_1.0.0_x64-setup.exe /out/
+
+# 提取全部 installer（bash glob 写法）
+docker run --rm \
+  -v "$PWD:/out" \
+  --entrypoint sh \
+  ghcr.io/qiurui144/attune-desktop-installers:1.0.0 \
+  -c "cp /installers/* /out/"
+```
+
+### 镜像内容
+
+| 文件名示例 | 平台 | 用途 |
+|-----------|------|------|
+| `Attune_X.Y.Z_amd64.deb` | Linux (Debian/Ubuntu) | dpkg 安装 |
+| `Attune_X.Y.Z_x86_64.rpm` | Linux (Fedora/RHEL) | rpm 安装 |
+| `Attune_X.Y.Z_amd64.AppImage` | Linux 通用 | 免安装直接运行 |
+| `Attune_X.Y.Z_x64-setup.exe` | Windows (NSIS) | 双击安装，含 auto-updater |
+| `Attune_X.Y.Z_x64_en-US.msi` | Windows (MSI) | 企业 GPO/SCCM 推送 |
+
+> 注：installer image 基于 `scratch`（零系统层），仅含 `/installers/` 目录。
+> 平台 `linux/amd64`，不需 QEMU——内容是文件，非可执行二进制。
+
 ## 切换 / 迁移
 
 老设备 export vault profile, 新设备 wizard import:
