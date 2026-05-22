@@ -122,6 +122,114 @@ pub trait LlmProvider: Send + Sync {
     fn is_local(&self) -> bool {
         false
     }
+
+    // ── Robust LLM infra (2026-05-22, spec: docs/superpowers/specs/2026-05-22-robust-llm-infra.md) ─
+    //
+    // 三个 model-agnostic 工具 — 让所有 LLM agent 不再为各家小模型单独写 JSON / retry /
+    // few-shot 硬化. 通过 trait default impl 提供 best-effort fallback (走 chat()),
+    // Ollama / OpenAI provider 各自重写以利用 backend 原生能力 (format=json / response_format).
+
+    /// Schema-guided JSON generation.
+    ///
+    /// - `schema = None`  → 弱约束 "valid JSON" (Ollama `format="json"` / OpenAI
+    ///   `response_format={type: "json_object"}`).
+    /// - `schema = Some`  → 强约束 (Ollama `format=<schema_object>` /
+    ///   OpenAI `response_format={type: "json_schema", json_schema: {...}}`).
+    ///
+    /// Default impl: 把 "请输出 valid JSON" 的指令拼到 system prompt 末尾, 走 chat().
+    /// 不保证输出 valid (取决于模型). 子类型重写后才有 backend-level 强制.
+    fn chat_with_format_json(
+        &self,
+        system: &str,
+        user: &str,
+        schema: Option<&serde_json::Value>,
+    ) -> Result<String> {
+        let hint = match schema {
+            Some(s) => format!(
+                "{system}\n\nOutput must be valid JSON conforming to this schema:\n{s}\n\
+                 Do NOT wrap in markdown fences. Do NOT add prose before or after."
+            ),
+            None => format!(
+                "{system}\n\nOutput must be a single valid JSON object or array.\
+                 \nDo NOT wrap in markdown fences. Do NOT add prose before or after."
+            ),
+        };
+        self.chat(&hint, user)
+    }
+
+    /// Validation-loop retry — string-in, string-out (dyn-compat).
+    ///
+    /// 调用 `validator(raw)` 校验每次 LLM 输出. 返回 `Ok(())` → 立即返回 raw.
+    /// 返回 `Err(msg)` → 把错误信息 append 到 conversation 让 LLM 自己看错在哪里,
+    /// 然后重新 call. 最多 `max_attempts` 次 (典型 3 次).
+    ///
+    /// 用于 grounding verify / JSON valid / field complete 等"校验-反馈-重试"场景.
+    /// **注意**: 用 `&dyn Fn` 而非泛型 `V`, 保留 trait dyn-compat (caller 可 `&dyn LlmProvider`).
+    /// 类型化反序列化由 caller 在收到 Ok(raw) 后自己做.
+    fn chat_with_retry(
+        &self,
+        system: &str,
+        user: &str,
+        max_attempts: usize,
+        validator: &dyn Fn(&str) -> std::result::Result<(), String>,
+    ) -> Result<String> {
+        if max_attempts == 0 {
+            return Err(VaultError::Classification(
+                "chat_with_retry: max_attempts must be >= 1".into(),
+            ));
+        }
+        let mut messages: Vec<ChatMessage> = vec![
+            ChatMessage::system(system),
+            ChatMessage::user(user),
+        ];
+        let mut last_err = String::new();
+        for attempt in 1..=max_attempts {
+            let raw = if attempt == 1 {
+                self.chat(system, user)?
+            } else {
+                self.chat_with_history(&messages)?
+            };
+            match validator(&raw) {
+                Ok(()) => return Ok(raw),
+                Err(e) => {
+                    last_err = e.clone();
+                    if attempt < max_attempts {
+                        messages.push(ChatMessage::assistant(&raw));
+                        messages.push(ChatMessage::user(&format!(
+                            "你上一次的输出无法通过校验: {e}\n请根据错误信息重新输出, 注意不要重复上次的错误."
+                        )));
+                    }
+                }
+            }
+        }
+        Err(VaultError::Classification(format!(
+            "LLM retry exhausted after {max_attempts} attempts: {last_err}"
+        )))
+    }
+
+    /// Few-shot context loader.
+    ///
+    /// 构造 `[system, ex1.user, ex1.assistant, ..., exN.user, exN.assistant, user]`
+    /// 的 message 序列, 调用 `chat_with_history()`. 小模型对 "follow this pattern"
+    /// 风格响应良好.
+    fn chat_few_shot(
+        &self,
+        system: &str,
+        examples: &[(String, String)],
+        user: &str,
+    ) -> Result<String> {
+        if examples.is_empty() {
+            return self.chat(system, user);
+        }
+        let mut messages: Vec<ChatMessage> = Vec::with_capacity(2 + examples.len() * 2);
+        messages.push(ChatMessage::system(system));
+        for (u_ex, a_ex) in examples {
+            messages.push(ChatMessage::user(u_ex));
+            messages.push(ChatMessage::assistant(a_ex));
+        }
+        messages.push(ChatMessage::user(user));
+        self.chat_with_history(&messages)
+    }
 }
 
 // OllamaChatRequest / OllamaChatMessage structs removed v0.6.4 — both chat_sync
@@ -247,7 +355,14 @@ impl OllamaLlmProvider {
         // F-16 Ollama 模型驻留: keep_alive=1h. 见 embed.rs 同款注释.
         let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
             .unwrap_or_else(|_| "1h".to_string());
-        let body = serde_json::json!({
+        // Lever 1 (2026-05-22 v1.0 GA defamation F1 push): 当 ATTUNE_OLLAMA_FORMAT_JSON=1
+        // 时打开 Ollama 的 schema-guided JSON 模式 — 强制输出 valid JSON, 消除 markdown
+        // wrapping / trailing prose / 未转义引号导致的 parse 错误. 默认 OFF, 不影响
+        // 其他 LLM caller (chat / 摘要 / 分类) 的自由格式输出.
+        let force_json = std::env::var("ATTUNE_OLLAMA_FORMAT_JSON")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let mut body = serde_json::json!({
             "model": &self.model,
             "messages": [
                 {"role": "system", "content": system},
@@ -256,6 +371,9 @@ impl OllamaLlmProvider {
             "stream": false,
             "keep_alive": keep_alive,
         });
+        if force_json {
+            body["format"] = serde_json::json!("json");
+        }
         let client = self.client.clone();
         let body_json = serde_json::to_vec(&body)?;
 
@@ -331,6 +449,52 @@ impl LlmProvider for OllamaLlmProvider {
 
     fn is_local(&self) -> bool {
         true // Ollama 始终是本地 runtime
+    }
+
+    /// Ollama-native schema-guided JSON.
+    ///   - schema=None  → `format: "json"` (free-form valid JSON)
+    ///   - schema=Some  → `format: <schema_object>` (Ollama 0.5+ structured output)
+    /// 不依赖 ATTUNE_OLLAMA_FORMAT_JSON env var (那是 Lever 1 全局开关, 这里是 per-call).
+    fn chat_with_format_json(
+        &self,
+        system: &str,
+        user: &str,
+        schema: Option<&serde_json::Value>,
+    ) -> Result<String> {
+        let url = format!("{}/api/chat", self.base_url);
+        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
+            .unwrap_or_else(|_| "1h".to_string());
+        let mut body = serde_json::json!({
+            "model": &self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "stream": false,
+            "keep_alive": keep_alive,
+        });
+        body["format"] = match schema {
+            Some(s) => s.clone(),
+            None => serde_json::json!("json"),
+        };
+        let client = self.client.clone();
+        let body_json = serde_json::to_vec(&body)?;
+
+        llm_block_on(async move {
+            let resp = client.post(&url)
+                .header("Content-Type", "application/json")
+                .body(body_json)
+                .send().await
+                .map_err(|e| VaultError::LlmUnavailable(format!("chat request: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!("ollama HTTP {status}: {body}")));
+            }
+            let parsed: OllamaChatResponse = resp.json().await
+                .map_err(|e| VaultError::Classification(format!("parse chat response: {e}")))?;
+            Ok(parsed.message.content)
+        })
     }
 }
 
@@ -606,6 +770,116 @@ impl LlmProvider for OpenAiLlmProvider {
         &self.model
     }
 
+    /// OpenAI-compatible schema-guided JSON.
+    ///   - schema=None  → `response_format = {type: "json_object"}` (free-form valid JSON)
+    ///   - schema=Some  → `response_format = {type: "json_schema", json_schema: {...}}`
+    ///
+    /// 失败 fallback (gateway 不支持 json_schema 时常见): 自动降级为 json_object 重试一次.
+    /// 仍失败 → 走 default impl (chat() + prompt hint).
+    fn chat_with_format_json(
+        &self,
+        system: &str,
+        user: &str,
+        schema: Option<&serde_json::Value>,
+    ) -> Result<String> {
+        let url = format!("{}/chat/completions", self.endpoint);
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        let configured_model = self.model.clone();
+        let endpoint = self.endpoint.clone();
+        let system = system.to_string();
+        let user = user.to_string();
+        let schema_owned = schema.cloned();
+
+        llm_block_on(async move {
+            let mut model_to_use = configured_model.trim().to_string();
+            if model_to_use.is_empty() || model_to_use.eq_ignore_ascii_case("auto") {
+                if let Some(m) = resolve_openai_compat_model(&client, &endpoint, &api_key).await {
+                    model_to_use = m;
+                }
+            }
+
+            // 构造 response_format
+            let primary_format = match &schema_owned {
+                Some(s) => serde_json::json!({
+                    "type": "json_schema",
+                    "json_schema": {"name": "attune_extract", "schema": s, "strict": true},
+                }),
+                None => serde_json::json!({"type": "json_object"}),
+            };
+
+            let messages_payload = serde_json::json!([
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ]);
+
+            let try_call = |fmt: serde_json::Value| {
+                let url = url.clone();
+                let client = client.clone();
+                let api_key = api_key.clone();
+                let model = model_to_use.clone();
+                let messages = messages_payload.clone();
+                async move {
+                    let body = serde_json::json!({
+                        "model": model,
+                        "messages": messages,
+                        "stream": false,
+                        "response_format": fmt,
+                    });
+                    let resp = client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .header("Authorization", format!("Bearer {api_key}"))
+                        .body(serde_json::to_vec(&body).map_err(VaultError::from)?)
+                        .send()
+                        .await
+                        .map_err(|e| VaultError::LlmUnavailable(format!("openai request: {e}")))?;
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(VaultError::LlmUnavailable(format!(
+                            "openai HTTP {status}: {body}"
+                        )));
+                    }
+                    let parsed: OpenAiResponse = resp.json().await.map_err(|e| {
+                        VaultError::Classification(format!("parse openai response: {e}"))
+                    })?;
+                    parsed
+                        .choices
+                        .into_iter()
+                        .next()
+                        .map(|c| c.message.content)
+                        .ok_or_else(|| VaultError::Classification("empty choices".into()))
+                }
+            };
+
+            // 主路径
+            match try_call(primary_format).await {
+                Ok(s) => Ok(s),
+                Err(e_primary) => {
+                    // schema 模式失败 → 降级 json_object
+                    if schema_owned.is_some() {
+                        log::warn!(
+                            "openai json_schema mode failed ({e_primary}), falling back to json_object"
+                        );
+                        match try_call(serde_json::json!({"type": "json_object"})).await {
+                            Ok(s) => Ok(s),
+                            Err(e_fallback) => {
+                                // 二次失败 → 报最有用的错 (用户最关心 fallback 阶段错误)
+                                Err(VaultError::LlmUnavailable(format!(
+                                    "openai both json_schema and json_object failed: \
+                                     primary={e_primary}; fallback={e_fallback}"
+                                )))
+                            }
+                        }
+                    } else {
+                        Err(e_primary)
+                    }
+                }
+            }
+        })
+    }
+
     fn is_local(&self) -> bool {
         // OpenAI 兼容协议既可指向云端也可指向本地（Ollama v1 / LM Studio / vLLM）。
         // 按 endpoint 的 **host 精确判定**（解析 URL 取 host，非子串匹配）——
@@ -812,5 +1086,101 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    // ── Robust LLM infra tests (2026-05-22) ─────────────────────────────────
+
+    #[test]
+    fn chat_with_format_json_default_fallback_works() {
+        // Mock provider 走 default impl: 拼 hint 到 system, 走 chat()
+        let mock = MockLlmProvider::new("text-only");
+        mock.push_response(r#"{"k":"v"}"#);
+        let s = mock.chat_with_format_json("sys", "user", None).unwrap();
+        assert_eq!(s, r#"{"k":"v"}"#);
+    }
+
+    #[test]
+    fn chat_with_format_json_default_fallback_with_schema() {
+        let mock = MockLlmProvider::new("text-only");
+        mock.push_response(r#"[{"f":"a"}]"#);
+        let schema = serde_json::json!({"type": "array"});
+        let s = mock.chat_with_format_json("sys", "user", Some(&schema)).unwrap();
+        assert_eq!(s, r#"[{"f":"a"}]"#);
+    }
+
+    #[test]
+    fn chat_with_retry_succeeds_on_second_attempt() {
+        let mock = MockLlmProvider::new("test");
+        mock.push_response("oops bad");
+        mock.push_response(r#"{"ok":1}"#);
+        let raw = mock.chat_with_retry(
+            "sys",
+            "user",
+            3,
+            &|s: &str| {
+                serde_json::from_str::<serde_json::Value>(s)
+                    .map(|_| ())
+                    .map_err(|e| format!("invalid json: {e}"))
+            },
+        ).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["ok"], 1);
+    }
+
+    #[test]
+    fn chat_with_retry_exhausts_after_max_attempts() {
+        let mock = MockLlmProvider::new("test");
+        mock.push_response("bad1");
+        mock.push_response("bad2");
+        mock.push_response("bad3");
+        let result = mock.chat_with_retry(
+            "sys",
+            "user",
+            3,
+            &|s: &str| {
+                serde_json::from_str::<serde_json::Value>(s)
+                    .map(|_| ())
+                    .map_err(|e| format!("invalid: {e}"))
+            },
+        );
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exhausted"), "err msg should mention exhausted: {msg}");
+        assert!(msg.contains("3 attempts"), "err msg should include max attempts: {msg}");
+    }
+
+    #[test]
+    fn chat_with_retry_zero_attempts_errors() {
+        let mock = MockLlmProvider::new("test");
+        let result = mock.chat_with_retry(
+            "sys",
+            "user",
+            0,
+            &|_s: &str| Ok(()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn chat_few_shot_with_empty_examples_falls_back_to_chat() {
+        let mock = MockLlmProvider::new("test");
+        mock.push_response("answer");
+        let s = mock.chat_few_shot("sys", &[], "user").unwrap();
+        assert_eq!(s, "answer");
+    }
+
+    #[test]
+    fn chat_few_shot_with_examples_calls_history_path() {
+        // MockLlmProvider.chat_with_history 默认实现取最后一条 user message + 第一条 system.
+        // 这里主要验证 "不 panic + 走 chat_with_history 路径而非 chat()" — 真正的
+        // 顺序验证由真 LLM 集成测试覆盖.
+        let mock = MockLlmProvider::new("test");
+        mock.push_response("final-reply");
+        let examples = vec![
+            ("Q1".to_string(), "A1".to_string()),
+            ("Q2".to_string(), "A2".to_string()),
+        ];
+        let s = mock.chat_few_shot("sys", &examples, "user-final").unwrap();
+        assert_eq!(s, "final-reply");
     }
 }

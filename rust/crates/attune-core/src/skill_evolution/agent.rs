@@ -449,6 +449,12 @@ pub fn heuristic_expansion(target: &str, all_buckets: &[QueryBucket]) -> Vec<Str
 // ── LLM expansion (opt-in, layer 💰) ────────────────────────────────────────
 
 fn llm_expansion(llm: &dyn LlmProvider, query_pattern: &str) -> Result<Vec<String>> {
+    // Detect query script so we can ask the LLM to stay in the same character set.
+    let script_hint = match detect_cjk_script(query_pattern) {
+        CjkScript::Simplified => "\n- If you output Chinese terms, use Simplified Chinese characters (简体中文)",
+        CjkScript::Traditional => "\n- If you output Chinese terms, use Traditional Chinese characters (繁體中文)",
+        CjkScript::None => "",
+    };
     let prompt = format!(
         r#"User searched the local knowledge base for "{query_pattern}" but got zero results.
 Provide up to 5 short related search terms (synonyms / related concepts / common abbreviations)
@@ -462,17 +468,170 @@ Constraints:
 - Each term ≤ 30 characters
 - Each term is a keyword phrase, NOT a sentence
 - Do NOT include the original query text itself
-- 5 terms maximum"#,
+- 5 terms maximum{script_hint}"#,
     );
-    let messages = vec![crate::llm::ChatMessage::user(&prompt)];
-    let raw = llm.chat_with_history(&messages).map_err(|e| {
-        crate::error::VaultError::LlmUnavailable(format!("skill agent LLM call: {e}"))
-    })?;
+    // Robust LLM infra (2026-05-22): 走 schema-guided JSON 模式. Ollama/OpenAI 各自
+    // backend-native 强制 valid JSON; 其他 provider 走 default fallback (chat() + prompt hint).
+    // 不再依赖 ATTUNE_OLLAMA_FORMAT_JSON 全局开关.
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "terms": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 5,
+            },
+        },
+        "required": ["terms"],
+    });
+    let raw = llm
+        .chat_with_format_json("", &prompt, Some(&schema))
+        .map_err(|e| {
+            crate::error::VaultError::LlmUnavailable(format!("skill agent LLM call: {e}"))
+        })?;
     Ok(parse_llm_terms(&raw, query_pattern))
 }
 
+/// CJK script classification of a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CjkScript {
+    /// Contains Simplified-only characters (and no Traditional-only characters).
+    Simplified,
+    /// Contains Traditional-only characters (and no Simplified-only characters).
+    Traditional,
+    /// No CJK, or ambiguous (mixed / cannot distinguish).
+    None,
+}
+
+/// Detect whether a string is primarily Simplified or Traditional Chinese.
+///
+/// Strategy: scan each character against a hand-coded set of unambiguous
+/// Traditional-only codepoints (chars that have a distinct Simplified form).
+/// If any Traditional-only char is found → Traditional.
+/// If any Simplified-only char is found and no Traditional → Simplified.
+/// Otherwise → None (ASCII-only, Japanese, ambiguous CJK).
+///
+/// This list is intentionally small — only the most frequent characters in
+/// knowledge-base queries — to avoid false positives. No external crate needed.
+pub(crate) fn detect_cjk_script(s: &str) -> CjkScript {
+    let mut has_trad = false;
+    let mut has_simp = false;
+    for c in s.chars() {
+        // Simplified-only common chars (have a distinct Traditional counterpart).
+        // Source: Unihan + common freq lists for queries about patents/law/tech.
+        if matches!(
+            c,
+            '专' | '业' | '东' | '义' | '习' | '书' | '产' | '传' | '侦'
+                | '儿' | '关' | '兴' | '农' | '决' | '净' | '减' | '测' | '为' | '发'
+                | '变' | '国' | '图' | '报' | '导' | '实' | '审' | '对' | '应' | '总'
+                | '纸' | '经' | '绪' | '证' | '话' | '请' | '认' | '设' | '输' | '转'
+                | '过' | '进' | '运' | '选' | '问' | '阶' | '电' | '标' | '权' | '机'
+                | '没' | '终' | '结' | '统' | '质' | '赔' | '责' | '贸' | '财' | '货'
+                | '费' | '车' | '连' | '销' | '锁' | '险' | '难' | '际' | '离'
+        ) {
+            has_simp = true;
+        }
+        // Traditional-only common chars (not used in Simplified orthography).
+        if matches!(
+            c,
+            '專' | '業' | '東' | '義' | '習' | '書' | '產' | '傳' | '偵'
+                | '兒' | '關' | '興' | '農' | '決' | '淨' | '減' | '測' | '為' | '發'
+                | '變' | '國' | '圖' | '報' | '導' | '實' | '審' | '對' | '應' | '總'
+                | '紙' | '經' | '緒' | '證' | '話' | '請' | '認' | '設' | '輸' | '轉'
+                | '過' | '進' | '運' | '選' | '問' | '階' | '電' | '標' | '權' | '機'
+                | '沒' | '終' | '結' | '統' | '質' | '賠' | '責' | '貿' | '財' | '貨'
+                | '費' | '車' | '連' | '銷' | '鎖' | '險' | '難' | '際' | '離'
+        ) {
+            has_trad = true;
+        }
+    }
+    match (has_simp, has_trad) {
+        (_, true) => CjkScript::Traditional,
+        (true, false) => CjkScript::Simplified,
+        _ => CjkScript::None,
+    }
+}
+
+/// Normalize a term to match the target script.
+///
+/// If the target is Simplified and the term contains Traditional-only chars,
+/// map them to their Simplified equivalents.  If the target is Traditional and
+/// the term contains Simplified-only chars, map them to Traditional.
+/// Otherwise return the term unchanged.
+///
+/// Only the most frequent ~60 char pairs are covered; rarer characters pass
+/// through unchanged (they are typically shared between both orthographies).
+pub(crate) fn normalize_to_script(term: &str, target: CjkScript) -> String {
+    match target {
+        CjkScript::Simplified => term
+            .chars()
+            .map(|c| trad_to_simp(c).unwrap_or(c))
+            .collect(),
+        CjkScript::Traditional => term
+            .chars()
+            .map(|c| simp_to_trad(c).unwrap_or(c))
+            .collect(),
+        CjkScript::None => term.to_string(),
+    }
+}
+
+/// Map a single Traditional char to its Simplified counterpart, if known.
+fn trad_to_simp(c: char) -> Option<char> {
+    Some(match c {
+        '專' => '专', '業' => '业', '東' => '东', '義' => '义', '習' => '习',
+        '書' => '书', '產' => '产', '傳' => '传', '偵' => '侦', '兒' => '儿',
+        '關' => '关', '興' => '兴', '農' => '农', '決' => '决', '淨' => '净',
+        '減' => '减', '測' => '测', '為' => '为', '發' => '发', '變' => '变',
+        '國' => '国', '圖' => '图', '報' => '报', '導' => '导', '實' => '实',
+        '審' => '审', '對' => '对', '應' => '应', '總' => '总', '紙' => '纸',
+        '經' => '经', '緒' => '绪', '證' => '证', '話' => '话', '請' => '请',
+        '認' => '认', '設' => '设', '輸' => '输', '轉' => '转', '過' => '过',
+        '進' => '进', '運' => '运', '選' => '选', '問' => '问', '階' => '阶',
+        '電' => '电', '標' => '标', '權' => '权', '機' => '机', '沒' => '没',
+        '終' => '终', '結' => '结', '統' => '统', '質' => '质', '賠' => '赔',
+        '責' => '责', '貿' => '贸', '財' => '财', '貨' => '货', '費' => '费',
+        '車' => '车', '連' => '连', '銷' => '销', '鎖' => '锁', '險' => '险',
+        '難' => '难', '際' => '际', '離' => '离', '樣' => '样', '歷' => '历',
+        '壓' => '压', '幹' => '干', '點' => '点', '號' => '号', '後' => '后',
+        '處' => '处', '術' => '术', '許' => '许', '論' => '论', '調' => '调',
+        '談' => '谈', '說' => '说', '讓' => '让', '讀' => '读', '貢' => '贡',
+        '賣' => '卖', '買' => '买', '開' => '开', '間' => '间',
+        '陽' => '阳', '隊' => '队', '頁' => '页', '頭' => '头', '題' => '题',
+        '風' => '风', '飛' => '飞', '體' => '体', '驗' => '验', '齊' => '齐',
+        _ => return None,
+    })
+}
+
+/// Map a single Simplified char to its Traditional counterpart, if known.
+fn simp_to_trad(c: char) -> Option<char> {
+    Some(match c {
+        '专' => '專', '业' => '業', '东' => '東', '义' => '義', '习' => '習',
+        '书' => '書', '产' => '產', '传' => '傳', '侦' => '偵', '儿' => '兒',
+        '关' => '關', '兴' => '興', '农' => '農', '决' => '決', '净' => '淨',
+        '减' => '減', '测' => '測', '为' => '為', '发' => '發', '变' => '變',
+        '国' => '國', '图' => '圖', '报' => '報', '导' => '導', '实' => '實',
+        '审' => '審', '对' => '對', '应' => '應', '总' => '總', '纸' => '紙',
+        '经' => '經', '绪' => '緒', '证' => '證', '话' => '話', '请' => '請',
+        '认' => '認', '设' => '設', '输' => '輸', '转' => '轉', '过' => '過',
+        '进' => '進', '运' => '運', '选' => '選', '问' => '問', '阶' => '階',
+        '电' => '電', '标' => '標', '权' => '權', '机' => '機', '没' => '沒',
+        '终' => '終', '结' => '結', '统' => '統', '质' => '質', '赔' => '賠',
+        '责' => '責', '贸' => '貿', '财' => '財', '货' => '貨', '费' => '費',
+        '车' => '車', '连' => '連', '销' => '銷', '锁' => '鎖', '险' => '險',
+        '难' => '難', '际' => '際', '离' => '離', '样' => '樣', '历' => '歷',
+        '压' => '壓', '干' => '幹', '点' => '點', '号' => '號', '后' => '後',
+        '处' => '處', '术' => '術', '许' => '許', '论' => '論', '调' => '調',
+        '谈' => '談', '说' => '說', '让' => '讓', '读' => '讀', '贡' => '貢',
+        '卖' => '賣', '买' => '買', '开' => '開', '间' => '間',
+        '阳' => '陽', '队' => '隊', '页' => '頁', '头' => '頭', '题' => '題',
+        '风' => '風', '飞' => '飛', '体' => '體', '验' => '驗', '齐' => '齊',
+        _ => return None,
+    })
+}
+
 /// Extract `terms: [...]` from an LLM response, tolerant of ```json fences```
-/// and trailing prose.
+/// and trailing prose. Normalizes CJK character set to match the query script,
+/// then deduplicates (case-insensitive + script-normalized key).
 pub(crate) fn parse_llm_terms(raw: &str, query_pattern: &str) -> Vec<String> {
     let json_str = strip_fences(raw);
     let value: serde_json::Value = match serde_json::from_str(&json_str) {
@@ -484,6 +643,7 @@ pub(crate) fn parse_llm_terms(raw: &str, query_pattern: &str) -> Vec<String> {
         None => return Vec::new(),
     };
 
+    let target_script = detect_cjk_script(query_pattern);
     let target_lower = query_pattern.to_lowercase();
     let mut out: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -493,13 +653,20 @@ pub(crate) fn parse_llm_terms(raw: &str, query_pattern: &str) -> Vec<String> {
         if s.is_empty() || s.len() > 60 {
             continue;
         }
-        // Don't echo the user's own query.
+        // Don't echo the user's own query (check both raw and normalized).
         if s.to_lowercase() == target_lower {
             continue;
         }
-        let key = s.to_lowercase();
+        // Normalize the term to the same CJK script as the query.
+        let normalized = normalize_to_script(s, target_script);
+        if normalized.to_lowercase() == target_lower {
+            continue;
+        }
+        // Dedupe key: lowercase of the normalized form so "專利" and "专利"
+        // collapse to the same slot and the correct script form wins.
+        let key = normalized.to_lowercase();
         if seen.insert(key) {
-            out.push(s.to_string());
+            out.push(normalized);
         }
         if out.len() >= 5 {
             break;
@@ -792,6 +959,88 @@ mod tests {
     #[test]
     fn parse_llm_terms_invalid_returns_empty() {
         assert!(parse_llm_terms("sorry I can't", "x").is_empty());
+    }
+
+    // ── CJK script detection ─────────────────────────────────────────────
+    #[test]
+    fn detect_simplified_query() {
+        assert_eq!(detect_cjk_script("专利"), CjkScript::Simplified);
+        assert_eq!(detect_cjk_script("交通事故 主责"), CjkScript::Simplified);
+        assert_eq!(detect_cjk_script("转让 合同"), CjkScript::Simplified);
+    }
+
+    #[test]
+    fn detect_traditional_query() {
+        assert_eq!(detect_cjk_script("專利"), CjkScript::Traditional);
+        assert_eq!(detect_cjk_script("電話 記錄"), CjkScript::Traditional);
+    }
+
+    #[test]
+    fn detect_no_cjk() {
+        assert_eq!(detect_cjk_script("rust ownership"), CjkScript::None);
+        assert_eq!(detect_cjk_script("k8s ingress nginx"), CjkScript::None);
+        assert_eq!(detect_cjk_script(""), CjkScript::None);
+    }
+
+    // ── normalize_to_script ──────────────────────────────────────────────
+    #[test]
+    fn normalize_traditional_to_simplified() {
+        // LLM returns Traditional "專利" for a Simplified query "专利".
+        let result = normalize_to_script("專利", CjkScript::Simplified);
+        assert_eq!(result, "专利");
+    }
+
+    #[test]
+    fn normalize_simplified_to_traditional() {
+        let result = normalize_to_script("专利", CjkScript::Traditional);
+        assert_eq!(result, "專利");
+    }
+
+    #[test]
+    fn normalize_none_passthrough() {
+        assert_eq!(normalize_to_script("patent", CjkScript::None), "patent");
+        assert_eq!(normalize_to_script("专利", CjkScript::None), "专利");
+    }
+
+    // ── parse_llm_terms with script normalization ────────────────────────
+    #[test]
+    fn parse_llm_terms_normalizes_traditional_to_simplified() {
+        // Query is Simplified; LLM returns mix of Simplified + Traditional.
+        let resp = r#"{"terms": ["专利", "專利", "patent", "Patents", "知识产权"]}"#;
+        let out = parse_llm_terms(resp, "专利申请");
+        // "专利" and "專利" should collapse to one Simplified "专利" (first seen wins).
+        let patent_zh_count = out.iter().filter(|t| *t == "专利" || *t == "專利").count();
+        assert_eq!(patent_zh_count, 1, "expected exactly one 专利 entry, got: {out:?}");
+        // The entry should be Simplified form.
+        assert!(out.contains(&"专利".to_string()), "should be Simplified form: {out:?}");
+        // English terms preserved as-is (no CJK normalization).
+        assert!(out.contains(&"patent".to_string()) || out.contains(&"Patents".to_string()),
+            "English terms should be present: {out:?}");
+    }
+
+    #[test]
+    fn parse_llm_terms_normalizes_simplified_to_traditional() {
+        // Query is Traditional; LLM returns Simplified term that should be converted.
+        let resp = r#"{"terms": ["专利", "patent", "知识产权"]}"#;
+        let out = parse_llm_terms(resp, "專利申請");
+        assert!(out.contains(&"專利".to_string()),
+            "Simplified 专利 should be normalized to Traditional 專利: {out:?}");
+        assert!(!out.contains(&"专利".to_string()),
+            "Simplified form should not appear in Traditional-query result: {out:?}");
+    }
+
+    #[test]
+    fn parse_llm_terms_dedup_after_normalization() {
+        // Both forms normalize to same key → only 1 output entry.
+        let resp = r#"{"terms": ["专利", "專利", "patent"]}"#;
+        let out = parse_llm_terms(resp, "知识产权");
+        let unique_count = out.len();
+        // "专利" appears as-is (no normalization when query has no script), but dedup
+        // still collapses the two CJK entries via normalized key.
+        // Regardless of script detection outcome, no exact-duplicate should survive.
+        let dupes: Vec<_> = out.iter().filter(|t| **t == "专利" || **t == "專利").collect();
+        assert!(dupes.len() <= 1, "normalization dedup should leave at most 1 variant: {out:?}");
+        let _ = unique_count; // satisfies unused-var lint
     }
 
     #[test]
