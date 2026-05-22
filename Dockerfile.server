@@ -8,20 +8,27 @@ FROM node:20-alpine AS ui-builder
 
 WORKDIR /ui
 COPY rust/crates/attune-server/ui/package*.json ./
-RUN npm ci --prefer-offline
+RUN npm ci
 
 COPY rust/crates/attune-server/ui/ ./
 RUN npm run build
 
 # ── Stage 2: Rust builder ─────────────────────────────────────────────────────
-FROM rust:1.91-bookworm AS builder
+# ubuntu:24.04 (glibc 2.39) matches ORT prebuilt binaries (glibc 2.38+)
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    build-essential curl pkg-config libssl-dev cmake ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Rust 1.91 (minimum: kreuzberg-paddle-ocr requires 1.91)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain 1.91 --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /src
-
-# Install build deps for rusqlite (bundled) + usearch (C++)
-RUN apt-get update -qq && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev cmake g++ && \
-    rm -rf /var/lib/apt/lists/*
 
 COPY rust/Cargo.toml rust/Cargo.lock ./rust/
 COPY rust/crates ./rust/crates
@@ -32,8 +39,16 @@ COPY --from=ui-builder /ui/dist ./rust/crates/attune-server/ui/dist/
 WORKDIR /src/rust
 RUN cargo build --release -p attune-server
 
+# Collect all needed files into /dist (binary + any ORT .so from copy-dylibs)
+RUN mkdir -p /dist/lib && \
+    cp target/release/attune-server-headless /dist/ && \
+    find target/release -maxdepth 1 -name 'libonnxruntime*.so*' -exec cp {} /dist/lib/ \; ; \
+    true
+
 # ── Stage 3: runtime ──────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+FROM ubuntu:24.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 && \
@@ -43,7 +58,8 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 RUN useradd -r -s /bin/false -d /data attune && \
     mkdir -p /data && chown attune:attune /data
 
-COPY --from=builder /src/rust/target/release/attune-server-headless /usr/local/bin/attune-server-headless
+COPY --from=builder /dist/attune-server-headless /usr/local/bin/attune-server-headless
+COPY --from=builder /dist/lib/ /usr/local/lib/
 
 USER attune
 WORKDIR /data
