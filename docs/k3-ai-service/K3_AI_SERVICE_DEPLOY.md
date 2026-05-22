@@ -6,7 +6,7 @@
 
 ## 服务概述
 
-K3 作为 AI 推理计算节点，提供四场景 HTTP API，供 attune/lawcontrol 远程调用：
+K3 作为 AI 推理计算节点，提供四场景 HTTP API，供 attune/attune-enterprise 远程调用：
 
 ```
 attune (x86/ARM)  ──HTTP──→  K3 :8080
