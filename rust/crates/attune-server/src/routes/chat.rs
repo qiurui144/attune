@@ -1112,3 +1112,69 @@ fn llm_upstream_error(e: attune_core::error::VaultError) -> ApiError {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use attune_core::error::VaultError;
+
+    fn status_of(e: VaultError) -> u16 {
+        llm_upstream_error(e).0.as_u16()
+    }
+
+    fn code_of(e: VaultError) -> String {
+        let (_, Json(body)) = llm_upstream_error(e);
+        body["code"].as_str().unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn upstream_429_maps_to_too_many_requests() {
+        let e = VaultError::LlmUnavailable("openai HTTP 429: rate limit exceeded".into());
+        assert_eq!(status_of(e), 429);
+    }
+
+    #[test]
+    fn upstream_503_maps_to_service_unavailable() {
+        let e = VaultError::LlmUnavailable("openai HTTP 503: system cpu overloaded".into());
+        let (status, Json(body)) = llm_upstream_error(e);
+        assert_eq!(status.as_u16(), 503);
+        assert_eq!(body["code"], "llm-provider-unavailable");
+        assert_eq!(body["upstream_status"], 503);
+    }
+
+    #[test]
+    fn upstream_529_anthropic_overloaded_maps_to_503() {
+        // Anthropic uses 529 for overload
+        let e = VaultError::LlmUnavailable("openai HTTP 529: overloaded".into());
+        assert_eq!(status_of(e), 503);
+        assert_eq!(code_of(VaultError::LlmUnavailable("openai HTTP 529: overloaded".into())), "llm-provider-unavailable");
+    }
+
+    #[test]
+    fn upstream_500_maps_to_bad_gateway() {
+        let e = VaultError::LlmUnavailable("openai HTTP 500: internal error".into());
+        assert_eq!(status_of(e), 502);
+        assert_eq!(code_of(VaultError::LlmUnavailable("openai HTTP 500: internal error".into())), "llm-provider-error");
+    }
+
+    #[test]
+    fn upstream_401_maps_to_bad_request_config_error() {
+        let e = VaultError::LlmUnavailable("openai HTTP 401: invalid api key".into());
+        assert_eq!(status_of(e), 400);
+        assert_eq!(code_of(VaultError::LlmUnavailable("openai HTTP 401: invalid api key".into())), "llm-config-error");
+    }
+
+    #[test]
+    fn ollama_unreachable_no_status_maps_to_500() {
+        let e = VaultError::LlmUnavailable("ollama unreachable: connection refused".into());
+        assert_eq!(status_of(e), 500);
+        assert_eq!(code_of(VaultError::LlmUnavailable("ollama unreachable: connection refused".into())), "llm-error");
+    }
+
+    #[test]
+    fn upstream_status_present_in_body() {
+        let e = VaultError::LlmUnavailable("openai HTTP 429: quota".into());
+        let (_, Json(body)) = llm_upstream_error(e);
+        assert_eq!(body["upstream_status"], 429);
+    }
+}
