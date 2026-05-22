@@ -704,3 +704,56 @@ detector.py 中维护了精确匹配表:
 - AMD: AMD_NPU_CHIPS (phoenix/hawk_point/strix_point/krackan_point)
 - 每个芯片条目包含: PCI ID、最低内核版本、固件路径、最低驱动版本、已知问题
 - /models/check API 输出完整检测报告 + 一键安装命令
+
+---
+
+## ⭐ Agent 模型兜底 — attune 项目历史踩坑(下沉自全局 CLAUDE.md,2026-05-22)
+
+> 通用 LLM agent 兜底规则(Schema-guided / 重试-验证 / Few-shot / 多模型矩阵 / 弱模型 fallback / 失败 telemetry)见 [`~/.claude/CLAUDE.md §Agent 模型兜底原则`](file:///home/qiurui/.claude/CLAUDE.md);本节是 attune 项目实际触发本规则的具体案例。
+
+### 历史踩坑(2026-05-22 attune v1.0)
+
+**defamation_extractor**:
+- mock 全过、qwen2.5:3b real F1 = **0.09**(JSON parse 间歇炸 + 多字段抽烂)
+- 根因:缺通用 §A(schema-guided 输出)+ §B(重试-验证循环)+ §C(few-shot)三项
+- 一次 dispatch agent 加 prompt fix + parser hardening 后 F1 → 0.56(qwen 仍卡能力)
+- 若一开始就走 §A + §B + §C 不会到 ship 前才暴露
+
+**OSS self_evolving_skill 真 LLM 跑**:
+- Simplified query 返回 Traditional 字符 expansion(无字符集 normalize 步骤 → DB 查询 miss)
+- 归一 + dedupe 是 §D 多模型矩阵跑出来的实际问题
+
+### attune 项目 LLM agent ship 前自检(本项目实施)
+
+任何"加新 LLM agent"或"现有 agent 改 prompt / 改 LLM call"场景,必须:
+1. 实施 schema-guided 输出 + 重试-验证 + few-shot
+2. 跑 3 tier 矩阵(qwen2.5:3b / gemini-1.5-flash / Sonnet)
+3. 依据数据写 RELEASE.md 标 model tier(`Requires ≥ gpt-4o-mini` / `Pro plan only` 等)
+4. 加 telemetry(per (agent × model) 失败率 > 30% UI 提示切高 tier)
+
+任一缺失 → 不 ship。
+
+---
+
+## ⭐ 架构级别设计 — attune Office helper 案例(下沉自全局 CLAUDE.md,2026-05-22)
+
+> 通用 spec-first 11 节规则见 [`~/.claude/CLAUDE.md §架构级别设计铁律`](file:///home/qiurui/.claude/CLAUDE.md);本节是 attune 项目实际践行该规则的正面案例。
+
+### 正面案例(2026-05-21 attune Office helper)
+
+由用户并行 session agent 起草 6 天 plan:
+- **spec 596 行 + plan 1453 行,11 节齐全**
+- 走完 D1-D5.6 落地 16 commits + 1085 tests + 163 office 专属 tests + proptest 抓出 14 u32 overflow bugs
+- **这是 spec-first 模板** — 大 capability 不能先动手再补 spec
+
+### 反面案例(2026-05-20 attune-pro Phase 2)
+
+详见 [`attune-pro/CLAUDE.md`](../attune-pro/CLAUDE.md) 同名章节。简言之:traffic/divorce/sale/housing 4 agent dispatch 时只有 prompt 没有完整 spec,worktree 隔离失败时主 worktree 共享导致 sale + housing 撞车合 commit。**先 spec 定义"每个 agent 一个 worktree + 共享文件如何 resolve"** 可避免该 incident。
+
+### attune 后续 capability 必走
+
+任何 attune capability(新 connector / 新 vault feature / 新 agent / 跨仓 capability)**实施前必须**:
+- `docs/superpowers/specs/<date>-<feature>.md` 11 节齐全
+- spec 评审通过 → invoke `superpowers:writing-plans` 出 plan
+- plan 评审过 → implementation
+- 不允许"先写代码再补 spec"
