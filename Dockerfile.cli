@@ -3,7 +3,7 @@
 # Usage: docker build -f Dockerfile.cli -t attune-cli:local .
 
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.91-bookworm AS builder
 
 WORKDIR /src
 

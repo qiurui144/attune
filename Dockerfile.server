@@ -14,7 +14,7 @@ COPY rust/crates/attune-server/ui/ ./
 RUN npm run build
 
 # ── Stage 2: Rust builder ─────────────────────────────────────────────────────
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.91-bookworm AS builder
 
 WORKDIR /src
 
