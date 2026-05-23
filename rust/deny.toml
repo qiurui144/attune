@@ -1,0 +1,120 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Check categories:
+#   advisories  — RUSTSEC vulnerability advisories
+#   licenses    — license compliance
+#   bans        — duplicate / forbidden crates
+#   sources     — crate registry / git source allowlist
+
+[graph]
+# Workspace members to resolve (default: all)
+all-features = false
+no-default-features = false
+
+# ---------------------------------------------------------------------------
+# advisories — fail on any RUSTSEC vulnerability not explicitly ignored
+# ---------------------------------------------------------------------------
+[advisories]
+# Path to local DB clone used in CI (fetched via rustsec/audit-check action).
+# Leave empty to use cargo-audit's default ~/.cargo/advisory-db cache.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+
+# Fail on vulnerabilities; unmaintained crates → warn only (not blocking).
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+
+# Per-advisory ignores go here when a vulnerability cannot be immediately
+# patched and a documented reason exists in docs/SECURITY.md.
+# Format:
+#   [[advisories.ignore]]
+#   id = "RUSTSEC-YYYY-NNNN"
+#   reason = "See docs/SECURITY.md §Known Exemptions"
+ignore = []
+
+# ---------------------------------------------------------------------------
+# licenses — acceptable SPDX license expressions
+# ---------------------------------------------------------------------------
+[licenses]
+# SPDX identifiers of licenses we accept without further review.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+    "Zlib",
+]
+
+# Confidence threshold for license text detection (0.0–1.0).
+confidence-threshold = 0.8
+
+# Explicit per-crate license clarifications for crates with missing/ambiguous
+# SPDX metadata.
+[[licenses.clarify]]
+name = "ring"
+# ring uses a custom non-standard license; it is OpenSSL-compatible.
+# See: https://github.com/briansmith/ring/blob/main/LICENSE
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# ---------------------------------------------------------------------------
+# bans — duplicate crates and forbidden patterns
+# ---------------------------------------------------------------------------
+[bans]
+# Warn on multiple versions of the same crate (expected in large workspaces).
+multiple-versions = "warn"
+
+# Deny specific crates that we never want in the dependency tree.
+deny = [
+    # openssl-sys: we use rustls everywhere; native OpenSSL is banned.
+    { name = "openssl-sys",    reason = "Use rustls (pure-Rust TLS). See Cargo.toml." },
+    { name = "openssl",        reason = "Use rustls (pure-Rust TLS). See Cargo.toml." },
+]
+
+# Crates that are allowed to have multiple versions (common in large
+# ecosystems; list here to silence the "multiple versions" warning).
+skip = [
+    # syn / quote / proc-macro2 — procedural macro ecosystem version skew is normal.
+    { name = "syn" },
+    { name = "quote" },
+    { name = "proc-macro2" },
+    # bitflags — v1 and v2 coexist widely.
+    { name = "bitflags" },
+    # indexmap — v1/v2 transition still ongoing in ecosystem.
+    { name = "indexmap" },
+    # base64 — v0.21 and v0.22 both present during migration window.
+    { name = "base64" },
+    # windows-sys / windows_* — Microsoft crate version matrix is noisy.
+    { name = "windows-sys" },
+    { name = "windows_x86_64_msvc" },
+    { name = "windows_x86_64_gnullvm" },
+    { name = "windows_aarch64_msvc" },
+    { name = "windows_i686_msvc" },
+    { name = "windows_i686_gnullvm" },
+    # hashbrown — internal impl detail of std collections, version skew normal.
+    { name = "hashbrown" },
+    # spin — pulled by multiple crypto crates at different versions.
+    { name = "spin" },
+    # toml_edit / toml_datetime — cargo tooling brings old versions.
+    { name = "toml_edit" },
+    { name = "toml_datetime" },
+]
+
+# ---------------------------------------------------------------------------
+# sources — only allow crates from crates.io and our own git repos
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# crates.io is always allowed implicitly; add explicit git allowlist below
+# if we ever add git-sourced dependencies.
+allow-git = []

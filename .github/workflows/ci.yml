@@ -119,6 +119,38 @@ jobs:
         run: cargo clippy --workspace --release -- -D warnings
         continue-on-error: true
 
+  cargo-audit:
+    # Security: run cargo audit + cargo deny on every push/PR.
+    # rustsec/audit-check caches advisory-db; cargo-deny checks licenses + bans.
+    # No untrusted input used in run: steps.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-audit-v1-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: cargo-audit-v1-
+
+      - name: cargo audit (RUSTSEC vulnerability scan)
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: rust
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: cargo deny check (licenses + bans + sources)
+        working-directory: rust
+        run: cargo deny check
+
   rust-test-slow-nightly:
     # R19 (2026-05-01): 慢 E2E 走 schedule 通道，每天 02:00 UTC 跑一次
     # form_factor_integration / system_wizard_full_flow_test / vault_setup_test (~6 min)
