@@ -262,6 +262,7 @@ gh workflow run desktop-release.yml --ref desktop-v0.9.x
 
 ## 关联文档
 
+- **私钥部署 step-by-step（GA 前必读）**：[`tauri-updater-deploy.md`](tauri-updater-deploy.md)
 - 用户安装:[`install-package-managers.md`](install-package-managers.md)
 - Release 流程:[`../DEVELOP.md`](../DEVELOP.md) §Release Checklist
 - Spec:[`superpowers/specs/2026-05-22-release-package-management.md`](superpowers/specs/2026-05-22-release-package-management.md)
