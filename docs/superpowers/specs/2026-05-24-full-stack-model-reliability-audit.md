@@ -247,6 +247,23 @@ Repro test: `rust/crates/attune-core/tests/ocr_long_page_audit.rs`(本 audit com
 | Ollama bge-m3 size_vram=0(纯 CPU 推理)| 🟢 Info | v1.1 | doc note: 用户笔电有 GPU 时 Ollama 自动用 vram;开发机 4090 红线下未测 |
 | Embedding 30q hit@5=40%(本 audit subset)| 🟢 Info | — | corpus 限制非 model 限制,full corpus per spec 5/24 = 93.9% |
 
+### R17/R18 综合 RAG flow + perf audit(2026-05-25 01:07)
+
+**R17 e2e flow 5 query**(`rag_flow_audit.rs`,10 文件 159 chunks):
+- ownership rr=0.994 ✅ / references rr=0.893 ✅ / trait rr=0.199 ✅ / async rr=0.446 ✅
+- error-handling MISS(corpus 缺 ch09-02 文件)
+- hit@1 = 4/5 = 80%,avg e2e latency 618ms
+
+**R18 perf 30 query**(`rag_perf_audit.rs`,30 文件 596 chunks):
+- chunks embed 60.3s @ 9.9 chunk/s(ORT bge-m3 1024d)
+- e2e latency:**P50=565ms / P90=624ms / P99=684ms**
+- 拆解:embed only P50=10ms / reranker only P50=553ms
+- **reranker 是 98% latency 贡献者**(top-10 cross-encoder)
+- 0/30 failure → 100% reliability
+
+**结论**:ORT embedding + reranker e2e 稳定 + 性能可接受(<1s/query)。Reranker
+是主瓶颈,符合 cross-encoder cost-quality trade-off。
+
 ### R14 Reranker fix 稳定性 in-session 复测(2026-05-25 00:57)
 
 跑 `rust/crates/attune-core/tests/reranker_long_doc_audit.rs`(本 audit commit)
