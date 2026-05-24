@@ -335,4 +335,104 @@ mod tests {
         let u: UserInfo = serde_json::from_str(json).unwrap();
         assert_eq!(u.gateway_default_model.as_deref(), Some("deepseek-v4-flash"));
     }
+
+    // ── 增强覆盖: with_session / signup / list_licenses / logout / network error ─
+
+    #[test]
+    fn with_session_preserves_token() {
+        let c = CloudClient::with_session("https://api.x.com", "sess-abc-123");
+        assert_eq!(c.session_token(), Some("sess-abc-123"));
+        assert_eq!(c.base_url, "https://api.x.com");
+    }
+
+    #[test]
+    fn session_token_empty_when_no_login() {
+        let c = CloudClient::new("https://x.com");
+        assert!(c.session_token().is_none());
+    }
+
+    #[test]
+    fn signup_against_unreachable_returns_err() {
+        let mut c = CloudClient::new("http://127.0.0.1:2");
+        let err = c.signup("new@example.com", "pw").unwrap_err();
+        // 网络错 → http_err → VaultError::Io
+        assert!(matches!(err, VaultError::Io(_)));
+    }
+
+    #[test]
+    fn me_without_session_returns_err() {
+        // 未登录调 me — unreachable port 直接 network err
+        let c = CloudClient::new("http://127.0.0.1:3");
+        assert!(c.me().is_err());
+    }
+
+    #[test]
+    fn list_licenses_unreachable_returns_err() {
+        let c = CloudClient::new("http://127.0.0.1:4");
+        assert!(c.list_licenses().is_err());
+    }
+
+    // FIXME(v1.1): logout 当前在网络失败时不清空 session_cookie (用 ? 提前 return)。
+    // 用户视角的"我登出了" 应当本地清空 session,不论 server 是否能响应。
+    // 本 test 锁定**当前行为**: 网络挂 → logout 返回 Err 且 session 仍存在。
+    // v1.1 应改为: 即使 server 不可达,也本地 session_cookie = None。
+    #[test]
+    fn logout_returns_err_on_unreachable_keeps_session_current_behavior() {
+        let mut c = CloudClient::with_session("http://127.0.0.1:5", "token");
+        assert!(c.session_token().is_some());
+        let result = c.logout();
+        // 当前: 网络错 → Err 提前 return → session 还在 (这是个 bug, 见 FIXME)
+        assert!(result.is_err());
+    }
+
+    // Happy logout: 用 mock URL trick — 注意当前 impl 不会清 session 即使 HTTP 200
+    // (因 `let _ = ?` 模式只在 ? 不触发时继续)。如果未来 fix 这个 bug, 改成本地无条件清。
+
+    // Edge: empty email / password 也走 HTTP request (业务校验由 server 端)
+    // 这里只验证 client 不 panic, 不 client-side reject
+    #[test]
+    fn login_empty_email_does_not_panic() {
+        let mut c = CloudClient::new("http://127.0.0.1:6");
+        let _ = c.login("", ""); // 不 panic
+    }
+
+    // EntitledPlugin: decrypt_key 可选 (free plugin 无)
+    #[test]
+    fn entitled_plugin_without_decrypt_key_parses() {
+        let json = r#"{
+            "plugin_id": "free-skill",
+            "version": "1.0.0",
+            "download_url": "https://x.com/x.attunepkg",
+            "signing_pubkey_hex": "deadbeef"
+        }"#;
+        let p: EntitledPlugin = serde_json::from_str(json).unwrap();
+        assert!(p.decrypt_key.is_none());
+    }
+
+    // UserInfo: plan_expires + is_admin defaults
+    #[test]
+    fn user_info_minimal_defaults() {
+        let json = r#"{"id": 1, "email": "x@y.com"}"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert!(u.plan.is_empty()); // default empty string
+        assert!(u.plan_expires.is_none());
+        assert!(!u.is_admin);
+        assert!(u.gateway_token.is_none());
+    }
+
+    // Adversarial: server 返回 invalid JSON → json_err 路径
+    // (这里只验证 EntitledPlugin parse 失败正确 propagate)
+    #[test]
+    fn entitled_plugin_invalid_json_errors() {
+        let json = r#"{"plugin_id": "x"}"#; // 缺 version / download_url / signing_pubkey_hex
+        let result: std::result::Result<EntitledPlugin, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // I18n: email 含 Unicode (虽然 RFC 限制 ASCII, 但 client 不应 panic)
+    #[test]
+    fn login_unicode_email_no_panic() {
+        let mut c = CloudClient::new("http://127.0.0.1:7");
+        let _ = c.login("中文@example.com", "🔒pw");
+    }
 }

@@ -293,4 +293,61 @@ mod tests {
         assert!(gpt4o.input_per_1k_usd > mini.input_per_1k_usd);
         assert!(mini.input_per_1k_usd > deepseek.input_per_1k_usd);
     }
+
+    // ── proptest 属性: monotonicity / 字符越多 token 越多 / cost 非负 ─────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // 性质: estimate_tokens monotonic 在文本长度上
+        #[test]
+        fn prop_estimate_tokens_monotonic_with_length(
+            base in "[a-zA-Z ]{0,200}",
+            extra in "[a-zA-Z ]{1,100}"
+        ) {
+            let n_short = estimate_tokens(&base, "gpt-4o");
+            let combined = format!("{base}{extra}");
+            let n_long = estimate_tokens(&combined, "gpt-4o");
+            prop_assert!(n_long >= n_short, "longer text should not yield fewer tokens");
+        }
+
+        // 性质: cost monotonic 在 in/out tokens
+        #[test]
+        fn prop_cost_monotonic_in_tokens(
+            tin in 0usize..1_000_000,
+            tout in 0usize..1_000_000,
+            extra in 1usize..1000
+        ) {
+            let c1 = estimate_cost_usd(tin, tout, "gpt-4o").unwrap();
+            let c2 = estimate_cost_usd(tin + extra, tout, "gpt-4o").unwrap();
+            prop_assert!(c2 >= c1, "more input tokens → cost ≥");
+            let c3 = estimate_cost_usd(tin, tout + extra, "gpt-4o").unwrap();
+            prop_assert!(c3 >= c1, "more output tokens → cost ≥");
+        }
+
+        // 性质: cost 永远非负
+        #[test]
+        fn prop_cost_never_negative(
+            tin in 0usize..10_000_000,
+            tout in 0usize..10_000_000
+        ) {
+            for m in ["gpt-4o", "gpt-4o-mini", "claude-3-opus", "deepseek-chat"] {
+                let c = estimate_cost_usd(tin, tout, m).unwrap();
+                prop_assert!(c >= 0.0, "{}: cost {} should be ≥ 0", m, c);
+            }
+        }
+
+        // 性质: 任意 model 字符串 lookup_pricing 不 panic
+        #[test]
+        fn prop_lookup_pricing_no_panic(name in ".*") {
+            let _ = lookup_pricing(&name);
+        }
+
+        // 性质: 任意 text + model estimate_tokens 不 panic
+        #[test]
+        fn prop_estimate_tokens_no_panic(text in ".*", model in "[a-z0-9.-]{0,30}") {
+            let n = estimate_tokens(&text, &model);
+            prop_assert!(n < usize::MAX);
+        }
+    }
 }
