@@ -147,6 +147,19 @@ top-50 + tantivy BM25 top-50 → RRF α=1/60 → reranker top-10 → 走 LLM。
 1. ppocr.rs `extract_text_from_image` 在 image dimensions 超过阈值(如 height > 8000px)前,自动用 imageops 切成多个 sub-image,各自 OCR 后 concat
 2. 或:在 chars==0 但 image 较大时返 Err 而不是 Ok("")
 
+**Fix proposal 反证(本 audit R8 真测,2026-05-25 00:30)**:
+
+把 1632×21050px 的 Page 4 切成 4 个 1632×5500px tile,各自 OCR:
+
+| 维度 | Full image (1632×21050px) | 4 tiles ~5500px each |
+|------|---------------------------|-----------------------|
+| Total chars | **0**(silent fail) | **8685**(2774 + 2524 + 2366 + 1021) |
+| Wall time | 0.5s(直接 reject) | 11s(3.4+3.0+2.8+1.8) |
+| 中文识别 | n/a | ✅ tile 1: "Python tutorial / Docs/3.Python 简介 / 下面的例子中..." |
+
+→ Fix proposal validated. 推 v1.0.1 实现 auto-tile.
+Repro test: `rust/crates/attune-core/tests/ocr_long_page_audit.rs`(本 audit commit)
+
 ### 边界 case 测试覆盖
 
 | 维度 | 覆盖 |
