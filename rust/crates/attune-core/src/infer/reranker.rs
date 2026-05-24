@@ -7,9 +7,15 @@ use std::path::Path;
 use std::sync::Mutex;
 use tokenizers::Tokenizer;
 
-/// bge-reranker-v2-m3 最大支持 8192 tokens；设 2048 作为安全默认值，
-/// 在精度与推理内存之间取得平衡。
-const MAX_SEQ_LEN: usize = 2048;
+/// BGE-reranker-base (BAAI 官方) / Xenova/bge-reranker-base — 均基于 XLM-RoBERTa-base，
+/// position_embeddings 维度 = 514（max 实际可用 token 数 = 512，扣 2 个特殊 token）。
+/// 之前设 2048 会触发 ONNX `Gather: indices element out of data bounds, idx=514 ...`
+/// 错误，在长文档检索中 reranker 100% 静默失败、永远 fallback 到 RRF，是 v0.6/v0.7 隐藏
+/// ranking quality 杀手（2026-05-24 50-query rust-book benchmark 发现）。
+///
+/// 注意：bge-reranker-v2-m3（多语言，max 8192）尚未默认启用，若未来切到 v2-m3 这条路径
+/// 时需要把这里改回 8192 或通过 env var 区分。
+const MAX_SEQ_LEN: usize = 512;
 
 pub struct OrtRerankProvider {
     session: Mutex<ort::session::Session>,
@@ -159,5 +165,22 @@ mod tests {
         let big_neg = 1.0f32 / (1.0 + (10.0f32).exp());
         assert!(big_pos > 0.99);
         assert!(big_neg < 0.01);
+    }
+
+    /// Regression: BGE-reranker-base / Xenova/bge-reranker-base 都基于 XLM-RoBERTa-base，
+    /// 其 position_embeddings dim 是 514（max 实际 token = 512）。
+    /// 之前 MAX_SEQ_LEN=2048 让 reranker 在长文档上 100% 静默失败
+    /// （ONNX `Gather: indices element out of data bounds idx=514`），
+    /// fallback 到 RRF，是 v0.6/v0.7 隐藏的 ranking quality 杀手。
+    /// 修复见 docs/superpowers/specs/2026-05-24-knowledge-base-deepseek-rag-audit.md §B1。
+    #[test]
+    fn max_seq_len_within_bge_reranker_position_embedding_bound() {
+        // BGE-reranker-base position_embeddings weight: dims=[514, 768]
+        // 加上 RoBERTa 的 padding_idx + 1 offset，实际安全 token 数 = 512
+        assert!(
+            MAX_SEQ_LEN <= 512,
+            "MAX_SEQ_LEN={MAX_SEQ_LEN} exceeds BGE-reranker-base safe bound (512). \
+             若切换 bge-reranker-v2-m3 等 8192-position 模型，需在此处区分常量。"
+        );
     }
 }

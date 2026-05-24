@@ -226,8 +226,15 @@ impl SearchParams {
     /// 用户期望"全部召回，自己挑"。
     /// per reviewer S2：自动启用 0.65 会让 Chrome 扩展 query 含义模糊时全无结果（cosine 0.4-0.6）。
     pub fn with_defaults(top_k: usize) -> Self {
-        let initial_k = (top_k * 5).clamp(20, 100);
-        let intermediate_k = (top_k * 2).clamp(top_k, 40);
+        // top_k 上限 100（per S14），但旧版 intermediate_k 写法 `(top_k*2).clamp(top_k, 40)`
+        // 在 top_k > 20 时 (top_k*2) > 40，让 clamp 的 min > max 而 panic。
+        // 2026-05-24 50-query rust-book benchmark 发现：top_k=50 直接让 tokio worker panic。
+        // 修正：保持原意 intermediate_k ≈ top_k*2（rerank 候选池 ~2x），但允许动态上限
+        // 跟随 top_k 增长，不再写死 40。下限保留 top_k 自身（rerank 至少要见到 top_k 个）。
+        let initial_k = (top_k * 5).clamp(20, 500);
+        // 旧契约：intermediate_k = (top_k*2).clamp(top_k, 40) → top_k=5→10 / top_k=20→40 / top_k=50→panic
+        // 新契约：intermediate_k = (top_k*2).max(top_k).min(200) → top_k=5→10 / top_k=20→40 / top_k=50→100
+        let intermediate_k = (top_k * 2).max(top_k).min(200);
         Self {
             top_k,
             initial_k,
@@ -590,6 +597,23 @@ mod tests {
         assert_eq!(fused[0].0, "a");
     }
 
+    /// Regression: top_k>20 previously panicked at `intermediate_k = (top_k*2).clamp(top_k, 40)`
+    /// because top_k*2 > 40 made the clamp `min > max`. See
+    /// docs/superpowers/specs/2026-05-24-knowledge-base-deepseek-rag-audit.md §B2.
+    /// 50-query benchmark on rust-book triggered tokio worker panic; fix ensures
+    /// `with_defaults(top_k)` is total over the documented range top_k ∈ [1, 100].
+    #[test]
+    fn with_defaults_does_not_panic_for_any_top_k() {
+        for tk in [1usize, 5, 10, 20, 21, 30, 50, 99, 100] {
+            let p = SearchParams::with_defaults(tk);
+            assert!(p.initial_k >= 20, "initial_k floor at 20 for top_k={tk}");
+            assert!(p.intermediate_k >= tk, "intermediate_k must be >= top_k for top_k={tk}");
+            // intermediate_k 上限 200 防止 rerank 过度膨胀（每个候选都过 ONNX 推理）
+            assert!(p.intermediate_k <= 200, "intermediate_k ceiling 200 for top_k={tk}");
+            assert_eq!(p.top_k, tk);
+        }
+    }
+
     #[test]
     fn allocate_budget_proportional() {
         let mut results = vec![
@@ -667,18 +691,31 @@ mod tests {
     fn search_params_defaults_clamp_correctly() {
         let p = SearchParams::with_defaults(5);
         assert_eq!(p.top_k, 5);
-        assert_eq!(p.initial_k, 25);   // 5*5=25, in [20,100]
-        assert_eq!(p.intermediate_k, 10); // 5*2=10, in [5,40]
+        assert_eq!(p.initial_k, 25);   // 5*5=25, in [20,500]
+        assert_eq!(p.intermediate_k, 10); // 5*2=10
         // per reviewer S2：通用 search 默认不启用 J3 阈值，保持 W2 前行为契约
         assert_eq!(p.min_score, None);
 
         let p2 = SearchParams::with_defaults(1);
         assert_eq!(p2.initial_k, 20);  // min clamp
-        assert_eq!(p2.intermediate_k, 2); // max(1, min(2, 40))
+        assert_eq!(p2.intermediate_k, 2); // max(1, 2) = 2
 
-        let p3 = SearchParams::with_defaults(30);
-        assert_eq!(p3.initial_k, 100); // max clamp
-        assert_eq!(p3.intermediate_k, 40); // max clamp
+        // top_k=20: 旧契约 intermediate_k=40 (max clamp), 新契约 intermediate_k=40 (top_k*2)
+        // 两者数值一致
+        let p3 = SearchParams::with_defaults(20);
+        assert_eq!(p3.initial_k, 100);
+        assert_eq!(p3.intermediate_k, 40);
+
+        // top_k=50: 旧契约会 panic（min=50 > max=40），新契约返回 100
+        // 这是本次修复的关键测试 (per 2026-05-24 spec §B2)
+        let p4 = SearchParams::with_defaults(50);
+        assert_eq!(p4.initial_k, 250);
+        assert_eq!(p4.intermediate_k, 100);
+
+        // top_k=100 (max per S14): 旧契约会 panic，新契约返回 200
+        let p5 = SearchParams::with_defaults(100);
+        assert_eq!(p5.initial_k, 500);
+        assert_eq!(p5.intermediate_k, 200);
     }
 
     // ── J3 tests（per spec §J3 + reviewer S2 路径分离）──────────────
