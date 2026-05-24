@@ -6,9 +6,13 @@
 > 配对 `desktop-v1.0.1` + attune-pro `v1.0.1` + cloud `cloud-v2.2.1`。
 > 详细 release notes：[`docs/release-notes-v1.0.0-drafts/attune-v1.0.1.md`](docs/release-notes-v1.0.0-drafts/attune-v1.0.1.md)
 
-**Bug Fixes**：CLI vault-import 误报修（#61）· OCR gender/amount 字段修（#62）· parse_llm_terms drift 修（#77）· LLM 上游错误码透传（429/503/4xx）· Docker builder glibc 不匹配修
+**Bug Fixes**：CLI vault-import 误报修（#61）· OCR gender/amount 字段修（#62）· parse_llm_terms drift 修（#77）· LLM 上游错误码透传（429/503/4xx）· Docker builder glibc 不匹配修 · **OCR 超长页 silent 0 chars fix**（PP-OCRv5 mobile 在 height>8000px 时 silent 返 0 chars 不报错。Fix: `extract_text_from_image` 加 dimensions guard + auto-tile by height threshold + concat。Repro test: `tests/ocr_long_page_audit.rs`,reliability audit 2026-05-24 R8 验证: full 1632×21050px=0 chars / 4 tiles=8685 chars。详见 spec `2026-05-24-full-stack-model-reliability-audit.md` §7）
 
-**New**：Tauri auto-updater · attune-cli/server OCI image（ghcr.io）· WinGet / APT / RPM 工作流 · 14 新 stress test（crash/concurrent/OOM/large-scale）· cargo audit + deny.toml + SECURITY.md
+**Office Helper 真红线 enforce**：v1.0.0 office_ocr_golden_gate(8 test)+ office_asr_golden_gate(4 test)全 SKIP-only（YAML 5 个但 image 0 个,fetch-office-asr-golden.sh 缺）。**v1.0.1 backfill real-image fixture**（receipt / id_card_cn / business_license / bank_card 每场景 ≥2 张脱敏,document / table / card 至少 5 个 YAML + image)+ cn / en / mixed 各 2-3 audio,然后开 `ATTUNE_ENFORCE_OFFICE_FLOOR=1` ratchet 进 CI。reliability audit R11/R12 实测发现。
+
+**VLM dead provider 重新规划**（v1.0.0 `attune-core/src/vlm.rs` + `state.vlm()` 存在但无 route 消费 — DeepSeek 不支持 vision,attune 走 OCR-first 路径）：v1.0.1 接 OpenAI Vision / Gemini Vision channel 到 cloud llm-gateway,补真 VLM provider + route 路由 + UI 选择。详见 spec `2026-05-24-vlm-multimodal-audit.md` + `2026-05-24-full-stack-model-reliability-audit.md` §11。
+
+**New**：Tauri auto-updater · attune-cli/server OCI image（ghcr.io）· WinGet / APT / RPM 工作流 · 14 新 stress test（crash/concurrent/OOM/large-scale）· cargo audit + deny.toml + SECURITY.md · **`tests/ocr_long_page_audit.rs` 与 `tests/reranker_long_doc_audit.rs`**（reliability audit 落地的 permanent reproducer + regression test）
 
 **Improvements**：Rust builder 1.88 → 1.91 · clippy 全清（32 文件 ~40 lint）· LLM call retry+format+json 加固 · attune-bench 独立仓链接
 
