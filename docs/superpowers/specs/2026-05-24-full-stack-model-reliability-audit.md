@@ -236,14 +236,31 @@ Repro test: `rust/crates/attune-core/tests/ocr_long_page_audit.rs`(本 audit com
 
 | Risk | Sev | 责任版本 | Owner Action |
 |------|-----|---------|-------------|
-| OCR 超长页 silent 0 chars(本 audit 新发现)| 🟡 Med | **v1.0.1** | PP-OCR `extract_text_from_image` 加 dimensions guard + auto-tile 切分 |
-| 中文 ASR fixture 缺失(无法红线验中文 WER 5-7%)| 🟡 Med | **v1.0.1** | 加 1-3 个中文 audio fixture 入 `tests/golden/office/asr/cn/` |
-| office_ocr_golden_gate 全 4 scene 0 image(只有 yaml)| 🟡 Med | **v1.0.1** | 补 receipt / id_card / business_license / bank_card 每场景至少 2 张脱敏 image |
+| **office_ocr_golden_gate 8 test 全 SKIP**(本 audit R11 新发现 ⚠️)| 🔴 High | **v1.0.1** | 所有红线 0.92-0.95 无任何 sample 验证,只是 SKIP-only。补 4 scene × 2 image 脱敏 fixture 让 gate 真 enforce |
+| **office_asr_golden_gate 4 test 全 SKIP**(本 audit R11 新发现 ⚠️)| 🔴 High | **v1.0.1** | 中文 WER ≤15% / 英 ≤10% 红线无任何 audio 验证。fetch-office-asr-golden.sh 缺。补 cn / en / mixed 各 2-3 audio 脱敏 fixture |
+| OCR 超长页 silent 0 chars(本 audit R4/R8 新发现)| 🟡 Med | **v1.0.1** | PP-OCR `extract_text_from_image` 加 dimensions guard + auto-tile 切分。Repro: `tests/ocr_long_page_audit.rs` |
+| 中文 ASR fixture 缺失(本 audit R5 发现)| 🟡 Med | **v1.0.1** | 与 ↑ asr golden gate 合并 — 加 cn audio fixture(scripts/fetch-office-asr-golden.sh) |
+| office_ocr_golden_gate 全 4 scene 0 image | 🟡 Med | **v1.0.1** | 与 ↑ 合并 — 补 receipt / id_card / business_license / bank_card 每场景至少 2 张脱敏 image |
 | VLM dead provider | 🟡 Med | **v1.0.1** | 接 OpenAI Vision / Gemini Vision channel 到 cloud llm-gateway(per 5/24 spec) |
 | qwen3-embedding:8b CPU 6s/query 太慢 | 🟢 Low | v1.1 | 不主推 8b,文档说明 GPU 才适合 |
 | qwen2.5:3b 单 seed std 高 | 🟢 Low | v1.1 | 多 seed 复跑或停用作 chat provider(K3 image 例外) |
 | Ollama bge-m3 size_vram=0(纯 CPU 推理)| 🟢 Info | v1.1 | doc note: 用户笔电有 GPU 时 Ollama 自动用 vram;开发机 4090 红线下未测 |
 | Embedding 30q hit@5=40%(本 audit subset)| 🟢 Info | — | corpus 限制非 model 限制,full corpus per spec 5/24 = 93.9% |
+
+### v1.0 GA ship-readiness 重审(R11 后)
+
+R11 新发现 office_ocr_golden_gate + office_asr_golden_gate 8 + 4 test 全 SKIP 后,
+原 §0 TL;DR 的 OCR 🟡 Beta / ASR 🟢 Production 决策应该**重审**:
+
+- **代码维度**:OCR + ASR 实现真测正常(本 audit R4 / R5 真测 — Python PDF 3 页 OCR
+  + 5 英文 audio ASR 全部成功),provider trait 完整、调用路径清晰
+- **生产 gate 维度**:office helper 红线 0.92-0.95(OCR)/ ≤15% WER(ASR)**完全没有 sample**
+  实际验证,只是 SKIP-only(自带 "expected pre-D3.5" 说明项目自知 fixture gap)
+
+**ship 决策修正**:
+- v1.0 GA 不阻 ship 的前提是: office helper 在 v1.0 不主推为关键卖点,**作为 v1.0.1 强化方向**
+  + RELEASE.md 在 v1.0 笔记里诚实声明"office helper 仍依赖通用 OCR / ASR provider,domain 红线在 v1.0.1 补齐"
+- 不允许营销/marketing 把 office helper 列为 v1.0 GA 完整 feature,因为红线尚未实跑通过
 
 ### 历史教训
 
