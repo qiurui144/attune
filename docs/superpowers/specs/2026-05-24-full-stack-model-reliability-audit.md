@@ -248,6 +248,29 @@ Repro test: `rust/crates/attune-core/tests/ocr_long_page_audit.rs`(本 audit com
 | Ollama bge-m3 size_vram=0(纯 CPU 推理)| 🟢 Info | v1.1 | doc note: 用户笔电有 GPU 时 Ollama 自动用 vram;开发机 4090 红线下未测 |
 | Embedding 30q hit@5=40%(本 audit subset)| 🟢 Info | — | corpus 限制非 model 限制,full corpus per spec 5/24 = 93.9% |
 
+### R29 multi-model determinism(2026-05-25 01:39)
+
+5x 同 query (`"Rust ownership and borrowing semantics"`)调 Ollama embedding:
+
+| Model | dims | latency | pair cosine to vec[0] (min/max) |
+|-------|------|---------|--------------------------------|
+| bge-m3 | 1024 | 163-207ms | **1.000000 / 1.000000** ✅ deterministic |
+| qwen3-embedding:0.6b | 1024 | 117-171ms | **1.000000 / 1.000000** ✅ deterministic |
+
+两个 embedding model 都完全 deterministic — 没有 stochastic drift。
+此发现支持后续 caching strategy 安全(同 text 缓存 vec 任意时长仍 valid)。
+
+### R27 cross-session embedding 稳定性(2026-05-25 01:36)
+
+R27 重跑 R2 的同 3 query,验证跨 audit 时段 + 修代码 + 1307 tests 后 bge-m3 是否漂移:
+
+| Query | R2 latency | R27 latency | R2 cosine | R27 cosine | drift |
+|-------|-----------|-------------|-----------|------------|-------|
+| EN-ownership vs ZH-ownership | 216ms | 282ms | 0.878 | **0.8780** | 0.0000 |
+| EN-ownership vs EN-tokio | 173ms | 190ms | 0.335 | **0.3348** | 0.0002 |
+
+→ bge-m3 cross-session deterministic,latency 抖动 ~30ms 是合理。
+
 ### R20 boundary + 异常注入(2026-05-25 01:15)
 
 跑 `model_boundary_audit.rs` 测 Embedding + Reranker 在异常输入下的行为:
