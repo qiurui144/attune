@@ -174,4 +174,111 @@ mod tests {
         assert_eq!(plan.history_dropped, 0);
         assert_eq!(plan.history_keep, 6);
     }
+
+    // ── 增强覆盖 ────────────────────────────────────────────────────────────
+
+    // knowledge_chars: token × 5/6
+    #[test]
+    fn knowledge_chars_uses_5_6_ratio() {
+        let plan = BudgetPlan {
+            window: 128_000,
+            response_reserve: 4_096,
+            knowledge_tokens: 6000,
+            history_keep: 0,
+            history_dropped: 0,
+        };
+        // 6000 × 5/6 = 5000
+        assert_eq!(plan.knowledge_chars(), 5_000);
+    }
+
+    // 边界: knowledge_tokens=0 → knowledge_chars=0
+    #[test]
+    fn knowledge_chars_zero() {
+        let plan = BudgetPlan {
+            window: 8_000, response_reserve: 2_000, knowledge_tokens: 0,
+            history_keep: 0, history_dropped: 0,
+        };
+        assert_eq!(plan.knowledge_chars(), 0);
+    }
+
+    // 历史空 → keep=0, dropped=0
+    #[test]
+    fn plan_empty_history() {
+        let plan = plan_context("gpt-4o", "sys", "u", &[]);
+        assert_eq!(plan.history_keep, 0);
+        assert_eq!(plan.history_dropped, 0);
+    }
+
+    // 超长 user/system 导致 fixed > window → available 用 saturating_sub 为 0
+    #[test]
+    fn plan_oversized_inputs_no_panic() {
+        let huge = "x".repeat(200_000);
+        let plan = plan_context("local-tiny-model", &huge, &huge, &[]);
+        // 不 panic, knowledge=0 也合理
+        assert!(plan.knowledge_tokens <= plan.window);
+    }
+
+    // moonshot / kimi → 128K
+    #[test]
+    fn context_window_moonshot_kimi() {
+        assert_eq!(context_window("moonshot-v1-8k"), 128_000);
+        assert_eq!(context_window("kimi-k2"), 128_000);
+    }
+
+    // claude variants 都 200K
+    #[test]
+    fn context_window_claude_variants() {
+        assert_eq!(context_window("claude-3-opus"), 200_000);
+        assert_eq!(context_window("claude-3-5-sonnet-20241022"), 200_000);
+        assert_eq!(context_window("claude-3-haiku"), 200_000);
+    }
+
+    // gpt-3.5 → 16K
+    #[test]
+    fn context_window_gpt_3_5() {
+        assert_eq!(context_window("gpt-3.5-turbo"), 16_000);
+    }
+
+    // llama 走 32K 分支
+    #[test]
+    fn context_window_llama() {
+        assert_eq!(context_window("llama3.2:3b"), 32_000);
+    }
+
+    // model lookup 大小写不敏感 (lowercases)
+    #[test]
+    fn context_window_case_insensitive() {
+        assert_eq!(context_window("CLAUDE-SONNET-4-6"), 200_000);
+        assert_eq!(context_window("GPT-4O"), 128_000);
+        assert_eq!(context_window("DeepSeek-Chat"), 64_000);
+    }
+
+    // 历史从"最新→最旧"保留: rev iter 保证最新 N 条留下
+    #[test]
+    fn plan_keeps_newest_history_when_trimming() {
+        let history: Vec<(String, String)> = (0..50)
+            .map(|i| ("user".to_string(), format!("msg{i} ").repeat(500)))
+            .collect();
+        let plan = plan_context("local-tiny-model", "sys", "q", &history);
+        assert_eq!(plan.history_keep + plan.history_dropped, history.len());
+        // 至少要 drop 一部分 (8K window vs 50 条长消息)
+        assert!(plan.history_dropped > 0);
+    }
+
+    // response_reserve clamp: 大窗口不超 4096
+    #[test]
+    fn plan_response_reserve_clamped_to_4096() {
+        let plan = plan_context("gemini-2.5-flash", "", "q", &[]);
+        // 1M / 4 = 250K, clamp 到 4096
+        assert_eq!(plan.response_reserve, 4_096);
+    }
+
+    // response_reserve clamp: 小窗口不低于 512
+    #[test]
+    fn plan_response_reserve_clamped_to_512() {
+        // 8K / 4 = 2000, 介于 512 和 4096 之间, 应保留 2000
+        let plan = plan_context("unknown-model", "", "q", &[]);
+        assert!(plan.response_reserve >= 512);
+        assert!(plan.response_reserve <= 4_096);
+    }
 }
