@@ -1,0 +1,25 @@
+id: e03-non-utf8-like
+description: 异常输入 — 全数字 / 全标点 / 控制字符. agent 不能 panic
+inputs:
+  - file: numbers.txt
+    text: '0123456789012345678901234567890123456789'
+  - file: punct.txt
+    text: '!!!@@@###$$$%%%^^^&&&***((()))---===+++'
+  - file: ctrl.txt
+    text: "\t\t\t\t  \n\n\n\n  "
+expected:
+  classified_count: 3
+  per_doc:
+    - file: numbers.txt
+      kind: other
+      confidence_max: 0.3
+    - file: punct.txt
+      kind: other
+      confidence_max: 0.3
+    - file: ctrl.txt
+      kind: other
+      confidence_max: 0.3
+  red_lines_count: 0
+reviewer:
+  approved: true
+  notes: graceful 处理 — 没 panic / 没 inf NaN

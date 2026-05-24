@@ -1,0 +1,20 @@
+id: 09-low-confidence-followup
+description: 低置信度文档触发软追问 — followups / missing_evidence 必含人工核对提示
+inputs:
+  - file: 日常笔记.txt
+    text: |
+      今天天气不错 路上看到很多人. 出门买了点东西回来.
+      下午跟朋友打电话聊了会. 晚上看书.
+expected:
+  classified_count: 1
+  per_doc:
+    - file: 日常笔记.txt
+      kind: other
+      confidence_max: 0.3
+  missing_evidence_min: 1
+  followups_min: 1
+  followup_must_contain: 人工核对
+  red_lines_count: 0
+reviewer:
+  approved: true
+  notes: agent 应识别低置信度并 surface 软追问

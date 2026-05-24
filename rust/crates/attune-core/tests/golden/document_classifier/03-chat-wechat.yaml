@@ -1,0 +1,22 @@
+id: 03-chat-wechat
+description: 微信聊天记录 — 出借/还款语义对话
+inputs:
+  - file: 微信聊天截图-2023.txt
+    text: |
+      [微信] 张三 (2023-01-15 10:30):  借款已转 50 万到你农行卡 [图片]
+      [微信] 李四 (2023-01-15 10:32):  收到 嗯嗯 感谢哥
+      [微信] 张三 (2023-06-15 14:00):  还款情况怎样? 已经到期了
+      [微信] 李四 (2023-06-15 15:30):  这个月先还 2 万 余下下月再说
+expected:
+  classified_count: 1
+  per_doc:
+    - file: 微信聊天截图-2023.txt
+      kind: chat
+      confidence_min: 0.2
+      keywords_must_contain:
+        - 微信
+      entities:
+        dates_min: 1
+  red_lines_count: 0
+reviewer:
+  approved: true

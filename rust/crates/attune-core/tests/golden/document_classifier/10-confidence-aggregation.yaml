@@ -1,0 +1,21 @@
+id: 10-confidence-aggregation
+description: 整体置信度 = 各份均值. 一强一弱 → 中间. 验证均值计算
+inputs:
+  - file: strong.pdf
+    text: 借条 出借人 借款人 本金 月利率 利息 还款期限 履行期限 借款合同 借据
+  - file: weak.pdf
+    text: 随便写点东西今天没事
+expected:
+  classified_count: 2
+  overall_confidence_min: 0.0
+  overall_confidence_max: 0.7
+  per_doc:
+    - file: strong.pdf
+      kind: borrowing_doc
+      confidence_min: 0.5
+    - file: weak.pdf
+      kind: other
+      confidence_max: 0.3
+  red_lines_count: 0
+reviewer:
+  approved: true

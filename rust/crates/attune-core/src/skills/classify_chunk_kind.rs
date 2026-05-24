@@ -82,6 +82,25 @@ const KIND_KEYWORDS: &[(ChunkKind, &[&str])] = &[
     ]),
 ];
 
+/// 高优先级专属标识 (anchor keywords) — 一旦命中, 该 kind 必须胜出, 不被
+/// 普通关键词数量超越.
+///
+/// 解决 #47 发现的真实退化: 判决书内嵌借款条款时, 因借款关键词命数较多
+/// (出借人/借款人/本金/月利率/利息) 而被错判为 borrowing_doc, 实际应为 judgment.
+///
+/// 设计:
+///   - anchor 出现 = 该 kind 强信号 (precision > recall)
+///   - 多 anchor 命中时按 kind 总命中数 tiebreak
+///   - 没有任何 anchor 命中时退回普通"命中最多胜出"逻辑
+const KIND_ANCHORS: &[(ChunkKind, &[&str])] = &[
+    (ChunkKind::Judgment, &["判决书", "裁定书", "本院查明", "本院认为", "判决如下", "裁定如下"]),
+    (ChunkKind::Receipt, &["收据", "收条", "今收到", "兹收到"]),
+    (ChunkKind::Chat, &["[微信]", "微信聊天", "短信", "聊天记录"]),
+    (ChunkKind::BorrowingDoc, &["借条", "借款合同", "借据"]),
+    (ChunkKind::BankStatement, &["交易日期", "交易金额", "对方户名", "对方账号"]),
+    (ChunkKind::IdDoc, &["身份证号", "公民身份号码", "户口本"]),
+];
+
 /// 主入口
 pub fn classify(text: &str) -> Classification {
     if text.trim().is_empty() {
@@ -112,9 +131,43 @@ pub fn classify(text: &str) -> Classification {
         };
     }
 
-    // 取命中关键词最多的 kind
-    scores.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
-    let (best_kind, matched) = scores.into_iter().next().unwrap();
+    // Anchor-first 选 kind: 命中 anchor 关键词的 kind 优先, 同 anchor 命中
+    // 数下回退到普通"命中最多"逻辑.
+    let anchor_hits: Vec<(ChunkKind, usize, usize)> = scores
+        .iter()
+        .map(|(k, matched_kws)| {
+            let anchors = KIND_ANCHORS
+                .iter()
+                .find(|(ak, _)| ak == k)
+                .map(|(_, kws)| *kws)
+                .unwrap_or(&[]);
+            let anchor_count =
+                anchors.iter().filter(|a| matched_kws.iter().any(|m| m == *a)).count();
+            (k.clone(), anchor_count, matched_kws.len())
+        })
+        .collect();
+
+    let any_anchor_hit = anchor_hits.iter().any(|(_, ac, _)| *ac > 0);
+    let chosen_kind = if any_anchor_hit {
+        // 先按 anchor 命中数降序, anchor 同数时按总关键词命中数降序
+        anchor_hits
+            .into_iter()
+            .max_by_key(|(_, ac, mc)| (*ac, *mc))
+            .map(|(k, _, _)| k)
+            .unwrap()
+    } else {
+        // 走普通逻辑: 命中关键词最多的 kind
+        let mut scores_sorted = scores.clone();
+        scores_sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
+        scores_sorted.into_iter().next().unwrap().0
+    };
+
+    let matched = scores
+        .into_iter()
+        .find(|(k, _)| k == &chosen_kind)
+        .map(|(_, m)| m)
+        .unwrap();
+    let best_kind = chosen_kind;
     // confidence: 命中数 / 该 kind 关键词总数, 上限 1.0
     let total_kw = KIND_KEYWORDS
         .iter()

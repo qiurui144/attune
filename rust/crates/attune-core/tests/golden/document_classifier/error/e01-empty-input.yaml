@@ -1,0 +1,11 @@
+id: e01-empty-input
+description: 空输入列表 — agent 必须 graceful 返回空 output, confidence=0.0
+inputs: []
+expected:
+  classified_count: 0
+  overall_confidence: 0.0
+  red_lines_count: 0
+  missing_evidence_count: 0
+reviewer:
+  approved: true
+  notes: 空输入不能 panic, confidence 应为 0.0 而不是 NaN

@@ -1,0 +1,22 @@
+id: 08-entity-extraction
+description: 实体抽取专项 — 人/日期/金额/地点 全要素出现, agent 不丢字段
+inputs:
+  - file: 综合证据.pdf
+    text: |
+      原告张三 (北京市海淀区) 与被告李四 (上海市浦东新区) 因借款 500000 元纠纷,
+      于 2023年1月15日在朝阳区人民法院起诉. 涉案金额包括本金 500000 元
+      和约定利息 60000 元, 合计 560000 元.
+expected:
+  classified_count: 1
+  per_doc:
+    - file: 综合证据.pdf
+      kind: borrowing_doc
+      confidence_min: 0.1
+      entities:
+        persons_min: 2          # 张三 + 李四
+        dates_min: 1            # 2023-01-15
+        amounts_min: 3          # 500000 / 60000 / 560000
+        locations_min: 2        # 海淀区 + 浦东新区
+  red_lines_count: 0
+reviewer:
+  approved: true
