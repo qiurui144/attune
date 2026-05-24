@@ -1,5 +1,21 @@
 # attune 版本记录
 
+## v1.0.1 — Bug Fix + Hardening（TBD，~2026-05-27–31）
+
+> Patch release。**0 breaking change**，所有 v1.0.0 用户建议升级。
+> 配对 `desktop-v1.0.1` + attune-pro `v1.0.1` + cloud `cloud-v2.2.1`。
+> 详细 release notes：[`docs/release-notes-v1.0.0-drafts/attune-v1.0.1.md`](docs/release-notes-v1.0.0-drafts/attune-v1.0.1.md)
+
+**Bug Fixes**：CLI vault-import 误报修（#61）· OCR gender/amount 字段修（#62）· parse_llm_terms drift 修（#77）· LLM 上游错误码透传（429/503/4xx）· Docker builder glibc 不匹配修
+
+**New**：Tauri auto-updater · attune-cli/server OCI image（ghcr.io）· WinGet / APT / RPM 工作流 · 14 新 stress test（crash/concurrent/OOM/large-scale）· cargo audit + deny.toml + SECURITY.md
+
+**Improvements**：Rust builder 1.88 → 1.91 · clippy 全清（32 文件 ~40 lint）· LLM call retry+format+json 加固 · attune-bench 独立仓链接
+
+**Tests**：237 passed / 0 failed（含 14 新 stress test）
+
+---
+
 ## v1.0.0 — 私有 AI 知识伙伴 GA（2026-05-25 计划上架）
 
 > **首个 1.x 正式版**。配对 `desktop-v1.0.0`（Tauri）+ attune-pro `v1.0.0`（law-pro plugin pack）+ cloud `cloud-v2.2.0`（accounts / pluginhub / llm-gateway / proxy）。
