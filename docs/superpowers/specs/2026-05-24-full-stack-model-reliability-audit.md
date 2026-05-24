@@ -272,6 +272,16 @@ Repro test: `rust/crates/attune-core/tests/ocr_long_page_audit.rs`(本 audit com
 对 empty 文本返 zero vector 或 skip,避免 panic。同理 `embed.rs` `OllamaProvider::embed`
 应做相同 guard。
 
+**🚀 R21 已实施 fix(本 audit shipping):**
+- `attune-core/src/infer/embedding.rs::embed_one`:`if text.trim().is_empty()` → 返
+  `vec![0.0; self.dims]`,双重保护(tokenize 后 seq_len==0 也 fallback)
+- `attune-core/src/embed.rs::OllamaProvider::embed`:partition 输入为 empty / non-empty,
+  非空走 HTTP,空占位返 zero vec,按原 index 顺序拼回
+- Regression assert 在 `tests/model_boundary_audit.rs`:empty input 必须返 `[0.0; dims]`
+  vec,任何回归 → panic + 阻 PR merge
+- 修复前 R20 Test: ❌ "Invalid dimension #2" ERROR
+- 修复后 R20 Test: ✅ 1024 dims zero vector,assert 全过
+
 ### R17/R18 综合 RAG flow + perf audit(2026-05-25 01:07)
 
 **R17 e2e flow 5 query**(`rag_flow_audit.rs`,10 文件 159 chunks):

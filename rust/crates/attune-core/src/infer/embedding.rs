@@ -64,12 +64,25 @@ impl OrtEmbeddingProvider {
     }
 
     fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
+        // 边界保护(per reliability audit 2026-05-24 R20):
+        // empty / whitespace-only 输入会让 tokenize 后 ids=[] (0 长度),
+        // ORT Tensor::from_array 拒 0-dim → "Invalid dimension #2" panic.
+        // 生产中 ingest pipeline 可能喂 empty chunk (trimming 边界),
+        // 不应让 embed 整个 pipeline break,返 zero vector 跳过.
+        if text.trim().is_empty() {
+            return Ok(vec![0.0f32; self.dims]);
+        }
+
         // 1. Tokenize（截断到 MAX_SEQ_LEN）
         let encoding = self.tokenizer
             .encode(text, false)
             .map_err(|e| VaultError::Crypto(format!("tokenize: {e}")))?;
 
         let seq_len = encoding.get_ids().len().min(MAX_SEQ_LEN);
+        // 二次保护:即便 tokenizer 对非空输入返 0 token (理论极小概率)
+        if seq_len == 0 {
+            return Ok(vec![0.0f32; self.dims]);
+        }
         let ids: Vec<i64> = encoding.get_ids()[..seq_len]
             .iter().map(|&x| x as i64).collect();
         let masks: Vec<i64> = encoding.get_attention_mask()[..seq_len]

@@ -22,11 +22,17 @@ fn embedding_boundary_audit() {
 
     eprintln!("\n=== Embedding boundary audit ===");
 
-    // 1. empty string
+    // 1. empty string — per audit R20 fix: 应返 zero vector (不再 ERROR)
     let r = emb.embed(&[""]);
     match &r {
-        Ok(v) => eprintln!("✅ empty string → {} dims, val[0]={:.4}", v[0].len(), v[0][0]),
-        Err(e) => eprintln!("❌ empty string → ERROR: {e}"),
+        Ok(v) => {
+            eprintln!("✅ empty string → {} dims, val[0]={:.4}", v[0].len(), v[0][0]);
+            // regression: empty 应该是 zero vector
+            assert_eq!(v.len(), 1, "empty input should still produce 1 vector");
+            assert_eq!(v[0].len(), emb.dimensions(), "empty input vector must have correct dims");
+            assert!(v[0].iter().all(|&x| x == 0.0), "empty input must produce all-zero vector");
+        }
+        Err(e) => panic!("❌ empty string regression: should be Ok(zero vec) after fix, got: {e}"),
     }
 
     // 2. single char

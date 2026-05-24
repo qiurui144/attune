@@ -102,9 +102,28 @@ impl Default for OllamaProvider {
 
 impl EmbeddingProvider for OllamaProvider {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        // 边界保护(per reliability audit 2026-05-24 R20):
+        // empty / whitespace-only 输入会让上游 server 返 size=0 embedding 数组或报错.
+        // 与 OrtEmbeddingProvider 行为一致:对 empty 输入返 zero vector (零向量在
+        // cosine 相似度中会得 0 分,自然 push 出 ranking,不会污染 retrieval).
+        // 避免单个 empty chunk 让整批 embed RPC 失败.
+        let mut empty_indices = Vec::new();
+        let mut non_empty: Vec<&str> = Vec::new();
+        for (i, t) in texts.iter().enumerate() {
+            if t.trim().is_empty() {
+                empty_indices.push(i);
+            } else {
+                non_empty.push(t);
+            }
+        }
+        // 短路:全 empty
+        if non_empty.is_empty() {
+            return Ok(vec![vec![0.0f32; self.dims]; texts.len()]);
+        }
+
         let url = format!("{}/api/embed", self.base_url);
         let model = self.model.clone();
-        let input: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
+        let input: Vec<String> = non_empty.iter().map(|s| s.to_string()).collect();
         let client = self.client.clone();
 
         let response = embed_block_on(async move {
@@ -125,7 +144,20 @@ impl EmbeddingProvider for OllamaProvider {
                 .map_err(|e| VaultError::LlmUnavailable(format!("ollama embed response: {e}")))
         })?;
 
-        Ok(response.embeddings)
+        // 把 empty 占位 zero vec 插回原 index 顺序
+        if empty_indices.is_empty() {
+            return Ok(response.embeddings);
+        }
+        let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+        let mut non_empty_iter = response.embeddings.into_iter();
+        for i in 0..texts.len() {
+            if empty_indices.contains(&i) {
+                out.push(vec![0.0f32; self.dims]);
+            } else {
+                out.push(non_empty_iter.next().unwrap_or_else(|| vec![0.0f32; self.dims]));
+            }
+        }
+        Ok(out)
     }
 
     fn dimensions(&self) -> usize {
