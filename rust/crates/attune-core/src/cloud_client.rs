@@ -170,6 +170,13 @@ pub struct UserInfo {
     /// LLM gateway endpoint（云端公布；如 https://gateway.attune.ai/v1）
     #[serde(default)]
     pub gateway_url: Option<String>,
+    /// 默认 LLM model（云端下发；如 "deepseek-v4-flash"）。
+    /// per spec 2026-05-24-deepseek-via-new-api-gateway-e2e.md Bug-1 修复 Option C:
+    /// fresh vault paid 用户 login 时 merge_gateway_into_settings 会用此 model 填入
+    /// llm.model,避免 chat 因 model=null → 404。
+    /// 老版 accounts server 不返回此字段 → None,attune-server 不写入 model 保持兼容。
+    #[serde(default)]
+    pub gateway_default_model: Option<String>,
 }
 
 /// accounts `GET /api/v1/licenses` 的单条 license 响应
@@ -310,5 +317,22 @@ mod tests {
         let json = r#"{"id": 1, "email": "free@example.com", "plan": "individual"}"#;
         let u: UserInfo = serde_json::from_str(json).unwrap();
         assert!(u.gateway_token.is_none());
+        // Bug-1 fix: old server lacks gateway_default_model → None,backward compat
+        assert!(u.gateway_default_model.is_none());
+    }
+
+    /// Bug-1 fix (spec 2026-05-24): cloud /me 新字段 `gateway_default_model` 须可解析。
+    #[test]
+    fn user_info_parses_gateway_default_model() {
+        let json = r#"{
+            "id": 7,
+            "email": "p@example.com",
+            "plan": "pro",
+            "gateway_token": "sk-newapi-1",
+            "gateway_url": "https://gw/v1",
+            "gateway_default_model": "deepseek-v4-flash"
+        }"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(u.gateway_default_model.as_deref(), Some("deepseek-v4-flash"));
     }
 }
