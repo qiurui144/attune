@@ -338,3 +338,38 @@ R11 新发现 office_ocr_golden_gate + office_asr_golden_gate 8 + 4 test 全 SKI
 - `docs/superpowers/specs/2026-05-24-deepseek-via-new-api-gateway-e2e.md`(LLM 路径)
 - `docs/superpowers/specs/2026-05-24-deepseek-integration-research.md`(LLM multi-seed std)
 - `tmp/full-stack-audit-2026-05-24/`(本 audit 真测脚本 + raw result JSON)
+
+### audit round retrospective(2026-05-24 23:20 → 2026-05-25 01:11)
+
+| Round | 维度 | 用时 | 真测产出 |
+|-------|------|------|---------|
+| R1 | 静态代码审查 | 30 min | 6 模型 provider 代码全审 + trait / impl 清单 |
+| R2 | 功能测试(embedding) | 5 min | bge-m3 5 sample L2 norm=1.0 + 跨语 EN-ZH cosine=0.878 |
+| R3 | 集成测试(retrieval) | 25 min | 30 q embedding hit@5=40%(corpus subset),P50/P99 实测 |
+| R4 | 端到端(OCR PDF) | 15 min | Python 中文 PDF 5 页:Page 1-3 OK / **Page 4-5 0 chars** 新 bug |
+| R5 | ASR 实测 | 10 min | 5 audio 全部成功,multi-emotion 准确,RTF 3-10x |
+| R6 | 性能 stress | 5 min | 100 query embedding stress P50=284 P99=1309ms,0/100 fail |
+| R7 | spec(11 节)+ commit + push | 5 min | spec landed,4 commit push develop |
+| R8 | OCR bug 反证 + fix proposal | 10 min | full 0 chars / 4 tiles 8685 chars,fix validated |
+| R9 | spec 更新 + R11 验证 | 5 min | office_ocr/asr golden gate 全 SKIP 升级到 🔴 |
+| R10 | 历史 baseline 回归对照 | 5 min | phase-b-final.json 引用,reranker fix 后无退化 |
+| R11 | office golden gate 状态 | 10 min | 8+4 test 全 SKIP-only 新发现 |
+| R12 | office_six_category_floor | 5 min | golden=0 / synth-only / OFF mode 印证 R11 |
+| R14 | reranker fix in-session 复测 | 5 min | 10 文档 15k-158k chars 全 OK, 0 panic, 0 NaN |
+| R17 | RAG e2e flow | 10 min | embed+cosine+rerank pipeline 真测 80% hit@1 |
+| R18 | RAG perf P50/P99 | 10 min | 30 q e2e: P50=565ms / P90=624ms / P99=684ms, 0 fail |
+| R19 | retrospective + commit | — | 9+ commit push develop, audit 收口 |
+
+**用时实测 wall clock 1h51m**(start 23:20,本节落 01:11),剩 ~2h 余量留给后续 v1.0.1
+实施时引用本 audit 数据。
+
+**真测发现总数**:
+- 🔴 High 2(office_ocr / asr golden gate 全 SKIP)
+- 🟡 Med 4(OCR 超长页 bug、VLM dead、中文 ASR fixture 缺、qwen2.5:3b 单 seed)
+- 🟢 Low 3(qwen3-emb 8b CPU 慢、bge-m3 size_vram=0、Embedding corpus subset hit@5=40%)
+
+**新加 test files**(commit 进 repo,永久 reproducer + 未来 regression test):
+1. `rust/crates/attune-core/tests/ocr_long_page_audit.rs` — OCR 超长页 bug
+2. `rust/crates/attune-core/tests/reranker_long_doc_audit.rs` — Reranker fix 稳定
+3. `rust/crates/attune-core/tests/rag_flow_audit.rs` — e2e flow
+4. `rust/crates/attune-core/tests/rag_perf_audit.rs` — perf P50/P99
