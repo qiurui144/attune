@@ -38,10 +38,6 @@ local-ip-address = "0.6"
 dunce = "1"
 # thiserror: 统一 AppError derive (OPT-3 / ARCH-A). 各 route 复用 IntoResponse.
 thiserror = "2"
-# arc-swap: lock-free atomic Arc swap, 用于 AppState 里 read-heavy 的 ML provider
-# trait object (embedding / llm / reranker / web_search / classifier). 写少读多场景,
-# 比 std::sync::Mutex<Arc<dyn>> 快得多 + 无 async/blocking 风险.
-arc-swap = "1"
 # RSS worker 到期判断需要解析 last_polled_at RFC3339 时间戳。
 chrono = { workspace = true }
 # Office helper (v0.7.1): OCR 端点写 multipart bytes 到临时文件喂 PP-OCR provider.

@@ -177,10 +177,7 @@ mod tests {
     fn max_seq_len_within_bge_reranker_position_embedding_bound() {
         // BGE-reranker-base position_embeddings weight: dims=[514, 768]
         // 加上 RoBERTa 的 padding_idx + 1 offset，实际安全 token 数 = 512
-        assert!(
-            MAX_SEQ_LEN <= 512,
-            "MAX_SEQ_LEN={MAX_SEQ_LEN} exceeds BGE-reranker-base safe bound (512). \
-             若切换 bge-reranker-v2-m3 等 8192-position 模型，需在此处区分常量。"
-        );
+        // 编译期常量断言：若切换 bge-reranker-v2-m3 等 8192-position 模型，需区分常量。
+        const _: () = assert!(MAX_SEQ_LEN <= 512);
     }
 }

@@ -357,7 +357,6 @@ dependencies = [
  "kreuzberg-paddle-ocr",
  "log",
  "mail-parser",
- "ndarray",
  "notify",
  "ort",
  "pdf-extract",
@@ -396,7 +395,6 @@ dependencies = [
 name = "attune-server"
 version = "1.0.0"
 dependencies = [
- "arc-swap",
  "attune-core",
  "axum",
  "axum-server",

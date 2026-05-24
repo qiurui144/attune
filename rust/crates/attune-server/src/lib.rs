@@ -214,8 +214,6 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/audit/log.csv", get(routes::audit::export_log_csv))
         // v0.7 F3: demo sample data 一键加载
         .route("/api/v1/demo/load", post(routes::demo::load_demo))
-        // v0.7 F5: streaming chat (SSE)
-        .route("/api/v1/chat/stream", post(routes::chat_stream::chat_stream))
         // v0.6 Phase A.5.5 隐私 tier 检测（Settings UI Privacy 页用）
         .route("/api/v1/privacy/tier", get(routes::privacy::tier))
         // Status (full status requires vault access)
