@@ -236,6 +236,7 @@ Repro test: `rust/crates/attune-core/tests/ocr_long_page_audit.rs`(本 audit com
 
 | Risk | Sev | 责任版本 | Owner Action |
 |------|-----|---------|-------------|
+| **ORT Embedding empty string ERROR**(本 audit R20 新发现 ⚠️)| 🟡 Med | **v1.0.1** | OrtEmbeddingProvider::embed_one / OllamaProvider::embed 入口加 empty/whitespace guard 返 zero vec 或 skip,避免 ORT `Invalid dimension #2` panic 终止 ingest pipeline |
 | **office_ocr_golden_gate 8 test 全 SKIP**(本 audit R11 新发现 ⚠️)| 🔴 High | **v1.0.1** | 所有红线 0.92-0.95 无任何 sample 验证,只是 SKIP-only。补 4 scene × 2 image 脱敏 fixture 让 gate 真 enforce |
 | **office_asr_golden_gate 4 test 全 SKIP**(本 audit R11 新发现 ⚠️)| 🔴 High | **v1.0.1** | 中文 WER ≤15% / 英 ≤10% 红线无任何 audio 验证。fetch-office-asr-golden.sh 缺。补 cn / en / mixed 各 2-3 audio 脱敏 fixture |
 | OCR 超长页 silent 0 chars(本 audit R4/R8 新发现)| 🟡 Med | **v1.0.1** | PP-OCR `extract_text_from_image` 加 dimensions guard + auto-tile 切分。Repro: `tests/ocr_long_page_audit.rs` |
@@ -246,6 +247,30 @@ Repro test: `rust/crates/attune-core/tests/ocr_long_page_audit.rs`(本 audit com
 | qwen2.5:3b 单 seed std 高 | 🟢 Low | v1.1 | 多 seed 复跑或停用作 chat provider(K3 image 例外) |
 | Ollama bge-m3 size_vram=0(纯 CPU 推理)| 🟢 Info | v1.1 | doc note: 用户笔电有 GPU 时 Ollama 自动用 vram;开发机 4090 红线下未测 |
 | Embedding 30q hit@5=40%(本 audit subset)| 🟢 Info | — | corpus 限制非 model 限制,full corpus per spec 5/24 = 93.9% |
+
+### R20 boundary + 异常注入(2026-05-25 01:15)
+
+跑 `model_boundary_audit.rs` 测 Embedding + Reranker 在异常输入下的行为:
+
+| 输入 | Embedding (ORT bge-m3) | Reranker (bge-reranker-base) |
+|------|------------------------|------------------------------|
+| empty string | ❌ **ERROR: Invalid dimension #2 ...** ⚠️ | ✅ Ok(score) |
+| single char "a" | ✅ 1024d | ✅ Ok |
+| 10000 chars(超 tokenizer max)| ✅ 1024d(truncate) | n/a |
+| unicode 中英 emoji 混 | ✅ 1024d | ✅ 0.99 |
+| 5 重复同文本 → 同向量 | ✅ deterministic | n/a |
+| batch 100 short | ✅ 1.0s 全成功 | ✅ 1.4s 100 score |
+| empty docs[] | n/a | ✅ Ok([]) |
+
+**🟡 新发现 bug — ORT Embedding empty string ERROR**:
+- 报错:`Invalid dimension #2; all dimensions must be >= 1 when creating a tensor from raw data`
+- 根因:empty string tokenize 后 ids 数组长度=0,ORT Tensor::from_array 拒绝 0-dim
+- 生产影响:如果 ingest pipeline 喂给 embedding 一个 empty chunk(trimming 边界 case),会 break;ollama HTTP 路径估计也踩到此
+
+**修复方案(推 v1.0.1)**:
+在 `OrtEmbeddingProvider::embed_one`(或 `embed`)入口加 empty / whitespace-only check,
+对 empty 文本返 zero vector 或 skip,避免 panic。同理 `embed.rs` `OllamaProvider::embed`
+应做相同 guard。
 
 ### R17/R18 综合 RAG flow + perf audit(2026-05-25 01:07)
 
