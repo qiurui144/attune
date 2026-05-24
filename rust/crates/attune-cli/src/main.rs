@@ -159,6 +159,8 @@ enum Commands {
     PluginVerifySig {
         plugin_dir: std::path::PathBuf,
         /// 公钥 hex (32-byte)
+        /// 用法: attune plugin-verify-sig <dir> --pubkey <pubkey>
+        #[arg(long)]
         pubkey: String,
     },
     /// 装载 plugin 到 attune 默认 plugins 目录 (~/.local/share/attune/plugins/<id>/).

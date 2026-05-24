@@ -172,7 +172,7 @@ $ echo '{"facts":{...,"principal":null,...},...}' | agent_civil_loan
 
 | 现象 | 原因 | 排查 |
 |------|------|------|
-| install 拒 "paid/trial must be Trusted" | 未提供 --pubkey 或签名错 | `attune plugin-verify-sig <dir> <pubkey>` 单独验证 |
+| install 拒 "paid/trial must be Trusted" | 未提供 --pubkey 或签名错 | `attune plugin-verify-sig <dir> --pubkey <pubkey>` 单独验证 |
 | install 拒 "encrypted plugin found but no key" | paid plugin 但 ATTUNE_PLUGIN_KEY 没设 | export ATTUNE_PLUGIN_KEY=... |
 | server 启动后 list 不到新装 plugin | 没重启 server | restart attune-server-headless |
 | agent_civil_loan 提交后 exit 2 | 业务红线触发 (借条 null / 字段 null) | 看 stderr audit_trail 提示, UI 引导补全 |
