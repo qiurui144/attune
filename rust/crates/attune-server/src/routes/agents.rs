@@ -194,7 +194,7 @@ mod tests {
             }
         });
         let env = llm_env_from_settings(&settings);
-        // endpoint と api_key は空なので除外される
+        // endpoint and api_key are empty → excluded
         assert!(env.iter().any(|(k, _)| k == "ATTUNE_LLM_PROVIDER"));
         assert!(env.iter().any(|(k, _)| k == "ATTUNE_LLM_MODEL"));
         assert!(!env.iter().any(|(k, _)| k == "ATTUNE_LLM_ENDPOINT"));
@@ -214,5 +214,91 @@ mod tests {
         let settings = serde_json::json!({});
         let env = llm_env_from_settings(&settings);
         assert!(env.is_empty());
+    }
+
+    // ── 增强覆盖: edge / adversarial ─────────────────────────────────────
+
+    // Adversarial: llm 字段是 null 而不是 object — 不 panic, 返回 empty
+    #[test]
+    fn llm_env_from_settings_null_llm_returns_empty() {
+        let settings = serde_json::json!({ "llm": null });
+        let env = llm_env_from_settings(&settings);
+        assert!(env.is_empty());
+    }
+
+    // Adversarial: llm 字段是 array 而不是 object — 不 panic
+    #[test]
+    fn llm_env_from_settings_array_llm_returns_empty() {
+        let settings = serde_json::json!({ "llm": [1, 2, 3] });
+        let env = llm_env_from_settings(&settings);
+        assert!(env.is_empty(), "非 object llm 应被忽略");
+    }
+
+    // Adversarial: llm 子字段类型错 (number 不是 string) — 应跳过
+    #[test]
+    fn llm_env_from_settings_wrong_field_type_skipped() {
+        let settings = serde_json::json!({
+            "llm": {
+                "provider": 123,        // number, 应跳过
+                "endpoint": true,        // bool, 应跳过
+                "model": "deepseek-chat",
+                "api_key": ["arr"]       // array, 应跳过
+            }
+        });
+        let env = llm_env_from_settings(&settings);
+        assert_eq!(env.len(), 1, "只有 model 是合法字符串");
+        assert!(env.iter().any(|(k, _)| k == "ATTUNE_LLM_MODEL"));
+    }
+
+    // Edge: 空字符串 key 也算 (api_key 是空但不是缺失) — 看 filter 行为
+    #[test]
+    fn llm_env_from_settings_whitespace_only_value_kept() {
+        // 当前实现仅 filter empty (!s.is_empty()), 不 trim, 所以 "  " 应保留
+        // 这是当前行为 — 这测试锁定它,如果将来想改成 trim 则该测试失败提醒
+        let settings = serde_json::json!({
+            "llm": {
+                "provider": "  ",
+                "model": "x"
+            }
+        });
+        let env = llm_env_from_settings(&settings);
+        // current behavior: only empty string excluded, whitespace kept
+        assert_eq!(env.len(), 2);
+    }
+
+    // Adversarial: 极深嵌套 settings — 不 stack overflow
+    #[test]
+    fn llm_env_from_settings_handles_huge_settings() {
+        let mut huge = serde_json::Map::new();
+        for i in 0..1000 {
+            huge.insert(format!("k{i}"), serde_json::json!(i));
+        }
+        huge.insert(
+            "llm".into(),
+            serde_json::json!({
+                "provider": "openai",
+                "endpoint": "https://api.openai.com/v1",
+                "model": "gpt-4",
+                "api_key": "sk-xxx"
+            }),
+        );
+        let env = llm_env_from_settings(&serde_json::Value::Object(huge));
+        assert_eq!(env.len(), 4);
+    }
+
+    // I18n: API key 含 Unicode (虽然不该, 但不 panic)
+    #[test]
+    fn llm_env_from_settings_unicode_values_pass_through() {
+        let settings = serde_json::json!({
+            "llm": {
+                "provider": "本地",
+                "endpoint": "http://本地.test/v1",
+                "model": "qwen-中文",
+                "api_key": "sk-🔑"
+            }
+        });
+        let env = llm_env_from_settings(&settings);
+        assert_eq!(env.len(), 4);
+        assert!(env.iter().any(|(_, v)| v == "qwen-中文"));
     }
 }

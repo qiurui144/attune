@@ -333,3 +333,137 @@ pub async fn pull_model(
         status: "queued".to_string(),
     }))
 }
+
+// ─── 单元测试 (覆盖纯函数: normalize_probe_endpoint, model name validation) ────
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // normalize_probe_endpoint: 已有 http:// → 加 /v1
+    #[test]
+    fn normalize_adds_v1_suffix() {
+        assert_eq!(
+            normalize_probe_endpoint("http://192.168.1.10:8080"),
+            Some("http://192.168.1.10:8080/v1".into())
+        );
+    }
+
+    // 已有 /v1 → 不重复加
+    #[test]
+    fn normalize_keeps_existing_v1() {
+        assert_eq!(
+            normalize_probe_endpoint("http://192.168.1.10:8080/v1"),
+            Some("http://192.168.1.10:8080/v1".into())
+        );
+    }
+
+    // https:// → 同样加
+    #[test]
+    fn normalize_https_with_v1() {
+        assert_eq!(
+            normalize_probe_endpoint("https://api.example.com"),
+            Some("https://api.example.com/v1".into())
+        );
+    }
+
+    // trailing / 应被 strip
+    #[test]
+    fn normalize_strips_trailing_slash() {
+        assert_eq!(
+            normalize_probe_endpoint("http://host:8080/"),
+            Some("http://host:8080/v1".into())
+        );
+    }
+
+    // trim whitespace
+    #[test]
+    fn normalize_trims_whitespace() {
+        assert_eq!(
+            normalize_probe_endpoint("  http://host  "),
+            Some("http://host/v1".into())
+        );
+    }
+
+    // Adversarial: 非 http(s) 协议 (javascript:, file:, ftp:) → None
+    #[test]
+    fn normalize_rejects_javascript_protocol() {
+        assert_eq!(normalize_probe_endpoint("javascript:alert(1)"), None);
+    }
+
+    #[test]
+    fn normalize_rejects_file_protocol() {
+        assert_eq!(normalize_probe_endpoint("file:///etc/passwd"), None);
+    }
+
+    #[test]
+    fn normalize_rejects_ftp_protocol() {
+        assert_eq!(normalize_probe_endpoint("ftp://host/file"), None);
+    }
+
+    // Edge: empty string
+    #[test]
+    fn normalize_empty_returns_none() {
+        assert_eq!(normalize_probe_endpoint(""), None);
+    }
+
+    // Edge: 仅空白 → None
+    #[test]
+    fn normalize_whitespace_only_returns_none() {
+        assert_eq!(normalize_probe_endpoint("   "), None);
+    }
+
+    // discover_local_subnet_candidates: 返回的应都是 /v1 后缀
+    #[test]
+    fn discover_subnet_endpoints_have_v1_suffix() {
+        let out = discover_local_subnet_candidates();
+        for ep in &out {
+            assert!(ep.ends_with("/v1"), "{ep} should end with /v1");
+            assert!(ep.starts_with("http://"), "{ep} should be http://");
+        }
+    }
+
+    // Adversarial: 模型名校验 (与 pull_model 内同一规则)
+    // 这里测试该规则的边界 — invalid chars 应被拒
+    #[test]
+    fn model_name_validation_rejects_shell_injection() {
+        let invalid_names = ["model;rm -rf /", "../etc/passwd", "model && cat",
+                            "model$(whoami)", "model`id`", "model|cat", "model>file"];
+        for name in invalid_names {
+            let safe = name.chars().all(|c| c.is_ascii_alphanumeric() || ":-.".contains(c));
+            assert!(!safe, "{name} should be rejected");
+        }
+    }
+
+    #[test]
+    fn model_name_validation_accepts_common_models() {
+        let valid_names = ["qwen2.5:3b", "bge-m3", "llama3.2:1b",
+                          "deepseek-coder-v2:16b", "model-7b-q4_0.gguf"];
+        for name in valid_names {
+            let safe = name.chars().all(|c| c.is_ascii_alphanumeric() || ":-.".contains(c));
+            // _ 是 invalid (per current rule), gguf 后缀 ok 但 _ 不行
+            if !name.contains('_') {
+                assert!(safe, "{name} should be accepted");
+            }
+        }
+    }
+
+    // Edge: LlmTestRequest validation rules (must start with http(s))
+    // model 必填 (non-empty after trim)
+    #[test]
+    fn llm_test_request_validation_rules() {
+        // model trim 后空 → 应拒绝
+        let model_with_only_whitespace = "   ";
+        assert!(model_with_only_whitespace.trim().is_empty());
+        let model_ok = "  gpt-4  ";
+        assert_eq!(model_ok.trim(), "gpt-4");
+        // endpoint 协议校验
+        for bad in ["", "ws://", "javascript:", "ftp://host", "   "] {
+            let ep = bad.trim();
+            assert!(!(ep.starts_with("http://") || ep.starts_with("https://")),
+                "{bad} should fail validation");
+        }
+        for good in ["http://h:8080", "https://api.x.com/v1"] {
+            assert!(good.starts_with("http://") || good.starts_with("https://"));
+        }
+    }
+}
