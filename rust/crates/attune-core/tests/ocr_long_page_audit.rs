@@ -49,6 +49,7 @@ fn ocr_long_page_tiles_vs_full() {
 
     // 2. each tile (reproduce fix proposal)
     eprintln!("\n=== Test B: 4 tiles ~5500px each ===");
+    let out_dir = "/data/company/project/attune/tmp/full-stack-audit-2026-05-24/ocr_long_page";
     let mut total_tile_chars = 0;
     for i in 1..=4 {
         let path = format!("{}/tile-{}.png", tile_dir, i);
@@ -63,9 +64,9 @@ fn ocr_long_page_tiles_vs_full() {
                 let chars = text.chars().count();
                 total_tile_chars += chars;
                 eprintln!("  tile {}: {} chars in {:.1}s", i, chars, t.elapsed().as_secs_f64());
-                if i == 1 {
-                    eprintln!("    preview: {}", text.chars().take(150).collect::<String>());
-                }
+                // save raw OCR text per tile for manual CER comparison
+                let out = format!("{}/tile-{}.txt", out_dir, i);
+                std::fs::write(&out, &text).ok();
             }
             Err(e) => eprintln!("  tile {} ERROR: {e}", i),
         }
