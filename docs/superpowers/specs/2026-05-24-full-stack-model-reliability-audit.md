@@ -247,6 +247,26 @@ Repro test: `rust/crates/attune-core/tests/ocr_long_page_audit.rs`(本 audit com
 | Ollama bge-m3 size_vram=0(纯 CPU 推理)| 🟢 Info | v1.1 | doc note: 用户笔电有 GPU 时 Ollama 自动用 vram;开发机 4090 红线下未测 |
 | Embedding 30q hit@5=40%(本 audit subset)| 🟢 Info | — | corpus 限制非 model 限制,full corpus per spec 5/24 = 93.9% |
 
+### R12 office_six_category_floor 实际状态(本 audit 新发现)
+
+跑 `office_six_category_floor` 13 test PASS,但内嵌 floor checker 报告 3 项缺口 +
+2 项 synth-only:
+
+| Bucket | golden total | real | synth | 状态 |
+|--------|-------------|------|-------|------|
+| ocr/document | **0** | 0 | 0 | 🔴 缺 5 个 |
+| ocr/receipt | 5 | **0** | 5 | 🟡 全 synthetic |
+| ocr/table | **0** | 0 | 0 | 🔴 缺 5 个 |
+| ocr/card | **0** | 0 | 0 | 🔴 缺 5 个 |
+| ocr/id_card | 15 | **0** | 15 | 🟡 全 synthetic |
+
+floor checker 输出:`INFO: 当前 OFF 模式 (兼容 D3.5 real-sample backfill 期).
+设 ATTUNE_ENFORCE_OFFICE_FLOOR=1 切到强制模式` — 切强制 = fail。
+
+这与 R11 office_ocr_golden_gate 全 SKIP 互相印证 — `golden=N real=0 synth=N`
+意思是有 YAML 但无 image (符合 R11 finding)。**升级 v1.0.1 优先级**:
+backfill real-image fixture 同时让 `ATTUNE_ENFORCE_OFFICE_FLOOR=1` ratchet 进 CI。
+
 ### v1.0 GA ship-readiness 重审(R11 后)
 
 R11 新发现 office_ocr_golden_gate + office_asr_golden_gate 8 + 4 test 全 SKIP 后,
