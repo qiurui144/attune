@@ -247,6 +247,32 @@ Repro test: `rust/crates/attune-core/tests/ocr_long_page_audit.rs`(本 audit com
 | Ollama bge-m3 size_vram=0(纯 CPU 推理)| 🟢 Info | v1.1 | doc note: 用户笔电有 GPU 时 Ollama 自动用 vram;开发机 4090 红线下未测 |
 | Embedding 30q hit@5=40%(本 audit subset)| 🟢 Info | — | corpus 限制非 model 限制,full corpus per spec 5/24 = 93.9% |
 
+### R14 Reranker fix 稳定性 in-session 复测(2026-05-25 00:57)
+
+跑 `rust/crates/attune-core/tests/reranker_long_doc_audit.rs`(本 audit commit)
+验证 commit 92c2750 MAX_SEQ_LEN=512 fix 在长文档下不再 panic:
+
+| 文档长度 | score | latency | 状态 |
+|---------|-------|---------|------|
+| 15800 chars | 0.9951 | 163ms | ✅ |
+| 31600 chars | 0.9951 | 154ms | ✅ |
+| 47400 chars | 0.9951 | 154ms | ✅ |
+| 63200 chars | 0.9951 | 156ms | ✅ |
+| 79000 chars | 0.9951 | 159ms | ✅ |
+| 94800 chars | 0.9951 | 162ms | ✅ |
+| 110600 chars | 0.9951 | 164ms | ✅ |
+| 126400 chars | 0.9951 | 166ms | ✅ |
+| 142200 chars | 0.9951 | 169ms | ✅ |
+| 158000 chars | 0.9951 | 172ms | ✅ |
+
+**Reranker fix holds** — 0/10 failure,0 NaN,0 panic。
+**latency 154-172ms 几乎不变** — 因 MAX_SEQ_LEN=512 truncate 后输入 size 一致;
+score 0.9951 也一致 — truncate 后内容相同因此相同 score。
+
+副作用 finding(留 v1.1 跟进):reranker 对**前 512 token 一致但后续不同**的文档给
+相同 score,可能导致差异化 ranking 失效。这是 BGE-reranker-base 模型本身的限制,
+要更长上下文需切到 bge-reranker-v2-m3(max 8192,但 ONNX 不可得)或自实现 sliding-window。
+
 ### R12 office_six_category_floor 实际状态(本 audit 新发现)
 
 跑 `office_six_category_floor` 13 test PASS,但内嵌 floor checker 报告 3 项缺口 +
