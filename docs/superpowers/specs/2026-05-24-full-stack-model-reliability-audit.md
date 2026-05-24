@@ -408,3 +408,17 @@ R11 新发现 office_ocr_golden_gate + office_asr_golden_gate 8 + 4 test 全 SKI
 2. `rust/crates/attune-core/tests/reranker_long_doc_audit.rs` — Reranker fix 稳定
 3. `rust/crates/attune-core/tests/rag_flow_audit.rs` — e2e flow
 4. `rust/crates/attune-core/tests/rag_perf_audit.rs` — perf P50/P99
+5. `rust/crates/attune-core/tests/model_boundary_audit.rs` — boundary + R20 empty-string regression
+
+**Code fix shipping in this audit**(本 audit 不只是 audit,还实 ship):
+- `attune-core/src/infer/embedding.rs::embed_one` — empty/whitespace guard
+- `attune-core/src/embed.rs::OllamaProvider::embed` — empty partition + 顺序回填
+- 1307 lib tests 全过(attune-core 1235 + attune-server 72,0 fail)
+- ingest_pipeline + rag_w2_batch1 integration 22 tests 全过
+
+**audit 收口(2026-05-25 01:30)**:
+- 12 commit push develop
+- 真测 + 1 fix + 5 new test files
+- 4 个真实 bug 找到(1 已 ship fix,3 推 v1.0.1)
+- 11 节 spec(11/11)+ TOC + 历史回归对照 + retrospective
+- wall-clock ~2h10m,实质 audit 价值密度高(每 round 真发现)
