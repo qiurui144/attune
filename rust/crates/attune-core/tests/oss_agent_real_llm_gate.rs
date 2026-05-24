@@ -46,26 +46,54 @@
 //! If real LLM falls below threshold, the v1.0 RELEASE.md must label the agent
 //! "Beta" or defer to v1.1, NOT relax the threshold here.
 
-use attune_core::llm::{LlmProvider, OllamaLlmProvider};
+use attune_core::llm::{LlmProvider, OllamaLlmProvider, OpenAiLlmProvider};
 use attune_core::memory_consolidation::{
     generate_one_episodic_memory, BundleChunk, ConsolidationBundle,
 };
 // Use production parser directly — was pub(crate); promoted to pub in #77 fix.
 use attune_core::skill_evolution::agent::parse_llm_terms;
 
-const TEST_MODEL: &str = "qwen2.5:3b";
+const DEFAULT_OLLAMA_MODEL: &str = "qwen2.5:3b";
 
-/// Skip the test cleanly if Ollama isn't reachable — surfaces a precise message
-/// rather than burying the failure in a generic HTTP error.
-fn require_ollama() -> OllamaLlmProvider {
-    let provider = OllamaLlmProvider::with_model(TEST_MODEL);
-    if !provider.is_available() {
-        panic!(
-            "Ollama not reachable on localhost:11434 — start `ollama serve` and \
-             `ollama pull {TEST_MODEL}` before running this gate."
-        );
+/// Provider selection via env vars (5/24 DeepSeek verify支持):
+/// - `ATTUNE_LLM_PROVIDER=ollama` (default) → 旧 qwen2.5:3b 路径
+/// - `ATTUNE_LLM_PROVIDER=openai_compat` → 读 `ATTUNE_LLM_ENDPOINT` + `ATTUNE_LLM_API_KEY`
+///   + `ATTUNE_LLM_MODEL`(e.g. DeepSeek / OpenAI / Anthropic-compat)
+///
+/// Per CLAUDE.md 红线:env var 注入 key,**禁止 print key**。
+fn require_llm() -> Box<dyn LlmProvider> {
+    let provider_kind = std::env::var("ATTUNE_LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string());
+    match provider_kind.as_str() {
+        "openai_compat" | "openai" => {
+            let endpoint = std::env::var("ATTUNE_LLM_ENDPOINT")
+                .expect("ATTUNE_LLM_ENDPOINT required for openai_compat (e.g. https://api.deepseek.com/v1)");
+            let api_key = std::env::var("ATTUNE_LLM_API_KEY")
+                .expect("ATTUNE_LLM_API_KEY required for openai_compat");
+            let model = std::env::var("ATTUNE_LLM_MODEL")
+                .expect("ATTUNE_LLM_MODEL required for openai_compat (e.g. deepseek-v4-flash)");
+            // NEVER print api_key — only model + endpoint host
+            let host = endpoint.split("//").nth(1).unwrap_or(&endpoint);
+            println!("[provider] openai_compat host={host} model={model}");
+            Box::new(OpenAiLlmProvider::new(&endpoint, &api_key, &model))
+        }
+        _ => {
+            let model = std::env::var("ATTUNE_LLM_MODEL")
+                .unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.to_string());
+            let provider = OllamaLlmProvider::with_model(&model);
+            if !provider.is_available() {
+                panic!(
+                    "Ollama not reachable on localhost:11434 — start `ollama serve` and \
+                     `ollama pull {model}` before running this gate."
+                );
+            }
+            println!("[provider] ollama model={model}");
+            Box::new(provider)
+        }
     }
-    provider
+}
+
+fn current_model_name() -> String {
+    std::env::var("ATTUNE_LLM_MODEL").unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.to_string())
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -195,18 +223,19 @@ fn check_memory_summary(summary: &str) -> (bool, Option<String>) {
 }
 
 #[test]
-#[ignore = "requires Ollama qwen2.5:3b on localhost:11434 — see module docs for run instructions"]
+#[ignore = "requires real LLM — see module docs (Ollama qwen2.5:3b OR openai_compat via env vars)"]
 fn agent_memory_consolidation_real_llm() {
-    let llm = require_ollama();
+    let llm = require_llm();
     let bundles = memory_real_inputs();
 
-    println!("\n=== AGENT 1: memory_consolidation — real LLM ({TEST_MODEL}) ===");
+    let model = current_model_name();
+    println!("\n=== AGENT 1: memory_consolidation — real LLM ({model}) ===");
     let mut results: Vec<MemoryCaseResult> = Vec::new();
     for (i, bundle) in bundles.iter().enumerate() {
         let case_no = i + 1;
         println!("\n[case {case_no}/5] window_start={} chunks={}", bundle.window_start, bundle.chunks.len());
 
-        let out = generate_one_episodic_memory(&llm, bundle);
+        let out = generate_one_episodic_memory(llm.as_ref(), bundle);
         match out {
             None => {
                 println!("  → LLM returned empty / error");
@@ -308,11 +337,12 @@ struct SkillCaseResult {
 }
 
 #[test]
-#[ignore = "requires Ollama qwen2.5:3b on localhost:11434 — see module docs for run instructions"]
+#[ignore = "requires real LLM — see module docs (Ollama qwen2.5:3b OR openai_compat via env vars)"]
 fn agent_self_evolving_skill_real_llm() {
-    let llm = require_ollama();
+    let llm = require_llm();
 
-    println!("\n=== AGENT 4: self_evolving_skill — real LLM ({TEST_MODEL}) ===");
+    let model = current_model_name();
+    println!("\n=== AGENT 4: self_evolving_skill — real LLM ({model}) ===");
     let mut results: Vec<SkillCaseResult> = Vec::new();
     for (i, q) in SKILL_QUERIES.iter().enumerate() {
         let case_no = i + 1;
