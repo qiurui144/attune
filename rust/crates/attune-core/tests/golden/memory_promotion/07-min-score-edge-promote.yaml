@@ -1,0 +1,26 @@
+id: 07-min-score-edge-promote
+description: |
+  Single-chunk episodic, 1d old, exactly 3 citations.
+  Independent score: 1.0*3 + 2.0/1.1 + 0.5*ln(1) ≈ 3 + 1.8182 + 0 = 4.8182 → > 4.0 → promote.
+  Captures the "minimum viable signal" path — low chunk density but enough citations.
+episodic_memories:
+  - id: ep-min-score-promo
+    chunk_hashes: [ms-001]
+    summary: |
+      用户对一个短小重要的代码片段（单 chunk）进行了三次反复引用。
+    created_at_offset_days: 1
+citation_hits:
+  - chunk: ms-001
+    count: 3
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: [ep-min-score-promo]
+  gated_by_access: 0
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true

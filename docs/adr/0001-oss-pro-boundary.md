@@ -8,7 +8,7 @@
 attune 初期方向不明: 是只做开源个人知识库, 还是行业 SaaS, 还是企业部署?
 - 律师 / 医生 / 学者等垂直场景需求很具体 (法律案号 / 病历术语)
 - 但通用个人用户 (学生 / 开发者 / 写作者) 不需要这些
-- lawcontrol (另一仓) 已做 B2B 律所小团队 SaaS
+- attune-enterprise (另一仓，原名 LawControl，2026-05-22 改名) 已做 B2B 律所小团队 SaaS
 
 混在一起会拖累三方: OSS 用户嫌行业绑定臃肿, 行业用户嫌 OSS 不够深,
 B2B 律所小团队需要的协作/审批与个人产品冲突.
@@ -21,10 +21,10 @@ B2B 律所小团队需要的协作/审批与个人产品冲突.
 |------|--------|------|
 | **attune (OSS)** | 个人通用 | 桌面/扩展, 零行业绑定 |
 | **attune-pro** | 个人行业增强 | Plugin pack 装载到 attune (律师/医生/学者/售前/工程师/专利) |
-| **lawcontrol** | 律所 B2B 小团队 | Django + Vue + 19 容器 SaaS |
+| **attune-enterprise** | 律所 B2B 小团队 | Django + Vue + 19 容器 SaaS（原 LawControl）|
 
-OSS attune 完全独立 — 不调 lawcontrol API / 不复用 lawcontrol 代码 / 数据完全隔离.
-可参考 lawcontrol plugin 设计模式但实现独立.
+OSS attune 完全独立 — 不调 attune-enterprise API / 不复用 attune-enterprise 代码 / 数据完全隔离.
+可参考 attune-enterprise plugin 设计模式但实现独立.
 
 ## Consequences
 
@@ -35,7 +35,7 @@ OSS attune 完全独立 — 不调 lawcontrol API / 不复用 lawcontrol 代码 
 
 **代价**:
 - attune-pro 与 attune 是配套关系, 跨仓 release coordination 复杂
-- 律所同时用 lawcontrol + attune 需要 export/import 手动桥接
+- 律所同时用 attune-enterprise + attune 需要 export/import 手动桥接
 - 同一团队三个产品, dev 资源稀释
 
 ## Implementation 落地

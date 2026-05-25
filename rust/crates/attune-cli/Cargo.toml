@@ -1,6 +1,6 @@
 [package]
 name = "attune-cli"
-version = "0.1.0"
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -19,6 +19,13 @@ hex = "0.4"
 chrono = "0.4"
 reqwest = { workspace = true, features = ["blocking", "json", "multipart"] }
 tempfile = "3"
+# D5.7: levenshtein suggestion for profile typos ("recipt" → "receipt"); zero-dep nano crate
+strsim = "0.11"
+
+[dev-dependencies]
+# D5.7: subprocess CLI smoke tests via `assert_cmd` + `predicates`
+assert_cmd = "2"
+predicates = "3"
 
 [lints]
 workspace = true

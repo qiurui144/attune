@@ -1,0 +1,27 @@
+id: 02-bank-statement
+description: 工商银行流水 — 交易日期/对方户名/交易金额/余额 标准字段
+inputs:
+  - file: 工行流水-2023.pdf
+    text: |
+      工商银行个人账户对账单
+      账户: 6222 0801 **** 1234
+      户主: 张三
+      交易日期 2023-01-15  对方户名 李四  交易金额 -500000.00  余额 1000000.00  汇出
+      交易日期 2023-06-15  对方户名 李四  交易金额 +20000.00   余额 1020000.00  汇入
+      交易日期 2023-12-31  对方户名 王五  交易金额 -10000.00   余额 1010000.00  代扣
+expected:
+  classified_count: 1
+  per_doc:
+    - file: 工行流水-2023.pdf
+      kind: bank_statement
+      confidence_min: 0.3
+      keywords_must_contain:
+        - 交易日期
+        - 余额
+      entities:
+        dates_min: 3
+        # 注: extract_amounts 要求带单位 (元/万/亿/角/分); 银行流水里的
+        # +500000.00 / 1000000.00 不带单位 → 不被抽. 此处只校验日期.
+  red_lines_count: 0
+reviewer:
+  approved: true

@@ -293,6 +293,7 @@ const PRIMARY_NAV: NavItem[] = [
 const MORE_NAV: NavItem[] = [
   { view: 'remote', icon: '🔗', labelKey: 'sidebar.nav.remote' },
   { view: 'skills', icon: '🧠', labelKey: 'sidebar.nav.skills' },
+  { view: 'office', icon: '📋', labelKey: 'sidebar.nav.office' },
   { view: 'marketplace', icon: '🏪', labelKey: 'sidebar.nav.marketplace' },
 ];
 

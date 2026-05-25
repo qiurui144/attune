@@ -241,4 +241,124 @@ chat_trigger:
         let m2 = router.route("帮我起草合同", false, &disabled);
         assert_eq!(m2.len(), 1, "no exclude trigger → match");
     }
+
+    // ── 增强覆盖: priority / multi-plugin / edge / adversarial ──────────────
+
+    // priority sort: 高 priority 在前
+    #[test]
+    fn route_sorts_by_priority_descending() {
+        let tmp = TempDir::new().expect("tmp");
+        write_skill_yaml(tmp.path(), "low",
+            "id: low\nname: 低\ntype: skill\nversion: '1.0.0'\nchat_trigger:\n  enabled: true\n  priority: 1\n  keywords: ['事项']\n");
+        write_skill_yaml(tmp.path(), "high",
+            "id: high\nname: 高\ntype: skill\nversion: '1.0.0'\nchat_trigger:\n  enabled: true\n  priority: 99\n  keywords: ['事项']\n");
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let router = IntentRouter::new(&reg);
+        let m = router.route("看这个事项", false, &HashSet::new());
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].skill_id, "high");
+        assert_eq!(m[1].skill_id, "low");
+    }
+
+    // edge: enabled=false 不参与路由
+    #[test]
+    fn route_skips_when_trigger_disabled() {
+        let tmp = TempDir::new().expect("tmp");
+        write_skill_yaml(tmp.path(), "off",
+            "id: off\nname: 关\ntype: skill\nversion: '1.0.0'\nchat_trigger:\n  enabled: false\n  keywords: ['hello']\n");
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let router = IntentRouter::new(&reg);
+        assert!(router.route("hello", false, &HashSet::new()).is_empty());
+    }
+
+    // edge: min_keyword_match=2 → 仅 1 关键词不够
+    #[test]
+    fn route_min_keyword_match_threshold() {
+        let tmp = TempDir::new().expect("tmp");
+        write_skill_yaml(tmp.path(), "twokw",
+            "id: twokw\nname: 双关键词\ntype: skill\nversion: '1.0.0'\nchat_trigger:\n  enabled: true\n  keywords: ['离婚', '财产']\n  min_keyword_match: 2\n");
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let router = IntentRouter::new(&reg);
+        // 仅 1 关键词 → 不匹配
+        assert!(router.route("离婚", false, &HashSet::new()).is_empty());
+        // 2 关键词 → 匹配
+        assert_eq!(router.route("离婚财产分割", false, &HashSet::new()).len(), 1);
+    }
+
+    // edge: empty message
+    #[test]
+    fn route_empty_message_no_match() {
+        let tmp = TempDir::new().expect("tmp");
+        write_skill_yaml(tmp.path(), "x",
+            "id: x\nname: X\ntype: skill\nversion: '1.0.0'\nchat_trigger:\n  enabled: true\n  keywords: ['anything']\n");
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let router = IntentRouter::new(&reg);
+        assert!(router.route("", false, &HashSet::new()).is_empty());
+    }
+
+    // adversarial: invalid regex 不 panic, 返回 false
+    #[test]
+    fn route_invalid_regex_does_not_panic() {
+        let tmp = TempDir::new().expect("tmp");
+        write_skill_yaml(tmp.path(), "badrx",
+            "id: badrx\nname: 坏\ntype: skill\nversion: '1.0.0'\nchat_trigger:\n  enabled: true\n  patterns: ['[invalid(((']\n  keywords: []\n");
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let router = IntentRouter::new(&reg);
+        // 无 keyword + invalid pattern → 不匹配也不 panic
+        let r = router.route("test", false, &HashSet::new());
+        assert!(r.is_empty());
+    }
+
+    // adversarial: 超长 message — 不爆栈
+    #[test]
+    fn route_huge_message_no_panic() {
+        let tmp = TempDir::new().expect("tmp");
+        write_skill_yaml(tmp.path(), "kw",
+            "id: kw\nname: 关键词\ntype: skill\nversion: '1.0.0'\nchat_trigger:\n  enabled: true\n  keywords: ['target']\n");
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let router = IntentRouter::new(&reg);
+        let huge = "x".repeat(1_000_000) + "target";
+        let r = router.route(&huge, false, &HashSet::new());
+        assert_eq!(r.len(), 1);
+    }
+
+    // I18n: Unicode keyword matching
+    #[test]
+    fn route_unicode_keyword_matches() {
+        let tmp = TempDir::new().expect("tmp");
+        write_skill_yaml(tmp.path(), "uni",
+            "id: uni\nname: Uni\ntype: skill\nversion: '1.0.0'\nchat_trigger:\n  enabled: true\n  keywords: ['契約', '🏠']\n");
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let router = IntentRouter::new(&reg);
+        let r = router.route("查 🏠 契約 内容", false, &HashSet::new());
+        assert_eq!(r.len(), 1);
+    }
+
+    // edge: pattern matching 通过 (无 keyword 路径)
+    #[test]
+    fn route_pattern_only_match() {
+        let tmp = TempDir::new().expect("tmp");
+        // 使用 YAML double-quoted with \\d escape
+        let yaml = "id: pat\nname: P\ntype: skill\nversion: \"1.0.0\"\nchat_trigger:\n  enabled: true\n  patterns:\n    - \"案[件号]\\\\d+\"\n  keywords: []\n";
+        write_skill_yaml(tmp.path(), "pat", yaml);
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(errs.is_empty(), "scan errors: {errs:?}");
+        let router = IntentRouter::new(&reg);
+        let r = router.route("案件123", false, &HashSet::new());
+        assert_eq!(r.len(), 1, "case-number pattern should match");
+        assert!(r[0].matched_via.iter().any(|s| s.starts_with("pattern:")));
+    }
+
+    // chat_trigger.description 空时回退到 plugin description
+    #[test]
+    fn route_falls_back_to_plugin_description() {
+        let tmp = TempDir::new().expect("tmp");
+        write_skill_yaml(tmp.path(), "fb",
+            "id: fb\nname: FB\ntype: skill\nversion: '1.0.0'\ndescription: 'plugin-level desc'\nchat_trigger:\n  enabled: true\n  keywords: ['hello']\n");
+        let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
+        let router = IntentRouter::new(&reg);
+        let r = router.route("hello", false, &HashSet::new());
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].description, "plugin-level desc");
+    }
 }

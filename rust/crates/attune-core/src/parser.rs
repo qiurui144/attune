@@ -791,7 +791,7 @@ mod tests {
         let mut zip = zip::ZipWriter::new(buf);
         let opts = zip::write::FileOptions::<()>::default();
         for (name, content) in slides {
-            zip.start_file(*name, opts.clone()).unwrap();
+            zip.start_file(*name, opts).unwrap();
             zip.write_all(content.as_bytes()).unwrap();
         }
         zip.finish().unwrap().into_inner()
@@ -839,7 +839,7 @@ mod tests {
         let mut zip = zip::ZipWriter::new(buf);
         let opts = zip::write::FileOptions::<()>::default();
         for (name, content) in html_entries {
-            zip.start_file(*name, opts.clone()).unwrap();
+            zip.start_file(*name, opts).unwrap();
             zip.write_all(content.as_bytes()).unwrap();
         }
         zip.finish().unwrap().into_inner()

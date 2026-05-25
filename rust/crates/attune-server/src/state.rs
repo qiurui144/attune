@@ -77,7 +77,13 @@ pub struct AppState {
     pub webdav_sync_worker_running: AtomicBool,
     /// Email 周期同步 worker 运行标志（防重入）。
     pub email_sync_worker_running: AtomicBool,
+    /// RSS 周期同步 worker 运行标志（防重入）。
+    pub rss_sync_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
+    /// Office helper async job registry (v0.7.1) — in-memory ASR transcription
+    /// jobs. Not persisted; restart cancels all in-flight. See
+    /// `attune_core::office_job_queue` + `docs/superpowers/specs/2026-05-20-office-helper-design.md` §1.
+    pub office_jobs: std::sync::Arc<attune_core::office_job_queue::JobRegistry>,
     /// Sprint 1 Phase B: project recommendation broadcast channel.
     /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
     pub recommendation_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
@@ -94,14 +100,12 @@ pub struct AppState {
 impl AppState {
     pub fn new(vault: Vault, require_auth: bool) -> Self {
         let (recommendation_tx, _rx) = tokio::sync::broadcast::channel::<serde_json::Value>(64);
-        // 启动时尝试读 license cache, 用 license_code 作为 paid plugin 解密 key.
-        // 没 cache 或读失败 → 等价于明文 scan (paid plugin 装载会失败, 但 free plugin OK).
-        let license_cache_path = attune_core::license_cache::LicenseCache::default_path();
-        let cached_license_key: Option<Vec<u8>> =
-            attune_core::license_cache::LicenseCache::load(&license_cache_path)
-                .ok()
-                .flatten()
-                .map(|c| c.as_decrypt_key().to_vec());
+        // 2026-05-20: 启动时 LicenseCache::load 的 paid-plugin 解密 key fallback 是死路径.
+        // 历史 cloud_client.list_licenses() 下发的 license_key 是 Bearer token, 不是
+        // SignedLicense code — attune-cli 已经跳过写 LicenseCache (see main.rs:784-786);
+        // 这里读出来也永远是 None. 直接走明文 scan; encrypted plugin 走 plugin_sync 路径
+        // (它从 cloud_client.EntitledPlugin.decrypt_key 直接拿 key, 不经此 cache).
+        let cached_license_key: Option<Vec<u8>> = None;
         let plugin_registry = match attune_core::plugin_registry::PluginRegistry::default_plugins_dir() {
             Ok(dir) => match attune_core::plugin_registry::PluginRegistry::scan_with_key(&dir, cached_license_key.as_deref()) {
                 Ok((reg, errs)) => {
@@ -150,10 +154,12 @@ impl AppState {
             reindex_worker_running: AtomicBool::new(false),
             webdav_sync_worker_running: AtomicBool::new(false),
             email_sync_worker_running: AtomicBool::new(false),
+            rss_sync_worker_running: AtomicBool::new(false),
             engines_initialized: AtomicBool::new(false),
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
             )),
+            office_jobs: attune_core::office_job_queue::JobRegistry::new(),
             // 启动时检测一次硬件，后续复用（避免每次 GET/PATCH 都同步读 /proc 等）
             hardware: attune_core::platform::HardwareProfile::detect(),
             recommendation_tx,
@@ -919,6 +925,91 @@ impl AppState {
                 std::thread::sleep(std::time::Duration::from_secs(15 * 60));
             }
             tracing::info!("Email sync worker stopped (vault locked)");
+        });
+    }
+
+    /// 启动 RSS 周期同步 worker：每分钟 wake，从 rss_feeds 表读所有 enabled 订阅，
+    /// 跑每个"到期"（now >= last_polled_at + poll_interval_minutes）的 feed。
+    /// 原子 flag 防重入 + RAII guard 复位。
+    ///
+    /// 与 WebDAV/Email worker 不同点：每个 feed 有独立 poll_interval_minutes，
+    /// worker 自身 tick 周期固定 1 min，到期判断在 worker 内做。这样高频订阅
+    /// （5 min）和低频订阅（24h）能共用一个 worker。
+    pub fn start_rss_sync_worker(state: std::sync::Arc<AppState>) {
+        if state
+            .rss_sync_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::debug!("RSS sync worker already running, skipping");
+            return;
+        }
+        std::thread::spawn(move || {
+            struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for FlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _guard = FlagGuard(&state.rss_sync_worker_running);
+
+            tracing::info!("RSS sync worker started");
+            loop {
+                // vault 锁定则退出 —— 下次 unlock 会重新 start。
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        break;
+                    }
+                }
+
+                // 从 rss_feeds 表读全部订阅 + 解密 URL（snapshot 后释放锁）。
+                let feeds: Vec<attune_core::store::rss_feeds::RssFeedRow> = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    let dek = match vault.dek_db() {
+                        Ok(k) => k,
+                        Err(_) => break, // vault 锁定 → 退出
+                    };
+                    vault.store().list_rss_feeds(&dek).unwrap_or_default()
+                };
+
+                let now = chrono::Utc::now();
+                for feed in feeds {
+                    if !feed.enabled {
+                        continue;
+                    }
+                    // 到期判断：last_polled_at 为 None（首次）或 now - last >= interval。
+                    let due = match feed.last_polled_at.as_deref() {
+                        None => true,
+                        Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
+                            Ok(prev) => {
+                                let elapsed = now
+                                    .signed_duration_since(prev.with_timezone(&chrono::Utc));
+                                elapsed >= chrono::Duration::minutes(
+                                    feed.poll_interval_minutes as i64,
+                                )
+                            }
+                            Err(_) => true,
+                        },
+                    };
+                    if !due {
+                        continue;
+                    }
+                    // 只打印 feed_id + name（不含 URL，URL 解密后仅在此函数内消费）。
+                    tracing::info!(
+                        "RSS sync: polling feed id={} name={}",
+                        feed.id,
+                        feed.name
+                    );
+                    if let Err(e) = crate::ingest_rss::sync_rss_feed(&state, &feed.id) {
+                        tracing::warn!("RSS sync for feed {} failed: {e}", feed.id);
+                    }
+                }
+
+                // 1 min tick；feed 到期判断在 worker 内做。
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+            tracing::info!("RSS sync worker stopped (vault locked)");
         });
     }
 
@@ -1719,23 +1810,6 @@ impl AppState {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn webdav_sync_worker_flag_prevents_double_start() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let flag = AtomicBool::new(false);
-        // 首次 compare_exchange 成功。
-        assert!(flag
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok());
-        // 二次失败 —— worker 不会重复起。
-        assert!(flag
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err());
-    }
-}
-
 /// 按 settings + 硬件构建 LLM provider。
 ///
 /// 四级优先级：
@@ -1782,4 +1856,21 @@ fn build_llm_from_settings(
             None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn webdav_sync_worker_flag_prevents_double_start() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = AtomicBool::new(false);
+        // 首次 compare_exchange 成功。
+        assert!(flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok());
+        // 二次失败 —— worker 不会重复起。
+        assert!(flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err());
+    }
 }

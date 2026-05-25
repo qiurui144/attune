@@ -1,0 +1,25 @@
+id: 08-mixed-shared-and-ref
+kind: shared_entity_and_explicit_ref
+doc_a:
+  title: 客户拜访纪要
+  content: |
+    拜访日期：2024-04-12。
+    客户：某科技有限公司。
+    对接人：李四。
+    年度合同金额：¥3,200,000。
+    详细产品配置见 [[年度报价单]] 文档。
+  url: ''
+doc_b:
+  title: 年度报价单
+  content: |
+    报价时间：2024-04-10。
+    报价主体：某科技有限公司。
+    对接人：李四。
+    年度合同金额：¥3,200,000。
+    报价有效期：2024-05-31 前。
+  url: ''
+expected:
+  link_kinds:
+    - shared_entity
+    - explicit_ref
+  evidence_substring: 'wikiref:年度报价单'

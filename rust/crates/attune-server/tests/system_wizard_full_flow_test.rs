@@ -44,6 +44,7 @@ async fn wait_for_health(base: &str) -> Result<(), String> {
 ///   8. POST /vault/unlock → state = UNLOCKED again, items still queryable
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "slow E2E (~70s, 8-step wizard with full Argon2id); R19 nightly only — run with --include-ignored"]
+#[allow(clippy::await_holding_lock)]
 async fn wizard_full_flow_end_to_end() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 

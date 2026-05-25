@@ -1,0 +1,27 @@
+id: 06-contract-sale
+description: 买卖合同 — 甲方 / 乙方 / 标的物 / 价款 / 交付 / 违约责任
+inputs:
+  - file: 买卖合同-甲乙.pdf
+    text: |
+      买卖合同
+      甲方 (出卖人): 张三
+      乙方 (买受人): 李四
+      标的物: A 款电子产品 100 台
+      价款: 人民币贰拾万元整 (¥200,000)
+      交付方式: 一次性全款交付
+      违约责任: 任一方违约的, 应按合同价款 20% 支付违约金.
+      签订日期: 2024-03-15
+expected:
+  classified_count: 1
+  per_doc:
+    - file: 买卖合同-甲乙.pdf
+      kind: contract
+      confidence_min: 0.3
+      keywords_must_contain:
+        - 合同
+      entities:
+        persons_min: 2
+        amounts_min: 1
+  red_lines_count: 0
+reviewer:
+  approved: true

@@ -118,25 +118,27 @@ mod tests {
 
     #[test]
     fn evidence_by_kind_filters() {
-        let mut m = CaseMetadata::default();
-        m.classified_evidence = vec![
-            ClassifiedEvidence {
-                file: "a.pdf".into(),
-                kind: "borrowing_doc".into(),
-                confidence: 0.9,
-                matched_keywords: vec![],
-                entities: Default::default(),
-                text_length: 100,
-            },
-            ClassifiedEvidence {
-                file: "b.pdf".into(),
-                kind: "bank_statement".into(),
-                confidence: 0.8,
-                matched_keywords: vec![],
-                entities: Default::default(),
-                text_length: 200,
-            },
-        ];
+        let m = CaseMetadata {
+            classified_evidence: vec![
+                ClassifiedEvidence {
+                    file: "a.pdf".into(),
+                    kind: "borrowing_doc".into(),
+                    confidence: 0.9,
+                    matched_keywords: vec![],
+                    entities: Default::default(),
+                    text_length: 100,
+                },
+                ClassifiedEvidence {
+                    file: "b.pdf".into(),
+                    kind: "bank_statement".into(),
+                    confidence: 0.8,
+                    matched_keywords: vec![],
+                    entities: Default::default(),
+                    text_length: 200,
+                },
+            ],
+            ..Default::default()
+        };
         assert_eq!(m.evidence_by_kind("borrowing_doc").len(), 1);
         assert_eq!(m.evidence_by_kind("bank_statement").len(), 1);
         assert_eq!(m.evidence_by_kind("contract").len(), 0);

@@ -38,6 +38,11 @@ pub mod async_fs;
 // parse_confidence / strip_confidence_marker 这些公开 API（per reviewer I3）。
 pub(crate) mod chat;
 pub use chat::{parse_confidence, strip_confidence_marker, Citation, ChatEngine, ChatResponse};
+// chat_reliability — post-hoc deterministic evaluation agent for LLM chat
+// responses (citation grounding + factual consistency + hallucination flag).
+// Zero LLM cost, designed to run from a background tokio task after each
+// chat turn. See module-level docs for cost contract + verification doctrine.
+pub mod chat_reliability;
 pub mod chunker;
 pub mod context_compress;
 pub mod context_budget;
@@ -50,12 +55,12 @@ pub mod agents;
 pub mod mcp_client;
 pub mod case_metadata;
 pub mod plugin_encryption;
-pub mod device_binding;
-pub mod accounts_client;
 pub mod ui_runtime;
 pub mod agent_runner;
-pub mod license;
-pub mod license_cache;
+// 2026-05-20: license / license_cache / accounts_client / device_binding 模块
+// 被移到 attune-accounts (OSS reference SaaS) — live cloud-Bearer-token path
+// 不走 Ed25519 SignedLicense, 这些类型只有 attune-accounts 在用, 留在 attune-core
+// 是 footgun. 删了它们, 同时把 LicenseCache 启动时的死代码也从 state.rs 删掉.
 pub mod member_session;
 pub mod cloud_client;
 pub mod plugin_sync;
@@ -74,6 +79,7 @@ pub mod llm;
 pub mod llm_settings;
 pub mod ocr;  // v0.6.0-rc.3: pub for ai_stack status API
 pub mod asr;
+pub mod office_job_queue;
 pub mod parser;
 pub mod pii;
 pub mod platform;
@@ -100,6 +106,7 @@ pub mod tools;
 pub mod demo;
 pub mod query_rewrite;
 pub mod entity_graph;
+pub mod linker;
 pub mod skill_eval;
 pub mod report;
 pub mod reader;

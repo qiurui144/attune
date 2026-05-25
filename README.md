@@ -13,6 +13,7 @@ Attune is a generic personal AI knowledge base for **any individual knowledge wo
 ## 📥 Download
 
 Latest stable: **server v0.7.0** · **desktop v0.7.0**
+In flight: **v1.0.0-rc.2** (2026-05-22) — GA 2026-05-25. See [`rust/RELEASE.md`](rust/RELEASE.md#v100--私有-ai-知识伙伴-ga2026-05-25-计划上架) for v1.0 highlights.
 
 ### Desktop app (Web UI + system tray) — [desktop-v0.7.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.7.0)
 
@@ -34,6 +35,44 @@ Latest stable: **server v0.7.0** · **desktop v0.7.0**
 | Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.7.0/attune-windows-x86_64.zip) |
 
 > macOS Intel: build from source with `cargo build --release` (Apple Silicon already covers modern Mac users). SHA256 checksum file ships with each archive.
+
+### Package managers (recommended for v1.0+)
+
+From **v1.0.0** onwards, Attune ships through native package managers with auto-update wired in:
+
+```bash
+# Windows
+winget install qiurui144.Attune
+
+# Debian / Ubuntu
+curl -fsSL https://qiurui144.github.io/attune/attune-archive-keyring.gpg | sudo tee /usr/share/keyrings/attune-archive-keyring.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/attune-archive-keyring.gpg] https://qiurui144.github.io/attune/apt stable main" | sudo tee /etc/apt/sources.list.d/attune.list
+sudo apt update && sudo apt install attune
+
+# RHEL / Fedora / openSUSE
+sudo curl -fsSL -o /etc/yum.repos.d/attune.repo https://qiurui144.github.io/attune/rpm/attune.repo
+sudo dnf install attune
+```
+
+The Tauri desktop app also has a **built-in auto-updater** — once installed, new versions arrive in-app without you touching a CLI. Full guide and troubleshooting: [`docs/install-package-managers.md`](docs/install-package-managers.md).
+
+## v1.0 GA highlights (in flight, 2026-05-25) — 私有 AI 知识伙伴
+
+> v1.0 = v0.7 记忆护城河 + v0.7.1 办公助理 + 4 个 OSS deterministic / heuristic agent + 真 LLM verification gate。完整 changelog 见 [`rust/RELEASE.md`](rust/RELEASE.md#v100--私有-ai-知识伙伴-ga2026-05-25-计划上架)。
+
+- 📁 **Office Helper** — 5 OCR scene（document / receipt / table / card / id_card_cn / bank_card / business_license）+ 卡证校验位（Luhn / GB 11643 / GB 32100）+ whisper.cpp 异步会议转写（WS 进度推送）；CLI `attune ocr` / `attune transcribe`
+- 🧠 **4 OSS Agent**（all deterministic / heuristic，零 / 低 LLM 成本）
+  - `internal_knowledge_linker_agent` — 激活 `entity_graph` 死代码 → item-to-item 持久化链接
+  - `memory_consolidation_agent` — L2 → L3 promotion 算法 + Store helpers
+  - `chat_reliability_agent` — citation / contradiction / hallucination 后置评估，proptest 256 case invariants
+  - `self_evolving_skill_agent` — heuristic + LLM expansion 学习器，CJK Trad↔Simp 归一 + dedupe
+- 🧪 **真 LLM verification gate** — 4 OSS agent real-LLM holdout 4/4 PASS（qwen2.5:3b）
+- ✅ **Agent 验证铁律 ENFORCE 6 类下限**（per CLAUDE.md）— 每个 agent 必过 ≥10 真实 golden + ≥3 proptest + ≥5 boundary + ≥3 error + ≥1 E2E subprocess + 回归 fixture
+- 🔁 **CLI 子命令 smoke gate** — 29 subcommand 端到端冒烟（30/35 PASS）
+- 🌐 **跨仓 E2E** — accounts ↔ pluginhub ↔ attune-server LLM gateway ↔ Stripe webhook Playwright 全链通
+- 📦 **测试规模** — workspace lib tests **1145+** PASS / E2E run_all.sh 49 PASS 0 FAIL / clippy + fmt clean
+
+配套：**attune-pro v1.0.0** law-pro plugin pack（11 agent）+ **cloud-v2.2.0**（accounts / pluginhub / llm-gateway / proxy / monitor）。
 
 ## v0.7 sprint highlights (2026-05-15) — Memory Moat Phase A+B
 
@@ -278,6 +317,171 @@ Distributing skills to others: zip the folder as `<plugin-id>.attunepkg` — rec
 - **Cmd+K global palette**: jump between views, sessions, and items
 - **Stability**: connection state machine · retry matrix · WebSocket auto-reconnect
 - **Plugin architecture**: Ed25519-signed YAML plugins (community + commercial tracks)
+
+---
+
+## 用户形态与默认底座
+
+> 面向**非专业用户**（非应用开发者），默认开箱即用，不需要任何技术配置。唯一暴露给用户的"配置"是 plugin（开源标准 MCP / skill / agents）。
+> 产品 = **Tauri 桌面应用窗口**（Windows / Linux / 未来 macOS）。Web UI 仅用于服务器端 API 调试，**不是产品 UI**。
+
+### 默认底座（随二进制打包，hidden 不暴露）
+
+| 能力 | 默认引擎 | 用户可改？ |
+|------|---------|---------|
+| Embedding | bge-m3 | ❌ |
+| Reranker | bge-reranker-v2-m3 | ❌ |
+| OCR | PP-OCRv5 | ❌（但可选**场景预设**，不暴露引擎） |
+| ASR | whisper-large-v3-turbo（中文 WER 5-7%） | ❌ |
+| 数据目录 | `~/.local/share/attune`（Linux）/ `%APPDATA%\attune`（Win） | ❌ |
+
+### LLM 大模型 — 主云端 + 统一 OpenAI 兼容协议
+
+**所有 LLM 调用统一走 OpenAI 兼容协议**（`POST /v1/chat/completions`），不论后端是云端 OpenAI / DeepSeek / 智谱 / 通义 / Anthropic 兼容代理 / Ollama 本地。attune 不为每个 provider 写独立 SDK — 一个 OpenAI client 走天下。
+
+**默认不打包本地 LLM**：
+- 普通免费用户：自己配云端大模型 API key（在应用窗口设置面板）
+- 付费用户：云端 gateway 自动下发（用户不持 raw key）
+- 本地 LLM（可选）：Ollama 自行装（`docs/local-llm-setup.md`），同样走 OpenAI 兼容 endpoint `http://127.0.0.1:11434/v1`
+
+**多模态支持**（per OpenAI Vision API）：
+- 文件（PDF / DOCX / TXT / 代码）：attune 自动 OCR/解析 → 拼到 user message 文本
+- 图片（PNG / JPG / WEBP）：走 OpenAI vision `content array`，支持 base64 data URI 或 https URL，需模型支持 vision（gpt-4o / claude-3.5-sonnet / qwen-vl-max / ...）；非 vision 模型自动 drop + log warning
+
+### 用户形态
+
+| 形态 | 标识 | 网络要求 | LLM 来源 |
+|------|------|---------|---------|
+| **离线 self-host** | LoggedOut | 永不联网；仅 RAG / 搜索可用；LLM Chat 需配自己的云端 API 或自装本地 LLM (Ollama) | 自配（云 / 本地） |
+| **免费会员** | Free（云端账号） | 注册/登录 + Chat 时联网 | **自己配云端大模型 API key**（默认） |
+| **付费会员** | Paid（云端 license） | Chat 时联网；30 天 license 离线缓存 | **云端 gateway 自动**（Pro 高级模型，用户不持 raw key） |
+
+### 用户可配置项（应用窗口暴露的仅 6 项）
+
+| 项 | 离线 | 免费 | 付费 |
+|----|:----:|:----:|:----:|
+| **vault 主密码**（改密码） | ✏️ | ✏️ | ✏️ |
+| **本地知识库目录关联**（隐私自管） | ✏️ | ✏️ | ✏️ |
+| **云端大模型**（普通用户自己 API key） | ✏️ | ✏️ | 🔒（云端 gateway 下发） |
+| **plugin 装载**（社区 / 开发者本地） | ✏️ | ✏️ | 🔒（云端按 license 自动 sync） |
+| **plugin 卸载** | ✏️ | ✏️ | 🔒（防误删 pro plugin） |
+| **OCR 场景预设**（合同/票据/截图...） | ✏️ | ✏️ | ✏️ |
+
+**OCR 场景预设**：4 个内置 `contract`（合同/法律 300dpi）/ `receipt`（票据 200dpi）/ `screenshot`（截图 200dpi）/ `ancient`（古籍 600dpi）；用户可自建任意数量自定义 profile。CLI: `attune ocr-profile-{list,show,create,delete}`。
+
+### 形态切换
+
+- **离线 → 免费会员**：应用窗口 → 我的账号 → 登录/注册，写 `~/.config/npu-vault/license.json`（free license code），设备绑定 1:2 自动生效
+- **免费 → 付费**：应用窗口 → 我的账号 → 升级 → 跳到 accounts.attune.ai 付款；付款后云端自动 sync pro plugins + 云端大模型自动接入
+
+### 一键安装
+
+| 平台 | 包格式 | 内含 |
+|------|-------|------|
+| Linux | AppImage（单文件）+ deb（apt 包） | attune binary + 底座模型（embedding/reranker/OCR/ASR）+ poppler-utils |
+| Windows | MSI installer | 同上 + Windows runtime |
+| macOS（未来） | dmg + brew tap | 同上 |
+
+**不包含**：Ollama 本地 LLM（用户需用时自行装，见 `docs/local-llm-setup.md`）。默认 attune 走云端大模型，无需 Ollama 也能完整使用。
+
+---
+
+## 代码模块视角（开发者用）
+
+> 一份完整的代码功能清单，用于代码 review / 文档审计 / 测试覆盖核查。每条 feature 含 ID / 模块 / 测试覆盖。
+
+### attune-core 核心模块
+
+| ID | 模块 | 主要 API | 测试 |
+|----|------|---------|------|
+| **C-VAULT** | `vault.rs` | setup / unlock / lock / dek_db / change_password / 设备 secret | unit |
+| **C-CRYPTO** | `crypto.rs` | Argon2id 派生 / AES-256-GCM / 字段加密 / zeroize | unit |
+| **C-STORE** | `store.rs` | rusqlite + 字段级加密 / item CRUD / FTS5 队列 | unit + integration |
+| **C-CHUNKER** | `chunker.rs` | 滑窗分块 + 章节切割 | unit |
+| **C-PARSER** | `parser.rs` | PDF/DOCX/MD/code 解析 + bytes 入口 + `parse_file_with_profile` / `parse_bytes_with_profile`（传 OCR profile_id） | unit + integration |
+| **C-EMBED** | `embed.rs` | Ollama / ONNX / openai_compat embedding provider | unit + ignored e2e |
+| **C-LLM** | `llm.rs` | LlmProvider trait（chat / chat_with_history / **chat_multimodal**）+ OpenAI compat + Ollama + Attachment (Image/TextFile) | unit + 3 multimodal + ignored e2e |
+| **C-CHAT** | `chat.rs` | ChatEngine / Citation / confidence parse | unit + integration |
+| **C-CLUSTER** | `clusterer.rs` | HDBSCAN 聚类 | unit |
+| **C-CLASSIFIER** | `classifier.rs` | LLM 文档分类 | unit |
+| **C-INDEX** | `index.rs` | tantivy + usearch | unit + integration |
+| **C-OCR** | `ocr/` | PP-OCRv5 + pdftoppm + extract_text_from_pdf + `_with_dpi` | unit + ignored e2e |
+| **C-OCR-PROFILE** | `ocr/profile.rs` + `profile_registry.rs` | OcrProfile + 4 builtin + 持久化 CRUD + `dpi_for_profile` | 17 unit |
+| **C-ASR** | `asr.rs` | whisper.cpp subprocess | unit |
+| **C-WORKFLOW** | `workflow.rs` | YAML workflow + 事件触发 | unit + integration |
+
+### Plugin 协议层 (v2)
+
+| ID | 模块 | 功能 | 测试 |
+|----|------|------|------|
+| **P-LOADER** | `plugin_loader.rs` | PluginManifest v2（pricing/resources/registers_case_kinds/skills/agents/mcps/ui） | unit + integration |
+| **P-LOADER-ENC** | `plugin_loader::from_dir_with_key` | 自动识别 plugin.yaml.enc 解密装载 | integration |
+| **P-REGISTRY** | `plugin_registry.rs` | scan + 5 查询 API（skills/agents/mcps/case_kind/chat_trigger） | 19 unit + 10 generic_plugins_test |
+| **P-REG-CHAT** | `plugin_registry::match_chat_trigger` | regex/keywords 匹配 + priority + exclude_patterns | 5 unit |
+| **P-SIG** | `plugin_sig.rs` | Ed25519 keygen / sign / verify_loose / verify_strict / verify_with_key | 14 unit |
+| **P-ENC** | `plugin_encryption.rs` | Argon2id + AES-GCM yaml 加密 + trust↔pricing 联动校验 | 7 unit |
+| **P-DISPATCH** | `capability_dispatch.rs` | subprocess + timeout + exit_code (0/2/-1) | 8 unit |
+| **P-RUNNER** | `agent_runner.rs` | run_agent_subprocess + format_for_chat | 5 unit |
+| **P-SYNC** | `plugin_sync.rs` | 拉云端 entitled_plugins → download → verify → install | 7 unit |
+
+### Skill / Agent / MCP 三角色
+
+| ID | 模块 | 功能 | 测试 |
+|----|------|------|------|
+| **S-DATE** | `skills/parse_chinese_date.rs` | 中文日期 → ISO 8601（含中文数字大写） | 13 unit |
+| **S-ENTITY** | `skills/extract_entities.rs` | 人名 / 日期 / 金额 / 地点 / 组织（纯规则） | 11 unit |
+| **S-CLASS** | `skills/classify_chunk_kind.rs` | 8 类 chunk 分类 | 10 unit |
+| **S-SUM** | `skills/summarize_text.rs` | LLM 摘要 + summarize_document_set | 6 unit |
+| **A-CLASS** | `agents/document_classifier.rs` | 编排 3 skill → ClassifiedEvidence | 6 unit + e2e |
+| **A-TRAIT** | `agents/mod.rs::Agent` | trait + AgentOutput<T>（computation/audit_trail/red_lines/missing/followups/confidence） | unit |
+| **MCP-CLIENT** | `mcp_client.rs` | stdio JSON-RPC + 心跳 + 重启 + id 路由 + transaction lock | 7 unit |
+
+### 案件库 / 设备 / 会员 / License
+
+| ID | 模块 | 功能 | 测试 |
+|----|------|------|------|
+| **CASE-META** | `case_metadata.rs` | CaseMetadata + Party + classified_evidence 持久化 | 4 unit |
+| **DEV-BIND** | `device_binding.rs` | DeviceFingerprint + License + 1:2 状态机 | 5 unit |
+| **DEV-CLIENT** | `accounts_client.rs` | HTTP client → cloud accounts | 3 unit |
+| **CLOUD-CLIENT** | `cloud_client.rs` | login/signup/me/list_licenses（FastAPI）+ cookie 自动管理 | 4 unit |
+| **LICENSE** | `license.rs` | LicenseClaims + Ed25519 签名 + base64 code + 离线校验 | 9 unit |
+| **MEMBER** | `member_session.rs` | MemberState 3 档（LoggedOut/Free/Paid）+ SettingsLocks 6 字段 | 6 unit |
+| **LIC-CACHE** | `license_cache.rs` | ~/.config/npu-vault/license.json 持久化 (chmod 600) | 5 unit |
+
+### attune-server 路由 / attune-cli 子命令
+
+参见 `DEVELOP.md` 「路由清单」与 `attune-cli --help`。完整子命令包括 vault setup/unlock/lock/status、plugin-{keygen,sign,verify,encrypt,decrypt,install,list,uninstall}、login、sync-plugins、link-folder、ocr、ocr-profile-{list,show,create,delete}、deploy。
+
+### Tauri 桌面 app（apps/attune-desktop）
+
+| ID | 模块 | 功能 |
+|----|------|------|
+| **TAURI-EMBED** | `main.rs::spawn_embedded_server()` | 子进程启动 `attune-server-headless --port 18900`，主窗口打开 `http://127.0.0.1:18900` |
+| **TAURI-TRAY** | `main.rs` | 系统托盘图标 + 菜单（Show / Hide / Quit），单实例检测 |
+| **TAURI-DROP** | `main.rs` | FileDrop 事件 → emit `attune-file-drop` 到前端 WebView |
+| **TAURI-UPLOAD** | `main.rs::upload_dropped_paths` | Tauri command：读取本地文件路径 → multipart POST `/api/v1/upload`（reqwest 0.12 rustls-tls） |
+
+### 测试金字塔与日志栈
+
+```
+        E2E (Playwright + 真集成)
+       ─────────────────────────
+      Integration (跨模块, ~30 tests)
+     ─────────────────────────────────
+    Unit (单模块, ~734 tests in attune-core)
+   ──────────────────────────────────────
+  Smoke (CLI 冒烟 7, Server 冒烟 N)
+```
+
+技术栈基础库（开源高可用）：`tracing` + `tracing-subscriber`（结构化日志）/ `thiserror`（类型化错误）/ `axum` + `tower-http`（HTTP）/ `argon2` + `aes-gcm` + `ed25519-dalek`（audited cryptography）/ `rusqlite` bundled（跨平台 SQLite）/ `tantivy` + `tantivy-jieba`（全文搜索）/ `usearch`（HNSW 向量）。
+
+### 已知约束
+
+- attune (OSS) **不内置任何行业 agent** — `civil_loan_agent` 等在 attune-pro
+- paid plugin yaml 加密载入需要 `ATTUNE_PLUGIN_KEY` env（设备 license token）
+- OCR / LLM 走 subprocess / HTTP，不直接 link C++
+- Web UI vite bundle 不在本仓 build，dist/ checked in
+- 跨平台：Linux/Win/macOS — aarch64（K3 一体机）交叉编译
 
 ---
 

@@ -1,0 +1,41 @@
+id: 07-hallucinated-organization
+description: |
+  Response mentions an organization with "有限公司" suffix that is NOT in
+  any retrieved chunk. Single Organization hallucination flag, severity
+  High. No other signals.
+
+query: 这份白皮书是谁出的？
+response: |
+  这份白皮书的发布单位是 某虚构科技有限公司，发布时间未明确。
+
+chunks:
+  - item_id: whitepaper
+    chunk_text: |
+      白皮书系业内联合编写，主要内容涵盖分布式存储与计算平台的演进路径，
+      包含若干典型部署案例，并对比开源方案与商业方案的差异。
+
+expected:
+  citation_grounded: []
+  contradictions_count: 0
+  hallucination_kinds:
+    - organization
+  confidence_range: [0.925, 0.925]
+
+# DERIVATION:
+# Response entity: Organization "某虚构科技有限公司" (matches "X 有限公司"
+# generic suffix in entities.rs).
+# Chunk text union does not contain "某虚构科技有限公司".
+# → 1 Hallucination flag, kind=Organization, severity=High.
+#
+# No inline cites → no citation checks.
+# No date / money entities → no contradictions.
+#
+# Formula:
+#   citation_penalty      = 0.0
+#   contradiction_penalty = 0.0
+#   hallucination_penalty = min(1.0, 1/4) * 0.30 = 0.25 * 0.30 = 0.075
+#   confidence            = 1.0 - 0.075 = 0.925
+
+reviewer:
+  approved: true
+  name: ENGINEERING_FIXTURE

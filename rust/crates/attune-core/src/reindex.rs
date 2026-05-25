@@ -67,6 +67,9 @@ pub fn reindex_item(
     let vectors_deleted = vectors.delete_by_item_id(item_id)?;
     fulltext.delete_document(item_id)?;
     let queue_cleared = store.purge_embed_queue_for_item(item_id)?;
+    // QW-5: 旧内容的 chunk_summary 已按旧 chunk_hash key 失效，孤悬在表里没用。
+    // content 变了 chunk 边界也变了，按 chunk_hash 看下次也命不中。直接清。
+    let _ = store.delete_chunk_summaries_for_item(item_id);
     fulltext.add_document(item_id, title, content, source_type)?;
 
     let mut chunk_counter: usize = 0;
@@ -101,6 +104,9 @@ pub fn purge_item_indexes(
     let vectors_deleted = vectors.delete_by_item_id(item_id)?;
     fulltext.delete_document(item_id)?;
     let queue_cleared = store.purge_embed_queue_for_item(item_id)?;
+    // QW-5: 删 item 同步删摘要（`delete_item` 软删路径已删，但 reindex_queue
+    // 走 purge_item_indexes 时也要确保孤儿被清掉 — defense in depth）。
+    let _ = store.delete_chunk_summaries_for_item(item_id);
     Ok(ReindexStats { vectors_deleted, queue_cleared, chunks_enqueued: 0 })
 }
 
@@ -142,5 +148,38 @@ mod tests {
         let stats = purge_item_indexes(&store, &mut vec, &ft, &id).unwrap();
         assert_eq!(stats.queue_cleared, 1);
         assert_eq!(stats.chunks_enqueued, 0);
+    }
+
+    /// QW-5: reindex_item 应当清掉旧 chunk_summary（孤儿摘要清理）。
+    #[test]
+    fn reindex_purges_chunk_summaries() {
+        let (_t, store, mut vec, ft, dek) = setup();
+        let id = store
+            .insert_item(&dek, "title", "# H1\n\nbody", None, "note", None, None)
+            .unwrap();
+        store
+            .put_chunk_summary(&dek, "hash-a", "economical", &id, "test-model", "old summary", 100)
+            .unwrap();
+        assert_eq!(store.chunk_summary_count().unwrap(), 1);
+
+        reindex_item(&store, &mut vec, &ft, &id, "title", "# H1\n\nNEW", "note").unwrap();
+        assert_eq!(
+            store.chunk_summary_count().unwrap(),
+            0,
+            "reindex 后旧摘要应被清掉"
+        );
+    }
+
+    /// QW-5: purge_item_indexes 也要清 chunk_summary（删 item 路径 defense-in-depth）。
+    #[test]
+    fn purge_indexes_removes_chunk_summaries() {
+        let (_t, store, mut vec, ft, dek) = setup();
+        let id = store.insert_item(&dek, "t", "body", None, "note", None, None).unwrap();
+        store
+            .put_chunk_summary(&dek, "hash-b", "economical", &id, "m", "s", 50)
+            .unwrap();
+        assert_eq!(store.chunk_summary_count().unwrap(), 1);
+        purge_item_indexes(&store, &mut vec, &ft, &id).unwrap();
+        assert_eq!(store.chunk_summary_count().unwrap(), 0);
     }
 }

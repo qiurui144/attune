@@ -102,6 +102,19 @@ impl Store {
             .execute("DELETE FROM web_search_cache", [])?;
         Ok(n)
     }
+
+    /// QW-4 (storage cleanup): GC 已过期行（`created_at_secs + ttl_secs < now`）。
+    ///
+    /// 老 `get_web_search_cached` 是惰性 GC（命中过期行返回 None 但不删行），
+    /// 长尾未再访问的 query 会一直留在表里。后台 cleanup worker 周期调本函数
+    /// 把硬过期的行清掉。返回删除行数。
+    pub fn gc_expired_web_search_cache(&self, now_secs: i64) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM web_search_cache WHERE created_at_secs + ttl_secs < ?1",
+            params![now_secs],
+        )?;
+        Ok(n)
+    }
 }
 
 #[cfg(test)]
@@ -186,7 +199,7 @@ mod tests {
             .put_web_search_cached(
                 &dek,
                 "query B",
-                &vec![WebSearchResult {
+                &[WebSearchResult {
                     title: "B 专属".into(),
                     url: "https://b.com".into(),
                     snippet: "different".into(),
@@ -244,6 +257,46 @@ mod tests {
             .unwrap();
         let raw_str = String::from_utf8_lossy(&raw);
         assert!(!raw_str.contains("Rust ownership"), "标题应加密，不出现在原始 blob 中");
+    }
+
+    #[test]
+    fn gc_expired_only_deletes_hard_expired_rows() {
+        // QW-4: 过期行（created_at_secs + ttl_secs < now_secs）被删；
+        // 未过期行保留。
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+
+        // 入 3 条：
+        //   "a": created=1000, ttl=100 → 过期窗 1000..1100
+        //   "b": created=2000, ttl=100 → 过期窗 2000..2100
+        //   "c": created=3000, ttl=100 → 过期窗 3000..3100
+        store
+            .put_web_search_cached(&dek, "a", &sample_results(), 100, 1000)
+            .unwrap();
+        store
+            .put_web_search_cached(&dek, "b", &sample_results(), 100, 2000)
+            .unwrap();
+        store
+            .put_web_search_cached(&dek, "c", &sample_results(), 100, 3000)
+            .unwrap();
+        assert_eq!(store.web_search_cache_count().unwrap(), 3);
+
+        // 在 t=2500：a (1100 <2500) 过期，b (2100 <2500) 过期，c (3100 ≥ 2500) 未过期
+        let removed = store.gc_expired_web_search_cache(2500).unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.web_search_cache_count().unwrap(), 1);
+
+        // 验证留下的是 "c"
+        assert!(store
+            .get_web_search_cached(&dek, "c", 3050)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn gc_expired_empty_table_returns_zero() {
+        let store = Store::open_memory().unwrap();
+        assert_eq!(store.gc_expired_web_search_cache(99999).unwrap(), 0);
     }
 
     #[test]

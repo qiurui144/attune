@@ -35,6 +35,66 @@ fn is_safe_http_url(s: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
+/// SettingsLocks 校验违规 (体内字段级粒度)。
+pub(crate) struct LockViolation {
+    pub settings_key: &'static str,
+    pub lock_field: &'static str,
+}
+
+/// 按 SettingsLocks + body 内容判断是否触犯会员锁定字段。
+///
+/// 字段映射: settings JSON key → SettingsLocks field name + (可选)子字段白名单。
+/// - 子字段 = `None`: 整对象触发 lock(老行为)
+/// - 子字段 = `Some(&[...])`: **仅当 body 改了任一列出的子字段时触发 lock**(粒度细化)
+///
+/// Bug-2 fix (spec 2026-05-24-deepseek-via-new-api-gateway-e2e.md):
+/// `cloud_llm` 锁不再 cover 整个 `llm` 对象。付费用户应能换 `model`(channel 内有多个
+/// 模型可选);仅锁 `endpoint` / `api_key` / `provider`(gateway URL + token 由 cloud
+/// 下发,provider 若被切走会绕过 gateway 计量)。
+pub(crate) fn check_settings_locks(
+    body: &serde_json::Value,
+    locks: &attune_core::member_session::SettingsLocks,
+) -> Option<LockViolation> {
+    let body_obj = body.as_object()?;
+
+    type SubFields = Option<&'static [&'static str]>;
+    const LLM_LOCKED_SUBFIELDS: SubFields = Some(&["endpoint", "api_key", "provider"]);
+    let lock_map: &[(&str, SubFields, &str)] = &[
+        // `llm`: cloud_llm 锁仅 cover endpoint/api_key/provider;model 用户可改
+        ("llm", LLM_LOCKED_SUBFIELDS, "cloud_llm"),
+        // `pluginhub`: 整对象锁(老行为)
+        ("pluginhub", None, "plugin_install"),
+        // `ocr`: 整对象锁(老行为)
+        ("ocr", None, "ocr_profiles"),
+    ];
+
+    for (settings_key, sub_fields, lock_field) in lock_map {
+        if !body_obj.contains_key(*settings_key) {
+            continue;
+        }
+        if locks.can_edit(lock_field) {
+            continue;
+        }
+        // lock_field 是 Locked — 看是否真的触碰了 locked sub-fields。
+        let touches_locked = match sub_fields {
+            None => true, // 整对象锁
+            Some(allowed_locked) => body_obj
+                .get(*settings_key)
+                .and_then(|v| v.as_object())
+                .map(|sub_obj| sub_obj.keys().any(|k| allowed_locked.contains(&k.as_str())))
+                // body 给的不是 object(异常输入) → 保守拒绝
+                .unwrap_or(true),
+        };
+        if touches_locked {
+            return Some(LockViolation {
+                settings_key,
+                lock_field,
+            });
+        }
+    }
+    None
+}
+
 /// 把 settings JSON 中的 `llm.api_key` 明文替换为 `null`，同时加 `llm.api_key_set` bool。
 /// 用于 GET 响应 —— 前端永远拿不到明文 key。
 fn redact_api_key(json: &mut serde_json::Value) {
@@ -125,30 +185,18 @@ pub async fn update_settings(
     }
 
     // SettingsLocks enforce — 会员锁定字段拒绝更新.
-    // 字段映射: settings JSON key → SettingsLocks field name
     let member_state = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let locks = attune_core::member_session::SettingsLocks::for_state(&member_state);
-    if let Some(body_obj) = body.as_object() {
-        // 仅 enforce 用户在应用窗口能改的字段; 底座配置 (embedding/ocr/data_dir 等) 由
-        // 二进制打包默认装配, 不接受 PATCH (server 不在此 lock_map enforce).
-        let lock_map: &[(&str, &str)] = &[
-            ("llm", "cloud_llm"),               // 普通用户改云端 LLM, 付费锁
-            ("pluginhub", "plugin_install"),    // pluginhub 配置变 → plugin_install lock
-            ("ocr", "ocr_profiles"),            // ocr.active_profile 改受 ocr_profiles lock
-        ];
-        for (settings_key, lock_field) in lock_map {
-            if body_obj.contains_key(*settings_key) && !locks.can_edit(lock_field) {
-                return Err((
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({
-                        "error": "setting_locked_by_member_tier",
-                        "field": settings_key,
-                        "lock_reason": format!("'{lock_field}' is locked under current membership tier"),
-                        "hint": "请升级会员或在「设置 → 会员」查看锁定矩阵",
-                    })),
-                ));
-            }
-        }
+    if let Some(violation) = check_settings_locks(&body, &locks) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "setting_locked_by_member_tier",
+                "field": violation.settings_key,
+                "lock_reason": format!("'{}' is locked under current membership tier", violation.lock_field),
+                "hint": "请升级会员或在「设置 → 会员」查看锁定矩阵",
+            })),
+        ));
     }
 
     // 嵌套对象键：这些字段的子字段支持 deep merge（客户端省略某子字段时保留原值）。
@@ -367,5 +415,95 @@ mod tests {
             assert_eq!(laptop.get(key), k3.get(key),
                 "{} should be identical across form factors (only LLM differs)", key);
         }
+    }
+
+    // ── Bug-2 fix: SettingsLocks 粒度 (spec 2026-05-24) ─────────────────────
+
+    use attune_core::member_session::{MemberState, SettingsLocks};
+
+    fn paid_locks() -> SettingsLocks {
+        SettingsLocks::for_state(&MemberState::Paid {
+            account_id: "u1".into(),
+            license_id: "lic-1".into(),
+            llm_quota_remaining: 0,
+        })
+    }
+
+    fn free_locks() -> SettingsLocks {
+        SettingsLocks::for_state(&MemberState::Free { account_id: "u1".into() })
+    }
+
+    #[test]
+    fn paid_user_can_change_llm_model() {
+        // Bug-2 核心:付费会员只改 model(channel 内 alias),应放行,不触发 cloud_llm 锁
+        let body = serde_json::json!({"llm": {"model": "deepseek-v4-pro"}});
+        assert!(check_settings_locks(&body, &paid_locks()).is_none(),
+            "paid user should be able to swap model under same channel");
+    }
+
+    #[test]
+    fn paid_user_cannot_change_llm_endpoint() {
+        // gateway URL 由 cloud 下发,用户不能改 (绕开 gateway 计量 / 路由)
+        let body = serde_json::json!({"llm": {"endpoint": "https://api.openai.com/v1"}});
+        let v = check_settings_locks(&body, &paid_locks()).expect("must violate");
+        assert_eq!(v.settings_key, "llm");
+        assert_eq!(v.lock_field, "cloud_llm");
+    }
+
+    #[test]
+    fn paid_user_cannot_change_llm_api_key() {
+        // gateway token 由 cloud 下发
+        let body = serde_json::json!({"llm": {"api_key": "sk-user-tries-to-swap"}});
+        assert!(check_settings_locks(&body, &paid_locks()).is_some());
+    }
+
+    #[test]
+    fn paid_user_cannot_change_llm_provider() {
+        // 用户切换 provider(如 ollama) 会绕过 gateway → 锁
+        let body = serde_json::json!({"llm": {"provider": "ollama"}});
+        assert!(check_settings_locks(&body, &paid_locks()).is_some());
+    }
+
+    #[test]
+    fn paid_user_partial_patch_with_only_model_and_query_rewrite() {
+        // 混合 patch: 改 model + 改 search 子配置 → 只看 lock 字段,放行
+        let body = serde_json::json!({
+            "llm": {"model": "deepseek-v4-flash"},
+            "theme": "dark",
+        });
+        assert!(check_settings_locks(&body, &paid_locks()).is_none());
+    }
+
+    #[test]
+    fn paid_user_patch_with_model_plus_endpoint_still_locks() {
+        // 即便混入了允许的 model,只要触碰任一 locked sub-field,就拒绝
+        let body = serde_json::json!({"llm": {"model": "x", "endpoint": "https://leaky"}});
+        assert!(check_settings_locks(&body, &paid_locks()).is_some());
+    }
+
+    #[test]
+    fn paid_user_llm_non_object_body_rejected() {
+        // 防御: body.llm 不是 object → 保守拒绝(否则可绕过 sub-field 检查)
+        let body = serde_json::json!({"llm": "garbage"});
+        assert!(check_settings_locks(&body, &paid_locks()).is_some());
+    }
+
+    #[test]
+    fn free_user_can_change_anything_in_llm() {
+        // 免费用户没有 cloud_llm 锁,endpoint/api_key/model 都可改
+        for k in ["model", "endpoint", "api_key", "provider"] {
+            let body = serde_json::json!({"llm": {k: "anything"}});
+            assert!(check_settings_locks(&body, &free_locks()).is_none(),
+                "free user should change llm.{}", k);
+        }
+    }
+
+    #[test]
+    fn paid_user_pluginhub_still_whole_object_lock_when_locked() {
+        // pluginhub 是整对象锁;但 P0 fix 后付费会员 plugin_install=Editable
+        // → 这里应该放行 (per member_session.rs::paid_locks_cloud_llm_and_plugin_uninstall_only)
+        let body = serde_json::json!({"pluginhub": {"url": "https://hub.attune.ai"}});
+        assert!(check_settings_locks(&body, &paid_locks()).is_none(),
+            "付费用户应能改 pluginhub URL(plugin_install 解锁)");
     }
 }

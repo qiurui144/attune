@@ -1,6 +1,6 @@
 # K3 AI 推理服务
 
-四场景 HTTP API，面向 attune/lawcontrol 产品。
+四场景 HTTP API，面向 attune/attune-enterprise 产品。
 
 ## 服务地址
 

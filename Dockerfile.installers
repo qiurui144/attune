@@ -1,0 +1,24 @@
+# Dockerfile.installers — attune desktop installer bundle image
+#
+# 用途: 将所有平台 installer 打包成 OCI image, 发布到 ghcr.io.
+# 企业 IT / air-gap 部署者可通过 docker pull + cp 取得任意平台 installer,
+# 无需去 GitHub Releases 页面手工下载.
+#
+# Usage:
+#   docker pull ghcr.io/qiurui144/attune-desktop-installers:v1.0.0
+#   docker run --rm -v "$PWD:/out" ghcr.io/qiurui144/attune-desktop-installers:v1.0.0 \
+#     cp /installers/Attune_1.0.0_amd64.deb /out/
+#
+# Build (CI only — installers/ must be pre-assembled):
+#   docker build -f Dockerfile.installers -t attune-desktop-installers:local .
+
+FROM scratch
+
+# Copy pre-assembled installer directory (populated by desktop-release.yml)
+COPY installers/ /installers/
+
+LABEL org.opencontainers.image.title="Attune Desktop Installers"
+LABEL org.opencontainers.image.description="All-platform desktop install packages: .deb .rpm .AppImage .exe .msi"
+LABEL org.opencontainers.image.url="https://github.com/qiurui144/attune"
+LABEL org.opencontainers.image.source="https://github.com/qiurui144/attune"
+LABEL org.opencontainers.image.licenses="Apache-2.0"

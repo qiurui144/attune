@@ -13,6 +13,7 @@ env:
 # 导致 "Resource not accessible by integration" (403). 历史 rc.3 fail 修.
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build:
@@ -27,6 +28,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             # nsis + msi: 历史 desktop-v0.6.0 / v0.6.1 都含 MSI (企业部署
             # 场景需要), rc.4 暂只产 NSIS = regression. 加回 msi.
+            # 注: Tauri auto-updater 仅支持 NSIS, MSI 不签 *.sig (仅手动下载).
             bundles: nsis,msi
     runs-on: ${{ matrix.os }}
     steps:
@@ -54,9 +56,16 @@ jobs:
       - name: Install tauri-cli
         run: cargo install --locked tauri-cli --version "^2.0"
 
+      # Tauri 在 build 时检测到 TAURI_SIGNING_PRIVATE_KEY 即自动对 updater-eligible
+      # bundle (Linux AppImage / Windows NSIS) 签名,产生 *.sig 同名文件.
+      # 未设 secret 时跳过签名(本地 dev 也无需配置).
       - name: Build Tauri bundles
         working-directory: apps/attune-desktop
-        run: cargo tauri build --bundles ${{ matrix.bundles }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          BUNDLES: ${{ matrix.bundles }}
+        run: cargo tauri build --bundles "$BUNDLES"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -67,6 +76,7 @@ jobs:
 
       # 自动创建/更新 GitHub Release 并上传 installer 二进制. 不再依赖手工
       # gh release create (历史 desktop-v0.6.0 / desktop-v0.6.1 都是手工补的).
+      # *.sig 也一起上传 — auto-updater 需要它们与 .AppImage / .exe 同 URL 路径下取.
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/desktop-v')
         uses: softprops/action-gh-release@v2
@@ -77,7 +87,157 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
           files: |
             apps/attune-desktop/target/release/bundle/nsis/*.exe
+            apps/attune-desktop/target/release/bundle/nsis/*.sig
             apps/attune-desktop/target/release/bundle/msi/*.msi
             apps/attune-desktop/target/release/bundle/deb/*.deb
             apps/attune-desktop/target/release/bundle/appimage/*.AppImage
+            apps/attune-desktop/target/release/bundle/appimage/*.sig
             apps/attune-desktop/target/release/bundle/rpm/*.rpm
+
+  # 在所有 build job 完成后,聚合各平台 *.sig 并生成 latest.json manifest,
+  # 上传到同一个 GitHub Release.客户端的 tauri-plugin-updater 拉取这个 manifest
+  # 做版本对比 + URL 解析.
+  latest-json:
+    needs: build
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          pattern: attune-desktop-*
+          merge-multiple: false
+
+      # actions/download-artifact 把每个 artifact 解包到独立子目录,
+      # 我们把它们汇总到一个 bundle/ 结构里供 gen-latest-json.sh 扫描.
+      - name: Assemble bundle root
+        run: |
+          set -euxo pipefail
+          mkdir -p bundle/appimage bundle/deb bundle/rpm bundle/nsis bundle/msi
+          # Linux artifact
+          if [ -d artifacts/attune-desktop-x86_64-unknown-linux-gnu ]; then
+            find artifacts/attune-desktop-x86_64-unknown-linux-gnu -type f -name "*.AppImage*" -exec cp -v {} bundle/appimage/ \;
+            find artifacts/attune-desktop-x86_64-unknown-linux-gnu -type f -name "*.deb" -exec cp -v {} bundle/deb/ \;
+            find artifacts/attune-desktop-x86_64-unknown-linux-gnu -type f -name "*.rpm" -exec cp -v {} bundle/rpm/ \;
+          fi
+          # Windows artifact
+          if [ -d artifacts/attune-desktop-x86_64-pc-windows-msvc ]; then
+            find artifacts/attune-desktop-x86_64-pc-windows-msvc -type f \( -name "*.exe" -o -name "*.exe.sig" \) -exec cp -v {} bundle/nsis/ \;
+            find artifacts/attune-desktop-x86_64-pc-windows-msvc -type f -name "*.msi" -exec cp -v {} bundle/msi/ \;
+          fi
+          ls -R bundle/
+
+      - name: Extract version from tag
+        id: version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          # TAG_NAME 来源:GitHub 拒绝非法 tag 字符,这里只是去前缀.
+          version="${TAG_NAME#desktop-v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Generate latest.json
+        env:
+          GITHUB_REPO_OWNER: ${{ github.repository_owner }}
+          GITHUB_REPO_NAME: ${{ github.event.repository.name }}
+          GITHUB_TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./scripts/gen-latest-json.sh "$VERSION" ./bundle > latest.json
+          echo "--- latest.json ---"
+          cat latest.json
+
+      - name: Upload latest.json to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Attune Desktop ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: latest.json
+
+  # 所有平台 installer 打包成 OCI image 推送到 ghcr.io/qiurui144/attune-desktop-installers.
+  # 企业 IT / air-gap 部署者可 docker pull 取得任意平台 installer,无需去 GitHub Releases.
+  package-installers:
+    needs: build
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          pattern: attune-desktop-*
+          merge-multiple: false
+
+      # 把各平台产物平铺到 installers/ 目录供 Dockerfile.installers COPY.
+      - name: Assemble installers directory
+        run: |
+          set -euxo pipefail
+          mkdir -p installers
+          # Linux: deb / rpm / AppImage (含 *.sig)
+          if [ -d artifacts/attune-desktop-x86_64-unknown-linux-gnu ]; then
+            find artifacts/attune-desktop-x86_64-unknown-linux-gnu \
+              -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" \) \
+              -exec cp -v {} installers/ \;
+          fi
+          # Windows: NSIS exe (含 *.sig) + MSI
+          if [ -d artifacts/attune-desktop-x86_64-pc-windows-msvc ]; then
+            find artifacts/attune-desktop-x86_64-pc-windows-msvc \
+              -type f \( -name "*.exe" -o -name "*.msi" \) \
+              -exec cp -v {} installers/ \;
+          fi
+          echo "--- installers/ ---"
+          ls -lh installers/
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version tag
+        id: version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          version="${TAG_NAME#desktop-v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/attune-desktop-installers
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=Attune Desktop Installers
+            org.opencontainers.image.description=All-platform desktop install packages: .deb .rpm .AppImage .exe .msi
+            org.opencontainers.image.url=https://github.com/qiurui144/attune
+            org.opencontainers.image.source=https://github.com/qiurui144/attune
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build and push installer image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.installers
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # scratch image 无法跨 arch,仅 linux/amd64 即可 (内容是文件,非二进制)
+          platforms: linux/amd64
+
+      - name: Image digest
+        env:
+          DIGEST: ${{ steps.meta.outputs.digest }}
+        run: echo "Pushed ghcr.io/${{ github.repository_owner }}/attune-desktop-installers digest ${DIGEST}"

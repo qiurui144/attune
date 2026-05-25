@@ -1,0 +1,25 @@
+# Sentinel / regression fixture — 防 #47 退化.
+# 该 case 触发了一组真实历史 bug:
+#   bug-A: classify_chunk_kind 在 chat 表情符号 (emoji [图片]/[表情]) 上不识别 chat
+#   bug-B: extract_entities 对中文方括号 '【】' 不抽地点 (历史只支持半角)
+# 任一 bug 重新出现 → 测试 fail, surface 退化点.
+id: 11-sentinel-regression
+description: 历史 bug 防退化 — chat emoji + 中文括号地点
+inputs:
+  - file: 微信-带图片.txt
+    text: |
+      [微信] 张三 (2023-01-15):  这是借条 [图片]
+      [微信] 李四 (2023-01-15):  好的 [表情] 收到了
+      地址: 【北京市海淀区中关村大街 1 号】
+expected:
+  classified_count: 1
+  per_doc:
+    - file: 微信-带图片.txt
+      kind: chat
+      confidence_min: 0.1
+      keywords_must_contain:
+        - 微信
+  red_lines_count: 0
+reviewer:
+  approved: true
+  notes: bug-A 防退化 — emoji 不污染 chat 识别

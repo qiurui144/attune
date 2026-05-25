@@ -556,7 +556,7 @@ mod tests {
         let content = "fn foo() {\n    println!(\"foo\");\n}\n\npub fn bar() {\n    helper();\n}";
         let secs = extract_sections_with_path(content);
         // 至少 2 sections（fn foo, pub fn bar），保持之前测试期望
-        assert!(secs.len() >= 1);
+        assert!(!secs.is_empty());
     }
 
     #[test]

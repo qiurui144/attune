@@ -67,11 +67,17 @@ pub async fn vault_setup(
     };
     // Initialize search engines after vault setup (vault mutex released)
     state.init_search_engines();
+    // Bug-C: vault unlock 后立即触发 reload_llm,确保 settings 中已有的 llm config
+    // 在 server restart 后第一次 chat 即可工作(不再依赖 member-login gateway_should_apply
+    // 走 reload_llm 分支)。init_search_engines 内部 compare_exchange 保证 LLM 也只 init 一次;
+    // 但 server 跨次重启后第二次 unlock 不会重跑 init_search_engines 的 LLM 块,故此处显式 reload。
+    state.reload_llm();
     crate::state::AppState::start_classify_worker(state.clone());
     crate::state::AppState::start_rescan_worker(state.clone());
     crate::state::AppState::start_reindex_worker(state.clone());
     crate::state::AppState::start_webdav_sync_worker(state.clone());
     crate::state::AppState::start_email_sync_worker(state.clone());
+    crate::state::AppState::start_rss_sync_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
     Ok(Json(serde_json::json!({
@@ -94,11 +100,15 @@ pub async fn vault_unlock(
     };
     // Initialize search engines after vault unlock (vault mutex released)
     state.init_search_engines();
+    // Bug-C: per setup 同步注释,unlock 后强制 reload_llm,杜绝
+    // "server restart → unlock → chat 503" 的 P3。
+    state.reload_llm();
     crate::state::AppState::start_classify_worker(state.clone());
     crate::state::AppState::start_rescan_worker(state.clone());
     crate::state::AppState::start_reindex_worker(state.clone());
     crate::state::AppState::start_webdav_sync_worker(state.clone());
     crate::state::AppState::start_email_sync_worker(state.clone());
+    crate::state::AppState::start_rss_sync_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
     Ok(Json(serde_json::json!({"status": "ok", "token": token})))
@@ -200,11 +210,14 @@ pub async fn vault_reset_with_recovery_key(
     };
 
     state.init_search_engines();
+    // Bug-C: reset 后也走 unlock 同样路径,显式 reload_llm。
+    state.reload_llm();
     crate::state::AppState::start_classify_worker(state.clone());
     crate::state::AppState::start_rescan_worker(state.clone());
     crate::state::AppState::start_reindex_worker(state.clone());
     crate::state::AppState::start_webdav_sync_worker(state.clone());
     crate::state::AppState::start_email_sync_worker(state.clone());
+    crate::state::AppState::start_rss_sync_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
 

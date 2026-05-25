@@ -1,0 +1,27 @@
+id: 04-stopwords-stripped
+description: |
+  Target "how do I deploy nginx" — stopwords {how, do, of, ...} are stripped.
+  ASCII-only tokenizer also drops single-letter "i" because we require ≥2 chars.
+  So target_tokens = {deploy, nginx}.
+  Co-occurring buckets:
+  - "how do I configure nginx" shares "nginx" → diff = {configure}; "how"/"do"/"i" filtered.
+  - "what is nginx config" shares "nginx" → diff = {config}; "what"/"is" filtered.
+  Sort: both at count 3, lex asc → [config, configure].
+signals:
+  - query: "how do I deploy nginx"
+    count: 3
+  - query: "how do I configure nginx"
+    count: 3
+  - query: "what is nginx config"
+    count: 3
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 3
+  contains_records:
+    - query_pattern: "how do i deploy nginx"
+      expansions: [config, configure]
+      generated_by: heuristic
+reviewer:
+  approved: true

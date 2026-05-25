@@ -43,7 +43,17 @@ pub fn gateway_should_apply(settings: &Value) -> bool {
 /// 仅在 [`gateway_should_apply`] 返回 `true` 时由调用方调用。
 /// 函数本身无条件覆写 `provider`/`endpoint`/`api_key`；保留 `model` 等其它字段.
 /// 返回新的 JSON（纯函数，不做 IO）.
-pub fn merge_gateway_into_settings(mut settings: Value, endpoint: &str, token: &str) -> Value {
+///
+/// **默认模型语义**(per spec 2026-05-24-deepseek-via-new-api-gateway-e2e.md Bug-1
+/// 修复 Option C):若 `default_model` 为 `Some(...)` 且现有 `llm.model` 缺失 / null /
+/// 空字符串,则把 `default_model` 写入 `llm.model`。已有用户配置 model 时不覆盖
+/// (用户偏好优先)。`None` (老版 cloud 不返回此字段) → 不动 model 字段,保持向后兼容。
+pub fn merge_gateway_into_settings(
+    mut settings: Value,
+    endpoint: &str,
+    token: &str,
+    default_model: Option<&str>,
+) -> Value {
     if !settings.is_object() {
         settings = json!({});
     }
@@ -58,6 +68,21 @@ pub fn merge_gateway_into_settings(mut settings: Value, endpoint: &str, token: &
             llm_obj.insert("provider".into(), json!("openai_compat"));
             llm_obj.insert("endpoint".into(), json!(endpoint));
             llm_obj.insert("api_key".into(), json!(token));
+            // Bug-1 fix: 只在用户未配置 model 时写入 cloud 默认 model。
+            // "未配置" 判定与 gateway_should_apply 内的字段判定一致 — None / null / 空字符串。
+            if let Some(dm) = default_model.filter(|s| !s.is_empty()) {
+                let model_empty = llm_obj
+                    .get("model")
+                    .map(|v| match v {
+                        Value::Null => true,
+                        Value::String(s) => s.is_empty(),
+                        _ => false,
+                    })
+                    .unwrap_or(true);
+                if model_empty {
+                    llm_obj.insert("model".into(), json!(dm));
+                }
+            }
         }
     }
     settings
@@ -71,7 +96,7 @@ mod tests {
 
     #[test]
     fn merges_into_empty_settings() {
-        let out = merge_gateway_into_settings(json!({}), "https://gw/v1", "sk-abc");
+        let out = merge_gateway_into_settings(json!({}), "https://gw/v1", "sk-abc", None);
         assert_eq!(out["llm"]["provider"], "openai_compat");
         assert_eq!(out["llm"]["endpoint"], "https://gw/v1");
         assert_eq!(out["llm"]["api_key"], "sk-abc");
@@ -80,7 +105,7 @@ mod tests {
     #[test]
     fn preserves_existing_model_field() {
         let existing = json!({"llm": {"model": "gpt-4o", "provider": "ollama"}, "search": {}});
-        let out = merge_gateway_into_settings(existing, "https://gw/v1", "sk-xyz");
+        let out = merge_gateway_into_settings(existing, "https://gw/v1", "sk-xyz", None);
         assert_eq!(out["llm"]["model"], "gpt-4o");           // kept
         assert_eq!(out["llm"]["provider"], "openai_compat"); // overwritten
         assert_eq!(out["llm"]["api_key"], "sk-xyz");
@@ -90,8 +115,81 @@ mod tests {
     #[test]
     fn replaces_non_object_llm() {
         let weird = json!({"llm": "garbage"});
-        let out = merge_gateway_into_settings(weird, "https://gw/v1", "sk-1");
+        let out = merge_gateway_into_settings(weird, "https://gw/v1", "sk-1", None);
         assert_eq!(out["llm"]["endpoint"], "https://gw/v1");
+    }
+
+    // ── Bug-1 fix: default_model handling (spec 2026-05-24) ─────────────────
+
+    #[test]
+    fn applies_default_model_when_llm_absent() {
+        // fresh vault, no llm section → default_model 写入 llm.model
+        let out = merge_gateway_into_settings(
+            json!({}),
+            "https://gw/v1",
+            "sk-abc",
+            Some("deepseek-v4-flash"),
+        );
+        assert_eq!(out["llm"]["model"], "deepseek-v4-flash");
+        assert_eq!(out["llm"]["endpoint"], "https://gw/v1");
+        assert_eq!(out["llm"]["api_key"], "sk-abc");
+    }
+
+    #[test]
+    fn applies_default_model_when_existing_model_null() {
+        // 老 vault meta: llm.model=null → 视为未配置,写入 default
+        let existing = json!({"llm": {"model": null, "api_key": "", "endpoint": ""}});
+        let out = merge_gateway_into_settings(
+            existing,
+            "https://gw/v1",
+            "sk-1",
+            Some("deepseek-v4-flash"),
+        );
+        assert_eq!(out["llm"]["model"], "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn applies_default_model_when_existing_model_empty_string() {
+        let existing = json!({"llm": {"model": "", "api_key": "", "endpoint": ""}});
+        let out = merge_gateway_into_settings(
+            existing,
+            "https://gw/v1",
+            "sk-1",
+            Some("deepseek-v4-flash"),
+        );
+        assert_eq!(out["llm"]["model"], "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn does_not_override_user_configured_model() {
+        // 用户手挑了 model — gateway 默认 model 不应覆盖。
+        // (注意: 这条 path 实际不会触发,因 gateway_should_apply 会因 endpoint/key 为空才走进来;
+        // 但函数本身要做到"用户已选 model 就保留",防回归。)
+        let existing = json!({"llm": {"model": "qwen2.5:3b"}});
+        let out = merge_gateway_into_settings(
+            existing,
+            "https://gw/v1",
+            "sk-1",
+            Some("deepseek-v4-flash"),
+        );
+        assert_eq!(out["llm"]["model"], "qwen2.5:3b");
+    }
+
+    #[test]
+    fn skips_default_model_when_cloud_returns_none() {
+        // 老版 accounts server 不返回 gateway_default_model → None,
+        // attune-server 不写 model 字段,保持向后兼容(行为同旧版)。
+        let out = merge_gateway_into_settings(json!({}), "https://gw/v1", "sk-abc", None);
+        assert!(out["llm"].get("model").is_none(),
+            "None default_model 时不应写入 model 字段");
+    }
+
+    #[test]
+    fn skips_default_model_when_cloud_returns_empty_string() {
+        // 防御: cloud 返回空串 "" 视同 None,不写入。
+        let out = merge_gateway_into_settings(json!({}), "https://gw/v1", "sk-abc", Some(""));
+        assert!(out["llm"].get("model").is_none(),
+            "空串 default_model 不应被写入(防 model='' 触发 new-api 400)");
     }
 
     // ── gateway_should_apply ─────────────────────────────────────────────────

@@ -1,0 +1,54 @@
+# Dockerfile.cli — attune CLI (headless, no server)
+# Binary: attune (attune-cli crate)
+# Usage: docker build -f Dockerfile.cli -t attune-cli:local .
+
+# ── Stage 1: builder ──────────────────────────────────────────────────────────
+# ubuntu:24.04 (glibc 2.39) matches ORT prebuilt binaries (glibc 2.38+)
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    build-essential curl pkg-config libssl-dev cmake ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Rust 1.91 (minimum: kreuzberg-paddle-ocr requires 1.91)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain 1.91 --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /src
+
+COPY rust/Cargo.toml rust/Cargo.lock ./rust/
+COPY rust/crates ./rust/crates
+
+WORKDIR /src/rust
+RUN cargo build --release -p attune-cli
+
+# Collect all needed files into /dist (binary + any ORT .so from copy-dylibs)
+RUN mkdir -p /dist/lib && \
+    cp target/release/attune /dist/ && \
+    find target/release -maxdepth 1 -name 'libonnxruntime*.so*' -exec cp {} /dist/lib/ \; ; \
+    true
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+FROM ubuntu:24.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Non-root user
+RUN useradd -r -s /bin/false -d /data attune && \
+    mkdir -p /data && chown attune:attune /data
+
+COPY --from=builder /dist/attune /usr/local/bin/attune
+COPY --from=builder /dist/lib/ /usr/local/lib/
+
+USER attune
+WORKDIR /data
+
+ENTRYPOINT ["attune"]
+CMD ["--help"]

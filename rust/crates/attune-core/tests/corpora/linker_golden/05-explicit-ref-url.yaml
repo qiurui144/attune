@@ -1,0 +1,19 @@
+id: 05-explicit-ref-url
+kind: explicit_ref
+doc_a:
+  title: 周报 2024W12
+  content: |
+    本周完成 Rust 异步编程章节复习。
+    参考资料：https://doc.rust-lang.org/book/ch16
+    新增章节笔记关于 channel 与 Mutex 的对比。
+  url: ''
+doc_b:
+  title: Rust 官方文档 — 并发
+  content: |
+    Rust 标准库提供 Send / Sync trait 作为线程安全标记。
+    本章覆盖 thread spawn / mpsc channel / Arc Mutex 模式。
+  url: 'https://doc.rust-lang.org/book/ch16'
+expected:
+  link_kinds:
+    - explicit_ref
+  evidence_substring: 'url:https://doc.rust-lang.org/book/ch16'

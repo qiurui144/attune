@@ -157,4 +157,145 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, VaultError::InvalidInput(_)));
     }
+
+    // ── 增强覆盖: success without audit / format edge / resolve_agent_binary ─
+
+    #[test]
+    fn format_success_without_audit_uses_stdout_only() {
+        let r = CapabilityResult {
+            exit_code: 0,
+            stdout: r#"{"k":"v"}"#.into(),
+            stderr: String::new(), // 无 audit
+            timed_out: false,
+        };
+        let s = format_agent_result_for_chat(&r, "ag");
+        assert!(s.contains("✅ ag"));
+        assert!(s.contains("json"));
+        assert!(s.contains("\"k\":\"v\""));
+        // 不应含 "audit_trail" 那种 fallback 标签
+        assert!(!s.contains("机器可读"));
+    }
+
+    // Edge: 空 stdout 也不 panic
+    #[test]
+    fn format_success_empty_stdout_no_panic() {
+        let r = CapabilityResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: "audit".into(),
+            timed_out: false,
+        };
+        let s = format_agent_result_for_chat(&r, "x");
+        assert!(s.contains("✅"));
+    }
+
+    // Edge: stderr 含多行 — trim 后保留
+    #[test]
+    fn format_multiline_stderr_trimmed() {
+        let r = CapabilityResult {
+            exit_code: 0,
+            stdout: "{}".into(),
+            stderr: "line1\nline2\nline3\n".into(),
+            timed_out: false,
+        };
+        let s = format_agent_result_for_chat(&r, "x");
+        assert!(s.contains("line1"));
+        assert!(s.contains("line3"));
+    }
+
+    // Edge: red line 用 exit 2 — Unicode error msg
+    #[test]
+    fn format_red_line_unicode_message() {
+        let r = CapabilityResult {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: "证据链断裂 — 缺借条 🚨".into(),
+            timed_out: false,
+        };
+        let s = format_agent_result_for_chat(&r, "civil_loan");
+        assert!(s.contains("证据链断裂"));
+        assert!(s.contains("🚨"));
+    }
+
+    // Edge: timed_out 优先于 exit_code 显示
+    #[test]
+    fn format_timeout_takes_precedence_over_exit_code() {
+        let r = CapabilityResult {
+            exit_code: 0, // 即使 exit 0
+            stdout: "result".into(),
+            stderr: String::new(),
+            timed_out: true, // ...但 timed_out 优先
+        };
+        let s = format_agent_result_for_chat(&r, "x");
+        assert!(s.contains("超时"));
+        // 不应显示 "成功"
+        assert!(!s.contains("✅"));
+    }
+
+    // run_agent: 空 agent_id (空字符串)
+    #[test]
+    fn run_agent_empty_id_returns_invalid_input() {
+        let reg = PluginRegistry::new();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = run_agent_subprocess(
+            &reg,
+            "",
+            tmp.path(),
+            "{}",
+            vec![],
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(matches!(err, VaultError::InvalidInput(_)));
+    }
+
+    // resolve_agent_binary: 给一个不存在的 binary path
+    #[test]
+    fn resolve_agent_binary_returns_none_for_missing() {
+        // 用 serde JSON 构造避免直接依赖所有 field
+        let yaml = r#"id: test_agent
+runtime: rust_binary
+binary: bin/nonexistent
+"#;
+        let agent: AgentSpec = serde_yaml::from_str(yaml).expect("parse spec");
+        let tmp = tempfile::TempDir::new().unwrap();
+        // binary 不在 plugin_dir/bin/nonexistent → fallback 到 capability_dispatch::resolve_binary
+        let result = resolve_agent_binary(tmp.path(), &agent);
+        // 大概率 None (bin/nonexistent 不存在 + capability_dispatch 也找不到)
+        assert!(result.is_none());
+    }
+
+    // resolve_agent_binary: 给一个存在的 binary path
+    #[test]
+    fn resolve_agent_binary_returns_some_when_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin_path = bin_dir.join("test_agent");
+        std::fs::write(&bin_path, "dummy").unwrap();
+
+        let yaml = r#"id: test_agent
+runtime: rust_binary
+binary: bin/test_agent
+"#;
+        let agent: AgentSpec = serde_yaml::from_str(yaml).expect("parse spec");
+        let result = resolve_agent_binary(tmp.path(), &agent);
+        assert!(result.is_some());
+        assert!(result.unwrap().ends_with("test_agent"));
+    }
+
+    // adversarial: super long stderr 不爆
+    #[test]
+    fn format_handles_huge_stderr() {
+        let big = "x".repeat(100_000);
+        let r = CapabilityResult {
+            exit_code: 99,
+            stdout: String::new(),
+            stderr: big.clone(),
+            timed_out: false,
+        };
+        let s = format_agent_result_for_chat(&r, "x");
+        assert!(s.len() > 100_000);
+        assert!(s.contains("exit=99"));
+    }
 }

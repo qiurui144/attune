@@ -1,58 +1,61 @@
-# Resource Governor (H1) Design
+# 资源治理框架（Resource Governor / H1）设计稿
 
-**Date**: 2026-04-27
-**Roadmap**: 12-week strategy v2, Phase 1 W1 F-P0a
-**Depends on**: nothing (foundation layer)
-**Depended by**: every Phase 1 P0 background task (A1 / G1 / G2 / etc.); H2 profile picker; H3 topbar Pause; H4 auto-throttle; H5 `attune --diag`; H6 telemetry chart
-
-[English](2026-04-27-resource-governor-design.md) · [简体中文](2026-04-27-resource-governor-design.zh.md)
+**日期**：2026-04-27
+**对应路线图**：12-week 战略 v2，Phase 1 W1 F-P0a
+**依赖谁**：所有 Phase 1 P0 后台任务（A1 / G1 / G2 等）
+**被谁依赖**：H2 三档档位、H3 顶栏 Pause、H4 自动降档、H5 `attune --diag`、H6 telemetry 图表
 
 ---
 
-## 1. Why
+## 1. 为什么做（Why）
 
-All current attune background tasks (embedding queue, SkillEvolver, file scanners, WebDAV sync, patent scanner, browser-driven web search, AI annotator) call `std::thread::spawn` directly with no CPU/RAM/IO ceiling. Symptoms:
+attune 当前所有后台任务（embedding 队列、SkillEvolver、文件扫描、WebDAV 同步、专利扫描、浏览器自动化搜索、AI 批注）直接 `std::thread::spawn` 后无 CPU/RAM/IO 上限，导致：
 
-- 100-file embedding burst causes desktop UI hitching
-- Background work drains laptop battery on the go
-- No user-visible Pause when presenting / gaming / streaming
-- README claims "production-ready" without hard evidence
+- 100 文件批量 embedding 时桌面应用感知卡顿
+- 笔记本电池供电时后台任务持续耗电
+- 用户演示 / 全屏游戏 / 直播时无暂停渠道
+- README 自称 production-ready 但缺硬证据
 
-Negative competitor reference: Obsidian / Logseq are widely complained about for index-rebuild lag. Making "system-friendly" an explicit product promise + visible thresholds turns this into an attune differentiator.
+竞品反例：Obsidian / Logseq 因索引重建拖系统被吐槽，attune 把"系统友好"做成产品承诺 + 显式可控阈值 = 差异化卖点。
 
-## 2. Core Decisions
+## 2. 核心设计决策
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Granularity | **Per-task governor** (one per background worker) | Global budget creates priority inversion (embedding starves SkillEvolver); per-task allows green-light for hot path, red-light for batch |
-| Threading model | **Keep `std::thread::spawn` + `Arc<AtomicBool>`** — governor adapts to it, no forced Tokio migration | Full Tokio migration is a 2-4 week refactor, far beyond W1 budget |
-| Sampling source | `sysinfo` crate (cross-platform), **global CPU%** not per-process | sysinfo 0.32 `Process::cpu_usage()` for self-process is unreliable on multiple platforms; `sys.cpus()` global usage is stable. **Semantic also better**: "system busy → back off" is closer to good-citizen intent than per-task tracking. Multiple governors share one global metric, sidestepping the per-task budget summing > 100% problem. |
-| Three presets | Conservative / Balanced / Aggressive | Matches 1Password / Logseq user mental model; Balanced default; battery → auto-Conservative (H4) |
-| Global pause | Central registry + each governor checks | Topbar one-click pause stops all atomically |
-| Telemetry | Local-only, never reported | Hard alignment with D1 No-telemetry mode |
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 治理粒度 | **任务级**（每个后台任务一个 governor） | 全局级会出现"embedding 卡死时 SkillEvolver 也饿死"的优先级倒置；任务级允许关键路径开绿灯、批处理红灯 |
+| 兼容现有线程模型 | **不强制迁移 Tokio**，governor 兼容 `std::thread::spawn` 的 `Arc<AtomicBool>` 模式 | 全部迁移 Tokio 是 2-4 周大重构，远超 W1 工作量；governor 用 trait 适配，新旧并存 |
+| 监控数据来源 | `sysinfo` crate（跨平台），**全局 CPU%** 不是单进程 | sysinfo 0.32 `Process::cpu_usage()` 对自身进程在多平台 quirky（部分平台返回 0）；`sys.cpus()` 全局占用稳定。**语义也更好**：「系统忙就让让」比「我用了多少」更符合好公民意图。多 governor 共享一个全局指标，自动避免每任务 budget 累加 > 100%。 |
+| 三档预设 | Conservative / Balanced / Aggressive | 与 1Password / Logseq 用户认知一致；Balanced 默认；电池供电自动 Conservative（H4） |
+| 全局 Pause | 中央 registry + 每个 governor 检查 | 顶栏一键暂停所有任务，原子性 |
+| Telemetry | 仅本地，无上报 | 与 D1 No-telemetry 强一致 |
 
-## 3. Module Layout
+## 3. 模块结构
 
 ```
 rust/crates/attune-core/src/resource_governor/
-├── mod.rs           # public API: TaskGovernor, GovernorRegistry, Profile
-├── budget.rs        # CpuBudget / RamBudget / IoBudget structs
-├── profiles.rs      # Conservative / Balanced / Aggressive presets
-├── governor.rs      # TaskGovernor: should_run / after_work / sample
-├── monitor.rs       # CPU/RAM/IO sampling (wraps sysinfo)
-├── registry.rs      # global GovernorRegistry: register / list / pause-all
-└── tests.rs         # unit tests with MockMonitor (no real CPU needed)
+├── mod.rs           # 公开 API：TaskGovernor, GovernorRegistry, Profile
+├── budget.rs        # CpuBudget / RamBudget / IoBudget 数据结构
+├── profiles.rs      # Conservative / Balanced / Aggressive 三档预设
+├── governor.rs      # TaskGovernor 核心：should_pause / throttle / sample
+├── monitor.rs       # CPU/RAM/IO 采样（封装 sysinfo）
+├── registry.rs      # 全局 GovernorRegistry：注册 / 列出 / 全局 pause
+└── tests.rs         # 单元测试（含 mock monitor，无需真实 CPU）
 ```
 
-## 4. Core Types
+## 4. 核心 trait & 数据结构
 
 ```rust
 // budget.rs
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
-    pub cpu_pct_max: f32,        // **system-wide CPU% threshold** (0.0-100.0): worker pauses when global CPU > this
-    pub ram_bytes_max: u64,      // resident set size cap (recorded only; not enforced cross-platform)
-    pub io_priority: IoPriority, // Linux only; best-effort elsewhere
+    /// **系统全局 CPU% 阈值**（0.0-100.0）— 当全局 CPU 高于此值时本任务暂缓。
+    /// 协作式语义，不是单进程上限；多任务共享同一全局指标。
+    pub cpu_pct_max: f32,
+    /// 此任务允许占用的最大常驻内存（bytes）— 记录用，不强制
+    pub ram_bytes_max: u64,
+    /// IO 优先级（仅 Linux 生效，其他平台 best-effort）
+    pub io_priority: IoPriority,
+    /// 当全局 CPU 超 cpu_pct_max 时，throttle 多少毫秒再继续
     pub throttle_on_exceed_ms: u64,
 }
 
@@ -60,8 +63,13 @@ pub struct Budget {
 pub enum IoPriority { Idle, BestEffort, Realtime }
 
 // profiles.rs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Profile { Conservative, Balanced, Aggressive }
+
+impl Profile {
+    /// 给定任务类型 + 当前档位，返回 Budget
+    pub fn budget_for(self, task: TaskKind) -> Budget { /* 见 §6 */ }
+}
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum TaskKind {
@@ -88,40 +96,49 @@ pub struct TaskGovernor {
 }
 
 impl TaskGovernor {
-    /// Call at the top of each worker loop iteration.
-    /// Returns false → worker should skip this round and short-sleep.
-    pub fn should_run(&self) -> bool;
+    /// Worker loop 每次迭代头部调用。返回 false → worker 应跳过本次工作并 sleep。
+    pub fn should_run(&self) -> bool { /* paused? + budget exceeded? */ }
 
-    /// Call after each batch. Returns sleep duration to honor throttle.
-    pub fn after_work(&self) -> Duration;
+    /// 批处理后调用，更新采样、决定是否需要 throttle 延迟。
+    pub fn after_work(&self) -> Duration { /* 返回需要 sleep 的时间 */ }
 
-    pub fn set_profile(&self, p: Profile);
-    pub fn pause(&self);
-    pub fn resume(&self);
+    /// 用户切档时调用
+    pub fn set_profile(&self, p: Profile) { /* 重算 budget */ }
+
+    /// 顶栏 Pause 按钮触发
+    pub fn pause(&self) { self.paused.store(true, SeqCst); }
+    pub fn resume(&self) { self.paused.store(false, SeqCst); }
 }
 
 // monitor.rs
 pub trait ResourceMonitor: Send + Sync {
-    fn sample_self(&self) -> Sample;
+    fn sample_self(&self) -> Sample;  // 当前进程 CPU% / RSS / IO
 }
-pub struct SysinfoMonitor { /* ... */ }
-pub struct MockMonitor { /* test-only */ }
+
+pub struct SysinfoMonitor { /* sysinfo::System refresh */ }
+pub struct MockMonitor { sample: Mutex<Sample> }  // 测试用
 
 // registry.rs
-pub struct GovernorRegistry { /* ... */ }
+pub struct GovernorRegistry {
+    governors: RwLock<HashMap<TaskKind, Arc<TaskGovernor>>>,
+    profile: RwLock<Profile>,
+}
+
 impl GovernorRegistry {
     pub fn register(&self, kind: TaskKind) -> Arc<TaskGovernor>;
     pub fn pause_all(&self);
     pub fn resume_all(&self);
-    pub fn set_profile(&self, p: Profile);
-    pub fn snapshot(&self) -> Vec<TaskStatus>;  // feeds H5 attune --diag
+    pub fn set_profile(&self, p: Profile);  // 全局切档，影响所有 governor
+    pub fn snapshot(&self) -> Vec<TaskStatus>;  // for attune --diag (H5)
 }
+
+/// 全局单例 registry（lazy_static / once_cell）
 pub fn global_registry() -> &'static GovernorRegistry;
 ```
 
-## 5. Worker Retrofit Pattern
+## 5. Worker 接入模式（retrofit reference）
 
-Reference: `rust/crates/attune-core/src/queue.rs` before/after.
+现有 `queue.rs` 改造前后对比：
 
 ```rust
 // BEFORE
@@ -129,7 +146,7 @@ std::thread::spawn(move || {
     while running.load(Ordering::SeqCst) {
         match Self::process_batch(...) {
             Ok(0) => std::thread::sleep(POLL_INTERVAL),
-            Ok(_) => { /* immediate next round */ }
+            Ok(_) => {/* 立即下一轮 */}
             Err(_) => std::thread::sleep(POLL_INTERVAL),
         }
     }
@@ -140,103 +157,105 @@ let governor = global_registry().register(TaskKind::EmbeddingQueue);
 std::thread::spawn(move || {
     while running.load(Ordering::SeqCst) {
         if !governor.should_run() {
+            // 全局 paused 或超 budget，sleep 短间隔后重试
             std::thread::sleep(Duration::from_millis(500));
             continue;
         }
         match Self::process_batch(...) {
             Ok(0) => std::thread::sleep(POLL_INTERVAL),
-            Ok(_) => std::thread::sleep(governor.after_work()),
+            Ok(_) => std::thread::sleep(governor.after_work()),  // throttle 决定下次 sleep
             Err(_) => std::thread::sleep(POLL_INTERVAL),
         }
     }
 });
 ```
 
-Each retrofit: ~10 LOC delta (register + loop-head check + loop-tail sleep swap). Existing logic untouched.
+每个被 retrofit 的 worker 改动量：~10 行（注册 governor + 循环头检查 + 循环尾 sleep 替换），不破坏现有逻辑。
 
-## 6. Default Preset Values (v1)
+## 6. 三档预设值（首版）
 
-> **Semantics**: `cpu_pct_max` is the **system-wide CPU% threshold**. A row reading
-> "EmbeddingQueue Balanced 25%" means "this worker pauses when global system CPU
-> usage exceeds 25%", **not** "this worker is capped at 25% of CPU". All workers
-> share the same global metric.
+> **语义**：`cpu_pct_max` 是**系统全局 CPU% 阈值**。表中"EmbeddingQueue Balanced 25%"
+> 意为"全局 CPU 占用超过 25% 时此 worker 暂缓"，**不是**"此 worker 单独占用上限 25%"。
+> 所有 worker 共享同一全局指标。
 
-| Task | Conservative | Balanced (default) | Aggressive |
-|------|--------------|-------------------|-----------|
-| EmbeddingQueue | 15% / 512MB / Idle / 2000ms | 25% / 1GB / BestEffort / 1000ms | 60% / 2GB / BestEffort / 100ms |
-| SkillEvolution | 10% / 256MB / Idle / 5000ms (LLM 5/h) | 20% / 512MB / Idle / 2000ms (10/h) | 40% / 1GB / BestEffort / 500ms (30/h) |
-| FileScanner | 10% / 256MB / Idle / 1000ms | 20% / 512MB / Idle / 500ms | 50% / 1GB / BestEffort / 100ms |
-| WebDavSync | 10% / 128MB / Idle / 5000ms | 15% / 256MB / Idle / 2000ms | 30% / 512MB / BestEffort / 500ms |
-| BrowserSearch | 30% / 1GB / BestEffort / 1000ms | 50% / 1.5GB / BestEffort / 500ms | 80% / 2GB / BestEffort / 100ms |
-| AiAnnotator | 10% / 256MB / Idle / 3000ms | 20% / 512MB / Idle / 1000ms | 50% / 1GB / BestEffort / 200ms |
-| BrowseSignalIngest (G1) | 5% / 64MB / Idle / 5000ms | 10% / 128MB / Idle / 2000ms | 20% / 256MB / Idle / 500ms |
-| AutoBookmark (G2) | 10% / 256MB / Idle / 5000ms | 20% / 512MB / Idle / 2000ms | 40% / 1GB / BestEffort / 500ms |
-| MemoryConsolidation (A1) | 15% / 512MB / Idle / 10000ms (LLM 5/h) | 25% / 1GB / Idle / 5000ms (10/h) | 50% / 2GB / BestEffort / 1000ms (30/h) |
+| 任务 | Conservative | Balanced (默认) | Aggressive |
+|------|-------------|----------------|-----------|
+| EmbeddingQueue | CPU 15% / 512MB / Idle IO / throttle 2000ms | CPU 25% / 1GB / BestEffort / 1000ms | CPU 60% / 2GB / BestEffort / 100ms |
+| SkillEvolution | CPU 10% / 256MB / Idle / 5000ms（限 LLM 调用 5/h） | CPU 20% / 512MB / Idle / 2000ms（10/h） | CPU 40% / 1GB / BestEffort / 500ms（30/h） |
+| FileScanner | CPU 10% / 256MB / Idle / 1000ms | CPU 20% / 512MB / Idle / 500ms | CPU 50% / 1GB / BestEffort / 100ms |
+| WebDavSync | CPU 10% / 128MB / Idle / 5000ms | CPU 15% / 256MB / Idle / 2000ms | CPU 30% / 512MB / BestEffort / 500ms |
+| BrowserSearch | CPU 30% / 1GB / BestEffort / 1000ms | CPU 50% / 1.5GB / BestEffort / 500ms | CPU 80% / 2GB / BestEffort / 100ms |
+| AiAnnotator | CPU 10% / 256MB / Idle / 3000ms | CPU 20% / 512MB / Idle / 1000ms | CPU 50% / 1GB / BestEffort / 200ms |
+| BrowseSignalIngest (G1) | CPU 5% / 64MB / Idle / 5000ms | CPU 10% / 128MB / Idle / 2000ms | CPU 20% / 256MB / Idle / 500ms |
+| AutoBookmark (G2) | CPU 10% / 256MB / Idle / 5000ms | CPU 20% / 512MB / Idle / 2000ms | CPU 40% / 1GB / BestEffort / 500ms |
+| MemoryConsolidation (A1) | CPU 15% / 512MB / Idle / 10000ms（限 LLM 5/h） | CPU 25% / 1GB / Idle / 5000ms（10/h） | CPU 50% / 2GB / BestEffort / 1000ms（30/h） |
 
-Numbers are reasoned from RK3588 / Radeon 780M / typical-laptop tiers; final tuning happens in `docs/system-impact.md` after baseline runs.
+数值来自 RK3588 / Radeon 780M / 普通笔记本三档实测的合理推断，正式发版前要在 H1 测试 + 实际负载 baseline 后微调，写入 `docs/system-impact.md`。
 
-## 7. Cross-Platform
+## 7. 跨平台兼容
 
-| OS | CPU sample | RAM sample | IO Priority |
-|----|-----------|-----------|-------------|
+| 平台 | CPU 采样 | RAM 采样 | IO Priority |
+|------|---------|---------|------------|
 | Linux | sysinfo `/proc/self/stat` | `/proc/self/status` VmRSS | `ioprio_set` (libc) |
-| Windows | sysinfo PDH | `GetProcessMemoryInfo` | best-effort (no ioprio, record only) |
+| Windows | sysinfo PDH | `GetProcessMemoryInfo` | best-effort（无 ioprio，仅记录） |
 | macOS | sysinfo task_info | task_info | best-effort |
 
-**Fallback**: `IoPriority::Idle` on unsupported platforms is recorded but not enforced — never errors.
+**降级策略**：IoPriority::Idle 在不支持平台仅记录，不报错。
 
-## 8. Test Strategy (per project test规范)
+## 8. 测试策略
 
-**Unit (`rust/crates/attune-core/src/resource_governor/tests.rs`)**:
-- `MockMonitor` injects fixed samples → assert `should_run()` / `after_work()` decisions
-- profile switch → budget effect immediate
-- pause/resume state transitions
-- preset value snapshot test (catches accidental tuning regressions)
-- All deterministic inputs + precise assertions, **no random data**
+per CLAUDE.md 测试规范：
 
-**Integration (`rust/tests/governor_integration.rs`)**:
-- Real `SysinfoMonitor` + real `std::thread` worker
-- Spin a CPU-bound task under governor → measured CPU% ≤ budget cap
-- Concurrent 5 workers + `pause_all()` → all stop within 100ms
-- Real Store + tempfile, no mock DB
+**Unit（attune-core/src/resource_governor/tests.rs）**：
+- `MockMonitor` 注入特定 sample，验证 `should_run()` / `after_work()` 决策正确
+- profile 切换后 budget 立即生效
+- pause/resume 状态转换
+- 三档预设值快照（防止意外修改）
+- 全部使用确定输入 + 精确断言，无 random
 
-**Corpus Integration (W4 enhanced)**:
-- 100 files (rust-lang/book pinned tag) batch embedding under governor → average CPU% ≤ 25 over the run
+**Integration（rust/tests/governor_integration.rs）**：
+- 真实 sysinfo monitor + 真实 std::thread worker
+- Spin 一个 CPU 烧热任务在 governor 下 → 实测 CPU% ≤ budget 上限
+- 并发 5 个 worker 同时 pause → 全部停在 ≤ 100ms 内
+- 用 tempfile + 真实 Store，无 mock 数据库
 
-## 9. Documentation Output
+**Corpus Integration（W4 测试 enhanced）**：
+- 100 文件（rust-lang/book pinned tag）批量 embedding 启用 governor → 24h 跑完不超 25% CPU 平均
 
-- `docs/system-impact.md` + `.zh.md` — user-facing: three-tier explainer + measured occupancy commitments
-- `rust/DEVELOP.md` + `.zh.md` section — developer: how to retrofit a new worker (5 steps)
-- `RELEASE.md` + `.zh.md` — Phase 1 W1 changelog entry
+## 9. 文档输出
 
-## 10. Out of Scope (avoid scope creep)
+- `docs/system-impact.md` — 用户面：三档说明 + 实测占用承诺
+- `rust/DEVELOP.md` 章节 — 开发者：如何 retrofit 一个新 worker（5 步）
+- `RELEASE.md` — Phase 1 W1 changelog
 
-- ❌ No cgroups / namespace isolation (Linux-only, high complexity — defer)
-- ❌ No GPU / NPU governance (inference goes through Ollama; Ollama controls itself)
-- ❌ No cross-process coordination (single attune process; attune-mcp-server runs separately and self-governs)
-- ❌ No dynamic preset learning from observed load — defer until after H6
+## 10. 不做的事（避免 scope creep）
 
-## 10.1. W1 Scope (Workers Retrofitted)
+- ❌ 不做 cgroups / namespace 隔离（Linux only，复杂度高，后续可加）
+- ❌ 不做 GPU / NPU 占用治理（推理走 Ollama，由 Ollama 自己控制）
+- ❌ 不做跨进程资源协调（attune 一个进程内即可，attune-mcp-server 各自管各自）
+- ❌ 不做动态学习预设（读用户实际负载自动调）— H6 之后再考虑
 
-W1 retrofits the **production-active workers** in `attune-server/src/state.rs`:
-- `start_classify_worker` → `TaskKind::AiAnnotator` (LLM classification path)
-- `start_rescan_worker` → `TaskKind::FileScanner` (30-min directory rescan)
-- `start_queue_worker` → `TaskKind::EmbeddingQueue` (production embedding path)
-- `start_skill_evolver` → `TaskKind::SkillEvolution` (4h LLM expansion cycle, with `allow_llm_call` quota check)
+## 10.1. W1 范围（已 retrofit 的 worker）
 
-Plus the `attune-core::queue::QueueWorker` (test-only / library path, retrofit for completeness).
+W1 retrofit 了 `attune-server/src/state.rs` 中**生产实际运行的 worker**：
+- `start_classify_worker` → `TaskKind::AiAnnotator`（LLM 分类路径）
+- `start_rescan_worker` → `TaskKind::FileScanner`（30 分钟目录重扫）
+- `start_queue_worker` → `TaskKind::EmbeddingQueue`（生产 embedding 路径）
+- `start_skill_evolver` → `TaskKind::SkillEvolution`（4 小时 LLM 扩词周期，含 `allow_llm_call` 配额检查）
 
-**NOT in W1** (deferred to W2/W3 per their feature week):
-- `web_search_browser.rs` — on-demand function called by `web_search.rs`, not a persistent worker. Will retrofit when network search becomes a long-running poller.
-- `scanner_webdav.rs` / `scanner_patent.rs` — invoked from rescan_worker iteration, inherit governor via the calling worker.
-- `ai_annotator.rs` — called from `routes/upload.rs` async tasks (per-request short-lived); H1 governs only persistent background workers.
-- `workflow/` — orchestrated by routes; per-execution lifecycle, not a long-running worker.
+外加 `attune-core::queue::QueueWorker`（test-only / 库路径，retrofit 是为完整性）。
 
-## 11. W1 Acceptance Checklist
+**W1 不做**（推迟到 W2/W3 各 feature 周）：
+- `web_search_browser.rs` — 由 `web_search.rs` on-demand 调用，不是常驻 worker。等网络搜索变成长跑 poller 时再 retrofit
+- `scanner_webdav.rs` / `scanner_patent.rs` — 从 rescan_worker 内部调用，治理通过调用方 worker 继承
+- `ai_annotator.rs` — 从 `routes/upload.rs` 异步任务调用（请求级短任务）；H1 只治理常驻后台 worker
+- `workflow/` — 由 routes 编排，按执行实例生命周期管理，不是常驻 worker
 
-- [ ] `cargo test -p attune-core resource_governor::` all green
-- [ ] `cargo test --test governor_integration` all green
-- [ ] `cargo test -p attune-core queue::` still green after retrofit
-- [ ] `docs/system-impact.md` + `.zh.md` completed
-- [ ] `tests/MANUAL_TEST_CHECKLIST.md` "H1 governor verification" section added
-- [ ] git commit + push develop, report SHA
+## 11. 验收清单（W1 末）
+
+- [ ] `cargo test -p attune-core resource_governor::` 全绿
+- [ ] `cargo test --test governor_integration` 全绿
+- [ ] queue.rs retrofit 后 `cargo test -p attune-core queue::` 全绿（保持原有行为不破坏）
+- [ ] `docs/system-impact.md` + `.zh.md` 完成
+- [ ] `tests/MANUAL_TEST_CHECKLIST.md` 加入"H1 治理验证"章节
+- [ ] git commit + push develop，SHA 报告

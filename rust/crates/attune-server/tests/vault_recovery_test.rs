@@ -57,6 +57,7 @@ async fn wait_for_server_ready(base: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "slow E2E (~120s, Argon2id×3); R19 nightly only — run with --include-ignored"]
+#[allow(clippy::await_holding_lock)]
 async fn vault_setup_returns_recovery_key() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -92,6 +93,7 @@ async fn vault_setup_returns_recovery_key() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "slow E2E (~180s, Argon2id×6); R19 nightly only — run with --include-ignored"]
+#[allow(clippy::await_holding_lock)]
 async fn reset_with_recovery_key_allows_new_password() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -190,6 +192,7 @@ async fn reset_with_recovery_key_allows_new_password() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "slow E2E (~120s, Argon2id×3); R19 nightly only — run with --include-ignored"]
+#[allow(clippy::await_holding_lock)]
 async fn reset_with_wrong_recovery_key_returns_400() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 

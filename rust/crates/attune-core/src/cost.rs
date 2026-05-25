@@ -182,4 +182,172 @@ mod tests {
         let c = estimate_cost_usd(1000, 500, "gpt-4o").unwrap();
         assert!((c - 0.0075).abs() < 1e-9, "actual: {c}");
     }
+
+    // ── 增强覆盖: 边界 / Unicode / 系数差异 / 大数 ───────────────────────────
+
+    // Empty string → 0 tokens
+    #[test]
+    fn estimate_tokens_empty_returns_zero() {
+        assert_eq!(estimate_tokens("", "gpt-4o"), 0);
+        assert_eq!(estimate_tokens("", "unknown-model"), 0);
+    }
+
+    // 短文本 (1 char) 仍 ceil 上来,避免 UI 显示 0
+    #[test]
+    fn estimate_tokens_single_char_ceils_to_at_least_one() {
+        let n = estimate_tokens("a", "gpt-4o");
+        assert_eq!(n, 1, "1 ASCII char × 0.25 → ceil 1");
+        let n = estimate_tokens("中", "gpt-4o");
+        assert_eq!(n, 1, "1 CJK char × 0.5 → ceil 1");
+    }
+
+    // Case-insensitive model lookup
+    #[test]
+    fn lookup_pricing_case_insensitive() {
+        assert!(lookup_pricing("GPT-4o").is_some());
+        assert!(lookup_pricing("GPT-4O-MINI").is_some());
+        assert!(lookup_pricing("Claude-3-5-Sonnet-20241022").is_some());
+    }
+
+    // 全 model 覆盖 — 确保所有 7 个 family 都能 lookup
+    #[test]
+    fn lookup_pricing_all_families() {
+        assert!(lookup_pricing("gpt-4o").is_some());
+        assert!(lookup_pricing("gpt-4o-mini").is_some());
+        assert!(lookup_pricing("claude-3-5-sonnet").is_some());
+        assert!(lookup_pricing("claude-3.5-sonnet").is_some()); // dot alt syntax
+        assert!(lookup_pricing("claude-3-opus").is_some());
+        assert!(lookup_pricing("gemini-1.5-pro").is_some());
+        assert!(lookup_pricing("deepseek-chat").is_some());
+        assert!(lookup_pricing("qwen-max").is_some());
+    }
+
+    // Output 比 input 价高 (per business model — chat 应 disincentivize long output)
+    #[test]
+    fn lookup_pricing_output_higher_than_input() {
+        for m in ["gpt-4o", "claude-3-5-sonnet", "claude-3-opus", "gemini-1.5-pro"] {
+            let p = lookup_pricing(m).unwrap();
+            assert!(p.output_per_1k_usd > p.input_per_1k_usd, "{m} output >= input");
+        }
+    }
+
+    // CJK Ext A (U+3400..U+4DBF) — 应识别
+    #[test]
+    fn estimate_tokens_cjk_ext_a_treated_as_cjk() {
+        // U+3400 = 㐀
+        let n_ext_a = estimate_tokens("㐀㐁㐂㐃", "gpt-4o");
+        let n_basic = estimate_tokens("一二三四", "gpt-4o");
+        assert_eq!(n_ext_a, n_basic, "CJK Ext A 与 CJK Unified 同系数");
+    }
+
+    // 日文假名 — 按设计应归为 non-CJK (ASCII 系数)
+    #[test]
+    fn estimate_tokens_japanese_kana_treated_as_non_cjk() {
+        // 4 平假名 × 0.25 (gpt ascii coef) = 1 → ceil 1
+        let n = estimate_tokens("あいうえ", "gpt-4o");
+        assert_eq!(n, 1, "假名按 ASCII 系数 (0.25), 实测 tokenizer 偏差近英文");
+    }
+
+    // 混合 CJK + ASCII: 系数应叠加
+    #[test]
+    fn estimate_tokens_mixed_text() {
+        // "Hello 世界" → 6 ASCII (含空格) + 2 CJK
+        // gpt-4o: 6*0.25 + 2*0.5 = 1.5 + 1.0 = 2.5 → ceil 3
+        let n = estimate_tokens("Hello 世界", "gpt-4o");
+        assert_eq!(n, 3);
+    }
+
+    // unknown model 用通用 0.30
+    #[test]
+    fn estimate_tokens_unknown_model_uses_generic_coef() {
+        // 10 chars × 0.30 = 3
+        let n = estimate_tokens("abcdefghij", "mystery-model");
+        assert_eq!(n, 3);
+    }
+
+    // 系数差异 deepseek vs gpt (相同文本不同 token 数)
+    #[test]
+    fn estimate_tokens_model_family_differs() {
+        let text = "这是一段比较长的中文测试文本用于验证模型系数差异";
+        let n_gpt = estimate_tokens(text, "gpt-4o");      // 0.50 coef
+        let n_qwen = estimate_tokens(text, "qwen-max");   // 0.40 coef
+        assert!(n_gpt > n_qwen, "gpt 系数更高 → token 更多");
+    }
+
+    // 大数 token 不 overflow
+    #[test]
+    fn estimate_cost_usd_million_tokens_no_overflow() {
+        let c = estimate_cost_usd(1_000_000, 500_000, "gpt-4o").unwrap();
+        // 1M in × 0.0025 + 500K out × 0.01 = 2.5 + 5.0 = 7.5
+        assert!((c - 7.5).abs() < 1e-6);
+    }
+
+    // 跨 family pricing 排序 — claude-3-opus 应是最贵
+    #[test]
+    fn pricing_opus_is_most_expensive() {
+        let opus = lookup_pricing("claude-3-opus").unwrap();
+        let gpt4o = lookup_pricing("gpt-4o").unwrap();
+        let mini = lookup_pricing("gpt-4o-mini").unwrap();
+        let deepseek = lookup_pricing("deepseek-chat").unwrap();
+        assert!(opus.input_per_1k_usd > gpt4o.input_per_1k_usd);
+        assert!(gpt4o.input_per_1k_usd > mini.input_per_1k_usd);
+        assert!(mini.input_per_1k_usd > deepseek.input_per_1k_usd);
+    }
+
+    // ── proptest 属性: monotonicity / 字符越多 token 越多 / cost 非负 ─────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // 性质: estimate_tokens monotonic 在文本长度上
+        #[test]
+        fn prop_estimate_tokens_monotonic_with_length(
+            base in "[a-zA-Z ]{0,200}",
+            extra in "[a-zA-Z ]{1,100}"
+        ) {
+            let n_short = estimate_tokens(&base, "gpt-4o");
+            let combined = format!("{base}{extra}");
+            let n_long = estimate_tokens(&combined, "gpt-4o");
+            prop_assert!(n_long >= n_short, "longer text should not yield fewer tokens");
+        }
+
+        // 性质: cost monotonic 在 in/out tokens
+        #[test]
+        fn prop_cost_monotonic_in_tokens(
+            tin in 0usize..1_000_000,
+            tout in 0usize..1_000_000,
+            extra in 1usize..1000
+        ) {
+            let c1 = estimate_cost_usd(tin, tout, "gpt-4o").unwrap();
+            let c2 = estimate_cost_usd(tin + extra, tout, "gpt-4o").unwrap();
+            prop_assert!(c2 >= c1, "more input tokens → cost ≥");
+            let c3 = estimate_cost_usd(tin, tout + extra, "gpt-4o").unwrap();
+            prop_assert!(c3 >= c1, "more output tokens → cost ≥");
+        }
+
+        // 性质: cost 永远非负
+        #[test]
+        fn prop_cost_never_negative(
+            tin in 0usize..10_000_000,
+            tout in 0usize..10_000_000
+        ) {
+            for m in ["gpt-4o", "gpt-4o-mini", "claude-3-opus", "deepseek-chat"] {
+                let c = estimate_cost_usd(tin, tout, m).unwrap();
+                prop_assert!(c >= 0.0, "{}: cost {} should be ≥ 0", m, c);
+            }
+        }
+
+        // 性质: 任意 model 字符串 lookup_pricing 不 panic
+        #[test]
+        fn prop_lookup_pricing_no_panic(name in ".*") {
+            let _ = lookup_pricing(&name);
+        }
+
+        // 性质: 任意 text + model estimate_tokens 不 panic
+        #[test]
+        fn prop_estimate_tokens_no_panic(text in ".*", model in "[a-z0-9.-]{0,30}") {
+            let n = estimate_tokens(&text, &model);
+            prop_assert!(n < usize::MAX);
+        }
+    }
 }

@@ -1,0 +1,32 @@
+id: e03-all-already-promoted
+description: |
+  Error case — 1 high-score candidate that has been promoted before. Re-run
+  must detect the existing semantic row by topic_key and skip without inserting
+  a duplicate; already_promoted = 1.
+  Test driver sets pre_promote=true: it runs run_promotion_cycle once first to
+  seed the L3 row, then runs it again and asserts on the SECOND run's output.
+pre_promote: true
+episodic_memories:
+  - id: ep-already
+    chunk_hashes: [ap-1, ap-2, ap-3]
+    summary: 用户已 promote 过的代表性记忆。
+    created_at_offset_days: 1
+citation_hits:
+  - chunk: ap-1
+    count: 2
+  - chunk: ap-2
+    count: 2
+  - chunk: ap-3
+    count: 1
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: []     # already in L3; second cycle inserts nothing
+  gated_by_access: 0
+  gated_by_score: 0
+  already_promoted: 1
+reviewer:
+  approved: true

@@ -1,0 +1,53 @@
+id: 11-sentinel-max-chunks-high-access
+description: |
+  Sentinel — large episodic at MAX_CHUNKS_PER_BUNDLE-ish size (50 chunks),
+  2 days old, 10 distinct citation hits.
+  Independent score: 1.0*10 + 2.0/1.2 + 0.5*ln(50) ≈ 10 + 1.6667 + 1.9560 = 13.62.
+  Regression guard against numeric overflow / SQL IN-list size explosion (50
+  placeholders ≪ SQLITE_MAX_VARIABLE_NUMBER=999 but still the largest realistic
+  episodic size).
+episodic_memories:
+  - id: ep-sentinel-large
+    chunk_hashes:
+      [sn-001, sn-002, sn-003, sn-004, sn-005, sn-006, sn-007, sn-008, sn-009, sn-010,
+       sn-011, sn-012, sn-013, sn-014, sn-015, sn-016, sn-017, sn-018, sn-019, sn-020,
+       sn-021, sn-022, sn-023, sn-024, sn-025, sn-026, sn-027, sn-028, sn-029, sn-030,
+       sn-031, sn-032, sn-033, sn-034, sn-035, sn-036, sn-037, sn-038, sn-039, sn-040,
+       sn-041, sn-042, sn-043, sn-044, sn-045, sn-046, sn-047, sn-048, sn-049, sn-050]
+    summary: |
+      用户在两天内系统性地学习了一个完整领域（50 段切分），
+      期间在 chat 中多次回引不同段落以巩固理解。
+    created_at_offset_days: 2
+citation_hits:
+  - chunk: sn-001
+    count: 1
+  - chunk: sn-005
+    count: 1
+  - chunk: sn-010
+    count: 1
+  - chunk: sn-015
+    count: 1
+  - chunk: sn-020
+    count: 1
+  - chunk: sn-025
+    count: 1
+  - chunk: sn-030
+    count: 1
+  - chunk: sn-035
+    count: 1
+  - chunk: sn-040
+    count: 1
+  - chunk: sn-045
+    count: 1
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: [ep-sentinel-large]
+  gated_by_access: 0
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true

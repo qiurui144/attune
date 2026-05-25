@@ -1,0 +1,24 @@
+id: 11-sentinel-regression
+description: |
+  Sentinel: stable canonical case that must not change across refactors.
+  Any change to tokenizer / heuristic ranking / cap will break this.
+  Same shape as 01- but documented as the *contract*: tweaking the agent
+  silently and only running prop tests will pass — this case keeps you honest.
+signals:
+  - query: "tcp connection timeout"
+    count: 3
+  - query: "tcp socket buffer"
+    count: 3
+  - query: "tcp keepalive interval"
+    count: 3
+config:
+  window_days: 0
+  min_signal_count: 3
+expected:
+  buckets_count: 3
+  contains_records:
+    - query_pattern: "tcp connection timeout"
+      expansions: [buffer, interval, keepalive, socket]
+      generated_by: heuristic
+reviewer:
+  approved: true

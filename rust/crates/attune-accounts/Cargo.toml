@@ -1,6 +1,6 @@
 [package]
 name = "attune-accounts"
-version = "0.1.0"
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -23,6 +23,11 @@ serde_json = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 hex = "0.4"
+# License protocol + device fingerprint — quarantined here (2026-05-20)
+# from attune-core where they were dead code on the live cloud-token path.
+ed25519-dalek = "2"
+base64 = "0.22"
+sha2 = "0.10"
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json", "blocking"] }

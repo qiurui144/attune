@@ -96,7 +96,7 @@ async fn amd_e2e_search_ownership() {
     assert_eq!(r.status(), 200);
     let body: serde_json::Value = r.json().await.expect("json");
     let results = body["results"].as_array().expect("results array");
-    assert!(results.len() >= 1, "expected ≥1 hit on rust-book corpus, got {}", results.len());
+    assert!(!results.is_empty(), "expected ≥1 hit on rust-book corpus, got {}", results.len());
     let top_title = results[0]["title"].as_str().unwrap_or("");
     assert!(
         top_title.contains("ownership") || top_title.contains("RAG"),

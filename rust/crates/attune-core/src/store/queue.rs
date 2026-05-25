@@ -205,4 +205,84 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// QW-1 (storage cleanup): 清理 embed_queue 中已完成 / 已放弃的行。
+    ///
+    /// 旧实现 `mark_embedding_done` 只 UPDATE status='done'，行永远留在表里。
+    /// 长期运行的 vault 会累积百万级 done 行，让 dequeue 走的索引扫描越来越慢
+    /// 且 SQLite 文件持续膨胀。本函数 DELETE 终态行（done / abandoned）：
+    ///
+    /// - 由 `Store::open()` 一次性调一次（清启动前累积的 done/abandoned）。
+    /// - 由后台 cleanup worker 周期（默认每周）调一次。
+    ///
+    /// 返回删除的行数（便于诊断 / 测试断言）。
+    pub fn purge_completed_embed_queue(&self) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM embed_queue WHERE status IN ('done', 'abandoned')",
+            [],
+        )?;
+        Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// QW-1: done / abandoned 终态行应被 purge_completed_embed_queue 删除；
+    /// pending / processing 行保留。
+    #[test]
+    fn purge_completed_removes_done_and_abandoned_only() {
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let item_id = store
+            .insert_item(&dek, "t", "body", None, "note", None, None)
+            .unwrap();
+
+        // 1 pending
+        store.enqueue_embedding(&item_id, 0, "p", 2, 1, 0).unwrap();
+        // 1 processing
+        store.enqueue_embedding(&item_id, 1, "ing", 2, 1, 0).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE embed_queue SET status = 'processing' WHERE chunk_idx = 1",
+                [],
+            )
+            .unwrap();
+        // 1 done
+        store.enqueue_embedding(&item_id, 2, "d", 2, 1, 0).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE embed_queue SET status = 'done' WHERE chunk_idx = 2",
+                [],
+            )
+            .unwrap();
+        // 1 abandoned
+        store.enqueue_embedding(&item_id, 3, "a", 2, 1, 0).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE embed_queue SET status = 'abandoned' WHERE chunk_idx = 3",
+                [],
+            )
+            .unwrap();
+
+        let removed = store.purge_completed_embed_queue().unwrap();
+        assert_eq!(removed, 2, "应删除 done + abandoned 两行");
+
+        let remaining: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM embed_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 2, "保留 pending + processing");
+    }
+
+    /// QW-1: 空表 / 全 pending 时 purge 不报错且返回 0。
+    #[test]
+    fn purge_completed_on_empty_returns_zero() {
+        let store = Store::open_memory().unwrap();
+        assert_eq!(store.purge_completed_embed_queue().unwrap(), 0);
+    }
 }

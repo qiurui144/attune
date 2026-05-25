@@ -1,0 +1,15 @@
+id: syn-bank_card-2
+profile: id_card
+id_card_subtype: bank_card
+schema_version: bank_card_v1
+expected_fields:
+  card_number: 3568 9644 2871 4229
+  bank_name: 中国工商银行
+  card_type: 信用卡
+  valid_thru: 06/26
+expected_lines_count_min: 4
+max_elapsed_ms: 2000
+reviewer:
+  name: SYNTHETIC_LUHN_VALID
+  approved: true
+notes: Synthetic — Luhn check digit verified; no real card.

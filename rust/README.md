@@ -96,6 +96,39 @@ At startup, Attune detects CPU / RAM / GPU / NPU and recommends a local summary 
 ### Scanned PDF OCR fallback (Batch 1)
 When `pdf_extract` returns empty or too-little text, Attune automatically runs OCR via **PP-OCRv5 mobile** (DBNet+CRNN+CLS, ~21 MB ONNX, Chinese accuracy 94–96%) + `pdftoppm`. Tesseract removed since v0.6.x (replaced by PP-OCR as single engine). One-shot install: `scripts/install-ocr-deps.sh` (apt/dnf/pacman/brew).
 
+### Office Helper (v0.7.1 — OCR structured extraction + ASR transcription)
+
+Standalone `/api/v1/office/*` endpoints expose OCR/ASR as **office-assistant tools** (results are NOT auto-saved to vault — user explicitly chooses to save).
+
+Five **structured OCR scenes** (zero-LLM, regex anchors + bbox proximity + GB/Luhn checksums):
+
+| Scene | Fields | Accuracy red line | Speed (p50) |
+|-------|--------|-------------------|-------------|
+| `document` | title + reading-order blocks (title/paragraph/list/figure_caption/footer) | char-level ≥ 92% | A4 ≤ 3s |
+| `receipt` | invoice_no, issue_date, seller, buyer, amount_total, tax_amount, amount_chinese | field-level ≥ 92% | ≤ 2s |
+| `table` | headers + 2D cells + row_count + column_count | cell ≥ 92% | A4 ≤ 4s |
+| `card` | name, company, job_title, phone, email, address | field-level ≥ 92% | ≤ 1.5s |
+| `id_card` (3 subtypes: `id_card_cn` / `bank_card` / `business_license`) | per-subtype schema with GB 11643 / Luhn / GB 32100-2015 check digits | field-level ≥ 95% | ≤ 2s |
+
+**Async ASR transcription** (`whisper.cpp small Q8` default, RTF ≤ 0.5 on CPU): submit returns `{job_id, ws_url}`, WebSocket pushes progress every 500 ms, supports speaker diarization (pyannote.audio subprocess). WER red lines: Chinese ≤ 15%, English ≤ 10%, mixed ≤ 18%, DER ≤ 25%.
+
+Endpoints:
+```
+POST   /api/v1/office/ocr            sync, multipart, schema-tagged response
+POST   /api/v1/office/transcribe     async, returns job_id
+GET    /api/v1/office/jobs/{job_id}  poll job state + result
+DELETE /api/v1/office/jobs/{job_id}  cancel (409 if done/failed/cancelled)
+WS     /api/v1/office/jobs/ws        progress push every 500ms
+```
+
+CLI:
+```
+attune ocr <image> [--profile receipt] [--id-card-subtype id_card_cn] [--json]
+attune transcribe <audio> [--diarization] [--json]
+```
+
+Spec: [`docs/superpowers/specs/2026-05-20-office-helper-design.md`](../docs/superpowers/specs/2026-05-20-office-helper-design.md). Golden dataset + L1/L2 gate testing: [`crates/attune-server/tests/golden/office/README.md`](crates/attune-server/tests/golden/office/README.md).
+
 ### Multi-format ingestion
 
 Attune parses 20+ file types natively. Unknown binary formats (video, archives, executables) are rejected with 422 rather than being silently treated as text. Remote ingest sources are also supported: **WebDAV** remote directories (ETag-based incremental sync) and **Email IMAP** (email bodies + document attachments auto-indexed, UID-based incremental sync).

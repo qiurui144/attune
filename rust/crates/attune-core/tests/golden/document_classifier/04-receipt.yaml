@@ -1,0 +1,23 @@
+id: 04-receipt
+description: 还款收据 — 还款 / 开票日期 / 金额
+inputs:
+  - file: 还款收据-2023-06.pdf
+    text: |
+      收据
+      今收到张三还款人民币贰万元整 (¥20,000)
+      经手人: 李四
+      开票日期: 2023-06-15
+expected:
+  classified_count: 1
+  per_doc:
+    - file: 还款收据-2023-06.pdf
+      kind: receipt
+      confidence_min: 0.2
+      keywords_must_contain:
+        - 收据
+      entities:
+        dates_min: 1
+        amounts_min: 1
+  red_lines_count: 0
+reviewer:
+  approved: true

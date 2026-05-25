@@ -346,7 +346,26 @@ impl OcrProvider for PpOcrProvider {
             log::debug!("PP-OCR structured: avg_confidence={c:.3}");
         }
 
-        Ok(super::OcrOutput { text: plain, table_markdown, avg_confidence })
+        // Step 6: 行级输出（含 bbox）— office helper 结构化抽取需要
+        let lines: Vec<super::RawLine> = result.text_blocks.iter()
+            .filter(|b| !b.text.is_empty())
+            .map(|b| {
+                // box_points: [tl, tr, br, bl], Point { x: u32, y: u32 }
+                let xs: Vec<u32> = b.box_points.iter().map(|p| p.x).collect();
+                let ys: Vec<u32> = b.box_points.iter().map(|p| p.y).collect();
+                let x = *xs.iter().min().unwrap_or(&0);
+                let y = *ys.iter().min().unwrap_or(&0);
+                let w = xs.iter().max().unwrap_or(&0).saturating_sub(x);
+                let h = ys.iter().max().unwrap_or(&0).saturating_sub(y);
+                super::RawLine {
+                    text: b.text.clone(),
+                    bbox: super::BBox { x, y, w, h },
+                    confidence: b.text_score,
+                }
+            })
+            .collect();
+
+        Ok(super::OcrOutput { text: plain, table_markdown, avg_confidence, lines: Some(lines) })
     }
 }
 
@@ -678,7 +697,7 @@ mod tests {
     #[test]
     fn num_cpus_safe_caps_at_8() {
         let n = num_cpus_safe();
-        assert!(n >= 1 && n <= 8, "got {n}");
+        assert!((1..=8).contains(&n), "got {n}");
     }
 
     #[test]

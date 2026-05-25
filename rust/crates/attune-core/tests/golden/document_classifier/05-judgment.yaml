@@ -1,0 +1,28 @@
+id: 05-judgment
+description: 民事判决书 — 案号 / 本院查明 / 判决如下
+inputs:
+  - file: 2024-京01民初1号-民事判决书.pdf
+    text: |
+      北京市第一中级人民法院
+      民事判决书
+      (2024)京01民初1号
+      原告: 张三
+      被告: 李四
+      本院查明:
+        原告于 2023-01-15 出借 500000 元给被告, 月利率 1%, 还款期限 2024-12-31.
+      判决如下:
+        被告李四自本判决生效之日起十日内偿还原告张三借款本金五十万元整及利息.
+expected:
+  classified_count: 1
+  per_doc:
+    - file: 2024-京01民初1号-民事判决书.pdf
+      kind: judgment
+      confidence_min: 0.3
+      keywords_must_contain:
+        - 判决书
+      entities:
+        persons_min: 2
+        dates_min: 1
+  red_lines_count: 0
+reviewer:
+  approved: true

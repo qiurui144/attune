@@ -1,0 +1,24 @@
+id: 03-tech-blog-recent-uncited
+description: |
+  Tech blog episodic — fresh (0d), 4 chunks, no citations.
+  access=0 < min_access_count=3 → gated by access. 0 promotions.
+episodic_memories:
+  - id: ep-tech-blog
+    chunk_hashes: [tb-001, tb-002, tb-003, tb-004]
+    summary: |
+      用户浏览了一篇关于 Rust async runtime 的技术博客，
+      尚未在 chat 引用其中任何 chunk。
+    created_at_offset_days: 0
+citation_hits: []
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 50
+expected:
+  promoted_ids: []
+  gated_by_access: 1
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true

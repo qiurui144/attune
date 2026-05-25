@@ -10,6 +10,7 @@ use std::time::Duration;
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
 async fn ocr_profiles_crud_round_trip() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     // 隔离 data_dir
@@ -158,6 +159,7 @@ async fn ocr_profiles_crud_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)]
 async fn settings_default_includes_active_profile() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     // 隔离 data_dir
@@ -199,7 +201,10 @@ async fn settings_default_includes_active_profile() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ocr_profiles_paid_user_can_still_edit() {
     // 验证 SettingsLocks::for_state(Paid).can_edit("ocr_profiles") = true
-    // (per member_session.rs: Paid 不锁定 ocr_profiles, 只锁 plugin_install/uninstall/cloud_llm)
+    // (per member_session.rs: Paid 不锁定 ocr_profiles, 只锁 plugin_uninstall + cloud_llm).
+    //
+    // P0 (2026-05-20): plugin_install **不再锁** — 付费会员必须能配 pluginhub URL
+    // 切到真 HttpPluginHubProvider, 否则被钉在 Mock provider 上拿不到真 pro plugin.
     let m = attune_core::member_session::MemberState::Paid {
         account_id: "u".to_string(),
         license_id: "l".to_string(),
@@ -209,7 +214,10 @@ async fn ocr_profiles_paid_user_can_still_edit() {
     assert!(locks.can_edit("ocr_profiles"), "Paid 不应锁 ocr_profiles");
     assert!(locks.can_edit("vault_password"));
     assert!(locks.can_edit("local_folder_links"));
-    assert!(!locks.can_edit("plugin_install"));
+    assert!(
+        locks.can_edit("plugin_install"),
+        "Paid 必须能配 pluginhub URL → 切真 HttpPluginHubProvider"
+    );
     assert!(!locks.can_edit("plugin_uninstall"));
     assert!(!locks.can_edit("cloud_llm"));
 }

@@ -1,0 +1,15 @@
+id: e02-empty-text
+description: 文档 text 为空 — agent 应分类为 other / 低置信度, 不 panic
+inputs:
+  - file: empty.txt
+    text: ''
+expected:
+  classified_count: 1
+  per_doc:
+    - file: empty.txt
+      kind: other
+      confidence_max: 0.3
+  missing_evidence_min: 1
+  red_lines_count: 0
+reviewer:
+  approved: true

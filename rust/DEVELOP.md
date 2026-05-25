@@ -817,6 +817,42 @@ fn test_vault() -> (Vault, TempDir) {
 - `e2e_content_encrypted_at_rest` — 验证 SQLite 文件原始字节不含明文（需 `vault.checkpoint()` 刷 WAL）
 - `e2e_multiple_items` — 批量插入 10 条，分页查询
 
+### Office Helper L1/L2 Gates（v0.7.1 起）
+
+Office helper 模块走 **6 类测试金字塔**（per CLAUDE.md 验证铁律 + spec §6）：
+
+```bash
+# L1 准入门 (release gate, 默认跑)
+cargo test -p attune-server --test office_happy_path --release          # 7 tests (REST contract smoke)
+cargo test -p attune-server --test office_error_contract --release      # 10 tests (kebab error codes)
+cargo test -p attune-server --test office_schema_compat --release       # 14 tests (tagged union)
+cargo test -p attune-server --test office_ocr_golden_gate --release     # 8 tests (accuracy + speed, skip if no images)
+cargo test -p attune-server --test office_asr_golden_gate --release     # 10 tests (WER + DER + RTF, skip if no audio)
+
+# L2 稳定性套件
+cargo test -p attune-server --test office_concurrent_test --release     # 4 tests (5 OCR + 2 ASR 并发)
+cargo test -p attune-server --test office_cancel_test --release         # 6 tests (Cancel 语义 + 409)
+cargo test -p attune-server --test office_failure_recovery_test --release # 5 tests (corrupt PDF / 0 字节)
+cargo test -p attune-server --test office_prop_tests --release          # 5 proptest invariants
+
+# 单元测试 (attune-core 内)
+cargo test -p attune-core ocr::structured                                # 81 unit tests
+cargo test -p attune-core office_job_queue                               # 11 unit tests
+```
+
+**Golden 数据集**（`crates/attune-server/tests/golden/office/`）:
+- OCR 7 个 scene 目录 + ASR 4 个 语言/会议 目录
+- Synthetic 样本生成: `python3 scripts/gen-office-ocr-golden.py` (GB 11643 / Luhn / GB 32100 合规)
+- 公开 ASR 数据集下载: `scripts/fetch-office-asr-golden.sh` (LibriSpeech test-clean)
+- 内部脱敏样本: 用户手工补 `<id>.png` + `<id>.expected.yaml` 配对，无图样本测试自动 SKIP
+- 准确度/速度红线 + 测试基线: [`tests/golden/office/BASELINE_ENV.md`](crates/attune-server/tests/golden/office/BASELINE_ENV.md)
+
+**ENFORCE mode**（六类覆盖门 — D5.5 起）:
+```bash
+ATTUNE_ENFORCE_OFFICE_FLOOR=1 cargo test -p attune-server --test office_six_category_floor --release
+```
+强制每个 scene 至少: 5 approved YAML + 3 error case + 3 proptest + 5 boundary + 1 integration. 0 violations 才能 tag GA.
+
 > **安全警告：NAS 远程访问必须启用 TLS**
 >
 > 绑定非 loopback 地址（如 `--host 0.0.0.0`）时，**必须**同时指定 `--tls-cert` 和 `--tls-key`，

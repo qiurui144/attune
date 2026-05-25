@@ -4,6 +4,7 @@ pub mod state;
 pub(crate) mod middleware;
 pub(crate) mod ingest_webdav;
 pub(crate) mod ingest_email;
+pub(crate) mod ingest_rss;
 
 use axum::middleware as axum_mw;
 use axum::routing::{delete, get, post};
@@ -89,6 +90,16 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/ocr/profiles/{id}",
             axum::routing::put(routes::ocr_profiles::update_profile)
                 .delete(routes::ocr_profiles::delete_profile))
+        // Office helper (v0.7.1) — OCR 同步 + ASR 异步 + WS 进度
+        .route("/api/v1/office/ocr",
+            axum::routing::post(routes::office::post_ocr))
+        .route("/api/v1/office/transcribe",
+            axum::routing::post(routes::office::post_transcribe))
+        .route("/api/v1/office/jobs/{job_id}",
+            get(routes::office::get_job)
+                .delete(routes::office::delete_job))
+        .route("/api/v1/office/jobs/ws",
+            get(routes::office::ws_jobs))
         // Folder links — 只读 (写入由 attune-cli link-folder)
         .route("/api/v1/folder-links", get(routes::folder_links::list_folder_links))
         // 批注（annotations）CRUD — 所有调用都是用户显式操作，不在建库流水线里自动触发
@@ -203,8 +214,6 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/audit/log.csv", get(routes::audit::export_log_csv))
         // v0.7 F3: demo sample data 一键加载
         .route("/api/v1/demo/load", post(routes::demo::load_demo))
-        // v0.7 F5: streaming chat (SSE)
-        .route("/api/v1/chat/stream", post(routes::chat_stream::chat_stream))
         // v0.6 Phase A.5.5 隐私 tier 检测（Settings UI Privacy 页用）
         .route("/api/v1/privacy/tier", get(routes::privacy::tier))
         // Status (full status requires vault access)
@@ -221,6 +230,21 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route(
             "/api/v1/index/email-accounts/{dir_id}/sync",
             post(routes::email::sync_email_account_now),
+        )
+        // RSS / Atom 订阅 —— 第三采集源
+        .route("/api/v1/sources/rss/feeds", get(routes::rss::list_feeds))
+        .route("/api/v1/sources/rss/feeds", post(routes::rss::add_feed))
+        .route(
+            "/api/v1/sources/rss/feeds/{id}",
+            axum::routing::delete(routes::rss::delete_feed),
+        )
+        .route(
+            "/api/v1/sources/rss/feeds/{id}",
+            axum::routing::patch(routes::rss::update_feed),
+        )
+        .route(
+            "/api/v1/sources/rss/feeds/{id}/poll",
+            post(routes::rss::poll_feed_now),
         )
         .route("/api/v1/index/unbind", delete(routes::index::unbind_directory))
         .route("/api/v1/index/status", get(routes::index::index_status))

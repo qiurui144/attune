@@ -69,25 +69,42 @@ attune 的发布产物分两条独立线，对应**两个独立 tag 命名空间
 │ 4. 验证 CI 产物                                                │
 │    □ rust-release.yml ✅ 5 平台二进制 tarball 上传 GitHub      │
 │      Releases (vX.Y.Z 页面)                                   │
-│    □ desktop-release.yml ✅ Win+Linux 安装器上传 GitHub        │
-│      Releases (desktop-vX.Y.Z 页面)                           │
+│    □ desktop-release.yml ✅ Win+Linux 安装器 + *.sig +         │
+│      latest.json 上传 GitHub Releases (desktop-vX.Y.Z 页面)   │
 │    □ 校验 SHA256（rust-release.yml 自动生成 *.sha256）        │
+│    □ 校验 latest.json 含 linux-x86_64 + windows-x86_64 两条   │
+│      platforms 字段(auto-updater 数据完整)                    │
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ 5. README + 官网更新                                           │
+│ 5. 包管理器发布 (v1.0+ GA 新增,仅 GA tag,不发 rc/alpha/beta)  │
+│    □ gh workflow run apt-rpm-repo.yml -f tag=desktop-vX.Y.Z   │
+│      → gh-pages 分支更新 APT + RPM repo                       │
+│    □ gh workflow run winget.yml -f tag=desktop-vX.Y.Z         │
+│      → 自动开 microsoft/winget-pkgs PR                        │
+│    □ 验证 apt update + apt install 在干净 ubuntu:24.04 容器     │
+│    □ 验证 dnf install 在干净 fedora:latest 容器                │
+│    □ 监控 winget PR 状态(1-7 天合并)                           │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 6. README + 官网更新                                           │
 │    □ README.md / README.zh.md Download 表格更新到 vX.Y.Z      │
 │    □ official-web (cloud/) v 号更新                            │
 │    □ wiki-web 跟进 (release notes)                             │
 └─────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ 6. develop 起新版本周期                                        │
+│ 7. develop 起新版本周期                                        │
 │    git checkout develop                                       │
 │    # 接下来的 commits 自然进入下一个 vX.Y+1 周期              │
 │    # （不需要手动 bump 版本号，rc.N tag 即标记节奏）          │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Auto-updater 与软件源运维**:首次配置 / Secret 管理 / 故障回滚见
+[`docs/auto-updater-setup.md`](docs/auto-updater-setup.md).
+用户安装命令汇总见 [`docs/install-package-managers.md`](docs/install-package-managers.md).
 
 **关键不变量**：
 - ❌ **永不**在 develop 上打 `vX.Y.Z` 无后缀 tag — 那是 main 专属

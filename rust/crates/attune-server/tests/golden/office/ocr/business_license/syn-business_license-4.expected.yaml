@@ -1,0 +1,17 @@
+id: syn-business_license-4
+profile: id_card
+id_card_subtype: business_license
+schema_version: business_license_v1
+expected_fields:
+  registration_no: WUR91UX2F2PP3EH8U3
+  company_name: 合成测试 4 有限公司
+  legal_rep: 测试法人 4
+  registered_capital: 783 万元人民币
+  established_date: '2023-04-18'
+  scope: 技术开发、技术咨询、软件销售
+expected_lines_count_min: 8
+max_elapsed_ms: 2000
+reviewer:
+  name: SYNTHETIC_GB32100_VALID
+  approved: true
+notes: Synthetic — GB 32100 check digit verified; no real entity.

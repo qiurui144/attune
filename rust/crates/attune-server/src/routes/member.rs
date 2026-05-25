@@ -143,9 +143,15 @@ pub async fn login_password(
         match client.me() {
             Ok(me) => match (me.gateway_url.as_deref(), me.gateway_token.as_deref()) {
                 (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
-                    match apply_gateway_to_vault_settings(&state, url, tok) {
+                    // Bug-1 fix (spec 2026-05-24): cloud 下发的默认 model 一并写入,
+                    // 避免 fresh vault paid 用户 chat 因 model=null → 404。
+                    let default_model = me.gateway_default_model.as_deref();
+                    match apply_gateway_to_vault_settings(&state, url, tok, default_model) {
                         Ok(applied) if applied => {
-                            tracing::info!("member login: cloud LLM gateway written to vault settings");
+                            tracing::info!(
+                                "member login: cloud LLM gateway written to vault settings (default_model={:?})",
+                                default_model,
+                            );
                             gateway_written = true;
                         }
                         Ok(_) => {
@@ -214,6 +220,7 @@ fn apply_gateway_to_vault_settings(
     state: &SharedState,
     endpoint: &str,
     token: &str,
+    default_model: Option<&str>,
 ) -> Result<bool, String> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     // Parity with settings.rs: surface a clear "vault locked" error before touching meta.
@@ -233,8 +240,12 @@ fn apply_gateway_to_vault_settings(
         return Ok(false);
     }
 
-    let merged =
-        attune_core::llm_settings::merge_gateway_into_settings(current, endpoint, token);
+    let merged = attune_core::llm_settings::merge_gateway_into_settings(
+        current,
+        endpoint,
+        token,
+        default_model,
+    );
     let data = serde_json::to_vec(&merged).map_err(|e| format!("settings ser: {e}"))?;
     vault
         .store()
@@ -258,6 +269,7 @@ mod tests {
             existing,
             "https://gateway.attune.ai/v1",
             "sk-newapi-abc",
+            None,
         );
         let llm = merged.get("llm").and_then(|v| v.as_object()).unwrap();
         assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
@@ -268,6 +280,27 @@ mod tests {
         assert_eq!(llm.get("api_key").and_then(|v| v.as_str()), Some("sk-newapi-abc"));
         // preexisting fields preserved
         assert_eq!(llm.get("model").and_then(|v| v.as_str()), Some("qwen2.5:3b"));
+    }
+
+    /// Bug-1 regression (spec 2026-05-24): fresh vault paid 用户 login,gateway 写入
+    /// endpoint+token+**model** 三件套,避免 chat 因 model=null → newapi 404。
+    #[test]
+    fn login_writes_default_model_into_fresh_vault_settings() {
+        // 模拟 fresh vault — 完全没有 llm 字段
+        let merged = merge_gateway_into_settings(
+            serde_json::json!({}),
+            "https://gateway.attune.ai/v1",
+            "sk-newapi-fresh",
+            Some("deepseek-v4-flash"),
+        );
+        let llm = merged.get("llm").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
+        assert_eq!(
+            llm.get("model").and_then(|v| v.as_str()),
+            Some("deepseek-v4-flash"),
+            "fresh vault paid 用户 login 应自动写入 cloud 下发的 default model"
+        );
+        assert_eq!(llm.get("api_key").and_then(|v| v.as_str()), Some("sk-newapi-fresh"));
     }
 
     // ── configure-if-unconfigured gating ────────────────────────────────────

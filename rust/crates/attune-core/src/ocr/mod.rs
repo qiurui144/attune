@@ -21,11 +21,29 @@
 pub mod ppocr;
 pub mod profile;
 pub mod profile_registry;
+pub mod structured;
 
 use crate::error::{Result, VaultError};
 use profile::OcrProfile;
 use std::path::Path;
 use std::process::Command;
+
+/// 单行 OCR 输出（含 bbox 坐标，办公助理结构化抽取需要）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RawLine {
+    pub text: String,
+    pub bbox: BBox,
+    pub confidence: f32,
+}
+
+/// 像素坐标 bbox（左上角 + 宽高）。
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct BBox {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
 
 /// OCR 输出 — 除纯文本外还携带可选的结构化信息。
 #[derive(Debug, Clone)]
@@ -39,6 +57,9 @@ pub struct OcrOutput {
     /// recognition score。`None` = provider 不提供（非 PP-OCR / 默认实现）。
     /// 下游（grounded 抽取器 / UI）用它判断证据 OCR 是否可信、是否需律师复核。
     pub avg_confidence: Option<f32>,
+    /// 行级 OCR 输出（含 bbox），用于 office helper 结构化抽取。
+    /// `None` = provider 不支持（默认实现 / mock）；`Some` = PP-OCR 等真实 provider 填充。
+    pub lines: Option<Vec<RawLine>>,
 }
 
 /// OCR provider 抽象 — 当前只有 PP-OCRv5 一个实现。
@@ -58,7 +79,7 @@ pub trait OcrProvider: Send + Sync {
     /// `PpOcrProvider` 重写以支持完整的场景能力。
     fn extract_structured(&self, image_path: &Path, _profile: &OcrProfile) -> Result<OcrOutput> {
         let text = self.extract_text_from_image(image_path)?;
-        Ok(OcrOutput { text, table_markdown: None, avg_confidence: None })
+        Ok(OcrOutput { text, table_markdown: None, avg_confidence: None, lines: None })
     }
 }
 
@@ -452,5 +473,30 @@ mod tests {
     fn auto_detect_scene_case_insensitive() {
         assert_eq!(auto_detect_scene("SCREENSHOT_001.PNG"), "screenshot");
         assert_eq!(auto_detect_scene("Invoice_Q1.PDF"), "receipt");
+    }
+}
+
+#[cfg(test)]
+mod office_types_tests {
+    use super::*;
+
+    #[test]
+    fn raw_line_serde_roundtrip() {
+        let l = RawLine { text: "hi".into(), bbox: BBox { x: 1, y: 2, w: 3, h: 4 }, confidence: 0.9 };
+        let s = serde_json::to_string(&l).unwrap();
+        let d: RawLine = serde_json::from_str(&s).unwrap();
+        assert_eq!(d.text, "hi");
+        assert_eq!(d.bbox.x, 1);
+        assert_eq!(d.bbox.y, 2);
+        assert_eq!(d.bbox.w, 3);
+        assert_eq!(d.bbox.h, 4);
+        assert!((d.confidence - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bbox_copy_and_clone() {
+        let b = BBox { x: 1, y: 2, w: 3, h: 4 };
+        let b2 = b; // Copy
+        assert_eq!(b2.x, b.x);
     }
 }

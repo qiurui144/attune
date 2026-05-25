@@ -58,3 +58,83 @@ pub trait Agent {
     /// 主入口: 接受输入 → 输出 AgentOutput
     fn run(&self, input: Self::Input) -> Result<AgentOutput<Self::Output>>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_output<T>(comp: T, red: Vec<String>, missing: Vec<String>) -> AgentOutput<T> {
+        AgentOutput {
+            computation: comp,
+            audit_trail: String::new(),
+            red_lines_violated: red,
+            missing_evidence: missing,
+            followups: vec![],
+            confidence: 1.0,
+        }
+    }
+
+    #[test]
+    fn has_red_lines_empty_is_false() {
+        let o = make_output(42, vec![], vec![]);
+        assert!(!o.has_red_lines());
+    }
+
+    #[test]
+    fn has_red_lines_with_one_violation_is_true() {
+        let o = make_output(42, vec!["red1".into()], vec![]);
+        assert!(o.has_red_lines());
+    }
+
+    #[test]
+    fn needs_attention_with_red_line() {
+        let o = make_output(42, vec!["red".into()], vec![]);
+        assert!(o.needs_attention());
+    }
+
+    #[test]
+    fn needs_attention_with_missing_evidence() {
+        let o = make_output(42, vec![], vec!["missing1".into()]);
+        assert!(o.needs_attention());
+    }
+
+    #[test]
+    fn needs_attention_when_clean_is_false() {
+        let o = make_output(42, vec![], vec![]);
+        assert!(!o.needs_attention());
+    }
+
+    #[test]
+    fn needs_attention_with_both() {
+        let o = make_output(42, vec!["red".into()], vec!["m".into()]);
+        assert!(o.needs_attention());
+    }
+
+    // serde roundtrip for AgentOutput<T>
+    #[test]
+    fn agent_output_serde_roundtrip() {
+        let o = AgentOutput {
+            computation: serde_json::json!({"result": "ok"}),
+            audit_trail: "step 1\nstep 2".into(),
+            red_lines_violated: vec!["red".into()],
+            missing_evidence: vec!["m1".into(), "m2".into()],
+            followups: vec!["follow".into()],
+            confidence: 0.85,
+        };
+        let json = serde_json::to_string(&o).expect("ser");
+        assert!(json.contains("\"confidence\":0.85"));
+        let back: AgentOutput<serde_json::Value> = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.red_lines_violated.len(), 1);
+        assert_eq!(back.missing_evidence.len(), 2);
+        assert_eq!(back.confidence, 0.85);
+    }
+
+    // generic T: 验证 String / Vec / Custom struct 都能 work
+    #[test]
+    fn agent_output_generic_over_types() {
+        let s: AgentOutput<String> = make_output("hello".into(), vec![], vec![]);
+        assert_eq!(s.computation, "hello");
+        let v: AgentOutput<Vec<i32>> = make_output(vec![1, 2, 3], vec![], vec![]);
+        assert_eq!(v.computation.len(), 3);
+    }
+}

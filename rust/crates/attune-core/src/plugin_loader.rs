@@ -2,7 +2,7 @@
 //
 // ## 设计目标
 //
-// 对齐 lawcontrol 的插件格式（见 `/data/company/project/lawcontrol/plugins/skills/*/plugin.yaml`），
+// 对齐 attune-enterprise 的插件格式（见 `/data/company/project/attune-enterprise/plugins/skills/*/plugin.yaml`），
 // 让未来：
 //   1. 商业插件（律师 / 售前 / 医疗）通过 PluginHub 分发，一套 YAML 两边都能装
 //   2. AI 批注 4 个角度（内置）从 plugin.yaml 加载，改 prompt 不用重新编译

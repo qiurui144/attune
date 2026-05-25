@@ -1,0 +1,35 @@
+# Golden case 01: 标准借条文档
+# 真实证据(2024 律师录入), 用于 document_classifier_agent 闭环验证.
+# Ground truth = 人工分类 (不调 agent.run() 反向推).
+id: 01-borrowing-doc
+description: 标准借条 — 出借人/借款人/本金/月利率/还款期限 全要素
+inputs:
+  - file: 借条-张三-李四.pdf
+    text: |
+      借条
+      出借人: 张三 (身份证号 110101******1234)
+      借款人: 李四 (身份证号 310101******5678)
+      借款本金: 人民币伍拾万元整 (¥500,000)
+      月利率: 1%
+      还款期限: 2024-12-31
+      签订日期: 2023-01-15
+expected:
+  classified_count: 1
+  per_doc:
+    - file: 借条-张三-李四.pdf
+      kind: borrowing_doc
+      confidence_min: 0.5
+      keywords_must_contain:
+        - 借条
+        - 出借人
+        - 借款人
+        - 本金
+        - 月利率
+      entities:
+        persons_min: 2
+        amounts_min: 1
+        dates_min: 1
+  red_lines_count: 0
+reviewer:
+  approved: true
+  notes: 强典型借条, 全部关键词命中, 应高置信度分类

@@ -60,18 +60,43 @@ pub async fn install_plugin(
     State(state): State<SharedState>,
     Path(plugin_id): Path<String>,
     Json(req): Json<InstallRequest>,
-) -> Result<Json<attune_core::plugin_hub::InstallResponse>, (StatusCode, String)> {
-    let hub = _hub_arc(&state)?;
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let hub = _hub_arc(&state).map_err(|(code, msg)| {
+        (
+            code,
+            Json(serde_json::json!({ "error": "pluginhub_unavailable", "detail": msg })),
+        )
+    })?;
+
+    // P0 (2026-05-20): Mock provider 无真实包体 — 之前 fall-through 返回 HTTP 200 +
+    // InstallResponse 让 UI 误判"安装成功"实际什么都没装. 改为 503 + actionable error
+    // 让 UI 提示用户配 pluginhub.url + license_key 切到真 HttpPluginHubProvider.
+    if hub.name() == "mock" {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "pluginhub_not_configured",
+                "detail": format!(
+                    "Plugin '{plugin_id}' cannot be installed: server is running with the offline Mock pluginhub provider. \
+                     Configure 'pluginhub.url' and 'pluginhub.license_key' in Settings to switch to the real hub."
+                ),
+                "hint": "Settings → 插件市场 → 填入 pluginhub URL + license key (paid 会员见 Attune Pro 邮件)",
+                "plugin_id": plugin_id,
+                "provider": "mock",
+            })),
+        ));
+    }
+
     let device_fp = req.device_fp;
 
     // hub 交互 + 下载 .attunepkg + 解压落地都是阻塞 IO，整体移出 async worker。
     // 真实 hub 才下载落地到 plugins 目录；新插件经一次 attune-server 重启由 registry 装载生效。
     let resp = tokio::task::spawn_blocking(
-        move || -> Result<attune_core::plugin_hub::InstallResponse, (StatusCode, String)> {
+        move || -> Result<attune_core::plugin_hub::InstallResponse, (StatusCode, Json<serde_json::Value>)> {
             let resp = hub
                 .install_plugin(&plugin_id, device_fp.as_deref())
                 .map_err(|e| {
-                    // mock / hub 都用 ModelLoad 表达 plan_required / not_found；按 message 区分
+                    // hub 用 ModelLoad 表达 plan_required / not_found；按 message 区分
                     let msg = e.to_string();
                     let code = if msg.contains("plan_required") || msg.contains("trial_already") {
                         StatusCode::PAYMENT_REQUIRED
@@ -80,40 +105,52 @@ pub async fn install_plugin(
                     } else {
                         StatusCode::SERVICE_UNAVAILABLE
                     };
-                    (code, msg)
+                    (code, Json(serde_json::json!({ "error": "install_failed", "detail": msg })))
                 })?;
 
-            // Mock 后端无真实包体（仅离线/测试用），跳过下载落地，保留旧元数据返回行为。
-            if hub.name() != "mock" {
-                let pkg = hub.download_plugin(&plugin_id, &resp.version).map_err(|e| {
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        format!("plugin download failed: {e}"),
-                    )
-                })?;
-                let plugins_dir =
-                    attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
-                        .map_err(|e| {
-                            (StatusCode::INTERNAL_SERVER_ERROR, format!("plugins dir: {e}"))
-                        })?;
-                let dst = attune_core::plugin_sync::install_plugin_package(
-                    &plugin_id,
-                    &pkg,
-                    &plugins_dir,
+            let pkg = hub.download_plugin(&plugin_id, &resp.version).map_err(|e| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "download_failed",
+                        "detail": format!("plugin download failed: {e}"),
+                    })),
                 )
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("plugin install failed: {e}"),
-                    )
-                })?;
-                tracing::info!("marketplace: 已安装插件 {plugin_id} → {}", dst.display());
-            }
+            })?;
+            let plugins_dir =
+                attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "error": "plugins_dir",
+                                "detail": e.to_string(),
+                            })),
+                        )
+                    })?;
+            let dst = attune_core::plugin_sync::install_plugin_package(
+                &plugin_id,
+                &pkg,
+                &plugins_dir,
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "install_failed",
+                        "detail": format!("plugin install failed: {e}"),
+                    })),
+                )
+            })?;
+            tracing::info!("marketplace: 已安装插件 {plugin_id} → {}", dst.display());
             Ok(resp)
         },
     )
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("install task: {e}")))??;
+    .map_err(|e| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": "install_task", "detail": e.to_string() })),
+    ))??;
 
-    Ok(Json(resp))
+    Ok(Json(serde_json::to_value(resp).unwrap_or_else(|_| serde_json::json!({}))))
 }

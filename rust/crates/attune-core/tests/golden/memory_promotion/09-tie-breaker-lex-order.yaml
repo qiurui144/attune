@@ -1,0 +1,37 @@
+id: 09-tie-breaker-lex-order
+description: |
+  Two episodics with IDENTICAL scoring inputs (same access, chunks, recency).
+  Score tie → tie-broken by episodic_id lex ascending. With max_promotions=1, the
+  lex-smaller id wins. Verifies the deterministic-on-ties contract.
+  Independent score: 1.0*3 + 2.0/1.1 + 0.5*ln(2) ≈ 3 + 1.8182 + 0.3466 = 5.16 → both > 4.0.
+  But cap=1 → only ep-aaa wins (lex < ep-zzz).
+episodic_memories:
+  - id: ep-aaa
+    chunk_hashes: [aaa-001, aaa-002]
+    summary: 用户研究了主题 A 的两段内容。
+    created_at_offset_days: 1
+  - id: ep-zzz
+    chunk_hashes: [zzz-001, zzz-002]
+    summary: 用户研究了主题 Z 的两段内容。
+    created_at_offset_days: 1
+citation_hits:
+  - chunk: aaa-001
+    count: 2
+  - chunk: aaa-002
+    count: 1
+  - chunk: zzz-001
+    count: 2
+  - chunk: zzz-002
+    count: 1
+config:
+  promotion_window_days: 7
+  min_access_count: 3
+  min_score: 4.0
+  max_promotions_per_run: 1
+expected:
+  promoted_ids: [ep-aaa]
+  gated_by_access: 0
+  gated_by_score: 0
+  already_promoted: 0
+reviewer:
+  approved: true

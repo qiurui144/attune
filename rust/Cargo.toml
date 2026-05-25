@@ -3,6 +3,10 @@ resolver = "2"
 # crates/attune-tauri 是历史 stub (含 Cargo.toml.template + README + 空 src/),
 # 不放进 members. Tauri 实际位置 apps/attune-desktop. 不要把 stub 推进 workspace.
 members = ["crates/attune-core", "crates/attune-cli", "crates/attune-server", "crates/attune-accounts"]
+# 显式 default-members 让 `cargo build --bin attune` 从 workspace root 找到 attune-cli。
+# 不设此项时 cargo 默认 "default-run packages" = root [package] attune(无 bin),报 "no bin target named attune"。
+# 此 regression 由 c14a5e7(cargo-deny v2 fix)引入 root [package] 后触发。
+default-members = ["crates/attune-core", "crates/attune-cli", "crates/attune-server", "crates/attune-accounts"]
 
 [workspace.metadata.features]
 note = "Use --features='attune-core/cuda' (Linux NVIDIA), 'attune-core/directml' (Win), 'attune-core/coreml' (Mac) to enable GPU EP. Default = CPU only."
@@ -44,8 +48,9 @@ all = { level = "warn", priority = -1 }
 
 [package]
 name = "attune"
-version = "0.1.0"
+version = "1.0.0"
 edition.workspace = true
+license.workspace = true
 publish = false
 
 [dev-dependencies]

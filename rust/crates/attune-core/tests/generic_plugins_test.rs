@@ -13,7 +13,7 @@
 //!
 //! 这些 plugin 不依赖外部仓 — 用本测试创建临时 plugin dir, 不依赖 ~/.local/share 已装.
 
-use attune_core::plugin_loader::{LoadedPlugin, PluginManifest};
+use attune_core::plugin_loader::PluginManifest;
 use attune_core::plugin_registry::PluginRegistry;
 use std::fs;
 use tempfile::TempDir;

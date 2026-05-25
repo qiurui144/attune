@@ -96,6 +96,7 @@ async fn spawn_isolated_server(
 /// F-09-FORMFACTOR Integration — K3 env var → diagnostics returns form_factor=k3
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "slow E2E (~60s/test, full Argon2id setup); R19 nightly only — run with --include-ignored"]
+#[allow(clippy::await_holding_lock)]
 async fn k3_env_var_propagates_to_diagnostics() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::TempDir::new().expect("tmp");
@@ -132,6 +133,7 @@ async fn k3_env_var_propagates_to_diagnostics() {
 /// F-09-FORMFACTOR Integration — laptop default (no env) → diagnostics form_factor=laptop
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "slow E2E (~60s/test, full Argon2id setup); R19 nightly only — run with --include-ignored"]
+#[allow(clippy::await_holding_lock)]
 async fn laptop_default_propagates_to_diagnostics() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::TempDir::new().expect("tmp");
@@ -167,6 +169,7 @@ async fn laptop_default_propagates_to_diagnostics() {
 /// F-09-FORMFACTOR Integration — invalid env var falls back to laptop (per detect_form_factor)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "slow E2E (~60s/test, full Argon2id setup); R19 nightly only — run with --include-ignored"]
+#[allow(clippy::await_holding_lock)]
 async fn invalid_env_var_falls_back_to_laptop() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::TempDir::new().expect("tmp");
@@ -201,6 +204,7 @@ async fn invalid_env_var_falls_back_to_laptop() {
 /// LLM endpoint and a confused first-launch UX.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "slow E2E (~60s/test, full Argon2id setup); R19 nightly only — run with --include-ignored"]
+#[allow(clippy::await_holding_lock)]
 async fn k3_form_factor_drives_settings_llm_default() {
     let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::TempDir::new().expect("tmp");

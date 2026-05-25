@@ -1,0 +1,321 @@
+{
+  "pass": 49,
+  "warn": 3,
+  "fail": 0,
+  "elapsed_sec": 65.0,
+  "results": [
+    {
+      "scene": "A",
+      "name": "页面标题含 Attune",
+      "status": "PASS",
+      "detail": "Attune · 私有 AI 知识伙伴"
+    },
+    {
+      "scene": "A",
+      "name": "vault 已存在 — 解锁路径",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "A",
+      "name": "进入主界面 — 看到「条目」按钮",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "B1",
+      "name": "Items 视图 — 上传文件 按钮可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "B3",
+      "name": "WebDAV 视图渲染",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "B3",
+      "name": "「添加 WebDAV」按钮可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "B3",
+      "name": "WebDAV 添加 modal 弹出",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "B2",
+      "name": "Email 采集源 section 可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "B4",
+      "name": "RSS 采集源 UI scaffold 不存在 — v1.0 未实装 UI（采集源插件计划文档已规划）",
+      "status": "WARN",
+      "detail": ""
+    },
+    {
+      "scene": "B5",
+      "name": "Telegram 采集源 UI scaffold 不存在 — v1.0 未实装 UI（采集源插件计划文档已规划）",
+      "status": "WARN",
+      "detail": ""
+    },
+    {
+      "scene": "B1",
+      "name": "「添加本地」按钮可见（folder watch）",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "C",
+      "name": "Chat 输入框可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "C",
+      "name": "切换模型 chip 可见（成本感知 UI）",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "C",
+      "name": "首屏 sample prompt chip 可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "C",
+      "name": "成本预估（token chip）可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "C",
+      "name": "Chat 发送 → 获得 LLM 回答",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "D",
+      "name": "Office 视图渲染（含标题）",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "D",
+      "name": "结构化 OCR tab 可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "D",
+      "name": "语音转写 tab 可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "D",
+      "name": "OCR profile 场景齐全（5/5 关键词命中）",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "D",
+      "name": "选 id_card → subtype 子下拉出现",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "D",
+      "name": "Transcribe tab 视图渲染",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "E",
+      "name": "Projects 视图渲染",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "E",
+      "name": "已有 civil_loan project（前轮残留 — 可作快速验证）",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "E",
+      "name": "law-pro 计算助手 panel 挂载（agent_view）",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "F1",
+      "name": "Items 列表 — 搜索框可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "F1",
+      "name": "Items — 来源筛选下拉可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "F1",
+      "name": "Items — 刷新按钮可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "F2",
+      "name": "Items 列表有数据可点击（detail 入口存在）",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "F3",
+      "name": "Projects — 新建项目按钮可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "F4",
+      "name": "Skills 视图渲染",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "F4",
+      "name": "Skills — 刷新按钮可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "F1",
+      "name": "Knowledge 全景视图渲染",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "G",
+      "name": "Settings modal 通过账号菜单打开",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "G",
+      "name": "Settings tab — 通用",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "G",
+      "name": "Settings tab — AI 大脑",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "G",
+      "name": "Settings tab — 数据",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "G",
+      "name": "Settings tab — 会员",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "G",
+      "name": "Settings tab — 隐私",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "G",
+      "name": "Settings tab — 关于",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "G",
+      "name": "会员 tab — 含 cloud accounts / license 信息",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "H",
+      "name": "账号菜单含「锁定知识库」入口",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "H",
+      "name": "通过账号菜单 → 锁定 vault",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "H",
+      "name": "锁定后 → 锁屏出现",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "H",
+      "name": "重解锁 → 回到主界面（session 重建）",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "H",
+      "name": "Settings 内未提供「修改密码」入口（设计上仅锁屏「忘记密码」走 recovery key 重置）— 与 wizard-flow.md 一致",
+      "status": "WARN",
+      "detail": ""
+    },
+    {
+      "scene": "I",
+      "name": "Marketplace 视图渲染",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "I",
+      "name": "Marketplace 显示已安装 plugin（4/4 命中）",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "J",
+      "name": "Cmd+K → 全局搜索 CommandPalette 唤起",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "J",
+      "name": "顶栏 — 账号菜单按钮可见",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "J",
+      "name": "刷新后状态合理（主界面或锁屏，不崩溃）",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "scene": "Z",
+      "name": "无未处理 JS 错误（0 真实 / 10 总）",
+      "status": "PASS",
+      "detail": ""
+    }
+  ],
+  "console_errors": []
+}

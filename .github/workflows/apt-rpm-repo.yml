@@ -1,0 +1,257 @@
+name: apt-rpm-repo
+
+# 每次 desktop-v* tag 完成 release 后,自动更新 GitHub Pages 上的 APT / RPM 仓库
+# 索引,让用户能通过 `apt install attune` / `dnf install attune` 升级.
+#
+# 仓库托管:gh-pages 分支根目录 (qiurui144.github.io/attune)
+#   apt/  → APT repo (dists/stable/main/binary-amd64/Packages + signed Release)
+#   rpm/  → RPM repo (x86_64/repodata/repomd.xml + signed repomd.xml.asc)
+#
+# Secrets 依赖:
+#   GPG_PRIVATE_KEY        — base64 编码的 ASCII-armored 私钥
+#   GPG_PRIVATE_KEY_PASSWORD — 私钥密码(若有)
+#   GPG_KEY_ID             — 公钥 ID(用于 -u 选项)
+#
+# 用户首次接入命令(README/docs/install-package-managers.md 同步):
+#   curl -fsSL https://qiurui144.github.io/attune/attune-archive-keyring.gpg \
+#     | sudo tee /usr/share/keyrings/attune-archive-keyring.gpg > /dev/null
+#   echo "deb [signed-by=/usr/share/keyrings/attune-archive-keyring.gpg] \
+#     https://qiurui144.github.io/attune/apt stable main" \
+#     | sudo tee /etc/apt/sources.list.d/attune.list
+#   sudo apt update && sudo apt install attune
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'desktop-v* tag to publish (e.g. desktop-v1.0.0)'
+        required: true
+  # 注: 不订阅 workflow_run 事件 — head_branch 是 tag-pushed branch (可被 push 者控制).
+  # 改由 desktop-release.yml 在 release 成功后,通过 workflow API 调用本 workflow,
+  # 或维护者手动 workflow_dispatch 触发,避免 GitHub Actions injection 风险.
+
+concurrency:
+  group: apt-rpm-repo
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate input tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -e
+          # 严格校验:仅允许 desktop-vX.Y.Z 或 desktop-vX.Y.Z-(rc|alpha|beta).N
+          if ! [[ "$INPUT_TAG" =~ ^desktop-v[0-9]+\.[0-9]+\.[0-9]+(-(rc|alpha|beta)\.[0-9]+)?$ ]]; then
+            echo "Invalid tag format: $INPUT_TAG"
+            exit 1
+          fi
+          echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install repo tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            dpkg-dev \
+            createrepo-c \
+            gpg \
+            curl \
+            jq
+
+      - name: Checkout main branch (for scripts)
+        uses: actions/checkout@v4
+        with:
+          path: main
+
+      - name: Checkout gh-pages branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+        continue-on-error: true
+
+      - name: Bootstrap gh-pages branch if missing
+        env:
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          if [ ! -d pages/.git ]; then
+            mkdir -p pages
+            cd pages
+            git init
+            git checkout -b gh-pages
+            git remote add origin "https://github.com/${REPO_FULL}.git"
+          fi
+          mkdir -p pages/apt pages/rpm
+
+      - name: Import GPG key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_KEY_PASSWORD: ${{ secrets.GPG_PRIVATE_KEY_PASSWORD }}
+          GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "WARN: GPG_PRIVATE_KEY secret not set — packages will be unsigned."
+            echo "      Users will need to use --allow-unauthenticated for apt; not recommended."
+            echo "      See docs/auto-updater-setup.md for GPG key generation."
+            echo "skip_sign=1" >> "$GITHUB_ENV"
+          else
+            echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+            echo "skip_sign=0" >> "$GITHUB_ENV"
+            echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
+            gpg --armor --export "$GPG_KEY_ID" > pages/attune-archive-keyring.gpg
+          fi
+
+      - name: Download .deb and .rpm from this release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          mkdir -p downloads
+          cd downloads
+          gh release download "$TAG" \
+            --repo "${REPO_FULL}" \
+            --pattern '*.deb' \
+            --pattern '*.rpm' \
+            || (echo "Release $TAG has no .deb/.rpm assets — exiting"; exit 0)
+          ls -la
+
+      - name: Build APT repo
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euxo pipefail
+          POOL="pages/apt/pool/main"
+          DISTS="pages/apt/dists/stable/main/binary-amd64"
+          mkdir -p "$POOL" "$DISTS"
+
+          if compgen -G "downloads/*.deb" > /dev/null; then
+            cp -v downloads/*.deb "$POOL/"
+          fi
+
+          cd pages/apt
+          dpkg-scanpackages --multiversion pool/main /dev/null > dists/stable/main/binary-amd64/Packages
+          gzip -9kf dists/stable/main/binary-amd64/Packages
+
+          cat > dists/stable/Release <<EOF
+          Origin: Attune
+          Label: Attune
+          Suite: stable
+          Codename: stable
+          Components: main
+          Architectures: amd64
+          Date: $(date -Ru)
+          Description: Attune APT repository
+          EOF
+          {
+            echo "MD5Sum:"
+            for f in main/binary-amd64/Packages main/binary-amd64/Packages.gz; do
+              [ -f "dists/stable/$f" ] || continue
+              size=$(stat -c %s "dists/stable/$f")
+              hash=$(md5sum "dists/stable/$f" | awk '{print $1}')
+              printf " %s %d %s\n" "$hash" "$size" "$f"
+            done
+            echo "SHA256:"
+            for f in main/binary-amd64/Packages main/binary-amd64/Packages.gz; do
+              [ -f "dists/stable/$f" ] || continue
+              size=$(stat -c %s "dists/stable/$f")
+              hash=$(sha256sum "dists/stable/$f" | awk '{print $1}')
+              printf " %s %d %s\n" "$hash" "$size" "$f"
+            done
+          } >> dists/stable/Release
+
+          if [ "$skip_sign" = "0" ]; then
+            gpg --batch --yes --default-key "$GPG_KEY_ID" -abs -o dists/stable/Release.gpg dists/stable/Release
+            gpg --batch --yes --default-key "$GPG_KEY_ID" --clearsign -o dists/stable/InRelease dists/stable/Release
+          fi
+          cd ../..
+
+      - name: Build RPM repo
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euxo pipefail
+          RPM_ROOT=pages/rpm/x86_64
+          mkdir -p "$RPM_ROOT"
+
+          if compgen -G "downloads/*.rpm" > /dev/null; then
+            cp -v downloads/*.rpm "$RPM_ROOT/"
+          fi
+
+          createrepo_c --update "$RPM_ROOT" || createrepo_c "$RPM_ROOT"
+
+          if [ "$skip_sign" = "0" ]; then
+            gpg --batch --yes --default-key "$GPG_KEY_ID" --detach-sign --armor "$RPM_ROOT/repodata/repomd.xml"
+          fi
+
+          gpgcheck_val=1
+          if [ "$skip_sign" = "1" ]; then
+            gpgcheck_val=0
+          fi
+
+          cat > pages/rpm/attune.repo <<EOF
+          [attune]
+          name=Attune
+          baseurl=https://${REPO_OWNER}.github.io/${REPO_NAME}/rpm/x86_64
+          enabled=1
+          gpgcheck=${gpgcheck_val}
+          gpgkey=https://${REPO_OWNER}.github.io/${REPO_NAME}/attune-archive-keyring.gpg
+          EOF
+
+      - name: Write index.html
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          cat > pages/index.html <<EOF
+          <!DOCTYPE html>
+          <html><head><title>Attune Package Repository</title>
+          <style>body{font-family:system-ui;max-width:720px;margin:2em auto;padding:0 1em;line-height:1.6}code{background:#f4f4f4;padding:.2em .4em;border-radius:3px}pre{background:#f4f4f4;padding:1em;border-radius:5px;overflow-x:auto}</style>
+          </head><body>
+          <h1>Attune Package Repository</h1>
+          <p>Latest published tag: <strong>${TAG}</strong></p>
+          <h2>Debian / Ubuntu</h2>
+          <pre>curl -fsSL https://${REPO_OWNER}.github.io/${REPO_NAME}/attune-archive-keyring.gpg \\
+            | sudo tee /usr/share/keyrings/attune-archive-keyring.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/attune-archive-keyring.gpg] \\
+            https://${REPO_OWNER}.github.io/${REPO_NAME}/apt stable main" \\
+            | sudo tee /etc/apt/sources.list.d/attune.list
+          sudo apt update &amp;&amp; sudo apt install attune</pre>
+          <h2>RHEL / Fedora / openSUSE</h2>
+          <pre>sudo curl -fsSL -o /etc/yum.repos.d/attune.repo \\
+            https://${REPO_OWNER}.github.io/${REPO_NAME}/rpm/attune.repo
+          sudo dnf install attune</pre>
+          <h2>Other platforms</h2>
+          <p>See the <a href="https://github.com/${REPO_FULL}/releases">GitHub Releases page</a>
+          for Windows installers (NSIS + MSI), Linux AppImage, and Server / CLI tarballs.</p>
+          </body></html>
+          EOF
+
+      - name: Commit and push gh-pages
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          cd pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+          git commit -m "chore(repo): publish $TAG to APT/RPM repository"
+          if git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1; then
+            git push origin gh-pages
+          else
+            git push --set-upstream origin gh-pages
+          fi

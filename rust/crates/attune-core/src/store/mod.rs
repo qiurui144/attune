@@ -5,6 +5,7 @@ pub mod items;
 pub mod item_blobs;
 pub mod webdav_remotes;
 pub mod email_accounts;
+pub mod rss_feeds;
 mod dirs;
 mod queue;
 mod history;
@@ -17,6 +18,10 @@ mod memories;
 mod memory_vectors;
 mod web_search_cache;
 mod chunk_breadcrumbs;
+mod links;               // internal knowledge linker — item_entities + item_links tables
+pub use links::LinkRow;
+mod skill_expansions;    // self_evolving_skill_agent — per-query learned expansions
+pub use skill_expansions::{ExpansionSource, SkillExpansionRow, MAX_EXPANSIONS_PER_PATTERN};
 pub mod browse_signals;  // pub: BrowseSignalInput / BrowseSignalRow 给 attune-server route 用
 pub mod auto_bookmarks;  // W4 G2: high engagement auto bookmark candidates (G3 staging)
 pub mod audit;            // v0.6 Phase A.5.3: 出网审计日志
@@ -158,6 +163,30 @@ CREATE TABLE IF NOT EXISTS email_folder_uids (
     last_uid INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (dir_id, folder)
 );
+
+-- RSS / Atom 订阅持久化。与 webdav_remotes / email_accounts 同模式：
+-- worker 周期对每个 feed 做 HTTP 条件请求（ETag + If-Modified-Since）增量重扫，
+-- 必须能读回配置。url_enc 是 AES-256-GCM 密文 BLOB（dek 加密，与 items.content
+-- 同模式）；entry 级去重靠 last_entry_guid（最后一次成功 ingest 的 guid/link）+
+-- ingest_document 的 content_hash 短路两层保护。
+--
+-- 不挂在 bound_dirs 上：bound_dirs 是 "目录 / 账户" 概念，单个 RSS feed 更近似
+-- 一行书签；UI 通过 /sources 统一看板列出各源。
+CREATE TABLE IF NOT EXISTS rss_feeds (
+    id                    TEXT PRIMARY KEY,
+    name                  TEXT NOT NULL DEFAULT '',
+    url_enc               BLOB NOT NULL,
+    last_entry_guid       TEXT,
+    etag                  TEXT,
+    last_modified         TEXT,
+    last_polled_at        TEXT,
+    poll_interval_minutes INTEGER NOT NULL DEFAULT 60,
+    enabled               INTEGER NOT NULL DEFAULT 1,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rss_feeds_enabled_polled
+    ON rss_feeds(enabled, last_polled_at);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
@@ -465,6 +494,46 @@ CREATE TABLE IF NOT EXISTS outbound_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_outbound_audit_ts ON outbound_audit(ts_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_outbound_audit_session ON outbound_audit(session_id, ts_ms);
+
+-- Internal knowledge linker (per docs/superpowers/specs/2026-05-19-internal-knowledge-linking-design.md)
+-- Two additive tables, CREATE TABLE IF NOT EXISTS — old vaults auto-migrate on next open.
+CREATE TABLE IF NOT EXISTS item_entities (
+    item_id     TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (item_id, kind, value)
+);
+CREATE INDEX IF NOT EXISTS idx_item_entities_kv ON item_entities(kind, value);
+
+CREATE TABLE IF NOT EXISTS item_links (
+    item_a     TEXT NOT NULL,
+    item_b     TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    weight     REAL NOT NULL,
+    directed   INTEGER NOT NULL DEFAULT 0,
+    evidence   TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (item_a, item_b, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_item_links_a ON item_links(item_a, weight DESC);
+CREATE INDEX IF NOT EXISTS idx_item_links_b ON item_links(item_b, weight DESC);
+
+-- self_evolving_skill_agent: per-query learned expansion words (SkillClaw style).
+-- 与 skill_evolution.rs 的 app_settings.search.learned_expansions（按 topic 维度）互补：
+-- 这里是按 *query_pattern*（小写后的原 query 文本）维度，由 self_evolving_skill_agent
+-- 周期 generate。Heuristic 路径零成本，LLM 路径仅在用户开启 + governor 允许时触发。
+-- 应用阶段（search 路由 expansion）会优先匹配 query_pattern 精确命中，再 fallback
+-- 到 learned_expansions topic 模糊命中。
+CREATE TABLE IF NOT EXISTS skill_expansions (
+    query_pattern  TEXT PRIMARY KEY,
+    expansions     TEXT NOT NULL,            -- JSON array of strings, bounded
+    generated_by   TEXT NOT NULL,            -- 'heuristic' | 'llm'
+    confidence     REAL NOT NULL DEFAULT 0.5,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_skill_expansions_updated ON skill_expansions(updated_at DESC);
 "#;
 
 pub struct Store {
@@ -476,6 +545,19 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+        // QW-3 (storage cleanup): 把 auto_vacuum 切到 INCREMENTAL。
+        // SQLite 的约束：`PRAGMA auto_vacuum = INCREMENTAL` 必须在第一次写入前生效
+        // 才会影响数据库文件 layout：
+        // - 全新 vault → 直接在短连接里设 + VACUUM stamp 进 header
+        // - 老 vault → VACUUM INTO 临时文件（迁移过程中新文件就是 INCREMENTAL 模式），
+        //              校验 integrity_check，原子 rename 回原 path
+        // 任何失败都静默回退 — 老 vault 没有 incremental_vacuum 仍可用，只是不能 shrink。
+        if let Err(e) = Self::ensure_incremental_autovacuum(path) {
+            log::warn!(
+                "QW-3: auto_vacuum setup failed, vault may remain in NONE mode: {e}. \
+                 This is non-fatal — vault works, just won't shrink on delete."
+            );
         }
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
@@ -492,7 +574,11 @@ impl Store {
         Self::migrate_items_content_hash(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
-        Ok(Self { conn })
+        let store = Self { conn };
+        // QW-1: 一次性 purge embed_queue 终态行（done / abandoned）。
+        // 这只是启动 housekeeping；周期清理由 cleanup worker 跑。失败静默忽略。
+        let _ = store.purge_completed_embed_queue();
+        Ok(store)
     }
 
     /// 打开内存数据库（测试用）
@@ -508,6 +594,140 @@ impl Store {
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// QW-3: 把 vault 的 `auto_vacuum` 模式切到 INCREMENTAL（在主 Connection 打开之前调用）。
+    ///
+    /// SQLite 约束：`PRAGMA auto_vacuum = INCREMENTAL` 只在 **数据库未写入任何 schema
+    /// 之前** 设置才会真正改变 db header；老 vault 必须走 `VACUUM INTO` 迁移。
+    ///
+    /// 三条路径：
+    /// 1. 文件不存在（全新 vault）→ 短连接设 pragma + VACUUM stamp，close。
+    /// 2. 文件存在 + 已是 INCREMENTAL（mode=2）→ no-op 直接返回。
+    /// 3. 文件存在 + mode != 2 → VACUUM INTO `<path>.av-migrate.tmp`，
+    ///    校验 integrity_check，atomic rename(tmp, path)。
+    ///
+    /// 任何失败都返回 Err 让 caller log warn 后静默继续（老 vault 仍可用，只是不
+    /// shrink）。函数在主连接打开之前调用，所以 rename 不被占用阻塞（Windows
+    /// 兼容）。
+    fn ensure_incremental_autovacuum(path: &Path) -> Result<()> {
+        // 1) 全新 vault
+        if !path.exists() {
+            let conn = Connection::open(path)?;
+            conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")?;
+            drop(conn);
+            return Ok(());
+        }
+        // 2) 老 vault — 先探测当前 mode
+        let current_mode: i64 = {
+            let conn = Connection::open(path)?;
+            conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+                .unwrap_or(0)
+        };
+        if current_mode == 2 {
+            return Ok(()); // 已是 INCREMENTAL，no-op
+        }
+        // 3) 走迁移
+        Self::migrate_to_incremental_autovacuum(path)
+    }
+
+    /// QW-3 migration: 用 `VACUUM INTO` 把老 vault 重写到 `<path>.av-migrate.tmp`，
+    /// 校验 integrity_check + mode=INCREMENTAL，atomic rename 回 path。
+    ///
+    /// 调用者保证主 Connection **尚未** 打开（在 Store::open 内 SCHEMA 之前）。
+    /// 任何步骤失败 → 删 tmp 残留 + 返回 Err。需要 ~2× 原文件磁盘空间（per D4）。
+    fn migrate_to_incremental_autovacuum(path: &Path) -> Result<()> {
+        let tmp_path = {
+            let mut p = path.to_path_buf();
+            let fname = p
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "vault.db".into());
+            p.set_file_name(format!("{fname}.av-migrate.tmp"));
+            p
+        };
+        // 清残留
+        let _ = std::fs::remove_file(&tmp_path);
+
+        // 1) VACUUM INTO 'tmp' — 源连接短期持有 + scope drop 释放原文件句柄
+        {
+            let src_conn = Connection::open(path)?;
+            let tmp_str = tmp_path.to_string_lossy().replace('\'', "''");
+            let vacuum_sql = format!("VACUUM INTO '{tmp_str}';");
+            if let Err(e) = src_conn.execute_batch(&vacuum_sql) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e.into());
+            }
+        }
+
+        // 2) 打开 tmp 切 INCREMENTAL 模式 + stamp 进 header + 校验
+        {
+            let tmp_conn = Connection::open(&tmp_path)?;
+            if let Err(e) = tmp_conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;") {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e.into());
+            }
+            let ok: String = tmp_conn
+                .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+                .unwrap_or_else(|_| "fail".into());
+            if ok != "ok" {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(VaultError::Crypto(format!(
+                    "QW-3: integrity_check failed on migrated db: {ok}"
+                )));
+            }
+            let mode: i64 = tmp_conn
+                .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+                .unwrap_or(0);
+            if mode != 2 {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(VaultError::Crypto(format!(
+                    "QW-3: tmp db auto_vacuum mode is {mode}, expected 2 (INCREMENTAL)"
+                )));
+            }
+        }
+
+        // 3) atomic rename(tmp → path)。主连接尚未打开，路径无占用。
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(VaultError::Crypto(format!(
+                "QW-3: rename {} -> {} failed: {e}",
+                tmp_path.display(),
+                path.display()
+            )));
+        }
+        log::info!(
+            "QW-3: auto_vacuum migration succeeded for {}",
+            path.display()
+        );
+        Ok(())
+    }
+
+    /// QW-3: 调 `PRAGMA incremental_vacuum(N)` 回收最多 N 个 free page 给 OS。
+    ///
+    /// 只在 auto_vacuum=INCREMENTAL 模式下有效；其他模式静默 no-op。
+    /// 由后台 cleanup worker 周期调，每次回收 500 页（默认 4KB/页 → 2MB/次）
+    /// 避免一次拉满 IO。返回 free pages 之前 vs 之后的差值（估算回收量）。
+    pub fn incremental_vacuum(&self, max_pages: u32) -> Result<usize> {
+        let before: i64 = self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap_or(0);
+        let sql = format!("PRAGMA incremental_vacuum({max_pages});");
+        let _ = self.conn.execute_batch(&sql);
+        let after: i64 = self
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap_or(0);
+        Ok((before - after).max(0) as usize)
+    }
+
+    /// QW-3: 探测当前 auto_vacuum mode（0=NONE, 1=FULL, 2=INCREMENTAL）。诊断用。
+    pub fn auto_vacuum_mode(&self) -> Result<i64> {
+        let mode: i64 = self
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        Ok(mode)
     }
 
     /// 多层记忆（2026-05-18）：memories 表新增 topic_key / cold / superseded_by 列（幂等）。
@@ -1228,6 +1448,82 @@ mod tests {
         let dek = test_dek();
         let result = store.get_conversation_by_id(&dek, "does-not-exist").unwrap();
         assert!(result.is_none());
+    }
+
+    /// QW-3: 全新 vault 打开后 auto_vacuum 应是 INCREMENTAL (=2)。
+    #[test]
+    fn fresh_vault_uses_incremental_autovacuum() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("fresh.db");
+        let store = Store::open(&db_path).unwrap();
+        let mode = store.auto_vacuum_mode().unwrap();
+        assert_eq!(mode, 2, "fresh vault must be INCREMENTAL");
+    }
+
+    /// QW-3: 老 vault（NONE 模式 auto_vacuum=0）打开后被迁移到 INCREMENTAL。
+    #[test]
+    fn legacy_vault_migrated_to_incremental_autovacuum() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("legacy.db");
+
+        // 构造一个 auto_vacuum=0 (NONE) 的 vault：手动创建并写入一些 schema
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            // 显式设 NONE 让本测试不依赖默认值
+            conn.execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;").unwrap();
+            conn.execute_batch(
+                "CREATE TABLE legacy_table (id INTEGER); INSERT INTO legacy_table VALUES (1);"
+            ).unwrap();
+            let mode: i64 = conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).unwrap();
+            assert_eq!(mode, 0, "test precondition: legacy vault should be NONE");
+        }
+
+        // Store::open 应该把它迁到 INCREMENTAL
+        let store = Store::open(&db_path).unwrap();
+        let mode = store.auto_vacuum_mode().unwrap();
+        assert_eq!(mode, 2, "legacy vault must be migrated to INCREMENTAL");
+
+        // 原表数据应当保留
+        let n: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM legacy_table", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "legacy data must survive migration");
+
+        // 迁移临时文件应被清掉
+        let tmp_file = db_path.with_file_name("legacy.db.av-migrate.tmp");
+        assert!(!tmp_file.exists(), "migration tmp file must be removed");
+    }
+
+    /// QW-3: incremental_vacuum 在 INCREMENTAL 模式下 ≥ 0，不报错。
+    #[test]
+    fn incremental_vacuum_runs_without_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Store::open(&tmp.path().join("v.db")).unwrap();
+        let dek = test_dek();
+        // 插入一些数据再删，制造 freelist
+        for i in 0..10 {
+            let title = format!("t{i}");
+            store
+                .insert_item(&dek, &title, "x".repeat(1000).as_str(), None, "note", None, None)
+                .unwrap();
+        }
+        // 拿到 IDs 删掉
+        let mut ids: Vec<String> = Vec::new();
+        {
+            let mut stmt = store.conn.prepare("SELECT id FROM items").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            for id in rows {
+                ids.push(id.unwrap());
+            }
+        }
+        for id in &ids {
+            // 硬删而非软删让 page 真的进 freelist
+            store.conn.execute("DELETE FROM items WHERE id = ?1", [id]).unwrap();
+        }
+        // incremental_vacuum 不报错（可能 0 页因为 SQLite 实际页释放策略）
+        let _ = store.incremental_vacuum(100).unwrap();
+        assert_eq!(store.auto_vacuum_mode().unwrap(), 2);
     }
 }
 
