@@ -6,9 +6,11 @@
 ## 目录
 
 - [Windows — WinGet](#windows--winget)
+- [Windows — Scoop(开发者)](#windows--scoop开发者)
 - [Linux — APT (Debian / Ubuntu)](#linux--apt-debian--ubuntu)
 - [Linux — DNF / YUM (RHEL / Fedora / openSUSE)](#linux--dnf--yum-rhel--fedora--opensuse)
 - [Linux — AppImage (通用)](#linux--appimage-通用)
+- [Linux / macOS — Homebrew(CLI/server)](#linux--macos--homebrewcliserver)
 - [Tauri in-app auto-updater](#tauri-in-app-auto-updater)
 - [其他平台与路径(v1.1 规划)](#其他平台与路径v11-规划)
 - [验证安装](#验证安装)
@@ -31,6 +33,37 @@ winget upgrade qiurui144.Attune
 
 > **注**:首次发布的新版本会在 microsoft/winget-pkgs 审核 1-3 天后才能被 `winget search` 命中.
 > 若 `winget` 提示 "No package found",可改走 [Tauri 内置自更新](#tauri-in-app-auto-updater) 或 [手动下载](https://github.com/qiurui144/attune/releases).
+
+## Windows — Scoop(开发者)
+
+Scoop 适合开发者:不需管理员权限、多版本共存、纯命令行.
+
+### 首次安装
+
+```powershell
+# 如果还没装 Scoop:
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+
+# 添加 attune bucket + 安装
+scoop bucket add attune https://github.com/qiurui144/scoop-attune
+scoop install attune
+```
+
+### 升级
+
+```powershell
+scoop update attune
+```
+
+### 卸载
+
+```powershell
+scoop uninstall attune
+scoop bucket rm attune
+```
+
+> **WinGet vs Scoop**:WinGet 装 Tauri 桌面 GUI(NSIS installer + 系统 PATH);Scoop 装 CLI/server 二进制(开发者隔离 + 易切版本).两者**可并存**,各装各的.
 
 ## Linux — APT (Debian / Ubuntu)
 
@@ -108,6 +141,39 @@ chmod +x Attune.AppImage
 
 **AppImage 不走 APT 自动升级** — Tauri 内置 auto-updater 会处理(见下).
 
+## Linux / macOS — Homebrew(CLI/server)
+
+Homebrew tap 仅分发 **CLI/server 二进制**(不含 Tauri 桌面 GUI).适合 headless 部署、远程服务器、习惯 Homebrew 的 macOS 开发者.
+
+### 首次安装
+
+```bash
+brew tap qiurui144/attune
+brew install attune
+```
+
+### 升级
+
+```bash
+brew update && brew upgrade attune
+```
+
+### 卸载
+
+```bash
+brew uninstall attune
+brew untap qiurui144/attune
+```
+
+### 启动
+
+```bash
+attune --help                  # CLI usage
+attune-server-headless          # 启动 server 在 :18900
+```
+
+> **macOS 桌面 GUI**:Homebrew tap 仅装 CLI;桌面 .dmg 走 [GitHub Releases](https://github.com/qiurui144/attune/releases/latest)(v1.1 加 cask 自动化).
+
 ---
 
 ## Tauri in-app auto-updater
@@ -132,9 +198,10 @@ chmod +x Attune.AppImage
 
 | 平台 / 工具 | 状态 | 备注 |
 |------------|------|------|
-| **Scoop** (Windows) | v1.1 | 需要单独 bucket 仓库,工作量大,推后 |
+| **Scoop** (Windows) | ✅ v1.0.11 | 见 [Windows — Scoop](#windows--scoop开发者).独立 bucket `qiurui144/scoop-attune` |
+| **Homebrew** (Linux/macOS) | ✅ v1.0.11 | 见 [Homebrew](#linux--macos--homebrewcliserver).独立 tap `qiurui144/homebrew-attune`,**CLI/server only** |
 | **Chocolatey** (Windows) | v1.1 | 需要 community 审核,周期长 |
-| **Homebrew** (macOS) | 不做 | 项目暂不支持 macOS(全局优先级) |
+| **Homebrew Cask** (macOS GUI) | v1.1 | 桌面 GUI 走 cask,需先解决 macOS Tauri build |
 | **AUR** (Arch) | v1.1 | 期待社区贡献 PKGBUILD |
 | **Flatpak** (Linux) | 评估中 | 用户群少,优先级低 |
 | **Snap** (Linux) | 不做 | Canonical 锁定,与 deb/AppImage 冲突 |
