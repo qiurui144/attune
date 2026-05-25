@@ -124,6 +124,11 @@ jobs:
     # rustsec/audit-check caches advisory-db; cargo-deny checks licenses + bans.
     # No untrusted input used in run: steps.
     runs-on: ubuntu-latest
+    # rustsec/audit-check@v2 posts findings as a GitHub Check Run (POST /repos/.../check-runs);
+    # needs checks:write. contents:read keeps the rest of the job least-privilege.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
 

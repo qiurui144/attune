@@ -312,6 +312,11 @@ fn registry_scan_with_key_loads_encrypted_paid_plugin() {
 /// 模拟 LLM agent binary：读 ATTUNE_LLM_ENDPOINT env，不存在则 exit 4（同 fact_extractor 约定）。
 /// 场景 1：传入正确 env → exit 0 + stdout 含 endpoint。
 /// 场景 2：不传 env     → exit 4（"LLM_ENDPOINT not set"，即 P1:3 bug 复现）。
+///
+/// Unix-only: mock binary is a `#!/bin/sh` script that Windows cannot exec
+/// (error 193 "not a valid Win32 application"). The env-propagation path under
+/// test is platform-agnostic Rust code, so Unix coverage is sufficient.
+#[cfg(unix)]
 #[test]
 fn agent_runner_subprocess_passes_llm_env_to_binary() {
     use attune_core::agent_runner::run_agent_subprocess;
