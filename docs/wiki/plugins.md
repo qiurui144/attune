@@ -31,7 +31,7 @@ Attune OSS（通用知识库）
 ### 前提
 
 - Attune Pro 订阅（30 天免费试用）
-- 网络可访问 `pluginhub.attune.ai`（离线场景见下文）
+- 网络可访问 `pluginhub.engi-stack.com`（离线场景见下文）
 
 ### 安装步骤
 

@@ -563,7 +563,7 @@ W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
 
 **FEAT-1 cloud endpoint UI gap 关闭**:
 - backend `settings.cloud.{accounts_url, gateway_url}` 字段 + UI Settings 会员 tab "高级 · 自部署 cloud 后端" 折叠区 + 3 URL 输入 + 保存即热重载 pluginhub
-- 关闭前次 Cloud-Integ-1 发现的自部署用户 UX gap (硬编码 attune.ai 没法切到私有 cloud)
+- 关闭前次 Cloud-Integ-1 发现的自部署用户 UX gap (硬编码 engi-stack.com 没法切到私有 cloud)
 
 **FEAT-2 浏览器 fallback (FIX-9 阶段 1)**:
 - `attune-core/web_search_browser.rs` 加 `browser_cache_dir()` / `cached_browser_path()` / `resolve_browser()` 三段式 API + `BrowserResolution` enum (System / Cached / NeedsDownload)
@@ -599,7 +599,7 @@ W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
 **Cloud 自部署可用性**：AMD 笔电 (Docker 29 + Compose v2) 跑通 pluginhub:9100 / accounts:8002 / llm-gateway:8001 三服务 + /health ✓。修了上游 cloud 仓 2 个 bug（Dockerfile copy 顺序 + alembic 0002 down_revision 链断，本地 commit 558df7c 待 push）。
 
 **已知限制 (v0.7 候选)**：
-- attune-desktop Settings/Wizard 没字段配置自定义 accounts/pluginhub URL — 默认硬编码 `attune.ai` 云端。私有 cloud 部署（自托管 / dev 环境）目前只能 SQL 直改 `app_settings`。`state.reload_plugin_hub` 后端已支持热切，缺 UI 入口
+- attune-desktop Settings/Wizard 没字段配置自定义 accounts/pluginhub URL — 默认硬编码 `engi-stack.com` 云端。私有 cloud 部署（自托管 / dev 环境）目前只能 SQL 直改 `app_settings`。`state.reload_plugin_hub` 后端已支持热切，缺 UI 入口
 - Reader / 项目卷宗 round-trip 未在本轮 Playwright E2E 覆盖
 - CI Python lint-and-test + Windows cargo 在 commit 6421de9 修复后转绿（修了 `models/` gitignore 误吞 Python 包 + Windows 浏览器路径假设）
 
@@ -690,7 +690,7 @@ W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
 核心原则：**云端为主，本地为辅；本地 LLM 当前研发成本过高，暂时不主推**。
 
 Wizard 推荐顺序：
-1. ★ **Attune Pro Membership**（默认）— `https://gateway.attune.ai/v1`，登录即用 token 配额
+1. ★ **Attune Pro Membership**（默认）— `https://gateway.engi-stack.com/v1`，登录即用 token 配额
 2. **BYOK**：用户已有付费会员 API key — OpenAI / Anthropic / Gemini / DeepSeek / Qwen
 3. **本地 Ollama**（advanced，K3 一体机预装 qwen2.5:1.5b/3b 走本地）
 

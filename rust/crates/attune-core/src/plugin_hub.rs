@@ -169,7 +169,7 @@ impl PluginHubProvider for MockPluginHubProvider {
         Ok(PluginListingResponse {
             hub_version: "1.1-mock".into(),
             user_plan: self.user_plan.clone(),
-            upgrade_url: "https://accounts.attune.ai/upgrade".into(),
+            upgrade_url: "https://accounts.engi-stack.com/upgrade".into(),
             plugins: self._builtin_plugins(),
         })
     }
@@ -284,7 +284,7 @@ fn _default_hub_version() -> String {
     "1.0".into()
 }
 fn _default_upgrade_url() -> String {
-    "https://accounts.attune.ai/upgrade".into()
+    "https://accounts.engi-stack.com/upgrade".into()
 }
 
 #[derive(Debug, Serialize)]
@@ -456,10 +456,10 @@ mod tests {
 
     #[test]
     fn http_provider_url_join() {
-        let h = HttpPluginHubProvider::new("https://hub.attune.ai/", "key");
-        assert_eq!(h.url("/api/v1/index.json"), "https://hub.attune.ai/api/v1/index.json");
-        let h2 = HttpPluginHubProvider::new("https://hub.attune.ai", "key");
-        assert_eq!(h2.url("/api/v1/index.json"), "https://hub.attune.ai/api/v1/index.json");
+        let h = HttpPluginHubProvider::new("https://hub.engi-stack.com/", "key");
+        assert_eq!(h.url("/api/v1/index.json"), "https://hub.engi-stack.com/api/v1/index.json");
+        let h2 = HttpPluginHubProvider::new("https://hub.engi-stack.com", "key");
+        assert_eq!(h2.url("/api/v1/index.json"), "https://hub.engi-stack.com/api/v1/index.json");
     }
 
     #[test]

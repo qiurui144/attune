@@ -691,7 +691,7 @@ mod tests {
         *state.llm_config.lock().unwrap() = Some(LlmGatewayConfig {
             upstream_endpoint: "https://api.openai.com/v1".into(),
             upstream_api_key: "sk-secret".into(),
-            gateway_endpoint: "https://gateway.attune.ai/v1".into(),
+            gateway_endpoint: "https://gateway.engi-stack.com/v1".into(),
             default_model: "gpt-4o-mini".into(),
         });
 
@@ -728,7 +728,7 @@ mod tests {
         *state.llm_config.lock().unwrap() = Some(LlmGatewayConfig {
             upstream_endpoint: "https://api.openai.com/v1".into(),
             upstream_api_key: "sk-secret".into(),
-            gateway_endpoint: "https://gateway.attune.ai/v1".into(),
+            gateway_endpoint: "https://gateway.engi-stack.com/v1".into(),
             default_model: "gpt-4o-mini".into(),
         });
 
@@ -766,7 +766,7 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
         let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let endpoint = val.get("endpoint").and_then(|v| v.as_str()).unwrap();
-        assert_eq!(endpoint, "https://gateway.attune.ai/v1");
+        assert_eq!(endpoint, "https://gateway.engi-stack.com/v1");
         // upstream 密钥不暴露
         let s = String::from_utf8(body.to_vec()).unwrap();
         assert!(!s.contains("sk-secret"));

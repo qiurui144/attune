@@ -140,7 +140,7 @@ per `2026-04-17-product-positioning-design.md`「混合智能 + 分层成本」+
 │  cloud accounts /me response:                                                │
 │    {                                                                         │
 │      tier: "pro",                                                            │
-│      gateway_url: "https://gw.attune.ai/v1",                                 │
+│      gateway_url: "https://gw.engi-stack.com/v1",                                 │
 │      gateway_token: "sk-pro-xxx",                                            │
 │      llm_default_model: "deepseek-v4-flash",                                 │
 │      vlm_default_model: "gpt-4o",                                            │
@@ -331,7 +331,7 @@ fn select_provider(messages: &[ChatMessage]) -> ProviderKind {
   "user_id": "...",
   "tier": "pro",
   "plan": "pro_plus",
-  "gateway_url": "https://gw.attune.ai/v1",
+  "gateway_url": "https://gw.engi-stack.com/v1",
   "gateway_token": "sk-pro-xxx",
   "gateway_default_model": "deepseek-v4-flash",
   "llm_default_model": "deepseek-v4-flash",

@@ -57,7 +57,7 @@ locale=zh-CN),L0-L5 分层,每元素定位→操作→断言→截图,`page.on(c
 | 2 | attune 设置无自部署 pluginhub license_key 输入框 | 设置页补 license key 入口 |
 | 3 | `extract_tarball` shell-out 系统 tar(Windows P0 隐患) | gzip 走纯 Rust tar+flate2 |
 | 4 | pluginhub `PluginVersion`/`License`/`Plugin` model 漏 4 列(`d197651` 迁移已建库但 model 未声明)→ upload/license/index 全 500 | AMD pluginhub models.py 补列 + 重建镜像 |
-| 5 | 本机 aTrust 零信任代理劫持 `*.attune.ai` DNS | SSH 隧道直连 AMD pluginhub 容器(传输层,不动 cloud 设计) |
+| 5 | 本机 aTrust 零信任代理劫持 `*.engi-stack.com` DNS | SSH 隧道直连 AMD pluginhub 容器(传输层,不动 cloud 设计) |
 
 attune 代码改动经 2 轮 code-review,修 6 项;`plugin_sync` 单测 11/0。
 

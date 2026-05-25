@@ -849,7 +849,7 @@ function MemberPanel(): JSX.Element {
   const logging = useSignal(false);
 
   // FEAT-1: 自部署 cloud endpoint 配置 (UX gap 关闭).
-  // 默认 attune.ai, 自部署用户填入私有 cluster URL.
+  // 默认 engi-stack.com, 自部署用户填入私有 cluster URL.
   const showAdvancedCloud = useSignal(false);
   const cloudAccountsUrl = useSignal('');
   const cloudGatewayUrl = useSignal('');

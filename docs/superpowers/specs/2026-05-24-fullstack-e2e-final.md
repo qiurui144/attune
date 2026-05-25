@@ -116,7 +116,7 @@ GET status.attune.local/api/v1/endpoints/statuses →
 ### Bug-A (BLOCKER for 5/26 上架) - official-web WP siteurl 错配
 - **现象** `www.attune.local` → 301 redirect → `http://localhost:10086/zh_cn/首页/`
 - **根因** WP 数据库 wp_options.siteurl=`http://localhost:10086`,home 同样
-- **修复** `UPDATE wp_options SET option_value='https://www.attune.ai' WHERE option_name IN ('siteurl','home');`(上架前必跑)
+- **修复** `UPDATE wp_options SET option_value='https://www.engi-stack.com' WHERE option_name IN ('siteurl','home');`(上架前必跑)
 - **不影响** attune client/cloud accounts/llm-gateway/pluginhub 任何核心路径
 
 ### Bug-B (P2) - new-api CPU overload threshold
@@ -198,6 +198,6 @@ GET status.attune.local/api/v1/endpoints/statuses →
 - chat+RAG 真链路打通
 
 **上架前 deploy checklist**(必跑):
-1. SQL UPDATE wp_options siteurl/home → 真生产域名(`https://www.attune.ai`)
+1. SQL UPDATE wp_options siteurl/home → 真生产域名(`https://www.engi-stack.com`)
 2. new-api options 表 cpu_overload_threshold → 99(或 docker env 注入)
 3. attune-server-headless `--vault-path` 或 `--data-dir` flag 加上(避免笔电用户 conflict 默认 ~/.local/share/attune)

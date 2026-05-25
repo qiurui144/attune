@@ -483,7 +483,7 @@ def scene_G(page: Page) -> None:
     click(page, "button", "会员")
     page.wait_for_timeout(500)
     has_member = ("会员" in page.content()) or ("license" in page.content().lower()) \
-        or ("attune.ai" in page.content().lower())
+        or ("engi-stack.com" in page.content().lower())
     check("G", "会员 tab — 含 cloud accounts / license 信息", has_member)
 
     # 关闭 modal

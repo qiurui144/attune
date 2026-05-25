@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-CLOUD_URL="${ATTUNE_CLOUD_URL:-https://accounts.attune.ai}"
+CLOUD_URL="${ATTUNE_CLOUD_URL:-https://accounts.engi-stack.com}"
 INSTALL_PREFIX="${ATTUNE_INSTALL_PREFIX:-$HOME/.local}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ATTUNE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -39,7 +39,7 @@ OPTIONS:
   -h, --help                      本帮助
 
 ENV:
-  ATTUNE_CLOUD_URL                云端 accounts URL (默认 https://accounts.attune.ai)
+  ATTUNE_CLOUD_URL                云端 accounts URL (默认 https://accounts.engi-stack.com)
   ATTUNE_INSTALL_PREFIX           安装前缀 (默认 ~/.local)
 
 EXAMPLES:

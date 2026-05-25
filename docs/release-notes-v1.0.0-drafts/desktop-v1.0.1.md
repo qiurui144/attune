@@ -27,7 +27,7 @@ All bug fixes from the server/CLI v1.0.1 release apply to the embedded server pr
 ## Known Issues
 
 - macOS build not yet available; targeting v1.1.
-- Auto-updater requires internet access to `releases.attune.ai`; air-gap environments should use the `attune-desktop-installers` OCI image and manual install.
+- Auto-updater requires internet access to `releases.engi-stack.com`; air-gap environments should use the `attune-desktop-installers` OCI image and manual install.
 
 ---
 

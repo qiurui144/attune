@@ -56,7 +56,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   // 不预设第三方 free API tier（避免误导）；本地 LLM 暂时不主推（研发成本高）
   const [provider, setProvider] = useState<string>('attune-pro');
   const [apiKey, setApiKey] = useState('');
-  const [endpoint, setEndpoint] = useState('https://gateway.attune.ai/v1');
+  const [endpoint, setEndpoint] = useState('https://gateway.engi-stack.com/v1');
   const [cloudModel, setCloudModel] = useState('auto');
   const [memberLoggingIn, setMemberLoggingIn] = useState(false);
   const [memberReady, setMemberReady] = useState(false);
@@ -418,7 +418,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                 //   - 不预设第三方 "free API tier"（避免误导，用户的"免费"指浏览器 web 会话）
                 const presets: Record<string, { endpoint: string; model: string }> = {
                   // ── ★ 主推：attune Pro 会员 gateway ──
-                  'attune-pro': { endpoint: 'https://gateway.attune.ai/v1', model: 'auto' },
+                  'attune-pro': { endpoint: 'https://gateway.engi-stack.com/v1', model: 'auto' },
                   // ── BYOK：用户已有付费会员的 API key ──
                   openai: { endpoint: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
                   anthropic: { endpoint: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-20241022' },

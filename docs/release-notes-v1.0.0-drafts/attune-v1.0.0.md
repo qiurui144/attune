@@ -149,8 +149,8 @@ Built with Rust, Axum, tantivy, usearch, hdbscan, whisper.cpp, and the broader R
 
 ## Documentation
 
-- Wiki: https://wiki.attune.ai/attune
-- Install guide: https://wiki.attune.ai/attune/install
+- Wiki: https://wiki.engi-stack.com/attune
+- Install guide: https://wiki.engi-stack.com/attune/install
 - Source: https://github.com/qiurui144/attune
 - Issues: https://github.com/qiurui144/attune/issues
 - Changelog (full): see `rust/RELEASE.md` in the repository

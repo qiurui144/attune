@@ -127,7 +127,7 @@ K3 出厂 IP DHCP, 用户:
 
 A/B 双分区 + signed firmware, OTA 拉新版 image:
 ```bash
-attune-cli k3 upgrade  # 从 attune.ai/firmware/k3 拉最新
+attune-cli k3 upgrade  # 从 engi-stack.com/firmware/k3 拉最新
 ```
 
 ## 4. Docker / GitHub Container Registry (ghcr.io)
@@ -260,9 +260,9 @@ scp my-vault-2026-05.profile new-laptop:
 |------|------|------|
 | 基础 chat (cloud LLM) | OpenAI / Anthropic / Gemini API 端 | — |
 | 网络搜索 | 系统已装 Chrome (chromiumoxide CDP) | v0.7 fallback 自动下载 |
-| Plugin marketplace | hub.attune.ai (公共) 或 自部署 pluginhub URL | — |
-| 会员验证 | accounts.attune.ai 或 自部署 accounts URL | — |
-| LLM Gateway | gateway.attune.ai (Pro Membership) 或 BYOK | — |
+| Plugin marketplace | hub.engi-stack.com (公共) 或 自部署 pluginhub URL | — |
+| 会员验证 | accounts.engi-stack.com 或 自部署 accounts URL | — |
+| LLM Gateway | gateway.engi-stack.com (Pro Membership) 或 BYOK | — |
 
 自部署用户 v0.6.3 起在 Settings → 会员 → "高级 · 自部署 cloud 后端" 配 3 URL.
 

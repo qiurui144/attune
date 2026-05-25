@@ -189,13 +189,13 @@ enum Commands {
     /// 登录后 settings 大多数项锁定 (云端下发), 并触发 pro 插件自动同步.
     Login {
         email: String,
-        /// 云端 accounts base URL (默认 https://accounts.attune.ai)
-        #[arg(long, default_value = "https://accounts.attune.ai")]
+        /// 云端 accounts base URL (默认 https://accounts.engi-stack.com)
+        #[arg(long, default_value = "https://accounts.engi-stack.com")]
         cloud_url: String,
     },
     /// 拉云端 entitled pro 插件清单, 自动下载 + 装载缺的
     SyncPlugins {
-        #[arg(long, default_value = "https://accounts.attune.ai")]
+        #[arg(long, default_value = "https://accounts.engi-stack.com")]
         cloud_url: String,
     },
     /// 打包 + 上传 plugin 到 pluginhub (开发者侧分发流程)
@@ -204,7 +204,7 @@ enum Commands {
         /// plugin 源目录 (含 plugin.yaml / bin/ / plugin.sig)
         plugin_dir: std::path::PathBuf,
         /// pluginhub base URL (lawcontrol/pluginhub 部署)
-        #[arg(long, default_value = "https://hub.attune.ai")]
+        #[arg(long, default_value = "https://hub.engi-stack.com")]
         hub_url: String,
         /// admin token (env PLUGINHUB_ADMIN_TOKEN)
         #[arg(long)]

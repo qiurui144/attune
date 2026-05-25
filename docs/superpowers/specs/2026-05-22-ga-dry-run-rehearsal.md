@@ -119,7 +119,7 @@ GET https://github.com/qiurui144/attune/releases/download/desktop-v1.0.0-rc.2/At
 | 4 | `version-audit` ERR：配对漂移 attune=v0.7.0 vs attune-pro=v0.9.5 | 脚本只取严格 GA tag，rc 阶段两仓 main 均是旧 GA | 脚本改为含 rc/beta/alpha tag 参与配对 | `9b0a132` |
 | 5 | `ga-ceremony` ERR：cloud dirty —`.claude/` + `secrets/` untracked | 脚本把 untracked 文件也算 dirty | 脚本过滤 `??` 行 | `9b0a132` |
 | 6 | attune-pro RELEASE.md 无 v1.0.0-rc.2 节 | version-audit WARN | 在 v1.0.0 节中添加 rc.2 子节 | `a152047` |
-| 7 | cloud GATEWAY_PUBLIC_URL 硬编码 attune.ai | 自部署用户无法覆盖 | 参数化为 `${GATEWAY_PUBLIC_URL:-...}` | `4076720` |
+| 7 | cloud GATEWAY_PUBLIC_URL 硬编码 engi-stack.com | 自部署用户无法覆盖 | 参数化为 `${GATEWAY_PUBLIC_URL:-...}` | `4076720` |
 
 ---
 

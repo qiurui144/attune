@@ -443,7 +443,7 @@ Output: `target/release/bundle/{deb,appimage,nsis,msi}/`.
 
 ### Auto-update
 
-Desktop checks `https://updates.attune.ai/desktop/{target}/{version}/latest.json`
+Desktop checks `https://updates.engi-stack.com/desktop/{target}/{version}/latest.json`
 30 seconds after launch. Updates are minisign-signed; pubkey embedded in binary.
 See `docs/superpowers/specs/2026-04-25-industry-attune-design.md` §6.6 for full design.
 

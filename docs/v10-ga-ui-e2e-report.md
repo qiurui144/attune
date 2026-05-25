@@ -84,7 +84,7 @@
 ### G — Settings 6 tab ✅
 - G1 **设置入口在「账号菜单」**（侧边栏底部用户头像下拉），不是 sidebar 一级入口 — 这是产品决策，与 ChatGPT/Gemini 范式一致
 - G2-G7 六个 tab（通用 / AI 大脑 / 数据 / 会员 / 隐私 / 关于）全部点击 + 渲染 PASS
-- G8 会员 tab 含 cloud accounts / license / attune.ai 公共云入口信息
+- G8 会员 tab 含 cloud accounts / license / engi-stack.com 公共云入口信息
 - 截图：`G-settings/01-{通用,AI 大脑,数据,会员,隐私,关于}.png`
 
 ### H — Vault lifecycle ✅（部分由设计决定）

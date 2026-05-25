@@ -86,7 +86,7 @@ pub struct LoginPasswordReq {
 ///
 /// 说明：
 /// - 密码只用于本次请求，不持久化到磁盘。
-/// - 默认 cloud_url 为 https://accounts.attune.ai，可由请求覆盖。
+/// - 默认 cloud_url 为 https://accounts.engi-stack.com，可由请求覆盖。
 pub async fn login_password(
     State(state): State<SharedState>,
     Json(req): Json<LoginPasswordReq>,
@@ -100,7 +100,7 @@ pub async fn login_password(
 
     let cloud_url = req
         .cloud_url
-        .unwrap_or_else(|| "https://accounts.attune.ai".to_string());
+        .unwrap_or_else(|| "https://accounts.engi-stack.com".to_string());
     let mut client = CloudClient::new(cloud_url);
 
     let user = client.login(req.email.trim(), &req.password).map_err(|e| {
@@ -267,7 +267,7 @@ mod tests {
         let existing = serde_json::json!({"llm": {"model": "qwen2.5:3b"}});
         let merged = merge_gateway_into_settings(
             existing,
-            "https://gateway.attune.ai/v1",
+            "https://gateway.engi-stack.com/v1",
             "sk-newapi-abc",
             None,
         );
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
         assert_eq!(
             llm.get("endpoint").and_then(|v| v.as_str()),
-            Some("https://gateway.attune.ai/v1")
+            Some("https://gateway.engi-stack.com/v1")
         );
         assert_eq!(llm.get("api_key").and_then(|v| v.as_str()), Some("sk-newapi-abc"));
         // preexisting fields preserved
@@ -289,7 +289,7 @@ mod tests {
         // 模拟 fresh vault — 完全没有 llm 字段
         let merged = merge_gateway_into_settings(
             serde_json::json!({}),
-            "https://gateway.attune.ai/v1",
+            "https://gateway.engi-stack.com/v1",
             "sk-newapi-fresh",
             Some("deepseek-v4-flash"),
         );

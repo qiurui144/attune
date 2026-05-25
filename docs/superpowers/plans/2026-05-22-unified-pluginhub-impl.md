@@ -588,7 +588,7 @@ sed -i 's/- lawcontrol(B2B SaaS)/- attune-enterprise(B2B SaaS, 原 lawcontrol)/'
 - [ ] **Step 2: 配 301**
 - [ ] **Step 3: 测试老 URL 301 到新 URL**
 
-**Acceptance:** 老 URL `https://attune.ai/products/lawcontrol` 返 301，跳到 `/products/attune-enterprise`；新 URL 内容正确。
+**Acceptance:** 老 URL `https://engi-stack.com/products/lawcontrol` 返 301，跳到 `/products/attune-enterprise`；新 URL 内容正确。
 
 ### Task D5.5: Submodule 重定向 + Gitea rename + 本地 dir mv
 
@@ -1028,7 +1028,7 @@ per spec §9 + 附录 A，统一勾选式：
 
 **反向兼容（D4-D5 重叠窗口）：**
 - D4 lawcontrol 仓本地名仍是 `lawcontrol/`，但 cloud 部署用新 image name → cloud 必须在 D5 dir mv 前先用 docker image registry path（不走本地 dir）
-- 客户端老 `lawcontrol.example.com` DNS 301 → `enterprise.attune.ai` 保留 30 天
+- 客户端老 `lawcontrol.example.com` DNS 301 → `enterprise.engi-stack.com` 保留 30 天
 
 ---
 

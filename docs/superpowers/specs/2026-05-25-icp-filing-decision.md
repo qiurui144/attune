@@ -1,10 +1,10 @@
-# ICP 备案决策矩阵 — attune.ai 域名 + cloud 上架路径
+# ICP 备案决策矩阵 — engi-stack.com 域名 + cloud 上架路径
 
 > **状态**：决策报告（user 决策）。**本文不实施任何备案 / 服务器迁移操作**。
 >
 > **触发**：5/26 上架前 Legal P0（per `docs/superpowers/specs/2026-05-25-software-engineering-gap-audit.md` §10.2）。
 >
-> **范围**：仅涵盖 `attune.ai` 域名 + cloud 6 个子域（accounts / gateway / hub / wiki / status / 主域）的中国大陆访问合规路径。OSS 桌面与 GitHub Releases 分发不受影响（不依赖 attune.ai DNS）。
+> **范围**：仅涵盖 `engi-stack.com` 域名 + cloud 6 个子域（accounts / gateway / hub / wiki / status / 主域）的中国大陆访问合规路径。OSS 桌面与 GitHub Releases 分发不受影响（不依赖 engi-stack.com DNS）。
 
 ## 目录
 
@@ -21,9 +21,9 @@
 
 ### 1.1 域名 WHOIS
 
-- **域名**：`attune.ai`
+- **域名**：`engi-stack.com`
 - **顶级域**：`.ai`（Anguilla 安圭拉 TLD，加勒比海英属海外领地）
-- **WHOIS 查询**：本地 `whois attune.ai` 返回为空（`.ai` registry 限制公开 WHOIS；用户已掌握 registrar 后台信息）
+- **WHOIS 查询**：本地 `whois engi-stack.com` 返回为空（`.ai` registry 限制公开 WHOIS；用户已掌握 registrar 后台信息）
 - **持有方**：engi-stack（per 内部记录）
 
 > **重要观察**：`.ai` **不是 .cn 域名**。中国 ICP 备案系统**仅强制 .cn 域名 + 大陆服务器**组合；`.ai` 域名 + 大陆服务器组合在实务上仍需备案（工信部 2018 起加强非 .cn 域名备案监管，参见 [工信部 32 号令](https://www.miit.gov.cn/jgsj/xgj/gzdt/art/2020/art_2fd1cb1a52a14f7ea5f0d6d2d33fc6e8.html)），但执行口径有弹性。
@@ -31,11 +31,11 @@
 ### 1.2 当前 DNS 解析
 
 ```
-$ dig attune.ai +short
+$ dig engi-stack.com +short
 198.18.1.194
 ```
 
-> `198.18.0.0/15` 是 IANA 保留段（RFC 2544 网络性能测试用），**不是公网 IP**。这意味着 attune.ai **当前未在公网 DNS 配置真实 A 记录**，或本地解析被路由器 / Pi-hole 拦截。这是开发期占位状态，**5/26 上架前必须配置真实公网 A 记录**。
+> `198.18.0.0/15` 是 IANA 保留段（RFC 2544 网络性能测试用），**不是公网 IP**。这意味着 engi-stack.com **当前未在公网 DNS 配置真实 A 记录**，或本地解析被路由器 / Pi-hole 拦截。这是开发期占位状态，**5/26 上架前必须配置真实公网 A 记录**。
 
 ### 1.3 服务器位置（计划）
 
@@ -51,12 +51,12 @@ per `cloud/docs/PRODUCTION_DEPLOY.md`：
 
 | 子域 | 组件 | 是否含中国用户敏感数据 |
 |------|------|---------------------|
-| `attune.ai`（official-web）| WordPress 营销官网 | 否（纯营销） |
-| `accounts.attune.ai` | Django 会员中心 | **是**（用户邮箱 / Argon2id 密码 / Stripe 订阅）|
-| `gateway.attune.ai` | new-api LLM 网关 | 部分（脱敏 prompt 元数据 30 天） |
-| `hub.attune.ai` | pluginhub 插件市场 | 否（公开 plugin 元数据）|
-| `wiki.attune.ai` | wiki-web 文档站 | 否（纯文档）|
-| `status.attune.ai` | gatus 监控 | 否（仅服务可用性数据）|
+| `engi-stack.com`（official-web）| WordPress 营销官网 | 否（纯营销） |
+| `accounts.engi-stack.com` | Django 会员中心 | **是**（用户邮箱 / Argon2id 密码 / Stripe 订阅）|
+| `gateway.engi-stack.com` | new-api LLM 网关 | 部分（脱敏 prompt 元数据 30 天） |
+| `hub.engi-stack.com` | pluginhub 插件市场 | 否（公开 plugin 元数据）|
+| `wiki.engi-stack.com` | wiki-web 文档站 | 否（纯文档）|
+| `status.engi-stack.com` | gatus 监控 | 否（仅服务可用性数据）|
 
 ---
 
@@ -130,7 +130,7 @@ per `cloud/docs/PRODUCTION_DEPLOY.md`：
 
 | 项 | 详情 |
 |----|------|
-| **架构** | 主服务器 HK / US（B 方案）；attune.ai 公网解析走 Cloudflare CDN；大陆访问通过 Cloudflare 中国合作节点 (JD Cloud)（部分付费层级支持） |
+| **架构** | 主服务器 HK / US（B 方案）；engi-stack.com 公网解析走 Cloudflare CDN；大陆访问通过 Cloudflare 中国合作节点 (JD Cloud)（部分付费层级支持） |
 | **时长** | 即时（5/26 可上架）；后台可并行启动 ICP 备案 |
 | **成本** | 主服务器 ~$70/月 + Cloudflare Enterprise ~$200/月（CN 节点访问）|
 | **优势** | 5/26 立即上架；大陆访问通过 CDN 加速到 50-100ms；后续可平滑迁移到 ICP + 大陆机房 |
@@ -142,9 +142,9 @@ per `cloud/docs/PRODUCTION_DEPLOY.md`：
 | 项 | 详情 |
 |----|------|
 | **策略** | B 方案 + 主动声明「**v1.0 GA 仅面向国际市场 + 海外华人开发者**」；中国大陆用户使用桌面 OSS 版（不依赖 cloud）|
-| **5/26 可上架范围** | 海外用户 + 中国大陆 OSS 桌面用户（GitHub Releases 直接下载，不经 attune.ai）|
+| **5/26 可上架范围** | 海外用户 + 中国大陆 OSS 桌面用户（GitHub Releases 直接下载，不经 engi-stack.com）|
 | **后续路径** | v1.1 / v1.2 启动 ICP 备案，6-7 月份发布「Attune 中国大陆专版」|
-| **优势** | 上架最简单；产品定位清晰（先国际后大陆）；不影响 OSS 桌面市场（GitHub 直接发布不经过 attune.ai）|
+| **优势** | 上架最简单；产品定位清晰（先国际后大陆）；不影响 OSS 桌面市场（GitHub 直接发布不经过 engi-stack.com）|
 | **劣势** | 短期内丢失大陆云端 SaaS 用户群体；attune-enterprise 律所市场（中国主市场）延后 |
 
 ---
@@ -157,13 +157,13 @@ per `cloud/docs/PRODUCTION_DEPLOY.md`：
 
 **理由**：
 1. **5/26 上架准时**：无需等待 ICP 备案（7-20 工作日）
-2. **OSS 桌面市场零影响**：attune OSS 桌面通过 GitHub Releases 分发，不依赖 attune.ai；中国大陆开发者照常可下载（GitHub 在大陆可访问，虽偶有抖动但不依赖备案）
+2. **OSS 桌面市场零影响**：attune OSS 桌面通过 GitHub Releases 分发，不依赖 engi-stack.com；中国大陆开发者照常可下载（GitHub 在大陆可访问，虽偶有抖动但不依赖备案）
 3. **海外华人开发者市场**：直接覆盖 SF / NY / London / Tokyo 华人开发者，避开备案审查门槛
-4. **v1.0.1 / v1.0.2 sprint 期内启动 ICP**：5/26 上架后立即启动备案，6 月底 / 7 月初推出「中国大陆版」（accounts.cn.attune.ai / 大陆 ICP 备案 / 大陆机房）
+4. **v1.0.1 / v1.0.2 sprint 期内启动 ICP**：5/26 上架后立即启动备案，6 月底 / 7 月初推出「中国大陆版」（accounts.cn.engi-stack.com / 大陆 ICP 备案 / 大陆机房）
 5. **attune-enterprise 律所市场**：以「本地部署」(self-hosted) 形式优先推广，绕开 SaaS 备案约束；律所对自托管接受度高
 
 **5/26 上架时执行清单**：
-- attune.ai 主域 + 5 子域 DNS 指向 HK / US 服务器（推荐阿里云香港或 Cloudflare）
+- engi-stack.com 主域 + 5 子域 DNS 指向 HK / US 服务器（推荐阿里云香港或 Cloudflare）
 - 主页 footer 显示「Serving international and overseas Chinese-speaking developers. Mainland China edition coming v1.0.2 (target Jun 2026).」
 - privacy policy 中跨境传输章节准备就绪（per `legal/privacy.md` §7）
 - 5/26 同日启动 ICP 备案流程（并行）
@@ -192,14 +192,14 @@ per `cloud/docs/PRODUCTION_DEPLOY.md`：
 
 ### 上架不阻断要素（无论选哪个）
 
-- ✅ OSS 桌面（GitHub Releases）不依赖 attune.ai DNS，全球可下载
-- ✅ Attune Pro 商业版（如已上架）不依赖 attune.ai 主域，可走 `gateway.<region>.attune.ai` 子域分布式部署
+- ✅ OSS 桌面（GitHub Releases）不依赖 engi-stack.com DNS，全球可下载
+- ✅ Attune Pro 商业版（如已上架）不依赖 engi-stack.com 主域，可走 `gateway.<region>.engi-stack.com` 子域分布式部署
 - ✅ wiki / docs 可通过 GitHub Pages 兜底（github.com/qiurui144/attune/wiki）
 
 ### 上架阻断要素（决策影响）
 
-- ⚠️ official-web（attune.ai）大陆访问：受方案影响（A 慢 → ICP 后好；B 慢；C 中等；D 主动放弃大陆短期）
-- ⚠️ accounts.attune.ai 大陆注册流程：同上
+- ⚠️ official-web（engi-stack.com）大陆访问：受方案影响（A 慢 → ICP 后好；B 慢；C 中等；D 主动放弃大陆短期）
+- ⚠️ accounts.engi-stack.com 大陆注册流程：同上
 - ⚠️ Stripe 付款 → 大陆用户卡 + 备案问题；建议大陆用户 v1.0.x 使用 Apple Pay / Google Pay / 海外卡
 
 ---
@@ -215,8 +215,8 @@ per `cloud/docs/PRODUCTION_DEPLOY.md`：
 
 ### 决策后 24h 内（5/25-5/26）
 
-- [ ] 5/25 晚：attune.ai DNS A 记录指向选定服务器公网 IP
-- [ ] 5/26 上架前：验证 `dig attune.ai +short` 返回真实公网 IP（不再是 198.18.x.x 占位）
+- [ ] 5/25 晚：engi-stack.com DNS A 记录指向选定服务器公网 IP
+- [ ] 5/26 上架前：验证 `dig engi-stack.com +short` 返回真实公网 IP（不再是 198.18.x.x 占位）
 - [ ] 5/26 上架前：6 个子域全部 DNS 配置完毕
 - [ ] 5/26 上架前：legal/* 三个文档同步到 WordPress 落地为 `/legal/tos /privacy /dpa` 路由
 - [ ] 5/26 上架前：footer 显示
@@ -228,7 +228,7 @@ per `cloud/docs/PRODUCTION_DEPLOY.md`：
 
 - [ ] v1.0.1 sprint（5/27-6/2）：监控大陆访问真实数据（gatus + 用户反馈）
 - [ ] v1.0.2 sprint（6 月中）：ICP 备案完成后切换 CDN 至 CN PoP / 大陆机房
-- [ ] v1.0.x：若选 D，发布「Attune 中国大陆版」公告 + accounts.cn.attune.ai 子域上线
+- [ ] v1.0.x：若选 D，发布「Attune 中国大陆版」公告 + accounts.cn.engi-stack.com 子域上线
 
 ---
 

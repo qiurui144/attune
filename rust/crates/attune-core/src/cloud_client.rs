@@ -167,7 +167,7 @@ pub struct UserInfo {
     /// new-api LLM token（付费会员；free 用户为 None）
     #[serde(default)]
     pub gateway_token: Option<String>,
-    /// LLM gateway endpoint（云端公布；如 https://gateway.attune.ai/v1）
+    /// LLM gateway endpoint（云端公布；如 https://gateway.engi-stack.com/v1）
     #[serde(default)]
     pub gateway_url: Option<String>,
     /// 默认 LLM model（云端下发；如 "deepseek-v4-flash"）。
@@ -227,8 +227,8 @@ mod tests {
 
     #[test]
     fn client_builds_with_url() {
-        let c = CloudClient::new("https://accounts.attune.ai");
-        assert_eq!(c.base_url, "https://accounts.attune.ai");
+        let c = CloudClient::new("https://accounts.engi-stack.com");
+        assert_eq!(c.base_url, "https://accounts.engi-stack.com");
         assert!(c.session_cookie.is_none());
     }
 
@@ -244,7 +244,7 @@ mod tests {
         let json = r#"{
             "plugin_id": "law-pro",
             "version": "0.2.0",
-            "download_url": "https://hub.attune.ai/plugins/law-pro-0.2.0.attunepkg?token=abc",
+            "download_url": "https://hub.engi-stack.com/plugins/law-pro-0.2.0.attunepkg?token=abc",
             "signing_pubkey_hex": "12fe0471d5a37735428704baa5ea7a55a937fcc490cddf5e325ef4a303e6affc",
             "decrypt_key": "device-license-token"
         }"#;
@@ -282,7 +282,7 @@ mod tests {
                 {
                     "plugin_id": "law-pro",
                     "version": "0.2.0",
-                    "download_url": "https://hub.attune.ai/plugins/law-pro-0.2.0.attunepkg",
+                    "download_url": "https://hub.engi-stack.com/plugins/law-pro-0.2.0.attunepkg",
                     "signing_pubkey_hex": "12fe0471d5a37735428704baa5ea7a55a937fcc490cddf5e325ef4a303e6affc",
                     "decrypt_key": "device-token"
                 }
@@ -304,11 +304,11 @@ mod tests {
             "is_admin": false,
             "created_at": "2026-05-18T00:00:00Z",
             "gateway_token": "sk-newapi-abc",
-            "gateway_url": "https://gateway.attune.ai/v1"
+            "gateway_url": "https://gateway.engi-stack.com/v1"
         }"#;
         let u: UserInfo = serde_json::from_str(json).unwrap();
         assert_eq!(u.gateway_token.as_deref(), Some("sk-newapi-abc"));
-        assert_eq!(u.gateway_url.as_deref(), Some("https://gateway.attune.ai/v1"));
+        assert_eq!(u.gateway_url.as_deref(), Some("https://gateway.engi-stack.com/v1"));
     }
 
     #[test]

@@ -1305,7 +1305,7 @@ apps/attune-desktop/keys/dev_signing.key.pub
   "updater": {
     "active": true,
     "endpoints": [
-      "https://updates.attune.ai/desktop/{{target}}/{{current_version}}/latest.json"
+      "https://updates.engi-stack.com/desktop/{{target}}/{{current_version}}/latest.json"
     ],
     "dialog": false,
     "pubkey": "<paste base64 pubkey from key.pub here>"
@@ -1362,7 +1362,7 @@ git add apps/attune-desktop/tauri.conf.json \
         .gitignore
 git commit -m "feat(desktop): wire tauri-plugin-updater (gateway deferred to Sprint 6)
 
-Updater hits https://updates.attune.ai/desktop/{target}/{version}/latest.json
+Updater hits https://updates.engi-stack.com/desktop/{target}/{version}/latest.json
 30s after launch. Pubkey embedded in tauri.conf.json (dev key for now;
 production key swap-in part of Sprint 6 release pipeline)."
 ```
@@ -1403,7 +1403,7 @@ Out: target/release/bundle/{deb,appimage,nsis,msi}/.
 
 ### Auto-update
 
-Desktop checks https://updates.attune.ai/desktop/{target}/{version}/latest.json
+Desktop checks https://updates.engi-stack.com/desktop/{target}/{version}/latest.json
 30 seconds after launch. Updates are minisign-signed; pubkey embedded in binary.
 See docs/superpowers/specs/2026-04-25-industry-attune-design.md §6.6 for design.
 ```

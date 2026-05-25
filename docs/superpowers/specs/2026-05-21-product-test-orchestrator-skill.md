@@ -347,7 +347,7 @@ reporters:
     only_failure: true
     only_phases: [nightly, pre-release]
   - type: email
-    to: [dev-team@attune.ai]
+    to: [dev-team@engi-stack.com]
     only_failure: true
     only_phases: [pre-release]
 ```

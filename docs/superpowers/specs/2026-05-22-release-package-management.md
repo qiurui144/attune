@@ -46,7 +46,7 @@ tauri-plugin-updater GET https://github.com/qiurui144/attune/releases/latest/dow
 下载 bundle 验证签名 → 替换二进制 → 重启
 ```
 
-**关键点**：`latest.json` 是 GitHub Releases 静态 asset，**用 `releases/latest/download/` URL 永远指向最新 release**，无需任何 server / DNS。这消除了 `updates.attune.ai` 域名依赖。
+**关键点**：`latest.json` 是 GitHub Releases 静态 asset，**用 `releases/latest/download/` URL 永远指向最新 release**，无需任何 server / DNS。这消除了 `updates.engi-stack.com` 域名依赖。
 
 ### 2.2 APT / RPM 源数据流
 
@@ -94,7 +94,7 @@ fork microsoft/winget-pkgs → push branch → 自动开 PR
 
 | 文件 | 操作 | 内容要点 |
 |------|------|---------|
-| `apps/attune-desktop/tauri.conf.json` | edit | endpoint 从 `updates.attune.ai` → GitHub Releases raw URL；`dialog: true`（用户可见弹窗）|
+| `apps/attune-desktop/tauri.conf.json` | edit | endpoint 从 `updates.engi-stack.com` → GitHub Releases raw URL；`dialog: true`（用户可见弹窗）|
 | `apps/attune-desktop/capabilities/default.json` | edit | 加 `updater:default` permission |
 | `apps/attune-desktop/src/main.rs` | edit | check + download + install 完整流程（替换当前只 log 的 stub）|
 | `.github/workflows/desktop-release.yml` | edit | 加 signing env + latest.json 生成 + 上传 |
@@ -118,7 +118,7 @@ fork microsoft/winget-pkgs → push branch → 自动开 PR
 | **WinGet PR 卡审** — microsoft/winget-pkgs review 可能 1-7 天 | 不阻塞发版；v1.0 GA 不要求 winget 当日上架；README 标注 "winget 通常发版后 1-3 天可用" |
 | **APT/RPM gpg key 丢失** — 一旦丢失老用户 apt update 会签名错误 | secret 备份策略 + docs 文档化恢复流程；首次发布前生成保管 |
 | **AppImage 不进 apt** — AppImage 不是 .deb，无法走 APT | 文档说明 AppImage 走 GitHub Releases 直下；APT 仅 .deb |
-| **域名 `updates.attune.ai` 弃用** — 老 v0.7.0 客户端连不上更新会 log warn 但不 crash（main.rs 已 graceful）| v0.7.0 → v1.0.0 升级需手动；新 endpoint 在 v1.0.0 起永久走 GitHub Releases |
+| **域名 `updates.engi-stack.com` 弃用** — 老 v0.7.0 客户端连不上更新会 log warn 但不 crash（main.rs 已 graceful）| v0.7.0 → v1.0.0 升级需手动；新 endpoint 在 v1.0.0 起永久走 GitHub Releases |
 | **gh auth 不可用** — 我当前 session gh CLI token 失效，无法验证 secret/触发 workflow | 所有改动通过 push 触发；secret 配置由用户在 GitHub web UI 完成；docs 提供完整 step-by-step |
 
 ## 5. 验收清单
