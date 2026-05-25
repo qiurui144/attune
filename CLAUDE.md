@@ -2,24 +2,53 @@
 
 个人知识库 + 记忆增强系统。通过 Chrome 扩展在 AI 对话和日常浏览中自动捕获、检索、注入知识，利用 Ollama / NPU / iGPU 闲置算力处理 embedding。
 
-## ⭐ v1.0 GA Roadmap（2026-05-20 用户拍板，5 天物理时间）
+## ⭐ v1.0 GA + v1.0.x 缺口闭环 Roadmap（2026-05-25 拍板）
 
-**目标**：**5/25 完成 v1.0 定版，5/26 cloud / wiki-web / official-web 全部上架**。
+> 完整 spec(11 节 + 切片表):`docs/superpowers/specs/2026-05-25-v1-0-ga-and-v1-0-x-gap-closure-roadmap.md`
+> SE 11 维度 audit 来源:`docs/superpowers/specs/2026-05-25-software-engineering-gap-audit.md`
+
+### A. v0.8 → v1.0 GA 历史(已完成)
 
 | 日期 | 版本 | 关键交付 |
 |------|------|---------|
-| **5/20** today | foundation | 文档清理（33+ 违规文件归并 / 删除）+ 双 CLAUDE.md commit + version/doc audit 脚本收口 |
-| **5/21** | **v0.8** | 底层框架固化：**6 现有 law-pro agent 闭环 backfill 全完成**（per "Agent 验证铁律"节）；`agent_golden_gate` 扩展强制 6 类测试下限；cloud 配套基础设施定版 |
-| **5/22-23** | **v0.9.0** | **现有规划 agents 接入**：4 个新 law-pro agent（traffic-accident / divorce / sale-contract / housing-rent），每个完整闭环；defamation 推到 v1.1 |
-| **5/24** | **v0.9.1** | 修复 sprint + E2E + Playwright + wiki/官网内容填充 |
-| **5/25** | **v1.0 GA** | develop → main `--no-ff`；tag `v1.0.0` + `desktop-v1.0.0`；attune-pro `v1.0.0` 配对；cloud `cloud-v2.2.0`（声明兼容 attune v1.0.x） |
-| **5/26** | 上架 | cloud SaaS / wiki-web / official-web（均在 cloud 仓内）全部部署上线 |
+| 5/20-21 | v0.8 | 6 law-pro agent 闭环 backfill + agent_golden_gate 6 类下限 |
+| 5/22-23 | v0.9.0 | 4 新 law-pro agent(traffic / sale / housing / divorce/defamation 推后) |
+| 5/24 | v0.9.5 | E2E + Playwright + perf baseline |
+| **5/25** today | **v1.0.0 GA** | CI 3 fail 修齐(in-flight #162)+ 3 仓 ceremony tag push + 多平台 install pkg |
 
-**核心硬约束**：
-- 每个新 agent 必须过 "Agent 验证铁律"（≥10 真实 golden + ≥3 prop + ≥5 boundary + ≥3 异常 + ≥1 E2E + 回归 fixture）
-- `agent_golden_gate.rs` 在每个 PR 上跑 1.00 pass rate
-- 5/25 GA 前每条 develop → main `--first-parent` 视角必须纯 `merge:` 前缀
-- 5/26 上架日 cloud 三个组件（accounts / wiki-web / official-web）必须同时 healthcheck 绿
+### B. v1.0.x 缺口闭环切片(12 minor / 5/26 → 8/15)
+
+per § 版本拆解能力 §4 强制切片表(每行 ≥ 主题 + 交付 + 时间 + tag 位置):
+
+| 版本 | 主题 | 完成日期 | tag 位置 | blockedBy |
+|------|------|---------|---------|-----------|
+| **v1.0.0** | GA 首发 | **5/25** | main | #162 CI |
+| ⚠️ **5/26 hotfix** | **Legal P0 + Release Eng P1**(audit 拉出 5/26 上架阻断)| **5/26** | main | v1.0.0 |
+| **v1.0.1** | 升级策略 SSOT + DSAR + support template | 5/28 | main | v1.0.0 + 5/26-hotfix |
+| **v1.0.2** | DB rename + SLA 分级 + DPA + i18n 债清 | 5/31 | main | v1.0.1 |
+| **v1.0.3** | Observability(Prometheus + Loki + alerts) | 6/05 | main | v1.0.2 |
+| **v1.0.4** | Security 持续(pen test + secret rotation + DSAR 完整) | 6/12 | main | v1.0.3 |
+| **v1.0.5** | Performance scale(1000 user + 100GB vault + SLA P99) | 6/18 | main | v1.0.3 |
+| **v1.0.6** | DR / BCP(backup restore 演练 + status page) | 6/25 | main | v1.0.3 |
+| **v1.0.7** | Payments billing(中国发票 + refund + quota) | 7/02 | main | v1.0.2 |
+| **v1.0.8** | Legal compliance 终态(ICP 备案完成 + 律师定稿) | 7/10 | main | v1.0.2 + ICP 审批 |
+| **v1.0.9** | i18n(wiki 双语 + 货币时区) | 7/15 | main | v1.0.2 |
+| **v1.0.10** | Plugin marketplace(第三方流程 + 80% cov) | 7/22 | main | v1.0.2 |
+| **v1.0.11** | Release engineering(APT/RPM repo + WinGet + homebrew) | 7/30 | main | v1.0.2 |
+| **v1.1.0** | VLM + defamation v3 + 新 connector | 8/15 | main | v1.0.11 |
+
+**核心硬约束**(v1.0.0 + 全 minor):
+- 每 minor = distinct deliverable(per § 拆解原则);不允许"5 个 feature 攒 v1.0.x")
+- 每个 agent 必须过 "Agent 验证铁律"
+- 每 PR `agent_golden_gate.rs` 1.00 pass rate
+- develop → main `--first-parent` 视角必须纯 `merge:` 前缀
+- **5/26 上架前**:Legal P0(ToS/Privacy publish + ICP 决策)+ winget/apt/rpm 干净环境真验证(P1)
+- 每 minor merge develop → main `--no-ff`;tag 仅在 main
+- task tracker(#163-#174)显式 blockedBy 链(per § 版本拆解 §8 工具触发器)
+
+**并行机会**(per § 并行开发):
+- v1.0.4 / v1.0.5 / v1.0.6 三者依赖 v1.0.3 但相互独立 → 6/12-6/25 三 worktree 同跑
+- v1.0.7 / v1.0.8 / v1.0.9 / v1.0.10 / v1.0.11 仅 blockedBy v1.0.2 → 7 月起开 5 worktree 真并行
 
 ## 双产品线架构
 
