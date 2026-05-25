@@ -39,5 +39,6 @@ pub mod tags;
 pub mod ui;
 pub mod upload;
 pub mod vault;
+pub mod version;
 pub mod web_search_cache;
 pub mod ws;

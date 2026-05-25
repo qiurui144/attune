@@ -57,6 +57,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Status (health check bypasses guard)
         .route("/api/v1/status/health", get(routes::status::health))
         .route("/api/v1/status/diagnostics", get(routes::status::diagnostics))
+        // v1.0.1 active version notification(per spec C3)
+        .route("/api/v1/version", get(routes::version::get_version))
         // LLM 运维端点（Wizard + Settings）
         .route("/api/v1/llm/test", post(routes::llm::test_llm))
         .route("/api/v1/llm/probe-k3", post(routes::llm::probe_k3))
