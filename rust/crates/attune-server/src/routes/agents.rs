@@ -68,18 +68,54 @@ pub async fn run_agent(
     }
     let registry = state.plugin_registry.clone();
 
-    // 1. agent_id → 所属 plugin_id（registry.list_agents 返回 (plugin_id, AgentSpec)）
-    let plugin_id = registry
+    // 1. agent_id → 所属 plugin_id + agent spec (registry.list_agents 返回 (plugin_id, AgentSpec))
+    let (plugin_id, agent_runtime) = registry
         .list_agents()
         .iter()
         .find(|(_, a)| a.id == agent_id)
-        .map(|(pid, _)| pid.to_string())
+        .map(|(pid, a)| (pid.to_string(), a.runtime.clone()))
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(json!({"error": format!("agent '{agent_id}' not found in any loaded plugin")})),
             )
         })?;
+
+    // Bug-D: runtime: library 的 agent (如 interest_calculator) 不暴露独立 binary —
+    // 由其他 agent 内部以 lib 方式调用,不应通过 HTTP route 直接 dispatch。
+    // 之前 fallthrough 到 run_agent_subprocess 找不到 binary 时返 500;改为 400 with
+    // 明确 schema/runtime 错误,告诉调用方 "这个 id 不是可独立 subprocess 的能力"。
+    if agent_runtime == "library" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid-input",
+                "code": "agent-not-callable",
+                "message": format!("agent '{agent_id}' has runtime=library and is not directly invokable via HTTP; it is called internally by other agents (e.g. civil_loan_agent)"),
+                "agent_id": agent_id,
+                "runtime": agent_runtime,
+            })),
+        ));
+    }
+
+    // Bug-D extension: 空 input ({} 或 null) 视为 schema 错误,返 400 而非 500/2/3 混乱。
+    // 业务 agent binary 普遍至少需要 1 个必填字段, body.input 完全空通常是客户端 bug。
+    let input_is_empty = match &body.input {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(m) => m.is_empty(),
+        _ => false,
+    };
+    if input_is_empty {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid-input",
+                "code": "empty-agent-input",
+                "message": format!("agent '{agent_id}' requires non-empty input object"),
+                "agent_id": agent_id,
+            })),
+        ));
+    }
 
     // 2. plugin_dir = plugins_root/<plugin_id>（plugin-install 装载约定子目录名 = plugin_id）
     let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
@@ -284,6 +320,25 @@ mod tests {
         );
         let env = llm_env_from_settings(&serde_json::Value::Object(huge));
         assert_eq!(env.len(), 4);
+    }
+
+    // Bug-D: empty input detection covers {}, null, but NOT non-empty objects
+    #[test]
+    fn input_is_empty_classification() {
+        // 这里复刻路由内的判定逻辑,作为 unit test 锁定行为(避免重构时漂移)。
+        fn is_empty(v: &serde_json::Value) -> bool {
+            match v {
+                serde_json::Value::Null => true,
+                serde_json::Value::Object(m) => m.is_empty(),
+                _ => false,
+            }
+        }
+        assert!(is_empty(&serde_json::json!({})), "empty object should be empty");
+        assert!(is_empty(&serde_json::Value::Null), "null should be empty");
+        assert!(!is_empty(&serde_json::json!({"x": 1})), "non-empty object should not be empty");
+        assert!(!is_empty(&serde_json::json!([])), "empty array is non-object, not treated as empty (agent decides)");
+        assert!(!is_empty(&serde_json::json!("string")), "string non-empty");
+        assert!(!is_empty(&serde_json::json!(42)), "number non-empty");
     }
 
     // I18n: API key 含 Unicode (虽然不该, 但不 panic)

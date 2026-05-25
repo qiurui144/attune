@@ -131,19 +131,33 @@ pub async fn chat(
     }
 
     // Check LLM availability
+    // Bug-C 兜底: state.llm 为 None 时尝试一次 lazy reload —— vault settings 里若已存
+    // llm 配置(server restart 后第一次 chat / 老用户 settings 未触发 PATCH 等),
+    // reload_llm 会从 settings 重新构建 provider, 避免用户体感 "重启就 503" 的 P3。
+    // reload_llm 失败 (无 settings.llm) 仍返 503,行为与之前一致。
     let llm = state.llm.lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "llm lock poisoned"}))))?
         .as_ref().cloned();
     let llm = match llm {
         Some(l) => l,
         None => {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "AI 后端不可用",
-                    "hint": "请安装 Ollama，并在本机下载一个 chat 模型（例如轻量模型）"
-                })),
-            ))
+            tracing::info!("chat: state.llm is None, attempting lazy reload from vault settings");
+            state.reload_llm();
+            let retry = state.llm.lock()
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "llm lock poisoned"}))))?
+                .as_ref().cloned();
+            match retry {
+                Some(l) => l,
+                None => {
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": "AI 后端不可用",
+                            "hint": "请安装 Ollama，并在本机下载一个 chat 模型（例如轻量模型）"
+                        })),
+                    ))
+                }
+            }
         }
     };
 
