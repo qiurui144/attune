@@ -1,0 +1,37 @@
+{
+  "provider": "tencent-tokenhub",
+  "model": "deepseek-v3-0324",
+  "case_id": "case02-traffic-accident",
+  "case_prompt_first50": "从下面提取事故信息(JSON: parties/injury_level/repair_cost_c",
+  "api_result": {
+    "ok": true,
+    "elapsed_s": 2.021,
+    "raw_response": "```json\n{\n  \"parties\": [\"李某\", \"陈某\"],\n  \"injury_level\": \"轻伤\",\n  \"repair_cost_cny\": 12000\n}\n```",
+    "usage": {
+      "prompt_tokens": 70,
+      "completion_tokens": 40,
+      "total_tokens": 110,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "model": "deepseek-v3-0324"
+  },
+  "eval_result": {
+    "parsed_ok": true,
+    "keys_hit_ratio": 1.0,
+    "value_match_ratio": 1.0,
+    "extracted": {
+      "parties": [
+        "李某",
+        "陈某"
+      ],
+      "injury_level": "轻伤",
+      "repair_cost_cny": 12000
+    }
+  },
+  "timestamp": "2026-05-25T15:36:52.772090+00:00"
+}

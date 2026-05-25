@@ -1,0 +1,36 @@
+{
+  "provider": "deepseek-direct",
+  "model": "deepseek-v4-flash",
+  "case_id": "case01-defamation-extract",
+  "case_prompt_first50": "从下面文本提取被告人/损害事实/索赔金额(JSON 格式,字段 defendant/harm/amo",
+  "api_result": {
+    "ok": true,
+    "elapsed_s": 1.446,
+    "raw_response": "{\"defendant\":\"张某\",\"harm\":\"在微信群中持续发布王某『学历造假』『工作不端』等不实言论,导致王某被解雇\",\"amount_cny\":50000}",
+    "usage": {
+      "prompt_tokens": 91,
+      "completion_tokens": 89,
+      "total_tokens": 180,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 47
+      },
+      "prompt_cache_hit_tokens": 0,
+      "prompt_cache_miss_tokens": 91
+    },
+    "model": "deepseek-v4-flash"
+  },
+  "eval_result": {
+    "parsed_ok": true,
+    "keys_hit_ratio": 1.0,
+    "value_match_ratio": 1.0,
+    "extracted": {
+      "defendant": "张某",
+      "harm": "在微信群中持续发布王某『学历造假』『工作不端』等不实言论,导致王某被解雇",
+      "amount_cny": 50000
+    }
+  },
+  "timestamp": "2026-05-25T15:36:10.002255+00:00"
+}

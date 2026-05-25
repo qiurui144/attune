@@ -1,0 +1,37 @@
+{
+  "provider": "deepseek-direct",
+  "model": "deepseek-v4-flash",
+  "case_id": "case04-sale-contract",
+  "case_prompt_first50": "从下面提取买卖合同关键信息(JSON: seller/buyer/total_cny/dispute",
+  "api_result": {
+    "ok": true,
+    "elapsed_s": 1.372,
+    "raw_response": "{\"seller\":\"甲公司\",\"buyer\":\"乙公司\",\"total_cny\":500000,\"dispute_type\":\"逾期付款\"}",
+    "usage": {
+      "prompt_tokens": 76,
+      "completion_tokens": 85,
+      "total_tokens": 161,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 59
+      },
+      "prompt_cache_hit_tokens": 0,
+      "prompt_cache_miss_tokens": 76
+    },
+    "model": "deepseek-v4-flash"
+  },
+  "eval_result": {
+    "parsed_ok": true,
+    "keys_hit_ratio": 1.0,
+    "value_match_ratio": 1.0,
+    "extracted": {
+      "seller": "甲公司",
+      "buyer": "乙公司",
+      "total_cny": 500000,
+      "dispute_type": "逾期付款"
+    }
+  },
+  "timestamp": "2026-05-25T15:36:22.356937+00:00"
+}
