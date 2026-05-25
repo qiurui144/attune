@@ -54,7 +54,7 @@ Scenario C (中文技术):
 
 ## Track 2 — Legal (lawcontrol corpus)
 
-Source: `/data/company/project/lawcontrol/data/crawler_backup/seed.sql`
+Source: `/data/company/project/attune-enterprise/data/crawler_backup/seed.sql`
 - Total records: **10,677** (8,109 regulations + 2,568 cases)
 - Parsed via `scripts/parse-legal-dump.py` → `tmp/lawcontrol-corpus/{regulation,case}/*.md`
 - This run uses a **100 + 100 sample subset** for fast iteration; full corpus run separately.
@@ -275,7 +275,7 @@ linux_process         MRR=1.00  Top-3: Linux | 计算机操作系统 - 进程管
 
 ```bash
 # 1. Parse legal dump (one-time, ~5s)
-sudo cp /data/company/project/lawcontrol/data/crawler_backup/seed.sql /tmp/lawcontrol_seed.sql
+sudo cp /data/company/project/attune-enterprise/data/crawler_backup/seed.sql /tmp/lawcontrol_seed.sql
 sudo chown $USER:$USER /tmp/lawcontrol_seed.sql
 python3 scripts/parse-legal-dump.py /tmp/lawcontrol_seed.sql tmp/lawcontrol-corpus
 

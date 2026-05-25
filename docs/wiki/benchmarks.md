@@ -47,7 +47,7 @@ v1.0 在检索 benchmark 之上新增三阶段 agent 可靠性门控：
 
 ## Scen A — 法律 / 中文（lawcontrol corpus）
 
-**Corpus**：`/data/company/project/lawcontrol/data/crawler_backup/seed.sql` 解析为 .md
+**Corpus**：`/data/company/project/attune-enterprise/data/crawler_backup/seed.sql` 解析为 .md
 - 8,109 法规 + 2,568 案例（共 10,677 条）
 - 测试用 117 条主题精选子集（民法典 / 公司法 / 商标法 / 劳动合同法 / 反洗钱法 + 案例）
 

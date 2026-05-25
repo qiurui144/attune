@@ -312,7 +312,7 @@ description: 合同审查 enterprise plugin（lawcontrol 原生迁移）
 - [ ] **Step 3: 通过 publish-to-pluginhub.sh 发布到 staging**
 
 ```bash
-cd /data/company/project/lawcontrol  # 注意：D5 才改名，D2 仍是 lawcontrol
+cd /data/company/project/attune-enterprise  # 注意：D5 才改名，D2 仍是 lawcontrol
 bash scripts/publish-to-pluginhub.sh plugins/skills/contract_review staging
 ```
 
@@ -441,7 +441,7 @@ git push origin v1.0.0
 - [ ] **Step 1: pre-rename git tag**
 
 ```bash
-cd /data/company/project/lawcontrol
+cd /data/company/project/attune-enterprise
 git tag -a pre-rename-2026-05-27 -m "snapshot before lawcontrol → attune-enterprise rename"
 git push github pre-rename-2026-05-27
 ```
@@ -526,7 +526,7 @@ docker tag attune-enterprise-backend:latest registry/attune-enterprise-backend:1
 - `plugins/law-pro/src/bin/run_golden_qa.rs` 2 处
 - `plugins/law-pro/src/bin/run_evidence_classify.rs` 1 处
 - `plugins/law-pro/tests/quality_scorer.rs` 4 处
-- **`plugins/law-pro/tests/bank_aggregator_test.rs` 1 处（hardcoded 绝对路径 `/data/company/project/lawcontrol/data/test_evidence/任其坤-梁素燕`，必须先改）**
+- **`plugins/law-pro/tests/bank_aggregator_test.rs` 1 处（hardcoded 绝对路径 `/data/company/project/attune-enterprise/data/test_evidence/任其坤-梁素燕`，必须先改）**
 - `plugins/law-pro/tests/vision_quality_scorer.rs` 1 处
 - `plugins/law-pro/tests/lawcontrol_compat/` 目录 → `mv` 为 `attune_enterprise_compat/`（更新所有引用）
 
@@ -549,7 +549,7 @@ docker tag attune-enterprise-backend:latest registry/attune-enterprise-backend:1
 
 - [ ] **Step 1: attune-pro 绝对路径优先改**
 
-`plugins/law-pro/tests/bank_aggregator_test.rs:72` 把 `/data/company/project/lawcontrol/` 改成 `/data/company/project/attune-enterprise/`，否则本地 dir mv 后该测试立即 broken。
+`plugins/law-pro/tests/bank_aggregator_test.rs:72` 把 `/data/company/project/attune-enterprise/` 改成 `/data/company/project/attune-enterprise/`，否则本地 dir mv 后该测试立即 broken。
 
 - [ ] **Step 2: attune-pro `tests/lawcontrol_compat/` mv**
 
@@ -606,7 +606,7 @@ git commit -am "chore: pluginhub submodule path update post-rename"
 在 Gitea web UI `http://qiurui-114.goho.co:3000/qiurui/working-ai-control` settings rename 为 `attune-enterprise`。
 
 ```bash
-cd /data/company/project/lawcontrol
+cd /data/company/project/attune-enterprise
 git remote set-url origin http://qiurui-114.goho.co:3000/qiurui/attune-enterprise.git
 git remote -v  # 验证
 ```

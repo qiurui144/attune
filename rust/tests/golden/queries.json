@@ -3,14 +3,14 @@
   "_version": "2026-04-17b",
   "_corpus_pins": {
     "rust-book": "tag:trpl-v0.3.0",
-    "lawcontrol": "fixed snapshot under /data/company/project/lawcontrol/data/test_evidence/",
+    "attune-enterprise": "fixed snapshot under /data/company/project/attune-enterprise/data/test_evidence/",
     "tim168": "commit:5128a58 (sparse: Python/Go/人工智能/数据库/算法)"
   },
   "scenarios": [
     {
       "id": "A",
       "name": "律师 / 中文法律",
-      "corpus": "lawcontrol",
+      "corpus": "attune-enterprise",
       "queries": [
         {
           "id": "labor_notice",

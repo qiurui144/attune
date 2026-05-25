@@ -82,7 +82,7 @@ per 项目 CLAUDE.md「三产品矩阵 + 边界」：
   - `/data/company/project/attune/CLAUDE.md`「三产品矩阵」节 lawcontrol → attune-enterprise
   - `/data/company/project/attune-pro/CLAUDE.md` 同步
   - `/home/qiurui/.claude/projects/-data-company-project-attune/memory/` 全部 grep + rename
-  - `/data/company/project/lawcontrol/CLAUDE.md` 迁到新 repo 路径
+  - `/data/company/project/attune-enterprise/CLAUDE.md` 迁到新 repo 路径
 
 ### 2.2 Out of Scope（推 v1.1+）
 
@@ -251,7 +251,7 @@ cloud/pluginhub (submodule)
 |------|---------|---------|------|
 | `attune-pluginhub` | `/data/company/project/attune-pluginhub` | schema 扩展 + API 扩展 | ❌ 不改名 |
 | `attune-pro` | `/data/company/project/attune-pro` | plugin metadata 增 `visibility: pro` + publish script | ❌ |
-| `attune-enterprise`（原 `lawcontrol`） | `/data/company/project/lawcontrol` → `/data/company/project/attune-enterprise` | **改名 + plugin 抽取发布** | ✅ rename |
+| `attune-enterprise`（原 `lawcontrol`） | `/data/company/project/attune-enterprise` → `/data/company/project/attune-enterprise` | **改名 + plugin 抽取发布** | ✅ rename |
 | `attune` (OSS) | `/data/company/project/attune` | client 端 visibility 不感知（只看 plugin id） | ❌ 几乎零改 |
 | `attune-cloud` | `/data/company/project/attune-cloud` | pluginhub 部署 wrapper（submodule 引用） | ❌ |
 
@@ -725,7 +725,7 @@ grep -rln "lawcontrol" \
   /data/company/project/attune/CLAUDE.md \
   /data/company/project/attune-pro/CLAUDE.md \
   /data/company/project/attune-pluginhub/CLAUDE.md \
-  /data/company/project/lawcontrol/CLAUDE.md \
+  /data/company/project/attune-enterprise/CLAUDE.md \
   /home/qiurui/.claude/projects/-data-company-project-attune/memory/ \
   /home/qiurui/.claude/projects/-data-company-project-attune-pro/memory/ \
   /home/qiurui/.claude/projects/-data-company-project-lawcontrol/memory/
@@ -739,7 +739,7 @@ grep -rln "lawcontrol" \
 | `lawcontrol` (URL / 部署) | `enterprise.attune.ai` |
 | `lawcontrol` (业务术语 / 历史 incident 引用) | 保留（如「2026-04 lawcontrol design borrowed plugin.yaml pattern」） |
 | `lawcontrol/plugins/skills/contract_review` | `attune-enterprise/plugins/skills/contract_review` |
-| `/data/company/project/lawcontrol` | `/data/company/project/attune-enterprise` |
+| `/data/company/project/attune-enterprise` | `/data/company/project/attune-enterprise` |
 | `B2B 律所` / `律所 SaaS` | `B2B 企业团队`（更通用，law 是第一垂直） |
 
 **memory 迁移命令（不直接执行，待评审）**：
@@ -750,7 +750,7 @@ mv ~/.claude/projects/-data-company-project-lawcontrol \
 
 # 全 grep + sed 替换（手工 review）
 find ~/.claude/projects/-data-company-project-attune-enterprise -type f -name "*.md" \
-  -exec sed -i 's|/data/company/project/lawcontrol|/data/company/project/attune-enterprise|g' {} \;
+  -exec sed -i 's|/data/company/project/attune-enterprise|/data/company/project/attune-enterprise|g' {} \;
 ```
 
 ### 10.5 客户端兼容（attune OSS）
