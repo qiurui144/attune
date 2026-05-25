@@ -134,6 +134,70 @@ impl CloudClient {
         self.session_cookie = None;
         Ok(())
     }
+
+    // ─── DSAR (Data Subject Access Request) — GDPR Art.15/17/20 + 中国 PIPL §44-50 ───
+
+    /// GET /api/v1/users/me/export — 拿用户 cloud 端所有数据 JSON dump.
+    ///
+    /// 返回 raw JSON (serde_json::Value) — 由调用方决定是写文件还是嵌入 UI 视图.
+    pub fn dsar_export(&self) -> Result<serde_json::Value> {
+        let url = format!("{}/api/v1/users/me/export", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .send()
+            .map_err(http_err)?;
+        if !resp.status().is_success() {
+            return Err(VaultError::Crypto(format!(
+                "dsar export failed: status={}",
+                resp.status()
+            )));
+        }
+        resp.json().map_err(http_err)
+    }
+
+    /// DELETE /api/v1/users/me — 软删除 cloud 账户 (30d grace).
+    ///
+    /// 返回 cloud 端 {status, hard_delete_at, grace_days} JSON.
+    /// 调用后该 session 立即失效 (current_user 拒绝 inactive),
+    /// session_cookie 保留供同会话内 cancel-deletion 用.
+    pub fn dsar_delete(&self) -> Result<serde_json::Value> {
+        let url = format!("{}/api/v1/users/me", self.base_url);
+        let resp = self
+            .http
+            .delete(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .send()
+            .map_err(http_err)?;
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().map_err(http_err)?;
+        if !status.is_success() {
+            return Err(VaultError::Crypto(format!(
+                "dsar delete failed: status={status} body={body}"
+            )));
+        }
+        Ok(body)
+    }
+
+    /// POST /api/v1/users/me/cancel-deletion — 30d grace 期内撤销软删除.
+    pub fn dsar_cancel_deletion(&self) -> Result<serde_json::Value> {
+        let url = format!("{}/api/v1/users/me/cancel-deletion", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .send()
+            .map_err(http_err)?;
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().map_err(http_err)?;
+        if !status.is_success() {
+            return Err(VaultError::Crypto(format!(
+                "dsar cancel-deletion failed: status={status} body={body}"
+            )));
+        }
+        Ok(body)
+    }
 }
 
 /// reqwest RequestBuilder 扩展: 按需注入 Cookie header

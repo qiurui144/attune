@@ -83,6 +83,11 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/member/login-token", post(routes::member::login_token))
         .route("/api/v1/member/login-password", post(routes::member::login_password))
         .route("/api/v1/member/logout", post(routes::member::logout))
+        // DSAR (GDPR Art.15/17/20 + 中国 PIPL §44-50) — cloud member 数据主权操作
+        // 桌面 UI 经此 proxy 到 cloud accounts，密码不持久化
+        .route("/api/v1/dsar/export", post(routes::dsar::export_data))
+        .route("/api/v1/dsar/delete", post(routes::dsar::delete_account))
+        .route("/api/v1/dsar/cancel-deletion", post(routes::dsar::cancel_deletion))
         // OCR 场景预设 (CRUD, builtin 不可删/改)
         .route("/api/v1/ocr/profiles",
             get(routes::ocr_profiles::list_profiles)
