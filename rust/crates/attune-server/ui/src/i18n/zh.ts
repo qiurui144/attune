@@ -17,6 +17,11 @@ export const zh = {
   'app.name': 'Attune',
   'app.tagline': '私有 AI 知识伙伴',
   'app.promise': '本地决定，全网增强，越用越懂你的专业。',
+  'app.boot.failed': '启动失败',
+  'app.boot.loading': 'Attune 正在启动…',
+  'app.tauri.dropped_files': '已检测到拖入 {count} 个文件（占位提示）：\n{paths}',
+  'chat.citation.label': '📎 引用',
+  'wizard.done.cta': '立即开始 →',
 
   // ─── Wizard · 通用 ────────────────────────────────────
   'wizard.skip_all': '跳过全部',

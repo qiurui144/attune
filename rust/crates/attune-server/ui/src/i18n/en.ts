@@ -22,6 +22,11 @@ export const en = {
   'app.tagline': 'Private AI Knowledge Companion',
   'app.promise':
     'Local-first, globally augmented, increasingly attuned to your expertise.',
+  'app.boot.failed': 'Startup failed',
+  'app.boot.loading': 'Attune is starting…',
+  'app.tauri.dropped_files': 'Detected {count} dropped files (placeholder):\n{paths}',
+  'chat.citation.label': '📎 Citations',
+  'wizard.done.cta': 'Get started →',
 
   // ─── Wizard common ───────────────────────────────────
   'wizard.skip_all': 'Skip all',

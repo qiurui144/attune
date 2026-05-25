@@ -24,6 +24,7 @@ import { api, ApiError } from './store/api';
 import { vaultState, sidebarCollapsed } from './store/signals';
 import { startConnectionMonitor } from './store/connection';
 import { startProgressWS } from './store/ws';
+import { t } from './i18n';
 
 type VaultStatusResponse = {
   state: 'sealed' | 'locked' | 'unlocked';
@@ -178,7 +179,7 @@ export function App(): JSX.Element {
         <div style={{ maxWidth: 400 }}>
           <div style={{ fontSize: 48, marginBottom: 'var(--space-3)' }}>⚠</div>
           <h1 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, marginBottom: 'var(--space-2)' }}>
-            启动失败
+            {t('app.boot.failed')}
           </h1>
           <p
             style={{
@@ -205,7 +206,7 @@ export function App(): JSX.Element {
               cursor: 'pointer',
             }}
           >
-            重试
+            {t('common.retry')}
           </button>
         </div>
         <ToastContainer />
@@ -265,7 +266,7 @@ function BootingSplash(): JSX.Element {
       <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
         <span className="spinner" />
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
-          Attune 正在启动…
+          {t('app.boot.loading')}
         </span>
       </div>
     </div>

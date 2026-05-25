@@ -11,6 +11,7 @@ import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import type { Message } from '../store/signals';
 import { drawerContent } from '../store/signals';
+import { t } from '../i18n';
 
 export type ChatMessageProps = {
   message: Message;
@@ -178,7 +179,7 @@ function CitationRow({
           alignSelf: 'center',
         }}
       >
-        📎 引用
+        {t('chat.citation.label')}
       </span>
       {citations.map((c, i) => (
         <button
