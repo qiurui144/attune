@@ -192,7 +192,7 @@ pub fn generate_one_semantic_memory(
     cluster: &SemanticCluster,
 ) -> Option<String> {
     match llm.chat_with_history(&[ChatMessage::user(&build_semantic_prompt(cluster))]) {
-        Ok(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        Ok((s, _usage)) if !s.trim().is_empty() => Some(s.trim().to_string()),
         _ => None,
     }
 }
@@ -337,7 +337,7 @@ mod tests {
     fn embed_summaries(store: &Store, dek: &Key32, emb: &dyn EmbeddingProvider) -> HashMap<String, Vec<f32>> {
         let mut map = HashMap::new();
         for m in store.list_live_memories(dek, "episodic", false).unwrap() {
-            let v = emb.embed(&[m.summary.as_str()]).unwrap().pop().unwrap();
+            let v = emb.embed(&[m.summary.as_str()]).unwrap().0.pop().unwrap();
             map.insert(m.id, v);
         }
         map

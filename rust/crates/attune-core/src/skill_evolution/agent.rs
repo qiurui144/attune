@@ -484,7 +484,7 @@ Constraints:
         },
         "required": ["terms"],
     });
-    let raw = llm
+    let (raw, _usage) = llm
         .chat_with_format_json("", &prompt, Some(&schema))
         .map_err(|e| {
             crate::error::VaultError::LlmUnavailable(format!("skill agent LLM call: {e}"))

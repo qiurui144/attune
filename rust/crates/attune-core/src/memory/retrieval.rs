@@ -159,8 +159,8 @@ pub fn search_memories(
     if index.is_empty() || query.trim().is_empty() {
         return Ok(vec![]);
     }
-    let query_vec = embedder
-        .embed(&[query])?
+    let (vecs, _usage) = embedder.embed(&[query])?;
+    let query_vec = vecs
         .into_iter()
         .next()
         .ok_or_else(|| VaultError::Crypto("embedder returned no vector".into()))?;
@@ -243,7 +243,7 @@ mod tests {
             (&id_cook, "用户学习了川菜的烹饪技巧"),
             (&id_async, "用户研究了 Rust async 运行时"),
         ] {
-            let v = emb.embed(&[txt]).unwrap().pop().unwrap();
+            let v = emb.embed(&[txt]).unwrap().0.pop().unwrap();
             idx.upsert(id, &v).unwrap();
         }
 
@@ -260,7 +260,7 @@ mod tests {
         let emb = MockEmbeddingProvider::new(64);
         let mut idx = MemoryVectorIndex::new(64).unwrap();
         let id = seed_episodic(&store, &dek, "h1", "用户研究了 Rust", 1000);
-        let v = emb.embed(&["用户研究了 Rust"]).unwrap().pop().unwrap();
+        let v = emb.embed(&["用户研究了 Rust"]).unwrap().0.pop().unwrap();
         idx.upsert(&id, &v).unwrap();
 
         // 窗口完全在 episodic window (1000..87400) 之外
@@ -277,7 +277,7 @@ mod tests {
         let mut idx = MemoryVectorIndex::new(64).unwrap();
         let day = 86400;
         let id = seed_episodic(&store, &dek, "old", "用户研究了 Rust", day);
-        let v = emb.embed(&["用户研究了 Rust"]).unwrap().pop().unwrap();
+        let v = emb.embed(&["用户研究了 Rust"]).unwrap().0.pop().unwrap();
         idx.upsert(&id, &v).unwrap();
         // 加一条 semantic 覆盖 + demote
         store

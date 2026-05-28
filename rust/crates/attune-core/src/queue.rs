@@ -216,7 +216,7 @@ pub fn embed_and_index_batch(
         return Ok(Vec::new());
     }
     let texts: Vec<&str> = tasks.iter().map(|t| t.chunk_text.as_str()).collect();
-    let embeddings = embedding.embed(&texts)?;
+    let (embeddings, _usage) = embedding.embed(&texts)?;
 
     // R10 S3 fix (P1): item 存活检查缓存。竞态场景 — embed worker dequeue chunk 任务
     // 时 item 还在，但 embedding 完写向量前 item 已被 delete_item 软删（reindex

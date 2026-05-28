@@ -403,7 +403,7 @@ pub fn search_with_context(
         match (&ctx.embedding, &ctx.vectors) {
             (Some(emb), Some(vecs)) => {
                 match emb.embed(&[query]) {
-                    Ok(e) if !e.is_empty() => {
+                    Ok((e, _usage)) if !e.is_empty() => {
                         let qv = e[0].clone();
                         let raw: Vec<(String, f32)> = vecs.search(&qv, params.initial_k)
                             .unwrap_or_default()

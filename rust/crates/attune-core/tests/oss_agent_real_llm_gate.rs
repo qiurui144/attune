@@ -349,9 +349,10 @@ fn agent_self_evolving_skill_real_llm() {
         println!("\n[case {case_no}/5] query: {q}");
 
         let prompt = skill_prompt(q);
-        let raw = llm
-            .chat_with_history(&[attune_core::llm::ChatMessage::user(&prompt)])
-            .unwrap_or_else(|e| format!("__ERROR__: {e}"));
+        let raw = match llm.chat_with_history(&[attune_core::llm::ChatMessage::user(&prompt)]) {
+            Ok((text, _usage)) => text,
+            Err(e) => format!("__ERROR__: {e}"),
+        };
         let preview: String = raw.chars().take(120).collect::<String>().replace('\n', " ");
         let terms = parse_llm_terms(&raw, q);
         println!("  raw preview: {preview}…");

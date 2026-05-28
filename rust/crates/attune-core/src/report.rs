@@ -68,7 +68,7 @@ impl ReportGenerator for MarkdownReportGenerator {
                 project_id, items_json
             );
             // LlmProvider::chat 是 sync — 在 async fn 中直接调用即可
-            let text = llm.chat(system, &user)?;
+            let (text, _usage) = llm.chat(system, &user)?;
             Ok(text)
         })
     }
@@ -88,8 +88,15 @@ mod tests {
         canned: String,
     }
     impl LlmProvider for MockLlm {
-        fn chat(&self, _system: &str, _user: &str) -> Result<String> {
-            Ok(self.canned.clone())
+        fn chat(
+            &self,
+            _system: &str,
+            _user: &str,
+        ) -> Result<(String, crate::usage::TokenUsage)> {
+            Ok((
+                self.canned.clone(),
+                crate::usage::TokenUsage::empty("mock", "mock"),
+            ))
         }
         fn is_available(&self) -> bool {
             true

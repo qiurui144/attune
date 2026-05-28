@@ -106,7 +106,7 @@ fn injected_token_reduction_meets_acceptance_target() {
     let mut embeddings: HashMap<String, Vec<f32>> = HashMap::new();
     for kind in ["episodic", "semantic"] {
         for m in store.list_live_memories(&dek, kind, true).unwrap() {
-            let v = emb.embed(&[m.summary.as_str()]).unwrap().pop().unwrap();
+            let v = emb.embed(&[m.summary.as_str()]).unwrap().0.pop().unwrap();
             store.put_memory_vector(&m.id, &v, "mock", 0).unwrap();
             idx.upsert(&m.id, &v).unwrap();
             embeddings.insert(m.id, v);

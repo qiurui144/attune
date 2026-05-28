@@ -368,7 +368,11 @@ impl ChatEngine {
             redacted_user, // already redacted; gate just validates contract
         );
 
-        let raw_response = self.llm.chat_with_history(&messages)?;
+        // Plan A1 Task I: LlmProvider::chat_with_history returns (String, TokenUsage).
+        // ChatEngine does not yet route usage into the recorder; bind to _usage so
+        // the path compiles. Wiring lives at the route layer (Task U) once
+        // UsageAggregator is in AppState (Task L).
+        let (raw_response, _usage) = self.llm.chat_with_history(&messages)?;
 
         // ── F-17 restore: LLM 响应里的所有 placeholder 还原 ──────────────
         let restored = self.redactor.restore(&raw_response, &all_mappings);

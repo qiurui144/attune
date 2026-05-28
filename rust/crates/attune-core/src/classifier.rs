@@ -45,7 +45,7 @@ impl Classifier {
     fn classify_one_llm_call(&self, items: &[(String, String)]) -> Result<Vec<ClassificationResult>> {
         let system = self.taxonomy.build_system_prompt();
         let user = self.taxonomy.build_user_prompt(items);
-        let raw = self.llm.chat(&system, &user)?;
+        let (raw, _usage) = self.llm.chat(&system, &user)?;
         self.parse_response(&raw, items.len())
     }
 

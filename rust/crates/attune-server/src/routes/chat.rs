@@ -817,7 +817,7 @@ pub async fn chat(
     let llm_is_local = llm.is_local();
 
     // 4. Call LLM (blocking via spawn_blocking)
-    let raw_response = tokio::task::spawn_blocking(move || llm.chat_with_history(&messages))
+    let (raw_response, _usage) = tokio::task::spawn_blocking(move || llm.chat_with_history(&messages))
         .await
         .map_err(|e| {
             (

@@ -301,6 +301,7 @@ mod tests {
     // We serialize tests that touch the real backup_dir and use HOME override to isolate.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    #[allow(unsafe_code)]
     fn with_temp_home<F: FnOnce(&std::path::Path)>(f: F) {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let td = tempfile::tempdir().expect("tempdir");

@@ -67,7 +67,7 @@ fn rag_perf_p50_p99() {
     // embed all
     let t0 = std::time::Instant::now();
     let texts: Vec<&str> = chunks.iter().map(|(_, t)| t.as_str()).collect();
-    let chunk_embeds = emb.embed(&texts).expect("embed");
+    let (chunk_embeds, _usage) = emb.embed(&texts).expect("embed");
     let chunk_embed_sec = t0.elapsed().as_secs_f64();
     eprintln!("✅ embed {} chunks in {:.1}s ({:.1} chunk/s)", chunk_embeds.len(), chunk_embed_sec, chunks.len() as f64 / chunk_embed_sec);
 
@@ -83,7 +83,7 @@ fn rag_perf_p50_p99() {
 
     // warm-up first 3
     for q in &queries[..3] {
-        let q_emb = emb.embed(&[q]).unwrap();
+        let (q_emb, _usage) = emb.embed(&[q]).unwrap();
         let mut scored: Vec<(usize, f32)> = chunk_embeds.iter().enumerate()
             .map(|(i, v)| (i, cosine(&q_emb[0], v))).collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -100,7 +100,7 @@ fn rag_perf_p50_p99() {
         let t = std::time::Instant::now();
 
         let t_e = std::time::Instant::now();
-        let q_emb = emb.embed(&[q]).unwrap();
+        let (q_emb, _usage) = emb.embed(&[q]).unwrap();
         embed_lats.push(t_e.elapsed().as_millis());
 
         let mut scored: Vec<(usize, f32)> = chunk_embeds.iter().enumerate()

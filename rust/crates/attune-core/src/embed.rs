@@ -30,8 +30,13 @@ where
 }
 
 /// Embedding provider trait
+///
+/// Spec: `docs/superpowers/specs/2026-05-28-cache-context-token-standard-api.md` §11 risk 1
+/// mitigation 1 — `embed` returns `(Vec<Vec<f32>>, TokenUsage)` so call sites must thread
+/// usage through (or explicitly discard via `let (vecs, _usage) = ...`). Ollama's embed
+/// endpoint does not expose token counts, so impls estimate via `cost::estimate_tokens`.
 pub trait EmbeddingProvider: Send + Sync {
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
+    fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)>;
     fn dimensions(&self) -> usize;
     fn is_available(&self) -> bool;
 }
@@ -101,7 +106,7 @@ impl Default for OllamaProvider {
 }
 
 impl EmbeddingProvider for OllamaProvider {
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)> {
         // 边界保护(per reliability audit 2026-05-24 R20):
         // empty / whitespace-only 输入会让上游 server 返 size=0 embedding 数组或报错.
         // 与 OrtEmbeddingProvider 行为一致:对 empty 输入返 zero vector (零向量在
@@ -116,9 +121,21 @@ impl EmbeddingProvider for OllamaProvider {
                 non_empty.push(t);
             }
         }
+        // Token estimate (Ollama embed endpoint does not return usage)
+        // Spec §11 risk 1 mitigation 1 — estimate via cost::estimate_tokens.
+        let joined = non_empty.join("");
+        let est_tokens = crate::cost::estimate_tokens(&joined, &self.model);
+        let usage = crate::usage::TokenUsage {
+            tokens_in: est_tokens as u32,
+            tokens_out: 0,
+            cached_in: 0,
+            model: self.model.clone(),
+            provider: "ollama".into(),
+        };
+
         // 短路:全 empty
         if non_empty.is_empty() {
-            return Ok(vec![vec![0.0f32; self.dims]; texts.len()]);
+            return Ok((vec![vec![0.0f32; self.dims]; texts.len()], usage));
         }
 
         let url = format!("{}/api/embed", self.base_url);
@@ -146,7 +163,7 @@ impl EmbeddingProvider for OllamaProvider {
 
         // 把 empty 占位 zero vec 插回原 index 顺序
         if empty_indices.is_empty() {
-            return Ok(response.embeddings);
+            return Ok((response.embeddings, usage));
         }
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         let mut non_empty_iter = response.embeddings.into_iter();
@@ -157,7 +174,7 @@ impl EmbeddingProvider for OllamaProvider {
                 out.push(non_empty_iter.next().unwrap_or_else(|| vec![0.0f32; self.dims]));
             }
         }
-        Ok(out)
+        Ok((out, usage))
     }
 
     fn dimensions(&self) -> usize {
@@ -228,8 +245,9 @@ impl MockEmbeddingProvider {
 
 #[cfg(any(test, feature = "test-utils"))]
 impl EmbeddingProvider for MockEmbeddingProvider {
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        Ok(texts.iter().map(|t| self.embed_one(t)).collect())
+    fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)> {
+        let vecs: Vec<Vec<f32>> = texts.iter().map(|t| self.embed_one(t)).collect();
+        Ok((vecs, crate::usage::TokenUsage::empty("mock", "mock")))
     }
     fn dimensions(&self) -> usize {
         self.dims
@@ -243,7 +261,7 @@ impl EmbeddingProvider for MockEmbeddingProvider {
 pub struct NoopProvider;
 
 impl EmbeddingProvider for NoopProvider {
-    fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    fn embed(&self, _texts: &[&str]) -> Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)> {
         Err(VaultError::Crypto("no embedding provider available".into()))
     }
     fn dimensions(&self) -> usize {

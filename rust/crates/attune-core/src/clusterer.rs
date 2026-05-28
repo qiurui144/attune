@@ -141,7 +141,7 @@ impl Clusterer {
             reps.len(),
             rep_texts.join("\n")
         );
-        let raw = self.llm.chat(system, &user)?;
+        let (raw, _usage) = self.llm.chat(system, &user)?;
         let trimmed = raw.trim();
         let json_str = if let Some(start) = trimmed.find('{') {
             if let Some(end) = trimmed.rfind('}') {

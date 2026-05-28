@@ -95,6 +95,22 @@ pub struct AppState {
     /// E2/E4 (2026-05-01): PluginHub 客户端 (Mutex 让 PATCH /settings 能热更新)
     /// 默认 Mock；settings.pluginhub.url + license_key 配齐后切到 HttpPluginHubProvider
     pub plugin_hub: Mutex<std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>>,
+    /// Plan A1 (2026-05-28): in-process cost-aware token usage ring buffer + flusher.
+    ///
+    /// Lifecycle:
+    /// - `new()` initializes to `None` — the aggregator needs an `Arc<Mutex<Store>>`
+    ///   handle which is only realizable after the vault layer exposes a sharable
+    ///   store accessor (deferred to a follow-up; current `Vault` owns `Store` by
+    ///   value).
+    /// - `set_usage` is the install point; once an aggregator is constructed
+    ///   downstream it is parked here and `usage()` returns `Some` until shutdown.
+    /// - Plan A2's `CapabilityRouter` will call `state.usage()?.recent(N)` for
+    ///   routing-feedback decisions.
+    pub usage_aggregator: Mutex<Option<std::sync::Arc<attune_core::usage::UsageAggregator>>>,
+    /// Plan A1 (2026-05-28): cost-aware response cache backend (L1 in-memory by
+    /// default; SqliteEncryptedCache can be installed via `set_cache_backend`
+    /// once the vault is unlocked).
+    pub cache_backend: Mutex<Option<std::sync::Arc<dyn attune_core::cache::CacheBackend>>>,
 }
 
 impl AppState {
@@ -171,6 +187,12 @@ impl AppState {
             )),
             // 默认未登录 — 本地 self-host 模式. login 后通过 /member/login endpoint 更新.
             member_state: Mutex::new(attune_core::member_session::MemberState::LoggedOut),
+            // Plan A1 — UsageAggregator stays None until a vault-bound Store handle
+            // exists (see field docs); cache_backend defaults to in-memory L1.
+            usage_aggregator: Mutex::new(None),
+            cache_backend: Mutex::new(Some(std::sync::Arc::new(
+                attune_core::cache::memory::MemoryLruCache::new(512),
+            ))),
         }
     }
 
@@ -1651,7 +1673,7 @@ impl AppState {
         let model = format!("embed-dim{}", embedder.dimensions());
         for (mem_id, summary) in pending {
             let vec = match embedder.embed(&[summary.as_str()]) {
-                Ok(mut v) if !v.is_empty() => v.remove(0),
+                Ok((mut v, _usage)) if !v.is_empty() => v.remove(0),
                 _ => continue,
             };
             {
@@ -1808,6 +1830,40 @@ impl AppState {
             *g = p;
         }
     }
+
+    // ── Plan A1 (cache + usage) accessors ───────────────────────────────────
+    // Stable API surface that Plan A2's CapabilityRouter consumes (see spec
+    // 2026-05-28-cache-context-token-standard-api.md §8). Same lock+clone Arc
+    // pattern as embedding/llm above; mirrors `set_*` for hot-reload symmetry.
+
+    /// Read the in-process usage aggregator. `None` until `set_usage` is called
+    /// (deferred to the vault-unlock path so the aggregator has a live Store
+    /// handle to flush into).
+    pub fn usage(&self) -> Option<Arc<attune_core::usage::UsageAggregator>> {
+        self.usage_aggregator.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Install / replace / clear the usage aggregator. Called at vault unlock
+    /// once the store is shareable (`None` is also valid — locked vault).
+    pub fn set_usage(&self, agg: Option<Arc<attune_core::usage::UsageAggregator>>) {
+        if let Ok(mut g) = self.usage_aggregator.lock() {
+            *g = agg;
+        }
+    }
+
+    /// Read the active cache backend. Defaults to `MemoryLruCache` after `new`;
+    /// callers can swap to `SqliteEncryptedCache` post-unlock via
+    /// `set_cache_backend`.
+    pub fn cache_backend(&self) -> Option<Arc<dyn attune_core::cache::CacheBackend>> {
+        self.cache_backend.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Install / replace / clear the cache backend.
+    pub fn set_cache_backend(&self, c: Option<Arc<dyn attune_core::cache::CacheBackend>>) {
+        if let Ok(mut g) = self.cache_backend.lock() {
+            *g = c;
+        }
+    }
 }
 
 /// 按 settings + 硬件构建 LLM provider。
@@ -1860,6 +1916,8 @@ fn build_llm_from_settings(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn webdav_sync_worker_flag_prevents_double_start() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1872,5 +1930,28 @@ mod tests {
         assert!(flag
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err());
+    }
+
+    /// Plan A1 Task L — AppState must expose `cache_backend()` (Some after `new`
+    /// because the in-memory L1 needs no vault DEK) and `usage()` (None initially;
+    /// set by `set_usage` once a vault-bound aggregator has been built). The
+    /// accessor signatures here are what Plan A2's router will consume.
+    #[test]
+    fn appstate_exposes_cache_backend_and_usage_accessors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("vault.db");
+        let vault = attune_core::vault::Vault::open(&db, dir.path()).unwrap();
+        let state = AppState::new(vault, false);
+        assert!(
+            state.cache_backend().is_some(),
+            "in-memory L1 cache backend must be installed at startup"
+        );
+        assert!(
+            state.usage().is_none(),
+            "usage aggregator stays None until set_usage is called post-vault-unlock"
+        );
+        // set_usage is None-tolerant (no-op when arg is None).
+        state.set_usage(None);
+        assert!(state.usage().is_none(), "set_usage(None) leaves aggregator None");
     }
 }

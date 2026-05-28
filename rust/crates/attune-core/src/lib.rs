@@ -27,6 +27,24 @@
 //! - L0 🔒 chunk 永不出网 (强制本地 LLM)
 //! - L1 默认 12 PII 类脱敏 → 云端 LLM
 //! - L3 LLM 语义脱敏 (v0.7, K3 一体机)
+//!
+//! ## Stable public API for routing consumers (Plan A2 dependency anchor)
+//!
+//! The following types and functions are frozen as of Plan A1 Task M. Plan A2
+//! (hybrid token routing) consumes this surface directly; bumping or renaming
+//! anything below must coordinate with `docs/superpowers/plans/2026-05-28-
+//! hybrid-token-routing.md`.
+//!
+//! ```
+//! # use attune_core::{
+//! #     TokenUsage, UsageEvent, UsageKind, CacheOutcome, CallOutcome, ErrorKind,
+//! #     UsageRecorderGuard, UsageAggregator,
+//! #     CacheBackend, CacheScope, CachedValue, cache_key,
+//! # };
+//! let _ = TokenUsage::empty("p", "m");
+//! let _key: String = cache_key("gpt-4o-mini", "hello");
+//! let _scope = CacheScope::Llm;
+//! ```
 
 pub mod ai_annotator;
 pub mod annotation_weight;
@@ -43,6 +61,28 @@ pub mod telemetry;
 // async_fs: D3 review 引入 — async-safe fs helpers (spawn_blocking 包装).
 // 新代码默认走 async_fs::*, 防止 future async handler 误调用 sync std::fs.
 pub mod async_fs;
+// usage / cache: Plan A1 — Cache/Context/Token standard API
+// spec: docs/superpowers/specs/2026-05-28-cache-context-token-standard-api.md
+// Public surface frozen at Task M for Plan A2 routing consumers.
+pub mod cache;
+pub mod usage;
+
+// ── Plan A1 Task M: frozen public API surface for Plan A2 routing consumers ──
+//
+// Any rename / removal / signature change to the items re-exported below is a
+// **breaking change** for Plan A2 (hybrid token routing). Plan A2's
+// `CapabilityRouter` imports these names directly from `attune_core::*` (NOT
+// from `attune_core::usage::types::*` / `attune_core::cache::*`) — keeping the
+// crate root stable means A2 can be developed against this commit without
+// needing to track sub-module reshuffles.
+//
+// Spec anchor: docs/superpowers/specs/2026-05-28-cache-context-token-
+// standard-api.md §8 ("Stable public API"). Plan A2 blockedBy = this commit.
+pub use usage::{
+    CacheOutcome, CallOutcome, ErrorKind, TokenUsage, UsageEvent, UsageKind,
+    UsageRecorderGuard, UsageAggregator,
+};
+pub use cache::{CacheBackend, CacheScope, CachedValue, cache_key};
 // chat 模块整体 pub(crate) — ChatEngine 只能内部构造（依赖 Vault/Store internal types）。
 // 外部消费者（attune-server route）通过本 crate re-export 拿到 Citation / ChatResponse /
 // parse_confidence / strip_confidence_marker 这些公开 API（per reviewer I3）。

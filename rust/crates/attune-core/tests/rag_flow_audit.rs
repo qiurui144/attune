@@ -100,7 +100,7 @@ fn rag_flow_e2e_audit() {
     let t0 = std::time::Instant::now();
     let texts: Vec<&str> = chunks.iter().map(|(_, t)| t.as_str()).collect();
     let chunk_embeds = match emb.embed(&texts) {
-        Ok(v) => v,
+        Ok((v, _usage)) => v,
         Err(e) => { eprintln!("embed err: {e}"); return; }
     };
     eprintln!("✅ embed {} chunks in {:.1}s", chunk_embeds.len(), t0.elapsed().as_secs_f64());
@@ -121,7 +121,7 @@ fn rag_flow_e2e_audit() {
         let t = std::time::Instant::now();
 
         // 5a. embed query
-        let q_emb = emb.embed(&[q]).expect("query embed");
+        let (q_emb, _usage) = emb.embed(&[q]).expect("query embed");
         let q_vec = &q_emb[0];
 
         // 5b. cosine top-10

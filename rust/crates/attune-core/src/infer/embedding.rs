@@ -152,8 +152,20 @@ impl OrtEmbeddingProvider {
 }
 
 impl EmbeddingProvider for OrtEmbeddingProvider {
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        texts.iter().map(|t| self.embed_one(t)).collect()
+    fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)> {
+        let vecs: Result<Vec<Vec<f32>>> = texts.iter().map(|t| self.embed_one(t)).collect();
+        let vecs = vecs?;
+        // Local ORT inference — count input chars via estimate_tokens (no remote usage feedback).
+        let joined: String = texts.join("");
+        let est_tokens = crate::cost::estimate_tokens(&joined, "ort-local");
+        let usage = crate::usage::TokenUsage {
+            tokens_in: est_tokens as u32,
+            tokens_out: 0,
+            cached_in: 0,
+            model: "ort-local".into(),
+            provider: "ort".into(),
+        };
+        Ok((vecs, usage))
     }
 
     fn dimensions(&self) -> usize {

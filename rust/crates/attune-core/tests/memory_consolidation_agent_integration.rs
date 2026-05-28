@@ -212,7 +212,7 @@ fn promotion_coexists_with_hdbscan_semantic_path_no_topic_key_collision() {
             .into_iter()
             .find(|m| &m.id == ep_id)
             .unwrap();
-        let v = emb.embed(&[m.summary.as_str()]).unwrap().pop().unwrap();
+        let v = emb.embed(&[m.summary.as_str()]).unwrap().0.pop().unwrap();
         embeddings.insert(m.id, v);
     }
     let clusters_opt = prepare_semantic_cycle(&store, &dek, &embeddings).unwrap();
