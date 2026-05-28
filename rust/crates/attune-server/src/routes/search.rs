@@ -126,7 +126,16 @@ pub async fn search(
     }
 
     // query_rewrite：将口语化 query 改写为检索关键词（开关在 settings.search.query_rewrite.enabled）
-    let effective_query = maybe_rewrite_query(&state, &params.q).await;
+    //
+    // T1 (v1.0.6 KB-bench, plan Step 11): bench harness can pin
+    // `X-Attune-Eval-Skip-Rewrite: true` to bypass the LLM rewrite call
+    // entirely — this isolates retrieval quality from LLM-noise in
+    // deterministic bench runs (per spec §11 Risk A).
+    let effective_query = if parsed_eval.skip_rewrite {
+        params.q.clone()
+    } else {
+        maybe_rewrite_query(&state, &params.q).await
+    };
 
     // v0.6 Phase B F-Pro Stage 4：从 query 自动 detect 领域意图，driving cross-domain penalty。
     // 命中 'legal' / 'tech' / 'medical' / 'patent' → 跨领域文档 score *= 0.4
@@ -138,6 +147,15 @@ pub async fn search(
         if let Some(ik) = params.initial_k { p.initial_k = ik; }
         if let Some(imk) = params.intermediate_k { p.intermediate_k = imk; }
         if let Some(d) = detected_domain.as_ref() { p.domain_hint = Some(d.clone()); }
+        // T1 (v1.0.6 KB-bench): forward eval knobs into SearchParams. Today
+        // only `skip_rewrite` actively gates the rewrite call above; `seed`
+        // and `skip_rerank` flow through to attune-core for v1.1 when
+        // SearchTracer lands (per spec §9.5 #6). Keeping the fields
+        // populated means downstream consumers can read which knobs were
+        // active without grepping HTTP headers.
+        p.seed = parsed_eval.seed;
+        p.skip_rewrite = parsed_eval.skip_rewrite;
+        p.skip_rerank = parsed_eval.skip_rerank;
         p
     };
 

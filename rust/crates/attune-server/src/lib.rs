@@ -7,6 +7,15 @@ pub(crate) mod ingest_webdav;
 pub(crate) mod ingest_email;
 pub(crate) mod ingest_rss;
 
+// T1 (v1.0.6 KB-bench, plan 2026-05-28-kb-bench-integration.md Step 9):
+// in-process eval-mode harness used by `tests/eval_determinism_test.rs`.
+// Marked `#[doc(hidden)]` so the symbol does not appear in user-facing API
+// docs — production callers (Chrome ext / Web UI / attune-cli) never import
+// this module. Plain `pub` (not feature-gated) keeps the integration test
+// crate compileable without a separate `--features test-support` cargo flag.
+#[doc(hidden)]
+pub mod test_support;
+
 use axum::middleware as axum_mw;
 use axum::routing::{delete, get, post};
 use axum::http::{HeaderValue, Method};

@@ -48,6 +48,45 @@ impl ChatMessage {
     }
 }
 
+/// Eval-mode call options — opt-in deterministic knobs.
+///
+/// Per spec docs/superpowers/specs/2026-05-28-kb-memory-vs-vlm-llm-bench-validation.md
+/// §11 Risk A: `seed` is best-effort (Ollama + OpenAI support; Anthropic does not).
+/// `temperature` Some(0.0) forces low-noise mode regardless of provider.
+///
+/// Threaded through [`LlmProvider::chat_with_options`] (T1, v1.0.6). When all
+/// fields are `None` callers should prefer the legacy chat / chat_with_history
+/// paths so behavior stays unchanged for production clients.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmCallOptions {
+    /// Provider-side seed for reproducible sampling. Honored by Ollama
+    /// (`options.seed`) and OpenAI (`seed` field). Anthropic ignores.
+    pub seed: Option<u64>,
+    /// Sampling temperature. `Some(0.0)` is the canonical "low noise" knob —
+    /// honored by every modern provider.
+    pub temperature: Option<f32>,
+    /// Top-p nucleus sampling. `Some(1.0)` paired with temperature 0 forces
+    /// greedy-style sampling.
+    pub top_p: Option<f32>,
+}
+
+/// Describes what level of determinism a provider can honor.
+///
+/// Surfaces in the chat response `eval.determinism` field so the bench harness
+/// knows whether equality of two outputs (same seed) is a real signal (`Exact`)
+/// or merely a low-variance signal (`Temp0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeterminismLevel {
+    /// Provider supports a server-side seed (Ollama, OpenAI, Gemini).
+    Exact,
+    /// Only temperature=0 + top_p=1 honored (Anthropic).
+    Temp0,
+    /// No deterministic knobs honored.
+    #[default]
+    BestEffort,
+}
+
 /// 多模态附件 — 走 OpenAI vision content array 协议 (per https://platform.openai.com/docs/guides/vision).
 ///
 /// attune 所有 LLM 调用统一走 OpenAI 兼容协议. 图片走 vision content array,
@@ -64,6 +103,32 @@ pub enum Attachment {
 pub trait LlmProvider: Send + Sync {
     /// 单次 chat 调用，system + user 消息，返回完整响应文本
     fn chat(&self, system: &str, user: &str) -> Result<String>;
+
+    /// Eval-mode entry point — accepts opt-in deterministic knobs.
+    ///
+    /// Default impl ignores `opts` and falls back to [`chat_with_history`],
+    /// so any provider not yet wired keeps working (= BestEffort determinism).
+    /// Providers SHOULD override to honor seed/temperature/top_p; the override
+    /// is the difference between [`DeterminismLevel::Exact`] / [`DeterminismLevel::Temp0`]
+    /// and the default `BestEffort`.
+    ///
+    /// Per spec docs/superpowers/specs/2026-05-28-kb-memory-vs-vlm-llm-bench-validation.md
+    /// §11 Risk A. Plan: docs/superpowers/plans/2026-05-28-kb-bench-integration.md T1.
+    fn chat_with_options(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<String> {
+        let _ = opts;
+        self.chat_with_history(messages)
+    }
+
+    /// What determinism level this provider can honor when [`chat_with_options`]
+    /// is called. Default `BestEffort` reflects providers that have not yet
+    /// implemented `chat_with_options`.
+    fn determinism_level(&self) -> DeterminismLevel {
+        DeterminismLevel::BestEffort
+    }
 
     /// 带历史的多轮对话
     fn chat_with_history(&self, messages: &[ChatMessage]) -> Result<String> {
@@ -433,6 +498,70 @@ impl LlmProvider for OllamaLlmProvider {
         })
     }
 
+    /// T1 (v1.0.6 KB-bench) — eval-mode entry: forwards `LlmCallOptions` into
+    /// the Ollama `options` body field. Ollama documents `seed` / `temperature`
+    /// / `top_p` under `options` per https://github.com/ollama/ollama/blob/main/docs/modelfile.md.
+    fn chat_with_options(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<String> {
+        let url = format!("{}/api/chat", self.base_url);
+        let ollama_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::json!({"role": &m.role, "content": &m.content}))
+            .collect();
+        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
+            .unwrap_or_else(|_| "1h".to_string());
+        let mut options_obj = serde_json::Map::new();
+        if let Some(s) = opts.seed {
+            options_obj.insert("seed".into(), serde_json::json!(s));
+        }
+        if let Some(t) = opts.temperature {
+            options_obj.insert("temperature".into(), serde_json::json!(t));
+        }
+        if let Some(p) = opts.top_p {
+            options_obj.insert("top_p".into(), serde_json::json!(p));
+        }
+        let body = serde_json::json!({
+            "model": &self.model,
+            "messages": ollama_messages,
+            "stream": false,
+            "keep_alive": keep_alive,
+            "options": options_obj,
+        });
+        let client = self.client.clone();
+        let body_bytes = serde_json::to_vec(&body)?;
+
+        llm_block_on(async move {
+            let resp = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(|e| VaultError::LlmUnavailable(format!("chat: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!(
+                    "ollama HTTP {status}: {body}"
+                )));
+            }
+            let parsed: OllamaChatResponse = resp
+                .json()
+                .await
+                .map_err(|e| VaultError::Classification(format!("parse: {e}")))?;
+            Ok(parsed.message.content)
+        })
+    }
+
+    fn determinism_level(&self) -> DeterminismLevel {
+        // Ollama honors options.seed via llama.cpp sampler — server-side
+        // deterministic. Per spec §11 Risk A mitigation 1.
+        DeterminismLevel::Exact
+    }
+
     fn is_available(&self) -> bool {
         let client = self.client.clone();
         let url = format!("{}/api/tags", self.base_url);
@@ -695,6 +824,82 @@ impl LlmProvider for OpenAiLlmProvider {
         self.chat_sync_impl(messages)
     }
 
+    /// T1 (v1.0.6 KB-bench) — eval-mode entry: forwards `LlmCallOptions` as
+    /// top-level OpenAI body fields (`seed`, `temperature`, `top_p`) per
+    /// https://platform.openai.com/docs/api-reference/chat/create.
+    ///
+    /// Bypasses the model auto-detect retry loop in `chat_sync_impl` — the
+    /// bench harness must specify a concrete model so determinism semantics
+    /// are unambiguous. If `model` is empty / "auto" we fall back to the
+    /// legacy path (which surfaces the same fallback model the production
+    /// path would have used, keeping behavior intuitive).
+    fn chat_with_options(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<String> {
+        let trimmed = self.model.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+            // Defer to the resolver-aware path; eval block still surfaces
+            // Exact since the override is registered.
+            return self.chat_sync_impl(messages);
+        }
+
+        let url = format!("{}/chat/completions", self.endpoint);
+        let mut body = serde_json::json!({
+            "model": &self.model,
+            "messages": messages,
+            "stream": false,
+        });
+        if let Some(s) = opts.seed {
+            body["seed"] = serde_json::json!(s);
+        }
+        if let Some(t) = opts.temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
+        if let Some(p) = opts.top_p {
+            body["top_p"] = serde_json::json!(p);
+        }
+        let api_key = self.api_key.clone();
+        let client = self.client.clone();
+        let body_bytes = serde_json::to_vec(&body)?;
+
+        llm_block_on(async move {
+            let resp = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(|e| VaultError::LlmUnavailable(format!("openai send: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!(
+                    "openai HTTP {status}: {body}"
+                )));
+            }
+            let parsed: OpenAiResponse = resp
+                .json()
+                .await
+                .map_err(|e| VaultError::Classification(format!("openai json: {e}")))?;
+            Ok(parsed
+                .choices
+                .first()
+                .map(|c| c.message.content.clone())
+                .unwrap_or_default())
+        })
+    }
+
+    fn determinism_level(&self) -> DeterminismLevel {
+        // OpenAI chat/completions accepts top-level `seed` since
+        // https://platform.openai.com/docs/api-reference/chat/create#chat-create-seed
+        // (released 2023-11) — server-side deterministic. Per spec §11 Risk A
+        // mitigation 1.
+        DeterminismLevel::Exact
+    }
+
     /// Vision API — content array 走 OpenAI 多模态协议.
     /// 支持图片 (base64 data URI / https URL) + 文件 (转 text 拼接).
     fn chat_multimodal(
@@ -909,6 +1114,10 @@ pub struct MockLlmProvider {
     model: String,
     /// 测试用 — 记录最后一次 chat 收到的 user content (供 chat_multimodal 默认 fallback 验证)
     last_user: Mutex<String>,
+    /// T1 — runtime-flippable determinism level so a single mock instance can
+    /// serve both `Exact` and `Temp0` flavored tests
+    /// (see `eval_determinism_test.rs::anthropic_provider_degrades_to_temp0`).
+    determinism: Mutex<DeterminismLevel>,
 }
 
 impl MockLlmProvider {
@@ -917,6 +1126,12 @@ impl MockLlmProvider {
             responses: Mutex::new(Vec::new()),
             model: model.to_string(),
             last_user: Mutex::new(String::new()),
+            // Defaults to Exact so tests that call `chat_with_options` without
+            // explicit configuration see the "happy path" deterministic-seed
+            // semantics. Other call sites (legacy mock-driven unit tests)
+            // never touch determinism_level / chat_with_options so this is
+            // backward compatible.
+            determinism: Mutex::new(DeterminismLevel::Exact),
         }
     }
 
@@ -927,6 +1142,16 @@ impl MockLlmProvider {
     pub fn last_received_user(&self) -> Option<String> {
         let s = self.last_user.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if s.is_empty() { None } else { Some(s) }
+    }
+
+    /// T1 — Override the mock's reported [`DeterminismLevel`] (used by
+    /// `eval_determinism_test::anthropic_provider_degrades_to_temp0` to make
+    /// a single mock instance impersonate an Anthropic-flavored provider).
+    pub fn set_determinism_level(&self, level: DeterminismLevel) {
+        *self
+            .determinism
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = level;
     }
 }
 
@@ -943,6 +1168,37 @@ impl LlmProvider for MockLlmProvider {
     fn chat_with_history(&self, _messages: &[ChatMessage]) -> Result<String> {
         // Mock ignores history, returns next preset
         self.chat("", "")
+    }
+
+    /// T1 — deterministic answer of the form `mock-<seed>-<hash(last_user)>`
+    /// so integration tests can assert equality / inequality across seeds
+    /// without preloading the response queue. Bypasses the response queue
+    /// entirely so legacy tests pushing responses are unaffected.
+    fn chat_with_options(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<String> {
+        use std::hash::{Hash, Hasher};
+        let user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        // Record what we saw — keeps multimodal fallback assertions stable.
+        *self.last_user.lock().unwrap_or_else(|e| e.into_inner()) = user.clone();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        user.hash(&mut hasher);
+        let seed_part = opts.seed.unwrap_or(0);
+        Ok(format!("mock-{seed_part}-{:x}", hasher.finish()))
+    }
+
+    fn determinism_level(&self) -> DeterminismLevel {
+        *self
+            .determinism
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn is_available(&self) -> bool {

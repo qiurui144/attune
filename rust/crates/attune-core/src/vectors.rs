@@ -25,6 +25,18 @@ pub struct VectorIndex {
 
 impl VectorIndex {
     pub fn new(dims: usize) -> Result<Self> {
+        Self::new_with_seed(dims, None)
+    }
+
+    /// T1 (v1.0.6 KB-bench) — deterministic constructor. Guarantees stable
+    /// HNSW topology given identical insertion order. `_seed` is reserved for
+    /// future usearch `random_seed` support; today the deterministic guarantee
+    /// is delivered by caller-side sorted insertion (per spec
+    /// docs/superpowers/specs/2026-05-28-kb-memory-vs-vlm-llm-bench-validation.md
+    /// §11 Risk A mitigation 3). Accepting the seed at the constructor lets
+    /// the caller pin reproducibility without an API churn when usearch grows
+    /// native seed support.
+    pub fn new_with_seed(dims: usize, _seed: Option<u64>) -> Result<Self> {
         let options = IndexOptions {
             dimensions: dims,
             metric: MetricKind::Cos,

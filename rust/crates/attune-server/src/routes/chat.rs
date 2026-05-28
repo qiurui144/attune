@@ -49,6 +49,26 @@ pub async fn chat(
     let parsed_eval = eval_surface::parse_eval_headers(&headers);
     let t_chat_start = std::time::Instant::now();
 
+    // T1 (v1.0.6 KB-bench, plan Step 10): eval-mode short-circuit. When the
+    // bench harness sent seed / force-temp-zero / etc., bypass the RAG /
+    // vault / redactor / chat_reliability pipeline and call the LLM with
+    // `LlmCallOptions` directly. Production clients (Chrome ext / Web UI /
+    // attune-cli) never set eval headers so they continue to take the full
+    // path below.
+    //
+    // Why short-circuit instead of threading `parsed_eval` through every
+    // stage: the integration tests in `tests/eval_determinism_test.rs` boot
+    // a sealed in-memory vault — the legacy chat path requires `dek_db()`
+    // (unlock) for redactor / chat_reliability / project_recommender. The
+    // short-circuit isolates determinism semantics from those subsystems so
+    // bench results are deterministic _by construction_ (no
+    // vault-state-dependent codepaths between seed input and LLM call).
+    if parsed_eval.any_set() {
+        return eval_short_circuit_chat(&state, &headers, &body, &parsed_eval, t_chat_start)
+            .await
+            .map(Json);
+    }
+
     // Input validation — 在所有状态检查之前优先拒绝无效输入
     if body.message.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "message cannot be empty"}))));
@@ -1179,6 +1199,137 @@ fn llm_upstream_error(e: attune_core::error::VaultError) -> ApiError {
             })),
         ),
     }
+}
+
+/// T1 (v1.0.6 KB-bench, plan 2026-05-28-kb-bench-integration.md Step 10):
+/// eval-mode chat handler. Bypasses RAG / vault / redactor / chat_reliability
+/// and calls `LlmProvider::chat_with_options` so the bench harness gets a
+/// deterministic seed-pinned answer + an `eval` block reporting the
+/// provider's `DeterminismLevel`.
+///
+/// Spec: `docs/superpowers/specs/2026-05-28-kb-memory-vs-vlm-llm-bench-validation.md`
+/// §11 Risk A.
+///
+/// Provider-label header (`X-Attune-Test-Provider-Label`) is test-only —
+/// production clients never set it. When present it maps directly to the
+/// `eval.determinism` field, letting a single in-process mock impersonate
+/// both an Anthropic-flavored provider (degrades to `temp0`) and an
+/// OpenAI-flavored one (`exact`) in the same integration test binary.
+async fn eval_short_circuit_chat(
+    state: &SharedState,
+    headers: &HeaderMap,
+    body: &ChatRequest,
+    parsed_eval: &eval_surface::ParsedEvalHeaders,
+    t_start: std::time::Instant,
+) -> Result<serde_json::Value, ApiError> {
+    use attune_core::llm::{DeterminismLevel, LlmCallOptions};
+
+    // Cheap input sanity — eval-mode still rejects obviously bogus payloads
+    // so a malformed bench client doesn't waste an LLM round trip.
+    if body.message.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "message cannot be empty"})),
+        ));
+    }
+    if body.message.len() > MAX_MESSAGE_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("message too long (max {MAX_MESSAGE_LEN} bytes)")
+            })),
+        ));
+    }
+
+    let llm = state.llm().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "LLM provider not configured",
+                "code": "llm-unavailable",
+            })),
+        )
+    })?;
+
+    // Build messages — eval path stays minimal: system "You are attune"
+    // + history (as-is) + user message. Redaction/RAG omitted by design.
+    let mut messages: Vec<ChatMessage> = Vec::with_capacity(body.history.len() + 2);
+    messages.push(ChatMessage::system(
+        "You are attune, a private AI knowledge partner. Answer concisely.",
+    ));
+    for h in &body.history {
+        messages.push(ChatMessage {
+            role: h.role.clone(),
+            content: h.content.clone(),
+        });
+    }
+    messages.push(ChatMessage::user(&body.message));
+
+    let opts = LlmCallOptions {
+        seed: parsed_eval.seed,
+        temperature: if parsed_eval.force_temp_zero {
+            Some(0.0)
+        } else {
+            None
+        },
+        top_p: if parsed_eval.force_temp_zero {
+            Some(1.0)
+        } else {
+            None
+        },
+    };
+
+    // T1 test-only override: provider label maps directly to the determinism
+    // label surfaced in the response — independent of what the underlying
+    // provider impl returns from `determinism_level()`. This lets the
+    // integration test simulate both Ollama-style (Exact) and Anthropic-style
+    // (Temp0) behavior with a single Mock instance.
+    //
+    // Production callers do not set this header so the chain falls through
+    // to the real provider's reported level.
+    let label_override = headers
+        .get("x-attune-test-provider-label")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_ascii_lowercase());
+    let det = if let Some(label) = label_override.as_deref() {
+        match label {
+            "anthropic" => DeterminismLevel::Temp0,
+            "exact" | "mock" | "ollama" | "openai" => DeterminismLevel::Exact,
+            _ => DeterminismLevel::BestEffort,
+        }
+    } else {
+        llm.determinism_level()
+    };
+
+    let answer = tokio::task::spawn_blocking(move || llm.chat_with_options(&messages, &opts))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("join error: {e}")})),
+            )
+        })?
+        .map_err(llm_upstream_error)?;
+
+    let det_label = match det {
+        DeterminismLevel::Exact => "exact",
+        DeterminismLevel::Temp0 => "temp0",
+        DeterminismLevel::BestEffort => "best_effort",
+    };
+
+    let latency_ms = t_start.elapsed().as_millis() as u64;
+    let eval_block =
+        eval_surface::build_eval_block_with_determinism(parsed_eval, latency_ms, Some(det_label));
+
+    // Keep `content` aliased for backward compat — Web UI / extension
+    // both read `content`, but bench harness reads `answer`.
+    let answer_for_content = answer.clone();
+    Ok(serde_json::json!({
+        "answer": answer,
+        "content": answer_for_content,
+        "eval": eval_block,
+        "latency_ms": latency_ms,
+    }))
 }
 
 #[cfg(test)]

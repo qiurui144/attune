@@ -204,17 +204,47 @@ pub struct ParsedEvalHeaders {
     pub seed: Option<u64>,
     /// `X-Attune-Eval-Trace: full` — surface per-stage latency breakdown.
     pub trace_full: bool,
+    /// `X-Attune-Eval-Force-Temp-Zero: true` — pin temperature=0 + top_p=1
+    /// on the LLM call (T1, v1.0.6 KB-bench). When any provider does not
+    /// honor seed but does honor temperature (e.g. Anthropic), this still
+    /// gives the bench a low-noise signal — surfaced via
+    /// `eval.determinism = "temp0"`.
+    pub force_temp_zero: bool,
+    /// `X-Attune-Eval-Skip-Rewrite: true` — bypass query rewrite for search
+    /// route (T1). Honored in `routes/search.rs`.
+    pub skip_rewrite: bool,
+    /// `X-Attune-Eval-Skip-Rerank: true` — bypass rerank for search
+    /// route (T1). Honored in `routes/search.rs`.
+    pub skip_rerank: bool,
+}
+
+impl ParsedEvalHeaders {
+    /// True if **any** eval knob was set by the caller. T1: the chat / search
+    /// handlers branch on this to (a) surface the eval response block and
+    /// (b) take the `chat_with_options` codepath that forwards seed /
+    /// temperature / top_p to the LLM provider.
+    pub fn any_set(&self) -> bool {
+        self.eval_mode
+            || self.seed.is_some()
+            || self.trace_full
+            || self.force_temp_zero
+            || self.skip_rewrite
+            || self.skip_rerank
+    }
 }
 
 /// Parse eval headers from a request. Never fails — invalid values drop to
 /// default (per spec §7 graceful degradation; we don't want a malformed
 /// bench harness to 422 the chat path).
 pub fn parse_eval_headers(headers: &HeaderMap) -> ParsedEvalHeaders {
-    let eval_mode = headers
-        .get("x-attune-eval-mode")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "True"))
-        .unwrap_or(false);
+    let truthy = |name: &str| -> bool {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "True"))
+            .unwrap_or(false)
+    };
+    let eval_mode = truthy("x-attune-eval-mode");
     let seed = headers
         .get("x-attune-eval-seed")
         .and_then(|v| v.to_str().ok())
@@ -224,26 +254,51 @@ pub fn parse_eval_headers(headers: &HeaderMap) -> ParsedEvalHeaders {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().eq_ignore_ascii_case("full"))
         .unwrap_or(false);
+    let force_temp_zero = truthy("x-attune-eval-force-temp-zero");
+    let skip_rewrite = truthy("x-attune-eval-skip-rewrite");
+    let skip_rerank = truthy("x-attune-eval-skip-rerank");
     ParsedEvalHeaders {
         eval_mode,
         seed,
         trace_full,
+        force_temp_zero,
+        skip_rewrite,
+        skip_rerank,
     }
 }
 
-/// Build the `eval` response block. Returns `Value::Null` when eval mode is
-/// off — caller can stash that into the response JSON and it serializes as
-/// `"eval": null`, preserving backward compat for clients that don't expect
-/// the key.
+/// Build the `eval` response block. Returns `Value::Null` when no eval header
+/// was set — caller can stash that into the response JSON and it serializes
+/// as `"eval": null`, preserving backward compat for clients that don't
+/// expect the key.
+///
+/// **T1 backward-compat note**: C-T2 callers in `routes/chat.rs` /
+/// `routes/search.rs` currently invoke this from the legacy 2-argument site
+/// — that path is preserved (`determinism = "best_effort"`, no
+/// `abstained` field). T1 introduces [`build_eval_block_with_determinism`]
+/// for the chat route which can surface the actual provider determinism
+/// level (Exact / Temp0 / BestEffort).
 pub fn build_eval_block(headers: &ParsedEvalHeaders, total_latency_ms: u64) -> serde_json::Value {
-    if !headers.eval_mode {
+    build_eval_block_with_determinism(headers, total_latency_ms, None)
+}
+
+/// T1 (v1.0.6 KB-bench) — full eval block with provider-supplied determinism.
+///
+/// Returns `Value::Null` if no eval header was set (= every field on
+/// `ParsedEvalHeaders` is default). When `determinism` is `Some`, surfaces
+/// that label in the JSON; when `None`, falls back to `"best_effort"` for
+/// legacy callers that have not been routed through `LlmProvider::determinism_level`
+/// yet.
+pub fn build_eval_block_with_determinism(
+    headers: &ParsedEvalHeaders,
+    total_latency_ms: u64,
+    determinism: Option<&str>,
+) -> serde_json::Value {
+    if !headers.any_set() {
         return serde_json::Value::Null;
     }
 
-    let determinism = match headers.seed {
-        Some(_) => "best_effort",
-        None => "best_effort",
-    };
+    let det = determinism.unwrap_or("best_effort");
 
     let trace = if headers.trace_full {
         serde_json::json!({
@@ -254,8 +309,14 @@ pub fn build_eval_block(headers: &ParsedEvalHeaders, total_latency_ms: u64) -> s
     };
 
     serde_json::json!({
-        "determinism": determinism,
+        "determinism": det,
         "seed_used": headers.seed,
+        // T1: bench harness reads abstained=false / abstention_reason=null
+        // as "answer was produced". v1.1 IDK-abstention work (per spec §11
+        // Risk B + R3 / G4) will populate these fields when chat_reliability
+        // signals low confidence.
+        "abstained": false,
+        "abstention_reason": serde_json::Value::Null,
         "trace": trace,
     })
 }
@@ -309,5 +370,46 @@ mod tests {
         assert!(!p.eval_mode);
         assert!(p.seed.is_none());
         assert!(!p.trace_full);
+        assert!(!p.force_temp_zero);
+        assert!(!p.skip_rewrite);
+        assert!(!p.skip_rerank);
+        assert!(!p.any_set());
+    }
+
+    #[test]
+    fn parse_eval_headers_t1_knobs() {
+        let mut h = HeaderMap::new();
+        h.insert("x-attune-eval-seed", "42".parse().unwrap());
+        h.insert("x-attune-eval-force-temp-zero", "true".parse().unwrap());
+        h.insert("x-attune-eval-skip-rewrite", "true".parse().unwrap());
+        h.insert("x-attune-eval-skip-rerank", "1".parse().unwrap());
+        let p = parse_eval_headers(&h);
+        assert_eq!(p.seed, Some(42));
+        assert!(p.force_temp_zero);
+        assert!(p.skip_rewrite);
+        assert!(p.skip_rerank);
+        assert!(p.any_set());
+    }
+
+    #[test]
+    fn build_eval_block_null_when_no_headers() {
+        let p = ParsedEvalHeaders::default();
+        assert!(build_eval_block(&p, 12).is_null());
+    }
+
+    #[test]
+    fn build_eval_block_populated_when_seed_only() {
+        // T1: seed alone (no eval_mode) still surfaces the eval block —
+        // this is the structural contract `eval_determinism_test::seed_header_propagates_to_llm_options`
+        // depends on.
+        let p = ParsedEvalHeaders {
+            seed: Some(42),
+            ..Default::default()
+        };
+        let v = build_eval_block_with_determinism(&p, 7, Some("exact"));
+        assert_eq!(v["determinism"], "exact");
+        assert_eq!(v["seed_used"], 42);
+        assert_eq!(v["abstained"], false);
+        assert!(v["abstention_reason"].is_null());
     }
 }
