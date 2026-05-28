@@ -33,6 +33,7 @@ export type View =
   | 'skills'
   | 'marketplace'  // G3 (2026-05-01): PluginHub 插件市场
   | 'office'       // v0.7.1: Office helper (OCR + ASR transcription)
+  | 'privacy'      // v1.0.6: Privacy dashboard (5 outbound points)
   | 'settings';
 export const currentView = signal<View>('chat');
 
