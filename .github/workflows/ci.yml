@@ -17,6 +17,17 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  privacy-audit:
+    # v1.0.6 Privacy Logic SSOT gate. Static analysis only; no untrusted
+    # input is interpolated into shell commands.
+    # Source: scripts/privacy-audit.sh + docs/PRIVACY.md.
+    name: Privacy Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run privacy-audit.sh
+        run: bash scripts/privacy-audit.sh
+
   lint-and-test:
     runs-on: ubuntu-latest
     steps:
