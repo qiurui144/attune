@@ -99,6 +99,25 @@ None. v1.0.0 用户向后兼容,vault schema 不动,API 协议不动。
 - Agent ENFORCE gate:6 类下限 0 violations
 - accounts pytest 199 PASS(quota+refund TestClient httpx fix)
 
+### Agent 真训练矩阵(2026-05-28 post-GA sprint)
+
+per 用户 2026-05-28「基于腾讯 token 和 deepseek token,一起进行 agents 训练固化」。
+OSS 端 4 个 framework agent 跑各自 golden gate(deterministic / 不调 LLM):
+
+| Agent | Tests | Pass | Status |
+|-------|-------|------|--------|
+| chat_reliability | 3/3 | 6-class floor + ENFORCE | ✅ Production |
+| memory_consolidation_agent | 2/2 | 14 fixtures (promote/fail/edge) | ✅ Production |
+| internal_knowledge_linker | 19/19 | golden+boundary+property+integration | ✅ Production |
+| self_evolving_skill_agent | 3/3 | 6-class + persistence + 1.00 pass | ✅ Production |
+
+**4/4 OSS framework agents PASS**。Raw evidence:`/data/company/project/attune/reports/runs/2026-05-28-agents-training/oss-deterministic-results.json`。
+
+attune-pro law-pro LLM extractor 3 agent 走 DeepSeek + Tencent TokenHub 双 provider × 3
+round multi-run:fact_extractor 1.0000 / divorce_extractor 0.9894 / defamation_extractor
+0.8683(mean,N=5,floor 0.85)— 详见 attune-pro `RELEASE.md` v1.0.5 + spec
+`docs/superpowers/specs/2026-05-28-agents-training-data.md`。
+
 ---
 
 ## v1.0.1 — Bug Fix + Hardening（TBD，~2026-05-27–31）
