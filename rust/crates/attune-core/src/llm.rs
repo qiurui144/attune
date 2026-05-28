@@ -133,8 +133,12 @@ pub trait LlmProvider: Send + Sync {
         messages: &[ChatMessage],
         opts: &LlmCallOptions,
     ) -> Result<String> {
+        // Plan A1 Task I + C-T1 cross-merge: chat_with_history now returns
+        // (String, TokenUsage); chat_with_options keeps single-String signature
+        // for eval-mode caller ergonomics — usage is dropped in default impl
+        // (eval mode usage is captured separately by route layer per Plan A1 §U).
         let _ = opts;
-        self.chat_with_history(messages)
+        self.chat_with_history(messages).map(|(s, _)| s)
     }
 
     /// What determinism level this provider can honor when [`chat_with_options`]
@@ -948,8 +952,10 @@ impl LlmProvider for OpenAiLlmProvider {
         let trimmed = self.model.trim();
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
             // Defer to the resolver-aware path; eval block still surfaces
-            // Exact since the override is registered.
-            return self.chat_sync_impl(messages);
+            // Exact since the override is registered. Strip TokenUsage tuple
+            // (A1 Task J): chat_with_options keeps single-String signature
+            // for eval-mode caller ergonomics.
+            return self.chat_sync_impl(messages).map(|(s, _)| s);
         }
 
         let url = format!("{}/chat/completions", self.endpoint);
