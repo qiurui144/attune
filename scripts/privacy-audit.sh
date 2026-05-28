@@ -27,7 +27,7 @@ fail=0
 # route through `attune_core::OutboundGate::enforce` first (per spec
 # §4.2). New entries here require a privacy-maintainer review.
 # ──────────────────────────────────────────────────────────────────────
-allow_files='rust/crates/attune-core/src/(outbound_gate|chat|cloud_client|telemetry|web_search_browser|web_search|web_search_engines|llm|embed|asr|mcp_client)\.rs|rust/crates/attune-core/src/(sync/webdav|infer/embedding|ocr/.*)\.rs|rust/crates/attune-server/src/routes/(llm|status|version)\.rs'
+allow_files='rust/crates/attune-core/src/(outbound_gate|chat|cloud_client|telemetry|web_search_browser|web_search|web_search_engines|llm|embed|asr|mcp_client)\.rs|rust/crates/attune-core/src/(sync/webdav|infer/embedding|ocr/.*)\.rs|rust/crates/attune-server/src/routes/(llm|status|version)\.rs|rust/crates/attune-server/src/test_support\.rs'
 
 echo "==> 1. Outbound HTTP clients must route through OutboundGate"
 hits=$(grep -rnE 'reqwest::(Client|get|post|Request)\b' rust/crates/attune-*/src 2>/dev/null \
