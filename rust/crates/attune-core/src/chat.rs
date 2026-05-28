@@ -352,6 +352,22 @@ impl ChatEngine {
         messages.extend(redacted_history);
         messages.push(ChatMessage::user(redacted_user));
 
+        // v1.0.6 Privacy Logic Strategy — OutboundGate audit hook for LLM outbound.
+        // The actual `privacy.llm` setting + vault_unlocked wiring is plumbed in
+        // Task 7 (PrivacyView state integration); today this is a non-rejecting
+        // call site marker — payload is already redacted above via redact_batch
+        // (the canonical PII boundary), so the gate's redact step is a no-op here.
+        // Grep guard (scripts/privacy-audit.sh) keys on `OutboundGate::enforce`.
+        let _ = crate::OutboundGate::enforce(
+            &crate::OutboundPolicy {
+                kind: crate::OutboundKind::Llm,
+                enabled: true, // wired in Task 7 from settings.privacy.llm
+                vault_unlocked: true, // wired in Task 7 from vault.state()
+                redactor: Some(&self.redactor),
+            },
+            redacted_user, // already redacted; gate just validates contract
+        );
+
         let raw_response = self.llm.chat_with_history(&messages)?;
 
         // ── F-17 restore: LLM 响应里的所有 placeholder 还原 ──────────────

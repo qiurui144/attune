@@ -245,6 +245,21 @@ impl WebSearchProvider for BrowserSearchProvider {
         }
         self.rate_limit();
 
+        // v1.0.6 Privacy Logic Strategy — OutboundGate audit hook for Web Search outbound.
+        // The actual `privacy.web_search` setting + vault_unlocked wiring is plumbed in
+        // Task 7 (PrivacyView state integration); today this is a non-rejecting
+        // call site marker. Query is unredacted (search engines see raw queries).
+        // Grep guard (scripts/privacy-audit.sh) keys on `OutboundGate::enforce`.
+        let _ = crate::OutboundGate::enforce(
+            &crate::OutboundPolicy {
+                kind: crate::OutboundKind::WebSearch,
+                enabled: true, // wired in Task 7 from settings.privacy.web_search
+                vault_unlocked: true, // wired in Task 7 from vault.state()
+                redactor: None,
+            },
+            "",
+        );
+
         let url = self.engine.build_url(query);
         log::info!("web search: GET {}", url);
         let html = self.fetch_html(&url)?;

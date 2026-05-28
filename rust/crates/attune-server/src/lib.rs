@@ -223,6 +223,12 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/demo/load", post(routes::demo::load_demo))
         // v0.6 Phase A.5.5 隐私 tier 检测（Settings UI Privacy 页用）
         .route("/api/v1/privacy/tier", get(routes::privacy::tier))
+        // v1.0.6 Privacy Logic Strategy — 5 outbound points 总览 + 切换 + lock + wipe
+        // per docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md §5.1
+        .route("/api/v1/privacy/status", get(routes::privacy::status))
+        .route("/api/v1/privacy/settings", axum::routing::patch(routes::privacy::settings_patch))
+        .route("/api/v1/privacy/lock", post(routes::privacy::lock))
+        .route("/api/v1/privacy/wipe-cloud-session", post(routes::privacy::wipe_cloud_session))
         // Status (full status requires vault access)
         .route("/api/v1/status", get(routes::status::status))
         // Index management

@@ -137,7 +137,17 @@ pub async fn update_settings(
         "wizard",  // wizard completion state: { complete: bool, current_step: int }
         "pluginhub", // G2 (2026-05-01): { url, license_key }
         "cloud", // FEAT-1 (2026-05-14): { accounts_url } — 自部署 / 私有 cloud 环境覆盖默认 engi-stack.com
+        "privacy", // v1.0.6 Privacy Logic Strategy: { llm, cloud_saas, webdav, web_search, telemetry, privacy_tour_seen }
     ];
+
+    // v1.0.6 Privacy Logic: telemetry 必须通过 isolation patch 切换,
+    // 不允许搭车其他 settings update (防 buggy UI / 第三方 plugin piggyback)
+    if !is_telemetry_path_allowed(&body) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "telemetry-must-be-isolated"})),
+        ));
+    }
     // URL 字段白名单 scheme 校验（防 javascript: / data: 注入成 XSS 种子）
     if let Some(body_obj) = body.as_object() {
         if let Some(llm_obj) = body_obj.get("llm").and_then(|v| v.as_object()) {
@@ -342,6 +352,23 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
                                           // pluginhub URL 仍走上方 pluginhub.url (历史命名保留)
         },
 
+        // ── v1.0.6 Privacy Logic Strategy (per docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md) ──
+        // 5 个出网点 + privacy tour seen flag,**所有出网点默认 false**:
+        //   - llm: wizard step 引导用户主动开
+        //   - cloud_saas: 登录 Attune Pro 后开
+        //   - webdav: 用户自行配置后开
+        //   - web_search: 用户在 Settings 开关后开
+        //   - telemetry: **永远默认关 + 必须 opt-in**,绝不自动启用(per spec §4.2 #⑤)
+        // PATCH /privacy/settings 是切换唯一入口;telemetry 必须走 isolated patch (见 is_telemetry_path_allowed)
+        "privacy": {
+            "llm": false,
+            "cloud_saas": false,
+            "webdav": false,
+            "web_search": false,
+            "telemetry": false,
+            "privacy_tour_seen": false
+        },
+
         // ── 不在 UI 暴露（保留后端行为）──
         "injection_mode": "auto",
         "injection_budget": 2000,
@@ -357,6 +384,26 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
             }
         }
     })
+}
+
+/// Telemetry MUST only be toggled through a patch whose ONLY top-level keys are
+/// "privacy" (or "privacy_tour_seen" piggyback inside privacy). Mixed patches
+/// are rejected so a buggy UI or third-party plugin cannot piggyback
+/// `privacy.telemetry=true` on an unrelated settings update.
+///
+/// per spec `docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md` §4.2 #⑤.
+pub fn is_telemetry_path_allowed(body: &serde_json::Value) -> bool {
+    let Some(obj) = body.as_object() else { return true };
+    let touches_telemetry = obj
+        .get("privacy")
+        .and_then(|p| p.as_object())
+        .map(|p| p.contains_key("telemetry"))
+        .unwrap_or(false);
+    if !touches_telemetry {
+        return true;
+    }
+    // 仅当本次 patch 唯一顶级 key 是 "privacy" 时允许触碰 telemetry。
+    obj.keys().all(|k| k == "privacy")
 }
 
 #[cfg(test)]
@@ -505,5 +552,76 @@ mod tests {
         let body = serde_json::json!({"pluginhub": {"url": "https://hub.engi-stack.com"}});
         assert!(check_settings_locks(&body, &paid_locks()).is_none(),
             "付费用户应能改 pluginhub URL(plugin_install 解锁)");
+    }
+
+    // ── v1.0.6 Privacy Logic Strategy — default-false block + telemetry isolation ──
+
+    /// 默认 settings 必须有 privacy block,且 5 个出网点全 false + privacy_tour_seen=false.
+    /// per spec §4.2 5 个出网点默认全关。
+    #[test]
+    fn default_settings_has_privacy_block_all_outbound_disabled_except_llm_off_by_default() {
+        let settings = default_settings("", FormFactor::Laptop);
+        let privacy = settings.get("privacy").expect("settings should contain privacy block");
+        assert_eq!(privacy.get("telemetry"), Some(&serde_json::json!(false)),
+            "telemetry MUST default to false");
+        assert_eq!(privacy.get("web_search"), Some(&serde_json::json!(false)),
+            "web_search MUST default to false");
+        assert_eq!(privacy.get("cloud_saas"), Some(&serde_json::json!(false)),
+            "cloud_saas MUST default to false (login required to enable)");
+        assert_eq!(privacy.get("webdav"), Some(&serde_json::json!(false)),
+            "webdav MUST default to false (user configures explicitly)");
+        assert_eq!(privacy.get("llm"), Some(&serde_json::json!(false)),
+            "llm MUST default to false (wizard step enables it)");
+        assert_eq!(privacy.get("privacy_tour_seen"), Some(&serde_json::json!(false)));
+    }
+
+    /// privacy block 在 K3 / Server / Unknown 形态下也必须全 false(form_factor 不影响 privacy).
+    #[test]
+    fn default_settings_privacy_block_invariant_across_form_factors() {
+        for ff in [FormFactor::Laptop, FormFactor::Server, FormFactor::Unknown, FormFactor::K3Appliance] {
+            let s = default_settings("qwen2.5:3b", ff);
+            let privacy = s.get("privacy").unwrap_or_else(|| panic!("privacy missing for {ff:?}"));
+            for key in &["llm", "cloud_saas", "webdav", "web_search", "telemetry"] {
+                assert_eq!(privacy.get(*key), Some(&serde_json::json!(false)),
+                    "{ff:?}: privacy.{key} must default false");
+            }
+        }
+    }
+
+    /// telemetry 只能通过纯 privacy patch 切换 — 混合 patch (privacy.telemetry + llm) 拒绝.
+    /// per spec §4.2 #⑤ telemetry 永远 opt-in,不可 piggyback.
+    #[test]
+    fn telemetry_only_togglable_through_explicit_privacy_patch() {
+        // 1. 非 privacy patch → allowed (无 telemetry 触碰)
+        let llm_only = serde_json::json!({ "llm": { "model": "deepseek-v4-pro" } });
+        assert!(is_telemetry_path_allowed(&llm_only),
+            "non-privacy patches must be allowed when they don't touch telemetry");
+
+        // 2. 纯 privacy patch 切 telemetry → allowed
+        let privacy_only = serde_json::json!({ "privacy": { "telemetry": true } });
+        assert!(is_telemetry_path_allowed(&privacy_only),
+            "isolated privacy patch toggling telemetry must be allowed");
+
+        // 3. privacy.telemetry + llm 混合 → rejected
+        let mixed = serde_json::json!({ "privacy": { "telemetry": true }, "llm": { "model": "x" } });
+        assert!(!is_telemetry_path_allowed(&mixed),
+            "mixed patch with telemetry must be rejected to prevent accidental enabling");
+
+        // 4. privacy.telemetry + theme → rejected
+        let mixed_theme = serde_json::json!({ "privacy": { "telemetry": false }, "theme": "dark" });
+        assert!(!is_telemetry_path_allowed(&mixed_theme),
+            "even disabling telemetry must be isolated to keep audit-log meaningful");
+
+        // 5. privacy 块改其他 key (不含 telemetry) + llm → allowed
+        let privacy_non_telemetry_mixed = serde_json::json!({
+            "privacy": { "web_search": true },
+            "llm": { "model": "x" }
+        });
+        assert!(is_telemetry_path_allowed(&privacy_non_telemetry_mixed),
+            "non-telemetry privacy keys may piggyback (only telemetry is super-protected)");
+
+        // 6. 非 object body → allowed(其他错误会拦截)
+        let not_obj = serde_json::json!([1, 2, 3]);
+        assert!(is_telemetry_path_allowed(&not_obj));
     }
 }

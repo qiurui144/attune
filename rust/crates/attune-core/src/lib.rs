@@ -30,6 +30,16 @@
 
 pub mod ai_annotator;
 pub mod annotation_weight;
+// v1.0.6 Privacy Logic Strategy — single outbound enforcement entry-point.
+// Every network egress (LLM / Cloud SaaS / WebDAV / Web Search / Telemetry)
+// MUST be wrapped by OutboundGate::enforce so settings + PII redactor are
+// consulted in one place. See docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md.
+pub mod outbound_gate;
+pub use outbound_gate::{OutboundError, OutboundGate, OutboundKind, OutboundPolicy};
+// v1.0.6 Privacy Logic Strategy — default-off telemetry queue.
+// Stub for v1.0.6: ships queue + default-false persistence, no HTTP send yet.
+// Actual send gated behind future v1.1 toggle AND privacy.telemetry == true.
+pub mod telemetry;
 // async_fs: D3 review 引入 — async-safe fs helpers (spawn_blocking 包装).
 // 新代码默认走 async_fs::*, 防止 future async handler 误调用 sync std::fs.
 pub mod async_fs;
