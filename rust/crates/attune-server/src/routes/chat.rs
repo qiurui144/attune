@@ -1,11 +1,15 @@
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::Deserialize;
 use attune_core::llm::ChatMessage;
 use attune_core::pii::Redactor;
 use attune_core::cost;
+use attune_core::chat_reliability::{
+    evaluate_response, ChatReliabilityConfig, RetrievedChunk,
+};
 
+use crate::eval as eval_surface;
 use crate::state::SharedState;
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
@@ -35,8 +39,16 @@ const MAX_HISTORY_DEPTH: usize = 80;
 
 pub async fn chat(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(mut body): Json<ChatRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // T2 (v1.0.6 KB-bench integration): parse opt-in eval headers + start
+    // wall-clock so we can surface latency to bench. parse_eval_headers never
+    // fails — invalid values drop to defaults so a malformed bench client
+    // never 422s the chat path (per spec §7 graceful degradation).
+    let parsed_eval = eval_surface::parse_eval_headers(&headers);
+    let t_chat_start = std::time::Instant::now();
+
     // Input validation — 在所有状态检查之前优先拒绝无效输入
     if body.message.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "message cannot be empty"}))));
@@ -841,32 +853,16 @@ pub async fn chat(
         sid_opt
     };
 
-    // 6. Build citations — v0.6 Phase B fix:
-    //    透传 breadcrumb + chunk_offset 让前端 reader 可点击跳转源 chunk
-    //    fallback：当 chunker 给 chunk[0] 空 path 时，用 [title] 给个最小面包屑
+    // 6. Build citations — T2 (v1.0.6): unified builder in attune_server::eval.
+    //    Preserves legacy keys (item_id / title / relevance / breadcrumb /
+    //    chunk_offset_*) for Chrome extension + Web UI; adds chunk_id / span /
+    //    score aliases for vlm-llm-benchmark R3 grounding eval.
+    //
+    //    Fallback for empty breadcrumb (chunker first-chunk before any heading)
+    //    is handled inside build_citation.
     let citations: Vec<serde_json::Value> = knowledge
         .iter()
-        .map(|k| {
-            let title = k.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let breadcrumb_arr = k
-                .get("breadcrumb")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let breadcrumb = if breadcrumb_arr.is_empty() && !title.is_empty() {
-                vec![serde_json::Value::String(title.clone())]
-            } else {
-                breadcrumb_arr
-            };
-            serde_json::json!({
-                "item_id": k.get("item_id"),
-                "title": title,
-                "relevance": k.get("score"),
-                "breadcrumb": breadcrumb,
-                "chunk_offset_start": k.get("chunk_offset_start"),
-                "chunk_offset_end": k.get("chunk_offset_end"),
-            })
-        })
+        .map(eval_surface::build_citation)
         .collect();
 
     // v0.7 自学习闭环 Phase B hook 2：citation_hit 信号喂 skill_evolution。
@@ -990,6 +986,55 @@ pub async fn chat(
     } else {
         cost::lookup_pricing(&llm_model_name).map(|p| p.input_per_1k_usd)
     };
+    // T2 (v1.0.6 KB-bench): build grounding block via chat_reliability agent.
+    // Reuses retrieved knowledge as RAG chunks; runs in-process (deterministic,
+    // zero-LLM, ~µs per call per chat_reliability::evaluate_response docs).
+    //
+    // We only feed local chunks with non-empty content; web-search hits have
+    // no persistent source so chat_reliability classifies them as Fabricated
+    // (which is correct — they can't be re-cited). The bench R3 aggregator
+    // reads `grounding.score` + `grounding.contradictions_count` directly.
+    let reliability_chunks: Vec<RetrievedChunk> = knowledge
+        .iter()
+        .filter_map(|k| {
+            let item_id = k.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
+            // skip web placeholders (item_id starts with "web:") and empty items
+            if item_id.is_empty() || item_id.starts_with("web:") {
+                return None;
+            }
+            let chunk_text = k
+                .get("inject_content")
+                .and_then(|v| v.as_str())
+                .or_else(|| k.get("content").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
+            if chunk_text.is_empty() {
+                return None;
+            }
+            let score = k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let mut rc = RetrievedChunk::new(item_id, chunk_text);
+            rc.score = score;
+            Some(rc)
+        })
+        .collect();
+    let reliability_report = evaluate_response(
+        &response,
+        &reliability_chunks,
+        &body.message,
+        &ChatReliabilityConfig::default(),
+    );
+    let grounding_block = eval_surface::build_grounding_block(&reliability_report);
+
+    // T2 (v1.0.6 KB-bench): structured cost block matching bench schema.
+    // Keep the legacy `cost_estimate` shape too (Chrome ext + Web UI read it).
+    let cost_block =
+        eval_surface::build_cost_block(tokens_in, tokens_out, &llm_model_name, llm_is_local);
+
+    // T2 (v1.0.6 KB-bench): eval block — surfaced only when bench sets
+    // X-Attune-Eval-Mode: 1. Null otherwise → old clients see no behavior change.
+    let chat_latency_ms = t_chat_start.elapsed().as_millis() as u64;
+    let eval_block = eval_surface::build_eval_block(&parsed_eval, chat_latency_ms);
+
     let mut response_json = serde_json::json!({
         "content": response,
         "citations": citations,
@@ -1001,6 +1046,7 @@ pub async fn chat(
         // 前端 cost chip tooltip 展示「context: L2 memory」让用户看到 token 省在哪。
         "context_tier": context_tier,
         // Cost & Trigger Contract: Chat 每次响应携带 token/费用估算供前端 chip 展示
+        // Legacy shape preserved for Chrome extension + Web UI TokenChip.
         "cost_estimate": {
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
@@ -1008,6 +1054,14 @@ pub async fn chat(
             "is_local": llm_is_local,
             "input_rate_per_k": input_rate_per_k,
         },
+        // T2: structured cost block for vlm-llm-benchmark (matches bench schema).
+        "cost": cost_block,
+        // T2: grounding block from chat_reliability post-hoc evaluation.
+        "grounding": grounding_block,
+        // T2: eval block — null unless X-Attune-Eval-Mode: 1 header set.
+        "eval": eval_block,
+        // T2: total chat latency in ms (always present for bench end-to-end).
+        "latency_ms": chat_latency_ms,
         // Batch B.2: 批注加权 / 上下文压缩统计 —— token chip 展开时展示
         "weight_stats": {
             "items_total": weight_stats.items_total,

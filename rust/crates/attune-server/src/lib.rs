@@ -1,4 +1,5 @@
 pub mod error;
+pub mod eval;
 pub mod routes;
 pub mod state;
 pub(crate) mod middleware;

@@ -1,0 +1,313 @@
+//! Eval-surface helpers — T2 (KB-bench integration, v1.0.6).
+//!
+//! Pure builders that translate internal types into the JSON shapes that
+//! `bench/adapters/attune.py` and `routes/chat.rs` / `routes/search.rs`
+//! depend on. Keeping them as pure functions lets us unit-test the full
+//! response surface without spawning the HTTP server (Argon2id setup costs
+//! ~30s per test — see `vault_lock_endpoint_test.rs` for the E2E pattern).
+//!
+//! ## Backward compatibility contract
+//!
+//! [`build_citation`] **must preserve every key already emitted today**:
+//! `item_id`, `title`, `relevance`, `breadcrumb`, `chunk_offset_start`,
+//! `chunk_offset_end`. New keys (`chunk_id`, `span`, `score`) are additive
+//! — Chrome extension and Web UI keep working unmodified.
+//!
+//! ## Spec
+//!
+//! `docs/superpowers/specs/2026-05-28-kb-memory-vs-vlm-llm-bench-validation.md`
+//! §9.4 P0 #2/#3 + §9.2 R3/G4 + §11 R3.
+
+use attune_core::chat_reliability::ChatReliabilityReport;
+use attune_core::cost;
+use axum::http::HeaderMap;
+use serde::Serialize;
+
+// ============================================================================
+// Citations
+// ============================================================================
+
+/// Build one citation JSON value from a `knowledge[]` entry (the inline
+/// `serde_json::Value` shape that `routes/chat.rs` builds from `SearchResult`
+/// or a web-search hit). Preserves all legacy keys and adds T2 keys
+/// (`chunk_id`, `span`, `score`).
+///
+/// The caller (`routes/chat.rs::chat`) already collects citations from
+/// `knowledge` for the legacy shape; this fn replaces that inline `json!{}`
+/// so the new keys live alongside the old.
+pub fn build_citation(k: &serde_json::Value) -> serde_json::Value {
+    let item_id = k.get("item_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let title = k.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let score = k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let chunk_offset_start = k.get("chunk_offset_start").and_then(|v| v.as_u64());
+    let chunk_offset_end = k.get("chunk_offset_end").and_then(|v| v.as_u64());
+    let breadcrumb_arr = k
+        .get("breadcrumb")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    // legacy behavior: fall back to [title] when breadcrumb missing + title set
+    let breadcrumb = if breadcrumb_arr.is_empty() && !title.is_empty() {
+        vec![serde_json::Value::String(title.clone())]
+    } else {
+        breadcrumb_arr
+    };
+
+    // T2 NEW: deterministic chunk_id = "<item_id>:<offset_start>"
+    // For chunks without offset (memory layer / web hits) → fall back to item_id alone.
+    let chunk_id = match chunk_offset_start {
+        Some(start) => format!("{item_id}:{start}"),
+        None => item_id.clone(),
+    };
+
+    // T2 NEW: span as `[start, end]` 2-element array when both offsets known.
+    // bench adapter prefers this shape (matches retrieval_eval.py schema).
+    let span = match (chunk_offset_start, chunk_offset_end) {
+        (Some(s), Some(e)) => serde_json::json!([s, e]),
+        _ => serde_json::Value::Null,
+    };
+
+    serde_json::json!({
+        // ── Legacy keys (Chrome extension + Web UI depend on these) ─────
+        "item_id": item_id,
+        "title": title,
+        "relevance": score,
+        "breadcrumb": breadcrumb,
+        "chunk_offset_start": chunk_offset_start,
+        "chunk_offset_end": chunk_offset_end,
+        // ── T2 additions (bench R3 grounding eval consumes these) ───────
+        "chunk_id": chunk_id,
+        "span": span,
+        "score": score,  // alias for relevance, matches bench schema
+    })
+}
+
+// ============================================================================
+// Grounding block
+// ============================================================================
+
+/// Bucketed grounding level — bench R3 wants a single label for filtering,
+/// distinct from the raw `overall_confidence` float.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroundingLevel {
+    High,
+    Medium,
+    Low,
+}
+
+impl GroundingLevel {
+    /// Bucket the chat_reliability overall_confidence score:
+    ///   - score ≥ 0.7 → High   (well-grounded, no contradictions, citations present)
+    ///   - score ≥ 0.4 → Medium (some signal weakness)
+    ///   - else        → Low    (likely fabricated or unsupported)
+    ///
+    /// Thresholds picked to align with `chat_reliability::confidence_from_signals`
+    /// — neutral 0.5 falls into Medium (correct for "no chunks" path).
+    pub fn from_score(score: f32) -> Self {
+        if score >= 0.7 {
+            Self::High
+        } else if score >= 0.4 {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
+}
+
+/// Distill a [`ChatReliabilityReport`] into the JSON block bench consumes.
+///
+/// Bench R3 (groundedness aggregate) reads `grounding.score` per response
+/// and `grounding.contradictions_count` for the failure rate. Surfacing
+/// counts avoids re-parsing the full `citation_grounded[]` array.
+pub fn build_grounding_block(report: &ChatReliabilityReport) -> serde_json::Value {
+    let score = report.overall_confidence;
+    let level = GroundingLevel::from_score(score);
+    serde_json::json!({
+        "score": score,
+        "level": level,
+        "citations_count": report.citation_grounded.len(),
+        "contradictions_count": report.contradictions.len(),
+        "hallucination_flags_count": report.hallucination_flags.len(),
+    })
+}
+
+// ============================================================================
+// Cost block
+// ============================================================================
+
+/// Map a model name to a provider id. Mirrors the dispatch in
+/// `attune_core::cost::lookup_pricing` so the two stay in lock-step.
+fn provider_for(model: &str) -> &'static str {
+    let m = model.to_lowercase();
+    if m.starts_with("gpt-") || m.starts_with("o1-") || m.starts_with("o3-") {
+        "openai"
+    } else if m.contains("claude") {
+        "anthropic"
+    } else if m.contains("gemini") {
+        "google"
+    } else if m.contains("deepseek") {
+        "deepseek"
+    } else if m.starts_with("qwen") || m.starts_with("llama") || m.starts_with("phi") || m.starts_with("mistral") {
+        "ollama"
+    } else if m.starts_with("doubao") || m.starts_with("ernie") || m.contains("baichuan") {
+        "tencent"
+    } else {
+        "unknown"
+    }
+}
+
+/// Build the `cost` block for a chat response.
+///
+/// `is_local` tells us whether the LLM provider is Ollama-on-laptop / K3 form
+/// factor → estimated_usd forced to 0.0 (the user is paying CPU/GPU, not USD).
+/// Cloud models that have no pricing entry also fall through to 0.0 (rather
+/// than `null`), so bench can sum `cost.estimated_usd` across rows without
+/// a null filter.
+pub fn build_cost_block(
+    tokens_in: usize,
+    tokens_out: usize,
+    model: &str,
+    is_local: bool,
+) -> serde_json::Value {
+    let provider = if is_local {
+        "ollama"
+    } else {
+        provider_for(model)
+    };
+    let estimated_usd = if is_local {
+        0.0
+    } else {
+        cost::estimate_cost_usd(tokens_in, tokens_out, model).unwrap_or(0.0)
+    };
+    serde_json::json!({
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "estimated_usd": estimated_usd,
+        "model": model,
+        "provider": provider,
+    })
+}
+
+// ============================================================================
+// Eval headers + block
+// ============================================================================
+
+/// Parsed `X-Attune-Eval-*` request headers. All fields default to off so
+/// production clients (Chrome extension / Web UI) see no behavior change.
+#[derive(Debug, Default, Clone)]
+pub struct ParsedEvalHeaders {
+    /// `X-Attune-Eval-Mode: 1` — surface the `eval` response block.
+    pub eval_mode: bool,
+    /// `X-Attune-Eval-Seed: <u64>` — forwarded to LLM provider when supported
+    /// (T1 work). Invalid values drop to None silently.
+    pub seed: Option<u64>,
+    /// `X-Attune-Eval-Trace: full` — surface per-stage latency breakdown.
+    pub trace_full: bool,
+}
+
+/// Parse eval headers from a request. Never fails — invalid values drop to
+/// default (per spec §7 graceful degradation; we don't want a malformed
+/// bench harness to 422 the chat path).
+pub fn parse_eval_headers(headers: &HeaderMap) -> ParsedEvalHeaders {
+    let eval_mode = headers
+        .get("x-attune-eval-mode")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(false);
+    let seed = headers
+        .get("x-attune-eval-seed")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    let trace_full = headers
+        .get("x-attune-eval-trace")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().eq_ignore_ascii_case("full"))
+        .unwrap_or(false);
+    ParsedEvalHeaders {
+        eval_mode,
+        seed,
+        trace_full,
+    }
+}
+
+/// Build the `eval` response block. Returns `Value::Null` when eval mode is
+/// off — caller can stash that into the response JSON and it serializes as
+/// `"eval": null`, preserving backward compat for clients that don't expect
+/// the key.
+pub fn build_eval_block(headers: &ParsedEvalHeaders, total_latency_ms: u64) -> serde_json::Value {
+    if !headers.eval_mode {
+        return serde_json::Value::Null;
+    }
+
+    let determinism = match headers.seed {
+        Some(_) => "best_effort",
+        None => "best_effort",
+    };
+
+    let trace = if headers.trace_full {
+        serde_json::json!({
+            "latency_breakdown_ms": build_latency_breakdown(total_latency_ms),
+        })
+    } else {
+        serde_json::Value::Null
+    };
+
+    serde_json::json!({
+        "determinism": determinism,
+        "seed_used": headers.seed,
+        "trace": trace,
+    })
+}
+
+/// Build the `latency_breakdown_ms` block.
+///
+/// `total_ms` is the only field measured today; per-stage placeholders
+/// (`rewrite` / `bm25` / `vector` / `rrf` / `rerank`) are zero until v1.1
+/// introduces `SearchTracer` (per plan §9.5 #6). Bench can already aggregate
+/// `total` for end-to-end latency curves.
+pub fn build_latency_breakdown(total_ms: u64) -> serde_json::Value {
+    serde_json::json!({
+        "rewrite": 0u64,
+        "bm25": 0u64,
+        "vector": 0u64,
+        "rrf": 0u64,
+        "rerank": 0u64,
+        "total": total_ms,
+    })
+}
+
+// ============================================================================
+// Inline unit tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_for_known_models() {
+        assert_eq!(provider_for("gpt-4o"), "openai");
+        assert_eq!(provider_for("gpt-4o-mini"), "openai");
+        assert_eq!(provider_for("claude-3-5-sonnet"), "anthropic");
+        assert_eq!(provider_for("gemini-1.5-pro"), "google");
+        assert_eq!(provider_for("deepseek-chat"), "deepseek");
+        assert_eq!(provider_for("qwen2.5:3b"), "ollama");
+        assert_eq!(provider_for("totally-mystery"), "unknown");
+    }
+
+    #[test]
+    fn provider_for_is_case_insensitive() {
+        assert_eq!(provider_for("CLAUDE-3-OPUS"), "anthropic");
+        assert_eq!(provider_for("GeMiNi-1.5-pro"), "google");
+    }
+
+    #[test]
+    fn parse_eval_headers_default_off() {
+        let h = HeaderMap::new();
+        let p = parse_eval_headers(&h);
+        assert!(!p.eval_mode);
+        assert!(p.seed.is_none());
+        assert!(!p.trace_full);
+    }
+}
