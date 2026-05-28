@@ -5,7 +5,7 @@
 
 [package]
 name = "attune-desktop"
-version = "1.0.6"
+version = "1.0.7"
 edition = "2021"
 rust-version = "1.75"
 description = "Attune 桌面应用（Tauri 2 shell + 内嵌 attune-server）"

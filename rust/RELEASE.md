@@ -1,5 +1,25 @@
 # attune 版本记录
 
+## v1.0.7 (2026-05-28) — Privacy regression hotfix
+
+### Highlights
+- 🔴 修复 v1.0.6 GA 含 regression:`vault_guard` middleware 误拦 `GET /privacy/status` + `POST /privacy/wipe-cloud-session`,导致 vault locked 时这两 endpoint 返回 403 而非真实状态。`privacy_endpoints_test::post_privacy_lock_drops_to_locked_state` 因此 fail。
+- 根因:v1.0.6 squash merge 时 commit message 提及 vault_guard bypass 但代码未真 staged(只在主 worktree 临时 edit,squash merge 取自 feature branch 的 commit,我的 manual edit 没 commit 进 feature branch)。
+
+### Breaking
+None.
+
+### Migration
+None — pure bug fix,user 无需操作。
+
+### Known Limitations
+- v1.0.6 KL 不变(Playwright spec / Provider snapshots / Telemetry 接入 推 v1.1.0)。
+
+### Process improvement
+- Pre-Create Gate(global CLAUDE.md §1.1.7)对 manual edit during squash merge 加强校验:任何 commit msg 声明 "Bug fix during merge" 必须验证 `git diff --cached` 真含相应代码改动,否则 commit 拒绝。
+
+---
+
 ## v1.0.6 — Privacy Logic SSOT + DR/BCP（2026-06-05）
 
 > 配对 `desktop-v1.0.6` + attune-pro `v1.0.6` + cloud `cloud-v2.3.0`。

@@ -76,6 +76,14 @@ pub async fn vault_guard(
         // 导致 wizard / locked 阶段前端连 WS 收 403 → 无限重连刷 console error。
         // bypass 后由 handle_scan_progress 自查 vault 状态推 locked JSON。
         || path == "/ws/scan-progress"
+        // v1.0.7 hotfix Privacy Logic — /privacy/status 必须在任意 vault state 都能查。
+        // v1.0.6 GA 误把此 bypass 漏出 squash merge(commit msg 提及但代码未 staged),
+        // 导致 POST /privacy/lock 后 GET /status 被 vault_guard 403 而非返回
+        // {"vault":{"state":"locked"}}。status handler 自身 vault-state-aware
+        // (读 state() 不读密文)。
+        || path == "/api/v1/privacy/status"
+        // /privacy/wipe-cloud-session 同理:用户主动清云端 footprint 不应被 vault lock 阻塞
+        || path == "/api/v1/privacy/wipe-cloud-session"
     {
         return next.run(request).await;
     }
