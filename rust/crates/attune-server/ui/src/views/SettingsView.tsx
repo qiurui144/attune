@@ -13,6 +13,7 @@ import {
   memberState,
   settingsLocks,
   folderLinks,
+  currentView,
 } from '../store/signals';
 import { setLocale, currentLocale, t } from '../i18n';
 import { loadSettings, patchSettings } from '../hooks/useSettings';
@@ -507,6 +508,20 @@ function PrivacyPanel(): JSX.Element {
 
   return (
     <>
+      {/* v1.0.6 — link to dedicated Privacy dashboard (5 outbound points + DSAR) */}
+      <Section title={t('privacy.title')}>
+        <SettingRow label={t('privacy.subtitle')}>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => {
+              currentView.value = 'privacy';
+            }}
+          >
+            {t('privacy.outbound.title')}
+          </Button>
+        </SettingRow>
+      </Section>
       <Section title={t('settings.privacy.security.title')}>
         <SettingRow label={t('settings.privacy.security.status')}>
           <span style={{ fontSize: 'var(--text-sm)' }}>

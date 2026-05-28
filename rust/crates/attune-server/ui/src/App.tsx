@@ -19,6 +19,7 @@ import { ToastContainer, RecommendationOverlay } from './components';
 import { CommandPalette } from './components/CommandPalette';
 import { Wizard, LoginScreen } from './wizard';
 import { MainShell } from './layout';
+import { PrivacyTour } from './views/PrivacyTour';
 import { useShortcut } from './hooks/useShortcut';
 import { api, ApiError } from './store/api';
 import { vaultState, sidebarCollapsed } from './store/signals';
@@ -240,6 +241,7 @@ export function App(): JSX.Element {
   return (
     <>
       <MainShell />
+      <PrivacyTour />
       <CommandPalette open={paletteOpen.value} onClose={() => (paletteOpen.value = false)} />
       <RecommendationOverlay />
       <ToastContainer />
