@@ -189,7 +189,7 @@ maturity: stable | beta | alpha
 pricing:
   tier: free | trial | paid
   trial_quota: 10
-  price_url: https://attune.ai/pro/law-pro
+  price_url: https://engi-stack.com/pro/law-pro
 
 # 信任级别 (复用 plugin_sig.rs)
 trust: Official | Trusted | Unsigned

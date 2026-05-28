@@ -1,0 +1,117 @@
+name: Bug Report
+description: 报告一个 bug / Report a bug
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告 bug。请尽可能填写以下字段,缺失关键信息可能导致 triage 延迟。
+
+        Thanks for reporting. Please fill out the fields below — missing details slow triage.
+
+  - type: input
+    id: version
+    attributes:
+      label: Attune 版本 / Version
+      description: 跑 `attune --version` 输出。Output of `attune --version`.
+      placeholder: e.g. v1.0.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统 / OS
+      options:
+        - Linux x86_64 (Ubuntu/Debian/Fedora)
+        - Linux x86_64 (Arch/other)
+        - Windows 10/11 x86_64
+        - K3 一体机 RVA23 riscv64
+        - 其他 / Other (在 reproduce steps 说明)
+    validations:
+      required: true
+
+  - type: input
+    id: vault-size
+    attributes:
+      label: Vault size (MB)
+      description: 跑 `ls -lh ~/.local/share/Attune/vault.db` 大小,或 Settings → About 查看
+      placeholder: e.g. 12 MB
+    validations:
+      required: false
+
+  - type: dropdown
+    id: llm-provider
+    attributes:
+      label: LLM Provider
+      options:
+        - Attune Pro Gateway (会员制 SaaS)
+        - BYOK OpenAI (ChatGPT Plus / Team API key)
+        - BYOK Anthropic Claude
+        - BYOK Google Gemini
+        - BYOK DeepSeek / Qwen / 其他兼容
+        - 本地 Ollama (qwen2.5:3b 等)
+        - 不涉及 LLM(此 bug 不需 LLM)
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤 / Reproduce Steps
+      description: 编号步骤,越精确越好。Numbered steps, more precise is better.
+      placeholder: |
+        1. 打开 attune
+        2. Settings → Plugins → ...
+        3. 看到 "X 错误"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为 / Expected Behavior
+      placeholder: 应该 X 发生
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为 / Actual Behavior
+      placeholder: 实际 Y 发生
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / Logs
+      description: |
+        `~/.local/share/Attune/logs/*.log` 节选(最近 50 行 + 任何 ERROR 行)。
+        敏感信息(token / password / vault content)请脱敏。
+        Excerpt from logs. Redact sensitive info (tokens/passwords/vault content).
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: screenshot
+    attributes:
+      label: 截图 / Screenshot
+      description: 如方便,贴 imgur 链接或拖拽图片到本框
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 自查 / Self-check
+      options:
+        - label: 已搜索 [existing issues](https://github.com/qiurui144/attune/issues?q=is%3Aissue) 无重复
+          required: true
+        - label: 已查看 [docs/UPGRADING.md](https://github.com/qiurui144/attune/blob/main/docs/UPGRADING.md) + [docs/ROLLBACK.md](https://github.com/qiurui144/attune/blob/main/docs/ROLLBACK.md) 排除升级问题
+          required: false
+        - label: 已脱敏 secrets / vault content
+          required: true

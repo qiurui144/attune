@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📚 Wiki / 文档
+    url: https://wiki.attune.example.com
+    about: 社区维护的 wiki,常见问题 + 部署教程 + 进阶用法
+  - name: 💬 GitHub Discussions
+    url: https://github.com/qiurui144/attune/discussions
+    about: 一般性讨论 / 头脑风暴 / 求助(非 bug / 非明确 feature request)
+  - name: 🔒 Security 漏洞报告
+    url: https://github.com/qiurui144/attune/security/advisories/new
+    about: 走 GitHub Security Advisory(私下报告,避免公开暴露 PoC)

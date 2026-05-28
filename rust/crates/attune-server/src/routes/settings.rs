@@ -136,7 +136,7 @@ pub async fn update_settings(
         "skills",  // Sprint 2 Skills Router: { disabled: string[] }
         "wizard",  // wizard completion state: { complete: bool, current_step: int }
         "pluginhub", // G2 (2026-05-01): { url, license_key }
-        "cloud", // FEAT-1 (2026-05-14): { accounts_url } — 自部署 / 私有 cloud 环境覆盖默认 attune.ai
+        "cloud", // FEAT-1 (2026-05-14): { accounts_url } — 自部署 / 私有 cloud 环境覆盖默认 engi-stack.com
     ];
     // URL 字段白名单 scheme 校验（防 javascript: / data: 注入成 XSS 种子）
     if let Some(body_obj) = body.as_object() {
@@ -326,14 +326,14 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
 
         // G2 (2026-05-01) — PluginHub 远端市场对接
         // null = 走内嵌 Mock provider（默认离线，看到 4 个 attune-pro 试用卡）
-        // 配 url + license_key 后切到 HttpPluginHubProvider，调真 hub.attune.ai
+        // 配 url + license_key 后切到 HttpPluginHubProvider，调真 hub.engi-stack.com
         "pluginhub": {
-            "url": null,                  // 例: "https://hub.attune.ai"
+            "url": null,                  // 例: "https://hub.engi-stack.com"
             "license_key": null           // 同 attune Pro 会员 license key（与 LLM Gateway 共享）
         },
 
         // FEAT-1 (2026-05-14) — 自部署 cloud cluster 入口
-        // null = 默认 attune.ai 公共 cloud (accounts.attune.ai / hub.attune.ai / gateway.attune.ai)
+        // null = 默认 engi-stack.com 公共 cloud (accounts.engi-stack.com / hub.engi-stack.com / gateway.engi-stack.com)
         // 自部署: 填入私有 cluster URL, 三个 endpoint 分别对应不同微服务.
         // 用户场景: 企业内网部署 attune-cloud-* 容器后, 在 Settings UI 填入这三个地址
         "cloud": {
@@ -502,7 +502,7 @@ mod tests {
     fn paid_user_pluginhub_still_whole_object_lock_when_locked() {
         // pluginhub 是整对象锁;但 P0 fix 后付费会员 plugin_install=Editable
         // → 这里应该放行 (per member_session.rs::paid_locks_cloud_llm_and_plugin_uninstall_only)
-        let body = serde_json::json!({"pluginhub": {"url": "https://hub.attune.ai"}});
+        let body = serde_json::json!({"pluginhub": {"url": "https://hub.engi-stack.com"}});
         assert!(check_settings_locks(&body, &paid_locks()).is_none(),
             "付费用户应能改 pluginhub URL(plugin_install 解锁)");
     }

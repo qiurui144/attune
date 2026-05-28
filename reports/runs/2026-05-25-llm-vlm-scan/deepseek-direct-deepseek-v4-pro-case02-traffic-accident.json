@@ -1,0 +1,39 @@
+{
+  "provider": "deepseek-direct",
+  "model": "deepseek-v4-pro",
+  "case_id": "case02-traffic-accident",
+  "case_prompt_first50": "从下面提取事故信息(JSON: parties/injury_level/repair_cost_c",
+  "api_result": {
+    "ok": true,
+    "elapsed_s": 3.157,
+    "raw_response": "{\"parties\": [\"李某\", \"陈某\"], \"injury_level\": \"轻伤\", \"repair_cost_cny\": 12000}",
+    "usage": {
+      "prompt_tokens": 82,
+      "completion_tokens": 159,
+      "total_tokens": 241,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 128
+      },
+      "prompt_cache_hit_tokens": 0,
+      "prompt_cache_miss_tokens": 82
+    },
+    "model": "deepseek-v4-pro"
+  },
+  "eval_result": {
+    "parsed_ok": true,
+    "keys_hit_ratio": 1.0,
+    "value_match_ratio": 1.0,
+    "extracted": {
+      "parties": [
+        "李某",
+        "陈某"
+      ],
+      "injury_level": "轻伤",
+      "repair_cost_cny": 12000
+    }
+  },
+  "timestamp": "2026-05-25T15:36:33.858600+00:00"
+}

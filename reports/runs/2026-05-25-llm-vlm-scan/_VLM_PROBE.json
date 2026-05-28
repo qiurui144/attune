@@ -1,0 +1,30 @@
+{
+  "probe_timestamp": "2026-05-25T23:35:00Z",
+  "purpose": "Discover VLM models available in user TokenHub plan",
+  "test_input": "1x1 transparent PNG (base64) + text 'describe this image'",
+  "candidates_probed": [
+    "qwen2.5-vl-72b-instruct",
+    "qwen-vl-max-latest",
+    "qwen-vl-plus",
+    "hunyuan-vision",
+    "hunyuan-large-vision",
+    "hunyuan-t1-vision",
+    "deepseek-v3-0324 (baseline text-only)",
+    "gpt-4o-mini",
+    "gemini-1.5-flash"
+  ],
+  "results": {
+    "all_vlm_models": "MODEL_NOT_FOUND or NO_FREE_PACKAGE",
+    "deepseek_v3_0324": "responds but silently drops image input (text-only)"
+  },
+  "conclusion": {
+    "user_tokenhub_plan_vlm_coverage": "NONE — current plan only active model is deepseek-v3-0324 (text)",
+    "deepseek_direct_vlm": "NOT SUPPORTED — DeepSeek v4-flash/v4-pro are text-only per /v1/models",
+    "recommendation_for_vlm": "Need separate VLM provider (Qwen-VL on Aliyun / Gemini Vision / GPT-4o / Hunyuan-Vision direct via TC3-signed API). Not testable with current keys."
+  },
+  "raw_errors": {
+    "qwen-vl-max-latest": "400004 model not found",
+    "hunyuan-vision": "400004 model not found",
+    "deepseek-v3-0324_with_image": "200 OK but says: 由于没有看到具体的图片，我无法提供准确的描述。"
+  }
+}

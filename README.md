@@ -372,7 +372,7 @@ Distributing skills to others: zip the folder as `<plugin-id>.attunepkg` — rec
 ### 形态切换
 
 - **离线 → 免费会员**：应用窗口 → 我的账号 → 登录/注册，写 `~/.config/npu-vault/license.json`（free license code），设备绑定 1:2 自动生效
-- **免费 → 付费**：应用窗口 → 我的账号 → 升级 → 跳到 accounts.attune.ai 付款；付款后云端自动 sync pro plugins + 云端大模型自动接入
+- **免费 → 付费**：应用窗口 → 我的账号 → 升级 → 跳到 accounts.engi-stack.com 付款；付款后云端自动 sync pro plugins + 云端大模型自动接入
 
 ### 一键安装
 

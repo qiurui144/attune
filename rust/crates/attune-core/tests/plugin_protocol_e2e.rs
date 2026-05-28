@@ -25,7 +25,7 @@ maturity: stable
 pricing:
   tier: paid
   trial_quota: 10
-  price_url: https://attune.ai/pro/law-pro
+  price_url: https://engi-stack.com/pro/law-pro
 resources:
   total_max_llm_tokens_per_call: 10000
   total_max_cpu_seconds: 30

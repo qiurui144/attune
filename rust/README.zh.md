@@ -488,7 +488,7 @@ cargo tauri build --bundles nsis,msi
 
 ### 自动更新
 
-桌面端启动 30 秒后检查 `https://updates.attune.ai/desktop/{target}/{version}/latest.json`。
+桌面端启动 30 秒后检查 `https://updates.engi-stack.com/desktop/{target}/{version}/latest.json`。
 更新包用 minisign 签名，公钥嵌入二进制。完整设计见
 `docs/superpowers/specs/2026-04-25-industry-attune-design.md` §6.6。
 

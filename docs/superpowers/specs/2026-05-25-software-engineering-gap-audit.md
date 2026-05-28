@@ -319,7 +319,7 @@ attune-server / accounts / pluginhub 没有 `/metrics`(Prometheus) endpoint。Ga
 **Gap 9.2 (P1 - 法律强约束)**:**DSAR API** —
 - `GET /api/v1/users/me/export`(JSON dump: profile / licenses / billing history)
 - `DELETE /api/v1/users/me`(soft delete + 30 天后 hard delete + Stripe 取消订阅)
-- 配套 `docs/data-rights.md`(用户可见 url:`https://attune.ai/data-rights`)
+- 配套 `docs/data-rights.md`(用户可见 url:`https://engi-stack.com/data-rights`)
 
 **Gap 9.3 (P2)**:**中国发票合规** — 走 Stripe 不发中国 增值税专票/普票。若 5/26 上架后有中国企业用户,得接 third-party(诺诺 / 百望)或先声明"暂不开发票,需开发票请联系 sales@"。
 
@@ -334,19 +334,19 @@ attune-server / accounts / pluginhub 没有 `/metrics`(Prometheus) endpoint。Ga
 | 官网 ToS 页面 | ❌ | grep 仅 wiki-web `external/attune-enterprise/` 内有 `京ICP证010230-17`(lawcontrol 老备案,不是 attune) |
 | 官网 Privacy Policy 页面 | ❌ | 同上,无 attune 自己的 |
 | DPA (Data Processing Agreement) | ❌ | 企业合同需要,缺 |
-| 中国 ICP 备案号 | ❌ | attune.ai 域名是否 ICP 备案未确认;若服务器在大陆 + 域名 attune.ai 解析到大陆 IP,**法定必须备案** |
+| 中国 ICP 备案号 | ❌ | engi-stack.com 域名是否 ICP 备案未确认;若服务器在大陆 + 域名 engi-stack.com 解析到大陆 IP,**法定必须备案** |
 | GDPR 合规 path | ⚠️ | 部分 — privacy 设计层面 OK(本地优先 / 端到端加密),但 user-facing DSAR API 缺 |
 | 中国个人信息保护法 | ⚠️ | 同上 |
 | enterprise 合同律师审核 | ❌ | 未做 |
 | 开源依赖合规扫描 | ✅ | cargo deny check (licenses + bans) |
 
 **Gap 10.1 (P0 - 5/26 上架阻断)**:**ToS / Privacy Policy 真页面缺**。
-官网 `https://attune.ai/tos` + `https://attune.ai/privacy` 必须有真内容。建议:
+官网 `https://engi-stack.com/tos` + `https://engi-stack.com/privacy` 必须有真内容。建议:
 - 参考 Notion / Linear 的 ToS / Privacy 草稿(SaaS 通用)
 - 找律师审一遍(中国数据主体 + 海外用户双 jurisdiction)
 - 5/26 上架前必须 publish — **这是 P0**
 
-**Gap 10.2 (P0 - 法定)**:**ICP 备案** — 若 attune.ai 解析到大陆服务器,工信部备案是法定义务。若不备案,大陆访问会被阻断。
+**Gap 10.2 (P0 - 法定)**:**ICP 备案** — 若 engi-stack.com 解析到大陆服务器,工信部备案是法定义务。若不备案,大陆访问会被阻断。
 - 5/26 上架前确认:服务器位置 + 域名解析 + 是否已备案
 - 未备案选项:(a) 备案(7-20 工作日) (b) 服务器迁海外(港/美) — 各有权衡
 

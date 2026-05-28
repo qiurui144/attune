@@ -1,0 +1,35 @@
+{
+  "provider": "tencent-tokenhub",
+  "model": "deepseek-v3-0324",
+  "case_id": "case04-sale-contract",
+  "case_prompt_first50": "从下面提取买卖合同关键信息(JSON: seller/buyer/total_cny/dispute",
+  "api_result": {
+    "ok": true,
+    "elapsed_s": 1.806,
+    "raw_response": "```json\n{\n  \"seller\": \"甲公司\",\n  \"buyer\": \"乙公司\",\n  \"total_cny\": 500000,\n  \"dispute_type\": \"逾期付款\"\n}\n```",
+    "usage": {
+      "prompt_tokens": 64,
+      "completion_tokens": 43,
+      "total_tokens": 107,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0
+      }
+    },
+    "model": "deepseek-v3-0324"
+  },
+  "eval_result": {
+    "parsed_ok": true,
+    "keys_hit_ratio": 1.0,
+    "value_match_ratio": 1.0,
+    "extracted": {
+      "seller": "甲公司",
+      "buyer": "乙公司",
+      "total_cny": 500000,
+      "dispute_type": "逾期付款"
+    }
+  },
+  "timestamp": "2026-05-25T15:36:59.337388+00:00"
+}

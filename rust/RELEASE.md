@@ -1,5 +1,106 @@
 # attune 版本记录
 
+## v1.0.5 — 5/22-28 累积 capstone GA（2026-05-28）
+
+> v1.0.0 GA(5/25)后 5/22-28 develop sprint 累积 work 一次性 ship 的 capstone。
+> 配对 `desktop-v1.0.5` + attune-pro `v1.0.5` + cloud `cloud-v2.3.0`。
+> 5/22-28 期间 develop 累计 172 commits over main(v1.0.0 GA)。
+
+### Highlights
+
+**升级策略 SSOT（C1-C5）**
+- `UPGRADING.md` 352 行 SSOT + `ROLLBACK.md` 7 场景 308 行
+- Tauri auto-updater + `publish-latest-json.yml` workflow + minisign 签名
+- `attune rollback` / `attune pre-upgrade-backup` CLI
+- `GET /api/v1/version` active version notification endpoint
+- 3 GitHub issue template + PR template + config.yml
+
+**Observability（A1）**
+- Prometheus + Loki + Grafana + 4 dashboard + 12 alert（cloud 端）
+- 应用 `/metrics` endpoint(attune-server + accounts)
+
+**Security 自动化（A2）**
+- trivy 镜像扫描 + rotation cron + prune
+- pre-commit gitleaks / trufflehog
+- cargo-deny v2 schema fix + license/advisory ignore
+
+**DR + Status（A4）**
+- `backup.rs` 模块 + off-site backup script
+- restore drill 真演练
+- STATUS-PAGE public 通路
+
+**Performance baseline（C4/C5）**
+- k6 stress framework + SLO 数值化
+- VLM provider stub(v1.1.0 接 OpenAI Vision / Gemini Vision)
+
+**DSAR（GDPR/PIPL P0）**
+- accounts DSAR endpoints + attune-server client-side proxy
+- `DSAR-USER-GUIDE.md` 用户操作手册
+
+**Engineering practices**
+- SUPPORT.md SLA 分级
+- i18n 0 残留 + grep 守卫(JSDoc 排除)
+- 5 包管理器接入(apt / rpm / winget / homebrew / scoop)
+- workspace default-members 显式声明(修 `cargo build --bin attune` regression)
+
+**Cloud 配套（cloud-v2.3.0）**
+- `./cloud` unified CLI(20+ 子命令,kubectl 风格)
+- `./cloud up` 一键部署(check + install + deploy + verify)
+- `ensure_network` 自动 docker network create
+- install-wizard 14→3 必填 + LLM 智能 detect
+- secrets/cloud.enc.yaml 入 git(SOPS encrypted 安全)
+- 分支极简(部署仓单 master)
+- attune-admin SSO MVP ready(v1.0.6 sprint)
+
+**LLM provider matrix**
+- DeepSeek + 腾讯 Hunyuan TokenHub + 7 channel template + 双源头 spec
+- 4 tier 推荐 + real-test 矩阵
+
+**Office Helper 真红线**（per v1.0.1 plan）
+- OCR 长页 silent-zero-chars fix(`extract_text_from_image` dimensions guard + auto-tile)
+- `tests/ocr_long_page_audit.rs` + `tests/reranker_long_doc_audit.rs` permanent reproducer
+
+**CI release engineering**
+- desktop-release Windows build fix(shell: bash for $BUNDLES expansion)
+- domain cleanup attune.ai → engi-stack.com
+
+### Breaking changes
+
+None. v1.0.0 用户向后兼容,vault schema 不动,API 协议不动。
+
+### Migration
+
+- Cloud 端 DSAR / Observability 是 **additive**(不影响 v1.0.0 cloud-v2.2.0)
+- Desktop 用户走 Tauri auto-updater 自动升级
+- CLI 用户 `attune pre-upgrade-backup` → 下新包 → 解压覆盖 → 启动
+
+### Known Limitations
+
+推延后续 minor/sprint:
+- **pen test 外包**(v1.0.6 supplier 选定)— 当前自动化扫描 only
+- **1000 user 真负载**(需 production 真测;k6 framework ready,等 prod env)
+- **ICP 备案**(user 决策海外 vs 大陆,5/28 未结)
+- **律师 ToS/Privacy 定稿**(v1.0.8)— 5/26 hotfix 草稿生效
+- **attune-admin full panel**(v1.0.6 sprint;MVP SSO 已 ready)
+- **wiki 双语扩**(可推 v1.1)
+
+### 配对
+
+- desktop-v1.0.5(同仓 tag,Windows fix per ed151e1 regression resolve)
+- attune-pro v1.0.5(VLM provider stub + defamation v3 extractor + cloud verify harness + 18-agent matrix 100% coverage audit)
+- cloud-v2.3.0(unified CLI + admin module ready + branches 极简 + SOPS bug fix)
+
+### 测试与质量门
+
+- workspace lib tests 1145+ passed(继承 v1.0.0 基线)
+- E2E 49 PASS / 3 WARN / 0 FAIL
+- Frontend E2E 45/0
+- `cargo clippy -D warnings` clean / `cargo fmt --check` clean
+- Agent ENFORCE gate:6 类下限 0 violations
+- accounts pytest 199 PASS(quota+refund TestClient httpx fix)
+
+---
+
 ## v1.0.1 — Bug Fix + Hardening（TBD，~2026-05-27–31）
 
 > Patch release。**0 breaking change**，所有 v1.0.0 用户建议升级。
@@ -563,7 +664,7 @@ W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
 
 **FEAT-1 cloud endpoint UI gap 关闭**:
 - backend `settings.cloud.{accounts_url, gateway_url}` 字段 + UI Settings 会员 tab "高级 · 自部署 cloud 后端" 折叠区 + 3 URL 输入 + 保存即热重载 pluginhub
-- 关闭前次 Cloud-Integ-1 发现的自部署用户 UX gap (硬编码 attune.ai 没法切到私有 cloud)
+- 关闭前次 Cloud-Integ-1 发现的自部署用户 UX gap (硬编码 engi-stack.com 没法切到私有 cloud)
 
 **FEAT-2 浏览器 fallback (FIX-9 阶段 1)**:
 - `attune-core/web_search_browser.rs` 加 `browser_cache_dir()` / `cached_browser_path()` / `resolve_browser()` 三段式 API + `BrowserResolution` enum (System / Cached / NeedsDownload)
@@ -599,7 +700,7 @@ W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
 **Cloud 自部署可用性**：AMD 笔电 (Docker 29 + Compose v2) 跑通 pluginhub:9100 / accounts:8002 / llm-gateway:8001 三服务 + /health ✓。修了上游 cloud 仓 2 个 bug（Dockerfile copy 顺序 + alembic 0002 down_revision 链断，本地 commit 558df7c 待 push）。
 
 **已知限制 (v0.7 候选)**：
-- attune-desktop Settings/Wizard 没字段配置自定义 accounts/pluginhub URL — 默认硬编码 `attune.ai` 云端。私有 cloud 部署（自托管 / dev 环境）目前只能 SQL 直改 `app_settings`。`state.reload_plugin_hub` 后端已支持热切，缺 UI 入口
+- attune-desktop Settings/Wizard 没字段配置自定义 accounts/pluginhub URL — 默认硬编码 `engi-stack.com` 云端。私有 cloud 部署（自托管 / dev 环境）目前只能 SQL 直改 `app_settings`。`state.reload_plugin_hub` 后端已支持热切，缺 UI 入口
 - Reader / 项目卷宗 round-trip 未在本轮 Playwright E2E 覆盖
 - CI Python lint-and-test + Windows cargo 在 commit 6421de9 修复后转绿（修了 `models/` gitignore 误吞 Python 包 + Windows 浏览器路径假设）
 
@@ -690,7 +791,7 @@ W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
 核心原则：**云端为主，本地为辅；本地 LLM 当前研发成本过高，暂时不主推**。
 
 Wizard 推荐顺序：
-1. ★ **Attune Pro Membership**（默认）— `https://gateway.attune.ai/v1`，登录即用 token 配额
+1. ★ **Attune Pro Membership**（默认）— `https://gateway.engi-stack.com/v1`，登录即用 token 配额
 2. **BYOK**：用户已有付费会员 API key — OpenAI / Anthropic / Gemini / DeepSeek / Qwen
 3. **本地 Ollama**（advanced，K3 一体机预装 qwen2.5:1.5b/3b 走本地）
 

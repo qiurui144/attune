@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+
+PackageIdentifier: qiurui144.Attune
+PackageVersion: 1.0.0
+PackageLocale: en-US
+Publisher: qiurui144
+PublisherUrl: https://engi-stack.com
+PublisherSupportUrl: https://github.com/qiurui144/attune/issues
+Author: qiurui144
+PackageName: Attune
+PackageUrl: https://github.com/qiurui144/attune
+License: MIT
+LicenseUrl: https://github.com/qiurui144/attune/blob/main/LICENSE
+Copyright: Copyright (c) 2026 qiurui144
+ShortDescription: Private AI Knowledge Companion — local-first knowledge base with hybrid intelligence.
+Description: |
+  Attune is a private AI knowledge companion that captures, indexes, and retrieves
+  your knowledge across documents, conversations, and web browsing. Hybrid local +
+  cloud intelligence: local Embedding/Rerank/ASR/OCR on your hardware, optional
+  cloud LLMs (BYOK or Pro membership gateway). End-to-end encrypted vault with
+  Argon2id + AES-256-GCM. Zero data ever leaves your device without explicit action.
+Moniker: attune
+Tags:
+  - ai
+  - knowledge-base
+  - rag
+  - embedding
+  - llm
+  - privacy
+  - local-first
+ReleaseNotes: |
+  v1.0.0 GA — first stable release.
+  See full release notes at:
+  https://github.com/qiurui144/attune/releases/tag/desktop-v1.0.0
+ReleaseNotesUrl: https://github.com/qiurui144/attune/releases/tag/desktop-v1.0.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

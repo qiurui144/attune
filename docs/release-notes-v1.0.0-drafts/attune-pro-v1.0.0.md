@@ -135,7 +135,7 @@ No vault data migration required. Agent computation is stateless.
 
 ## Documentation
 
-- law-pro user guide: https://wiki.attune.ai/attune-pro/law-pro
+- law-pro user guide: https://wiki.engi-stack.com/attune-pro/law-pro
 - Agent methodology: `docs/agent-skill-training-methodology.md` (866 lines, in attune-pro repo)
 - Plugin development guide: https://github.com/qiurui144/attune/blob/main/docs/plugin-development.md
 - Source (private): https://github.com/qiurui144/attune-pro

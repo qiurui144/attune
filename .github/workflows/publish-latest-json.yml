@@ -1,0 +1,163 @@
+name: publish-latest-json
+
+# v1.0.1 C5: Auto-generate latest.json + minisign sign + upload to GH release.
+# Tauri auto-updater (tauri.conf.json:54 endpoints) consumes this file for user auto-upgrade.
+#
+# Trigger: desktop tag push (`desktop-v*`) + workflow_dispatch
+#
+# Prereq (user 1-time setup):
+#   1. minisign -G -p attune-updater.pub -s attune-updater.key
+#   2. GitHub Secrets add `MINISIGN_PRIVATE_KEY` (.key file content base64-encoded)
+#   3. apps/attune-desktop/tauri.conf.json `pubkey` field = .pub content
+#
+# If MINISIGN_PRIVATE_KEY unset: graceful skip + friendly hint, do NOT fail GA.
+
+on:
+  push:
+    tags: ['desktop-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'desktop version to (re)publish, e.g. 1.0.1'
+        required: true
+
+jobs:
+  publish-latest-json:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: ver
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          GH_REF: ${{ github.ref }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="${GH_REF#refs/tags/desktop-v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=desktop-v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check minisign key configured
+        id: keycheck
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        run: |
+          if [ -z "$MINISIGN_KEY" ]; then
+            echo "Warn: MINISIGN_PRIVATE_KEY secret unset - skip latest.json generation"
+            echo "User 1-time setup steps:"
+            echo "  1. minisign -G -p attune-updater.pub -s attune-updater.key"
+            echo "  2. Add MINISIGN_PRIVATE_KEY (base64-encoded .key content) to GH secrets"
+            echo "  3. Update apps/attune-desktop/tauri.conf.json pubkey with .pub content"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for release assets
+        if: steps.keycheck.outputs.skipped == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          for i in $(seq 1 40); do
+            ASSETS=$(gh release view "$TAG" --json assets 2>/dev/null | \
+                     jq -r '.assets[].name' 2>/dev/null || true)
+            COUNT=$(echo "$ASSETS" | grep -cE '\.deb$|\.AppImage$|\.exe$|\.msi$|\.rpm$' || true)
+            if [ "$COUNT" -ge 4 ]; then
+              echo "OK $COUNT install pkg ready"
+              break
+            fi
+            echo "[$i/40] $COUNT pkg available, waiting 60s..."
+            sleep 60
+          done
+
+      - name: Download release assets
+        if: steps.keycheck.outputs.skipped == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          mkdir -p release
+          gh release download "$TAG" --dir release/ \
+            --pattern "*.deb" --pattern "*.AppImage" \
+            --pattern "*.exe" --pattern "*.msi" --pattern "*.rpm"
+          ls -la release/
+
+      - name: Install minisign
+        if: steps.keycheck.outputs.skipped == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y minisign
+
+      - name: Sign artifacts
+        if: steps.keycheck.outputs.skipped == 'false'
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        run: |
+          echo "$MINISIGN_KEY" | base64 -d > /tmp/minisign.key
+          chmod 600 /tmp/minisign.key
+          shopt -s nullglob
+          for pkg in release/*.deb release/*.AppImage release/*.exe release/*.msi release/*.rpm; do
+            echo "Signing: $pkg"
+            minisign -Sm "$pkg" -s /tmp/minisign.key -W || {
+              echo "Error: minisign failed - check MINISIGN_PRIVATE_KEY is base64-encoded no-password key"
+              exit 1
+            }
+          done
+          rm -f /tmp/minisign.key
+
+      - name: Generate latest.json
+        if: steps.keycheck.outputs.skipped == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          NOTES=$(gh release view "$TAG" --json body --jq .body 2>/dev/null | head -c 1000 | jq -Rs .)
+
+          PLATFORMS=$(jq -n '{}')
+          shopt -s nullglob
+          for sig_file in release/*.minisig; do
+            pkg_file="${sig_file%.minisig}"
+            pkg_name=$(basename "$pkg_file")
+            case "$pkg_name" in
+              *_amd64.deb|*amd64.AppImage) plat="linux-x86_64" ;;
+              *.rpm) plat="linux-x86_64-rpm" ;;
+              *_x64-setup.exe|*_x64_en-US.msi) plat="windows-x86_64" ;;
+              *) plat="unknown" ;;
+            esac
+            [ "$plat" = "unknown" ] && continue
+            SIG=$(tail -1 "$sig_file")
+            URL="https://github.com/qiurui144/attune/releases/download/${TAG}/${pkg_name}"
+            PLATFORMS=$(echo "$PLATFORMS" | \
+              jq --arg plat "$plat" --arg sig "$SIG" --arg url "$URL" \
+              '. + {($plat): {signature: $sig, url: $url}}')
+          done
+
+          jq -n \
+            --arg version "v$VERSION" \
+            --argjson notes "$NOTES" \
+            --arg pub_date "$PUB_DATE" \
+            --argjson platforms "$PLATFORMS" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}' \
+            > latest.json
+
+          echo "Generated latest.json:"
+          cat latest.json
+
+      - name: Upload latest.json to release
+        if: steps.keycheck.outputs.skipped == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          gh release upload "$TAG" latest.json --clobber
+          echo "OK latest.json uploaded to $TAG"
+          echo "URL: https://github.com/qiurui144/attune/releases/download/${TAG}/latest.json"

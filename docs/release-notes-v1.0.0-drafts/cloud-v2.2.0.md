@@ -76,7 +76,7 @@ curl -X POST /admin/licenses/generate \
 
 # --- User side ---
 attune login user@example.com \
-     --cloud-url https://accounts.attune.ai
+     --cloud-url https://accounts.engi-stack.com
 # enter license_code when prompted
 attune sync-plugins                          # auto-installs entitled pro plugins
 attune-server-headless                       # start server on :18900
@@ -152,7 +152,7 @@ Alternatively, use the `attune-accounts` Rust reference implementation (Apache-2
 
 ## Documentation
 
-- Admin deploy guide: https://wiki.attune.ai/cloud/deploy
-- Self-host accounts: https://wiki.attune.ai/cloud/self-host
-- API reference: https://wiki.attune.ai/cloud/api
+- Admin deploy guide: https://wiki.engi-stack.com/cloud/deploy
+- Self-host accounts: https://wiki.engi-stack.com/cloud/self-host
+- API reference: https://wiki.engi-stack.com/cloud/api
 - Source (OSS reference impl): https://github.com/qiurui144/attune (see `rust/crates/attune-accounts/`)

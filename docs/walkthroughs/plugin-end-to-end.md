@@ -52,7 +52,7 @@ $ cd /path/to/law-pro/.. && tar czf law-pro-0.2.0.attunepkg law-pro/
 ### 1. 下载 + 解压 .attunepkg
 
 ```bash
-$ curl -O https://hub.attune.ai/plugins/law-pro/0.2.0.attunepkg
+$ curl -O https://hub.engi-stack.com/plugins/law-pro/0.2.0.attunepkg
 $ tar xzf law-pro-0.2.0.attunepkg
 ```
 

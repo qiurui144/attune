@@ -43,7 +43,7 @@ E2E 运行机：本机 host 直访 docker 内 container IP (`172.31.0.7:8002` ac
 |---|------|------|------|
 | P1 | `cloud-accounts` 容器 restart loop | DB 密码未注入（先前 `make up` 没经 sops 包装重启过） | `make up-accounts` (走 secrets.sh 解密 sops 注入 env) → up |
 | P2 | nginx-proxy 路由 `accounts.attune.local` 返回 503 | `accounts_accounts-network` 在 cloud-proxy 容器外不可达，docker-gen 把它选为 upstream | 绕过 proxy，host 直访容器 IP（本地 E2E 完全合法路径） |
-| P3 | `gateway_public_url` 默认 `https://gateway.attune.ai/v1` 在本地 unreachable | accounts 容器无 `GATEWAY_PUBLIC_URL` env 覆盖默认值 | 临时在 `accounts/docker-compose.yml` 加一行 `GATEWAY_PUBLIC_URL` env，跑完测试后 revert（已 restored） |
+| P3 | `gateway_public_url` 默认 `https://gateway.engi-stack.com/v1` 在本地 unreachable | accounts 容器无 `GATEWAY_PUBLIC_URL` env 覆盖默认值 | 临时在 `accounts/docker-compose.yml` 加一行 `GATEWAY_PUBLIC_URL` env，跑完测试后 revert（已 restored） |
 
 P1+P2 是 cloud 部署环境问题（与代码无关）。P3 揭示了 **docker-compose 缺一个 env 占位** — 任何本地 E2E / 自部署用户都会撞到，建议补默认 placeholder 配置（attune-pro 上云线 / 文档补充）。
 
@@ -93,13 +93,13 @@ P1+P2 是 cloud 部署环境问题（与代码无关）。P3 揭示了 **docker-
 
 ### Finding-B (P1 / 部署文档补强) — `GATEWAY_PUBLIC_URL` 在 `accounts/docker-compose.yml` 缺占位
 
-**症状**: 本地或自部署 cloud 后，`accounts` 容器 env 没 `GATEWAY_PUBLIC_URL` 占位（仅有 `LLM_GATEWAY_BASE_URL`，那是 accounts → newapi 内部 admin 调用），attune-server 拿到的 `gateway_url` 永远是生产硬编码 `https://gateway.attune.ai/v1`。
+**症状**: 本地或自部署 cloud 后，`accounts` 容器 env 没 `GATEWAY_PUBLIC_URL` 占位（仅有 `LLM_GATEWAY_BASE_URL`，那是 accounts → newapi 内部 admin 调用），attune-server 拿到的 `gateway_url` 永远是生产硬编码 `https://gateway.engi-stack.com/v1`。
 
 **影响**: 任何"我想在内网 / 本地跑全栈"的用户 chat 都会失败。
 
 **修复**: `accounts/docker-compose.yml` env 列表加一行：
 ```yaml
-- GATEWAY_PUBLIC_URL=${GATEWAY_PUBLIC_URL:-https://gateway.attune.ai/v1}
+- GATEWAY_PUBLIC_URL=${GATEWAY_PUBLIC_URL:-https://gateway.engi-stack.com/v1}
 ```
 + 在 `secrets/cloud.secrets.example.yaml` 或 `.env` 文档补一段"自部署时务必覆盖到 cluster 内可达 URL"。
 

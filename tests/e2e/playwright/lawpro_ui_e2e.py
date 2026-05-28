@@ -176,7 +176,7 @@ def run(page) -> None:
     print("\n── L5 law-pro 接入 ──")
     click(page, "button", "会员")
     page.wait_for_timeout(500)
-    click(page, "button", "▶ 展开 · 默认使用 attune.ai 公共云")
+    click(page, "button", "▶ 展开 · 默认使用 engi-stack.com 公共云")
     page.wait_for_timeout(400)
     try:
         page.get_by_role("textbox", name="https://hub.your-company.com").fill(HUB_URL)

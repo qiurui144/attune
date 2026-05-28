@@ -27,7 +27,7 @@ attune 装包后立刻就绪以下底座：
 
 笔电 wizard 推荐顺序：
 1. **★ Attune Pro Membership**（登录即用）— 默认推荐
-   - Endpoint: `https://gateway.attune.ai/v1`
+   - Endpoint: `https://gateway.engi-stack.com/v1`
    - 月费会员，token 配额由 attune 计费追踪
    - Gateway 路由到 OpenAI / Anthropic / Gemini（对用户透明）
 2. **BYOK：用户已有的 API key**

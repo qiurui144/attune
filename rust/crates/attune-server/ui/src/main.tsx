@@ -1,5 +1,6 @@
 import { render } from 'preact';
 import { App } from './App';
+import { t } from './i18n';
 import './styles/global.css';
 
 const rootEl = document.getElementById('app');
@@ -19,8 +20,10 @@ if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
         // 当前先 alert 让用户验证桥通
         if (paths.length > 0) {
           alert(
-            `已检测到拖入 ${paths.length} 个文件（占位提示）：\n` +
-              paths.slice(0, 3).join('\n'),
+            t('app.tauri.dropped_files', {
+              count: paths.length,
+              paths: paths.slice(0, 3).join('\n'),
+            }),
           );
         }
       }).catch((err) => {

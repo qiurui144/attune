@@ -129,7 +129,7 @@ Finished 1 bundle at:
 | Windows NSIS hooks | `scripts/installer.nsh` | ✅ 存在 |
 | whisper-cli bundle | `resources/bin/whisper-cli` | ✅ 2.6 MB 二进制已放入 |
 | icon | icon.png + icon.ico | ✅ 齐全 |
-| updater endpoint | `https://updates.attune.ai/...` | ✅ pubkey 已配置 |
+| updater endpoint | `https://updates.engi-stack.com/...` | ✅ pubkey 已配置 |
 
 ### MSI 配置说明
 

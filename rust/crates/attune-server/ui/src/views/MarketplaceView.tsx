@@ -4,7 +4,7 @@
  *
  * Backend: /api/v1/marketplace/plugins (GET) + /install (POST)
  * 默认走内嵌 Mock provider（4 个 attune-pro vertical plugin）；
- * 用户在 Settings 配 pluginhub.url + license_key 后切真 hub.attune.ai。
+ * 用户在 Settings 配 pluginhub.url + license_key 后切真 hub.engi-stack.com。
  */
 
 import type { JSX } from 'preact';

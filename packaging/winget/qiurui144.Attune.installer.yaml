@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+#
+# WinGet installer manifest for Attune Desktop.
+# 路径:manifests/q/qiurui144/Attune/<version>/qiurui144.Attune.installer.yaml
+# 提交至 microsoft/winget-pkgs(详见 packaging/winget/SUBMISSION.md)
+#
+# CI 自动化:.github/workflows/winget.yml 在 GA tag (desktop-vX.Y.Z) 触发,
+# 用 wingetcreate 重新计算 SHA256 + 生成 manifest + 自动开 PR.
+# 本文件作为 fallback/seed,首次手动提交或 wingetcreate 故障时使用.
+
+PackageIdentifier: qiurui144.Attune
+PackageVersion: 1.0.0
+InstallerType: nullsoft
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+ReleaseDate: 2026-05-25
+ReleaseNotesUrl: https://github.com/qiurui144/attune/releases/tag/desktop-v1.0.0
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/qiurui144/attune/releases/download/desktop-v1.0.0/Attune_1.0.0_x64-setup.exe
+    # SHA256 — 首次提交时 wingetcreate 会自动计算并替换;此处为占位,prevent schema fail.
+    InstallerSha256: REPLACE_WITH_ACTUAL_SHA256_FROM_RELEASE_ASSET
+    InstallerSwitches:
+      Silent: /S
+      SilentWithProgress: /S
+ManifestType: installer
+ManifestVersion: 1.6.0

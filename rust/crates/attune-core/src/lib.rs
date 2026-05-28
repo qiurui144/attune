@@ -87,6 +87,7 @@ pub mod memory_consolidation;
 pub mod memory;
 pub mod project_recommender;
 pub mod queue;
+pub mod backup;
 pub mod reindex;
 pub mod resource_governor;
 pub mod scanner;

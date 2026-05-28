@@ -123,7 +123,7 @@ Vault is **not touched** by the installer/uninstaller. Upgrade steps:
 
 ## Documentation
 
-- Install guide: https://wiki.attune.ai/attune/install
-- Desktop app docs: https://wiki.attune.ai/attune/desktop
+- Install guide: https://wiki.engi-stack.com/attune/install
+- Desktop app docs: https://wiki.engi-stack.com/attune/desktop
 - Source (Tauri config): `rust/crates/attune-desktop/` in https://github.com/qiurui144/attune
 - Issues: https://github.com/qiurui144/attune/issues

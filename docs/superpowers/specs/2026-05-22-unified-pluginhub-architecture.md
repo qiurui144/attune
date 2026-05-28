@@ -74,7 +74,7 @@ per 项目 CLAUDE.md「三产品矩阵 + 边界」：
 - lawcontrol → attune-enterprise 改名全链：
   - git repo（远端 + 本地 worktree）
   - docker image / docker-compose service name
-  - DNS / domain（如 `lawcontrol.example.com` → `enterprise.attune.ai`）
+  - DNS / domain（如 `lawcontrol.example.com` → `enterprise.engi-stack.com`）
   - service-discovery / k8s namespace
   - database schema 字段（凡含 `lawcontrol_*` 命名的表 / 列，加迁移脚本 rename）
   - 仓内 CLAUDE.md / README.md / DEVELOP.md / RELEASE.md
@@ -631,7 +631,7 @@ per 全局 CLAUDE.md「Agent 验证铁律」6 类下限，适配 pluginhub backe
 
 特殊回归测试：
 - R1：旧 `lawcontrol_*` docker image tag 仍存档（30 天过渡期，期间 docker pull 兼容）
-- R2：旧 `lawcontrol.example.com` DNS 加 301 redirect 到 `enterprise.attune.ai`
+- R2：旧 `lawcontrol.example.com` DNS 加 301 redirect 到 `enterprise.engi-stack.com`
 - R3：旧 `db_table = lawcontrol_*` SQL alias view（保留 1 release，期间双写）
 - R4：CLAUDE.md / memory 全 grep 后 0 残留 lawcontrol 字串（除合理保留的 law 业务术语）
 
@@ -683,7 +683,7 @@ UPDATE plugin SET visibility = 'pro' WHERE id IN (SELECT id FROM plugin WHERE ca
 **阶段 2（第 2 周）**：双仓并存
 - 老仓 freeze（main 分支锁定，只接 hotfix）
 - 新仓 develop 上 rebrand commit（image name / service name / docker-compose）
-- 部署侧用 alias DNS（`lawcontrol.* → enterprise.attune.ai`，301 redirect）
+- 部署侧用 alias DNS（`lawcontrol.* → enterprise.engi-stack.com`，301 redirect）
 
 **阶段 3（第 3-4 周）**：客户迁移
 - 现有客户 SaaS 端逐个切换（每客户一个 maintenance window）
@@ -736,7 +736,7 @@ grep -rln "lawcontrol" \
 | 原文 | 改为 |
 |------|------|
 | `lawcontrol` (repo / product 引用) | `attune-enterprise` |
-| `lawcontrol` (URL / 部署) | `enterprise.attune.ai` |
+| `lawcontrol` (URL / 部署) | `enterprise.engi-stack.com` |
 | `lawcontrol` (业务术语 / 历史 incident 引用) | 保留（如「2026-04 lawcontrol design borrowed plugin.yaml pattern」） |
 | `lawcontrol/plugins/skills/contract_review` | `attune-enterprise/plugins/skills/contract_review` |
 | `/data/company/project/attune-enterprise` | `/data/company/project/attune-enterprise` |

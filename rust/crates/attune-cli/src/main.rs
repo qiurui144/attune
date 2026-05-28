@@ -189,13 +189,13 @@ enum Commands {
     /// 登录后 settings 大多数项锁定 (云端下发), 并触发 pro 插件自动同步.
     Login {
         email: String,
-        /// 云端 accounts base URL (默认 https://accounts.attune.ai)
-        #[arg(long, default_value = "https://accounts.attune.ai")]
+        /// 云端 accounts base URL (默认 https://accounts.engi-stack.com)
+        #[arg(long, default_value = "https://accounts.engi-stack.com")]
         cloud_url: String,
     },
     /// 拉云端 entitled pro 插件清单, 自动下载 + 装载缺的
     SyncPlugins {
-        #[arg(long, default_value = "https://accounts.attune.ai")]
+        #[arg(long, default_value = "https://accounts.engi-stack.com")]
         cloud_url: String,
     },
     /// 打包 + 上传 plugin 到 pluginhub (开发者侧分发流程)
@@ -204,7 +204,7 @@ enum Commands {
         /// plugin 源目录 (含 plugin.yaml / bin/ / plugin.sig)
         plugin_dir: std::path::PathBuf,
         /// pluginhub base URL (lawcontrol/pluginhub 部署)
-        #[arg(long, default_value = "https://hub.attune.ai")]
+        #[arg(long, default_value = "https://hub.engi-stack.com")]
         hub_url: String,
         /// admin token (env PLUGINHUB_ADMIN_TOKEN)
         #[arg(long)]
@@ -248,6 +248,19 @@ enum Commands {
     OcrProfileDelete {
         id: String,
     },
+    /// v1.0.1 C4: 列出 / 回滚 vault 备份。
+    /// 无 --version 列出 ~/.local/share/Attune/backups/ 内备份(时间 / size / SHA256)。
+    /// 带 --version 选最近一份回滚 vault.db(自动备份 current 防双失)。
+    Rollback {
+        /// 选第 N 份备份(1 = 最新)。不传则列表。
+        #[arg(long)]
+        index: Option<usize>,
+        /// 跳过确认 prompt。
+        #[arg(long)]
+        yes: bool,
+    },
+    /// v1.0.1 C4: 强制升级前备份 — `vault.db` → `vault.db.bak.<stamp>`,自动 retention 5 份。
+    PreUpgradeBackup,
 }
 
 /// CLI exit code protocol (D5.7).
@@ -332,6 +345,9 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             return run_ocr_profile_create(id, name, description, languages, *dpi, tags);
         }
         Commands::OcrProfileDelete { id } => return run_ocr_profile_delete(id),
+        // v1.0.1 C4 — backup/rollback 不需要 vault 已 unlock(直接操作 vault.db 文件)
+        Commands::Rollback { index, yes } => return run_rollback(*index, *yes),
+        Commands::PreUpgradeBackup => return run_pre_upgrade_backup(),
         // VaultImport must run BEFORE Vault::open_default() — open() auto-creates vault.db
         // via Connection::open(), which would make the "already exists" guard always trigger.
         Commands::VaultImport { src, force } => {
@@ -597,7 +613,8 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         | Commands::Login { .. } | Commands::SyncPlugins { .. } | Commands::LinkFolder { .. }
         | Commands::PluginPublish { .. }
         | Commands::OcrProfileList | Commands::OcrProfileShow { .. }
-        | Commands::OcrProfileCreate { .. } | Commands::OcrProfileDelete { .. } => {
+        | Commands::OcrProfileCreate { .. } | Commands::OcrProfileDelete { .. }
+        | Commands::Rollback { .. } | Commands::PreUpgradeBackup => {
             unreachable!("plugin/cloud/ocr-profile commands handled before vault open")
         }
     }
@@ -1270,6 +1287,54 @@ fn run_ocr_profile_delete(id: &str) -> attune_core::error::Result<()> {
     let mut reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
     reg.delete(id)?;
     eprintln!("✓ profile {id} 已删除");
+    Ok(())
+}
+
+/// v1.0.1 C4: `attune pre-upgrade-backup` — 强制升级前备份 + retention 5。
+fn run_pre_upgrade_backup() -> attune_core::error::Result<()> {
+    let entry = attune_core::backup::create_pre_upgrade_backup()?;
+    eprintln!("✓ backup 已创建: {}", entry.path.display());
+    eprintln!("  size: {} bytes", entry.size);
+    eprintln!("  stamp: {}", entry.stamp);
+    Ok(())
+}
+
+/// v1.0.1 C4: `attune rollback [--index N]` — 列出 / 回滚 vault 备份。
+fn run_rollback(index: Option<usize>, yes: bool) -> attune_core::error::Result<()> {
+    let entries = attune_core::backup::list_backups()?;
+    if entries.is_empty() {
+        eprintln!("没有可用 backup(目录: {})", attune_core::backup::backup_dir()?.display());
+        eprintln!("提示:升级前先跑 `attune pre-upgrade-backup` 创建备份。");
+        return Ok(());
+    }
+    match index {
+        None => {
+            // 列表模式
+            eprintln!("可用 backup ({} 份,1 = 最新):", entries.len());
+            for (i, e) in entries.iter().enumerate() {
+                eprintln!("  [{}] {} — {} bytes", i + 1, e.filename, e.size);
+            }
+            eprintln!();
+            eprintln!("回滚:`attune rollback --index <N>`");
+        }
+        Some(n) => {
+            // 回滚模式
+            if !yes {
+                eprintln!("⚠️  即将回滚 vault.db 到 backup #{}(自动备份当前 vault 防双失)。", n);
+                eprintln!("    继续? 输入 'yes' 确认:");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)
+                    .map_err(attune_core::error::VaultError::Io)?;
+                if input.trim() != "yes" {
+                    eprintln!("中止。");
+                    return Ok(());
+                }
+            }
+            let restored = attune_core::backup::restore_from_index(n)?;
+            eprintln!("✓ vault.db 已回滚到: {}", restored.filename);
+            eprintln!("  原 vault.db 备份为 vault.db.before-rollback.<ts>(防双失)");
+        }
+    }
     Ok(())
 }
 

@@ -100,7 +100,7 @@ export function WizardDone({ onContinue }: WizardDoneProps): JSX.Element {
           {t(TIPS_KEYS[tipIdx] ?? TIPS_KEYS[0])}
         </div>
         <Button variant="ghost" onClick={onContinue}>
-          立即开始 →
+          {t('wizard.done.cta')}
         </Button>
       </div>
     </div>

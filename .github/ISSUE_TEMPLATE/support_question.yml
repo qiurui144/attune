@@ -1,0 +1,57 @@
+name: Support Question
+description: 使用问题 / 求助 / Support / how-to question
+title: "[Question]: "
+labels: ["question", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **请优先查以下资源**:
+
+        - [`README.md`](https://github.com/qiurui144/attune/blob/main/README.md) — 入门
+        - [`docs/UPGRADING.md`](https://github.com/qiurui144/attune/blob/main/docs/UPGRADING.md) — 升级路径
+        - [`docs/ROLLBACK.md`](https://github.com/qiurui144/attune/blob/main/docs/ROLLBACK.md) — Disaster recovery
+        - [Wiki](https://wiki.attune.example.com) — 社区 wiki(同步自 docs/)
+        - [Existing issues](https://github.com/qiurui144/attune/issues) — 已有问题搜索
+
+        如确实无答案,再开 issue。
+        **Please check the resources above before opening an issue.**
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 问题描述 / Question
+      description: 一句话描述你的问题。What's your question?
+      placeholder: 例:K3 一体机如何离线升级?
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 已尝试方案 / What have you tried
+      description: 列出已 Google / 读 docs / 翻 issues 的关键词或方案
+      placeholder: |
+        1. 读了 UPGRADING.md §3.4 — 但没说 .img 在哪里下载
+        2. Google "attune k3 ota" 无结果
+        3. 看了 issue #42 — 但场景不同
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Attune 版本 / Version
+      placeholder: e.g. v1.0.1
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 自查 / Self-check
+      options:
+        - label: 已读 README / docs/ 相关章节
+          required: true
+        - label: 已搜索 existing issues
+          required: true

@@ -155,17 +155,17 @@ gh run list --repo qiurui144/attune --workflow docker-publish.yml --limit 3
 
 ### C5. wiki-web 部署
 
-- [ ] `https://wiki.attune.ai` 可访问，页面版本号显示 v1.0.0
+- [ ] `https://wiki.engi-stack.com` 可访问，页面版本号显示 v1.0.0
 
 ### C6. official-web 部署
 
-- [ ] `https://attune.ai` 可访问，下载页显示 v1.0.0 安装链接
+- [ ] `https://engi-stack.com` 可访问，下载页显示 v1.0.0 安装链接
 
 ### C7. accounts / pluginhub healthcheck
 
 ```bash
-curl -sf https://accounts.attune.ai/health | python3 -m json.tool
-curl -sf https://pluginhub.attune.ai/health | python3 -m json.tool
+curl -sf https://accounts.engi-stack.com/health | python3 -m json.tool
+curl -sf https://pluginhub.engi-stack.com/health | python3 -m json.tool
 ```
 
 - [ ] accounts 返回 `{"status":"ok"}`

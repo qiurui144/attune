@@ -57,6 +57,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Status (health check bypasses guard)
         .route("/api/v1/status/health", get(routes::status::health))
         .route("/api/v1/status/diagnostics", get(routes::status::diagnostics))
+        // v1.0.1 active version notification(per spec C3)
+        .route("/api/v1/version", get(routes::version::get_version))
         // LLM 运维端点（Wizard + Settings）
         .route("/api/v1/llm/test", post(routes::llm::test_llm))
         .route("/api/v1/llm/probe-k3", post(routes::llm::probe_k3))
@@ -83,6 +85,11 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/member/login-token", post(routes::member::login_token))
         .route("/api/v1/member/login-password", post(routes::member::login_password))
         .route("/api/v1/member/logout", post(routes::member::logout))
+        // DSAR (GDPR Art.15/17/20 + 中国 PIPL §44-50) — cloud member 数据主权操作
+        // 桌面 UI 经此 proxy 到 cloud accounts，密码不持久化
+        .route("/api/v1/dsar/export", post(routes::dsar::export_data))
+        .route("/api/v1/dsar/delete", post(routes::dsar::delete_account))
+        .route("/api/v1/dsar/cancel-deletion", post(routes::dsar::cancel_deletion))
         // OCR 场景预设 (CRUD, builtin 不可删/改)
         .route("/api/v1/ocr/profiles",
             get(routes::ocr_profiles::list_profiles)

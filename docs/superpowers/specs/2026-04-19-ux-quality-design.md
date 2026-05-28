@@ -554,7 +554,7 @@ test('Chat view keyboard nav', async ({ page }) => {
 1. **help markdown 是否要加图片/截图**？
    - 加：更易懂，但 bundle 涨（图片 base64 inline）
    - 不加：保持 bundle 小，靠文字 + 动图 gif 或外部 URL
-   - **决策**：不加 inline 图片；复杂场景用文字描述 + 外链到 docs.attune.ai
+   - **决策**：不加 inline 图片；复杂场景用文字描述 + 外链到 docs.engi-stack.com
 
 2. **是否需要"新手教程" guided tour**（像 Notion 那种圈圈指向 UI 元素）？
    - 本 spec 不做（复杂度高）
