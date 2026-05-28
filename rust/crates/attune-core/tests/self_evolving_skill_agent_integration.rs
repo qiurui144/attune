@@ -135,12 +135,19 @@ fn llm_path_supersedes_heuristic_via_upsert() {
 fn llm_failure_falls_back_to_heuristic() {
     struct FailingLlm;
     impl LlmProvider for FailingLlm {
-        fn chat(&self, _s: &str, _u: &str) -> attune_core::error::Result<String> {
+        fn chat(
+            &self,
+            _s: &str,
+            _u: &str,
+        ) -> attune_core::error::Result<(String, attune_core::usage::TokenUsage)> {
             Err(attune_core::error::VaultError::LlmUnavailable(
                 "induced failure".into(),
             ))
         }
-        fn chat_with_history(&self, _m: &[ChatMessage]) -> attune_core::error::Result<String> {
+        fn chat_with_history(
+            &self,
+            _m: &[ChatMessage],
+        ) -> attune_core::error::Result<(String, attune_core::usage::TokenUsage)> {
             self.chat("", "")
         }
         fn is_available(&self) -> bool {

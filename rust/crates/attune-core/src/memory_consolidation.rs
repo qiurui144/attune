@@ -159,7 +159,7 @@ pub fn generate_one_episodic_memory(
     bundle: &ConsolidationBundle,
 ) -> Option<String> {
     match llm.chat_with_history(&[ChatMessage::user(&build_prompt(bundle))]) {
-        Ok(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        Ok((s, _usage)) if !s.trim().is_empty() => Some(s.trim().to_string()),
         _ => None,
     }
 }

@@ -1,10 +1,20 @@
 pub mod error;
+pub mod eval;
 pub mod routes;
 pub mod state;
 pub(crate) mod middleware;
 pub(crate) mod ingest_webdav;
 pub(crate) mod ingest_email;
 pub(crate) mod ingest_rss;
+
+// T1 (v1.0.6 KB-bench, plan 2026-05-28-kb-bench-integration.md Step 9):
+// in-process eval-mode harness used by `tests/eval_determinism_test.rs`.
+// Marked `#[doc(hidden)]` so the symbol does not appear in user-facing API
+// docs — production callers (Chrome ext / Web UI / attune-cli) never import
+// this module. Plain `pub` (not feature-gated) keeps the integration test
+// crate compileable without a separate `--features test-support` cargo flag.
+#[doc(hidden)]
+pub mod test_support;
 
 use axum::middleware as axum_mw;
 use axum::routing::{delete, get, post};
@@ -223,6 +233,12 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/demo/load", post(routes::demo::load_demo))
         // v0.6 Phase A.5.5 隐私 tier 检测（Settings UI Privacy 页用）
         .route("/api/v1/privacy/tier", get(routes::privacy::tier))
+        // v1.0.6 Privacy Logic Strategy — 5 outbound points 总览 + 切换 + lock + wipe
+        // per docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md §5.1
+        .route("/api/v1/privacy/status", get(routes::privacy::status))
+        .route("/api/v1/privacy/settings", axum::routing::patch(routes::privacy::settings_patch))
+        .route("/api/v1/privacy/lock", post(routes::privacy::lock))
+        .route("/api/v1/privacy/wipe-cloud-session", post(routes::privacy::wipe_cloud_session))
         // Status (full status requires vault access)
         .route("/api/v1/status", get(routes::status::status))
         // Index management

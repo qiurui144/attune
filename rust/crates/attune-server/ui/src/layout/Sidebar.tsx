@@ -295,6 +295,7 @@ const MORE_NAV: NavItem[] = [
   { view: 'skills', icon: '🧠', labelKey: 'sidebar.nav.skills' },
   { view: 'office', icon: '📋', labelKey: 'sidebar.nav.office' },
   { view: 'marketplace', icon: '🏪', labelKey: 'sidebar.nav.marketplace' },
+  { view: 'privacy', icon: '🔐', labelKey: 'sidebar.nav.privacy' }, // v1.0.6
 ];
 
 const MORE_VIEWS = new Set<View>(MORE_NAV.map((i) => i.view));

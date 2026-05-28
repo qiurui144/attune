@@ -72,7 +72,7 @@ pub fn generate_expansions(
 ) -> Result<Vec<(String, Vec<String>)>> {
     let prompt = build_evolution_prompt(signals);
     let messages = vec![crate::llm::ChatMessage::user(&prompt)];
-    let raw_response = llm.chat_with_history(&messages).map_err(|e| {
+    let (raw_response, _usage) = llm.chat_with_history(&messages).map_err(|e| {
         VaultError::LlmUnavailable(format!("skill evolution LLM call: {e}"))
     })?;
     Ok(parse_expansion_response(&raw_response))

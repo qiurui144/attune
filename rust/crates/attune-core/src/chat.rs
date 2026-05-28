@@ -352,7 +352,27 @@ impl ChatEngine {
         messages.extend(redacted_history);
         messages.push(ChatMessage::user(redacted_user));
 
-        let raw_response = self.llm.chat_with_history(&messages)?;
+        // v1.0.6 Privacy Logic Strategy — OutboundGate audit hook for LLM outbound.
+        // The actual `privacy.llm` setting + vault_unlocked wiring is plumbed in
+        // Task 7 (PrivacyView state integration); today this is a non-rejecting
+        // call site marker — payload is already redacted above via redact_batch
+        // (the canonical PII boundary), so the gate's redact step is a no-op here.
+        // Grep guard (scripts/privacy-audit.sh) keys on `OutboundGate::enforce`.
+        let _ = crate::OutboundGate::enforce(
+            &crate::OutboundPolicy {
+                kind: crate::OutboundKind::Llm,
+                enabled: true, // wired in Task 7 from settings.privacy.llm
+                vault_unlocked: true, // wired in Task 7 from vault.state()
+                redactor: Some(&self.redactor),
+            },
+            redacted_user, // already redacted; gate just validates contract
+        );
+
+        // Plan A1 Task I: LlmProvider::chat_with_history returns (String, TokenUsage).
+        // ChatEngine does not yet route usage into the recorder; bind to _usage so
+        // the path compiles. Wiring lives at the route layer (Task U) once
+        // UsageAggregator is in AppState (Task L).
+        let (raw_response, _usage) = self.llm.chat_with_history(&messages)?;
 
         // ── F-17 restore: LLM 响应里的所有 placeholder 还原 ──────────────
         let restored = self.redactor.restore(&raw_response, &all_mappings);

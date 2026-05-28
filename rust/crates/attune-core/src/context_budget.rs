@@ -47,6 +47,13 @@ pub struct BudgetPlan {
     pub history_keep: usize,
     /// 因预算不足应丢弃的历史条数（最旧的若干条）
     pub history_dropped: usize,
+    /// Spec §4.2 — pre-flight input token estimate for the UsageEvent path.
+    ///
+    /// Covers `system + user + retained history` (the parts `plan_context` can
+    /// account for deterministically). Excludes the actual knowledge tokens
+    /// that downstream RAG injection ends up using — the caller (chat.rs)
+    /// adds the realized knowledge slice before emitting `UsageEvent`.
+    pub tokens_in_used: usize,
 }
 
 impl BudgetPlan {
@@ -97,12 +104,17 @@ pub fn plan_context(
     }
     let history_dropped = history.len().saturating_sub(keep);
 
+    // Spec §4.2 — populate tokens_in_used = system + user + retained history.
+    // Downstream call sites add realized knowledge tokens before emitting UsageEvent.
+    let tokens_in_used = system_tok + user_tok + used;
+
     BudgetPlan {
         window,
         response_reserve,
         knowledge_tokens,
         history_keep: keep,
         history_dropped,
+        tokens_in_used,
     }
 }
 
@@ -134,6 +146,47 @@ mod tests {
         assert!(plan.response_reserve <= 4096);
         // system + user + reserve + knowledge*2 大致 ≤ window
         assert!(plan.knowledge_tokens * 2 + plan.response_reserve <= plan.window);
+    }
+
+    /// Spec §4.2: plan_context must populate `tokens_in_used` so the UsageEvent at
+    /// the call site can read the pre-flight token budget without re-counting the
+    /// history. The value covers system + user + retained history; the knowledge
+    /// budget is excluded because the actual injected knowledge size is decided
+    /// downstream (search::allocate_budget can return less than the reserved
+    /// `knowledge_tokens`), and the caller (chat.rs) will add the realized
+    /// knowledge tokens before emitting the UsageEvent.
+    #[test]
+    fn plan_context_reports_tokens_used() {
+        let plan = plan_context("gpt-4o-mini", "system text", "user question", &[]);
+        assert!(
+            plan.tokens_in_used > 0,
+            "tokens_in_used should reflect system+user (+history when present)"
+        );
+        let cap = plan.window - plan.response_reserve;
+        assert!(
+            plan.tokens_in_used <= cap,
+            "tokens_in_used ({}) must not exceed window - response_reserve ({})",
+            plan.tokens_in_used,
+            cap
+        );
+    }
+
+    /// Adding history must increase `tokens_in_used` proportionally to the
+    /// `history_keep` count (subject to truncation when over budget).
+    #[test]
+    fn plan_context_tokens_used_grows_with_kept_history() {
+        let base = plan_context("gpt-4o-mini", "sys", "q", &[]);
+        let history: Vec<(String, String)> = (0..5)
+            .map(|i| ("user".into(), format!("turn {i} content")))
+            .collect();
+        let with_hist = plan_context("gpt-4o-mini", "sys", "q", &history);
+        assert!(
+            with_hist.tokens_in_used > base.tokens_in_used,
+            "history kept ({}) should raise tokens_in_used (base={}, with={})",
+            with_hist.history_keep,
+            base.tokens_in_used,
+            with_hist.tokens_in_used
+        );
     }
 
     #[test]
@@ -186,6 +239,7 @@ mod tests {
             knowledge_tokens: 6000,
             history_keep: 0,
             history_dropped: 0,
+            tokens_in_used: 0,
         };
         // 6000 × 5/6 = 5000
         assert_eq!(plan.knowledge_chars(), 5_000);
@@ -197,6 +251,7 @@ mod tests {
         let plan = BudgetPlan {
             window: 8_000, response_reserve: 2_000, knowledge_tokens: 0,
             history_keep: 0, history_dropped: 0,
+            tokens_in_used: 0,
         };
         assert_eq!(plan.knowledge_chars(), 0);
     }

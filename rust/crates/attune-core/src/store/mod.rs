@@ -25,6 +25,8 @@ pub use skill_expansions::{ExpansionSource, SkillExpansionRow, MAX_EXPANSIONS_PE
 pub mod browse_signals;  // pub: BrowseSignalInput / BrowseSignalRow 给 attune-server route 用
 pub mod auto_bookmarks;  // W4 G2: high engagement auto bookmark candidates (G3 staging)
 pub mod audit;            // v0.6 Phase A.5.3: 出网审计日志
+pub mod usage;            // Plan A1 Task D: usage_events CRUD + UsageSummary
+pub mod cache;            // Plan A1 Task D: llm_cache / embed_cache CRUD
 
 pub use types::*;
 
@@ -534,6 +536,54 @@ CREATE TABLE IF NOT EXISTS skill_expansions (
     updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_skill_expansions_updated ON skill_expansions(updated_at DESC);
+
+-- ── Usage telemetry (spec 2026-05-28 cache-context-token-standard-api §3 DB tables)
+--    Plan A1 Task D. One row per LLM / Embed / Rerank / OCR / ASR / VLM call.
+CREATE TABLE IF NOT EXISTS usage_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms       INTEGER NOT NULL,
+    kind        TEXT    NOT NULL,                      -- llm_chat / llm_extract / embed / rerank / ocr / asr / vlm
+    provider    TEXT    NOT NULL,                      -- ollama / openai / gemini / cloud_gateway / k3_local / mock
+    model       TEXT    NOT NULL,
+    agent_id    TEXT,                                  -- NULL = direct chat / non-agent path
+    tokens_in   INTEGER NOT NULL,
+    tokens_out  INTEGER NOT NULL,
+    cached_in   INTEGER NOT NULL DEFAULT 0,            -- vendor-side prompt cache hits
+    cost_usd    REAL,                                  -- NULL = unknown pricing for model
+    cache       TEXT    NOT NULL,                      -- hit / miss / bypass (L1/L2 only)
+    outcome     TEXT    NOT NULL,                      -- ok / retry / fail
+    latency_ms  INTEGER NOT NULL,
+    error_kind  TEXT,                                  -- parse / grounding / timeout / quota / network / schema_invalid / other
+    query_hash  TEXT                                   -- BLAKE3 16-hex prefix; NULL unless log_queries enabled
+);
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events(ts_ms);
+CREATE INDEX IF NOT EXISTS idx_usage_kind_provider ON usage_events(kind, provider);
+CREATE INDEX IF NOT EXISTS idx_usage_agent ON usage_events(agent_id) WHERE agent_id IS NOT NULL;
+
+-- ── LLM response cache (L2). `response` BLOB is AES-256-GCM ciphertext (encryption
+--    performed by cache::sqlite_encrypted backend; this layer stores raw bytes).
+CREATE TABLE IF NOT EXISTS llm_cache (
+    key          TEXT PRIMARY KEY,                    -- BLAKE3(model || 0xFF || prompt)[0..32]
+    model        TEXT NOT NULL,
+    response     BLOB NOT NULL,
+    tokens_in    INTEGER NOT NULL,
+    tokens_out   INTEGER NOT NULL,
+    created_ts   INTEGER NOT NULL,
+    last_hit_ts  INTEGER NOT NULL,
+    hit_count    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_llm_cache_lru ON llm_cache(last_hit_ts);
+
+-- ── Embedding cache (L2). Vectors are not PII so stored plain (f16-quantized BLOB).
+CREATE TABLE IF NOT EXISTS embed_cache (
+    key          TEXT PRIMARY KEY,                    -- BLAKE3(model || 0xFF || text)[0..32]
+    model        TEXT NOT NULL,
+    vector       BLOB NOT NULL,
+    dim          INTEGER NOT NULL,
+    created_ts   INTEGER NOT NULL,
+    last_hit_ts  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embed_cache_lru ON embed_cache(last_hit_ts);
 "#;
 
 pub struct Store {
@@ -541,6 +591,15 @@ pub struct Store {
 }
 
 impl Store {
+    /// Test-only borrow of the raw SQLite connection.
+    ///
+    /// Plan A1 Task D — used by store::usage_test / store::cache_test to verify
+    /// the schema migration. Hidden from non-test builds via `#[cfg(test)]`.
+    #[cfg(test)]
+    pub fn raw_connection_for_test(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
+
     /// 打开或创建数据库，初始化 schema
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {

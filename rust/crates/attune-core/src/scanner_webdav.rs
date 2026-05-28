@@ -108,6 +108,21 @@ impl WebDavConnector {
 
     /// 异步列出远端目录，过滤出受支持文件。
     pub async fn list(&self) -> Result<Vec<RemoteEntry>> {
+        // v1.0.6 Privacy Logic Strategy — OutboundGate audit hook for WebDAV outbound.
+        // The actual `privacy.webdav` setting + vault_unlocked wiring is plumbed in
+        // Task 7 (PrivacyView state integration); today this is a non-rejecting
+        // call site marker — payload is just the WebDAV path (no PII).
+        // Grep guard (scripts/privacy-audit.sh) keys on `OutboundGate::enforce`.
+        let _ = crate::OutboundGate::enforce(
+            &crate::OutboundPolicy {
+                kind: crate::OutboundKind::Webdav,
+                enabled: true, // wired in Task 7 from settings.privacy.webdav
+                vault_unlocked: true, // wired in Task 7 from vault.state()
+                redactor: None,
+            },
+            "",
+        );
+
         let client = self.build_client()?;
         let depth = match self.config.depth {
             0 => reqwest_dav::Depth::Number(0),

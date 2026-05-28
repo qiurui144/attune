@@ -30,6 +30,24 @@ fn redact_query_param(query: &str, key: &str) -> String {
         .join("&")
 }
 
+/// T1 (v1.0.6 KB-bench) — true if the request carries any `X-Attune-Eval-*`
+/// header, signaling the bench harness wants the eval-mode short-circuit in
+/// `routes/chat.rs` / `routes/search.rs`. Used by [`vault_guard`] to skip
+/// the unlock check on those routes so an in-memory eval-mode server can
+/// answer chat/search without an Argon2id-derived DEK on disk.
+fn request_has_any_eval_header(request: &Request<axum::body::Body>) -> bool {
+    const EVAL_HEADERS: &[&str] = &[
+        "x-attune-eval-mode",
+        "x-attune-eval-seed",
+        "x-attune-eval-trace",
+        "x-attune-eval-force-temp-zero",
+        "x-attune-eval-skip-rewrite",
+        "x-attune-eval-skip-rerank",
+    ];
+    let headers = request.headers();
+    EVAL_HEADERS.iter().any(|h| headers.contains_key(*h))
+}
+
 /// Vault guard: 未 UNLOCKED 时返回 403
 pub async fn vault_guard(
     State(state): State<SharedState>,
@@ -58,6 +76,25 @@ pub async fn vault_guard(
         // 导致 wizard / locked 阶段前端连 WS 收 403 → 无限重连刷 console error。
         // bypass 后由 handle_scan_progress 自查 vault 状态推 locked JSON。
         || path == "/ws/scan-progress"
+    {
+        return next.run(request).await;
+    }
+
+    // T1 (v1.0.6 KB-bench, plan 2026-05-28-kb-bench-integration.md Step 10):
+    // bench harness requests carrying any `X-Attune-Eval-*` header take the
+    // eval-mode short-circuit inside `routes/chat.rs::chat` /
+    // `routes/search.rs::search`. Those handlers do not read the vault on
+    // the eval path, so requiring an unlocked vault here would be a false
+    // negative — and would prevent the integration test
+    // `eval_determinism_test::seed_header_propagates_to_llm_options` from
+    // running against a freshly-opened in-memory vault.
+    //
+    // Restricted to `/api/v1/chat` / `/api/v1/search*` so we don't widen the
+    // bypass surface for unrelated routes (items / files / ingest still
+    // require an unlocked vault even if a bench-style header is forwarded).
+    if (path == "/api/v1/chat"
+        || path.starts_with("/api/v1/search"))
+        && request_has_any_eval_header(&request)
     {
         return next.run(request).await;
     }

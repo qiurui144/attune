@@ -459,7 +459,7 @@ mod tests {
                 topic_text, "m", 0, 1000, 1000,
             )
             .unwrap();
-        let v = emb.embed(&[topic_text]).unwrap().pop().unwrap();
+        let v = emb.embed(&[topic_text]).unwrap().0.pop().unwrap();
         idx.upsert(&id, &v).unwrap();
 
         let l0 = make_l0(5);
@@ -504,7 +504,7 @@ mod tests {
             .find(|m| m.source_chunk_hashes == vec!["e1"])
             .unwrap()
             .id;
-        let v = emb.embed(&[summary]).unwrap().pop().unwrap();
+        let v = emb.embed(&[summary]).unwrap().0.pop().unwrap();
         idx.upsert(&id, &v).unwrap();
 
         let l0 = make_l0(5);

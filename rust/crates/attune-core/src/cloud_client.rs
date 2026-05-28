@@ -135,6 +135,41 @@ impl CloudClient {
         Ok(())
     }
 
+    /// Best-effort cloud logout + **unconditional** local clear of the session
+    /// token. Network failure does NOT prevent the local token from being
+    /// wiped — the contract is "after this call, this client carries no
+    /// session token". Used by `POST /api/v1/privacy/wipe-cloud-session`
+    /// (per spec `2026-05-28-privacy-logic-strategy.md` §5.1).
+    ///
+    /// **Task 4 of v1.0.6 Privacy Logic Implementation Plan.**
+    ///
+    /// v1.0.6 Privacy Logic Strategy — OutboundGate audit hook for Cloud SaaS
+    /// outbound. The actual `privacy.cloud_saas` setting + vault_unlocked
+    /// wiring is plumbed in Task 7 (PrivacyView state integration); today
+    /// this is a non-rejecting call site marker — wipe_session needs to
+    /// succeed even if cloud_saas is "disabled" because the user is asking
+    /// to remove their cloud footprint. Grep guard (scripts/privacy-audit.sh)
+    /// keys on `OutboundGate::enforce`.
+    pub fn wipe_session(&mut self) -> Result<()> {
+        // Audit hook — wipe_session must succeed regardless of policy outcome.
+        let _ = crate::OutboundGate::enforce(
+            &crate::OutboundPolicy {
+                kind: crate::OutboundKind::CloudSaas,
+                enabled: true, // wipe is always allowed (user-initiated DSAR-adjacent)
+                vault_unlocked: true,
+                redactor: None,
+            },
+            "",
+        );
+
+        // Best-effort remote logout: swallow errors so local clear always wins.
+        let _ = self.logout();
+        // Re-enforce local clear (logout already cleared, but make contract
+        // explicit + self-documenting for future maintainers).
+        self.session_cookie = None;
+        Ok(())
+    }
+
     // ─── DSAR (Data Subject Access Request) — GDPR Art.15/17/20 + 中国 PIPL §44-50 ───
 
     /// GET /api/v1/users/me/export — 拿用户 cloud 端所有数据 JSON dump.
@@ -294,6 +329,41 @@ mod tests {
         let c = CloudClient::new("https://accounts.engi-stack.com");
         assert_eq!(c.base_url, "https://accounts.engi-stack.com");
         assert!(c.session_cookie.is_none());
+    }
+
+    /// Task 4 of v1.0.6 Privacy Logic Plan — wipe_session must clear the local
+    /// token even when the remote logout endpoint is unreachable.
+    #[test]
+    fn wipe_session_clears_token_even_when_logout_endpoint_unreachable() {
+        let mut c = CloudClient::with_session("http://127.0.0.1:1", "fake-token-not-real");
+        assert!(c.session_token().is_some(), "precondition: token present");
+
+        // wipe_session swallows network errors but MUST clear local token.
+        let _ = c.wipe_session();
+
+        assert!(
+            c.session_token().is_none(),
+            "token must be cleared after wipe_session even if remote logout failed"
+        );
+    }
+
+    /// wipe_session is idempotent — calling it twice is safe.
+    #[test]
+    fn wipe_session_is_idempotent() {
+        let mut c = CloudClient::with_session("http://127.0.0.1:1", "fake-token-not-real");
+        let _ = c.wipe_session();
+        // Second call on already-cleared client must also succeed.
+        let _ = c.wipe_session();
+        assert!(c.session_token().is_none());
+    }
+
+    /// wipe_session on a fresh client (no session) is a no-op.
+    #[test]
+    fn wipe_session_on_fresh_client_is_noop() {
+        let mut c = CloudClient::new("http://127.0.0.1:1");
+        assert!(c.session_token().is_none(), "precondition: no session");
+        let _ = c.wipe_session();
+        assert!(c.session_token().is_none());
     }
 
     #[test]

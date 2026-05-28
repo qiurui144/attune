@@ -49,7 +49,7 @@ pub async fn rewrite_query(query: &str, llm: Arc<dyn LlmProvider>) -> Result<Str
     .await;
 
     match rewrite_result {
-        Ok(Ok(raw)) => Ok(sanitize_keywords(&raw, trimmed)),
+        Ok(Ok((raw, _usage))) => Ok(sanitize_keywords(&raw, trimmed)),
         // LLM 调用失败 / join error 都走 fallback
         Ok(Err(_)) | Err(_) => Ok(trimmed.to_string()),
     }
@@ -99,12 +99,25 @@ mod tests {
     }
 
     impl LlmProvider for StubLlm {
-        fn chat(&self, _system: &str, _user: &str) -> Result<String> {
-            Ok(self.response.clone())
+        fn chat(
+            &self,
+            _system: &str,
+            _user: &str,
+        ) -> Result<(String, crate::usage::TokenUsage)> {
+            Ok((
+                self.response.clone(),
+                crate::usage::TokenUsage::empty("stub", "stub"),
+            ))
         }
 
-        fn chat_with_history(&self, _messages: &[ChatMessage]) -> Result<String> {
-            Ok(self.response.clone())
+        fn chat_with_history(
+            &self,
+            _messages: &[ChatMessage],
+        ) -> Result<(String, crate::usage::TokenUsage)> {
+            Ok((
+                self.response.clone(),
+                crate::usage::TokenUsage::empty("stub", "stub"),
+            ))
         }
 
         fn is_available(&self) -> bool { true }
@@ -115,7 +128,11 @@ mod tests {
     struct FailingLlm;
 
     impl LlmProvider for FailingLlm {
-        fn chat(&self, _system: &str, _user: &str) -> Result<String> {
+        fn chat(
+            &self,
+            _system: &str,
+            _user: &str,
+        ) -> Result<(String, crate::usage::TokenUsage)> {
             Err(VaultError::LlmUnavailable("test fail".into()))
         }
 

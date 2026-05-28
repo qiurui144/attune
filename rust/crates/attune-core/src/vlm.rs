@@ -57,22 +57,29 @@ impl VlmProvider for LlmVlmProvider {
     fn caption(&self, image_path: &Path) -> Result<String> {
         let (data_uri, mime) = Self::read_image_as_data_uri(image_path)?;
         let attachment = Attachment::Image { url_or_data_uri: data_uri, mime };
-        // chat_multimodal 是同步调用，直接转发；LLM 内部走独立 llm_rt Runtime
-        self.llm.chat_multimodal(
-            "You are a concise image description assistant.",
-            "用一句话（≤200字）描述这张图的内容、场景和主要物体。",
-            &[attachment],
-        )
+        // chat_multimodal 是同步调用，直接转发；LLM 内部走独立 llm_rt Runtime.
+        // Plan A1 Task I: discard TokenUsage here — VLM caption is invoked from
+        // batch ingest paths without a recorder context. When Task U wires the
+        // chat route, plumb usage through this layer too.
+        self.llm
+            .chat_multimodal(
+                "You are a concise image description assistant.",
+                "用一句话（≤200字）描述这张图的内容、场景和主要物体。",
+                &[attachment],
+            )
+            .map(|(s, _u)| s)
     }
 
     fn vqa(&self, image_path: &Path, question: &str) -> Result<String> {
         let (data_uri, mime) = Self::read_image_as_data_uri(image_path)?;
         let attachment = Attachment::Image { url_or_data_uri: data_uri, mime };
-        self.llm.chat_multimodal(
-            "You are a precise visual question answering assistant.",
-            question,
-            &[attachment],
-        )
+        self.llm
+            .chat_multimodal(
+                "You are a precise visual question answering assistant.",
+                question,
+                &[attachment],
+            )
+            .map(|(s, _u)| s)
     }
 }
 
@@ -233,18 +240,28 @@ mod tests {
     }
 
     impl LlmProvider for RecordingLlm {
-        fn chat(&self, _system: &str, _user: &str) -> Result<String> {
-            Ok("text-only".to_string())
+        fn chat(
+            &self,
+            _system: &str,
+            _user: &str,
+        ) -> Result<(String, crate::usage::TokenUsage)> {
+            Ok((
+                "text-only".to_string(),
+                crate::usage::TokenUsage::empty("mock", "recording-mock"),
+            ))
         }
         fn chat_multimodal(
             &self,
             _system: &str,
             _user: &str,
             attachments: &[Attachment],
-        ) -> Result<String> {
+        ) -> Result<(String, crate::usage::TokenUsage)> {
             let has_image = attachments.iter().any(|a| matches!(a, Attachment::Image { .. }));
             *self.image_seen.lock().unwrap_or_else(|e| e.into_inner()) = has_image;
-            Ok("recorded".to_string())
+            Ok((
+                "recorded".to_string(),
+                crate::usage::TokenUsage::empty("mock", "recording-mock"),
+            ))
         }
         fn is_available(&self) -> bool {
             true

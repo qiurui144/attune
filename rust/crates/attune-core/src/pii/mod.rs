@@ -68,7 +68,7 @@ pub fn llm_chat_redacted(
         );
     }
 
-    let raw = llm.chat(&redacted[0], &redacted[1])?;
+    let (raw, _usage) = llm.chat(&redacted[0], &redacted[1])?;
     Ok(redactor.restore(&raw, &mappings))
 }
 

@@ -1,5 +1,101 @@
 # attune 版本记录
 
+## v1.0.6 — Privacy Logic SSOT + DR/BCP（2026-06-05）
+
+> 配对 `desktop-v1.0.6` + attune-pro `v1.0.6` + cloud `cloud-v2.3.0`。
+> v1.0.5 → v1.0.6 develop sprint 主题:把"5 出网点"从约定升格为 SSOT
+> 单一 dashboard + 默认全关 + 强制经 `OutboundGate::enforce` + CI 硬门。
+
+### Highlights
+
+**Privacy Logic SSOT（B 批 12 task 闭环）**
+
+后端骨架(Tasks 1-6, 已并入 v1.0.5 sprint develop):
+- `routes/privacy.rs` — 4 endpoint:`GET /privacy/status` / `PATCH /privacy/settings`
+  / `POST /privacy/lock` / `POST /privacy/wipe-cloud-session`
+- `outbound_gate.rs` — 5 `OutboundKind` (LLM / CloudSaas / Webdav / WebSearch /
+  Telemetry) + `OutboundGate::enforce` 强制 PII 脱敏 + settings 检查
+- `cloud_client::wipe_session()` — 吊销 cloud token 一键操作
+- `telemetry.rs` — 默认 off + send 路径返回 `SendOutcome::SkippedNotImplemented`
+- 审计日志集成:vault lock / outbound block / DSAR export 都进
+  `audit_log` 表(无 prompt / response / key 内容,只 redacted counts)
+- 默认 settings:`privacy: { llm:false, cloud_saas:false, webdav:false,
+  web_search:false, telemetry:false, privacy_tour_seen:false }`
+
+UI dashboard(Tasks 7-8, 本 sprint):
+- `views/PrivacyView.tsx` — 侧栏 🔐「隐私」入口,5 出网点 toggle + vault state
+  + lock-now + wipe-cloud-session + DSAR 导出/删除/审计日志直达
+- `views/PrivacyTour.tsx` — 首次解锁后弹一次性 modal,dismiss 后永不再出
+- SettingsView 中的旧 PrivacyPanel(L1/L2/L3 redactor tier 配置 + 机密文件
+  + 审计 + 遥测描述)保留 — 与新 dashboard 互补;顶部加 CTA 链接到 PrivacyView
+- i18n:`privacy.*` 50 keys × 2 locale,zh.ts/en.ts diff = 0
+
+文档与 CI 硬门(Tasks 9-10):
+- `docs/PRIVACY.md` — 用户文档:四承诺 + 5 出网点表 + vault 加密边界
+  + DSAR 操作 + 第三方 LLM provider 留存政策快照(OpenAI / Anthropic /
+  Gemini / DeepSeek / Attune Pro Gateway / Ollama)+ `tcpdump` 本地验证
+  recipe + 中文摘要
+- `docs/PRIVACY-AUDIT-CHECKLIST.md` — 月度审计 checklist(grep 守卫 +
+  provider 政策 diff + 真装包审计 + 近期 code diff + DSAR sanity)
+- `scripts/privacy-audit.sh` — 4 不变量 CI 静态门:
+  (1) 所有 `reqwest::Client/get/post` 命中位点都在 allow-list
+      (新增出网必须同 PR 加 allow-list + 评审)
+  (2) 无硬编码 API key(sk-* / AKIA* / AIza*),排除 `pii/` 检测器与
+      `tests/` fixture
+  (3) `telemetry::` 调用只能在 `telemetry.rs` 内
+  (4) `routes/settings.rs` `default_settings()` 的 privacy 块 5 key
+      恒为 false(awk 限制到 `#[cfg(test)]` 之前的 production 代码段)
+- `.github/workflows/ci.yml` — 新增 `privacy-audit` job,push/PR 必跑
+
+### Breaking
+
+无。所有新增 settings 默认 false,旧 vault 没有 `privacy` 块时 server
+按需 lazy 写入默认值,客户端不感知。telemetry 一如既往默认关。
+
+### Migration
+
+- 已有 settings.json 不含 `privacy` block:server 首次读时 lazy 写入默认
+  全 false 块,**用户无需任何操作**。
+- 已有 vault 不含 `audit_log` 表迁移:沿用 v1.0.5 起的 `store::audit`
+  migration,本版本未改 schema。
+- 跨仓配对:升级到 desktop-v1.0.6 + attune-pro v1.0.6 + cloud v2.3.0;
+  attune-pro plugin 中的 law-pro / patent-pro 等行业 agent 在 OSS
+  Privacy 默认全关时仍可正常 deterministic 运行,LLM-call 类 agent
+  需用户先开 LLM 出网点。
+
+### Known Limitations
+
+- **L2 ONNX NER redactor 仍是 opt-in**:Wizard / Settings → AI Stack
+  里手动开启,默认 L1 正则 12 类。L3 LLM 脱敏需高端硬件或一体机。
+- **WebDAV 上行是密文 vault block**,Redactor 跳过该路径(语义上密文
+  不可读取 PII)。如未来支持 cleartext WebDAV(例如纯文档导出),需
+  另接 Redactor 链路。
+- **Telemetry 实际上传推迟到 v1.1**:`Telemetry::send()` 返回
+  `SendOutcome::SkippedNotImplemented`。queue stub 已就位但不上传,
+  当用户后续 opt-in 时也只走 OutboundGate 检查,具体后端管道 v1.1
+  连接。
+- **provider 政策表是 2026-06-05 快照**;月度审计 `PRIVACY-AUDIT-CHECKLIST.md`
+  §2 负责保持新鲜,若 7 天内有保护性弱化变更会在 RELEASE.md 补通告。
+
+### 配对
+
+- `desktop-v1.0.6` — Tauri 安装器同步 ship,版本号一致
+- attune-pro v1.0.6 — 行业 agent 矩阵在 Privacy 默认全关下保持
+  deterministic 通路;LLM agent 同步 v1.0.6 标 model tier 矩阵
+- cloud-v2.3.0 — `wipe-cloud-session` 走 cloud `accounts/sessions/revoke`
+  endpoint(v2.3.0 已 ship,本版仅客户端打通调用)
+
+### 测试与质量门
+
+- `cargo test --workspace --release` PASS(privacy backend 测试套已并入
+  attune-core / attune-server,具体见 v1.0.5 Tasks 1-6 commit)
+- `bun run typecheck` + `bun run build` PASS,316 KB single-file bundle
+- i18n grep guard PASS:zh.ts ↔ en.ts key 集合 diff = 0(818 keys 各)
+- `bash scripts/privacy-audit.sh` PASS:4/4 invariant 通过
+- 文档同步:README/RELEASE/PRIVACY/PRIVACY-AUDIT-CHECKLIST 同时更新
+
+---
+
 ## v1.0.5 — 5/22-28 累积 capstone GA（2026-05-28）
 
 > v1.0.0 GA(5/25)后 5/22-28 develop sprint 累积 work 一次性 ship 的 capstone。
@@ -98,6 +194,25 @@ None. v1.0.0 用户向后兼容,vault schema 不动,API 协议不动。
 - `cargo clippy -D warnings` clean / `cargo fmt --check` clean
 - Agent ENFORCE gate:6 类下限 0 violations
 - accounts pytest 199 PASS(quota+refund TestClient httpx fix)
+
+### Agent 真训练矩阵(2026-05-28 post-GA sprint)
+
+per 用户 2026-05-28「基于腾讯 token 和 deepseek token,一起进行 agents 训练固化」。
+OSS 端 4 个 framework agent 跑各自 golden gate(deterministic / 不调 LLM):
+
+| Agent | Tests | Pass | Status |
+|-------|-------|------|--------|
+| chat_reliability | 3/3 | 6-class floor + ENFORCE | ✅ Production |
+| memory_consolidation_agent | 2/2 | 14 fixtures (promote/fail/edge) | ✅ Production |
+| internal_knowledge_linker | 19/19 | golden+boundary+property+integration | ✅ Production |
+| self_evolving_skill_agent | 3/3 | 6-class + persistence + 1.00 pass | ✅ Production |
+
+**4/4 OSS framework agents PASS**。Raw evidence:`/data/company/project/attune/reports/runs/2026-05-28-agents-training/oss-deterministic-results.json`。
+
+attune-pro law-pro LLM extractor 3 agent 走 DeepSeek + Tencent TokenHub 双 provider × 3
+round multi-run:fact_extractor 1.0000 / divorce_extractor 0.9894 / defamation_extractor
+0.8683(mean,N=5,floor 0.85)— 详见 attune-pro `RELEASE.md` v1.0.5 + spec
+`docs/superpowers/specs/2026-05-28-agents-training-data.md`。
 
 ---
 

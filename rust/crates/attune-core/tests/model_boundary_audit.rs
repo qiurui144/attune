@@ -25,7 +25,7 @@ fn embedding_boundary_audit() {
     // 1. empty string — per audit R20 fix: 应返 zero vector (不再 ERROR)
     let r = emb.embed(&[""]);
     match &r {
-        Ok(v) => {
+        Ok((v, _usage)) => {
             eprintln!("✅ empty string → {} dims, val[0]={:.4}", v[0].len(), v[0][0]);
             // regression: empty 应该是 zero vector
             assert_eq!(v.len(), 1, "empty input should still produce 1 vector");
@@ -37,23 +37,23 @@ fn embedding_boundary_audit() {
 
     // 2. single char
     let r = emb.embed(&["a"]);
-    eprintln!("{} single char 'a': {:?}", if r.is_ok() { "✅" } else { "❌" }, r.as_ref().map(|v| v[0].len()).unwrap_or(0));
+    eprintln!("{} single char 'a': {:?}", if r.is_ok() { "✅" } else { "❌" }, r.as_ref().map(|(v, _)| v[0].len()).unwrap_or(0));
 
     // 3. very long input (~10000 chars,远超 tokenizer max)
     let long_text = "Rust is a systems programming language. ".repeat(250);
     let r = emb.embed(&[long_text.as_str()]);
-    eprintln!("{} long {} chars: {:?}", if r.is_ok() { "✅" } else { "❌" }, long_text.len(), r.as_ref().map(|v| v[0].len()).unwrap_or(0));
+    eprintln!("{} long {} chars: {:?}", if r.is_ok() { "✅" } else { "❌" }, long_text.len(), r.as_ref().map(|(v, _)| v[0].len()).unwrap_or(0));
 
     // 4. unicode 中文 + 英文 + emoji
     let mixed = "Rust 是一门系统编程语言 🦀 with great memory safety";
     let r = emb.embed(&[mixed]);
-    eprintln!("{} unicode mix '{}'...: {:?}", if r.is_ok() { "✅" } else { "❌" }, &mixed[..20], r.as_ref().map(|v| v[0].len()).unwrap_or(0));
+    eprintln!("{} unicode mix '{}'...: {:?}", if r.is_ok() { "✅" } else { "❌" }, &mixed[..20], r.as_ref().map(|(v, _)| v[0].len()).unwrap_or(0));
 
     // 5. 同一文本重复 5 次 → 5 个向量应完全相同(deterministic)
     let same_text = "Rust ownership and borrowing";
     let mut vecs = Vec::new();
     for _ in 0..5 {
-        let v = emb.embed(&[same_text]).unwrap();
+        let (v, _usage) = emb.embed(&[same_text]).unwrap();
         vecs.push(v[0].clone());
     }
     let same_all = vecs.iter().all(|v| v.iter().zip(&vecs[0]).all(|(a, b)| (a - b).abs() < 1e-5));
@@ -65,7 +65,7 @@ fn embedding_boundary_audit() {
     let t = std::time::Instant::now();
     let r = emb.embed(&batch_refs);
     let lat = t.elapsed().as_secs_f64();
-    eprintln!("{} batch 100: {:?} in {:.1}s", if r.is_ok() { "✅" } else { "❌" }, r.as_ref().map(|v| v.len()).unwrap_or(0), lat);
+    eprintln!("{} batch 100: {:?} in {:.1}s", if r.is_ok() { "✅" } else { "❌" }, r.as_ref().map(|(v, _)| v.len()).unwrap_or(0), lat);
 }
 
 #[test]

@@ -48,6 +48,45 @@ impl ChatMessage {
     }
 }
 
+/// Eval-mode call options — opt-in deterministic knobs.
+///
+/// Per spec docs/superpowers/specs/2026-05-28-kb-memory-vs-vlm-llm-bench-validation.md
+/// §11 Risk A: `seed` is best-effort (Ollama + OpenAI support; Anthropic does not).
+/// `temperature` Some(0.0) forces low-noise mode regardless of provider.
+///
+/// Threaded through [`LlmProvider::chat_with_options`] (T1, v1.0.6). When all
+/// fields are `None` callers should prefer the legacy chat / chat_with_history
+/// paths so behavior stays unchanged for production clients.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmCallOptions {
+    /// Provider-side seed for reproducible sampling. Honored by Ollama
+    /// (`options.seed`) and OpenAI (`seed` field). Anthropic ignores.
+    pub seed: Option<u64>,
+    /// Sampling temperature. `Some(0.0)` is the canonical "low noise" knob —
+    /// honored by every modern provider.
+    pub temperature: Option<f32>,
+    /// Top-p nucleus sampling. `Some(1.0)` paired with temperature 0 forces
+    /// greedy-style sampling.
+    pub top_p: Option<f32>,
+}
+
+/// Describes what level of determinism a provider can honor.
+///
+/// Surfaces in the chat response `eval.determinism` field so the bench harness
+/// knows whether equality of two outputs (same seed) is a real signal (`Exact`)
+/// or merely a low-variance signal (`Temp0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeterminismLevel {
+    /// Provider supports a server-side seed (Ollama, OpenAI, Gemini).
+    Exact,
+    /// Only temperature=0 + top_p=1 honored (Anthropic).
+    Temp0,
+    /// No deterministic knobs honored.
+    #[default]
+    BestEffort,
+}
+
 /// 多模态附件 — 走 OpenAI vision content array 协议 (per https://platform.openai.com/docs/guides/vision).
 ///
 /// attune 所有 LLM 调用统一走 OpenAI 兼容协议. 图片走 vision content array,
@@ -61,12 +100,59 @@ pub enum Attachment {
 }
 
 /// Chat LLM 抽象 (统一 OpenAI 兼容协议).
+///
+/// **Plan A1 Task I (BREAKING)**: every `chat*` method returns
+/// `Result<(String, TokenUsage)>` so call sites are compile-time forced to
+/// flow usage into the recorder (spec §11 risk 1 mitigation 1). Use the
+/// destructure pattern:
+///
+/// ```ignore
+/// let (response, usage) = provider.chat(system, user)?;
+/// recorder.record(usage_event_from(usage, ...));
+/// ```
+///
+/// Sites that intentionally discard usage (no recorder available yet, legacy
+/// path being migrated) destructure with `let (response, _usage) = ...` to
+/// stay clippy-clean.
 pub trait LlmProvider: Send + Sync {
-    /// 单次 chat 调用，system + user 消息，返回完整响应文本
-    fn chat(&self, system: &str, user: &str) -> Result<String>;
+    /// 单次 chat 调用，system + user 消息，返回 (响应文本, TokenUsage).
+    fn chat(&self, system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)>;
+
+    /// Eval-mode entry point — accepts opt-in deterministic knobs.
+    ///
+    /// Default impl ignores `opts` and falls back to [`chat_with_history`],
+    /// so any provider not yet wired keeps working (= BestEffort determinism).
+    /// Providers SHOULD override to honor seed/temperature/top_p; the override
+    /// is the difference between [`DeterminismLevel::Exact`] / [`DeterminismLevel::Temp0`]
+    /// and the default `BestEffort`.
+    ///
+    /// Per spec docs/superpowers/specs/2026-05-28-kb-memory-vs-vlm-llm-bench-validation.md
+    /// §11 Risk A. Plan: docs/superpowers/plans/2026-05-28-kb-bench-integration.md T1.
+    fn chat_with_options(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<String> {
+        // Plan A1 Task I + C-T1 cross-merge: chat_with_history now returns
+        // (String, TokenUsage); chat_with_options keeps single-String signature
+        // for eval-mode caller ergonomics — usage is dropped in default impl
+        // (eval mode usage is captured separately by route layer per Plan A1 §U).
+        let _ = opts;
+        self.chat_with_history(messages).map(|(s, _)| s)
+    }
+
+    /// What determinism level this provider can honor when [`chat_with_options`]
+    /// is called. Default `BestEffort` reflects providers that have not yet
+    /// implemented `chat_with_options`.
+    fn determinism_level(&self) -> DeterminismLevel {
+        DeterminismLevel::BestEffort
+    }
 
     /// 带历史的多轮对话
-    fn chat_with_history(&self, messages: &[ChatMessage]) -> Result<String> {
+    fn chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         // 默认实现：取最后一条 user 消息，用第一条 system 消息
         let system = messages.iter()
             .find(|m| m.role == "system")
@@ -87,7 +173,7 @@ pub trait LlmProvider: Send + Sync {
         system: &str,
         user: &str,
         attachments: &[Attachment],
-    ) -> Result<String> {
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         let mut user_text = String::from(user);
         let mut dropped_images = 0;
         for a in attachments {
@@ -143,7 +229,7 @@ pub trait LlmProvider: Send + Sync {
         system: &str,
         user: &str,
         schema: Option<&serde_json::Value>,
-    ) -> Result<String> {
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         let hint = match schema {
             Some(s) => format!(
                 "{system}\n\nOutput must be valid JSON conforming to this schema:\n{s}\n\
@@ -172,7 +258,7 @@ pub trait LlmProvider: Send + Sync {
         user: &str,
         max_attempts: usize,
         validator: &dyn Fn(&str) -> std::result::Result<(), String>,
-    ) -> Result<String> {
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         if max_attempts == 0 {
             return Err(VaultError::Classification(
                 "chat_with_retry: max_attempts must be >= 1".into(),
@@ -184,13 +270,13 @@ pub trait LlmProvider: Send + Sync {
         ];
         let mut last_err = String::new();
         for attempt in 1..=max_attempts {
-            let raw = if attempt == 1 {
+            let (raw, usage) = if attempt == 1 {
                 self.chat(system, user)?
             } else {
                 self.chat_with_history(&messages)?
             };
             match validator(&raw) {
-                Ok(()) => return Ok(raw),
+                Ok(()) => return Ok((raw, usage)),
                 Err(e) => {
                     last_err = e.clone();
                     if attempt < max_attempts {
@@ -217,7 +303,7 @@ pub trait LlmProvider: Send + Sync {
         system: &str,
         examples: &[(String, String)],
         user: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         if examples.is_empty() {
             return self.chat(system, user);
         }
@@ -239,6 +325,13 @@ pub trait LlmProvider: Send + Sync {
 #[derive(Deserialize)]
 struct OllamaChatResponse {
     message: OllamaChatResponseMessage,
+    /// Ollama /api/chat returns `prompt_eval_count` (input tokens) and
+    /// `eval_count` (output tokens) on a successful non-streaming response.
+    /// Both default to 0 if missing — typical for very small / cached responses.
+    #[serde(default)]
+    prompt_eval_count: u32,
+    #[serde(default)]
+    eval_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -350,7 +443,7 @@ impl OllamaLlmProvider {
         )))
     }
 
-    fn chat_sync(&self, system: &str, user: &str) -> Result<String> {
+    fn chat_sync(&self, system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
         let url = format!("{}/api/chat", self.base_url);
         // F-16 Ollama 模型驻留: keep_alive=1h. 见 embed.rs 同款注释.
         let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
@@ -376,6 +469,7 @@ impl OllamaLlmProvider {
         }
         let client = self.client.clone();
         let body_json = serde_json::to_vec(&body)?;
+        let model = self.model.clone();
 
         llm_block_on(async move {
             let resp = client.post(&url)
@@ -390,17 +484,27 @@ impl OllamaLlmProvider {
             }
             let parsed: OllamaChatResponse = resp.json().await
                 .map_err(|e| VaultError::Classification(format!("parse chat response: {e}")))?;
-            Ok(parsed.message.content)
+            let usage = crate::usage::TokenUsage {
+                tokens_in: parsed.prompt_eval_count,
+                tokens_out: parsed.eval_count,
+                cached_in: 0,
+                model,
+                provider: "ollama".to_string(),
+            };
+            Ok((parsed.message.content, usage))
         })
     }
 }
 
 impl LlmProvider for OllamaLlmProvider {
-    fn chat(&self, system: &str, user: &str) -> Result<String> {
+    fn chat(&self, system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
         self.chat_sync(system, user)
     }
 
-    fn chat_with_history(&self, messages: &[ChatMessage]) -> Result<String> {
+    fn chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         let url = format!("{}/api/chat", self.base_url);
         let ollama_messages: Vec<serde_json::Value> = messages.iter()
             .map(|m| serde_json::json!({"role": &m.role, "content": &m.content}))
@@ -416,6 +520,7 @@ impl LlmProvider for OllamaLlmProvider {
         });
         let client = self.client.clone();
         let body_bytes = serde_json::to_vec(&body)?;
+        let model = self.model.clone();
 
         llm_block_on(async move {
             let resp = client.post(&url)
@@ -429,8 +534,79 @@ impl LlmProvider for OllamaLlmProvider {
             }
             let parsed: OllamaChatResponse = resp.json().await
                 .map_err(|e| VaultError::Classification(format!("parse: {e}")))?;
+            let usage = crate::usage::TokenUsage {
+                tokens_in: parsed.prompt_eval_count,
+                tokens_out: parsed.eval_count,
+                cached_in: 0,
+                model,
+                provider: "ollama".to_string(),
+            };
+            Ok((parsed.message.content, usage))
+        })
+    }
+
+    /// T1 (v1.0.6 KB-bench) — eval-mode entry: forwards `LlmCallOptions` into
+    /// the Ollama `options` body field. Ollama documents `seed` / `temperature`
+    /// / `top_p` under `options` per https://github.com/ollama/ollama/blob/main/docs/modelfile.md.
+    fn chat_with_options(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<String> {
+        let url = format!("{}/api/chat", self.base_url);
+        let ollama_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::json!({"role": &m.role, "content": &m.content}))
+            .collect();
+        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
+            .unwrap_or_else(|_| "1h".to_string());
+        let mut options_obj = serde_json::Map::new();
+        if let Some(s) = opts.seed {
+            options_obj.insert("seed".into(), serde_json::json!(s));
+        }
+        if let Some(t) = opts.temperature {
+            options_obj.insert("temperature".into(), serde_json::json!(t));
+        }
+        if let Some(p) = opts.top_p {
+            options_obj.insert("top_p".into(), serde_json::json!(p));
+        }
+        let body = serde_json::json!({
+            "model": &self.model,
+            "messages": ollama_messages,
+            "stream": false,
+            "keep_alive": keep_alive,
+            "options": options_obj,
+        });
+        let client = self.client.clone();
+        let body_bytes = serde_json::to_vec(&body)?;
+
+        llm_block_on(async move {
+            let resp = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(|e| VaultError::LlmUnavailable(format!("chat: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!(
+                    "ollama HTTP {status}: {body}"
+                )));
+            }
+            let parsed: OllamaChatResponse = resp
+                .json()
+                .await
+                .map_err(|e| VaultError::Classification(format!("parse: {e}")))?;
             Ok(parsed.message.content)
         })
+    }
+
+    fn determinism_level(&self) -> DeterminismLevel {
+        // Ollama honors options.seed via llama.cpp sampler — server-side
+        // deterministic. Per spec §11 Risk A mitigation 1.
+        DeterminismLevel::Exact
     }
 
     fn is_available(&self) -> bool {
@@ -461,7 +637,7 @@ impl LlmProvider for OllamaLlmProvider {
         system: &str,
         user: &str,
         schema: Option<&serde_json::Value>,
-    ) -> Result<String> {
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         let url = format!("{}/api/chat", self.base_url);
         let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
             .unwrap_or_else(|_| "1h".to_string());
@@ -480,6 +656,7 @@ impl LlmProvider for OllamaLlmProvider {
         };
         let client = self.client.clone();
         let body_json = serde_json::to_vec(&body)?;
+        let model = self.model.clone();
 
         llm_block_on(async move {
             let resp = client.post(&url)
@@ -494,7 +671,14 @@ impl LlmProvider for OllamaLlmProvider {
             }
             let parsed: OllamaChatResponse = resp.json().await
                 .map_err(|e| VaultError::Classification(format!("parse chat response: {e}")))?;
-            Ok(parsed.message.content)
+            let usage = crate::usage::TokenUsage {
+                tokens_in: parsed.prompt_eval_count,
+                tokens_out: parsed.eval_count,
+                cached_in: 0,
+                model,
+                provider: "ollama".to_string(),
+            };
+            Ok((parsed.message.content, usage))
         })
     }
 }
@@ -516,6 +700,10 @@ pub struct OpenAiLlmProvider {
 #[derive(Deserialize)]
 struct OpenAiResponse {
     choices: Vec<OpenAiChoice>,
+    /// `usage` may be absent on streaming responses; we never request streaming
+    /// so it should always be present on success — but tolerate absence anyway.
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(Deserialize)]
@@ -526,6 +714,44 @@ struct OpenAiChoice {
 #[derive(Deserialize)]
 struct OpenAiMessage {
     content: String,
+}
+
+/// OpenAI-compatible usage block. Fields are all `Option<u32>` to tolerate
+/// gateways that omit any subset (per actual `chat/completions` responses
+/// observed from OpenAI, DeepSeek, Qwen, Anthropic-via-gateway).
+#[derive(Deserialize, Default, Clone)]
+struct OpenAiUsage {
+    #[serde(default)]
+    prompt_tokens: Option<u32>,
+    #[serde(default)]
+    completion_tokens: Option<u32>,
+    /// Prompt-cache hits (OpenAI ≥ 2024-10 + Anthropic prompt-cache). Many
+    /// gateways do not pass this through — treat absent as 0.
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct OpenAiPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+}
+
+impl OpenAiUsage {
+    fn into_token_usage(self, model: &str, provider: &str) -> crate::usage::TokenUsage {
+        let cached_in = self
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+            .unwrap_or(0);
+        crate::usage::TokenUsage {
+            tokens_in: self.prompt_tokens.unwrap_or(0),
+            tokens_out: self.completion_tokens.unwrap_or(0),
+            cached_in,
+            model: model.to_string(),
+            provider: provider.to_string(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -592,7 +818,10 @@ impl OpenAiLlmProvider {
         }
     }
 
-    fn chat_sync_impl(&self, messages: &[ChatMessage]) -> Result<String> {
+    fn chat_sync_impl(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         let url = format!("{}/chat/completions", self.endpoint);
         let client = self.client.clone();
         let api_key = self.api_key.clone();
@@ -659,11 +888,15 @@ impl OpenAiLlmProvider {
                                         "parse openai response: {e}"
                                     ))
                                 })?;
+                                let usage = parsed
+                                    .usage
+                                    .unwrap_or_default()
+                                    .into_token_usage(&fallback_model, "openai_compat");
                                 return parsed
                                     .choices
                                     .into_iter()
                                     .next()
-                                    .map(|c| c.message.content)
+                                    .map(|c| (c.message.content, usage))
                                     .ok_or_else(|| {
                                         VaultError::Classification("empty choices".into())
                                     });
@@ -676,23 +909,108 @@ impl OpenAiLlmProvider {
             }
             let parsed: OpenAiResponse = resp.json().await
                 .map_err(|e| VaultError::Classification(format!("parse openai response: {e}")))?;
+            let usage = parsed
+                .usage
+                .unwrap_or_default()
+                .into_token_usage(&model_to_use, "openai_compat");
             parsed.choices.into_iter().next()
-                .map(|c| c.message.content)
+                .map(|c| (c.message.content, usage))
                 .ok_or_else(|| VaultError::Classification("empty choices".into()))
         })
     }
 }
 
 impl LlmProvider for OpenAiLlmProvider {
-    fn chat(&self, system: &str, user: &str) -> Result<String> {
+    fn chat(&self, system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
         self.chat_sync_impl(&[
             ChatMessage::system(system),
             ChatMessage::user(user),
         ])
     }
 
-    fn chat_with_history(&self, messages: &[ChatMessage]) -> Result<String> {
+    fn chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         self.chat_sync_impl(messages)
+    }
+
+    /// T1 (v1.0.6 KB-bench) — eval-mode entry: forwards `LlmCallOptions` as
+    /// top-level OpenAI body fields (`seed`, `temperature`, `top_p`) per
+    /// https://platform.openai.com/docs/api-reference/chat/create.
+    ///
+    /// Bypasses the model auto-detect retry loop in `chat_sync_impl` — the
+    /// bench harness must specify a concrete model so determinism semantics
+    /// are unambiguous. If `model` is empty / "auto" we fall back to the
+    /// legacy path (which surfaces the same fallback model the production
+    /// path would have used, keeping behavior intuitive).
+    fn chat_with_options(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<String> {
+        let trimmed = self.model.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+            // Defer to the resolver-aware path; eval block still surfaces
+            // Exact since the override is registered. Strip TokenUsage tuple
+            // (A1 Task J): chat_with_options keeps single-String signature
+            // for eval-mode caller ergonomics.
+            return self.chat_sync_impl(messages).map(|(s, _)| s);
+        }
+
+        let url = format!("{}/chat/completions", self.endpoint);
+        let mut body = serde_json::json!({
+            "model": &self.model,
+            "messages": messages,
+            "stream": false,
+        });
+        if let Some(s) = opts.seed {
+            body["seed"] = serde_json::json!(s);
+        }
+        if let Some(t) = opts.temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
+        if let Some(p) = opts.top_p {
+            body["top_p"] = serde_json::json!(p);
+        }
+        let api_key = self.api_key.clone();
+        let client = self.client.clone();
+        let body_bytes = serde_json::to_vec(&body)?;
+
+        llm_block_on(async move {
+            let resp = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(|e| VaultError::LlmUnavailable(format!("openai send: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!(
+                    "openai HTTP {status}: {body}"
+                )));
+            }
+            let parsed: OpenAiResponse = resp
+                .json()
+                .await
+                .map_err(|e| VaultError::Classification(format!("openai json: {e}")))?;
+            Ok(parsed
+                .choices
+                .first()
+                .map(|c| c.message.content.clone())
+                .unwrap_or_default())
+        })
+    }
+
+    fn determinism_level(&self) -> DeterminismLevel {
+        // OpenAI chat/completions accepts top-level `seed` since
+        // https://platform.openai.com/docs/api-reference/chat/create#chat-create-seed
+        // (released 2023-11) — server-side deterministic. Per spec §11 Risk A
+        // mitigation 1.
+        DeterminismLevel::Exact
     }
 
     /// Vision API — content array 走 OpenAI 多模态协议.
@@ -702,7 +1020,7 @@ impl LlmProvider for OpenAiLlmProvider {
         system: &str,
         user: &str,
         attachments: &[Attachment],
-    ) -> Result<String> {
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         // user content 构造 array: 文本块 + 图片块
         // 文件先拼到文本块 (OpenAI 兼容协议无原生文件附件)
         let mut text_with_files = String::from(user);
@@ -741,6 +1059,7 @@ impl LlmProvider for OpenAiLlmProvider {
         let client = self.client.clone();
         let body_bytes = serde_json::to_vec(&body)?;
         let api_key = self.api_key.clone();
+        let model = self.model.clone();
 
         llm_block_on(async move {
             let resp = client
@@ -757,8 +1076,12 @@ impl LlmProvider for OpenAiLlmProvider {
             }
             let parsed: OpenAiResponse = resp.json().await
                 .map_err(|e| VaultError::Classification(format!("parse openai response: {e}")))?;
+            let usage = parsed
+                .usage
+                .unwrap_or_default()
+                .into_token_usage(&model, "openai_compat");
             parsed.choices.into_iter().next()
-                .map(|c| c.message.content)
+                .map(|c| (c.message.content, usage))
                 .ok_or_else(|| VaultError::Classification("empty openai response".into()))
         })
     }
@@ -782,7 +1105,7 @@ impl LlmProvider for OpenAiLlmProvider {
         system: &str,
         user: &str,
         schema: Option<&serde_json::Value>,
-    ) -> Result<String> {
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         let url = format!("{}/chat/completions", self.endpoint);
         let client = self.client.clone();
         let api_key = self.api_key.clone();
@@ -845,11 +1168,17 @@ impl LlmProvider for OpenAiLlmProvider {
                     let parsed: OpenAiResponse = resp.json().await.map_err(|e| {
                         VaultError::Classification(format!("parse openai response: {e}"))
                     })?;
+                    let usage = parsed
+                        .usage
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_token_usage(&model, "openai_compat");
                     parsed
                         .choices
                         .into_iter()
                         .next()
-                        .map(|c| c.message.content)
+                        .map(|c| (c.message.content, usage))
                         .ok_or_else(|| VaultError::Classification("empty choices".into()))
                 }
             };
@@ -909,6 +1238,10 @@ pub struct MockLlmProvider {
     model: String,
     /// 测试用 — 记录最后一次 chat 收到的 user content (供 chat_multimodal 默认 fallback 验证)
     last_user: Mutex<String>,
+    /// T1 — runtime-flippable determinism level so a single mock instance can
+    /// serve both `Exact` and `Temp0` flavored tests
+    /// (see `eval_determinism_test.rs::anthropic_provider_degrades_to_temp0`).
+    determinism: Mutex<DeterminismLevel>,
 }
 
 impl MockLlmProvider {
@@ -917,6 +1250,12 @@ impl MockLlmProvider {
             responses: Mutex::new(Vec::new()),
             model: model.to_string(),
             last_user: Mutex::new(String::new()),
+            // Defaults to Exact so tests that call `chat_with_options` without
+            // explicit configuration see the "happy path" deterministic-seed
+            // semantics. Other call sites (legacy mock-driven unit tests)
+            // never touch determinism_level / chat_with_options so this is
+            // backward compatible.
+            determinism: Mutex::new(DeterminismLevel::Exact),
         }
     }
 
@@ -928,21 +1267,66 @@ impl MockLlmProvider {
         let s = self.last_user.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if s.is_empty() { None } else { Some(s) }
     }
+
+    /// T1 — Override the mock's reported [`DeterminismLevel`] (used by
+    /// `eval_determinism_test::anthropic_provider_degrades_to_temp0` to make
+    /// a single mock instance impersonate an Anthropic-flavored provider).
+    pub fn set_determinism_level(&self, level: DeterminismLevel) {
+        *self
+            .determinism
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = level;
+    }
 }
 
 impl LlmProvider for MockLlmProvider {
-    fn chat(&self, _system: &str, user: &str) -> Result<String> {
+    fn chat(&self, _system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
         *self.last_user.lock().unwrap_or_else(|e| e.into_inner()) = user.to_string();
         let mut guard = self.responses.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_empty() {
             return Err(VaultError::Classification("no mock response".into()));
         }
-        Ok(guard.remove(0))
+        let response = guard.remove(0);
+        Ok((response, crate::usage::TokenUsage::empty("mock", &self.model)))
     }
 
-    fn chat_with_history(&self, _messages: &[ChatMessage]) -> Result<String> {
+    fn chat_with_history(
+        &self,
+        _messages: &[ChatMessage],
+    ) -> Result<(String, crate::usage::TokenUsage)> {
         // Mock ignores history, returns next preset
         self.chat("", "")
+    }
+
+    /// T1 — deterministic answer of the form `mock-<seed>-<hash(last_user)>`
+    /// so integration tests can assert equality / inequality across seeds
+    /// without preloading the response queue. Bypasses the response queue
+    /// entirely so legacy tests pushing responses are unaffected.
+    fn chat_with_options(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<String> {
+        use std::hash::{Hash, Hasher};
+        let user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        // Record what we saw — keeps multimodal fallback assertions stable.
+        *self.last_user.lock().unwrap_or_else(|e| e.into_inner()) = user.clone();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        user.hash(&mut hasher);
+        let seed_part = opts.seed.unwrap_or(0);
+        Ok(format!("mock-{seed_part}-{:x}", hasher.finish()))
+    }
+
+    fn determinism_level(&self) -> DeterminismLevel {
+        *self
+            .determinism
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn is_available(&self) -> bool {
@@ -968,8 +1352,10 @@ mod tests {
     fn mock_provider_returns_preset() {
         let mock = MockLlmProvider::new("test-model");
         mock.push_response(r#"{"hello":"world"}"#);
-        let resp = mock.chat("sys", "user").unwrap();
+        let (resp, usage) = mock.chat("sys", "user").unwrap();
         assert_eq!(resp, r#"{"hello":"world"}"#);
+        assert_eq!(usage.provider, "mock");
+        assert_eq!(usage.model, "test-model");
         assert_eq!(mock.model_name(), "test-model");
         assert!(mock.is_available());
     }
@@ -1028,7 +1414,7 @@ mod tests {
             ChatMessage::assistant("hi"),
             ChatMessage::user("how are you"),
         ];
-        let resp = mock.chat_with_history(&messages).unwrap();
+        let (resp, _usage) = mock.chat_with_history(&messages).unwrap();
         assert_eq!(resp, "history reply");
     }
 
@@ -1047,7 +1433,7 @@ mod tests {
                 mime: "image/jpeg".into(),
             },
         ];
-        let resp = mock.chat_multimodal("system", "请分析", &attachments).unwrap();
+        let (resp, _usage) = mock.chat_multimodal("system", "请分析", &attachments).unwrap();
         assert_eq!(resp, "ack");
         // mock 收到的 user text 应含 file content (拼接)
         let received = mock.last_received_user().unwrap_or_default();
@@ -1096,7 +1482,7 @@ mod tests {
         // Mock provider 走 default impl: 拼 hint 到 system, 走 chat()
         let mock = MockLlmProvider::new("text-only");
         mock.push_response(r#"{"k":"v"}"#);
-        let s = mock.chat_with_format_json("sys", "user", None).unwrap();
+        let (s, _u) = mock.chat_with_format_json("sys", "user", None).unwrap();
         assert_eq!(s, r#"{"k":"v"}"#);
     }
 
@@ -1105,7 +1491,7 @@ mod tests {
         let mock = MockLlmProvider::new("text-only");
         mock.push_response(r#"[{"f":"a"}]"#);
         let schema = serde_json::json!({"type": "array"});
-        let s = mock.chat_with_format_json("sys", "user", Some(&schema)).unwrap();
+        let (s, _u) = mock.chat_with_format_json("sys", "user", Some(&schema)).unwrap();
         assert_eq!(s, r#"[{"f":"a"}]"#);
     }
 
@@ -1114,7 +1500,7 @@ mod tests {
         let mock = MockLlmProvider::new("test");
         mock.push_response("oops bad");
         mock.push_response(r#"{"ok":1}"#);
-        let raw = mock.chat_with_retry(
+        let (raw, _u) = mock.chat_with_retry(
             "sys",
             "user",
             3,
@@ -1166,7 +1552,7 @@ mod tests {
     fn chat_few_shot_with_empty_examples_falls_back_to_chat() {
         let mock = MockLlmProvider::new("test");
         mock.push_response("answer");
-        let s = mock.chat_few_shot("sys", &[], "user").unwrap();
+        let (s, _u) = mock.chat_few_shot("sys", &[], "user").unwrap();
         assert_eq!(s, "answer");
     }
 
@@ -1181,7 +1567,7 @@ mod tests {
             ("Q1".to_string(), "A1".to_string()),
             ("Q2".to_string(), "A2".to_string()),
         ];
-        let s = mock.chat_few_shot("sys", &examples, "user-final").unwrap();
+        let (s, _u) = mock.chat_few_shot("sys", &examples, "user-final").unwrap();
         assert_eq!(s, "final-reply");
     }
 }

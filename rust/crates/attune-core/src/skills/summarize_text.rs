@@ -26,7 +26,11 @@ pub fn summarize_with_prompt(llm: &dyn LlmProvider, text: &str, system: &str) ->
     } else {
         text.to_string()
     };
-    llm.chat(system, &input)
+    // Plan A1 Task I: drop the TokenUsage since this entry point predates
+    // the recorder (summarize is invoked from non-route paths). When the
+    // recorder is plumbed through (Task U / future), surface `TokenUsage`
+    // from this function instead of swallowing it.
+    llm.chat(system, &input).map(|(s, _u)| s)
 }
 
 /// 多文档汇总. 默认禁用 (大量 token), 由调用方显式启用.
@@ -64,12 +68,19 @@ mod tests {
     /// Mock LLM: 直接拼接 system + user 返回, 用于测试 summarize 不依赖真 LLM.
     struct MockLlm;
     impl LlmProvider for MockLlm {
-        fn chat(&self, system: &str, user: &str) -> Result<String> {
-            Ok(format!(
-                "[MOCK] sys.len={}, user.len={}, head={:?}",
-                system.len(),
-                user.len(),
-                user.chars().take(20).collect::<String>(),
+        fn chat(
+            &self,
+            system: &str,
+            user: &str,
+        ) -> Result<(String, crate::usage::TokenUsage)> {
+            Ok((
+                format!(
+                    "[MOCK] sys.len={}, user.len={}, head={:?}",
+                    system.len(),
+                    user.len(),
+                    user.chars().take(20).collect::<String>(),
+                ),
+                crate::usage::TokenUsage::empty("mock", "mock"),
             ))
         }
         fn is_available(&self) -> bool { true }

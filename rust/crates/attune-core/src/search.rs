@@ -218,6 +218,21 @@ pub struct SearchParams {
     /// None / Some("general") = 不应用 cross-domain penalty（默认行为，保留召回多样性）。
     /// 由 detect_query_domain (Stage 4) 自动从 query 推断 + plugin keywords 判断。
     pub domain_hint: Option<String>,
+
+    // ── T1 (v1.0.6 KB-bench) deterministic knobs ──────────────────────────
+    //
+    // Per spec docs/superpowers/specs/2026-05-28-kb-memory-vs-vlm-llm-bench-validation.md
+    // §11 Risk A. Threaded from `X-Attune-Eval-*` headers in
+    // attune-server/src/routes/search.rs. All default to off so legacy callers
+    // see no behavior change.
+    /// Pin seed for query_rewrite + rerank LLM calls (only honored if the
+    /// active LlmProvider supports it — see `DeterminismLevel`).
+    pub seed: Option<u64>,
+    /// Skip query_rewrite LLM call entirely (deterministic retrieval — bench
+    /// uses this to isolate retrieval quality from LLM noise).
+    pub skip_rewrite: bool,
+    /// Skip rerank LLM call entirely (same motivation as `skip_rewrite`).
+    pub skip_rerank: bool,
 }
 
 impl SearchParams {
@@ -241,6 +256,9 @@ impl SearchParams {
             intermediate_k,
             min_score: None,
             domain_hint: None,
+            seed: None,
+            skip_rewrite: false,
+            skip_rerank: false,
         }
     }
 
@@ -385,7 +403,7 @@ pub fn search_with_context(
         match (&ctx.embedding, &ctx.vectors) {
             (Some(emb), Some(vecs)) => {
                 match emb.embed(&[query]) {
-                    Ok(e) if !e.is_empty() => {
+                    Ok((e, _usage)) if !e.is_empty() => {
                         let qv = e[0].clone();
                         let raw: Vec<(String, f32)> = vecs.search(&qv, params.initial_k)
                             .unwrap_or_default()

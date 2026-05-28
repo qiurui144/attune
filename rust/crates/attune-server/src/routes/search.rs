@@ -1,9 +1,10 @@
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::Deserialize;
 use attune_core::search::{allocate_budget, SearchResult, INJECTION_BUDGET};
 
+use crate::eval as eval_surface;
 use crate::state::SharedState;
 
 /// 从 app_settings 读取 search.query_rewrite.enabled 开关。
@@ -78,8 +79,15 @@ fn err_500(msg: &str) -> ApiError {
 
 pub async fn search(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // T2 (v1.0.6 KB-bench): parse opt-in eval headers + start wall-clock.
+    // Old clients send no eval headers → parsed_eval all-default → eval block
+    // is null in response (backward compatible).
+    let parsed_eval = eval_surface::parse_eval_headers(&headers);
+    let t_search_start = std::time::Instant::now();
+
     // top_k = 0 会导致搜索始终返回空结果，提前拒绝
     if params.top_k == 0 {
         return Err((
@@ -102,18 +110,32 @@ pub async fn search(
         if let Some(entry) = cache.get(&cache_key) {
             // 验证原始 query 字符串防止哈希碰撞返回错误结果
             if entry.query == params.q && !entry.is_expired() {
+                let cached_latency_ms = t_search_start.elapsed().as_millis() as u64;
+                let eval_block = eval_surface::build_eval_block(&parsed_eval, cached_latency_ms);
                 return Ok(Json(serde_json::json!({
                     "query": params.q,
                     "results": entry.results,
                     "total": entry.results.len(),
-                    "cached": true
+                    "cached": true,
+                    // T2: eval block; null unless X-Attune-Eval-Mode set
+                    "eval": eval_block,
+                    "latency_ms": cached_latency_ms,
                 })));
             }
         }
     }
 
     // query_rewrite：将口语化 query 改写为检索关键词（开关在 settings.search.query_rewrite.enabled）
-    let effective_query = maybe_rewrite_query(&state, &params.q).await;
+    //
+    // T1 (v1.0.6 KB-bench, plan Step 11): bench harness can pin
+    // `X-Attune-Eval-Skip-Rewrite: true` to bypass the LLM rewrite call
+    // entirely — this isolates retrieval quality from LLM-noise in
+    // deterministic bench runs (per spec §11 Risk A).
+    let effective_query = if parsed_eval.skip_rewrite {
+        params.q.clone()
+    } else {
+        maybe_rewrite_query(&state, &params.q).await
+    };
 
     // v0.6 Phase B F-Pro Stage 4：从 query 自动 detect 领域意图，driving cross-domain penalty。
     // 命中 'legal' / 'tech' / 'medical' / 'patent' → 跨领域文档 score *= 0.4
@@ -125,6 +147,15 @@ pub async fn search(
         if let Some(ik) = params.initial_k { p.initial_k = ik; }
         if let Some(imk) = params.intermediate_k { p.intermediate_k = imk; }
         if let Some(d) = detected_domain.as_ref() { p.domain_hint = Some(d.clone()); }
+        // T1 (v1.0.6 KB-bench): forward eval knobs into SearchParams. Today
+        // only `skip_rewrite` actively gates the rewrite call above; `seed`
+        // and `skip_rerank` flow through to attune-core for v1.1 when
+        // SearchTracer lands (per spec §9.5 #6). Keeping the fields
+        // populated means downstream consumers can read which knobs were
+        // active without grepping HTTP headers.
+        p.seed = parsed_eval.seed;
+        p.skip_rewrite = parsed_eval.skip_rewrite;
+        p.skip_rerank = parsed_eval.skip_rerank;
         p
     };
 
@@ -187,11 +218,17 @@ pub async fn search(
         });
     }
 
+    let search_latency_ms = t_search_start.elapsed().as_millis() as u64;
+    let eval_block = eval_surface::build_eval_block(&parsed_eval, search_latency_ms);
+
     Ok(Json(serde_json::json!({
         "query": params.q,
         "results": results,
         "total": results.len(),
-        "cutoff_filtered": total_before_cutoff - total_after_cutoff
+        "cutoff_filtered": total_before_cutoff - total_after_cutoff,
+        // T2 (v1.0.6 KB-bench): eval block null unless X-Attune-Eval-Mode: 1 header set
+        "eval": eval_block,
+        "latency_ms": search_latency_ms,
     })))
 }
 

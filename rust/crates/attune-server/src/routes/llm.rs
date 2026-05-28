@@ -77,7 +77,7 @@ pub async fn test_llm(
     let latency_ms = start.elapsed().as_millis() as u64;
 
     match result {
-        Ok(reply) => Ok(Json(LlmTestResponse {
+        Ok((reply, _usage)) => Ok(Json(LlmTestResponse {
             ok: true,
             latency_ms: Some(latency_ms),
             reply: Some(reply.chars().take(100).collect()),
