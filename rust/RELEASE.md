@@ -1,11 +1,10 @@
 # attune 版本记录
 
-## v1.1.0 (2026-XX-XX) — Agent Control Plane (ACP)
+## v1.1.0 (2026-05-30) — Agent Control Plane (ACP)
 
 > 把 22 个产品 agent 当一个工程组织治理. ACP-1~7 七子系统跨多 minor (acp.1 → acp.6)
-> 在 develop 累积, GA 统一打 tag. spec:
+> 在 develop 累积, v1.1.0 GA 统一打 tag. spec:
 > `docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md`.
-> (tag 时把日期填实.)
 
 ### Highlights
 
