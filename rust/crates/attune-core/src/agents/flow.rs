@@ -294,5 +294,330 @@ pub fn flow_priorities(set: &FlowSet) -> BTreeMap<String, i32> {
     set.flows.iter().map(|f| (f.id.clone(), f.route_priority)).collect()
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Flow Executor (autonomous flow engine, spec §5.3b ③)
+// ══════════════════════════════════════════════════════════════════════════
+
+use std::collections::HashSet;
+
+use super::registry::AgentSpec;
+use super::scheduler::{ScheduleDecision, Scheduler};
+
+/// A typed work item flowing between agents. Carries the handoff `type_name`
+/// (so we can verify / record the type at each hop) plus an opaque JSON value
+/// (the agent's structured output). The flow executor threads one step's
+/// `Payload` into the next step's input — this is the "autonomous flow":
+/// `payload = step(payload)` along the declared DAG (spec §5.3b ③).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Payload {
+    type_name: String,
+    value: serde_json::Value,
+}
+
+impl Payload {
+    /// Construct a payload with a handoff type name + structured value.
+    pub fn new(type_name: &str, value: serde_json::Value) -> Self {
+        Payload {
+            type_name: type_name.to_string(),
+            value,
+        }
+    }
+
+    /// The handoff type name (matches a registry `consumes` / `produces`).
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    /// The structured value.
+    pub fn value(&self) -> &serde_json::Value {
+        &self.value
+    }
+}
+
+/// Why a single flow step failed inside the [`StepRunner`] (distinct from a
+/// scheduler block, which the executor handles before ever calling the runner).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepFailKind {
+    /// The agent's computation returned an error.
+    AgentError,
+    /// The agent's output failed the typed-handoff check at runtime.
+    HandoffMismatch,
+}
+
+/// A failure surfaced by a [`StepRunner`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepError {
+    /// The failure category.
+    pub kind: StepFailKind,
+    /// Human-readable detail (telemetry / trace).
+    pub message: String,
+}
+
+/// Runs the actual computation for one already-scheduled step. The flow executor
+/// owns orchestration (registry lookup, disabled check, scheduling, payload
+/// threading, degrade policy, trace); the runner owns the agent invocation +
+/// ACP-4 cost governance + ACP-3 telemetry for that one call. This split keeps
+/// the executor's control-flow logic pure-testable while production wires the
+/// real governor / agent dispatch.
+pub trait StepRunner {
+    /// Run `agent` (already scheduled to `decision`) on `input`, returning its
+    /// typed output payload or a [`StepError`].
+    fn run(
+        &mut self,
+        agent: &AgentSpec,
+        decision: &ScheduleDecision,
+        input: &Payload,
+    ) -> Result<Payload, StepError>;
+}
+
+/// One audit entry per flow step (auditability guarantee, spec §5.3b ④).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepTrace {
+    /// The step's agent id.
+    pub agent_id: String,
+    /// Did the runner actually execute this step? (`false` = skipped: disabled /
+    /// scheduler-blocked / unregistered / optional-failure).
+    pub ran: bool,
+    /// Was the schedule decision a degraded local fallback (quota exhausted)?
+    pub degraded: bool,
+    /// Free-text note (scheduling decision / skip reason / failure detail).
+    pub note: String,
+}
+
+/// The terminal disposition of a flow run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowStatus {
+    /// Every (non-skipped) step ran and the final payload is the last step's.
+    Complete,
+    /// A non-optional step failed/blocked under `on_step_fail = partial` — the
+    /// payload is the last good output, the flow did not run further (no cascade).
+    Partial,
+    /// A non-optional step failed under `on_step_fail = abort`.
+    Aborted,
+    /// A non-optional step was disabled/blocked and could not proceed; the flow
+    /// degraded to the last good payload (graceful, never cascade).
+    Degraded,
+}
+
+/// The result of running a flow: status + the (possibly partial) final payload +
+/// a per-step audit trace.
+#[derive(Debug, Clone)]
+pub struct FlowResult {
+    status: FlowStatus,
+    payload: Payload,
+    trace: Vec<StepTrace>,
+}
+
+impl FlowResult {
+    /// The terminal status.
+    pub fn status(&self) -> &FlowStatus {
+        &self.status
+    }
+    /// The final (possibly partial) payload.
+    pub fn payload(&self) -> &Payload {
+        &self.payload
+    }
+    /// The per-step audit trace.
+    pub fn trace(&self) -> &[StepTrace] {
+        &self.trace
+    }
+    /// Did the flow complete fully?
+    pub fn is_complete(&self) -> bool {
+        self.status == FlowStatus::Complete
+    }
+    /// Did the flow stop early with a partial result (graceful)?
+    pub fn is_partial(&self) -> bool {
+        self.status == FlowStatus::Partial
+    }
+    /// Was the flow aborted by an `abort` policy?
+    pub fn is_aborted(&self) -> bool {
+        self.status == FlowStatus::Aborted
+    }
+    /// Did the flow degrade around a disabled/blocked non-optional step?
+    pub fn is_degraded(&self) -> bool {
+        self.status == FlowStatus::Degraded
+    }
+}
+
+/// **The autonomous-flow engine** (spec §5.3b ③). Walks a declared flow DAG,
+/// threading each step's typed output into the next step's input. Each step:
+///
+///   1. **ACP-1** — look the agent up in the registry. An unregistered (shadow)
+///      step degrades like a failure (R8: never panic).
+///   2. **ACP-3** — if the agent is disabled (`disabled` set), skip it (optional)
+///      or degrade (non-optional) — never dispatch a disabled agent.
+///   3. **ACP-7** — schedule the call (`scheduler.route`). A scheduler block
+///      (entitlement / quota) is treated like step unavailability: skip if
+///      optional, else degrade per policy.
+///   4. **ACP-4 + ACP-3** — hand the scheduled step to the [`StepRunner`] (which
+///      wires cost governance + telemetry); thread its output forward.
+///
+/// The 4 guarantees hold: ① typed handoff was validated at load
+/// ([`FlowSet::validate_against`]); ② every hop is scheduled + run through the
+/// governable runner; ③ any unavailability degrades (skip optional / partial /
+/// abort) and **never cascades** (§11 R8); ④ every step leaves a [`StepTrace`].
+///
+/// `disabled` is the set of agent ids ACP-3's FeedbackController has soft-disabled
+/// (the caller computes it from `FeedbackController::decide`).
+pub fn run_flow(
+    flow: &FlowDef,
+    registry: &AgentRegistry,
+    scheduler: &Scheduler,
+    input: Payload,
+    disabled: &HashSet<String>,
+    runner: &mut dyn StepRunner,
+) -> FlowResult {
+    let mut payload = input;
+    let mut trace: Vec<StepTrace> = Vec::with_capacity(flow.steps.len());
+
+    for step in &flow.steps {
+        let optional = flow.is_optional(step);
+
+        // ① ACP-1 registry lookup — a shadow step degrades, never panics (R8).
+        let Some(agent) = registry.get(step) else {
+            trace.push(StepTrace {
+                agent_id: step.clone(),
+                ran: false,
+                degraded: false,
+                note: "unregistered (shadow) agent — skipped".to_string(),
+            });
+            if optional {
+                continue;
+            }
+            return finish_non_optional(flow, payload, trace, step, "unregistered agent");
+        };
+
+        // ② ACP-3 disabled gate.
+        let disabled_reason = if disabled.contains(step) {
+            Some("soft-disabled by ACP-3 (weak-model F1 below floor)")
+        } else {
+            None
+        };
+
+        // ③ ACP-7 schedule.
+        let decision = scheduler.route(agent, disabled_reason);
+        if decision.is_blocked() {
+            let note = blocked_note(&decision);
+            trace.push(StepTrace {
+                agent_id: step.clone(),
+                ran: false,
+                degraded: false,
+                note: note.clone(),
+            });
+            if optional {
+                continue;
+            }
+            return finish_non_optional(flow, payload, trace, step, &note);
+        }
+
+        // ④ ACP-4 + ACP-3 — run the scheduled step through the governable runner.
+        let degraded = matches!(
+            decision,
+            ScheduleDecision::Local { degraded_from_cloud: true, .. }
+        );
+        match runner.run(agent, &decision, &payload) {
+            Ok(out) => {
+                trace.push(StepTrace {
+                    agent_id: step.clone(),
+                    ran: true,
+                    degraded,
+                    note: schedule_note(&decision),
+                });
+                payload = out; // autonomous flow: upstream output → downstream input
+            }
+            Err(e) => {
+                trace.push(StepTrace {
+                    agent_id: step.clone(),
+                    ran: false,
+                    degraded,
+                    note: format!("step failed: {} ({:?})", e.message, e.kind),
+                });
+                if optional {
+                    continue; // graceful: skip optional step failure, no cascade
+                }
+                return finish_non_optional(flow, payload, trace, step, &e.message);
+            }
+        }
+    }
+
+    FlowResult {
+        status: FlowStatus::Complete,
+        payload,
+        trace,
+    }
+}
+
+/// Resolve a non-optional step that could not proceed (failure / block /
+/// unavailability) per the flow's `on_step_fail` policy. Never cascade-fails:
+/// `partial` returns the last good payload, `abort` marks aborted, and
+/// `fallback_agent`/disabled paths degrade. The trailing skipped steps are NOT
+/// recorded as runs (the flow stopped here).
+fn finish_non_optional(
+    flow: &FlowDef,
+    payload: Payload,
+    trace: Vec<StepTrace>,
+    _step: &str,
+    _reason: &str,
+) -> FlowResult {
+    let status = match flow.degrade.on_step_fail {
+        OnStepFail::Abort => FlowStatus::Aborted,
+        // `fallback_agent` without a wired alternate runner degrades like partial
+        // here (the executor has no second runner to dispatch to); the policy is
+        // honored structurally — a real fallback runner would be threaded by the
+        // caller. Either way: never cascade.
+        OnStepFail::Partial | OnStepFail::FallbackAgent => FlowStatus::Partial,
+    };
+    // A disabled/blocked non-optional step that the scheduler refused is a
+    // graceful degrade rather than an agent failure; the distinction is in the
+    // trace note. We keep the status as Partial/Aborted from the policy, but if
+    // the policy is partial AND the last trace entry was a *block* (not a run
+    // failure), surface Degraded to make the disposition explicit.
+    let last_was_block = trace
+        .last()
+        .map(|t| !t.ran && (t.note.contains("blocked") || t.note.contains("disabled") || t.note.contains("quota") || t.note.contains("entitlement")))
+        .unwrap_or(false);
+    let status = if status == FlowStatus::Partial && last_was_block {
+        FlowStatus::Degraded
+    } else {
+        status
+    };
+    FlowResult {
+        status,
+        payload,
+        trace,
+    }
+}
+
+/// A short note describing a runnable schedule decision (trace).
+fn schedule_note(decision: &ScheduleDecision) -> String {
+    match decision {
+        ScheduleDecision::Cloud => "scheduled: cloud".to_string(),
+        ScheduleDecision::Local {
+            degraded_from_cloud: true,
+            ..
+        } => "scheduled: local (degraded from cloud — quota exhausted)".to_string(),
+        ScheduleDecision::Local { model, .. } => {
+            format!("scheduled: local (model={})", model.as_deref().unwrap_or("default"))
+        }
+        other => format!("scheduled: {other:?}"),
+    }
+}
+
+/// A short note describing a blocked schedule decision (trace).
+fn blocked_note(decision: &ScheduleDecision) -> String {
+    match decision {
+        ScheduleDecision::BlockedEntitlement { reason } => {
+            format!("blocked (entitlement): {reason}")
+        }
+        ScheduleDecision::BlockedQuotaExhausted { reason } => {
+            format!("blocked (quota): {reason}")
+        }
+        ScheduleDecision::BlockedDisabled { reason } => {
+            format!("blocked (disabled): {reason}")
+        }
+        runnable => format!("unexpected runnable in block path: {runnable:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests;
