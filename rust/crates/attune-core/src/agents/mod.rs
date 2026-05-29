@@ -14,6 +14,60 @@ pub mod scheduler;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 
+/// Locate a workspace SSOT file (`agents.registry.toml` / `agent_flows.toml`) by
+/// walking up from CWD and the running executable's directory (ACP §5.5 / §5.3b —
+/// the registry + flows are workspace files, not vault data). Returns `None` when
+/// the file is absent (e.g. an OSS attune install that ships no agent registry —
+/// the flow path then stays a no-op and chat falls back to free-form RAG).
+///
+/// Shared by the CLI (`attune agent flow …`) and the server's chat-path flow
+/// wiring so both resolve the same files with identical semantics.
+pub fn locate_workspace_file(name: &str) -> Option<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+        }
+    }
+    for root in roots {
+        let mut cur: Option<&std::path::Path> = Some(root.as_path());
+        while let Some(dir) = cur {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            cur = dir.parent();
+        }
+    }
+    None
+}
+
+/// Load the workspace agent registry + flow set and validate the typed-handoff
+/// chain (ACP-5 guarantee ①). Returns `None` when either file is absent (graceful
+/// — an OSS install with no agents has no flows to run) or fails to parse /
+/// validate (the error is logged by the caller; the chat path must never hard-fail
+/// because the optional flow layer could not load — spec §7 / §11 R8).
+///
+/// The two file names default to the workspace SSOT names but are parameterized so
+/// tests can point at fixtures.
+pub fn load_workspace_flows(
+    registry_name: &str,
+    flows_name: &str,
+) -> std::result::Result<(flow::FlowSet, registry::AgentRegistry), String> {
+    let reg_path = locate_workspace_file(registry_name)
+        .ok_or_else(|| format!("{registry_name} not found in workspace"))?;
+    let flows_path = locate_workspace_file(flows_name)
+        .ok_or_else(|| format!("{flows_name} not found in workspace"))?;
+    let reg = registry::AgentRegistry::from_path(&reg_path)?;
+    let flows = flow::FlowSet::from_path(&flows_path)?;
+    // Guarantee ① — typed handoff validated against the registry at load time.
+    flows.validate_against(&reg)?;
+    Ok((flows, reg))
+}
+
 /// 统一 agent 输出 schema
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentOutput<T> {
@@ -140,5 +194,45 @@ mod tests {
         assert_eq!(s.computation, "hello");
         let v: AgentOutput<Vec<i32>> = make_output(vec![1, 2, 3], vec![], vec![]);
         assert_eq!(v.computation.len(), 3);
+    }
+
+    // ACP-5 chat wiring — workspace file locator finds the SSOT registry by
+    // walking up from CWD (tests run with CWD inside the crate dir).
+    #[test]
+    fn locate_workspace_file_finds_registry() {
+        let found = super::locate_workspace_file("agents.registry.toml");
+        assert!(
+            found.is_some(),
+            "agents.registry.toml must be locatable from the workspace"
+        );
+    }
+
+    // ACP-5 chat wiring — a missing file is a graceful None (not a panic / error).
+    #[test]
+    fn locate_workspace_file_missing_is_none() {
+        assert!(super::locate_workspace_file("definitely-not-a-real-file.toml").is_none());
+    }
+
+    // ACP-5 chat wiring — load_workspace_flows validates the typed-handoff chain
+    // against the registry (guarantee ①) and returns the canonical legal_defamation
+    // flow from the workspace SSOT.
+    #[test]
+    fn load_workspace_flows_loads_and_validates() {
+        let (flows, reg) =
+            super::load_workspace_flows("agents.registry.toml", "agent_flows.toml")
+                .expect("workspace flows must load + validate");
+        assert!(!reg.is_empty(), "registry must have agents");
+        assert!(
+            flows.get("legal_defamation").is_some(),
+            "the canonical legal_defamation flow must be present"
+        );
+    }
+
+    // ACP-5 chat wiring — a missing registry/flows file is an Err (caller degrades),
+    // never a panic.
+    #[test]
+    fn load_workspace_flows_missing_is_err() {
+        let r = super::load_workspace_flows("nope-registry.toml", "nope-flows.toml");
+        assert!(r.is_err());
     }
 }
