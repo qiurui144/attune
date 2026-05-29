@@ -130,6 +130,91 @@ fn shipped_registry_oss_agents_are_free() {
     }
 }
 
+// ── ACP-5 dedupe: alias (shared binary) ─────────────────────────────────
+
+#[test]
+fn alias_field_defaults_to_none() {
+    let reg = AgentRegistry::from_toml_str(one_agent_toml()).unwrap();
+    let a = reg.get("fact_extractor").unwrap();
+    assert!(a.shares_binary.is_none(), "no alias declared → None");
+}
+
+#[test]
+fn alias_to_existing_binary_validates() {
+    // Two agent ids sharing one binary (the divorce dedupe shape).
+    let toml = r#"
+[[agent]]
+id = "agent_divorce"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "离婚确定性路径"
+cost_class = "zero"
+gate = "g"
+[agent.handoff]
+consumes = "DivorceFacts"
+produces = "DivorceComputation"
+
+[[agent]]
+id = "divorce_extractor"
+tier = "paid"
+plugin = "law-pro"
+kind = "llm-judge"
+capability_boundary = "离婚案情抽取"
+model_tier_floor = "qwen3b"
+cost_class = "cloud"
+gate = "g2"
+shares_binary = "agent_divorce"
+[agent.handoff]
+consumes = "RawCaseText"
+produces = "DivorceFacts"
+"#;
+    let reg = AgentRegistry::from_toml_str(toml).expect("alias to existing agent validates");
+    let a = reg.get("divorce_extractor").unwrap();
+    assert_eq!(a.shares_binary.as_deref(), Some("agent_divorce"));
+}
+
+#[test]
+fn alias_to_unregistered_binary_rejected() {
+    let toml = r#"
+[[agent]]
+id = "divorce_extractor"
+tier = "paid"
+plugin = "law-pro"
+kind = "llm-judge"
+capability_boundary = "离婚案情抽取"
+model_tier_floor = "qwen3b"
+cost_class = "cloud"
+gate = "g2"
+shares_binary = "ghost_binary"
+[agent.handoff]
+consumes = "RawCaseText"
+produces = "DivorceFacts"
+"#;
+    let err = AgentRegistry::from_toml_str(toml).unwrap_err();
+    assert!(err.contains("shares_binary") && err.contains("ghost_binary"), "got: {err}");
+}
+
+#[test]
+fn alias_to_self_rejected() {
+    let toml = r#"
+[[agent]]
+id = "x"
+tier = "free"
+plugin = "oss-core"
+kind = "deterministic"
+capability_boundary = "b"
+cost_class = "zero"
+gate = "g"
+shares_binary = "x"
+[agent.handoff]
+consumes = "A"
+produces = "B"
+"#;
+    let err = AgentRegistry::from_toml_str(toml).unwrap_err();
+    assert!(err.contains("shares_binary") && err.contains("itself"), "got: {err}");
+}
+
 // ── golden / pure-logic: parse + accessors ──────────────────────────────
 
 #[test]

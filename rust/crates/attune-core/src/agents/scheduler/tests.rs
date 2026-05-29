@@ -16,6 +16,7 @@ fn agent(id: &str, tier: Tier, cost: CostClass, floor: &str) -> AgentSpec {
         gate: "g".to_string(),
         route_keywords: vec![],
         route_priority: 0,
+        shares_binary: None,
         handoff: Handoff {
             consumes: "In".to_string(),
             produces: "Out".to_string(),

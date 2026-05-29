@@ -299,6 +299,13 @@ produces = "InterestAmount"
 
 [[agent]]
 id = "divorce_extractor"
+# A audit: this LLM extractor shares bin/agent_divorce with the deterministic
+# divorce path ("one binary, two agent ids"). The registry now carries a
+# machine-checkable `shares_binary` field for that relationship (validated:
+# target must be a registered agent, may not be self). The deterministic divorce
+# sibling is not currently registered as a separate agent, so this entry owns its
+# binary and leaves shares_binary unset; when the sibling is registered it sets
+# `shares_binary = "divorce_extractor"` (or vice-versa) to make the link explicit.
 tier = "paid"
 plugin = "law-pro"
 kind = "llm-judge"

@@ -334,6 +334,57 @@ fn shipped_flows_validate_against_shipped_registry() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// Task 5 — dedupe defamation/divorce (correctness unchanged, §2.3)
+// ══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn defamation_dedupe_routes_to_composed_flow_not_individual_agents() {
+    // A audit: defamation capability was split across 2 agents (deterministic
+    // defamation_agent + LLM defamation_extractor) on the same keywords. The
+    // dedupe composes them into ONE flow. A defamation intent must resolve to the
+    // legal_defamation flow (priority 9), NOT to either single agent.
+    let reg = AgentRegistry::from_path(&shipped_path("agents.registry.toml"))
+        .expect("shipped registry");
+    let flows =
+        FlowSet::from_path(&shipped_path("agent_flows.toml")).expect("shipped flows");
+    let resolved = resolve_flow("他诽谤侮辱我，要求名誉权赔偿", &flows, &reg)
+        .expect("defamation intent resolves");
+    assert_eq!(resolved.id, "legal_defamation", "defamation → composed flow");
+    assert!(!resolved.synthesized, "composed flow is declared, not synthesized");
+    // The flow composes extraction → damages: LLM extractor leads, deterministic
+    // damages calc follows (the documented dedupe shape).
+    assert!(resolved.flow.steps.contains(&"defamation_extractor".to_string()));
+    assert!(resolved.flow.steps.contains(&"defamation_agent".to_string()));
+}
+
+#[test]
+fn defamation_flow_typed_chain_connects_extractor_to_damages() {
+    // Correctness-preserving (§2.3): the flow only ORGANIZES the existing agents;
+    // the typed handoff must actually connect extractor.produces → agent.consumes.
+    let reg = AgentRegistry::from_path(&shipped_path("agents.registry.toml")).unwrap();
+    let extractor = reg.get("defamation_extractor").unwrap();
+    let damages = reg.get("defamation_agent").unwrap();
+    assert_eq!(
+        extractor.handoff.produces, damages.handoff.consumes,
+        "defamation_extractor produces must equal defamation_agent consumes (DefamationFacts)"
+    );
+}
+
+#[test]
+fn divorce_alias_mechanism_available_in_registry() {
+    // A audit: divorce_extractor shares bin/agent_divorce with the deterministic
+    // divorce path (one binary, two ids). The registry now carries a machine-
+    // checkable shares_binary field for that relationship. The shipped
+    // divorce_extractor owns its binary (no deterministic sibling registered),
+    // so shares_binary is None — but the mechanism exists + validates aliases.
+    let reg = AgentRegistry::from_path(&shipped_path("agents.registry.toml")).unwrap();
+    let divorce = reg.get("divorce_extractor").expect("divorce_extractor present");
+    // Field is present (None here); the alias-validation test in registry/tests.rs
+    // proves a real alias to a sibling validates + an unregistered target rejects.
+    let _ = &divorce.shares_binary;
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // Task 2 — Flow Executor (autonomous flow) + the 4 guarantees (§5.3b)
 // ══════════════════════════════════════════════════════════════════════════
 

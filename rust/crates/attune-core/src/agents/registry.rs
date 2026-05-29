@@ -105,6 +105,14 @@ pub struct AgentSpec {
     /// Router priority — higher wins when keywords collide.
     #[serde(default)]
     pub route_priority: i32,
+    /// ACP-5 dedupe (A audit): the id of another registered agent whose binary
+    /// this agent shares. Makes the "one binary, two agent ids" relationship
+    /// (e.g. `divorce_extractor` shares `bin/agent_divorce` with the deterministic
+    /// divorce path) explicit + machine-checkable instead of a comment. `None`
+    /// when the agent owns its own binary. Does NOT change any computation
+    /// (§2.3) — purely a declared relationship.
+    #[serde(default)]
+    pub shares_binary: Option<String>,
     /// Typed handoff contract (autonomous-flow foundation).
     pub handoff: Handoff,
 }
@@ -211,6 +219,25 @@ impl AgentRegistry {
                 return Err(format!("agent {} has empty handoff.produces type", a.id));
             }
         }
+        // Second pass: alias (shares_binary) targets must be a registered agent
+        // and may not point at the declaring agent itself (ACP-5 dedupe, §5.3b).
+        // Done after the id set is complete so a forward reference is allowed.
+        for a in &self.agents {
+            if let Some(target) = &a.shares_binary {
+                if target == &a.id {
+                    return Err(format!(
+                        "agent {} declares shares_binary pointing at itself",
+                        a.id
+                    ));
+                }
+                if !seen_ids.contains_key(target.as_str()) {
+                    return Err(format!(
+                        "agent {} declares shares_binary {target:?} which is not a registered agent",
+                        a.id
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -281,6 +308,9 @@ impl AgentRegistry {
                     consumes = a.handoff.consumes,
                     produces = a.handoff.produces,
                 ));
+                if let Some(shared) = &a.shares_binary {
+                    out.push_str(&format!("        shares binary with: {shared}\n"));
+                }
             }
         }
         // Surface any route-keyword conflicts (resolved by priority — informational).
