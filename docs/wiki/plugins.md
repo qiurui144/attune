@@ -99,7 +99,7 @@ chat_trigger:
   domain: legal
 ```
 
-详见 [PluginHub 开发者文档](/pluginhub/)。
+详见 PluginHub 开发者文档（`pluginhub.engi-stack.com`）。
 
 ## 版本兼容性
 
