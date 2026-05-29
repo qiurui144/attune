@@ -106,6 +106,7 @@ pub mod capability_dispatch;
 pub mod skills;
 pub mod agents;
 pub mod agent_telemetry;
+pub mod feedback;
 pub mod mcp_client;
 pub mod case_metadata;
 pub mod plugin_encryption;
