@@ -5,10 +5,59 @@
 //! 2. 比对本地已装 (plugin_registry::default_plugins_dir() 内目录列表)
 //! 3. 差异: 缺的 → 下载 .attunepkg + verify sig + 解密 + install
 //!    多余的 → 留着 (用户手动卸载, 防误删自装插件)
+//!
+//! ## ACP-6 boundary invariant: plugin-shipped ⊥ user-accumulated
+//!
+//! The D audit (`2026-05-29-self-iteration-preservation-audit.md`) found that
+//! learned state surviving a plugin upgrade was a **lucky accident** of file
+//! layout, not an enforced contract. ACP-6 Task 4 makes the boundary explicit:
+//!
+//! | Class | Examples | Lives in | On upgrade |
+//! |-------|----------|----------|-----------|
+//! | **plugin-shipped** (code) | agent binaries, `plugin.yaml`, prompts, JSON schemas, golden YAML, ratchet thresholds | `plugins/<id>/` | **replaced wholesale** (`remove_dir_all` + recopy) |
+//! | **user-accumulated** (learned/user state) | `agent_state` (skill_expansion / preference / ratchet_watermark), `skill_expansions`, signals, memory | vault DB (`data_dir`) | **untouched** |
+//!
+//! Enforcement (not just doc): every install path operates **only** on
+//! `plugins_dir`; it never opens, reads, or writes the vault DB. In the real
+//! layout the vault DB (`data_dir/vault.db`) is a *sibling* of `plugins/`
+//! (`data_dir/plugins/`), so a `remove_dir_all(plugins/<id>)` on upgrade can
+//! never touch it. The guard [`assert_vault_db_outside_plugins_dir`] refuses an
+//! install whose `plugins_dir` would contain the vault DB, so a misconfiguration
+//! can never let a plugin-dir wipe clobber learned state. The
+//! `plugin_upgrade_preserves_user_agent_state` test turns the guarantee into a
+//! tested one (audit rec #4).
 
 use crate::cloud_client::{CloudClient, EntitledPlugin};
 use crate::error::{Result, VaultError};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Boundary guard (ACP-6 Task 4): refuse any plugin install whose `plugins_dir`
+/// would **contain** the vault DB. Plugin installs `remove_dir_all` + recopy a
+/// plugin dir under `plugins_dir`; if the vault DB lived inside `plugins_dir`,
+/// an upgrade could wipe user-accumulated learned state.
+///
+/// The real layout passes: `data_dir/vault.db` is a sibling of
+/// `data_dir/plugins/`, not inside it. Only a misconfiguration that nests the
+/// vault DB under the plugins dir is rejected.
+///
+/// Best-effort path normalization: canonicalize when the paths exist (resolves
+/// symlinks / `..`), else compare lexically.
+pub fn assert_vault_db_outside_plugins_dir(plugins_dir: &Path, vault_db: &Path) -> Result<()> {
+    let norm = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let plugins = norm(plugins_dir);
+    // The vault DB may not exist yet; canonicalize its parent then re-join.
+    let vault = match (vault_db.parent(), vault_db.file_name()) {
+        (Some(parent), Some(name)) => norm(parent).join(name),
+        _ => norm(vault_db),
+    };
+    if vault == plugins || vault.starts_with(&plugins) {
+        return Err(VaultError::InvalidInput(format!(
+            "vault DB {vault:?} must not be inside the plugins dir {plugins:?} \
+             (ACP-6 boundary: plugin-shipped code ⊥ user-accumulated learned state)"
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct SyncReport {
@@ -97,6 +146,9 @@ fn install_one_plugin(ep: &EntitledPlugin, license_key: &str, plugins_dir: &std:
         Some("Trusted"),
     )?;
 
+    // ACP-6 boundary: never let a plugin-dir wipe touch the vault DB.
+    guard_install_target(plugins_dir)?;
+
     // 6. 复制到目标
     let dst = plugins_dir.join(&ep.plugin_id);
     if dst.exists() {
@@ -104,6 +156,16 @@ fn install_one_plugin(ep: &EntitledPlugin, license_key: &str, plugins_dir: &std:
     }
     copy_dir_recursive(&plugin_src, &dst)?;
     Ok(())
+}
+
+/// ACP-6 Task 4 enforcement: before any install mutates `plugins_dir`, assert
+/// the live vault DB is not nested inside it (so `remove_dir_all` of a plugin
+/// dir can never clobber user-accumulated learned state). Uses the real
+/// platform vault path; in unit tests `plugins_dir` is a temp dir disjoint from
+/// the real `data_dir`, so this is a harmless pass.
+fn guard_install_target(plugins_dir: &Path) -> Result<()> {
+    let vault_db = crate::platform::data_dir().join("vault.db");
+    assert_vault_db_outside_plugins_dir(plugins_dir, &vault_db)
 }
 
 /// 从 `.attunepkg` 字节流安装一个插件到 plugins 目录 —— marketplace 下载安装路径用。
@@ -150,6 +212,9 @@ pub fn install_plugin_package(
             loaded.manifest.id
         )));
     }
+
+    // ACP-6 boundary: never let a plugin-dir wipe touch the vault DB.
+    guard_install_target(plugins_dir)?;
 
     std::fs::create_dir_all(plugins_dir).map_err(VaultError::Io)?;
     let dst = plugins_dir.join(plugin_id);
@@ -401,5 +466,100 @@ mod tests {
         let dst = install_plugin_package("demo-plugin", &bytes, &plugins_dir).expect("install");
         assert!(dst.join("plugin.yaml").exists());
         assert!(!dst.join("stale.txt").exists(), "旧内容应被覆盖清除");
+    }
+
+    // ── ACP-6 Task 4: plugin-shipped ⊥ user-accumulated boundary enforcement ──
+
+    #[test]
+    fn install_refuses_when_vault_db_inside_plugins_dir() {
+        // §2.3 / boundary invariant: a plugin install must NEVER be able to wipe
+        // the vault DB (where user-accumulated agent_state lives). If
+        // misconfigured so the vault DB sits inside the plugins dir, the guard
+        // must refuse rather than risk a remove_dir_all clobbering learned state.
+        let tmp = TempDir::new().expect("tmp");
+        let plugins_dir = tmp.path().join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+
+        // Misconfigured: vault DB nested INSIDE the plugins dir.
+        let bad_vault = plugins_dir.join("vault.db");
+        let err = assert_vault_db_outside_plugins_dir(&plugins_dir, &bad_vault).unwrap_err();
+        assert!(format!("{err}").contains("must not be inside the plugins dir"));
+
+        // The REAL production layout passes: data_dir/vault.db is a sibling of
+        // data_dir/plugins/ (plugins is INSIDE data_dir, but the DB is not
+        // inside plugins).
+        let data_dir = tmp.path().join("attune");
+        let real_plugins = data_dir.join("plugins");
+        let real_vault = data_dir.join("vault.db");
+        std::fs::create_dir_all(&real_plugins).unwrap();
+        assert!(assert_vault_db_outside_plugins_dir(&real_plugins, &real_vault).is_ok());
+    }
+
+    #[test]
+    fn plugin_upgrade_preserves_user_agent_state() {
+        // The audit's recommended upgrade-preservation E2E (rec #4): real vault
+        // accumulates agent_state, a plugin is upgraded v1.0.5 -> v1.0.6, assert
+        // the user's learned state survives. Turns the incidental guarantee into
+        // a tested one — plugin install only mutates the plugins dir.
+        use crate::crypto::Key32;
+        use crate::store::{AgentStateKind, Store};
+
+        let tmp = TempDir::new().expect("tmp");
+        // Vault DB lives in the data dir; plugins dir is a SIBLING (real layout).
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let vault_db = data_dir.join("vault.db");
+        let plugins_dir = tmp.path().join("plugins");
+
+        // User accumulates learned state for an installed plugin.
+        let dek = Key32::generate();
+        {
+            let store = Store::open(&vault_db).unwrap();
+            store
+                .upsert_agent_state(
+                    &dek,
+                    "defamation_extractor",
+                    "law-pro",
+                    AgentStateKind::SkillExpansion,
+                    1,
+                    b"user-learned-terms",
+                )
+                .unwrap();
+            store
+                .upsert_agent_state(
+                    &dek,
+                    "law-pro-router",
+                    "law-pro",
+                    AgentStateKind::Preference,
+                    1,
+                    b"verbosity:terse",
+                )
+                .unwrap();
+            assert_eq!(store.count_agent_state().unwrap(), 2);
+        }
+
+        // Install law-pro v1.0.5, then "upgrade" to v1.0.6 (overwrite plugin dir).
+        let v105 = make_pkg(tmp.path(), "law-pro-105", "law-pro");
+        install_plugin_package("law-pro", &v105, &plugins_dir).expect("install v1.0.5");
+        let v106 = make_pkg(tmp.path(), "law-pro-106", "law-pro");
+        install_plugin_package("law-pro", &v106, &plugins_dir).expect("upgrade v1.0.6");
+        assert!(plugins_dir.join("law-pro").join("plugin.yaml").exists());
+
+        // The boundary invariant holds for this layout (vault DB not under plugins).
+        assert!(assert_vault_db_outside_plugins_dir(&plugins_dir, &vault_db).is_ok());
+
+        // CRITICAL: the user's accumulated agent_state must be fully intact after
+        // the plugin upgrade — the vault DB was never touched by the install.
+        let store = Store::open(&vault_db).unwrap();
+        assert_eq!(
+            store.count_agent_state().unwrap(),
+            2,
+            "plugin upgrade must NOT drop user-accumulated agent_state"
+        );
+        let row = store
+            .get_agent_state(&dek, "defamation_extractor", "law-pro", AgentStateKind::SkillExpansion)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.payload, b"user-learned-terms");
     }
 }
