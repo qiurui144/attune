@@ -332,12 +332,14 @@ per 产品 cost & trigger contract 三层:
 
 ---
 
-## 评审决策点(等用户拍板)
+## 评审决策(2026-05-29 用户 "并行" — 取 spec 推荐默认拍板)
 
-1. **切片顺序认可?**(spec 推荐 wire-first:acp.1 接孤岛回报最高,先做)
-2. **ACP-3 auto-escalate model tier 默认开还是默认关?**(R2 成本风险 — spec 倾向默认关 + 用户显式开)
-3. **OSS 补 gate 暴露不达标 agent 如何处置?**(spec 倾向诚实标 Beta,不藏 — 但可能影响 OSS 卖点)
-4. **能力空洞填充(tech/patent/presales)是否纳入本 capability?**(spec 推荐拆出独立 v1.2 spec,本 capability 只治理不扩 agent)
-5. **state 跨 plugin 共享(legal-prompts-pack）现在设计还是推后?**(D 建议;spec 留 `shared` scope 扩展点但不本期实现)
+| # | 决策 | 拍板 |
+|---|------|------|
+| 1 | 切片顺序 | ✅ **wire-first**(acp.1 接孤岛先做,回报最高)|
+| 2 | ACP-3 auto-escalate model tier | ✅ **默认关 + 用户显式开**(R2 成本风险)|
+| 3 | OSS 补 gate 暴露不达标 agent | ✅ **诚实标 Beta 不藏**(per §7.2 Gate 4)|
+| 4 | 能力空洞填充(tech/patent/presales)| ✅ **拆独立 v1.2 spec**(本 capability 只治理不扩 agent)|
+| 5 | state 跨 plugin 共享 | ✅ **留 `shared` scope 扩展点,不本期实现** |
 
-评审通过 → invoke `superpowers:writing-plans` 出 acp.1 实施 plan。
+评审通过 → acp.1 实施(wire A1 孤岛进生产 chat/embed 路径 + output token cap + CoT budget)。
