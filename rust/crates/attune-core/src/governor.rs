@@ -22,7 +22,7 @@ use crate::cache::{cache_key, CacheBackend, CacheScope, CachedValue};
 use crate::error::Result;
 use crate::llm::{ChatMessage, LlmCallOptions, LlmProvider};
 use crate::usage::{
-    CacheOutcome, CallOutcome, TokenUsage, UsageAggregator, UsageEvent, UsageKind,
+    CacheOutcome, CallOutcome, ErrorKind, TokenUsage, UsageAggregator, UsageEvent, UsageKind,
 };
 
 /// Build the ACP-4 LLM cache key. Per spec §11 R1 (stale-cache mitigation) the
@@ -164,8 +164,28 @@ pub fn governed_chat(
         }
     }
 
-    // ② Miss → upstream call with cap + CoT budget.
-    let (text, usage) = provider.chat_with_history_opts(messages, opts)?;
+    // ② Miss → upstream call with cap + CoT budget. On failure (ACP-3 / spec §3
+    // "产出 outcome → ACP-3 telemetry") record a classified Fail event BEFORE
+    // propagating the error, so the agent×model failure-rate roll-up sees it.
+    let (text, usage) = match provider.chat_with_history_opts(messages, opts) {
+        Ok(ok) => ok,
+        Err(e) => {
+            let latency = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+            let failed_usage = TokenUsage::empty(&provider_tag(provider), &model);
+            record_usage_event(
+                usage_agg,
+                UsageKind::LlmChat,
+                &failed_usage,
+                CacheOutcome::Miss,
+                CallOutcome::Fail {
+                    error_kind: classify_llm_error(&e),
+                },
+                latency,
+                agent_id,
+            );
+            return Err(e);
+        }
+    };
     let latency = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
 
     // ③ Cache store + usage record (both graceful / non-blocking).
@@ -193,6 +213,34 @@ pub fn governed_chat(
         usage,
         cache: CacheOutcome::Miss,
     })
+}
+
+/// Classify an LLM-call error into a telemetry [`ErrorKind`] (ACP-3 §5.2). The
+/// provider surface returns a single `VaultError`, so we inspect the variant +
+/// message: timeout / rate-limit / quota / network keywords route to the precise
+/// bucket; everything else falls back to `Other`. JSON/parse failures surface as
+/// `VaultError::Json` (decode) → `Parse`.
+fn classify_llm_error(err: &crate::error::VaultError) -> ErrorKind {
+    use crate::error::VaultError;
+    match err {
+        VaultError::Json(_) => ErrorKind::Parse,
+        VaultError::LlmUnavailable(msg) | VaultError::Classification(msg) => {
+            let m = msg.to_ascii_lowercase();
+            if m.contains("timeout") || m.contains("timed out") {
+                ErrorKind::Timeout
+            } else if m.contains("rate limit") || m.contains("rate-limit") || m.contains("quota") {
+                ErrorKind::Quota
+            } else if m.contains("parse") || m.contains("json") || m.contains("schema") {
+                ErrorKind::Parse
+            } else if m.contains("network") || m.contains("connect") || m.contains("dns") {
+                ErrorKind::Network
+            } else {
+                ErrorKind::Other
+            }
+        }
+        VaultError::Io(_) => ErrorKind::Network,
+        _ => ErrorKind::Other,
+    }
 }
 
 /// The provider's wire tag for telemetry. We do not have a `provider()` getter

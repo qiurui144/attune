@@ -293,6 +293,138 @@ fn cache_hit_records_hit_outcome() {
     );
 }
 
+// ── ACP-3 Task 3: failure outcome wired to telemetry ───────────────────────
+
+/// A provider that always fails upstream — to prove the governor RECORDS the
+/// failure (classified) before propagating the error, so the agent×model
+/// failure-rate roll-up can see it.
+struct FailingProvider {
+    err: crate::error::VaultError,
+    model: String,
+}
+impl FailingProvider {
+    fn new(err: crate::error::VaultError) -> Self {
+        Self { err: err_clone(&err), model: "qwen2.5:3b".to_string() }
+    }
+}
+fn err_clone(e: &crate::error::VaultError) -> crate::error::VaultError {
+    // VaultError is not Clone; reproduce the LlmUnavailable string we use.
+    match e {
+        crate::error::VaultError::LlmUnavailable(s) => {
+            crate::error::VaultError::LlmUnavailable(s.clone())
+        }
+        _ => crate::error::VaultError::LlmUnavailable("upstream failure".into()),
+    }
+}
+impl LlmProvider for FailingProvider {
+    fn chat(&self, _system: &str, _user: &str) -> crate::error::Result<(String, TokenUsage)> {
+        Err(err_clone(&self.err))
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+    fn is_local(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn upstream_failure_records_fail_outcome_to_telemetry() {
+    use crate::agent_telemetry::AgentOutcome;
+    use crate::store::Store;
+    use crate::usage::UsageAggregator;
+    use std::sync::Mutex;
+
+    let provider = FailingProvider::new(crate::error::VaultError::LlmUnavailable(
+        "rate limit exceeded".into(),
+    ));
+    let store = Arc::new(Mutex::new(Store::open_memory().expect("memory store")));
+    let agg = UsageAggregator::new(store.clone(), 50, 1000);
+
+    // The governed call MUST still return Err (we do not swallow the failure)...
+    let res = governed_chat(
+        &provider,
+        &msgs("q-fail"),
+        &LlmCallOptions::default(),
+        None,
+        Some(&agg),
+        Some("defamation_extractor"),
+        None,
+    );
+    assert!(res.is_err(), "a failing upstream must propagate Err");
+
+    // ...AND it must have recorded a failure usage event for the agent×model.
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    rt.block_on(agg.flush_now());
+
+    let health = {
+        let s = store.lock().unwrap();
+        s.agent_model_health(0, i64::MAX).expect("health roll-up")
+    };
+    assert_eq!(health.len(), 1, "exactly one (agent×model) row");
+    let h = &health[0];
+    assert_eq!(h.agent_id, "defamation_extractor");
+    assert_eq!(h.model, "qwen2.5:3b");
+    assert_eq!(h.total_calls, 1);
+    assert_eq!(h.failures, 1, "the failed call must count as a failure");
+    assert_eq!(h.failure_rate, 1.0);
+
+    // The persisted outcome classifies as a rate-limit telemetry bucket.
+    let s = store.lock().unwrap();
+    let conn = s.raw_connection_for_test();
+    let (outcome, error_kind): (String, Option<String>) = conn
+        .query_row(
+            "SELECT outcome, error_kind FROM usage_events WHERE agent_id = 'defamation_extractor'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(outcome, "fail");
+    assert_eq!(error_kind.as_deref(), Some("quota"), "rate-limit → quota error_kind");
+    // And reading it back as telemetry classifies as RateLimit.
+    drop(s);
+    assert_eq!(
+        AgentOutcome::from_call_outcome(crate::usage::CallOutcome::Fail {
+            error_kind: crate::usage::ErrorKind::Quota
+        }),
+        AgentOutcome::RateLimit
+    );
+}
+
+#[test]
+fn upstream_success_records_ok_not_failure() {
+    // Regression guard: a successful call must NOT be counted as a failure.
+    use crate::store::Store;
+    use crate::usage::UsageAggregator;
+    use std::sync::Mutex;
+
+    let provider = CountingProvider::new("answer");
+    let store = Arc::new(Mutex::new(Store::open_memory().expect("memory store")));
+    let agg = UsageAggregator::new(store.clone(), 50, 1000);
+    let _ = governed_chat(
+        &provider,
+        &msgs("q-ok"),
+        &LlmCallOptions::default(),
+        None,
+        Some(&agg),
+        Some("fact_extractor"),
+        None,
+    )
+    .unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    rt.block_on(agg.flush_now());
+    let health = {
+        let s = store.lock().unwrap();
+        s.agent_model_health(0, i64::MAX).expect("health")
+    };
+    assert_eq!(health.len(), 1);
+    assert_eq!(health[0].failures, 0, "success must not count as failure");
+    assert_eq!(health[0].total_calls, 1);
+}
+
 #[test]
 fn hit_serves_stored_text_not_provider_reply() {
     // After a miss caches "first", a provider whose reply later changes must
