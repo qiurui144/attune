@@ -1,5 +1,45 @@
 # attune 版本记录
 
+## v1.1.0-acp (develop 累积, pre-release) — Agent Control Plane
+
+> ACP 治理 capability 跨多 minor (acp.1 → acp.6), 在 develop 累积, v1.1.0 GA 时统一打 tag.
+> spec: `docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md`.
+
+### Highlights
+
+**acp.2 — 统一质量门编排 + OSS gate + real-LLM 入 nightly**
+- `rust/agent_quality_manifest.yaml` — workspace 级质量门 SSOT, 上提 law-pro `thresholds.yaml`
+  模式. 录全 11 gate (8 attune-side machine-checkable + 3 attune-pro external),
+  metric_kind 闭合白名单 (11 词汇) 统一散落词汇.
+- `attune_core::agent_quality` + `tests/agent_gate_orchestrator.rs` — 机器可检 ratchet
+  (只升不降, 降阈值 fail PR), roll-up dashboard (total == sum-of-parts), `#[ignore]` 突增守卫
+  (实扫 tests/, baseline 35 + 2 预算). 接入 `ci.yml` 作 PR 硬门.
+- `attune agent gate` CLI — 跑 orchestrator + 输出 roll-up pass-rate dashboard (spec §5.5).
+- `.github/workflows/nightly-real-llm.yml` — 把孤儿 `oss_agent_real_llm_gate.rs` 接入
+  nightly (cron + dispatch), 防 mock-0.99/real-0.09 式回归对 OSS memory/skill agent 复发.
+
+**acp.1 — ACP-4 Cost Governor (前序, 已 land 982ebc0)**
+- A1 cache/usage frozen island 接进 chat/embed 真路径 + output token cap + CoT budget.
+
+### Breaking
+- 无. ACP 是控制面叠加, 不重写任何 agent 的 correctness / prompt / schema.
+
+### Migration
+- 无. 新增 manifest + 测试 + workflow + CLI 子命令, 老行为不变.
+
+### Known Limitations
+- **OSS real-LLM gate 仍 `#[ignore]`** — 需 self-hosted Ollama runner (per
+  `docs/nightly-real-llm-setup.md` 模式) 才真跑; 未注册 runner 时 nightly 在
+  ubuntu-latest 上 graceful skip, 不 fail.
+- **R4 诚实 baseline**: OSS 5 个 agent gate (chat_reliability / document_classifier /
+  linker / memory_consolidation / self_evolving_skill) **早已存在**且为 deterministic
+  @1.00 (audit 实证), 本期如实记录, 无不达标项, 无需标 Beta. (审计原 "OSS 无 gate" 表述
+  与实际不符, 已据 audit 纠正.)
+- **ratchet baseline 在文件内** (law-pro 同模式): 单 PR 同时下调 threshold + ratchet_baseline
+  仍靠 code-review 拦, 非 git-diff 强制. 后续可加 git-history 比对.
+- **self_evolving_skill legacy-overlap**: 与历史 skill_evolution learning loop 共用模块,
+  registry dedupe 推 v1.2 (spec R6 / 决策 #4: 本 capability 只治理不重构 agent).
+
 ## v1.0.7 (2026-05-28) — Privacy regression hotfix
 
 ### Highlights
