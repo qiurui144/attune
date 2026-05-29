@@ -405,6 +405,44 @@ fn skill_evolution_source_silent_when_no_signals() {
     );
 }
 
+// ── Task 4: `attune agent tune --dry-run` render ──────────────────────────────
+
+#[test]
+fn render_tune_dry_run_shows_recommendation_and_not_applied() {
+    let reg = test_registry();
+    // auto_escalate OFF (default posture) → escalation is a recommendation.
+    let ctrl = FeedbackController::new(FeedbackConfig {
+        auto_escalate: false,
+        min_samples: 5,
+        consecutive_periods: 1,
+    });
+    let rows = vec![health("judge", "qwen3b", 20, 8)];
+    let decisions = ctrl.decide(&reg, &rows);
+    let out = render_tune(&decisions, /* auto_escalate = */ false);
+    assert!(out.contains("judge"));
+    assert!(out.contains("escalate") || out.contains("qwen3b → flash"));
+    // dry-run banner must make clear nothing was applied (R2)
+    assert!(out.to_lowercase().contains("dry-run") || out.contains("not applied"));
+}
+
+#[test]
+fn render_tune_empty_is_friendly() {
+    let out = render_tune(&[], false);
+    assert!(out.contains("no") || out.contains("No"), "friendly empty line");
+}
+
+#[test]
+fn render_tune_flags_red_line_protected_rows() {
+    let reg = test_registry();
+    let ctrl = FeedbackController::new(FeedbackConfig::aggressive_for_test());
+    let rows = vec![health("calc", "qwen3b", 50, 50)];
+    let decisions = ctrl.decide(&reg, &rows);
+    let out = render_tune(&decisions, true);
+    // deterministic agent shown as protected, never tuned
+    assert!(out.contains("calc"));
+    assert!(out.to_lowercase().contains("protected") || out.contains("NoOp"));
+}
+
 // silence unused-import warnings for types only referenced in some builds
 #[allow(unused)]
 fn _type_anchors(_: AgentSpec, _: Tier, _: Kind, _: CostClass, _: Handoff) {}

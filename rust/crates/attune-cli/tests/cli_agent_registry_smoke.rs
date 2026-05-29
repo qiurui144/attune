@@ -51,3 +51,18 @@ fn agent_registry_missing_file_exits_nonzero() {
         .failure()
         .stderr(predicate::str::contains("cannot read registry"));
 }
+
+// ── ACP-3 Task 4: `attune agent tune` is wired and dry-run by default ──────────
+
+#[test]
+fn agent_tune_help_documents_dry_run_default() {
+    // `--help` needs neither a vault nor the registry; it proves the subcommand
+    // is wired and that dry-run is the safe default (R2).
+    attune_cmd()
+        .args(["agent", "tune", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FeedbackController"))
+        .stdout(predicate::str::contains("dry-run"))
+        .stdout(predicate::str::contains("auto_escalate"));
+}

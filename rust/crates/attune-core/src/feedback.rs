@@ -434,5 +434,64 @@ impl FeedbackSource for SkillEvolutionFeedback<'_> {
     }
 }
 
+/// Render the `attune agent tune --dry-run` view (§5.5 / Task 4): for each
+/// telemetry row, the [`TuningAction`] the controller chose and whether it was
+/// applied. `auto_escalate` reflects the effective config so the banner can warn
+/// the operator that escalations are recommendations only when it is OFF (R2).
+pub fn render_tune(decisions: &[TuningDecision], auto_escalate: bool) -> String {
+    let mut out = String::new();
+    out.push_str("Agent Tuning Plan (ACP-3 FeedbackController, dry-run)\n");
+    out.push_str(&"=".repeat(60));
+    out.push('\n');
+    if !auto_escalate {
+        out.push_str(
+            "  auto-escalate is OFF (default) — escalations below are recommendations\n  \
+             only and were NOT applied. Set `acp.auto_escalate = true` to enable (R2).\n\n",
+        );
+    }
+    let actionable: Vec<&TuningDecision> = decisions
+        .iter()
+        .filter(|d| !matches!(d.action, TuningAction::NoOp) || d.red_line_protected)
+        .collect();
+    if actionable.is_empty() {
+        out.push_str("  No tuning actions — all agents healthy (no rows above the 30% alert threshold).\n");
+        return out;
+    }
+    for d in &actionable {
+        let (verb, detail) = match &d.action {
+            TuningAction::EscalateModelTier { from, to } => {
+                ("escalate", format!("{from} → {to}"))
+            }
+            TuningAction::InjectFewShot { examples, .. } => {
+                ("inject-few-shot", format!("+{examples} examples"))
+            }
+            TuningAction::DisableWithAlert { reason, .. } => {
+                ("disable+alert", reason.clone())
+            }
+            TuningAction::NoOp => {
+                if d.red_line_protected {
+                    ("noop", "red-line protected (deterministic) — never tuned".to_string())
+                } else {
+                    ("noop", String::new())
+                }
+            }
+        };
+        let status = if d.needs_human_review() {
+            "[needs human review]"
+        } else if d.applied {
+            "[applied]"
+        } else if d.is_recommendation() {
+            "[recommendation — not applied]"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "  {:<24} {:<14} {:<16} {} {}\n",
+            d.agent_id, d.model, verb, detail, status
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests;

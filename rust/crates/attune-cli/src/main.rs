@@ -299,6 +299,29 @@ enum AgentAction {
         #[arg(long)]
         to_ms: Option<i64>,
     },
+    /// ACP-3: print the FeedbackController tuning plan — for each (agent × model)
+    /// failure rate, which TuningAction it triggers (escalate model tier /
+    /// inject few-shot / soft-disable). Requires an unlocked vault (telemetry
+    /// lives in usage_events) + the registry. Per spec §5.2 + Task 4.
+    ///
+    /// `--dry-run` (the default and only supported mode today) shows the plan
+    /// without applying anything. Auto-applying escalations is OFF by default
+    /// (R2 cost guard) and is enabled per-deployment via `acp.auto_escalate`.
+    Tune {
+        /// Show the plan without applying (default true). Auto-apply is gated by
+        /// `acp.auto_escalate` and is not yet a CLI flag (R2 — opt-in only).
+        #[arg(long, default_value_t = true)]
+        dry_run: bool,
+        /// Window start (Unix epoch ms; default 0 = all history).
+        #[arg(long, default_value_t = 0)]
+        from_ms: i64,
+        /// Window end (Unix epoch ms; default = now).
+        #[arg(long)]
+        to_ms: Option<i64>,
+        /// Path to the registry (default: auto-locate `agents.registry.toml`).
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+    },
 }
 
 /// CLI exit code protocol (D5.7).
@@ -393,7 +416,8 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             AgentAction::Registry { registry } => {
                 return run_agent_registry(registry.as_deref())
             }
-            AgentAction::Health { .. } => {} // handled after vault open
+            // ACP-3 health + tune need the unlocked vault → handled after open.
+            AgentAction::Health { .. } | AgentAction::Tune { .. } => {}
         },
         // VaultImport must run BEFORE Vault::open_default() — open() auto-creates vault.db
         // via Connection::open(), which would make the "already exists" guard always trigger.
@@ -669,6 +693,14 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         Commands::Agent { action } => match action {
             AgentAction::Health { from_ms, to_ms } => {
                 return run_agent_health(&vault, from_ms, to_ms);
+            }
+            AgentAction::Tune {
+                dry_run,
+                from_ms,
+                to_ms,
+                registry,
+            } => {
+                return run_agent_tune(&vault, dry_run, from_ms, to_ms, registry.as_deref());
             }
             AgentAction::Gate { .. } | AgentAction::Registry { .. } => {
                 unreachable!("agent gate/registry handled before vault open")
@@ -1415,6 +1447,61 @@ fn run_agent_health(
     let to = to_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
     let rows = vault.store().agent_model_health(from_ms, to)?;
     print!("{}", attune_core::agent_telemetry::render_health(&rows));
+    Ok(())
+}
+
+/// ACP-3 Task 4: `attune agent tune [--dry-run]` — run the FeedbackController
+/// over the current per-(agent × model) telemetry + the registry and print the
+/// tuning plan (which TuningAction each breaching row triggers).
+///
+/// Auto-applying escalations is gated by `acp.auto_escalate` (default OFF, R2);
+/// it is not yet wired as a CLI flag, so this command is dry-run only and any
+/// `--dry-run=false` request is refused with a clear message (never silently
+/// pushes traffic onto pricier tiers).
+fn run_agent_tune(
+    vault: &attune_core::vault::Vault,
+    dry_run: bool,
+    from_ms: i64,
+    to_ms: Option<i64>,
+    registry: Option<&std::path::Path>,
+) -> attune_core::error::Result<()> {
+    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+        return Err(attune_core::error::VaultError::Locked);
+    }
+    if !dry_run {
+        // R2: auto-apply is opt-in per-deployment via `acp.auto_escalate`, not a
+        // CLI flag. Refuse rather than silently escalate spend.
+        return Err(attune_core::error::VaultError::InvalidInput(
+            "`attune agent tune` is dry-run only: auto-applying escalations is gated by \
+             `acp.auto_escalate` (default OFF, R2 cost guard). Review the plan, then enable \
+             auto-escalate in config to apply."
+                .to_string(),
+        ));
+    }
+    let reg_path = match registry {
+        Some(p) => p.to_path_buf(),
+        None => locate_named("agents.registry.toml").ok_or_else(|| {
+            attune_core::error::VaultError::NotFound(
+                "agents.registry.toml not found — pass --registry <path> or run from the \
+                 workspace"
+                    .to_string(),
+            )
+        })?,
+    };
+    let reg = attune_core::agents::registry::AgentRegistry::from_path(&reg_path)
+        .map_err(attune_core::error::VaultError::InvalidInput)?;
+    let to = to_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    let rows = vault.store().agent_model_health(from_ms, to)?;
+
+    // Default safe posture: auto_escalate OFF (recommendations only, R2).
+    let cfg = attune_core::feedback::FeedbackConfig::default();
+    let auto_escalate = cfg.auto_escalate;
+    let controller = attune_core::feedback::FeedbackController::new(cfg);
+    let decisions = controller.decide(&reg, &rows);
+    print!(
+        "{}",
+        attune_core::feedback::render_tune(&decisions, auto_escalate)
+    );
     Ok(())
 }
 
