@@ -158,7 +158,7 @@
 
 - [ ] **关闭 tiered assembler**：Settings 把 `memory.tiered_assembler_enabled` 设 false → 所有 query `context_tier` 恒为 `L0`，行为与旧版一致
 
-## Memory Moat v0.7 — 文档编辑嵌入 + 自学习闭环（per `docs/specs/memory-moat-v07.md`）
+## Memory Moat v0.7 — 文档编辑嵌入 + 自学习闭环（per `docs/superpowers/specs/2026-05-19-memory-moat-v07.md`）
 
 每次 v0.7 dot release 必须全过。
 
@@ -236,4 +236,4 @@ Email IMAP 采集源的自动化测试（解析层 + mock fetcher）覆盖于
 - 任何一项失败 → 提 issue + 附 `attune --diag` 输出 + 本机 CPU/核数信息
 - "演示场景"是核心，必须每次发版前手动验
 - A1 的 LLM 速率限制依赖 H1 的 governor，验证 A1 前先确认 H1 已工作
-- Memory Moat v0.7 验收必须全过才能打 GA tag（per `docs/specs/memory-moat-v07.md` §7）
+- Memory Moat v0.7 验收必须全过才能打 GA tag（per `docs/superpowers/specs/2026-05-19-memory-moat-v07.md` §7）

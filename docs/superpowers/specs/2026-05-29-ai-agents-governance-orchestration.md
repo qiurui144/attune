@@ -1,6 +1,7 @@
 # AI Agents 治理与编排架构 — Agent Control Plane (ACP)
 
-> Status: **DESIGN PROPOSAL** — 评审前不动代码(per global CLAUDE.md §3.1)。
+> Status: **已实施并 GA**(v1.1.0, 2026-05-30;acp.1-7 全链 + chat wiring 已 merge main `e6b9b47`)。本 spec 为 ACP 设计 SSOT 保留,后续 ACP 演进以此为权威依据。
+> (历史:2026-05-29 起草时为 DESIGN PROPOSAL — 评审前不动代码,per global CLAUDE.md §3.1。)
 > Scope: attune-core(OSS base)+ attune-pro(law/tech/patent/presales)全 22 agent 的治理控制面。
 > 触发:用户 2026-05-29 — "从 AI agents 治理以及协同机制等工程维度考虑编排设计与开发"。
 > 配套(must-not-break):`2026-05-19-agent-self-learning-design.md`(correctness vs preference 分面)、`attune-pro/docs/agent-reliability-framework.md`(correctness spine)。

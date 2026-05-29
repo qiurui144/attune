@@ -315,7 +315,6 @@ round multi-run:fact_extractor 1.0000 / divorce_extractor 0.9894 / defamation_ex
 
 > Patch release。**0 breaking change**，所有 v1.0.0 用户建议升级。
 > 配对 `desktop-v1.0.1` + attune-pro `v1.0.1` + cloud `cloud-v2.2.1`。
-> 详细 release notes：[`docs/release-notes-v1.0.0-drafts/attune-v1.0.1.md`](docs/release-notes-v1.0.0-drafts/attune-v1.0.1.md)
 
 **Bug Fixes**：CLI vault-import 误报修（#61）· OCR gender/amount 字段修（#62）· parse_llm_terms drift 修（#77）· LLM 上游错误码透传（429/503/4xx）· Docker builder glibc 不匹配修 · **OCR 超长页 silent 0 chars fix**（PP-OCRv5 mobile 在 height>8000px 时 silent 返 0 chars 不报错。Fix: `extract_text_from_image` 加 dimensions guard + auto-tile by height threshold + concat。Repro test: `tests/ocr_long_page_audit.rs`,reliability audit 2026-05-24 R8 验证: full 1632×21050px=0 chars / 4 tiles=8685 chars。详见 spec `2026-05-24-full-stack-model-reliability-audit.md` §7）
 
@@ -720,7 +719,7 @@ API：`Store::record_signal_event(kind, ref_id, query_opt)` + `count_unprocessed
 
 #### Phase C — spec only（v0.7 后续 sprint）
 
-`docs/specs/memory-moat-v07.md` — RICE 排序 5 项：C1 文档版本化记忆 / C2 编辑触发自动重标注 / C3 失败信号反推 project_recommender / C4 知识衰减曲线 / C5 embed_model_version 迁移工具链
+`docs/superpowers/specs/2026-05-19-memory-moat-v07.md` — RICE 排序 5 项：C1 文档版本化记忆 / C2 编辑触发自动重标注 / C3 失败信号反推 project_recommender / C4 知识衰减曲线 / C5 embed_model_version 迁移工具链
 
 #### v0.7 sprint 1（5 agents 并行）— commit 71d82ee
 
@@ -731,7 +730,7 @@ API：`Store::record_signal_event(kind, ref_id, query_opt)` + `count_unprocessed
 #### 30 轮 sprint + R1-R9 滚动 review（静态审查 + 单元测试）
 
 W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
-`docs/specs/memory-moat-v07.md` §6.5 / §6.6。
+`docs/superpowers/specs/2026-05-19-memory-moat-v07.md` §6.5 / §6.6。
 
 #### Round A-H 真实场景 E2E（编译真实 server，全程 HTTP）
 
