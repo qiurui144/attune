@@ -26,6 +26,7 @@ pub mod browse_signals;  // pub: BrowseSignalInput / BrowseSignalRow 给 attune-
 pub mod auto_bookmarks;  // W4 G2: high engagement auto bookmark candidates (G3 staging)
 pub mod audit;            // v0.6 Phase A.5.3: 出网审计日志
 pub mod usage;            // Plan A1 Task D: usage_events CRUD + UsageSummary
+pub mod agent_telemetry;  // ACP-3 §4.5-F: per-(agent×model) failure-rate roll-up over usage_events
 pub mod cache;            // Plan A1 Task D: llm_cache / embed_cache CRUD
 
 pub use types::*;
