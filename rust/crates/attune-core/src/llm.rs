@@ -68,6 +68,82 @@ pub struct LlmCallOptions {
     /// Top-p nucleus sampling. `Some(1.0)` paired with temperature 0 forces
     /// greedy-style sampling.
     pub top_p: Option<f32>,
+    /// ACP-4 Cost Governor — output token ceiling. Maps to Ollama
+    /// `options.num_predict` and OpenAI `max_tokens`. `None` = provider default
+    /// (unchanged legacy behavior). Spec
+    /// docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §5.3.
+    pub max_tokens: Option<u32>,
+    /// ACP-4 Cost Governor — chain-of-thought / reasoning budget. When set and
+    /// `max_tokens` is unset, it becomes the effective output ceiling so CoT
+    /// preamble cannot balloon `tokens_out`. Also appends a terse-output system
+    /// hint (see [`apply_cot_hint`]) to suppress verbose reasoning. Never alters
+    /// existing messages (so a JSON-emitting agent prompt stays intact).
+    pub reasoning_budget: Option<u32>,
+}
+
+impl LlmCallOptions {
+    /// The authoritative output token ceiling for this call: explicit
+    /// `max_tokens` wins; otherwise `reasoning_budget` acts as the ceiling;
+    /// `None` means "no cap" (provider default).
+    pub fn effective_output_cap(&self) -> Option<u32> {
+        self.max_tokens.or(self.reasoning_budget)
+    }
+}
+
+/// Build the Ollama `options` object from call options. Pure + testable.
+/// `num_predict` is set from the effective output cap (max_tokens or, failing
+/// that, reasoning_budget) so a configured ceiling reaches llama.cpp's sampler.
+pub(crate) fn ollama_options_json(opts: &LlmCallOptions) -> serde_json::Map<String, serde_json::Value> {
+    let mut options_obj = serde_json::Map::new();
+    if let Some(s) = opts.seed {
+        options_obj.insert("seed".into(), serde_json::json!(s));
+    }
+    if let Some(t) = opts.temperature {
+        options_obj.insert("temperature".into(), serde_json::json!(t));
+    }
+    if let Some(p) = opts.top_p {
+        options_obj.insert("top_p".into(), serde_json::json!(p));
+    }
+    if let Some(cap) = opts.effective_output_cap() {
+        options_obj.insert("num_predict".into(), serde_json::json!(cap));
+    }
+    options_obj
+}
+
+/// Apply call options to an OpenAI-compatible request body in place. Pure +
+/// testable. Sets `seed` / `temperature` / `top_p` (determinism) and
+/// `max_tokens` (the ACP-4 output cap).
+pub(crate) fn apply_openai_options(body: &mut serde_json::Value, opts: &LlmCallOptions) {
+    if let Some(s) = opts.seed {
+        body["seed"] = serde_json::json!(s);
+    }
+    if let Some(t) = opts.temperature {
+        body["temperature"] = serde_json::json!(t);
+    }
+    if let Some(p) = opts.top_p {
+        body["top_p"] = serde_json::json!(p);
+    }
+    if let Some(cap) = opts.effective_output_cap() {
+        body["max_tokens"] = serde_json::json!(cap);
+    }
+}
+
+/// When `reasoning_budget` is set, append a single terse-output system hint so
+/// the model suppresses verbose chain-of-thought. Returns the (possibly
+/// extended) message list. Existing messages are **never mutated** — R2
+/// adversarial guard: a JSON-only agent prompt must stay byte-for-byte intact,
+/// so the hint is additive and lives in its own system message at the tail.
+pub(crate) fn apply_cot_hint(messages: &[ChatMessage], opts: &LlmCallOptions) -> Vec<ChatMessage> {
+    if opts.reasoning_budget.is_none() {
+        return messages.to_vec();
+    }
+    let mut out = messages.to_vec();
+    out.push(ChatMessage::system(
+        "请直接给出最终答案，简洁作答，不要输出推理过程 / 思维链。\
+         Answer directly and concisely; do not emit chain-of-thought reasoning. \
+         If a specific output format (e.g. JSON) was requested above, follow it exactly.",
+    ));
+    out
 }
 
 /// Describes what level of determinism a provider can honor.
@@ -163,6 +239,30 @@ pub trait LlmProvider: Send + Sync {
             .map(|m| m.content.as_str())
             .unwrap_or("");
         self.chat(system, user)
+    }
+
+    /// ACP-4 Cost Governor entry point — multi-turn chat that honors the output
+    /// token cap + CoT budget in [`LlmCallOptions`] **and** returns
+    /// [`TokenUsage`] (so the governor can record it).
+    ///
+    /// Default impl applies the CoT suppression hint (per [`apply_cot_hint`])
+    /// then forwards to [`chat_with_history`]. The cap (`max_tokens` /
+    /// `num_predict`) only takes effect on providers that override this method
+    /// (Ollama, OpenAI) — providers without a native cap degrade gracefully to
+    /// the CoT-hint-only path, which is still a meaningful reduction.
+    ///
+    /// With default (all-`None`) options this is byte-identical to
+    /// [`chat_with_history`] (per spec §10 backward-compat).
+    ///
+    /// [`TokenUsage`]: crate::usage::TokenUsage
+    /// [`chat_with_history`]: LlmProvider::chat_with_history
+    fn chat_with_history_opts(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<(String, crate::usage::TokenUsage)> {
+        let hinted = apply_cot_hint(messages, opts);
+        self.chat_with_history(&hinted)
     }
 
     /// 多模态 chat (图片 + 文件附件).
@@ -545,6 +645,64 @@ impl LlmProvider for OllamaLlmProvider {
         })
     }
 
+    /// ACP-4 governed entry — honors `num_predict` (output cap / CoT budget) via
+    /// `options` and the CoT suppression hint, while returning real `TokenUsage`
+    /// (Ollama reports `prompt_eval_count` / `eval_count`).
+    fn chat_with_history_opts(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<(String, crate::usage::TokenUsage)> {
+        let hinted = apply_cot_hint(messages, opts);
+        let url = format!("{}/api/chat", self.base_url);
+        let ollama_messages: Vec<serde_json::Value> = hinted
+            .iter()
+            .map(|m| serde_json::json!({"role": &m.role, "content": &m.content}))
+            .collect();
+        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
+            .unwrap_or_else(|_| "1h".to_string());
+        let options_obj = ollama_options_json(opts);
+        let body = serde_json::json!({
+            "model": &self.model,
+            "messages": ollama_messages,
+            "stream": false,
+            "keep_alive": keep_alive,
+            "options": options_obj,
+        });
+        let client = self.client.clone();
+        let body_bytes = serde_json::to_vec(&body)?;
+        let model = self.model.clone();
+
+        llm_block_on(async move {
+            let resp = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(|e| VaultError::LlmUnavailable(format!("chat: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!(
+                    "ollama HTTP {status}: {body}"
+                )));
+            }
+            let parsed: OllamaChatResponse = resp
+                .json()
+                .await
+                .map_err(|e| VaultError::Classification(format!("parse: {e}")))?;
+            let usage = crate::usage::TokenUsage {
+                tokens_in: parsed.prompt_eval_count,
+                tokens_out: parsed.eval_count,
+                cached_in: 0,
+                model,
+                provider: "ollama".to_string(),
+            };
+            Ok((parsed.message.content, usage))
+        })
+    }
+
     /// T1 (v1.0.6 KB-bench) — eval-mode entry: forwards `LlmCallOptions` into
     /// the Ollama `options` body field. Ollama documents `seed` / `temperature`
     /// / `top_p` under `options` per https://github.com/ollama/ollama/blob/main/docs/modelfile.md.
@@ -560,16 +718,7 @@ impl LlmProvider for OllamaLlmProvider {
             .collect();
         let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
             .unwrap_or_else(|_| "1h".to_string());
-        let mut options_obj = serde_json::Map::new();
-        if let Some(s) = opts.seed {
-            options_obj.insert("seed".into(), serde_json::json!(s));
-        }
-        if let Some(t) = opts.temperature {
-            options_obj.insert("temperature".into(), serde_json::json!(t));
-        }
-        if let Some(p) = opts.top_p {
-            options_obj.insert("top_p".into(), serde_json::json!(p));
-        }
+        let options_obj = ollama_options_json(opts);
         let body = serde_json::json!({
             "model": &self.model,
             "messages": ollama_messages,
@@ -935,6 +1084,76 @@ impl LlmProvider for OpenAiLlmProvider {
         self.chat_sync_impl(messages)
     }
 
+    /// ACP-4 governed entry — honors `max_tokens` (output cap / CoT budget) +
+    /// CoT suppression hint, returning real `TokenUsage` from the OpenAI
+    /// `usage` block.
+    ///
+    /// When no output cap is set we defer to `chat_sync_impl` so the model
+    /// auto-detect retry loop + usage parsing are preserved unchanged
+    /// (backward-compat). When a cap is set we issue a direct request with a
+    /// concrete model so `max_tokens` semantics are unambiguous; empty / "auto"
+    /// model also defers to the resolver path.
+    fn chat_with_history_opts(
+        &self,
+        messages: &[ChatMessage],
+        opts: &LlmCallOptions,
+    ) -> Result<(String, crate::usage::TokenUsage)> {
+        let hinted = apply_cot_hint(messages, opts);
+        let trimmed = self.model.trim();
+        if opts.effective_output_cap().is_none()
+            || trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("auto")
+        {
+            // No cap (or no concrete model) → preserve the legacy resolver path
+            // (auto-detect retry + usage parsing). CoT hint still applied.
+            return self.chat_sync_impl(&hinted);
+        }
+
+        let url = format!("{}/chat/completions", self.endpoint);
+        let mut body = serde_json::json!({
+            "model": &self.model,
+            "messages": hinted,
+            "stream": false,
+        });
+        apply_openai_options(&mut body, opts);
+        let api_key = self.api_key.clone();
+        let client = self.client.clone();
+        let body_bytes = serde_json::to_vec(&body)?;
+        let model = self.model.clone();
+
+        llm_block_on(async move {
+            let resp = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .body(body_bytes)
+                .send()
+                .await
+                .map_err(|e| VaultError::LlmUnavailable(format!("openai send: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(VaultError::LlmUnavailable(format!(
+                    "openai HTTP {status}: {body}"
+                )));
+            }
+            let parsed: OpenAiResponse = resp
+                .json()
+                .await
+                .map_err(|e| VaultError::Classification(format!("openai json: {e}")))?;
+            let usage = parsed
+                .usage
+                .unwrap_or_default()
+                .into_token_usage(&model, "openai_compat");
+            parsed
+                .choices
+                .into_iter()
+                .next()
+                .map(|c| (c.message.content, usage))
+                .ok_or_else(|| VaultError::Classification("empty choices".into()))
+        })
+    }
+
     /// T1 (v1.0.6 KB-bench) — eval-mode entry: forwards `LlmCallOptions` as
     /// top-level OpenAI body fields (`seed`, `temperature`, `top_p`) per
     /// https://platform.openai.com/docs/api-reference/chat/create.
@@ -964,15 +1183,7 @@ impl LlmProvider for OpenAiLlmProvider {
             "messages": messages,
             "stream": false,
         });
-        if let Some(s) = opts.seed {
-            body["seed"] = serde_json::json!(s);
-        }
-        if let Some(t) = opts.temperature {
-            body["temperature"] = serde_json::json!(t);
-        }
-        if let Some(p) = opts.top_p {
-            body["top_p"] = serde_json::json!(p);
-        }
+        apply_openai_options(&mut body, opts);
         let api_key = self.api_key.clone();
         let client = self.client.clone();
         let body_bytes = serde_json::to_vec(&body)?;
@@ -1402,6 +1613,147 @@ mod tests {
 
         let a = ChatMessage::assistant("reply");
         assert_eq!(a.role, "assistant");
+    }
+
+    // ── ACP-4 Cost Governor: output token cap + CoT budget ──────────────
+    // Spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §5.3.
+    // The cap/budget must reach the provider request body (not be silently dropped),
+    // and CoT budget must never corrupt JSON output (it only constrains length +
+    // adds a suppression hint, never alters message structure).
+
+    #[test]
+    fn ollama_options_json_includes_num_predict_when_max_tokens_set() {
+        let opts = LlmCallOptions {
+            max_tokens: Some(256),
+            ..Default::default()
+        };
+        let obj = ollama_options_json(&opts);
+        assert_eq!(
+            obj.get("num_predict").and_then(|v| v.as_i64()),
+            Some(256),
+            "max_tokens must map to Ollama options.num_predict"
+        );
+    }
+
+    #[test]
+    fn ollama_options_json_omits_num_predict_when_unset() {
+        let obj = ollama_options_json(&LlmCallOptions::default());
+        assert!(
+            obj.get("num_predict").is_none(),
+            "no cap → no num_predict (unchanged behavior, per §10 backward-compat)"
+        );
+    }
+
+    #[test]
+    fn cot_budget_caps_effective_output_when_max_tokens_unset() {
+        // reasoning_budget present but no explicit max_tokens → CoT budget becomes
+        // the effective output ceiling so chain-of-thought cannot balloon tokens_out.
+        let opts = LlmCallOptions {
+            max_tokens: None,
+            reasoning_budget: Some(128),
+            ..Default::default()
+        };
+        assert_eq!(
+            opts.effective_output_cap(),
+            Some(128),
+            "CoT budget must act as the output ceiling when no explicit cap"
+        );
+    }
+
+    #[test]
+    fn explicit_max_tokens_wins_over_cot_budget() {
+        let opts = LlmCallOptions {
+            max_tokens: Some(512),
+            reasoning_budget: Some(128),
+            ..Default::default()
+        };
+        assert_eq!(
+            opts.effective_output_cap(),
+            Some(512),
+            "explicit max_tokens is the authoritative cap"
+        );
+    }
+
+    #[test]
+    fn openai_apply_options_sets_max_tokens_in_body() {
+        let mut body = serde_json::json!({"model": "gpt-4o-mini", "messages": []});
+        let opts = LlmCallOptions {
+            max_tokens: Some(300),
+            ..Default::default()
+        };
+        apply_openai_options(&mut body, &opts);
+        assert_eq!(
+            body.get("max_tokens").and_then(|v| v.as_i64()),
+            Some(300),
+            "max_tokens must be set as a top-level OpenAI body field"
+        );
+    }
+
+    #[test]
+    fn cot_suppression_hint_is_appended_not_replacing_messages() {
+        // reasoning_budget present → a terse-output system hint is appended as an
+        // EXTRA system message; existing messages are never mutated (so a JSON-
+        // emitting agent prompt stays intact — R2 adversarial: cap must not break JSON).
+        let original = vec![
+            ChatMessage::system("Output ONLY valid JSON: {\"x\": 1}"),
+            ChatMessage::user("go"),
+        ];
+        let opts = LlmCallOptions {
+            reasoning_budget: Some(64),
+            ..Default::default()
+        };
+        let out = apply_cot_hint(&original, &opts);
+        assert_eq!(out.len(), original.len() + 1, "exactly one hint message added");
+        assert_eq!(out[0].content, original[0].content, "original system untouched");
+        assert!(
+            out.last().unwrap().role == "system",
+            "hint is a system message"
+        );
+        assert!(
+            out.last().unwrap().content.contains("简洁")
+                || out.last().unwrap().content.to_lowercase().contains("concise"),
+            "hint instructs concise / no chain-of-thought output"
+        );
+    }
+
+    #[test]
+    fn cot_hint_noop_when_budget_unset() {
+        let original = vec![ChatMessage::user("go")];
+        let out = apply_cot_hint(&original, &LlmCallOptions::default());
+        assert_eq!(out.len(), original.len(), "no budget → no hint (unchanged)");
+    }
+
+    #[test]
+    fn chat_with_history_opts_returns_usage_and_applies_cot_hint() {
+        // The governed entry point must (a) return TokenUsage (so ACP-4 can
+        // record it) and (b) append the CoT suppression hint when a reasoning
+        // budget is set. Default trait impl forwards to chat_with_history.
+        let mock = MockLlmProvider::new("test");
+        mock.push_response("answer");
+        let messages = vec![ChatMessage::user("question")];
+        let opts = LlmCallOptions {
+            reasoning_budget: Some(64),
+            ..Default::default()
+        };
+        let (resp, usage) = mock.chat_with_history_opts(&messages, &opts).unwrap();
+        assert_eq!(resp, "answer");
+        assert_eq!(usage.provider, "mock", "governed entry must return usage");
+        // The hint-appending behavior itself is verified directly by
+        // `cot_suppression_hint_is_appended_not_replacing_messages`; here we
+        // only confirm the governed entry returns (text, usage) without error.
+    }
+
+    #[test]
+    fn chat_with_history_opts_noop_options_matches_legacy() {
+        // Default options (all None) → behaves exactly like chat_with_history
+        // (per §10 backward-compat: cache miss / no governor knobs = current behavior).
+        let mock = MockLlmProvider::new("m");
+        mock.push_response("r1");
+        let messages = vec![ChatMessage::system("s"), ChatMessage::user("u")];
+        let (resp, _usage) = mock
+            .chat_with_history_opts(&messages, &LlmCallOptions::default())
+            .unwrap();
+        assert_eq!(resp, "r1");
     }
 
     #[test]

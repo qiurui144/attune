@@ -1,3 +1,4 @@
+pub mod acp_chat;
 pub mod error;
 pub mod eval;
 pub mod routes;
@@ -360,6 +361,11 @@ pub async fn run_in_runtime(
     }
 
     let shared_state = Arc::new(state::AppState::new(vault, require_auth));
+    // ACP-4 Task 2 — wire the usage telemetry aggregator + flusher at boot so
+    // every governed LLM call records into the `usage_events` table (closes the
+    // audit-C "usage recorder NOT wired" gap). Telemetry-only; failure degrades
+    // gracefully without affecting request handling.
+    let _usage_flusher = shared_state.install_usage_aggregator();
     let app = build_router(shared_state);
 
     let is_loopback = {

@@ -261,6 +261,108 @@ enum Commands {
     },
     /// v1.0.1 C4: 强制升级前备份 — `vault.db` → `vault.db.bak.<stamp>`,自动 retention 5 份。
     PreUpgradeBackup,
+    /// ACP-2: Agent governance & quality observability (no vault required).
+    /// spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §5.5
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Run the unified quality-gate orchestrator and print the roll-up
+    /// pass-rate dashboard (reads `agent_quality_manifest.yaml`). Exits non-zero
+    /// if the ratchet (only-up) is violated. Per spec §5.5 `attune agent gate`.
+    Gate {
+        /// Path to the workspace quality manifest (default: auto-locate
+        /// `agent_quality_manifest.yaml` next to the running binary's workspace).
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+    },
+    /// ACP-1: print the agent directory — every registered agent with tier /
+    /// kind / cost / capability boundary / bound quality gate / typed handoff.
+    /// Reads `agents.registry.toml` (no vault required). Per spec §5.5.
+    Registry {
+        /// Path to the registry (default: auto-locate `agents.registry.toml`).
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+    },
+    /// ACP-3: print per-(agent × model) failure-rate telemetry (§4.5-F). Rows
+    /// above the 30% alert threshold are flagged "switch to higher tier".
+    /// Requires an unlocked vault (telemetry lives in usage_events). Per spec §5.5.
+    Health {
+        /// Window start (Unix epoch ms; default 0 = all history).
+        #[arg(long, default_value_t = 0)]
+        from_ms: i64,
+        /// Window end (Unix epoch ms; default = now).
+        #[arg(long)]
+        to_ms: Option<i64>,
+    },
+    /// ACP-3: print the FeedbackController tuning plan — for each (agent × model)
+    /// failure rate, which TuningAction it triggers (escalate model tier /
+    /// inject few-shot / soft-disable). Requires an unlocked vault (telemetry
+    /// lives in usage_events) + the registry. Per spec §5.2 + Task 4.
+    ///
+    /// `--dry-run` (the default and only supported mode today) shows the plan
+    /// without applying anything. Auto-applying escalations is OFF by default
+    /// (R2 cost guard) and is enabled per-deployment via `acp.auto_escalate`.
+    Tune {
+        /// Show the plan without applying (default true). Auto-apply is gated by
+        /// `acp.auto_escalate` and is not yet a CLI flag (R2 — opt-in only).
+        #[arg(long, default_value_t = true)]
+        dry_run: bool,
+        /// Window start (Unix epoch ms; default 0 = all history).
+        #[arg(long, default_value_t = 0)]
+        from_ms: i64,
+        /// Window end (Unix epoch ms; default = now).
+        #[arg(long)]
+        to_ms: Option<i64>,
+        /// Path to the registry (default: auto-locate `agents.registry.toml`).
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+    },
+    /// ACP-5: inspect autonomous flows (declarative agent-collaboration DAGs).
+    /// Reads `agent_flows.toml` + `agents.registry.toml` (no vault required).
+    /// Per spec §5.3b + §5.5 (Task 6).
+    Flow {
+        #[command(subcommand)]
+        action: FlowAction,
+    },
+}
+
+/// `attune agent flow <action>` (ACP-5 autonomous flow inspection).
+#[derive(Subcommand)]
+enum FlowAction {
+    /// List every declared flow DAG + its typed-handoff step chain.
+    List {
+        /// Path to the flows file (default: auto-locate `agent_flows.toml`).
+        #[arg(long)]
+        flows: Option<std::path::PathBuf>,
+        /// Path to the registry (default: auto-locate `agents.registry.toml`).
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+    },
+    /// Dry-run a flow: show which agents it traverses + the per-step scheduling
+    /// decision (cost class / tier / cloud-vs-local) — WITHOUT calling any LLM.
+    Run {
+        /// The flow id to dry-run.
+        id: String,
+        /// Path to the flows file (default: auto-locate `agent_flows.toml`).
+        #[arg(long)]
+        flows: Option<std::path::PathBuf>,
+        /// Path to the registry (default: auto-locate `agents.registry.toml`).
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+        /// Simulate a paid entitlement (default: free). Affects the dry-run
+        /// scheduling decision shown for paid/cloud steps.
+        #[arg(long, default_value_t = false)]
+        paid: bool,
+        /// Simulated remaining cloud quota (default 1000). `0` shows the
+        /// quota-exhausted degrade path.
+        #[arg(long, default_value_t = 1000)]
+        cloud_quota: u64,
+    },
 }
 
 /// CLI exit code protocol (D5.7).
@@ -348,6 +450,18 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         // v1.0.1 C4 — backup/rollback 不需要 vault 已 unlock(直接操作 vault.db 文件)
         Commands::Rollback { index, yes } => return run_rollback(*index, *yes),
         Commands::PreUpgradeBackup => return run_pre_upgrade_backup(),
+        // ACP-2/ACP-1: gate + registry operate on workspace files, no vault.
+        // ACP-3 health needs the unlocked vault → falls through to the post-open match.
+        Commands::Agent { action } => match action {
+            AgentAction::Gate { manifest } => return run_agent_gate(manifest.as_deref()),
+            AgentAction::Registry { registry } => {
+                return run_agent_registry(registry.as_deref())
+            }
+            // ACP-5 flow inspection operates on workspace files — vault-free.
+            AgentAction::Flow { action } => return run_agent_flow(action),
+            // ACP-3 health + tune need the unlocked vault → handled after open.
+            AgentAction::Health { .. } | AgentAction::Tune { .. } => {}
+        },
         // VaultImport must run BEFORE Vault::open_default() — open() auto-creates vault.db
         // via Connection::open(), which would make the "already exists" guard always trigger.
         Commands::VaultImport { src, force } => {
@@ -617,6 +731,24 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         | Commands::Rollback { .. } | Commands::PreUpgradeBackup => {
             unreachable!("plugin/cloud/ocr-profile commands handled before vault open")
         }
+        // ACP-3: `attune agent health` needs the unlocked vault (telemetry lives
+        // in usage_events). Gate + Registry already early-returned vault-free.
+        Commands::Agent { action } => match action {
+            AgentAction::Health { from_ms, to_ms } => {
+                return run_agent_health(&vault, from_ms, to_ms);
+            }
+            AgentAction::Tune {
+                dry_run,
+                from_ms,
+                to_ms,
+                registry,
+            } => {
+                return run_agent_tune(&vault, dry_run, from_ms, to_ms, registry.as_deref());
+            }
+            AgentAction::Gate { .. } | AgentAction::Registry { .. } | AgentAction::Flow { .. } => {
+                unreachable!("agent gate/registry/flow handled before vault open")
+            }
+        },
     }
     Ok(())
 }
@@ -1297,6 +1429,251 @@ fn run_pre_upgrade_backup() -> attune_core::error::Result<()> {
     eprintln!("  size: {} bytes", entry.size);
     eprintln!("  stamp: {}", entry.stamp);
     Ok(())
+}
+
+/// ACP-2: `attune agent gate` — run the unified quality-gate orchestrator and
+/// print the roll-up pass-rate dashboard. Exits non-zero (InvalidInput) when the
+/// ratchet (only-up) is violated. Per spec §5.5.
+fn run_agent_gate(manifest: Option<&std::path::Path>) -> attune_core::error::Result<()> {
+    let path = match manifest {
+        Some(p) => p.to_path_buf(),
+        None => locate_quality_manifest().ok_or_else(|| {
+            attune_core::error::VaultError::NotFound(
+                "agent_quality_manifest.yaml not found — pass --manifest <path> or run from \
+                 the workspace (searched CWD ancestors and the binary directory)"
+                    .to_string(),
+            )
+        })?,
+    };
+    let (dashboard, pass) = attune_core::agent_quality::run_orchestrator(&path)
+        .map_err(attune_core::error::VaultError::InvalidInput)?;
+    print!("{dashboard}");
+    if !pass {
+        return Err(attune_core::error::VaultError::InvalidInput(
+            "agent quality gate FAILED: ratchet (only-up) violated — see dashboard above"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// ACP-1: `attune agent registry` — load + validate `agents.registry.toml` and
+/// print the agent directory (tier / kind / cost / boundary / gate / handoff).
+/// Per spec §5.5. No vault required.
+fn run_agent_registry(registry: Option<&std::path::Path>) -> attune_core::error::Result<()> {
+    let path = match registry {
+        Some(p) => p.to_path_buf(),
+        None => locate_named("agents.registry.toml").ok_or_else(|| {
+            attune_core::error::VaultError::NotFound(
+                "agents.registry.toml not found — pass --registry <path> or run from the \
+                 workspace (searched CWD ancestors and the binary directory)"
+                    .to_string(),
+            )
+        })?,
+    };
+    let reg = attune_core::agents::registry::AgentRegistry::from_path(&path)
+        .map_err(attune_core::error::VaultError::InvalidInput)?;
+    print!("{}", reg.render_directory());
+    Ok(())
+}
+
+/// ACP-5: `attune agent flow <list|run>` — inspect autonomous flows (Task 6).
+/// Vault-free; reads `agent_flows.toml` + `agents.registry.toml`.
+fn run_agent_flow(action: &FlowAction) -> attune_core::error::Result<()> {
+    use attune_core::agents::flow::FlowSet;
+    use attune_core::agents::registry::AgentRegistry;
+
+    let load = |flows: &Option<std::path::PathBuf>,
+                registry: &Option<std::path::PathBuf>|
+     -> attune_core::error::Result<(FlowSet, AgentRegistry)> {
+        let reg_path = match registry {
+            Some(p) => p.clone(),
+            None => locate_named("agents.registry.toml").ok_or_else(|| {
+                attune_core::error::VaultError::NotFound(
+                    "agents.registry.toml not found — pass --registry <path> or run from the \
+                     workspace"
+                        .to_string(),
+                )
+            })?,
+        };
+        let flows_path = match flows {
+            Some(p) => p.clone(),
+            None => locate_named("agent_flows.toml").ok_or_else(|| {
+                attune_core::error::VaultError::NotFound(
+                    "agent_flows.toml not found — pass --flows <path> or run from the workspace"
+                        .to_string(),
+                )
+            })?,
+        };
+        let reg =
+            AgentRegistry::from_path(&reg_path).map_err(attune_core::error::VaultError::InvalidInput)?;
+        let flow_set =
+            FlowSet::from_path(&flows_path).map_err(attune_core::error::VaultError::InvalidInput)?;
+        // Validate the typed-handoff chain against the registry before printing,
+        // so `flow list` surfaces a load-time mis-wiring as an error.
+        flow_set
+            .validate_against(&reg)
+            .map_err(attune_core::error::VaultError::InvalidInput)?;
+        Ok((flow_set, reg))
+    };
+
+    match action {
+        FlowAction::List { flows, registry } => {
+            let (flow_set, reg) = load(flows, registry)?;
+            print!("{}", flow_set.render_list(&reg));
+            Ok(())
+        }
+        FlowAction::Run {
+            id,
+            flows,
+            registry,
+            paid,
+            cloud_quota,
+        } => {
+            let (flow_set, reg) = load(flows, registry)?;
+            let flow = flow_set.get(id).ok_or_else(|| {
+                attune_core::error::VaultError::NotFound(format!(
+                    "no flow with id {id:?} (try `attune agent flow list`)"
+                ))
+            })?;
+            let entitlement = if *paid {
+                attune_core::agents::scheduler::Entitlement::paid_with_quota(*cloud_quota)
+            } else {
+                attune_core::agents::scheduler::Entitlement::free_local()
+            };
+            let scheduler = attune_core::agents::scheduler::Scheduler::new(entitlement);
+            // Dry-run: walk the declared steps and print the scheduling decision
+            // for each — WITHOUT calling any agent / LLM (zero cost).
+            println!("Flow dry-run: {id}");
+            println!(
+                "  entitlement: {} (cloud_quota={})",
+                if *paid { "paid" } else { "free" },
+                cloud_quota
+            );
+            println!("  steps ({}):", flow.steps.len());
+            for (i, step) in flow.steps.iter().enumerate() {
+                let optional = flow.is_optional(step);
+                let opt = if optional { " [optional]" } else { "" };
+                match reg.get(step) {
+                    None => {
+                        println!("    {}. {step}{opt} — UNREGISTERED (would skip/degrade)", i + 1);
+                    }
+                    Some(agent) => {
+                        let decision = scheduler.route(agent, None);
+                        println!(
+                            "    {}. {step}{opt} — {} → {}",
+                            i + 1,
+                            agent.handoff.consumes,
+                            agent.handoff.produces,
+                        );
+                        println!("         schedule: {decision:?}");
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// ACP-3: `attune agent health` — per-(agent × model) failure-rate telemetry
+/// (§4.5-F). Requires an unlocked vault (telemetry lives in usage_events).
+fn run_agent_health(
+    vault: &attune_core::vault::Vault,
+    from_ms: i64,
+    to_ms: Option<i64>,
+) -> attune_core::error::Result<()> {
+    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+        return Err(attune_core::error::VaultError::Locked);
+    }
+    let to = to_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    let rows = vault.store().agent_model_health(from_ms, to)?;
+    print!("{}", attune_core::agent_telemetry::render_health(&rows));
+    Ok(())
+}
+
+/// ACP-3 Task 4: `attune agent tune [--dry-run]` — run the FeedbackController
+/// over the current per-(agent × model) telemetry + the registry and print the
+/// tuning plan (which TuningAction each breaching row triggers).
+///
+/// Auto-applying escalations is gated by `acp.auto_escalate` (default OFF, R2);
+/// it is not yet wired as a CLI flag, so this command is dry-run only and any
+/// `--dry-run=false` request is refused with a clear message (never silently
+/// pushes traffic onto pricier tiers).
+fn run_agent_tune(
+    vault: &attune_core::vault::Vault,
+    dry_run: bool,
+    from_ms: i64,
+    to_ms: Option<i64>,
+    registry: Option<&std::path::Path>,
+) -> attune_core::error::Result<()> {
+    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+        return Err(attune_core::error::VaultError::Locked);
+    }
+    if !dry_run {
+        // R2: auto-apply is opt-in per-deployment via `acp.auto_escalate`, not a
+        // CLI flag. Refuse rather than silently escalate spend.
+        return Err(attune_core::error::VaultError::InvalidInput(
+            "`attune agent tune` is dry-run only: auto-applying escalations is gated by \
+             `acp.auto_escalate` (default OFF, R2 cost guard). Review the plan, then enable \
+             auto-escalate in config to apply."
+                .to_string(),
+        ));
+    }
+    let reg_path = match registry {
+        Some(p) => p.to_path_buf(),
+        None => locate_named("agents.registry.toml").ok_or_else(|| {
+            attune_core::error::VaultError::NotFound(
+                "agents.registry.toml not found — pass --registry <path> or run from the \
+                 workspace"
+                    .to_string(),
+            )
+        })?,
+    };
+    let reg = attune_core::agents::registry::AgentRegistry::from_path(&reg_path)
+        .map_err(attune_core::error::VaultError::InvalidInput)?;
+    let to = to_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    let rows = vault.store().agent_model_health(from_ms, to)?;
+
+    // Default safe posture: auto_escalate OFF (recommendations only, R2).
+    let cfg = attune_core::feedback::FeedbackConfig::default();
+    let auto_escalate = cfg.auto_escalate;
+    let controller = attune_core::feedback::FeedbackController::new(cfg);
+    let decisions = controller.decide(&reg, &rows);
+    print!(
+        "{}",
+        attune_core::feedback::render_tune(&decisions, auto_escalate)
+    );
+    Ok(())
+}
+
+/// Locate `agent_quality_manifest.yaml` (ACP-2 wrapper over [`locate_named`]).
+fn locate_quality_manifest() -> Option<std::path::PathBuf> {
+    locate_named("agent_quality_manifest.yaml")
+}
+
+/// Locate a workspace file by name: walk up from CWD, then the binary directory
+/// ancestors. Cross-platform (no hardcoded separators).
+fn locate_named(name: &str) -> Option<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+        }
+    }
+    for root in roots {
+        let mut cur: Option<&std::path::Path> = Some(root.as_path());
+        while let Some(dir) = cur {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            cur = dir.parent();
+        }
+    }
+    None
 }
 
 /// v1.0.1 C4: `attune rollback [--index N]` — 列出 / 回滚 vault 备份。

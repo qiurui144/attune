@@ -193,6 +193,83 @@ pub async fn chat(
         }
     };
 
+    // ACP-5 (2026-05-29) — autonomous-flow wiring. When the user message resolves
+    // to a *declared multi-step flow* (e.g. legal_defamation), run it end-to-end
+    // through the production GovernedStepRunner (each step: ACP-7 schedule + ACP-4
+    // governor + ACP-3 telemetry, threaded along the typed-handoff DAG). The
+    // outcome is attached to the response as `acp_flow`. A single-agent / no-match
+    // resolution returns None so the free-form RAG path below runs unchanged (no
+    // regression). Deterministic steps have no embedded agent binary in the server
+    // process → the dispatch closure errors and the flow degrades gracefully to a
+    // partial result (spec §7 / §11 R8); the chat answer is still produced by RAG.
+    //
+    // Spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §5.3b
+    let acp_flow: Option<serde_json::Value> = if let Some(flows_reg) = state.agent_flows.clone() {
+        let entitlement = {
+            let paid = state
+                .member_state
+                .lock()
+                .map(|g| g.is_paid())
+                .unwrap_or(false);
+            if paid {
+                // Real per-call quota accounting lives in the cloud gateway; the
+                // scheduler only needs "has cloud budget" here, so seed a non-zero
+                // quota. Exhaustion is surfaced by the gateway, not this gate.
+                attune_core::agents::scheduler::Entitlement::paid_with_quota(1_000_000)
+            } else {
+                attune_core::agents::scheduler::Entitlement::free_local()
+            }
+        };
+        // ACP-3 soft-disabled agent ids (same source as the skills observer above).
+        let disabled: std::collections::HashSet<String> = {
+            let bytes = match state.vault.lock() {
+                Ok(vault) => vault.store().get_meta("app_settings").ok().flatten(),
+                Err(_) => None,
+            };
+            bytes
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|v| {
+                    v.get("agents")
+                        .and_then(|s| s.get("disabled"))
+                        .and_then(|d| d.as_array())
+                        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                })
+                .unwrap_or_default()
+        };
+        let flow_llm = llm.clone();
+        let flow_cache = state.cache_backend();
+        let flow_usage = state.usage();
+        let flow_msg = body.message.clone();
+        // run_flow is synchronous and may issue governed LLM calls → spawn_blocking
+        // so the async worker is never blocked (per Rust 商用线 async-safe rule).
+        tokio::task::spawn_blocking(move || {
+            // Server has no embedded agent binaries — deterministic steps degrade
+            // gracefully (the LLM lead steps still run + are telemetered).
+            let mut dispatch =
+                |_a: &attune_core::agents::registry::AgentSpec,
+                 _i: &attune_core::agents::flow::Payload|
+                 -> std::result::Result<serde_json::Value, String> {
+                    Err("deterministic agent binary not available in server process".to_string())
+                };
+            crate::acp_chat::run_chat_flow(
+                &flow_msg,
+                &flows_reg.0,
+                &flows_reg.1,
+                flow_llm.as_ref(),
+                flow_cache.as_deref(),
+                flow_usage.as_deref(),
+                entitlement,
+                &disabled,
+                &mut dispatch,
+            )
+            .and_then(|o| serde_json::to_value(o).ok())
+        })
+        .await
+        .unwrap_or(None)
+    } else {
+        None
+    };
+
     // 按 LLM 上下文窗口精确裁历史（替代写死的固定深度）。
     // 不同 model 窗口差 30×（qwen 32K / gemini 1M）—— 按窗口动态保留最近若干轮，
     let dek = {
@@ -816,16 +893,41 @@ pub async fn chat(
     let llm_model_name = llm.model_name().to_string();
     let llm_is_local = llm.is_local();
 
-    // 4. Call LLM (blocking via spawn_blocking)
-    let (raw_response, _usage) = tokio::task::spawn_blocking(move || llm.chat_with_history(&messages))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?
-        .map_err(llm_upstream_error)?;
+    // 4. Call LLM via the ACP-4 Cost Governor (blocking via spawn_blocking).
+    //    governed_chat wires the A1 cache (get/put — saves tokens on identical
+    //    prompts) + usage recorder (writes usage_events). Free-form chat uses
+    //    default options (no output cap) so existing answers are never
+    //    truncated (spec §2.3: never sacrifice correctness; §10: miss = current
+    //    behavior). Cache key folds in model + sampling knobs + full message
+    //    content, so changed injected knowledge auto-invalidates (R1).
+    let cache_backend = state.cache_backend();
+    let usage_agg = state.usage();
+    let gov_opts = attune_core::llm::LlmCallOptions::default();
+    let governed = tokio::task::spawn_blocking(move || {
+        attune_core::governor::governed_chat(
+            llm.as_ref(),
+            &messages,
+            &gov_opts,
+            cache_backend.as_deref(),
+            usage_agg.as_deref(),
+            None,        // direct chat → no agent_id
+            None,        // TTL: backend default
+        )
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?
+    .map_err(llm_upstream_error)?;
+    let raw_response = governed.text;
+    // ACP-4: real vendor token usage + cache disposition for the UI cost chip.
+    // Vendor counts are authoritative when reported (> 0); on a cache hit the
+    // saved input tokens arrive via `cached_in`.
+    let vendor_usage = governed.usage.clone();
+    let cache_served = matches!(governed.cache, attune_core::usage::CacheOutcome::Hit);
 
     // F-17 restore: LLM 响应里的所有 placeholder 还原成原值给用户看
     let response = redactor.restore(&raw_response, &all_mappings);
@@ -1073,6 +1175,15 @@ pub async fn chat(
             "cost_usd": cost_usd,
             "is_local": llm_is_local,
             "input_rate_per_k": input_rate_per_k,
+            // ACP-4: cache disposition + authoritative vendor token counts.
+            // `cache_hit=true` → served from cache (tokens saved, no upstream
+            // call); `cached_tokens` = input tokens the hit avoided. Vendor
+            // counts (when the provider reports > 0) are exact, vs the legacy
+            // CJK-heuristic `tokens_in`/`tokens_out` above.
+            "cache_hit": cache_served,
+            "cached_tokens": vendor_usage.cached_in,
+            "vendor_tokens_in": vendor_usage.tokens_in,
+            "vendor_tokens_out": vendor_usage.tokens_out,
         },
         // T2: structured cost block for vlm-llm-benchmark (matches bench schema).
         "cost": cost_block,
@@ -1096,6 +1207,13 @@ pub async fn chat(
             "strategy": strategy_str,
         },
     });
+
+    // ACP-5: surface the autonomous-flow outcome (status + per-step trace + final
+    // payload) when a declared multi-step flow ran. Absent for plain chat (no
+    // regression — old clients ignore the extra key).
+    if let Some(flow_json) = acp_flow {
+        response_json["acp_flow"] = flow_json;
+    }
 
     // 本地无结果 + 浏览器不可用：明确告知用户而非静默失败
     if knowledge.is_empty() {
@@ -1277,6 +1395,7 @@ async fn eval_short_circuit_chat(
         } else {
             None
         },
+        ..Default::default()
     };
 
     // T1 test-only override: provider label maps directly to the determinism

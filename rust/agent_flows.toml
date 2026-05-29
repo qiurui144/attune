@@ -1,0 +1,46 @@
+# ACP-5 Agent Flows — declarative autonomous-flow DAGs (workspace SSOT).
+#
+# Spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §5.3b
+# (autonomous flow: three-layer abstraction + typed handoff + flow executor).
+#
+# User 2026-05-29 (twice-reiterated): "确保插件的自主流转能力 / agents 之间是工程协作的关系".
+#
+# A flow is a human-authored chain of agent ids. Work flows between agents along
+# the chain WITHOUT manual per-step stitching — but the chain itself is declared
+# here (NOT agent-spawns-agent, which is deferred to v2.x per spec §2.2).
+#
+# Loaded + validated against agents.registry.toml at startup (agents/flow.rs):
+#   ① type-safe handoff — step A → B legal iff A.produces == B.consumes;
+#   ② no shadow agent — every step id must be a registered agent;
+#   ③ no within-flow cycle — a step id may appear at most once;
+#   ④ optional steps must reference real steps; fallback_agent must be registered.
+#
+# At runtime the Flow Executor (run_flow) runs each step through ACP-7 schedule +
+# ACP-4 cost governance + ACP-3 telemetry, and degrades gracefully (skip an
+# optional step / return a partial result) — never cascade-fail (spec §11 R8).
+#
+# on_step_fail: partial (default — return what we have) | abort | fallback_agent
+
+# ─────────────────────────── legal_defamation (spec §5.3b example) ────────────
+#
+# The canonical 3-step autonomous flow. Typed-handoff chain (verified against
+# agents.registry.toml):
+#   fact_extractor       RawCaseText   → CaseFacts
+#   defamation_extractor CaseFacts     → DefamationFacts
+#   defamation_agent     DefamationFacts → DamageAward
+#
+# This is the ACP-5 dedupe landing: the defamation det+LLM agents that previously
+# both routed on the same keywords now compose into ONE flow — the LLM extractor
+# leads, then hands its DefamationFacts to the deterministic damages-calc agent.
+
+[[flow]]
+id = "legal_defamation"
+route_keywords = ["名誉", "诽谤", "侮辱", "名誉权", "名誉损害", "精神损害"]
+route_priority = 9
+steps = ["fact_extractor", "defamation_extractor", "defamation_agent"]
+[flow.degrade]
+# The final deterministic damages calc is the load-bearing step; the LLM extractor
+# is the optional enrichment — if it is disabled (ACP-3) or quota-exhausted
+# (ACP-7), the flow degrades to a partial result rather than cascade-failing.
+optional = ["fact_extractor"]
+on_step_fail = "partial"

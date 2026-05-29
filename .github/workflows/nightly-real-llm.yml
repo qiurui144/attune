@@ -1,0 +1,171 @@
+name: nightly-real-llm
+
+# ACP-2 orphan fix (B audit finding #3): oss_agent_real_llm_gate.rs was written
+# but absent from every attune workflow — the mock-0.99/real-0.09 class of bug
+# (per the law-pro defamation incident) could re-enter undetected for the OSS
+# memory_consolidation / self_evolving_skill agents. This workflow runs the two
+# #[ignore] real-LLM gates on a schedule against a REAL model, mirroring
+# attune-pro/.github/workflows/nightly-real-llm.yml.
+#
+# spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §9
+#       ("ACP-2 把 OSS real-LLM gate 接入 nightly CI（当前孤儿）")
+
+on:
+  schedule:
+    # 02:30 UTC daily, weekdays (Beijing 10:30). Offset from attune-pro's 02:00
+    # so a shared self-hosted Ollama runner is not double-booked.
+    - cron: '30 2 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Ollama model name (default qwen2.5:3b)'
+        required: false
+        default: 'qwen2.5:3b'
+
+# Real-LLM gates do not run on push/PR (per R5: PR is fast/deterministic,
+# nightly is slow/real). The deterministic golden gates + the
+# agent_gate_orchestrator ratchet run on every PR via ci.yml.
+
+jobs:
+  oss-real-llm-gate:
+    # Requires a runner labelled [self-hosted, ollama] with `ollama serve` up and
+    # `ollama pull qwen2.5:3b` done. If unavailable, change to `ubuntu-latest`:
+    # the test early-returns (does not fail) when Ollama is unreachable.
+    runs-on: [self-hosted, ollama]
+
+    # One nightly at a time; new triggers wait (do not cancel a running gate).
+    concurrency:
+      group: nightly-real-llm-oss
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout attune
+        uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-nightly-realllm-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-realllm-
+
+      # ── Ollama availability probe (informational; never fails the job) ──
+      - name: Check Ollama availability
+        run: |
+          if curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; then
+            echo "OLLAMA_AVAILABLE=true" >> "$GITHUB_ENV"
+            echo "[nightly-real-llm] Ollama reachable"
+          else
+            echo "OLLAMA_AVAILABLE=false" >> "$GITHUB_ENV"
+            echo "[nightly-real-llm] Ollama NOT reachable — gate will panic (require_llm). Set up the runner per docs/nightly-real-llm-setup.md, or this is expected on ubuntu-latest."
+          fi
+
+      # ── Build (release) ──
+      - name: cargo build --release
+        working-directory: rust
+        run: cargo build -p attune-core --release --tests
+
+      # ── Run the OSS real-LLM gate (the two #[ignore] tests) ──
+      # inputs.model is workflow_dispatch (trusted) but still passed via env: per
+      # GitHub Actions injection best practice — no untrusted input in run:.
+      - name: Run OSS real-LLM golden gate
+        id: gate
+        working-directory: rust
+        env:
+          ATTUNE_LLM_MODEL: ${{ inputs.model || 'qwen2.5:3b' }}
+          RUST_LOG: warn
+        run: |
+          set -o pipefail
+          OUTPUT_FILE="$RUNNER_TEMP/oss-real-llm.log"
+          # Run only the two real-LLM gates by name; serial to share warm model.
+          if cargo test -p attune-core --release --test oss_agent_real_llm_gate \
+               -- real_llm --ignored --nocapture --test-threads=1 \
+               2>&1 | tee "$OUTPUT_FILE"; then
+            echo "result=passed" >> "$GITHUB_OUTPUT"
+          else
+            # Distinguish "Ollama down" (acceptable skip) from a real F1/accept drop.
+            if grep -q "Ollama not reachable" "$OUTPUT_FILE"; then
+              echo "result=skipped_no_ollama" >> "$GITHUB_OUTPUT"
+            else
+              echo "result=degraded" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+          # Extract per-agent RESULT lines for the summary / issue body.
+          SUMMARY=$(grep -E "RESULT:|real-LLM gate failed|need ≥ 4" "$OUTPUT_FILE" 2>/dev/null | tail -20 || true)
+          {
+            echo "summary<<SUMMARY_EOF"
+            echo "$SUMMARY"
+            echo "SUMMARY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── On degradation: open a GitHub issue (does not block any PR) ──
+      - name: Create degradation issue
+        if: always() && steps.gate.outputs.result == 'degraded'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          GATE_SUMMARY: ${{ steps.gate.outputs.summary }}
+        run: |
+          DATE=$(date '+%Y-%m-%d')
+          RUN_URL="${SERVER_URL}/${REPOSITORY}/actions/runs/${RUN_ID}"
+          BODY=$(cat <<EOF
+          ## OSS Nightly Real-LLM Gate — degradation detected
+
+          **Date**: ${DATE} (run #${RUN_ID})
+
+          The OSS real-LLM gate (memory_consolidation / self_evolving_skill) fell
+          below its acceptance floor (passed >= 4 of 5). Per the Agent 验证铁律,
+          the threshold is NOT to be relaxed — investigate model drift / prompt
+          regression / parser hardening, OR label the agent Beta in RELEASE.md.
+
+          ### Per-agent result
+
+          \`\`\`
+          ${GATE_SUMMARY}
+          \`\`\`
+
+          ### Next steps
+          1. Open the [Actions log](${RUN_URL}) for full per-case output.
+          2. If prompt regression: fix the agent prompt + re-run nightly to verify.
+          3. If a genuine weak-model ceiling: mark the agent Beta in RELEASE.md
+             (do NOT lower the accept floor — only-up ratchet).
+
+          > Auto-filed by .github/workflows/nightly-real-llm.yml (ACP-2 orphan fix).
+          EOF
+          )
+          gh issue create \
+            --title "[oss-nightly-real-llm] real-LLM gate degraded ${DATE}" \
+            --body "$BODY" \
+            --repo "$REPOSITORY" || echo "[nightly-real-llm] issue create failed — check GITHUB_TOKEN issues:write"
+
+      # ── Job summary (always) ──
+      - name: Write job summary
+        if: always()
+        env:
+          GATE_RESULT: ${{ steps.gate.outputs.result || 'unknown' }}
+          GATE_SUMMARY: ${{ steps.gate.outputs.summary }}
+          OLLAMA_STATUS: ${{ env.OLLAMA_AVAILABLE || 'unknown' }}
+        run: |
+          {
+            echo "## OSS Nightly Real-LLM Gate"
+            echo ""
+            echo "- **result**: ${GATE_RESULT}"
+            echo "- **Ollama**: ${OLLAMA_STATUS}"
+            echo ""
+            echo "### Per-agent RESULT"
+            echo '```'
+            echo "${GATE_SUMMARY}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

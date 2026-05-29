@@ -26,7 +26,12 @@ pub mod browse_signals;  // pub: BrowseSignalInput / BrowseSignalRow 给 attune-
 pub mod auto_bookmarks;  // W4 G2: high engagement auto bookmark candidates (G3 staging)
 pub mod audit;            // v0.6 Phase A.5.3: 出网审计日志
 pub mod usage;            // Plan A1 Task D: usage_events CRUD + UsageSummary
+pub mod agent_telemetry;  // ACP-3 §4.5-F: per-(agent×model) failure-rate roll-up over usage_events
 pub mod cache;            // Plan A1 Task D: llm_cache / embed_cache CRUD
+pub mod agent_state;      // ACP-6: versioned, plugin-scoped, encrypted learned/user state
+pub use agent_state::{AgentStateKind, AgentStateRow};
+pub mod state_migration;  // ACP-6 Task 3: learned-state migration + orphan quarantine (§2.3)
+pub use state_migration::{MigratedRow, MigrationReport, MigrationStep, OrphanRow};
 
 pub use types::*;
 
@@ -42,6 +47,19 @@ use std::path::Path;
 #[allow(unused_imports)]
 use crate::crypto::{self, Key32};
 use crate::error::{Result, VaultError};
+
+/// Global vault schema version, tracked via SQLite `PRAGMA user_version`.
+///
+/// ACP-6 Task 1: prior to this, `user_version` was always 0 (never set), so
+/// there was no machine-checkable schema-version gate. Any future change that
+/// re-keys learned state (agent-id / query-pattern format) could silently
+/// orphan rows with no version to migrate from.
+///
+/// Bump this whenever a *semantic* migration of learned/user state is needed
+/// (not for purely additive column ALTERs — those stay idempotent + guarded).
+/// `1` = baseline: PRAGMA user_version introduced + `agent_state` table with
+/// `schema_version` per row.
+pub const SCHEMA_VERSION: i64 = 1;
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS vault_meta (
@@ -584,6 +602,39 @@ CREATE TABLE IF NOT EXISTS embed_cache (
     last_hit_ts  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_embed_cache_lru ON embed_cache(last_hit_ts);
+
+-- ── ACP-6 agent_state: versioned, plugin-scoped, encrypted learned/user state.
+--    `payload` is AES-256-GCM ciphertext (DEK-encrypted, same model as items.content).
+--    `plugin_id` scopes state to its owner (D audit: skill_expansions was global +
+--    unscoped → orphan/leak risk). `schema_version` is the per-row migration basis.
+CREATE TABLE IF NOT EXISTS agent_state (
+    agent_id       TEXT NOT NULL,
+    plugin_id      TEXT NOT NULL,                       -- "oss-core" for OSS; plugin id otherwise
+    state_kind     TEXT NOT NULL,                       -- skill_expansion | preference | ratchet_watermark
+    schema_version INTEGER NOT NULL,                    -- migration basis (per-row)
+    payload        BLOB NOT NULL,                       -- AES-256-GCM ciphertext (DEK)
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (agent_id, plugin_id, state_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_state_plugin ON agent_state(plugin_id);
+
+-- ── ACP-6 orphan quarantine (§2.3 red line: migration NEVER silently drops user
+--    learned state). When a learned-state migration finds a row no registered
+--    migrator can advance (e.g. plugin renamed agent-id / changed key format with
+--    no migrator), the row is COPIED here (payload kept as-is, still DEK-encrypted)
+--    and flagged — never deleted. Recoverable: a later plugin version shipping a
+--    migrator can re-claim it. `detected_at` + `reason` aid diagnosis.
+CREATE TABLE IF NOT EXISTS agent_state_orphans (
+    agent_id       TEXT NOT NULL,
+    plugin_id      TEXT NOT NULL,
+    state_kind     TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,                    -- the (stale) version the row was at
+    payload        BLOB NOT NULL,                       -- preserved ciphertext (recoverable)
+    reason         TEXT NOT NULL,                       -- e.g. "no migrator for v1->v2"
+    detected_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (agent_id, plugin_id, state_kind, schema_version)
+);
 "#;
 
 pub struct Store {
@@ -633,6 +684,7 @@ impl Store {
         Self::migrate_items_content_hash(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
+        Self::ensure_schema_version(&conn)?;
         let store = Self { conn };
         // QW-1: 一次性 purge embed_queue 终态行（done / abandoned）。
         // 这只是启动 housekeeping；周期清理由 cleanup worker 跑。失败静默忽略。
@@ -652,7 +704,63 @@ impl Store {
         Self::migrate_items_content_hash(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
+        Self::ensure_schema_version(&conn)?;
         Ok(Self { conn })
+    }
+
+    /// Read the vault's global schema version (`PRAGMA user_version`).
+    ///
+    /// ACP-6 Task 1. Returns 0 for a pre-version-gate ("old") vault that has
+    /// not yet been opened by version-aware code.
+    pub fn schema_version(&self) -> Result<i64> {
+        let v: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        Ok(v)
+    }
+
+    /// Schema version gate (ACP-6 Task 1). Called at the end of `open` /
+    /// `open_memory`, after the additive migrations have run.
+    ///
+    /// Rules:
+    /// - `user_version == 0` (fresh vault OR old vault predating the gate) →
+    ///   lazily stamp to [`SCHEMA_VERSION`]. This is non-destructive: it only
+    ///   writes the header pragma; tables + rows are untouched.
+    /// - `0 < user_version < SCHEMA_VERSION` → a learned-state migration is
+    ///   due. Migrations are dispatched by [`Store::run_state_migrations`]
+    ///   (ACP-6 Task 3) BEFORE this gate stamps the new version.
+    /// - `user_version > SCHEMA_VERSION` → vault written by a *newer* attune.
+    ///   We do **not** downgrade the stamp (that would mask a
+    ///   forward-incompatible schema); leave it as-is so callers can detect it.
+    ///
+    /// Why lazy-stamp old vaults to current instead of running every migration:
+    /// at v1 baseline there is no historical learned-state shape to migrate
+    /// *from* — old vaults differ from fresh ones only in lacking the stamp,
+    /// not in row layout. The real migration machinery (Task 3) engages once
+    /// SCHEMA_VERSION advances past 1.
+    fn ensure_schema_version(conn: &Connection) -> Result<()> {
+        let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if current >= SCHEMA_VERSION {
+            // Already current, or a future vault — never downgrade.
+            return Ok(());
+        }
+        if current > 0 {
+            // 0 < current < SCHEMA_VERSION: real semantic migration path.
+            Self::run_state_migrations(conn, current, SCHEMA_VERSION)?;
+        }
+        // PRAGMA user_version does not accept a bound parameter — version is a
+        // compile-time constant under our control, so format! is injection-safe.
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        Ok(())
+    }
+
+    /// Learned-state migration dispatcher (ACP-6 Task 3).
+    ///
+    /// Runs the registered migrators for every version step in
+    /// `(from, to]`. At v1 baseline there are no historical steps, so this is
+    /// a no-op; Task 3 registers the first real migrator + orphan detection.
+    /// Kept here (not in Task 3's module) so [`Store::ensure_schema_version`]
+    /// has a single dispatch seam.
+    fn run_state_migrations(_conn: &Connection, _from: i64, _to: i64) -> Result<()> {
+        Ok(())
     }
 
     /// QW-3: 把 vault 的 `auto_vacuum` 模式切到 INCREMENTAL（在主 Connection 打开之前调用）。
@@ -1121,6 +1229,77 @@ mod tests {
     fn open_memory_creates_tables() {
         let store = Store::open_memory().unwrap();
         assert!(!store.has_meta("nonexistent").unwrap());
+    }
+
+    // ── ACP-6 Task 1: PRAGMA user_version + schema version gate ──────────
+
+    #[test]
+    fn fresh_vault_stamps_current_schema_version() {
+        // A brand-new vault opened by current code must carry the current
+        // schema version, not 0 — so future upgrades have a baseline to
+        // migrate from.
+        let store = Store::open_memory().unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        // SCHEMA_VERSION is a const >= 1 by definition; asserting it here is a
+        // compile-time tautology (clippy: const assertion), so we only check
+        // the runtime stamp matches.
+    }
+
+    #[test]
+    fn old_vault_user_version_zero_is_lazily_upgraded() {
+        // Simulate an old vault that predates PRAGMA user_version: it has the
+        // tables (SCHEMA_SQL ran) but user_version is still 0. On open() the
+        // version gate must lazily stamp it to current WITHOUT wiping data.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        // Old vault: user_version untouched (defaults to 0).
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 0, "precondition: simulated old vault is at version 0");
+
+        // Insert a learned-state row so we can prove the upgrade is non-destructive.
+        conn.execute(
+            "INSERT INTO skill_expansions (query_pattern, expansions, generated_by, confidence) \
+             VALUES ('q', '[\"a\"]', 'heuristic', 0.4)",
+            [],
+        )
+        .unwrap();
+
+        // Run the version gate (what open() calls on an existing connection).
+        Store::ensure_schema_version(&conn).unwrap();
+
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION, "old vault must be lazily stamped to current");
+
+        // Non-destructive: the pre-existing row is still there.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM skill_expansions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "version gate must NOT wipe existing learned state");
+    }
+
+    #[test]
+    fn ensure_schema_version_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        Store::ensure_schema_version(&conn).unwrap();
+        Store::ensure_schema_version(&conn).unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn ensure_schema_version_does_not_downgrade() {
+        // If a vault was written by a FUTURE attune (user_version > current),
+        // opening it with older code must NOT silently downgrade the stamp —
+        // that would mask a forward-incompatible schema.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA_SQL).unwrap();
+        let future = SCHEMA_VERSION + 5;
+        conn.execute_batch(&format!("PRAGMA user_version = {future};")).unwrap();
+        Store::ensure_schema_version(&conn).unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, future, "must not downgrade a future-versioned vault");
     }
 
     #[test]

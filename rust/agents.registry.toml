@@ -1,0 +1,371 @@
+# ACP-1 Agent Registry — central agent directory (workspace SSOT).
+#
+# Spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §5.1
+# Source of truth for the 22-agent inventory (audit
+# docs/reports/2026-05-29-agent-inventory-audit.md): 6 OSS + 14 law-pro +
+# 1 tech-pro + 1 law-pro VLM capability.
+#
+# Human-authored + auditable. Loaded + validated at startup (registry.rs):
+#   - every agent id unique; every capability_boundary unique (single-point);
+#   - every agent binds a quality gate; every handoff declares typed consumes/produces.
+# A shadow agent (an id invoked but absent here) is rejected at the call site.
+#
+# Typed handoff (consumes/produces) is the ACP-6 autonomous-flow foundation:
+# a flow step A → B is legal iff A.produces == B.consumes. The legal_defamation
+# flow chains: fact_extractor (RawCaseText → CaseFacts) → defamation_extractor
+# (CaseFacts → DefamationFacts) → defamation_agent (DefamationFacts → DamageAward).
+#
+# kind:        deterministic | llm-judge | rule | vlm
+# tier:        free | paid
+# cost_class:  zero | local | cloud
+# model_tier_floor: "" (deterministic) | qwen3b | flash | gpt-4o-mini | sonnet
+
+# ─────────────────────────── OSS attune (6, free, oss-core) ───────────────────
+
+[[agent]]
+id = "document_classifier"
+tier = "free"
+plugin = "oss-core"
+kind = "deterministic"
+capability_boundary = "文档分类 → 证据 kind + 置信度 + 追问"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "oss/document_classifier_agent_golden_gate"
+route_keywords = []
+route_priority = 0
+[agent.handoff]
+consumes = "RawDocument"
+produces = "DocumentClassification"
+
+[[agent]]
+id = "memory_consolidation"
+tier = "free"
+plugin = "oss-core"
+kind = "llm-judge"
+capability_boundary = "chunk 摘要 → 情景记忆(时间窗、幂等)"
+model_tier_floor = "qwen3b"
+cost_class = "cloud"
+gate = "oss/memory_consolidation_agent_golden_gate"
+route_keywords = []
+route_priority = 0
+[agent.handoff]
+consumes = "ChunkSummaries"
+produces = "EpisodicMemory"
+
+[[agent]]
+id = "linker"
+tier = "free"
+plugin = "oss-core"
+kind = "deterministic"
+capability_boundary = "实体/向量共现 → item 间 LinkKind(how 非 why)"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "oss/linker_golden_gate"
+route_keywords = []
+route_priority = 0
+[agent.handoff]
+consumes = "ItemPair"
+produces = "LinkEdges"
+
+[[agent]]
+id = "chat_reliability"
+tier = "free"
+plugin = "oss-core"
+kind = "deterministic"
+capability_boundary = "RAG 答案 grounding 评分(引用/矛盾/幻觉)"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "oss/chat_reliability_golden_gate"
+route_keywords = []
+route_priority = 0
+[agent.handoff]
+consumes = "RagAnswer"
+produces = "ReliabilityGrade"
+
+[[agent]]
+id = "self_evolving_skill"
+tier = "free"
+plugin = "oss-core"
+kind = "deterministic"
+capability_boundary = "per-query 学习搜索扩展词(SkillClaw 启发式)"
+model_tier_floor = ""
+cost_class = "local"
+gate = "oss/self_evolving_skill_agent_golden_gate"
+route_keywords = []
+route_priority = 0
+[agent.handoff]
+consumes = "SearchQuery"
+produces = "QueryExpansions"
+
+[[agent]]
+id = "skill_evolution_cycle"
+tier = "free"
+plugin = "oss-core"
+kind = "llm-judge"
+capability_boundary = "失败 query 主题聚类 → learned_expansions(topic-keyed)"
+model_tier_floor = "qwen3b"
+cost_class = "cloud"
+gate = "oss/oss_agent_real_llm_gate::skill_evolution"
+route_keywords = []
+route_priority = 0
+[agent.handoff]
+consumes = "FailedQueries"
+produces = "TopicExpansions"
+
+# ─────────────────────── attune-pro law-pro (14, paid) ───────────────────────
+
+[[agent]]
+id = "civil_loan_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "借贷本息合规计算 + 红线"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::civil_loan"
+route_keywords = ["本金", "利息", "借贷", "应付", "应收", "本息"]
+route_priority = 10
+[agent.handoff]
+consumes = "LoanEvidence"
+produces = "LoanComputation"
+
+[[agent]]
+id = "bank_aggregator_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "银行流水聚合 + 交叉验证"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::bank_aggregator"
+route_keywords = ["流水", "银行流水", "交易记录", "到账", "转账明细"]
+route_priority = 9
+[agent.handoff]
+consumes = "BankStatements"
+produces = "AggregatedFlow"
+
+[[agent]]
+id = "fact_extractor"
+tier = "paid"
+plugin = "law-pro"
+kind = "llm-judge"
+capability_boundary = "借条 OCR → 本息事实(grounded)"
+model_tier_floor = "qwen3b"
+cost_class = "cloud"
+gate = "law-pro/agent_golden_gate::fact"
+route_keywords = ["抽取事实", "借条信息", "识别本金", "提取要素"]
+route_priority = 8
+[agent.handoff]
+consumes = "RawCaseText"
+produces = "CaseFacts"
+
+[[agent]]
+id = "limitation_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "诉讼时效日期算术"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::limitation"
+route_keywords = ["诉讼时效", "时效", "过了时效", "三年时效"]
+route_priority = 9
+[agent.handoff]
+consumes = "LimitationDates"
+produces = "LimitationVerdict"
+
+[[agent]]
+id = "evidence_chain_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "证据链印证/矛盾/缺口(描述-only)"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::evidence_chain"
+route_keywords = ["证据链", "证据关系", "证据缺口", "印证", "证据矛盾"]
+route_priority = 9
+[agent.handoff]
+consumes = "EvidenceSet"
+produces = "ChainAnalysis"
+
+[[agent]]
+id = "labor_dispute_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "劳动经济补偿金/赔偿金(劳法47/87)"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::labor_dispute"
+route_keywords = ["经济补偿金", "赔偿金", "违法解除", "劳动争议", "工龄"]
+route_priority = 9
+[agent.handoff]
+consumes = "LaborFacts"
+produces = "LaborComputation"
+
+[[agent]]
+id = "traffic_accident_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "交通责任比例 + 伤残赔偿"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::traffic_accident"
+route_keywords = ["交通事故", "责任比例", "伤残等级", "事故认定", "医疗费"]
+route_priority = 9
+[agent.handoff]
+consumes = "AccidentFacts"
+produces = "TrafficComputation"
+
+[[agent]]
+id = "sale_contract_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "买卖合同违约金(民法典585)"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::sale_contract"
+route_keywords = ["买卖合同", "违约金", "合同价款", "实际损失", "第585条"]
+route_priority = 9
+[agent.handoff]
+consumes = "SaleContractFacts"
+produces = "PenaltyComputation"
+
+[[agent]]
+id = "housing_rent_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "房屋租赁押金/违约金/已付租金"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::housing_rent"
+route_keywords = ["房屋租赁", "租房", "押金", "退租", "租赁合同", "月租金"]
+route_priority = 9
+[agent.handoff]
+consumes = "RentFacts"
+produces = "RentComputation"
+
+[[agent]]
+id = "inheritance_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "法定继承份额(民法典1127/1130/1131)"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::inheritance"
+route_keywords = ["继承", "法定继承", "遗产", "继承人", "份额", "1127", "1130"]
+route_priority = 9
+[agent.handoff]
+consumes = "InheritanceFacts"
+produces = "ShareComputation"
+
+[[agent]]
+id = "defamation_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "名誉权物质损失 + 精神抚慰金区间"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::defamation"
+# Shares the defamation case_kind with defamation_extractor: this deterministic
+# damages-calc agent runs at LOWER priority (7) than the LLM extractor (9) so the
+# extractor leads on routing. Distinct priorities = intentional, non-ambiguous.
+route_keywords = ["名誉权", "名誉损害", "诽谤", "侮辱", "精神损害", "侵权"]
+route_priority = 7
+[agent.handoff]
+consumes = "DefamationFacts"
+produces = "DamageAward"
+
+[[agent]]
+id = "interest_calculator"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "LPR 利息计算引擎(civil_loan 内部调用)"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::interest_calculator"
+route_keywords = []
+route_priority = 0
+[agent.handoff]
+consumes = "InterestParams"
+produces = "InterestAmount"
+
+[[agent]]
+id = "divorce_extractor"
+# A audit: this LLM extractor shares bin/agent_divorce with the deterministic
+# divorce path ("one binary, two agent ids"). The registry now carries a
+# machine-checkable `shares_binary` field for that relationship (validated:
+# target must be a registered agent, may not be self). The deterministic divorce
+# sibling is not currently registered as a separate agent, so this entry owns its
+# binary and leaves shares_binary unset; when the sibling is registered it sets
+# `shares_binary = "divorce_extractor"` (or vice-versa) to make the link explicit.
+tier = "paid"
+plugin = "law-pro"
+kind = "llm-judge"
+capability_boundary = "离婚案情抽取(财产/抚养)"
+model_tier_floor = "qwen3b"
+cost_class = "cloud"
+gate = "law-pro/agent_golden_gate::divorce"
+route_keywords = ["离婚", "婚姻", "财产分割", "抚养权", "夫妻共同财产"]
+route_priority = 8
+[agent.handoff]
+consumes = "RawCaseText"
+produces = "DivorceFacts"
+
+[[agent]]
+id = "defamation_extractor"
+tier = "paid"
+plugin = "law-pro"
+kind = "llm-judge"
+capability_boundary = "名誉权侵权 LLM 抽取(5 要素 + 严重度)"
+model_tier_floor = "gpt-4o-mini"
+cost_class = "cloud"
+gate = "law-pro/agent_golden_gate::defamation"
+# Higher priority (9) than the deterministic defamation_agent (7) — the extractor
+# leads, then hands its DefamationFacts to defamation_agent for the damages calc.
+route_keywords = ["名誉权", "名誉损害", "诽谤", "侮辱", "精神损害", "侵权"]
+route_priority = 9
+[agent.handoff]
+consumes = "CaseFacts"
+produces = "DefamationFacts"
+
+# ─────────────────────── attune-pro tech-pro (1, paid, alpha) ─────────────────
+
+[[agent]]
+id = "code_reviewer"
+tier = "paid"
+plugin = "tech-pro"
+kind = "deterministic"
+capability_boundary = "unified-diff 代码审查(模式 + secret/large-file + team-rule)"
+model_tier_floor = ""
+cost_class = "zero"
+gate = "tech-pro/code_reviewer_golden_gate"
+route_keywords = ["代码库", "PR", "issue", "代码审查"]
+route_priority = 6
+[agent.handoff]
+consumes = "UnifiedDiff"
+produces = "ReviewFindings"
+
+# ─────────── attune-pro law-pro VLM capability (1, paid, manual) ──────────────
+
+[[agent]]
+id = "evidence_classifier"
+tier = "paid"
+plugin = "law-pro"
+kind = "vlm"
+capability_boundary = "证据图片 28-class 视觉分类(VLM)"
+model_tier_floor = "sonnet"
+cost_class = "cloud"
+gate = "law-pro/evidence_classifier_golden_gate"
+route_keywords = []
+route_priority = 0
+[agent.handoff]
+consumes = "EvidenceImage"
+produces = "EvidenceClass"
