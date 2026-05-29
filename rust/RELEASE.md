@@ -1,31 +1,61 @@
 # attune 版本记录
 
-## v1.1.0-acp (develop 累积, pre-release) — Agent Control Plane
+## v1.1.0 (2026-XX-XX) — Agent Control Plane (ACP)
 
-> ACP 治理 capability 跨多 minor (acp.1 → acp.6), 在 develop 累积, v1.1.0 GA 时统一打 tag.
-> spec: `docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md`.
+> 把 22 个产品 agent 当一个工程组织治理. ACP-1~7 七子系统跨多 minor (acp.1 → acp.6)
+> 在 develop 累积, GA 统一打 tag. spec:
+> `docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md`.
+> (tag 时把日期填实.)
 
 ### Highlights
 
-**acp.2 — 统一质量门编排 + OSS gate + real-LLM 入 nightly**
-- `rust/agent_quality_manifest.yaml` — workspace 级质量门 SSOT, 上提 law-pro `thresholds.yaml`
-  模式. 录全 11 gate (8 attune-side machine-checkable + 3 attune-pro external),
-  metric_kind 闭合白名单 (11 词汇) 统一散落词汇.
-- `attune_core::agent_quality` + `tests/agent_gate_orchestrator.rs` — 机器可检 ratchet
-  (只升不降, 降阈值 fail PR), roll-up dashboard (total == sum-of-parts), `#[ignore]` 突增守卫
-  (实扫 tests/, baseline 35 + 2 预算). 接入 `ci.yml` 作 PR 硬门.
-- `attune agent gate` CLI — 跑 orchestrator + 输出 roll-up pass-rate dashboard (spec §5.5).
-- `.github/workflows/nightly-real-llm.yml` — 把孤儿 `oss_agent_real_llm_gate.rs` 接入
-  nightly (cron + dispatch), 防 mock-0.99/real-0.09 式回归对 OSS memory/skill agent 复发.
+**ACP-1 — Agent Registry (中央目录 + typed handoff)**
+- 22 agent 中央注册表 + 声明式 consumes/produces 类型契约 — 自主流转 (ACP-5) 的地基.
 
-**acp.1 — ACP-4 Cost Governor (前序, 已 land 982ebc0)**
+**ACP-3 — 监控 / 反馈闭环**
+- `agent×model` 失败 telemetry (§4.5-F, 从零建): parse/grounding/timeout 分类 + 失败 outcome
+  接进 governor telemetry; (agent×model) 失败率 > 30% 触发 "切高 tier" UI 提示.
+- `FeedbackController` 闭环: fail-rate → TuningAction + skill_evolution channel
+  (确定性 agent 永不被自动 tune — §2.3 红线测试守).
+
+**ACP-4 — Cost Governor (前序, 已 land 982ebc0)**
 - A1 cache/usage frozen island 接进 chat/embed 真路径 + output token cap + CoT budget.
 
+**ACP-5 — 自主流转 (declarative DAG flow executor)**
+- `agent_flows.toml` 声明式 DAG + load 时 typed-handoff 校验 (A.produces != B.consumes /
+  shadow agent 直接拒).
+- Flow executor + 4 保证: ① 类型安全衔接 ② 每步可治理 (经 scheduler+governor+telemetry)
+  ③ 优雅降级 (绝不 cascade / 绝不 panic, proptest 全子集覆盖) ④ 可审计 (每步 StepTrace).
+- 生产 `GovernedStepRunner` 真接 `governed_chat` + UsageAggregator.
+- **chat 路径装配 (本期闭环)**: `routes/chat.rs` 从 IntentRouter-only → `resolve_flow →
+  GovernedStepRunner → run_flow` 沿 typed-handoff DAG. 单 agent / 无匹配回退向后兼容
+  (RAG/grounding/citations/cost 不变), flow 命中则附加 `acp_flow` 响应块. §2.2 真起服验证:
+  defamation 消息真返回 `acp_flow.flow_id=legal_defamation` + degraded 非静默 + content 完好.
+- intent routing 扩 flow 路由 (声明 flow 优先, 无匹配合成 1-step, 现有 chat_trigger 13 测不变).
+
+**ACP-6 — 自迭代状态保留 + schema 版本门**
+- `PRAGMA user_version` schema gate (fresh/old vault 懒标记非破坏, future vault 不降级) +
+  versioned `agent_state` 表 (plugin_id scope, payload DEK 加密).
+- learned-state migration + orphan quarantine (§2.3 红线: 无 migrator 的行 copy 到
+  `agent_state_orphans` 保留密文, 原行**绝不删**; VACUUM INTO 先备份).
+- plugin 升级 user-accumulated state 不丢 (E2E: 装 law-pro v1.0.5 → 升 v1.0.6, 2 行 state 完好).
+
+**ACP-7 — 成本调度**
+- cost-aware scheduler: entitlement + cost-class 路由 (qwen3b-floor 降本地 / gpt-4o-mini-floor
+  走 BlockedQuotaExhausted 拒绝静默降质 / free 用户 BlockedEntitlement).
+
+**统一质量门 (acp.2) + CLI**
+- `rust/agent_quality_manifest.yaml` workspace 级质量门 SSOT (11 gate), `attune_core::agent_quality`
+  + `agent_gate_orchestrator.rs` 机器可检 ratchet (只升不降) + roll-up dashboard + `#[ignore]`
+  突增守卫, 接 `ci.yml` PR 硬门; `nightly-real-llm.yml` 把孤儿 real-LLM gate 接 nightly.
+- CLI: `attune agent registry|health|gate|tune --dry-run|flow list|run`.
+
 ### Breaking
-- 无. ACP 是控制面叠加, 不重写任何 agent 的 correctness / prompt / schema.
+- 无. ACP 是控制面叠加, 不重写任何 agent 的 correctness / prompt / schema (spec 决策 #4).
 
 ### Migration
-- 无. 新增 manifest + 测试 + workflow + CLI 子命令, 老行为不变.
+- 无. 新增 manifest + 测试 + workflow + CLI 子命令 + agent_state 表 (懒建, 老 vault 自动升级).
+  老行为不变; chat 路径 flow 装配对未命中 flow 的请求完全向后兼容.
 
 ### Known Limitations
 - **OSS real-LLM gate 仍 `#[ignore]`** — 需 self-hosted Ollama runner (per
@@ -39,6 +69,12 @@
   仍靠 code-review 拦, 非 git-diff 强制. 后续可加 git-history 比对.
 - **self_evolving_skill legacy-overlap**: 与历史 skill_evolution learning loop 共用模块,
   registry dedupe 推 v1.2 (spec R6 / 决策 #4: 本 capability 只治理不重构 agent).
+- **OSS-only 安装 `legal_defamation` flow 必 degrade**: 该 flow 含 paid agent, 免费用户
+  entitlement 拦截 → status=degraded (reason 入 trace, 非静默). 设计如此, 非 bug.
+- **flow 内 deterministic step 待 agent-binary dispatch**: 当前 flow 装配覆盖 LLM step 经
+  GovernedStepRunner; deterministic sibling 的 binary dispatch 是 follow-up minor.
+- **Web UI 暂不渲染 `acp_flow` 响应块**: 后端已附 `acp_flow` 到 chat 响应, 前端渲染待
+  frontend follow-up (当前对用户透明, 不影响 content/citations/cost 显示).
 
 ## v1.0.7 (2026-05-28) — Privacy regression hotfix
 
