@@ -12,10 +12,10 @@ Attune is a generic personal AI knowledge base for **any individual knowledge wo
 
 ## 📥 Download
 
-Latest stable: **server v0.7.0** · **desktop v0.7.0**
-In flight: **v1.0.0-rc.2** (2026-05-22) — GA 2026-05-25. See [`rust/RELEASE.md`](rust/RELEASE.md#v100--私有-ai-知识伙伴-ga2026-05-25-计划上架) for v1.0 highlights.
+Latest stable: **server v1.1.0** · **desktop v1.1.0** — GA 2026-05-30, Agent Control Plane (ACP).
+See [`rust/RELEASE.md`](rust/RELEASE.md) for v1.1.0 highlights (ACP-1~7 + chat-flow wiring).
 
-### Desktop app (Web UI + system tray) — [desktop-v0.7.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v0.7.0)
+### Desktop app (Web UI + system tray) — [desktop-v1.1.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v1.1.0)
 
 | Platform | File | Size | Notes |
 |----------|------|------|-------|
@@ -56,7 +56,7 @@ sudo dnf install attune
 
 The Tauri desktop app also has a **built-in auto-updater** — once installed, new versions arrive in-app without you touching a CLI. Full guide and troubleshooting: [`docs/install-package-managers.md`](docs/install-package-managers.md).
 
-## v1.0 GA highlights (in flight, 2026-05-25) — 私有 AI 知识伙伴
+## v1.0 GA highlights (shipped 2026-05-25; current GA v1.1.0 ACP) — 私有 AI 知识伙伴
 
 > v1.0 = v0.7 记忆护城河 + v0.7.1 办公助理 + 4 个 OSS deterministic / heuristic agent + 真 LLM verification gate。完整 changelog 见 [`rust/RELEASE.md`](rust/RELEASE.md#v100--私有-ai-知识伙伴-ga2026-05-25-计划上架)。
 
