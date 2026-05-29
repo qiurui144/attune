@@ -66,6 +66,9 @@ pub mod async_fs;
 // Public surface frozen at Task M for Plan A2 routing consumers.
 pub mod cache;
 pub mod usage;
+// agent_quality: ACP-2 unified quality gate orchestration (workspace manifest SSOT).
+// spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §3 ACP-2
+pub mod agent_quality;
 
 // ── Plan A1 Task M: frozen public API surface for Plan A2 routing consumers ──
 //
