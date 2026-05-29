@@ -7,6 +7,7 @@
 
 pub mod document_classifier;
 pub mod flow;
+pub mod flow_runner;
 pub mod registry;
 pub mod scheduler;
 
