@@ -30,6 +30,8 @@ pub mod agent_telemetry;  // ACP-3 §4.5-F: per-(agent×model) failure-rate roll
 pub mod cache;            // Plan A1 Task D: llm_cache / embed_cache CRUD
 pub mod agent_state;      // ACP-6: versioned, plugin-scoped, encrypted learned/user state
 pub use agent_state::{AgentStateKind, AgentStateRow};
+pub mod state_migration;  // ACP-6 Task 3: learned-state migration + orphan quarantine (§2.3)
+pub use state_migration::{MigratedRow, MigrationReport, MigrationStep, OrphanRow};
 
 pub use types::*;
 
@@ -616,6 +618,23 @@ CREATE TABLE IF NOT EXISTS agent_state (
     PRIMARY KEY (agent_id, plugin_id, state_kind)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_state_plugin ON agent_state(plugin_id);
+
+-- ── ACP-6 orphan quarantine (§2.3 red line: migration NEVER silently drops user
+--    learned state). When a learned-state migration finds a row no registered
+--    migrator can advance (e.g. plugin renamed agent-id / changed key format with
+--    no migrator), the row is COPIED here (payload kept as-is, still DEK-encrypted)
+--    and flagged — never deleted. Recoverable: a later plugin version shipping a
+--    migrator can re-claim it. `detected_at` + `reason` aid diagnosis.
+CREATE TABLE IF NOT EXISTS agent_state_orphans (
+    agent_id       TEXT NOT NULL,
+    plugin_id      TEXT NOT NULL,
+    state_kind     TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,                    -- the (stale) version the row was at
+    payload        BLOB NOT NULL,                       -- preserved ciphertext (recoverable)
+    reason         TEXT NOT NULL,                       -- e.g. "no migrator for v1->v2"
+    detected_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (agent_id, plugin_id, state_kind, schema_version)
+);
 "#;
 
 pub struct Store {
