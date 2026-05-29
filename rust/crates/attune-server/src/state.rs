@@ -111,6 +111,18 @@ pub struct AppState {
     /// default; SqliteEncryptedCache can be installed via `set_cache_backend`
     /// once the vault is unlocked).
     pub cache_backend: Mutex<Option<std::sync::Arc<dyn attune_core::cache::CacheBackend>>>,
+    /// ACP-5 (2026-05-29): the workspace agent registry + declarative flow DAGs
+    /// (`agents.registry.toml` + `agent_flows.toml`), loaded + typed-handoff
+    /// validated once at startup. `None` when the files are absent (an OSS install
+    /// shipping no agents) or fail to load — the chat path then never runs a flow
+    /// and falls back to free-form RAG (spec §7 / §11 R8, never hard-fail chat).
+    /// `Arc` so the chat handler can clone a cheap handle out of `&AppState`.
+    pub agent_flows: Option<
+        std::sync::Arc<(
+            attune_core::agents::flow::FlowSet,
+            attune_core::agents::registry::AgentRegistry,
+        )>,
+    >,
 }
 
 impl AppState {
@@ -193,6 +205,26 @@ impl AppState {
             cache_backend: Mutex::new(Some(std::sync::Arc::new(
                 attune_core::cache::memory::MemoryLruCache::new(512),
             ))),
+            // ACP-5: load + validate the workspace flow DAGs once at startup.
+            // Absent files / parse / validation failure → None (chat degrades to
+            // free-form RAG; never panic — spec §11 R8).
+            agent_flows: match attune_core::agents::load_workspace_flows(
+                "agents.registry.toml",
+                "agent_flows.toml",
+            ) {
+                Ok((flows, reg)) => {
+                    tracing::info!(
+                        "ACP-5: loaded {} agent flows, {} agents from workspace",
+                        flows.len(),
+                        reg.len()
+                    );
+                    Some(std::sync::Arc::new((flows, reg)))
+                }
+                Err(e) => {
+                    tracing::info!("ACP-5: no agent flows loaded ({e}); chat uses free-form RAG only");
+                    None
+                }
+            },
         }
     }
 
