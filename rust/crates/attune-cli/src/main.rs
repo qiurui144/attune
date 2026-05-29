@@ -261,6 +261,25 @@ enum Commands {
     },
     /// v1.0.1 C4: 强制升级前备份 — `vault.db` → `vault.db.bak.<stamp>`,自动 retention 5 份。
     PreUpgradeBackup,
+    /// ACP-2: Agent governance & quality observability (no vault required).
+    /// spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §5.5
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Run the unified quality-gate orchestrator and print the roll-up
+    /// pass-rate dashboard (reads `agent_quality_manifest.yaml`). Exits non-zero
+    /// if the ratchet (only-up) is violated. Per spec §5.5 `attune agent gate`.
+    Gate {
+        /// Path to the workspace quality manifest (default: auto-locate
+        /// `agent_quality_manifest.yaml` next to the running binary's workspace).
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+    },
 }
 
 /// CLI exit code protocol (D5.7).
@@ -348,6 +367,10 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         // v1.0.1 C4 — backup/rollback 不需要 vault 已 unlock(直接操作 vault.db 文件)
         Commands::Rollback { index, yes } => return run_rollback(*index, *yes),
         Commands::PreUpgradeBackup => return run_pre_upgrade_backup(),
+        // ACP-2: agent governance commands operate on the workspace manifest, no vault.
+        Commands::Agent { action } => match action {
+            AgentAction::Gate { manifest } => return run_agent_gate(manifest.as_deref()),
+        },
         // VaultImport must run BEFORE Vault::open_default() — open() auto-creates vault.db
         // via Connection::open(), which would make the "already exists" guard always trigger.
         Commands::VaultImport { src, force } => {
@@ -614,8 +637,9 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         | Commands::PluginPublish { .. }
         | Commands::OcrProfileList | Commands::OcrProfileShow { .. }
         | Commands::OcrProfileCreate { .. } | Commands::OcrProfileDelete { .. }
-        | Commands::Rollback { .. } | Commands::PreUpgradeBackup => {
-            unreachable!("plugin/cloud/ocr-profile commands handled before vault open")
+        | Commands::Rollback { .. } | Commands::PreUpgradeBackup
+        | Commands::Agent { .. } => {
+            unreachable!("plugin/cloud/ocr-profile/agent commands handled before vault open")
         }
     }
     Ok(())
@@ -1297,6 +1321,59 @@ fn run_pre_upgrade_backup() -> attune_core::error::Result<()> {
     eprintln!("  size: {} bytes", entry.size);
     eprintln!("  stamp: {}", entry.stamp);
     Ok(())
+}
+
+/// ACP-2: `attune agent gate` — run the unified quality-gate orchestrator and
+/// print the roll-up pass-rate dashboard. Exits non-zero (InvalidInput) when the
+/// ratchet (only-up) is violated. Per spec §5.5.
+fn run_agent_gate(manifest: Option<&std::path::Path>) -> attune_core::error::Result<()> {
+    let path = match manifest {
+        Some(p) => p.to_path_buf(),
+        None => locate_quality_manifest().ok_or_else(|| {
+            attune_core::error::VaultError::NotFound(
+                "agent_quality_manifest.yaml not found — pass --manifest <path> or run from \
+                 the workspace (searched CWD ancestors and the binary directory)"
+                    .to_string(),
+            )
+        })?,
+    };
+    let (dashboard, pass) = attune_core::agent_quality::run_orchestrator(&path)
+        .map_err(attune_core::error::VaultError::InvalidInput)?;
+    print!("{dashboard}");
+    if !pass {
+        return Err(attune_core::error::VaultError::InvalidInput(
+            "agent quality gate FAILED: ratchet (only-up) violated — see dashboard above"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Locate `agent_quality_manifest.yaml` by walking up from the current working
+/// directory, then trying the binary's directory ancestors. Cross-platform
+/// (no hardcoded separators).
+fn locate_quality_manifest() -> Option<std::path::PathBuf> {
+    const NAME: &str = "agent_quality_manifest.yaml";
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+        }
+    }
+    for root in roots {
+        let mut cur: Option<&std::path::Path> = Some(root.as_path());
+        while let Some(dir) = cur {
+            let candidate = dir.join(NAME);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            cur = dir.parent();
+        }
+    }
+    None
 }
 
 /// v1.0.1 C4: `attune rollback [--index N]` — 列出 / 回滚 vault 备份。
