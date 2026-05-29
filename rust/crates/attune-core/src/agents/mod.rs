@@ -8,6 +8,7 @@
 pub mod document_classifier;
 pub mod flow;
 pub mod registry;
+pub mod scheduler;
 
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
