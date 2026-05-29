@@ -62,7 +62,37 @@ still run + are telemetered.
 
 ## 4. User-first verification (§2.2)
 
-<!-- FILLED IN §6 below -->
+**Real product entry, real HTTP, real server — not mock.**
+
+1. Built the real `attune-server-headless` binary (`target/debug/attune-server-headless`, 250 MB).
+2. Booted it with an isolated `HOME=/tmp/acp5-verify-home`, `--no-auth --port 18977`.
+   - **Startup log (live evidence)**: `ACP-5: loaded 1 agent flows, 22 agents from workspace` — the wiring loads + validates the flow DAG at boot.
+3. Drove the **product HTTP API** (not a backdoor): `POST /api/v1/vault/setup` → `POST /api/v1/vault/unlock` → `PATCH /api/v1/settings {llm}` → `POST /api/v1/chat`.
+4. Sent a real defamation message: `"对方在朋友圈公开诽谤侮辱我，损害我的名誉权，我能索赔精神损害吗"`.
+
+**Result (HTTP 200):**
+```json
+{
+  "acp_flow": {
+    "flow_id": "legal_defamation",
+    "status": "degraded",
+    "steps": [
+      { "agent_id": "fact_extractor",       "ran": false, "note": "blocked (entitlement): agent fact_extractor requires a paid plan (tier…" },
+      { "agent_id": "defamation_extractor", "ran": false, "note": "blocked (entitlement): agent defamation_extractor requires a paid plan…" }
+    ],
+    "final_type": "RawCaseText"
+  }
+}
+```
+Evidence JSON: `docs/reports/acp5-verify/chat-response-evidence.json`.
+
+**What this proves:**
+- The chat path now **routes through the flow engine**: a real defamation message resolved to the declared multi-step `legal_defamation` flow and ran through `run_chat_flow` → `run_flow`.
+- **Entitlement gating works in production** (ACP-7): the test user is free (not paid), so the paid agent steps were blocked by entitlement and the flow **degraded** — recorded in the trace with the reason, **not a silent quality-drop** (§2.3). No panic, no cascade (§11 R8).
+- **No regression**: the same response carried a 292-char `content`, a `citations` array, `cost_estimate`, and `grounding` — the free-form RAG path is fully intact; `acp_flow` is purely additive.
+- The LLM-step *execution* path (paid → step runs + telemetry) is proven by the integration test `defamation_message_runs_flow_through_governed_runner` (upstream LLM call made + usage_events row written). The live free-user run proves the routing + degrade gate; together they cover both branches.
+
+Test server stopped + isolated home discarded after verification (§4.3).
 
 ## 5. Commits (each task independently committed + pushed for durability)
 
@@ -70,7 +100,7 @@ still run + are telemetered.
 |------|-----|--------|
 | 1 — workspace flow loader | `65cb4ee` | `origin/acp-chat-flow-wiring` |
 | 2 — run_chat_flow module | `e274a25` | `origin/acp-chat-flow-wiring` |
-| 3 — chat.rs + state.rs wire | `<TASK3_SHA>` | `origin/acp-chat-flow-wiring` |
+| 3 — chat.rs + state.rs wire | `2236c33` | `origin/acp-chat-flow-wiring` |
 
 (Per §worktree isolation: commits live on the feature branch and are pushed there
 for crash-durability; final `develop` integration is the merge step at completion,
@@ -78,8 +108,25 @@ left to the controller per the task's tag/merge guard.)
 
 ## 6. Green gate (real numbers)
 
-<!-- FILLED IN below -->
+| Suite | Result |
+|-------|--------|
+| `cargo test -p attune-core --lib` | **1499 passed, 0 failed, 1 ignored** (was 1496; +3 new agents loader tests + my locator) |
+| `cargo test -p attune-server --lib` | **101 passed, 0 failed** (includes 6 new `acp_chat::tests`) |
+| `cargo test -p attune-server --tests --no-fail-fast` (all integration binaries) | **261 passed, 0 failed**, 0 FAILED across ~30 test binaries (incl. new `acp5_chat_flow_wire_test` 3/3 + `acp4_governor_wire_test` 2/2) |
+| `cargo clippy -p attune-core -p attune-server --lib -- -D warnings` | **clean, EXIT 0** |
+
+Note: a full `cargo test -p attune-server` (lib + all integration binaries in one invocation) exceeds 30 min wall-clock due to ollama-touching + model-download integration tests; it was split (lib + `--tests --no-fail-fast`) and both are green. The only clippy *warning* anywhere is a **pre-existing** `unsafe { set_var }` in `tests/privacy_endpoints_test.rs:44` (untouched by this work; same pattern as the existing `acp4_governor_wire_test`) — not a regression, not in any modified file.
+
+`agent_golden_gate`: not applicable — OSS attune-core ships no domain agent / golden gate (per CLAUDE.md). This work routes only (§2.3 — never reimplements an agent's computation), so no gate is affected.
 
 ## 7. v1.1.0 ready assessment
 
-<!-- FILLED IN below -->
+**The ACP chain on `origin/develop` (+ this branch) is now complete and green:** ACP-1…7 shipped, and the previously-missing chat-path wiring (ACP-6 concern #1) is closed — real chat requests flow through `resolve_flow → GovernedStepRunner → run_flow` with all 4 guarantees, graceful degrade, and entitlement gating, verified live on the real server.
+
+**Ready for v1.1.0 tag consideration**, pending the §7.2 four-gate review by the controller:
+- **Gate 1 (docs)**: this report added; RELEASE.md needs a `v1.1.0` Highlights/Breaking/Migration/Known-Limitations section before tag (NOT done here — left to release step).
+- **Gate 2 (code)**: tests green (1499 + 101 + 261), clippy `-D warnings` clean on lib. ✅
+- **Gate 3 (functional)**: live user-first verification of the headline feature (autonomous chat flow) passed end-to-end. ✅
+- **Gate 4 (gaps / Known Limitations)**: (a) the canonical `legal_defamation` flow's agents are all `law-pro` (paid) — in OSS-only installs every step blocks on entitlement → the flow always degrades (correct, but means OSS users see no *completed* multi-step flow until attune-pro is installed and the user is paid). (b) deterministic agent steps in the server process have no embedded binary → degrade; full deterministic execution needs the agent-binary dispatch path (a follow-up). (c) the `acp_flow` block is wired into the JSON response but the **Web UI does not yet render it** — a frontend surfacing task (out of scope here).
+
+**Recommendation**: merge `acp-chat-flow-wiring` → `develop`, then the controller decides on `develop → main --no-ff` + `v1.1.0` after adding the RELEASE.md section (Gate 1) and confirming the four gates. **This agent did NOT merge main or tag** (per task instruction — left to controller).

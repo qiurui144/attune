@@ -1,0 +1,32 @@
+{
+  "note": "live user-first: real headless server :18977 + real POST /api/v1/chat. acp_flow routed to legal_defamation; free-user entitlement gate degraded (not silent). RAG path intact.",
+  "http_status": 200,
+  "rag_path_intact": {
+    "content_len": 292,
+    "citations_is_array": true,
+    "cost_estimate_present": true,
+    "grounding_present": true
+  },
+  "acp_flow": {
+    "final_type": "RawCaseText",
+    "final_value": {
+      "text": "对方公开诽谤侮辱损害我的名誉权，精神损害赔偿"
+    },
+    "flow_id": "legal_defamation",
+    "status": "degraded",
+    "steps": [
+      {
+        "agent_id": "fact_extractor",
+        "degraded": false,
+        "note": "blocked (entitlement): agent fact_extractor requires a paid plan (tier=paid)",
+        "ran": false
+      },
+      {
+        "agent_id": "defamation_extractor",
+        "degraded": false,
+        "note": "blocked (entitlement): agent defamation_extractor requires a paid plan (tier=paid)",
+        "ran": false
+      }
+    ]
+  }
+}
