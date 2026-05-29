@@ -204,6 +204,73 @@ async fn governed_call(req: LlmRequest, agent: &AgentMeta) -> Result<(String, To
 }
 ```
 
+### 5.3b ACP-5 自主流转(Autonomous Flow)— 插件间工程协作落地 ⭐
+
+> 用户 2026-05-29 重申:"确保插件的自主流转能力 / agents 之间是工程协作的关系"。
+> 本节把 ACP-5 从"单 agent 路由"升级为 **声明式 flow DAG** —— work 在 agent 间**自主流转**,无需人工逐次拼接,但流转链**人工声明**(不是 agent 自主 spawn agent,后者 per §2.2 推 v2.x)。
+
+**三层抽象**:
+
+```
+用户 intent ──► [Intent Router] ──► flow_id ──► [Flow Executor 跑 DAG]
+                  按 keyword/优先级匹配         按声明的 typed handoff 链逐步传递
+                                                每步:ACP-7 调度 + ACP-4 成本治理 + ACP-3 telemetry
+```
+
+**① Typed Handoff 契约(registry 已声明 consumes/produces)**
+
+flow 合法当且仅当 上游 `produces` ⊇ 下游 `consumes`(编译期校验,防错接):
+```
+fact_extractor   : consumes RawCaseText      produces CaseFacts
+defamation_judge : consumes CaseFacts        produces DefamationVerdict
+citation_linker  : consumes DefamationVerdict produces CitedVerdict
+```
+
+**② 声明式 Flow DAG(`agent_flows.toml`,human-authored,可审计)**
+```toml
+[[flow]]
+id = "legal_defamation"
+route_keywords = ["名誉", "诽谤", "侮辱"]   # router 匹配入口
+route_priority = 9
+steps = ["fact_extractor", "defamation_judge", "citation_linker"]  # DAG 链
+[flow.degrade]
+optional = ["citation_linker"]   # 此步失败/quota 耗尽 → 跳过,返回部分结果(不 hard-fail)
+on_step_fail = "partial"         # partial | abort | fallback_agent
+```
+
+**③ Flow Executor(自主流转引擎,attune-core/src/agents/flow.rs 新)**
+```rust
+async fn run_flow(flow: &FlowDef, input: RawInput, acp: &ControlPlane) -> FlowResult {
+    let mut payload = input.into_typed();
+    for step in &flow.steps {
+        let agent = acp.registry.get(step)?;            // ACP-1 目录
+        if acp.feedback.is_disabled(step) {             // ACP-3 监控:被 disable 的 agent
+            if flow.is_optional(step) { continue; }     // 自主降级:可选步跳过
+            else { return FlowResult::degraded(payload, step); }
+        }
+        let scheduled = acp.scheduler.route(agent, payload.cost_hint());  // ACP-7 成本调度
+        let out = acp.governor.governed_call(scheduled).await;            // ACP-4 成本治理(cache/cap)
+        acp.telemetry.record(step, &out);               // ACP-3 监控-微调
+        match out {
+            Ok(typed) => payload = typed,               // 自主流转:上游输出 → 下游输入
+            Err(e) if flow.is_optional(step) => continue,           // 可选步失败 → 跳
+            Err(e) => return flow.on_fail(payload, step, e),        // partial / abort / fallback
+        }
+    }
+    FlowResult::complete(payload)
+}
+```
+
+**自主流转的 4 个保证**(= 你说的"工程协作 + 可靠稳定运行"):
+1. **类型安全衔接** — handoff 契约编译期校验,上下游类型不匹配 build 拒绝(防运行时错接)
+2. **每步可治理** — 流转每一跳都过 ACP-7 调度 + ACP-4 成本 + ACP-3 telemetry,不是黑盒
+3. **优雅降级** — 某 agent 被 disable(ACP-3)/ quota 耗尽(ACP-7)/ 失败 → 按 `degrade` 策略跳过可选步或返回部分结果,**绝不 cascade fail**(per §11 R8 控制面单点防护)
+4. **可审计** — flow DAG 是声明式 TOML,每步 telemetry 留痕,可重放可诊断
+
+**与现有 intent_router 的关系**(A audit):现 `intent_router.rs` 是单 agent keyword 路由。ACP-5 扩它为 **flow 路由** —— 匹配到 flow_id 而非单 agent;单 agent 退化为 `steps=[single]` 的 1-step flow(向后兼容,per §10)。
+
+**dedupe 落点**(A audit 职责重叠):defamation det+LLM 双 agent → 重构为一条 flow(det 算 facts → LLM judge);divorce 双 id → registry 标 alias 指同 binary。
+
 ### 5.4 ACP-6 agent_state schema 版本契约
 ```sql
 -- vault DB
@@ -325,7 +392,7 @@ per 产品 cost & trigger contract 三层:
 | **v1.1.0-acp.3** | ACP-1 Registry + ACP-3 Telemetry | agents.registry.toml(22 注册)+ AgentTelemetry §4.5-F 实现 | main | acp.2 |
 | **v1.1.0-acp.4** | ACP-3 FeedbackController loop 闭环 | fail-rate→tuning action + skill_evolution 接为 channel | main | acp.3 |
 | **v1.1.0-acp.5** | ACP-6 State 保留 + schema 版本门 | PRAGMA user_version + agent_state + plugin_id scope + orphan 侦测 | main | acp.3 |
-| **v1.1.0-acp.6** | ACP-7 成本调度 + ACP-5 协作契约 | scheduler(free/paid×cost)+ handoff schema + overlap/void 侦测 | main | acp.4 |
+| **v1.1.0-acp.6** | ACP-7 成本调度 + **ACP-5 自主流转**(⭐ 插件协作)| scheduler(free/paid×cost)+ **flow executor + agent_flows.toml DAG + typed handoff + 优雅降级**(per §5.3b)+ intent_router 扩 flow 路由 + dedupe defamation/divorce | main | acp.3 |
 | **v1.2.0** | 能力空洞填充(独立 capability,新 spec)| tech/patent/presales agent + dedupe defamation/divorce | main | acp 全 |
 
 **并行机会**:acp.4(feedback loop)/ acp.5(state)/ acp.6(scheduler)三者均 blockedBy acp.3 但相互独立 → 3 worktree 同跑(per §并行开发,≤ 5-6 worktree 上限)。
