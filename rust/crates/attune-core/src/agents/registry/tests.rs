@@ -314,6 +314,25 @@ fn no_route_conflicts_when_keywords_disjoint() {
     assert!(reg.route_conflicts().is_empty());
 }
 
+// ── directory render (CLI §5.5) ─────────────────────────────────────────
+
+#[test]
+fn render_directory_lists_all_agents_with_columns() {
+    let reg = load_shipped();
+    let out = reg.render_directory();
+    assert!(out.contains("Agent Registry — 22 agents"));
+    // grouped headers per plugin
+    assert!(out.contains("[oss-core]"));
+    assert!(out.contains("[law-pro]"));
+    assert!(out.contains("[tech-pro]"));
+    // representative agents + their columns
+    assert!(out.contains("document_classifier"));
+    assert!(out.contains("defamation_extractor"));
+    assert!(out.contains("gpt-4o-mini"), "model floor column shown");
+    assert!(out.contains("handoff:"), "handoff chain rendered");
+    assert!(out.contains("gate="), "gate binding rendered");
+}
+
 // ── property tests (spec §9: 随机 agent 组合校验) ────────────────────────
 
 use proptest::prelude::*;

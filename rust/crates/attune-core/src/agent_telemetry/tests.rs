@@ -225,6 +225,28 @@ fn record_agent_call_best_effort_swallows_error() {
     assert_eq!(health.len(), 1);
 }
 
+// ── health dashboard render (CLI §5.5) ──────────────────────────────────
+
+#[test]
+fn render_health_empty_is_friendly() {
+    let out = render_health(&[]);
+    assert!(out.contains("no agent calls recorded"));
+}
+
+#[test]
+fn render_health_flags_only_above_threshold() {
+    let rows = vec![
+        AgentModelHealth::new("defamation_extractor".into(), "qwen2.5:3b".into(), 10, 5), // 0.5 → flag
+        AgentModelHealth::new("fact_extractor".into(), "qwen2.5:3b".into(), 10, 1),        // 0.1 → no flag
+    ];
+    let out = render_health(&rows);
+    assert!(out.contains("defamation_extractor"));
+    assert!(out.contains("fact_extractor"));
+    assert!(out.contains("switch to higher tier"), "high-failure row flagged");
+    // The flag must attach to the defamation row only — count occurrences.
+    assert_eq!(out.matches("switch to higher tier").count(), 1);
+}
+
 // ── proptest: any outcome sequence yields a consistent roll-up ───────────
 
 use proptest::prelude::*;

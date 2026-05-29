@@ -280,6 +280,25 @@ enum AgentAction {
         #[arg(long)]
         manifest: Option<std::path::PathBuf>,
     },
+    /// ACP-1: print the agent directory — every registered agent with tier /
+    /// kind / cost / capability boundary / bound quality gate / typed handoff.
+    /// Reads `agents.registry.toml` (no vault required). Per spec §5.5.
+    Registry {
+        /// Path to the registry (default: auto-locate `agents.registry.toml`).
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+    },
+    /// ACP-3: print per-(agent × model) failure-rate telemetry (§4.5-F). Rows
+    /// above the 30% alert threshold are flagged "switch to higher tier".
+    /// Requires an unlocked vault (telemetry lives in usage_events). Per spec §5.5.
+    Health {
+        /// Window start (Unix epoch ms; default 0 = all history).
+        #[arg(long, default_value_t = 0)]
+        from_ms: i64,
+        /// Window end (Unix epoch ms; default = now).
+        #[arg(long)]
+        to_ms: Option<i64>,
+    },
 }
 
 /// CLI exit code protocol (D5.7).
@@ -367,9 +386,14 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         // v1.0.1 C4 — backup/rollback 不需要 vault 已 unlock(直接操作 vault.db 文件)
         Commands::Rollback { index, yes } => return run_rollback(*index, *yes),
         Commands::PreUpgradeBackup => return run_pre_upgrade_backup(),
-        // ACP-2: agent governance commands operate on the workspace manifest, no vault.
+        // ACP-2/ACP-1: gate + registry operate on workspace files, no vault.
+        // ACP-3 health needs the unlocked vault → falls through to the post-open match.
         Commands::Agent { action } => match action {
             AgentAction::Gate { manifest } => return run_agent_gate(manifest.as_deref()),
+            AgentAction::Registry { registry } => {
+                return run_agent_registry(registry.as_deref())
+            }
+            AgentAction::Health { .. } => {} // handled after vault open
         },
         // VaultImport must run BEFORE Vault::open_default() — open() auto-creates vault.db
         // via Connection::open(), which would make the "already exists" guard always trigger.
@@ -637,10 +661,19 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         | Commands::PluginPublish { .. }
         | Commands::OcrProfileList | Commands::OcrProfileShow { .. }
         | Commands::OcrProfileCreate { .. } | Commands::OcrProfileDelete { .. }
-        | Commands::Rollback { .. } | Commands::PreUpgradeBackup
-        | Commands::Agent { .. } => {
-            unreachable!("plugin/cloud/ocr-profile/agent commands handled before vault open")
+        | Commands::Rollback { .. } | Commands::PreUpgradeBackup => {
+            unreachable!("plugin/cloud/ocr-profile commands handled before vault open")
         }
+        // ACP-3: `attune agent health` needs the unlocked vault (telemetry lives
+        // in usage_events). Gate + Registry already early-returned vault-free.
+        Commands::Agent { action } => match action {
+            AgentAction::Health { from_ms, to_ms } => {
+                return run_agent_health(&vault, from_ms, to_ms);
+            }
+            AgentAction::Gate { .. } | AgentAction::Registry { .. } => {
+                unreachable!("agent gate/registry handled before vault open")
+            }
+        },
     }
     Ok(())
 }
@@ -1349,11 +1382,50 @@ fn run_agent_gate(manifest: Option<&std::path::Path>) -> attune_core::error::Res
     Ok(())
 }
 
-/// Locate `agent_quality_manifest.yaml` by walking up from the current working
-/// directory, then trying the binary's directory ancestors. Cross-platform
-/// (no hardcoded separators).
+/// ACP-1: `attune agent registry` — load + validate `agents.registry.toml` and
+/// print the agent directory (tier / kind / cost / boundary / gate / handoff).
+/// Per spec §5.5. No vault required.
+fn run_agent_registry(registry: Option<&std::path::Path>) -> attune_core::error::Result<()> {
+    let path = match registry {
+        Some(p) => p.to_path_buf(),
+        None => locate_named("agents.registry.toml").ok_or_else(|| {
+            attune_core::error::VaultError::NotFound(
+                "agents.registry.toml not found — pass --registry <path> or run from the \
+                 workspace (searched CWD ancestors and the binary directory)"
+                    .to_string(),
+            )
+        })?,
+    };
+    let reg = attune_core::agents::registry::AgentRegistry::from_path(&path)
+        .map_err(attune_core::error::VaultError::InvalidInput)?;
+    print!("{}", reg.render_directory());
+    Ok(())
+}
+
+/// ACP-3: `attune agent health` — per-(agent × model) failure-rate telemetry
+/// (§4.5-F). Requires an unlocked vault (telemetry lives in usage_events).
+fn run_agent_health(
+    vault: &attune_core::vault::Vault,
+    from_ms: i64,
+    to_ms: Option<i64>,
+) -> attune_core::error::Result<()> {
+    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+        return Err(attune_core::error::VaultError::Locked);
+    }
+    let to = to_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    let rows = vault.store().agent_model_health(from_ms, to)?;
+    print!("{}", attune_core::agent_telemetry::render_health(&rows));
+    Ok(())
+}
+
+/// Locate `agent_quality_manifest.yaml` (ACP-2 wrapper over [`locate_named`]).
 fn locate_quality_manifest() -> Option<std::path::PathBuf> {
-    const NAME: &str = "agent_quality_manifest.yaml";
+    locate_named("agent_quality_manifest.yaml")
+}
+
+/// Locate a workspace file by name: walk up from CWD, then the binary directory
+/// ancestors. Cross-platform (no hardcoded separators).
+fn locate_named(name: &str) -> Option<std::path::PathBuf> {
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd);
@@ -1366,7 +1438,7 @@ fn locate_quality_manifest() -> Option<std::path::PathBuf> {
     for root in roots {
         let mut cur: Option<&std::path::Path> = Some(root.as_path());
         while let Some(dir) = cur {
-            let candidate = dir.join(NAME);
+            let candidate = dir.join(name);
             if candidate.is_file() {
                 return Some(candidate);
             }

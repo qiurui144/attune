@@ -237,6 +237,63 @@ impl AgentRegistry {
             .collect()
     }
 
+    /// Render the directory view for `attune agent registry` (§5.5). One row per
+    /// agent: id / tier / kind / cost / plugin / model-floor / gate / boundary.
+    /// Grouped by plugin, agents sorted by id for a stable dashboard.
+    pub fn render_directory(&self) -> String {
+        let mut by_plugin: BTreeMap<&str, Vec<&AgentSpec>> = BTreeMap::new();
+        for a in &self.agents {
+            by_plugin.entry(a.plugin.as_str()).or_default().push(a);
+        }
+        let mut out = String::new();
+        out.push_str(&format!("Agent Registry — {} agents\n", self.agents.len()));
+        out.push_str(&"=".repeat(60));
+        out.push('\n');
+        for (plugin, mut agents) in by_plugin {
+            agents.sort_by(|x, y| x.id.cmp(&y.id));
+            out.push_str(&format!("\n[{plugin}] ({} agents)\n", agents.len()));
+            for a in agents {
+                let tier = match a.tier {
+                    Tier::Free => "free",
+                    Tier::Paid => "paid",
+                };
+                let kind = match a.kind {
+                    Kind::Deterministic => "deterministic",
+                    Kind::LlmJudge => "llm-judge",
+                    Kind::Rule => "rule",
+                    Kind::Vlm => "vlm",
+                };
+                let cost = match a.cost_class {
+                    CostClass::Zero => "zero",
+                    CostClass::Local => "local",
+                    CostClass::Cloud => "cloud",
+                };
+                let floor = if a.model_tier_floor.is_empty() {
+                    "-"
+                } else {
+                    a.model_tier_floor.as_str()
+                };
+                out.push_str(&format!(
+                    "  {id:<24} {tier:<4} {kind:<13} {cost:<5} floor={floor:<11} gate={gate}\n      ↳ {boundary}\n        handoff: {consumes} → {produces}\n",
+                    id = a.id,
+                    gate = a.gate,
+                    boundary = a.capability_boundary,
+                    consumes = a.handoff.consumes,
+                    produces = a.handoff.produces,
+                ));
+            }
+        }
+        // Surface any route-keyword conflicts (resolved by priority — informational).
+        let conflicts = self.route_conflicts();
+        if !conflicts.is_empty() {
+            out.push_str("\nRoute-keyword conflicts (resolved by priority):\n");
+            for c in conflicts {
+                out.push_str(&format!("  {:?} → {:?}\n", c.keyword, c.agent_ids));
+            }
+        }
+        out
+    }
+
     /// The set of distinct handoff type names referenced by any agent. The flow
     /// executor (ACP-6) uses this to validate that a declared flow's steps form
     /// a typed chain (`upstream.produces == downstream.consumes`).

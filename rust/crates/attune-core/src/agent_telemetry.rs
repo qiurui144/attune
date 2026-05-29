@@ -179,5 +179,41 @@ impl AgentModelHealth {
     }
 }
 
+/// Render the `attune agent health` dashboard (§5.5) from a per-(agent × model)
+/// roll-up. Worst-first (the store query already orders by failure_rate desc);
+/// rows above the §4.5-F threshold are flagged with a "⚠ switch to higher tier"
+/// hint. Empty input yields a friendly "no agent calls recorded" line.
+pub fn render_health(rows: &[AgentModelHealth]) -> String {
+    let mut out = String::new();
+    out.push_str("Agent×Model Health (failure telemetry, §4.5-F)\n");
+    out.push_str(&"=".repeat(60));
+    out.push('\n');
+    if rows.is_empty() {
+        out.push_str("  (no agent calls recorded in this window)\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "  {:<24} {:<14} {:>6} {:>6} {:>8}\n",
+        "agent", "model", "calls", "fail", "rate"
+    ));
+    for h in rows {
+        let flag = if h.should_suggest_higher_tier() {
+            "  ⚠ switch to higher tier"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "  {:<24} {:<14} {:>6} {:>6} {:>7.1}%{}\n",
+            h.agent_id,
+            h.model,
+            h.total_calls,
+            h.failures,
+            h.failure_rate * 100.0,
+            flag,
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests;
