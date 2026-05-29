@@ -86,4 +86,9 @@
 
 ## 6. Commit + Push 证据
 
-(见本节末尾 — commit/push 后回填)
+| 仓 | 分支 | commit SHA | push 状态 |
+|----|------|-----------|-----------|
+| attune | develop | `94a09ce` | ✅ pushed (`ddba9be..94a09ce`, https://github.com/qiurui144/attune.git) |
+| attune-pro | develop | `2cc580c` | ⚠️ 本地已 commit, push 被 TLS 瞬断阻塞 (`gnutls_handshake() failed: TLS connection was non-properly terminated`), 已重试 5+ 次 + 30s 退避仍失败 — 待网络恢复后 `git push origin develop` 重推 (commit 已安全落本地) |
+
+> 注: attune push 成功后同窗口 attune-pro push 持续 TLS handshake 失败 (含 fetch), 属环境瞬断非 commit 问题。attune-pro commit 2cc580c 已落 develop 本地, 内容无丢失风险。
