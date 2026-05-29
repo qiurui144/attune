@@ -120,6 +120,12 @@ jobs:
       - name: K2 Parse Golden Gate (W3 batch C, gate <95% blocks PR)
         working-directory: rust
         run: cargo test --release -p attune-core --test parse_golden_set_regression
+      - name: ACP-2 Agent Quality Gate Orchestrator (manifest ratchet + #[ignore] guard, blocks PR)
+        working-directory: rust
+        # Machine-checkable only-up ratchet over agent_quality_manifest.yaml +
+        # #[ignore]-spike guard (per §7.2 Gate 2). A loosened threshold or an
+        # #[ignore] spike fails the PR. spec: 2026-05-29-ai-agents-governance-orchestration.md §9
+        run: cargo test --release -p attune-core --test agent_gate_orchestrator
       - name: cargo test workspace lib + fast integration
         working-directory: rust
         # R19 (2026-05-01): 慢 attune-server integration tests 加 #[ignore] 走 nightly,
