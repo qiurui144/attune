@@ -816,16 +816,41 @@ pub async fn chat(
     let llm_model_name = llm.model_name().to_string();
     let llm_is_local = llm.is_local();
 
-    // 4. Call LLM (blocking via spawn_blocking)
-    let (raw_response, _usage) = tokio::task::spawn_blocking(move || llm.chat_with_history(&messages))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?
-        .map_err(llm_upstream_error)?;
+    // 4. Call LLM via the ACP-4 Cost Governor (blocking via spawn_blocking).
+    //    governed_chat wires the A1 cache (get/put — saves tokens on identical
+    //    prompts) + usage recorder (writes usage_events). Free-form chat uses
+    //    default options (no output cap) so existing answers are never
+    //    truncated (spec §2.3: never sacrifice correctness; §10: miss = current
+    //    behavior). Cache key folds in model + sampling knobs + full message
+    //    content, so changed injected knowledge auto-invalidates (R1).
+    let cache_backend = state.cache_backend();
+    let usage_agg = state.usage();
+    let gov_opts = attune_core::llm::LlmCallOptions::default();
+    let governed = tokio::task::spawn_blocking(move || {
+        attune_core::governor::governed_chat(
+            llm.as_ref(),
+            &messages,
+            &gov_opts,
+            cache_backend.as_deref(),
+            usage_agg.as_deref(),
+            None,        // direct chat → no agent_id
+            None,        // TTL: backend default
+        )
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?
+    .map_err(llm_upstream_error)?;
+    let raw_response = governed.text;
+    // ACP-4: real vendor token usage + cache disposition for the UI cost chip.
+    // Vendor counts are authoritative when reported (> 0); on a cache hit the
+    // saved input tokens arrive via `cached_in`.
+    let vendor_usage = governed.usage.clone();
+    let cache_served = matches!(governed.cache, attune_core::usage::CacheOutcome::Hit);
 
     // F-17 restore: LLM 响应里的所有 placeholder 还原成原值给用户看
     let response = redactor.restore(&raw_response, &all_mappings);
@@ -1073,6 +1098,15 @@ pub async fn chat(
             "cost_usd": cost_usd,
             "is_local": llm_is_local,
             "input_rate_per_k": input_rate_per_k,
+            // ACP-4: cache disposition + authoritative vendor token counts.
+            // `cache_hit=true` → served from cache (tokens saved, no upstream
+            // call); `cached_tokens` = input tokens the hit avoided. Vendor
+            // counts (when the provider reports > 0) are exact, vs the legacy
+            // CJK-heuristic `tokens_in`/`tokens_out` above.
+            "cache_hit": cache_served,
+            "cached_tokens": vendor_usage.cached_in,
+            "vendor_tokens_in": vendor_usage.tokens_in,
+            "vendor_tokens_out": vendor_usage.tokens_out,
         },
         // T2: structured cost block for vlm-llm-benchmark (matches bench schema).
         "cost": cost_block,
@@ -1277,6 +1311,7 @@ async fn eval_short_circuit_chat(
         } else {
             None
         },
+        ..Default::default()
     };
 
     // T1 test-only override: provider label maps directly to the determinism

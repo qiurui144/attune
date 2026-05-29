@@ -1851,6 +1851,45 @@ impl AppState {
         }
     }
 
+    /// ACP-4 Task 2 — install the usage aggregator + spawn its flusher.
+    ///
+    /// Resolves the A1 "instantiation deferred" blocker (audit C / A1 Task L)
+    /// **without** the `Vault::store_arc` refactor: `usage_events` is an
+    /// unencrypted telemetry table (token counts / model / provider / latency —
+    /// no PII; `query_hash` is a BLAKE3 prefix and off by default), and the
+    /// table is created by `Store::open` on the main DB. So the aggregator gets
+    /// its **own** `Arc<Mutex<Store>>` opened on the same `db_path` — SQLite WAL
+    /// (set by `Store::open`) makes concurrent reader/writer connections safe.
+    ///
+    /// Idempotent-ish: if it cannot open the DB it logs + leaves the aggregator
+    /// `None` (telemetry degrades, main paths unaffected — spec §7 / §11 R8).
+    /// `flush_interval_ms` follows spec §11 risk 6 (100ms laptop / 500ms K3);
+    /// we use 200ms as a balanced default. Returns the flusher `JoinHandle` (or
+    /// `None` on failure) so the caller can abort it on shutdown.
+    pub fn install_usage_aggregator(&self) -> Option<tokio::task::JoinHandle<()>> {
+        // Already installed → no-op.
+        if self.usage().is_some() {
+            return None;
+        }
+        let db_path = attune_core::platform::db_path();
+        let store = match attune_core::store::Store::open(&db_path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "ACP-4: usage aggregator disabled — cannot open telemetry store \
+                     at {db_path:?}: {e}"
+                );
+                return None;
+            }
+        };
+        let store = Arc::new(std::sync::Mutex::new(store));
+        let agg = Arc::new(attune_core::usage::UsageAggregator::new(store, 200, 1000));
+        let handle = agg.clone().spawn_flusher();
+        self.set_usage(Some(agg));
+        tracing::info!("ACP-4: usage aggregator installed (flush every 200ms)");
+        Some(handle)
+    }
+
     /// Read the active cache backend. Defaults to `MemoryLruCache` after `new`;
     /// callers can swap to `SqliteEncryptedCache` post-unlock via
     /// `set_cache_backend`.
