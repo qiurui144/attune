@@ -6,6 +6,7 @@
 //! - audit_trail 含完整推理链 (调用方可审计)
 
 pub mod document_classifier;
+pub mod flow;
 pub mod registry;
 
 use crate::error::Result;
