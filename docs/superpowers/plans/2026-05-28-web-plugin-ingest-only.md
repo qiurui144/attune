@@ -1099,8 +1099,8 @@ Placeholder scan: no "TBD", "implement later", or "appropriate error handling" m
 
 Type consistency: `SOURCE_TYPES` enum exports the literal strings; `KNOWN_TYPES` in `ingest_extension.rs` lists the same five values; `DEPRECATED_MSGS` lists the same three strings as the worker.js warn case; `vault-locked` error code string matches between server (`routes/ingest_extension.rs`), client buffer (`pending_ingest_buffer.js`), and integration test.
 
-Cross-plan consistency with `2026-05-28-privacy-logic-implementation.md`:
-- Plan B1 introduces `POST /api/v1/privacy/lock` — this plan's E2E (Task 6) uses it to put the vault into the locked state for the buffer test. Order dependency: Plan B1 Task 2 must merge before Plan B2 Task 6.
+Cross-plan consistency with the privacy-logic work (shipped v1.0.7 hotfix — `017ab81`; design ref `docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md`):
+- `POST /api/v1/privacy/lock` (already shipped) — this plan's E2E (Task 6) uses it to put the vault into the locked state for the buffer test.
 - Plan B1 introduces `scripts/privacy-audit.sh`; this plan adds `scripts/extension-permission-audit.sh`. Both are wired into CI as separate jobs, no name collision.
 - `OutboundGate` (Plan B1 Task 3) does not gate localhost loopback traffic — extension → server traffic is exempt by design. Confirmed: the gate enforces 5 outbound kinds, none of which are "loopback".
 

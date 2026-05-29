@@ -207,7 +207,7 @@ cargo test -p attune-core --test parse_golden_set_regression
 
 #### 2.3.2 RAGAS 风格 benchmark harness
 
-跑三赛道检索质量评估（法律 lawcontrol / 英文 rust-book / 中文 cs-notes）：
+跑三赛道检索质量评估（法律 legal-track / 英文 rust-book / 中文 cs-notes）：
 
 ```bash
 bash scripts/bench-orchestrator.sh all

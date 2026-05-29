@@ -3,7 +3,7 @@
 //! 给生产 SaaS 部署方一份可工作的 reference. 实际生产应替换为真正的 PostgreSQL +
 //! 鉴权 / 计费 / 多区域 / 监控 等. 此 crate 是 OSS attune 验证客户端流程用.
 //!
-//! Endpoints (per attune docs/specs/attune-plugin-protocol.md §10):
+//! Endpoints (per attune docs/plugin-protocol.md §10):
 //! - POST /api/v1/devices/register
 //! - POST /api/v1/devices/{id}/deactivate
 //! - GET  /api/v1/devices?account_id=...
