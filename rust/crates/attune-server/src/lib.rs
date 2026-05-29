@@ -1,3 +1,4 @@
+pub mod acp_chat;
 pub mod error;
 pub mod eval;
 pub mod routes;
