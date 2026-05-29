@@ -322,6 +322,47 @@ enum AgentAction {
         #[arg(long)]
         registry: Option<std::path::PathBuf>,
     },
+    /// ACP-5: inspect autonomous flows (declarative agent-collaboration DAGs).
+    /// Reads `agent_flows.toml` + `agents.registry.toml` (no vault required).
+    /// Per spec §5.3b + §5.5 (Task 6).
+    Flow {
+        #[command(subcommand)]
+        action: FlowAction,
+    },
+}
+
+/// `attune agent flow <action>` (ACP-5 autonomous flow inspection).
+#[derive(Subcommand)]
+enum FlowAction {
+    /// List every declared flow DAG + its typed-handoff step chain.
+    List {
+        /// Path to the flows file (default: auto-locate `agent_flows.toml`).
+        #[arg(long)]
+        flows: Option<std::path::PathBuf>,
+        /// Path to the registry (default: auto-locate `agents.registry.toml`).
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+    },
+    /// Dry-run a flow: show which agents it traverses + the per-step scheduling
+    /// decision (cost class / tier / cloud-vs-local) — WITHOUT calling any LLM.
+    Run {
+        /// The flow id to dry-run.
+        id: String,
+        /// Path to the flows file (default: auto-locate `agent_flows.toml`).
+        #[arg(long)]
+        flows: Option<std::path::PathBuf>,
+        /// Path to the registry (default: auto-locate `agents.registry.toml`).
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+        /// Simulate a paid entitlement (default: free). Affects the dry-run
+        /// scheduling decision shown for paid/cloud steps.
+        #[arg(long, default_value_t = false)]
+        paid: bool,
+        /// Simulated remaining cloud quota (default 1000). `0` shows the
+        /// quota-exhausted degrade path.
+        #[arg(long, default_value_t = 1000)]
+        cloud_quota: u64,
+    },
 }
 
 /// CLI exit code protocol (D5.7).
@@ -416,6 +457,8 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             AgentAction::Registry { registry } => {
                 return run_agent_registry(registry.as_deref())
             }
+            // ACP-5 flow inspection operates on workspace files — vault-free.
+            AgentAction::Flow { action } => return run_agent_flow(action),
             // ACP-3 health + tune need the unlocked vault → handled after open.
             AgentAction::Health { .. } | AgentAction::Tune { .. } => {}
         },
@@ -702,8 +745,8 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             } => {
                 return run_agent_tune(&vault, dry_run, from_ms, to_ms, registry.as_deref());
             }
-            AgentAction::Gate { .. } | AgentAction::Registry { .. } => {
-                unreachable!("agent gate/registry handled before vault open")
+            AgentAction::Gate { .. } | AgentAction::Registry { .. } | AgentAction::Flow { .. } => {
+                unreachable!("agent gate/registry/flow handled before vault open")
             }
         },
     }
@@ -1432,6 +1475,104 @@ fn run_agent_registry(registry: Option<&std::path::Path>) -> attune_core::error:
         .map_err(attune_core::error::VaultError::InvalidInput)?;
     print!("{}", reg.render_directory());
     Ok(())
+}
+
+/// ACP-5: `attune agent flow <list|run>` — inspect autonomous flows (Task 6).
+/// Vault-free; reads `agent_flows.toml` + `agents.registry.toml`.
+fn run_agent_flow(action: &FlowAction) -> attune_core::error::Result<()> {
+    use attune_core::agents::flow::FlowSet;
+    use attune_core::agents::registry::AgentRegistry;
+
+    let load = |flows: &Option<std::path::PathBuf>,
+                registry: &Option<std::path::PathBuf>|
+     -> attune_core::error::Result<(FlowSet, AgentRegistry)> {
+        let reg_path = match registry {
+            Some(p) => p.clone(),
+            None => locate_named("agents.registry.toml").ok_or_else(|| {
+                attune_core::error::VaultError::NotFound(
+                    "agents.registry.toml not found — pass --registry <path> or run from the \
+                     workspace"
+                        .to_string(),
+                )
+            })?,
+        };
+        let flows_path = match flows {
+            Some(p) => p.clone(),
+            None => locate_named("agent_flows.toml").ok_or_else(|| {
+                attune_core::error::VaultError::NotFound(
+                    "agent_flows.toml not found — pass --flows <path> or run from the workspace"
+                        .to_string(),
+                )
+            })?,
+        };
+        let reg =
+            AgentRegistry::from_path(&reg_path).map_err(attune_core::error::VaultError::InvalidInput)?;
+        let flow_set =
+            FlowSet::from_path(&flows_path).map_err(attune_core::error::VaultError::InvalidInput)?;
+        // Validate the typed-handoff chain against the registry before printing,
+        // so `flow list` surfaces a load-time mis-wiring as an error.
+        flow_set
+            .validate_against(&reg)
+            .map_err(attune_core::error::VaultError::InvalidInput)?;
+        Ok((flow_set, reg))
+    };
+
+    match action {
+        FlowAction::List { flows, registry } => {
+            let (flow_set, reg) = load(flows, registry)?;
+            print!("{}", flow_set.render_list(&reg));
+            Ok(())
+        }
+        FlowAction::Run {
+            id,
+            flows,
+            registry,
+            paid,
+            cloud_quota,
+        } => {
+            let (flow_set, reg) = load(flows, registry)?;
+            let flow = flow_set.get(id).ok_or_else(|| {
+                attune_core::error::VaultError::NotFound(format!(
+                    "no flow with id {id:?} (try `attune agent flow list`)"
+                ))
+            })?;
+            let entitlement = if *paid {
+                attune_core::agents::scheduler::Entitlement::paid_with_quota(*cloud_quota)
+            } else {
+                attune_core::agents::scheduler::Entitlement::free_local()
+            };
+            let scheduler = attune_core::agents::scheduler::Scheduler::new(entitlement);
+            // Dry-run: walk the declared steps and print the scheduling decision
+            // for each — WITHOUT calling any agent / LLM (zero cost).
+            println!("Flow dry-run: {id}");
+            println!(
+                "  entitlement: {} (cloud_quota={})",
+                if *paid { "paid" } else { "free" },
+                cloud_quota
+            );
+            println!("  steps ({}):", flow.steps.len());
+            for (i, step) in flow.steps.iter().enumerate() {
+                let optional = flow.is_optional(step);
+                let opt = if optional { " [optional]" } else { "" };
+                match reg.get(step) {
+                    None => {
+                        println!("    {}. {step}{opt} — UNREGISTERED (would skip/degrade)", i + 1);
+                    }
+                    Some(agent) => {
+                        let decision = scheduler.route(agent, None);
+                        println!(
+                            "    {}. {step}{opt} — {} → {}",
+                            i + 1,
+                            agent.handoff.consumes,
+                            agent.handoff.produces,
+                        );
+                        println!("         schedule: {decision:?}");
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// ACP-3: `attune agent health` — per-(agent × model) failure-rate telemetry
