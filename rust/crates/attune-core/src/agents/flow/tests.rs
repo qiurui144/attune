@@ -772,6 +772,112 @@ fn payload_carries_type_name() {
     assert_eq!(p.type_name(), "Foo");
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Task 3 — intent routing extended to flow routing (backward compatible)
+// ══════════════════════════════════════════════════════════════════════════
+
+/// Registry with two single-agent route entries + the defamation chain agents.
+fn routing_registry() -> AgentRegistry {
+    let toml = r#"
+[[agent]]
+id = "civil_loan_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "借贷计算"
+cost_class = "zero"
+gate = "g"
+route_keywords = ["本金", "利息", "借贷"]
+route_priority = 10
+[agent.handoff]
+consumes = "LoanEvidence"
+produces = "LoanComputation"
+
+[[agent]]
+id = "fact_extractor"
+tier = "paid"
+plugin = "law-pro"
+kind = "llm-judge"
+capability_boundary = "事实抽取"
+model_tier_floor = "qwen3b"
+cost_class = "cloud"
+gate = "g2"
+route_keywords = ["名誉", "诽谤"]
+route_priority = 8
+[agent.handoff]
+consumes = "RawCaseText"
+produces = "CaseFacts"
+"#;
+    AgentRegistry::from_toml_str(toml).expect("routing registry")
+}
+
+#[test]
+fn flow_route_matches_declared_multistep_flow() {
+    let reg = routing_registry();
+    let flows = FlowSet::from_toml_str(
+        r#"
+[[flow]]
+id = "legal_defamation"
+route_keywords = ["名誉", "诽谤"]
+route_priority = 9
+steps = ["fact_extractor"]
+"#,
+    )
+    .unwrap();
+    let resolved = resolve_flow("他诽谤我", &flows, &reg).expect("routes to a flow");
+    assert_eq!(resolved.id, "legal_defamation");
+    assert!(!resolved.synthesized, "matched a declared flow, not synthesized");
+}
+
+#[test]
+fn single_agent_backward_compat_synthesizes_one_step_flow() {
+    let reg = routing_registry();
+    // No flow declared — but civil_loan_agent has route_keywords. Routing must
+    // fall back to a synthesized 1-step flow (backward compatibility, §10).
+    let flows = FlowSet::default();
+    let resolved = resolve_flow("帮我算本金", &flows, &reg).expect("routes to a synthesized flow");
+    assert_eq!(resolved.flow.steps, ["civil_loan_agent"]);
+    assert!(resolved.synthesized, "single agent → synthesized 1-step flow");
+}
+
+#[test]
+fn declared_flow_wins_over_single_agent_when_both_match() {
+    let reg = routing_registry();
+    // Both fact_extractor (single, priority 8) and a declared flow (priority 9)
+    // match the keyword — the declared flow wins on priority.
+    let flows = FlowSet::from_toml_str(
+        r#"
+[[flow]]
+id = "legal_defamation"
+route_keywords = ["名誉", "诽谤"]
+route_priority = 9
+steps = ["fact_extractor"]
+"#,
+    )
+    .unwrap();
+    let resolved = resolve_flow("诽谤案", &flows, &reg).unwrap();
+    assert_eq!(resolved.id, "legal_defamation");
+    assert!(!resolved.synthesized);
+}
+
+#[test]
+fn no_match_returns_none() {
+    let reg = routing_registry();
+    let flows = FlowSet::default();
+    assert!(resolve_flow("今天天气真好", &flows, &reg).is_none());
+}
+
+#[test]
+fn higher_priority_single_agent_wins_among_agents() {
+    let reg = routing_registry();
+    let flows = FlowSet::default();
+    // "本金" matches civil_loan_agent (priority 10). Only one matches, but verify
+    // the synthesized flow carries the agent's keywords + priority.
+    let resolved = resolve_flow("本金多少", &flows, &reg).unwrap();
+    assert_eq!(resolved.flow.steps, ["civil_loan_agent"]);
+    assert_eq!(resolved.flow.route_priority, 10);
+}
+
 // ── Property tests (§9 ACP-5 row: any agent chain) ──────────────────────────
 
 mod proptests {

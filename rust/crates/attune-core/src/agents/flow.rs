@@ -294,6 +294,68 @@ pub fn flow_priorities(set: &FlowSet) -> BTreeMap<String, i32> {
     set.flows.iter().map(|f| (f.id.clone(), f.route_priority)).collect()
 }
 
+/// The flow an intent resolved to — either a declared multi-step flow or a
+/// **synthesized 1-step flow** from a single matching agent (backward
+/// compatibility with single-agent routing, spec §5.3b / §10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedFlow {
+    /// The flow id (the declared id, or the agent id for a synthesized flow).
+    pub id: String,
+    /// The (declared or synthesized) flow definition to execute.
+    pub flow: FlowDef,
+    /// True when this flow was synthesized from a single agent (not declared in
+    /// `agent_flows.toml`).
+    pub synthesized: bool,
+}
+
+/// Resolve a user intent to a flow (spec §5.3b — intent routing extended to flow
+/// routing, backward compatible). Resolution order:
+///
+///   1. **Declared flows** — the highest-priority `agent_flows.toml` flow whose
+///      `route_keywords` the message matches.
+///   2. **Single-agent fallback** — if no declared flow matches, the
+///      highest-priority *agent* (from the registry's `route_keywords`) whose
+///      keywords match, wrapped as a synthesized 1-step flow (`steps=[agent]`).
+///
+/// A declared flow always wins over a single agent when both match (a declared
+/// multi-step composition is the more specific intent). Ties broken by id for
+/// determinism. Returns `None` when nothing matches.
+pub fn resolve_flow(
+    message: &str,
+    flows: &FlowSet,
+    registry: &AgentRegistry,
+) -> Option<ResolvedFlow> {
+    // 1. Declared flow.
+    if let Some(f) = flows.route(message) {
+        return Some(ResolvedFlow {
+            id: f.id.clone(),
+            flow: f.clone(),
+            synthesized: false,
+        });
+    }
+    // 2. Single-agent fallback → synthesized 1-step flow.
+    let best = registry
+        .agents()
+        .iter()
+        .filter(|a| a.route_keywords.iter().any(|k| message.contains(k.as_str())))
+        .max_by(|x, y| {
+            x.route_priority
+                .cmp(&y.route_priority)
+                .then_with(|| y.id.cmp(&x.id))
+        })?;
+    Some(ResolvedFlow {
+        id: best.id.clone(),
+        flow: FlowDef {
+            id: best.id.clone(),
+            route_keywords: best.route_keywords.clone(),
+            route_priority: best.route_priority,
+            steps: vec![best.id.clone()],
+            degrade: Degrade::default(),
+        },
+        synthesized: true,
+    })
+}
+
 // ══════════════════════════════════════════════════════════════════════════
 // Flow Executor (autonomous flow engine, spec §5.3b ③)
 // ══════════════════════════════════════════════════════════════════════════
