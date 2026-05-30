@@ -79,7 +79,7 @@ enum Commands {
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         wait: bool,
     },
-    /// R38 (2026-05-01): Export vault data files to a backup directory.
+    /// Export vault data files to a backup directory.
     /// Copies vault.db (encrypted SQLite), tantivy/ (full-text index), vectors.encbin (if present).
     /// Vault MUST be locked first (this command verifies and refuses if unlocked, to avoid WAL corruption).
     /// Note: device.key (master secret) is NOT exported — user must back that up separately.
@@ -87,7 +87,7 @@ enum Commands {
         /// Destination directory (will be created if missing)
         dest: std::path::PathBuf,
     },
-    /// R38: Import a previously exported vault into data_dir.
+    /// Import a previously exported vault into data_dir.
     /// Vault MUST be sealed (no setup yet) OR locked; refuses if any vault.db exists.
     /// Use --force to overwrite (DANGEROUS — will replace current vault).
     VaultImport {
@@ -657,7 +657,7 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             println!("{}", serde_json::to_string_pretty(&items).expect("Vec<Item> is serializable"));
         }
         Commands::VaultExport { dest } => {
-            // R38: 必须 locked，否则 SQLite WAL 文件可能不一致
+            // 必须 locked，否则 SQLite WAL 文件可能不一致
             if matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
                 eprintln!("Refusing to export while vault is UNLOCKED — please run `attune lock` first.");
                 eprintln!("Reason: SQLite WAL must be checkpointed; locking forces a consistent snapshot.");
@@ -1610,7 +1610,7 @@ fn run_agent_tune(
         return Err(attune_core::error::VaultError::Locked);
     }
     if !dry_run {
-        // R2: auto-apply is opt-in per-deployment via `acp.auto_escalate`, not a
+        // auto-apply is opt-in per-deployment via `acp.auto_escalate`, not a
         // CLI flag. Refuse rather than silently escalate spend.
         return Err(attune_core::error::VaultError::InvalidInput(
             "`attune agent tune` is dry-run only: auto-applying escalations is gated by \

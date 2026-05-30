@@ -66,7 +66,7 @@ pub async fn record_batch(
     let mut high_engagement = 0usize;
     let mut auto_bookmarked = 0usize;
     for (idx, signal) in body.signals.iter().enumerate() {
-        // per R04 P0-2：URL 协议白名单。仅允许 http/https；
+        // URL 协议白名单。仅允许 http/https；
         // javascript: / data: / file: 等协议是 XSS / 任意文件读取风险。
         // chrome 扩展虽在 manifest exclude chrome://，但页面 history.pushState 可
         // 注入伪协议 URL，必须后端兜底。
@@ -76,7 +76,7 @@ pub async fn record_batch(
             continue;
         }
 
-        // per reviewer I3：截断超长字段（防恶意页面 1MB title）
+        // 截断超长字段（防恶意页面 1MB title）
         let mut owned = signal.clone();
         owned.truncate_to_limits();
 
@@ -127,8 +127,8 @@ pub async fn record_batch(
     Ok(Json(serde_json::json!({
         "recorded": recorded,
         "high_engagement": high_engagement,
-        "auto_bookmarked": auto_bookmarked,  // W4 G2: 实际入候选表的条数
-        // per reviewer I2：返回失败 indices，让客户端能精准重试某几条
+        "auto_bookmarked": auto_bookmarked,  // 实际入候选表的条数
+        // 返回失败 indices，让客户端能精准重试某几条
         "failed_indices": failed_indices,
     })))
 }

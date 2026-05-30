@@ -1,5 +1,5 @@
 //! Perf bench for reindex pipeline — wall-clock duration of `reindex_item`
-//! on documents of varying sizes (R1 滚动 review 实测).
+//! on documents of varying sizes.
 //!
 //! 跑法：`cargo test -p attune-core --release --test perf_reindex_bench -- --nocapture --ignored`
 //! `#[ignore]` 让默认 CI 不跑（耗时不属于 unit test）；手动验收时显式 --ignored.

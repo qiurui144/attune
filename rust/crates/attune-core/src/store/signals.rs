@@ -10,7 +10,7 @@ use crate::store::Store;
 #[allow(unused_imports)]
 use crate::store::types::*;
 
-/// R6 P1-4 fix: 已知 skill_signals kind 允许集。新加 kind 必须先入此白名单。
+/// 已知 skill_signals kind 允许集。新加 kind 必须先入此白名单。
 /// 拒绝 typo 静默写入 unknown kind 让 `count_unprocessed_signals_by_kind` 永远 0.
 const KNOWN_SIGNAL_KINDS: &[&str] = &[
     "search_miss",
@@ -55,14 +55,14 @@ impl Store {
     pub fn record_signal_event(&self, kind: &str, ref_id: &str, query: Option<&str>) -> Result<()> {
         if !is_known_signal_kind(kind) {
             return Err(crate::error::VaultError::Crypto(format!(
-                "unknown skill_signals kind: {kind:?} (R6 P1-4 fix: typo guard)"
+                "unknown skill_signals kind: {kind:?} (typo guard)"
             )));
         }
-        // R2 F4 fix (P2): defense-in-depth — caller 传超长 ref_id 会膨胀 skill_signals 表。
+        // defense-in-depth — caller 传超长 ref_id 会膨胀 skill_signals 表。
         // 当前 caller (annotation id / item id) 均 ≤ 64 但加 boundary 防 future caller。
         if ref_id.len() > 128 {
             return Err(crate::error::VaultError::Crypto(
-                "ref_id too long (max 128, R2 F4 fix)".into()
+                "ref_id too long (max 128)".into()
             ));
         }
         self.conn.execute(
@@ -85,7 +85,7 @@ impl Store {
 
     /// 获取未处理的失败信号数量。
     ///
-    /// R17 P0 fix (S4-Q1): 同 `get_unprocessed_signals` — 仅计 search_miss kind，
+    /// 同 `get_unprocessed_signals` — 仅计 search_miss kind，
     /// 让 evolver 触发阈值不被 Phase B 信号污染。
     pub fn count_unprocessed_signals(&self) -> Result<usize> {
         let count: i64 = self.conn.query_row(
@@ -98,7 +98,7 @@ impl Store {
 
     /// 取出最近 N 条未处理 search_miss 信号（evolver 主消费路径）。
     ///
-    /// R17 P0 fix (S4-Q1): 之前不按 kind 过滤 → Phase B 加 doc_*/citation_hit/
+    /// 之前不按 kind 过滤 → Phase B 加 doc_*/citation_hit/
     /// annotation_marker 后，evolver 会拉到这些 kind 但其 query 字段为空，
     /// LLM prompt "近期失败查询" 列表充斥空字符串 → 扩展词学习被污染 + 浪费 token。
     /// 现在强制 `kind='search_miss'` 让 evolver 只看真正的搜索失败信号；
@@ -124,7 +124,7 @@ impl Store {
 
     /// 标记一批信号为已处理。
     ///
-    /// R6 P1-7 fix: 包在 `unchecked_transaction` 里，避免半批失败留下"部分 processed
+    /// 包在 `unchecked_transaction` 里，避免半批失败留下"部分 processed
     /// + 部分未 processed"的悬而未决状态 — caller 重试会重复处理已 mark 的子集。
     pub fn mark_signals_processed(&self, ids: &[i64]) -> Result<()> {
         if ids.is_empty() {

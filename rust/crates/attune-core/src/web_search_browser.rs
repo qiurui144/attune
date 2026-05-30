@@ -17,7 +17,7 @@ pub fn detect_system_browser() -> Option<PathBuf> {
     detect_with(|p: &Path| p.exists())
 }
 
-/// attune 自托管 browser cache 目录路径 (FEAT-2: FIX-9 浏览器 fallback).
+/// attune 自托管 browser cache 目录路径（浏览器 fallback）。
 ///
 /// 路径: `~/.cache/attune/browser/` (Linux/macOS) 或 `%LOCALAPPDATA%\attune\browser\` (Win)
 /// 已下载的 Chrome for Testing 解压到此目录下, 可执行文件路径见 cached_browser_path().

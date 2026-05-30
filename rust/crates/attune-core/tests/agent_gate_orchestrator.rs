@@ -224,9 +224,8 @@ fn oss_real_llm_gate_recorded_and_marked_nightly() {
 
 #[test]
 fn the_five_oss_deterministic_gates_recorded_with_real_baselines() {
-    // R4 honesty: the 5 OSS agent gates already exist (B audit) and are
-    // deterministic at pass_rate/zero_violations = 1.00 (their real baseline).
-    // Record — do not fudge.
+    // The 5 OSS agent gates already exist and are deterministic at
+    // pass_rate/zero_violations = 1.00 (their real baseline). Record — do not fudge.
     let m = agent_quality::load_manifest(&manifest_path()).unwrap();
     for id in [
         "chat_reliability",

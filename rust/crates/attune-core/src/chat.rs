@@ -53,9 +53,9 @@ pub struct Citation {
     // ── B1 (W2, 2026-04-27)：deep-link 数据 ───────────────────────────────
     /// 字符级 offset 到源 item content（含 start，不含 end）。
     /// web 搜索结果为 None（无源 item 可定位）。
-    /// **Known limitation (W3 batch A v1)**：当前 offset 是 sidecar 内累计 char，
-    /// 不严格对齐原文 char index — 适合顶层导航不适合精确 Reader 高亮（W5+ 修）。
-    /// per reviewer S2：skip_serializing_if 让 None 不出现在 JSON，前端不必处理 null。
+    /// **Known limitation**：当前 offset 是 sidecar 内累计 char，
+    /// 不严格对齐原文 char index — 适合顶层导航不适合精确 Reader 高亮。
+    /// skip_serializing_if 让 None 不出现在 JSON，前端不必处理 null。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_offset_start: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,8 +141,8 @@ impl ChatEngine {
                     }
                     None => match ws.search(user_message, 3) {
                         Ok(fresh) => {
-                            // 写入缓存（默认 30 天 TTL）— per reviewer I6：空结果也缓存，
-                            // 否则偏门 query 反复浪费网络。靠 TTL 自然过期。per reviewer I1：
+                            // 写入缓存（默认 30 天 TTL）— 空结果也缓存，
+                            // 否则偏门 query 反复浪费网络。靠 TTL 自然过期。
                             // 错误显式 log 而非吞掉，便于排查 SQLite 满 / DEK 错。
                             if let Ok(s) = self.store.lock() {
                                 if let Err(e) = s.put_web_search_cached(
@@ -193,7 +193,7 @@ impl ChatEngine {
             self.run_llm_once(user_message, history, &knowledge, web_search_used)?;
 
         // 4. J5.c：置信度 < 3 → 降阈值二次检索（per CRAG §3.2 ambiguous 分支）。
-        // per reviewer S3：web 路径也允许 fallback 到本地 broader 召回，不无脑跳过 —
+        // web 路径也允许 fallback 到本地 broader 召回，不无脑跳过 —
         // 否则用户拿到模糊答案没救济。本地 broader 即使 confidence_1 路径来自 web，
         // 重检拿到的本地结果若更相关，下次 LLM 调用 web_search_used 设回 false。
         let (final_response, final_confidence, secondary_used) = if confidence_1 < 3 {
@@ -535,7 +535,7 @@ fn build_rag_system_prompt(knowledge: &[SearchResult], from_web: bool) -> String
 
 /// 从 LLM 响应中解析置信度（1-5）。缺失或非法时返回 3（中性默认值）。
 ///
-/// 全文匹配（per reviewer S4：避免末尾 byte offset 与 UTF-8 字符边界冲突），
+/// 全文匹配（避免末尾 byte offset 与 UTF-8 字符边界冲突），
 /// 取最后一个 marker（LLM 偶尔会在草稿中提到示例数字，最终结论在末尾）。
 pub fn parse_confidence(response: &str) -> u8 {
     // 中文格式：【置信度: N/5】（容忍中英文冒号 + 可选空格）
@@ -568,11 +568,11 @@ pub fn parse_confidence(response: &str) -> u8 {
 /// **WARNING**：删除 marker 之后到末尾的**所有**内容（防 LLM 在 marker 后续写无关
 /// 描述）。当前 prompt 明确要求 "回答末尾必须输出【置信度: N/5】"，所以 marker 后
 /// 续写视为噪音。如果未来 telemetry 显示 LLM 频繁在 marker 后输出有用信息（如附加
-/// 章节标题 / 参考链接），需改为只删 marker 那一行而非到末尾。per reviewer I4。
+/// 章节标题 / 参考链接），需改为只删 marker 那一行而非到末尾。
 ///
 /// 用 (?s) flag 让 `.` 匹配换行符（marker 后可能有换行+续文）。
 pub fn strip_confidence_marker(response: &str) -> String {
-    // per reviewer P1 #2：与 parse_confidence 对称，取**最后一个** marker 的位置开始删；
+    // 与 parse_confidence 对称，取**最后一个** marker 的位置开始删；
     // 如果 LLM 输出"草稿提到【置信度: 2/5】... 最终【置信度: 5/5】"，应保留草稿、
     // 仅从最终 marker 开始截。
     let zh_marker = regex::Regex::new(r"【置信度[:：]\s*[1-5]\s*/\s*5】").ok();

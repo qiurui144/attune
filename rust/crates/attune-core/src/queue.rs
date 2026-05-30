@@ -195,7 +195,7 @@ impl QueueWorker {
     }
 }
 
-/// R23 (2026-05-01): 共享批处理函数 — `attune-core::queue::QueueWorker` 与
+/// 共享批处理函数 — `attune-core::queue::QueueWorker` 与
 /// `attune-server::start_queue_worker` 的统一入口，消除两处重复的
 /// "embed → 写 vectors → 写 fulltext (Level 1 only)" 逻辑。
 ///
@@ -218,7 +218,7 @@ pub fn embed_and_index_batch(
     let texts: Vec<&str> = tasks.iter().map(|t| t.chunk_text.as_str()).collect();
     let (embeddings, _usage) = embedding.embed(&texts)?;
 
-    // R10 S3 fix (P1): item 存活检查缓存。竞态场景 — embed worker dequeue chunk 任务
+    // item 存活检查缓存。竞态场景 — embed worker dequeue chunk 任务
     // 时 item 还在，但 embedding 完写向量前 item 已被 delete_item 软删（reindex
     // worker / HTTP delete 并发）。不检查会写 orphan 向量（已删文档仍被搜到）。
     // 同 batch 多 chunk 常属同 item → HashMap 缓存避免重复 COUNT 查询。
@@ -229,7 +229,7 @@ pub fn embed_and_index_batch(
         if i >= embeddings.len() {
             break;
         }
-        // R10 S3 fix (update 场景，P1): chunk 任务行被 reindex/delete 的
+        // update 场景：chunk 任务行被 reindex/delete 的
         // purge_embed_queue_for_item DELETE 掉 → 该 chunk 已作废（item 被 PATCH
         // 重切 / 被删）→ 跳过写向量，防 stale 向量（大文档实测必现）。
         // task 行已不在表里，不 push done_id（mark_done 也无行可改）。

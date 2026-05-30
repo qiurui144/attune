@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS items (
     -- v0.7 记忆护城河（per 用户决策 2026-05-15）：
     -- content 明文的 SHA-256 hex（content 是密文 BLOB，不便直接 hash 比对），
     -- 用于 update / re-upload 时短路判断"内容是否变化" → 内容不变跳过 re-embed
-    -- + 用于 chunk-level diff 基础（v0.7 next sprint）。
+    -- + 用于 chunk-level diff 基础。
     -- 空字符串语义：旧 vault 尚未 backfill（lazy 在 update 时 backfill）。
     content_hash TEXT NOT NULL DEFAULT ''
 );
@@ -440,11 +440,11 @@ CREATE INDEX IF NOT EXISTS idx_web_cache_created ON web_search_cache(created_at_
 -- 明文存储：标题来自文档结构，非用户笔记内容。
 -- offset_start/end 是 chunk 在 item.content 的 char-level 区间。
 CREATE TABLE IF NOT EXISTS chunk_breadcrumbs (
-    -- per reviewer I3：FK CASCADE 与 annotations 表对称（item 硬删除时清理；
+    -- FK CASCADE 与 annotations 表对称（item 硬删除时清理；
     -- 软删除模型下还需在 store::delete_item 显式清理，与 annotations 一致）
     item_id              TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
     chunk_idx            INTEGER NOT NULL,
-    -- per R04 P0-1：breadcrumb（章节标题路径如"案件分析 > 原告主张"）属用户敏感
+    -- breadcrumb（章节标题路径如"案件分析 > 原告主张"）属用户敏感
     -- 数据，必须 DEK 加密。修复违反 "All data encrypted on your own device" 承诺。
     -- 字段名 breadcrumb_enc 取代原 breadcrumb_json 明文，schema bump 让老 db 自动重建。
     breadcrumb_enc       BLOB NOT NULL,
@@ -452,7 +452,7 @@ CREATE TABLE IF NOT EXISTS chunk_breadcrumbs (
     offset_end           INTEGER NOT NULL,
     PRIMARY KEY (item_id, chunk_idx)
 );
--- per reviewer G5：删除冗余 idx_chunk_breadcrumbs_item，PK 前缀已可用
+-- 删除冗余 idx_chunk_breadcrumbs_item，PK 前缀已可用
 
 -- G1 浏览状态信号 (W3 batch B, 2026-04-27)
 -- per spec docs/superpowers/specs/2026-04-27-w3-batch-b-design.md §3
@@ -1010,7 +1010,7 @@ impl Store {
     /// 用途：
     /// 1. update_item / upload 入口短路 — 新 content hash == 旧值时跳过 re-embed
     /// 2. delete_item → reindex::purge_item_indexes 时无需重新解密验证
-    /// 3. chunk-level diff 的基础（v0.7 next sprint）
+    /// 3. chunk-level diff 的基础
     ///
     /// 老 vault 升级：列加上后默认 ''，下次 update_item 或 reindex 时 lazy backfill。
     fn migrate_items_content_hash(conn: &Connection) -> Result<()> {
@@ -1025,7 +1025,7 @@ impl Store {
                 [],
             )?;
         }
-        // R16 review fix: INDEX CREATE 提出 if 块外。否则用户手动 ALTER 加列 / 历史
+        // INDEX CREATE 提出 if 块外。否则用户手动 ALTER 加列 / 历史
         // 中断的 migration / 测试 fixture 升级时，列存在但索引缺失会得不到补建。
         // CREATE INDEX IF NOT EXISTS 本身幂等无害。
         conn.execute(
@@ -1067,17 +1067,15 @@ impl Store {
         Ok(())
     }
 
-    /// per R07 P0 + R04 P0-1：chunk_breadcrumbs.breadcrumb_json (TEXT 明文) →
+    /// chunk_breadcrumbs.breadcrumb_json (TEXT 明文) →
     /// breadcrumb_enc (BLOB DEK 加密) 列名变更迁移。
     ///
-    /// 老 vault（W3 batch A 末，commit 28bd691）有 `breadcrumb_json` 列；升级到
-    /// W3 末后 SCHEMA_SQL `CREATE TABLE IF NOT EXISTS` 跳过老表 → INSERT 用
-    /// `breadcrumb_enc` 列名运行期 SQL error → F2 子系统瘫痪。
+    /// 老 vault 有 `breadcrumb_json` 列；升级后 SCHEMA_SQL `CREATE TABLE IF NOT EXISTS`
+    /// 跳过老表 → INSERT 用 `breadcrumb_enc` 列名运行期 SQL error → breadcrumb 子系统瘫痪。
     ///
     /// 修复策略：检测老列存在 → DROP TABLE + IF NOT EXISTS 重建。
     /// **老明文 breadcrumb 数据丢失**（acceptable — 下次 indexer ingest 触发重新
-    /// upsert 自动 backfill；R07 P0 注释 + RELEASE.md 用户须知"W3 升级后首次
-    /// ingest 触发 breadcrumb 重建"）。
+    /// upsert 自动 backfill；升级后首次 ingest 触发 breadcrumb 重建）。
     fn migrate_breadcrumbs_encrypt(conn: &Connection) -> Result<()> {
         let has_old_column: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('chunk_breadcrumbs') WHERE name = 'breadcrumb_json'",

@@ -104,7 +104,7 @@ pub async fn update_item(
     Path(id): Path<String>,
     Json(body): Json<UpdateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    // R2 F2 fix (P1): 输入长度上限。否则恶意 PATCH 500MB content → crypto::encrypt
+    // 输入长度上限。否则恶意 PATCH 500MB content → crypto::encrypt
     // 在 async handler 同步执行阻塞 tokio worker + 写 500MB BLOB 到 SQLite。
     const MAX_ID_LEN: usize = 64;
     const MAX_TITLE_LEN: usize = 1024;
@@ -156,11 +156,11 @@ pub async fn update_item(
         drop(vectors_guard);
 
         // Phase B hook 1: doc_update 信号喂 skill_evolution
-        // R3 F4 fix: 失败不阻塞主流程但留 debug 痕（schema drift / WAL 故障可诊断）
+        // 失败不阻塞主流程但留 debug 痕（schema drift / WAL 故障可诊断）
         if let Err(e) = vault.store().record_signal_event("doc_update", &id, None) {
             tracing::debug!(signal = "doc_update", error = %e, "record_signal_event failed (non-fatal)");
         }
-        // R10 E2E fix (P0): 内容变了 → 失效 search 缓存，否则搜旧关键词命中陈旧结果
+        // 内容变了 → 失效 search 缓存，否则搜旧关键词命中陈旧结果
         state.invalidate_search_cache();
     }
 
@@ -185,13 +185,13 @@ pub async fn delete_item(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    // R2 F2 fix: id 长度上限（防 Path<String> GB 级输入浪费 query plan）
+    // id 长度上限（防 Path<String> GB 级输入浪费 query plan）
     if id.len() > 64 {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "id too long"}))));
     }
     let vault = state.vault.lock()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
-    // R9 P1-2 fix: vault Locked/Sealed 时拒绝删除（与 update_item / list_items 等
+    // vault Locked/Sealed 时拒绝删除（与 update_item / list_items 等
     // mutating handler 一致 — "锁着的 vault 不可被改"语义）。
     let _ = vault.dek_db().map_err(|e| {
         (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
@@ -216,7 +216,7 @@ pub async fn delete_item(
             if let Err(e) = vault.store().record_signal_event("doc_delete", &id, None) {
                 tracing::debug!(signal = "doc_delete", error = %e, "record_signal_event failed (non-fatal)");
             }
-            // R10 E2E fix (P0): 删除后失效 search 缓存，否则已删文档仍被缓存命中
+            // 删除后失效 search 缓存，否则已删文档仍被缓存命中
             state.invalidate_search_cache();
             Ok(Json(serde_json::json!({
                 "status": "ok",

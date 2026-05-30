@@ -88,7 +88,7 @@ pub use usage::{
 pub use cache::{CacheBackend, CacheScope, CachedValue, cache_key};
 // chat 模块整体 pub(crate) — ChatEngine 只能内部构造（依赖 Vault/Store internal types）。
 // 外部消费者（attune-server route）通过本 crate re-export 拿到 Citation / ChatResponse /
-// parse_confidence / strip_confidence_marker 这些公开 API（per reviewer I3）。
+// parse_confidence / strip_confidence_marker 这些公开 API。
 pub(crate) mod chat;
 pub use chat::{parse_confidence, strip_confidence_marker, Citation, ChatEngine, ChatResponse};
 // chat_reliability — post-hoc deterministic evaluation agent for LLM chat
@@ -157,7 +157,6 @@ pub mod vault;
 pub mod vectors;
 pub mod skill_evolution;
 
-// v0.7 sprint feature modules
 pub mod cost;
 pub mod tools;
 pub mod demo;

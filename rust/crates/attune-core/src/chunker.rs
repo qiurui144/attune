@@ -184,7 +184,7 @@ fn has_unbalanced_fence(chars: &[char], start: usize, end: usize) -> bool {
 
 /// 语义章节切割: Markdown 标题 / 代码 def|class / 段落大小
 ///
-/// per reviewer I5：W2 后改为 wrapper，调 [`extract_sections_with_path`] 后丢弃 path，
+/// Wrapper：调 [`extract_sections_with_path`] 后丢弃 path，
 /// 避免两份函数维护相同的章节切分逻辑（未来一份改了另一份会漂移）。
 pub fn extract_sections(content: &str) -> Vec<(usize, String)> {
     extract_sections_with_path(content)
@@ -311,7 +311,7 @@ pub fn extract_sections_with_path(content: &str) -> Vec<SectionWithPath> {
             // 维护栈：dedent 到 depth-1，再 push（per spec §J1 path stack maintenance）
             // 防御性：depth >= 1 已由 heading_depth_and_text 保证（H1-H6 + 代码 boundary
             // 都 >= 1），但用 .max(1).saturating_sub(1) 防止未来扩展某 prefix 写成 (0, ...)
-            // 时 usize underflow → truncate(usize::MAX) 静默失效（per reviewer S1）
+            // 时 usize underflow → truncate(usize::MAX) 静默失效
             debug_assert!(*depth >= 1, "heading depth must be >=1, got {depth}");
             path_stack.truncate(depth.max(&1).saturating_sub(1));
             path_stack.push(title.clone());
@@ -599,8 +599,8 @@ mod tests {
 
     #[test]
     fn chunk_with_text_exactly_chunk_size_returns_single_chunk() {
-        // R12 (mutation testing) 发现: 17 chunker tests 全没测 text.len() == chunk_size
-        // 边界. 故意改 `<=` 为 `<` 时所有 test 仍 pass. 本 test 锁定该边界.
+        // 锁定 text.len() == chunk_size 边界:
+        // 故意改 `<=` 为 `<` 时其他 test 仍 pass（mutation 漏网），本 test 锁定该边界.
         // 不变量: text 长度 ≤ chunk_size 时 chunk() 返回 1 个 chunk (整段, 不切).
         let text: String = "a".repeat(512);
         assert_eq!(text.len(), 512);
@@ -749,12 +749,11 @@ mod tests {
         assert!(!chunks.is_empty());
     }
 
-    // ── Round I (v0.7 滚动 review): chunker 边界条件回归测试 ──
-    // R11 review agent 报告的边界问题，加测试暴露真相 + 回归保护。
+    // ── chunker 边界条件回归测试 ──
 
     #[test]
     fn chunk_inline_triple_backtick_no_oversized_extend() {
-        // R11 Critical-2: 行内 ``` (不在行首) 不应触发 code-fence extend 产生超大 chunk。
+        // 行内 ``` (不在行首) 不应触发 code-fence extend 产生超大 chunk。
         // 典型场景: API 文档行内引用 "use ``` to start a code fence"。
         let line = "use ``` to start a code fence in Markdown documents.\n";
         let text = line.repeat(5); // ~265 chars, > chunk_size 200
@@ -771,7 +770,7 @@ mod tests {
 
     #[test]
     fn chunk_no_newline_100kb_line_cuts_correctly() {
-        // R11 Critical-1 smoke: 无换行 100KB 长行必须被切割、不 panic、
+        // 无换行 100KB 长行必须被切割、不 panic、
         // 每段 ≤ 2*chunk_size（无 fence 不该 extend）。
         let text = "x".repeat(100_000);
         let chunks = chunk(&text, 512, 128);
@@ -786,7 +785,7 @@ mod tests {
 
     #[test]
     fn chunk_multilingual_no_char_boundary_panic() {
-        // R11: 中英日 emoji 阿拉伯文混排 — chunk() 全程基于 Vec<char> 下标，
+        // 中英日 emoji 阿拉伯文混排 — chunk() 全程基于 Vec<char> 下标，
         // 不应有 &str 裸字节切片导致的 char boundary panic。
         let text = "中文 English 日本語 한국어 🚀🔥✨ émojis مرحبا Ω≈ç√∫ ".repeat(40);
         let chunks = chunk(&text, 128, 32);

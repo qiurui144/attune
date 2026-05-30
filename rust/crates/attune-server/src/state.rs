@@ -716,7 +716,7 @@ impl AppState {
         }
 
         std::thread::spawn(move || {
-            // R5 P1-1 fix: RAII guard 保证任何退出路径（含 reindex_item / usearch FFI
+            // RAII guard 保证任何退出路径（含 reindex_item / usearch FFI
             // panic）都复位 reindex_worker_running flag。否则 worker thread panic 后
             // flag 永久 true → start_reindex_worker 的 compare_exchange 永远失败 →
             // worker 无法重启 → reindex 全停 → search 永久返回 stale 内容。
@@ -750,7 +750,7 @@ impl AppState {
 
                 // 顺序处理（持锁短，按 task 释放，避免长占 vectors lock 影响 search）
                 for (task_id, item_id, action, _prior_attempts) in tasks {
-                    // R17 P1 fix (S2-Q1 + S3-Q2): 区分 Transient vs Task error。
+                    // 区分 Transient vs Task error。
                     // Transient（引擎未就绪 / dek 解密失败 / vault 锁定）= 时序 race，
                     //   不计 attempts 只 sleep；下次 unlock+ready 后正常处理。
                     // Task（item not found / unknown action）= 任务本身有问题，
@@ -773,7 +773,7 @@ impl AppState {
                                     .map(|_| ())
                                     .map_err(|e| WorkerErr::Task(e.to_string()))
                             }
-                            // R6 P1-6 fix: 'reindex' action 实现（schema 文档化但 worker 之前未实现）
+                            // 'reindex' action 实现
                             "reindex" => {
                                 let item = vault.store().get_item(&dek, &item_id)
                                     .map_err(|e| WorkerErr::Task(e.to_string()))?
@@ -795,7 +795,7 @@ impl AppState {
                                 let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                                 let _ = vault.store().mark_reindex_done(task_id);
                             }
-                            // R10 E2E fix (P0): reindex worker 改了向量/FTS → 失效 search 缓存
+                            // reindex worker 改了向量/FTS → 失效 search 缓存
                             state.invalidate_search_cache();
                             tracing::info!("reindex_queue: {action} done for item={item_id}");
                         }
@@ -807,10 +807,10 @@ impl AppState {
                             std::thread::sleep(std::time::Duration::from_secs(2));
                         }
                         Err(WorkerErr::Task(e)) => {
-                            // R6 P0-3 fix: bump attempts → 达 5 次后 dequeue WHERE 自动 skip。
+                            // bump attempts → 达 5 次后 dequeue WHERE 自动 skip。
                             let new_attempts = {
                                 let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                                // R3 F3 fix: bump 失败（schema drift / WAL 故障）不应静默
+                                // bump 失败（schema drift / WAL 故障）不应静默
                                 // 当成"到 5 次"，否则无法区分"真毒任务"与"DB 写挂了"。
                                 match vault.store().bump_reindex_attempts(task_id) {
                                     Ok(n) => n,
@@ -836,7 +836,7 @@ impl AppState {
                     }
                 }
             }
-            // flag 复位由 WorkerFlagGuard::drop 接管（含 panic 路径，R5 P1-1 fix）
+            // flag 复位由 WorkerFlagGuard::drop 接管（含 panic 路径）
             tracing::info!("Reindex worker stopped (vault locked)");
         });
     }
@@ -1244,7 +1244,7 @@ impl AppState {
                     continue;
                 }
 
-                // R23 (2026-05-01): 调 attune-core::queue::embed_and_index_batch 共享批处理。
+                // 调 attune-core::queue::embed_and_index_batch 共享批处理。
                 // 锁顺序：vault → vectors → fulltext，全程持锁直到 done_ids 取出。
                 let done_ids: Vec<i64> = {
                     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
@@ -1761,7 +1761,7 @@ impl AppState {
         self.engines_initialized.store(false, Ordering::SeqCst);
     }
 
-    /// R10 E2E fix (P0): 文档变更后失效 search 结果缓存。
+    /// 文档变更后失效 search 结果缓存。
     ///
     /// search_cache 按 query hash 缓存结果。之前只有 vault lock (reset) 和 ingest
     /// 清缓存 — update_item / delete_item / upload / reindex worker 全都不清，导致：

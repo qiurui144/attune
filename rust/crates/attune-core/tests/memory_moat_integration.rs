@@ -62,7 +62,7 @@ fn doc_lifecycle_signals_complete_flow() {
 
 #[test]
 fn evolver_only_consumes_search_miss_kind() {
-    // R17 S4-Q1 fix 验收：evolver 只看 search_miss kind 不被 Phase B 信号污染
+    // evolver 只看 search_miss kind 不被 Phase B 信号污染
     let (_t, store, _v, _f, _d) = setup();
     store.record_skill_signal("query without results", 0, false).unwrap();
     store.record_signal_event("doc_update", "item_x", None).unwrap();
@@ -71,7 +71,7 @@ fn evolver_only_consumes_search_miss_kind() {
 
     // count 只数 search_miss
     let total = store.count_unprocessed_signals().unwrap();
-    assert_eq!(total, 1, "count 必须只数 search_miss kind（R17 P0 fix）");
+    assert_eq!(total, 1, "count 必须只数 search_miss kind");
 
     // get 也只拿 search_miss
     let sigs = store.get_unprocessed_signals(10).unwrap();
@@ -87,7 +87,6 @@ fn evolver_only_consumes_search_miss_kind() {
 
 #[test]
 fn signal_kind_rejects_typo() {
-    // R6 P1-4 fix 验收
     let (_t, store, _v, _f, _d) = setup();
     assert!(store.record_signal_event("doc_updaet", "item_x", None).is_err(),
             "typo kind 必须报错");
@@ -95,7 +94,7 @@ fn signal_kind_rejects_typo() {
 
 #[test]
 fn update_item_within_transaction_atomic() {
-    // R17 S1-Q4 fix 验收：update_item 内 SQL 已包入事务，多轮 update 后 hash + BLOB 一致
+    // update_item 内 SQL 已包入事务，多轮 update 后 hash + BLOB 一致
     let (_t, store, _v, _f, dek) = setup();
     let id = store.insert_item(&dek, "t", "v1", None, "note", None, None).unwrap();
 
@@ -111,7 +110,6 @@ fn update_item_within_transaction_atomic() {
 
 #[test]
 fn reindex_queue_action_validation_and_park() {
-    // R6 P0-3 + P1-5 fix 全链路验收
     let (_t, store, _v, _f, dek) = setup();
     let id = store.insert_item(&dek, "t", "c", None, "note", None, None).unwrap();
 
@@ -137,7 +135,7 @@ fn reindex_queue_action_validation_and_park() {
 
 #[test]
 fn signal_event_with_truncated_query() {
-    // R9 P1-3 fix 验收：chat citation_hit query 截断
+    // chat citation_hit query 截断
     let (_t, store, _v, _f, _d) = setup();
     let long_msg: String = "x".repeat(2000);
     let truncated: String = long_msg.chars().take(512).collect();
@@ -151,7 +149,7 @@ fn signal_event_with_truncated_query() {
 
 #[test]
 fn reindex_item_deletes_existing_vectors_precise_count() {
-    // R4 补测：之前 reindex 测试从不验 vectors_deleted（setup 没插向量）。
+    // 验 vectors_deleted 精确计数：
     // 先手工 add 3 个该 item 的向量 + 1 个别的 item 的，reindex 应只删自己的 3 个。
     use attune_core::vectors::VectorMeta;
     let (_t, store, mut vec, ft, dek) = setup();
@@ -170,7 +168,7 @@ fn reindex_item_deletes_existing_vectors_precise_count() {
 
 #[test]
 fn reindex_item_skips_empty_sections() {
-    // R4 补测：reindex.rs 空 section 跳过分支之前 0 覆盖
+    // reindex.rs 空 section 跳过分支
     let (_t, store, mut vec, ft, dek) = setup();
     let content = "# H1\n\n   \n\n# H2\n\nreal content here";
     let id = store.insert_item(&dek, "t", content, None, "note", None, None).unwrap();
@@ -181,7 +179,7 @@ fn reindex_item_skips_empty_sections() {
 
 #[test]
 fn all_known_signal_kinds_accepted() {
-    // R4 补测：白名单 8 值全覆盖（之前集成测试只验 5 个）
+    // 白名单 8 值全覆盖
     let (_t, store, _v, _f, _d) = setup();
     for kind in ["search_miss", "doc_create", "doc_update", "doc_delete",
                  "citation_hit", "annotation_marker", "click_through", "dwell"] {
@@ -192,7 +190,7 @@ fn all_known_signal_kinds_accepted() {
 
 #[test]
 fn signal_ref_id_length_boundary() {
-    // R2 F4 fix 边界验收：ref_id 128 ok / 129 reject
+    // ref_id 128 ok / 129 reject
     let (_t, store, _v, _f, _d) = setup();
     let id_128 = "a".repeat(128);
     let id_129 = "a".repeat(129);
@@ -202,7 +200,7 @@ fn signal_ref_id_length_boundary() {
 
 #[test]
 fn update_item_title_and_content_both_changed() {
-    // R4 补测：title + content 同时传的组合分支
+    // title + content 同时传的组合分支
     let (_t, store, _v, _f, dek) = setup();
     let id = store.insert_item(&dek, "OldTitle", "old body", None, "note", None, None).unwrap();
     let outcome = store.update_item(&dek, &id, Some("NewTitle"), Some("new body")).unwrap();
@@ -215,7 +213,7 @@ fn update_item_title_and_content_both_changed() {
 
 #[test]
 fn v07_migrations_idempotent_across_reopens() {
-    // R6 补测：v0.7 三个 migration (content_hash / skill_signals kind+ref_id /
+    // v0.7 三个 migration (content_hash / skill_signals kind+ref_id /
     // reindex_queue) 必须幂等 — Store::open 同一文件多次不报错、数据不丢。
     // 模拟用户多次重启 server / 升级再降级再升级。
     let tmp = TempDir::new().unwrap();
@@ -251,7 +249,7 @@ fn v07_migrations_idempotent_across_reopens() {
 
 #[test]
 fn open_memory_has_all_v07_schema() {
-    // R6 补测：open_memory（测试路径）也注册 v0.7 migration，新列/表齐全
+    // open_memory（测试路径）也注册 v0.7 migration，新列/表齐全
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
     // content_hash 路径可用

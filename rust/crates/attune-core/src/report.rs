@@ -1,4 +1,4 @@
-//! Project 报告生成（v0.7 sprint，F-Report）
+//! Project 报告生成
 //!
 //! OSS 范围：仅 trait scaffold + 通用 Markdown 实现，把若干 ReportItem
 //! 用 LLM 整合成一篇可读 Markdown（概要 / item 列表 / 关联分析三段）。

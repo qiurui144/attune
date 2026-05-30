@@ -1,4 +1,4 @@
-//! Entity 关系图数据结构（v0.7 sprint，F-EntityGraph）
+//! Entity 关系图数据结构
 //!
 //! 设计目的：把通过 `entities::extract_entities()` 抽出来的零散 entity，
 //! 跨多个 item 聚合成图——同一 item 内同时出现的两个 entity 之间加一条边，

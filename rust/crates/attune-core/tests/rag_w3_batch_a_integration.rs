@@ -43,7 +43,7 @@ fn c1_default_ttl_is_30_days() {
 }
 
 // ── F2 集成 ────────────────────────────────────────────────────────────
-// 注意：chunk_breadcrumbs.item_id 走 FK CASCADE 到 items 表（per reviewer I3）。
+// 注意：chunk_breadcrumbs.item_id 走 FK CASCADE 到 items 表。
 // 集成测试必须先 insert_item 拿到真实 item_id 再 upsert。
 
 #[test]

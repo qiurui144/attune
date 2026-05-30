@@ -360,7 +360,7 @@ pub async fn chat(
     let mut search_params = attune_core::search::SearchParams::with_defaults(5);
     if let Some(d) = detected_domain.as_ref() {
         search_params.domain_hint = Some(d.clone());
-        // R3 F2 fix (P1): 不把用户 chat query 明文写日志。日志文件 data_dir()/logs/
+        // 不把用户 chat query 明文写日志。日志文件 data_dir()/logs/
         // 不加密、保留 7 天 — query 是高隐私数据（用户问的法律/医疗/私事）。
         // 改 debug 级 + 仅打长度与 domain，不打内容。
         tracing::debug!(domain = %d, query_len = body.message.len(), "F-Pro domain detected");
@@ -992,7 +992,6 @@ pub async fn chat(
     // 信号量。skill_evolution 用这些 ref_id 反推"哪类 query 召回了什么 chunk"，
     // 在扩展词学习时优先保留与命中 chunk 同语义的同义词。
     //
-    // R9 P1-3 fix:
     // - query 字段截断到 512 字符（用户可能粘 4KB+ prompt，无截断时 5 行 ×4KB
     //   一年膨胀 skill_signals 表）
     // - 仅第一条写 query，后 4 条 None — 同一 query 关联多 chunk，evolver 用
@@ -1019,7 +1018,7 @@ pub async fn chat(
     // OSS-S12 fix: confident hallucination 防御。当所有 citation 的 relevance 都接近零
     // (max < 0.001) 时，说明 RAG 检索到的文档与 query 实质无关，LLM 在用预训练知识
     // "权威地" 编造答案。强制在前面加 disclaimer 让用户知晓答案非来自知识库。
-    // R5/R18 反复确认此现象（古希腊伊壁鸠鲁/量子退火等 out-of-corpus query）。
+    // 实测反复确认此现象（古希腊伊壁鸠鲁/量子退火等 out-of-corpus query）。
     //
     // OSS-S25 fix (任其坤案件 2026-05-09): 进一步强化对**结构化数据计算 query** 的拒绝。
     // 律师真实场景中"多少元/合计/求和/总计/笔数/对账/转账明细"这类问题 RAG chat 完全

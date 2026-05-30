@@ -1,4 +1,4 @@
-//! Reader 高亮 / 划词数据结构（v0.7 sprint，F-Reader scaffold；大头 v0.8）
+//! Reader 高亮 / 划词数据结构（scaffold）
 //!
 //! v0.7 本会话仅落数据结构。v0.8 实际 UI:
 //! pdf.js + react-pdf 渲染 PDF → 用户划词捕获 bbox → 持久化为 PdfHighlight

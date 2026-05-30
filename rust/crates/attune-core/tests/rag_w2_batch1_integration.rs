@@ -85,7 +85,7 @@ fn j1_dedent_across_chapters() {
     assert!(b_section.path.iter().any(|p| p.contains("第二章")));
 }
 
-// ── J3 集成（per reviewer S2 路径分离后）────────────────────────────────
+// ── min_score 阈值集成（路径分离后）────────────────────────────────
 
 #[test]
 fn j3_general_search_default_no_threshold() {

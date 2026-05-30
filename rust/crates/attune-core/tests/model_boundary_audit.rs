@@ -22,7 +22,7 @@ fn embedding_boundary_audit() {
 
     eprintln!("\n=== Embedding boundary audit ===");
 
-    // 1. empty string — per audit R20 fix: 应返 zero vector (不再 ERROR)
+    // 1. empty string — 应返 zero vector (不再 ERROR)
     let r = emb.embed(&[""]);
     match &r {
         Ok((v, _usage)) => {

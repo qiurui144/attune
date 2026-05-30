@@ -1,6 +1,6 @@
-//! 集中错误响应 helper（W4-005，2026-04-27）。
+//! 集中错误响应 helper。
 //!
-//! per R15 P1 followup：route 层不应把 VaultError / 内部异常的 to_string() 直接回给客户端。
+//! route 层不应把 VaultError / 内部异常的 to_string() 直接回给客户端。
 //! VaultError 可能含文件路径、crypto 细节（AesGcm tag 失败、Argon2 参数等），
 //! 暴露给 Chrome 扩展 / Web UI 是 fingerprinting + reconnaissance 风险。
 //!
