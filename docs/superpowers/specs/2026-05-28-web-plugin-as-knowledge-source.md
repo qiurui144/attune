@@ -4,7 +4,7 @@
 > 触发: 用户 v1.0 暴击 #9「我们的 web 插件作为知识库来源也需要」
 > Spec 责任人: extension / ingest 子领域
 > 关联代码: `extension/` + `rust/crates/attune-core/src/{ingest/, capture/, store/}` + `rust/crates/attune-server/src/routes/{ingest.rs, upload.rs}`
-> 关联前置: `docs/superpowers/specs/2026-04-27-w3-batch-b-design.md`（G1 浏览信号）+ `docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md`（隐私 SSOT）
+> 关联前置: G1 浏览信号 schema 见 `rust/crates/attune-core/src/capture/`（w3-batch-b 设计 spec 已实现并归档）+ `docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md`（隐私 SSOT）
 
 ---
 
@@ -301,7 +301,7 @@ attune Chrome extension 历史曲折:
 }
 ```
 
-(详细 schema 见 `docs/superpowers/specs/2026-04-27-w3-batch-b-design.md` §3)
+(详细 schema 见 `rust/crates/attune-core/src/capture/` — G1 浏览信号已实现)
 
 #### sidepanel files upload → POST /api/v1/upload (multipart)
 

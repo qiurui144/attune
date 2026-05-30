@@ -9,7 +9,7 @@
 - **关联**: 
   - `2026-05-19-agent-self-learning-design.md`（LLM gate）
   - `2026-04-19-data-infrastructure-design.md`（settings schema）
-  - `2026-05-22-robust-llm-infra.md`（chat trait infra）
+  - `docs/adr/0007-model-agnostic-llm-infra.md`（chat trait infra — robust-llm-infra spec 已归档为 ADR）
   - #89（gateway failover spec）
   - #150（`chat_multimodal` 现 dead，本 spec 让它真起来）
   - `attune-core/src/llm.rs:85` `chat_multimodal` trait method（fallback impl 已在）
