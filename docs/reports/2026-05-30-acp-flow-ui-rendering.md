@@ -62,4 +62,5 @@ UI 实测渲染：
 
 改动：`ChatMessage.tsx`（AcpFlowPanel）/ `signals.ts`（类型）/ `useChat.ts`（接线 + skip guard）/ `ChatView.tsx`（effect guard）/ `i18n/{zh,en}.ts`（14 key）/ `dist/index.html`（rebuild）。
 
-commit SHA / push 证据见本节末（提交后回填）。
+**commit**: `7d3a26b` feat(ui): render acp_flow autonomous-flow block in chat (release gap P1)
+**push**: `git push origin develop` → `aec5a85..7d3a26b develop -> develop`（origin/develop @ 7d3a26b，HTTPS，首推 TLS 瞬断重试 1 次成功）。develop fast-forward,未碰 main/tag,未 force。
