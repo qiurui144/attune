@@ -61,7 +61,7 @@
 | attune-pro | Rust workspace + plugin packs | P0 — 与 OSS 配对 |
 | attune-cloud | Rust + Docker compose（B 端 SaaS） | P1 |
 | KVM | Go / 其他（待 detector 实装） | P2 |
-| lawcontrol | Python + Django + Vue + 19 容器 | P2 — 与 attune 完全独立 |
+| attune-enterprise | Python + Django + Vue + 19 容器 | P2 — 与 attune 完全独立 |
 | rv-* 子项目 | C/C++/Rust + 交叉编译 + bench | P3 — 需要扩展 detector + 远端 SSH 执行器 |
 
 ---

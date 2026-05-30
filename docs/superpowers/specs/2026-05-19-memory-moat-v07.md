@@ -155,11 +155,11 @@ reindex / delete 并发时写 stale / orphan 向量。
 
 ---
 
-## 6. 与 attune-pro / lawcontrol 边界
+## 6. 与 attune-pro / attune-enterprise 边界
 
 - **attune (本仓 OSS)** — 上述 C1/C2/C4/C5 通用基建
 - **attune-pro / law-pro** — 律师专属版本化策略（案件卷宗时间线 + 截止日期回滚）
-- **lawcontrol** — 律所 B2B 团队共享记忆（B2B SaaS，不在 attune 仓）
+- **attune-enterprise** — 律所 B2B 团队共享记忆（B2B SaaS，不在 attune 仓）
 
 技术上独立，可参考设计模式但代码不互联（per CLAUDE.md「三产品矩阵 + 边界」§硬约束）。
 

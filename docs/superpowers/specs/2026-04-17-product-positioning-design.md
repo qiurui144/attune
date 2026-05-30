@@ -13,7 +13,7 @@
 >
 > - **OSS attune** = 通用个人知识工作者基座（**零行业绑定**）
 > - **attune-pro** = 行业垂直 plugin pack（律师/医生/专利/学者等）
-> - **lawcontrol** = B2B 律所小团队 SaaS
+> - **attune-enterprise** = B2B 律所小团队 SaaS
 >
 > **§5 那 4 个场景按以下方式移交**：
 > - 场景 1（专利 FTO）→ `attune-pro/docs/specs/patent-pro-vertical-workflow-design.md`

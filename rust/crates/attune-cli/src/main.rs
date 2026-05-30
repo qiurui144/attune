@@ -203,7 +203,7 @@ enum Commands {
     PluginPublish {
         /// plugin 源目录 (含 plugin.yaml / bin/ / plugin.sig)
         plugin_dir: std::path::PathBuf,
-        /// pluginhub base URL (lawcontrol/pluginhub 部署)
+        /// pluginhub base URL (attune-enterprise/pluginhub 部署)
         #[arg(long, default_value = "https://hub.engi-stack.com")]
         hub_url: String,
         /// admin token (env PLUGINHUB_ADMIN_TOKEN)

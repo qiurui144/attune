@@ -31,7 +31,7 @@
 | 2 | Stripe live key 配置 + 小额灰度 | 外部资质 + secret |
 | 3 | cloud 真机 install pkg 部署验收 | §7.3 手工 |
 | 4 | attune-pro 分支决策(A:补 develop→main / B:认 develop-tag 政策) | 分支策略 |
-| 5 | lawcontrol 9 处品牌残留意图澄清(历史对标 vs 兼容文档) | 语义确认 |
+| 5 | 旧品名残留全量替换 attune-enterprise(2026-05-30 全面替换 sprint 已完成) | 完成 |
 | 6 | 手动会员 feature merge(accounts feature→develop + cloud pin)+ review | 评审 |
 | 7 | K3 端到端 / Step7 LLM live smoke | 等硬件/真 token |
 | 8 | payment 多渠道实施决策(调研报告已出) | 产品方向 |

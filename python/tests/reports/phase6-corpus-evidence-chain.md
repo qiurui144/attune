@@ -10,7 +10,7 @@
 
 | Scenario | 语料 | 文件数 | Hit@10 | MRR | Recall@10 |
 |----------|------|--------|--------|-----|-----------|
-| **A 律师 / 中文法律** | lawcontrol/data/test_evidence | ~10 .txt 法规+判例 | **0.80** | 0.52 | 0.43 |
+| **A 律师 / 中文法律** | attune-enterprise/data/test_evidence | ~10 .txt 法规+判例 | **0.80** | 0.52 | 0.43 |
 | **B Rust 开发者 / 英文** | rust-lang/book@trpl-v0.3.0 | 479 .md | **0.80** | 0.57 | 0.57 |
 | **C 中文八股** | CyC2018/CS-Notes (子集) | 183 .md | **1.00** | 0.56 | 0.70 |
 
@@ -18,7 +18,7 @@
 应该是因为 corpus 切换全量 rust-book（之前是 subset），加上 lifetime/references 类
 长上下文 query 检索仍是 hard case。
 
-## 2. attune-pro/law-pro 5 维度评分 (lawcontrol_compat golden_qa)
+## 2. attune-pro/law-pro 5 维度评分 (attune_enterprise_compat golden_qa)
 
 跑 `cargo run --release -p law-pro --bin run_golden_qa --manifest-path
 /data/company/project/attune-pro/Cargo.toml` 复用 bench server :18901。

@@ -5,7 +5,7 @@
 验证 civil_loan_agent 在 3 条复杂证据链下金额计算正确 + 证据链完整性评估。
 
 3 条链（复杂度递增）：
-- 链A 标准      : lawcontrol 借款合同样本 20万/年9.6%/1年 → 单利
+- 链A 标准      : 借款合同样本 20万/年9.6%/1年 → 单利
 - 链B 砍头息    : 借条50万/转账实付45万 → 本金按实付计（民法典680条）
 - 链C 利率红线  : 100万/年36%超LPR4倍 → lpr_capped 封顶 + 部分还款冲抵
 
@@ -71,7 +71,7 @@ print("=== law-pro 复杂证据链 + 金额计算 E2E ===\n")
 post("/api/v1/vault/setup", {"password": PW})
 post("/api/v1/vault/unlock", {"password": PW})
 
-# 链 A — 标准基线（lawcontrol 借款合同样本）
+# 链 A — 标准基线（借款合同样本）
 print("链 A — 标准 (合同样本 20万/年9.6%/1年)")
 st, d = run_agent(facts(
     principal=200000.0, principal_evidence="借款合同_民间借贷.txt 第1条 本金20万",

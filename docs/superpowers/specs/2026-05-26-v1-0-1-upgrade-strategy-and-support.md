@@ -80,7 +80,7 @@
 
 ### v1.0.2+ 才做(避免范围漂移)
 
-- DB rename(lawcontrol → attune_enterprise)alembic migration
+- DB rename(attune_enterprise)alembic migration
 - DSAR 实测 user 法定请求满足 ≤ 30 天 turnaround SLA 数值化
 - SLA 分级 P0/P1/P2/P3 真定义 + status page
 

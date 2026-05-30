@@ -331,7 +331,7 @@ attune-server / accounts / pluginhub 没有 `/metrics`(Prometheus) endpoint。Ga
 |----|------|------|
 | LICENSE (attune OSS) | ✅ | Apache 2.0 |
 | LICENSE (attune-pro) | ✅ | LicenseRef-Proprietary |
-| 官网 ToS 页面 | ❌ | grep 仅 wiki-web `external/attune-enterprise/` 内有 `京ICP证010230-17`(lawcontrol 老备案,不是 attune) |
+| 官网 ToS 页面 | ❌ | grep 仅 wiki-web `external/attune-enterprise/` 内有 `京ICP证010230-17`(attune-enterprise 老备案,不是 attune) |
 | 官网 Privacy Policy 页面 | ❌ | 同上,无 attune 自己的 |
 | DPA (Data Processing Agreement) | ❌ | 企业合同需要,缺 |
 | 中国 ICP 备案号 | ❌ | engi-stack.com 域名是否 ICP 备案未确认;若服务器在大陆 + 域名 engi-stack.com 解析到大陆 IP,**法定必须备案** |

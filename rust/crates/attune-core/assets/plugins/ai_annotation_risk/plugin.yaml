@@ -21,7 +21,7 @@ constraints:
 prompt_file: prompt.md
 
 # JSON Schema 约束（输出必须 match）—— 参照
-# `@attune-lawcontrol/schemas/annotation_findings.v1.json`（未来独立发包）
+# `@attune-enterprise/schemas/annotation_findings.v1.json`（未来独立发包）
 output:
   schema:
     type: object

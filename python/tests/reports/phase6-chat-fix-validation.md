@@ -6,7 +6,7 @@
 
 ## 对比结果
 
-attune-pro/law-pro lawcontrol_compat golden_qa (10 cases × 5 dim 共 250 分)
+attune-pro/law-pro attune_enterprise_compat golden_qa (10 cases × 5 dim 共 250 分)
 
 | 指标 | 修复前 (a18679b) | 修复后 (759429d) | 变化 |
 |------|--------|--------|------|

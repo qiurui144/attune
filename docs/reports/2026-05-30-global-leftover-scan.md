@@ -58,7 +58,7 @@
 
 ### 3.2 [P1] `docs/specs/` 与 `docs/superpowers/specs/` 双 spec 目录
 `docs/specs/` 含 2 文件: `attune-plugin-protocol.md` `memory-moat-v07.md`;主 spec 目录是 `docs/superpowers/specs/`(40+ 文件)。
-**为何遗留**: 两个 spec 落点违反单一主题 SSOT;`memory-moat-v07.md` 是 v0.7 期产物且引用已改名的 `lawcontrol`(见 §3.5)。
+**为何遗留**: 两个 spec 落点违反单一主题 SSOT;`memory-moat-v07.md` 是 v0.7 期产物(旧品名引用已于 2026-05-30 全量替换为 `attune-enterprise`,见 §3.5)。
 **建议**: P1 — `attune-plugin-protocol.md` 若仍是协议 SSOT 应迁 `docs/`(白名单 `<feature>.md`)或并入 `plugin-development.md`;`memory-moat-v07.md` 是过期设计稿,结论入 ADR 后删。
 
 ### 3.3 [P1] `2026-05-28-v1-0-x-sprint-closure-report.md` 误放在 specs 目录
@@ -71,10 +71,9 @@
 **为何遗留**: §3.2 sprint report / gap analysis 应进 PR description 或 RELEASE.md 节,不留独立 .md;`test-pyramid-*` 4 个时间戳副本是典型 "同主题多副本"。
 **建议**: P2 — `test-pyramid-*` 只保留最新一份(或全删,结论已固化);`v1.0-*` / `v10-ga-*` GA 验收报告已发版,结论入 RELEASE 后归档/删;`docs/reports/` 保留为短期 sprint 落档区可接受,但需定期清(per §3.2 周期审计)。
 
-### 3.5 [P2] stale `lawcontrol` 引用(产品已 2026-05-22 改名 attune-enterprise)
-命中文件(非 corpora):`docs/specs/memory-moat-v07.md:158,162` · `docs/TESTING.md:210` · `docs/oss-pro-strategy.md` · `docs/adr/0001-oss-pro-boundary.md` · 多份 `docs/reports/v1.0-*.md` · 多份 `docs/superpowers/specs/*.md`
-**为何遗留**: CLAUDE.md 明示 "attune-enterprise 原名 LawControl,自 2026-05-22 改名"。文档里 `lawcontrol` 是过时品名。
-**建议**: P2 — 活文档(oss-pro-strategy / TESTING / ADR)应改 `attune-enterprise`;一次性 report/spec 里的留作历史痕迹可忽略(随归档一并消失)。注意 ADR `0001` 是永久文档,应更新。
+### 3.5 [完成] 旧品名引用全量替换 `attune-enterprise`
+命中文件(非 corpora):`docs/specs/memory-moat-v07.md` · `docs/TESTING.md` · `docs/oss-pro-strategy.md` · `docs/adr/0001-oss-pro-boundary.md` · 多份 `docs/reports/v1.0-*.md` · 多份 `docs/superpowers/specs/*.md`
+**状态**: 2026-05-30 "全面替换" sprint 已将全仓旧品名替换为 `attune-enterprise`(品牌)/ `legal`(corpus 标签),含 ADR `0001`(永久文档)。0 残留。
 
 ### 3.6 [P2] `docs/superpowers/plans/` 完成的 plan 未删(3 份)
 `2026-05-18-lawpro-agents-enhancement.md`(92KB)· `2026-05-19-civil-loan-evidence-chain-agent.md`(79KB)· `2026-05-28-k1-secrets-simplification.md`(attune-pro)
@@ -151,7 +150,7 @@ grep `sk-* / AKIA* / ghp_* / BEGIN PRIVATE KEY` 命中全部为**合法 test fix
 | 3.2 | **P1** | 文档 | `docs/specs/` 双 spec 目录,2 文件迁移/归档 |
 | 3.3 | **P1** | 文档 | sprint-closure-report 误放 specs,与 reports 重复 |
 | 5.1 | **P1** | 版本 | RELEASE v1.1.0 写完成态但未 tag,标注 "未发布" |
-| 3.5 | P2 | 文档 | 活文档(ADR/oss-pro/TESTING)stale `lawcontrol` → attune-enterprise |
+| 3.5 | 完成 | 文档 | 全仓旧品名 → attune-enterprise(含 ADR/oss-pro/TESTING) |
 | 3.4 | P2 | 文档 | `docs/reports/` test-pyramid 4 副本 + GA 报告归档 |
 | 3.6 | P2 | 文档 | 已 ship plan 未删(lawpro/civil-loan) |
 | 3.7/5.3 | P2 | 版本 | Python RELEASE 仍写 v0.7.0 GA |

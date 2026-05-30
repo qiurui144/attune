@@ -323,7 +323,7 @@ CREATE INDEX IF NOT EXISTS idx_chunk_sum_item ON chunk_summaries(item_id);
 -- 设计决策（详见 memory/project_attune_annotation_model.md）：
 --   · source = 状态（user/ai）而非分类；用户再手动编辑 → 回到 user
 --   · 字符偏移 + snippet 双锚点：offset_start/offset_end 是首选定位，snippet 是 fallback，
---     供文档更新后重新定位（lawcontrol 风格的 location_confidence 后续版本再加）
+--     供文档更新后重新定位（attune-enterprise 风格的 location_confidence 后续版本再加）
 --   · 5 个预设 emoji 标签由前端枚举：⭐重点 / 📍待深入 / 🤔存疑 / ❓不懂 / 🗑过时
 --   · content 字段加密（放个人思考），snippet 不加密（用于定位恢复）
 CREATE TABLE IF NOT EXISTS annotations (

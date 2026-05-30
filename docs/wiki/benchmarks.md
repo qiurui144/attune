@@ -10,7 +10,7 @@
 **三赛道全 PRO，两赛道 MRR 满分。Reliability framework Phase 3 F1 = 0.9828。**
 
 ```
-Scen A 法律 (lawcontrol):  Hit@10=0.80  MRR=0.50  ✅ PRO
+Scen A 法律 (attune-enterprise):  Hit@10=0.80  MRR=0.50  ✅ PRO
 Scen B Rust (rust-book):   Hit@10=1.00  MRR=1.00  ✅ PRO 满分
 Scen C 中文八股 (cs-notes): Hit@10=1.00  MRR=1.00  ✅ PRO 满分
 
@@ -45,7 +45,7 @@ v1.0 在检索 benchmark 之上新增三阶段 agent 可靠性门控：
 | BM25 | tantivy 0.22 + tantivy-jieba |
 | Cross-domain penalty | 0.4 (F-Pro) |
 
-## Scen A — 法律 / 中文（lawcontrol corpus）
+## Scen A — 法律 / 中文（legal corpus）
 
 **Corpus**：`/data/company/project/attune-enterprise/data/crawler_backup/seed.sql` 解析为 .md
 - 8,109 法规 + 2,568 案例（共 10,677 条）
@@ -91,7 +91,7 @@ v1.0 在检索 benchmark 之上新增三阶段 agent 可靠性门控：
 
 ## law-pro 答案质量评分（5 维度）
 
-跑 `attune-pro/plugins/law-pro/tests/lawcontrol_compat/golden_qa.yaml` 10 case：
+跑 `attune-pro/plugins/law-pro/tests/attune_enterprise_compat/golden_qa.yaml` 10 case：
 
 | 维度 | 分值 | 说明 |
 |------|------|------|
@@ -106,7 +106,7 @@ v1.0 在检索 benchmark 之上新增三阶段 agent 可靠性门控：
 - 法律常识（3）/ 法条引用（2）/ 案例分析（2）
 - 长文本理解 / 防幻觉 / 上下文记忆（多轮）
 
-**vs lawcontrol B2B SaaS baseline (~17-18/25) 提升 +39%。**
+**vs attune-enterprise B2B SaaS baseline (~17-18/25) 提升 +39%。**
 
 ## 演化历史（Phase B 5 轮）
 
@@ -158,7 +158,7 @@ top-K 中包含至少 1 个 acceptable_hit → 1，否则 0。
 ### Recall@K
 top-K 中命中的 acceptable_hits 数 / 该 query 的 acceptable_hits 总数。
 
-### 5 维度（lawcontrol 兼容）
+### 5 维度（attune-enterprise 兼容）
 - **correctness**: 5 - missing key points 数
 - **completeness**: 命中要点 / 总要点
 - **legal_cite**: 法条引用是否真实（无引用题默认 5）
@@ -177,5 +177,5 @@ MRR    ≥ 0.50      ← 达 PRO
 
 - Scen A `shareholder_resolution` miss 是 corpus 缺特定判决，非 retrieval bug
 - 117 法律 doc 子集是为快速迭代设计；全量 10K corpus run 在 v0.6.1 单独发版
-- VLM 视觉证据（Phase D）在 v0.7 路线图（需 lawcontrol 28 张图片证据）
+- VLM 视觉证据（Phase D）在 v0.7 路线图（需 attune-enterprise 28 张图片证据）
 - 三赛道 corpus 都是 GitHub 公开仓 + 版本固化，benchmark 完全可复现

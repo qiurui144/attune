@@ -9,7 +9,7 @@
 //!    - MRR (Mean Reciprocal Rank) — 第一个 acceptable_hit 的倒数排名
 //!
 //! 2. **Mock corpus harness** — 不依赖 attune-server / 真 LLM，纯算法验证。
-//!    真 corpus 跑数（rust-book + lawcontrol 等）走 `scripts/run-benchmark-corpus.sh`
+//!    真 corpus 跑数（rust-book + legal 等）走 `scripts/run-benchmark-corpus.sh`
 //!    + e2e attune-server，留 W5 出 v0.6 GA baseline 数字。
 //!
 //! 3. **CRAG/RAGAS 框架占位** — Faithfulness / Answer Relevancy / Context Precision /
@@ -186,7 +186,7 @@ fn golden_queries_file_loads() {
 fn run_benchmark_against_real_corpus() {
     // 占位：真 implementation 在 W5 J6 GA 跑数 PR 中：
     //   1. spawn attune-server with test vault
-    //   2. bind ../../tests/corpora/rust-book/ + /data/.../lawcontrol/test_evidence/
+    //   2. bind ../../tests/corpora/rust-book/ + /data/.../attune-enterprise/test_evidence/
     //   3. wait scan + index complete
     //   4. for each scenario.query: call /api/v1/search, collect top-K item titles
     //   5. map titles → acceptable_hits IDs (queries.json schema)

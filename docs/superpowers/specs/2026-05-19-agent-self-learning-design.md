@@ -211,7 +211,7 @@ worker is cheap and the cost contract (§5) is naturally satisfied.
 A new top-level key in the existing `app_settings` blob (or a sibling `agent_preferences`
 meta key — implementation choice), encrypted at rest by the vault DEK like all
 `get_meta`/`set_meta` data. **Never leaves the device.** Never synced to any external
-product (the attune data-isolation rule in `CLAUDE.md` — no lawcontrol bridge, no cloud).
+product (the attune data-isolation rule in `CLAUDE.md` — no attune-enterprise bridge, no cloud).
 
 ```json
 {

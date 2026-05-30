@@ -114,10 +114,10 @@ skill_evolution 从"失败驱动"升级为"全谱信号驱动" — 可按 kind �
 
 | Scenario | Hit@10 | MRR | Verdict |
 |----------|--------|-----|---------|
-| 法律 / lawcontrol corpus | **0.80** | 0.50 | ✅ PRO |
+| 法律 / legal corpus | **0.80** | 0.50 | ✅ PRO |
 | Rust / rust-book | **1.00** | **1.00** | ✅ PRO 满分 |
 | 中文八股 / cs-notes | **1.00** | **1.00** | ✅ PRO 满分 |
-| **5-dim answer quality (lawcontrol golden_qa)** | **25.00/25** (100%) | 10/10 excellent | ✅ +39% vs baseline |
+| **5-dim answer quality (legal golden_qa)** | **25.00/25** (100%) | 10/10 excellent | ✅ +39% vs baseline |
 
 🔒 **Phase A.5 — Three-layer privacy model**:
 - **L0 🔒**: per-file flag, chunk never leaves device (forced local LLM)
@@ -149,18 +149,18 @@ Validated Python features get promoted to the Rust line. See [`rust/README.md`](
 
 ## Three-product matrix (where Attune fits)
 
-> Decisive positioning (2026-04-27): Attune (this repo, OSS) is a **generic personal knowledge base**, with **zero industry binding**. Industry depth (law / medical / academic / sales / engineering / patent) is delivered as commercial plugin packs in `attune-pro`. Small-team B2B law-firm scenarios are handled by a separate product, `lawcontrol`.
+> Decisive positioning (2026-04-27): Attune (this repo, OSS) is a **generic personal knowledge base**, with **zero industry binding**. Industry depth (law / medical / academic / sales / engineering / patent) is delivered as commercial plugin packs in `attune-pro`. Small-team B2B law-firm scenarios are handled by a separate product, `attune-enterprise`.
 
 | Product | License | Form | User group |
 |---------|---------|------|------------|
 | **`attune`** (this repo) | Apache-2.0 | Tauri desktop / Chrome extension | **Personal generic users** — universal RAG, encrypted vault, browser capture, MCP outlet |
 | **`attune-pro`** (private) | Proprietary | Plugin packs (.attunepkg signed) loaded into `attune` | **Personal industry users** — law / presales / patent / tech / medical / academic vertical packs |
-| **`lawcontrol`** (separate product) | Proprietary | Django + Vue B2B SaaS | **Law-firm small teams** — multi-tenant RBAC + case assignment + multi-user collaboration |
+| **`attune-enterprise`** (separate product) | Proprietary | Django + Vue B2B SaaS | **Law-firm small teams** — multi-tenant RBAC + case assignment + multi-user collaboration |
 
 **Equation:**
 - Personal generic user = `attune (OSS)`
 - Personal industry user = `attune (OSS)` + `attune-pro/<vertical>-pro` plugin pack
-- Industry small team = `lawcontrol`
+- Industry small team = `attune-enterprise`
 
 The three products are technically independent (no cross-product runtime dependency) and strategically complementary (same team, distinct user segments). Full strategy + admission rules: [`docs/oss-pro-strategy.md`](docs/oss-pro-strategy.md) (bilingual).
 

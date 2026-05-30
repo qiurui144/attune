@@ -53,7 +53,7 @@
 - 发现 2 个真实 bug 并 fix
 
 **不做（推到后续）**：
-- 中文 corpus（lawcontrol）真实验证 — 推 v1.1
+- 中文 corpus（attune-enterprise）真实验证 — 推 v1.1
 - 完整 50 query DeepSeek E2E — 时间预算只够 18 stratified sample
 - Hallucination rate by LLM judge — 推 v1.1（attune-bench Phase 3）
 - 反向 baseline retest（v0.6 binary）— 已有 Phase B mini-corpus 数据，本 spec 是 v1.0 baseline
@@ -106,7 +106,7 @@
 ## 6. 扩展点
 
 - v1.1: 把 50-query 固化进 golden set（`rust/tests/golden/queries-rust-book-50.json`）+ 进 `scripts/run-benchmark-corpus.sh` 跑 CI
-- v1.1: 同样方法验证 lawcontrol 中文 corpus（per #131 attune-bench Phase 3）
+- v1.1: 同样方法验证 attune-enterprise 中文 corpus（per #131 attune-bench Phase 3）
 - v1.1: 引入 LLM-judged hallucination/faithfulness 指标（per `rag_quality_benchmark.rs` CRAG/RAGAS 占位）
 
 ## 7. 错误处理 + 边界 case
@@ -153,7 +153,7 @@
 | 风险 | 缓解 |
 |------|------|
 | Reranker 修复带来 latency 跳升（25ms → 6.2s）| ✅ 这是**预期效果** — 之前 reranker 静默失败所以"快"，现在真的跑了；后续优化 reranker GPU 推理 |
-| 50-query rust-book 是英文 + 单 corpus，结论或 over-fit | ⚠ 已知；推 v1.1 lawcontrol 中文 + multi-corpus E2E |
+| 50-query rust-book 是英文 + 单 corpus，结论或 over-fit | ⚠ 已知；推 v1.1 attune-enterprise 中文 + multi-corpus E2E |
 | Q31/Q32 仍未命中（borrow checker / Option 类）| ⚠ 多 hop 推理类难题；DeepSeek 用 pretrained 知识补偿，answer 仍正确 |
 | 18 sample 而非 50 全跑 DeepSeek | ⚠ 时间预算 cap 但 4 type stratified sample 已具代表性 |
 

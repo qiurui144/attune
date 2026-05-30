@@ -1,9 +1,9 @@
-# Unified Pluginhub 架构 spec — 三产品矩阵 + lawcontrol → attune-enterprise 改名
+# Unified Pluginhub 架构 spec — 三产品矩阵 + attune-enterprise 企业形态确立
 
 **日期**：2026-05-22
 **状态**：DRAFT — 等用户评审，未进 implementation
 **作者**：spec 起草 AI
-**触发**：用户原话「把 attune-pluginhub 和 attune-pro（还有 lawcontrol 中的插件也要融入 pro 体系，这些都是付费插件，都通过 pluginhub 的下载），做好架构的处理。仓库处理好之后，lawcontrol 改名为 attune-enterprise，把相关 claude 和记忆也都做好迁移」
+**触发**：用户原话「把 attune-pluginhub 和 attune-pro（还有 attune-enterprise 中的插件也要融入 pro 体系，这些都是付费插件，都通过 pluginhub 的下载），做好架构的处理。仓库处理好之后，attune-enterprise 企业形态确立，把相关 claude 和记忆也都做好迁移」
 **关联**：全局 CLAUDE.md「架构级别设计铁律」，项目 CLAUDE.md「三产品矩阵 + 边界」
 
 ---
@@ -30,19 +30,19 @@
 
 ### 1.1 用户痛点
 
-当前三产品矩阵（attune OSS / attune-pro / lawcontrol）的付费 plugin 分发存在三组结构性矛盾：
+当前三产品矩阵（attune OSS / attune-pro / attune-enterprise）的付费 plugin 分发存在三组结构性矛盾：
 
 | 矛盾 | 现状 | 后果 |
 |------|------|------|
-| **分发分散** | attune-pro plugin 通过 pluginhub 走 license + JWT 下发；lawcontrol plugin 嵌在 `lawcontrol/plugins/` 直接读文件系统，无 license 校验 | 同一团队两个产品两套分发逻辑，license / 审计 / 撤回机制不统一 |
-| **付费体系断层** | pluginhub 已有 `License.plan = individual / pro / enterprise` 三档，但 enterprise 档无实际 plugin 路由进来；lawcontrol 内部 plugin 没有 enterprise tier 概念 | enterprise 用户付了 enterprise license 但拿不到 enterprise-only plugin（如 law_firm 行业包） |
-| **产品定位不清晰** | 用户原话「lawcontrol 改名为 attune-enterprise」反映：lawcontrol 不是独立产品，而是 attune 矩阵的企业形态。但当前名字暗示「law-only B2B」，限制非律所企业场景 | 销售错位 + 客户认知偏差 + 后续扩 medical / patent / finance 企业版无名字空间 |
+| **分发分散** | attune-pro plugin 通过 pluginhub 走 license + JWT 下发；attune-enterprise plugin 嵌在 `attune-enterprise/plugins/` 直接读文件系统，无 license 校验 | 同一团队两个产品两套分发逻辑，license / 审计 / 撤回机制不统一 |
+| **付费体系断层** | pluginhub 已有 `License.plan = individual / pro / enterprise` 三档，但 enterprise 档无实际 plugin 路由进来；attune-enterprise 内部 plugin 没有 enterprise tier 概念 | enterprise 用户付了 enterprise license 但拿不到 enterprise-only plugin（如 law_firm 行业包） |
+| **产品定位不清晰** | attune-enterprise 的定位反映：它不是独立产品，而是 attune 矩阵的企业形态。但当前名字暗示「law-only B2B」，限制非律所企业场景 | 销售错位 + 客户认知偏差 + 后续扩 medical / patent / finance 企业版无名字空间 |
 
 ### 1.2 解决目标
 
 1. **统一付费 plugin 分发管道**：attune-pro plugin（个人付费）+ attune-enterprise plugin（企业付费）共用 pluginhub backend，统一 license / 撤回 / 审计 / 心跳
 2. **明示三档 visibility**：`public`（OSS 免费）/ `pro`（个人订阅）/ `enterprise`（企业 license + org_id 匹配）
-3. **lawcontrol → attune-enterprise 改名**：明示产品矩阵地位，腾出 vertical 扩展空间（law 是 attune-enterprise 第一个垂直，后续 medical / patent / finance 同管道接入）
+3. **attune-enterprise 企业形态确立**：明示产品矩阵地位，腾出 vertical 扩展空间（law 是 attune-enterprise 第一个垂直，后续 medical / patent / finance 同管道接入）
 
 ### 1.3 与产品 positioning 对齐
 
@@ -50,7 +50,7 @@ per 项目 CLAUDE.md「三产品矩阵 + 边界」：
 
 - **attune (OSS)**：零行业绑定，免费，pluginhub 公开端点拿 `visibility=public` plugin
 - **attune-pro**：个人行业付费，pluginhub 走 `License.plan ≥ pro` 路径
-- **attune-enterprise（原 lawcontrol）**：B2B 小团队，pluginhub 走 `License.plan = enterprise` + `org_id` 匹配
+- **attune-enterprise**：B2B 小团队，pluginhub 走 `License.plan = enterprise` + `org_id` 匹配
 
 技术独立硬约束不变：attune OSS 不调用 pluginhub 之外的任何 attune-pro / attune-enterprise API；数据完全隔离；任何配套关系通过用户主动 install / export / import 完成。
 
@@ -58,7 +58,7 @@ per 项目 CLAUDE.md「三产品矩阵 + 边界」：
 
 - ❌ 改 attune OSS 任何行为或边界（OSS 用户体验完全不变）
 - ❌ 改 pluginhub 的 license-key 颁发机制（admin token / customer flow 不变）
-- ❌ 把 lawcontrol 的业务逻辑（卷宗 / RPA / Intent Router）迁出当前仓 — 只改名，不动核心
+- ❌ 把 attune-enterprise 的业务逻辑（卷宗 / RPA / Intent Router）迁出当前仓 — 只改名，不动核心
 - ❌ 引入 plugin 跨产品互通（attune-pro plugin 不能装到 attune-enterprise，反之亦然，除非显式 cross-tier 设计）
 
 ---
@@ -70,16 +70,16 @@ per 项目 CLAUDE.md「三产品矩阵 + 边界」：
 - pluginhub schema 增 `Plugin.visibility` + `Plugin.org_id`（可空）字段
 - pluginhub API 增 `visibility` / `org_id` 过滤逻辑（`/api/v1/index.json` + `/api/v1/plugin/<id>/download`）
 - attune-pro 现有 plugin 全部标 `visibility = pro`（batch update）
-- lawcontrol 现有 plugin 抽出（保留源码在原仓不动，仅做发布管道改造）→ pluginhub 中标 `visibility = enterprise`
-- lawcontrol → attune-enterprise 改名全链：
+- attune-enterprise 现有 plugin 抽出（保留源码在原仓不动，仅做发布管道改造）→ pluginhub 中标 `visibility = enterprise`
+- attune-enterprise 形态确立全链：
   - git repo（远端 + 本地 worktree）
   - docker image / docker-compose service name
-  - DNS / domain（如 `lawcontrol.example.com` → `enterprise.engi-stack.com`）
+  - DNS / domain（统一 `enterprise.engi-stack.com`）
   - service-discovery / k8s namespace
-  - database schema 字段（凡含 `lawcontrol_*` 命名的表 / 列，加迁移脚本 rename）
+  - database schema 字段（凡含旧命名的表 / 列，加迁移脚本 rename 到 `attune_enterprise_*`）
   - 仓内 CLAUDE.md / README.md / DEVELOP.md / RELEASE.md
 - CLAUDE.md 链 + memory 迁移：
-  - `/data/company/project/attune/CLAUDE.md`「三产品矩阵」节 lawcontrol → attune-enterprise
+  - `/data/company/project/attune/CLAUDE.md`「三产品矩阵」节统一 attune-enterprise
   - `/data/company/project/attune-pro/CLAUDE.md` 同步
   - `/home/qiurui/.claude/projects/-data-company-project-attune/memory/` 全部 grep + rename
   - `/data/company/project/attune-enterprise/CLAUDE.md` 迁到新 repo 路径
@@ -137,7 +137,7 @@ per 项目 CLAUDE.md「三产品矩阵 + 边界」：
               └──────────────────┘                                │  └────────────────┘       │
                                                                   │                          │
                                                                   │  ┌─ enterprise ──┐       │
-                                                                  │  │ law-firm-ent  │ ◄── attune-enterprise (B2B SaaS, 原 lawcontrol) │
+                                                                  │  │ law-firm-ent  │ ◄── attune-enterprise (B2B SaaS) │
                                                                   │  │ medical-ent   │     │
                                                                   │  │ ... (企业团队) │     │
                                                                   │  └────────────────┘    │
@@ -230,7 +230,7 @@ attune-pluginhub (独立仓)
 attune-pro (独立仓)
   └─ plugins/ ──[ scripts/publish-to-pluginhub.sh ]──→ pluginhub /admin/plugins POST
 
-attune-enterprise (改名后，原 lawcontrol)
+attune-enterprise (B2B SaaS)
   └─ plugins/ ──[ scripts/publish-to-pluginhub.sh ]──→ pluginhub /admin/plugins POST
 
 attune (OSS)
@@ -251,7 +251,7 @@ cloud/pluginhub (submodule)
 |------|---------|---------|------|
 | `attune-pluginhub` | `/data/company/project/attune-pluginhub` | schema 扩展 + API 扩展 | ❌ 不改名 |
 | `attune-pro` | `/data/company/project/attune-pro` | plugin metadata 增 `visibility: pro` + publish script | ❌ |
-| `attune-enterprise`（原 `lawcontrol`） | `/data/company/project/attune-enterprise` → `/data/company/project/attune-enterprise` | **改名 + plugin 抽取发布** | ✅ rename |
+| `attune-enterprise` | `/data/company/project/attune-enterprise` → `/data/company/project/attune-enterprise` | **改名 + plugin 抽取发布** | ✅ rename |
 | `attune` (OSS) | `/data/company/project/attune` | client 端 visibility 不感知（只看 plugin id） | ❌ 几乎零改 |
 | `attune-cloud` | `/data/company/project/attune-cloud` | pluginhub 部署 wrapper（submodule 引用） | ❌ |
 
@@ -290,7 +290,7 @@ cloud/pluginhub (submodule)
 - `.github/workflows/release-plugins.yml`（新增或扩展）
 
 **attune-enterprise 改动文件**（改名 + 抽 plugin 发布）：
-- 全仓 `lawcontrol` 字符串 grep + rename（除合理保留的 law 业务术语，如 `law_firm` 行业代码）
+- 全仓旧品名字符串 grep + rename 到 `attune-enterprise`（除合理保留的 law 业务术语，如 `law_firm` 行业代码）
 - `docker-compose*.yml` service name rename
 - `Dockerfile` image name 改
 - `backend/settings.py` / `backend/manage.py` 等 Django 模块路径不变（避免大量 import 重写），但顶层标识改
@@ -627,13 +627,13 @@ per 全局 CLAUDE.md「Agent 验证铁律」6 类下限，适配 pluginhub backe
 - 例：若发现「pro license 拿到 enterprise plugin」漏洞 → fixture `13-pro-cannot-see-enterprise-org-null` 写入 golden set
 - ratchet rule：fixture 集合只升不降
 
-### 9.7 改名 regression（lawcontrol → attune-enterprise）
+### 9.7 改名 regression（已完成 — attune-enterprise）
 
 特殊回归测试：
-- R1：旧 `lawcontrol_*` docker image tag 仍存档（30 天过渡期，期间 docker pull 兼容）
-- R2：旧 `lawcontrol.example.com` DNS 加 301 redirect 到 `enterprise.engi-stack.com`
-- R3：旧 `db_table = lawcontrol_*` SQL alias view（保留 1 release，期间双写）
-- R4：CLAUDE.md / memory 全 grep 后 0 残留 lawcontrol 字串（除合理保留的 law 业务术语）
+- R1：旧 docker image tag 仍存档（30 天过渡期，期间 docker pull 兼容）
+- R2：旧部署域名 DNS 加 301 redirect 到 `enterprise.engi-stack.com`
+- R3：旧 SQL 表名 alias view（保留 1 release，期间双写）
+- R4：CLAUDE.md / memory 全 grep 后 0 残留旧品名字串（除合理保留的 law 业务术语）
 
 ---
 
@@ -673,17 +673,17 @@ UPDATE plugin SET visibility = 'enterprise' WHERE min_plan = 'enterprise';
 UPDATE plugin SET visibility = 'pro' WHERE id IN (SELECT id FROM plugin WHERE category IN ('law-pro', 'tech-pro', 'patent-pro', 'presales-pro'));
 ```
 
-### 10.2 lawcontrol → attune-enterprise 改名 path（staged）
+### 10.2 attune-enterprise 形态确立 path（staged，已完成）
 
 **阶段 1（spec 评审后第 1 周）**：准备
-- 在 GitHub 创建 `attune-enterprise` 仓（保留 `lawcontrol` 仓作 archive，README 指向新仓）
-- 跑 `git clone lawcontrol --mirror && git push attune-enterprise --mirror`（含全 history）
+- 在 GitHub 创建 `attune-enterprise` 仓（保留旧仓作 archive，README 指向新仓）
+- 跑 `git clone <旧仓> --mirror && git push attune-enterprise --mirror`（含全 history）
 - 仓内 `README.md` / `CLAUDE.md` 改名
 
 **阶段 2（第 2 周）**：双仓并存
 - 老仓 freeze（main 分支锁定，只接 hotfix）
 - 新仓 develop 上 rebrand commit（image name / service name / docker-compose）
-- 部署侧用 alias DNS（`lawcontrol.* → enterprise.engi-stack.com`，301 redirect）
+- 部署侧用 alias DNS（`旧域名 → enterprise.engi-stack.com`，301 redirect）
 
 **阶段 3（第 3-4 周）**：客户迁移
 - 现有客户 SaaS 端逐个切换（每客户一个 maintenance window）
@@ -720,32 +720,32 @@ org_id: null          # ★ 显式 null（个人 plugin 不绑 org）
 **文件清单**：
 
 ```bash
-# Step 1: grep all lawcontrol references
-grep -rln "lawcontrol" \
+# Step 1: grep all legacy product-name references
+grep -rln "<legacy-name>" \
   /data/company/project/attune/CLAUDE.md \
   /data/company/project/attune-pro/CLAUDE.md \
   /data/company/project/attune-pluginhub/CLAUDE.md \
   /data/company/project/attune-enterprise/CLAUDE.md \
   /home/qiurui/.claude/projects/-data-company-project-attune/memory/ \
   /home/qiurui/.claude/projects/-data-company-project-attune-pro/memory/ \
-  /home/qiurui/.claude/projects/-data-company-project-lawcontrol/memory/
+  /home/qiurui/.claude/projects/-data-company-project-attune-enterprise/memory/
 ```
 
 **rename 规则**：
 
 | 原文 | 改为 |
 |------|------|
-| `lawcontrol` (repo / product 引用) | `attune-enterprise` |
-| `lawcontrol` (URL / 部署) | `enterprise.engi-stack.com` |
-| `lawcontrol` (业务术语 / 历史 incident 引用) | 保留（如「2026-04 lawcontrol design borrowed plugin.yaml pattern」） |
-| `lawcontrol/plugins/skills/contract_review` | `attune-enterprise/plugins/skills/contract_review` |
+| 旧 repo / product 引用 | `attune-enterprise` |
+| 旧 URL / 部署 | `enterprise.engi-stack.com` |
+| 业务术语 / 历史 incident 引用 | 按上下文判断保留 |
+| `attune-enterprise/plugins/skills/contract_review` | （现行路径） |
 | `/data/company/project/attune-enterprise` | `/data/company/project/attune-enterprise` |
 | `B2B 律所` / `律所 SaaS` | `B2B 企业团队`（更通用，law 是第一垂直） |
 
 **memory 迁移命令（不直接执行，待评审）**：
 ```bash
 # 重命名 memory 目录
-mv ~/.claude/projects/-data-company-project-lawcontrol \
+mv ~/.claude/projects/-data-company-project-attune-enterprise-legacy \
    ~/.claude/projects/-data-company-project-attune-enterprise
 
 # 全 grep + sed 替换（手工 review）
@@ -765,15 +765,15 @@ find ~/.claude/projects/-data-company-project-attune-enterprise -type f -name "*
 
 | ID | 风险 | 等级 | 触发场景 | 缓解措施 | 责任方 |
 |----|------|------|---------|---------|--------|
-| **R1** | lawcontrol 改名破坏现有客户部署 | 🔴 高 | 客户现网用 `lawcontrol.example.com` / `docker pull lawcontrol/*` / SQL 含 `lawcontrol_*` 表名 | 阶段化 migration（10.2）+ 30 天 grace + DNS 301 + docker tag alias + DB view alias | DevOps + 商务 |
+| **R1** | 企业形态确立期间破坏现有客户部署 | 🔴 高 | 客户现网用旧域名 / 旧 docker tag / 旧 SQL 表名 | 阶段化 migration（10.2）+ 30 天 grace + DNS 301 + docker tag alias + DB view alias | DevOps + 商务 |
 | **R2** | pluginhub schema migration 破生产数据 | 🔴 高 | Alembic upgrade 跑挂 / backfill SQL 错刷数据 | (1) prod 跑前 staging 全量 dry-run；(2) `pg_dump` 完整备份；(3) `BEGIN; ... ROLLBACK;` 在 staging 验证；(4) downgrade migration 必须可执行 | pluginhub 维护者 |
-| **R3** | enterprise plugin 抽出后 lawcontrol 现有功能 break | 🟡 中 | lawcontrol 内部 skill 当前直接 import `plugins/skills/*` Python module，抽到 pluginhub 后路径变 | (1) 不真正物理移动 plugin 源码，仅在 pluginhub 上注册元信息 + 包；(2) lawcontrol 内部 import 路径保持 attune-enterprise/plugins/* 不变；(3) pluginhub 是「分发管道」而非「源码 SoT」 | attune-enterprise 维护者 |
+| **R3** | enterprise plugin 抽出后 attune-enterprise 现有功能 break | 🟡 中 | attune-enterprise 内部 skill 当前直接 import `plugins/skills/*` Python module，抽到 pluginhub 后路径变 | (1) 不真正物理移动 plugin 源码，仅在 pluginhub 上注册元信息 + 包；(2) attune-enterprise 内部 import 路径保持 attune-enterprise/plugins/* 不变；(3) pluginhub 是「分发管道」而非「源码 SoT」 | attune-enterprise 维护者 |
 | **R4** | CLAUDE.md / memory 迁移漏文件 → AI 上下文丢 | 🟡 中 | grep / sed 漏文件 / 漏字符串变种 | (1) grep 必须 case-insensitive `grep -irln`；(2) 跑两遍（自己 + 第二人 review）；(3) commit 后跑 verify script 确认 0 残留；(4) AI 会话冷启动后人工抽检几个 prompt | AI 工作流维护者 |
 | **R5** | individual user 通过拼 url 越权访问 enterprise plugin | 🔴 高（安全） | 客户端层不校验 visibility，仅依赖服务端 | (1) 所有 download endpoint 必须服务端重跑 `filter_visible_plugins`；(2) presigned URL 短时效（5 min）；(3) S3 / OSS bucket 不允许直接 public list | pluginhub 维护者 |
 | **R6** | org_id 命名冲突（两家 ACME 公司） | 🟡 中 | 不同企业同名 → org_id 重复 | (1) org_id 由 pluginhub admin 创建 license 时分配 + 唯一性校验；(2) 命名规则建议「company-suffix」（如 `acme-us` / `acme-cn`）；(3) admin UI 含 org_id 已存在告警 | pluginhub admin |
 | **R7** | enterprise plugin org_id 误配（错给到别家） | 🔴 高（数据泄漏） | admin 创建 plugin 时 org_id 错填 | (1) admin UI 二次确认；(2) audit log 记录每次 visibility / org_id 改动；(3) 客户端首次 install 显示「来源 org_id」让用户验证 | pluginhub admin |
 | **R8** | 老 license JWT 没 `org_id` claim 视为 null → 个人 license 误判为「全 org plugin 可见」 | 🟡 中 | 老 license fallback 逻辑写错 | (1) fallback `org_id=null` AND `plan ∈ {individual, pro}` AND `visibility ∈ {public, pro}` 三条件严格 AND；(2) 测试 fixture `08-enterprise-mismatch-org` 必须覆盖 | pluginhub 维护者 |
-| **R9** | DNS / docker rename 期间客户端 cache 旧地址 | 🟢 低 | 客户端硬编码 `lawcontrol.example.com` | (1) 客户端 endpoint 走 config 文件（不硬编码）；(2) auto-update 推送新 config | client 维护者 |
+| **R9** | DNS / docker rename 期间客户端 cache 旧地址 | 🟢 低 | 客户端硬编码旧部署域名 | (1) 客户端 endpoint 走 config 文件（不硬编码）；(2) auto-update 推送新 config | client 维护者 |
 | **R10** | scope 蠕变：实施期间增「跨 vertical plugin」「企业自管签名」等需求 | 🟡 中 | 用户 / PM 要求顺手做 | 拒绝。推 v1.1 新 spec，本 spec scope 锁定 | spec 评审 owner |
 | **R11** | attune OSS 用户误以为升级后能用 enterprise plugin | 🟢 低（产品） | UI marketplace 显示 enterprise plugin 但 install 失败 | 服务端过滤后客户端根本看不到 enterprise plugin（path A 数据流）→ 不出现该 case | pluginhub 维护者 |
 | **R12** | 双仓（attune-pro + attune-enterprise）publish-to-pluginhub script 重复维护 | 🟢 低 | 两份 script 漂移 | 抽公共 logic 到 `attune-pluginhub/scripts/cli.py`，pro / enterprise 仓只放 `.github/workflows/release.yml` 调用 | attune-pluginhub 维护者 |
@@ -801,7 +801,7 @@ R1 / R2 / R5 / R7 是**必须在 implementation plan 阶段单独立 mitigation 
 - [ ] §9 测试矩阵是否覆盖 6 类下限（per Agent 验证铁律）？
 - [ ] §10 migration path 是否可回滚（downgrade migration）？
 - [ ] §11 红色风险是否都有 mitigation？责任方是否明确？
-- [ ] lawcontrol → attune-enterprise rename 是否考虑了客户现网部署的 disruption？
+- [ ] attune-enterprise 形态确立是否考虑了客户现网部署的 disruption？
 - [ ] org_id 命名 / 冲突 / 错配是否有防护？
 
 ---

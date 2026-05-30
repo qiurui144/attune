@@ -215,7 +215,7 @@ attune-core 提供 workflow 解析 + runner + deterministic ops 库（`extract /
 
 ## 4. 数据层 — 自研 RPA 框架
 
-### 4.1 七类插件分法（参考 lawcontrol 设计）
+### 4.1 七类插件分法（参考 attune-enterprise 设计）
 
 | type | AI 允许？ | 例子 |
 |:---|:---|:---|

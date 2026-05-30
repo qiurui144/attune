@@ -278,7 +278,7 @@ pub struct PiiPatternSpec {
     pub regex: String,
 }
 
-/// chat_trigger 配置（参考 lawcontrol skill plugin.yaml）
+/// chat_trigger 配置（参考 attune-enterprise skill plugin.yaml）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatTrigger {
     /// 是否启用 chat 触发（plugin.yaml 默认 false）

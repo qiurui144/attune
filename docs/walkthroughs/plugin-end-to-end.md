@@ -45,7 +45,7 @@ $ attune plugin-sign /path/to/law-pro/ --priv-file ~/.secrets/law-pro.signing-ke
 $ cd /path/to/law-pro/.. && tar czf law-pro-0.2.0.attunepkg law-pro/
 ```
 
-发布到 lawcontrol/pluginhub (attune-cloud 软链共享).
+发布到 attune-enterprise/pluginhub (attune-cloud 软链共享).
 
 ## Phase B: 律师侧 (安装 + 使用)
 
@@ -201,4 +201,4 @@ $ echo '{"facts":{...,"principal":null,...},...}' | agent_civil_loan
 - [ ] **attune-server scan 支持 paid plugin 解密** — 当前装载时 .yaml.enc 不解密 (限定明文)
 - [ ] **forms-iframe 用真实 form schema** — 当前路由返空 fields stub, 应从 plugin dir 读 form yaml
 - [ ] **chat 命中后真 dispatch** — 当前 chat.rs 只提示, 不自动调 agent_runner (因 chat 缺 facts JSON)
-- [ ] **lawcontrol/pluginhub 集成 .attunepkg 上传 + 公钥分发** — attune-cloud 软链已就位, 缺真实分发流程
+- [ ] **attune-enterprise/pluginhub 集成 .attunepkg 上传 + 公钥分发** — attune-cloud 软链已就位, 缺真实分发流程
