@@ -66,5 +66,5 @@ attune-pro 此前无仓库根级 TESTING.md（测试大纲只活在 `plugins/law
 
 ## 5. Commit SHA
 
-- attune develop：<填充于 commit 后>
-- attune-pro develop：<填充于 commit 后>
+- attune develop：`ef239f7`（push d21ae25..ef239f7 → github.com/qiurui144/attune）
+- attune-pro develop：`29703ae`（push 33adf74..29703ae → github.com/qiurui144/attune-pro）
