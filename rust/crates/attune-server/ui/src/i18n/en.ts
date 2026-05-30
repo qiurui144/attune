@@ -232,6 +232,19 @@ export const en = {
   'chat.token.unknown': '—',
   'chat.cost.unknown': '?$/K',
 
+  // ─── ACP-5 autonomous flow acp_flow block ─────────────
+  'chat.flow.label': 'Autonomous flow',
+  'chat.flow.status.complete': 'Complete',
+  'chat.flow.status.partial': 'Partial',
+  'chat.flow.status.degraded': 'Degraded',
+  'chat.flow.status.aborted': 'Aborted',
+  'chat.flow.step.ran': 'ran',
+  'chat.flow.step.degraded': 'degraded',
+  'chat.flow.step.skipped': 'skipped',
+  'chat.flow.expand': 'Show step details',
+  'chat.flow.collapse': 'Hide step details',
+  'chat.flow.steps_aria': 'Flow step trace',
+
   // ─── ItemsView ──────────────────────────────────────
   'items.empty.bind_folder': 'Bind folder',
   'items.empty.bind_folder_toast': 'Jump to Remote binding (Phase 6.3 wiring)',

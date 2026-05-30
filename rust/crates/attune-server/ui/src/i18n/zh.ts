@@ -225,6 +225,19 @@ export const zh = {
   'chat.token.unknown': '—',
   'chat.cost.unknown': '?$/K',
 
+  // ─── ACP-5 自主流转 acp_flow 块 ────────────────────────
+  'chat.flow.label': '自主流转',
+  'chat.flow.status.complete': '已完成',
+  'chat.flow.status.partial': '部分完成',
+  'chat.flow.status.degraded': '降级运行',
+  'chat.flow.status.aborted': '已中止',
+  'chat.flow.step.ran': '已执行',
+  'chat.flow.step.degraded': '降级',
+  'chat.flow.step.skipped': '已跳过',
+  'chat.flow.expand': '展开步骤详情',
+  'chat.flow.collapse': '收起步骤详情',
+  'chat.flow.steps_aria': '流转步骤轨迹',
+
   // ─── ItemsView ──────────────────────────────────────
   'items.empty.bind_folder': '绑定文件夹',
   'items.empty.bind_folder_toast': '跳转到远程绑定（Phase 6.3 接入）',

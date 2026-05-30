@@ -9,7 +9,7 @@
 
 import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
-import type { Message } from '../store/signals';
+import type { Message, AcpFlow, AcpFlowStatus } from '../store/signals';
 import { drawerContent } from '../store/signals';
 import { t } from '../i18n';
 
@@ -135,8 +135,184 @@ function AssistantBubble({
         {m.citations && m.citations.length > 0 && !streaming && (
           <CitationRow citations={m.citations} />
         )}
+        {m.acp_flow && !streaming && <AcpFlowPanel flow={m.acp_flow} />}
       </div>
     </div>
+  );
+}
+
+// ── ACP-5 自主流转块 ─────────────────────────────────────────
+// 后端 chat 响应附 acp_flow（flow_id + status + 每步 trace）。让用户看到
+// 自主流转真发生了，而非静默 —— free 用户 entitlement 拦截显示为 degraded/skipped。
+const FLOW_STATUS_STYLE: Record<
+  AcpFlowStatus,
+  { bg: string; fg: string; border: string }
+> = {
+  complete: { bg: 'rgba(34,197,94,0.12)', fg: '#16a34a', border: 'rgba(34,197,94,0.4)' },
+  partial: { bg: 'rgba(234,179,8,0.12)', fg: '#ca8a04', border: 'rgba(234,179,8,0.4)' },
+  degraded: { bg: 'rgba(234,179,8,0.12)', fg: '#ca8a04', border: 'rgba(234,179,8,0.4)' },
+  aborted: { bg: 'rgba(239,68,68,0.12)', fg: '#dc2626', border: 'rgba(239,68,68,0.4)' },
+};
+
+function flowStatusLabel(status: AcpFlowStatus): string {
+  // 未知 status 兜底（后端将来加新 status 时不至于显示 raw key）
+  const key = `chat.flow.status.${status}`;
+  const label = t(key);
+  return label === key ? status : label;
+}
+
+function AcpFlowPanel({ flow }: { flow: AcpFlow }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const style = FLOW_STATUS_STYLE[flow.status] ?? FLOW_STATUS_STYLE.partial;
+
+  return (
+    <div
+      style={{
+        marginTop: 'var(--space-2)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--space-1)',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 'var(--space-2)',
+          alignItems: 'center',
+        }}
+      >
+        <span
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--color-text-secondary)',
+          }}
+        >
+          ⚙ {t('chat.flow.label')}
+        </span>
+        <span
+          style={{
+            padding: '2px var(--space-2)',
+            background: 'var(--color-bg)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-sm)',
+            fontSize: 'var(--text-xs)',
+            fontFamily: 'var(--font-mono, monospace)',
+            color: 'var(--color-text)',
+          }}
+        >
+          {flow.flow_id}
+        </span>
+        <span
+          style={{
+            padding: '2px var(--space-2)',
+            background: style.bg,
+            border: `1px solid ${style.border}`,
+            borderRadius: 'var(--radius-sm)',
+            fontSize: 'var(--text-xs)',
+            fontWeight: 600,
+            color: style.fg,
+          }}
+        >
+          {flowStatusLabel(flow.status)}
+        </span>
+        {flow.steps.length > 0 && (
+          <button
+            type="button"
+            className="interactive"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            style={{
+              padding: '2px var(--space-2)',
+              background: 'transparent',
+              border: 'none',
+              fontSize: 'var(--text-xs)',
+              color: 'var(--color-accent)',
+              cursor: 'pointer',
+            }}
+          >
+            {open ? t('chat.flow.collapse') : t('chat.flow.expand')} ({flow.steps.length})
+          </button>
+        )}
+      </div>
+      {open && flow.steps.length > 0 && (
+        <ul
+          aria-label={t('chat.flow.steps_aria')}
+          style={{
+            listStyle: 'none',
+            margin: 0,
+            padding: 'var(--space-2)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 'var(--space-2)',
+            background: 'var(--color-bg)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-sm)',
+          }}
+        >
+          {flow.steps.map((s, i) => (
+            <AcpFlowStepRow key={`${s.agent_id}-${i}`} step={s} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function AcpFlowStepRow({
+  step,
+}: {
+  step: AcpFlow['steps'][number];
+}): JSX.Element {
+  // 三态：ran+degraded=降级 / ran=已执行 / !ran=已跳过（entitlement 拦截等）
+  const stateLabel = step.degraded
+    ? t('chat.flow.step.degraded')
+    : step.ran
+      ? t('chat.flow.step.ran')
+      : t('chat.flow.step.skipped');
+  const dotColor = step.degraded
+    ? '#ca8a04'
+    : step.ran
+      ? '#16a34a'
+      : 'var(--color-text-secondary)';
+  return (
+    <li
+      style={{
+        display: 'flex',
+        gap: 'var(--space-2)',
+        fontSize: 'var(--text-xs)',
+        lineHeight: 'var(--leading-normal)',
+      }}
+    >
+      <span
+        aria-hidden="true"
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: '50%',
+          background: dotColor,
+          flexShrink: 0,
+          marginTop: 5,
+        }}
+      />
+      <div style={{ minWidth: 0 }}>
+        <span style={{ color: 'var(--color-text)', fontWeight: 600 }}>
+          {step.agent_id}
+        </span>
+        <span style={{ color: dotColor, marginLeft: 6 }}>· {stateLabel}</span>
+        {step.note && (
+          <div
+            style={{
+              color: 'var(--color-text-secondary)',
+              marginTop: 2,
+              wordBreak: 'break-word',
+            }}
+          >
+            {step.note}
+          </div>
+        )}
+      </div>
+    </li>
   );
 }
 

@@ -15,7 +15,7 @@ import {
   messages,
   lastCostEstimate,
 } from '../store/signals';
-import type { ChatSession, Message, CostEstimate } from '../store/signals';
+import type { ChatSession, Message, CostEstimate, AcpFlow } from '../store/signals';
 
 // ── 后端响应类型 ─────────────────────────────────────────────
 type SessionsResponse = {
@@ -42,7 +42,21 @@ type ChatResponse = {
   web_search_used?: boolean;
   hint?: string;
   cost_estimate?: CostEstimate;
+  acp_flow?: AcpFlow;
 };
+
+// 刚发送完一条消息后，sendMessage 会回填新 session_id，触发 ChatView 的
+// activeSessionId effect 去 loadSession —— 但服务端 history 不持久化 acp_flow
+// 流转 trace（live-only），重载会冲掉刚附在内存消息上的 acp_flow 块。
+// 用此 guard 让那一次紧随发送的重载跳过，保留内存消息（含 acp_flow）。
+let skipNextSessionLoad = false;
+export function consumeSkipNextSessionLoad(): boolean {
+  if (skipNextSessionLoad) {
+    skipNextSessionLoad = false;
+    return true;
+  }
+  return false;
+}
 
 // ── Session 管理 ─────────────────────────────────────────────
 export async function loadSessions(): Promise<void> {
@@ -126,12 +140,15 @@ export async function sendMessage(
       role: 'assistant',
       content: res.content,
       citations: res.citations,
+      acp_flow: res.acp_flow,
       created_at: new Date().toISOString(),
     };
     messages.value = [...messages.value, assistantMsg];
 
-    // 若是第一次发送（无 session_id），回填 + 刷新列表
+    // 若是第一次发送（无 session_id），回填 + 刷新列表。回填 activeSessionId 会触发
+    // ChatView 的 loadSession —— 置 skip 让那次重载跳过，保留刚附 acp_flow 的内存消息。
     if (!currentSession && res.session_id) {
+      skipNextSessionLoad = true;
       activeSessionId.value = res.session_id;
       void loadSessions();
     }
