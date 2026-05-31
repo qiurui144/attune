@@ -35,6 +35,86 @@ fn is_safe_http_url(s: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
+/// 全字段设置校验:所有设置保存前必须有效,拒绝静默接受无效值(URL scheme / 枚举 / 数值范围)。
+/// 返回 Err(用户可读信息);调用方映射为 400。与上方 4 个 ad-hoc 检查(endpoint/browser_path/
+/// skills.disabled/ocr.active_profile)互补,这里补齐其余字段。
+fn validate_settings_fields(body: &serde_json::Value) -> Result<(), String> {
+    let Some(obj) = body.as_object() else { return Ok(()) };
+    let nested = |sect: &str, key: &str| -> Option<String> {
+        obj.get(sect)?.as_object()?.get(key)?.as_str().map(str::to_string)
+    };
+
+    // 1. 所有 URL 字段统一 http/https scheme 校验(对齐 llm.endpoint,防 javascript:/data: + 明显无效)
+    for (sect, key, label) in [
+        ("embedding", "ollama_url", "embedding.ollama_url"),
+        ("pluginhub", "url", "pluginhub.url"),
+        ("cloud", "accounts_url", "cloud.accounts_url"),
+        ("cloud", "gateway_url", "cloud.gateway_url"),
+    ] {
+        if let Some(v) = nested(sect, key) {
+            if !v.is_empty() && !is_safe_http_url(&v) {
+                return Err(format!("{label} 必须是 http:// 或 https:// 开头的有效 URL"));
+            }
+        }
+    }
+
+    // 2. 顶层枚举字段
+    for (key, allowed) in [
+        ("theme", &["system", "dark", "light"][..]),
+        ("language", &["zh-CN", "en", "en-US"][..]),
+        ("context_strategy", &["economical", "accurate", "raw"][..]),
+        ("injection_mode", &["auto", "manual", "off"][..]),
+    ] {
+        if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
+            if !allowed.contains(&v) {
+                return Err(format!("{key} 取值无效:'{v}'(允许:{})", allowed.join(" / ")));
+            }
+        }
+    }
+    if let Some(p) = nested("llm", "provider") {
+        const PROVIDERS: &[&str] = &["openai_compat", "anthropic", "deepseek", "qwen", "ollama", "claude", "gemini"];
+        if !PROVIDERS.contains(&p.as_str()) {
+            return Err(format!("llm.provider 无效:'{p}'(允许:{})", PROVIDERS.join(" / ")));
+        }
+    }
+    if let Some(e) = nested("web_search", "engine") {
+        const ENGINES: &[&str] = &["duckduckgo", "bing", "google", "searxng"];
+        if !ENGINES.contains(&e.as_str()) {
+            return Err(format!("web_search.engine 无效:'{e}'(允许:{})", ENGINES.join(" / ")));
+        }
+    }
+
+    // 3. 数值范围
+    if let Some(b) = obj.get("injection_budget").and_then(serde_json::Value::as_i64) {
+        if !(100..=32_768).contains(&b) {
+            return Err(format!("injection_budget 须在 100-32768(当前 {b})"));
+        }
+    }
+    if let Some(s) = obj.get("search").and_then(|v| v.as_object()) {
+        if let Some(k) = s.get("default_top_k").and_then(serde_json::Value::as_i64) {
+            if !(1..=200).contains(&k) {
+                return Err(format!("search.default_top_k 须在 1-200(当前 {k})"));
+            }
+        }
+        for w in ["vector_weight", "fulltext_weight"] {
+            if let Some(x) = s.get(w).and_then(serde_json::Value::as_f64) {
+                if !(0.0..=1.0).contains(&x) {
+                    return Err(format!("search.{w} 须在 0.0-1.0(当前 {x})"));
+                }
+            }
+        }
+    }
+    if let Some(ms) = obj.get("web_search").and_then(|v| v.as_object())
+        .and_then(|o| o.get("min_interval_ms")).and_then(serde_json::Value::as_i64)
+    {
+        if !(0..=600_000).contains(&ms) {
+            return Err(format!("web_search.min_interval_ms 须在 0-600000(当前 {ms})"));
+        }
+    }
+
+    Ok(())
+}
+
 /// SettingsLocks 校验违规 (体内字段级粒度)。
 pub(crate) struct LockViolation {
     pub settings_key: &'static str,
@@ -192,6 +272,13 @@ pub async fn update_settings(
                 }
             }
         }
+    }
+
+    // 全字段校验:所有设置保存前必须有效(URL scheme / 枚举 / 数值范围),拒绝静默接受无效值。
+    if let Err(msg) = validate_settings_fields(&body) {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": msg, "code": "invalid-setting"
+        }))));
     }
 
     // SettingsLocks enforce — 会员锁定字段拒绝更新.
@@ -410,6 +497,49 @@ pub fn is_telemetry_path_allowed(body: &serde_json::Value) -> bool {
 mod tests {
     use super::*;
     use attune_core::platform::FormFactor;
+
+    #[test]
+    fn validate_settings_fields_rejects_invalid_and_accepts_valid() {
+        // 有效:全通过
+        assert!(validate_settings_fields(&serde_json::json!({
+            "theme": "dark", "language": "en", "context_strategy": "accurate",
+            "injection_mode": "auto", "injection_budget": 2000,
+            "embedding": {"ollama_url": "http://localhost:11434"},
+            "cloud": {"accounts_url": "https://a.example.com", "gateway_url": "https://g.example.com"},
+            "pluginhub": {"url": "https://hub.example.com"},
+            "llm": {"provider": "deepseek"},
+            "web_search": {"engine": "duckduckgo", "min_interval_ms": 2000},
+            "search": {"default_top_k": 10, "vector_weight": 0.6, "fulltext_weight": 0.4}
+        })).is_ok());
+
+        // 无效 URL(各 url 字段)
+        for bad in [
+            serde_json::json!({"embedding": {"ollama_url": "javascript:alert(1)"}}),
+            serde_json::json!({"pluginhub": {"url": "ftp://x"}}),
+            serde_json::json!({"cloud": {"accounts_url": "not-a-url"}}),
+            serde_json::json!({"cloud": {"gateway_url": "data:text/html,x"}}),
+        ] {
+            assert!(validate_settings_fields(&bad).is_err(), "should reject {bad:?}");
+        }
+        // 无效枚举 + 越界
+        for bad in [
+            serde_json::json!({"theme": "neon"}),
+            serde_json::json!({"language": "ja-JP"}),
+            serde_json::json!({"context_strategy": "turbo"}),
+            serde_json::json!({"injection_mode": "always"}),
+            serde_json::json!({"llm": {"provider": "skynet"}}),
+            serde_json::json!({"web_search": {"engine": "altavista"}}),
+            serde_json::json!({"injection_budget": 50}),
+            serde_json::json!({"injection_budget": 99999}),
+            serde_json::json!({"search": {"default_top_k": 0}}),
+            serde_json::json!({"search": {"vector_weight": 1.5}}),
+            serde_json::json!({"web_search": {"min_interval_ms": -1}}),
+        ] {
+            assert!(validate_settings_fields(&bad).is_err(), "should reject {bad:?}");
+        }
+        // 空 URL 视为"清空",允许
+        assert!(validate_settings_fields(&serde_json::json!({"cloud": {"accounts_url": ""}})).is_ok());
+    }
 
     /// Laptop 形态：LLM 默认走远端 token (openai_compat + null endpoint/model)
     /// — 这是 v0.6.0 GA 既有行为，v0.6.1 必须保持兼容。
