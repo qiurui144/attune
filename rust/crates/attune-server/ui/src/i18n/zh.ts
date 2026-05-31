@@ -311,6 +311,7 @@ export const zh = {
   'remote.local.path_label': '路径',
   'remote.local.path_hint': '服务器可访问的绝对路径；Attune 会监听变化自动索引',
   'remote.local.bind': '绑定',
+  'remote.local.browse': '浏览',
   'remote.webdav.username': '用户名',
   'remote.webdav.password': '密码',
   'remote.webdav.remote_path': '远端路径',

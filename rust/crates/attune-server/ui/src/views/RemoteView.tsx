@@ -199,6 +199,27 @@ function LocalForm({
 }): JSX.Element {
   const path = useSignal('');
   const submitting = useSignal(false);
+  const picking = useSignal(false);
+  // Tauri 桌面壳里才有原生目录选择器；浏览器调试模式回退到手填路径。
+  const canPickFolder = typeof window !== 'undefined'
+    && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+
+  async function browse() {
+    if (!canPickFolder) {
+      toast('warning', t('settings.folder.desktop_only'));
+      return;
+    }
+    picking.value = true;
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({ directory: true, multiple: false, title: t('settings.folder.pick_title') });
+      if (typeof selected === 'string') path.value = selected;
+    } catch (e) {
+      toast('error', e instanceof Error ? e.message : t('settings.folder.add_fail'));
+    } finally {
+      picking.value = false;
+    }
+  }
 
   async function submit() {
     if (!path.value.trim()) return;
@@ -210,15 +231,24 @@ function LocalForm({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-      <Input
-        label={t('remote.local.path_label')}
-        value={path.value}
-        onInput={(e) => (path.value = e.currentTarget.value)}
-        placeholder={t('remote.local.path_placeholder')}
-        autoFocus
-        required
-        hint={t('remote.local.path_hint')}
-      />
+      <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'flex-end' }}>
+        <div style={{ flex: 1 }}>
+          <Input
+            label={t('remote.local.path_label')}
+            value={path.value}
+            onInput={(e) => (path.value = e.currentTarget.value)}
+            placeholder={t('remote.local.path_placeholder')}
+            autoFocus
+            required
+            hint={t('remote.local.path_hint')}
+          />
+        </div>
+        {canPickFolder && (
+          <Button variant="secondary" onClick={browse} loading={picking.value}>
+            {`📂 ${t('remote.local.browse')}`}
+          </Button>
+        )}
+      </div>
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
         <Button variant="ghost" onClick={() => onDone({ ok: false })}>
           {t('common.cancel')}

@@ -318,6 +318,7 @@ export const en = {
   'remote.local.path_label': 'Path',
   'remote.local.path_hint': 'Absolute path accessible by server; Attune will monitor changes and auto-index',
   'remote.local.bind': 'Bind',
+  'remote.local.browse': 'Browse',
   'remote.webdav.username': 'Username',
   'remote.webdav.password': 'Password',
   'remote.webdav.remote_path': 'Remote path',
