@@ -28,9 +28,12 @@ impl AsRef<[u8]> for Key32 {
     }
 }
 
-pub const ARGON2_M_COST: u32 = 65536; // 64 MB
-pub const ARGON2_T_COST: u32 = 3;
-pub const ARGON2_P_COST: u32 = 4;
+// Argon2id KEK 派生参数:OWASP 2024 最低推荐档(m=19 MiB / t=2 / p=1)。
+// 解锁单次派生 ~10ms 级,远快于旧 64 MiB/t3/p4(弱机可达 1-2s)。
+// 注意:参数未随 vault 持久化 → 调整即破坏旧库(需重新初始化)。
+pub const ARGON2_M_COST: u32 = 19_456; // 19 MiB
+pub const ARGON2_T_COST: u32 = 2;
+pub const ARGON2_P_COST: u32 = 1;
 pub const SALT_LEN: usize = 32;
 pub const NONCE_LEN: usize = 12;
 

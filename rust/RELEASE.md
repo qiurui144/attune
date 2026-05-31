@@ -1,5 +1,18 @@
 # attune 版本记录
 
+## Unreleased (develop)
+
+### Highlights
+- **远程目录页补原生文件夹选择器**:`Settings → 远程目录 → 添加本地目录` 原来只有手敲路径文本框,
+  现补 "📂 浏览" 按钮(Tauri 原生目录选择,浏览器回退手填),对齐 Settings 关联文件夹页 / 向导。
+- **解锁提速 ~10×**:vault Argon2id KEK 派生参数从 64 MiB/t3/p4 降到 OWASP 最低档 19 MiB/t2/p1
+  (弱机解锁从 1-2s → ~百毫秒级);字段读写本就是快速 AES-GCM,不受影响。
+
+### ⚠️ Breaking
+- **旧 vault 不可直接升级解锁**:Argon2 参数未随 vault 持久化,降档后旧库(64 MiB 参数加密)
+  会派生出不同 KEK → 解锁失败。**已有 v1.x vault 需重新初始化**(导出数据 → 升级 → 重新导入)。
+  本次按"全新库"前提实施(用户确认)。如需平滑迁移,后续可加"参数随 vault 存储 + 改密时自动重派生"。
+
 ## v1.1.0 (2026-05-30) — Agent Control Plane (ACP)
 
 > 把 22 个产品 agent 当一个工程组织治理. ACP-1~7 七子系统跨多 minor (acp.1 → acp.6)
