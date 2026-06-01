@@ -174,6 +174,10 @@ pub mod capture;
 pub mod sync;
 pub mod vlm;
 
+// version: ATTUNE_VERSION + is_compatible — plugin min_attune_version 加载期 gate.
+// spec: docs/superpowers/specs/2026-05-31-agent-cross-platform-distribution.md §5.3
+pub mod version;
+
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

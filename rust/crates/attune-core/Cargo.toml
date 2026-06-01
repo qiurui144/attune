@@ -77,6 +77,8 @@ which = "6"
 ed25519-dalek = "2"
 base64 = "0.22"
 regex = "1"
+# 插件兼容性 gate: min_attune_version 走 semver 语义比较(非字典序)。纯 Rust,零跨平台风险。
+semver = "1"
 # H1 资源治理：跨平台 CPU/RAM 采样（Linux /proc · Win PDH · macOS task_info）
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 
