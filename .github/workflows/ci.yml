@@ -140,6 +140,16 @@ jobs:
         working-directory: rust
         # GA checklist:--no-default-features 去 wasmtime 后 native cap 仍编译过。
         run: cargo build --release -p attune-core --no-default-features
+      - name: WASM leaf build guard (attune-agent-sdk 必须可编 wasm32-wasip1)
+        # leaf crate 零 native dep 守卫:任一 native-only crate(rusqlite/tokio/
+        # reqwest/usearch/tantivy/hdbscan/socket2/serde_yaml/chrono)回流即编译失败,
+        # 守住"确定性 agent 一包通吃所有平台"的抽取目的。仅 Linux 跑一次足够
+        # (build-target 检查与 host OS 无关)。
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: rust
+        run: |
+          rustup target add wasm32-wasip1
+          cargo build -p attune-agent-sdk --target wasm32-wasip1
       - name: cargo clippy (non-blocking)
         working-directory: rust
         run: cargo clippy --workspace --release -- -D warnings
