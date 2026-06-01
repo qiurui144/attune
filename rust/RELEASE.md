@@ -21,6 +21,9 @@
 - **插件版本兼容 gate(`min_attune_version`)**:`plugin.yaml` 可声明 `min_attune_version`,
   加载期(scan)按 semver 校验;不满足 → skip + marketplace 返回 `plugin-incompatible-version`
   提示升级(不再运行期 NotFound 崩)。老包无此字段 → 视为兼容(向后兼容)。
+- **桌面 file-drop 真上传 + 应用更新接线(#240)**:拖文件进桌面 App 现真调 `upload_dropped_paths`
+  入库(原实现只 alert 不上传 + 一份走 `window.__TAURI__` 的死 handler,已清);Settings→关于
+  加"检查更新/重启更新"(原 Rust updater 命令注册但前端零接入)。
 - **远程目录页补原生文件夹选择器**:`Settings → 远程目录 → 添加本地目录` 原来只有手敲路径文本框,
   现补 "📂 浏览" 按钮(Tauri 原生目录选择,浏览器回退手填),对齐 Settings 关联文件夹页 / 向导。
 
