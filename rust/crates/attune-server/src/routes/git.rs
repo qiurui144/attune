@@ -83,14 +83,13 @@ pub async fn bind_git(State(state): State<SharedState>, Json(body): Json<BindGit
         }
         c
     };
-    let connector = match attune_core::ingest::git::GitConnector::with_cloner(
-        config.clone(),
-        Box::new(attune_core::ingest::git::Git2Cloner),
+    // SSRF 校验在**原始 URL** 上做（normalize_url 会把任意 scheme 重写成 https，
+    // 若先 normalize 再校验, ssh:// / file:// 的 scheme 拒绝就被绕过）。
+    if let Err(e) = attune_core::net::url_guard::validate_outbound_url(
+        body.url.trim(),
+        &config.allow_hosts,
+        &|h| attune_core::net::url_guard::system_resolve(h),
     ) {
-        Ok(c) => c,
-        Err(e) => return Err(git_error_response(&e.to_string())),
-    };
-    if let Err(e) = connector.check_ssrf(&|h| attune_core::net::url_guard::system_resolve(h)) {
         return Err(git_error_response(&e.to_string()));
     }
     let normalized = match attune_core::ingest::git::normalize_url(body.url.trim()) {

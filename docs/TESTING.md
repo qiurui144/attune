@@ -172,6 +172,14 @@ CI 默认只跑 Tier 0 + Tier 1；Tier 2 用 `cargo test --test '*' -- --ignored
 | **D: pdl** (可选) | github.com/openlawlibrary/pdl | TBD | 法律类长文档 | law 插件 + 长文档分段 |
 | **E: edge cases** | `rust/tests/fixtures/edge_cases/` | 跟代码走 | 空文档/10MB/非 UTF-8/全 emoji/恶意 HTML | 容错与压力 |
 
+**GitConnector 测试语料（2026-05-31）**：GitConnector（`Settings → 从 Git 仓库导入`）复用上表
+**A: rust-book**（tag `1.75.0`）+ **B: cs-notes**（commit `c47a2a7`）做真平台仓验证（手动/nightly：
+clone → glob → 入库 → BM25/向量可检索 + tantivy-jieba 中文分词）。CI 默认走**本地 bare-repo
+fixture**（`crates/attune-core/tests/git_connector.rs`，git2 程序化建仓，无网络、确定性），覆盖
+happy/edge（空仓/全二进制/subdir/超长路径）/error（无效 URL/404/ref）/adversarial（SSRF 全表 +
+path traversal）/资源耗尽（限额）/i18n（中文 .md）。SSRF + 错误码契约端到端见
+`crates/attune-server/tests/git_route_subprocess.rs`。
+
 #### 运行
 
 ```bash

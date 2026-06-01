@@ -117,6 +117,20 @@ pub fn normalize_url(raw: &str) -> Result<NormalizedRepo> {
     let trimmed = raw.trim().trim_end_matches('/');
     let parsed = url::Url::parse(trimmed)
         .map_err(|e| VaultError::InvalidInput(format!("invalid-git-url: parse: {e}")))?;
+
+    // file:// —— 仅本地 fixture / 测试用（无 host）。clone_url 原样透传, slug 取
+    // 路径末段。生产 bind 走 route SSRF 校验拒 file://（host allowlist），此分支
+    // 不构成 SSRF 面（无远程 fetch）。
+    if parsed.scheme() == "file" {
+        let p = parsed.path().trim_end_matches('/');
+        let repo = p.rsplit('/').next().unwrap_or("repo").trim_end_matches(".git");
+        return Ok(NormalizedRepo {
+            clone_url: trimmed.to_string(),
+            host: "localhost".into(),
+            slug: format!("local/{repo}"),
+        });
+    }
+
     let host = parsed
         .host_str()
         .ok_or_else(|| VaultError::InvalidInput("invalid-git-url: missing host".into()))?
@@ -188,76 +202,104 @@ impl GitCloner for Git2Cloner {
         let tmp = tempfile::tempdir()
             .map_err(|e| VaultError::InvalidInput(format!("git-network-error: tempdir: {e}")))?;
 
-        let mut fo = git2::FetchOptions::new();
-        fo.depth(1); // shallow
-        let mut builder = git2::build::RepoBuilder::new();
-        builder.fetch_options(fo);
-        if let Some(b) = &config.branch {
-            builder.branch(b);
-        }
-
         let auth = Self::auth_url(repo, config.token.as_deref());
-        let git_repo = builder.clone(&auth, tmp.path()).map_err(map_git_err)?;
 
-        let head = git_repo
-            .head()
-            .map_err(map_git_err)?
-            .peel_to_commit()
-            .map_err(map_git_err)?;
-        let commit_sha = head.id().to_string();
-
-        // 全量 walk 工作树（增量 diff 走 server 层 fallback 即可；shallow depth-1
-        // clone 无历史，diff <old>..<new> 不可行 → 本实现始终产全量 tree，
-        // 增量去重靠 server 层 indexed_files.file_hash + content_hash 短路）。
-        let walk_root = tmp.path();
-        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-        let mut total_bytes: u64 = 0u64;
-
-        for entry in walkdir::WalkDir::new(walk_root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if !entry.file_type().is_file() {
-                continue;
+        // shallow clone（--depth 1）—— 智能 HTTP/SSH 传输支持；本地 file:// 传输
+        // 不支持 shallow（libgit2 限制）→ fall back 全量 clone。也兜底某些 server
+        // 拒绝 shallow 的情况。两路都失败才报错。
+        let clone_with = |depth: Option<i32>, dest: &std::path::Path| {
+            let mut fo = git2::FetchOptions::new();
+            if let Some(d) = depth {
+                fo.depth(d);
             }
-            let path = entry.path();
-            // 跳过 .git 内部。
-            if path.components().any(|c| c.as_os_str() == ".git") {
-                continue;
+            let mut builder = git2::build::RepoBuilder::new();
+            builder.fetch_options(fo);
+            if let Some(b) = &config.branch {
+                builder.branch(b);
             }
-            let rel = match path.strip_prefix(walk_root) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            builder.clone(&auth, dest)
+        };
 
-            // path traversal 防御（symlink 逃出工作树 / `..`）—— relpath 不得含 `..`。
-            if rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-                continue;
+        let git_repo = match clone_with(Some(1), tmp.path()) {
+            Ok(r) => r,
+            Err(e) if e.class() == git2::ErrorClass::Net && e.message().contains("shallow") => {
+                // 本地传输不支持 shallow → 重建临时目录全量 clone。
+                let tmp2 = tempfile::tempdir().map_err(|e| {
+                    VaultError::InvalidInput(format!("git-network-error: tempdir: {e}"))
+                })?;
+                let r = clone_with(None, tmp2.path()).map_err(map_git_err)?;
+                // 用全量目录顶替 shallow 临时目录（保持后续 walk 用 tmp2）。
+                return walk_and_collect(tmp2.path(), &r, config);
             }
+            Err(e) => return Err(map_git_err(e)),
+        };
+        return walk_and_collect(tmp.path(), &git_repo, config);
+    }
+}
 
-            // 读字节（失败跳过，可恢复）。
-            let bytes = match std::fs::read(path) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            total_bytes = total_bytes.saturating_add(bytes.len() as u64);
-            if total_bytes > config.max_total_bytes {
-                return Err(VaultError::InvalidInput(format!(
-                    "git-repo-too-large: exceeds {} bytes (add subdir / narrow scope)",
-                    config.max_total_bytes
-                )));
-            }
-            files.push((rel_str, bytes));
+/// 走工作树收集匹配文件（shallow / full clone 后共用）。
+fn walk_and_collect(
+    walk_root: &std::path::Path,
+    git_repo: &git2::Repository,
+    config: &GitSourceConfig,
+) -> Result<FetchedTree> {
+    let head = git_repo
+        .head()
+        .map_err(map_git_err)?
+        .peel_to_commit()
+        .map_err(map_git_err)?;
+    let commit_sha = head.id().to_string();
+
+    // 全量 walk 工作树（shallow depth-1 clone 无历史, diff <old>..<new> 不可行 →
+    // 本实现始终产全量 tree；增量去重靠 server 层 indexed_files.file_hash (per-file
+    // SHA-256) + content_hash 短路, force-push 天然 fallback 全量）。
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut total_bytes: u64 = 0u64;
+
+    for entry in walkdir::WalkDir::new(walk_root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        // 跳过 .git 内部。
+        if path.components().any(|c| c.as_os_str() == ".git") {
+            continue;
+        }
+        let rel = match path.strip_prefix(walk_root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+
+        // path traversal 防御（symlink 逃出工作树 / `..`）—— relpath 不得含 `..`。
+        if rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            continue;
         }
 
-        Ok(FetchedTree {
-            commit_sha,
-            files,
-            deleted: Vec::new(),
-            full: true,
-        })
+        // 读字节（失败跳过，可恢复）。
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+        if total_bytes > config.max_total_bytes {
+            return Err(VaultError::InvalidInput(format!(
+                "git-repo-too-large: exceeds {} bytes (add subdir / narrow scope)",
+                config.max_total_bytes
+            )));
+        }
+        files.push((rel_str, bytes));
     }
+
+    Ok(FetchedTree {
+        commit_sha,
+        files,
+        deleted: Vec::new(),
+        full: true,
+    })
 }
 
 /// 把 git2 错误映射到带 kebab 错误码的脱敏消息（不含 token / 内网细节）。
