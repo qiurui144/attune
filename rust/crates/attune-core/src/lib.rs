@@ -103,6 +103,10 @@ pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;
 pub mod capability_dispatch;
+// wasm_runtime: 跨平台 agent 分发 — wasmtime + WASI preview1 执行 wasm32-wasip1 模块.
+// feature-gated(默认开,极小镜像可 --no-default-features 关)。spec §4 模块边界.
+#[cfg(feature = "wasm-runtime")]
+pub mod wasm_runtime;
 pub mod skills;
 pub mod agents;
 pub mod agent_telemetry;
@@ -174,6 +178,10 @@ pub mod workflow;
 pub mod capture;
 pub mod sync;
 pub mod vlm;
+
+// version: ATTUNE_VERSION + is_compatible — plugin min_attune_version 加载期 gate.
+// spec: docs/superpowers/specs/2026-05-31-agent-cross-platform-distribution.md §5.3
+pub mod version;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

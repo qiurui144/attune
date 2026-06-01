@@ -77,6 +77,8 @@ which = "6"
 ed25519-dalek = "2"
 base64 = "0.22"
 regex = "1"
+# 插件兼容性 gate: min_attune_version 走 semver 语义比较(非字典序)。纯 Rust,零跨平台风险。
+semver = "1"
 # H1 资源治理：跨平台 CPU/RAM 采样（Linux /proc · Win PDH · macOS task_info）
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 # GitConnector (OSS git 仓导入)：libgit2 绑定，shallow/fetch/diff 走库内 API，
@@ -90,9 +92,17 @@ git2 = { version = "0.19", default-features = false, features = ["vendored-libgi
 globset = "0.4"
 # URL 解析（SSRF url_guard）—— 已在依赖树（reqwest 传递）, 纯 Rust。
 url = "2"
+# 跨平台 agent 分发: wasm32-wasip1 模块由 wasmtime 执行(一包通吃所有平台)。
+# default-features=false + 显式选 cranelift(JIT)+ runtime + std,只用 WASI preview1。
+# feature-gated(默认开,极小镜像可 --no-default-features 关)。
+wasmtime = { version = "45", default-features = false, features = ["cranelift", "runtime", "std"], optional = true }
+wasmtime-wasi = { version = "45", optional = true }
 
 [features]
-default = []
+# wasm-runtime 默认开(per spec §8 决策);size-constrained / riscv 极小镜像可
+# `--no-default-features` 关闭以剔除 wasmtime(纯 native cap 路径)。
+default = ["wasm-runtime"]
+wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
 coreml = ["ort/coreml"]

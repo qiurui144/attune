@@ -10,6 +10,17 @@
   clone + 嵌入全在本地完成,**导入路径零 LLM 调用**(成本契约:`~本地 · 网络克隆 + 本地嵌入`)。
   基于 libgit2(git2 crate),不依赖系统 git。SSRF 防护:host allowlist + 拒内网/loopback/
   link-local/云 metadata,token 不落盘明文。
+- **Agent 跨平台分发(WASM runtime)**:确定性 agent/skill 可编到 `wasm32-wasip1`,由内嵌
+  wasmtime(45.0.0)执行 —— **一个 `.attunepkg` 含一份 `.wasm` 即在所有平台运行**
+  (Windows P0 / Linux P1 / riscv64 K3 P2),与现有 subprocess 契约对齐(stdin JSON →
+  stdout JSON → exit code 0/1/2/-1)。`plugin.yaml` 新增 `runtime: wasm` + `wasm:` 路径 +
+  `wasi_caps`(白名单 `stdio`/`clock`/`read:<path>`/`env:<KEY>`,默认无 fs/net)。
+  边界硬约束:每调用 fresh Store / 内存上限 256 MB / epoch 超时杀失控插件。
+  `wasm-runtime` 默认开 cargo feature,`--no-default-features` 可关(K3 极小镜像)。
+  spec:`docs/superpowers/specs/2026-05-31-agent-cross-platform-distribution.md`。
+- **插件版本兼容 gate(`min_attune_version`)**:`plugin.yaml` 可声明 `min_attune_version`,
+  加载期(scan)按 semver 校验;不满足 → skip + marketplace 返回 `plugin-incompatible-version`
+  提示升级(不再运行期 NotFound 崩)。老包无此字段 → 视为兼容(向后兼容)。
 - **远程目录页补原生文件夹选择器**:`Settings → 远程目录 → 添加本地目录` 原来只有手敲路径文本框,
   现补 "📂 浏览" 按钮(Tauri 原生目录选择,浏览器回退手填),对齐 Settings 关联文件夹页 / 向导。
 
@@ -23,6 +34,14 @@
   CI 默认用本地 bare-repo fixture(`attune-core/tests/git_connector.rs`,无网络)。
 - **解锁提速 ~10×**:vault Argon2id KEK 派生参数从 64 MiB/t3/p4 降到 OWASP 最低档 19 MiB/t2/p1
   (弱机解锁从 1-2s → ~百毫秒级);字段读写本就是快速 AES-GCM,不受影响。
+
+### Known Limitations(WASM runtime)
+- **`python_subprocess` runtime 仍未实现** — dispatch 遇到返回明确 `unsupported-runtime`(非 silent)。
+- **WASI preview1**(非 component model)— 无网络、有限 fs;需网络/重 native 依赖的 agent
+  保留 `rust_binary`(平台分包),不强迁 wasm。
+- **wasmtime 版本** 45.0.0;wasm ABI 锁稳定的 wasip1。`min_attune_version` 锁兼容窗口。
+- **OSS 仓不含任何 vertical wasm 产物** — attune-pro 各 vertical 按本契约自产 `.wasm`(跨仓迁移
+  不阻塞 OSS ship;OSS 自带 reference fixture 自证链路)。
 
 ### ⚠️ Breaking
 - **旧 vault 不可直接升级解锁**:Argon2 参数未随 vault 持久化,降档后旧库(64 MiB 参数加密)
