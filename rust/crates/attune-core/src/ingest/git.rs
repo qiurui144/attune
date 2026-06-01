@@ -233,7 +233,7 @@ impl GitCloner for Git2Cloner {
             }
             Err(e) => return Err(map_git_err(e)),
         };
-        return walk_and_collect(tmp.path(), &git_repo, config);
+        walk_and_collect(tmp.path(), &git_repo, config)
     }
 }
 
