@@ -103,6 +103,10 @@ pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;
 pub mod capability_dispatch;
+// wasm_runtime: 跨平台 agent 分发 — wasmtime + WASI preview1 执行 wasm32-wasip1 模块.
+// feature-gated(默认开,极小镜像可 --no-default-features 关)。spec §4 模块边界.
+#[cfg(feature = "wasm-runtime")]
+pub mod wasm_runtime;
 pub mod skills;
 pub mod agents;
 pub mod agent_telemetry;
