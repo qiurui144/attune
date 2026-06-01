@@ -52,6 +52,12 @@ pub struct PluginManifest {
     #[serde(rename = "type")]
     pub plugin_type: String,
     pub version: String,
+
+    /// 跨平台分发 gate: 低于此 attune 版本拒载(加载期 skip + 提示升级)。
+    /// `None`(老包无此字段)→ 视为兼容(向后兼容,per spec §10)。
+    #[serde(default)]
+    pub min_attune_version: Option<String>,
+
     #[serde(default)]
     pub author: String,
     #[serde(default)]
