@@ -3,7 +3,10 @@
 //! 给 chat handler / Web UI 一层方便调用: 给定 agent_id + JSON 输入, 跑 binary 拿结果.
 //! plugin_registry 查 agent.binary 路径 → capability_dispatch 起 subprocess → 返回结构化结果.
 
-use crate::capability_dispatch::{dispatch, CapabilityInvocation, CapabilityResult};
+use crate::capability_dispatch::{
+    dispatch_capability, parse_runtime, resolve_wasm, CapabilityInvocation, CapabilityResult,
+    CapabilityRuntime,
+};
 use crate::error::{Result, VaultError};
 use crate::plugin_loader::AgentSpec;
 use crate::plugin_registry::PluginRegistry;
@@ -40,20 +43,44 @@ pub fn run_agent_subprocess(
             VaultError::InvalidInput(format!("agent '{agent_id}' not found in registry"))
         })?;
 
-    let binary = resolve_agent_binary(plugin_dir, &agent).ok_or_else(|| {
-        VaultError::InvalidInput(format!(
-            "agent '{agent_id}' binary not found (declared {:?})",
-            agent.binary
-        ))
-    })?;
+    // 跨平台分流 (spec §3.2): 按 agent.runtime 解析执行体路径,统一走
+    // dispatch_capability。RustBinary → resolve_binary(现有行为不变);
+    // Wasm → resolve_wasm(.wasm 模块);data_only/python_subprocess → Err。
+    // CapabilityInvocation.binary 字段复用为"执行体路径"(per 决策 D-a)。
+    let runtime = parse_runtime(&agent.runtime)?;
+    let entry = match runtime {
+        CapabilityRuntime::RustBinary => {
+            resolve_agent_binary(plugin_dir, &agent).ok_or_else(|| {
+                VaultError::InvalidInput(format!(
+                    "agent '{agent_id}' binary not found (declared {:?})",
+                    agent.binary
+                ))
+            })?
+        }
+        CapabilityRuntime::Wasm => {
+            let rel = agent.wasm.as_deref().ok_or_else(|| {
+                VaultError::InvalidInput(format!("agent '{agent_id}' runtime=wasm but no wasm path"))
+            })?;
+            resolve_wasm(plugin_dir, rel).ok_or_else(|| {
+                VaultError::InvalidInput(format!(
+                    "agent '{agent_id}' wasm module not found: {rel}"
+                ))
+            })?
+        }
+        CapabilityRuntime::DataOnly => {
+            return Err(VaultError::InvalidInput(format!(
+                "agent '{agent_id}' is data_only; no executable to dispatch"
+            )));
+        }
+    };
 
-    let mut inv = CapabilityInvocation::new(binary)
+    let mut inv = CapabilityInvocation::new(entry)
         .stdin(stdin_json)
         .timeout(timeout);
     for (k, v) in env {
         inv = inv.env(k, v);
     }
-    dispatch(&inv)
+    dispatch_capability(runtime, &inv)
 }
 
 /// 上层封装: agent 调用结果适配为统一 chat-friendly 字符串
