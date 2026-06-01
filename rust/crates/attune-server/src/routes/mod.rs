@@ -14,6 +14,7 @@ pub mod errors;
 pub mod feedback;
 pub mod folder_links;
 pub mod forms;
+pub mod git;
 pub mod member;
 pub mod ocr_profiles;
 pub mod office;

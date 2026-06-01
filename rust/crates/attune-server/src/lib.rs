@@ -246,6 +246,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Index management
         .route("/api/v1/index/bind", post(routes::index::bind_directory))
         .route("/api/v1/index/bind-remote", post(routes::remote::bind_remote))
+        .route("/api/v1/index/bind-git", post(routes::git::bind_git))
+        .route("/api/v1/index/sync-git", post(routes::git::sync_git))
         .route("/api/v1/index/email-accounts", get(routes::email::list_email_accounts))
         .route("/api/v1/index/bind-email", post(routes::email::bind_email))
         .route(
