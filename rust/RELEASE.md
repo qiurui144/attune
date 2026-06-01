@@ -1,6 +1,6 @@
 # attune 版本记录
 
-## Unreleased (develop)
+## v1.2.0 (2026-06-01) — GitConnector + WASM 跨平台 agent + 一键依赖部署
 
 ### Highlights
 - **GitConnector — 从 Git 仓库导入知识库**:`Settings → 远程目录 → 🐙 从 Git 仓库导入`,
@@ -33,6 +33,12 @@
   加"检查更新/重启更新"(原 Rust updater 命令注册但前端零接入)。
 - **远程目录页补原生文件夹选择器**:`Settings → 远程目录 → 添加本地目录` 原来只有手敲路径文本框,
   现补 "📂 浏览" 按钮(Tauri 原生目录选择,浏览器回退手填),对齐 Settings 关联文件夹页 / 向导。
+- **一键依赖部署(零终端 UX,面向非技术用户)**:第三方必备依赖全部 in-app 一键拉取/部署,
+  不再要求用户敲命令。① **Ollama readiness 三态检测**(未安装 / 已装未起 / 就绪)+ 一键
+  install/pull —— UI 直接拉起安装与模型下载,带进度;② **底座模型一键 ensure**(embedding/
+  rerank/OCR/ASR 缺失即一键补齐);③ **summary 模式 off/local/cloud 可选**(默认 off ——
+  存档摘要在弱机/多平台可能慢,用户显式选 local 走本地算力或 cloud 走远端);④ **LM Studio
+  检测预设**(向导卡片自动识别 localhost:1234 的 OpenAI 兼容端点,一键填入)。
 
 ### Known Limitations (GitConnector v1)
 - 仅 **HTTPS** 仓(`git@host:` SSH / OAuth 授权流推 v.next);私有仓仅 PAT。
