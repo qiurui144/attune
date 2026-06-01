@@ -102,6 +102,12 @@ rust/
 │   │   └── src/
 │   │       └── main.rs               # clap: setup/unlock/lock/insert/get/list/status
 │   │
+│   ├── attune-agent-sdk/              # leaf crate (零 native dep, 可编 wasm32-wasip1)
+│   │   ├── Cargo.toml                # 仅 serde + thiserror; deny-list 禁 rusqlite/tokio/...
+│   │   └── src/
+│   │       └── lib.rs               # Agent trait + AgentOutput<T> + AgentError/AgentResult
+│   │                                # (attune-core re-export 同一类型; 确定性 agent 直链编 wasm)
+│   │
 │   └── attune-tauri/                  # bin (脚手架模板，已由 apps/attune-desktop 取代)
 │       ├── README.md
 │       ├── Cargo.toml.template

@@ -18,6 +18,13 @@
   边界硬约束:每调用 fresh Store / 内存上限 256 MB / epoch 超时杀失控插件。
   `wasm-runtime` 默认开 cargo feature,`--no-default-features` 可关(K3 极小镜像)。
   spec:`docs/superpowers/specs/2026-05-31-agent-cross-platform-distribution.md`。
+- **WASM-safe agent SDK(`attune-agent-sdk` 0.1.0)**:抽出零 native 依赖的 leaf crate
+  承载 `Agent` trait + `AgentOutput<T>` + wasm-safe `AgentError`/`AgentResult`(仅
+  `serde`+`thiserror`)。`attune-core` re-export 同一类型 + `From<AgentError> for VaultError`
+  桥接,**现有 `attune_core::agents::{Agent, AgentOutput}` 路径零改动**;确定性 agent
+  从此可直链 leaf 编 `wasm32-wasip1`,不再被 attune-core 整树(rusqlite/usearch/tokio…)
+  拖累。CI 加 `wasm32-wasip1` 编译守卫,native dep 回流即红。
+  spec/plan:`docs/superpowers/{specs,plans}/2026-06-01-wasm-safe-agent-leaf-crate.md`。
 - **插件版本兼容 gate(`min_attune_version`)**:`plugin.yaml` 可声明 `min_attune_version`,
   加载期(scan)按 semver 校验;不满足 → skip + marketplace 返回 `plugin-incompatible-version`
   提示升级(不再运行期 NotFound 崩)。老包无此字段 → 视为兼容(向后兼容)。
