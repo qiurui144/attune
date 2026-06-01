@@ -38,7 +38,6 @@ OSS × attune-pro 功能边界见 [`docs/oss-pro-strategy.zh.md`](../docs/oss-pr
 - 浏览器自动化网络搜索（后台驱动系统已装 Chrome / Edge，零 API 成本）
 - 可插拔 Embedding（Ollama / ONNX）和 LLM（Ollama / OpenAI 兼容端点）
 - 领域插件（patent / law / tech / presales + 运行时加载用户自定义 YAML）
-- USPTO 专利实时检索（`POST /api/v1/patent/search`）
 
 ### 数据主权与透明
 - 加密本地存储（Argon2id + AES-256-GCM + Device Secret）

@@ -175,8 +175,6 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/marketplace/plugins", get(routes::marketplace::list_plugins))
         .route("/api/v1/marketplace/plugins/{id}/install", post(routes::marketplace::install_plugin))
         .route("/api/v1/skills", get(routes::skills::list_skills))
-        .route("/api/v1/patent/search", post(routes::patent::search))
-        .route("/api/v1/patent/databases", get(routes::patent::databases))
         .route("/api/v1/profile/export", get(routes::profile::export))
         .route("/api/v1/profile/import", post(routes::profile::import))
         // F1 topic distribution (W4, 2026-04-27) — 桌面"我的画像"页后端

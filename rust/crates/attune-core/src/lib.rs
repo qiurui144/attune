@@ -153,7 +153,6 @@ pub mod backup;
 pub mod reindex;
 pub mod resource_governor;
 pub mod scanner;
-pub mod scanner_patent;
 pub mod scanner_webdav;
 pub mod search;
 pub mod store;

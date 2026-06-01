@@ -53,7 +53,6 @@ For the OSS × attune-pro feature boundary, see [`docs/oss-pro-strategy.md`](../
 - Browser-automated web search (driving a local Chrome/Edge, zero API cost)
 - Pluggable embeddings (Ollama / ONNX) and LLMs (Ollama / OpenAI-compatible endpoints)
 - Industry plugins (patent / law / tech / presales + runtime user-defined YAML)
-- Real-time USPTO patent search (`POST /api/v1/patent/search`)
 
 ### Data sovereignty
 - Encrypted local storage (Argon2id + AES-256-GCM + Device Secret)

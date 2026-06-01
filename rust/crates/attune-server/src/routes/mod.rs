@@ -25,7 +25,6 @@ pub mod ingest;
 pub mod items;
 pub mod llm;
 pub mod marketplace;
-pub mod patent;
 pub mod plugins;
 pub mod privacy;
 pub mod profile;
