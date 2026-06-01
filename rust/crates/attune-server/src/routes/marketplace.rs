@@ -143,6 +143,29 @@ pub async fn install_plugin(
                 )
             })?;
             tracing::info!("marketplace: 已安装插件 {plugin_id} → {}", dst.display());
+
+            // 跨平台分发 version gate (spec §5/§10): 落盘后立即 scan, 若本插件因
+            // min_attune_version 不满足而被 skip → 返回 plugin-incompatible-version
+            // (不 panic, 清晰提示升级 attune)。scan 第二 Vec 含 [incompatible] /
+            // [invalid-min-version] 前缀字符串, 匹配本 plugin_id 即拒绝。
+            if let Ok((_, warnings)) =
+                attune_core::plugin_registry::PluginRegistry::scan(&plugins_dir)
+            {
+                if let Some(detail) = warnings.iter().find(|w| {
+                    (w.starts_with("[incompatible]") || w.starts_with("[invalid-min-version]"))
+                        && w.contains(&plugin_id)
+                }) {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": "plugin-incompatible-version",
+                            "detail": detail,
+                            "plugin_id": plugin_id,
+                            "hint": "请升级 attune 到插件要求的版本后重试",
+                        })),
+                    ));
+                }
+            }
             Ok(resp)
         },
     )
