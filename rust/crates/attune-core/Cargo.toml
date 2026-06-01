@@ -81,9 +81,17 @@ regex = "1"
 semver = "1"
 # H1 资源治理：跨平台 CPU/RAM 采样（Linux /proc · Win PDH · macOS task_info）
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+# 跨平台 agent 分发: wasm32-wasip1 模块由 wasmtime 执行(一包通吃所有平台)。
+# default-features=false + 显式选 cranelift(JIT)+ runtime + gc + component-model 关,
+# 只用 WASI preview1 字节流。feature-gated(默认开,极小镜像可 --no-default-features 关)。
+wasmtime = { version = "45", default-features = false, features = ["cranelift", "runtime", "std"], optional = true }
+wasmtime-wasi = { version = "45", optional = true }
 
 [features]
-default = []
+# wasm-runtime 默认开(per spec §8 决策);size-constrained / riscv 极小镜像可
+# `--no-default-features` 关闭以剔除 wasmtime(纯 native cap 路径)。
+default = ["wasm-runtime"]
+wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
 coreml = ["ort/coreml"]
