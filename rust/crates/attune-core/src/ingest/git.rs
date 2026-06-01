@@ -435,6 +435,16 @@ impl SourceConnector for GitConnector {
                 self.repo.host, self.repo.slug, tree.commit_sha, rel
             );
 
+            // modified_marker = 文件内容 SHA-256 —— 每文件独立, 增量时 indexed_files
+            // 命中即跳过未变文件（不能用 commit SHA: 同 commit 下所有文件 marker 相同,
+            // 会让 re-sync 误判全箱未变）。content_hash 短路是第二防线。
+            let file_marker = {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(&bytes);
+                hex::encode(h.finalize())
+            };
+
             sink(RawDocument {
                 uri,
                 title,
@@ -442,9 +452,7 @@ impl SourceConnector for GitConnector {
                 mime_hint: None,
                 source_kind: SourceKind::GitRepo,
                 source_ref,
-                // modified_marker = commit SHA（同 commit 下文件未变即 indexed_files
-                // 命中跳过；content_hash 短路是第二防线）。
-                modified_marker: Some(tree.commit_sha.clone()),
+                modified_marker: Some(file_marker),
                 domain: None,
                 tags: None,
                 corpus_domain: self.config.corpus_domain.clone(),
@@ -576,6 +584,8 @@ mod tests {
         assert!(!refs.iter().any(|r| r.contains("Makefile")));
         assert_eq!(docs[0].source_kind, SourceKind::GitRepo);
         assert_eq!(conn.take_last_commit().as_deref(), Some("deadbeefcafebabe"));
+        // commit SHA 进 metadata（marker 改用 per-file 内容 SHA）。
+        assert_eq!(docs[0].metadata.get("commit").unwrap(), "deadbeefcafebabe");
     }
 
     #[test]
@@ -675,16 +685,26 @@ mod tests {
             proptest::prop_assert!(inc.is_match(Path::new(&p)));
         }
 
-        // proptest #3：modified_marker 稳定 —— 同一 commit 下所有 doc 的 marker 一致。
+        // proptest #3：modified_marker 稳定 —— 同内容文件的 marker (per-file SHA-256)
+        // 跨次稳定且非空 (增量去重不漂移)。
         #[test]
-        fn marker_stable_within_commit(n in 1usize..6) {
-            let files: Vec<(&str, &[u8])> = (0..n).map(|_| ("f.md", b"x" as &[u8])).collect();
-            // 注意 source_ref 会去重(同名)，但 marker 必一致。
-            let conn = mock_connector(files, GitSourceConfig::new("https://github.com/o/r"));
-            let docs = drain(&conn);
-            for d in &docs {
-                proptest::prop_assert_eq!(d.modified_marker.as_deref(), Some("deadbeefcafebabe"));
-            }
+        fn marker_stable_for_same_content(body in "[a-z ]{1,40}") {
+            let bytes = body.clone().into_bytes();
+            let conn = mock_connector(
+                vec![("f.md", bytes.as_slice())],
+                GitSourceConfig::new("https://github.com/o/r"),
+            );
+            let docs1 = drain(&conn);
+            let conn2 = mock_connector(
+                vec![("f.md", bytes.as_slice())],
+                GitSourceConfig::new("https://github.com/o/r"),
+            );
+            let docs2 = drain(&conn2);
+            proptest::prop_assert_eq!(docs1.len(), 1);
+            let m1 = docs1[0].modified_marker.clone().unwrap();
+            let m2 = docs2[0].modified_marker.clone().unwrap();
+            proptest::prop_assert_eq!(&m1, &m2);
+            proptest::prop_assert_eq!(m1.len(), 64); // SHA-256 hex
         }
     }
 }

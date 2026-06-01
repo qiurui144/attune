@@ -7,6 +7,7 @@ pub(crate) mod middleware;
 pub(crate) mod ingest_webdav;
 pub(crate) mod ingest_email;
 pub(crate) mod ingest_rss;
+pub(crate) mod ingest_git;
 
 // T1 (v1.0.6 KB-bench, plan 2026-05-28-kb-bench-integration.md Step 9):
 // in-process eval-mode harness used by `tests/eval_determinism_test.rs`.
