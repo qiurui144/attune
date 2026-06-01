@@ -16,6 +16,7 @@ import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
 import { ToastContainer, RecommendationOverlay } from './components';
+import { toast } from './components/Toast';
 import { CommandPalette } from './components/CommandPalette';
 import { Wizard, LoginScreen } from './wizard';
 import { MainShell } from './layout';
@@ -74,26 +75,35 @@ export function App(): JSX.Element {
     startProgressWS();
     void bootstrap();
 
-    // Tauri 桌面模式：监听 OS 文件拖拽事件，调用 Tauri command 上传文件
-    type TauriGlobal = {
-      event?: { listen?: (event: string, handler: (payload: { payload: string[] }) => void) => Promise<() => void> };
-    };
-    const tauri = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
-    if (!tauri?.event?.listen) return;
-
+    // Tauri 桌面模式:监听 OS 文件拖拽 → 调 upload_dropped_paths 上传。
+    // 经 @tauri-apps/api(__TAURI_INTERNALS__ 始终注入);不用 window.__TAURI__
+    // (withGlobalTauri 默认 false,那条路径不存在 → 旧实现是死代码)。
     let unlisten: (() => void) | null = null;
-    tauri.event.listen('attune-file-drop', async (event) => {
-      const paths: string[] = event.payload ?? [];
-      if (paths.length === 0) return;
-      try {
-        const invoke = (window as unknown as { __TAURI__?: { core?: { invoke?: <T>(cmd: string, args: unknown) => Promise<T> } } }).__TAURI__?.core?.invoke;
-        if (invoke) {
-          await invoke<string[]>('upload_dropped_paths', { paths });
+    if (typeof window !== 'undefined' && (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
+      void (async () => {
+        try {
+          const [{ listen }, { invoke }] = await Promise.all([
+            import('@tauri-apps/api/event'),
+            import('@tauri-apps/api/core'),
+          ]);
+          unlisten = await listen<string[]>('attune-file-drop', async (event) => {
+            const paths = event.payload ?? [];
+            if (paths.length === 0) return;
+            try {
+              const results = await invoke<string[]>('upload_dropped_paths', { paths });
+              const ok = results.filter((r) => r.startsWith('ok:')).length;
+              const failed = results.length - ok;
+              if (ok > 0) toast('success', t('app.tauri.upload_ok', { count: ok }));
+              if (failed > 0) toast('error', t('app.tauri.upload_fail', { count: failed }));
+            } catch (e) {
+              toast('error', e instanceof Error ? e.message : t('app.tauri.upload_err'));
+            }
+          });
+        } catch (e) {
+          console.warn('failed to attach attune-file-drop listener:', e);
         }
-      } catch (e) {
-        console.warn('[attune-file-drop] invoke failed:', e);
-      }
-    }).then((fn) => { unlisten = fn; });
+      })();
+    }
 
     return () => { if (unlisten) unlisten(); };
   }, []);

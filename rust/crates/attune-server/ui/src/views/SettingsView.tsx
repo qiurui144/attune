@@ -649,6 +649,75 @@ function PrivacyPanel(): JSX.Element {
   );
 }
 
+/** 应用自动更新 — 接 attune-update-status 事件 + check_for_update_now / restart_for_update。
+ *  仅桌面(__TAURI_INTERNALS__)显示;浏览器模式返回 null。 */
+function UpdaterRow(): JSX.Element | null {
+  const isTauri = typeof window !== 'undefined'
+    && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+  const state = useSignal<string>('idle');
+  const pct = useSignal<number>(0);
+  const busy = useSignal(false);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen<{ state?: string; percent?: number }>('attune-update-status', (e) => {
+          if (e.payload?.state) state.value = e.payload.state;
+          if (typeof e.payload?.percent === 'number') pct.value = e.payload.percent;
+          if (e.payload?.state && e.payload.state !== 'downloading') busy.value = false;
+        });
+      } catch { /* 桌面 event API 不可用时静默 */ }
+    })();
+    return () => { if (unlisten) unlisten(); };
+  }, []);
+
+  if (!isTauri) return null;
+
+  async function invokeCmd(cmd: string): Promise<void> {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke(cmd);
+  }
+  async function check(): Promise<void> {
+    busy.value = true;
+    state.value = 'checking';
+    try { await invokeCmd('check_for_update_now'); }
+    catch (e) {
+      state.value = 'idle';
+      busy.value = false;
+      toast('error', e instanceof Error ? e.message : t('settings.about.update.error'));
+    }
+  }
+  async function restart(): Promise<void> {
+    try { await invokeCmd('restart_for_update'); }
+    catch (e) { toast('error', e instanceof Error ? e.message : t('settings.about.update.error')); }
+  }
+
+  const statusLabel = (() => {
+    switch (state.value) {
+      case 'checking': return t('settings.about.update.checking');
+      case 'available': return t('settings.about.update.available');
+      case 'downloading': return t('settings.about.update.downloading', { percent: pct.value });
+      case 'ready': return t('settings.about.update.ready');
+      case 'up-to-date': return t('settings.about.update.uptodate');
+      default: return t('settings.about.update.idle');
+    }
+  })();
+
+  return (
+    <SettingRow label={t('settings.about.update.label')}>
+      <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+        <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>{statusLabel}</span>
+        {state.value === 'ready'
+          ? <Button size="sm" variant="primary" onClick={restart}>{t('settings.about.update.restart')}</Button>
+          : <Button size="sm" variant="secondary" loading={busy.value} onClick={check}>{t('settings.about.update.check')}</Button>}
+      </div>
+    </SettingRow>
+  );
+}
+
 function AboutPanel(): JSX.Element {
   const hw = hardware.value;
   const m = memberState.value;
@@ -701,6 +770,7 @@ function AboutPanel(): JSX.Element {
         <SettingRow label={t('settings.about.app.version')}>
           <code style={codeStyle}>0.7.0-dev</code>
         </SettingRow>
+        <UpdaterRow />
         <SettingRow label={t('settings.about.app.license')}>
           <code style={codeStyle}>Apache-2.0</code>
         </SettingRow>
