@@ -131,6 +131,15 @@ jobs:
         # R19 (2026-05-01): 慢 attune-server integration tests 加 #[ignore] 走 nightly,
         # PR-time CI 跑 lib 全 + 不带 --include-ignored 的 integration（自动跳过 #[ignore]）
         run: cargo test --workspace --release
+      - name: WASM cross-platform golden (same .wasm on linux + windows)
+        working-directory: rust
+        # 跨平台分发 GA gate (spec §9):同一入库 .wasm fixture 在 ubuntu + windows
+        # runner 各跑一次 golden gate,证明"一包通吃"。.wasm 已入库,无需 wasm 工具链。
+        run: cargo test --release -p attune-core --test wasm_capability_gate
+      - name: attune-core builds with wasm-runtime feature OFF (K3 极小镜像路径)
+        working-directory: rust
+        # GA checklist:--no-default-features 去 wasmtime 后 native cap 仍编译过。
+        run: cargo build --release -p attune-core --no-default-features
       - name: cargo clippy (non-blocking)
         working-directory: rust
         run: cargo clippy --workspace --release -- -D warnings
