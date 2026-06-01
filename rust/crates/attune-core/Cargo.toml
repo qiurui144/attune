@@ -88,6 +88,8 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
 # glob 过滤（include/exclude 多模式）—— globset 编译多 glob 成单一 matcher。
 globset = "0.4"
+# URL 解析（SSRF url_guard）—— 已在依赖树（reqwest 传递）, 纯 Rust。
+url = "2"
 
 [features]
 default = []
