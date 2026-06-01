@@ -619,13 +619,26 @@ pub async fn chat(
         .and_then(|v| v.as_str())
         .unwrap_or("economical")
         .to_string();
+    // 本地模型一键化 (2026-06-01): summary 模式决定上下文摘要是否跑 + 用哪个 LLM。
+    //   off  → 不压缩 (纯检索注入原文，等价 Raw，零 LLM 成本/无需本地模型)
+    //   local→ 用 summary_llm (本地 Ollama)
+    //   cloud→ 复用主 chat LLM (远端 token)，避免要求笔电先装 Ollama
+    // 缺省: 兼容老 vault (无 summary 字段) → "local" 保持历史行为 (summary_llm or chat 兜底)。
+    let summary_mode = app_settings.get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("local")
+        .to_string();
     let mut compression_stats = (0usize, 0usize, 0usize);  // (chunks, hits, orig_total_chars)
     let knowledge: Vec<serde_json::Value> = if web_search_used {
         // 网络搜索结果已经是 snippet，不做二次压缩
         knowledge
+    } else if summary_mode == "off" {
+        // summary=off：跳过上下文摘要，注入原文 (弱机/离线/省钱)。
+        knowledge
     } else {
         use attune_core::context_compress::{ContextStrategy, chunk_hash, CompressedChunk};
         let strategy = ContextStrategy::parse(&strategy_str);
+        let summary_use_cloud = summary_mode == "cloud";
         // 敏感模式下跳过上下文压缩。压缩会把证据 content 喂给 summary_llm
         // （可能配置为云端，独立于主 llm），绕过上方 F1 对主 LLM 的拦截。
         // 敏感模式宁可注入原文、不省 token，也不让证据流向云端摘要器。
@@ -662,10 +675,20 @@ pub async fn chat(
                     let llm_arc = state_compress.llm.lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .as_ref().cloned();
-                    let summary_llm_arc = state_compress.summary_llm.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .as_ref().cloned()
-                        .or_else(|| llm_arc.clone());
+                    // summary=cloud → 优先用主 chat LLM (远端 token)；否则用 summary_llm (本地)，
+                    // 两者均缺失时互相兜底，确保摘要尽量能跑 (graceful，永不 panic)。
+                    let summary_llm_arc = if summary_use_cloud {
+                        llm_arc.clone().or_else(|| {
+                            state_compress.summary_llm.lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .as_ref().cloned()
+                        })
+                    } else {
+                        state_compress.summary_llm.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_ref().cloned()
+                            .or_else(|| llm_arc.clone())
+                    };
                     let target = strategy.target_chars();
                     let strategy_str = strategy.as_str();
 

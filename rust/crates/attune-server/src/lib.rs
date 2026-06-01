@@ -75,6 +75,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/llm/test", post(routes::llm::test_llm))
         .route("/api/v1/llm/probe-k3", post(routes::llm::probe_k3))
         .route("/api/v1/models/pull", post(routes::llm::pull_model))
+        // 本地模型一键就绪：Ollama 三态 readiness + 一键安装 + LM Studio 探测
+        .route("/api/v1/ollama/readiness", get(routes::llm::ollama_readiness))
+        .route("/api/v1/ollama/install", post(routes::llm::install_ollama))
+        .route("/api/v1/lmstudio/probe", get(routes::llm::lmstudio_probe))
         // Chat (RAG)
         .route("/api/v1/chat", post(routes::chat::chat))
         .route("/api/v1/chat/history", get(routes::chat::chat_history))
@@ -216,6 +220,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // AI 底座状态（v0.6.0-rc.3, 2026-04-27）— Embedding / Rerank / OCR / ASR / LLM 可用性
         .route("/api/v1/ai-stack", get(routes::ai_stack::status))
         .route("/api/v1/ai_stack", get(routes::ai_stack::status))
+        // 本地底座模型一键拉取（OCR + ASR）
+        .route("/api/v1/ai-stack/ensure", post(routes::ai_stack::ensure))
         // G2 Auto bookmark candidates (W4, 2026-04-27)
         // POST 不暴露：仅由 routes::browse_signals::record_batch high_engagement 路径写
         .route("/api/v1/auto-bookmarks",

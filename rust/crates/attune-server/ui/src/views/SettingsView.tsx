@@ -3,7 +3,7 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
-import { Button } from '../components';
+import { Button, LocalModelReadiness } from '../components';
 import { toast } from '../components/Toast';
 import {
   theme,
@@ -386,6 +386,45 @@ function AIPanel(): JSX.Element {
             {saving.value ? t('settings.ai.llm.saving') : t('settings.ai.llm.save')}
           </Button>
         </SettingRow>
+        {/* 本地模型一键就绪：仅在选了 Ollama 本地 provider 时显示三态 + 一键修复 */}
+        {String(llm.value.provider ?? '') === 'ollama' && (
+          <SettingRow label={t('settings.ai.local_model.label')}>
+            <LocalModelReadiness model={String(draftModel.value || llm.value.model || 'qwen2.5:3b')} compact />
+          </SettingRow>
+        )}
+      </Section>
+
+      {/* 摘要模式：off 纯检索 / local 本地模型 / cloud 复用 chat LLM */}
+      <Section title={t('settings.ai.summary.title')}>
+        <SettingRow label={t('settings.ai.summary.mode')}>
+          <select
+            value={String(settings.value?.summary ?? 'cloud')}
+            onChange={async (e) => {
+              const v = e.currentTarget.value;
+              const ok = await patchSettings({ summary: v });
+              toast(ok ? 'success' : 'error',
+                ok ? t('settings.ai.summary.saved') : t('settings.ai.summary.save_failed'));
+            }}
+            style={{ ...selectStyle, minWidth: 240 }}
+            aria-label={t('settings.ai.summary.mode')}
+          >
+            <option value="off">{t('settings.ai.summary.opt_off')}</option>
+            <option value="local">{t('settings.ai.summary.opt_local')}</option>
+            <option value="cloud">{t('settings.ai.summary.opt_cloud')}</option>
+          </select>
+        </SettingRow>
+        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', padding: '0 var(--space-3)' }}>
+          {t('settings.ai.summary.hint')}
+        </div>
+        {/* summary=local 时若 Ollama 未就绪，给一键修复 */}
+        {String(settings.value?.summary ?? '') === 'local' && (
+          <SettingRow label={t('settings.ai.local_model.label')}>
+            <LocalModelReadiness
+              model={String((settings.value?.summary_model as string) ?? 'qwen2.5:3b')}
+              compact
+            />
+          </SettingRow>
+        )}
       </Section>
 
       <Section title={t('settings.ai.web_search.title')}>
@@ -686,6 +725,35 @@ function AboutPanel(): JSX.Element {
         <SettingRow label={t('settings.about.services.web_search')}>
           <ServiceStatus ok={ws.ok} note={ws.note} />
         </SettingRow>
+        {/* 一键拉取缺失的本地底座模型（OCR + ASR）— 不让用户去终端 / 重装包 */}
+        {(!ocr.ok || !asr.ok) && (
+          <SettingRow label={t('settings.about.services.ensure_label')}>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={async () => {
+                try {
+                  await api.post<{ status: string; message: string }>('/ai-stack/ensure', {});
+                  toast('success', t('settings.about.services.ensure_started'));
+                  // 轮询刷新底座状态（最多 ~5min）
+                  for (let i = 0; i < 75; i++) {
+                    await new Promise((r) => setTimeout(r, 4000));
+                    try {
+                      aiStack.value = await api.get<Record<string, unknown>>('/ai_stack');
+                    } catch { /* 忽略单次失败，继续轮询 */ }
+                    const o = aiStack.value?.['ocr'] as { available?: boolean } | undefined;
+                    const a = aiStack.value?.['asr'] as { available?: boolean } | undefined;
+                    if (o?.available && a?.available) break;
+                  }
+                } catch (e) {
+                  toast('error', t('settings.about.services.ensure_failed', { message: e instanceof Error ? e.message : String(e) }));
+                }
+              }}
+            >
+              {t('settings.about.services.ensure_btn')}
+            </Button>
+          </SettingRow>
+        )}
       </Section>
 
       <Section title={t('settings.about.storage.title')}>

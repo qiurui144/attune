@@ -212,7 +212,7 @@ pub async fn update_settings(
     const ALLOWED_KEYS: &[&str] = &[
         "injection_mode", "injection_budget", "excluded_domains",
         "search", "embedding", "web_search", "llm",
-        "summary_model", "context_strategy", "theme", "language",
+        "summary_model", "summary", "context_strategy", "theme", "language",
         "skills",  // Sprint 2 Skills Router: { disabled: string[] }
         "wizard",  // wizard completion state: { complete: bool, current_step: int }
         "pluginhub", // G2 (2026-05-01): { url, license_key }
@@ -247,6 +247,18 @@ pub async fn update_settings(
                         "error": "web_search.browser_path cannot start with '-' (argv injection risk)"
                     }))));
                 }
+            }
+        }
+        // 本地模型一键化 (2026-06-01): summary 模式枚举校验。
+        // off  = 纯检索，不跑文档/上下文摘要 (弱机 / 离线默认)
+        // local= 用本地 summary_model (Ollama)
+        // cloud= 复用 chat LLM (远端 token)
+        if let Some(summary) = body_obj.get("summary").and_then(|v| v.as_str()) {
+            const SUMMARY_MODES: &[&str] = &["off", "local", "cloud"];
+            if !SUMMARY_MODES.contains(&summary) {
+                return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "error": "summary must be one of: off / local / cloud"
+                }))));
             }
         }
         // Sprint 2 Skills Router: 校验 skills.disabled 必须是 string[]
@@ -384,6 +396,10 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
         "language": "zh-CN",
         // 摘要模型默认固定为本地可运行且效果较稳的 qwen2.5:3b；可在 Settings 中覆盖。
         "summary_model": "qwen2.5:3b",
+        // 本地模型一键化 (2026-06-01): 摘要模式 off / local / cloud。
+        // K3 一体机预装本地模型 → local；其他形态 LLM 默认走远端 token → 摘要也复用云端
+        // (cloud) 避免要求笔电先装 Ollama 才能用摘要。弱机用户可在 Settings 改 off 纯检索。
+        "summary": if form_factor == FormFactor::K3Appliance { "local" } else { "cloud" },
         "context_strategy": "economical",      // economical(150字) / accurate(300字+片段) / raw(不压缩，仅本地)
         "web_search": {
             "enabled": true,
@@ -576,6 +592,43 @@ mod tests {
             assert_eq!(
                 llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"),
                 "FormFactor::{:?} should fall back to openai_compat", ff
+            );
+        }
+    }
+
+    /// 本地模型一键化 (2026-06-01): summary 默认值随形态分裂。
+    /// K3 一体机预装本地模型 → "local"；其他形态 LLM 走远端 → "cloud"
+    /// (不强制笔电先装 Ollama 才能用摘要)。
+    #[test]
+    fn summary_default_splits_by_form_factor() {
+        assert_eq!(
+            default_settings("qwen2.5:3b", FormFactor::K3Appliance)
+                .get("summary").and_then(|v| v.as_str()),
+            Some("local"),
+            "K3 预装本地模型 → summary=local"
+        );
+        for ff in [FormFactor::Laptop, FormFactor::Server, FormFactor::Unknown] {
+            assert_eq!(
+                default_settings("qwen2.5:3b", ff)
+                    .get("summary").and_then(|v| v.as_str()),
+                Some("cloud"),
+                "FormFactor::{ff:?} LLM 默认远端 → summary=cloud"
+            );
+        }
+    }
+
+    /// summary 默认值必须落在合法枚举内 (off/local/cloud)。
+    #[test]
+    fn summary_default_is_valid_enum() {
+        for ff in [
+            FormFactor::Laptop, FormFactor::Server,
+            FormFactor::Unknown, FormFactor::K3Appliance,
+        ] {
+            let v = default_settings("qwen2.5:3b", ff);
+            let summary = v.get("summary").and_then(|x| x.as_str()).unwrap_or("");
+            assert!(
+                ["off", "local", "cloud"].contains(&summary),
+                "summary '{summary}' must be a valid enum value"
             );
         }
     }

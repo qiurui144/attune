@@ -138,6 +138,7 @@ pub mod net;
 pub mod governor;
 pub mod llm;
 pub mod llm_settings;
+pub mod ollama_setup;
 pub mod ocr;  // v0.6.0-rc.3: pub for ai_stack status API
 pub mod asr;
 pub mod office_job_queue;
