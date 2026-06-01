@@ -49,7 +49,7 @@ impl super::Agent for DocumentClassifierAgent {
     fn description(&self) -> &str { "文档分类 + 简单理解 (内置, 不碰行业)" }
     fn case_kinds(&self) -> &[&str] { &[] } // 通用, 不限定 case_kind
 
-    fn run(&self, input: Self::Input) -> crate::error::Result<super::AgentOutput<Self::Output>> {
+    fn run(&self, input: Self::Input) -> super::AgentResult<super::AgentOutput<Self::Output>> {
         let docs: Vec<DocumentInput<'_>> = input
             .iter()
             .map(|(f, t)| DocumentInput { file: f.as_str(), text: t.as_str() })

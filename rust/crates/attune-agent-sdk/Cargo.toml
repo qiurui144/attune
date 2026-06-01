@@ -1,0 +1,21 @@
+[package]
+name = "attune-agent-sdk"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# WASM-safe leaf crate. Carries the `Agent` trait + `AgentOutput<T>` +
+# `AgentError`/`AgentResult` with ZERO native dependencies so deterministic
+# agents can compile to `wasm32-wasip1`. Deny-list (CI-guarded, see ci.yml
+# rust-test job "WASM leaf build guard"): rusqlite / tokio / reqwest /
+# usearch / tantivy / hdbscan / socket2 / serde_yaml / chrono must NEVER
+# appear here — adding any breaks the wasm build and the leaf's whole reason
+# to exist.
+[dependencies]
+serde = { workspace = true }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+proptest = "1"
