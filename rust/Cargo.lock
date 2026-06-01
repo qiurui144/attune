@@ -377,6 +377,7 @@ dependencies = [
  "argon2",
  "async-imap",
  "async-trait",
+ "attune-agent-sdk",
  "attune-core",
  "base64 0.22.1",
  "blake3",

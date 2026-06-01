@@ -9,6 +9,9 @@ license.workspace = true
 thiserror = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+# wasm-safe agent leaf crate — re-export Agent/AgentOutput 保 attune_core::agents::*
+# 路径不变;From<AgentError> for VaultError 桥接(方向 core→leaf 单一,无环)。
+attune-agent-sdk = { workspace = true }
 # Plan A1 — Cache/Context/Token standard API:
 #   blake3: cache key derivation (32-hex prefix, 64-bit collision domain per spec §7.2)
 #   async-trait: CacheBackend trait (async get/put/clear/count for future Redis/disk backends)

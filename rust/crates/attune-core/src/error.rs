@@ -65,6 +65,24 @@ pub enum VaultError {
 
 pub type Result<T> = std::result::Result<T, VaultError>;
 
+/// wasm-safe leaf 错误 → native VaultError 桥接(方向 core→leaf 单一,无环)。
+/// 内部 agent 返回 `AgentResult` 时,在 `crate::error::Result` 的 `?` 边界自动转,
+/// 调用方无感。`AgentError` 是 `#[non_exhaustive]`,catch-all arm 兜底未来新增变体
+/// (新增变体应在此显式补 arm —— 兜底仅防编译失败,不是放任不映射)。
+impl From<attune_agent_sdk::AgentError> for VaultError {
+    fn from(e: attune_agent_sdk::AgentError) -> Self {
+        use attune_agent_sdk::AgentError as A;
+        match e {
+            A::InvalidInput(s) => VaultError::InvalidInput(s),
+            A::Computation(s) => VaultError::Classification(s),
+            // serde_json::Error 无法从 String 凭空回造 → 落 InvalidInput(带前缀保信息)
+            A::Serialization(s) => VaultError::InvalidInput(format!("serialization: {s}")),
+            A::RedLine(s) => VaultError::InvalidInput(format!("red line: {s}")),
+            other => VaultError::InvalidInput(other.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +188,44 @@ mod tests {
         let big = "x".repeat(100_000);
         let v = VaultError::NotFound(big.clone());
         assert!(v.to_string().contains(&big));
+    }
+
+    // From<AgentError> for VaultError — 每变体映射断言(桥接 wasm-safe leaf 错误)
+    #[test]
+    fn from_agent_error_invalid_input() {
+        let v: VaultError = attune_agent_sdk::AgentError::InvalidInput("x".into()).into();
+        assert!(matches!(v, VaultError::InvalidInput(ref s) if s == "x"));
+    }
+
+    #[test]
+    fn from_agent_error_computation_maps_classification() {
+        let v: VaultError = attune_agent_sdk::AgentError::Computation("overflow".into()).into();
+        assert!(matches!(v, VaultError::Classification(ref s) if s == "overflow"));
+    }
+
+    #[test]
+    fn from_agent_error_serialization_maps_invalid_input_prefixed() {
+        // serde_json::Error 无法从 String 回造 → 落 InvalidInput 带 "serialization:" 前缀
+        let v: VaultError = attune_agent_sdk::AgentError::Serialization("bad".into()).into();
+        assert!(matches!(v, VaultError::InvalidInput(ref s) if s == "serialization: bad"));
+    }
+
+    #[test]
+    fn from_agent_error_red_line_maps_invalid_input_prefixed() {
+        let v: VaultError = attune_agent_sdk::AgentError::RedLine("usury".into()).into();
+        assert!(matches!(v, VaultError::InvalidInput(ref s) if s == "red line: usury"));
+    }
+
+    // ? 边界自动桥接 — agent 返回 AgentResult,在 crate::error::Result 上下文 ? 转
+    #[test]
+    fn agent_error_propagates_into_vault_result() {
+        fn agent_call() -> attune_agent_sdk::AgentResult<i32> {
+            Err(attune_agent_sdk::AgentError::Computation("boom".into()))
+        }
+        fn vault_ctx() -> Result<i32> {
+            let v = agent_call()?; // From<AgentError> for VaultError 自动转
+            Ok(v)
+        }
+        assert!(matches!(vault_ctx(), Err(VaultError::Classification(ref s)) if s == "boom"));
     }
 }
