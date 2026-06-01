@@ -10,6 +10,7 @@ import {
   listBoundDirs,
   bindLocalDir,
   bindWebdav,
+  bindGit,
   unbindDir,
 } from '../hooks/useRemote';
 import type { BoundDir } from '../hooks/useRemote';
@@ -24,7 +25,7 @@ import type { EmailAccount } from '../hooks/useEmail';
 export function RemoteView(): JSX.Element {
   const dirs = useSignal<BoundDir[]>([]);
   const loading = useSignal(true);
-  const modal = useSignal<null | 'local' | 'webdav'>(null);
+  const modal = useSignal<null | 'local' | 'webdav' | 'git'>(null);
 
   async function refresh() {
     loading.value = true;
@@ -71,8 +72,11 @@ export function RemoteView(): JSX.Element {
           <Button variant="secondary" size="sm" onClick={() => (modal.value = 'local')}>
             {`📂 ${t('remote.action.add_local')}`}
           </Button>
-          <Button variant="primary" size="sm" onClick={() => (modal.value = 'webdav')}>
+          <Button variant="secondary" size="sm" onClick={() => (modal.value = 'webdav')}>
             {`☁ ${t('remote.action.add_webdav')}`}
+          </Button>
+          <Button variant="primary" size="sm" onClick={() => (modal.value = 'git')}>
+            {`🐙 ${t('remote.action.add_git')}`}
           </Button>
         </div>
       </header>
@@ -134,6 +138,25 @@ export function RemoteView(): JSX.Element {
         />
       </Modal>
 
+      <Modal
+        open={modal.value === 'git'}
+        onClose={() => (modal.value = null)}
+        title={t('remote.modal.git.title')}
+        maxWidth={520}
+      >
+        <GitForm
+          onDone={async (result) => {
+            modal.value = null;
+            if (result.ok) {
+              toast('success', t('remote.toast.git_bind_success'));
+              await refresh();
+            } else {
+              toast('error', t('remote.toast.git_bind_fail', { error: result.error ?? t('remote.error.check_url_credential') }));
+            }
+          }}
+        />
+      </Modal>
+
       <EmailSection />
     </div>
   );
@@ -159,7 +182,7 @@ function DirRow({
       }}
     >
       <span aria-hidden="true" style={{ fontSize: 20 }}>
-        {d.kind === 'webdav' ? '☁' : '📂'}
+        {d.path.startsWith('git:') ? '🐙' : d.path.startsWith('webdav:') || d.kind === 'webdav' ? '☁' : '📂'}
       </span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
@@ -332,6 +355,88 @@ function WebdavForm({
           disabled={!canSubmit}
         >
           {t('remote.webdav.bind')}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function GitForm({
+  onDone,
+}: {
+  onDone: (result: { ok: boolean; error?: string }) => void;
+}): JSX.Element {
+  const url = useSignal('');
+  const branch = useSignal('');
+  const subdir = useSignal('');
+  const glob = useSignal('');
+  const token = useSignal('');
+  const submitting = useSignal(false);
+
+  async function submit() {
+    submitting.value = true;
+    const include = glob.value
+      .split(',')
+      .map((g) => g.trim())
+      .filter((g) => g.length > 0);
+    const result = await bindGit({
+      url: url.value.trim(),
+      branch: branch.value.trim() || undefined,
+      subdir: subdir.value.trim() || undefined,
+      include_glob: include.length > 0 ? include : undefined,
+      token: token.value.trim() || undefined,
+    });
+    submitting.value = false;
+    onDone(result);
+  }
+
+  const canSubmit = url.value.trim().startsWith('http');
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+      <Input
+        label={t('remote.modal.git.url')}
+        value={url.value}
+        onInput={(e) => (url.value = e.currentTarget.value)}
+        placeholder="https://github.com/rust-lang/book"
+        autoFocus
+        required
+      />
+      <Input
+        label={t('remote.modal.git.branch')}
+        value={branch.value}
+        onInput={(e) => (branch.value = e.currentTarget.value)}
+        placeholder="main"
+      />
+      <Input
+        label={t('remote.modal.git.subdir')}
+        value={subdir.value}
+        onInput={(e) => (subdir.value = e.currentTarget.value)}
+        placeholder="src"
+      />
+      <Input
+        label={t('remote.modal.git.glob')}
+        value={glob.value}
+        onInput={(e) => (glob.value = e.currentTarget.value)}
+        placeholder="**/*.md, **/*.rst"
+        hint={t('remote.modal.git.glob_hint')}
+      />
+      <Input
+        label={t('remote.modal.git.token')}
+        type="password"
+        value={token.value}
+        onInput={(e) => (token.value = e.currentTarget.value)}
+        hint={t('remote.modal.git.token_hint')}
+      />
+      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+        {t('remote.modal.git.cost_hint')}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+        <Button variant="ghost" onClick={() => onDone({ ok: false })}>
+          {t('common.cancel')}
+        </Button>
+        <Button variant="primary" onClick={submit} loading={submitting.value} disabled={!canSubmit}>
+          {t('remote.modal.git.bind')}
         </Button>
       </div>
     </div>

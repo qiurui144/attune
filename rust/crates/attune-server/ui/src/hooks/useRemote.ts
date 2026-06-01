@@ -58,6 +58,39 @@ export async function bindWebdav(input: WebdavInput): Promise<RemoteActionResult
   }
 }
 
+export type GitInput = {
+  url: string;
+  branch?: string;
+  subdir?: string;
+  include_glob?: string[];
+  exclude_glob?: string[];
+  token?: string;
+};
+
+export async function bindGit(input: GitInput): Promise<RemoteActionResult> {
+  try {
+    await api.post('/index/bind-git', input);
+    return { ok: true };
+  } catch (e: unknown) {
+    if (e instanceof ApiError) {
+      return { ok: false, error: extractErrorMessage(e.body) };
+    }
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function syncGit(dirId: string): Promise<RemoteActionResult> {
+  try {
+    await api.post('/index/sync-git', { dir_id: dirId });
+    return { ok: true };
+  } catch (e: unknown) {
+    if (e instanceof ApiError) {
+      return { ok: false, error: extractErrorMessage(e.body) };
+    }
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function unbindDir(id: string): Promise<boolean> {
   try {
     await api.delete(`/index/unbind?id=${encodeURIComponent(id)}`);

@@ -3,8 +3,24 @@
 ## Unreleased (develop)
 
 ### Highlights
+- **GitConnector — 从 Git 仓库导入知识库**:`Settings → 远程目录 → 🐙 从 Git 仓库导入`,
+  输入仓库 URL(GitHub/GitLab/Gitea/Bitbucket/Codeberg/sr.ht 的 HTTPS)→ 自动 clone →
+  按 glob 过滤(默认知识类文档 + 常见源码)→ 入库 → 后续增量跟随上游 commit。
+  支持分支/标签、子目录限定、include/exclude glob、私有仓 PAT(本地加密存储,不回显/不上传)。
+  clone + 嵌入全在本地完成,**导入路径零 LLM 调用**(成本契约:`~本地 · 网络克隆 + 本地嵌入`)。
+  基于 libgit2(git2 crate),不依赖系统 git。SSRF 防护:host allowlist + 拒内网/loopback/
+  link-local/云 metadata,token 不落盘明文。
 - **远程目录页补原生文件夹选择器**:`Settings → 远程目录 → 添加本地目录` 原来只有手敲路径文本框,
   现补 "📂 浏览" 按钮(Tauri 原生目录选择,浏览器回退手填),对齐 Settings 关联文件夹页 / 向导。
+
+### Known Limitations (GitConnector v1)
+- 仅 **HTTPS** 仓(`git@host:` SSH / OAuth 授权流推 v.next);私有仓仅 PAT。
+- 仅导入**工作树文件**(默认分支/指定 ref 的 HEAD);不导 commit 历史 / issue / PR / wiki。
+- **Git LFS** 指针文件跳过(不拉 LFS 大文件);submodule 不递归;只读导入,绝不 push 回仓。
+- 增量靠 per-file 内容 SHA-256 + commit 游标;上游 force-push 天然 fallback 全量(content_hash 短路不重嵌)。
+- 限额默认 5000 文件 / 单文件 5 MiB / 总 500 MiB,超限拒绝(`git-repo-too-large`)。
+- 真平台仓(rust-lang/book、CyC2018/CS-Notes)端到端验证走手动/nightly(语料 pin 见 `docs/TESTING.md`);
+  CI 默认用本地 bare-repo fixture(`attune-core/tests/git_connector.rs`,无网络)。
 - **解锁提速 ~10×**:vault Argon2id KEK 派生参数从 64 MiB/t3/p4 降到 OWASP 最低档 19 MiB/t2/p1
   (弱机解锁从 1-2s → ~百毫秒级);字段读写本就是快速 AES-GCM,不受影响。
 

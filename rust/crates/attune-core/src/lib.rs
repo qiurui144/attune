@@ -130,6 +130,7 @@ pub mod error;
 pub mod index;
 pub mod ingest;
 pub mod intent_router;
+pub mod net;
 pub mod governor;
 pub mod llm;
 pub mod llm_settings;

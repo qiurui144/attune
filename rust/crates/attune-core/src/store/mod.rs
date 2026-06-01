@@ -6,6 +6,7 @@ pub mod item_blobs;
 pub mod webdav_remotes;
 pub mod email_accounts;
 pub mod rss_feeds;
+pub mod git_sources;
 mod dirs;
 mod queue;
 mod history;
@@ -207,6 +208,31 @@ CREATE TABLE IF NOT EXISTS rss_feeds (
 );
 CREATE INDEX IF NOT EXISTS idx_rss_feeds_enabled_polled
     ON rss_feeds(enabled, last_polled_at);
+
+-- GitConnector (OSS git 仓导入) 配置持久化。与 webdav_remotes 同模式：
+-- bound_dirs(git:<url>#<ref> path) 只记绑定字符串；增量同步 worker 要复用
+-- clone 范围 + token + commit 游标 → 此表存完整配置。
+-- token_ref_enc 是 AES-256-GCM 密文 BLOB（dek 加密，与 items.content 同模式）—
+-- 存的是 env 键名 / token 引用，非明文 token；NULL = 公开仓。
+-- 纯追加表：老 vault 下次 open 自动获得空表，SCHEMA_VERSION 不 bump。
+CREATE TABLE IF NOT EXISTS git_sources (
+    dir_id          TEXT PRIMARY KEY REFERENCES bound_dirs(id) ON DELETE CASCADE,
+    url             TEXT NOT NULL,
+    host            TEXT NOT NULL,
+    branch          TEXT,
+    subdir          TEXT,
+    include_glob    TEXT NOT NULL DEFAULT '',
+    exclude_glob    TEXT NOT NULL DEFAULT '',
+    corpus_domain   TEXT NOT NULL DEFAULT 'general',
+    token_ref_enc   BLOB,
+    max_files       INTEGER NOT NULL DEFAULT 5000,
+    max_file_bytes  INTEGER NOT NULL DEFAULT 5242880,
+    max_total_bytes INTEGER NOT NULL DEFAULT 524288000,
+    last_commit_sha TEXT,
+    last_synced_at  TEXT,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_git_sources_synced ON git_sources(last_synced_at);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
