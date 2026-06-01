@@ -15,6 +15,8 @@ pub enum SourceKind {
     Rss,
     /// 云盘（经 rclone 桥接：Google Drive / Dropbox / OneDrive 等）。
     CloudDrive,
+    /// Git 仓库（GitHub / GitLab / Gitea / Bitbucket / 任意 HTTPS git host）。
+    GitRepo,
 }
 
 impl SourceKind {
@@ -26,6 +28,7 @@ impl SourceKind {
             SourceKind::Email => "email",
             SourceKind::Rss => "rss",
             SourceKind::CloudDrive => "cloud_drive",
+            SourceKind::GitRepo => "git_repo",
         }
     }
 
@@ -141,10 +144,12 @@ mod tests {
             SourceKind::Email,
             SourceKind::Rss,
             SourceKind::CloudDrive,
+            SourceKind::GitRepo,
         ] {
             assert!(!k.as_str().is_empty());
         }
         assert_eq!(SourceKind::WebDav.as_str(), "webdav");
+        assert_eq!(SourceKind::GitRepo.as_str(), "git_repo");
     }
 
     #[test]

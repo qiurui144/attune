@@ -79,6 +79,15 @@ base64 = "0.22"
 regex = "1"
 # H1 资源治理：跨平台 CPU/RAM 采样（Linux /proc · Win PDH · macOS task_info）
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+# GitConnector (OSS git 仓导入)：libgit2 绑定，shallow/fetch/diff 走库内 API，
+# 不依赖系统 git 子进程（桌面机可能没装 git；避 subprocess-env 坑）。
+# vendored-libgit2 内嵌 libgit2 C 源码（cc 自动编译，跨平台含 Windows P0，
+# 与 rusqlite/usearch 同 C 负担）；vendored-openssl 关掉 —— 走 libgit2 内置
+# http(s) transport（schannel on Win / SecureTransport on macOS / openssl on Linux
+# 仅运行时动态链接，clone https 公开仓不强依赖 openssl-sys 编译）。
+git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
+# glob 过滤（include/exclude 多模式）—— globset 编译多 glob 成单一 matcher。
+globset = "0.4"
 
 [features]
 default = []
