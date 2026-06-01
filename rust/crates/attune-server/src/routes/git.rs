@@ -49,19 +49,28 @@ pub struct SyncGitRequest {
 
 type RouteResult = Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)>;
 
-/// 把 git 错误（message 带 kebab 前缀）映射到 HTTP status + 透传 code。
+/// 把 git 错误（message 带 kebab code）映射到 HTTP status + 透传 code。
+///
+/// code **不取 ':' 首段** —— url_guard 的错误会被 `VaultError::InvalidInput` 包裹，
+/// Display 前置 `"invalid input: "`，首段会变成 "invalid input" 而非真正的 kebab
+/// code（曾导致 SSRF 拒绝错返 502 而非 400）。改为扫描已知 code 在 message 中的出现。
 fn git_error_response(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
-    // message 形如 "git-auth-failed: ...";取 ':' 前的 code。
-    let code = msg.split(':').next().unwrap_or("git-error").trim();
-    let status = match code {
-        "invalid-git-url" | "git-url-not-allowed" => StatusCode::BAD_REQUEST,
-        "git-auth-failed" => StatusCode::BAD_GATEWAY,
-        "git-repo-not-found" | "git-ref-not-found" => StatusCode::NOT_FOUND,
-        "git-repo-too-large" => StatusCode::PAYLOAD_TOO_LARGE,
-        "git-cli-missing" => StatusCode::SERVICE_UNAVAILABLE,
-        "git-network-error" => StatusCode::BAD_GATEWAY,
-        _ => StatusCode::BAD_GATEWAY,
-    };
+    // (code, status) 表；按出现即命中扫描，顺序无关（code 互不为子串）。
+    const KNOWN: &[(&str, StatusCode)] = &[
+        ("invalid-git-url", StatusCode::BAD_REQUEST),
+        ("git-url-not-allowed", StatusCode::BAD_REQUEST),
+        ("git-auth-failed", StatusCode::BAD_GATEWAY),
+        ("git-repo-not-found", StatusCode::NOT_FOUND),
+        ("git-ref-not-found", StatusCode::NOT_FOUND),
+        ("git-repo-too-large", StatusCode::PAYLOAD_TOO_LARGE),
+        ("git-cli-missing", StatusCode::SERVICE_UNAVAILABLE),
+        ("git-network-error", StatusCode::BAD_GATEWAY),
+    ];
+    let (code, status) = KNOWN
+        .iter()
+        .find(|(c, _)| msg.contains(c))
+        .map(|(c, s)| (*c, *s))
+        .unwrap_or(("git-error", StatusCode::BAD_GATEWAY));
     // error message 已脱敏（connector map_git_err 不含 token / 内网细节）。
     (status, Json(json!({ "error": msg, "code": code })))
 }
