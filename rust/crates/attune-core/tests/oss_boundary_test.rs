@@ -26,8 +26,10 @@ fn pii_module_works_without_case_metadata() {
     let mut r = Redactor::default();
     r.add_pattern("phone", r"1[3-9]\d{9}").expect("add pattern");
     let result = r.redact("我的手机号是 13812345678，请联系我");
+    // RedactionResult 有 redacted_text(String) 字段; 验证手机号已被脱敏(不再出现明文)
     assert!(
-        result.contains("[PHONE"),
-        "pii redaction must work without case_metadata; got: {result}"
+        !result.redacted_text.contains("13812345678"),
+        "pii redaction must work without case_metadata; redacted_text={}",
+        result.redacted_text
     );
 }
