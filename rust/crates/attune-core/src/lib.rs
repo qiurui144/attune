@@ -112,7 +112,7 @@ pub mod agents;
 pub mod agent_telemetry;
 pub mod feedback;
 pub mod mcp_client;
-pub mod case_metadata;
+// S4b: case_metadata removed from OSS attune-core — migrated to attune-pro/plugins/law-pro/
 pub mod plugin_encryption;
 pub mod ui_runtime;
 pub mod agent_runner;
