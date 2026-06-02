@@ -151,55 +151,11 @@ gates:
     ci: pr
     note: "char-level WER red lines: zh <= 0.15, en <= 0.10, mixed <= 0.18; RTF p50 <= 0.5"
 
-  # ── attune-pro gates (EXTERNAL — recorded for roll-up only) ───────────────
-  # These run in the attune-pro repo (its own thresholds.yaml + nightly-real-llm.yml).
-  # external: true means this manifest does NOT machine-check them in this repo;
-  # they appear in the roll-up dashboard so the workspace view is complete.
-
-  - id: tech_pro_code_reviewer
-    plugin: tech-pro
-    tier: deterministic
-    crate: "attune-pro:tech-pro"
-    test_name: code_reviewer_golden_gate
-    metric_kind: zero_violations
-    threshold: 1.00
-    ratchet_baseline: 1.00
-    fixture_min: 11            # >= 11 cases, >= 10 approved, >= 3 error, sentinel (audit :120,206-231)
-    ignored: false
-    ci: external
-    external: true
-    note: "enforced in attune-pro repo (cargo test --workspace)"
-
-  - id: law_pro_deterministic
-    plugin: law-pro
-    tier: deterministic
-    crate: "attune-pro:law-pro"
-    test_name: deterministic_agent_golden_gate
-    metric_kind: exact_match_rate
-    threshold: 1.00            # 12 pure-fn agents all @1.00 (law-pro thresholds.yaml)
-    ratchet_baseline: 1.00
-    fixture_min: 10
-    ignored: false
-    ci: external
-    external: true
-    note: "law-pro thresholds.yaml is the in-repo ratchet SSOT for the 12 deterministic agents"
-
-  - id: law_pro_fact_extractor_llm
-    plugin: law-pro
-    tier: llm
-    crate: "attune-pro:law-pro"
-    test_name: llm_agent_golden_gate
-    metric_kind: micro_f1
-    threshold: 0.85            # fact_extractor micro_F1 >= 0.85, only-up (law-pro thresholds.yaml llm:)
-    ratchet_baseline: 0.85
-    fixture_min: 10
-    ignored: false             # mock lane is PR; real lane (#[ignore]) is the pro nightly-real-llm
-    ci: external
-    external: true
-    note: >
-      mock lane runs on PR (attune-pro); real Ollama lane runs in
-      attune-pro/.github/workflows/nightly-real-llm.yml (cron, F1 floor 0.85).
-      The acp.2 OSS nightly mirrors this pattern for oss_agent_real_llm.
+  # ── S4b (2026-06-03): attune-pro external gates removed from OSS manifest ──
+  # tech_pro_code_reviewer / law_pro_deterministic / law_pro_fact_extractor_llm
+  # have been removed from this OSS manifest per S4b industry decoupling.
+  # These gates are enforced in attune-pro's own thresholds.yaml + CI.
+  # See: docs/superpowers/specs/2026-06-02-oss-industry-decoupling.md §4.1 MU-8
 
 # Per-crate #[ignore] baseline counts for the spike guard (per CLAUDE.md §7.2
 # Gate 2: new #[ignore] must not spike beyond baseline + 2). The orchestrator
