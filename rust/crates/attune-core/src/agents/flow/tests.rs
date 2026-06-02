@@ -313,12 +313,14 @@ steps = ["a"]
 }
 
 // ── Integration: the SHIPPED agent_flows.toml validates against the SHIPPED
-// agents.registry.toml (the legal_defamation 3-step flow must type-connect) ──
+// agents.registry.toml (S4b: OSS flows intentionally empty after industry move) ──
 
 fn shipped_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join(name)
 }
 
+/// S4b: OSS agent_flows.toml is intentionally empty (industry flows moved to attune-pro).
+/// The FlowSet must parse successfully and contain zero flows.
 #[test]
 fn shipped_flows_validate_against_shipped_registry() {
     let reg = AgentRegistry::from_path(&shipped_path("agents.registry.toml"))
@@ -327,41 +329,75 @@ fn shipped_flows_validate_against_shipped_registry() {
         FlowSet::from_path(&shipped_path("agent_flows.toml")).expect("shipped flows parse");
     flows
         .validate_against(&reg)
-        .expect("shipped flows must type-connect against the shipped registry");
-    // The canonical legal_defamation 3-step flow must be present.
-    let f = flows.get("legal_defamation").expect("legal_defamation present");
-    assert_eq!(f.steps, ["fact_extractor", "defamation_extractor", "defamation_agent"]);
+        .expect("shipped flows must validate against the shipped registry (empty set is valid)");
+    // S4b: legal_defamation flow moved to attune-pro/plugins/law-pro/.
+    assert!(
+        flows.get("legal_defamation").is_none(),
+        "S4b: legal_defamation flow must not appear in OSS agent_flows.toml",
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Task 5 — dedupe defamation/divorce (correctness unchanged, §2.3)
+// Task 5 — dedupe defamation/divorce (S4b: moved to attune-pro, §2.3)
 // ══════════════════════════════════════════════════════════════════════════
 
+/// S4b: defamation flow composition moved to attune-pro. No industry flow in OSS.
 #[test]
 fn defamation_dedupe_routes_to_composed_flow_not_individual_agents() {
-    // A audit: defamation capability was split across 2 agents (deterministic
-    // defamation_agent + LLM defamation_extractor) on the same keywords. The
-    // dedupe composes them into ONE flow. A defamation intent must resolve to the
-    // legal_defamation flow (priority 9), NOT to either single agent.
+    // S4b: legal_defamation flow + law-pro agents removed from OSS. OSS has no
+    // industry flows. A defamation query on the OSS registry resolves to None
+    // (graceful degrade — attune-pro loads the law-pro flow at runtime).
     let reg = AgentRegistry::from_path(&shipped_path("agents.registry.toml"))
         .expect("shipped registry");
     let flows =
         FlowSet::from_path(&shipped_path("agent_flows.toml")).expect("shipped flows");
-    let resolved = resolve_flow("他诽谤侮辱我，要求名誉权赔偿", &flows, &reg)
-        .expect("defamation intent resolves");
-    assert_eq!(resolved.id, "legal_defamation", "defamation → composed flow");
-    assert!(!resolved.synthesized, "composed flow is declared, not synthesized");
-    // The flow composes extraction → damages: LLM extractor leads, deterministic
-    // damages calc follows (the documented dedupe shape).
-    assert!(resolved.flow.steps.contains(&"defamation_extractor".to_string()));
-    assert!(resolved.flow.steps.contains(&"defamation_agent".to_string()));
+    // OSS has no defamation flow — resolve_flow must degrade gracefully (None/empty).
+    let resolved = resolve_flow("他诽谤侮辱我，要求名誉权赔偿", &flows, &reg);
+    // Either None or Ok with no defamation flow — must not panic.
+    if let Ok(r) = resolved {
+        assert_ne!(
+            r.id.as_str(),
+            "legal_defamation",
+            "S4b: legal_defamation must not resolve in OSS (industry flow belongs in attune-pro)",
+        );
+    }
+    // law-pro agents are absent from OSS registry — they must return None.
+    assert!(reg.get("defamation_extractor").is_none(), "S4b: defamation_extractor not in OSS");
+    assert!(reg.get("defamation_agent").is_none(), "S4b: defamation_agent not in OSS");
 }
 
+/// S4b: defamation typed-chain test converted to unit test with inline toml (no shipped registry).
 #[test]
 fn defamation_flow_typed_chain_connects_extractor_to_damages() {
-    // Correctness-preserving (§2.3): the flow only ORGANIZES the existing agents;
-    // the typed handoff must actually connect extractor.produces → agent.consumes.
-    let reg = AgentRegistry::from_path(&shipped_path("agents.registry.toml")).unwrap();
+    // S4b: defamation_extractor + defamation_agent removed from OSS shipped registry.
+    // This pure-logic test verifies typed-handoff chain invariant using inline toml.
+    let toml = r#"
+[[agent]]
+id = "defamation_extractor"
+tier = "paid"
+plugin = "law-pro"
+kind = "llm-judge"
+capability_boundary = "名誉权侵权 LLM 抽取"
+model_tier_floor = "gpt-4o-mini"
+cost_class = "cloud"
+gate = "law-pro/agent_golden_gate::defamation"
+[agent.handoff]
+consumes = "CaseFacts"
+produces = "DefamationFacts"
+
+[[agent]]
+id = "defamation_agent"
+tier = "paid"
+plugin = "law-pro"
+kind = "deterministic"
+capability_boundary = "名誉权物质损失 + 精神抚慰金"
+cost_class = "zero"
+gate = "law-pro/deterministic_agent_golden_gate::defamation"
+[agent.handoff]
+consumes = "DefamationFacts"
+produces = "DamageAward"
+"#;
+    let reg = AgentRegistry::from_toml_str(toml).unwrap();
     let extractor = reg.get("defamation_extractor").unwrap();
     let damages = reg.get("defamation_agent").unwrap();
     assert_eq!(
@@ -370,18 +406,17 @@ fn defamation_flow_typed_chain_connects_extractor_to_damages() {
     );
 }
 
+/// S4b: divorce_alias test converted to unit test — divorce_extractor no longer in OSS shipped registry.
 #[test]
 fn divorce_alias_mechanism_available_in_registry() {
-    // A audit: divorce_extractor shares bin/agent_divorce with the deterministic
-    // divorce path (one binary, two ids). The registry now carries a machine-
-    // checkable shares_binary field for that relationship. The shipped
-    // divorce_extractor owns its binary (no deterministic sibling registered),
-    // so shares_binary is None — but the mechanism exists + validates aliases.
+    // S4b: divorce_extractor (law-pro) removed from OSS shipped registry.
+    // Alias mechanism is validated via pure-logic tests in registry/tests.rs.
+    // Verify graceful degrade: shipped OSS registry returns None for divorce_extractor.
     let reg = AgentRegistry::from_path(&shipped_path("agents.registry.toml")).unwrap();
-    let divorce = reg.get("divorce_extractor").expect("divorce_extractor present");
-    // Field is present (None here); the alias-validation test in registry/tests.rs
-    // proves a real alias to a sibling validates + an unregistered target rejects.
-    let _ = &divorce.shares_binary;
+    assert!(
+        reg.get("divorce_extractor").is_none(),
+        "S4b: divorce_extractor must not be in OSS shipped registry",
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════════════
