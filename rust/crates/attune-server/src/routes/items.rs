@@ -119,47 +119,121 @@ pub async fn update_item(
         return Err((StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "content too large"}))));
     }
 
-    let vault = state.vault.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
-    let dek = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
-    })?;
+    // --- Phase 1: vault ops only (no vectors/fulltext held) ---
+    // Lock ordering: vault must be released before acquiring vectors/fulltext to prevent
+    // ABBA deadlock with search/chat paths that acquire fulltext→vectors→vault in that order.
+    // We release vault here and re-acquire it narrowly in later phases.
+    let (outcome, item_for_reindex) = {
+        let vault = state.vault.lock()
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+        let dek = vault.dek_db().map_err(|e| {
+            (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        })?;
 
-    let outcome = vault.store()
-        .update_item(&dek, &id, body.title.as_deref(), body.content.as_deref())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        let outcome = vault.store()
+            .update_item(&dek, &id, body.title.as_deref(), body.content.as_deref())
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
 
-    if !outcome.existed {
-        return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))));
-    }
+        if !outcome.existed {
+            return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))));
+        }
+
+        // Read item data as owned Strings before dropping vault guard.
+        let item = if outcome.content_changed {
+            let item = vault.store().get_item(&dek, &id)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
+                .ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "race: item gone"}))))?;
+            Some(item)
+        } else {
+            None
+        };
+        // vault guard drops here — no overlap with vectors/fulltext locks below
+        (outcome, item)
+    };
 
     let mut reindex_stats = None;
     if outcome.content_changed {
-        // 重新读 item（拿 title + 新 content + source_type）走 reindex pipeline
-        let item = vault.store().get_item(&dek, &id)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
-            .ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "race: item gone"}))))?;
+        let item = item_for_reindex.expect("item_for_reindex is Some when content_changed");
 
-        let mut vectors_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
-        let fulltext_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
-        if let (Some(vectors), Some(fulltext)) = (vectors_guard.as_mut(), fulltext_guard.as_ref()) {
-            match reindex::reindex_item(vault.store(), vectors, fulltext, &id, &item.title, &item.content, &item.source_type) {
-                Ok(stats) => reindex_stats = Some(stats),
-                Err(e) => {
-                    tracing::warn!("reindex_item failed for {id}: {e} — search 可能短暂 stale，下次 update 重试");
+        // --- Phase 2: pre-reindex store ops (vault only, no vectors/fulltext) ---
+        // Clear stale embed queue and chunk summaries before touching index structures.
+        let queue_cleared = {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            let queue_cleared = vault.store()
+                .purge_embed_queue_for_item(&id)
+                .unwrap_or(0);
+            // QW-5: chunk_summary entries keyed by old chunk_hash become stale on content change.
+            let _ = vault.store().delete_chunk_summaries_for_item(&id);
+            // vault guard drops here
+            queue_cleared
+        };
+
+        // --- Phase 3: index ops only (vectors + fulltext, no vault held) ---
+        // Acquire vectors/fulltext only after vault is released to maintain consistent
+        // lock order with search/chat (fulltext→vectors without vault).
+        let mut vectors_deleted = 0usize;
+        {
+            let mut vectors_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+            let fulltext_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+            if let (Some(vectors), Some(fulltext)) = (vectors_guard.as_mut(), fulltext_guard.as_ref()) {
+                match vectors.delete_by_item_id(&id) {
+                    Ok(n) => vectors_deleted = n,
+                    Err(e) => tracing::warn!("vectors.delete_by_item_id failed for {id}: {e}"),
+                }
+                if let Err(e) = fulltext.delete_document(&id) {
+                    tracing::warn!("fulltext.delete_document failed for {id}: {e}");
+                }
+                if let Err(e) = fulltext.add_document(&id, &item.title, &item.content, &item.source_type) {
+                    tracing::warn!("fulltext.add_document failed for {id}: {e} — search 可能短暂 stale，下次 update 重试");
+                }
+            } else {
+                tracing::warn!("vectors / fulltext 未初始化，update_item skip reindex (item={id})");
+            }
+            // vectors_guard and fulltext_guard drop here
+        }
+
+        // --- Phase 4: post-reindex store ops (vault only, no vectors/fulltext held) ---
+        // Enqueue embedding chunks and emit doc_update signal.
+        let chunks_enqueued = {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            let mut chunk_counter: usize = 0;
+            let sections = attune_core::chunker::extract_sections(&item.content);
+            let mut enqueue_ok = true;
+            for (section_idx, section_text) in &sections {
+                if section_text.trim().is_empty() { continue; }
+                if let Err(e) = vault.store().enqueue_embedding(&id, chunk_counter, section_text, 1, 1, *section_idx) {
+                    tracing::warn!("enqueue_embedding L1 failed for {id}: {e}");
+                    enqueue_ok = false;
+                    break;
+                }
+                chunk_counter += 1;
+            }
+            if enqueue_ok {
+                for (section_idx, section_text) in &sections {
+                    for chunk_text in attune_core::chunker::chunk(section_text, attune_core::chunker::DEFAULT_CHUNK_SIZE, attune_core::chunker::DEFAULT_OVERLAP) {
+                        if let Err(e) = vault.store().enqueue_embedding(&id, chunk_counter, &chunk_text, 2, 2, *section_idx) {
+                            tracing::warn!("enqueue_embedding L2 failed for {id}: {e}");
+                            break;
+                        }
+                        chunk_counter += 1;
+                    }
                 }
             }
-        } else {
-            tracing::warn!("vectors / fulltext 未初始化，update_item skip reindex (item={id})");
-        }
-        drop(fulltext_guard);
-        drop(vectors_guard);
+            // Phase B hook 1: doc_update 信号喂 skill_evolution
+            // 失败不阻塞主流程但留 debug 痕（schema drift / WAL 故障可诊断）
+            if let Err(e) = vault.store().record_signal_event("doc_update", &id, None) {
+                tracing::debug!(signal = "doc_update", error = %e, "record_signal_event failed (non-fatal)");
+            }
+            // vault guard drops here
+            chunk_counter
+        };
 
-        // Phase B hook 1: doc_update 信号喂 skill_evolution
-        // 失败不阻塞主流程但留 debug 痕（schema drift / WAL 故障可诊断）
-        if let Err(e) = vault.store().record_signal_event("doc_update", &id, None) {
-            tracing::debug!(signal = "doc_update", error = %e, "record_signal_event failed (non-fatal)");
-        }
+        reindex_stats = Some(reindex::ReindexStats {
+            vectors_deleted,
+            queue_cleared,
+            chunks_enqueued,
+        });
+
         // 内容变了 → 失效 search 缓存，否则搜旧关键词命中陈旧结果
         state.invalidate_search_cache();
     }
