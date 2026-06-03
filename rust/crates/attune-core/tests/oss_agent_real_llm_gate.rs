@@ -2,10 +2,13 @@
 //!
 //! ## 背景 / Why this test exists
 //!
-//! Per `attune-pro` law-pro #54 incident:mock-only test gates are a "false sense
-//! of security" — defamation_extractor passed every mock test but real Ollama
-//! qwen2.5:3b yielded F1=0.0923 with 4/10 JSON parse errors. This test runs the
-//! same drill for OSS attune's 4 agents shipped in v1.0:
+//! Per Agent 验证铁律 (attune/CLAUDE.md §"Agent 验证铁律"): mock-only test gates are a
+//! "false sense of security" — an agent may pass every mock test but fail on a real
+//! LLM. This test runs the same drill for OSS attune's 4 agents shipped in v1.0.
+//! S4b note: industry agent references (law-pro defamation_extractor incident) removed
+//! from this OSS file per docs/superpowers/specs/2026-06-02-oss-industry-decoupling.md.
+//!
+//! This test runs the drill for OSS attune's 4 agents shipped in v1.0:
 //!
 //! | Agent | Module | Uses LLM? | Verified here? |
 //! |-------|--------|-----------|----------------|

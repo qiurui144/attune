@@ -97,17 +97,24 @@ mod tests {
     }
 
     // ACP-5 chat wiring — load_workspace_flows validates the typed-handoff chain
-    // against the registry (guarantee ①) and returns the canonical legal_defamation
-    // flow from the workspace SSOT.
+    // against the registry (guarantee ①). S4b: OSS ships an intentionally empty
+    // flow set — industry flows (legal_defamation etc.) live in attune-pro. The
+    // loader must succeed (not Err) and return an empty FlowSet; the OSS registry
+    // still has 6 oss-core agents.
     #[test]
     fn load_workspace_flows_loads_and_validates() {
         let (flows, reg) =
             super::load_workspace_flows("agents.registry.toml", "agent_flows.toml")
                 .expect("workspace flows must load + validate");
-        assert!(!reg.is_empty(), "registry must have agents");
+        assert!(!reg.is_empty(), "registry must have oss-core agents");
+        // S4b: legal_defamation moved to attune-pro — OSS flow set is empty.
         assert!(
-            flows.get("legal_defamation").is_some(),
-            "the canonical legal_defamation flow must be present"
+            flows.get("legal_defamation").is_none(),
+            "S4b: legal_defamation flow must not be present in OSS (moved to attune-pro)"
+        );
+        assert!(
+            flows.is_empty(),
+            "S4b: OSS agent_flows.toml is intentionally empty — industry flows live in attune-pro"
         );
     }
 

@@ -83,3 +83,5 @@ tmp/
 
 # Claude Code 工具产物
 .claude/
+.sdlc/
+reports/runs/

@@ -104,63 +104,13 @@ impl MockPluginHubProvider {
     }
 
     fn _builtin_plugins(&self) -> Vec<PluginListing> {
-        let plan_rank = |p: &str| match p {
-            "individual" => 0,
-            "pro" => 1,
-            "enterprise" => 2,
-            _ => 0,
-        };
-        let user_rank = plan_rank(&self.user_plan);
-
-        let make = |id: &str, name: &str, desc: &str, min_plan: &str, trial_days: i32| {
-            let plugin_rank = plan_rank(min_plan);
-            let available = user_rank >= plugin_rank;
-            let trial_available = !available && trial_days > 0;
-            PluginListing {
-                id: id.into(),
-                name: name.into(),
-                plugin_type: "industry".into(),
-                category: "vertical".into(),
-                description: desc.into(),
-                latest_version: "0.7.0".into(),
-                tags: vec!["attune-pro".into()],
-                min_plan: min_plan.into(),
-                available,
-                trial_available,
-                trial_days,
-            }
-        };
-
-        vec![
-            make(
-                "law-pro",
-                "Law Pro",
-                "律师专属 — 合同审查 / 风险矩阵 / 起草 / OA 答辩 / 条款检索",
-                "pro",
-                7,
-            ),
-            make(
-                "patent-pro",
-                "Patent Pro",
-                "专利代理 — FTO 检索 / 侵权检测 / 申请起草 / OA 答辩",
-                "pro",
-                7,
-            ),
-            make(
-                "presales-pro",
-                "Presales Pro",
-                "B2B 售前 — 竞品分析 / BANT / 报价 / demo 脚本",
-                "pro",
-                7,
-            ),
-            make(
-                "tech-pro",
-                "Tech Pro",
-                "工程师 — 仓库扫描 / PR auto-review / IDE 集成",
-                "pro",
-                7,
-            ),
-        ]
+        // S4b OSS decoupling (2026-06-03): industry catalog (law-pro / patent-pro /
+        // presales-pro / tech-pro) removed from OSS MockPluginHubProvider.
+        // Real catalog is served by HttpPluginHubProvider from cloud/pluginhub.
+        // Marketplace UI receives [] → shows "no plugins available" (existing fallback UI).
+        // v1.1.x: dynamic loading from pluginhub_url.
+        // See: docs/superpowers/specs/2026-06-02-oss-industry-decoupling.md §4.1 MU-4
+        vec![]
     }
 }
 
@@ -410,42 +360,63 @@ impl PluginHubProvider for HttpPluginHubProvider {
 mod tests {
     use super::*;
 
+    /// S4b regression: OSS MockPluginHubProvider returns empty catalog (no industry plugins).
+    /// Marketplace UI receives [] → shows "no plugins available" (expected fallback).
     #[test]
-    fn mock_individual_user_sees_all_plugins_with_trial() {
-        let hub = MockPluginHubProvider::with_plan("individual");
+    fn mock_hub_default_returns_empty_plugin_list() {
+        let hub = MockPluginHubProvider::default();
         let resp = hub.list_plugins().unwrap();
-        assert_eq!(resp.user_plan, "individual");
-        assert_eq!(resp.plugins.len(), 4);
-        for p in &resp.plugins {
-            assert!(!p.available, "{} should not be available for individual", p.id);
-            assert!(p.trial_available, "{} should offer trial", p.id);
-            assert_eq!(p.trial_days, 7);
-        }
+        assert!(
+            resp.plugins.is_empty(),
+            "S4b: MockPluginHubProvider must return empty catalog; \
+             industry catalog served by HttpPluginHubProvider from cloud/pluginhub; \
+             got {} plugins",
+            resp.plugins.len()
+        );
     }
 
+    /// S4b regression: no industry plugin IDs in OSS mock listing.
     #[test]
-    fn mock_pro_user_sees_all_plugins_available() {
+    fn mock_hub_no_industry_ids_in_listing() {
         let hub = MockPluginHubProvider::with_plan("pro");
         let resp = hub.list_plugins().unwrap();
         for p in &resp.plugins {
-            assert!(p.available, "{} should be available for pro", p.id);
-            assert!(!p.trial_available, "{} no trial needed", p.id);
+            for industry_id in ["law-pro", "patent-pro", "presales-pro", "tech-pro"] {
+                assert_ne!(
+                    p.id.as_str(),
+                    industry_id,
+                    "S4b: industry plugin '{}' must not appear in OSS MockPluginHubProvider catalog",
+                    industry_id,
+                );
+            }
         }
     }
 
-    #[test]
-    fn mock_install_individual_starts_trial() {
-        let hub = MockPluginHubProvider::with_plan("individual");
-        let resp = hub.install_plugin("law-pro", None).unwrap();
-        assert_eq!(resp.plugin_id, "law-pro");
-        assert!(resp.download_url.contains("law-pro"));
-    }
+    // S4b: mock_individual_user_sees_all_plugins_with_trial — superseded by
+    // mock_hub_default_returns_empty_plugin_list (industry catalog removed from OSS mock).
+    // HttpPluginHubProvider serves the real catalog from cloud/pluginhub.
 
+    // S4b: mock_pro_user_sees_all_plugins_available — superseded (see above).
+
+    // S4b: mock_install_individual_starts_trial — law-pro not in OSS mock catalog.
+    // install_plugin("law-pro") now returns Err (plugin not found in empty catalog).
     #[test]
     fn mock_install_unknown_plugin_fails() {
         let hub = MockPluginHubProvider::default();
         let r = hub.install_plugin("nonexistent", None);
-        assert!(r.is_err());
+        assert!(r.is_err(), "unknown plugin must return Err");
+    }
+
+    /// S4b: industry plugin install returns Err (not in OSS mock catalog).
+    #[test]
+    fn mock_install_industry_plugin_fails_in_oss_mock() {
+        let hub = MockPluginHubProvider::with_plan("pro");
+        // law-pro removed from OSS mock catalog — even pro plan gets Err
+        let r = hub.install_plugin("law-pro", None);
+        assert!(
+            r.is_err(),
+            "S4b: law-pro not in OSS MockPluginHubProvider — install must return Err"
+        );
     }
 
     #[test]

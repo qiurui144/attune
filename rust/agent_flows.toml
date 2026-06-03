@@ -21,26 +21,11 @@
 #
 # on_step_fail: partial (default — return what we have) | abort | fallback_agent
 
-# ─────────────────────────── legal_defamation (spec §5.3b example) ────────────
+# ── S4b (2026-06-03): legal_defamation flow removed from OSS ─────────────────
 #
-# The canonical 3-step autonomous flow. Typed-handoff chain (verified against
-# agents.registry.toml):
-#   fact_extractor       RawCaseText   → CaseFacts
-#   defamation_extractor CaseFacts     → DefamationFacts
-#   defamation_agent     DefamationFacts → DamageAward
+# The legal_defamation 3-step flow (fact_extractor → defamation_extractor →
+# defamation_agent) referenced law-pro agents which have been moved to
+# attune-pro/plugins/law-pro/. The flow definition moves with the agents.
+# See: docs/superpowers/specs/2026-06-02-oss-industry-decoupling.md §4.1 MU-1
 #
-# This is the ACP-5 dedupe landing: the defamation det+LLM agents that previously
-# both routed on the same keywords now compose into ONE flow — the LLM extractor
-# leads, then hands its DefamationFacts to the deterministic damages-calc agent.
-
-[[flow]]
-id = "legal_defamation"
-route_keywords = ["名誉", "诽谤", "侮辱", "名誉权", "名誉损害", "精神损害"]
-route_priority = 9
-steps = ["fact_extractor", "defamation_extractor", "defamation_agent"]
-[flow.degrade]
-# The final deterministic damages calc is the load-bearing step; the LLM extractor
-# is the optional enrichment — if it is disabled (ACP-3) or quota-exhausted
-# (ACP-7), the flow degrades to a partial result rather than cascade-failing.
-optional = ["fact_extractor"]
-on_step_fail = "partial"
+# OSS agent_flows.toml intentionally empty — industry flows live in attune-pro.

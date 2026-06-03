@@ -1,8 +1,10 @@
 //! ACP-1 registry tests (spec §9 ACP-1 row).
 //!
-//! Coverage: golden (consistency: 22 all-registered / no empty gate / handoff
-//! closed), boundary (empty registry / duplicate id), error (shadow-agent
+//! Coverage: golden (consistency: 6 OSS-core all-registered / no empty gate /
+//! handoff closed), boundary (empty registry / duplicate id), error (shadow-agent
 //! reject), integration (the shipped `agents.registry.toml` loads + validates).
+//! S4b: industry agents (law-pro/tech-pro) removed from OSS registry — regression
+//! tests verify only oss-core agents remain.
 
 use super::*;
 
@@ -49,16 +51,57 @@ fn shipped_registry_loads_and_validates() {
     assert!(!reg.is_empty(), "shipped registry must not be empty");
 }
 
+/// S4b: replaced shipped_registry_has_all_22_agents — OSS ships 6 oss-core agents only.
+/// Industry agents (law-pro / tech-pro) live in attune-pro and are not in OSS registry.
 #[test]
-fn shipped_registry_has_all_22_agents() {
+fn shipped_registry_has_all_6_oss_core_agents() {
     let reg = load_shipped();
     assert_eq!(
         reg.len(),
-        22,
-        "audit 2026-05-29 inventory = 22 agents (6 OSS + 14 law-pro + 1 tech-pro + 1 VLM capability); \
+        6,
+        "S4b OSS registry = 6 oss-core agents only (law-pro/tech-pro moved to attune-pro); \
          got {}",
         reg.len()
     );
+}
+
+/// S4b regression: OSS registry contains ONLY oss-core agents — no industry plugin agents.
+#[test]
+fn oss_registry_contains_only_oss_core_agents() {
+    let reg = load_shipped();
+    for a in reg.agents() {
+        assert_eq!(
+            a.plugin.as_str(),
+            "oss-core",
+            "S4b: agent '{}' has plugin='{}' — only oss-core agents allowed in OSS registry; \
+             industry agents belong in attune-pro/plugins/<vertical>/",
+            a.id,
+            a.plugin,
+        );
+    }
+}
+
+/// S4b regression: registry.get() returns None for industry agent ids (graceful degrade, no panic).
+#[test]
+fn registry_get_missing_industry_agent_returns_none() {
+    let reg = load_shipped();
+    // These industry agents were removed from OSS in S4b; lookup must degrade gracefully.
+    for industry_id in [
+        "civil_loan_agent",
+        "defamation_extractor",
+        "defamation_agent",
+        "fact_extractor",
+        "code_reviewer",
+        "evidence_classifier",
+        "divorce_extractor",
+        "traffic_accident_agent",
+    ] {
+        assert!(
+            reg.get(industry_id).is_none(),
+            "S4b: industry agent '{}' must not be in OSS registry (graceful degrade → None)",
+            industry_id,
+        );
+    }
 }
 
 #[test]
@@ -95,31 +138,34 @@ fn shipped_registry_handoff_type_graph_nonempty() {
     );
 }
 
+/// S4b: updated from 7-agent spot-check to OSS-only agents.
 #[test]
-fn shipped_registry_known_agents_present() {
-    // Spot-check representative agents from each owner (A audit matrix).
+fn shipped_registry_known_oss_agents_present() {
+    // Spot-check all 6 oss-core agents (S4b: law-pro/tech-pro removed from OSS).
     let reg = load_shipped();
     for id in [
-        "document_classifier",   // OSS
-        "memory_consolidation",  // OSS LLM
-        "fact_extractor",        // law-pro LLM
-        "civil_loan_agent",      // law-pro deterministic
-        "defamation_extractor",  // law-pro LLM, ≥gpt-4o-mini floor
-        "code_reviewer",         // tech-pro
-        "evidence_classifier",   // law-pro VLM capability
+        "document_classifier",    // OSS deterministic
+        "memory_consolidation",   // OSS LLM
+        "linker",                 // OSS deterministic
+        "chat_reliability",       // OSS deterministic
+        "self_evolving_skill",    // OSS deterministic
+        "skill_evolution_cycle",  // OSS LLM
     ] {
-        assert!(reg.contains(id), "shipped registry missing known agent {id}");
+        assert!(reg.contains(id), "S4b: shipped OSS registry missing oss-core agent '{id}'");
     }
 }
 
+/// S4b: kept for historical reference — defamation_extractor is now in attune-pro only.
+/// Graceful degrade: registry.get returns None, does not panic.
 #[test]
-fn shipped_registry_defamation_extractor_floor_is_gpt4o_mini() {
-    // A audit: defamation_extractor must hit ≥ gpt-4o-mini (qwen3b caps at 0.56-0.72).
+fn shipped_registry_defamation_extractor_absent_in_oss() {
+    // S4b: defamation_extractor (law-pro, gpt-4o-mini floor) removed from OSS registry.
+    // attune-pro/plugins/law-pro/agents.registry.toml holds the authoritative entry.
     let reg = load_shipped();
-    let a = reg.get("defamation_extractor").expect("defamation_extractor present");
-    assert_eq!(a.model_tier_floor, "gpt-4o-mini");
-    assert_eq!(a.kind, Kind::LlmJudge);
-    assert_eq!(a.cost_class, CostClass::Cloud);
+    assert!(
+        reg.get("defamation_extractor").is_none(),
+        "S4b: defamation_extractor must not appear in OSS registry",
+    );
 }
 
 #[test]
@@ -401,19 +447,25 @@ fn no_route_conflicts_when_keywords_disjoint() {
 
 // ── directory render (CLI §5.5) ─────────────────────────────────────────
 
+/// S4b: updated from 22-agent multi-plugin view to 6-agent oss-core only.
+/// Industry agents (law-pro / tech-pro) removed from OSS registry in S4b.
 #[test]
 fn render_directory_lists_all_agents_with_columns() {
     let reg = load_shipped();
     let out = reg.render_directory();
-    assert!(out.contains("Agent Registry — 22 agents"));
-    // grouped headers per plugin
-    assert!(out.contains("[oss-core]"));
-    assert!(out.contains("[law-pro]"));
-    assert!(out.contains("[tech-pro]"));
-    // representative agents + their columns
-    assert!(out.contains("document_classifier"));
-    assert!(out.contains("defamation_extractor"));
-    assert!(out.contains("gpt-4o-mini"), "model floor column shown");
+    // S4b: 6 oss-core agents only.
+    assert!(out.contains("Agent Registry — 6 agents"), "S4b: OSS registry has 6 agents, got:\n{out}");
+    // Only oss-core plugin group.
+    assert!(out.contains("[oss-core]"), "oss-core group must be present");
+    // No industry plugin groups (S4b — moved to attune-pro).
+    assert!(!out.contains("[law-pro]"), "S4b: law-pro group must not appear in OSS");
+    assert!(!out.contains("[tech-pro]"), "S4b: tech-pro group must not appear in OSS");
+    // Representative oss-core agents.
+    assert!(out.contains("document_classifier"), "document_classifier must be listed");
+    assert!(out.contains("memory_consolidation"), "memory_consolidation must be listed");
+    // S4b: industry agents absent.
+    assert!(!out.contains("defamation_extractor"), "S4b: defamation_extractor must not appear in OSS");
+    // Column headers still rendered.
     assert!(out.contains("handoff:"), "handoff chain rendered");
     assert!(out.contains("gate="), "gate binding rendered");
 }

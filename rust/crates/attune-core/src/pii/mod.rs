@@ -77,7 +77,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// PII 类别。`Custom` 来自用户词典；`PluginProvided` 来自 vertical plugin
-/// (如 law-pro 的 case_no、medical-pro 的 medical_id)。
+/// (如 attune-pro 各行业插件注册的专属 PII 类型)。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PiiKind {
@@ -146,7 +146,7 @@ pub struct RedactionStats {
 
 /// vertical plugin 注册的自定义 PII 抽取器。
 ///
-/// 例如 attune-pro/law-pro 提供 CaseNoExtractor，识别 `(2023)京01民终123号`。
+/// 例如 attune-pro 行业插件可注册专属抽取器，识别特定领域 PII 模式。
 pub trait PiiExtractor: Send + Sync {
     /// 抽取器名字（用于 placeholder 前缀，如 "case_no" → `[case_no_1]`）
     fn name(&self) -> &str;
