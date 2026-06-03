@@ -353,8 +353,8 @@ fn defamation_dedupe_routes_to_composed_flow_not_individual_agents() {
         FlowSet::from_path(&shipped_path("agent_flows.toml")).expect("shipped flows");
     // OSS has no defamation flow — resolve_flow must degrade gracefully (None/empty).
     let resolved = resolve_flow("他诽谤侮辱我，要求名誉权赔偿", &flows, &reg);
-    // Either None or Ok with no defamation flow — must not panic.
-    if let Ok(r) = resolved {
+    // Either None or Some with no defamation flow — must not panic.
+    if let Some(r) = resolved {
         assert_ne!(
             r.id.as_str(),
             "legal_defamation",
