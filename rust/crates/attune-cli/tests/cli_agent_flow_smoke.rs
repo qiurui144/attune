@@ -16,8 +16,11 @@ fn workspace_file(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join(name)
 }
 
+/// S4b: OSS agent_flows.toml is intentionally empty — industry flows
+/// (legal_defamation etc.) moved to attune-pro/plugins/law-pro/.
+/// `agent flow list` exits zero and reports 0 flows in OSS mode.
 #[test]
-fn agent_flow_list_shows_typed_chain_exit_zero() {
+fn agent_flow_list_shows_empty_oss_flowset_exit_zero() {
     attune_cmd()
         .args(["agent", "flow", "list", "--flows"])
         .arg(workspace_file("agent_flows.toml"))
@@ -25,36 +28,31 @@ fn agent_flow_list_shows_typed_chain_exit_zero() {
         .arg(workspace_file("agents.registry.toml"))
         .assert()
         .success()
+        // S4b: OSS ships 0 flows; list must succeed (not crash) and report empty.
         .stdout(predicate::str::contains("Agent Flows"))
-        .stdout(predicate::str::contains("legal_defamation"))
-        // the typed-handoff chain must be visible (§5.5)
-        .stdout(predicate::str::contains("CaseFacts"))
-        .stdout(predicate::str::contains("DefamationFacts"))
-        .stdout(predicate::str::contains("defamation_extractor"))
-        .stdout(predicate::str::contains("defamation_agent"));
+        // legal_defamation and its industry steps must NOT appear in OSS output.
+        .stdout(predicate::str::contains("legal_defamation").not())
+        .stdout(predicate::str::contains("defamation_extractor").not());
 }
 
+/// S4b: `agent flow run legal_defamation` exits non-zero (no such flow in OSS).
+/// This is the graceful-degrade path — the command reports the unknown id and exits 1.
 #[test]
-fn agent_flow_run_dry_run_shows_schedule_decisions() {
-    // Paid + default quota → the cloud extractors route Cloud, the deterministic
-    // damages calc routes Local. Pure dry-run, no LLM.
+fn agent_flow_run_unknown_industry_flow_exits_nonzero() {
+    // legal_defamation is now an attune-pro flow; OSS must reject it gracefully.
     attune_cmd()
         .args(["agent", "flow", "run", "legal_defamation", "--paid", "--flows"])
         .arg(workspace_file("agent_flows.toml"))
         .arg("--registry")
         .arg(workspace_file("agents.registry.toml"))
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Flow dry-run: legal_defamation"))
-        .stdout(predicate::str::contains("entitlement: paid"))
-        .stdout(predicate::str::contains("schedule: Cloud"))
-        .stdout(predicate::str::contains("Local"));
+        .failure()
+        .stderr(predicate::str::contains("no flow with id"));
 }
 
+/// S4b: quota-zero path with an unknown industry flow also exits non-zero gracefully.
 #[test]
-fn agent_flow_run_quota_zero_shows_degrade_and_block() {
-    // Quota exhausted: qwen3b-floor fact_extractor degrades to local; the
-    // gpt-4o-mini-floor defamation_extractor blocks (never silently downgrade).
+fn agent_flow_run_quota_zero_unknown_industry_flow_exits_nonzero() {
     attune_cmd()
         .args([
             "agent", "flow", "run", "legal_defamation", "--paid", "--cloud-quota", "0", "--flows",
@@ -63,9 +61,8 @@ fn agent_flow_run_quota_zero_shows_degrade_and_block() {
         .arg("--registry")
         .arg(workspace_file("agents.registry.toml"))
         .assert()
-        .success()
-        .stdout(predicate::str::contains("degraded_from_cloud: true"))
-        .stdout(predicate::str::contains("BlockedQuotaExhausted"));
+        .failure()
+        .stderr(predicate::str::contains("no flow with id"));
 }
 
 #[test]

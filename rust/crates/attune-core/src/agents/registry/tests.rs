@@ -447,19 +447,25 @@ fn no_route_conflicts_when_keywords_disjoint() {
 
 // ── directory render (CLI §5.5) ─────────────────────────────────────────
 
+/// S4b: updated from 22-agent multi-plugin view to 6-agent oss-core only.
+/// Industry agents (law-pro / tech-pro) removed from OSS registry in S4b.
 #[test]
 fn render_directory_lists_all_agents_with_columns() {
     let reg = load_shipped();
     let out = reg.render_directory();
-    assert!(out.contains("Agent Registry — 22 agents"));
-    // grouped headers per plugin
-    assert!(out.contains("[oss-core]"));
-    assert!(out.contains("[law-pro]"));
-    assert!(out.contains("[tech-pro]"));
-    // representative agents + their columns
-    assert!(out.contains("document_classifier"));
-    assert!(out.contains("defamation_extractor"));
-    assert!(out.contains("gpt-4o-mini"), "model floor column shown");
+    // S4b: 6 oss-core agents only.
+    assert!(out.contains("Agent Registry — 6 agents"), "S4b: OSS registry has 6 agents, got:\n{out}");
+    // Only oss-core plugin group.
+    assert!(out.contains("[oss-core]"), "oss-core group must be present");
+    // No industry plugin groups (S4b — moved to attune-pro).
+    assert!(!out.contains("[law-pro]"), "S4b: law-pro group must not appear in OSS");
+    assert!(!out.contains("[tech-pro]"), "S4b: tech-pro group must not appear in OSS");
+    // Representative oss-core agents.
+    assert!(out.contains("document_classifier"), "document_classifier must be listed");
+    assert!(out.contains("memory_consolidation"), "memory_consolidation must be listed");
+    // S4b: industry agents absent.
+    assert!(!out.contains("defamation_extractor"), "S4b: defamation_extractor must not appear in OSS");
+    // Column headers still rendered.
     assert!(out.contains("handoff:"), "handoff chain rendered");
     assert!(out.contains("gate="), "gate binding rendered");
 }

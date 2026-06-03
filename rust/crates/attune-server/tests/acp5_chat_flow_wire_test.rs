@@ -1,26 +1,22 @@
 //! ACP-5 — integration test for the chat-path autonomous-flow wire.
 //!
-//! Verifies the exact component graph the chat route assembles
-//! (`state.agent_flows` → `acp_chat::run_chat_flow` with real provider + cache +
-//! usage + entitlement): a message routing to the workspace `legal_defamation`
-//! declared multi-step flow runs end-to-end through the GovernedStepRunner, the
-//! per-step trace is produced, and the LLM lead step writes telemetry. A
-//! non-matching message takes the free-form path (None) — no regression.
+//! S4b (2026-06-03): OSS agent_flows.toml is intentionally empty — industry flows
+//! (legal_defamation etc.) moved to attune-pro/plugins/law-pro/. Tests now verify
+//! the graceful-degrade path: empty FlowSet → run_chat_flow returns None for all
+//! messages (chat handler falls back to free-form RAG). The CountingProvider
+//! is retained to verify no spurious LLM calls are made on the empty-flows path.
 //!
 //! Spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §5.3b / §9.
+//! S4b: docs/superpowers/specs/2026-06-02-oss-industry-decoupling.md §4.1 MU-1.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 use attune_core::agents::flow::Payload;
 use attune_core::agents::registry::AgentSpec;
 use attune_core::agents::scheduler::Entitlement;
-use attune_core::cache::memory::MemoryLruCache;
-use attune_core::cache::CacheBackend;
 use attune_core::llm::LlmProvider;
-use attune_core::store::Store;
-use attune_core::usage::{TokenUsage, UsageAggregator};
+use attune_core::usage::TokenUsage;
 
 use attune_server::acp_chat::run_chat_flow;
 
@@ -54,74 +50,77 @@ impl LlmProvider for CountingProvider {
     }
 }
 
-/// The chat route loads `agents.registry.toml` + `agent_flows.toml` at startup
-/// (AppState::new). Loading them here the same way must surface the canonical
-/// legal_defamation flow — i.e. the wire has a real flow to route to.
+/// S4b: The chat route loads `agents.registry.toml` + `agent_flows.toml` at
+/// startup (AppState::new). In OSS, agent_flows.toml is intentionally empty —
+/// industry flows (legal_defamation) live in attune-pro. Loading must succeed
+/// (not Err/panic) and return an empty FlowSet; the OSS registry has 6 agents.
 #[test]
 fn workspace_flows_present_for_chat_wire() {
     let loaded = attune_core::agents::load_workspace_flows(
         "agents.registry.toml",
         "agent_flows.toml",
     );
-    let (flows, _reg) = loaded.expect("workspace flows must load (tests run in the crate dir)");
+    let (flows, reg) = loaded.expect("workspace flows must load (tests run in the crate dir)");
+    // S4b: OSS registry still has oss-core agents.
+    assert!(!reg.is_empty(), "S4b: OSS registry must have oss-core agents");
+    // S4b: legal_defamation moved to attune-pro — OSS flow set is empty.
     assert!(
-        flows.get("legal_defamation").is_some(),
-        "the legal_defamation flow the chat wire routes to must exist"
+        flows.get("legal_defamation").is_none(),
+        "S4b: legal_defamation must not be in OSS flow set (moved to attune-pro)"
+    );
+    assert!(
+        flows.is_empty(),
+        "S4b: OSS agent_flows.toml is intentionally empty (industry flows in attune-pro)"
     );
 }
 
-/// The exact graph the chat handler assembles: a defamation message → declared
-/// multi-step flow runs through the GovernedStepRunner; the LLM lead step makes
-/// the upstream call and writes a telemetry row.
+/// S4b: legal_defamation flow moved to attune-pro — OSS has no declared flows.
+/// A defamation message must fall back to free-form RAG (None), not attempt to
+/// route to a flow that no longer exists in the OSS flow set. This verifies the
+/// graceful-degrade path: empty FlowSet → run_chat_flow returns None (§7/§11 R8).
 #[test]
-fn defamation_message_runs_flow_through_governed_runner() {
+fn defamation_message_falls_back_to_freeform_in_oss() {
     let (flows, reg) = attune_core::agents::load_workspace_flows(
         "agents.registry.toml",
         "agent_flows.toml",
     )
     .expect("workspace flows");
 
+    // S4b: OSS flow set must be empty.
+    assert!(flows.is_empty(), "S4b: OSS has no declared flows");
+
     let provider = CountingProvider {
         calls: AtomicUsize::new(0),
         model: "qwen2.5:3b".into(),
     };
-    let cache: Arc<dyn CacheBackend> = Arc::new(MemoryLruCache::new(512));
-    let store = Arc::new(Mutex::new(Store::open_memory().expect("store")));
-    let agg = UsageAggregator::new(store.clone(), 100, 1000);
-
-    // Server has no embedded agent binaries → deterministic steps degrade.
     let mut dispatch = |_a: &AgentSpec, _i: &Payload| -> std::result::Result<serde_json::Value, String> {
-        Err("no agent binary in this process".to_string())
+        Ok(serde_json::json!({}))
     };
 
-    // "名誉权" routes to legal_defamation (route_keywords include 名誉权).
+    // "名誉权" cannot route to legal_defamation (absent in OSS) → must fall back to None.
     let out = run_chat_flow(
         "我的名誉权被侵害了，对方公开诽谤我",
         &flows,
         &reg,
         &provider,
-        Some(cache.as_ref()),
-        Some(&agg),
+        None,
+        None,
         Entitlement::paid_with_quota(1_000_000),
         &HashSet::new(),
         &mut dispatch,
-    )
-    .expect("a defamation message must resolve to the declared multi-step flow");
-
-    assert_eq!(out.flow_id, "legal_defamation");
-    // The flow has an optional fact_extractor lead, then defamation_extractor
-    // (LLM) → defamation_agent (deterministic, degrades). At least one LLM step
-    // must have run (upstream call made).
-    assert!(
-        provider.calls.load(Ordering::SeqCst) >= 1,
-        "an LLM step must have made an upstream call"
     );
-    assert!(!out.steps.is_empty(), "every step leaves a trace (ACP-5 ④)");
-    // Telemetry recorded for the LLM step(s).
-    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-    rt.block_on(agg.flush_now());
-    let summary = store.lock().unwrap().usage_summary(0, i64::MAX).expect("summary");
-    assert!(summary.events >= 1, "LLM flow step must record telemetry");
+
+    // S4b graceful degrade: no flow matched → None (chat handler uses free-form RAG path).
+    assert!(
+        out.is_none(),
+        "S4b: defamation message must fall back to free-form RAG in OSS (no industry flows)"
+    );
+    // No LLM calls made — there was no flow step to execute.
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "S4b: no LLM call when no flow matched"
+    );
 }
 
 /// No regression: an irrelevant message resolves to no flow (None) so the chat
