@@ -17,6 +17,10 @@ pub mod scheduler;
 // attune-pro `impl Agent for ...` 仍指向同一 trait。`From<AgentError> for VaultError`
 // 在 crate::error 侧定义,内部 agent 仍可返回 crate::error::Result(? 自动桥接)。
 pub use attune_agent_sdk::{Agent, AgentError, AgentOutput, AgentResult};
+// Re-export the generic subprocess-ABI entry helper so plugin agents (law-pro
+// ×12, future medical/patent) call it via the stable `attune_core::agents::
+// agent_main` path. Same module — not a redefinition.
+pub use attune_agent_sdk::agent_main;
 
 /// Locate a workspace SSOT file (`agents.registry.toml` / `agent_flows.toml`) by
 /// walking up from CWD and the running executable's directory (ACP §5.5 / §5.3b —
@@ -124,5 +128,24 @@ mod tests {
     fn load_workspace_flows_missing_is_err() {
         let r = super::load_workspace_flows("nope-registry.toml", "nope-flows.toml");
         assert!(r.is_err());
+    }
+}
+
+#[cfg(test)]
+mod agent_main_reexport_tests {
+    #[test]
+    fn agent_main_helper_is_reachable_via_attune_core_path() {
+        // Compile-level: these paths must resolve through attune-core.
+        use crate::agents::agent_main::{AgentExit, EntryConfig, Section, SectionField};
+        let _cfg = EntryConfig {
+            red_line_exit2: true,
+            sections: &[Section {
+                title: "x",
+                field: SectionField::RedLines,
+                bullet: "⚠️  ",
+            }],
+            input_name: "X",
+        };
+        let _ = AgentExit::Success;
     }
 }
