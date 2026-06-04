@@ -9,10 +9,14 @@
 //! `tantivy` / `hdbscan` / `socket2` / `serde_yaml` / `chrono` 等 native-only crate
 //! —— 任一引入即破坏 wasm 可编性(`attune-core` 当年正是被这些拖进整树才编不了
 //! wasm)。CI 的 `cargo build -p attune-agent-sdk --target wasm32-wasip1` 守卫此约束。
+//! `serde_json`(纯 Rust,wasm-safe)于 2026-06-03 从 dev-dep 提升为正式依赖,
+//! 供 `agent_main` stdio 助手使用 —— 不破坏 wasm 可编性,守卫仍绿。
 //!
 //! `attune-core` 反过来依赖本 crate 并 `pub use` re-export `Agent`/`AgentOutput`,
 //! 保 `attune_core::agents::{Agent, AgentOutput}` 路径不变;`From<AgentError> for
 //! VaultError` 在 attune-core 侧定义(方向 core→leaf 单一,无环)。
+
+pub mod agent_main;
 
 use serde::{Deserialize, Serialize};
 

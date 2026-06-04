@@ -12,10 +12,13 @@ publish = false
 # usearch / tantivy / hdbscan / socket2 / serde_yaml / chrono must NEVER
 # appear here — adding any breaks the wasm build and the leaf's whole reason
 # to exist.
+# Allowed (pure-Rust, wasm-safe): serde / serde_json / thiserror. serde_json
+# was promoted from dev-dep to dep on 2026-06-03 for the agent_main stdio
+# helper; it compiles to wasm32-wasip1 cleanly, so the WASM guard stays green.
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }  # pure-Rust, wasm-safe; used by agent_main stdio helper
 thiserror = "2"
 
 [dev-dependencies]
-serde_json = { workspace = true }
 proptest = "1"
