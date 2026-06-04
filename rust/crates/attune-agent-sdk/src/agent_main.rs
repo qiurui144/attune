@@ -8,6 +8,7 @@
 //! `EntryConfig`. The 5 difference axes (input type, agent ctor, red-line
 //! exit-2 gate, LLM env, stderr section labels) are all parameters here.
 
+#[allow(unused_imports)] // AgentOutput inferred via Agent::Output in run_agent_with
 use crate::{Agent, AgentOutput};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -121,8 +122,6 @@ where
     W: std::io::Write,
     E: std::io::Write,
 {
-    use std::io::Write as _;
-
     let mut buf = String::new();
     if let Err(e) = reader.read_to_string(&mut buf) {
         let _ = writeln!(err, "stdin read error: {e}");
