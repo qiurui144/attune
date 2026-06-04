@@ -85,3 +85,11 @@ tmp/
 .claude/
 .sdlc/
 reports/runs/
+# AI scaffolding (untracked — local only)
+docs/superpowers/
+reports/
+.remember/
+.serena/
+.context-mode/
+.playwright-mcp/
+.claude/settings.local.json
