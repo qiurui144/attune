@@ -4,6 +4,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
 #[derive(Deserialize)]
@@ -19,15 +20,15 @@ fn default_limit() -> usize { 20 }
 pub async fn list_items(
     State(state): State<SharedState>,
     Query(params): Query<ListQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     let _ = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
     let limit = params.limit.min(200);
     let items = vault.store().list_items(limit, params.offset).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Internal(e.to_string())
     })?;
     Ok(Json(serde_json::json!({"items": items, "count": items.len()})))
 }
@@ -35,16 +36,16 @@ pub async fn list_items(
 pub async fn get_item(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     let dek = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
     match vault.store().get_item(&dek, &id) {
         Ok(Some(item)) => Ok(Json(serde_json::json!(item))),
-        Ok(None) => Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"})))),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))),
+        Ok(None) => Err(AppError::NotFound("not found".into())),
+        Err(e) => Err(AppError::Internal(e.to_string())),
     }
 }
 
@@ -55,11 +56,11 @@ pub async fn get_item(
 pub async fn get_item_original(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<axum::response::Response> {
     let vault = state.vault.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     let dek = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
     match vault.store().get_item_blob(&dek, &id) {
         Ok(Some(blob)) => {
@@ -72,17 +73,13 @@ pub async fn get_item_original(
                 .header(header::CACHE_CONTROL, "no-store")
                 .body(axum::body::Body::from(blob.bytes))
                 .map_err(|e| {
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+                    AppError::Internal(e.to_string())
                 })
         }
-        Ok(None) => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "no original file retained for this item"})),
+        Ok(None) => Err(AppError::NotFound(
+            "no original file retained for this item".into(),
         )),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )),
+        Err(e) => Err(AppError::Internal(e.to_string())),
     }
 }
 
@@ -103,20 +100,20 @@ pub async fn update_item(
     State(state): State<SharedState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     // 输入长度上限。否则恶意 PATCH 500MB content → crypto::encrypt
     // 在 async handler 同步执行阻塞 tokio worker + 写 500MB BLOB 到 SQLite。
     const MAX_ID_LEN: usize = 64;
     const MAX_TITLE_LEN: usize = 1024;
     const MAX_CONTENT_LEN: usize = 100 * 1024 * 1024; // 100 MB 与 upload 一致
     if id.len() > MAX_ID_LEN {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "id too long"}))));
+        return Err(AppError::BadRequest("id too long".into()));
     }
     if body.title.as_ref().is_some_and(|t| t.len() > MAX_TITLE_LEN) {
-        return Err((StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "title too long"}))));
+        return Err(AppError::PayloadTooLarge("title too long".into()));
     }
     if body.content.as_ref().is_some_and(|c| c.len() > MAX_CONTENT_LEN) {
-        return Err((StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error": "content too large"}))));
+        return Err(AppError::PayloadTooLarge("content too large".into()));
     }
 
     // --- Phase 1: vault ops only (no vectors/fulltext held) ---
@@ -125,24 +122,24 @@ pub async fn update_item(
     // We release vault here and re-acquire it narrowly in later phases.
     let (outcome, item_for_reindex) = {
         let vault = state.vault.lock()
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+            .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
         let dek = vault.dek_db().map_err(|e| {
-            (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Forbidden(e.to_string())
         })?;
 
         let outcome = vault.store()
             .update_item(&dek, &id, body.title.as_deref(), body.content.as_deref())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         if !outcome.existed {
-            return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))));
+            return Err(AppError::NotFound("not found".into()));
         }
 
         // Read item data as owned Strings before dropping vault guard.
         let item = if outcome.content_changed {
             let item = vault.store().get_item(&dek, &id)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
-                .ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "race: item gone"}))))?;
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .ok_or_else(|| AppError::NotFound("race: item gone".into()))?;
             Some(item)
         } else {
             None
@@ -258,17 +255,17 @@ pub async fn update_item(
 pub async fn delete_item(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     // id 长度上限（防 Path<String> GB 级输入浪费 query plan）
     if id.len() > 64 {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "id too long"}))));
+        return Err(AppError::BadRequest("id too long".into()));
     }
     let vault = state.vault.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     // vault Locked/Sealed 时拒绝删除（与 update_item / list_items 等
     // mutating handler 一致 — "锁着的 vault 不可被改"语义）。
     let _ = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
 
     // 先清索引（vector + FTS + queue），再 SQL 软删 — 让 search 在删除窗口内
@@ -300,8 +297,8 @@ pub async fn delete_item(
                 })),
             })))
         },
-        Ok(false) => Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"})))),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))),
+        Ok(false) => Err(AppError::NotFound("not found".into())),
+        Err(e) => Err(AppError::Internal(e.to_string())),
     }
 }
 
@@ -319,15 +316,15 @@ fn default_stale_limit() -> i64 { 50 }
 pub async fn list_stale_items(
     State(state): State<SharedState>,
     Query(params): Query<StaleQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     let _ = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
     let limit = params.limit.min(200);
     let items = vault.store().list_stale_items(params.days, limit).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Internal(e.to_string())
     })?;
     let count = items.len();
     Ok(Json(serde_json::json!({"items": items, "count": count, "days": params.days})))
@@ -336,16 +333,16 @@ pub async fn list_stale_items(
 pub async fn get_item_stats(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     let _ = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
     match vault.store().get_item_stats(&id) {
         Ok(Some(stats)) => Ok(Json(serde_json::json!(stats))),
-        Ok(None) => Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"})))),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))),
+        Ok(None) => Err(AppError::NotFound("not found".into())),
+        Err(e) => Err(AppError::Internal(e.to_string())),
     }
 }
 
@@ -359,17 +356,14 @@ pub struct PrivacyTierBody {
     pub tier: String,
 }
 
-fn parse_tier(s: &str) -> Result<PrivacyTier, (StatusCode, Json<serde_json::Value>)> {
+fn parse_tier(s: &str) -> Result<PrivacyTier, AppError> {
     match s.to_uppercase().as_str() {
         "L0" => Ok(PrivacyTier::L0),
         "L1" => Ok(PrivacyTier::L1),
         "L3" => Ok(PrivacyTier::L3),
-        other => Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!("invalid tier '{other}'; expected L0|L1|L3")
-            })),
-        )),
+        other => Err(AppError::BadRequest(format!(
+            "invalid tier '{other}'; expected L0|L1|L3"
+        ))),
     }
 }
 
@@ -386,21 +380,21 @@ pub async fn set_item_privacy(
     State(state): State<SharedState>,
     Path(id): Path<String>,
     Json(body): Json<PrivacyTierBody>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let tier = parse_tier(&body.tier)?;
     let vault = state.vault.lock().map_err(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"})))
+        AppError::Internal("vault lock poisoned".into())
     })?;
     let _ = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
     vault.store().set_item_privacy_tier(&id, tier).map_err(|e| {
-        let code = if e.to_string().contains("not found") {
-            StatusCode::NOT_FOUND
+        let m = e.to_string();
+        if m.contains("not found") {
+            AppError::NotFound(m)
         } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
-        (code, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Internal(m)
+        }
     })?;
     Ok(Json(serde_json::json!({"id": id, "privacy_tier": tier_str(tier)})))
 }
@@ -409,20 +403,20 @@ pub async fn set_item_privacy(
 pub async fn get_item_privacy(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().map_err(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"})))
+        AppError::Internal("vault lock poisoned".into())
     })?;
     let _ = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
     let tier = vault.store().get_item_privacy_tier(&id).map_err(|e| {
-        let code = if e.to_string().contains("not found") {
-            StatusCode::NOT_FOUND
+        let m = e.to_string();
+        if m.contains("not found") {
+            AppError::NotFound(m)
         } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
-        (code, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Internal(m)
+        }
     })?;
     Ok(Json(serde_json::json!({"id": id, "privacy_tier": tier_str(tier)})))
 }
@@ -430,15 +424,15 @@ pub async fn get_item_privacy(
 /// GET /api/v1/items/protected — 列出所有标记为 L0 的 item id（Settings UI "受保护文件"）
 pub async fn list_protected_items(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().map_err(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"})))
+        AppError::Internal("vault lock poisoned".into())
     })?;
     let _ = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
     let ids = vault.store().list_l0_item_ids().map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Internal(e.to_string())
     })?;
     let count = ids.len();
     Ok(Json(serde_json::json!({"items": ids, "count": count})))
