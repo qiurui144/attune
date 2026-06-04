@@ -1,5 +1,20 @@
 # attune 版本记录
 
+## Unreleased (develop)
+
+### 内部重构（无对外 API 行为变更）
+- **attune-server 错误处理统一到 `AppError`**（B4）：消除原有三套并行错误约定
+  （naive `(StatusCode, Json)` tuple / `routes/errors.rs` 安全 helper / `AppError`），
+  25 个 route 文件全部走单一 `AppError` + `?`。
+  - **错误响应契约（加性，向后兼容）**：所有错误统一为 `{"error": <msg>, "code": <kebab>}`，
+    **新增稳定 `code` 字段**；错误 message 文本不变（`AppError` Display 去类别前缀）；
+    HTTP status 逐一保持。富错误体（backpressure `retry_after_seconds` / agent 结构化
+    `code`+`message` / LLM provider `upstream_status` / `hint`）经新增 `AppError::Detailed`
+    variant **字节级保持**，不丢任何字段。
+  - `routes/errors.rs` 的 `internal()` 安全行为保留（log 内部详情 + wire 只回通用消息）。
+  - 例外（保留 bespoke 契约）：`git.rs`（domain prefix→status+透传 code 系统）、
+    `marketplace.rs`（`text/plain` 响应）。
+
 ## v1.2.0 (2026-06-01) — GitConnector + WASM 跨平台 agent + 一键依赖部署
 
 ### Highlights

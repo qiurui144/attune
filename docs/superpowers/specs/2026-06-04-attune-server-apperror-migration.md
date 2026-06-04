@@ -196,7 +196,14 @@ Task 0 基础设施(429 + Option B)无论选哪个都已落地, 不浪费。
 
 **B4 实际规模 = 统一三套错误约定**, 比 audit "机械迁 tuple" 大。
 
-## 进度 (2026-06-04, develop @ ca140a8, 全绿 + 已推)
+## ✅ B4 完成 (2026-06-04)
+
+**25 文件全迁完 + 完整基础设施。终验全绿**:clippy `--all-targets -D warnings` 干净 +
+全量测试 ~42 bin **0 failed**(含 golden / 集成 / e2e)+ 全 crate 裸 Err tuple 审计仅剩
+2 个 §7 carve-out(git/marketplace)+ projects 的 CREATED 成功 tuple(非错误)。
+status 逐一保持,富错误体字节级保持,错误响应纯加性(+`code` 字段)。
+
+## 进度明细 (历史)
 
 **已迁移 19 文件 + 基础设施**(每文件独立 commit, status 逐一保持, 108 lib 测试过 + clippy 干净):
 - 基础: error.rs(TooManyRequests + Option B 去前缀 + Detailed variant)f97183a/e6941b3
