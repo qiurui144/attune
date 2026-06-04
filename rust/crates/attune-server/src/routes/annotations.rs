@@ -1,8 +1,8 @@
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use attune_core::ai_annotator::{self, AiAngle};
 use attune_core::store::AnnotationInput;
@@ -46,11 +46,11 @@ pub struct UpdateAnnotationRequest {
     pub source: Option<String>,
 }
 
-fn bad_request(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": msg})))
+fn bad_request(msg: &str) -> AppError {
+    AppError::BadRequest(msg.to_string())
 }
 
-fn validate_source(source: Option<&str>) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+fn validate_source(source: Option<&str>) -> Result<(), AppError> {
     if let Some(s) = source {
         if !matches!(s, "user" | "ai") {
             return Err(bad_request("source must be 'user' or 'ai'"));
@@ -66,7 +66,7 @@ fn validate_common(
     label: Option<&str>,
     color: &str,
     content: &str,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(), AppError> {
     if offset_start < 0 || offset_end < offset_start {
         return Err(bad_request("invalid offsets"));
     }
@@ -91,7 +91,7 @@ fn validate_common(
 pub async fn create_annotation(
     State(state): State<SharedState>,
     Json(body): Json<CreateAnnotationRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let color = body.color.as_deref().unwrap_or("yellow");
     let content = body.content.as_deref().unwrap_or("");
     validate_common(
@@ -102,13 +102,13 @@ pub async fn create_annotation(
 
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
 
     // 拉取条目：既校验存在性（404 清晰于 SQL 外键错），又拿 content 长度做 offset 越界校验
     let item = vault.store().get_item(&dek, &body.item_id).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
-    })?.ok_or_else(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "item not found"}))))?;
+        AppError::Internal(e.to_string())
+    })?.ok_or_else(|| AppError::NotFound("item not found".into()))?;
 
     // offset 上界：按 UTF-16 code unit（与前端 JS String index 对齐）
     let content_utf16_len = item.content.encode_utf16().count() as i64;
@@ -121,12 +121,12 @@ pub async fn create_annotation(
 
     // 单条目批注数上限
     let existing = vault.store().count_annotations(&body.item_id).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Internal(e.to_string())
     })?;
     if existing >= MAX_ANNOTATIONS_PER_ITEM {
-        return Err((StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({
-            "error": format!("annotation limit {MAX_ANNOTATIONS_PER_ITEM} reached for this item")
-        }))));
+        return Err(AppError::TooManyRequests(format!(
+            "annotation limit {MAX_ANNOTATIONS_PER_ITEM} reached for this item"
+        )));
     }
 
     let input = AnnotationInput {
@@ -139,7 +139,7 @@ pub async fn create_annotation(
         source: body.source,
     };
     let id = vault.store().create_annotation(&dek, &body.item_id, &input).map_err(|e| {
-        (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Unprocessable(e.to_string())
     })?;
 
     // v0.7 自学习闭环 Phase B hook 3：annotation_marker 信号喂 skill_evolution。
@@ -158,16 +158,16 @@ pub async fn create_annotation(
 pub async fn list_annotations(
     State(state): State<SharedState>,
     Query(q): Query<ListAnnotationsQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     if q.item_id.len() > 64 {
         return Err(bad_request("item_id too long"));
     }
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
     let anns = vault.store().list_annotations(&dek, &q.item_id).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Internal(e.to_string())
     })?;
     Ok(Json(serde_json::json!({"annotations": anns})))
 }
@@ -177,7 +177,7 @@ pub async fn update_annotation(
     State(state): State<SharedState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateAnnotationRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     if id.len() > 64 {
         return Err(bad_request("id too long"));
     }
@@ -190,7 +190,7 @@ pub async fn update_annotation(
 
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
 
     // 读现有记录以保留 offset/snippet（update 路径不接受改定位）
@@ -205,7 +205,7 @@ pub async fn update_annotation(
     };
 
     vault.store().update_annotation(&dek, &id, &input).map_err(|e| {
-        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::NotFound(e.to_string())
     })?;
 
     // 用户改批注（如 ⭐ 重点 → 🤔 存疑）是态度反转，evolver 应可见。
@@ -240,7 +240,7 @@ fn default_scope() -> String { "whole_item".to_string() }
 pub async fn ai_analyze(
     State(state): State<SharedState>,
     Json(body): Json<AiAnalyzeRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     // 1. 参数校验
     let angle = AiAngle::parse(&body.angle)
         .ok_or_else(|| bad_request("unknown angle (must be risk/outdated/highlights/questions)"))?;
@@ -255,12 +255,12 @@ pub async fn ai_analyze(
     let (item_content, llm_arc) = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let dek = vault.dek_db().map_err(|e| {
-            (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Forbidden(e.to_string())
         })?;
         let item = vault.store().get_item(&dek, &body.item_id).map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Internal(e.to_string())
         })?.ok_or_else(|| {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "item not found"})))
+            AppError::NotFound("item not found".into())
         })?;
         let llm = state.llm.lock().unwrap_or_else(|e| e.into_inner())
             .as_ref().cloned();
@@ -268,9 +268,9 @@ pub async fn ai_analyze(
     };
 
     let llm = llm_arc.ok_or_else(|| {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-            "error": "LLM not configured. Install Ollama or configure cloud provider in Settings."
-        })))
+        AppError::ServiceUnavailable(
+            "LLM not configured. Install Ollama or configure cloud provider in Settings.".into(),
+        )
     })?;
 
     // 3. 确定分析范围
@@ -303,25 +303,25 @@ pub async fn ai_analyze(
             angle,
         )
     }).await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("tokio join: {e}")}))))?
-    .map_err(|e| (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": format!("LLM error: {e}")}))))?;
+    .map_err(|e| AppError::Internal(format!("tokio join: {e}")))?
+    .map_err(|e| AppError::BadGateway(format!("LLM error: {e}")))?;
 
     // 5. 为每个 finding 创建 source='ai' 批注
     let label = angle.label_prefix().to_string();
     let color = angle.default_color().to_string();
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
 
     // TOCTOU 防御：步骤 2 释放锁后到此，item 可能被删。提前探测给 404，避免所有 INSERT
     // 因外键失败 + 返回 200 created_count=0 的歧义。
     if !vault.store().item_exists(&body.item_id).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Internal(e.to_string())
     })? {
-        return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "item was deleted during AI analysis"
-        }))));
+        return Err(AppError::NotFound(
+            "item was deleted during AI analysis".into(),
+        ));
     }
 
     let mut created_ids = Vec::with_capacity(findings.len());
@@ -371,19 +371,19 @@ fn substring_by_utf16(s: &str, start: usize, end: usize) -> String {
 pub async fn delete_annotation(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     if id.len() > 64 {
         return Err(bad_request("id too long"));
     }
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
     // 先取 item_id 用于信号；再删。撤回批注（如撤掉之前的 ⭐）也是
     // evolver 必要的负向信号（防止单方面累积"重点"权重导致 search 偏倚）。
     let item_id_for_signal = vault.store().get_annotation_item_id(&id).ok().flatten();
     vault.store().delete_annotation(&id).map_err(|e| {
-        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::NotFound(e.to_string())
     })?;
     if let Some(item_id) = item_id_for_signal {
         if let Err(e) = vault.store().record_signal_event("annotation_marker", &item_id, Some("deleted")) {
