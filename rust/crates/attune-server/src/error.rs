@@ -81,12 +81,30 @@ pub enum AppError {
     /// error. 客户端不应特殊处理, 显示通用 "服务器内部错误" 即可.
     #[error("{0}")]
     Internal(String),
+
+    /// 结构化错误 (Option 2, 2026-06-04 B4) — 携带 `error` 之外额外字段的响应
+    /// (backpressure `retry_after_seconds` / agent `code`+`message`+`agent_id` /
+    /// `hint`). `body` 原样作为响应体, `status` 原样 → wire 字节级保持, 让 rich-error
+    /// tuple 也能统一走 AppError 而不丢任何字段. 用 `AppError::detailed(status, body)`
+    /// 构造.
+    #[error("{status}")]
+    Detailed {
+        status: StatusCode,
+        body: serde_json::Value,
+    },
 }
 
 impl AppError {
+    /// 构造结构化错误 (携带额外字段, wire 字节级保持). 见 `Detailed` variant.
+    pub fn detailed(status: StatusCode, body: serde_json::Value) -> Self {
+        AppError::Detailed { status, body }
+    }
+
     /// 将 AppError 映射到 HTTP status + 稳定 code 字符串 (客户端契约).
+    /// `Detailed` 由 `into_response` 短路处理, 不经此函数 (此 arm 仅为穷尽性).
     fn parts(&self) -> (StatusCode, &'static str) {
         match self {
+            AppError::Detailed { status, .. } => (*status, "detailed"),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad-request"),
             AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
             AppError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
@@ -105,6 +123,10 @@ impl AppError {
 /// 统一 IntoResponse: HTTP status + `{"error": msg, "code": kebab}` shape.
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // Detailed 原样输出 body (wire 字节级保持), 不套 {"error","code"} shape.
+        if let AppError::Detailed { status, body } = self {
+            return (status, Json(body)).into_response();
+        }
         let (status, code) = self.parts();
         let msg = self.to_string();
         (status, Json(json!({"error": msg, "code": code}))).into_response()
@@ -213,5 +235,23 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"], "message too long"); // 精确相等, 非 contains
         assert_eq!(v["code"], "bad-request");
+    }
+
+    /// Detailed 契约 (Option 2): status + body 原样输出, wire 字节级保持.
+    /// 用于迁移 rich-error tuple (backpressure retry 信号 / agent 结构化拒绝)
+    /// 不丢任何额外字段.
+    #[tokio::test]
+    async fn detailed_preserves_status_and_full_body() {
+        let original = json!({
+            "error": "embedding queue backpressure",
+            "pending_embeddings": 12000,
+            "retry_after_seconds": 30,
+        });
+        let resp = AppError::detailed(StatusCode::SERVICE_UNAVAILABLE, original.clone())
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, original); // 整个 body 字节级一致 (含额外字段)
     }
 }
