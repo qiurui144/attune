@@ -19,6 +19,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
 /// 默认 cloud accounts base URL (生产 SaaS endpoint)
@@ -44,11 +45,18 @@ fn cloud_url(req: &DSARCredentialsReq) -> String {
         .unwrap_or_else(|| DEFAULT_CLOUD_URL.to_string())
 }
 
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({"error": msg.into()})))
+fn err(status: StatusCode, msg: impl Into<String>) -> AppError {
+    let m = msg.into();
+    match status {
+        StatusCode::BAD_REQUEST => AppError::BadRequest(m),
+        StatusCode::UNAUTHORIZED => AppError::Unauthorized(m),
+        StatusCode::FORBIDDEN => AppError::Forbidden(m),
+        StatusCode::BAD_GATEWAY => AppError::BadGateway(m),
+        _ => AppError::detailed(status, serde_json::json!({"error": m})),
+    }
 }
 
-fn validate(req: &DSARCredentialsReq) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+fn validate(req: &DSARCredentialsReq) -> Result<(), AppError> {
     if req.email.trim().is_empty() || req.password.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "email/password required"));
     }
@@ -56,7 +64,7 @@ fn validate(req: &DSARCredentialsReq) -> Result<(), (StatusCode, Json<serde_json
 }
 
 /// 内部 helper: 用密码登 cloud 拿 authenticated CloudClient.
-fn login_cloud(req: &DSARCredentialsReq) -> Result<CloudClient, (StatusCode, Json<serde_json::Value>)> {
+fn login_cloud(req: &DSARCredentialsReq) -> Result<CloudClient, AppError> {
     let url = cloud_url(req);
     let mut client = CloudClient::new(url);
     client
@@ -72,7 +80,7 @@ fn login_cloud(req: &DSARCredentialsReq) -> Result<CloudClient, (StatusCode, Jso
 pub async fn export_data(
     State(_state): State<SharedState>,
     Json(req): Json<DSARCredentialsReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     validate(&req)?;
     let client = login_cloud(&req)?;
     let body = client
@@ -94,7 +102,7 @@ pub async fn export_data(
 pub async fn delete_account(
     State(_state): State<SharedState>,
     Json(req): Json<DSARCredentialsReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     validate(&req)?;
     let client = login_cloud(&req)?;
     let body = client
@@ -119,19 +127,13 @@ pub async fn delete_account(
 pub async fn cancel_deletion(
     State(_state): State<SharedState>,
     Json(req): Json<DSARCredentialsReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     validate(&req)?;
-    let client = login_cloud(&req).map_err(|(_status, body)| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "error": format!(
-                    "login refused (likely already soft-deleted; cancel-deletion must be \
-                     issued from the same session that triggered the deletion): {}",
-                    body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown")
-                )
-            })),
-        )
+    let client = login_cloud(&req).map_err(|e| {
+        AppError::Forbidden(format!(
+            "login refused (likely already soft-deleted; cancel-deletion must be \
+             issued from the same session that triggered the deletion): {e}"
+        ))
     })?;
     let body = client
         .dsar_cancel_deletion()

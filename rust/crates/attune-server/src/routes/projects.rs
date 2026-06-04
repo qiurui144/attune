@@ -20,6 +20,7 @@ use attune_core::store::{Project, ProjectFile, ProjectTimelineEntry};
 use attune_core::vault::VaultState;
 use serde::{Deserialize, Serialize};
 
+use crate::error::AppError;
 use crate::state::SharedState;
 
 #[derive(Debug, Deserialize)]
@@ -56,25 +57,19 @@ pub struct TimelineResponse {
     pub entries: Vec<ProjectTimelineEntry>,
 }
 
-fn vault_locked_error() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::FORBIDDEN,
-        Json(serde_json::json!({"error": "vault locked"})),
-    )
+fn vault_locked_error() -> AppError {
+    AppError::Forbidden("vault locked".into())
 }
 
-fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error": e.to_string()})),
-    )
+fn internal_error(e: impl std::fmt::Display) -> AppError {
+    AppError::Internal(e.to_string())
 }
 
 /// POST /api/v1/projects
 pub async fn create_project(
     State(state): State<SharedState>,
     Json(req): Json<CreateProjectRequest>,
-) -> Result<(StatusCode, Json<Project>), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(StatusCode, Json<Project>), AppError> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     if !matches!(vault.state(), VaultState::Unlocked) {
         return Err(vault_locked_error());
@@ -82,10 +77,7 @@ pub async fn create_project(
     let kind = req.kind.as_deref().unwrap_or("generic");
     let title = req.title.trim();
     if title.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "title required"})),
-        ));
+        return Err(AppError::BadRequest("title required".into()));
     }
     let p = vault
         .store()
@@ -98,7 +90,7 @@ pub async fn create_project(
 pub async fn list_projects(
     State(state): State<SharedState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Result<Json<ProjectListResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<ProjectListResponse>, AppError> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     if !matches!(vault.state(), VaultState::Unlocked) {
         return Err(vault_locked_error());
@@ -119,7 +111,7 @@ pub async fn list_projects(
 pub async fn get_project(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-) -> Result<Json<Project>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<Project>, AppError> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     if !matches!(vault.state(), VaultState::Unlocked) {
         return Err(vault_locked_error());
@@ -127,10 +119,7 @@ pub async fn get_project(
     let p = vault.store().get_project(&id).map_err(internal_error)?;
     match p {
         Some(p) => Ok(Json(p)),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "project not found"})),
-        )),
+        None => Err(AppError::NotFound("project not found".into())),
     }
 }
 
@@ -139,7 +128,7 @@ pub async fn add_file_to_project(
     State(state): State<SharedState>,
     Path(id): Path<String>,
     Json(req): Json<AddFileRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     if !matches!(vault.state(), VaultState::Unlocked) {
         return Err(vault_locked_error());
@@ -150,10 +139,7 @@ pub async fn add_file_to_project(
         .map_err(internal_error)?
         .is_some();
     if !exists {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "project not found"})),
-        ));
+        return Err(AppError::NotFound("project not found".into()));
     }
     let role = req.role.as_deref().unwrap_or("");
     vault
@@ -167,7 +153,7 @@ pub async fn add_file_to_project(
 pub async fn list_project_files(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-) -> Result<Json<FilesListResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<FilesListResponse>, AppError> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     if !matches!(vault.state(), VaultState::Unlocked) {
         return Err(vault_locked_error());
@@ -183,7 +169,7 @@ pub async fn list_project_files(
 pub async fn list_project_timeline(
     State(state): State<SharedState>,
     Path(id): Path<String>,
-) -> Result<Json<TimelineResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<TimelineResponse>, AppError> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     if !matches!(vault.state(), VaultState::Unlocked) {
         return Err(vault_locked_error());
