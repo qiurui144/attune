@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 use attune_core::ingest::{ingest_document, IngestOutcome, RawDocument, SourceKind};
 
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
 #[derive(Deserialize)]
@@ -34,37 +35,39 @@ const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
 pub async fn ingest(
     State(state): State<SharedState>,
     Json(body): Json<IngestRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     if body.title.len() > MAX_INGEST_TITLE {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": format!("title too long (max {MAX_INGEST_TITLE} bytes)")})),
-        ));
+        return Err(AppError::PayloadTooLarge(format!(
+            "title too long (max {MAX_INGEST_TITLE} bytes)"
+        )));
     }
     if body.content.len() > MAX_INGEST_CONTENT {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": format!("content too large: {} bytes (max {MAX_INGEST_CONTENT})", body.content.len())})),
-        ));
+        return Err(AppError::PayloadTooLarge(format!(
+            "content too large: {} bytes (max {MAX_INGEST_CONTENT})",
+            body.content.len()
+        )));
     }
-    let vault = state.vault.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     // OSS-S15 fix: 检查 embedding 队列深度，超阈值返回 503 强制 backpressure
     if let Ok(pending) = vault.store().pending_count_by_type("embed") {
         if pending > EMBEDDING_QUEUE_BACKPRESSURE_LIMIT {
-            return Err((
+            // rich error: 携带 retry 信号字段, 走 Detailed 保持完整 body
+            return Err(AppError::detailed(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
+                serde_json::json!({
                     "error": format!("embedding queue backpressure ({pending} pending > {EMBEDDING_QUEUE_BACKPRESSURE_LIMIT} limit), retry later"),
                     "pending_embeddings": pending,
                     "retry_after_seconds": 30,
-                })),
+                }),
             ));
         }
     }
-    let dek = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
-    })?;
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
     // JSON ingest 的 content 已是纯文本 —— 包成 RawDocument 走统一 pipeline。
     // source_ref 用 url（缺失则用 title），让同源重复内容能命中 content_hash 短路。
@@ -84,19 +87,15 @@ pub async fn ingest(
         metadata: std::collections::HashMap::new(),
     };
 
-    let outcome = ingest_document(vault.store(), &dek, &raw).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
-    })?;
+    let outcome = ingest_document(vault.store(), &dek, &raw)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let (id, chunks_queued) = match &outcome {
         IngestOutcome::Inserted { item_id, chunks_enqueued } => (item_id.clone(), *chunks_enqueued),
         IngestOutcome::Duplicate { item_id } => (item_id.clone(), 0),
         IngestOutcome::Updated { item_id, .. } => (item_id.clone(), 0),
         IngestOutcome::Skipped { reason } => {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({"error": reason})),
-            ));
+            return Err(AppError::Unprocessable(reason.clone()));
         }
     };
 
