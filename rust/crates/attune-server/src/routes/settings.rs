@@ -1,21 +1,22 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use attune_core::llm_settings::SETTINGS_META_KEY as SETTINGS_KEY;
 
 pub async fn get_settings(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let recommended_summary = state.hardware.recommended_summary_model();
     let form_factor = state.hardware.form_factor;
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
 
     let settings = vault.store().get_meta(SETTINGS_KEY)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let mut json: serde_json::Value = match settings {
         Some(data) => serde_json::from_slice(&data)
@@ -190,17 +191,17 @@ fn redact_api_key(json: &mut serde_json::Value) {
 pub async fn update_settings(
     State(state): State<SharedState>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let recommended_summary = state.hardware.recommended_summary_model();
     let form_factor = state.hardware.form_factor;
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
 
     // Merge with existing settings
     let existing = vault.store().get_meta(SETTINGS_KEY)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let mut current: serde_json::Value = match existing {
         Some(data) => serde_json::from_slice(&data)
@@ -223,19 +224,16 @@ pub async fn update_settings(
     // v1.0.6 Privacy Logic: telemetry 必须通过 isolation patch 切换,
     // 不允许搭车其他 settings update (防 buggy UI / 第三方 plugin piggyback)
     if !is_telemetry_path_allowed(&body) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "telemetry-must-be-isolated"})),
-        ));
+        return Err(AppError::BadRequest("telemetry-must-be-isolated".into()));
     }
     // URL 字段白名单 scheme 校验（防 javascript: / data: 注入成 XSS 种子）
     if let Some(body_obj) = body.as_object() {
         if let Some(llm_obj) = body_obj.get("llm").and_then(|v| v.as_object()) {
             if let Some(ep) = llm_obj.get("endpoint").and_then(|v| v.as_str()) {
                 if !ep.is_empty() && !is_safe_http_url(ep) {
-                    return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                        "error": "llm.endpoint must be http:// or https:// URL"
-                    }))));
+                    return Err(AppError::BadRequest(
+                        "llm.endpoint must be http:// or https:// URL".into(),
+                    ));
                 }
             }
         }
@@ -243,9 +241,9 @@ pub async fn update_settings(
             if let Some(bp) = ws_obj.get("browser_path").and_then(|v| v.as_str()) {
                 // 浏览器路径是文件路径，不是 URL；但不允许以 - 开头（防 argv 注入）
                 if bp.starts_with('-') {
-                    return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                        "error": "web_search.browser_path cannot start with '-' (argv injection risk)"
-                    }))));
+                    return Err(AppError::BadRequest(
+                        "web_search.browser_path cannot start with '-' (argv injection risk)".into(),
+                    ));
                 }
             }
         }
@@ -256,9 +254,9 @@ pub async fn update_settings(
         if let Some(summary) = body_obj.get("summary").and_then(|v| v.as_str()) {
             const SUMMARY_MODES: &[&str] = &["off", "local", "cloud"];
             if !SUMMARY_MODES.contains(&summary) {
-                return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                    "error": "summary must be one of: off / local / cloud"
-                }))));
+                return Err(AppError::BadRequest(
+                    "summary must be one of: off / local / cloud".into(),
+                ));
             }
         }
         // Sprint 2 Skills Router: 校验 skills.disabled 必须是 string[]
@@ -266,9 +264,9 @@ pub async fn update_settings(
             if let Some(d) = skills_obj.get("disabled") {
                 let arr_ok = d.as_array().map(|arr| arr.iter().all(|x| x.is_string())).unwrap_or(false);
                 if !arr_ok {
-                    return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                        "error": "skills.disabled must be an array of strings"
-                    }))));
+                    return Err(AppError::BadRequest(
+                        "skills.disabled must be an array of strings".into(),
+                    ));
                 }
             }
         }
@@ -276,11 +274,11 @@ pub async fn update_settings(
         if let Some(ocr_obj) = body_obj.get("ocr").and_then(|v| v.as_object()) {
             if let Some(prof) = ocr_obj.get("active_profile").and_then(|v| v.as_str()) {
                 let reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
                 if reg.get(prof).is_none() {
-                    return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                        "error": format!("ocr.active_profile '{prof}' 不存在 (用 GET /api/v1/ocr/profiles 查看可用 id)")
-                    }))));
+                    return Err(AppError::BadRequest(format!(
+                        "ocr.active_profile '{prof}' 不存在 (用 GET /api/v1/ocr/profiles 查看可用 id)"
+                    )));
                 }
             }
         }
@@ -288,23 +286,23 @@ pub async fn update_settings(
 
     // 全字段校验:所有设置保存前必须有效(URL scheme / 枚举 / 数值范围),拒绝静默接受无效值。
     if let Err(msg) = validate_settings_fields(&body) {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
+        return Err(AppError::detailed(StatusCode::BAD_REQUEST, serde_json::json!({
             "error": msg, "code": "invalid-setting"
-        }))));
+        })));
     }
 
     // SettingsLocks enforce — 会员锁定字段拒绝更新.
     let member_state = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let locks = attune_core::member_session::SettingsLocks::for_state(&member_state);
     if let Some(violation) = check_settings_locks(&body, &locks) {
-        return Err((
+        return Err(AppError::detailed(
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "setting_locked_by_member_tier",
                 "field": violation.settings_key,
                 "lock_reason": format!("'{}' is locked under current membership tier", violation.lock_field),
                 "hint": "请升级会员或在「设置 → 会员」查看锁定矩阵",
-            })),
+            }),
         ));
     }
 
@@ -332,9 +330,9 @@ pub async fn update_settings(
     }
 
     let data = serde_json::to_vec(&current)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     vault.store().set_meta(SETTINGS_KEY, &data)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     // 准备热切参数（仍持 vault lock），值复制完释放再触发 reload，避免死锁
     let pluginhub_url = body.get("pluginhub").and_then(|_| {
