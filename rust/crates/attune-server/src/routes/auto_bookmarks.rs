@@ -10,7 +10,8 @@ use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::routes::errors::{internal, vault_locked, RouteError};
+use crate::routes::errors::{internal, vault_locked};
+use crate::error::AppResult;
 use crate::state::SharedState;
 
 #[derive(Deserialize)]
@@ -28,7 +29,7 @@ fn default_limit() -> usize {
 pub async fn list(
     State(state): State<SharedState>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<serde_json::Value>, RouteError> {
+) -> AppResult<Json<serde_json::Value>> {
     let limit = q.limit.min(200);
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|_| vault_locked())?;
@@ -68,7 +69,7 @@ pub async fn list(
 /// 注意：不清 items 表 — 用户应另走 items.delete 删 promote 后的真实条目
 pub async fn delete(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, RouteError> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|_| vault_locked())?;
     let n = vault

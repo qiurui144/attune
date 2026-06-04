@@ -11,7 +11,8 @@ use axum::response::Response;
 use axum::Json;
 use serde::Deserialize;
 
-use crate::routes::errors::{internal, vault_locked, RouteError};
+use crate::routes::errors::{internal, vault_locked};
+use crate::error::AppResult;
 use crate::state::SharedState;
 
 #[derive(Deserialize)]
@@ -43,7 +44,7 @@ pub struct ExportQuery {
 pub async fn list(
     State(state): State<SharedState>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<serde_json::Value>, RouteError> {
+) -> AppResult<Json<serde_json::Value>> {
     let limit = q.limit.min(10_000);
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|_| vault_locked())?;
@@ -63,7 +64,7 @@ pub async fn list(
 pub async fn export_csv(
     State(state): State<SharedState>,
     Query(q): Query<ExportQuery>,
-) -> Result<Response, RouteError> {
+) -> AppResult<Response> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|_| vault_locked())?;
 
@@ -122,7 +123,7 @@ pub struct LogExportQuery {
 pub async fn list_log(
     State(state): State<SharedState>,
     Query(q): Query<LogListQuery>,
-) -> Result<Json<serde_json::Value>, RouteError> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|_| vault_locked())?;
 
@@ -144,7 +145,7 @@ pub async fn list_log(
 pub async fn export_log_csv(
     State(state): State<SharedState>,
     Query(q): Query<LogExportQuery>,
-) -> Result<Response, RouteError> {
+) -> AppResult<Response> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|_| vault_locked())?;
 

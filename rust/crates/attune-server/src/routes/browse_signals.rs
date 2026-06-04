@@ -5,13 +5,13 @@
 //! 路径设计：批量收以减少 HTTP 调用次数（每 30s 一次最多 50 条）。
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
 use attune_core::store::browse_signals::BrowseSignalInput;
 
 use crate::state::SharedState;
+use crate::error::{AppError, AppResult};
 
 const MAX_BATCH_SIZE: usize = 50;
 
@@ -38,17 +38,14 @@ pub struct DeleteQuery {
 pub async fn record_batch(
     State(state): State<SharedState>,
     Json(body): Json<BrowseSignalsBatch>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     if body.signals.is_empty() {
         return Ok(Json(serde_json::json!({"recorded": 0, "high_engagement": 0})));
     }
     if body.signals.len() > MAX_BATCH_SIZE {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({
-                "error": format!("batch too large (max {MAX_BATCH_SIZE})")
-            })),
-        ));
+        return Err(AppError::PayloadTooLarge(format!(
+            "batch too large (max {MAX_BATCH_SIZE})"
+        )));
     }
 
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
@@ -137,7 +134,7 @@ pub async fn record_batch(
 pub async fn list(
     State(state): State<SharedState>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let limit = q.limit.min(200);
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault
@@ -158,7 +155,7 @@ pub async fn list(
 pub async fn delete(
     State(state): State<SharedState>,
     Query(q): Query<DeleteQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault
         .dek_db()

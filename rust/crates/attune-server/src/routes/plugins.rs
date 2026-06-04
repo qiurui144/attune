@@ -3,7 +3,8 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use crate::routes::errors::{internal, vault_locked, RouteError};
+use crate::routes::errors::{internal, vault_locked};
+use crate::error::AppResult;
 use crate::state::SharedState;
 use attune_core::taxonomy::Taxonomy;
 
@@ -38,7 +39,7 @@ fn load_disabled_plugin_ids(state: &SharedState) -> Vec<String> {
 /// GET /api/v1/plugins — 列出所有可用插件（内置 taxonomy + plugin_registry 装载）+ enabled 状态
 pub async fn list(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, RouteError> {
+) -> AppResult<Json<serde_json::Value>> {
     let disabled = load_disabled_plugin_ids(&state);
     let is_enabled = |id: &str| !disabled.iter().any(|d| d == id);
 
@@ -128,7 +129,7 @@ pub async fn list(
 pub async fn toggle(
     State(state): State<SharedState>,
     Path(plugin_id): Path<String>,
-) -> Result<Json<serde_json::Value>, RouteError> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|_| vault_locked())?;
 
