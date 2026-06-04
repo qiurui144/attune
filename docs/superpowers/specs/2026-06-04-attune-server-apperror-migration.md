@@ -174,3 +174,24 @@ route handler (新)  -> AppResult<Json<T>>
 - **Option 3**:B4 收益小于预期 → 降级,资源投其他 backlog(B3/B5)。
 
 Task 0 基础设施(429 + Option B)无论选哪个都已落地, 不浪费。
+
+## ⚠ 实施发现 2 (2026-06-04, 用户选 Option 2 后)
+
+**Task 0b 完成**:AppError 加 `Detailed { status, body }` variant + 构造器 + 字节保持测试(commit e6941b3)。rich-error 现可统一走 AppError。
+
+**ingest + upload 已迁(commit 870776f)**:7+10 site,backpressure rich → Detailed。
+
+**发现 attune-server 实有三套错误约定**(不止 tuple vs AppError):
+1. **naive leaky tuple**(~120 处):`(INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))` —— 把内部 error 详情上 wire(items/upload/ingest/...)。
+2. **安全意识 helper** `routes/errors.rs`(9 文件:agents/audit/auto_bookmarks/browse_signals/demo/plugins/profile/web_search_cache):
+   - `internal(scope, e)`:log e 内部, wire 只返通用 "internal server error"(防 crypto/path fingerprinting)。
+   - `vault_locked()`:统一 403 "vault locked or unavailable"(不分锁定/dek 失败)。
+   - `bad_request(msg)`:user-facing。
+   - 返回类型 `RouteError = (StatusCode, Json<Value>)`。
+3. **AppError**(4 文件:email/rss/git/status)。
+
+**Option 2 统一路径(更新)**:
+- **把 errors.rs helper 改成返回 AppError**(保留安全行为):`internal()` 仍 log e + 返 `AppError::Internal("internal server error")`(通用消息 + 加 code);`vault_locked()` → `AppError::Forbidden("vault locked or unavailable")`;`bad_request()` → `AppError::BadRequest`。→ 一举统一第 2 套, helper-using 文件只需改签名(helper 调用不变)。**零 wire 行为变更**(通用消息保留 + 加 code)。
+- errors.rs helper 改返回类型 = 跨文件原子变更(helper + 9 文件签名一起改, 一个 commit 保持 build 绿)。
+
+**B4 实际规模 = 统一三套错误约定**, 比 audit "机械迁 tuple" 大。已绿提交链:Task0 f97183a → Task0b e6941b3 → ingest/upload 870776f。**剩余**:errors.rs helper 统一(+9 文件)+ ~18 个 naive tuple 文件(items 20+/annotations 22/classify 18/settings/clusters/chat/vault/...)。
