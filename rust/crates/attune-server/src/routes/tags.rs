@@ -1,16 +1,16 @@
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::Json;
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
 /// GET /api/v1/tags — 所有维度的聚合统计（不含 entities）
 pub async fn all_dimensions(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let tag_index = state.tag_index.lock().unwrap_or_else(|e| e.into_inner());
     let index = match tag_index.as_ref() {
         Some(i) => i,
-        None => return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "vault locked or tag index unavailable"})))),
+        None => return Err(AppError::Forbidden("vault locked or tag index unavailable".into())),
     };
 
     let dims = index.all_dimensions();
@@ -31,11 +31,11 @@ pub async fn all_dimensions(
 pub async fn dimension_histogram(
     State(state): State<SharedState>,
     Path(dimension): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let tag_index = state.tag_index.lock().unwrap_or_else(|e| e.into_inner());
     let index = match tag_index.as_ref() {
         Some(i) => i,
-        None => return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "vault locked or tag index unavailable"})))),
+        None => return Err(AppError::Forbidden("vault locked or tag index unavailable".into())),
     };
     let hist = index.histogram(&dimension);
     let values: Vec<serde_json::Value> = hist.into_iter()

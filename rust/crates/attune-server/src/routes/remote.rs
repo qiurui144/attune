@@ -1,7 +1,7 @@
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use attune_core::scanner_webdav::WebDavConfig;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
@@ -27,11 +27,10 @@ fn default_depth() -> u32 {
 pub async fn bind_remote(
     State(state): State<SharedState>,
     Json(body): Json<BindRemoteRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     if body.depth > 2 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "depth must be <= 2 to prevent runaway directory traversal"})),
+        return Err(AppError::BadRequest(
+            "depth must be <= 2 to prevent runaway directory traversal".into(),
         ));
     }
     let config = WebDavConfig {
@@ -44,30 +43,22 @@ pub async fn bind_remote(
     // 创建/复用 bound_dirs 记录（webdav: 前缀标记远程目录）。
     let dir_id = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = vault.dek_db().map_err(|e| {
-            (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
+        let _ = vault
+            .dek_db()
+            .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
         vault
             .store()
             .bind_directory(&format!("webdav:{}", body.url), false, &["md", "txt"])
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": e.to_string()})),
-                )
-            })?
+            .map_err(|e| AppError::Internal(e.to_string()))?
     };
 
     // 决策 4：落库加密 remote 配置，让周期 worker 能读回凭据自动重扫。
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let dek = vault.dek_db().map_err(|e| {
-            (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
-        })?;
+        let dek = vault
+            .dek_db()
+            .map_err(|e| AppError::Forbidden(e.to_string()))?;
         let input = attune_core::store::webdav_remotes::WebDavRemoteInput {
             dir_id: dir_id.clone(),
             url: body.url.clone(),
@@ -77,10 +68,7 @@ pub async fn bind_remote(
             corpus_domain: body.corpus_domain.clone().unwrap_or_else(|| "general".into()),
         };
         if let Err(e) = vault.store().upsert_webdav_remote(&dek, &input) {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("persist webdav remote: {e}")})),
-            ));
+            return Err(AppError::Internal(format!("persist webdav remote: {e}")));
         }
     }
 
@@ -92,18 +80,8 @@ pub async fn bind_remote(
         crate::ingest_webdav::sync_webdav_dir(&state_clone, &dir_id_clone, config, &corpus_domain)
     })
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-    })?;
+    .map_err(|e| AppError::Internal(e.to_string()))?
+    .map_err(AppError::Internal)?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
