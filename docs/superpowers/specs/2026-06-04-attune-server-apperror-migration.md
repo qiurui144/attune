@@ -194,4 +194,22 @@ Task 0 基础设施(429 + Option B)无论选哪个都已落地, 不浪费。
 - **把 errors.rs helper 改成返回 AppError**(保留安全行为):`internal()` 仍 log e + 返 `AppError::Internal("internal server error")`(通用消息 + 加 code);`vault_locked()` → `AppError::Forbidden("vault locked or unavailable")`;`bad_request()` → `AppError::BadRequest`。→ 一举统一第 2 套, helper-using 文件只需改签名(helper 调用不变)。**零 wire 行为变更**(通用消息保留 + 加 code)。
 - errors.rs helper 改返回类型 = 跨文件原子变更(helper + 9 文件签名一起改, 一个 commit 保持 build 绿)。
 
-**B4 实际规模 = 统一三套错误约定**, 比 audit "机械迁 tuple" 大。已绿提交链:Task0 f97183a → Task0b e6941b3 → ingest/upload 870776f。**剩余**:errors.rs helper 统一(+9 文件)+ ~18 个 naive tuple 文件(items 20+/annotations 22/classify 18/settings/clusters/chat/vault/...)。
+**B4 实际规模 = 统一三套错误约定**, 比 audit "机械迁 tuple" 大。
+
+## 进度 (2026-06-04, develop @ ca140a8, 全绿 + 已推)
+
+**已迁移 19 文件 + 基础设施**(每文件独立 commit, status 逐一保持, 108 lib 测试过 + clippy 干净):
+- 基础: error.rs(TooManyRequests + Option B 去前缀 + Detailed variant)f97183a/e6941b3
+- errors.rs 三套约定统一 + 8 helper-using 文件(agents/audit/auto_bookmarks/browse_signals/demo/plugins/profile/web_search_cache)a88cb38
+- ingest/upload(backpressure→Detailed)870776f · tags/feedback/remote 025bcd5 · dsar/chat_sessions/projects db28486 · behavior f34abd8 · vault ca140a8
+
+**§7 carve-out(2 文件有意保留, bespoke 契约不套 AppError)**:
+- `git.rs`: domain prefix→status+透传 code 系统(doc 注释明示与 AppError 分离), 测试耦合 tuple `.0`。
+- `marketplace.rs`: `(StatusCode, String)` text/plain 响应 + install_plugin 8 处 rich, 迁移会改 content-type。
+
+**剩余 6 文件(careful 续作, 含 rich-error 需逐 site 分类 → Detailed, 非纯机械)**:
+- `chat.rs`(1540 行, ApiError 别名, 混合 uniform + rich: hint/code llm-rate-limited/sensitive-evidence 等)
+- `clusters.rs`(13, hint→Detailed) · `settings.rs`(13, code→Detailed) · `classify.rs`(18, hint→Detailed)
+- `annotations.rs`(22, 含 429 TooManyRequests) · `items.rs`(38, 最大)
+
+续作 recipe 已固化(§迁移 Recipe + 映射表 + Detailed for rich)。基础设施(Detailed/Option B/errors.rs 统一)已就位, 剩余文件按 recipe + 逐 site uniform/rich 分类推进。
