@@ -32,45 +32,54 @@ use thiserror::Error;
 /// 可读 code (kebab-case, 稳定字符串, 用于客户端定向处理).
 #[derive(Debug, Error)]
 pub enum AppError {
+    // Option B (2026-06-04 B4): Display == 原始内层 message, 不含类别前缀.
+    // 类别由 IntoResponse 的 `code` 字段承载 (parts()). 这样旧 tuple route 迁移
+    // 到 AppError 时 wire `error` 文本保持不变 (纯加性: 只多了 code 字段).
+    // 类别信息在日志侧由 #[derive(Debug)] 的 variant 名保留.
+
     /// 400 Bad Request — 输入校验失败 / 参数错误 / 路径不合法.
-    #[error("bad request: {0}")]
+    #[error("{0}")]
     BadRequest(String),
 
     /// 401 Unauthorized — 缺 token / 未登录 / vault 锁定 (需要解锁前置).
-    #[error("unauthorized: {0}")]
+    #[error("{0}")]
     Unauthorized(String),
 
     /// 403 Forbidden — 有 token 但无权限 (membership tier 不够 / plugin 未购买).
-    #[error("forbidden: {0}")]
+    #[error("{0}")]
     Forbidden(String),
 
     /// 404 Not Found — 资源不存在 (item id / project id / plugin slug).
-    #[error("not found: {0}")]
+    #[error("{0}")]
     NotFound(String),
 
     /// 409 Conflict — 资源已存在 / state 不匹配 (e.g. vault already initialized).
-    #[error("conflict: {0}")]
+    #[error("{0}")]
     Conflict(String),
 
     /// 413 Payload Too Large — 上传体积超限 (file upload / chat context).
-    #[error("payload too large: {0}")]
+    #[error("{0}")]
     PayloadTooLarge(String),
 
     /// 422 Unprocessable Entity — 语义校验失败 (输入合规但业务规则拒绝).
-    #[error("unprocessable: {0}")]
+    #[error("{0}")]
     Unprocessable(String),
 
+    /// 429 Too Many Requests — 速率限制 / 资源配额上限 (e.g. 单 item 批注数上限).
+    #[error("{0}")]
+    TooManyRequests(String),
+
     /// 502 Bad Gateway — 调上游服务 (Ollama / cloud accounts / plugin hub) 失败.
-    #[error("bad gateway: {0}")]
+    #[error("{0}")]
     BadGateway(String),
 
     /// 503 Service Unavailable — 系统组件初始化中 / 后台任务繁忙 / 资源不足.
-    #[error("service unavailable: {0}")]
+    #[error("{0}")]
     ServiceUnavailable(String),
 
     /// 500 Internal Server Error — fallback. 用于 anyhow / 未分类的 attune-core
     /// error. 客户端不应特殊处理, 显示通用 "服务器内部错误" 即可.
-    #[error("internal: {0}")]
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -85,6 +94,7 @@ impl AppError {
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             AppError::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload-too-large"),
             AppError::Unprocessable(_) => (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable"),
+            AppError::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "too-many-requests"),
             AppError::BadGateway(_) => (StatusCode::BAD_GATEWAY, "bad-gateway"),
             AppError::ServiceUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "service-unavailable"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
@@ -182,5 +192,26 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "perm");
         let app_err: AppError = io_err.into();
         assert!(matches!(app_err, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn too_many_requests_maps_to_429_with_code() {
+        let resp = AppError::TooManyRequests("rate limit".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["code"], "too-many-requests");
+        assert_eq!(v["error"], "rate limit");
+    }
+
+    /// Option B 契约: wire `error` 字段是原始 message, 不带类别前缀
+    /// (类别由 `code` 承载). 防止迁移后客户端显示 "bad request: ..." 噪声.
+    #[tokio::test]
+    async fn wire_message_has_no_category_prefix() {
+        let resp = AppError::BadRequest("message too long".into()).into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "message too long"); // 精确相等, 非 contains
+        assert_eq!(v["code"], "bad-request");
     }
 }
