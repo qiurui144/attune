@@ -1,0 +1,56 @@
+# SDLC state SSOT — sprint oss-boundary-realignment
+schema_version: 1
+sprint_id: oss-boundary-realignment
+title: "OSS 边界归位 — patent 全栈迁出 + 行业 agent 声明/流/测试解耦"
+stack: rust
+created_utc8: 2026-06-01T19:45:00+08:00
+source_audit: reports/2026-06-01_audit-summary.md   # P0 两条
+
+# ── phase pointer ──
+phase: G1                      # G1 REJECT; awaiting human decision (redo / split / stop)
+status: gate_rejected
+
+transitions:
+  - phase_from: INIT
+    phase_to: SPEC_DRAFT
+    at_utc8: 2026-06-01T19:40:00+08:00
+    by: task-orchestrator
+
+  - phase_from: SPEC_DRAFT
+    phase_to: spec
+    at_utc8: 2026-06-01T19:45:00+08:00
+    by: spec-analyst
+    artifact_path: docs/superpowers/specs/2026-06-01-oss-boundary-realignment.md
+    artifact_sha: 938ae56079dfdc87a4d80e07b949b2130e3f8913
+    artifact_lines: 503
+    self_score: { overall: 5.0, weak_points: none }   # 偏乐观, 被 G1 证伪
+
+  - phase_from: spec
+    phase_to: G1
+    at_utc8: 2026-06-01T20:00:00+08:00
+    by: architect            # G1 Challenger (independent)
+    gate: G1
+    verdict: REJECT
+    rubric_e1:
+      scope_clarity: 2       # 致命: §4 只列 6 测试文件, 实测 ≥16-18; 漏列 registry/scheduler/governor/flow_runner tests
+      test_matrix: 3
+      risk_register: 3
+      migration_path: 4
+      cost_contract: 4
+      overall: 3.2           # < 4 全项门槛; scope=2 致命
+    self_score_drift: -1.8   # architect 3.2 vs spec-analyst 5.0; scope 单项 drift -3 → 升旗
+    grounding_verified:
+      patent_hard_delete_safe: true     # routes/patent.rs + scanner_patent.rs 自包含, extension 0 调用, 无专属 schema
+      case_metadata_defer_ok: true      # 无通用 runtime 硬依赖
+      legal_defamation_is_fixture: true # ⭐ 织进 registry/tests.rs:102-122,412 + scheduler/tests.rs(7处) + governor/tests.rs:354-380 + flow_runner/tests.rs — load-bearing, 非注释
+      registry_test_is_semantic_redesign: true  # 断言"shipped 含哪些 paid agent", 删声明=断言意图失效, 非机械换 id
+    fatal_gaps:              # spec 必须修复后重交 G1
+      - "§4 模块表 + Appendix 补全漏列的 4 个 agent 子系统测试(registry/scheduler/governor/flow_runner tests), 逐个标注 机械换id vs 语义重设计"
+      - "修正 ≤12 文件 claim → 实测 ≥16-18 .rs/toml"
+      - "R4 拆分: R4a 机械换id(scheduler/telemetry, Low) + R4b 语义重设计(registry shipped-owner 断言, High残余), R4b mitigation 必须是'先设计 OSS-only 断言(仅6 oss-core)再删声明'"
+      - "§9 补 case: 验证 registry/tests.rs 重设计后断言'仅6 oss-core 无 paid'通过 + 明确 oss_agent_real_llm_gate.rs 处置"
+    split_signal: "patent 硬删干净(无 caller/schema/client) vs registry/flow/测试解耦脏(语义重设计) → 可考虑拆 2 minor"
+
+invariants:
+  oss_boundary: "零行业绑定; 行业全在 attune-pro"
+  cross_repo_dep: "patent 落 attune-pro/patent-pro = 外部前置; 本仓不读 attune-pro 私有仓"

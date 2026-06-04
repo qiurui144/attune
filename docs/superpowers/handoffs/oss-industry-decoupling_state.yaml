@@ -1,0 +1,52 @@
+# SDLC state SSOT — sprint oss-industry-decoupling (S4b)
+schema_version: 1
+sprint_id: oss-industry-decoupling
+title: "OSS 边界归位 S4b — 行业 agent 声明/流/测试解耦出 OSS SSOT(脏部分)"
+stack: rust
+created_utc8: 2026-06-02T07:30:00+08:00
+split_from: oss-boundary-realignment     # S4 G1 REJECT 后拆: S4a(patent 干净, 已 SHIPPED) + S4b(行业解耦脏)
+source_audit: reports/2026-06-01_audit-summary.md   # P0-2
+
+# ── phase pointer ──
+phase: G1                      # G1 REJECT ×2(同根因第3次复发: census 不全); 需换打法(穷尽 census)
+status: gate_rejected_x4_ESCALATE_HUMAN
+g1_reject_4_root_fix: "4 连 REJECT 同根因(census 非穷尽). architect 第4次给出机械根因+修法: gate==census 这次做对(byte-identical), 但 census 集合本身仍漏 — spec 挑选式分类, 超集正则实测命中 65.rs+2toml=67, spec 处置36+豁免~26<67 → 漏≥9处置(state_migration.rs 14处 law/tech-pro fixture + plugin_encryption.rs:96 paid定价fixture + 7 D5注释)+4豁免账目失踪. 根治: 每个 grep 命中逐条落表 TREATED(D1-D6)/EXEMPT(read判据) + 自校验等式 TREATED+EXEMPT==67(实测总命中). 此机械完整性检查是4连败缺的. 第5次 redo 必带此机械指令(不再挑选式)."
+escalate_decision: "4 reject 已 escalate human(用户 focus C2 中). 选项: (a)第5次 redo 带 sum==67 机械指令(大概率成) (b)承认 S4b 是大专项后续做. 待用户定."
+escalation: "3 连 REJECT 同根因(grep-census 不全, 每拓宽正则就冒新漏网: defamation→civil_loan→plugin_hub _builtin_plugins 付费目录). grep-猜不可靠 → 建议换打法: 先一次穷尽 census(全行业 token grep 跨所有 crate 含 leaf crate + 逐条 read 定真全集)再 spec, 而非迭代猜. plugin_hub.rs:106-164 _builtin_plugins() 是生产默认 provider 硬编码 law/patent/presales/tech-pro 付费目录+营销文案 = 重大泄漏, 与 registry.toml 同级"
+redo2_sha: d56414bacabb8dc0919e21a7ed19e26a8b6f39fa   # 第2版(修 F1/F2/F3) — 仍 REJECT(plugin_hub 第31漏网 + gate 正则不含 patent/presales)
+
+transitions:
+  - phase_from: SPEC_DRAFT
+    phase_to: spec
+    at_utc8: 2026-06-02T07:30:00+08:00
+    by: spec-analyst
+    artifact_path: docs/superpowers/specs/2026-06-01-oss-industry-decoupling.md
+    artifact_sha: 86f5c7700326d9ee9fa5691eb56ebf859a1dadab
+    self_score: { overall: 4.2 }   # 诚实, 但窄正则导致 census 不全
+    note: "实测 23 文件(比 S4 G1 估 16-18 多), D3 语义重设计 6 处识别精准(含 5 个 S4 漏列) — 主体质量高"
+
+  - phase_from: spec
+    phase_to: G1
+    at_utc8: 2026-06-02T08:30:00+08:00
+    by: architect            # G1 Challenger (独立, 跑更宽正则)
+    gate: G1
+    verdict: REJECT
+    rubric_e1: { scope_clarity: 3, risk_register: 4, test_matrix: 4, migration_path: 5, cost_contract: 5, overall: 4.2 }
+    self_score_drift: 0       # overall 持平掩盖 scope_clarity 单项 -1.2; scope 3<4 触发 hard rule
+    grounding_verified:
+      narrow_regex_23_classification_accurate: true   # D1-D5 主体分类正确
+      D3_6_semantic_redesign_correct: true            # 含 S4 漏的 flow/tests.rs/mod.rs/cli-smoke/acp5-wire, load-bearing 确认
+      runtime_not_broken: true                        # state.rs:208-219 graceful None, 删声明 runtime 一行不改
+      case_metadata_2_refs_only: true
+      R4a_R4b_order_correct: true                     # 先 D3 改断言再 D1 删声明
+      census_NOT_complete: false                      # ❌ 23 非全集
+    fatal_gaps:              # spec redo 必修(同 S4 失败模式: 窄grep漏维度)
+      - "F1: lib.rs:172 生产注释 law-pro 泄漏(// law-pro 接入阶段2...civil_loan_agent)未列入处置 — 与已列 D5 注释(chat.rs:195/scheduler.rs:209)同性质, 漏列. 修: 加 D5"
+      - "F2: civil_loan/case_kind plugin-protocol 层 5 文件(plugin_registry.rs:858-934/plugin_loader.rs:273/agent_runner.rs:141-242/generic_plugins_test.rs:7-12/forms.rs:45)用 law/civil_loan 作通用 plugin loader fixture/注释 — 未处置也未显式 scope-out. 修(二选一,§2写死): (a)判合法→显式豁免+判据(测通用协议非泄漏paid清单)+建议中性化 fixture(sample_agent/generic-case) (b)判泄漏→列 D5/D4. 撤回或重界定『23=全集』"
+      - "F3: §8/T6 grep gate 正则过窄(只 defamation|fact_extractor) → 0命中无法证明 civil_loan/lib.rs:172 已清. 修: gate 正则补 civil_loan(或显式注释豁免维度). R1『grep漏文件』mitigation 自相矛盾"
+    architect_note: "D1-D5 主体质量很高(6语义重设计正是S4缺的已补), REJECT 仅因『窄grep→自称全集』根因复发(换 civil_loan 维度). 修 3 gap + 拓宽 grep 后应 PASS"
+    report: agent stdout (architect 无 Write; 关键已录于此 handoff)
+
+invariants:
+  oss_boundary: "零行业绑定; 行业(law/patent/sales/civil_loan)全在 attune-pro; OSS census 须穷举所有行业 token 维度"
+  no_attune_pro_read: "OSS 只删声明; paid 实现在 attune-pro 私有仓(合法), 不读不改"

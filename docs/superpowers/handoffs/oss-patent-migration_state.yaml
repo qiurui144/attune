@@ -1,0 +1,101 @@
+# SDLC state SSOT — sprint oss-patent-migration (S4a)
+schema_version: 1
+sprint_id: oss-patent-migration
+title: "OSS 边界归位 S4a — patent 全栈硬删(干净部分)"
+stack: rust
+created_utc8: 2026-06-01T20:15:00+08:00
+split_from: oss-boundary-realignment     # S4 G1 REJECT 后拆: S4a(patent 干净) + S4b(行业解耦脏)
+source_audit: reports/2026-06-01_audit-summary.md   # P0-1
+
+# ── phase pointer ──
+phase: DONE                    # S4a squash-merged + pushed → origin/develop(40202ee); GitFlow-Lite refactor(GA tag 随下个 release)
+status: shipped                # 2026-06-02 pushed(首次 TLS 握手瞬态失败, retry 第2次成功); origin/develop 6b09eec..40202ee
+merge:
+  squash_commit: 40202ee
+  target: develop
+  diff: "9 文件 -545 LOC, 纯 patent, Cargo.lock/.gitignore 未混入(验证优先确认)"
+  feature_branch: "feature/oss-patent-migration 已删"
+  push_pending: "local develop 领先 origin/develop 4 commit(40202ee + 0dcf32e 1.2.0bump + fa6ba54 rename记录 + 1b177ec SSRF fix); push 待用户确认(捆绑 3 个 pre-existing)"
+g3_review:
+  verdict: PASS                 # pr-reviewer 两轮, 0 Critical/Important/Nit
+  diff: "净 -545 LOC (3+/548-), 9 文件, 4 commit 各单一删除单元"
+  r1: "删除完整(git grep PatentScanner=0残留) + scope严守(S4b未碰,--name-only验) + 保留标签在(corpus_domain/patent-pro 独立grep确认) + F1自洽(9变体/9arm/27行/all_27/注释9kinds) + match穷尽(无_通配)"
+  r2: "README EN+ZH USPTO行删 pro-framing保留双语齐; commit 1:1单一职责spec-cited; 删除无fix-regression"
+  nonblocking_flag: "working tree 有未提交 rust/Cargo.lock(1.1.0→1.2.0)+.gitignore+orchestrator scaffolding(.sdlc/等), 不在 committed diff; merge develop 时确保版本 bump 不悄混入"
+  report: reports/2026-06-01_review-S4a-patent-migration.md
+impl_note: "implementer agent ad668d 在 T5(cargo test --workspace) STALLED(600s stream-watchdog, 非代码错). T1-T4 commit 已落. T5 改由 orchestrator background Bash 重跑(TMPDIR→/data 护盘). 教训 [[feedback-attune-test-disk-tmpdir]]"
+T5_verified:               # orchestrator 亲跑真 runner(§6.2 R18), 非信 agent
+  clippy: "PASS — --workspace --all-targets -D warnings 干净(6 crate, 0 warning, 35.33s) → 删除无 dangling + lint 净"
+  grep_gate: "CLEAN — 0 patent exec ref(scanner_patent/routes::patent/PatentScanner/USPTO), corpus_domain/patent_pro 豁免"
+  F1: "PASS — profiles.rs:323 all_27_combinations_snapshot + :364 cases.len()==27 '3 profiles × 9 kinds'"
+  governor_tests: "PASS — resource_governor::profiles 6 passed 0 failed(1552 filtered)"
+  doc_tests: "ok(2 passed 0 failed)"
+  caveat: "全 --workspace runtime 计数被 tail 截断未存 + reranker 集成测试是 disk-bomb; 全套 runtime 留 RC releaser(§7.2 Gate2, TMPDIR→/data). 纯删除 sprint: 编译净+唯一行为改动(F1)过+grep 净 已足够进 G3"
+
+transitions:
+  - phase_from: INIT
+    phase_to: SPEC_DRAFT
+    at_utc8: 2026-06-01T20:05:00+08:00
+    by: task-orchestrator
+
+  - phase_from: SPEC_DRAFT
+    phase_to: spec
+    at_utc8: 2026-06-01T20:15:00+08:00
+    by: spec-analyst
+    artifact_path: docs/superpowers/specs/2026-06-01-oss-patent-migration.md
+    artifact_sha: 1f0a503b9b1ad4fca88e0c0226e19c10a6de22e9   # post-F1 amendment
+    artifact_lines: 416
+    self_score: { overall: 4.4, weak_points: ["wall-clock 无实证(改客观计数)", "纯删除 sprint 无新#[test](编译+grep gate 代偿)", "R4 触通用 governor"] }   # 诚实自评, 学到"5.0 无 weak"是黄旗
+
+  - phase_from: spec
+    phase_to: G1
+    at_utc8: 2026-06-01T20:25:00+08:00
+    by: architect            # G1 Challenger (independent)
+    gate: G1
+    verdict: REJECT_then_PASS_after_F1     # REJECT(单一致命 F1) → orchestrator 补 architect 逐字指定的 F1 → 满足"补 F1 即 PASS"
+    rubric_e1:
+      scope_clarity: 5
+      risk_register: 4
+      test_matrix: 4
+      migration_path: 5
+      cost_contract: 5
+      overall: 4.6
+    self_score_drift: +0.2   # architect 4.6 vs spec-analyst 4.4 — producer 不虚高, 健康校准方向, 无 flag
+    grounding_verified:       # 17 条逐一 file:line 核实
+      patent_2_routes_lib178_179: true
+      scanner_patent_self_contained: true       # patent.rs spawn_blocking 不调 governor
+      patentscanner_orphan_dead_label: true     # profiles.rs + governor_integration.rs:152 only
+      match_exhaustive_after_delete: true        # 删 variant+arm 后 match 仍穷尽, 编译安全 (G14)
+      governor_others_no_drift: true             # FileScanner/WebDavSync/... budget 不变 (G15)
+      cross_repo_not_blocking: true              # OSS 删除仓内闭环, 能力 gap 是 Pro 仓事 (G17)
+    fatal_gap_F1_resolved:
+      gap: "A.3 漏 profiles.rs:384 assert_eq!(cases.len(),30) + 测试名 all_30_combinations_snapshot + 注释 — 删 3 行后不改则 cargo test runtime RED (G13)"
+      fix_applied: "orchestrator 补进 spec §4 删除清单 + A.3 事实表(30→27 / 改名 / 注释 10→9 kinds), 逐字采用 architect F1"
+    non_blocking_recs:        # plan 阶段吸收
+      - "N1: README patent 行号 plan 内 grep 精确定位再删(双语两份都要)"
+      - "N3: governor_integration.rs:152 删后 :163 snap.len()==kinds.len() 自洽(kinds→9), 无第二处计数耦合 — 已核"
+
+  - phase_from: PLAN_DRAFT
+    phase_to: G2
+    at_utc8: 2026-06-01T20:45:00+08:00
+    by: task-orchestrator    # G2 structural gate (orchestrator ≠ plan writer)
+    gate: G2
+    verdict: PASS
+    verification: mechanical # grep/wc 机器核验, 非信 plan writer 自报(§6.2 R18)
+    artifact_path: docs/superpowers/plans/2026-06-01-oss-patent-migration.md
+    artifact_sha: bc750a27460446945789254f5b5d971f873b24e6
+    artifact_lines: 550
+    task_count: 5            # T1 删 route / T2 删 scanner / T3 删 PatentScanner+F1+N3 / T4 README双语 / T5 回归 gate
+    checks:
+      tasks_with_tdd_acceptance_tier: "5/5"
+      F1_in_T3_same_task: true   # 删 :359-362 3行 与 :384 断言30→27+测试改名+注释 同 task, 含 before/after, 防 cargo test RED
+      N1_readme_feature_vs_pro: true  # T4 删 feature 行 / 保留 pro-plugin 引用行
+      N3_governor_integration_self_consistent: true
+      scope_creep: none        # registry/flow/case_metadata 仅在排除语句; T1 acceptance 含 git show --stat 不含 S4b 文件
+    plan_self_score: { overall: 4.8, weak_points: ["T4 haiku-tier 临界(N1 判断负担转精确清单代偿)", "T5 grep gate 与 corpus_domain 重叠风险(收窄判据缓解)", "跨仓 R2 不可机器验(handoff RELEASE.md Known Limitations)"] }
+    model_tiers: { sonnet: [T1, T2, T3, T5], haiku: [T4] }
+
+invariants:
+  oss_boundary: "零行业绑定; patent 全栈移出 OSS"
+  cross_repo_dep: "patent 落 attune-pro/patent-pro = 外部前置; 本仓不读 attune-pro; OSS 删除不阻塞于此"
+  scope_locked: "只 patent 硬删; 不碰 registry/flow/case_metadata/agent测试解耦(=S4b); corpus_domain='patent' 数据标签保留"

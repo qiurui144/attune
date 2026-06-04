@@ -1,0 +1,105 @@
+# SDLC state SSOT — sprint rss-cloud-ingest-connectors
+# Updated after every phase transition by task-orchestrator (DRIVE mode).
+schema_version: 1
+sprint_id: rss-cloud-ingest-connectors
+title: "RSS feed connector 加固 + 云盘 (cloud-drive via rclone) ingest connector"
+stack: rust
+created_utc8: 2026-06-01T18:40:00+08:00
+
+# ── phase pointer ──
+phase: G2                      # spec(G1✓) + plan(G2✓) 完成; IMPL 未启动
+status: ON_HOLD                # 2026-06-01 用户 pivot: 先做 核心功能缺失 + 架构冗余 排查, RSS/云盘暂缓
+hold_reason: "用户决策 2026-06-01 G2 门: 在堆更多 connector 前先排查 (1)核心功能缺失 (2)架构冗余; spec+plan 成果保留, /sdlc:run 可从 G2 续 IMPL"
+
+# ── transitions log ──
+transitions:
+  - phase_from: INIT
+    phase_to: SPEC_DRAFT
+    at_utc8: 2026-06-01T18:25:00+08:00
+    by: task-orchestrator
+
+  - phase_from: SPEC_DRAFT
+    phase_to: spec
+    at_utc8: 2026-06-01T18:40:00+08:00
+    by: spec-analyst
+    artifact_path: docs/superpowers/specs/2026-06-01-rss-cloud-ingest-connectors.md
+    artifact_sha: 96dcc776b7b68aa866abf71368f3e68ec1cdf62a
+    artifact_lines: 443
+    sections: 11   # 0..11 + Appendix A grounding table, 0 TBD
+    self_score:
+      rubric: spec
+      scope_clarity: 5
+      risk_register: 5
+      test_matrix: 5
+      migration_path: 4
+      cost_contract: 5
+      overall: 4.8
+
+  - phase_from: spec
+    phase_to: G1
+    at_utc8: 2026-06-01T18:55:00+08:00
+    by: architect            # G1 Challenger (independent)
+    gate: G1
+    verdict: PASS
+    rubric_e1:
+      scope_clarity: 5
+      risk_register: 5
+      test_matrix: 4
+      migration_path: 5
+      cost_contract: 5
+      overall: 4.8
+    self_score_drift: 0       # architect 4.8 vs spec-analyst 4.8; max single-criterion drift=1 (test_matrix), under threshold
+    grounding_verified:
+      rss_already_implemented: true     # routes/rss.rs:71-198 + ingest_rss.rs + ingest/rss.rs (not stub)
+      validate_missing_ssrf: true       # routes/rss.rs:51-69 has zero url_guard call
+      worker_path_also_unguarded: true  # ingest_rss.rs:25-53 sync_rss_feed fetches stored URL w/o url_guard (DNS-rebind/pre-fix bypass)
+      cloud_drive_greenfield: true      # only SourceKind::CloudDrive enum exists (connector.rs:16-17,30); no impl/route/table
+      gitrs_ssrf_400_precedent: true    # routes/git.rs:52-76 git_error_response
+    plan_must_absorb:        # 5 non-blocking recs carried into PLAN_DRAFT/G2
+      - "XXE: 把『feed-rs 不解析外部实体』从假设转为实测断言 fixture(含 <!ENTITY xxe SYSTEM file:///etc/passwd>，断言正文不含 /etc/passwd) — §6.1 反白盒推理"
+      - "SSRF 回归 fixture 双路径: route validate() + sync_rss_feed worker 各一个 case，守护 worker 那道防线不被未来重构悄删"
+      - "conflict-marker / lock-ordering 自检: 多文件(7+)新增，commit 分批步骤含 grep '^<<<<<<<' marker 检查关(§4.2.3)"
+      - "citation 行号校准: Appendix A 引 git.rs:54-56/74 实际函数在 routes/git.rs:52-76; core 端 check_ssrf 在 ingest_git.rs"
+      - "increment marker: 确认 cloud 路径复用 ingest_document content_hash 短路(RSS 已验 ingest_rss.rs:103)，云盘新码不绕过"
+
+  - phase_from: G1
+    phase_to: PLAN_DRAFT
+    at_utc8: 2026-06-01T19:10:00+08:00
+    by: architect            # plan writer (invoked superpowers:writing-plans, not freehand)
+    artifact_path: docs/superpowers/plans/2026-06-01-rss-cloud-ingest-connectors.md
+    artifact_sha: 28d17de7a775bfa5278a4f491da357e156dfb597
+    artifact_lines: 1592
+    task_count: 16           # T1-T5 RSS 加固 / T6-T14 云盘 greenfield / T15 接线+marker / T16 GA+并发N=3
+    self_score:
+      rubric: plan
+      scope_coverage: 5
+      task_granularity: 5
+      tdd_present: 5
+      model_tier_valid: 5
+      no_placeholders: 5
+      overall: 5.0           # NOTE: 偏乐观(自评无 weak point); 真实质量待 impl/G3 测试真跑验证
+
+  - phase_from: PLAN_DRAFT
+    phase_to: G2
+    at_utc8: 2026-06-01T19:20:00+08:00
+    by: task-orchestrator    # G2 structural gate (orchestrator ≠ plan writer → 不算 self-pass)
+    gate: G2
+    verdict: PASS
+    verification: mechanical # grep/wc 机器核验，非信 agent 自报(§6.2 R18)
+    checks:
+      tasks_with_tdd: "16/16"
+      tasks_with_acceptance_judges: "16/16"
+      tasks_with_model_tier: "16/16"
+      g1_recs_absorbed: "5/5 — XXE→T4(实测断言) / SSRF双路径→T1+T2+T3 / marker→T15 / citation校准 / content_hash短路→T9复用pipeline.rs:99"
+      scope_creep: none      # 无 Email/Telegram/OAuth/行业 task; cloud corpus_domain=None
+    orchestrator_caveat: "plan self-score 5.0/无weak偏乐观; impl 阶段按 §2.3「首跑全过=没测对」加压验测"
+    model_tiers:             # per Appendix D
+      opus: [T6, T9]         # trait 设计 + 三段式 worker (结构判断)
+      sonnet: [T1, T2, T3, T4, T5, T7, T8, T10, T11, T12, T13, T14]
+      haiku: [T15, T16]      # 接线 + GA 验收
+
+# ── boundary invariants (carried every phase) ──
+invariants:
+  oss_boundary: "零行业绑定; 不调 attune-enterprise/attune-pro; cloud corpus_domain=None"
+  no_llm_agent: true          # deterministic 全程; 不触发 Agent 验证铁律 3-tier 矩阵
+  scope_locked: "只做 RSS SSRF 加固+测试+体积上限 + 云盘 rclone connector; 不做 Email/Telegram/OAuth内置/rclone打包"
