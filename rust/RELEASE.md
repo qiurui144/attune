@@ -1,20 +1,5 @@
 # attune 版本记录
 
-## Unreleased (develop)
-
-### 内部重构（无对外 API 行为变更）
-- **attune-server 错误处理统一到 `AppError`**（B4）：消除原有三套并行错误约定
-  （naive `(StatusCode, Json)` tuple / `routes/errors.rs` 安全 helper / `AppError`），
-  25 个 route 文件全部走单一 `AppError` + `?`。
-  - **错误响应契约（加性，向后兼容）**：所有错误统一为 `{"error": <msg>, "code": <kebab>}`，
-    **新增稳定 `code` 字段**；错误 message 文本不变（`AppError` Display 去类别前缀）；
-    HTTP status 逐一保持。富错误体（backpressure `retry_after_seconds` / agent 结构化
-    `code`+`message` / LLM provider `upstream_status` / `hint`）经新增 `AppError::Detailed`
-    variant **字节级保持**，不丢任何字段。
-  - `routes/errors.rs` 的 `internal()` 安全行为保留（log 内部详情 + wire 只回通用消息）。
-  - 例外（保留 bespoke 契约）：`git.rs`（domain prefix→status+透传 code 系统）、
-    `marketplace.rs`（`text/plain` 响应）。
-
 ## v1.2.0 (2026-06-01) — GitConnector + WASM 跨平台 agent + 一键依赖部署
 
 ### Highlights
@@ -78,6 +63,18 @@
 - **旧 vault 不可直接升级解锁**:Argon2 参数未随 vault 持久化,降档后旧库(64 MiB 参数加密)
   会派生出不同 KEK → 解锁失败。**已有 v1.x vault 需重新初始化**(导出数据 → 升级 → 重新导入)。
   本次按"全新库"前提实施(用户确认)。如需平滑迁移,后续可加"参数随 vault 存储 + 改密时自动重派生"。
+
+### 内部重构（无对外 API 行为变更）
+- **attune-server 错误处理统一到 `AppError`**（B4）：消除原有三套并行错误约定
+  （naive `(StatusCode, Json)` tuple / `routes/errors.rs` 安全 helper / `AppError`），
+  25 个 route 文件全部走单一 `AppError` + `?`。错误响应**加性**统一为 `{"error", "code"}`
+  （**新增稳定 `code` 字段**，message 文本不变，HTTP status 逐一保持）；富错误体经新增
+  `AppError::Detailed` variant **字节级保持**。例外：`git.rs`/`marketplace.rs` 保留 bespoke 契约。
+
+### Migration
+- **本版无需数据/schema 迁移**（B4 是纯加性内部重构，错误响应只多 `code` 字段，老客户端忽略未知字段）。
+- ⚠️ **唯一 Breaking（见上）**：从 < v1.x 旧 vault（64 MiB Argon2 参数）升级需**导出数据 → 重装 → 重新导入**；
+  全新安装无此问题。
 
 ## v1.1.0 (2026-05-30) — Agent Control Plane (ACP)
 

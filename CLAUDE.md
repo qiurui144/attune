@@ -2,8 +2,9 @@
 
 个人知识库 + 记忆增强系统。通过 Chrome 扩展在 AI 对话和日常浏览中自动捕获、检索、注入知识，利用 Ollama / NPU / iGPU 闲置算力处理 embedding。
 
-## ⭐ v1.0 GA + v1.0.x 缺口闭环 Roadmap（2026-05-25 拍板）
+## ⭐ v1.0 GA + v1.0.x 缺口闭环 Roadmap（2026-05-25 拍板 — 历史）
 
+> ⚠️ **历史 roadmap（2026-05-25）**:实际进度已超越本节 —— 已发 v1.1.0(ACP) + v1.2.0(GitConnector/WASM/一键依赖)。本节保留作历史决策记录;**当前版本与发布历史以 [`rust/RELEASE.md`](rust/RELEASE.md) 为 SSOT**。
 > 完整 spec(11 节 + 切片表):`docs/superpowers/specs/2026-05-25-v1-0-ga-and-v1-0-x-gap-closure-roadmap.md`
 > SE 11 维度 audit 来源:`docs/superpowers/specs/2026-05-25-software-engineering-gap-audit.md`
 
@@ -505,10 +506,11 @@ MarketplaceView / SettingsView / Step3LLM / Step4Hardware 等）。**2026-05-25 
 - attune-core 后台 worker（scanner / scanner_webdav / 任何拿不到 server lock 的）**不要**自己调 vectors / fulltext API，**必须**通过 `store.enqueue_reindex(item_id, action)` 让 server worker 间接处理
 - `vectors::delete_by_item_id` + `fulltext::delete_document` 现在通过 reindex 模块统一调，**不再单独直调**
 
-**Lock ordering（防死锁）**:
-- 顺序：`vault.lock()` → `vectors.lock()` → `fulltext.lock()` → `embedding.lock()`
-- 反顺序持锁是死锁高风险路径；route handler 同时拿多锁前先 release vault guard，或保证顺序一致
-- `start_reindex_worker` 内部已经按此顺序，新加 worker 沿用相同模式
+**Lock ordering（防死锁，B1 死锁修复 2026-06-04 修正方向）**:
+- **唯一序：`fulltext.lock()` → `vectors.lock()` → `vault.lock()`**（search/chat 热点路径序；items.rs update/delete 已对齐，见 `routes/items.rs:120-121` 注释）
+- **禁止持 vault guard 时再取 vectors/fulltext**（反序 = 与热点路径 ABBA 死锁）；mutating handler（items.rs）把 vault-only / index-only 拆成时间不重叠的锁相，绝不同时持 vault+vectors+fulltext
+- `embedding.lock()` 独立于上述三锁（embed worker 路径），不与读路径交叠
+- 旧文档曾写反序 `vault→vectors→fulltext`，与代码矛盾（B1 ABBA 死锁根因），已更正为上述热点序
 
 **自学习信号约定**:
 - 用 `Store::record_signal_event(kind, ref_id, query_opt)` 写新信号；kind 必须从已知集选（doc_create / doc_update / doc_delete / citation_hit / annotation_marker / search_miss）
