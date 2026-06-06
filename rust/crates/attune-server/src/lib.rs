@@ -88,6 +88,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/chat/sessions/{id}",
             get(routes::chat_sessions::get_session).delete(routes::chat_sessions::delete_session),
         )
+        // Document Intelligence (compare / summarize / chapters) — member-gated tier-3
+        .route("/api/v1/documents/compare", post(routes::documents::compare_docs))
+        .route("/api/v1/documents/summarize", post(routes::documents::summarize_doc))
+        .route("/api/v1/documents/chapters", post(routes::documents::chapters_doc))
         // Ingest + Items + Search
         .route("/api/v1/ingest", post(routes::ingest::ingest))
         .route("/api/v1/feedback", post(routes::feedback::submit_feedback))
