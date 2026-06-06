@@ -17,6 +17,7 @@ pub mod deep_summary; // T-02 — flagship token-thrift pipeline
 pub mod extractive; // T-03 — local zero-LLM pre-cut
 pub mod model_routing; // T-01 — per-stage vetted-model selection
 pub mod token_bill; // T-06 — bill struct + savings computation
+pub mod vlm_extract; // T-09 — scanned/image source → VLM text extraction
 
 // Later batches register here on merge:
 //   pub mod compare;       // T-04
