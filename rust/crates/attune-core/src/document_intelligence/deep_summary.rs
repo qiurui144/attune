@@ -153,13 +153,10 @@ pub fn summarize(
         };
         extractive_kept_tokens = extractive_kept_tokens.saturating_add(estimate_tokens(&candidate) as u32);
 
-        if is_short {
-            // Short block: use its text directly as its "summary" (no LLM, like chat.rs is_short).
-            block_summaries.push((heading.clone(), candidate));
-            continue;
-        }
-
-        // STAGE 2: cache query (only when we have a real item_id).
+        // STAGE 2: cache query (only when we have a real item_id). Done BEFORE the short-block
+        // short-circuit so that on a re-read EVERY block (short ones included) is served from
+        // cache — otherwise short-block docs would re-pay their reduce input on every run and a
+        // warm-cache run could not approach the spec §9.1 "second run → ~1.0" target.
         let hash = chunk_hash(block); // hash the ORIGINAL block (stable across queries, chat.rs R1-I1)
         if !item_id.is_empty() {
             if let Ok(Some(cached)) = store.get_chunk_summary(dek, &hash, &strategy) {
@@ -169,22 +166,36 @@ pub fn summarize(
             }
         }
 
+        if is_short {
+            // Short block: use its text directly as its "summary" (no LLM, like chat.rs is_short),
+            // but DO cache it (write-back below) so a re-read hits the cache like any other block.
+            if !item_id.is_empty() {
+                store.put_chunk_summary(dek, &hash, &strategy, item_id, "extractive-short", &candidate, block.chars().count())?;
+            }
+            block_summaries.push((heading.clone(), candidate));
+            continue;
+        }
+
         // STAGE 3: bounded MAP — cheap LLM compresses the extractive candidate (not the raw block).
         bill.new_chunks += 1;
         let system = MAP_SYSTEM_PROMPT;
         let user = format!("段落：\n{candidate}");
         let (summary, usage) = llms.cheap.chat(system, &user)?;
         bill.map_llm_tokens.add(&usage);
-        // Approximate the map input token count from the candidate (mock usage reports 0).
+        // Approximate the map token counts when the provider reports none (mock). MUST use the
+        // SAME tokenizer as the naive baseline (`cost::estimate_tokens`, model-aware) — using
+        // `context_compress::estimate_tokens` here was an apples-to-oranges mismatch (fixed CJK
+        // ×1.2 vs the model's coefficient) that could make actual_billable exceed the naive
+        // baseline for CJK docs (T-12 caught this).
         if usage.tokens_in == 0 {
             bill.map_llm_tokens.r#in = bill
                 .map_llm_tokens
                 .r#in
-                .saturating_add(estimate_tokens(&user) as u32);
+                .saturating_add(cost::estimate_tokens(&user, &cheap_model) as u32);
             bill.map_llm_tokens.out = bill
                 .map_llm_tokens
                 .out
-                .saturating_add(estimate_tokens(&summary) as u32);
+                .saturating_add(cost::estimate_tokens(&summary, &cheap_model) as u32);
             if bill.map_llm_tokens.model.is_empty() {
                 bill.map_llm_tokens.model = cheap_model.clone();
             }
@@ -243,14 +254,16 @@ fn reduce(
         ];
         let (text, usage) = reasoning.chat_with_history(&messages)?;
         if usage.tokens_in == 0 {
+            // Same tokenizer as the naive baseline (model-aware cost::estimate_tokens), see the
+            // map-stage note above — keeps the savings ratio apples-to-apples for CJK.
             bill.reduce_llm_tokens.r#in = bill
                 .reduce_llm_tokens
                 .r#in
-                .saturating_add(estimate_tokens(payload) as u32);
+                .saturating_add(cost::estimate_tokens(payload, reasoning_model) as u32);
             bill.reduce_llm_tokens.out = bill
                 .reduce_llm_tokens
                 .out
-                .saturating_add(estimate_tokens(&text) as u32);
+                .saturating_add(cost::estimate_tokens(&text, reasoning_model) as u32);
             if bill.reduce_llm_tokens.model.is_empty() {
                 bill.reduce_llm_tokens.model = reasoning_model.to_string();
             }
