@@ -15,9 +15,9 @@
 
 pub mod extractive; // T-03 — local zero-LLM pre-cut
 pub mod model_routing; // T-01 — per-stage vetted-model selection
+pub mod token_bill; // T-06 — bill struct + savings computation
 
 // Later batches register here on merge:
-//   pub mod token_bill;    // T-06
 //   pub mod deep_summary;  // T-02
 //   pub mod compare;       // T-04
 //   pub mod chapters;      // T-05

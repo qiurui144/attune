@@ -52,7 +52,12 @@ impl Store {
         summary: &str,
         orig_chars: usize,
     ) -> Result<()> {
-        if !matches!(strategy, "economical" | "accurate") {
+        // chat-context strategies are the original two; document-intelligence deep summary
+        // adds the `deepsum:<level>` namespace (spec §10 backward-compat: same table,
+        // namespace-isolated strategy values, no migration). REPLACE on (chunk_hash, strategy).
+        let known = matches!(strategy, "economical" | "accurate")
+            || strategy.starts_with("deepsum:");
+        if !known {
             return Err(VaultError::InvalidInput(format!("unknown strategy: {strategy}")));
         }
         let enc = crypto::encrypt(dek, summary.as_bytes())?;
