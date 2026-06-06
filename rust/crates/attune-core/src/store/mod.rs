@@ -339,7 +339,11 @@ CREATE INDEX IF NOT EXISTS idx_skill_sig_processed ON skill_signals(processed, c
 --   orig_chars —— 原 chunk 字符数（统计用）
 CREATE TABLE IF NOT EXISTS chunk_summaries (
     chunk_hash  TEXT NOT NULL,
-    strategy    TEXT NOT NULL CHECK(strategy IN ('economical','accurate')),
+    -- chat-context strategies ('economical','accurate') + document-intelligence deep-summary
+    -- namespace ('deepsum:brief' / 'deepsum:standard' / 'deepsum:detailed'). Namespace-isolated
+    -- per spec 2026-06-06-oss-document-intelligence §10 (same table, no data migration needed;
+    -- older vaults rebuilt in place by migrate_chunk_summaries_deepsum_strategy).
+    strategy    TEXT NOT NULL CHECK(strategy IN ('economical','accurate') OR strategy LIKE 'deepsum:%'),
     item_id     TEXT NOT NULL,
     model       TEXT NOT NULL,
     summary     BLOB NOT NULL,
@@ -715,6 +719,7 @@ impl Store {
         Self::migrate_items_content_hash(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
+        Self::migrate_chunk_summaries_deepsum_strategy(&conn)?;
         Self::ensure_schema_version(&conn)?;
         let store = Self { conn };
         // QW-1: 一次性 purge embed_queue 终态行（done / abandoned）。
@@ -999,6 +1004,49 @@ impl Store {
                 [],
             )?;
         }
+        Ok(())
+    }
+
+    /// document-intelligence (2026-06-06): relax the `chunk_summaries.strategy` CHECK to admit
+    /// the `deepsum:<level>` namespace (deep summary cache). Idempotent — only rebuilds when the
+    /// stored DDL still carries the old restrictive CHECK (`IN ('economical','accurate')` without
+    /// the `deepsum:%` clause). SQLite cannot ALTER a CHECK in place, so we rebuild via the
+    /// canonical 12-step table-redef recipe. Existing rows are copied verbatim (no data change;
+    /// spec §10 namespace-isolated). PRIMARY KEY (chunk_hash, strategy) is preserved.
+    fn migrate_chunk_summaries_deepsum_strategy(conn: &Connection) -> Result<()> {
+        let ddl: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_summaries'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        let needs_rebuild = match ddl {
+            Some(sql) => sql.contains("CHECK") && !sql.contains("deepsum"),
+            None => false, // table absent → fresh SCHEMA_SQL already has the relaxed CHECK
+        };
+        if !needs_rebuild {
+            return Ok(());
+        }
+        // Canonical table-rebuild (foreign_keys already ON; chunk_summaries has no FK so order is safe).
+        conn.execute_batch(
+            "CREATE TABLE chunk_summaries_new (
+                 chunk_hash  TEXT NOT NULL,
+                 strategy    TEXT NOT NULL CHECK(strategy IN ('economical','accurate') OR strategy LIKE 'deepsum:%'),
+                 item_id     TEXT NOT NULL,
+                 model       TEXT NOT NULL,
+                 summary     BLOB NOT NULL,
+                 orig_chars  INTEGER NOT NULL,
+                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                 PRIMARY KEY (chunk_hash, strategy)
+             );
+             INSERT INTO chunk_summaries_new
+                 SELECT chunk_hash, strategy, item_id, model, summary, orig_chars, created_at
+                 FROM chunk_summaries;
+             DROP TABLE chunk_summaries;
+             ALTER TABLE chunk_summaries_new RENAME TO chunk_summaries;
+             CREATE INDEX IF NOT EXISTS idx_chunk_sum_item ON chunk_summaries(item_id);",
+        )?;
         Ok(())
     }
 
