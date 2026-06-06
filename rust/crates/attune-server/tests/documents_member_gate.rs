@@ -200,3 +200,79 @@ async fn sentinel_gateway_token_never_appears_in_any_response() {
         }
     }
 }
+
+/// §9.2 TEST-phase leg (c): a LIVE paid-member summarize against a REAL LLM returns 200 with a
+/// real summary, carries a `token_bill.path`, and STILL never leaks the gateway token.
+///
+/// `#[ignore]` — opt-in real-LLM run only. Enable by exporting (CLAUDE.md §1.4 — key from env,
+/// never committed): ATTUNE_TEST_REAL_LLM_ENDPOINT / _KEY / _MODEL, then
+///   cargo test -p attune-server --test documents_member_gate -- --ignored real_llm
+/// The real LLM is wired via the production path (PATCH /settings → reload_llm builds an
+/// OpenAiLlmProvider), so this also exercises the real settings → provider hot-reload wiring.
+#[tokio::test]
+#[ignore = "real-LLM live leg; run manually with ATTUNE_TEST_REAL_LLM_* env set"]
+async fn real_llm_paid_summarize_returns_200_happy_path() {
+    let (Ok(ep), Ok(key), Ok(model)) = (
+        std::env::var("ATTUNE_TEST_REAL_LLM_ENDPOINT"),
+        std::env::var("ATTUNE_TEST_REAL_LLM_KEY"),
+        std::env::var("ATTUNE_TEST_REAL_LLM_MODEL"),
+    ) else {
+        eprintln!("SKIP: ATTUNE_TEST_REAL_LLM_* not all set");
+        return;
+    };
+    if key.is_empty() {
+        eprintln!("SKIP: ATTUNE_TEST_REAL_LLM_KEY empty");
+        return;
+    }
+    let srv = spawn_eval_server().await;
+    let base = srv.url();
+    let client = reqwest::Client::new();
+
+    // Realistic happy-path: a paid member with an UNLOCKED vault. The summarize route fetches the
+    // DEK for its cache layer even for inline text, so the vault must be unlocked. (Follow-up:
+    // the route could fetch the DEK lazily only when item_id is present — out of T-13 scope.)
+    let r = client
+        .post(format!("{base}/api/v1/vault/setup"))
+        .json(&json!({ "password": "P@ssw0rd-RealLlmLiveLeg-not-real" }))
+        .send()
+        .await
+        .expect("vault setup");
+    assert_eq!(r.status().as_u16(), 200, "vault setup must unlock");
+
+    // Wire the real LLM via the PRODUCTION path: PATCH /settings → reload_llm builds the provider.
+    // (The key is in-process only — never logged; CLAUDE.md §1.4.)
+    let r = client
+        .patch(format!("{base}/api/v1/settings"))
+        .json(&json!({ "llm": { "provider": "openai_compat", "endpoint": ep, "api_key": key, "model": model } }))
+        .send()
+        .await
+        .expect("patch settings");
+    assert_eq!(r.status().as_u16(), 200, "settings PATCH must 200");
+
+    login(&base, "paid").await;
+
+    let (status, v) = post(
+        &base,
+        "documents/summarize",
+        json!({
+            "source": { "text": "# 第一章 所有权\n\nRust 的所有权系统在编译期保证内存安全而无需垃圾回收。\
+                每个值有唯一的所有者，赋值会移动所有权，离开作用域时自动释放。\n\n# 第二章 借用\n\n\
+                借用允许在不取得所有权的情况下读取或修改值，借用检查器在编译期拒绝悬垂引用与数据竞争。" },
+            "level": "standard"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, 200, "paid + real LLM summarize must 200, body={v}");
+    let overview = v["result"]["overview"].as_str().unwrap_or("");
+    assert!(!overview.is_empty(), "real summary overview must be non-empty: {v}");
+    // The bypass/pipeline path is recorded (short doc here → single-call).
+    assert!(
+        v["tokenBill"]["path"].as_str().map(|p| !p.is_empty()).unwrap_or(false),
+        "token_bill.path must be present: {v}"
+    );
+    // Real LLM in the loop — STILL no gateway-token leak in the live response.
+    let s = serde_json::to_string(&v).unwrap();
+    assert!(!s.contains(SENTINEL_GATEWAY_TOKEN), "live response leaked gateway token: {s}");
+    assert!(!s.contains("Bearer "), "live response must not echo a Bearer token: {s}");
+}
