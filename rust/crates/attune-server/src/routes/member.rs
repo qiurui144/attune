@@ -15,6 +15,11 @@ struct CloudLoginData {
     user: UserInfo,
     license: Option<License>,
     me: Option<UserInfo>,
+    /// B5 (2026-06-06): best-effort plugin auto-install report. Computed inside
+    /// the SAME blocking thread as the login (sync_plugins does blocking network
+    /// I/O — must NOT run on the async worker, same constraint as B4). `None` for
+    /// free users (no entitlements to sync).
+    plugin_sync: Option<attune_core::plugin_sync::SyncReport>,
 }
 
 /// GET /api/v1/member/state — 当前会员状态 (UI 展示)
@@ -51,6 +56,7 @@ pub async fn login_token(
     State(state): State<SharedState>,
     Json(req): Json<LoginTokenReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let is_paid = req.tier.as_str() == "paid";
     let new_state = match req.tier.as_str() {
         "free" => MemberState::Free { account_id: req.account_id },
         "paid" => {
@@ -75,10 +81,55 @@ pub async fn login_token(
         }
     };
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
+
+    // B5 (2026-06-06): mirror login_password — a paid member-login must auto-install
+    // entitled pro plugins. This endpoint carries no credentials (the desktop client
+    // already authenticated to cloud), so we can only sync when a persisted cloud
+    // session exists. Runs on a blocking thread (sync_plugins = blocking network
+    // I/O, same B4 constraint). Best-effort: any failure (no session / unreachable)
+    // is logged and never fails the login (§4.5); signature verification inside
+    // sync is NOT bypassed.
+    let plugin_sync = if is_paid {
+        tokio::task::spawn_blocking(member_session_sync_plugins)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    let plugins_json = plugin_sync.as_ref().map(sync_report_to_json);
+
     Ok(Json(serde_json::json!({
         "status": "ok",
         "state": new_state,
+        "plugin_sync": plugins_json,
     })))
+}
+
+/// Build a `CloudClient` from the persisted CLI cloud session (`config_dir/
+/// cloud-session.json`) and run best-effort plugin sync. Returns `None` when no
+/// session is available (so the `login_token` paid path simply skips). Used only
+/// by `login_token`, which carries no live credentials of its own.
+fn member_session_sync_plugins() -> Option<attune_core::plugin_sync::SyncReport> {
+    let path = attune_core::platform::config_dir().join("cloud-session.json");
+    let json = std::fs::read_to_string(&path).ok()?;
+    let sess: serde_json::Value = serde_json::from_str(&json).ok()?;
+    let cloud_url = sess.get("cloud_url").and_then(|v| v.as_str())?;
+    let session = sess.get("session").and_then(|v| v.as_str()).filter(|s| !s.is_empty())?;
+    let client = CloudClient::with_session(cloud_url, session);
+    Some(attune_core::plugin_sync::best_effort_sync_plugins(&client))
+}
+
+/// Serialize a [`SyncReport`] into the stable UI JSON shape (shared by both
+/// member-login endpoints).
+fn sync_report_to_json(r: &attune_core::plugin_sync::SyncReport) -> serde_json::Value {
+    serde_json::json!({
+        "installed": r.installed,
+        "skipped_already_installed": r.skipped_already_installed,
+        "failed": r.failed
+            .iter()
+            .map(|(id, reason)| serde_json::json!({"plugin_id": id, "reason": reason}))
+            .collect::<Vec<_>>(),
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -128,7 +179,7 @@ pub async fn login_password(
             .map_err(|e| (StatusCode::UNAUTHORIZED, format!("login failed: {e}")))?;
         let is_paid = matches!(user.plan.as_str(), "pro" | "pro_plus" | "enterprise");
         if !is_paid {
-            return Ok(CloudLoginData { user, license: None, me: None });
+            return Ok(CloudLoginData { user, license: None, me: None, plugin_sync: None });
         }
         let licenses = client
             .list_licenses()
@@ -148,9 +199,17 @@ pub async fn login_password(
         .ok_or((StatusCode::BAD_REQUEST, "paid user has no matching license".to_string()))?;
         // best-effort gateway token fetch — a failure here must not block login.
         let me = client.me().ok();
-        Ok(CloudLoginData { user, license: Some(selected), me })
+        // B5 (2026-06-06): auto-install entitled pro plugins (e.g. law-pro) so
+        // domain-specific agents work right after login, no manual `attune
+        // sync-plugins`. Runs on THIS blocking thread (reusing the authenticated
+        // client + its session cookie). best_effort_* never returns Err — a sync
+        // failure logs + yields an empty report; the login still succeeds (§4.5).
+        // Signature verification (verify_with_key) inside sync is NOT bypassed:
+        // an unverified package fails closed and is reported in `failed`.
+        let plugin_sync = Some(attune_core::plugin_sync::best_effort_sync_plugins(&client));
+        Ok(CloudLoginData { user, license: Some(selected), me, plugin_sync })
     });
-    let CloudLoginData { user, license, me } = blocking
+    let CloudLoginData { user, license, me, plugin_sync } = blocking
         .await
         .map_err(|e| {
             (
@@ -218,11 +277,15 @@ pub async fn login_password(
     };
 
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
+    // B5: surface the best-effort plugin auto-install outcome to the UI (non-fatal;
+    // the login already succeeded regardless of plugin sync).
+    let plugins_json = plugin_sync.as_ref().map(sync_report_to_json);
     Ok(Json(serde_json::json!({
         "status": "ok",
         "state": new_state,
         "email": user.email,
         "tier": user.plan,
+        "plugin_sync": plugins_json,
     })))
 }
 

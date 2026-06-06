@@ -66,6 +66,56 @@ pub struct SyncReport {
     pub failed: Vec<(String, String)>, // (plugin_id, reason)
 }
 
+/// Best-effort wrapper around [`sync_plugins`] for the **membership-login** path
+/// (B5, 2026-06-06).
+///
+/// After a member logs in, entitled pro plugins (e.g. `law-pro`) must auto-install
+/// so domain-specific agents start working without a manual `attune sync-plugins`.
+/// But a plugin-sync failure (cloud unreachable, hub 5xx, a single bad package)
+/// MUST NOT fail the login itself (§4.5 graceful degradation): the user is still
+/// authenticated; the plugins can be retried later.
+///
+/// This never returns `Err`. On a hard failure (e.g. `list_licenses` errored) it
+/// logs a warning and returns an empty report. Per-plugin failures are already
+/// captured non-fatally in [`SyncReport::failed`] by `sync_plugins`.
+///
+/// Like `sync_plugins`, this performs **blocking** network I/O (blocking reqwest
+/// inside `CloudClient` + `download_to_file`), so the caller MUST invoke it on a
+/// blocking thread (`spawn_blocking`), never directly on a Tokio async worker
+/// (same constraint as the B4 login fix).
+pub fn best_effort_sync_plugins(cloud: &CloudClient) -> SyncReport {
+    match sync_plugins(cloud) {
+        Ok(report) => {
+            if !report.installed.is_empty() {
+                log::info!(
+                    "member login: auto-installed {} entitled plugin(s): {:?}",
+                    report.installed.len(),
+                    report.installed
+                );
+            }
+            if !report.failed.is_empty() {
+                // Non-fatal: individual packages failed to verify/install. Login proceeds.
+                log::warn!(
+                    "member login: {} entitled plugin(s) failed to install (login NOT blocked): {:?}",
+                    report.failed.len(),
+                    report.failed
+                );
+            }
+            report
+        }
+        Err(e) => {
+            // Hard failure (e.g. list_licenses / plugins_dir). Best-effort: do not
+            // fail login; the user can retry plugin sync later.
+            log::warn!("member login: plugin auto-sync skipped (login NOT blocked): {e}");
+            SyncReport {
+                installed: Vec::new(),
+                skipped_already_installed: Vec::new(),
+                failed: Vec::new(),
+            }
+        }
+    }
+}
+
 /// 拉云端 entitled 清单, 自动装缺的 pro 插件
 pub fn sync_plugins(cloud: &CloudClient) -> Result<SyncReport> {
     let licenses = cloud.list_licenses()?;
@@ -561,5 +611,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.payload, b"user-learned-terms");
+    }
+
+    // ── B5 (2026-06-06): best-effort auto-install on membership login ──────────
+    //
+    // After a member logs in, entitled plugins must auto-install. But a sync
+    // failure (cloud unreachable / hub 5xx) MUST NOT fail the login (§4.5). The
+    // login path therefore calls `best_effort_sync_plugins`, which swallows the
+    // error into a logged empty report instead of propagating `Err`.
+
+    #[test]
+    fn best_effort_sync_returns_empty_report_when_cloud_unreachable_never_errs() {
+        // Cloud at an unreachable address → list_licenses() errors → the
+        // best-effort wrapper must return an empty SyncReport, NOT panic, NOT Err.
+        // (login must proceed regardless.)
+        let cloud = CloudClient::new("http://127.0.0.1:1");
+        let report = best_effort_sync_plugins(&cloud);
+        assert!(
+            report.installed.is_empty(),
+            "no plugins should install against an unreachable cloud"
+        );
+        // The whole point: a hard sync failure surfaces as an empty report, not a
+        // login-blocking error — there is no `?`/Result to unwrap here.
     }
 }
