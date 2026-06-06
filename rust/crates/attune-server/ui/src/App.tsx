@@ -22,7 +22,7 @@ import { Wizard, LoginScreen } from './wizard';
 import { MainShell } from './layout';
 import { PrivacyTour } from './views/PrivacyTour';
 import { useShortcut } from './hooks/useShortcut';
-import { api, ApiError } from './store/api';
+import { api, ApiError, getToken } from './store/api';
 import { vaultState, sidebarCollapsed } from './store/signals';
 import { startConnectionMonitor } from './store/connection';
 import { startProgressWS } from './store/ws';
@@ -72,7 +72,11 @@ export function App(): JSX.Element {
   // 启动
   useEffect(() => {
     startConnectionMonitor();
-    startProgressWS();
+    // B2: only open the scan-progress WS once a session token exists. Connecting
+    // pre-auth (no vault / locked) just spams `/ws/scan-progress 401` + reconnects.
+    // handleUnlock() and handleWizardComplete() re-call startProgressWS() once the
+    // token is set, so the live cases are still covered.
+    if (getToken() != null) startProgressWS();
     void bootstrap();
 
     // Tauri 桌面模式:监听 OS 文件拖拽 → 调 upload_dropped_paths 上传。

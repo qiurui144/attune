@@ -44,16 +44,17 @@ export function stopProgressWS(): void {
 
 function connect(): void {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  // WebSocket handshakes cannot carry an Authorization header (RFC 6455),
-  // so the token is passed as a query param when available. If no token exists
-  // yet (vault not unlocked / first load) we still attempt the connection so
-  // that no-auth dev mode works; a 401 close will simply trigger scheduleReconnect,
-  // and startProgressWS() is called again from handleUnlock() once the token
-  // is set in sessionStorage.
+  // WebSocket handshakes cannot carry an Authorization header (RFC 6455), so the
+  // token is passed as a query param. B2: callers (App mount / handleUnlock /
+  // handleWizardComplete) only start the WS once a token exists; if it is somehow
+  // gone (logout race) bail rather than open an auth-less socket that 401s and
+  // restarts the reconnect storm.
   const token = getToken();
-  const url = token
-    ? `${proto}://${location.host}/ws/scan-progress?token=${encodeURIComponent(token)}`
-    : `${proto}://${location.host}/ws/scan-progress`;
+  if (token == null) {
+    stopped = true;
+    return;
+  }
+  const url = `${proto}://${location.host}/ws/scan-progress?token=${encodeURIComponent(token)}`;
   try {
     ws = new WebSocket(url);
   } catch {
