@@ -13,11 +13,11 @@
 //! map/reduce/semantic-verdict/Q&A — those are member-gated at the route layer and the
 //! routing DECISION is client-side (see [`model_routing`]).
 
-pub mod model_routing;
+pub mod extractive; // T-03 — local zero-LLM pre-cut
+pub mod model_routing; // T-01 — per-stage vetted-model selection
 
-// B1 sibling modules (T-03 / T-06) and later batches register here on merge:
-//   pub mod extractive;   // T-03
-//   pub mod token_bill;   // T-06
+// Later batches register here on merge:
+//   pub mod token_bill;    // T-06
 //   pub mod deep_summary;  // T-02
 //   pub mod compare;       // T-04
 //   pub mod chapters;      // T-05
