@@ -509,6 +509,20 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
                 </div>
                 <Input
                   type="text"
+                  label={t('wizard.member.email')}
+                  placeholder={t('wizard.member.email_placeholder')}
+                  value={ctx.memberEmail ?? ''}
+                  onInput={(e) => onUpdate({ memberEmail: e.currentTarget.value })}
+                />
+                <Input
+                  type="password"
+                  label={t('wizard.member.password')}
+                  placeholder={t('wizard.member.password_placeholder')}
+                  value={ctx.memberPassword ?? ''}
+                  onInput={(e) => onUpdate({ memberPassword: e.currentTarget.value })}
+                />
+                <Input
+                  type="text"
                   placeholder={t('wizard.llm.cloud.endpoint_default_placeholder')}
                   value={endpoint}
                   onInput={(e) => setEndpoint(e.currentTarget.value)}
