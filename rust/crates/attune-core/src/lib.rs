@@ -99,6 +99,7 @@ pub mod chat_reliability;
 pub mod chunker;
 pub mod context_compress;
 pub mod context_budget;
+pub mod document_intelligence;
 pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;
