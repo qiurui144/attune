@@ -72,6 +72,20 @@ pub struct ChapterSummary {
 /// is the wrong tool and we fall back to one standard summarize call.
 pub const DEEPSUM_MIN_TOK: u32 = 1500;
 
+// W1 (adversarial review): pin the cutoff to its T-12 evidence band at COMPILE TIME, so it can
+// never silently drift away from its justification (which would disable the flagship pipeline in
+// prod with no red test). Evidence (`reports/2026-06-06_deepsum-savings.md`): largest net-negative
+// short doc = 441 tok; smallest doc that benefits from the pipeline = 9873 tok. A drift outside
+// this band is a build failure, not a runtime surprise.
+const _: () = assert!(
+    DEEPSUM_MIN_TOK > 441,
+    "DEEPSUM_MIN_TOK must exceed the largest net-negative short doc (441 tok, T-12) so every net-negative doc bypasses"
+);
+const _: () = assert!(
+    DEEPSUM_MIN_TOK < 9873,
+    "DEEPSUM_MIN_TOK must be below the smallest beneficial doc (9873 tok, T-12) so no beneficial doc is stranded on the bypass"
+);
+
 /// Tuning knobs (kept small; defaults match the chat.rs precedent).
 pub struct DeepSummaryConfig {
     /// Blocks with `estimate_tokens` below this skip the map LLM entirely (chat.rs is_short).
@@ -134,6 +148,16 @@ pub fn summarize(
         baseline_model: reasoning_model.clone(),
         ..Default::default()
     };
+
+    // Empty/whitespace doc → no LLM call (W2: defensive at the core, not only at the route, so
+    // any caller — chapters.rs / future — never spends an LLM call on nothing). Zero bill.
+    if full_text.trim().is_empty() {
+        bill.path = "empty".to_string();
+        return Ok((
+            Summary { level: level.as_str().to_string(), overview: String::new(), per_chapter: Vec::new() },
+            bill,
+        ));
+    }
 
     // STAGE -1 — short-doc single-call bypass (spec §3.2 / §9.1 / §11 R2; G3-flagship Option 3).
     // Below the cutoff the multi-stage map+reduce overhead exceeds a single naive call (T-12
@@ -681,6 +705,26 @@ mod tests {
         assert!(summary.per_chapter.len() >= 2, "multi-stage produces per-chapter view");
         // The 93-96% re-read figure rests on warm-cache savings; first run still bills map+reduce.
         assert!(bill.new_chunks > 0, "long-doc cold run bills new map chunks");
+    }
+
+    /// W2 (adversarial review): empty/whitespace doc spends ZERO LLM calls at the core (not only
+    /// at the route) — any caller is protected, zero bill, no panic.
+    #[test]
+    fn test_empty_doc_spends_no_llm() {
+        let cheap = RecordingMockLlm::new("gpt-4o-mini");
+        let reasoning = RecordingMockLlm::new("gpt-4o");
+        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+        let (store, dek) = mem_store_dek();
+        let r = router();
+        let cfg = DeepSummaryConfig::default();
+        let (summary, bill) =
+            summarize("   \n\t ", SummaryLevel::Standard, "item-empty", &r, &llms, &store, &dek, &cfg)
+                .unwrap();
+        assert_eq!(cheap.call_count(), 0, "empty doc: no map LLM call");
+        assert_eq!(reasoning.call_count(), 0, "empty doc: no reasoning LLM call");
+        assert_eq!(bill.actual_billable_tokens(), 0, "empty doc: zero bill");
+        assert_eq!(bill.path, "empty");
+        assert!(summary.overview.is_empty());
     }
 
     #[test]
