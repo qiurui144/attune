@@ -2,10 +2,10 @@
 //! review/批阅 output-mode contract.
 //!
 //! Three actions (spec §5.3):
-//!   - `list`           : zero-LLM chapter navigation + per-chapter extractive preview.
+//!   - `list`: zero-LLM chapter navigation + per-chapter extractive preview.
 //!   - `summarize_chapter`: reuses the deep_summary single-chapter pipeline (member-gated).
-//!   - `ask`            : RAG over this+related chapters → Reasoning-model Q&A; cross-chapter
-//!                        memory = prior chapters' (cached) summaries injected into context.
+//!   - `ask`: RAG over this+related chapters → Reasoning-model Q&A; cross-chapter memory =
+//!     prior chapters' (cached) summaries injected into context.
 //!
 //! **Output-Mode Contract (spec §3.5)**: the default mode is `review/批阅` — each chapter
 //! carries `annotations[]` anchored to **that chapter's char offsets** (like a margin note /

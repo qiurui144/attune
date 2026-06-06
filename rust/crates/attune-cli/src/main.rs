@@ -267,6 +267,51 @@ enum Commands {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// Document intelligence (T-11): compare / summarize / chapters on local files.
+    /// Local path, no vault required. The zero-cost layers (structural/textual compare,
+    /// chapter list, extractive pre-cut) always run; tier-3 LLM stages run only when a local
+    /// Ollama model is configured (member-gate is enforced server-side, not here).
+    /// spec: docs/superpowers/specs/2026-06-06-oss-document-intelligence.md §5
+    Doc {
+        #[command(subcommand)]
+        action: DocAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DocAction {
+    /// Compare two local files (structural + textual diff; semantic verdict if --model given).
+    Compare {
+        /// Old version (A).
+        left: std::path::PathBuf,
+        /// New version (B).
+        right: std::path::PathBuf,
+        /// structural | textual | semantic (semantic needs --model).
+        #[arg(long, default_value = "textual")]
+        mode: String,
+        /// Local LLM model for the semantic layer (e.g. qwen2.5:3b). Omit → no LLM.
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Deep summary of a local file (token-thrift pipeline; prints the token bill).
+    Summarize {
+        /// Document file to summarize.
+        file: std::path::PathBuf,
+        /// brief | standard | detailed.
+        #[arg(long, default_value = "standard")]
+        level: String,
+        /// Local cheap (map) model. Omit → extractive-only degrade (no LLM).
+        #[arg(long)]
+        cheap_model: Option<String>,
+        /// Local reasoning (reduce) model. Defaults to --cheap-model.
+        #[arg(long)]
+        reasoning_model: Option<String>,
+    },
+    /// List the chapters of a local file (zero-LLM extractive preview).
+    Chapters {
+        /// Document file.
+        file: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -462,6 +507,8 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             // ACP-3 health + tune need the unlocked vault → handled after open.
             AgentAction::Health { .. } | AgentAction::Tune { .. } => {}
         },
+        // Document intelligence (T-11) — operates on local files, vault-free.
+        Commands::Doc { action } => return run_doc(action),
         // VaultImport must run BEFORE Vault::open_default() — open() auto-creates vault.db
         // via Connection::open(), which would make the "already exists" guard always trigger.
         Commands::VaultImport { src, force } => {
@@ -728,8 +775,9 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         | Commands::PluginPublish { .. }
         | Commands::OcrProfileList | Commands::OcrProfileShow { .. }
         | Commands::OcrProfileCreate { .. } | Commands::OcrProfileDelete { .. }
-        | Commands::Rollback { .. } | Commands::PreUpgradeBackup => {
-            unreachable!("plugin/cloud/ocr-profile commands handled before vault open")
+        | Commands::Rollback { .. } | Commands::PreUpgradeBackup
+        | Commands::Doc { .. } => {
+            unreachable!("plugin/cloud/ocr-profile/doc commands handled before vault open")
         }
         // ACP-3: `attune agent health` needs the unlocked vault (telemetry lives
         // in usage_events). Gate + Registry already early-returned vault-free.
@@ -1756,6 +1804,112 @@ fn run_vault_import(src: &std::path::Path, force: bool) -> attune_core::error::R
     println!("If unlock fails, ensure device.key matches: {}",
         attune_core::platform::device_secret_path().display());
     Ok(())
+}
+
+/// `attune doc <action>` (T-11) — document intelligence on local files, vault-free.
+fn run_doc(action: &DocAction) -> attune_core::error::Result<()> {
+    use attune_core::document_intelligence::{compare, deep_summary, chapters};
+    use attune_core::document_intelligence::model_routing::ModelRouter;
+    use attune_core::llm::OllamaLlmProvider;
+    use serde_json::json;
+
+    // A degenerate router: every role → the same default name; CLI overrides per-stage below.
+    let router = ModelRouter::from_settings(&json!({}));
+
+    match action {
+        DocAction::Compare { left, right, mode, model } => {
+            let a = std::fs::read_to_string(left)
+                .map_err(|e| attune_core::error::VaultError::InvalidInput(format!("read {}: {e}", left.display())))?;
+            let b = std::fs::read_to_string(right)
+                .map_err(|e| attune_core::error::VaultError::InvalidInput(format!("read {}: {e}", right.display())))?;
+            let cmode = match mode.as_str() {
+                "structural" => compare::CompareMode::Structural,
+                "textual" => compare::CompareMode::Textual,
+                "semantic" => compare::CompareMode::Semantic,
+                other => return Err(attune_core::error::VaultError::InvalidInput(format!("invalid mode: {other}"))),
+            };
+            // semantic needs a local model; a CLI run is treated as a "member" so the layer runs.
+            let member = cmode == compare::CompareMode::Semantic && model.is_some();
+            let llm: Box<dyn attune_core::llm::LlmProvider> = match model {
+                Some(m) => Box::new(OllamaLlmProvider::with_model(m)),
+                None => Box::new(attune_core::llm::MockLlmProvider::new("none")),
+            };
+            let llms = compare::StageLlms { cheap: llm.as_ref(), reasoning: llm.as_ref() };
+            let report = compare::compare(&a, &b, cmode, compare::OutputMode::Structured, member, &router, &llms)?;
+            println!("structural diffs: {}", report.structural_diffs.len());
+            for d in &report.structural_diffs {
+                println!("  [{}] {} (section {})", d.kind, d.heading_path, d.section_idx);
+            }
+            println!("textual diff sections: {}", report.textual_diffs.len());
+            if !report.semantic_verdicts.is_empty() {
+                println!("semantic verdicts:");
+                for v in &report.semantic_verdicts {
+                    println!("  section {}: {} — {}", v.section_idx, v.verdict, v.rationale);
+                }
+            }
+            print_bill(&report.token_bill);
+        }
+        DocAction::Summarize { file, level, cheap_model, reasoning_model } => {
+            let text = std::fs::read_to_string(file)
+                .map_err(|e| attune_core::error::VaultError::InvalidInput(format!("read {}: {e}", file.display())))?;
+            let lvl = match level.as_str() {
+                "brief" => deep_summary::SummaryLevel::Brief,
+                "standard" => deep_summary::SummaryLevel::Standard,
+                "detailed" => deep_summary::SummaryLevel::Detailed,
+                other => return Err(attune_core::error::VaultError::InvalidInput(format!("invalid level: {other}"))),
+            };
+            // Deep summary is a tier-3 LLM op (map+reduce). The CLI requires a local model;
+            // without one we'd have nothing to call the reduce stage with. Per spec §11 R1 the
+            // weak/absent-model degrade (pure extractive, no reduce) is a server-side path, not
+            // exposed here — surface a clear, actionable error instead of an opaque LLM failure.
+            let cheap_name = cheap_model.as_ref().ok_or_else(|| {
+                attune_core::error::VaultError::InvalidInput(
+                    "summarize needs a local model: pass --cheap-model <ollama-model> (e.g. qwen2.5:3b)".into(),
+                )
+            })?;
+            let reasoning_name = reasoning_model.as_ref().unwrap_or(cheap_name);
+            let cheap: Box<dyn attune_core::llm::LlmProvider> = Box::new(OllamaLlmProvider::with_model(cheap_name));
+            let reasoning: Box<dyn attune_core::llm::LlmProvider> = Box::new(OllamaLlmProvider::with_model(reasoning_name));
+            let llms = deep_summary::StageLlms { cheap: cheap.as_ref(), reasoning: reasoning.as_ref() };
+            // Empty item_id → no cache layer (CLI is one-shot).
+            let store = attune_core::store::Store::open_memory()?;
+            let dek = attune_core::crypto::Key32::generate();
+            let cfg = deep_summary::DeepSummaryConfig::default();
+            let (summary, bill) = deep_summary::summarize(&text, lvl, "", &router, &llms, &store, &dek, &cfg)?;
+            println!("== {} summary ==", summary.level);
+            println!("{}", summary.overview);
+            for ch in &summary.per_chapter {
+                let h = if ch.heading_path.is_empty() { "(untitled)" } else { ch.heading_path.as_str() };
+                println!("  • [{h}] {}", ch.summary);
+            }
+            print_bill(&bill);
+        }
+        DocAction::Chapters { file } => {
+            let text = std::fs::read_to_string(file)
+                .map_err(|e| attune_core::error::VaultError::InvalidInput(format!("read {}: {e}", file.display())))?;
+            let entries = chapters::list(&text, 0.5);
+            println!("chapters: {}", entries.len());
+            for c in &entries {
+                let h = if c.heading_path.is_empty() { "(untitled)" } else { c.heading_path.as_str() };
+                let preview: String = c.extractive_preview.chars().take(60).collect();
+                println!("  [{}] {h}\n      {preview}", c.idx);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Print the token bill (savings made visible — §8.3).
+fn print_bill(bill: &attune_core::document_intelligence::token_bill::TokenBill) {
+    let actual = bill.actual_billable_tokens();
+    println!(
+        "token_bill: naive_baseline={} actual_billable={} savings={:.0}% (cache_hit_chunks={} new_chunks={})",
+        bill.naive_baseline_tokens,
+        actual,
+        bill.savings_ratio_by_token() * 100.0,
+        bill.cache_hit_chunks,
+        bill.new_chunks,
+    );
 }
 
 #[cfg(test)]

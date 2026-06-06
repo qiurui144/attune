@@ -197,7 +197,7 @@ mod tests {
         // ratio below floor still keeps ≥1
         let one = extract_candidates(block, 0.0, &[]);
         assert!(!one.is_empty());
-        assert!(split_sentences(&one).len() >= 1);
+        assert!(!split_sentences(&one).is_empty());
         // ratio above 1.0 clamps to all
         let over = extract_candidates(block, 5.0, &[]);
         assert_eq!(split_sentences(&over).len(), 10);

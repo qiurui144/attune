@@ -419,7 +419,7 @@ fn line_diff(a: &str, b: &str) -> Vec<TextualHunk> {
     let mut hunks: Vec<TextualHunk> = Vec::new();
     let mut ia = 0usize;
     let mut ib = 0usize;
-    let mut push = |hunks: &mut Vec<TextualHunk>, op: HunkOp, text: &str| {
+    let push = |hunks: &mut Vec<TextualHunk>, op: HunkOp, text: &str| {
         if text.is_empty() {
             return;
         }
