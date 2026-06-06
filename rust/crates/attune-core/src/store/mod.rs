@@ -318,7 +318,12 @@ CREATE TABLE IF NOT EXISTS skill_signals (
     ref_id          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_skill_sig_processed ON skill_signals(processed, created_at);
-CREATE INDEX IF NOT EXISTS idx_skill_sig_kind ON skill_signals(kind, processed, created_at);
+-- B3: idx_skill_sig_kind is built in migrate_skill_signals_v07 AFTER `ALTER TABLE
+-- skill_signals ADD COLUMN kind`. Building it here in the unconditional SCHEMA_SQL
+-- crashes existing pre-v0.7 vaults (kind-less table) with `no such column: kind`,
+-- because CREATE TABLE IF NOT EXISTS is a no-op on the old table and the ALTER has
+-- not run yet at this point. The migrate fn runs on both open() and open_memory(),
+-- so fresh + in-memory DBs still get the index.
 
 -- Chunk 摘要缓存 —— 上下文压缩流水线（Batch B.1）
 --
@@ -2238,5 +2243,109 @@ mod tests_annotations {
         assert_eq!(store.list_annotations(&dek, &item_id).unwrap().len(), 0);
         // count 是裸 SQL 查表 —— 还能看到（作为内部指标），但外部不可见
         assert_eq!(store.count_annotations(&item_id).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tests_skill_signals_migration {
+    //! B3 regression: an existing pre-v0.7 vault has a `skill_signals` table WITHOUT
+    //! the `kind` column. Building `idx_skill_sig_kind` in the unconditional SCHEMA_SQL
+    //! crashed `Store::open()` on such vaults with `no such column: kind` because the
+    //! index ran before `migrate_skill_signals_v07` could ALTER the column in. The fix
+    //! moves the index creation into the migrate fn (after the ALTER). These tests guard
+    //! both the upgrade path (no data loss) and the fresh-install path (index still built).
+    use super::*;
+    use rusqlite::Connection;
+
+    /// Build a minimal pre-v0.7 `skill_signals` table (no `kind` / `ref_id` columns)
+    /// at `path`, seed one row, and close the connection.
+    fn seed_old_schema(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE skill_signals (
+                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                 query           TEXT NOT NULL,
+                 knowledge_count INTEGER NOT NULL DEFAULT 0,
+                 web_used        INTEGER NOT NULL DEFAULT 0,
+                 processed       INTEGER NOT NULL DEFAULT 0,
+                 created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_signals (query, knowledge_count, web_used) VALUES ('legacy query', 0, 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn has_column(conn: &Connection, col: &str) -> bool {
+        let c: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('skill_signals') WHERE name = ?1",
+                [col],
+                |r| r.get(0),
+            )
+            .unwrap();
+        c > 0
+    }
+
+    fn has_index(conn: &Connection, idx: &str) -> bool {
+        let c: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [idx],
+                |r| r.get(0),
+            )
+            .unwrap();
+        c > 0
+    }
+
+    #[test]
+    fn open_upgrades_old_skill_signals_without_kind_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old-vault.db");
+        seed_old_schema(&path);
+
+        // Before B3 fix this returned Err(no such column: kind). It must now succeed.
+        let store = Store::open(&path).expect("open() must upgrade a kind-less skill_signals table");
+
+        // kind + ref_id columns added by the migrate fn.
+        assert!(has_column(&store.conn, "kind"), "kind column must be present after upgrade");
+        assert!(has_column(&store.conn, "ref_id"), "ref_id column must be present after upgrade");
+        // The index is now built in the migrate fn (after the ALTER).
+        assert!(has_index(&store.conn, "idx_skill_sig_kind"), "idx_skill_sig_kind must be built");
+
+        // Zero data loss: the legacy row survives and defaults to kind='search_miss'.
+        let (count, kind): (i64, String) = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*), MIN(kind) FROM skill_signals WHERE query = 'legacy query'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "legacy skill_signals row must not be dropped on upgrade");
+        assert_eq!(kind, "search_miss", "legacy row must default to kind='search_miss'");
+    }
+
+    #[test]
+    fn open_is_idempotent_on_already_migrated_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.db");
+        seed_old_schema(&path);
+        // Open twice — second open must be a clean no-op (idempotent migrate + index).
+        let _ = Store::open(&path).unwrap();
+        let store = Store::open(&path).expect("re-open of an already-migrated vault must succeed");
+        assert!(has_index(&store.conn, "idx_skill_sig_kind"));
+    }
+
+    #[test]
+    fn fresh_install_still_builds_kind_index() {
+        // open_memory() runs SCHEMA_SQL (no index line now) + the migrate fn. The index
+        // must still exist so fresh + in-memory DBs are not regressed.
+        let store = Store::open_memory().unwrap();
+        assert!(has_column(&store.conn, "kind"));
+        assert!(has_index(&store.conn, "idx_skill_sig_kind"), "fresh DB must still have idx_skill_sig_kind");
     }
 }
