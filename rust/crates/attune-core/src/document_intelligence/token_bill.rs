@@ -65,6 +65,11 @@ pub struct TokenBill {
     pub new_chunks: u32,
     /// Reasoning model name used for the naive baseline estimate (for USD).
     pub baseline_model: String,
+    /// Which pipeline path produced this bill (spec §3.2): `"map-reduce"` (multi-stage) or
+    /// `"single-call"` (short-doc STAGE -1 bypass, spec §9.1 / §11 R2). Empty default keeps the
+    /// serialized shape additive for old clients (back-compat, spec §10). NOT a secret.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
 }
 
 impl TokenBill {
