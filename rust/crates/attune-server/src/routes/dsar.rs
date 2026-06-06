@@ -82,16 +82,32 @@ pub async fn export_data(
     Json(req): Json<DSARCredentialsReq>,
 ) -> AppResult<Json<serde_json::Value>> {
     validate(&req)?;
-    let client = login_cloud(&req)?;
-    let body = client
-        .dsar_export()
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar export: {e}")))?;
-    tracing::info!(
-        "DSAR export: relayed cloud export for email={} (size~{} bytes)",
-        req.email,
-        body.to_string().len()
-    );
+    // B4 (2026-06-06): CloudClient (reqwest::blocking) must not run in the async
+    // handler — its current-thread runtime panics on drop. Do login + dsar op on a
+    // blocking thread. See routes/member.rs for the same fix.
+    let body = run_blocking(req, |client| {
+        client
+            .dsar_export()
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar export: {e}")))
+    })
+    .await?;
+    tracing::info!("DSAR export: relayed cloud export (size~{} bytes)", body.to_string().len());
     Ok(Json(body))
+}
+
+/// B4 helper: run `login_cloud(req)` + a blocking CloudClient op on a blocking thread
+/// so the embedded `reqwest::blocking` runtime is created and dropped off the async
+/// worker. `op` receives the authenticated client and returns the proxied body.
+async fn run_blocking<F>(req: DSARCredentialsReq, op: F) -> AppResult<serde_json::Value>
+where
+    F: FnOnce(&CloudClient) -> AppResult<serde_json::Value> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let client = login_cloud(&req)?;
+        op(&client)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("dsar task join: {e}")))?
 }
 
 /// POST /api/v1/dsar/delete — 软删除 cloud 账户 proxy.
@@ -104,14 +120,14 @@ pub async fn delete_account(
     Json(req): Json<DSARCredentialsReq>,
 ) -> AppResult<Json<serde_json::Value>> {
     validate(&req)?;
-    let client = login_cloud(&req)?;
-    let body = client
-        .dsar_delete()
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar delete: {e}")))?;
-    tracing::info!(
-        "DSAR delete: cloud soft-delete confirmed for email={}",
-        req.email
-    );
+    // B4: blocking CloudClient off the async worker (see export_data).
+    let body = run_blocking(req, |client| {
+        client
+            .dsar_delete()
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar delete: {e}")))
+    })
+    .await?;
+    tracing::info!("DSAR delete: cloud soft-delete confirmed");
     Ok(Json(body))
 }
 
@@ -129,19 +145,22 @@ pub async fn cancel_deletion(
     Json(req): Json<DSARCredentialsReq>,
 ) -> AppResult<Json<serde_json::Value>> {
     validate(&req)?;
-    let client = login_cloud(&req).map_err(|e| {
-        AppError::Forbidden(format!(
-            "login refused (likely already soft-deleted; cancel-deletion must be \
-             issued from the same session that triggered the deletion): {e}"
-        ))
-    })?;
-    let body = client
-        .dsar_cancel_deletion()
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar cancel: {e}")))?;
-    tracing::info!(
-        "DSAR cancel-deletion: cloud restore confirmed for email={}",
-        req.email
-    );
+    // B4: blocking CloudClient off the async worker. login refusal keeps its
+    // Forbidden mapping (soft-deleted users cannot re-login).
+    let body = tokio::task::spawn_blocking(move || -> AppResult<serde_json::Value> {
+        let client = login_cloud(&req).map_err(|e| {
+            AppError::Forbidden(format!(
+                "login refused (likely already soft-deleted; cancel-deletion must be \
+                 issued from the same session that triggered the deletion): {e}"
+            ))
+        })?;
+        client
+            .dsar_cancel_deletion()
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar cancel: {e}")))
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("dsar task join: {e}")))??;
+    tracing::info!("DSAR cancel-deletion: cloud restore confirmed");
     Ok(Json(body))
 }
 

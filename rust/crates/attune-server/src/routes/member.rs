@@ -1,12 +1,21 @@
 //! /api/v1/member — 会员状态 / settings locks endpoint.
 
 use crate::state::SharedState;
-use attune_core::cloud_client::CloudClient;
+use attune_core::cloud_client::{CloudClient, License, UserInfo};
 use attune_core::llm_settings::SETTINGS_META_KEY;
 use attune_core::member_session::{MemberState, SettingsLocks};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+
+/// Result of the blocking CloudClient interaction (B4): carried back from
+/// `spawn_blocking` into the async tail. `license`/`me` are `None` for free users
+/// or when the best-effort `/me` fetch failed.
+struct CloudLoginData {
+    user: UserInfo,
+    license: Option<License>,
+    me: Option<UserInfo>,
+}
 
 /// GET /api/v1/member/state — 当前会员状态 (UI 展示)
 pub async fn get_state(State(state): State<SharedState>) -> Json<serde_json::Value> {
@@ -89,7 +98,7 @@ pub struct LoginPasswordReq {
 /// - 默认 cloud_url 为 https://accounts.engi-stack.com，可由请求覆盖。
 pub async fn login_password(
     State(state): State<SharedState>,
-    Json(req): Json<LoginPasswordReq>,
+    Json(mut req): Json<LoginPasswordReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     if req.email.trim().is_empty() || req.password.is_empty() {
         return Err((
@@ -101,47 +110,62 @@ pub async fn login_password(
     let cloud_url = req
         .cloud_url
         .unwrap_or_else(|| "https://accounts.engi-stack.com".to_string());
-    let mut client = CloudClient::new(cloud_url);
 
-    let user = client.login(req.email.trim(), &req.password).map_err(|e| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": format!("login failed: {e}")})),
-        )
-    })?;
-
-    // accounts plan → member tier：pro / pro_plus / enterprise 视为 paid，其余 free。
-    let is_paid = matches!(user.plan.as_str(), "pro" | "pro_plus" | "enterprise");
-    let new_state = if is_paid {
-        let licenses = client.list_licenses().map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("list licenses failed: {e}")})),
-            )
-        })?;
-        let selected = if let Some(code) = req.license_code.as_deref() {
+    // B4 (2026-06-06): CloudClient wraps `reqwest::blocking`, which spins up (and on
+    // drop tears down) a current-thread Tokio runtime. Calling it directly inside this
+    // async handler panicked the worker with "Cannot drop a runtime in a context where
+    // blocking is not allowed", resetting the connection — membership login was 100%
+    // broken on the real server (mock/unit tests never hit the live blocking path).
+    // Move the whole blocking CloudClient interaction (login → list_licenses → me) onto
+    // a blocking thread; the async tail (vault write + state mutation) stays here.
+    let email = req.email.trim().to_string();
+    let password = std::mem::take(&mut req.password);
+    let license_code = req.license_code.clone();
+    let blocking = tokio::task::spawn_blocking(move || -> Result<CloudLoginData, (StatusCode, String)> {
+        let mut client = CloudClient::new(cloud_url);
+        let user = client
+            .login(&email, &password)
+            .map_err(|e| (StatusCode::UNAUTHORIZED, format!("login failed: {e}")))?;
+        let is_paid = matches!(user.plan.as_str(), "pro" | "pro_plus" | "enterprise");
+        if !is_paid {
+            return Ok(CloudLoginData { user, license: None, me: None });
+        }
+        let licenses = client
+            .list_licenses()
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("list licenses failed: {e}")))?;
+        let selected = if let Some(code) = license_code.as_deref() {
             let code = code.trim();
             if code.is_empty() {
-                licenses.first()
+                licenses.into_iter().next()
             } else {
                 licenses
-                    .iter()
+                    .into_iter()
                     .find(|lic| lic.license_key == code || lic.id.to_string() == code)
             }
         } else {
-            licenses.first()
+            licenses.into_iter().next()
         }
-        .ok_or_else(|| {
+        .ok_or((StatusCode::BAD_REQUEST, "paid user has no matching license".to_string()))?;
+        // best-effort gateway token fetch — a failure here must not block login.
+        let me = client.me().ok();
+        Ok(CloudLoginData { user, license: Some(selected), me })
+    });
+    let CloudLoginData { user, license, me } = blocking
+        .await
+        .map_err(|e| {
             (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "paid user has no matching license"})),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("login task join error: {e}")})),
             )
-        })?;
+        })?
+        .map_err(|(code, msg)| (code, Json(serde_json::json!({"error": msg}))))?;
+
+    let new_state = if let Some(selected) = license {
         // 付费会员：拿 cloud gateway token, 合并进 vault app_settings,
         // 桌面 chat 零配置接通云端 LLM。best-effort — 失败不阻断登录。
         let mut gateway_written = false;
-        match client.me() {
-            Ok(me) => match (me.gateway_url.as_deref(), me.gateway_token.as_deref()) {
+        match me {
+            Some(me) => match (me.gateway_url.as_deref(), me.gateway_token.as_deref()) {
                 (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
                     // Bug-1 fix (spec 2026-05-24): cloud 下发的默认 model 一并写入,
                     // 避免 fresh vault paid 用户 chat 因 model=null → 404。
@@ -171,7 +195,7 @@ pub async fn login_password(
                     );
                 }
             },
-            Err(e) => tracing::warn!("member login: fetch /me failed: {e}"),
+            None => tracing::warn!("member login: fetch /me failed — user keeps current LLM settings"),
         }
 
         // Reload in-memory LLM provider so chat works immediately after login
@@ -256,7 +280,36 @@ fn apply_gateway_to_vault_settings(
 
 #[cfg(test)]
 mod tests {
+    use attune_core::cloud_client::CloudClient;
     use attune_core::llm_settings::{gateway_should_apply, merge_gateway_into_settings};
+
+    // ── B4 regression: blocking CloudClient must not panic the async worker ──
+    //
+    // Before B4, login_password() called CloudClient::login() (reqwest::blocking,
+    // which owns a current-thread Tokio runtime) directly inside the async handler.
+    // Dropping that runtime inside an async context panicked the tokio-rt-worker
+    // with "Cannot drop a runtime in a context where blocking is not allowed",
+    // resetting the connection — membership login was 100% broken on the real
+    // server. The fix moves the blocking call onto spawn_blocking. This test drives
+    // the exact pattern on a multi-thread runtime against an unreachable address: it
+    // must return Err (connection refused), NEVER panic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_cloud_client_via_spawn_blocking_does_not_panic() {
+        let result = tokio::task::spawn_blocking(|| {
+            // port 1 is unreachable → login returns Err; the point is that creating
+            // and dropping the embedded blocking runtime here does not panic.
+            let mut client = CloudClient::new("http://127.0.0.1:1");
+            client.login("user@example.com", "pw-not-real")
+        })
+        .await
+        .expect("spawn_blocking join must succeed (no worker panic)");
+        assert!(result.is_err(), "login against an unreachable host must be Err, not panic/Ok");
+    }
+
+    // Guards the anti-pattern the fix removed: doing the same blocking call WITHOUT
+    // spawn_blocking, directly on the async worker, is what panicked. We cannot
+    // assert the panic here without aborting the test process, so this test documents
+    // (via the passing spawn_blocking variant above) that spawn_blocking is required.
 
     // ── merge shape (kept from original, tests the pure helper) ─────────────
 

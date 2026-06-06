@@ -36,7 +36,20 @@ async fn main() {
     // 一键化部署: bootstrap models 路径 (postinst.sh 或开发者首次部署)
     if cli.bootstrap_models || cli.bootstrap_only {
         eprintln!("=== Attune bootstrap-models: 下载必需模型 ===");
-        match attune_core::ocr::ppocr::PpOcrProvider::ensure_models_downloaded() {
+        // B4 (2026-06-06): ensure_models_downloaded() uses reqwest::blocking, whose
+        // embedded current-thread runtime panics on drop inside this #[tokio::main]
+        // async context ("Cannot drop a runtime ..."). postinst.sh runs --bootstrap-models
+        // on every install, so this crashed fresh installs. Run it on a blocking thread.
+        let bootstrap = tokio::task::spawn_blocking(
+            attune_core::ocr::ppocr::PpOcrProvider::ensure_models_downloaded,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            Err(attune_core::error::VaultError::ModelLoad(format!(
+                "bootstrap task join error: {e}"
+            )))
+        });
+        match bootstrap {
             Ok(()) => eprintln!("✓ PP-OCR models ready"),
             Err(e) => {
                 eprintln!("✗ PP-OCR bootstrap failed: {e}");
