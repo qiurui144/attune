@@ -13,12 +13,10 @@
 //! map/reduce/semantic-verdict/Q&A — those are member-gated at the route layer and the
 //! routing DECISION is client-side (see [`model_routing`]).
 
+pub mod chapters; // T-05 — chapter-by-chapter reading (review output-mode contract)
 pub mod compare; // T-04 — document comparison (marked output-mode contract)
 pub mod deep_summary; // T-02 — flagship token-thrift pipeline
 pub mod extractive; // T-03 — local zero-LLM pre-cut
 pub mod model_routing; // T-01 — per-stage vetted-model selection
 pub mod token_bill; // T-06 — bill struct + savings computation
 pub mod vlm_extract; // T-09 — scanned/image source → VLM text extraction
-
-// Later batches register here on merge:
-//   pub mod chapters;      // T-05
