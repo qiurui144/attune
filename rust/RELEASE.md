@@ -1,5 +1,60 @@
 # attune 版本记录
 
+## v1.3.0 (2026-06-07) — OSS 文档智能：文档对比 · 深度总结(省 token) · 逐章阅读
+
+> spec:`docs/superpowers/specs/2026-06-06-oss-document-intelligence.md`(11 节齐全)。
+> 三功能均守 §Cost&Trigger 三层成本契约 — 零成本层(结构/文本 diff、extractive 抽取、章节切分)
+> 无需登录;**语义裁决 / map-reduce 归纳 / 每章 LLM 摘要 = tier-3 付费 member-gated**。
+
+### Highlights
+- **① 文档对比(`POST /api/v1/documents/compare`)**:零成本层 = 结构 diff(基于 `extract_sections`
+  的章节对齐增删改)+ 文本级行/句 diff + 相似块召回(BM25/向量);**member-gated** = 语义差异裁决
+  ("改写还是实质变更 / 立场是否反转" — LLM 判定)+ 差异自然语言总结。LLM 不可用时自动退化到
+  结构+文本 diff(免 LLM 仍可用)。
+- **② 深度总结-省 token 版(`POST /api/v1/documents/summarize`,旗舰算法)**:本地 extractive
+  预砍候选句 + `chunk_summaries` 缓存复用 +(member-gated)bounded map-reduce —— map 阶段 cheap-LLM
+  批量压缩 miss 块、reduce 阶段 capable-LLM ×1 合成多级摘要。**省 token 兑现作用域 = 长文档 re-read
+  (warm cache):实测 93-96% by-token**(`reports/2026-06-06_deepsum-savings.md`)。**短文档
+  (naive < `DEEPSUM_MIN_TOK`=1500 tok)走单次 standard call bypass**(map-reduce 多级开销 > 单次,
+  net-negative → STAGE -1 旁路,验收 actual ≤ naive)。
+- **③ 逐章阅读(`POST /api/v1/documents/chapters`)**:章节切分 + 每章 extractive 要点(零成本)+
+  章节导航;**member-gated** = 每章 LLM 摘要/Q&A + 跨章滚动记忆(前序章摘要注入 context)。
+- **Web UI 三模式视图 + 成本 chip**:`DocIntelView`(Compare / Deep Summary / Chapter Reading 三 tab),
+  i18n zh/en 全覆盖(key diff=0),成本契约 chip 显示本地/云端 + 预估;未付费触发 tier-3 → 提示
+  `membership-required`。
+- **CLI `attune doc` 子命令**:`compare` / `summarize` / `chapters`,本地文件、无需 vault,
+  零成本层零 LLM。
+- **per-agent/task vetted-model routing**:`settings.model_routing` 按 role(map=cheap / reduce=capable /
+  裁决 / Q&A)路由,经 new-api group 计费;缺省回退现有 default_model(老 settings 无该块 → 兜底不报错)。
+- **token_bill SSOT + 输出模式契约**:每次 tier-3 调用回 `token_bill`(counts + 逻辑模型名 + `path`),
+  输出走 `DocEnvelope`(narrative / structured,§3.5 输出模式一等公民)。
+
+### ⚠️ Breaking
+- **无 Breaking Change**。全部新增 `/api/v1/documents/*` 路径 + 新 CLI 子命令 + 新 UI 视图,
+  不改任何现有 route / CLI / schema 契约;老 client / 老 UI 完全不受影响。
+
+### Migration
+- **本版无需数据/schema 迁移**。`chunk_summaries` 表复用现有结构,仅新增 strategy 取值
+  `deepsum:<level>`(与现有 chat-compress strategy 命名空间隔离,`(chunk_hash, strategy)` 复合键
+  REPLACE 幂等)。`settings` 新增 `model_routing` 块,缺省回退 default_model,无需迁移老配置。
+
+### Known Limitations
+- **省 token 是 workload/size-dependent,不是一刀切 ≥60%**:旗舰兑现作用域 = **长文档 re-read
+  (warm cache)≥60% by-token(实测 93-96%)**;长文档 cold-run 仅 34-56%(map 必读 extractive 候选
+  ≥40% by-token + bounded reduce 恒按输入计费,结构上 cold-run 整体 ≥60% 不可达 — 见 spec §8.5/§9.1
+  三条诚实论证);短文档(< 1500 tok)map-reduce net-negative,已走单次 standard call bypass。
+  **不是** flat ≥60%;USD 节省因 cheap/capable 分级更高但定价敏感,故主指标按 token 数。
+- **lazy-DEK follow-up(已登记,next-sprint candidate)**:`summarize` 路由对 inline-text / 无 item_id
+  的请求仍 fetch DEK(`vault.dek_db()`)供缓存层使用,而该路径缓存从不命中 → 强制 vault-unlock。
+  live leg(§7.3 真部署)发现;OUT of 本 sprint scope,候选下一 sprint 改为按需 lazy-DEK。
+- **model-tier:3-tier 兼容,无最低 tier 限制**:§9.2 实测 qwen-turbo / deepseek-chat /
+  deepseek-reasoner 三 tier 全过 floor(ROUGE-L ≥0.40 + validity 1.0 + kp-recall ≥0.80),
+  跨 tier ROUGE-L spread = 0.047 « 0.15 → model-compatible,**无需 RELEASE 最低 tier 标注**
+  (`reports/2026-06-07_doc-intel-real-llm-matrix.md`)。弱本地 3B map 质量塌方时按 §4.5 退化到
+  纯 extractive(免 LLM 仍可用)。
+- **不做(写死,§2.2)**:行业专属对比/总结(= attune-pro)、流式输出、AI 主动建议、建库期偷跑深度总结、
+  后台批量深度总结队列。扫描件/图片 VLM 路径仅单文档(批量后置 v1.1)。
+
 ## v1.2.0 (2026-06-01) — GitConnector + WASM 跨平台 agent + 一键依赖部署
 
 ### Highlights
