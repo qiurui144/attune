@@ -79,9 +79,9 @@ fn parse_corpus(yaml: &str) -> Corpus {
             if let Some(rest) = t.strip_prefix("- id:") {
                 flush_doc(&mut docs, &mut cur_id, &mut cur_content);
                 cur_id = Some(rest.trim().to_string());
-            } else if t.starts_with("content:") {
+            } else if let Some(after) = t.strip_prefix("content:") {
                 // value (possibly `>`) starts on following indented lines
-                let after = t["content:".len()..].trim();
+                let after = after.trim();
                 if after != ">" && !after.is_empty() {
                     cur_content.push_str(after);
                     cur_content.push(' ');
