@@ -390,6 +390,24 @@ cargo test -p attune-core --test stress_large_scale_test
 | S-005 | Session token 伪造 | HMAC 校验 + nonce 递增 | F-01-VAULT |
 | S-006 | 无授权访问 | 所有 vault API 返回 403 | F-01-VAULT |
 | S-007 | API key 泄露（GET /settings） | redact_api_key 必须生效 | F-09-FORMFACTOR / 配置 |
+| S-008 | 出网点关闭仍出网（web_search/webdav） | OutboundGate Err 中止 HTTP；`{web_search,webdav}_disabled_in_settings_blocks_outbound` | F-17-PRIVACY |
+| S-009 | vault 锁定仍出网（web_search/webdav） | OutboundGate VaultLocked 中止；`{web_search,webdav}_vault_locked_blocks_outbound` | F-17-PRIVACY |
+| S-010 | L0 内容流向云端 LLM | `retain_non_l0_for_cloud` + 路由二次过滤剔除 L0 item / memory anchor；`retain_drops_l0_item_from_cloud_context`、`l0_content_to_cloud_is_blocked` | F-17-PRIVACY |
+| S-011 | OutboundGate Result 被丢弃（no-op enforce） | `scripts/privacy-audit.sh` 检查 #5 FAIL on `let _ = OutboundGate::enforce` / no-op marker | F-17-PRIVACY |
+
+#### F-17-PRIVACY OutboundGate 强制点 — P0-fixed list（2026-06-08）
+
+> 背景：coverage scan `reports/2026-06-08_coverage-scan-vault-privacy-security.md` G1/G3 暴露「OutboundGate 在 3/5 出网点是 no-op + L0「永不出网」零强制」。本轮 TDD（先红后绿）闭环。
+
+| 缺口 | 根因（修前） | 修复 | 回归测试（绿） |
+|------|--------------|------|----------------|
+| **G1** web_search 出网无强制 | `let _ = enforce(... enabled:true, vault_unlocked:true)` 丢弃 Result（"Task 7" 从未做）；关闭/锁定仍真出网（实测红：DuckDuckGo 真返结果） | `BrowserSearchProvider` 加真实 `outbound_enabled`/`vault_unlocked`，`search()` 用 `?` 中止；路由层 `read_privacy_outbound_enabled` 活查 `privacy.web_search` | `web_search_browser::tests::web_search_{disabled,vault_locked}_blocks_outbound` |
+| **G1** webdav 出网无强制 | 同上（`scanner_webdav::list` no-op）；关闭/锁定仍 PROPFIND（实测红：真连远端） | `WebDavConnector::with_outbound_policy` + `list()` 用 `?` 中止；`sync_webdav_dir` 活查 `privacy.webdav` + vault state | `scanner_webdav::tests::webdav_{disabled,vault_locked}_blocks_outbound` |
+| **G1** cloud_saas wipe | `let _ = enforce`（**有意** always-allow，DSAR 擦除）| 保留 always-allow，注释/audit allow-list 显式化（唯一合法丢弃点） | privacy-audit 检查 #5 allow-list |
+| **G3** L0「永不出网」未实现 | `PrivacyTier::L0` 仅存储；`filter_out_l0_items` 死代码（无调用方）；`OutboundGate` 无 tier 参数 | `OutboundGate` 加 `local_destination`/`contains_l0`（L0→云 = `L0CloudBlocked`）；`Store::retain_non_l0_for_cloud` 原语 + 路由出网前调用 + 记忆装配后二次过滤 | `outbound_gate::tests::l0_content_to_cloud_is_blocked`、`store::items::privacy_tier_tests::retain_drops_l0_item_from_cloud_context`（含 deleted/ghost fail-closed） |
+| **audit** 脚本被 no-op 骗过 | 检查 #1 仅看 `enforce` 调用存在 | 新增检查 #5：grep `let _ = OutboundGate::enforce` / `wired in Task 7` 标记 → FAIL（已自测灵敏度：probe 注入 no-op 真红） | `scripts/privacy-audit.sh` 检查 #5 |
+
+**残留（FLAG，follow-up）**：(a) 休眠的 agent `WebSearchTool`（`tools.rs`，OSS 未注册进任何生产 ToolRegistry）走 state provider 默认 permissive policy —— 接入生产 flow 时构造方须调 `with_outbound_policy`；(b) 全链 HTTP E2E（真 upload+index+L0 标记→chat→断言 cloud payload 无 L0）需真 embedding，本轮以 store 原语级 + gate 级红→绿 prove-test 闭环替代。
 
 ### 3.2 跨平台测试矩阵（CI）
 

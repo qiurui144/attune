@@ -56,6 +56,7 @@ hits=$(grep -rnE '(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})' 
         | grep -vE 'scripts/privacy-audit\.sh' \
         | grep -vE 'rust/crates/attune-core/src/pii/' \
         | grep -vE '/tests/|_test\.rs:|_tests\.rs:' \
+        | grep -vE 'AKIAIOSFODNN7EXAMPLE' \
         || true)
 if [ -n "$hits" ]; then
   echo "FAIL: hardcoded API-key candidates:"
@@ -92,6 +93,43 @@ if [ -n "$default_block" ]; then
   fail=1
 else
   echo "  ok — 5 outbound keys all default false"
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# 5. OutboundGate result must NOT be discarded (no-op enforcement).
+#
+# History (F-17 G1, 2026-06-08): four egress sites called
+# `let _ = OutboundGate::enforce(... enabled:true, vault_unlocked:true ...)`
+# as a *no-op audit marker* ("wired in Task 7", never done). Check #1 keys on
+# the *presence* of `OutboundGate::enforce` and was fooled — the call existed
+# but its Result (Disabled / VaultLocked / L0CloudBlocked / RedactorRequired)
+# was thrown away, so disabling an egress or locking the vault did NOT stop it.
+#
+# This check FAILS on any `let _ = ... OutboundGate::enforce` (result discarded)
+# and on the tell-tale `// wired in Task 7` no-op comment. The ONE legitimate
+# discard is CloudClient::wipe_session (DSAR-adjacent always-allow) — explicitly
+# allow-listed below.
+# ──────────────────────────────────────────────────────────────────────
+echo "==> 5. OutboundGate Result must be honored (no discarded enforce / no-op markers)"
+gate_allow='rust/crates/attune-core/src/cloud_client\.rs' # wipe_session: intentional always-allow
+# 5a. `let _ = ... OutboundGate::enforce` — discarded fail-closed Result.
+noop_hits=$(grep -rnE 'let[[:space:]]+_[[:space:]]*=.*OutboundGate::enforce' \
+              rust/crates/attune-*/src 2>/dev/null \
+            | grep -vE "$gate_allow" \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
+            || true)
+# 5b. The historical no-op marker comment (a stub that never wired real state).
+marker_hits=$(grep -rnE 'wired in Task 7|non-rejecting call site marker|hardcoded.*OutboundPolicy' \
+                rust/crates/attune-*/src 2>/dev/null || true)
+if [ -n "$noop_hits" ] || [ -n "$marker_hits" ]; then
+  echo "FAIL: OutboundGate enforcement is a no-op at one or more egress points:"
+  [ -n "$noop_hits" ] && { echo "  -- discarded Result (let _ = enforce):"; echo "$noop_hits"; }
+  [ -n "$marker_hits" ] && { echo "  -- no-op marker comments:"; echo "$marker_hits"; }
+  echo "  Fix: propagate the Err (use ? / match) and pass REAL enabled +"
+  echo "       vault_unlocked + redactor (see web_search_browser.rs / scanner_webdav.rs)."
+  fail=1
+else
+  echo "  ok — every OutboundGate::enforce honors its Result (wipe_session allow-listed)"
 fi
 
 if [ "$fail" -eq 0 ]; then
