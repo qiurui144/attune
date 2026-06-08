@@ -19,7 +19,7 @@
 - Axum HTTP Server + TLS + Bearer auth + 嵌入式 Web UI
 - 跨平台单二进制（Linux / Windows / macOS / NAS）+ Tauri 桌面安装器
 - 用途：生产部署、商用发布、NAS 远程访问
-- **最新版本 v1.1.0 GA**（2026-05-30，Agent Control Plane），详见 [`rust/RELEASE.md`](rust/RELEASE.md)（Rust 商用线为版本 SSOT；本根 RELEASE 记录 Python 原型线历史）
+- **最新版本 v1.2.0**（2026-06-01，GitConnector + WASM 跨平台 agent + 一键依赖部署），详见 [`rust/RELEASE.md`](rust/RELEASE.md)（Rust 商用线为版本 SSOT；本根 RELEASE 仅记录 Python 原型线历史，不重复 Rust 版本节）
 
 两条线共享 Chrome 扩展协议（`/api/v1/*`），Python 原型验证的特性择优迁移到 Rust 商用线。
 
@@ -154,11 +154,11 @@ vMAJOR.MINOR.PATCH[-PRERELEASE.N]
 
 **测试**：622 passed / 0 failed / 3 ignored，含 8 个新 form_factor unit test。
 
-详细 release notes：[`docs/v0.6.1-release-notes.md`](docs/v0.6.1-release-notes.md) ([中文](docs/v0.6.1-release-notes.zh.md))。
+> Rust 商用线 v0.6.x 及之后所有版本的完整 release notes 见 [`rust/RELEASE.md`](rust/RELEASE.md)（版本 SSOT）。
 
 ### v0.6.0（2026-04-28）GA
 
-详见 [`docs/v0.6-release-notes.md`](docs/v0.6-release-notes.md) ([中文](docs/v0.6-release-notes.zh.md))。
+Rust 商用线 GA 首发，详见 [`rust/RELEASE.md`](rust/RELEASE.md)。
 
 ---
 
@@ -192,21 +192,4 @@ git tag -l 'v0.6*'
 - Sprint 2 Phase C — Intent Router（chat 自然语言 → skill 路由）
 - Sprint 2 Phase E — K3 ssh 部署 + Win MSI CI 实测
 
-## 远端清理 TODO（user push 时执行）
-
-`develop` 上有两条已 merge 的远端 feature 分支需要清理（避免分支墓地）：
-
-```bash
-# 推送本地 develop + 标签
-git push origin develop
-git push origin v0.6.0-alpha.1
-
-# 清理已合并的远端 feature 分支
-git push origin --delete feature/phase3-long-text
-git push origin --delete feature/search-rerank-infer
-
-# 同步本地引用
-git fetch --prune
-```
-
-后续每个 sprint 的 feature 分支 squash merge 入 `develop` 后**立即删远端**。详见 `DEVELOP.md` 的「分支模型 / 远端清理」。
+> 以上为 Python 原型线早期历史快照。Rust 商用线后续完整迭代（v0.6.x → v1.2.0）见 [`rust/RELEASE.md`](rust/RELEASE.md)。
