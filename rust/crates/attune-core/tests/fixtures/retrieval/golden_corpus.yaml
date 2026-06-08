@@ -1,0 +1,50 @@
+# Retrieval golden set for retrieval_quality_test.rs
+#
+# Each doc has an id + content. Each query names the single doc that is the
+# known-relevant target. The test embeds the corpus with MockEmbeddingProvider
+# (and, when ATTUNE_TEST_OLLAMA_EMBED=1 + bge-m3 reachable, also with real
+# bge-m3) and asserts the relevant doc lands in top-K.
+#
+# Queries are written to share surface tokens with their target doc so the
+# deterministic bag-of-tokens mock embedder (and BM25) can separate them.
+# Cross-language (EN query -> CN doc by semantics) is a SEPARATE env-gated
+# leg because the mock embedder cannot model cross-lingual semantics.
+
+docs:
+  - id: doc-rust-ownership
+    content: >
+      Rust ownership and borrowing rules guarantee memory safety without a
+      garbage collector. Each value has a single owner, and the borrow checker
+      enforces that references never outlive the value they point to.
+  - id: doc-python-gil
+    content: >
+      The Python global interpreter lock serializes bytecode execution so only
+      one thread runs Python code at a time. This simplifies the interpreter
+      but limits multithreaded CPU-bound parallelism.
+  - id: doc-tantivy-bm25
+    content: >
+      Tantivy is a full text search engine library that ranks documents with
+      the BM25 scoring function over an inverted index. It tokenizes text and
+      computes term frequency and inverse document frequency.
+  - id: doc-hnsw-vector
+    content: >
+      Vector search uses an HNSW graph index to find approximate nearest
+      neighbors by cosine similarity over dense embedding vectors. Recall is
+      traded against latency by tuning the graph parameters.
+  - id: doc-encryption-aes
+    content: >
+      Field level encryption protects stored data with AES-256-GCM using a key
+      derived from the user passphrase by Argon2id. The data encryption key
+      never leaves memory in plaintext.
+
+queries:
+  - query: Rust ownership borrow checker memory safety
+    relevant: doc-rust-ownership
+  - query: Python global interpreter lock thread parallelism
+    relevant: doc-python-gil
+  - query: BM25 full text search inverted index ranking
+    relevant: doc-tantivy-bm25
+  - query: HNSW approximate nearest neighbor cosine vector search
+    relevant: doc-hnsw-vector
+  - query: AES-256-GCM Argon2id field encryption key
+    relevant: doc-encryption-aes
