@@ -156,6 +156,82 @@ apps/attune-desktop/
 └─────────────────────────────────────────────────┘
 ```
 
+## 能力矩阵 × 技术栈选型
+
+> 高层能力地图(基于 develop 实时代码:5 crate / 60+ `attune-core` 模块 / 40+ route 文件)。
+> **库版本号以下文「Cargo workspace 关键依赖」为准**;各域实现细节见本文对应深挖节(括号内指引)。
+> 选型不逐功能挑"最强库",而被三条全局约束夹出 — 见末尾「横切选型三决策」。
+
+### 安全 / 隐私底座(隐私优先 = 产品北极星)
+| 能力 | 实现模块 | 技术栈 | 选型理由 |
+|------|---------|--------|---------|
+| 加密 Vault(字段级) | `vault.rs` `crypto.rs` `store/` | Argon2id + AES-256-GCM + zeroize | 纯 Rust 密码学,无 OpenSSL(详见「加密细节」节) |
+| 隐私出网门 / Tier | `outbound_gate.rs` | 自研 OutboundGate + `PrivacyTier::L0` | egress 强制,L0 永不出网 |
+| PII 脱敏 / DSAR / 审计 | `pii/` `routes/{dsar,audit}.rs` | 自研 redact + hash-chain | 隐私合规 |
+
+### 摄取 / 解析 / 连接器
+| 能力 | 实现模块 | 技术栈 | 选型理由 |
+|------|---------|--------|---------|
+| 统一 ingest + 连接器 | `ingest/{connector,local,email,git,rss,pipeline}.rs` | git2 / reqwest(IMAP) / reqwest_dav | SourceConnector 抽象(详见「采集体系」节) |
+| 多格式解析 | `parser.rs` `chunker.rs` `reader.rs` | pdf-extract · calamine(xlsx) · zip(office 解压) · scraper(HTML) | PDF/DOCX/XLSX/PPTX/EPUB/HTML/code,含 zip-bomb 防护 |
+
+### 混合检索(🆓 零成本层)
+| 能力 | 实现模块 | 技术栈 | 选型理由 |
+|------|---------|--------|---------|
+| 全文检索(FTS) | `index.rs` `reindex.rs` | tantivy + tantivy-jieba + LowerCaser/Stemmer | 中文分词 + 英文多语言(详见「搜索引擎架构」节) |
+| 向量检索 | `vectors.rs` | usearch HNSW + f16 量化 | 纯 Rust,可静态链入单 binary |
+| RRF 融合 | `search.rs` | 自研 RRF + 两阶段层级 | 动态注入预算 |
+
+### AI 推理 / 分类 / 组织(⚡ 本地算力层)
+| 能力 | 实现模块 | 技术栈 | 选型理由 |
+|------|---------|--------|---------|
+| Embedding | `embed.rs` `infer/` | bge-m3(Ollama HTTP)/ ONNX(ort) | ort 自动选 CPU/DirectML/CUDA + download-binaries 免编译链 |
+| 分类 / 聚类 / 实体 | `classifier.rs` `clusterer.rs` `taxonomy.rs` `entities.rs` `entity_graph.rs` `linker/` | hdbscan + Ollama qwen2.5 + tokenizers/hf-hub | hdbscan 纯 Rust;分类走 schema-guided |
+
+### 对话 + RAG + LLM 抽象(💰 显式触发层)
+| 能力 | 实现模块 | 技术栈 | 选型理由 |
+|------|---------|--------|---------|
+| Chat + RAG | `chat.rs` `chat_reliability/` `intent_router.rs` `query_rewrite.rs` `context_{budget,compress}.rs` | 自研动态注入预算 | 非流式(本地模型快,见「上下文压缩」节) |
+| LLM Provider | `llm.rs` `member_session.rs` `cloud_client.rs` `llm_settings.rs` `ollama_setup.rs` | `trait LlmProvider` + `DeterminismLevel` + `Attachment` | 云为主本地为辅;Ollama / Pro 网关 / BYOK(OpenAI/Anthropic/Gemini/DeepSeek/Qwen) |
+
+### Agent / Skill / Workflow / 记忆(生态核心功能)
+| 能力 | 实现模块 | 技术栈 | 选型理由 |
+|------|---------|--------|---------|
+| Agent 框架 | `agents/` `agent_runner.rs` `agent_quality.rs` `capability_dispatch.rs` | 自研 + ratchet 质量门 | `agent_quality_manifest.yaml` 阈值只升不降 |
+| 跨平台 agent 分发 | `wasm_runtime.rs` + `attune-agent-sdk` | wasmtime(`wasm32-wasip1`) | 一包通吃所有平台(详见「插件 capability runtime 契约」节) |
+| Skill + 自进化 | `skills/` `skill_eval.rs` `skill_evolution/` | 自研 SkillClaw 风格 | 失败信号 → 静默进化 |
+| Workflow 引擎 | `workflow/{ops,runner,schema}.rs` | 自研 DAG | |
+| 记忆增强 | `memory/` `memory_consolidation.rs` | 150 字存档摘要 + golden gate | 详见「多层记忆」节 |
+
+### 多模态底座(subprocess 而非 FFI)
+| 能力 | 实现模块 | 技术栈 | 选型理由 |
+|------|---------|--------|---------|
+| ASR | `asr.rs` | whisper.cpp **subprocess** | 复用系统二进制,避 libwhisper 交叉编译版本地狱 |
+| OCR | `ocr/` `routes/ocr_profiles.rs` | PP-OCRv5 mobile(ONNX/ort)+ image/imageproc | 同 subprocess 哲学 |
+| VLM / Office | `vlm.rs` `office.rs` `office_job_queue.rs` | 队列化重活 | |
+
+### 治理 / 插件市场 / 行为 / 网搜 / 备份
+| 能力 | 实现模块 | 技术栈 | 选型理由 |
+|------|---------|--------|---------|
+| 成本治理(ACP) | `governor.rs` `resource_governor/` `cost.rs` | output cap + CoT budget + cache 监控 | 详见「资源治理框架」节 |
+| 插件签名 / 市场 / MCP | `plugin_{sig,encryption,loader,registry,hub,sync}.rs` `mcp_client.rs` `routes/marketplace.rs` | Ed25519 + 离线 license + binary 多路复用 | 信任锚 Official/Community |
+| 行为画像 | `behavior/` `capture/` `auto_bookmarks.rs` `browse_signals.rs` `project_recommender.rs` `feedback/` | 自研可导出画像 | |
+| 零 API 费网搜 | `web_search{,_engines,_browser,_cache}.rs` | 浏览器自动化(驱动系统 Chrome)+ 加密 TTL 缓存 | 详见「Web search 缓存」节 |
+| 备份 / 恢复 | `backup.rs` | 加密快照 + 演练 | |
+
+### 接入层
+| 层 | 技术栈 |
+|----|--------|
+| **Server** | Axum 0.8(json / multipart / **ws**)+ axum-server(tls-rustls)+ tower-http + Tokio |
+| **Web UI** | Preact + TypeScript + Vite(嵌入式 SPA,`include_str!`)+ i18n(zh/en 双 key 集合强一致) |
+| **Desktop** | Tauri 2(tray-icon / dialog / single-instance / updater)— "Attune" |
+| **CLI** | clap(derive)+ rpassword |
+
+### 横切选型三决策(为什么是这些库,而非"最强库")
+1. **跨平台静态分发** → 纯 Rust 密码学 / TLS(rustls,不碰系统 OpenSSL);C/C++ 只留两处不可替代的(rusqlite `bundled` + usearch C++);ort 用 `download-binaries` 免本地编译链。合力 = 一个静态 binary 通吃 Win/Linux。**这条解释了 tantivy 而非 Elasticsearch、usearch 而非 faiss、rustls 而非 openssl、Preact 而非 React**。
+2. **重活走 subprocess 不进 FFI**(whisper / PP-OCR)→ 调系统二进制而非链 libwhisper/libpaddle,理由写在 `asr.rs` 注释:**交叉编译时的 C++ 库版本地狱**。代价多一次进程启动,换交叉编译不爆。
+3. **attune 本身不碰 GPU** → 所有推理走 HTTP(Ollama / 网关)或 ONNX(ort 自动选后端),核心逻辑零 GPU 依赖 → CI 无 GPU 可跑、弱机自动降级。`wasmtime` 跑 agent 是同一思路延伸:**用 wasm 把"一次编译多处运行"从理想变成 agent 分发的现实**。
+
 ## 启动序列
 
 ### attune-server lifespan
@@ -953,20 +1029,35 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:18900/
 ## Cargo workspace 关键依赖
 
 ```toml
-# attune-core
+# attune-core — 加密
 argon2 = "0.5"                    # Argon2id 密钥派生
-aes-gcm = "0.10"                  # AES-256-GCM 加密
+aes-gcm = "0.10"                  # AES-256-GCM 字段级加密
 zeroize = { version = "1", features = ["derive"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+# attune-core — 存储 / 检索
+rusqlite = { version = "0.32", features = ["bundled"] }       # 内嵌 SQLite
 tantivy = "0.22"                  # 全文搜索
 tantivy-jieba = "0.11"            # 中文分词
-usearch = "2"                     # 向量索引
-walkdir = "2"                     # 目录遍历
-notify = "8"                      # 文件监听
-reqwest = { version = "0.12", features = ["json"] }  # Ollama HTTP
+usearch = "2.25"                  # 向量索引 HNSW（2.25+ 修 Windows MAP_FAILED build）
+hdbscan = "0.11"                  # 聚类（纯 Rust）
+walkdir = "2"; notify = "8"       # 目录遍历 / 文件监听
+# attune-core — 推理 / 多模态
+ort = "2.0.0-rc.12"               # ONNX Runtime（embedding/OCR，CPU/DirectML/CUDA + download-binaries 免编译）
+tokenizers = "0.21"               # 分词
+hf-hub = "0.5"                    # 模型拉取（ureq+rustls，不引 openssl）
+image = "0.25"; imageproc = "0.26"   # OCR 图像处理
+# attune-core — 解析 / 连接器
+pdf-extract = "0.8"               # PDF
+calamine = "0.26"                 # xlsx
+zip = "2"                         # docx/pptx/epub 解压（含 zip-bomb 防护）
+scraper = "0.21"                  # HTML
+git2 = "0.21"                     # git 连接器（含 SSRF allowlist）
+reqwest_dav = "0.3"               # WebDAV（rustls-tls）
+reqwest = { workspace = true, features = ["blocking", "cookies"] }   # Ollama / HTTP
+# attune-core — agent 跨平台分发
+wasmtime = { version = "45", optional = true }   # 执行 wasm32-wasip1 agent 模块（cranelift）
 
 # attune-server
-axum = { version = "0.8", features = ["json", "multipart"] }
+axum = { version = "0.8", features = ["json", "multipart", "ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = "0.23"
@@ -974,6 +1065,9 @@ rustls = "0.23"
 # attune-cli
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
+
+# apps/attune-desktop
+tauri = { version = "2", features = ["tray-icon"] }   # + dialog / single-instance / updater 插件
 ```
 
 ## 跨平台编译
