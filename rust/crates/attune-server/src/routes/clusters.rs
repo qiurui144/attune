@@ -88,8 +88,10 @@ pub async fn rebuild(
     let mut inputs: Vec<ClusterInput> = Vec::with_capacity(ids.len());
     let mut missing_vec = 0usize;
     {
-        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        // 规范锁序 fulltext → vectors → vault：vectors 必须在 vault 之前取
+        // （与 search/chat 热点路径一致），反序持锁会 ABBA 死锁。
         let vecs = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let vecs_ref = vecs.as_ref();
         for id in &ids {
             let embedding = match vecs_ref.and_then(|v| v.get_vector(id)) {

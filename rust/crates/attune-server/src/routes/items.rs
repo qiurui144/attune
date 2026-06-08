@@ -170,8 +170,12 @@ pub async fn update_item(
         // lock order with search/chat (fulltext→vectors without vault).
         let mut vectors_deleted = 0usize;
         {
-            let mut vectors_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+            // Canonical order fulltext → vectors (matches the search/chat hot path,
+            // routes/search.rs ft_guard before vec_guard). Acquiring vectors before
+            // fulltext here would invert the relative order vs search and deadlock
+            // (ABBA: search holds fulltext waits vectors; this holds vectors waits fulltext).
             let fulltext_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+            let mut vectors_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
             if let (Some(vectors), Some(fulltext)) = (vectors_guard.as_mut(), fulltext_guard.as_ref()) {
                 match vectors.delete_by_item_id(&id) {
                     Ok(n) => vectors_deleted = n,
@@ -260,6 +264,12 @@ pub async fn delete_item(
     if id.len() > 64 {
         return Err(AppError::BadRequest("id too long".into()));
     }
+    // Canonical lock order: fulltext → vectors → vault (matches search/chat hot
+    // path). Acquiring vault before the index locks here would invert the order
+    // vs search/chat and deadlock (ABBA). Hold all three across purge + SQL
+    // delete so search never sees a "DB deleted but vectors still present" state.
+    let fulltext_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+    let mut vectors_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
     let vault = state.vault.lock()
         .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     // vault Locked/Sealed 时拒绝删除（与 update_item / list_items 等
@@ -271,14 +281,10 @@ pub async fn delete_item(
     // 先清索引（vector + FTS + queue），再 SQL 软删 — 让 search 在删除窗口内
     // 不会读到"DB 已删但向量还在"的 partial 状态
     let mut purge_stats = None;
-    {
-        let mut vectors_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
-        let fulltext_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
-        if let (Some(vectors), Some(fulltext)) = (vectors_guard.as_mut(), fulltext_guard.as_ref()) {
-            match reindex::purge_item_indexes(vault.store(), vectors, fulltext, &id) {
-                Ok(stats) => purge_stats = Some(stats),
-                Err(e) => tracing::warn!("purge_item_indexes failed for {id}: {e}"),
-            }
+    if let (Some(vectors), Some(fulltext)) = (vectors_guard.as_mut(), fulltext_guard.as_ref()) {
+        match reindex::purge_item_indexes(vault.store(), vectors, fulltext, &id) {
+            Ok(stats) => purge_stats = Some(stats),
+            Err(e) => tracing::warn!("purge_item_indexes failed for {id}: {e}"),
         }
     }
 

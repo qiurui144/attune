@@ -143,26 +143,35 @@ pub async fn upload_file(
     }
 
     // 即时 FTS 索引（搜索不依赖 AI 即可工作）。
-    // ingest_document 不碰 VectorIndex / FulltextIndex（server AppState 独立 Mutex），
-    // FTS 即时写由此 server 薄壳补充（锁顺序与 embed_worker 不相交）。
     // parsed_title：parser 从内容提取的真实标题（如 Markdown H1），用于响应 + FTS；
     // get_item 失败时回退原始文件名。
-    let parsed_title = if is_new {
-        if let Ok(Some(item)) = vault.store().get_item(&dek, &item_id) {
-            let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(ft) = ft_guard.as_ref() {
-                let _ = ft.add_document(&item_id, &item.title, &item.content, "file");
-            }
-            item.title.clone()
-        } else {
-            filename.clone()
+    //
+    // 先在持 vault 时把 title/content 读成 owned 值，drop(vault) 后再单独取
+    // fulltext 写 FTS。绝不在持 vault 时取 fulltext —— 那会反转规范锁序
+    // fulltext → vectors → vault（与 search/chat 热点路径冲突 = ABBA 死锁）。
+    let fts_payload: Option<(String, String)> = if is_new {
+        match vault.store().get_item(&dek, &item_id) {
+            Ok(Some(item)) => Some((item.title.clone(), item.content.clone())),
+            _ => None,
         }
     } else {
-        filename.clone()
+        None
     };
 
-    // 释放 vault guard，让后续 spawn task 能独立 lock vault
+    // 释放 vault guard，让后续 FTS 写 + spawn task 能在不持 vault 时取其他锁。
     drop(vault);
+
+    // FTS 即时写：此处 fulltext 单独持有（vault 已释放），无并发锁序约束。
+    let parsed_title = match &fts_payload {
+        Some((title, content)) => {
+            let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(ft) = ft_guard.as_ref() {
+                let _ = ft.add_document(&item_id, title, content, "file");
+            }
+            title.clone()
+        }
+        None => filename.clone(),
+    };
 
     // 新文档入库 → 失效 search 缓存，否则之前搜过的 query
     // 命中旧缓存，新文档搜不到

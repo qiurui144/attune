@@ -328,8 +328,11 @@ impl AppState {
         //   优先从 ~/.local/share/attune/vectors.encbin 加密加载；不存在或损坏
         //   降级为空 HNSW。写入在 start_queue_worker 批次结束时 flush（每 20 次 or
         //   每 10 分钟取近者），clear_search_engines 锁定前再 flush 一次。
-        // 锁序：先取 vault（拿 dek）再取 vectors —— 与文档化全局序
-        // vault → vectors → fulltext → embedding 一致，杜绝 vectors→vault 反序持锁。
+        // 全局规范锁序（任意路径同时持多锁时必须遵守）：
+        //   fulltext → vectors → vault  （embedding / search_cache / cluster_snapshot
+        //   各为独立锁，不参与该序）。与 search/chat 热点路径一致；反序持锁 = ABBA 死锁。
+        // 此处不同时持锁：先取 vault 拿 dek（语句结束即释放），再单独取 vectors 装载，
+        // 两锁不重叠，故不违反规范序。
         let vectors_path = attune_core::platform::data_dir().join("vectors.encbin");
         let dek_opt = self
             .vault
@@ -760,10 +763,13 @@ impl AppState {
                     // 错误地 park（attempts ≥ 5），需运维手动 reset 才能恢复。
                     enum WorkerErr { Transient(String), Task(String) }
                     let result: Result<(), WorkerErr> = (|| {
+                        // Lock order MUST be fulltext → vectors → vault (canonical, matches
+                        // the search/chat hot path). Acquiring vault first here would invert
+                        // the order vs search/chat and deadlock (ABBA). See lock_order_abba_test.
+                        let fulltext_g = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut vectors_g = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
                         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                         let dek = vault.dek_db().map_err(|e| WorkerErr::Transient(format!("dek_db: {e}")))?;
-                        let mut vectors_g = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
-                        let fulltext_g = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
                         let (Some(vectors), Some(fulltext)) = (vectors_g.as_mut(), fulltext_g.as_ref()) else {
                             return Err(WorkerErr::Transient("vectors/fulltext not initialized".into()));
                         };
@@ -1245,11 +1251,12 @@ impl AppState {
                 }
 
                 // 调 attune-core::queue::embed_and_index_batch 共享批处理。
-                // 锁顺序：vault → vectors → fulltext，全程持锁直到 done_ids 取出。
+                // 锁顺序：fulltext → vectors → vault（规范序，与 search/chat 热点路径一致），
+                // 全程持锁直到 done_ids 取出。绝不 vault 先于 fulltext/vectors（ABBA 死锁）。
                 let done_ids: Vec<i64> = {
-                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut vecs_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
                     let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut vecs_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
 
                     let (Some(vi), Some(ft)) = (vecs_guard.as_mut(), ft_guard.as_ref()) else {
                         tracing::debug!("Queue worker: vectors/fulltext index unavailable mid-batch");

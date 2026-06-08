@@ -155,9 +155,15 @@ pub async fn bind_directory(
                 )
             })?;
 
+    // 释放 bind/scan 阶段持有的 vault，再以规范锁序 fulltext → vault 重取做 FTS
+    // rebuild。绝不在持 vault 时取 fulltext（那会反转 fulltext → vectors → vault
+    // 规范序，与 search/chat 热点路径冲突 = ABBA 死锁）。dek 是 owned Key32，drop
+    // vault 后仍可用。
+    drop(vault);
     {
         let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ft) = ft_guard.as_ref() {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
             if let Ok(ids) = vault.store().list_all_item_ids() {
                 for id in &ids {
                     if let Ok(Some(item)) = vault.store().get_item(&dek, id) {
