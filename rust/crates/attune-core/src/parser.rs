@@ -390,7 +390,9 @@ fn parse_content(content: &str, filename: &str) -> Result<(String, String)> {
         // TXT 等: 首行作标题
         content.lines().next()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim()[..l.trim().len().min(100)].to_string())
+            // char-safe truncation: byte-slicing [..100] panics when byte 100 lands
+            // mid-codepoint on a >100-byte multibyte first line (emoji/CJK) — take 100 chars.
+            .map(|l| l.trim().chars().take(100).collect::<String>())
             .unwrap_or(stem)
     };
 
@@ -434,6 +436,26 @@ fn parse_html_file(path: &Path, stem: &str) -> Result<(String, String)> {
     Ok((title, content))
 }
 
+/// element 子树文本，跳过 `<script>`/`<style>` 子树。scraper 的 `.text()` 会把 script/style
+/// 的源码文本一并收进来；不剔除就会让脚本/样式源码泄漏进被索引/可搜索的内容(安全+质量问题)。
+fn text_excluding_script_style(el: scraper::ElementRef) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for node in el.descendants() {
+        let Some(t) = node.value().as_text() else { continue };
+        // 文本节点的任一祖先是 script/style → 跳过
+        let mut ancestor = node.parent();
+        let mut skip = false;
+        while let Some(a) = ancestor {
+            if let Some(e) = a.value().as_element() {
+                if e.name() == "script" || e.name() == "style" { skip = true; break; }
+            }
+            ancestor = a.parent();
+        }
+        if !skip { out.push(t.to_string()); }
+    }
+    out.join(" ")
+}
+
 /// HTML 字符串 → 可读文本（title tag 优先，body 内联文本拼接）
 fn html_to_text(html: &str) -> String {
     use scraper::{Html, Selector};
@@ -445,15 +467,13 @@ fn html_to_text(html: &str) -> String {
         .map(|el| el.text().collect::<String>())
         .unwrap_or_default();
 
-    // body 文本：排除 script/style 节点
+    // body 文本：剔除 <script>/<style> 子树(防脚本/样式源码泄漏进索引)
     let body_text = if let Ok(body_sel) = Selector::parse("body") {
-        document.select(&body_sel).next().map(|body| {
-            body.text()
-                .collect::<Vec<_>>()
-                .join(" ")
-        }).unwrap_or_default()
+        document.select(&body_sel).next()
+            .map(text_excluding_script_style)
+            .unwrap_or_default()
     } else {
-        document.root_element().text().collect::<Vec<_>>().join(" ")
+        text_excluding_script_style(document.root_element())
     };
 
     // 合并并规范空白

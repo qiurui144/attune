@@ -198,8 +198,7 @@ fn non_utf8_bytes_ingest_graceful_lossy() {
 /// floor_char_boundary). This test is #[ignore] until the src guard lands; the
 /// companion `all_emoji_first_line_short_no_panic` locks the currently-safe
 /// sub-100-byte case so the path is exercised in CI today.
-#[test]
-#[ignore = "FLAG BUG-1: parser.rs:393 non-char-boundary slice panics on >100B multibyte first line; un-ignore after src fix"]
+#[test] // BUG-1 fixed: parser.rs first-line title now uses char-safe chars().take(100)
 fn all_emoji_long_first_line_ingests_without_panic() {
     let (store, dek) = mem_store();
     let bytes = fixture_bytes("all_emoji.txt"); // single line, >100 bytes of emoji
@@ -278,8 +277,7 @@ const FORBIDDEN_MARKERS: &[&str] = &[
 /// skipping `script`/`style` elements, or use an ammonia-style sanitizer that
 /// removes those elements). This test is #[ignore] (asserts the desired
 /// all-stripped behavior) until the src fix lands.
-#[test]
-#[ignore = "FLAG BUG-2: body-level <script>/<style> text leaks via html_to_text (parser.rs:438); un-ignore after src fix"]
+#[test] // BUG-2 fixed: html_to_text now drops <script>/<style> subtrees before extracting body text
 fn malicious_html_all_payloads_stripped() {
     let (store, dek) = mem_store();
     let raw = raw_doc(fixture_bytes("malicious.html"), "malicious.html");
@@ -345,14 +343,11 @@ fn malicious_html_partial_stripping_current_behavior() {
         );
     }
 
-    // KNOWN LEAK (BUG-2): body-level <script> text. We assert its CURRENT
-    // (buggy) presence so the regression test is honest about today's state;
-    // when parser.rs:438 is fixed, flip this to assert!(!...) and delete the
-    // #[ignore] on `malicious_html_all_payloads_stripped`.
+    // BUG-2 FIXED: html_to_text now drops <script>/<style> subtrees, so body-level
+    // script text must NOT leak into indexed content (regression lock).
     assert!(
-        stored.contains("XSS_SECOND_SCRIPT_MARKER"),
-        "expected the documented BUG-2 body-script leak; if this fails the src \
-         was fixed — update this test + un-ignore malicious_html_all_payloads_stripped"
+        !stored.contains("XSS_SECOND_SCRIPT_MARKER"),
+        "regression: body-level <script> text leaked into indexed content again (BUG-2). stored={stored:?}"
     );
 }
 
