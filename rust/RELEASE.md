@@ -1,8 +1,27 @@
 # attune 版本记录
 
-## Unreleased — 多语言全文分词强化（FTS LowerCaser + English Stemmer）
+## Unreleased — 隐私出网门强制 + ABBA 死锁修复 + 多语言分词 + 摄取安全加固
 
 ### Highlights
+- **🔒 隐私出网门真强制 + L0「永不出网」落地(P0)**:`OutboundGate::enforce` 现在包裹
+  **每一个网络 egress**(LLM Chat / Cloud SaaS / WebDAV / Web Search / Telemetry),
+  settings 与 PII 脱敏在**一处**统一裁决(`crates/attune-core/src/outbound_gate.rs`)。
+  标记 `PrivacyTier::L0`(「🔒 永不出网」)的内容送往云端目的地时,gate 直接拒绝该云 LLM
+  调用(`OutboundError::L0CloudBlocked`),route 层再做一道 L0 过滤(defense-in-depth)。
+  修复了此前 gate 存在但未接进真实 egress 的 no-op 缺口(`acfd26f` / `78b1ef3`)。
+  egress 接入点经审计实证:`chat.rs` / `cloud_client.rs` / `scanner_webdav.rs` /
+  `web_search_browser.rs` / `telemetry.rs` + server `ingest_webdav.rs` / `routes/chat.rs`。
+- **P0 ABBA 死锁修复 + 回归守卫**:统一规范锁序 **`fulltext → vectors → vault`**
+  (search/chat 热点路径序),`routes/items.rs` 的 update/delete 对齐该序,杜绝与热点路径
+  反序持锁导致的 ABBA 死锁。新增真 3-mutex 锁序回归测试钉死(`2b3bedc` / `d379c2e` /
+  `b59d706`),并据此重新 baseline `#[ignore]` 计数。
+- **摄取安全加固 + 文档智能 A-K 验收测试矩阵**:office 解析对抗面 P0 套件
+  (zip 炸弹 / 路径穿越 / XXE 实体)+ ZIP-entry 解压上限封顶(`ff18fe2`,BUG-3,防 office
+  zip-bomb)+ 确定性 docx/xlsx/pptx/epub/rtf/csv fixture;多语言摄取+检索覆盖、RRF/relevance@K
+  质量套件;并把 **文档智能 A-K 维度覆盖矩阵固化为 release-acceptance gate**(`96a55ee`,
+  进 `docs/TESTING.md` 主大纲,每轮 RC/GA 硬性检查)。**注**:文档智能*功能*本身尚未并入
+  develop(在独立 RC 分支待人工 RELEASE go,规划为 v1.3.0);本期仅含其已合并的
+  测试 / 安全加固提交。
 - **全文搜索英文大小写不敏感 + 词干归并**:tantivy 的 "jieba" 分词器从裸
   `JiebaTokenizer` 升级为 analyzer 链 `jieba → LowerCaser → English Stemmer`。
   英文检索从此大小写无关(搜 `running` 命中 `Running`)且词干归并(搜 `run`
@@ -13,6 +32,9 @@
   生成器 `scripts/gen-pdf-fixtures.py`)。
 
 ### Migration（升级即自动,无需手动操作）
+- **OutboundGate / ABBA 修复无需数据迁移**:均为运行期行为修复(egress 裁决接线 +
+  锁序对齐),不改 schema、不改加密格式;升级即生效。已标 L0 的 item 升级后立即享受
+  「永不出网」强制(此前可能因 gate no-op 而被送往云端 —— 这是本期修复的安全缺口)。
 - **FTS 索引自动重建**:分词规则变更使旧磁盘索引(token 用旧规则切出)与新 analyzer
   不一致。引入分词器版本标记(`tokenizer_version` 文件,当前 v2)。`FulltextIndex::open`
   检测到标记缺失(v1.2 之前的索引)或版本不符 → **清空索引目录强制重建**。索引是从加密
@@ -21,6 +43,10 @@
   rebuild),之后版本一致不再重建。
 
 ### Known Limitations
+- **L0 强制依赖正确打标**:gate 只对**已标 `PrivacyTier::L0`** 的 chunk 强制本地;未打标的
+  普通内容按 settings 的 outbound policy 走(L1 走 PII 脱敏 + 审计)。打标是用户/插件职责。
+- **文档智能功能未发布**:本期仅含其测试/安全加固提交;功能本体(深度摘要 / member-gate /
+  短文旁路)在独立 RC 分支待人工 RELEASE,规划 v1.3.0,**不在本 develop 行可用**。
 - 词干器仅英文(`Language::English`);其他拉丁语系(法/德/西)未做词干归并,
   按原 token 索引(仍受益于 LowerCaser 大小写归一)。
 - `pdf_extract` 对拉丁字形会插入词内空格(`borrowing` → `bor rowing`);token 级断言
