@@ -42,17 +42,21 @@ yanked = "warn"
 # immediately patched and a documented reason exists in docs/SECURITY.md.
 # Format:
 #   { id = "RUSTSEC-YYYY-NNNN", reason = "See docs/SECURITY.md §..." }
+# NOTE on scope split (2026-06): the three real UNSOUND advisories
+# (git2 RUSTSEC-2026-0008, lru-direct + rand RUSTSEC-2026-0097) are FIXED by
+# version bumps (git2 0.21 / lru 0.18 / rand 0.8.6) — NOT ignored.
+# The UNMAINTAINED/YANKED informational advisories (core2 / fxhash / instant /
+# paste / proc-macro-error2 / rustls-pemfile) are ignored in `.cargo/audit.toml`
+# (where rustsec/audit-check gates them); cargo-deny has unmaintained="none" so
+# it does not gate those here — listing them here only yields advisory-not-detected
+# noise, so they are intentionally NOT duplicated into this list.
 ignore = [
-    # lru ≤ 0.16.2: IterMut Stacked-Borrows violation. We never call
-    # IterMut::next / next_back on the affected lru caches (used as simple
-    # get/put caches). Upstream fix lands in lru 0.16.3; pulled transitively
-    # by tantivy & friends — wait for ecosystem catch-up.
-    { id = "RUSTSEC-2026-0002", reason = "lru IterMut path not exercised; upstream fix in 0.16.3, transitive dep" },
-    # rand 0.8.5: unsound only when (a) `log` + `thread_rng` features and (b)
-    # a custom logger calls rand::rng() / thread_rng() inside its impl. We
-    # use env_logger / tracing with stock impls — none invoke rand. Transitive
-    # via several crypto crates; will fall off when ecosystem moves to rand 0.9.
-    { id = "RUSTSEC-2026-0097", reason = "no custom logger calls rand::rng/thread_rng; transitive dep" },
+    # UNSOUND, transitive-only remnant. Our direct deps (attune-core +
+    # attune-server) now pin lru 0.18 (>=0.16.3 = patched). The ONLY remaining
+    # 0.12.5 path is tantivy 0.22.1, which pins `lru = "0.12"` (semver-incompatible
+    # — cannot reach 0.16.3 without a tantivy major bump). IterMut is never called
+    # on tantivy's internal lru cache. Revisit when tantivy>=0.23 drops the 0.12 pin.
+    { id = "RUSTSEC-2026-0002", reason = "direct deps on lru 0.18 (patched); only tantivy 0.22 transitive 0.12 pin remains, IterMut path unused. Revisit on tantivy>=0.23." },
 ]
 
 # ---------------------------------------------------------------------------

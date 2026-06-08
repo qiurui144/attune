@@ -17,13 +17,15 @@ attune-agent-sdk = { workspace = true }
 #   async-trait: CacheBackend trait (async get/put/clear/count for future Redis/disk backends)
 blake3 = "1.5"
 async-trait = "0.1"
-# lru 0.13 — pinned to match attune-server (RUSTSEC-2026-0002 fix; 0.12 had unsound IterMut)
-lru = "0.13"
+# lru 0.18 — RUSTSEC-2026-0002 (IterMut Stacked-Borrows) patched in >=0.16.3.
+# Must match attune-server. NOTE: tantivy 0.22 still pins lru 0.12 transitively;
+# that path stays advisory-listed until tantivy upgrades (see deny.toml ignore).
+lru = "0.18"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = { workspace = true }
 argon2 = "0.5"
 aes-gcm = "0.10"
-rand = "0.8"
+rand = "0.8.6"  # >=0.8.6 fixes RUSTSEC-2026-0097 (custom-logger UB) within the 0.8 line
 zeroize = { version = "1", features = ["derive"] }
 hmac = "0.12"
 sha2 = "0.10"
@@ -90,7 +92,9 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 # 与 rusqlite/usearch 同 C 负担）；vendored-openssl 关掉 —— 走 libgit2 内置
 # http(s) transport（schannel on Win / SecureTransport on macOS / openssl on Linux
 # 仅运行时动态链接，clone https 公开仓不强依赖 openssl-sys 编译）。
-git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
+# 0.20.4+ fixes RUSTSEC-2026-0008 (Buf deref UB); 0.21 is the current line — our
+# API surface (FetchOptions / RepoBuilder / ErrorClass / ErrorCode) is unchanged.
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 # glob 过滤（include/exclude 多模式）—— globset 编译多 glob 成单一 matcher。
 globset = "0.4"
 # URL 解析（SSRF url_guard）—— 已在依赖树（reqwest 传递）, 纯 Rust。
