@@ -1,5 +1,31 @@
 # attune 版本记录
 
+## Unreleased — 多语言全文分词强化（FTS LowerCaser + English Stemmer）
+
+### Highlights
+- **全文搜索英文大小写不敏感 + 词干归并**:tantivy 的 "jieba" 分词器从裸
+  `JiebaTokenizer` 升级为 analyzer 链 `jieba → LowerCaser → English Stemmer`。
+  英文检索从此大小写无关(搜 `running` 命中 `Running`)且词干归并(搜 `run`
+  命中 `running`);中文仍走 jieba 正确分词,CJK 不受 LowerCaser/Stemmer 影响。
+  index 与 query 共用同一 analyzer,保证对称(`crates/attune-core/src/index.rs`)。
+- **PDF 解析回归保障**:新增 4 篇确定性 PDF fixture(中/英/混合文本层 + 图片层扫描件)
+  + 集成测试,钉死 `pdf_extract` 文本层提取与 `needs_ocr` 路由(`tests/pdf_ingest_test.rs`,
+  生成器 `scripts/gen-pdf-fixtures.py`)。
+
+### Migration（升级即自动,无需手动操作）
+- **FTS 索引自动重建**:分词规则变更使旧磁盘索引(token 用旧规则切出)与新 analyzer
+  不一致。引入分词器版本标记(`tokenizer_version` 文件,当前 v2)。`FulltextIndex::open`
+  检测到标记缺失(v1.2 之前的索引)或版本不符 → **清空索引目录强制重建**。索引是从加密
+  vault 派生的缓存(SSOT 是加密 SQL 存储),unlock 时 `state.rs` 会从全部 item 重灌,
+  **不丢任何用户数据**。用户首次解锁升级后的版本时索引自动重建一次(知识库大时多花数秒
+  rebuild),之后版本一致不再重建。
+
+### Known Limitations
+- 词干器仅英文(`Language::English`);其他拉丁语系(法/德/西)未做词干归并,
+  按原 token 索引(仍受益于 LowerCaser 大小写归一)。
+- `pdf_extract` 对拉丁字形会插入词内空格(`borrowing` → `bor rowing`);token 级断言
+  用去空格比对(见 `pdf_ingest_test.rs::despace`),实际检索经 jieba 切分不受影响。
+
 ## v1.2.0 (2026-06-01) — GitConnector + WASM 跨平台 agent + 一键依赖部署
 
 ### Highlights

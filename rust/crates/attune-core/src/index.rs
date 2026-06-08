@@ -11,6 +11,19 @@ use crate::error::{Result, VaultError};
 
 const HEAP_SIZE: usize = 50_000_000; // 50 MB writer heap
 
+/// 分词器版本标记。改变 analyzer 链（jieba / LowerCaser / Stemmer 组合）时 +1。
+///
+/// 为什么需要：tantivy 的 meta.json 只持久化字段引用的分词器**名字**（"jieba"），
+/// 不持久化运行期注册的 analyzer 链。若我们升级 analyzer（如加 LowerCaser），旧
+/// 磁盘段里的 token 仍是旧规则切出来的（大小写敏感 / 未词干化），用新 analyzer 去
+/// 查会产生不一致命中。本标记在 open() 时比对，一旦不符就清空索引目录强制重建，
+/// 让 unlock 时的全量 rebuild（state.rs 从加密 SQL 重灌全部 item）用新 analyzer 落盘。
+///
+/// v1: bare jieba（≤ v1.2）
+/// v2: jieba → LowerCaser → English Stemmer（2026-06-08 多语言分词强化）
+const TOKENIZER_VERSION: u32 = 2;
+const TOKENIZER_VERSION_FILE: &str = "tokenizer_version";
+
 /// FulltextIndex 持久持有唯一 IndexWriter，避免多线程并发重复创建 writer 导致 panic。
 /// Tantivy 规定：同一 Index 同时只能有一个活跃 IndexWriter；
 /// 用 Mutex<IndexWriter> 保护，所有写操作共享该 writer。
@@ -51,6 +64,11 @@ impl FulltextIndex {
     /// 打开持久化索引
     pub fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
+        // 分词器版本迁移：旧索引（缺标记或版本不符）的 token 用旧 analyzer 切出，
+        // 与新 analyzer 不一致 → 清空目录强制重建。unlock 时 state.rs 会从加密 SQL
+        // 全量重灌 item，用新 analyzer 重新落盘，保证一致。索引是派生缓存，清空安全
+        // （SSOT 是加密 vault，不丢数据）。
+        Self::migrate_tokenizer_version(dir)?;
         let schema = Self::build_schema();
         let index = if dir.join("meta.json").exists() {
             Index::open_in_dir(dir)
@@ -60,6 +78,11 @@ impl FulltextIndex {
                 .map_err(|e| VaultError::Crypto(format!("tantivy create: {e}")))?
         };
         Self::register_tokenizers(&index);
+        // 重建/创建成功后写当前版本标记（仅磁盘索引；内存索引不需要）。
+        let _ = std::fs::write(
+            dir.join(TOKENIZER_VERSION_FILE),
+            TOKENIZER_VERSION.to_string(),
+        );
         let f_item_id = schema.get_field("item_id").expect("schema field 'item_id' defined in build_schema");
         let f_title = schema.get_field("title").expect("schema field 'title' defined in build_schema");
         let f_content = schema.get_field("content").expect("schema field 'content' defined in build_schema");
@@ -71,6 +94,41 @@ impl FulltextIndex {
             .try_into()
             .map_err(|e| VaultError::Crypto(format!("tantivy reader: {e}")))?;
         Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type, writer: Mutex::new(writer), reader })
+    }
+
+    /// 检查磁盘索引的分词器版本标记；缺失或不符 → 删除整个索引目录内容，
+    /// 让后续 open 走 create 路径（空索引），unlock 时全量重建。
+    ///
+    /// 触发条件：
+    ///   - 已有 meta.json（旧索引）但无 tokenizer_version 文件 → v1 旧索引，需迁移
+    ///   - tokenizer_version 文件存在但值 != TOKENIZER_VERSION → 跨版本，需迁移
+    ///   - 无 meta.json（全新目录）→ 不需迁移（本就是空的）
+    fn migrate_tokenizer_version(dir: &Path) -> Result<()> {
+        let has_index = dir.join("meta.json").exists();
+        if !has_index {
+            return Ok(()); // 全新目录，create 路径会处理
+        }
+        let marker = dir.join(TOKENIZER_VERSION_FILE);
+        let on_disk: Option<u32> = std::fs::read_to_string(&marker)
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+        if on_disk == Some(TOKENIZER_VERSION) {
+            return Ok(()); // 版本一致，无需迁移
+        }
+        // 不一致（含旧索引无标记的 None 情形）→ 清空目录内容。
+        log::info!(
+            "fulltext tokenizer version mismatch (disk={on_disk:?}, code={TOKENIZER_VERSION}); \
+             wiping index dir to force rebuild with new analyzer"
+        );
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        Ok(())
     }
 
     fn build_schema() -> Schema {
@@ -92,9 +150,18 @@ impl FulltextIndex {
     }
 
     fn register_tokenizers(index: &Index) {
-        // 注册 jieba 分词器用于中文
-        let tokenizer = tantivy_jieba::JiebaTokenizer {};
-        index.tokenizers().register("jieba", tokenizer);
+        // 多语言分词链：jieba 切词（中文 + 把英文按空格/标点切出）→ LowerCaser
+        // （英文大小写不敏感）→ English Stemmer（running→run 等词干归并）。
+        //
+        // CJK 不受 LowerCaser / Stemmer 影响（无大小写、非英文词干），只有拉丁
+        // token 被归一。index 与 query 共用此 analyzer（QueryParser 走字段的
+        // "jieba" 分词器，tokenize_cjk_query 也取同一个），保证对称。
+        use tantivy::tokenizer::{Language, LowerCaser, Stemmer, TextAnalyzer};
+        let analyzer = TextAnalyzer::builder(tantivy_jieba::JiebaTokenizer {})
+            .filter(LowerCaser)
+            .filter(Stemmer::new(Language::English))
+            .build();
+        index.tokenizers().register("jieba", analyzer);
     }
 }
 
@@ -252,6 +319,100 @@ mod tests {
             let results = idx.search("Content", 10).unwrap();
             assert!(!results.is_empty());
         }
+    }
+
+    /// 分词器版本迁移：缺失/不符的版本标记 → open 时清空旧索引强制重建。
+    #[test]
+    fn tokenizer_version_migration_wipes_stale_index() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ft");
+
+        // 1) 建索引 + 加文档，open 会写当前版本标记。
+        {
+            let idx = FulltextIndex::open(&path).unwrap();
+            idx.add_document("id1", "Title", "Running content", "note").unwrap();
+            assert_eq!(idx.doc_count().unwrap(), 1);
+        }
+        assert!(path.join("meta.json").exists());
+        assert!(path.join(super::TOKENIZER_VERSION_FILE).exists());
+
+        // 2) 模拟旧索引：把版本标记改成旧值（或删掉），下次 open 必须清空重建。
+        std::fs::write(path.join(super::TOKENIZER_VERSION_FILE), "1").unwrap();
+
+        // 3) 重新 open：版本不符 → 清空 → 空索引（doc 丢失是预期，派生缓存由 unlock 重灌）。
+        {
+            let idx = FulltextIndex::open(&path).unwrap();
+            assert_eq!(
+                idx.doc_count().unwrap(),
+                0,
+                "stale-version index must be wiped on open (rebuilt by unlock)"
+            );
+            // 标记应已更新为当前版本。
+            let v = std::fs::read_to_string(path.join(super::TOKENIZER_VERSION_FILE)).unwrap();
+            assert_eq!(v.trim(), super::TOKENIZER_VERSION.to_string());
+            // 重灌后可正常工作（多语言 analyzer 生效）。
+            idx.add_document("id2", "T", "Running 检索", "note").unwrap();
+            assert!(!idx.search("running", 10).unwrap().is_empty());
+        }
+
+        // 4) 再 open（版本已一致）→ 不清空，doc 保留。
+        {
+            let idx = FulltextIndex::open(&path).unwrap();
+            assert_eq!(
+                idx.doc_count().unwrap(),
+                1,
+                "matching-version index must NOT be wiped"
+            );
+        }
+    }
+
+    /// 旧索引无版本标记（v1.2 之前）→ open 视为 stale，清空重建。
+    #[test]
+    fn tokenizer_version_missing_marker_treated_as_stale() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ft");
+        {
+            let idx = FulltextIndex::open(&path).unwrap();
+            idx.add_document("id1", "T", "content", "note").unwrap();
+        }
+        // 删除版本标记，模拟 v1.2 之前建的索引。
+        std::fs::remove_file(path.join(super::TOKENIZER_VERSION_FILE)).unwrap();
+        assert!(path.join("meta.json").exists());
+
+        let idx = FulltextIndex::open(&path).unwrap();
+        assert_eq!(idx.doc_count().unwrap(), 0, "marker-less index must be wiped");
+    }
+
+    /// 多语言分词：英文大小写不敏感（LowerCaser）+ 词干归并（Stemmer）+ CJK 仍走 jieba。
+    ///
+    /// 在 jieba 之后挂 LowerCaser/Stemmer 之前，"Running" 索引为大小写敏感的
+    /// 原 token，搜 "running" 命不中；本测试钉死修复后行为。
+    #[test]
+    fn multilingual_tokenizer_lowercases_english_and_keeps_cjk() {
+        let idx = FulltextIndex::open_memory().unwrap();
+        idx.add_document("doc1", "项目 Running 测试", "向量 search 检索 hybrid recall", "note")
+            .unwrap();
+
+        // 1) 英文大小写不敏感：原文 "Running"（大写 R），搜小写 "running" 必须命中。
+        let r = idx.search("running", 10).unwrap();
+        assert!(
+            r.iter().any(|(id, _)| id == "doc1"),
+            "lowercase 'running' should hit 'Running' after LowerCaser"
+        );
+
+        // 2) 英文词干归并：搜 "run" 经 Stemmer 应命中 "running"（running→run）。
+        let r = idx.search("run", 10).unwrap();
+        assert!(
+            r.iter().any(|(id, _)| id == "doc1"),
+            "stemmed 'run' should hit 'Running' after English Stemmer"
+        );
+
+        // 3) CJK 仍正确分词：搜 "检索" 必须命中。
+        let r = idx.search("检索", 10).unwrap();
+        assert!(
+            r.iter().any(|(id, _)| id == "doc1"),
+            "CJK '检索' must still segment + hit via jieba"
+        );
     }
 
     /// OSS-S13 P0 regression: 多次 search 应该复用同一个 IndexReader，不重新分配
