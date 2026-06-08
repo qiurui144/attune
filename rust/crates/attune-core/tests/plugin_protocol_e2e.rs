@@ -290,7 +290,8 @@ fn registry_scan_with_key_loads_encrypted_paid_plugin() {
 /// agent_runner subprocess env 传递测试。
 ///
 /// 验证 run_agent_subprocess 的 env 参数确实被转发给子进程。
-/// 模拟 LLM agent binary：读 ATTUNE_LLM_ENDPOINT env，不存在则 exit 4（同 fact_extractor 约定）。
+/// 模拟 LLM agent binary：读 LLM_ENDPOINT env，不存在则 exit 4（同 fact_extractor /
+/// attune-agent-sdk prepare_llm_env 真实约定 — 裸 `LLM_*` 前缀，非 `ATTUNE_LLM_*`）。
 /// 场景 1：传入正确 env → exit 0 + stdout 含 endpoint。
 /// 场景 2：不传 env     → exit 4（"LLM_ENDPOINT not set"，即 P1:3 bug 复现）。
 ///
@@ -328,20 +329,20 @@ pricing:
   tier: free
 agents:
   - id: llm_echo_agent
-    description: "Echo the ATTUNE_LLM_ENDPOINT env var"
+    description: "Echo the LLM_ENDPOINT env var"
     runtime: rust_binary
     binary: bin/run_llm_echo_agent
 "#;
     fs::write(plugin_dir.join("plugin.yaml"), plugin_yaml).expect("write plugin.yaml");
 
-    // mock binary：读 ATTUNE_LLM_ENDPOINT；不存在则 exit 4
+    // mock binary：读 LLM_ENDPOINT（真实 agent 约定，非 ATTUNE_LLM_*）；不存在则 exit 4
     let script_path = bin_dir.join("run_llm_echo_agent");
     let script = r#"#!/bin/sh
-if [ -z "$ATTUNE_LLM_ENDPOINT" ]; then
+if [ -z "$LLM_ENDPOINT" ]; then
     echo "LLM_ENDPOINT not set" >&2
     exit 4
 fi
-echo "{\"endpoint\":\"$ATTUNE_LLM_ENDPOINT\"}"
+echo "{\"endpoint\":\"$LLM_ENDPOINT\"}"
 exit 0
 "#;
     fs::write(&script_path, script).expect("write script");
@@ -363,10 +364,10 @@ exit 0
 
     // 场景 1：传 env → exit 0，stdout 含 endpoint
     let env_with_llm = vec![
-        ("ATTUNE_LLM_PROVIDER".to_string(), "openai_compat".to_string()),
-        ("ATTUNE_LLM_ENDPOINT".to_string(), "https://api.deepseek.com/v1".to_string()),
-        ("ATTUNE_LLM_MODEL".to_string(), "deepseek-chat".to_string()),
-        ("ATTUNE_LLM_API_KEY".to_string(), "sk-test".to_string()),
+        ("LLM_PROVIDER".to_string(), "openai_compat".to_string()),
+        ("LLM_ENDPOINT".to_string(), "https://api.deepseek.com/v1".to_string()),
+        ("LLM_MODEL".to_string(), "deepseek-chat".to_string()),
+        ("LLM_API_KEY".to_string(), "sk-test".to_string()),
     ];
     let result = run_agent_subprocess(
         &reg,

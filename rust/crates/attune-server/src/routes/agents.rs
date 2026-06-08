@@ -28,22 +28,26 @@ use std::time::Duration;
 
 /// 从 app_settings JSON 中提取 LLM env vars，供 agent subprocess 使用。
 ///
-/// 只显式 set 4 个 ATTUNE_LLM_* 变量，不 inherit parent env（避免泄露无关变量）。
-/// agent binary 读取这 4 个 env 来初始化 LLM client。
+/// 只显式 set 这几个 LLM_* 变量，不 inherit parent env（避免泄露无关变量）。
+/// 变量名必须与 agent binary 的读取约定一致：attune-agent-sdk
+/// `agent_main::prepare_llm_env` 读取裸前缀 `LLM_ENDPOINT` / `LLM_API_KEY` /
+/// `LLM_MODEL`（见 capability_dispatch 协议注释 "LLM_ENDPOINT / LLM_API_KEY"）。
+/// 历史 bug：曾发 `ATTUNE_LLM_*`，与 agent 读取的裸 `LLM_*` 不匹配 → LLM agent
+/// 即使配置了 LLM 也恒 exit 4 "LLM_ENDPOINT not set"（§7.3 env-wiring trap）。
 fn llm_env_from_settings(settings: &serde_json::Value) -> Vec<(String, String)> {
     let mut env = Vec::new();
     let Some(llm) = settings.get("llm") else { return env };
     if let Some(v) = llm.get("provider").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-        env.push(("ATTUNE_LLM_PROVIDER".into(), v.into()));
+        env.push(("LLM_PROVIDER".into(), v.into()));
     }
     if let Some(v) = llm.get("endpoint").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-        env.push(("ATTUNE_LLM_ENDPOINT".into(), v.into()));
+        env.push(("LLM_ENDPOINT".into(), v.into()));
     }
     if let Some(v) = llm.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-        env.push(("ATTUNE_LLM_MODEL".into(), v.into()));
+        env.push(("LLM_MODEL".into(), v.into()));
     }
     if let Some(v) = llm.get("api_key").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-        env.push(("ATTUNE_LLM_API_KEY".into(), v.into()));
+        env.push(("LLM_API_KEY".into(), v.into()));
     }
     env
 }
@@ -127,7 +131,7 @@ pub async fn run_agent(
         .map_err(|e| internal("serialize agent input", e))?;
 
     // 3b. 从 app_settings 读取 LLM env vars，转发给 agent subprocess。
-    // LLM-heavy agents (fact_extractor 等) 依赖 ATTUNE_LLM_* 来初始化 LLM client；
+    // LLM-heavy agents (fact_extractor 等) 依赖裸 `LLM_*` env 来初始化 LLM client；
     // 未传递时 binary exit 4 "LLM_ENDPOINT not set"（per E2E spec P1:3）。
     let llm_env: Vec<(String, String)> = {
         let app_settings: serde_json::Value = state
@@ -212,10 +216,12 @@ mod tests {
             }
         });
         let env = llm_env_from_settings(&settings);
-        assert!(env.iter().any(|(k, v)| k == "ATTUNE_LLM_PROVIDER" && v == "openai_compat"));
-        assert!(env.iter().any(|(k, v)| k == "ATTUNE_LLM_ENDPOINT" && v == "https://api.deepseek.com/v1"));
-        assert!(env.iter().any(|(k, v)| k == "ATTUNE_LLM_MODEL" && v == "deepseek-chat"));
-        assert!(env.iter().any(|(k, v)| k == "ATTUNE_LLM_API_KEY" && v == "sk-test123"));
+        // Bare-prefix names must match attune-agent-sdk prepare_llm_env reader
+        // (§7.3 env-wiring trap: ATTUNE_LLM_* mismatch caused recurring exit-4).
+        assert!(env.iter().any(|(k, v)| k == "LLM_PROVIDER" && v == "openai_compat"));
+        assert!(env.iter().any(|(k, v)| k == "LLM_ENDPOINT" && v == "https://api.deepseek.com/v1"));
+        assert!(env.iter().any(|(k, v)| k == "LLM_MODEL" && v == "deepseek-chat"));
+        assert!(env.iter().any(|(k, v)| k == "LLM_API_KEY" && v == "sk-test123"));
         assert_eq!(env.len(), 4);
     }
 
@@ -231,10 +237,10 @@ mod tests {
         });
         let env = llm_env_from_settings(&settings);
         // endpoint and api_key are empty → excluded
-        assert!(env.iter().any(|(k, _)| k == "ATTUNE_LLM_PROVIDER"));
-        assert!(env.iter().any(|(k, _)| k == "ATTUNE_LLM_MODEL"));
-        assert!(!env.iter().any(|(k, _)| k == "ATTUNE_LLM_ENDPOINT"));
-        assert!(!env.iter().any(|(k, _)| k == "ATTUNE_LLM_API_KEY"));
+        assert!(env.iter().any(|(k, _)| k == "LLM_PROVIDER"));
+        assert!(env.iter().any(|(k, _)| k == "LLM_MODEL"));
+        assert!(!env.iter().any(|(k, _)| k == "LLM_ENDPOINT"));
+        assert!(!env.iter().any(|(k, _)| k == "LLM_API_KEY"));
         assert_eq!(env.len(), 2);
     }
 
@@ -283,7 +289,7 @@ mod tests {
         });
         let env = llm_env_from_settings(&settings);
         assert_eq!(env.len(), 1, "只有 model 是合法字符串");
-        assert!(env.iter().any(|(k, _)| k == "ATTUNE_LLM_MODEL"));
+        assert!(env.iter().any(|(k, _)| k == "LLM_MODEL"));
     }
 
     // Edge: 空字符串 key 也算 (api_key 是空但不是缺失) — 看 filter 行为
