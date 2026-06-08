@@ -115,7 +115,15 @@ pub fn dispatch(invocation: &CapabilityInvocation) -> Result<CapabilityResult> {
     if let Some(stdin_str) = &invocation.stdin {
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            stdin.write_all(stdin_str.as_bytes()).map_err(VaultError::Io)?;
+            // BrokenPipe 容错:子进程可能不读 stdin 就快速退出(出错早退 / 无需输入的 agent),
+            // 此时 write_all 返回 BrokenPipe。这非致命——子进程的 stdout + 退出码仍有效,
+            // 继续往下 wait 即可。否则一个快速退出的 agent 会让整个 dispatch 因 stdin
+            // BrokenPipe 失败(CI 时序下偶发,本地难复现)。仅其他 io 错误才上抛。
+            match stdin.write_all(stdin_str.as_bytes()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => return Err(VaultError::Io(e)),
+            }
             // drop(stdin) 隐式 close
         }
     } else {
