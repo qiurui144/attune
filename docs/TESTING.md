@@ -349,7 +349,7 @@ cargo test -p attune-core --test stress_large_scale_test
 | OCRIMG | `tests/fixtures/ocr_image/`（`gen_ocr_image_fixtures.py`） | 跟代码走 | known-text PNG/JPG + zero-byte/non-image | A/G |
 | I18N | `tests/fixtures/i18n/`（生成器 `generate.sh`：committed UTF-8 = japanese/korean/traditional_chinese/arabic_rtl/hebrew_rtl/emoji_heavy + gitignored 非UTF8 = gbk/shift_jis 测试内重生成） | 跟代码走 | 多语种 ingest + FTS 词法层 | B |
 | OFFICE | `tests/fixtures/office/`（生成器 `scripts/gen-office-fixtures.py`：known.{docx,xlsx,pptx,epub,rtf,csv} 含 CN+EN marker + bomb.{docx,xlsx}/traversal.docx/laughs.docx/big_entry.docx 对抗样本） | 跟代码走 | ZIP/XML 系格式 + 对抗 | A/C |
-| RETR | `tests/fixtures/retrieval/`（**待补**：分块/RRF/relevance@K golden） | 跟代码走 | 检索质量 | D/E |
+| RETR | `tests/fixtures/retrieval/`（structured_doc.md + golden_corpus.yaml + cross_language.yaml） | 跟代码走 | 分块/RRF/relevance@K/跨语言 golden | D/E |
 
 > 真实仓库语料**必须 git clone --depth 1 -b `<tag/commit>` 锁版本**（附录 B 脚本）；上游变动不得改判据基线（§6.3）。本地 fixture **必须随生成器同入仓、字节级可复现**。
 
@@ -360,8 +360,8 @@ cargo test -p attune-core --test stress_large_scale_test
 | **A** | 格式（14 类） | `parser` 单测 + `pdf_ingest_test`/`ocr_image_test` + `office_formats_test`(7) | PDF/OCRIMG/A/B/OFFICE | 每格式抽取已知内容 | PDF/图/文 ✅；docx/xlsx/pptx/epub/rtf/csv ✅(OFFICE，各格式抽取 CN+EN 已知 marker) |
 | **B** | 语言 i18n | `pdf_e2e_search`(中英)、`golden/*/e03-non-utf8`、jieba 套件、`i18n_ingest_search_test`(10) | PDF mixed/B/I18N | 各语种 ingest 无 panic + 词法层行为如实记录 | **ingest ✅**(JP/KR/繁/RTL/emoji/非UTF8 GBK/SJIS 全 graceful，ASCII marker 经 from_utf8_lossy 存活，emoji 文档内非 emoji token 仍可检索)；**词法层**：中英 ✅、JP 汉字 ✅、繁中 ✅(jieba Han 词典切真词)、emoji ✅(token 化不崩)；⚠️ **韩/阿/希伯来词法层降级**(jieba 无模型 → 逐音节/逐字母切，单字符 query 过度命中、无词边界)，语义召回靠向量层 bge-m3 — FLAG `index.rs::register_tokenizers` 后续 ICU/分语种分词器(见下 I18N-GAP) |
 | **C** | 鲁棒 6 类 | `ingest_edge_resource_test`(13) + `office_adversarial_test`(6+1 FLAG) | EDGE/OFFICE | 空/超长/非UTF8/emoji/恶意HTML graceful；并发无死锁；ZIP/XML 对抗 bounded | edge/error/resource/concurrent ✅；**ZIP/XML 对抗 ✅(OFFICE,P0安全)** — docx/epub/pptx zip-bomb 真解压上限拒绝/路径穿越无FS逃逸/billion-laughs+XXE 惰性/超大单条目 bounded，均带 20s watchdog；⚠️ xlsx bomb 仅挡"诚实"中央目录(BUG-3b：伪造声明大小可绕过，#[ignore] FLAG 留 follow-up) |
-| **D** | 检索质量 | `pdf_e2e_search`(真 bge-m3 RRF) | PDF/A/B | 中/英/大写 query 命中；RRF 双信号 | E2E ✅；relevance@K ❌待补(RETR) |
-| **E** | 分块质量 | `chunker` 单测 | RETR | L1章节/L2段落边界、代码块/表格保留 | ⚠️待系统化(RETR) |
+| **D** | 检索质量 | `pdf_e2e_search`(真 bge-m3) + `retrieval_quality_test`(10) | PDF/A/B/RETR | 中/英/大写 query 命中;RRF 双信号;relevance@K | ✅ E2E + relevance@K(golden recall 5/5+precision@1 5/5;真 bge-m3 跨语言 EN→CN top-1;RRF 表面 lexical-only+vector-only 双信号)。⚠️ FLAG:`rrf_fuse` rank-based,弱但普遍 doc 可压过强单信号精确命中—corrector 是 cross-encoder rerank,非 fusion 权重 |
+| **E** | 分块质量 | `chunking_quality_test`(10) + `chunker` 单测 | RETR | L1章节/L2段落边界、代码块/表格保留 | ✅(L1 边界落标题+path=[H1,H2];L2 ≤2×chunk_size+overlap 覆盖头尾;代码 fence 平衡不撕裂;超大段落 Latin+CJK 分块不丢;表格行保留) |
 | **F** | 向量/embedding | `pdf_e2e_search`、`index::` 套件 | PDF | bge-m3 1024d 真向量;维度一致 | ✅ |
 | **G** | OCR 专项 | `ocr_image_test`、`ppocr_icbc_smoke` | OCRIMG/PDF scanned | 路由正确;真 CER 红线 | 路由 ✅;真 CER ⚠️(PP-OCR 模型 env-gated) |
 | **H** | ASR 专项 | `asr_ingest_test` | AUDIO | 路由 + 真 WER/CER 红线 | ✅(真 whisper turbo CER=0.000) |
