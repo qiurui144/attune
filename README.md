@@ -12,29 +12,17 @@ Attune is a generic personal AI knowledge base for **any individual knowledge wo
 
 ## 📥 Download
 
-Latest stable: **server v1.1.0** · **desktop v1.1.0** — GA 2026-05-30, Agent Control Plane (ACP).
-See [`rust/RELEASE.md`](rust/RELEASE.md) for v1.1.0 highlights (ACP-1~7 + chat-flow wiring).
+Latest stable: **server v1.2.0** · **desktop v1.2.0** — released 2026-06-01: GitConnector + WASM cross-platform agent distribution + one-click dependency deploy. Build on top of **v1.1.0 (Agent Control Plane / ACP)** and **v1.0 GA**.
+See [`rust/RELEASE.md`](rust/RELEASE.md) for the full changelog (version SSOT).
 
-### Desktop app (Web UI + system tray) — [desktop-v1.1.0 Release](https://github.com/qiurui144/attune/releases/tag/desktop-v1.1.0)
+Grab the binaries from the [Releases page](https://github.com/qiurui144/attune/releases) — pick the latest `vX.Y.Z` (server/CLI tarballs) and `desktop-vX.Y.Z` (Tauri installers) tag. Each archive ships with a SHA256 checksum.
 
-| Platform | File | Size | Notes |
-|----------|------|------|-------|
-| Windows | [`Attune_0.7.0_x64-setup.exe`](https://github.com/qiurui144/attune/releases/download/desktop-v0.7.0/Attune_0.7.0_x64-setup.exe) | 17 MB | NSIS installer (recommended) |
-| Windows | [`Attune_0.7.0_x64_en-US.msi`](https://github.com/qiurui144/attune/releases/download/desktop-v0.7.0/Attune_0.7.0_x64_en-US.msi) | 33 MB | MSI for enterprise |
-| Linux deb | [`Attune_0.7.0_amd64.deb`](https://github.com/qiurui144/attune/releases/download/desktop-v0.7.0/Attune_0.7.0_amd64.deb) | 29 MB | Debian/Ubuntu |
-| Linux rpm | [`Attune-0.7.0-1.x86_64.rpm`](https://github.com/qiurui144/attune/releases/download/desktop-v0.7.0/Attune-0.7.0-1.x86_64.rpm) | 29 MB | RHEL/Fedora |
-| Linux AppImage | [`Attune_0.7.0_amd64.AppImage`](https://github.com/qiurui144/attune/releases/download/desktop-v0.7.0/Attune_0.7.0_amd64.AppImage) | 97 MB | Generic Linux |
+| Track | Tag prefix | Artifacts |
+|-------|-----------|-----------|
+| **Desktop app** (Web UI + system tray) | `desktop-vX.Y.Z` | Windows NSIS `.exe` / MSI · Linux `.deb` / `.rpm` / `.AppImage` |
+| **Server / CLI** (headless / NAS / server) | `vX.Y.Z` | `attune-linux-x86_64.tar.gz` · `attune-linux-aarch64.tar.gz` · `attune-macos-aarch64.tar.gz` · `attune-windows-x86_64.zip` |
 
-### Server / CLI binaries (headless / NAS / server) — [v0.7.0 Release](https://github.com/qiurui144/attune/releases/tag/v0.7.0)
-
-| Platform | File |
-|----------|------|
-| Linux x86_64 | [`attune-linux-x86_64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.7.0/attune-linux-x86_64.tar.gz) |
-| Linux ARM64 | [`attune-linux-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.7.0/attune-linux-aarch64.tar.gz) |
-| macOS Apple Silicon | [`attune-macos-aarch64.tar.gz`](https://github.com/qiurui144/attune/releases/download/v0.7.0/attune-macos-aarch64.tar.gz) |
-| Windows x86_64 | [`attune-windows-x86_64.zip`](https://github.com/qiurui144/attune/releases/download/v0.7.0/attune-windows-x86_64.zip) |
-
-> macOS Intel: build from source with `cargo build --release` (Apple Silicon already covers modern Mac users). SHA256 checksum file ships with each archive.
+> macOS Intel: build from source with `cargo build --release` (Apple Silicon already covers modern Mac users).
 
 ### Package managers (recommended for v1.0+)
 
@@ -54,9 +42,19 @@ sudo curl -fsSL -o /etc/yum.repos.d/attune.repo https://qiurui144.github.io/attu
 sudo dnf install attune
 ```
 
-The Tauri desktop app also has a **built-in auto-updater** — once installed, new versions arrive in-app without you touching a CLI. Full guide and troubleshooting: [`docs/install-package-managers.md`](docs/install-package-managers.md).
+The Tauri desktop app also has a **built-in auto-updater** — once installed, new versions arrive in-app without you touching a CLI. Full install guide and troubleshooting: [`docs/INSTALL.md`](docs/INSTALL.md).
 
-## v1.0 GA highlights (shipped 2026-05-25; current GA v1.1.0 ACP) — 私有 AI 知识伙伴
+## What's new since v1.0 GA (current: v1.2.0)
+
+The v1.0→v1.2 line layers production-grade governance and cross-platform reach onto the GA core. Full notes in [`rust/RELEASE.md`](rust/RELEASE.md); the per-module × tech-stack map lives in [`rust/DEVELOP.md` → 能力矩阵 × 技术栈选型](rust/DEVELOP.md#能力矩阵--技术栈选型).
+
+- **Agent Control Plane (ACP, v1.1.0)** — central agent registry + typed handoffs, declarative DAG flow executor, per-`agent×model` failure telemetry, cost-aware scheduler, and a workspace-level quality gate (ratchet-only thresholds). Governs the whole agent ecosystem as one engineering org.
+- **Cross-platform agent distribution (WASM, v1.2.0)** — deterministic agents/skills compile to `wasm32-wasip1` and run via an embedded `wasmtime`; one `.attunepkg` with one `.wasm` runs on Windows / Linux / riscv64. The WASM-safe `attune-agent-sdk` leaf crate keeps the `Agent` trait free of native deps.
+- **GitConnector (v1.2.0)** — import a knowledge base directly from a Git repo (GitHub / GitLab / Gitea / Bitbucket / Codeberg / sr.ht over HTTPS): clone → glob filter → ingest → follow upstream commits. Local-only, zero-LLM import path, with SSRF protection.
+- **Privacy OutboundGate + `PrivacyTier::L0` "never leaves device"** — every network egress (LLM / Cloud / WebDAV / Web Search / Telemetry) is funneled through one gate that consults settings + PII redaction; L0-tagged content refuses any cloud LLM call.
+- **One-click dependency deploy** — Ollama readiness detection + in-app install/pull, base-model auto-ensure, and LM Studio endpoint auto-detect, so non-technical users never touch a terminal.
+
+## v1.0 GA highlights (shipped 2026-05-25) — 私有 AI 知识伙伴
 
 > v1.0 = v0.7 记忆护城河 + v0.7.1 办公助理 + 4 个 OSS deterministic / heuristic agent + 真 LLM verification gate。完整 changelog 见 [`rust/RELEASE.md`](rust/RELEASE.md#v100--私有-ai-知识伙伴-ga2026-05-25-计划上架)。
 
@@ -130,7 +128,7 @@ skill_evolution 从"失败驱动"升级为"全谱信号驱动" — 可按 kind �
 
 📋 **Evidence flow end-to-end**: chat citations now include real `breadcrumb` (chapter path), `chunk_offset_start/end` (Reader deep-link target), and `confidence` (1-5, parsed from LLM strict-prompt marker).
 
-Reproduce: `bash scripts/bench-orchestrator.sh all && python3 scripts/run-final-eval.py`. Full benchmark methodology in [`docs/benchmarks/dual-track-baseline.md`](docs/benchmarks/dual-track-baseline.md), release notes in [`docs/v0.6-release-notes.md`](docs/v0.6-release-notes.md).
+Reproduce: `bash scripts/bench-orchestrator.sh all && python3 scripts/run-final-eval.py`. Full benchmark methodology in [`docs/benchmarks/dual-track-baseline.md`](docs/benchmarks/dual-track-baseline.md); v0.6 release notes are in [`rust/RELEASE.md`](rust/RELEASE.md) (version SSOT).
 
 ---
 

@@ -21,6 +21,16 @@ OSS × attune-pro 功能边界见 [`docs/oss-pro-strategy.zh.md`](../docs/oss-pr
 - 换设备通过加密导出/导入无损迁移
 - **你只付两样钱**：软件本身 + 你自己的 LLM token（如果你用云端 LLM）。无中间商、无搜索 API 订阅、无隐藏费用
 
+## v1.0 GA 以来的更新（当前：v1.2.0）
+
+下方核心能力描述的是 GA 核心。v1.0→v1.2 在其上叠加生产级治理与跨平台能力 —— 完整发布说明见 [`RELEASE.md`](RELEASE.md)，各能力 × 模块 × 技术栈映射见 [`DEVELOP.md` → 能力矩阵 × 技术栈选型](DEVELOP.md#能力矩阵--技术栈选型)：
+
+- **Agent Control Plane（ACP，v1.1.0）** — 中央 agent 注册表 + typed handoff、声明式 DAG flow 执行器、每 `agent×model` 失败 telemetry、cost-aware 调度器、workspace 级质量门（阈值只升不降）。
+- **跨平台 agent 分发（WASM，v1.2.0）** — 确定性 agent/skill 编到 `wasm32-wasip1`，内嵌 `wasmtime` 执行；一个 `.attunepkg` + 一份 `.wasm` 即在 Windows / Linux / riscv64 全平台运行。WASM-safe 的 `attune-agent-sdk` leaf crate 让 `Agent` trait 零 native 依赖。
+- **GitConnector（v1.2.0）** — 从 Git 仓库导入知识库（GitHub / GitLab / Gitea / Bitbucket / Codeberg / sr.ht 的 HTTPS）：clone → glob 过滤 → 入库 → 跟随上游 commit；本地完成、零 LLM 导入路径、带 SSRF 防护。
+- **隐私出网门 OutboundGate + `PrivacyTier::L0`** — 每个网络 egress（LLM / Cloud / WebDAV / Web Search / Telemetry）统一经一处 gate 裁决 settings + PII 脱敏；标 L0 的内容拒绝任何云端 LLM 调用（`outbound_gate.rs`）。
+- **一键依赖部署** — Ollama readiness 检测 + 应用内一键 install/pull、底座模型一键 ensure、LM Studio 端点自动识别，无需碰终端。
+
 ## 核心能力
 
 ### 主动进化
