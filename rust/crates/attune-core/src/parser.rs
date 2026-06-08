@@ -119,16 +119,14 @@ pub fn parse_bytes_with_profile(
                     std::io::ErrorKind::InvalidData,
                     format!("DOCX zip open failed: {e}"),
                 )))?;
-            let mut doc_xml = String::new();
-            if let Ok(mut entry) = archive.by_name("word/document.xml") {
-                use std::io::Read;
-                entry.read_to_string(&mut doc_xml)?;
+            let doc_xml = if let Ok(mut entry) = archive.by_name("word/document.xml") {
+                read_zip_entry_string_bounded(&mut entry)?
             } else {
                 return Err(VaultError::Io(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "word/document.xml not found in docx",
                 )));
-            }
+            };
             let content = strip_xml_tags(&doc_xml);
             let title = first_line_title(&content, &stem);
             Ok((title, content))
@@ -310,16 +308,14 @@ fn parse_docx_file(path: &Path, stem: &str) -> Result<(String, String)> {
             format!("DOCX zip open failed: {e}"),
         )))?;
 
-    let mut doc_xml = String::new();
-    if let Ok(mut entry) = archive.by_name("word/document.xml") {
-        use std::io::Read;
-        entry.read_to_string(&mut doc_xml)?;
+    let doc_xml = if let Ok(mut entry) = archive.by_name("word/document.xml") {
+        read_zip_entry_string_bounded(&mut entry)?
     } else {
         return Err(VaultError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "word/document.xml not found in docx",
         )));
-    }
+    };
 
     let content = strip_xml_tags(&doc_xml);
     let title = first_line_title(&content, stem);
@@ -428,6 +424,33 @@ pub fn file_hash(path: &Path) -> Result<String> {
 
 // ── 新格式处理函数 ────────────────────────────────────────────────────────────
 
+/// 单个 ZIP 条目解压后允许的最大字节数（防解压炸弹）。
+///
+/// docx/epub/pptx 都是 ZIP+XML 容器，且是不可信的上传。`read_to_string` 会把整个
+/// 解压后的条目读进内存——一个高压缩比的 "zip bomb"（几 KB 压缩 → 数 GB 解压）能把
+/// 进程 OOM。这里给单条目设一个硬上限：解压字节超过该值即报错（InvalidInput），
+/// 而不是无界分配。64 MB 远大于任何真实的 `word/document.xml` / slide / xhtml 章节，
+/// 既不误伤正常文档，又把炸弹挡在 OOM 之前。
+const MAX_ZIP_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 把一个 ZIP 条目读成 String，但**带解压上限**(`MAX_ZIP_ENTRY_BYTES`)。
+///
+/// 用 `Read::take(limit + 1)` 限制读取量：若解压输出能填满 `limit + 1`，说明真实
+/// 大小超过上限 → 返回 InvalidInput（拒绝该条目，不继续无界解压）。lossy UTF-8
+/// 解码与原 `read_to_string` 行为一致（容错而非 panic）。
+fn read_zip_entry_string_bounded<R: std::io::Read>(reader: &mut R) -> Result<String> {
+    use std::io::Read;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut limited = reader.take(MAX_ZIP_ENTRY_BYTES + 1);
+    limited.read_to_end(&mut buf).map_err(VaultError::Io)?;
+    if buf.len() as u64 > MAX_ZIP_ENTRY_BYTES {
+        return Err(VaultError::InvalidInput(format!(
+            "zip entry exceeds {MAX_ZIP_ENTRY_BYTES} bytes decompressed (possible zip bomb); rejected"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// HTML 文件 → 纯文本（scraper strip tags，保留段落空行）
 fn parse_html_file(path: &Path, stem: &str) -> Result<(String, String)> {
     let html = std::fs::read_to_string(path).map_err(VaultError::Io)?;
@@ -494,7 +517,7 @@ fn parse_epub_file(path: &Path, stem: &str) -> Result<(String, String)> {
 }
 
 fn epub_bytes_to_text(data: &[u8]) -> Result<String> {
-    use std::io::{Cursor, Read};
+    use std::io::Cursor;
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| VaultError::Io(std::io::Error::new(
@@ -503,6 +526,7 @@ fn epub_bytes_to_text(data: &[u8]) -> Result<String> {
         )))?;
 
     let mut parts: Vec<String> = Vec::new();
+    let mut total: u64 = 0; // 累计解压字节，防"多条目累加"型炸弹
     let count = archive.len();
     for i in 0..count {
         let mut entry = archive.by_index(i)
@@ -513,8 +537,16 @@ fn epub_bytes_to_text(data: &[u8]) -> Result<String> {
         if !name.ends_with(".xhtml") && !name.ends_with(".html") && !name.ends_with(".htm") {
             continue;
         }
-        let mut buf = String::new();
-        let _ = entry.read_to_string(&mut buf);
+        // 单条目带解压上限；任一条目超限即拒绝整本（zip bomb）。注：从旧的
+        // `let _ = read_to_string`(吞读错误、跳过坏条目) 改为 `?` 传播——bomb 防护
+        // 要求传播，且坏条目 hard-fail 比静默跳过更正确。
+        let buf = read_zip_entry_string_bounded(&mut entry)?;
+        total = total.saturating_add(buf.len() as u64);
+        if total > MAX_ZIP_ENTRY_BYTES {
+            return Err(VaultError::InvalidInput(format!(
+                "epub total decompressed text exceeds {MAX_ZIP_ENTRY_BYTES} bytes (possible zip bomb); rejected"
+            )));
+        }
         if !buf.is_empty() {
             parts.push(html_to_text(&buf));
         }
@@ -535,6 +567,33 @@ fn parse_xlsx_file(path: &Path, stem: &str) -> Result<(String, String)> {
 fn xlsx_bytes_to_text(data: &[u8], ext: &str) -> Result<String> {
     use calamine::{Reader, open_workbook_from_rs, Xls, Xlsx, Data};
     use std::io::Cursor;
+
+    // calamine 在内部物化 workbook（shared/inline strings 累积进内存，无解压上限），
+    // 所以 zip-bomb 防护必须在交给 calamine **之前**做。.xlsx 是 ZIP 容器：读中央目录
+    // 里每个条目**声明的**解压后大小(`size()`，无需真解压)，任一超 MAX_ZIP_ENTRY_BYTES
+    // 即拒绝。.xls 是 BIFF 二进制(非 zip)，跳过此扫描，由 calamine 自身边界兜底。
+    //
+    // 已知局限(FLAG，见 office_adversarial_test.rs::xlsx_spoofed_size_bomb_*)：`size()`
+    // 取自中央目录、可被构造者伪造（声明小、实际 inflate 大）。本扫描挡得住"诚实"的
+    // 解压炸弹(主流 bomb 工具写真实中央目录)，但挡不住伪造声明大小的 bomb——那种情况
+    // calamine 仍会累积真实字节。根治需对 calamine 将读的 part 做**真解压带上限**(如
+    // docx 路径的 take(MAX) 思路)或换带 cap 的 xlsx 解析器，属较大改动，留 follow-up。
+    if ext != ".xls" {
+        let cursor = Cursor::new(data);
+        if let Ok(mut archive) = zip::ZipArchive::new(cursor) {
+            let mut total: u64 = 0;
+            for i in 0..archive.len() {
+                if let Ok(entry) = archive.by_index_raw(i) {
+                    total = total.saturating_add(entry.size());
+                    if entry.size() > MAX_ZIP_ENTRY_BYTES || total > MAX_ZIP_ENTRY_BYTES {
+                        return Err(VaultError::InvalidInput(format!(
+                            "xlsx zip entry exceeds {MAX_ZIP_ENTRY_BYTES} bytes decompressed (possible zip bomb); rejected"
+                        )));
+                    }
+                }
+            }
+        }
+    }
 
     let cursor = Cursor::new(data.to_vec());
     let mut parts: Vec<String> = Vec::new();
@@ -583,7 +642,7 @@ fn parse_pptx_file(path: &Path, stem: &str) -> Result<(String, String)> {
 }
 
 fn pptx_bytes_to_text(data: &[u8]) -> Result<String> {
-    use std::io::{Cursor, Read};
+    use std::io::Cursor;
     let cursor = Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| VaultError::Io(std::io::Error::new(
@@ -592,6 +651,7 @@ fn pptx_bytes_to_text(data: &[u8]) -> Result<String> {
         )))?;
 
     let mut slides: Vec<(String, String)> = Vec::new();
+    let mut total: u64 = 0; // 累计解压字节，防"多 slide 累加"型炸弹
     let count = archive.len();
     for i in 0..count {
         let name = {
@@ -609,8 +669,14 @@ fn pptx_bytes_to_text(data: &[u8]) -> Result<String> {
             .map_err(|e| VaultError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData, format!("{e}"),
             )))?;
-        let mut buf = String::new();
-        let _ = entry.read_to_string(&mut buf);
+        // 单条目带解压上限；任一 slide 超限即拒绝整份（zip bomb）。
+        let buf = read_zip_entry_string_bounded(&mut entry)?;
+        total = total.saturating_add(buf.len() as u64);
+        if total > MAX_ZIP_ENTRY_BYTES {
+            return Err(VaultError::InvalidInput(format!(
+                "pptx total decompressed slide text exceeds {MAX_ZIP_ENTRY_BYTES} bytes (possible zip bomb); rejected"
+            )));
+        }
         let text = strip_xml_tags(&buf);
         if !text.trim().is_empty() {
             slides.push((name, text));
