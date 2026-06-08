@@ -23,7 +23,33 @@ pub fn sync_webdav_dir(
     config: WebDavConfig,
     corpus_domain: &str,
 ) -> Result<serde_json::Value, String> {
-    let connector = WebDavConnector::new(config);
+    // F-17 G1: REAL OutboundGate enforcement for the WebDAV egress. Read the
+    // live `settings.privacy.webdav` toggle + current vault unlock state and
+    // hand them to the connector so OutboundGate refuses BEFORE any PROPFIND/GET
+    // when the user disabled webdav or the vault is locked. Fail-closed: missing
+    // privacy block ⇒ disabled (matches the 5-egress default-off contract).
+    let (webdav_enabled, vault_unlocked) = {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let unlocked = matches!(
+            vault.state(),
+            attune_core::vault::VaultState::Unlocked
+        );
+        let enabled = vault
+            .store()
+            .get_meta(attune_core::llm_settings::SETTINGS_META_KEY)
+            .ok()
+            .flatten()
+            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+            .and_then(|s| {
+                s.get("privacy")
+                    .and_then(|p| p.get("webdav"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false);
+        (enabled, unlocked)
+    };
+    let connector =
+        WebDavConnector::new(config).with_outbound_policy(webdav_enabled, vault_unlocked);
 
     // 阶段 1：锁外做全部网络 I/O（list + 逐文件 fetch），物化到 Vec。
     let mut docs: Vec<RawDocument> = Vec::new();

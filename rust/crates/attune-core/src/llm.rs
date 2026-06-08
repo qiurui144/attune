@@ -1449,6 +1449,9 @@ pub struct MockLlmProvider {
     model: String,
     /// 测试用 — 记录最后一次 chat 收到的 user content (供 chat_multimodal 默认 fallback 验证)
     last_user: Mutex<String>,
+    /// 测试用 — 记录最后一次 chat_with_history 收到的全部 messages (system + history
+    /// + user)。F-17 G3 用此验证 L0 内容是否泄漏进出网 payload (注入在 system prompt)。
+    last_messages: Mutex<Vec<ChatMessage>>,
     /// T1 — runtime-flippable determinism level so a single mock instance can
     /// serve both `Exact` and `Temp0` flavored tests
     /// (see `eval_determinism_test.rs::anthropic_provider_degrades_to_temp0`).
@@ -1461,6 +1464,7 @@ impl MockLlmProvider {
             responses: Mutex::new(Vec::new()),
             model: model.to_string(),
             last_user: Mutex::new(String::new()),
+            last_messages: Mutex::new(Vec::new()),
             // Defaults to Exact so tests that call `chat_with_options` without
             // explicit configuration see the "happy path" deterministic-seed
             // semantics. Other call sites (legacy mock-driven unit tests)
@@ -1477,6 +1481,18 @@ impl MockLlmProvider {
     pub fn last_received_user(&self) -> Option<String> {
         let s = self.last_user.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if s.is_empty() { None } else { Some(s) }
+    }
+
+    /// 测试用 — 返回最后一次 `chat_with_history` 收到的全部 messages 拼接文本
+    /// (role:content\n...)。F-17 G3 用此断言出网 payload 不含 L0 内容。
+    pub fn last_outbound_payload(&self) -> String {
+        self.last_messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|m| format!("{}:{}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// T1 — Override the mock's reported [`DeterminismLevel`] (used by
@@ -1503,9 +1519,12 @@ impl LlmProvider for MockLlmProvider {
 
     fn chat_with_history(
         &self,
-        _messages: &[ChatMessage],
+        messages: &[ChatMessage],
     ) -> Result<(String, crate::usage::TokenUsage)> {
-        // Mock ignores history, returns next preset
+        // Record the full outbound payload (system + history + user) so F-17 G3
+        // tests can assert L0 content never reached the (cloud) LLM. Mock still
+        // returns the next preset, ignoring message content for the response.
+        *self.last_messages.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
         self.chat("", "")
     }
 

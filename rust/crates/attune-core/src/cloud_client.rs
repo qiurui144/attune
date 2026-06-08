@@ -143,22 +143,29 @@ impl CloudClient {
     ///
     /// **Task 4 of v1.0.6 Privacy Logic Implementation Plan.**
     ///
-    /// v1.0.6 Privacy Logic Strategy — OutboundGate audit hook for Cloud SaaS
-    /// outbound. The actual `privacy.cloud_saas` setting + vault_unlocked
-    /// wiring is plumbed in Task 7 (PrivacyView state integration); today
-    /// this is a non-rejecting call site marker — wipe_session needs to
-    /// succeed even if cloud_saas is "disabled" because the user is asking
-    /// to remove their cloud footprint. Grep guard (scripts/privacy-audit.sh)
-    /// keys on `OutboundGate::enforce`.
+    /// v1.0.6 Privacy Logic Strategy — Cloud SaaS egress. Unlike the other four
+    /// egress points (LLM / WebDAV / WebSearch / Telemetry) which now enforce
+    /// the OutboundGate's Result, `wipe_session` is INTENTIONALLY always-allow:
+    /// it is a DSAR-adjacent right (remove your cloud footprint) that must
+    /// succeed even when `privacy.cloud_saas` is disabled or the vault is
+    /// locked. This is the single allow-listed `let _ = enforce` call site in
+    /// `scripts/privacy-audit.sh`.
     pub fn wipe_session(&mut self) -> Result<()> {
-        // Audit hook — wipe_session must succeed regardless of policy outcome.
+        // Audit hook — wipe_session is INTENTIONALLY always-allow: the user is
+        // exercising a DSAR-adjacent right to remove their cloud footprint, so
+        // it must succeed even if `privacy.cloud_saas` is disabled or the vault
+        // is locked. We construct the policy with `enabled: true,
+        // vault_unlocked: true` deliberately (not a no-op stub) and the result
+        // is genuinely discarded because the contract overrides the gate here.
+        // This is the ONLY egress where discarding the Result is correct;
+        // scripts/privacy-audit.sh allow-lists exactly this one call site.
         let _ = crate::OutboundGate::enforce(
-            &crate::OutboundPolicy {
-                kind: crate::OutboundKind::CloudSaas,
-                enabled: true, // wipe is always allowed (user-initiated DSAR-adjacent)
-                vault_unlocked: true,
-                redactor: None,
-            },
+            &crate::OutboundPolicy::cloud(
+                crate::OutboundKind::CloudSaas,
+                true, // DSAR wipe: always allowed by design
+                true, // DSAR wipe: not vault-gated by design
+                None,
+            ),
             "",
         );
 

@@ -36,6 +36,32 @@ const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 /// 真正的窗口感知裁剪由context_budget 在拿到 LLM 后做（见下方）。
 const MAX_HISTORY_DEPTH: usize = 80;
 
+/// F-17 G1 helper — read whether a given outbound point is enabled in
+/// `settings.privacy.<key>`. Defaults to `false` (fail-closed) when the block
+/// or key is absent — matching the privacy default (all 5 egress off until the
+/// user opts in, per `routes/privacy.rs` + `scripts/privacy-audit.sh` gate #4).
+/// The settings meta key is the same one `routes/privacy.rs` reads/writes.
+fn read_privacy_outbound_enabled(state: &SharedState, key: &str) -> bool {
+    let vault = match state.vault.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let meta = vault
+        .store()
+        .get_meta(attune_core::llm_settings::SETTINGS_META_KEY)
+        .ok()
+        .flatten();
+    let settings: serde_json::Value = match meta {
+        Some(data) => serde_json::from_slice(&data).unwrap_or_else(|_| serde_json::json!({})),
+        None => serde_json::json!({}),
+    };
+    settings
+        .get("privacy")
+        .and_then(|p| p.get(key))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 pub async fn chat(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -415,6 +441,33 @@ pub async fn chat(
         ));
     }
 
+    // F-17 G3: L0 "🔒 永不出网" enforcement — drop every PrivacyTier::L0 item
+    // from the context BEFORE it can reach a cloud LLM. Unlike the per-vault
+    // `force_local_for_evidence` switch (which blocks the whole turn), L0 is a
+    // PER-ITEM tag: the user marked specific files "never leaves the device",
+    // so we silently exclude only those chunks and still answer from the rest.
+    // Only applies when the destination is a cloud LLM — a local LLM may see L0.
+    // The filter primitive (Store::retain_non_l0_for_cloud) is unit-tested in
+    // attune-core; here we just invoke it on the live context.
+    if !llm.is_local() && !search_results.is_empty() {
+        let before = search_results.len();
+        search_results = {
+            let vault = state.vault.lock()
+                .map_err(|_| AppError::Internal("vault lock (l0 filter)".into()))?;
+            vault.store()
+                .retain_non_l0_for_cloud(&search_results)
+                .map_err(|e| AppError::Internal(format!("l0 filter: {e}")))?
+        };
+        let dropped = before - search_results.len();
+        if dropped > 0 {
+            tracing::info!(
+                target: "outbound_audit",
+                "F-17 G3: dropped {dropped} L0-tagged item(s) from cloud LLM context (model={}, local={})",
+                llm.model_name(), llm.is_local()
+            );
+        }
+    }
+
     // 2a0. 批注加权（Batch B.2）—— 🆓 零成本（仅 DB 读 + 算数）
     //
     // 读每条结果的批注，按 label 精确匹配调整 score：
@@ -539,6 +592,35 @@ pub async fn chat(
         }
     }
 
+    // F-17 G3 (defense-in-depth): the tiered assembler may re-introduce an L0
+    // item's anchor chunk into the (memory-tagged) context AFTER the first L0
+    // filter. Re-filter on item_id for any cloud destination — memory blocks
+    // carrying a real L0 item_id are dropped here. Blocks with empty / web ids
+    // (pure summaries, no source item) are kept. Safe-default = deny L0.
+    if !llm.is_local() && !search_results.is_empty() {
+        let l0_ids: std::collections::HashSet<String> = {
+            let vault = state.vault.lock()
+                .map_err(|_| AppError::Internal("vault lock (l0 post-assembler)".into()))?;
+            vault.store()
+                .list_l0_item_ids()
+                .map_err(|e| AppError::Internal(format!("l0 list: {e}")))?
+                .into_iter()
+                .collect()
+        };
+        if !l0_ids.is_empty() {
+            let before = search_results.len();
+            search_results.retain(|r| !l0_ids.contains(&r.item_id));
+            let dropped = before - search_results.len();
+            if dropped > 0 {
+                tracing::info!(
+                    target: "outbound_audit",
+                    "F-17 G3: dropped {dropped} L0 anchor(s) re-introduced by memory assembler (model={})",
+                    llm.model_name()
+                );
+            }
+        }
+    }
+
     // 2a. 本地无结果时记录失败信号（后台技能进化的驱动数据），非阻塞
     if search_results.is_empty() {
         let signal_state = state.clone();
@@ -554,7 +636,23 @@ pub async fn chat(
     // 2b. 若本地无结果，尝试网络搜索 fallback
     let web_search_used;
     let knowledge: Vec<serde_json::Value> = if search_results.is_empty() {
-        let ws = state.web_search.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        // F-17 G1: REAL OutboundGate enforcement for the web-search egress at
+        // the live call site. `privacy.web_search` is read fresh from settings
+        // (it can be toggled at runtime) and the vault is unlocked here (dek_db
+        // succeeded above). When the gate refuses, we skip the search entirely
+        // — no raw query leaves the device. Provider-level enforcement
+        // (BrowserSearchProvider::with_outbound_policy) is the defense-in-depth
+        // backstop for direct/other callers.
+        let web_search_allowed = read_privacy_outbound_enabled(&state, "web_search");
+        let ws = if web_search_allowed {
+            state.web_search.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        } else {
+            tracing::info!(
+                target: "outbound_audit",
+                "F-17 G1: web_search egress blocked by privacy gate (settings.privacy.web_search=false)"
+            );
+            None
+        };
         if let Some(ws_provider) = ws {
             let query = body.message.clone();
             let web_results = tokio::task::spawn_blocking(move || {

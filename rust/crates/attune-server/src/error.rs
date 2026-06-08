@@ -173,6 +173,10 @@ impl From<attune_core::error::VaultError> for AppError {
                 AppError::Unauthorized(e.to_string())
             }
             VaultError::InvalidInput(s) => AppError::BadRequest(s),
+            // F-17: an OutboundGate refusal is a user-policy block (privacy
+            // setting off / vault locked / L0-to-cloud), not a server fault →
+            // 403 Forbidden so the client can surface "you disabled this".
+            VaultError::OutboundBlocked(s) => AppError::Forbidden(s),
             _ => AppError::Internal(e.to_string()),
         }
     }

@@ -163,6 +163,13 @@ pub struct BrowserSearchProvider {
     engine: Arc<dyn SearchEngineStrategy>,
     min_interval: Duration,
     last_query_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// v1.0.6 Privacy Logic — the real `settings.privacy.web_search` flag.
+    /// `true` until the server overrides via [`Self::with_outbound_policy`].
+    /// When `false`, [`OutboundGate`] refuses the search before any HTTP call.
+    outbound_enabled: bool,
+    /// v1.0.6 Privacy Logic — the real `vault.state() == Unlocked` flag.
+    /// When `false`, web search outbound is refused (vault-locked).
+    vault_unlocked: bool,
 }
 
 impl BrowserSearchProvider {
@@ -179,11 +186,27 @@ impl BrowserSearchProvider {
             engine,
             min_interval: Duration::from_millis(DEFAULT_MIN_INTERVAL_MS),
             last_query_at: std::sync::Mutex::new(None),
+            // Default open; the server narrows this via with_outbound_policy
+            // once it has read privacy settings + vault state. Note the default
+            // is intentionally permissive for unit-test ergonomics — the
+            // production path ALWAYS calls with_outbound_policy.
+            outbound_enabled: true,
+            vault_unlocked: true,
         }
     }
 
     pub fn with_min_interval_ms(mut self, ms: u64) -> Self {
         self.min_interval = Duration::from_millis(ms);
+        self
+    }
+
+    /// v1.0.6 Privacy Logic — wire the real outbound policy (the
+    /// `settings.privacy.web_search` toggle + current vault unlock state).
+    /// The server MUST call this before handing the provider to chat/search so
+    /// the [`OutboundGate`] enforces the user's choice. Chainable.
+    pub fn with_outbound_policy(mut self, enabled: bool, vault_unlocked: bool) -> Self {
+        self.outbound_enabled = enabled;
+        self.vault_unlocked = vault_unlocked;
         self
     }
 
@@ -243,22 +266,24 @@ impl WebSearchProvider for BrowserSearchProvider {
         if query.trim().is_empty() {
             return Ok(vec![]);
         }
-        self.rate_limit();
-
-        // v1.0.6 Privacy Logic Strategy — OutboundGate audit hook for Web Search outbound.
-        // The actual `privacy.web_search` setting + vault_unlocked wiring is plumbed in
-        // Task 7 (PrivacyView state integration); today this is a non-rejecting
-        // call site marker. Query is unredacted (search engines see raw queries).
-        // Grep guard (scripts/privacy-audit.sh) keys on `OutboundGate::enforce`.
-        let _ = crate::OutboundGate::enforce(
-            &crate::OutboundPolicy {
-                kind: crate::OutboundKind::WebSearch,
-                enabled: true, // wired in Task 7 from settings.privacy.web_search
-                vault_unlocked: true, // wired in Task 7 from vault.state()
-                redactor: None,
-            },
+        // v1.0.6 Privacy Logic Strategy — REAL OutboundGate enforcement for the
+        // Web Search egress. If the user disabled `privacy.web_search` or the
+        // vault is locked, the gate returns Err and we abort BEFORE any HTTP
+        // request leaves the device. The search query itself is unredacted
+        // (search engines see raw queries by design — there is no PII-safe way
+        // to run a keyword search), so the gate uses an empty payload and
+        // `redactor: None` (RedactorRequired only fires on non-empty payload).
+        crate::OutboundGate::enforce(
+            &crate::OutboundPolicy::cloud(
+                crate::OutboundKind::WebSearch,
+                self.outbound_enabled,
+                self.vault_unlocked,
+                None,
+            ),
             "",
-        );
+        )?; // OutboundError → VaultError::OutboundBlocked, aborts before HTTP.
+
+        self.rate_limit();
 
         let url = self.engine.build_url(query);
         log::info!("web search: GET {}", url);
@@ -326,6 +351,58 @@ mod tests {
     fn detect_with_returns_none_when_nothing_exists() {
         let result = detect_with(|_p: &Path| false);
         assert!(result.is_none());
+    }
+
+    // ── G1: REAL OutboundGate enforcement on the Web Search egress ────────
+    // These would be RED on the pre-fix `let _ = enforce(...)` no-op: the
+    // search would proceed to HTTP and fail with a fetch error, NOT a gate
+    // error. We assert the gate-signature error to prove enforcement, and that
+    // it aborts before any network call (a non-existent browser path proves the
+    // gate fires first — no HTTP attempt is made).
+
+    fn gate_test_provider(enabled: bool, vault_unlocked: bool) -> BrowserSearchProvider {
+        // Path need not exist; the gate must refuse before fetch_html runs.
+        BrowserSearchProvider::new(
+            PathBuf::from("/nonexistent/browser-for-gate-test"),
+            Arc::new(DuckDuckGoEngine),
+        )
+        .with_min_interval_ms(0)
+        .with_outbound_policy(enabled, vault_unlocked)
+    }
+
+    #[test]
+    fn web_search_disabled_in_settings_blocks_outbound() {
+        let provider = gate_test_provider(/* enabled */ false, /* vault_unlocked */ true);
+        let err = provider
+            .search("anything", 3)
+            .expect_err("disabled web_search must be refused, not return results");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outbound blocked") && msg.contains("disabled"),
+            "expected gate Disabled error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn web_search_vault_locked_blocks_outbound() {
+        let provider = gate_test_provider(/* enabled */ true, /* vault_unlocked */ false);
+        let err = provider
+            .search("anything", 3)
+            .expect_err("vault-locked web_search must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outbound blocked") && msg.contains("vault-locked"),
+            "expected gate VaultLocked error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn web_search_empty_query_short_circuits_before_gate() {
+        // Empty query returns [] without touching the gate or network (existing
+        // behavior preserved — gate change must not regress this).
+        let provider = gate_test_provider(false, false);
+        let out = provider.search("   ", 3).expect("empty query is a no-op");
+        assert!(out.is_empty());
     }
 
     #[test]

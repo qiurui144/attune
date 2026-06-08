@@ -640,6 +640,37 @@ impl Store {
         Ok(keep)
     }
 
+    /// F-17 G3: 从一组检索结果中剔除所有 L0 (🔒 永不出网) item，用于云端 LLM
+    /// 上下文装配前的强制过滤。返回保留的 `SearchResult` (顺序不变)。
+    ///
+    /// 保留规则:
+    /// - `item_id` 为空 → 合成/记忆块 (无源 item)，永不是 L0，保留
+    /// - `item_id` 以 `web:` 开头 → web 搜索结果 (无源 item)，保留
+    /// - `source_type == "web"` / `"memory"` → 同上，保留
+    /// - 其余 (真实 DB item) → 仅当 `filter_out_l0_items` 判定非 L0 (且存在、未删)
+    ///   时保留;L0 / 已删 / 不存在 一律剔除 (fail-closed)
+    ///
+    /// 这是 chat 路由在出网前调用的核心原语。单独抽出便于直接单测 (证明 G3 闭环)。
+    pub fn retain_non_l0_for_cloud(
+        &self,
+        results: &[crate::search::SearchResult],
+    ) -> Result<Vec<crate::search::SearchResult>> {
+        let ids: Vec<String> = results.iter().map(|r| r.item_id.clone()).collect();
+        let kept: std::collections::HashSet<String> =
+            self.filter_out_l0_items(&ids)?.into_iter().collect();
+        Ok(results
+            .iter()
+            .filter(|r| {
+                r.item_id.is_empty()
+                    || r.item_id.starts_with("web:")
+                    || r.source_type == "web"
+                    || r.source_type == "memory"
+                    || kept.contains(&r.item_id)
+            })
+            .cloned()
+            .collect())
+    }
+
     /// 列出当前所有标记为 L0 的 item id（Settings UI "受保护文件" 列表）
     pub fn list_l0_item_ids(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare_cached(
@@ -767,6 +798,93 @@ mod privacy_tier_tests {
         assert_eq!(l0.len(), 2);
         assert!(l0.contains(&"a".to_string()));
         assert!(l0.contains(&"c".to_string()));
+    }
+
+    // ── F-17 G3: retain_non_l0_for_cloud — the cloud-bound context filter ──
+    // These prove the L0 "永不出网" invariant the chat route relies on. They
+    // are RED on the pre-fix code (no caller filtered L0 → the L0 item would
+    // remain in the cloud payload).
+
+    fn sr(item_id: &str, source_type: &str) -> crate::search::SearchResult {
+        crate::search::SearchResult {
+            item_id: item_id.to_string(),
+            score: 0.9,
+            title: "T".into(),
+            content: "secret evidence body".into(),
+            source_type: source_type.into(),
+            inject_content: Some("secret evidence body".into()),
+            corpus_domain: "general".into(),
+            breadcrumb: Vec::new(),
+            chunk_offset_start: None,
+            chunk_offset_end: None,
+        }
+    }
+
+    fn seed_three_items(s: &Store) {
+        for id in ["a", "b", "c"] {
+            s.conn
+                .execute(
+                    "INSERT INTO items (id, title, content, source_type, created_at, updated_at) \
+                     VALUES (?1, 'T', X'00', 'note', '2026-01-01', '2026-01-01')",
+                    params![id],
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn retain_drops_l0_item_from_cloud_context() {
+        let s = Store::open_memory().unwrap();
+        seed_three_items(&s);
+        s.set_item_privacy_tier("b", PrivacyTier::L0).unwrap();
+
+        let results = vec![sr("a", "note"), sr("b", "note"), sr("c", "note")];
+        let kept = s.retain_non_l0_for_cloud(&results).unwrap();
+
+        let kept_ids: Vec<&str> = kept.iter().map(|r| r.item_id.as_str()).collect();
+        assert_eq!(kept_ids, vec!["a", "c"], "L0 item 'b' must be dropped");
+        // The L0 body must NOT survive into the cloud-bound set.
+        assert!(
+            kept.iter().all(|r| r.item_id != "b"),
+            "no L0 item may remain in cloud context"
+        );
+    }
+
+    #[test]
+    fn retain_keeps_web_and_memory_synthetic_items() {
+        let s = Store::open_memory().unwrap();
+        // No DB items: web / memory / empty-id synthetic blocks are never L0.
+        let results = vec![
+            sr("web:https://example.com/x", "web"),
+            sr("", "memory"),
+            sr("mem-block-1", "memory"),
+        ];
+        let kept = s.retain_non_l0_for_cloud(&results).unwrap();
+        assert_eq!(kept.len(), 3, "synthetic web/memory items must be preserved");
+    }
+
+    #[test]
+    fn retain_drops_nonexistent_and_deleted_ids_failclosed() {
+        let s = Store::open_memory().unwrap();
+        seed_three_items(&s);
+        // 'ghost' never existed; 'b' will be soft-deleted.
+        s.conn
+            .execute("UPDATE items SET is_deleted = 1 WHERE id = 'b'", [])
+            .unwrap();
+        let results = vec![sr("a", "note"), sr("b", "note"), sr("ghost", "note")];
+        let kept = s.retain_non_l0_for_cloud(&results).unwrap();
+        let kept_ids: Vec<&str> = kept.iter().map(|r| r.item_id.as_str()).collect();
+        // Only the live, non-L0 'a' survives (fail-closed on unknown/deleted).
+        assert_eq!(kept_ids, vec!["a"]);
+    }
+
+    #[test]
+    fn retain_all_non_l0_passthrough() {
+        let s = Store::open_memory().unwrap();
+        seed_three_items(&s);
+        let results = vec![sr("a", "note"), sr("b", "note"), sr("c", "note")];
+        let kept = s.retain_non_l0_for_cloud(&results).unwrap();
+        assert_eq!(kept.len(), 3, "no L0 tags → nothing dropped");
     }
 
     // ── v0.7 W4 R27: update_item UpdateOutcome 三态完备性测试 ──

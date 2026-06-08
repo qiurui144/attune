@@ -12,10 +12,15 @@
 //! 2. **Locked vault** → returns [`OutboundError::VaultLocked`]. (Telemetry is
 //!    exempt because telemetry payloads contain no vault data; see field
 //!    `policy.requires_vault`.)
-//! 3. **Payload contains PII but no redactor installed** → returns
+//! 3. **L0-tagged content to a cloud destination** → returns
+//!    [`OutboundError::L0CloudBlocked`]. `PrivacyTier::L0` ("🔒 永不出网,
+//!    强制本地 LLM") content must NEVER reach a non-local endpoint. Checked
+//!    before redaction because redaction does not make L0 content cloud-safe —
+//!    L0 means *no egress at all*, even redacted.
+//! 4. **Payload contains PII but no redactor installed** → returns
 //!    [`OutboundError::RedactorRequired`]. We **fail closed** rather than send
 //!    PII unredacted.
-//! 4. **All checks pass** → returns the **redacted** payload, never the
+//! 5. **All checks pass** → returns the **redacted** payload, never the
 //!    original. Caller passes the returned string to the wire.
 //!
 //! ## Why a struct gate and not a free function?
@@ -63,6 +68,11 @@ pub enum OutboundError {
     /// Vault is locked / sealed; non-telemetry outbound requires unlocked vault.
     #[error("vault-locked: outbound requires unlocked vault")]
     VaultLocked,
+    /// Payload carries `PrivacyTier::L0` ("永不出网") content but the destination
+    /// is a cloud (non-local) endpoint → fail closed. L0 content may only go to
+    /// a local LLM; even redaction does not relax this.
+    #[error("l0-cloud-blocked: L0-tagged content cannot leave the device to a cloud destination")]
+    L0CloudBlocked,
     /// Payload contained PII but no redactor was installed → fail closed.
     #[error("redactor-required: payload contained PII and redactor is unavailable")]
     RedactorRequired,
@@ -80,13 +90,46 @@ pub struct OutboundPolicy<'a> {
     /// Optional redactor. If `None` and `payload` contains PII, the gate
     /// fails closed with [`OutboundError::RedactorRequired`].
     pub redactor: Option<&'a Redactor>,
+    /// Whether the destination endpoint is a **local** LLM/service (Ollama /
+    /// localhost). When `false` (cloud), any `contains_l0` payload is refused
+    /// with [`OutboundError::L0CloudBlocked`]. For non-LLM egress points
+    /// (WebDAV / WebSearch / CloudSaas) the destination is always cloud, so
+    /// callers pass `local_destination: false`.
+    pub local_destination: bool,
+    /// Whether `payload` (or the context being assembled for it) includes any
+    /// content tagged `PrivacyTier::L0`. When `true` AND
+    /// `local_destination == false`, the gate refuses. Callers that never carry
+    /// item content (telemetry / search query / webdav path) pass `false`.
+    pub contains_l0: bool,
+}
+
+impl<'a> OutboundPolicy<'a> {
+    /// Convenience constructor for the common case: a cloud destination that
+    /// carries no L0 content (the historical 4-field policy). Keeps existing
+    /// call sites terse while the two privacy-tier fields default safely.
+    pub fn cloud(
+        kind: OutboundKind,
+        enabled: bool,
+        vault_unlocked: bool,
+        redactor: Option<&'a Redactor>,
+    ) -> Self {
+        OutboundPolicy {
+            kind,
+            enabled,
+            vault_unlocked,
+            redactor,
+            local_destination: false,
+            contains_l0: false,
+        }
+    }
 }
 
 /// The single outbound enforcement entry-point.
 pub struct OutboundGate;
 
 impl OutboundGate {
-    /// Enforce all four contract clauses (disabled / vault / redactor / redact).
+    /// Enforce all five contract clauses
+    /// (disabled / vault / L0-cloud / redactor / redact).
     ///
     /// Returns the **redacted** payload to be sent to the wire — never the
     /// original. Caller is responsible for using the returned string.
@@ -102,7 +145,14 @@ impl OutboundGate {
             return Err(OutboundError::VaultLocked);
         }
 
-        // 3) Redact PII (fail closed if payload appears to contain PII but no
+        // 3) L0 "永不出网" → an L0-tagged payload may only reach a local LLM.
+        //    Checked BEFORE redaction: L0 means no egress at all, redaction does
+        //    not make it cloud-safe. Local destinations are exempt.
+        if policy.contains_l0 && !policy.local_destination {
+            return Err(OutboundError::L0CloudBlocked);
+        }
+
+        // 4) Redact PII (fail closed if payload appears to contain PII but no
         //    redactor is installed).
         let Some(redactor) = policy.redactor else {
             // No redactor: only allow if payload has zero PII signal.
@@ -138,6 +188,25 @@ mod tests {
             enabled,
             vault_unlocked,
             redactor,
+            local_destination: false,
+            contains_l0: false,
+        }
+    }
+
+    /// Build an LLM policy carrying L0 content, parameterized on destination.
+    fn l0_pol(local_destination: bool, with_redactor: bool) -> OutboundPolicy<'static> {
+        let redactor: Option<&'static Redactor> = if with_redactor {
+            Some(Box::leak(Box::new(Redactor::new())))
+        } else {
+            None
+        };
+        OutboundPolicy {
+            kind: OutboundKind::Llm,
+            enabled: true,
+            vault_unlocked: true,
+            redactor,
+            local_destination,
+            contains_l0: true,
         }
     }
 
@@ -233,5 +302,57 @@ mod tests {
                 "{k:?} did not refuse when disabled"
             );
         }
+    }
+
+    // ── G3: L0 "永不出网" enforcement ────────────────────────────────────
+
+    #[test]
+    fn l0_content_to_cloud_is_blocked() {
+        // L0-tagged content + cloud destination → MUST refuse, even with a
+        // redactor present (redaction does not relax L0).
+        let p = l0_pol(/* local_destination */ false, /* redactor */ true);
+        assert!(
+            matches!(
+                OutboundGate::enforce(&p, "敏感证据 phone 13800138000"),
+                Err(OutboundError::L0CloudBlocked)
+            ),
+            "L0 content to cloud must be refused"
+        );
+    }
+
+    #[test]
+    fn l0_content_to_local_is_allowed() {
+        // L0 content + local destination → allowed (forced-local is the point).
+        let p = l0_pol(/* local_destination */ true, /* redactor */ true);
+        let out = OutboundGate::enforce(&p, "敏感证据 phone 13800138000")
+            .expect("L0 to local LLM must be allowed");
+        // Redaction still applies even on local.
+        assert!(!out.contains("13800138000"), "phone still redacted; got: {out}");
+    }
+
+    #[test]
+    fn l0_blocked_takes_precedence_over_redactor_required() {
+        // L0 + cloud + NO redactor → L0CloudBlocked (the stronger refusal),
+        // not RedactorRequired. The order proves L0 is checked first.
+        let p = l0_pol(/* local_destination */ false, /* redactor */ false);
+        assert!(
+            matches!(
+                OutboundGate::enforce(&p, "敏感证据"),
+                Err(OutboundError::L0CloudBlocked)
+            ),
+            "L0-cloud must refuse before the redactor check"
+        );
+    }
+
+    #[test]
+    fn non_l0_cloud_unaffected_by_l0_gate() {
+        // Default cloud policy (contains_l0=false) still passes through normally.
+        let p = OutboundPolicy::cloud(
+            OutboundKind::Llm,
+            true,
+            true,
+            Some(Box::leak(Box::new(Redactor::new()))),
+        );
+        assert_eq!(OutboundGate::enforce(&p, "hello").unwrap(), "hello");
     }
 }
