@@ -10,7 +10,44 @@ pub use tier::{classify_hardware, ModelRecommendation, Tier};
 const APP_DIR: &str = "attune";
 const LEGACY_APP_DIR: &str = "npu-vault";
 
+std::thread_local! {
+    /// Per-thread override for the resolved app data/config dir.
+    ///
+    /// When `Some`, [`data_dir`] / [`config_dir`] return this path verbatim
+    /// (already the final app dir — no `attune/` suffix is appended), bypassing
+    /// the `dirs::`/HOME fallback chain entirely. When `None` (the production
+    /// default), resolution is byte-for-byte identical to having no override.
+    ///
+    /// This is a genuine data-dir-injection seam: it lets tests pin a temp dir
+    /// without relying on `dirs::data_local_dir()` honoring `HOME`/`XDG_*` —
+    /// which it does NOT on Windows (it reads `%LOCALAPPDATA%` via the
+    /// Known-Folder API). A thread-local is correct because cargo runs each test
+    /// on its own thread, so there is no process-global env clobber and the
+    /// behavior is identical on Windows and Linux. See `set_dir_override_for_test`.
+    static DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Read the current thread-local dir override, if any.
+fn dir_override() -> Option<PathBuf> {
+    DIR_OVERRIDE.with(|c| c.borrow().clone())
+}
+
+/// Set (or clear with `None`) the per-thread app-dir override. Test-only seam.
+///
+/// The override path is treated as the FINAL app dir — `data_dir()`/`config_dir()`
+/// return it directly (no `attune/` suffix). Callers should `create_dir_all` it
+/// themselves before use and restore the previous value on exit.
+#[doc(hidden)]
+pub fn set_dir_override_for_test(path: Option<PathBuf>) -> Option<PathBuf> {
+    DIR_OVERRIDE.with(|c| c.replace(path))
+}
+
 pub fn data_dir() -> PathBuf {
+    // Test-injection seam (thread-local): when set, return verbatim and skip the
+    // dirs::/HOME fallback chain. None → behavior identical to production.
+    if let Some(p) = dir_override() {
+        return p;
+    }
     // 容器/headless 环境中 dirs::data_local_dir() 可能返回 None（无 HOME 变量）；
     // 回退到 $HOME/.local/share 或当前目录，确保不 panic。
     //
@@ -23,6 +60,9 @@ pub fn data_dir() -> PathBuf {
 }
 
 pub fn config_dir() -> PathBuf {
+    if let Some(p) = dir_override() {
+        return p;
+    }
     // 同上，回退到 $HOME/.config 或当前目录
     let base = dirs::config_dir()
         .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))
@@ -589,6 +629,29 @@ mod tests {
         let md = models_dir();
         assert!(md.starts_with(data_dir()));
         assert!(md.to_str().unwrap().ends_with("models"));
+    }
+
+    #[test]
+    fn dir_override_pins_data_and_config_then_restores() {
+        // When the thread-local override is set, data_dir()/config_dir() return it
+        // verbatim (no attune/ suffix). When cleared, behavior must be byte-identical
+        // to production — this is the critical invariant for the test-injection seam.
+        let prod_data = data_dir();
+        let prod_config = config_dir();
+        assert!(dir_override().is_none(), "no override leaked into this test");
+
+        let td = tempfile::tempdir().expect("tempdir");
+        let pinned = td.path().to_path_buf();
+        let prev = set_dir_override_for_test(Some(pinned.clone()));
+        assert_eq!(prev, None, "fresh thread has no prior override");
+        assert_eq!(data_dir(), pinned, "data_dir returns override verbatim");
+        assert_eq!(config_dir(), pinned, "config_dir returns override verbatim");
+
+        // Restoring None must reproduce production resolution exactly.
+        let restored = set_dir_override_for_test(None);
+        assert_eq!(restored, Some(pinned));
+        assert_eq!(data_dir(), prod_data, "data_dir restored byte-identical to production");
+        assert_eq!(config_dir(), prod_config, "config_dir restored byte-identical to production");
     }
 
     #[test]

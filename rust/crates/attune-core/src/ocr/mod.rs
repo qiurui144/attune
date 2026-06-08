@@ -414,10 +414,13 @@ mod tests {
     #[test]
     fn dpi_for_profile_unknown_returns_default() {
         // unknown profile id → 300 (registry 加载得到 7 builtin 但无此 id)
+        // Pin the data dir to a temp dir via the thread-local injection seam rather
+        // than overriding HOME/XDG (which leaks process-globally and does NOT isolate
+        // on Windows — dirs reads %LOCALAPPDATA%). See platform::set_dir_override_for_test.
         let tmp = tempfile::TempDir::new().expect("tmp");
-        std::env::set_var("HOME", tmp.path());
-        std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
+        let prev = crate::platform::set_dir_override_for_test(Some(tmp.path().to_path_buf()));
         assert_eq!(dpi_for_profile(Some("does-not-exist")), 300);
+        crate::platform::set_dir_override_for_test(prev);
     }
 
     #[test]
