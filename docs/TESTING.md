@@ -348,7 +348,7 @@ cargo test -p attune-core --test stress_large_scale_test
 | AUDIO | `tests/fixtures/audio/`（`gen_audio_fixtures.py`） | 跟代码走 | tone/silence/corrupt/speech WAV | H |
 | OCRIMG | `tests/fixtures/ocr_image/`（`gen_ocr_image_fixtures.py`） | 跟代码走 | known-text PNG/JPG + zero-byte/non-image | A/G |
 | I18N | `tests/fixtures/i18n/`（**待补**：JP/KR/繁/RTL/emoji/非UTF8） | 跟代码走 | 多语种 | B |
-| OFFICE | `tests/fixtures/office/`（**待补**：docx/xlsx/pptx/epub + zip-bomb/路径穿越/XML实体 对抗样本） | 跟代码走 | ZIP/XML 系格式 + 对抗 | A/C |
+| OFFICE | `tests/fixtures/office/`（生成器 `scripts/gen-office-fixtures.py`：known.{docx,xlsx,pptx,epub,rtf,csv} 含 CN+EN marker + bomb.{docx,xlsx}/traversal.docx/laughs.docx/big_entry.docx 对抗样本） | 跟代码走 | ZIP/XML 系格式 + 对抗 | A/C |
 | RETR | `tests/fixtures/retrieval/`（**待补**：分块/RRF/relevance@K golden） | 跟代码走 | 检索质量 | D/E |
 
 > 真实仓库语料**必须 git clone --depth 1 -b `<tag/commit>` 锁版本**（附录 B 脚本）；上游变动不得改判据基线（§6.3）。本地 fixture **必须随生成器同入仓、字节级可复现**。
@@ -357,9 +357,9 @@ cargo test -p attune-core --test stress_large_scale_test
 
 | 轴 | 维度 | 测试文件 | 语料 | 通过判据 | 状态 |
 |----|------|---------|------|---------|------|
-| **A** | 格式（14 类） | `parser` 单测 + `pdf_ingest_test`/`ocr_image_test` | PDF/OCRIMG/A/B | 每格式抽取已知内容 | PDF/图/文 ✅；docx/xlsx/pptx/epub/rtf/csv ❌待补(OFFICE) |
+| **A** | 格式（14 类） | `parser` 单测 + `pdf_ingest_test`/`ocr_image_test` + `office_formats_test`(7) | PDF/OCRIMG/A/B/OFFICE | 每格式抽取已知内容 | PDF/图/文 ✅；docx/xlsx/pptx/epub/rtf/csv ✅(OFFICE，各格式抽取 CN+EN 已知 marker) |
 | **B** | 语言 i18n | `pdf_e2e_search`(中英)、`golden/*/e03-non-utf8`、jieba 套件 | PDF mixed/B/I18N | 各语种 ingest+检索命中 | 中英 ✅；JP/KR/繁/RTL ❌待补(I18N) |
-| **C** | 鲁棒 6 类 | `ingest_edge_resource_test`(13) | EDGE | 空/超长/非UTF8/emoji/恶意HTML graceful；并发无死锁 | edge/error/resource/concurrent ✅；**ZIP/XML 对抗 ❌待补(OFFICE,P0安全)** |
+| **C** | 鲁棒 6 类 | `ingest_edge_resource_test`(13) + `office_adversarial_test`(6+1 FLAG) | EDGE/OFFICE | 空/超长/非UTF8/emoji/恶意HTML graceful；并发无死锁；ZIP/XML 对抗 bounded | edge/error/resource/concurrent ✅；**ZIP/XML 对抗 ✅(OFFICE,P0安全)** — docx/epub/pptx zip-bomb 真解压上限拒绝/路径穿越无FS逃逸/billion-laughs+XXE 惰性/超大单条目 bounded，均带 20s watchdog；⚠️ xlsx bomb 仅挡"诚实"中央目录(BUG-3b：伪造声明大小可绕过，#[ignore] FLAG 留 follow-up) |
 | **D** | 检索质量 | `pdf_e2e_search`(真 bge-m3 RRF) | PDF/A/B | 中/英/大写 query 命中；RRF 双信号 | E2E ✅；relevance@K ❌待补(RETR) |
 | **E** | 分块质量 | `chunker` 单测 | RETR | L1章节/L2段落边界、代码块/表格保留 | ⚠️待系统化(RETR) |
 | **F** | 向量/embedding | `pdf_e2e_search`、`index::` 套件 | PDF | bge-m3 1024d 真向量;维度一致 | ✅ |
@@ -369,9 +369,9 @@ cargo test -p attune-core --test stress_large_scale_test
 | **J** | 迁移/reindex | `index::` migration 测试 | — | tokenizer_version 变更 → 索引重建无数据丢失 | ✅(FTS v2 迁移) |
 | **K** | 成本契约 | `context_budget` 套件 | — | 建库不升 LLM;CJK-aware 预算;成本显示准 | ⚠️待系统化 |
 
-**最高价值待补（§6.1「证明它会挂」）**：① OFFICE ZIP/XML 对抗（解压炸弹 / entry 路径穿越 / billion-laughs XML — P0 安全，docx/xlsx/pptx/epub 全是 zip+XML 不可信上传）② I18N 非中英语种。
+**最高价值待补（§6.1「证明它会挂」）**：① I18N 非中英语种（JP/KR/繁/RTL）② RETR relevance@K golden。OFFICE ZIP/XML 对抗已闭环（见下 BUG-3）。
 
-**已抓修真 bug（本轮扩展产出，回归永久锁）**：BUG-1 `parser.rs` 首行标题多字节 byte-slice **PANIC**（char-safe 修）；BUG-2 `html_to_text` body 级 `<script>/<style>` 源码**泄漏进索引**（剔除子树修）。两者回归测试在 `ingest_edge_resource_test.rs`。
+**已抓修真 bug（本轮扩展产出，回归永久锁）**：BUG-1 `parser.rs` 首行标题多字节 byte-slice **PANIC**（char-safe 修）；BUG-2 `html_to_text` body 级 `<script>/<style>` 源码**泄漏进索引**（剔除子树修）。两者回归测试在 `ingest_edge_resource_test.rs`。**BUG-3（P0 安全，本轮）**：docx/xlsx/pptx/epub 的 ZIP 条目解压**无大小上限** —— `read_to_string` 把整条目读进内存，高压缩比 zip-bomb（~100KB 压缩 → ~100MB 解压，甚至可达 GB 级）能 **OOM**。修复：`parser.rs::read_zip_entry_string_bounded` + `MAX_ZIP_ENTRY_BYTES`(64MB) 给 docx/epub/pptx 单条目+累计**真解压**量设硬上限(`Read::take` 在实际解压流上，不可伪造)，超限 `InvalidInput` 拒绝；xlsx 在交 calamine 前预扫描中央目录**声明的**解压大小拒绝炸弹。回归锁在 `office_adversarial_test.rs`（zip-bomb 拒绝 / 路径穿越 memory-only 无 FS 逃逸 / billion-laughs+XXE 因 char-scanner 不展开实体而惰性 / 超大单条目 bounded，全部 20s watchdog 兜 hang）。**残留 BUG-3b（FLAG，follow-up）**：xlsx 扫描信任 `ZipFile::size()`(取自可伪造的中央目录)，伪造"声明小、实际大"的 bomb 可绕过 → calamine 仍累积真字节。docx/epub/pptx 不受影响(走真解压 take)。根治需对 calamine 将读的 part 做真解压带上限，属较大改动，`#[ignore]` FLAG `xlsx_spoofed_size_bomb_not_yet_bounded` 留记。
 
 ---
 
