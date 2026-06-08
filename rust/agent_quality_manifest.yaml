@@ -167,4 +167,9 @@ gates:
 # observed count so the guard catches *future* spikes without false-positiving
 # on the existing slow-test-nightly migration (#[ignore] E2E tests, ci.yml:170).
 ignore_baseline:
-  attune-core: 35
+  # 2026-06-08 re-baselined 35→43: doc-intelligence test expansion added env-gated
+  # real-model legs (asr/ocr/real-LLM) + heavyweight (10MB/deep-nested) + 1 office
+  # BUG-3b FLAG — all legit env/slow gates per §1.2 / §7.2 Gate 2, NOT failure-skips.
+  # The prior 35 was stale (never bumped as nightly/env #[ignore] accumulated; the
+  # spike was masked by the earlier rust-test ENOSPC failure until the disk-reclaim fix).
+  attune-core: 43
