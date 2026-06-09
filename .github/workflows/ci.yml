@@ -200,11 +200,54 @@ jobs:
         # #[ignore]-spike guard (per §7.2 Gate 2). spec: 2026-05-29-ai-agents-governance-orchestration.md §9
         run: cargo test --release -p attune-core --test agent_gate_orchestrator
 
-      # ── attune-core lib + integration: BOTH legs ──
-      - name: cargo test -p attune-core
+      # ── attune-core lib + integration HALF-A: BOTH legs ──
+      # attune-core has 66 integration test binaries; each statically links the
+      # full release dep tree (wasmtime/tantivy/usearch/ort). On a 4-vCPU windows
+      # runner, compiling all 66 alone exceeds 50min, so the integration tests
+      # are split across rust-test-core (half A + lib + gates) and rust-test-core-b
+      # (half B). The 3 deterministic gates (parse/agent/wasm) run as their own
+      # steps above/below and are excluded from the halves.
+      - name: Guard — core integration split covers every non-gate core test
+        shell: bash
         working-directory: rust
-        # PR-time runs lib 全 + integration（#[ignore] 慢 E2E 自动跳过，走 nightly）
-        run: cargo test -p attune-core --release
+        run: bash ../.github/scripts/ci-core-test-split-guard.sh
+      - name: cargo test attune-core lib + integration (half A)
+        working-directory: rust
+        # PR-time runs lib 全 + half-A integration（#[ignore] 慢 E2E 自动跳过，走 nightly）
+        run: >
+          cargo test --release -p attune-core --lib
+          --test asr_ingest_test
+          --test change_password_test
+          --test chat_reliability_golden_gate
+          --test chat_reliability_integration
+          --test chat_reliability_proptests
+          --test chunking_quality_test
+          --test concurrent_stress_test
+          --test crash_recovery_test
+          --test document_classifier_agent_golden_gate
+          --test document_classifier_agent_integration
+          --test document_classifier_agent_proptests
+          --test email_accounts_test
+          --test entities_test
+          --test generic_plugins_test
+          --test git_connector
+          --test governor_integration
+          --test i18n_ingest_search_test
+          --test ingest_edge_resource_test
+          --test ingest_email_test
+          --test ingest_pipeline_test
+          --test ingest_rss_test
+          --test linker_entity_debug
+          --test linker_golden_gate
+          --test memory_consolidation_agent_golden_gate
+          --test memory_consolidation_agent_integration
+          --test memory_consolidation_agent_proptests
+          --test memory_consolidation_integration
+          --test memory_moat_integration
+          --test memory_token_reduction_benchmark
+          --test migration_roundtrip_test
+          --test model_boundary_audit
+          --test multilayer_memory_integration
 
       - name: WASM cross-platform golden (same .wasm on linux + windows)
         working-directory: rust
@@ -228,28 +271,128 @@ jobs:
           rustup target add wasm32-wasip1
           cargo build -p attune-agent-sdk --target wasm32-wasip1
 
-  # attune-server is the HOG and is sharded into TWO parallel jobs:
+  rust-test-core-b:
+    # Second attune-core integration shard (half B). Compiling all 66 core test
+    # binaries in one job overran the 50min budget on the 4-vCPU windows runner
+    # (compile-bound — it never reached running a test). Half B runs the
+    # remaining ~31 integration test files; the guard (shared script) proves
+    # half-A ∪ half-B ∪ gates == on-disk.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: rust-test-core-b-${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_NET_RETRY: "10"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (ubuntu — reclaim ~25-30G before the release build)
+        if: matrix.os == 'ubuntu-latest'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Free disk space (windows — drop large pre-installed SDKs)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $paths = @(
+            "$env:ANDROID_HOME",
+            "$env:CHROMEWEBDRIVER",
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "$env:AGENT_TOOLSDIRECTORY\CodeQL"
+          )
+          foreach ($p in $paths) {
+            if ($p -and (Test-Path $p)) {
+              Write-Host "Removing $p"
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Get-PSDrive C | Select-Object Used,Free
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (registry + git + target, pruned)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: core-b-${{ matrix.os }}-v3
+
+      - name: Guard — core integration split covers every non-gate core test
+        shell: bash
+        working-directory: rust
+        run: bash ../.github/scripts/ci-core-test-split-guard.sh
+      - name: cargo test attune-core integration (half B)
+        working-directory: rust
+        run: >
+          cargo test --release -p attune-core
+          --test ocr_image_test
+          --test ocr_long_page_audit
+          --test office_adversarial_test
+          --test office_formats_test
+          --test oom_behavior_test
+          --test oss_agent_real_llm_gate
+          --test oss_boundary_test
+          --test pdf_e2e_search
+          --test pdf_ingest_test
+          --test perf_chunker_bench
+          --test perf_reindex_bench
+          --test pii_chat_path_redact_test
+          --test plugin_protocol_e2e
+          --test ppocr_icbc_smoke
+          --test project_recommender_test
+          --test rag_flow_audit
+          --test rag_perf_audit
+          --test rag_quality_benchmark
+          --test rag_w2_batch1_integration
+          --test rag_w3_batch_a_integration
+          --test rag_w3_batch_b_integration
+          --test reranker_long_doc_audit
+          --test retrieval_quality_test
+          --test rss_feeds_test
+          --test self_evolving_skill_agent_golden_gate
+          --test self_evolving_skill_agent_integration
+          --test self_evolving_skill_agent_proptests
+          --test session_revoke_test
+          --test stress_large_scale_test
+          --test webdav_remotes_test
+          --test workflow_test
+
+  # attune-server is the HOG and is sharded into THREE parallel jobs (its 36
+  # integration tests each boot a real attune_server + do an argon2 vault setup,
+  # which is CPU-bound and does NOT speed up with more --test-threads, so the
+  # only lever is spreading the binaries across parallel runners):
   #   rust-test-server        — server lib + accounts + root-package integration
-  #                             + every NON-office server integration test.
-  #   rust-test-server-office — the 10 office_* engine integration test binaries
-  #                             (each boots a real attune_server + does vault
-  #                             setup; office_concurrent alone = ~99s single-
-  #                             threaded — measured locally). These dominate the
-  #                             server runtime and on a 4-vCPU runner the combined
-  #                             server crate overran the 50min budget.
-  # A guard step asserts the office split-list exactly equals the on-disk
-  # office_*.rs set, so adding a new office test can't silently skip a shard.
+  #                             + non-office GROUP A (the heavier server-booting
+  #                             tests).
+  #   rust-test-server-b      — non-office GROUP B (lighter wire/logic tests).
+  #   rust-test-server-office — the 10 office_* engine integration binaries
+  #                             (office_concurrent alone ≈ 99s single-threaded).
+  # A shared guard script (ci-server-test-split-guard.sh) asserts
+  # office ∪ A ∪ B == on-disk tests/*.rs, so a new server test can't silently
+  # skip a shard.
 
   rust-test-server:
-    # Server lib + accounts + workspace-root package + all NON-office server
-    # integration tests. `attune` = the workspace-root package; its tests/
-    # (server_test / classifier_test / corpus_integration_test / integration_test)
-    # boot AppState across core+server, so they ride the server leg.
-    # cargo can't exclude integration binaries, so the NON-office tests are
-    # enumerated explicitly via --test below, and office runs in the sibling
-    # rust-test-server-office job. Coverage of the old `--workspace` run is
-    # preserved (office in the sibling job; the guard there proves no office
-    # binary is dropped).
+    # Server lib unittests + attune-accounts + the workspace-root `attune`
+    # package's integration tests (server_test / classifier_test /
+    # integration_test / corpus_integration_test non-#[ignore]) + non-office
+    # GROUP A. GROUP B → rust-test-server-b; office_* → rust-test-server-office.
+    # cargo can't exclude integration binaries, so each shard enumerates its
+    # --test set explicitly; the shared guard proves the union is complete.
     strategy:
       fail-fast: false
       matrix:
@@ -305,25 +448,10 @@ jobs:
           workspaces: rust
           key: server-${{ matrix.os }}-v3
 
-      - name: Guard — non-office split-list covers every NON-office server test
-        # Fails loudly if a new (non-office) tests/*.rs appears that isn't in the
-        # --test list below, so a new server integration test can't silently skip
-        # CI. (office_* files are intentionally excluded — they run in the
-        # rust-test-server-office shard.)
+      - name: Guard — server test split covers every server test (office+A+B)
         shell: bash
         working-directory: rust
-        run: |
-          listed="acp4_governor_wire_test acp5_chat_flow_wire_test ai_stack_web_search_test amd_laptop_e2e_smoke api_v1_version_test chat_cost_estimate_test eval_determinism_test eval_response_surface_test form_factor_integration forms_routes_test git_route_subprocess index_path_test lib_runtime_test lock_order_abba_test marketplace_install_test member_routes_test ocr_profiles_routes_test privacy_endpoints_test projects_routes_test session_test settings_lock_test store_queue_test system_wizard_full_flow_test vault_lock_endpoint_test vault_recovery_test vault_setup_test"
-          listed_sorted=$(echo $listed | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')
-          actual=$(ls crates/attune-server/tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' | grep -v '^office_' | sort | tr '\n' ' ' | sed 's/ $//')
-          if [ "$listed_sorted" != "$actual" ]; then
-            echo "::error::non-office server test split-list drifted."
-            echo "listed : $listed_sorted"
-            echo "on-disk: $actual"
-            echo "Update rust-test-server's --test list to match (or move new office_* to the office shard)."
-            exit 1
-          fi
-          echo "non-office split-list OK ($(echo $actual | wc -w) binaries)."
+        run: bash ../.github/scripts/ci-server-test-split-guard.sh
 
       # attune-accounts (lib) + the workspace-root `attune` package's integration
       # tests (server_test / classifier_test / integration_test +
@@ -333,41 +461,111 @@ jobs:
         working-directory: rust
         run: cargo test --release -p attune-accounts -p attune
 
-      # attune-server lib unittests + every NON-office integration test, listed
-      # explicitly via --test so this job never touches the office engine
-      # binaries (those run in rust-test-server-office). The guard in the office
-      # job fails loudly if a NEW office_*.rs appears unassigned. #[ignore]
-      # 慢 E2E 自动跳过(走 nightly)。
-      - name: cargo test attune-server lib + non-office integration
+      # attune-server lib unittests + the NON-office integration GROUP A (the
+      # heavier, server-booting / argon2-vault-setup tests). GROUP B runs in the
+      # sibling rust-test-server-b job; office_* run in rust-test-server-office.
+      # The shared guard above proves office∪A∪B == on-disk. #[ignore] 慢 E2E
+      # 自动跳过(走 nightly)。
+      - name: cargo test attune-server lib + non-office integration (group A)
         working-directory: rust
         run: >
           cargo test --release -p attune-server --lib
+          --test ai_stack_web_search_test
+          --test form_factor_integration
+          --test git_route_subprocess
+          --test lock_order_abba_test
+          --test marketplace_install_test
+          --test ocr_profiles_routes_test
+          --test privacy_endpoints_test
+          --test projects_routes_test
+          --test settings_lock_test
+          --test system_wizard_full_flow_test
+          --test vault_lock_endpoint_test
+          --test vault_recovery_test
+          --test vault_setup_test
+
+  rust-test-server-b:
+    # Second non-office server integration shard (GROUP B — the lighter, mostly
+    # pure-logic / wire tests). Split off rust-test-server so neither non-office
+    # shard overruns the 50min budget (the server crate's argon2-vault-setup
+    # integration tests are CPU-bound and don't speed up with more threads).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: rust-test-server-b-${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_NET_RETRY: "10"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (ubuntu — reclaim ~25-30G before the release build)
+        if: matrix.os == 'ubuntu-latest'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Free disk space (windows — drop large pre-installed SDKs)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $paths = @(
+            "$env:ANDROID_HOME",
+            "$env:CHROMEWEBDRIVER",
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "$env:AGENT_TOOLSDIRECTORY\CodeQL"
+          )
+          foreach ($p in $paths) {
+            if ($p -and (Test-Path $p)) {
+              Write-Host "Removing $p"
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Get-PSDrive C | Select-Object Used,Free
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (registry + git + target, pruned)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: server-b-${{ matrix.os }}-v3
+
+      - name: Guard — server test split covers every server test (office+A+B)
+        shell: bash
+        working-directory: rust
+        run: bash ../.github/scripts/ci-server-test-split-guard.sh
+
+      - name: cargo test attune-server non-office integration (group B)
+        working-directory: rust
+        run: >
+          cargo test --release -p attune-server
           --test acp4_governor_wire_test
           --test acp5_chat_flow_wire_test
-          --test ai_stack_web_search_test
           --test amd_laptop_e2e_smoke
           --test api_v1_version_test
           --test chat_cost_estimate_test
           --test eval_determinism_test
           --test eval_response_surface_test
-          --test form_factor_integration
           --test forms_routes_test
-          --test git_route_subprocess
           --test index_path_test
           --test lib_runtime_test
-          --test lock_order_abba_test
-          --test marketplace_install_test
           --test member_routes_test
-          --test ocr_profiles_routes_test
-          --test privacy_endpoints_test
-          --test projects_routes_test
           --test session_test
-          --test settings_lock_test
           --test store_queue_test
-          --test system_wizard_full_flow_test
-          --test vault_lock_endpoint_test
-          --test vault_recovery_test
-          --test vault_setup_test
 
   rust-test-server-office:
     # The office/engine integration shard: 10 office_* binaries that each boot a
@@ -428,23 +626,10 @@ jobs:
           workspaces: rust
           key: server-office-${{ matrix.os }}-v3
 
-      - name: Guard — office split-list matches on-disk office_*.rs (no silent gap)
-        # Fails loudly if someone adds/removes an office_* test file without
-        # updating this shard, so coverage can't silently drift.
+      - name: Guard — server test split covers every server test (office+A+B)
         shell: bash
         working-directory: rust
-        run: |
-          expected="office_asr_golden_gate office_cancel_test office_concurrent_test office_error_contract office_failure_recovery_test office_happy_path office_ocr_golden_gate office_prop_tests office_schema_compat office_six_category_floor"
-          actual=$(ls crates/attune-server/tests/office_*.rs | xargs -n1 basename | sed 's/\.rs$//' | sort | tr '\n' ' ' | sed 's/ $//')
-          exp_sorted=$(echo $expected | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')
-          if [ "$actual" != "$exp_sorted" ]; then
-            echo "::error::office test split-list drifted."
-            echo "expected: $exp_sorted"
-            echo "on-disk : $actual"
-            echo "Update rust-test-server-office's --test list to match."
-            exit 1
-          fi
-          echo "office split-list OK ($(echo $actual | wc -w) binaries)."
+        run: bash ../.github/scripts/ci-server-test-split-guard.sh
 
       - name: cargo test attune-server office/engine integration shard
         working-directory: rust
