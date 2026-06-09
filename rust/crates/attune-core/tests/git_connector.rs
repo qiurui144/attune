@@ -35,7 +35,15 @@ fn build_bare_repo(dir: &Path, files: &[(&str, &[u8])]) -> String {
     repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
 
     // file:// URL 指向工作仓（含 .git）—— libgit2 可从本地 .git clone。
-    format!("file://{}", work.display())
+    // 跨平台:用 url::Url::from_directory_path 生成 RFC-8089 合规的 file URL。
+    // 不能用 format!("file://{}", path)——在 Windows 上 path.display() 是
+    // `C:\Users\…\work`(盘符 + 反斜杠),拼成 `file://C:\…` 会被 url::Url::parse
+    // 当成 host=`C:`(只有两道斜杠)且反斜杠非法,libgit2 解析失败 → git-network-error
+    // (7/8 测试在 Windows CI 上 panic 的根因)。from_directory_path 在 Windows 产出
+    // `file:///C:/Users/…/work/`(三斜杠 + 正斜杠),在 Unix 产出 `file:///home/…/work/`。
+    url::Url::from_directory_path(&work)
+        .expect("work dir is absolute (tempdir) — from_directory_path must succeed")
+        .to_string()
 }
 
 fn drain(conn: &GitConnector) -> Vec<RawDocument> {
