@@ -1,0 +1,57 @@
+# gitleaks configuration — attune secret scanning (CLAUDE.md §1.4)
+# https://github.com/gitleaks/gitleaks
+#
+# Extends gitleaks' built-in rule set; only adds an allowlist for known,
+# justified false positives. The committed history is clean (0 real secrets);
+# these allowlist entries cover non-committed build artifacts + explicit test
+# stubs so both the `gitleaks git` (history) and `gitleaks dir` (tree) scans
+# stay green. Mirrors attune-pro/.gitleaks.toml (same Rust workspace shape).
+
+# Inherit all of gitleaks' default detection rules.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "attune justified false positives (no real secrets — verified 2026-06-10)"
+
+# 1) Build artifacts: target/ is gitignored and never committed. Rust crates such
+#    as ed25519-dalek embed rustdoc example text containing the literal string
+#    `-----BEGIN PRIVATE KEY-----` (PKCS#8 usage docs) inside their .rmeta build
+#    metadata. gitleaks' `private-key` rule matches that documentation text, not
+#    a real key. Exclude the entire build output directory.
+# 2) Gitignored local working files (never committed): E2E secret files, tmp/
+#    scratch scripts, Playwright/.claude runtime logs + agent worktree copies —
+#    the CLAUDE.md §1.4 allowed "gitignored file" form. The gitleaks-action
+#    history scan never sees them; allowlisting also keeps an on-disk
+#    `gitleaks dir` scan green. Plus the third-party openai-cookbook test corpus
+#    (placeholders + notebook doc text, not attune secrets).
+paths = [
+    '''target/''',
+    '''.*\.rmeta$''',
+    '''.*\.rlib$''',
+    '''(^|/)\.playwright-mcp/''',
+    '''(^|/)\.claude/''',
+    '''(^|/)tmp/''',
+    '''(^|/)\.env\.local$''',
+    '''(^|/)rust/tests/corpora/''',
+]
+
+# 3) Test-stub / fixture credentials + public keys (CLAUDE.md §1.4 allowed forms):
+#    explicit fake values in fixtures / unit tests, and the Ed25519 *public*
+#    verify key constant (a public key is not a secret by definition).
+regexes = [
+    '''test-pass-not-real''',
+    '''fake[_-]?key[_-]?for[_-]?test''',
+    '''your-key-here''',
+    # PII-redactor unit-test stubs (patterns.rs api_key_openai / api_key_github_pat,
+    # pii_chat_path_redact_test) + office_* fixture passwords + spec/benchmark
+    # doc fixtures — all sequential / obviously-fake literals.
+    '''sk-abcdefghijklmnopqrstuvwxyz0123456789''',
+    '''sk-1234567890ABCDEF1234567890ABCDEF''',
+    '''ghp_abcdefghijklmnopqrstuvwxyzABCDEF1234''',
+    '''office-(err|test|e2e)-?[A-Za-z0-9-]*7890''',
+    '''testpass[A-Za-z0-9-]*7890''',
+    # Ed25519 signing PUBLIC key (cloud_client.rs verify-key constant in #[test]).
+    '''12fe0471d5a37735428704baa5ea7a55a937fcc490cddf5e325ef4a303e6affc''',
+    '''678cef09[a-f0-9]*''',
+]
