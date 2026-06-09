@@ -372,19 +372,25 @@ jobs:
           --test webdav_remotes_test
           --test workflow_test
 
-  # attune-server is the HOG and is sharded into THREE parallel jobs (its 36
+  # attune-server is the HOG and is sharded into FIVE parallel jobs (its 36
   # integration tests each boot a real attune_server + do an argon2 vault setup,
   # which is CPU-bound and does NOT speed up with more --test-threads, so the
-  # only lever is spreading the binaries across parallel runners):
-  #   rust-test-server        — server lib + accounts + root-package integration
-  #                             + non-office GROUP A (the heavier server-booting
-  #                             tests).
-  #   rust-test-server-b      — non-office GROUP B (lighter wire/logic tests).
-  #   rust-test-server-office — the 10 office_* engine integration binaries
-  #                             (office_concurrent alone ≈ 99s single-threaded).
+  # only lever is spreading the binaries across parallel runners). 2026-06-10:
+  # widened from 3 → 5 shards because group-A and office each overran the 50min
+  # budget (cancelled mid-run on 27183998186 — every shard recompiles the full
+  # release dep tree, then the server-boot tests are slow on ubuntu and the
+  # windows runner sometimes never finished compiling):
+  #   rust-test-server         — server lib + accounts + root-package integration
+  #                              + non-office GROUP A (lighter route/wire tests).
+  #   rust-test-server-b       — non-office GROUP B (lighter wire/logic tests).
+  #   rust-test-server-c       — non-office GROUP C (heavy server-booting / vault
+  #                              setup / wizard tests, pulled out of GROUP A).
+  #   rust-test-server-office  — office_* shard A (5 binaries, incl. the ≈99s
+  #                              office_concurrent).
+  #   rust-test-server-office-b — office_* shard B (the other 5 binaries).
   # A shared guard script (ci-server-test-split-guard.sh) asserts
-  # office ∪ A ∪ B == on-disk tests/*.rs, so a new server test can't silently
-  # skip a shard.
+  # office-a ∪ office-b ∪ A ∪ B ∪ C == on-disk tests/*.rs, so a new server test
+  # can't silently skip a shard.
 
   rust-test-server:
     # Server lib unittests + attune-accounts + the workspace-root `attune`
@@ -448,7 +454,7 @@ jobs:
           workspaces: rust
           key: server-${{ matrix.os }}-v3
 
-      - name: Guard — server test split covers every server test (office+A+B)
+      - name: Guard — server test split covers every server test (office+A+B+C)
         shell: bash
         working-directory: rust
         run: bash ../.github/scripts/ci-server-test-split-guard.sh
@@ -462,27 +468,22 @@ jobs:
         run: cargo test --release -p attune-accounts -p attune
 
       # attune-server lib unittests + the NON-office integration GROUP A (the
-      # heavier, server-booting / argon2-vault-setup tests). GROUP B runs in the
-      # sibling rust-test-server-b job; office_* run in rust-test-server-office.
-      # The shared guard above proves office∪A∪B == on-disk. #[ignore] 慢 E2E
+      # lighter route/wire tests). The heavy server-booting / vault-setup /
+      # wizard tests live in GROUP C (rust-test-server-c); GROUP B in
+      # rust-test-server-b; office_* in rust-test-server-office[-b]. The shared
+      # guard above proves office-a∪office-b∪A∪B∪C == on-disk. #[ignore] 慢 E2E
       # 自动跳过(走 nightly)。
       - name: cargo test attune-server lib + non-office integration (group A)
         working-directory: rust
         run: >
           cargo test --release -p attune-server --lib
           --test ai_stack_web_search_test
-          --test form_factor_integration
           --test git_route_subprocess
           --test lock_order_abba_test
           --test marketplace_install_test
           --test ocr_profiles_routes_test
           --test privacy_endpoints_test
-          --test projects_routes_test
-          --test settings_lock_test
-          --test system_wizard_full_flow_test
           --test vault_lock_endpoint_test
-          --test vault_recovery_test
-          --test vault_setup_test
 
   rust-test-server-b:
     # Second non-office server integration shard (GROUP B — the lighter, mostly
@@ -544,7 +545,7 @@ jobs:
           workspaces: rust
           key: server-b-${{ matrix.os }}-v3
 
-      - name: Guard — server test split covers every server test (office+A+B)
+      - name: Guard — server test split covers every server test (office+A+B+C)
         shell: bash
         working-directory: rust
         run: bash ../.github/scripts/ci-server-test-split-guard.sh
@@ -568,9 +569,11 @@ jobs:
           --test store_queue_test
 
   rust-test-server-office:
-    # The office/engine integration shard: 10 office_* binaries that each boot a
-    # real attune_server + vault setup (office_concurrent ≈ 99s single-threaded).
-    # Split off rust-test-server so neither shard overruns the 50min budget.
+    # Office/engine integration shard A: 5 office_* binaries that each boot a
+    # real attune_server + vault setup (office_concurrent ≈ 99s single-threaded
+    # lives here). Office split into two shards (office + office-b) because 10
+    # engine-boot binaries + the full release recompile overran the 50min budget
+    # on the slow ubuntu runner (cancelled mid-run on 27183998186).
     strategy:
       fail-fast: false
       matrix:
@@ -626,12 +629,12 @@ jobs:
           workspaces: rust
           key: server-office-${{ matrix.os }}-v3
 
-      - name: Guard — server test split covers every server test (office+A+B)
+      - name: Guard — server test split covers every server test (office+A+B+C)
         shell: bash
         working-directory: rust
         run: bash ../.github/scripts/ci-server-test-split-guard.sh
 
-      - name: cargo test attune-server office/engine integration shard
+      - name: cargo test attune-server office/engine integration shard A
         working-directory: rust
         run: >
           cargo test --release -p attune-server
@@ -640,11 +643,158 @@ jobs:
           --test office_concurrent_test
           --test office_error_contract
           --test office_failure_recovery_test
+
+  rust-test-server-office-b:
+    # Office/engine integration shard B: the remaining 5 office_* binaries.
+    # Split off rust-test-server-office (was 10 → 5+5) so neither office shard
+    # overruns the 50min budget after the full release recompile.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: rust-test-server-office-b-${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_NET_RETRY: "10"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (ubuntu — reclaim ~25-30G before the release build)
+        if: matrix.os == 'ubuntu-latest'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Free disk space (windows — drop large pre-installed SDKs)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $paths = @(
+            "$env:ANDROID_HOME",
+            "$env:CHROMEWEBDRIVER",
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "$env:AGENT_TOOLSDIRECTORY\CodeQL"
+          )
+          foreach ($p in $paths) {
+            if ($p -and (Test-Path $p)) {
+              Write-Host "Removing $p"
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Get-PSDrive C | Select-Object Used,Free
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (registry + git + target, pruned)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: server-office-b-${{ matrix.os }}-v3
+
+      - name: Guard — server test split covers every server test (office+A+B+C)
+        shell: bash
+        working-directory: rust
+        run: bash ../.github/scripts/ci-server-test-split-guard.sh
+
+      - name: cargo test attune-server office/engine integration shard B
+        working-directory: rust
+        run: >
+          cargo test --release -p attune-server
           --test office_happy_path
           --test office_ocr_golden_gate
           --test office_prop_tests
           --test office_schema_compat
           --test office_six_category_floor
+
+  rust-test-server-c:
+    # Third non-office server shard (GROUP C — the heavy server-booting /
+    # argon2-vault-setup / wizard tests pulled out of GROUP A). These each boot
+    # a real attune_server and are CPU-bound (don't speed up with more threads);
+    # bundling them with the rest of GROUP A pushed rust-test-server past the
+    # 50min budget (cancelled mid-run on 27183998186), and on the slow windows
+    # runner the per-binary release compile never even reached the tests.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: rust-test-server-c-${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_NET_RETRY: "10"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (ubuntu — reclaim ~25-30G before the release build)
+        if: matrix.os == 'ubuntu-latest'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Free disk space (windows — drop large pre-installed SDKs)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $paths = @(
+            "$env:ANDROID_HOME",
+            "$env:CHROMEWEBDRIVER",
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "$env:AGENT_TOOLSDIRECTORY\CodeQL"
+          )
+          foreach ($p in $paths) {
+            if ($p -and (Test-Path $p)) {
+              Write-Host "Removing $p"
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Get-PSDrive C | Select-Object Used,Free
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (registry + git + target, pruned)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: server-c-${{ matrix.os }}-v3
+
+      - name: Guard — server test split covers every server test (office+A+B+C)
+        shell: bash
+        working-directory: rust
+        run: bash ../.github/scripts/ci-server-test-split-guard.sh
+
+      - name: cargo test attune-server non-office integration (group C — heavy boot)
+        working-directory: rust
+        run: >
+          cargo test --release -p attune-server
+          --test form_factor_integration
+          --test projects_routes_test
+          --test settings_lock_test
+          --test system_wizard_full_flow_test
+          --test vault_recovery_test
+          --test vault_setup_test
 
   rust-test-cli:
     # attune-cli (light: 4 smoke tests). Folds the attune-agent-sdk leaf-crate
@@ -784,6 +934,92 @@ jobs:
       - name: cargo deny check (licenses + bans + sources)
         working-directory: rust
         run: cargo deny check
+
+  secret-scan:
+    # Security (CLAUDE.md §1.4): gitleaks secret scan over commit history + tree.
+    # Policy: .gitleaks.toml (history is clean — 983 commits, 0 real secrets;
+    # allowlist covers gitignored working files, third-party test corpus, the
+    # Ed25519 *public* verify key, and explicit test-stub literals). Mirrors
+    # attune-pro's secret-scan job. No untrusted input is used in run: steps.
+    name: Secret Scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so gitleaks scans every commit, not just HEAD.
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Repo-local config (.gitleaks.toml) is auto-detected by the action.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+
+  coverage:
+    # Code coverage REPORTING (cargo-llvm-cov). REPORT-ONLY on day one — measures
+    # a baseline and uploads lcov + summary as artifacts; NOT a blocking gate
+    # (no --fail-under). A conservative ratchet floor can be turned on once the
+    # baseline is observed across a few runs. Mirrors attune-pro's coverage job.
+    # attune is a self-contained workspace (no sibling checkout needed). --release
+    # keeps link memory in check; the workspace pulls wasmtime/onnx/tantivy/
+    # usearch so the build is heavy — free disk up front like the test jobs.
+    name: Coverage (report-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (reclaim ~25-30G before the coverage build)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: coverage-v1
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (lcov + summary)
+        working-directory: rust
+        # Run instrumented tests ONCE (--no-report keeps the profraw data), then
+        # emit lcov + summary from that same run. #[ignore] slow E2E auto-skip
+        # (same as the PR test jobs). Write lcov to an absolute path so the
+        # upload step can't miss it.
+        run: |
+          cargo llvm-cov --workspace --release --no-report
+          cargo llvm-cov report --release --lcov --output-path "$GITHUB_WORKSPACE/lcov.info"
+          echo "## Coverage summary" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cargo llvm-cov report --release --summary-only >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -la "$GITHUB_WORKSPACE/lcov.info"
+
+      - name: Upload coverage artifact (lcov)
+        # Report-only gate: a flaky artifact upload must NEVER red-fail coverage.
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: attune-coverage-lcov
+          path: lcov.info
+          retention-days: 30
 
   rust-test-slow-nightly:
     # R19 (2026-05-01): 慢 E2E 走 schedule 通道，每天 02:00 UTC 跑一次
