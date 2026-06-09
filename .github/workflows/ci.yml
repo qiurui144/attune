@@ -228,13 +228,28 @@ jobs:
           rustup target add wasm32-wasip1
           cargo build -p attune-agent-sdk --target wasm32-wasip1
 
+  # attune-server is the HOG and is sharded into TWO parallel jobs:
+  #   rust-test-server        — server lib + accounts + root-package integration
+  #                             + every NON-office server integration test.
+  #   rust-test-server-office — the 10 office_* engine integration test binaries
+  #                             (each boots a real attune_server + does vault
+  #                             setup; office_concurrent alone = ~99s single-
+  #                             threaded — measured locally). These dominate the
+  #                             server runtime and on a 4-vCPU runner the combined
+  #                             server crate overran the 50min budget.
+  # A guard step asserts the office split-list exactly equals the on-disk
+  # office_*.rs set, so adding a new office test can't silently skip a shard.
+
   rust-test-server:
-    # attune-server (the HOG): office/engine integration tests each boot a real
-    # attune_server + load OCR/ASR engines (60s+ per test). Isolated into its
-    # own parallel job so it no longer drags the whole workspace over the cancel
-    # threshold. Also folds the standalone attune-accounts lib tests (tiny) for
-    # full coverage. If this job alone ever exceeds budget, shard the office_*
-    # tests (10 binaries) into a 2nd server job.
+    # Server lib + accounts + workspace-root package + all NON-office server
+    # integration tests. `attune` = the workspace-root package; its tests/
+    # (server_test / classifier_test / corpus_integration_test / integration_test)
+    # boot AppState across core+server, so they ride the server leg.
+    # cargo can't exclude integration binaries, so the NON-office tests are
+    # enumerated explicitly via --test below, and office runs in the sibling
+    # rust-test-server-office job. Coverage of the old `--workspace` run is
+    # preserved (office in the sibling job; the guard there proves no office
+    # binary is dropped).
     strategy:
       fail-fast: false
       matrix:
@@ -290,15 +305,161 @@ jobs:
           workspaces: rust
           key: server-${{ matrix.os }}-v3
 
-      - name: cargo test -p attune-server -p attune-accounts -p attune (root integration)
+      - name: Guard — non-office split-list covers every NON-office server test
+        # Fails loudly if a new (non-office) tests/*.rs appears that isn't in the
+        # --test list below, so a new server integration test can't silently skip
+        # CI. (office_* files are intentionally excluded — they run in the
+        # rust-test-server-office shard.)
+        shell: bash
         working-directory: rust
-        # PR-time runs lib 全 + integration（#[ignore] 慢 E2E 自动跳过，走 nightly）。
-        # office_* engine tests (no #[ignore]) DO run here — this is the slow leg.
-        # `attune` = the workspace-root package; its tests/ (server_test /
-        # classifier_test / corpus_integration_test / integration_test) boot
-        # AppState across core+server, so they belong on the server leg. Keeping
-        # them here preserves the exact coverage of the old `--workspace` run.
-        run: cargo test -p attune-server -p attune-accounts -p attune --release
+        run: |
+          listed="acp4_governor_wire_test acp5_chat_flow_wire_test ai_stack_web_search_test amd_laptop_e2e_smoke api_v1_version_test chat_cost_estimate_test eval_determinism_test eval_response_surface_test form_factor_integration forms_routes_test git_route_subprocess index_path_test lib_runtime_test lock_order_abba_test marketplace_install_test member_routes_test ocr_profiles_routes_test privacy_endpoints_test projects_routes_test session_test settings_lock_test store_queue_test system_wizard_full_flow_test vault_lock_endpoint_test vault_recovery_test vault_setup_test"
+          listed_sorted=$(echo $listed | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')
+          actual=$(ls crates/attune-server/tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' | grep -v '^office_' | sort | tr '\n' ' ' | sed 's/ $//')
+          if [ "$listed_sorted" != "$actual" ]; then
+            echo "::error::non-office server test split-list drifted."
+            echo "listed : $listed_sorted"
+            echo "on-disk: $actual"
+            echo "Update rust-test-server's --test list to match (or move new office_* to the office shard)."
+            exit 1
+          fi
+          echo "non-office split-list OK ($(echo $actual | wc -w) binaries)."
+
+      # attune-accounts (lib) + the workspace-root `attune` package's integration
+      # tests (server_test / classifier_test / integration_test +
+      # corpus_integration_test's non-#[ignore] cases). Run full (no --test
+      # filter) so every root/accounts test is covered. #[ignore] auto-skips.
+      - name: cargo test attune-accounts + root attune integration
+        working-directory: rust
+        run: cargo test --release -p attune-accounts -p attune
+
+      # attune-server lib unittests + every NON-office integration test, listed
+      # explicitly via --test so this job never touches the office engine
+      # binaries (those run in rust-test-server-office). The guard in the office
+      # job fails loudly if a NEW office_*.rs appears unassigned. #[ignore]
+      # 慢 E2E 自动跳过(走 nightly)。
+      - name: cargo test attune-server lib + non-office integration
+        working-directory: rust
+        run: >
+          cargo test --release -p attune-server --lib
+          --test acp4_governor_wire_test
+          --test acp5_chat_flow_wire_test
+          --test ai_stack_web_search_test
+          --test amd_laptop_e2e_smoke
+          --test api_v1_version_test
+          --test chat_cost_estimate_test
+          --test eval_determinism_test
+          --test eval_response_surface_test
+          --test form_factor_integration
+          --test forms_routes_test
+          --test git_route_subprocess
+          --test index_path_test
+          --test lib_runtime_test
+          --test lock_order_abba_test
+          --test marketplace_install_test
+          --test member_routes_test
+          --test ocr_profiles_routes_test
+          --test privacy_endpoints_test
+          --test projects_routes_test
+          --test session_test
+          --test settings_lock_test
+          --test store_queue_test
+          --test system_wizard_full_flow_test
+          --test vault_lock_endpoint_test
+          --test vault_recovery_test
+          --test vault_setup_test
+
+  rust-test-server-office:
+    # The office/engine integration shard: 10 office_* binaries that each boot a
+    # real attune_server + vault setup (office_concurrent ≈ 99s single-threaded).
+    # Split off rust-test-server so neither shard overruns the 50min budget.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: rust-test-server-office-${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_NET_RETRY: "10"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (ubuntu — reclaim ~25-30G before the release build)
+        if: matrix.os == 'ubuntu-latest'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Free disk space (windows — drop large pre-installed SDKs)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $paths = @(
+            "$env:ANDROID_HOME",
+            "$env:CHROMEWEBDRIVER",
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "$env:AGENT_TOOLSDIRECTORY\CodeQL"
+          )
+          foreach ($p in $paths) {
+            if ($p -and (Test-Path $p)) {
+              Write-Host "Removing $p"
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Get-PSDrive C | Select-Object Used,Free
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (registry + git + target, pruned)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: server-office-${{ matrix.os }}-v3
+
+      - name: Guard — office split-list matches on-disk office_*.rs (no silent gap)
+        # Fails loudly if someone adds/removes an office_* test file without
+        # updating this shard, so coverage can't silently drift.
+        shell: bash
+        working-directory: rust
+        run: |
+          expected="office_asr_golden_gate office_cancel_test office_concurrent_test office_error_contract office_failure_recovery_test office_happy_path office_ocr_golden_gate office_prop_tests office_schema_compat office_six_category_floor"
+          actual=$(ls crates/attune-server/tests/office_*.rs | xargs -n1 basename | sed 's/\.rs$//' | sort | tr '\n' ' ' | sed 's/ $//')
+          exp_sorted=$(echo $expected | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')
+          if [ "$actual" != "$exp_sorted" ]; then
+            echo "::error::office test split-list drifted."
+            echo "expected: $exp_sorted"
+            echo "on-disk : $actual"
+            echo "Update rust-test-server-office's --test list to match."
+            exit 1
+          fi
+          echo "office split-list OK ($(echo $actual | wc -w) binaries)."
+
+      - name: cargo test attune-server office/engine integration shard
+        working-directory: rust
+        run: >
+          cargo test --release -p attune-server
+          --test office_asr_golden_gate
+          --test office_cancel_test
+          --test office_concurrent_test
+          --test office_error_contract
+          --test office_failure_recovery_test
+          --test office_happy_path
+          --test office_ocr_golden_gate
+          --test office_prop_tests
+          --test office_schema_compat
+          --test office_six_category_floor
 
   rust-test-cli:
     # attune-cli (light: 4 smoke tests). Folds the attune-agent-sdk leaf-crate
