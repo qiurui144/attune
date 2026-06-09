@@ -94,32 +94,52 @@ jobs:
           path: extension/dist/
           retention-days: 30
 
-  rust-test:
-    # Rust 商用线 CI — attune-core + attune-server + attune-cli workspace
-    # MockLlmProvider 驱动，无 Ollama 依赖
-    # R18 (2026-05-01): 跨 Linux + Windows 矩阵，CLAUDE.md P0 平台守门
-    #
-    # Disk/time fit (2026-06): the workspace pulls wasmtime/cranelift/tantivy/
-    # usearch/whisper/onnx and builds in `--release` (lto=thin, codegen-units=1 —
-    # the slowest, largest profile). On stock GH runners (windows ~14G free,
-    # ubuntu ~25G) the multi-invocation release matrix overflowed disk (windows
-    # ENOSPC at 2h33m). Fixes: (1) reclaim runner disk up front, (2) Swatinem
-    # rust-cache (caches + PRUNES target, unlike raw actions/cache on the whole
-    # dir), (3) CARGO_INCREMENTAL=0 + no test/release debuginfo to shrink target,
-    # (4) scope the windows leg to a lib+fast-integration + cross-platform-wasm
-    # smoke (the .deb/.exe parity it uniquely guards) — the heavy deterministic
-    # gates + wasm32 leaf build run on ubuntu (the primary gate). Windows stays a
-    # real (scoped) gate, not deleted.
+  # ───────────────────────────────────────────────────────────────────────────
+  # Rust 商用线 CI — split into PARALLEL per-crate jobs (2026-06-09).
+  #
+  # Previously a single `rust-test` job ran `cargo test --workspace --release`
+  # on the os matrix. That one job took ~90min (ubuntu) / ~173min (windows) and
+  # was KILLED by GitHub's long-job reclaim (`exit 143 "operation was canceled"`)
+  # — not a test failure, a wall-clock overrun. Root cause: attune-server's
+  # office/engine integration tests (office_cancel / office_concurrent /
+  # office_error_contract / office_happy_path …) each boot a real attune_server
+  # + load OCR/ASR engines (60s+ per test), and the full-workspace release job
+  # compiled+ran every crate's tests serially.
+  #
+  # Fix (split, not defer — full PR coverage stays; nothing moved to nightly,
+  # nothing #[ignore]d): one job per crate / test-group, all running in parallel
+  # on the os matrix. Each job only compiles its crate's dep tree + runs that
+  # crate's tests, so the longest single job (rust-test-server, the office hog)
+  # stays well under the cancel threshold. Each job carries `timeout-minutes:`
+  # so any future overrun fails FAST + CLEAR instead of a mysterious 90min cancel.
+  #
+  # Per-job disk/time fit (unchanged rationale): the workspace pulls wasmtime/
+  # cranelift/tantivy/usearch/whisper/onnx and builds `--release` (lto=thin,
+  # codegen-units=1 — slowest/largest profile). On stock runners (windows ~14G
+  # free, ubuntu ~25G) the old full matrix overflowed disk. Each job keeps:
+  # (1) up-front runner-disk reclaim, (2) Swatinem rust-cache (caches + PRUNES
+  # target, unlike raw actions/cache on the whole dir; PER-JOB key so the
+  # parallel jobs don't thrash one cache), (3) CARGO_INCREMENTAL=0 + no test/
+  # release debuginfo.
+  #
+  # Windows stays a real (full per-crate) gate on every test job — it uniquely
+  # guards .deb/.exe parity + the cross-platform .wasm "一包通吃" golden — not
+  # deleted, not scoped down.
+  # ───────────────────────────────────────────────────────────────────────────
+
+  rust-test-core:
+    # attune-core (the base crate: ingest / RAG / agents / vault / WASM runtime).
+    # Largest test surface (~66 integration test files), all MockLlmProvider-
+    # driven (no Ollama). Carries the heavy deterministic gates that are scoped
+    # to attune-core, plus the build-shape guards.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    name: rust-test-${{ matrix.os }}
+    name: rust-test-core-${{ matrix.os }}
+    timeout-minutes: 50
     env:
-      # Incremental compilation only bloats target/ on ephemeral CI (no reuse
-      # across runs) — disable it. Strip debuginfo from test + release artifacts
-      # (we don't open a debugger on CI; panics still unwind with messages).
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
       CARGO_PROFILE_RELEASE_DEBUG: "false"
@@ -132,7 +152,6 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         uses: jlumbroso/free-disk-space@main
         with:
-          # Keep the toolchain bits we need; drop the big pre-installed images.
           tool-cache: false
           android: true
           dotnet: true
@@ -144,8 +163,6 @@ jobs:
       - name: Free disk space (windows — drop large pre-installed SDKs)
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        # Reclaim ~15-20G: Android SDK, Chromium, and other hosted-toolcache bits
-        # the rust workspace never uses. Best-effort — ignore missing paths.
         run: |
           $paths = @(
             "$env:ANDROID_HOME",
@@ -163,21 +180,15 @@ jobs:
           Get-PSDrive C | Select-Object Used,Free
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
 
       - name: Cache cargo (registry + git + target, pruned)
-        # Swatinem/rust-cache caches ~/.cargo/{registry,git} + target and prunes
-        # stale artifacts each run, keeping target/ from growing unbounded across
-        # the release rebuilds (raw actions/cache on the whole target dir cannot
-        # shrink an over-full disk).
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          # Different gate scope per leg → separate cache key avoids cross-poisoning.
-          key: ${{ matrix.os }}-v2
+          # Per-job key so the parallel jobs each own a cache slot (no thrash).
+          key: core-${{ matrix.os }}-v3
 
-      # ── Heavy deterministic gates: ubuntu only (primary platform gate) ──
+      # ── Heavy deterministic gates (attune-core-scoped): ubuntu only ──
       - name: K2 Parse Golden Gate (W3 batch C, gate <95% blocks PR)
         if: matrix.os == 'ubuntu-latest'
         working-directory: rust
@@ -186,16 +197,14 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         working-directory: rust
         # Machine-checkable only-up ratchet over agent_quality_manifest.yaml +
-        # #[ignore]-spike guard (per §7.2 Gate 2). A loosened threshold or an
-        # #[ignore] spike fails the PR. spec: 2026-05-29-ai-agents-governance-orchestration.md §9
+        # #[ignore]-spike guard (per §7.2 Gate 2). spec: 2026-05-29-ai-agents-governance-orchestration.md §9
         run: cargo test --release -p attune-core --test agent_gate_orchestrator
 
-      # ── Workspace lib + fast integration: BOTH legs (the P0 cross-platform gate) ──
-      - name: cargo test workspace lib + fast integration
+      # ── attune-core lib + integration: BOTH legs ──
+      - name: cargo test -p attune-core
         working-directory: rust
-        # R19 (2026-05-01): 慢 attune-server integration tests 加 #[ignore] 走 nightly,
-        # PR-time CI 跑 lib 全 + 不带 --include-ignored 的 integration（自动跳过 #[ignore]）
-        run: cargo test --workspace --release
+        # PR-time runs lib 全 + integration（#[ignore] 慢 E2E 自动跳过，走 nightly）
+        run: cargo test -p attune-core --release
 
       - name: WASM cross-platform golden (same .wasm on linux + windows)
         working-directory: rust
@@ -212,15 +221,183 @@ jobs:
       - name: WASM leaf build guard (attune-agent-sdk 必须可编 wasm32-wasip1)
         # leaf crate 零 native dep 守卫:任一 native-only crate(rusqlite/tokio/
         # reqwest/usearch/tantivy/hdbscan/socket2/serde_yaml/chrono)回流即编译失败,
-        # 守住"确定性 agent 一包通吃所有平台"的抽取目的。仅 Linux 跑一次足够
-        # (build-target 检查与 host OS 无关)。
+        # 守住"确定性 agent 一包通吃所有平台"的抽取目的。仅 Linux 跑一次足够。
         if: matrix.os == 'ubuntu-latest'
         working-directory: rust
         run: |
           rustup target add wasm32-wasip1
           cargo build -p attune-agent-sdk --target wasm32-wasip1
-      - name: cargo clippy (non-blocking)
+
+  rust-test-server:
+    # attune-server (the HOG): office/engine integration tests each boot a real
+    # attune_server + load OCR/ASR engines (60s+ per test). Isolated into its
+    # own parallel job so it no longer drags the whole workspace over the cancel
+    # threshold. Also folds the standalone attune-accounts lib tests (tiny) for
+    # full coverage. If this job alone ever exceeds budget, shard the office_*
+    # tests (10 binaries) into a 2nd server job.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: rust-test-server-${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_NET_RETRY: "10"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (ubuntu — reclaim ~25-30G before the release build)
         if: matrix.os == 'ubuntu-latest'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Free disk space (windows — drop large pre-installed SDKs)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $paths = @(
+            "$env:ANDROID_HOME",
+            "$env:CHROMEWEBDRIVER",
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "$env:AGENT_TOOLSDIRECTORY\CodeQL"
+          )
+          foreach ($p in $paths) {
+            if ($p -and (Test-Path $p)) {
+              Write-Host "Removing $p"
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Get-PSDrive C | Select-Object Used,Free
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (registry + git + target, pruned)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: server-${{ matrix.os }}-v3
+
+      - name: cargo test -p attune-server -p attune-accounts -p attune (root integration)
+        working-directory: rust
+        # PR-time runs lib 全 + integration（#[ignore] 慢 E2E 自动跳过，走 nightly）。
+        # office_* engine tests (no #[ignore]) DO run here — this is the slow leg.
+        # `attune` = the workspace-root package; its tests/ (server_test /
+        # classifier_test / corpus_integration_test / integration_test) boot
+        # AppState across core+server, so they belong on the server leg. Keeping
+        # them here preserves the exact coverage of the old `--workspace` run.
+        run: cargo test -p attune-server -p attune-accounts -p attune --release
+
+  rust-test-cli:
+    # attune-cli (light: 4 smoke tests). Folds the attune-agent-sdk leaf-crate
+    # lib tests too (tiny) so every workspace member's tests run somewhere.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: rust-test-cli-${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_NET_RETRY: "10"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (ubuntu — reclaim ~25-30G before the release build)
+        if: matrix.os == 'ubuntu-latest'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Free disk space (windows — drop large pre-installed SDKs)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $paths = @(
+            "$env:ANDROID_HOME",
+            "$env:CHROMEWEBDRIVER",
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "$env:AGENT_TOOLSDIRECTORY\CodeQL"
+          )
+          foreach ($p in $paths) {
+            if ($p -and (Test-Path $p)) {
+              Write-Host "Removing $p"
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Get-PSDrive C | Select-Object Used,Free
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (registry + git + target, pruned)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: cli-${{ matrix.os }}-v3
+
+      - name: cargo test -p attune-cli -p attune-agent-sdk
+        working-directory: rust
+        run: cargo test -p attune-cli -p attune-agent-sdk --release
+
+  rust-clippy:
+    # Lint as its own parallel job (was an inline non-blocking step). Stays
+    # non-blocking (continue-on-error) to preserve prior behavior — the Python
+    # prototype line + Rust workspace lint is advisory, not a PR hard-gate here.
+    runs-on: ubuntu-latest
+    name: rust-clippy
+    timeout-minutes: 50
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_NET_RETRY: "10"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (ubuntu — reclaim ~25-30G before the release build)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo (registry + git + target, pruned)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: clippy-ubuntu-latest-v3
+
+      - name: cargo clippy (non-blocking)
         working-directory: rust
         run: cargo clippy --workspace --release -- -D warnings
         continue-on-error: true
