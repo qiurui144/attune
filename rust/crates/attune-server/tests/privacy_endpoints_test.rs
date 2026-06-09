@@ -37,6 +37,7 @@ async fn wait_for_server(base: &str) {
 
 /// Spin up the full Axum router + an in-memory vault for the duration of the
 /// test. Returns `(base_url, client, vault_password)`.
+#[allow(unsafe_code)] // env isolation (AppState uses data_dir() for tantivy/vectors)
 async fn spawn_privacy_test_server() -> (String, reqwest::Client, &'static str) {
     let tmp = tempfile::TempDir::new().expect("tmp");
     // Each test gets isolated $HOME so nothing leaks between runs.

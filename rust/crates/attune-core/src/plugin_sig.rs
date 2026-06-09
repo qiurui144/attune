@@ -68,7 +68,17 @@ pub struct VerifyResult {
 
 /// 宽松校验：无签名 / 签名无效都返回 `Unsigned` 不 panic。
 /// 生产切 strict 前，`is_allowed()` 决定是否加载。
+///
+/// 内嵌的 `OFFICIAL_PUBLIC_KEYS` 当前为空 —— 任何插件都判 `Unsigned`（首发前无
+/// 官方密钥）。PluginHub 上线后填入官方公钥即激活 `Trust::Official` 路径。
 pub fn verify_loose(plugin_dir: &Path) -> Result<VerifyResult> {
+    verify_against_keys(plugin_dir, OFFICIAL_PUBLIC_KEYS)
+}
+
+/// 校验内核：用调用方提供的官方公钥列表校验。`verify_loose` 传内嵌的
+/// `OFFICIAL_PUBLIC_KEYS`；测试可传一组测试公钥来真正走通 `Trust::Official`
+/// 路径 —— 因为内嵌列表是 `const` 不能运行时改，否则 Official 分支永远测不到。
+fn verify_against_keys(plugin_dir: &Path, official_keys: &[&str]) -> Result<VerifyResult> {
     let sig_path = plugin_dir.join("plugin.sig");
     if !sig_path.exists() {
         return Ok(VerifyResult {
@@ -97,7 +107,7 @@ pub fn verify_loose(plugin_dir: &Path) -> Result<VerifyResult> {
     let digest = compute_plugin_digest(plugin_dir)?;
 
     // 依次尝试官方公钥
-    for (idx, pub_hex) in OFFICIAL_PUBLIC_KEYS.iter().enumerate() {
+    for (idx, pub_hex) in official_keys.iter().enumerate() {
         let Ok(pub_bytes) = hex::decode(pub_hex) else { continue; };
         let Ok(pub_arr): std::result::Result<[u8; 32], _> = pub_bytes.as_slice().try_into() else { continue; };
         let Ok(vk) = VerifyingKey::from_bytes(&pub_arr) else { continue; };
@@ -119,7 +129,13 @@ pub fn verify_loose(plugin_dir: &Path) -> Result<VerifyResult> {
 /// 预留，当前不在任何路径调用 —— PluginHub 上线后激活。
 #[allow(dead_code)]
 pub fn verify_strict(plugin_dir: &Path) -> Result<()> {
-    let r = verify_loose(plugin_dir)?;
+    verify_strict_against_keys(plugin_dir, OFFICIAL_PUBLIC_KEYS)
+}
+
+/// `verify_strict` 内核 —— 官方公钥列表可注入（测试用）。仅当签名由列表中某个
+/// 官方公钥校验通过（`Trust::Official`）才放行，否则返回 Err。
+fn verify_strict_against_keys(plugin_dir: &Path, official_keys: &[&str]) -> Result<()> {
+    let r = verify_against_keys(plugin_dir, official_keys)?;
     if r.trust == Trust::Official {
         Ok(())
     } else {
@@ -374,5 +390,127 @@ mod tests {
         let pk = derive_verifying_key_hex(&sk);
         assert_eq!(pk.len(), 64);
         assert!(pk.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── Official trust path (OFFICIAL_PUBLIC_KEYS is empty in the binary, so the
+    //    Trust::Official + verify_strict branch is dead in production tests; we
+    //    inject a test key list to exercise it for real) ──────────────────────
+
+    /// Sign a plugin with a known key, register that key as "official", and prove
+    /// `verify_against_keys` returns `Trust::Official` AND `verify_strict_against_keys`
+    /// passes — the previously-unexercised happy path of the trust chain.
+    #[test]
+    fn official_key_match_yields_official_trust_and_strict_passes() {
+        let dir = make_plugin_dir("id: official-plugin\n", Some("# official prompt"));
+        let sk_bytes = generate_signing_key();
+        let pk_hex = derive_verifying_key_hex(&sk_bytes);
+        sign_plugin(dir.path(), &sk_bytes).expect("sign");
+
+        // Inject our test key as the sole "official" key.
+        let official_keys: &[&str] = &[pk_hex.as_str()];
+
+        let r = verify_against_keys(dir.path(), official_keys).expect("verify");
+        assert_eq!(r.trust, Trust::Official, "matching official key must yield Official");
+        assert!(r.reason.contains("official key #0"));
+
+        // verify_strict must accept an Official plugin.
+        verify_strict_against_keys(dir.path(), official_keys)
+            .expect("strict verify must pass for an officially-signed plugin");
+    }
+
+    /// Trust-chain rotation: multiple official keys, signature matches the 2nd —
+    /// proves the loop tries each key and reports the matching index.
+    #[test]
+    fn official_trust_matches_second_key_in_rotation_list() {
+        let dir = make_plugin_dir("id: rotated\n", Some("# p"));
+        let signer = generate_signing_key();
+        let signer_pk = derive_verifying_key_hex(&signer);
+        sign_plugin(dir.path(), &signer).expect("sign");
+
+        let stale_pk = derive_verifying_key_hex(&generate_signing_key());
+        let official_keys: &[&str] = &[stale_pk.as_str(), signer_pk.as_str()];
+
+        let r = verify_against_keys(dir.path(), official_keys).expect("verify");
+        assert_eq!(r.trust, Trust::Official);
+        assert!(r.reason.contains("official key #1"), "should report the matching index: {}", r.reason);
+    }
+
+    /// Tampering with prompt.md after signing must break the Official trust:
+    /// verify drops to Unsigned and strict verify returns Err. Closes the
+    /// "tampered content silently accepted" hole on the Official path.
+    #[test]
+    fn tampered_prompt_md_rejected_on_official_path() {
+        let dir = make_plugin_dir("id: secure\n", Some("# trusted content"));
+        let sk_bytes = generate_signing_key();
+        let pk_hex = derive_verifying_key_hex(&sk_bytes);
+        sign_plugin(dir.path(), &sk_bytes).expect("sign");
+        let official_keys: &[&str] = &[pk_hex.as_str()];
+
+        // Sanity: signed → Official before tampering.
+        assert_eq!(
+            verify_against_keys(dir.path(), official_keys).unwrap().trust,
+            Trust::Official
+        );
+
+        // Attacker swaps the prompt.md body after the signature was produced.
+        std::fs::write(dir.path().join("prompt.md"), "# MALICIOUS injected prompt").unwrap();
+
+        let r = verify_against_keys(dir.path(), official_keys).expect("verify");
+        assert_eq!(r.trust, Trust::Unsigned, "tampered prompt.md must NOT verify as Official");
+        assert!(r.reason.contains("no matching official"));
+
+        // And strict mode must hard-reject it.
+        let err = verify_strict_against_keys(dir.path(), official_keys);
+        assert!(err.is_err(), "strict verify must reject a tampered (now-Unsigned) plugin");
+    }
+
+    /// Tampering with plugin.yaml after signing is likewise rejected on the
+    /// Official path (digest covers both files).
+    #[test]
+    fn tampered_yaml_rejected_on_official_path() {
+        let dir = make_plugin_dir("id: original\n", Some("# p"));
+        let sk_bytes = generate_signing_key();
+        let pk_hex = derive_verifying_key_hex(&sk_bytes);
+        sign_plugin(dir.path(), &sk_bytes).expect("sign");
+        let official_keys: &[&str] = &[pk_hex.as_str()];
+
+        std::fs::write(dir.path().join("plugin.yaml"), "id: tampered\n").unwrap();
+
+        let r = verify_against_keys(dir.path(), official_keys).expect("verify");
+        assert_eq!(r.trust, Trust::Unsigned);
+        assert!(verify_strict_against_keys(dir.path(), official_keys).is_err());
+    }
+
+    /// A signature from a non-official key (e.g. a third-party self-signer) must
+    /// NOT be promoted to Official even if structurally valid.
+    #[test]
+    fn non_official_signer_not_promoted_to_official() {
+        let dir = make_plugin_dir("id: thirdparty\n", Some("# p"));
+        let attacker = generate_signing_key();
+        sign_plugin(dir.path(), &attacker).expect("sign");
+
+        // The official list contains a DIFFERENT key than the signer.
+        let official_pk = derive_verifying_key_hex(&generate_signing_key());
+        let official_keys: &[&str] = &[official_pk.as_str()];
+
+        let r = verify_against_keys(dir.path(), official_keys).expect("verify");
+        assert_eq!(r.trust, Trust::Unsigned, "third-party signature must not be Official");
+        assert!(verify_strict_against_keys(dir.path(), official_keys).is_err());
+    }
+
+    /// The production constant is empty (no official keys shipped yet) — guards
+    /// against accidentally committing a real key, and documents that verify_loose
+    /// yields Unsigned by default.
+    #[test]
+    fn production_official_keys_empty_so_verify_loose_is_unsigned() {
+        let dir = make_plugin_dir("id: x\n", Some("# p"));
+        let sk_bytes = generate_signing_key();
+        sign_plugin(dir.path(), &sk_bytes).expect("sign");
+        // verify_loose uses the real (empty) OFFICIAL_PUBLIC_KEYS.
+        assert!(OFFICIAL_PUBLIC_KEYS.is_empty(), "no official keys should be committed pre-launch");
+        let r = verify_loose(dir.path()).unwrap();
+        assert_eq!(r.trust, Trust::Unsigned);
+        // And verify_strict (real keys) hard-rejects everything pre-launch.
+        assert!(verify_strict(dir.path()).is_err());
     }
 }
