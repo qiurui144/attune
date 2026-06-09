@@ -129,6 +129,14 @@ fn install_one_plugin(ep: &EntitledPlugin, license_key: &str, plugins_dir: &std:
     // 3. 找解压后 plugin 实际目录 (通常是 extract_dir/<plugin_id>/ 或 extract_dir/)
     let plugin_src = locate_plugin_dir(&extract_dir)?;
 
+    // W1-B trust-anchor cross-check (cloud slice8 §5.6) — MUST run before
+    // verify_with_key. The signing key is the *root* we verify against; if the
+    // server (compromised or MITM'd) hands us an off-allowlist key, verifying the
+    // package against that key proves nothing. Pin the trust root to the
+    // compile-time OFFICIAL_PLUGIN_ANCHORS allowlist; a miss = refuse install
+    // (fail-closed), surfaced as `anchor-not-pinned` in SyncReport.failed.
+    verify_plugin_anchor(ep)?;
+
     // 4. 签名校验
     let sig_ok = crate::plugin_sig::verify_with_key(&plugin_src, &ep.signing_pubkey_hex)?;
     if !sig_ok {
@@ -155,6 +163,23 @@ fn install_one_plugin(ep: &EntitledPlugin, license_key: &str, plugins_dir: &std:
         std::fs::remove_dir_all(&dst).map_err(VaultError::Io)?;
     }
     copy_dir_recursive(&plugin_src, &dst)?;
+    Ok(())
+}
+
+/// W1-B trust-anchor cross-check (cloud slice8 §5.6.1). Refuse to install any
+/// entitlement whose `signing_pubkey_hex` is not in the compile-time
+/// [`crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS`] allowlist.
+///
+/// This is the desktop-side trust decision: cert-pinning protects the wire, but
+/// only this allowlist protects against a *compromised server* substituting an
+/// attacker pubkey (the legitimate TLS endpoint still matches the pin). A miss
+/// is **rejection** (fail-closed), returned as [`VaultError::AnchorNotPinned`]
+/// carrying the off-allowlist key so it lands in `SyncReport.failed` as the
+/// `anchor-not-pinned` reason for the UI / telemetry.
+fn verify_plugin_anchor(ep: &EntitledPlugin) -> Result<()> {
+    if !crate::plugin_anchor::is_official_anchor(&ep.signing_pubkey_hex) {
+        return Err(VaultError::AnchorNotPinned(ep.signing_pubkey_hex.clone()));
+    }
     Ok(())
 }
 
@@ -561,5 +586,75 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.payload, b"user-learned-terms");
+    }
+
+    // ---- W1-B trust-anchor cross-check (cloud slice8 §5.6) ----
+
+    fn ep_with_pubkey(signing_pubkey_hex: &str) -> EntitledPlugin {
+        EntitledPlugin {
+            plugin_id: "law-pro".into(),
+            version: "1.0.5".into(),
+            download_url: "https://hub.engi-stack.com/p/law-pro-1.0.5.attunepkg".into(),
+            signing_pubkey_hex: signing_pubkey_hex.into(),
+            decrypt_key: None,
+        }
+    }
+
+    #[test]
+    fn anchor_check_allows_official_publisher_key() {
+        // The law-pro publisher anchor (SSOT mirror of cloud config) must pass.
+        let ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        assert!(
+            verify_plugin_anchor(&ep).is_ok(),
+            "official baked anchor must pass the W1-B cross-check"
+        );
+    }
+
+    #[test]
+    fn anchor_check_rejects_off_allowlist_key_with_typed_error() {
+        // Compromised-server / MITM threat: server hands an attacker pubkey over a
+        // valid TLS endpoint (cert-pin can't catch this). W1 must reject it.
+        let attacker = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let ep = ep_with_pubkey(attacker);
+        let err = verify_plugin_anchor(&ep).unwrap_err();
+        match err {
+            VaultError::AnchorNotPinned(key) => {
+                assert_eq!(key, attacker, "error must carry the off-allowlist key for telemetry");
+            }
+            other => panic!("expected AnchorNotPinned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anchor_check_rejects_empty_key_fail_closed() {
+        // A missing signing key must never resolve to "trusted".
+        let err = verify_plugin_anchor(&ep_with_pubkey("")).unwrap_err();
+        assert!(matches!(err, VaultError::AnchorNotPinned(_)));
+    }
+
+    #[test]
+    fn anchor_error_surfaces_as_anchor_not_pinned_reason() {
+        // The Display string is the reason captured into SyncReport.failed →
+        // stable kebab-ish tag the UI/telemetry keys on.
+        let err = verify_plugin_anchor(&ep_with_pubkey("deadbeef")).unwrap_err();
+        assert!(
+            err.to_string().starts_with("anchor not pinned:"),
+            "reason must be the anchor-not-pinned message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn anchor_check_runs_before_signature_verification() {
+        // Ordering invariant: install_one_plugin calls verify_plugin_anchor BEFORE
+        // verify_with_key. We assert the gate alone rejects an off-allowlist key
+        // (so a forged package signed by an attacker key never reaches sig verify,
+        // which would otherwise "succeed" against the attacker's own key).
+        let attacker_signed = ep_with_pubkey(
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        );
+        assert!(
+            verify_plugin_anchor(&attacker_signed).is_err(),
+            "trust-root gate must reject before any signature math against the attacker key"
+        );
     }
 }

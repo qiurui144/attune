@@ -1,0 +1,3 @@
+leaf_a.der SPKI pin (openssl base64(sha256(DER(SPKI)))): ym929iXSKqV9+yc4/GoWrBt26WEnHt/+2KDCeEMlYPs=
+leaf_b.der SPKI pin: /NxNe3XksGl1qtt7Ji+IODYYLaP/Cu/5f4O09Pp1zvY=
+Generated: openssl req -x509 -newkey ec prime256v1, self-signed P-256 leaf certs (no key material kept).

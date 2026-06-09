@@ -61,6 +61,19 @@ pub enum VaultError {
 
     #[error("model load error: {0}")]
     ModelLoad(String),
+
+    /// W1-B (cloud slice8 §5.6): an entitlement's plugin signing key is not in
+    /// the compile-time `OFFICIAL_PLUGIN_ANCHORS` allowlist. Install is refused
+    /// (fail-closed) — defends against a compromised accounts server substituting
+    /// an attacker pubkey. Payload = the off-allowlist signing_pubkey_hex.
+    #[error("anchor not pinned: {0}")]
+    AnchorNotPinned(String),
+
+    /// Cert-pin (cloud slice8 §3.2 / §7.1): the server's TLS leaf SPKI did not
+    /// match any entry in `ACCOUNTS_SPKI_PINS`. Connection is rejected — defends
+    /// against DNS-hijack / network MITM. Payload = the host that was pinned.
+    #[error("pin mismatch: {0}")]
+    PinMismatch(String),
 }
 
 pub type Result<T> = std::result::Result<T, VaultError>;
