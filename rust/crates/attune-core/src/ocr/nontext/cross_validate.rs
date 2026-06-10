@@ -187,3 +187,51 @@ mod tests {
         assert_eq!(report.summary.escalated, 1);
     }
 }
+
+#[cfg(test)]
+mod props {
+    use super::*;
+    use crate::ocr::nontext::{Region, RegionKind, RegionResult, RegionSource};
+    use crate::ocr::BBox;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// R5: build_report never sets applied=true (no silent auto-correct).
+        #[test]
+        fn report_never_auto_applies(text in ".*", ocr in ".*", conf in 0.0f32..1.0) {
+            let regions = vec![Region {
+                kind: RegionKind::Handwriting, bbox: BBox { x:0,y:0,w:1,h:1 }, page: 0,
+                det_confidence: 0.5,
+                result: RegionResult::HandwritingV1 { text: Some(text) },
+                source: RegionSource::Local, confidence: conf, validation_warnings: vec![],
+            }];
+            let report = build_report(&regions, &[Some(ocr)]);
+            prop_assert!(report.entries.iter().all(|e| !e.applied));
+        }
+
+        /// decide() is total + never panics across the confidence range.
+        #[test]
+        fn decide_total(conf in -1.0f32..2.0) {
+            let _ = decide(Agreement::Agree, conf);
+            let _ = decide(Agreement::ContentConflict, conf);
+            let _ = decide(Agreement::StructureDiscrepancy, conf);
+        }
+
+        /// summary totals are internally consistent (confirmed+conflicts+discrepancies == total).
+        #[test]
+        fn summary_partition_sums_to_total(n in 0usize..20) {
+            let regions: Vec<Region> = (0..n).map(|_| Region {
+                kind: RegionKind::Handwriting, bbox: BBox { x:0,y:0,w:1,h:1 }, page: 0,
+                det_confidence: 0.5,
+                result: RegionResult::HandwritingV1 { text: Some("x".into()) },
+                source: RegionSource::Local, confidence: 0.9, validation_warnings: vec![],
+            }).collect();
+            let ocr: Vec<Option<String>> = (0..n).map(|i| Some(if i % 2 == 0 { "x".into() } else { "y".into() })).collect();
+            let report = build_report(&regions, &ocr);
+            prop_assert_eq!(
+                report.summary.confirmed + report.summary.conflicts + report.summary.discrepancies,
+                report.summary.total
+            );
+        }
+    }
+}
