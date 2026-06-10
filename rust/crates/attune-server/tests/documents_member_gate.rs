@@ -10,7 +10,7 @@
 //!
 //! Uses inline `text` documents so no vault unlock is needed; the gate is the unit under test.
 
-use attune_server::test_support::spawn_eval_server;
+use attune_server::test_support::{enable_cloud_llm, spawn_eval_server};
 use serde_json::{json, Value};
 
 /// Sentinel that stands in for the new-api/gateway token (CLAUDE.md §1.4: a fake test token).
@@ -103,6 +103,8 @@ async fn paid_passes_the_member_gate_on_tier3_ops() {
     let srv = spawn_eval_server().await;
     let base = srv.url();
     login(&base, "paid").await;
+    // I2: the cloud-LLM egress toggle must be ON for a tier-3 cloud op to proceed.
+    enable_cloud_llm(&base).await;
 
     for (path, body) in tier3_ops() {
         let (status, v) = post(&base, path, body).await;
@@ -110,6 +112,30 @@ async fn paid_passes_the_member_gate_on_tier3_ops() {
         assert_ne!(
             v["code"], "membership-required",
             "paid tier3 {path} must never get membership-required"
+        );
+        assert_ne!(
+            v["code"], "cloud-llm-disabled",
+            "paid tier3 {path} with egress enabled must not be cloud-llm-disabled"
+        );
+    }
+}
+
+/// I2 regression: a paid member who has NOT enabled cloud-LLM egress in Privacy settings must NOT
+/// have private doc content silently sent to the cloud — the tier-3 op is refused with a clear
+/// `cloud-llm-disabled` (not a 200, not a silent send).
+#[tokio::test]
+async fn paid_but_cloud_llm_disabled_refuses_tier3_not_silently_sends() {
+    let srv = spawn_eval_server().await;
+    let base = srv.url();
+    login(&base, "paid").await;
+    // Deliberately do NOT enable_cloud_llm — privacy.llm defaults false.
+
+    for (path, body) in tier3_ops() {
+        let (status, v) = post(&base, path, body).await;
+        assert_eq!(status, 403, "tier3 {path} with cloud LLM disabled must be refused, body={v}");
+        assert_eq!(
+            v["code"], "cloud-llm-disabled",
+            "tier3 {path} must refuse with cloud-llm-disabled, not send to the cloud"
         );
     }
 }

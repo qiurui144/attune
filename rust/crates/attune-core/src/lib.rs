@@ -146,6 +146,7 @@ pub mod asr;
 pub mod office_job_queue;
 pub mod parser;
 pub mod pii;
+pub mod redacting_llm;
 pub mod platform;
 pub mod memory_consolidation;
 pub mod memory;

@@ -69,6 +69,15 @@ fn llm_unavailable() -> AppError {
         "no LLM provider is configured",
     )
 }
+/// I2: the user disabled cloud LLM in Privacy settings (`privacy.llm != true`). A tier-3 op that
+/// needs the cloud LLM must refuse rather than silently send private doc content to the cloud.
+fn cloud_llm_disabled() -> AppError {
+    doc_err(
+        axum::http::StatusCode::FORBIDDEN,
+        "cloud-llm-disabled",
+        "cloud LLM is disabled in Privacy settings; enable it to use this operation",
+    )
+}
 fn vault_locked() -> AppError {
     doc_err(axum::http::StatusCode::UNAUTHORIZED, "vault-locked", "vault is locked")
 }
@@ -204,8 +213,33 @@ fn router_from_state(state: &SharedState) -> ModelRouter {
     ModelRouter::from_settings(&settings)
 }
 
-fn llm_or_503(state: &SharedState) -> AppResult<Arc<dyn LlmProvider>> {
-    state.llm().ok_or_else(llm_unavailable)
+/// I2: has the user enabled cloud-LLM egress in Privacy settings? Reads `app_settings.privacy.llm`
+/// (v1.0.6 Privacy Logic Strategy — default `false` until the user opts in via the wizard/Privacy
+/// dashboard). A missing/false value ⇒ cloud LLM is NOT permitted.
+fn cloud_llm_egress_enabled(state: &SharedState) -> bool {
+    let bytes = match state.vault.lock() {
+        Ok(vault) => vault.store().get_meta("app_settings").ok().flatten(),
+        Err(_) => None,
+    };
+    bytes
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|s| s.get("privacy").and_then(|p| p.get("llm")).and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+/// Resolve the LLM provider for a tier-3 (cloud) op, enforcing two privacy guarantees before any
+/// content can leave:
+///   - **I2**: refuse (`cloud-llm-disabled`) when the user has not enabled cloud-LLM egress.
+///   - **I1**: wrap the provider in [`RedactingLlmProvider`] so every outbound payload is
+///     PII-redacted (parity with chat.rs's F-17 boundary) — doc-intel was sending RAW doc content.
+fn cloud_llm_or_refuse(state: &SharedState) -> AppResult<Arc<dyn LlmProvider>> {
+    if !cloud_llm_egress_enabled(state) {
+        return Err(cloud_llm_disabled());
+    }
+    let inner = state.llm().ok_or_else(llm_unavailable)?;
+    Ok(Arc::new(
+        attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner),
+    ))
 }
 
 fn is_paid(state: &SharedState) -> bool {
@@ -251,7 +285,18 @@ pub async fn compare_docs(
     };
 
     let router = router_from_state(&state);
-    let llm = llm_or_503(&state)?;
+    // Only the semantic (tier-3) path sends content to the cloud LLM. Privacy-gate + redact only
+    // then (I1/I2); structural/textual compare is local and needs no cloud consent —
+    // `compare::compare` short-circuits before touching the provider for those modes.
+    let llm = if is_tier3_compare(&body.mode) {
+        cloud_llm_or_refuse(&state)?
+    } else {
+        // Local modes: the provider is never invoked. Wrap the configured one (redaction is a
+        // no-op here) so the StageLlms shape is satisfied; 503 only if none is configured at all,
+        // matching the prior contract.
+        let inner = state.llm().ok_or_else(llm_unavailable)?;
+        Arc::new(attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner))
+    };
     let llms = compare::StageLlms { cheap: llm.as_ref(), reasoning: llm.as_ref() };
 
     let report: DiffReport = compare::compare(
@@ -299,7 +344,8 @@ pub async fn summarize_doc(
     let item_id = body.source.item_id.clone().unwrap_or_default();
 
     let router = router_from_state(&state);
-    let llm = llm_or_503(&state)?;
+    // summarize is always tier-3 → privacy-gate (I2) + redact (I1).
+    let llm = cloud_llm_or_refuse(&state)?;
     let llms = deep_summary::StageLlms { cheap: llm.as_ref(), reasoning: llm.as_ref() };
 
     // store + dek for the cache layer (only when a real item_id was given).
@@ -347,7 +393,8 @@ pub async fn chapters_doc(
             let idx = body.chapter_idx.ok_or_else(|| invalid_input("chapter_idx is required"))?;
             let chs = chapters::split_chapters(&full_text);
             let router = router_from_state(&state);
-            let llm = llm_or_503(&state)?;
+            // chapter summarize/ask are tier-3 → privacy-gate (I2) + redact (I1).
+            let llm = cloud_llm_or_refuse(&state)?;
             let structured = matches!(body.output_mode.as_deref(), Some("structured"));
             let om = if structured { chapters::OutputMode::Structured } else { chapters::OutputMode::Review };
 
