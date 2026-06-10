@@ -92,6 +92,12 @@ pub struct AppState {
     /// 会员登录状态 — 控制 SettingsLocks 灰显 / 锁定 PATCH /settings 字段.
     /// 默认 LoggedOut (本地 self-host). login 后由 cloud_client.me() 推导.
     pub member_state: Mutex<attune_core::member_session::MemberState>,
+    /// C1 paywall-bypass fix: server-side verifier for a "paid" claim. `login_token` MUST run
+    /// this before granting `MemberState::Paid` so a forged `{tier:paid, license_id:..}` cannot
+    /// reach a billable tier-3 op. Default = `CloudMemberVerifier` (verifies against the cloud
+    /// session, fail-closed). Tests inject a verifier that performs a real (offline) match.
+    pub member_verifier:
+        Mutex<std::sync::Arc<dyn attune_core::member_verifier::MemberVerifier>>,
     /// E2/E4 (2026-05-01): PluginHub 客户端 (Mutex 让 PATCH /settings 能热更新)
     /// 默认 Mock；settings.pluginhub.url + license_key 配齐后切到 HttpPluginHubProvider
     pub plugin_hub: Mutex<std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>>,
@@ -199,6 +205,10 @@ impl AppState {
             )),
             // 默认未登录 — 本地 self-host 模式. login 后通过 /member/login endpoint 更新.
             member_state: Mutex::new(attune_core::member_session::MemberState::LoggedOut),
+            // C1: default verifier proves paid claims against the cloud session (fail-closed).
+            member_verifier: Mutex::new(std::sync::Arc::new(
+                attune_core::member_verifier::CloudMemberVerifier::default(),
+            )),
             // Plan A1 — UsageAggregator stays None until a vault-bound Store handle
             // exists (see field docs); cache_backend defaults to in-memory L1.
             usage_aggregator: Mutex::new(None),
@@ -1805,6 +1815,29 @@ impl AppState {
     pub fn set_llm(&self, p: Option<Arc<dyn LlmProvider>>) {
         if let Ok(mut g) = self.llm.lock() {
             *g = p;
+        }
+    }
+
+    /// Snapshot the member-paid verifier (Arc clone, µs critical section). Used by `login_token`
+    /// to prove a "paid" claim before granting `MemberState::Paid` (C1 paywall-bypass fix).
+    pub fn member_verifier(
+        &self,
+    ) -> Arc<dyn attune_core::member_verifier::MemberVerifier> {
+        self.member_verifier
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Replace the member-paid verifier — TEST seam. Lets a test inject a verifier that performs a
+    /// real (offline, deterministic) license match so the member-gate is exercised without a live
+    /// cloud, instead of bypassing it via a blanket client claim.
+    pub fn set_member_verifier(
+        &self,
+        v: Arc<dyn attune_core::member_verifier::MemberVerifier>,
+    ) {
+        if let Ok(mut g) = self.member_verifier.lock() {
+            *g = v;
         }
     }
 

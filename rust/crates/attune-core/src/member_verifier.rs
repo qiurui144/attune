@@ -132,6 +132,38 @@ impl<S: CloudSessionSource> MemberVerifier for CloudMemberVerifier<S> {
     }
 }
 
+/// A verifier that approves a single explicitly-whitelisted `license_id` — for tests and the
+/// eval harness. It performs a REAL match (`claimed == expected`), so a test that reaches Paid
+/// still goes through a verification step rather than a blanket client claim. A forged or empty
+/// license is rejected exactly like production.
+///
+/// This deliberately lives in non-test code (not `#[cfg(test)]`) so integration tests in other
+/// crates can construct it; it grants Paid for ONE known license only.
+pub struct WhitelistMemberVerifier {
+    expected_license: String,
+}
+
+impl WhitelistMemberVerifier {
+    /// Approve exactly `expected_license` (and nothing else).
+    pub fn new(expected_license: impl Into<String>) -> Self {
+        Self { expected_license: expected_license.into() }
+    }
+}
+
+impl MemberVerifier for WhitelistMemberVerifier {
+    fn verify_paid(&self, _account_id: &str, license_id: &str) -> Result<(), MemberVerifyError> {
+        let claimed = license_id.trim();
+        if claimed.is_empty() {
+            return Err(MemberVerifyError::MissingLicenseId);
+        }
+        if claimed == self.expected_license {
+            Ok(())
+        } else {
+            Err(MemberVerifyError::LicenseNotOnAccount)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +218,23 @@ mod tests {
         assert!(
             matches!(err, MemberVerifyError::Unavailable(_)),
             "unreachable cloud must fail closed (Unavailable), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn whitelist_verifier_approves_only_the_expected_license() {
+        let v = WhitelistMemberVerifier::new("lic-known");
+        // The one whitelisted license passes — a real match, not a blanket Ok.
+        assert!(v.verify_paid("acct", "lic-known").is_ok());
+        assert!(v.verify_paid("acct", " lic-known ").is_ok(), "trims whitespace");
+        // Anything else is rejected exactly like production.
+        assert_eq!(
+            v.verify_paid("acct", "lic-other").unwrap_err(),
+            MemberVerifyError::LicenseNotOnAccount
+        );
+        assert_eq!(
+            v.verify_paid("acct", "").unwrap_err(),
+            MemberVerifyError::MissingLicenseId
         );
     }
 }

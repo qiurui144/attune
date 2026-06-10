@@ -24,6 +24,13 @@
 use std::sync::Arc;
 
 use attune_core::llm::{DeterminismLevel, MockLlmProvider};
+use attune_core::member_verifier::WhitelistMemberVerifier;
+
+/// The ONE license id the eval harness's member verifier approves. A `login-token` "paid" claim
+/// reaches `MemberState::Paid` only when its `license_id` equals this — i.e. it must pass a real
+/// verification step (a match), NOT the old blanket non-empty check. Any other license id is
+/// rejected exactly like production (C1 paywall-bypass fix).
+pub const EVAL_PAID_LICENSE: &str = "lic-test";
 
 /// Spawned in-process server. Listens on a random ephemeral port. Server is
 /// stopped when this struct is dropped (handle is aborted).
@@ -82,6 +89,11 @@ pub async fn spawn_eval_server() -> EvalServer {
     let mock = Arc::new(MockLlmProvider::new("eval-mock"));
     mock.set_determinism_level(DeterminismLevel::Exact);
     state.set_llm(Some(mock.clone()));
+
+    // C1: install a verifier that approves ONLY `EVAL_PAID_LICENSE`. A "paid" login-token must
+    // present that exact license to reach Paid — a real verification step. A forged/other license
+    // is rejected, so the member-gate test exercises the production reject path (not a bypass).
+    state.set_member_verifier(Arc::new(WhitelistMemberVerifier::new(EVAL_PAID_LICENSE)));
 
     let router = crate::build_router(Arc::clone(&state));
 

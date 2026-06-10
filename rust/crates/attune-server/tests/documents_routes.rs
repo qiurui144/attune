@@ -110,7 +110,7 @@ async fn invalid_level_returns_invalid_input_unpaid_path_independent() {
     let client = reqwest::Client::new();
     let _ = client
         .post(format!("{base}/api/v1/member/login-token"))
-        .json(&json!({ "tier": "paid", "account_id": "u", "license_id": "lic" }))
+        .json(&json!({ "tier": "paid", "account_id": "u", "license_id": "lic-test" }))
         .send()
         .await;
     let (status, v) = post(
@@ -151,7 +151,7 @@ async fn missing_chapter_idx_returns_invalid_input() {
     let client = reqwest::Client::new();
     let _ = client
         .post(format!("{base}/api/v1/member/login-token"))
-        .json(&json!({ "tier": "paid", "account_id": "u", "license_id": "lic" }))
+        .json(&json!({ "tier": "paid", "account_id": "u", "license_id": "lic-test" }))
         .send()
         .await;
     let (status, v) = post(

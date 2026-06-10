@@ -60,16 +60,19 @@ pub async fn login_token(
     let new_state = match req.tier.as_str() {
         "free" => MemberState::Free { account_id: req.account_id },
         "paid" => {
+            // C1 paywall-bypass fix: a "paid" claim MUST be verified server-side before it can
+            // gate billable cloud-LLM spend (doc-intel is the first such consumer). The previous
+            // `!lic.is_empty()` check trusted the client; now `verify_paid` proves the license
+            // against the cloud session (CloudMemberVerifier) and FAILS CLOSED on every error
+            // path. A forged / empty / unverifiable claim → 403, never Paid.
             let lic = req.license_id.unwrap_or_default();
-            if lic.is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "paid tier requires license_id"})),
-                ));
-            }
+            let verifier = state.member_verifier();
+            verifier
+                .verify_paid(&req.account_id, &lic)
+                .map_err(|e| paid_verification_error(&e))?;
             MemberState::Paid {
                 account_id: req.account_id,
-                license_id: lic,
+                license_id: lic.trim().to_string(),
                 llm_quota_remaining: req.llm_quota_remaining,
             }
         }
@@ -103,6 +106,29 @@ pub async fn login_token(
         "state": new_state,
         "plugin_sync": plugins_json,
     })))
+}
+
+/// Map a [`MemberVerifyError`] to the wire response. A missing/empty license is a client input
+/// error (400); every "could not prove paid" reason (no session / unreachable / not-on-account /
+/// revoked) is a 403 — the claim is simply not authorized as Paid. The verifier message never
+/// carries a credential.
+fn paid_verification_error(
+    e: &attune_core::member_verifier::MemberVerifyError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use attune_core::member_verifier::MemberVerifyError as E;
+    let status = match e {
+        E::MissingLicenseId => StatusCode::BAD_REQUEST,
+        E::NoCloudSession | E::Unavailable(_) | E::LicenseNotOnAccount | E::LicenseRevoked => {
+            StatusCode::FORBIDDEN
+        }
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "error": e.to_string(),
+            "code": "paid-verification-failed",
+        })),
+    )
 }
 
 /// Build a `CloudClient` from the persisted CLI cloud session (`config_dir/

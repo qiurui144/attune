@@ -114,6 +114,49 @@ async fn paid_passes_the_member_gate_on_tier3_ops() {
     }
 }
 
+/// C1 paywall-bypass regression (§5.2.0b CRITICAL): a self-asserted, UNVERIFIED `{tier:"paid"}`
+/// claim must NOT reach a billable tier-3 op. The eval harness installs a verifier that approves
+/// only `EVAL_PAID_LICENSE`; a forged license is rejected exactly like production (no cloud
+/// session). Before the fix, ANY non-empty `license_id` flipped the member to Paid and the
+/// billable summarize went through. Now the forged claim is rejected at login (403
+/// paid-verification-failed) AND, even if a client skips that signal and calls the tier-3 op
+/// directly, the member stays unpaid → membership-required.
+#[tokio::test]
+async fn forged_unverified_paid_claim_cannot_reach_billable_tier3() {
+    let srv = spawn_eval_server().await;
+    let base = srv.url();
+    let client = reqwest::Client::new();
+
+    // Attacker asserts paid with a license the verifier does not approve.
+    let (login_status, login_body) = {
+        let r = client
+            .post(format!("{base}/api/v1/member/login-token"))
+            .json(&json!({
+                "tier": "paid",
+                "account_id": "attacker",
+                "license_id": "self-asserted-unsigned-license",
+                "llm_quota_remaining": 1_000_000
+            }))
+            .send()
+            .await
+            .expect("login sent");
+        let s = r.status().as_u16();
+        (s, r.json::<Value>().await.unwrap_or(Value::Null))
+    };
+    assert_eq!(login_status, 403, "forged paid login must be rejected: {login_body}");
+    assert_eq!(login_body["code"], "paid-verification-failed");
+
+    // The billable tier-3 op must NOT be reachable — the member was never granted Paid.
+    let (status, v) = post(
+        &base,
+        "documents/summarize",
+        json!({ "source": doc_a(), "level": "detailed" }),
+    )
+    .await;
+    assert_eq!(status, 403, "forged-paid summarize must be gate-blocked, body={v}");
+    assert_eq!(v["code"], "membership-required", "the forged claim never reached a billable op");
+}
+
 #[tokio::test]
 async fn adversarial_direct_connect_unpaid_still_403() {
     // No UI, no login — a raw direct request to the richest tier-3 op must be rejected.
