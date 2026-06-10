@@ -398,8 +398,10 @@ Size breakdown: rustls crypto stack + tantivy full-text + usearch C++ bindings +
 ## Testing
 
 ```bash
-cargo test --workspace    # 376+ tests
+cargo test --workspace    # full suite across all 5 crates
 ```
+
+Test strategy, the 6-category coverage floor, and the doc-intelligence A–K acceptance matrix live in [`../docs/TESTING.md`](../docs/TESTING.md). Office parsing tests are irreducibly heavy and run on dedicated CI shards.
 
 ---
 

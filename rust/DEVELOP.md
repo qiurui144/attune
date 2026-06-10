@@ -11,8 +11,8 @@ rustup default stable
 cd attune
 cargo build --workspace
 
-# 运行测试
-cargo test --workspace    # 237+ tests 全部通过 (attune-core 210 + attune-server 27)
+# 运行测试（5 crate 全量，attune-core 占绝大多数；office 重测试见 CI 分片说明）
+cargo test --workspace
 
 # 格式化 + lint
 cargo fmt --all
@@ -545,7 +545,7 @@ fn process_batch() -> Result<usize> {
 
 ## J 系列 RAG Production Quality（W2 batch 1，2026-04-27）
 
-详见 [`docs/superpowers/specs/2026-04-27-w2-rag-quality-batch1-design.md`](../docs/superpowers/specs/2026-04-27-w2-rag-quality-batch1-design.md)。所有抄袭来源登记在 [`ACKNOWLEDGMENTS.md`](../ACKNOWLEDGMENTS.md)。
+原始设计 spec（W2 batch 1，一次性 sprint 产物）已按 §3.2 生命周期清理；结论见 [`RELEASE.md`](RELEASE.md)。所有抄袭来源登记在 [`ACKNOWLEDGMENTS.md`](../ACKNOWLEDGMENTS.md)。
 
 **3 个核心改造**：
 
@@ -583,7 +583,7 @@ let display = strip_confidence_marker(&response);  // 用户看不到 marker
 
 ## W3 batch A：Web search 缓存（C1, 2026-04-27）
 
-详见 [`docs/superpowers/specs/2026-04-27-w3-batch-a-design.md`](../docs/superpowers/specs/2026-04-27-w3-batch-a-design.md) §3。
+原始设计 spec（W3 batch A，一次性 sprint 产物）已按 §3.2 生命周期清理；结论见 [`RELEASE.md`](RELEASE.md)。
 
 ```rust
 // chat.rs web fallback 流程：
@@ -607,7 +607,7 @@ let results = match cached {
 
 ## 资源治理框架（H1, 2026-04-27）
 
-`attune_core::resource_governor` 提供任务级 CPU/RAM/IO 协作式调度。所有常驻后台 worker 必须接入。详见 [`docs/superpowers/specs/2026-04-27-resource-governor-design.md`](../docs/superpowers/specs/2026-04-27-resource-governor-design.md)。
+`attune_core::resource_governor` 提供任务级 CPU/RAM/IO 协作式调度。所有常驻后台 worker 必须接入。设计决策见 [`docs/adr/0006-resource-governor-cost-tier.md`](../docs/adr/0006-resource-governor-cost-tier.md)。
 
 **关键概念**：`cpu_pct_max` 是**系统全局 CPU 阈值**（不是单进程占用上限）— "系统忙就让让"协作式语义。
 
@@ -676,8 +676,8 @@ apply_consolidation_result(store, &fresh_dek, &bundles, &summaries, model, now_s
 ## 多层记忆（2026-05-18）
 
 `attune_core::memory` 把 A1 的 episodic memory 接入检索路径，新增语义层（L3）+ tier-aware
-上下文装配，让 chat 按 query 形态选最便宜的层应答而非永远 dump 原始 chunk。设计稿：
-[`docs/superpowers/plans/2026-05-18-multilayer-memory.md`](../docs/superpowers/plans/2026-05-18-multilayer-memory.md)。
+上下文装配，让 chat 按 query 形态选最便宜的层应答而非永远 dump 原始 chunk。实施 plan 已按
+§3.2 生命周期清理（plan 实现后删）；分层定义见下。
 
 **分层**：L0 raw chunks · L1 chunk summaries · L2 episodic（A1，1d 时间窗口）·
 L3 semantic（新增，按主题聚类，跨时间）。
