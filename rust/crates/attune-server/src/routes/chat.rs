@@ -369,8 +369,11 @@ pub async fn chat(
     // 1b. 用 learned_expansions 自动扩展查询词（语义扩展，透明无感）
     let expanded_query = attune_core::skill_evolution::expand_query(&body.message, &app_settings);
 
-    // v0.6 Phase B F-Pro Stage 4：query 意图 detect → cross-domain penalty
-    let detected_domain = attune_core::search::detect_query_domain(&expanded_query);
+    // v0.6 Phase B F-Pro Stage 4：query 意图 detect → cross-domain penalty。
+    // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供（attune-pro）。
+    // OSS 裸装无 plugin → 空词表 → None → 不降权（generic ranking）。
+    let domain_keywords = state.plugin_registry.all_chat_trigger_keywords_by_domain();
+    let detected_domain = attune_core::search::detect_query_domain(&expanded_query, &domain_keywords);
 
     // 1. Search knowledge base via three-stage pipeline (initial_k → rerank → top_k)
     let mut search_params = attune_core::search::SearchParams::with_defaults(5);

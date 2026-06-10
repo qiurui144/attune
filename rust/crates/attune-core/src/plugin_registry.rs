@@ -134,6 +134,54 @@ impl PluginRegistry {
         out
     }
 
+    /// S4b MU-5：按 domain 分组聚合各 vertical plugin 的 chat_trigger.project_keywords。
+    ///
+    /// 用途：`search::detect_query_domain` 的 **唯一** 关键词来源。OSS attune-core
+    /// 不再硬编码 legal/medical/patent/tech 行业词表（per oss-pro-strategy §4.3 —
+    /// 行业 domain detection 属于 attune-pro 能力）。每个 vertical plugin 用其
+    /// manifest `category`（如 `legal` / `medical` / `patent` / `tech`）声明自己的
+    /// domain，并在 `chat_trigger.project_keywords` 提供该 domain 的特征词。
+    ///
+    /// domain 字符串需与 ingest 阶段写入 item 的 `corpus_domain` 对齐
+    /// （`apply_cross_domain_penalty` 比对的是 `corpus_domain`）。
+    ///
+    /// 跳过规则：`category` 为空 或 无 `chat_trigger` 或 `project_keywords` 为空的
+    /// plugin 不贡献条目。同 domain 多 plugin 的 keywords 合并去重。
+    ///
+    /// OSS 裸装 → plugins 空 → 返空 Vec → `detect_query_domain` 返 None → 不应用
+    /// cross-domain penalty（generic ranking，graceful degrade）。
+    pub fn all_chat_trigger_keywords_by_domain(&self) -> Vec<(String, Vec<&str>)> {
+        use std::collections::HashSet;
+        // 保持 plugins 迭代序的稳定 domain 顺序（同分 domain 命中按首见序优先）。
+        let mut order: Vec<String> = Vec::new();
+        let mut by_domain: HashMap<String, (HashSet<&str>, Vec<&str>)> = HashMap::new();
+        for p in self.plugins.values() {
+            let domain = p.manifest.category.trim();
+            if domain.is_empty() {
+                continue;
+            }
+            let Some(ct) = p.manifest.chat_trigger.as_ref() else { continue };
+            if ct.project_keywords.is_empty() {
+                continue;
+            }
+            let entry = by_domain.entry(domain.to_string()).or_insert_with(|| {
+                order.push(domain.to_string());
+                (HashSet::new(), Vec::new())
+            });
+            for kw in &ct.project_keywords {
+                let s = kw.as_str();
+                if !s.is_empty() && entry.0.insert(s) {
+                    entry.1.push(s);
+                }
+            }
+        }
+        order
+            .into_iter()
+            .filter_map(|d| by_domain.remove(&d).map(|(_, kws)| (d, kws)))
+            .filter(|(_, kws)| !kws.is_empty())
+            .collect()
+    }
+
     /// 列出所有 plugin 的全部 skills (附带 plugin_id)
     pub fn list_skills(&self) -> Vec<(&str, &crate::plugin_loader::SkillSpec)> {
         let mut out = Vec::new();
@@ -689,6 +737,136 @@ chat_trigger:
         assert!(kws.contains(&"申请"));
         // dedupe 验证: 总长度 == unique 大小
         assert_eq!(kws.len(), unique.len(), "no duplicates allowed");
+    }
+
+    // ── S4b MU-5 (R8): all_chat_trigger_keywords_by_domain — search domain 词表来源 ──
+
+    #[test]
+    fn keywords_by_domain_empty_oss_default() {
+        // OSS 裸装无 plugin → 空 → detect_query_domain 永远 None（generic ranking）。
+        // oss-pro-strategy §4.3：行业 domain detection 不在 OSS attune-core。
+        let reg = PluginRegistry::new();
+        assert!(reg.all_chat_trigger_keywords_by_domain().is_empty());
+    }
+
+    #[test]
+    fn keywords_by_domain_grouped_by_category() {
+        // vertical plugin 用 category 声明 domain，project_keywords 提供该 domain 特征词。
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师插件
+type: industry
+category: legal
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  project_keywords:
+    - 诉讼
+    - 合同
+"#,
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "med-pro",
+            r#"
+id: med-pro
+name: 医疗插件
+type: industry
+category: medical
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  project_keywords:
+    - 病历
+    - 处方
+"#,
+        );
+        // 无 category 的 plugin 不贡献条目（即使有 project_keywords）。
+        write_plugin_dir(
+            tmp.path(),
+            "nocat",
+            r#"
+id: nocat
+name: 无分类
+type: skill
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  project_keywords:
+    - 应被忽略
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(errs.is_empty(), "scan errors: {:?}", errs);
+
+        let by_domain = reg.all_chat_trigger_keywords_by_domain();
+        let domains: std::collections::HashSet<&str> =
+            by_domain.iter().map(|(d, _)| d.as_str()).collect();
+        assert_eq!(domains.len(), 2, "只有 legal/medical 两 domain，nocat 被跳过: {:?}", by_domain);
+        assert!(domains.contains("legal"));
+        assert!(domains.contains("medical"));
+        assert!(!domains.contains(""), "空 category 不得成为 domain");
+
+        let legal_kws: Vec<&str> = by_domain
+            .iter()
+            .find(|(d, _)| d == "legal")
+            .map(|(_, kws)| kws.clone())
+            .expect("legal domain present");
+        assert!(legal_kws.contains(&"诉讼"));
+        assert!(legal_kws.contains(&"合同"));
+        assert!(!legal_kws.contains(&"应被忽略"));
+    }
+
+    #[test]
+    fn keywords_by_domain_merges_and_dedups_same_category() {
+        // 同 category 多 plugin → keywords 合并去重。
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-a",
+            r#"
+id: law-a
+name: A
+type: industry
+category: legal
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  project_keywords:
+    - 诉讼
+    - 合同
+"#,
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "law-b",
+            r#"
+id: law-b
+name: B
+type: industry
+category: legal
+version: "1.0.0"
+chat_trigger:
+  enabled: true
+  project_keywords:
+    - 合同
+    - 赔偿
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(errs.is_empty(), "scan errors: {:?}", errs);
+
+        let by_domain = reg.all_chat_trigger_keywords_by_domain();
+        assert_eq!(by_domain.len(), 1, "合并为单个 legal domain: {:?}", by_domain);
+        let (dom, kws) = &by_domain[0];
+        assert_eq!(dom, "legal");
+        let unique: std::collections::HashSet<&str> = kws.iter().copied().collect();
+        assert_eq!(unique.len(), kws.len(), "no dup within domain: {:?}", kws);
+        assert_eq!(unique, ["诉讼", "合同", "赔偿"].into_iter().collect());
     }
 
     #[test]

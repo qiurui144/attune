@@ -138,9 +138,11 @@ pub async fn search(
     };
 
     // v0.6 Phase B F-Pro Stage 4：从 query 自动 detect 领域意图，driving cross-domain penalty。
-    // 命中 'legal' / 'tech' / 'medical' / 'patent' → 跨领域文档 score *= 0.4
-    // 未命中（None）→ 不应用 penalty（保持向后兼容）
-    let detected_domain = attune_core::search::detect_query_domain(&effective_query);
+    // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供（attune-pro），不再硬编码行业词。
+    // 命中某 plugin domain（如 'legal'）→ 跨领域文档 score *= 0.4
+    // OSS 裸装无 plugin / 未命中（None）→ 不应用 penalty（generic ranking，向后兼容）
+    let domain_keywords = state.plugin_registry.all_chat_trigger_keywords_by_domain();
+    let detected_domain = attune_core::search::detect_query_domain(&effective_query, &domain_keywords);
 
     let search_params = {
         let mut p = attune_core::search::SearchParams::with_defaults(params.top_k);
@@ -250,7 +252,9 @@ pub async fn search_relevant(
     // query_rewrite：Chrome 扩展注入路径同样受益于 query 改写
     let effective_query = maybe_rewrite_query(&state, &body.query).await;
 
-    let detected_domain = attune_core::search::detect_query_domain(&effective_query);
+    // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供；OSS 裸装 → None。
+    let domain_keywords = state.plugin_registry.all_chat_trigger_keywords_by_domain();
+    let detected_domain = attune_core::search::detect_query_domain(&effective_query, &domain_keywords);
     let search_params = {
         let mut p = attune_core::search::SearchParams::with_defaults(top_k);
         if let Some(ik) = body.initial_k { p.initial_k = ik; }
