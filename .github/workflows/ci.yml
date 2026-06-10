@@ -138,7 +138,12 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     name: rust-test-core-${{ matrix.os }}
-    timeout-minutes: 50
+    # Per-OS budget: the windows runner (4 vCPU, no sccache) needs ~40-50min just
+    # to compile the --release dep tree per shard before tests run; ubuntu is ~2x
+    # faster. 50min cancelled windows mid-compile (run 27241292586) even though
+    # every test that DID run passed — so give windows 75min, keep ubuntu tight at
+    # 50min so a real ubuntu hang still fails FAST + CLEAR.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
@@ -283,7 +288,8 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     name: rust-test-core-b-${{ matrix.os }}
-    timeout-minutes: 50
+    # windows release-compile is the binding constraint (see rust-test-core).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
@@ -405,7 +411,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     name: rust-test-server-${{ matrix.os }}
-    timeout-minutes: 50
+    # windows release-compile is the binding constraint: run 27241292586's
+    # server-windows passed every test it reached (accounts + root all green) but
+    # was still compiling group-A binaries at the 50min mark → cancel. 75min on
+    # windows clears the compile; ubuntu stays tight at 50min.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
@@ -496,7 +506,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     name: rust-test-server-b-${{ matrix.os }}
-    timeout-minutes: 50
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
@@ -580,7 +590,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     name: rust-test-server-office-${{ matrix.os }}
-    timeout-minutes: 50
+    # The office tests themselves PASS fast (<3min total) once compiled; the ~16min
+    # full-release dep-tree recompile per shard is the irreducible cost (NOT the
+    # test count — finer office sharding does not reduce per-shard compile). windows
+    # gets 75min headroom; ubuntu 50min.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
@@ -654,7 +668,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     name: rust-test-server-office-b-${{ matrix.os }}
-    timeout-minutes: 50
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
@@ -731,7 +745,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     name: rust-test-server-c-${{ matrix.os }}
-    timeout-minutes: 50
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
@@ -805,7 +819,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     name: rust-test-cli-${{ matrix.os }}
-    timeout-minutes: 50
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
@@ -966,7 +980,11 @@ jobs:
     # usearch so the build is heavy — free disk up front like the test jobs.
     name: Coverage (report-only)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The instrumented (-C instrument-coverage) full-workspace --release build is
+    # far heavier than a normal build and hit the 60min wall still compiling on
+    # run 27241292586. 90min clears it. Report-only (no --fail-under), so this gate
+    # never blocks a PR on coverage numbers — only on the job completing.
+    timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_NET_RETRY: "10"
