@@ -418,7 +418,6 @@ dependencies = [
  "clap",
  "dirs",
  "dunce",
- "image",
  "local-ip-address",
  "lru 0.13.0",
  "proptest",

@@ -42,15 +42,12 @@ thiserror = "2"
 chrono = { workspace = true }
 # Office helper (v0.7.1): OCR 端点写 multipart bytes 到临时文件喂 PP-OCR provider.
 tempfile = "3"
-# Placeholder region crop for the nontext recognize endpoint (matches attune-core's image dep).
-# Only pulled in under the `nontext` feature.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 
 [features]
 default = []
 # Non-text content recognition endpoint (POST /api/v1/ocr/recognize + report/accept).
 # Forwards to attune-core's `nontext` feature. Default-OFF, mirroring attune-core.
-nontext = ["attune-core/nontext", "dep:image"]
+nontext = ["attune-core/nontext"]
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json", "multipart"] }

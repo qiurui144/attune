@@ -213,6 +213,68 @@ pub fn recognize_region(
     })
 }
 
+/// Typed output of the shared visual-understanding pass (ADR-0008): the recognized regions
+/// plus the OCR cross-validation correction report. This is the SINGLE result type every
+/// caller of the capability sees — REST handler, CLI subcommand, and any plugin invoking
+/// the capability. Industry semantics (e.g. "this table is a contract-clause table") are
+/// layered by pro plugins ON TOP of this generic output; this struct stays zero-industry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecognizePageResult {
+    pub regions: Vec<Region>,
+    pub correction_report: OcrCorrectionReport,
+    /// 🆓/⚡ local regions vs 💰 VLM-escalated regions (spec §8 cost surfacing).
+    pub local_regions: u32,
+    pub escalated_regions: u32,
+}
+
+/// Shared visual-understanding orchestrator (spec §3 data-flow Stage1→2→3): detect layout
+/// regions, dispatch each to its 🆓/⚡ local recognizer, then 🆓 cross-validate against the
+/// PP-OCR second opinion. This is the ONE entry point the capability exposes — REST, CLI,
+/// and plugins all funnel through it so cost/quality/telemetry have a single tuning point.
+///
+/// Models missing → `detect_regions` returns empty → regions degrade to plain OCR (never
+/// errors). VLM escalation (Stage4) is NOT performed here; it is the caller's gated step
+/// (build-stage default Off never escalates, §8).
+///
+/// `ocr_lines` is the PP-OCR second opinion (empty when no engine present). `layout_model`
+/// and `table_model` are the ONNX model paths (absent → graceful empty).
+pub fn recognize_page(
+    image_path: &std::path::Path,
+    layout_model: &std::path::Path,
+    table_model: &std::path::Path,
+    ocr_lines: &[RawLine],
+) -> RecognizePageResult {
+    let detected = layout::detect_regions(layout_model, image_path).unwrap_or_default();
+    let ctx = RegionCtx {
+        ocr_lines: ocr_lines.to_vec(),
+        page: 0,
+    };
+    // Placeholder crop until per-region cropping lands with real layout inference; the
+    // local recognizers tolerate it and the dispatch path is what is exercised today.
+    let crop = DynamicImage::new_rgb8(1, 1);
+    let regions: Vec<Region> = detected
+        .iter()
+        .filter_map(|lr| recognize_region(lr, &crop, &ctx, table_model).ok())
+        .collect();
+
+    let ocr_texts: Vec<Option<String>> = regions.iter().map(|_| None).collect();
+    let correction_report = cross_validate::build_report(&regions, &ocr_texts);
+    let local_regions = regions
+        .iter()
+        .filter(|r| r.source == RegionSource::Local)
+        .count() as u32;
+    let escalated_regions = regions
+        .iter()
+        .filter(|r| r.source == RegionSource::Vlm)
+        .count() as u32;
+    RecognizePageResult {
+        regions,
+        correction_report,
+        local_regions,
+        escalated_regions,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +360,49 @@ mod tests {
             !j.contains("validation_warnings"),
             "empty warnings should be skipped: {j}"
         );
+    }
+
+    #[test]
+    fn recognize_page_missing_models_degrades_to_empty() {
+        // The shared capability entry point: no layout/table model present → empty regions,
+        // empty report, zero cost, never errors (the 🆓 degrade-to-plain-OCR invariant, R1).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let out = recognize_page(
+            tmp.path(),
+            std::path::Path::new("/nonexistent/layout.onnx"),
+            std::path::Path::new("/nonexistent/slanet.onnx"),
+            &[],
+        );
+        assert!(out.regions.is_empty());
+        assert_eq!(out.local_regions, 0);
+        assert_eq!(out.escalated_regions, 0);
+        assert_eq!(out.correction_report.summary.total, 0);
+    }
+
+    #[test]
+    fn recognize_page_result_serializes_typed() {
+        // The capability output must serialize to a typed JSON envelope plugins can parse.
+        let out = RecognizePageResult {
+            regions: vec![Region {
+                kind: RegionKind::Checkbox,
+                bbox: BBox { x: 0, y: 0, w: 1, h: 1 },
+                page: 0,
+                det_confidence: 0.9,
+                result: RegionResult::CheckboxV1 { checked: true },
+                source: RegionSource::Local,
+                confidence: 0.9,
+                validation_warnings: vec![],
+            }],
+            correction_report: OcrCorrectionReport {
+                schema_version: 1,
+                entries: vec![],
+                summary: CorrectionSummary::default(),
+            },
+            local_regions: 1,
+            escalated_regions: 0,
+        };
+        let j = serde_json::to_string(&out).unwrap();
+        assert!(j.contains(r#""schema":"checkbox_v1""#), "got {j}");
+        assert!(j.contains(r#""local_regions":1"#));
     }
 }

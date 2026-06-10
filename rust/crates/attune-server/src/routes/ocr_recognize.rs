@@ -5,14 +5,11 @@
 //! layout/recognizer models are missing the pass degrades to empty regions (never 500).
 
 use crate::state::SharedState;
-use attune_core::ocr::nontext::{
-    cross_validate, layout, recognize_region, OcrCorrectionReport, Region, RegionCtx,
-};
+use attune_core::ocr::nontext::{recognize_page, OcrCorrectionReport, Region};
 use attune_core::ocr::{self, RawLine};
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 
 /// Request body for /api/v1/ocr/recognize (multipart file OR { item_id }).
@@ -113,57 +110,26 @@ pub async fn post_recognize(
         None => Vec::new(),
     };
 
-    let regions = build_regions(tmp.path(), &ocr_lines);
-    let response = assemble_response(regions, &ocr_lines, filename.as_deref());
+    // Shared visual-understanding capability — ONE orchestration path (ADR-0008);
+    // CLI + plugins go through the same `recognize_page`.
+    let response = run_recognize(tmp.path(), &ocr_lines);
     Ok(Json(response))
 }
 
-/// Stage1+2: detect layout regions (model-missing → empty) and dispatch each to its
-/// 🆓/⚡ recognizer. The layout/table model paths follow the PP-OCR model dir convention;
-/// when absent, detect_regions returns empty so the whole pass degrades to plain OCR.
-fn build_regions(image_path: &std::path::Path, ocr_lines: &[RawLine]) -> Vec<Region> {
+/// Run the shared recognition pass and shape it into the HTTP response. The layout/table
+/// model paths follow the PP-OCR model dir convention; when absent the pass degrades to
+/// empty regions (plain OCR). Cost is surfaced for the UI (spec §8).
+fn run_recognize(image_path: &std::path::Path, ocr_lines: &[RawLine]) -> OcrRecognizeResponse {
     let models_dir = ocr::ppocr::PpOcrProvider::models_dir();
     let layout_model = models_dir.join("layout").join("layout.onnx");
     let table_model = models_dir.join("table").join("slanet.onnx");
-    let detected = layout::detect_regions(&layout_model, image_path).unwrap_or_default();
-    let ctx = RegionCtx {
-        ocr_lines: ocr_lines.to_vec(),
-        page: 0,
-    };
-    // A black 1x1 placeholder crop: real region cropping arrives with model inference.
-    // Recognizers tolerate it; the orchestrator dispatch is what's exercised here.
-    let crop = DynamicImage::new_rgb8(1, 1);
-    detected
-        .iter()
-        .filter_map(|lr| recognize_region(lr, &crop, &ctx, &table_model).ok())
-        .collect()
-}
-
-/// Stage3 + cost assembly. The PP-OCR text per region is approximated by the joined OCR
-/// lines (real per-region crop assignment arrives with layout inference); when there are no
-/// regions the report is empty and cost is all-zero.
-fn assemble_response(
-    regions: Vec<Region>,
-    _ocr_lines: &[RawLine],
-    _filename: Option<&str>,
-) -> OcrRecognizeResponse {
-    use attune_core::ocr::nontext::RegionSource;
-    let ocr_texts: Vec<Option<String>> = regions.iter().map(|_| None).collect();
-    let correction_report = cross_validate::build_report(&regions, &ocr_texts);
-    let local_regions = regions
-        .iter()
-        .filter(|r| r.source == RegionSource::Local)
-        .count() as u32;
-    let escalated_regions = regions
-        .iter()
-        .filter(|r| r.source == RegionSource::Vlm)
-        .count() as u32;
+    let out = recognize_page(image_path, &layout_model, &table_model, ocr_lines);
     OcrRecognizeResponse {
-        regions,
-        correction_report,
+        regions: out.regions,
+        correction_report: out.correction_report,
         cost: RecognizeCost {
-            local_regions,
-            escalated_regions,
+            local_regions: out.local_regions,
+            escalated_regions: out.escalated_regions,
             cache_hits: 0,
         },
     }
@@ -227,10 +193,9 @@ mod tests {
 
     #[test]
     fn no_models_degrades_to_empty_regions() {
-        // build_regions with no layout model present → empty (never panics, never 500).
+        // run_recognize with no layout model present → empty (never panics, never 500).
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let regions = build_regions(tmp.path(), &[]);
-        let resp = assemble_response(regions, &[], None);
+        let resp = run_recognize(tmp.path(), &[]);
         assert!(resp.regions.is_empty());
         assert_eq!(resp.cost.local_regions, 0);
         assert_eq!(resp.correction_report.summary.total, 0);
