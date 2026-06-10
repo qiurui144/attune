@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Any
 
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 
 BASE_URL = os.environ.get("ATTUNE_BASE_URL", "http://localhost:18900").rstrip("/")
 API_TOKEN = os.environ.get("ATTUNE_API_TOKEN", "")
@@ -75,6 +77,32 @@ def _log(msg: str) -> None:
         print(f"[attune_mcp_shim] {msg}", file=sys.stderr, flush=True)
 
 
+# Attune item ids are UUIDs / content-hash slugs: alphanumeric plus `-` and `_`.
+# A strict allowlist is the only safe way to interpolate a value into a URL path:
+# it blocks path traversal (`../`, encoded `%2e%2e`), absolute-URL / scheme
+# injection (`http://evil`, `//evil`, `file:`), query/fragment smuggling
+# (`?`, `#`), and embedded slashes that would re-route the request (SSRF).
+_ITEM_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,128}\Z")
+
+
+def sanitize_item_id(item_id: Any) -> str:
+    """Validate an item_id for safe use in a URL path segment.
+
+    Returns the id unchanged if it matches the strict allowlist; raises
+    ValueError otherwise. Callers MUST NOT interpolate an unvalidated id into a
+    URL — that is a path-traversal / SSRF vector (an attacker-supplied id like
+    `../../admin` or `http://169.254.169.254/` would otherwise re-target the
+    request).
+    """
+    if not isinstance(item_id, str):
+        raise ValueError("item_id must be a string")
+    if not _ITEM_ID_RE.match(item_id):
+        raise ValueError(
+            "item_id must be 1-128 chars of [A-Za-z0-9_-] (got an unsafe value)"
+        )
+    return item_id
+
+
 def _http_call(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     url = f"{BASE_URL}{path}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -105,7 +133,15 @@ def call_attune_get_item(args: dict[str, Any]) -> dict[str, Any]:
     item_id = args.get("item_id", "")
     if not item_id:
         return {"_error": "item_id is required"}
-    return _http_call("GET", f"/api/v1/items/{item_id}")
+    try:
+        item_id = sanitize_item_id(item_id)
+    except ValueError as e:
+        return {"_error": f"invalid item_id: {e}"}
+    # Allowlist already guarantees safety; quote() with empty safe set is
+    # defence-in-depth so even a future allowlist relaxation can't break out
+    # of the path segment.
+    safe_id = urllib.parse.quote(item_id, safe="")
+    return _http_call("GET", f"/api/v1/items/{safe_id}")
 
 
 def call_attune_chat(args: dict[str, Any]) -> dict[str, Any]:

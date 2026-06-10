@@ -72,6 +72,122 @@ pub fn llm_chat_redacted(
     Ok(redactor.restore(&raw, &mappings))
 }
 
+/// Hardened variant of [`llm_chat_redacted`] — same PII redact/restore wrapping,
+/// but routes the LLM call through the §4.5 robustness primitives so weak models
+/// (qwen2.5:3b, gemini-flash, …) degrade meaningfully instead of returning garbage
+/// (the defamation_extractor mock-0.99 / real-0.09 trap class):
+///
+/// 1. **Few-shot** — `examples` ([(user, assistant)]) are prepended as prior turns
+///    (small models follow the pattern; large models are unaffected).
+/// 2. **Schema-guided JSON** — `schema` forces `format=json` / `response_format`
+///    at the backend (Ollama / OpenAI override the trait default).
+/// 3. **Retry-with-validation** — each attempt is checked by `validator`; on
+///    failure the error is fed back to the LLM and it retries (≤ `max_attempts`).
+///
+/// PII is redacted across [system, user, all example pairs] with globally unique
+/// placeholders before any token leaves the process, and restored on the final
+/// raw output. Returns the *restored* raw string; the caller deserializes.
+///
+/// Used by `ai_annotator::generate_annotations`.
+#[allow(clippy::too_many_arguments)]
+pub fn llm_chat_redacted_hardened(
+    llm: &dyn crate::llm::LlmProvider,
+    redactor: &Redactor,
+    system: &str,
+    user: &str,
+    examples: &[(String, String)],
+    schema: Option<&serde_json::Value>,
+    max_attempts: usize,
+    validator: &dyn Fn(&str) -> std::result::Result<(), String>,
+    call_site: &str,
+) -> crate::error::Result<String> {
+    use crate::llm::ChatMessage;
+
+    // Redact every outbound string in one batch so identical PII shares one
+    // placeholder across system / user / few-shot examples (semantic consistency).
+    let mut batch: Vec<&str> = Vec::with_capacity(2 + examples.len() * 2);
+    batch.push(system);
+    batch.push(user);
+    for (u_ex, a_ex) in examples {
+        batch.push(u_ex);
+        batch.push(a_ex);
+    }
+    let (redacted, mappings) = redactor.redact_batch(&batch);
+
+    if !mappings.is_empty() {
+        let mut by_kind: HashMap<String, usize> = HashMap::new();
+        for m in &mappings {
+            let prefix = m.kind.placeholder_prefix().to_string().to_uppercase();
+            *by_kind.entry(prefix).or_insert(0) += 1;
+        }
+        log::info!(
+            target: "outbound_audit",
+            "F-17: PII redacted in {} outbound — kinds={:?} total={} model={}",
+            call_site,
+            by_kind,
+            mappings.len(),
+            llm.model_name()
+        );
+    }
+
+    let red_system = &redacted[0];
+    let red_user = &redacted[1];
+
+    // Build the few-shot prefix once: [system, ex1.user, ex1.assistant, ...].
+    // schema-guided + retry are layered on top of this conversation.
+    let mut base_messages: Vec<ChatMessage> = Vec::with_capacity(1 + examples.len() * 2);
+    base_messages.push(ChatMessage::system(red_system));
+    for i in 0..examples.len() {
+        base_messages.push(ChatMessage::user(&redacted[2 + i * 2]));
+        base_messages.push(ChatMessage::assistant(&redacted[2 + i * 2 + 1]));
+    }
+
+    if max_attempts == 0 {
+        return Err(crate::error::VaultError::Classification(
+            "llm_chat_redacted_hardened: max_attempts must be >= 1".into(),
+        ));
+    }
+
+    let mut messages = base_messages;
+    messages.push(ChatMessage::user(red_user));
+    let mut last_err = String::new();
+    let mut last_raw = String::new();
+    let has_history = !examples.is_empty();
+
+    for attempt in 1..=max_attempts {
+        // Attempt 1 with no few-shot history → single schema-guided call so the
+        // Ollama/OpenAI native JSON-mode path constrains output at the backend.
+        // Few-shot / retry attempts reuse the full conversation (incl. the prior
+        // bad output + the validator error) via chat_with_history.
+        let (raw, _usage) = if attempt == 1 && !has_history {
+            llm.chat_with_format_json(red_system, red_user, schema)?
+        } else {
+            llm.chat_with_history(&messages)?
+        };
+        last_raw = raw.clone();
+
+        match validator(&raw) {
+            Ok(()) => return Ok(redactor.restore(&raw, &mappings)),
+            Err(e) => {
+                last_err = e.clone();
+                if attempt < max_attempts {
+                    messages.push(ChatMessage::assistant(&raw));
+                    messages.push(ChatMessage::user(&format!(
+                        "你上一次的输出无法通过校验: {e}\n请根据错误信息重新输出有效 JSON, 不要重复上次的错误, 不要包裹 markdown 代码块."
+                    )));
+                }
+            }
+        }
+    }
+
+    // All attempts failed validation. Restore + return the last raw output so the
+    // caller's salvage parser still gets a chance (graceful degradation, not Err).
+    log::warn!(
+        "{call_site}: LLM output failed validation after {max_attempts} attempts: {last_err}"
+    );
+    Ok(redactor.restore(&last_raw, &mappings))
+}
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
