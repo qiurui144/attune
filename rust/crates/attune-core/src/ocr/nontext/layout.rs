@@ -59,7 +59,19 @@ pub fn map_layout_class(label: &str) -> super::RegionKind {
     }
 }
 
+/// Whether a real layout ONNX model is present at `model_path`. Lets the orchestrator
+/// surface an HONEST `EngineStatus` (scaffold-no-layout-model vs functional) — the C1 truth.
+pub fn layout_model_present(model_path: &std::path::Path) -> bool {
+    model_path.exists()
+}
+
 /// Detect layout regions. Returns empty when the model is missing (non-fatal degrade, §7).
+///
+/// SCAFFOLD: real layout inference requires a layout ONNX model — pending, see spec R3/R4.
+/// The model is NOT bundled, so today `layout_model_present` is false in every shipped build
+/// and this returns Ok(empty). When a model IS present, this is still a stub returning empty
+/// until real PP-Structure inference is wired; a future Err here is a genuine inference error
+/// that the orchestrator surfaces as `EngineStatus::LayoutError` (never masked as empty page).
 pub fn detect_regions(
     model_path: &std::path::Path,
     _page_image: &std::path::Path,
@@ -67,8 +79,9 @@ pub fn detect_regions(
     if !probe_session_buildable(model_path)? {
         return Ok(Vec::new()); // model-missing → regions: None upstream → plain OCR
     }
-    // Real inference wired against the PP-Structure layout ONNX in a follow-up;
-    // for now an available model with no detections returns empty (deterministic).
+    // SCAFFOLD: real PP-Structure layout inference requires a layout ONNX model — pending,
+    // see spec R3/R4. An available model with no detections returns empty (deterministic)
+    // until the real inference call lands.
     Ok(Vec::new())
 }
 

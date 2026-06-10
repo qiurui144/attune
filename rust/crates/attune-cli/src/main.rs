@@ -828,9 +828,19 @@ fn run_recognize_regions(
     );
 
     let out = recognize_page(image, &layout_model, &table_model, &ocr_lines);
+    // I3/C1: surface the HONEST engine status + the applied escalation policy so a plugin /
+    // agent KNOWS whether recognition is functional or a scaffold (no layout model bundled).
+    let policy = match _vlm_escalation {
+        "aggressive" => attune_core::ocr::profile::VlmEscalationPolicy::Aggressive,
+        "on_discrepancy" => attune_core::ocr::profile::VlmEscalationPolicy::OnDiscrepancy,
+        _ => attune_core::ocr::profile::VlmEscalationPolicy::Off,
+    };
     let envelope = serde_json::json!({
         "envelope_version": "1",
         "capability": "visual-understanding",
+        "engine_status": out.engine_status,
+        "vlm_escalation": policy,
+        "validation_warnings": out.validation_warnings,
         "regions": out.regions,
         "correction_report": out.correction_report,
         "cost": {

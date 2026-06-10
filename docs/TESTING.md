@@ -583,10 +583,17 @@ benchmark 走确定性 MockEmbeddingProvider，无 LLM / 无网络，进 CI（<1
 
 ## 非文字内容识别 (Non-Text Content Recognition) 测试矩阵（2026-06-10，`--features nontext`）
 
-OSS-base 共享视觉理解能力（ADR-0008）。检测 7 类非文字 region（table / chart / figure /
+OSS-base 共享视觉理解能力（ADR-0008）。设计上检测 7 类非文字 region（table / chart / figure /
 formula / handwriting / stamp / signature + checkbox），跑 🆓/⚡ 本地识别器，🆓 与 PP-OCR 交叉
 校验，仅对低置信/分歧 region 升级 💰 VLM。所有代码门控在 `nontext` feature 后（默认 OFF →
 plain OCR，`regions: None`，字节级旧行为）。
+
+> ⚠️ **SCAFFOLD 状态（C1 诚实标注，2026-06-10）**：Stage1 布局检测（`layout::detect_regions`）
+> **当前返回空**，因为 layout ONNX 模型**未捆绑**（pending model sourcing，见 spec R3/R4）。因此
+> 在已发布构建里识别**尚不可用**：`recognize_page` / CLI / REST 响应都带显式 `engine_status`
+> 字段（`scaffold-no-layout-model` / `functional` / `layout-error`），调用方据此**知道**识别是否
+> 真功能。R6 stamp / R7 checkbox 等无需 ONNX 的识别器代码已就绪，但因 Stage1 不产出 region 而
+> **当前无法被触达**（被 Stage1 门控）。layout ONNX 接入是单独决策（pending），不在本批修复范围。
 
 **运行**：`cargo test -p attune-core --features nontext`（lib + golden）；
 `cargo test -p attune-cli --features nontext`（agent-invocable CLI E2E）。
@@ -597,8 +604,9 @@ feature-OFF 必须仍全绿（`cargo test -p attune-core` / `-p attune-server` /
 | 类型 | 落点 | 覆盖 |
 |------|------|------|
 | Golden | `tests/nontext_cross_validate_golden.rs` | OCR-纠错 ≥8 ContentConflict + ≥2 Agree sentinel（视觉混淆数字/字母） |
-| 边界 | `ocr/nontext/mod.rs` `#[cfg(test)]` | recognize_region 各 kind dispatch / model-missing → UnrecognizedV1 / recognize_page 空模型 degrade |
-| 异常/错误 | CLI E2E + 路由 | 图片缺失 → exit 1；模型缺失 → 空 envelope 200/exit 0（never 500/panic, R1） |
+| 边界 | `ocr/nontext/mod.rs` `#[cfg(test)]` | recognize_region 各 kind dispatch / model-missing → UnrecognizedV1 / recognize_page 空模型 degrade + `engine_status=scaffold-no-layout-model`（C1） |
+| 异常/错误 | CLI E2E + 路由 | 图片缺失 → exit 1；模型缺失 → 空 envelope 200/exit 0（never 500/panic, R1）；recognizer Err → region 保留为 UnrecognizedV1 + warning（**绝不 drop**, I1）；Stage1 推理 Err → 上浮 warning 而非伪装空页（I1） |
+| 隐私/出网（C2/C3） | `ocr/nontext/vlm_escalate.rs` `#[cfg(test)]` + doctest | VLM 出网类型强制：`VlmEgressToken` 无公开构造器，唯一来源 `gate_vlm_egress`（`compile_fail` doctest 证明无法绕过）；图片级 refuse/allow + 下采样到 `EGRESS_MAX_EDGE`，离开的是缩小副本非原图，读图失败 fail-closed |
 | 属性 (proptest) | `ocr/nontext/...proptest` | cross-validation 不变量：no auto-correct（R5）、total = confirmed+conflicts+discrepancies |
 | 集成 E2E | `attune-cli/tests/cli_recognize_regions_smoke.rs` | subprocess 真跑 `attune recognize-regions` — 插件 dispatch 的契约 |
 | 回归 | golden set 永久 | 阈值 ratchet 只升不降（≥8 conflict floor） |

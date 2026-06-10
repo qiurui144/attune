@@ -213,6 +213,26 @@ pub fn recognize_region(
     })
 }
 
+/// HONEST status of the recognition engine, surfaced to every caller so nobody mistakes a
+/// degraded/scaffold pass for a functioning one (the C1 truth from adversarial review).
+///
+/// SCAFFOLD: Stage1 layout detection (`layout::detect_regions`) currently returns empty
+/// because the layout ONNX model is NOT bundled (pending model sourcing, spec R3/R4). When
+/// no model is present the only honest answer is `ScaffoldNoLayoutModel` — recognition is
+/// not yet functional, callers must not claim it recognizes structure. Once a real layout
+/// model is wired the status becomes `Functional` (model present) or `LayoutError` (the
+/// model is present but inference failed — surfaced, never masked as "empty page").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EngineStatus {
+    /// Layout ONNX model is absent → Stage1 yields no regions. Recognition NOT functional.
+    ScaffoldNoLayoutModel,
+    /// Layout model present + inference ran (functional path). Regions reflect real detection.
+    Functional,
+    /// Layout model present but inference errored — surfaced (not masked as empty page, I1).
+    LayoutError,
+}
+
 /// Typed output of the shared visual-understanding pass (ADR-0008): the recognized regions
 /// plus the OCR cross-validation correction report. This is the SINGLE result type every
 /// caller of the capability sees — REST handler, CLI subcommand, and any plugin invoking
@@ -226,6 +246,12 @@ pub struct RecognizePageResult {
     /// 🆓/⚡ local regions vs 💰 VLM-escalated regions (spec §8 cost surfacing).
     pub local_regions: u32,
     pub escalated_regions: u32,
+    /// HONEST engine status — callers KNOW whether recognition is functional or a scaffold.
+    pub engine_status: EngineStatus,
+    /// Page-level warnings (e.g. a Stage1 inference error surfaced instead of masked as empty,
+    /// or a per-region recognizer error flagged on its region). Empty on the happy path.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub validation_warnings: Vec<String>,
 }
 
 /// Shared visual-understanding orchestrator (spec §3 data-flow Stage1→2→3): detect layout
@@ -245,7 +271,30 @@ pub fn recognize_page(
     table_model: &std::path::Path,
     ocr_lines: &[RawLine],
 ) -> RecognizePageResult {
-    let detected = layout::detect_regions(layout_model, image_path).unwrap_or_default();
+    let mut page_warnings: Vec<String> = Vec::new();
+
+    // I1b + HONEST status: distinguish "model absent (scaffold)" from "model present but
+    // inference errored" from "real empty result". Never mask an error as an empty page.
+    let model_present = layout::layout_model_present(layout_model);
+    let detected = match layout::detect_regions(layout_model, image_path) {
+        Ok(d) => d,
+        Err(e) => {
+            // I1b: a genuine Stage1 inference error is SURFACED (telemetry + warning),
+            // not silently turned into an empty page via unwrap_or_default().
+            page_warnings.push(format!("layout-inference-error: {e}"));
+            Vec::new()
+        }
+    };
+    let layout_errored = page_warnings.iter().any(|w| w.starts_with("layout-inference-error"));
+    let engine_status = if !model_present {
+        // SCAFFOLD: no layout ONNX bundled → recognition not functional (spec R3/R4, C1).
+        EngineStatus::ScaffoldNoLayoutModel
+    } else if layout_errored {
+        EngineStatus::LayoutError
+    } else {
+        EngineStatus::Functional
+    };
+
     let ctx = RegionCtx {
         ocr_lines: ocr_lines.to_vec(),
         page: 0,
@@ -253,12 +302,28 @@ pub fn recognize_page(
     // Placeholder crop until per-region cropping lands with real layout inference; the
     // local recognizers tolerate it and the dispatch path is what is exercised today.
     let crop = DynamicImage::new_rgb8(1, 1);
+
+    // I1a: a recognizer Err does NOT drop the region (spec §7 "绝不 drop region"). The
+    // region stays in the output flagged as UnrecognizedV1 + a validation_warning, so the
+    // caller sees the region exists but recognition failed (vs it never having been there).
     let regions: Vec<Region> = detected
         .iter()
-        .filter_map(|lr| recognize_region(lr, &crop, &ctx, table_model).ok())
+        .map(|lr| {
+            let res = recognize_region(lr, &crop, &ctx, table_model)
+                .map(|region| region.result);
+            region_from_recognizer_result(lr, ctx.page, res)
+        })
         .collect();
 
-    let ocr_texts: Vec<Option<String>> = regions.iter().map(|_| None).collect();
+    // I2: feed the REAL PP-OCR text for each region (the second opinion) into cross-validation
+    // — not hardcoded all-None. For each region we gather the OCR lines whose bbox center sits
+    // inside the region bbox; that is the OCR's reading of the same area, which build_report
+    // compares against the local recognizer's reading. If no OCR line falls in the region the
+    // entry is None (not a content region / no overlap), and build_report treats it as Agree.
+    let ocr_texts: Vec<Option<String>> = regions
+        .iter()
+        .map(|r| ocr_text_for_region(&r.bbox, ocr_lines))
+        .collect();
     let correction_report = cross_validate::build_report(&regions, &ocr_texts);
     let local_regions = regions
         .iter()
@@ -273,6 +338,71 @@ pub fn recognize_page(
         correction_report,
         local_regions,
         escalated_regions,
+        engine_status,
+        validation_warnings: page_warnings,
+    }
+}
+
+/// I2 helper: the PP-OCR second opinion for one region — concatenated text of every OCR line
+/// whose bbox center falls inside the region bbox. `None` when no OCR line overlaps (so
+/// cross-validation does not invent a comparison). Lines are joined in reading order (the
+/// order PP-OCR emits them, which is top-to-bottom / left-to-right).
+fn ocr_text_for_region(region: &BBox, ocr_lines: &[RawLine]) -> Option<String> {
+    let parts: Vec<&str> = ocr_lines
+        .iter()
+        .filter(|l| bbox_center_in(&l.bbox, region))
+        .map(|l| l.text.as_str())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+/// True when the center of `inner` lies within `outer` (inclusive). Integer pixel coords.
+fn bbox_center_in(inner: &BBox, outer: &BBox) -> bool {
+    let cx = inner.x + inner.w / 2;
+    let cy = inner.y + inner.h / 2;
+    cx >= outer.x && cx <= outer.x + outer.w && cy >= outer.y && cy <= outer.y + outer.h
+}
+
+/// I1b: turn a per-region recognizer result into a `Region` that ALWAYS stays in the output.
+/// On Ok the region carries the recognized result; on Err the region is KEPT (never dropped,
+/// spec §7 "绝不 drop region") as `UnrecognizedV1{reason}` + a `validation_warnings` entry so
+/// the caller sees the region exists but recognition failed (distinct from it never existing).
+fn region_from_recognizer_result(
+    lr: &layout::LayoutRegion,
+    page: u32,
+    res: Result<RegionResult>,
+) -> Region {
+    match res {
+        Ok(result) => Region {
+            kind: lr.kind,
+            bbox: lr.bbox,
+            page,
+            det_confidence: lr.det_confidence,
+            result,
+            source: RegionSource::Local,
+            confidence: lr.det_confidence,
+            validation_warnings: vec![],
+        },
+        Err(e) => Region {
+            kind: lr.kind,
+            bbox: lr.bbox,
+            page,
+            det_confidence: lr.det_confidence,
+            result: RegionResult::UnrecognizedV1 {
+                reason: format!("recognizer-error: {e}"),
+            },
+            source: RegionSource::Local,
+            confidence: lr.det_confidence,
+            validation_warnings: vec![format!(
+                "region kept despite recognizer error ({:?}): {e}",
+                lr.kind
+            )],
+        },
     }
 }
 
@@ -367,6 +497,7 @@ mod tests {
     fn recognize_page_missing_models_degrades_to_empty() {
         // The shared capability entry point: no layout/table model present → empty regions,
         // empty report, zero cost, never errors (the 🆓 degrade-to-plain-OCR invariant, R1).
+        // HONEST status: no layout model → ScaffoldNoLayoutModel (recognition not functional).
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let out = recognize_page(
             tmp.path(),
@@ -378,6 +509,73 @@ mod tests {
         assert_eq!(out.local_regions, 0);
         assert_eq!(out.escalated_regions, 0);
         assert_eq!(out.correction_report.summary.total, 0);
+        assert_eq!(out.engine_status, EngineStatus::ScaffoldNoLayoutModel);
+        assert!(out.validation_warnings.is_empty());
+    }
+
+    #[test]
+    fn scaffold_status_serializes_honestly() {
+        // The C1 truth must be machine-readable: callers see engine-status = scaffold string.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let out = recognize_page(
+            tmp.path(),
+            std::path::Path::new("/nonexistent/layout.onnx"),
+            std::path::Path::new("/nonexistent/slanet.onnx"),
+            &[],
+        );
+        let j = serde_json::to_string(&out).unwrap();
+        assert!(
+            j.contains(r#""engine_status":"scaffold-no-layout-model""#),
+            "callers must KNOW recognition is a scaffold; got {j}"
+        );
+    }
+
+    #[test]
+    fn engine_status_serde_kebab() {
+        assert_eq!(
+            serde_json::to_string(&EngineStatus::ScaffoldNoLayoutModel).unwrap(),
+            r#""scaffold-no-layout-model""#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineStatus::LayoutError).unwrap(),
+            r#""layout-error""#
+        );
+    }
+
+    #[test]
+    fn recognizer_error_keeps_region_flagged_not_dropped() {
+        // I1b: spec §7 "绝不 drop region". A recognizer Err must NOT drop the region; it stays
+        // in output as UnrecognizedV1 + a validation_warning (distinct from never existing).
+        let lr = layout::LayoutRegion {
+            kind: RegionKind::Table,
+            bbox: BBox { x: 5, y: 6, w: 7, h: 8 },
+            det_confidence: 0.77,
+        };
+        let injected = Err(crate::error::VaultError::Io(std::io::Error::other("boom")));
+        let region = region_from_recognizer_result(&lr, 3, injected);
+        // The region is preserved (same kind/bbox/page), not dropped.
+        assert_eq!(region.kind, RegionKind::Table);
+        assert_eq!(region.bbox, BBox { x: 5, y: 6, w: 7, h: 8 });
+        assert_eq!(region.page, 3);
+        assert!(matches!(region.result, RegionResult::UnrecognizedV1 { .. }));
+        assert!(
+            region.validation_warnings.iter().any(|w| w.contains("recognizer error")),
+            "region must carry a warning explaining recognition failed: {:?}",
+            region.validation_warnings
+        );
+    }
+
+    #[test]
+    fn ocr_text_for_region_matches_lines_inside_bbox() {
+        // I2: the real PP-OCR second opinion for a region = OCR lines whose center is inside it.
+        let region = BBox { x: 0, y: 0, w: 100, h: 100 };
+        let lines = vec![
+            RawLine { text: "inside".into(), bbox: BBox { x: 10, y: 10, w: 20, h: 10 }, confidence: 0.9 },
+            RawLine { text: "outside".into(), bbox: BBox { x: 500, y: 500, w: 20, h: 10 }, confidence: 0.9 },
+        ];
+        assert_eq!(ocr_text_for_region(&region, &lines).as_deref(), Some("inside"));
+        // No overlapping line → None (don't invent a comparison).
+        assert_eq!(ocr_text_for_region(&BBox { x: 1000, y: 1000, w: 1, h: 1 }, &lines), None);
     }
 
     #[test]
@@ -401,9 +599,12 @@ mod tests {
             },
             local_regions: 1,
             escalated_regions: 0,
+            engine_status: EngineStatus::Functional,
+            validation_warnings: vec![],
         };
         let j = serde_json::to_string(&out).unwrap();
         assert!(j.contains(r#""schema":"checkbox_v1""#), "got {j}");
         assert!(j.contains(r#""local_regions":1"#));
+        assert!(j.contains(r#""engine_status":"functional""#));
     }
 }

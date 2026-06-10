@@ -5,7 +5,7 @@
 //! layout/recognizer models are missing the pass degrades to empty regions (never 500).
 
 use crate::state::SharedState;
-use attune_core::ocr::nontext::{recognize_page, OcrCorrectionReport, Region};
+use attune_core::ocr::nontext::{recognize_page, EngineStatus, OcrCorrectionReport, Region};
 use attune_core::ocr::{self, RawLine};
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
@@ -28,13 +28,24 @@ pub struct OcrRecognizeResponse {
     pub correction_report: OcrCorrectionReport,
     /// Per spec §8: surfaced cost summary for the UI.
     pub cost: RecognizeCost,
+    /// HONEST engine status (I3 / C1): callers KNOW whether recognition is functional or a
+    /// scaffold (no layout model bundled). Mirrors the core `EngineStatus`.
+    pub engine_status: EngineStatus,
+    /// The VLM escalation policy actually applied (I3: don't discard the parsed policy).
+    /// Build-stage default is Off (never escalates, §8).
+    pub vlm_escalation: attune_core::ocr::profile::VlmEscalationPolicy,
+    /// Page-level warnings surfaced (e.g. a Stage1 inference error), empty on happy path.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub validation_warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct RecognizeCost {
     pub local_regions: u32,
     pub escalated_regions: u32,
-    pub cache_hits: u32,
+    // NOTE(I3): no `cache_hits` field. Escalation + a VLM result cache are NOT wired yet, so
+    // reporting `cache_hits: 0` would fabricate a metric for a path that does not run. We omit
+    // it entirely until the cache exists rather than emit a misleading always-zero number.
 }
 
 /// Map the profile vlm_escalation string → typed policy (defaults Off, §8 build-stage-safe).
@@ -87,8 +98,9 @@ pub async fn post_recognize(
     if bytes.is_empty() {
         return Err(err("empty-file", "file is empty", StatusCode::BAD_REQUEST));
     }
-    // vlm_escalation is parsed for policy (build-stage Off never escalates, §8).
-    let _policy = parse_escalation(vlm_escalation.as_deref());
+    // vlm_escalation is parsed for policy (build-stage Off never escalates, §8). I3: the
+    // policy is no longer discarded — it is threaded into run_recognize and echoed honestly.
+    let policy = parse_escalation(vlm_escalation.as_deref());
 
     // Write to a tmp file (PP-OCR + layout models accept a path).
     let tmp = tempfile::NamedTempFile::new()
@@ -110,14 +122,19 @@ pub async fn post_recognize(
 
     // Shared visual-understanding capability — ONE orchestration path (ADR-0008);
     // CLI + plugins go through the same `recognize_page`.
-    let response = run_recognize(tmp.path(), &ocr_lines);
+    let response = run_recognize(tmp.path(), &ocr_lines, policy);
     Ok(Json(response))
 }
 
 /// Run the shared recognition pass and shape it into the HTTP response. The layout/table
 /// model paths follow the PP-OCR model dir convention; when absent the pass degrades to
-/// empty regions (plain OCR). Cost is surfaced for the UI (spec §8).
-fn run_recognize(image_path: &std::path::Path, ocr_lines: &[RawLine]) -> OcrRecognizeResponse {
+/// empty regions (plain OCR) and the response HONESTLY reports `engine_status` (I3/C1). The
+/// applied `policy` is echoed back instead of being discarded. Cost is surfaced (spec §8).
+fn run_recognize(
+    image_path: &std::path::Path,
+    ocr_lines: &[RawLine],
+    policy: attune_core::ocr::profile::VlmEscalationPolicy,
+) -> OcrRecognizeResponse {
     let models_dir = ocr::ppocr::PpOcrProvider::models_dir();
     let layout_model = models_dir.join("layout").join("layout.onnx");
     let table_model = models_dir.join("table").join("slanet.onnx");
@@ -128,8 +145,10 @@ fn run_recognize(image_path: &std::path::Path, ocr_lines: &[RawLine]) -> OcrReco
         cost: RecognizeCost {
             local_regions: out.local_regions,
             escalated_regions: out.escalated_regions,
-            cache_hits: 0,
         },
+        engine_status: out.engine_status,
+        vlm_escalation: policy,
+        validation_warnings: out.validation_warnings,
     }
 }
 
@@ -171,6 +190,7 @@ mod tests {
 
     #[test]
     fn response_serializes_with_cost() {
+        use attune_core::ocr::profile::VlmEscalationPolicy;
         let resp = OcrRecognizeResponse {
             regions: vec![],
             correction_report: OcrCorrectionReport {
@@ -181,21 +201,31 @@ mod tests {
             cost: RecognizeCost {
                 local_regions: 3,
                 escalated_regions: 1,
-                cache_hits: 0,
             },
+            engine_status: EngineStatus::Functional,
+            vlm_escalation: VlmEscalationPolicy::Off,
+            validation_warnings: vec![],
         };
         let j = serde_json::to_string(&resp).unwrap();
         assert!(j.contains(r#""local_regions":3"#));
         assert!(j.contains(r#""schema_version":1"#));
+        // I3: no fabricated cache_hits field in the serialized response.
+        assert!(!j.contains("cache_hits"), "cache_hits must not be fabricated; got {j}");
+        // I3: the applied policy is echoed honestly.
+        assert!(j.contains(r#""vlm_escalation":"off""#));
     }
 
     #[test]
     fn no_models_degrades_to_empty_regions() {
         // run_recognize with no layout model present → empty (never panics, never 500).
+        // I3/C1: response honestly reports the scaffold status + echoes the applied policy.
+        use attune_core::ocr::profile::VlmEscalationPolicy;
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let resp = run_recognize(tmp.path(), &[]);
+        let resp = run_recognize(tmp.path(), &[], VlmEscalationPolicy::OnDiscrepancy);
         assert!(resp.regions.is_empty());
         assert_eq!(resp.cost.local_regions, 0);
         assert_eq!(resp.correction_report.summary.total, 0);
+        assert_eq!(resp.engine_status, EngineStatus::ScaffoldNoLayoutModel);
+        assert_eq!(resp.vlm_escalation, VlmEscalationPolicy::OnDiscrepancy);
     }
 }
