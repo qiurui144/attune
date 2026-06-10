@@ -54,83 +54,7 @@ The v1.0→v1.2 line layers production-grade governance and cross-platform reach
 - **Privacy OutboundGate + `PrivacyTier::L0` "never leaves device"** — every network egress (LLM / Cloud / WebDAV / Web Search / Telemetry) is funneled through one gate that consults settings + PII redaction; L0-tagged content refuses any cloud LLM call.
 - **One-click dependency deploy** — Ollama readiness detection + in-app install/pull, base-model auto-ensure, and LM Studio endpoint auto-detect, so non-technical users never touch a terminal.
 
-## v1.0 GA highlights (shipped 2026-05-25) — 私有 AI 知识伙伴
-
-> v1.0 = v0.7 记忆护城河 + v0.7.1 办公助理 + 4 个 OSS deterministic / heuristic agent + 真 LLM verification gate。完整 changelog 见 [`rust/RELEASE.md`](rust/RELEASE.md#v100--私有-ai-知识伙伴-ga2026-05-25-计划上架)。
-
-- 📁 **Office Helper** — 5 OCR scene（document / receipt / table / card / id_card_cn / bank_card / business_license）+ 卡证校验位（Luhn / GB 11643 / GB 32100）+ whisper.cpp 异步会议转写（WS 进度推送）；CLI `attune ocr` / `attune transcribe`
-- 🧠 **4 OSS Agent**（all deterministic / heuristic，零 / 低 LLM 成本）
-  - `internal_knowledge_linker_agent` — 激活 `entity_graph` 死代码 → item-to-item 持久化链接
-  - `memory_consolidation_agent` — L2 → L3 promotion 算法 + Store helpers
-  - `chat_reliability_agent` — citation / contradiction / hallucination 后置评估，proptest 256 case invariants
-  - `self_evolving_skill_agent` — heuristic + LLM expansion 学习器，CJK Trad↔Simp 归一 + dedupe
-- 🧪 **真 LLM verification gate** — 4 OSS agent real-LLM holdout 4/4 PASS（qwen2.5:3b）
-- ✅ **Agent 验证铁律 ENFORCE 6 类下限**（per CLAUDE.md）— 每个 agent 必过 ≥10 真实 golden + ≥3 proptest + ≥5 boundary + ≥3 error + ≥1 E2E subprocess + 回归 fixture
-- 🔁 **CLI 子命令 smoke gate** — 29 subcommand 端到端冒烟（30/35 PASS）
-- 🌐 **跨仓 E2E** — accounts ↔ pluginhub ↔ attune-server LLM gateway ↔ Stripe webhook Playwright 全链通
-- 📦 **测试规模** — workspace lib tests **1145+** PASS / E2E run_all.sh 49 PASS 0 FAIL / clippy + fmt clean
-
-配套：**attune-pro v1.0.0** law-pro plugin pack（11 agent）+ **cloud-v2.2.0**（accounts / pluginhub / llm-gateway / proxy / monitor）。
-
-## v0.7 sprint highlights (2026-05-15) — Memory Moat Phase A+B
-
-> **"优势不在于模型，而在于以安全有效的记忆"** — 同样的 LLM，挂上 attune 比单跑模型答得更准、更敢用。
-
-### Phase A — 文档编辑嵌入功能完全有效（修 3 个 release-blocker）
-
-之前 `update_item` 仅刷 SQL → 搜索永远返回旧内容；同名重传重复 embed；delete 不清向量。本 sprint 用 **`attune-core::reindex` 协调模块**收敛三资源（DB / VectorIndex / FulltextIndex / embed_queue）事务式 cleanup，同步增加：
-
-- `items.content_hash` 列（SHA-256 hex）+ migration → update / upload 短路省 ~3s/100KB embedding
-- `reindex_queue` 表 + `AppState::start_reindex_worker`（3s 轮询）→ 解锁 `scanner` / `scanner_webdav` 等无法直接持锁的后台 worker
-- `routes/items.rs::update_item` 返回 `UpdateOutcome` 三态（existed / content_changed / backfilled_hash），仅真改才触发 reindex
-
-### Phase B — 自学习闭环 3 hook
-
-`skill_signals` 加 `kind` + `ref_id` 列，5 类信号汇入：
-
-| Hook | kind | 写入位点 |
-|---|---|---|
-| 1 | `doc_create` / `doc_update` / `doc_delete` | upload / items.update / items.delete / scanner |
-| 2 | `citation_hit` | chat.rs 取 top-5 引用 chunk 喂入 |
-| 3 | `annotation_marker` | annotations.rs::create_annotation |
-
-skill_evolution 从"失败驱动"升级为"全谱信号驱动" — 可按 kind 设阈值 / 调权。
-
-### Phase C spec
-
-`docs/superpowers/specs/2026-05-19-memory-moat-v07.md` — 文档版本化 / 编辑触发重标注 / 失败信号反推 project / 衰减曲线 / embed_model_version 迁移工具链，RICE 排序后留 sprint 2+。
-
-📊 **5 agents 并行交付的 v0.7 缺口模块**（commit 71d82ee）：cost / tools / demo / query_rewrite / entity_graph / skill_eval / report / reader / capture(email+telegram) / sync(webdav) / vlm + 4 个 server 路由（audit log + log.csv + demo load + chat stream）
-
-🧪 **验证**：workspace lib tests **910 passed / 0 failed / 1 ignored**；MANUAL_TEST_CHECKLIST 新增 8 条 Memory Moat 验收。
-
----
-
-## v0.6.0-rc.5 highlights (2026-04-28)
-
-🎯 **Three-track PRO benchmark** — verified end-to-end RAG quality on legal + general English + Chinese fundamentals:
-
-| Scenario | Hit@10 | MRR | Verdict |
-|----------|--------|-----|---------|
-| 法律 / legal corpus | **0.80** | 0.50 | ✅ PRO |
-| Rust / rust-book | **1.00** | **1.00** | ✅ PRO 满分 |
-| 中文八股 / cs-notes | **1.00** | **1.00** | ✅ PRO 满分 |
-| **5-dim answer quality (legal golden_qa)** | **25.00/25** (100%) | 10/10 excellent | ✅ +39% vs baseline |
-
-🔒 **Phase A.5 — Three-layer privacy model**:
-- **L0 🔒**: per-file flag, chunk never leaves device (forced local LLM)
-- **L1 default**: 12 PII classes (id-card with ISO 7064 / phone / email / 8 API key vendors / etc.) with reversible `[KIND_N]` placeholders + outbound audit log (CSV exportable for compliance)
-- **L3** (v0.7): LLM-based semantic redaction on Tier T3+/K3 hardware
-
-🌐 **F-Pro — Cross-domain pollution defense**:
-- `items.corpus_domain` metadata + `[领域: legal]` chunk prefix + cross-domain penalty (0.4) + keyword query intent detection (zero LLM call)
-- Logical domain isolation on shared vault — no more "反洗钱" pulling Java algorithm docs
-
-📋 **Evidence flow end-to-end**: chat citations now include real `breadcrumb` (chapter path), `chunk_offset_start/end` (Reader deep-link target), and `confidence` (1-5, parsed from LLM strict-prompt marker).
-
-Reproduce: `bash scripts/bench-orchestrator.sh all && python3 scripts/run-final-eval.py`. Full benchmark methodology in [`docs/benchmarks/dual-track-baseline.md`](docs/benchmarks/dual-track-baseline.md); v0.6 release notes are in [`rust/RELEASE.md`](rust/RELEASE.md) (version SSOT).
-
----
+> **v1.0 GA (2026-05-25)** delivered the Office Helper (OCR scenes + card/ID checksums + whisper.cpp transcription), 4 OSS deterministic/heuristic agents, a real-LLM verification gate, and the Agent 验证铁律 6-category floor. Per-version notes — including v0.7 Memory Moat and the v0.6 RAG-quality benchmarks — live in [`rust/RELEASE.md`](rust/RELEASE.md) (version SSOT); the benchmark methodology is in [`docs/benchmarks/dual-track-baseline.md`](docs/benchmarks/dual-track-baseline.md).
 
 ## Two product lines
 
@@ -386,100 +310,15 @@ Distributing skills to others: zip the folder as `<plugin-id>.attunepkg` — rec
 
 ## 代码模块视角（开发者用）
 
-> 一份完整的代码功能清单，用于代码 review / 文档审计 / 测试覆盖核查。每条 feature 含 ID / 模块 / 测试覆盖。
-
-### attune-core 核心模块
-
-| ID | 模块 | 主要 API | 测试 |
-|----|------|---------|------|
-| **C-VAULT** | `vault.rs` | setup / unlock / lock / dek_db / change_password / 设备 secret | unit |
-| **C-CRYPTO** | `crypto.rs` | Argon2id 派生 / AES-256-GCM / 字段加密 / zeroize | unit |
-| **C-STORE** | `store.rs` | rusqlite + 字段级加密 / item CRUD / FTS5 队列 | unit + integration |
-| **C-CHUNKER** | `chunker.rs` | 滑窗分块 + 章节切割 | unit |
-| **C-PARSER** | `parser.rs` | PDF/DOCX/MD/code 解析 + bytes 入口 + `parse_file_with_profile` / `parse_bytes_with_profile`（传 OCR profile_id） | unit + integration |
-| **C-EMBED** | `embed.rs` | Ollama / ONNX / openai_compat embedding provider | unit + ignored e2e |
-| **C-LLM** | `llm.rs` | LlmProvider trait（chat / chat_with_history / **chat_multimodal**）+ OpenAI compat + Ollama + Attachment (Image/TextFile) | unit + 3 multimodal + ignored e2e |
-| **C-CHAT** | `chat.rs` | ChatEngine / Citation / confidence parse | unit + integration |
-| **C-CLUSTER** | `clusterer.rs` | HDBSCAN 聚类 | unit |
-| **C-CLASSIFIER** | `classifier.rs` | LLM 文档分类 | unit |
-| **C-INDEX** | `index.rs` | tantivy + usearch | unit + integration |
-| **C-OCR** | `ocr/` | PP-OCRv5 + pdftoppm + extract_text_from_pdf + `_with_dpi` | unit + ignored e2e |
-| **C-OCR-PROFILE** | `ocr/profile.rs` + `profile_registry.rs` | OcrProfile + 4 builtin + 持久化 CRUD + `dpi_for_profile` | 17 unit |
-| **C-ASR** | `asr.rs` | whisper.cpp subprocess | unit |
-| **C-WORKFLOW** | `workflow.rs` | YAML workflow + 事件触发 | unit + integration |
-
-### Plugin 协议层 (v2)
-
-| ID | 模块 | 功能 | 测试 |
-|----|------|------|------|
-| **P-LOADER** | `plugin_loader.rs` | PluginManifest v2（pricing/resources/registers_case_kinds/skills/agents/mcps/ui） | unit + integration |
-| **P-LOADER-ENC** | `plugin_loader::from_dir_with_key` | 自动识别 plugin.yaml.enc 解密装载 | integration |
-| **P-REGISTRY** | `plugin_registry.rs` | scan + 5 查询 API（skills/agents/mcps/case_kind/chat_trigger） | 19 unit + 10 generic_plugins_test |
-| **P-REG-CHAT** | `plugin_registry::match_chat_trigger` | regex/keywords 匹配 + priority + exclude_patterns | 5 unit |
-| **P-SIG** | `plugin_sig.rs` | Ed25519 keygen / sign / verify_loose / verify_strict / verify_with_key | 14 unit |
-| **P-ENC** | `plugin_encryption.rs` | Argon2id + AES-GCM yaml 加密 + trust↔pricing 联动校验 | 7 unit |
-| **P-DISPATCH** | `capability_dispatch.rs` | subprocess + timeout + exit_code (0/2/-1) | 8 unit |
-| **P-RUNNER** | `agent_runner.rs` | run_agent_subprocess + format_for_chat | 5 unit |
-| **P-SYNC** | `plugin_sync.rs` | 拉云端 entitled_plugins → download → verify → install | 7 unit |
-
-### Skill / Agent / MCP 三角色
-
-| ID | 模块 | 功能 | 测试 |
-|----|------|------|------|
-| **S-DATE** | `skills/parse_chinese_date.rs` | 中文日期 → ISO 8601（含中文数字大写） | 13 unit |
-| **S-ENTITY** | `skills/extract_entities.rs` | 人名 / 日期 / 金额 / 地点 / 组织（纯规则） | 11 unit |
-| **S-CLASS** | `skills/classify_chunk_kind.rs` | 8 类 chunk 分类 | 10 unit |
-| **S-SUM** | `skills/summarize_text.rs` | LLM 摘要 + summarize_document_set | 6 unit |
-| **A-CLASS** | `agents/document_classifier.rs` | 编排 3 skill → ClassifiedEvidence | 6 unit + e2e |
-| **A-TRAIT** | `agents/mod.rs::Agent` | trait + AgentOutput<T>（computation/audit_trail/red_lines/missing/followups/confidence） | unit |
-| **MCP-CLIENT** | `mcp_client.rs` | stdio JSON-RPC + 心跳 + 重启 + id 路由 + transaction lock | 7 unit |
-
-### 案件库 / 设备 / 会员 / License
-
-| ID | 模块 | 功能 | 测试 |
-|----|------|------|------|
-| **CASE-META** | `case_metadata.rs` | CaseMetadata + Party + classified_evidence 持久化 | 4 unit |
-| **DEV-BIND** | `device_binding.rs` | DeviceFingerprint + License + 1:2 状态机 | 5 unit |
-| **DEV-CLIENT** | `accounts_client.rs` | HTTP client → cloud accounts | 3 unit |
-| **CLOUD-CLIENT** | `cloud_client.rs` | login/signup/me/list_licenses（FastAPI）+ cookie 自动管理 | 4 unit |
-| **LICENSE** | `license.rs` | LicenseClaims + Ed25519 签名 + base64 code + 离线校验 | 9 unit |
-| **MEMBER** | `member_session.rs` | MemberState 3 档（LoggedOut/Free/Paid）+ SettingsLocks 6 字段 | 6 unit |
-| **LIC-CACHE** | `license_cache.rs` | ~/.config/npu-vault/license.json 持久化 (chmod 600) | 5 unit |
-
-### attune-server 路由 / attune-cli 子命令
-
-参见 `DEVELOP.md` 「路由清单」与 `attune-cli --help`。完整子命令包括 vault setup/unlock/lock/status、plugin-{keygen,sign,verify,encrypt,decrypt,install,list,uninstall}、login、sync-plugins、link-folder、ocr、ocr-profile-{list,show,create,delete}、deploy。
-
-### Tauri 桌面 app（apps/attune-desktop）
-
-| ID | 模块 | 功能 |
-|----|------|------|
-| **TAURI-EMBED** | `main.rs::spawn_embedded_server()` | 子进程启动 `attune-server-headless --port 18900`，主窗口打开 `http://127.0.0.1:18900` |
-| **TAURI-TRAY** | `main.rs` | 系统托盘图标 + 菜单（Show / Hide / Quit），单实例检测 |
-| **TAURI-DROP** | `main.rs` | FileDrop 事件 → emit `attune-file-drop` 到前端 WebView |
-| **TAURI-UPLOAD** | `main.rs::upload_dropped_paths` | Tauri command：读取本地文件路径 → multipart POST `/api/v1/upload`（reqwest 0.12 rustls-tls） |
-
-### 测试金字塔与日志栈
-
-```
-        E2E (Playwright + 真集成)
-       ─────────────────────────
-      Integration (跨模块, ~30 tests)
-     ─────────────────────────────────
-    Unit (单模块, ~734 tests in attune-core)
-   ──────────────────────────────────────
-  Smoke (CLI 冒烟 7, Server 冒烟 N)
-```
-
-技术栈基础库（开源高可用）：`tracing` + `tracing-subscriber`（结构化日志）/ `thiserror`（类型化错误）/ `axum` + `tower-http`（HTTP）/ `argon2` + `aes-gcm` + `ed25519-dalek`（audited cryptography）/ `rusqlite` bundled（跨平台 SQLite）/ `tantivy` + `tantivy-jieba`（全文搜索）/ `usearch`（HNSW 向量）。
-
-### 已知约束
-
-- attune (OSS) **不内置任何行业 agent** — `civil_loan_agent` 等在 attune-pro
-- paid plugin yaml 加密载入需要 `ATTUNE_PLUGIN_KEY` env（设备 license token）
-- OCR / LLM 走 subprocess / HTTP，不直接 link C++
-- Web UI vite bundle 不在本仓 build，dist/ checked in
-- 跨平台：Linux/Win/macOS — aarch64（K3 一体机）交叉编译
+> 面向开发者的 **能力 × 实现模块 × 技术栈 × 选型理由** 完整矩阵已收敛到
+> [`rust/DEVELOP.md` → 能力矩阵 × 技术栈选型](rust/DEVELOP.md#能力矩阵--技术栈选型)（基于
+> develop 实时代码：5 crate / 60+ `attune-core` 模块 / 40+ route 文件），并在那里持续维护，
+> 避免 README 与代码漂移。crate 布局、路由清单、启动序列、加密/搜索/采集深挖节也都在
+> `rust/DEVELOP.md`。
+>
+> 边界提醒：attune (OSS) **不内置任何行业 agent**（`civil_loan_agent` 等在 attune-pro）；
+> OCR / LLM / ASR 走 subprocess / HTTP，核心逻辑不直接 link C++；Web UI vite bundle 的
+> `dist/` checked in（不在本仓 build）。
 
 ---
 
@@ -596,8 +435,10 @@ Contribution guidelines are still being drafted. For now, see [DEVELOP.md](DEVEL
 
 ## Documentation
 
+- [Install guide](docs/INSTALL.md) · [Testing guide](docs/TESTING.md) · [Deployment guide](docs/DEPLOY.md)
+- [Developer guide & capability × tech-stack matrix](rust/DEVELOP.md)
+- [OSS × Pro strategy](docs/oss-pro-strategy.md) (bilingual)
 - [Memory Moat v0.7 spec](docs/superpowers/specs/2026-05-19-memory-moat-v07.md)
-- [v0.7 gap analysis](docs/v07-gap-analysis.md)
 - [Product positioning design](docs/superpowers/specs/2026-04-17-product-positioning-design.md)
 - [Frontend redesign spec](docs/superpowers/specs/2026-04-19-frontend-redesign-design.md)
 - [UX quality infrastructure](docs/superpowers/specs/2026-04-19-ux-quality-design.md)
