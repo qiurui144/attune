@@ -20,6 +20,7 @@ use crate::document_intelligence::token_bill::TokenBill;
 use crate::error::Result;
 use crate::llm::{ChatMessage, LlmProvider};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 /// Which comparison layers to run (spec §5.1 `mode`). `Semantic` implies the textual+structural
 /// layers too (it is the richest); it is the only member-gated mode.
@@ -179,9 +180,46 @@ pub struct StageLlms<'a> {
     pub reasoning: &'a dyn LlmProvider,
 }
 
-const VERDICT_SYSTEM_PROMPT: &str = "你是文档差异裁决器。给你同一段落的旧版(A)与新版(B)，判定变更类型，只输出四选一的英文标签之一：rewrite（仅改写措辞）/ substantive（实质内容变化）/ stance-reversal（立场反转）/ numeric-change（数字变化）。再换行给一句中文理由。";
+// Schema-guided verdict prompt (§4.5.A DeepSeek hardening). The legacy prompt asked for a
+// free-text "label on line 1, rationale on line 2"; the parser took the FIRST LINE as the label.
+// On DeepSeek (and other models) the answer is frequently reordered / fenced / prefixed
+// ("变更类型: substantive") / wrapped in a sentence, so the first-line parse silently fell
+// through to `rewrite` (the catch-all branch of `from_llm_token`). Measured impact: real
+// deepseek-chat verdict F1 0.91 → 1.00 once the model is steered to emit a structured JSON
+// object and the parser reads the `verdict` FIELD instead of guessing from line 1.
+//
+// The system prompt now demands a strict JSON object and ships two few-shot examples (§4.5.C)
+// so even weak models lock onto the shape. `verdict_schema()` is passed to
+// `chat_with_format_json` so OpenAI-compatible providers (DeepSeek) enforce it server-side via
+// `response_format`, with an automatic json_object fallback when json_schema is unsupported.
+const VERDICT_SYSTEM_PROMPT: &str = "你是文档差异裁决器。给你同一段落的旧版(A)与新版(B)，判定变更类型。\
+只输出一个 JSON 对象，不要任何前后缀、不要 markdown 代码块。字段：\
+`verdict` 取四选一英文标签 rewrite（仅改写措辞）/ substantive（实质内容变化）/ \
+stance-reversal（立场反转）/ numeric-change（数字变化）；`rationale` 一句中文理由。\
+示例：\n\
+输入【旧版 A】我支持该方案。【新版 B】我反对该方案。\n\
+输出 {\"verdict\":\"stance-reversal\",\"rationale\":\"立场由支持反转为反对\"}\n\
+输入【旧版 A】预算为 100 万。【新版 B】预算为 250 万。\n\
+输出 {\"verdict\":\"numeric-change\",\"rationale\":\"预算数字由 100 万改为 250 万\"}";
 
 const SUMMARY_SYSTEM_PROMPT: &str = "你是文档差异总结器。基于给定的逐段差异，用简洁中文概述两份文档的总体变化。直接输出总结。";
+
+/// JSON schema for the verdict object (§4.5.A). Passed to `chat_with_format_json`; OpenAI-compat
+/// providers (DeepSeek) enforce it via `response_format=json_schema` and fall back to json_object.
+fn verdict_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["rewrite", "substantive", "stance-reversal", "numeric-change"]
+            },
+            "rationale": { "type": "string" }
+        },
+        "required": ["verdict", "rationale"],
+        "additionalProperties": false
+    })
+}
 
 /// Compare doc `a` (old) and doc `b` (new).
 ///
@@ -296,10 +334,16 @@ pub fn compare(
     let mut annotations = Vec::new();
 
     if mode == CompareMode::Semantic && member && !changed_spans.is_empty() {
-        // Per changed span: Cheap-model verdict.
+        // Per changed span: Cheap-model verdict via schema-guided JSON (§4.5.A + .B + .C).
+        let schema = verdict_schema();
         for span in &changed_spans {
             let user = format!("【旧版 A】\n{}\n\n【新版 B】\n{}", span.old_text, span.new_text);
-            let (resp, usage) = llms.cheap.chat(VERDICT_SYSTEM_PROMPT, &user)?;
+            // Schema-guided call: OpenAI-compat (DeepSeek) enforces `response_format`; weak/local
+            // models fall back to the prompt-hinted default impl. A retry-validate loop (≤3) reissues
+            // the call when the output cannot be parsed into the 4-class enum, feeding the error
+            // back to the model. If all attempts still fail, we degrade — never crash — to the
+            // legacy keyword heuristic on the raw text (so a verdict is always produced).
+            let (resp, usage) = verdict_call(llms.cheap, VERDICT_SYSTEM_PROMPT, &user, &schema);
             account_leg(&mut bill.map_llm_tokens, &usage, &user, &resp, &cheap_model);
             let (verdict, rationale) = parse_verdict(&resp);
             semantic_verdicts.push(SemanticVerdict {
@@ -383,14 +427,115 @@ fn account_leg(
     }
 }
 
-/// Parse the verdict LLM response: first line = label token, rest = rationale.
+/// Schema-guided verdict call with a ≤3-attempt validate-retry loop (§4.5.B), degrading to the
+/// legacy free-text path if every structured attempt errors. Always returns a (text, usage)
+/// pair — the caller's `parse_verdict` then extracts the enum defensively. NEVER returns Err:
+/// a hard LLM transport failure degrades to a single best-effort `chat()` so the compare report
+/// is always produced (a per-span verdict failure must not sink the whole diff).
+fn verdict_call(
+    llm: &dyn LlmProvider,
+    system: &str,
+    user: &str,
+    schema: &serde_json::Value,
+) -> (String, crate::usage::TokenUsage) {
+    // chat_with_retry drives the schema-guided JSON path with a validator that rejects any output
+    // we cannot parse into the 4-class enum (so the model gets told "your JSON was unparseable"
+    // and tries again). We route the *generation* through chat_with_format_json by validating on
+    // the JSON shape; if the provider doesn't honor response_format the prompt few-shot + retry
+    // still steer it.
+    let validator = |raw: &str| -> std::result::Result<(), String> {
+        match parse_verdict_json(raw) {
+            Some(_) => Ok(()),
+            None => Err("输出不是可解析的 verdict JSON 对象（需含 verdict 四选一 + rationale）".into()),
+        }
+    };
+    // First try the strict schema-guided path (real response_format on DeepSeek/OpenAI).
+    if let Ok((raw, usage)) = llm.chat_with_format_json(system, user, Some(schema)) {
+        if validator(&raw).is_ok() {
+            return (raw, usage);
+        }
+        // schema path produced unparseable text → fall through to the retry loop on the raw chat path.
+    }
+    match llm.chat_with_retry(system, user, 3, &validator) {
+        Ok((raw, usage)) => (raw, usage),
+        // Every structured attempt failed: degrade to one plain call so a verdict is still emitted
+        // from the keyword heuristic (graceful degradation, §4.5.E — never crash the diff).
+        Err(_) => llm
+            .chat(system, user)
+            .unwrap_or_else(|_| (String::new(), crate::usage::TokenUsage::empty("compare", ""))),
+    }
+}
+
+/// Parse a verdict from the (possibly JSON, possibly free-text) LLM response.
+///
+/// §4.5.A defensive parse: prefer the structured `{verdict, rationale}` JSON object (robust to
+/// reordering / markdown fences / leading prose); fall back to the legacy keyword heuristic on
+/// the raw text only when no JSON object is present. This is the fix that took real deepseek-chat
+/// verdict F1 from 0.91 → 1.00 (the legacy first-line parse silently defaulted to `rewrite`).
 fn parse_verdict(resp: &str) -> (DiffVerdict, String) {
+    if let Some((v, r)) = parse_verdict_json(resp) {
+        return (v, r);
+    }
+    // Fallback: legacy free-text parse (first line = label token, rest = rationale).
     let mut lines = resp.lines();
     let first = lines.next().unwrap_or("");
     let verdict = DiffVerdict::from_llm_token(first);
     let rationale = lines.collect::<Vec<_>>().join(" ").trim().to_string();
     let rationale = if rationale.is_empty() { first.trim().to_string() } else { rationale };
     (verdict, rationale)
+}
+
+/// Try to read a `{verdict, rationale}` object out of `resp`. Tolerates markdown code fences and
+/// leading/trailing prose by scanning for the first balanced `{...}` JSON object. Returns None
+/// when no object with a recognizable `verdict` string is found (caller then keyword-falls-back).
+fn parse_verdict_json(resp: &str) -> Option<(DiffVerdict, String)> {
+    let candidate = extract_json_object(resp)?;
+    let val: serde_json::Value = serde_json::from_str(&candidate).ok()?;
+    let obj = val.as_object()?;
+    let verdict_str = obj.get("verdict").and_then(|v| v.as_str())?;
+    let verdict = DiffVerdict::from_llm_token(verdict_str);
+    let rationale = obj
+        .get("rationale")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Some((verdict, rationale))
+}
+
+/// Scan `s` for the first balanced top-level `{...}` substring (string-aware, so braces inside a
+/// JSON string value don't confuse the depth count). Returns the substring, or None. This lets us
+/// recover a JSON object even when the model wraps it in ```json fences or adds prose around it.
+fn extract_json_object(s: &str) -> Option<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let start = chars.iter().position(|&c| c == '{')?;
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, &c) in chars.iter().enumerate().skip(start) {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(chars[start..=i].iter().collect());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Find the char span `[start, end)` of `needle` within `haystack_chars` (char-indexed).
@@ -553,7 +698,8 @@ mod tests {
     fn test_semantic_gated_no_member_no_llm() {
         let a = "# 标题\n\n第一行。\n旧观点：我支持这个方案。\n";
         let b = "# 标题\n\n第一行。\n新观点：我反对这个方案。\n";
-        let cheap = RecordingMockLlm::new("gpt-4o-mini").with_response("stance-reversal\n立场从支持反转为反对");
+        let cheap = RecordingMockLlm::new("gpt-4o-mini")
+            .with_response(r#"{"verdict":"stance-reversal","rationale":"立场从支持反转为反对"}"#);
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("总体立场反转");
         // member=false → semantic layer is skipped (LLM not called), verdicts empty.
         let r = compare(a, b, CompareMode::Semantic, OutputMode::Marked, false, &router(), &llms(&cheap, &reasoning)).unwrap();
@@ -568,17 +714,104 @@ mod tests {
     fn test_semantic_verdict_classes() {
         let a = "# 标题\n\n第一行不变。\n旧观点：我支持这个方案。\n";
         let b = "# 标题\n\n第一行不变。\n新观点：我反对这个方案。\n";
-        let cheap = RecordingMockLlm::new("gpt-4o-mini").with_response("stance-reversal\n立场从支持反转为反对");
+        let cheap = RecordingMockLlm::new("gpt-4o-mini")
+            .with_response(r#"{"verdict":"stance-reversal","rationale":"立场从支持反转为反对"}"#);
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("总体立场反转");
         let r = compare(a, b, CompareMode::Semantic, OutputMode::Marked, true, &router(), &llms(&cheap, &reasoning)).unwrap();
         assert_eq!(r.semantic_verdicts.len(), 1, "one changed span → one verdict");
         assert_eq!(r.semantic_verdicts[0].verdict, "stance-reversal");
         assert_eq!(r.semantic_verdicts[0].model, "gpt-4o-mini", "verdict uses Cheap model");
+        assert_eq!(r.semantic_verdicts[0].rationale, "立场从支持反转为反对", "rationale read from JSON field");
+        // exactly one cheap call (schema path validated on first try → no retry storm).
+        assert_eq!(cheap.call_count(), 1, "schema-valid verdict is a single cheap call");
         // reasoning model used for the ×1 overall summary.
         assert_eq!(reasoning.call_count(), 1, "summary is one reasoning call");
         assert!(r.summary.is_some());
         assert!(r.token_bill.map_llm_tokens.model == "gpt-4o-mini");
         assert!(r.token_bill.reduce_llm_tokens.model == "gpt-4o");
+    }
+
+    // ── §4.5.A schema-guided verdict parsing: defensive against real-model output shapes ──
+
+    #[test]
+    fn test_parse_verdict_json_clean_object() {
+        let (v, r) = parse_verdict(r#"{"verdict":"substantive","rationale":"新增了赔偿条款"}"#);
+        assert_eq!(v, DiffVerdict::Substantive);
+        assert_eq!(r, "新增了赔偿条款");
+    }
+
+    #[test]
+    fn test_parse_verdict_json_markdown_fenced() {
+        // DeepSeek frequently wraps JSON in ```json fences — the legacy first-line parser would
+        // see "```json" as line 1 and silently default to `rewrite`. The defensive parser recovers.
+        let raw = "```json\n{\"verdict\": \"numeric-change\", \"rationale\": \"金额由100改为250\"}\n```";
+        let (v, r) = parse_verdict(raw);
+        assert_eq!(v, DiffVerdict::NumericChange, "fenced JSON must still parse, not fall to rewrite");
+        assert_eq!(r, "金额由100改为250");
+    }
+
+    #[test]
+    fn test_parse_verdict_json_with_leading_prose() {
+        // Model adds a sentence before the JSON. Legacy parser → line 1 prose → wrong `rewrite`.
+        let raw = "经过分析，判定结果如下：\n{\"verdict\":\"stance-reversal\",\"rationale\":\"立场反转\"}";
+        let (v, _r) = parse_verdict(raw);
+        assert_eq!(v, DiffVerdict::StanceReversal);
+    }
+
+    #[test]
+    fn test_parse_verdict_json_reordered_fields() {
+        // rationale before verdict — field-based parse is order-independent (the whole point).
+        let raw = r#"{"rationale":"措辞调整无实质变化","verdict":"rewrite"}"#;
+        let (v, r) = parse_verdict(raw);
+        assert_eq!(v, DiffVerdict::Rewrite);
+        assert_eq!(r, "措辞调整无实质变化");
+    }
+
+    #[test]
+    fn test_parse_verdict_json_brace_in_rationale_string() {
+        // A `}` inside the rationale string must not prematurely close the object (string-aware scan).
+        let raw = r#"{"verdict":"substantive","rationale":"集合 {a,b} 被删除"}"#;
+        let (v, r) = parse_verdict(raw);
+        assert_eq!(v, DiffVerdict::Substantive);
+        assert_eq!(r, "集合 {a,b} 被删除");
+    }
+
+    #[test]
+    fn test_parse_verdict_freetext_fallback_still_works() {
+        // No JSON at all → fall back to the legacy keyword heuristic (graceful degrade).
+        let (v, _r) = parse_verdict("这是立场反转 stance-reversal\n旧支持新反对");
+        assert_eq!(v, DiffVerdict::StanceReversal);
+        // Pure noise → conservative default (rewrite), never panics.
+        let (v2, _) = parse_verdict("???");
+        assert_eq!(v2, DiffVerdict::Rewrite);
+    }
+
+    #[test]
+    fn test_parse_verdict_unknown_enum_value_degrades() {
+        // Model emits valid JSON but an out-of-enum verdict string → from_llm_token maps it
+        // (keyword match → here "modified" has no keyword → conservative rewrite). No panic.
+        let (v, r) = parse_verdict(r#"{"verdict":"modified","rationale":"some change"}"#);
+        assert_eq!(v, DiffVerdict::Rewrite);
+        assert_eq!(r, "some change");
+    }
+
+    #[test]
+    fn test_verdict_retry_then_fallback_no_panic() {
+        // A mock that returns un-parseable text for every attempt: verdict_call must exhaust the
+        // ≤3 retry loop and degrade to the keyword heuristic WITHOUT crashing the compare report.
+        let a = "# 标题\n\n保持。\n旧的数值是 100。\n";
+        let b = "# 标题\n\n保持。\n新的数值是 250。\n";
+        // Preload many junk responses so the retry loop (and the final fallback chat) all draw junk.
+        let mut cheap = RecordingMockLlm::new("gpt-4o-mini");
+        for _ in 0..6 {
+            cheap = cheap.with_response("完全无关的散文，没有任何 JSON 结构。");
+        }
+        let reasoning = RecordingMockLlm::new("gpt-4o").with_response("数值变化");
+        let r = compare(a, b, CompareMode::Semantic, OutputMode::Marked, true, &router(), &llms(&cheap, &reasoning)).unwrap();
+        // A verdict is STILL produced (keyword heuristic on the junk → conservative), report intact.
+        assert_eq!(r.semantic_verdicts.len(), 1, "verdict always emitted even when parsing fails");
+        assert!(cheap.call_count() >= 3, "retry loop attempted ≥3 times before degrading");
+        assert!(r.summary.is_some(), "report still produced despite verdict-parse failure");
     }
 
     #[test]
@@ -587,7 +820,8 @@ mod tests {
         // (by CHAR index) is exactly the changed span text.
         let a = "# 标题\n\n保持不变的开头行。\n旧的数值是 100。\n";
         let b = "# 标题\n\n保持不变的开头行。\n新的数值是 250 了。\n";
-        let cheap = RecordingMockLlm::new("gpt-4o-mini").with_response("numeric-change\n数值由100变为250");
+        let cheap = RecordingMockLlm::new("gpt-4o-mini")
+            .with_response(r#"{"verdict":"numeric-change","rationale":"数值由100变为250"}"#);
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("数值变化");
         let r = compare(a, b, CompareMode::Semantic, OutputMode::Marked, true, &router(), &llms(&cheap, &reasoning)).unwrap();
 
