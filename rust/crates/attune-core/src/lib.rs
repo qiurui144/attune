@@ -122,6 +122,7 @@ pub mod agent_runner;
 // 不走 Ed25519 SignedLicense, 这些类型只有 attune-accounts 在用, 留在 attune-core
 // 是 footgun. 删了它们, 同时把 LicenseCache 启动时的死代码也从 state.rs 删掉.
 pub mod member_session;
+pub mod member_verifier;
 pub mod cloud_client;
 pub mod plugin_sync;
 pub mod plugin_sig;
