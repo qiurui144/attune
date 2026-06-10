@@ -125,6 +125,36 @@ pub struct RegionCtx {
     pub page: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OcrCorrectionReport {
+    pub schema_version: u32,
+    pub entries: Vec<CorrectionEntry>,
+    pub summary: CorrectionSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CorrectionEntry {
+    pub region_idx: usize,
+    pub bbox: BBox,
+    pub kind: RegionKind,
+    pub original: Option<String>,
+    pub corrected: Option<String>,
+    pub agreement: Agreement,
+    pub source: RegionSource,
+    pub confidence: f32,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+pub struct CorrectionSummary {
+    pub total: u32,
+    pub confirmed: u32,
+    pub discrepancies: u32,
+    pub conflicts: u32,
+    pub escalated: u32,
+    pub accepted: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

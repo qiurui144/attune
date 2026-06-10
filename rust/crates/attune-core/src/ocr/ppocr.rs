@@ -365,7 +365,14 @@ impl OcrProvider for PpOcrProvider {
             })
             .collect();
 
-        Ok(super::OcrOutput { text: plain, table_markdown, avg_confidence, lines: Some(lines) })
+        Ok(super::OcrOutput {
+            text: plain,
+            table_markdown,
+            avg_confidence,
+            lines: Some(lines),
+            regions: None,
+            correction_report: None,
+        })
     }
 }
 

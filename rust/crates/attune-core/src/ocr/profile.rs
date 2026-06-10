@@ -8,6 +8,18 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 💰 VLM escalation policy for non-text recognition (per spec §8).
+/// `Off` = never escalate (保守 governor / build stage). `OnDiscrepancy` = escalate only
+/// low-confidence/conflict regions. `Aggressive` = user-opt-in full-region VLM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VlmEscalationPolicy {
+    #[default]
+    Off,
+    OnDiscrepancy,
+    Aggressive,
+}
+
 /// OCR 场景预设. `builtin = true` 的预设不可删不可改.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct OcrProfile {
@@ -41,6 +53,16 @@ pub struct OcrProfile {
     /// 0 或越界值在 OCR 调用处回退到 `DEFAULT_MAX_SIDE_LEN`。
     #[serde(default = "default_max_side_len")]
     pub max_side_len: u32,
+    /// Whether to run the non-text region recognition pass (Stage 1-3) on this profile.
+    /// Default false → old behavior (plain OCR, regions: None).
+    #[serde(default)]
+    pub recognize_nontext: bool,
+    /// Restrict which RegionKind to recognize (snake_case strings); empty = all kinds.
+    #[serde(default)]
+    pub nontext_kinds: Vec<String>,
+    /// 💰 VLM escalation policy. Default Off (build-stage never escalates, §8).
+    #[serde(default)]
+    pub vlm_escalation: VlmEscalationPolicy,
 }
 
 /// `max_side_len` 的 serde 默认值 —— 旧 profile JSON 缺该字段时回退。
@@ -63,6 +85,9 @@ impl OcrProfile {
                 reconstruct_tables: false,
                 deskew: true,
                 max_side_len: 3200,
+                recognize_nontext: false,
+                nontext_kinds: vec![],
+                vlm_escalation: VlmEscalationPolicy::Off,
             },
             OcrProfile {
                 id: "receipt".to_string(),
@@ -75,6 +100,9 @@ impl OcrProfile {
                 reconstruct_tables: true,
                 deskew: false,
                 max_side_len: 3200,
+                recognize_nontext: false,
+                nontext_kinds: vec![],
+                vlm_escalation: VlmEscalationPolicy::Off,
             },
             OcrProfile {
                 id: "screenshot".to_string(),
@@ -87,6 +115,9 @@ impl OcrProfile {
                 reconstruct_tables: false,
                 deskew: false,
                 max_side_len: 2048,
+                recognize_nontext: false,
+                nontext_kinds: vec![],
+                vlm_escalation: VlmEscalationPolicy::Off,
             },
             OcrProfile {
                 id: "ancient".to_string(),
@@ -99,6 +130,9 @@ impl OcrProfile {
                 reconstruct_tables: false,
                 deskew: true,
                 max_side_len: 4096,
+                recognize_nontext: false,
+                nontext_kinds: vec![],
+                vlm_escalation: VlmEscalationPolicy::Off,
             },
             OcrProfile {
                 id: "table".to_string(),
@@ -111,6 +145,9 @@ impl OcrProfile {
                 reconstruct_tables: true,
                 deskew: true,
                 max_side_len: 3200,
+                recognize_nontext: false,
+                nontext_kinds: vec![],
+                vlm_escalation: VlmEscalationPolicy::Off,
             },
             OcrProfile {
                 id: "form".to_string(),
@@ -123,6 +160,9 @@ impl OcrProfile {
                 reconstruct_tables: true,
                 deskew: false,
                 max_side_len: 2560,
+                recognize_nontext: false,
+                nontext_kinds: vec![],
+                vlm_escalation: VlmEscalationPolicy::Off,
             },
             OcrProfile {
                 id: "card".to_string(),
@@ -135,6 +175,9 @@ impl OcrProfile {
                 reconstruct_tables: false,
                 deskew: false,
                 max_side_len: 2560,
+                recognize_nontext: false,
+                nontext_kinds: vec![],
+                vlm_escalation: VlmEscalationPolicy::Off,
             },
         ]
     }
@@ -253,5 +296,20 @@ mod tests {
         let p: OcrProfile = serde_json::from_str(legacy_json).expect("deserialize legacy");
         assert!(!p.reconstruct_tables);
         assert!(!p.deskew);
+    }
+
+    #[test]
+    fn serde_roundtrip_nontext_fields_default_on_missing() {
+        // Legacy JSON without nontext fields → defaults: recognize_nontext=false,
+        // empty kinds, vlm_escalation=off (i.e. zero behavior change for old users).
+        let legacy_json = r#"{
+            "id":"contract","name":"合同","description":"desc",
+            "languages":"chi_sim","dpi":300,"tags":[],"builtin":true,
+            "reconstruct_tables":false,"deskew":true,"max_side_len":3200
+        }"#;
+        let p: OcrProfile = serde_json::from_str(legacy_json).expect("deserialize legacy");
+        assert!(!p.recognize_nontext);
+        assert!(p.nontext_kinds.is_empty());
+        assert_eq!(p.vlm_escalation, crate::ocr::profile::VlmEscalationPolicy::Off);
     }
 }
