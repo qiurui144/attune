@@ -82,6 +82,15 @@ impl DiffVerdict {
             DiffVerdict::StanceReversal => 4,
         }
     }
+    /// Parse a verdict from a raw LLM response (schema-guided JSON preferred, free-text fallback).
+    ///
+    /// Public so the golden gate + attune-pro verticals can reuse the exact production parse.
+    /// Returns the verdict only; for the (verdict, rationale) pair the internal `parse_verdict`
+    /// is used by [`compare`]. This is the §4.5.A defensive parse entry point.
+    pub fn parse_from_llm_response(resp: &str) -> DiffVerdict {
+        parse_verdict(resp).0
+    }
+
     fn from_llm_token(s: &str) -> DiffVerdict {
         let t = s.trim().to_lowercase();
         if t.contains("stance") || t.contains("reversal") || t.contains("立场") || t.contains("反转") {
