@@ -8,12 +8,15 @@ attune 支持 3 种部署形态. 选择基于 form factor (per [ADR 0002](adr/00
 
 ### Linux (deb)
 
+> v1.0+ 起推荐走 APT 仓库（自动升级），见 [INSTALL.md](INSTALL.md) 与 [README](../README.md#-download) 的「系统包管理器」节。下方手动 .deb 流程仍受支持。
+
 ```bash
-# 下载最新 GA .deb
-wget https://github.com/qiurui144/attune/releases/download/desktop-v0.6.3/Attune_0.6.3_amd64.deb
+# 从 Releases 页取最新 desktop-vX.Y.Z 的 .deb（VERSION 替换为实际版本号，如 1.2.0）
+VERSION=1.2.0
+wget https://github.com/qiurui144/attune/releases/download/desktop-v${VERSION}/Attune_${VERSION}_amd64.deb
 
 # 装
-sudo dpkg -i Attune_0.6.3_amd64.deb
+sudo dpkg -i Attune_${VERSION}_amd64.deb
 # 自动装依赖: curl / poppler-utils / libwebkit2gtk-4.1-0 / libgtk-3-0 / libayatana-appindicator3-1
 
 # 启 (桌面菜单 "Attune" 或命令行)
@@ -28,7 +31,7 @@ post-install 自动准备 4 底座:
 
 ### Windows
 
-下载 `Attune_0.6.3_x64-setup.exe` (NSIS) 或 `Attune_0.6.3_x64_en-US.msi` (企业).
+从 Releases 页取最新 `desktop-vX.Y.Z` 的 `Attune_<VERSION>_x64-setup.exe` (NSIS) 或 `Attune_<VERSION>_x64_en-US.msi` (企业); 或 `winget install qiurui144.Attune`.
 双击安装, 任务栏图标启动.
 
 ### macOS
@@ -44,10 +47,10 @@ cargo tauri build --bundles dmg
 
 ### Linux AppImage
 
-通用 Linux (非 Debian 系):
+通用 Linux (非 Debian 系), 从 Releases 页取最新 `desktop-vX.Y.Z` 的 AppImage:
 ```bash
-chmod +x Attune_0.6.3_amd64.AppImage
-./Attune_0.6.3_amd64.AppImage
+chmod +x Attune_<VERSION>_amd64.AppImage
+./Attune_<VERSION>_amd64.AppImage
 ```
 
 ## 2. Headless Server / NAS
@@ -57,8 +60,9 @@ chmod +x Attune_0.6.3_amd64.AppImage
 ### 安装
 
 ```bash
-# 下载 server tarball (4 平台)
-wget https://github.com/qiurui144/attune/releases/download/v0.6.3/attune-linux-x86_64.tar.gz
+# 下载 server tarball (取最新 vX.Y.Z, VERSION 替换为实际版本号, 如 1.2.0)
+VERSION=1.2.0
+wget https://github.com/qiurui144/attune/releases/download/v${VERSION}/attune-linux-x86_64.tar.gz
 tar xzf attune-linux-x86_64.tar.gz
 sudo install -m 755 attune-server-headless /usr/local/bin/
 sudo install -m 755 attune-cli /usr/local/bin/
@@ -264,7 +268,7 @@ scp my-vault-2026-05.profile new-laptop:
 | 会员验证 | accounts.engi-stack.com 或 自部署 accounts URL | — |
 | LLM Gateway | gateway.engi-stack.com (Pro Membership) 或 BYOK | — |
 
-自部署用户 v0.6.3 起在 Settings → 会员 → "高级 · 自部署 cloud 后端" 配 3 URL.
+自部署用户在 Settings → 会员 → "高级 · 自部署 cloud 后端" 配 3 URL.
 
 ## 故障排查
 
