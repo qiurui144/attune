@@ -5,11 +5,55 @@
 
 use super::{RegionKind, RegionResult, Series};
 use crate::error::{Result, VaultError};
+use crate::ocr::profile::VlmEscalationPolicy;
+use crate::outbound_gate::{OutboundError, OutboundGate, OutboundKind, OutboundPolicy};
+use crate::pii::Redactor;
 use crate::vlm::VlmProvider;
 use std::path::Path;
 
 /// Max retries when VLM JSON is invalid (spec §4.5 B).
 pub const MAX_RETRIES: u32 = 3;
+
+/// Should this region escalate, given policy + the cross-validate decision + budget?
+/// `discrepant` = the region was flagged conflict/discrepancy or low-confidence.
+pub fn should_escalate(policy: VlmEscalationPolicy, discrepant: bool, used: u32, budget: u32) -> bool {
+    if used >= budget {
+        return false; // R2 budget cap (escalate_budget)
+    }
+    match policy {
+        VlmEscalationPolicy::Off => false, // build-stage / 保守 → never (§8)
+        VlmEscalationPolicy::OnDiscrepancy => discrepant,
+        VlmEscalationPolicy::Aggressive => true,
+    }
+}
+
+/// Enforce the outbound gate for a VLM (cloud) escalation call. Returns Ok(()) when the
+/// region crop may leave the device; Err(gate reason) → caller degrades to local (R7).
+/// VLM egress is tracked under OutboundKind::Llm (the existing cloud-LLM egress point).
+///
+/// NOTE(plan-recon 2026-06-10): the plan's Task 13 referenced OutboundPolicy fields
+/// `local_destination` / `contains_l0` and an `OutboundError::L0CloudBlocked` variant that
+/// do NOT exist in the real outbound_gate.rs API. The real `OutboundPolicy` is
+/// { kind, enabled, vault_unlocked, redactor } and errors are { Disabled, VaultLocked,
+/// RedactorRequired }. We adapt to the real API while preserving R7's intent (VLM egress
+/// passes through the REAL, non-no-op gate): the caller maps privacy settings to `enabled`
+/// (a local-only / 保守-governor destination sets enabled=false to refuse cloud egress),
+/// supplies a Redactor so PII is stripped before the crop descriptor leaves, and the gate
+/// fails closed (RedactorRequired) when a non-empty descriptor lacks a redactor.
+pub fn gate_vlm_egress(
+    enabled: bool,
+    vault_unlocked: bool,
+    redactor: Option<&Redactor>,
+    crop_descriptor: &str,
+) -> std::result::Result<String, OutboundError> {
+    let policy = OutboundPolicy {
+        kind: OutboundKind::Llm,
+        enabled,
+        vault_unlocked,
+        redactor,
+    };
+    OutboundGate::enforce(&policy, crop_descriptor)
+}
 
 /// One telemetry record per VLM call attempt (spec §7 / §4.5 F).
 #[derive(Debug, Clone, PartialEq)]
@@ -234,5 +278,48 @@ mod tests {
         assert!(res.is_err());
         assert_eq!(tel.retry_count, MAX_RETRIES);
         assert_eq!(tel.error_kind.as_deref(), Some("parse"));
+    }
+
+    #[test]
+    fn off_policy_never_escalates() {
+        assert!(!should_escalate(VlmEscalationPolicy::Off, true, 0, 100));
+    }
+    #[test]
+    fn on_discrepancy_only_when_flagged() {
+        assert!(should_escalate(VlmEscalationPolicy::OnDiscrepancy, true, 0, 8));
+        assert!(!should_escalate(VlmEscalationPolicy::OnDiscrepancy, false, 0, 8));
+    }
+    #[test]
+    fn budget_cap_blocks_when_exhausted() {
+        assert!(!should_escalate(VlmEscalationPolicy::Aggressive, true, 8, 8));
+        assert!(should_escalate(VlmEscalationPolicy::Aggressive, true, 7, 8));
+    }
+
+    // gate_vlm_egress tests use the REAL OutboundGate API (Disabled / VaultLocked /
+    // RedactorRequired), not the plan's hypothetical L0CloudBlocked. A local-only /
+    // 保守-governor destination is modeled by enabled=false (refuse cloud egress).
+    #[test]
+    fn gate_blocks_when_disabled() {
+        // enabled=false models a local-only / privacy-off destination → refuse cloud egress.
+        let err = gate_vlm_egress(false, true, None, "region-crop").unwrap_err();
+        assert!(matches!(err, OutboundError::Disabled(OutboundKind::Llm)));
+    }
+    #[test]
+    fn gate_blocks_when_vault_locked() {
+        let err = gate_vlm_egress(true, false, None, "region-crop").unwrap_err();
+        assert!(matches!(err, OutboundError::VaultLocked));
+    }
+    #[test]
+    fn gate_fails_closed_without_redactor_on_nonempty() {
+        // R7 / MEMORY P0: gate is non-no-op — a non-empty payload with no redactor fails closed.
+        let err = gate_vlm_egress(true, true, None, "sensitive crop descriptor").unwrap_err();
+        assert!(matches!(err, OutboundError::RedactorRequired));
+    }
+    #[test]
+    fn gate_allows_with_redactor_and_redacts() {
+        let redactor = Redactor::new();
+        // PII in the descriptor is stripped before it leaves the device.
+        let out = gate_vlm_egress(true, true, Some(&redactor), "联系电话 13800138000").unwrap();
+        assert!(!out.contains("13800138000"), "phone must be redacted; got {out}");
     }
 }

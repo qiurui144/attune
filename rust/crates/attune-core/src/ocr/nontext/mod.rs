@@ -1,5 +1,5 @@
-//! Non-text content recognition — 7 region recognizers (⚡ local) + 🆓 OCR cross-validation
-//! + 💰 VLM escalation. Extends the OCR pipeline; never replaces PP-OCRv5.
+//! Non-text content recognition — 7 region recognizers (⚡ local), 🆓 OCR cross-validation,
+//! and 💰 VLM escalation. Extends the OCR pipeline; never replaces PP-OCRv5.
 //! All native model deps live here behind `feature="nontext"` (keeps wasm leaf clean).
 //!
 //! R6 lock-order note: any ort `Session` used by recognizers in this module lives behind
