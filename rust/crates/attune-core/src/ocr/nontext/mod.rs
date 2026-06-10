@@ -10,6 +10,7 @@ use crate::ocr::{BBox, RawLine};
 use serde::{Deserialize, Serialize};
 
 pub mod checkbox;
+pub mod cross_validate;
 pub mod layout;
 pub mod stamp_signature;
 
