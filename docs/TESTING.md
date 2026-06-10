@@ -755,6 +755,69 @@ benchmark 走确定性 MockEmbeddingProvider，无 LLM / 无网络，进 CI（<1
 
 ---
 
+## 非文字内容识别 (Non-Text Content Recognition) 测试矩阵（2026-06-10，`--features nontext`）
+
+OSS-base 共享视觉理解能力（ADR-0008）。设计上检测 7 类非文字 region（table / chart / figure /
+formula / handwriting / stamp / signature + checkbox），跑 🆓/⚡ 本地识别器，🆓 与 PP-OCR 交叉
+校验，仅对低置信/分歧 region 升级 💰 VLM。所有代码门控在 `nontext` feature 后（默认 OFF →
+plain OCR，`regions: None`，字节级旧行为）。
+
+> ✅ **FUNCTIONAL 状态（C1 诚实标注，2026-06-10→2026-06-11 更新）**：Stage1 布局检测
+> （`layout::detect_regions`）**已接入真实 ONNX 推理**（RapidLayout PP-Structure CDLA PicoDet，
+> Apache-2.0）。模型**未捆绑但首用自动拉取**（mirrors PpOcr，`HF_ENDPOINT` 可指向镜像）：模型存在
+> 且推理成功 → `engine_status=functional`，region 反映真实布局；推理失败 → `layout-error`（上浮，
+> 绝不伪装空页，I1）；仅离线/无下载环境模型缺失 → `scaffold-no-layout-model`，降级 plain OCR。
+> `recognize_page` / CLI / REST 响应都带显式 `engine_status` 字段，调用方据此**知道**识别状态。
+> Stage1 产出 region 后 R6 stamp / R7 checkbox 等识别器跑在真实 per-region 裁剪上。
+>
+> ⚠️ **诚实边界（不可过度宣称）**：检测**准确率尚未对标注集验证**（无 mAP 实测）。后续：SLANet
+> 表格结构模型 + 💰 VLM Stage4 升级路径（type-enforced gate，当前未接入）。
+
+**运行**：`cargo test -p attune-core --features nontext`（lib + golden）；
+`cargo test -p attune-cli --features nontext`（agent-invocable CLI E2E）。
+feature-OFF 必须仍全绿（`cargo test -p attune-core` / `-p attune-server` / `-p attune-cli`）。
+
+### 6 类下限映射（per §6.1）
+
+| 类型 | 落点 | 覆盖 |
+|------|------|------|
+| Golden | `tests/nontext_cross_validate_golden.rs` | OCR-纠错 ≥8 ContentConflict + ≥2 Agree sentinel（视觉混淆数字/字母） |
+| 边界 | `ocr/nontext/mod.rs` `#[cfg(test)]` | recognize_region 各 kind dispatch / model-missing → UnrecognizedV1 / recognize_page 空模型 degrade + `engine_status=scaffold-no-layout-model`（C1） |
+| 异常/错误 | CLI E2E + 路由 | 图片缺失 → exit 1；模型缺失 → 空 envelope 200/exit 0（never 500/panic, R1）；recognizer Err → region 保留为 UnrecognizedV1 + warning（**绝不 drop**, I1）；Stage1 推理 Err → 上浮 warning 而非伪装空页（I1） |
+| 隐私/出网（C2/C3） | `ocr/nontext/vlm_escalate.rs` `#[cfg(test)]` + doctest | VLM 出网类型强制：`VlmEgressToken` 无公开构造器，唯一来源 `gate_vlm_egress`（`compile_fail` doctest 证明无法绕过）；图片级 refuse/allow + 下采样到 `EGRESS_MAX_EDGE`，离开的是缩小副本非原图，读图失败 fail-closed |
+| 属性 (proptest) | `ocr/nontext/...proptest` | cross-validation 不变量：no auto-correct（R5）、total = confirmed+conflicts+discrepancies |
+| 集成 E2E | `attune-cli/tests/cli_recognize_regions_smoke.rs` | subprocess 真跑 `attune recognize-regions` — 插件 dispatch 的契约 |
+| 回归 | golden set 永久 | 阈值 ratchet 只升不降（≥8 conflict floor） |
+
+### agent-invocable 面（ADR-0008）
+
+`attune recognize-regions <image>` 输出 typed JSON envelope（`regions` + `correction_report` +
+`cost`）到 stdout — 任意插件经 subprocess capability 契约（`CapabilityInvocation`）调用、拿
+通用 `RegionResult`，再叠加行业语义。REST `POST /api/v1/ocr/recognize` + CLI 共用 core 单一
+orchestrator `nontext::recognize_page`（成本/质量/遥测单一调优点）。
+
+### 💰 VLM 路径 — multi-seed + 3-tier 兼容矩阵（ship 前必跑，per §4.5 D + Agent 验证铁律）
+
+VLM 升级路径（Stage4，schema-guided + 重试-验证 ≤3 + telemetry）一旦接真模型，必须：
+- **multi-seed N=3**：评估指标高方差，胜出/SOTA 候选 ≥3 seed 复跑，报 mean ± std。
+- **3-tier 矩阵**：弱本地（qwen2.5-vl:3b）/ 弱云（gemini-1.5-flash）/ 强云（GPT-4o）各 ≥10 case。
+  三 tier F1 差 > 0.15 → RELEASE.md 标最低 tier（`Requires ≥ ...`）；弱模型 < floor → 自动 disable。
+- **精度判据（量化，非主观）**：cell-level F1（table）/ LaTeX edit-distance（formula）/ chart series
+  rel-error。
+- **R3 directive**：任何「极致精度 / F1↑」claim 必须有真 golden 实测 + 对照 baseline + raw log 链接
+  （`reports/runs/<ts>/`），不接受 anecdote / 单 seed 排名。
+
+### 格式安全对抗面（继承自 document-intelligence 矩阵，P0）
+
+非文字识别吃 office/PDF 解包出的图像 → 继承 ZIP/XML 格式对抗维度：office 解压炸弹（zip bomb）/
+路径穿越（zip slip）/ XML 实体膨胀（billion laughs）。这些在上游 ingest 解包层拦截，但 nontext
+入口对超大/畸形图像必须 graceful（OOM 防护 / 尺寸上限 / decode 失败不 panic），不得绕过该防线。
+
+> tokenizer / 模型版本变更触发 reindex 迁移：region schema（`*_v1` tag）演进必须 additive +
+> serde-default，老 vault 的 `regions: None` 永远可读（§10 向后兼容）。
+
+---
+
 ## 附录 A：人工验收清单
 
 某些 UX / 集成场景无法自动化（需要真实 Chrome 实例 / 真实 USB / 真实账号登录等），这些用 [`python/tests/MANUAL_TEST_CHECKLIST.md`](../python/tests/MANUAL_TEST_CHECKLIST.md) 维护勾选式步骤（含 v0.7 Memory Moat 验收节）。

@@ -60,6 +60,26 @@ enum Commands {
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         bbox: bool,
     },
+    /// Shared visual-understanding capability (ADR-0008): detect non-text regions
+    /// (table / chart / figure / formula / handwriting / stamp / signature / checkbox),
+    /// run 🆓/⚡ local recognizers, and 🆓 cross-validate against PP-OCR. Emits a typed
+    /// JSON envelope (regions + correction_report + cost) on stdout — the agent-invocable
+    /// surface any plugin dispatches to get generic structured output, then layers its own
+    /// industry semantics on top. Requires building with `--features nontext`.
+    ///
+    /// Exit codes (match CapabilityResult contract):
+    ///   0 success | 1 user input (file missing) | 3 engine failure
+    RecognizeRegions {
+        /// Image path (PNG / JPG / etc supported by `image` crate)
+        image: std::path::PathBuf,
+        /// Office helper scene profile for the PP-OCR second opinion (optional).
+        #[arg(long)]
+        profile: Option<String>,
+        /// 💰 VLM escalation policy: off (default, build-stage-safe) | on_discrepancy | aggressive.
+        /// Reserved — escalation is gated by the caller; this CLI runs the 🆓/⚡ Stage1-3 pass only.
+        #[arg(long, default_value = "off")]
+        vlm_escalation: String,
+    },
     /// Office helper async ASR transcription. Currently runs synchronously in-process
     /// (no daemon), printing transcript JSON to stdout.
     ///
@@ -537,6 +557,9 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
         return Ok(());
     }
+    if let Commands::RecognizeRegions { image, profile, vlm_escalation } = &cli.command {
+        return run_recognize_regions(image, profile.as_deref(), vlm_escalation);
+    }
     if let Commands::Transcribe { audio, diarization, json, wait } = &cli.command {
         // ── D5.7 pre-validation: friendly errors with structured exit codes ──
         if !audio.exists() {
@@ -686,6 +709,9 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
                 attune_core::platform::device_secret_path().display());
         }
         Commands::Ocr { .. } => unreachable!("Ocr handled before vault open"),
+        Commands::RecognizeRegions { .. } => {
+            unreachable!("RecognizeRegions handled before vault open")
+        }
         Commands::Transcribe { .. } => unreachable!("Transcribe handled before vault open"),
         Commands::Deploy { no_models, dry_run, script } => {
             // R-deploy: 调底层 bash 脚本。Linux-only。
@@ -751,6 +777,93 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         },
     }
     Ok(())
+}
+
+/// Agent-invocable surface for the shared visual-understanding capability (ADR-0008).
+/// Runs the 🆓/⚡ Stage1-3 pass via the single core orchestrator `nontext::recognize_page`
+/// and prints a typed JSON envelope to stdout. Plugins dispatch this via the subprocess
+/// capability contract (`CapabilityInvocation`) and parse the typed `RegionResult`.
+///
+/// Built without `--features nontext`, the capability is absent → friendly exit-1 message
+/// (the binary still works; the optional vision pass is simply not compiled in).
+#[cfg(feature = "nontext")]
+fn run_recognize_regions(
+    image: &std::path::Path,
+    profile: Option<&str>,
+    _vlm_escalation: &str,
+) -> attune_core::error::Result<()> {
+    use attune_core::ocr::nontext::recognize_page;
+
+    if !image.exists() {
+        return Err(attune_core::error::VaultError::InvalidInput(format!(
+            "image file not found: {}\n\
+             hint: check the path; cwd is {}",
+            image.display(),
+            std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "<unknown>".into()),
+        )));
+    }
+
+    // PP-OCR second opinion for cross-validation (best-effort; missing engine → none).
+    let ocr_lines = match attune_core::ocr::detect_default_provider() {
+        Some(provider) => {
+            let ocr_profile = attune_core::ocr::profile_for_id(profile);
+            provider
+                .extract_structured(image, &ocr_profile)
+                .ok()
+                .and_then(|o| o.lines)
+                .unwrap_or_default()
+        }
+        None => Vec::new(),
+    };
+
+    let models_dir = attune_core::ocr::ppocr::PpOcrProvider::models_dir();
+    let layout_model = models_dir.join("layout").join("layout.onnx");
+    let table_model = models_dir.join("table").join("slanet.onnx");
+
+    eprintln!(
+        "[attune recognize-regions] image: {} | layout model present: {} | ocr lines: {}",
+        image.display(),
+        layout_model.exists(),
+        ocr_lines.len(),
+    );
+
+    let out = recognize_page(image, &layout_model, &table_model, &ocr_lines);
+    // I3/C1: surface the HONEST engine status + the applied escalation policy so a plugin /
+    // agent KNOWS whether recognition is functional or a scaffold (no layout model bundled).
+    let policy = match _vlm_escalation {
+        "aggressive" => attune_core::ocr::profile::VlmEscalationPolicy::Aggressive,
+        "on_discrepancy" => attune_core::ocr::profile::VlmEscalationPolicy::OnDiscrepancy,
+        _ => attune_core::ocr::profile::VlmEscalationPolicy::Off,
+    };
+    let envelope = serde_json::json!({
+        "envelope_version": "1",
+        "capability": "visual-understanding",
+        "engine_status": out.engine_status,
+        "vlm_escalation": policy,
+        "validation_warnings": out.validation_warnings,
+        "regions": out.regions,
+        "correction_report": out.correction_report,
+        "cost": {
+            "local_regions": out.local_regions,
+            "escalated_regions": out.escalated_regions,
+        },
+    });
+    println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+    Ok(())
+}
+
+#[cfg(not(feature = "nontext"))]
+fn run_recognize_regions(
+    _image: &std::path::Path,
+    _profile: Option<&str>,
+    _vlm_escalation: &str,
+) -> attune_core::error::Result<()> {
+    Err(attune_core::error::VaultError::InvalidInput(
+        "non-text recognition not available: this build was compiled without \
+         `--features nontext`. Rebuild attune with the nontext feature to use \
+         `recognize-regions`."
+            .into(),
+    ))
 }
 
 /// D5.7: list of valid OCR scene profile ids (mirrors `structured::extract` match arms).
@@ -1408,6 +1521,11 @@ fn run_ocr_profile_create(
         deskew: false,
         reconstruct_tables: false,
         max_side_len: attune_core::ocr::profile::OcrProfile::DEFAULT_MAX_SIDE_LEN,
+        // Non-text recognition is opt-in per profile; user-created profiles default to plain
+        // OCR (regions: None, no VLM escalation) — matches OcrProfile serde defaults.
+        recognize_nontext: false,
+        nontext_kinds: Vec::new(),
+        vlm_escalation: attune_core::ocr::profile::VlmEscalationPolicy::Off,
     };
     let mut reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
     reg.upsert(p)?;

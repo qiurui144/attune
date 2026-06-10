@@ -17,6 +17,8 @@ pub mod forms;
 pub mod git;
 pub mod member;
 pub mod ocr_profiles;
+#[cfg(feature = "nontext")]
+pub mod ocr_recognize;
 pub mod office;
 pub mod classify;
 pub mod clusters;

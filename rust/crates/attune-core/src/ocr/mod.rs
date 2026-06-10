@@ -23,10 +23,26 @@ pub mod profile;
 pub mod profile_registry;
 pub mod structured;
 
+#[cfg(feature = "nontext")]
+pub mod nontext;
+
 use crate::error::{Result, VaultError};
 use profile::OcrProfile;
 use std::path::Path;
 use std::process::Command;
+
+// When `nontext` is off, the Region/report types are unavailable; alias to a
+// zero-variant placeholder so OcrOutput's Option<...> fields type-check and are
+// always `None`. This keeps OcrOutput's shape stable across feature configs.
+#[cfg(feature = "nontext")]
+use crate::ocr::nontext as nontext_regions;
+#[cfg(not(feature = "nontext"))]
+mod nontext_regions {
+    #[derive(Debug, Clone)]
+    pub enum Region {}
+    #[derive(Debug, Clone)]
+    pub enum OcrCorrectionReport {}
+}
 
 /// 单行 OCR 输出（含 bbox 坐标，办公助理结构化抽取需要）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -37,7 +53,7 @@ pub struct RawLine {
 }
 
 /// 像素坐标 bbox（左上角 + 宽高）。
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BBox {
     pub x: u32,
     pub y: u32,
@@ -60,6 +76,10 @@ pub struct OcrOutput {
     /// 行级 OCR 输出（含 bbox），用于 office helper 结构化抽取。
     /// `None` = provider 不支持（默认实现 / mock）；`Some` = PP-OCR 等真实 provider 填充。
     pub lines: Option<Vec<RawLine>>,
+    /// Non-text recognition regions (Stage 1-4 output). `None` = pass not run (old behavior).
+    pub regions: Option<Vec<nontext_regions::Region>>,
+    /// OCR cross-validation / correction report. `None` = cross-validation not run.
+    pub correction_report: Option<nontext_regions::OcrCorrectionReport>,
 }
 
 /// OCR provider 抽象 — 当前只有 PP-OCRv5 一个实现。
@@ -79,7 +99,24 @@ pub trait OcrProvider: Send + Sync {
     /// `PpOcrProvider` 重写以支持完整的场景能力。
     fn extract_structured(&self, image_path: &Path, _profile: &OcrProfile) -> Result<OcrOutput> {
         let text = self.extract_text_from_image(image_path)?;
-        Ok(OcrOutput { text, table_markdown: None, avg_confidence: None, lines: None })
+        Ok(OcrOutput {
+            text,
+            table_markdown: None,
+            avg_confidence: None,
+            lines: None,
+            regions: None,
+            correction_report: None,
+        })
+    }
+
+    /// Run the non-text region recognition pass. Default returns empty (plain-OCR providers
+    /// opt out). `PpOcrProvider` + the nontext orchestrator override when feature enabled.
+    fn recognize_regions(
+        &self,
+        _image_path: &Path,
+        _profile: &OcrProfile,
+    ) -> Result<Vec<nontext_regions::Region>> {
+        Ok(Vec::new())
     }
 }
 
@@ -501,5 +538,40 @@ mod office_types_tests {
         let b = BBox { x: 1, y: 2, w: 3, h: 4 };
         let b2 = b; // Copy
         assert_eq!(b2.x, b.x);
+    }
+
+    #[test]
+    fn ocr_output_new_fields_default_none() {
+        let o = OcrOutput {
+            text: "x".into(),
+            table_markdown: None,
+            avg_confidence: None,
+            lines: None,
+            regions: None,
+            correction_report: None,
+        };
+        assert!(o.regions.is_none());
+        assert!(o.correction_report.is_none());
+    }
+
+    #[test]
+    fn default_recognize_regions_returns_empty() {
+        struct Stub;
+        impl OcrProvider for Stub {
+            fn name(&self) -> &str {
+                "stub"
+            }
+            fn has_chinese(&self) -> bool {
+                false
+            }
+            fn extract_text_from_image(&self, _: &Path) -> Result<String> {
+                Ok(String::new())
+            }
+        }
+        let out = Stub.recognize_regions(
+            Path::new("/x.png"),
+            &crate::ocr::profile::OcrProfile::default(),
+        );
+        assert!(out.unwrap().is_empty(), "default impl must return empty regions");
     }
 }

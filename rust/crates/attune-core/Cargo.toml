@@ -120,6 +120,12 @@ coreml = ["ort/coreml"]
 # 集成测试用：暴露 __test_seed_* 等内部 fixture helper。生产构建不开。
 test-utils = []
 
+# Non-text content recognition (layout/table/chart/formula/handwriting/stamp/checkbox
+# region recognizers + OCR cross-validation). Pulls native ort/imageproc model paths;
+# default-OFF so size-constrained / riscv-minimal images can drop it. When off,
+# OcrProvider::recognize_regions() returns empty and the pipeline degrades to plain OCR.
+nontext = []
+
 # Self-dev-dependency：让 `cargo test -p attune-core` 自动启用 test-utils feature，
 # 集成测试无需 --features 显式开启。生产 `cargo build` 不受影响（仅 dev profile）。
 [dev-dependencies]

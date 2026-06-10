@@ -22,6 +22,13 @@ tempfile = "3"
 # D5.7: levenshtein suggestion for profile typos ("recipt" → "receipt"); zero-dep nano crate
 strsim = "0.11"
 
+[features]
+default = []
+# Shared visual-understanding capability (ADR-0008): the `recognize-regions` subcommand.
+# Forwards to attune-core's `nontext` feature. Default-OFF; without it the subcommand
+# returns a friendly "rebuild with --features nontext" error.
+nontext = ["attune-core/nontext"]
+
 [dev-dependencies]
 # D5.7: subprocess CLI smoke tests via `assert_cmd` + `predicates`
 assert_cmd = "2"

@@ -53,7 +53,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         ])
         .allow_credentials(true);
 
-    Router::new()
+    let router = Router::new()
         // Health check（前缀外，方便 Tauri / monitor 直接探活）
         .route("/health", get(routes::status::health))
         // Vault endpoints (no guard needed)
@@ -292,7 +292,15 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/", get(routes::ui::index))
         .route("/ui", get(routes::ui::index))
         // favicon：返回 204 避免浏览器自动请求落空刷 console error
-        .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }))
+        .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }));
+
+    // Non-text content recognition (shared visual-understanding capability, ADR-0008).
+    // Feature-gated: only present when built with `--features nontext`; otherwise the
+    // router is byte-for-byte unchanged (plain OCR pipeline).
+    #[cfg(feature = "nontext")]
+    let router = router.merge(nontext_recognize_routes());
+
+    router
         // Guard middleware for all other routes
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::vault_guard))
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::bearer_auth_guard))
@@ -301,6 +309,27 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::access_log))
         .layer(cors)
         .with_state(shared_state)
+}
+
+/// Shared visual-understanding capability routes (ADR-0008): non-text region recognition,
+/// the OCR cross-validation correction report, and explicit-accept (spec §5.1). Office-helper
+/// semantics — results are never auto-written; the user (or a plugin on the user's behalf)
+/// must explicitly accept. Merged into `build_router` only under `--features nontext`.
+#[cfg(feature = "nontext")]
+fn nontext_recognize_routes() -> Router<state::SharedState> {
+    Router::new()
+        .route(
+            "/api/v1/ocr/recognize",
+            post(routes::ocr_recognize::post_recognize),
+        )
+        .route(
+            "/api/v1/ocr/recognize/{item_id}/report",
+            get(routes::ocr_recognize::get_report),
+        )
+        .route(
+            "/api/v1/ocr/recognize/{item_id}/accept",
+            post(routes::ocr_recognize::accept),
+        )
 }
 
 #[derive(Clone, Debug)]
