@@ -299,9 +299,14 @@ pub fn recognize_page(
         ocr_lines: ocr_lines.to_vec(),
         page: 0,
     };
-    // Placeholder crop until per-region cropping lands with real layout inference; the
-    // local recognizers tolerate it and the dispatch path is what is exercised today.
-    let crop = DynamicImage::new_rgb8(1, 1);
+    // Real per-region cropping: decode the page once, then hand each recognizer the actual
+    // pixels of its region bbox (falls back to a 1×1 placeholder if the page can't be decoded
+    // or a bbox is degenerate — the local recognizers tolerate it).
+    let page_img: Option<DynamicImage> = if detected.is_empty() {
+        None
+    } else {
+        image::open(image_path).ok()
+    };
 
     // I1a: a recognizer Err does NOT drop the region (spec §7 "绝不 drop region"). The
     // region stays in the output flagged as UnrecognizedV1 + a validation_warning, so the
@@ -309,6 +314,7 @@ pub fn recognize_page(
     let regions: Vec<Region> = detected
         .iter()
         .map(|lr| {
+            let crop = crop_region(page_img.as_ref(), &lr.bbox);
             let res = recognize_region(lr, &crop, &ctx, table_model)
                 .map(|region| region.result);
             region_from_recognizer_result(lr, ctx.page, res)
@@ -366,6 +372,25 @@ fn bbox_center_in(inner: &BBox, outer: &BBox) -> bool {
     let cx = inner.x + inner.w / 2;
     let cy = inner.y + inner.h / 2;
     cx >= outer.x && cx <= outer.x + outer.w && cy >= outer.y && cy <= outer.y + outer.h
+}
+
+/// Crop the page image to a region bbox, clamped to image bounds. Returns a 1×1 placeholder
+/// when the page is absent (couldn't decode) or the clamped bbox is degenerate — the local
+/// recognizers tolerate a tiny crop and degrade gracefully rather than erroring.
+fn crop_region(page: Option<&DynamicImage>, bbox: &BBox) -> DynamicImage {
+    use image::GenericImageView;
+    let Some(img) = page else {
+        return DynamicImage::new_rgb8(1, 1);
+    };
+    let (iw, ih) = img.dimensions();
+    let x = bbox.x.min(iw.saturating_sub(1));
+    let y = bbox.y.min(ih.saturating_sub(1));
+    let w = bbox.w.min(iw.saturating_sub(x));
+    let h = bbox.h.min(ih.saturating_sub(y));
+    if w == 0 || h == 0 {
+        return DynamicImage::new_rgb8(1, 1);
+    }
+    img.crop_imm(x, y, w, h)
 }
 
 /// I1b: turn a per-region recognizer result into a `Region` that ALWAYS stays in the output.
@@ -563,6 +588,23 @@ mod tests {
             "region must carry a warning explaining recognition failed: {:?}",
             region.validation_warnings
         );
+    }
+
+    #[test]
+    fn crop_region_clamps_and_placeholders() {
+        // No page → 1×1 placeholder.
+        let ph = crop_region(None, &BBox { x: 0, y: 0, w: 10, h: 10 });
+        assert_eq!((ph.width(), ph.height()), (1, 1));
+        // Real page, in-bounds bbox → exact crop.
+        let page = DynamicImage::new_rgb8(100, 80);
+        let c = crop_region(Some(&page), &BBox { x: 10, y: 20, w: 30, h: 40 });
+        assert_eq!((c.width(), c.height()), (30, 40));
+        // Bbox overflowing the page is clamped, never panics.
+        let c2 = crop_region(Some(&page), &BBox { x: 90, y: 70, w: 999, h: 999 });
+        assert_eq!((c2.width(), c2.height()), (10, 10));
+        // Degenerate (zero area after clamp) → 1×1 placeholder.
+        let c3 = crop_region(Some(&page), &BBox { x: 100, y: 80, w: 5, h: 5 });
+        assert_eq!((c3.width(), c3.height()), (1, 1));
     }
 
     #[test]
