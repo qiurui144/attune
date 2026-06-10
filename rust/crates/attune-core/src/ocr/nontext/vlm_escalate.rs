@@ -121,27 +121,35 @@ impl VlmEgressToken {
 ///
 /// Returns a [`VlmEgressToken`] — the ONLY way to obtain one. `escalate_region` requires it.
 ///
-/// NOTE(plan-recon 2026-06-10): the plan's Task 13 referenced OutboundPolicy fields
-/// `local_destination` / `contains_l0` and an `OutboundError::L0CloudBlocked` variant that
-/// do NOT exist in the real outbound_gate.rs API. The real `OutboundPolicy` is
-/// { kind, enabled, vault_unlocked, redactor } and errors are { Disabled, VaultLocked,
-/// RedactorRequired }. We adapt to the real API while preserving R7's intent: the caller
-/// maps privacy settings to `enabled` (local-only sets enabled=false) and to the image-level
-/// `image_decision`; supplies a Redactor so PII is stripped before the descriptor leaves.
+/// ## L0-egress integration (C3 image-egress ⨯ develop's L0-egress gate)
+///
+/// The VLM is a **cloud** destination, so the policy passes `local_destination: false`. The
+/// `source_contains_l0` flag threads the source document's privacy tier into the gate: when the
+/// region/source carries `PrivacyTier::L0` ("🔒 永不出网") content, the gate refuses the call with
+/// [`OutboundError::L0CloudBlocked`] (the cloud VLM must NEVER see L0 content — even redacted /
+/// downscaled). The recognize pipeline is responsible for passing the document's real tier; until
+/// the tier is plumbed to this call site, callers MUST pass `true` so the gate **fails closed**
+/// (refuse on unknown) rather than silently leaking. The invariant "L0 content never reaches the
+/// cloud VLM" holds for every caller, known-tier or not.
 pub fn gate_vlm_egress(
     enabled: bool,
     vault_unlocked: bool,
+    source_contains_l0: bool,
     redactor: Option<&Redactor>,
     crop_descriptor: &str,
     region_crop_path: &Path,
     image_decision: ImageEgressDecision,
 ) -> std::result::Result<VlmEgressToken, EgressError> {
-    // (1) String-descriptor gate — fails closed on disabled / vault-locked / no-redactor.
+    // (1) String-descriptor gate — fails closed on disabled / vault-locked / L0-to-cloud /
+    //     no-redactor. The VLM is a cloud endpoint (`local_destination: false`), so any L0
+    //     content (`source_contains_l0`) is refused with OutboundError::L0CloudBlocked.
     let policy = OutboundPolicy {
         kind: OutboundKind::Llm,
         enabled,
         vault_unlocked,
         redactor,
+        local_destination: false,
+        contains_l0: source_contains_l0,
     };
     let redacted_descriptor = OutboundGate::enforce(&policy, crop_descriptor)?;
 
@@ -382,6 +390,7 @@ mod tests {
     }
 
     /// Mint a token the ONLY legal way — through the gate. Used to drive escalate_region tests.
+    /// Non-L0 source (`source_contains_l0=false`) so a cloud VLM call is allowed.
     fn gated_token(dir: &std::path::Path) -> VlmEgressToken {
         let redactor = Redactor::new();
         let src = write_test_png(dir, "src.png", 8);
@@ -389,6 +398,7 @@ mod tests {
         gate_vlm_egress(
             true,
             true,
+            false, // source_contains_l0: non-L0 region → cloud egress permitted
             Some(&redactor),
             "region-crop",
             &src,
@@ -476,16 +486,17 @@ mod tests {
         assert!(should_escalate(VlmEscalationPolicy::Aggressive, true, 7, 8));
     }
 
-    // gate_vlm_egress tests use the REAL OutboundGate API (Disabled / VaultLocked /
-    // RedactorRequired), not the plan's hypothetical L0CloudBlocked. A local-only /
-    // 保守-governor destination is modeled by enabled=false (refuse cloud egress).
+    // gate_vlm_egress tests use the REAL OutboundGate API: Disabled / VaultLocked /
+    // L0CloudBlocked / RedactorRequired. A local-only / 保守-governor destination is modeled
+    // by enabled=false (refuse cloud egress); an L0-classified source is modeled by
+    // source_contains_l0=true (refuse cloud egress — the VLM is a cloud endpoint).
     #[test]
     fn gate_blocks_when_disabled() {
         let dir = tempfile::tempdir().unwrap();
         let src = write_test_png(dir.path(), "s.png", 8);
         // enabled=false models a local-only / privacy-off destination → refuse cloud egress.
         let err = gate_vlm_egress(
-            false, true, None, "region-crop", &src,
+            false, true, false, None, "region-crop", &src,
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )
         .unwrap_err();
@@ -496,11 +507,68 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = write_test_png(dir.path(), "s.png", 8);
         let err = gate_vlm_egress(
-            true, false, None, "region-crop", &src,
+            true, false, false, None, "region-crop", &src,
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )
         .unwrap_err();
         assert!(matches!(err, EgressError::Gate(OutboundError::VaultLocked)));
+    }
+
+    // ---- L0-egress integration: an L0-classified source NEVER reaches the cloud VLM ----
+
+    #[test]
+    fn l0_source_is_refused_egress_to_cloud_vlm() {
+        // SECURITY (C3 ⨯ develop L0-egress gate): a region from an L0-tagged ("永不出网")
+        // source must NEVER egress to the cloud VLM — even fully enabled, vault-unlocked,
+        // with a redactor and an Allow image decision. The gate refuses BEFORE any bytes
+        // are minimized/written: L0CloudBlocked fires ahead of the image step.
+        let dir = tempfile::tempdir().unwrap();
+        let src = write_test_png(dir.path(), "s.png", 8);
+        let redactor = Redactor::new();
+        let dst = dir.path().join("e.png");
+        let err = gate_vlm_egress(
+            true, true, /* source_contains_l0 */ true, Some(&redactor), "region-crop", &src,
+            ImageEgressDecision::AllowDownscaled(dst.clone()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, EgressError::Gate(OutboundError::L0CloudBlocked)),
+            "L0-classified source must be refused egress to the cloud VLM; got {err:?}"
+        );
+        // Fail-closed: the gate refused before minimizing/writing any egress bytes.
+        assert!(!dst.exists(), "no egress crop may be materialized for an L0-refused call");
+    }
+
+    #[test]
+    fn non_l0_source_is_allowed_egress_downscaled() {
+        // The other side of the invariant: a non-L0 source IS allowed (and the bytes that
+        // leave are the downscaled minimized copy per C3), so the gate is not over-blocking.
+        let dir = tempfile::tempdir().unwrap();
+        let src = write_test_png(dir.path(), "s.png", 8);
+        let redactor = Redactor::new();
+        let dst = dir.path().join("e.png");
+        let tok = gate_vlm_egress(
+            true, true, /* source_contains_l0 */ false, Some(&redactor), "region-crop", &src,
+            ImageEgressDecision::AllowDownscaled(dst.clone()),
+        )
+        .expect("non-L0 source under allow policy must mint a token");
+        assert_eq!(tok.egress_crop_path(), dst.as_path());
+        assert!(tok.egress_crop_path().exists(), "minimized egress crop must be materialized");
+    }
+
+    #[test]
+    fn unknown_tier_default_fails_closed() {
+        // Documents the fail-closed contract: callers that have NOT plumbed the source tier
+        // MUST pass source_contains_l0=true, which the gate refuses — never egress when unsure.
+        let dir = tempfile::tempdir().unwrap();
+        let src = write_test_png(dir.path(), "s.png", 8);
+        let redactor = Redactor::new();
+        let err = gate_vlm_egress(
+            true, true, /* unknown tier → conservative */ true, Some(&redactor), "region-crop", &src,
+            ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
+        )
+        .unwrap_err();
+        assert!(matches!(err, EgressError::Gate(OutboundError::L0CloudBlocked)));
     }
     #[test]
     fn gate_fails_closed_without_redactor_on_nonempty() {
@@ -508,7 +576,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = write_test_png(dir.path(), "s.png", 8);
         let err = gate_vlm_egress(
-            true, true, None, "sensitive crop descriptor", &src,
+            true, true, false, None, "sensitive crop descriptor", &src,
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )
         .unwrap_err();
@@ -521,7 +589,7 @@ mod tests {
         let redactor = Redactor::new();
         // PII in the descriptor is stripped before it leaves the device.
         let tok = gate_vlm_egress(
-            true, true, Some(&redactor), "联系电话 13800138000", &src,
+            true, true, false, Some(&redactor), "联系电话 13800138000", &src,
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )
         .unwrap();
@@ -541,7 +609,7 @@ mod tests {
         let src = write_test_png(dir.path(), "s.png", 8);
         let redactor = Redactor::new();
         let err = gate_vlm_egress(
-            true, true, Some(&redactor), "region-crop", &src,
+            true, true, false, Some(&redactor), "region-crop", &src,
             ImageEgressDecision::Refuse,
         )
         .unwrap_err();
@@ -556,7 +624,7 @@ mod tests {
         let dst = dir.path().join("egress.png");
         let redactor = Redactor::new();
         let tok = gate_vlm_egress(
-            true, true, Some(&redactor), "region-crop", &src,
+            true, true, false, Some(&redactor), "region-crop", &src,
             ImageEgressDecision::AllowDownscaled(dst.clone()),
         )
         .unwrap();
@@ -578,7 +646,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let redactor = Redactor::new();
         let err = gate_vlm_egress(
-            true, true, Some(&redactor), "region-crop",
+            true, true, false, Some(&redactor), "region-crop",
             std::path::Path::new("/nonexistent/crop.png"),
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )
