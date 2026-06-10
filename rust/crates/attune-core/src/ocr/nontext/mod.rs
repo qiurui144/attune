@@ -18,6 +18,7 @@ pub mod handwriting;
 pub mod layout;
 pub mod stamp_signature;
 pub mod table_structure;
+pub mod vlm_escalate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
