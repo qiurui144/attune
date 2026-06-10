@@ -65,3 +65,31 @@ fn recognize_regions_no_models_degrades_to_empty_envelope() {
         .stdout(predicate::str::contains(r#""local_regions": 0"#))
         .stdout(predicate::str::contains(r#""total": 0"#));
 }
+
+/// Real-model agent-invocable E2E (Task 5): with a layout model bundled at the data_dir
+/// path + a real document image, the CLI surface a plugin/agent dispatches must return a
+/// FUNCTIONAL engine status + non-empty regions. Env-gated + #[ignore] (the *.onnx model is
+/// gitignored and not committed). Run with:
+///   ATTUNE_TEST_LAYOUT_MODEL pointing at a layout.onnx already copied to
+///   <data_dir>/models/ppocr/layout/layout.onnx, plus ATTUNE_TEST_LAYOUT_IMAGE=<doc.png>:
+///   cargo test -p attune-cli --features nontext --release \
+///     recognize_regions_real_model_is_functional -- --ignored --nocapture
+#[test]
+#[ignore]
+fn recognize_regions_real_model_is_functional() {
+    let image = match std::env::var("ATTUNE_TEST_LAYOUT_IMAGE") {
+        Ok(i) => i,
+        Err(_) => {
+            eprintln!("skip: set ATTUNE_TEST_LAYOUT_IMAGE (and ensure the layout model is at <data_dir>/models/ppocr/layout/layout.onnx)");
+            return;
+        }
+    };
+    attune_cmd()
+        .args(["recognize-regions"])
+        .arg(&image)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""engine_status": "functional""#))
+        // at least one detected region (regions array is non-empty)
+        .stdout(predicate::str::contains(r#""kind""#));
+}

@@ -4,12 +4,12 @@
 //! PaddleOCR's PP-Structure layout PicoDet). `layout_cdla.onnx` (10 Chinese-Document-
 //! Layout-Analysis classes: table / figure / *_caption / header / footer / reference /
 //! equation / text / title). Input `image` f32 NCHW [1,3,800,608]; outputs are the RAW
-//! PicoDet head (NO baked-in NMS): 4 classification maps (post-sigmoid probs, C classes)
-//! + 4 DFL box-distribution maps (4 sides × 8 reg bins) at strides 8/16/32/64. We do the
-//! post-processing (DFL decode → boxes, threshold, NMS) here — verified against the python
-//! onnxruntime reference on real document scans before this Rust port was written.
+//! PicoDet head with NO baked-in NMS — 4 classification maps (post-sigmoid probs, C classes)
+//! and 4 DFL box-distribution maps (4 sides times 8 reg bins) at strides 8/16/32/64.
+//! We run the post-processing here (DFL decode into boxes, then score-threshold and NMS),
+//! verified against the python onnxruntime reference on real document scans before this port.
 //!
-//! R4 (riscv64 / K3 feasibility) — measured 2026-06-10:
+//! R4 (riscv64 / K3 feasibility) — re-measured 2026-06-11 with the real ort layout path:
 //! `cargo build -p attune-core --features nontext --target riscv64gc-unknown-linux-gnu`
 //! FAILS, but NOT on ort/onnxruntime — it dies earlier in pre-existing C++ build-deps
 //! (`cxx`, `clipper-sys`) because the riscv64 g++ has no C++ stdlib sysroot wired. This is
@@ -312,33 +312,22 @@ fn decode_picodet(tensors: &[(Vec<usize>, Vec<f32>)]) -> Result<Vec<Det>> {
                 continue;
             }
 
-            // DFL decode: reg[a] is 4*REG_MAX, softmax each side then expected value * stride
+            // DFL decode: reg[a] is 4*REG_MAX, softmax each side then expected value * stride.
             let reg_base = a * 4 * REG_MAX;
-            let mut dist = [0f32; 4];
-            for side in 0..4 {
-                let off = reg_base + side * REG_MAX;
-                let mut maxv = f32::NEG_INFINITY;
-                for k in 0..REG_MAX {
-                    maxv = maxv.max(reg[off + k]);
-                }
-                let mut sum = 0f32;
-                let mut exps = [0f32; REG_MAX];
-                for k in 0..REG_MAX {
-                    let e = (reg[off + k] - maxv).exp();
-                    exps[k] = e;
-                    sum += e;
-                }
-                let mut acc = 0f32;
-                for k in 0..REG_MAX {
-                    acc += (exps[k] / sum) * k as f32;
-                }
-                dist[side] = acc * stride as f32;
-            }
+            let dfl_dist = |side: usize| -> f32 {
+                let bins = &reg[reg_base + side * REG_MAX..reg_base + (side + 1) * REG_MAX];
+                let maxv = bins.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let exps: [f32; REG_MAX] = std::array::from_fn(|k| (bins[k] - maxv).exp());
+                let sum: f32 = exps.iter().sum();
+                let acc: f32 = exps.iter().enumerate().map(|(k, &e)| (e / sum) * k as f32).sum();
+                acc * stride as f32
+            };
+            let (dl, dt, dr, db) = (dfl_dist(0), dfl_dist(1), dfl_dist(2), dfl_dist(3));
             dets.push(Det {
-                x1: cx - dist[0],
-                y1: cy - dist[1],
-                x2: cx + dist[2],
-                y2: cy + dist[3],
+                x1: cx - dl,
+                y1: cy - dt,
+                x2: cx + dr,
+                y2: cy + db,
                 score: best_s,
                 class: best_c,
             });
