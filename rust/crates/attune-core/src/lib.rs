@@ -122,8 +122,16 @@ pub mod agent_runner;
 // 是 footgun. 删了它们, 同时把 LicenseCache 启动时的死代码也从 state.rs 删掉.
 pub mod member_session;
 pub mod cloud_client;
+// SPKI cert-pinning for cloud accounts connections (slice8 §3.2). Layers a leaf
+// SubjectPublicKeyInfo pin on top of standard webpki chain validation; defends
+// against DNS-hijack / network MITM. See cert_pin.rs.
+pub mod cert_pin;
 pub mod plugin_sync;
 pub mod plugin_sig;
+// W1 plugin trust-anchor allowlist (cloud slice8 §5.6.1). The immutable trust
+// root for auto-installed plugins; defends against a compromised accounts server
+// substituting an attacker signing key. See plugin_anchor.rs.
+pub mod plugin_anchor;
 pub mod classifier;
 pub mod clusterer;
 pub mod crypto;

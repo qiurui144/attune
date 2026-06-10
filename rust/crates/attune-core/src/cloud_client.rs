@@ -25,12 +25,26 @@ impl CloudClient {
         Self {
             base_url: base_url.into(),
             session_cookie: None,
-            http: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
-                .cookie_store(true) // 自动管理 session cookie
-                .build()
-                .expect("build http client"),
+            http: Self::build_http(),
         }
+    }
+
+    /// Build the blocking HTTP client with SPKI cert-pinning enforced on the TLS
+    /// layer (cloud slice8 §3.2). The pinned `rustls::ClientConfig` runs standard
+    /// webpki chain validation AND additionally requires the accounts server's
+    /// leaf SPKI ∈ [`crate::cert_pin::ACCOUNTS_SPKI_PINS`]. When that pin set is
+    /// empty (pin provisioned at release time, §10.3 fail-safe) the config is
+    /// equivalent to standard webpki — no regression vs. an unpinned client.
+    fn build_http() -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .cookie_store(true) // 自动管理 session cookie
+            // Pass the bare ClientConfig: reqwest wraps it in Option internally
+            // and downcasts to Option<rustls::ClientConfig> (passing Some(..) here
+            // would double-wrap → "Unknown TLS backend").
+            .use_preconfigured_tls(crate::cert_pin::pinned_client_config())
+            .build()
+            .expect("build http client")
     }
 
     /// 用持久化 session token 构造客户端 (sync-plugins 等跨进程调用路径)
