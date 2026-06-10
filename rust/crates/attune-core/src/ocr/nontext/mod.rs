@@ -216,8 +216,9 @@ pub fn recognize_region(
 /// Typed output of the shared visual-understanding pass (ADR-0008): the recognized regions
 /// plus the OCR cross-validation correction report. This is the SINGLE result type every
 /// caller of the capability sees — REST handler, CLI subcommand, and any plugin invoking
-/// the capability. Industry semantics (e.g. "this table is a contract-clause table") are
-/// layered by pro plugins ON TOP of this generic output; this struct stays zero-industry.
+/// the capability. Domain-specific interpretation (what a given table/stamp/figure *means*
+/// in a vertical) is layered by pro plugins ON TOP of this generic output; this struct and
+/// every RegionKind stay zero-vertical-binding (R8 OSS-boundary).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecognizePageResult {
     pub regions: Vec<Region>,
