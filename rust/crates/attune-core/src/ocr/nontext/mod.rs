@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod checkbox;
 pub mod layout;
+pub mod stamp_signature;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
