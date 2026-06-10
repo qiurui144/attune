@@ -9,8 +9,12 @@
 use crate::ocr::{BBox, RawLine};
 use serde::{Deserialize, Serialize};
 
+pub mod chart;
 pub mod checkbox;
 pub mod cross_validate;
+pub mod figure;
+pub mod formula;
+pub mod handwriting;
 pub mod layout;
 pub mod stamp_signature;
 pub mod table_structure;
@@ -172,6 +176,42 @@ pub trait RegionRecognizer: Send + Sync {
     fn cost_tier(&self) -> CostTier;
 }
 
+/// Dispatch a single detected region to its kind's recognizer. 🆓/⚡ only — no VLM here.
+/// Returns a fully-populated Region with source=Local and confidence from det_confidence.
+pub fn recognize_region(
+    layout: &layout::LayoutRegion,
+    crop: &DynamicImage,
+    ctx: &RegionCtx,
+    table_model: &std::path::Path,
+) -> Result<Region> {
+    let result = match layout.kind {
+        RegionKind::Checkbox => checkbox::CheckboxRecognizer.recognize(crop, ctx)?,
+        RegionKind::Stamp => stamp_signature::StampRecognizer.recognize(crop, ctx)?,
+        RegionKind::Signature => stamp_signature::SignatureRecognizer.recognize(crop, ctx)?,
+        RegionKind::Table => table_structure::TableStructureRecognizer {
+            model_path: table_model.to_path_buf(),
+        }
+        .recognize(crop, ctx)?,
+        RegionKind::Chart => chart::ChartRecognizer.recognize(crop, ctx)?,
+        RegionKind::Figure => figure::FigureRecognizer.recognize(crop, ctx)?,
+        RegionKind::Formula => formula::FormulaRecognizer.recognize(crop, ctx)?,
+        RegionKind::Handwriting => handwriting::HandwritingRecognizer.recognize(crop, ctx)?,
+        RegionKind::Text | RegionKind::FormField => RegionResult::UnrecognizedV1 {
+            reason: "handled-by-plain-ocr".into(),
+        },
+    };
+    Ok(Region {
+        kind: layout.kind,
+        bbox: layout.bbox,
+        page: ctx.page,
+        det_confidence: layout.det_confidence,
+        result,
+        source: RegionSource::Local,
+        confidence: layout.det_confidence,
+        validation_warnings: vec![],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +239,41 @@ mod tests {
     fn recognizer_trait_is_object_safe() {
         // Compile-time proof the trait is dyn-compatible (we store Box<dyn RegionRecognizer>).
         fn _assert(_: &dyn RegionRecognizer) {}
+    }
+
+    #[test]
+    fn recognize_region_dispatches_checkbox() {
+        use image::DynamicImage;
+        let lr = layout::LayoutRegion {
+            kind: RegionKind::Checkbox,
+            bbox: BBox { x: 0, y: 0, w: 1, h: 1 },
+            det_confidence: 0.8,
+        };
+        // new_rgb8 is all-black → checkbox detector reads it as checked.
+        let crop = DynamicImage::new_rgb8(10, 10);
+        let ctx = RegionCtx { ocr_lines: vec![], page: 2 };
+        let r = recognize_region(&lr, &crop, &ctx, std::path::Path::new("/no.onnx")).unwrap();
+        assert_eq!(r.page, 2);
+        assert_eq!(r.source, RegionSource::Local);
+        assert!(matches!(r.result, RegionResult::CheckboxV1 { .. }));
+    }
+
+    #[test]
+    fn recognize_region_table_missing_model_unrecognized() {
+        use image::DynamicImage;
+        let lr = layout::LayoutRegion {
+            kind: RegionKind::Table,
+            bbox: BBox { x: 0, y: 0, w: 1, h: 1 },
+            det_confidence: 0.8,
+        };
+        let r = recognize_region(
+            &lr,
+            &DynamicImage::new_rgb8(4, 4),
+            &RegionCtx { ocr_lines: vec![], page: 0 },
+            std::path::Path::new("/no.onnx"),
+        )
+        .unwrap();
+        assert!(matches!(r.result, RegionResult::UnrecognizedV1 { .. }));
     }
 
     #[test]
