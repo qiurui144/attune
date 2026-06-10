@@ -23,6 +23,9 @@ pub mod profile;
 pub mod profile_registry;
 pub mod structured;
 
+#[cfg(feature = "nontext")]
+pub mod nontext;
+
 use crate::error::{Result, VaultError};
 use profile::OcrProfile;
 use std::path::Path;
@@ -37,7 +40,7 @@ pub struct RawLine {
 }
 
 /// 像素坐标 bbox（左上角 + 宽高）。
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BBox {
     pub x: u32,
     pub y: u32,
