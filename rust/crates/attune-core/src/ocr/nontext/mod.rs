@@ -157,6 +157,17 @@ pub struct CorrectionSummary {
     pub accepted: u32,
 }
 
+use crate::error::Result;
+use image::DynamicImage;
+
+/// Internal extension point: one recognizer per RegionKind (spec §6.4).
+pub trait RegionRecognizer: Send + Sync {
+    fn kind(&self) -> RegionKind;
+    /// ⚡/🆓 local recognition of a cropped region.
+    fn recognize(&self, region_crop: &DynamicImage, ctx: &RegionCtx) -> Result<RegionResult>;
+    fn cost_tier(&self) -> CostTier;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +189,12 @@ mod tests {
             serde_json::to_string(&RegionKind::FormField).unwrap(),
             r#""form_field""#
         );
+    }
+
+    #[test]
+    fn recognizer_trait_is_object_safe() {
+        // Compile-time proof the trait is dyn-compatible (we store Box<dyn RegionRecognizer>).
+        fn _assert(_: &dyn RegionRecognizer) {}
     }
 
     #[test]
