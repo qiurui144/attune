@@ -18,3 +18,4 @@ ADR 格式: status (proposed / accepted / superseded) + context + decision + con
 | [0005](0005-f17-full-path-pii-redact.md) | F-17 全路径 PII redact (ChatEngine + outbound audit) | Accepted | 2026-05-14 |
 | [0006](0006-resource-governor-cost-tier.md) | Resource Governor + 三层成本治理契约 | Accepted | 2026-04-27 |
 | [0007](0007-model-agnostic-llm-infra.md) | Model-Agnostic LLM Infra (弱模型兜底加固) | Accepted | 2026-05-22 |
+| [0008](0008-shared-visual-understanding-agent.md) | Shared Visual-Understanding Agent (插件消费, 绝不自带视觉) | Accepted | 2026-06-10 |
