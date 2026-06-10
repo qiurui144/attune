@@ -588,12 +588,16 @@ formula / handwriting / stamp / signature + checkbox），跑 🆓/⚡ 本地识
 校验，仅对低置信/分歧 region 升级 💰 VLM。所有代码门控在 `nontext` feature 后（默认 OFF →
 plain OCR，`regions: None`，字节级旧行为）。
 
-> ⚠️ **SCAFFOLD 状态（C1 诚实标注，2026-06-10）**：Stage1 布局检测（`layout::detect_regions`）
-> **当前返回空**，因为 layout ONNX 模型**未捆绑**（pending model sourcing，见 spec R3/R4）。因此
-> 在已发布构建里识别**尚不可用**：`recognize_page` / CLI / REST 响应都带显式 `engine_status`
-> 字段（`scaffold-no-layout-model` / `functional` / `layout-error`），调用方据此**知道**识别是否
-> 真功能。R6 stamp / R7 checkbox 等无需 ONNX 的识别器代码已就绪，但因 Stage1 不产出 region 而
-> **当前无法被触达**（被 Stage1 门控）。layout ONNX 接入是单独决策（pending），不在本批修复范围。
+> ✅ **FUNCTIONAL 状态（C1 诚实标注，2026-06-10→2026-06-11 更新）**：Stage1 布局检测
+> （`layout::detect_regions`）**已接入真实 ONNX 推理**（RapidLayout PP-Structure CDLA PicoDet，
+> Apache-2.0）。模型**未捆绑但首用自动拉取**（mirrors PpOcr，`HF_ENDPOINT` 可指向镜像）：模型存在
+> 且推理成功 → `engine_status=functional`，region 反映真实布局；推理失败 → `layout-error`（上浮，
+> 绝不伪装空页，I1）；仅离线/无下载环境模型缺失 → `scaffold-no-layout-model`，降级 plain OCR。
+> `recognize_page` / CLI / REST 响应都带显式 `engine_status` 字段，调用方据此**知道**识别状态。
+> Stage1 产出 region 后 R6 stamp / R7 checkbox 等识别器跑在真实 per-region 裁剪上。
+>
+> ⚠️ **诚实边界（不可过度宣称）**：检测**准确率尚未对标注集验证**（无 mAP 实测）。后续：SLANet
+> 表格结构模型 + 💰 VLM Stage4 升级路径（type-enforced gate，当前未接入）。
 
 **运行**：`cargo test -p attune-core --features nontext`（lib + golden）；
 `cargo test -p attune-cli --features nontext`（agent-invocable CLI E2E）。

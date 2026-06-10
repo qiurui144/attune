@@ -216,12 +216,16 @@ pub fn recognize_region(
 /// HONEST status of the recognition engine, surfaced to every caller so nobody mistakes a
 /// degraded/scaffold pass for a functioning one (the C1 truth from adversarial review).
 ///
-/// SCAFFOLD: Stage1 layout detection (`layout::detect_regions`) currently returns empty
-/// because the layout ONNX model is NOT bundled (pending model sourcing, spec R3/R4). When
-/// no model is present the only honest answer is `ScaffoldNoLayoutModel` — recognition is
-/// not yet functional, callers must not claim it recognizes structure. Once a real layout
-/// model is wired the status becomes `Functional` (model present) or `LayoutError` (the
-/// model is present but inference failed — surfaced, never masked as "empty page").
+/// FUNCTIONAL: Stage1 layout detection (`layout::detect_regions`) runs real ONNX inference
+/// (RapidLayout PP-Structure CDLA PicoDet) — the model is NOT bundled but is auto-fetched on
+/// first use (mirrors PpOcr). When the model is present and inference succeeds the status is
+/// `Functional` and regions reflect real layout detection; when inference fails it is
+/// `LayoutError` (surfaced, never masked as an "empty page", I1). The model is only absent in
+/// an offline/no-download environment, in which case the honest answer is
+/// `ScaffoldNoLayoutModel` and recognition degrades to plain OCR.
+///
+/// HONESTY NOTE: detection accuracy is NOT yet validated against a labeled set (no mAP
+/// measured). Follow-ups: SLANet table-structure model and the 💰 VLM Stage4 escalation path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EngineStatus {
