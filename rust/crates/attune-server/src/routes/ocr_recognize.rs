@@ -62,7 +62,6 @@ pub async fn post_recognize(
     mut multipart: Multipart,
 ) -> RouteResult<Json<OcrRecognizeResponse>> {
     let mut file_bytes: Option<Vec<u8>> = None;
-    let mut filename: Option<String> = None;
     let mut profile_id: Option<String> = None;
     let mut vlm_escalation: Option<String> = None;
 
@@ -72,7 +71,6 @@ pub async fn post_recognize(
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "file" => {
-                filename = field.file_name().map(|s| s.to_string());
                 let bytes = field.bytes().await.map_err(|e| {
                     err("invalid-input", &format!("file read: {e}"), StatusCode::BAD_REQUEST)
                 })?;
