@@ -186,6 +186,135 @@ impl EmbeddingProvider for OllamaProvider {
     }
 }
 
+/// OpenAI 兼容 embedding 客户端（`POST {endpoint}/embeddings`）。
+///
+/// 区别于 [`OllamaProvider`]（Ollama 原生 `/api/embed`）：本 provider 走 OpenAI
+/// `/v1/embeddings` 协议（`{"model","input"}` → `{"data":[{"embedding":[...]}],...}`），
+/// 因此可指向**任意** OpenAI 兼容 endpoint —— OpenAI、DeepSeek、本地 vLLM / LM Studio、
+/// attune Pro gateway，以及 K3 scheduler（G4 — K3 一体机把 embedding 指向本机调度器）。
+///
+/// `endpoint` 约定为不含 `/embeddings` 的 base（如 `https://api.openai.com/v1`），
+/// 与 `llm.rs::OpenAiLlmProvider` 一致。`api_key` 为空时不发 `Authorization` 头
+/// （本地 vLLM / 无鉴权 endpoint 友好）。
+pub struct OpenAiEmbeddingProvider {
+    client: reqwest::Client,
+    endpoint: String,
+    api_key: String,
+    model: String,
+    dims: usize,
+}
+
+#[derive(Deserialize)]
+struct OpenAiEmbeddingResponse {
+    data: Vec<OpenAiEmbeddingDatum>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiEmbeddingDatum {
+    embedding: Vec<f32>,
+}
+
+impl OpenAiEmbeddingProvider {
+    pub fn new(endpoint: &str, api_key: &str, model: &str, dims: usize) -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("HTTP client"),
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            model: model.to_string(),
+            dims,
+        }
+    }
+}
+
+impl EmbeddingProvider for OpenAiEmbeddingProvider {
+    fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)> {
+        // 与 OllamaProvider 一致的 empty/whitespace 边界保护:empty chunk 占位 zero vec,
+        // 避免单个空 chunk 让整批 RPC 失败 / 污染 retrieval(零向量 cosine 得 0 分自然下沉)。
+        let mut empty_indices = Vec::new();
+        let mut non_empty: Vec<&str> = Vec::new();
+        for (i, t) in texts.iter().enumerate() {
+            if t.trim().is_empty() {
+                empty_indices.push(i);
+            } else {
+                non_empty.push(t);
+            }
+        }
+
+        let joined = non_empty.join("");
+        let est_tokens = crate::cost::estimate_tokens(&joined, &self.model);
+        let usage = crate::usage::TokenUsage {
+            tokens_in: est_tokens as u32,
+            tokens_out: 0,
+            cached_in: 0,
+            model: self.model.clone(),
+            provider: "openai_compat".into(),
+        };
+
+        if non_empty.is_empty() {
+            return Ok((vec![vec![0.0f32; self.dims]; texts.len()], usage));
+        }
+
+        let url = format!("{}/embeddings", self.endpoint);
+        let model = self.model.clone();
+        let api_key = self.api_key.clone();
+        let input: Vec<String> = non_empty.iter().map(|s| s.to_string()).collect();
+        let client = self.client.clone();
+
+        let response = embed_block_on(async move {
+            let body = serde_json::json!({"model": model, "input": input});
+            let mut req = client.post(&url).json(&body);
+            // 空 api_key → 不发 Authorization(本地 vLLM / 无鉴权 endpoint)。
+            if !api_key.is_empty() {
+                req = req.header("Authorization", format!("Bearer {api_key}"));
+            }
+            req.send()
+                .await
+                .map_err(|e| VaultError::LlmUnavailable(format!("openai embed request: {e}")))?
+                .json::<OpenAiEmbeddingResponse>()
+                .await
+                .map_err(|e| VaultError::LlmUnavailable(format!("openai embed response: {e}")))
+        })?;
+
+        let embeddings: Vec<Vec<f32>> = response.data.into_iter().map(|d| d.embedding).collect();
+
+        // 把 empty 占位 zero vec 插回原 index 顺序。
+        if empty_indices.is_empty() {
+            return Ok((embeddings, usage));
+        }
+        let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+        let mut non_empty_iter = embeddings.into_iter();
+        for i in 0..texts.len() {
+            if empty_indices.contains(&i) {
+                out.push(vec![0.0f32; self.dims]);
+            } else {
+                out.push(non_empty_iter.next().unwrap_or_else(|| vec![0.0f32; self.dims]));
+            }
+        }
+        Ok((out, usage))
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dims
+    }
+
+    fn is_available(&self) -> bool {
+        let url = format!("{}/models", self.endpoint);
+        let api_key = self.api_key.clone();
+        let client = self.client.clone();
+        embed_block_on(async move {
+            let mut req = client.get(&url);
+            if !api_key.is_empty() {
+                req = req.header("Authorization", format!("Bearer {api_key}"));
+            }
+            Ok(req.send().await.map(|r| r.status().is_success()).unwrap_or(false))
+        })
+        .unwrap_or(false)
+    }
+}
+
 /// 确定性 mock embedding provider — 仅供测试。
 ///
 /// 把文本按 token（whitespace + 中文逐字）散列成固定维度向量：相同文本得相同向量，
@@ -289,5 +418,75 @@ mod tests {
         let provider = OllamaProvider::new("http://localhost:11434", "bge-m3", 1024);
         assert_eq!(provider.dimensions(), 1024);
         // 不测试实际连接（CI 环境可能无 Ollama）
+    }
+
+    #[test]
+    fn openai_embedding_provider_creation_trims_endpoint() {
+        let p = OpenAiEmbeddingProvider::new("https://api.openai.com/v1/", "sk-x", "text-embedding-3-small", 1536);
+        assert_eq!(p.dimensions(), 1536);
+        assert_eq!(p.endpoint, "https://api.openai.com/v1"); // trailing slash trimmed
+    }
+
+    /// G4 — proves the OpenAI-compatible embedding provider routes its request to a
+    /// **configurable** endpoint (not a hardcoded Ollama URL) and parses the
+    /// `/v1/embeddings` response shape. Uses a hand-rolled single-shot TcpListener
+    /// mock (no new dev-deps); the captured request line + body assert that the
+    /// custom base URL + model were honoured — exactly the K3-scheduler routing G4 wants.
+    #[test]
+    fn openai_embedding_routes_to_custom_endpoint() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let cap2 = captured.clone();
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            *cap2.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+            // OpenAI /v1/embeddings response shape: data[].embedding
+            let body = r#"{"data":[{"embedding":[0.1,0.2,0.3,0.4]}],"model":"k3-embed"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        });
+
+        let endpoint = format!("http://127.0.0.1:{port}/v1");
+        let provider = OpenAiEmbeddingProvider::new(&endpoint, "sk-test", "k3-embed", 4);
+        let (vecs, usage) = provider.embed(&["hello k3"]).expect("embed ok");
+
+        handle.join().unwrap();
+
+        assert_eq!(vecs.len(), 1);
+        assert_eq!(vecs[0], vec![0.1f32, 0.2, 0.3, 0.4]);
+        assert_eq!(usage.provider, "openai_compat");
+        assert_eq!(usage.model, "k3-embed");
+
+        // reqwest lowercases header names on the wire — match case-insensitively.
+        let req = captured.lock().unwrap().clone();
+        let req_lc = req.to_lowercase();
+        // Routed to the configured endpoint's /embeddings path, with bearer auth + the configured model.
+        assert!(req.starts_with("POST /v1/embeddings "), "request line was: {req}");
+        assert!(req_lc.contains("authorization: bearer sk-test"), "missing bearer auth: {req}");
+        assert!(req.contains("\"model\":\"k3-embed\""), "model not in body: {req}");
+    }
+
+    /// Empty / whitespace inputs short-circuit to a zero vector without any network
+    /// call — same boundary contract as OllamaProvider / OrtEmbeddingProvider.
+    #[test]
+    fn openai_embedding_all_empty_short_circuits() {
+        // Endpoint is bogus on purpose: if the short-circuit fails we'd get a network error.
+        let provider = OpenAiEmbeddingProvider::new("http://127.0.0.1:1/v1", "", "m", 3);
+        let (vecs, _usage) = provider.embed(&["", "   "]).expect("empty short-circuits");
+        assert_eq!(vecs.len(), 2);
+        assert_eq!(vecs[0], vec![0.0f32; 3]);
+        assert_eq!(vecs[1], vec![0.0f32; 3]);
     }
 }

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use attune_core::classifier::Classifier;
 use attune_core::clusterer::ClusterSnapshot;
-use attune_core::embed::{EmbeddingProvider, OllamaProvider};
+use attune_core::embed::{EmbeddingProvider, OllamaProvider, OpenAiEmbeddingProvider};
 use attune_core::index::FulltextIndex;
 use attune_core::llm::{LlmProvider, OllamaLlmProvider, OpenAiLlmProvider};
 use attune_core::resource_governor::{global_registry, TaskKind};
@@ -359,31 +359,22 @@ impl AppState {
             };
         }
 
-        // Embedding 提供者选择：
-        // - 默认 ONNX (Xenova/bge-m3 quantized, CPU) — 自包含、零外部依赖
-        // - ATTUNE_EMBEDDING_BACKEND=ollama 强制走 Ollama bge-m3 (full precision, GPU 可用)
-        //   benchmark / Pro 部署用，质量更好但需要 Ollama 运行
+        // Embedding 提供者选择（优先级见 build_embedding_from_settings 文档）：
+        // 0. settings.embedding.endpoint 非空 → OpenAI 兼容（G4 — K3 scheduler / 任意 endpoint）
+        // 1. ATTUNE_EMBEDDING_BACKEND=ollama → Ollama bge-m3 (full precision, GPU 可用)
+        // 2. 默认 ONNX (Xenova/bge-m3 quantized, CPU) — 自包含、零外部依赖
+        // 3. ONNX 不可用 → 回退 Ollama bge-m3
+        let embed_settings_json = {
+            let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+            vault_guard
+                .store()
+                .get_meta("app_settings")
+                .ok()
+                .flatten()
+                .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        };
         if let Ok(mut guard) = self.embedding.lock() {
-            let prefer_ollama = std::env::var("ATTUNE_EMBEDDING_BACKEND")
-                .map(|v| v.eq_ignore_ascii_case("ollama"))
-                .unwrap_or(false);
-
-            let provider: Arc<dyn EmbeddingProvider> = if prefer_ollama {
-                tracing::info!("Embedding: Ollama bge-m3 (ATTUNE_EMBEDDING_BACKEND=ollama)");
-                Arc::new(OllamaProvider::default())
-            } else {
-                match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
-                    Ok(p) => {
-                        tracing::info!("Embedding: OrtEmbeddingProvider (Xenova/bge-m3 ONNX quantized)");
-                        Arc::new(p)
-                    }
-                    Err(e) => {
-                        tracing::info!("ONNX embedding unavailable ({e}), falling back to Ollama bge-m3");
-                        Arc::new(OllamaProvider::default())
-                    }
-                }
-            };
-            *guard = Some(provider);
+            *guard = Some(build_embedding_from_settings(&embed_settings_json));
         }
 
         // Multi-layer memory (2026-05-18): build the memory vector index from the
@@ -1992,6 +1983,74 @@ fn build_llm_from_settings(
     })
 }
 
+/// 按 settings 构建 embedding provider（G4 — embedding endpoint 可配置）。
+///
+/// 优先级：
+/// 1. `settings.embedding.endpoint` 非空 → [`OpenAiEmbeddingProvider`]（OpenAI 兼容，
+///    指向任意 endpoint：OpenAI / DeepSeek / 本地 vLLM / attune Pro gateway / K3 scheduler）。
+///    读 `endpoint` / `api_key` / `model` / `dims`（缺省 model=`bge-m3`、dims=1024，与
+///    ONNX/Ollama 默认对齐，使三种 backend 维度一致、向量索引可复用）。
+/// 2. `ATTUNE_EMBEDDING_BACKEND=ollama` → Ollama bge-m3（full precision，需 Ollama 运行）。
+/// 3. 默认 ONNX（Xenova/bge-m3 quantized，CPU）— 自包含、零外部依赖。
+/// 4. ONNX 不可用 → 回退 Ollama bge-m3。
+///
+/// 镜像 [`build_llm_from_settings`]：endpoint 走 `settings.embedding.*`，与 `settings.llm.*`
+/// 同形（provider/endpoint/api_key/model），让 K3 把 embedding 指向本机 scheduler 时零特例。
+fn build_embedding_from_settings(
+    settings_json: &Option<serde_json::Value>,
+) -> Arc<dyn EmbeddingProvider> {
+    // 1. settings.embedding.endpoint 非空 → OpenAI 兼容
+    let configured = settings_json.as_ref().and_then(|settings| {
+        let embedding = settings.get("embedding")?;
+        let endpoint = embedding
+            .get("endpoint")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())?;
+        let api_key = embedding.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let model = embedding
+            .get("model")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("bge-m3")
+            .to_string();
+        // dims 默认 1024(bge-m3 / 与 VectorIndex 默认对齐);自定义 endpoint 模型维度不同时显式配。
+        let dims = embedding
+            .get("dims")
+            .and_then(|v| v.as_u64())
+            .map(|d| d as usize)
+            .filter(|d| *d > 0)
+            .unwrap_or(1024);
+        tracing::info!("Embedding: OpenAI-compatible endpoint {endpoint} (model={model}, dims={dims})");
+        Some(Arc::new(OpenAiEmbeddingProvider::new(&endpoint, &api_key, &model, dims))
+            as Arc<dyn EmbeddingProvider>)
+    });
+    if let Some(p) = configured {
+        return p;
+    }
+
+    // 2. ATTUNE_EMBEDDING_BACKEND=ollama
+    let prefer_ollama = std::env::var("ATTUNE_EMBEDDING_BACKEND")
+        .map(|v| v.eq_ignore_ascii_case("ollama"))
+        .unwrap_or(false);
+    if prefer_ollama {
+        tracing::info!("Embedding: Ollama bge-m3 (ATTUNE_EMBEDDING_BACKEND=ollama)");
+        return Arc::new(OllamaProvider::default());
+    }
+
+    // 3. 默认 ONNX,4. 回退 Ollama
+    match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
+        Ok(p) => {
+            tracing::info!("Embedding: OrtEmbeddingProvider (Xenova/bge-m3 ONNX quantized)");
+            Arc::new(p)
+        }
+        Err(e) => {
+            tracing::info!("ONNX embedding unavailable ({e}), falling back to Ollama bge-m3");
+            Arc::new(OllamaProvider::default())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2031,5 +2090,41 @@ mod tests {
         // set_usage is None-tolerant (no-op when arg is None).
         state.set_usage(None);
         assert!(state.usage().is_none(), "set_usage(None) leaves aggregator None");
+    }
+
+    /// G4 — settings.embedding.endpoint drives the embedding provider to an
+    /// OpenAI-compatible endpoint (1536 dims here proves the configured dims are read).
+    /// We assert dimensions rather than network behaviour (covered by embed.rs unit test).
+    #[test]
+    fn embedding_settings_endpoint_selects_openai_compat() {
+        let settings = Some(serde_json::json!({
+            "embedding": {
+                "endpoint": "http://127.0.0.1:9/v1",
+                "api_key": "sk-x",
+                "model": "text-embedding-3-small",
+                "dims": 1536
+            }
+        }));
+        let provider = build_embedding_from_settings(&settings);
+        // OpenAiEmbeddingProvider reports the configured dims; Ort/Ollama defaults are 1024/0.
+        assert_eq!(provider.dimensions(), 1536, "configured embedding endpoint + dims must route to OpenAI-compatible provider");
+    }
+
+    /// G4 — empty/absent embedding settings must NOT pick the OpenAI path (falls through
+    /// to ATTUNE_EMBEDDING_BACKEND / ONNX / Ollama). An empty endpoint string is treated
+    /// as unconfigured. We force the Ollama branch via env to avoid downloading the ONNX
+    /// model in CI, and assert the default 1024 dims (not the 1536 OpenAI path above).
+    #[test]
+    fn embedding_settings_empty_endpoint_does_not_select_openai() {
+        // SAFETY: single-threaded test mutating process env; restored before return.
+        let prev = std::env::var("ATTUNE_EMBEDDING_BACKEND").ok();
+        std::env::set_var("ATTUNE_EMBEDDING_BACKEND", "ollama");
+        let settings = Some(serde_json::json!({ "embedding": { "endpoint": "" } }));
+        let provider = build_embedding_from_settings(&settings);
+        assert_eq!(provider.dimensions(), 1024, "empty endpoint must not route to OpenAI provider");
+        match prev {
+            Some(v) => std::env::set_var("ATTUNE_EMBEDDING_BACKEND", v),
+            None => std::env::remove_var("ATTUNE_EMBEDDING_BACKEND"),
+        }
     }
 }
