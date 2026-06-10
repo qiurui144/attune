@@ -230,7 +230,20 @@ pub fn summarize(
         bill.new_chunks += 1;
         let system = MAP_SYSTEM_PROMPT;
         let user = format!("段落：\n{candidate}");
-        let (summary, usage) = llms.cheap.chat(system, &user)?;
+        // §4.5.E graceful degrade: a per-block map call that errors (transport hiccup, gateway
+        // 429/5xx) or returns an empty/whitespace summary must NOT sink a whole long-doc summary
+        // — fall back to the local extractive candidate as this block's summary. The candidate is
+        // already a faithful (if less compressed) representation, so the reduce stage still has
+        // real content. Only a *total* provider outage (every block failing) degrades quality,
+        // never crashes; the reduce call's own failure is still surfaced (a missing final
+        // synthesis is a genuine error worth a 503, unlike one noisy block).
+        let (summary, usage) = match llms.cheap.chat(system, &user) {
+            Ok((s, u)) if !s.trim().is_empty() => (s, u),
+            _ => (
+                candidate.clone(),
+                crate::usage::TokenUsage::empty("deepsum-map-degraded", &cheap_model),
+            ),
+        };
         bill.map_llm_tokens.add(&usage);
         // Approximate the map token counts when the provider reports none (mock). MUST use the
         // SAME tokenizer as the naive baseline (`cost::estimate_tokens`, model-aware) — using
@@ -484,6 +497,29 @@ mod tests {
         assert!(!summary.overview.is_empty());
         assert!(summary.per_chapter.len() >= 2, "≥2-section doc → ≥2 per_chapter");
         assert_eq!(bill.baseline_model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_map_empty_output_degrades_to_extractive_no_crash() {
+        // §4.5.E: a cheap map call returning empty/whitespace (weak-model failure) must degrade to
+        // the extractive candidate for that block, NOT crash the whole summary. Preload empty map
+        // responses; the reduce still gets real (candidate-derived) block content.
+        let cheap = RecordingMockLlm::new("gpt-4o-mini")
+            .with_response("")        // section 1 map → empty
+            .with_response("   \n  "); // section 2 map → whitespace
+        let reasoning = RecordingMockLlm::new("gpt-4o").with_response("全文导语 + 每章要点");
+        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+        let (store, dek) = mem_store_dek();
+        let r = router();
+        let cfg = DeepSummaryConfig { min_tokens_for_pipeline: 0, ..DeepSummaryConfig::default() };
+
+        // Must NOT panic / error despite empty map output.
+        let (summary, _bill) =
+            summarize(&doc(), SummaryLevel::Standard, "item-degrade", &r, &llms, &store, &dek, &cfg).unwrap();
+        assert!(!summary.overview.is_empty(), "reduce still synthesizes from degraded blocks");
+        // Each per_chapter point came from the extractive candidate fallback (non-empty).
+        assert!(summary.per_chapter.iter().all(|c| !c.summary.trim().is_empty()),
+            "degraded block summaries fall back to non-empty extractive candidate");
     }
 
     #[test]

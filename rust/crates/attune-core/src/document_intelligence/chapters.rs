@@ -151,6 +151,10 @@ pub fn summarize_chapter(
     let user = compose_chapter_payload(&memory, &ch.content);
     let msgs = [ChatMessage::system(SUMMARIZE_SYSTEM_PROMPT), ChatMessage::user(&user)];
     let (summary, usage) = reasoning.chat_with_history(&msgs)?;
+    // §4.5.E: a model that returns an empty/whitespace summary (some weak models do on long input)
+    // must yield an honest fallback, not a confusing empty card — degrade to the chapter's local
+    // extractive preview so the user still sees the gist. Annotations/bill still attach normally.
+    let summary = degrade_if_empty(summary, &ch.content);
 
     let mut bill = TokenBill::default();
     account(&mut bill, &usage, &user, &summary, &reasoning_model);
@@ -200,6 +204,8 @@ pub fn ask(
     );
     let msgs = [ChatMessage::system(ASK_SYSTEM_PROMPT), ChatMessage::user(&user)];
     let (answer, usage) = reasoning.chat_with_history(&msgs)?;
+    // §4.5.E: empty answer → honest fallback (chapter extractive preview) instead of a blank card.
+    let answer = degrade_if_empty(answer, &ch.content);
 
     let mut bill = TokenBill::default();
     account(&mut bill, &usage, &user, &answer, &reasoning_model);
@@ -221,6 +227,22 @@ pub fn ask(
         citations,
         token_bill: bill,
     })
+}
+
+/// §4.5.E graceful degradation: if the LLM returned an empty / whitespace-only result, fall back
+/// to the chapter's local extractive preview (zero-LLM, always available) so the user sees real
+/// content instead of a blank card. A non-empty model result passes through unchanged.
+fn degrade_if_empty(result: String, chapter_content: &str) -> String {
+    if !result.trim().is_empty() {
+        return result;
+    }
+    let preview = crate::document_intelligence::extractive::extract_candidates(chapter_content, 0.5, &[]);
+    if preview.trim().is_empty() {
+        // Truly empty chapter — return a short honest marker rather than "".
+        "（本章无可提取内容）".to_string()
+    } else {
+        format!("（模型未返回内容，以下为本章要点提取）\n{preview}")
+    }
 }
 
 /// Build the cross-chapter memory string from prior chapters' cached summaries.
@@ -470,5 +492,31 @@ mod tests {
         let js = serde_json::to_string(&r).unwrap();
         let back: ChapterReadResult = serde_json::from_str(&js).unwrap();
         assert_eq!(back, r);
+    }
+
+    // ── §4.5.E graceful degradation: empty model output → extractive fallback, never blank ──
+
+    #[test]
+    fn test_summarize_empty_model_output_degrades_to_extractive() {
+        let chs = split_chapters(&three_chapter_doc());
+        // Model returns whitespace (weak-model failure mode) — must NOT yield an empty result.
+        let reasoning = RecordingMockLlm::new("gpt-4o").with_response("   \n  ");
+        let r = summarize_chapter(&chs, 0, OutputMode::Review, &reasoning, &router()).unwrap();
+        assert!(!r.result.trim().is_empty(), "empty model output must degrade, not return blank");
+        assert!(r.result.contains("本章要点提取"), "fallback marker present: {:?}", r.result);
+    }
+
+    #[test]
+    fn test_ask_empty_model_output_degrades() {
+        let chs = split_chapters(&three_chapter_doc());
+        let reasoning = RecordingMockLlm::new("gpt-4o").with_response("");
+        let r = ask(&chs, 0, "引言讲了什么？", OutputMode::Structured, &reasoning, &router()).unwrap();
+        assert!(!r.result.trim().is_empty(), "empty answer must degrade to a non-blank fallback");
+    }
+
+    #[test]
+    fn test_degrade_if_empty_passthrough_when_nonempty() {
+        // Non-empty model output is returned verbatim (no spurious fallback wrapping).
+        assert_eq!(degrade_if_empty("真实答案".into(), "正文"), "真实答案");
     }
 }
