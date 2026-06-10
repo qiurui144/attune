@@ -38,6 +38,40 @@ pub fn probe_session_buildable(model_path: &Path) -> Result<bool> {
     }
 }
 
+/// A detected region from layout analysis (pre-recognition).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutRegion {
+    pub kind: super::RegionKind,
+    pub bbox: crate::ocr::BBox,
+    pub det_confidence: f32,
+}
+
+/// Map a PP-Structure layout class label to our RegionKind. Unknown → Figure (safe default;
+/// a Figure region only triggers 💰 caption, never auto-corrects text).
+pub fn map_layout_class(label: &str) -> super::RegionKind {
+    use super::RegionKind::*;
+    match label.to_ascii_lowercase().as_str() {
+        "table" => Table,
+        "figure" | "image" | "chart" => Figure, // chart sub-classified later by chart.rs
+        "equation" | "formula" => Formula,
+        "title" | "text" | "list" | "header" | "footer" => Text,
+        _ => Figure,
+    }
+}
+
+/// Detect layout regions. Returns empty when the model is missing (non-fatal degrade, §7).
+pub fn detect_regions(
+    model_path: &std::path::Path,
+    _page_image: &std::path::Path,
+) -> Result<Vec<LayoutRegion>> {
+    if !probe_session_buildable(model_path)? {
+        return Ok(Vec::new()); // model-missing → regions: None upstream → plain OCR
+    }
+    // Real inference wired against the PP-Structure layout ONNX in a follow-up;
+    // for now an available model with no detections returns empty (deterministic).
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,5 +82,29 @@ mod tests {
         let got =
             probe_session_buildable(&PathBuf::from("/definitely/missing/layout.onnx")).unwrap();
         assert!(!got, "missing model → Ok(false), never Err");
+    }
+
+    #[test]
+    fn map_known_classes() {
+        use crate::ocr::nontext::RegionKind;
+        assert_eq!(map_layout_class("Table"), RegionKind::Table);
+        assert_eq!(map_layout_class("equation"), RegionKind::Formula);
+        assert_eq!(map_layout_class("text"), RegionKind::Text);
+    }
+
+    #[test]
+    fn unknown_class_defaults_to_figure() {
+        use crate::ocr::nontext::RegionKind;
+        assert_eq!(map_layout_class("weird-new-class"), RegionKind::Figure);
+    }
+
+    #[test]
+    fn detect_with_missing_model_returns_empty() {
+        let got = detect_regions(
+            std::path::Path::new("/missing.onnx"),
+            std::path::Path::new("/p.png"),
+        )
+        .unwrap();
+        assert!(got.is_empty());
     }
 }
