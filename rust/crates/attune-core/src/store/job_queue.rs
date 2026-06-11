@@ -62,6 +62,15 @@ fn parse_state(s: &str) -> Option<JobState> {
     }
 }
 
+/// Outcome of [`Store::recover_on_boot`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecoverSummary {
+    /// Running at_least_once jobs requeued to Queued.
+    pub requeued: usize,
+    /// Running at_most_once jobs marked Failed (not retried).
+    pub failed_no_retry: usize,
+}
+
 impl Store {
     /// Enqueue a durable job. Returns the generated job id (uuid).
     /// Mirror of `enqueue_reindex` generalized to multi-kind + priority + deadline.
@@ -250,6 +259,73 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(n as usize)
+    }
+
+    /// Boot recovery (generalizes the embed_queue processing→pending reset in
+    /// `Store::open`). Replaces the old JobRegistry::cancel_all_running which
+    /// dropped every in-flight job ("server restarted, please resubmit").
+    /// For each Running job:
+    ///   - delivery == at_least_once → Queued (requeue, clear started_ms)
+    ///   - delivery == at_most_once  → Failed (code `interrupted-no-retry`)
+    /// Queued/Done/Failed/Cancelled are untouched.
+    pub fn recover_on_boot(&self) -> Result<RecoverSummary> {
+        // Read interrupted Running jobs (need kind to decide delivery).
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, kind FROM job_queue WHERE state = 'running'")?;
+        let running: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut summary = RecoverSummary::default();
+        for (id, kind_s) in running {
+            let delivery = JobKind::from_str_kind(&kind_s)
+                .map(|k| k.default_delivery())
+                // Unknown kind: be conservative, do not silently re-run.
+                .unwrap_or(crate::office_job_queue::DeliveryContract::AtMostOnce);
+            match delivery {
+                crate::office_job_queue::DeliveryContract::AtLeastOnce => {
+                    self.conn.execute(
+                        "UPDATE job_queue SET state = 'queued', started_ms = NULL WHERE id = ?1",
+                        params![id],
+                    )?;
+                    summary.requeued += 1;
+                }
+                crate::office_job_queue::DeliveryContract::AtMostOnce => {
+                    self.conn.execute(
+                        "UPDATE job_queue SET state = 'failed', \
+                         error_code = 'interrupted-no-retry', \
+                         error_message = 'server restarted; job is not safe to retry', \
+                         finished_ms = ?2 WHERE id = ?1",
+                        params![id, now_ms()],
+                    )?;
+                    summary.failed_no_retry += 1;
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Fail every Running job whose deadline_ms has passed. Returns count failed.
+    pub fn sweep_timeouts(&self, now_ms: i64) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE job_queue SET state = 'failed', error_code = 'job-timeout', \
+             error_message = 'job exceeded deadline_ms', finished_ms = ?1 \
+             WHERE state = 'running' AND deadline_ms IS NOT NULL AND deadline_ms < ?1",
+            params![now_ms],
+        )?;
+        Ok(n)
+    }
+
+    /// TTL purge: delete terminal (done/failed/cancelled) jobs older than `ttl_days`.
+    /// Prevents unbounded growth on a 24h K3 box (spec §8). Returns count deleted.
+    pub fn purge_terminal_jobs(&self, now_ms: i64, ttl_days: i64) -> Result<usize> {
+        let cutoff = now_ms - ttl_days * 86_400_000;
+        let n = self.conn.execute(
+            "DELETE FROM job_queue \
+             WHERE state IN ('done', 'failed', 'cancelled') AND created_ms < ?1",
+            params![cutoff],
+        )?;
+        Ok(n)
     }
 }
 
@@ -479,6 +555,95 @@ mod tests {
         store.claim_next_job().unwrap(); // high → Running
         assert_eq!(store.job_queue_position(&high).unwrap(), 0);
         assert_eq!(store.job_queue_position(&a).unwrap(), 0, "a moved up");
+    }
+
+    #[test]
+    fn recover_on_boot_requeues_at_least_once_running() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap(); // ASR = at_least_once
+        store.claim_next_job().unwrap(); // Running
+        let summary = store.recover_on_boot().unwrap();
+        assert_eq!(summary.requeued, 1);
+        assert_eq!(summary.failed_no_retry, 0);
+        let j = store.get_job(&id).unwrap().unwrap();
+        assert_eq!(j.state, JobState::Queued);
+        assert!(j.started_ms.is_none());
+    }
+
+    #[test]
+    fn recover_on_boot_fails_at_most_once_running() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Agent, "{}", 0, None).unwrap(); // Agent = at_most_once
+        store.claim_next_job().unwrap(); // Running
+        let summary = store.recover_on_boot().unwrap();
+        assert_eq!(summary.requeued, 0);
+        assert_eq!(summary.failed_no_retry, 1);
+        let j = store.get_job(&id).unwrap().unwrap();
+        assert_eq!(j.state, JobState::Failed);
+        assert_eq!(j.error.unwrap().code, "interrupted-no-retry");
+    }
+
+    #[test]
+    fn recover_on_boot_does_not_touch_done_or_queued() {
+        let store = Store::open_memory().unwrap();
+        let done = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.complete_job(&done, "{}").unwrap();
+        let queued = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.recover_on_boot().unwrap();
+        assert_eq!(store.get_job(&done).unwrap().unwrap().state, JobState::Done);
+        assert_eq!(store.get_job(&queued).unwrap().unwrap().state, JobState::Queued);
+    }
+
+    #[test]
+    fn sweep_timeouts_fails_expired_running_jobs() {
+        let store = Store::open_memory().unwrap();
+        // deadline already in the past.
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, Some(1)).unwrap();
+        store.claim_next_job().unwrap(); // Running, deadline_ms=1
+        let n = store.sweep_timeouts(now_ms_test()).unwrap();
+        assert_eq!(n, 1);
+        let j = store.get_job(&id).unwrap().unwrap();
+        assert_eq!(j.state, JobState::Failed);
+        assert_eq!(j.error.unwrap().code, "job-timeout");
+    }
+
+    #[test]
+    fn sweep_timeouts_ignores_future_deadline_and_queued() {
+        let store = Store::open_memory().unwrap();
+        let _future = store
+            .enqueue_job(JobKind::Asr, "{}", 0, Some(now_ms_test() + 60_000))
+            .unwrap();
+        store.claim_next_job().unwrap();
+        // An expired-deadline job that is still Queued is NOT swept (only Running).
+        let _queued_expired = store.enqueue_job(JobKind::Asr, "{}", -1, Some(1)).unwrap();
+        assert_eq!(store.sweep_timeouts(now_ms_test()).unwrap(), 0);
+    }
+
+    #[test]
+    fn purge_terminal_jobs_removes_old_done_failed() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.complete_job(&id, "{}").unwrap();
+        // Backdate created_ms far past TTL.
+        store
+            .raw_connection_for_test()
+            .execute(
+                "UPDATE job_queue SET created_ms = 0 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        // A fresh queued job must survive the purge.
+        let fresh = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        let removed = store.purge_terminal_jobs(now_ms_test(), 30).unwrap();
+        assert_eq!(removed, 1);
+        assert!(store.get_job(&id).unwrap().is_none());
+        assert!(store.get_job(&fresh).unwrap().is_some());
+    }
+
+    fn now_ms_test() -> i64 {
+        chrono::Utc::now().timestamp_millis()
     }
 
     #[test]
