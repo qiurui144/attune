@@ -753,6 +753,20 @@ pub fn ensure_whisper_model(ggml_filename: &str) -> crate::error::Result<std::pa
         return Ok(target);
     }
 
+    // 离线模式: 缓存未命中时禁止网络下载, 立即 Err → 调用方 graceful degrade(不阻塞)。
+    if crate::infer::model_store::hf_hub_offline() {
+        return Err(VaultError::ModelLoad(format!(
+            "whisper model {ggml_filename} not cached and HF_HUB_OFFLINE is set; refusing network download"
+        )));
+    }
+
+    // S1: pre-flight 可达性探测(带显式 connect 超时)。注意 whisper.cpp 仓在 ModelScope
+    // **无覆盖** → CN 默认源(ModelScope)会 404,但探测命中可达后 hf-hub 的 404 是快速失败;
+    // 若整个 endpoint 死(如旧 hf-mirror)则探测在超时内 fail-fast 而非永久阻塞启动后台线程。
+    crate::infer::model_store::probe_endpoint_reachable(
+        &crate::infer::model_store::hf_endpoint(),
+    )?;
+
     let api = hf_hub::api::sync::Api::new()
         .map_err(|e| VaultError::ModelLoad(format!("hf-hub init: {e}")))?;
     let repo = api.model("ggerganov/whisper.cpp".to_string());

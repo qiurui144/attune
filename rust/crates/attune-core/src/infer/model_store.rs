@@ -62,13 +62,47 @@ fn verify_or_record_sha256(file_path: &std::path::Path) -> Result<()> {
 /// 用它阻断 `ensure_models` 的阻塞式 `ureq` 下载（一次 setup/unlock 会同步拉 330MB
 /// reranker + embedding ONNX，无超时；测试里 9 个并发 server 各拉一份会把 CI 卡到超时）。
 /// 沿用 hf-hub 生态既有的 `HF_HUB_OFFLINE` 约定，不另造 attune 专属变量。
-fn hf_hub_offline() -> bool {
+pub(crate) fn hf_hub_offline() -> bool {
     std::env::var("HF_HUB_OFFLINE")
         .map(|v| {
             let v = v.trim();
             v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
         })
         .unwrap_or(false)
+}
+
+/// 下载源的 pre-flight 可达性探测连接超时。hf-hub 0.5 的 `ureq` agent 不暴露超时配置
+/// (`ApiBuilder` 无 `with_timeout`),`repo.get()` 对一个连不上的 endpoint(如 CN 已死的
+/// hf-mirror.com / 黑洞地址)会阻塞到 TCP 内核超时(可达数分钟)→ 启动期 / 请求路径永久
+/// hang(呼应 9936dca 教训)。因此在调 hf-hub 前先用一个**带显式 connect 超时**的轻量
+/// reqwest blocking 探针确认 endpoint 可达;不可达即快速 `Err` → 调用方 graceful degrade。
+const ENDPOINT_PROBE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 解析当前 HF endpoint(优先 `HF_ENDPOINT` 环境变量,未设走官方 `huggingface.co`)。
+pub(crate) fn hf_endpoint() -> String {
+    std::env::var("HF_ENDPOINT")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://huggingface.co".to_string())
+}
+
+/// 带显式 connect + 整体超时探测 endpoint 是否可达。可达 → `Ok(())`;否则 `Err`。
+///
+/// 用于在 hf-hub 阻塞下载**之前**做 fail-fast 守卫,避免对死源永久 hang。探针本身不下任何
+/// 模型文件(只对 endpoint 根发一个 GET,读不读 body 都行),不引入新的请求路径网络副作用(R3)。
+pub(crate) fn probe_endpoint_reachable(endpoint: &str) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(ENDPOINT_PROBE_CONNECT_TIMEOUT)
+        .timeout(ENDPOINT_PROBE_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|e| VaultError::ModelLoad(format!("build probe client: {e}")))?;
+    client.get(endpoint).send().map(|_| ()).map_err(|e| {
+        VaultError::ModelLoad(format!(
+            "model download source {endpoint} unreachable (connect/timeout {}s): {e}; engine degraded",
+            ENDPOINT_PROBE_CONNECT_TIMEOUT.as_secs()
+        ))
+    })
 }
 
 /// 确保 model_filename 和 tokenizer_filename 两个文件已缓存在本地
@@ -110,6 +144,10 @@ pub fn ensure_models(
             "model {repo_id}/{model_filename} not cached and HF_HUB_OFFLINE is set; refusing network download"
         )));
     }
+
+    // S1: pre-flight 可达性探测(带显式 connect 超时)。死源(CN hf-mirror / 黑洞)在此
+    // fail-fast,而非让无超时的 hf-hub `get()` 永久阻塞启动 / 请求路径。
+    probe_endpoint_reachable(&hf_endpoint())?;
 
     let api = hf_hub::api::sync::Api::new()
         .map_err(|e| VaultError::ModelLoad(format!("hf-hub init: {e}")))?;
@@ -170,6 +208,31 @@ mod tests {
         let s = dir.to_str().unwrap();
         assert!(!s.contains("BAAI/bge"), "slash should be replaced");
         assert!(s.contains("BAAI_bge-reranker-v2-m3"));
+    }
+
+    #[test]
+    fn probe_unreachable_endpoint_fails_fast() {
+        // S1: 指向一个黑洞地址(127.0.0.1:1 — 普通环境无监听 → connect refused/timeout)。
+        // 断言探针在 connect 超时上限内返回 Err 而非永久 hang。给一点调度余量。
+        let start = std::time::Instant::now();
+        let r = probe_endpoint_reachable("http://127.0.0.1:1");
+        let elapsed = start.elapsed();
+        assert!(r.is_err(), "black-hole endpoint must return Err, not hang");
+        assert!(
+            elapsed < ENDPOINT_PROBE_CONNECT_TIMEOUT + std::time::Duration::from_secs(5),
+            "probe must fail-fast within ~{}s, took {:?}",
+            ENDPOINT_PROBE_CONNECT_TIMEOUT.as_secs(),
+            elapsed
+        );
+    }
+
+    #[test]
+    fn hf_endpoint_defaults_to_official_when_unset() {
+        // HF_ENDPOINT 未设(或为空)→ 官方 huggingface.co。注意:不 mutate 进程 env(与
+        // 并行测试竞争),仅在当前未设时断言默认值;CI 环境通常不设该变量。
+        if std::env::var_os("HF_ENDPOINT").is_none() {
+            assert_eq!(hf_endpoint(), "https://huggingface.co");
+        }
     }
 
     #[test]

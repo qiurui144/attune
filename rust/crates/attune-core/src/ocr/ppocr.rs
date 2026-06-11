@@ -194,6 +194,7 @@ fn num_cpus_safe() -> usize {
 fn download_file(url: &str, dst: &std::path::Path) -> Result<()> {
     let tmp = dst.with_extension("tmp");
     let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))  // S1: 死源 fail-fast,不等内核 TCP 超时
         .timeout(std::time::Duration::from_secs(180))  // 大 ONNX 文件慢网慢
         .build()
         .map_err(|e| VaultError::ModelLoad(format!("build http client: {e}")))?;
