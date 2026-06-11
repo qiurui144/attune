@@ -241,7 +241,16 @@ pub async fn bearer_auth_guard(
             || path == "/api/v1/vault/status"
             || path == "/api/v1/vault/reset-with-recovery-key"
             || path == "/api/v1/vault/forgot-password-reset"
-            || path.starts_with("/api/v1/member")
+            // R1.1a (2026-06-11): the former blanket `starts_with("/api/v1/member")`
+            // bypass is removed — NO member endpoint is exempt from bearer auth.
+            // Caller audit: every member call happens after a session token exists
+            // (Web UI wizard Step3 member login runs after Step2 vault setup/unlock
+            // issued a token via setToken; SettingsView runs post-unlock; no CLI /
+            // extension / tauri caller hits /api/v1/member/*). login-token + logout
+            // mutate member_state, login-password forwards cloud credentials, and
+            // state/locks leak account info — all must sit behind bearer auth when
+            // `require_auth` is on. (The vault_guard member bypass is unrelated: it
+            // only skips the *unlock* requirement, not authentication.)
             || path == "/ws/scan-progress")
     {
         return next.run(request).await;
