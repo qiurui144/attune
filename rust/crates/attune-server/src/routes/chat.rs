@@ -41,7 +41,9 @@ const MAX_HISTORY_DEPTH: usize = 80;
 /// or key is absent — matching the privacy default (all 5 egress off until the
 /// user opts in, per `routes/privacy.rs` + `scripts/privacy-audit.sh` gate #4).
 /// The settings meta key is the same one `routes/privacy.rs` reads/writes.
-fn read_privacy_outbound_enabled(state: &SharedState, key: &str) -> bool {
+/// `pub(crate)`: shared with `routes/version.rs` (update-check egress) and
+/// `routes/llm.rs` (non-local probe candidates) — R1.1b outbound-gate sweep.
+pub(crate) fn read_privacy_outbound_enabled(state: &SharedState, key: &str) -> bool {
     let vault = match state.vault.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),

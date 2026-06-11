@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::SharedState;
 use attune_core::llm::{ChatMessage, LlmProvider, OpenAiLlmProvider};
+use attune_core::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
+use attune_core::vault::VaultState;
 
 /// 同一时间最多 2 个 ollama pull 进程（防资源耗尽，见 CRITICAL 1.2）
 static PULL_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -107,6 +109,7 @@ pub struct ProbeK3Response {
 }
 
 pub async fn probe_k3(
+    State(state): State<SharedState>,
     Json(body): Json<ProbeK3Request>,
 ) -> Result<Json<ProbeK3Response>, ApiError> {
     let mut candidates = Vec::new();
@@ -133,6 +136,31 @@ pub async fn probe_k3(
     for ep in discover_local_subnet_candidates() {
         if dedup.insert(ep.clone()) {
             candidates.push(ep);
+        }
+    }
+
+    // R1.1b: the loopback + discovered-subnet candidates are local destinations
+    // (loopback / RFC1918) — no egress, no gate needed. But user-supplied
+    // candidates (1) accept ANY http(s) URL, i.e. a non-local probe path. Those
+    // go through the OutboundGate (kind=Llm — it's an LLM-endpoint probe) and
+    // are silently dropped (graceful: local probing continues) when the gate
+    // refuses. Probe payload is empty (bare GET /models), so no redactor needed.
+    let (mut candidates, nonlocal): (Vec<String>, Vec<String>) =
+        candidates.into_iter().partition(|ep| is_local_probe_target(ep));
+    if !nonlocal.is_empty() {
+        let enabled = super::chat::read_privacy_outbound_enabled(&state, OutboundKind::Llm.as_str());
+        let vault_unlocked = matches!(
+            state.vault.lock().unwrap_or_else(|e| e.into_inner()).state(),
+            VaultState::Unlocked
+        );
+        let policy = OutboundPolicy::cloud(OutboundKind::Llm, enabled, vault_unlocked, None);
+        match OutboundGate::enforce(&policy, "") {
+            Ok(_) => candidates.extend(nonlocal),
+            Err(e) => tracing::info!(
+                target: "outbound_audit",
+                "R1.1b: probe-k3 dropped {} non-local candidate(s) — outbound gate refused: {e}",
+                nonlocal.len()
+            ),
         }
     }
 
@@ -194,6 +222,36 @@ fn normalize_probe_endpoint(input: &str) -> Option<String> {
         ep.push_str("/v1");
     }
     Some(ep)
+}
+
+/// R1.1b — classify a probe candidate URL as a **local destination** (no egress):
+/// host `localhost`, or an IP literal that is loopback / RFC1918 private /
+/// link-local (IPv4), or IPv6 loopback. Everything else — public IPs and ALL
+/// named hosts (a name can resolve anywhere, fail closed) — is non-local and
+/// must pass the OutboundGate before being probed.
+fn is_local_probe_target(ep: &str) -> bool {
+    let rest = ep
+        .strip_prefix("http://")
+        .or_else(|| ep.strip_prefix("https://"))
+        .unwrap_or(ep);
+    let authority = rest.split('/').next().unwrap_or("");
+    // strip port; tolerate bracketed IPv6 (`[::1]:8080`)
+    let host = if let Some(h) = authority.strip_prefix('[') {
+        h.split(']').next().unwrap_or("")
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(authority)
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        Ok(IpAddr::V6(v6)) => v6.is_loopback(),
+        Err(_) => false,
+    }
 }
 
 fn discover_local_subnet_candidates() -> Vec<String> {
@@ -514,6 +572,11 @@ const LMSTUDIO_ENDPOINT: &str = "http://localhost:1234/v1";
 const LMSTUDIO_HOMEPAGE: &str = "https://lmstudio.ai/";
 
 pub async fn lmstudio_probe() -> Json<LmStudioProbeResponse> {
+    // R1.1b audit: the probe target is the compile-time constant
+    // `LMSTUDIO_ENDPOINT` (http://localhost:1234/v1) — a local destination with
+    // no user-controllable host, so this is NOT a network egress point and needs
+    // no OutboundGate. If a configurable endpoint is ever added here, it must go
+    // through `is_local_probe_target` + OutboundGate like `probe_k3`.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(800))
         .build()
@@ -680,6 +743,38 @@ mod tests {
         }
         for good in ["http://h:8080", "https://api.x.com/v1"] {
             assert!(good.starts_with("http://") || good.starts_with("https://"));
+        }
+    }
+
+    // R1.1b — probe candidate locality classification (gate boundary)
+    #[test]
+    fn local_probe_targets_classified_local() {
+        for ep in [
+            "http://localhost:8080/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://127.0.0.1/v1",
+            "http://[::1]:8080/v1",
+            "http://192.168.1.50:8080/v1",
+            "http://10.0.0.2:8080/v1",
+            "http://172.16.3.4:8080/v1",
+            "http://169.254.1.1:8080/v1",
+        ] {
+            assert!(super::is_local_probe_target(ep), "{ep} should be local");
+        }
+    }
+
+    #[test]
+    fn nonlocal_probe_targets_classified_nonlocal() {
+        // Public IPs and named hosts (can resolve anywhere → fail closed) must be
+        // gated before probing.
+        for ep in [
+            "http://8.8.8.8:8080/v1",
+            "https://1.2.3.4/v1",
+            "http://k3.example.com:8080/v1",
+            "https://attacker.tld/v1",
+            "http://[2001:db8::1]:8080/v1",
+        ] {
+            assert!(!super::is_local_probe_target(ep), "{ep} should be non-local");
         }
     }
 }
