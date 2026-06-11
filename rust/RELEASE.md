@@ -3,6 +3,18 @@
 ## Unreleased — 隐私出网门强制 + ABBA 死锁修复 + 多语言分词 + 摄取安全加固
 
 ### Highlights
+- **G5 durable job queue(K3 24h 夜间批处理底座)**:office ASR(及后续 ocr / agent /
+  ingest_batch)job 持久化到 SQLite `job_queue` 表,**重启不再丢 in-flight job** ——
+  幂等 kind(asr/ocr/ingest_batch,`at_least_once`)被 boot recovery 重新排队,非幂等
+  kind(agent,`at_most_once`)标 `interrupted-no-retry` 不静默重跑。新增 priority +
+  `deadline_ms` 超时清扫(`job-timeout`)+ 30 天终态 TTL purge + attempts 毒丸停放
+  (`max-attempts`)。管理端点:`GET /api/v1/jobs`、`POST /api/v1/jobs/{id}/cancel`、
+  `POST /api/v1/jobs/{id}/requeue`。原子认领用单条 `UPDATE … WHERE state='queued' …
+  RETURNING`(8-worker 并发竞争测试钉死无 double-claim);后台 worker 串行 drain
+  (保留 ASR 信号量防资源踩踏语义)。office HTTP 契约不变(`POST /office/transcribe` →
+  `job_id`、`GET /office/jobs/{id}`、WS 进度帧)。boot recovery 只在 server 进程启动
+  跑一次(`install_job_store`),不在 `Store::open`(vault unlock 等多处 open 会把
+  正在 Running 的 job 重复入队 —— 8-worker 竞争测试抓出的真 bug,已修)。
 - **🔒 隐私出网门真强制 + L0「永不出网」落地(P0)**:`OutboundGate::enforce` 现在包裹
   **每一个网络 egress**(LLM Chat / Cloud SaaS / WebDAV / Web Search / Telemetry),
   settings 与 PII 脱敏在**一处**统一裁决(`crates/attune-core/src/outbound_gate.rs`)。
@@ -53,6 +65,12 @@
   按原 token 索引(仍受益于 LowerCaser 大小写归一)。
 - `pdf_extract` 对拉丁字形会插入词内空格(`borrowing` → `bor rowing`);token 级断言
   用去空格比对(见 `pdf_ingest_test.rs::despace`),实际检索经 jieba 切分不受影响。
+- **G5 job queue 限制**:单机队列(无分布式);job DAG 依赖未做;`payload_json` 以明文
+  存储(同 `reindex_queue` 的 item_id;字段级加密是后续 hardening);`result_json` 无
+  1MB 上限保护(ASR/OCR 结果尺寸下低风险);agent kind 中断后不自动重试(需手动
+  requeue)。Migration:自动 —— `job_queue` 表 `CREATE TABLE IF NOT EXISTS` 随下次
+  打开创建,无数据迁移(旧 in-memory job 本就不持久);重启行为变化:不再批量取消
+  in-flight job。
 
 ## v1.3.0 (2026-06-07) — OSS 文档智能：文档对比 · 深度总结(省 token) · 逐章阅读
 
