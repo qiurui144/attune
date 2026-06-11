@@ -84,6 +84,13 @@ pub async fn vault_guard(
         || path == "/api/v1/privacy/status"
         // /privacy/wipe-cloud-session 同理:用户主动清云端 footprint 不应被 vault lock 阻塞
         || path == "/api/v1/privacy/wipe-cloud-session"
+        // /api/v1/documents/* — document-intelligence (compare/summarize/chapters). Inline-text
+        // ops + the chapters `list` free-preview + the member-gate (403 membership-required for
+        // unpaid) must all work WITHOUT an unlocked vault: the handler enforces `vault-locked`
+        // itself only when a request carries an `item_id` that needs the DEK
+        // (routes/documents.rs::resolve_doc). Bypassing here lets the stronger member-gate run
+        // and keeps zero-cost text ops usable pre-unlock (mirrors the chat/search eval bypass).
+        || path.starts_with("/api/v1/documents")
     {
         return next.run(request).await;
     }

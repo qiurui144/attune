@@ -19,9 +19,9 @@
   (zip 炸弹 / 路径穿越 / XXE 实体)+ ZIP-entry 解压上限封顶(`ff18fe2`,BUG-3,防 office
   zip-bomb)+ 确定性 docx/xlsx/pptx/epub/rtf/csv fixture;多语言摄取+检索覆盖、RRF/relevance@K
   质量套件;并把 **文档智能 A-K 维度覆盖矩阵固化为 release-acceptance gate**(`96a55ee`,
-  进 `docs/TESTING.md` 主大纲,每轮 RC/GA 硬性检查)。**注**:文档智能*功能*本身尚未并入
-  develop(在独立 RC 分支待人工 RELEASE go,规划为 v1.3.0);本期仅含其已合并的
-  测试 / 安全加固提交。
+  进 `docs/TESTING.md` 主大纲,每轮 RC/GA 硬性检查)。**注**:文档智能*功能*本身已并入
+  develop(见下方 v1.3.0 节);本期 Unreleased 仅记录其相关的测试 / 安全加固提交,功能
+  Highlights / Security / Known Limitations 见 v1.3.0。
 - **全文搜索英文大小写不敏感 + 词干归并**:tantivy 的 "jieba" 分词器从裸
   `JiebaTokenizer` 升级为 analyzer 链 `jieba → LowerCaser → English Stemmer`。
   英文检索从此大小写无关(搜 `running` 命中 `Running`)且词干归并(搜 `run`
@@ -49,12 +49,91 @@
 ### Known Limitations
 - **L0 强制依赖正确打标**:gate 只对**已标 `PrivacyTier::L0`** 的 chunk 强制本地;未打标的
   普通内容按 settings 的 outbound policy 走(L1 走 PII 脱敏 + 审计)。打标是用户/插件职责。
-- **文档智能功能未发布**:本期仅含其测试/安全加固提交;功能本体(深度摘要 / member-gate /
-  短文旁路)在独立 RC 分支待人工 RELEASE,规划 v1.3.0,**不在本 develop 行可用**。
 - 词干器仅英文(`Language::English`);其他拉丁语系(法/德/西)未做词干归并,
   按原 token 索引(仍受益于 LowerCaser 大小写归一)。
 - `pdf_extract` 对拉丁字形会插入词内空格(`borrowing` → `bor rowing`);token 级断言
   用去空格比对(见 `pdf_ingest_test.rs::despace`),实际检索经 jieba 切分不受影响。
+
+## v1.3.0 (2026-06-07) — OSS 文档智能：文档对比 · 深度总结(省 token) · 逐章阅读
+
+> spec:`docs/superpowers/specs/2026-06-06-oss-document-intelligence.md`(11 节齐全;该目录按
+> 本仓约定 gitignore 为 AI scaffolding,本地可查、不入 git——见 commit f89d155)。
+> 三功能均守 §Cost&Trigger 三层成本契约 — 零成本层(结构/文本 diff、extractive 抽取、章节切分)
+> 无需登录;**语义裁决 / map-reduce 归纳 / 每章 LLM 摘要 = tier-3 付费 member-gated**。
+
+### Highlights
+- **① 文档对比(`POST /api/v1/documents/compare`)**:零成本层 = 结构 diff(基于 `extract_sections`
+  的章节对齐增删改)+ 文本级行/句 diff + 相似块召回(BM25/向量);**member-gated** = 语义差异裁决
+  ("改写还是实质变更 / 立场是否反转" — LLM 判定)+ 差异自然语言总结。LLM 不可用时自动退化到
+  结构+文本 diff(免 LLM 仍可用)。
+- **② 深度总结-省 token 版(`POST /api/v1/documents/summarize`,旗舰算法)**:本地 extractive
+  预砍候选句 + `chunk_summaries` 缓存复用 +(member-gated)bounded map-reduce —— map 阶段 cheap-LLM
+  批量压缩 miss 块、reduce 阶段 capable-LLM ×1 合成多级摘要。**省 token 兑现作用域 = 长文档 re-read
+  (warm cache)**;by-token 节省比例属 workload-dependent,**warm-cache 量化 benchmark 待补
+  (PENDING-VERIFY,§6.3)** —— 现有 real-LLM run(`reports/runs/2026-06-11T080906_doc-intel-deepseek/`)
+  仅测到 cold-path savings=0.00(ad-hoc 无缓存路径,符合 Known Limitations 的诚实论证),warm-cache
+  比例尚无 committed 测据,不再援引未落盘报告。**短文档(naive < `DEEPSUM_MIN_TOK`=1500 tok)走单次
+  standard call bypass**(map-reduce 多级开销 > 单次,net-negative → STAGE -1 旁路,验收 actual ≤ naive)。
+- **③ 逐章阅读(`POST /api/v1/documents/chapters`)**:章节切分 + 每章 extractive 要点(零成本)+
+  章节导航;**member-gated** = 每章 LLM 摘要/Q&A + 跨章滚动记忆(前序章摘要注入 context)。
+- **Web UI 三模式视图 + 成本 chip**:`DocIntelView`(Compare / Deep Summary / Chapter Reading 三 tab),
+  i18n zh/en 全覆盖(key diff=0),成本契约 chip 显示本地/云端 + 预估;未付费触发 tier-3 → 提示
+  `membership-required`。
+- **CLI `attune doc` 子命令**:`compare` / `summarize` / `chapters`,本地文件、无需 vault,
+  零成本层零 LLM。
+- **per-agent/task vetted-model routing**:`settings.model_routing` 按 role(map=cheap / reduce=capable /
+  裁决 / Q&A)路由,经 new-api group 计费;缺省回退现有 default_model(老 settings 无该块 → 兜底不报错)。
+- **token_bill SSOT + 输出模式契约**:每次 tier-3 调用回 `token_bill`(counts + 逻辑模型名 + `path`),
+  输出走 `DocEnvelope`(narrative / structured,§3.5 输出模式一等公民)。
+
+### 🔒 Security / Privacy(§5.2.0b adversarial review 闭环)
+
+- **付费门必须服务端验证(C1)**:`POST /member/login-token` 旧实现仅凭客户端自报 `{tier:paid,
+  license_id:<非空>}` 即置 `Paid`,doc-intel 是首个把**计费云端 LLM 花费**挂在该门上的功能 →
+  伪造即盗刷。新增 `MemberVerifier`(默认 `CloudMemberVerifier`,凭持久化 cloud session 向账号服务端
+  核验 license,**fail-closed**:空 / 无 session / 云不可达 / license 不属本账号 / 已吊销 → 拒,绝不授 Paid)。
+  伪造请求回 `403 paid-verification-failed`。
+- **doc-intel 云端出网脱敏(I1,恢复 F-17)**:compare / deep_summary / chapters 旧路径把**原文**直发
+  云端 LLM;新增 `RedactingLlmProvider` 装饰器在 trait 边界统一脱敏出网 payload(手机/邮箱/身份证 →
+  reversible placeholder,与 chat.rs 同一 `redact_batch` 边界),响应再 restore。
+- **尊重隐私「关闭云端 LLM」开关(I2)**:任何 tier-3 云端操作先查 `app_settings.privacy.llm`(v1.0.6
+  Privacy Logic Strategy,默认关、wizard 引导开);关闭时回 `403 cloud-llm-disabled` 拒绝,**不静默发往
+  DeepSeek**。结构/文本本地 diff 不受影响。
+
+### ⚠️ Breaking
+- **无 Breaking Change**。全部新增 `/api/v1/documents/*` 路径 + 新 CLI 子命令 + 新 UI 视图,
+  不改任何现有 route / CLI / schema 契约;老 client / 老 UI 完全不受影响。
+
+### Migration
+- **本版无需数据/schema 迁移**。`chunk_summaries` 表复用现有结构,仅新增 strategy 取值
+  `deepsum:<level>`(与现有 chat-compress strategy 命名空间隔离,`(chunk_hash, strategy)` 复合键
+  REPLACE 幂等)。`settings` 新增 `model_routing` 块,缺省回退 default_model,无需迁移老配置。
+
+### Known Limitations
+- **省 token 是 workload/size-dependent,不是一刀切 ≥60%**:旗舰兑现作用域 = **长文档 re-read
+  (warm cache)**;结构上长文档 cold-run 仅 34-56%(map 必读 extractive 候选 ≥40% by-token +
+  bounded reduce 恒按输入计费,cold-run 整体 ≥60% 不可达 — 见 spec §8.5/§9.1 三条诚实论证);
+  短文档(< 1500 tok)map-reduce net-negative,已走单次 standard call bypass。**warm-cache 的具体
+  by-token 节省比例尚无 committed benchmark(PENDING-VERIFY,§6.3)** —— 此前 "实测 93-96%" 援引
+  的 `reports/2026-06-06_deepsum-savings.md` 未落盘,已撤回该数字,待 warm-cache 量化测据补齐。
+  **不是** flat ≥60%;USD 节省因 cheap/capable 分级更高但定价敏感,故主指标按 token 数。
+- **lazy-DEK follow-up(已登记,next-sprint candidate)**:`summarize` 路由对 inline-text / 无 item_id
+  的请求仍 fetch DEK(`vault.dek_db()`)供缓存层使用,而该路径缓存从不命中 → 强制 vault-unlock。
+  live leg(§7.3 真部署)发现;OUT of 本 sprint scope,候选下一 sprint 改为按需 lazy-DEK。
+- **model-tier:deepseek-chat 实测全过 floor(§9.2,N=3)**:`doc_intel_real_llm_gate.rs` 对
+  deepseek-chat 跑 N=3 —— compare-verdict macro-F1 **1.000 ± 0.000**(0 parse-fail)、deep_summary
+  keypoint-recall **0.833 ± 0.068**、chapters-ask grounded-rate **1.000 ± 0.000**,三 agent 全过
+  各自 floor(`reports/2026-06-07_doc-intel-real-llm-matrix.md` +
+  raw `reports/runs/2026-06-11T080906_doc-intel-deepseek/`)。**跨多 tier(qwen-turbo /
+  deepseek-reasoner)的 spread 对照尚未 committed(PENDING-VERIFY,§6.3)** —— 不再 claim 未落盘的
+  三 tier spread=0.047;最低 tier 标注待多 tier 测据补齐前保守不下结论。弱本地 3B map 质量塌方时
+  按 §4.5 退化到纯 extractive(免 LLM 仍可用)。
+- **`/api/v1/member/*` 仍绕过 bearer/vault guard(残留,本 sprint 部分闭环)**:C1 已堵住「伪造 Paid
+  盗刷计费」的核心洞(login-token 现走服务端 license 核验,fail-closed);但 member 路由整体仍未要求
+  bearer token —— 本地 self-host 单用户场景可接受,**NAS / 暴露端口部署下** 远端调用者仍能翻动全局
+  member_state(至多降级到 Free/LoggedOut,无法伪造 Paid)。为 member 路由加鉴权是后续 sprint 候选。
+- **不做(写死,§2.2)**:行业专属对比/总结(= attune-pro)、流式输出、AI 主动建议、建库期偷跑深度总结、
+  后台批量深度总结队列。扫描件/图片 VLM 路径仅单文档(批量后置 v1.1)。
 
 ## v1.2.0 (2026-06-01) — GitConnector + WASM 跨平台 agent + 一键依赖部署
 

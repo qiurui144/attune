@@ -23,7 +23,14 @@
 
 use std::sync::Arc;
 
-use attune_core::llm::{DeterminismLevel, MockLlmProvider};
+use attune_core::llm::{DeterminismLevel, MockLlmProvider, RecordingMockLlm};
+use attune_core::member_verifier::WhitelistMemberVerifier;
+
+/// The ONE license id the eval harness's member verifier approves. A `login-token` "paid" claim
+/// reaches `MemberState::Paid` only when its `license_id` equals this — i.e. it must pass a real
+/// verification step (a match), NOT the old blanket non-empty check. Any other license id is
+/// rejected exactly like production (C1 paywall-bypass fix).
+pub const EVAL_PAID_LICENSE: &str = "lic-test";
 
 /// Spawned in-process server. Listens on a random ephemeral port. Server is
 /// stopped when this struct is dropped (handle is aborted).
@@ -83,6 +90,11 @@ pub async fn spawn_eval_server() -> EvalServer {
     mock.set_determinism_level(DeterminismLevel::Exact);
     state.set_llm(Some(mock.clone()));
 
+    // C1: install a verifier that approves ONLY `EVAL_PAID_LICENSE`. A "paid" login-token must
+    // present that exact license to reach Paid — a real verification step. A forged/other license
+    // is rejected, so the member-gate test exercises the production reject path (not a bypass).
+    state.set_member_verifier(Arc::new(WhitelistMemberVerifier::new(EVAL_PAID_LICENSE)));
+
     let router = crate::build_router(Arc::clone(&state));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -110,6 +122,88 @@ pub async fn spawn_eval_server() -> EvalServer {
         handle,
         _tmp: tmp,
     }
+}
+
+/// Like [`spawn_eval_server`] but installs a [`RecordingMockLlm`] as the LLM provider and returns
+/// a handle to it, so a test can inspect EXACTLY what reached the wire-facing provider — used to
+/// prove I1 (doc-intel cloud egress is PII-redacted) at the route level. The recording mock echoes
+/// a fixed response, so doc-intel ops complete fast (no retry storm).
+pub async fn spawn_eval_server_with_recording_llm() -> (EvalServer, Arc<RecordingMockLlm>) {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+        std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+    }
+
+    let vault =
+        attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    // Set up + unlock the vault now so the later `enable_cloud_llm` PATCH (behind vault_guard) is
+    // not blocked. Doing it here means the test's `enable_cloud_llm` vault-setup call 409s early
+    // (AlreadyInitialized) BEFORE `reload_llm` — so the recording provider installed below is NOT
+    // clobbered by a settings-driven reload.
+    vault.setup("P@ss-eval-cloud-llm-not-real").expect("vault setup");
+    let state = Arc::new(crate::state::AppState::new(vault, false));
+
+    // Recording provider: returns a benign JSON-ish verdict/summary so every doc-intel agent's
+    // parser succeeds in one call; every call's system+user is recorded for inspection. Installed
+    // AFTER vault setup so no reload_llm path replaces it.
+    let rec = Arc::new(RecordingMockLlm::new("eval-rec").with_response(
+        r#"{"verdict":"rewrite","reason":"ok","overview":"摘要","summary":"摘要","answer":"答案"}"#,
+    ));
+    state.set_llm(Some(rec.clone()));
+    state.set_member_verifier(Arc::new(WhitelistMemberVerifier::new(EVAL_PAID_LICENSE)));
+
+    let router = crate::build_router(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router.into_make_service()).await;
+    });
+
+    let client = reqwest::Client::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let url = format!("http://{}/health", addr);
+    while std::time::Instant::now() < deadline {
+        if let Ok(r) = client.get(&url).send().await {
+            if r.status().is_success() {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    (EvalServer { addr, handle, _tmp: tmp }, rec)
+}
+
+/// Enable cloud-LLM egress via the PRODUCT entry (`PATCH /api/v1/privacy/settings {llm:true}`),
+/// the same path the Privacy dashboard uses. doc-intel's tier-3 cloud ops refuse with
+/// `cloud-llm-disabled` until this opt-in is set (I2), so any test that needs a real cloud-LLM op
+/// must call this first — exercising the toggle the way a user would, not by writing meta directly.
+///
+/// `PATCH /privacy/settings` is behind `vault_guard`, so the in-memory vault (sealed by default)
+/// is set up first. Setup is best-effort idempotent — already-initialized returns 409, which we
+/// tolerate.
+pub async fn enable_cloud_llm(base: &str) {
+    let client = reqwest::Client::new();
+    // Unlock the vault so the privacy PATCH is not blocked by vault_guard.
+    let _ = client
+        .post(format!("{base}/api/v1/vault/setup"))
+        .json(&serde_json::json!({ "password": "P@ss-eval-cloud-llm-not-real" }))
+        .send()
+        .await;
+    let r = client
+        .patch(format!("{base}/api/v1/privacy/settings"))
+        .json(&serde_json::json!({ "llm": true }))
+        .send()
+        .await
+        .expect("PATCH privacy/settings");
+    assert!(
+        r.status().is_success(),
+        "enabling cloud LLM egress must succeed, got {}",
+        r.status()
+    );
 }
 
 /// HTTP client for the eval-mode test server. Owns a reusable reqwest client +

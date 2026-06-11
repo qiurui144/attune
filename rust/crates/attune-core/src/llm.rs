@@ -1568,6 +1568,136 @@ impl LlmProvider for MockLlmProvider {
     }
 }
 
+/// Recording mock for document-intelligence pipeline tests.
+///
+/// Unlike [`MockLlmProvider`] (which only records the last user message), this records
+/// **every** call as `(model, system, user)` so a test can assert *which model* the
+/// map stage vs the reduce stage used and *how many times* each was called. T-02/T-04/T-05
+/// acceptance_judges depend on this (e.g. "map calls use Cheap model, reduce uses
+/// Reasoning model, reduce call-count ≤ ⌈n/FANIN⌉"). Always-compiled (like `MockLlmProvider`)
+/// so `attune-server/tests/*` integration tests can use it too.
+///
+/// The model returned in [`crate::usage::TokenUsage`] reflects the router-selected model
+/// the *caller* set via [`LlmProvider::with_model`]-style construction: each
+/// `RecordingMockLlm` instance carries one model name (callers build one per role, or one
+/// per `with_model` clone), and every recorded call stamps that name. Responses are popped
+/// FIFO from a preset queue; an empty queue yields a deterministic `recmock:<n>` answer so
+/// tests that only assert call-shape need not preload responses.
+pub struct RecordingMockLlm {
+    model: String,
+    responses: Mutex<std::collections::VecDeque<String>>,
+    /// Every call recorded as (model, system, user).
+    calls: Mutex<Vec<RecordedCall>>,
+}
+
+/// One recorded LLM call (model + the system/user it saw).
+#[derive(Debug, Clone)]
+pub struct RecordedCall {
+    pub model: String,
+    pub system: String,
+    pub user: String,
+}
+
+impl RecordingMockLlm {
+    pub fn new(model: &str) -> Self {
+        Self {
+            model: model.to_string(),
+            responses: Mutex::new(std::collections::VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Preload one canned response (FIFO). Chainable.
+    pub fn with_response(self, json_or_text: &str) -> Self {
+        self.responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(json_or_text.to_string());
+        self
+    }
+
+    /// Number of calls recorded so far.
+    pub fn call_count(&self) -> usize {
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Snapshot of all recorded calls.
+    pub fn calls(&self) -> Vec<RecordedCall> {
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Count of calls whose model == `model`.
+    pub fn calls_with_model(&self, model: &str) -> usize {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|c| c.model == model)
+            .count()
+    }
+
+    /// True iff any recorded call's system+user contains `needle` (cross-chapter memory /
+    /// no-leak assertions). For the secret no-leak test, assert this is **false** for the
+    /// sentinel token.
+    pub fn any_call_contains(&self, needle: &str) -> bool {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|c| c.system.contains(needle) || c.user.contains(needle))
+    }
+
+    fn record_and_respond(&self, system: &str, user: &str) -> (String, crate::usage::TokenUsage) {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(RecordedCall {
+                model: self.model.clone(),
+                system: system.to_string(),
+                user: user.to_string(),
+            });
+        let mut q = self.responses.lock().unwrap_or_else(|e| e.into_inner());
+        let resp = q
+            .pop_front()
+            .unwrap_or_else(|| format!("recmock:{}", self.call_count()));
+        // Token usage stamped with this instance's model so cost/bill math is model-aware.
+        let usage = crate::usage::TokenUsage::empty("recmock", &self.model);
+        (resp, usage)
+    }
+}
+
+impl LlmProvider for RecordingMockLlm {
+    fn chat(&self, system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
+        Ok(self.record_and_respond(system, user))
+    }
+
+    fn chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<(String, crate::usage::TokenUsage)> {
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+        let user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+        Ok(self.record_and_respond(system, user))
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

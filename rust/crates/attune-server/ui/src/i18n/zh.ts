@@ -993,6 +993,33 @@ export const zh = {
   'privacy.tour.title': '欢迎来到 Attune 隐私中心',
   'privacy.tour.intro': 'Attune 是本地优先的。下面这 5 条出网连接全部默认关闭，由你决定何时开启。',
   'privacy.tour.cta': '我知道了',
+
+  // ─── Document Intelligence (T-10) ─────────────────────
+  'docIntel.title': '文档智能',
+  'docIntel.tabCompare': '文档对比',
+  'docIntel.tabSummarize': '深度总结',
+  'docIntel.tabChapters': '逐章阅读',
+  'docIntel.leftPlaceholder': '粘贴旧版本（A）文本…',
+  'docIntel.rightPlaceholder': '粘贴新版本（B）文本…',
+  'docIntel.sourcePlaceholder': '粘贴待处理文档文本…',
+  'docIntel.questionPlaceholder': '就本章提一个问题…',
+  'docIntel.chapterIdx': '章节序号',
+  'docIntel.runCompare': '开始对比',
+  'docIntel.runSummarize': '开始总结',
+  'docIntel.listChapters': '列出章节',
+  'docIntel.askChapter': '提问本章',
+  'docIntel.memberRequired': '该操作需要付费会员',
+  'docIntel.runFailed': '操作失败',
+  'docIntel.memberGateNotice': '语义裁决 / 深度总结 / 章节问答需付费会员解锁；零成本的结构对比、章节列表免费可用。',
+  'docIntel.markedHeading': '变更高亮（锚在新版文档）',
+  'docIntel.narrativeHeading': '分层总结报告',
+  'docIntel.reviewHeading': '逐章批阅',
+  'docIntel.structuredHeading': '结构化结果',
+  'docIntel.costTitle': '本次调用的 token 账单：原始对照实际',
+  'docIntel.tokenSaved': '省 token',
+  'docIntel.naive': '原始',
+  'docIntel.actual': '实际',
+  'docIntel.cacheHit': '缓存命中块',
 } as const;
 
 export type MessageKey = keyof typeof zh;

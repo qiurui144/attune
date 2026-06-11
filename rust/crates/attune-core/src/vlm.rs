@@ -123,6 +123,45 @@ impl VlmProvider for MockVlmProvider {
     }
 }
 
+/// Recording VLM mock — counts `caption`/`vqa` calls and returns a preset extraction.
+/// Document-intelligence T-09 asserts an image source routes here (call-count ≥ 1) and a
+/// text source does not (call-count 0). Always-compiled (like `MockVlmProvider`).
+pub struct RecordingMockVlm {
+    extracted_text: String,
+    caption_calls: std::sync::Mutex<usize>,
+    vqa_calls: std::sync::Mutex<usize>,
+}
+
+impl RecordingMockVlm {
+    pub fn new(extracted_text: &str) -> Self {
+        Self {
+            extracted_text: extracted_text.to_string(),
+            caption_calls: std::sync::Mutex::new(0),
+            vqa_calls: std::sync::Mutex::new(0),
+        }
+    }
+    pub fn caption_call_count(&self) -> usize {
+        *self.caption_calls.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn vqa_call_count(&self) -> usize {
+        *self.vqa_calls.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn total_calls(&self) -> usize {
+        self.caption_call_count() + self.vqa_call_count()
+    }
+}
+
+impl VlmProvider for RecordingMockVlm {
+    fn caption(&self, _image_path: &Path) -> Result<String> {
+        *self.caption_calls.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        Ok(self.extracted_text.clone())
+    }
+    fn vqa(&self, _image_path: &Path, _question: &str) -> Result<String> {
+        *self.vqa_calls.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        Ok(self.extracted_text.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

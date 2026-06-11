@@ -8,6 +8,7 @@ pub mod behavior;
 pub mod browse_signals;
 pub mod chat;
 pub mod chat_sessions;
+pub mod documents;
 pub mod dsar;
 pub mod email;
 pub mod errors;

@@ -1,0 +1,147 @@
+# Golden corpus — document-comparison semantic-verdict (compare.rs).
+#
+# Ground truth = HAND-LABELED by a human reading each (old A → new B) pair, NOT produced by
+# calling the agent (per CLAUDE.md Agent 验证铁律: GT must not be agent-self-generated).
+#
+# Consumed by:
+#   - tests/doc_compare_verdict_golden_gate.rs   (deterministic — parser robustness + wiring)
+#   - tests/doc_intel_real_llm_gate.rs           (real DeepSeek — per-case F1, #[ignore])
+#
+# Each case: a (old) / b (new) paragraph pair + the expected 4-class verdict
+#   rewrite          — same meaning, reworded
+#   substantive      — meaning changed (added / removed substance)
+#   stance-reversal  — position/stance flipped (支持→反对, 同意→拒绝, …)
+#   numeric-change   — a number / figure / date / amount changed
+#
+# Coverage spans: zh / en / mixed; short clauses & multi-sentence paragraphs; legal / financial /
+# technical / everyday registers; and the adversarial near-misses (a numeric edit that is ALSO a
+# stance flip → labeled by the dominant change; a rewrite that merely reorders words).
+
+cases:
+  # ── numeric-change (8) ──
+  - id: num-01-amount-zh
+    a: "本次采购预算为人民币 100 万元。"
+    b: "本次采购预算为人民币 250 万元。"
+    verdict: numeric-change
+  - id: num-02-percent-zh
+    a: "月利率约定为 1%。"
+    b: "月利率约定为 2.5%。"
+    verdict: numeric-change
+  - id: num-03-date-zh
+    a: "还款期限为 2024 年 12 月 31 日。"
+    b: "还款期限为 2025 年 6 月 30 日。"
+    verdict: numeric-change
+  - id: num-04-count-en
+    a: "The cluster runs with 4 worker nodes."
+    b: "The cluster runs with 16 worker nodes."
+    verdict: numeric-change
+  - id: num-05-version-en
+    a: "We pin tantivy at version 0.21."
+    b: "We pin tantivy at version 0.22."
+    verdict: numeric-change
+  - id: num-06-multi-sentence-zh
+    a: "甲方应在签约后支付定金 5000 元。余款于交付时结清。"
+    b: "甲方应在签约后支付定金 8000 元。余款于交付时结清。"
+    verdict: numeric-change
+  - id: num-07-range-en
+    a: "Latency stayed within the 10-20 ms band under load."
+    b: "Latency stayed within the 30-50 ms band under load."
+    verdict: numeric-change
+  - id: num-08-area-zh
+    a: "房屋建筑面积为 89.5 平方米。"
+    b: "房屋建筑面积为 112.0 平方米。"
+    verdict: numeric-change
+
+  # ── stance-reversal (7) ──
+  - id: stance-01-support-zh
+    a: "经讨论，我方支持该合并方案。"
+    b: "经讨论，我方反对该合并方案。"
+    verdict: stance-reversal
+  - id: stance-02-agree-en
+    a: "The committee agrees to proceed with the launch."
+    b: "The committee declines to proceed with the launch."
+    verdict: stance-reversal
+  - id: stance-03-recommend-zh
+    a: "综合评估，建议采纳本设计。"
+    b: "综合评估，不建议采纳本设计。"
+    verdict: stance-reversal
+  - id: stance-04-permit-en
+    a: "Section 4 permits subletting with written consent."
+    b: "Section 4 prohibits subletting under any circumstance."
+    verdict: stance-reversal
+  - id: stance-05-grant-zh
+    a: "法院认为原告主张成立，予以支持。"
+    b: "法院认为原告主张不成立，不予支持。"
+    verdict: stance-reversal
+  - id: stance-06-approve-en
+    a: "Management approved the budget increase."
+    b: "Management rejected the budget increase."
+    verdict: stance-reversal
+  - id: stance-07-accept-zh
+    a: "公司决定接受该供应商的报价。"
+    b: "公司决定拒绝该供应商的报价。"
+    verdict: stance-reversal
+
+  # ── substantive (8) ──
+  - id: subst-01-add-clause-zh
+    a: "乙方负责安装设备。"
+    b: "乙方负责安装设备，并提供为期两年的免费维护与配件更换。"
+    verdict: substantive
+  - id: subst-02-remove-condition-en
+    a: "Refunds are issued within 30 days, subject to a 10% restocking fee."
+    b: "Refunds are issued within 30 days."
+    verdict: substantive
+  - id: subst-03-new-obligation-zh
+    a: "用户可随时导出个人数据。"
+    b: "用户可随时导出个人数据，导出前须完成二次身份验证并签署数据使用承诺。"
+    verdict: substantive
+  - id: subst-04-scope-change-en
+    a: "The API returns the user's display name."
+    b: "The API returns the user's display name, email, and last-login timestamp."
+    verdict: substantive
+  - id: subst-05-add-exception-zh
+    a: "所有员工享有带薪年假。"
+    b: "所有员工享有带薪年假，但试用期内员工不适用本条。"
+    verdict: substantive
+  - id: subst-06-remove-feature-en
+    a: "The plan includes priority support and an on-site audit."
+    b: "The plan includes priority support."
+    verdict: substantive
+  - id: subst-07-add-liability-zh
+    a: "因不可抗力导致的延误，双方互不担责。"
+    b: "因不可抗力导致的延误，双方互不担责；但延误超过 90 天的，守约方有权解除合同。"
+    verdict: substantive
+  - id: subst-08-mixed-en-zh
+    a: "The service stores data in the EU region."
+    b: "本服务将数据存储于中国境内的合规机房，并接受年度第三方安全审计。"
+    verdict: substantive
+
+  # ── rewrite (7) ──
+  - id: rewrite-01-reorder-zh
+    a: "在签订本协议之后，甲方应当及时支付款项。"
+    b: "甲方应在本协议签订后及时支付款项。"
+    verdict: rewrite
+  - id: rewrite-02-synonym-en
+    a: "The user must provide a valid email address."
+    b: "The user is required to supply a valid email address."
+    verdict: rewrite
+  - id: rewrite-03-voice-zh
+    a: "本系统会自动备份用户数据。"
+    b: "用户数据将由本系统自动备份。"
+    verdict: rewrite
+  - id: rewrite-04-formal-en
+    a: "You can cancel anytime."
+    b: "Cancellation may be performed at any time."
+    verdict: rewrite
+  - id: rewrite-05-punct-zh
+    a: "请在收到货物后七日内验收。"
+    b: "请于收到货物之后的七日内完成验收。"
+    verdict: rewrite
+  - id: rewrite-06-abbrev-en
+    a: "The application programming interface accepts JSON."
+    b: "The API accepts JSON."
+    verdict: rewrite
+  - id: rewrite-07-tone-zh
+    a: "我们建议尽快升级到最新版本。"
+    b: "为获得最佳体验，建议您尽早升级至最新版本。"
+    verdict: rewrite

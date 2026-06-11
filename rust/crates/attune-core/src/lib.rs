@@ -99,6 +99,7 @@ pub mod chat_reliability;
 pub mod chunker;
 pub mod context_compress;
 pub mod context_budget;
+pub mod document_intelligence;
 pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;
@@ -121,6 +122,7 @@ pub mod agent_runner;
 // 不走 Ed25519 SignedLicense, 这些类型只有 attune-accounts 在用, 留在 attune-core
 // 是 footgun. 删了它们, 同时把 LicenseCache 启动时的死代码也从 state.rs 删掉.
 pub mod member_session;
+pub mod member_verifier;
 pub mod cloud_client;
 // SPKI cert-pinning for cloud accounts connections (slice8 §3.2). Layers a leaf
 // SubjectPublicKeyInfo pin on top of standard webpki chain validation; defends
@@ -152,6 +154,7 @@ pub mod asr;
 pub mod office_job_queue;
 pub mod parser;
 pub mod pii;
+pub mod redacting_llm;
 pub mod platform;
 pub mod memory_consolidation;
 pub mod memory;
