@@ -57,9 +57,24 @@ fn verify_or_record_sha256(file_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// 离线模式：`HF_HUB_OFFLINE` 置 `1` / `true` / `yes` 时，禁止任何 HuggingFace 网络
+/// 下载——只允许命中本地缓存。air-gapped 部署（K3 一体机 / 企业内网）+ 测试套件
+/// 用它阻断 `ensure_models` 的阻塞式 `ureq` 下载（一次 setup/unlock 会同步拉 330MB
+/// reranker + embedding ONNX，无超时；测试里 9 个并发 server 各拉一份会把 CI 卡到超时）。
+/// 沿用 hf-hub 生态既有的 `HF_HUB_OFFLINE` 约定，不另造 attune 专属变量。
+fn hf_hub_offline() -> bool {
+    std::env::var("HF_HUB_OFFLINE")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
 /// 确保 model_filename 和 tokenizer_filename 两个文件已缓存在本地
 ///
 /// 若文件不存在则从 HuggingFace Hub 下载（支持 HF_ENDPOINT 环境变量镜像）。
+/// `HF_HUB_OFFLINE=1` 时禁止下载，未命中缓存直接返回 `Err`（调用方 graceful degrade）。
 /// 返回 (model_path, tokenizer_path)。
 pub fn ensure_models(
     repo_id: &str,
@@ -86,6 +101,14 @@ pub fn ensure_models(
         }
         // 至少一个校验失败（损坏文件已被删除）：继续走下载流程
         log::warn!("model integrity check failed (model_ok={model_ok}, tokenizer_ok={tokenizer_ok}), re-downloading affected files");
+    }
+
+    // 离线模式：缓存未命中（上面的 early-return 没触发）时，禁止任何网络下载。
+    // 在 `hf_hub::Api::new()`（会发起 ureq/rustls 阻塞握手）之前拦截。
+    if hf_hub_offline() {
+        return Err(VaultError::ModelLoad(format!(
+            "model {repo_id}/{model_filename} not cached and HF_HUB_OFFLINE is set; refusing network download"
+        )));
     }
 
     let api = hf_hub::api::sync::Api::new()
@@ -116,6 +139,24 @@ pub fn ensure_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hf_hub_offline_parses_truthy_values() {
+        // Pure parser over an explicit string — no process env mutation (would race
+        // with parallel unit tests). The env wiring itself is exercised by the
+        // privacy_endpoints_test integration suite, which sets HF_HUB_OFFLINE=1 and
+        // must complete in <1s instead of stalling on a 330MB blocking download.
+        fn parse(v: &str) -> bool {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+        }
+        for t in ["1", "true", "TRUE", " yes ", "Yes"] {
+            assert!(parse(t), "{t:?} must be truthy");
+        }
+        for f in ["0", "false", "no", "", "off", "2"] {
+            assert!(!parse(f), "{f:?} must be falsy");
+        }
+    }
 
     #[test]
     fn model_cache_dir_for_repo() {

@@ -47,6 +47,14 @@ async fn spawn_privacy_test_server() -> (String, reqwest::Client, &'static str) 
         std::env::set_var("HOME", tmp.path());
         std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
         std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+        // Each test gets a fresh empty $HOME → empty model cache. Without this guard
+        // `vault/setup` → `init_search_engines()` synchronously downloads the 330MB
+        // bge-reranker + embedding ONNX via hf-hub (blocking ureq/rustls, no timeout).
+        // 9 parallel servers each pulling a copy saturates the network and stalls the
+        // suite past CI's timeout (observed 60–113s; one test appears to "hang").
+        // HF_HUB_OFFLINE forces `ensure_models` to skip the download → reranker/embedding
+        // degrade gracefully (reranker=None, embedding→Ollama struct, no network).
+        std::env::set_var("HF_HUB_OFFLINE", "1");
     }
 
     let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
@@ -171,6 +179,17 @@ async fn patch_privacy_settings_silently_drops_unknown_keys() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_privacy_lock_drops_to_locked_state() {
+    // Regression deadline (2026-06-11): the lock/status round-trip previously stalled
+    // for 60–113s because `vault/setup` synchronously downloaded reranker+embedding ONNX
+    // (blocking ureq) in the request path. With HF_HUB_OFFLINE set in the test helper this
+    // must now complete in seconds; the timeout makes any future regression fail FAST
+    // (so CI fails clearly) rather than hang until the CI job timeout.
+    tokio::time::timeout(Duration::from_secs(60), post_privacy_lock_inner())
+        .await
+        .expect("privacy lock/status round-trip must complete well within 60s (no blocking model download)");
+}
+
+async fn post_privacy_lock_inner() {
     let (base, client, _pw) = spawn_privacy_test_server().await;
 
     // Verify pre-state is unlocked (vault setup left it unlocked). When tests
