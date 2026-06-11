@@ -33,6 +33,7 @@ pub mod agent_state;      // ACP-6: versioned, plugin-scoped, encrypted learned/
 pub use agent_state::{AgentStateKind, AgentStateRow};
 pub mod state_migration;  // ACP-6 Task 3: learned-state migration + orphan quarantine (§2.3)
 pub use state_migration::{MigratedRow, MigrationReport, MigrationStep, OrphanRow};
+pub mod job_queue;        // G5: durable multi-kind job queue (generalizes reindex_queue)
 
 pub use types::*;
 
@@ -300,6 +301,35 @@ CREATE TABLE IF NOT EXISTS reindex_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_reindex_queue_created ON reindex_queue(created_at);
 CREATE INDEX IF NOT EXISTS idx_reindex_queue_item ON reindex_queue(item_id);
+
+-- G5 durable job queue (per docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md).
+-- Generalizes reindex_queue to multiple job kinds (asr/ocr/agent/ingest_batch).
+-- Survives restart: boot recovery requeues Running→Queued for idempotent kinds
+-- (see Store::recover_on_boot) instead of the old in-memory JobRegistry which
+-- dropped all in-flight jobs. Timestamps are epoch-ms (i64) — timeout math
+-- needs integer comparison (deliberate divergence from reindex_queue rfc3339).
+-- finished_ms: set on done/failed/cancelled so elapsed_ms survives restart
+-- (the old in-memory Job carried elapsed via Instant, not persistable).
+CREATE TABLE IF NOT EXISTS job_queue (
+    id            TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    state         TEXT NOT NULL DEFAULT 'queued',
+    stage_json    TEXT,
+    progress      REAL NOT NULL DEFAULT 0,
+    priority      INTEGER NOT NULL DEFAULT 0,
+    payload_json  TEXT NOT NULL,
+    result_json   TEXT,
+    error_code    TEXT,
+    error_message TEXT,
+    warnings_json TEXT,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    created_ms    INTEGER NOT NULL,
+    started_ms    INTEGER,
+    finished_ms   INTEGER,
+    deadline_ms   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_job_queue_state_prio ON job_queue(state, priority DESC, created_ms);
+CREATE INDEX IF NOT EXISTS idx_job_queue_kind ON job_queue(kind);
 
 CREATE TABLE IF NOT EXISTS skill_signals (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
