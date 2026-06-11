@@ -21,6 +21,7 @@ pub mod ocr_profiles;
 #[cfg(feature = "nontext")]
 pub mod ocr_recognize;
 pub mod office;
+pub mod jobs;
 pub mod classify;
 pub mod clusters;
 pub mod index;
