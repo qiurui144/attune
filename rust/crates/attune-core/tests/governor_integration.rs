@@ -149,7 +149,6 @@ fn multiple_governors_register_independently() {
         TaskKind::SkillEvolution,
         TaskKind::FileScanner,
         TaskKind::WebDavSync,
-        TaskKind::PatentScanner,
         TaskKind::BrowserSearch,
         TaskKind::AiAnnotator,
         TaskKind::BrowseSignalIngest,

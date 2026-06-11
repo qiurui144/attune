@@ -2,7 +2,7 @@
 
 import type { JSX } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
-import { Button, Input, Tooltip } from '../components';
+import { Button, Input, Tooltip, LocalModelReadiness } from '../components';
 import { t } from '../i18n';
 import { api } from '../store/api';
 import { toast } from '../components/Toast';
@@ -16,7 +16,15 @@ type Diagnostics = {
   hardware?: {
     form_factor?: 'laptop' | 'k3' | 'server' | 'unknown';
     prefers_local_llm?: boolean;
+    recommended_summary_model?: string;
   };
+};
+
+type LmStudioProbeResponse = {
+  found: boolean;
+  endpoint?: string | null;
+  models: string[];
+  download_url: string;
 };
 
 type AiStackGate = {
@@ -41,7 +49,6 @@ export type Step3Props = {
 export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element {
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus>('checking');
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-  const [scanning, setScanning] = useState(true);
   // 形态分裂：K3 一体机优先本地 Ollama；Laptop/Server 默认远端 token
   const [prefersLocal, setPrefersLocal] = useState<boolean>(false);
   const [localChatAllowed, setLocalChatAllowed] = useState<boolean>(false);
@@ -49,6 +56,11 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   const [k3Endpoint, setK3Endpoint] = useState('http://192.168.100.166:8080/v1');
   const [k3Detecting, setK3Detecting] = useState(false);
   const [k3DetectResult, setK3DetectResult] = useState<string | null>(null);
+  // 本地模型一键就绪：目标 chat 模型 = 硬件推荐 (fallback qwen2.5:3b)。
+  const [ollamaTargetModel, setOllamaTargetModel] = useState('qwen2.5:3b');
+  // LM Studio (OpenAI 兼容 :1234) 自动探测
+  const [lmStudio, setLmStudio] = useState<LmStudioProbeResponse | null>(null);
+  const [lmStudioProbing, setLmStudioProbing] = useState(false);
 
   // 云端 API 表单
   // Default: attune-pro membership — 登录即用，token 配额由 attune 计费追踪
@@ -67,7 +79,6 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
 
   async function scanOllama() {
     setOllamaStatus('checking');
-    setScanning(true);
     try {
       const [d, gate] = await Promise.all([
         api.get<Diagnostics>('/status/diagnostics'),
@@ -81,6 +92,10 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
       }
       // 读形态：K3 → 主推 Ollama；Laptop/其他 → 主推云端
       setPrefersLocal(d.hardware?.prefers_local_llm === true);
+      // 本地一键拉取的目标模型 = 硬件推荐（弱机自动落到轻量模型）
+      if (d.hardware?.recommended_summary_model) {
+        setOllamaTargetModel(d.hardware.recommended_summary_model);
+      }
 
       const tier = gate.hardware?.tier ?? 'unsupported';
       const allow = gate.hardware?.supported === true && (tier === 'high' || tier === 'flagship');
@@ -92,15 +107,54 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
       setOllamaStatus('missing');
       setLocalChatAllowed(false);
       setLocalBlockReason(t('wizard.llm.block.detect_failed'));
-    } finally {
-      setScanning(false);
     }
   }
 
   useEffect(() => {
     void scanOllama();
     void autoDetectK3(true);
+    void probeLmStudio(true);
   }, []);
+
+  async function probeLmStudio(silent = false) {
+    setLmStudioProbing(true);
+    try {
+      const res = await api.get<LmStudioProbeResponse>('/lmstudio/probe');
+      setLmStudio(res);
+      if (res.found && !silent) {
+        toast('success', t('wizard.llm.lmstudio.detected', { count: res.models.length }));
+      } else if (!res.found && !silent) {
+        toast('error', t('wizard.llm.lmstudio.not_found'));
+      }
+    } catch {
+      setLmStudio(null);
+    } finally {
+      setLmStudioProbing(false);
+    }
+  }
+
+  async function selectLmStudio() {
+    if (!lmStudio?.found || !lmStudio.endpoint) {
+      toast('error', t('wizard.llm.lmstudio.not_found'));
+      return;
+    }
+    const lmModel = lmStudio.models[0] ?? 'auto';
+    onUpdate({ llmMode: 'cloud' });
+    try {
+      // LM Studio = 本机 OpenAI 兼容 server，按 openai_compat 接入（无需 api_key）。
+      await api.patch('/settings', {
+        llm: {
+          endpoint: lmStudio.endpoint,
+          api_key: '',
+          model: lmModel,
+          provider: 'openai_compat',
+        },
+      });
+    } catch {
+      /* 保存失败不阻塞 */
+    }
+    onContinue();
+  }
 
   async function autoDetectK3(silent = false) {
     setK3Detecting(true);
@@ -305,62 +359,15 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
             tag={prefersLocal ? '★ ' + t('wizard.llm.ollama.tag') : t('wizard.llm.ollama.tag')}
           />
           <div style={{ fontSize: 'var(--text-sm)', minHeight: 56 }}>
-            {scanning && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-                <span className="spinner" />
-                {t('wizard.llm.ollama.scanning')}
-              </div>
-            )}
-            {!scanning && ollamaStatus === 'ready' && (
-              <>
-                <div style={{ color: 'var(--color-success)' }}>
-                  {t('wizard.llm.ollama.models_found', { count: ollamaModels.length })}
-                </div>
-                {!localChatAllowed && (
-                  <div style={{ color: 'var(--color-warning)', marginTop: 'var(--space-2)' }}>
-                    {localBlockReason}
-                  </div>
-                )}
-              </>
-            )}
-            {!scanning && ollamaStatus === 'missing' && (
-              <div>
-                <div style={{ color: 'var(--color-warning)', marginBottom: 'var(--space-2)' }}>
-                  {t('wizard.llm.ollama.not_detected')}
-                </div>
-                <code
-                  style={{
-                    display: 'block',
-                    padding: 'var(--space-2)',
-                    background: 'var(--color-bg)',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: 'var(--text-xs)',
-                    fontFamily: 'var(--font-mono)',
-                    wordBreak: 'break-all',
-                  }}
-                  onClick={(e) => {
-                    const text = e.currentTarget.textContent ?? '';
-                    navigator.clipboard?.writeText(text);
-                    toast('success', t('wizard.llm.toast.copied'));
-                  }}
-                >
-                    curl -fsSL https://ollama.com/install.sh | sh
-                </code>
-                <button
-                  type="button"
-                  onClick={scanOllama}
-                  style={{
-                    marginTop: 'var(--space-2)',
-                    fontSize: 'var(--text-xs)',
-                    background: 'transparent',
-                    border: 'none',
-                    color: 'var(--color-accent)',
-                    cursor: 'pointer',
-                    padding: 0,
-                  }}
-                >
-                  {t('wizard.llm.ollama.rescan')}
-                </button>
+            {/* 本地模型一键就绪：三态 + 一键安装/拉取（替代过去让用户复制 curl 命令）。
+                model 用硬件推荐的本地 chat 模型；就绪后允许选 Ollama。 */}
+            <LocalModelReadiness
+              model={ollamaTargetModel}
+              onReadyChange={(ready) => setOllamaStatus(ready ? 'ready' : 'missing')}
+            />
+            {!localChatAllowed && (
+              <div style={{ color: 'var(--color-warning)', marginTop: 'var(--space-2)' }}>
+                {localBlockReason}
               </div>
             )}
           </div>
@@ -390,6 +397,41 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
             <Button size="sm" variant="primary" onClick={selectK3} disabled={!k3Endpoint.trim()}>
               {t('wizard.llm.k3.use_btn')}
             </Button>
+          </div>
+        </Card>
+
+        {/* LM Studio 卡片：自动探测本机 :1234 OpenAI 兼容 server */}
+        <Card selected={false}>
+          <CardHeader icon="🖥" title={t('wizard.llm.lmstudio.title')} tag={t('wizard.llm.lmstudio.tag')} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+              {t('wizard.llm.lmstudio.desc')}
+            </div>
+            <Button size="sm" variant="secondary" onClick={() => void probeLmStudio()} loading={lmStudioProbing}>
+              {t('wizard.llm.lmstudio.detect_btn')}
+            </Button>
+            {lmStudio?.found && (
+              <>
+                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-success)' }}>
+                  {t('wizard.llm.lmstudio.found', { count: lmStudio.models.length })}
+                </div>
+                <Button size="sm" variant="primary" onClick={selectLmStudio}>
+                  {t('wizard.llm.lmstudio.use_btn')}
+                </Button>
+              </>
+            )}
+            {lmStudio && !lmStudio.found && (
+              <button
+                type="button"
+                onClick={() => window.open(lmStudio.download_url, '_blank', 'noopener')}
+                style={{
+                  background: 'transparent', border: 'none', color: 'var(--color-accent)',
+                  fontSize: 'var(--text-xs)', cursor: 'pointer', padding: 0, textAlign: 'left',
+                }}
+              >
+                {t('wizard.llm.lmstudio.download_link')}
+              </button>
+            )}
           </div>
         </Card>
           </>

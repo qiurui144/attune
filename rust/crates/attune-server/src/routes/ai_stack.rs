@@ -114,3 +114,46 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         }
     }))
 }
+
+/// POST /api/v1/ai-stack/ensure — 一键拉取缺失的本地底座模型（OCR + ASR）。
+///
+/// 面向非技术用户：底座模型缺失时不再要求用户去终端 / 重装包，应用内一键拉取。
+/// OCR (PP-OCRv5 ~16MB) 与 ASR (whisper ggml) 走 HuggingFace（支持 HF_ENDPOINT 镜像）。
+/// 后台执行（不阻塞请求），UI 轮询 GET /ai_stack 检测 available 翻绿。
+/// Embedding / Rerank 在 vault 解锁 + 首次检索时自动加载，不在此处单独拉取。
+pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    // 按硬件 tier 选 ASR ggml（弱机自动落到更小模型）。
+    let tier = attune_core::platform::classify_hardware(&state.hardware);
+    let asr_ggml = attune_core::platform::ModelRecommendation::for_tier(tier)
+        .map(|r| r.asr_ggml.to_string());
+
+    tokio::spawn(async move {
+        // OCR：~16MB，缺失才拉。失败不 panic，仅 log（§4.5 graceful）。
+        let ocr = tokio::task::spawn_blocking(
+            attune_core::ocr::ppocr::PpOcrProvider::ensure_models_downloaded,
+        )
+        .await;
+        match ocr {
+            Ok(Ok(())) => tracing::info!("ai-stack ensure: OCR models ready"),
+            Ok(Err(e)) => tracing::warn!("ai-stack ensure: OCR download failed: {e}"),
+            Err(e) => tracing::warn!("ai-stack ensure: OCR task join error: {e}"),
+        }
+        // ASR ggml：按 tier 选模型，缺失才拉。
+        if let Some(ggml) = asr_ggml {
+            let r = tokio::task::spawn_blocking(move || {
+                attune_core::asr::ensure_whisper_model(&ggml)
+            })
+            .await;
+            match r {
+                Ok(Ok(path)) => tracing::info!("ai-stack ensure: ASR model ready at {}", path.display()),
+                Ok(Err(e)) => tracing::warn!("ai-stack ensure: ASR download failed: {e}"),
+                Err(e) => tracing::warn!("ai-stack ensure: ASR task join error: {e}"),
+            }
+        }
+    });
+
+    Json(json!({
+        "status": "queued",
+        "message": "正在后台下载缺失的本地底座模型，完成后将自动可用",
+    }))
+}

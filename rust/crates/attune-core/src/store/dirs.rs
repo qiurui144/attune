@@ -131,6 +131,35 @@ impl Store {
         }
     }
 
+    /// 列出某 bound_dir 下所有已索引文件（path + item_id）。
+    /// git 增量同步用：比对本次 fetch 的文件集，找出上游已删除的文件。
+    pub fn list_indexed_files_for_dir(&self, dir_id: &str) -> Result<Vec<IndexedFileRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, dir_id, path, file_hash, item_id FROM indexed_files WHERE dir_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![dir_id], |row| {
+            Ok(IndexedFileRow {
+                id: row.get(0)?,
+                dir_id: row.get(1)?,
+                path: row.get(2)?,
+                file_hash: row.get(3)?,
+                item_id: row.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// 删除一条 indexed_files 记录（按 path）。git 增量删除上游消失文件时调。
+    pub fn delete_indexed_file(&self, path: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM indexed_files WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+
     /// 插入或更新已索引文件记录（INSERT OR REPLACE 原子操作，消除 check-then-act 竞态）
     pub fn upsert_indexed_file(
         &self,

@@ -52,20 +52,20 @@ Scenario C (中文技术):
 **Gap 分析（Scenario B）**：rust-book subset 缺 ch10 + ch19 章节是 staging
 错误，**不是 attune 检索问题**。修复后 Hit@10 应回到 ≥ 0.80。
 
-## Track 2 — Legal (lawcontrol corpus)
+## Track 2 — Legal (legal corpus)
 
 Source: `/data/company/project/attune-enterprise/data/crawler_backup/seed.sql`
 - Total records: **10,677** (8,109 regulations + 2,568 cases)
-- Parsed via `scripts/parse-legal-dump.py` → `tmp/lawcontrol-corpus/{regulation,case}/*.md`
+- Parsed via `scripts/parse-legal-dump.py` → `tmp/legal-corpus/{regulation,case}/*.md`
 - This run uses a **100 + 100 sample subset** for fast iteration; full corpus run separately.
 
 Scenarios:
 - **Scenario A** — 律师 / 中文法律 (5 queries) — labor / loan / trademark / shareholder / breach
 
-### Retrieval baseline — 2026-04-28 first run (lawcontrol-20-sample)
+### Retrieval baseline — 2026-04-28 first run (legal-20-sample)
 
 ```
-Scenario A (lawcontrol-20-sample, 10 法规 + 10 案例):
+Scenario A (legal-20-sample, 10 法规 + 10 案例):
   ✅ Hit@10:    0.80    (达到 Pro 阈值 ≥ 0.80)
   ✅ MRR:       0.67    (超 Pro 阈值 ≥ 0.50)
      Recall@10: 0.37
@@ -275,14 +275,14 @@ linux_process         MRR=1.00  Top-3: Linux | 计算机操作系统 - 进程管
 
 ```bash
 # 1. Parse legal dump (one-time, ~5s)
-sudo cp /data/company/project/attune-enterprise/data/crawler_backup/seed.sql /tmp/lawcontrol_seed.sql
-sudo chown $USER:$USER /tmp/lawcontrol_seed.sql
-python3 scripts/parse-legal-dump.py /tmp/lawcontrol_seed.sql tmp/lawcontrol-corpus
+sudo cp /data/company/project/attune-enterprise/data/crawler_backup/seed.sql /tmp/legal_seed.sql
+sudo chown $USER:$USER /tmp/legal_seed.sql
+python3 scripts/parse-legal-dump.py /tmp/legal_seed.sql tmp/legal-corpus
 
 # 2. Stage sample (or full corpus)
 mkdir -p ~/attune-bench/legal-sample/{regulation,case}
-find tmp/lawcontrol-corpus/regulation -name '*.md' | head -100 | xargs -I{} cp {} ~/attune-bench/legal-sample/regulation/
-find tmp/lawcontrol-corpus/case       -name '*.md' | head -100 | xargs -I{} cp {} ~/attune-bench/legal-sample/case/
+find tmp/legal-corpus/regulation -name '*.md' | head -100 | xargs -I{} cp {} ~/attune-bench/legal-sample/regulation/
+find tmp/legal-corpus/case       -name '*.md' | head -100 | xargs -I{} cp {} ~/attune-bench/legal-sample/case/
 
 # 3. Run dual-track bench (auto vault setup + bind + index + query)
 bash scripts/bench-orchestrator.sh all
@@ -297,7 +297,7 @@ ATTUNE_URL=http://localhost:18901 cargo run --release \
 ### Scenario A (法律) — already at Pro level
 - Hit@10 = 0.80 / MRR = 0.67 → **达到 Pro 阈值，无需调优即可宣告"法律场景跑通到 Pro"**
 - 唯一 miss (`shareholder_resolution`) 因为 corpus 仅 20 doc 子集，全量 (10K+) 后会自然解决
-- 升级路径：扩到全 lawcontrol corpus → 切换 bge-m3 → 估 Hit@10 ≥ 0.95
+- 升级路径：扩到全 legal corpus → 切换 bge-m3 → 估 Hit@10 ≥ 0.95
 
 ### Scenario B (Rust 英文) — staging 错误，非 attune 问题
 - Hit@10 = 0.60 因为 rust-book-subset 缺 ch10 (lifetimes) + ch19 (patterns) 章节

@@ -334,6 +334,222 @@ pub async fn pull_model(
     }))
 }
 
+// ── GET /api/v1/ollama/readiness?model=<chat_model> ──────────────────────────
+//
+// 把 "daemon 是否在 + 配置模型是否已下载" 归一成三态，供 wizard / Settings 渲染
+// 🔴 DaemonDown / 🟡 ModelMissing / 🟢 Ready + 对应一键按钮。纯查询，无副作用。
+
+#[derive(Deserialize)]
+pub struct ReadinessQuery {
+    /// 要核对的 chat 模型；缺省时只判断 daemon 是否在 (Ready.resolved 为空)。
+    pub model: Option<String>,
+}
+
+/// 探 Ollama `/api/tags`：返回 (daemon_reachable, model_names)。
+async fn probe_ollama_tags() -> (bool, Vec<String>) {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return (false, vec![]),
+    };
+    match client.get("http://localhost:11434/api/tags").send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let models = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("models").cloned())
+                .and_then(|m| serde_json::from_value::<Vec<serde_json::Value>>(m).ok())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (true, models)
+        }
+        _ => (false, vec![]),
+    }
+}
+
+pub async fn ollama_readiness(
+    axum::extract::Query(q): axum::extract::Query<ReadinessQuery>,
+) -> Json<serde_json::Value> {
+    let (reachable, models) = probe_ollama_tags().await;
+    // 缺省 model 时，daemon 在即视为 Ready(resolved="")；否则核对具体模型。
+    let configured = q.model.unwrap_or_default();
+    let readiness = if configured.trim().is_empty() {
+        if reachable {
+            attune_core::ollama_setup::OllamaReadiness::Ready { resolved: String::new() }
+        } else {
+            attune_core::ollama_setup::OllamaReadiness::DaemonDown
+        }
+    } else {
+        attune_core::ollama_setup::check_readiness(reachable, &models, configured.trim())
+    };
+    // install_plan 一并返回，省一次往返：DaemonDown 时 UI 直接拿到一键安装方式。
+    let plan = attune_core::ollama_setup::install_plan(std::env::consts::OS);
+    Json(serde_json::json!({
+        "readiness": readiness,
+        "models": models,
+        "install_plan": plan,
+    }))
+}
+
+// ── POST /api/v1/ollama/install ──────────────────────────────────────────────
+//
+// 一键安装 Ollama runtime。Linux 后台跑 install.sh；Windows 下载 OllamaSetup.exe
+// 静默安装；macOS / 未知平台无法应用内安装 → 返回 manual_download 给 UI 弹下载链接。
+// 安装本身在后台跑（不阻塞请求），UI 轮询 /ollama/readiness 检测 daemon 起来。
+
+/// 同一时间最多 1 个安装进程（安装是重操作，不并发）。
+static INSTALL_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Serialize)]
+pub struct InstallResponse {
+    /// queued (后台执行中) / manual (需用户手动下载) / busy (已有安装在跑)。
+    pub status: String,
+    pub task_id: Option<String>,
+    /// 当 status=manual 时给出下载链接。
+    pub download_url: Option<String>,
+    /// 用户友好提示 (§4.5 可操作错误信息)。
+    pub message: String,
+}
+
+pub async fn install_ollama() -> Result<Json<InstallResponse>, ApiError> {
+    let plan = attune_core::ollama_setup::install_plan(std::env::consts::OS);
+    use attune_core::ollama_setup::OllamaInstallMethod as M;
+
+    match &plan.method {
+        M::ManualDownload { download_url } => Ok(Json(InstallResponse {
+            status: "manual".into(),
+            task_id: None,
+            download_url: Some(download_url.clone()),
+            message: format!("当前平台 ({}) 需手动安装 Ollama，请前往下载页", plan.platform),
+        })),
+        M::Script { command } => {
+            // 并发守卫：安装是重操作，同时只跑一个。
+            if INSTALL_IN_FLIGHT
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return Ok(Json(InstallResponse {
+                    status: "busy".into(),
+                    task_id: None,
+                    download_url: Some(plan.homepage.clone()),
+                    message: "已有一个 Ollama 安装任务在进行中".into(),
+                }));
+            }
+            let task_id = format!("install-{}", uuid::Uuid::new_v4());
+            let task_id_ret = task_id.clone();
+            let cmd = command.clone();
+            // 后台执行 install.sh；完成后尝试 `ollama serve`（install.sh 在多数 Linux
+            // 上会装 systemd unit 并自启，serve 作为 fallback 不阻塞、失败静默）。
+            tokio::spawn(async move {
+                let out = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output()
+                    .await;
+                match out {
+                    Ok(o) if o.status.success() => {
+                        tracing::info!("ollama install done (task={task_id})");
+                        // best-effort 拉起 daemon（install.sh 通常已自启）
+                        let _ = tokio::process::Command::new("ollama")
+                            .arg("serve")
+                            .spawn();
+                    }
+                    Ok(o) => {
+                        tracing::warn!(
+                            "ollama install failed (task={task_id}) status={} stderr={}",
+                            o.status,
+                            String::from_utf8_lossy(&o.stderr)
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("ollama install spawn error (task={task_id}) err={e}");
+                    }
+                }
+                INSTALL_IN_FLIGHT.store(0, Ordering::SeqCst);
+            });
+            Ok(Json(InstallResponse {
+                status: "queued".into(),
+                task_id: Some(task_id_ret),
+                download_url: None,
+                message: "正在后台安装 Ollama，安装完成后将自动可用".into(),
+            }))
+        }
+        M::Installer { download_url } => {
+            // Windows: 应用内静默安装较脆弱（需下载 exe + 提权 + /S）。当前阶段
+            // 安全做法是把下载链接交给 UI（用户双击安装器）；后续 desktop 端可接
+            // Tauri sidecar 静默安装。返回 manual 形态但保留 installer URL。
+            Ok(Json(InstallResponse {
+                status: "manual".into(),
+                task_id: None,
+                download_url: Some(download_url.clone()),
+                message: "请下载并运行 Ollama 安装器（OllamaSetup.exe）".into(),
+            }))
+        }
+    }
+}
+
+// ── GET /api/v1/lmstudio/probe ───────────────────────────────────────────────
+//
+// 探测本机 LM Studio（默认 OpenAI 兼容 server :1234/v1）。探到则返回可一键填入
+// 的 openai_compat endpoint + 模型列表；探不到给官网下载链接。
+
+#[derive(Serialize)]
+pub struct LmStudioProbeResponse {
+    pub found: bool,
+    /// 可一键填入 settings.llm.endpoint 的 OpenAI 兼容地址。
+    pub endpoint: Option<String>,
+    pub models: Vec<String>,
+    /// 探不到时的官网下载链接。
+    pub download_url: String,
+}
+
+const LMSTUDIO_ENDPOINT: &str = "http://localhost:1234/v1";
+const LMSTUDIO_HOMEPAGE: &str = "https://lmstudio.ai/";
+
+pub async fn lmstudio_probe() -> Json<LmStudioProbeResponse> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+        .unwrap_or_default();
+    // OpenAI 兼容: GET /v1/models
+    let url = format!("{LMSTUDIO_ENDPOINT}/models");
+    let models: Option<Vec<String>> = match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("data").cloned())
+            .and_then(|d| serde_json::from_value::<Vec<serde_json::Value>>(d).ok())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from))
+                    .collect()
+            }),
+        _ => None,
+    };
+    match models {
+        Some(models) => Json(LmStudioProbeResponse {
+            found: true,
+            endpoint: Some(LMSTUDIO_ENDPOINT.to_string()),
+            models,
+            download_url: LMSTUDIO_HOMEPAGE.to_string(),
+        }),
+        None => Json(LmStudioProbeResponse {
+            found: false,
+            endpoint: None,
+            models: vec![],
+            download_url: LMSTUDIO_HOMEPAGE.to_string(),
+        }),
+    }
+}
+
 // ─── 单元测试 (覆盖纯函数: normalize_probe_endpoint, model name validation) ────
 #[cfg(test)]
 mod tests {

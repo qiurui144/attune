@@ -9,13 +9,14 @@
 use axum::extract::State;
 use axum::Json;
 
-use crate::routes::errors::{internal, vault_locked, RouteError};
+use crate::routes::errors::{internal, vault_locked};
+use crate::error::AppResult;
 use crate::state::SharedState;
 
 /// GET /api/v1/web_search_cache — 诊断查询缓存条目数（不返回内容）
 pub async fn count(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, RouteError> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|_| vault_locked())?;
     let n = vault.store().web_search_cache_count().unwrap_or(0);
@@ -28,7 +29,7 @@ pub async fn count(
 /// per CLAUDE.md cost & trigger contract：用户显式触发，永不后台偷跑。
 pub async fn delete(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, RouteError> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|_| vault_locked())?;
     let n = vault

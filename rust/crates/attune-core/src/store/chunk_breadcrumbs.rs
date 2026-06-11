@@ -1,11 +1,10 @@
-//! F2 Chunk breadcrumb 元数据 sidecar（W3 batch A，2026-04-27）。
+//! Chunk breadcrumb 元数据 sidecar。
 //!
-//! per spec `docs/superpowers/specs/2026-04-27-w3-batch-a-design.md` §4
-//! per R04 P0-1：breadcrumb 属用户敏感数据（章节标题路径暴露文档结构 + 主题），
-//! 必须 DEK 加密落盘。violates "All data encrypted on your own device" 承诺。
+//! breadcrumb 属用户敏感数据（章节标题路径暴露文档结构 + 主题），
+//! 必须 DEK 加密落盘（"All data encrypted on your own device" 承诺）。
 //!
-//! 关闭 W2 batch 1 留下的 placeholder 状态：让 `Citation.breadcrumb` + `chunk_offset_*`
-//! 真正有值。设计取舍：用独立 sidecar 表而非扩 `embed_queue` / `VectorMeta` —
+//! 让 `Citation.breadcrumb` + `chunk_offset_*` 真正有值。
+//! 设计取舍：用独立 sidecar 表而非扩 `embed_queue` / `VectorMeta` —
 //! 避免老 vault `.encbin` 反序列化破坏 + 4 个 enqueue 调用点的迁移风险。
 
 use rusqlite::{params, OptionalExtension};
@@ -18,7 +17,7 @@ use crate::store::Store;
 impl Store {
     /// 用文档原文跑 [`extract_sections_with_path`] 后批量写入 chunk_breadcrumbs。
     ///
-    /// per R04 P0-1：breadcrumb_json DEK 加密后落盘，参数加 `dek: &Key32`。
+    /// breadcrumb_json DEK 加密后落盘，参数加 `dek: &Key32`。
     /// 调用方：indexer pipeline 在 chunk 入 embed_queue 之前 / 同时调用一次。
     /// 同 (item_id, chunk_idx) 二次调用走 INSERT OR REPLACE 覆盖。
     /// 返回写入条数。
@@ -269,7 +268,7 @@ mod tests {
 
     #[test]
     fn migrate_breadcrumbs_encrypt_drops_old_plaintext_column() {
-        // per R07 P0：模拟 W3 batch A 末老 schema → 升级到 W3 末新 schema
+        // 模拟老 schema（明文列）→ 升级到加密 schema
         // 验证 migrate_breadcrumbs_encrypt 触发 DROP + 重建，不让 indexer 写入 SQL error
         use rusqlite::Connection;
         let conn = Connection::open_in_memory().unwrap();
@@ -329,7 +328,7 @@ mod tests {
 
     #[test]
     fn breadcrumb_encrypted_at_rest() {
-        // per R04 P0-1：breadcrumb 落盘必须加密。用通用文档结构（与行业无关）。
+        // breadcrumb 落盘必须加密。用通用文档结构（与行业无关）。
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
         let content = "# 项目分析\n\n## 重点观察\n\n详情";

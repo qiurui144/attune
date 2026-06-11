@@ -52,6 +52,12 @@ pub struct PluginManifest {
     #[serde(rename = "type")]
     pub plugin_type: String,
     pub version: String,
+
+    /// 跨平台分发 gate: 低于此 attune 版本拒载(加载期 skip + 提示升级)。
+    /// `None`(老包无此字段)→ 视为兼容(向后兼容,per spec §10)。
+    #[serde(default)]
+    pub min_attune_version: Option<String>,
+
     #[serde(default)]
     pub author: String,
     #[serde(default)]
@@ -160,11 +166,18 @@ pub struct SkillSpec {
     /// outputs schema
     #[serde(default)]
     pub outputs: serde_json::Value,
-    /// 执行运行时: "rust_binary" | "wasm" | "python_subprocess"
+    /// 执行运行时: "rust_binary" | "wasm" | "python_subprocess" | "data_only"
     pub runtime: String,
     /// runtime=rust_binary 时, 二进制相对路径
     #[serde(default)]
     pub binary: Option<String>,
+    /// runtime=wasm 时, .wasm 模块相对路径(相对 plugin dir)。
+    #[serde(default)]
+    pub wasm: Option<String>,
+    /// WASI 能力声明(白名单: stdio / clock / read:<path> / env:<KEY>)。
+    /// 空 = 纯计算,默认无 fs/net。
+    #[serde(default)]
+    pub wasi_caps: Vec<String>,
     /// 成本 hint
     #[serde(default)]
     pub cost: SkillCost,
@@ -201,10 +214,16 @@ pub struct AgentSpec {
     /// 软追问 (缺则 missing_evidence 提示, 不阻塞)
     #[serde(default)]
     pub soft_followups: Vec<String>,
-    /// 执行运行时: "rust_binary" | "wasm" | "python_subprocess"
+    /// 执行运行时: "rust_binary" | "wasm" | "python_subprocess" | "data_only"
     pub runtime: String,
     #[serde(default)]
     pub binary: Option<String>,
+    /// runtime=wasm 时, .wasm 模块相对路径(相对 plugin dir)。
+    #[serde(default)]
+    pub wasm: Option<String>,
+    /// WASI 能力声明(白名单: stdio / clock / read:<path> / env:<KEY>)。
+    #[serde(default)]
+    pub wasi_caps: Vec<String>,
     /// 依赖的 skill id 列表 (本 plugin 或其他 plugin 暴露)
     #[serde(default)]
     pub requires_skills: Vec<String>,
@@ -278,7 +297,7 @@ pub struct PiiPatternSpec {
     pub regex: String,
 }
 
-/// chat_trigger 配置（参考 lawcontrol skill plugin.yaml）
+/// chat_trigger 配置（参考 attune-enterprise skill plugin.yaml）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatTrigger {
     /// 是否启用 chat 触发（plugin.yaml 默认 false）
@@ -374,11 +393,63 @@ pub struct LoadedPlugin {
     pub prompt: String,
 }
 
+/// 校验一个 wasi_cap 字符串是否在白名单内。
+///
+/// 白名单(spec §5.1):
+/// - `stdio`            — stdin/stdout(默认隐含)
+/// - `clock`            — wall-clock
+/// - `read:<path>`      — 只读某路径
+/// - `env:<KEY>`        — 注入某环境变量
+///
+/// 默认无 net、无任意 fs 写。未知能力 → 加载期拒绝。
+fn is_valid_wasi_cap(cap: &str) -> bool {
+    matches!(cap, "stdio" | "clock")
+        || cap.strip_prefix("read:").is_some_and(|p| !p.is_empty())
+        || cap.strip_prefix("env:").is_some_and(|k| !k.is_empty())
+}
+
+/// 校验单个 capability(skill/agent)的 runtime/wasm/wasi_caps 一致性。
+fn validate_capability_entry(
+    id: &str,
+    runtime: &str,
+    wasm: &Option<String>,
+    wasi_caps: &[String],
+) -> Result<()> {
+    // runtime=wasm 必须声明 wasm 路径
+    if runtime == "wasm" && wasm.as_deref().map(str::is_empty).unwrap_or(true) {
+        return Err(VaultError::InvalidInput(format!(
+            "wasm-entry-missing: capability '{id}' has runtime=wasm but no 'wasm' path"
+        )));
+    }
+    // wasi_caps 白名单(任意 runtime 都校验,防误写)
+    for cap in wasi_caps {
+        if !is_valid_wasi_cap(cap) {
+            return Err(VaultError::InvalidInput(format!(
+                "unknown wasi_cap '{cap}' on capability '{id}' \
+                 (allowed: stdio / clock / read:<path> / env:<KEY>)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 加载期校验整个 manifest 的所有 skill/agent runtime 字段。
+pub fn validate_capabilities(manifest: &PluginManifest) -> Result<()> {
+    for s in &manifest.skills {
+        validate_capability_entry(&s.id, &s.runtime, &s.wasm, &s.wasi_caps)?;
+    }
+    for a in &manifest.agents {
+        validate_capability_entry(&a.id, &a.runtime, &a.wasm, &a.wasi_caps)?;
+    }
+    Ok(())
+}
+
 impl LoadedPlugin {
     /// 从 YAML 字符串 + prompt 字符串构造（内置插件走这条路径）
     pub fn from_strings(yaml: &str, prompt: &str) -> Result<Self> {
         let manifest: PluginManifest = serde_yaml::from_str(yaml)
             .map_err(|e| VaultError::InvalidInput(format!("plugin yaml parse: {e}")))?;
+        validate_capabilities(&manifest)?;
         Ok(Self { manifest, prompt: prompt.to_string() })
     }
 
@@ -426,6 +497,9 @@ impl LoadedPlugin {
 
         let manifest: PluginManifest = serde_yaml::from_str(&yaml)
             .map_err(|e| VaultError::InvalidInput(format!("plugin yaml parse: {e}")))?;
+
+        // 跨平台分发: runtime/wasm/wasi_caps 加载期校验(spec §5.1)
+        validate_capabilities(&manifest)?;
 
         // trust↔pricing 联动 — 调用方传入实际验证后的 trust 级别
         if let Some(pricing) = &manifest.pricing {
@@ -649,6 +723,93 @@ chat_trigger:
         assert_eq!(ct.min_keyword_match, 1);
         assert!(ct.requires_document);
         assert_eq!(ct.exclude_patterns, vec!["起草".to_string()]);
+    }
+
+    // ── 跨平台 runtime 字段校验 (spec §5.1) ──
+
+    #[test]
+    fn wasm_runtime_without_wasm_path_rejected() {
+        let yaml = r#"
+id: p
+name: p
+type: industry
+version: "1.0.0"
+skills:
+  - id: calc
+    runtime: wasm
+"#;
+        let err = LoadedPlugin::from_strings(yaml, "").unwrap_err();
+        assert!(err.to_string().contains("wasm-entry-missing"), "got {err}");
+    }
+
+    #[test]
+    fn wasm_runtime_with_wasm_path_accepted() {
+        let yaml = r#"
+id: p
+name: p
+type: industry
+version: "1.0.0"
+skills:
+  - id: calc
+    runtime: wasm
+    wasm: wasm/calc.wasm
+    wasi_caps: ["stdio", "clock"]
+"#;
+        let p = LoadedPlugin::from_strings(yaml, "").expect("should parse");
+        assert_eq!(p.manifest.skills[0].wasm.as_deref(), Some("wasm/calc.wasm"));
+        assert_eq!(p.manifest.skills[0].wasi_caps.len(), 2);
+    }
+
+    #[test]
+    fn unknown_wasi_cap_rejected() {
+        let yaml = r#"
+id: p
+name: p
+type: industry
+version: "1.0.0"
+agents:
+  - id: a
+    runtime: wasm
+    wasm: wasm/a.wasm
+    wasi_caps: ["net"]
+"#;
+        let err = LoadedPlugin::from_strings(yaml, "").unwrap_err();
+        assert!(err.to_string().contains("unknown wasi_cap"), "got {err}");
+    }
+
+    #[test]
+    fn read_and_env_wasi_caps_accepted() {
+        let yaml = r#"
+id: p
+name: p
+type: industry
+version: "1.0.0"
+agents:
+  - id: a
+    runtime: wasm
+    wasm: wasm/a.wasm
+    wasi_caps: ["read:/tmp/scratch", "env:LLM_ENDPOINT"]
+"#;
+        let p = LoadedPlugin::from_strings(yaml, "").expect("should parse");
+        assert_eq!(p.manifest.agents[0].wasi_caps.len(), 2);
+    }
+
+    #[test]
+    fn rust_binary_runtime_unaffected_by_wasm_validation() {
+        // 现有 runtime=rust_binary 插件不受影响(无 wasm 字段也合法)
+        let yaml = r#"
+id: p
+name: p
+type: industry
+version: "1.0.0"
+skills:
+  - id: calc
+    runtime: rust_binary
+    binary: bin/run_calc
+"#;
+        let p = LoadedPlugin::from_strings(yaml, "").expect("rust_binary still valid");
+        assert_eq!(p.manifest.skills[0].runtime, "rust_binary");
+        assert!(p.manifest.skills[0].wasm.is_none());
     }
 
     #[test]

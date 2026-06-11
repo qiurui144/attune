@@ -19,6 +19,8 @@ fn good_registry() -> std::path::PathBuf {
         .join("agents.registry.toml")
 }
 
+/// S4b: updated from 22-agent (multi-plugin) to 6-agent (oss-core only).
+/// Industry agents (law-pro / tech-pro) removed from OSS registry in S4b.
 #[test]
 fn agent_registry_lists_all_agents_exit_zero() {
     attune_cmd()
@@ -27,15 +29,16 @@ fn agent_registry_lists_all_agents_exit_zero() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Agent Registry"))
-        .stdout(predicate::str::contains("22 agents"))
-        // representative agents from each owner
+        // S4b: 6 oss-core agents only.
+        .stdout(predicate::str::contains("6 agents"))
+        // representative oss-core agents
         .stdout(predicate::str::contains("document_classifier"))
-        .stdout(predicate::str::contains("defamation_extractor"))
-        .stdout(predicate::str::contains("code_reviewer"))
+        .stdout(predicate::str::contains("memory_consolidation"))
+        // S4b: no industry agents in OSS registry
+        .stdout(predicate::str::contains("oss-core"))
         // columns: tier + gate must be visible (directory view, §5.5)
         .stdout(predicate::str::contains("free"))
-        .stdout(predicate::str::contains("paid"))
-        .stdout(predicate::str::contains("gpt-4o-mini"));
+        .stdout(predicate::str::contains("gate="));
 }
 
 #[test]

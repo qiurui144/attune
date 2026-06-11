@@ -5,7 +5,7 @@
 //! 2. PluginRegistry 查询 API (list_skills/agents/mcp + agents_by_case_kind)
 //! 3. Agent trait roundtrip (DocumentClassifierAgent)
 //! 4. ChunkKind serde JSON roundtrip
-//! 5. CaseMetadata 持久化 + 反序列化
+//! 5. CaseMetadata 持久化 + 反序列化 [S4b: #[ignore] — migrated to attune-pro]
 //! 6. PluginManifest v2 完整 yaml 解析
 
 use attune_core::agents::Agent;
@@ -182,34 +182,15 @@ fn chunk_kind_serde_json_roundtrip() {
     assert_eq!(back.kind, ChunkKind::BorrowingDoc);
 }
 
+// S4b: CaseMetadata 已迁至 attune-pro/plugins/law-pro/，此测试迁移至该仓。
+// [BLOCKED: attune-pro] needs case_metadata_test.rs in law-pro/tests/.
+// spec: docs/superpowers/specs/2026-06-02-oss-industry-decoupling.md §4.1 MU-2
 #[test]
+#[ignore = "S4b: CaseMetadata migrated to attune-pro — test moved to attune-pro/plugins/law-pro/tests/"]
 fn case_metadata_with_classified_evidence_persists() {
-    use attune_core::agents::document_classifier::DocumentClassifierAgent;
-    use attune_core::case_metadata::CaseMetadata;
-
-    let agent = DocumentClassifierAgent;
-    let docs = vec![
-        ("借条.pdf".to_string(), "借条 出借人 借款人 本金".to_string()),
-        ("流水.pdf".to_string(), "交易日期 余额 对方户名".to_string()),
-    ];
-    let out = agent.run(docs).expect("run");
-
-    let mut meta = CaseMetadata::new(Some("civil-loan".into()))
-        .add_party("张三", "plaintiff", true)
-        .add_party("李四", "defendant", false);
-    meta.update_classified(out.computation.classified.clone());
-
-    let json = meta.to_json().expect("ser");
-    let back = CaseMetadata::from_json(&json).expect("de");
-    assert_eq!(back.kind.as_deref(), Some("civil-loan"));
-    assert_eq!(back.parties.len(), 2);
-    assert_eq!(back.classified_evidence.len(), 2);
-    assert_eq!(back.our_client_name(), Some("张三"));
-
-    // 按 kind 过滤
-    let bd = back.evidence_by_kind("borrowing_doc");
-    assert_eq!(bd.len(), 1);
-    assert_eq!(bd[0].file, "借条.pdf");
+    // Body removed — attune_core::case_metadata module deleted from OSS in S4b.
+    // Equivalent test lives in attune-pro/plugins/law-pro/tests/case_metadata_test.rs.
+    // [BLOCKED: attune-pro] receiving side test to be added.
 }
 
 #[test]

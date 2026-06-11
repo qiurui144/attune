@@ -1,7 +1,7 @@
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
 #[derive(Deserialize)]
@@ -47,21 +47,21 @@ pub async fn vault_status(State(state): State<SharedState>) -> Json<serde_json::
 pub async fn vault_setup(
     State(state): State<SharedState>,
     Json(body): Json<SetupRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     // setup 成功后内部走一次 lock+unlock，复用 unlock 的 token 颁发路径，
     // 让首次安装直接拿到可用 token（避免客户端必须 restart server 再 unlock）。
     let (token, recovery_key) = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let recovery_key = vault.setup_with_recovery_key(&body.password).map_err(|e| {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::BadRequest(e.to_string())
         })?;
         // setup 自动 Unlocked；先 lock 再 unlock，复用 unlock token 颁发路径。
         // 首次安装一次性操作，多一次 Argon2id 派生可接受。
         vault.lock().map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Internal(e.to_string())
         })?;
         let token = vault.unlock(&body.password).map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Internal(e.to_string())
         })?;
         (token, recovery_key)
     };
@@ -91,11 +91,11 @@ pub async fn vault_setup(
 pub async fn vault_unlock(
     State(state): State<SharedState>,
     Json(body): Json<UnlockRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let token = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         vault.unlock(&body.password).map_err(|e| {
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Unauthorized(e.to_string())
         })?
     };
     // Initialize search engines after vault unlock (vault mutex released)
@@ -116,13 +116,13 @@ pub async fn vault_unlock(
 
 pub async fn vault_lock(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     // Clear search engines before locking (no vault mutex held)
     state.clear_search_engines();
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         vault.lock().map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Internal(e.to_string())
         })?;
     }
     Ok(Json(serde_json::json!({"status": "ok", "state": "locked"})))
@@ -130,10 +130,10 @@ pub async fn vault_lock(
 
 pub async fn export_device_secret(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let secret = vault.export_device_secret().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
 
     Ok(Json(serde_json::json!({
@@ -150,10 +150,10 @@ pub struct ImportDeviceSecretRequest {
 pub async fn import_device_secret(
     State(state): State<SharedState>,
     Json(body): Json<ImportDeviceSecretRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     vault.import_device_secret(&body.device_secret).map_err(|e| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::BadRequest(e.to_string())
     })?;
 
     Ok(Json(serde_json::json!({
@@ -165,10 +165,10 @@ pub async fn import_device_secret(
 pub async fn vault_change_password(
     State(state): State<SharedState>,
     Json(body): Json<ChangePasswordRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     vault.change_password(&body.old_password, &body.new_password).map_err(|e| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::BadRequest(e.to_string())
     })?;
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
@@ -176,13 +176,13 @@ pub async fn vault_change_password(
 pub async fn vault_forgot_password_reset(
     State(state): State<SharedState>,
     Json(body): Json<ForgotPasswordResetRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     // reset 前先清理内存索引，避免残留状态继续服务。
     state.clear_search_engines();
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         vault.forgot_password_reset(&body.confirmation).map_err(|e| {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::BadRequest(e.to_string())
         })?;
     }
 
@@ -196,16 +196,16 @@ pub async fn vault_forgot_password_reset(
 pub async fn vault_reset_with_recovery_key(
     State(state): State<SharedState>,
     Json(body): Json<ResetWithRecoveryKeyRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let token = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         vault
             .reset_password_with_recovery_key(&body.recovery_key, &body.new_password)
             .map_err(|e| {
-                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()})))
+                AppError::BadRequest(e.to_string())
             })?;
         vault.unlock(&body.new_password).map_err(|e| {
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Unauthorized(e.to_string())
         })?
     };
 

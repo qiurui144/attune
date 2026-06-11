@@ -1,8 +1,8 @@
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use crate::routes::errors::{internal, vault_locked, RouteError};
+use crate::error::{AppError, AppResult};
+use crate::routes::errors::{internal, vault_locked};
 use crate::state::SharedState;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -26,15 +26,15 @@ pub struct VaultProfile {
 /// GET /api/v1/profile/export — 导出当前分类结果 + 聚类 + 直方图
 pub async fn export(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
 
     // Read all item tags
     let ids = vault.store().list_all_item_ids()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let mut tags_map = std::collections::HashMap::new();
     for id in &ids {
@@ -98,16 +98,17 @@ pub async fn export(
 pub async fn import(
     State(state): State<SharedState>,
     Json(profile): Json<VaultProfile>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     if !matches!(profile.version, 1 | 2) {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": format!("unsupported profile version: {} (supported: 1, 2)", profile.version)
-        }))));
+        return Err(AppError::BadRequest(format!(
+            "unsupported profile version: {} (supported: 1, 2)",
+            profile.version
+        )));
     }
 
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+        AppError::Forbidden(e.to_string())
     })?;
 
     let existing_ids: std::collections::HashSet<String> = vault.store()
@@ -125,7 +126,7 @@ pub async fn import(
             continue;
         }
         let json_str = serde_json::to_string(tags_value)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         if vault.store().update_tags(&dek, item_id, &json_str).unwrap_or(false) {
             merged += 1;
         }
@@ -136,7 +137,7 @@ pub async fn import(
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let dek = vault.dek_db().map_err(|e| {
-            (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
+            AppError::Forbidden(e.to_string())
         })?;
         if let Ok(new_index) = attune_core::tag_index::TagIndex::build(vault.store(), &dek) {
             *state.tag_index.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_index);
@@ -158,7 +159,7 @@ pub async fn import(
 /// 真正的"主题分布雷达 + 知识盲区识别"需要读 classification_result.core，留 W5+ 增强。
 pub async fn topic_distribution(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, RouteError> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db().map_err(|_| vault_locked())?;
     let pairs = vault

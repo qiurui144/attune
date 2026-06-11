@@ -1,6 +1,6 @@
-//! W4-004：schema migration 集成测试（真持久化文件 + 重开 roundtrip）。
+//! schema migration 集成测试（真持久化文件 + 重开 roundtrip）。
 //!
-//! W3 batch A 引入 `migrate_breadcrumbs_encrypt`（per R07 P0），但单元测试用
+//! `migrate_breadcrumbs_encrypt` 的单元测试用
 //! `Store::open_memory()` 跑 — in-memory 不能复现"上一次进程关闭、新进程重开"的真升级场景。
 //! 本测试用 tempfile 持久化文件，跨多个 Store::open 调用验证：
 //!

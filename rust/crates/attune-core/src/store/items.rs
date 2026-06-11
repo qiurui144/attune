@@ -272,7 +272,7 @@ impl Store {
     pub fn update_item(&self, dek: &Key32, id: &str, title: Option<&str>, content: Option<&str>) -> Result<UpdateOutcome> {
         let mut outcome = UpdateOutcome { existed: false, content_changed: false, backfilled_hash: false };
 
-        // R17 P1 fix (S1-Q4): 所有 SQL 包入 unchecked_transaction，避免并发 PATCH
+        // 所有 SQL 包入 unchecked_transaction，避免并发 PATCH
         // 同 item 的中间状态可见性 — 两个 client race 时第二个的 stored_hash 读取与
         // 第一个的 content/hash 写入交错，会留下 hash 与 BLOB 不一致的悬而未决状态。
         // SQLite 用 BEGIN IMMEDIATE 让事务获取 RESERVED 锁，序列化写。
@@ -294,7 +294,7 @@ impl Store {
 
         let now = chrono::Utc::now().to_rfc3339();
 
-        // R6 P0-1 fix: 无条件 bump updated_at 当 existed=true。
+        // 无条件 bump updated_at 当 existed=true。
         // 之前只有 title 分支或 content_changed 分支才写 updated_at，导致
         // `update_item(id, None, Some(same_content))` 调用永不刷 updated_at — stale-items
         // 查询基于 updated_at，会把"用户刚刚 touch 过但内容没变"的 item 判为陈旧。
@@ -352,7 +352,7 @@ impl Store {
                 "DELETE FROM chunk_summaries WHERE item_id = ?1",
                 params![id],
             )?;
-            // F2 (W3 batch A, per reviewer R2 P0-1)：与 annotations / chunk_summaries
+            // 与 annotations / chunk_summaries
             // 对称清理 chunk_breadcrumbs。否则用户软删除 item 后 ChatEngine 仍可能
             // 透传 stale breadcrumb 到 Citation — "引用已忘记的文档"漏洞。
             // FK CASCADE 仅在硬删除时触发，软删除路径必须显式处理。
@@ -387,11 +387,11 @@ impl Store {
     /// - `"purge"` — 清向量+FTS+queue（item 已 SQL 软删）
     /// - `"reindex"` — 完整重建（item content 已 update）
     ///
-    /// 未知 action 返回 InvalidInput（R6 P1-5 fix）。
+    /// 未知 action 返回 InvalidInput。
     pub fn enqueue_reindex(&self, item_id: &str, action: &str) -> Result<()> {
         if !matches!(action, "purge" | "reindex") {
             return Err(crate::error::VaultError::Crypto(format!(
-                "unknown reindex_queue action: {action:?} (R6 P1-5 fix: typo guard)"
+                "unknown reindex_queue action: {action:?} (typo guard)"
             )));
         }
         self.conn.execute(
@@ -403,7 +403,7 @@ impl Store {
 
     /// server 后台 reindex worker 用：取出一批待处理任务，调 caller 后再 mark_done。
     /// 返回 (id, item_id, action, attempts)。worker 失败时调 [`bump_reindex_attempts`]
-    /// 让 R6 P0-3 fix 的"毒任务"在 5 次后被自动 skip。
+    /// 让"毒任务"在 5 次后被自动 skip。
     pub fn dequeue_reindex_tasks(&self, limit: usize) -> Result<Vec<(i64, String, String, i64)>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, item_id, action, attempts FROM reindex_queue
@@ -426,7 +426,7 @@ impl Store {
         Ok(())
     }
 
-    /// R6 P0-3 fix：worker 失败时调，让 attempts 计数。dequeue 端 WHERE attempts < 5
+    /// worker 失败时调，让 attempts 计数。dequeue 端 WHERE attempts < 5
     /// 自动跳过毒任务（如已 hard-deleted 的 item_id / typoed action）。
     /// 达上限的任务保留在表里供运维查询（不静默 DELETE 丢失）。
     pub fn bump_reindex_attempts(&self, task_id: i64) -> Result<i64> {
@@ -800,7 +800,7 @@ mod privacy_tier_tests {
 
     #[test]
     fn update_item_title_only_bumps_updated_at_but_not_content_changed() {
-        // R6 P0-1 fix 验收：existed=true 时无条件刷 updated_at
+        // existed=true 时无条件刷 updated_at
         let s = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
         let id = s.insert_item(&dek, "OldTitle", "C", None, "note", None, None).unwrap();
@@ -815,7 +815,7 @@ mod privacy_tier_tests {
         let t1: String = s.conn
             .query_row("SELECT updated_at FROM items WHERE id = ?1", params![&id], |r| r.get(0))
             .unwrap();
-        assert!(t1 > t0, "title-only update 必须刷新 updated_at（R6 P0-1）");
+        assert!(t1 > t0, "title-only update 必须刷新 updated_at");
     }
 
     #[test]
@@ -873,7 +873,7 @@ mod privacy_tier_tests {
         assert!(compute_content_hash("anything").len() == 64, "SHA-256 hex 必为 64 字符，永不空");
     }
 
-    // ── v0.7 W4 R26: reindex_queue attempts 计数测试（R6 P0-3 fix 验收）──
+    // ── reindex_queue attempts 计数测试 ──
 
     #[test]
     fn enqueue_reindex_validates_action() {
@@ -882,7 +882,7 @@ mod privacy_tier_tests {
         let id = s.insert_item(&dek, "t", "x", None, "note", None, None).unwrap();
         assert!(s.enqueue_reindex(&id, "purge").is_ok());
         assert!(s.enqueue_reindex(&id, "reindex").is_ok());
-        assert!(s.enqueue_reindex(&id, "typo_action").is_err(), "未知 action 必须报错（R6 P1-5）");
+        assert!(s.enqueue_reindex(&id, "typo_action").is_err(), "未知 action 必须报错");
     }
 
     #[test]

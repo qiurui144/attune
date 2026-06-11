@@ -50,7 +50,7 @@
 - accounts/pluginhub submodule 化
 - secrets/cloud.enc.yaml SOPS encrypted 入 git
 - 7 channel template + 腾讯 TokenHub + LLM gateway failover
-- LawControl → Attune Enterprise rebrand 收尾
+- Attune Enterprise 品牌确立收尾
 - 分支极简策略 SSOT
 
 ## 推 v1.0.6+ 后续(未在本 sprint ship)

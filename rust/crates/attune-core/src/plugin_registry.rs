@@ -279,6 +279,27 @@ impl PluginRegistry {
                 match LoadedPlugin::from_dir_with_key(&path, decrypt_key, Some("Trusted")) {
                     Ok(p) => {
                         let pid = p.manifest.id.clone();
+                        // 跨平台分发 version gate (spec §10): min_attune_version 高于当前 →
+                        // skip + 收集到 errors(语义扩展为含 incompatible 提示, scan 签名不变)。
+                        // None(老包)→ 兼容。非法 semver → 拒载 + invalid-min-version 提示。
+                        if let Some(min) = &p.manifest.min_attune_version {
+                            match crate::version::is_compatible(min) {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    errors.push(format!(
+                                        "[incompatible] {pid}: requires attune >= {min} (current {})",
+                                        crate::version::ATTUNE_VERSION
+                                    ));
+                                    continue;
+                                }
+                                Err(e) => {
+                                    errors.push(format!(
+                                        "[invalid-min-version] {pid}: {e}"
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
                         reg.plugins.insert(pid.clone(), p);
                         // 扫该 plugin 下的 workflows/
                         let wf_dir = path.join("workflows");
@@ -386,6 +407,90 @@ version: "1.0.0"
         assert_eq!(reg.plugins().count(), 1);
         assert!(reg.get_plugin("test-plugin").is_some());
         assert!(errs.is_empty());
+    }
+
+    // ── 跨平台分发 version gate (spec §10) ──
+
+    #[test]
+    fn scan_skips_plugin_requiring_higher_attune_version() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "future-plugin",
+            r#"
+id: future-plugin
+name: 未来插件
+type: industry
+version: "1.0.0"
+min_attune_version: "99.0.0"
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(reg.get_plugin("future-plugin").is_none(), "incompatible plugin must be skipped");
+        assert!(
+            errs.iter().any(|e| e.starts_with("[incompatible]") && e.contains("future-plugin")),
+            "expected [incompatible] warning, got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn scan_loads_plugin_with_satisfiable_min_version() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "compat-plugin",
+            r#"
+id: compat-plugin
+name: 兼容插件
+type: industry
+version: "1.0.0"
+min_attune_version: "0.0.1"
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(reg.get_plugin("compat-plugin").is_some(), "satisfiable min must load");
+        assert!(errs.is_empty(), "no warning expected, got {errs:?}");
+    }
+
+    #[test]
+    fn scan_loads_legacy_plugin_without_min_version() {
+        // 老包无 min_attune_version → None → 视为兼容(向后兼容)
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "legacy-plugin",
+            r#"
+id: legacy-plugin
+name: 老插件
+type: industry
+version: "1.0.0"
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(reg.get_plugin("legacy-plugin").is_some());
+        assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn scan_rejects_plugin_with_invalid_min_version() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "bad-version-plugin",
+            r#"
+id: bad-version-plugin
+name: 非法版本插件
+type: industry
+version: "1.0.0"
+min_attune_version: "not-a-semver"
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(reg.get_plugin("bad-version-plugin").is_none(), "invalid min must skip");
+        assert!(
+            errs.iter().any(|e| e.starts_with("[invalid-min-version]") && e.contains("bad-version-plugin")),
+            "expected [invalid-min-version] warning, got {errs:?}"
+        );
     }
 
     #[test]

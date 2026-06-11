@@ -114,11 +114,28 @@ export type ChatSession = {
 export const chatSessions = signal<ChatSession[]>([]);
 export const activeSessionId = signal<string | null>(null);
 
+// ── ACP-5 自主流转：chat 响应携带的 acp_flow 块（每步可见，非静默） ───
+export type AcpFlowStatus = 'complete' | 'partial' | 'aborted' | 'degraded';
+export type AcpFlowStep = {
+  agent_id: string;
+  ran: boolean;
+  degraded: boolean;
+  note: string;
+};
+export type AcpFlow = {
+  flow_id: string;
+  status: AcpFlowStatus;
+  steps: AcpFlowStep[];
+  final_type?: string;
+  final_value?: unknown;
+};
+
 export type Message = {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   citations?: Array<{ item_id: string; title: string; relevance: number }>;
+  acp_flow?: AcpFlow;
   created_at: string;
 };
 export const messages = signal<Message[]>([]);

@@ -23,7 +23,6 @@ pub enum TaskKind {
     SkillEvolution,
     FileScanner,
     WebDavSync,
-    PatentScanner,
     BrowserSearch,
     AiAnnotator,
     /// G1：Chrome 扩展通用浏览状态摄取
@@ -42,7 +41,6 @@ impl TaskKind {
             Self::SkillEvolution => "skill_evolution",
             Self::FileScanner => "file_scanner",
             Self::WebDavSync => "webdav_sync",
-            Self::PatentScanner => "patent_scanner",
             Self::BrowserSearch => "browser_search",
             Self::AiAnnotator => "ai_annotator",
             Self::BrowseSignalIngest => "browse_signal_ingest",
@@ -154,9 +152,6 @@ impl Profile {
                 throttle_on_exceed_ms: 500,
                 llm_calls_per_hour: None,
             },
-
-            // PatentScanner — 与 FileScanner 同档
-            (p, PatentScanner) => p.budget_for(FileScanner),
 
             // BrowserSearch — 浏览器自动化天然占用大
             (Conservative, BrowserSearch) => Budget {
@@ -318,25 +313,14 @@ mod tests {
     }
 
     #[test]
-    fn patent_scanner_inherits_file_scanner() {
-        // Spec §6 中 PatentScanner 与 FileScanner 同档 — 验证不漂移
-        for profile in [Profile::Conservative, Profile::Balanced, Profile::Aggressive] {
-            let p = profile.budget_for(TaskKind::PatentScanner);
-            let f = profile.budget_for(TaskKind::FileScanner);
-            assert_eq!(p.cpu_pct_max, f.cpu_pct_max);
-            assert_eq!(p.ram_bytes_max, f.ram_bytes_max);
-        }
-    }
-
-    #[test]
     fn default_profile_is_balanced() {
         assert_eq!(Profile::default(), Profile::Balanced);
     }
 
-    /// 全 30 组合 (3 profiles × 10 task kinds) snapshot — 防漂移。
+    /// 全 27 组合 (3 profiles × 9 task kinds) snapshot — 防漂移。
     /// 修改任何预设值都需要同步更新此表 + spec §6 + docs/system-impact.md。
     #[test]
-    fn all_30_combinations_snapshot() {
+    fn all_27_combinations_snapshot() {
         // (profile, kind, cpu_pct, ram_mb, throttle_ms, llm_per_h)
         type Case = (Profile, TaskKind, f32, u64, u64, Option<u32>);
         let cases: &[Case] = &[
@@ -356,10 +340,6 @@ mod tests {
             (Profile::Conservative, TaskKind::WebDavSync, 10.0, 128, 5000, None),
             (Profile::Balanced, TaskKind::WebDavSync, 15.0, 256, 2000, None),
             (Profile::Aggressive, TaskKind::WebDavSync, 30.0, 512, 500, None),
-            // PatentScanner — 与 FileScanner 同档（继承）
-            (Profile::Conservative, TaskKind::PatentScanner, 10.0, 256, 1000, None),
-            (Profile::Balanced, TaskKind::PatentScanner, 20.0, 512, 500, None),
-            (Profile::Aggressive, TaskKind::PatentScanner, 50.0, 1024, 100, None),
             // BrowserSearch
             (Profile::Conservative, TaskKind::BrowserSearch, 30.0, 1024, 1000, None),
             (Profile::Balanced, TaskKind::BrowserSearch, 50.0, 1536, 500, None),
@@ -381,7 +361,7 @@ mod tests {
             (Profile::Balanced, TaskKind::MemoryConsolidation, 25.0, 1024, 5000, Some(10)),
             (Profile::Aggressive, TaskKind::MemoryConsolidation, 50.0, 2048, 1000, Some(30)),
         ];
-        assert_eq!(cases.len(), 30, "must cover 3 profiles × 10 kinds");
+        assert_eq!(cases.len(), 27, "must cover 3 profiles × 9 kinds");
 
         for (profile, kind, expect_cpu, expect_ram_mb, expect_throttle, expect_llm) in cases {
             let b = profile.budget_for(*kind);

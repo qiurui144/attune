@@ -9,12 +9,13 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
 
-use crate::routes::errors::{internal, vault_locked, RouteError};
+use crate::routes::errors::{internal, vault_locked};
+use crate::error::AppResult;
 use crate::state::SharedState;
 
 pub async fn load_demo(
     State(state): State<SharedState>,
-) -> Result<impl IntoResponse, RouteError> {
+) -> AppResult<impl IntoResponse> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|_| vault_locked())?;
     let store = vault.store();

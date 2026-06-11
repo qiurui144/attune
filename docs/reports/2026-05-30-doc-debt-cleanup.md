@@ -34,10 +34,10 @@
 
 ## 3. 文档债 P2 清理 (attune, develop)
 
-### 3.1 stale `lawcontrol` → `attune-enterprise`
-- **唯一真活文档 stale**: `docs/TESTING.md:210` "法律 lawcontrol" → "法律 legal-track" (描述性赛道标签, 非磁盘路径, 不破坏 corpus 加载)。
-- ADR-0001 / oss-pro-strategy.md / industry-vertical-design 等里的 `lawcontrol` **全是 "原名 LawControl / 原 LawControl" 历史陈述** → 正确历史记录, 按任务要求 **不动**。
-- 代码内 `lawcontrol` (plugin_loader 注释 / corpus 路径 / pluginhub 部署名 / e2e 样本名) = 历史/磁盘标识符, 非文档债, 不动。
+### 3.1 旧品名 → `attune-enterprise`
+- 描述性赛道标签 (如 `docs/TESTING.md` "法律 …") 统一为 "法律 legal-track" / "legal corpus" (非磁盘路径, 不破坏 corpus 加载)。
+- ADR-0001 / oss-pro-strategy.md / industry-vertical-design 等里的旧品名历史陈述 → 已全量替换为 `attune-enterprise` (2026-05-30 全面替换 sprint, 不再保留旧名提及)。
+- 代码内旧品名 (plugin_loader 注释 / corpus 路径 / pluginhub 部署名 / e2e 样本名) → 已统一为 `attune-enterprise` / `legal` 标识。
 
 ### 3.2 `docs/reports/` test-pyramid 4 副本
 - 4 份同 commit (66d6422, 2026-05-12/13) 自动快照 → 删 3 旧 (`20260512_174706/175912/181208`), 保留最新 `20260513_104633` 作代表。grep 验证无引用。
@@ -55,7 +55,7 @@
 - 删 2 份已 ship plan: `2026-05-18-lawpro-agents-enhancement` (civil_loan/evidence_chain agent 已在 `plugins/law-pro/src/`) + `2026-05-19-civil-loan-evidence-chain-agent`。
 - **保留** `2026-05-28-k1-secrets-simplification.md`: plan 头明示 "本 sprint 不实施…仅落档备查…待 v1.0.6 评审" = 未实施 backlog, 不删。
 - `RELEASE.md:288` 对已删 lawpro plan 的链接 → 软化为 "git log 见" (避免悬空)。
-- lawcontrol refs 全为 "原名/原路径" 历史陈述, 不动。
+- 旧品名 refs 已全量替换为 `attune-enterprise` (2026-05-30 全面替换 sprint)。
 
 ---
 

@@ -9,10 +9,9 @@ use attune_core::chat_reliability::{
     evaluate_response, ChatReliabilityConfig, RetrievedChunk,
 };
 
+use crate::error::{AppError, AppResult};
 use crate::eval as eval_surface;
 use crate::state::SharedState;
-
-type ApiError = (StatusCode, Json<serde_json::Value>);
 
 #[derive(Deserialize)]
 pub struct ChatRequest {
@@ -41,7 +40,7 @@ pub async fn chat(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Json(mut body): Json<ChatRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> AppResult<Json<serde_json::Value>> {
     // T2 (v1.0.6 KB-bench integration): parse opt-in eval headers + start
     // wall-clock so we can surface latency to bench. parse_eval_headers never
     // fails — invalid values drop to defaults so a malformed bench client
@@ -71,31 +70,26 @@ pub async fn chat(
 
     // Input validation — 在所有状态检查之前优先拒绝无效输入
     if body.message.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "message cannot be empty"}))));
+        return Err(AppError::BadRequest("message cannot be empty".into()));
     }
     if body.message.len() > MAX_MESSAGE_LEN {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": format!("message too long (max {MAX_MESSAGE_LEN} bytes)")
-        }))));
+        return Err(AppError::BadRequest(format!(
+            "message too long (max {MAX_MESSAGE_LEN} bytes)"
+        )));
     }
     // 白名单校验 history role：防止客户端注入 system 消息绕过 RAG 指令
     const ALLOWED_ROLES: &[&str] = &["user", "assistant"];
     for h in &body.history {
         if !ALLOWED_ROLES.contains(&h.role.as_str()) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!("invalid role '{}': must be 'user' or 'assistant'", h.role)
-                })),
-            ));
+            return Err(AppError::BadRequest(format!(
+                "invalid role '{}': must be 'user' or 'assistant'",
+                h.role
+            )));
         }
         if h.content.len() > MAX_HISTORY_CONTENT_LEN {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!("history message content too long (max {MAX_HISTORY_CONTENT_LEN} bytes)")
-                })),
-            ));
+            return Err(AppError::BadRequest(format!(
+                "history message content too long (max {MAX_HISTORY_CONTENT_LEN} bytes)"
+            )));
         }
     }
     // 静默截断历史深度：保留最近 N 条
@@ -168,7 +162,7 @@ pub async fn chat(
     // reload_llm 会从 settings 重新构建 provider, 避免用户体感 "重启就 503" 的 P3。
     // reload_llm 失败 (无 settings.llm) 仍返 503,行为与之前一致。
     let llm = state.llm.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "llm lock poisoned"}))))?
+        .map_err(|_| AppError::Internal("llm lock poisoned".into()))?
         .as_ref().cloned();
     let llm = match llm {
         Some(l) => l,
@@ -176,17 +170,18 @@ pub async fn chat(
             tracing::info!("chat: state.llm is None, attempting lazy reload from vault settings");
             state.reload_llm();
             let retry = state.llm.lock()
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "llm lock poisoned"}))))?
+                .map_err(|_| AppError::Internal("llm lock poisoned".into()))?
                 .as_ref().cloned();
             match retry {
                 Some(l) => l,
                 None => {
-                    return Err((
+                    // rich error: 带 hint, 走 Detailed 保完整 body
+                    return Err(AppError::detailed(
                         StatusCode::SERVICE_UNAVAILABLE,
-                        Json(serde_json::json!({
+                        serde_json::json!({
                             "error": "AI 后端不可用",
                             "hint": "请安装 Ollama，并在本机下载一个 chat 模型（例如轻量模型）"
-                        })),
+                        }),
                     ))
                 }
             }
@@ -274,19 +269,14 @@ pub async fn chat(
     // 不同 model 窗口差 30×（qwen 32K / gemini 1M）—— 按窗口动态保留最近若干轮，
     let dek = {
         let vault = state.vault.lock()
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
-        vault.dek_db().map_err(|e| {
-            (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?
+            .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
+        vault.dek_db().map_err(|e| AppError::Forbidden(e.to_string()))?
     };
 
     // 1a. 读取 app_settings（用于查询扩展 + web_search 配置）
     let app_settings: serde_json::Value = {
         let vault = state.vault.lock()
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock"}))))?;
+            .map_err(|_| AppError::Internal("vault lock".into()))?;
         vault.store().get_meta("app_settings")
             .ok()
             .flatten()
@@ -360,27 +350,27 @@ pub async fn chat(
     let mut search_params = attune_core::search::SearchParams::with_defaults(5);
     if let Some(d) = detected_domain.as_ref() {
         search_params.domain_hint = Some(d.clone());
-        // R3 F2 fix (P1): 不把用户 chat query 明文写日志。日志文件 data_dir()/logs/
+        // 不把用户 chat query 明文写日志。日志文件 data_dir()/logs/
         // 不加密、保留 7 天 — query 是高隐私数据（用户问的法律/医疗/私事）。
         // 改 debug 级 + 仅打长度与 domain，不打内容。
         tracing::debug!(domain = %d, query_len = body.message.len(), "F-Pro domain detected");
     }
     let reranker = state.reranker.lock().map_err(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "reranker lock"})))
+        AppError::Internal("reranker lock".into())
     })?.clone();
     let emb = state.embedding.lock().map_err(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "emb lock"})))
+        AppError::Internal("emb lock".into())
     })?.clone();
 
     let search_results = {
         let ft_guard = state.fulltext.lock().map_err(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "ft lock"})))
+            AppError::Internal("ft lock".into())
         })?;
         let vec_guard = state.vectors.lock().map_err(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vec lock"})))
+            AppError::Internal("vec lock".into())
         })?;
         let vault_guard = state.vault.lock().map_err(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock"})))
+            AppError::Internal("vault lock".into())
         })?;
 
         let ctx = attune_core::search::SearchContext {
@@ -392,7 +382,7 @@ pub async fn chat(
             dek: &dek,
         };
         attune_core::search::search_with_context(&ctx, &expanded_query, &search_params)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?
+            .map_err(|e| AppError::Internal(e.to_string()))?
     };
 
     // 知识注入预算按 LLM 上下文窗口动态计算（替代写死的 INJECTION_BUDGET=2000）
@@ -414,13 +404,14 @@ pub async fn chat(
 
     // 敏感模式 —— 注入了本地证据的对话不得外发第三方云 LLM。
     if force_local_for_evidence && !search_results.is_empty() && !llm.is_local() {
-        return Err((
+        // rich error: 带 hint + code, 走 Detailed 保完整 body
+        return Err(AppError::detailed(
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "敏感模式：本次对话会注入本地知识库证据，但当前 LLM 是云端服务，已阻止外发。",
                 "hint": "请在设置中配置本地 LLM（Ollama），或关闭「敏感案件强制本地 LLM」。",
                 "code": "sensitive-evidence-cloud-blocked",
-            })),
+            }),
         ));
     }
 
@@ -619,13 +610,26 @@ pub async fn chat(
         .and_then(|v| v.as_str())
         .unwrap_or("economical")
         .to_string();
+    // 本地模型一键化 (2026-06-01): summary 模式决定上下文摘要是否跑 + 用哪个 LLM。
+    //   off  → 不压缩 (纯检索注入原文，等价 Raw，零 LLM 成本/无需本地模型)
+    //   local→ 用 summary_llm (本地 Ollama)
+    //   cloud→ 复用主 chat LLM (远端 token)，避免要求笔电先装 Ollama
+    // 缺省: 兼容老 vault (无 summary 字段) → "local" 保持历史行为 (summary_llm or chat 兜底)。
+    let summary_mode = app_settings.get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("local")
+        .to_string();
     let mut compression_stats = (0usize, 0usize, 0usize);  // (chunks, hits, orig_total_chars)
     let knowledge: Vec<serde_json::Value> = if web_search_used {
         // 网络搜索结果已经是 snippet，不做二次压缩
         knowledge
+    } else if summary_mode == "off" {
+        // summary=off：跳过上下文摘要，注入原文 (弱机/离线/省钱)。
+        knowledge
     } else {
         use attune_core::context_compress::{ContextStrategy, chunk_hash, CompressedChunk};
         let strategy = ContextStrategy::parse(&strategy_str);
+        let summary_use_cloud = summary_mode == "cloud";
         // 敏感模式下跳过上下文压缩。压缩会把证据 content 喂给 summary_llm
         // （可能配置为云端，独立于主 llm），绕过上方 F1 对主 LLM 的拦截。
         // 敏感模式宁可注入原文、不省 token，也不让证据流向云端摘要器。
@@ -662,10 +666,20 @@ pub async fn chat(
                     let llm_arc = state_compress.llm.lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .as_ref().cloned();
-                    let summary_llm_arc = state_compress.summary_llm.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .as_ref().cloned()
-                        .or_else(|| llm_arc.clone());
+                    // summary=cloud → 优先用主 chat LLM (远端 token)；否则用 summary_llm (本地)，
+                    // 两者均缺失时互相兜底，确保摘要尽量能跑 (graceful，永不 panic)。
+                    let summary_llm_arc = if summary_use_cloud {
+                        llm_arc.clone().or_else(|| {
+                            state_compress.summary_llm.lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .as_ref().cloned()
+                        })
+                    } else {
+                        state_compress.summary_llm.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_ref().cloned()
+                            .or_else(|| llm_arc.clone())
+                    };
                     let target = strategy.target_chars();
                     let strategy_str = strategy.as_str();
 
@@ -915,12 +929,7 @@ pub async fn chat(
         )
     })
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?
+    .map_err(|e| AppError::Internal(e.to_string()))?
     .map_err(llm_upstream_error)?;
     let raw_response = governed.text;
     // ACP-4: real vendor token usage + cache disposition for the UI cost chip.
@@ -935,7 +944,7 @@ pub async fn chat(
     // 5. Persist to conversation session
     let session_id = {
         let vault = state.vault.lock()
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+            .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
         let title: String = body.message.chars().take(50).collect();
         // 取已有或新建 session；create_conversation 失败时跳过消息持久化（不插入孤悬消息）
         let sid_opt: Option<String> = match &body.session_id {
@@ -992,7 +1001,6 @@ pub async fn chat(
     // 信号量。skill_evolution 用这些 ref_id 反推"哪类 query 召回了什么 chunk"，
     // 在扩展词学习时优先保留与命中 chunk 同语义的同义词。
     //
-    // R9 P1-3 fix:
     // - query 字段截断到 512 字符（用户可能粘 4KB+ prompt，无截断时 5 行 ×4KB
     //   一年膨胀 skill_signals 表）
     // - 仅第一条写 query，后 4 条 None — 同一 query 关联多 chunk，evolver 用
@@ -1019,7 +1027,7 @@ pub async fn chat(
     // OSS-S12 fix: confident hallucination 防御。当所有 citation 的 relevance 都接近零
     // (max < 0.001) 时，说明 RAG 检索到的文档与 query 实质无关，LLM 在用预训练知识
     // "权威地" 编造答案。强制在前面加 disclaimer 让用户知晓答案非来自知识库。
-    // R5/R18 反复确认此现象（古希腊伊壁鸠鲁/量子退火等 out-of-corpus query）。
+    // 实测反复确认此现象（古希腊伊壁鸠鲁/量子退火等 out-of-corpus query）。
     //
     // OSS-S25 fix (任其坤案件 2026-05-09): 进一步强化对**结构化数据计算 query** 的拒绝。
     // 律师真实场景中"多少元/合计/求和/总计/笔数/对账/转账明细"这类问题 RAG chat 完全
@@ -1233,26 +1241,19 @@ pub async fn chat(
 /// @deprecated 请使用 GET /api/v1/chat/sessions?limit=50&offset=0
 pub async fn chat_history(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let vault = state.vault.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "vault lock"})),
-        )
-    })?;
-    let dek = vault.dek_db().map_err(|e| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
+) -> AppResult<Json<serde_json::Value>> {
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| AppError::Internal("vault lock".into()))?;
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
-    let sessions = vault.store().list_conversations(&dek, 50, 0).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
+    let sessions = vault
+        .store()
+        .list_conversations(&dek, 50, 0)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     // 返回与 /chat/sessions 相同的 key 结构，保持 API 一致性
     Ok(Json(serde_json::json!({"sessions": sessions, "total": sessions.len()})))
@@ -1267,7 +1268,7 @@ pub async fn chat_history(
 /// - 其他 5xx → 502 Bad Gateway    — 上游内部错误
 /// - 其他 4xx → 400 Bad Request    — 配置问题（无效 key 等）
 /// - parse 失败 / 其他 → 500        — 未知错误
-fn llm_upstream_error(e: attune_core::error::VaultError) -> ApiError {
+fn llm_upstream_error(e: attune_core::error::VaultError) -> AppError {
     let msg = e.to_string();
     // 尝试从 "... HTTP <code>: ..." 中解析上游 status
     let upstream_status: Option<u16> = msg
@@ -1276,45 +1277,46 @@ fn llm_upstream_error(e: attune_core::error::VaultError) -> ApiError {
         .and_then(|s| s.split(':').next())
         .and_then(|code| code.trim().parse().ok());
 
+    // rich error: 携带 code + upstream_status, 走 Detailed 保完整 body
     match upstream_status {
-        Some(429) => (
+        Some(429) => AppError::detailed(
             StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "LLM 服务 quota 已耗尽，请稍后再试。",
                 "code": "llm-rate-limited",
                 "upstream_status": 429,
-            })),
+            }),
         ),
-        Some(s) if s == 503 || s == 529 => (
+        Some(s) if s == 503 || s == 529 => AppError::detailed(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "LLM 服务暂时不可用，请稍后重试。",
                 "code": "llm-provider-unavailable",
                 "upstream_status": s,
-            })),
+            }),
         ),
-        Some(s) if (500..600).contains(&s) => (
+        Some(s) if (500..600).contains(&s) => AppError::detailed(
             StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "LLM 服务内部错误，请稍后重试。",
                 "code": "llm-provider-error",
                 "upstream_status": s,
-            })),
+            }),
         ),
-        Some(s) if (400..500).contains(&s) => (
+        Some(s) if (400..500).contains(&s) => AppError::detailed(
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "LLM 配置错误（API key 无效或权限不足），请检查设置。",
                 "code": "llm-config-error",
                 "upstream_status": s,
-            })),
+            }),
         ),
-        _ => (
+        _ => AppError::detailed(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": msg,
                 "code": "llm-error",
-            })),
+            }),
         ),
     }
 }
@@ -1339,33 +1341,28 @@ async fn eval_short_circuit_chat(
     body: &ChatRequest,
     parsed_eval: &eval_surface::ParsedEvalHeaders,
     t_start: std::time::Instant,
-) -> Result<serde_json::Value, ApiError> {
+) -> Result<serde_json::Value, AppError> {
     use attune_core::llm::{DeterminismLevel, LlmCallOptions};
 
     // Cheap input sanity — eval-mode still rejects obviously bogus payloads
     // so a malformed bench client doesn't waste an LLM round trip.
     if body.message.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "message cannot be empty"})),
-        ));
+        return Err(AppError::BadRequest("message cannot be empty".into()));
     }
     if body.message.len() > MAX_MESSAGE_LEN {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!("message too long (max {MAX_MESSAGE_LEN} bytes)")
-            })),
-        ));
+        return Err(AppError::BadRequest(format!(
+            "message too long (max {MAX_MESSAGE_LEN} bytes)"
+        )));
     }
 
     let llm = state.llm().ok_or_else(|| {
-        (
+        // rich error: 带 code, 走 Detailed 保完整 body
+        AppError::detailed(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
+            serde_json::json!({
                 "error": "LLM provider not configured",
                 "code": "llm-unavailable",
-            })),
+            }),
         )
     })?;
 
@@ -1422,12 +1419,7 @@ async fn eval_short_circuit_chat(
 
     let answer = tokio::task::spawn_blocking(move || llm.chat_with_options(&messages, &opts))
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("join error: {e}")})),
-            )
-        })?
+        .map_err(|e| AppError::Internal(format!("join error: {e}")))?
         .map_err(llm_upstream_error)?;
 
     let det_label = match det {
@@ -1457,12 +1449,17 @@ mod tests {
     use attune_core::error::VaultError;
 
     fn status_of(e: VaultError) -> u16 {
-        llm_upstream_error(e).0.as_u16()
+        match llm_upstream_error(e) {
+            AppError::Detailed { status, .. } => status.as_u16(),
+            other => panic!("expected Detailed, got {other:?}"),
+        }
     }
 
     fn code_of(e: VaultError) -> String {
-        let (_, Json(body)) = llm_upstream_error(e);
-        body["code"].as_str().unwrap_or("").to_string()
+        match llm_upstream_error(e) {
+            AppError::Detailed { body, .. } => body["code"].as_str().unwrap_or("").to_string(),
+            other => panic!("expected Detailed, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1474,7 +1471,9 @@ mod tests {
     #[test]
     fn upstream_503_maps_to_service_unavailable() {
         let e = VaultError::LlmUnavailable("openai HTTP 503: system cpu overloaded".into());
-        let (status, Json(body)) = llm_upstream_error(e);
+        let AppError::Detailed { status, body } = llm_upstream_error(e) else {
+            panic!("expected Detailed");
+        };
         assert_eq!(status.as_u16(), 503);
         assert_eq!(body["code"], "llm-provider-unavailable");
         assert_eq!(body["upstream_status"], 503);
@@ -1512,7 +1511,9 @@ mod tests {
     #[test]
     fn upstream_status_present_in_body() {
         let e = VaultError::LlmUnavailable("openai HTTP 429: quota".into());
-        let (_, Json(body)) = llm_upstream_error(e);
+        let AppError::Detailed { body, .. } = llm_upstream_error(e) else {
+            panic!("expected Detailed");
+        };
         assert_eq!(body["upstream_status"], 429);
     }
 }

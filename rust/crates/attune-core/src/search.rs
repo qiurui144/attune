@@ -177,15 +177,15 @@ pub struct SearchResult {
     // per spec docs/superpowers/specs/2026-04-27-w3-batch-a-design.md §4
     // 关闭 W2 batch 1 的 Citation 占位状态；search 阶段 join chunk_breadcrumbs
     // sidecar 表填入数据，ChatEngine 后续映射到 Citation。
-    /// 启发式：F2 v1 用 item 第一个 chunk 的 path（W5+ 切换到精确 chunk 命中）。
-    /// per reviewer S2：skip_serializing_if 让空 Vec 不出现在 JSON，
+    /// 启发式：用 item 第一个 chunk 的 path。
+    /// skip_serializing_if 让空 Vec 不出现在 JSON，
     /// 保持 Chrome 扩展旧客户端契约（之前不存在此字段）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub breadcrumb: Vec<String>,
     /// chunk 在 item.content 的 char-level 区间。无 sidecar 数据时 None。
-    /// **Known limitation (W3 batch A v1, per reviewer S1)**：当前 offset 是 sidecar
+    /// **Known limitation**：当前 offset 是 sidecar
     /// 内累计 char count，不一定对齐原文 char index（行末 `\n` 处理 + `\r\n` 剥离会
-    /// 引入漂移）。适合 item 顶层导航；W5+ 真正按行号映射回原文。
+    /// 引入漂移）。适合 item 顶层导航；精确映射回原文留待后续。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_offset_start: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,7 +239,7 @@ impl SearchParams {
     /// 通用 search 路径默认 — **不**应用 cosine 阈值过滤，保持 W2 之前的行为契约。
     /// 用于 `/api/v1/search` / `/api/v1/search/relevant` (Chrome 扩展) — 这些 route 的
     /// 用户期望"全部召回，自己挑"。
-    /// per reviewer S2：自动启用 0.65 会让 Chrome 扩展 query 含义模糊时全无结果（cosine 0.4-0.6）。
+    /// 自动启用 0.65 会让 Chrome 扩展 query 含义模糊时全无结果（cosine 0.4-0.6）。
     pub fn with_defaults(top_k: usize) -> Self {
         // top_k 上限 100（per S14），但旧版 intermediate_k 写法 `(top_k*2).clamp(top_k, 40)`
         // 在 top_k > 20 时 (top_k*2) > 40，让 clamp 的 min > max 而 panic。
@@ -446,7 +446,7 @@ pub fn search_with_context(
     let mut results: Vec<SearchResult> = Vec::new();
     for (item_id, score) in &fused {
         if let Ok(Some(item)) = ctx.store.get_item(ctx.dek, item_id) {
-            // F2 (per R04 P0-1)：breadcrumb 现已加密落盘，需传 dek 解密
+            // breadcrumb 现已加密落盘，需传 dek 解密
             let (breadcrumb, off_start, off_end) = ctx
                 .store
                 .get_first_chunk_breadcrumb(ctx.dek, &item.id)
@@ -711,7 +711,7 @@ mod tests {
         assert_eq!(p.top_k, 5);
         assert_eq!(p.initial_k, 25);   // 5*5=25, in [20,500]
         assert_eq!(p.intermediate_k, 10); // 5*2=10
-        // per reviewer S2：通用 search 默认不启用 J3 阈值，保持 W2 前行为契约
+        // 通用 search 默认不启用 min_score 阈值，保持向后行为契约
         assert_eq!(p.min_score, None);
 
         let p2 = SearchParams::with_defaults(1);

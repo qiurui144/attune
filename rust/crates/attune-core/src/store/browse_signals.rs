@@ -7,7 +7,7 @@
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256; // per R02 P1-1: Digest trait 在 HMAC 路径下 unused
+use sha2::Sha256; // Digest trait 在 HMAC 路径下 unused
 
 use crate::crypto::{self, Key32};
 use crate::error::Result;
@@ -18,7 +18,7 @@ pub const HIGH_ENGAGEMENT_DWELL_MS: u64 = 3 * 60 * 1000; // 3 min
 pub const HIGH_ENGAGEMENT_SCROLL_PCT: u32 = 50;
 pub const HIGH_ENGAGEMENT_COPY_COUNT: u32 = 1;
 
-/// 字段长度上限（per reviewer I3：防恶意页面 document.title=1MB 拖慢加密 + 写盘）
+/// 字段长度上限（防恶意页面 document.title=1MB 拖慢加密 + 写盘）
 pub const MAX_URL_LEN: usize = 2048;
 pub const MAX_TITLE_LEN: usize = 512;
 
@@ -46,7 +46,7 @@ impl BrowseSignalInput {
         url_to_domain(&self.url)
     }
 
-    /// per reviewer I3：截断超长字段。route / store 调用前必走，防恶意页面拖慢加密。
+    /// 截断超长字段。route / store 调用前必走，防恶意页面拖慢加密。
     /// 超长按 char boundary 截断（不破坏 UTF-8）。
     pub fn truncate_to_limits(&mut self) {
         if self.url.chars().count() > MAX_URL_LEN {
@@ -79,7 +79,7 @@ fn url_to_domain(url: &str) -> String {
     host.split(':').next().unwrap_or(host).to_lowercase()
 }
 
-/// per reviewer I1：domain hash 加 pepper，防止 SHA-256(常见域名) 彩虹表反推。
+/// domain hash 加 pepper，防止 SHA-256(常见域名) 彩虹表反推。
 /// 用 HMAC-SHA256(pepper, domain)。pepper 是编译期常量（per-installation 不同更好，
 /// 但 attune 单二进制无每用户配置；此处接受弱 pepper 比裸 SHA-256 强很多）。
 /// 真正的 vault-scoped salt 需要 dek 透传，会让 hash_domain 签名变重 — 留 W4 评估。
@@ -96,7 +96,7 @@ fn hash_domain(domain: &str) -> String {
 
 impl Store {
     /// 写入一条浏览信号，返回新 row id。
-    /// per R05 P0：自动 truncate_to_limits 作 defense-in-depth — 防御非 route 调用方
+    /// 自动 truncate_to_limits 作 defense-in-depth — 防御非 route 调用方
     /// 直接调 store 时跳过 route 层 truncate（如未来 batch indexer / migration tool）。
     pub fn record_browse_signal(
         &self,
@@ -104,7 +104,7 @@ impl Store {
         signal: &BrowseSignalInput,
         now_secs: i64,
     ) -> Result<i64> {
-        // R05 P0：store 层兜底 truncate
+        // store 层兜底 truncate
         let mut owned = signal.clone();
         owned.truncate_to_limits();
         let url_enc = crypto::encrypt(dek, owned.url.as_bytes())?;
@@ -159,7 +159,7 @@ impl Store {
             .filter_map(|r| r.ok());
         let mut out = Vec::new();
         for (id, url_enc, title_enc, domain_hash, dwell, scroll, copy, visit, ts) in rows {
-            // per R15 P1：解密失败 fallback 到空字符串前 log warn，
+            // 解密失败 fallback 到空字符串前 log warn，
             // 否则用户切换 vault 后看到 url/title 全空但不知原因。
             let url = match crypto::decrypt(dek, &url_enc) {
                 Ok(b) => String::from_utf8(b).unwrap_or_default(),
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn record_auto_truncates_oversized_fields() {
-        // per R05 P0 defense-in-depth：store 层兜底 truncate，1MB title 不能落盘
+        // defense-in-depth：store 层兜底 truncate，1MB title 不能落盘
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
         let huge = "x".repeat(MAX_TITLE_LEN * 10);
@@ -340,18 +340,18 @@ mod tests {
 
     #[test]
     fn list_with_wrong_dek_silently_skips_decrypt_failures() {
-        // per R05 P0 #2：DEK 错路径无 panic，解密失败 fallback 到空字符串
+        // DEK 错路径无 panic，解密失败 fallback 到空字符串
         let store = Store::open_memory().unwrap();
         let dek_a = Key32::generate();
         let dek_b = Key32::generate();
         store.record_browse_signal(&dek_a, &sample_signal("https://x.com", 5, 80, 2), 1000).unwrap();
         let rows = store.list_recent_browse_signals(&dek_b, 10).unwrap();
         // 当前 fallback：解密失败 → url/title 空字符串（不崩溃）
-        // R04 P1-3 followup：未来加 decrypt_ok bool 字段让前端区分
+        // 未来加 decrypt_ok bool 字段让前端区分
         assert_eq!(rows.len(), 1, "row 仍被列出（不丢条目）");
         assert_eq!(rows[0].url, "", "wrong DEK → url 解密失败 → 空字符串 fallback");
         assert_eq!(rows[0].title, "", "wrong DEK → title 解密失败 → 空字符串 fallback");
-        // domain_hash 明文，不受 DEK 影响 — 攻击向量在 R04 P1-1 + P1-2 followup 处理
+        // domain_hash 明文，不受 DEK 影响 — 攻击向量另由 pepper hash 处理
         assert!(!rows[0].domain_hash.is_empty());
     }
 }

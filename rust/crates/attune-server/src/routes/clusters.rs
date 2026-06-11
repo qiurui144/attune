@@ -1,19 +1,20 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
 /// GET /api/v1/clusters — 当前聚类快照
 pub async fn list(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let snapshot = state.cluster_snapshot.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "lock poisoned"}))))?
+        .map_err(|_| AppError::Internal("lock poisoned".into()))?
         .clone();
     match snapshot {
         Some(s) => {
             let val = serde_json::to_value(&s)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+                .map_err(|e| AppError::Internal(e.to_string()))?;
             Ok(Json(val))
         }
         None => Ok(Json(serde_json::json!({
@@ -27,21 +28,21 @@ pub async fn list(
 pub async fn detail(
     State(state): State<SharedState>,
     Path(id): Path<i32>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let snapshot = state.cluster_snapshot.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "lock poisoned"}))))?;
+        .map_err(|_| AppError::Internal("lock poisoned".into()))?;
     match snapshot.as_ref() {
         Some(s) => {
             match s.clusters.iter().find(|c| c.id == id) {
                 Some(c) => {
                     let val = serde_json::to_value(c)
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
                     Ok(Json(val))
                 }
-                None => Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "cluster not found"})))),
+                None => Err(AppError::NotFound("cluster not found".into())),
             }
         }
-        None => Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no snapshot"})))),
+        None => Err(AppError::NotFound("no snapshot".into())),
     }
 }
 
@@ -55,30 +56,31 @@ pub async fn detail(
 ///   5. 写入 state.cluster_snapshot
 pub async fn rebuild(
     State(state): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     use attune_core::clusterer::{Clusterer, ClusterInput};
 
     // 取 LLM（聚类命名依赖 LLM）
     let llm = state.llm.lock()
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "llm lock"}))))?
+        .map_err(|_| AppError::Internal("llm lock".into()))?
         .as_ref().cloned();
     let llm = match llm {
         Some(l) => l,
-        None => return Err((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+        // rich error: 带 hint 字段, 走 Detailed 保完整 body
+        None => return Err(AppError::detailed(StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({
             "error": "LLM 不可用，无法为聚类命名",
             "hint": "请确保 Ollama 已安装并拉取 chat 模型"
-        })))),
+        }))),
     };
 
     // 1. 取所有 item IDs
     let (ids, dek) = {
         let vault = state.vault.lock()
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock"}))))?;
-        let dek = vault.dek_db().map_err(|e| {
-            (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": e.to_string()})))
-        })?;
+            .map_err(|_| AppError::Internal("vault lock".into()))?;
+        let dek = vault
+            .dek_db()
+            .map_err(|e| AppError::Forbidden(e.to_string()))?;
         let ids = vault.store().list_all_item_ids()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         (ids, dek)
     };
 
@@ -112,8 +114,8 @@ pub async fn rebuild(
     let clusterer = Clusterer::new(llm).with_min_items(10);
     let snapshot = tokio::task::spawn_blocking(move || clusterer.rebuild(inputs))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("join: {e}")}))))?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))?;
+        .map_err(|e| AppError::Internal(format!("join: {e}")))?
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let cluster_count = snapshot.clusters.len();
     let noise_count = snapshot.noise_item_ids.len();

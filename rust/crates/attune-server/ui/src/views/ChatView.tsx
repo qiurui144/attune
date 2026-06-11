@@ -16,7 +16,12 @@ import { useEffect, useRef } from 'preact/hooks';
 import { EmptyState, ChatMessage, ChatInput } from '../components';
 import { t } from '../i18n';
 import { activeSessionId, messages, chatSessions, settings } from '../store/signals';
-import { loadSession, sendMessage, clearActiveSession } from '../hooks/useChat';
+import {
+  loadSession,
+  sendMessage,
+  clearActiveSession,
+  consumeSkipNextSessionLoad,
+} from '../hooks/useChat';
 import type { Message } from '../store/signals';
 
 export function ChatView(): JSX.Element {
@@ -25,9 +30,11 @@ export function ChatView(): JSX.Element {
     ? chatSessions.value.find((s) => s.id === currentSid)
     : null;
 
-  // 跟随 activeSessionId 加载 session 消息
+  // 跟随 activeSessionId 加载 session 消息。刚发送后的 session 回填会触发本 effect，
+  // 但内存消息（含 acp_flow live trace）已是最新且更完整 —— 跳过那一次重载避免冲掉。
   useEffect(() => {
     if (currentSid) {
+      if (consumeSkipNextSessionLoad()) return;
       void loadSession(currentSid);
     } else {
       messages.value = [];

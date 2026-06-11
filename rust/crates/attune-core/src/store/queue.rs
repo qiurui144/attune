@@ -86,7 +86,7 @@ impl Store {
         Ok(())
     }
 
-    /// R10 S3 fix (P1)：检查 embed_queue 任务行是否仍存在。
+    /// 检查 embed_queue 任务行是否仍存在。
     ///
     /// embed worker dequeue 任务后（标 processing，行仍在），到写向量之间有窗口。
     /// 若期间 reindex / delete 调 `purge_embed_queue_for_item`，会 DELETE 该行

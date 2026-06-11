@@ -2,7 +2,7 @@
 resolver = "2"
 # crates/attune-tauri 是历史 stub (含 Cargo.toml.template + README + 空 src/),
 # 不放进 members. Tauri 实际位置 apps/attune-desktop. 不要把 stub 推进 workspace.
-members = ["crates/attune-core", "crates/attune-cli", "crates/attune-server", "crates/attune-accounts"]
+members = ["crates/attune-core", "crates/attune-cli", "crates/attune-server", "crates/attune-accounts", "crates/attune-agent-sdk"]
 # 显式 default-members 让 `cargo build --bin attune` 从 workspace root 找到 attune-cli。
 # 不设此项时 cargo 默认 "default-run packages" = root [package] attune(无 bin),报 "no bin target named attune"。
 # 此 regression 由 c14a5e7(cargo-deny v2 fix)引入 root [package] 后触发。
@@ -24,6 +24,9 @@ license = "Apache-2.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# attune-agent-sdk: wasm-safe leaf crate (Agent trait + AgentOutput + AgentError),
+# 零 native dep。attune-core 依赖并 re-export 它(方向 core→leaf 单一,无环)。
+attune-agent-sdk = { path = "crates/attune-agent-sdk" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # dirs：原 attune-core=6 / attune-server=5 不一致，统一到 6
 dirs = "6"
@@ -48,7 +51,7 @@ all = { level = "warn", priority = -1 }
 
 [package]
 name = "attune"
-version = "1.1.0"
+version = "1.2.0"
 edition.workspace = true
 license.workspace = true
 publish = false

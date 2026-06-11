@@ -32,52 +32,79 @@ use thiserror::Error;
 /// 可读 code (kebab-case, 稳定字符串, 用于客户端定向处理).
 #[derive(Debug, Error)]
 pub enum AppError {
+    // Option B (2026-06-04 B4): Display == 原始内层 message, 不含类别前缀.
+    // 类别由 IntoResponse 的 `code` 字段承载 (parts()). 这样旧 tuple route 迁移
+    // 到 AppError 时 wire `error` 文本保持不变 (纯加性: 只多了 code 字段).
+    // 类别信息在日志侧由 #[derive(Debug)] 的 variant 名保留.
+
     /// 400 Bad Request — 输入校验失败 / 参数错误 / 路径不合法.
-    #[error("bad request: {0}")]
+    #[error("{0}")]
     BadRequest(String),
 
     /// 401 Unauthorized — 缺 token / 未登录 / vault 锁定 (需要解锁前置).
-    #[error("unauthorized: {0}")]
+    #[error("{0}")]
     Unauthorized(String),
 
     /// 403 Forbidden — 有 token 但无权限 (membership tier 不够 / plugin 未购买).
-    #[error("forbidden: {0}")]
+    #[error("{0}")]
     Forbidden(String),
 
     /// 404 Not Found — 资源不存在 (item id / project id / plugin slug).
-    #[error("not found: {0}")]
+    #[error("{0}")]
     NotFound(String),
 
     /// 409 Conflict — 资源已存在 / state 不匹配 (e.g. vault already initialized).
-    #[error("conflict: {0}")]
+    #[error("{0}")]
     Conflict(String),
 
     /// 413 Payload Too Large — 上传体积超限 (file upload / chat context).
-    #[error("payload too large: {0}")]
+    #[error("{0}")]
     PayloadTooLarge(String),
 
     /// 422 Unprocessable Entity — 语义校验失败 (输入合规但业务规则拒绝).
-    #[error("unprocessable: {0}")]
+    #[error("{0}")]
     Unprocessable(String),
 
+    /// 429 Too Many Requests — 速率限制 / 资源配额上限 (e.g. 单 item 批注数上限).
+    #[error("{0}")]
+    TooManyRequests(String),
+
     /// 502 Bad Gateway — 调上游服务 (Ollama / cloud accounts / plugin hub) 失败.
-    #[error("bad gateway: {0}")]
+    #[error("{0}")]
     BadGateway(String),
 
     /// 503 Service Unavailable — 系统组件初始化中 / 后台任务繁忙 / 资源不足.
-    #[error("service unavailable: {0}")]
+    #[error("{0}")]
     ServiceUnavailable(String),
 
     /// 500 Internal Server Error — fallback. 用于 anyhow / 未分类的 attune-core
     /// error. 客户端不应特殊处理, 显示通用 "服务器内部错误" 即可.
-    #[error("internal: {0}")]
+    #[error("{0}")]
     Internal(String),
+
+    /// 结构化错误 (Option 2, 2026-06-04 B4) — 携带 `error` 之外额外字段的响应
+    /// (backpressure `retry_after_seconds` / agent `code`+`message`+`agent_id` /
+    /// `hint`). `body` 原样作为响应体, `status` 原样 → wire 字节级保持, 让 rich-error
+    /// tuple 也能统一走 AppError 而不丢任何字段. 用 `AppError::detailed(status, body)`
+    /// 构造.
+    #[error("{status}")]
+    Detailed {
+        status: StatusCode,
+        body: serde_json::Value,
+    },
 }
 
 impl AppError {
+    /// 构造结构化错误 (携带额外字段, wire 字节级保持). 见 `Detailed` variant.
+    pub fn detailed(status: StatusCode, body: serde_json::Value) -> Self {
+        AppError::Detailed { status, body }
+    }
+
     /// 将 AppError 映射到 HTTP status + 稳定 code 字符串 (客户端契约).
+    /// `Detailed` 由 `into_response` 短路处理, 不经此函数 (此 arm 仅为穷尽性).
     fn parts(&self) -> (StatusCode, &'static str) {
         match self {
+            AppError::Detailed { status, .. } => (*status, "detailed"),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad-request"),
             AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
             AppError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
@@ -85,6 +112,7 @@ impl AppError {
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             AppError::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload-too-large"),
             AppError::Unprocessable(_) => (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable"),
+            AppError::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "too-many-requests"),
             AppError::BadGateway(_) => (StatusCode::BAD_GATEWAY, "bad-gateway"),
             AppError::ServiceUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "service-unavailable"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
@@ -95,6 +123,10 @@ impl AppError {
 /// 统一 IntoResponse: HTTP status + `{"error": msg, "code": kebab}` shape.
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // Detailed 原样输出 body (wire 字节级保持), 不套 {"error","code"} shape.
+        if let AppError::Detailed { status, body } = self {
+            return (status, Json(body)).into_response();
+        }
         let (status, code) = self.parts();
         let msg = self.to_string();
         (status, Json(json!({"error": msg, "code": code}))).into_response()
@@ -182,5 +214,44 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "perm");
         let app_err: AppError = io_err.into();
         assert!(matches!(app_err, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn too_many_requests_maps_to_429_with_code() {
+        let resp = AppError::TooManyRequests("rate limit".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["code"], "too-many-requests");
+        assert_eq!(v["error"], "rate limit");
+    }
+
+    /// Option B 契约: wire `error` 字段是原始 message, 不带类别前缀
+    /// (类别由 `code` 承载). 防止迁移后客户端显示 "bad request: ..." 噪声.
+    #[tokio::test]
+    async fn wire_message_has_no_category_prefix() {
+        let resp = AppError::BadRequest("message too long".into()).into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "message too long"); // 精确相等, 非 contains
+        assert_eq!(v["code"], "bad-request");
+    }
+
+    /// Detailed 契约 (Option 2): status + body 原样输出, wire 字节级保持.
+    /// 用于迁移 rich-error tuple (backpressure retry 信号 / agent 结构化拒绝)
+    /// 不丢任何额外字段.
+    #[tokio::test]
+    async fn detailed_preserves_status_and_full_body() {
+        let original = json!({
+            "error": "embedding queue backpressure",
+            "pending_embeddings": 12000,
+            "retry_after_seconds": 30,
+        });
+        let resp = AppError::detailed(StatusCode::SERVICE_UNAVAILABLE, original.clone())
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, original); // 整个 body 字节级一致 (含额外字段)
     }
 }

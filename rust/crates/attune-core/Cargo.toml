@@ -1,6 +1,6 @@
 [package]
 name = "attune-core"
-version = "1.1.0"
+version = "1.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,6 +9,9 @@ license.workspace = true
 thiserror = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+# wasm-safe agent leaf crate — re-export Agent/AgentOutput 保 attune_core::agents::*
+# 路径不变;From<AgentError> for VaultError 桥接(方向 core→leaf 单一,无环)。
+attune-agent-sdk = { workspace = true }
 # Plan A1 — Cache/Context/Token standard API:
 #   blake3: cache key derivation (32-hex prefix, 64-bit collision domain per spec §7.2)
 #   async-trait: CacheBackend trait (async get/put/clear/count for future Redis/disk backends)
@@ -77,11 +80,32 @@ which = "6"
 ed25519-dalek = "2"
 base64 = "0.22"
 regex = "1"
+# 插件兼容性 gate: min_attune_version 走 semver 语义比较(非字典序)。纯 Rust,零跨平台风险。
+semver = "1"
 # H1 资源治理：跨平台 CPU/RAM 采样（Linux /proc · Win PDH · macOS task_info）
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+# GitConnector (OSS git 仓导入)：libgit2 绑定，shallow/fetch/diff 走库内 API，
+# 不依赖系统 git 子进程（桌面机可能没装 git；避 subprocess-env 坑）。
+# vendored-libgit2 内嵌 libgit2 C 源码（cc 自动编译，跨平台含 Windows P0，
+# 与 rusqlite/usearch 同 C 负担）；vendored-openssl 关掉 —— 走 libgit2 内置
+# http(s) transport（schannel on Win / SecureTransport on macOS / openssl on Linux
+# 仅运行时动态链接，clone https 公开仓不强依赖 openssl-sys 编译）。
+git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
+# glob 过滤（include/exclude 多模式）—— globset 编译多 glob 成单一 matcher。
+globset = "0.4"
+# URL 解析（SSRF url_guard）—— 已在依赖树（reqwest 传递）, 纯 Rust。
+url = "2"
+# 跨平台 agent 分发: wasm32-wasip1 模块由 wasmtime 执行(一包通吃所有平台)。
+# default-features=false + 显式选 cranelift(JIT)+ runtime + std,只用 WASI preview1。
+# feature-gated(默认开,极小镜像可 --no-default-features 关)。
+wasmtime = { version = "45", default-features = false, features = ["cranelift", "runtime", "std"], optional = true }
+wasmtime-wasi = { version = "45", optional = true }
 
 [features]
-default = []
+# wasm-runtime 默认开(per spec §8 决策);size-constrained / riscv 极小镜像可
+# `--no-default-features` 关闭以剔除 wasmtime(纯 native cap 路径)。
+default = ["wasm-runtime"]
+wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
 coreml = ["ort/coreml"]

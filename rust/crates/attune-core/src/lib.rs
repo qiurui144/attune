@@ -88,7 +88,7 @@ pub use usage::{
 pub use cache::{CacheBackend, CacheScope, CachedValue, cache_key};
 // chat 模块整体 pub(crate) — ChatEngine 只能内部构造（依赖 Vault/Store internal types）。
 // 外部消费者（attune-server route）通过本 crate re-export 拿到 Citation / ChatResponse /
-// parse_confidence / strip_confidence_marker 这些公开 API（per reviewer I3）。
+// parse_confidence / strip_confidence_marker 这些公开 API。
 pub(crate) mod chat;
 pub use chat::{parse_confidence, strip_confidence_marker, Citation, ChatEngine, ChatResponse};
 // chat_reliability — post-hoc deterministic evaluation agent for LLM chat
@@ -103,12 +103,16 @@ pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;
 pub mod capability_dispatch;
+// wasm_runtime: 跨平台 agent 分发 — wasmtime + WASI preview1 执行 wasm32-wasip1 模块.
+// feature-gated(默认开,极小镜像可 --no-default-features 关)。spec §4 模块边界.
+#[cfg(feature = "wasm-runtime")]
+pub mod wasm_runtime;
 pub mod skills;
 pub mod agents;
 pub mod agent_telemetry;
 pub mod feedback;
 pub mod mcp_client;
-pub mod case_metadata;
+// S4b: case_metadata removed from OSS attune-core — migrated to attune-pro/plugins/law-pro/
 pub mod plugin_encryption;
 pub mod ui_runtime;
 pub mod agent_runner;
@@ -130,9 +134,11 @@ pub mod error;
 pub mod index;
 pub mod ingest;
 pub mod intent_router;
+pub mod net;
 pub mod governor;
 pub mod llm;
 pub mod llm_settings;
+pub mod ollama_setup;
 pub mod ocr;  // v0.6.0-rc.3: pub for ai_stack status API
 pub mod asr;
 pub mod office_job_queue;
@@ -147,7 +153,6 @@ pub mod backup;
 pub mod reindex;
 pub mod resource_governor;
 pub mod scanner;
-pub mod scanner_patent;
 pub mod scanner_webdav;
 pub mod search;
 pub mod store;
@@ -157,7 +162,6 @@ pub mod vault;
 pub mod vectors;
 pub mod skill_evolution;
 
-// v0.7 sprint feature modules
 pub mod cost;
 pub mod tools;
 pub mod demo;
@@ -174,6 +178,10 @@ pub mod workflow;
 pub mod capture;
 pub mod sync;
 pub mod vlm;
+
+// version: ATTUNE_VERSION + is_compatible — plugin min_attune_version 加载期 gate.
+// spec: docs/superpowers/specs/2026-05-31-agent-cross-platform-distribution.md §5.3
+pub mod version;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

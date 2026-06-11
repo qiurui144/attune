@@ -132,7 +132,7 @@ impl Store {
         Ok(())
     }
 
-    /// R21 S2-1 fix: 反查 annotation 的 item_id（便于 update/delete 路径
+    /// 反查 annotation 的 item_id（便于 update/delete 路径
     /// 写 annotation_marker 信号到 skill_signals）。
     pub fn get_annotation_item_id(&self, id: &str) -> Result<Option<String>> {
         let r = self.conn.query_row(

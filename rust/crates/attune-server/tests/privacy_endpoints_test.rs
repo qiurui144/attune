@@ -41,6 +41,7 @@ async fn spawn_privacy_test_server() -> (String, reqwest::Client, &'static str) 
     let tmp = tempfile::TempDir::new().expect("tmp");
     // Each test gets isolated $HOME so nothing leaks between runs.
     // SAFETY: tests are single-threaded per `cargo test --test`, so env mutation is fine here.
+    #[allow(unsafe_code)]
     unsafe {
         std::env::set_var("HOME", tmp.path());
         std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));

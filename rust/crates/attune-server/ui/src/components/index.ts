@@ -4,6 +4,9 @@ export type { ButtonProps, ButtonVariant, ButtonSize } from './Button';
 export { Tooltip } from './Tooltip';
 export type { TooltipProps } from './Tooltip';
 
+export { LocalModelReadiness } from './LocalModelReadiness';
+export type { LocalModelReadinessProps } from './LocalModelReadiness';
+
 export { Input } from './Input';
 export type { InputProps } from './Input';
 

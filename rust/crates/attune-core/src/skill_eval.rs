@@ -1,4 +1,4 @@
-//! Skill 评估 framework（v0.7 sprint，F-SkillEval）
+//! Skill 评估 framework
 //!
 //! 给 skill 注册一组 (input, expected) 用例 + runner 闭包，跑出
 //! pass/fail + 延迟统计报告。用于回归测试任何 skill 实现，包括

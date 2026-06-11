@@ -130,7 +130,7 @@ impl Store {
     ) -> Result<MigrationReport> {
         let mut report = MigrationReport::default();
 
-        // R3: backup BEFORE touching anything.
+        // Backup BEFORE touching anything.
         if let Some(dir) = backup_dir {
             report.backup_path = Some(self.backup_vault_to(dir)?);
         }
@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn backup_is_really_generated_before_migration() {
-        // R3: migration must be preceded by a real backup file on disk.
+        // Migration must be preceded by a real backup file on disk.
         let store = Store::open_memory().unwrap();
         let dek = dek();
         store

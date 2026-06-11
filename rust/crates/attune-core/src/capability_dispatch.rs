@@ -171,6 +171,81 @@ pub fn dispatch(invocation: &CapabilityInvocation) -> Result<CapabilityResult> {
     }
 }
 
+/// Capability 执行运行时分流类型 (spec §5.3).
+///
+/// - `RustBinary`: 现有 subprocess(平台相关二进制)
+/// - `Wasm`: wasm32-wasip1 模块,wasmtime 执行(一包通吃所有平台)
+/// - `DataOnly`: 无执行体(纯 prompt + JSON schema,宿主侧组合)
+///
+/// `python_subprocess` 不入 enum — parse 时遇到返回 `unsupported-runtime` Err
+/// (声明未实现,不 silent NotFound)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityRuntime {
+    RustBinary,
+    Wasm,
+    DataOnly,
+}
+
+/// 解析 manifest runtime 字符串到 `CapabilityRuntime`。
+///
+/// `python_subprocess` / 任何未知值 → `unsupported-runtime` Err。
+pub fn parse_runtime(s: &str) -> Result<CapabilityRuntime> {
+    match s {
+        "rust_binary" => Ok(CapabilityRuntime::RustBinary),
+        "wasm" => Ok(CapabilityRuntime::Wasm),
+        "data_only" => Ok(CapabilityRuntime::DataOnly),
+        "python_subprocess" => Err(VaultError::InvalidInput(
+            "unsupported-runtime: python_subprocess is declared but not implemented".into(),
+        )),
+        other => Err(VaultError::InvalidInput(format!(
+            "unsupported-runtime: unknown runtime '{other}'"
+        ))),
+    }
+}
+
+/// 在 plugin dir 下解析 wasm 模块路径 (runtime=wasm)。
+pub fn resolve_wasm(plugin_dir: &Path, rel: &str) -> Option<PathBuf> {
+    let p = plugin_dir.join(rel);
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// 统一 capability 分流入口 (spec §3.2):调用方按 `runtime` 透明分流,
+/// 不感知 RustBinary / Wasm / DataOnly 差异,产物统一 `CapabilityResult`。
+///
+/// - `RustBinary`: `entry` = 已解析的 binary 绝对路径,走现有 `dispatch`。
+/// - `Wasm`: `entry` = .wasm 模块绝对路径;`wasm-runtime` feature 开 → WasmRunner;
+///   关 → `unsupported-runtime` Err(不 silent 成功)。
+/// - `DataOnly`: 无执行体,返回明确 Err(宿主侧 LLM lane 处理,不该走 dispatch)。
+pub fn dispatch_capability(
+    runtime: CapabilityRuntime,
+    invocation: &CapabilityInvocation,
+) -> Result<CapabilityResult> {
+    match runtime {
+        CapabilityRuntime::RustBinary => dispatch(invocation),
+        CapabilityRuntime::Wasm => {
+            #[cfg(feature = "wasm-runtime")]
+            {
+                crate::wasm_runtime::WasmRunner::shared().run(invocation)
+            }
+            #[cfg(not(feature = "wasm-runtime"))]
+            {
+                Err(VaultError::InvalidInput(
+                    "unsupported-runtime: wasm capability requires the 'wasm-runtime' \
+                     feature (disabled in this build)"
+                        .into(),
+                ))
+            }
+        }
+        CapabilityRuntime::DataOnly => Err(VaultError::InvalidInput(
+            "data_only capability has no executable; handle via host LLM lane".into(),
+        )),
+    }
+}
+
 /// 在 plugin dir 下解析 binary 路径 (per plugin.yaml `capability_binary` 字段或默认 `bin/run_<id>`)
 ///
 /// 约定:
@@ -280,6 +355,66 @@ mod tests {
         let inv = CapabilityInvocation::new("/nonexistent/binary/path/xyz123");
         let err = dispatch(&inv).unwrap_err();
         assert!(matches!(err, VaultError::Io(_)));
+    }
+
+    // ── 跨平台 runtime 分流 (spec §5.3) ──
+
+    #[test]
+    fn parse_runtime_known_values() {
+        assert_eq!(parse_runtime("rust_binary").unwrap(), CapabilityRuntime::RustBinary);
+        assert_eq!(parse_runtime("wasm").unwrap(), CapabilityRuntime::Wasm);
+        assert_eq!(parse_runtime("data_only").unwrap(), CapabilityRuntime::DataOnly);
+    }
+
+    #[test]
+    fn parse_runtime_python_subprocess_unsupported() {
+        let err = parse_runtime("python_subprocess").unwrap_err();
+        assert!(err.to_string().contains("unsupported-runtime"), "got {err}");
+    }
+
+    #[test]
+    fn parse_runtime_unknown_value_unsupported() {
+        let err = parse_runtime("brainfuck").unwrap_err();
+        assert!(err.to_string().contains("unsupported-runtime"), "got {err}");
+    }
+
+    #[test]
+    fn dispatch_capability_rust_binary_still_works() {
+        // RustBinary 分支 == 现有 dispatch,行为不变
+        let echo = which::which("echo").unwrap_or_else(|_| PathBuf::from("/bin/echo"));
+        if !echo.exists() {
+            eprintln!("skip: echo not found");
+            return;
+        }
+        let inv = CapabilityInvocation::new(&echo).arg("router_ok");
+        let r = dispatch_capability(CapabilityRuntime::RustBinary, &inv).expect("dispatch");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("router_ok"));
+    }
+
+    #[test]
+    fn dispatch_capability_data_only_is_error() {
+        let inv = CapabilityInvocation::new("/unused");
+        let err = dispatch_capability(CapabilityRuntime::DataOnly, &inv).unwrap_err();
+        assert!(err.to_string().contains("data_only"), "got {err}");
+    }
+
+    #[cfg(not(feature = "wasm-runtime"))]
+    #[test]
+    fn dispatch_capability_wasm_unsupported_without_feature() {
+        let inv = CapabilityInvocation::new("/unused.wasm");
+        let err = dispatch_capability(CapabilityRuntime::Wasm, &inv).unwrap_err();
+        assert!(err.to_string().contains("unsupported-runtime"), "got {err}");
+    }
+
+    #[test]
+    fn resolve_wasm_finds_existing_file() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let wasm_dir = tmp.path().join("wasm");
+        std::fs::create_dir_all(&wasm_dir).expect("mkdir");
+        std::fs::write(wasm_dir.join("a.wasm"), b"\0asm").expect("write");
+        assert!(resolve_wasm(tmp.path(), "wasm/a.wasm").is_some());
+        assert!(resolve_wasm(tmp.path(), "wasm/missing.wasm").is_none());
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub(crate) mod middleware;
 pub(crate) mod ingest_webdav;
 pub(crate) mod ingest_email;
 pub(crate) mod ingest_rss;
+pub(crate) mod ingest_git;
 
 // T1 (v1.0.6 KB-bench, plan 2026-05-28-kb-bench-integration.md Step 9):
 // in-process eval-mode harness used by `tests/eval_determinism_test.rs`.
@@ -74,6 +75,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/llm/test", post(routes::llm::test_llm))
         .route("/api/v1/llm/probe-k3", post(routes::llm::probe_k3))
         .route("/api/v1/models/pull", post(routes::llm::pull_model))
+        // 本地模型一键就绪：Ollama 三态 readiness + 一键安装 + LM Studio 探测
+        .route("/api/v1/ollama/readiness", get(routes::llm::ollama_readiness))
+        .route("/api/v1/ollama/install", post(routes::llm::install_ollama))
+        .route("/api/v1/lmstudio/probe", get(routes::llm::lmstudio_probe))
         // Chat (RAG)
         .route("/api/v1/chat", post(routes::chat::chat))
         .route("/api/v1/chat/history", get(routes::chat::chat_history))
@@ -131,7 +136,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
                 .delete(routes::annotations::delete_annotation))
         .route("/api/v1/items", get(routes::items::list_items))
         .route("/api/v1/items/stale", get(routes::items::list_stale_items))
-        // Round D E2E fix: PATCH content 需与 /upload 同享 100MB body limit。
+        // PATCH content 需与 /upload 同享 100MB body limit。
         // 否则 axum 默认 2MB 先拦截，update_item 的 MAX_CONTENT_LEN=100MB 检查成死代码，
         // 且用户能 upload 100MB 文档却无法 PATCH 编辑（2MB 上限）。GET/DELETE 无 body 不受影响。
         .route("/api/v1/items/{id}",
@@ -170,8 +175,6 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/marketplace/plugins", get(routes::marketplace::list_plugins))
         .route("/api/v1/marketplace/plugins/{id}/install", post(routes::marketplace::install_plugin))
         .route("/api/v1/skills", get(routes::skills::list_skills))
-        .route("/api/v1/patent/search", post(routes::patent::search))
-        .route("/api/v1/patent/databases", get(routes::patent::databases))
         .route("/api/v1/profile/export", get(routes::profile::export))
         .route("/api/v1/profile/import", post(routes::profile::import))
         // F1 topic distribution (W4, 2026-04-27) — 桌面"我的画像"页后端
@@ -215,6 +218,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // AI 底座状态（v0.6.0-rc.3, 2026-04-27）— Embedding / Rerank / OCR / ASR / LLM 可用性
         .route("/api/v1/ai-stack", get(routes::ai_stack::status))
         .route("/api/v1/ai_stack", get(routes::ai_stack::status))
+        // 本地底座模型一键拉取（OCR + ASR）
+        .route("/api/v1/ai-stack/ensure", post(routes::ai_stack::ensure))
         // G2 Auto bookmark candidates (W4, 2026-04-27)
         // POST 不暴露：仅由 routes::browse_signals::record_batch high_engagement 路径写
         .route("/api/v1/auto-bookmarks",
@@ -245,6 +250,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // Index management
         .route("/api/v1/index/bind", post(routes::index::bind_directory))
         .route("/api/v1/index/bind-remote", post(routes::remote::bind_remote))
+        .route("/api/v1/index/bind-git", post(routes::git::bind_git))
+        .route("/api/v1/index/sync-git", post(routes::git::sync_git))
         .route("/api/v1/index/email-accounts", get(routes::email::list_email_accounts))
         .route("/api/v1/index/bind-email", post(routes::email::bind_email))
         .route(
@@ -325,7 +332,7 @@ impl Default for ServerConfig {
 pub async fn run_in_runtime(
     config: ServerConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // R37 (2026-05-01): 双 sink — stdout (人类可读) + 文件 daily rotation (生产排障)。
+    // 双 sink — stdout (人类可读) + 文件 daily rotation (生产排障)。
     // 文件位于 data_dir()/logs/attune-server.YYYY-MM-DD（tracing-appender 自动加日期）。
     // 默认保留 7 天 — 由用户手动清理（tracing-appender 0.2 没有自动清理）。
     let log_dir = attune_core::platform::data_dir().join("logs");
@@ -386,7 +393,7 @@ pub async fn run_in_runtime(
 
     let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
 
-    // R35: 安装信号 stream **同步在 spawn 之前**，确保 SIGTERM/SIGINT 不被默认 handler 抢走。
+    // 安装信号 stream **同步在 spawn 之前**，确保 SIGTERM/SIGINT 不被默认 handler 抢走。
     // tokio::signal::unix::signal 必须在收到信号前调，且要 hold stream 不被 drop。
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -416,7 +423,7 @@ pub async fn run_in_runtime(
             tracing::info!("attune-server listening on https://{addr}");
             let tls_config =
                 axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
-            // R35: graceful shutdown via axum_server Handle，等 oneshot 收到信号后 30s 内 drain
+            // graceful shutdown via axum_server Handle，等 oneshot 收到信号后 30s 内 drain
             let handle = axum_server::Handle::new();
             let shutdown_handle = handle.clone();
             tokio::spawn(async move {

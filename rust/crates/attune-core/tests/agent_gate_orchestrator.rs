@@ -33,13 +33,36 @@ fn manifest_path() -> std::path::PathBuf {
         .join("agent_quality_manifest.yaml")
 }
 
+/// S4b regression: OSS manifest contains only oss-core gates — no industry plugin gates.
+/// Industry gates (law-pro / tech-pro external) removed per S4b decoupling.
+#[test]
+fn quality_manifest_contains_only_oss_core_gates() {
+    let m = agent_quality::load_manifest(&manifest_path()).unwrap();
+    for gate in &m.gates {
+        assert_ne!(
+            gate.plugin.as_str(),
+            "law-pro",
+            "S4b: law-pro gate '{}' must not appear in OSS manifest — belongs in attune-pro",
+            gate.id,
+        );
+        assert_ne!(
+            gate.plugin.as_str(),
+            "tech-pro",
+            "S4b: tech-pro gate '{}' must not appear in OSS manifest — belongs in attune-pro",
+            gate.id,
+        );
+    }
+}
+
 #[test]
 fn manifest_loads_and_is_nonempty() {
     let m = agent_quality::load_manifest(&manifest_path())
         .expect("agent_quality_manifest.yaml must load");
+    // S4b: 3 external industry gates (law_pro_deterministic, law_pro_fact_extractor_llm,
+    // tech_pro_code_reviewer) removed — OSS manifest now has 8 oss-core gates.
     assert!(
-        m.gates.len() >= 11,
-        "manifest must record all 11 known gates (B audit), got {}",
+        m.gates.len() >= 8,
+        "S4b: manifest must record all 8 oss-core gates, got {}",
         m.gates.len()
     );
 }
@@ -138,16 +161,19 @@ fn rollup_equals_sum_of_parts() {
 fn rollup_counts_machine_checkable_vs_external() {
     let m = agent_quality::load_manifest(&manifest_path()).unwrap();
     let dash = agent_quality::roll_up(&m);
-    // attune-side gates are machine-checkable here; attune-pro gates are
-    // external (their own thresholds.yaml + nightly-real-llm in the pro repo).
+    // S4b: industry external gates (law_pro_deterministic, law_pro_fact_extractor_llm,
+    // tech_pro_code_reviewer) removed from OSS manifest. All remaining gates are
+    // machine-checkable oss-core gates.
     assert!(
         dash.machine_checkable >= 8,
-        "≥8 attune-side gates must be machine-checkable in this repo, got {}",
+        "S4b: ≥8 oss-core gates must be machine-checkable in this repo, got {}",
         dash.machine_checkable
     );
-    assert!(
-        dash.external >= 3,
-        "≥3 attune-pro gates must be marked external, got {}",
+    assert_eq!(
+        dash.external,
+        0,
+        "S4b: 0 external gates remain in OSS manifest (industry gates moved to attune-pro); \
+         got {}",
         dash.external
     );
 }
@@ -224,9 +250,8 @@ fn oss_real_llm_gate_recorded_and_marked_nightly() {
 
 #[test]
 fn the_five_oss_deterministic_gates_recorded_with_real_baselines() {
-    // R4 honesty: the 5 OSS agent gates already exist (B audit) and are
-    // deterministic at pass_rate/zero_violations = 1.00 (their real baseline).
-    // Record — do not fudge.
+    // The 5 OSS agent gates already exist and are deterministic at
+    // pass_rate/zero_violations = 1.00 (their real baseline). Record — do not fudge.
     let m = agent_quality::load_manifest(&manifest_path()).unwrap();
     for id in [
         "chat_reliability",

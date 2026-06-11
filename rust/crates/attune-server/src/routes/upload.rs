@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use attune_core::ingest::{RawDocument, SourceKind};
 
@@ -26,58 +27,48 @@ pub async fn upload_file(
     State(state): State<SharedState>,
     Query(q): Query<UploadQuery>,
     mut multipart: Multipart,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     // First, read multipart data without holding any locks
     let (filename, data) = {
         let field = multipart
             .next_field()
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": e.to_string()})),
-                )
-            })?
-            .ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "no file provided"})),
-                )
-            })?;
+            .map_err(|e| AppError::BadRequest(e.to_string()))?
+            .ok_or_else(|| AppError::BadRequest("no file provided".into()))?;
 
         let filename = field.file_name().unwrap_or("unknown").to_string();
-        let data = field.bytes().await.map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
         (filename, data)
     };
 
     if data.len() > MAX_UPLOAD_BYTES {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({
-                "error": format!("file too large: {} bytes (max {})", data.len(), MAX_UPLOAD_BYTES)
-            })),
-        ));
+        return Err(AppError::PayloadTooLarge(format!(
+            "file too large: {} bytes (max {})",
+            data.len(),
+            MAX_UPLOAD_BYTES
+        )));
     }
 
     // upload 单次可塞大量 chunks，接同款 embedding 队列 backpressure 防 server hung
     const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
     {
-        let vault = state.vault.lock()
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "vault lock poisoned"}))))?;
+        let vault = state
+            .vault
+            .lock()
+            .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
         if let Ok(pending) = vault.store().pending_count_by_type("embed") {
             if pending > EMBEDDING_QUEUE_BACKPRESSURE_LIMIT {
-                return Err((
+                // rich error: retry 信号字段, 走 Detailed 保完整 body
+                return Err(AppError::detailed(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({
+                    serde_json::json!({
                         "error": format!("embedding queue backpressure ({pending} pending > {EMBEDDING_QUEUE_BACKPRESSURE_LIMIT} limit), retry later"),
                         "pending_embeddings": pending,
                         "retry_after_seconds": 30,
-                    })),
+                    }),
                 ));
             }
         }
@@ -85,12 +76,9 @@ pub async fn upload_file(
 
     // Now lock vault for DB operations (no more await points after this)
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let dek = vault.dek_db().map_err(|e| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
     // content_hash 短路 + 入库走统一 pipeline。OCR profile 透传给 parser。
     // upload 无来源域 / 用户标签 / 语料领域 —— domain/tags/corpus_domain 传 None。
@@ -114,12 +102,7 @@ pub async fn upload_file(
         &raw,
         q.profile.as_deref(),
     )
-    .map_err(|e| {
-        (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
+    .map_err(|e| AppError::Unprocessable(e.to_string()))?;
 
     let (item_id, chunks_queued, is_new) = match &outcome {
         attune_core::ingest::IngestOutcome::Inserted { item_id, chunks_enqueued } => {
@@ -140,10 +123,7 @@ pub async fn upload_file(
             (item_id.clone(), 0usize, true)
         }
         attune_core::ingest::IngestOutcome::Skipped { reason } => {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({"error": reason})),
-            ));
+            return Err(AppError::Unprocessable(reason.clone()));
         }
     };
 
@@ -184,7 +164,7 @@ pub async fn upload_file(
     // 释放 vault guard，让后续 spawn task 能独立 lock vault
     drop(vault);
 
-    // R10 E2E fix (P0): 新文档入库 → 失效 search 缓存，否则之前搜过的 query
+    // 新文档入库 → 失效 search 缓存，否则之前搜过的 query
     // 命中旧缓存，新文档搜不到
     state.invalidate_search_cache();
 

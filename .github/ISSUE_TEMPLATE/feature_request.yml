@@ -43,7 +43,7 @@ body:
       options:
         - attune (OSS) — 通用,任何 user 受益
         - attune-pro plugin pack — 行业增强(law / patent / medical / sales / academic 等)
-        - lawcontrol (B2B) — 律所小团队协作
+        - attune-enterprise (B2B) — 律所小团队协作
         - cloud SaaS — 服务端 / 官网 / wiki
         - 不确定 / triage 决定
     validations:

@@ -16,7 +16,8 @@
 //!   exit 其他 → 500          内部错误（IO / 序列化）
 //!   timeout → 503
 
-use crate::routes::errors::{internal, RouteError};
+use crate::error::{AppError, AppResult};
+use crate::routes::errors::internal;
 use crate::state::SharedState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -62,9 +63,9 @@ pub async fn run_agent(
     State(state): State<SharedState>,
     Path(agent_id): Path<String>,
     Json(body): Json<RunAgentRequest>,
-) -> Result<Json<serde_json::Value>, RouteError> {
+) -> AppResult<Json<serde_json::Value>> {
     if agent_id.len() > 128 {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "agent_id too long"}))));
+        return Err(AppError::BadRequest("agent_id too long".into()));
     }
     let registry = state.plugin_registry.clone();
 
@@ -75,10 +76,7 @@ pub async fn run_agent(
         .find(|(_, a)| a.id == agent_id)
         .map(|(pid, a)| (pid.to_string(), a.runtime.clone()))
         .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("agent '{agent_id}' not found in any loaded plugin")})),
-            )
+            AppError::NotFound(format!("agent '{agent_id}' not found in any loaded plugin"))
         })?;
 
     // Bug-D: runtime: library 的 agent (如 interest_calculator) 不暴露独立 binary —
@@ -86,15 +84,16 @@ pub async fn run_agent(
     // 之前 fallthrough 到 run_agent_subprocess 找不到 binary 时返 500;改为 400 with
     // 明确 schema/runtime 错误,告诉调用方 "这个 id 不是可独立 subprocess 的能力"。
     if agent_runtime == "library" {
-        return Err((
+        // rich error: 结构化 code/message/agent_id/runtime, 走 Detailed 保完整 body
+        return Err(AppError::detailed(
             StatusCode::BAD_REQUEST,
-            Json(json!({
+            json!({
                 "error": "invalid-input",
                 "code": "agent-not-callable",
                 "message": format!("agent '{agent_id}' has runtime=library and is not directly invokable via HTTP; it is called internally by other agents (e.g. civil_loan_agent)"),
                 "agent_id": agent_id,
                 "runtime": agent_runtime,
-            })),
+            }),
         ));
     }
 
@@ -106,14 +105,15 @@ pub async fn run_agent(
         _ => false,
     };
     if input_is_empty {
-        return Err((
+        // rich error: 结构化 code/message/agent_id, 走 Detailed 保完整 body
+        return Err(AppError::detailed(
             StatusCode::BAD_REQUEST,
-            Json(json!({
+            json!({
                 "error": "invalid-input",
                 "code": "empty-agent-input",
                 "message": format!("agent '{agent_id}' requires non-empty input object"),
                 "agent_id": agent_id,
-            })),
+            }),
         ));
     }
 
@@ -160,10 +160,10 @@ pub async fn run_agent(
 
     // 5. 错误映射
     if result.timed_out {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": format!("agent '{agent_id}' timed out (>{}s)", AGENT_RUN_TIMEOUT.as_secs())})),
-        ));
+        return Err(AppError::ServiceUnavailable(format!(
+            "agent '{agent_id}' timed out (>{}s)",
+            AGENT_RUN_TIMEOUT.as_secs()
+        )));
     }
     // agent stdout 是机器可读 JSON；解析失败保留原文（不阻断响应）
     let output: serde_json::Value =
@@ -186,10 +186,10 @@ pub async fn run_agent(
             "audit_trail": result.stderr,
         }))),
         // exit 3 = 客户端输入错误（畸形 / 空 JSON）—— 是调用方的错，回 400 而非 500。
-        3 => Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("agent '{agent_id}' rejected input: {}", result.stderr.trim())})),
-        )),
+        3 => Err(AppError::BadRequest(format!(
+            "agent '{agent_id}' rejected input: {}",
+            result.stderr.trim()
+        ))),
         other => Err(internal(
             "agent run",
             format!("agent '{agent_id}' exit {other}: {}", result.stderr),

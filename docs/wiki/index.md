@@ -17,12 +17,12 @@ Attune 是一个**私有知识库 + 记忆增强系统**：
 |------|------|--------|---------|
 | **Attune (OSS)** | 桌面 / Chrome 扩展 | 个人通用用户 | Apache-2.0 |
 | **Attune Pro** | Plugin pack 装载到 Attune | 个人行业用户（律师/医生/学者/售前/工程师/专利代理）| 商业（订阅）|
-| **LawControl** | Django + Vue + 19 容器 SaaS | 律所 / 小团队 B2B | 商业（License）|
+| **Attune Enterprise** | Django + Vue + 19 容器 SaaS | 律所 / 小团队 B2B | 商业（License）|
 
 **等式**：
 - 个人通用用户 = Attune (OSS)
 - 个人行业用户 = Attune (OSS) + Attune-Pro/<vertical>-pro
-- 行业小团队 = LawControl
+- 行业小团队 = Attune Enterprise
 
 ## v1.0 亮点
 
@@ -40,7 +40,7 @@ Attune 是一个**私有知识库 + 记忆增强系统**：
   - 法律: Hit@10=0.80, MRR=0.50
   - Rust/英文: Hit@10=1.00, MRR=1.00 ⭐ 满分
   - 中文八股: Hit@10=1.00, MRR=1.00 ⭐ 满分
-  - law-pro golden_qa 5 维度: **25/25 满分** (vs lawcontrol baseline +39%)
+  - law-pro golden_qa 5 维度: **25/25 满分** (vs legal baseline +39%)
 
 - **📥 5 个采集源内置 connector**
   - Local / Email (IMAP) / WebDAV / RSS / Telegram scaffold

@@ -5,13 +5,13 @@
 //! 路径设计：批量收以减少 HTTP 调用次数（每 30s 一次最多 50 条）。
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
 use attune_core::store::browse_signals::BrowseSignalInput;
 
 use crate::state::SharedState;
+use crate::error::{AppError, AppResult};
 
 const MAX_BATCH_SIZE: usize = 50;
 
@@ -38,17 +38,14 @@ pub struct DeleteQuery {
 pub async fn record_batch(
     State(state): State<SharedState>,
     Json(body): Json<BrowseSignalsBatch>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     if body.signals.is_empty() {
         return Ok(Json(serde_json::json!({"recorded": 0, "high_engagement": 0})));
     }
     if body.signals.len() > MAX_BATCH_SIZE {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({
-                "error": format!("batch too large (max {MAX_BATCH_SIZE})")
-            })),
-        ));
+        return Err(AppError::PayloadTooLarge(format!(
+            "batch too large (max {MAX_BATCH_SIZE})"
+        )));
     }
 
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
@@ -66,7 +63,7 @@ pub async fn record_batch(
     let mut high_engagement = 0usize;
     let mut auto_bookmarked = 0usize;
     for (idx, signal) in body.signals.iter().enumerate() {
-        // per R04 P0-2：URL 协议白名单。仅允许 http/https；
+        // URL 协议白名单。仅允许 http/https；
         // javascript: / data: / file: 等协议是 XSS / 任意文件读取风险。
         // chrome 扩展虽在 manifest exclude chrome://，但页面 history.pushState 可
         // 注入伪协议 URL，必须后端兜底。
@@ -76,7 +73,7 @@ pub async fn record_batch(
             continue;
         }
 
-        // per reviewer I3：截断超长字段（防恶意页面 1MB title）
+        // 截断超长字段（防恶意页面 1MB title）
         let mut owned = signal.clone();
         owned.truncate_to_limits();
 
@@ -127,8 +124,8 @@ pub async fn record_batch(
     Ok(Json(serde_json::json!({
         "recorded": recorded,
         "high_engagement": high_engagement,
-        "auto_bookmarked": auto_bookmarked,  // W4 G2: 实际入候选表的条数
-        // per reviewer I2：返回失败 indices，让客户端能精准重试某几条
+        "auto_bookmarked": auto_bookmarked,  // 实际入候选表的条数
+        // 返回失败 indices，让客户端能精准重试某几条
         "failed_indices": failed_indices,
     })))
 }
@@ -137,7 +134,7 @@ pub async fn record_batch(
 pub async fn list(
     State(state): State<SharedState>,
     Query(q): Query<ListQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let limit = q.limit.min(200);
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault
@@ -158,7 +155,7 @@ pub async fn list(
 pub async fn delete(
     State(state): State<SharedState>,
     Query(q): Query<DeleteQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault
         .dek_db()

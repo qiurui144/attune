@@ -102,6 +102,12 @@ rust/
 │   │   └── src/
 │   │       └── main.rs               # clap: setup/unlock/lock/insert/get/list/status
 │   │
+│   ├── attune-agent-sdk/              # leaf crate (零 native dep, 可编 wasm32-wasip1)
+│   │   ├── Cargo.toml                # 仅 serde + thiserror; deny-list 禁 rusqlite/tokio/...
+│   │   └── src/
+│   │       └── lib.rs               # Agent trait + AgentOutput<T> + AgentError/AgentResult
+│   │                                # (attune-core re-export 同一类型; 确定性 agent 直链编 wasm)
+│   │
 │   └── attune-tauri/                  # bin (脚手架模板，已由 apps/attune-desktop 取代)
 │       ├── README.md
 │       ├── Cargo.toml.template
@@ -625,6 +631,57 @@ L3 semantic（新增，按主题聚类，跨时间）。
 
 **设置键**（`app_settings.memory.*`）：`tiered_assembler_enabled` (bool, 默认 true)、
 `memory_confidence` (float, 默认 0.70 — coverage gate 阈值)。
+
+## 插件 capability runtime 契约（跨平台分发，2026-05-31）
+
+> SSOT。attune-pro 各 vertical 迁移 wasm 时引用本节。
+> spec:`docs/superpowers/specs/2026-05-31-agent-cross-platform-distribution.md`。
+
+attune-core 通过 `capability_dispatch::dispatch_capability(runtime, &invocation)` 统一分流执行
+skill/agent,调用方(`agent_runner` / chat handler)**不感知 runtime 差异**,产物统一
+`CapabilityResult{exit_code, stdout, stderr, timed_out}`。
+
+### runtime 取值（plugin.yaml 的 skill/agent 条目 `runtime:` 字段）
+
+| runtime | 执行体字段 | 说明 | 跨平台 |
+|---------|-----------|------|--------|
+| `rust_binary` | `binary: bin/run_<id>` | 现有 subprocess(平台相关 ELF/PE)。native-only cap(OCR/系统调用)保留 | △ 需平台分包 |
+| `wasm` | `wasm: wasm/<id>.wasm` | wasm32-wasip1,内嵌 wasmtime 执行。一份 .wasm 通吃所有平台 | ✅ 一包通吃 |
+| `data_only` | （无） | 纯 prompt + JSON schema,逻辑全在宿主 LLM lane | ✅ |
+| `python_subprocess` | — | **未实现** → dispatch 返回 `unsupported-runtime` Err | — |
+
+### wasm 契约（spec §5.2）
+
+- **输入**:stdin UTF-8 JSON(与 subprocess agent 同 schema:`{"facts":{...},"context":{...}}`)。
+- **输出**:stdout UTF-8 JSON(plugin schema 定义的业务输出)。
+- **exit code**:`0` 成功 / `1` 一般错误 / `2` 业务红线(`red_lines_violated`)/ `-1` 超时(`timed_out`)。
+  wasm 侧用 `proc_exit(N)` 退出码;trap → 宿主映射 exit 1;epoch 超时 → -1。
+- **确定性**:金额/数量计算用整数/定点(避免 f64),保证 wasm/native 输出**逐字节一致**(golden diff=0)。
+
+### `wasi_caps` 白名单（spec §5.1）
+
+`wasi_caps: []` 默认 = 纯计算,无 fs/net。可显式声明:`stdio`(默认隐含)/ `clock` /
+`read:<host_path>`(只读 preopen)/ `env:<KEY>`(注入某 env)。**默认无 net、无任意 fs 写**;
+未知能力字符串 → 加载期拒载。
+
+### 边界硬约束（spec §7,WasmRunner）
+
+每次调用 fresh `Store`(无跨调用状态泄漏);`StoreLimits` 内存上限 256 MB;
+epoch deadline 超时(后台 std::thread ticker,不引 tokio);`Engine` 进程级复用(JIT 摊销)。
+
+### `min_attune_version` gate（spec §10）
+
+`plugin.yaml` 顶层可声明 `min_attune_version: "1.1.0"`。`PluginRegistry::scan` 加载期按 semver
+校验:不满足 → skip + `[incompatible]` warning;非法 semver → skip + `[invalid-min-version]`。
+marketplace 安装链路把匹配本 plugin 的 incompatible warning 转 409 `plugin-incompatible-version`。
+**老包无此字段 → `None` → 视为兼容**(向后兼容)。
+
+### 迁移分类（rust_binary → wasm,分批,不阻塞发版）
+
+- **首批迁 wasm**:纯计算确定性 agent(本息/利率/期限计算、案号结构化、专利权利要求抽取)。
+- **保留 rust_binary**:依赖 poppler/OCR 预处理、系统 Chrome、重 native 性能的 cap。
+- **data_only**:无计算逻辑、逻辑全在 prompt/LLM 的 agent。
+- 每迁一个跑 golden diff=0(其 `agent_golden_gate`)才合入。
 
 ## 数据库 Schema
 

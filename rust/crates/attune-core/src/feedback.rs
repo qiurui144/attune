@@ -133,7 +133,7 @@ impl TuningDecision {
     }
 
     /// True when the controller chose a real action but did **not** auto-apply
-    /// it (R2 dry-run / human-review path).
+    /// it (dry-run / human-review path).
     pub fn is_recommendation(&self) -> bool {
         !matches!(self.action, TuningAction::NoOp) && !self.applied
     }
@@ -151,13 +151,13 @@ impl TuningDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeedbackConfig {
-    /// R2: when OFF (default), escalations are recommendations only — never
+    /// When OFF (default), escalations are recommendations only — never
     /// auto-applied. The user must explicitly opt in (`acp.auto_escalate = true`).
     pub auto_escalate: bool,
-    /// R7: minimum number of calls before any tuning action fires — guards
+    /// Minimum number of calls before any tuning action fires — guards
     /// against acting on a tiny, noisy sample.
     pub min_samples: u64,
-    /// R7: number of consecutive breaching observations required before a
+    /// Number of consecutive breaching observations required before a
     /// soft-disable fires. `1` = act on the first sustained breach.
     pub consecutive_periods: u32,
 }
@@ -165,11 +165,11 @@ pub struct FeedbackConfig {
 impl Default for FeedbackConfig {
     fn default() -> Self {
         FeedbackConfig {
-            // R2: never push spend onto pricier cloud tiers without opt-in.
+            // Never push spend onto pricier cloud tiers without opt-in.
             auto_escalate: false,
-            // R7: at least 20 calls of evidence before acting.
+            // At least 20 calls of evidence before acting.
             min_samples: 20,
-            // R7: require 3 consecutive breaching periods before disabling.
+            // Require 3 consecutive breaching periods before disabling.
             consecutive_periods: 3,
         }
     }
@@ -279,7 +279,7 @@ impl FeedbackController {
         // model tier exists; otherwise soft-disable (no headroom left).
         match next_model_tier(&row.model) {
             Some(higher) => {
-                // R2: only auto-apply when the user opted in.
+                // Only auto-apply when the user opted in.
                 let applied = self.cfg.auto_escalate;
                 TuningDecision {
                     agent_id: row.agent_id.clone(),

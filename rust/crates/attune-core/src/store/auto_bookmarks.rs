@@ -97,7 +97,7 @@ impl Store {
     }
 
     /// 列出最近 N 条候选（解密 url/title）。limit 上限调用方夹紧。
-    /// 解密失败的行 silent skip + warn — 与 list_recent_browse_signals 一致（per R15 P1）。
+    /// 解密失败的行 silent skip + warn — 与 list_recent_browse_signals 一致。
     pub fn list_recent_auto_bookmarks(
         &self,
         dek: &Key32,
