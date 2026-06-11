@@ -172,4 +172,7 @@ ignore_baseline:
   # BUG-3b FLAG — all legit env/slow gates per §1.2 / §7.2 Gate 2, NOT failure-skips.
   # The prior 35 was stale (never bumped as nightly/env #[ignore] accumulated; the
   # spike was masked by the earlier rust-test ENOSPC failure until the disk-reclaim fix).
-  attune-core: 43
+  # 2026-06-11 re-baselined 43→46: non-text recognition real-model smokes (layout
+  # ONNX + CLI recognize) + doc-intel real-LLM lanes ×3 + documents_member_gate
+  # real-LLM leg — all env-gated real-model/real-LLM lanes, NOT failure-skips.
+  attune-core: 46
