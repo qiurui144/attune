@@ -143,6 +143,114 @@ impl Store {
             None => Ok(None),
         }
     }
+
+    /// Update kind-specific stage + progress on a Running job. No-op if id absent.
+    pub fn update_job_progress(
+        &self,
+        id: &str,
+        stage_json: Option<&str>,
+        progress: f32,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE job_queue SET stage_json = ?2, progress = ?3 WHERE id = ?1",
+            params![id, stage_json, progress as f64],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a Running job Done with its result. Sets progress = 1.0 + finished_ms.
+    /// Guarded on state='running' so a cooperative cancel that already landed is
+    /// not overwritten by a late-finishing worker (cancel/complete race).
+    /// Returns true if the row transitioned.
+    pub fn complete_job(&self, id: &str, result_json: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE job_queue SET state = 'done', result_json = ?2, progress = 1.0, \
+             finished_ms = ?3 WHERE id = ?1 AND state = 'running'",
+            params![id, result_json, now_ms()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Mark a Running job Failed with a kebab error code + message. Same
+    /// state='running' guard as [`Store::complete_job`] (cancel wins races).
+    /// Returns true if the row transitioned.
+    pub fn fail_job(&self, id: &str, code: &str, message: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE job_queue SET state = 'failed', error_code = ?2, error_message = ?3, \
+             finished_ms = ?4 WHERE id = ?1 AND state = 'running'",
+            params![id, code, message, now_ms()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Increment attempts and return the new count (mirror of bump_reindex_attempts).
+    pub fn increment_job_attempts(&self, id: &str) -> Result<i64> {
+        self.conn.execute(
+            "UPDATE job_queue SET attempts = attempts + 1 WHERE id = ?1",
+            params![id],
+        )?;
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT attempts FROM job_queue WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok(n)
+    }
+
+    /// Requeue a Failed (or Cancelled) job back to Queued for retry. Clears
+    /// started_ms/finished_ms/error. No-op (returns false) for Done/Queued/Running.
+    pub fn requeue_job(&self, id: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE job_queue SET state = 'queued', started_ms = NULL, finished_ms = NULL, \
+             error_code = NULL, error_message = NULL \
+             WHERE id = ?1 AND state IN ('failed', 'cancelled')",
+            params![id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Reprioritize a still-Queued job (spec §2 可重排). No-op once claimed.
+    pub fn set_job_priority(&self, id: &str, priority: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE job_queue SET priority = ?2 WHERE id = ?1 AND state = 'queued'",
+            params![id, priority],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// How many Queued jobs are ahead of this one in claim order
+    /// (priority DESC, created_ms ASC, id ASC — must match [`Store::claim_next_job`]).
+    /// 0 for unknown ids and non-Queued jobs (mirrors JobRegistry::queue_position).
+    pub fn job_queue_position(&self, id: &str) -> Result<usize> {
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM job_queue q, job_queue t \
+                 WHERE t.id = ?1 AND t.state = 'queued' AND q.state = 'queued' \
+                   AND (q.priority > t.priority \
+                        OR (q.priority = t.priority AND q.created_ms < t.created_ms) \
+                        OR (q.priority = t.priority AND q.created_ms = t.created_ms \
+                            AND q.id < t.id))",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok(n as usize)
+    }
+
+    /// In-flight (Queued + Running) job count — metrics parity with the old
+    /// JobRegistry::in_flight_count.
+    pub fn in_flight_job_count(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM job_queue WHERE state IN ('queued', 'running')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +370,130 @@ mod tests {
         let job = store.get_job(&id).unwrap().unwrap();
         assert_eq!(job.priority, 5);
         assert_eq!(job.deadline_ms, Some(1_000_000));
+    }
+
+    #[test]
+    fn update_progress_persists_stage_and_progress() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store
+            .update_job_progress(&id, Some("{\"stage\":\"transcribing\"}"), 0.5)
+            .unwrap();
+        let j = store.get_job(&id).unwrap().unwrap();
+        assert_eq!(j.stage_json.as_deref(), Some("{\"stage\":\"transcribing\"}"));
+        assert!((j.progress - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn complete_job_sets_done_and_result() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        assert!(store.complete_job(&id, "{\"segments\":[]}").unwrap());
+        let j = store.get_job(&id).unwrap().unwrap();
+        assert_eq!(j.state, JobState::Done);
+        assert_eq!(j.result_json.as_deref(), Some("{\"segments\":[]}"));
+        assert!((j.progress - 1.0).abs() < 1e-6);
+        assert!(j.finished_ms.is_some());
+    }
+
+    #[test]
+    fn complete_does_not_overwrite_cancelled() {
+        // cancel/complete race: cancel landed first → late worker completion is dropped.
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.cancel_job(&id).unwrap();
+        assert!(!store.complete_job(&id, "{}").unwrap());
+        assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Cancelled);
+    }
+
+    #[test]
+    fn fail_job_sets_failed_with_code_and_message() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        assert!(store.fail_job(&id, "asr-engine-failed", "whisper exited 1").unwrap());
+        let j = store.get_job(&id).unwrap().unwrap();
+        assert_eq!(j.state, JobState::Failed);
+        let e = j.error.unwrap();
+        assert_eq!(e.code, "asr-engine-failed");
+        assert_eq!(e.message, "whisper exited 1");
+    }
+
+    #[test]
+    fn increment_attempts_counts_up() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        assert_eq!(store.increment_job_attempts(&id).unwrap(), 1);
+        assert_eq!(store.increment_job_attempts(&id).unwrap(), 2);
+    }
+
+    #[test]
+    fn requeue_failed_job_back_to_queued() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.fail_job(&id, "asr-engine-failed", "boom").unwrap();
+        assert!(store.requeue_job(&id).unwrap());
+        let j = store.get_job(&id).unwrap().unwrap();
+        assert_eq!(j.state, JobState::Queued);
+        assert!(j.started_ms.is_none(), "requeue clears started_ms");
+        assert!(j.error.is_none(), "requeue clears error");
+        // Now claimable again.
+        assert_eq!(store.claim_next_job().unwrap().unwrap().id, id);
+    }
+
+    #[test]
+    fn requeue_done_job_is_noop() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.complete_job(&id, "{}").unwrap();
+        assert!(!store.requeue_job(&id).unwrap(), "done jobs do not requeue");
+        assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Done);
+    }
+
+    #[test]
+    fn set_priority_only_while_queued() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        assert!(store.set_job_priority(&id, 7).unwrap());
+        assert_eq!(store.get_job(&id).unwrap().unwrap().priority, 7);
+        store.claim_next_job().unwrap();
+        assert!(!store.set_job_priority(&id, 9).unwrap(), "running job not reprioritizable");
+    }
+
+    #[test]
+    fn queue_position_follows_claim_order() {
+        let store = Store::open_memory().unwrap();
+        let a = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        let b = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        let high = store.enqueue_job(JobKind::Asr, "{}", 10, None).unwrap();
+        assert_eq!(store.job_queue_position(&high).unwrap(), 0, "high prio is next");
+        assert_eq!(store.job_queue_position(&a).unwrap(), 1);
+        assert_eq!(store.job_queue_position(&b).unwrap(), 2);
+        // Unknown / non-queued → 0 (JobRegistry parity).
+        assert_eq!(store.job_queue_position("nope").unwrap(), 0);
+        store.claim_next_job().unwrap(); // high → Running
+        assert_eq!(store.job_queue_position(&high).unwrap(), 0);
+        assert_eq!(store.job_queue_position(&a).unwrap(), 0, "a moved up");
+    }
+
+    #[test]
+    fn in_flight_count_tracks_queued_and_running() {
+        let store = Store::open_memory().unwrap();
+        let q = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap(); // one Running, one Queued
+        assert_eq!(store.in_flight_job_count().unwrap(), 2);
+        let d = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        // Terminal jobs drop out of in-flight.
+        let running = store.get_job(&d).unwrap().unwrap();
+        let done_id = if running.state == JobState::Running { d.clone() } else { q.clone() };
+        store.complete_job(&done_id, "{}").unwrap();
+        assert_eq!(store.in_flight_job_count().unwrap(), 2);
     }
 }
