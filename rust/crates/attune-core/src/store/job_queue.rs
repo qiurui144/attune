@@ -327,6 +327,35 @@ impl Store {
         )?;
         Ok(n)
     }
+
+    /// List jobs filtered by optional kind/state, claim order first (priority DESC),
+    /// newest first within priority. For the GET /jobs panel (spec §5).
+    /// Dynamic-filter SQL uses `prepare` (NOT prepare_cached — per CLAUDE.md 约定).
+    pub fn list_jobs(
+        &self,
+        kind: Option<&str>,
+        state: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<JobRecord>> {
+        let mut sql = format!("SELECT {SELECT_COLS} FROM job_queue WHERE 1=1");
+        let mut binds: Vec<String> = Vec::new();
+        if let Some(k) = kind {
+            sql.push_str(" AND kind = ?");
+            binds.push(k.to_string());
+        }
+        if let Some(s) = state {
+            sql.push_str(" AND state = ?");
+            binds.push(s.to_string());
+        }
+        sql.push_str(" ORDER BY priority DESC, created_ms DESC LIMIT ?");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let limit_i = limit as i64;
+        let mut p: Vec<&dyn rusqlite::ToSql> =
+            binds.iter().map(|b| b as &dyn rusqlite::ToSql).collect();
+        p.push(&limit_i);
+        let rows = stmt.query_map(p.as_slice(), row_to_record)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
@@ -660,5 +689,29 @@ mod tests {
         let done_id = if running.state == JobState::Running { d.clone() } else { q.clone() };
         store.complete_job(&done_id, "{}").unwrap();
         assert_eq!(store.in_flight_job_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn list_jobs_filters_by_kind_and_state() {
+        let store = Store::open_memory().unwrap();
+        store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.enqueue_job(JobKind::Agent, "{}", 0, None).unwrap();
+        let asr = store.list_jobs(Some("asr"), None, 100).unwrap();
+        assert_eq!(asr.len(), 1);
+        assert_eq!(asr[0].kind, JobKind::Asr);
+        let queued = store.list_jobs(None, Some("queued"), 100).unwrap();
+        assert_eq!(queued.len(), 2);
+        let none = store.list_jobs(None, Some("done"), 100).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn list_jobs_respects_limit_and_priority_order() {
+        let store = Store::open_memory().unwrap();
+        let _low = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        let high = store.enqueue_job(JobKind::Asr, "{}", 9, None).unwrap();
+        let top = store.list_jobs(None, None, 1).unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].id, high, "priority DESC ordering");
     }
 }
