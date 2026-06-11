@@ -135,59 +135,55 @@ async fn random_junk_bytes_with_image_ext_no_panic() {
 }
 
 #[test]
-fn registry_cancel_all_running_simulates_server_restart() {
-    use attune_core::office_job_queue::{Job, JobRegistry, JobState};
+fn durable_recovery_simulates_server_restart() {
+    // G5: restart no longer mass-cancels — recover_on_boot requeues idempotent
+    // (at_least_once) Running jobs; Queued + Done are preserved untouched.
+    use attune_core::office_job_queue::{JobKind, JobState};
+    use attune_core::store::Store;
 
-    let registry = JobRegistry::new();
-    // Pre-restart: 3 in-flight, 1 done
-    let mut q = Job::new("queued".into());
-    q.state = JobState::Queued;
-    registry.insert(q);
-    let mut r = Job::new("running".into());
-    r.state = JobState::Running;
-    registry.insert(r);
-    let mut d = Job::new("done".into());
-    d.state = JobState::Done;
-    d.result_json = Some("{}".into());
-    registry.insert(d);
+    let store = Store::open_memory().unwrap();
+    let running = store.enqueue_job(JobKind::Asr, "{}", 5, None).unwrap();
+    let queued = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+    let done = store.enqueue_job(JobKind::Asr, "{}", 9, None).unwrap();
+    let c = store.claim_next_job().unwrap().unwrap();
+    assert_eq!(c.id, done);
+    store.complete_job(&done, "{}").unwrap();
+    store.claim_next_job().unwrap(); // `running` (prio 5) → Running
 
-    // Simulate server restart
-    registry.cancel_all_running();
+    // Simulate server restart (install_job_store runs this once per boot).
+    let summary = store.recover_on_boot().unwrap();
+    assert_eq!(summary.requeued, 1);
+    assert_eq!(summary.failed_no_retry, 0);
 
-    assert_eq!(registry.get("queued").unwrap().state, JobState::Cancelled);
-    assert_eq!(registry.get("running").unwrap().state, JobState::Cancelled);
+    assert_eq!(store.get_job(&running).unwrap().unwrap().state, JobState::Queued);
+    assert_eq!(store.get_job(&queued).unwrap().unwrap().state, JobState::Queued);
     // Done preserved (terminal state)
-    assert_eq!(registry.get("done").unwrap().state, JobState::Done);
-
-    // Both former-in-flight have restart warning
-    for id in ["queued", "running"] {
-        let j = registry.get(id).unwrap();
-        assert!(
-            j.warnings.iter().any(|w| w.contains("server restarted")),
-            "job '{id}' missing restart warning"
-        );
-    }
+    assert_eq!(store.get_job(&done).unwrap().unwrap().state, JobState::Done);
 }
 
 #[test]
-fn registry_resubmit_after_failure_creates_new_job_id() {
-    use attune_core::office_job_queue::{Job, JobError, JobRegistry, JobState};
+fn durable_retry_after_failure_requeues_or_coexists() {
+    // After a failure the operator can requeue the SAME job (id preserved,
+    // error cleared), or the user can resubmit as a new job — both coexist.
+    use attune_core::office_job_queue::{JobKind, JobState};
+    use attune_core::store::Store;
 
-    let registry = JobRegistry::new();
-    let mut failed = Job::new("attempt-1".into());
-    failed.state = JobState::Failed;
-    failed.error = Some(JobError {
-        message: "transient".into(),
-        code: "asr-engine-failed".into(),
-    });
-    registry.insert(failed);
+    let store = Store::open_memory().unwrap();
+    let attempt1 = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+    store.claim_next_job().unwrap();
+    store.fail_job(&attempt1, "asr-engine-failed", "transient").unwrap();
+    assert_eq!(store.get_job(&attempt1).unwrap().unwrap().state, JobState::Failed);
 
-    // User resubmits → new job with different id (caller's responsibility)
-    let retry = Job::new("attempt-2".into());
-    registry.insert(retry);
+    // Path A: user resubmits → new independent job id.
+    let attempt2 = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+    assert_ne!(attempt1, attempt2);
+    assert_eq!(store.get_job(&attempt2).unwrap().unwrap().state, JobState::Queued);
+    assert_eq!(store.get_job(&attempt1).unwrap().unwrap().state, JobState::Failed);
 
-    assert_eq!(registry.get("attempt-1").unwrap().state, JobState::Failed);
-    assert_eq!(registry.get("attempt-2").unwrap().state, JobState::Queued);
-    // Both coexist
-    assert!(registry.in_flight_count() >= 1);
+    // Path B: operator requeues the failed job in place (error cleared).
+    assert!(store.requeue_job(&attempt1).unwrap());
+    let j = store.get_job(&attempt1).unwrap().unwrap();
+    assert_eq!(j.state, JobState::Queued);
+    assert!(j.error.is_none(), "requeue clears the previous error");
+    assert_eq!(store.in_flight_job_count().unwrap(), 2);
 }

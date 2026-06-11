@@ -577,6 +577,17 @@ mod tests {
         let a = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         let b = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         let high = store.enqueue_job(JobKind::Asr, "{}", 10, None).unwrap();
+        // Same-ms enqueues tie-break by random uuid — pin created_ms so the
+        // FIFO assertion is deterministic.
+        for (id, ms) in [(&a, 1i64), (&b, 2i64)] {
+            store
+                .raw_connection_for_test()
+                .execute(
+                    "UPDATE job_queue SET created_ms = ?2 WHERE id = ?1",
+                    rusqlite::params![id, ms],
+                )
+                .unwrap();
+        }
         assert_eq!(store.job_queue_position(&high).unwrap(), 0, "high prio is next");
         assert_eq!(store.job_queue_position(&a).unwrap(), 1);
         assert_eq!(store.job_queue_position(&b).unwrap(), 2);

@@ -756,12 +756,12 @@ impl Store {
         // QW-1: 一次性 purge embed_queue 终态行（done / abandoned）。
         // 这只是启动 housekeeping；周期清理由 cleanup worker 跑。失败静默忽略。
         let _ = store.purge_completed_embed_queue();
-        // G5: durable job-queue boot recovery (Running→Queued for at_least_once,
-        // →Failed for at_most_once). Replaces the old in-memory cancel_all_running.
-        // Failure is non-fatal — vault opens regardless.
-        if let Err(e) = store.recover_on_boot() {
-            log::warn!("G5: job_queue recover_on_boot failed (non-fatal): {e}");
-        }
+        // G5 NOTE: job-queue `recover_on_boot` is deliberately NOT called here.
+        // `Store::open` runs on every vault unlock / aggregator install / worker
+        // connection — recovering here would requeue jobs that are legitimately
+        // Running on another connection (double-execution; caught by the 8-worker
+        // race test in tests/job_queue_durable.rs). The server calls it exactly
+        // once per process boot (AppState::install_job_store).
         Ok(store)
     }
 

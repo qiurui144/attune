@@ -1971,8 +1971,10 @@ impl AppState {
 
     /// G5: open the durable job-queue store at boot (mirror of
     /// `install_usage_aggregator` — own `Arc<Mutex<Store>>` on `db_path`, WAL
-    /// makes the extra connection safe; `Store::open` already ran
-    /// `recover_on_boot` for the restart-recovery semantics). Idempotent.
+    /// makes the extra connection safe). Runs `recover_on_boot` here — exactly
+    /// once per process — NOT inside `Store::open` (which also runs at vault
+    /// unlock etc. and would requeue legitimately-Running jobs → double
+    /// execution; caught by the 8-worker race test). Idempotent.
     pub fn install_job_store(&self) {
         if self.job_store().is_some() {
             return;
@@ -1980,6 +1982,19 @@ impl AppState {
         let db_path = attune_core::platform::db_path();
         match attune_core::store::Store::open(&db_path) {
             Ok(s) => {
+                match s.recover_on_boot() {
+                    Ok(summary) if summary.requeued + summary.failed_no_retry > 0 => {
+                        tracing::info!(
+                            "G5: job recovery — {} requeued, {} failed (interrupted-no-retry)",
+                            summary.requeued,
+                            summary.failed_no_retry
+                        );
+                    }
+                    Ok(_) => {}
+                    // Non-fatal: queue still usable; interrupted Running rows are
+                    // eventually failed by the worker's timeout sweep.
+                    Err(e) => tracing::warn!("G5: recover_on_boot failed (non-fatal): {e}"),
+                }
                 if let Ok(mut g) = self.job_store.lock() {
                     *g = Some(std::sync::Arc::new(std::sync::Mutex::new(s)));
                 }
