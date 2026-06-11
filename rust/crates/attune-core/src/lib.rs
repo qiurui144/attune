@@ -152,6 +152,7 @@ pub mod ollama_setup;
 pub mod ocr;  // v0.6.0-rc.3: pub for ai_stack status API
 pub mod asr;
 pub mod office_job_queue;
+pub mod job_handler;  // G5: per-kind durable job dispatch (JobHandler + run_one_job)
 pub mod parser;
 pub mod pii;
 pub mod redacting_llm;
