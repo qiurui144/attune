@@ -267,6 +267,7 @@ impl Store {
     /// For each Running job:
     ///   - delivery == at_least_once → Queued (requeue, clear started_ms)
     ///   - delivery == at_most_once  → Failed (code `interrupted-no-retry`)
+    ///
     /// Queued/Done/Failed/Cancelled are untouched.
     pub fn recover_on_boot(&self) -> Result<RecoverSummary> {
         // Read interrupted Running jobs (need kind to decide delivery).

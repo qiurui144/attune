@@ -6,14 +6,13 @@
 
 use crate::state::SharedState;
 use attune_core::ocr::{self, RawLine};
-use attune_core::office_job_queue::{Job, JobError, JobStage, JobState};
+use attune_core::office_job_queue::{JobKind, JobRecord, JobState};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // ─── OCR (sync) ─────────────────────────────────────────────────────────────
 
@@ -232,7 +231,61 @@ pub struct TranscribeResponse {
     pub ws_url: String,
 }
 
-/// POST /api/v1/office/transcribe — 提交 ASR job, 立即返 job_id
+/// ASR jobs that have not finished within this ceiling are failed by the worker's
+/// timeout sweep (`job-timeout`). Generous: K3 long recordings via whisper subprocess.
+const ASR_JOB_DEADLINE_MS: i64 = 60 * 60 * 1000; // 1h
+
+/// G5: map a durable [`JobRecord`] to the office job-status JSON contract
+/// (`job_id`/`state`/`stage`/`queue_position`/`progress`/`elapsed_ms`/`eta_ms`/
+/// `result`/`error`/`warnings` — unchanged from the old in-memory JobRegistry shape).
+/// `queue_position` defaults to 0; HTTP/WS callers overwrite it with the live value.
+pub(crate) fn job_record_to_status_json(j: &JobRecord) -> serde_json::Value {
+    // stage: surface the inner string of stage_json {"stage":"transcribing"};
+    // fall back to the state name (pre-claim jobs were stage "queued" in the old enum).
+    let stage = j
+        .stage_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("stage").and_then(|x| x.as_str()).map(String::from))
+        .unwrap_or_else(|| {
+            match j.state {
+                JobState::Queued => "queued",
+                JobState::Running => "running",
+                JobState::Done => "postprocess",
+                JobState::Failed => "failed",
+                JobState::Cancelled => "cancelled",
+            }
+            .to_string()
+        });
+    let elapsed_ms = j
+        .started_ms
+        .map(|s| {
+            let end = j
+                .finished_ms
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+            (end - s).max(0) as u64
+        })
+        .unwrap_or(0);
+    serde_json::json!({
+        "job_id": j.id,
+        "kind": j.kind,
+        "state": j.state,
+        "stage": stage,
+        "queue_position": 0,
+        "progress": j.progress,
+        "elapsed_ms": elapsed_ms,
+        "eta_ms": serde_json::Value::Null,
+        "result": j.result_json.as_ref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+        "error": j.error,
+        "warnings": j.warnings,
+    })
+}
+
+/// POST /api/v1/office/transcribe — 提交 ASR job, 立即返 job_id.
+/// G5: enqueues to the durable `job_queue` table (survives restart — idempotent
+/// ASR is requeued by `recover_on_boot`); the background job worker
+/// (`crate::job_worker`) claims and runs it. HTTP contract unchanged.
 pub async fn post_transcribe(
     State(state): State<SharedState>,
     Json(req): Json<TranscribeRequest>,
@@ -246,105 +299,34 @@ pub async fn post_transcribe(
         ));
     }
 
-    let job_id = format!("asr-{}", Uuid::new_v4().simple());
+    let store = state.job_store().ok_or_else(|| {
+        err(
+            "job-store-unavailable",
+            "durable job queue unavailable (store failed to open at boot)",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
+
+    // Durable payload: everything AsrJobHandler needs to (re-)run after a restart.
+    // language/model are accepted for forward-compat but the backend self-detects.
+    let payload = serde_json::json!({
+        "file_path": req.file_path,
+        "diarization": req.diarization,
+    })
+    .to_string();
+    let deadline = chrono::Utc::now().timestamp_millis() + ASR_JOB_DEADLINE_MS;
+    let job_id = {
+        let s = store.lock().unwrap_or_else(|e| e.into_inner());
+        s.enqueue_job(JobKind::Asr, &payload, 0, Some(deadline))
+            .map_err(|e| {
+                err(
+                    "job-enqueue-failed",
+                    &e.to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            })?
+    };
     let ws_url = format!("/api/v1/office/jobs/ws?job_id={job_id}");
-    state.office_jobs.insert(Job::new(job_id.clone()));
-
-    // Spawn ASR worker (blocking thread; whisper-cli 是子进程, tokio::spawn_blocking 是对的).
-    let registry = state.office_jobs.clone();
-    let job_id_for_task = job_id.clone();
-    let file_path = req.file_path.clone();
-    let _language = req.language.clone(); // ASR backend 自检测 language; 当前 attune-core API 不暴露 override
-    let diarization = req.diarization;
-
-    tokio::task::spawn_blocking(move || {
-        registry.update(&job_id_for_task, |j| {
-            j.state = JobState::Running;
-            j.stage = JobStage::LoadingModel;
-            j.started_at = Some(std::time::Instant::now());
-        });
-
-        let backend = match attune_core::asr::detect_asr_backend() {
-            Some(b) => b,
-            None => {
-                registry.update(&job_id_for_task, |j| {
-                    j.state = JobState::Failed;
-                    j.error = Some(JobError {
-                        message: "ASR backend not available (whisper-cli not installed)".into(),
-                        code: "asr-engine-failed".into(),
-                    });
-                });
-                return;
-            }
-        };
-
-        registry.update(&job_id_for_task, |j| j.stage = JobStage::Transcribing);
-
-        let diar_backend = if diarization {
-            attune_core::asr::detect_diarization_backend()
-        } else {
-            None
-        };
-
-        let (segments, _full_text_legacy) = match attune_core::asr::transcribe_with_diarization(
-            &backend,
-            std::path::Path::new(&file_path),
-            diar_backend.as_ref(),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                registry.update(&job_id_for_task, |j| {
-                    j.state = JobState::Failed;
-                    j.error = Some(JobError {
-                        message: e.to_string(),
-                        code: "asr-engine-failed".into(),
-                    });
-                });
-                return;
-            }
-        };
-
-        // Aggregate speakers (TranscriptSegment uses ms granularity → 转 sec for response)
-        let mut speakers_agg: std::collections::BTreeMap<String, (f64, u64)> =
-            std::collections::BTreeMap::new();
-        for s in &segments {
-            let key = s.speaker.clone().unwrap_or_else(|| "SPEAKER_UNK".into());
-            let dur = (s.end_ms as f64 - s.start_ms as f64).max(0.0) / 1000.0;
-            let entry = speakers_agg.entry(key).or_insert((0.0, 0));
-            entry.0 += dur;
-            entry.1 += 1;
-        }
-        let duration_sec = segments.last().map(|s| s.end_ms as f64 / 1000.0).unwrap_or(0.0);
-
-        let result = serde_json::json!({
-            "model": backend.model_name,
-            "language_detected": backend.language,
-            "duration_sec": duration_sec,
-            "segments": segments.iter().map(|s| serde_json::json!({
-                "start_sec": s.start_ms as f64 / 1000.0,
-                "end_sec": s.end_ms as f64 / 1000.0,
-                "text": s.text,
-                "speaker": s.speaker,
-            })).collect::<Vec<_>>(),
-            "speakers": speakers_agg.iter().map(|(id, (total, count))| serde_json::json!({
-                "id": id,
-                "total_sec": total,
-                "segment_count": count,
-            })).collect::<Vec<_>>(),
-            "full_text": segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" "),
-            "diarization_used": diar_backend.is_some(),
-        });
-
-        registry.update(&job_id_for_task, |j| {
-            j.state = JobState::Done;
-            j.stage = JobStage::Postprocess;
-            j.progress = 1.0;
-            j.result_json = Some(result.to_string());
-            if let Some(start) = j.started_at {
-                j.elapsed_ms = start.elapsed().as_millis() as u64;
-            }
-        });
-    });
 
     Ok((
         StatusCode::ACCEPTED,
@@ -352,32 +334,45 @@ pub async fn post_transcribe(
     ))
 }
 
+/// Error shape of the office routes ({error, code} JSON per CLAUDE.md contract).
+type OfficeErr = (StatusCode, Json<serde_json::Value>);
+
+/// Fetch a job + its live queue position from the durable store.
+fn fetch_job(state: &SharedState, job_id: &str) -> Result<Option<(JobRecord, usize)>, OfficeErr> {
+    let store = state.job_store().ok_or_else(|| {
+        err(
+            "job-store-unavailable",
+            "durable job queue unavailable (store failed to open at boot)",
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
+    let s = store.lock().unwrap_or_else(|e| e.into_inner());
+    let job = s.get_job(job_id).map_err(|e| {
+        err(
+            "job-read-failed",
+            &e.to_string(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    match job {
+        Some(j) => {
+            let pos = s.job_queue_position(job_id).unwrap_or(0);
+            Ok(Some((j, pos)))
+        }
+        None => Ok(None),
+    }
+}
+
 /// GET /api/v1/office/jobs/{job_id}
 pub async fn get_job(
     State(state): State<SharedState>,
     Path(job_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let job = state.office_jobs.get(&job_id).ok_or_else(|| {
-        err("not-found", "job not found", StatusCode::NOT_FOUND)
-    })?;
-    let queue_pos = state.office_jobs.queue_position(&job_id);
-    let elapsed = job
-        .started_at
-        .map(|s| s.elapsed().as_millis() as u64)
-        .unwrap_or(job.elapsed_ms);
-    Ok(Json(serde_json::json!({
-        "job_id": job.id,
-        "state": job.state,
-        "stage": job.stage,
-        "queue_position": queue_pos,
-        "progress": job.progress,
-        "elapsed_ms": elapsed,
-        "eta_ms": job.eta_ms,
-        "result": job.result_json.as_ref()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
-        "error": job.error,
-        "warnings": job.warnings,
-    })))
+    let (job, queue_pos) = fetch_job(&state, &job_id)?
+        .ok_or_else(|| err("not-found", "job not found", StatusCode::NOT_FOUND))?;
+    let mut v = job_record_to_status_json(&job);
+    v["queue_position"] = queue_pos.into();
+    Ok(Json(v))
 }
 
 /// DELETE /api/v1/office/jobs/{job_id}
@@ -385,9 +380,7 @@ pub async fn delete_job(
     State(state): State<SharedState>,
     Path(job_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    let job = state
-        .office_jobs
-        .get(&job_id)
+    let (job, _) = fetch_job(&state, &job_id)?
         .ok_or_else(|| err("not-found", "job not found", StatusCode::NOT_FOUND))?;
     match job.state {
         JobState::Done => Err(err(
@@ -406,9 +399,22 @@ pub async fn delete_job(
             StatusCode::CONFLICT,
         )),
         _ => {
-            state
-                .office_jobs
-                .update(&job_id, |j| j.state = JobState::Cancelled);
+            // cancel_job is guarded to queued/running; terminal races are 409 above.
+            let store = state.job_store().ok_or_else(|| {
+                err(
+                    "job-store-unavailable",
+                    "durable job queue unavailable",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+            })?;
+            let s = store.lock().unwrap_or_else(|e| e.into_inner());
+            s.cancel_job(&job_id).map_err(|e| {
+                err(
+                    "job-cancel-failed",
+                    &e.to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            })?;
             Ok(StatusCode::NO_CONTENT)
         }
     }
@@ -435,7 +441,8 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, job_id: String
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                let Some(job) = state.office_jobs.get(&job_id) else {
+                let lookup = fetch_job(&state, &job_id).ok().flatten();
+                let Some((job, queue_pos)) = lookup else {
                     let _ = socket.send(Message::Text(
                         serde_json::json!({
                             "type": "failed",
@@ -445,8 +452,6 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, job_id: String
                     )).await;
                     return;
                 };
-                let queue_pos = state.office_jobs.queue_position(&job_id);
-                let elapsed = job.started_at.map(|s| s.elapsed().as_millis() as u64).unwrap_or(job.elapsed_ms);
                 let frame = match job.state {
                     JobState::Done => serde_json::json!({
                         "type": "done",
@@ -463,15 +468,12 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, job_id: String
                         "type": "cancelled",
                         "job_id": job.id,
                     }),
-                    _ => serde_json::json!({
-                        "type": "progress",
-                        "job_id": job.id,
-                        "state": job.state,
-                        "stage": job.stage,
-                        "queue_position": queue_pos,
-                        "progress": job.progress,
-                        "elapsed_ms": elapsed,
-                    }),
+                    _ => {
+                        let mut v = job_record_to_status_json(&job);
+                        v["type"] = "progress".into();
+                        v["queue_position"] = queue_pos.into();
+                        v
+                    }
                 };
                 if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
                     return;
@@ -484,10 +486,63 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState, job_id: String
                 let Some(Ok(Message::Text(t))) = msg else { return; };
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
                     if v.get("type").and_then(|x| x.as_str()) == Some("cancel") {
-                        state.office_jobs.update(&job_id, |j| j.state = JobState::Cancelled);
+                        if let Some(store) = state.job_store() {
+                            let s = store.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ = s.cancel_job(&job_id);
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use attune_core::office_job_queue::JobKind;
+    use attune_core::store::Store;
+
+    #[test]
+    fn job_record_maps_to_status_json_with_stage() {
+        let store = Store::open_memory().unwrap();
+        let id = store
+            .enqueue_job(JobKind::Asr, "{\"file_path\":\"a.wav\"}", 0, None)
+            .unwrap();
+        store.claim_next_job().unwrap();
+        store
+            .update_job_progress(&id, Some("{\"stage\":\"transcribing\"}"), 0.4)
+            .unwrap();
+        let j = store.get_job(&id).unwrap().unwrap();
+        let v = super::job_record_to_status_json(&j);
+        assert_eq!(v["state"], "running");
+        assert_eq!(v["stage"], "transcribing");
+        assert!((v["progress"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+        assert_eq!(v["job_id"], id);
+    }
+
+    #[test]
+    fn queued_job_status_json_has_queued_stage_and_zero_elapsed() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        let j = store.get_job(&id).unwrap().unwrap();
+        let v = super::job_record_to_status_json(&j);
+        assert_eq!(v["state"], "queued");
+        assert_eq!(v["stage"], "queued");
+        assert_eq!(v["elapsed_ms"], 0);
+        assert!(v["result"].is_null());
+        assert!(v["error"].is_null());
+    }
+
+    #[test]
+    fn failed_job_status_json_carries_error_contract() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.fail_job(&id, "asr-engine-failed", "whisper exited 1").unwrap();
+        let j = store.get_job(&id).unwrap().unwrap();
+        let v = super::job_record_to_status_json(&j);
+        assert_eq!(v["state"], "failed");
+        assert_eq!(v["error"]["code"], "asr-engine-failed");
+        assert_eq!(v["error"]["message"], "whisper exited 1");
     }
 }

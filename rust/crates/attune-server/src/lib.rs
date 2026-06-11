@@ -3,6 +3,7 @@ pub mod error;
 pub mod eval;
 pub mod routes;
 pub mod state;
+pub(crate) mod job_worker;
 pub(crate) mod middleware;
 pub(crate) mod ingest_webdav;
 pub(crate) mod ingest_email;
@@ -406,6 +407,12 @@ pub async fn run_in_runtime(
     // audit-C "usage recorder NOT wired" gap). Telemetry-only; failure degrades
     // gracefully without affecting request handling.
     let _usage_flusher = shared_state.install_usage_aggregator();
+    // G5 — durable job queue: open the store handle (Store::open already ran
+    // recover_on_boot → interrupted ASR jobs requeue instead of vanishing), then
+    // start the background drain worker. Failure degrades gracefully: office ASR
+    // routes return 503 job-store-unavailable, everything else unaffected.
+    shared_state.install_job_store();
+    job_worker::start_job_worker(shared_state.clone());
     let app = build_router(shared_state);
 
     let is_loopback = {

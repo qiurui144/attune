@@ -80,10 +80,16 @@ pub struct AppState {
     /// RSS 周期同步 worker 运行标志（防重入）。
     pub rss_sync_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
-    /// Office helper async job registry (v0.7.1) — in-memory ASR transcription
-    /// jobs. Not persisted; restart cancels all in-flight. See
-    /// `attune_core::office_job_queue` + `docs/superpowers/specs/2026-05-20-office-helper-design.md` §1.
-    pub office_jobs: std::sync::Arc<attune_core::office_job_queue::JobRegistry>,
+    /// G5 (2026-06-11): durable job queue store handle. Replaces the in-memory
+    /// `office_jobs: JobRegistry` — jobs now persist in the `job_queue` table and
+    /// survive restart (Running→Queued requeue for idempotent kinds). Like the
+    /// usage aggregator, this is its **own** `Arc<Mutex<Store>>` opened on
+    /// `db_path` (job_queue is an unencrypted table; SQLite WAL makes the extra
+    /// connection safe). `None` until `install_job_store` succeeds at boot.
+    /// See docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md.
+    pub job_store: Mutex<Option<std::sync::Arc<std::sync::Mutex<attune_core::store::Store>>>>,
+    /// 防止重复启动 G5 durable job worker 后台 task
+    pub job_worker_running: AtomicBool,
     /// Sprint 1 Phase B: project recommendation broadcast channel.
     /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
     pub recommendation_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
@@ -193,7 +199,8 @@ impl AppState {
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
             )),
-            office_jobs: attune_core::office_job_queue::JobRegistry::new(),
+            job_store: Mutex::new(None),
+            job_worker_running: AtomicBool::new(false),
             // 启动时检测一次硬件，后续复用（避免每次 GET/PATCH 都同步读 /proc 等）
             hardware: attune_core::platform::HardwareProfile::detect(),
             recommendation_tx,
@@ -1951,6 +1958,39 @@ impl AppState {
         self.set_usage(Some(agg));
         tracing::info!("ACP-4: usage aggregator installed (flush every 200ms)");
         Some(handle)
+    }
+
+    /// G5: the durable job queue's store handle. `None` until
+    /// [`AppState::install_job_store`] runs at boot (or if the DB cannot open —
+    /// office ASR routes then return 503 `job-store-unavailable`).
+    pub fn job_store(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<attune_core::store::Store>>> {
+        self.job_store.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// G5: open the durable job-queue store at boot (mirror of
+    /// `install_usage_aggregator` — own `Arc<Mutex<Store>>` on `db_path`, WAL
+    /// makes the extra connection safe; `Store::open` already ran
+    /// `recover_on_boot` for the restart-recovery semantics). Idempotent.
+    pub fn install_job_store(&self) {
+        if self.job_store().is_some() {
+            return;
+        }
+        let db_path = attune_core::platform::db_path();
+        match attune_core::store::Store::open(&db_path) {
+            Ok(s) => {
+                if let Ok(mut g) = self.job_store.lock() {
+                    *g = Some(std::sync::Arc::new(std::sync::Mutex::new(s)));
+                }
+                tracing::info!("G5: durable job store installed at {db_path:?}");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "G5: durable job queue disabled — cannot open store at {db_path:?}: {e}"
+                );
+            }
+        }
     }
 
     /// Read the active cache backend. Defaults to `MemoryLruCache` after `new`;
