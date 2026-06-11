@@ -116,9 +116,12 @@ impl Store {
         }
     }
 
-    /// Cancel a job: any non-terminal job → Cancelled. Running jobs stop cooperatively
-    /// (the handler checks [`Store::is_job_cancelled`] between stages). No-op for
-    /// terminal jobs. Returns true if a row changed.
+    /// Cancel a job: any non-terminal job → Cancelled. A Running job stops
+    /// cooperatively IF its handler is multi-stage (polls `JobControl::is_cancelled`
+    /// between stages); a single-blocking-call handler (e.g. ASR's whisper
+    /// subprocess) cannot be interrupted mid-call — cancel still flips state and
+    /// the late result is dropped by the running-guard. No-op for terminal jobs.
+    /// Returns true if a row changed.
     pub fn cancel_job(&self, id: &str) -> Result<bool> {
         let n = self.conn.execute(
             "UPDATE job_queue SET state = 'cancelled', finished_ms = ?2 \
@@ -317,13 +320,21 @@ impl Store {
         Ok(n)
     }
 
-    /// TTL purge: delete terminal (done/failed/cancelled) jobs older than `ttl_days`.
-    /// Prevents unbounded growth on a 24h K3 box (spec §8). Returns count deleted.
+    /// TTL purge: delete terminal (done/failed/cancelled) jobs whose retention
+    /// window *since they finished* has elapsed. Prevents unbounded growth on a
+    /// 24h K3 box (spec §8). Returns count deleted.
+    ///
+    /// Retention is measured from `finished_ms` (when the job entered a terminal
+    /// state), NOT `created_ms`: a long-queued or many-times-requeued job that
+    /// only just completed must survive its full TTL so the user can still see /
+    /// download the result. A terminal row with NULL finished_ms falls back to
+    /// created_ms (defensive — every terminal transition now stamps finished_ms).
     pub fn purge_terminal_jobs(&self, now_ms: i64, ttl_days: i64) -> Result<usize> {
         let cutoff = now_ms - ttl_days * 86_400_000;
         let n = self.conn.execute(
             "DELETE FROM job_queue \
-             WHERE state IN ('done', 'failed', 'cancelled') AND created_ms < ?1",
+             WHERE state IN ('done', 'failed', 'cancelled') \
+               AND COALESCE(finished_ms, created_ms) < ?1",
             params![cutoff],
         )?;
         Ok(n)
@@ -667,11 +678,11 @@ mod tests {
         let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         store.claim_next_job().unwrap();
         store.complete_job(&id, "{}").unwrap();
-        // Backdate created_ms far past TTL.
+        // Backdate finished_ms far past TTL (retention is measured from finish).
         store
             .raw_connection_for_test()
             .execute(
-                "UPDATE job_queue SET created_ms = 0 WHERE id = ?1",
+                "UPDATE job_queue SET created_ms = 0, finished_ms = 0 WHERE id = ?1",
                 rusqlite::params![id],
             )
             .unwrap();
@@ -681,6 +692,33 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(store.get_job(&id).unwrap().is_none());
         assert!(store.get_job(&fresh).unwrap().is_some());
+    }
+
+    #[test]
+    fn purge_retention_is_measured_from_finish_not_creation() {
+        // B-side [M] regression: a long-queued / many-times-requeued job that was
+        // CREATED long ago but only JUST completed must survive its full TTL so
+        // the user can still see/download the result — purging by created_ms would
+        // delete it the instant it finished.
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.complete_job(&id, "{\"segments\":[]}").unwrap();
+        // created 60 days ago, finished just now.
+        let now = now_ms_test();
+        store
+            .raw_connection_for_test()
+            .execute(
+                "UPDATE job_queue SET created_ms = ?2, finished_ms = ?3 WHERE id = ?1",
+                rusqlite::params![id, now - 60 * 86_400_000, now],
+            )
+            .unwrap();
+        let removed = store.purge_terminal_jobs(now, 30).unwrap();
+        assert_eq!(removed, 0, "recently-finished job must survive despite old created_ms");
+        assert!(
+            store.get_job(&id).unwrap().is_some(),
+            "result must still be retrievable right after completion"
+        );
     }
 
     fn now_ms_test() -> i64 {

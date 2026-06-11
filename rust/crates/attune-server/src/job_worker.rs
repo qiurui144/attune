@@ -6,7 +6,7 @@
 //! Spec: docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md §4/§6.
 
 use crate::state::AppState;
-use attune_core::job_handler::{JobHandler, JobHandlerRegistry};
+use attune_core::job_handler::{JobControl, JobHandler, JobHandlerRegistry};
 use attune_core::office_job_queue::JobKind;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -19,6 +19,14 @@ const JOB_TTL_DAYS: i64 = 30;
 /// ASR handler — runs whisper via subprocess, same pipeline the old inline
 /// office.rs spawn used. Payload: {"file_path": "...", "diarization": bool}.
 /// at_least_once: re-transcribing the same file after a crash is idempotent.
+///
+/// **Cancellation limitation (documented, RELEASE.md Known Limitations):** the
+/// core of `run` is a single uninterruptible `transcribe_with_diarization`
+/// subprocess call. We honor cancellation at the boundaries we *can* — before
+/// backend detection and before the subprocess starts — but once whisper is
+/// running we cannot stop it mid-file; cancel flips DB state immediately and the
+/// late result is dropped by the running-guard. True mid-subprocess kill is a
+/// follow-up (needs a child-process handle + SIGTERM path).
 pub struct AsrJobHandler;
 
 impl JobHandler for AsrJobHandler {
@@ -30,7 +38,7 @@ impl JobHandler for AsrJobHandler {
         Some("{\"stage\":\"transcribing\"}")
     }
 
-    fn run(&self, payload_json: &str) -> Result<String, (String, String)> {
+    fn run(&self, payload_json: &str, ctl: &dyn JobControl) -> Result<String, (String, String)> {
         let v: serde_json::Value = serde_json::from_str(payload_json)
             .map_err(|e| ("bad-payload".to_string(), e.to_string()))?;
         let file_path = v["file_path"]
@@ -46,6 +54,12 @@ impl JobHandler for AsrJobHandler {
             ));
         }
 
+        // Honor cancellation at the boundaries we can (pre-detection, pre-subprocess) —
+        // the cheapest savings for a job cancelled while still queued behind a slow one.
+        if ctl.is_cancelled() {
+            return Err(("cancelled".to_string(), "cancelled before start".to_string()));
+        }
+
         let backend = attune_core::asr::detect_asr_backend().ok_or_else(|| {
             (
                 "asr-engine-failed".to_string(),
@@ -57,6 +71,12 @@ impl JobHandler for AsrJobHandler {
         } else {
             None
         };
+
+        // Last pre-subprocess cancel checkpoint. Beyond this the whisper call is
+        // uninterruptible (see struct doc).
+        if ctl.is_cancelled() {
+            return Err(("cancelled".to_string(), "cancelled before transcribe".to_string()));
+        }
 
         let (segments, _full_text_legacy) = attune_core::asr::transcribe_with_diarization(
             &backend,

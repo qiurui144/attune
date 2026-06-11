@@ -200,13 +200,13 @@ fn resource_exhaust_thousand_jobs_queue_and_drain() {
 fn poison_job_parked_after_max_attempts() {
     // Attempts guard at the worker layer (run_one_job) parks poison jobs even
     // if an operator keeps requeueing them.
-    use attune_core::job_handler::{run_one_job, JobHandler, JobHandlerRegistry};
+    use attune_core::job_handler::{run_one_job, JobControl, JobHandler, JobHandlerRegistry};
     struct AlwaysFail;
     impl JobHandler for AlwaysFail {
         fn kind(&self) -> JobKind {
             JobKind::Ocr
         }
-        fn run(&self, _: &str) -> Result<String, (String, String)> {
+        fn run(&self, _: &str, _ctl: &dyn JobControl) -> Result<String, (String, String)> {
             Err(("always".into(), "fail".into()))
         }
     }
@@ -232,4 +232,83 @@ fn poison_job_parked_after_max_attempts() {
     );
     // The final execution was parked by the worker, not the handler.
     // (last requeue flips it back to Queued; the run before it stamped max-attempts)
+}
+
+#[test]
+fn cooperative_cancel_stops_multistage_handler_midway() {
+    // B-side [C] fix: a long-running multi-stage handler must observe a cancel
+    // that lands while it is running and bail — NOT run every stage to the end.
+    // Real cross-connection: the handler polls is_cancelled (its own Store read)
+    // while a separate connection issues the cancel mid-flight.
+    use attune_core::job_handler::{JobControl, JobHandler, JobHandlerRegistry};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static STAGES_RUN: AtomicUsize = AtomicUsize::new(0);
+
+    struct SlowOcr;
+    impl JobHandler for SlowOcr {
+        fn kind(&self) -> JobKind {
+            JobKind::Ocr
+        }
+        fn run(&self, _: &str, ctl: &dyn JobControl) -> Result<String, (String, String)> {
+            for _page in 0..20 {
+                if ctl.is_cancelled() {
+                    return Err(("cancelled".into(), "stopped mid-run".into()));
+                }
+                STAGES_RUN.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok("{}".into())
+        }
+    }
+
+    let (_dir, path) = open_disk();
+    let store = Arc::new(Mutex::new(Store::open(&path).unwrap()));
+    let id = store
+        .lock()
+        .unwrap()
+        .enqueue_job(JobKind::Ocr, "{}", 0, None)
+        .unwrap();
+    store.lock().unwrap().claim_next_job().unwrap(); // → Running
+
+    // Cancel from a SEPARATE connection while the handler is in its stage loop.
+    let cancel_path = path.clone();
+    let cancel_id = id.clone();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(60)); // ~3 stages in
+        let s = Store::open(&cancel_path).unwrap();
+        assert!(s.cancel_job(&cancel_id).unwrap());
+    });
+
+    let mut reg = JobHandlerRegistry::new();
+    reg.register(Arc::new(SlowOcr));
+    // Drive the handler directly with a control bound to the shared store.
+    struct Ctl {
+        store: Arc<Mutex<Store>>,
+        id: String,
+    }
+    impl JobControl for Ctl {
+        fn is_cancelled(&self) -> bool {
+            let s = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            s.is_job_cancelled(&self.id).unwrap_or(false)
+        }
+        fn report(&self, _: Option<&str>, _: f32) {}
+    }
+    let ctl = Ctl {
+        store: store.clone(),
+        id: id.clone(),
+    };
+    let out = reg.get(JobKind::Ocr).unwrap().run("{}", &ctl);
+    canceller.join().unwrap();
+
+    assert!(out.is_err(), "handler must bail on cancel");
+    let stages = STAGES_RUN.load(Ordering::SeqCst);
+    assert!(
+        stages < 20,
+        "handler stopped mid-run (ran {stages}/20 stages), did not run to completion"
+    );
+    assert_eq!(
+        store.lock().unwrap().get_job(&id).unwrap().unwrap().state,
+        JobState::Cancelled
+    );
 }

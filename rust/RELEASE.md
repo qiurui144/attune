@@ -65,12 +65,23 @@
   按原 token 索引(仍受益于 LowerCaser 大小写归一)。
 - `pdf_extract` 对拉丁字形会插入词内空格(`borrowing` → `bor rowing`);token 级断言
   用去空格比对(见 `pdf_ingest_test.rs::despace`),实际检索经 jieba 切分不受影响。
-- **G5 job queue 限制**:单机队列(无分布式);job DAG 依赖未做;`payload_json` 以明文
-  存储(同 `reindex_queue` 的 item_id;字段级加密是后续 hardening);`result_json` 无
-  1MB 上限保护(ASR/OCR 结果尺寸下低风险);agent kind 中断后不自动重试(需手动
-  requeue)。Migration:自动 —— `job_queue` 表 `CREATE TABLE IF NOT EXISTS` 随下次
-  打开创建,无数据迁移(旧 in-memory job 本就不持久);重启行为变化:不再批量取消
-  in-flight job。
+- **G5 job queue 限制**:
+  - **单 worker 串行 drain**(本版**有意** scope):所有 kind 共享一个串行 drain 循环,
+    保留 ASR "信号量门控防显存踩踏" 语义。spec §6 的 per-kind semaphore / 多 worker /
+    "交互 job 优先于批处理并行" **本版不做,推 v1.x**(原子 claim 已具备多 worker 安全性,
+    底座就绪)。后果:一个慢 ASR 会阻塞排在其后的其它 kind。
+  - **协作式取消对单次阻塞 handler 不能中途停**:多阶段 handler(OCR 翻页 / agent step /
+    ingest 批)通过 `JobControl::is_cancelled` 在阶段间真正提前退出;但 `AsrJobHandler` 的
+    核心是单次不可打断的 whisper subprocess —— 取消会**立即翻 DB state 并丢弃晚到结果**,
+    但 subprocess 仍跑到底(在 backend 检测前 / subprocess 启动前两个边界点会响应取消)。
+    真·subprocess 中途 kill(需 child handle + SIGTERM)是后续。
+  - 单机队列(无分布式);job DAG 依赖未做;`payload_json` 以明文存储(同 `reindex_queue`
+    的 item_id;字段级加密是后续 hardening);`result_json` 无 1MB 上限保护(ASR/OCR 结果
+    尺寸下低风险);agent kind 中断后不自动重试(需手动 requeue)。
+  - **TTL purge 按 `finished_ms` 而非 `created_ms`**:终态保留期从"完成时刻"起算,
+    长排队 / 多次 requeue 后才完成的 job 完整保留 30 天可查可下载(防完成即被误删)。
+  - Migration:自动 —— `job_queue` 表 `CREATE TABLE IF NOT EXISTS` 随下次打开创建,
+    无数据迁移(旧 in-memory job 本就不持久);重启行为变化:不再批量取消 in-flight job。
 
 ## v1.3.0 (2026-06-07) — OSS 文档智能：文档对比 · 深度总结(省 token) · 逐章阅读
 
