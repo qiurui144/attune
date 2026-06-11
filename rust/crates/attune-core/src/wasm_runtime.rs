@@ -55,11 +55,31 @@ impl WasmRunner {
         Ok(Self { engine })
     }
 
-    /// 进程级共享单例(JIT/Engine 复用)。失败时每次 run 退化为新建(返回 Err)。
-    pub fn shared() -> &'static WasmRunner {
-        static SHARED: OnceLock<WasmRunner> = OnceLock::new();
-        SHARED.get_or_init(|| {
-            WasmRunner::new().unwrap_or_else(|e| panic!("wasm runner init: {e}"))
+    /// 进程级共享单例(JIT/Engine 复用)。
+    ///
+    /// R1.2 (2026-06-11): engine 初始化失败**不再 panic 整个进程** —— 失败结果
+    /// 被缓存(同样只初始化一次),每次调用返回 `wasm-runtime-unavailable` 错误。
+    /// 效果:WASM agent 能力被禁用(dispatch 返回明确错误),宿主(server / CLI /
+    /// desktop)继续运行,native capability 不受影响。
+    pub fn shared() -> Result<&'static WasmRunner> {
+        static SHARED: OnceLock<std::result::Result<WasmRunner, String>> = OnceLock::new();
+        let init = SHARED.get_or_init(|| {
+            WasmRunner::new().map_err(|e| {
+                log::error!("wasm engine init failed — wasm capabilities disabled: {e}");
+                e.to_string()
+            })
+        });
+        Self::from_init(init)
+    }
+
+    /// R1.2 — 把缓存的初始化结果映射为调用方可见的 `Result`。独立成 fn 是为了
+    /// 单测失败路径:wasmtime `Engine::new` 在常规环境几乎不可注入失败,但映射
+    /// 逻辑(Err → `wasm-runtime-unavailable`,不 panic)必须有测试锁定。
+    fn from_init(
+        init: &std::result::Result<WasmRunner, String>,
+    ) -> std::result::Result<&WasmRunner, VaultError> {
+        init.as_ref().map_err(|e| {
+            VaultError::InvalidInput(format!("wasm-runtime-unavailable: engine init failed: {e}"))
         })
     }
 
@@ -219,5 +239,29 @@ impl WasmRunner {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R1.2 happy path: 常规环境下 shared() 必须成功(行为与旧版一致)。
+    #[test]
+    fn shared_engine_initializes_ok() {
+        assert!(WasmRunner::shared().is_ok(), "engine init should succeed in a normal env");
+    }
+
+    /// R1.2 degradation: 缓存了 Err 的初始化结果 → 每次取用得到
+    /// `wasm-runtime-unavailable` 错误而非 panic(模拟 wasmtime engine init
+    /// 失败;真实 Engine::new 失败不可注入,锁定映射层)。
+    #[test]
+    fn failed_init_maps_to_unavailable_error_not_panic() {
+        let cached: std::result::Result<WasmRunner, String> =
+            Err("simulated engine init failure".into());
+        let err = WasmRunner::from_init(&cached).err().expect("must be Err");
+        let msg = err.to_string();
+        assert!(msg.contains("wasm-runtime-unavailable"), "stable error code missing: {msg}");
+        assert!(msg.contains("simulated engine init failure"), "root cause missing: {msg}");
     }
 }

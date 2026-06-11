@@ -237,7 +237,9 @@ pub fn dispatch_capability(
         CapabilityRuntime::Wasm => {
             #[cfg(feature = "wasm-runtime")]
             {
-                crate::wasm_runtime::WasmRunner::shared().run(invocation)
+                // R1.2: shared() 可失败(engine init 失败被缓存) — 返回
+                // `wasm-runtime-unavailable` 错误,WASM 能力禁用,宿主进程继续。
+                crate::wasm_runtime::WasmRunner::shared()?.run(invocation)
             }
             #[cfg(not(feature = "wasm-runtime"))]
             {
