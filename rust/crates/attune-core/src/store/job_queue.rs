@@ -81,6 +81,57 @@ impl Store {
         Ok(id)
     }
 
+    /// Atomically claim the next runnable job (highest priority, then FIFO).
+    ///
+    /// THE claim-race solver: a single `UPDATE ... WHERE state='queued' ... RETURNING`
+    /// is one atomic statement under SQLite's connection-level write lock. With N
+    /// concurrent workers (each on its own connection to the same WAL DB), at most one
+    /// `UPDATE` can match a given row in 'queued' state — the loser's subquery re-selects
+    /// and either grabs a different row or matches zero rows (returns None). No row is
+    /// ever transitioned to Running by two workers. (Verified by the integration
+    /// N-worker race test in tests/job_queue_durable.rs.)
+    pub fn claim_next_job(&self) -> Result<Option<JobRecord>> {
+        let now = now_ms();
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "UPDATE job_queue SET state = 'running', started_ms = ?1 \
+             WHERE id = ( \
+                 SELECT id FROM job_queue WHERE state = 'queued' \
+                 ORDER BY priority DESC, created_ms ASC, id ASC LIMIT 1 \
+             ) AND state = 'queued' \
+             RETURNING {SELECT_COLS}",
+        ))?;
+        let mut rows = stmt.query_map(params![now], row_to_record)?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Cancel a job: any non-terminal job → Cancelled. Running jobs stop cooperatively
+    /// (the handler checks [`Store::is_job_cancelled`] between stages). No-op for
+    /// terminal jobs. Returns true if a row changed.
+    pub fn cancel_job(&self, id: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE job_queue SET state = 'cancelled', finished_ms = ?2 \
+             WHERE id = ?1 AND state IN ('queued', 'running')",
+            params![id, now_ms()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Lightweight cancellation probe for cooperative-stop handlers.
+    pub fn is_job_cancelled(&self, id: &str) -> Result<bool> {
+        let s: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT state FROM job_queue WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .ok();
+        Ok(s.as_deref() == Some("cancelled"))
+    }
+
     /// Read a job by id. None if absent.
     pub fn get_job(&self, id: &str) -> Result<Option<JobRecord>> {
         let mut stmt = self
@@ -133,6 +184,73 @@ mod tests {
     fn get_unknown_job_returns_none() {
         let store = Store::open_memory().unwrap();
         assert!(store.get_job("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn claim_next_transitions_queued_to_running_and_sets_started() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        let claimed = store.claim_next_job().unwrap().expect("a queued job exists");
+        assert_eq!(claimed.id, id);
+        assert_eq!(claimed.state, JobState::Running);
+        assert!(claimed.started_ms.is_some());
+        // Re-reading confirms it is durably Running (claim is committed, not in-memory).
+        assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Running);
+    }
+
+    #[test]
+    fn claim_next_returns_none_on_empty_queue() {
+        let store = Store::open_memory().unwrap();
+        assert!(store.claim_next_job().unwrap().is_none());
+    }
+
+    #[test]
+    fn claim_respects_priority_then_fifo() {
+        let store = Store::open_memory().unwrap();
+        let _low = store.enqueue_job(JobKind::Asr, "{\"n\":1}", 0, None).unwrap();
+        let high = store.enqueue_job(JobKind::Asr, "{\"n\":2}", 10, None).unwrap();
+        // Higher priority claimed first despite being enqueued later.
+        assert_eq!(store.claim_next_job().unwrap().unwrap().id, high);
+    }
+
+    #[test]
+    fn claim_does_not_pick_running_or_cancelled() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap().unwrap(); // now Running
+        // Nothing left to claim.
+        assert!(store.claim_next_job().unwrap().is_none());
+        // A cancelled job is also never claimed.
+        let c = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.cancel_job(&c).unwrap();
+        let next = store.claim_next_job().unwrap();
+        assert!(next.is_none(), "cancelled job must not be claimed; got {next:?}");
+        let _ = id;
+    }
+
+    #[test]
+    fn double_claim_serial_never_returns_same_job_twice() {
+        // Serial proxy for the N-worker race (full thread test in integration suite).
+        let store = Store::open_memory().unwrap();
+        for _ in 0..5 {
+            store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        }
+        let mut seen = std::collections::HashSet::new();
+        while let Some(j) = store.claim_next_job().unwrap() {
+            assert!(seen.insert(j.id.clone()), "job {} claimed twice", j.id);
+        }
+        assert_eq!(seen.len(), 5);
+    }
+
+    #[test]
+    fn cancel_terminal_job_is_noop() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.cancel_job(&id).unwrap();
+        // Second cancel: already terminal → false.
+        assert!(!store.cancel_job(&id).unwrap());
+        assert!(store.is_job_cancelled(&id).unwrap());
+        assert!(!store.is_job_cancelled("nope").unwrap());
     }
 
     #[test]
