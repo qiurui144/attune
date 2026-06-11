@@ -86,6 +86,41 @@ impl LlmProvider for RedactingLlmProvider {
         Ok(self.redactor.restore(&raw, &mappings))
     }
 
+    fn chat_with_format_json(
+        &self,
+        system: &str,
+        user: &str,
+        schema: Option<&serde_json::Value>,
+    ) -> crate::error::Result<(String, TokenUsage)> {
+        // Redact, then call the INNER provider's NATIVE schema-guided path (DeepSeek/OpenAI
+        // response_format) so the §4.5.A robustness is preserved — NOT the trait default, which
+        // would downgrade to a plain `chat` hint. The schema describes output shape, not content,
+        // so it is forwarded unchanged.
+        let (segs, mappings) = self.redactor.redact_batch(&[system, user]);
+        let (raw, usage) = self.inner.chat_with_format_json(&segs[0], &segs[1], schema)?;
+        Ok((self.redactor.restore(&raw, &mappings), usage))
+    }
+
+    fn chat_with_retry(
+        &self,
+        system: &str,
+        user: &str,
+        max_attempts: usize,
+        validator: &dyn Fn(&str) -> std::result::Result<(), String>,
+    ) -> crate::error::Result<(String, TokenUsage)> {
+        // Redact inputs, delegate to the inner retry loop, and run the caller's validator on the
+        // RESTORED text each attempt (the validator reasons about real content / JSON shape; the
+        // redaction is transparent to it). The inner sees only redacted prompts on every retry.
+        let (segs, mappings) = self.redactor.redact_batch(&[system, user]);
+        let restoring_validator = |raw: &str| -> std::result::Result<(), String> {
+            validator(&self.redactor.restore(raw, &mappings))
+        };
+        let (raw, usage) =
+            self.inner
+                .chat_with_retry(&segs[0], &segs[1], max_attempts, &restoring_validator)?;
+        Ok((self.redactor.restore(&raw, &mappings), usage))
+    }
+
     fn chat_multimodal(
         &self,
         system: &str,
@@ -227,5 +262,45 @@ mod tests {
         assert_eq!(resp, "answer");
         let seen = inner.calls();
         assert_eq!(seen[0].user, "no pii here at all", "clean text must be byte-identical");
+    }
+
+    #[test]
+    fn format_json_path_also_redacts_and_uses_inner() {
+        // compare.rs uses chat_with_format_json — it MUST redact and hit the inner (not the trait
+        // default that downgrades to a plain chat hint). RecordingMockLlm uses the default
+        // chat_with_format_json (→ chat), which still records the redacted payload.
+        let inner = Arc::new(RecordingMockLlm::new("mock").with_response(r#"{"verdict":"rewrite"}"#));
+        let wrapped = RedactingLlmProvider::with_default_redactor(inner.clone());
+        let (_r, _u) = wrapped
+            .chat_with_format_json("判定差异", pii_doc(), None)
+            .unwrap();
+        let seen = inner.calls();
+        let sent = format!("{} {}", seen[0].system, seen[0].user);
+        assert!(!sent.contains("13800138000"), "format_json must redact phone: {sent}");
+        assert!(!sent.contains("zhangsan@example.com"), "format_json must redact email: {sent}");
+    }
+
+    #[test]
+    fn retry_path_redacts_and_validator_sees_restored_text() {
+        // chat_with_retry (compare.rs) must redact outbound AND let the caller's validator reason
+        // about restored content. The validator here asserts it sees the REAL phone (restored),
+        // while the inner provider must only have seen the redacted form.
+        let inner = Arc::new(RecordingMockLlm::new("mock").with_response("电话 [PHONE_1] 已记录"));
+        let wrapped = RedactingLlmProvider::with_default_redactor(inner.clone());
+        let validator = |restored: &str| -> std::result::Result<(), String> {
+            // The restored response carries the real value back for the caller's validation.
+            if restored.contains("13800138000") {
+                Ok(())
+            } else {
+                Err("expected restored phone".into())
+            }
+        };
+        let (resp, _u) = wrapped
+            .chat_with_retry("助手", "我的电话 13800138000", 3, &validator)
+            .unwrap();
+        assert!(resp.contains("13800138000"), "caller gets restored response: {resp}");
+        let seen = inner.calls();
+        let sent = format!("{} {}", seen[0].system, seen[0].user);
+        assert!(!sent.contains("13800138000"), "inner must only see redacted prompt: {sent}");
     }
 }
