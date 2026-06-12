@@ -61,6 +61,24 @@
 > 三功能均守 §Cost&Trigger 三层成本契约 — 零成本层(结构/文本 diff、extractive 抽取、章节切分)
 > 无需登录;**语义裁决 / map-reduce 归纳 / 每章 LLM 摘要 = tier-3 付费 member-gated**。
 
+### 🚑 发布前关键修复(2026-06-12 — 干净机器 E2E 抓出,均 fresh-install / CN 冷启动级)
+
+> 在 AMD 干净机(无旧 vault / 无模型缓存)按标准 E2E(全局 §6.4.1 / docs/TESTING.md §1.5 环境保真契约)
+> 跑出两个 dev 机被掩盖的发布阻断,本节即修复。
+
+- **P0 — 全新安装首启崩溃修复**:`skill_signals` 表缺 `kind` 列却在无条件 SCHEMA_SQL 建引用它的索引,
+  fresh vault 建库失败 → server 起不来(全新用户装上即崩)。修:`kind` 列入表定义 + 索引移到 migration
+  (commit `d8c6c78`,带 fresh-DB 回归测试)。**⚠️ v1.2.0 release artifact 不含此修复,fresh-install 损坏 —— v1.2.0 标记 deprecated,请用本版本。**
+- **CN 冷启动模型获取修复**:CN 默认源 hf-mirror 已死 + 模型下载无超时 → vault setup 拉 330MB embedding
+  时永久 hang(TLS recv 传输中途 stall)。修:CN 默认源 → **ModelScope**(实测唯一活源)+ 全 5 路下载
+  (embedding/reranker/ASR/OCR/layout)加 connect+total 超时 + offline 守卫,死源一律有界失败 + 引擎 degrade,
+  绝不 hang(移除零超时 hf-hub 依赖)。海外用户仍走 HF 官方。
+
+### Known Limitations(本版本新增)
+- **CN ASR / OCR 模型暂无活源**:ModelScope 覆盖 embedding/reranker(Xenova ONNX),但不含 whisper(ASR)
+  / SWHL RapidOCR(PP-OCR)。CN 用户首次用 ASR/OCR 会下载失败 → 功能 degrade(不崩、不 hang)。彻底解需
+  company-mirror(规划中,见 ModelStack spec §12 S8 动态多源)。会员 chat / RAG(embedding)不受影响。
+
 ### Highlights
 - **① 文档对比(`POST /api/v1/documents/compare`)**:零成本层 = 结构 diff(基于 `extract_sections`
   的章节对齐增删改)+ 文本级行/句 diff + 相似块召回(BM25/向量);**member-gated** = 语义差异裁决
