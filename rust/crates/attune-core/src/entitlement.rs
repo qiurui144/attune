@@ -316,6 +316,17 @@ impl EntitlementCache {
         }
     }
 
+    /// 上次接受的 `last_verified_at`(SEC-2 freshness 单调基准)。无行 → None。
+    /// 供 re-verify 比对 `signed_payload.verified_at` 严格递增。
+    pub fn last_verified_at(&self, plugin_id: &str) -> Option<DateTime<Utc>> {
+        let map = self.inner.read().expect("entitlement cache poisoned");
+        map.get(plugin_id).and_then(|row| {
+            DateTime::parse_from_rfc3339(&row.last_verified_at)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
+        })
+    }
+
     /// snapshot 全部行(诊断 / 列表)。
     pub fn snapshot(&self) -> Vec<EntitlementRow> {
         let map = self.inner.read().expect("entitlement cache poisoned");

@@ -141,6 +141,26 @@ impl CloudClient {
         resp.json().map_err(http_err)
     }
 
+    /// `POST /api/v1/member/verify` (T8 / T6 契约). 发送 client `nonce` + `license_id`,
+    /// 解析 entitlement 快照 (§5.2). **网络错 / 5xx → `Err`**(调用方走宽限,§7.2);
+    /// **200 + valid=false → `Ok(snapshot)`**(业务拒,调用方据 status 立即关)。两类
+    /// 错误严格区分 (per §7.2 error 5) —— 故只有传输层失败抛 Err,业务态走解析快照。
+    pub fn verify_entitlements(&self, license_id: &str, nonce: &str) -> Result<EntitlementSnapshot> {
+        let url = format!("{}/api/v1/member/verify", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .json(&serde_json::json!({ "license_id": license_id, "nonce": nonce }))
+            .send()
+            .map_err(http_err)?;
+        // 5xx / transport → Err (走宽限). 4xx (含 401/403) 也视为不可信 → Err.
+        if !resp.status().is_success() {
+            return Err(VaultError::Crypto(format!("verify: status={}", resp.status())));
+        }
+        resp.json().map_err(http_err)
+    }
+
     /// 登出
     pub fn logout(&mut self) -> Result<()> {
         let url = format!("{}/api/v1/logout", self.base_url);

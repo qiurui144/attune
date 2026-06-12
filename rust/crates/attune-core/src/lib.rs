@@ -136,6 +136,7 @@ pub mod plugin_sig;
 pub mod plugin_anchor;
 pub mod entitlement_anchor;  // trust-chain SEC-1: entitlement signing-key anchor + verify
 pub mod entitlement;  // trust-chain T5: EntitlementCache + grace state machine + clock-rollback
+pub mod entitlement_reverify;  // trust-chain T8: re-verify orchestration (SEC-1/2 worker integration)
 pub mod classifier;
 pub mod clusterer;
 pub mod crypto;

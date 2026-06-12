@@ -1,12 +1,17 @@
 //! /api/v1/member — 会员状态 / settings locks endpoint.
 
+use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use attune_core::cloud_client::{CloudClient, License, UserInfo};
+use attune_core::entitlement::EntitlementCache;
+use attune_core::entitlement_reverify::{apply_refresh_rounds, RefreshSummary, ReverifyOutcome};
 use attune_core::llm_settings::SETTINGS_META_KEY;
 use attune_core::member_session::{MemberState, SettingsLocks};
+use attune_core::plugin_sig::TrustMode;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+use chrono::Utc;
 
 /// Result of the blocking CloudClient interaction (B4): carried back from
 /// `spawn_blocking` into the async tail. `license`/`me` are `None` for free users
@@ -315,6 +320,134 @@ pub async fn login_password(
     })))
 }
 
+/// POST /api/v1/member/entitlements/refresh — 手动触发一轮 entitlement re-verify
+/// (三入口之一:周期 worker / 登录 / **手动**,spec §7.2 / plan T8)。
+///
+/// 必须已登录会员(R1.1 复用:未登录 → 401)。对缓存中每条 entitlement 跑真
+/// `verify_round`,响应经 SEC-1/2 门(`authorize_snapshot`)**后**才转 Active;
+/// 写回缓存 + vault(短取 vault 锁,**不嵌套** fulltext/vectors)。
+///
+/// - cloud 完全不可达(所有 verify 5xx/transport)→ 502 `{code: cloud-unreachable}`,
+///   **本地缓存原样不动**(spec §7.2 error 5)。
+/// - 否则 → 200 `{refreshed, statuses}`。
+pub async fn refresh_entitlements(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
+    // R1.1: 必须已登录(free 或 paid 都可手动 refresh;未登录拒)。
+    {
+        let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner());
+        if !m.is_logged_in() {
+            return Err(AppError::Unauthorized("member login required".into()));
+        }
+    }
+
+    // 网络 I/O 是 blocking(CloudClient = reqwest::blocking)→ spawn_blocking(B4 约束)。
+    // 把 EntitlementCache(Arc 内,clone 廉价)move 进 blocking 线程跑真 verify;写回
+    // vault 也在该线程(短取 vault 锁)。结果 RefreshSummary 带回 async tail 映射响应。
+    let cache = state.entitlement_cache.clone();
+    let state_for_writeback = state.clone();
+    let summary = tokio::task::spawn_blocking(move || -> RefreshSummary {
+        run_refresh_round(&state_for_writeback, &cache)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("refresh task join error: {e}")))?;
+
+    if summary.all_network_error {
+        // cloud 完全不可达 —— 缓存未被破坏(apply_reverify NetworkError 不动缓存)。
+        return Err(AppError::detailed(
+            StatusCode::BAD_GATEWAY,
+            serde_json::json!({ "error": "cloud unreachable", "code": "cloud-unreachable" }),
+        ));
+    }
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "refreshed": summary.refreshed,
+        "statuses": summary
+            .statuses
+            .iter()
+            .map(|(id, st)| serde_json::json!({ "plugin_id": id, "status": st }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+/// 跑一轮 refresh(blocking):读缓存 → 真 verify 每条 → apply → 写回 vault。
+/// 复用为 worker 的单轮逻辑(worker 周期调用本函数)。无可达 cloud session →
+/// 返回空 summary(`all_network_error=false`、`refreshed=0` —— 不误判 502)。
+pub fn run_refresh_round(state: &SharedState, cache: &EntitlementCache) -> RefreshSummary {
+    let now = Utc::now();
+    let mode = resolve_trust_mode(state);
+
+    // 构建 CloudClient(从持久化 cloud session)。无 session → 不算"网络错"
+    // (没有可 verify 的入口),返回空 summary。
+    let Some(client) = cloud_client_from_session() else {
+        return RefreshSummary::default();
+    };
+
+    let rounds = attune_core::entitlement_reverify::reverify_all(cache, &client, mode, &now);
+    let summary = apply_refresh_rounds(cache, &rounds, &now);
+
+    // 写回 vault:仅对被接受(Active/BusinessDeny)的轮次落盘。短取 vault 锁,
+    // **不**在持 entitlement 锁时取 vault(apply_refresh_rounds 已释放 cache 锁)。
+    writeback_accepted(state, &rounds);
+    summary
+}
+
+/// 把 apply 后被接受的行写回 vault DB(短取 vault 锁,不嵌套)。NetworkError/
+/// Unauthorized 的轮次不写(缓存与 vault 都保持原样)。
+fn writeback_accepted(state: &SharedState, rounds: &[(String, ReverifyOutcome, Option<String>)]) {
+    let cache = &state.entitlement_cache;
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(dek) = vault.dek_db() else { return }; // vault locked → skip writeback
+    for (plugin_id, outcome, verified_at) in rounds {
+        let new_status = match outcome {
+            ReverifyOutcome::Active => "active",
+            ReverifyOutcome::BusinessDeny(s) => s.as_str(),
+            // 网络错 / 未授权 → 不动 vault(grace,缓存也未变)。
+            ReverifyOutcome::NetworkError | ReverifyOutcome::Unauthorized(_) => continue,
+        };
+        // 取缓存当前行(apply 已更新内存),按其 last_verified_at 落盘。
+        let va = verified_at.as_deref().unwrap_or("");
+        if let Some(mut row) = cache
+            .snapshot()
+            .into_iter()
+            .find(|r| &r.plugin_id == plugin_id)
+        {
+            row.status = new_status.to_string();
+            if !va.is_empty() {
+                row.last_verified_at = va.to_string();
+            }
+            row.updated_at = va.to_string();
+            let _ = vault.store().upsert_entitlement(&dek, &row);
+        }
+    }
+}
+
+/// 从持久化 cloud session(`config_dir/cloud-session.json`)构建 CloudClient。
+/// 与 [`member_session_sync_plugins`] 同源(login 后写入)。无 session → None。
+fn cloud_client_from_session() -> Option<CloudClient> {
+    let path = attune_core::platform::config_dir().join("cloud-session.json");
+    let json = std::fs::read_to_string(&path).ok()?;
+    let sess: serde_json::Value = serde_json::from_str(&json).ok()?;
+    let cloud_url = sess.get("cloud_url").and_then(|v| v.as_str())?;
+    let session = sess.get("session").and_then(|v| v.as_str()).filter(|s| !s.is_empty())?;
+    Some(CloudClient::with_session(cloud_url, session))
+}
+
+/// 解析当前 `plugin_trust_mode`(app_settings meta);缺失/旧配置/vault 锁 → 默认
+/// [`TrustMode::Warn`](决策 2 + spec §10 grandfather)。T11 加 UI setter;本函数
+/// 只读,默认 Warn 让 client 先于 cloud v4 ship 不破网(跨仓 bootstrap)。
+fn resolve_trust_mode(state: &SharedState) -> TrustMode {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(data) = vault.store().get_meta(SETTINGS_META_KEY) else {
+        return TrustMode::Warn;
+    };
+    let Some(bytes) = data else { return TrustMode::Warn };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return TrustMode::Warn;
+    };
+    v.get("plugin_trust_mode")
+        .and_then(|m| serde_json::from_value::<TrustMode>(m.clone()).ok())
+        .unwrap_or(TrustMode::Warn)
+}
+
 /// POST /api/v1/member/logout — 重置会员状态为 LoggedOut
 pub async fn logout(State(state): State<SharedState>) -> Json<serde_json::Value> {
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
@@ -370,7 +503,102 @@ fn apply_gateway_to_vault_settings(
 #[cfg(test)]
 mod tests {
     use attune_core::cloud_client::CloudClient;
+    use attune_core::entitlement::{EntStatus, EntitlementCache};
+    use attune_core::entitlement_reverify::{apply_refresh_rounds, ReverifyOutcome};
     use attune_core::llm_settings::{gateway_should_apply, merge_gateway_into_settings};
+    use attune_core::store::plugin_entitlements::EntitlementRow;
+    use chrono::{DateTime, Utc};
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn row(plugin_id: &str, status: &str, last_verified: &str) -> EntitlementRow {
+        EntitlementRow {
+            plugin_id: plugin_id.into(),
+            license_id: "lic-x".into(),
+            tier: "paid".into(),
+            status: status.into(),
+            trial_expires: None,
+            signing_pubkey_hex: "00".repeat(32),
+            last_verified_at: last_verified.into(),
+            grace_started_at: None,
+            updated_at: last_verified.into(),
+        }
+    }
+
+    // ── T8: refresh 200 → cache updated + {refreshed, statuses} ──────────────
+    //
+    // A successful re-verify round (cloud returns a signed v1 snapshot that passes
+    // SEC-1/2 → ReverifyOutcome::Active) advances the cached status to Active and the
+    // route's 200 mapping reports refreshed>0 + per-plugin statuses. We drive the
+    // route's pure aggregation (`apply_refresh_rounds`) + the same 200 body shape the
+    // handler builds — proving the cache-update + response contract without a live cloud.
+    #[test]
+    fn refresh_endpoint_200_updates_cache() {
+        let cache = EntitlementCache::new();
+        // Pre-state: law-pro currently suspended in cache (e.g. a stale revoke).
+        cache.upsert(row("law-pro", "suspended", "2026-06-10T00:00:00+00:00"));
+        let now = ts("2026-06-12T00:00:01+00:00");
+        assert_eq!(cache.status("law-pro", &now), EntStatus::Suspended);
+
+        // A verified-Active round (the only legal transition-to-Active path; produced
+        // by reverify_all after authorize_snapshot_fresh accepts a signed v1 snapshot).
+        let rounds = vec![(
+            "law-pro".to_string(),
+            ReverifyOutcome::Active,
+            Some("2026-06-12T00:00:00+00:00".to_string()),
+        )];
+        let summary = apply_refresh_rounds(&cache, &rounds, &now);
+
+        // cache now Active (re-verify renewal).
+        assert_eq!(cache.status("law-pro", &now), EntStatus::Active);
+        // route 200 mapping: refreshed counts accepted rounds; statuses lists per-plugin.
+        assert_eq!(summary.refreshed, 1);
+        assert!(!summary.all_network_error, "200 path, not 502");
+        let body = serde_json::json!({
+            "status": "ok",
+            "refreshed": summary.refreshed,
+            "statuses": summary.statuses.iter()
+                .map(|(id, st)| serde_json::json!({"plugin_id": id, "status": st}))
+                .collect::<Vec<_>>(),
+        });
+        assert_eq!(body["refreshed"], 1);
+        assert_eq!(body["statuses"][0]["plugin_id"], "law-pro");
+        assert_eq!(body["statuses"][0]["status"], "active");
+    }
+
+    // ── T8: refresh 5xx → 502 {code: cloud-unreachable}, cache UNCHANGED ──────
+    //
+    // §7.2 error 5: when the cloud is entirely unreachable (every verify is a
+    // NetworkError), the route returns 502 {code: cloud-unreachable} and the local
+    // cache must be byte-for-byte unchanged (no false downgrade). We assert the cache
+    // snapshot is identical before/after apply, that the summary flags all-network-error
+    // (→ the handler's 502 branch), and that the 502 body carries the kebab code.
+    #[test]
+    fn refresh_502_preserves_cache() {
+        let cache = EntitlementCache::new();
+        cache.upsert(row("law-pro", "active", "2026-06-12T00:00:00+00:00"));
+        let now = ts("2026-06-12T00:00:01+00:00");
+        let before = cache.snapshot();
+
+        // Cloud unreachable: every plugin's round is a NetworkError.
+        let rounds = vec![(
+            "law-pro".to_string(),
+            ReverifyOutcome::NetworkError,
+            None,
+        )];
+        let summary = apply_refresh_rounds(&cache, &rounds, &now);
+
+        // cache UNCHANGED — the load-bearing §7.2 error-5 invariant.
+        assert_eq!(cache.snapshot(), before, "network error must not mutate the cache");
+        assert_eq!(summary.refreshed, 0);
+        assert!(summary.all_network_error, "all-network-error → 502 branch");
+
+        // route 502 body shape (the handler builds this kebab-coded AppError::detailed).
+        let body = serde_json::json!({ "error": "cloud unreachable", "code": "cloud-unreachable" });
+        assert_eq!(body["code"], "cloud-unreachable");
+    }
 
     // ── B4 regression: blocking CloudClient must not panic the async worker ──
     //
