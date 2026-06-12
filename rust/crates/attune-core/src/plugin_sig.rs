@@ -176,12 +176,119 @@ pub fn compute_plugin_digest(plugin_dir: &Path) -> Result<Vec<u8>> {
 }
 
 /// 便捷判断：loose 模式下此 plugin 是否允许加载。
-/// 当前全部允许（开发期）；未来 strict_mode flag 开启后仅 Official 允许。
+/// 当前全部允许（开发期）；strict_mode flag 开启后仅 Official 允许。
+///
+/// 旧两态 API（向后兼容）：`strict=false` 等价 `TrustMode::Off`，`strict=true`
+/// 等价 `TrustMode::Strict`（仅看 trust 等级，不区分篡改 vs 未签名 —— 该区分由
+/// 三态 [`gate`] + [`SigOutcome`] 表达）。
 pub fn is_allowed(trust: Trust, strict: bool) -> bool {
     if !strict {
         true
     } else {
         trust == Trust::Official
+    }
+}
+
+/// 三态信任门（spec §7.1 / settings `plugin_trust_mode`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustMode {
+    /// 全放行（仅标注 trust，不拦截）。
+    Off,
+    /// 未签名放行 + 警示；**篡改（签名无效）拒载**（升级默认，grandfather）。
+    #[default]
+    Warn,
+    /// 仅 Official / 白名单 ThirdParty 放行。
+    Strict,
+}
+
+/// 签名校验的细化结果 —— 区分"未签名"(无 plugin.sig) 与"签名无效"(有 sig 但
+/// 不匹配任何已知公钥 / 损坏)。`Trust` enum 把两者折叠为 `Unsigned`，但三态门
+/// 需要区分：warn 下未签名放行、篡改拒载（spec §7.1 关键边界）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigOutcome {
+    /// 官方公钥验签通过。
+    Official,
+    /// 用户白名单 pubkey 验签通过。
+    ThirdParty,
+    /// 无 plugin.sig 文件 —— 自写 / 未签名插件。
+    Unsigned,
+    /// 有 plugin.sig 但验签失败（损坏 / 篡改 / 无匹配公钥）—— **不是** Unsigned。
+    Invalid,
+}
+
+impl SigOutcome {
+    /// 映射到面向 pricing 的 [`Trust`] 等级（Invalid 与 Unsigned 同样不可信）。
+    pub fn trust(self) -> Trust {
+        match self {
+            SigOutcome::Official => Trust::Official,
+            SigOutcome::ThirdParty => Trust::ThirdParty,
+            SigOutcome::Unsigned | SigOutcome::Invalid => Trust::Unsigned,
+        }
+    }
+}
+
+/// 三态门的判定结果。Reject 携带 kebab-case 错误码供路由回传 `{code}`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustDecision {
+    /// 放行，无警示。
+    Allow,
+    /// 放行但带警示（warn 下的未签名 / 标注用）。
+    AllowWarn(&'static str),
+    /// 拒载，携带 kebab 错误码。
+    Reject(&'static str),
+}
+
+/// 白名单验签：先试 official → `Official`，再试 user_pubkeys → `ThirdParty`，
+/// 有 sig 但都不匹配 → `Invalid`，无 sig → `Unsigned`（spec §6.1 ThirdParty 通道）。
+///
+/// `verify_loose` = `verify_with_whitelist(dir, OFFICIAL_PUBLIC_KEYS, &[])` 的语义上位。
+pub fn verify_with_whitelist(
+    plugin_dir: &Path,
+    official_keys: &[&str],
+    user_pubkeys: &[String],
+) -> Result<SigOutcome> {
+    let sig_path = plugin_dir.join("plugin.sig");
+    if !sig_path.exists() {
+        return Ok(SigOutcome::Unsigned);
+    }
+    // 官方公钥优先。
+    if verify_against_keys(plugin_dir, official_keys)?.trust == Trust::Official {
+        return Ok(SigOutcome::Official);
+    }
+    // 用户白名单。白名单永远不能把无效签名抬成 Official —— 这里只产 ThirdParty。
+    for pk in user_pubkeys {
+        if verify_with_key(plugin_dir, pk).unwrap_or(false) {
+            return Ok(SigOutcome::ThirdParty);
+        }
+    }
+    // 有 sig 但无任何匹配 → 篡改 / 损坏，标记 Invalid（区别于 Unsigned）。
+    Ok(SigOutcome::Invalid)
+}
+
+/// 三态信任门（spec §7.1 表）。输入是细化的 [`SigOutcome`]，输出携带 kebab code。
+///
+/// | 场景 | off | warn | strict |
+/// |------|-----|------|--------|
+/// | 无签名 | Allow | AllowWarn | Reject(plugin-unsigned-strict) |
+/// | 签名无效/篡改 | Allow | **Reject(plugin-sig-invalid)** | Reject(plugin-sig-invalid) |
+/// | 官方签名 | Allow | Allow | Allow |
+/// | 白名单 ThirdParty | Allow | Allow | Allow |
+pub fn gate(outcome: SigOutcome, mode: TrustMode) -> TrustDecision {
+    use SigOutcome::*;
+    use TrustMode::*;
+    match (outcome, mode) {
+        // Official / ThirdParty 三态都放行。
+        (Official, _) | (ThirdParty, _) => TrustDecision::Allow,
+        // off：全放行（仅标注）。
+        (Unsigned, Off) => TrustDecision::AllowWarn("plugin-unsigned"),
+        (Invalid, Off) => TrustDecision::AllowWarn("plugin-sig-invalid"),
+        // warn：未签名放行 + 警示；篡改拒载（关键边界）。
+        (Unsigned, Warn) => TrustDecision::AllowWarn("plugin-unsigned"),
+        (Invalid, Warn) => TrustDecision::Reject("plugin-sig-invalid"),
+        // strict：未签名拒、篡改拒。
+        (Unsigned, Strict) => TrustDecision::Reject("plugin-unsigned-strict"),
+        (Invalid, Strict) => TrustDecision::Reject("plugin-sig-invalid"),
     }
 }
 
@@ -530,6 +637,126 @@ mod tests {
             crate::plugin_anchor::is_official_anchor(OFFICIAL_PUBLIC_KEYS[0]),
             "anchor[0] must be the pinned law-pro publisher key (per plugin_anchor SSOT)"
         );
+    }
+
+    // ── T3: three-state trust_mode gate + ThirdParty whitelist (spec §7.1) ──
+
+    /// Helper: sign a plugin dir with `sk`, return its pubkey hex.
+    fn sign_with(dir: &Path, sk: &[u8; 32]) -> String {
+        sign_plugin(dir, sk).expect("sign");
+        derive_verifying_key_hex(sk)
+    }
+
+    #[test]
+    fn gate_unsigned_three_modes() {
+        // 无签名: off Allow / warn AllowWarn / strict Reject(plugin-unsigned-strict)
+        assert_eq!(gate(SigOutcome::Unsigned, TrustMode::Off), TrustDecision::AllowWarn("plugin-unsigned"));
+        assert_eq!(gate(SigOutcome::Unsigned, TrustMode::Warn), TrustDecision::AllowWarn("plugin-unsigned"));
+        assert_eq!(
+            gate(SigOutcome::Unsigned, TrustMode::Strict),
+            TrustDecision::Reject("plugin-unsigned-strict")
+        );
+    }
+
+    #[test]
+    fn gate_invalid_three_modes() {
+        // 篡改/无效: off Allow(标注) / warn **Reject** / strict Reject
+        assert!(matches!(gate(SigOutcome::Invalid, TrustMode::Off), TrustDecision::AllowWarn(_)));
+        assert_eq!(
+            gate(SigOutcome::Invalid, TrustMode::Warn),
+            TrustDecision::Reject("plugin-sig-invalid"),
+            "tampered ≠ unsigned: warn must REJECT a sig-invalid plugin"
+        );
+        assert_eq!(gate(SigOutcome::Invalid, TrustMode::Strict), TrustDecision::Reject("plugin-sig-invalid"));
+    }
+
+    #[test]
+    fn gate_official_all_modes_allow() {
+        for m in [TrustMode::Off, TrustMode::Warn, TrustMode::Strict] {
+            assert_eq!(gate(SigOutcome::Official, m), TrustDecision::Allow);
+        }
+    }
+
+    #[test]
+    fn gate_thirdparty_all_modes_allow() {
+        for m in [TrustMode::Off, TrustMode::Warn, TrustMode::Strict] {
+            assert_eq!(gate(SigOutcome::ThirdParty, m), TrustDecision::Allow);
+        }
+    }
+
+    /// 关键边界 (spec §7.1): 篡改 ≠ 未签名，warn 下也拒。end-to-end through verify.
+    #[test]
+    fn tampered_rejected_in_warn() {
+        let dir = make_plugin_dir("id: t\n", Some("# p"));
+        let signer = generate_signing_key();
+        let pk = sign_with(dir.path(), &signer);
+        // 篡改 yaml after signing.
+        std::fs::write(dir.path().join("plugin.yaml"), "id: tampered\n").unwrap();
+        let official: &[&str] = &[pk.as_str()];
+        let outcome = verify_with_whitelist(dir.path(), official, &[]).unwrap();
+        assert_eq!(outcome, SigOutcome::Invalid, "tampered plugin must be Invalid not Unsigned");
+        assert_eq!(gate(outcome, TrustMode::Warn), TrustDecision::Reject("plugin-sig-invalid"));
+    }
+
+    #[test]
+    fn whitelist_pubkey_yields_thirdparty() {
+        let dir = make_plugin_dir("id: tp\n", Some("# p"));
+        let signer = generate_signing_key();
+        let pk = sign_with(dir.path(), &signer);
+        // Not an official key, but on the user whitelist.
+        let official: &[&str] = &[];
+        let outcome = verify_with_whitelist(dir.path(), official, &[pk]).unwrap();
+        assert_eq!(outcome, SigOutcome::ThirdParty);
+        assert_eq!(gate(outcome, TrustMode::Strict), TrustDecision::Allow);
+    }
+
+    #[test]
+    fn whitelist_cannot_override_official() {
+        // A tampered plugin whose signer happens to be whitelisted but signature
+        // no longer matches → Invalid, NOT promoted to Official or ThirdParty.
+        let dir = make_plugin_dir("id: x\n", Some("# p"));
+        let signer = generate_signing_key();
+        let pk = sign_with(dir.path(), &signer);
+        std::fs::write(dir.path().join("plugin.yaml"), "id: TAMPERED\n").unwrap();
+        // Even with the signer on the whitelist, the broken sig can't verify.
+        let official: &[&str] = &[];
+        let outcome = verify_with_whitelist(dir.path(), official, &[pk]).unwrap();
+        assert_eq!(outcome, SigOutcome::Invalid, "broken sig must not be promoted via whitelist");
+        // And an official-key list of a DIFFERENT key never lifts an invalid sig.
+        let other = derive_verifying_key_hex(&generate_signing_key());
+        let official2: &[&str] = &[other.as_str()];
+        assert_eq!(
+            verify_with_whitelist(dir.path(), official2, &[]).unwrap(),
+            SigOutcome::Invalid
+        );
+    }
+
+    #[test]
+    fn verify_with_whitelist_official_beats_whitelist() {
+        let dir = make_plugin_dir("id: o\n", Some("# p"));
+        let signer = generate_signing_key();
+        let pk = sign_with(dir.path(), &signer);
+        // signer key is BOTH official and on whitelist → resolves to Official (priority).
+        let official: &[&str] = &[pk.as_str()];
+        let outcome = verify_with_whitelist(dir.path(), official, std::slice::from_ref(&pk)).unwrap();
+        assert_eq!(outcome, SigOutcome::Official);
+    }
+
+    #[test]
+    fn verify_with_whitelist_unsigned_when_no_sig() {
+        let dir = make_plugin_dir("id: u\n", Some("# p"));
+        let outcome = verify_with_whitelist(dir.path(), &[], &[]).unwrap();
+        assert_eq!(outcome, SigOutcome::Unsigned);
+    }
+
+    #[test]
+    fn trust_mode_serde_lowercase() {
+        assert_eq!(serde_json::to_string(&TrustMode::Warn).unwrap(), "\"warn\"");
+        assert_eq!(serde_json::to_string(&TrustMode::Strict).unwrap(), "\"strict\"");
+        assert_eq!(serde_json::to_string(&TrustMode::Off).unwrap(), "\"off\"");
+        let m: TrustMode = serde_json::from_str("\"strict\"").unwrap();
+        assert_eq!(m, TrustMode::Strict);
+        assert_eq!(TrustMode::default(), TrustMode::Warn);
     }
 
     /// An anchor private key produces `Trust::Official` via `verify_loose`'s key
