@@ -114,6 +114,12 @@ pub fn ensure_model_downloaded() -> Result<()> {
     if dst.exists() {
         return Ok(());
     }
+    // 离线模式: 缓存未命中时禁止网络下载, 立即 Err → graceful degrade(layout 引擎禁用)。
+    if crate::infer::model_store::hf_hub_offline() {
+        return Err(VaultError::ModelLoad(
+            "layout model not cached and HF_HUB_OFFLINE is set; refusing network download".into(),
+        ));
+    }
     let dir = dst.parent().ok_or_else(|| {
         VaultError::ModelLoad("layout model path has no parent dir".into())
     })?;
@@ -126,8 +132,12 @@ pub fn ensure_model_downloaded() -> Result<()> {
     );
     log::info!("layout: model missing, auto-downloading CDLA PicoDet (~7 MB) from {url}");
     let tmp = dst.with_extension("onnx.tmp");
+    // S1/C1: connect_timeout(死源 connect 守卫)+ total timeout(600s, 兜传输中途 stall;
+    // reqwest blocking 无 read_timeout)替代裸 .timeout(180s) —— 180s 偏紧但本就有界;
+    // 统一为 600s 与其它下载点对齐, 死源仍有界失败不永久 hang。
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|e| VaultError::ModelLoad(format!("build http client: {e}")))?;
     let mut resp = client

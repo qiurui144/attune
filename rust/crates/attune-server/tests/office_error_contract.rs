@@ -22,6 +22,12 @@ async fn wait_for_server(base: &str) {
 }
 
 async fn start_test_server() -> String {
+    // 这是错误码契约测试,不验证模型下载。vault/setup → init_search_engines 会同步
+    // ensure_models 拉 330MB embedding+reranker ONNX;在 CN(hf-mirror 已死)或离线 CI
+    // 上该阻塞下载无超时 → 测试永久 hang。设 HF_HUB_OFFLINE=1 让任何 ensure_models
+    // 立即返回 Err → embedding/reranker graceful degrade(回退 Ollama/cosine),不下载。
+    std::env::set_var("HF_HUB_OFFLINE", "1");
+
     let tmp = tempfile::TempDir::new().expect("tmp");
     std::env::set_var("HOME", tmp.path());
     std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));

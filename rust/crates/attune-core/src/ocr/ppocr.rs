@@ -71,6 +71,14 @@ impl PpOcrProvider {
         if Self::models_present() {
             return Ok(());
         }
+        // 离线模式: 缺模型时禁止网络下载, 立即 Err → graceful degrade(OCR 引擎不可用)。
+        // ppocr 走自有 reqwest download_file(不经 model_store), 故须在此独立检查 offline 守卫,
+        // 否则 HF_HUB_OFFLINE=1 对 OCR 路径无效(对抗复核 I1)。
+        if crate::infer::model_store::hf_hub_offline() {
+            return Err(VaultError::ModelLoad(
+                "PP-OCR models not cached and HF_HUB_OFFLINE is set; refusing network download".into(),
+            ));
+        }
         let d = Self::models_dir();
         std::fs::create_dir_all(&d).map_err(|e| {
             VaultError::ModelLoad(format!("create ppocr dir {}: {e}", d.display()))
@@ -190,11 +198,14 @@ fn num_cpus_safe() -> usize {
 /// 同步下载 URL 到目标路径 (一键化部署用 — 替代 postinst.sh curl)。
 ///
 /// 用 reqwest blocking client (复用 attune-core 已有 reqwest 依赖, 不增加 dep)。
-/// 60s 超时 + atomic rename (.tmp → 最终文件) 防止半下载状态。
+/// connect_timeout(10s, 死源 connect 守卫)+ total timeout(600s, 兜传输中途 stall:
+/// reqwest blocking 无 read_timeout, 用 total 把永久 hang 压成有界; OCR 模型 ≤16MB, 600s
+/// 远够慢网)+ atomic rename (.tmp → 最终文件) 防止半下载状态。
 fn download_file(url: &str, dst: &std::path::Path) -> Result<()> {
     let tmp = dst.with_extension("tmp");
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))  // 大 ONNX 文件慢网慢
+        .connect_timeout(std::time::Duration::from_secs(10))  // S1: 死源 connect fail-fast,不等内核 TCP 超时
+        .timeout(std::time::Duration::from_secs(600))         // C1: 传输中途 stall 守卫(total,blocking 无 read_timeout)
         .build()
         .map_err(|e| VaultError::ModelLoad(format!("build http client: {e}")))?;
     let mut resp = client.get(url).send().map_err(|e| {
