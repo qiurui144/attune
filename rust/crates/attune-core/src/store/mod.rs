@@ -30,6 +30,7 @@ pub mod usage;            // Plan A1 Task D: usage_events CRUD + UsageSummary
 pub mod agent_telemetry;  // ACP-3 §4.5-F: per-(agent×model) failure-rate roll-up over usage_events
 pub mod cache;            // Plan A1 Task D: llm_cache / embed_cache CRUD
 pub mod agent_state;      // ACP-6: versioned, plugin-scoped, encrypted learned/user state
+pub mod plugin_entitlements; // trust-chain: client entitlement cache (license/trial/status)
 pub use agent_state::{AgentStateKind, AgentStateRow};
 pub mod state_migration;  // ACP-6 Task 3: learned-state migration + orphan quarantine (§2.3)
 pub use state_migration::{MigratedRow, MigrationReport, MigrationStep, OrphanRow};
@@ -233,6 +234,22 @@ CREATE TABLE IF NOT EXISTS git_sources (
     updated_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_git_sources_synced ON git_sources(last_synced_at);
+
+-- trust-chain (T4): 客户端 entitlement 缓存。付费插件本地授权态,随 vault 字段级
+-- 加密(license_id_enc 是 dek-AES-256-GCM 密文 BLOB)。ACP-6 边界:不进 plugins/<id>/,
+-- 插件升级 wholesale 替换不触碰。纯追加表:老 vault 下次 open 自动建表,SCHEMA_VERSION 不 bump。
+-- plugin_id PRIMARY KEY → 同 plugin 只存最优 status 一条(PERF-5 upsert 时归并)。
+CREATE TABLE IF NOT EXISTS plugin_entitlements (
+    plugin_id          TEXT PRIMARY KEY,
+    license_id_enc     BLOB NOT NULL,      -- AES-256-GCM(license_id) — 敏感,加密
+    tier               TEXT NOT NULL,      -- free|trial|paid
+    status             TEXT NOT NULL,      -- active|suspended|revoked
+    trial_expires      TEXT,               -- RFC3339|NULL
+    signing_pubkey_hex TEXT NOT NULL,
+    last_verified_at   TEXT NOT NULL,      -- RFC3339, 时钟回拨 + freshness 单调基准
+    grace_started_at   TEXT,               -- NULL=非宽限态
+    updated_at         TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
