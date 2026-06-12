@@ -1,6 +1,7 @@
 // npu-vault/crates/vault-core/src/infer/mod.rs
 
 pub mod embedding;
+pub mod model_source;
 pub mod model_store;
 pub mod provider;
 pub mod reranker;
