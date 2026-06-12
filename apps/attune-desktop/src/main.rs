@@ -2,6 +2,7 @@
 
 mod embedded_server;
 mod tray;
+mod update_feed;
 
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -17,7 +18,16 @@ const EV_UPDATE_STATUS: &str = "attune-update-status";
 #[tauri::command]
 async fn check_for_update_now(app: AppHandle) -> Result<bool, String> {
     use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    // Resolve feed endpoints at runtime (company mirror first, GitHub fallback)
+    // instead of the compile-time tauri.conf.json default. Signature pubkey is
+    // unchanged → still verified against whichever endpoint serves latest.json.
+    let endpoints = update_feed::resolve_endpoints_from_env();
+    let updater = app
+        .updater_builder()
+        .endpoints(endpoints.iter().filter_map(|e| e.parse().ok()).collect())
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
     let update = match updater.check().await.map_err(|e| e.to_string())? {
         Some(u) => u,
         None => {
@@ -223,7 +233,14 @@ fn main() {
                         tauri::async_runtime::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                             use tauri_plugin_updater::UpdaterExt;
-                            match app_handle_for_update.updater() {
+                            let endpoints = update_feed::resolve_endpoints_from_env();
+                            let updater = app_handle_for_update
+                                .updater_builder()
+                                .endpoints(
+                                    endpoints.iter().filter_map(|e| e.parse().ok()).collect(),
+                                )
+                                .and_then(|b| b.build());
+                            match updater {
                                 Ok(updater) => match updater.check().await {
                                     Ok(Some(update)) => {
                                         tracing::info!(

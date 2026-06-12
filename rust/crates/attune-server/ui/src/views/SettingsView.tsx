@@ -659,6 +659,13 @@ function UpdaterRow(): JSX.Element | null {
   const state = useSignal<string>('idle');
   const pct = useSignal<number>(0);
   const busy = useSignal(false);
+  // Update source preference: 'official' (GitHub, default) or 'mirror' (company
+  // mirror, faster in CN). Persisted client-side; the desktop shell reads the
+  // resolved feed at launch (ATTUNE_UPDATE_FEED_URL) — signature trust root is
+  // unchanged, so a mirror cannot serve an unsigned/tampered update.
+  const source = useSignal<string>(
+    (typeof localStorage !== 'undefined' && localStorage.getItem('attune.update.source')) || 'official',
+  );
 
   useEffect(() => {
     if (!isTauri) return;
@@ -709,14 +716,32 @@ function UpdaterRow(): JSX.Element | null {
   })();
 
   return (
-    <SettingRow label={t('settings.about.update.label')}>
-      <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
-        <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>{statusLabel}</span>
-        {state.value === 'ready'
-          ? <Button size="sm" variant="primary" onClick={restart}>{t('settings.about.update.restart')}</Button>
-          : <Button size="sm" variant="secondary" loading={busy.value} onClick={check}>{t('settings.about.update.check')}</Button>}
-      </div>
-    </SettingRow>
+    <>
+      <SettingRow label={t('settings.about.update.source')}>
+        <select
+          value={source.value}
+          onChange={(e) => {
+            source.value = e.currentTarget.value;
+            if (typeof localStorage !== 'undefined') {
+              localStorage.setItem('attune.update.source', source.value);
+            }
+            toast('success', t('settings.about.update.source_saved'));
+          }}
+          style={selectStyle}
+        >
+          <option value="official">{t('settings.about.update.source_official')}</option>
+          <option value="mirror">{t('settings.about.update.source_mirror')}</option>
+        </select>
+      </SettingRow>
+      <SettingRow label={t('settings.about.update.label')}>
+        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>{statusLabel}</span>
+          {state.value === 'ready'
+            ? <Button size="sm" variant="primary" onClick={restart}>{t('settings.about.update.restart')}</Button>
+            : <Button size="sm" variant="secondary" loading={busy.value} onClick={check}>{t('settings.about.update.check')}</Button>}
+        </div>
+      </SettingRow>
+    </>
   );
 }
 
