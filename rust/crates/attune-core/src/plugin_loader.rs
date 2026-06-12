@@ -469,12 +469,15 @@ impl LoadedPlugin {
     /// 2. 否则读明文 `plugin.yaml`
     /// 3. 解析 manifest + 校验 verified_trust↔pricing 联动 (paid/trial 必须 Trusted/Official)
     ///
-    /// `verified_trust` 必须是调用方在 sig 验证 (plugin_sig::verify_*) 后得到的字符串
-    /// "Official" / "Trusted" / "Unsigned". 不传则按 "Unsigned" 处理.
+    /// `verified_trust` 必须是调用方在 sig 验证 (plugin_sig::verify_*) 后得到的
+    /// [`crate::plugin_sig::Trust`] 变体. 不传则按 `Trust::Unsigned` 处理.
+    ///
+    /// T2 (G2): 类型从 `Option<&str>` 改为 `Option<Trust>` —— 类型级杜绝调用方传
+    /// 任意魔法串("Official"/"Trusted")绕过签名验证 (spec §10 / §4).
     pub fn from_dir_with_key(
         plugin_dir: &std::path::Path,
         decrypt_key: Option<&[u8]>,
-        verified_trust: Option<&str>,
+        verified_trust: Option<crate::plugin_sig::Trust>,
     ) -> Result<Self> {
         let enc_path = plugin_dir.join("plugin.yaml.enc");
         let plain_path = plugin_dir.join("plugin.yaml");
@@ -503,7 +506,7 @@ impl LoadedPlugin {
 
         // trust↔pricing 联动 — 调用方传入实际验证后的 trust 级别
         if let Some(pricing) = &manifest.pricing {
-            let trust = verified_trust.unwrap_or("Unsigned");
+            let trust = verified_trust.unwrap_or(crate::plugin_sig::Trust::Unsigned);
             crate::plugin_encryption::validate_trust_for_pricing(trust, &pricing.tier)?;
         }
 

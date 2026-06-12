@@ -135,6 +135,13 @@ pub struct AppState {
             attune_core::agents::registry::AgentRegistry,
         )>,
     >,
+    /// Trust-chain T5/T8: in-memory entitlement cache (Arc<RwLock> inside).
+    /// Hydrated from `plugin_entitlements` at unlock; the re-verify worker +
+    /// `POST /member/entitlements/refresh` update it. Independent lock — never
+    /// nested with fulltext/vectors/vault (spec §3.3 / lock-ordering 铁律).
+    pub entitlement_cache: attune_core::entitlement::EntitlementCache,
+    /// 防止重复启动 entitlement re-verify worker 后台线程 (T8)。
+    pub entitlement_worker_running: AtomicBool,
 }
 
 impl AppState {
@@ -242,6 +249,9 @@ impl AppState {
                     None
                 }
             },
+            // Trust-chain T5/T8: empty until hydrated from vault at unlock.
+            entitlement_cache: attune_core::entitlement::EntitlementCache::new(),
+            entitlement_worker_running: AtomicBool::new(false),
         }
     }
 
@@ -871,6 +881,74 @@ impl AppState {
             }
             // flag 复位由 WorkerFlagGuard::drop 接管（含 panic 路径）
             tracing::info!("Reindex worker stopped (vault locked)");
+        });
+    }
+
+    /// Trust-chain T8: 启动 entitlement 周期 re-verify worker。
+    ///
+    /// 每轮(默认 24h,按 cloud `next_verify_after_hours` 可调)对 EntitlementCache 中
+    /// 每条 entitlement 跑真 verify;响应**经 SEC-1/2 门(`authorize_snapshot`)后**才
+    /// 转 Active(伪造/重放/未签名 strict → 不转 Active,走宽限)。失败连续退避
+    /// 1h → 4h → 24h([`attune_core::entitlement_reverify::backoff_after`]),成功重置。
+    ///
+    /// 锁序铁律:复用 `routes::member::run_refresh_round` —— entitlement 缓存锁独立,
+    /// 写回 vault 时短取 vault 锁,**绝不**在持 entitlement 锁时取 fulltext/vectors/vault。
+    /// 原子 flag 防重入 + RAII guard 复位;vault lock → 静默退出。
+    pub fn start_entitlement_worker(state: std::sync::Arc<AppState>) {
+        if state.entitlement_worker_running.compare_exchange(
+            false, true, Ordering::SeqCst, Ordering::SeqCst,
+        ).is_err() {
+            tracing::debug!("Entitlement worker already running, skipping");
+            return;
+        }
+
+        std::thread::spawn(move || {
+            struct WorkerFlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for WorkerFlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _flag_guard = WorkerFlagGuard(&state.entitlement_worker_running);
+
+            tracing::info!("Entitlement re-verify worker started");
+            // 退避状态(worker 内存,失败计数);恢复成功重置。
+            let mut consecutive_failures: u32 = 0;
+            // 周期默认 24h(spec §5.2 next_verify_after_hours 默认)。
+            const BASE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+            // 轮询粒度:每 60s 醒来检查 vault 状态 + 是否到下一轮(避免长 sleep 阻 vault-lock 退出)。
+            const TICK: std::time::Duration = std::time::Duration::from_secs(60);
+            let mut next_run = std::time::Instant::now();
+
+            loop {
+                // vault lock check —— 锁定即退出(下次 unlock 重启 worker)。
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        break;
+                    }
+                }
+
+                if std::time::Instant::now() < next_run {
+                    std::thread::sleep(TICK);
+                    continue;
+                }
+
+                // 一轮 re-verify(blocking 网络 + 短取 vault 锁写回,均在本 worker 线程)。
+                let summary = crate::routes::member::run_refresh_round(&state, &state.entitlement_cache);
+
+                // 退避:本轮"全网络错"(cloud 不可达)→ 失败 +1 并按退避延后;否则重置。
+                let interval = if summary.all_network_error {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let backoff = attune_core::entitlement_reverify::backoff_after(consecutive_failures);
+                    std::time::Duration::from_secs(backoff.num_seconds().max(0) as u64)
+                } else {
+                    consecutive_failures = 0;
+                    BASE_INTERVAL
+                };
+                next_run = std::time::Instant::now() + interval;
+            }
+            tracing::info!("Entitlement re-verify worker stopped (vault locked)");
         });
     }
 

@@ -141,6 +141,26 @@ impl CloudClient {
         resp.json().map_err(http_err)
     }
 
+    /// `POST /api/v1/member/verify` (T8 / T6 契约). 发送 client `nonce` + `license_id`,
+    /// 解析 entitlement 快照 (§5.2). **网络错 / 5xx → `Err`**(调用方走宽限,§7.2);
+    /// **200 + valid=false → `Ok(snapshot)`**(业务拒,调用方据 status 立即关)。两类
+    /// 错误严格区分 (per §7.2 error 5) —— 故只有传输层失败抛 Err,业务态走解析快照。
+    pub fn verify_entitlements(&self, license_id: &str, nonce: &str) -> Result<EntitlementSnapshot> {
+        let url = format!("{}/api/v1/member/verify", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .json(&serde_json::json!({ "license_id": license_id, "nonce": nonce }))
+            .send()
+            .map_err(http_err)?;
+        // 5xx / transport → Err (走宽限). 4xx (含 401/403) 也视为不可信 → Err.
+        if !resp.status().is_success() {
+            return Err(VaultError::Crypto(format!("verify: status={}", resp.status())));
+        }
+        resp.json().map_err(http_err)
+    }
+
     /// 登出
     pub fn logout(&mut self) -> Result<()> {
         let url = format!("{}/api/v1/logout", self.base_url);
@@ -331,6 +351,132 @@ pub struct EntitledPlugin {
     /// 加密 key (paid plugin 用; free 可空)
     #[serde(default)]
     pub decrypt_key: Option<String>,
+}
+
+// ─── trust-chain (T6): entitlement 快照契约 v1 (spec §5.2) ───────────────
+//
+// cloud `/member/verify` 响应镜像。向后兼容追加字段:老 cloud 不返回 entitlements
+// / signature / nonce → serde default 容缺,标记为 schema-0 / unsigned-response,
+// 由 T-auth-1/2 决定策略(warn grandfather / strict 拒)。本模块只做契约镜像 +
+// "是否带签名"标记,不做验签策略。
+
+/// 单条 entitlement(派生视图,由 signed_payload.allowed_plugins + status 展开)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntitlementSnapshotItem {
+    pub plugin_id: String,
+    /// free | trial | paid
+    pub tier: String,
+    /// active | suspended | revoked
+    pub status: String,
+    #[serde(default)]
+    pub trial_expires: Option<String>,
+    #[serde(default)]
+    pub signing_pubkey_hex: String,
+    #[serde(default)]
+    pub verified_at: Option<String>,
+}
+
+/// 验签覆盖体(canonical JSON,字段序固定)—— SEC-1 签名作用于此,SEC-2 nonce/
+/// verified_at 校验也基于此。client 转 Active 仅依据**验签通过的** `status`,不直接
+/// 信顶层 `valid` / `entitlements`(防顶层伪造,spec §5.2 裁决)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SignedPayload {
+    /// active | suspended | revoked (per-license 总体状态)
+    pub status: String,
+    /// 该 license 授权的 plugin_id 列表
+    #[serde(default)]
+    pub allowed_plugins: Vec<String>,
+    /// RFC3339 | None (trial/paid 到期)
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// 回显 client 发来的同一 nonce (SEC-2 anti-replay)
+    #[serde(default)]
+    pub nonce: String,
+    /// 服务端权威时间 RFC3339,单调递增 (SEC-2 freshness)
+    #[serde(default)]
+    pub verified_at: String,
+}
+
+impl SignedPayload {
+    /// **RFC 8785 JCS** canonical 序列化(§4.1.4 钉死的 codec):键按字典序、UTF-8、
+    /// 无多余空白。这是 cross-repo 唯一可能 silent 字节分歧的点,故确定性编码。
+    ///
+    /// 实现:用 `BTreeMap<&str, serde_json::Value>` 强制键序 + `serde_json::to_vec`
+    /// (compact,无空白)。对本 payload 的标量/数组字段足够确定(同输入同字节);
+    /// cloud v4 须用同一 JCS 实现产出同一字节。client T-auth-1 验签复算此字节。
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        use std::collections::BTreeMap;
+        let mut m: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+        m.insert("status", serde_json::Value::String(self.status.clone()));
+        m.insert(
+            "allowed_plugins",
+            serde_json::Value::Array(
+                self.allowed_plugins
+                    .iter()
+                    .map(|p| serde_json::Value::String(p.clone()))
+                    .collect(),
+            ),
+        );
+        m.insert(
+            "expires_at",
+            match &self.expires_at {
+                Some(s) => serde_json::Value::String(s.clone()),
+                None => serde_json::Value::Null,
+            },
+        );
+        m.insert("nonce", serde_json::Value::String(self.nonce.clone()));
+        m.insert("verified_at", serde_json::Value::String(self.verified_at.clone()));
+        // BTreeMap → serde_json::to_vec is compact + key-sorted (JCS subset).
+        serde_json::to_vec(&m).expect("canonical serialize never fails for owned values")
+    }
+}
+
+/// `/member/verify` 响应快照(顶层契约 v1,spec §5.2)。
+#[derive(Debug, Clone, Deserialize)]
+pub struct EntitlementSnapshot {
+    #[serde(default)]
+    pub valid: bool,
+    #[serde(default)]
+    pub plan: String,
+    /// schema 版本。缺失(老 cloud)→ 0,见 [`Self::schema`]。
+    #[serde(default)]
+    pub entitlement_schema: u32,
+    /// 回显的 nonce (SEC-2)
+    #[serde(default)]
+    pub nonce: Option<String>,
+    /// 验签覆盖体(canonical),缺失 = unsigned-response。
+    #[serde(default)]
+    pub signed_payload: Option<SignedPayload>,
+    /// base64 Ed25519 签名,缺失 = unsigned-response。
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// 派生视图。缺失 → schema-0(老 cloud)。
+    #[serde(default)]
+    pub entitlements: Option<Vec<EntitlementSnapshotItem>>,
+    /// 服务端可调验证节奏。
+    #[serde(default)]
+    pub next_verify_after_hours: Option<u32>,
+}
+
+impl EntitlementSnapshot {
+    /// 有效 schema:`entitlement_schema` 显式给 → 用之;否则若缺 `entitlements`
+    /// → 视为 schema 0(老 cloud,spec §10)。
+    pub fn schema(&self) -> u32 {
+        if self.entitlement_schema > 0 {
+            self.entitlement_schema
+        } else if self.entitlements.is_none() {
+            0
+        } else {
+            // entitlements present but schema field absent → treat as v1.
+            1
+        }
+    }
+
+    /// 是否是"未签名响应"(缺 signature 或 signed_payload)——老 cloud grandfather。
+    /// T-auth-1 据此在 warn 容忍 / strict 拒。T6 仅标记,不做策略。
+    pub fn is_unsigned_response(&self) -> bool {
+        self.signature.is_none() || self.signed_payload.is_none()
+    }
 }
 
 fn http_err(e: reqwest::Error) -> VaultError {
@@ -589,5 +735,167 @@ mod tests {
     fn login_unicode_email_no_panic() {
         let mut c = CloudClient::new("http://127.0.0.1:7");
         let _ = c.login("中文@example.com", "🔒pw");
+    }
+
+    // ── T6: entitlement 快照契约 v1 镜像 (spec §5.2) ──────────────────────
+
+    const V1_SNAPSHOT: &str = r#"{
+        "valid": true,
+        "plan": "pro",
+        "entitlement_schema": 1,
+        "nonce": "client-nonce-abc",
+        "signed_payload": {
+            "status": "active",
+            "allowed_plugins": ["law-pro", "med-pro"],
+            "expires_at": "2026-12-31T00:00:00+00:00",
+            "nonce": "client-nonce-abc",
+            "verified_at": "2026-06-12T00:00:00+00:00"
+        },
+        "signature": "QmFzZTY0RWQyNTUxOVNpZ25hdHVyZQ==",
+        "entitlements": [
+            {"plugin_id": "law-pro", "tier": "paid", "status": "active",
+             "trial_expires": null, "signing_pubkey_hex": "8866ae9b", "verified_at": "2026-06-12T00:00:00+00:00"}
+        ],
+        "next_verify_after_hours": 24
+    }"#;
+
+    #[test]
+    fn parse_v1_snapshot() {
+        let s: EntitlementSnapshot = serde_json::from_str(V1_SNAPSHOT).unwrap();
+        assert!(s.valid);
+        assert_eq!(s.schema(), 1);
+        assert_eq!(s.nonce.as_deref(), Some("client-nonce-abc"));
+        let sp = s.signed_payload.as_ref().unwrap();
+        assert_eq!(sp.status, "active");
+        assert_eq!(sp.allowed_plugins, vec!["law-pro", "med-pro"]);
+        assert_eq!(sp.nonce, "client-nonce-abc");
+        assert!(s.signature.is_some());
+        assert!(!s.is_unsigned_response());
+        assert_eq!(s.entitlements.as_ref().unwrap().len(), 1);
+        assert_eq!(s.next_verify_after_hours, Some(24));
+    }
+
+    #[test]
+    fn unknown_field_tolerated() {
+        let json = r#"{
+            "valid": true, "plan": "pro", "entitlement_schema": 1,
+            "signed_payload": {"status": "active", "allowed_plugins": [], "nonce": "n", "verified_at": "t"},
+            "signature": "sig", "nonce": "n",
+            "future_field_v2": {"seats": 5}, "another_unknown": [1,2,3]
+        }"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).expect("unknown fields ignored");
+        assert!(s.valid);
+        assert!(!s.is_unsigned_response());
+    }
+
+    #[test]
+    fn missing_entitlements_is_schema_0() {
+        // 老 cloud: 仅 valid + plan, 无 entitlements/schema → schema 0.
+        let json = r#"{"valid": true, "plan": "pro"}"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(s.schema(), 0, "missing entitlements → schema 0 (old cloud)");
+        assert!(s.is_unsigned_response(), "old cloud has no signature → unsigned-response");
+    }
+
+    #[test]
+    fn unknown_schema_major_treated_as_verify_fail() {
+        // schema 2 大版本 → 客户端按宽限处理 (caller checks schema() != 1).
+        let json = r#"{"valid": true, "plan": "pro", "entitlement_schema": 2,
+            "signed_payload": {"status":"active","allowed_plugins":[],"nonce":"n","verified_at":"t"},
+            "signature":"s","nonce":"n"}"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(s.schema(), 2, "schema 2 surfaced for caller to route to grace");
+    }
+
+    #[test]
+    fn missing_signature_is_unsigned_response() {
+        // 缺 signature / signed_payload → 标记 unsigned-response (T-auth-1 据此处理).
+        let json = r#"{"valid": true, "plan": "pro", "entitlement_schema": 1,
+            "entitlements": [], "next_verify_after_hours": 24}"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
+        assert!(s.is_unsigned_response(), "no signature → unsigned-response");
+        // does NOT panic, does NOT break: tolerant.
+        assert!(s.valid);
+    }
+
+    // ── T12: backward-compat matrix (§10) ───────────────────────────────────
+
+    /// old_client_new_cloud (§10): a new cloud only ADDS fields to the verify response;
+    /// an older client's serde must ignore the unknown additions and parse the core
+    /// contract unchanged (no breaking). The v1 snapshot already carries future-shaped
+    /// extras; here we additionally inject brand-new top-level keys a future cloud might
+    /// add and assert the existing fields still parse.
+    #[test]
+    fn old_client_new_cloud() {
+        let json = r#"{
+            "valid": true, "plan": "pro", "entitlement_schema": 1,
+            "nonce": "n", "next_verify_after_hours": 12,
+            "signed_payload": {"status":"active","allowed_plugins":["law-pro"],"nonce":"n","verified_at":"2026-06-12T00:00:00+00:00"},
+            "signature": "sig",
+            "entitlements": [{"plugin_id":"law-pro","tier":"paid","status":"active"}],
+            "seat_count_v2": 5, "grace_policy_v3": {"days": 14}, "telemetry_opt": false
+        }"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).expect("old client tolerates new cloud fields");
+        // Core contract still parses correctly despite the unknown additions.
+        assert!(s.valid);
+        assert_eq!(s.schema(), 1);
+        assert_eq!(s.signed_payload.as_ref().unwrap().status, "active");
+        assert_eq!(s.next_verify_after_hours, Some(12));
+        assert!(!s.is_unsigned_response());
+    }
+
+    /// new_client_old_cloud (§10 G1 补写): a NEW client talking to an OLD cloud that does
+    /// not yet sign / does not send `entitlements` → schema 0. The client must classify
+    /// this as schema 0 (unsigned) so a paid user is routed to GRACE (fail-open), NOT
+    /// fail-closed. We assert the parse + schema-0 classification that drives that policy.
+    #[test]
+    fn new_client_old_cloud() {
+        // Old cloud: paid user, but no entitlements array and no signature.
+        let json = r#"{"valid": true, "plan": "pro"}"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(s.schema(), 0, "old cloud (no entitlements) → schema 0");
+        assert!(s.is_unsigned_response(), "old cloud unsigned → grace, not fail-closed");
+        // schema 0 is the signal the consume layer uses to keep a paid license in Grace
+        // (spec §10: do NOT lock a paying user just because the cloud hasn't shipped v4).
+        assert!(s.valid, "the paid plan is still surfaced — caller keeps it in grace");
+    }
+
+    /// JCS canonical 序列化:确定性 (同输入同字节) + 键排序 + 无空白。
+    #[test]
+    fn signed_payload_canonical_byte_equal_roundtrip() {
+        let p = SignedPayload {
+            status: "active".into(),
+            allowed_plugins: vec!["law-pro".into(), "med-pro".into()],
+            expires_at: Some("2026-12-31T00:00:00+00:00".into()),
+            nonce: "abc123".into(),
+            verified_at: "2026-06-12T00:00:00+00:00".into(),
+        };
+        let b1 = p.canonical_bytes();
+        let b2 = p.canonical_bytes();
+        assert_eq!(b1, b2, "canonical must be deterministic (byte-equal)");
+        // Keys must be sorted (JCS): allowed_plugins < expires_at < nonce < status < verified_at.
+        let s = String::from_utf8(b1).unwrap();
+        let i_allowed = s.find("allowed_plugins").unwrap();
+        let i_expires = s.find("expires_at").unwrap();
+        let i_nonce = s.find("nonce").unwrap();
+        let i_status = s.find("status").unwrap();
+        let i_verified = s.find("verified_at").unwrap();
+        assert!(i_allowed < i_expires && i_expires < i_nonce && i_nonce < i_status && i_status < i_verified,
+            "canonical keys must be lexicographically sorted: {s}");
+        // No whitespace (compact).
+        assert!(!s.contains(": ") && !s.contains(", "), "canonical must be compact: {s}");
+    }
+
+    #[test]
+    fn signed_payload_null_expires_canonical() {
+        let p = SignedPayload {
+            status: "trial".into(),
+            allowed_plugins: vec![],
+            expires_at: None,
+            nonce: "n".into(),
+            verified_at: "t".into(),
+        };
+        let s = String::from_utf8(p.canonical_bytes()).unwrap();
+        assert!(s.contains("\"expires_at\":null"), "None → null in canonical: {s}");
     }
 }

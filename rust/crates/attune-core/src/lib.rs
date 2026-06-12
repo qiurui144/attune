@@ -134,6 +134,9 @@ pub mod plugin_sig;
 // root for auto-installed plugins; defends against a compromised accounts server
 // substituting an attacker signing key. See plugin_anchor.rs.
 pub mod plugin_anchor;
+pub mod entitlement_anchor;  // trust-chain SEC-1: entitlement signing-key anchor + verify
+pub mod entitlement;  // trust-chain T5: EntitlementCache + grace state machine + clock-rollback
+pub mod entitlement_reverify;  // trust-chain T8: re-verify orchestration (SEC-1/2 worker integration)
 pub mod classifier;
 pub mod clusterer;
 pub mod crypto;

@@ -106,6 +106,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/member/login-token", post(routes::member::login_token))
         .route("/api/v1/member/login-password", post(routes::member::login_password))
         .route("/api/v1/member/logout", post(routes::member::logout))
+        // Trust-chain T8: 手动触发一轮 entitlement re-verify (SEC-1/2 gated transition)
+        .route("/api/v1/member/entitlements/refresh", post(routes::member::refresh_entitlements))
         // DSAR (GDPR Art.15/17/20 + 中国 PIPL §44-50) — cloud member 数据主权操作
         // 桌面 UI 经此 proxy 到 cloud accounts，密码不持久化
         .route("/api/v1/dsar/export", post(routes::dsar::export_data))

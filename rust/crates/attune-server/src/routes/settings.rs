@@ -113,6 +113,28 @@ fn validate_settings_fields(body: &serde_json::Value) -> Result<(), String> {
         }
     }
 
+    // 4. Trust-chain T11: plugin_trust_mode 三态 + plugin_trusted_pubkeys 64-hex 数组。
+    if let Some(m) = obj.get("plugin_trust_mode").and_then(|v| v.as_str()) {
+        const MODES: &[&str] = &["off", "warn", "strict"];
+        if !MODES.contains(&m) {
+            return Err(format!("plugin_trust_mode 无效:'{m}'(允许:{})", MODES.join(" / ")));
+        }
+    }
+    if let Some(keys) = obj.get("plugin_trusted_pubkeys") {
+        let arr = keys
+            .as_array()
+            .ok_or_else(|| "plugin_trusted_pubkeys 必须是字符串数组".to_string())?;
+        for (i, k) in arr.iter().enumerate() {
+            let s = k
+                .as_str()
+                .ok_or_else(|| format!("plugin_trusted_pubkeys[{i}] 必须是字符串"))?;
+            // Ed25519 公钥 = 32 字节 → 64 hex 字符。拒绝非 64-hex(防注入垃圾)。
+            if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(format!("plugin_trusted_pubkeys[{i}] 必须是 64 位 hex 公钥"));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -219,6 +241,8 @@ pub async fn update_settings(
         "pluginhub", // G2 (2026-05-01): { url, license_key }
         "cloud", // FEAT-1 (2026-05-14): { accounts_url } — 自部署 / 私有 cloud 环境覆盖默认 engi-stack.com
         "privacy", // v1.0.6 Privacy Logic Strategy: { llm, cloud_saas, webdav, web_search, telemetry, privacy_tour_seen }
+        "plugin_trust_mode", // Trust-chain T11: "off" | "warn" | "strict" (default warn)
+        "plugin_trusted_pubkeys", // Trust-chain T11: user-whitelisted third-party signer pubkeys (64-hex[])
     ];
 
     // v1.0.6 Privacy Logic: telemetry 必须通过 isolation patch 切换,
@@ -435,6 +459,12 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
             "disabled": []  // W4 E1: marketplace 禁用列表，list 用于 enabled 字段
         },
 
+        // Trust-chain T11 (spec §10 决策 2): 插件签名信任门三态 + 用户白名单公钥。
+        // 默认 warn(升级 grandfather:未签名加载+警示,篡改拒载)。官方公钥是编译期
+        // const(plugin_anchor::OFFICIAL_PLUGIN_ANCHORS),settings 不可覆盖(防降级攻击)。
+        "plugin_trust_mode": "warn",
+        "plugin_trusted_pubkeys": [],
+
         // G2 (2026-05-01) — PluginHub 远端市场对接
         // null = 走内嵌 Mock provider（默认离线，看到 4 个 attune-pro 试用卡）
         // 配 url + license_key 后切到 HttpPluginHubProvider，调真 hub.engi-stack.com
@@ -511,6 +541,84 @@ pub fn is_telemetry_path_allowed(body: &serde_json::Value) -> bool {
 mod tests {
     use super::*;
     use attune_core::platform::FormFactor;
+
+    // ── Trust-chain T11: trust_mode + pubkey whitelist ──────────────────────
+
+    /// Fresh vault default `plugin_trust_mode` = "warn" (决策 2 + spec §10 grandfather).
+    #[test]
+    fn settings_trust_mode_default_warn() {
+        let d = default_settings("qwen2.5:3b", FormFactor::Laptop);
+        assert_eq!(
+            d.get("plugin_trust_mode").and_then(|v| v.as_str()),
+            Some("warn"),
+            "fresh vault must default plugin_trust_mode to warn"
+        );
+        assert_eq!(
+            d.get("plugin_trusted_pubkeys").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(0),
+            "default whitelist is empty"
+        );
+        // The default value is itself an accepted settings shape.
+        assert!(validate_settings_fields(&d).is_ok());
+    }
+
+    /// Settings can NOT inject an "official" trust root: the official anchor is the
+    /// compile-time `plugin_anchor::OFFICIAL_PLUGIN_ANCHORS` const, and a
+    /// `plugin_trusted_pubkeys` entry only ever yields `Trust::ThirdParty` via
+    /// `verify_with_whitelist` — never `Official` (§9 adversarial 2, defends downgrade).
+    #[test]
+    fn settings_pubkey_cannot_override_official() {
+        use attune_core::plugin_sig::{verify_with_whitelist, SigOutcome};
+        // A user-whitelisted key signs a plugin; the SigOutcome must be ThirdParty,
+        // not Official — settings pubkeys are a separate, lower trust domain.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("p");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.yaml"), "id: p\nname: P\ntype: industry\nversion: \"1.0.0\"\n").unwrap();
+        // generate a fresh signer + sign the plugin dir contents.
+        let sk = attune_core::plugin_sig::generate_signing_key();
+        attune_core::plugin_sig::sign_plugin(&dir, &sk).expect("sign");
+        let pubkey_hex = attune_core::plugin_sig::derive_verifying_key_hex(&sk);
+        // official_keys = the production anchor const (NOT the user key).
+        let official: Vec<&str> = attune_core::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS.to_vec();
+        let user_keys = vec![pubkey_hex];
+        let outcome = verify_with_whitelist(&dir, &official, &user_keys).unwrap();
+        assert_eq!(
+            outcome,
+            SigOutcome::ThirdParty,
+            "a settings-whitelisted pubkey yields ThirdParty, never Official"
+        );
+        // And: there is no settings key that mutates the official anchor const — the
+        // settings schema only carries plugin_trusted_pubkeys (third-party domain).
+        let d = default_settings("qwen2.5:3b", FormFactor::Laptop);
+        assert!(d.get("official_pubkeys").is_none(), "no settings path to official anchor");
+    }
+
+    /// plugin_trusted_pubkeys validates as a 64-hex array and round-trips through the
+    /// settings JSON (PATCH merge → GET). Non-hex / wrong-length entries are rejected.
+    #[test]
+    fn trusted_pubkeys_roundtrip() {
+        let valid = "ab".repeat(32); // 64 hex chars
+        let body = serde_json::json!({
+            "plugin_trust_mode": "strict",
+            "plugin_trusted_pubkeys": [valid.clone()],
+        });
+        assert!(validate_settings_fields(&body).is_ok(), "valid 64-hex pubkey accepted");
+        // round-trip: the array survives a clone through the settings value shape.
+        assert_eq!(body["plugin_trusted_pubkeys"][0], serde_json::Value::String(valid));
+        assert_eq!(body["plugin_trust_mode"], "strict");
+
+        // reject malformed: not 64-hex, non-string, bad mode.
+        for bad in [
+            serde_json::json!({"plugin_trusted_pubkeys": ["xyz"]}),
+            serde_json::json!({"plugin_trusted_pubkeys": ["ab".repeat(33)]}),
+            serde_json::json!({"plugin_trusted_pubkeys": [123]}),
+            serde_json::json!({"plugin_trusted_pubkeys": "not-an-array"}),
+            serde_json::json!({"plugin_trust_mode": "paranoid"}),
+        ] {
+            assert!(validate_settings_fields(&bad).is_err(), "should reject {bad:?}");
+        }
+    }
 
     #[test]
     fn validate_settings_fields_rejects_invalid_and_accepts_valid() {

@@ -203,6 +203,17 @@ enum Commands {
     PluginUninstall {
         plugin_id: String,
     },
+    /// 把一个第三方签名公钥加入信任白名单 (settings.plugin_trusted_pubkeys).
+    /// 该公钥签名的插件验签后标 ThirdParty (可在 strict 模式加载)。**不能**把插件
+    /// 抬成 Official —— 官方信任根是编译期 const,白名单是独立的低信任域 (T11)。
+    /// 经运行中的 attune-server (默认 http://localhost:18900) PATCH settings 落库。
+    PluginTrustAdd {
+        /// 第三方签名公钥 hex (64 chars, Ed25519)
+        pubkey: String,
+        /// attune-server base URL (默认 http://localhost:18900)
+        #[arg(long, default_value = "http://localhost:18900")]
+        server_url: String,
+    },
     /// 列出已装载 plugins (~/.local/share/attune/plugins/)
     PluginList,
     /// 登录云端账号 (走 cloud accounts /api/v1/users/login)
@@ -490,6 +501,9 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
         Commands::PluginUninstall { plugin_id } => {
             return run_plugin_uninstall(plugin_id);
+        }
+        Commands::PluginTrustAdd { pubkey, server_url } => {
+            return run_plugin_trust_add(pubkey, server_url);
         }
         Commands::PluginList => {
             return run_plugin_list();
@@ -797,6 +811,7 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. }
         | Commands::PluginKeygen { .. } | Commands::PluginSign { .. } | Commands::PluginVerifySig { .. }
         | Commands::PluginInstall { .. } | Commands::PluginUninstall { .. } | Commands::PluginList
+        | Commands::PluginTrustAdd { .. }
         | Commands::Login { .. } | Commands::SyncPlugins { .. } | Commands::LinkFolder { .. }
         | Commands::PluginPublish { .. }
         | Commands::OcrProfileList | Commands::OcrProfileShow { .. }
@@ -1040,10 +1055,17 @@ fn run_plugin_verify(
     } else {
         None
     };
+    // T2: CLI 诊断命令的 --trust 字符串映射到 Trust enum (类型级 guard)。
+    use attune_core::plugin_sig::Trust;
+    let trust_enum = match trust {
+        "Official" => Trust::Official,
+        "Trusted" | "ThirdParty" => Trust::ThirdParty,
+        _ => Trust::Unsigned,
+    };
     let plugin = attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(
         plugin_dir,
         key_bytes.as_deref(),
-        Some(trust),
+        Some(trust_enum),
     )?;
     eprintln!("✓ plugin loaded: id={}, version={}, type={}",
         plugin.manifest.id, plugin.manifest.version, plugin.manifest.plugin_type);
@@ -1139,7 +1161,9 @@ fn run_plugin_install(
     pubkey: Option<&str>,
     force: bool,
 ) -> attune_core::error::Result<()> {
-    // 1. 签名校验先行 (用于推导 trust 级别, paid plugin 装载校验需要)
+    // 1. 签名校验先行 (用于推导 trust 级别, paid plugin 装载校验需要)。
+    // T2: trust 用 Trust enum (类型级), 由真实 verify_with_key 结果推导。
+    use attune_core::plugin_sig::Trust;
     let trust = if let Some(pk) = pubkey {
         let ok = attune_core::plugin_sig::verify_with_key(src, pk)?;
         if !ok {
@@ -1148,10 +1172,10 @@ fn run_plugin_install(
             ));
         }
         eprintln!("✓ signature verified with provided pubkey → trust=Trusted");
-        "Trusted"
+        Trust::ThirdParty
     } else {
         eprintln!("⚠️  no --pubkey: trust=Unsigned (paid plugin will be rejected)");
-        "Unsigned"
+        Trust::Unsigned
     };
 
     // 2. 解析 src plugin.yaml 拿 id (paid plugin 需提供 key + 合格 trust)
@@ -1206,6 +1230,57 @@ fn run_plugin_uninstall(plugin_id: &str) -> attune_core::error::Result<()> {
     Ok(())
 }
 
+/// Trust-chain T11: add a third-party signer pubkey to settings.plugin_trusted_pubkeys
+/// via the running attune-server PATCH /api/v1/settings. The pubkey must be 64-hex
+/// (Ed25519); the server validates again and rejects malformed keys. This whitelist is
+/// a SEPARATE trust domain — it can never elevate a plugin to Official (that anchor is
+/// a compile-time const, §9 adversarial 2).
+fn run_plugin_trust_add(pubkey: &str, server_url: &str) -> attune_core::error::Result<()> {
+    let pk = pubkey.trim().to_string();
+    if pk.len() != 64 || !pk.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(attune_core::error::VaultError::InvalidInput(
+            "pubkey must be 64 hex chars (Ed25519 verifying key)".into(),
+        ));
+    }
+    let base = server_url.trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder()
+        .build()
+        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!("http client: {e}"))))?;
+
+    // 1) GET current settings to read the existing whitelist (vault must be unlocked).
+    let cur: serde_json::Value = client
+        .get(format!("{base}/api/v1/settings"))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.json())
+        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!(
+            "GET settings failed (is attune-server running + vault unlocked?): {e}"
+        ))))?;
+    let mut keys: Vec<String> = cur
+        .get("plugin_trusted_pubkeys")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if keys.iter().any(|k| k == &pk) {
+        eprintln!("✓ pubkey already trusted: {pk}");
+        return Ok(());
+    }
+    keys.push(pk.clone());
+
+    // 2) PATCH the merged whitelist back.
+    let resp = client
+        .patch(format!("{base}/api/v1/settings"))
+        .json(&serde_json::json!({ "plugin_trusted_pubkeys": keys }))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!(
+            "PATCH settings failed: {e}"
+        ))))?;
+    let _ = resp;
+    eprintln!("✓ added trusted pubkey: {pk}");
+    Ok(())
+}
+
 fn run_plugin_list() -> attune_core::error::Result<()> {
     let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()?;
     if !plugins_root.exists() {
@@ -1222,14 +1297,19 @@ fn run_plugin_list() -> attune_core::error::Result<()> {
         }
         // list 是诊断命令, 不强制 trust 校验 (绕开 paid+Unsigned 联动). 真实装载时
         // attune-server scan 仍会按 trust 拒绝.
-        match attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(&path, None, Some("Official")) {
+        // T9: 跑**真实** verify_loose 得到真 trust 标签 (不再硬编码 Some(Trust::Official))。
+        // 装载用真 trust;若 paid+Unsigned 联动拒绝则降级为 None 仅做诊断展示。
+        let real_trust = attune_core::plugin_sig::verify_loose(&path)
+            .map(|r| r.trust)
+            .unwrap_or(attune_core::plugin_sig::Trust::Unsigned);
+        match attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(&path, None, Some(real_trust)) {
             Ok(plugin) => {
                 count += 1;
                 let m = &plugin.manifest;
                 let tier = m.pricing.as_ref().map(|p| p.tier.as_str()).unwrap_or("?");
                 println!(
-                    "  {} (v{}, type={}, tier={}, agents={}, skills={}, mcps={})",
-                    m.id, m.version, m.plugin_type, tier,
+                    "  {} (v{}, type={}, tier={}, trust={}, agents={}, skills={}, mcps={})",
+                    m.id, m.version, m.plugin_type, tier, real_trust.as_str(),
                     m.agents.len(), m.skills.len(), m.mcp_servers.len()
                 );
             }
@@ -1422,8 +1502,9 @@ fn run_plugin_publish(
         ))?;
 
     // 1. 解析 manifest 拿 id + version
+    // T2 占位: 类型迁移为 Trust enum; T9 接入真验签结果。
     let plugin = attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(
-        plugin_dir, None, Some("Trusted"),
+        plugin_dir, None, Some(attune_core::plugin_sig::Trust::ThirdParty),
     )?;
     let id = plugin.manifest.id.clone();
     let version = plugin.manifest.version.clone();

@@ -77,12 +77,13 @@ const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
   },
 };
 
-type SettingsTab = 'general' | 'ai' | 'data' | 'member' | 'privacy' | 'about';
+type SettingsTab = 'general' | 'ai' | 'data' | 'plugins' | 'member' | 'privacy' | 'about';
 
 const TABS: Array<{ key: SettingsTab; icon: string; labelKey: string }> = [
   { key: 'general', icon: '⚙', labelKey: 'settings.tab.general' },
   { key: 'ai', icon: '🤖', labelKey: 'settings.tab.ai' },
   { key: 'data', icon: '📂', labelKey: 'settings.tab.data' },
+  { key: 'plugins', icon: '🧩', labelKey: 'settings.tab.plugins' },
   { key: 'member', icon: '👤', labelKey: 'settings.tab.member' },
   { key: 'privacy', icon: '🔐', labelKey: 'settings.tab.privacy' },
   { key: 'about', icon: 'ℹ', labelKey: 'settings.tab.about' },
@@ -171,6 +172,7 @@ export function SettingsView(): JSX.Element {
           {activeTab.value === 'general' && <GeneralPanel />}
           {activeTab.value === 'ai' && <AIPanel />}
           {activeTab.value === 'data' && <DataPanel />}
+          {activeTab.value === 'plugins' && <PluginsPanel />}
           {activeTab.value === 'member' && <MemberPanel />}
           {activeTab.value === 'privacy' && <PrivacyPanel />}
           {activeTab.value === 'about' && <AboutPanel />}
@@ -889,6 +891,172 @@ function ServiceStatus({ ok, note }: { ok: boolean; note?: string }): JSX.Elemen
 }
 
 // ── 共享组件 ─────────────────────────────────────────────────
+// Trust-chain T11: plugin signature trust-mode + third-party pubkey whitelist.
+// Three-state radio (off / warn / strict) + whitelist add/remove + strict-switch
+// shows the affected unsigned plugins. The official trust root is a compile-time
+// const — this panel can only manage the SEPARATE third-party whitelist (§9 adv 2).
+type PluginTrustMode = 'off' | 'warn' | 'strict';
+
+function PluginsPanel(): JSX.Element {
+  const mode = useComputed<PluginTrustMode>(
+    () => ((settings.value?.plugin_trust_mode as PluginTrustMode) ?? 'warn'),
+  );
+  const pubkeys = useComputed<string[]>(
+    () => ((settings.value?.plugin_trusted_pubkeys as string[]) ?? []),
+  );
+  const draftKey = useSignal('');
+  const saving = useSignal(false);
+  // Affected unsigned plugins surfaced when the user moves to strict (they will be
+  // refused on next load). Fetched lazily from the real plugins list.
+  const affectedUnsigned = useSignal<string[]>([]);
+
+  const setMode = async (next: PluginTrustMode): Promise<void> => {
+    // Switching TO strict: surface the unsigned plugins that strict will block.
+    if (next === 'strict') {
+      try {
+        const resp = await api.get<{ plugins: Array<{ id: string; trust?: string }> }>('/plugins');
+        affectedUnsigned.value = (resp.plugins ?? [])
+          .filter((p) => p.trust === 'unsigned')
+          .map((p) => p.id);
+      } catch {
+        affectedUnsigned.value = [];
+      }
+    } else {
+      affectedUnsigned.value = [];
+    }
+    saving.value = true;
+    try {
+      const ok = await patchSettings({ plugin_trust_mode: next });
+      if (ok) {
+        toast('success', t('settings.plugins.trust_mode.saved'));
+      } else {
+        toast('error', t('settings.plugins.trust_mode.save_failed'));
+      }
+    } finally {
+      saving.value = false;
+    }
+  };
+
+  const addPubkey = async (): Promise<void> => {
+    const k = draftKey.value.trim().toLowerCase();
+    if (k.length !== 64 || !/^[0-9a-f]+$/.test(k)) {
+      toast('error', t('settings.plugins.whitelist.invalid_pubkey'));
+      return;
+    }
+    if (pubkeys.value.includes(k)) {
+      toast('error', t('settings.plugins.whitelist.already_trusted'));
+      return;
+    }
+    saving.value = true;
+    try {
+      const ok = await patchSettings({ plugin_trusted_pubkeys: [...pubkeys.value, k] });
+      if (ok) {
+        draftKey.value = '';
+        toast('success', t('settings.plugins.whitelist.added'));
+      } else {
+        toast('error', t('settings.plugins.whitelist.save_failed'));
+      }
+    } finally {
+      saving.value = false;
+    }
+  };
+
+  const removePubkey = async (k: string): Promise<void> => {
+    saving.value = true;
+    try {
+      const ok = await patchSettings({
+        plugin_trusted_pubkeys: pubkeys.value.filter((x) => x !== k),
+      });
+      if (ok) toast('success', t('settings.plugins.whitelist.removed'));
+    } finally {
+      saving.value = false;
+    }
+  };
+
+  return (
+    <>
+      <Section
+        title={t('settings.plugins.trust_mode.title')}
+        desc={t('settings.plugins.trust_mode.desc')}
+      >
+        <>
+        {(['off', 'warn', 'strict'] as PluginTrustMode[]).map((m) => (
+          <label
+            key={m}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 'var(--space-2)',
+              padding: 'var(--space-3) var(--space-4)',
+              background: 'var(--color-surface)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-md)',
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="radio"
+              name="plugin-trust-mode"
+              checked={mode.value === m}
+              disabled={saving.value}
+              onChange={() => void setMode(m)}
+            />
+            <span style={{ fontSize: 'var(--text-sm)' }}>
+              {t(`settings.plugins.trust_mode.${m}`)}
+            </span>
+          </label>
+        ))}
+        {affectedUnsigned.value.length > 0 && (
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-warning, #b8860b)', margin: 0 }}>
+            {t('settings.plugins.trust_mode.strict_affected')}
+            {': '}
+            {affectedUnsigned.value.join(', ')}
+          </p>
+        )}
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+          {t('settings.plugins.unsigned_install_warn')}
+        </p>
+        </>
+      </Section>
+
+      <Section
+        title={t('settings.plugins.whitelist.title')}
+        desc={t('settings.plugins.whitelist.desc')}
+      >
+        <>
+        <SettingRow label={t('settings.plugins.whitelist.add_label')}>
+          <span style={{ display: 'flex', gap: 'var(--space-2)' }}>
+            <input
+              type="text"
+              value={draftKey.value}
+              placeholder={t('settings.plugins.whitelist.pubkey_placeholder')}
+              onInput={(e) => (draftKey.value = e.currentTarget.value)}
+              style={{ ...inputStyle, width: 280 }}
+            />
+            <Button onClick={() => void addPubkey()} disabled={saving.value}>
+              {t('settings.plugins.whitelist.add_button')}
+            </Button>
+          </span>
+        </SettingRow>
+        {pubkeys.value.length === 0 ? (
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+            {t('settings.plugins.whitelist.empty')}
+          </p>
+        ) : (
+          pubkeys.value.map((k) => (
+            <SettingRow key={k} label={`${k.slice(0, 16)}…${k.slice(-8)}`}>
+              <Button onClick={() => void removePubkey(k)} disabled={saving.value}>
+                {t('settings.plugins.whitelist.remove')}
+              </Button>
+            </SettingRow>
+          ))
+        )}
+        </>
+      </Section>
+    </>
+  );
+}
+
 const selectStyle: JSX.CSSProperties = {
   padding: '4px var(--space-2)',
   fontSize: 'var(--text-sm)',
