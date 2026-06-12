@@ -312,6 +312,75 @@ fn explicit_hf_endpoint_override() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 选定源的缓存(§12.3:选定缓存进 settings `model_source_selected` + 探测时间戳)。
+/// 落在 `app_settings.model_source` 节(纯 JSON,随 server settings 持久化);避免每次下载
+/// 都重探所有源。新鲜度由 TTL 控制(§3.4:非 READY 态 TTL 10min;这里对"已选源"统一用
+/// 一个保守 TTL,过期则下次显式下载重探)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SelectedSource {
+    /// 选定源 id(对应 `ModelSource::id`)。
+    pub source_id: String,
+    /// 选定源 endpoint(下载时直接用,省去重新 resolve)。
+    pub endpoint: String,
+    /// 探测/选定时刻(unix epoch 秒)。新鲜度判定用。
+    pub probed_at_unix: u64,
+}
+
+/// `app_settings` 中模型源缓存节的 key。
+const MODEL_SOURCE_SETTINGS_KEY: &str = "model_source";
+/// 选源缓存新鲜度 TTL(秒)。§3.4:远端可能恢复(K3 回网 / 镜像上线),不宜永久 pin
+/// 一个选定源 —— 过期后下次显式下载重探,自愈到当前最优。1h 平衡"少重探"与"跟上变化"。
+const SELECTED_SOURCE_TTL_SECS: u64 = 3600;
+
+/// 当前 unix epoch 秒(单调性不重要,只用于 TTL 比较)。
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 从 `app_settings` JSON 读出缓存的选定源(若存在且 schema 合法)。纯函数,无 IO。
+pub fn read_selected_source(settings: &serde_json::Value) -> Option<SelectedSource> {
+    let node = settings.get(MODEL_SOURCE_SETTINGS_KEY)?;
+    serde_json::from_value(node.clone()).ok()
+}
+
+/// 把选定源写进 `app_settings` JSON 的 `model_source` 节(覆盖旧值)。纯函数返回新 JSON,
+/// 不做 IO(调用方负责持久化,对齐 `llm_settings::merge_gateway_into_settings` 模式)。
+pub fn write_selected_source(
+    mut settings: serde_json::Value,
+    selected: &SelectedSource,
+) -> serde_json::Value {
+    if !settings.is_object() {
+        settings = serde_json::json!({});
+    }
+    if let Some(obj) = settings.as_object_mut() {
+        obj.insert(
+            MODEL_SOURCE_SETTINGS_KEY.to_string(),
+            serde_json::to_value(selected).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    settings
+}
+
+/// 缓存的选定源是否仍新鲜(`now - probed_at < TTL`)。过期 → 调用方应重探。
+/// 也防御未来时钟(`probed_at > now` 视为新鲜,避免时钟回拨误判过期)。
+pub fn selected_source_is_fresh(selected: &SelectedSource, now: u64) -> bool {
+    now < selected.probed_at_unix || now - selected.probed_at_unix < SELECTED_SOURCE_TTL_SECS
+}
+
+impl SelectedSource {
+    /// 从一个刚选定的 `ModelSource` 构造缓存项(打当前时间戳)。
+    pub fn from_source(source: &ModelSource) -> Self {
+        Self {
+            source_id: source.id.clone(),
+            endpoint: source.endpoint.clone(),
+            probed_at_unix: now_unix(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,6 +715,63 @@ mod tests {
         let dst = dir.path().join("model.bin");
         let r = download_with_failover(&[], "Xenova/bge-m3", "model.bin", &dst);
         assert!(r.is_err(), "empty source list → Err (degraded)");
+    }
+
+    // --- 选定源缓存(§12.3:settings 持久化 + TTL 新鲜度)。纯 JSON,无 IO/无 env。 ---
+
+    #[test]
+    fn selected_source_roundtrip_in_settings() {
+        let source = src("modelscope", "https://modelscope.cn/models", 80);
+        let sel = SelectedSource::from_source(&source);
+        let settings = serde_json::json!({"llm": {"model": "x"}});
+        let written = write_selected_source(settings, &sel);
+        // 既有 key 不动
+        assert_eq!(written["llm"]["model"], "x");
+        // 读回一致
+        let back = read_selected_source(&written).expect("must read back");
+        assert_eq!(back.source_id, "modelscope");
+        assert_eq!(back.endpoint, "https://modelscope.cn/models");
+        assert_eq!(back.probed_at_unix, sel.probed_at_unix);
+    }
+
+    #[test]
+    fn read_selected_source_absent_or_invalid() {
+        assert!(read_selected_source(&serde_json::json!({})).is_none());
+        // 节存在但 schema 错(字符串而非对象)→ None,不 panic
+        assert!(read_selected_source(&serde_json::json!({"model_source": "garbage"})).is_none());
+        // 缺字段 → None
+        assert!(
+            read_selected_source(&serde_json::json!({"model_source": {"source_id": "x"}}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn write_selected_source_into_non_object() {
+        let sel = SelectedSource {
+            source_id: "hf".into(),
+            endpoint: "https://huggingface.co".into(),
+            probed_at_unix: 100,
+        };
+        let out = write_selected_source(serde_json::json!("not-an-object"), &sel);
+        assert_eq!(read_selected_source(&out).unwrap().source_id, "hf");
+    }
+
+    #[test]
+    fn selected_source_freshness_ttl() {
+        let sel = SelectedSource {
+            source_id: "ms".into(),
+            endpoint: "https://modelscope.cn/models".into(),
+            probed_at_unix: 1000,
+        };
+        // 刚探测 → 新鲜
+        assert!(selected_source_is_fresh(&sel, 1000));
+        // TTL 内 → 新鲜
+        assert!(selected_source_is_fresh(&sel, 1000 + SELECTED_SOURCE_TTL_SECS - 1));
+        // 超 TTL → 过期(应重探)
+        assert!(!selected_source_is_fresh(&sel, 1000 + SELECTED_SOURCE_TTL_SECS + 1));
+        // 时钟回拨(now < probed_at)→ 视为新鲜,不误判过期
+        assert!(selected_source_is_fresh(&sel, 500));
     }
 
     #[test]
