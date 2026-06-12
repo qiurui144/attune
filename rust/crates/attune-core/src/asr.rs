@@ -760,21 +760,15 @@ pub fn ensure_whisper_model(ggml_filename: &str) -> crate::error::Result<std::pa
         )));
     }
 
-    // S1: pre-flight 可达性探测(带显式 connect 超时)。注意 whisper.cpp 仓在 ModelScope
-    // **无覆盖** → CN 默认源(ModelScope)会 404,但探测命中可达后 hf-hub 的 404 是快速失败;
-    // 若整个 endpoint 死(如旧 hf-mirror)则探测在超时内 fail-fast 而非永久阻塞启动后台线程。
+    // S1/C1: connect 探针前哨 + 带超时的流式下载(download_hf_file: connect_timeout +
+    // total timeout),替代零超时的 hf-hub repo.get()。注意 whisper.cpp 仓在 ModelScope
+    // **无覆盖** → CN 默认源会 404
+    // (快速失败 → ASR 引擎 degrade);若整个 endpoint 死则 connect/read 超时内 fail-fast
+    // 而非永久阻塞启动后台线程。
     crate::infer::model_store::probe_endpoint_reachable(
         &crate::infer::model_store::hf_endpoint(),
     )?;
-
-    let api = hf_hub::api::sync::Api::new()
-        .map_err(|e| VaultError::ModelLoad(format!("hf-hub init: {e}")))?;
-    let repo = api.model("ggerganov/whisper.cpp".to_string());
-    let src = repo
-        .get(ggml_filename)
-        .map_err(|e| VaultError::ModelLoad(format!("download {ggml_filename}: {e}")))?;
-    std::fs::copy(&src, &target)
-        .map_err(|e| VaultError::ModelLoad(format!("copy ggml file: {e}")))?;
+    crate::infer::model_store::download_hf_file("ggerganov/whisper.cpp", ggml_filename, &target)?;
     Ok(target)
 }
 
