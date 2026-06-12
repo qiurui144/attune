@@ -135,6 +135,7 @@ pub mod plugin_sig;
 // substituting an attacker signing key. See plugin_anchor.rs.
 pub mod plugin_anchor;
 pub mod entitlement_anchor;  // trust-chain SEC-1: entitlement signing-key anchor + verify
+pub mod entitlement;  // trust-chain T5: EntitlementCache + grace state machine + clock-rollback
 pub mod classifier;
 pub mod clusterer;
 pub mod crypto;
