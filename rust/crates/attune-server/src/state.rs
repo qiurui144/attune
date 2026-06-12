@@ -311,6 +311,25 @@ impl AppState {
             unsafe { std::env::set_var("HF_ENDPOINT", endpoint) };
             tracing::info!("Region detected: {} → HF_ENDPOINT={endpoint}", region.label());
         }
+
+        // S8 cache: seed the in-memory model-source resolution cache from the persisted
+        // selected source so the first post-unlock download skips re-probing all sources
+        // (the read_selected_source/freshness layer was dead code before this wiring).
+        // vault guard taken alone (no vectors/fulltext held) — respects lock ordering.
+        {
+            let settings = {
+                let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+                vault_guard.store().get_meta("app_settings").ok().flatten()
+                    .and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok())
+            };
+            if let Some(s) = settings {
+                let region = attune_core::platform::detect_region();
+                let n = attune_core::infer::model_source::seed_resolution_cache_from_settings(&s, region);
+                if n > 0 {
+                    tracing::info!("model-source cache seeded from persisted selection ({n} buckets)");
+                }
+            }
+        }
         // Fulltext index (persistent on disk)
         {
             let tantivy_dir = attune_core::platform::data_dir().join("tantivy");

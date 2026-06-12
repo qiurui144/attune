@@ -30,6 +30,14 @@
 - **PDF 解析回归保障**:新增 4 篇确定性 PDF fixture(中/英/混合文本层 + 图片层扫描件)
   + 集成测试,钉死 `pdf_extract` 文本层提取与 `needs_ocr` 路由(`tests/pdf_ingest_test.rs`,
   生成器 `scripts/gen-pdf-fixtures.py`)。
+- **S8 动态模型源 — OCR/layout 接入 + 选源缓存补全(ModelStack spec §12)**:此前仅
+  embedding/reranker/ASR 走 S8 候选注册表 + 健康探测 + failover,**OCR(PP-OCRv5)/ layout
+  (CDLA PicoDet)仍硬连静态 `HF_ENDPOINT`** —— CN 用户 OCR 模型下载打不可靠 HF 且无 failover。
+  本期把 OCR/layout 下载也接进 `download_with_failover`(`SWHL/RapidOCR` / `Desperado-JT/*` 在
+  ModelScope 无覆盖 → selector 自动跳过,改走 company-mirror / hf-mirror / HF)。同时把此前
+  **死代码**的选定源缓存(`SelectedSource` 读写 + TTL 新鲜度)真正接进解析路径:进程内 2×2 桶
+  (region × coverage-class)缓存 failover 顺序,fresh 命中跳过重探(首源黑洞时省去每源 connect
+  超时叠加到首搜延迟);解锁时从持久化选定源 seed,下载后回填 winning source 供下次冷启动复用。
 
 ### Breaking
 - **无对外 API / 数据格式破坏性变更**。隐私出网门、锁序、分词链均为运行期行为修复;

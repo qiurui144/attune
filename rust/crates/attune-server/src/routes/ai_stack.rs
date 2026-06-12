@@ -127,6 +127,7 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
     let asr_ggml = attune_core::platform::ModelRecommendation::for_tier(tier)
         .map(|r| r.asr_ggml.to_string());
 
+    let state_for_persist = state.clone();
     tokio::spawn(async move {
         // OCR：~16MB，缺失才拉。失败不 panic，仅 log（§4.5 graceful）。
         let ocr = tokio::task::spawn_blocking(
@@ -148,6 +149,21 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
                 Ok(Ok(path)) => tracing::info!("ai-stack ensure: ASR model ready at {}", path.display()),
                 Ok(Err(e)) => tracing::warn!("ai-stack ensure: ASR download failed: {e}"),
                 Err(e) => tracing::warn!("ai-stack ensure: ASR task join error: {e}"),
+            }
+        }
+        // S8 cache: persist the source the resolver just selected so the next cold start
+        // seeds it (makes write_selected_source/persist_used_source live, not dead code).
+        // vault guard taken alone — respects lock ordering.
+        if let Some(src_id) = attune_core::infer::model_source::current_top_source_id() {
+            let vault_guard = state_for_persist.vault.lock().unwrap_or_else(|e| e.into_inner());
+            let cur = vault_guard.store().get_meta("app_settings").ok().flatten()
+                .and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            let updated = attune_core::infer::model_source::persist_used_source(cur, &src_id);
+            if let Ok(bytes) = serde_json::to_vec(&updated) {
+                if let Err(e) = vault_guard.store().set_meta("app_settings", &bytes) {
+                    tracing::warn!("ai-stack ensure: persist selected source failed: {e}");
+                }
             }
         }
     });

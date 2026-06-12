@@ -57,22 +57,49 @@ impl PpOcrProvider {
         need.iter().all(|f| d.join(f).exists())
     }
 
+    /// HF repo id used for PP-OCR ONNX 模型 (RapidOCR 镜像)。S8 source selector 的 coverage
+    /// 判定 + failover key —— ModelScope 非全镜像(无 RapidOCR) → selector 自动跳过,改走
+    /// company-mirror / hf-mirror / HF 官方。
+    pub(crate) const RAPIDOCR_REPO: &'static str = "SWHL/RapidOCR";
+
+    /// 3 个 PP-OCR ONNX (RapidOCR repo 内子路径, 本地落盘名, 描述)。
+    pub(crate) const ONNX_DOWNLOADS: &'static [(&'static str, &'static str, &'static str)] = &[
+        (
+            "PP-OCRv4/ch_PP-OCRv4_det_infer.onnx",
+            "ch_PP-OCRv5_det_mobile.onnx",
+            "~5 MB det (PP-OCRv4)",
+        ),
+        (
+            "PP-OCRv1/ch_ppocr_mobile_v2.0_cls_infer.onnx",
+            "ch_ppocr_mobile_v2.0_cls.onnx",
+            "~1 MB cls",
+        ),
+        (
+            "PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx",
+            "ch_PP-OCRv5_rec_mobile.onnx",
+            "~10 MB rec (PP-OCRv4)",
+        ),
+    ];
+
     /// 一键化部署: 模型缺失时**自动下载**（任何部署方式 — deb/cargo/源码 都生效）。
     ///
     /// 替代 postinst.sh 单一渠道下载的限制。AMD 等 cargo binary 部署的 server 启动
     /// 即可触发模型下载，避免用户手动 apt install --reinstall.
     ///
-    /// 数据源 (与 postinst.sh 一致):
-    /// - 3 ONNX from HuggingFace SWHL/RapidOCR (~16 MB)
-    /// - 字典 from PaddlePaddle GitHub (6627 chars + # / space wrap)
+    /// 数据源:
     ///
-    /// HF_ENDPOINT 环境变量支持 (e.g. hf-mirror.com 国内镜像).
+    /// 3 ONNX from `SWHL/RapidOCR` (~16 MB) —— 经 **S8 动态源选择**(候选注册表 + 健康探测 +
+    /// failover)解析下载源,替代旧的静态单 `HF_ENDPOINT`。CN 用户 HF 不可达时自动切
+    /// company-mirror / hf-mirror。RapidOCR 在 ModelScope 无覆盖 → selector 自动跳过。
+    ///
+    /// 字典 from PaddlePaddle GitHub (6627 chars + # / space wrap) —— GitHub raw 非 HF resolve
+    /// 源,不在 S8 注册表内,保留直连(小文本文件)。
     pub fn ensure_models_downloaded() -> Result<()> {
         if Self::models_present() {
             return Ok(());
         }
         // 离线模式: 缺模型时禁止网络下载, 立即 Err → graceful degrade(OCR 引擎不可用)。
-        // ppocr 走自有 reqwest download_file(不经 model_store), 故须在此独立检查 offline 守卫,
+        // ppocr 走自有 download, 故须在此独立检查 offline 守卫,
         // 否则 HF_HUB_OFFLINE=1 对 OCR 路径无效(对抗复核 I1)。
         if crate::infer::model_store::hf_hub_offline() {
             return Err(VaultError::ModelLoad(
@@ -85,39 +112,10 @@ impl PpOcrProvider {
         })?;
         log::info!("PP-OCR: models missing, auto-downloading (~16 MB)...");
 
-        // HF endpoint (支持国内镜像)
-        let hf_endpoint = std::env::var("HF_ENDPOINT")
-            .unwrap_or_else(|_| "https://huggingface.co".to_string());
-        let rapidocr_base = format!("{}/SWHL/RapidOCR/resolve/main", hf_endpoint.trim_end_matches('/'));
-
-        let downloads: &[(&str, &str, &str)] = &[
-            (
-                "PP-OCRv4/ch_PP-OCRv4_det_infer.onnx",
-                "ch_PP-OCRv5_det_mobile.onnx",
-                "~5 MB det (PP-OCRv4)",
-            ),
-            (
-                "PP-OCRv1/ch_ppocr_mobile_v2.0_cls_infer.onnx",
-                "ch_ppocr_mobile_v2.0_cls.onnx",
-                "~1 MB cls",
-            ),
-            (
-                "PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx",
-                "ch_PP-OCRv5_rec_mobile.onnx",
-                "~10 MB rec (PP-OCRv4)",
-            ),
-        ];
-
-        for (src_path, dst_name, desc) in downloads {
-            let dst = d.join(dst_name);
-            if dst.exists() {
-                log::info!("  PP-OCR: {} already present", dst_name);
-                continue;
-            }
-            let url = format!("{}/{}", rapidocr_base, src_path);
-            log::info!("  PP-OCR: downloading {dst_name} ({desc}) from {url}");
-            download_file(&url, &dst)?;
-        }
+        // S8: 解析 failover 顺序 (RapidOCR repo) —— 探测只在此显式下载路径(非请求路径,R3)。
+        let sources =
+            crate::infer::model_source::resolve_sources_for(Self::RAPIDOCR_REPO);
+        download_onnx_models(&sources, &d)?;
 
         // 字典 (需 # prefix + ' ' suffix 满足 kreuzberg-paddle-ocr CTC blank 格式)
         let dict_path = d.join("ppocr_keys_v1.txt");
@@ -195,7 +193,35 @@ fn num_cpus_safe() -> usize {
         .unwrap_or(4)
 }
 
-/// 同步下载 URL 到目标路径 (一键化部署用 — 替代 postinst.sh curl)。
+/// 经 S8 failover 顺序下载 3 个 PP-OCR ONNX 到 `dir`。逐文件按给定 `sources` 失败切次优
+/// (复用 `model_source::download_with_failover`);任一文件全源失败即 `Err`。`sources` 由
+/// `resolve_sources_for(RAPIDOCR_REPO)` 提供,测试可注入固定 mock 源列表绕过网络探测。
+///
+/// 注: ONNX repo 内子路径 (`PP-OCRv4/...`) 作为 `download_with_failover` 的 `filename` 传入
+/// —— HF-resolve URL 拼成 `{endpoint}/SWHL/RapidOCR/resolve/main/PP-OCRv4/...`,与 hf-hub 约定一致。
+pub(crate) fn download_onnx_models(
+    sources: &[crate::infer::model_source::ModelSource],
+    dir: &std::path::Path,
+) -> Result<()> {
+    for (src_path, dst_name, desc) in PpOcrProvider::ONNX_DOWNLOADS {
+        let dst = dir.join(dst_name);
+        if dst.exists() {
+            log::info!("  PP-OCR: {} already present", dst_name);
+            continue;
+        }
+        log::info!("  PP-OCR: downloading {dst_name} ({desc}) via S8 source selection");
+        let used = crate::infer::model_source::download_with_failover(
+            sources,
+            PpOcrProvider::RAPIDOCR_REPO,
+            src_path,
+            &dst,
+        )?;
+        log::info!("  PP-OCR: {dst_name} downloaded via source '{used}'");
+    }
+    Ok(())
+}
+
+/// 同步下载 URL 到目标路径 (字典等 GitHub raw 非 HF 源用 — 替代 postinst.sh curl)。
 ///
 /// 用 reqwest blocking client (复用 attune-core 已有 reqwest 依赖, 不增加 dep)。
 /// connect_timeout(10s, 死源 connect 守卫)+ total timeout(600s, 兜传输中途 stall:
@@ -886,5 +912,103 @@ mod tests {
         ];
         let md = reconstruct_table_md(&blocks).unwrap();
         assert!(md.contains(r"A\|B"), "pipe in cell should be escaped");
+    }
+
+    // ── S8: OCR ONNX 下载经 source selector + failover ────────────────────────
+
+    use crate::infer::model_source::{ModelSource, SourceCoverage};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// RapidOCR repo 必须在内置注册表里被 Full 源覆盖、ModelScope 跳过(OnlyXenovaOnnx)。
+    /// 防回归:若有人误把 RapidOCR 标成 Xenova-only 或漏覆盖,OCR failover 会全空。
+    #[test]
+    fn rapidocr_repo_covered_by_full_sources_skips_modelscope() {
+        let srcs = crate::infer::model_source::builtin_sources();
+        let company = srcs.iter().find(|s| s.id == "company-mirror").unwrap();
+        let ms = srcs.iter().find(|s| s.id == "modelscope").unwrap();
+        assert!(
+            company.coverage.covers(PpOcrProvider::RAPIDOCR_REPO),
+            "company-mirror must cover RapidOCR"
+        );
+        assert!(
+            !ms.coverage.covers(PpOcrProvider::RAPIDOCR_REPO),
+            "ModelScope must NOT cover RapidOCR (selector skips it)"
+        );
+    }
+
+    /// mock HF-resolve 源:对任意请求返回 200 + body。处理 n 次连接后退出。
+    fn mock_source_ok(body: Vec<u8>, n: usize) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..n {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    fn full_src(id: &str, endpoint: &str, priority: u32) -> ModelSource {
+        ModelSource {
+            id: id.to_string(),
+            endpoint: endpoint.to_string(),
+            priority,
+            region_hint: None,
+            coverage: SourceCoverage::Full,
+        }
+    }
+
+    /// S8 核心:OCR ONNX 下载真的经 `download_with_failover` —— 首选黑洞,次优 mock OK,
+    /// 应自动 failover 到 mock 并把 3 个 ONNX 全部落盘。证明 OCR 不再裸连 HF_ENDPOINT。
+    #[test]
+    fn download_onnx_models_failover_to_healthy_source() {
+        // 3 个 ONNX 各发一次 GET → mock 需处理 3 次连接。
+        let (good, handle) = mock_source_ok(b"ONNX-MODEL-BYTES".to_vec(), 3);
+        let sources = vec![
+            full_src("dead", "http://127.0.0.1:1", 100), // 黑洞首选
+            full_src("good", &good, 50),                 // healthy 次优
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        download_onnx_models(&sources, dir.path()).expect("failover must succeed");
+        handle.join().unwrap();
+        // 3 个 ONNX 都落盘且内容是 mock 源的字节(证明走的是 selector 给的源,非 HF)。
+        for (_, dst_name, _) in PpOcrProvider::ONNX_DOWNLOADS {
+            let p = dir.path().join(dst_name);
+            assert!(p.exists(), "{dst_name} must be downloaded");
+            assert_eq!(std::fs::read(&p).unwrap(), b"ONNX-MODEL-BYTES");
+        }
+    }
+
+    /// 空源列表(全不可达/无覆盖)→ Err，不静默成功(graceful degrade，OCR 引擎不可用)。
+    #[test]
+    fn download_onnx_models_empty_sources_errs() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = download_onnx_models(&[], dir.path());
+        assert!(r.is_err(), "no eligible source → Err, not silent success");
+    }
+
+    /// 已存在的 ONNX 不重下(短路)；download 不发起任何网络请求即返回 Ok。
+    #[test]
+    fn download_onnx_models_skips_present_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for (_, dst_name, _) in PpOcrProvider::ONNX_DOWNLOADS {
+            std::fs::write(dir.path().join(dst_name), b"already-here").unwrap();
+        }
+        // 源全是黑洞;但文件已存在 → 不应触网 → Ok。
+        let sources = vec![full_src("dead", "http://127.0.0.1:1", 100)];
+        download_onnx_models(&sources, dir.path()).expect("present files → no download → Ok");
     }
 }
