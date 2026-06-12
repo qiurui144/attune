@@ -789,4 +789,116 @@ mod tests {
         assert!(used.starts_with("env:"), "must report env override, got {used}");
         assert_eq!(std::fs::read(&dst).unwrap(), b"VIA-ENV");
     }
+
+    // --- 属性测试(proptest ≥3,per spec §9 + Agent 验证铁律):选源/缓存对任意输入
+    //     不 panic、不变量恒成立。纯逻辑,无网络。 ---
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn arb_source()(
+            id in "[a-z]{1,8}",
+            priority in 1u32..200,
+            bps in 0.0f64..1e8,
+            reachable in any::<bool>(),
+            is_cn in any::<bool>(),
+            full in any::<bool>(),
+        ) -> (ModelSource, SourceHealth) {
+            let source = ModelSource {
+                id: id.clone(),
+                endpoint: format!("https://{id}.example"),
+                priority,
+                region_hint: if is_cn { Some(Region::China) } else { Some(Region::International) },
+                coverage: if full { SourceCoverage::Full } else { SourceCoverage::OnlyXenovaOnnx },
+            };
+            let health = SourceHealth {
+                source_id: id,
+                reachable,
+                throughput_bps: if reachable { bps } else { 0.0 },
+                latency_ms: if reachable { Some(10) } else { None },
+            };
+            (source, health)
+        }
+    }
+
+    proptest! {
+        // ① 任意源/health 组合:select 不 panic;输出只含 covered+reachable 源;
+        //    输出每项的排序键单调非增(failover 顺序合法)。
+        //    注:把生成的 source.id 用下标去重(probed 是 (source, health) 配对,id 唯一才能
+        //    在验证侧按 id 回查到**正确**那条 health;否则是测试 oracle 的二义,非选源逻辑 bug)。
+        #[test]
+        fn prop_select_never_panics_and_filters(
+            raw in prop::collection::vec(arb_source(), 0..12),
+            repo in prop_oneof!["Xenova/bge-m3", "ggerganov/whisper.cpp", "SWHL/RapidOCR"],
+            cn in any::<bool>(),
+        ) {
+            // 下标去重 id + 同步 health.source_id,保证 (source,health) 配对的 id 全局唯一。
+            let probed: Vec<(ModelSource, SourceHealth)> = raw
+                .into_iter()
+                .enumerate()
+                .map(|(i, (mut s, mut h))| {
+                    let uniq = format!("{}-{i}", s.id);
+                    s.id = uniq.clone();
+                    s.endpoint = format!("https://{uniq}.example");
+                    h.source_id = uniq;
+                    (s, h)
+                })
+                .collect();
+            let region = if cn { Region::China } else { Region::International };
+            let order = select_failover_order(&probed, &repo, region);
+            // 输出只含 covered + reachable 的源
+            for s in &order {
+                prop_assert!(s.coverage.covers(&repo), "uncovered source leaked into order");
+                let h = probed.iter().find(|(src, _)| src.id == s.id).map(|(_, h)| h);
+                prop_assert!(h.map(|h| h.reachable).unwrap_or(false), "unreachable leaked");
+            }
+            // 输出数量 ≤ 输入
+            prop_assert!(order.len() <= probed.len());
+            // 排序键单调非增(降序)
+            let score = |s: &ModelSource| -> f64 {
+                let h = probed.iter().find(|(src,_)| src.id == s.id).map(|(_,h)| h.throughput_bps).unwrap_or(0.0);
+                let bias = if s.region_hint == Some(region) { REGION_MATCH_BIAS } else { 1.0 };
+                h * s.priority as f64 * bias
+            };
+            for w in order.windows(2) {
+                prop_assert!(score(&w[0]) >= score(&w[1]), "order not descending by score");
+            }
+        }
+
+        // ② read_selected_source 对任意 JSON 不 panic(garbage in → None/Some,never crash)。
+        #[test]
+        fn prop_read_selected_never_panics(
+            sid in ".*",
+            ep in ".*",
+            ts in any::<u64>(),
+            wrap in any::<bool>(),
+        ) {
+            let node = if wrap {
+                serde_json::json!({"source_id": sid, "endpoint": ep, "probed_at_unix": ts})
+            } else {
+                serde_json::json!(sid) // 非对象 garbage
+            };
+            let settings = serde_json::json!({"model_source": node, "other": 1});
+            // 不 panic 即通过;合法 schema 时读回字段一致。
+            if let Some(sel) = read_selected_source(&settings) {
+                prop_assert_eq!(sel.probed_at_unix, ts);
+            }
+        }
+
+        // ③ write→read 缓存幂等:任意合法 SelectedSource 写入再读出字段不变,且不破坏 sibling key。
+        #[test]
+        fn prop_selected_source_write_read_roundtrip(
+            sid in "[a-z]{1,10}",
+            ep in "https://[a-z]{1,10}\\.example",
+            ts in any::<u64>(),
+        ) {
+            let sel = SelectedSource { source_id: sid.clone(), endpoint: ep.clone(), probed_at_unix: ts };
+            let settings = serde_json::json!({"sibling": "keep-me"});
+            let out = write_selected_source(settings, &sel);
+            prop_assert_eq!(&out["sibling"], "keep-me");
+            let back = read_selected_source(&out).expect("must roundtrip");
+            prop_assert_eq!(back.source_id, sid);
+            prop_assert_eq!(back.endpoint, ep);
+            prop_assert_eq!(back.probed_at_unix, ts);
+        }
+    }
 }
