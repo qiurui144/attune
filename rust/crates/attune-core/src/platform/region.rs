@@ -12,8 +12,8 @@
 //!   - ❌ ASR(`ggerganov/whisper.cpp`)/ OCR(`SWHL/RapidOCR`)— ModelScope 无(404)
 //!
 //! 注:本 `Region::hf_endpoint()` 现仅作启动期 `HF_ENDPOINT` env 的**静态默认**(state.rs)
-//! + 显式覆盖逃生门。模型**下载**已升级到 S8 动态多源选择(`infer::model_source`:候选注册表
-//! company-mirror > ModelScope > hf-mirror > HF + 健康探测 + failover),对 ModelScope
+//! 加显式覆盖逃生门。模型**下载**已升级到 S8 动态多源选择(`infer::model_source`:候选注册表
+//! company-mirror > ModelScope > hf-mirror > HF 加健康探测 + failover),对 ModelScope
 //! 无覆盖的 whisper/PP-OCR 自动跳过改走 company-mirror/HF,不再 404 degrade
 //! (spec docs/superpowers/specs/2026-06-11-modelstack-lifecycle.md §12;company-mirror
 //! host 归 cloud R2.E)。

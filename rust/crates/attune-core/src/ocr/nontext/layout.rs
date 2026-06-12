@@ -104,11 +104,18 @@ pub fn default_model_path() -> PathBuf {
         .join("layout.onnx")
 }
 
+/// HF repo + 文件名 for layout PicoDet。S8 source selector coverage key —— `Desperado-JT/*`
+/// 非 `Xenova/*` → ModelScope(OnlyXenovaOnnx)自动跳过,改走 company-mirror / hf-mirror / HF。
+pub(crate) const LAYOUT_REPO: &str = "Desperado-JT/RapidLayout-PP-Structure";
+pub(crate) const LAYOUT_FILE: &str = "layout_cdla.onnx";
+
 /// One-shot deployment: download the layout ONNX if absent (mirrors PpOcr's auto-download
 /// so any deploy path — deb / cargo / source — gets a functional layout engine).
 ///
-/// Source: `Desperado-JT/RapidLayout-PP-Structure` (Apache-2.0). `HF_ENDPOINT` env honored
-/// for mirrors (e.g. hf-mirror.com). Atomic write via .tmp rename. No-op when already present.
+/// Source: `Desperado-JT/RapidLayout-PP-Structure` (Apache-2.0), resolved via **S8 dynamic
+/// source selection** (candidate registry + health probe + failover) instead of a static
+/// `HF_ENDPOINT` —— CN users where HF is unreachable fail over to company-mirror / hf-mirror.
+/// Atomic write via .part rename (inside `download_with_failover`). No-op when already present.
 pub fn ensure_model_downloaded() -> Result<()> {
     let dst = default_model_path();
     if dst.exists() {
@@ -125,41 +132,16 @@ pub fn ensure_model_downloaded() -> Result<()> {
     })?;
     std::fs::create_dir_all(dir)
         .map_err(|e| VaultError::ModelLoad(format!("create layout dir {}: {e}", dir.display())))?;
-    let hf = std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string());
-    let url = format!(
-        "{}/Desperado-JT/RapidLayout-PP-Structure/resolve/main/layout_cdla.onnx",
-        hf.trim_end_matches('/')
-    );
-    log::info!("layout: model missing, auto-downloading CDLA PicoDet (~7 MB) from {url}");
-    let tmp = dst.with_extension("onnx.tmp");
-    // S1/C1: connect_timeout(死源 connect 守卫)+ total timeout(600s, 兜传输中途 stall;
-    // reqwest blocking 无 read_timeout)替代裸 .timeout(180s) —— 180s 偏紧但本就有界;
-    // 统一为 600s 与其它下载点对齐, 死源仍有界失败不永久 hang。
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|e| VaultError::ModelLoad(format!("build http client: {e}")))?;
-    let mut resp = client
-        .get(&url)
-        .send()
-        .map_err(|e| VaultError::ModelLoad(format!("download GET {url}: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(VaultError::ModelLoad(format!(
-            "download {url} returned status {}",
-            resp.status()
-        )));
-    }
-    let mut out = std::fs::File::create(&tmp)
-        .map_err(|e| VaultError::ModelLoad(format!("create tmp {}: {e}", tmp.display())))?;
-    resp.copy_to(&mut out)
-        .map_err(|e| VaultError::ModelLoad(format!("copy_to {}: {e}", tmp.display())))?;
-    drop(out);
-    std::fs::rename(&tmp, &dst).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        VaultError::ModelLoad(format!("rename {} -> {}: {e}", tmp.display(), dst.display()))
-    })?;
-    log::info!("layout: model downloaded ✓ {}", dst.display());
+    log::info!("layout: model missing, auto-downloading CDLA PicoDet (~7 MB) via S8 source selection");
+    // S8: 解析 failover 顺序 + 逐源下载 —— 探测只在此显式下载路径(非请求路径,R3)。
+    let sources = crate::infer::model_source::resolve_sources_for(LAYOUT_REPO);
+    let used = crate::infer::model_source::download_with_failover(
+        &sources,
+        LAYOUT_REPO,
+        LAYOUT_FILE,
+        &dst,
+    )?;
+    log::info!("layout: model downloaded ✓ {} via source '{used}'", dst.display());
     Ok(())
 }
 
@@ -387,6 +369,17 @@ mod tests {
         let got =
             probe_session_buildable(&PathBuf::from("/definitely/missing/layout.onnx")).unwrap();
         assert!(!got, "missing model → Ok(false), never Err");
+    }
+
+    /// S8 regression: layout repo (`Desperado-JT/*`) must be covered by Full sources and
+    /// skipped by ModelScope (OnlyXenovaOnnx) — else layout failover order is empty.
+    #[test]
+    fn layout_repo_covered_by_full_skips_modelscope() {
+        let srcs = crate::infer::model_source::builtin_sources();
+        let company = srcs.iter().find(|s| s.id == "company-mirror").unwrap();
+        let ms = srcs.iter().find(|s| s.id == "modelscope").unwrap();
+        assert!(company.coverage.covers(LAYOUT_REPO), "company-mirror must cover layout repo");
+        assert!(!ms.coverage.covers(LAYOUT_REPO), "ModelScope must NOT cover layout repo");
     }
 
     #[test]
