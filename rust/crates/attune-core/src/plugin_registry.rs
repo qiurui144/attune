@@ -1315,6 +1315,26 @@ chat_trigger:
         assert_eq!(reg.plugin_trust("u2"), Some(crate::plugin_sig::Trust::Unsigned));
     }
 
+    /// T12 §10 grandfather regression: an already-installed UNSIGNED plugin must still
+    /// LOAD after the trust-chain upgrade when trust_mode = warn (the default), carrying
+    /// the real Trust::Unsigned (yellow-badge) metadata — existing users are NOT broken
+    /// by the new signature enforcement. (Strict would reject it; warn grandfathers it.)
+    #[test]
+    fn grandfather_unsigned_loads_in_warn() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(tmp.path(), "legacy-unsigned", "id: legacy-unsigned\nname: Legacy\ntype: industry\nversion: \"1.0.0\"\n");
+        let (reg, _errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            crate::plugin_sig::TrustMode::Warn,
+            &[],
+            &[],
+        )
+        .unwrap();
+        // Loaded (grandfathered) AND labelled with the real unsigned trust (yellow badge).
+        assert!(reg.get_plugin("legacy-unsigned").is_some(), "warn must grandfather an unsigned plugin");
+        assert_eq!(reg.plugin_trust("legacy-unsigned"), Some(crate::plugin_sig::Trust::Unsigned));
+    }
+
     #[test]
     fn whitelisted_pubkey_yields_thirdparty_trust() {
         // A user-whitelisted (non-official) signer → Trust::ThirdParty (real verify).

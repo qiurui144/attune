@@ -692,6 +692,25 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(store.count_agent_state().unwrap(), 2);
+            // T12 / ACP-6 §9 regression 2: the user's entitlement cache row is ALSO
+            // user-accumulated state in the vault DB — it must survive plugin upgrade
+            // (it lives in plugin_entitlements, not under plugins/<id>/).
+            store
+                .upsert_entitlement(
+                    &dek,
+                    &crate::store::plugin_entitlements::EntitlementRow {
+                        plugin_id: "law-pro".into(),
+                        license_id: "lic-xyz".into(),
+                        tier: "paid".into(),
+                        status: "active".into(),
+                        trial_expires: None,
+                        signing_pubkey_hex: crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0].into(),
+                        last_verified_at: "2026-06-12T00:00:00+00:00".into(),
+                        grace_started_at: None,
+                        updated_at: "2026-06-12T00:00:00+00:00".into(),
+                    },
+                )
+                .unwrap();
         }
 
         // Install law-pro v1.0.5, then "upgrade" to v1.0.6 (overwrite plugin dir).
@@ -717,6 +736,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.payload, b"user-learned-terms");
+
+        // ACP-6 §9 regression 2 (T12): the entitlement cache row survives the upgrade
+        // intact — a paid user is NOT silently downgraded by reinstalling a newer pack.
+        let ent = store
+            .get_entitlement(&dek, "law-pro")
+            .unwrap()
+            .expect("entitlement row must survive plugin upgrade");
+        assert_eq!(ent.status, "active");
+        assert_eq!(ent.tier, "paid");
+        assert_eq!(ent.license_id, "lic-xyz");
     }
 
     // ── B5 (2026-06-06): best-effort auto-install on membership login ──────────

@@ -319,6 +319,29 @@ mod tests {
         );
     }
 
+    /// T12 bootstrap regression (§0.3 / §10): an OLD cloud that does not yet sign the
+    /// verify response → a NEW client in the DEFAULT warn mode must TOLERATE it (not
+    /// break the network) so the client can ship before cloud v4. Driven through the
+    /// full `authorize_snapshot_fresh` path (SEC-1 + SEC-2) to lock the cross-repo
+    /// decoupling: unsigned + warn → AuthorizedWithWarning, never Unauthorized.
+    #[test]
+    fn warn_tolerates_unsigned_verify_response() {
+        let json = r#"{"valid": true, "plan": "pro"}"#; // old cloud: no signature/payload
+        let snap: EntitlementSnapshot = serde_json::from_str(json).unwrap();
+        let now = chrono::Utc::now();
+        let auth = authorize_snapshot_fresh(&snap, TrustMode::Warn, &[], "any-nonce", None, &now);
+        assert!(
+            matches!(auth, SnapshotAuthorization::AuthorizedWithWarning(_)),
+            "warn client must tolerate an unsigned old-cloud response (cross-repo bootstrap)"
+        );
+        // And the same response in strict is rejected — the two-repo release order is
+        // bridged ONLY by warn grandfather, never by silently accepting in strict.
+        assert!(matches!(
+            authorize_snapshot_fresh(&snap, TrustMode::Strict, &[], "any-nonce", None, &now),
+            SnapshotAuthorization::Unauthorized(_)
+        ));
+    }
+
     #[test]
     fn entitlement_anchor_independent_from_plugin_anchor() {
         // 私钥隔离 / 无 split-brain: entitlement anchor 中没有任何元素是 plugin 信任根

@@ -818,6 +818,48 @@ mod tests {
         assert!(s.valid);
     }
 
+    // ── T12: backward-compat matrix (§10) ───────────────────────────────────
+
+    /// old_client_new_cloud (§10): a new cloud only ADDS fields to the verify response;
+    /// an older client's serde must ignore the unknown additions and parse the core
+    /// contract unchanged (no breaking). The v1 snapshot already carries future-shaped
+    /// extras; here we additionally inject brand-new top-level keys a future cloud might
+    /// add and assert the existing fields still parse.
+    #[test]
+    fn old_client_new_cloud() {
+        let json = r#"{
+            "valid": true, "plan": "pro", "entitlement_schema": 1,
+            "nonce": "n", "next_verify_after_hours": 12,
+            "signed_payload": {"status":"active","allowed_plugins":["law-pro"],"nonce":"n","verified_at":"2026-06-12T00:00:00+00:00"},
+            "signature": "sig",
+            "entitlements": [{"plugin_id":"law-pro","tier":"paid","status":"active"}],
+            "seat_count_v2": 5, "grace_policy_v3": {"days": 14}, "telemetry_opt": false
+        }"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).expect("old client tolerates new cloud fields");
+        // Core contract still parses correctly despite the unknown additions.
+        assert!(s.valid);
+        assert_eq!(s.schema(), 1);
+        assert_eq!(s.signed_payload.as_ref().unwrap().status, "active");
+        assert_eq!(s.next_verify_after_hours, Some(12));
+        assert!(!s.is_unsigned_response());
+    }
+
+    /// new_client_old_cloud (§10 G1 补写): a NEW client talking to an OLD cloud that does
+    /// not yet sign / does not send `entitlements` → schema 0. The client must classify
+    /// this as schema 0 (unsigned) so a paid user is routed to GRACE (fail-open), NOT
+    /// fail-closed. We assert the parse + schema-0 classification that drives that policy.
+    #[test]
+    fn new_client_old_cloud() {
+        // Old cloud: paid user, but no entitlements array and no signature.
+        let json = r#"{"valid": true, "plan": "pro"}"#;
+        let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(s.schema(), 0, "old cloud (no entitlements) → schema 0");
+        assert!(s.is_unsigned_response(), "old cloud unsigned → grace, not fail-closed");
+        // schema 0 is the signal the consume layer uses to keep a paid license in Grace
+        // (spec §10: do NOT lock a paying user just because the cloud hasn't shipped v4).
+        assert!(s.valid, "the paid plan is still surfaced — caller keeps it in grace");
+    }
+
     /// JCS canonical 序列化:确定性 (同输入同字节) + 键排序 + 无空白。
     #[test]
     fn signed_payload_canonical_byte_equal_roundtrip() {

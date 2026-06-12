@@ -261,12 +261,18 @@ fn agent_runner_unknown_agent_errors() {
     assert!(result.is_err());
 }
 
-/// scan_with_key 装载加密 paid plugin
+/// scan_with_key 装载加密 paid plugin。
+///
+/// T9/T12 regression rewrite: the trust chain now runs REAL signature verification
+/// (the old hardcoded trust label is gone). A paid plugin therefore must be signed by
+/// a trusted key — an UNSIGNED encrypted paid plugin is correctly rejected by the
+/// pricing↔trust linkage (`validate_trust_for_pricing`: paid ⇒ Official|ThirdParty).
+/// This test now asserts BOTH the new reject path AND the legitimate signed-load path.
 #[test]
 fn registry_scan_with_key_loads_encrypted_paid_plugin() {
-    let tmp = TempDir::new().expect("tmp");
+    use attune_core::plugin_sig::{derive_verifying_key_hex, generate_signing_key, sign_plugin};
 
-    // 写一个加密 paid plugin
+    let tmp = TempDir::new().expect("tmp");
     let p = tmp.path().join("law-pro");
     fs::create_dir_all(&p).expect("mkdir");
     let key = b"device-license-key";
@@ -279,13 +285,32 @@ fn registry_scan_with_key_loads_encrypted_paid_plugin() {
     assert!(!errs.is_empty());
     assert!(errs[0].contains("encrypted plugin") || errs[0].contains("decrypt_key"));
 
-    // scan_with_key() 提供 key → 装载成功
+    // scan_with_key() 提供 key 但插件 UNSIGNED → paid+Unsigned 被 pricing↔trust 拒载
+    // (T9 杀掉硬编码 Trusted 后的新安全不变量,非 bug)。
     let (reg, errs) = PluginRegistry::scan_with_key(tmp.path(), Some(key)).expect("scan");
-    assert_eq!(reg.plugins().count(), 1);
+    assert_eq!(reg.plugins().count(), 0, "unsigned paid plugin must be rejected (paid ⇒ signed)");
+    assert!(!errs.is_empty(), "rejection surfaced in errors");
+
+    // 合法路径:对插件签名(签名作用于 plaintext plugin.yaml 的 digest),把签名公钥
+    // 加入白名单 → 验签为 ThirdParty → 通过 pricing↔trust → scan_with_trust 装载成功。
+    // (真实分发的 signed+encrypted plugin 同时带 plugin.yaml.enc + plugin.sig。)
+    fs::write(p.join("plugin.yaml"), PAID_PLUGIN_YAML).expect("write plaintext for signing");
+    let sk = generate_signing_key();
+    sign_plugin(&p, &sk).expect("sign");
+    let pubkey_hex = derive_verifying_key_hex(&sk);
+    let (reg, errs) = PluginRegistry::scan_with_trust(
+        tmp.path(),
+        Some(key),
+        attune_core::plugin_sig::TrustMode::Strict,
+        &[pubkey_hex],
+    )
+    .expect("scan");
+    assert_eq!(reg.plugins().count(), 1, "signed (whitelisted ThirdParty) paid plugin loads");
     assert!(errs.is_empty(), "errors: {errs:?}");
     let p = reg.plugins().next().unwrap();
     assert_eq!(p.manifest.id, "law-pro");
     assert_eq!(p.manifest.agents.len(), 1);
+    assert_eq!(reg.plugin_trust("law-pro"), Some(Trust::ThirdParty));
 }
 
 /// agent_runner subprocess env 传递测试。
