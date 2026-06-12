@@ -3,6 +3,7 @@ pub mod error;
 pub mod eval;
 pub mod routes;
 pub mod state;
+pub(crate) mod job_worker;
 pub(crate) mod middleware;
 pub(crate) mod ingest_webdav;
 pub(crate) mod ingest_email;
@@ -127,6 +128,12 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
                 .delete(routes::office::delete_job))
         .route("/api/v1/office/jobs/ws",
             get(routes::office::ws_jobs))
+        // G5 durable job queue — 管理面板 (list / cancel / requeue)
+        .route("/api/v1/jobs", get(routes::jobs::list_jobs))
+        .route("/api/v1/jobs/{id}/cancel",
+            axum::routing::post(routes::jobs::cancel_job))
+        .route("/api/v1/jobs/{id}/requeue",
+            axum::routing::post(routes::jobs::requeue_job))
         // Folder links — 只读 (写入由 attune-cli link-folder)
         .route("/api/v1/folder-links", get(routes::folder_links::list_folder_links))
         // 批注（annotations）CRUD — 所有调用都是用户显式操作，不在建库流水线里自动触发
@@ -406,6 +413,12 @@ pub async fn run_in_runtime(
     // audit-C "usage recorder NOT wired" gap). Telemetry-only; failure degrades
     // gracefully without affecting request handling.
     let _usage_flusher = shared_state.install_usage_aggregator();
+    // G5 — durable job queue: open the store handle (Store::open already ran
+    // recover_on_boot → interrupted ASR jobs requeue instead of vanishing), then
+    // start the background drain worker. Failure degrades gracefully: office ASR
+    // routes return 503 job-store-unavailable, everything else unaffected.
+    shared_state.install_job_store();
+    job_worker::start_job_worker(shared_state.clone());
     let app = build_router(shared_state);
 
     let is_loopback = {
