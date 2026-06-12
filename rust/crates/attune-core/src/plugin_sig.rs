@@ -36,17 +36,16 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// 官方公钥列表（内嵌二进制）。首次发布前此数组为空 —— 无官方插件可通过严格校验。
-/// PluginHub 上线前默认使用 `verify_loose` 不拦截未签名/无匹配公钥的插件。
+/// 官方公钥列表（内嵌二进制）= 单一信任根 SSOT（G1 闭合，决策 1）。
+///
+/// **不在此重复硬编码官方锚 hash** —— 那会变成"第二份信任根"（split-brain）。
+/// 此 const 是 [`crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS`] 的**别名**（零拷贝），
+/// 后者已是 fail-closed + `MAX_ANCHORS` + 64-hex 格式校验的唯一守卫。
+/// `verify_loose` 用此列表激活 `Trust::Official` 路径。
 ///
 /// 每个公钥是 32-byte Ed25519 verifying key 的 **hex** 形式。
-/// 生成：`openssl genpkey -algorithm ED25519 -out attune-priv.pem`
-///       `openssl pkey -in attune-priv.pem -pubout -outform DER | tail -c 32 | xxd -p`
-pub const OFFICIAL_PUBLIC_KEYS: &[&str] = &[
-    // 首批官方公钥待生成后填入
-    // 示例格式（勿上线使用）：
-    // "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-];
+/// 轮转 / 吊销机制全在 `plugin_anchor`（dual-anchor 窗口，≤ 3）。
+pub const OFFICIAL_PUBLIC_KEYS: &[&str] = crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS;
 
 /// 插件信任等级
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,8 +68,8 @@ pub struct VerifyResult {
 /// 宽松校验：无签名 / 签名无效都返回 `Unsigned` 不 panic。
 /// 生产切 strict 前，`is_allowed()` 决定是否加载。
 ///
-/// 内嵌的 `OFFICIAL_PUBLIC_KEYS` 当前为空 —— 任何插件都判 `Unsigned`（首发前无
-/// 官方密钥）。PluginHub 上线后填入官方公钥即激活 `Trust::Official` 路径。
+/// 内嵌的 `OFFICIAL_PUBLIC_KEYS` = `plugin_anchor::OFFICIAL_PLUGIN_ANCHORS`（单一信任根
+/// SSOT，非空）。官方私钥签名的插件 → `Trust::Official`；其余 → `Trust::Unsigned`。
 pub fn verify_loose(plugin_dir: &Path) -> Result<VerifyResult> {
     verify_against_keys(plugin_dir, OFFICIAL_PUBLIC_KEYS)
 }
@@ -498,19 +497,58 @@ mod tests {
         assert!(verify_strict_against_keys(dir.path(), official_keys).is_err());
     }
 
-    /// The production constant is empty (no official keys shipped yet) — guards
-    /// against accidentally committing a real key, and documents that verify_loose
-    /// yields Unsigned by default.
+    /// G1 closure (spec §5.3 / §9 regression 1): the official-key list is the
+    /// single anchor SSOT and is non-empty, pinned to the law-pro publisher anchor.
     #[test]
-    fn production_official_keys_empty_so_verify_loose_is_unsigned() {
-        let dir = make_plugin_dir("id: x\n", Some("# p"));
-        let sk_bytes = generate_signing_key();
-        sign_plugin(dir.path(), &sk_bytes).expect("sign");
-        // verify_loose uses the real (empty) OFFICIAL_PUBLIC_KEYS.
-        assert!(OFFICIAL_PUBLIC_KEYS.is_empty(), "no official keys should be committed pre-launch");
-        let r = verify_loose(dir.path()).unwrap();
-        assert_eq!(r.trust, Trust::Unsigned);
-        // And verify_strict (real keys) hard-rejects everything pre-launch.
-        assert!(verify_strict(dir.path()).is_err());
+    fn official_keys_nonempty_anchor_pinned() {
+        assert!(
+            !OFFICIAL_PUBLIC_KEYS.is_empty(),
+            "official key list must be non-empty (G1: verify_loose can yield Official)"
+        );
+        // SSOT: identical to the single plugin trust root, no second copy. The
+        // literal anchor hash lives ONLY in plugin_anchor (decision 1) — we assert
+        // against it by reference, never by re-stating the hash in this file.
+        assert_eq!(
+            OFFICIAL_PUBLIC_KEYS,
+            crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS,
+            "OFFICIAL_PUBLIC_KEYS must be the plugin_anchor SSOT alias, not a second root"
+        );
+        assert!(
+            crate::plugin_anchor::is_official_anchor(OFFICIAL_PUBLIC_KEYS[0]),
+            "anchor[0] must be the pinned law-pro publisher key (per plugin_anchor SSOT)"
+        );
+    }
+
+    /// An anchor private key produces `Trust::Official` via `verify_loose`'s key
+    /// set; a non-anchor key yields `Unsigned`. We exercise the real wiring by
+    /// asserting the official key set used by verify_loose equals the anchors,
+    /// then run the verify kernel against that exact set (we cannot hold the real
+    /// anchor private key, so we prove the routing with the injectable kernel).
+    #[test]
+    fn official_signed_plugin_verifies_official() {
+        let dir = make_plugin_dir("id: official-anchor\n", Some("# p"));
+        // A signer whose pubkey we treat as the official set (mirrors anchor wiring).
+        let signer = generate_signing_key();
+        let signer_pk = derive_verifying_key_hex(&signer);
+        sign_plugin(dir.path(), &signer).expect("sign");
+
+        // anchor private key signs → Official
+        let official_keys: &[&str] = &[signer_pk.as_str()];
+        assert_eq!(
+            verify_against_keys(dir.path(), official_keys).unwrap().trust,
+            Trust::Official
+        );
+
+        // a different (non-anchor) key never yields Official
+        let outsider = derive_verifying_key_hex(&generate_signing_key());
+        let non_anchor: &[&str] = &[outsider.as_str()];
+        assert_eq!(
+            verify_against_keys(dir.path(), non_anchor).unwrap().trust,
+            Trust::Unsigned,
+            "non-anchor signer must not be promoted to Official"
+        );
+
+        // And verify_loose now routes through the (non-empty) anchor SSOT.
+        assert_eq!(OFFICIAL_PUBLIC_KEYS, crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS);
     }
 }
