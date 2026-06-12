@@ -12,6 +12,7 @@ use attune_core::agents::Agent;
 use attune_core::plugin_encryption::{decrypt_yaml, encrypt_yaml};
 use attune_core::plugin_loader::{LoadedPlugin, PluginManifest};
 use attune_core::plugin_registry::PluginRegistry;
+use attune_core::plugin_sig::Trust;
 use std::fs;
 use tempfile::TempDir;
 
@@ -76,7 +77,7 @@ fn encrypted_plugin_loads_with_correct_key() {
     let cipher = encrypt_yaml(PAID_PLUGIN_YAML.as_bytes(), key).expect("encrypt");
     fs::write(tmp.path().join("plugin.yaml.enc"), &cipher).expect("write");
 
-    let plugin = LoadedPlugin::from_dir_with_key(tmp.path(), Some(key), Some("Trusted"))
+    let plugin = LoadedPlugin::from_dir_with_key(tmp.path(), Some(key), Some(Trust::ThirdParty))
         .expect("load encrypted plugin");
     assert_eq!(plugin.manifest.id, "law-pro");
     assert_eq!(plugin.manifest.skills.len(), 1);
@@ -92,7 +93,7 @@ fn encrypted_plugin_fails_with_wrong_key() {
     fs::write(tmp.path().join("plugin.yaml.enc"), &cipher).expect("write");
 
     let result =
-        LoadedPlugin::from_dir_with_key(tmp.path(), Some(b"wrong-key"), Some("Trusted"));
+        LoadedPlugin::from_dir_with_key(tmp.path(), Some(b"wrong-key"), Some(Trust::ThirdParty));
     assert!(result.is_err());
 }
 
@@ -102,7 +103,7 @@ fn encrypted_plugin_fails_without_key() {
     let cipher = encrypt_yaml(PAID_PLUGIN_YAML.as_bytes(), b"key").expect("encrypt");
     fs::write(tmp.path().join("plugin.yaml.enc"), &cipher).expect("write");
 
-    let result = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some("Trusted"));
+    let result = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some(Trust::ThirdParty));
     assert!(result.is_err());
 }
 
@@ -111,7 +112,7 @@ fn paid_plugin_with_unsigned_trust_rejected() {
     let tmp = TempDir::new().expect("tmp");
     fs::write(tmp.path().join("plugin.yaml"), PAID_PLUGIN_YAML).expect("write");
 
-    let result = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some("Unsigned"));
+    let result = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some(Trust::Unsigned));
     assert!(result.is_err(), "paid plugin with Unsigned trust must reject");
     let msg = format!("{:?}", result.unwrap_err());
     assert!(msg.contains("paid/trial") || msg.contains("Trusted") || msg.contains("Official"));
@@ -129,7 +130,7 @@ pricing:
 "#;
     let tmp = TempDir::new().expect("tmp");
     fs::write(tmp.path().join("plugin.yaml"), yaml).expect("write");
-    let plugin = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some("Unsigned"))
+    let plugin = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some(Trust::Unsigned))
         .expect("free plugin loads with any trust");
     assert_eq!(plugin.manifest.id, "free-plugin");
 }

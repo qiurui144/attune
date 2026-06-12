@@ -155,10 +155,13 @@ fn list_installed_plugin_ids(plugins_dir: &std::path::Path) -> Result<std::colle
         if !path.is_dir() {
             continue;
         }
-        // 用 Trusted 装载 (绕开 paid/Unsigned 联动 — 用户已装)
-        if let Ok(plugin) =
-            crate::plugin_loader::LoadedPlugin::from_dir_with_key(&path, None, Some("Trusted"))
-        {
+        // 用 Trusted 装载 (绕开 paid/Unsigned 联动 — 用户已装)。
+        // T2 占位: 类型迁移为 Trust enum, 真验证在 T9 接入。
+        if let Ok(plugin) = crate::plugin_loader::LoadedPlugin::from_dir_with_key(
+            &path,
+            None,
+            Some(crate::plugin_sig::Trust::ThirdParty),
+        ) {
             out.insert(plugin.manifest.id);
         }
     }
@@ -201,7 +204,7 @@ fn install_one_plugin(ep: &EntitledPlugin, license_key: &str, plugins_dir: &std:
     let _ = crate::plugin_loader::LoadedPlugin::from_dir_with_key(
         &plugin_src,
         key_bytes.as_deref(),
-        Some("Trusted"),
+        Some(crate::plugin_sig::Trust::ThirdParty),
     )?;
 
     // ACP-6 boundary: never let a plugin-dir wipe touch the vault DB.
@@ -279,7 +282,7 @@ pub fn install_plugin_package(
     let loaded = crate::plugin_loader::LoadedPlugin::from_dir_with_key(
         &plugin_src,
         None,
-        Some("Trusted"),
+        Some(crate::plugin_sig::Trust::ThirdParty),
     )?;
     if loaded.manifest.id != plugin_id {
         return Err(VaultError::InvalidInput(format!(

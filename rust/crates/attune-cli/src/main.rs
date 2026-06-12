@@ -1040,10 +1040,17 @@ fn run_plugin_verify(
     } else {
         None
     };
+    // T2: CLI 诊断命令的 --trust 字符串映射到 Trust enum (类型级 guard)。
+    use attune_core::plugin_sig::Trust;
+    let trust_enum = match trust {
+        "Official" => Trust::Official,
+        "Trusted" | "ThirdParty" => Trust::ThirdParty,
+        _ => Trust::Unsigned,
+    };
     let plugin = attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(
         plugin_dir,
         key_bytes.as_deref(),
-        Some(trust),
+        Some(trust_enum),
     )?;
     eprintln!("✓ plugin loaded: id={}, version={}, type={}",
         plugin.manifest.id, plugin.manifest.version, plugin.manifest.plugin_type);
@@ -1139,7 +1146,9 @@ fn run_plugin_install(
     pubkey: Option<&str>,
     force: bool,
 ) -> attune_core::error::Result<()> {
-    // 1. 签名校验先行 (用于推导 trust 级别, paid plugin 装载校验需要)
+    // 1. 签名校验先行 (用于推导 trust 级别, paid plugin 装载校验需要)。
+    // T2: trust 用 Trust enum (类型级), 由真实 verify_with_key 结果推导。
+    use attune_core::plugin_sig::Trust;
     let trust = if let Some(pk) = pubkey {
         let ok = attune_core::plugin_sig::verify_with_key(src, pk)?;
         if !ok {
@@ -1148,10 +1157,10 @@ fn run_plugin_install(
             ));
         }
         eprintln!("✓ signature verified with provided pubkey → trust=Trusted");
-        "Trusted"
+        Trust::ThirdParty
     } else {
         eprintln!("⚠️  no --pubkey: trust=Unsigned (paid plugin will be rejected)");
-        "Unsigned"
+        Trust::Unsigned
     };
 
     // 2. 解析 src plugin.yaml 拿 id (paid plugin 需提供 key + 合格 trust)
@@ -1222,7 +1231,8 @@ fn run_plugin_list() -> attune_core::error::Result<()> {
         }
         // list 是诊断命令, 不强制 trust 校验 (绕开 paid+Unsigned 联动). 真实装载时
         // attune-server scan 仍会按 trust 拒绝.
-        match attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(&path, None, Some("Official")) {
+        // T2 占位: 类型迁移为 Trust enum; T9 接入真验签结果。
+        match attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(&path, None, Some(attune_core::plugin_sig::Trust::Official)) {
             Ok(plugin) => {
                 count += 1;
                 let m = &plugin.manifest;
@@ -1422,8 +1432,9 @@ fn run_plugin_publish(
         ))?;
 
     // 1. 解析 manifest 拿 id + version
+    // T2 占位: 类型迁移为 Trust enum; T9 接入真验签结果。
     let plugin = attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(
-        plugin_dir, None, Some("Trusted"),
+        plugin_dir, None, Some(attune_core::plugin_sig::Trust::ThirdParty),
     )?;
     let id = plugin.manifest.id.clone();
     let version = plugin.manifest.version.clone();

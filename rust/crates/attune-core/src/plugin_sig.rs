@@ -58,6 +58,19 @@ pub enum Trust {
     Unsigned,
 }
 
+impl Trust {
+    /// Canonical string form for pricing-tier validation + diagnostics.
+    /// `ThirdParty` maps to `"Trusted"` — the legacy pricing label for a
+    /// user-whitelisted third-party signer (paid/trial allowed).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Trust::Official => "Official",
+            Trust::ThirdParty => "Trusted",
+            Trust::Unsigned => "Unsigned",
+        }
+    }
+}
+
 /// 签名校验结果
 #[derive(Debug, Clone)]
 pub struct VerifyResult {
