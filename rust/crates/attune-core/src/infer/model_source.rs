@@ -234,19 +234,98 @@ pub fn select_failover_order(
     eligible.into_iter().map(|(s, _)| s.clone()).collect()
 }
 
+/// 进程内选源缓存:把 `resolve_sources_for` 的探测结果(已排序 failover 顺序)按
+/// (region, eligible-class) 缓存一段 TTL,**避免每次模型下载都重探所有源**。
+///
+/// 根因(§5.2.0b cache 死代码 finding):S8 落了 `SelectedSource` 读写 + TTL 但**零调用** ——
+/// 每次下载都 `resolve_sources_for` 重探全注册表,首源黑洞时串行卡到 connect 超时(~5s/源 ×
+/// 4 源 ≈ 加到首搜延迟)。这里把缓存真正接进解析路径:fresh 命中直接复用顺序,跳过重探。
+///
+/// 缓存 key = (region, eligible_class):同一 region 下,所有 `Full`-only repo(whisper/OCR/
+/// layout)共享同一组 eligible 源 + 同一相对健康序;所有 `Xenova/*` repo 共享另一组。两类
+/// 即可覆盖全部下载点(§model_source coverage 只有 Full / OnlyXenovaOnnx 两种)。
+struct CachedResolution {
+    order: Vec<ModelSource>,
+    cached_at_unix: u64,
+}
+
+/// 选源缓存 key 的 eligible-class 维度:repo 是否落在 `OnlyXenovaOnnx` 源的覆盖面内
+/// (`Xenova/*` → true)。决定 eligible 源集合,从而决定可复用的缓存桶。
+fn eligible_class_is_xenova(repo_id: &str) -> bool {
+    SourceCoverage::OnlyXenovaOnnx.covers(repo_id)
+}
+
+/// (region_is_china, is_xenova_class) → 缓存槽。进程生命期内 2×2 桶。
+/// 用 `OnceLock<Mutex<..>>`(1.70+,对齐仓内 MSRV 1.75 + 既有 idiom),非 `LazyLock`(1.80)。
+type ResolutionMap = std::collections::HashMap<(bool, bool), CachedResolution>;
+static RESOLUTION_CACHE: std::sync::OnceLock<std::sync::Mutex<ResolutionMap>> =
+    std::sync::OnceLock::new();
+
+/// 取(惰性初始化)缓存的 Mutex。
+fn resolution_cache() -> &'static std::sync::Mutex<ResolutionMap> {
+    RESOLUTION_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// 便捷:对内置注册表逐源探测(覆盖 `repo_id` 的源才探,省掉必 404 的探测)→ 选 failover 顺序。
 /// **只在 pre-flight / 显式触发调用**(R3)。`detect_region()` 决定 region 偏置。
+///
+/// 进程内缓存:TTL(`SELECTED_SOURCE_TTL_SECS`)内对同 (region, class) 的请求直接复用上次
+/// 排序结果,跳过重探(§cache finding 修复)。过期/未命中才真探测并回填。
 pub fn resolve_sources_for(repo_id: &str) -> Vec<ModelSource> {
     let region = crate::platform::region::detect_region();
+    resolve_sources_with(repo_id, region, &probe_source)
+}
+
+/// `resolve_sources_for` 的可注入核心(测试用固定 `probe_fn` 计探测次数 + 注入 region)。
+/// 缓存命中(fresh)→ 返回缓存顺序,`probe_fn` **零调用**;未命中/过期 → 真探测 + 回填。
+/// `probe_fn` 取引用 —— 让测试可跨多次 resolve 复用同一(捕获引用、非 Copy)计数闭包。
+fn resolve_sources_with(
+    repo_id: &str,
+    region: Region,
+    probe_fn: &impl Fn(&ModelSource) -> SourceHealth,
+) -> Vec<ModelSource> {
+    let key = (region == Region::China, eligible_class_is_xenova(repo_id));
+    let now = now_unix();
+    {
+        let cache = resolution_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = cache.get(&key) {
+            // fresh(now - cached_at < TTL;时钟回拨也视为新鲜)→ 复用,跳过重探。
+            if now < c.cached_at_unix || now - c.cached_at_unix < SELECTED_SOURCE_TTL_SECS {
+                return c.order.clone();
+            }
+        }
+    }
+    // 未命中/过期:真探测覆盖 `repo_id` 的源 → 选序 → 回填缓存。
     let probed: Vec<(ModelSource, SourceHealth)> = builtin_sources()
         .into_iter()
         .filter(|s| s.coverage.covers(repo_id))
         .map(|s| {
-            let h = probe_source(&s);
+            let h = probe_fn(&s);
             (s, h)
         })
         .collect();
-    select_failover_order(&probed, repo_id, region)
+    let order = select_failover_order(&probed, repo_id, region);
+    {
+        let mut cache = resolution_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache.insert(key, CachedResolution { order: order.clone(), cached_at_unix: now });
+    }
+    order
+}
+
+/// 清空进程内选源缓存(测试隔离 / 显式"强制重探"用,如用户在 Settings 手动切区域)。
+pub fn clear_resolution_cache() {
+    resolution_cache().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// 当前(检测区域,Full-class)缓存桶的首选源 id —— 供下载后持久化(`persist_used_source`)。
+/// `None` = 缓存空(尚未 resolve 过 / 已 clear)。Full-class 桶覆盖 whisper/OCR/layout 全集。
+pub fn current_top_source_id() -> Option<String> {
+    let region_cn = crate::platform::region::detect_region() == Region::China;
+    let cache = resolution_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache
+        .get(&(region_cn, false))
+        .and_then(|c| c.order.first())
+        .map(|s| s.id.clone())
 }
 
 /// S8 step 3 集成:按给定 failover 顺序逐源尝试下载 `repo_id/filename` → `dst`,
@@ -379,6 +458,58 @@ impl SelectedSource {
             probed_at_unix: now_unix(),
         }
     }
+}
+
+/// 启动期 seed:把持久化(`app_settings.model_source`)的选定源接进**进程内**选源缓存,
+/// 使**冷启动后第一次下载也免重探**(跨重启复用上次选定结果,只要仍 fresh)。
+///
+/// 这正是 §cache finding 要求的"把 read_selected_source / selected_source_is_fresh 接进
+/// 解析路径"——否则二者是死代码。`settings` 由调用方(state.rs unlock 后)从 store 读出。
+/// 该选定源回填进**两个**缓存桶(Full + Xenova class)的当前 region 槽:它是上次实测的 healthy
+/// 源,作为 failover 首选合理;过期后正常重探自愈。返回 seed 的源数(0=无持久化/已过期)。
+pub fn seed_resolution_cache_from_settings(settings: &serde_json::Value, region: Region) -> usize {
+    let Some(sel) = read_selected_source(settings) else {
+        return 0;
+    };
+    let now = now_unix();
+    if !selected_source_is_fresh(&sel, now) {
+        return 0; // 过期 → 不 seed,下次下载正常重探
+    }
+    // 用持久化 endpoint 重建一个 ModelSource(coverage 取 Full —— 选定源既然下过模型必是全覆盖
+    // 候选;Xenova-class 桶也放它,whisper/OCR 类下载首选它,失败再 failover 到注册表其余源)。
+    let seeded = builtin_sources()
+        .into_iter()
+        .find(|s| s.id == sel.source_id)
+        .unwrap_or_else(|| ModelSource {
+            id: sel.source_id.clone(),
+            endpoint: sel.endpoint.clone(),
+            priority: 50,
+            region_hint: None,
+            coverage: SourceCoverage::Full,
+        });
+    let mut cache = resolution_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let mut n = 0;
+    for is_xenova in [false, true] {
+        cache.insert(
+            (region == Region::China, is_xenova),
+            CachedResolution { order: vec![seeded.clone()], cached_at_unix: sel.probed_at_unix },
+        );
+        n += 1;
+    }
+    n
+}
+
+/// 把刚成功用过的源(`source_id`)持久化进 `app_settings`(供下次冷启动 seed)。纯函数返回
+/// 新 JSON(调用方负责落 store),对齐 `write_selected_source` 的无 IO 约定。`None` = 未知源
+/// (不写)。这让 `download_with_failover` 报出的 winning source 真正进入持久层(非死代码)。
+pub fn persist_used_source(
+    settings: serde_json::Value,
+    source_id: &str,
+) -> serde_json::Value {
+    let Some(source) = builtin_sources().into_iter().find(|s| s.id == source_id) else {
+        return settings; // env: 覆盖等非注册表源不持久化
+    };
+    write_selected_source(settings, &SelectedSource::from_source(&source))
 }
 
 #[cfg(test)]
@@ -715,6 +846,113 @@ mod tests {
         let dst = dir.path().join("model.bin");
         let r = download_with_failover(&[], "Xenova/bge-m3", "model.bin", &dst);
         assert!(r.is_err(), "empty source list → Err (degraded)");
+    }
+
+    // --- 进程内选源缓存接进解析路径(§cache finding:fresh 命中跳过重探)。 ---
+    //     缓存是进程全局静态 → 用一把锁串行化这组测试,避免桶互相污染计数。
+
+    static RESOLVE_CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn resolve_cache_fresh_hit_skips_reprobe() {
+        let _g = RESOLVE_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_resolution_cache();
+        // 探测计数器:每次 probe_fn 被调即 +1。第一次 resolve 真探(>0),第二次 fresh 命中应 0。
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let probe = |s: &ModelSource| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // 标记 company-mirror healthy,其余不可达 → 选序确定(company 首位)。
+            health(&s.id, s.id == "company-mirror", 1e6)
+        };
+        let first = resolve_sources_with("Xenova/bge-m3", Region::China, &probe);
+        let after_first = count.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(after_first > 0, "first resolve must probe at least once");
+        assert!(!first.is_empty(), "company-mirror healthy → non-empty order");
+
+        // 第二次同 (region, class):fresh 命中 → probe_fn 零调用,顺序一致。
+        let second = resolve_sources_with("Xenova/bge-reranker-base", Region::China, &probe);
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            after_first,
+            "fresh cache hit must NOT re-probe"
+        );
+        assert_eq!(
+            first.iter().map(|s| &s.id).collect::<Vec<_>>(),
+            second.iter().map(|s| &s.id).collect::<Vec<_>>(),
+            "cached order reused verbatim"
+        );
+        clear_resolution_cache();
+    }
+
+    #[test]
+    fn resolve_cache_distinct_class_and_region_buckets() {
+        let _g = RESOLVE_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_resolution_cache();
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let probe = |s: &ModelSource| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            health(&s.id, true, 1e6)
+        };
+        // Full-class repo (whisper) 与 Xenova-class repo 用**不同桶** → 各自首次都要探测。
+        let _ = resolve_sources_with("ggerganov/whisper.cpp", Region::China, &probe);
+        let after_full = count.load(std::sync::atomic::Ordering::SeqCst);
+        let _ = resolve_sources_with("Xenova/bge-m3", Region::China, &probe);
+        let after_xenova = count.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(after_xenova > after_full, "distinct class bucket must probe (not reuse Full bucket)");
+        clear_resolution_cache();
+    }
+
+    #[test]
+    fn seed_from_settings_populates_cache_and_skips_probe() {
+        let _g = RESOLVE_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_resolution_cache();
+        // 持久化一个 fresh 选定源(company-mirror, 刚探测)。
+        let sel = SelectedSource {
+            source_id: "company-mirror".into(),
+            endpoint: company_mirror_endpoint(),
+            probed_at_unix: now_unix(),
+        };
+        let settings = write_selected_source(serde_json::json!({}), &sel);
+        let seeded = seed_resolution_cache_from_settings(&settings, Region::China);
+        assert_eq!(seeded, 2, "seeds both Full + Xenova class buckets");
+
+        // seed 后 resolve 应直接命中 seeded 源,probe 零调用。
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let probe = |s: &ModelSource| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            health(&s.id, true, 1e6)
+        };
+        let order = resolve_sources_with("SWHL/RapidOCR", Region::China, &probe);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0, "seeded cache → no probe");
+        assert_eq!(order.first().map(|s| s.id.as_str()), Some("company-mirror"));
+        clear_resolution_cache();
+    }
+
+    #[test]
+    fn seed_from_settings_expired_does_not_seed() {
+        let _g = RESOLVE_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_resolution_cache();
+        // 过期选定源(probed_at 远在 TTL 之前)→ 不 seed。
+        let sel = SelectedSource {
+            source_id: "company-mirror".into(),
+            endpoint: company_mirror_endpoint(),
+            probed_at_unix: now_unix().saturating_sub(SELECTED_SOURCE_TTL_SECS + 100),
+        };
+        let settings = write_selected_source(serde_json::json!({}), &sel);
+        assert_eq!(seed_resolution_cache_from_settings(&settings, Region::China), 0);
+        clear_resolution_cache();
+    }
+
+    #[test]
+    fn persist_used_source_roundtrips_registry_source() {
+        // download_with_failover 报出的 winning id → 持久化 → 下次可读回。
+        let out = persist_used_source(serde_json::json!({"keep": 1}), "modelscope");
+        assert_eq!(out["keep"], 1, "sibling key preserved");
+        let back = read_selected_source(&out).expect("must persist");
+        assert_eq!(back.source_id, "modelscope");
+        // 非注册表源(env: 覆盖)不写。
+        let unchanged = persist_used_source(serde_json::json!({"x": 2}), "env:http://foo");
+        assert!(read_selected_source(&unchanged).is_none(), "non-registry source not persisted");
     }
 
     // --- 选定源缓存(§12.3:settings 持久化 + TTL 新鲜度)。纯 JSON,无 IO/无 env。 ---
