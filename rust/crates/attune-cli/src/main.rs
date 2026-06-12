@@ -1231,15 +1231,19 @@ fn run_plugin_list() -> attune_core::error::Result<()> {
         }
         // list 是诊断命令, 不强制 trust 校验 (绕开 paid+Unsigned 联动). 真实装载时
         // attune-server scan 仍会按 trust 拒绝.
-        // T2 占位: 类型迁移为 Trust enum; T9 接入真验签结果。
-        match attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(&path, None, Some(attune_core::plugin_sig::Trust::Official)) {
+        // T9: 跑**真实** verify_loose 得到真 trust 标签 (不再硬编码 Some(Trust::Official))。
+        // 装载用真 trust;若 paid+Unsigned 联动拒绝则降级为 None 仅做诊断展示。
+        let real_trust = attune_core::plugin_sig::verify_loose(&path)
+            .map(|r| r.trust)
+            .unwrap_or(attune_core::plugin_sig::Trust::Unsigned);
+        match attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(&path, None, Some(real_trust)) {
             Ok(plugin) => {
                 count += 1;
                 let m = &plugin.manifest;
                 let tier = m.pricing.as_ref().map(|p| p.tier.as_str()).unwrap_or("?");
                 println!(
-                    "  {} (v{}, type={}, tier={}, agents={}, skills={}, mcps={})",
-                    m.id, m.version, m.plugin_type, tier,
+                    "  {} (v{}, type={}, tier={}, trust={}, agents={}, skills={}, mcps={})",
+                    m.id, m.version, m.plugin_type, tier, real_trust.as_str(),
                     m.agents.len(), m.skills.len(), m.mcp_servers.len()
                 );
             }

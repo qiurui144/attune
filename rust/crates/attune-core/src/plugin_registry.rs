@@ -51,6 +51,9 @@ pub struct ChatTriggerMatch {
 pub struct PluginRegistry {
     plugins: HashMap<String, LoadedPlugin>,
     workflows: Vec<LoadedWorkflow>,
+    /// 每个已装 plugin 的**真实**签名信任级别(T9:scan 时跑真 `verify_with_whitelist`
+    /// 得来,非硬编码)。供列表路由暴露 `trust`(spec §5.1 / T10)。
+    trust: HashMap<String, crate::plugin_sig::Trust>,
 }
 
 impl PluginRegistry {
@@ -64,6 +67,11 @@ impl PluginRegistry {
 
     pub fn get_plugin(&self, id: &str) -> Option<&LoadedPlugin> {
         self.plugins.get(id)
+    }
+
+    /// 已装 plugin 的真实信任级别(T9)。未知 plugin → None。
+    pub fn plugin_trust(&self, id: &str) -> Option<crate::plugin_sig::Trust> {
+        self.trust.get(id).copied()
     }
 
     pub fn workflows(&self) -> &[LoadedWorkflow] {
@@ -293,18 +301,42 @@ impl PluginRegistry {
     ///
     /// 调用方典型: 在 attune-server 启动时, 从用户 license 拿 decrypt_key 透传.
     pub fn scan_with_key(plugins_root: &Path, decrypt_key: Option<&[u8]>) -> Result<(Self, Vec<String>)> {
-        Self::scan_impl(plugins_root, decrypt_key)
+        // 默认 trust_mode = Off(load-all,保持现有行为);trust 标签来自**真实**验签。
+        // 按 trust_mode 过滤的 server 路径走 [`scan_with_trust`](T11 settings 注入 mode)。
+        Self::scan_impl(plugins_root, decrypt_key, crate::plugin_sig::TrustMode::Off, &[], crate::plugin_sig::OFFICIAL_PUBLIC_KEYS)
     }
 
     /// 扫描 plugins_root 下每个一级子目录作为一个 plugin。
-    /// 每个 plugin dir 必须有 `plugin.yaml`；可选 `workflows/*.yaml` 和 `capabilities/<cap_id>/plugin.yaml`。
+    /// 每个 plugin dir 必须有 `plugin.yaml`;可选 `workflows/*.yaml` 和 `capabilities/<cap_id>/plugin.yaml`。
     ///
     /// **best-effort 加载** — 单个 plugin 失败不影响其他。返回错误数量供 caller 决定是否告警。
     pub fn scan(plugins_root: &Path) -> Result<(Self, Vec<String>)> {
-        Self::scan_impl(plugins_root, None)
+        Self::scan_impl(plugins_root, None, crate::plugin_sig::TrustMode::Off, &[], crate::plugin_sig::OFFICIAL_PUBLIC_KEYS)
     }
 
-    fn scan_impl(plugins_root: &Path, decrypt_key: Option<&[u8]>) -> Result<(Self, Vec<String>)> {
+    /// T9:按真实签名验证 + `trust_mode` 三态门过滤扫描。每个 plugin dir 跑
+    /// [`crate::plugin_sig::verify_with_whitelist`](官方公钥 + 用户白名单)得到真实
+    /// [`crate::plugin_sig::SigOutcome`],经 [`crate::plugin_sig::gate`] 判定 —— `Reject`
+    /// → skip + errors(`[<code>] <id>`);`Allow`/`AllowWarn` → 以**真实** [`Trust`] 装载
+    /// (杜绝硬编码)。`user_pubkeys` = settings `plugin_trusted_pubkeys`(T11)。
+    pub fn scan_with_trust(
+        plugins_root: &Path,
+        decrypt_key: Option<&[u8]>,
+        mode: crate::plugin_sig::TrustMode,
+        user_pubkeys: &[String],
+    ) -> Result<(Self, Vec<String>)> {
+        Self::scan_impl(plugins_root, decrypt_key, mode, user_pubkeys, crate::plugin_sig::OFFICIAL_PUBLIC_KEYS)
+    }
+
+    /// 内核。`official_keys` 可注入(测试走 Official 路径 —— 内嵌 anchor const 无私钥)。
+    fn scan_impl(
+        plugins_root: &Path,
+        decrypt_key: Option<&[u8]>,
+        mode: crate::plugin_sig::TrustMode,
+        user_pubkeys: &[String],
+        official_keys: &[&str],
+    ) -> Result<(Self, Vec<String>)> {
+        use crate::plugin_sig::{gate, verify_with_whitelist, SigOutcome, Trust, TrustDecision};
         let mut reg = Self::new();
         let mut errors: Vec<String> = Vec::new();
 
@@ -321,11 +353,22 @@ impl PluginRegistry {
             let plugin_yaml = path.join("plugin.yaml");
             let plugin_yaml_enc = path.join("plugin.yaml.enc");
             if plugin_yaml.exists() || plugin_yaml_enc.exists() {
-                // 装到 plugins/ 目录的 plugin 视为用户已通过 attune-cli plugin-install 装载
-                // (CLI 已校验签名 + 解密). server 装载时给 Trust::ThirdParty, 不再二次拒绝.
-                // 真实加密 paid plugin 在 scan 中**当前不解密** — 调用方按需扩展.
-                // T2 占位: 类型迁移为 Trust enum; 真验签结果在 T9 接入.
-                match LoadedPlugin::from_dir_with_key(&path, decrypt_key, Some(crate::plugin_sig::Trust::ThirdParty)) {
+                // T9: run REAL signature verification. The outcome drives both the
+                // trust label passed to from_dir_with_key (no hardcoded Trust) AND the
+                // three-state gate (mode) that decides whether to load at all.
+                let outcome = verify_with_whitelist(&path, official_keys, user_pubkeys)
+                    .unwrap_or(SigOutcome::Unsigned);
+                let real_trust: Trust = outcome.trust();
+                // dir name (for the reject error message) — best-effort.
+                let dir_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+                match gate(outcome, mode) {
+                    TrustDecision::Reject(code) => {
+                        errors.push(format!("[{code}] {dir_name}: rejected by trust_mode={mode:?}"));
+                        continue;
+                    }
+                    TrustDecision::Allow | TrustDecision::AllowWarn(_) => {}
+                }
+                match LoadedPlugin::from_dir_with_key(&path, decrypt_key, Some(real_trust)) {
                     Ok(p) => {
                         let pid = p.manifest.id.clone();
                         // 跨平台分发 version gate (spec §10): min_attune_version 高于当前 →
@@ -349,6 +392,7 @@ impl PluginRegistry {
                                 }
                             }
                         }
+                        reg.trust.insert(pid.clone(), real_trust);
                         reg.plugins.insert(pid.clone(), p);
                         // 扫该 plugin 下的 workflows/
                         let wf_dir = path.join("workflows");
@@ -414,6 +458,18 @@ impl PluginRegistry {
         let data = dirs::data_local_dir()
             .ok_or_else(|| VaultError::InvalidInput("cannot resolve user data dir".into()))?;
         Ok(data.join("attune").join("plugins"))
+    }
+
+    /// Test-only: scan with an INJECTED official-keys list so a test can drive the
+    /// `Trust::Official` path (the baked anchor const has no private key to sign with).
+    #[cfg(test)]
+    fn scan_with_injected_official(
+        plugins_root: &Path,
+        mode: crate::plugin_sig::TrustMode,
+        user_pubkeys: &[String],
+        official_keys: &[&str],
+    ) -> Result<(Self, Vec<String>)> {
+        Self::scan_impl(plugins_root, None, mode, user_pubkeys, official_keys)
     }
 }
 
@@ -1171,5 +1227,119 @@ chat_trigger:
         assert!(reg.match_chat_trigger("利息怎么算").is_some());
         // 含 exclude pattern → 否决
         assert!(reg.match_chat_trigger("利息税应该咨询税务师").is_none());
+    }
+
+    // ── T9: registry runs REAL signature verification + trust_mode gate ───────
+
+    use ed25519_dalek::SigningKey;
+
+    /// Write a plugin dir and SIGN it with `signer` (writes plugin.sig).
+    fn write_signed_plugin(root: &Path, id: &str, signer: &SigningKey) -> std::path::PathBuf {
+        let dir = write_plugin_dir(
+            root,
+            id,
+            &format!("id: {id}\nname: P\ntype: industry\nversion: \"1.0.0\"\n"),
+        );
+        crate::plugin_sig::sign_plugin(&dir, &signer.to_bytes()).expect("sign");
+        dir
+    }
+
+    #[test]
+    fn registry_scan_runs_real_verify_official() {
+        // An official-signed plugin → real verify yields Trust::Official (NOT a
+        // hardcoded label). Inject the test key as the official allowlist.
+        let tmp = TempDir::new().unwrap();
+        let signer = SigningKey::from_bytes(&[7u8; 32]);
+        let official_hex = hex::encode(signer.verifying_key().to_bytes());
+        write_signed_plugin(tmp.path(), "off-plug", &signer);
+        let (reg, errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            crate::plugin_sig::TrustMode::Strict,
+            &[],
+            &[&official_hex],
+        )
+        .unwrap();
+        assert!(errs.is_empty(), "official plugin must load in strict, got: {errs:?}");
+        assert_eq!(reg.plugin_trust("off-plug"), Some(crate::plugin_sig::Trust::Official));
+    }
+
+    #[test]
+    fn registry_scan_tampered_rejected_in_warn() {
+        // A plugin signed by a key NOT in the official allowlist and NOT whitelisted →
+        // SigOutcome::Invalid → gate rejects in warn (tampered ≠ unsigned).
+        let tmp = TempDir::new().unwrap();
+        let attacker = SigningKey::from_bytes(&[9u8; 32]);
+        let official = SigningKey::from_bytes(&[7u8; 32]);
+        let official_hex = hex::encode(official.verifying_key().to_bytes());
+        write_signed_plugin(tmp.path(), "tampered-plug", &attacker);
+        let (reg, errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            crate::plugin_sig::TrustMode::Warn,
+            &[],
+            &[&official_hex],
+        )
+        .unwrap();
+        assert!(reg.get_plugin("tampered-plug").is_none(), "invalid sig must be rejected in warn");
+        assert!(errs.iter().any(|e| e.contains("plugin-sig-invalid")), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn unsigned_dir_rejected_in_strict() {
+        // Hand-copied unsigned plugin dir (no plugin.sig) → strict rejects at scan.
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(tmp.path(), "unsigned-plug", "id: unsigned-plug\nname: U\ntype: industry\nversion: \"1.0.0\"\n");
+        let (reg, errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            crate::plugin_sig::TrustMode::Strict,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(reg.get_plugin("unsigned-plug").is_none(), "unsigned rejected in strict");
+        assert!(errs.iter().any(|e| e.contains("plugin-unsigned-strict")), "errors: {errs:?}");
+    }
+
+    #[test]
+    fn unsigned_dir_loads_with_real_unsigned_trust_in_warn() {
+        // In warn, an unsigned plugin loads but with the REAL Trust::Unsigned label
+        // (not a hardcoded Official/ThirdParty).
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(tmp.path(), "u2", "id: u2\nname: U\ntype: industry\nversion: \"1.0.0\"\n");
+        let (reg, _errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            crate::plugin_sig::TrustMode::Warn,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(reg.plugin_trust("u2"), Some(crate::plugin_sig::Trust::Unsigned));
+    }
+
+    #[test]
+    fn whitelisted_pubkey_yields_thirdparty_trust() {
+        // A user-whitelisted (non-official) signer → Trust::ThirdParty (real verify).
+        let tmp = TempDir::new().unwrap();
+        let dev = SigningKey::from_bytes(&[13u8; 32]);
+        let dev_hex = hex::encode(dev.verifying_key().to_bytes());
+        write_signed_plugin(tmp.path(), "tp-plug", &dev);
+        let (reg, errs) = PluginRegistry::scan_with_injected_official(
+            tmp.path(),
+            crate::plugin_sig::TrustMode::Strict,
+            &[dev_hex],
+            &[],
+        )
+        .unwrap();
+        assert!(errs.is_empty(), "whitelisted third-party loads in strict, got: {errs:?}");
+        assert_eq!(reg.plugin_trust("tp-plug"), Some(crate::plugin_sig::Trust::ThirdParty));
+    }
+
+    #[test]
+    fn default_scan_labels_real_unsigned_not_hardcoded() {
+        // The public scan() (mode=Off) now labels an unsigned plugin as the REAL
+        // Trust::Unsigned — proving the hardcoded Trust::ThirdParty is gone.
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(tmp.path(), "p", "id: p\nname: P\ntype: industry\nversion: \"1.0.0\"\n");
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        assert_eq!(reg.plugin_trust("p"), Some(crate::plugin_sig::Trust::Unsigned));
     }
 }
