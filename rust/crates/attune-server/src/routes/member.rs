@@ -397,25 +397,40 @@ fn writeback_accepted(state: &SharedState, rounds: &[(String, ReverifyOutcome, O
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(dek) = vault.dek_db() else { return }; // vault locked → skip writeback
     for (plugin_id, outcome, verified_at) in rounds {
-        let new_status = match outcome {
-            ReverifyOutcome::Active => "active",
-            ReverifyOutcome::BusinessDeny(s) => s.as_str(),
+        // is_deny:验签通过的 revoked/suspended 是 AUTHORITATIVE DOWNGRADE,必须绕过
+        // upsert 的反降级归并落盘(REVIEW Critical-1),否则吊销在重启后复活。
+        let (new_status, is_deny) = match outcome {
+            ReverifyOutcome::Active => ("active", false),
+            ReverifyOutcome::BusinessDeny(s) => (s.as_str(), true),
             // 网络错 / 未授权 → 不动 vault(grace,缓存也未变)。
             ReverifyOutcome::NetworkError | ReverifyOutcome::Unauthorized(_) => continue,
         };
         // 取缓存当前行(apply 已更新内存),按其 last_verified_at 落盘。
         let va = verified_at.as_deref().unwrap_or("");
-        if let Some(mut row) = cache
-            .snapshot()
-            .into_iter()
-            .find(|r| &r.plugin_id == plugin_id)
+        if is_deny {
+            // 显式降级:直接 UPDATE,无 rank guard(merge 不会吃掉吊销)。
+            // 用 verified_at 作 freshness 基准;空则退回行内 last_verified_at。
+            let last_verified = if va.is_empty() {
+                cache.last_verified_at(plugin_id).map(|d| d.to_rfc3339()).unwrap_or_default()
+            } else {
+                va.to_string()
+            };
+            if let Err(e) = vault.store().set_entitlement_status(plugin_id, new_status, &last_verified) {
+                tracing::error!(
+                    "reverify: failed to persist verified deny for {plugin_id} (status={new_status}): {e}"
+                );
+            }
+        } else if let Some(mut row) =
+            cache.snapshot().into_iter().find(|r| &r.plugin_id == plugin_id)
         {
             row.status = new_status.to_string();
             if !va.is_empty() {
                 row.last_verified_at = va.to_string();
             }
             row.updated_at = va.to_string();
-            let _ = vault.store().upsert_entitlement(&dek, &row);
+            if let Err(e) = vault.store().upsert_entitlement(&dek, &row) {
+                tracing::error!("reverify: failed to persist active write-back for {plugin_id}: {e}");
+            }
         }
     }
 }

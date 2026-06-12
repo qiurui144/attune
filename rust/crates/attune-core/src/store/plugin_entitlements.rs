@@ -143,6 +143,30 @@ impl Store {
         Ok(())
     }
 
+    /// 显式降级落盘 —— **唯一**能把更优态降到更劣态的持久化入口(镜像内存层
+    /// [`crate::entitlement::EntitlementCache::set_status`])。re-verify worker 收到
+    /// **验签通过的** revoked/suspended 时调用,**绕过** [`Self::upsert_entitlement`]
+    /// 的 PERF-5 反降级归并 —— 否则一条已存的 `active` 行会拒绝吊销写盘,导致吊销
+    /// 在重启 / re-unlock 后复活(REVIEW Critical-1)。
+    ///
+    /// 直接 `UPDATE ... WHERE plugin_id=?`,**无 rank guard**。行不存在 → 影响 0 行
+    /// (无错):付费插件吊销时该行必由 install 时写入存在;免费插件无行 → is_entitled
+    /// 本就 Allow,无需吊销。
+    pub fn set_entitlement_status(
+        &self,
+        plugin_id: &str,
+        status: &str,
+        last_verified_at: &str,
+    ) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "UPDATE plugin_entitlements
+                SET status = ?1, last_verified_at = ?2, updated_at = ?2
+              WHERE plugin_id = ?3",
+        )?;
+        stmt.execute(rusqlite::params![status, last_verified_at, plugin_id])?;
+        Ok(())
+    }
+
     /// 读一条 entitlement(license_id 解密回明文)。
     pub fn get_entitlement(&self, dek: &Key32, plugin_id: &str) -> Result<Option<EntitlementRow>> {
         let enc_row: Option<EncRow> = self
@@ -273,6 +297,51 @@ mod tests {
         store.upsert_entitlement(&dek, &row("law-pro", "active")).unwrap();
         store.delete_entitlement("law-pro").unwrap();
         assert!(store.get_entitlement(&dek, "law-pro").unwrap().is_none());
+    }
+
+    #[test]
+    fn persisted_revoke_survives_reopen() {
+        // REVIEW Critical-1: an AUTHORITATIVE VERIFIED revoke must reach disk and
+        // survive restart / re-unlock — even though an existing `active` row would
+        // make the anti-downgrade merge (upsert_entitlement) refuse it.
+        use crate::entitlement::{EntitlementCache, EntitlementDecision};
+        use chrono::Utc;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("vault.db");
+        let dek = Key32::generate();
+        {
+            let store = Store::open(&path).unwrap();
+            // Paid plugin installed → active row on disk.
+            store.upsert_entitlement(&dek, &row("law-pro", "active")).unwrap();
+            // Cloud revokes; re-verify worker persists the VERIFIED deny via the
+            // explicit-downgrade path (NOT upsert, which would be eaten by the merge).
+            store
+                .set_entitlement_status("law-pro", "revoked", "2026-06-12T10:00:00+00:00")
+                .unwrap();
+            // Sanity within the same Store: the downgrade landed despite prior active.
+            let same = store.get_entitlement(&dek, "law-pro").unwrap().unwrap();
+            assert_eq!(same.status, "revoked", "explicit downgrade must overwrite active");
+        }
+
+        // (1) Durable: reopen a FRESH Store on the same DB path — revoke survived.
+        let store2 = Store::open(&path).unwrap();
+        let got = store2.get_entitlement(&dek, "law-pro").unwrap().unwrap();
+        assert_eq!(
+            got.status, "revoked",
+            "verified revoke must survive restart/re-unlock (not revive as active)"
+        );
+
+        // (2) Rehydrate path: a fresh EntitlementCache built from list_entitlements
+        // must dispatch-Reject the revoked plugin (license-revoked), not Allow.
+        let cache = EntitlementCache::new();
+        cache.hydrate_from_rows(store2.list_entitlements(&dek).unwrap());
+        let now = Utc::now();
+        assert_eq!(
+            cache.is_entitled("law-pro", &now),
+            EntitlementDecision::Reject("license-revoked"),
+            "rehydrated cache must reject a revoked plugin, not revive it to Allow"
+        );
     }
 
     #[test]
