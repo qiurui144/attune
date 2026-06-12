@@ -192,6 +192,63 @@ pub fn probe_source(source: &ModelSource) -> SourceHealth {
     probe_source_with(source, "Xenova/bge-m3", "tokenizer.json")
 }
 
+/// region_hint 命中当前检测区域时的优先级偏置乘数(§12:CN 区把 company/ModelScope 提前)。
+/// 对 healthy 源的排序键 `throughput × priority × region_bias` 生效 —— 同区源被显著抬升,
+/// 但**实测 throughput 仍能翻盘**(一个区内极慢的源不会因 region 命中就压过区外快源)。
+const REGION_MATCH_BIAS: f64 = 1.5;
+
+/// 给定一组**已探测**的源 + 它们的 health,为 `repo_id` 选出 failover 顺序(最优在前)。
+///
+/// 规则(§12 step 2+3):
+/// 1. 先按 `coverage.covers(repo_id)` 过滤 —— 该源不覆盖此 repo 直接剔除(whisper/PP-OCR
+///    跳过 ModelScope,避免无谓 404)。
+/// 2. 再按 `reachable` 过滤 —— 探测不可达的源剔除。
+/// 3. 剩余按排序键 `throughput_bps × priority × region_bias` 降序;`region_bias` 在源
+///    `region_hint == 当前 region` 时取 `REGION_MATCH_BIAS`,否则 1.0。
+///
+/// 返回的是**排序后的源列表**(供 failover 顺序消费):空 = 无可用源(调用方报 model-missing /
+/// unreachable)。`region` 由 `detect_region()`(locale/timezone,**非 IP geo**)传入,便于测试注入。
+pub fn select_failover_order(
+    probed: &[(ModelSource, SourceHealth)],
+    repo_id: &str,
+    region: Region,
+) -> Vec<ModelSource> {
+    let mut eligible: Vec<&(ModelSource, SourceHealth)> = probed
+        .iter()
+        .filter(|(s, h)| s.coverage.covers(repo_id) && h.reachable)
+        .collect();
+    eligible.sort_by(|a, b| {
+        let score = |s: &ModelSource, h: &SourceHealth| -> f64 {
+            let region_bias = if s.region_hint == Some(region) {
+                REGION_MATCH_BIAS
+            } else {
+                1.0
+            };
+            h.throughput_bps * (s.priority as f64) * region_bias
+        };
+        let sa = score(&a.0, &a.1);
+        let sb = score(&b.0, &b.1);
+        // 降序;NaN 兜底成 Equal(理论上 throughput 非 NaN)。
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    eligible.into_iter().map(|(s, _)| s.clone()).collect()
+}
+
+/// 便捷:对内置注册表逐源探测(覆盖 `repo_id` 的源才探,省掉必 404 的探测)→ 选 failover 顺序。
+/// **只在 pre-flight / 显式触发调用**(R3)。`detect_region()` 决定 region 偏置。
+pub fn resolve_sources_for(repo_id: &str) -> Vec<ModelSource> {
+    let region = crate::platform::region::detect_region();
+    let probed: Vec<(ModelSource, SourceHealth)> = builtin_sources()
+        .into_iter()
+        .filter(|s| s.coverage.covers(repo_id))
+        .map(|s| {
+            let h = probe_source(&s);
+            (s, h)
+        })
+        .collect();
+    select_failover_order(&probed, repo_id, region)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +413,88 @@ mod tests {
             elapsed < PROBE_TOTAL_TIMEOUT + Duration::from_secs(5),
             "probe must fail-fast, took {elapsed:?}"
         );
+    }
+
+    // --- 选源 / failover 排序(纯逻辑,无网络;用构造的 health 注入)。 ---
+
+    fn srch(id: &str, priority: u32, region: Option<Region>, cov: SourceCoverage) -> ModelSource {
+        ModelSource {
+            id: id.to_string(),
+            endpoint: format!("https://{id}.example"),
+            priority,
+            region_hint: region,
+            coverage: cov,
+        }
+    }
+
+    fn health(id: &str, reachable: bool, bps: f64) -> SourceHealth {
+        SourceHealth {
+            source_id: id.to_string(),
+            reachable,
+            throughput_bps: bps,
+            latency_ms: if reachable { Some(50) } else { None },
+        }
+    }
+
+    #[test]
+    fn select_filters_unreachable_and_uncovered() {
+        let probed = vec![
+            // 不覆盖 whisper(OnlyXenovaOnnx)→ 剔除
+            (srch("ms", 80, Some(Region::China), SourceCoverage::OnlyXenovaOnnx), health("ms", true, 5e6)),
+            // 不可达 → 剔除
+            (srch("dead", 100, None, SourceCoverage::Full), health("dead", false, 0.0)),
+            // healthy + 覆盖 → 保留
+            (srch("ok", 60, None, SourceCoverage::Full), health("ok", true, 1e6)),
+        ];
+        let order = select_failover_order(&probed, "ggerganov/whisper.cpp", Region::International);
+        assert_eq!(order.len(), 1, "only the covering+reachable source survives");
+        assert_eq!(order[0].id, "ok");
+    }
+
+    #[test]
+    fn select_sorts_by_throughput_times_priority() {
+        // 两源都 Full + healthy:throughput×priority 决定序。
+        // fast: 4MB/s × 50 = 2e8;slow: 1MB/s × 100 = 1e8 → fast 应在前。
+        let probed = vec![
+            (srch("slow", 100, None, SourceCoverage::Full), health("slow", true, 1e6)),
+            (srch("fast", 50, None, SourceCoverage::Full), health("fast", true, 4e6)),
+        ];
+        let order = select_failover_order(&probed, "Xenova/bge-m3", Region::International);
+        assert_eq!(order[0].id, "fast", "higher throughput×priority wins");
+        assert_eq!(order[1].id, "slow");
+    }
+
+    #[test]
+    fn select_region_hint_boosts_same_region() {
+        // 两源 throughput×priority 持平(都 = 1e6×60 = 6e7);CN 区时 CN-hint 源因 1.5x 偏置抬前。
+        let probed = vec![
+            (srch("intl", 60, Some(Region::International), SourceCoverage::Full), health("intl", true, 1e6)),
+            (srch("cn", 60, Some(Region::China), SourceCoverage::Full), health("cn", true, 1e6)),
+        ];
+        let order = select_failover_order(&probed, "Xenova/bge-m3", Region::China);
+        assert_eq!(order[0].id, "cn", "CN-region source boosted in CN region");
+    }
+
+    #[test]
+    fn select_throughput_can_beat_region_bias() {
+        // region 偏置只是 1.5x,不该让一个极慢的同区源压过区外快源(§12:实测能翻盘)。
+        // cn(同区): 1e5 × 60 × 1.5 = 9e6;intl(区外): 1e6 × 60 × 1 = 6e7 → intl 仍在前。
+        let probed = vec![
+            (srch("cn", 60, Some(Region::China), SourceCoverage::Full), health("cn", true, 1e5)),
+            (srch("intl", 60, Some(Region::International), SourceCoverage::Full), health("intl", true, 1e6)),
+        ];
+        let order = select_failover_order(&probed, "Xenova/bge-m3", Region::China);
+        assert_eq!(order[0].id, "intl", "fast out-of-region must beat slow in-region");
+    }
+
+    #[test]
+    fn select_empty_when_no_eligible() {
+        let probed = vec![
+            (srch("dead", 100, None, SourceCoverage::Full), health("dead", false, 0.0)),
+            (srch("ms", 80, None, SourceCoverage::OnlyXenovaOnnx), health("ms", true, 5e6)),
+        ];
+        // whisper 不被 OnlyXenovaOnnx 覆盖,dead 不可达 → 空
+        let order = select_failover_order(&probed, "ggerganov/whisper.cpp", Region::China);
+        assert!(order.is_empty(), "no eligible source → empty failover order");
     }
 }
