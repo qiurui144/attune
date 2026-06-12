@@ -203,6 +203,17 @@ enum Commands {
     PluginUninstall {
         plugin_id: String,
     },
+    /// 把一个第三方签名公钥加入信任白名单 (settings.plugin_trusted_pubkeys).
+    /// 该公钥签名的插件验签后标 ThirdParty (可在 strict 模式加载)。**不能**把插件
+    /// 抬成 Official —— 官方信任根是编译期 const,白名单是独立的低信任域 (T11)。
+    /// 经运行中的 attune-server (默认 http://localhost:18900) PATCH settings 落库。
+    PluginTrustAdd {
+        /// 第三方签名公钥 hex (64 chars, Ed25519)
+        pubkey: String,
+        /// attune-server base URL (默认 http://localhost:18900)
+        #[arg(long, default_value = "http://localhost:18900")]
+        server_url: String,
+    },
     /// 列出已装载 plugins (~/.local/share/attune/plugins/)
     PluginList,
     /// 登录云端账号 (走 cloud accounts /api/v1/users/login)
@@ -490,6 +501,9 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
         Commands::PluginUninstall { plugin_id } => {
             return run_plugin_uninstall(plugin_id);
+        }
+        Commands::PluginTrustAdd { pubkey, server_url } => {
+            return run_plugin_trust_add(pubkey, server_url);
         }
         Commands::PluginList => {
             return run_plugin_list();
@@ -797,6 +811,7 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. }
         | Commands::PluginKeygen { .. } | Commands::PluginSign { .. } | Commands::PluginVerifySig { .. }
         | Commands::PluginInstall { .. } | Commands::PluginUninstall { .. } | Commands::PluginList
+        | Commands::PluginTrustAdd { .. }
         | Commands::Login { .. } | Commands::SyncPlugins { .. } | Commands::LinkFolder { .. }
         | Commands::PluginPublish { .. }
         | Commands::OcrProfileList | Commands::OcrProfileShow { .. }
@@ -1212,6 +1227,57 @@ fn run_plugin_uninstall(plugin_id: &str) -> attune_core::error::Result<()> {
     }
     std::fs::remove_dir_all(&dst).map_err(attune_core::error::VaultError::Io)?;
     eprintln!("✓ uninstalled {plugin_id}");
+    Ok(())
+}
+
+/// Trust-chain T11: add a third-party signer pubkey to settings.plugin_trusted_pubkeys
+/// via the running attune-server PATCH /api/v1/settings. The pubkey must be 64-hex
+/// (Ed25519); the server validates again and rejects malformed keys. This whitelist is
+/// a SEPARATE trust domain — it can never elevate a plugin to Official (that anchor is
+/// a compile-time const, §9 adversarial 2).
+fn run_plugin_trust_add(pubkey: &str, server_url: &str) -> attune_core::error::Result<()> {
+    let pk = pubkey.trim().to_string();
+    if pk.len() != 64 || !pk.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(attune_core::error::VaultError::InvalidInput(
+            "pubkey must be 64 hex chars (Ed25519 verifying key)".into(),
+        ));
+    }
+    let base = server_url.trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder()
+        .build()
+        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!("http client: {e}"))))?;
+
+    // 1) GET current settings to read the existing whitelist (vault must be unlocked).
+    let cur: serde_json::Value = client
+        .get(format!("{base}/api/v1/settings"))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.json())
+        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!(
+            "GET settings failed (is attune-server running + vault unlocked?): {e}"
+        ))))?;
+    let mut keys: Vec<String> = cur
+        .get("plugin_trusted_pubkeys")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if keys.iter().any(|k| k == &pk) {
+        eprintln!("✓ pubkey already trusted: {pk}");
+        return Ok(());
+    }
+    keys.push(pk.clone());
+
+    // 2) PATCH the merged whitelist back.
+    let resp = client
+        .patch(format!("{base}/api/v1/settings"))
+        .json(&serde_json::json!({ "plugin_trusted_pubkeys": keys }))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!(
+            "PATCH settings failed: {e}"
+        ))))?;
+    let _ = resp;
+    eprintln!("✓ added trusted pubkey: {pk}");
     Ok(())
 }
 
