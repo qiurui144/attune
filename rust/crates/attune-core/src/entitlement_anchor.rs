@@ -132,6 +132,85 @@ pub fn authorize_snapshot(
     }
 }
 
+// ─── SEC-2: anti-replay nonce + verified_at freshness (T-auth-2) ──────────
+//
+// 堵"吊销用户无限重放旧 active 200"。每次 verify client 生成随机 nonce,要求签名
+// signed_payload.nonce 回显同一值;verified_at 单调时钟校验(回拨/旧值拒绝)。与
+// SEC-1 叠加:签名真 + 新鲜 + nonce 绑定,三者缺一拒。
+
+/// 时钟前跳容忍窗口(spec §7.2 时钟回拨弱启发,24h skew)。
+pub const FRESHNESS_SKEW_SECONDS: i64 = 24 * 3600;
+
+/// 生成一次性 128-bit challenge nonce(hex)。用 `OsRng`(crypto-secure)**不用**
+/// `thread_rng` —— 可预测 nonce 会让重放绕过 anti-replay。每次 verify 新生成,不持久化。
+pub fn generate_nonce() -> String {
+    use aes_gcm::aead::{rand_core::RngCore, OsRng};
+    let mut buf = [0u8; 16];
+    OsRng.fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+/// SEC-1 + SEC-2 叠加门(纯函数,无锁/无网络/无 DB)。在 [`authorize_snapshot`]
+/// 签名验签之上叠加:
+/// - **nonce 回显**:`signed_payload.nonce` 必须 byte-equal `client_nonce`(重放旧响应
+///   必然 nonce 不匹配 → 拒);
+/// - **verified_at 单调**:必须 **严格大于** `last_accepted` 已存值(旧快照重放拒);
+///   且不得超 `now + FRESHNESS_SKEW`(伪造未来时间拒)。
+///
+/// 三项失败在 strict → `Unauthorized`;warn 仅记警告返 `AuthorizedWithWarning`
+/// (grandfather 跨仓 bootstrap 不破网)。
+#[allow(clippy::too_many_arguments)]
+pub fn authorize_snapshot_fresh(
+    resp: &EntitlementSnapshot,
+    mode: TrustMode,
+    keys: &[&str],
+    client_nonce: &str,
+    last_accepted: Option<&chrono::DateTime<chrono::Utc>>,
+    now: &chrono::DateTime<chrono::Utc>,
+) -> SnapshotAuthorization {
+    // 1) 先过 SEC-1 签名门。Unauthorized / Warning 直接透传。
+    let base = authorize_snapshot(resp, mode, keys);
+    let status = match &base {
+        SnapshotAuthorization::Authorized(s) => s.clone(),
+        // 未签名 warn 容忍 / strict 已拒 → 不再做 freshness(无可信 payload)。
+        _ => return base,
+    };
+
+    // 到此 SEC-1 通过(Authorized)。signed_payload 必在。
+    let payload = resp.signed_payload.as_ref().expect("authorized implies payload");
+
+    let reject = |code: &'static str| -> SnapshotAuthorization {
+        match mode {
+            TrustMode::Strict => SnapshotAuthorization::Unauthorized(code),
+            _ => SnapshotAuthorization::AuthorizedWithWarning(status.clone()),
+        }
+    };
+
+    // 2) nonce 回显(byte-equal)。
+    if payload.nonce != client_nonce {
+        return reject("entitlement-nonce-mismatch");
+    }
+
+    // 3) verified_at 解析 + freshness 单调。
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&payload.verified_at) else {
+        return reject("entitlement-verified-at-unparseable");
+    };
+    let verified_at = parsed.with_timezone(&chrono::Utc);
+
+    // 超 now + skew(伪造未来时间)→ 拒。
+    if verified_at > *now + chrono::Duration::seconds(FRESHNESS_SKEW_SECONDS) {
+        return reject("entitlement-verified-at-future");
+    }
+    // 非严格递增(<= 已存)→ 旧快照重放 → 拒。
+    if let Some(prev) = last_accepted {
+        if verified_at <= *prev {
+            return reject("entitlement-stale-replay");
+        }
+    }
+
+    SnapshotAuthorization::Authorized(status)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +359,162 @@ mod tests {
     fn verify_entitlement_signature_rejects_bad_base64() {
         assert!(!verify_entitlement_signature(b"payload", "not!!base64", &["abcd"]));
         assert!(!verify_entitlement_signature(b"payload", "c2hvcnQ=", &["abcd"])); // wrong len
+    }
+
+    // ── T-auth-2: SEC-2 anti-replay nonce + verified_at freshness ──────────
+
+    /// Build a signed snapshot with explicit nonce + verified_at, signed by `signer`.
+    fn signed_snapshot_at(
+        signer: &SigningKey,
+        status: &str,
+        nonce: &str,
+        verified_at: &str,
+    ) -> EntitlementSnapshot {
+        let payload = SignedPayload {
+            status: status.into(),
+            allowed_plugins: vec!["law-pro".into()],
+            expires_at: Some("2026-12-31T00:00:00+00:00".into()),
+            nonce: nonce.into(),
+            verified_at: verified_at.into(),
+        };
+        let sig = signer.sign(&payload.canonical_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+        let json = serde_json::json!({
+            "valid": true, "plan": "pro", "entitlement_schema": 1,
+            "nonce": nonce,
+            "signed_payload": serde_json::to_value(&payload).unwrap(),
+            "signature": sig_b64, "entitlements": [], "next_verify_after_hours": 24
+        });
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn nonce_used_is_random_okrng() {
+        // generate_nonce is 128-bit hex (32 chars), distinct across calls.
+        let a = generate_nonce();
+        let b = generate_nonce();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b, "nonces must be unpredictable / unique");
+    }
+
+    #[test]
+    fn nonce_mismatch_rejected() {
+        let signer = signing_key(11);
+        let keys = [pubkey_hex(&signer)];
+        let kr: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        // Response nonce = "server-n", but client sent "client-n" → reject even though sig valid.
+        let snap = signed_snapshot_at(&signer, "active", "server-n", "2026-06-12T00:00:00+00:00");
+        let now = ts("2026-06-12T01:00:00+00:00");
+        assert_eq!(
+            authorize_snapshot_fresh(&snap, TrustMode::Strict, &kr, "client-n", None, &now),
+            SnapshotAuthorization::Unauthorized("entitlement-nonce-mismatch")
+        );
+    }
+
+    #[test]
+    fn monotonic_verified_at_accepted() {
+        let signer = signing_key(11);
+        let keys = [pubkey_hex(&signer)];
+        let kr: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let snap = signed_snapshot_at(&signer, "active", "n1", "2026-06-12T00:00:00+00:00");
+        let prev = ts("2026-06-11T00:00:00+00:00"); // older than verified_at
+        let now = ts("2026-06-12T00:30:00+00:00");
+        assert_eq!(
+            authorize_snapshot_fresh(&snap, TrustMode::Strict, &kr, "n1", Some(&prev), &now),
+            SnapshotAuthorization::Authorized("active".into())
+        );
+    }
+
+    #[test]
+    fn stale_verified_at_rejected() {
+        let signer = signing_key(11);
+        let keys = [pubkey_hex(&signer)];
+        let kr: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        // verified_at == prev (not strictly greater) → stale.
+        let snap = signed_snapshot_at(&signer, "active", "n1", "2026-06-12T00:00:00+00:00");
+        let prev = ts("2026-06-12T00:00:00+00:00");
+        let now = ts("2026-06-12T01:00:00+00:00");
+        assert_eq!(
+            authorize_snapshot_fresh(&snap, TrustMode::Strict, &kr, "n1", Some(&prev), &now),
+            SnapshotAuthorization::Unauthorized("entitlement-stale-replay")
+        );
+    }
+
+    #[test]
+    fn future_verified_at_beyond_skew_rejected() {
+        let signer = signing_key(11);
+        let keys = [pubkey_hex(&signer)];
+        let kr: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        // verified_at is 48h in the future vs now (> 24h skew) → reject.
+        let snap = signed_snapshot_at(&signer, "active", "n1", "2026-06-14T00:00:00+00:00");
+        let now = ts("2026-06-12T00:00:00+00:00");
+        assert_eq!(
+            authorize_snapshot_fresh(&snap, TrustMode::Strict, &kr, "n1", None, &now),
+            SnapshotAuthorization::Unauthorized("entitlement-verified-at-future")
+        );
+    }
+
+    /// SEC-2 核心:重放一个旧的、签名有效的 active 200(nonce 是上次的)→ 拒。
+    #[test]
+    fn replayed_snapshot_rejected() {
+        let signer = signing_key(11);
+        let keys = [pubkey_hex(&signer)];
+        let kr: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        // An OLD active snapshot (signed, valid) with last-time's nonce + old verified_at.
+        let old = signed_snapshot_at(&signer, "active", "old-nonce", "2026-06-10T00:00:00+00:00");
+        // Client now sent a FRESH nonce; the replayed response carries the stale nonce.
+        let fresh_client_nonce = "fresh-nonce-this-round";
+        let prev = ts("2026-06-11T00:00:00+00:00");
+        let now = ts("2026-06-12T00:00:00+00:00");
+        let auth = authorize_snapshot_fresh(&old, TrustMode::Strict, &kr, fresh_client_nonce, Some(&prev), &now);
+        // nonce mismatch fires first (replayed response can't echo this round's nonce).
+        assert_eq!(auth, SnapshotAuthorization::Unauthorized("entitlement-nonce-mismatch"));
+    }
+
+    /// SEC-1 + SEC-2 吊销逃逸闭合总断言:吊销后攻击者重放"上一条签名有效的 active 快照"
+    /// (签名真但 nonce 旧 + verified_at 旧)→ 被 nonce + freshness 拒。
+    #[test]
+    fn revoked_replay_with_valid_old_signature_rejected() {
+        let official = signing_key(11);
+        let keys = [pubkey_hex(&official)];
+        let kr: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        // The attacker replays a genuinely-signed old "active" snapshot.
+        let old_active = signed_snapshot_at(&official, "active", "round-1-nonce", "2026-06-10T00:00:00+00:00");
+        // This round the client minted a new nonce + has advanced last_accepted.
+        let this_round_nonce = generate_nonce();
+        let last_accepted = ts("2026-06-11T00:00:00+00:00");
+        let now = ts("2026-06-12T00:00:00+00:00");
+        let auth = authorize_snapshot_fresh(
+            &old_active,
+            TrustMode::Strict,
+            &kr,
+            &this_round_nonce,
+            Some(&last_accepted),
+            &now,
+        );
+        assert!(
+            matches!(auth, SnapshotAuthorization::Unauthorized(_)),
+            "replayed (real-sig but stale) active must be rejected → revoked license cannot revive"
+        );
+    }
+
+    #[test]
+    fn warn_mode_tolerates_nonce_and_freshness_failures() {
+        // grandfather: warn records warning but does not block (cross-repo bootstrap).
+        let signer = signing_key(11);
+        let keys = [pubkey_hex(&signer)];
+        let kr: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+        let snap = signed_snapshot_at(&signer, "active", "server-n", "2026-06-12T00:00:00+00:00");
+        let now = ts("2026-06-12T01:00:00+00:00");
+        let auth = authorize_snapshot_fresh(&snap, TrustMode::Warn, &kr, "DIFFERENT", None, &now);
+        assert!(
+            matches!(auth, SnapshotAuthorization::AuthorizedWithWarning(_)),
+            "warn must tolerate nonce mismatch (grandfather)"
+        );
     }
 }
