@@ -43,6 +43,21 @@ pub async fn list(
     let disabled = load_disabled_plugin_ids(&state);
     let is_enabled = |id: &str| !disabled.iter().any(|d| d == id);
 
+    // Trust-chain T10 (spec §5.1): each plugin reports `trust` (real verify result,
+    // T9 — not hardcoded) + `entitlement_status` (runtime state from EntitlementCache).
+    // Free / unregistered plugins → entitlement_status "free"; trust defaults to
+    // "unsigned" when the registry has no verified label (builtin taxonomy plugins).
+    let now = chrono::Utc::now();
+    let trust_of = |id: &str| -> &'static str {
+        state
+            .plugin_registry
+            .plugin_trust(id)
+            .map(|t| t.as_api_str())
+            .unwrap_or("unsigned")
+    };
+    let entitlement_status_of =
+        |id: &str| -> &'static str { state.entitlement_cache.status(id, &now).as_api_str() };
+
     // 收集两个数据源:
     // 1. taxonomy.plugins (内置 dimensions yaml)
     // 2. plugin_registry (用户从 plugins/ 目录加载的, e.g. law-pro)
@@ -59,6 +74,8 @@ pub async fn list(
                 "description": p.description,
                 "source": if ["tech", "law", "presales", "patent"].contains(&p.id.as_str()) { "builtin" } else { "user" },
                 "enabled": is_enabled(&p.id),
+                "trust": trust_of(&p.id),
+                "entitlement_status": entitlement_status_of(&p.id),
                 "type": "taxonomy",
                 "dimensions": p.dimensions.iter().map(|d| serde_json::json!({
                     "name": d.name,
@@ -95,6 +112,8 @@ pub async fn list(
             "description": m.description,
             "source": "user",
             "enabled": is_enabled(&m.id),
+            "trust": trust_of(&m.id),
+            "entitlement_status": entitlement_status_of(&m.id),
             "type": m.plugin_type.clone(),
             "agents": agents,
             "ui_components": ui_components,
@@ -115,6 +134,8 @@ pub async fn list(
         "description": p.description,
         "source": "builtin",
         "enabled": true,
+        "trust": trust_of(&p.id),
+        "entitlement_status": entitlement_status_of(&p.id),
         "dimensions": p.dimensions.iter().map(|d| serde_json::json!({
             "name": d.name,
             "label": d.label,
@@ -175,4 +196,67 @@ pub async fn toggle(
         "id": plugin_id,
         "enabled": now_enabled,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use attune_core::store::plugin_entitlements::EntitlementRow;
+    use std::sync::Arc;
+
+    fn ent_row(plugin_id: &str, tier: &str, status: &str) -> EntitlementRow {
+        EntitlementRow {
+            plugin_id: plugin_id.into(),
+            license_id: "lic-x".into(),
+            tier: tier.into(),
+            status: status.into(),
+            trial_expires: None,
+            signing_pubkey_hex: "00".repeat(32),
+            last_verified_at: "2026-06-12T00:00:00+00:00".into(),
+            grace_started_at: None,
+            updated_at: "2026-06-12T00:00:00+00:00".into(),
+        }
+    }
+
+    /// Trust-chain T10 (spec §5.1): GET /api/v1/plugins lists each plugin with `trust`
+    /// (real verify result — an unsigned user plugin → "unsigned") + `entitlement_status`
+    /// (runtime state from EntitlementCache — a seeded active paid license → "active").
+    /// Drives the real `list` handler against an AppState that scanned a temp plugins dir.
+    #[tokio::test]
+    async fn list_returns_trust_and_status() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        // default_plugins_dir() resolves under dirs::data_local_dir() = XDG_DATA_HOME.
+        // SAFETY: single-threaded test, set before AppState::new scans the dir.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+            std::env::set_var("HOME", tmp.path());
+        }
+        let plugin_dir = tmp.path().join("attune").join("plugins").join("test-pro");
+        std::fs::create_dir_all(&plugin_dir).expect("mkdir plugin");
+        std::fs::write(
+            plugin_dir.join("plugin.yaml"),
+            "id: test-pro\nname: Test Pro\ntype: industry\nversion: \"1.0.0\"\n",
+        )
+        .expect("write plugin.yaml");
+
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-plugins-trust-not-real").expect("setup");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+        // Seed entitlement cache: test-pro is a paid, active license → status "active".
+        state.entitlement_cache.upsert(ent_row("test-pro", "paid", "active"));
+
+        let resp = list(axum::extract::State(state)).await.expect("list ok");
+        let body = resp.0; // Json(Value)
+        let plugins = body["plugins"].as_array().expect("plugins array");
+        let entry = plugins
+            .iter()
+            .find(|p| p["id"] == "test-pro")
+            .expect("test-pro listed");
+
+        // Unsigned user plugin (no plugin.sig) → real verify yields trust "unsigned".
+        assert_eq!(entry["trust"], "unsigned", "trust is the real verify result, not hardcoded");
+        // Seeded paid active license → entitlement_status "active".
+        assert_eq!(entry["entitlement_status"], "active");
+    }
 }

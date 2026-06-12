@@ -62,6 +62,39 @@ pub struct RunAgentRequest {
     pub input: serde_json::Value,
 }
 
+/// Trust-chain T10 (spec §7.2): entitlement dispatch gate. Returns `Ok(())` when the
+/// owning plugin is entitled to run (free / active / trial / paid-grace / degraded);
+/// returns a kebab-coded `AppError::Forbidden` when blocked (`trial-expired` /
+/// `license-revoked`). The plugin's installed data is NOT touched — only the run is
+/// refused, so re-subscribing re-enables it (spec §7.2 "插件保留已装"). Pure read of
+/// the in-memory cache (O(1) keyed lookup); no vault / network.
+fn entitlement_gate(state: &SharedState, plugin_id: &str) -> AppResult<()> {
+    let now = chrono::Utc::now();
+    let decision = state.entitlement_cache.is_entitled(plugin_id, &now);
+    gate_decision_to_result(plugin_id, decision)
+}
+
+/// Map an [`attune_core::entitlement::EntitlementDecision`] to the dispatch route's
+/// result. `Allow` → `Ok`; `Reject(code)` → kebab-coded 403 `AppError::detailed`.
+/// Pure (no state) so the dispatch-gate behavior is unit-testable per §7.2.
+fn gate_decision_to_result(
+    plugin_id: &str,
+    decision: attune_core::entitlement::EntitlementDecision,
+) -> AppResult<()> {
+    use attune_core::entitlement::EntitlementDecision;
+    match decision {
+        EntitlementDecision::Allow => Ok(()),
+        EntitlementDecision::Reject(code) => Err(AppError::detailed(
+            StatusCode::FORBIDDEN,
+            json!({
+                "error": "agent dispatch blocked by entitlement",
+                "code": code,
+                "plugin_id": plugin_id,
+            }),
+        )),
+    }
+}
+
 /// POST /api/v1/agents/{agent_id}/run
 pub async fn run_agent(
     State(state): State<SharedState>,
@@ -82,6 +115,12 @@ pub async fn run_agent(
         .ok_or_else(|| {
             AppError::NotFound(format!("agent '{agent_id}' not found in any loaded plugin"))
         })?;
+
+    // Trust-chain T10 (spec §7.2): entitlement gate BEFORE any dispatch work. A
+    // trial-expired / revoked license rejects with a kebab code (plugin data is
+    // preserved — only the run is blocked); paid-grace / degraded allow (fail-open);
+    // free / unregistered plugins always allow. O(1) EntitlementCache keyed lookup.
+    entitlement_gate(&state, &plugin_id)?;
 
     // Bug-D: runtime: library 的 agent (如 interest_calculator) 不暴露独立 binary —
     // 由其他 agent 内部以 lib 方式调用,不应通过 HTTP route 直接 dispatch。
@@ -204,6 +243,75 @@ pub async fn run_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use attune_core::entitlement::{EntitlementCache, EntitlementDecision};
+    use attune_core::store::plugin_entitlements::EntitlementRow;
+    use chrono::{DateTime, Utc};
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn row(
+        plugin_id: &str,
+        tier: &str,
+        status: &str,
+        trial_expires: Option<&str>,
+        grace_started: Option<&str>,
+    ) -> EntitlementRow {
+        EntitlementRow {
+            plugin_id: plugin_id.into(),
+            license_id: "lic-x".into(),
+            tier: tier.into(),
+            status: status.into(),
+            trial_expires: trial_expires.map(|s| s.into()),
+            signing_pubkey_hex: "00".repeat(32),
+            last_verified_at: "2026-06-12T00:00:00+00:00".into(),
+            grace_started_at: grace_started.map(|s| s.into()),
+            updated_at: "2026-06-12T00:00:00+00:00".into(),
+        }
+    }
+
+    // ── T10: dispatch gate (spec §7.2) ──────────────────────────────────────
+
+    /// trial-expired → dispatch blocked with kebab code `trial-expired`; the plugin's
+    /// installed data is untouched (gate only refuses the run, cache row still present).
+    #[test]
+    fn dispatch_blocked_when_trial_expired() {
+        let cache = EntitlementCache::new();
+        cache.upsert(row("law-pro", "trial", "active", Some("2026-06-10T00:00:00+00:00"), None));
+        let now = ts("2026-06-12T00:00:00+00:00"); // past trial_expires
+        let decision = cache.is_entitled("law-pro", &now);
+        assert_eq!(decision, EntitlementDecision::Reject("trial-expired"));
+        let res = gate_decision_to_result("law-pro", decision);
+        let err = res.unwrap_err();
+        // 403 + kebab code via AppError::detailed; plugin row still in cache (data preserved).
+        assert!(matches!(err, AppError::Detailed { status, .. } if status == StatusCode::FORBIDDEN));
+        assert_eq!(cache.snapshot().len(), 1, "trial-expired must NOT delete the plugin row");
+    }
+
+    /// paid in-grace (cloud unreachable, < 14d) → dispatch ALLOWED (fail-open).
+    #[test]
+    fn dispatch_allowed_in_grace_paid() {
+        let cache = EntitlementCache::new();
+        cache.upsert(row("law-pro", "paid", "active", None, Some("2026-06-10T00:00:00+00:00")));
+        let now = ts("2026-06-12T00:00:00+00:00"); // 2d into grace, < 14d
+        let decision = cache.is_entitled("law-pro", &now);
+        assert_eq!(decision, EntitlementDecision::Allow);
+        assert!(gate_decision_to_result("law-pro", decision).is_ok());
+    }
+
+    /// revoked → dispatch blocked with kebab code `license-revoked` (fail-closed).
+    #[test]
+    fn dispatch_blocked_when_revoked() {
+        let cache = EntitlementCache::new();
+        cache.upsert(row("law-pro", "paid", "revoked", None, None));
+        let now = ts("2026-06-12T00:00:00+00:00");
+        let decision = cache.is_entitled("law-pro", &now);
+        assert_eq!(decision, EntitlementDecision::Reject("license-revoked"));
+        let res = gate_decision_to_result("law-pro", decision);
+        assert!(matches!(res.unwrap_err(), AppError::Detailed { status, .. } if status == StatusCode::FORBIDDEN));
+        assert_eq!(cache.snapshot().len(), 1, "revoked must NOT delete the plugin row (data preserved)");
+    }
 
     #[test]
     fn llm_env_from_settings_extracts_all_four_vars() {

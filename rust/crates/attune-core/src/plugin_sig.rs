@@ -69,6 +69,17 @@ impl Trust {
             Trust::Unsigned => "Unsigned",
         }
     }
+
+    /// kebab/lowercase wire form for the plugins-list API (spec §5.1 `trust`):
+    /// `official | third-party | unsigned`. Distinct from [`Self::as_str`] (the
+    /// PascalCase pricing-tier label) — the API surface is the kebab variant.
+    pub fn as_api_str(self) -> &'static str {
+        match self {
+            Trust::Official => "official",
+            Trust::ThirdParty => "third-party",
+            Trust::Unsigned => "unsigned",
+        }
+    }
 }
 
 /// 签名校验结果
