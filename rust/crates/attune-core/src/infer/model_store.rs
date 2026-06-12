@@ -71,59 +71,35 @@ pub(crate) fn hf_hub_offline() -> bool {
         .unwrap_or(false)
 }
 
-/// 下载源的 pre-flight 可达性探测连接超时。hf-hub 0.5 的 `ureq` agent 不暴露超时配置
-/// (`ApiBuilder` 无 `with_timeout`),`repo.get()` 对一个连不上的 endpoint(如 CN 已死的
-/// hf-mirror.com / 黑洞地址)会阻塞到 TCP 内核超时(可达数分钟)→ 启动期 / 请求路径永久
-/// hang(呼应 9936dca 教训)。因此在调 hf-hub 前先用一个**带显式 connect 超时**的轻量
-/// reqwest blocking 探针确认 endpoint 可达;不可达即快速 `Err` → 调用方 graceful degrade。
+/// 下载客户端的连接超时。对连不上的 endpoint(CN 已死的 hf-mirror.com / 黑洞地址)
+/// 用**显式 connect 超时**把"connect 阶段永久 hang"压成有界失败(呼应 9936dca 教训:
+/// hf-hub 0.5 的零超时 ureq agent 对死源会阻塞到 TCP 内核超时,可达数分钟)。
 const ENDPOINT_PROBE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// 解析当前 HF endpoint(优先 `HF_ENDPOINT` 环境变量,未设走官方 `huggingface.co`)。
-pub(crate) fn hf_endpoint() -> String {
-    std::env::var("HF_ENDPOINT")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "https://huggingface.co".to_string())
-}
-
-/// 单次模型文件下载的**整体**超时上限。hf-hub 的 `repo.get()` 用零超时 ureq agent,gdb
-/// thread-dump(9936dca)实证 hang 发生在 TLS recv **传输中途**(连上后 stall),probe 的
-/// connect 守卫覆盖不到。reqwest **blocking** ClientBuilder 不暴露 `read_timeout`(仅 async
-/// 有),故用 total `.timeout()` 把 worst-case 从"永久"压成有界:本仓模型 ≤330MB,即便
-/// ~500KB/s 慢网也 < 11min 完成,600s 足够不误杀合法慢下载,而纯 stall 的死源 600s 内必
-/// `Err` → 有界失败 + graceful degrade,不再永久阻塞 unlock/启动线程。
+/// 单次模型文件下载的**整体**超时上限。gdb thread-dump(9936dca)实证 hang 发生在 TLS recv
+/// **传输中途**(连上后 stall),connect 守卫覆盖不到。reqwest **blocking** ClientBuilder
+/// 不暴露 `read_timeout`(仅 async 有),故用 total `.timeout()` 把 worst-case 从"永久"压成
+/// 有界:本仓模型 ≤330MB,即便 ~500KB/s 慢网也 < 11min 完成,600s 足够不误杀合法慢下载,
+/// 而纯 stall 的死源 600s 内必 `Err` → 有界失败 + graceful degrade,不再永久阻塞 unlock/启动。
 const DOWNLOAD_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// 带显式 connect + 整体超时探测 endpoint 是否可达。可达 → `Ok(())`;否则 `Err`。
-///
-/// 用于在阻塞下载**之前**做 fail-fast 前哨(connect-refuse 类死源在此即挂);但**非充分**
-/// ——connect-then-stall 类死源由 `download_hf_file` 的 total `timeout` 兜底(见 C1 注释)。
-/// 探针本身不下任何模型文件(只对 endpoint 根发一个 GET),不引入新的请求路径网络副作用(R3)。
-pub(crate) fn probe_endpoint_reachable(endpoint: &str) -> Result<()> {
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(ENDPOINT_PROBE_CONNECT_TIMEOUT)
-        .timeout(ENDPOINT_PROBE_CONNECT_TIMEOUT)
-        .build()
-        .map_err(|e| VaultError::ModelLoad(format!("build probe client: {e}")))?;
-    client.get(endpoint).send().map(|_| ()).map_err(|e| {
-        VaultError::ModelLoad(format!(
-            "model download source {endpoint} unreachable (connect/timeout {}s): {e}; engine degraded",
-            ENDPOINT_PROBE_CONNECT_TIMEOUT.as_secs()
-        ))
-    })
-}
-
 /// 构造一个 HF-resolve 兼容 URL(`{endpoint}/{repo}/resolve/main/{filename}`)并**流式**
-/// 下载到 `dst`。endpoint 取 `hf_endpoint()`(env `HF_ENDPOINT` / region 默认)。
+/// 下载到 `dst`。endpoint 由调用方**显式**给定 —— S8 selector(`model_source`)解析出的源,
+/// 或 failover 链上的次优源。**唯一下载原语**(旧 `download_hf_file` env-默认包装 +
+/// `probe_endpoint_reachable` 前哨已被 S8 failover 取代:source selector 的探测做选源,
+/// 本函数的 connect+total 超时做单次下载的有界守卫)。
 ///
-/// C1 核心:替代 hf-hub `repo.get()`(零超时 ureq → 传输中途 stall 永久 hang)。client 配
-/// `connect_timeout`(死源 connect 守卫)+ total `timeout`(兜 stall-after-connect,把永久
-/// hang 压成 ≤600s 有界失败;reqwest blocking 无 read_timeout,故用 total)。逐块 copy 到
-/// `.part` 后 atomic rename,半下载不留脏文件。与 hf-hub 同 URL 约定(`{endpoint}/{repo}/
+/// client 配 `connect_timeout`(死源 connect 守卫)+ total `timeout`(兜 stall-after-connect,
+/// 把永久 hang 压成 ≤600s 有界失败;reqwest blocking 无 read_timeout,故用 total)。逐块 copy
+/// 到 `.part` 后 atomic rename,半下载不留脏文件。与 hf-hub 同 URL 约定(`{endpoint}/{repo}/
 /// resolve/{rev}/{file}`),CN ModelScope /models 路径已含在 endpoint 内。
-pub(crate) fn download_hf_file(repo_id: &str, filename: &str, dst: &std::path::Path) -> Result<()> {
-    let endpoint = hf_endpoint();
+pub(crate) fn download_hf_file_from(
+    endpoint: &str,
+    repo_id: &str,
+    filename: &str,
+    dst: &std::path::Path,
+) -> Result<()> {
+    let endpoint = endpoint.trim_end_matches('/');
     let url = format!("{endpoint}/{repo_id}/resolve/main/{filename}");
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(ENDPOINT_PROBE_CONNECT_TIMEOUT)
@@ -196,17 +172,30 @@ pub fn ensure_models(
         )));
     }
 
-    // S1/C1: pre-flight 可达性探测(connect 守卫)做 fast-fail 前哨;真正的下载走
-    // download_hf_file —— 带 connect+total 超时的流式 reqwest,替代零超时的 hf-hub repo.get(),
-    // 兜住"连上后传输中途 stall"的死源(9936dca gdb 实证的 hang 模式),不再永久阻塞。
-    probe_endpoint_reachable(&hf_endpoint())?;
+    // S8: 经动态源选择解析 failover 顺序(候选注册表 + 健康/吞吐探测),逐源下载,
+    // 任一源失败(网络 / 非 2xx / sha)自动切次优。embedding repo 是 `Xenova/*`,
+    // 全源覆盖 → 顺序通常 company-mirror → ModelScope(CN)→ HF。探测只在此显式
+    // 下载路径(非请求路径,R3);显式 HF_ENDPOINT 仍由 download_with_failover 尊重。
+    // 替代旧的"静态单源 probe + download_hf_file"(S1/C1 的超时守卫已下沉进
+    // download_hf_file_from,failover 全程复用)。
+    let sources = crate::infer::model_source::resolve_sources_for(repo_id);
 
     if !model_path.exists() {
-        download_hf_file(repo_id, model_filename, &model_path)?;
+        crate::infer::model_source::download_with_failover(
+            &sources,
+            repo_id,
+            model_filename,
+            &model_path,
+        )?;
     }
 
     if !tokenizer_path.exists() {
-        download_hf_file(repo_id, tokenizer_filename, &tokenizer_path)?;
+        crate::infer::model_source::download_with_failover(
+            &sources,
+            repo_id,
+            tokenizer_filename,
+            &tokenizer_path,
+        )?;
     }
 
     // 完整性校验（首次写入 .sha256；后续对比）
@@ -253,28 +242,22 @@ mod tests {
     }
 
     #[test]
-    fn probe_unreachable_endpoint_fails_fast() {
-        // S1: 指向一个黑洞地址(127.0.0.1:1 — 普通环境无监听 → connect refused/timeout)。
-        // 断言探针在 connect 超时上限内返回 Err 而非永久 hang。给一点调度余量。
+    fn download_from_black_hole_fails_fast() {
+        // 黑洞地址(127.0.0.1:1 — 普通环境无监听 → connect refused/timeout)。
+        // 断言下载原语在 connect 超时上限内返回 Err 而非永久 hang(9936dca 守卫)。
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("model.bin");
         let start = std::time::Instant::now();
-        let r = probe_endpoint_reachable("http://127.0.0.1:1");
+        let r = download_hf_file_from("http://127.0.0.1:1", "Xenova/bge-m3", "model.bin", &dst);
         let elapsed = start.elapsed();
         assert!(r.is_err(), "black-hole endpoint must return Err, not hang");
+        assert!(!dst.exists(), "no file left on failed download");
         assert!(
             elapsed < ENDPOINT_PROBE_CONNECT_TIMEOUT + std::time::Duration::from_secs(5),
-            "probe must fail-fast within ~{}s, took {:?}",
+            "download must fail-fast within ~{}s, took {:?}",
             ENDPOINT_PROBE_CONNECT_TIMEOUT.as_secs(),
             elapsed
         );
-    }
-
-    #[test]
-    fn hf_endpoint_defaults_to_official_when_unset() {
-        // HF_ENDPOINT 未设(或为空)→ 官方 huggingface.co。注意:不 mutate 进程 env(与
-        // 并行测试竞争),仅在当前未设时断言默认值;CI 环境通常不设该变量。
-        if std::env::var_os("HF_ENDPOINT").is_none() {
-            assert_eq!(hf_endpoint(), "https://huggingface.co");
-        }
     }
 
     #[test]

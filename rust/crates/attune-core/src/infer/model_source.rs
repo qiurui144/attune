@@ -249,6 +249,69 @@ pub fn resolve_sources_for(repo_id: &str) -> Vec<ModelSource> {
     select_failover_order(&probed, repo_id, region)
 }
 
+/// S8 step 3 集成:按给定 failover 顺序逐源尝试下载 `repo_id/filename` → `dst`,
+/// 任一源失败(网络错 / 非 2xx / sha 不符)→ 自动切**次优源**重试,全失败才 `Err`。
+///
+/// `sources` 是 selector 输出(已按 throughput×priority×region 排序);通常由
+/// `resolve_sources_for(repo_id)` 提供,测试可注入固定列表绕过网络探测。
+///
+/// **向后兼容**:用户显式 `HF_ENDPOINT` env 仍最高优先 —— 设了就只用它(单源,
+/// 不走 failover),尊重运维显式注入(§5 / spec §12.5)。
+///
+/// 不变量(R3):本函数是**下载**动作(显式触发,后台队列),非请求路径;探测/选源
+/// 已在上游 `resolve_sources_for` 完成,这里只消费已排序列表 + 逐源下载。
+pub fn download_with_failover(
+    sources: &[ModelSource],
+    repo_id: &str,
+    filename: &str,
+    dst: &std::path::Path,
+) -> crate::error::Result<String> {
+    use crate::error::VaultError;
+
+    // 向后兼容逃生门:显式 HF_ENDPOINT → 单源直下,不 failover(运维/测试显式注入优先)。
+    if let Some(explicit) = explicit_hf_endpoint_override() {
+        crate::infer::model_store::download_hf_file_from(&explicit, repo_id, filename, dst)?;
+        return Ok(format!("env:{explicit}"));
+    }
+
+    if sources.is_empty() {
+        return Err(VaultError::ModelLoad(format!(
+            "no eligible model source for {repo_id}/{filename} (all unreachable or uncovered); engine degraded"
+        )));
+    }
+
+    let mut last_err = None;
+    for source in sources {
+        match crate::infer::model_store::download_hf_file_from(
+            &source.endpoint,
+            repo_id,
+            filename,
+            dst,
+        ) {
+            Ok(()) => return Ok(source.id.clone()),
+            Err(e) => {
+                log::warn!(
+                    "model source {} failed for {repo_id}/{filename}: {e}; failing over to next",
+                    source.id
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        VaultError::ModelLoad(format!("all sources failed for {repo_id}/{filename}"))
+    }))
+}
+
+/// 显式 `HF_ENDPOINT` env 覆盖(向后兼容):非空则返回 trimmed 值。复用 model_store
+/// 的解析口径但区分"用户显式设置"与"region 默认" —— 这里只看 env 是否被显式设过。
+fn explicit_hf_endpoint_override() -> Option<String> {
+    std::env::var("HF_ENDPOINT")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,5 +559,108 @@ mod tests {
         // whisper 不被 OnlyXenovaOnnx 覆盖,dead 不可达 → 空
         let order = select_failover_order(&probed, "ggerganov/whisper.cpp", Region::China);
         assert!(order.is_empty(), "no eligible source → empty failover order");
+    }
+
+    // --- download_with_failover(集成:逐源下载 + 切次优)。这些测试 mutate HF_ENDPOINT
+    //     env 以验证向后兼容逃生门;env 是进程全局 → 用一个共享 Mutex 串行化(不引
+    //     serial_test dev-dep),并用 RAII guard 保证恢复原值。 ---
+
+    // 串行锁:所有 mutate HF_ENDPOINT 的测试持有它,避免与彼此(及未来同 env 测试)竞争。
+    static HF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 临时清掉/设置 HF_ENDPOINT;Drop 时恢复原值。持有 HF_ENV_LOCK 的 guard 串行化访问。
+    struct HfEndpointGuard {
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl HfEndpointGuard {
+        fn acquire(set_to: Option<&str>) -> Self {
+            let lock = HF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("HF_ENDPOINT").ok();
+            #[allow(unsafe_code)]
+            unsafe {
+                match set_to {
+                    Some(v) => std::env::set_var("HF_ENDPOINT", v),
+                    None => std::env::remove_var("HF_ENDPOINT"),
+                }
+            }
+            Self { prev, _lock: lock }
+        }
+        fn clear() -> Self {
+            Self::acquire(None)
+        }
+        fn set(val: &str) -> Self {
+            Self::acquire(Some(val))
+        }
+    }
+    impl Drop for HfEndpointGuard {
+        fn drop(&mut self) {
+            #[allow(unsafe_code)]
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var("HF_ENDPOINT", v),
+                    None => std::env::remove_var("HF_ENDPOINT"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failover_skips_dead_source_uses_next() {
+        let _g = HfEndpointGuard::clear();
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("model.bin");
+        let (good_endpoint, handle) = mock_source_ok(b"REAL-MODEL-BYTES".to_vec(), 1);
+        // 首选是黑洞(连不上),次优是 good mock → 应 failover 到 good 并成功。
+        let sources = vec![
+            src("dead", "http://127.0.0.1:1", 100),
+            src("good", &good_endpoint, 50),
+        ];
+        let used = download_with_failover(&sources, "Xenova/bge-m3", "model.bin", &dst)
+            .expect("failover to good source must succeed");
+        handle.join().unwrap();
+        assert_eq!(used, "good", "must report the source that actually worked");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"REAL-MODEL-BYTES");
+    }
+
+    #[test]
+    fn failover_all_dead_returns_err() {
+        let _g = HfEndpointGuard::clear();
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("model.bin");
+        let (e404, h404) = mock_source_404(1);
+        let sources = vec![
+            src("dead", "http://127.0.0.1:1", 100),
+            src("notfound", &e404, 50),
+        ];
+        let r = download_with_failover(&sources, "Xenova/bge-m3", "model.bin", &dst);
+        h404.join().unwrap();
+        assert!(r.is_err(), "all sources dead → Err");
+        assert!(!dst.exists(), "no file on total failure");
+    }
+
+    #[test]
+    fn failover_empty_sources_returns_err() {
+        let _g = HfEndpointGuard::clear();
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("model.bin");
+        let r = download_with_failover(&[], "Xenova/bge-m3", "model.bin", &dst);
+        assert!(r.is_err(), "empty source list → Err (degraded)");
+    }
+
+    #[test]
+    fn explicit_hf_endpoint_overrides_failover() {
+        // 向后兼容:显式 HF_ENDPOINT 设了 → 只用它(单源直下),忽略 sources 列表。
+        let (explicit_endpoint, handle) = mock_source_ok(b"VIA-ENV".to_vec(), 1);
+        let _g = HfEndpointGuard::set(&explicit_endpoint);
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("model.bin");
+        // sources 里全是黑洞;但 env 逃生门应让它走 explicit_endpoint。
+        let sources = vec![src("dead", "http://127.0.0.1:1", 100)];
+        let used = download_with_failover(&sources, "Xenova/bge-m3", "model.bin", &dst)
+            .expect("explicit HF_ENDPOINT must be honored");
+        handle.join().unwrap();
+        assert!(used.starts_with("env:"), "must report env override, got {used}");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"VIA-ENV");
     }
 }

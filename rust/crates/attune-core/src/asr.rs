@@ -733,8 +733,9 @@ pub fn format_diarized_text(segments: &[TranscriptSegment]) -> String {
 
 /// 自动下载 whisper.cpp ggml 模型文件（按 tier）。
 ///
-/// 来源：HuggingFace `ggerganov/whisper.cpp` 仓（ggml-{tiny/base/small/medium}-q8_0.bin）。
-/// HF_ENDPOINT 环境变量已由 state.rs 按 region 设好（China → hf-mirror.com）。
+/// 来源：`ggerganov/whisper.cpp` 仓（ggml-{tiny/base/small/medium}-q8_0.bin）。下载源由 S8
+/// 动态选择(`model_source`：候选注册表 + 健康探测 + failover）解析 —— whisper 在 ModelScope
+/// 无覆盖会被自动跳过,改走 company-mirror / hf-mirror / HF 官方。
 ///
 /// 模型保存到 ~/.local/share/attune/models/whisper/{filename}，让 detect_asr_backend
 /// 之后能找到。
@@ -760,15 +761,19 @@ pub fn ensure_whisper_model(ggml_filename: &str) -> crate::error::Result<std::pa
         )));
     }
 
-    // S1/C1: connect 探针前哨 + 带超时的流式下载(download_hf_file: connect_timeout +
-    // total timeout),替代零超时的 hf-hub repo.get()。注意 whisper.cpp 仓在 ModelScope
-    // **无覆盖** → CN 默认源会 404
-    // (快速失败 → ASR 引擎 degrade);若整个 endpoint 死则 connect/read 超时内 fail-fast
-    // 而非永久阻塞启动后台线程。
-    crate::infer::model_store::probe_endpoint_reachable(
-        &crate::infer::model_store::hf_endpoint(),
+    // S8: 经动态源选择(候选注册表 + 健康探测 + failover)解析下载源,替代静态单源
+    // `hf_endpoint()`。whisper.cpp 在 ModelScope **无覆盖** —— S8 selector 对其
+    // 自动跳过 ModelScope(OnlyXenovaOnnx),改走 company-mirror / hf-mirror / HF 官方,
+    // 任一源失败自动切次优。源探测只在此显式下载路径(非请求路径,R3)。
+    // HF_HUB_OFFLINE 已在上方拦截;显式 HF_ENDPOINT 由 download_with_failover 内部尊重。
+    let sources = crate::infer::model_source::resolve_sources_for("ggerganov/whisper.cpp");
+    let used = crate::infer::model_source::download_with_failover(
+        &sources,
+        "ggerganov/whisper.cpp",
+        ggml_filename,
+        &target,
     )?;
-    crate::infer::model_store::download_hf_file("ggerganov/whisper.cpp", ggml_filename, &target)?;
+    log::info!("whisper model {ggml_filename} downloaded via source '{used}'");
     Ok(target)
 }
 
