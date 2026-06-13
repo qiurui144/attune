@@ -97,11 +97,26 @@ const ALLOWLIST: &[(&str, usize, &str)] = &[
         "PP-OCR model download (one-time asset fetch from release mirror), not \
          user-content egress. No vault data on the wire.",
     ),
+    // layout.rs egress removed (S8 refactor routed layout downloads through
+    // download_hf_file_from in model_store.rs; entry removed per egress_guard stale check).
     (
-        "attune-core/src/ocr/nontext/layout.rs",
+        "attune-core/src/infer/model_source.rs",
         1,
-        "Layout model download (one-time asset fetch), not user-content egress. \
-         VLM content egress is separately gated (vlm_escalate L0/local checks).",
+        "S8 dynamic model source: probe_source_with — health/latency probe sent to \
+         builtin model mirror candidates (company-mirror / ModelScope / HF) ONLY during \
+         pre-flight or explicit /api/v1/ai-stack/refresh trigger; never on request path. \
+         Destination = model asset mirrors (no vault data). No OutboundGate needed: \
+         (a) probes carry no PII/vault content; (b) triggered only by AI-stack init or \
+         explicit user action; (c) equivalent to ppocr.rs pattern (one-time asset infra).",
+    ),
+    (
+        "attune-core/src/infer/model_store.rs",
+        1,
+        "S8 dynamic model download: download_hf_file_from — downloads a model binary \
+         from the S8-selected best source (company-mirror first, HF fallback). Called only \
+         when a model file is absent/stale; no vault data on the wire. Same destination \
+         class as ppocr.rs (one-time asset fetch from release mirror); no OutboundGate \
+         needed for asset downloads that carry no user content.",
     ),
 ];
 
