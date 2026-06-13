@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
 CREATE INDEX IF NOT EXISTS idx_items_deleted ON items(is_deleted);
+-- Composite index: covers `WHERE is_deleted = 0 ORDER BY created_at` (list_all_item_ids, classify, index rebuild).
+CREATE INDEX IF NOT EXISTS idx_items_active_created ON items(is_deleted, created_at);
 
 -- 原始证据文件留存。
 -- items.content 只存 OCR 文本；律师需核对原图判断 OCR 转录是否准确 →
@@ -1181,6 +1183,11 @@ impl Store {
                 [],
             )?;
         }
+        // Index on privacy_tier: covers L0 filter queries. Added after column migration
+        // to ensure the column exists before CREATE INDEX runs (idempotent).
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_items_privacy_tier ON items(privacy_tier);",
+        )?;
         Ok(())
     }
 

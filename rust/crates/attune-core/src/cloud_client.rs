@@ -161,11 +161,15 @@ impl CloudClient {
         resp.json().map_err(http_err)
     }
 
-    /// 登出
+    /// 登出：先无条件清空本地 session，再 best-effort 通知 server。
+    /// 网络失败不影响本地 token 清除，保证用户视角的"已登出"语义。
     pub fn logout(&mut self) -> Result<()> {
+        // Clear local session unconditionally before any network call.
+        // A network failure must not leave the client carrying a valid token
+        // the user believes they've revoked (I-1 from production deepdive audit).
+        self.session_cookie = None;
         let url = format!("{}/api/v1/logout", self.base_url);
         let _ = self.http.post(&url).send().map_err(http_err)?;
-        self.session_cookie = None;
         Ok(())
     }
 
@@ -673,21 +677,17 @@ mod tests {
         assert!(c.list_licenses().is_err());
     }
 
-    // FIXME(v1.1): logout 当前在网络失败时不清空 session_cookie (用 ? 提前 return)。
-    // 用户视角的"我登出了" 应当本地清空 session,不论 server 是否能响应。
-    // 本 test 锁定**当前行为**: 网络挂 → logout 返回 Err 且 session 仍存在。
-    // v1.1 应改为: 即使 server 不可达,也本地 session_cookie = None。
+    // logout: 本地 session 必须无条件清空，即使 server 不可达。
+    // Fix: 先清 session_cookie，再 best-effort 通知 server（I-1 audit fix）。
     #[test]
-    fn logout_returns_err_on_unreachable_keeps_session_current_behavior() {
+    fn logout_clears_local_session_even_on_network_failure() {
         let mut c = CloudClient::with_session("http://127.0.0.1:5", "token");
-        assert!(c.session_token().is_some());
+        assert!(c.session_token().is_some(), "precondition: token present");
         let result = c.logout();
-        // 当前: 网络错 → Err 提前 return → session 还在 (这是个 bug, 见 FIXME)
-        assert!(result.is_err());
+        // Network fails (port 5 unreachable), but local session MUST be cleared.
+        assert!(result.is_err(), "network call should fail");
+        assert!(c.session_token().is_none(), "local session cleared unconditionally");
     }
-
-    // Happy logout: 用 mock URL trick — 注意当前 impl 不会清 session 即使 HTTP 200
-    // (因 `let _ = ?` 模式只在 ? 不触发时继续)。如果未来 fix 这个 bug, 改成本地无条件清。
 
     // Edge: empty email / password 也走 HTTP request (业务校验由 server 端)
     // 这里只验证 client 不 panic, 不 client-side reject
