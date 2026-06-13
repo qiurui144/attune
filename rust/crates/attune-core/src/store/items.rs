@@ -544,6 +544,29 @@ impl Store {
         Ok(ids)
     }
 
+    /// #83 P0 可用性修复：分页版 list_all_item_ids。
+    ///
+    /// 大 vault（10 万+ items）调 list_all_item_ids 会把全部 UUID 物化到内存，
+    /// unlock 路径持 vault lock 执行时会阻塞所有并发请求 30-60 秒。
+    /// 调用方应以合理页大小（如 500）循环调用，中途可释放 vault lock。
+    ///
+    /// `offset = 0, limit = usize::MAX` 等价于 list_all_item_ids（保留兼容用）。
+    /// 返回空 Vec 表示到达末尾，不报错。
+    pub fn list_item_ids_paged(&self, offset: usize, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM items WHERE is_deleted = 0 ORDER BY created_at LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![limit as i64, offset as i64],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
+    }
+
     // ============================================================
     // v0.6 Phase B F-Pro — corpus domain
     // ============================================================
@@ -1029,5 +1052,96 @@ mod privacy_tier_tests {
             "SELECT COUNT(*) FROM reindex_queue", [], |r| r.get(0)
         ).unwrap();
         assert_eq!(total, 1, "park 后仍保留在表里");
+    }
+}
+
+// ── #83 P0: list_item_ids_paged unit tests ────────────────────────────────────
+#[cfg(test)]
+mod list_item_ids_paged_tests {
+    use crate::store::Store;
+
+    /// Insert N bare rows (no encryption needed for id-only queries).
+    fn insert_items(store: &Store, n: usize) -> Vec<String> {
+        let mut ids = Vec::with_capacity(n);
+        for i in 0..n {
+            let id = format!("paged-test-{i:04}");
+            let ts = format!("2026-01-01T{:02}:00:00", i % 24);
+            store
+                .conn
+                .execute(
+                    "INSERT INTO items (id, title, content, source_type, created_at, updated_at) \
+                     VALUES (?1, 'T', X'00', 'note', ?2, ?2)",
+                    rusqlite::params![id, ts],
+                )
+                .unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
+    #[test]
+    fn empty_store_returns_empty_vec() {
+        let s = Store::open_memory().unwrap();
+        let result = s.list_item_ids_paged(0, 100).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn offset_beyond_count_returns_empty() {
+        let s = Store::open_memory().unwrap();
+        insert_items(&s, 5);
+        let result = s.list_item_ids_paged(10, 50).unwrap();
+        assert!(result.is_empty(), "offset beyond total should return empty");
+    }
+
+    #[test]
+    fn first_page_respects_limit() {
+        let s = Store::open_memory().unwrap();
+        insert_items(&s, 20);
+        let page = s.list_item_ids_paged(0, 7).unwrap();
+        assert_eq!(page.len(), 7);
+    }
+
+    #[test]
+    fn paged_iteration_covers_all_items() {
+        let s = Store::open_memory().unwrap();
+        let total = 17usize;
+        insert_items(&s, total);
+        const PAGE: usize = 5;
+        let mut collected: Vec<String> = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = s.list_item_ids_paged(offset, PAGE).unwrap();
+            let n = page.len();
+            collected.extend(page);
+            offset += PAGE;
+            if n < PAGE { break; }
+        }
+        assert_eq!(collected.len(), total, "paged loop must cover all {total} items");
+        // No duplicates
+        let unique: std::collections::HashSet<_> = collected.iter().collect();
+        assert_eq!(unique.len(), total, "no duplicate ids across pages");
+    }
+
+    #[test]
+    fn limit_zero_returns_empty() {
+        let s = Store::open_memory().unwrap();
+        insert_items(&s, 5);
+        let result = s.list_item_ids_paged(0, 0).unwrap();
+        assert!(result.is_empty(), "limit=0 should return empty");
+    }
+
+    #[test]
+    fn deleted_items_excluded() {
+        let s = Store::open_memory().unwrap();
+        insert_items(&s, 3);
+        // Mark first as deleted
+        s.conn.execute(
+            "UPDATE items SET is_deleted = 1 WHERE id = 'paged-test-0000'",
+            [],
+        ).unwrap();
+        let result = s.list_item_ids_paged(0, 100).unwrap();
+        assert_eq!(result.len(), 2, "deleted item must be excluded");
+        assert!(!result.contains(&"paged-test-0000".to_string()));
     }
 }

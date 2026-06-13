@@ -72,14 +72,15 @@ pub async fn rebuild(
         }))),
     };
 
-    // 1. 取所有 item IDs
+    // 1. 取 item IDs（#83: 上限 10_000 避免大 vault OOM + 持锁超时）
+    const CLUSTER_ITEM_CAP: usize = 10_000;
     let (ids, dek) = {
         let vault = state.vault.lock()
             .map_err(|_| AppError::Internal("vault lock".into()))?;
         let dek = vault
             .dek_db()
             .map_err(|e| AppError::Forbidden(e.to_string()))?;
-        let ids = vault.store().list_all_item_ids()
+        let ids = vault.store().list_item_ids_paged(0, CLUSTER_ITEM_CAP)
             .map_err(|e| AppError::Internal(e.to_string()))?;
         (ids, dek)
     };

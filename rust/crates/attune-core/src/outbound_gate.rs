@@ -31,7 +31,7 @@
 
 use crate::pii::Redactor;
 
-/// Discriminator over the 5 outbound kinds tracked by Privacy Logic Strategy.
+/// Discriminator over the 6 outbound kinds tracked by Privacy Logic Strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutboundKind {
     /// Cloud LLM endpoints (`chat.rs` / Cloud LLM gateway / BYOK provider).
@@ -44,6 +44,11 @@ pub enum OutboundKind {
     WebSearch,
     /// Diagnostic telemetry (default-off; `telemetry.rs`).
     Telemetry,
+    /// Embedding providers (OllamaProvider / OpenAiEmbeddingProvider).
+    /// Local Ollama (localhost/127.x) is always permitted even for L0 content;
+    /// cloud embedding endpoints are subject to the full L0 + PII gate.
+    /// (#82 P0 privacy fix — embed was the only egress point missing gate wiring.)
+    Embedding,
 }
 
 impl OutboundKind {
@@ -55,7 +60,16 @@ impl OutboundKind {
             OutboundKind::Webdav => "webdav",
             OutboundKind::WebSearch => "web_search",
             OutboundKind::Telemetry => "telemetry",
+            OutboundKind::Embedding => "embedding",
         }
+    }
+
+    /// Returns true if this kind is Embedding (used to select Telemetry-style
+    /// vault-lock exemption — embedding of memory summaries runs on a background
+    /// timer that may fire before the vault has been unlocked by the UI; we
+    /// short-circuit at the caller level instead).
+    pub fn is_embedding(self) -> bool {
+        matches!(self, OutboundKind::Embedding)
     }
 }
 
@@ -284,6 +298,7 @@ mod tests {
         assert_eq!(OutboundKind::Webdav.as_str(), "webdav");
         assert_eq!(OutboundKind::WebSearch.as_str(), "web_search");
         assert_eq!(OutboundKind::Telemetry.as_str(), "telemetry");
+        assert_eq!(OutboundKind::Embedding.as_str(), "embedding");
     }
 
     #[test]
@@ -295,6 +310,7 @@ mod tests {
             OutboundKind::Webdav,
             OutboundKind::WebSearch,
             OutboundKind::Telemetry,
+            OutboundKind::Embedding,
         ] {
             let p = pol(k, false, true, true);
             assert!(
@@ -302,6 +318,80 @@ mod tests {
                 "{k:?} did not refuse when disabled"
             );
         }
+    }
+
+    // ── #82 P0: Embedding OutboundGate ───────────────────────────────────────
+
+    /// L0 chunk to a cloud embedding endpoint must be blocked.
+    /// This is the adversarial test: construct a real L0 policy and verify the
+    /// gate refuses before any HTTP is sent.
+    #[test]
+    fn embedding_l0_cloud_blocked() {
+        let p = OutboundPolicy {
+            kind: OutboundKind::Embedding,
+            enabled: true,
+            vault_unlocked: true,
+            redactor: Some(Box::leak(Box::new(Redactor::new()))),
+            local_destination: false, // cloud endpoint, e.g. api.openai.com
+            contains_l0: true,
+        };
+        assert!(
+            matches!(
+                OutboundGate::enforce(&p, "敏感医疗记录 L0 内容"),
+                Err(OutboundError::L0CloudBlocked)
+            ),
+            "L0 chunk to cloud embedding endpoint must be blocked"
+        );
+    }
+
+    /// L0 chunk to localhost Ollama must be allowed (forced-local is the point).
+    #[test]
+    fn embedding_l0_local_allowed() {
+        let p = OutboundPolicy {
+            kind: OutboundKind::Embedding,
+            enabled: true,
+            vault_unlocked: true,
+            redactor: Some(Box::leak(Box::new(Redactor::new()))),
+            local_destination: true, // localhost ollama
+            contains_l0: true,
+        };
+        let out = OutboundGate::enforce(&p, "敏感内容 L0 本地允许");
+        assert!(out.is_ok(), "L0 to local embedding must be allowed; got {out:?}");
+    }
+
+    /// Cloud embedding disabled → gate refuses.
+    #[test]
+    fn embedding_disabled_refuses() {
+        let p = OutboundPolicy {
+            kind: OutboundKind::Embedding,
+            enabled: false, // user disabled cloud embedding
+            vault_unlocked: true,
+            redactor: Some(Box::leak(Box::new(Redactor::new()))),
+            local_destination: false,
+            contains_l0: false,
+        };
+        assert!(
+            matches!(
+                OutboundGate::enforce(&p, "normal content"),
+                Err(OutboundError::Disabled(OutboundKind::Embedding))
+            ),
+            "disabled embedding must be refused"
+        );
+    }
+
+    /// Non-L0 chunk to cloud embedding, enabled → allowed (normal path regression).
+    #[test]
+    fn embedding_non_l0_cloud_allowed() {
+        let p = OutboundPolicy {
+            kind: OutboundKind::Embedding,
+            enabled: true,
+            vault_unlocked: true,
+            redactor: Some(Box::leak(Box::new(Redactor::new()))),
+            local_destination: false,
+            contains_l0: false,
+        };
+        let out = OutboundGate::enforce(&p, "public knowledge document");
+        assert!(out.is_ok(), "non-L0 cloud embedding must be allowed; got {out:?}");
     }
 
     // ── G3: L0 "永不出网" enforcement ────────────────────────────────────

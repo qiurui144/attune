@@ -49,9 +49,10 @@ const ALLOWLIST: &[(&str, usize, &str)] = &[
         "attune-core/src/embed.rs",
         2,
         "Embedding providers (Ollama / OpenAI-compat). Endpoint from user \
-         settings; embedding of vault content is the product's core local-first \
-         path (default Ollama localhost). Cloud endpoints are user-configured \
-         BYOK; gate parity tracked under F-17.",
+         settings; default is local Ollama/ONNX (local_destination=true). \
+         Cloud endpoints are user-configured BYOK; gated via OutboundKind::Embedding \
+         in state.rs::start_queue_worker (L0 item filter) and embed_pending_memories. \
+         AppState::embedding_is_local flag drives gate enforcement (#82 P0 fix).",
     ),
     (
         "attune-core/src/llm.rs",

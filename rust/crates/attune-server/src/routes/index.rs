@@ -160,16 +160,36 @@ pub async fn bind_directory(
     // 规范序，与 search/chat 热点路径冲突 = ABBA 死锁）。dek 是 owned Key32，drop
     // vault 后仍可用。
     drop(vault);
+    // #83 P0: 分页 FTS 增量刷新，每页单独加释放 vault lock。
+    // 锁序维持 fulltext → vault（正确；ft_guard 外层，vault 内层），
+    // 且持锁期限从"全量"缩为每页 500 条。
     {
         let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ft) = ft_guard.as_ref() {
-            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-            if let Ok(ids) = vault.store().list_all_item_ids() {
-                for id in &ids {
-                    if let Ok(Some(item)) = vault.store().get_item(&dek, id) {
-                        let _ = ft.add_document(&item.id, &item.title, &item.content, &item.source_type);
+            const FTS_PAGE: usize = 500;
+            let mut fts_offset = 0usize;
+            loop {
+                let page_items: Vec<(String, String, String, String)> = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    match vault.store().list_item_ids_paged(fts_offset, FTS_PAGE) {
+                        Ok(ids) => {
+                            let mut buf = Vec::with_capacity(ids.len());
+                            for id in &ids {
+                                if let Ok(Some(item)) = vault.store().get_item(&dek, id) {
+                                    buf.push((item.id, item.title, item.content, item.source_type));
+                                }
+                            }
+                            buf
+                        }
+                        Err(_) => break,
                     }
+                }; // vault lock released here
+                let n = page_items.len();
+                for (id, title, content, source_type) in &page_items {
+                    let _ = ft.add_document(id, title, content, source_type);
                 }
+                fts_offset += FTS_PAGE;
+                if n < FTS_PAGE { break; }
             }
         }
     }

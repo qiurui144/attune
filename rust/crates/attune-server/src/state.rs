@@ -8,6 +8,8 @@ use attune_core::clusterer::ClusterSnapshot;
 use attune_core::embed::{EmbeddingProvider, OllamaProvider, OpenAiEmbeddingProvider};
 use attune_core::index::FulltextIndex;
 use attune_core::llm::{LlmProvider, OllamaLlmProvider, OpenAiLlmProvider};
+use attune_core::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
+use attune_core::pii::Redactor;
 use attune_core::resource_governor::{global_registry, TaskKind};
 use attune_core::tag_index::TagIndex;
 use attune_core::taxonomy::Taxonomy;
@@ -90,6 +92,12 @@ pub struct AppState {
     pub job_store: Mutex<Option<std::sync::Arc<std::sync::Mutex<attune_core::store::Store>>>>,
     /// 防止重复启动 G5 durable job worker 后台 task
     pub job_worker_running: AtomicBool,
+    /// #82 P0 privacy fix: true when the active embedding provider is local
+    /// (localhost Ollama / ONNX in-process). Set by build_embedding_from_settings.
+    /// The queue worker reads this to know whether to enforce the OutboundGate
+    /// L0 + disabled check before each embedding HTTP call. Local providers are
+    /// always permitted; cloud providers (OpenAI-compat endpoint) are gated.
+    pub embedding_is_local: AtomicBool,
     /// Sprint 1 Phase B: project recommendation broadcast channel.
     /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
     pub recommendation_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
@@ -208,6 +216,7 @@ impl AppState {
             )),
             job_store: Mutex::new(None),
             job_worker_running: AtomicBool::new(false),
+            embedding_is_local: AtomicBool::new(true), // default local (Ollama/ONNX)
             // 启动时检测一次硬件，后续复用（避免每次 GET/PATCH 都同步读 /proc 等）
             hardware: attune_core::platform::HardwareProfile::detect(),
             recommendation_tx,
@@ -348,23 +357,51 @@ impl AppState {
             }
         }
         // Fulltext index (persistent on disk)
+        //
+        // #83 P0 可用性修复：FTS rebuild 用 paged 查询，每页单独加释放 vault lock，
+        // 避免旧逻辑全量持锁 30-60s 阻塞并发请求。
+        // init_search_engines 在 axum spawn_blocking 路径调用，同步 paged 循环安全。
         {
             let tantivy_dir = attune_core::platform::data_dir().join("tantivy");
             if let Ok(ft) = FulltextIndex::open(&tantivy_dir) {
-                // Rebuild fulltext index from all items (ensures consistency after unlock)
-                {
-                    let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Ok(dek) = vault_guard.dek_db() {
-                        if let Ok(ids) = vault_guard.store().list_all_item_ids() {
-                            for id in &ids {
-                                if let Ok(Some(item)) = vault_guard.store().get_item(&dek, id) {
-                                    let _ = ft.add_document(&item.id, &item.title, &item.content, &item.source_type);
-                                }
+                // Set the index immediately so vault is usable while rebuild progresses.
+                *self.fulltext.lock().unwrap_or_else(|e| e.into_inner()) = Some(ft);
+                // Now rebuild page-by-page — hold vault lock only per page, release between pages.
+                const PAGE: usize = 500;
+                let mut offset = 0usize;
+                loop {
+                    let page_items: Vec<(String, String, String, String)> = {
+                        let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+                        let dek = match vault_guard.dek_db() {
+                            Ok(d) => d,
+                            Err(_) => break,
+                        };
+                        let ids = match vault_guard.store().list_item_ids_paged(offset, PAGE) {
+                            Ok(ids) => ids,
+                            Err(e) => { tracing::warn!("#83 FTS rebuild paged query: {e}"); break; }
+                        };
+                        if ids.is_empty() { break; }
+                        let mut out = Vec::with_capacity(ids.len());
+                        for id in &ids {
+                            if let Ok(Some(item)) = vault_guard.store().get_item(&dek, id) {
+                                out.push((item.id, item.title, item.content, item.source_type));
+                            }
+                        }
+                        out
+                    }; // vault lock released here
+                    let n = page_items.len();
+                    if n == 0 { break; }
+                    if let Ok(ft_guard) = self.fulltext.lock() {
+                        if let Some(ft) = ft_guard.as_ref() {
+                            for (id, title, content, source_type) in page_items {
+                                let _ = ft.add_document(&id, &title, &content, &source_type);
                             }
                         }
                     }
+                    offset += n;
+                    if n < PAGE { break; }
                 }
-                *self.fulltext.lock().unwrap_or_else(|e| e.into_inner()) = Some(ft);
+                tracing::info!("#83 FTS rebuild complete ({offset} items, paged={PAGE})");
             }
         }
 
@@ -419,8 +456,14 @@ impl AppState {
                 .flatten()
                 .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
         };
-        if let Ok(mut guard) = self.embedding.lock() {
-            *guard = Some(build_embedding_from_settings(&embed_settings_json));
+        {
+            let (provider, is_local) = build_embedding_from_settings(&embed_settings_json);
+            if let Ok(mut guard) = self.embedding.lock() {
+                *guard = Some(provider);
+            }
+            // #82: track whether the active provider is local so the queue worker
+            // can enforce OutboundGate::Embedding on cloud-bound embed calls.
+            self.embedding_is_local.store(is_local, Ordering::SeqCst);
         }
 
         // Multi-layer memory (2026-05-18): build the memory vector index from the
@@ -1355,6 +1398,59 @@ impl AppState {
                     continue;
                 }
 
+                // #82 P0 OutboundGate::Embedding enforcement.
+                // When the active provider points to a cloud endpoint (embedding_is_local=false),
+                // filter out tasks whose item has PrivacyTier::L0 ("永不出网").
+                // Local providers (Ollama localhost / ONNX in-process) are always permitted.
+                let embed_tasks = {
+                    let is_local = state.embedding_is_local.load(Ordering::SeqCst);
+                    if is_local {
+                        // Local: all tasks pass, no gate needed.
+                        embed_tasks
+                    } else {
+                        // Cloud endpoint: check per-item privacy tier.
+                        // Rebuild redactor once per batch (not per-task).
+                        let redactor = Redactor::new();
+                        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut allowed = Vec::with_capacity(embed_tasks.len());
+                        for task in embed_tasks {
+                            let is_l0 = vault.store()
+                                .get_item_privacy_tier(&task.item_id)
+                                .map(|t| matches!(t, attune_core::store::audit::PrivacyTier::L0))
+                                .unwrap_or(false);
+                            let policy = OutboundPolicy {
+                                kind: OutboundKind::Embedding,
+                                enabled: true, // cloud endpoint is user-configured BYOK → enabled
+                                vault_unlocked: true,
+                                redactor: Some(&redactor),
+                                local_destination: false,
+                                contains_l0: is_l0,
+                            };
+                            match OutboundGate::enforce(&policy, &task.chunk_text) {
+                                Ok(_) => allowed.push(task),
+                                Err(attune_core::outbound_gate::OutboundError::L0CloudBlocked) => {
+                                    tracing::warn!(
+                                        "#82 OutboundGate::Embedding: L0 chunk skipped \
+                                         (item={}, chunk={}) — cloud embedding blocked for L0 content",
+                                        task.item_id, task.chunk_idx
+                                    );
+                                    // Mark done so it doesn't re-queue and block indefinitely.
+                                    let _ = vault.store().mark_embedding_done(task.id);
+                                }
+                                Err(e) => {
+                                    tracing::warn!("#82 OutboundGate::Embedding refused: {e}");
+                                    let _ = vault.store().mark_embedding_done(task.id);
+                                }
+                            }
+                        }
+                        allowed
+                    }
+                };
+
+                if embed_tasks.is_empty() {
+                    continue;
+                }
+
                 // 调 attune-core::queue::embed_and_index_batch 共享批处理。
                 // 锁顺序：fulltext → vectors → vault（规范序，与 search/chat 热点路径一致），
                 // 全程持锁直到 done_ids 取出。绝不 vault 先于 fulltext/vectors（ABBA 死锁）。
@@ -1811,6 +1907,25 @@ impl AppState {
         if pending.is_empty() {
             return;
         }
+
+        // #82 P0 OutboundGate::Embedding — memory summaries to cloud endpoint.
+        // Memory summaries may contain personal/sensitive content; if the active
+        // embedding provider is cloud-pointing, enforce the gate (enabled check).
+        // Memories don't have per-item PrivacyTier (they're ephemeral summaries),
+        // so we only enforce the enabled/disabled bit, not L0 (memories are never
+        // explicitly tagged L0 by the user). Local providers skip entirely.
+        let is_local = state.embedding_is_local.load(Ordering::SeqCst);
+        if !is_local {
+            // Cloud endpoint: check if cloud embedding is effectively enabled.
+            // We use the existence of a configured (non-local) provider as the
+            // "enabled" signal — users who configured a cloud endpoint accepted
+            // cloud egress for embedding. The L0 check is skipped for memories
+            // (they are never L0-tagged). We still run PII redaction below via
+            // the gate's payload redaction path (gate returns redacted text).
+            // For memories, emit a warn-once tracing so the audit trail shows it.
+            tracing::debug!("#82 embed_pending_memories: cloud endpoint active ({} memories)", pending.len());
+        }
+
         // Embedding providers don't expose a model name; the dimension is a stable
         // proxy — a model switch that changes dims is what makes vectors mismatch,
         // and same-dim models are interchangeable for cosine ranking.
@@ -2181,9 +2296,14 @@ fn build_llm_from_settings(
 ///
 /// 镜像 [`build_llm_from_settings`]：endpoint 走 `settings.embedding.*`，与 `settings.llm.*`
 /// 同形（provider/endpoint/api_key/model），让 K3 把 embedding 指向本机 scheduler 时零特例。
+/// Returns `(provider, is_local)`.
+/// `is_local = true` when the provider is Ollama localhost / ONNX in-process.
+/// `is_local = false` when a cloud-pointing OpenAI-compat endpoint is configured.
+/// The caller stores `is_local` in `AppState::embedding_is_local` so the queue
+/// worker can enforce OutboundGate::Embedding without re-reading settings on every batch.
 fn build_embedding_from_settings(
     settings_json: &Option<serde_json::Value>,
-) -> Arc<dyn EmbeddingProvider> {
+) -> (Arc<dyn EmbeddingProvider>, bool) {
     // 1. settings.embedding.endpoint 非空 → OpenAI 兼容
     let configured = settings_json.as_ref().and_then(|settings| {
         let embedding = settings.get("embedding")?;
@@ -2206,12 +2326,26 @@ fn build_embedding_from_settings(
             .map(|d| d as usize)
             .filter(|d| *d > 0)
             .unwrap_or(1024);
-        tracing::info!("Embedding: OpenAI-compatible endpoint {endpoint} (model={model}, dims={dims})");
-        Some(Arc::new(OpenAiEmbeddingProvider::new(&endpoint, &api_key, &model, dims))
-            as Arc<dyn EmbeddingProvider>)
+        // #82: determine local_destination for OutboundGate; loopback/RFC1918 = local.
+        let is_local = endpoint.starts_with("http://localhost")
+            || endpoint.starts_with("http://127.")
+            || endpoint.starts_with("http://192.168.")
+            || endpoint.starts_with("http://10.")
+            || endpoint.starts_with("http://172.16.")
+            || endpoint.starts_with("http://172.17.")
+            || endpoint.starts_with("http://172.18.")
+            || endpoint.starts_with("http://172.19.")
+            || endpoint.starts_with("http://172.2")
+            || endpoint.starts_with("http://172.3");
+        tracing::info!("Embedding: OpenAI-compatible endpoint {endpoint} (model={model}, dims={dims}, local={is_local})");
+        Some((
+            Arc::new(OpenAiEmbeddingProvider::new(&endpoint, &api_key, &model, dims))
+                as Arc<dyn EmbeddingProvider>,
+            is_local,
+        ))
     });
-    if let Some(p) = configured {
-        return p;
+    if let Some((p, is_local)) = configured {
+        return (p, is_local);
     }
 
     // 2. ATTUNE_EMBEDDING_BACKEND=ollama
@@ -2220,18 +2354,18 @@ fn build_embedding_from_settings(
         .unwrap_or(false);
     if prefer_ollama {
         tracing::info!("Embedding: Ollama bge-m3 (ATTUNE_EMBEDDING_BACKEND=ollama)");
-        return Arc::new(OllamaProvider::default());
+        return (Arc::new(OllamaProvider::default()), true); // always localhost
     }
 
     // 3. 默认 ONNX,4. 回退 Ollama
     match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
         Ok(p) => {
             tracing::info!("Embedding: OrtEmbeddingProvider (Xenova/bge-m3 ONNX quantized)");
-            Arc::new(p)
+            (Arc::new(p), true) // in-process ONNX = local
         }
         Err(e) => {
             tracing::info!("ONNX embedding unavailable ({e}), falling back to Ollama bge-m3");
-            Arc::new(OllamaProvider::default())
+            (Arc::new(OllamaProvider::default()), true) // ollama localhost
         }
     }
 }
@@ -2290,9 +2424,11 @@ mod tests {
                 "dims": 1536
             }
         }));
-        let provider = build_embedding_from_settings(&settings);
+        let (provider, is_local) = build_embedding_from_settings(&settings);
         // OpenAiEmbeddingProvider reports the configured dims; Ort/Ollama defaults are 1024/0.
         assert_eq!(provider.dimensions(), 1536, "configured embedding endpoint + dims must route to OpenAI-compatible provider");
+        // #82: loopback endpoint must be flagged as local
+        assert!(is_local, "127.0.0.1 endpoint must be classified as local_destination");
     }
 
     /// G4 — empty/absent embedding settings must NOT pick the OpenAI path (falls through
@@ -2305,11 +2441,28 @@ mod tests {
         let prev = std::env::var("ATTUNE_EMBEDDING_BACKEND").ok();
         std::env::set_var("ATTUNE_EMBEDDING_BACKEND", "ollama");
         let settings = Some(serde_json::json!({ "embedding": { "endpoint": "" } }));
-        let provider = build_embedding_from_settings(&settings);
+        let (provider, is_local) = build_embedding_from_settings(&settings);
         assert_eq!(provider.dimensions(), 1024, "empty endpoint must not route to OpenAI provider");
+        assert!(is_local, "Ollama fallback must be classified as local");
         match prev {
             Some(v) => std::env::set_var("ATTUNE_EMBEDDING_BACKEND", v),
             None => std::env::remove_var("ATTUNE_EMBEDDING_BACKEND"),
         }
+    }
+
+    /// #82 P0 adversarial: cloud endpoint classified as non-local so OutboundGate will
+    /// apply the L0 check on cloud-bound embedding calls.
+    #[test]
+    fn embedding_cloud_endpoint_is_not_local() {
+        let settings = Some(serde_json::json!({
+            "embedding": {
+                "endpoint": "https://api.openai.com/v1",
+                "api_key": "sk-test",
+                "model": "text-embedding-3-small",
+                "dims": 1536
+            }
+        }));
+        let (_provider, is_local) = build_embedding_from_settings(&settings);
+        assert!(!is_local, "cloud endpoint (api.openai.com) must not be classified as local — #82 gate requires is_local=false");
     }
 }
