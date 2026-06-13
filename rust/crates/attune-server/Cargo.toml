@@ -15,6 +15,10 @@ path = "src/bin/headless.rs"
 
 [dependencies]
 attune-core = { path = "../attune-core" }
+# #82: URL host parsing for embedding-endpoint local/RFC-1918 detection (anchored,
+# not starts_with) — closes the OutboundGate privacy bypass. Same pure-Rust crate
+# attune-core already depends on; no new transitive risk.
+url = "2"
 axum = { version = "0.8", features = ["json", "multipart", "ws"] }
 tokio = { workspace = true }
 tower-http = { version = "0.6", features = ["cors"] }

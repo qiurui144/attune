@@ -2301,6 +2301,38 @@ fn build_llm_from_settings(
 /// `is_local = false` when a cloud-pointing OpenAI-compat endpoint is configured.
 /// The caller stores `is_local` in `AppState::embedding_is_local` so the queue
 /// worker can enforce OutboundGate::Embedding without re-reading settings on every batch.
+/// #82 security: is an embedding endpoint a LOCAL (loopback / RFC-1918 private)
+/// destination? The OutboundGate skips in-network embedding but gates cloud egress,
+/// so a wrong answer leaks L0 PII. MUST parse the URL host and match the FULL host —
+/// NEVER `starts_with` on the raw endpoint string, which lets these bypass the gate
+/// (background security review HIGH, 2026-06-13):
+///   - `http://localhost.evil.com/...`  (suffix on the "localhost" prefix)
+///   - `http://10.0.0.1@evil.com/...`   (userinfo — real host is evil.com)
+///   - `http://172.2.0.0/...`           (PUBLIC, but matched by a "172.2" prefix)
+/// Uses std `Ipv4Addr::is_private()` (10/8, 172.16-31/12, 192.168/16) + `is_loopback()`
+/// (127/8, ::1), which are RFC-1918/RFC-4291 correct.
+fn embedding_endpoint_is_local(endpoint: &str) -> bool {
+    use std::net::IpAddr;
+    url::Url::parse(endpoint)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .map(|host| {
+            if host == "localhost" {
+                return true;
+            }
+            // url::host_str() returns ipv6 without brackets, but trim defensively.
+            let h = host.trim_start_matches('[').trim_end_matches(']');
+            match h.parse::<IpAddr>() {
+                Ok(IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private(),
+                Ok(IpAddr::V6(v6)) => v6.is_loopback(),
+                // Not "localhost" and not an IP literal → external hostname
+                // (e.g. `localhost.evil.com`) → NOT local → cloud egress gated.
+                Err(_) => false,
+            }
+        })
+        .unwrap_or(false)
+}
+
 fn build_embedding_from_settings(
     settings_json: &Option<serde_json::Value>,
 ) -> (Arc<dyn EmbeddingProvider>, bool) {
@@ -2327,16 +2359,9 @@ fn build_embedding_from_settings(
             .filter(|d| *d > 0)
             .unwrap_or(1024);
         // #82: determine local_destination for OutboundGate; loopback/RFC1918 = local.
-        let is_local = endpoint.starts_with("http://localhost")
-            || endpoint.starts_with("http://127.")
-            || endpoint.starts_with("http://192.168.")
-            || endpoint.starts_with("http://10.")
-            || endpoint.starts_with("http://172.16.")
-            || endpoint.starts_with("http://172.17.")
-            || endpoint.starts_with("http://172.18.")
-            || endpoint.starts_with("http://172.19.")
-            || endpoint.starts_with("http://172.2")
-            || endpoint.starts_with("http://172.3");
+        // MUST parse the host (not `starts_with` on the raw string) — see
+        // `embedding_endpoint_is_local` for the bypass classes this closes.
+        let is_local = embedding_endpoint_is_local(&endpoint);
         tracing::info!("Embedding: OpenAI-compatible endpoint {endpoint} (model={model}, dims={dims}, local={is_local})");
         Some((
             Arc::new(OpenAiEmbeddingProvider::new(&endpoint, &api_key, &model, dims))
@@ -2464,5 +2489,37 @@ mod tests {
         }));
         let (_provider, is_local) = build_embedding_from_settings(&settings);
         assert!(!is_local, "cloud endpoint (api.openai.com) must not be classified as local — #82 gate requires is_local=false");
+    }
+
+    /// #82 security regression (background review HIGH 2026-06-13): the local
+    /// classifier MUST parse the host, not `starts_with` the raw URL. Each of these
+    /// would bypass the privacy gate under the old prefix match → leak L0 PII.
+    #[test]
+    fn embedding_endpoint_is_local_anchored_no_bypass() {
+        // genuinely local → true
+        for ep in [
+            "http://localhost:11434",
+            "http://127.0.0.1:11434",
+            "http://192.168.1.50:8080",
+            "http://10.0.0.5/v1",
+            "http://172.16.0.1/v1",
+            "http://172.31.255.254/v1",
+            "http://[::1]:11434",
+        ] {
+            assert!(embedding_endpoint_is_local(ep), "{ep} must be local");
+        }
+        // bypass attempts + genuinely-public → false (gated)
+        for ep in [
+            "http://localhost.evil.com/v1",     // suffix on "localhost" prefix
+            "http://127.0.0.1.evil.com/v1",     // suffix on "127." prefix
+            "http://192.168.1.1@evil.com/v1",   // userinfo — real host is evil.com
+            "http://10.0.0.1@evil.com/v1",      // userinfo
+            "http://172.2.0.0/v1",              // PUBLIC, but matched old "172.2" prefix
+            "http://172.32.0.1/v1",             // PUBLIC, just outside RFC1918 172.16-31
+            "https://api.openai.com/v1",        // cloud
+            "http://11.0.0.1/v1",               // public (not 10/8)
+        ] {
+            assert!(!embedding_endpoint_is_local(ep), "{ep} must NOT be local (would bypass privacy gate)");
+        }
     }
 }
