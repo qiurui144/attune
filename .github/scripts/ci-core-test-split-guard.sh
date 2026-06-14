@@ -3,7 +3,7 @@
 # cover EVERY non-#[ignore]-irrelevant test file on disk, so sharding can never
 # silently drop a test. Run from rust/ (working-directory: rust).
 #
-# The 66 core integration test files are partitioned across three places:
+# The core integration test files are partitioned across three places:
 #   - 3 deterministic gates run as dedicated ci.yml steps (GATES below)
 #   - HALF_A runs in rust-test-core           (the --test list there)
 #   - HALF_B runs in rust-test-core-b         (the --test list there)
@@ -14,7 +14,9 @@ GATES="parse_golden_set_regression agent_gate_orchestrator wasm_capability_gate"
 
 HALF_A="asr_ingest_test change_password_test chat_reliability_golden_gate \
 chat_reliability_integration chat_reliability_proptests chunking_quality_test \
-concurrent_stress_test crash_recovery_test document_classifier_agent_golden_gate \
+concurrent_stress_test crash_recovery_test deepsum_savings \
+doc_compare_verdict_golden_gate doc_intel_real_llm_gate \
+document_classifier_agent_golden_gate \
 document_classifier_agent_integration document_classifier_agent_proptests \
 email_accounts_test entities_test generic_plugins_test git_connector \
 governor_integration i18n_ingest_search_test ingest_edge_resource_test \
@@ -25,7 +27,8 @@ memory_consolidation_integration memory_moat_integration \
 memory_token_reduction_benchmark migration_roundtrip_test model_boundary_audit \
 multilayer_memory_integration"
 
-HALF_B="ocr_image_test ocr_long_page_audit office_adversarial_test \
+HALF_B="job_queue_durable nontext_cross_validate_golden \
+ocr_image_test ocr_long_page_audit office_adversarial_test \
 office_formats_test oom_behavior_test oss_agent_real_llm_gate oss_boundary_test \
 pdf_e2e_search pdf_ingest_test perf_chunker_bench perf_reindex_bench \
 pii_chat_path_redact_test plugin_protocol_e2e ppocr_icbc_smoke \

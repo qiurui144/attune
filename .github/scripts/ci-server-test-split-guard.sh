@@ -3,14 +3,14 @@
 # together cover EVERY tests/*.rs on disk, so sharding can never silently drop a
 # test. Run from rust/ (working-directory: rust).
 #
-# attune-server's 36 integration test files are partitioned across FIVE jobs
+# attune-server's integration test files are partitioned across FIVE jobs
 # (2026-06-10: split finer — group-A + office each overran the 50min budget on
 # the slow runners because every shard recompiles the full release dep tree and
 # the server-booting / argon2-vault-setup tests are CPU-bound):
 #   - OFFICE_A (5)  runs in rust-test-server-office    (incl. office_concurrent ≈ 99s)
 #   - OFFICE_B (5)  runs in rust-test-server-office-b
-#   - GROUP_A  (7)  runs in rust-test-server           (+ lib + accounts + root pkg)
-#   - GROUP_B  (13) runs in rust-test-server-b         (lighter wire/logic tests)
+#   - GROUP_A  (10) runs in rust-test-server           (+ lib + accounts + root pkg; route tests incl. documents_*)
+#   - GROUP_B  (16) runs in rust-test-server-b         (lighter wire/logic/security tests)
 #   - GROUP_C  (6)  runs in rust-test-server-c         (heavy server-booting / wizard / vault tests)
 # This script recomputes the union of all five and compares to on-disk.
 set -euo pipefail
@@ -21,14 +21,16 @@ office_error_contract office_failure_recovery_test"
 OFFICE_B="office_happy_path office_ocr_golden_gate office_prop_tests \
 office_schema_compat office_six_category_floor"
 
-GROUP_A="ai_stack_web_search_test git_route_subprocess lock_order_abba_test \
+GROUP_A="ai_stack_web_search_test documents_member_gate documents_redaction \
+documents_routes git_route_subprocess lock_order_abba_test \
 marketplace_install_test ocr_profiles_routes_test privacy_endpoints_test \
 vault_lock_endpoint_test"
 
 GROUP_B="acp4_governor_wire_test acp5_chat_flow_wire_test amd_laptop_e2e_smoke \
-api_v1_version_test chat_cost_estimate_test eval_determinism_test \
+api_v1_version_test chat_cost_estimate_test egress_guard eval_determinism_test \
 eval_response_surface_test forms_routes_test index_path_test lib_runtime_test \
-member_routes_test session_test store_queue_test"
+member_auth_test member_routes_test session_test store_queue_test \
+version_privacy_gate"
 
 GROUP_C="form_factor_integration projects_routes_test settings_lock_test \
 system_wizard_full_flow_test vault_recovery_test vault_setup_test"

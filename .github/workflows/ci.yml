@@ -229,6 +229,9 @@ jobs:
           --test chunking_quality_test
           --test concurrent_stress_test
           --test crash_recovery_test
+          --test deepsum_savings
+          --test doc_compare_verdict_golden_gate
+          --test doc_intel_real_llm_gate
           --test document_classifier_agent_golden_gate
           --test document_classifier_agent_integration
           --test document_classifier_agent_proptests
@@ -346,6 +349,8 @@ jobs:
         working-directory: rust
         run: >
           cargo test --release -p attune-core
+          --test job_queue_durable
+          --test nontext_cross_validate_golden
           --test ocr_image_test
           --test ocr_long_page_audit
           --test office_adversarial_test
@@ -488,6 +493,9 @@ jobs:
         run: >
           cargo test --release -p attune-server --lib
           --test ai_stack_web_search_test
+          --test documents_member_gate
+          --test documents_redaction
+          --test documents_routes
           --test git_route_subprocess
           --test lock_order_abba_test
           --test marketplace_install_test
@@ -569,14 +577,17 @@ jobs:
           --test amd_laptop_e2e_smoke
           --test api_v1_version_test
           --test chat_cost_estimate_test
+          --test egress_guard
           --test eval_determinism_test
           --test eval_response_surface_test
           --test forms_routes_test
           --test index_path_test
           --test lib_runtime_test
+          --test member_auth_test
           --test member_routes_test
           --test session_test
           --test store_queue_test
+          --test version_privacy_gate
 
   rust-test-server-office:
     # Office/engine integration shard A: 5 office_* binaries that each boot a
