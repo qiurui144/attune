@@ -14,6 +14,7 @@ import {
   settingsLocks,
   folderLinks,
   currentView,
+  settingsInitialTab,
 } from '../store/signals';
 import { setLocale, currentLocale, t } from '../i18n';
 import { loadSettings, patchSettings } from '../hooks/useSettings';
@@ -90,9 +91,14 @@ const TABS: Array<{ key: SettingsTab; icon: string; labelKey: string }> = [
 ];
 
 export function SettingsView(): JSX.Element {
-  const activeTab = useSignal<SettingsTab>('general');
+  const activeTab = useSignal<SettingsTab>(settingsInitialTab.value ?? 'general');
 
   useEffect(() => {
+    // 消费 deep-link 初始 tab（如 ChatView ModelChip "更多设置" → 'ai'），仅读一次
+    if (settingsInitialTab.value) {
+      activeTab.value = settingsInitialTab.value;
+      settingsInitialTab.value = null;
+    }
     void loadSettings();
     // 同时刷新 hardware
     void api

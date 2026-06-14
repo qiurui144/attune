@@ -13,16 +13,38 @@
 
 import type { JSX } from 'preact';
 import { useEffect, useRef } from 'preact/hooks';
+import { useSignal } from '@preact/signals';
 import { EmptyState, ChatMessage, ChatInput } from '../components';
+import { toast } from '../components/Toast';
 import { t } from '../i18n';
-import { activeSessionId, messages, chatSessions, settings } from '../store/signals';
+import {
+  activeSessionId,
+  messages,
+  chatSessions,
+  settings,
+  currentView,
+  settingsInitialTab,
+} from '../store/signals';
 import {
   loadSession,
   sendMessage,
   clearActiveSession,
   consumeSkipNextSessionLoad,
 } from '../hooks/useChat';
+import { patchSettings } from '../hooks/useSettings';
 import type { Message } from '../store/signals';
+
+// 各 provider 已知可选模型（与 SettingsView 的 LLM_PRESETS 对齐）。
+// chip 内切换只改 model（同 provider / endpoint / key），跨 provider 走 Settings。
+const PROVIDER_MODELS: Record<string, string[]> = {
+  ollama: ['auto', 'qwen2.5:3b', 'qwen2.5:1.5b', 'llama3.2:3b'],
+  openai: ['gpt-4o-mini', 'gpt-4o'],
+  deepseek: ['deepseek-chat', 'deepseek-reasoner'],
+  qwen: ['qwen-plus', 'qwen-turbo', 'qwen-max'],
+  gemini: ['gemini-1.5-flash', 'gemini-1.5-pro'],
+  anthropic: ['claude-3-5-haiku-latest', 'claude-3-5-sonnet-latest'],
+  attune_pro: [],
+};
 
 export function ChatView(): JSX.Element {
   const currentSid = activeSessionId.value;
@@ -117,31 +139,142 @@ function ChatHeader({ title, model }: { title: string; model: string }): JSX.Ele
 }
 
 function ModelChip({ model }: { model: string }): JSX.Element {
+  const open = useSignal(false);
+  const s = settings.value;
+  const llm = (s?.llm as { provider?: string; model?: string } | undefined) ?? {};
+  const provider = llm.provider ?? '';
+  const currentModel = llm.model?.trim() || '';
+
+  // 当前 provider 的候选模型 + 当前已配置模型（去重）
+  const candidates = (() => {
+    const list = PROVIDER_MODELS[provider] ?? [];
+    const set = new Set<string>(list);
+    if (currentModel) set.add(currentModel);
+    return [...set];
+  })();
+
+  async function pickModel(m: string): Promise<void> {
+    open.value = false;
+    if (m === currentModel) return;
+    const ok = await patchSettings({ llm: { ...llm, model: m } });
+    toast(ok ? 'success' : 'error',
+      ok ? t('chat.model.switched', { model: m }) : t('chat.model.switch_failed'));
+  }
+
+  function goSettings(): void {
+    open.value = false;
+    settingsInitialTab.value = 'ai';
+    currentView.value = 'settings';
+  }
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        type="button"
+        className="interactive"
+        aria-haspopup="menu"
+        aria-expanded={open.value}
+        style={{
+          padding: '4px var(--space-3)',
+          background: 'var(--color-bg)',
+          border: '1px solid var(--color-border)',
+          borderRadius: 'var(--radius-md)',
+          fontSize: 'var(--text-xs)',
+          fontFamily: 'var(--font-mono)',
+          color: 'var(--color-text-secondary)',
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 'var(--space-1)',
+        }}
+        onClick={() => (open.value = !open.value)}
+        aria-label={t('chat.model.change')}
+      >
+        <span aria-hidden="true">🧠</span>
+        <span>{model}</span>
+        <span aria-hidden="true" style={{ fontSize: 10 }}>
+          ▾
+        </span>
+      </button>
+      {open.value && (
+        <div
+          role="menu"
+          className="fade-slide-in"
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + var(--space-1))',
+            right: 0,
+            minWidth: 200,
+            background: 'var(--color-surface)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-md)',
+            boxShadow: 'var(--shadow-lg)',
+            padding: 'var(--space-1) 0',
+            zIndex: 20,
+          }}
+        >
+          {candidates.length === 0 ? (
+            <div
+              style={{
+                padding: '6px var(--space-3)',
+                fontSize: 'var(--text-xs)',
+                color: 'var(--color-text-secondary)',
+              }}
+            >
+              {t('chat.model.none')}
+            </div>
+          ) : (
+            candidates.map((m) => (
+              <ModelMenuItem
+                key={m}
+                label={m}
+                active={m === currentModel}
+                onClick={() => void pickModel(m)}
+              />
+            ))
+          )}
+          <div style={{ height: 1, background: 'var(--color-border)', margin: 'var(--space-1) 0' }} />
+          <ModelMenuItem label={t('chat.model.configure')} active={false} onClick={goSettings} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ModelMenuItem({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}): JSX.Element {
   return (
     <button
       type="button"
+      role="menuitem"
+      onClick={onClick}
       className="interactive"
       style={{
-        padding: '4px var(--space-3)',
-        background: 'var(--color-bg)',
-        border: '1px solid var(--color-border)',
-        borderRadius: 'var(--radius-md)',
-        fontSize: 'var(--text-xs)',
-        fontFamily: 'var(--font-mono)',
-        color: 'var(--color-text-secondary)',
-        cursor: 'pointer',
-        display: 'inline-flex',
+        display: 'flex',
         alignItems: 'center',
-        gap: 'var(--space-1)',
+        gap: 'var(--space-2)',
+        width: '100%',
+        padding: '6px var(--space-3)',
+        background: active ? 'var(--color-surface-hover)' : 'transparent',
+        border: 'none',
+        color: 'var(--color-text)',
+        fontSize: 'var(--text-sm)',
+        fontFamily: 'var(--font-mono)',
+        textAlign: 'left',
+        cursor: 'pointer',
       }}
-      onClick={() => {}}
-      aria-label={t('chat.model.change')}
+      onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--color-surface-hover)')}
+      onMouseLeave={(e) => (e.currentTarget.style.background = active ? 'var(--color-surface-hover)' : 'transparent')}
     >
-      <span aria-hidden="true">🧠</span>
-      <span>{model}</span>
-      <span aria-hidden="true" style={{ fontSize: 10 }}>
-        ▾
-      </span>
+      <span aria-hidden="true" style={{ width: 14, opacity: active ? 1 : 0 }}>✓</span>
+      <span style={{ flex: 1 }}>{label}</span>
     </button>
   );
 }

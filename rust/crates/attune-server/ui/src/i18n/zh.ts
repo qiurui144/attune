@@ -226,7 +226,13 @@ export const zh = {
   'chat.sample.last_topic': '我上次讨论了什么话题？',
   'chat.token.local': '本地',
   'chat.token.unknown': '—',
-  'chat.cost.unknown': '?$/K',
+  'chat.token.cloud_no_rate': '云端',
+  'chat.cost.estimated_title': '基于输入词元和厂商单价的估算，实际费用以账单为准',
+  'chat.cost.no_rate_title': '云端模型，暂无可用单价；发送后按真实用量显示估算',
+  'chat.model.switched': '已切换到 {model}',
+  'chat.model.switch_failed': '切换模型失败',
+  'chat.model.none': '当前厂商无预设模型，请在设置中配置',
+  'chat.model.configure': '更多设置…',
 
   // ─── ACP-5 自主流转 acp_flow 块 ────────────────────────
   'chat.flow.label': '自主流转',

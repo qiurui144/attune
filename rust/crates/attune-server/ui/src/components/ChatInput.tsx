@@ -153,29 +153,31 @@ function TokenChip({ tokens, isLocal }: { tokens: number; isLocal: boolean | nul
         ? `~${(tokens / 1000).toFixed(1)}K`
         : `~${tokens}`;
 
+  // 成本契约诚信：只展示真实费率推导的 $；无真实单价时绝不编造美元数。
   // 后端响应携带的精确 input 单价；优先于 isLocal prop（后者在首次发送前可能为 null）
   const lastCost = lastCostEstimate.value;
   const effectiveIsLocal = lastCost ? lastCost.is_local : isLocal;
   let suffix: string;
+  let suffixTitle: string | undefined;
   if (effectiveIsLocal === null) {
     // settings 未加载，provider 未知 → 显示"—"而非误报本地/费用
     suffix = t('chat.token.unknown');
   } else if (effectiveIsLocal) {
     suffix = t('chat.token.local');
   } else if (lastCost?.input_rate_per_k != null) {
-    // 直接用后端 input 单价估算（input/output 价差最大 5×，混合均价误差大）
-    suffix = `$${(tokens * lastCost.input_rate_per_k / 1000).toFixed(4)}`;
-  } else if (lastCost && lastCost.cost_usd === null) {
-    // 已知云端但 model 不在定价表
-    suffix = t('chat.cost.unknown');
+    // 真实 input 单价（来自后端定价表，input/output 价差最大 5× → 用 input 价更稳）
+    suffix = `~$${(tokens * lastCost.input_rate_per_k / 1000).toFixed(4)}`;
+    suffixTitle = t('chat.cost.estimated_title');
   } else {
-    // 无历史记录：通用兜底费率
-    suffix = `$${((tokens / 1000) * 0.0005).toFixed(4)}`;
+    // 已知云端但无真实单价（首次发送前 / model 不在定价表）→ 仅标"云端"，不编 $
+    suffix = t('chat.token.cloud_no_rate');
+    suffixTitle = t('chat.cost.no_rate_title');
   }
 
   return (
     <div
       aria-label={t('chat.tokens.aria', { tokens: String(tokens) })}
+      title={suffixTitle}
       style={{
         fontSize: 'var(--text-xs)',
         color: 'var(--color-text-secondary)',

@@ -233,7 +233,13 @@ export const en = {
   'chat.sample.last_topic': 'What topic did I discuss last time?',
   'chat.token.local': 'Local',
   'chat.token.unknown': '—',
-  'chat.cost.unknown': '?$/K',
+  'chat.token.cloud_no_rate': 'Cloud',
+  'chat.cost.estimated_title': 'Estimated from input tokens and provider rate; actual cost per your bill',
+  'chat.cost.no_rate_title': 'Cloud model; no rate available yet — estimate shown after sending based on real usage',
+  'chat.model.switched': 'Switched to {model}',
+  'chat.model.switch_failed': 'Failed to switch model',
+  'chat.model.none': 'No preset models for this provider — configure in Settings',
+  'chat.model.configure': 'More settings…',
 
   // ─── ACP-5 autonomous flow acp_flow block ─────────────
   'chat.flow.label': 'Autonomous flow',
