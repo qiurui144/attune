@@ -142,6 +142,15 @@ async fn upload_dropped_paths(paths: Vec<String>) -> Result<Vec<String>, String>
 }
 
 fn main() {
+    // webkit2gtk 2.42+ 默认启用 DMABUF/GBM EGL 渲染器,在 NVIDIA 私有驱动(及部分虚拟
+    // 显示)上初始化 GBM EGL 失败 → "Could not create GBM EGL display:
+    // EGL_NOT_INITIALIZED. Aborting..." → 窗口启动即崩(deb 在 N 卡机上点图标即崩的根因,
+    // 2026-06-13 实测)。出厂禁用该渲染器走兼容路径,让 attune 在 NVIDIA 机上开箱可用;
+    // 用户可显式 export WEBKIT_DISABLE_DMABUF_RENDERER 覆盖。必须在 GTK/webview 初始化前设。
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
