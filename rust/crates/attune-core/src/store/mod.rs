@@ -15,6 +15,7 @@ mod signals;
 mod chunk_summaries;
 mod annotations;
 mod organization;        // 文件夹一键整理:organization_proposals 缓存 + 加密 CRUD + TTL
+pub use organization::{ApplyResult, ConfirmedGroup};
 mod project;
 mod memories;
 mod memory_vectors;

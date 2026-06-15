@@ -208,6 +208,12 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         )
         // 文件夹一键智能整理 → 案卷（auto-organize folder-to-project, 2026-06-15）
         .route("/api/v1/organize/analyze", post(routes::organize::analyze))
+        .route("/api/v1/organize/apply", post(routes::organize::apply))
+        .route("/api/v1/organize/proposals", get(routes::organize::list))
+        .route(
+            "/api/v1/organize/proposals/{id}",
+            get(routes::organize::get_one).delete(routes::organize::delete_one),
+        )
         .route("/api/v1/behavior/click", post(routes::behavior::log_click))
         .route("/api/v1/behavior/history", get(routes::behavior::history))
         .route("/api/v1/behavior/popular", get(routes::behavior::popular))

@@ -151,3 +151,163 @@ async fn analyze_locked_vault_returns_403() {
     let s = resp.status().as_u16();
     assert!(s == 401 || s == 403, "locked vault ⇒ 401/403, got {s}");
 }
+
+/// Run analyze and return the resulting proposal_id (drives the Task-9 lifecycle tests).
+async fn make_proposal(base: &str, client: &reqwest::Client, ids: &[String]) -> String {
+    let resp = client
+        .post(format!("{}/api/v1/organize/analyze", base))
+        .json(&serde_json::json!({
+            "scope": { "item_ids": ids },
+            "options": { "min_cluster_size": 2 }
+        }))
+        .send()
+        .await
+        .expect("analyze");
+    assert_eq!(resp.status().as_u16(), 200, "analyze returns 200");
+    let body: serde_json::Value = resp.json().await.expect("json");
+    body["proposal_id"].as_str().expect("proposal_id").to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_files_items_then_is_idempotent() {
+    let (base, client, ids) = spawn(true, 3).await;
+    let pid = make_proposal(&base, &client, &ids).await;
+
+    // First apply: create one project, file two items into it → filed_count == 2.
+    let apply = client
+        .post(format!("{}/api/v1/organize/apply", base))
+        .json(&serde_json::json!({
+            "proposal_id": pid,
+            "confirmed_groups": [{
+                "group_id": 0, "action": "create", "title": "案卷A", "kind": "collection",
+                "items": [
+                    { "item_id": ids[0], "role": "证据" },
+                    { "item_id": ids[1] }
+                ]
+            }]
+        }))
+        .send()
+        .await
+        .expect("apply");
+    assert_eq!(apply.status().as_u16(), 200, "apply returns 200");
+    let body: serde_json::Value = apply.json().await.expect("json");
+    assert_eq!(body["filed_count"], 2, "two items filed");
+    assert_eq!(
+        body["created"].as_array().map(|a| a.len()),
+        Some(1),
+        "exactly one project created"
+    );
+    assert_eq!(body["already_applied"], false, "first apply not idempotent short-circuit");
+
+    // Second apply of the SAME proposal_id → idempotent short-circuit, no new project.
+    let again = client
+        .post(format!("{}/api/v1/organize/apply", base))
+        .json(&serde_json::json!({ "proposal_id": pid, "confirmed_groups": [] }))
+        .send()
+        .await
+        .expect("apply again");
+    assert_eq!(again.status().as_u16(), 200, "re-apply returns 200");
+    let again_body: serde_json::Value = again.json().await.expect("json");
+    assert_eq!(again_body["already_applied"], true, "re-apply is idempotent");
+    assert_eq!(again_body["filed_count"], 0, "re-apply files nothing");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_one_returns_decrypted_proposal_else_404() {
+    let (base, client, ids) = spawn(true, 3).await;
+    let pid = make_proposal(&base, &client, &ids).await;
+
+    // get_one must decrypt the cached proposal back to plaintext JSON (uses dek).
+    let got = client
+        .get(format!("{}/api/v1/organize/proposals/{}", base, pid))
+        .send()
+        .await
+        .expect("get_one");
+    assert_eq!(got.status().as_u16(), 200, "get_one returns 200");
+    let body: serde_json::Value = got.json().await.expect("json");
+    assert_eq!(body["proposal_id"], pid, "decrypted proposal carries its id");
+    // Plaintext round-trip: groups+noise cover every seeded item.
+    let mut covered: Vec<String> = Vec::new();
+    let empty = Vec::new();
+    for g in body["groups"].as_array().unwrap_or(&empty) {
+        for it in g["items"].as_array().unwrap_or(&empty) {
+            covered.push(it["item_id"].as_str().unwrap().to_string());
+        }
+    }
+    for n in body["noise_items"].as_array().unwrap_or(&empty) {
+        covered.push(n["item_id"].as_str().unwrap().to_string());
+    }
+    covered.sort();
+    let mut want = ids.clone();
+    want.sort();
+    assert_eq!(covered, want, "decrypted proposal covers all input items");
+
+    // Unknown id → 404.
+    let missing = client
+        .get(format!("{}/api/v1/organize/proposals/does-not-exist", base))
+        .send()
+        .await
+        .expect("get_one missing");
+    assert_eq!(missing.status().as_u16(), 404, "unknown proposal ⇒ 404");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_paginates_proposals() {
+    let (base, client, ids) = spawn(true, 3).await;
+    // Create two distinct proposals.
+    let p1 = make_proposal(&base, &client, &ids).await;
+    let p2 = make_proposal(&base, &client, &ids).await;
+    assert_ne!(p1, p2, "two distinct proposals");
+
+    // Page 1: limit=1 returns exactly one (most recent first).
+    let page1 = client
+        .get(format!("{}/api/v1/organize/proposals?limit=1&offset=0", base))
+        .send()
+        .await
+        .expect("list page1");
+    assert_eq!(page1.status().as_u16(), 200, "list returns 200");
+    let body1: serde_json::Value = page1.json().await.expect("json");
+    let arr1 = body1.as_array().expect("array");
+    assert_eq!(arr1.len(), 1, "limit=1 ⇒ one row");
+    assert!(arr1[0]["id"].is_string(), "row carries id");
+    assert_eq!(arr1[0]["status"], "draft", "fresh proposal is draft");
+
+    // Page 2: offset=1 returns the second row, different id from page 1.
+    let page2 = client
+        .get(format!("{}/api/v1/organize/proposals?limit=1&offset=1", base))
+        .send()
+        .await
+        .expect("list page2");
+    let body2: serde_json::Value = page2.json().await.expect("json");
+    let arr2 = body2.as_array().expect("array");
+    assert_eq!(arr2.len(), 1, "offset=1 ⇒ one row");
+    assert_ne!(arr1[0]["id"], arr2[0]["id"], "pagination yields distinct rows");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_discards_proposal_returns_204() {
+    let (base, client, ids) = spawn(true, 3).await;
+    let pid = make_proposal(&base, &client, &ids).await;
+
+    let del = client
+        .delete(format!("{}/api/v1/organize/proposals/{}", base, pid))
+        .send()
+        .await
+        .expect("delete");
+    assert_eq!(del.status().as_u16(), 204, "delete returns 204");
+
+    // After discard, the proposal is no longer listed among drafts.
+    let listed = client
+        .get(format!("{}/api/v1/organize/proposals?status=draft", base))
+        .send()
+        .await
+        .expect("list after delete");
+    let body: serde_json::Value = listed.json().await.expect("json");
+    let ids_listed: Vec<String> = body
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .map(|r| r["id"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(!ids_listed.contains(&pid), "discarded proposal not in draft list");
+}

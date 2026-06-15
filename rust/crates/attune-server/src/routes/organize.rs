@@ -6,8 +6,13 @@
 //!
 //! 锁序铁律:vectors 必须先于 vault 取(规范序 fulltext → vectors → vault,与
 //! search/chat 热点路径一致;反序持锁 = ABBA 死锁)。本 handler 镜像 clusters::rebuild。
+//!
+//! Task 9 追加 apply/get_one/list/delete_one(用户审核后归档 + 提案生命周期)。
 
-use axum::extract::State;
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
@@ -181,6 +186,128 @@ fn scope_summary_json(scope: &Scope, item_count: usize) -> String {
         }
     };
     v.to_string()
+}
+
+/// 用户审核后确认的整理动作。action: "create" | "add-to" | "skip"。
+#[derive(Deserialize)]
+pub struct ApplyReq {
+    pub proposal_id: String,
+    #[serde(default)]
+    pub confirmed_groups: Vec<CgReq>,
+}
+
+#[derive(Deserialize)]
+pub struct CgReq {
+    #[allow(dead_code)] // group_id 仅前端追踪;归档以 items 为准。
+    pub group_id: Option<i32>,
+    pub action: String,
+    pub project_id: Option<String>,
+    pub title: Option<String>,
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub items: Vec<CgItem>,
+}
+
+#[derive(Deserialize)]
+pub struct CgItem {
+    pub item_id: String,
+    pub role: Option<String>,
+}
+
+/// `POST /api/v1/organize/apply`:把确认后的分组批量归入案卷。单事务幂等(Task 7),
+/// 重复 apply 同 proposal_id 返回 already_applied。归档动作不涉及加密字段 → 无需 dek。
+pub async fn apply(
+    State(state): State<SharedState>,
+    Json(req): Json<ApplyReq>,
+) -> AppResult<Json<serde_json::Value>> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    if !matches!(vault.state(), VaultState::Unlocked) {
+        return Err(AppError::Forbidden("vault locked".into()));
+    }
+    let groups: Vec<attune_core::store::ConfirmedGroup> = req
+        .confirmed_groups
+        .into_iter()
+        .map(|g| attune_core::store::ConfirmedGroup {
+            action: g.action,
+            project_id: g.project_id,
+            title: g.title,
+            kind: g.kind,
+            items: g
+                .items
+                .into_iter()
+                .map(|i| (i.item_id, i.role.unwrap_or_default()))
+                .collect(),
+        })
+        .collect();
+    let r = vault
+        .store()
+        .apply_proposal(&req.proposal_id, &groups)
+        .map_err(int)?;
+    Ok(Json(serde_json::json!({
+        "created": r.created,
+        "updated": r.updated,
+        "filed_count": r.filed_count,
+        "skipped_count": r.skipped_count,
+        "already_applied": r.already_applied,
+    })))
+}
+
+/// `GET /api/v1/organize/proposals/{id}`:返回解密后的提案明文 JSON。
+/// proposal_json 加密存储 → 需 dek 解密(照 analyze handler 的 dek_db() 取法)。
+pub async fn get_one(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    if !matches!(vault.state(), VaultState::Unlocked) {
+        return Err(AppError::Forbidden("vault locked".into()));
+    }
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
+    match vault.store().get_proposal(&dek, &id).map_err(int)? {
+        Some((_status, json)) => Ok(Json(serde_json::from_str(&json).map_err(int)?)),
+        None => Err(AppError::NotFound("proposal not found".into())),
+    }
+}
+
+/// `GET /api/v1/organize/proposals`:分页列出提案元数据(id/status/created_at)。
+/// 列表不解密内容(降明文暴露面);查询参 status/limit/offset。无需 dek。
+pub async fn list(
+    State(state): State<SharedState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> AppResult<Json<serde_json::Value>> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    if !matches!(vault.state(), VaultState::Unlocked) {
+        return Err(AppError::Forbidden("vault locked".into()));
+    }
+    let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(20);
+    let offset: i64 = q.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let rows = vault
+        .store()
+        .list_proposals(q.get("status").map(|s| s.as_str()), limit, offset)
+        .map_err(int)?;
+    Ok(Json(serde_json::json!(rows
+        .into_iter()
+        .map(|(id, status, created_at)| serde_json::json!({
+            "id": id,
+            "status": status,
+            "created_at": created_at,
+        }))
+        .collect::<Vec<_>>())))
+}
+
+/// `DELETE /api/v1/organize/proposals/{id}`:废弃提案(status='discarded',保留审计)。无需 dek。
+pub async fn delete_one(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    if !matches!(vault.state(), VaultState::Unlocked) {
+        return Err(AppError::Forbidden("vault locked".into()));
+    }
+    vault.store().discard_proposal(&id).map_err(int)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn int(e: impl std::fmt::Display) -> AppError {
