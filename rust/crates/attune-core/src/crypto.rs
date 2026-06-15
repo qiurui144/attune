@@ -20,6 +20,14 @@ impl Key32 {
         OsRng.fill_bytes(&mut bytes);
         Self(bytes)
     }
+
+    /// Construct from already-derived 32 bytes. WHY: portable-key derivation
+    /// (memory bundle export/import) needs to wrap an Argon2id output that is
+    /// not the vault DEK; the raw bytes must round-trip into a `Key32` without
+    /// going through `derive_master_key`.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 }
 
 impl AsRef<[u8]> for Key32 {
