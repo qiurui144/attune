@@ -201,6 +201,7 @@ export const zh = {
   'sidebar.nav.privacy': '隐私',
   'sidebar.nav.quota': '用量配额',
   'sidebar.nav.docintel': '文档智能',
+  'sidebar.nav.workbench': '工作台',
   'sidebar.nav.settings': '设置',
   'sidebar.nav.more': '更多',
   'sidebar.nav.more.aria': '展开更多功能',
@@ -1138,6 +1139,26 @@ export const zh = {
   'docIntel.naive': '原始',
   'docIntel.actual': '实际',
   'docIntel.cacheHit': '缓存命中块',
+
+  // ── Workbench（行业场景直接入口） ──────────────────────────────
+  'workbench.title': '工作台',
+  'workbench.subtitle': '点击场景卡片直接运行行业核心功能（无需对话触发）',
+  'workbench.loading': '加载场景中…',
+  'workbench.load_failed': '加载场景失败',
+  'workbench.retry': '重试',
+  'workbench.empty_title': '尚未安装行业插件',
+  'workbench.empty_desc': '安装律师 / 专利 / 医疗 / 售前 / 学术 / 工程等插件后，对应场景会自动出现在这里。',
+  'workbench.empty_action': '前往插件市场',
+  'workbench.run': '运行',
+  'workbench.cost.free': '即时',
+  'workbench.cost.cloud': '云端',
+  'workbench.locked': '需订阅',
+  'workbench.locked_hint': '该插件授权已过期或被吊销，请前往会员页恢复。',
+  'workbench.locked_action': '查看会员',
+  'workbench.llm_needed_title': '该场景需要配置 LLM',
+  'workbench.llm_needed_desc': '此场景调用云端模型，请先在设置中配置 LLM。',
+  'workbench.llm_needed_action': '前往设置',
+  'workbench.group_other': '其他',
 } as const;
 
 export type MessageKey = keyof typeof zh;

@@ -184,6 +184,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/plugins/{id}/toggle", post(routes::plugins::toggle))
         // law-pro 接入阶段 2: 前端触发 plugin agent binary（civil_loan_agent 算金额）
         .route("/api/v1/agents/{agent_id}/run", post(routes::agents::run_agent))
+        // 行业工作台: 聚合已装插件场景卡片（直接入口，bypass chat-trigger）
+        .route("/api/v1/scenarios", get(routes::scenarios::list))
         // E4 (2026-05-01) — PluginHub marketplace (默认 Mock provider；attune-pro 注入 hub-client)
         .route("/api/v1/marketplace/plugins", get(routes::marketplace::list_plugins))
         .route("/api/v1/marketplace/plugins/{id}/install", post(routes::marketplace::install_plugin))

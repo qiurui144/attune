@@ -328,6 +328,7 @@ type NavItem = { view: View; icon: string; labelKey: string };
 
 // Primary tier — always visible
 const PRIMARY_NAV: NavItem[] = [
+  { view: 'workbench', icon: '🛠', labelKey: 'sidebar.nav.workbench' },
   { view: 'items', icon: '📄', labelKey: 'sidebar.nav.items' },
   { view: 'projects', icon: '🗂', labelKey: 'sidebar.nav.projects' },
   { view: 'knowledge', icon: '📊', labelKey: 'sidebar.nav.knowledge' },

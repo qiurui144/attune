@@ -196,12 +196,62 @@ pub struct SkillCost {
     pub external_calls_per_invocation: Option<u32>,
 }
 
+/// agent 输出模式声明。plugin.yaml 两种历史写法都需兼容(spec §10 向后兼容)：
+///   - map 形态(law/patent): `output_modes: { default: structured, supports: [structured] }`
+///   - 裸 list 形态(tech-pro): `output_modes: [structured]`
+///
+/// 任何无法识别的形态 → 默认空(永不让 plugin 加载失败,见 deserialize_output_modes)。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentOutputModes {
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(default)]
+    pub supports: Vec<String>,
+}
+
+/// 宽松解析 `output_modes`：接受 map / 裸 list / 缺省,绝不因形态不符让加载失败。
+/// 严格 struct 解析会把 tech-pro 的 `[structured]` 当 invalid type 拒绝整个 plugin
+/// (这是引入该字段时的 regression);本函数把 list 归一为 `{default:None, supports:[...]}`。
+fn deserialize_output_modes<'de, D>(de: D) -> std::result::Result<Option<AgentOutputModes>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(de)?;
+    Ok(match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::Array(arr) => {
+            let supports = arr
+                .into_iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect();
+            Some(AgentOutputModes { default: None, supports })
+        }
+        serde_json::Value::Object(_) => serde_json::from_value(v).ok(),
+        // 其他标量形态 → 忽略(不阻塞加载)。
+        _ => None,
+    })
+}
+
 /// Agent 声明 (场景专家)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSpec {
     pub id: String,
     #[serde(default)]
     pub description: String,
+    /// 工作台卡片显示名（行业术语，language-neutral 例外）。缺省时派生层回退
+    /// 到 scenario → description → id（见 plugin_registry::all_scenarios）。
+    #[serde(default)]
+    pub label: Option<String>,
+    /// 意图分类（如 "核算 compute" / "抽取 extract"）。仅 hint，供工作台卡片副标。
+    #[serde(default)]
+    pub intent: Option<String>,
+    /// 场景描述（卡片主标）。law/patent 已声明；其余插件缺则回退（见上）。
+    #[serde(default)]
+    pub scenario: Option<String>,
+    /// 输出模式声明（default + supports）。结果面板据此渲染 structured/marked/...
+    /// 宽松解析(map / 裸 list / 缺省都接受),不因形态不符让 plugin 加载失败。
+    #[serde(default, deserialize_with = "deserialize_output_modes")]
+    pub output_modes: Option<AgentOutputModes>,
     /// 处理哪些案件类型 (与 registers_case_kinds 配套)
     #[serde(default)]
     pub case_kinds: Vec<String>,
@@ -825,5 +875,40 @@ version: "1.0.0"
 "#;
         let m: PluginManifest = serde_yaml::from_str(yaml).expect("parse");
         assert!(m.chat_trigger.is_none());
+    }
+
+    // output_modes 双形态兼容 (spec §10): map (law/patent) + 裸 list (tech-pro)。
+    // 严格 struct 会把 list 当 invalid type 拒绝整个 plugin — 这是 regression 守卫。
+    #[test]
+    fn output_modes_accepts_both_map_and_list() {
+        // map 形态
+        let map_yaml = r#"
+id: p
+name: P
+type: industry
+version: "1.0.0"
+agents:
+  - id: a_map
+    runtime: rust_binary
+    output_modes: { default: structured, supports: [structured, marked] }
+  - id: a_list
+    runtime: subprocess
+    output_modes: [structured]
+  - id: a_none
+    runtime: subprocess
+"#;
+        let m: PluginManifest = serde_yaml::from_str(map_yaml).expect("parse must not fail on list form");
+        let map_agent = m.agents.iter().find(|a| a.id == "a_map").unwrap();
+        let om = map_agent.output_modes.as_ref().unwrap();
+        assert_eq!(om.default.as_deref(), Some("structured"));
+        assert_eq!(om.supports, vec!["structured", "marked"]);
+
+        let list_agent = m.agents.iter().find(|a| a.id == "a_list").unwrap();
+        let om = list_agent.output_modes.as_ref().unwrap();
+        assert_eq!(om.default, None, "bare list → no default");
+        assert_eq!(om.supports, vec!["structured"]);
+
+        let none_agent = m.agents.iter().find(|a| a.id == "a_none").unwrap();
+        assert!(none_agent.output_modes.is_none());
     }
 }

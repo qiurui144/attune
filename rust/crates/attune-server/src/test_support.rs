@@ -26,6 +26,18 @@ use std::sync::Arc;
 use attune_core::llm::{DeterminismLevel, MockLlmProvider, RecordingMockLlm};
 use attune_core::member_verifier::WhitelistMemberVerifier;
 
+/// Process-global lock serializing unit tests that mutate `HOME` / `XDG_DATA_HOME`
+/// (e.g. routes::plugins / routes::scenarios drive `default_plugins_dir` off these).
+/// `set_var` is process-wide, so concurrent env-mutating tests leak each other's
+/// plugin dirs / settings. Acquire this before touching those vars in any test.
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`ENV_LOCK`], tolerating a poisoned mutex (a prior test panic must not
+/// cascade into unrelated test failures).
+pub fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// The ONE license id the eval harness's member verifier approves. A `login-token` "paid" claim
 /// reaches `MemberState::Paid` only when its `license_id` equals this — i.e. it must pass a real
 /// verification step (a match), NOT the old blanket non-empty check. Any other license id is

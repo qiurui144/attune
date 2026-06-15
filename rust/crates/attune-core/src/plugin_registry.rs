@@ -47,6 +47,40 @@ pub struct ChatTriggerMatch {
     pub keyword_hits: usize,
 }
 
+/// 工作台「场景卡片」派生数据（一卡 = 一可独立 dispatch 的 agent）。
+///
+/// 全部从已加载 plugin.yaml 声明派生 —— 装插件即出卡,零 UI 硬编码 (spec §3.1)。
+/// label 回退链 `label → scenario → description → id` 保证永不出空卡 (spec §7)。
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct Scenario {
+    pub plugin_id: String,
+    pub plugin_label: String,
+    /// 插件类型(如 "industry") → 工作台分组依据。
+    pub plugin_type: String,
+    pub agent_id: String,
+    /// 卡片主标(回退链解析后,永不空)。
+    pub label: String,
+    /// 意图 hint(可空)。
+    pub intent: Option<String>,
+    /// 场景描述(可空; label 已含回退,故这里保留原始声明)。
+    pub scenario: Option<String>,
+    /// "free"(llm_tokens==0/未声明) | "cloud"(llm_tokens>0)。
+    pub cost_tier: &'static str,
+    pub llm_required: bool,
+    /// 关联的 case_kind(取首个;无则 None → 不绑 Project,如 tech-pro)。
+    pub case_kind: Option<String>,
+    pub has_form: bool,
+    /// 有表单时 → {plugin_id, form_id}(form_id = ui_component.id)。
+    pub form_ref: Option<ScenarioFormRef>,
+    pub output_modes: Option<crate::plugin_loader::AgentOutputModes>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct ScenarioFormRef {
+    pub plugin_id: String,
+    pub form_id: String,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct PluginRegistry {
     plugins: HashMap<String, LoadedPlugin>,
@@ -238,6 +272,63 @@ impl PluginRegistry {
         for p in self.plugins.values() {
             for k in &p.manifest.registers_case_kinds {
                 out.push(k);
+            }
+        }
+        out
+    }
+
+    /// 派生工作台「场景卡片」清单 —— 遍历所有已装 plugin 的 agents (spec §3.1)。
+    ///
+    /// 每个**非 library** runtime 的 agent 派生一张卡; `runtime: library` 的 agent
+    /// (如 law-pro interest_calculator) 是内部工具,不可独立 dispatch → 跳过 (spec §3.5)。
+    /// label 回退链 `label → scenario → description → id`,永不出空卡 (spec §7)。
+    /// has_form 来自 ui_components(`target: agent:<id>`)。OSS 裸装无 plugin → 空 Vec。
+    pub fn all_scenarios(&self) -> Vec<Scenario> {
+        let mut out = Vec::new();
+        for (pid, p) in &self.plugins {
+            let m = &p.manifest;
+            let plugin_label = if m.name.is_empty() { pid.clone() } else { m.name.clone() };
+            for a in &m.agents {
+                // library runtime 不暴露独立 binary → 不出卡(与 agents.rs dispatch gate 一致)。
+                if a.runtime == "library" {
+                    continue;
+                }
+                let label = a
+                    .label
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .or(a.scenario.as_deref().filter(|s| !s.is_empty()))
+                    .or(Some(a.description.as_str()).filter(|s| !s.is_empty()))
+                    .unwrap_or(a.id.as_str())
+                    .to_string();
+
+                let llm_required = a.cost.llm_tokens.unwrap_or(0) > 0;
+                let cost_tier = if llm_required { "cloud" } else { "free" };
+
+                // ui_component 以 `target: agent:<id>` 关联 agent → 表单引用。
+                let form_ref = m.ui_components.iter().find_map(|c| {
+                    let target = c.target.strip_prefix("agent:").unwrap_or(c.target.as_str());
+                    (target == a.id).then(|| ScenarioFormRef {
+                        plugin_id: pid.clone(),
+                        form_id: c.id.clone(),
+                    })
+                });
+
+                out.push(Scenario {
+                    plugin_id: pid.clone(),
+                    plugin_label: plugin_label.clone(),
+                    plugin_type: m.plugin_type.clone(),
+                    agent_id: a.id.clone(),
+                    label,
+                    intent: a.intent.clone().filter(|s| !s.is_empty()),
+                    scenario: a.scenario.clone().filter(|s| !s.is_empty()),
+                    cost_tier,
+                    llm_required,
+                    case_kind: a.case_kinds.first().cloned(),
+                    has_form: form_ref.is_some(),
+                    form_ref,
+                    output_modes: a.output_modes.clone(),
+                });
             }
         }
         out
@@ -1361,5 +1452,177 @@ chat_trigger:
         write_plugin_dir(tmp.path(), "p", "id: p\nname: P\ntype: industry\nversion: \"1.0.0\"\n");
         let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
         assert_eq!(reg.plugin_trust("p"), Some(crate::plugin_sig::Trust::Unsigned));
+    }
+
+    // ── all_scenarios() 派生 (spec §9 单元下限 ≥6) ───────────────────────────
+
+    /// 一个 plugin 含多 agent + 一个 ui_component 表单 → 派生正确的卡片清单:
+    /// scenario 主标 / cost_tier / has_form / form_ref / case_kind 全对。
+    #[test]
+    fn all_scenarios_derives_card_fields() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师助手
+type: industry
+version: "1.0.0"
+agents:
+  - id: civil_loan_agent
+    description: "民事借贷"
+    intent: 核算 compute
+    scenario: "借贷本息计算"
+    output_modes: { default: structured, supports: [structured] }
+    case_kinds: [civil-loan]
+    runtime: rust_binary
+    binary: bin/agent_civil_loan
+    cost: { llm_tokens: 0, cpu_seconds: 1 }
+  - id: fact_extractor_agent
+    description: "事实抽取"
+    intent: 抽取 extract
+    scenario: "证据事实抽取"
+    case_kinds: [civil-loan]
+    runtime: rust_binary
+    binary: bin/agent_fact_extract
+    cost: { llm_tokens: 2000 }
+ui_components:
+  - id: civil_loan
+    target: agent:civil_loan_agent
+    html: forms/civil_loan.yaml
+    description: 借贷表单
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        let scenarios = reg.all_scenarios();
+        assert_eq!(scenarios.len(), 2, "two non-library agents → two cards");
+
+        let loan = scenarios.iter().find(|s| s.agent_id == "civil_loan_agent").unwrap();
+        assert_eq!(loan.label, "借贷本息计算", "label 取 scenario");
+        assert_eq!(loan.plugin_label, "律师助手");
+        assert_eq!(loan.cost_tier, "free");
+        assert!(!loan.llm_required);
+        assert_eq!(loan.case_kind.as_deref(), Some("civil-loan"));
+        assert!(loan.has_form);
+        assert_eq!(loan.form_ref.as_ref().unwrap().form_id, "civil_loan");
+
+        let fact = scenarios.iter().find(|s| s.agent_id == "fact_extractor_agent").unwrap();
+        assert_eq!(fact.cost_tier, "cloud", "llm_tokens>0 → cloud");
+        assert!(fact.llm_required);
+        assert!(!fact.has_form, "no ui_component for this agent");
+    }
+
+    /// runtime: library 的 agent (内部工具) 不出卡 (spec §3.5)。
+    #[test]
+    fn all_scenarios_skips_library_runtime() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师助手
+type: industry
+version: "1.0.0"
+agents:
+  - id: interest_calculator
+    description: "内部本息计算库"
+    runtime: library
+  - id: civil_loan_agent
+    scenario: "借贷本息计算"
+    runtime: rust_binary
+    binary: bin/x
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        let scenarios = reg.all_scenarios();
+        assert_eq!(scenarios.len(), 1, "library runtime agent 不出卡");
+        assert_eq!(scenarios[0].agent_id, "civil_loan_agent");
+    }
+
+    /// label 回退链: scenario 缺 → description → id (spec §7,永不空卡)。
+    #[test]
+    fn all_scenarios_label_fallback_chain() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "medical-pro",
+            r#"
+id: medical-pro
+name: 医疗助手
+type: industry
+version: "1.0.0"
+agents:
+  - id: a_with_desc
+    description: "医学术语规范化"
+    runtime: subprocess
+  - id: a_bare
+    runtime: subprocess
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        let scenarios = reg.all_scenarios();
+        let desc = scenarios.iter().find(|s| s.agent_id == "a_with_desc").unwrap();
+        assert_eq!(desc.label, "医学术语规范化", "缺 scenario → 回退 description");
+        let bare = scenarios.iter().find(|s| s.agent_id == "a_bare").unwrap();
+        assert_eq!(bare.label, "a_bare", "全缺 → 回退 agent_id");
+    }
+
+    /// 无 case_kind 的 agent (如 tech-pro) 仍出卡,case_kind = None。
+    #[test]
+    fn all_scenarios_agent_without_case_kind() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "tech-pro",
+            r#"
+id: tech-pro
+name: 工程助手
+type: industry
+version: "1.0.0"
+agents:
+  - id: code-reviewer
+    description: "代码自动审查"
+    runtime: in_process
+    cost: {}
+"#,
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        let scenarios = reg.all_scenarios();
+        assert_eq!(scenarios.len(), 1);
+        assert_eq!(scenarios[0].case_kind, None, "无 case_kind → None,不绑 Project");
+        assert_eq!(scenarios[0].cost_tier, "free", "未声明 llm_tokens → free");
+    }
+
+    /// OSS 裸装无 plugin → 空 Vec (工作台空态)。
+    #[test]
+    fn all_scenarios_empty_when_no_plugins() {
+        let tmp = TempDir::new().unwrap();
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        assert!(reg.all_scenarios().is_empty());
+    }
+
+    /// 多 plugin → 卡片聚合,各带正确 plugin_id / plugin_type 分组依据。
+    #[test]
+    fn all_scenarios_aggregates_multiple_plugins() {
+        let tmp = TempDir::new().unwrap();
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            "id: law-pro\nname: 律师\ntype: industry\nversion: \"1.0.0\"\nagents:\n  - id: a1\n    scenario: 场景1\n    runtime: rust_binary\n    binary: bin/x\n",
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "patent-pro",
+            "id: patent-pro\nname: 专利\ntype: industry\nversion: \"1.0.0\"\nagents:\n  - id: b1\n    scenario: 场景2\n    runtime: rust_binary\n    binary: bin/y\n",
+        );
+        let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
+        let scenarios = reg.all_scenarios();
+        assert_eq!(scenarios.len(), 2);
+        let law = scenarios.iter().find(|s| s.plugin_id == "law-pro").unwrap();
+        assert_eq!(law.plugin_label, "律师");
+        assert_eq!(law.plugin_type, "industry");
+        assert!(scenarios.iter().any(|s| s.plugin_id == "patent-pro"));
     }
 }

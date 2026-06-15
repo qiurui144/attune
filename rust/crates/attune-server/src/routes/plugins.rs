@@ -224,6 +224,9 @@ mod tests {
     /// Drives the real `list` handler against an AppState that scanned a temp plugins dir.
     #[tokio::test]
     async fn list_returns_trust_and_status() {
+        // Serialize with sibling env-mutating unit tests (routes::scenarios) — both
+        // drive default_plugins_dir off process-global XDG_DATA_HOME/HOME.
+        let _env_guard = crate::test_support::lock_test_env();
         let tmp = tempfile::TempDir::new().expect("tmp");
         // default_plugins_dir() resolves under dirs::data_local_dir() = XDG_DATA_HOME.
         // SAFETY: single-threaded test, set before AppState::new scans the dir.
