@@ -47,6 +47,31 @@ pub use web_search_cache::DEFAULT_TTL_SECS as DEFAULT_WEB_SEARCH_TTL_SECS;
 
 use rusqlite::{params, Connection};
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::HashMap;
+
+/// Process-wide registry of per-DB-path open locks.
+///
+/// `Store::open` is invoked on the same `vault.db` from several places at boot
+/// (vault unlock, `install_job_store`, `install_usage_aggregator`, background
+/// workers) and these can race. SQLite file locking + busy_timeout does not
+/// protect the create+`journal_mode=WAL`+`VACUUM`+schema-migration sequence well
+/// when the file is being created concurrently (observed: `locking protocol`,
+/// `database is locked`, and a non-atomic check-then-`ALTER ADD COLUMN` TOCTOU
+/// → `duplicate column name`). Serializing the *open path* (not steady-state
+/// connections, which are already separate handles) in-process eliminates all
+/// of these deterministically; the critical section is sub-ms.
+fn open_lock_for(path: &Path) -> Arc<Mutex<()>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = registry.lock().unwrap_or_else(|e| e.into_inner());
+    // Canonicalize-lite: in-memory DBs share path ":memory:"; on-disk use the
+    // path verbatim (callers always pass the same db_path()).
+    map.entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 // crypto + Key32 仅 tests 内引用 (#[cfg(test)] 子模块经常重新 use 它们)；
 // 顶部 import 保留是为防未来 mod.rs 主体加 dek 字段时不必再补 import。
@@ -741,6 +766,13 @@ impl Store {
 
     /// 打开或创建数据库，初始化 schema
     pub fn open(path: &Path) -> Result<Self> {
+        // Serialize concurrent opens of the *same* DB file in-process (see
+        // `open_lock_for`): the create + WAL + VACUUM + migration bootstrap below
+        // is not safe under a concurrent create on the same path. The guard is
+        // released when this fn returns; steady-state queries use the returned,
+        // already-open connection and are unaffected.
+        let open_lock = open_lock_for(path);
+        let _open_guard = open_lock.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -759,23 +791,26 @@ impl Store {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
-        conn.execute_batch(SCHEMA_SQL)?;
-        Self::migrate_task_type(&conn)?;
-        Self::migrate_breadcrumbs_encrypt(&conn)?;
-        // v0.6 fix: 复位 stuck 在 processing 的任务回 pending（上次进程崩溃 / kill）
-        let _ = conn.execute(
-            "UPDATE embed_queue SET status = 'pending' WHERE status = 'processing'",
-            [],
-        );
-        Self::migrate_items_privacy_tier(&conn)?;
-        Self::migrate_corpus_domain(&conn)?;
-        Self::migrate_items_content_hash(&conn)?;
-        Self::migrate_skill_signals_v07(&conn)?;
-        Self::migrate_memories_multilayer(&conn)?;
-        Self::migrate_chunk_summaries_deepsum_strategy(&conn)?;
-        Self::migrate_organization_proposals(&conn)?;
-        Self::migrate_memory_migrations(&conn)?;
-        Self::ensure_schema_version(&conn)?;
+        // Concurrent-open safety: `Store::open` runs on every vault unlock, the
+        // job-store/usage-aggregator install, and each background worker — and
+        // these can race on the *same* DB file at boot (e.g. install_job_store
+        // running while init_search_engines opens its own connection). The schema
+        // bootstrap below is a check-then-`ALTER TABLE ADD COLUMN` sequence whose
+        // TOCTOU is *not* protected by busy_timeout: two connections can both see
+        // a column absent, then both ALTER, and the loser gets
+        // `duplicate column name: ...` → `Store::open` Err → job_store stays None
+        // → office routes return 503 instead of 404 (only on fresh runners where
+        // no model cache shifts the init timing). Wrapping SCHEMA_SQL + the
+        // migrations in a single `BEGIN IMMEDIATE` transaction serializes openers
+        // on the write lock (honoring busy_timeout above): the second opener
+        // blocks until the first commits, then its existence checks see the
+        // columns already present and skip the ALTERs.
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        if let Err(e) = Self::bootstrap_schema(&conn) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+        conn.execute_batch("COMMIT;")?;
         let store = Self { conn };
         // QW-1: 一次性 purge embed_queue 终态行（done / abandoned）。
         // 这只是启动 housekeeping；周期清理由 cleanup worker 跑。失败静默忽略。
@@ -787,6 +822,32 @@ impl Store {
         // race test in tests/job_queue_durable.rs). The server calls it exactly
         // once per process boot (AppState::install_job_store).
         Ok(store)
+    }
+
+    /// Run SCHEMA_SQL + the additive migration sequence on `conn`.
+    ///
+    /// Factored out of `open` so the whole sequence runs inside a single
+    /// `BEGIN IMMEDIATE` transaction (concurrent-open safety — see `open`).
+    /// Must be called with an open write transaction; the caller commits.
+    fn bootstrap_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(SCHEMA_SQL)?;
+        Self::migrate_task_type(conn)?;
+        Self::migrate_breadcrumbs_encrypt(conn)?;
+        // v0.6 fix: 复位 stuck 在 processing 的任务回 pending（上次进程崩溃 / kill）
+        let _ = conn.execute(
+            "UPDATE embed_queue SET status = 'pending' WHERE status = 'processing'",
+            [],
+        );
+        Self::migrate_items_privacy_tier(conn)?;
+        Self::migrate_corpus_domain(conn)?;
+        Self::migrate_items_content_hash(conn)?;
+        Self::migrate_skill_signals_v07(conn)?;
+        Self::migrate_memories_multilayer(conn)?;
+        Self::migrate_chunk_summaries_deepsum_strategy(conn)?;
+        Self::migrate_organization_proposals(conn)?;
+        Self::migrate_memory_migrations(conn)?;
+        Self::ensure_schema_version(conn)?;
+        Ok(())
     }
 
     /// 打开内存数据库（测试用）
@@ -880,13 +941,24 @@ impl Store {
         // 1) 全新 vault
         if !path.exists() {
             let conn = Connection::open(path)?;
-            conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")?;
+            // busy_timeout: this runs before the main connection's pragma, and a
+            // concurrent Store::open on the same fresh path can hold a write lock
+            // here (VACUUM). Without the timeout the loser fails SQLITE_BUSY →
+            // open Err (the autovacuum failure itself is non-fatal, but it logs
+            // noisily). Wait for the lock instead.
+            conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+            // The first writer creates + stamps the file; a concurrent opener may
+            // find it already exists by the time it runs VACUUM, which fails with
+            // "cannot VACUUM from within a transaction" / lock — treat any failure
+            // as benign no-op (the existing-vault path below handles mode check).
+            let _ = conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;");
             drop(conn);
             return Ok(());
         }
         // 2) 老 vault — 先探测当前 mode
         let current_mode: i64 = {
             let conn = Connection::open(path)?;
+            conn.execute_batch("PRAGMA busy_timeout=5000;")?;
             conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
                 .unwrap_or(0)
         };
@@ -1368,6 +1440,27 @@ mod tests {
 
     fn test_dek() -> Key32 {
         Key32::generate()
+    }
+
+    /// Regression: concurrent `Store::open` on the same fresh on-disk path must
+    /// all succeed. Before the per-path open lock + transactional bootstrap, the
+    /// non-atomic check-then-`ALTER ADD COLUMN` migrations raced
+    /// (`duplicate column name: task_type`) and the WAL/VACUUM create raced
+    /// (`database is locked` / `locking protocol`), making `Store::open` return
+    /// Err on a fresh runner — which left the office job-store None → routes 503
+    /// instead of 404.
+    #[test]
+    fn concurrent_open_same_fresh_path_all_succeed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("vault.db");
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || Store::open(&p).map(|_| ())));
+        }
+        for h in handles {
+            h.join().unwrap().expect("concurrent Store::open must not Err");
+        }
     }
 
     #[test]
