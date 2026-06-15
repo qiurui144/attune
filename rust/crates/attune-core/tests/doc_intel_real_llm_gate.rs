@@ -11,20 +11,37 @@
 //! counterpart (`doc_compare_verdict_golden_gate.rs` proves the parser; this proves the model
 //! actually picks the right class / produces grounded output on the real provider).
 //!
-//! ## How to run (real DeepSeek)
+//! ## How to run — multi-tier matrix (§4.5-D)
 //!
+//! This one harness is provider-agnostic via env, so the SAME three tests run on every tier of
+//! the §4.5-D compatibility matrix. Run each tier and compare floor pass-rate; if a tier fails a
+//! floor, RELEASE.md must label the agent for that minimum tier (do NOT relax the floor).
+//!
+//! **Tier 1 — weak local (3B-class, e.g. qwen2.5:3b via Ollama):**
+//! ```bash
+//! ollama pull qwen2.5:3b
+//! export ATTUNE_LLM_PROVIDER=ollama ATTUNE_LLM_MODEL=qwen2.5:3b ATTUNE_REAL_LLM_SEEDS=3
+//! cargo test -p attune-core --test doc_intel_real_llm_gate -- --ignored --nocapture --test-threads=1
+//! ```
+//!
+//! **Tier 2 — weak cloud (e.g. deepseek-chat / gpt-4o-mini / gemini-flash):**
 //! ```bash
 //! set -a; source /tmp/secrets-deepseek/key.env; set +a   # DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL
 //! export ATTUNE_LLM_PROVIDER=openai_compat
 //! export ATTUNE_LLM_ENDPOINT="$DEEPSEEK_BASE_URL"        # https://api.deepseek.com/v1
 //! export ATTUNE_LLM_API_KEY="$DEEPSEEK_API_KEY"          # NEVER echoed / logged / committed
-//! export ATTUNE_LLM_MODEL=deepseek-chat
-//! export ATTUNE_REAL_LLM_SEEDS=3                          # N≥3
+//! export ATTUNE_LLM_MODEL=deepseek-chat ATTUNE_REAL_LLM_SEEDS=3
 //! cargo test -p attune-core --test doc_intel_real_llm_gate -- --ignored --nocapture --test-threads=1
 //! ```
 //!
+//! **Tier 3 — strong cloud (upper-bound reference, e.g. deepseek-reasoner / a Pro model):** same
+//! as Tier 2 with `ATTUNE_LLM_MODEL` set to the strong model + its endpoint/key. Any
+//! OpenAI-compatible `*_BASE_URL` works (DashScope / OpenAI / a self-hosted gateway).
+//!
 //! The harness NEVER prints the api key (only model + endpoint host). Raw per-seed numbers are
-//! printed to stdout for the report (`reports/runs/<ts>_doc-intel-deepseek/`).
+//! printed to stdout for the report (`reports/runs/<ts>_doc-intel-<tier>/`). Per §4.5-D, "all-tier
+//! pass" → RELEASE.md no warning; "Tier-2/3 only" → "Requires ≥ gpt-4o-mini tier"; "Tier-3 only"
+//! → "Pro plan only". The default (no env) runs Tier 1 against local Ollama.
 //!
 //! ## Floors (no goalpost-moving — Agent 验证铁律)
 //!

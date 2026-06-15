@@ -4,8 +4,10 @@
 //! Three actions (spec §5.3):
 //!   - `list`: zero-LLM chapter navigation + per-chapter extractive preview.
 //!   - `summarize_chapter`: reuses the deep_summary single-chapter pipeline (member-gated).
-//!   - `ask`: RAG over this+related chapters → Reasoning-model Q&A; cross-chapter memory =
-//!     prior chapters' (cached) summaries injected into context.
+//!   - `ask`: doc-local Q&A → Reasoning-model answers over THIS chapter's text; "cross-chapter
+//!     memory" = prior chapters' (cached) summaries injected into context. This is chapter-local
+//!     context assembly, NOT vault-wide RAG (no `search::` over other documents) — see the module
+//!     doc in `mod.rs` for the retrieval-scope contract; vault-level RAG is a v.next item.
 //!
 //! **Output-Mode Contract (spec §3.5)**: the default mode is `review/批阅` — each chapter
 //! carries `annotations[]` anchored to **that chapter's char offsets** (like a margin note /
