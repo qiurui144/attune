@@ -21,7 +21,7 @@ import { loadSettings, patchSettings } from '../hooks/useSettings';
 import { loadMemberState, loadSettingsLocks, memberLogout, memberLoginPassword } from '../hooks/useMember';
 import { loadFolderLinks } from '../hooks/useFolderLinks';
 import { unbindDir } from '../hooks/useRemote';
-import { api, clearToken } from '../store/api';
+import { api, clearToken, getToken, ApiError } from '../store/api';
 
 /** LLM 厂商快捷预设 — 选中后自动填 endpoint + model，用户只需贴 API key。 */
 type LlmPresetKey =
@@ -482,6 +482,253 @@ function AIPanel(): JSX.Element {
   );
 }
 
+interface MigrationStatus {
+  current_model: string;
+  current_dim: number;
+  stale: number;
+  paused: boolean;
+}
+
+interface ImportResult {
+  imported: number;
+  merged: number;
+  skipped: number;
+}
+
+/**
+ * 记忆延续 + 可携带性。三块:迁移状态(换 embedding 模型后旧向量 reindex 进度) +
+ * 口令加密导出 + 合并式导入。
+ *
+ * WHY 不走 api.* 助手:导出返回 application/octet-stream 二进制(api.* 强行 res.json()
+ * 会炸);导入是 multipart(api.post 只发 JSON)。两者都用裸 fetch + getToken() 注入
+ * Bearer(token 源是 sessionStorage,与 api.ts 一致 —— 不用 localStorage)。
+ */
+function MemorySection(): JSX.Element {
+  const status = useSignal<MigrationStatus | null>(null);
+  const loadingStatus = useSignal(false);
+  const exportOpen = useSignal(false);
+  const pw = useSignal('');
+  const exporting = useSignal(false);
+  const importing = useSignal(false);
+
+  async function refreshStatus(): Promise<void> {
+    loadingStatus.value = true;
+    try {
+      status.value = await api.get<MigrationStatus>('/memory/migration/status');
+    } catch (e) {
+      // vault 锁定时后端 403;此处静默(状态块显示"不可用"),不弹 toast 打扰。
+      status.value = null;
+      if (e instanceof ApiError && e.status !== 403) {
+        toast('error', t('settings.memory.status_fail'));
+      }
+    } finally {
+      loadingStatus.value = false;
+    }
+  }
+
+  useEffect(() => {
+    void refreshStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function toggleReindex(pause: boolean): Promise<void> {
+    try {
+      await api.post('/memory/reindex', { pause });
+      await refreshStatus();
+    } catch {
+      toast('error', t('settings.memory.reindex_fail'));
+    }
+  }
+
+  async function doExport(): Promise<void> {
+    exporting.value = true;
+    try {
+      const token = getToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const resp = await fetch('/api/v1/memory/export', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ passphrase: pw.value }),
+      });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({ error: 'unknown' }));
+        if (resp.status === 403) {
+          toast('error', t('settings.memory.vault_locked'));
+        } else {
+          toast('error', t('settings.memory.export_fail', { message: body.error ?? `HTTP ${resp.status}` }));
+        }
+        return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'attune-memory.bundle';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('success', t('settings.memory.export_ok'));
+      exportOpen.value = false;
+      pw.value = '';
+    } catch (e) {
+      toast('error', t('settings.memory.export_fail', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      exporting.value = false;
+    }
+  }
+
+  async function doImport(file: File): Promise<void> {
+    const passphrase = window.prompt(t('settings.memory.import_pw_prompt'));
+    // 取消(null)直接退出;空串交给后端校验,口令短由 import 解密失败兜底。
+    if (passphrase == null) return;
+    importing.value = true;
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('passphrase', passphrase);
+      const token = getToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const resp = await fetch('/api/v1/memory/import', { method: 'POST', headers, body: form });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({ error: 'unknown' }));
+        // 后端把可操作的前置错误编进 error 文本(code 统一 bad-request),按文本分流给友好提示。
+        const marker = String(body.error ?? '');
+        if (marker.includes('vault-not-ready')) {
+          toast('error', t('settings.memory.import_vault_not_ready'));
+        } else if (marker.includes('bad-passphrase')) {
+          toast('error', t('settings.memory.import_bad_passphrase'));
+        } else if (marker.includes('unsupported-bundle-version')) {
+          toast('error', t('settings.memory.import_unsupported'));
+        } else if (marker.includes('corrupt-bundle')) {
+          toast('error', t('settings.memory.import_corrupt'));
+        } else {
+          toast('error', t('settings.memory.import_fail', { message: marker || `HTTP ${resp.status}` }));
+        }
+        return;
+      }
+      const r = (await resp.json()) as ImportResult;
+      toast('success', t('settings.memory.import_ok', { imported: r.imported, skipped: r.skipped }));
+      await refreshStatus();
+    } catch (e) {
+      toast('error', t('settings.memory.import_fail', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      importing.value = false;
+    }
+  }
+
+  const st = status.value;
+  return (
+    <Section title={t('settings.memory.title')} desc={t('settings.memory.desc')}>
+      {/* 迁移状态 + reindex 控制 */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+        {loadingStatus.value && !st ? (
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+            {t('common.loading')}
+          </p>
+        ) : st ? (
+          <>
+            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+              {t('settings.memory.current_model', { model: st.current_model, dim: st.current_dim })}
+            </p>
+            {st.stale > 0 ? (
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)', margin: 0 }}>
+                {st.paused
+                  ? t('settings.memory.stale_paused', { count: st.stale })
+                  : t('settings.memory.stale_running', { count: st.stale })}
+              </p>
+            ) : (
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+                {t('settings.memory.up_to_date')}
+              </p>
+            )}
+            <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+              <Button variant="secondary" size="sm" onClick={() => void refreshStatus()}>
+                {t('settings.memory.refresh')}
+              </Button>
+              {st.stale > 0 &&
+                (st.paused ? (
+                  <Button variant="primary" size="sm" onClick={() => void toggleReindex(false)}>
+                    {t('settings.memory.resume')}
+                  </Button>
+                ) : (
+                  <Button variant="secondary" size="sm" onClick={() => void toggleReindex(true)}>
+                    {t('settings.memory.pause')}
+                  </Button>
+                ))}
+            </div>
+          </>
+        ) : (
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+            {t('settings.memory.unavailable')}
+          </p>
+        )}
+      </div>
+
+      {/* 导出 / 导入 */}
+      <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+        <Button variant="secondary" size="sm" onClick={() => (exportOpen.value = true)}>
+          {t('settings.memory.export')}
+        </Button>
+        <label>
+          <input
+            type="file"
+            accept=".bundle,application/octet-stream"
+            style={{ display: 'none' }}
+            disabled={importing.value}
+            onChange={(e) => {
+              const input = e.currentTarget;
+              const f = input.files?.[0];
+              if (f) void doImport(f);
+              input.value = ''; // 允许重复选同一文件
+            }}
+          />
+          <Button variant="secondary" size="sm" loading={importing.value} onClick={(e) => {
+            (e.currentTarget.previousElementSibling as HTMLInputElement | null)?.click();
+          }}>
+            {t('settings.memory.import')}
+          </Button>
+        </label>
+      </div>
+
+      <Modal
+        open={exportOpen.value}
+        onClose={() => { exportOpen.value = false; pw.value = ''; }}
+        title={t('settings.memory.export_title')}
+        disableBackdropClose
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-error)', margin: 0 }}>
+            {t('settings.memory.export_warn')}
+          </p>
+          <Input
+            type="password"
+            label={t('settings.memory.passphrase')}
+            placeholder={t('settings.memory.passphrase_hint')}
+            value={pw.value}
+            autoFocus
+            onInput={(e) => (pw.value = e.currentTarget.value)}
+          />
+          <div style={{ display: 'flex', gap: 'var(--space-2)', justifyContent: 'flex-end' }}>
+            <Button variant="ghost" size="sm" onClick={() => { exportOpen.value = false; pw.value = ''; }}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={exporting.value}
+              disabled={pw.value.length < 8}
+              onClick={() => void doExport()}
+            >
+              {t('settings.memory.export_confirm')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    </Section>
+  );
+}
+
 function DataPanel(): JSX.Element {
   return (
     <>
@@ -491,6 +738,7 @@ function DataPanel(): JSX.Element {
         </p>
       </Section>
       <FolderLinksSection />
+      <MemorySection />
       <Section title={t('settings.data.backup.title')}>
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 8px 0' }}>
           {t('settings.data.backup.desc')}
