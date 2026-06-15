@@ -91,6 +91,11 @@ pub async fn vault_guard(
         // (routes/documents.rs::resolve_doc). Bypassing here lets the stronger member-gate run
         // and keeps zero-cost text ops usable pre-unlock (mirrors the chat/search eval bypass).
         || path.starts_with("/api/v1/documents")
+        // memory import: the handler itself rejects sealed/locked vaults with a
+        // user-actionable 400 `vault-not-ready` ("先建库并解锁") instead of the
+        // guard's generic 403; bypass here so that more specific guidance reaches
+        // the client (the handler still requires Unlocked before touching the DEK).
+        || path == "/api/v1/memory/import"
     {
         return next.run(request).await;
     }

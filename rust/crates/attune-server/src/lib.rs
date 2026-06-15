@@ -221,6 +221,9 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             get(routes::memory::migration_status),
         )
         .route("/api/v1/memory/reindex", post(routes::memory::reindex))
+        // 记忆可迁移性：口令加密导出 + 合并式导入（2026-06-15, Task 7）
+        .route("/api/v1/memory/export", post(routes::memory::export))
+        .route("/api/v1/memory/import", post(routes::memory::import))
         .route("/api/v1/behavior/click", post(routes::behavior::log_click))
         .route("/api/v1/behavior/history", get(routes::behavior::history))
         .route("/api/v1/behavior/popular", get(routes::behavior::popular))
