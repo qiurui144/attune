@@ -105,6 +105,7 @@ export function ProjectsView(): JSX.Element {
   const newTitle = useSignal('');
   const newKind = useSignal('generic');
   const selectedId = useSignal<string | null>(null);
+  const creating = useSignal(false); // 并发防护：创建进行中禁用确认按钮，防快速双击多次 POST
   const files = useSignal<ProjectFile[]>([]);
   const timeline = useSignal<TimelineEntry[]>([]);
   const plugins = useSignal<PluginInfo[]>([]);
@@ -140,12 +141,14 @@ export function ProjectsView(): JSX.Element {
   }, []);
 
   const onCreate = async (): Promise<void> => {
+    if (creating.value) return; // 已有创建请求在飞，忽略重复点击
     const title = newTitle.value.trim();
     const kind = newKind.value.trim() || 'generic';
     if (!title) {
       toast('error', t('projects.toast.title_required'));
       return;
     }
+    creating.value = true;
     try {
       await api.post('/projects', { title, kind });
       newTitle.value = '';
@@ -157,6 +160,8 @@ export function ProjectsView(): JSX.Element {
       const msg = e instanceof Error ? e.message : String(e);
       error.value = msg;
       toast('error', t('projects.toast.create_failed', { message: msg }));
+    } finally {
+      creating.value = false;
     }
   };
 
@@ -210,6 +215,7 @@ export function ProjectsView(): JSX.Element {
           <CreateProjectModal
             title={newTitle}
             kind={newKind}
+            busy={creating.value}
             onCancel={() => (showCreate.value = false)}
             onConfirm={() => void onCreate()}
           />
@@ -317,6 +323,7 @@ export function ProjectsView(): JSX.Element {
         <CreateProjectModal
           title={newTitle}
           kind={newKind}
+          busy={creating.value}
           onCancel={() => (showCreate.value = false)}
           onConfirm={() => void onCreate()}
         />
@@ -621,11 +628,13 @@ function ProjectDetail({
 function CreateProjectModal({
   title,
   kind,
+  busy,
   onCancel,
   onConfirm,
 }: {
   title: { value: string };
   kind: { value: string };
+  busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }): JSX.Element {
@@ -668,11 +677,11 @@ function CreateProjectModal({
             marginTop: 'var(--space-2)',
           }}
         >
-          <Button variant="secondary" size="sm" onClick={onCancel}>
+          <Button variant="secondary" size="sm" onClick={onCancel} disabled={busy}>
             {t('common.cancel')}
           </Button>
-          <Button variant="primary" size="sm" onClick={onConfirm}>
-            {t('projects.empty.action')}
+          <Button variant="primary" size="sm" onClick={onConfirm} disabled={busy}>
+            {busy ? t('common.loading') : t('projects.empty.action')}
           </Button>
         </div>
       </div>

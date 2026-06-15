@@ -34,6 +34,8 @@ export type View =
   | 'marketplace'  // G3 (2026-05-01): PluginHub 插件市场
   | 'office'       // v0.7.1: Office helper (OCR + ASR transcription)
   | 'privacy'      // v1.0.6: Privacy dashboard (5 outbound points)
+  | 'quota'        // v1.0.7: cloud quota dashboard
+  | 'doc-intel'    // doc-intel: compare/summarize/chapters (T-10)
   | 'settings';
 export const currentView = signal<View>('chat');
 
@@ -143,6 +145,10 @@ export type Message = {
   created_at: string;
 };
 export const messages = signal<Message[]>([]);
+
+// 最近一次 chat 发送失败/超时的用户原文 —— 非 null 时 ChatView 显示"重试"入口，
+// 重发成功或重新发送即清空。让用户在超时/网络故障后有恢复路径（不是死消息）。
+export const lastFailedSend = signal<string | null>(null);
 
 // ── Cost & Trigger Contract: LLM 调用费用估算（来自后端响应） ─────
 export type CostEstimate = {

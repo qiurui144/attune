@@ -14,7 +14,7 @@
 import type { JSX } from 'preact';
 import { useEffect, useRef } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { EmptyState, ChatMessage, ChatInput } from '../components';
+import { EmptyState, ChatMessage, ChatInput, Button } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import {
@@ -24,6 +24,7 @@ import {
   settings,
   currentView,
   settingsInitialTab,
+  lastFailedSend,
 } from '../store/signals';
 import {
   loadSession,
@@ -73,12 +74,41 @@ export function ChatView(): JSX.Element {
     >
       <ChatHeader title={session?.title ?? t('chat.new_session_title')} model={getCurrentModel()} />
       <MessageList />
+      <RetryBanner />
       <ChatInput
         onSend={async (text) => {
           await sendMessage(text);
         }}
         isLocal={isLlmLocal()}
       />
+    </div>
+  );
+}
+
+// 发送失败/超时后的重试入口：lastFailedSend 非 null 时常驻输入框上方，
+// 点重试用同一原文重发；成功（sendMessage 开头清 lastFailedSend）即消失。
+function RetryBanner(): JSX.Element | null {
+  const failed = lastFailedSend.value;
+  if (!failed) return null;
+  return (
+    <div
+      role="alert"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 'var(--space-3)',
+        padding: 'var(--space-2) var(--space-5)',
+        background: 'var(--color-error-bg, #fef2f2)',
+        borderTop: '1px solid var(--color-border)',
+        fontSize: 'var(--text-sm)',
+        color: 'var(--color-text-secondary)',
+      }}
+    >
+      <span style={{ flex: 1, minWidth: 0 }}>{t('chat.error.timeout')}</span>
+      <Button variant="secondary" size="sm" onClick={() => void sendMessage(failed)}>
+        {t('chat.error.retry')}
+      </Button>
     </div>
   );
 }

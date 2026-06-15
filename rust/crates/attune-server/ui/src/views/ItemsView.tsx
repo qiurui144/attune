@@ -152,13 +152,23 @@ export function ItemsView(): JSX.Element {
 function ItemsHeader(): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploading = useSignal(false);
+  // 上传进度：100MB 大文件按文件串行处理，无反馈时用户会以为卡死。
+  // progress 显示 当前/总数 + 当前文件名，让用户确认仍在进行。
+  const progressDone = useSignal(0);
+  const progressTotal = useSignal(0);
+  const progressName = useSignal('');
 
   const onUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    if (uploading.value) return; // 并发防护：上传进行中忽略新触发
+    const list = Array.from(files);
     uploading.value = true;
+    progressTotal.value = list.length;
+    progressDone.value = 0;
     let successCount = 0;
     let failCount = 0;
-    for (const file of Array.from(files)) {
+    for (const file of list) {
+      progressName.value = file.name;
       const form = new FormData();
       form.append('file', file);
       try {
@@ -177,8 +187,10 @@ function ItemsHeader(): JSX.Element {
       } catch {
         failCount++;
       }
+      progressDone.value += 1;
     }
     uploading.value = false;
+    progressName.value = '';
     if (successCount > 0) {
       toast('success', t('items.upload.success', { count: successCount }));
       void loadItems(100, 0);
@@ -199,7 +211,32 @@ function ItemsHeader(): JSX.Element {
       <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
         {`📄 ${t('sidebar.nav.items')}`}
       </h2>
-      <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+        {uploading.value && (
+          <span
+            role="status"
+            aria-live="polite"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 'var(--space-2)',
+              fontSize: 'var(--text-xs)',
+              color: 'var(--color-text-secondary)',
+            }}
+          >
+            <span className="spinner" aria-hidden="true" />
+            {progressName.value
+              ? t('items.upload.progress_file', {
+                  name: progressName.value,
+                  done: progressDone.value + 1,
+                  total: progressTotal.value,
+                })
+              : t('items.upload.progress', {
+                  done: progressDone.value,
+                  total: progressTotal.value,
+                })}
+          </span>
+        )}
         <input
           ref={fileInputRef}
           type="file"
@@ -219,6 +256,7 @@ function ItemsHeader(): JSX.Element {
         <Button
           variant="secondary"
           size="sm"
+          disabled={uploading.value}
           onClick={() => void loadItems(100, 0)}
         >
           {t('items.refresh')}

@@ -15,6 +15,8 @@ import {
   MarketplaceView,
   OfficeView,
   PrivacyView,
+  QuotaView,
+  DocIntelView,
   SettingsView,
 } from '../views';
 import { currentView } from '../store/signals';
@@ -50,6 +52,8 @@ export function MainShell(): JSX.Element {
         {view === 'marketplace' && <MarketplaceView />}
         {view === 'office' && <OfficeView />}
         {view === 'privacy' && <PrivacyView />}
+        {view === 'quota' && <QuotaView />}
+        {view === 'doc-intel' && <DocIntelView />}
         {view === 'settings' && <SettingsView />}
       </main>
       <DrawerHost />

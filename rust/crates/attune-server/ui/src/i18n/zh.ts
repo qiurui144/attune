@@ -199,6 +199,8 @@ export const zh = {
   'sidebar.nav.marketplace': '插件市场',
   'sidebar.nav.office': '办公助理',
   'sidebar.nav.privacy': '隐私',
+  'sidebar.nav.quota': '用量配额',
+  'sidebar.nav.docintel': '文档智能',
   'sidebar.nav.settings': '设置',
   'sidebar.nav.more': '更多',
   'sidebar.nav.more.aria': '展开更多功能',
@@ -233,6 +235,10 @@ export const zh = {
   'chat.model.switch_failed': '切换模型失败',
   'chat.model.none': '当前厂商无预设模型，请在设置中配置',
   'chat.model.configure': '更多设置…',
+  // 发送失败 / 超时（替换 useChat 里硬编码的"⚠ 发送失败"，并提供重试入口）
+  'chat.error.send_failed': '发送失败：{message}',
+  'chat.error.timeout': '响应超时，模型可能仍在处理或网络较慢。可重试。',
+  'chat.error.retry': '重试',
 
   // ─── ACP-5 自主流转 acp_flow 块 ────────────────────────
   'chat.flow.label': '自主流转',
@@ -263,6 +269,9 @@ export const zh = {
   'items.upload.fail': '{count} 个文件上传失败',
   'items.upload.uploading': '上传中…',
   'items.upload.button': '上传文件',
+  // 多文件上传进度（避免 100MB 文件时用户以为卡死）：显示 当前/总数 + 当前文件名
+  'items.upload.progress': '上传中 {done}/{total}…',
+  'items.upload.progress_file': '正在处理：{name}（{done}/{total}）',
   'items.refresh': '⟳ 刷新',
   'items.untitled': '(无标题)',
   'items.delete.confirm': '删除条目 "{title}"？',

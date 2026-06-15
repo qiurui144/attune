@@ -206,6 +206,8 @@ export const en = {
   'sidebar.nav.marketplace': 'Marketplace',
   'sidebar.nav.office': 'Office Helper',
   'sidebar.nav.privacy': 'Privacy',
+  'sidebar.nav.quota': 'Quota',
+  'sidebar.nav.docintel': 'Doc Intelligence',
   'sidebar.nav.settings': 'Settings',
   'sidebar.nav.more': 'More',
   'sidebar.nav.more.aria': 'Expand more features',
@@ -240,6 +242,9 @@ export const en = {
   'chat.model.switch_failed': 'Failed to switch model',
   'chat.model.none': 'No preset models for this provider — configure in Settings',
   'chat.model.configure': 'More settings…',
+  'chat.error.send_failed': 'Failed to send: {message}',
+  'chat.error.timeout': 'Response timed out — the model may still be working or the network is slow. You can retry.',
+  'chat.error.retry': 'Retry',
 
   // ─── ACP-5 autonomous flow acp_flow block ─────────────
   'chat.flow.label': 'Autonomous flow',
@@ -270,6 +275,8 @@ export const en = {
   'items.upload.fail': '{count} file(s) failed to upload',
   'items.upload.uploading': 'Uploading…',
   'items.upload.button': 'Upload files',
+  'items.upload.progress': 'Uploading {done}/{total}…',
+  'items.upload.progress_file': 'Processing: {name} ({done}/{total})',
   'items.refresh': '⟳ Refresh',
   'items.untitled': '(Untitled)',
   'items.delete.confirm': 'Delete item "{title}"?',

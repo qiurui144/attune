@@ -8,14 +8,20 @@
  *   - 新建 / 删除 session
  */
 
-import { api } from '../store/api';
+import { api, apiCall, RETRY_POLICIES } from '../store/api';
 import {
   chatSessions,
   activeSessionId,
   messages,
   lastCostEstimate,
+  lastFailedSend,
 } from '../store/signals';
 import type { ChatSession, Message, CostEstimate, AcpFlow } from '../store/signals';
+import { t } from '../i18n';
+
+// chat 请求超时上限。超过此值视为超时 → 给用户超时提示 + 重试入口，
+// 而非无限转圈让用户怀疑卡死（90s 容忍较慢的本地大模型 / 云端长回答）。
+const CHAT_TIMEOUT_MS = 90_000;
 
 // ── 后端响应类型 ─────────────────────────────────────────────
 type SessionsResponse = {
@@ -108,6 +114,7 @@ export async function sendMessage(
   if (!trimmed) return;
   if (sendInFlight) return; // 有请求在飞，忽略新发送
   sendInFlight = true;
+  lastFailedSend.value = null; // 新发送 → 清掉上次失败态（重试入口消失）
 
   // Optimistic 用户消息
   const userMsg: Message = {
@@ -126,6 +133,10 @@ export async function sendMessage(
 
   const currentSession = activeSessionId.value;
 
+  // 超时标记 hoist 到函数作用域：apiCall 重试后会把 AbortError 包成 NetworkError，
+  // 错误对象上的 name 丢失，故用此 flag 在 catch 里可靠区分超时 vs 一般失败。
+  let timedOut = false;
+
   try {
     const body: Record<string, unknown> = {
       message: trimmed,
@@ -133,7 +144,24 @@ export async function sendMessage(
     };
     if (currentSession) body.session_id = currentSession;
 
-    const res = await api.post<ChatResponse>('/chat', body);
+    // 超时保护：AbortController + 定时器。超过 CHAT_TIMEOUT_MS 主动 abort，
+    // fetch 抛 AbortError → 落入 catch 当作超时，给超时提示 + 重试入口。
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, CHAT_TIMEOUT_MS);
+    let res: ChatResponse;
+    try {
+      res = await apiCall<ChatResponse>('/chat', {
+        method: 'POST',
+        body: JSON.stringify(body),
+        retry: RETRY_POLICIES.nonIdempotentWrite,
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     const assistantMsg: Message = {
       id: `a-${Date.now()}`,
@@ -171,14 +199,18 @@ export async function sendMessage(
       ];
     }
   } catch (e) {
-    // 失败 → 系统消息提示
+    // 超时（abort）与一般失败分别给文案；都暴露重试入口（lastFailedSend）让用户恢复。
+    const content = timedOut
+      ? `⚠ ${t('chat.error.timeout')}`
+      : `⚠ ${t('chat.error.send_failed', { message: e instanceof Error ? e.message : String(e) })}`;
     const errMsg: Message = {
       id: `err-${Date.now()}`,
       role: 'system',
-      content: `⚠ 发送失败：${e instanceof Error ? e.message : String(e)}`,
+      content,
       created_at: new Date().toISOString(),
     };
     messages.value = [...messages.value, errMsg];
+    lastFailedSend.value = trimmed; // ChatView 据此显示"重试"
   } finally {
     sendInFlight = false;
   }
