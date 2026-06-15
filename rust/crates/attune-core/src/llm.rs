@@ -1585,6 +1585,31 @@ impl LlmProvider for MockLlmProvider {
     }
 }
 
+/// No-op LLM provider whose `chat` returns an empty string + zero usage.
+///
+/// WHY: `Clusterer::new` requires an `Arc<dyn LlmProvider>` even when only the
+/// LLM-free `group_only` path is used (organizer tier-2 extractive naming).
+/// `MockLlmProvider` errors on an empty response queue, so it is unsuitable as
+/// a "never actually called" placeholder. `noop_llm()` is that placeholder.
+struct NoopLlmProvider;
+impl LlmProvider for NoopLlmProvider {
+    fn chat(&self, _system: &str, _user: &str) -> Result<(String, crate::usage::TokenUsage)> {
+        Ok((String::new(), crate::usage::TokenUsage::empty("noop", "noop")))
+    }
+    fn is_available(&self) -> bool {
+        false
+    }
+    fn model_name(&self) -> &str {
+        "noop"
+    }
+}
+
+/// Returns a shared no-op [`LlmProvider`] for paths that need the trait object
+/// to satisfy a signature but never invoke the model (e.g. `Clusterer::group_only`).
+pub fn noop_llm() -> std::sync::Arc<dyn LlmProvider> {
+    std::sync::Arc::new(NoopLlmProvider)
+}
+
 /// Recording mock for document-intelligence pipeline tests.
 ///
 /// Unlike [`MockLlmProvider`] (which only records the last user message), this records
