@@ -206,6 +206,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/projects/{id}/timeline",
             get(routes::projects::list_project_timeline),
         )
+        // 文件夹一键智能整理 → 案卷（auto-organize folder-to-project, 2026-06-15）
+        .route("/api/v1/organize/analyze", post(routes::organize::analyze))
         .route("/api/v1/behavior/click", post(routes::behavior::log_click))
         .route("/api/v1/behavior/history", get(routes::behavior::history))
         .route("/api/v1/behavior/popular", get(routes::behavior::popular))
