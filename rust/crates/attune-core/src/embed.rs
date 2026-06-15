@@ -39,6 +39,30 @@ pub trait EmbeddingProvider: Send + Sync {
     fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)>;
     fn dimensions(&self) -> usize;
     fn is_available(&self) -> bool;
+
+    /// 当前 embedding 的身份键。Option A(维度键):返回 `"embed-dim<N>"`,
+    /// 必须与 state.rs:1950 写入 memory_vectors.model 的串完全一致 —— 否则
+    /// `list_stale_memory_ids` 会把现存行全判 stale → reindex 风暴。providers
+    /// 不暴露真实模型名,维度是稳定代理(同维度换模型属语义漂移,留 v.next)。
+    fn model_name(&self) -> String {
+        format!("embed-dim{}", self.dimensions())
+    }
+}
+
+/// 当前 active embedding 的 (model, dim) 单一来源。memory 迁移 + organize 共用,
+/// 避免各处自拼维度键漂移。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingSignature {
+    pub model: String,
+    pub dim: usize,
+}
+
+/// 取当前 embedding provider 的签名(model + dim 的 SSOT)。
+pub fn current_embedding_signature(p: &dyn EmbeddingProvider) -> EmbeddingSignature {
+    EmbeddingSignature {
+        model: p.model_name(),
+        dim: p.dimensions(),
+    }
 }
 
 /// Ollama HTTP embedding client
@@ -404,6 +428,14 @@ impl EmbeddingProvider for NoopProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signature_is_dimension_keyed() {
+        let p = MockEmbeddingProvider::new(1024);
+        let sig = current_embedding_signature(&p);
+        // 维度键:与 state.rs:1950 写 memory_vectors 的 "embed-dim<N>" 一致
+        assert_eq!(sig, EmbeddingSignature { model: "embed-dim1024".into(), dim: 1024 });
+    }
 
     #[test]
     fn noop_provider_not_available() {
