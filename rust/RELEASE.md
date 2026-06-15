@@ -1,6 +1,6 @@
 # attune 版本记录
 
-## Unreleased — 隐私出网门强制 + ABBA 死锁修复 + 多语言分词 + 摄取安全加固
+## v1.4.0 (2026-06-16) — 文件夹一键整理→案卷 · 记忆延续可迁移 · 行业直达工作台 · 隐私出网门 · ABBA/并发开库修复
 
 ### Highlights
 - **G5 durable job queue(K3 24h 夜间批处理底座)**:office ASR(及后续 ocr / agent /
@@ -50,6 +50,27 @@
   **死代码**的选定源缓存(`SelectedSource` 读写 + TTL 新鲜度)真正接进解析路径:进程内 2×2 桶
   (region × coverage-class)缓存 failover 顺序,fresh 命中跳过重探(首源黑洞时省去每源 connect
   超时叠加到首搜延迟);解锁时从持久化选定源 seed,下载后回填 winning source 供下次冷启动复用。
+- **📁 文件夹一键整理 → 案卷(可复用聚类引擎)**:新增 organizer 引擎(gather → group →
+  label → apply),HDBSCAN group-only 聚类(`min_samples` 下限 5)+ `StrategyRegistry` /
+  `OrganizationStrategy` trait(OSS `GenericStrategy`;行业策略在 attune-pro)。`analyze` 产出
+  整理建议(草稿)→ 用户确认 → 单事务 `apply` 归档到 Project,**绝不自动改动数据**(成本契约:
+  聚类属 ⚡ 本地算力,LLM 标签需用户显式触发)。`POST /organize/analyze` / `apply` + 建议 CRUD;
+  12 TDD task 全绿 + `organize_golden_gate`。
+- **🧠 记忆延续与可迁移性**:记忆子系统(L2 episodic + L3 semantic,字段级 AES-256-GCM)新增
+  **跨模型/维度延续** —— `current_embedding_signature` SSOT(维度键 `embed-dim{N}`)+
+  `memory_migrations` 表 + 维度变更时 `reindex_one` 重建向量,升级换 embedding 模型不丢记忆;
+  以及 **记忆导出 / 导入**(Argon2id 派生密钥 + AES-256-GCM bundle,导入前整批校验 +
+  `source_chunk_hashes` 去重,杜绝半写 / 重放)。9 TDD task 全绿 + `memory_continuity_golden_gate`。
+- **🎯 行业场景直达工作台(避免"对话触发不了 agent")**:新增工作台视图把各行业插件的
+  场景以**直达卡片**呈现(`GET /scenarios` 从内存 PluginRegistry 只读派生,带 cost_tier /
+  has_form / enabled / entitlement_status),用户点卡片直接进对应 agent / 表单,**不依赖**
+  chat 自然语言触发(解决"说错关键词 agent 不触发"的可用性痛点)。
+- **🛡️ boot 稳定性:`Store::open` 并发开库竞争修复**:同一 `vault.db` 在 boot 期被多处并发
+  打开(vault unlock / `install_job_store` / usage aggregator / 后台 worker)时,create + WAL +
+  VACUUM + schema-migration 序列存在竞争(TOCTOU `ALTER ADD COLUMN` → `duplicate column`;
+  无 busy_timeout 的 VACUUM → `database is locked`),会让 `Store::open` Err → job store 装不上
+  → office 路由错返 503。新增 per-path 进程内 open 锁 + 事务化 bootstrap + autovacuum busy_timeout
+  彻底消除(确定性并发回归测试钉死);CI office shard 在无模型缓存的 fresh runner 上也稳定通过。
 
 ### Breaking
 - **无对外 API / 数据格式破坏性变更**。隐私出网门、锁序、分词链均为运行期行为修复;
