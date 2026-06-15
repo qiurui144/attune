@@ -152,38 +152,51 @@ fn probe_source_with(
     probe_repo: &str,
     probe_file: &str,
 ) -> SourceHealth {
+    // WHY 独立线程:`reqwest::blocking::Client` 内部自建 tokio runtime,其析构会 block
+    // 关闭后台线程。本函数是同步 API,但可被 async 上下文同步调用(vault/setup handler →
+    // init_search_engines → resolve_sources → 此处),那时 client 在 tokio worker 线程上
+    // drop 会 panic「Cannot drop a runtime in a context where blocking is not allowed」。
+    // 把整段 blocking HTTP 隔离到普通 OS 线程(blocking 合法),与 embed.rs/llm.rs 同模式 —
+    // runtime 在该线程内创建并析构,与调用方是否 async 无关。
+    let source_id = source.id.clone();
     let url = format!("{}/{}/resolve/main/{}", source.endpoint, probe_repo, probe_file);
-    let client = match reqwest::blocking::Client::builder()
-        .connect_timeout(PROBE_CONNECT_TIMEOUT)
-        .timeout(PROBE_TOTAL_TIMEOUT)
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return SourceHealth::unreachable(&source.id),
-    };
-    let start = std::time::Instant::now();
-    let resp = client
-        .get(&url)
-        .header("Range", format!("bytes=0-{}", PROBE_BYTES - 1))
-        .send();
-    let resp = match resp {
-        Ok(r) if r.status().is_success() => r,
-        _ => return SourceHealth::unreachable(&source.id),
-    };
-    let latency_ms = start.elapsed().as_millis() as u64;
-    // 读 body(range-GET 已限 1MB;若源忽略 Range 返回全文,bytes() 仍受 total timeout 兜底)。
-    let bytes = match resp.bytes() {
-        Ok(b) if !b.is_empty() => b,
-        _ => return SourceHealth::unreachable(&source.id),
-    };
-    let elapsed = start.elapsed().as_secs_f64().max(1e-3);
-    let throughput_bps = bytes.len() as f64 / elapsed;
-    SourceHealth {
-        source_id: source.id.clone(),
-        reachable: true,
-        throughput_bps,
-        latency_ms: Some(latency_ms),
-    }
+    let id_in = source_id.clone();
+    let handle = std::thread::spawn(move || -> SourceHealth {
+        let client = match reqwest::blocking::Client::builder()
+            .connect_timeout(PROBE_CONNECT_TIMEOUT)
+            .timeout(PROBE_TOTAL_TIMEOUT)
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return SourceHealth::unreachable(&id_in),
+        };
+        let start = std::time::Instant::now();
+        let resp = client
+            .get(&url)
+            .header("Range", format!("bytes=0-{}", PROBE_BYTES - 1))
+            .send();
+        let resp = match resp {
+            Ok(r) if r.status().is_success() => r,
+            _ => return SourceHealth::unreachable(&id_in),
+        };
+        let latency_ms = start.elapsed().as_millis() as u64;
+        // 读 body(range-GET 已限 1MB;若源忽略 Range 返回全文,bytes() 仍受 total timeout 兜底)。
+        let bytes = match resp.bytes() {
+            Ok(b) if !b.is_empty() => b,
+            _ => return SourceHealth::unreachable(&id_in),
+        };
+        let elapsed = start.elapsed().as_secs_f64().max(1e-3);
+        let throughput_bps = bytes.len() as f64 / elapsed;
+        SourceHealth {
+            source_id: id_in.clone(),
+            reachable: true,
+            throughput_bps,
+            latency_ms: Some(latency_ms),
+        }
+    });
+    handle
+        .join()
+        .unwrap_or_else(|_| SourceHealth::unreachable(&source_id))
 }
 
 /// 探测一个源:对 `OnlyXenovaOnnx` 源用 Xenova 标准 repo,`Full` 源同样可用该 repo

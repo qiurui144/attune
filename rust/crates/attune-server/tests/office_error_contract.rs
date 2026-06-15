@@ -35,6 +35,9 @@ async fn start_test_server() -> String {
 
     let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open vault");
     let state = Arc::new(attune_server::state::AppState::new(vault, false));
+    // office 路由需 durable job store(否则 unknown-job 返 503 而非 not-found);生产 boot
+    // 时安装,测试需显式补(同 office_concurrent_test)。
+    state.install_job_store();
     let router = attune_server::build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

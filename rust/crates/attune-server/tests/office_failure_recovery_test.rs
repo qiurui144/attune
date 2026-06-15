@@ -27,6 +27,9 @@ async fn start_server() -> String {
     std::env::set_var("HOME", tmp.path());
     std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
     std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+    // 空缓存 + 同步 ensure_models → blocking hf-hub 下载在 async drop runtime → panic;
+    // HF_HUB_OFFLINE 让未命中缓存直接 Err(graceful),不进网络(同 office_error_contract)。
+    std::env::set_var("HF_HUB_OFFLINE", "1");
     let vault = attune_core::vault::Vault::open_memory(tmp.path()).unwrap();
     let state = Arc::new(attune_server::state::AppState::new(vault, false));
     let router = attune_server::build_router(state);
