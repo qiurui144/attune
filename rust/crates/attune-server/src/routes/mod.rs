@@ -17,6 +17,7 @@ pub mod folder_links;
 pub mod forms;
 pub mod git;
 pub mod member;
+pub mod memory;
 pub mod ocr_profiles;
 #[cfg(feature = "nontext")]
 pub mod ocr_recognize;

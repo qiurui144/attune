@@ -214,6 +214,13 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/organize/proposals/{id}",
             get(routes::organize::get_one).delete(routes::organize::delete_one),
         )
+        // 记忆延续：换 embedding 模型后老向量批量 reindex 状态 + 暂停开关
+        // (memory-continuity, 2026-06-15)
+        .route(
+            "/api/v1/memory/migration/status",
+            get(routes::memory::migration_status),
+        )
+        .route("/api/v1/memory/reindex", post(routes::memory::reindex))
         .route("/api/v1/behavior/click", post(routes::behavior::log_click))
         .route("/api/v1/behavior/history", get(routes::behavior::history))
         .route("/api/v1/behavior/popular", get(routes::behavior::popular))

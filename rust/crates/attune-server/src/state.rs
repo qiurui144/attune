@@ -75,6 +75,11 @@ pub struct AppState {
     /// v0.7 记忆护城河：防止重复启动 ReindexWorker 后台线程（消费 reindex_queue
     /// 让 scanner / scanner_webdav 等无法持锁的 worker 间接清向量+FTS）。
     pub reindex_worker_running: AtomicBool,
+    /// 记忆延续（2026-06-15）：换 embedding 模型后老记忆向量的批量 reindex 暂停开关。
+    /// 不同于 reindex_worker_running（那是 item 语料的 reindex_queue 消费）—— 这是
+    /// memory_vectors 的维度键迁移，并入消费者后台 loop（run_memory_reindex_batch），
+    /// POST /memory/reindex {pause:true} 可暂停（reindex 是 tier-2 本地算力，可控）。
+    pub memory_reindex_paused: AtomicBool,
     /// WebDAV 周期同步 worker 是否在运行（防重复启动）。
     pub webdav_sync_worker_running: AtomicBool,
     /// Email 周期同步 worker 运行标志（防重入）。
@@ -212,6 +217,7 @@ impl AppState {
             evolve_worker_running: AtomicBool::new(false),
             memory_consolidator_running: AtomicBool::new(false),
             reindex_worker_running: AtomicBool::new(false),
+            memory_reindex_paused: AtomicBool::new(false),
             webdav_sync_worker_running: AtomicBool::new(false),
             email_sync_worker_running: AtomicBool::new(false),
             rss_sync_worker_running: AtomicBool::new(false),
@@ -1890,6 +1896,82 @@ impl AppState {
                 }
             }
         }
+
+        // Memory continuity (2026-06-15): re-embed memory vectors whose stored model
+        // (dimension key) differs from the active embedder. A model swap that changes
+        // dims silently strands old vectors (assembler's dim-guard skips them); this
+        // batch heals them in place. Cost tier 2 (local re-embed, no LLM) — pausable.
+        Self::run_memory_reindex_batch(state);
+    }
+
+    /// One memory-reindex pass: for the current embedding signature, take a bounded
+    /// batch of stale `memory_vectors` rows and re-embed each summary in place
+    /// (REPLACE to the current dimension key). Best-effort — failures only `warn`.
+    ///
+    /// WHY batched + folded into the consolidator loop (not its own worker): reindex
+    /// shares the consolidator's vault-unlocked precondition and tier-2 embedding
+    /// budget; a separate thread would duplicate the lock dance and flag plumbing.
+    /// WHY a bounded batch per pass: a model swap on a large vault could otherwise
+    /// pin the embedder for minutes — the cap lets the next loop tick observe a fresh
+    /// pause flag / vault-lock and yield. `dek` is taken inside the vault-unlocked
+    /// section and never crosses into vectors/fulltext (§Lock ordering).
+    fn run_memory_reindex_batch(state: &std::sync::Arc<AppState>) {
+        // Per-pass cap: re-embeds at most this many stale memories, then yields the
+        // loop so pause / vault-lock take effect promptly between batches.
+        const REINDEX_BATCH: usize = 64;
+
+        if state.reindex_paused() {
+            return;
+        }
+        let embedder = match state.embedding.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+            Some(e) if e.is_available() => e,
+            _ => return,
+        };
+        let cur_model = attune_core::embed::current_embedding_signature(embedder.as_ref()).model;
+
+        // Reindex each stale id under the vault lock (dek scoped here; never escapes
+        // into the vectors/fulltext locks). reindex_one re-embeds via the embedder
+        // (no extra lock) and REPLACEs the single memory_vectors row.
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+            return;
+        }
+        let dek = match vault.dek_db() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let store = vault.store();
+        let stale: Vec<String> = match store.list_stale_memory_ids(&cur_model) {
+            Ok(ids) => ids.into_iter().take(REINDEX_BATCH).collect(),
+            Err(e) => {
+                tracing::warn!("memory reindex: list_stale failed: {e}");
+                return;
+            }
+        };
+        if stale.is_empty() {
+            return;
+        }
+        // Record a migration row for observability/progress (best-effort).
+        let mig_id = store
+            .start_memory_migration("(mixed)", &cur_model, stale.len() as i64)
+            .ok();
+        let mut done = 0usize;
+        for id in &stale {
+            match attune_core::memory::migration::reindex_one(store, &dek, embedder.as_ref(), id) {
+                Ok(1) => {
+                    done += 1;
+                    if let Some(mid) = mig_id {
+                        let _ = store.bump_memory_migration_done(mid, 1);
+                    }
+                }
+                Ok(_) => {} // memory gone / empty summary — nothing to re-embed
+                Err(e) => tracing::warn!("memory reindex: reindex_one({id}) failed: {e}"),
+            }
+        }
+        if let Some(mid) = mig_id {
+            let _ = store.finish_memory_migration(mid);
+        }
+        tracing::info!("memory reindex: re-embedded {done}/{} stale memory vector(s) to {cur_model}", stale.len());
     }
 
     /// Embed every memory that lacks a `memory_vectors` row, write the vector, and
@@ -2040,6 +2122,16 @@ impl AppState {
         if let Ok(mut g) = self.embedding.lock() {
             *g = p;
         }
+    }
+
+    /// 暂停/恢复记忆向量的后台 reindex（POST /memory/reindex 调）。
+    pub fn set_reindex_paused(&self, pause: bool) {
+        self.memory_reindex_paused.store(pause, Ordering::SeqCst);
+    }
+
+    /// 后台 loop 读它决定本周期是否跳过记忆 reindex 批。
+    pub fn reindex_paused(&self) -> bool {
+        self.memory_reindex_paused.load(Ordering::SeqCst)
     }
 
     /// 读 LLM provider — 主 chat 用.

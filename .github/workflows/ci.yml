@@ -500,6 +500,7 @@ jobs:
           --test git_route_subprocess
           --test lock_order_abba_test
           --test marketplace_install_test
+          --test memory_route_test
           --test ocr_profiles_routes_test
           --test organize_e2e_test
           --test organize_route_test

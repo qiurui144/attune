@@ -9,7 +9,7 @@
 # the server-booting / argon2-vault-setup tests are CPU-bound):
 #   - OFFICE_A (5)  runs in rust-test-server-office    (incl. office_concurrent ≈ 99s)
 #   - OFFICE_B (5)  runs in rust-test-server-office-b
-#   - GROUP_A  (12) runs in rust-test-server           (+ lib + accounts + root pkg; route tests incl. documents_* + organize_*)
+#   - GROUP_A  (13) runs in rust-test-server           (+ lib + accounts + root pkg; route tests incl. documents_* + organize_* + memory_route_test)
 #   - GROUP_B  (16) runs in rust-test-server-b         (lighter wire/logic/security tests)
 #   - GROUP_C  (6)  runs in rust-test-server-c         (heavy server-booting / wizard / vault tests)
 # This script recomputes the union of all five and compares to on-disk.
@@ -23,8 +23,8 @@ office_schema_compat office_six_category_floor"
 
 GROUP_A="ai_stack_web_search_test documents_member_gate documents_redaction \
 documents_routes git_route_subprocess lock_order_abba_test \
-marketplace_install_test ocr_profiles_routes_test organize_e2e_test \
-organize_route_test privacy_endpoints_test vault_lock_endpoint_test"
+marketplace_install_test memory_route_test ocr_profiles_routes_test \
+organize_e2e_test organize_route_test privacy_endpoints_test vault_lock_endpoint_test"
 
 GROUP_B="acp4_governor_wire_test acp5_chat_flow_wire_test amd_laptop_e2e_smoke \
 api_v1_version_test chat_cost_estimate_test egress_guard eval_determinism_test \

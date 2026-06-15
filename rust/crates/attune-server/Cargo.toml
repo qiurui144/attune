@@ -57,6 +57,8 @@ nontext = ["attune-core/nontext"]
 reqwest = { workspace = true, features = ["json", "multipart"] }
 tokio = { workspace = true, features = ["test-util"] }
 proptest = "1"
+# MockEmbeddingProvider for memory-reindex route tests (test-only, dev-dep scope).
+attune-core = { path = "../attune-core", features = ["test-utils"] }
 
 [lints]
 workspace = true
