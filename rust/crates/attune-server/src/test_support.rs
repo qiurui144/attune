@@ -38,6 +38,27 @@ pub fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// RAII guard restoring the prior data-dir override on drop. See [`override_data_dir`].
+#[doc(hidden)]
+pub struct DataDirGuard(Option<std::path::PathBuf>);
+impl Drop for DataDirGuard {
+    fn drop(&mut self) {
+        attune_core::platform::set_dir_override_for_test(self.0.take());
+    }
+}
+
+/// Test-only: redirect attune's resolved data dir (and thus `default_plugins_dir`)
+/// to `app_dir` via the thread-local override seam. Unlike setting `XDG_DATA_HOME`,
+/// this works on Windows too (`dirs` reads `%LOCALAPPDATA%` via the Known-Folder API
+/// there, ignoring env vars). `app_dir` is the FINAL app dir — pass
+/// `tmp.path().join("attune")`. The prior override is restored when the returned
+/// guard drops, so no process-global `ENV_LOCK` serialization is needed.
+#[doc(hidden)]
+#[must_use]
+pub fn override_data_dir(app_dir: std::path::PathBuf) -> DataDirGuard {
+    DataDirGuard(attune_core::platform::set_dir_override_for_test(Some(app_dir)))
+}
+
 /// The ONE license id the eval harness's member verifier approves. A `login-token` "paid" claim
 /// reaches `MemberState::Paid` only when its `license_id` equals this — i.e. it must pass a real
 /// verification step (a match), NOT the old blanket non-empty check. Any other license id is

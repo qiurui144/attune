@@ -546,9 +546,12 @@ impl PluginRegistry {
 
     /// 默认 plugin 目录：`~/.local/share/attune/plugins/`（Linux/macOS）/ `%APPDATA%\attune\plugins\`（Windows）
     pub fn default_plugins_dir() -> Result<std::path::PathBuf> {
-        let data = dirs::data_local_dir()
-            .ok_or_else(|| VaultError::InvalidInput("cannot resolve user data dir".into()))?;
-        Ok(data.join("attune").join("plugins"))
+        // Route through platform::data_dir() (not raw dirs::data_local_dir) so the
+        // thread-local test override + npu-vault legacy migration apply consistently
+        // with the rest of attune. Production path is byte-identical to the old
+        // dirs::data_local_dir()/attune/plugins; tests can pin a temp dir via
+        // platform::set_dir_override_for_test (which XDG_DATA_HOME cannot do on Windows).
+        Ok(crate::platform::data_dir().join("plugins"))
     }
 
     /// Test-only: scan with an INJECTED official-keys list so a test can drive the

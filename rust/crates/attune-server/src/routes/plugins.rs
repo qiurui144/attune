@@ -224,17 +224,10 @@ mod tests {
     /// Drives the real `list` handler against an AppState that scanned a temp plugins dir.
     #[tokio::test]
     async fn list_returns_trust_and_status() {
-        // Serialize with sibling env-mutating unit tests (routes::scenarios) — both
-        // drive default_plugins_dir off process-global XDG_DATA_HOME/HOME.
-        let _env_guard = crate::test_support::lock_test_env();
         let tmp = tempfile::TempDir::new().expect("tmp");
-        // default_plugins_dir() resolves under dirs::data_local_dir() = XDG_DATA_HOME.
-        // SAFETY: single-threaded test, set before AppState::new scans the dir.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", tmp.path());
-            std::env::set_var("HOME", tmp.path());
-        }
+        // Pin attune's data dir to a temp dir via the thread-local override seam —
+        // works on Windows too (dirs ignores XDG_DATA_HOME there). Restored on drop.
+        let _dir = crate::test_support::override_data_dir(tmp.path().join("attune"));
         let plugin_dir = tmp.path().join("attune").join("plugins").join("test-pro");
         std::fs::create_dir_all(&plugin_dir).expect("mkdir plugin");
         std::fs::write(

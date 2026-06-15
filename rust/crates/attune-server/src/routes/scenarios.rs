@@ -80,25 +80,17 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::lock_test_env as lock_env;
     use std::sync::Arc;
 
-    // These tests mutate process-global XDG_DATA_HOME/HOME (default_plugins_dir reads
-    // them) — serialize via the shared ENV_LOCK so a sibling test's plugin dir /
-    // settings (incl. routes::plugins) don't leak in.
+    // These tests pin attune's data dir to a temp dir via the thread-local override
+    // seam (test_support::override_data_dir) — works on Windows too, where `dirs`
+    // ignores XDG_DATA_HOME. The guard restores the prior override on drop.
 
     /// 装一个 law-pro 插件 → /scenarios 派生出该 agent 的卡片,带 cost_tier/has_form/enabled。
     #[tokio::test]
     async fn list_returns_scenario_cards() {
-        let _guard = lock_env();
         let tmp = tempfile::TempDir::new().expect("tmp");
-        // default_plugins_dir() resolves under XDG_DATA_HOME.
-        // SAFETY: single-threaded test, set before AppState::new scans the dir.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", tmp.path());
-            std::env::set_var("HOME", tmp.path());
-        }
+        let _dir = crate::test_support::override_data_dir(tmp.path().join("attune"));
         let plugin_dir = tmp.path().join("attune").join("plugins").join("law-pro");
         std::fs::create_dir_all(&plugin_dir).expect("mkdir plugin");
         std::fs::write(
@@ -146,13 +138,8 @@ ui_components:
     /// 无任何插件 → scenarios 空数组(工作台空态),不报错。
     #[tokio::test]
     async fn list_empty_when_no_plugins() {
-        let _guard = lock_env();
         let tmp = tempfile::TempDir::new().expect("tmp");
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", tmp.path());
-            std::env::set_var("HOME", tmp.path());
-        }
+        let _dir = crate::test_support::override_data_dir(tmp.path().join("attune"));
         let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
         vault.setup("P@ss-scenarios-empty-not-real").expect("setup");
         let state = Arc::new(crate::state::AppState::new(vault, false));
@@ -165,13 +152,8 @@ ui_components:
     /// disabled 插件的卡片 enabled=false(工作台据此置灰/隐藏)。
     #[tokio::test]
     async fn list_marks_disabled_plugin() {
-        let _guard = lock_env();
         let tmp = tempfile::TempDir::new().expect("tmp");
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", tmp.path());
-            std::env::set_var("HOME", tmp.path());
-        }
+        let _dir = crate::test_support::override_data_dir(tmp.path().join("attune"));
         let plugin_dir = tmp.path().join("attune").join("plugins").join("law-pro");
         std::fs::create_dir_all(&plugin_dir).expect("mkdir");
         std::fs::write(
@@ -199,13 +181,8 @@ ui_components:
     /// 派生层永不 silent-fail: cost_tier/has_form 字段恒存在(契约稳定)。
     #[tokio::test]
     async fn list_card_shape_is_stable() {
-        let _guard = lock_env();
         let tmp = tempfile::TempDir::new().expect("tmp");
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", tmp.path());
-            std::env::set_var("HOME", tmp.path());
-        }
+        let _dir = crate::test_support::override_data_dir(tmp.path().join("attune"));
         let plugin_dir = tmp.path().join("attune").join("plugins").join("tech-pro");
         std::fs::create_dir_all(&plugin_dir).expect("mkdir");
         std::fs::write(
