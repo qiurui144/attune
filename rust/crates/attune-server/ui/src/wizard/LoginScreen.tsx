@@ -3,6 +3,7 @@
 import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
 import { Button, Input, Modal } from '../components';
+import { confirmDialog } from '../components/ConfirmModal';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api, clearToken, setToken, RETRY_POLICIES } from '../store/api';
@@ -42,9 +43,14 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
   }
 
   async function handleForgotPasswordReset() {
-    const first = window.confirm(t('lock.confirm.wipe'));
+    const first = await confirmDialog({
+      title: t('confirm.title.wipePassword'),
+      message: t('lock.confirm.wipe'),
+      danger: true,
+    });
     if (!first) return;
 
+    // 二次防呆：要求手动键入 RESET（不可逆 wipe 的强 gate，保留 prompt）
     const typed = window.prompt(t('lock.prompt.reset_confirm'));
     if (typed !== 'RESET') {
       toast('error', t('lock.toast.reset_cancelled'));

@@ -21,6 +21,7 @@ import { loadSessions, clearActiveSession } from '../hooks/useChat';
 import { t } from '../i18n';
 import { api, clearToken } from '../store/api';
 import { toast } from '../components/Toast';
+import { confirmDialog } from '../components/ConfirmModal';
 
 const SIDEBAR_WIDTH = 280;
 const SIDEBAR_COLLAPSED_WIDTH = 64;
@@ -28,7 +29,7 @@ const SIDEBAR_COLLAPSED_WIDTH = 64;
 // 锁定 vault 单一路径（与 SettingsView 一致）：confirm → /vault/lock → 清 token → reload。
 // 顶栏常驻锁按钮 + AccountMenu 菜单项共用，避免逻辑漂移。
 async function lockVault(): Promise<void> {
-  if (!confirm(t('sidebar.menu.lock_vault.confirm'))) return;
+  if (!(await confirmDialog({ title: t('confirm.title.lockVault'), message: t('sidebar.menu.lock_vault.confirm'), danger: true }))) return;
   try {
     await api.post('/vault/lock');
     clearToken();

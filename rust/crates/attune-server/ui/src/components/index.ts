@@ -13,6 +13,9 @@ export type { InputProps } from './Input';
 export { Modal } from './Modal';
 export type { ModalProps } from './Modal';
 
+export { ConfirmModal, useConfirm, confirmDialog, ConfirmHost } from './ConfirmModal';
+export type { ConfirmModalProps, ConfirmOptions, UseConfirmResult } from './ConfirmModal';
+
 export { Drawer } from './Drawer';
 export type { DrawerProps } from './Drawer';
 

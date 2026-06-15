@@ -15,7 +15,7 @@
 import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { ToastContainer, RecommendationOverlay } from './components';
+import { ToastContainer, RecommendationOverlay, ConfirmHost } from './components';
 import { toast } from './components/Toast';
 import { CommandPalette } from './components/CommandPalette';
 import { Wizard, LoginScreen } from './wizard';
@@ -246,6 +246,7 @@ export function App(): JSX.Element {
     return (
       <>
         <LoginScreen onUnlock={handleUnlock} />
+        <ConfirmHost />
         <ToastContainer />
       </>
     );
@@ -258,6 +259,7 @@ export function App(): JSX.Element {
       <PrivacyTour />
       <CommandPalette open={paletteOpen.value} onClose={() => (paletteOpen.value = false)} />
       <RecommendationOverlay />
+      <ConfirmHost />
       <ToastContainer />
     </>
   );

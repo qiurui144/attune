@@ -4,6 +4,7 @@ import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
 import { Button, LocalModelReadiness, Modal, Input } from '../components';
+import { confirmDialog } from '../components/ConfirmModal';
 import { toast } from '../components/Toast';
 import {
   theme,
@@ -829,7 +830,7 @@ function PrivacyPanel(): JSX.Element {
             variant="danger"
             size="sm"
             onClick={async () => {
-              if (!confirm(t('settings.privacy.security.lock_confirm'))) return;
+              if (!(await confirmDialog({ title: t('confirm.title.lockVault'), message: t('settings.privacy.security.lock_confirm'), danger: true }))) return;
               try {
                 await api.post('/vault/lock');
                 clearToken();
@@ -1753,7 +1754,7 @@ export function FolderLinksSection(): JSX.Element {
       toast('error', t('settings.folder.unbind_unavailable'));
       return;
     }
-    if (!confirm(t('settings.folder.unbind_confirm', { path: fl.path }))) return;
+    if (!(await confirmDialog({ title: t('confirm.title.unbindFolder'), message: t('settings.folder.unbind_confirm', { path: fl.path }), danger: true }))) return;
     const ok = await unbindDir(fl.id);
     if (ok) {
       toast('success', t('settings.folder.unbind_success'));

@@ -2,7 +2,7 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { Button, EmptyState } from '../components';
+import { Button, EmptyState, Skeleton } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import {
@@ -69,7 +69,15 @@ export function SkillsView(): JSX.Element {
       </p>
 
       {loading.value ? (
-        <div style={{ color: 'var(--color-text-secondary)' }}>{t('common.loading')}</div>
+        <div
+          role="status"
+          aria-label={t('common.loading')}
+          style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}
+        >
+          <Skeleton height={64} />
+          <Skeleton height={64} />
+          <Skeleton height={64} />
+        </div>
       ) : skills.value.length === 0 ? (
         <EmptyState
           icon="🧠"

@@ -19,6 +19,8 @@ export type ButtonProps = {
   'aria-label'?: string;
   /** toggle 按钮标明是否按下 */
   'aria-pressed'?: boolean;
+  /** 测试钩子（透传到 DOM，供 e2e / 集成测试定位） */
+  'data-testid'?: string;
   children?: ComponentChildren;
 };
 

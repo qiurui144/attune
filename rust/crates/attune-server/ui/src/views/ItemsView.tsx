@@ -4,6 +4,7 @@ import type { JSX } from 'preact';
 import { useEffect, useRef } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
 import { Button, EmptyState } from '../components';
+import { confirmDialog } from '../components/ConfirmModal';
 import { t } from '../i18n';
 import { items, drawerContent } from '../store/signals';
 import type { Item } from '../store/signals';
@@ -342,12 +343,17 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          if (confirm(t('items.delete.confirm', { title: it.title || t('items.untitled') }))) {
-            void deleteItem(it.id).then((ok) => {
-              if (ok) toast('success', t('items.delete.success'));
+          void confirmDialog({
+            title: t('confirm.title.deleteItem'),
+            message: t('items.delete.confirm', { title: it.title || t('items.untitled') }),
+            danger: true,
+          }).then((ok) => {
+            if (!ok) return;
+            return deleteItem(it.id).then((deleted) => {
+              if (deleted) toast('success', t('items.delete.success'));
               else toast('error', t('items.delete.fail'));
             });
-          }
+          });
         }}
         aria-label="Delete"
         style={{
