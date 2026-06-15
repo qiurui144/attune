@@ -150,6 +150,11 @@ pub struct AppState {
     pub entitlement_cache: attune_core::entitlement::EntitlementCache,
     /// 防止重复启动 entitlement re-verify worker 后台线程 (T8)。
     pub entitlement_worker_running: AtomicBool,
+    /// 文件夹一键整理 (organize/analyze) 的领域策略注册表。默认仅含领域无关的
+    /// `GenericStrategy`(主题命名 / 无角色 / kind=collection);attune-pro 在启动时
+    /// 经 `register()` 注入 `LawCaseStrategy` 等行业策略。`Arc` 让 analyze handler
+    /// 廉价 clone 出 `Arc<dyn OrganizationStrategy>` 而不持 AppState 锁。
+    pub strategy_registry: std::sync::Arc<attune_core::organizer::strategy::StrategyRegistry>,
 }
 
 impl AppState {
@@ -261,7 +266,20 @@ impl AppState {
             // Trust-chain T5/T8: empty until hydrated from vault at unlock.
             entitlement_cache: attune_core::entitlement::EntitlementCache::new(),
             entitlement_worker_running: AtomicBool::new(false),
+            // Default registry = GenericStrategy only (OSS boundary: no industry
+            // semantics in attune-core). attune-pro injects LawCaseStrategy at boot.
+            strategy_registry: std::sync::Arc::new(
+                attune_core::organizer::strategy::StrategyRegistry::new(),
+            ),
         }
+    }
+
+    /// 整理策略注册表的廉价句柄(Arc clone)。analyze handler 用它 resolve
+    /// corpus_domain → strategy,无需持任何 AppState 锁。
+    pub fn strategy_registry(
+        &self,
+    ) -> std::sync::Arc<attune_core::organizer::strategy::StrategyRegistry> {
+        self.strategy_registry.clone()
     }
 
     /// G2 (2026-05-01) — 按 settings 切换 PluginHub provider
