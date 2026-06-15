@@ -350,6 +350,7 @@ jobs:
         run: >
           cargo test --release -p attune-core
           --test job_queue_durable
+          --test memory_continuity_golden_gate
           --test nontext_cross_validate_golden
           --test organize_golden_gate
           --test ocr_image_test
