@@ -1,0 +1,14 @@
+id: 08-reindex-multi
+description: 多条旧模型记忆批量 reindex 后全部对齐当前模型 (无遗漏)
+reindex:
+  from_dim: 4
+  to_dim: 16
+  memories:
+    - { hash: rm1, summary: tcp congestion control algorithms, model: embed-dim4 }
+    - { hash: rm2, summary: tls handshake key exchange, model: embed-dim4 }
+    - { hash: rm3, summary: dns resolution caching layers, model: embed-dim4 }
+    - { hash: rm4, summary: http2 multiplexing streams, model: embed-dim4 }
+  recall_query: tls handshake
+  recall_min_hits: 1
+expected:
+  stale_after_reindex: 0

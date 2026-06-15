@@ -1,0 +1,14 @@
+id: 04-partial-overlap-merge
+description: 目标设备已有部分同源记忆 → 合并式导入只补差 (preexisting 子集跳过)
+passphrase: merge-pass-9999
+preexisting:
+  - { hash: o2, summary: shared memory already on target, model: embed-dim4 }
+memories:
+  - { hash: o1, summary: new memory one only in bundle, model: embed-dim4 }
+  - { hash: o2, summary: shared memory already on target, model: embed-dim4 }
+  - { hash: o3, summary: new memory three only in bundle, model: embed-dim4 }
+expected:
+  imported: 2
+  skipped_on_reimport: 3
+  recall_query: new memory three
+  recall_min_hits: 1

@@ -1,0 +1,9 @@
+id: 12-corrupt-bundle-error
+description: "篡改/截断 bundle → 解析或解密拒绝, 零写入 (错误用例: 损坏检测)"
+passphrase: intact-pass-222
+corrupt: truncate-tail
+memories:
+  - { hash: t1, summary: integrity must hold or reject, model: embed-dim4 }
+expected:
+  import_errors: true
+  rows_after_failed_import: 0

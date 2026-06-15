@@ -1,0 +1,16 @@
+id: 06-long-summary
+description: 超长 summary (近 150 字存档摘要上限) 不截断, 召回仍命中关键词
+passphrase: longsum-pass-77
+memories:
+  - hash: l1
+    summary: >-
+      the actor model isolates state inside actors that communicate only by
+      asynchronous message passing which avoids shared mutable state and the
+      class of data races it produces while enabling location transparency and
+      supervision trees for fault tolerance in erlang akka and similar runtimes
+    model: embed-dim4
+expected:
+  imported: 1
+  skipped_on_reimport: 1
+  recall_query: supervision trees fault tolerance
+  recall_min_hits: 1

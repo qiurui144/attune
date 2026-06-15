@@ -1,0 +1,9 @@
+id: 05-empty-bundle
+description: "零记忆导出包 → 合法 round-trip, 导入 0 条 (边界: 空 vault 也能搬)"
+passphrase: empty-pass-1234
+memories: []
+expected:
+  imported: 0
+  skipped_on_reimport: 0
+  recall_query: anything
+  recall_min_hits: 0

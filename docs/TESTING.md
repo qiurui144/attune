@@ -439,6 +439,44 @@ ORGANIZE_TIERS="qwen2.5:3b" bash scripts/run-organize-tier-matrix.sh
 
 > **CI shard**：`organize_golden_gate`(core HALF_B) / `organize_e2e_test` + `organize_route_test`(server GROUP_A) 已登记 split-guard + ci.yml `--test` 名单（确定性 blocker，不进 shard = CI 红）。
 
+### 2.8 记忆延续与可迁移性（memory continuity）测试矩阵（release 验收硬门 · 2026-06-15）
+
+> **能力**：(A) 换 embedding 模型后老记忆向量自动 reindex（旧维度键向量逐条原地 re-embed 为当前模型，不再静默丢失召回）；(B) 记忆经 Argon2id 口令派生 key 加密成 bundle，合并式跨设备导出/导入（按 `source_chunk_hashes` 幂等去重）。spec `docs/superpowers/specs/2026-06-15-memory-continuity-and-portability.md`。**不碰已实装的 L3 semantic。**
+> **release 硬性要求**：每轮 RC/GA 验收过本矩阵 —— §7.2 **Gate 2** = 确定性维度（golden + proptest + E2E）CI 全绿；**Gate 4** = ⚠️ 召回降级语义（迁移中旧向量 graceful-skip 而非丢失）登记 RELEASE.md Known Limitations。
+
+#### 2.8.1 维度覆盖矩阵
+
+| 轴 | 维度 | 测试文件 | 通过判据 | 状态 |
+|----|------|---------|---------|------|
+| **M1** | 导出/导入 round-trip（异 DEK） | `memory_continuity_golden_gate.rs`(golden 01/02/03/06) | bundle 经口令 key 解密 → summary 明文等价落库；中文/超长 summary 不丢/不乱码（UTF-8 GCM） | ✅ |
+| **M2** | 合并幂等（source_chunk_hashes） | golden 04 + proptest `second_import_is_pure_skip` | 二次导入同 bundle → `imported=0` / `skipped=N`；目标已有同源子集只补差 | ✅ |
+| **M3** | 空 bundle 边界 | golden 05 | 零记忆 vault 也能合法 round-trip（`imported=0`，不 panic） | ✅ |
+| **M4** | reindex 换模型 → stale=0 + 召回恢复 | golden 07/08 + `memory_continuity_e2e::change_model_then_reindex...` | 旧维度键向量全 stale → `reindex_one` 逐条 → `list_stale_memory_ids=0`；新模型 cosine 召回命中 | ✅ |
+| **M5** | reindex 幂等边界（已是当前模型） | golden 09 | from==to 维度 → stale 始终 0，reindex 无操作 | ✅ |
+| **M6** | import-then-reindex 组合（regression） | golden 10 + `memory_continuity_e2e` round-trip | bundle 带旧模型向量 → 新设备 import → reindex 对齐本机模型 → stale=0 + 召回恢复 | ✅ |
+| **M7** | 错误 case（错口令 / 损坏包） | golden 11/12 + proptest `wrong_passphrase_never_writes` | 错口令 / 截断 bundle → GCM 认证在写库前 fail → 整包拒绝 + **零写入**（原子拒绝） | ✅ |
+| **M8** | 不变量 `import(export(x))==x` | proptest `import_of_export_is_identity`(48 case) | 任意随机记忆集 → 导出再导入 → summary 集合 byte-for-byte 一致 | ✅ |
+| **M9** | 路由：status/reindex/export/import | `memory_route_test.rs`(8) | status 报 current_model+stale；reindex 翻转 pause flag；export 200 二进制 + 口令下限 < 8→400；import multipart + sealed→400 vault-not-ready + 错口令→400 bad-passphrase | ✅ |
+| **M10** | 集成 E2E（HTTP 全链） | `memory_continuity_e2e.rs`(2) | 真起服 → 换模型 reindex stale=0 + 向量真对齐 dim8；export→fresh vault import imported≥1 + 二次导入幂等 skip | ✅ |
+
+#### 2.8.2 E2E 模式说明（轻量 seed vs 重路径）
+
+- **CI 跑的 E2E = 轻量 seed**（`memory_continuity_e2e.rs`）：`Vault::open_memory` + `setup/unlock` + `insert_memory` + `put_memory_vector`（直接 seed 旧模型向量），不走 HTTP `/vault/setup` + `/ingest`。boot 守 office trap：`HF_HUB_OFFLINE=1` + `install_job_store()` 在 serve 前（防 `init_search_engines` 在 request path 同步 hf-hub 下载 → async drop runtime panic / 503，per fix 22eec99）。
+- **reindex 驱动**：E2E 直接调真 `memory::migration::reindex_one`（与后台 batch worker `run_memory_reindex_batch` 同一代码路径）逐条迁移,再经 HTTP `/migration/status` 断言 stale=0 —— 避开后台 loop 的 timing flakiness,验的是真路由 + 真 reindex 逻辑。
+- **召回验证用真 cosine**：golden gate 用产品同款 `MemoryVectorIndex` 余弦检索；`MockEmbeddingProvider` 把共享 token 哈希成相近向量,故"共享关键词的 query 真能召回该记忆"是真检索而非行数。GT 独立于引擎（YAML `expected.*` 手工 curate），符合 §「Agent 验证铁律」。
+
+#### 2.8.3 运行命令
+
+```bash
+# 确定性维度（CI 门，全绿）
+cd rust && TMPDIR=/data CARGO_TARGET_DIR=/data/attune-target cargo test -p attune-core --test memory_continuity_golden_gate   # golden 12 + proptest 3
+cd rust && TMPDIR=/data CARGO_TARGET_DIR=/data/attune-target cargo test -p attune-server --test memory_continuity_e2e         # E2E 轻量 seed（2）
+cd rust && TMPDIR=/data CARGO_TARGET_DIR=/data/attune-target cargo test -p attune-server --test memory_route_test             # 路由 8
+cd rust && TMPDIR=/data CARGO_TARGET_DIR=/data/attune-target cargo test -p attune-core memory::portability memory::migration   # lib 单测
+```
+
+> **CI shard**：`memory_continuity_golden_gate`(core) / `memory_continuity_e2e` + `memory_route_test`(server GROUP_A) 已登记 split-guard + ci.yml `--test` 名单（确定性 blocker，不进 shard = CI 红）。
+
 ---
 
 ## 3. 安全 + 跨平台测试

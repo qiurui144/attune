@@ -1,0 +1,14 @@
+id: 10-roundtrip-then-reindex
+description: 导入的记忆带旧模型向量 → 在新设备 reindex 对齐本机模型, 召回恢复
+import_then_reindex:
+  passphrase: combo-pass-1234
+  bundle_dim: 4
+  target_dim: 8
+  memories:
+    - { hash: cr1, summary: kubernetes pod scheduling affinity, model: embed-dim4 }
+    - { hash: cr2, summary: docker layer caching optimization, model: embed-dim4 }
+  recall_query: pod scheduling affinity
+  recall_min_hits: 1
+expected:
+  imported: 2
+  stale_after_reindex: 0
