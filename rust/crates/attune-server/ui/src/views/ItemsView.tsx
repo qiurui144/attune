@@ -6,7 +6,7 @@ import { useSignal, useComputed } from '@preact/signals';
 import { Button, EmptyState } from '../components';
 import { confirmDialog } from '../components/ConfirmModal';
 import { t } from '../i18n';
-import { items, drawerContent } from '../store/signals';
+import { items, drawerContent, currentView } from '../store/signals';
 import type { Item } from '../store/signals';
 import { loadItems, deleteItem } from '../hooks/useItems';
 import { toast } from '../components/Toast';
@@ -262,6 +262,14 @@ function ItemsHeader(): JSX.Element {
         >
           {t('items.refresh')}
         </Button>
+        {/* OrganizeWizard 只在 Projects 里可达 — 在 Items 给一个发现入口,引导到项目页整理 */}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => (currentView.value = 'projects')}
+        >
+          {`🗂 ${t('items.organize')}`}
+        </Button>
       </div>
     </header>
   );
@@ -339,8 +347,10 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
       >
         {formatDate(it.created_at)}
       </time>
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
+        aria-label={t('items.delete.aria')}
         onClick={(e) => {
           e.stopPropagation();
           void confirmDialog({
@@ -355,23 +365,9 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
             });
           });
         }}
-        aria-label="Delete"
-        style={{
-          background: 'transparent',
-          border: 'none',
-          color: 'var(--color-text-secondary)',
-          cursor: 'pointer',
-          fontSize: 'var(--text-base)',
-          padding: '4px 6px',
-          borderRadius: 'var(--radius-sm)',
-        }}
-        onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--color-error)')}
-        onMouseLeave={(e) =>
-          (e.currentTarget.style.color = 'var(--color-text-secondary)')
-        }
       >
         ×
-      </button>
+      </Button>
     </div>
   );
 }
