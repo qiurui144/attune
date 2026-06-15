@@ -110,6 +110,20 @@ impl Clusterer {
         })
     }
 
+    /// 仅做 HDBSCAN 分组,返回 (cluster_id, item_ids)。**不调 LLM 命名**(命名交 organizer strategy)。
+    /// cluster_id = -1 表噪声。输入不足 min_items 返回单一 (-1, 全部)。
+    pub fn group_only(&self, inputs: &[ClusterInput]) -> Result<Vec<(i32, Vec<String>)>> {
+        if inputs.len() < self.min_items {
+            return Ok(vec![(-1, inputs.iter().map(|i| i.item_id.clone()).collect())]);
+        }
+        let labels = self.run_hdbscan(inputs)?;
+        let mut groups: std::collections::BTreeMap<i32, Vec<String>> = std::collections::BTreeMap::new();
+        for (i, label) in labels.iter().enumerate() {
+            groups.entry(*label).or_default().push(inputs[i].item_id.clone());
+        }
+        Ok(groups.into_iter().collect())
+    }
+
     fn run_hdbscan(&self, inputs: &[ClusterInput]) -> Result<Vec<i32>> {
         // 验证所有向量维度一致，防止新旧模型混入时 hdbscan panic
         if let Some(first_dim) = inputs.first().map(|i| i.embedding.len()) {
@@ -165,6 +179,25 @@ mod tests {
     use super::*;
     use crate::llm::MockLlmProvider;
 
+    /// A mock LlmProvider whose chat() aborts the test if reached — proves
+    /// group_only never invokes the LLM (naming is deferred to organizer strategy).
+    struct PanicOnCallLlm;
+    impl LlmProvider for PanicOnCallLlm {
+        fn chat(&self, _system: &str, _user: &str) -> Result<(String, crate::usage::TokenUsage)> {
+            unreachable!("group_only must not call LLM")
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "panic-on-call"
+        }
+    }
+
+    fn panic_on_call_llm() -> Arc<dyn LlmProvider> {
+        Arc::new(PanicOnCallLlm)
+    }
+
     fn make_inputs(n: usize) -> Vec<ClusterInput> {
         (0..n).map(|i| ClusterInput {
             item_id: format!("id{i}"),
@@ -204,6 +237,19 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let parsed: Cluster = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, "test");
+    }
+
+    #[test]
+    fn group_only_returns_labels_without_llm() {
+        // MockLlm 若被调用会 panic;group_only 必须不触发 LLM。
+        // hdbscan default_hyper_params 的 min_samples 默认为 5(k-NN core distance
+        // 取 dist[k-1]),输入点数须 >= 5 否则库内部越界;故 fixture 用 8 点。
+        let clusterer = Clusterer::new(panic_on_call_llm()).with_min_items(2);
+        let inputs = make_inputs(8);
+        let groups = clusterer.group_only(&inputs).unwrap();
+        // 返回 (cluster_id, item_ids);全部 input 覆盖(含噪声 -1)
+        let total: usize = groups.iter().map(|(_, ids)| ids.len()).sum();
+        assert_eq!(total, 8);
     }
 
     #[test]
