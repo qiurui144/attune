@@ -3,7 +3,7 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
-import { Button, LocalModelReadiness } from '../components';
+import { Button, LocalModelReadiness, Modal, Input } from '../components';
 import { toast } from '../components/Toast';
 import {
   theme,
@@ -20,6 +20,7 @@ import { setLocale, currentLocale, t } from '../i18n';
 import { loadSettings, patchSettings } from '../hooks/useSettings';
 import { loadMemberState, loadSettingsLocks, memberLogout, memberLoginPassword } from '../hooks/useMember';
 import { loadFolderLinks } from '../hooks/useFolderLinks';
+import { unbindDir } from '../hooks/useRemote';
 import { api, clearToken } from '../store/api';
 
 /** LLM 厂商快捷预设 — 选中后自动填 endpoint + model，用户只需贴 API key。 */
@@ -1434,6 +1435,10 @@ function MemberPanel(): JSX.Element {
 
 export function FolderLinksSection(): JSX.Element {
   const picking = useSignal(false);
+  const showAddModal = useSignal(false);
+  const manualPath = useSignal('');
+  const submitting = useSignal(false);
+  // Tauri 桌面壳里才有原生目录选择器；浏览器调试模式回退到手填路径对话框（与 RemoteView LocalForm 一致）。
   const canPickFolder = typeof window !== 'undefined'
     && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 
@@ -1441,9 +1446,28 @@ export function FolderLinksSection(): JSX.Element {
     void loadFolderLinks();
   }, []);
 
+  async function bindPaths(paths: string[]): Promise<number> {
+    let added = 0;
+    for (const path of paths) {
+      try {
+        await api.post('/index/bind', { path, recursive: true });
+        added += 1;
+      } catch {
+        // 单个失败不阻塞其它
+      }
+    }
+    if (added > 0) {
+      toast('success', t('settings.folder.added', { count: added }));
+      await loadFolderLinks();
+    }
+    return added;
+  }
+
+  // 桌面壳 → 原生目录选择器；浏览器 → 弹手填路径对话框（不再是无反应的 disabled 按钮）。
   async function onAddFolder(): Promise<void> {
     if (!canPickFolder) {
-      toast('warning', t('settings.folder.desktop_only'));
+      manualPath.value = '';
+      showAddModal.value = true;
       return;
     }
     picking.value = true;
@@ -1451,23 +1475,43 @@ export function FolderLinksSection(): JSX.Element {
       const { open } = await import('@tauri-apps/plugin-dialog');
       const selected = await open({ directory: true, multiple: true, title: t('settings.folder.pick_title') });
       const chosen = Array.isArray(selected) ? selected : selected ? [selected] : [];
-      let added = 0;
-      for (const path of chosen) {
-        try {
-          await api.post('/index/bind', { path, recursive: true });
-          added += 1;
-        } catch {
-          // 单个失败不阻塞其它
-        }
-      }
-      if (added > 0) {
-        toast('success', t('settings.folder.added', { count: added }));
-        await loadFolderLinks();
-      }
+      await bindPaths(chosen);
     } catch (e) {
       toast('error', e instanceof Error ? e.message : t('settings.folder.add_fail'));
     } finally {
       picking.value = false;
+    }
+  }
+
+  async function onSubmitManual(): Promise<void> {
+    const path = manualPath.value.trim();
+    if (!path) return;
+    submitting.value = true;
+    try {
+      const added = await bindPaths([path]);
+      if (added > 0) {
+        showAddModal.value = false;
+        manualPath.value = '';
+      } else {
+        toast('error', t('settings.folder.add_fail'));
+      }
+    } finally {
+      submitting.value = false;
+    }
+  }
+
+  async function onUnbind(fl: { id?: string; path: string }): Promise<void> {
+    if (!fl.id) {
+      toast('error', t('settings.folder.unbind_unavailable'));
+      return;
+    }
+    if (!confirm(t('settings.folder.unbind_confirm', { path: fl.path }))) return;
+    const ok = await unbindDir(fl.id);
+    if (ok) {
+      toast('success', t('settings.folder.unbind_success'));
+      await loadFolderLinks();
+    } else {
+      toast('error', t('settings.folder.unbind_fail'));
     }
   }
 
@@ -1481,16 +1525,11 @@ export function FolderLinksSection(): JSX.Element {
         <Button
           variant="primary"
           size="sm"
-          disabled={picking.value || !canPickFolder}
+          disabled={picking.value}
           onClick={() => void onAddFolder()}
         >
           {picking.value ? t('settings.folder.opening') : t('settings.folder.add_btn')}
         </Button>
-        {!canPickFolder && (
-          <span style={{ marginLeft: 'var(--space-3)', fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
-            {t('settings.folder.browser_note')}
-          </span>
-        )}
       </div>
       {links.length === 0 && (
         <p style={{ color: 'var(--color-text-secondary)' }}>
@@ -1504,6 +1543,7 @@ export function FolderLinksSection(): JSX.Element {
               <th style={{ padding: 8 }}>{t('settings.folder.col_path')}</th>
               <th style={{ padding: 8 }}>{t('settings.folder.col_project')}</th>
               <th style={{ padding: 8 }}>{t('settings.folder.col_added')}</th>
+              <th style={{ padding: 8 }}>{t('settings.folder.col_actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -1515,11 +1555,47 @@ export function FolderLinksSection(): JSX.Element {
                 <td style={{ padding: 8, fontFamily: 'monospace' }}>{fl.path}</td>
                 <td style={{ padding: 8 }}>{fl.project_id ?? t('settings.folder.default_project')}</td>
                 <td style={{ padding: 8 }}>{fl.added_at ?? '—'}</td>
+                <td style={{ padding: 8 }}>
+                  <Button variant="ghost" size="sm" onClick={() => void onUnbind(fl)}>
+                    {t('settings.folder.unbind')}
+                  </Button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
+
+      <Modal
+        open={showAddModal.value}
+        onClose={() => (showAddModal.value = false)}
+        title={t('settings.folder.add_modal_title')}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <Input
+            label={t('settings.folder.path_label')}
+            value={manualPath.value}
+            onInput={(e) => (manualPath.value = e.currentTarget.value)}
+            placeholder={t('settings.folder.path_placeholder')}
+            hint={t('settings.folder.path_hint')}
+            autoFocus
+            required
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+            <Button variant="ghost" onClick={() => (showAddModal.value = false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => void onSubmitManual()}
+              loading={submitting.value}
+              disabled={!manualPath.value.trim()}
+            >
+              {t('settings.folder.add_confirm')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </Section>
   );
 }
