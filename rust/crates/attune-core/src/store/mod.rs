@@ -14,6 +14,7 @@ mod conversations;
 mod signals;
 mod chunk_summaries;
 mod annotations;
+mod organization;        // 文件夹一键整理:organization_proposals 缓存 + 加密 CRUD + TTL
 mod project;
 mod memories;
 mod memory_vectors;
@@ -770,6 +771,7 @@ impl Store {
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
         Self::migrate_chunk_summaries_deepsum_strategy(&conn)?;
+        Self::migrate_organization_proposals(&conn)?;
         Self::ensure_schema_version(&conn)?;
         let store = Self { conn };
         // QW-1: 一次性 purge embed_queue 终态行（done / abandoned）。
@@ -796,6 +798,7 @@ impl Store {
         Self::migrate_items_content_hash(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
+        Self::migrate_organization_proposals(&conn)?;
         Self::ensure_schema_version(&conn)?;
         Ok(Self { conn })
     }
