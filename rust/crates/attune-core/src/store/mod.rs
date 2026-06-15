@@ -19,6 +19,7 @@ pub use organization::{ApplyResult, ConfirmedGroup};
 mod project;
 mod memories;
 mod memory_vectors;
+mod migrations_mem;      // 记忆延续:memory_migrations 进度表 + list_stale_memory_ids
 mod web_search_cache;
 mod chunk_breadcrumbs;
 mod links;               // internal knowledge linker — item_entities + item_links tables
@@ -773,6 +774,7 @@ impl Store {
         Self::migrate_memories_multilayer(&conn)?;
         Self::migrate_chunk_summaries_deepsum_strategy(&conn)?;
         Self::migrate_organization_proposals(&conn)?;
+        Self::migrate_memory_migrations(&conn)?;
         Self::ensure_schema_version(&conn)?;
         let store = Self { conn };
         // QW-1: 一次性 purge embed_queue 终态行（done / abandoned）。
@@ -800,6 +802,7 @@ impl Store {
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
         Self::migrate_organization_proposals(&conn)?;
+        Self::migrate_memory_migrations(&conn)?;
         Self::ensure_schema_version(&conn)?;
         Ok(Self { conn })
     }
