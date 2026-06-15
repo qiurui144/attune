@@ -15,6 +15,7 @@
 
 pub mod assembler;
 pub mod consolidation_agent;
+pub mod migration;
 pub mod retrieval;
 pub mod semantic;
 

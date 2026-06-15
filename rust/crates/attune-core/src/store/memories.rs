@@ -128,6 +128,30 @@ impl Store {
         Ok(out)
     }
 
+    /// 取单条 memory 的 summary 明文（解密）。`None` = 该 id 不存在。
+    /// reindex 用:只需 summary 文本去 re-embed,不必拉整行解密。
+    pub fn get_memory_summary_plaintext(
+        &self,
+        memory_id: &str,
+        dek: &Key32,
+    ) -> Result<Option<String>> {
+        let enc: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT summary_encrypted FROM memories WHERE id = ?1",
+                params![memory_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match enc {
+            None => Ok(None),
+            Some(blob) => {
+                let plain = crypto::decrypt(dek, &blob)?;
+                Ok(Some(String::from_utf8(plain).unwrap_or_default()))
+            }
+        }
+    }
+
     /// 列出 live（未 superseded、可选排除 cold）的指定 kind memory。
     /// 多层记忆检索的入口 — assembler 经 memory_vectors 排序后用此解密正文。
     pub fn list_live_memories(
