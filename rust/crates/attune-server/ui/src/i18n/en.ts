@@ -877,6 +877,31 @@ export const en = {
   'projects.agents.title': 'Agents',
   'projects.agents.run': 'Run',
 
+  // ─── OrganizeWizard (one-click folder → project, Task 10) ──────────
+  'organize.entry': '🪄 Organize folder',
+  'organize.title': 'Smart organize → Project',
+  'organize.intro': 'Automatically cluster and name a set of files into a structured project. Organizing is an explicit action — nothing runs in the background.',
+  'organize.analyze': 'Analyze',
+  'organize.analyzing': 'Analyzing…',
+  'organize.reanalyze': 'Re-analyze',
+  'organize.confirm': 'Confirm & file',
+  'organize.applying': 'Filing…',
+  'organize.confidence': 'Confidence',
+  'organize.item_count': '{count} files',
+  'organize.noise': '{count} more file(s) could not be grouped (mixed dimensions or no vector) and will not be filed.',
+  'organize.cost': 'Estimated cost: tier {tier} · {tokens} tokens · ${usd}',
+  'organize.member_hint': 'Currently using extractive naming. Upgrade to a membership for AI-generated, more fitting group names.',
+  'organize.no_groups': 'No groups were produced. Adjust the scope and try again.',
+  'organize.field.path': 'Folder path to organize',
+  'organize.field.path_placeholder': 'e.g. /home/user/documents/ClientA',
+  'organize.field.group_name': 'Group name',
+  'organize.action.skip': 'Skip this group',
+  'organize.toast.scope_required': 'Please enter a folder path to organize first',
+  'organize.toast.analyze_failed': 'Analysis failed: {message}',
+  'organize.toast.apply_failed': 'Filing failed: {message}',
+  'organize.toast.applied': 'Filed: created {created} project(s), filed {filed} file(s)',
+  'organize.toast.already_applied': 'This proposal was already applied; not re-run',
+
   // ─── Plural ─────────────────────────────────────────
   'items.count': { one: '{count} item', other: '{count} items' },
 

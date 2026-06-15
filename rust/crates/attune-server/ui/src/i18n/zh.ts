@@ -870,6 +870,31 @@ export const zh = {
   'projects.agents.title': '计算助手',
   'projects.agents.run': '运行',
 
+  // ─── OrganizeWizard (文件夹一键整理 → 案卷, Task 10) ──────────
+  'organize.entry': '🪄 整理文件夹',
+  'organize.title': '一键智能整理 → 案卷',
+  'organize.intro': '自动把一组文件聚类、命名，整理成有结构的案卷。整理是显式操作，不会后台偷跑。',
+  'organize.analyze': '开始分析',
+  'organize.analyzing': '分析中…',
+  'organize.reanalyze': '重新分析',
+  'organize.confirm': '确认归档',
+  'organize.applying': '归档中…',
+  'organize.confidence': '置信度',
+  'organize.item_count': '{count} 个文件',
+  'organize.noise': '另有 {count} 个文件未能归组（混合维度或无向量），暂不归档。',
+  'organize.cost': '预估成本：tier {tier} · {tokens} tokens · ${usd}',
+  'organize.member_hint': '当前为抽取式命名。开通会员后可用 AI 生成更贴切的分组名称。',
+  'organize.no_groups': '未产生任何分组，请调整范围后重试。',
+  'organize.field.path': '待整理文件夹路径',
+  'organize.field.path_placeholder': '如：/home/user/documents/客户A',
+  'organize.field.group_name': '分组名称',
+  'organize.action.skip': '跳过此组',
+  'organize.toast.scope_required': '请先填写待整理的文件夹路径',
+  'organize.toast.analyze_failed': '分析失败：{message}',
+  'organize.toast.apply_failed': '归档失败：{message}',
+  'organize.toast.applied': '已归档：新建 {created} 个案卷，归入 {filed} 个文件',
+  'organize.toast.already_applied': '该提案已归档，未重复执行',
+
   // ─── Plural 示例 ──────────────────────────────────────
   'items.count': { one: '{count} 条', other: '{count} 条' }, // 中文单复数同形
 

@@ -1,6 +1,7 @@
 export { ChatView } from './ChatView';
 export { ItemsView } from './ItemsView';
 export { ProjectsView } from './ProjectsView';
+export { OrganizeWizard } from './OrganizeWizard'; // 文件夹一键整理 → 案卷 (Task 10)
 export { RemoteView } from './RemoteView';
 export { KnowledgeView } from './KnowledgeView';
 export { SkillsView } from './SkillsView';
