@@ -2419,6 +2419,7 @@ fn build_llm_from_settings(
 ///   - `http://localhost.evil.com/...`  (suffix on the "localhost" prefix)
 ///   - `http://10.0.0.1@evil.com/...`   (userinfo — real host is evil.com)
 ///   - `http://172.2.0.0/...`           (PUBLIC, but matched by a "172.2" prefix)
+///
 /// Uses std `Ipv4Addr::is_private()` (10/8, 172.16-31/12, 192.168/16) + `is_loopback()`
 /// (127/8, ::1), which are RFC-1918/RFC-4291 correct.
 fn embedding_endpoint_is_local(endpoint: &str) -> bool {

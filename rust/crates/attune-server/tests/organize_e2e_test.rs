@@ -219,7 +219,7 @@ async fn folder_seed_to_organized_project_e2e() {
         "every grouped item is filed into a project"
     );
     assert!(
-        applied["created"].as_array().unwrap().len() >= 1,
+        !applied["created"].as_array().unwrap().is_empty(),
         "at least one project created"
     );
     assert_eq!(applied["already_applied"], false, "first apply not a short-circuit");
