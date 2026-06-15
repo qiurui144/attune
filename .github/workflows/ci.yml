@@ -690,6 +690,13 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: "false"
       CARGO_NET_RETRY: "10"
       RUST_BACKTRACE: "1"
+      # Office tests are offline-by-design: a fresh runner has an empty model cache,
+      # so any office_* binary that boots a server with the default embedder would
+      # trigger a blocking hf-hub download (no timeout; drops the async runtime →
+      # panic, and leaks model TempDirs that fill the small ubuntu disk). 4 of the 10
+      # office files already force this in-test; set it job-wide so the rest (asr /
+      # cancel / ocr / prop / schema / six_category) are uniformly offline too.
+      HF_HUB_OFFLINE: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -764,6 +771,11 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: "false"
       CARGO_NET_RETRY: "10"
       RUST_BACKTRACE: "1"
+      # Offline-by-design (see rust-test-server-office) — empty fresh-runner model
+      # cache → default-embedder server boot would block on an hf-hub download and
+      # leak model TempDirs that fill the small ubuntu disk. happy_path forces it
+      # in-test; set it job-wide so ocr / prop / schema / six_category match.
+      HF_HUB_OFFLINE: "1"
     steps:
       - uses: actions/checkout@v4
 
