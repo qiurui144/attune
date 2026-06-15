@@ -351,6 +351,7 @@ jobs:
           cargo test --release -p attune-core
           --test job_queue_durable
           --test nontext_cross_validate_golden
+          --test organize_golden_gate
           --test ocr_image_test
           --test ocr_long_page_audit
           --test office_adversarial_test
@@ -500,6 +501,8 @@ jobs:
           --test lock_order_abba_test
           --test marketplace_install_test
           --test ocr_profiles_routes_test
+          --test organize_e2e_test
+          --test organize_route_test
           --test privacy_endpoints_test
           --test vault_lock_endpoint_test
 

@@ -27,7 +27,7 @@ memory_consolidation_integration memory_moat_integration \
 memory_token_reduction_benchmark migration_roundtrip_test model_boundary_audit \
 multilayer_memory_integration"
 
-HALF_B="job_queue_durable nontext_cross_validate_golden \
+HALF_B="job_queue_durable nontext_cross_validate_golden organize_golden_gate \
 ocr_image_test ocr_long_page_audit office_adversarial_test \
 office_formats_test oom_behavior_test oss_agent_real_llm_gate oss_boundary_test \
 pdf_e2e_search pdf_ingest_test perf_chunker_bench perf_reindex_bench \

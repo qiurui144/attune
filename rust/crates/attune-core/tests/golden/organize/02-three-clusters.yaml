@@ -1,0 +1,25 @@
+id: 02-three-clusters
+description: 三个分离簇 (axis 0 / 2 / 4, 各 5 点) → ≥2 组 (HDBSCAN 可能合并最近两簇), 全覆盖
+min_cluster_size: 5
+items:
+  - { id: a1, lobe: 0, title: contract one }
+  - { id: a2, lobe: 0, title: contract two }
+  - { id: a3, lobe: 0, title: contract three }
+  - { id: a4, lobe: 0, title: contract four }
+  - { id: a5, lobe: 0, title: contract five }
+  - { id: c1, lobe: 2, title: invoice one }
+  - { id: c2, lobe: 2, title: invoice two }
+  - { id: c3, lobe: 2, title: invoice three }
+  - { id: c4, lobe: 2, title: invoice four }
+  - { id: c5, lobe: 2, title: invoice five }
+  - { id: b1, lobe: 4, title: receipt one }
+  - { id: b2, lobe: 4, title: receipt two }
+  - { id: b3, lobe: 4, title: receipt three }
+  - { id: b4, lobe: 4, title: receipt four }
+  - { id: b5, lobe: 4, title: receipt five }
+expected:
+  min_groups: 2
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 0

@@ -1,0 +1,22 @@
+id: 09-min-cluster-size-override
+description: min_cluster_size 显式调低到 2, 但引擎 floor=5 仍保护 — 6 点 (clean) 达阈值走 HDBSCAN
+min_cluster_size: 2
+items:
+  - { id: a1, lobe: 0, title: alpha doc one }
+  - { id: a2, lobe: 0, title: alpha doc two }
+  - { id: a3, lobe: 0, title: alpha doc three }
+  - { id: a4, lobe: 0, title: alpha doc four }
+  - { id: a5, lobe: 0, title: alpha doc five }
+  - { id: a6, lobe: 0, title: alpha doc six }
+  - { id: b1, lobe: 4, title: beta doc one }
+  - { id: b2, lobe: 4, title: beta doc two }
+  - { id: b3, lobe: 4, title: beta doc three }
+  - { id: b4, lobe: 4, title: beta doc four }
+  - { id: b5, lobe: 4, title: beta doc five }
+  - { id: b6, lobe: 4, title: beta doc six }
+expected:
+  min_groups: 2
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 0

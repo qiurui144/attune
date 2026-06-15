@@ -1,0 +1,21 @@
+id: 03-cluster-plus-noise
+description: 两个密簇 + 一个孤立点 (axis 6) → 孤立点入 noise, 仍全覆盖, 分组数 ≥2
+min_cluster_size: 5
+items:
+  - { id: a1, lobe: 0, title: spec one }
+  - { id: a2, lobe: 0, title: spec two }
+  - { id: a3, lobe: 0, title: spec three }
+  - { id: a4, lobe: 0, title: spec four }
+  - { id: a5, lobe: 0, title: spec five }
+  - { id: b1, lobe: 4, title: log one }
+  - { id: b2, lobe: 4, title: log two }
+  - { id: b3, lobe: 4, title: log three }
+  - { id: b4, lobe: 4, title: log four }
+  - { id: b5, lobe: 4, title: log five }
+  - { id: lonely, lobe: 6, title: orphan stray file }
+expected:
+  min_groups: 2
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 0

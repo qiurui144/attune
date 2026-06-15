@@ -1,0 +1,22 @@
+id: 10-mixed-vector-and-novector
+description: 两密簇 + 2 个无向量 item → 无向量入 noise, 密簇成组, 全覆盖 (真实采集中途态)
+min_cluster_size: 5
+items:
+  - { id: a1, lobe: 0, title: dataset a one }
+  - { id: a2, lobe: 0, title: dataset a two }
+  - { id: a3, lobe: 0, title: dataset a three }
+  - { id: a4, lobe: 0, title: dataset a four }
+  - { id: a5, lobe: 0, title: dataset a five }
+  - { id: b1, lobe: 4, title: dataset b one }
+  - { id: b2, lobe: 4, title: dataset b two }
+  - { id: b3, lobe: 4, title: dataset b three }
+  - { id: b4, lobe: 4, title: dataset b four }
+  - { id: b5, lobe: 4, title: dataset b five }
+  - { id: pend1, no_vector: true, title: still embedding one }
+  - { id: pend2, no_vector: true, title: still embedding two }
+expected:
+  min_groups: 2
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 0

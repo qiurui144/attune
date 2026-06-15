@@ -397,6 +397,50 @@ cargo test -p attune-core --test stress_large_scale_test
 
 ---
 
+### 2.7 文件夹一键整理 → 案卷（organize 引擎）测试矩阵（release 验收硬门 · 2026-06-15）
+
+> **能力**：导入文件夹（已编排 / 完全扁平）→ 全自动聚类（本地 HDBSCAN）→ 命名/分类（领域无关 `OrganizationStrategy`，OSS 内置 `GenericStrategy`，law 语义在 attune-pro）→ 用户确认 → 单事务批量归入案卷（Project）。spec `docs/superpowers/specs/2026-06-15-auto-organize-folder-to-project.md`。
+> **release 硬性要求**：每轮 RC/GA 验收过本矩阵 —— §7.2 **Gate 2** = 确定性维度 CI 全绿；**Gate 3** = tier-3 命名路径有真模型证据（多模型矩阵脚本）；**Gate 4** = ⚠️ 维度登记 RELEASE.md Known Limitations。
+
+#### 2.7.1 维度覆盖矩阵
+
+| 轴 | 维度 | 测试文件 | 通过判据 | 状态 |
+|----|------|---------|---------|------|
+| **G1** | 分组（HDBSCAN，真聚类） | `organize_golden_gate.rs`(golden 01/02/08/09) + `clusterer::group_only` 单测 | 两/多密簇 → ≥2 真组（`allow_single_cluster=false` 需 ≥2-way split）；不调 LLM | ✅ |
+| **G2** | fallback（点数 < HDBSCAN_FLOOR=5） | golden 04/05 + `organizer::mod` 单测 | clean < 5 → 子目录 fallback，**绝不**触发 hdbscan 库 panic | ✅ |
+| **G3** | 混维 / 无向量 → noise | golden 06/07/10 + `grouping::partition_by_majority_dim` 单测 | 少数派维度 + 无向量入 noise；`dimension_mismatch_count` 准确；不丢点 | ✅ |
+| **G4** | 命名（tier-2 extractive，无 LLM） | golden 12 + proptest `groups_are_named_and_nonempty` | 每组标题词频 top1 命名非空；golden 12 命名含共享高频词 | ✅ |
+| **G5** | 命名（tier-3 LLM，多模型矩阵） | `organize_golden_gate::organize_tier_matrix_naming`(#[ignore]) + `scripts/run-organize-tier-matrix.sh` | qwen2.5:3b / gemini-flash / deepseek-v4 三 tier 命名质量 + JSON-parse 鲁棒 | ⚠️ PENDING-VERIFY（需 §1.3 算力批准；CI 不跑） |
+| **G6** | 成本契约（tier 路由 + token） | proptest `no_llm_always_tier_two` + golden `tier` 字段 | 无 LLM → tier-2 + 0 token；有会员+LLM → tier-3；`group_only` 不双调 LLM | ✅ |
+| **G7** | 不变量（并集 = 输入） | proptest `union_equals_inputs`(256 case) + `types::all_item_ids` 单测 | 任意 lobe/缺向量/簇大小组合：groups ∪ noise == inputs（不丢不重） | ✅ |
+| **G8** | 错误 case（空 scope） | golden 11 + `organizer::mod` 单测 + `organize_route_test::analyze_empty_scope_returns_400` | 0 item → `EmptyScope` / HTTP 400 | ✅ |
+| **G9** | 路由 member-gate + 锁序 | `organize_route_test.rs`(7) | 非会员 → tier-2 + `member-required-for-llm-label` hint；vault locked → 401/403；锁序 fulltext→vectors→vault | ✅ |
+| **G10** | 持久化幂等（单事务） | `organize_route_test::apply_files_items_then_is_idempotent` + `store::organization` 单测 | apply 单事务 create+file+timeline+status；重 apply → `already_applied`，无重复建项目 | ✅ |
+| **G11** | 集成 E2E（seed→analyze→apply） | `organize_e2e_test.rs`(2 跑 + 1 #[ignore]) | 12 item 双簇真 HDBSCAN → analyze → get → apply 全链；filed_count = 分组 item 数；幂等 | ✅ |
+
+#### 2.7.2 E2E 模式说明（轻量 seed vs 重路径）
+
+- **CI 跑的 E2E = 轻量 seed**（`organize_e2e_test.rs`）：`Vault::open_memory` + `setup/unlock` + `insert_item` + **直接 seed `state.vectors`**（两个 ≥5 点正交密簇），不走 HTTP `/vault/setup` + `/index/bind` + `/ingest`。WHY：重路径加载 reranker + 在 async ctx drop 后台 worker，会挂 2-worker test runtime（Task-8 实测，与 `vault_setup_test` 同因 `#[ignore]`）。
+- **重路径 E2E** `folder_http_bind_ingest_organize_e2e_heavy` = **诚实 `#[ignore]` stub**：保留全保真意图（真 bind + 真 ingest），需真模型栈手动跑 `-- --ignored`，PENDING-VERIFY，**不假装跑过**。
+- **golden 向量合成**：golden YAML 用 `lobe` 轴索引合成正交 8 维向量（同 lobe 同基轴 = 一密簇），完全确定性、离线（无 embedding 模型、无 LLM），HDBSCAN 在每 lobe ≥5 点时切出独立簇。GT 独立于引擎（向量几何 → 期望分组数下限手工推导，非跑引擎记录），符合 §「Agent 验证铁律」。
+
+#### 2.7.3 运行命令
+
+```bash
+# 确定性维度（CI 门，全绿）
+cd rust && TMPDIR=/data cargo test -p attune-core --test organize_golden_gate   # golden 12 + proptest 3
+cd rust && TMPDIR=/data cargo test -p attune-core --lib organizer               # 引擎单测
+cd rust && TMPDIR=/data cargo test -p attune-server --test organize_e2e_test    # E2E 轻量 seed（2 跑 + 1 ignore）
+cd rust && TMPDIR=/data cargo test -p attune-server --test organize_route_test  # 路由 7
+
+# tier-3 多模型命名矩阵（⚠️ 需 §1.3 算力批准；非 CI）
+ORGANIZE_TIERS="qwen2.5:3b" bash scripts/run-organize-tier-matrix.sh
+```
+
+> **CI shard**：`organize_golden_gate`(core HALF_B) / `organize_e2e_test` + `organize_route_test`(server GROUP_A) 已登记 split-guard + ci.yml `--test` 名单（确定性 blocker，不进 shard = CI 红）。
+
+---
+
 ## 3. 安全 + 跨平台测试
 
 ### 3.1 安全测试
