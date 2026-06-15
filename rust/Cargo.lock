@@ -409,6 +409,7 @@ dependencies = [
  "reqwest_dav",
  "rusqlite",
  "rustls",
+ "rustls-pemfile",
  "scraper",
  "semver",
  "serde",

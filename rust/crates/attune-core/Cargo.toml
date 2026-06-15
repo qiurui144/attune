@@ -50,6 +50,7 @@ feed-rs = "2.3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 webpki-roots = "0.26"
+rustls-pemfile = "2"  # 解析 ATTUNE_CLOUD_CA_PEM(自托管/LAN CA)→ CertificateDer
 # X.509 leaf-cert parsing for SPKI cert-pinning (cloud slice8 §3.2). Pure-Rust
 # RustCrypto stack (der/spki/const-oid already resolved in the tree via
 # ed25519-dalek), WASM-safe; avoids the heavier x509-parser (asn1-rs/nom) tree.
@@ -121,6 +122,7 @@ directml = ["ort/directml"]
 coreml = ["ort/coreml"]
 # 集成测试用：暴露 __test_seed_* 等内部 fixture helper。生产构建不开。
 test-utils = []
+
 
 # Non-text content recognition (layout/table/chart/formula/handwriting/stamp/checkbox
 # region recognizers + OCR cross-validation). Pulls native ort/imageproc model paths;

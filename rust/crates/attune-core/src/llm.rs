@@ -956,11 +956,28 @@ async fn resolve_openai_compat_model(
 
 impl OpenAiLlmProvider {
     pub fn new(endpoint: &str, api_key: &str, model: &str) -> Self {
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120));
+        // Self-hosted / LAN gateway support: trust an operator-provided CA via env
+        // ATTUNE_CLOUD_CA_PEM (a path to a PEM file, or inline PEM). The CA is ADDED
+        // to the trust store — full TLS chain/hostname/validity verification stays
+        // enforced (NOT a bypass). Mirrors cert_pin::add_custom_cloud_ca for the
+        // openai-compat gateway client. (Replaces the former dev-insecure-tls hatch.)
+        if let Ok(src) = std::env::var("ATTUNE_CLOUD_CA_PEM") {
+            if !src.trim().is_empty() {
+                let pem = if std::path::Path::new(&src).is_file() {
+                    std::fs::read(&src).unwrap_or_default()
+                } else {
+                    src.into_bytes()
+                };
+                if let Ok(certs) = reqwest::Certificate::from_pem_bundle(&pem) {
+                    for c in certs {
+                        builder = builder.add_root_certificate(c);
+                    }
+                }
+            }
+        }
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .expect("HTTP client"),
+            client: builder.build().expect("HTTP client"),
             endpoint: endpoint.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),

@@ -154,6 +154,47 @@ impl rustls::client::danger::ServerCertVerifier for SpkiPinVerifier {
     }
 }
 
+/// Optionally trust an operator-provided CA for self-hosted / LAN cloud, via env
+/// `ATTUNE_CLOUD_CA_PEM` (a path to a PEM file, or inline PEM text). The CA is
+/// **added** to the trust store; full chain + hostname + validity verification is
+/// still enforced. This is NOT a verification bypass — a private/self-signed cloud
+/// is reached the same secure way a public one is, just with an extra trusted
+/// root. No-op when the env is unset/empty or the PEM yields no certificate.
+///
+/// (Replaces the former `dev-insecure-tls` skip-all-verification escape hatch:
+/// trusting a specific CA is strictly safer than disabling verification.)
+fn add_custom_cloud_ca(roots: &mut rustls::RootCertStore) {
+    let src = match std::env::var("ATTUNE_CLOUD_CA_PEM") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => return,
+    };
+    let pem: Vec<u8> = if std::path::Path::new(&src).is_file() {
+        match std::fs::read(&src) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("ATTUNE_CLOUD_CA_PEM: cannot read file {src}: {e} — ignoring (public roots only)");
+                return;
+            }
+        }
+    } else {
+        src.into_bytes()
+    };
+    let mut added = 0usize;
+    for cert in rustls_pemfile::certs(&mut &pem[..]).flatten() {
+        if roots.add(cert).is_ok() {
+            added += 1;
+        }
+    }
+    if added > 0 {
+        eprintln!(
+            "ATTUNE_CLOUD_CA_PEM: trusting {added} operator-provided CA cert(s) \
+             (full TLS chain/hostname/validity verification still enforced)"
+        );
+    } else {
+        eprintln!("ATTUNE_CLOUD_CA_PEM set but no valid certificate parsed — ignoring (public roots only)");
+    }
+}
+
 /// Build a rustls [`rustls::ClientConfig`] that pins the accounts SPKI on top of
 /// standard webpki chain validation, for injection into reqwest via
 /// `ClientBuilder::use_preconfigured_tls`.
@@ -164,6 +205,9 @@ impl rustls::client::danger::ServerCertVerifier for SpkiPinVerifier {
 pub fn pinned_client_config() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    // Self-hosted / LAN cloud support (replaces the old dev-only skip-all hatch):
+    // trust an operator-provided private/self-signed CA in ADDITION to public roots.
+    add_custom_cloud_ca(&mut roots);
 
     // Pin the crypto provider explicitly (the crate is built with the `ring`
     // feature, no aws-lc-rs) so this config is self-contained and does not depend
@@ -312,5 +356,31 @@ mod tests {
     #[test]
     fn pinned_client_config_builds() {
         let _cfg = pinned_client_config();
+    }
+
+    /// ATTUNE_CLOUD_CA_PEM: an inline PEM cert is added to the trust store; when
+    /// the env is unset it is a no-op. (Single test to avoid env-var races across
+    /// parallel test threads.) This is the secure self-host path that replaced the
+    /// removed dev-insecure-tls skip-all hatch — the CA is ADDED, verification kept.
+    #[test]
+    fn custom_cloud_ca_env_add_then_noop() {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(LEAF_A_DER);
+        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).unwrap());
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
+
+        std::env::set_var("ATTUNE_CLOUD_CA_PEM", &pem);
+        let mut roots = rustls::RootCertStore::empty();
+        add_custom_cloud_ca(&mut roots);
+        assert_eq!(roots.len(), 1, "inline PEM CA must be added to the trust store");
+
+        std::env::remove_var("ATTUNE_CLOUD_CA_PEM");
+        let mut roots2 = rustls::RootCertStore::empty();
+        add_custom_cloud_ca(&mut roots2);
+        assert_eq!(roots2.len(), 0, "unset env ⇒ no roots added (no-op)");
     }
 }
