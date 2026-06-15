@@ -170,9 +170,22 @@ pub fn import_memory_bundle(
         return Err(VaultError::InvalidInput("corrupt-bundle: count mismatch".into()));
     }
 
+    // 安全(对抗审查 High-1):写库前预校验全部记录,任一非法即拒整包,兑现"原子拒绝"
+    // 不变量 —— 否则恶意空 source_chunk_hashes 会让 insert_memory 中途 Err、留下前 N-1 条
+    // 已落库的部分导入。
+    if let Some(bad) = mems.iter().position(|m| m.source_chunk_hashes.is_empty()) {
+        return Err(VaultError::InvalidInput(format!(
+            "corrupt-bundle: record {bad} has empty source_chunk_hashes"
+        )));
+    }
+
     let now = chrono::Utc::now().timestamp();
     let mut res = ImportResult::default();
-    for m in mems {
+    for mut m in mems {
+        // 安全(对抗审查 High-2):uq_memories_source 唯一键是 sorted hashes 的序列化,顺序敏感
+        // 且 insert_memory 契约要求调用方预排序;bundle 内 hashes 可能被重排以绕过去重 → 此处
+        // 强制排序后再入库/回查,保证幂等。
+        m.source_chunk_hashes.sort();
         // insert_memory 走 INSERT OR IGNORE + uq_memories_source 唯一索引:
         // 返回 1=新增、0=已存在(幂等 skip),无需先 SELECT 检查。
         let affected = store.insert_memory(
