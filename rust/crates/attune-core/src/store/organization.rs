@@ -14,6 +14,27 @@ use crate::crypto::{self, Key32};
 use crate::error::Result;
 use crate::store::Store;
 
+/// 用户在提案审核面板确认后的一个分组动作。
+/// action: "create"(新建项目) | "add-to"(归入既有,需 project_id) | "skip"(跳过)。
+/// items: (item_id, role);role 空串表无角色。
+pub struct ConfirmedGroup {
+    pub action: String,
+    pub project_id: Option<String>,
+    pub title: Option<String>,
+    pub kind: Option<String>,
+    pub items: Vec<(String, String)>,
+}
+
+/// apply_proposal 结果。already_applied=true 表示该 proposal 此前已 apply(幂等短路)。
+#[derive(Debug, Default)]
+pub struct ApplyResult {
+    pub created: Vec<String>,
+    pub updated: Vec<String>,
+    pub filed_count: usize,
+    pub skipped_count: usize,
+    pub already_applied: bool,
+}
+
 impl Store {
     /// 缓存一份整理提案。scope_json / proposal_json 加密存储(含敏感标题/摘要)。
     /// 重复 id → INSERT OR REPLACE(重新 analyze 同 scope 覆盖旧 draft)。
@@ -104,6 +125,82 @@ impl Store {
         Ok(n)
     }
 
+    /// 轻量状态读取:只 SELECT 明文 status 列,**不需要 dek、不解密**。
+    /// apply_proposal 用它判幂等(只关心 'applied' 与否,无需解 proposal_json)。
+    pub fn proposal_status(&self, id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT status FROM organization_proposals WHERE id = ?1")?;
+        let status = stmt.query_row(params![id], |r| r.get::<_, String>(0)).ok();
+        Ok(status)
+    }
+
+    /// 用户确认后批量归档:create_project + add_file + timeline + status 翻转,**单事务幂等**。
+    ///
+    /// 幂等只看明文 status(无需 dek/解密);已 'applied' → 直接返回 already_applied,不重做。
+    /// 全程单 unchecked_transaction:中途任一 INSERT 失败 → 整体回滚,绝无半建 Project。
+    /// 不涉及加密字段(project/project_file/project_timeline 均明文或 opaque blob),故无 dek 参数。
+    pub fn apply_proposal(
+        &self,
+        proposal_id: &str,
+        groups: &[ConfirmedGroup],
+    ) -> Result<ApplyResult> {
+        if self.proposal_status(proposal_id)?.as_deref() == Some("applied") {
+            return Ok(ApplyResult {
+                already_applied: true,
+                ..Default::default()
+            });
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        let mut res = ApplyResult::default();
+        for g in groups {
+            if g.action == "skip" {
+                res.skipped_count += g.items.len();
+                continue;
+            }
+            let now = Utc::now().timestamp();
+            let pid = if g.action == "create" {
+                let title = g.title.as_deref().unwrap_or("未命名案卷");
+                let kind = g.kind.as_deref().unwrap_or("collection");
+                let id = uuid::Uuid::new_v4().to_string();
+                tx.execute(
+                    "INSERT INTO project (id, title, kind, metadata_encrypted, created_at, updated_at, archived) \
+                     VALUES (?1, ?2, ?3, NULL, ?4, ?4, 0)",
+                    params![id, title, kind, now],
+                )?;
+                res.created.push(id.clone());
+                id
+            } else {
+                // "add-to"：归入既有项目，必须带 project_id
+                let id = g.project_id.clone().ok_or_else(|| {
+                    crate::error::VaultError::InvalidInput("add-to requires project_id".into())
+                })?;
+                res.updated.push(id.clone());
+                id
+            };
+            for (item_id, role) in &g.items {
+                tx.execute(
+                    "INSERT OR REPLACE INTO project_file (project_id, file_id, role, added_at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![pid, item_id, role, now],
+                )?;
+                res.filed_count += 1;
+            }
+            tx.execute(
+                "INSERT INTO project_timeline (project_id, ts, event_type, payload_encrypted) \
+                 VALUES (?1, ?2, 'organized', NULL)",
+                params![pid, Utc::now().timestamp_millis()],
+            )?;
+        }
+        tx.execute(
+            "UPDATE organization_proposals SET status='applied', applied_at=?2 WHERE id=?1",
+            params![proposal_id, Utc::now().timestamp()],
+        )?;
+        tx.commit()?;
+        Ok(res)
+    }
+
     /// organization_proposals 表迁移(幂等)。新 vault 直接建表;老 vault 升级也走此路径。
     pub(crate) fn migrate_organization_proposals(conn: &rusqlite::Connection) -> Result<()> {
         conn.execute_batch(
@@ -167,6 +264,83 @@ mod tests {
         assert_eq!(drafts[0].0, "a");
         let all = s.list_proposals(None, 10, 0).unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn apply_is_transactional_and_idempotent() {
+        let s = store();
+        let dek = Key32::generate();
+        s.save_proposal(&dek, "p1", "{}", None, "{}").unwrap();
+        let groups = vec![ConfirmedGroup {
+            action: "create".into(),
+            project_id: None,
+            title: Some("案卷A".into()),
+            kind: Some("collection".into()),
+            items: vec![("i1".into(), "证据".into()), ("i2".into(), "".into())],
+        }];
+        let r1 = s.apply_proposal("p1", &groups).unwrap();
+        assert_eq!(r1.created.len(), 1);
+        assert_eq!(r1.filed_count, 2);
+        assert!(!r1.already_applied);
+        // status 已翻转 applied(明文列,proposal_status 无 dek 即可读)
+        assert_eq!(s.proposal_status("p1").unwrap().as_deref(), Some("applied"));
+        // 文件确实归入新建项目
+        let pid = &r1.created[0];
+        assert_eq!(s.list_files_for_project(pid).unwrap().len(), 2);
+
+        // 幂等:再 apply 同 proposal_id 返回 already_applied,不重复建项目
+        let before = s.list_projects(false).unwrap().len();
+        let r2 = s.apply_proposal("p1", &groups).unwrap();
+        assert!(r2.already_applied);
+        assert_eq!(r2.created.len(), 0);
+        assert_eq!(s.list_projects(false).unwrap().len(), before);
+    }
+
+    #[test]
+    fn apply_add_to_existing_and_skip() {
+        let s = store();
+        let dek = Key32::generate();
+        s.save_proposal(&dek, "p3", "{}", None, "{}").unwrap();
+        let existing = s.create_project("Existing", "collection").unwrap();
+        let groups = vec![
+            ConfirmedGroup {
+                action: "add-to".into(),
+                project_id: Some(existing.id.clone()),
+                title: None,
+                kind: None,
+                items: vec![("i9".into(), "".into())],
+            },
+            ConfirmedGroup {
+                action: "skip".into(),
+                project_id: None,
+                title: None,
+                kind: None,
+                items: vec![("i10".into(), "".into())],
+            },
+        ];
+        let r = s.apply_proposal("p3", &groups).unwrap();
+        assert_eq!(r.updated, vec![existing.id.clone()]);
+        assert_eq!(r.filed_count, 1);
+        assert_eq!(r.skipped_count, 1);
+        assert_eq!(s.list_files_for_project(&existing.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn apply_add_to_without_project_id_errors() {
+        let s = store();
+        let dek = Key32::generate();
+        s.save_proposal(&dek, "p4", "{}", None, "{}").unwrap();
+        let groups = vec![ConfirmedGroup {
+            action: "add-to".into(),
+            project_id: None,
+            title: None,
+            kind: None,
+            items: vec![("i1".into(), "".into())],
+        }];
+        assert!(s.apply_proposal("p4", &groups).is_err());
+        // 事务回滚:status 仍是 draft,无半建项目
+        assert_eq!(s.proposal_status("p4").unwrap().as_deref(), Some("draft"));
+        assert_eq!(s.list_projects(false).unwrap().len(), 0);
     }
 
     #[test]
