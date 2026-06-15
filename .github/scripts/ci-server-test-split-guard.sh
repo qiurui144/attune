@@ -9,10 +9,11 @@
 # the server-booting / argon2-vault-setup tests are CPU-bound):
 #   - OFFICE_A (5)  runs in rust-test-server-office    (incl. office_concurrent ≈ 99s)
 #   - OFFICE_B (5)  runs in rust-test-server-office-b
-#   - GROUP_A  (14) runs in rust-test-server           (+ lib + accounts + root pkg; route tests incl. documents_* + organize_* + memory_route_test + memory_continuity_e2e)
+#   - GROUP_A1 (7)  runs in rust-test-server           (+ lib + accounts + root pkg; lighter route/wire tests)
+#   - GROUP_A2 (7)  runs in rust-test-server-a2        (heavy server-booting route tests: organize_* / memory_* / privacy / documents_routes / marketplace — split out 2026-06-15 because GROUP_A+lib overran the 75min windows budget)
 #   - GROUP_B  (16) runs in rust-test-server-b         (lighter wire/logic/security tests)
 #   - GROUP_C  (6)  runs in rust-test-server-c         (heavy server-booting / wizard / vault tests)
-# This script recomputes the union of all five and compares to on-disk.
+# This script recomputes the union of all six and compares to on-disk.
 set -euo pipefail
 
 OFFICE_A="office_asr_golden_gate office_cancel_test office_concurrent_test \
@@ -21,10 +22,11 @@ office_error_contract office_failure_recovery_test"
 OFFICE_B="office_happy_path office_ocr_golden_gate office_prop_tests \
 office_schema_compat office_six_category_floor"
 
-GROUP_A="ai_stack_web_search_test documents_member_gate documents_redaction \
-documents_routes git_route_subprocess lock_order_abba_test \
-marketplace_install_test memory_continuity_e2e memory_route_test ocr_profiles_routes_test \
-organize_e2e_test organize_route_test privacy_endpoints_test vault_lock_endpoint_test"
+GROUP_A1="ai_stack_web_search_test documents_member_gate documents_redaction \
+git_route_subprocess lock_order_abba_test ocr_profiles_routes_test vault_lock_endpoint_test"
+
+GROUP_A2="documents_routes marketplace_install_test memory_continuity_e2e memory_route_test \
+organize_e2e_test organize_route_test privacy_endpoints_test"
 
 GROUP_B="acp4_governor_wire_test acp5_chat_flow_wire_test amd_laptop_e2e_smoke \
 api_v1_version_test chat_cost_estimate_test egress_guard eval_determinism_test \
@@ -35,14 +37,14 @@ version_privacy_gate"
 GROUP_C="form_factor_integration projects_routes_test settings_lock_test \
 system_wizard_full_flow_test vault_recovery_test vault_setup_test"
 
-covered=$(echo "$OFFICE_A $OFFICE_B $GROUP_A $GROUP_B $GROUP_C" | tr ' ' '\n' | grep -v '^$' | sort -u)
+covered=$(echo "$OFFICE_A $OFFICE_B $GROUP_A1 $GROUP_A2 $GROUP_B $GROUP_C" | tr ' ' '\n' | grep -v '^$' | sort -u)
 ondisk=$(for f in crates/attune-server/tests/*.rs; do basename "$f" .rs; done | sort -u)
 
 if [ "$covered" != "$ondisk" ]; then
   echo "::error::attune-server test split-list drifted from on-disk tests/*.rs."
   echo "--- in split lists but NOT on disk ---"; comm -23 <(echo "$covered") <(echo "$ondisk") || true
   echo "--- on disk but NOT in any split list (UNCOVERED!) ---"; comm -13 <(echo "$covered") <(echo "$ondisk") || true
-  echo "Update OFFICE_A/OFFICE_B/GROUP_A/GROUP_B/GROUP_C in ci.yml + this guard so every server test file is assigned to a shard."
+  echo "Update OFFICE_A/OFFICE_B/GROUP_A1/GROUP_A2/GROUP_B/GROUP_C in ci.yml + this guard so every server test file is assigned to a shard."
   exit 1
 fi
-echo "server test split-list OK ($(echo "$ondisk" | wc -w) files = $(echo "$OFFICE_A" | wc -w) office-a + $(echo "$OFFICE_B" | wc -w) office-b + $(echo "$GROUP_A" | wc -w) group-A + $(echo "$GROUP_B" | wc -w) group-B + $(echo "$GROUP_C" | wc -w) group-C)."
+echo "server test split-list OK ($(echo "$ondisk" | wc -w) files = $(echo "$OFFICE_A" | wc -w) office-a + $(echo "$OFFICE_B" | wc -w) office-b + $(echo "$GROUP_A1" | wc -w) group-A1 + $(echo "$GROUP_A2" | wc -w) group-A2 + $(echo "$GROUP_B" | wc -w) group-B + $(echo "$GROUP_C" | wc -w) group-C)."

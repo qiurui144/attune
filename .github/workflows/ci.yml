@@ -483,30 +483,102 @@ jobs:
         working-directory: rust
         run: cargo test --release -p attune-accounts -p attune
 
-      # attune-server lib unittests + the NON-office integration GROUP A (the
-      # lighter route/wire tests). The heavy server-booting / vault-setup /
-      # wizard tests live in GROUP C (rust-test-server-c); GROUP B in
-      # rust-test-server-b; office_* in rust-test-server-office[-b]. The shared
-      # guard above proves office-a∪office-b∪A∪B∪C == on-disk. #[ignore] 慢 E2E
-      # 自动跳过(走 nightly)。
-      - name: cargo test attune-server lib + non-office integration (group A)
+      # attune-server lib unittests + the NON-office integration GROUP A1 (the
+      # lighter route/wire tests). Heavy server-booting route tests (organize_* /
+      # memory_* / privacy / documents_routes / marketplace) live in GROUP A2
+      # (rust-test-server-a2, split out 2026-06-15 — GROUP_A + lib overran the
+      # 75min windows budget). GROUP B in rust-test-server-b; GROUP C in
+      # rust-test-server-c; office_* in rust-test-server-office[-b]. The shared
+      # guard above proves office-a∪office-b∪A1∪A2∪B∪C == on-disk. #[ignore] 慢
+      # E2E 自动跳过(走 nightly)。
+      - name: cargo test attune-server lib + non-office integration (group A1)
         working-directory: rust
         run: >
           cargo test --release -p attune-server --lib
           --test ai_stack_web_search_test
           --test documents_member_gate
           --test documents_redaction
-          --test documents_routes
           --test git_route_subprocess
           --test lock_order_abba_test
+          --test ocr_profiles_routes_test
+          --test vault_lock_endpoint_test
+
+  rust-test-server-a2:
+    # GROUP A2 — heavy server-booting route tests (organize_* / memory_* /
+    # privacy / documents_routes / marketplace) split out of rust-test-server
+    # (2026-06-15) because GROUP_A + lib unittests overran the 75min windows
+    # budget. No --lib / accounts here (those run in rust-test-server / GROUP A1).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: rust-test-server-a2-${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_NET_RETRY: "10"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (ubuntu — reclaim ~25-30G before the release build)
+        if: matrix.os == 'ubuntu-latest'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Free disk space (windows — drop large pre-installed SDKs)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $paths = @(
+            "$env:ANDROID_HOME",
+            "$env:CHROMEWEBDRIVER",
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "$env:AGENT_TOOLSDIRECTORY\CodeQL"
+          )
+          foreach ($p in $paths) {
+            if ($p -and (Test-Path $p)) {
+              Write-Host "Removing $p"
+              Remove-Item -Recurse -Force $p -ErrorAction SilentlyContinue
+            }
+          }
+          Get-PSDrive C | Select-Object Used,Free
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (registry + git + target, pruned)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: server-a2-${{ matrix.os }}-v3
+
+      - name: Guard — server test split covers every server test (office+A1+A2+B+C)
+        shell: bash
+        working-directory: rust
+        run: bash ../.github/scripts/ci-server-test-split-guard.sh
+
+      - name: cargo test attune-server non-office integration (group A2)
+        working-directory: rust
+        run: >
+          cargo test --release -p attune-server
+          --test documents_routes
           --test marketplace_install_test
           --test memory_continuity_e2e
           --test memory_route_test
-          --test ocr_profiles_routes_test
           --test organize_e2e_test
           --test organize_route_test
           --test privacy_endpoints_test
-          --test vault_lock_endpoint_test
 
   rust-test-server-b:
     # Second non-office server integration shard (GROUP B — the lighter, mostly
