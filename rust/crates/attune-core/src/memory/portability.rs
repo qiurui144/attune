@@ -125,6 +125,83 @@ pub fn export_memory_bundle(store: &Store, dek: &Key32, passphrase: &str) -> Res
     Ok(out)
 }
 
+/// 从口令加密 bundle 合并式导入记忆到当前 vault(用本机 DEK 重加密)。
+///
+/// WHY 合并而非覆盖:跨设备搬运时目标设备可能已有记忆;按 `(kind, source_chunk_hashes)`
+/// 幂等去重(底层 `INSERT OR IGNORE` + `uq_memories_source` 唯一索引),已存在的记忆跳过,
+/// 重复导入同 bundle 是安全的 no-op。
+///
+/// WHY 解密在写库之前:口令错 → GCM 认证失败(`InvalidPassword`)在派生 key 解出 payload
+/// 阶段就返回 Err,此时尚未触碰任何表 → 零写入(原子拒绝整包)。
+/// manifest 条数与解出条数不符同样在写库前拒绝(detect 截断/损坏)。
+///
+/// 向量按 bundle 内 model 原样写入;后续 reindex(Task 3)会把它对齐到本机 embedding 模型。
+pub fn import_memory_bundle(
+    store: &Store,
+    dek: &Key32,
+    bundle: &[u8],
+    passphrase: &str,
+) -> Result<ImportResult> {
+    // 切分 [manifest-json]\n[salt(16B)][ciphertext],严格对称 export_memory_bundle。
+    let nl = bundle
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or_else(|| VaultError::InvalidInput("corrupt-bundle: no manifest delimiter".into()))?;
+    let manifest: BundleManifest = serde_json::from_slice(&bundle[..nl])
+        .map_err(|_| VaultError::InvalidInput("unsupported-bundle-version".into()))?;
+    if manifest.format_version != BUNDLE_FORMAT_VERSION {
+        return Err(VaultError::InvalidInput("unsupported-bundle-version".into()));
+    }
+    let rest = &bundle[nl + 1..];
+    if rest.len() < BUNDLE_SALT_LEN {
+        return Err(VaultError::InvalidInput("corrupt-bundle: truncated salt".into()));
+    }
+    let (salt, ct) = rest.split_at(BUNDLE_SALT_LEN);
+
+    let pkey = derive_portable_key(passphrase, salt)?;
+    // 口令错 → crypto::decrypt 返回 VaultError::InvalidPassword(GCM tag 失配),
+    // 在任何写库之前 → 零写入。route 层据此映射 400 bad-passphrase。
+    let plain = crypto::decrypt(&pkey, ct)?;
+    let mems: Vec<PortableMemory> = serde_json::from_slice(&plain)
+        .map_err(|_| VaultError::InvalidInput("corrupt-bundle: payload".into()))?;
+
+    // manifest 校验:解出条数须与头部声明一致,否则拒绝整包(写库前)。
+    if mems.len() != manifest.memories {
+        return Err(VaultError::InvalidInput("corrupt-bundle: count mismatch".into()));
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let mut res = ImportResult::default();
+    for m in mems {
+        // insert_memory 走 INSERT OR IGNORE + uq_memories_source 唯一索引:
+        // 返回 1=新增、0=已存在(幂等 skip),无需先 SELECT 检查。
+        let affected = store.insert_memory(
+            dek,
+            &m.kind,
+            m.window_start,
+            m.window_end,
+            &m.source_chunk_hashes,
+            &m.summary,
+            &m.model,
+            m.created_at,
+        )?;
+        if affected == 0 {
+            res.skipped += 1;
+            continue;
+        }
+        res.imported += 1;
+        // 若 bundle 带向量,按其 model 写入(后续 reindex 对齐本机模型)。
+        // 向量按本机记忆 id 关联:insert_memory 内部新生成 id,故需经 source_chunk_hashes
+        // 回查刚插入行的 id。
+        if let Some(v) = m.vector {
+            if let Some(id) = store.find_memory_id_by_source(&m.kind, &m.source_chunk_hashes)? {
+                store.put_memory_vector(&id, &v.embedding, &v.model, now)?;
+            }
+        }
+    }
+    Ok(res)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +276,39 @@ mod tests {
         let mems: Vec<PortableMemory> = serde_json::from_slice(&plain).unwrap();
         assert_eq!(mems.len(), 3);
         assert!(mems.iter().all(|m| m.summary.starts_with("summary")));
+    }
+
+    fn empty_unlocked_store() -> (Store, Key32) {
+        (Store::open_memory().unwrap(), Key32::generate())
+    }
+
+    #[test]
+    fn export_then_import_roundtrip_equivalent() {
+        let (store, dek) = unlocked_store_with_n_memories(5);
+        let bundle = export_memory_bundle(&store, &dek, "correct horse battery").unwrap();
+
+        // 全新设备(不同 DEK)首次导入:5 条全部落库。
+        let (store2, dek2) = empty_unlocked_store();
+        let r = import_memory_bundle(&store2, &dek2, &bundle, "correct horse battery").unwrap();
+        assert_eq!(r.imported, 5);
+        assert_eq!(r.skipped, 0);
+        assert_eq!(store2.list_recent_memories(&dek2, 100).unwrap().len(), 5);
+
+        // 二次导入同 bundle:source_chunk_hashes 幂等去重 → 全部 skip,零新增。
+        let r2 = import_memory_bundle(&store2, &dek2, &bundle, "correct horse battery").unwrap();
+        assert_eq!(r2.imported, 0);
+        assert_eq!(r2.skipped, 5);
+        assert_eq!(store2.list_recent_memories(&dek2, 100).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn import_wrong_passphrase_fails_no_write() {
+        let (store, dek) = unlocked_store_with_n_memories(2);
+        let bundle = export_memory_bundle(&store, &dek, "right").unwrap();
+
+        let (store2, dek2) = empty_unlocked_store();
+        // 口令错 → GCM 解密在写库之前就失败,整包拒绝。
+        assert!(import_memory_bundle(&store2, &dek2, &bundle, "wrong").is_err());
+        assert_eq!(store2.list_recent_memories(&dek2, 100).unwrap().len(), 0);
     }
 }

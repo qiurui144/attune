@@ -65,6 +65,26 @@ impl Store {
         Ok(exists.is_some())
     }
 
+    /// 取 (kind, sorted_chunk_hashes) 对应 memory 的 id。`None` = 不存在。
+    /// import 用:`insert_memory` 内部新生成 id 不外露,需回查刚落库行 id 以关联向量。
+    pub fn find_memory_id_by_source(
+        &self,
+        kind: &str,
+        sorted_chunk_hashes: &[String],
+    ) -> Result<Option<String>> {
+        let hashes_json = serde_json::to_string(sorted_chunk_hashes)
+            .map_err(|e| VaultError::InvalidInput(format!("hashes serialize: {e}")))?;
+        let id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM memories WHERE kind = ?1 AND source_chunk_hashes = ?2 LIMIT 1",
+                params![kind, hashes_json],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id)
+    }
+
     /// 写入一条 memory。`source_chunk_hashes` 必须**升序排序**（调用方保证）；
     /// 唯一索引会拒绝重复 (kind, hashes_json) 组合 → 返回 0 表示已存在。
     /// 返回 1 = 新增，0 = 已存在跳过。
