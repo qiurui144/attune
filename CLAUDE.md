@@ -74,6 +74,15 @@ per § 版本拆解能力 §4 强制切片表(每行 ≥ 主题 + 交付 + 时�
 
 **测试策略**：`docs/TESTING.md` 固化了产品级测试方案 — 六层测试金字塔、GitHub 真实知识仓库作为语料（rust-lang/book、CyC2018/CS-Notes 等版本固化）、golden set 质量回归、禁止随机测试数据。添加任何 feature 前先参考该文档的测试矩阵。
 
+## 技术文档 / wiki / 工作流 SSOT（2026-06-16 确立）
+
+**内容边界**（用户拍板）：**wiki 承载全部技术内容**（架构 / 测试报告 / API / 原理）；**官网博文区 = 面向用户的科普 / 案例**（非技术细节）。技术内容先沉淀到 `docs/`，日后同步到 wiki。
+
+- **开发工作流 + 分工 SSOT**：`docs/agent-development-workflow.md` —— 插件/agent 端到端流水线（spec→G1→plan→G2→impl→**test-fix-verify**→双岗位 review→G3/G4→ship）+ 六类测试下限 + §4.5 LLM 兜底 + real-LLM N=3 F1≥0.85 ratchet + 角色矩阵 + 输出模式契约。
+- **wiki 技术内容**：`docs/wiki/`（`memory-token-economy.md` 省 token 架构 / `vision-understanding-pipeline.md` 视觉稳定输出流水线）。
+- **质量证据（先进性/稳定性/准确性）**：`docs/benchmarks/`（proof points，每条引 commit/runs，PENDING-EXPERT 项明示）。
+- **视觉增强 spec**：`docs/superpowers/specs/2026-06-16-vision-understanding-enhancement.md`（DRAFT，nontext+VLM 已 ship，增量=grounding+N=3 gate+矩阵 failover+共享 agent 暴露）。
+
 Python 验证后，择优特性迁移到 Rust 商用线。对应开发时根据任务选择目录：
 - 涉及算法实验、ML 集成、快速原型 → 改 Python 端
 - 涉及加密、性能、打包分发、生产部署 → 改 Rust 端
@@ -235,7 +244,7 @@ git push origin main
 - Web UI: 嵌入式单页 HTML + vanilla JS（`include_str!`）
 - CLI: clap + rpassword
 - AI 分类: Ollama chat (qwen2.5) + hdbscan 聚类 + 编程/法律插件
-- 分发: Rust 主二进制 ~47 MB stripped / 59 MB unstripped（静态链接，含 TLS + 搜索引擎 + Web UI + 分类引擎；R32 实测 2026-05-01 x86_64-linux）；Win MSI / Linux deb 安装包 ~150-200 MB（捆绑 Ollama runtime + whisper.cpp + PP-OCRv5 mobile (ONNX) + poppler-utils + 必要底座模型；**LLM 不本地预装** — 笔电统一 cloud API（Gemini Free / attune Pro 会员 token / 用户 BYOK），K3 一体机镜像例外）
+- 分发: Rust 主二进制 ~47 MB stripped / 59 MB unstripped（静态链接，含 TLS + 搜索引擎 + Web UI + 分类引擎；R32 实测 2026-05-01 x86_64-linux）。**desktop 安装包 = 瘦包**（2026-06-16 v1.4.0 实测 + 用户拍板）：Linux deb 38M（app binary + whisper-cli binary；系统库 poppler-utils/webkit/gtk/curl 走 apt Depends 自动解析）/ AppImage 110M / Win nsis 23M+msi 41M。**底座模型不捆绑** — embedding/rerank/ASR权重/PP-OCR ONNX/Ollama runtime 在**首次运行经 S8 ModelStack failover 从 company-mirror→hf-mirror→HF 拉取**（非完全离线自包含，装完一次联网初始化即用，失败有 failover+重试兜底）。**LLM 不本地预装** — cloud API（attune Pro 会员 token / 用户 BYOK），K3 一体机镜像例外。（旧"150-200MB 捆绑底座"描述已过时，与实际 thin-deb + runtime-fetch 设计不符。）
 
 ## 已实现模块（Phase 0-3）
 
