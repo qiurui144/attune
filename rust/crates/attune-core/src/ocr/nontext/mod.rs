@@ -12,15 +12,20 @@ use serde::{Deserialize, Serialize};
 pub mod chart;
 pub mod checkbox;
 pub mod cross_validate;
+/// I2 vision eval gate (offline only). Feature-gated so it never compiles into a production binary
+/// (spec §I2 / §7 eval-mode safety boundary).
+#[cfg(feature = "vision-eval")]
+pub mod eval;
 pub mod figure;
 pub mod formula;
+pub mod grounding;
 pub mod handwriting;
 pub mod layout;
 pub mod stamp_signature;
 pub mod table_structure;
 pub mod vlm_escalate;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegionKind {
     Text,
@@ -73,6 +78,10 @@ pub struct Cell {
 pub struct Series {
     pub name: String,
     pub values: Vec<f64>,
+    /// I1: where this series was read from on the page (region/sub-bbox/OCR-line). `None` on
+    /// local-only / old payloads (back-compat, spec §10); populated on VLM-grounded extraction.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub grounding: Option<grounding::GroundingRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,18 +100,30 @@ pub enum RegionResult {
     FigureV1 {
         class: String,
         caption: Option<String>,
+        /// I1: region-level grounding for the caption (spec §5.3).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        grounding: Option<grounding::GroundingRef>,
     },
     FormulaV1 {
         latex: Option<String>,
         raw_ocr: Option<String>,
+        /// I1: where the formula was transcribed from (spec §5.3).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        grounding: Option<grounding::GroundingRef>,
     },
     HandwritingV1 {
         text: Option<String>,
+        /// I1: where the handwriting was transcribed from (spec §5.3).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        grounding: Option<grounding::GroundingRef>,
     },
     StampV1 {
         present: bool,
         text: Option<String>,
         stamp_type: Option<String>,
+        /// I1: where the stamp text was read from (spec §5.3).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        grounding: Option<grounding::GroundingRef>,
     },
     SignatureV1 {
         present: bool,

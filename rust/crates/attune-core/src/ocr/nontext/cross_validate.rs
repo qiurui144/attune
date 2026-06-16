@@ -105,8 +105,8 @@ pub fn build_report(regions: &[Region], ocr_texts: &[Option<String>]) -> OcrCorr
 /// Best-effort text extraction from a RegionResult for content comparison.
 fn region_text(r: &RegionResult) -> Option<String> {
     match r {
-        RegionResult::HandwritingV1 { text } => text.clone(),
-        RegionResult::FormulaV1 { latex, raw_ocr } => latex.clone().or_else(|| raw_ocr.clone()),
+        RegionResult::HandwritingV1 { text, .. } => text.clone(),
+        RegionResult::FormulaV1 { latex, raw_ocr, .. } => latex.clone().or_else(|| raw_ocr.clone()),
         RegionResult::StampV1 { text, .. } => text.clone(),
         _ => None,
     }
@@ -163,7 +163,7 @@ mod tests {
     fn build_report_marks_agree_no_correction() {
         let regions = vec![region(
             RegionKind::Handwriting,
-            RegionResult::HandwritingV1 { text: Some("foo".into()) },
+            RegionResult::HandwritingV1 { text: Some("foo".into()), grounding: None },
             RegionSource::CrossConfirmed,
             0.9,
         )];
@@ -176,7 +176,7 @@ mod tests {
     fn build_report_conflict_keeps_both_values() {
         let regions = vec![region(
             RegionKind::Handwriting,
-            RegionResult::HandwritingV1 { text: Some("1OO".into()) },
+            RegionResult::HandwritingV1 { text: Some("1OO".into()), grounding: None },
             RegionSource::Vlm,
             0.7,
         )];
@@ -202,7 +202,7 @@ mod props {
             let regions = vec![Region {
                 kind: RegionKind::Handwriting, bbox: BBox { x:0,y:0,w:1,h:1 }, page: 0,
                 det_confidence: 0.5,
-                result: RegionResult::HandwritingV1 { text: Some(text) },
+                result: RegionResult::HandwritingV1 { text: Some(text), grounding: None },
                 source: RegionSource::Local, confidence: conf, validation_warnings: vec![],
             }];
             let report = build_report(&regions, &[Some(ocr)]);
@@ -223,7 +223,7 @@ mod props {
             let regions: Vec<Region> = (0..n).map(|_| Region {
                 kind: RegionKind::Handwriting, bbox: BBox { x:0,y:0,w:1,h:1 }, page: 0,
                 det_confidence: 0.5,
-                result: RegionResult::HandwritingV1 { text: Some("x".into()) },
+                result: RegionResult::HandwritingV1 { text: Some("x".into()), grounding: None },
                 source: RegionSource::Local, confidence: 0.9, validation_warnings: vec![],
             }).collect();
             let ocr: Vec<Option<String>> = (0..n).map(|i| Some(if i % 2 == 0 { "x".into() } else { "y".into() })).collect();

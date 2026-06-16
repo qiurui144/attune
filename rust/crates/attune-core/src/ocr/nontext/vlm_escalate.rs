@@ -13,9 +13,11 @@
 //! passing the gate — the compiler refuses. See `egress_without_gate_is_impossible`
 //! and the `tests` module for the proofs.
 
+use super::grounding::{validate_grounding, GroundingFail, GroundingRef};
 use super::{RegionKind, RegionResult, Series};
 use crate::error::{Result, VaultError};
 use crate::ocr::profile::VlmEscalationPolicy;
+use crate::ocr::BBox;
 use crate::outbound_gate::{OutboundError, OutboundGate, OutboundKind, OutboundPolicy};
 use crate::pii::Redactor;
 use crate::vlm::VlmProvider;
@@ -201,13 +203,19 @@ pub struct VlmTelemetry {
 }
 
 /// Build the schema-guided VQA question for a region kind (spec §3.2 / §4.5 A).
+///
+/// I1 grounding (spec §E2): the prompt asks the VLM to locate each extracted value with a
+/// `grounding.sub_bbox` in CROP-RELATIVE pixel coordinates (top-left origin of the region crop it is
+/// shown). The caller stamps the authoritative `region_bbox`/`page` (it knows the page coords; the
+/// VLM, seeing only the crop, cannot) and validates the sub_bbox lands inside the crop. A value the
+/// VLM cannot locate must be omitted — never invent a value or a location.
 pub fn escalation_prompt(kind: RegionKind) -> &'static str {
     match kind {
-        RegionKind::Chart => "Extract the chart as JSON: {\"chart_type\":\"bar|line|pie\",\"series\":[{\"name\":\"...\",\"values\":[..]}],\"axis_labels\":[..]}. Reply with ONLY the JSON object.",
-        RegionKind::Formula => "Transcribe the formula to LaTeX as JSON: {\"latex\":\"...\"}. Reply with ONLY the JSON object.",
-        RegionKind::Handwriting => "Transcribe the handwriting as JSON: {\"text\":\"...\"}. Reply with ONLY the JSON object.",
-        RegionKind::Figure => "Caption the figure as JSON: {\"caption\":\"...\"}. Reply with ONLY the JSON object.",
-        RegionKind::Stamp => "Read the stamp as JSON: {\"text\":\"...\",\"stamp_type\":\"...\"}. Reply with ONLY the JSON object.",
+        RegionKind::Chart => "Extract the chart as JSON: {\"chart_type\":\"bar|line|pie\",\"series\":[{\"name\":\"...\",\"values\":[..],\"grounding\":{\"sub_bbox\":{\"x\":int,\"y\":int,\"w\":int,\"h\":int}}}],\"axis_labels\":[..]}. The sub_bbox locates each series in the image (top-left origin pixels). Only report a series you can locate. Reply with ONLY the JSON object.",
+        RegionKind::Formula => "Transcribe the formula to LaTeX as JSON: {\"latex\":\"...\",\"grounding\":{\"sub_bbox\":{\"x\":int,\"y\":int,\"w\":int,\"h\":int}}}. The sub_bbox locates the formula in the image (top-left origin pixels). Reply with ONLY the JSON object.",
+        RegionKind::Handwriting => "Transcribe the handwriting as JSON: {\"text\":\"...\",\"grounding\":{\"sub_bbox\":{\"x\":int,\"y\":int,\"w\":int,\"h\":int}}}. The sub_bbox locates the handwriting in the image (top-left origin pixels). Reply with ONLY the JSON object.",
+        RegionKind::Figure => "Caption the figure as JSON: {\"caption\":\"...\",\"grounding\":{\"sub_bbox\":{\"x\":int,\"y\":int,\"w\":int,\"h\":int}}}. The sub_bbox locates the captioned subject (top-left origin pixels). Reply with ONLY the JSON object.",
+        RegionKind::Stamp => "Read the stamp as JSON: {\"text\":\"...\",\"stamp_type\":\"...\",\"grounding\":{\"sub_bbox\":{\"x\":int,\"y\":int,\"w\":int,\"h\":int}}}. The sub_bbox locates the stamp in the image (top-left origin pixels). Reply with ONLY the JSON object.",
         _ => "Describe this region as JSON: {\"text\":\"...\"}. Reply with ONLY the JSON object.",
     }
 }
@@ -223,13 +231,16 @@ pub fn parse_vlm_answer(kind: RegionKind, answer: &str) -> Result<RegionResult> 
         RegionKind::Formula => RegionResult::FormulaV1 {
             latex: v.get("latex").and_then(|x| x.as_str()).map(str::to_string),
             raw_ocr: None,
+            grounding: parse_grounding(&v),
         },
         RegionKind::Handwriting => RegionResult::HandwritingV1 {
             text: v.get("text").and_then(|x| x.as_str()).map(str::to_string),
+            grounding: parse_grounding(&v),
         },
         RegionKind::Figure => RegionResult::FigureV1 {
             class: "figure".into(),
             caption: v.get("caption").and_then(|x| x.as_str()).map(str::to_string),
+            grounding: parse_grounding(&v),
         },
         RegionKind::Chart => RegionResult::ChartV1 {
             chart_type: v
@@ -255,6 +266,7 @@ pub fn parse_vlm_answer(kind: RegionKind, answer: &str) -> Result<RegionResult> 
                 .get("stamp_type")
                 .and_then(|x| x.as_str())
                 .map(str::to_string),
+            grounding: parse_grounding(&v),
         },
         _ => RegionResult::UnrecognizedV1 {
             reason: "vlm-unsupported-kind".into(),
@@ -275,10 +287,91 @@ fn parse_series(v: &serde_json::Value) -> Option<Vec<Series>> {
                         .iter()
                         .filter_map(|x| x.as_f64())
                         .collect(),
+                    // I1: per-series grounding, if the VLM provided a source location for this series.
+                    grounding: parse_grounding(s),
                 })
             })
             .collect(),
     )
+}
+
+/// I1: parse an optional `grounding` object out of a VLM JSON value (region/series level). The VLM
+/// is asked (via the escalation prompt) to locate each extracted value with a crop-relative
+/// `sub_bbox`; if it does we capture the ref so the caller can stamp the authoritative region_bbox
+/// and [`ground_region`] can validate the sub_bbox lands inside the crop. A `grounding` object with
+/// NO usable location (no `sub_bbox`) → `None` (the validator then flags `Missing` and drives a
+/// retry, spec §E2). `region_bbox`/`page` in the JSON are ignored: the VLM sees a crop and cannot
+/// know absolute page coords; the caller ([`stamp_grounding`]) overwrites them.
+fn parse_grounding(v: &serde_json::Value) -> Option<GroundingRef> {
+    let g = v.get("grounding")?;
+    let bbox = |key: &str| -> Option<BBox> {
+        let b = g.get(key)?;
+        Some(BBox {
+            x: b.get("x")?.as_u64()? as u32,
+            y: b.get("y")?.as_u64()? as u32,
+            w: b.get("w")?.as_u64()? as u32,
+            h: b.get("h")?.as_u64()? as u32,
+        })
+    };
+    // A grounding object is only useful if it carries a sub_bbox (the crop-relative location). The
+    // region_bbox is a placeholder here; stamp_grounding overwrites it with the crop-origin region.
+    let sub_bbox = bbox("sub_bbox")?;
+    Some(GroundingRef {
+        region_bbox: BBox { x: 0, y: 0, w: 0, h: 0 }, // placeholder, overwritten by stamp_grounding
+        page: 0,
+        sub_bbox: Some(sub_bbox),
+        ocr_line_ref: g
+            .get("ocr_line_ref")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+    })
+}
+
+/// I1 grounding check (spec §E2): every extracted value in `result` must carry a [`GroundingRef`]
+/// that lands inside `region` on `page`. Returns the first [`GroundingFail`] found (so the retry
+/// loop can feed a specific reason back to the VLM), or `Ok(())` when all values are grounded.
+///
+/// Only VLM-extractable, value-bearing variants are checked. A `ChartV1` with an EMPTY series list
+/// has no values to ground (so it cannot fabricate an ungrounded value) → vacuously grounded; a
+/// chart WITH series requires each series to be grounded. Variants that carry no extracted content
+/// (`UnrecognizedV1`, `CheckboxV1`, `SignatureV1`, `TableV1` — TableV1 cell grounding is a later
+/// increment, spec §5.3 marks it `Option`) are not grounding-gated here.
+pub fn ground_region(result: &RegionResult, region: &BBox, page: u32) -> std::result::Result<(), GroundingFail> {
+    match result {
+        RegionResult::ChartV1 { series, .. } => {
+            for s in series {
+                validate_grounding(s.grounding.as_ref(), region, page)?;
+            }
+            Ok(())
+        }
+        RegionResult::FormulaV1 { latex, grounding, .. } => {
+            // Only require grounding when a value was actually extracted (latex present).
+            if latex.is_some() {
+                validate_grounding(grounding.as_ref(), region, page)?;
+            }
+            Ok(())
+        }
+        RegionResult::HandwritingV1 { text, grounding } => {
+            if text.is_some() {
+                validate_grounding(grounding.as_ref(), region, page)?;
+            }
+            Ok(())
+        }
+        RegionResult::FigureV1 { caption, grounding, .. } => {
+            if caption.is_some() {
+                validate_grounding(grounding.as_ref(), region, page)?;
+            }
+            Ok(())
+        }
+        RegionResult::StampV1 { text, grounding, .. } => {
+            if text.is_some() {
+                validate_grounding(grounding.as_ref(), region, page)?;
+            }
+            Ok(())
+        }
+        // No extracted free value to ground (or grounding is a later increment).
+        _ => Ok(()),
+    }
 }
 
 /// Extract the first {...} JSON object from a possibly-chatty answer.
@@ -292,8 +385,85 @@ fn extract_json(s: &str) -> Option<String> {
     }
 }
 
-/// Escalate one region to VLM. Retries up to MAX_RETRIES on parse failure, feeding the
-/// validator error back into the question (spec §4.5 B). Returns (result, telemetry).
+/// Geometry of the region being escalated, used to ground the VLM's extracted values (I1).
+///
+/// The VLM is shown only the region CROP (top-left origin), so it returns `sub_bbox` in crop-relative
+/// pixels. The caller stamps the authoritative `page_bbox`/`page` (the absolute page coords it knows
+/// but the VLM can't) and validates each `sub_bbox` lands inside the crop (`crop_w`×`crop_h`).
+#[derive(Debug, Clone, Copy)]
+pub struct RegionGeom {
+    /// The region's absolute bbox on the page (stamped into each GroundingRef).
+    pub page_bbox: BBox,
+    /// The page index.
+    pub page: u32,
+    /// Width of the crop the VLM was shown (the coordinate system its sub_bbox uses).
+    pub crop_w: u32,
+    /// Height of the crop the VLM was shown.
+    pub crop_h: u32,
+}
+
+impl RegionGeom {
+    /// The crop-origin region used to validate the VLM's crop-relative sub_bbox.
+    fn crop_region(&self) -> BBox {
+        BBox { x: 0, y: 0, w: self.crop_w, h: self.crop_h }
+    }
+}
+
+/// Stamp the authoritative `region_bbox`/`page` into every GroundingRef the VLM returned, keeping
+/// the VLM-supplied `sub_bbox`/`ocr_line_ref`. The VLM cannot know absolute page coords (it sees a
+/// crop), so we OVERWRITE whatever `region_bbox` it guessed with the crop-origin region — then
+/// [`ground_region`] validates the sub_bbox lies inside it. (Validation runs in crop coords; the
+/// page_bbox is what downstream UI uses to map back to the original page.)
+fn stamp_grounding(result: &mut RegionResult, geom: &RegionGeom) {
+    let crop = geom.crop_region();
+    let restamp = |g: &mut Option<GroundingRef>| {
+        if let Some(gr) = g {
+            gr.region_bbox = crop;
+            gr.page = geom.page;
+        }
+    };
+    match result {
+        RegionResult::ChartV1 { series, .. } => series.iter_mut().for_each(|s| restamp(&mut s.grounding)),
+        RegionResult::FormulaV1 { grounding, .. } => restamp(grounding),
+        RegionResult::HandwritingV1 { grounding, .. } => restamp(grounding),
+        RegionResult::FigureV1 { grounding, .. } => restamp(grounding),
+        RegionResult::StampV1 { grounding, .. } => restamp(grounding),
+        _ => {}
+    }
+}
+
+/// Rewrite the page_bbox of every grounding ref to the region's absolute page bbox, AFTER grounding
+/// validation passed in crop coords. Downstream consumers (UI highlight, OCR-line jump) need the
+/// absolute page rectangle, not the crop-origin one used for validation.
+fn finalize_grounding_page_coords(result: &mut RegionResult, geom: &RegionGeom) {
+    let set = |g: &mut Option<GroundingRef>| {
+        if let Some(gr) = g {
+            gr.region_bbox = geom.page_bbox;
+        }
+    };
+    match result {
+        RegionResult::ChartV1 { series, .. } => series.iter_mut().for_each(|s| set(&mut s.grounding)),
+        RegionResult::FormulaV1 { grounding, .. } => set(grounding),
+        RegionResult::HandwritingV1 { grounding, .. } => set(grounding),
+        RegionResult::FigureV1 { grounding, .. } => set(grounding),
+        RegionResult::StampV1 { grounding, .. } => set(grounding),
+        _ => {}
+    }
+}
+
+/// The telemetry `error_kind` value set when a value is KEPT-but-ungrounded after the retry budget
+/// is spent (spec §7). The Stage4 caller maps this to a `validation_warnings: ["ungrounded"]` on the
+/// Region (validation_warnings lives on Region, not RegionResult), so the value is surfaced as
+/// "could not be located back to source" — never dropped, never fabricated.
+pub const UNGROUNDED_ERROR_KIND: &str = "grounding";
+
+/// Escalate one region to VLM. Retries up to MAX_RETRIES feeding the validator error (parse OR
+/// I1 grounding_fail) back into the question (spec §4.5 B / §E2). Returns (result, telemetry).
+///
+/// I1: after a successful parse, the extracted values' grounding is stamped + validated against the
+/// crop. A `grounding_fail` (missing/out-of-bounds/empty source location) is fed back to the VLM
+/// like a parse error and retried; after MAX_RETRIES the value is KEPT but the telemetry error_kind
+/// is `grounding` and `ungrounded` is set so the caller flags it (never drop, never fabricate, §7).
 ///
 /// SECURITY (C2): requires a [`VlmEgressToken`] by value — the ONLY way to obtain one is
 /// [`gate_vlm_egress`]. This makes VLM egress type-enforced: no token ⇒ this function is
@@ -304,11 +474,16 @@ pub fn escalate_region(
     token: VlmEgressToken,
     kind: RegionKind,
     model_name: &str,
+    geom: RegionGeom,
 ) -> (Result<RegionResult>, VlmTelemetry) {
     // The bytes that leave the device are the gate's minimized copy, not a raw original.
     let region_crop_path = token.egress_crop_path().to_path_buf();
     let base = escalation_prompt(kind);
+    let crop = geom.crop_region();
     let mut last_err = String::new();
+    // Holds the most recent successfully-parsed-but-ungrounded result, so after the retry budget is
+    // spent we can KEEP the value (flagged ungrounded) rather than dropping it (spec §7).
+    let mut last_ungrounded: Option<(RegionResult, GroundingFail)> = None;
     for attempt in 0..MAX_RETRIES {
         let q = if attempt == 0 {
             base.to_string()
@@ -317,16 +492,28 @@ pub fn escalate_region(
         };
         match vlm.vqa(&region_crop_path, &q) {
             Ok(answer) => match parse_vlm_answer(kind, &answer) {
-                Ok(r) => {
-                    return (
-                        Ok(r),
-                        VlmTelemetry {
-                            region_kind: kind,
-                            vlm_model: model_name.into(),
-                            error_kind: None,
-                            retry_count: attempt,
-                        },
-                    )
+                Ok(mut r) => {
+                    stamp_grounding(&mut r, &geom);
+                    match ground_region(&r, &crop, geom.page) {
+                        Ok(()) => {
+                            // Grounded: finalize page coords for downstream consumers + return.
+                            finalize_grounding_page_coords(&mut r, &geom);
+                            return (
+                                Ok(r),
+                                VlmTelemetry {
+                                    region_kind: kind,
+                                    vlm_model: model_name.into(),
+                                    error_kind: None,
+                                    retry_count: attempt,
+                                },
+                            );
+                        }
+                        Err(gf) => {
+                            // I1: grounding failed — feed the specific reason back and retry.
+                            last_err = gf.as_reason().to_string();
+                            last_ungrounded = Some((r, gf));
+                        }
+                    }
                 }
                 Err(e) => last_err = e.to_string(),
             },
@@ -342,6 +529,20 @@ pub fn escalate_region(
                 )
             }
         }
+    }
+    // Retry budget spent. If we have a parsed-but-ungrounded value, KEEP it (spec §7: never drop /
+    // fabricate); telemetry error_kind = grounding so the failure is visible.
+    if let Some((mut r, _gf)) = last_ungrounded {
+        finalize_grounding_page_coords(&mut r, &geom);
+        return (
+            Ok(r),
+            VlmTelemetry {
+                region_kind: kind,
+                vlm_model: model_name.into(),
+                error_kind: Some(UNGROUNDED_ERROR_KIND.into()),
+                retry_count: MAX_RETRIES,
+            },
+        );
     }
     (
         Err(VaultError::Io(std::io::Error::other(
@@ -382,6 +583,21 @@ mod tests {
         }
     }
 
+    /// The crop the gate produces from an 8×8 src is 8×8 (≤ EGRESS_MAX_EDGE → not downscaled), so a
+    /// grounding sub_bbox inside 8×8 is valid. Geom for these tests: tiny page bbox + 8×8 crop.
+    fn test_geom() -> RegionGeom {
+        RegionGeom {
+            page_bbox: BBox { x: 100, y: 200, w: 8, h: 8 },
+            page: 0,
+            crop_w: 8,
+            crop_h: 8,
+        }
+    }
+
+    /// A grounded handwriting answer: text + a sub_bbox inside the 8×8 crop. region_bbox/page in the
+    /// JSON are ignored (the caller stamps the authoritative crop region), so we omit them.
+    const GROUNDED_HW: &str = r#"{"text":"ok","grounding":{"sub_bbox":{"x":1,"y":1,"w":3,"h":3}}}"#;
+
     /// Write a tiny real PNG so the gate's downscale step has bytes to act on.
     fn write_test_png(dir: &std::path::Path, name: &str, edge: u32) -> PathBuf {
         let p = dir.join(name);
@@ -416,7 +632,7 @@ mod tests {
     fn parse_chatty_answer_extracts_json() {
         let r = parse_vlm_answer(RegionKind::Handwriting, r#"Sure! {"text":"hello"} done"#).unwrap();
         match r {
-            RegionResult::HandwritingV1 { text } => assert_eq!(text.as_deref(), Some("hello")),
+            RegionResult::HandwritingV1 { text, .. } => assert_eq!(text.as_deref(), Some("hello")),
             _ => panic!(),
         }
     }
@@ -427,9 +643,9 @@ mod tests {
     #[test]
     fn first_try_success_zero_retries() {
         let dir = tempfile::tempdir().unwrap();
-        let vlm = script(&[r#"{"text":"ok"}"#]);
+        let vlm = script(&[GROUNDED_HW]);
         let (res, tel) =
-            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl");
+            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
         assert!(res.is_ok());
         assert_eq!(tel.retry_count, 0);
         assert_eq!(tel.error_kind, None);
@@ -437,9 +653,9 @@ mod tests {
     #[test]
     fn retries_then_succeeds() {
         let dir = tempfile::tempdir().unwrap();
-        let vlm = script(&["garbage", r#"{"text":"ok"}"#]);
+        let vlm = script(&["garbage", GROUNDED_HW]);
         let (res, tel) =
-            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl");
+            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
         assert!(res.is_ok());
         assert_eq!(tel.retry_count, 1);
     }
@@ -448,10 +664,98 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&["bad1", "bad2", "bad3", "bad4"]);
         let (res, tel) =
-            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl");
+            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
         assert!(res.is_err());
         assert_eq!(tel.retry_count, MAX_RETRIES);
         assert_eq!(tel.error_kind.as_deref(), Some("parse"));
+    }
+
+    // ── I1 grounding integration (spec §E2 / §7) ──────────────────────────────
+
+    #[test]
+    fn grounded_answer_succeeds_and_stamps_page_coords() {
+        // A value with a valid in-crop sub_bbox is grounded; the returned ref carries the
+        // authoritative PAGE bbox (not the crop origin) for downstream UI highlight.
+        let dir = tempfile::tempdir().unwrap();
+        let vlm = script(&[GROUNDED_HW]);
+        let (res, tel) =
+            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        let r = res.unwrap();
+        assert_eq!(tel.error_kind, None);
+        match r {
+            RegionResult::HandwritingV1 { text, grounding } => {
+                assert_eq!(text.as_deref(), Some("ok"));
+                let g = grounding.expect("grounded value must carry a GroundingRef");
+                // Finalized to the absolute page bbox the caller supplied (geom.page_bbox).
+                assert_eq!(g.region_bbox, BBox { x: 100, y: 200, w: 8, h: 8 });
+                assert_eq!(g.sub_bbox, Some(BBox { x: 1, y: 1, w: 3, h: 3 }));
+            }
+            _ => panic!("expected HandwritingV1"),
+        }
+    }
+
+    #[test]
+    fn ungrounded_answer_retries_then_keeps_value_flagged() {
+        // A value WITHOUT grounding (the VLM omitted sub_bbox) fails the grounding validator and is
+        // retried; if the VLM keeps omitting it, after MAX_RETRIES the value is KEPT (never dropped,
+        // §7) with telemetry error_kind = "grounding".
+        let dir = tempfile::tempdir().unwrap();
+        let vlm = script(&[r#"{"text":"ok"}"#, r#"{"text":"ok"}"#, r#"{"text":"ok"}"#]);
+        let (res, tel) =
+            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        let r = res.expect("value must be KEPT, not dropped (spec §7)");
+        assert_eq!(tel.retry_count, MAX_RETRIES);
+        assert_eq!(tel.error_kind.as_deref(), Some(UNGROUNDED_ERROR_KIND));
+        match r {
+            RegionResult::HandwritingV1 { text, .. } => assert_eq!(text.as_deref(), Some("ok")),
+            _ => panic!("ungrounded value must still be returned"),
+        }
+    }
+
+    #[test]
+    fn ungrounded_then_grounded_succeeds_on_retry() {
+        // First answer omits grounding (grounding_fail → retry), second answer includes a valid
+        // sub_bbox → success. Proves the grounding error feeds back into the SAME retry loop.
+        let dir = tempfile::tempdir().unwrap();
+        let vlm = script(&[r#"{"text":"ok"}"#, GROUNDED_HW]);
+        let (res, tel) =
+            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        assert!(res.is_ok());
+        assert_eq!(tel.retry_count, 1);
+        assert_eq!(tel.error_kind, None);
+    }
+
+    #[test]
+    fn out_of_bounds_grounding_is_retried_as_grounding_fail() {
+        // A sub_bbox outside the 8×8 crop (x=50) is out-of-bounds → grounding_fail every attempt →
+        // value kept + flagged grounding (not parse — the JSON parsed fine, only grounding failed).
+        let dir = tempfile::tempdir().unwrap();
+        let oob = r#"{"text":"ok","grounding":{"sub_bbox":{"x":50,"y":50,"w":3,"h":3}}}"#;
+        let vlm = script(&[oob, oob, oob]);
+        let (res, tel) =
+            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        assert!(res.is_ok());
+        assert_eq!(tel.error_kind.as_deref(), Some(UNGROUNDED_ERROR_KIND));
+    }
+
+    #[test]
+    fn ground_region_empty_chart_series_is_vacuously_grounded() {
+        // A chart with NO series has no value to ground → ground_region passes (can't fabricate an
+        // ungrounded value out of nothing).
+        let crop = BBox { x: 0, y: 0, w: 8, h: 8 };
+        let r = RegionResult::ChartV1 { chart_type: "bar".into(), series: vec![], axis_labels: vec![] };
+        assert!(ground_region(&r, &crop, 0).is_ok());
+    }
+
+    #[test]
+    fn ground_region_chart_series_missing_grounding_fails() {
+        let crop = BBox { x: 0, y: 0, w: 8, h: 8 };
+        let r = RegionResult::ChartV1 {
+            chart_type: "bar".into(),
+            series: vec![Series { name: "Q1".into(), values: vec![1.0], grounding: None }],
+            axis_labels: vec![],
+        };
+        assert_eq!(ground_region(&r, &crop, 0), Err(GroundingFail::Missing));
     }
 
     /// C2 proof — type-enforcement. There is NO public way to build a `VlmEgressToken`
@@ -466,8 +770,8 @@ mod tests {
         // NOT some caller-supplied raw original outside the gate.
         assert!(token.egress_crop_path().starts_with(dir.path()));
         assert!(token.egress_crop_path().exists(), "minimized crop must be materialized");
-        let vlm = script(&[r#"{"text":"ok"}"#]);
-        let (res, _) = escalate_region(&vlm, token, RegionKind::Handwriting, "qwen-vl");
+        let vlm = script(&[GROUNDED_HW]);
+        let (res, _) = escalate_region(&vlm, token, RegionKind::Handwriting, "qwen-vl", test_geom());
         assert!(res.is_ok());
     }
 

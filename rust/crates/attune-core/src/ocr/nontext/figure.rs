@@ -12,6 +12,7 @@ impl RegionRecognizer for FigureRecognizer {
         Ok(RegionResult::FigureV1 {
             class: "figure".into(),
             caption: None,
+            grounding: None,
         })
     }
     fn cost_tier(&self) -> CostTier {

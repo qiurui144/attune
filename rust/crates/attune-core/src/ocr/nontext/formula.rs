@@ -19,6 +19,7 @@ impl RegionRecognizer for FormulaRecognizer {
         Ok(RegionResult::FormulaV1 {
             latex: None,
             raw_ocr,
+            grounding: None,
         })
     }
     fn cost_tier(&self) -> CostTier {
@@ -47,7 +48,8 @@ mod tests {
             r,
             RegionResult::FormulaV1 {
                 latex: None,
-                raw_ocr: Some(_)
+                raw_ocr: Some(_),
+                ..
             }
         ));
     }

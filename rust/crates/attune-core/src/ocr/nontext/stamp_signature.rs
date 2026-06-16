@@ -53,6 +53,7 @@ impl RegionRecognizer for StampRecognizer {
             present,
             text: None,
             stamp_type: None,
+            grounding: None,
         })
     }
     fn cost_tier(&self) -> CostTier {
