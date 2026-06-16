@@ -11,10 +11,13 @@
 #   - 操作幂等（重装/升级不破坏已有 Ollama 配置）
 #
 # 不做的事：
-#   - 拉模型（耗时 + 占带宽 + 没 progress UI；交给 attune-desktop 首次启动 wizard）
 #   - 创建 vault（用户数据，留给 setup 流程）
-
-set -e
+#
+# ⚠️ 禁用 `set -e`（2026-06-16 §7.3 真机修复）：本脚本的硬契约是「永不让 dpkg 失败」
+# （末尾 exit 0 + 每步 `|| true` / `if` / `|| log WARN` 守卫）。`set -e` 与该契约直接冲突——
+# 任一未守卫步（groupadd / curl|sh / 模型下载 / stat 在 apt 事务里瞬时失败）会中途 abort，
+# 永远到不了 exit 0 → 包停在 `iF`（half-configured），需 `dpkg --configure -a` 才补全。
+# 实测:192.168.100.186 首装即触发 iF。故不用 set -e,best-effort 跑到底再 exit 0。
 
 # dpkg/rpm postinst 使用 /bin/sh + 受限 PATH (/usr/sbin:/usr/bin:/sbin:/bin)，
 # 不含 /usr/local/bin。Ollama install.sh 默认装到 /usr/local/bin/ollama —
