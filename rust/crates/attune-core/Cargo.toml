@@ -117,9 +117,19 @@ wasmtime-wasi = { version = "45", optional = true }
 # `--no-default-features` 关闭以剔除 wasmtime(纯 native cap 路径)。
 default = ["wasm-runtime"]
 wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
+# ── ONNX Runtime Execution Provider feature passthrough(全矩阵,默认全 OFF) ──
+# 每个 EP = 一个 ort cargo feature(+ 多数需对应 ORT 二进制变体 / 系统 userspace
+# runtime;runtime 栈由 infer::stack_installer 按需拉取,非全量打包,护 thin-deb)。
+# **默认 build 不开任何 GPU/NPU EP** → 行为 == 纯 CPU(向后兼容,CI 绿)。release
+# workflow 按 target 选 `--features`(Win:directml;NVIDIA Linux GPU 增强包:cuda 等)。
+# 编不过 / 需特殊 ORT 二进制的 EP 留 default-off + PENDING-VERIFY,绝不进默认 build。
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
 coreml = ["ort/coreml"]
+openvino = ["ort/openvino"]
+rocm = ["ort/rocm"]
+tensorrt = ["ort/tensorrt"]
+vitis = ["ort/vitis"]
 # 集成测试用：暴露 __test_seed_* 等内部 fixture helper。生产构建不开。
 test-utils = []
 

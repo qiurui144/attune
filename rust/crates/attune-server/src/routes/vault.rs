@@ -85,6 +85,9 @@ pub async fn vault_setup(
     state.init_search_engines();
     // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
     crate::state::AppState::spawn_model_bootstrap(state.clone());
+    // EP 运行时软件栈(cuda/openvino/rocm/directml/vitisai userspace)按需安装,
+    // 缺则像底座模型一样后台拉取(内核驱动除外,走 #6 consent)。
+    crate::state::AppState::spawn_stack_bootstrap(state.clone());
     // Bug-C: vault unlock 后立即触发 reload_llm,确保 settings 中已有的 llm config
     // 在 server restart 后第一次 chat 即可工作(不再依赖 member-login gateway_should_apply
     // 走 reload_llm 分支)。init_search_engines 内部 compare_exchange 保证 LLM 也只 init 一次;
@@ -122,6 +125,9 @@ pub async fn vault_unlock(
     state.init_search_engines();
     // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
     crate::state::AppState::spawn_model_bootstrap(state.clone());
+    // EP 运行时软件栈(cuda/openvino/rocm/directml/vitisai userspace)按需安装,
+    // 缺则像底座模型一样后台拉取(内核驱动除外,走 #6 consent)。
+    crate::state::AppState::spawn_stack_bootstrap(state.clone());
     // Bug-C: per setup 同步注释,unlock 后强制 reload_llm,杜绝
     // "server restart → unlock → chat 503" 的 P3。
     state.reload_llm();
@@ -236,6 +242,9 @@ pub async fn vault_reset_with_recovery_key(
     state.init_search_engines();
     // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
     crate::state::AppState::spawn_model_bootstrap(state.clone());
+    // EP 运行时软件栈(cuda/openvino/rocm/directml/vitisai userspace)按需安装,
+    // 缺则像底座模型一样后台拉取(内核驱动除外,走 #6 consent)。
+    crate::state::AppState::spawn_stack_bootstrap(state.clone());
     // Bug-C: reset 后也走 unlock 同样路径,显式 reload_llm。
     state.reload_llm();
     crate::state::AppState::start_classify_worker(state.clone());

@@ -49,6 +49,10 @@ pub struct AppState {
     /// 解锁立即返回，模型在后台线程拉取；本字段让 /ai_stack 暴露进度 + 失败原因，
     /// 不静默。clone 廉价（内部 Arc）。
     pub model_bootstrap: attune_core::infer::bootstrap_status::ModelBootstrapStatus,
+    /// EP 运行时软件栈按需安装进度快照（cuda / openvino / rocm / directml / vitisai）。
+    /// 与 `model_bootstrap` 平行：栈像底座模型一样首次运行按需拉取 userspace runtime
+    /// （内核驱动除外，走 #6 consent）。/ai_stack 暴露状态。clone 廉价（内部 Arc）。
+    pub stack_install: attune_core::infer::stack_installer::StackInstallStatus,
     pub llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub summary_llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub web_search: Mutex<Option<Arc<dyn WebSearchProvider>>>,
@@ -207,6 +211,7 @@ impl AppState {
             embedding: Mutex::new(None),
             reranker: Mutex::new(None),
             model_bootstrap: attune_core::infer::bootstrap_status::ModelBootstrapStatus::new(),
+            stack_install: attune_core::infer::stack_installer::StackInstallStatus::new(),
             llm: Mutex::new(None),
             summary_llm: Mutex::new(None),
             web_search: Mutex::new(None),
@@ -852,6 +857,34 @@ impl AppState {
                 state.model_bootstrap.all_ready()
             );
         });
+    }
+
+    /// 按需安装本机推荐 EP 链所需的运行时软件栈（userspace runtime，**非驱动**）。
+    ///
+    /// 流程:`accel::cached_selection().recommend_ep_chain()` → 取每个 EP 的
+    /// `runtime_stack()`（去重）→ `stack_installer::spawn_stack_bootstrap` 后台拉取缺失栈
+    /// （已就位则标 Present 跳过）。与 `spawn_model_bootstrap` 平行、非阻塞、可重试。
+    ///
+    /// 栈装不上 → 对应 EP 运行时注册失败 → ORT 静默降级 CPU（provider.rs 不用
+    /// error_on_failure 已兜住）。内核驱动不在此装（#6 consent-gated）。
+    pub fn spawn_stack_bootstrap(state: std::sync::Arc<AppState>) {
+        let sel = attune_core::infer::accel::cached_selection();
+        let chain = sel.recommend_ep_chain();
+        // 去重收集链上需要 userspace 栈的标识（CPU/CoreML 返回 None，自动排除）。
+        let mut wanted: Vec<String> = Vec::new();
+        for ep in &chain {
+            if let Some(stack) = ep.runtime_stack() {
+                if !wanted.iter().any(|s| s == stack) {
+                    wanted.push(stack.to_string());
+                }
+            }
+        }
+        if wanted.is_empty() {
+            // 纯 CPU 链（默认 build / 无加速硬件）：无栈可装，直接返回。
+            return;
+        }
+        tracing::info!("EP stack bootstrap: ensuring runtime stacks {wanted:?} (userspace only, drivers excluded)");
+        attune_core::infer::stack_installer::spawn_stack_bootstrap(state.stack_install.clone(), wanted);
     }
 
     /// 启动后台分类 worker（需要在 init_search_engines 之后调用）

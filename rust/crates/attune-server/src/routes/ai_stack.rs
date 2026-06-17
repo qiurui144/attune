@@ -52,8 +52,14 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         .and_then(|e| e.npu_tops);
 
     // 统一加速器视图：枚举本机所有推理加速器 (CPU/NVIDIA/AMD GPU+NPU/Intel iGPU+NPU)
-    // + 每个的就绪度，并给底座 ONNX EP 选择提示 (recommended_ep_hint, 仅建议不接线)。
+    // + 每个的就绪度，并给底座 ONNX EP 选择提示 (recommended_ep_hint, 仅硬件视角建议)。
     let accel = attune_core::platform::AccelCapabilities::from_profile(hw);
+
+    // 实际 EP 选型链(硬件 × 当前 artifact 编入的 EP × ATTUNE_ORT_EP env)→ 有序链,
+    // 末位永远 CPU。telemetry 给 UI 显示「embedding 预计跑在 cuda / cpu」+ fallback 原因。
+    let ep_sel = attune_core::infer::accel::cached_selection();
+    let ep_chain = ep_sel.recommend_ep_chain();
+    let ep_telemetry = attune_core::infer::accel::EpSelectionTelemetry::from_chain(&ep_chain);
 
     Json(json!({
         "hardware": {
@@ -75,7 +81,17 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
                 "driver_ready": a.driver_ready,
                 "notes": a.notes,
             })).collect::<Vec<_>>(),
+            // 实际 ORT EP 选型链 + 当前 artifact 编入的 EP + best-effort active EP。
+            "ep_chain": ep_telemetry.requested,
+            "active_ep": ep_telemetry.active,
+            "active_ep_approx": ep_telemetry.approx,
+            "fallback_reason": ep_telemetry.fallback_reason,
+            "compiled_eps": ep_sel.compiled.iter().map(|e| e.id()).collect::<Vec<_>>(),
         },
+        // EP 运行时软件栈按需安装状态(cuda/openvino/rocm/directml/vitisai userspace)。
+        // 平行 model_bootstrap:栈像底座模型一样首次运行按需拉取(内核驱动除外)。UI 轮询
+        // 此字段显示「安装中 / 已就绪 / 失败」。栈装不上 → 对应 EP 降级 CPU。
+        "ep_runtime_stacks": state.stack_install.snapshot(),
         "region": {
             "detected": region.label(),
             "hf_endpoint": region.hf_endpoint(),
