@@ -51,6 +51,10 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     let npu_tops = attune_core::platform::cpu_db::lookup(&hw.cpu_model)
         .and_then(|e| e.npu_tops);
 
+    // 统一加速器视图：枚举本机所有推理加速器 (CPU/NVIDIA/AMD GPU+NPU/Intel iGPU+NPU)
+    // + 每个的就绪度，并给底座 ONNX EP 选择提示 (recommended_ep_hint, 仅建议不接线)。
+    let accel = attune_core::platform::AccelCapabilities::from_profile(hw);
+
     Json(json!({
         "hardware": {
             "tier": tier.label(),
@@ -60,6 +64,17 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "npu_tops": npu_tops,
             "ram_gb": hw.total_ram_bytes / (1024 * 1024 * 1024),
             "has_gpu": hw.has_nvidia_gpu || hw.has_amd_gpu,
+        },
+        "accel": {
+            "recommended_ep_hint": accel.recommended_ep_hint(),
+            "has_hw_accelerator": accel.has_hw_accelerator(),
+            "accelerators": accel.accelerators.iter().map(|a| json!({
+                "kind": a.kind.id(),
+                "vendor": a.vendor,
+                "present": a.present,
+                "driver_ready": a.driver_ready,
+                "notes": a.notes,
+            })).collect::<Vec<_>>(),
         },
         "region": {
             "detected": region.label(),
