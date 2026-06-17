@@ -24,7 +24,7 @@ const DEFAULT_ACCOUNTS_URL: &str = "https://accounts.engi-stack.com";
 /// from the request body — a client-controlled URL would let an attacker point
 /// login/activation at their own server and forge "paid" / inject a malicious
 /// gateway config. Self-host operators configure this once under 设置 → cloud.
-fn resolve_accounts_url(state: &SharedState) -> String {
+pub(crate) fn resolve_accounts_url(state: &SharedState) -> String {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let configured = vault
         .store()
@@ -1003,6 +1003,94 @@ mod tests {
         let settings =
             serde_json::json!({"llm": {"model": "qwen2.5:3b", "api_key": "", "endpoint": ""}});
         assert!(gateway_should_apply(&settings));
+    }
+
+    // ── 接线守卫 #4/#5: login_password 与 activate 共享 wire 逻辑(DRY 不漂移) ──
+    //
+    // 两条会员入口(login_password 用 UserInfo.gateway_*,activate 用
+    // ActivateResult.gateway_*)都喂同一个 wire_cloud_gateway → merge_gateway_into_settings
+    // sink。如果两个响应类型的 gateway 字段集漂移(一边加了 model 另一边没加),付费
+    // 会员会因入口不同而拿到不一致的 LLM 配置。本守卫钉死:**相同的 (url, token,
+    // default_model) 三元组,无论来自哪个响应类型,经同一 sink 必产出字节相同的 llm 配置**。
+    //
+    // 我们无法在单元测试里起 vault 调 wire_cloud_gateway(&SharedState),所以守卫
+    // 作用在 wire 的纯核心 —— merge_gateway_into_settings —— 并显式从两个真实响应
+    // 类型抽字段喂进去,证明字段映射不漂移。
+
+    use attune_core::cloud_client::{ActivateResult, UserInfo};
+
+    #[test]
+    fn both_member_entrances_wire_identical_gateway_config() {
+        // 同一套云端下发凭据,分别封进两个响应类型。
+        let url = "https://gateway.engi-stack.com/v1";
+        let token = "sk-newapi-shared-not-real";
+        let model = "deepseek-v4-flash";
+
+        let from_login: UserInfo = serde_json::from_value(serde_json::json!({
+            "id": 9, "email": "p@example.com", "plan": "pro",
+            "gateway_url": url, "gateway_token": token, "gateway_default_model": model,
+        }))
+        .unwrap();
+        let from_activate: ActivateResult = serde_json::from_value(serde_json::json!({
+            "plan": "pro", "allowed_plugins": ["law-pro"],
+            "gateway_url": url, "gateway_token": token, "gateway_default_model": model,
+        }))
+        .unwrap();
+
+        // login_password feeds (me.gateway_url, me.gateway_token, me.gateway_default_model);
+        // activate_license feeds (result.gateway_url, result.gateway_token,
+        // result.gateway_default_model) — into the SAME wire_cloud_gateway → merge sink.
+        let merged_login = merge_gateway_into_settings(
+            serde_json::json!({}),
+            from_login.gateway_url.as_deref().unwrap(),
+            from_login.gateway_token.as_deref().unwrap(),
+            from_login.gateway_default_model.as_deref(),
+        );
+        let merged_activate = merge_gateway_into_settings(
+            serde_json::json!({}),
+            from_activate.gateway_url.as_deref().unwrap(),
+            from_activate.gateway_token.as_deref().unwrap(),
+            from_activate.gateway_default_model.as_deref(),
+        );
+
+        // Byte-identical → the two entrances cannot drift in what they wire.
+        assert_eq!(
+            merged_login, merged_activate,
+            "login_password and activate_license must wire identical gateway LLM config (DRY)"
+        );
+        // And it really is the full three-piece config (provider + endpoint + api_key + model).
+        let llm = merged_login.get("llm").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
+        assert_eq!(llm.get("endpoint").and_then(|v| v.as_str()), Some(url));
+        assert_eq!(llm.get("api_key").and_then(|v| v.as_str()), Some(token));
+        assert_eq!(llm.get("model").and_then(|v| v.as_str()), Some(model));
+    }
+
+    /// 接线守卫 #4: 两响应类型的 gateway 字段集必须对齐 —— 若 cloud 给 UserInfo 加了
+    /// 新 gateway 字段却忘了给 ActivateResult 加(或反之),激活路径会丢该配置。守卫用
+    /// serde round-trip 钉死两者都解析同名三件套(url/token/default_model),缺一即编译/
+    /// 断言失败,逼维护者同步两边。
+    #[test]
+    fn user_info_and_activate_result_share_gateway_field_set() {
+        let payload = serde_json::json!({
+            "gateway_url": "https://gw/v1",
+            "gateway_token": "sk-x-not-real",
+            "gateway_default_model": "m1",
+        });
+        // UserInfo needs id+email; ActivateResult needs plan — merge the minimal envelopes.
+        let mut ui = payload.clone();
+        ui["id"] = serde_json::json!(1);
+        ui["email"] = serde_json::json!("a@b.com");
+        let mut ar = payload.clone();
+        ar["plan"] = serde_json::json!("pro");
+
+        let u: UserInfo = serde_json::from_value(ui).unwrap();
+        let r: ActivateResult = serde_json::from_value(ar).unwrap();
+
+        assert_eq!(u.gateway_url, r.gateway_url);
+        assert_eq!(u.gateway_token, r.gateway_token);
+        assert_eq!(u.gateway_default_model, r.gateway_default_model);
+        assert!(u.gateway_default_model.is_some() && r.gateway_default_model.is_some());
     }
 
     // ── SECURITY: client-controlled cloud_url is rejected (SSRF / paywall) ───

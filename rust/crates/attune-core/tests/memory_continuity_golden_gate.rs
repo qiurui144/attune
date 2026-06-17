@@ -126,7 +126,7 @@ fn load_cases() -> Vec<(String, GoldenCase)> {
 fn seed(store: &Store, dek: &Key32, mems: &[Mem]) {
     for (i, m) in mems.iter().enumerate() {
         store
-            .insert_memory(dek, "episodic", 1, 2, &[m.hash.clone()], &m.summary, &m.model, i as i64)
+            .insert_memory(dek, "episodic", 1, 2, std::slice::from_ref(&m.hash), &m.summary, &m.model, i as i64)
             .expect("insert memory");
     }
 }
@@ -225,7 +225,7 @@ fn run_reindex_case(file: &str, case: &GoldenCase, spec: &ReindexSpec) {
     // vs the new active model.
     let old_emb = MockEmbeddingProvider::new(spec.from_dim);
     for m in &spec.memories {
-        let id = store.find_memory_id_by_source("episodic", &[m.hash.clone()]).unwrap().unwrap();
+        let id = store.find_memory_id_by_source("episodic", std::slice::from_ref(&m.hash)).unwrap().unwrap();
         let (v, _) = old_emb.embed(&[m.summary.as_str()]).unwrap();
         store.put_memory_vector(&id, &v[0], &old_emb.model_name(), 1).unwrap();
     }
@@ -262,7 +262,7 @@ fn run_combo_case(file: &str, case: &GoldenCase, spec: &ComboSpec) {
     seed(&src, &src_dek, &spec.memories);
     let bundle_emb = MockEmbeddingProvider::new(spec.bundle_dim);
     for m in &spec.memories {
-        let id = src.find_memory_id_by_source("episodic", &[m.hash.clone()]).unwrap().unwrap();
+        let id = src.find_memory_id_by_source("episodic", std::slice::from_ref(&m.hash)).unwrap().unwrap();
         let (v, _) = bundle_emb.embed(&[m.summary.as_str()]).unwrap();
         src.put_memory_vector(&id, &v[0], &bundle_emb.model_name(), 1).unwrap();
     }
