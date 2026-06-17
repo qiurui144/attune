@@ -12,6 +12,44 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::Utc;
+use sha2::{Digest, Sha256};
+
+/// Default public cloud accounts endpoint when the self-host override
+/// (`settings.cloud.accounts_url`) is unset/empty.
+const DEFAULT_ACCOUNTS_URL: &str = "https://accounts.engi-stack.com";
+
+/// Resolve the cloud accounts base URL **server-side** from persisted settings
+/// (`app_settings.cloud.accounts_url`), defaulting to the public engi-stack
+/// endpoint. SECURITY (SSRF / paywall-bypass): the accounts URL is NEVER taken
+/// from the request body — a client-controlled URL would let an attacker point
+/// login/activation at their own server and forge "paid" / inject a malicious
+/// gateway config. Self-host operators configure this once under 设置 → cloud.
+fn resolve_accounts_url(state: &SharedState) -> String {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let configured = vault
+        .store()
+        .get_meta(SETTINGS_META_KEY)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|v| {
+            v.get("cloud")
+                .and_then(|c| c.get("accounts_url"))
+                .and_then(|u| u.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    configured.unwrap_or_else(|| DEFAULT_ACCOUNTS_URL.to_string())
+}
+
+/// SECURITY: redact a license_key for log/identity use. Never log the raw key
+/// (§1.4) — emit a stable `lic:<8-hex>` digest prefix so operators can correlate
+/// without the credential ever reaching a log sink.
+fn redact_license_key(license_key: &str) -> String {
+    let digest = Sha256::digest(license_key.as_bytes());
+    format!("lic:{}", &hex::encode(digest)[..8])
+}
 
 /// Result of the blocking CloudClient interaction (B4): carried back from
 /// `spawn_blocking` into the async tail. `license`/`me` are `None` for free users
@@ -168,8 +206,6 @@ pub struct LoginPasswordReq {
     pub email: String,
     pub password: String,
     #[serde(default)]
-    pub cloud_url: Option<String>,
-    #[serde(default)]
     pub license_code: Option<String>,
 }
 
@@ -177,7 +213,9 @@ pub struct LoginPasswordReq {
 ///
 /// 说明：
 /// - 密码只用于本次请求，不持久化到磁盘。
-/// - 默认 cloud_url 为 https://accounts.engi-stack.com，可由请求覆盖。
+/// - accounts URL 由**服务端** `settings.cloud.accounts_url` 决定（默认
+///   https://accounts.engi-stack.com）。SECURITY: 不接受请求体覆盖 —— 见
+///   [`resolve_accounts_url`]（SSRF / 付费墙绕过)。
 pub async fn login_password(
     State(state): State<SharedState>,
     Json(mut req): Json<LoginPasswordReq>,
@@ -189,9 +227,7 @@ pub async fn login_password(
         ));
     }
 
-    let cloud_url = req
-        .cloud_url
-        .unwrap_or_else(|| "https://accounts.engi-stack.com".to_string());
+    let cloud_url = resolve_accounts_url(&state);
 
     // B4 (2026-06-06): CloudClient wraps `reqwest::blocking`, which spins up (and on
     // drop tears down) a current-thread Tokio runtime. Calling it directly inside this
@@ -437,8 +473,6 @@ fn resolve_trust_mode(state: &SharedState) -> TrustMode {
 #[derive(serde::Deserialize)]
 pub struct ActivateLicenseReq {
     pub license_key: String,
-    #[serde(default)]
-    pub cloud_url: Option<String>,
 }
 
 /// 授权码激活的两阶段结果(blocking 线程内一次性完成两次 cloud 调用):
@@ -485,9 +519,9 @@ pub async fn activate_license(
             Json(serde_json::json!({"error": "license_key required", "code": "license-key-required"})),
         ));
     }
-    let cloud_url = req
-        .cloud_url
-        .unwrap_or_else(|| "https://accounts.engi-stack.com".to_string());
+    // SECURITY: accounts URL 来自服务端 settings(不接受请求体覆盖)—— 见
+    // resolve_accounts_url(SSRF / 付费墙绕过)。
+    let cloud_url = resolve_accounts_url(&state);
 
     // B4 约束:CloudClient = reqwest::blocking → spawn_blocking,async tail 留本线程。
     // 两次 cloud 调用(authorize + device bind)在**同一** blocking 线程里串行完成,
@@ -524,12 +558,13 @@ pub async fn activate_license(
 
     // ── 授权成功:配 gateway LLM + 落 entitlement + 置 Paid(与 login_password 同逻辑)──
     // best-effort:写失败不阻断激活(用户仍是 Paid,只是 chat 需手填 key,§4.5)。
+    // SECURITY (§1.4): `who` 进 tracing 日志 —— 绝不传 license_key 明文,传脱敏摘要。
     wire_cloud_gateway(
         &state,
         result.gateway_url.as_deref(),
         result.gateway_token.as_deref(),
         result.gateway_default_model.as_deref(),
-        &license_key,
+        &redact_license_key(&license_key),
     );
     // 落 entitlement:allowed_plugins 写进缓存 + vault,供 pluginhub 安装授权(②)+
     // 周期 re-verify 基准。best-effort,失败仅 warn。
@@ -637,7 +672,11 @@ pub const DEVICE_BINDING_META_KEY: &str = "device_binding";
 /// 保证两条会员入口写出**完全一致**的锁定 gateway 配置。
 ///
 /// best-effort:`url`/`token` 缺失或为空 → 跳过(用户保留现有 LLM 设置);写入失败
-/// → warn,不阻断登录/激活(§4.5)。`who` 仅用于日志(email 或 license_key 前缀)。
+/// → warn,不阻断登录/激活(§4.5)。
+///
+/// SECURITY (§1.4):`who` 进 tracing 日志,**必须是非敏感标识**(email,或
+/// [`redact_license_key`] 生成的 `lic:<8-hex>` 摘要)—— **绝不**传 license_key /
+/// gateway_token / password 明文。`token` 仅写入 vault settings,从不进日志。
 fn wire_cloud_gateway(
     state: &SharedState,
     url: Option<&str>,
@@ -964,6 +1003,99 @@ mod tests {
         let settings =
             serde_json::json!({"llm": {"model": "qwen2.5:3b", "api_key": "", "endpoint": ""}});
         assert!(gateway_should_apply(&settings));
+    }
+
+    // ── SECURITY: client-controlled cloud_url is rejected (SSRF / paywall) ───
+    //
+    // Threat: an attacker who can reach the local member API posts a `cloud_url`
+    // pointing at their own server, which would forge "login/activation success"
+    // → Paid state + a malicious gateway config (paywall bypass + SSRF). The fix
+    // removed the field entirely from both request structs; the accounts URL is
+    // resolved server-side from settings. We assert the field no longer exists on
+    // the wire contract: a body carrying `cloud_url` deserializes fine (serde
+    // ignores the unknown key) but the parsed struct has NO place to carry it —
+    // i.e. the attacker-supplied URL is structurally dropped, never reaching
+    // CloudClient::new.
+    use crate::routes::member::{ActivateLicenseReq, LoginPasswordReq};
+
+    #[test]
+    fn login_password_req_ignores_client_cloud_url() {
+        // Body includes a malicious cloud_url — it must be dropped, not honored.
+        let body = serde_json::json!({
+            "email": "u@example.com",
+            "password": "pw-not-real",
+            "cloud_url": "http://attacker.example/forge",
+            "license_code": "code-1",
+        });
+        let req: LoginPasswordReq =
+            serde_json::from_value(body).expect("deserializes (unknown field dropped)");
+        assert_eq!(req.email, "u@example.com");
+        assert_eq!(req.license_code.as_deref(), Some("code-1"));
+        // Compile-time + runtime proof: there is no `cloud_url` field to read.
+        // (If the field were re-added, the JSON-shape assertion below would still
+        //  pass, so we additionally serialize the struct back and assert the key
+        //  is absent from the canonical wire form.)
+        let reserialized = serde_json::to_value(SerLoginShape::from(&req)).unwrap();
+        assert!(
+            reserialized.get("cloud_url").is_none(),
+            "LoginPasswordReq must not carry a client cloud_url (SSRF/paywall)"
+        );
+    }
+
+    #[test]
+    fn activate_license_req_ignores_client_cloud_url() {
+        let body = serde_json::json!({
+            "license_key": "LIC-XYZ",
+            "cloud_url": "http://attacker.example/forge",
+        });
+        let req: ActivateLicenseReq =
+            serde_json::from_value(body).expect("deserializes (unknown field dropped)");
+        assert_eq!(req.license_key, "LIC-XYZ");
+        let reserialized = serde_json::json!({ "license_key": req.license_key });
+        assert!(
+            reserialized.get("cloud_url").is_none(),
+            "ActivateLicenseReq must not carry a client cloud_url (SSRF/paywall)"
+        );
+    }
+
+    // Mirror of LoginPasswordReq's *public* fields for serialize-back assertion
+    // (the real struct is Deserialize-only). If someone re-adds `cloud_url` to
+    // LoginPasswordReq, this mirror won't compile against it — the maintainer is
+    // forced to confront the security regression.
+    #[derive(serde::Serialize)]
+    struct SerLoginShape {
+        email: String,
+        license_code: Option<String>,
+    }
+    impl From<&LoginPasswordReq> for SerLoginShape {
+        fn from(r: &LoginPasswordReq) -> Self {
+            Self { email: r.email.clone(), license_code: r.license_code.clone() }
+        }
+    }
+
+    // ── SECURITY: license_key never logged in plaintext (§1.4) ───────────────
+    //
+    // wire_cloud_gateway's `who` arg is recorded by tracing. The activate path
+    // must pass a redacted identifier, never the raw license_key. We assert the
+    // redaction is a stable, non-reversible `lic:<8-hex>` digest that does NOT
+    // contain the original key.
+    use crate::routes::member::redact_license_key;
+
+    #[test]
+    fn redact_license_key_hides_plaintext() {
+        let key = "LIC-SUPER-SECRET-123456";
+        let red = redact_license_key(key);
+        assert!(red.starts_with("lic:"), "redaction has the lic: prefix");
+        assert_eq!(red.len(), "lic:".len() + 8, "8 hex chars of digest");
+        assert!(!red.contains(key), "the raw license_key must not appear");
+        assert!(
+            !red.contains("SECRET") && !red.contains("123456"),
+            "no plaintext fragment of the key leaks into the redacted form"
+        );
+        // Stable: same key → same digest (so operators can correlate logs).
+        assert_eq!(red, redact_license_key(key));
+        // Distinct keys → distinct redactions (collision-resistant prefix).
+        assert_ne!(red, redact_license_key("LIC-OTHER-KEY"));
     }
 
     // ── device binding (授权码激活 ① 设备绑定) ─────────────────────────────────

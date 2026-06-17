@@ -46,6 +46,10 @@ thiserror = "2"
 chrono = { workspace = true }
 # Office helper (v0.7.1): OCR 端点写 multipart bytes 到临时文件喂 PP-OCR provider.
 tempfile = "3"
+# Security: redact license_key for log/identity use (SSRF/secret-log hardening,
+# member.rs). Same pure-Rust crates attune-core already pins; no new transitive risk.
+sha2 = "0.10"
+hex = "0.4"
 
 [features]
 default = []

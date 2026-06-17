@@ -97,10 +97,12 @@ export async function loadSettingsLocks(): Promise<void> {
 export async function memberLoginPassword(
   email: string,
   password: string,
-  cloudUrl?: string,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    await api.post('/member/login-password', { email, password, cloud_url: cloudUrl ?? null });
+    // SECURITY: the accounts URL is resolved server-side from settings
+    // (settings.cloud.accounts_url) — never sent from the client (SSRF/paywall).
+    // Self-host operators configure it once under Settings → cloud.
+    await api.post('/member/login-password', { email, password });
     await loadMemberState();
     await loadSettingsLocks();
     return { ok: true };
