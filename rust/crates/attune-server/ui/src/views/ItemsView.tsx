@@ -55,7 +55,8 @@ export function ItemsView(): JSX.Element {
           actions={[
             {
               label: t('items.empty.bind_folder'),
-              onClick: () => toast('info', t('items.empty.bind_folder_toast')),
+              // 真导航到 Remote 视图（本地 / WebDAV / Git 目录绑定 UI），不再只弹提示
+              onClick: () => (currentView.value = 'remote'),
               variant: 'primary',
             },
           ]}
