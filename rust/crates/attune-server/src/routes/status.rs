@@ -147,6 +147,10 @@ pub async fn diagnostics(
     // F-16: probe actual GPU usage (only meaningful when a model is currently loaded)
     let ollama_gpu_active = probe_ollama_gpu_active().await;
 
+    // AMD Ryzen AI NPU 细粒度状态 + consent-gated 安装计划(#6)。只读探测,零成本。
+    // 非 AMD/无 NPU 主机 → null。
+    let amd_npu = amd_npu_json();
+
     Json(serde_json::json!({
         "vault_state": vault_state,
         "ai_status": ai_status,
@@ -187,8 +191,53 @@ pub async fn diagnostics(
             },
             "prefers_local_llm": hw.form_factor.prefers_local_llm(),
         },
+        // #6: AMD Ryzen AI NPU 细粒度状态 + consent-gated 安装计划(非 AMD/无 NPU → null)
+        "amd_npu": amd_npu,
         "hint": if ai_status == "unavailable" {
             "安装 Ollama 获取 AI 分类能力: curl -fsSL https://ollama.com/install.sh | sh && ollama pull <轻量本地模型>"
         } else { "" }
     }))
+}
+
+/// 把 `NpuStatus` + 安装计划序列化成 diagnostics 用的 JSON;非 AMD Ryzen AI 主机 → null。
+///
+/// 暴露安装计划但**不执行**:每条 step 带 danger 等级 + consent_required,前端据此引导用户
+/// (能安全自动的 safe-auto / 需同意的 needs-consent / 纯手工的 manual),由用户同意后执行。
+fn amd_npu_json() -> serde_json::Value {
+    use attune_core::platform::NpuStatus;
+    let Some(npu) = NpuStatus::detect_amd() else {
+        return serde_json::Value::Null;
+    };
+    let plan = npu.install_plan();
+    let steps: Vec<_> = plan
+        .steps
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "description": s.description,
+                "command": s.command,
+                "danger": s.danger.as_str(),
+                "consent_required": s.consent_required,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "chip_id": npu.chip_id,
+        "chip_name": npu.chip_name,
+        "xdna_version": npu.xdna_version,
+        "tops": npu.tops,
+        "ready": npu.is_ready(),
+        "driver_loaded": npu.driver_loaded,
+        "firmware_present": npu.firmware_present,
+        "device_node_present": npu.device_node_present,
+        "kernel_ok": npu.kernel_ok,
+        "current_kernel": npu.current_kernel,
+        "min_kernel": npu.min_kernel,
+        "iommu_ok": npu.iommu_ok,
+        "summary": npu.summary(),
+        "install_plan": {
+            "missing": plan.missing,
+            "steps": steps,
+        }
+    })
 }
