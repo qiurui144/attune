@@ -124,6 +124,10 @@ pub mod agent_runner;
 pub mod member_session;
 pub mod member_verifier;
 pub mod cloud_client;
+// Cloud device fingerprint — 授权码激活时绑定本机到 license。指纹字段顺序逐字节
+// 对齐 cloud accounts `_compute_fingerprint_sig`(device_id|hostname|os|cpu_brand|
+// hardware_uuid)。区别于 quarantine 的 attune-accounts::device_binding(不同契约)。
+pub mod device_fingerprint;
 // SPKI cert-pinning for cloud accounts connections (slice8 §3.2). Layers a leaf
 // SubjectPublicKeyInfo pin on top of standard webpki chain validation; defends
 // against DNS-hijack / network MITM. See cert_pin.rs.

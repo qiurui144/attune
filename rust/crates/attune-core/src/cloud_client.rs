@@ -152,6 +152,56 @@ impl CloudClient {
         serde_json::from_str(&body).map_err(json_err)
     }
 
+    /// `POST /api/v1/devices/activate` — 设备绑定:把本机指纹绑到 license_key,
+    /// 颁发 device_token + 限制设备数。
+    ///
+    /// 契约 (cloud `accounts/api/devices.py`):请求体
+    /// `{license_key, device_fingerprint: {device_id, hostname, os, cpu_brand,
+    /// hardware_uuid, form_factor, fingerprint_sig}}`。`fingerprint_sig` =
+    /// `SHA-256(device_id|hostname|os|cpu_brand|hardware_uuid)` hex(字段顺序与
+    /// cloud `_compute_fingerprint_sig` 逐字节一致;`hardware_uuid=None` 计入字面
+    /// `"null"`)。200 → `{device_token, device_id, plan, max_activations,
+    /// current_activations, issued_at, expires_at}`。
+    ///
+    /// **错误语义 (fail-closed)**:任何非 2xx → `Err`。区分:
+    /// - 409 (max-devices-reached) → [`DeviceActivateError::MaxDevicesReached`](设备超限,
+    ///   可操作:用户应在别处吊销旧设备)。
+    /// - 401 (invalid-license) / 403 (指纹不符等) → [`DeviceActivateError::Rejected`]。
+    /// - 5xx / transport → [`DeviceActivateError::Unavailable`]。
+    ///
+    /// 调用方据此给出可操作提示,绝不在错误路径默认放行设备绑定。
+    pub fn device_activate(
+        &self,
+        license_key: &str,
+        fp: &crate::device_fingerprint::DeviceFingerprint,
+    ) -> std::result::Result<DeviceActivateResult, DeviceActivateError> {
+        let url = format!("{}/api/v1/devices/activate", self.base_url);
+        let body = serde_json::json!({
+            "license_key": license_key,
+            "device_fingerprint": fp,
+        });
+        let resp = self
+            .http
+            .post(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .json(&body)
+            .send()
+            .map_err(|e| DeviceActivateError::Unavailable(format!("transport: {e}")))?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            return serde_json::from_str(&text)
+                .map_err(|e| DeviceActivateError::Unavailable(format!("bad activate body: {e}")));
+        }
+        // Map cloud HTTP status → typed, actionable error. 409 = device-count cap;
+        // 401/403 = license/fingerprint reject; everything else = unavailable.
+        match status.as_u16() {
+            409 => Err(DeviceActivateError::MaxDevicesReached(extract_code_or(&text, "max-devices-reached"))),
+            401 | 403 => Err(DeviceActivateError::Rejected(extract_code_or(&text, "device-rejected"))),
+            _ => Err(DeviceActivateError::Unavailable(format!("status={status} body={text}"))),
+        }
+    }
+
     /// 拿用户的 license 列表 (含已分配的 pro 插件)
     pub fn list_licenses(&self) -> Result<Vec<License>> {
         let url = format!("{}/api/v1/licenses", self.base_url);
@@ -398,6 +448,72 @@ pub struct ActivateResult {
     /// 云端下发默认 model (如 "deepseek-v4-flash");老 cloud 不返回 → None
     #[serde(default)]
     pub gateway_default_model: Option<String>,
+}
+
+/// `POST /api/v1/devices/activate` 成功响应 — cloud 颁发的设备绑定凭据.
+///
+/// 镜像 cloud `device_service._activation_response`。`device_token` 是后续 heartbeat /
+/// cert 签发的 Bearer 凭据,客户端持久化。`max_activations` / `current_activations`
+/// 供 UI 显示"已用 N/上限 M 台设备"。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeviceActivateResult {
+    /// 设备绑定 token(HMAC,heartbeat / cert 签发用)
+    pub device_token: String,
+    /// 回显的稳定 device_id
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub plan: String,
+    /// 该 license 允许的最大设备数
+    #[serde(default)]
+    pub max_activations: Option<u32>,
+    /// 含本次后当前已激活设备数
+    #[serde(default)]
+    pub current_activations: Option<u32>,
+    #[serde(default)]
+    pub issued_at: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// 设备绑定失败的分类(供调用方给可操作提示 / 决定是否阻断激活)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceActivateError {
+    /// 设备数超限(409):用户应吊销旧设备后重试。
+    MaxDevicesReached(String),
+    /// license / 指纹被拒(401/403):授权码无效 / 已吊销 / 指纹不匹配。
+    Rejected(String),
+    /// cloud 不可达 / 5xx / 响应不可解析。
+    Unavailable(String),
+}
+
+impl std::fmt::Display for DeviceActivateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MaxDevicesReached(c) => write!(f, "max-devices-reached: {c}"),
+            Self::Rejected(c) => write!(f, "device-rejected: {c}"),
+            Self::Unavailable(c) => write!(f, "device-activate-unavailable: {c}"),
+        }
+    }
+}
+
+impl std::error::Error for DeviceActivateError {}
+
+/// 从 cloud 错误响应体(`{"detail": {"error", "code"}}` 或 `{"detail": "code"}`)
+/// 抽出 kebab `code`;抽不到 → `fallback`。仅用于错误分类信息,不影响 fail-closed。
+fn extract_code_or(body: &str, fallback: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        let detail = v.get("detail");
+        if let Some(d) = detail {
+            if let Some(code) = d.get("code").and_then(|c| c.as_str()) {
+                return code.to_string();
+            }
+            if let Some(s) = d.as_str() {
+                return s.to_string();
+            }
+        }
+    }
+    fallback.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -727,6 +843,71 @@ mod tests {
         assert!(r.allowed_plugins.is_empty());
         assert!(r.gateway_token.is_none());
         assert!(r.gateway_default_model.is_none());
+    }
+
+    // ── device_activate (设备绑定路径) ───────────────────────────────────────
+
+    #[test]
+    fn device_activate_result_parses_full_contract() {
+        let json = r#"{
+            "device_token": "dt-hmac-abc",
+            "device_id": "dev-xyz",
+            "plan": "pro",
+            "max_activations": 2,
+            "current_activations": 1,
+            "issued_at": "2026-06-17T00:00:00+00:00",
+            "expires_at": "2026-07-17T00:00:00+00:00"
+        }"#;
+        let r: DeviceActivateResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.device_token, "dt-hmac-abc");
+        assert_eq!(r.device_id, "dev-xyz");
+        assert_eq!(r.max_activations, Some(2));
+        assert_eq!(r.current_activations, Some(1));
+    }
+
+    #[test]
+    fn device_activate_result_minimal_defaults() {
+        // 仅 device_token 必需,其余 serde default 容缺。
+        let r: DeviceActivateResult = serde_json::from_str(r#"{"device_token": "t"}"#).unwrap();
+        assert_eq!(r.device_token, "t");
+        assert!(r.max_activations.is_none());
+        assert!(r.current_activations.is_none());
+    }
+
+    #[test]
+    fn device_activate_unreachable_is_unavailable_err() {
+        // 网络不可达 → fail-closed Unavailable(绝不放行设备绑定)。
+        let c = CloudClient::new("http://127.0.0.1:9");
+        let fp = crate::device_fingerprint::DeviceFingerprint {
+            device_id: "d".into(),
+            hostname: "h".into(),
+            os: "linux".into(),
+            cpu_brand: "cpu".into(),
+            hardware_uuid: None,
+            form_factor: "laptop".into(),
+            fingerprint_sig: "sig".into(),
+        };
+        let err = c.device_activate("LIC-KEY", &fp).unwrap_err();
+        assert!(matches!(err, DeviceActivateError::Unavailable(_)), "unreachable → Unavailable, got {err:?}");
+    }
+
+    #[test]
+    fn extract_code_handles_cloud_shapes() {
+        // 403 detail 对象 {error, code}
+        assert_eq!(
+            extract_code_or(r#"{"detail":{"error":"fingerprint mismatch","code":"fingerprint-mismatch"}}"#, "x"),
+            "fingerprint-mismatch"
+        );
+        // 409 detail 字符串
+        assert_eq!(extract_code_or(r#"{"detail":"max-devices-reached"}"#, "x"), "max-devices-reached");
+        // 不可解析 → fallback
+        assert_eq!(extract_code_or("not json", "device-rejected"), "device-rejected");
+    }
+
+    #[test]
+    fn device_activate_error_display_is_actionable() {
+        assert!(DeviceActivateError::MaxDevicesReached("c".into()).to_string().contains("max-devices-reached"));
+        assert!(DeviceActivateError::Rejected("c".into()).to_string().contains("device-rejected"));
     }
 
     #[test]

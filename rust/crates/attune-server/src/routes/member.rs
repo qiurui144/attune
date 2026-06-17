@@ -441,15 +441,39 @@ pub struct ActivateLicenseReq {
     pub cloud_url: Option<String>,
 }
 
-/// POST /api/v1/member/activate-license — 授权码 (license_key) 激活路径。
+/// 授权码激活的两阶段结果(blocking 线程内一次性完成两次 cloud 调用):
+/// - 阶段一 **authorization**:`/member/activate` 成功 → 用户被授权为 Paid + 拿 gateway。
+/// - 阶段二 **device binding**:`/devices/activate` 把本机指纹绑到 license + 颁 device_token。
 ///
-/// manual 会员不走账号密码,而是输入一串授权码即激活 pro。镜像 `login_password`
-/// 的付费分支:调 cloud `activate_license` → 复用 [`wire_cloud_gateway`] 配 gateway
-/// LLM (锁定 endpoint/api_key/provider) + 落 entitlement (allowed_plugins 供
-/// pluginhub) + 置 [`MemberState::Paid`]。
+/// 两阶段语义分离(spec §3 编排):授权成功即视为 Paid(gateway 已可用);设备绑定
+/// 失败(超设备数 / 指纹被拒)是**独立**的可操作问题,不回退已授权状态,但必须明确
+/// surface 给用户(不静默)。device 绑定结果用 `Result` 携带分类错误。
+struct ActivationOutcome {
+    activate: attune_core::cloud_client::ActivateResult,
+    device: std::result::Result<
+        attune_core::cloud_client::DeviceActivateResult,
+        attune_core::cloud_client::DeviceActivateError,
+    >,
+}
+
+/// POST /api/v1/member/activate-license — 授权码 (license_key) 激活全链。
 ///
+/// 授权激活 = ① **绑定设备**(本机指纹 → license,颁 device_token + 限设备数)
+/// ② pro 下载(entitlement allowed_plugins 供 pluginhub)③ new-api 调用(gateway LLM)。
+/// 镜像 `login_password` 的付费分支并补齐设备绑定(#79 全链):
+/// 调 cloud `activate_license`(授权)+ `device_activate`(绑本机)→ 复用
+/// [`wire_cloud_gateway`] 配 gateway LLM(锁定 endpoint/api_key/provider)+ 落 entitlement
+/// + 持久化 device_token + 置 [`MemberState::Paid`]。
+///
+/// 错误语义(两阶段分离,fail-closed):
 /// - 空 license_key → 400。
-/// - cloud 4xx/5xx/transport → 502 (`activate-failed`),**不**置 Paid (fail-closed)。
+/// - 授权阶段 `/member/activate` 4xx/5xx/transport → 502 (`activate-failed`),**不**置 Paid。
+/// - 设备绑定阶段(授权已成功):
+///   - 超设备数 → 409 (`max-devices-reached`),给可操作提示(用户应在别处吊销旧设备);
+///   - 指纹/license 被拒 → 403 (`device-rejected`);
+///   - cloud 不可达 → 502 (`device-activate-unavailable`)。
+///
+/// 这些错误下用户已被授权(gateway 已配),但本机未完成绑定 —— 明确返回而非静默。
 pub async fn activate_license(
     State(state): State<SharedState>,
     Json(req): Json<ActivateLicenseReq>,
@@ -466,11 +490,19 @@ pub async fn activate_license(
         .unwrap_or_else(|| "https://accounts.engi-stack.com".to_string());
 
     // B4 约束:CloudClient = reqwest::blocking → spawn_blocking,async tail 留本线程。
+    // 两次 cloud 调用(authorize + device bind)在**同一** blocking 线程里串行完成,
+    // 复用同一 client(及 session)。指纹采集也在此线程(machine-id / 持久化 device.id
+    // 的文件 I/O,非异步上下文)。
     let key_for_blocking = license_key.clone();
-    let result = tokio::task::spawn_blocking(
-        move || -> Result<attune_core::cloud_client::ActivateResult, String> {
+    let outcome = tokio::task::spawn_blocking(
+        move || -> Result<ActivationOutcome, String> {
             let client = CloudClient::new(cloud_url);
-            client.activate_license(&key_for_blocking).map_err(|e| e.to_string())
+            // 阶段一:授权(失败即整体失败,fail-closed)。
+            let activate = client.activate_license(&key_for_blocking).map_err(|e| e.to_string())?;
+            // 阶段二:绑定本机设备(授权已成功;绑定结果按分类错误带回,不在此抛)。
+            let fp = attune_core::device_fingerprint::device_fingerprint();
+            let device = client.device_activate(&key_for_blocking, &fp);
+            Ok(ActivationOutcome { activate, device })
         },
     )
     .await
@@ -481,15 +513,17 @@ pub async fn activate_license(
         )
     })?
     .map_err(|msg| {
-        // 无效授权码 / cloud 不可达 → 502。绝不在错误路径置 Paid。
+        // 授权阶段失败:无效授权码 / cloud 不可达 → 502。绝不在错误路径置 Paid。
         (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": format!("activate failed: {msg}"), "code": "activate-failed"})),
         )
     })?;
 
-    // 配 gateway LLM (锁定字段) —— 与 login_password 同一逻辑。best-effort:写失败
-    // 不阻断激活 (用户仍是 Paid,只是 chat 需手填 key,§4.5)。
+    let ActivationOutcome { activate: result, device } = outcome;
+
+    // ── 授权成功:配 gateway LLM + 落 entitlement + 置 Paid(与 login_password 同逻辑)──
+    // best-effort:写失败不阻断激活(用户仍是 Paid,只是 chat 需手填 key,§4.5)。
     wire_cloud_gateway(
         &state,
         result.gateway_url.as_deref(),
@@ -497,8 +531,7 @@ pub async fn activate_license(
         result.gateway_default_model.as_deref(),
         &license_key,
     );
-
-    // 落 entitlement:allowed_plugins 写进缓存 + vault,供 pluginhub 安装授权 +
+    // 落 entitlement:allowed_plugins 写进缓存 + vault,供 pluginhub 安装授权(②)+
     // 周期 re-verify 基准。best-effort,失败仅 warn。
     store_activation_entitlements(&state, &license_key, &result.allowed_plugins);
 
@@ -510,14 +543,94 @@ pub async fn activate_license(
     };
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
 
-    Ok(Json(serde_json::json!({
-        "status": "ok",
-        "state": new_state,
-        "plan": result.plan,
-        "expires_at": result.expires_at,
-        "allowed_plugins": result.allowed_plugins,
-    })))
+    // ── 设备绑定阶段(①):成功 → 持久化 device_token;失败 → 明确返回可操作错误 ──
+    match device {
+        Ok(dev) => {
+            // 把 device_token + device_id + 配额落 vault(后续 heartbeat / cert 用)。
+            store_device_binding(&state, &dev);
+            Ok(Json(serde_json::json!({
+                "status": "ok",
+                "state": new_state,
+                "plan": result.plan,
+                "expires_at": result.expires_at,
+                "allowed_plugins": result.allowed_plugins,
+                "device": {
+                    "device_id": dev.device_id,
+                    "max_activations": dev.max_activations,
+                    "current_activations": dev.current_activations,
+                },
+            })))
+        }
+        Err(e) => Err(device_binding_error(&e)),
+    }
 }
+
+/// 把设备绑定失败映射为 HTTP 响应(可操作提示)。授权已成功(gateway 已配),
+/// 但本机绑定未完成 —— 明确返回而非静默放行。`status="activated-not-bound"` 让 UI
+/// 知道"会员已生效,但本设备超限/被拒,需处理"。
+fn device_binding_error(
+    e: &attune_core::cloud_client::DeviceActivateError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use attune_core::cloud_client::DeviceActivateError as E;
+    let (status, code, hint) = match e {
+        E::MaxDevicesReached(_) => (
+            StatusCode::CONFLICT,
+            "max-devices-reached",
+            "已达该授权码的设备上限。请在其他设备上注销，或联系管理员吊销旧设备后重试。",
+        ),
+        E::Rejected(_) => (
+            StatusCode::FORBIDDEN,
+            "device-rejected",
+            "设备绑定被拒绝（授权码无效/已吊销，或设备指纹不匹配）。",
+        ),
+        E::Unavailable(_) => (
+            StatusCode::BAD_GATEWAY,
+            "device-activate-unavailable",
+            "设备绑定服务暂时不可达，请稍后重试。",
+        ),
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "status": "activated-not-bound",
+            "error": e.to_string(),
+            "code": code,
+            "hint": hint,
+        })),
+    )
+}
+
+/// best-effort 把 cloud 颁发的 device binding(device_token + device_id + 配额)落 vault
+/// meta(`DEVICE_BINDING_META_KEY`)。后续 heartbeat / cert 签发读它。vault 锁短取,
+/// 不嵌套 fulltext/vectors(lock-ordering)。失败仅 warn,不阻断激活。
+fn store_device_binding(state: &SharedState, dev: &attune_core::cloud_client::DeviceActivateResult) {
+    let payload = serde_json::json!({
+        "device_token": dev.device_token,
+        "device_id": dev.device_id,
+        "max_activations": dev.max_activations,
+        "current_activations": dev.current_activations,
+        "issued_at": dev.issued_at,
+        "expires_at": dev.expires_at,
+    });
+    let data = match serde_json::to_vec(&payload) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("activate: device binding serialize failed: {e}");
+            return;
+        }
+    };
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    if vault.dek_db().is_err() {
+        tracing::warn!("activate: vault locked — device_token not persisted");
+        return;
+    }
+    if let Err(e) = vault.store().set_meta(DEVICE_BINDING_META_KEY, &data) {
+        tracing::warn!("activate: failed to persist device binding: {e}");
+    }
+}
+
+/// vault meta key:授权码激活后 cloud 颁发的设备绑定凭据(device_token 等)。
+pub const DEVICE_BINDING_META_KEY: &str = "device_binding";
 
 /// 共享:把 cloud 下发的 gateway endpoint+token(+默认 model)配进 vault settings
 /// 并热重载 LLM provider。`login_password` 与 `activate_license` 复用同一逻辑(DRY),
@@ -851,5 +964,66 @@ mod tests {
         let settings =
             serde_json::json!({"llm": {"model": "qwen2.5:3b", "api_key": "", "endpoint": ""}});
         assert!(gateway_should_apply(&settings));
+    }
+
+    // ── device binding (授权码激活 ① 设备绑定) ─────────────────────────────────
+    use attune_core::cloud_client::{DeviceActivateError, DeviceActivateResult};
+    use crate::routes::member::{device_binding_error, DEVICE_BINDING_META_KEY};
+    use axum::http::StatusCode;
+
+    /// 超设备数 → 409 max-devices-reached + 可操作 hint,且 status=activated-not-bound
+    /// (会员已授权,本机未绑定 —— 明确 surface,不静默)。
+    #[test]
+    fn device_binding_max_devices_maps_to_409() {
+        let (status, body) = device_binding_error(&DeviceActivateError::MaxDevicesReached("c".into()));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.0["code"], "max-devices-reached");
+        assert_eq!(body.0["status"], "activated-not-bound");
+        assert!(body.0["hint"].as_str().unwrap().contains("设备上限"), "actionable hint present");
+    }
+
+    /// 指纹/license 被拒 → 403 device-rejected。
+    #[test]
+    fn device_binding_rejected_maps_to_403() {
+        let (status, body) = device_binding_error(&DeviceActivateError::Rejected("fingerprint-mismatch".into()));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body.0["code"], "device-rejected");
+        assert_eq!(body.0["status"], "activated-not-bound");
+    }
+
+    /// cloud 不可达 → 502 device-activate-unavailable(fail-closed,不静默放行)。
+    #[test]
+    fn device_binding_unavailable_maps_to_502() {
+        let (status, body) = device_binding_error(&DeviceActivateError::Unavailable("transport".into()));
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body.0["code"], "device-activate-unavailable");
+    }
+
+    /// store_device_binding 写出的 vault meta payload 形态(device_token + 配额)。
+    /// 钉死键名,后续 heartbeat / cert 读同一形态。用纯 JSON 形态断言(不起 vault)。
+    #[test]
+    fn device_binding_meta_payload_shape() {
+        let dev = DeviceActivateResult {
+            device_token: "dt-hmac".into(),
+            device_id: "dev-1".into(),
+            plan: "pro".into(),
+            max_activations: Some(2),
+            current_activations: Some(1),
+            issued_at: Some("2026-06-17T00:00:00+00:00".into()),
+            expires_at: Some("2026-07-17T00:00:00+00:00".into()),
+        };
+        // 与 store_device_binding 内构造的 payload 同形态。
+        let payload = serde_json::json!({
+            "device_token": dev.device_token,
+            "device_id": dev.device_id,
+            "max_activations": dev.max_activations,
+            "current_activations": dev.current_activations,
+            "issued_at": dev.issued_at,
+            "expires_at": dev.expires_at,
+        });
+        assert_eq!(payload["device_token"], "dt-hmac");
+        assert_eq!(payload["device_id"], "dev-1");
+        assert_eq!(payload["max_activations"], 2);
+        assert_eq!(DEVICE_BINDING_META_KEY, "device_binding");
     }
 }
