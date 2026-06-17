@@ -123,6 +123,35 @@ impl CloudClient {
         resp.json().map_err(http_err)
     }
 
+    /// `POST /api/v1/member/activate` — 授权码 (license_key) 激活路径.
+    ///
+    /// manual 会员不走账号密码,而是输入一串授权码即激活 pro 并配 gateway LLM.
+    /// 契约 (cloud 侧由另一 agent 实现):
+    /// 请求 `{license_key}` → 200 `{plan, expires_at, allowed_plugins,
+    /// gateway_token, gateway_url, gateway_default_model}`。
+    ///
+    /// 错误语义:**任何非 2xx (4xx 无效授权码 / 5xx / transport) → `Err`**。
+    /// 调用方据此拒绝激活,绝不在错误时把用户置为 Paid (fail-closed)。
+    pub fn activate_license(&self, license_key: &str) -> Result<ActivateResult> {
+        let url = format!("{}/api/v1/member/activate", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .json(&serde_json::json!({ "license_key": license_key }))
+            .send()
+            .map_err(http_err)?;
+        let status = resp.status();
+        let body = resp.text().map_err(http_err)?;
+        if !status.is_success() {
+            // 4xx (无效/已吊销授权码) 与 5xx/transport 同走 Err — 激活失败即不配。
+            return Err(VaultError::Crypto(format!(
+                "activate failed: status={status} body={body}"
+            )));
+        }
+        serde_json::from_str(&body).map_err(json_err)
+    }
+
     /// 拿用户的 license 列表 (含已分配的 pro 插件)
     pub fn list_licenses(&self) -> Result<Vec<License>> {
         let url = format!("{}/api/v1/licenses", self.base_url);
@@ -342,6 +371,33 @@ pub struct License {
     /// pro 插件清单 (pluginhub 下发)
     #[serde(default)]
     pub entitled_plugins: Vec<EntitledPlugin>,
+}
+
+/// `POST /api/v1/member/activate` 响应 — 授权码激活成功后 cloud 下发的会员配置.
+///
+/// 镜像 cloud 契约。`gateway_*` 与 [`UserInfo`] 的同名字段语义一致 (付费会员的
+/// new-api token / endpoint / 默认 model)。`allowed_plugins` 是该授权码授权的
+/// plugin_id 列表 (供 pluginhub 安装授权);客户端把它落进 entitlement 缓存/vault。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivateResult {
+    /// pro | pro_plus | enterprise | individual ...
+    #[serde(default)]
+    pub plan: String,
+    /// RFC3339 会员到期 | None (永久 / 未提供)
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// 该授权码授权的 plugin_id 列表 (pluginhub 安装授权)
+    #[serde(default)]
+    pub allowed_plugins: Vec<String>,
+    /// new-api LLM token (gateway api_key)
+    #[serde(default)]
+    pub gateway_token: Option<String>,
+    /// LLM gateway endpoint (如 https://gateway.engi-stack.com/v1)
+    #[serde(default)]
+    pub gateway_url: Option<String>,
+    /// 云端下发默认 model (如 "deepseek-v4-flash");老 cloud 不返回 → None
+    #[serde(default)]
+    pub gateway_default_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -639,6 +695,52 @@ mod tests {
         }"#;
         let u: UserInfo = serde_json::from_str(json).unwrap();
         assert_eq!(u.gateway_default_model.as_deref(), Some("deepseek-v4-flash"));
+    }
+
+    // ── activate_license (授权码激活路径) ────────────────────────────────────
+
+    #[test]
+    fn activate_result_parses_full_contract() {
+        let json = r#"{
+            "plan": "pro",
+            "expires_at": "2026-12-31T00:00:00+00:00",
+            "allowed_plugins": ["law-pro", "med-pro"],
+            "gateway_token": "sk-newapi-activate",
+            "gateway_url": "https://gateway.engi-stack.com/v1",
+            "gateway_default_model": "deepseek-v4-flash"
+        }"#;
+        let r: ActivateResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.plan, "pro");
+        assert_eq!(r.expires_at.as_deref(), Some("2026-12-31T00:00:00+00:00"));
+        assert_eq!(r.allowed_plugins, vec!["law-pro", "med-pro"]);
+        assert_eq!(r.gateway_token.as_deref(), Some("sk-newapi-activate"));
+        assert_eq!(r.gateway_url.as_deref(), Some("https://gateway.engi-stack.com/v1"));
+        assert_eq!(r.gateway_default_model.as_deref(), Some("deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn activate_result_old_cloud_minimal_defaults() {
+        // 老 cloud / 缺字段 → serde default 容缺,不 panic。
+        let json = r#"{"plan": "pro"}"#;
+        let r: ActivateResult = serde_json::from_str(json).unwrap();
+        assert!(r.expires_at.is_none());
+        assert!(r.allowed_plugins.is_empty());
+        assert!(r.gateway_token.is_none());
+        assert!(r.gateway_default_model.is_none());
+    }
+
+    #[test]
+    fn activate_against_unreachable_returns_err() {
+        // 网络不可达 → http_err → Err (激活失败,调用方 fail-closed)。
+        let c = CloudClient::new("http://127.0.0.1:8");
+        assert!(c.activate_license("ATTUNE-LIC-XXXX").is_err());
+    }
+
+    #[test]
+    fn activate_empty_license_key_does_not_panic() {
+        // client 不做 client-side reject (业务校验由 server);只验证不 panic。
+        let c = CloudClient::new("http://127.0.0.1:9");
+        let _ = c.activate_license("");
     }
 
     // ── 增强覆盖: with_session / signup / list_licenses / logout / network error ─

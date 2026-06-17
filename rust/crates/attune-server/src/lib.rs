@@ -105,6 +105,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/member/locks", get(routes::member::get_locks))
         .route("/api/v1/member/login-token", post(routes::member::login_token))
         .route("/api/v1/member/login-password", post(routes::member::login_password))
+        .route("/api/v1/member/activate-license", post(routes::member::activate_license))
         .route("/api/v1/member/logout", post(routes::member::logout))
         // Trust-chain T8: 手动触发一轮 entitlement re-verify (SEC-1/2 gated transition)
         .route("/api/v1/member/entitlements/refresh", post(routes::member::refresh_entitlements))

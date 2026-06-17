@@ -253,46 +253,17 @@ pub async fn login_password(
     let new_state = if let Some(selected) = license {
         // 付费会员：拿 cloud gateway token, 合并进 vault app_settings,
         // 桌面 chat 零配置接通云端 LLM。best-effort — 失败不阻断登录。
-        let mut gateway_written = false;
         match me {
-            Some(me) => match (me.gateway_url.as_deref(), me.gateway_token.as_deref()) {
-                (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
-                    // Bug-1 fix (spec 2026-05-24): cloud 下发的默认 model 一并写入,
-                    // 避免 fresh vault paid 用户 chat 因 model=null → 404。
-                    let default_model = me.gateway_default_model.as_deref();
-                    match apply_gateway_to_vault_settings(&state, url, tok, default_model) {
-                        Ok(applied) if applied => {
-                            tracing::info!(
-                                "member login: cloud LLM gateway written to vault settings (default_model={:?})",
-                                default_model,
-                            );
-                            gateway_written = true;
-                        }
-                        Ok(_) => {
-                            tracing::info!(
-                                "member login: user has own LLM config — gateway not auto-applied"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!("member login: gateway settings not written: {e}");
-                        }
-                    }
-                }
-                _ => {
-                    tracing::info!(
-                        "member login: no gateway token for {} — user keeps current LLM settings",
-                        user.email
-                    );
-                }
-            },
+            Some(me) => {
+                wire_cloud_gateway(
+                    &state,
+                    me.gateway_url.as_deref(),
+                    me.gateway_token.as_deref(),
+                    me.gateway_default_model.as_deref(),
+                    &user.email,
+                );
+            }
             None => tracing::warn!("member login: fetch /me failed — user keeps current LLM settings"),
-        }
-
-        // Reload in-memory LLM provider so chat works immediately after login
-        // without requiring a server restart. Must be called AFTER the vault lock
-        // from apply_gateway_to_vault_settings has been released.
-        if gateway_written {
-            state.reload_llm();
         }
 
         MemberState::Paid {
@@ -461,6 +432,170 @@ fn resolve_trust_mode(state: &SharedState) -> TrustMode {
     v.get("plugin_trust_mode")
         .and_then(|m| serde_json::from_value::<TrustMode>(m.clone()).ok())
         .unwrap_or(TrustMode::Warn)
+}
+
+#[derive(serde::Deserialize)]
+pub struct ActivateLicenseReq {
+    pub license_key: String,
+    #[serde(default)]
+    pub cloud_url: Option<String>,
+}
+
+/// POST /api/v1/member/activate-license — 授权码 (license_key) 激活路径。
+///
+/// manual 会员不走账号密码,而是输入一串授权码即激活 pro。镜像 `login_password`
+/// 的付费分支:调 cloud `activate_license` → 复用 [`wire_cloud_gateway`] 配 gateway
+/// LLM (锁定 endpoint/api_key/provider) + 落 entitlement (allowed_plugins 供
+/// pluginhub) + 置 [`MemberState::Paid`]。
+///
+/// - 空 license_key → 400。
+/// - cloud 4xx/5xx/transport → 502 (`activate-failed`),**不**置 Paid (fail-closed)。
+pub async fn activate_license(
+    State(state): State<SharedState>,
+    Json(req): Json<ActivateLicenseReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let license_key = req.license_key.trim().to_string();
+    if license_key.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "license_key required", "code": "license-key-required"})),
+        ));
+    }
+    let cloud_url = req
+        .cloud_url
+        .unwrap_or_else(|| "https://accounts.engi-stack.com".to_string());
+
+    // B4 约束:CloudClient = reqwest::blocking → spawn_blocking,async tail 留本线程。
+    let key_for_blocking = license_key.clone();
+    let result = tokio::task::spawn_blocking(
+        move || -> Result<attune_core::cloud_client::ActivateResult, String> {
+            let client = CloudClient::new(cloud_url);
+            client.activate_license(&key_for_blocking).map_err(|e| e.to_string())
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("activate task join error: {e}")})),
+        )
+    })?
+    .map_err(|msg| {
+        // 无效授权码 / cloud 不可达 → 502。绝不在错误路径置 Paid。
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("activate failed: {msg}"), "code": "activate-failed"})),
+        )
+    })?;
+
+    // 配 gateway LLM (锁定字段) —— 与 login_password 同一逻辑。best-effort:写失败
+    // 不阻断激活 (用户仍是 Paid,只是 chat 需手填 key,§4.5)。
+    wire_cloud_gateway(
+        &state,
+        result.gateway_url.as_deref(),
+        result.gateway_token.as_deref(),
+        result.gateway_default_model.as_deref(),
+        &license_key,
+    );
+
+    // 落 entitlement:allowed_plugins 写进缓存 + vault,供 pluginhub 安装授权 +
+    // 周期 re-verify 基准。best-effort,失败仅 warn。
+    store_activation_entitlements(&state, &license_key, &result.allowed_plugins);
+
+    // 置 Paid。授权码激活无独立 account_id,用 license_key 作 account 标识。
+    let new_state = MemberState::Paid {
+        account_id: license_key.clone(),
+        license_id: license_key.clone(),
+        llm_quota_remaining: 0,
+    };
+    *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "state": new_state,
+        "plan": result.plan,
+        "expires_at": result.expires_at,
+        "allowed_plugins": result.allowed_plugins,
+    })))
+}
+
+/// 共享:把 cloud 下发的 gateway endpoint+token(+默认 model)配进 vault settings
+/// 并热重载 LLM provider。`login_password` 与 `activate_license` 复用同一逻辑(DRY),
+/// 保证两条会员入口写出**完全一致**的锁定 gateway 配置。
+///
+/// best-effort:`url`/`token` 缺失或为空 → 跳过(用户保留现有 LLM 设置);写入失败
+/// → warn,不阻断登录/激活(§4.5)。`who` 仅用于日志(email 或 license_key 前缀)。
+fn wire_cloud_gateway(
+    state: &SharedState,
+    url: Option<&str>,
+    token: Option<&str>,
+    default_model: Option<&str>,
+    who: &str,
+) {
+    let mut gateway_written = false;
+    match (url, token) {
+        (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
+            // Bug-1 fix (spec 2026-05-24): cloud 下发默认 model 一并写入,避免 fresh
+            // vault paid 用户 chat 因 model=null → 404。
+            match apply_gateway_to_vault_settings(state, url, tok, default_model) {
+                Ok(true) => {
+                    tracing::info!(
+                        "member gateway: cloud LLM gateway written to vault settings (default_model={default_model:?})"
+                    );
+                    gateway_written = true;
+                }
+                Ok(false) => {
+                    tracing::info!("member gateway: user has own LLM config — gateway not auto-applied");
+                }
+                Err(e) => tracing::warn!("member gateway: settings not written: {e}"),
+            }
+        }
+        _ => tracing::info!("member gateway: no gateway token for {who} — keeps current LLM settings"),
+    }
+    // Reload in-memory LLM provider so chat works immediately, no server restart.
+    // MUST run AFTER apply_gateway_to_vault_settings released its vault lock.
+    if gateway_written {
+        state.reload_llm();
+    }
+}
+
+/// best-effort 把激活授权的 `allowed_plugins` 落进 entitlement 缓存 + vault。
+/// 这是 pluginhub 安装授权 + 周期 re-verify 的本地基准。vault 锁短取,不嵌套
+/// fulltext/vectors(lock-ordering)。失败仅 warn,绝不阻断激活。
+fn store_activation_entitlements(state: &SharedState, license_id: &str, allowed_plugins: &[String]) {
+    if allowed_plugins.is_empty() {
+        return;
+    }
+    let now = Utc::now().to_rfc3339();
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let dek = match vault.dek_db() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("activate: vault locked — entitlements not persisted: {e}");
+            return;
+        }
+    };
+    for plugin_id in allowed_plugins {
+        let row = attune_core::store::plugin_entitlements::EntitlementRow {
+            plugin_id: plugin_id.clone(),
+            license_id: license_id.to_string(),
+            tier: "paid".into(),
+            status: "active".into(),
+            trial_expires: None,
+            // 授权码路径下 cloud 未随激活下发 per-plugin 公钥;签名校验仍由
+            // pluginhub 安装 + 周期 re-verify 时按 EntitledPlugin.signing_pubkey_hex
+            // 校验。此处先记账,留空 pubkey。
+            signing_pubkey_hex: String::new(),
+            last_verified_at: now.clone(),
+            grace_started_at: None,
+            updated_at: now.clone(),
+        };
+        // 同步内存缓存 (dispatch 决策即时可见) + 持久化 vault。
+        state.entitlement_cache.upsert(row.clone());
+        if let Err(e) = vault.store().upsert_entitlement(&dek, &row) {
+            tracing::warn!("activate: failed to persist entitlement {plugin_id}: {e}");
+        }
+    }
 }
 
 /// POST /api/v1/member/logout — 重置会员状态为 LoggedOut
