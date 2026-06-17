@@ -71,6 +71,12 @@ impl PpOcrProvider {
         if Self::models_present() {
             return Ok(());
         }
+        // 逃生开关：HF_HUB_OFFLINE 时不联网，缺失直接报错（与 model_store 一致）。
+        if crate::infer::model_store::hf_offline() {
+            return Err(VaultError::ModelLoad(
+                "HF_HUB_OFFLINE set but PP-OCR models missing — pre-stage them or unset HF_HUB_OFFLINE".to_string(),
+            ));
+        }
         let d = Self::models_dir();
         std::fs::create_dir_all(&d).map_err(|e| {
             VaultError::ModelLoad(format!("create ppocr dir {}: {e}", d.display()))

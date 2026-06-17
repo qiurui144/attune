@@ -111,7 +111,10 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "available": web_search_available,
             "engine": "browser (DuckDuckGo)",
             "note": note(web_search_available, "未检测到 Chrome/Edge — 安装 Chrome 或在 Settings 中指定 browser_path")
-        }
+        },
+        // #2 #5: 底座模型后台下载进度（embedding/reranker/ocr/asr）。解锁立即返回，
+        // 模型在后台拉取；UI 轮询此字段显示"下载中 / 已就绪 / 失败"，不再静默卡住。
+        "model_bootstrap": state.model_bootstrap.snapshot()
     }))
 }
 

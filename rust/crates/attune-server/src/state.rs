@@ -43,6 +43,10 @@ pub struct AppState {
     pub memory_index: Mutex<Option<attune_core::memory::MemoryVectorIndex>>,
     pub embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     pub reranker: Mutex<Option<Arc<dyn attune_core::infer::RerankProvider>>>,
+    /// #2 #5: 底座模型后台下载进度快照（embedding / reranker / ocr / asr）。
+    /// 解锁立即返回，模型在后台线程拉取；本字段让 /ai_stack 暴露进度 + 失败原因，
+    /// 不静默。clone 廉价（内部 Arc）。
+    pub model_bootstrap: attune_core::infer::bootstrap_status::ModelBootstrapStatus,
     pub llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub summary_llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub web_search: Mutex<Option<Arc<dyn WebSearchProvider>>>,
@@ -165,6 +169,7 @@ impl AppState {
             memory_index: Mutex::new(None),
             embedding: Mutex::new(None),
             reranker: Mutex::new(None),
+            model_bootstrap: attune_core::infer::bootstrap_status::ModelBootstrapStatus::new(),
             llm: Mutex::new(None),
             summary_llm: Mutex::new(None),
             web_search: Mutex::new(None),
@@ -356,91 +361,25 @@ impl AppState {
             };
         }
 
-        // Embedding 提供者选择：
-        // - 默认 ONNX (Xenova/bge-m3 quantized, CPU) — 自包含、零外部依赖
-        // - ATTUNE_EMBEDDING_BACKEND=ollama 强制走 Ollama bge-m3 (full precision, GPU 可用)
-        //   benchmark / Pro 部署用，质量更好但需要 Ollama 运行
-        if let Ok(mut guard) = self.embedding.lock() {
-            let prefer_ollama = std::env::var("ATTUNE_EMBEDDING_BACKEND")
-                .map(|v| v.eq_ignore_ascii_case("ollama"))
-                .unwrap_or(false);
-
-            let provider: Arc<dyn EmbeddingProvider> = if prefer_ollama {
-                tracing::info!("Embedding: Ollama bge-m3 (ATTUNE_EMBEDDING_BACKEND=ollama)");
-                Arc::new(OllamaProvider::default())
-            } else {
-                match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
-                    Ok(p) => {
-                        tracing::info!("Embedding: OrtEmbeddingProvider (Xenova/bge-m3 ONNX quantized)");
-                        Arc::new(p)
-                    }
-                    Err(e) => {
-                        tracing::info!("ONNX embedding unavailable ({e}), falling back to Ollama bge-m3");
-                        Arc::new(OllamaProvider::default())
-                    }
-                }
-            };
-            *guard = Some(provider);
-        }
-
-        // Multi-layer memory (2026-05-18): build the memory vector index from the
-        // memory_vectors sidecar. Dimension = active embedding provider's; rows from
-        // a different model graceful-skip inside build_from_store.
+        // #2 #5: Embedding / Reranker（~330MB ONNX 下载）+ OCR + ASR 的获取**不再**在此
+        // 同步阻塞——它们曾让 vault 解锁卡在网络下载上（解锁慢 + 失败即四类底座全不可用）。
+        // 现在解锁只做"本地、零下载"的部分（上面的 fulltext / vector / memory 索引装载 +
+        // 下面的 LLM 配置读取），底座模型由 `spawn_model_bootstrap` 在后台线程拉取（经
+        // company-mirror → CN mirror → HF failover + 重试），进度落 `model_bootstrap`，
+        // 由 /ai_stack 暴露。embedding 就绪后后台再用其 dims 重建 memory_index。
+        //
+        // 注：memory_index 在上面以默认 1024 dims（bge-m3）先建一份兜底，让 tiered
+        // assembler 在 embedding 还在下载时不至于完全停摆；bg 任务拿到真 dims 后会重建。
         {
-            let dims = self
-                .embedding
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().map(|p| p.dimensions()))
-                .filter(|d| *d > 0)
-                .unwrap_or(1024);
             let built = {
                 let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-                attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), dims)
+                attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), 1024)
             };
-            match built {
-                Ok(idx) => {
-                    tracing::info!("Memory vector index loaded ({} memories)", idx.len());
-                    if let Ok(mut g) = self.memory_index.lock() {
-                        *g = Some(idx);
-                    }
-                }
-                Err(e) => tracing::warn!("Memory vector index build failed ({e}); tiered assembler disabled until rebuilt"),
-            }
-        }
-
-        // Try loading OrtRerankProvider
-        if let Ok(mut guard) = self.reranker.lock() {
-            match attune_core::infer::reranker::OrtRerankProvider::bge_reranker_v2_m3() {
-                Ok(r) => {
-                    tracing::info!("Reranker: OrtRerankProvider (bge-reranker-v2-m3)");
-                    *guard = Some(Arc::new(r));
-                }
-                Err(e) => {
-                    tracing::info!("Reranker unavailable ({e}), will use vector cosine fallback");
+            if let Ok(idx) = built {
+                if let Ok(mut g) = self.memory_index.lock() {
+                    *g = Some(idx);
                 }
             }
-        }
-
-        // v0.6.0-rc.4: 按 tier 后台拉取 whisper ggml 模型（不阻塞启动）
-        // 失败仅 warn — 用户上传音频时若 detect_asr_backend 仍返 None 会在 ai_stack
-        // status note 给出再次下载提示。
-        let tier = attune_core::platform::classify_hardware(&self.hardware);
-        if tier.is_supported() {
-            std::thread::spawn(move || {
-                match attune_core::asr::fetch_for_tier(tier) {
-                    Ok(path) => {
-                        tracing::info!(
-                            "ASR ggml ready at {} (tier={})",
-                            path.display(),
-                            tier.label()
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("ASR ggml auto-fetch failed (tier={}): {e}", tier.label());
-                    }
-                }
-            });
         }
 
         // LLM 四级优先级见 build_llm_from_settings 文档
@@ -645,6 +584,140 @@ impl AppState {
         }
 
         Ok(processed)
+    }
+
+    /// #2 #5: 后台拉取四类底座模型（embedding / reranker / ocr / asr）。
+    ///
+    /// 必须在 `init_search_engines` **之后**调用（它已按 region 设好 HF_ENDPOINT）。
+    /// 单独一个后台线程顺序拉取，不阻塞 vault 解锁；每类经既有 failover
+    /// （company-mirror → CN mirror → HF，由 model_store / asr / ocr 内部 + HF_ENDPOINT
+    /// 决定）+ 最多 3 次重试；进度 / 失败原因落 `state.model_bootstrap`，由 /ai_stack 暴露。
+    ///
+    /// 失败不 panic（§4.5）：标记 Failed + warn 日志；HF_HUB_OFFLINE 时各 ensure_* 直接
+    /// 返错（逃生开关），同样记为 Failed 但不卡网络超时。已缓存的模型秒返（sha 校验后）。
+    pub fn spawn_model_bootstrap(state: std::sync::Arc<AppState>) {
+        // 防重入：解锁可被多次调用（restart 后再 unlock），但模型只需拉一次。
+        // 用 engines_initialized 之外的独立判断：若全部已 ready 直接跳过。
+        if state.model_bootstrap.all_ready() {
+            return;
+        }
+        std::thread::spawn(move || {
+            let status = &state.model_bootstrap;
+            const MAX_ATTEMPTS: u32 = 3;
+
+            // 通用重试器：闭包返回 Ok 即成功；失败重试至 MAX_ATTEMPTS。
+            // 每次尝试前 mark_downloading（attempts += 1）；成功 mark_ready；
+            // 全部失败 mark_failed（带最后一次错误）。
+            fn run_with_retry<F>(
+                status: &attune_core::infer::bootstrap_status::ModelBootstrapStatus,
+                class: &str,
+                max_attempts: u32,
+                mut attempt: F,
+            ) where
+                F: FnMut() -> Result<(), String>,
+            {
+                // 离线逃生：缓存缺失时不浪费重试在网络上。
+                let offline = attune_core::infer::model_store::hf_offline();
+                let mut last_err = String::new();
+                for n in 1..=max_attempts {
+                    status.mark_downloading(class);
+                    match attempt() {
+                        Ok(()) => {
+                            status.mark_ready(class);
+                            tracing::info!("model bootstrap: {class} ready (attempt {n})");
+                            return;
+                        }
+                        Err(e) => {
+                            last_err = e;
+                            tracing::warn!("model bootstrap: {class} attempt {n}/{max_attempts} failed: {last_err}");
+                            if offline {
+                                break; // 离线时重试无意义
+                            }
+                            // 退避，避免 burst（§4.5 B）。
+                            std::thread::sleep(std::time::Duration::from_millis(500 * n as u64));
+                        }
+                    }
+                }
+                status.mark_failed(class, last_err.clone());
+                tracing::warn!("model bootstrap: {class} giving up after {max_attempts} attempts: {last_err}");
+            }
+
+            // 1) Embedding（ONNX ~默认 bge-m3 量化；ATTUNE_EMBEDDING_BACKEND=ollama 走 Ollama 无下载）。
+            let prefer_ollama = std::env::var("ATTUNE_EMBEDDING_BACKEND")
+                .map(|v| v.eq_ignore_ascii_case("ollama"))
+                .unwrap_or(false);
+            run_with_retry(status, "embedding", MAX_ATTEMPTS, || {
+                let provider: Arc<dyn EmbeddingProvider> = if prefer_ollama {
+                    Arc::new(OllamaProvider::default())
+                } else {
+                    match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
+                        Ok(p) => Arc::new(p),
+                        // ONNX 拉取失败时本次记失败（触发重试）；仅最后兜底到 Ollama。
+                        Err(e) => return Err(format!("ONNX embedding: {e}")),
+                    }
+                };
+                state.set_embedding(Some(provider));
+                Ok(())
+            });
+            // ONNX 三次都失败 → 兜底 Ollama（无下载，至少让 embedding path 可用）。
+            if !state.model_bootstrap.phase("embedding")
+                .map(|p| p.is_ready()).unwrap_or(false)
+                && !prefer_ollama
+            {
+                tracing::info!("model bootstrap: embedding ONNX unavailable, falling back to Ollama bge-m3");
+                state.set_embedding(Some(Arc::new(OllamaProvider::default())));
+                state.model_bootstrap.mark_ready("embedding");
+            }
+
+            // embedding 就绪后用真 dims 重建 memory_index（解锁时用 1024 兜底建过一份）。
+            if let Some(dims) = state.embedding().map(|p| p.dimensions()).filter(|d| *d > 0) {
+                let built = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), dims)
+                };
+                if let Ok(idx) = built {
+                    tracing::info!("Memory vector index rebuilt with dims={dims} ({} memories)", idx.len());
+                    if let Ok(mut g) = state.memory_index.lock() {
+                        *g = Some(idx);
+                    }
+                }
+            }
+
+            // 2) Reranker（ONNX bge-reranker-v2-m3）。失败仅降级到 vector cosine，不致命。
+            run_with_retry(status, "reranker", MAX_ATTEMPTS, || {
+                match attune_core::infer::reranker::OrtRerankProvider::bge_reranker_v2_m3() {
+                    Ok(r) => {
+                        state.set_reranker(Some(Arc::new(r)));
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("ONNX reranker: {e}")),
+                }
+            });
+
+            // 3) OCR（PP-OCR ONNX ~16MB）。
+            run_with_retry(status, "ocr", MAX_ATTEMPTS, || {
+                attune_core::ocr::ppocr::PpOcrProvider::ensure_models_downloaded()
+                    .map_err(|e| e.to_string())
+            });
+
+            // 4) ASR（whisper ggml，按硬件 tier 选大小）。tier 不支持则跳过（标 ready）。
+            let tier = attune_core::platform::classify_hardware(&state.hardware);
+            if tier.is_supported() {
+                run_with_retry(status, "asr", MAX_ATTEMPTS, || {
+                    attune_core::asr::fetch_for_tier(tier)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                });
+            } else {
+                tracing::info!("model bootstrap: ASR skipped (hardware tier {} unsupported)", tier.label());
+                status.mark_ready("asr");
+            }
+
+            tracing::info!(
+                "model bootstrap finished (all_ready={})",
+                state.model_bootstrap.all_ready()
+            );
+        });
     }
 
     /// 启动后台分类 worker（需要在 init_search_engines 之后调用）

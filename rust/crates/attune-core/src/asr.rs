@@ -753,6 +753,14 @@ pub fn ensure_whisper_model(ggml_filename: &str) -> crate::error::Result<std::pa
         return Ok(target);
     }
 
+    // 逃生开关：HF_HUB_OFFLINE 时不联网，缓存缺失直接报错（与 model_store 一致）。
+    if crate::infer::model_store::hf_offline() {
+        return Err(VaultError::ModelLoad(format!(
+            "HF_HUB_OFFLINE set but whisper ggml {ggml_filename} not cached at {} — pre-stage it or unset HF_HUB_OFFLINE",
+            target.display()
+        )));
+    }
+
     let api = hf_hub::api::sync::Api::new()
         .map_err(|e| VaultError::ModelLoad(format!("hf-hub init: {e}")))?;
     let repo = api.model("ggerganov/whisper.cpp".to_string());
