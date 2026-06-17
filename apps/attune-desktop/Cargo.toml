@@ -30,6 +30,17 @@ attune-server = { path = "../../rust/crates/attune-server" }
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 default = ["custom-protocol"]
+# ── ONNX Runtime EP passthrough → attune-server → attune-core (默认全 OFF) ──
+# desktop-release workflow 为 GPU 变体包传 `cargo tauri build --features <ep>`,
+# 经此链式到 attune-core 的 ort/<ep>。默认 build 不开任一 EP = 纯 CPU 包(基础包不变)。
+# ORT 约束: directml 与 cuda 互斥 → 各自独立变体 artifact, 不在同一二进制共存。
+cuda = ["attune-server/cuda"]
+directml = ["attune-server/directml"]
+coreml = ["attune-server/coreml"]
+openvino = ["attune-server/openvino"]
+rocm = ["attune-server/rocm"]
+tensorrt = ["attune-server/tensorrt"]
+vitis = ["attune-server/vitis"]
 
 [package.metadata.cargo-machete]
 ignored = ["serde", "serde_json"]

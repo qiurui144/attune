@@ -21,15 +21,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ── 基础 CPU 包(默认 build,无 EP feature)— 不变 ──
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             bundles: deb,rpm,appimage
+            variant: ""
+            features: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             # nsis + msi: 历史 desktop-v0.6.0 / v0.6.1 都含 MSI (企业部署
             # 场景需要), rc.4 暂只产 NSIS = regression. 加回 msi.
             # 注: Tauri auto-updater 仅支持 NSIS, MSI 不签 *.sig (仅手动下载).
             bundles: nsis,msi
+            variant: ""
+            features: ""
+          # ── GPU EP 变体(rc.4 范围:Win-DirectML + Linux-CUDA)──
+          # ORT 一二进制一 GPU EP → 各自独立 artifact;EP 运行时栈按需从资源站拉。
+          # 变体产物改名加 -<variant> 后缀,不与基础 CPU 包撞名;updater/latest.json
+          # 仍只取基础包(变体走手动下载,见 latest-json job 的 base-only 装配)。
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+            variant: cuda
+            features: cuda
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+            variant: directml
+            features: directml
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -71,12 +90,40 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           BUNDLES: ${{ matrix.bundles }}
-        run: cargo tauri build --bundles "$BUNDLES"
+          FEATURES: ${{ matrix.features }}
+        # FEATURES 空 = 基础 CPU 包(默认 build,行为不变);非空 = GPU EP 变体
+        # (cuda/directml),经 attune-desktop→server→core 的 feature passthrough 到 ort/<ep>。
+        run: cargo tauri build --bundles "$BUNDLES" ${FEATURES:+--features "$FEATURES"}
+
+      # GPU 变体:给所有 installer(+ .sig)在最终扩展名前插入 -<variant>,避免与
+      # 基础 CPU 包在同一 Release 撞名;基础包(variant 空)跳过此步,名字不变。
+      - name: Tag GPU-variant bundles
+        if: matrix.variant != ''
+        shell: bash
+        working-directory: apps/attune-desktop
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euxo pipefail
+          find target/release/bundle -type f \
+            \( -name "*.deb" -o -name "*.AppImage" -o -name "*.rpm" -o -name "*.exe" \
+               -o -name "*.msi" -o -name "*.sig" \) | while read -r f; do
+            dir=$(dirname "$f"); base=$(basename "$f")
+            case "$base" in
+              *.AppImage.sig) new="${base%.AppImage.sig}-${VARIANT}.AppImage.sig" ;;
+              *.exe.sig)      new="${base%.exe.sig}-${VARIANT}.exe.sig" ;;
+              *.*)            ext="${base##*.}"; stem="${base%.*}"; new="${stem}-${VARIANT}.${ext}" ;;
+              *)              new="${base}-${VARIANT}" ;;
+            esac
+            mv "$f" "$dir/$new"
+          done
+          find target/release/bundle -type f
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: attune-desktop-${{ matrix.target }}
+          # 变体用独立 artifact 名 → latest-json / OCI 的 base-dir 装配不会误纳变体
+          name: attune-desktop-${{ matrix.target }}${{ matrix.variant != '' && format('-{0}', matrix.variant) || '' }}
           path: apps/attune-desktop/target/release/bundle/**/*
           retention-days: 30
 
