@@ -26,6 +26,17 @@ pub struct ChatEngine {
     /// Default: 12 builtin PII patterns (phone/email/api_key/id_card/ipv4/ipv6/...).
     /// attune-pro plugins can inject industry PII via `with_redactor()`.
     redactor: Arc<Redactor>,
+    /// v1.0.6 Privacy Logic — real `settings.privacy.llm` flag for the
+    /// OutboundGate. Default `true` (legacy behavior); the server narrows it.
+    llm_outbound_enabled: bool,
+    /// v1.0.6 Privacy Logic — real vault unlock state for the OutboundGate.
+    /// Default `true` because reaching `chat()` already requires a valid DEK.
+    vault_unlocked: bool,
+    /// v1.0.6 Privacy Logic — set when the assembled context includes any
+    /// `PrivacyTier::L0` item. Defense-in-depth: the route filters L0 before
+    /// constructing the engine, so this is normally `false`; if set, the gate
+    /// blocks the cloud LLM call.
+    context_contains_l0: bool,
 }
 
 /// 对话响应
@@ -84,12 +95,32 @@ impl ChatEngine {
             reranker,
             web_search: None,
             redactor: Arc::new(Redactor::default()),
+            llm_outbound_enabled: true,
+            vault_unlocked: true,
+            context_contains_l0: false,
         }
     }
 
     /// 设置网络搜索提供者（链式调用）
     pub fn with_web_search(mut self, ws: Arc<dyn WebSearchProvider>) -> Self {
         self.web_search = Some(ws);
+        self
+    }
+
+    /// v1.0.6 Privacy Logic — wire the real LLM outbound policy
+    /// (`settings.privacy.llm` toggle + current vault unlock state) so the
+    /// [`crate::OutboundGate`] honors the user's choice. Chainable.
+    pub fn with_outbound_policy(mut self, enabled: bool, vault_unlocked: bool) -> Self {
+        self.llm_outbound_enabled = enabled;
+        self.vault_unlocked = vault_unlocked;
+        self
+    }
+
+    /// v1.0.6 Privacy Logic — mark the assembled context as containing
+    /// `PrivacyTier::L0` content. When set, the gate refuses a cloud LLM call.
+    /// Defense-in-depth; the route normally filters L0 upstream. Chainable.
+    pub fn with_context_contains_l0(mut self, contains_l0: bool) -> Self {
+        self.context_contains_l0 = contains_l0;
         self
     }
 
@@ -352,21 +383,25 @@ impl ChatEngine {
         messages.extend(redacted_history);
         messages.push(ChatMessage::user(redacted_user));
 
-        // v1.0.6 Privacy Logic Strategy — OutboundGate audit hook for LLM outbound.
-        // The actual `privacy.llm` setting + vault_unlocked wiring is plumbed in
-        // Task 7 (PrivacyView state integration); today this is a non-rejecting
-        // call site marker — payload is already redacted above via redact_batch
-        // (the canonical PII boundary), so the gate's redact step is a no-op here.
-        // Grep guard (scripts/privacy-audit.sh) keys on `OutboundGate::enforce`.
-        let _ = crate::OutboundGate::enforce(
+        // v1.0.6 Privacy Logic Strategy — REAL OutboundGate enforcement for the
+        // LLM egress. `payload` is already redacted above via redact_batch (the
+        // canonical PII boundary) so the gate's redact step is idempotent, but
+        // the disabled / vault-locked / L0-cloud checks are now honored: a
+        // returned Err aborts before the LLM call. The legacy ChatEngine path
+        // (this method) is reached only when an L0 item slipped through (the
+        // route filters L0 upstream); the gate is the defense-in-depth net.
+        let local_dest = self.llm.is_local();
+        crate::OutboundGate::enforce(
             &crate::OutboundPolicy {
                 kind: crate::OutboundKind::Llm,
-                enabled: true, // wired in Task 7 from settings.privacy.llm
-                vault_unlocked: true, // wired in Task 7 from vault.state()
+                enabled: self.llm_outbound_enabled,
+                vault_unlocked: self.vault_unlocked,
                 redactor: Some(&self.redactor),
+                local_destination: local_dest,
+                contains_l0: self.context_contains_l0,
             },
-            redacted_user, // already redacted; gate just validates contract
-        );
+            redacted_user, // already redacted; gate validates contract + tier
+        )?;
 
         // Plan A1 Task I: LlmProvider::chat_with_history returns (String, TokenUsage).
         // ChatEngine does not yet route usage into the recorder; bind to _usage so

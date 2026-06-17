@@ -51,6 +51,10 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     let npu_tops = attune_core::platform::cpu_db::lookup(&hw.cpu_model)
         .and_then(|e| e.npu_tops);
 
+    // 统一加速器视图：枚举本机所有推理加速器 (CPU/NVIDIA/AMD GPU+NPU/Intel iGPU+NPU)
+    // + 每个的就绪度，并给底座 ONNX EP 选择提示 (recommended_ep_hint, 仅建议不接线)。
+    let accel = attune_core::platform::AccelCapabilities::from_profile(hw);
+
     Json(json!({
         "hardware": {
             "tier": tier.label(),
@@ -60,6 +64,17 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "npu_tops": npu_tops,
             "ram_gb": hw.total_ram_bytes / (1024 * 1024 * 1024),
             "has_gpu": hw.has_nvidia_gpu || hw.has_amd_gpu,
+        },
+        "accel": {
+            "recommended_ep_hint": accel.recommended_ep_hint(),
+            "has_hw_accelerator": accel.has_hw_accelerator(),
+            "accelerators": accel.accelerators.iter().map(|a| json!({
+                "kind": a.kind.id(),
+                "vendor": a.vendor,
+                "present": a.present,
+                "driver_ready": a.driver_ready,
+                "notes": a.notes,
+            })).collect::<Vec<_>>(),
         },
         "region": {
             "detected": region.label(),
@@ -111,7 +126,10 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "available": web_search_available,
             "engine": "browser (DuckDuckGo)",
             "note": note(web_search_available, "未检测到 Chrome/Edge — 安装 Chrome 或在 Settings 中指定 browser_path")
-        }
+        },
+        // #2 #5: 底座模型后台下载进度（embedding/reranker/ocr/asr）。解锁立即返回，
+        // 模型在后台拉取；UI 轮询此字段显示"下载中 / 已就绪 / 失败"，不再静默卡住。
+        "model_bootstrap": state.model_bootstrap.snapshot()
     }))
 }
 
@@ -127,6 +145,7 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
     let asr_ggml = attune_core::platform::ModelRecommendation::for_tier(tier)
         .map(|r| r.asr_ggml.to_string());
 
+    let state_for_persist = state.clone();
     tokio::spawn(async move {
         // OCR：~16MB，缺失才拉。失败不 panic，仅 log（§4.5 graceful）。
         let ocr = tokio::task::spawn_blocking(
@@ -148,6 +167,21 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
                 Ok(Ok(path)) => tracing::info!("ai-stack ensure: ASR model ready at {}", path.display()),
                 Ok(Err(e)) => tracing::warn!("ai-stack ensure: ASR download failed: {e}"),
                 Err(e) => tracing::warn!("ai-stack ensure: ASR task join error: {e}"),
+            }
+        }
+        // S8 cache: persist the source the resolver just selected so the next cold start
+        // seeds it (makes write_selected_source/persist_used_source live, not dead code).
+        // vault guard taken alone — respects lock ordering.
+        if let Some(src_id) = attune_core::infer::model_source::current_top_source_id() {
+            let vault_guard = state_for_persist.vault.lock().unwrap_or_else(|e| e.into_inner());
+            let cur = vault_guard.store().get_meta("app_settings").ok().flatten()
+                .and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+            let updated = attune_core::infer::model_source::persist_used_source(cur, &src_id);
+            if let Ok(bytes) = serde_json::to_vec(&updated) {
+                if let Err(e) = vault_guard.store().set_meta("app_settings", &bytes) {
+                    tracing::warn!("ai-stack ensure: persist selected source failed: {e}");
+                }
             }
         }
     });

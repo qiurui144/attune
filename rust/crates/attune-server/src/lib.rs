@@ -3,6 +3,7 @@ pub mod error;
 pub mod eval;
 pub mod routes;
 pub mod state;
+pub(crate) mod job_worker;
 pub(crate) mod middleware;
 pub(crate) mod ingest_webdav;
 pub(crate) mod ingest_email;
@@ -53,7 +54,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         ])
         .allow_credentials(true);
 
-    Router::new()
+    let router = Router::new()
         // Health check（前缀外，方便 Tauri / monitor 直接探活）
         .route("/health", get(routes::status::health))
         // Vault endpoints (no guard needed)
@@ -88,6 +89,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/chat/sessions/{id}",
             get(routes::chat_sessions::get_session).delete(routes::chat_sessions::delete_session),
         )
+        // Document Intelligence (compare / summarize / chapters) — member-gated tier-3
+        .route("/api/v1/documents/compare", post(routes::documents::compare_docs))
+        .route("/api/v1/documents/summarize", post(routes::documents::summarize_doc))
+        .route("/api/v1/documents/chapters", post(routes::documents::chapters_doc))
         // Ingest + Items + Search
         .route("/api/v1/ingest", post(routes::ingest::ingest))
         .route("/api/v1/feedback", post(routes::feedback::submit_feedback))
@@ -100,7 +105,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/member/locks", get(routes::member::get_locks))
         .route("/api/v1/member/login-token", post(routes::member::login_token))
         .route("/api/v1/member/login-password", post(routes::member::login_password))
+        .route("/api/v1/member/activate-license", post(routes::member::activate_license))
         .route("/api/v1/member/logout", post(routes::member::logout))
+        // Trust-chain T8: 手动触发一轮 entitlement re-verify (SEC-1/2 gated transition)
+        .route("/api/v1/member/entitlements/refresh", post(routes::member::refresh_entitlements))
         // DSAR (GDPR Art.15/17/20 + 中国 PIPL §44-50) — cloud member 数据主权操作
         // 桌面 UI 经此 proxy 到 cloud accounts，密码不持久化
         .route("/api/v1/dsar/export", post(routes::dsar::export_data))
@@ -123,6 +131,12 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
                 .delete(routes::office::delete_job))
         .route("/api/v1/office/jobs/ws",
             get(routes::office::ws_jobs))
+        // G5 durable job queue — 管理面板 (list / cancel / requeue)
+        .route("/api/v1/jobs", get(routes::jobs::list_jobs))
+        .route("/api/v1/jobs/{id}/cancel",
+            axum::routing::post(routes::jobs::cancel_job))
+        .route("/api/v1/jobs/{id}/requeue",
+            axum::routing::post(routes::jobs::requeue_job))
         // Folder links — 只读 (写入由 attune-cli link-folder)
         .route("/api/v1/folder-links", get(routes::folder_links::list_folder_links))
         // 批注（annotations）CRUD — 所有调用都是用户显式操作，不在建库流水线里自动触发
@@ -171,6 +185,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/plugins/{id}/toggle", post(routes::plugins::toggle))
         // law-pro 接入阶段 2: 前端触发 plugin agent binary（civil_loan_agent 算金额）
         .route("/api/v1/agents/{agent_id}/run", post(routes::agents::run_agent))
+        // 行业工作台: 聚合已装插件场景卡片（直接入口，bypass chat-trigger）
+        .route("/api/v1/scenarios", get(routes::scenarios::list))
         // E4 (2026-05-01) — PluginHub marketplace (默认 Mock provider；attune-pro 注入 hub-client)
         .route("/api/v1/marketplace/plugins", get(routes::marketplace::list_plugins))
         .route("/api/v1/marketplace/plugins/{id}/install", post(routes::marketplace::install_plugin))
@@ -193,6 +209,24 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/projects/{id}/timeline",
             get(routes::projects::list_project_timeline),
         )
+        // 文件夹一键智能整理 → 案卷（auto-organize folder-to-project, 2026-06-15）
+        .route("/api/v1/organize/analyze", post(routes::organize::analyze))
+        .route("/api/v1/organize/apply", post(routes::organize::apply))
+        .route("/api/v1/organize/proposals", get(routes::organize::list))
+        .route(
+            "/api/v1/organize/proposals/{id}",
+            get(routes::organize::get_one).delete(routes::organize::delete_one),
+        )
+        // 记忆延续：换 embedding 模型后老向量批量 reindex 状态 + 暂停开关
+        // (memory-continuity, 2026-06-15)
+        .route(
+            "/api/v1/memory/migration/status",
+            get(routes::memory::migration_status),
+        )
+        .route("/api/v1/memory/reindex", post(routes::memory::reindex))
+        // 记忆可迁移性：口令加密导出 + 合并式导入（2026-06-15, Task 7）
+        .route("/api/v1/memory/export", post(routes::memory::export))
+        .route("/api/v1/memory/import", post(routes::memory::import))
         .route("/api/v1/behavior/click", post(routes::behavior::log_click))
         .route("/api/v1/behavior/history", get(routes::behavior::history))
         .route("/api/v1/behavior/popular", get(routes::behavior::popular))
@@ -292,7 +326,15 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/", get(routes::ui::index))
         .route("/ui", get(routes::ui::index))
         // favicon：返回 204 避免浏览器自动请求落空刷 console error
-        .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }))
+        .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }));
+
+    // Non-text content recognition (shared visual-understanding capability, ADR-0008).
+    // Feature-gated: only present when built with `--features nontext`; otherwise the
+    // router is byte-for-byte unchanged (plain OCR pipeline).
+    #[cfg(feature = "nontext")]
+    let router = router.merge(nontext_recognize_routes());
+
+    router
         // Guard middleware for all other routes
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::vault_guard))
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::bearer_auth_guard))
@@ -301,6 +343,27 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::access_log))
         .layer(cors)
         .with_state(shared_state)
+}
+
+/// Shared visual-understanding capability routes (ADR-0008): non-text region recognition,
+/// the OCR cross-validation correction report, and explicit-accept (spec §5.1). Office-helper
+/// semantics — results are never auto-written; the user (or a plugin on the user's behalf)
+/// must explicitly accept. Merged into `build_router` only under `--features nontext`.
+#[cfg(feature = "nontext")]
+fn nontext_recognize_routes() -> Router<state::SharedState> {
+    Router::new()
+        .route(
+            "/api/v1/ocr/recognize",
+            post(routes::ocr_recognize::post_recognize),
+        )
+        .route(
+            "/api/v1/ocr/recognize/{item_id}/report",
+            get(routes::ocr_recognize::get_report),
+        )
+        .route(
+            "/api/v1/ocr/recognize/{item_id}/accept",
+            post(routes::ocr_recognize::accept),
+        )
 }
 
 #[derive(Clone, Debug)]
@@ -373,6 +436,12 @@ pub async fn run_in_runtime(
     // audit-C "usage recorder NOT wired" gap). Telemetry-only; failure degrades
     // gracefully without affecting request handling.
     let _usage_flusher = shared_state.install_usage_aggregator();
+    // G5 — durable job queue: open the store handle (Store::open already ran
+    // recover_on_boot → interrupted ASR jobs requeue instead of vanishing), then
+    // start the background drain worker. Failure degrades gracefully: office ASR
+    // routes return 503 job-store-unavailable, everything else unaffected.
+    shared_state.install_job_store();
+    job_worker::start_job_worker(shared_state.clone());
     let app = build_router(shared_state);
 
     let is_loopback = {

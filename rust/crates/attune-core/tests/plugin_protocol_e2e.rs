@@ -12,6 +12,7 @@ use attune_core::agents::Agent;
 use attune_core::plugin_encryption::{decrypt_yaml, encrypt_yaml};
 use attune_core::plugin_loader::{LoadedPlugin, PluginManifest};
 use attune_core::plugin_registry::PluginRegistry;
+use attune_core::plugin_sig::Trust;
 use std::fs;
 use tempfile::TempDir;
 
@@ -76,7 +77,7 @@ fn encrypted_plugin_loads_with_correct_key() {
     let cipher = encrypt_yaml(PAID_PLUGIN_YAML.as_bytes(), key).expect("encrypt");
     fs::write(tmp.path().join("plugin.yaml.enc"), &cipher).expect("write");
 
-    let plugin = LoadedPlugin::from_dir_with_key(tmp.path(), Some(key), Some("Trusted"))
+    let plugin = LoadedPlugin::from_dir_with_key(tmp.path(), Some(key), Some(Trust::ThirdParty))
         .expect("load encrypted plugin");
     assert_eq!(plugin.manifest.id, "law-pro");
     assert_eq!(plugin.manifest.skills.len(), 1);
@@ -92,7 +93,7 @@ fn encrypted_plugin_fails_with_wrong_key() {
     fs::write(tmp.path().join("plugin.yaml.enc"), &cipher).expect("write");
 
     let result =
-        LoadedPlugin::from_dir_with_key(tmp.path(), Some(b"wrong-key"), Some("Trusted"));
+        LoadedPlugin::from_dir_with_key(tmp.path(), Some(b"wrong-key"), Some(Trust::ThirdParty));
     assert!(result.is_err());
 }
 
@@ -102,7 +103,7 @@ fn encrypted_plugin_fails_without_key() {
     let cipher = encrypt_yaml(PAID_PLUGIN_YAML.as_bytes(), b"key").expect("encrypt");
     fs::write(tmp.path().join("plugin.yaml.enc"), &cipher).expect("write");
 
-    let result = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some("Trusted"));
+    let result = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some(Trust::ThirdParty));
     assert!(result.is_err());
 }
 
@@ -111,7 +112,7 @@ fn paid_plugin_with_unsigned_trust_rejected() {
     let tmp = TempDir::new().expect("tmp");
     fs::write(tmp.path().join("plugin.yaml"), PAID_PLUGIN_YAML).expect("write");
 
-    let result = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some("Unsigned"));
+    let result = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some(Trust::Unsigned));
     assert!(result.is_err(), "paid plugin with Unsigned trust must reject");
     let msg = format!("{:?}", result.unwrap_err());
     assert!(msg.contains("paid/trial") || msg.contains("Trusted") || msg.contains("Official"));
@@ -129,7 +130,7 @@ pricing:
 "#;
     let tmp = TempDir::new().expect("tmp");
     fs::write(tmp.path().join("plugin.yaml"), yaml).expect("write");
-    let plugin = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some("Unsigned"))
+    let plugin = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some(Trust::Unsigned))
         .expect("free plugin loads with any trust");
     assert_eq!(plugin.manifest.id, "free-plugin");
 }
@@ -260,12 +261,18 @@ fn agent_runner_unknown_agent_errors() {
     assert!(result.is_err());
 }
 
-/// scan_with_key 装载加密 paid plugin
+/// scan_with_key 装载加密 paid plugin。
+///
+/// T9/T12 regression rewrite: the trust chain now runs REAL signature verification
+/// (the old hardcoded trust label is gone). A paid plugin therefore must be signed by
+/// a trusted key — an UNSIGNED encrypted paid plugin is correctly rejected by the
+/// pricing↔trust linkage (`validate_trust_for_pricing`: paid ⇒ Official|ThirdParty).
+/// This test now asserts BOTH the new reject path AND the legitimate signed-load path.
 #[test]
 fn registry_scan_with_key_loads_encrypted_paid_plugin() {
-    let tmp = TempDir::new().expect("tmp");
+    use attune_core::plugin_sig::{derive_verifying_key_hex, generate_signing_key, sign_plugin};
 
-    // 写一个加密 paid plugin
+    let tmp = TempDir::new().expect("tmp");
     let p = tmp.path().join("law-pro");
     fs::create_dir_all(&p).expect("mkdir");
     let key = b"device-license-key";
@@ -278,19 +285,39 @@ fn registry_scan_with_key_loads_encrypted_paid_plugin() {
     assert!(!errs.is_empty());
     assert!(errs[0].contains("encrypted plugin") || errs[0].contains("decrypt_key"));
 
-    // scan_with_key() 提供 key → 装载成功
+    // scan_with_key() 提供 key 但插件 UNSIGNED → paid+Unsigned 被 pricing↔trust 拒载
+    // (T9 杀掉硬编码 Trusted 后的新安全不变量,非 bug)。
     let (reg, errs) = PluginRegistry::scan_with_key(tmp.path(), Some(key)).expect("scan");
-    assert_eq!(reg.plugins().count(), 1);
+    assert_eq!(reg.plugins().count(), 0, "unsigned paid plugin must be rejected (paid ⇒ signed)");
+    assert!(!errs.is_empty(), "rejection surfaced in errors");
+
+    // 合法路径:对插件签名(签名作用于 plaintext plugin.yaml 的 digest),把签名公钥
+    // 加入白名单 → 验签为 ThirdParty → 通过 pricing↔trust → scan_with_trust 装载成功。
+    // (真实分发的 signed+encrypted plugin 同时带 plugin.yaml.enc + plugin.sig。)
+    fs::write(p.join("plugin.yaml"), PAID_PLUGIN_YAML).expect("write plaintext for signing");
+    let sk = generate_signing_key();
+    sign_plugin(&p, &sk).expect("sign");
+    let pubkey_hex = derive_verifying_key_hex(&sk);
+    let (reg, errs) = PluginRegistry::scan_with_trust(
+        tmp.path(),
+        Some(key),
+        attune_core::plugin_sig::TrustMode::Strict,
+        &[pubkey_hex],
+    )
+    .expect("scan");
+    assert_eq!(reg.plugins().count(), 1, "signed (whitelisted ThirdParty) paid plugin loads");
     assert!(errs.is_empty(), "errors: {errs:?}");
     let p = reg.plugins().next().unwrap();
     assert_eq!(p.manifest.id, "law-pro");
     assert_eq!(p.manifest.agents.len(), 1);
+    assert_eq!(reg.plugin_trust("law-pro"), Some(Trust::ThirdParty));
 }
 
 /// agent_runner subprocess env 传递测试。
 ///
 /// 验证 run_agent_subprocess 的 env 参数确实被转发给子进程。
-/// 模拟 LLM agent binary：读 ATTUNE_LLM_ENDPOINT env，不存在则 exit 4（同 fact_extractor 约定）。
+/// 模拟 LLM agent binary：读 LLM_ENDPOINT env，不存在则 exit 4（同 fact_extractor /
+/// attune-agent-sdk prepare_llm_env 真实约定 — 裸 `LLM_*` 前缀，非 `ATTUNE_LLM_*`）。
 /// 场景 1：传入正确 env → exit 0 + stdout 含 endpoint。
 /// 场景 2：不传 env     → exit 4（"LLM_ENDPOINT not set"，即 P1:3 bug 复现）。
 ///
@@ -328,20 +355,20 @@ pricing:
   tier: free
 agents:
   - id: llm_echo_agent
-    description: "Echo the ATTUNE_LLM_ENDPOINT env var"
+    description: "Echo the LLM_ENDPOINT env var"
     runtime: rust_binary
     binary: bin/run_llm_echo_agent
 "#;
     fs::write(plugin_dir.join("plugin.yaml"), plugin_yaml).expect("write plugin.yaml");
 
-    // mock binary：读 ATTUNE_LLM_ENDPOINT；不存在则 exit 4
+    // mock binary：读 LLM_ENDPOINT（真实 agent 约定，非 ATTUNE_LLM_*）；不存在则 exit 4
     let script_path = bin_dir.join("run_llm_echo_agent");
     let script = r#"#!/bin/sh
-if [ -z "$ATTUNE_LLM_ENDPOINT" ]; then
+if [ -z "$LLM_ENDPOINT" ]; then
     echo "LLM_ENDPOINT not set" >&2
     exit 4
 fi
-echo "{\"endpoint\":\"$ATTUNE_LLM_ENDPOINT\"}"
+echo "{\"endpoint\":\"$LLM_ENDPOINT\"}"
 exit 0
 "#;
     fs::write(&script_path, script).expect("write script");
@@ -363,10 +390,10 @@ exit 0
 
     // 场景 1：传 env → exit 0，stdout 含 endpoint
     let env_with_llm = vec![
-        ("ATTUNE_LLM_PROVIDER".to_string(), "openai_compat".to_string()),
-        ("ATTUNE_LLM_ENDPOINT".to_string(), "https://api.deepseek.com/v1".to_string()),
-        ("ATTUNE_LLM_MODEL".to_string(), "deepseek-chat".to_string()),
-        ("ATTUNE_LLM_API_KEY".to_string(), "sk-test".to_string()),
+        ("LLM_PROVIDER".to_string(), "openai_compat".to_string()),
+        ("LLM_ENDPOINT".to_string(), "https://api.deepseek.com/v1".to_string()),
+        ("LLM_MODEL".to_string(), "deepseek-chat".to_string()),
+        ("LLM_API_KEY".to_string(), "sk-test".to_string()),
     ];
     let result = run_agent_subprocess(
         &reg,

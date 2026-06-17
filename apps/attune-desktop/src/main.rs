@@ -2,6 +2,7 @@
 
 mod embedded_server;
 mod tray;
+mod update_feed;
 
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -17,7 +18,16 @@ const EV_UPDATE_STATUS: &str = "attune-update-status";
 #[tauri::command]
 async fn check_for_update_now(app: AppHandle) -> Result<bool, String> {
     use tauri_plugin_updater::UpdaterExt;
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    // Resolve feed endpoints at runtime (company mirror first, GitHub fallback)
+    // instead of the compile-time tauri.conf.json default. Signature pubkey is
+    // unchanged → still verified against whichever endpoint serves latest.json.
+    let endpoints = update_feed::resolve_endpoints_from_env();
+    let updater = app
+        .updater_builder()
+        .endpoints(endpoints.iter().filter_map(|e| e.parse().ok()).collect())
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
     let update = match updater.check().await.map_err(|e| e.to_string())? {
         Some(u) => u,
         None => {
@@ -132,6 +142,15 @@ async fn upload_dropped_paths(paths: Vec<String>) -> Result<Vec<String>, String>
 }
 
 fn main() {
+    // webkit2gtk 2.42+ 默认启用 DMABUF/GBM EGL 渲染器,在 NVIDIA 私有驱动(及部分虚拟
+    // 显示)上初始化 GBM EGL 失败 → "Could not create GBM EGL display:
+    // EGL_NOT_INITIALIZED. Aborting..." → 窗口启动即崩(deb 在 N 卡机上点图标即崩的根因,
+    // 2026-06-13 实测)。出厂禁用该渲染器走兼容路径,让 attune 在 NVIDIA 机上开箱可用;
+    // 用户可显式 export WEBKIT_DISABLE_DMABUF_RENDERER 覆盖。必须在 GTK/webview 初始化前设。
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -223,7 +242,14 @@ fn main() {
                         tauri::async_runtime::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                             use tauri_plugin_updater::UpdaterExt;
-                            match app_handle_for_update.updater() {
+                            let endpoints = update_feed::resolve_endpoints_from_env();
+                            let updater = app_handle_for_update
+                                .updater_builder()
+                                .endpoints(
+                                    endpoints.iter().filter_map(|e| e.parse().ok()).collect(),
+                                )
+                                .and_then(|b| b.build());
+                            match updater {
                                 Ok(updater) => match updater.check().await {
                                     Ok(Some(update)) => {
                                         tracing::info!(

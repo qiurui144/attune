@@ -27,6 +27,16 @@ For the OSS × attune-pro feature boundary, see [`docs/oss-pro-strategy.md`](../
 
 ---
 
+## What's new since v1.0 GA (current: v1.2.0)
+
+The capability sections below describe the GA core. The v1.0→v1.2 line adds production-grade governance and cross-platform reach on top — full notes in [`RELEASE.md`](RELEASE.md), and the per-capability × module × tech-stack map in [`DEVELOP.md` → 能力矩阵 × 技术栈选型](DEVELOP.md#能力矩阵--技术栈选型):
+
+- **Agent Control Plane (ACP, v1.1.0)** — central agent registry + typed handoffs, declarative DAG flow executor, per-`agent×model` failure telemetry, cost-aware scheduler, workspace-level ratchet-only quality gate.
+- **Cross-platform agent distribution (WASM, v1.2.0)** — deterministic agents/skills compile to `wasm32-wasip1`, run via embedded `wasmtime`; one `.attunepkg` + one `.wasm` runs on Windows / Linux / riscv64. WASM-safe `attune-agent-sdk` leaf crate keeps the `Agent` trait native-dep-free.
+- **GitConnector (v1.2.0)** — import a knowledge base from a Git repo (GitHub / GitLab / Gitea / Bitbucket / Codeberg / sr.ht over HTTPS); clone → glob filter → ingest → follow upstream commits; local-only, zero-LLM import path, SSRF-protected.
+- **Privacy OutboundGate + `PrivacyTier::L0`** — every network egress (LLM / Cloud / WebDAV / Web Search / Telemetry) routes through one gate consulting settings + PII redaction; L0-tagged content refuses any cloud LLM call (`outbound_gate.rs`).
+- **One-click dependency deploy** — Ollama readiness detection + in-app install/pull, base-model auto-ensure, LM Studio endpoint auto-detect — no terminal required.
+
 ## Core capabilities
 
 ### Active Evolution
@@ -388,8 +398,10 @@ Size breakdown: rustls crypto stack + tantivy full-text + usearch C++ bindings +
 ## Testing
 
 ```bash
-cargo test --workspace    # 376+ tests
+cargo test --workspace    # full suite across all 5 crates
 ```
+
+Test strategy, the 6-category coverage floor, and the doc-intelligence A–K acceptance matrix live in [`../docs/TESTING.md`](../docs/TESTING.md). Office parsing tests are irreducibly heavy and run on dedicated CI shards.
 
 ---
 

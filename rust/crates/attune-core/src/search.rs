@@ -84,63 +84,44 @@ pub fn apply_cross_lang_penalty(results: &mut [SearchResult], query_lang: Lang) 
 pub const CROSS_DOMAIN_PENALTY: f32 = 0.4;
 
 /// v0.6 Phase B F-Pro Stage 4：从 query 文本检测领域意图（零 LLM 调用）。
-/// 关键词命中策略：每个 domain 维护一组特征词，统计命中数最多的 domain 返回。
-/// 返回 None = 未明确意图（不应用 cross-domain penalty，保持现状）。
 ///
-/// 关键词集建议来源：vertical plugin.yaml::chat_trigger.project_keywords。
-/// 当 plugin loader 已加载 vertical plugin 时调用方应优先用 plugin 数据；
-/// 这里仅提供 hardcoded fallback 让 OSS 裸装也能用基础识别能力。
-pub fn detect_query_domain(query: &str) -> Option<String> {
-    use std::collections::HashMap;
-
-    // hardcoded fallback：覆盖 attune-pro 6 vertical 的核心特征词
-    // 每个 domain 选 12-20 个高判别性词（避免泛词如"问题/可以"）
-    let keywords_by_domain: &[(&str, &[&str])] = &[
-        ("legal", &[
-            "法律", "法条", "法规", "法院", "判决", "案件", "案号", "诉讼", "起诉", "判例",
-            "民法", "刑法", "民法典", "合同法", "公司法", "商标法", "专利法",
-            "借贷", "商标", "股东", "股权", "侵权", "违约", "赔偿", "仲裁",
-            "反洗钱", "劳动合同", "工伤", "婚姻", "继承",
-        ]),
-        ("tech", &[
-            // Rust / 系统编程
-            "Rust", "ownership", "borrow", "lifetime",
-            // Python / 通用
-            "Python", "decorator", "tuple", "list comprehension",
-            // 算法 / 数据结构
-            "算法", "数据结构", "动态规划", "二叉树", "哈希", "梯度下降", "过拟合",
-            // 系统 / 分布式
-            "Linux", "Docker", "kubernetes", "k8s", "Redis", "MySQL", "PostgreSQL",
-            "分布式", "TCP", "HTTP", "Socket",
-            // 数据库
-            "SQL", "索引", "事务",
-        ]),
-        ("medical", &[
-            "病历", "诊断", "症状", "用药", "处方", "手术", "病人", "患者",
-            "临床", "医院", "禁忌", "副作用", "剂量",
-        ]),
-        ("patent", &[
-            "专利", "权利要求", "申请号", "IPC", "OA", "审查", "优先权", "新颖性",
-            "创造性", "实用新型", "外观设计", "PCT",
-        ]),
-    ];
-
+/// **S4b MU-5 (R8 boundary)**：领域词表 **完全由 plugin 提供**，不再硬编码任何行业
+/// 关键词。per oss-pro-strategy §4.3，legal / medical / patent / tech 全部属于
+/// attune-pro vertical —— 行业 domain detection 不应活在 OSS attune-core。
+///
+/// 关键词来源：vertical plugin（attune-pro）经
+/// `PluginRegistry::all_chat_trigger_keywords_by_domain()` 提供 `(domain, keywords)`
+/// 分组；调用方传入。每个 domain 统计命中词数，命中最多者胜出（同分按传入顺序优先）。
+///
+/// - `domain_keywords` 空（OSS 裸装无 vertical plugin）→ 返 `None` →
+///   不应用 cross-domain penalty → 走 generic ranking（graceful degrade）。
+///   domain-aware reranking 是 pro feature（§4.3），OSS 裸装优雅降级。
+/// - 任一 domain 命中 ≥1 词 → 返该 domain；零命中 → `None`。
+///
+/// `domain` 字符串需与 ingest 写入 item 的 `corpus_domain` 对齐
+/// （`apply_cross_domain_penalty` 比对 `corpus_domain`）。
+pub fn detect_query_domain<D: AsRef<str>, K: AsRef<str>>(
+    query: &str,
+    domain_keywords: &[(D, Vec<K>)],
+) -> Option<String> {
+    if domain_keywords.is_empty() {
+        return None;
+    }
     let q = query.to_lowercase();
-    let mut hit_counts: HashMap<&str, usize> = HashMap::new();
-    for (domain, kws) in keywords_by_domain {
-        for kw in *kws {
-            // 中文命中按子串；英文命中按子串（lowercase 已处理大小写）
-            if q.contains(&kw.to_lowercase()) {
-                *hit_counts.entry(*domain).or_insert(0) += 1;
-            }
+    // 同分按传入序优先 → 用严格 `>` 累积，首个达到最大命中数的 domain 胜出。
+    let mut best: Option<(&str, usize)> = None;
+    for (domain, kws) in domain_keywords {
+        let hits = kws
+            .iter()
+            // 中文/英文均按子串命中（lowercase 已统一英文大小写）
+            .filter(|kw| q.contains(&kw.as_ref().to_lowercase()))
+            .count();
+        // 至少 1 个命中才参与（避免误识别）；严格大于才替换 → 保留首见最大者
+        if hits >= 1 && best.map(|(_, b)| hits > b).unwrap_or(true) {
+            best = Some((domain.as_ref(), hits));
         }
     }
-    // 至少 1 个命中才返回（避免误识别），同分则按表序优先
-    hit_counts
-        .into_iter()
-        .max_by_key(|(_, c)| *c)
-        .filter(|(_, c)| *c >= 1)
-        .map(|(d, _)| d.to_string())
+    best.map(|(domain, _)| domain.to_string())
 }
 
 /// 跨领域降权：query 有 domain hint（如 "legal"）时，doc.corpus_domain 不匹配的降权。
@@ -582,6 +563,115 @@ mod tests {
         ];
         apply_cross_lang_penalty(&mut results, Lang::Mixed);
         assert_eq!(results[0].score, 0.5, "Mixed query 不应降权任何结果");
+    }
+
+    // ── S4b MU-5 (R8): detect_query_domain is plugin-driven, no hardcoded industry words ──
+
+    /// Helper: build a domain→keyword mapping the way the plugin registry would,
+    /// so tests don't depend on owned-vs-borrowed str types.
+    fn dk(pairs: &[(&'static str, &[&'static str])]) -> Vec<(&'static str, Vec<&'static str>)> {
+        pairs.iter().map(|(d, kws)| (*d, kws.to_vec())).collect()
+    }
+
+    #[test]
+    fn detect_query_domain_oss_bare_no_plugin_returns_none() {
+        // OSS 裸装无 vertical plugin → 空词表 → 永远 None（无 cross-domain penalty）。
+        // 这是 oss-pro-strategy §4.3 边界规则的代码层验证：行业 domain detection 不在 OSS。
+        let empty: Vec<(&str, Vec<&str>)> = Vec::new();
+        assert_eq!(detect_query_domain("反洗钱合同纠纷怎么处理", &empty), None);
+        assert_eq!(detect_query_domain("Rust ownership and borrowing", &empty), None);
+    }
+
+    #[test]
+    fn detect_query_domain_plugin_keywords_detect_correctly() {
+        // vertical plugin（attune-pro）提供 domain 词表后才识别。
+        let domains = dk(&[
+            ("legal", &["反洗钱", "诉讼", "合同"]),
+            ("medical", &["病历", "处方"]),
+        ]);
+        assert_eq!(
+            detect_query_domain("反洗钱合同纠纷怎么处理", &domains).as_deref(),
+            Some("legal")
+        );
+        assert_eq!(
+            detect_query_domain("帮我看看这份病历", &domains).as_deref(),
+            Some("medical")
+        );
+    }
+
+    #[test]
+    fn detect_query_domain_zero_hit_returns_none() {
+        // 提供了词表但 query 不含任何特征词 → None（不误识别）。
+        let domains = dk(&[("legal", &["诉讼", "合同"])]);
+        assert_eq!(detect_query_domain("今天天气怎么样", &domains), None);
+    }
+
+    #[test]
+    fn detect_query_domain_tie_prefers_input_order() {
+        // 两个 domain 各命中 1 词（平手）→ 按传入顺序取首个（legal 先于 tech）。
+        let domains = dk(&[
+            ("legal", &["合同"]),
+            ("tech", &["索引"]),
+        ]);
+        assert_eq!(
+            detect_query_domain("合同里的索引字段", &domains).as_deref(),
+            Some("legal")
+        );
+        // 顺序反转 → tech 胜出，证明的确是 input-order 而非字母序。
+        let domains_rev = dk(&[
+            ("tech", &["索引"]),
+            ("legal", &["合同"]),
+        ]);
+        assert_eq!(
+            detect_query_domain("合同里的索引字段", &domains_rev).as_deref(),
+            Some("tech")
+        );
+    }
+
+    #[test]
+    fn detect_query_domain_most_hits_wins() {
+        // 命中数多的 domain 胜出（不受 input order 影响）。
+        let domains = dk(&[
+            ("tech", &["索引"]),                 // 1 命中
+            ("legal", &["合同", "诉讼", "赔偿"]), // 3 命中
+        ]);
+        assert_eq!(
+            detect_query_domain("合同诉讼赔偿与索引", &domains).as_deref(),
+            Some("legal")
+        );
+    }
+
+    #[test]
+    fn detect_query_domain_case_insensitive_english() {
+        // 英文关键词大小写无关（query 与 keyword 都 lowercase 后子串匹配）。
+        let domains = dk(&[("tech", &["Rust", "Docker"])]);
+        assert_eq!(
+            detect_query_domain("How does RUST ownership work", &domains).as_deref(),
+            Some("tech")
+        );
+    }
+
+    #[test]
+    fn detect_query_domain_drives_cross_domain_penalty_only_with_plugin() {
+        // 端到端：plugin 提供词表 → detect → penalty 生效；无 plugin → 无 penalty。
+        let mk = |dom: &str| SearchResult {
+            item_id: "x".into(), score: 1.0, title: "t".into(), content: "c".into(),
+            source_type: "file".into(), inject_content: None,
+            corpus_domain: dom.into(), ..Default::default()
+        };
+        // OSS 裸装：detect → None → penalty no-op
+        let empty: Vec<(&str, Vec<&str>)> = Vec::new();
+        let d = detect_query_domain("反洗钱诉讼", &empty);
+        let mut results = vec![mk("tech")];
+        apply_cross_domain_penalty(&mut results, d.as_deref());
+        assert_eq!(results[0].score, 1.0, "OSS 裸装无词表 → 不降权");
+        // 装了 legal plugin：detect → legal → tech doc 被降权
+        let domains = dk(&[("legal", &["反洗钱", "诉讼"])]);
+        let d = detect_query_domain("反洗钱诉讼", &domains);
+        let mut results = vec![mk("tech")];
+        apply_cross_domain_penalty(&mut results, d.as_deref());
+        assert!((results[0].score - CROSS_DOMAIN_PENALTY).abs() < 1e-6,
+            "legal query + tech doc 应降权到 {CROSS_DOMAIN_PENALTY}: {}", results[0].score);
     }
 
     #[test]

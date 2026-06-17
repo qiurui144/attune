@@ -2,6 +2,7 @@
 
 import type { JSX } from 'preact';
 import { EmptyState } from '../components';
+import { currentView } from '../store/signals';
 import { t } from '../i18n';
 
 export function KnowledgeView(): JSX.Element {
@@ -14,6 +15,10 @@ export function KnowledgeView(): JSX.Element {
         icon="📊"
         title={t('knowledge.empty.title')}
         description={t('knowledge.empty.desc')}
+        actions={[
+          { label: t('knowledge.empty.action_items'), onClick: () => (currentView.value = 'items'), variant: 'primary' },
+          { label: t('knowledge.empty.action_remote'), onClick: () => (currentView.value = 'remote'), variant: 'secondary' },
+        ]}
       />
     </div>
   );

@@ -733,8 +733,9 @@ pub fn format_diarized_text(segments: &[TranscriptSegment]) -> String {
 
 /// 自动下载 whisper.cpp ggml 模型文件（按 tier）。
 ///
-/// 来源：HuggingFace `ggerganov/whisper.cpp` 仓（ggml-{tiny/base/small/medium}-q8_0.bin）。
-/// HF_ENDPOINT 环境变量已由 state.rs 按 region 设好（China → hf-mirror.com）。
+/// 来源：`ggerganov/whisper.cpp` 仓（ggml-{tiny/base/small/medium}-q8_0.bin）。下载源由 S8
+/// 动态选择(`model_source`：候选注册表 + 健康探测 + failover）解析 —— whisper 在 ModelScope
+/// 无覆盖会被自动跳过,改走 company-mirror / hf-mirror / HF 官方。
 ///
 /// 模型保存到 ~/.local/share/attune/models/whisper/{filename}，让 detect_asr_backend
 /// 之后能找到。
@@ -753,14 +754,26 @@ pub fn ensure_whisper_model(ggml_filename: &str) -> crate::error::Result<std::pa
         return Ok(target);
     }
 
-    let api = hf_hub::api::sync::Api::new()
-        .map_err(|e| VaultError::ModelLoad(format!("hf-hub init: {e}")))?;
-    let repo = api.model("ggerganov/whisper.cpp".to_string());
-    let src = repo
-        .get(ggml_filename)
-        .map_err(|e| VaultError::ModelLoad(format!("download {ggml_filename}: {e}")))?;
-    std::fs::copy(&src, &target)
-        .map_err(|e| VaultError::ModelLoad(format!("copy ggml file: {e}")))?;
+    // 离线模式: 缓存未命中时禁止网络下载, 立即 Err → 调用方 graceful degrade(不阻塞)。
+    if crate::infer::model_store::hf_hub_offline() {
+        return Err(VaultError::ModelLoad(format!(
+            "whisper model {ggml_filename} not cached and HF_HUB_OFFLINE is set; refusing network download"
+        )));
+    }
+
+    // S8: 经动态源选择(候选注册表 + 健康探测 + failover)解析下载源,替代静态单源
+    // `hf_endpoint()`。whisper.cpp 在 ModelScope **无覆盖** —— S8 selector 对其
+    // 自动跳过 ModelScope(OnlyXenovaOnnx),改走 company-mirror / hf-mirror / HF 官方,
+    // 任一源失败自动切次优。源探测只在此显式下载路径(非请求路径,R3)。
+    // HF_HUB_OFFLINE 已在上方拦截;显式 HF_ENDPOINT 由 download_with_failover 内部尊重。
+    let sources = crate::infer::model_source::resolve_sources_for("ggerganov/whisper.cpp");
+    let used = crate::infer::model_source::download_with_failover(
+        &sources,
+        "ggerganov/whisper.cpp",
+        ggml_filename,
+        &target,
+    )?;
+    log::info!("whisper model {ggml_filename} downloaded via source '{used}'");
     Ok(target)
 }
 

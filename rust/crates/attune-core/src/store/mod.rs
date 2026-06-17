@@ -14,9 +14,12 @@ mod conversations;
 mod signals;
 mod chunk_summaries;
 mod annotations;
+mod organization;        // 文件夹一键整理:organization_proposals 缓存 + 加密 CRUD + TTL
+pub use organization::{ApplyResult, ConfirmedGroup};
 mod project;
 mod memories;
 mod memory_vectors;
+mod migrations_mem;      // 记忆延续:memory_migrations 进度表 + list_stale_memory_ids
 mod web_search_cache;
 mod chunk_breadcrumbs;
 mod links;               // internal knowledge linker — item_entities + item_links tables
@@ -30,9 +33,12 @@ pub mod usage;            // Plan A1 Task D: usage_events CRUD + UsageSummary
 pub mod agent_telemetry;  // ACP-3 §4.5-F: per-(agent×model) failure-rate roll-up over usage_events
 pub mod cache;            // Plan A1 Task D: llm_cache / embed_cache CRUD
 pub mod agent_state;      // ACP-6: versioned, plugin-scoped, encrypted learned/user state
+pub mod plugin_entitlements; // trust-chain: client entitlement cache (license/trial/status)
 pub use agent_state::{AgentStateKind, AgentStateRow};
 pub mod state_migration;  // ACP-6 Task 3: learned-state migration + orphan quarantine (§2.3)
 pub use state_migration::{MigratedRow, MigrationReport, MigrationStep, OrphanRow};
+pub mod job_queue;        // G5: durable multi-kind job queue (generalizes reindex_queue)
+pub use job_queue::RecoverSummary;
 
 pub use types::*;
 
@@ -41,6 +47,31 @@ pub use web_search_cache::DEFAULT_TTL_SECS as DEFAULT_WEB_SEARCH_TTL_SECS;
 
 use rusqlite::{params, Connection};
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::HashMap;
+
+/// Process-wide registry of per-DB-path open locks.
+///
+/// `Store::open` is invoked on the same `vault.db` from several places at boot
+/// (vault unlock, `install_job_store`, `install_usage_aggregator`, background
+/// workers) and these can race. SQLite file locking + busy_timeout does not
+/// protect the create+`journal_mode=WAL`+`VACUUM`+schema-migration sequence well
+/// when the file is being created concurrently (observed: `locking protocol`,
+/// `database is locked`, and a non-atomic check-then-`ALTER ADD COLUMN` TOCTOU
+/// → `duplicate column name`). Serializing the *open path* (not steady-state
+/// connections, which are already separate handles) in-process eliminates all
+/// of these deterministically; the critical section is sub-ms.
+fn open_lock_for(path: &Path) -> Arc<Mutex<()>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = registry.lock().unwrap_or_else(|e| e.into_inner());
+    // Canonicalize-lite: in-memory DBs share path ":memory:"; on-disk use the
+    // path verbatim (callers always pass the same db_path()).
+    map.entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 // crypto + Key32 仅 tests 内引用 (#[cfg(test)] 子模块经常重新 use 它们)；
 // 顶部 import 保留是为防未来 mod.rs 主体加 dek 字段时不必再补 import。
@@ -96,6 +127,8 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
 CREATE INDEX IF NOT EXISTS idx_items_deleted ON items(is_deleted);
+-- Composite index: covers `WHERE is_deleted = 0 ORDER BY created_at` (list_all_item_ids, classify, index rebuild).
+CREATE INDEX IF NOT EXISTS idx_items_active_created ON items(is_deleted, created_at);
 
 -- 原始证据文件留存。
 -- items.content 只存 OCR 文本；律师需核对原图判断 OCR 转录是否准确 →
@@ -234,6 +267,22 @@ CREATE TABLE IF NOT EXISTS git_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_git_sources_synced ON git_sources(last_synced_at);
 
+-- trust-chain (T4): 客户端 entitlement 缓存。付费插件本地授权态,随 vault 字段级
+-- 加密(license_id_enc 是 dek-AES-256-GCM 密文 BLOB)。ACP-6 边界:不进 plugins/<id>/,
+-- 插件升级 wholesale 替换不触碰。纯追加表:老 vault 下次 open 自动建表,SCHEMA_VERSION 不 bump。
+-- plugin_id PRIMARY KEY → 同 plugin 只存最优 status 一条(PERF-5 upsert 时归并)。
+CREATE TABLE IF NOT EXISTS plugin_entitlements (
+    plugin_id          TEXT PRIMARY KEY,
+    license_id_enc     BLOB NOT NULL,      -- AES-256-GCM(license_id) — 敏感,加密
+    tier               TEXT NOT NULL,      -- free|trial|paid
+    status             TEXT NOT NULL,      -- active|suspended|revoked
+    trial_expires      TEXT,               -- RFC3339|NULL
+    signing_pubkey_hex TEXT NOT NULL,
+    last_verified_at   TEXT NOT NULL,      -- RFC3339, 时钟回拨 + freshness 单调基准
+    grace_started_at   TEXT,               -- NULL=非宽限态
+    updated_at         TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -301,6 +350,35 @@ CREATE TABLE IF NOT EXISTS reindex_queue (
 CREATE INDEX IF NOT EXISTS idx_reindex_queue_created ON reindex_queue(created_at);
 CREATE INDEX IF NOT EXISTS idx_reindex_queue_item ON reindex_queue(item_id);
 
+-- G5 durable job queue (per docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md).
+-- Generalizes reindex_queue to multiple job kinds (asr/ocr/agent/ingest_batch).
+-- Survives restart: boot recovery requeues Running→Queued for idempotent kinds
+-- (see Store::recover_on_boot) instead of the old in-memory JobRegistry which
+-- dropped all in-flight jobs. Timestamps are epoch-ms (i64) — timeout math
+-- needs integer comparison (deliberate divergence from reindex_queue rfc3339).
+-- finished_ms: set on done/failed/cancelled so elapsed_ms survives restart
+-- (the old in-memory Job carried elapsed via Instant, not persistable).
+CREATE TABLE IF NOT EXISTS job_queue (
+    id            TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    state         TEXT NOT NULL DEFAULT 'queued',
+    stage_json    TEXT,
+    progress      REAL NOT NULL DEFAULT 0,
+    priority      INTEGER NOT NULL DEFAULT 0,
+    payload_json  TEXT NOT NULL,
+    result_json   TEXT,
+    error_code    TEXT,
+    error_message TEXT,
+    warnings_json TEXT,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    created_ms    INTEGER NOT NULL,
+    started_ms    INTEGER,
+    finished_ms   INTEGER,
+    deadline_ms   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_job_queue_state_prio ON job_queue(state, priority DESC, created_ms);
+CREATE INDEX IF NOT EXISTS idx_job_queue_kind ON job_queue(kind);
+
 CREATE TABLE IF NOT EXISTS skill_signals (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     query           TEXT NOT NULL,
@@ -318,7 +396,12 @@ CREATE TABLE IF NOT EXISTS skill_signals (
     ref_id          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_skill_sig_processed ON skill_signals(processed, created_at);
-CREATE INDEX IF NOT EXISTS idx_skill_sig_kind ON skill_signals(kind, processed, created_at);
+-- B3: idx_skill_sig_kind is built in migrate_skill_signals_v07 AFTER `ALTER TABLE
+-- skill_signals ADD COLUMN kind`. Building it here in the unconditional SCHEMA_SQL
+-- crashes existing pre-v0.7 vaults (kind-less table) with `no such column: kind`,
+-- because CREATE TABLE IF NOT EXISTS is a no-op on the old table and the ALTER has
+-- not run yet at this point. The migrate fn runs on both open() and open_memory(),
+-- so fresh + in-memory DBs still get the index.
 
 -- Chunk 摘要缓存 —— 上下文压缩流水线（Batch B.1）
 --
@@ -334,7 +417,11 @@ CREATE INDEX IF NOT EXISTS idx_skill_sig_kind ON skill_signals(kind, processed, 
 --   orig_chars —— 原 chunk 字符数（统计用）
 CREATE TABLE IF NOT EXISTS chunk_summaries (
     chunk_hash  TEXT NOT NULL,
-    strategy    TEXT NOT NULL CHECK(strategy IN ('economical','accurate')),
+    -- chat-context strategies ('economical','accurate') + document-intelligence deep-summary
+    -- namespace ('deepsum:brief' / 'deepsum:standard' / 'deepsum:detailed'). Namespace-isolated
+    -- per spec 2026-06-06-oss-document-intelligence §10 (same table, no data migration needed;
+    -- older vaults rebuilt in place by migrate_chunk_summaries_deepsum_strategy).
+    strategy    TEXT NOT NULL CHECK(strategy IN ('economical','accurate') OR strategy LIKE 'deepsum:%'),
     item_id     TEXT NOT NULL,
     model       TEXT NOT NULL,
     summary     BLOB NOT NULL,
@@ -679,6 +766,13 @@ impl Store {
 
     /// 打开或创建数据库，初始化 schema
     pub fn open(path: &Path) -> Result<Self> {
+        // Serialize concurrent opens of the *same* DB file in-process (see
+        // `open_lock_for`): the create + WAL + VACUUM + migration bootstrap below
+        // is not safe under a concurrent create on the same path. The guard is
+        // released when this fn returns; steady-state queries use the returned,
+        // already-open connection and are unaffected.
+        let open_lock = open_lock_for(path);
+        let _open_guard = open_lock.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -697,25 +791,63 @@ impl Store {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
+        // Concurrent-open safety: `Store::open` runs on every vault unlock, the
+        // job-store/usage-aggregator install, and each background worker — and
+        // these can race on the *same* DB file at boot (e.g. install_job_store
+        // running while init_search_engines opens its own connection). The schema
+        // bootstrap below is a check-then-`ALTER TABLE ADD COLUMN` sequence whose
+        // TOCTOU is *not* protected by busy_timeout: two connections can both see
+        // a column absent, then both ALTER, and the loser gets
+        // `duplicate column name: ...` → `Store::open` Err → job_store stays None
+        // → office routes return 503 instead of 404 (only on fresh runners where
+        // no model cache shifts the init timing). Wrapping SCHEMA_SQL + the
+        // migrations in a single `BEGIN IMMEDIATE` transaction serializes openers
+        // on the write lock (honoring busy_timeout above): the second opener
+        // blocks until the first commits, then its existence checks see the
+        // columns already present and skip the ALTERs.
+        conn.execute_batch("BEGIN IMMEDIATE;")?;
+        if let Err(e) = Self::bootstrap_schema(&conn) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+        conn.execute_batch("COMMIT;")?;
+        let store = Self { conn };
+        // QW-1: 一次性 purge embed_queue 终态行（done / abandoned）。
+        // 这只是启动 housekeeping；周期清理由 cleanup worker 跑。失败静默忽略。
+        let _ = store.purge_completed_embed_queue();
+        // G5 NOTE: job-queue `recover_on_boot` is deliberately NOT called here.
+        // `Store::open` runs on every vault unlock / aggregator install / worker
+        // connection — recovering here would requeue jobs that are legitimately
+        // Running on another connection (double-execution; caught by the 8-worker
+        // race test in tests/job_queue_durable.rs). The server calls it exactly
+        // once per process boot (AppState::install_job_store).
+        Ok(store)
+    }
+
+    /// Run SCHEMA_SQL + the additive migration sequence on `conn`.
+    ///
+    /// Factored out of `open` so the whole sequence runs inside a single
+    /// `BEGIN IMMEDIATE` transaction (concurrent-open safety — see `open`).
+    /// Must be called with an open write transaction; the caller commits.
+    fn bootstrap_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA_SQL)?;
-        Self::migrate_task_type(&conn)?;
-        Self::migrate_breadcrumbs_encrypt(&conn)?;
+        Self::migrate_task_type(conn)?;
+        Self::migrate_breadcrumbs_encrypt(conn)?;
         // v0.6 fix: 复位 stuck 在 processing 的任务回 pending（上次进程崩溃 / kill）
         let _ = conn.execute(
             "UPDATE embed_queue SET status = 'pending' WHERE status = 'processing'",
             [],
         );
-        Self::migrate_items_privacy_tier(&conn)?;
-        Self::migrate_corpus_domain(&conn)?;
-        Self::migrate_items_content_hash(&conn)?;
-        Self::migrate_skill_signals_v07(&conn)?;
-        Self::migrate_memories_multilayer(&conn)?;
-        Self::ensure_schema_version(&conn)?;
-        let store = Self { conn };
-        // QW-1: 一次性 purge embed_queue 终态行（done / abandoned）。
-        // 这只是启动 housekeeping；周期清理由 cleanup worker 跑。失败静默忽略。
-        let _ = store.purge_completed_embed_queue();
-        Ok(store)
+        Self::migrate_items_privacy_tier(conn)?;
+        Self::migrate_corpus_domain(conn)?;
+        Self::migrate_items_content_hash(conn)?;
+        Self::migrate_skill_signals_v07(conn)?;
+        Self::migrate_memories_multilayer(conn)?;
+        Self::migrate_chunk_summaries_deepsum_strategy(conn)?;
+        Self::migrate_organization_proposals(conn)?;
+        Self::migrate_memory_migrations(conn)?;
+        Self::ensure_schema_version(conn)?;
+        Ok(())
     }
 
     /// 打开内存数据库（测试用）
@@ -730,6 +862,8 @@ impl Store {
         Self::migrate_items_content_hash(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
+        Self::migrate_organization_proposals(&conn)?;
+        Self::migrate_memory_migrations(&conn)?;
         Self::ensure_schema_version(&conn)?;
         Ok(Self { conn })
     }
@@ -807,13 +941,24 @@ impl Store {
         // 1) 全新 vault
         if !path.exists() {
             let conn = Connection::open(path)?;
-            conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")?;
+            // busy_timeout: this runs before the main connection's pragma, and a
+            // concurrent Store::open on the same fresh path can hold a write lock
+            // here (VACUUM). Without the timeout the loser fails SQLITE_BUSY →
+            // open Err (the autovacuum failure itself is non-fatal, but it logs
+            // noisily). Wait for the lock instead.
+            conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+            // The first writer creates + stamps the file; a concurrent opener may
+            // find it already exists by the time it runs VACUUM, which fails with
+            // "cannot VACUUM from within a transaction" / lock — treat any failure
+            // as benign no-op (the existing-vault path below handles mode check).
+            let _ = conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;");
             drop(conn);
             return Ok(());
         }
         // 2) 老 vault — 先探测当前 mode
         let current_mode: i64 = {
             let conn = Connection::open(path)?;
+            conn.execute_batch("PRAGMA busy_timeout=5000;")?;
             conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
                 .unwrap_or(0)
         };
@@ -997,6 +1142,49 @@ impl Store {
         Ok(())
     }
 
+    /// document-intelligence (2026-06-06): relax the `chunk_summaries.strategy` CHECK to admit
+    /// the `deepsum:<level>` namespace (deep summary cache). Idempotent — only rebuilds when the
+    /// stored DDL still carries the old restrictive CHECK (`IN ('economical','accurate')` without
+    /// the `deepsum:%` clause). SQLite cannot ALTER a CHECK in place, so we rebuild via the
+    /// canonical 12-step table-redef recipe. Existing rows are copied verbatim (no data change;
+    /// spec §10 namespace-isolated). PRIMARY KEY (chunk_hash, strategy) is preserved.
+    fn migrate_chunk_summaries_deepsum_strategy(conn: &Connection) -> Result<()> {
+        let ddl: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_summaries'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        let needs_rebuild = match ddl {
+            Some(sql) => sql.contains("CHECK") && !sql.contains("deepsum"),
+            None => false, // table absent → fresh SCHEMA_SQL already has the relaxed CHECK
+        };
+        if !needs_rebuild {
+            return Ok(());
+        }
+        // Canonical table-rebuild (foreign_keys already ON; chunk_summaries has no FK so order is safe).
+        conn.execute_batch(
+            "CREATE TABLE chunk_summaries_new (
+                 chunk_hash  TEXT NOT NULL,
+                 strategy    TEXT NOT NULL CHECK(strategy IN ('economical','accurate') OR strategy LIKE 'deepsum:%'),
+                 item_id     TEXT NOT NULL,
+                 model       TEXT NOT NULL,
+                 summary     BLOB NOT NULL,
+                 orig_chars  INTEGER NOT NULL,
+                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                 PRIMARY KEY (chunk_hash, strategy)
+             );
+             INSERT INTO chunk_summaries_new
+                 SELECT chunk_hash, strategy, item_id, model, summary, orig_chars, created_at
+                 FROM chunk_summaries;
+             DROP TABLE chunk_summaries;
+             ALTER TABLE chunk_summaries_new RENAME TO chunk_summaries;
+             CREATE INDEX IF NOT EXISTS idx_chunk_sum_item ON chunk_summaries(item_id);",
+        )?;
+        Ok(())
+    }
+
     /// v0.7 自学习闭环：skill_signals 新增 kind + ref_id 列（幂等）
     ///
     /// 老 vault 升级：所有现存信号默认 kind='search_miss'（与原语义一致），
@@ -1074,6 +1262,11 @@ impl Store {
                 [],
             )?;
         }
+        // Index on privacy_tier: covers L0 filter queries. Added after column migration
+        // to ensure the column exists before CREATE INDEX runs (idempotent).
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_items_privacy_tier ON items(privacy_tier);",
+        )?;
         Ok(())
     }
 
@@ -1247,6 +1440,27 @@ mod tests {
 
     fn test_dek() -> Key32 {
         Key32::generate()
+    }
+
+    /// Regression: concurrent `Store::open` on the same fresh on-disk path must
+    /// all succeed. Before the per-path open lock + transactional bootstrap, the
+    /// non-atomic check-then-`ALTER ADD COLUMN` migrations raced
+    /// (`duplicate column name: task_type`) and the WAL/VACUUM create raced
+    /// (`database is locked` / `locking protocol`), making `Store::open` return
+    /// Err on a fresh runner — which left the office job-store None → routes 503
+    /// instead of 404.
+    #[test]
+    fn concurrent_open_same_fresh_path_all_succeed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("vault.db");
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || Store::open(&p).map(|_| ())));
+        }
+        for h in handles {
+            h.join().unwrap().expect("concurrent Store::open must not Err");
+        }
     }
 
     #[test]
@@ -2238,5 +2452,109 @@ mod tests_annotations {
         assert_eq!(store.list_annotations(&dek, &item_id).unwrap().len(), 0);
         // count 是裸 SQL 查表 —— 还能看到（作为内部指标），但外部不可见
         assert_eq!(store.count_annotations(&item_id).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tests_skill_signals_migration {
+    //! B3 regression: an existing pre-v0.7 vault has a `skill_signals` table WITHOUT
+    //! the `kind` column. Building `idx_skill_sig_kind` in the unconditional SCHEMA_SQL
+    //! crashed `Store::open()` on such vaults with `no such column: kind` because the
+    //! index ran before `migrate_skill_signals_v07` could ALTER the column in. The fix
+    //! moves the index creation into the migrate fn (after the ALTER). These tests guard
+    //! both the upgrade path (no data loss) and the fresh-install path (index still built).
+    use super::*;
+    use rusqlite::Connection;
+
+    /// Build a minimal pre-v0.7 `skill_signals` table (no `kind` / `ref_id` columns)
+    /// at `path`, seed one row, and close the connection.
+    fn seed_old_schema(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE skill_signals (
+                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                 query           TEXT NOT NULL,
+                 knowledge_count INTEGER NOT NULL DEFAULT 0,
+                 web_used        INTEGER NOT NULL DEFAULT 0,
+                 processed       INTEGER NOT NULL DEFAULT 0,
+                 created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_signals (query, knowledge_count, web_used) VALUES ('legacy query', 0, 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn has_column(conn: &Connection, col: &str) -> bool {
+        let c: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('skill_signals') WHERE name = ?1",
+                [col],
+                |r| r.get(0),
+            )
+            .unwrap();
+        c > 0
+    }
+
+    fn has_index(conn: &Connection, idx: &str) -> bool {
+        let c: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [idx],
+                |r| r.get(0),
+            )
+            .unwrap();
+        c > 0
+    }
+
+    #[test]
+    fn open_upgrades_old_skill_signals_without_kind_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old-vault.db");
+        seed_old_schema(&path);
+
+        // Before B3 fix this returned Err(no such column: kind). It must now succeed.
+        let store = Store::open(&path).expect("open() must upgrade a kind-less skill_signals table");
+
+        // kind + ref_id columns added by the migrate fn.
+        assert!(has_column(&store.conn, "kind"), "kind column must be present after upgrade");
+        assert!(has_column(&store.conn, "ref_id"), "ref_id column must be present after upgrade");
+        // The index is now built in the migrate fn (after the ALTER).
+        assert!(has_index(&store.conn, "idx_skill_sig_kind"), "idx_skill_sig_kind must be built");
+
+        // Zero data loss: the legacy row survives and defaults to kind='search_miss'.
+        let (count, kind): (i64, String) = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*), MIN(kind) FROM skill_signals WHERE query = 'legacy query'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "legacy skill_signals row must not be dropped on upgrade");
+        assert_eq!(kind, "search_miss", "legacy row must default to kind='search_miss'");
+    }
+
+    #[test]
+    fn open_is_idempotent_on_already_migrated_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.db");
+        seed_old_schema(&path);
+        // Open twice — second open must be a clean no-op (idempotent migrate + index).
+        let _ = Store::open(&path).unwrap();
+        let store = Store::open(&path).expect("re-open of an already-migrated vault must succeed");
+        assert!(has_index(&store.conn, "idx_skill_sig_kind"));
+    }
+
+    #[test]
+    fn fresh_install_still_builds_kind_index() {
+        // open_memory() runs SCHEMA_SQL (no index line now) + the migrate fn. The index
+        // must still exist so fresh + in-memory DBs are not regressed.
+        let store = Store::open_memory().unwrap();
+        assert!(has_column(&store.conn, "kind"));
+        assert!(has_index(&store.conn, "idx_skill_sig_kind"), "fresh DB must still have idx_skill_sig_kind");
     }
 }

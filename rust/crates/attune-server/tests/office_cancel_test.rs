@@ -1,120 +1,95 @@
-//! D5.2 — L2 cancel semantics test.
+//! D5.2 — L2 cancel semantics test (G5: durable JobStore edition).
 //!
-//! Spec §6.3:
+//! Spec §6.3 (office) + G5 spec §7:
 //!   - DELETE on running job → state=Cancelled
-//!   - DELETE on Done → 409 job-already-completed
+//!   - DELETE on Done → 409 job-already-completed (route guards; store refuses too)
 //!   - DELETE on Cancelled → 409 job-already-cancelled
 //!   - WS disconnect does NOT auto-cancel
 //!
-//! 不依赖真实 whisper-cli (CI 不一定有), 用 JobRegistry 直接操作 + REST DELETE.
+//! 不依赖真实 whisper-cli (CI 不一定有)：直接驱动 durable Store 的状态机 —
+//! office.rs 的 delete_job / WS cancel 路径就是这些 store 转换的薄包装。
 
-use attune_core::office_job_queue::{Job, JobError, JobRegistry, JobStage, JobState};
+use attune_core::office_job_queue::{JobKind, JobState};
+use attune_core::store::Store;
 
 #[test]
-fn cancel_running_job_via_registry_flips_state() {
-    let registry = JobRegistry::new();
-    let mut j = Job::new("test-1".into());
-    j.state = JobState::Running;
-    j.stage = JobStage::Transcribing;
-    registry.insert(j);
+fn cancel_running_job_flips_state() {
+    let store = Store::open_memory().unwrap();
+    let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+    store.claim_next_job().unwrap(); // → Running
+    assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Running);
 
-    // Simulate DELETE: route reads job, sees state=Running, calls update.
-    let job = registry.get("test-1").unwrap();
-    assert_eq!(job.state, JobState::Running);
-
-    registry.update("test-1", |j| j.state = JobState::Cancelled);
-    let after = registry.get("test-1").unwrap();
-    assert_eq!(after.state, JobState::Cancelled);
+    assert!(store.cancel_job(&id).unwrap(), "running job is cancellable");
+    assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Cancelled);
 }
 
 #[test]
-fn cancel_done_job_should_be_rejected_at_route_level() {
-    // The route returns 409 before calling update, so registry stays Done.
-    let registry = JobRegistry::new();
-    let mut j = Job::new("done-1".into());
-    j.state = JobState::Done;
-    j.result_json = Some("{}".into());
-    registry.insert(j);
+fn cancel_done_job_is_refused_by_store_and_route() {
+    // The route returns 409 before calling cancel; the store ALSO refuses
+    // (guarded to queued/running) so a race cannot flip a terminal job.
+    let store = Store::open_memory().unwrap();
+    let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+    store.claim_next_job().unwrap();
+    store.complete_job(&id, "{}").unwrap();
 
-    let job = registry.get("done-1").unwrap();
-    // Route logic: if job.state == Done → return 409, don't update.
-    match job.state {
-        JobState::Done => { /* would return 409 */ }
-        _ => panic!("expected Done"),
-    }
-    // Registry should remain Done
-    assert_eq!(registry.get("done-1").unwrap().state, JobState::Done);
+    assert!(!store.cancel_job(&id).unwrap(), "done job must not cancel");
+    assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Done);
 }
 
 #[test]
 fn cancel_failed_job_treated_as_terminal() {
-    let registry = JobRegistry::new();
-    let mut j = Job::new("failed-1".into());
-    j.state = JobState::Failed;
-    j.error = Some(JobError {
-        message: "test".into(),
-        code: "asr-engine-failed".into(),
-    });
-    registry.insert(j);
+    let store = Store::open_memory().unwrap();
+    let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+    store.claim_next_job().unwrap();
+    store.fail_job(&id, "asr-engine-failed", "test").unwrap();
 
-    let job = registry.get("failed-1").unwrap();
-    assert_eq!(job.state, JobState::Failed);
-    // Route returns 409 for Failed too (terminal state)
+    assert!(!store.cancel_job(&id).unwrap(), "failed is terminal");
+    assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Failed);
 }
 
 #[test]
 fn ws_disconnect_does_not_change_job_state() {
-    // WS handler only flips state on receiving {"type":"cancel"} text frame.
-    // A bare close (no cancel frame) leaves job alone.
-    let registry = JobRegistry::new();
-    let mut j = Job::new("ws-test".into());
-    j.state = JobState::Running;
-    j.stage = JobStage::Transcribing;
-    registry.insert(j);
-
-    // Simulate: WS opens, ticks once (no cancel sent), client closes connection.
-    // No update calls happen on close path.
-    assert_eq!(registry.get("ws-test").unwrap().state, JobState::Running);
+    // WS handler only cancels on an explicit {"type":"cancel"} frame; a bare
+    // close performs no store write — the job keeps running.
+    let store = Store::open_memory().unwrap();
+    let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+    store.claim_next_job().unwrap();
+    // (no cancel_job call = WS closed without cancel frame)
+    assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Running);
 }
 
 #[test]
-fn cancel_all_running_marks_in_flight_with_warning() {
-    let registry = JobRegistry::new();
-    let mut running = Job::new("r1".into());
-    running.state = JobState::Running;
-    registry.insert(running);
+fn restart_requeues_running_instead_of_mass_cancel() {
+    // G5 replaces JobRegistry::cancel_all_running ("server restarted, please
+    // resubmit") with recover_on_boot: idempotent ASR requeues, Done untouched.
+    let store = Store::open_memory().unwrap();
+    let running = store.enqueue_job(JobKind::Asr, "{}", 5, None).unwrap();
+    let queued = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+    let done = store.enqueue_job(JobKind::Asr, "{}", 9, None).unwrap();
+    let c = store.claim_next_job().unwrap().unwrap();
+    assert_eq!(c.id, done);
+    store.complete_job(&done, "{}").unwrap();
+    store.claim_next_job().unwrap(); // `running` (prio 5) → Running
 
-    let queued = Job::new("q1".into()); // default Queued
-    registry.insert(queued);
-
-    let mut done = Job::new("d1".into());
-    done.state = JobState::Done;
-    registry.insert(done);
-
-    registry.cancel_all_running();
-
-    assert_eq!(registry.get("r1").unwrap().state, JobState::Cancelled);
-    assert_eq!(registry.get("q1").unwrap().state, JobState::Cancelled);
-    // Done preserved
-    assert_eq!(registry.get("d1").unwrap().state, JobState::Done);
-
-    // Warning added to former-running
-    let r1 = registry.get("r1").unwrap();
-    assert!(r1.warnings.iter().any(|w| w.contains("server restarted")));
+    let summary = store.recover_on_boot().unwrap();
+    assert_eq!(summary.requeued, 1);
+    assert_eq!(store.get_job(&running).unwrap().unwrap().state, JobState::Queued);
+    assert_eq!(store.get_job(&queued).unwrap().unwrap().state, JobState::Queued);
+    assert_eq!(store.get_job(&done).unwrap().unwrap().state, JobState::Done);
 }
 
 #[test]
-fn fifo_queue_position_collapses_after_cancel() {
-    let registry = JobRegistry::new();
-    registry.insert(Job::new("j1".into()));
-    std::thread::sleep(std::time::Duration::from_millis(2));
-    registry.insert(Job::new("j2".into()));
-    std::thread::sleep(std::time::Duration::from_millis(2));
-    registry.insert(Job::new("j3".into()));
+fn queue_position_collapses_after_cancel() {
+    // Priority-distinct enqueues make claim order deterministic (created_ms has
+    // ms resolution — same-ms ties break by id, which is random uuid).
+    let store = Store::open_memory().unwrap();
+    let _j1 = store.enqueue_job(JobKind::Asr, "{}", 9, None).unwrap();
+    let j2 = store.enqueue_job(JobKind::Asr, "{}", 5, None).unwrap();
+    let j3 = store.enqueue_job(JobKind::Asr, "{}", 1, None).unwrap();
 
-    assert_eq!(registry.queue_position("j3"), 2);
+    assert_eq!(store.job_queue_position(&j3).unwrap(), 2);
 
-    // Cancel j2 → j3's position should drop to 1 (only j1 older + still Queued)
-    registry.update("j2", |j| j.state = JobState::Cancelled);
-    assert_eq!(registry.queue_position("j3"), 1);
+    // Cancel j2 → j3's position drops to 1 (only j1 ahead and still Queued).
+    assert!(store.cancel_job(&j2).unwrap());
+    assert_eq!(store.job_queue_position(&j3).unwrap(), 1);
 }

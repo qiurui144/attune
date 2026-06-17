@@ -1,6 +1,6 @@
 [package]
 name = "attune-core"
-version = "1.2.0"
+version = "1.4.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,13 +17,15 @@ attune-agent-sdk = { workspace = true }
 #   async-trait: CacheBackend trait (async get/put/clear/count for future Redis/disk backends)
 blake3 = "1.5"
 async-trait = "0.1"
-# lru 0.13 — pinned to match attune-server (RUSTSEC-2026-0002 fix; 0.12 had unsound IterMut)
-lru = "0.13"
+# lru 0.18 — RUSTSEC-2026-0002 (IterMut Stacked-Borrows) patched in >=0.16.3.
+# Must match attune-server. NOTE: tantivy 0.22 still pins lru 0.12 transitively;
+# that path stays advisory-listed until tantivy upgrades (see deny.toml ignore).
+lru = "0.18"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = { workspace = true }
 argon2 = "0.5"
 aes-gcm = "0.10"
-rand = "0.8"
+rand = "0.8.6"  # >=0.8.6 fixes RUSTSEC-2026-0097 (custom-logger UB) within the 0.8 line
 zeroize = { version = "1", features = ["derive"] }
 hmac = "0.12"
 sha2 = "0.10"
@@ -48,6 +50,11 @@ feed-rs = "2.3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 webpki-roots = "0.26"
+rustls-pemfile = "2"  # 解析 ATTUNE_CLOUD_CA_PEM(自托管/LAN CA)→ CertificateDer
+# X.509 leaf-cert parsing for SPKI cert-pinning (cloud slice8 §3.2). Pure-Rust
+# RustCrypto stack (der/spki/const-oid already resolved in the tree via
+# ed25519-dalek), WASM-safe; avoids the heavier x509-parser (asn1-rs/nom) tree.
+x509-cert = { version = "0.2", default-features = false, features = ["pem"] }
 tokio = { workspace = true }
 tantivy = "0.22"
 tantivy-jieba = "0.11"
@@ -70,7 +77,9 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 kreuzberg-paddle-ocr = "4.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 imageproc = { version = "0.26", default-features = false }
-hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }  # 0.5 起加 rustls-tls 路径; 这里用 ureq (默认 rustls), 不引入 native-tls/openssl-sys
+# hf-hub 已移除(C1): 其 0.5 ureq agent 不暴露超时配置, repo.get() 对连上后传输中途 stall
+# 的死源会永久 hang(9936dca gdb 实证)。模型下载改走 model_store::download_hf_file —— 带
+# connect_timeout + total timeout 的流式 reqwest, HF-resolve URL 兼容(含 ModelScope /models)。
 scraper = "0.21"
 calamine = { version = "0.26", features = ["dates"] }
 urlencoding = "2"
@@ -90,7 +99,9 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 # 与 rusqlite/usearch 同 C 负担）；vendored-openssl 关掉 —— 走 libgit2 内置
 # http(s) transport（schannel on Win / SecureTransport on macOS / openssl on Linux
 # 仅运行时动态链接，clone https 公开仓不强依赖 openssl-sys 编译）。
-git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
+# 0.20.4+ fixes RUSTSEC-2026-0008 (Buf deref UB); 0.21 is the current line — our
+# API surface (FetchOptions / RepoBuilder / ErrorClass / ErrorCode) is unchanged.
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 # glob 过滤（include/exclude 多模式）—— globset 编译多 glob 成单一 matcher。
 globset = "0.4"
 # URL 解析（SSRF url_guard）—— 已在依赖树（reqwest 传递）, 纯 Rust。
@@ -111,6 +122,20 @@ directml = ["ort/directml"]
 coreml = ["ort/coreml"]
 # 集成测试用：暴露 __test_seed_* 等内部 fixture helper。生产构建不开。
 test-utils = []
+
+
+# Non-text content recognition (layout/table/chart/formula/handwriting/stamp/checkbox
+# region recognizers + OCR cross-validation). Pulls native ort/imageproc model paths;
+# default-OFF so size-constrained / riscv-minimal images can drop it. When off,
+# OcrProvider::recognize_regions() returns empty and the pipeline degrades to plain OCR.
+nontext = []
+
+# I2 vision eval gate (spec 2026-06-16 §I2 / §9.2): N=3 real-VLM eval harness — golden fixtures
+# (per non-text kind) × multi-seed micro-F1 + grounding precision. OFFLINE only (ship / develop→main
+# gate, never the user request path); default-OFF so it never compiles into a production binary
+# (mirrors the eval-mode safety boundary, spec §7). Pulls in `nontext` (it grades the recognition
+# pipeline's output).
+vision-eval = ["nontext"]
 
 # Self-dev-dependency：让 `cargo test -p attune-core` 自动启用 test-utils feature，
 # 集成测试无需 --features 显式开启。生产 `cargo build` 不受影响（仅 dev profile）。

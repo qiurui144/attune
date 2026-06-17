@@ -1,0 +1,30 @@
+# Cross-language retrieval fixture for retrieval_quality_test.rs
+#
+# CN documents retrieved by EN-semantics queries via dense vectors.
+# This ONLY works with a real multilingual embedder (bge-m3). The deterministic
+# MockEmbeddingProvider is a bag-of-tokens hash and cannot align "memory safety"
+# (EN) with "内存安全" (CN), so this leg is env-gated:
+#   ATTUNE_TEST_OLLAMA_EMBED=1 + ollama bge-m3 reachable on localhost:11434.
+# When the gate is off the test is skipped (reported, not failed).
+
+docs:
+  - id: cn-rust-ownership
+    content: >
+      Rust 的所有权与借用规则在没有垃圾回收器的情况下保证内存安全。
+      每个值都有唯一的所有者，借用检查器确保引用不会比它指向的值存活更久。
+  - id: cn-python-gil
+    content: >
+      Python 的全局解释器锁让字节码串行执行，同一时刻只有一个线程运行 Python 代码。
+      这简化了解释器实现，但限制了多线程 CPU 密集型任务的并行能力。
+  - id: cn-vector-search
+    content: >
+      向量检索使用 HNSW 图索引，通过余弦相似度在稠密嵌入向量中查找近似最近邻。
+      可以通过调节图参数在召回率和延迟之间权衡。
+
+queries:
+  - query: how does Rust guarantee memory safety without a garbage collector
+    relevant: cn-rust-ownership
+  - query: why can only one thread run Python bytecode at a time
+    relevant: cn-python-gil
+  - query: approximate nearest neighbor search over dense vectors
+    relevant: cn-vector-search

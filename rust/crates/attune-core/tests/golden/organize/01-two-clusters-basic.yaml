@@ -1,0 +1,22 @@
+id: 01-two-clusters-basic
+description: 两个紧致簇 (各 6 点, axis 0 / axis 4) → HDBSCAN 切出 ≥2 组, 全覆盖, GenericStrategy 命名非空
+min_cluster_size: 5
+items:
+  - { id: a1, lobe: 0, title: report alpha one }
+  - { id: a2, lobe: 0, title: report alpha two }
+  - { id: a3, lobe: 0, title: report alpha three }
+  - { id: a4, lobe: 0, title: report alpha four }
+  - { id: a5, lobe: 0, title: report alpha five }
+  - { id: a6, lobe: 0, title: report alpha six }
+  - { id: b1, lobe: 4, title: memo beta one }
+  - { id: b2, lobe: 4, title: memo beta two }
+  - { id: b3, lobe: 4, title: memo beta three }
+  - { id: b4, lobe: 4, title: memo beta four }
+  - { id: b5, lobe: 4, title: memo beta five }
+  - { id: b6, lobe: 4, title: memo beta six }
+expected:
+  min_groups: 2
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 0

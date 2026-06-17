@@ -99,6 +99,11 @@ pub async fn ingest(
         }
     };
 
+    // 释放 vault guard，再取 fulltext —— 绝不在持 vault 时取 fulltext（那会反转
+    // 规范锁序 fulltext → vectors → vault，与 search/chat 热点路径冲突 = ABBA）。
+    // 即时 FTS 写只需 body 字段（title/content/source_type）+ id，不依赖 vault。
+    drop(vault);
+
     // 此路由只调 ingest_document（非 _replacing），outcome 只会是 Inserted/Duplicate/Skipped，
     // 不会出现 Updated。仅 Inserted 需失效 search 缓存 + 即时 FTS（搜索不等 embedding）；
     // Duplicate 数据库状态未变，无需失效。

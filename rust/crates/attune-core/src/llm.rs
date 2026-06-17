@@ -956,11 +956,28 @@ async fn resolve_openai_compat_model(
 
 impl OpenAiLlmProvider {
     pub fn new(endpoint: &str, api_key: &str, model: &str) -> Self {
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120));
+        // Self-hosted / LAN gateway support: trust an operator-provided CA via env
+        // ATTUNE_CLOUD_CA_PEM (a path to a PEM file, or inline PEM). The CA is ADDED
+        // to the trust store — full TLS chain/hostname/validity verification stays
+        // enforced (NOT a bypass). Mirrors cert_pin::add_custom_cloud_ca for the
+        // openai-compat gateway client. (Replaces the former dev-insecure-tls hatch.)
+        if let Ok(src) = std::env::var("ATTUNE_CLOUD_CA_PEM") {
+            if !src.trim().is_empty() {
+                let pem = if std::path::Path::new(&src).is_file() {
+                    std::fs::read(&src).unwrap_or_default()
+                } else {
+                    src.into_bytes()
+                };
+                if let Ok(certs) = reqwest::Certificate::from_pem_bundle(&pem) {
+                    for c in certs {
+                        builder = builder.add_root_certificate(c);
+                    }
+                }
+            }
+        }
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .expect("HTTP client"),
+            client: builder.build().expect("HTTP client"),
             endpoint: endpoint.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
@@ -1449,6 +1466,9 @@ pub struct MockLlmProvider {
     model: String,
     /// 测试用 — 记录最后一次 chat 收到的 user content (供 chat_multimodal 默认 fallback 验证)
     last_user: Mutex<String>,
+    /// 测试用 — 记录最后一次 chat_with_history 收到的全部 messages (system + history
+    /// + user)。F-17 G3 用此验证 L0 内容是否泄漏进出网 payload (注入在 system prompt)。
+    last_messages: Mutex<Vec<ChatMessage>>,
     /// T1 — runtime-flippable determinism level so a single mock instance can
     /// serve both `Exact` and `Temp0` flavored tests
     /// (see `eval_determinism_test.rs::anthropic_provider_degrades_to_temp0`).
@@ -1461,6 +1481,7 @@ impl MockLlmProvider {
             responses: Mutex::new(Vec::new()),
             model: model.to_string(),
             last_user: Mutex::new(String::new()),
+            last_messages: Mutex::new(Vec::new()),
             // Defaults to Exact so tests that call `chat_with_options` without
             // explicit configuration see the "happy path" deterministic-seed
             // semantics. Other call sites (legacy mock-driven unit tests)
@@ -1477,6 +1498,18 @@ impl MockLlmProvider {
     pub fn last_received_user(&self) -> Option<String> {
         let s = self.last_user.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if s.is_empty() { None } else { Some(s) }
+    }
+
+    /// 测试用 — 返回最后一次 `chat_with_history` 收到的全部 messages 拼接文本
+    /// (role:content\n...)。F-17 G3 用此断言出网 payload 不含 L0 内容。
+    pub fn last_outbound_payload(&self) -> String {
+        self.last_messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|m| format!("{}:{}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// T1 — Override the mock's reported [`DeterminismLevel`] (used by
@@ -1503,9 +1536,12 @@ impl LlmProvider for MockLlmProvider {
 
     fn chat_with_history(
         &self,
-        _messages: &[ChatMessage],
+        messages: &[ChatMessage],
     ) -> Result<(String, crate::usage::TokenUsage)> {
-        // Mock ignores history, returns next preset
+        // Record the full outbound payload (system + history + user) so F-17 G3
+        // tests can assert L0 content never reached the (cloud) LLM. Mock still
+        // returns the next preset, ignoring message content for the response.
+        *self.last_messages.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
         self.chat("", "")
     }
 
@@ -1538,6 +1574,161 @@ impl LlmProvider for MockLlmProvider {
             .determinism
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+}
+
+/// No-op LLM provider whose `chat` returns an empty string + zero usage.
+///
+/// WHY: `Clusterer::new` requires an `Arc<dyn LlmProvider>` even when only the
+/// LLM-free `group_only` path is used (organizer tier-2 extractive naming).
+/// `MockLlmProvider` errors on an empty response queue, so it is unsuitable as
+/// a "never actually called" placeholder. `noop_llm()` is that placeholder.
+struct NoopLlmProvider;
+impl LlmProvider for NoopLlmProvider {
+    fn chat(&self, _system: &str, _user: &str) -> Result<(String, crate::usage::TokenUsage)> {
+        Ok((String::new(), crate::usage::TokenUsage::empty("noop", "noop")))
+    }
+    fn is_available(&self) -> bool {
+        false
+    }
+    fn model_name(&self) -> &str {
+        "noop"
+    }
+}
+
+/// Returns a shared no-op [`LlmProvider`] for paths that need the trait object
+/// to satisfy a signature but never invoke the model (e.g. `Clusterer::group_only`).
+pub fn noop_llm() -> std::sync::Arc<dyn LlmProvider> {
+    std::sync::Arc::new(NoopLlmProvider)
+}
+
+/// Recording mock for document-intelligence pipeline tests.
+///
+/// Unlike [`MockLlmProvider`] (which only records the last user message), this records
+/// **every** call as `(model, system, user)` so a test can assert *which model* the
+/// map stage vs the reduce stage used and *how many times* each was called. T-02/T-04/T-05
+/// acceptance_judges depend on this (e.g. "map calls use Cheap model, reduce uses
+/// Reasoning model, reduce call-count ≤ ⌈n/FANIN⌉"). Always-compiled (like `MockLlmProvider`)
+/// so `attune-server/tests/*` integration tests can use it too.
+///
+/// The model returned in [`crate::usage::TokenUsage`] reflects the router-selected model
+/// the *caller* set via [`LlmProvider::with_model`]-style construction: each
+/// `RecordingMockLlm` instance carries one model name (callers build one per role, or one
+/// per `with_model` clone), and every recorded call stamps that name. Responses are popped
+/// FIFO from a preset queue; an empty queue yields a deterministic `recmock:<n>` answer so
+/// tests that only assert call-shape need not preload responses.
+pub struct RecordingMockLlm {
+    model: String,
+    responses: Mutex<std::collections::VecDeque<String>>,
+    /// Every call recorded as (model, system, user).
+    calls: Mutex<Vec<RecordedCall>>,
+}
+
+/// One recorded LLM call (model + the system/user it saw).
+#[derive(Debug, Clone)]
+pub struct RecordedCall {
+    pub model: String,
+    pub system: String,
+    pub user: String,
+}
+
+impl RecordingMockLlm {
+    pub fn new(model: &str) -> Self {
+        Self {
+            model: model.to_string(),
+            responses: Mutex::new(std::collections::VecDeque::new()),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Preload one canned response (FIFO). Chainable.
+    pub fn with_response(self, json_or_text: &str) -> Self {
+        self.responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(json_or_text.to_string());
+        self
+    }
+
+    /// Number of calls recorded so far.
+    pub fn call_count(&self) -> usize {
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Snapshot of all recorded calls.
+    pub fn calls(&self) -> Vec<RecordedCall> {
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Count of calls whose model == `model`.
+    pub fn calls_with_model(&self, model: &str) -> usize {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|c| c.model == model)
+            .count()
+    }
+
+    /// True iff any recorded call's system+user contains `needle` (cross-chapter memory /
+    /// no-leak assertions). For the secret no-leak test, assert this is **false** for the
+    /// sentinel token.
+    pub fn any_call_contains(&self, needle: &str) -> bool {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|c| c.system.contains(needle) || c.user.contains(needle))
+    }
+
+    fn record_and_respond(&self, system: &str, user: &str) -> (String, crate::usage::TokenUsage) {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(RecordedCall {
+                model: self.model.clone(),
+                system: system.to_string(),
+                user: user.to_string(),
+            });
+        let mut q = self.responses.lock().unwrap_or_else(|e| e.into_inner());
+        let resp = q
+            .pop_front()
+            .unwrap_or_else(|| format!("recmock:{}", self.call_count()));
+        // Token usage stamped with this instance's model so cost/bill math is model-aware.
+        let usage = crate::usage::TokenUsage::empty("recmock", &self.model);
+        (resp, usage)
+    }
+}
+
+impl LlmProvider for RecordingMockLlm {
+    fn chat(&self, system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
+        Ok(self.record_and_respond(system, user))
+    }
+
+    fn chat_with_history(
+        &self,
+        messages: &[ChatMessage],
+    ) -> Result<(String, crate::usage::TokenUsage)> {
+        let system = messages
+            .iter()
+            .find(|m| m.role == "system")
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+        let user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+        Ok(self.record_and_respond(system, user))
     }
 
     fn is_available(&self) -> bool {

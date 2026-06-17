@@ -3,7 +3,8 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
-import { Button, LocalModelReadiness } from '../components';
+import { Button, LocalModelReadiness, Modal, Input } from '../components';
+import { confirmDialog } from '../components/ConfirmModal';
 import { toast } from '../components/Toast';
 import {
   theme,
@@ -14,12 +15,14 @@ import {
   settingsLocks,
   folderLinks,
   currentView,
+  settingsInitialTab,
 } from '../store/signals';
 import { setLocale, currentLocale, t } from '../i18n';
 import { loadSettings, patchSettings } from '../hooks/useSettings';
 import { loadMemberState, loadSettingsLocks, memberLogout, memberLoginPassword } from '../hooks/useMember';
 import { loadFolderLinks } from '../hooks/useFolderLinks';
-import { api, clearToken } from '../store/api';
+import { unbindDir } from '../hooks/useRemote';
+import { api, clearToken, getToken, ApiError } from '../store/api';
 
 /** LLM 厂商快捷预设 — 选中后自动填 endpoint + model，用户只需贴 API key。 */
 type LlmPresetKey =
@@ -77,21 +80,27 @@ const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
   },
 };
 
-type SettingsTab = 'general' | 'ai' | 'data' | 'member' | 'privacy' | 'about';
+type SettingsTab = 'general' | 'ai' | 'data' | 'plugins' | 'member' | 'privacy' | 'about';
 
 const TABS: Array<{ key: SettingsTab; icon: string; labelKey: string }> = [
   { key: 'general', icon: '⚙', labelKey: 'settings.tab.general' },
   { key: 'ai', icon: '🤖', labelKey: 'settings.tab.ai' },
   { key: 'data', icon: '📂', labelKey: 'settings.tab.data' },
+  { key: 'plugins', icon: '🧩', labelKey: 'settings.tab.plugins' },
   { key: 'member', icon: '👤', labelKey: 'settings.tab.member' },
   { key: 'privacy', icon: '🔐', labelKey: 'settings.tab.privacy' },
   { key: 'about', icon: 'ℹ', labelKey: 'settings.tab.about' },
 ];
 
 export function SettingsView(): JSX.Element {
-  const activeTab = useSignal<SettingsTab>('general');
+  const activeTab = useSignal<SettingsTab>(settingsInitialTab.value ?? 'general');
 
   useEffect(() => {
+    // 消费 deep-link 初始 tab（如 ChatView ModelChip "更多设置" → 'ai'），仅读一次
+    if (settingsInitialTab.value) {
+      activeTab.value = settingsInitialTab.value;
+      settingsInitialTab.value = null;
+    }
     void loadSettings();
     // 同时刷新 hardware
     void api
@@ -171,6 +180,7 @@ export function SettingsView(): JSX.Element {
           {activeTab.value === 'general' && <GeneralPanel />}
           {activeTab.value === 'ai' && <AIPanel />}
           {activeTab.value === 'data' && <DataPanel />}
+          {activeTab.value === 'plugins' && <PluginsPanel />}
           {activeTab.value === 'member' && <MemberPanel />}
           {activeTab.value === 'privacy' && <PrivacyPanel />}
           {activeTab.value === 'about' && <AboutPanel />}
@@ -473,6 +483,253 @@ function AIPanel(): JSX.Element {
   );
 }
 
+interface MigrationStatus {
+  current_model: string;
+  current_dim: number;
+  stale: number;
+  paused: boolean;
+}
+
+interface ImportResult {
+  imported: number;
+  merged: number;
+  skipped: number;
+}
+
+/**
+ * 记忆延续 + 可携带性。三块:迁移状态(换 embedding 模型后旧向量 reindex 进度) +
+ * 口令加密导出 + 合并式导入。
+ *
+ * WHY 不走 api.* 助手:导出返回 application/octet-stream 二进制(api.* 强行 res.json()
+ * 会炸);导入是 multipart(api.post 只发 JSON)。两者都用裸 fetch + getToken() 注入
+ * Bearer(token 源是 sessionStorage,与 api.ts 一致 —— 不用 localStorage)。
+ */
+function MemorySection(): JSX.Element {
+  const status = useSignal<MigrationStatus | null>(null);
+  const loadingStatus = useSignal(false);
+  const exportOpen = useSignal(false);
+  const pw = useSignal('');
+  const exporting = useSignal(false);
+  const importing = useSignal(false);
+
+  async function refreshStatus(): Promise<void> {
+    loadingStatus.value = true;
+    try {
+      status.value = await api.get<MigrationStatus>('/memory/migration/status');
+    } catch (e) {
+      // vault 锁定时后端 403;此处静默(状态块显示"不可用"),不弹 toast 打扰。
+      status.value = null;
+      if (e instanceof ApiError && e.status !== 403) {
+        toast('error', t('settings.memory.status_fail'));
+      }
+    } finally {
+      loadingStatus.value = false;
+    }
+  }
+
+  useEffect(() => {
+    void refreshStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function toggleReindex(pause: boolean): Promise<void> {
+    try {
+      await api.post('/memory/reindex', { pause });
+      await refreshStatus();
+    } catch {
+      toast('error', t('settings.memory.reindex_fail'));
+    }
+  }
+
+  async function doExport(): Promise<void> {
+    exporting.value = true;
+    try {
+      const token = getToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const resp = await fetch('/api/v1/memory/export', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ passphrase: pw.value }),
+      });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({ error: 'unknown' }));
+        if (resp.status === 403) {
+          toast('error', t('settings.memory.vault_locked'));
+        } else {
+          toast('error', t('settings.memory.export_fail', { message: body.error ?? `HTTP ${resp.status}` }));
+        }
+        return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'attune-memory.bundle';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('success', t('settings.memory.export_ok'));
+      exportOpen.value = false;
+      pw.value = '';
+    } catch (e) {
+      toast('error', t('settings.memory.export_fail', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      exporting.value = false;
+    }
+  }
+
+  async function doImport(file: File): Promise<void> {
+    const passphrase = window.prompt(t('settings.memory.import_pw_prompt'));
+    // 取消(null)直接退出;空串交给后端校验,口令短由 import 解密失败兜底。
+    if (passphrase == null) return;
+    importing.value = true;
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('passphrase', passphrase);
+      const token = getToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const resp = await fetch('/api/v1/memory/import', { method: 'POST', headers, body: form });
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({ error: 'unknown' }));
+        // 后端把可操作的前置错误编进 error 文本(code 统一 bad-request),按文本分流给友好提示。
+        const marker = String(body.error ?? '');
+        if (marker.includes('vault-not-ready')) {
+          toast('error', t('settings.memory.import_vault_not_ready'));
+        } else if (marker.includes('bad-passphrase')) {
+          toast('error', t('settings.memory.import_bad_passphrase'));
+        } else if (marker.includes('unsupported-bundle-version')) {
+          toast('error', t('settings.memory.import_unsupported'));
+        } else if (marker.includes('corrupt-bundle')) {
+          toast('error', t('settings.memory.import_corrupt'));
+        } else {
+          toast('error', t('settings.memory.import_fail', { message: marker || `HTTP ${resp.status}` }));
+        }
+        return;
+      }
+      const r = (await resp.json()) as ImportResult;
+      toast('success', t('settings.memory.import_ok', { imported: r.imported, skipped: r.skipped }));
+      await refreshStatus();
+    } catch (e) {
+      toast('error', t('settings.memory.import_fail', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      importing.value = false;
+    }
+  }
+
+  const st = status.value;
+  return (
+    <Section title={t('settings.memory.title')} desc={t('settings.memory.desc')}>
+      {/* 迁移状态 + reindex 控制 */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+        {loadingStatus.value && !st ? (
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+            {t('common.loading')}
+          </p>
+        ) : st ? (
+          <>
+            <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+              {t('settings.memory.current_model', { model: st.current_model, dim: st.current_dim })}
+            </p>
+            {st.stale > 0 ? (
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)', margin: 0 }}>
+                {st.paused
+                  ? t('settings.memory.stale_paused', { count: st.stale })
+                  : t('settings.memory.stale_running', { count: st.stale })}
+              </p>
+            ) : (
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+                {t('settings.memory.up_to_date')}
+              </p>
+            )}
+            <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+              <Button variant="secondary" size="sm" onClick={() => void refreshStatus()}>
+                {t('settings.memory.refresh')}
+              </Button>
+              {st.stale > 0 &&
+                (st.paused ? (
+                  <Button variant="primary" size="sm" onClick={() => void toggleReindex(false)}>
+                    {t('settings.memory.resume')}
+                  </Button>
+                ) : (
+                  <Button variant="secondary" size="sm" onClick={() => void toggleReindex(true)}>
+                    {t('settings.memory.pause')}
+                  </Button>
+                ))}
+            </div>
+          </>
+        ) : (
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+            {t('settings.memory.unavailable')}
+          </p>
+        )}
+      </div>
+
+      {/* 导出 / 导入 */}
+      <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+        <Button variant="secondary" size="sm" onClick={() => (exportOpen.value = true)}>
+          {t('settings.memory.export')}
+        </Button>
+        <label>
+          <input
+            type="file"
+            accept=".bundle,application/octet-stream"
+            style={{ display: 'none' }}
+            disabled={importing.value}
+            onChange={(e) => {
+              const input = e.currentTarget;
+              const f = input.files?.[0];
+              if (f) void doImport(f);
+              input.value = ''; // 允许重复选同一文件
+            }}
+          />
+          <Button variant="secondary" size="sm" loading={importing.value} onClick={(e) => {
+            (e.currentTarget.previousElementSibling as HTMLInputElement | null)?.click();
+          }}>
+            {t('settings.memory.import')}
+          </Button>
+        </label>
+      </div>
+
+      <Modal
+        open={exportOpen.value}
+        onClose={() => { exportOpen.value = false; pw.value = ''; }}
+        title={t('settings.memory.export_title')}
+        disableBackdropClose
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-error)', margin: 0 }}>
+            {t('settings.memory.export_warn')}
+          </p>
+          <Input
+            type="password"
+            label={t('settings.memory.passphrase')}
+            placeholder={t('settings.memory.passphrase_hint')}
+            value={pw.value}
+            autoFocus
+            onInput={(e) => (pw.value = e.currentTarget.value)}
+          />
+          <div style={{ display: 'flex', gap: 'var(--space-2)', justifyContent: 'flex-end' }}>
+            <Button variant="ghost" size="sm" onClick={() => { exportOpen.value = false; pw.value = ''; }}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={exporting.value}
+              disabled={pw.value.length < 8}
+              onClick={() => void doExport()}
+            >
+              {t('settings.memory.export_confirm')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    </Section>
+  );
+}
+
 function DataPanel(): JSX.Element {
   return (
     <>
@@ -482,6 +739,7 @@ function DataPanel(): JSX.Element {
         </p>
       </Section>
       <FolderLinksSection />
+      <MemorySection />
       <Section title={t('settings.data.backup.title')}>
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: '0 0 8px 0' }}>
           {t('settings.data.backup.desc')}
@@ -572,7 +830,7 @@ function PrivacyPanel(): JSX.Element {
             variant="danger"
             size="sm"
             onClick={async () => {
-              if (!confirm(t('settings.privacy.security.lock_confirm'))) return;
+              if (!(await confirmDialog({ title: t('confirm.title.lockVault'), message: t('settings.privacy.security.lock_confirm'), danger: true }))) return;
               try {
                 await api.post('/vault/lock');
                 clearToken();
@@ -657,6 +915,13 @@ function UpdaterRow(): JSX.Element | null {
   const state = useSignal<string>('idle');
   const pct = useSignal<number>(0);
   const busy = useSignal(false);
+  // Update source preference: 'official' (GitHub, default) or 'mirror' (company
+  // mirror, faster in CN). Persisted client-side; the desktop shell reads the
+  // resolved feed at launch (ATTUNE_UPDATE_FEED_URL) — signature trust root is
+  // unchanged, so a mirror cannot serve an unsigned/tampered update.
+  const source = useSignal<string>(
+    (typeof localStorage !== 'undefined' && localStorage.getItem('attune.update.source')) || 'official',
+  );
 
   useEffect(() => {
     if (!isTauri) return;
@@ -707,14 +972,32 @@ function UpdaterRow(): JSX.Element | null {
   })();
 
   return (
-    <SettingRow label={t('settings.about.update.label')}>
-      <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
-        <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>{statusLabel}</span>
-        {state.value === 'ready'
-          ? <Button size="sm" variant="primary" onClick={restart}>{t('settings.about.update.restart')}</Button>
-          : <Button size="sm" variant="secondary" loading={busy.value} onClick={check}>{t('settings.about.update.check')}</Button>}
-      </div>
-    </SettingRow>
+    <>
+      <SettingRow label={t('settings.about.update.source')}>
+        <select
+          value={source.value}
+          onChange={(e) => {
+            source.value = e.currentTarget.value;
+            if (typeof localStorage !== 'undefined') {
+              localStorage.setItem('attune.update.source', source.value);
+            }
+            toast('success', t('settings.about.update.source_saved'));
+          }}
+          style={selectStyle}
+        >
+          <option value="official">{t('settings.about.update.source_official')}</option>
+          <option value="mirror">{t('settings.about.update.source_mirror')}</option>
+        </select>
+      </SettingRow>
+      <SettingRow label={t('settings.about.update.label')}>
+        <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>{statusLabel}</span>
+          {state.value === 'ready'
+            ? <Button size="sm" variant="primary" onClick={restart}>{t('settings.about.update.restart')}</Button>
+            : <Button size="sm" variant="secondary" loading={busy.value} onClick={check}>{t('settings.about.update.check')}</Button>}
+        </div>
+      </SettingRow>
+    </>
   );
 }
 
@@ -889,6 +1172,172 @@ function ServiceStatus({ ok, note }: { ok: boolean; note?: string }): JSX.Elemen
 }
 
 // ── 共享组件 ─────────────────────────────────────────────────
+// Trust-chain T11: plugin signature trust-mode + third-party pubkey whitelist.
+// Three-state radio (off / warn / strict) + whitelist add/remove + strict-switch
+// shows the affected unsigned plugins. The official trust root is a compile-time
+// const — this panel can only manage the SEPARATE third-party whitelist (§9 adv 2).
+type PluginTrustMode = 'off' | 'warn' | 'strict';
+
+function PluginsPanel(): JSX.Element {
+  const mode = useComputed<PluginTrustMode>(
+    () => ((settings.value?.plugin_trust_mode as PluginTrustMode) ?? 'warn'),
+  );
+  const pubkeys = useComputed<string[]>(
+    () => ((settings.value?.plugin_trusted_pubkeys as string[]) ?? []),
+  );
+  const draftKey = useSignal('');
+  const saving = useSignal(false);
+  // Affected unsigned plugins surfaced when the user moves to strict (they will be
+  // refused on next load). Fetched lazily from the real plugins list.
+  const affectedUnsigned = useSignal<string[]>([]);
+
+  const setMode = async (next: PluginTrustMode): Promise<void> => {
+    // Switching TO strict: surface the unsigned plugins that strict will block.
+    if (next === 'strict') {
+      try {
+        const resp = await api.get<{ plugins: Array<{ id: string; trust?: string }> }>('/plugins');
+        affectedUnsigned.value = (resp.plugins ?? [])
+          .filter((p) => p.trust === 'unsigned')
+          .map((p) => p.id);
+      } catch {
+        affectedUnsigned.value = [];
+      }
+    } else {
+      affectedUnsigned.value = [];
+    }
+    saving.value = true;
+    try {
+      const ok = await patchSettings({ plugin_trust_mode: next });
+      if (ok) {
+        toast('success', t('settings.plugins.trust_mode.saved'));
+      } else {
+        toast('error', t('settings.plugins.trust_mode.save_failed'));
+      }
+    } finally {
+      saving.value = false;
+    }
+  };
+
+  const addPubkey = async (): Promise<void> => {
+    const k = draftKey.value.trim().toLowerCase();
+    if (k.length !== 64 || !/^[0-9a-f]+$/.test(k)) {
+      toast('error', t('settings.plugins.whitelist.invalid_pubkey'));
+      return;
+    }
+    if (pubkeys.value.includes(k)) {
+      toast('error', t('settings.plugins.whitelist.already_trusted'));
+      return;
+    }
+    saving.value = true;
+    try {
+      const ok = await patchSettings({ plugin_trusted_pubkeys: [...pubkeys.value, k] });
+      if (ok) {
+        draftKey.value = '';
+        toast('success', t('settings.plugins.whitelist.added'));
+      } else {
+        toast('error', t('settings.plugins.whitelist.save_failed'));
+      }
+    } finally {
+      saving.value = false;
+    }
+  };
+
+  const removePubkey = async (k: string): Promise<void> => {
+    saving.value = true;
+    try {
+      const ok = await patchSettings({
+        plugin_trusted_pubkeys: pubkeys.value.filter((x) => x !== k),
+      });
+      if (ok) toast('success', t('settings.plugins.whitelist.removed'));
+    } finally {
+      saving.value = false;
+    }
+  };
+
+  return (
+    <>
+      <Section
+        title={t('settings.plugins.trust_mode.title')}
+        desc={t('settings.plugins.trust_mode.desc')}
+      >
+        <>
+        {(['off', 'warn', 'strict'] as PluginTrustMode[]).map((m) => (
+          <label
+            key={m}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 'var(--space-2)',
+              padding: 'var(--space-3) var(--space-4)',
+              background: 'var(--color-surface)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-md)',
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="radio"
+              name="plugin-trust-mode"
+              checked={mode.value === m}
+              disabled={saving.value}
+              onChange={() => void setMode(m)}
+            />
+            <span style={{ fontSize: 'var(--text-sm)' }}>
+              {t(`settings.plugins.trust_mode.${m}`)}
+            </span>
+          </label>
+        ))}
+        {affectedUnsigned.value.length > 0 && (
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-warning, #b8860b)', margin: 0 }}>
+            {t('settings.plugins.trust_mode.strict_affected')}
+            {': '}
+            {affectedUnsigned.value.join(', ')}
+          </p>
+        )}
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+          {t('settings.plugins.unsigned_install_warn')}
+        </p>
+        </>
+      </Section>
+
+      <Section
+        title={t('settings.plugins.whitelist.title')}
+        desc={t('settings.plugins.whitelist.desc')}
+      >
+        <>
+        <SettingRow label={t('settings.plugins.whitelist.add_label')}>
+          <span style={{ display: 'flex', gap: 'var(--space-2)' }}>
+            <input
+              type="text"
+              value={draftKey.value}
+              placeholder={t('settings.plugins.whitelist.pubkey_placeholder')}
+              onInput={(e) => (draftKey.value = e.currentTarget.value)}
+              style={{ ...inputStyle, width: 280 }}
+            />
+            <Button onClick={() => void addPubkey()} disabled={saving.value}>
+              {t('settings.plugins.whitelist.add_button')}
+            </Button>
+          </span>
+        </SettingRow>
+        {pubkeys.value.length === 0 ? (
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+            {t('settings.plugins.whitelist.empty')}
+          </p>
+        ) : (
+          pubkeys.value.map((k) => (
+            <SettingRow key={k} label={`${k.slice(0, 16)}…${k.slice(-8)}`}>
+              <Button onClick={() => void removePubkey(k)} disabled={saving.value}>
+                {t('settings.plugins.whitelist.remove')}
+              </Button>
+            </SettingRow>
+          ))
+        )}
+        </>
+      </Section>
+    </>
+  );
+}
+
 const selectStyle: JSX.CSSProperties = {
   padding: '4px var(--space-2)',
   fontSize: 'var(--text-sm)',
@@ -1235,6 +1684,10 @@ function MemberPanel(): JSX.Element {
 
 export function FolderLinksSection(): JSX.Element {
   const picking = useSignal(false);
+  const showAddModal = useSignal(false);
+  const manualPath = useSignal('');
+  const submitting = useSignal(false);
+  // Tauri 桌面壳里才有原生目录选择器；浏览器调试模式回退到手填路径对话框（与 RemoteView LocalForm 一致）。
   const canPickFolder = typeof window !== 'undefined'
     && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 
@@ -1242,9 +1695,28 @@ export function FolderLinksSection(): JSX.Element {
     void loadFolderLinks();
   }, []);
 
+  async function bindPaths(paths: string[]): Promise<number> {
+    let added = 0;
+    for (const path of paths) {
+      try {
+        await api.post('/index/bind', { path, recursive: true });
+        added += 1;
+      } catch {
+        // 单个失败不阻塞其它
+      }
+    }
+    if (added > 0) {
+      toast('success', t('settings.folder.added', { count: added }));
+      await loadFolderLinks();
+    }
+    return added;
+  }
+
+  // 桌面壳 → 原生目录选择器；浏览器 → 弹手填路径对话框（不再是无反应的 disabled 按钮）。
   async function onAddFolder(): Promise<void> {
     if (!canPickFolder) {
-      toast('warning', t('settings.folder.desktop_only'));
+      manualPath.value = '';
+      showAddModal.value = true;
       return;
     }
     picking.value = true;
@@ -1252,23 +1724,43 @@ export function FolderLinksSection(): JSX.Element {
       const { open } = await import('@tauri-apps/plugin-dialog');
       const selected = await open({ directory: true, multiple: true, title: t('settings.folder.pick_title') });
       const chosen = Array.isArray(selected) ? selected : selected ? [selected] : [];
-      let added = 0;
-      for (const path of chosen) {
-        try {
-          await api.post('/index/bind', { path, recursive: true });
-          added += 1;
-        } catch {
-          // 单个失败不阻塞其它
-        }
-      }
-      if (added > 0) {
-        toast('success', t('settings.folder.added', { count: added }));
-        await loadFolderLinks();
-      }
+      await bindPaths(chosen);
     } catch (e) {
       toast('error', e instanceof Error ? e.message : t('settings.folder.add_fail'));
     } finally {
       picking.value = false;
+    }
+  }
+
+  async function onSubmitManual(): Promise<void> {
+    const path = manualPath.value.trim();
+    if (!path) return;
+    submitting.value = true;
+    try {
+      const added = await bindPaths([path]);
+      if (added > 0) {
+        showAddModal.value = false;
+        manualPath.value = '';
+      } else {
+        toast('error', t('settings.folder.add_fail'));
+      }
+    } finally {
+      submitting.value = false;
+    }
+  }
+
+  async function onUnbind(fl: { id?: string; path: string }): Promise<void> {
+    if (!fl.id) {
+      toast('error', t('settings.folder.unbind_unavailable'));
+      return;
+    }
+    if (!(await confirmDialog({ title: t('confirm.title.unbindFolder'), message: t('settings.folder.unbind_confirm', { path: fl.path }), danger: true }))) return;
+    const ok = await unbindDir(fl.id);
+    if (ok) {
+      toast('success', t('settings.folder.unbind_success'));
+      await loadFolderLinks();
+    } else {
+      toast('error', t('settings.folder.unbind_fail'));
     }
   }
 
@@ -1282,16 +1774,11 @@ export function FolderLinksSection(): JSX.Element {
         <Button
           variant="primary"
           size="sm"
-          disabled={picking.value || !canPickFolder}
+          disabled={picking.value}
           onClick={() => void onAddFolder()}
         >
           {picking.value ? t('settings.folder.opening') : t('settings.folder.add_btn')}
         </Button>
-        {!canPickFolder && (
-          <span style={{ marginLeft: 'var(--space-3)', fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
-            {t('settings.folder.browser_note')}
-          </span>
-        )}
       </div>
       {links.length === 0 && (
         <p style={{ color: 'var(--color-text-secondary)' }}>
@@ -1305,6 +1792,7 @@ export function FolderLinksSection(): JSX.Element {
               <th style={{ padding: 8 }}>{t('settings.folder.col_path')}</th>
               <th style={{ padding: 8 }}>{t('settings.folder.col_project')}</th>
               <th style={{ padding: 8 }}>{t('settings.folder.col_added')}</th>
+              <th style={{ padding: 8 }}>{t('settings.folder.col_actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -1316,11 +1804,47 @@ export function FolderLinksSection(): JSX.Element {
                 <td style={{ padding: 8, fontFamily: 'monospace' }}>{fl.path}</td>
                 <td style={{ padding: 8 }}>{fl.project_id ?? t('settings.folder.default_project')}</td>
                 <td style={{ padding: 8 }}>{fl.added_at ?? '—'}</td>
+                <td style={{ padding: 8 }}>
+                  <Button variant="ghost" size="sm" onClick={() => void onUnbind(fl)}>
+                    {t('settings.folder.unbind')}
+                  </Button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
+
+      <Modal
+        open={showAddModal.value}
+        onClose={() => (showAddModal.value = false)}
+        title={t('settings.folder.add_modal_title')}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <Input
+            label={t('settings.folder.path_label')}
+            value={manualPath.value}
+            onInput={(e) => (manualPath.value = e.currentTarget.value)}
+            placeholder={t('settings.folder.path_placeholder')}
+            hint={t('settings.folder.path_hint')}
+            autoFocus
+            required
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+            <Button variant="ghost" onClick={() => (showAddModal.value = false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => void onSubmitManual()}
+              loading={submitting.value}
+              disabled={!manualPath.value.trim()}
+            >
+              {t('settings.folder.add_confirm')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </Section>
   );
 }

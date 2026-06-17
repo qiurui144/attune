@@ -65,6 +65,26 @@ impl Store {
         Ok(exists.is_some())
     }
 
+    /// 取 (kind, sorted_chunk_hashes) 对应 memory 的 id。`None` = 不存在。
+    /// import 用:`insert_memory` 内部新生成 id 不外露,需回查刚落库行 id 以关联向量。
+    pub fn find_memory_id_by_source(
+        &self,
+        kind: &str,
+        sorted_chunk_hashes: &[String],
+    ) -> Result<Option<String>> {
+        let hashes_json = serde_json::to_string(sorted_chunk_hashes)
+            .map_err(|e| VaultError::InvalidInput(format!("hashes serialize: {e}")))?;
+        let id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM memories WHERE kind = ?1 AND source_chunk_hashes = ?2 LIMIT 1",
+                params![kind, hashes_json],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id)
+    }
+
     /// 写入一条 memory。`source_chunk_hashes` 必须**升序排序**（调用方保证）；
     /// 唯一索引会拒绝重复 (kind, hashes_json) 组合 → 返回 0 表示已存在。
     /// 返回 1 = 新增，0 = 已存在跳过。
@@ -126,6 +146,30 @@ impl Store {
             out.push(raw.decrypt(dek));
         }
         Ok(out)
+    }
+
+    /// 取单条 memory 的 summary 明文（解密）。`None` = 该 id 不存在。
+    /// reindex 用:只需 summary 文本去 re-embed,不必拉整行解密。
+    pub fn get_memory_summary_plaintext(
+        &self,
+        memory_id: &str,
+        dek: &Key32,
+    ) -> Result<Option<String>> {
+        let enc: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT summary_encrypted FROM memories WHERE id = ?1",
+                params![memory_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match enc {
+            None => Ok(None),
+            Some(blob) => {
+                let plain = crypto::decrypt(dek, &blob)?;
+                Ok(Some(String::from_utf8(plain).unwrap_or_default()))
+            }
+        }
     }
 
     /// 列出 live（未 superseded、可选排除 cold）的指定 kind memory。

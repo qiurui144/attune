@@ -1,0 +1,13 @@
+id: 07-no-vectors-all-noise
+description: 全部 item 无向量 (尚未 embedding) → 全入 noise, 0 组, 仍全覆盖不丢点
+min_cluster_size: 5
+items:
+  - { id: n1, no_vector: true, title: pending one }
+  - { id: n2, no_vector: true, title: pending two }
+  - { id: n3, no_vector: true, title: pending three }
+expected:
+  min_groups: 0
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 0

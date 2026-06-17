@@ -77,13 +77,16 @@ impl Telemetry {
         // v1.0.6: defensively route through the gate for audit-script visibility.
         // Telemetry payload is empty here — we don't have an HTTP backend, so the
         // gate's redactor isn't needed.
-        let policy = OutboundPolicy {
-            kind: OutboundKind::Telemetry,
-            enabled: self.enabled,
-            // Telemetry is exempt from vault-locked check (no vault data).
-            vault_unlocked: false,
-            redactor: None,
-        };
+        // Telemetry is exempt from vault-locked (no vault data) and never
+        // carries item content (no L0 tier). `cloud()` defaults both privacy-
+        // tier fields safely; vault_unlocked=false is harmless because the gate
+        // skips the vault check for OutboundKind::Telemetry.
+        let policy = OutboundPolicy::cloud(
+            OutboundKind::Telemetry,
+            self.enabled,
+            false,
+            None,
+        );
         match OutboundGate::enforce(&policy, "") {
             Ok(_) => SendOutcome::SkippedNotImplemented,
             Err(_) => SendOutcome::SkippedGate,

@@ -1,0 +1,13 @@
+id: 05-single-subdir-fallback
+description: 少量点全在同一子目录 → fallback 退化为单组, 全覆盖, 命名非空
+min_cluster_size: 5
+items:
+  - { id: s1, lobe: 0, dir: /inbox, title: scan one }
+  - { id: s2, lobe: 0, dir: /inbox, title: scan two }
+  - { id: s3, lobe: 0, dir: /inbox, title: scan three }
+expected:
+  min_groups: 1
+  all_items_covered: true
+  labels_non_empty: true
+  tier: 2
+  dimension_mismatch: 0

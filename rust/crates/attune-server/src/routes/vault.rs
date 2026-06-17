@@ -4,6 +4,22 @@ use serde::Deserialize;
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
+/// Trust-chain T8: hydrate the in-memory [`attune_core::entitlement::EntitlementCache`]
+/// from the `plugin_entitlements` vault table at unlock. Reads rows under a SHORT vault
+/// lock (get dek + `list_entitlements` → owned Vec), then populates the cache (cache's
+/// own independent lock) AFTER the vault lock drops — never nested (lock-ordering 铁律).
+/// Best-effort: a locked / empty / unparseable vault leaves the cache empty (free users
+/// or no entitlements → no dispatch gate).
+fn hydrate_entitlement_cache(state: &SharedState) {
+    let rows = {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(dek) = vault.dek_db() else { return };
+        vault.store().list_entitlements(&dek).unwrap_or_default()
+        // vault lock drops here
+    };
+    state.entitlement_cache.hydrate_from_rows(rows);
+}
+
 #[derive(Deserialize)]
 pub struct SetupRequest {
     pub password: String,
@@ -67,11 +83,14 @@ pub async fn vault_setup(
     };
     // Initialize search engines after vault setup (vault mutex released)
     state.init_search_engines();
+    // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
+    crate::state::AppState::spawn_model_bootstrap(state.clone());
     // Bug-C: vault unlock 后立即触发 reload_llm,确保 settings 中已有的 llm config
     // 在 server restart 后第一次 chat 即可工作(不再依赖 member-login gateway_should_apply
     // 走 reload_llm 分支)。init_search_engines 内部 compare_exchange 保证 LLM 也只 init 一次;
     // 但 server 跨次重启后第二次 unlock 不会重跑 init_search_engines 的 LLM 块,故此处显式 reload。
     state.reload_llm();
+    hydrate_entitlement_cache(&state);
     crate::state::AppState::start_classify_worker(state.clone());
     crate::state::AppState::start_rescan_worker(state.clone());
     crate::state::AppState::start_reindex_worker(state.clone());
@@ -80,6 +99,7 @@ pub async fn vault_setup(
     crate::state::AppState::start_rss_sync_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
+    crate::state::AppState::start_entitlement_worker(state.clone());
     Ok(Json(serde_json::json!({
         "status": "ok",
         "state": "unlocked",
@@ -100,9 +120,12 @@ pub async fn vault_unlock(
     };
     // Initialize search engines after vault unlock (vault mutex released)
     state.init_search_engines();
+    // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
+    crate::state::AppState::spawn_model_bootstrap(state.clone());
     // Bug-C: per setup 同步注释,unlock 后强制 reload_llm,杜绝
     // "server restart → unlock → chat 503" 的 P3。
     state.reload_llm();
+    hydrate_entitlement_cache(&state);
     crate::state::AppState::start_classify_worker(state.clone());
     crate::state::AppState::start_rescan_worker(state.clone());
     crate::state::AppState::start_reindex_worker(state.clone());
@@ -111,6 +134,7 @@ pub async fn vault_unlock(
     crate::state::AppState::start_rss_sync_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
+    crate::state::AppState::start_entitlement_worker(state.clone());
     Ok(Json(serde_json::json!({"status": "ok", "token": token})))
 }
 
@@ -210,6 +234,8 @@ pub async fn vault_reset_with_recovery_key(
     };
 
     state.init_search_engines();
+    // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
+    crate::state::AppState::spawn_model_bootstrap(state.clone());
     // Bug-C: reset 后也走 unlock 同样路径,显式 reload_llm。
     state.reload_llm();
     crate::state::AppState::start_classify_worker(state.clone());

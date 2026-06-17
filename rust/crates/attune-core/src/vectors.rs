@@ -6,6 +6,9 @@ use usearch::ffi::{IndexOptions, MetricKind, ScalarKind};
 
 use crate::error::{Result, VaultError};
 
+/// 初始预留容量。超出后 `add` 走 amortized 翻倍扩容，不再是硬上限。
+const INITIAL_CAPACITY: usize = 10_000;
+
 /// 向量元数据
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VectorMeta {
@@ -45,7 +48,7 @@ impl VectorIndex {
         };
         let index = usearch::new_index(&options)
             .map_err(|e| VaultError::Crypto(format!("usearch init: {e}")))?;
-        index.reserve(10000)
+        index.reserve(INITIAL_CAPACITY)
             .map_err(|e| VaultError::Crypto(format!("usearch reserve: {e}")))?;
         Ok(Self { index, meta: HashMap::new(), next_key: 0, dims })
     }
@@ -57,12 +60,40 @@ impl VectorIndex {
                 "vector dims mismatch: expected {}, got {}", self.dims, vector.len()
             )));
         }
+        // usearch `add` panics 一旦 size 触及 capacity（"Reserve capacity ahead of
+        // insertions!"）。生产 embed worker 不会预知最终向量数，所以每次写入前按需
+        // amortized 翻倍扩容，复用 usearch 自身的 grow（reserve 的 capacity 含当前 size）。
+        self.ensure_capacity_for_one()?;
         let key = self.next_key;
         self.next_key += 1;
         self.index.add(key, vector)
             .map_err(|e| VaultError::Crypto(format!("usearch add: {e}")))?;
         self.meta.insert(key, meta);
         Ok(key)
+    }
+
+    /// 保证索引至少能再容纳一个向量。不足则 amortized 翻倍 reserve。
+    fn ensure_capacity_for_one(&mut self) -> Result<()> {
+        let size = self.index.size();
+        let cap = self.index.capacity();
+        if size < cap {
+            return Ok(());
+        }
+        // 翻倍（cap 可能为 0 → 用 INITIAL_CAPACITY 兜底）；reserve 是"总容量含当前 size"语义。
+        let target = cap.saturating_mul(2).max(INITIAL_CAPACITY);
+        self.index.reserve(target).map_err(|e| {
+            VaultError::Crypto(format!(
+                "usearch reserve grow to {target} (size={size}, cap={cap}): {e}"
+            ))
+        })?;
+        // 防御：若底层未能真正扩容（不应发生），显式 Err 而非让后续 add panic。
+        if self.index.capacity() <= size {
+            return Err(VaultError::Crypto(format!(
+                "usearch capacity did not grow past {size} (still {}); refusing to add to avoid panic",
+                self.index.capacity()
+            )));
+        }
+        Ok(())
     }
 
     /// 搜索最相似向量
@@ -397,6 +428,70 @@ mod tests {
     fn get_vector_empty_item_id_returns_none() {
         let idx = VectorIndex::new(4).unwrap();
         assert!(idx.get_vector("").is_none());
+    }
+
+    // 构造一个归一化的确定性向量（不同 seed → 不同向量）。
+    fn det_vec(dims: usize, seed: u64) -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dims)
+            .map(|d| ((seed.wrapping_mul(31).wrapping_add(d as u64)) as f32).sin())
+            .collect();
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+        v.iter_mut().for_each(|x| *x /= norm);
+        v
+    }
+
+    // P0 GA blocker regression: 超过初始 10_000 预留容量的 add 不得 panic
+    // （usearch "Reserve capacity ahead of insertions!"）。插入 12_001 向量后搜索仍正确。
+    #[test]
+    fn grow_beyond_initial_capacity_no_panic() {
+        const DIMS: usize = 16;
+        const N: usize = 12_001; // 越过 10_000 边界 + 跨越下一次翻倍
+        let mut idx = VectorIndex::new(DIMS).unwrap();
+        for i in 0..N {
+            idx.add(
+                &det_vec(DIMS, i as u64),
+                VectorMeta { item_id: format!("item-{i}"), chunk_idx: 0, level: 2, section_idx: 0 },
+            )
+            .unwrap_or_else(|e| panic!("add vector {i} (>10k) must not fail: {e}"));
+        }
+        assert_eq!(idx.len(), N, "全部 {N} 向量必须写入成功");
+
+        // 扩容后搜索仍正确（无 corrupt）：query == item-7777 的向量，它必须出现在
+        // top-k 结果里。注意 usearch 用 F16 量化 + HNSW 近似检索，12k 个 sin() 派生
+        // 的稠密近共线向量下 top-1 精确召回无法保证，所以这里验证 recall@k（命中即
+        // 证明扩容路径未损坏索引），而非苛求 top-1。精确 top-1 召回由 add_and_search
+        // 在干净小集合上覆盖。
+        let target = 7777u64;
+        let q = det_vec(DIMS, target);
+        let results = idx.search(&q, 16).expect("search over 12k vectors must not fail");
+        assert!(!results.is_empty(), "12k 向量下搜索必须有结果");
+        assert!(
+            results.iter().any(|(m, _)| m.item_id == format!("item-{target}")),
+            "扩容后索引未损坏：item-{target} 必须出现在 top-16 召回里，实得 {:?}",
+            results.iter().map(|(m, _)| &m.item_id).collect::<Vec<_>>()
+        );
+    }
+
+    // 边界:刚好 10_000(填满初始预留)+ 第 10_001 个(触发首次翻倍)。
+    #[test]
+    fn boundary_exactly_10000_and_10001() {
+        const DIMS: usize = 8;
+        let mut idx = VectorIndex::new(DIMS).unwrap();
+        for i in 0..10_000 {
+            idx.add(
+                &det_vec(DIMS, i as u64),
+                VectorMeta { item_id: format!("b-{i}"), chunk_idx: 0, level: 2, section_idx: 0 },
+            )
+            .unwrap_or_else(|e| panic!("add at exactly-10000 boundary, i={i}: {e}"));
+        }
+        assert_eq!(idx.len(), 10_000);
+        // 第 10_001 个 —— 旧代码在此 panic。
+        idx.add(
+            &det_vec(DIMS, 10_000),
+            VectorMeta { item_id: "b-10000".into(), chunk_idx: 0, level: 2, section_idx: 0 },
+        )
+        .expect("the 10_001-th vector must grow capacity, not panic");
+        assert_eq!(idx.len(), 10_001);
     }
 
     #[test]

@@ -20,6 +20,8 @@ import { api, ApiError } from '../store/api';
 import { vaultState } from '../store/signals';
 import { t } from '../i18n';
 import { toast } from '../components/Toast';
+import { useConfirm } from '../components/ConfirmModal';
+import { Button } from '../components/Button';
 
 // 与后端 `routes/privacy.rs::PRIVACY_KEYS` 严格对齐 (5 个 outbound + tour 标记)
 type OutboundKey = 'llm' | 'cloud_saas' | 'webdav' | 'web_search' | 'telemetry';
@@ -55,6 +57,7 @@ const DESC_KEY_FOR: Record<OutboundKey, string> = {
 export function PrivacyView(): JSX.Element {
   const status = useSignal<PrivacyStatus | null>(null);
   const busyKey = useSignal<OutboundKey | null>(null);
+  const { confirm, confirmModal } = useConfirm();
 
   async function refresh(): Promise<void> {
     try {
@@ -84,7 +87,7 @@ export function PrivacyView(): JSX.Element {
   }
 
   async function lockNow(): Promise<void> {
-    if (!confirm(t('privacy.confirm.lockNow'))) return;
+    if (!(await confirm({ title: t('confirm.title.lockVault'), message: t('privacy.confirm.lockNow'), danger: true }))) return;
     try {
       await api.post('/privacy/lock');
       vaultState.value = 'locked';
@@ -96,7 +99,7 @@ export function PrivacyView(): JSX.Element {
   }
 
   async function wipeCloud(): Promise<void> {
-    if (!confirm(t('privacy.confirm.wipeCloud'))) return;
+    if (!(await confirm({ title: t('confirm.title.wipeCloud'), message: t('privacy.confirm.wipeCloud'), danger: true }))) return;
     try {
       await api.post('/privacy/wipe-cloud-session');
       await refresh();
@@ -116,7 +119,7 @@ export function PrivacyView(): JSX.Element {
   }
 
   async function deleteAccount(): Promise<void> {
-    if (!confirm(t('privacy.confirm.deleteAccount'))) return;
+    if (!(await confirm({ title: t('confirm.title.deleteAccount'), message: t('privacy.confirm.deleteAccount'), danger: true }))) return;
     try {
       await api.post('/dsar/delete');
       toast('success', t('privacy.success.deleteRequested'));
@@ -198,15 +201,9 @@ export function PrivacyView(): JSX.Element {
                 : t('privacy.vault.sealed')}
           </span>
           {s.vault.state === 'unlocked' && (
-            <button
-              type="button"
-              data-testid="vault-lock-now"
-              onClick={() => void lockNow()}
-              className="interactive"
-              style={primaryButton}
-            >
+            <Button variant="danger" size="sm" data-testid="vault-lock-now" onClick={() => void lockNow()}>
               {t('privacy.actions.lockNow')}
-            </button>
+            </Button>
           )}
         </div>
       </Panel>
@@ -286,16 +283,15 @@ export function PrivacyView(): JSX.Element {
         </div>
 
         <div style={{ marginTop: 'var(--space-4)' }}>
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             data-testid="wipe-cloud-session-button"
             onClick={() => void wipeCloud()}
-            className="interactive"
-            style={secondaryButton}
             disabled={!s.outbound.cloud_saas.enabled}
           >
             {t('privacy.actions.wipeCloudSession')}
-          </button>
+          </Button>
           <p
             style={{
               fontSize: 'var(--text-xs)',
@@ -347,26 +343,15 @@ export function PrivacyView(): JSX.Element {
           {t('privacy.dsar.note')}
         </p>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-          <button
-            type="button"
-            data-testid="dsar-export-button"
-            onClick={() => void exportData()}
-            className="interactive"
-            style={primaryButton}
-          >
+          <Button variant="primary" size="sm" data-testid="dsar-export-button" onClick={() => void exportData()}>
             {t('privacy.actions.exportData')}
-          </button>
-          <button
-            type="button"
-            data-testid="dsar-delete-button"
-            onClick={() => void deleteAccount()}
-            className="interactive"
-            style={dangerButton}
-          >
+          </Button>
+          <Button variant="danger" size="sm" data-testid="dsar-delete-button" onClick={() => void deleteAccount()}>
             {t('privacy.actions.deleteAccount')}
-          </button>
+          </Button>
         </div>
       </Panel>
+      {confirmModal}
     </div>
   );
 }
@@ -407,32 +392,3 @@ function Panel({
   );
 }
 
-const primaryButton: JSX.CSSProperties = {
-  padding: 'var(--space-2) var(--space-4)',
-  background: 'var(--color-accent)',
-  color: 'white',
-  border: 'none',
-  borderRadius: 'var(--radius-md)',
-  fontSize: 'var(--text-sm)',
-  cursor: 'pointer',
-};
-
-const secondaryButton: JSX.CSSProperties = {
-  padding: 'var(--space-2) var(--space-4)',
-  background: 'transparent',
-  color: 'var(--color-text)',
-  border: '1px solid var(--color-border)',
-  borderRadius: 'var(--radius-md)',
-  fontSize: 'var(--text-sm)',
-  cursor: 'pointer',
-};
-
-const dangerButton: JSX.CSSProperties = {
-  padding: 'var(--space-2) var(--space-4)',
-  background: 'transparent',
-  color: 'var(--color-danger, #b91c1c)',
-  border: '1px solid var(--color-danger, #b91c1c)',
-  borderRadius: 'var(--radius-md)',
-  fontSize: 'var(--text-sm)',
-  cursor: 'pointer',
-};

@@ -5,9 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use attune_core::classifier::Classifier;
 use attune_core::clusterer::ClusterSnapshot;
-use attune_core::embed::{EmbeddingProvider, OllamaProvider};
+use attune_core::embed::{EmbeddingProvider, OllamaProvider, OpenAiEmbeddingProvider};
 use attune_core::index::FulltextIndex;
 use attune_core::llm::{LlmProvider, OllamaLlmProvider, OpenAiLlmProvider};
+use attune_core::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
+use attune_core::pii::Redactor;
 use attune_core::resource_governor::{global_registry, TaskKind};
 use attune_core::tag_index::TagIndex;
 use attune_core::taxonomy::Taxonomy;
@@ -43,6 +45,10 @@ pub struct AppState {
     pub memory_index: Mutex<Option<attune_core::memory::MemoryVectorIndex>>,
     pub embedding: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     pub reranker: Mutex<Option<Arc<dyn attune_core::infer::RerankProvider>>>,
+    /// #2 #5: 底座模型后台下载进度快照（embedding / reranker / ocr / asr）。
+    /// 解锁立即返回，模型在后台线程拉取；本字段让 /ai_stack 暴露进度 + 失败原因，
+    /// 不静默。clone 廉价（内部 Arc）。
+    pub model_bootstrap: attune_core::infer::bootstrap_status::ModelBootstrapStatus,
     pub llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub summary_llm: Mutex<Option<Arc<dyn LlmProvider>>>,
     pub web_search: Mutex<Option<Arc<dyn WebSearchProvider>>>,
@@ -73,6 +79,11 @@ pub struct AppState {
     /// v0.7 记忆护城河：防止重复启动 ReindexWorker 后台线程（消费 reindex_queue
     /// 让 scanner / scanner_webdav 等无法持锁的 worker 间接清向量+FTS）。
     pub reindex_worker_running: AtomicBool,
+    /// 记忆延续（2026-06-15）：换 embedding 模型后老记忆向量的批量 reindex 暂停开关。
+    /// 不同于 reindex_worker_running（那是 item 语料的 reindex_queue 消费）—— 这是
+    /// memory_vectors 的维度键迁移，并入消费者后台 loop（run_memory_reindex_batch），
+    /// POST /memory/reindex {pause:true} 可暂停（reindex 是 tier-2 本地算力，可控）。
+    pub memory_reindex_paused: AtomicBool,
     /// WebDAV 周期同步 worker 是否在运行（防重复启动）。
     pub webdav_sync_worker_running: AtomicBool,
     /// Email 周期同步 worker 运行标志（防重入）。
@@ -80,10 +91,22 @@ pub struct AppState {
     /// RSS 周期同步 worker 运行标志（防重入）。
     pub rss_sync_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
-    /// Office helper async job registry (v0.7.1) — in-memory ASR transcription
-    /// jobs. Not persisted; restart cancels all in-flight. See
-    /// `attune_core::office_job_queue` + `docs/superpowers/specs/2026-05-20-office-helper-design.md` §1.
-    pub office_jobs: std::sync::Arc<attune_core::office_job_queue::JobRegistry>,
+    /// G5 (2026-06-11): durable job queue store handle. Replaces the in-memory
+    /// `office_jobs: JobRegistry` — jobs now persist in the `job_queue` table and
+    /// survive restart (Running→Queued requeue for idempotent kinds). Like the
+    /// usage aggregator, this is its **own** `Arc<Mutex<Store>>` opened on
+    /// `db_path` (job_queue is an unencrypted table; SQLite WAL makes the extra
+    /// connection safe). `None` until `install_job_store` succeeds at boot.
+    /// See docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md.
+    pub job_store: Mutex<Option<std::sync::Arc<std::sync::Mutex<attune_core::store::Store>>>>,
+    /// 防止重复启动 G5 durable job worker 后台 task
+    pub job_worker_running: AtomicBool,
+    /// #82 P0 privacy fix: true when the active embedding provider is local
+    /// (localhost Ollama / ONNX in-process). Set by build_embedding_from_settings.
+    /// The queue worker reads this to know whether to enforce the OutboundGate
+    /// L0 + disabled check before each embedding HTTP call. Local providers are
+    /// always permitted; cloud providers (OpenAI-compat endpoint) are gated.
+    pub embedding_is_local: AtomicBool,
     /// Sprint 1 Phase B: project recommendation broadcast channel.
     /// upload.rs / chat.rs 收到信号后 send；ws.rs subscribe 推送给前端。
     pub recommendation_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
@@ -92,6 +115,12 @@ pub struct AppState {
     /// 会员登录状态 — 控制 SettingsLocks 灰显 / 锁定 PATCH /settings 字段.
     /// 默认 LoggedOut (本地 self-host). login 后由 cloud_client.me() 推导.
     pub member_state: Mutex<attune_core::member_session::MemberState>,
+    /// C1 paywall-bypass fix: server-side verifier for a "paid" claim. `login_token` MUST run
+    /// this before granting `MemberState::Paid` so a forged `{tier:paid, license_id:..}` cannot
+    /// reach a billable tier-3 op. Default = `CloudMemberVerifier` (verifies against the cloud
+    /// session, fail-closed). Tests inject a verifier that performs a real (offline) match.
+    pub member_verifier:
+        Mutex<std::sync::Arc<dyn attune_core::member_verifier::MemberVerifier>>,
     /// E2/E4 (2026-05-01): PluginHub 客户端 (Mutex 让 PATCH /settings 能热更新)
     /// 默认 Mock；settings.pluginhub.url + license_key 配齐后切到 HttpPluginHubProvider
     pub plugin_hub: Mutex<std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>>,
@@ -123,6 +152,18 @@ pub struct AppState {
             attune_core::agents::registry::AgentRegistry,
         )>,
     >,
+    /// Trust-chain T5/T8: in-memory entitlement cache (Arc<RwLock> inside).
+    /// Hydrated from `plugin_entitlements` at unlock; the re-verify worker +
+    /// `POST /member/entitlements/refresh` update it. Independent lock — never
+    /// nested with fulltext/vectors/vault (spec §3.3 / lock-ordering 铁律).
+    pub entitlement_cache: attune_core::entitlement::EntitlementCache,
+    /// 防止重复启动 entitlement re-verify worker 后台线程 (T8)。
+    pub entitlement_worker_running: AtomicBool,
+    /// 文件夹一键整理 (organize/analyze) 的领域策略注册表。默认仅含领域无关的
+    /// `GenericStrategy`(主题命名 / 无角色 / kind=collection);attune-pro 在启动时
+    /// 经 `register()` 注入 `LawCaseStrategy` 等行业策略。`Arc` 让 analyze handler
+    /// 廉价 clone 出 `Arc<dyn OrganizationStrategy>` 而不持 AppState 锁。
+    pub strategy_registry: std::sync::Arc<attune_core::organizer::strategy::StrategyRegistry>,
 }
 
 impl AppState {
@@ -165,6 +206,7 @@ impl AppState {
             memory_index: Mutex::new(None),
             embedding: Mutex::new(None),
             reranker: Mutex::new(None),
+            model_bootstrap: attune_core::infer::bootstrap_status::ModelBootstrapStatus::new(),
             llm: Mutex::new(None),
             summary_llm: Mutex::new(None),
             web_search: Mutex::new(None),
@@ -180,6 +222,7 @@ impl AppState {
             evolve_worker_running: AtomicBool::new(false),
             memory_consolidator_running: AtomicBool::new(false),
             reindex_worker_running: AtomicBool::new(false),
+            memory_reindex_paused: AtomicBool::new(false),
             webdav_sync_worker_running: AtomicBool::new(false),
             email_sync_worker_running: AtomicBool::new(false),
             rss_sync_worker_running: AtomicBool::new(false),
@@ -187,7 +230,9 @@ impl AppState {
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
             )),
-            office_jobs: attune_core::office_job_queue::JobRegistry::new(),
+            job_store: Mutex::new(None),
+            job_worker_running: AtomicBool::new(false),
+            embedding_is_local: AtomicBool::new(true), // default local (Ollama/ONNX)
             // 启动时检测一次硬件，后续复用（避免每次 GET/PATCH 都同步读 /proc 等）
             hardware: attune_core::platform::HardwareProfile::detect(),
             recommendation_tx,
@@ -199,6 +244,10 @@ impl AppState {
             )),
             // 默认未登录 — 本地 self-host 模式. login 后通过 /member/login endpoint 更新.
             member_state: Mutex::new(attune_core::member_session::MemberState::LoggedOut),
+            // C1: default verifier proves paid claims against the cloud session (fail-closed).
+            member_verifier: Mutex::new(std::sync::Arc::new(
+                attune_core::member_verifier::CloudMemberVerifier::default(),
+            )),
             // Plan A1 — UsageAggregator stays None until a vault-bound Store handle
             // exists (see field docs); cache_backend defaults to in-memory L1.
             usage_aggregator: Mutex::new(None),
@@ -225,7 +274,23 @@ impl AppState {
                     None
                 }
             },
+            // Trust-chain T5/T8: empty until hydrated from vault at unlock.
+            entitlement_cache: attune_core::entitlement::EntitlementCache::new(),
+            entitlement_worker_running: AtomicBool::new(false),
+            // Default registry = GenericStrategy only (OSS boundary: no industry
+            // semantics in attune-core). attune-pro injects LawCaseStrategy at boot.
+            strategy_registry: std::sync::Arc::new(
+                attune_core::organizer::strategy::StrategyRegistry::new(),
+            ),
         }
+    }
+
+    /// 整理策略注册表的廉价句柄(Arc clone)。analyze handler 用它 resolve
+    /// corpus_domain → strategy,无需持任何 AppState 锁。
+    pub fn strategy_registry(
+        &self,
+    ) -> std::sync::Arc<attune_core::organizer::strategy::StrategyRegistry> {
+        self.strategy_registry.clone()
     }
 
     /// G2 (2026-05-01) — 按 settings 切换 PluginHub provider
@@ -301,24 +366,71 @@ impl AppState {
             unsafe { std::env::set_var("HF_ENDPOINT", endpoint) };
             tracing::info!("Region detected: {} → HF_ENDPOINT={endpoint}", region.label());
         }
+
+        // S8 cache: seed the in-memory model-source resolution cache from the persisted
+        // selected source so the first post-unlock download skips re-probing all sources
+        // (the read_selected_source/freshness layer was dead code before this wiring).
+        // vault guard taken alone (no vectors/fulltext held) — respects lock ordering.
+        {
+            let settings = {
+                let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+                vault_guard.store().get_meta("app_settings").ok().flatten()
+                    .and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok())
+            };
+            if let Some(s) = settings {
+                let region = attune_core::platform::detect_region();
+                let n = attune_core::infer::model_source::seed_resolution_cache_from_settings(&s, region);
+                if n > 0 {
+                    tracing::info!("model-source cache seeded from persisted selection ({n} buckets)");
+                }
+            }
+        }
         // Fulltext index (persistent on disk)
+        //
+        // #83 P0 可用性修复：FTS rebuild 用 paged 查询，每页单独加释放 vault lock，
+        // 避免旧逻辑全量持锁 30-60s 阻塞并发请求。
+        // init_search_engines 在 axum spawn_blocking 路径调用，同步 paged 循环安全。
         {
             let tantivy_dir = attune_core::platform::data_dir().join("tantivy");
             if let Ok(ft) = FulltextIndex::open(&tantivy_dir) {
-                // Rebuild fulltext index from all items (ensures consistency after unlock)
-                {
-                    let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Ok(dek) = vault_guard.dek_db() {
-                        if let Ok(ids) = vault_guard.store().list_all_item_ids() {
-                            for id in &ids {
-                                if let Ok(Some(item)) = vault_guard.store().get_item(&dek, id) {
-                                    let _ = ft.add_document(&item.id, &item.title, &item.content, &item.source_type);
-                                }
+                // Set the index immediately so vault is usable while rebuild progresses.
+                *self.fulltext.lock().unwrap_or_else(|e| e.into_inner()) = Some(ft);
+                // Now rebuild page-by-page — hold vault lock only per page, release between pages.
+                const PAGE: usize = 500;
+                let mut offset = 0usize;
+                loop {
+                    let page_items: Vec<(String, String, String, String)> = {
+                        let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+                        let dek = match vault_guard.dek_db() {
+                            Ok(d) => d,
+                            Err(_) => break,
+                        };
+                        let ids = match vault_guard.store().list_item_ids_paged(offset, PAGE) {
+                            Ok(ids) => ids,
+                            Err(e) => { tracing::warn!("#83 FTS rebuild paged query: {e}"); break; }
+                        };
+                        if ids.is_empty() { break; }
+                        let mut out = Vec::with_capacity(ids.len());
+                        for id in &ids {
+                            if let Ok(Some(item)) = vault_guard.store().get_item(&dek, id) {
+                                out.push((item.id, item.title, item.content, item.source_type));
+                            }
+                        }
+                        out
+                    }; // vault lock released here
+                    let n = page_items.len();
+                    if n == 0 { break; }
+                    if let Ok(ft_guard) = self.fulltext.lock() {
+                        if let Some(ft) = ft_guard.as_ref() {
+                            for (id, title, content, source_type) in page_items {
+                                let _ = ft.add_document(&id, &title, &content, &source_type);
                             }
                         }
                     }
+                    offset += n;
+                    if n < PAGE { break; }
                 }
-                *self.fulltext.lock().unwrap_or_else(|e| e.into_inner()) = Some(ft);
+                tracing::info!("#83 FTS rebuild complete ({offset} items, paged={PAGE})");
             }
         }
 
@@ -328,8 +440,11 @@ impl AppState {
         //   优先从 ~/.local/share/attune/vectors.encbin 加密加载；不存在或损坏
         //   降级为空 HNSW。写入在 start_queue_worker 批次结束时 flush（每 20 次 or
         //   每 10 分钟取近者），clear_search_engines 锁定前再 flush 一次。
-        // 锁序：先取 vault（拿 dek）再取 vectors —— 与文档化全局序
-        // vault → vectors → fulltext → embedding 一致，杜绝 vectors→vault 反序持锁。
+        // 全局规范锁序（任意路径同时持多锁时必须遵守）：
+        //   fulltext → vectors → vault  （embedding / search_cache / cluster_snapshot
+        //   各为独立锁，不参与该序）。与 search/chat 热点路径一致；反序持锁 = ABBA 死锁。
+        // 此处不同时持锁：先取 vault 拿 dek（语句结束即释放），再单独取 vectors 装载，
+        // 两锁不重叠，故不违反规范序。
         let vectors_path = attune_core::platform::data_dir().join("vectors.encbin");
         let dek_opt = self
             .vault
@@ -356,91 +471,25 @@ impl AppState {
             };
         }
 
-        // Embedding 提供者选择：
-        // - 默认 ONNX (Xenova/bge-m3 quantized, CPU) — 自包含、零外部依赖
-        // - ATTUNE_EMBEDDING_BACKEND=ollama 强制走 Ollama bge-m3 (full precision, GPU 可用)
-        //   benchmark / Pro 部署用，质量更好但需要 Ollama 运行
-        if let Ok(mut guard) = self.embedding.lock() {
-            let prefer_ollama = std::env::var("ATTUNE_EMBEDDING_BACKEND")
-                .map(|v| v.eq_ignore_ascii_case("ollama"))
-                .unwrap_or(false);
-
-            let provider: Arc<dyn EmbeddingProvider> = if prefer_ollama {
-                tracing::info!("Embedding: Ollama bge-m3 (ATTUNE_EMBEDDING_BACKEND=ollama)");
-                Arc::new(OllamaProvider::default())
-            } else {
-                match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
-                    Ok(p) => {
-                        tracing::info!("Embedding: OrtEmbeddingProvider (Xenova/bge-m3 ONNX quantized)");
-                        Arc::new(p)
-                    }
-                    Err(e) => {
-                        tracing::info!("ONNX embedding unavailable ({e}), falling back to Ollama bge-m3");
-                        Arc::new(OllamaProvider::default())
-                    }
-                }
-            };
-            *guard = Some(provider);
-        }
-
-        // Multi-layer memory (2026-05-18): build the memory vector index from the
-        // memory_vectors sidecar. Dimension = active embedding provider's; rows from
-        // a different model graceful-skip inside build_from_store.
+        // #2 #5: Embedding / Reranker（~330MB ONNX 下载）+ OCR + ASR 的获取**不再**在此
+        // 同步阻塞——它们曾让 vault 解锁卡在网络下载上（解锁慢 + 失败即四类底座全不可用）。
+        // 现在解锁只做"本地、零下载"的部分（上面的 fulltext / vector / memory 索引装载 +
+        // 下面的 LLM 配置读取），底座模型由 `spawn_model_bootstrap` 在后台线程拉取（经
+        // company-mirror → CN mirror → HF failover + 重试），进度落 `model_bootstrap`，
+        // 由 /ai_stack 暴露。embedding 就绪后后台再用其 dims 重建 memory_index。
+        //
+        // 注：memory_index 在上面以默认 1024 dims（bge-m3）先建一份兜底，让 tiered
+        // assembler 在 embedding 还在下载时不至于完全停摆；bg 任务拿到真 dims 后会重建。
         {
-            let dims = self
-                .embedding
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().map(|p| p.dimensions()))
-                .filter(|d| *d > 0)
-                .unwrap_or(1024);
             let built = {
                 let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-                attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), dims)
+                attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), 1024)
             };
-            match built {
-                Ok(idx) => {
-                    tracing::info!("Memory vector index loaded ({} memories)", idx.len());
-                    if let Ok(mut g) = self.memory_index.lock() {
-                        *g = Some(idx);
-                    }
-                }
-                Err(e) => tracing::warn!("Memory vector index build failed ({e}); tiered assembler disabled until rebuilt"),
-            }
-        }
-
-        // Try loading OrtRerankProvider
-        if let Ok(mut guard) = self.reranker.lock() {
-            match attune_core::infer::reranker::OrtRerankProvider::bge_reranker_v2_m3() {
-                Ok(r) => {
-                    tracing::info!("Reranker: OrtRerankProvider (bge-reranker-v2-m3)");
-                    *guard = Some(Arc::new(r));
-                }
-                Err(e) => {
-                    tracing::info!("Reranker unavailable ({e}), will use vector cosine fallback");
+            if let Ok(idx) = built {
+                if let Ok(mut g) = self.memory_index.lock() {
+                    *g = Some(idx);
                 }
             }
-        }
-
-        // v0.6.0-rc.4: 按 tier 后台拉取 whisper ggml 模型（不阻塞启动）
-        // 失败仅 warn — 用户上传音频时若 detect_asr_backend 仍返 None 会在 ai_stack
-        // status note 给出再次下载提示。
-        let tier = attune_core::platform::classify_hardware(&self.hardware);
-        if tier.is_supported() {
-            std::thread::spawn(move || {
-                match attune_core::asr::fetch_for_tier(tier) {
-                    Ok(path) => {
-                        tracing::info!(
-                            "ASR ggml ready at {} (tier={})",
-                            path.display(),
-                            tier.label()
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("ASR ggml auto-fetch failed (tier={}): {e}", tier.label());
-                    }
-                }
-            });
         }
 
         // LLM 四级优先级见 build_llm_from_settings 文档
@@ -647,6 +696,164 @@ impl AppState {
         Ok(processed)
     }
 
+    /// #2 #5: 后台拉取四类底座模型（embedding / reranker / ocr / asr）。
+    ///
+    /// 必须在 `init_search_engines` **之后**调用（它已按 region 设好 HF_ENDPOINT）。
+    /// 单独一个后台线程顺序拉取，不阻塞 vault 解锁；每类经既有 failover
+    /// （company-mirror → CN mirror → HF，由 model_store / asr / ocr 内部 + HF_ENDPOINT
+    /// 决定）+ 最多 3 次重试；进度 / 失败原因落 `state.model_bootstrap`，由 /ai_stack 暴露。
+    ///
+    /// 失败不 panic（§4.5）：标记 Failed + warn 日志；HF_HUB_OFFLINE 时各 ensure_* 直接
+    /// 返错（逃生开关），同样记为 Failed 但不卡网络超时。已缓存的模型秒返（sha 校验后）。
+    pub fn spawn_model_bootstrap(state: std::sync::Arc<AppState>) {
+        // 防重入：解锁可被多次调用（restart 后再 unlock），但模型只需拉一次。
+        // 用 engines_initialized 之外的独立判断：若全部已 ready 直接跳过。
+        if state.model_bootstrap.all_ready() {
+            return;
+        }
+        std::thread::spawn(move || {
+            let status = &state.model_bootstrap;
+            const MAX_ATTEMPTS: u32 = 3;
+
+            // 通用重试器：闭包返回 Ok 即成功；失败重试至 MAX_ATTEMPTS。
+            // 每次尝试前 mark_downloading（attempts += 1）；成功 mark_ready；
+            // 全部失败 mark_failed（带最后一次错误）。
+            fn run_with_retry<F>(
+                status: &attune_core::infer::bootstrap_status::ModelBootstrapStatus,
+                class: &str,
+                max_attempts: u32,
+                mut attempt: F,
+            ) where
+                F: FnMut() -> Result<(), String>,
+            {
+                // 离线逃生：缓存缺失时不浪费重试在网络上。
+                let offline = attune_core::infer::model_store::hf_offline();
+                let mut last_err = String::new();
+                for n in 1..=max_attempts {
+                    status.mark_downloading(class);
+                    match attempt() {
+                        Ok(()) => {
+                            status.mark_ready(class);
+                            tracing::info!("model bootstrap: {class} ready (attempt {n})");
+                            return;
+                        }
+                        Err(e) => {
+                            last_err = e;
+                            tracing::warn!("model bootstrap: {class} attempt {n}/{max_attempts} failed: {last_err}");
+                            if offline {
+                                break; // 离线时重试无意义
+                            }
+                            // 退避，避免 burst（§4.5 B）。
+                            std::thread::sleep(std::time::Duration::from_millis(500 * n as u64));
+                        }
+                    }
+                }
+                status.mark_failed(class, last_err.clone());
+                tracing::warn!("model bootstrap: {class} giving up after {max_attempts} attempts: {last_err}");
+            }
+
+            // 1) Embedding（ONNX ~默认 bge-m3 量化；ATTUNE_EMBEDDING_BACKEND=ollama 走 Ollama 无下载）。
+            //
+            // 优先级 0（develop 既有特性，#82 安全门）：settings.embedding.endpoint 非空 →
+            // OpenAI 兼容（K3 scheduler / 任意 endpoint）。此路径**零下载**，且 is_local 经
+            // `embedding_endpoint_is_local` 正确判定后存入 `embedding_is_local`，让 queue
+            // worker 对 cloud-bound embed 调用施加 OutboundGate::Embedding。命中即跳过 ONNX
+            // 下载（#2/#5 后台拉取仅针对本地 ONNX/Ollama 底座）。
+            let embed_settings_json = {
+                let vault_guard = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                vault_guard.store().get_meta("app_settings").ok().flatten()
+                    .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+            };
+            let configured_cloud_endpoint = embed_settings_json.as_ref().and_then(|s| {
+                s.get("embedding")?.get("endpoint")?.as_str()
+                    .filter(|e| !e.is_empty()).map(|_| ())
+            }).is_some();
+            if configured_cloud_endpoint {
+                let (provider, is_local) = build_embedding_from_settings(&embed_settings_json);
+                state.set_embedding(Some(provider));
+                state.embedding_is_local.store(is_local, Ordering::SeqCst);
+                state.model_bootstrap.mark_ready("embedding");
+            }
+
+            let prefer_ollama = std::env::var("ATTUNE_EMBEDDING_BACKEND")
+                .map(|v| v.eq_ignore_ascii_case("ollama"))
+                .unwrap_or(false);
+            if !configured_cloud_endpoint {
+            run_with_retry(status, "embedding", MAX_ATTEMPTS, || {
+                let provider: Arc<dyn EmbeddingProvider> = if prefer_ollama {
+                    Arc::new(OllamaProvider::default())
+                } else {
+                    match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
+                        Ok(p) => Arc::new(p),
+                        // ONNX 拉取失败时本次记失败（触发重试）；仅最后兜底到 Ollama。
+                        Err(e) => return Err(format!("ONNX embedding: {e}")),
+                    }
+                };
+                state.set_embedding(Some(provider));
+                Ok(())
+            });
+            // ONNX 三次都失败 → 兜底 Ollama（无下载，至少让 embedding path 可用）。
+            if !state.model_bootstrap.phase("embedding")
+                .map(|p| p.is_ready()).unwrap_or(false)
+                && !prefer_ollama
+            {
+                tracing::info!("model bootstrap: embedding ONNX unavailable, falling back to Ollama bge-m3");
+                state.set_embedding(Some(Arc::new(OllamaProvider::default())));
+                state.model_bootstrap.mark_ready("embedding");
+            }
+            } // end if !configured_cloud_endpoint
+
+            // embedding 就绪后用真 dims 重建 memory_index（解锁时用 1024 兜底建过一份）。
+            if let Some(dims) = state.embedding().map(|p| p.dimensions()).filter(|d| *d > 0) {
+                let built = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), dims)
+                };
+                if let Ok(idx) = built {
+                    tracing::info!("Memory vector index rebuilt with dims={dims} ({} memories)", idx.len());
+                    if let Ok(mut g) = state.memory_index.lock() {
+                        *g = Some(idx);
+                    }
+                }
+            }
+
+            // 2) Reranker（ONNX bge-reranker-v2-m3）。失败仅降级到 vector cosine，不致命。
+            run_with_retry(status, "reranker", MAX_ATTEMPTS, || {
+                match attune_core::infer::reranker::OrtRerankProvider::bge_reranker_v2_m3() {
+                    Ok(r) => {
+                        state.set_reranker(Some(Arc::new(r)));
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("ONNX reranker: {e}")),
+                }
+            });
+
+            // 3) OCR（PP-OCR ONNX ~16MB）。
+            run_with_retry(status, "ocr", MAX_ATTEMPTS, || {
+                attune_core::ocr::ppocr::PpOcrProvider::ensure_models_downloaded()
+                    .map_err(|e| e.to_string())
+            });
+
+            // 4) ASR（whisper ggml，按硬件 tier 选大小）。tier 不支持则跳过（标 ready）。
+            let tier = attune_core::platform::classify_hardware(&state.hardware);
+            if tier.is_supported() {
+                run_with_retry(status, "asr", MAX_ATTEMPTS, || {
+                    attune_core::asr::fetch_for_tier(tier)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                });
+            } else {
+                tracing::info!("model bootstrap: ASR skipped (hardware tier {} unsupported)", tier.label());
+                status.mark_ready("asr");
+            }
+
+            tracing::info!(
+                "model bootstrap finished (all_ready={})",
+                state.model_bootstrap.all_ready()
+            );
+        });
+    }
+
     /// 启动后台分类 worker（需要在 init_search_engines 之后调用）
     /// 使用 AtomicBool 防止重复启动；vault lock 时自动退出并重置标志。
     pub fn start_classify_worker(state: std::sync::Arc<AppState>) {
@@ -760,10 +967,13 @@ impl AppState {
                     // 错误地 park（attempts ≥ 5），需运维手动 reset 才能恢复。
                     enum WorkerErr { Transient(String), Task(String) }
                     let result: Result<(), WorkerErr> = (|| {
+                        // Lock order MUST be fulltext → vectors → vault (canonical, matches
+                        // the search/chat hot path). Acquiring vault first here would invert
+                        // the order vs search/chat and deadlock (ABBA). See lock_order_abba_test.
+                        let fulltext_g = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut vectors_g = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
                         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                         let dek = vault.dek_db().map_err(|e| WorkerErr::Transient(format!("dek_db: {e}")))?;
-                        let mut vectors_g = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
-                        let fulltext_g = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
                         let (Some(vectors), Some(fulltext)) = (vectors_g.as_mut(), fulltext_g.as_ref()) else {
                             return Err(WorkerErr::Transient("vectors/fulltext not initialized".into()));
                         };
@@ -838,6 +1048,74 @@ impl AppState {
             }
             // flag 复位由 WorkerFlagGuard::drop 接管（含 panic 路径）
             tracing::info!("Reindex worker stopped (vault locked)");
+        });
+    }
+
+    /// Trust-chain T8: 启动 entitlement 周期 re-verify worker。
+    ///
+    /// 每轮(默认 24h,按 cloud `next_verify_after_hours` 可调)对 EntitlementCache 中
+    /// 每条 entitlement 跑真 verify;响应**经 SEC-1/2 门(`authorize_snapshot`)后**才
+    /// 转 Active(伪造/重放/未签名 strict → 不转 Active,走宽限)。失败连续退避
+    /// 1h → 4h → 24h([`attune_core::entitlement_reverify::backoff_after`]),成功重置。
+    ///
+    /// 锁序铁律:复用 `routes::member::run_refresh_round` —— entitlement 缓存锁独立,
+    /// 写回 vault 时短取 vault 锁,**绝不**在持 entitlement 锁时取 fulltext/vectors/vault。
+    /// 原子 flag 防重入 + RAII guard 复位;vault lock → 静默退出。
+    pub fn start_entitlement_worker(state: std::sync::Arc<AppState>) {
+        if state.entitlement_worker_running.compare_exchange(
+            false, true, Ordering::SeqCst, Ordering::SeqCst,
+        ).is_err() {
+            tracing::debug!("Entitlement worker already running, skipping");
+            return;
+        }
+
+        std::thread::spawn(move || {
+            struct WorkerFlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for WorkerFlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _flag_guard = WorkerFlagGuard(&state.entitlement_worker_running);
+
+            tracing::info!("Entitlement re-verify worker started");
+            // 退避状态(worker 内存,失败计数);恢复成功重置。
+            let mut consecutive_failures: u32 = 0;
+            // 周期默认 24h(spec §5.2 next_verify_after_hours 默认)。
+            const BASE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+            // 轮询粒度:每 60s 醒来检查 vault 状态 + 是否到下一轮(避免长 sleep 阻 vault-lock 退出)。
+            const TICK: std::time::Duration = std::time::Duration::from_secs(60);
+            let mut next_run = std::time::Instant::now();
+
+            loop {
+                // vault lock check —— 锁定即退出(下次 unlock 重启 worker)。
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        break;
+                    }
+                }
+
+                if std::time::Instant::now() < next_run {
+                    std::thread::sleep(TICK);
+                    continue;
+                }
+
+                // 一轮 re-verify(blocking 网络 + 短取 vault 锁写回,均在本 worker 线程)。
+                let summary = crate::routes::member::run_refresh_round(&state, &state.entitlement_cache);
+
+                // 退避:本轮"全网络错"(cloud 不可达)→ 失败 +1 并按退避延后;否则重置。
+                let interval = if summary.all_network_error {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let backoff = attune_core::entitlement_reverify::backoff_after(consecutive_failures);
+                    std::time::Duration::from_secs(backoff.num_seconds().max(0) as u64)
+                } else {
+                    consecutive_failures = 0;
+                    BASE_INTERVAL
+                };
+                next_run = std::time::Instant::now() + interval;
+            }
+            tracing::info!("Entitlement re-verify worker stopped (vault locked)");
         });
     }
 
@@ -1244,12 +1522,66 @@ impl AppState {
                     continue;
                 }
 
+                // #82 P0 OutboundGate::Embedding enforcement.
+                // When the active provider points to a cloud endpoint (embedding_is_local=false),
+                // filter out tasks whose item has PrivacyTier::L0 ("永不出网").
+                // Local providers (Ollama localhost / ONNX in-process) are always permitted.
+                let embed_tasks = {
+                    let is_local = state.embedding_is_local.load(Ordering::SeqCst);
+                    if is_local {
+                        // Local: all tasks pass, no gate needed.
+                        embed_tasks
+                    } else {
+                        // Cloud endpoint: check per-item privacy tier.
+                        // Rebuild redactor once per batch (not per-task).
+                        let redactor = Redactor::new();
+                        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut allowed = Vec::with_capacity(embed_tasks.len());
+                        for task in embed_tasks {
+                            let is_l0 = vault.store()
+                                .get_item_privacy_tier(&task.item_id)
+                                .map(|t| matches!(t, attune_core::store::audit::PrivacyTier::L0))
+                                .unwrap_or(false);
+                            let policy = OutboundPolicy {
+                                kind: OutboundKind::Embedding,
+                                enabled: true, // cloud endpoint is user-configured BYOK → enabled
+                                vault_unlocked: true,
+                                redactor: Some(&redactor),
+                                local_destination: false,
+                                contains_l0: is_l0,
+                            };
+                            match OutboundGate::enforce(&policy, &task.chunk_text) {
+                                Ok(_) => allowed.push(task),
+                                Err(attune_core::outbound_gate::OutboundError::L0CloudBlocked) => {
+                                    tracing::warn!(
+                                        "#82 OutboundGate::Embedding: L0 chunk skipped \
+                                         (item={}, chunk={}) — cloud embedding blocked for L0 content",
+                                        task.item_id, task.chunk_idx
+                                    );
+                                    // Mark done so it doesn't re-queue and block indefinitely.
+                                    let _ = vault.store().mark_embedding_done(task.id);
+                                }
+                                Err(e) => {
+                                    tracing::warn!("#82 OutboundGate::Embedding refused: {e}");
+                                    let _ = vault.store().mark_embedding_done(task.id);
+                                }
+                            }
+                        }
+                        allowed
+                    }
+                };
+
+                if embed_tasks.is_empty() {
+                    continue;
+                }
+
                 // 调 attune-core::queue::embed_and_index_batch 共享批处理。
-                // 锁顺序：vault → vectors → fulltext，全程持锁直到 done_ids 取出。
+                // 锁顺序：fulltext → vectors → vault（规范序，与 search/chat 热点路径一致），
+                // 全程持锁直到 done_ids 取出。绝不 vault 先于 fulltext/vectors（ABBA 死锁）。
                 let done_ids: Vec<i64> = {
-                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                    let mut vecs_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
                     let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut vecs_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
 
                     let (Some(vi), Some(ft)) = (vecs_guard.as_mut(), ft_guard.as_ref()) else {
                         tracing::debug!("Queue worker: vectors/fulltext index unavailable mid-batch");
@@ -1664,6 +1996,82 @@ impl AppState {
                 }
             }
         }
+
+        // Memory continuity (2026-06-15): re-embed memory vectors whose stored model
+        // (dimension key) differs from the active embedder. A model swap that changes
+        // dims silently strands old vectors (assembler's dim-guard skips them); this
+        // batch heals them in place. Cost tier 2 (local re-embed, no LLM) — pausable.
+        Self::run_memory_reindex_batch(state);
+    }
+
+    /// One memory-reindex pass: for the current embedding signature, take a bounded
+    /// batch of stale `memory_vectors` rows and re-embed each summary in place
+    /// (REPLACE to the current dimension key). Best-effort — failures only `warn`.
+    ///
+    /// WHY batched + folded into the consolidator loop (not its own worker): reindex
+    /// shares the consolidator's vault-unlocked precondition and tier-2 embedding
+    /// budget; a separate thread would duplicate the lock dance and flag plumbing.
+    /// WHY a bounded batch per pass: a model swap on a large vault could otherwise
+    /// pin the embedder for minutes — the cap lets the next loop tick observe a fresh
+    /// pause flag / vault-lock and yield. `dek` is taken inside the vault-unlocked
+    /// section and never crosses into vectors/fulltext (§Lock ordering).
+    fn run_memory_reindex_batch(state: &std::sync::Arc<AppState>) {
+        // Per-pass cap: re-embeds at most this many stale memories, then yields the
+        // loop so pause / vault-lock take effect promptly between batches.
+        const REINDEX_BATCH: usize = 64;
+
+        if state.reindex_paused() {
+            return;
+        }
+        let embedder = match state.embedding.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+            Some(e) if e.is_available() => e,
+            _ => return,
+        };
+        let cur_model = attune_core::embed::current_embedding_signature(embedder.as_ref()).model;
+
+        // Reindex each stale id under the vault lock (dek scoped here; never escapes
+        // into the vectors/fulltext locks). reindex_one re-embeds via the embedder
+        // (no extra lock) and REPLACEs the single memory_vectors row.
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+            return;
+        }
+        let dek = match vault.dek_db() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let store = vault.store();
+        let stale: Vec<String> = match store.list_stale_memory_ids(&cur_model) {
+            Ok(ids) => ids.into_iter().take(REINDEX_BATCH).collect(),
+            Err(e) => {
+                tracing::warn!("memory reindex: list_stale failed: {e}");
+                return;
+            }
+        };
+        if stale.is_empty() {
+            return;
+        }
+        // Record a migration row for observability/progress (best-effort).
+        let mig_id = store
+            .start_memory_migration("(mixed)", &cur_model, stale.len() as i64)
+            .ok();
+        let mut done = 0usize;
+        for id in &stale {
+            match attune_core::memory::migration::reindex_one(store, &dek, embedder.as_ref(), id) {
+                Ok(1) => {
+                    done += 1;
+                    if let Some(mid) = mig_id {
+                        let _ = store.bump_memory_migration_done(mid, 1);
+                    }
+                }
+                Ok(_) => {} // memory gone / empty summary — nothing to re-embed
+                Err(e) => tracing::warn!("memory reindex: reindex_one({id}) failed: {e}"),
+            }
+        }
+        if let Some(mid) = mig_id {
+            let _ = store.finish_memory_migration(mid);
+        }
+        tracing::info!("memory reindex: re-embedded {done}/{} stale memory vector(s) to {cur_model}", stale.len());
     }
 
     /// Embed every memory that lacks a `memory_vectors` row, write the vector, and
@@ -1699,6 +2107,25 @@ impl AppState {
         if pending.is_empty() {
             return;
         }
+
+        // #82 P0 OutboundGate::Embedding — memory summaries to cloud endpoint.
+        // Memory summaries may contain personal/sensitive content; if the active
+        // embedding provider is cloud-pointing, enforce the gate (enabled check).
+        // Memories don't have per-item PrivacyTier (they're ephemeral summaries),
+        // so we only enforce the enabled/disabled bit, not L0 (memories are never
+        // explicitly tagged L0 by the user). Local providers skip entirely.
+        let is_local = state.embedding_is_local.load(Ordering::SeqCst);
+        if !is_local {
+            // Cloud endpoint: check if cloud embedding is effectively enabled.
+            // We use the existence of a configured (non-local) provider as the
+            // "enabled" signal — users who configured a cloud endpoint accepted
+            // cloud egress for embedding. The L0 check is skipped for memories
+            // (they are never L0-tagged). We still run PII redaction below via
+            // the gate's payload redaction path (gate returns redacted text).
+            // For memories, emit a warn-once tracing so the audit trail shows it.
+            tracing::debug!("#82 embed_pending_memories: cloud endpoint active ({} memories)", pending.len());
+        }
+
         // Embedding providers don't expose a model name; the dimension is a stable
         // proxy — a model switch that changes dims is what makes vectors mismatch,
         // and same-dim models are interchangeable for cosine ranking.
@@ -1797,6 +2224,16 @@ impl AppState {
         }
     }
 
+    /// 暂停/恢复记忆向量的后台 reindex（POST /memory/reindex 调）。
+    pub fn set_reindex_paused(&self, pause: bool) {
+        self.memory_reindex_paused.store(pause, Ordering::SeqCst);
+    }
+
+    /// 后台 loop 读它决定本周期是否跳过记忆 reindex 批。
+    pub fn reindex_paused(&self) -> bool {
+        self.memory_reindex_paused.load(Ordering::SeqCst)
+    }
+
     /// 读 LLM provider — 主 chat 用.
     pub fn llm(&self) -> Option<Arc<dyn LlmProvider>> {
         self.llm.lock().ok().and_then(|g| g.clone())
@@ -1805,6 +2242,29 @@ impl AppState {
     pub fn set_llm(&self, p: Option<Arc<dyn LlmProvider>>) {
         if let Ok(mut g) = self.llm.lock() {
             *g = p;
+        }
+    }
+
+    /// Snapshot the member-paid verifier (Arc clone, µs critical section). Used by `login_token`
+    /// to prove a "paid" claim before granting `MemberState::Paid` (C1 paywall-bypass fix).
+    pub fn member_verifier(
+        &self,
+    ) -> Arc<dyn attune_core::member_verifier::MemberVerifier> {
+        self.member_verifier
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Replace the member-paid verifier — TEST seam. Lets a test inject a verifier that performs a
+    /// real (offline, deterministic) license match so the member-gate is exercised without a live
+    /// cloud, instead of bypassing it via a blanket client claim.
+    pub fn set_member_verifier(
+        &self,
+        v: Arc<dyn attune_core::member_verifier::MemberVerifier>,
+    ) {
+        if let Ok(mut g) = self.member_verifier.lock() {
+            *g = v;
         }
     }
 
@@ -1922,6 +2382,54 @@ impl AppState {
         Some(handle)
     }
 
+    /// G5: the durable job queue's store handle. `None` until
+    /// [`AppState::install_job_store`] runs at boot (or if the DB cannot open —
+    /// office ASR routes then return 503 `job-store-unavailable`).
+    pub fn job_store(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<attune_core::store::Store>>> {
+        self.job_store.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// G5: open the durable job-queue store at boot (mirror of
+    /// `install_usage_aggregator` — own `Arc<Mutex<Store>>` on `db_path`, WAL
+    /// makes the extra connection safe). Runs `recover_on_boot` here — exactly
+    /// once per process — NOT inside `Store::open` (which also runs at vault
+    /// unlock etc. and would requeue legitimately-Running jobs → double
+    /// execution; caught by the 8-worker race test). Idempotent.
+    pub fn install_job_store(&self) {
+        if self.job_store().is_some() {
+            return;
+        }
+        let db_path = attune_core::platform::db_path();
+        match attune_core::store::Store::open(&db_path) {
+            Ok(s) => {
+                match s.recover_on_boot() {
+                    Ok(summary) if summary.requeued + summary.failed_no_retry > 0 => {
+                        tracing::info!(
+                            "G5: job recovery — {} requeued, {} failed (interrupted-no-retry)",
+                            summary.requeued,
+                            summary.failed_no_retry
+                        );
+                    }
+                    Ok(_) => {}
+                    // Non-fatal: queue still usable; interrupted Running rows are
+                    // eventually failed by the worker's timeout sweep.
+                    Err(e) => tracing::warn!("G5: recover_on_boot failed (non-fatal): {e}"),
+                }
+                if let Ok(mut g) = self.job_store.lock() {
+                    *g = Some(std::sync::Arc::new(std::sync::Mutex::new(s)));
+                }
+                tracing::info!("G5: durable job store installed at {db_path:?}");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "G5: durable job queue disabled — cannot open store at {db_path:?}: {e}"
+                );
+            }
+        }
+    }
+
     /// Read the active cache backend. Defaults to `MemoryLruCache` after `new`;
     /// callers can swap to `SqliteEncryptedCache` post-unlock via
     /// `set_cache_backend`.
@@ -1985,6 +2493,119 @@ fn build_llm_from_settings(
     })
 }
 
+/// 按 settings 构建 embedding provider（G4 — embedding endpoint 可配置）。
+///
+/// 优先级：
+/// 1. `settings.embedding.endpoint` 非空 → [`OpenAiEmbeddingProvider`]（OpenAI 兼容，
+///    指向任意 endpoint：OpenAI / DeepSeek / 本地 vLLM / attune Pro gateway / K3 scheduler）。
+///    读 `endpoint` / `api_key` / `model` / `dims`（缺省 model=`bge-m3`、dims=1024，与
+///    ONNX/Ollama 默认对齐，使三种 backend 维度一致、向量索引可复用）。
+/// 2. `ATTUNE_EMBEDDING_BACKEND=ollama` → Ollama bge-m3（full precision，需 Ollama 运行）。
+/// 3. 默认 ONNX（Xenova/bge-m3 quantized，CPU）— 自包含、零外部依赖。
+/// 4. ONNX 不可用 → 回退 Ollama bge-m3。
+///
+/// 镜像 [`build_llm_from_settings`]：endpoint 走 `settings.embedding.*`，与 `settings.llm.*`
+/// 同形（provider/endpoint/api_key/model），让 K3 把 embedding 指向本机 scheduler 时零特例。
+/// Returns `(provider, is_local)`.
+/// `is_local = true` when the provider is Ollama localhost / ONNX in-process.
+/// `is_local = false` when a cloud-pointing OpenAI-compat endpoint is configured.
+/// The caller stores `is_local` in `AppState::embedding_is_local` so the queue
+/// worker can enforce OutboundGate::Embedding without re-reading settings on every batch.
+/// #82 security: is an embedding endpoint a LOCAL (loopback / RFC-1918 private)
+/// destination? The OutboundGate skips in-network embedding but gates cloud egress,
+/// so a wrong answer leaks L0 PII. MUST parse the URL host and match the FULL host —
+/// NEVER `starts_with` on the raw endpoint string, which lets these bypass the gate
+/// (background security review HIGH, 2026-06-13):
+///   - `http://localhost.evil.com/...`  (suffix on the "localhost" prefix)
+///   - `http://10.0.0.1@evil.com/...`   (userinfo — real host is evil.com)
+///   - `http://172.2.0.0/...`           (PUBLIC, but matched by a "172.2" prefix)
+///
+/// Uses std `Ipv4Addr::is_private()` (10/8, 172.16-31/12, 192.168/16) + `is_loopback()`
+/// (127/8, ::1), which are RFC-1918/RFC-4291 correct.
+fn embedding_endpoint_is_local(endpoint: &str) -> bool {
+    use std::net::IpAddr;
+    url::Url::parse(endpoint)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .map(|host| {
+            if host == "localhost" {
+                return true;
+            }
+            // url::host_str() returns ipv6 without brackets, but trim defensively.
+            let h = host.trim_start_matches('[').trim_end_matches(']');
+            match h.parse::<IpAddr>() {
+                Ok(IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private(),
+                Ok(IpAddr::V6(v6)) => v6.is_loopback(),
+                // Not "localhost" and not an IP literal → external hostname
+                // (e.g. `localhost.evil.com`) → NOT local → cloud egress gated.
+                Err(_) => false,
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn build_embedding_from_settings(
+    settings_json: &Option<serde_json::Value>,
+) -> (Arc<dyn EmbeddingProvider>, bool) {
+    // 1. settings.embedding.endpoint 非空 → OpenAI 兼容
+    let configured = settings_json.as_ref().and_then(|settings| {
+        let embedding = settings.get("embedding")?;
+        let endpoint = embedding
+            .get("endpoint")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())?;
+        let api_key = embedding.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let model = embedding
+            .get("model")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("bge-m3")
+            .to_string();
+        // dims 默认 1024(bge-m3 / 与 VectorIndex 默认对齐);自定义 endpoint 模型维度不同时显式配。
+        let dims = embedding
+            .get("dims")
+            .and_then(|v| v.as_u64())
+            .map(|d| d as usize)
+            .filter(|d| *d > 0)
+            .unwrap_or(1024);
+        // #82: determine local_destination for OutboundGate; loopback/RFC1918 = local.
+        // MUST parse the host (not `starts_with` on the raw string) — see
+        // `embedding_endpoint_is_local` for the bypass classes this closes.
+        let is_local = embedding_endpoint_is_local(&endpoint);
+        tracing::info!("Embedding: OpenAI-compatible endpoint {endpoint} (model={model}, dims={dims}, local={is_local})");
+        Some((
+            Arc::new(OpenAiEmbeddingProvider::new(&endpoint, &api_key, &model, dims))
+                as Arc<dyn EmbeddingProvider>,
+            is_local,
+        ))
+    });
+    if let Some((p, is_local)) = configured {
+        return (p, is_local);
+    }
+
+    // 2. ATTUNE_EMBEDDING_BACKEND=ollama
+    let prefer_ollama = std::env::var("ATTUNE_EMBEDDING_BACKEND")
+        .map(|v| v.eq_ignore_ascii_case("ollama"))
+        .unwrap_or(false);
+    if prefer_ollama {
+        tracing::info!("Embedding: Ollama bge-m3 (ATTUNE_EMBEDDING_BACKEND=ollama)");
+        return (Arc::new(OllamaProvider::default()), true); // always localhost
+    }
+
+    // 3. 默认 ONNX,4. 回退 Ollama
+    match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
+        Ok(p) => {
+            tracing::info!("Embedding: OrtEmbeddingProvider (Xenova/bge-m3 ONNX quantized)");
+            (Arc::new(p), true) // in-process ONNX = local
+        }
+        Err(e) => {
+            tracing::info!("ONNX embedding unavailable ({e}), falling back to Ollama bge-m3");
+            (Arc::new(OllamaProvider::default()), true) // ollama localhost
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2024,5 +2645,92 @@ mod tests {
         // set_usage is None-tolerant (no-op when arg is None).
         state.set_usage(None);
         assert!(state.usage().is_none(), "set_usage(None) leaves aggregator None");
+    }
+
+    /// G4 — settings.embedding.endpoint drives the embedding provider to an
+    /// OpenAI-compatible endpoint (1536 dims here proves the configured dims are read).
+    /// We assert dimensions rather than network behaviour (covered by embed.rs unit test).
+    #[test]
+    fn embedding_settings_endpoint_selects_openai_compat() {
+        let settings = Some(serde_json::json!({
+            "embedding": {
+                "endpoint": "http://127.0.0.1:9/v1",
+                "api_key": "sk-x",
+                "model": "text-embedding-3-small",
+                "dims": 1536
+            }
+        }));
+        let (provider, is_local) = build_embedding_from_settings(&settings);
+        // OpenAiEmbeddingProvider reports the configured dims; Ort/Ollama defaults are 1024/0.
+        assert_eq!(provider.dimensions(), 1536, "configured embedding endpoint + dims must route to OpenAI-compatible provider");
+        // #82: loopback endpoint must be flagged as local
+        assert!(is_local, "127.0.0.1 endpoint must be classified as local_destination");
+    }
+
+    /// G4 — empty/absent embedding settings must NOT pick the OpenAI path (falls through
+    /// to ATTUNE_EMBEDDING_BACKEND / ONNX / Ollama). An empty endpoint string is treated
+    /// as unconfigured. We force the Ollama branch via env to avoid downloading the ONNX
+    /// model in CI, and assert the default 1024 dims (not the 1536 OpenAI path above).
+    #[test]
+    fn embedding_settings_empty_endpoint_does_not_select_openai() {
+        // SAFETY: single-threaded test mutating process env; restored before return.
+        let prev = std::env::var("ATTUNE_EMBEDDING_BACKEND").ok();
+        std::env::set_var("ATTUNE_EMBEDDING_BACKEND", "ollama");
+        let settings = Some(serde_json::json!({ "embedding": { "endpoint": "" } }));
+        let (provider, is_local) = build_embedding_from_settings(&settings);
+        assert_eq!(provider.dimensions(), 1024, "empty endpoint must not route to OpenAI provider");
+        assert!(is_local, "Ollama fallback must be classified as local");
+        match prev {
+            Some(v) => std::env::set_var("ATTUNE_EMBEDDING_BACKEND", v),
+            None => std::env::remove_var("ATTUNE_EMBEDDING_BACKEND"),
+        }
+    }
+
+    /// #82 P0 adversarial: cloud endpoint classified as non-local so OutboundGate will
+    /// apply the L0 check on cloud-bound embedding calls.
+    #[test]
+    fn embedding_cloud_endpoint_is_not_local() {
+        let settings = Some(serde_json::json!({
+            "embedding": {
+                "endpoint": "https://api.openai.com/v1",
+                "api_key": "sk-test",
+                "model": "text-embedding-3-small",
+                "dims": 1536
+            }
+        }));
+        let (_provider, is_local) = build_embedding_from_settings(&settings);
+        assert!(!is_local, "cloud endpoint (api.openai.com) must not be classified as local — #82 gate requires is_local=false");
+    }
+
+    /// #82 security regression (background review HIGH 2026-06-13): the local
+    /// classifier MUST parse the host, not `starts_with` the raw URL. Each of these
+    /// would bypass the privacy gate under the old prefix match → leak L0 PII.
+    #[test]
+    fn embedding_endpoint_is_local_anchored_no_bypass() {
+        // genuinely local → true
+        for ep in [
+            "http://localhost:11434",
+            "http://127.0.0.1:11434",
+            "http://192.168.1.50:8080",
+            "http://10.0.0.5/v1",
+            "http://172.16.0.1/v1",
+            "http://172.31.255.254/v1",
+            "http://[::1]:11434",
+        ] {
+            assert!(embedding_endpoint_is_local(ep), "{ep} must be local");
+        }
+        // bypass attempts + genuinely-public → false (gated)
+        for ep in [
+            "http://localhost.evil.com/v1",     // suffix on "localhost" prefix
+            "http://127.0.0.1.evil.com/v1",     // suffix on "127." prefix
+            "http://192.168.1.1@evil.com/v1",   // userinfo — real host is evil.com
+            "http://10.0.0.1@evil.com/v1",      // userinfo
+            "http://172.2.0.0/v1",              // PUBLIC, but matched old "172.2" prefix
+            "http://172.32.0.1/v1",             // PUBLIC, just outside RFC1918 172.16-31
+            "https://api.openai.com/v1",        // cloud
+            "http://11.0.0.1/v1",               // public (not 10/8)
+        ] {
+            assert!(!embedding_endpoint_is_local(ep), "{ep} must NOT be local (would bypass privacy gate)");
+        }
     }
 }

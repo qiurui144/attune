@@ -1,0 +1,12 @@
+id: 02-multi-memory
+description: 多条记忆全量 export→import → 全部落库, 召回命中其中一条
+passphrase: pw-multi-12345
+memories:
+  - { hash: m1, summary: python asyncio event loop basics, model: embed-dim4 }
+  - { hash: m2, summary: rust tokio runtime scheduling, model: embed-dim4 }
+  - { hash: m3, summary: golang goroutine channel patterns, model: embed-dim4 }
+expected:
+  imported: 3
+  skipped_on_reimport: 3
+  recall_query: tokio runtime
+  recall_min_hits: 1

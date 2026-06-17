@@ -27,9 +27,58 @@
 //! `plugin_upgrade_preserves_user_agent_state` test turns the guarantee into a
 //! tested one (audit rec #4).
 
-use crate::cloud_client::{CloudClient, EntitledPlugin};
+use crate::cloud_client::{CloudClient, EntitledPlugin, License};
+use crate::crypto::Key32;
 use crate::error::{Result, VaultError};
+use crate::store::plugin_entitlements::EntitlementRow;
+use crate::store::Store;
 use std::path::{Path, PathBuf};
+
+/// Optional vault sink for install-time entitlement snapshots (T7). Threaded as
+/// `Option` so the legacy [`sync_plugins`] / CLI paths (no unlocked vault) keep
+/// working unchanged; the server login path supplies `Some((store, dek))` so the
+/// snapshot lands in `plugin_entitlements` (ACP-6 safe — vault DB only, never
+/// inside `plugins/<id>/`).
+pub type EntitlementSink<'a> = (&'a Store, &'a Key32);
+
+/// Build an [`EntitlementRow`] from a cloud `EntitledPlugin` + its `License`
+/// (T7, pure). The `list_licenses` payload carries `plugin_id` /
+/// `signing_pubkey_hex` / license id / plan; tier is derived from the plan and
+/// status is `active` at install (the entitlement was just granted — re-verify
+/// (T8) is the authority that can later flip it to suspended/revoked). No
+/// network, no DB, no lock — easy to unit-test.
+pub fn entitlement_row_for(ep: &EntitledPlugin, lic: &License, now_rfc3339: &str) -> EntitlementRow {
+    // Plan → tier mapping. "trial" plans seed a trial tier; everything else paid.
+    let tier = if lic.plan.eq_ignore_ascii_case("trial") {
+        "trial"
+    } else {
+        "paid"
+    };
+    // license_id: prefer the explicit numeric license_id, else the row id.
+    let license_id = lic
+        .license_id
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| lic.id.to_string());
+    // revoked license → status revoked (fail-closed even before first re-verify).
+    let status = if lic.revoked_at.is_some() {
+        "revoked"
+    } else {
+        "active"
+    };
+    EntitlementRow {
+        plugin_id: ep.plugin_id.clone(),
+        license_id,
+        tier: tier.to_string(),
+        status: status.to_string(),
+        // list_licenses carries no per-plugin trial_expires; T8 re-verify fills it
+        // from the signed snapshot. None here = "unknown, rely on grace/re-verify".
+        trial_expires: None,
+        signing_pubkey_hex: ep.signing_pubkey_hex.clone(),
+        last_verified_at: now_rfc3339.to_string(),
+        grace_started_at: None,
+        updated_at: now_rfc3339.to_string(),
+    }
+}
 
 /// Boundary guard (ACP-6 Task 4): refuse any plugin install whose `plugins_dir`
 /// would **contain** the vault DB. Plugin installs `remove_dir_all` + recopy a
@@ -66,12 +115,72 @@ pub struct SyncReport {
     pub failed: Vec<(String, String)>, // (plugin_id, reason)
 }
 
-/// 拉云端 entitled 清单, 自动装缺的 pro 插件
+/// Best-effort wrapper around [`sync_plugins`] for the **membership-login** path
+/// (B5, 2026-06-06).
+///
+/// After a member logs in, entitled pro plugins (e.g. `law-pro`) must auto-install
+/// so domain-specific agents start working without a manual `attune sync-plugins`.
+/// But a plugin-sync failure (cloud unreachable, hub 5xx, a single bad package)
+/// MUST NOT fail the login itself (§4.5 graceful degradation): the user is still
+/// authenticated; the plugins can be retried later.
+///
+/// This never returns `Err`. On a hard failure (e.g. `list_licenses` errored) it
+/// logs a warning and returns an empty report. Per-plugin failures are already
+/// captured non-fatally in [`SyncReport::failed`] by `sync_plugins`.
+///
+/// Like `sync_plugins`, this performs **blocking** network I/O (blocking reqwest
+/// inside `CloudClient` + `download_to_file`), so the caller MUST invoke it on a
+/// blocking thread (`spawn_blocking`), never directly on a Tokio async worker
+/// (same constraint as the B4 login fix).
+pub fn best_effort_sync_plugins(cloud: &CloudClient) -> SyncReport {
+    match sync_plugins(cloud) {
+        Ok(report) => {
+            if !report.installed.is_empty() {
+                log::info!(
+                    "member login: auto-installed {} entitled plugin(s): {:?}",
+                    report.installed.len(),
+                    report.installed
+                );
+            }
+            if !report.failed.is_empty() {
+                // Non-fatal: individual packages failed to verify/install. Login proceeds.
+                log::warn!(
+                    "member login: {} entitled plugin(s) failed to install (login NOT blocked): {:?}",
+                    report.failed.len(),
+                    report.failed
+                );
+            }
+            report
+        }
+        Err(e) => {
+            // Hard failure (e.g. list_licenses / plugins_dir). Best-effort: do not
+            // fail login; the user can retry plugin sync later.
+            log::warn!("member login: plugin auto-sync skipped (login NOT blocked): {e}");
+            SyncReport {
+                installed: Vec::new(),
+                skipped_already_installed: Vec::new(),
+                failed: Vec::new(),
+            }
+        }
+    }
+}
+
+/// 拉云端 entitled 清单, 自动装缺的 pro 插件(legacy 路径,不落 entitlement 快照)。
 pub fn sync_plugins(cloud: &CloudClient) -> Result<SyncReport> {
+    sync_plugins_with_store(cloud, None)
+}
+
+/// 同 [`sync_plugins`],但可选地把 entitlement 快照写入 vault `plugin_entitlements`
+/// 表(T7)。`sink = Some((store, dek))` 时:每个新装插件写一行(ACP-6 安全 —
+/// 只经 store API 写 vault DB,不在 `plugins/<id>/` 落授权态);已装但无 entitlement
+/// 行的插件做 **lazy backfill**(spec §10 grandfather,如已装 law-pro)。写失败静默
+/// (`let _ =`,不阻塞 install 主流程,per 项目信号约定)。
+pub fn sync_plugins_with_store(cloud: &CloudClient, sink: Option<EntitlementSink<'_>>) -> Result<SyncReport> {
     let licenses = cloud.list_licenses()?;
     let plugins_dir = crate::plugin_registry::PluginRegistry::default_plugins_dir()?;
     std::fs::create_dir_all(&plugins_dir).map_err(VaultError::Io)?;
     let installed_ids: std::collections::HashSet<String> = list_installed_plugin_ids(&plugins_dir)?;
+    let now = chrono::Utc::now().to_rfc3339();
 
     let mut report = SyncReport {
         installed: Vec::new(),
@@ -83,15 +192,34 @@ pub fn sync_plugins(cloud: &CloudClient) -> Result<SyncReport> {
         for ep in &lic.entitled_plugins {
             if installed_ids.contains(&ep.plugin_id) {
                 report.skipped_already_installed.push(ep.plugin_id.clone());
+                // Lazy backfill: already installed but no entitlement row yet
+                // (e.g. pre-T4 law-pro) → write one now (§10 grandfather).
+                if let Some((store, dek)) = sink {
+                    if store.get_entitlement(dek, &ep.plugin_id).ok().flatten().is_none() {
+                        let _ = persist_entitlement(store, dek, ep, lic, &now);
+                    }
+                }
                 continue;
             }
             match install_one_plugin(ep, &lic.license_key, &plugins_dir) {
-                Ok(()) => report.installed.push(ep.plugin_id.clone()),
+                Ok(()) => {
+                    report.installed.push(ep.plugin_id.clone());
+                    if let Some((store, dek)) = sink {
+                        let _ = persist_entitlement(store, dek, ep, lic, &now);
+                    }
+                }
                 Err(e) => report.failed.push((ep.plugin_id.clone(), format!("{e}"))),
             }
         }
     }
     Ok(report)
+}
+
+/// Write a single entitlement snapshot row to the vault table (T7). Errors are
+/// the caller's to swallow (best-effort, never blocks install).
+fn persist_entitlement(store: &Store, dek: &Key32, ep: &EntitledPlugin, lic: &License, now_rfc3339: &str) -> Result<()> {
+    let row = entitlement_row_for(ep, lic, now_rfc3339);
+    store.upsert_entitlement(dek, &row)
 }
 
 fn list_installed_plugin_ids(plugins_dir: &std::path::Path) -> Result<std::collections::HashSet<String>> {
@@ -105,10 +233,13 @@ fn list_installed_plugin_ids(plugins_dir: &std::path::Path) -> Result<std::colle
         if !path.is_dir() {
             continue;
         }
-        // 用 Trusted 装载 (绕开 paid/Unsigned 联动 — 用户已装)
-        if let Ok(plugin) =
-            crate::plugin_loader::LoadedPlugin::from_dir_with_key(&path, None, Some("Trusted"))
-        {
+        // 用 Trusted 装载 (绕开 paid/Unsigned 联动 — 用户已装)。
+        // T2 占位: 类型迁移为 Trust enum, 真验证在 T9 接入。
+        if let Ok(plugin) = crate::plugin_loader::LoadedPlugin::from_dir_with_key(
+            &path,
+            None,
+            Some(crate::plugin_sig::Trust::ThirdParty),
+        ) {
             out.insert(plugin.manifest.id);
         }
     }
@@ -129,6 +260,14 @@ fn install_one_plugin(ep: &EntitledPlugin, license_key: &str, plugins_dir: &std:
     // 3. 找解压后 plugin 实际目录 (通常是 extract_dir/<plugin_id>/ 或 extract_dir/)
     let plugin_src = locate_plugin_dir(&extract_dir)?;
 
+    // W1-B trust-anchor cross-check (cloud slice8 §5.6) — MUST run before
+    // verify_with_key. The signing key is the *root* we verify against; if the
+    // server (compromised or MITM'd) hands us an off-allowlist key, verifying the
+    // package against that key proves nothing. Pin the trust root to the
+    // compile-time OFFICIAL_PLUGIN_ANCHORS allowlist; a miss = refuse install
+    // (fail-closed), surfaced as `anchor-not-pinned` in SyncReport.failed.
+    verify_plugin_anchor(ep)?;
+
     // 4. 签名校验
     let sig_ok = crate::plugin_sig::verify_with_key(&plugin_src, &ep.signing_pubkey_hex)?;
     if !sig_ok {
@@ -143,7 +282,7 @@ fn install_one_plugin(ep: &EntitledPlugin, license_key: &str, plugins_dir: &std:
     let _ = crate::plugin_loader::LoadedPlugin::from_dir_with_key(
         &plugin_src,
         key_bytes.as_deref(),
-        Some("Trusted"),
+        Some(crate::plugin_sig::Trust::ThirdParty),
     )?;
 
     // ACP-6 boundary: never let a plugin-dir wipe touch the vault DB.
@@ -155,6 +294,23 @@ fn install_one_plugin(ep: &EntitledPlugin, license_key: &str, plugins_dir: &std:
         std::fs::remove_dir_all(&dst).map_err(VaultError::Io)?;
     }
     copy_dir_recursive(&plugin_src, &dst)?;
+    Ok(())
+}
+
+/// W1-B trust-anchor cross-check (cloud slice8 §5.6.1). Refuse to install any
+/// entitlement whose `signing_pubkey_hex` is not in the compile-time
+/// [`crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS`] allowlist.
+///
+/// This is the desktop-side trust decision: cert-pinning protects the wire, but
+/// only this allowlist protects against a *compromised server* substituting an
+/// attacker pubkey (the legitimate TLS endpoint still matches the pin). A miss
+/// is **rejection** (fail-closed), returned as [`VaultError::AnchorNotPinned`]
+/// carrying the off-allowlist key so it lands in `SyncReport.failed` as the
+/// `anchor-not-pinned` reason for the UI / telemetry.
+fn verify_plugin_anchor(ep: &EntitledPlugin) -> Result<()> {
+    if !crate::plugin_anchor::is_official_anchor(&ep.signing_pubkey_hex) {
+        return Err(VaultError::AnchorNotPinned(ep.signing_pubkey_hex.clone()));
+    }
     Ok(())
 }
 
@@ -204,7 +360,7 @@ pub fn install_plugin_package(
     let loaded = crate::plugin_loader::LoadedPlugin::from_dir_with_key(
         &plugin_src,
         None,
-        Some("Trusted"),
+        Some(crate::plugin_sig::Trust::ThirdParty),
     )?;
     if loaded.manifest.id != plugin_id {
         return Err(VaultError::InvalidInput(format!(
@@ -536,6 +692,25 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(store.count_agent_state().unwrap(), 2);
+            // T12 / ACP-6 §9 regression 2: the user's entitlement cache row is ALSO
+            // user-accumulated state in the vault DB — it must survive plugin upgrade
+            // (it lives in plugin_entitlements, not under plugins/<id>/).
+            store
+                .upsert_entitlement(
+                    &dek,
+                    &crate::store::plugin_entitlements::EntitlementRow {
+                        plugin_id: "law-pro".into(),
+                        license_id: "lic-xyz".into(),
+                        tier: "paid".into(),
+                        status: "active".into(),
+                        trial_expires: None,
+                        signing_pubkey_hex: crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0].into(),
+                        last_verified_at: "2026-06-12T00:00:00+00:00".into(),
+                        grace_started_at: None,
+                        updated_at: "2026-06-12T00:00:00+00:00".into(),
+                    },
+                )
+                .unwrap();
         }
 
         // Install law-pro v1.0.5, then "upgrade" to v1.0.6 (overwrite plugin dir).
@@ -561,5 +736,225 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.payload, b"user-learned-terms");
+
+        // ACP-6 §9 regression 2 (T12): the entitlement cache row survives the upgrade
+        // intact — a paid user is NOT silently downgraded by reinstalling a newer pack.
+        let ent = store
+            .get_entitlement(&dek, "law-pro")
+            .unwrap()
+            .expect("entitlement row must survive plugin upgrade");
+        assert_eq!(ent.status, "active");
+        assert_eq!(ent.tier, "paid");
+        assert_eq!(ent.license_id, "lic-xyz");
+    }
+
+    // ── B5 (2026-06-06): best-effort auto-install on membership login ──────────
+    //
+    // After a member logs in, entitled plugins must auto-install. But a sync
+    // failure (cloud unreachable / hub 5xx) MUST NOT fail the login (§4.5). The
+    // login path therefore calls `best_effort_sync_plugins`, which swallows the
+    // error into a logged empty report instead of propagating `Err`.
+
+    #[test]
+    fn best_effort_sync_returns_empty_report_when_cloud_unreachable_never_errs() {
+        // Cloud at an unreachable address → list_licenses() errors → the
+        // best-effort wrapper must return an empty SyncReport, NOT panic, NOT Err.
+        // (login must proceed regardless.)
+        let cloud = CloudClient::new("http://127.0.0.1:1");
+        let report = best_effort_sync_plugins(&cloud);
+        assert!(
+            report.installed.is_empty(),
+            "no plugins should install against an unreachable cloud"
+        );
+        // The whole point: a hard sync failure surfaces as an empty report, not a
+        // login-blocking error — there is no `?`/Result to unwrap here.
+    }
+
+    // ---- W1-B trust-anchor cross-check (cloud slice8 §5.6) ----
+
+    fn ep_with_pubkey(signing_pubkey_hex: &str) -> EntitledPlugin {
+        EntitledPlugin {
+            plugin_id: "law-pro".into(),
+            version: "1.0.5".into(),
+            download_url: "https://hub.engi-stack.com/p/law-pro-1.0.5.attunepkg".into(),
+            signing_pubkey_hex: signing_pubkey_hex.into(),
+            decrypt_key: None,
+        }
+    }
+
+    #[test]
+    fn anchor_check_allows_official_publisher_key() {
+        // The law-pro publisher anchor (SSOT mirror of cloud config) must pass.
+        let ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        assert!(
+            verify_plugin_anchor(&ep).is_ok(),
+            "official baked anchor must pass the W1-B cross-check"
+        );
+    }
+
+    #[test]
+    fn anchor_check_rejects_off_allowlist_key_with_typed_error() {
+        // Compromised-server / MITM threat: server hands an attacker pubkey over a
+        // valid TLS endpoint (cert-pin can't catch this). W1 must reject it.
+        let attacker = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let ep = ep_with_pubkey(attacker);
+        let err = verify_plugin_anchor(&ep).unwrap_err();
+        match err {
+            VaultError::AnchorNotPinned(key) => {
+                assert_eq!(key, attacker, "error must carry the off-allowlist key for telemetry");
+            }
+            other => panic!("expected AnchorNotPinned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anchor_check_rejects_empty_key_fail_closed() {
+        // A missing signing key must never resolve to "trusted".
+        let err = verify_plugin_anchor(&ep_with_pubkey("")).unwrap_err();
+        assert!(matches!(err, VaultError::AnchorNotPinned(_)));
+    }
+
+    #[test]
+    fn anchor_error_surfaces_as_anchor_not_pinned_reason() {
+        // The Display string is the reason captured into SyncReport.failed →
+        // stable kebab-ish tag the UI/telemetry keys on.
+        let err = verify_plugin_anchor(&ep_with_pubkey("deadbeef")).unwrap_err();
+        assert!(
+            err.to_string().starts_with("anchor not pinned:"),
+            "reason must be the anchor-not-pinned message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn anchor_check_runs_before_signature_verification() {
+        // Ordering invariant: install_one_plugin calls verify_plugin_anchor BEFORE
+        // verify_with_key. We assert the gate alone rejects an off-allowlist key
+        // (so a forged package signed by an attacker key never reaches sig verify,
+        // which would otherwise "succeed" against the attacker's own key).
+        let attacker_signed = ep_with_pubkey(
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        );
+        assert!(
+            verify_plugin_anchor(&attacker_signed).is_err(),
+            "trust-root gate must reject before any signature math against the attacker key"
+        );
+    }
+
+    // ── T7: install-time entitlement snapshot write (ACP-6 safe) ──────────────
+
+    fn make_license(plan: &str, entitled: Vec<EntitledPlugin>) -> License {
+        License {
+            id: 42,
+            name: Some("Pro".into()),
+            plan: plan.into(),
+            license_key: "lk-secret".into(),
+            license_id: Some(7),
+            revoked_at: None,
+            last_used_at: None,
+            created_at: None,
+            entitled_plugins: entitled,
+        }
+    }
+
+    #[test]
+    fn entitlement_row_for_paid_plan() {
+        let ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        let lic = make_license("pro", vec![ep.clone()]);
+        let row = entitlement_row_for(&ep, &lic, "2026-06-12T00:00:00+00:00");
+        assert_eq!(row.plugin_id, "law-pro");
+        assert_eq!(row.tier, "paid");
+        assert_eq!(row.status, "active");
+        assert_eq!(row.license_id, "7");
+        assert_eq!(row.signing_pubkey_hex, crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+    }
+
+    #[test]
+    fn entitlement_row_for_trial_plan_sets_trial_tier() {
+        let ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        let lic = make_license("trial", vec![ep.clone()]);
+        let row = entitlement_row_for(&ep, &lic, "2026-06-12T00:00:00+00:00");
+        assert_eq!(row.tier, "trial");
+    }
+
+    #[test]
+    fn entitlement_row_for_revoked_license_is_revoked() {
+        let ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        let mut lic = make_license("pro", vec![ep.clone()]);
+        lic.revoked_at = Some("2026-06-10T00:00:00+00:00".into());
+        let row = entitlement_row_for(&ep, &lic, "2026-06-12T00:00:00+00:00");
+        assert_eq!(row.status, "revoked", "revoked license → fail-closed status at install");
+    }
+
+    #[test]
+    fn install_writes_entitlement_row() {
+        // The install-time persist path (persist_entitlement) lands the snapshot in
+        // the vault table; get_entitlement then hits with correct tier/pubkey.
+        use crate::crypto::Key32;
+        use crate::store::Store;
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        let lic = make_license("pro", vec![ep.clone()]);
+        persist_entitlement(&store, &dek, &ep, &lic, "2026-06-12T00:00:00+00:00").unwrap();
+        let got = store.get_entitlement(&dek, "law-pro").unwrap().unwrap();
+        assert_eq!(got.tier, "paid");
+        assert_eq!(got.status, "active");
+        assert_eq!(got.signing_pubkey_hex, crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+    }
+
+    #[test]
+    fn sync_preserves_acp6_boundary() {
+        // ACP-6: the entitlement snapshot lands ONLY in the vault DB (store API),
+        // NEVER inside plugins/<id>/. Assert that after persisting, the plugins dir
+        // for the plugin contains no authorization-state file.
+        use crate::crypto::Key32;
+        use crate::store::Store;
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let vault_db = data_dir.join("vault.db");
+        let plugins_dir = tmp.path().join("plugins");
+        let ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        // Install the plugin code into plugins/<id>/ (wholesale code dir).
+        let pkg = make_pkg(tmp.path(), "law-pro-code", "law-pro");
+        install_plugin_package("law-pro", &pkg, &plugins_dir).unwrap();
+        // Persist the entitlement to the vault DB only.
+        let dek = Key32::generate();
+        let store = Store::open(&vault_db).unwrap();
+        let lic = make_license("pro", vec![ep.clone()]);
+        persist_entitlement(&store, &dek, &ep, &lic, "2026-06-12T00:00:00+00:00").unwrap();
+        // Vault row exists.
+        assert!(store.get_entitlement(&dek, "law-pro").unwrap().is_some());
+        // ACP-6: plugins/law-pro/ has NO authorization-state file (only code).
+        let plugin_code_dir = plugins_dir.join("law-pro");
+        for entry in std::fs::read_dir(&plugin_code_dir).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.contains("entitlement") && !name.contains("license"),
+                "authorization state must NOT live in plugins/<id>/, found: {name}"
+            );
+        }
+        // The vault DB must be OUTSIDE the plugins dir (the install guard invariant).
+        assert!(assert_vault_db_outside_plugins_dir(&plugins_dir, &vault_db).is_ok());
+    }
+
+    #[test]
+    fn lazy_backfill_writes_row_when_missing() {
+        // §10 grandfather: an already-installed law-pro with NO entitlement row gets
+        // one written (the lazy-backfill branch of sync_plugins_with_store, exercised
+        // here directly via the same persist path it calls).
+        use crate::crypto::Key32;
+        use crate::store::Store;
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        let lic = make_license("pro", vec![ep.clone()]);
+        // No row yet → backfill condition true.
+        assert!(store.get_entitlement(&dek, "law-pro").unwrap().is_none());
+        if store.get_entitlement(&dek, "law-pro").ok().flatten().is_none() {
+            persist_entitlement(&store, &dek, &ep, &lic, "2026-06-12T00:00:00+00:00").unwrap();
+        }
+        assert!(store.get_entitlement(&dek, "law-pro").unwrap().is_some(), "lazy backfill landed the row");
     }
 }

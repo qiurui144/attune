@@ -62,22 +62,29 @@ pub async fn classify_one(
 pub async fn rebuild(
     State(state): State<SharedState>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
-
-    let ids = vault.store().list_all_item_ids()
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
-    for id in &ids {
-        vault.store().enqueue_classify(id, 4)
+    // #83 P0: 分页入队，每页单独加释放 vault lock，避免大 vault 持锁。
+    const PAGE: usize = 500;
+    let mut total_enqueued = 0usize;
+    let mut offset = 0usize;
+    loop {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = vault.dek_db().map_err(|e| AppError::Forbidden(e.to_string()))?;
+        let ids = vault.store().list_item_ids_paged(offset, PAGE)
             .map_err(|e| AppError::Internal(e.to_string()))?;
+        let n = ids.len();
+        for id in &ids {
+            vault.store().enqueue_classify(id, 4)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+        }
+        total_enqueued += n;
+        drop(vault);
+        offset += n;
+        if n < PAGE { break; }
     }
 
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "enqueued": ids.len(),
+        "enqueued": total_enqueued,
         "note": "classify tasks enqueued with priority=4; process via /classify/{id} or manual trigger"
     })))
 }

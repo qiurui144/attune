@@ -297,42 +297,27 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // Test isolation: backup_dir() reads platform::data_dir() which is process-global via XDG.
-    // We serialize tests that touch the real backup_dir and use HOME override to isolate.
+    // Test isolation: backup_dir() reads platform::data_dir(). Overriding HOME/XDG
+    // env vars does NOT isolate on Windows (dirs::data_local_dir() reads
+    // %LOCALAPPDATA% via the Known-Folder API, ignoring HOME/XDG) → on Windows all
+    // tests shared the real per-runner data dir and the seeding tests polluted the
+    // fresh-dir tests. We now use platform::set_dir_override_for_test (a thread-local
+    // injection seam): cargo runs each test on its own thread, so this isolates
+    // identically on Windows and Linux with no process-global clobber. TEST_LOCK is
+    // retained only as a belt-and-suspenders guard for any future shared-state use.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    #[allow(unsafe_code)]
     fn with_temp_home<F: FnOnce(&std::path::Path)>(f: F) {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let td = tempfile::tempdir().expect("tempdir");
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_DATA_HOME");
-        let prev_xdg_cfg = std::env::var_os("XDG_CONFIG_HOME");
-        // SAFETY: tests are serialized via TEST_LOCK; mutating env is safe within the lock.
-        unsafe {
-            std::env::set_var("HOME", td.path());
-            std::env::set_var("XDG_DATA_HOME", td.path().join(".local/share"));
-            std::env::set_var("XDG_CONFIG_HOME", td.path().join(".config"));
-        }
+        // Pin data_dir()/config_dir() to this temp dir for the current thread only.
+        let prev = platform::set_dir_override_for_test(Some(td.path().to_path_buf()));
         // Ensure data_dir exists so vault.db writes succeed.
         let data = platform::data_dir();
         std::fs::create_dir_all(&data).expect("mkdir data");
         f(td.path());
-        // Restore env to avoid cross-test bleed even though we hold the lock.
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match prev_xdg {
-                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-            match prev_xdg_cfg {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
+        // Restore the previous override (None in the common case) on exit.
+        platform::set_dir_override_for_test(prev);
     }
 
     #[test]

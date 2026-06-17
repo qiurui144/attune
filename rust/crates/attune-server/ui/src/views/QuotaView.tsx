@@ -22,6 +22,25 @@ import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api } from '../store/api';
 
+/** 后端透传的原始跨服务错误码对用户不可读 — 映射为可操作的本地化说明,
+ *  匹配不到时回退到 generic 友好提示(原始码仍可在 title 悬浮看到)。 */
+function friendlyServiceError(raw: string): string {
+  const r = raw.toUpperCase();
+  if (r.includes('EHOSTUNREACH') || r.includes('ENETUNREACH') || r.includes('ENOTFOUND')) {
+    return t('quota.error.network_unreachable');
+  }
+  if (r.includes('ECONNREFUSED') || r.includes('503') || r.includes('502')) {
+    return t('quota.error.service_offline');
+  }
+  if (r.includes('401') || r.includes('403') || r.includes('UNAUTHORIZED')) {
+    return t('quota.error.auth_failed');
+  }
+  if (r.includes('TIMEOUT') || r.includes('ETIMEDOUT')) {
+    return t('quota.error.timeout');
+  }
+  return t('quota.error.generic');
+}
+
 interface QuotaUsage {
   llm_tokens_input: number;
   llm_tokens_output: number;
@@ -161,8 +180,9 @@ export function QuotaView(): JSX.Element {
           <strong>{t('quota.partial_data')}</strong>
           <ul style={{ margin: '4px 0 0 0', paddingLeft: 20 }}>
             {Object.entries(d.cross_service_errors).map(([svc, msg]) => (
-              <li key={svc}>
-                <code>{svc}</code>: {msg}
+              // title 保留原始错误码供排障,正文显示友好说明
+              <li key={svc} title={`${svc}: ${msg}`}>
+                <code>{svc}</code>: {friendlyServiceError(msg)}
               </li>
             ))}
           </ul>

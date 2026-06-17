@@ -1,0 +1,36 @@
+# cargo-audit / rustsec-audit-check configuration
+# https://docs.rs/cargo-audit  — read by `cargo audit` and the
+# rustsec/audit-check@v2 GitHub Action (working-directory: rust).
+#
+# Policy mirrors rust/deny.toml [advisories].ignore.
+#
+# We ignore ONLY: (a) one UNSOUND advisory whose remaining hit is a deep
+# transitive pin we cannot bump without a major upstream version (lru via
+# tantivy 0.22), and (b) UNMAINTAINED/YANKED informational advisories that have
+# NO patched version and are non-security. The three real unsound advisories we
+# CAN fix by upgrade — git2 (RUSTSEC-2026-0008), lru direct (RUSTSEC-2026-0002
+# on our 0.18 deps), rand (RUSTSEC-2026-0097) — are FIXED by version bumps and
+# are NOT ignored here.
+
+[advisories]
+ignore = [
+    # ── UNSOUND, transitive-only remnant (direct deps already upgraded) ──
+    # lru: our direct deps pin lru 0.18 (>=0.16.3 = patched). The only remaining
+    # 0.12.5 path is tantivy 0.22.1 (pins `lru = "0.12"`, semver-incompatible).
+    # IterMut not exercised on tantivy's internal cache. 2026-06; revisit on tantivy>=0.23.
+    "RUSTSEC-2026-0002",
+
+    # ── UNMAINTAINED / YANKED: deep transitive, no patch, NON-security ──
+    "RUSTSEC-2026-0105",  # core2: yanked+unmaintained, deep transitive (wasmtime/cranelift). Revisit 2026-12.
+    "RUSTSEC-2025-0057",  # fxhash: unmaintained, transitive. Revisit 2026-12.
+    "RUSTSEC-2024-0384",  # instant: unmaintained (wasm time shim), transitive. Revisit 2026-12.
+    "RUSTSEC-2024-0436",  # paste: unmaintained proc-macro, transitive. Revisit 2026-12.
+    "RUSTSEC-2026-0173",  # proc-macro-error2: unmaintained, transitive. Revisit 2026-12.
+    "RUSTSEC-2025-0134",  # rustls-pemfile: unmaintained (folded into rustls-pki-types), transitive. Revisit 2026-12.
+]
+
+[yanked]
+# Warn on yanked crates but do not fail the build — core2 is yanked AND already
+# ignored above via its RUSTSEC id; no patched non-yanked version exists.
+enabled = true
+update_index = false

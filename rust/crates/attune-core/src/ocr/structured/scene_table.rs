@@ -117,6 +117,49 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
     }
 }
 
+/// Build `TableFields` from pre-merged cells produced by the nontext table-structure
+/// recognizer (which DOES carry rowspan/colspan markers, unlike the y/x heuristic in
+/// `extract`). Callers prefer this when the nontext pass ran. Output schema is identical
+/// to `extract` (StructuredFields::TableV1) so downstream consumers are unaffected.
+///
+/// row_count / col_count account for spans (a cell at row r spanning row_span rows reaches
+/// r + row_span). Headers = the row-0 cell texts.
+#[cfg(feature = "nontext")]
+pub fn extract_from_cells(cells: &[crate::ocr::nontext::Cell]) -> StructuredFields {
+    if cells.is_empty() {
+        return StructuredFields::TableV1 {
+            fields: TableFields::default(),
+            unrecognized_fields: vec!["table_structure".into()],
+            validation_warnings: vec![],
+        };
+    }
+    let row_count = cells.iter().map(|c| c.row + c.row_span.max(1)).max().unwrap_or(0);
+    let col_count = cells.iter().map(|c| c.col + c.col_span.max(1)).max().unwrap_or(0);
+    let header_texts: Vec<String> = cells
+        .iter()
+        .filter(|c| c.row == 0)
+        .map(|c| c.text.clone())
+        .collect();
+    let headers = serde_json::to_string(&header_texts).unwrap_or_default();
+
+    let cell = |v: String| FieldValue {
+        value: Some(v),
+        confidence: 1.0,
+        bbox: None,
+        source_line_idx: None,
+    };
+    StructuredFields::TableV1 {
+        fields: TableFields {
+            headers: cell(headers),
+            rows: cell(String::new()),
+            row_count: cell(row_count.to_string()),
+            column_count: cell(col_count.to_string()),
+        },
+        unrecognized_fields: vec![],
+        validation_warnings: vec![],
+    }
+}
+
 /// y 聚类成逻辑行.
 fn cluster_into_rows(lines: &[RawLine], y_overlap_threshold: f32) -> Vec<Vec<usize>> {
     if lines.is_empty() {
@@ -348,5 +391,53 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0], vec!["1".to_string(), "Alice".into(), "95".into()]);
         assert_eq!(rows[1], vec!["2".to_string(), "Bob".into(), "88".into()]);
+    }
+
+    #[cfg(feature = "nontext")]
+    #[test]
+    fn extract_from_cells_2x2_counts_rows_and_cols() {
+        use crate::ocr::nontext::Cell;
+        let mk = |row, col, text: &str| Cell {
+            row,
+            col,
+            row_span: 1,
+            col_span: 1,
+            text: text.into(),
+            confidence: 1.0,
+        };
+        let cells = vec![
+            mk(0, 0, "H1"),
+            mk(0, 1, "H2"),
+            mk(1, 0, "a"),
+            mk(1, 1, "b"),
+        ];
+        let StructuredFields::TableV1 { fields, .. } = extract_from_cells(&cells) else {
+            unreachable!()
+        };
+        assert_eq!(fields.row_count.value.as_deref(), Some("2"));
+        assert_eq!(fields.column_count.value.as_deref(), Some("2"));
+        let headers: Vec<String> =
+            serde_json::from_str(fields.headers.value.as_deref().unwrap()).unwrap();
+        assert_eq!(headers, vec!["H1".to_string(), "H2".into()]);
+    }
+
+    #[cfg(feature = "nontext")]
+    #[test]
+    fn extract_from_cells_respects_spans() {
+        use crate::ocr::nontext::Cell;
+        // A single cell at (0,0) spanning 2 rows x 3 cols → 2 rows, 3 cols.
+        let cells = vec![Cell {
+            row: 0,
+            col: 0,
+            row_span: 2,
+            col_span: 3,
+            text: "merged".into(),
+            confidence: 1.0,
+        }];
+        let StructuredFields::TableV1 { fields, .. } = extract_from_cells(&cells) else {
+            unreachable!()
+        };
+        assert_eq!(fields.row_count.value.as_deref(), Some("2"));
+        assert_eq!(fields.column_count.value.as_deref(), Some("3"));
     }
 }

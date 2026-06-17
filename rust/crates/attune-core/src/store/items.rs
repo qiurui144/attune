@@ -544,6 +544,29 @@ impl Store {
         Ok(ids)
     }
 
+    /// #83 P0 可用性修复：分页版 list_all_item_ids。
+    ///
+    /// 大 vault（10 万+ items）调 list_all_item_ids 会把全部 UUID 物化到内存，
+    /// unlock 路径持 vault lock 执行时会阻塞所有并发请求 30-60 秒。
+    /// 调用方应以合理页大小（如 500）循环调用，中途可释放 vault lock。
+    ///
+    /// `offset = 0, limit = usize::MAX` 等价于 list_all_item_ids（保留兼容用）。
+    /// 返回空 Vec 表示到达末尾，不报错。
+    pub fn list_item_ids_paged(&self, offset: usize, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM items WHERE is_deleted = 0 ORDER BY created_at LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![limit as i64, offset as i64],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
+    }
+
     // ============================================================
     // v0.6 Phase B F-Pro — corpus domain
     // ============================================================
@@ -638,6 +661,37 @@ impl Store {
             keep.push(r?);
         }
         Ok(keep)
+    }
+
+    /// F-17 G3: 从一组检索结果中剔除所有 L0 (🔒 永不出网) item，用于云端 LLM
+    /// 上下文装配前的强制过滤。返回保留的 `SearchResult` (顺序不变)。
+    ///
+    /// 保留规则:
+    /// - `item_id` 为空 → 合成/记忆块 (无源 item)，永不是 L0，保留
+    /// - `item_id` 以 `web:` 开头 → web 搜索结果 (无源 item)，保留
+    /// - `source_type == "web"` / `"memory"` → 同上，保留
+    /// - 其余 (真实 DB item) → 仅当 `filter_out_l0_items` 判定非 L0 (且存在、未删)
+    ///   时保留;L0 / 已删 / 不存在 一律剔除 (fail-closed)
+    ///
+    /// 这是 chat 路由在出网前调用的核心原语。单独抽出便于直接单测 (证明 G3 闭环)。
+    pub fn retain_non_l0_for_cloud(
+        &self,
+        results: &[crate::search::SearchResult],
+    ) -> Result<Vec<crate::search::SearchResult>> {
+        let ids: Vec<String> = results.iter().map(|r| r.item_id.clone()).collect();
+        let kept: std::collections::HashSet<String> =
+            self.filter_out_l0_items(&ids)?.into_iter().collect();
+        Ok(results
+            .iter()
+            .filter(|r| {
+                r.item_id.is_empty()
+                    || r.item_id.starts_with("web:")
+                    || r.source_type == "web"
+                    || r.source_type == "memory"
+                    || kept.contains(&r.item_id)
+            })
+            .cloned()
+            .collect())
     }
 
     /// 列出当前所有标记为 L0 的 item id（Settings UI "受保护文件" 列表）
@@ -767,6 +821,93 @@ mod privacy_tier_tests {
         assert_eq!(l0.len(), 2);
         assert!(l0.contains(&"a".to_string()));
         assert!(l0.contains(&"c".to_string()));
+    }
+
+    // ── F-17 G3: retain_non_l0_for_cloud — the cloud-bound context filter ──
+    // These prove the L0 "永不出网" invariant the chat route relies on. They
+    // are RED on the pre-fix code (no caller filtered L0 → the L0 item would
+    // remain in the cloud payload).
+
+    fn sr(item_id: &str, source_type: &str) -> crate::search::SearchResult {
+        crate::search::SearchResult {
+            item_id: item_id.to_string(),
+            score: 0.9,
+            title: "T".into(),
+            content: "secret evidence body".into(),
+            source_type: source_type.into(),
+            inject_content: Some("secret evidence body".into()),
+            corpus_domain: "general".into(),
+            breadcrumb: Vec::new(),
+            chunk_offset_start: None,
+            chunk_offset_end: None,
+        }
+    }
+
+    fn seed_three_items(s: &Store) {
+        for id in ["a", "b", "c"] {
+            s.conn
+                .execute(
+                    "INSERT INTO items (id, title, content, source_type, created_at, updated_at) \
+                     VALUES (?1, 'T', X'00', 'note', '2026-01-01', '2026-01-01')",
+                    params![id],
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn retain_drops_l0_item_from_cloud_context() {
+        let s = Store::open_memory().unwrap();
+        seed_three_items(&s);
+        s.set_item_privacy_tier("b", PrivacyTier::L0).unwrap();
+
+        let results = vec![sr("a", "note"), sr("b", "note"), sr("c", "note")];
+        let kept = s.retain_non_l0_for_cloud(&results).unwrap();
+
+        let kept_ids: Vec<&str> = kept.iter().map(|r| r.item_id.as_str()).collect();
+        assert_eq!(kept_ids, vec!["a", "c"], "L0 item 'b' must be dropped");
+        // The L0 body must NOT survive into the cloud-bound set.
+        assert!(
+            kept.iter().all(|r| r.item_id != "b"),
+            "no L0 item may remain in cloud context"
+        );
+    }
+
+    #[test]
+    fn retain_keeps_web_and_memory_synthetic_items() {
+        let s = Store::open_memory().unwrap();
+        // No DB items: web / memory / empty-id synthetic blocks are never L0.
+        let results = vec![
+            sr("web:https://example.com/x", "web"),
+            sr("", "memory"),
+            sr("mem-block-1", "memory"),
+        ];
+        let kept = s.retain_non_l0_for_cloud(&results).unwrap();
+        assert_eq!(kept.len(), 3, "synthetic web/memory items must be preserved");
+    }
+
+    #[test]
+    fn retain_drops_nonexistent_and_deleted_ids_failclosed() {
+        let s = Store::open_memory().unwrap();
+        seed_three_items(&s);
+        // 'ghost' never existed; 'b' will be soft-deleted.
+        s.conn
+            .execute("UPDATE items SET is_deleted = 1 WHERE id = 'b'", [])
+            .unwrap();
+        let results = vec![sr("a", "note"), sr("b", "note"), sr("ghost", "note")];
+        let kept = s.retain_non_l0_for_cloud(&results).unwrap();
+        let kept_ids: Vec<&str> = kept.iter().map(|r| r.item_id.as_str()).collect();
+        // Only the live, non-L0 'a' survives (fail-closed on unknown/deleted).
+        assert_eq!(kept_ids, vec!["a"]);
+    }
+
+    #[test]
+    fn retain_all_non_l0_passthrough() {
+        let s = Store::open_memory().unwrap();
+        seed_three_items(&s);
+        let results = vec![sr("a", "note"), sr("b", "note"), sr("c", "note")];
+        let kept = s.retain_non_l0_for_cloud(&results).unwrap();
+        assert_eq!(kept.len(), 3, "no L0 tags → nothing dropped");
     }
 
     // ── v0.7 W4 R27: update_item UpdateOutcome 三态完备性测试 ──
@@ -911,5 +1052,96 @@ mod privacy_tier_tests {
             "SELECT COUNT(*) FROM reindex_queue", [], |r| r.get(0)
         ).unwrap();
         assert_eq!(total, 1, "park 后仍保留在表里");
+    }
+}
+
+// ── #83 P0: list_item_ids_paged unit tests ────────────────────────────────────
+#[cfg(test)]
+mod list_item_ids_paged_tests {
+    use crate::store::Store;
+
+    /// Insert N bare rows (no encryption needed for id-only queries).
+    fn insert_items(store: &Store, n: usize) -> Vec<String> {
+        let mut ids = Vec::with_capacity(n);
+        for i in 0..n {
+            let id = format!("paged-test-{i:04}");
+            let ts = format!("2026-01-01T{:02}:00:00", i % 24);
+            store
+                .conn
+                .execute(
+                    "INSERT INTO items (id, title, content, source_type, created_at, updated_at) \
+                     VALUES (?1, 'T', X'00', 'note', ?2, ?2)",
+                    rusqlite::params![id, ts],
+                )
+                .unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
+    #[test]
+    fn empty_store_returns_empty_vec() {
+        let s = Store::open_memory().unwrap();
+        let result = s.list_item_ids_paged(0, 100).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn offset_beyond_count_returns_empty() {
+        let s = Store::open_memory().unwrap();
+        insert_items(&s, 5);
+        let result = s.list_item_ids_paged(10, 50).unwrap();
+        assert!(result.is_empty(), "offset beyond total should return empty");
+    }
+
+    #[test]
+    fn first_page_respects_limit() {
+        let s = Store::open_memory().unwrap();
+        insert_items(&s, 20);
+        let page = s.list_item_ids_paged(0, 7).unwrap();
+        assert_eq!(page.len(), 7);
+    }
+
+    #[test]
+    fn paged_iteration_covers_all_items() {
+        let s = Store::open_memory().unwrap();
+        let total = 17usize;
+        insert_items(&s, total);
+        const PAGE: usize = 5;
+        let mut collected: Vec<String> = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = s.list_item_ids_paged(offset, PAGE).unwrap();
+            let n = page.len();
+            collected.extend(page);
+            offset += PAGE;
+            if n < PAGE { break; }
+        }
+        assert_eq!(collected.len(), total, "paged loop must cover all {total} items");
+        // No duplicates
+        let unique: std::collections::HashSet<_> = collected.iter().collect();
+        assert_eq!(unique.len(), total, "no duplicate ids across pages");
+    }
+
+    #[test]
+    fn limit_zero_returns_empty() {
+        let s = Store::open_memory().unwrap();
+        insert_items(&s, 5);
+        let result = s.list_item_ids_paged(0, 0).unwrap();
+        assert!(result.is_empty(), "limit=0 should return empty");
+    }
+
+    #[test]
+    fn deleted_items_excluded() {
+        let s = Store::open_memory().unwrap();
+        insert_items(&s, 3);
+        // Mark first as deleted
+        s.conn.execute(
+            "UPDATE items SET is_deleted = 1 WHERE id = 'paged-test-0000'",
+            [],
+        ).unwrap();
+        let result = s.list_item_ids_paged(0, 100).unwrap();
+        assert_eq!(result.len(), 2, "deleted item must be excluded");
+        assert!(!result.contains(&"paged-test-0000".to_string()));
     }
 }

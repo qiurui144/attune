@@ -75,13 +75,21 @@ fn derive_key(password: &[u8], salt: &[u8]) -> Result<[u8; KEY_LEN]> {
     Ok(key)
 }
 
-/// 检查 paid/trial plugin 必须 Trusted/Official trust 级别.
-/// 联动: pricing.tier == "paid" || "trial" → trust ∈ {"Official", "Trusted"}.
-pub fn validate_trust_for_pricing(trust: &str, pricing_tier: &str) -> Result<()> {
+/// 检查 paid/trial plugin 必须 Official/ThirdParty(Trusted) trust 级别.
+/// 联动: pricing.tier == "paid" || "trial" → trust ∈ {Official, ThirdParty}.
+///
+/// T2 (G2): trust 由 `&str` 魔法串改为类型安全的 [`crate::plugin_sig::Trust`] enum —
+/// 调用方再也无法传任意字符串("Official"/"Trusted")绕过验证。
+pub fn validate_trust_for_pricing(
+    trust: crate::plugin_sig::Trust,
+    pricing_tier: &str,
+) -> Result<()> {
+    use crate::plugin_sig::Trust;
     let is_paid = matches!(pricing_tier, "paid" | "trial");
-    if is_paid && !matches!(trust, "Official" | "Trusted") {
+    if is_paid && !matches!(trust, Trust::Official | Trust::ThirdParty) {
         return Err(VaultError::Crypto(format!(
-            "paid/trial plugin must be Official or Trusted, got '{trust}'"
+            "paid/trial plugin must be Official or Trusted, got '{}'",
+            trust.as_str()
         )));
     }
     Ok(())
@@ -135,15 +143,17 @@ mod tests {
         assert_ne!(c1, c2, "ciphertexts must differ even for same input");
     }
 
+    use crate::plugin_sig::Trust;
+
     #[test]
     fn validate_trust_for_pricing_passes_paid_with_official() {
-        assert!(validate_trust_for_pricing("Official", "paid").is_ok());
-        assert!(validate_trust_for_pricing("Trusted", "trial").is_ok());
+        assert!(validate_trust_for_pricing(Trust::Official, "paid").is_ok());
+        assert!(validate_trust_for_pricing(Trust::ThirdParty, "trial").is_ok());
     }
 
     #[test]
     fn validate_trust_for_pricing_rejects_paid_unsigned() {
-        let err = validate_trust_for_pricing("Unsigned", "paid").unwrap_err();
+        let err = validate_trust_for_pricing(Trust::Unsigned, "paid").unwrap_err();
         let s = format!("{err:?}");
         assert!(s.contains("paid/trial"));
     }
@@ -151,7 +161,7 @@ mod tests {
     #[test]
     fn validate_trust_for_pricing_allows_free_unsigned() {
         // free plugin 可任意 trust 级别
-        assert!(validate_trust_for_pricing("Unsigned", "free").is_ok());
-        assert!(validate_trust_for_pricing("Trusted", "free").is_ok());
+        assert!(validate_trust_for_pricing(Trust::Unsigned, "free").is_ok());
+        assert!(validate_trust_for_pricing(Trust::ThirdParty, "free").is_ok());
     }
 }

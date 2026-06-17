@@ -27,36 +27,37 @@ pub struct VaultProfile {
 pub async fn export(
     State(state): State<SharedState>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let dek = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
-
-    // Read all item tags
-    let ids = vault.store().list_all_item_ids()
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-
+    // #83 P0: 分批读取，每页单独加释放 vault lock，避免大 vault 持锁 30s+。
+    const EXPORT_PAGE: usize = 500;
     let mut tags_map = std::collections::HashMap::new();
-    for id in &ids {
-        if let Ok(Some(json)) = vault.store().get_tags_json(&dek, id) {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json) {
-                tags_map.insert(id.clone(), parsed);
-            }
-        }
-    }
-    // 批注（v2+）：每个 item 的所有批注
     let mut all_annotations = Vec::new();
-    for id in &ids {
-        if let Ok(anns) = vault.store().list_annotations(&dek, id) {
-            for a in anns {
-                if let Ok(v) = serde_json::to_value(&a) {
-                    all_annotations.push(v);
+    let vault_version_str = attune_core::version().to_string();
+    let mut offset = 0usize;
+    loop {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let dek = vault.dek_db().map_err(|e| AppError::Forbidden(e.to_string()))?;
+        let ids = vault.store().list_item_ids_paged(offset, EXPORT_PAGE)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let n = ids.len();
+        for id in &ids {
+            if let Ok(Some(json)) = vault.store().get_tags_json(&dek, id) {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json) {
+                    tags_map.insert(id.clone(), parsed);
+                }
+            }
+            // 批注（v2+）
+            if let Ok(anns) = vault.store().list_annotations(&dek, id) {
+                for a in anns {
+                    if let Ok(v) = serde_json::to_value(&a) {
+                        all_annotations.push(v);
+                    }
                 }
             }
         }
+        drop(vault); // release lock between pages
+        offset += n;
+        if n < EXPORT_PAGE { break; }
     }
-    let vault_version_str = attune_core::version().to_string();
-    drop(vault);
 
     // Histograms snapshot
     let mut histograms = std::collections::HashMap::new();
@@ -106,32 +107,42 @@ pub async fn import(
         )));
     }
 
-    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let dek = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
-
-    let existing_ids: std::collections::HashSet<String> = vault.store()
-        .list_all_item_ids()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    // #83: build existing_ids set with paged reads; lock released between pages.
+    let existing_ids: std::collections::HashSet<String> = {
+        const PAGE: usize = 500;
+        let mut set = std::collections::HashSet::new();
+        let mut offset = 0usize;
+        loop {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            let ids = vault.store().list_item_ids_paged(offset, PAGE).unwrap_or_default();
+            let n = ids.len();
+            set.extend(ids);
+            drop(vault);
+            offset += n;
+            if n < PAGE { break; }
+        }
+        set
+    };
 
     let mut merged = 0;
     let mut skipped = 0;
 
-    for (item_id, tags_value) in &profile.tags {
-        if !existing_ids.contains(item_id) {
-            skipped += 1;
-            continue;
-        }
-        let json_str = serde_json::to_string(tags_value)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        if vault.store().update_tags(&dek, item_id, &json_str).unwrap_or(false) {
-            merged += 1;
+    // Apply merged tags — short-lived lock per batch.
+    {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let dek = vault.dek_db().map_err(|e| AppError::Forbidden(e.to_string()))?;
+        for (item_id, tags_value) in &profile.tags {
+            if !existing_ids.contains(item_id) {
+                skipped += 1;
+                continue;
+            }
+            let json_str = serde_json::to_string(tags_value)
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            if vault.store().update_tags(&dek, item_id, &json_str).unwrap_or(false) {
+                merged += 1;
+            }
         }
     }
-    drop(vault);
 
     // Rebuild tag index to pick up merged tags
     {

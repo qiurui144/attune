@@ -84,6 +84,18 @@ pub async fn vault_guard(
         || path == "/api/v1/privacy/status"
         // /privacy/wipe-cloud-session 同理:用户主动清云端 footprint 不应被 vault lock 阻塞
         || path == "/api/v1/privacy/wipe-cloud-session"
+        // /api/v1/documents/* — document-intelligence (compare/summarize/chapters). Inline-text
+        // ops + the chapters `list` free-preview + the member-gate (403 membership-required for
+        // unpaid) must all work WITHOUT an unlocked vault: the handler enforces `vault-locked`
+        // itself only when a request carries an `item_id` that needs the DEK
+        // (routes/documents.rs::resolve_doc). Bypassing here lets the stronger member-gate run
+        // and keeps zero-cost text ops usable pre-unlock (mirrors the chat/search eval bypass).
+        || path.starts_with("/api/v1/documents")
+        // memory import: the handler itself rejects sealed/locked vaults with a
+        // user-actionable 400 `vault-not-ready` ("先建库并解锁") instead of the
+        // guard's generic 403; bypass here so that more specific guidance reaches
+        // the client (the handler still requires Unlocked before touching the DEK).
+        || path == "/api/v1/memory/import"
     {
         return next.run(request).await;
     }
@@ -234,7 +246,16 @@ pub async fn bearer_auth_guard(
             || path == "/api/v1/vault/status"
             || path == "/api/v1/vault/reset-with-recovery-key"
             || path == "/api/v1/vault/forgot-password-reset"
-            || path.starts_with("/api/v1/member")
+            // R1.1a (2026-06-11): the former blanket `starts_with("/api/v1/member")`
+            // bypass is removed — NO member endpoint is exempt from bearer auth.
+            // Caller audit: every member call happens after a session token exists
+            // (Web UI wizard Step3 member login runs after Step2 vault setup/unlock
+            // issued a token via setToken; SettingsView runs post-unlock; no CLI /
+            // extension / tauri caller hits /api/v1/member/*). login-token + logout
+            // mutate member_state, login-password forwards cloud credentials, and
+            // state/locks leak account info — all must sit behind bearer auth when
+            // `require_auth` is on. (The vault_guard member bypass is unrelated: it
+            // only skips the *unlock* requirement, not authentication.)
             || path == "/ws/scan-progress")
     {
         return next.run(request).await;

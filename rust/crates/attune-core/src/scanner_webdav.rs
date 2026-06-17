@@ -86,11 +86,34 @@ pub struct RemoteEntry {
 /// WebDAV 采集源。
 pub struct WebDavConnector {
     config: WebDavConfig,
+    /// v1.0.6 Privacy Logic — real `settings.privacy.webdav` flag. When
+    /// `false`, [`OutboundGate`] refuses the sync before any PROPFIND/GET.
+    outbound_enabled: bool,
+    /// v1.0.6 Privacy Logic — real `vault.state() == Unlocked` flag. When
+    /// `false`, webdav outbound is refused (vault-locked).
+    vault_unlocked: bool,
 }
 
 impl WebDavConnector {
     pub fn new(config: WebDavConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            // Default open; the server narrows this via with_outbound_policy
+            // once it has read privacy settings + vault state. The production
+            // path (sync_webdav_dir) ALWAYS calls with_outbound_policy.
+            outbound_enabled: true,
+            vault_unlocked: true,
+        }
+    }
+
+    /// v1.0.6 Privacy Logic — wire the real outbound policy (the
+    /// `settings.privacy.webdav` toggle + current vault unlock state).
+    /// The server MUST call this before driving a sync so the [`OutboundGate`]
+    /// enforces the user's choice. Chainable.
+    pub fn with_outbound_policy(mut self, enabled: bool, vault_unlocked: bool) -> Self {
+        self.outbound_enabled = enabled;
+        self.vault_unlocked = vault_unlocked;
+        self
     }
 
     /// 构造带鉴权的 reqwest_dav 客户端。
@@ -108,20 +131,20 @@ impl WebDavConnector {
 
     /// 异步列出远端目录，过滤出受支持文件。
     pub async fn list(&self) -> Result<Vec<RemoteEntry>> {
-        // v1.0.6 Privacy Logic Strategy — OutboundGate audit hook for WebDAV outbound.
-        // The actual `privacy.webdav` setting + vault_unlocked wiring is plumbed in
-        // Task 7 (PrivacyView state integration); today this is a non-rejecting
-        // call site marker — payload is just the WebDAV path (no PII).
-        // Grep guard (scripts/privacy-audit.sh) keys on `OutboundGate::enforce`.
-        let _ = crate::OutboundGate::enforce(
-            &crate::OutboundPolicy {
-                kind: crate::OutboundKind::Webdav,
-                enabled: true, // wired in Task 7 from settings.privacy.webdav
-                vault_unlocked: true, // wired in Task 7 from vault.state()
-                redactor: None,
-            },
+        // v1.0.6 Privacy Logic Strategy — REAL OutboundGate enforcement for the
+        // WebDAV egress. If the user disabled `privacy.webdav` or the vault is
+        // locked, the gate returns Err and we abort BEFORE any PROPFIND/GET
+        // leaves the device. Payload is empty (the egress carries WebDAV paths,
+        // not vault content), so `redactor: None` is safe.
+        crate::OutboundGate::enforce(
+            &crate::OutboundPolicy::cloud(
+                crate::OutboundKind::Webdav,
+                self.outbound_enabled,
+                self.vault_unlocked,
+                None,
+            ),
             "",
-        );
+        )?; // OutboundError → VaultError::OutboundBlocked, aborts before PROPFIND.
 
         let client = self.build_client()?;
         let depth = match self.config.depth {
@@ -288,5 +311,52 @@ mod tests {
         assert!(is_supported_remote_ext("report.pdf"));
         assert!(!is_supported_remote_ext("movie.mp4"));
         assert!(!is_supported_remote_ext("archive.zip"));
+    }
+
+    // ── G1: REAL OutboundGate enforcement on the WebDAV egress ────────────
+    // RED on the pre-fix `let _ = enforce(...)` no-op: list() would proceed to
+    // PROPFIND. We assert the gate-signature error to prove enforcement; the
+    // gate fires before build_client/PROPFIND so no network call is made even
+    // though the URL points nowhere routable.
+
+    fn gate_cfg() -> WebDavConfig {
+        WebDavConfig {
+            // 127.0.0.1:9 (discard) — would refuse-connect quickly IF reached;
+            // but the gate must refuse first, so we never get here.
+            url: "http://127.0.0.1:9/dav/".into(),
+            username: None,
+            password: None,
+            depth: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn webdav_disabled_in_settings_blocks_outbound() {
+        let connector = WebDavConnector::new(gate_cfg())
+            .with_outbound_policy(/* enabled */ false, /* vault_unlocked */ true);
+        let err = connector
+            .list()
+            .await
+            .expect_err("disabled webdav must be refused, not PROPFIND");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outbound blocked") && msg.contains("disabled"),
+            "expected gate Disabled error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn webdav_vault_locked_blocks_outbound() {
+        let connector = WebDavConnector::new(gate_cfg())
+            .with_outbound_policy(/* enabled */ true, /* vault_unlocked */ false);
+        let err = connector
+            .list()
+            .await
+            .expect_err("vault-locked webdav must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outbound blocked") && msg.contains("vault-locked"),
+            "expected gate VaultLocked error, got: {msg}"
+        );
     }
 }

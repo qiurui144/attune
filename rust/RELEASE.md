@@ -1,5 +1,216 @@
 # attune 版本记录
 
+## v1.4.0 (2026-06-16) — 文件夹一键整理→案卷 · 记忆延续可迁移 · 行业直达工作台 · 隐私出网门 · ABBA/并发开库修复
+
+### Highlights
+- **G5 durable job queue(K3 24h 夜间批处理底座)**:office ASR(及后续 ocr / agent /
+  ingest_batch)job 持久化到 SQLite `job_queue` 表,**重启不再丢 in-flight job** ——
+  幂等 kind(asr/ocr/ingest_batch,`at_least_once`)被 boot recovery 重新排队,非幂等
+  kind(agent,`at_most_once`)标 `interrupted-no-retry` 不静默重跑。新增 priority +
+  `deadline_ms` 超时清扫(`job-timeout`)+ 30 天终态 TTL purge + attempts 毒丸停放
+  (`max-attempts`)。管理端点:`GET /api/v1/jobs`、`POST /api/v1/jobs/{id}/cancel`、
+  `POST /api/v1/jobs/{id}/requeue`。原子认领用单条 `UPDATE … WHERE state='queued' …
+  RETURNING`(8-worker 并发竞争测试钉死无 double-claim);后台 worker 串行 drain
+  (保留 ASR 信号量防资源踩踏语义)。office HTTP 契约不变(`POST /office/transcribe` →
+  `job_id`、`GET /office/jobs/{id}`、WS 进度帧)。boot recovery 只在 server 进程启动
+  跑一次(`install_job_store`),不在 `Store::open`(vault unlock 等多处 open 会把
+  正在 Running 的 job 重复入队 —— 8-worker 竞争测试抓出的真 bug,已修)。
+- **🔒 隐私出网门真强制 + L0「永不出网」落地(P0)**:`OutboundGate::enforce` 现在包裹
+  **每一个网络 egress**(LLM Chat / Cloud SaaS / WebDAV / Web Search / Telemetry),
+  settings 与 PII 脱敏在**一处**统一裁决(`crates/attune-core/src/outbound_gate.rs`)。
+  标记 `PrivacyTier::L0`(「🔒 永不出网」)的内容送往云端目的地时,gate 直接拒绝该云 LLM
+  调用(`OutboundError::L0CloudBlocked`),route 层再做一道 L0 过滤(defense-in-depth)。
+  修复了此前 gate 存在但未接进真实 egress 的 no-op 缺口(`acfd26f` / `78b1ef3`)。
+  egress 接入点经审计实证:`chat.rs` / `cloud_client.rs` / `scanner_webdav.rs` /
+  `web_search_browser.rs` / `telemetry.rs` + server `ingest_webdav.rs` / `routes/chat.rs`。
+- **P0 ABBA 死锁修复 + 回归守卫**:统一规范锁序 **`fulltext → vectors → vault`**
+  (search/chat 热点路径序),`routes/items.rs` 的 update/delete 对齐该序,杜绝与热点路径
+  反序持锁导致的 ABBA 死锁。新增真 3-mutex 锁序回归测试钉死(`2b3bedc` / `d379c2e` /
+  `b59d706`),并据此重新 baseline `#[ignore]` 计数。
+- **摄取安全加固 + 文档智能 A-K 验收测试矩阵**:office 解析对抗面 P0 套件
+  (zip 炸弹 / 路径穿越 / XXE 实体)+ ZIP-entry 解压上限封顶(`ff18fe2`,BUG-3,防 office
+  zip-bomb)+ 确定性 docx/xlsx/pptx/epub/rtf/csv fixture;多语言摄取+检索覆盖、RRF/relevance@K
+  质量套件;并把 **文档智能 A-K 维度覆盖矩阵固化为 release-acceptance gate**(`96a55ee`,
+  进 `docs/TESTING.md` 主大纲,每轮 RC/GA 硬性检查)。**注**:文档智能*功能*本身已并入
+  develop(见下方 v1.3.0 节);本期 Unreleased 仅记录其相关的测试 / 安全加固提交,功能
+  Highlights / Security / Known Limitations 见 v1.3.0。
+- **全文搜索英文大小写不敏感 + 词干归并**:tantivy 的 "jieba" 分词器从裸
+  `JiebaTokenizer` 升级为 analyzer 链 `jieba → LowerCaser → English Stemmer`。
+  英文检索从此大小写无关(搜 `running` 命中 `Running`)且词干归并(搜 `run`
+  命中 `running`);中文仍走 jieba 正确分词,CJK 不受 LowerCaser/Stemmer 影响。
+  index 与 query 共用同一 analyzer,保证对称(`crates/attune-core/src/index.rs`)。
+- **PDF 解析回归保障**:新增 4 篇确定性 PDF fixture(中/英/混合文本层 + 图片层扫描件)
+  + 集成测试,钉死 `pdf_extract` 文本层提取与 `needs_ocr` 路由(`tests/pdf_ingest_test.rs`,
+  生成器 `scripts/gen-pdf-fixtures.py`)。
+- **S8 动态模型源 — OCR/layout 接入 + 选源缓存补全(ModelStack spec §12)**:此前仅
+  embedding/reranker/ASR 走 S8 候选注册表 + 健康探测 + failover,**OCR(PP-OCRv5)/ layout
+  (CDLA PicoDet)仍硬连静态 `HF_ENDPOINT`** —— CN 用户 OCR 模型下载打不可靠 HF 且无 failover。
+  本期把 OCR/layout 下载也接进 `download_with_failover`(`SWHL/RapidOCR` / `Desperado-JT/*` 在
+  ModelScope 无覆盖 → selector 自动跳过,改走 company-mirror / hf-mirror / HF)。同时把此前
+  **死代码**的选定源缓存(`SelectedSource` 读写 + TTL 新鲜度)真正接进解析路径:进程内 2×2 桶
+  (region × coverage-class)缓存 failover 顺序,fresh 命中跳过重探(首源黑洞时省去每源 connect
+  超时叠加到首搜延迟);解锁时从持久化选定源 seed,下载后回填 winning source 供下次冷启动复用。
+- **📁 文件夹一键整理 → 案卷(可复用聚类引擎)**:新增 organizer 引擎(gather → group →
+  label → apply),HDBSCAN group-only 聚类(`min_samples` 下限 5)+ `StrategyRegistry` /
+  `OrganizationStrategy` trait(OSS `GenericStrategy`;行业策略在 attune-pro)。`analyze` 产出
+  整理建议(草稿)→ 用户确认 → 单事务 `apply` 归档到 Project,**绝不自动改动数据**(成本契约:
+  聚类属 ⚡ 本地算力,LLM 标签需用户显式触发)。`POST /organize/analyze` / `apply` + 建议 CRUD;
+  12 TDD task 全绿 + `organize_golden_gate`。
+- **🧠 记忆延续与可迁移性**:记忆子系统(L2 episodic + L3 semantic,字段级 AES-256-GCM)新增
+  **跨模型/维度延续** —— `current_embedding_signature` SSOT(维度键 `embed-dim{N}`)+
+  `memory_migrations` 表 + 维度变更时 `reindex_one` 重建向量,升级换 embedding 模型不丢记忆;
+  以及 **记忆导出 / 导入**(Argon2id 派生密钥 + AES-256-GCM bundle,导入前整批校验 +
+  `source_chunk_hashes` 去重,杜绝半写 / 重放)。9 TDD task 全绿 + `memory_continuity_golden_gate`。
+- **🎯 行业场景直达工作台(避免"对话触发不了 agent")**:新增工作台视图把各行业插件的
+  场景以**直达卡片**呈现(`GET /scenarios` 从内存 PluginRegistry 只读派生,带 cost_tier /
+  has_form / enabled / entitlement_status),用户点卡片直接进对应 agent / 表单,**不依赖**
+  chat 自然语言触发(解决"说错关键词 agent 不触发"的可用性痛点)。
+- **🛡️ boot 稳定性:`Store::open` 并发开库竞争修复**:同一 `vault.db` 在 boot 期被多处并发
+  打开(vault unlock / `install_job_store` / usage aggregator / 后台 worker)时,create + WAL +
+  VACUUM + schema-migration 序列存在竞争(TOCTOU `ALTER ADD COLUMN` → `duplicate column`;
+  无 busy_timeout 的 VACUUM → `database is locked`),会让 `Store::open` Err → job store 装不上
+  → office 路由错返 503。新增 per-path 进程内 open 锁 + 事务化 bootstrap + autovacuum busy_timeout
+  彻底消除(确定性并发回归测试钉死);CI office shard 在无模型缓存的 fresh runner 上也稳定通过。
+
+### Breaking
+- **无对外 API / 数据格式破坏性变更**。隐私出网门、锁序、分词链均为运行期行为修复;
+  唯一用户可感知变化是首次解锁后 FTS 索引会自动重建一次(见 Migration,不丢数据)。
+
+### Migration（升级即自动,无需手动操作）
+- **OutboundGate / ABBA 修复无需数据迁移**:均为运行期行为修复(egress 裁决接线 +
+  锁序对齐),不改 schema、不改加密格式;升级即生效。已标 L0 的 item 升级后立即享受
+  「永不出网」强制(此前可能因 gate no-op 而被送往云端 —— 这是本期修复的安全缺口)。
+- **FTS 索引自动重建**:分词规则变更使旧磁盘索引(token 用旧规则切出)与新 analyzer
+  不一致。引入分词器版本标记(`tokenizer_version` 文件,当前 v2)。`FulltextIndex::open`
+  检测到标记缺失(v1.2 之前的索引)或版本不符 → **清空索引目录强制重建**。索引是从加密
+  vault 派生的缓存(SSOT 是加密 SQL 存储),unlock 时 `state.rs` 会从全部 item 重灌,
+  **不丢任何用户数据**。用户首次解锁升级后的版本时索引自动重建一次(知识库大时多花数秒
+  rebuild),之后版本一致不再重建。
+
+### Known Limitations
+- **L0 强制依赖正确打标**:gate 只对**已标 `PrivacyTier::L0`** 的 chunk 强制本地;未打标的
+  普通内容按 settings 的 outbound policy 走(L1 走 PII 脱敏 + 审计)。打标是用户/插件职责。
+- 词干器仅英文(`Language::English`);其他拉丁语系(法/德/西)未做词干归并,
+  按原 token 索引(仍受益于 LowerCaser 大小写归一)。
+- `pdf_extract` 对拉丁字形会插入词内空格(`borrowing` → `bor rowing`);token 级断言
+  用去空格比对(见 `pdf_ingest_test.rs::despace`),实际检索经 jieba 切分不受影响。
+- **G5 job queue 限制**:
+  - **单 worker 串行 drain**(本版**有意** scope):所有 kind 共享一个串行 drain 循环,
+    保留 ASR "信号量门控防显存踩踏" 语义。spec §6 的 per-kind semaphore / 多 worker /
+    "交互 job 优先于批处理并行" **本版不做,推 v1.x**(原子 claim 已具备多 worker 安全性,
+    底座就绪)。后果:一个慢 ASR 会阻塞排在其后的其它 kind。
+  - **协作式取消对单次阻塞 handler 不能中途停**:多阶段 handler(OCR 翻页 / agent step /
+    ingest 批)通过 `JobControl::is_cancelled` 在阶段间真正提前退出;但 `AsrJobHandler` 的
+    核心是单次不可打断的 whisper subprocess —— 取消会**立即翻 DB state 并丢弃晚到结果**,
+    但 subprocess 仍跑到底(在 backend 检测前 / subprocess 启动前两个边界点会响应取消)。
+    真·subprocess 中途 kill(需 child handle + SIGTERM)是后续。
+  - 单机队列(无分布式);job DAG 依赖未做;`payload_json` 以明文存储(同 `reindex_queue`
+    的 item_id;字段级加密是后续 hardening);`result_json` 无 1MB 上限保护(ASR/OCR 结果
+    尺寸下低风险);agent kind 中断后不自动重试(需手动 requeue)。
+  - **TTL purge 按 `finished_ms` 而非 `created_ms`**:终态保留期从"完成时刻"起算,
+    长排队 / 多次 requeue 后才完成的 job 完整保留 30 天可查可下载(防完成即被误删)。
+  - Migration:自动 —— `job_queue` 表 `CREATE TABLE IF NOT EXISTS` 随下次打开创建,
+    无数据迁移(旧 in-memory job 本就不持久);重启行为变化:不再批量取消 in-flight job。
+
+## v1.3.0 (2026-06-07) — OSS 文档智能：文档对比 · 深度总结(省 token) · 逐章阅读
+
+> spec:`docs/superpowers/specs/2026-06-06-oss-document-intelligence.md`(11 节齐全;该目录按
+> 本仓约定 gitignore 为 AI scaffolding,本地可查、不入 git——见 commit f89d155)。
+> 三功能均守 §Cost&Trigger 三层成本契约 — 零成本层(结构/文本 diff、extractive 抽取、章节切分)
+> 无需登录;**语义裁决 / map-reduce 归纳 / 每章 LLM 摘要 = tier-3 付费 member-gated**。
+
+### 🚑 发布前关键修复(2026-06-12 — 干净机器 E2E 抓出,均 fresh-install / CN 冷启动级)
+
+> 在 AMD 干净机(无旧 vault / 无模型缓存)按标准 E2E(全局 §6.4.1 / docs/TESTING.md §1.5 环境保真契约)
+> 跑出两个 dev 机被掩盖的发布阻断,本节即修复。
+
+- **P0 — 全新安装首启崩溃修复**:`skill_signals` 表缺 `kind` 列却在无条件 SCHEMA_SQL 建引用它的索引,
+  fresh vault 建库失败 → server 起不来(全新用户装上即崩)。修:`kind` 列入表定义 + 索引移到 migration
+  (commit `d8c6c78`,带 fresh-DB 回归测试)。**⚠️ v1.2.0 release artifact 不含此修复,fresh-install 损坏 —— v1.2.0 标记 deprecated,请用本版本。**
+- **CN 冷启动模型获取修复**:CN 默认源 hf-mirror 已死 + 模型下载无超时 → vault setup 拉 330MB embedding
+  时永久 hang(TLS recv 传输中途 stall)。修:CN 默认源 → **ModelScope**(实测唯一活源)+ 全 5 路下载
+  (embedding/reranker/ASR/OCR/layout)加 connect+total 超时 + offline 守卫,死源一律有界失败 + 引擎 degrade,
+  绝不 hang(移除零超时 hf-hub 依赖)。海外用户仍走 HF 官方。
+
+### Known Limitations(本版本新增)
+- **CN ASR / OCR 模型暂无活源**:ModelScope 覆盖 embedding/reranker(Xenova ONNX),但不含 whisper(ASR)
+  / SWHL RapidOCR(PP-OCR)。CN 用户首次用 ASR/OCR 会下载失败 → 功能 degrade(不崩、不 hang)。彻底解需
+  company-mirror(规划中,见 ModelStack spec §12 S8 动态多源)。会员 chat / RAG(embedding)不受影响。
+
+### Highlights
+- **① 文档对比(`POST /api/v1/documents/compare`)**:零成本层 = 结构 diff(基于 `extract_sections`
+  的章节对齐增删改)+ 文本级行/句 diff + 相似块召回(BM25/向量);**member-gated** = 语义差异裁决
+  ("改写还是实质变更 / 立场是否反转" — LLM 判定)+ 差异自然语言总结。LLM 不可用时自动退化到
+  结构+文本 diff(免 LLM 仍可用)。
+- **② 深度总结-省 token 版(`POST /api/v1/documents/summarize`,旗舰算法)**:本地 extractive
+  预砍候选句 + `chunk_summaries` 缓存复用 +(member-gated)bounded map-reduce —— map 阶段 cheap-LLM
+  批量压缩 miss 块、reduce 阶段 capable-LLM ×1 合成多级摘要。**省 token 兑现作用域 = 长文档 re-read
+  (warm cache)**;by-token 节省比例属 workload-dependent,**warm-cache 量化 benchmark 待补
+  (PENDING-VERIFY,§6.3)** —— 现有 real-LLM run(`reports/runs/2026-06-11T080906_doc-intel-deepseek/`)
+  仅测到 cold-path savings=0.00(ad-hoc 无缓存路径,符合 Known Limitations 的诚实论证),warm-cache
+  比例尚无 committed 测据,不再援引未落盘报告。**短文档(naive < `DEEPSUM_MIN_TOK`=1500 tok)走单次
+  standard call bypass**(map-reduce 多级开销 > 单次,net-negative → STAGE -1 旁路,验收 actual ≤ naive)。
+- **③ 逐章阅读(`POST /api/v1/documents/chapters`)**:章节切分 + 每章 extractive 要点(零成本)+
+  章节导航;**member-gated** = 每章 LLM 摘要/Q&A + 跨章滚动记忆(前序章摘要注入 context)。
+- **Web UI 三模式视图 + 成本 chip**:`DocIntelView`(Compare / Deep Summary / Chapter Reading 三 tab),
+  i18n zh/en 全覆盖(key diff=0),成本契约 chip 显示本地/云端 + 预估;未付费触发 tier-3 → 提示
+  `membership-required`。
+- **CLI `attune doc` 子命令**:`compare` / `summarize` / `chapters`,本地文件、无需 vault,
+  零成本层零 LLM。
+- **per-agent/task vetted-model routing**:`settings.model_routing` 按 role(map=cheap / reduce=capable /
+  裁决 / Q&A)路由,经 new-api group 计费;缺省回退现有 default_model(老 settings 无该块 → 兜底不报错)。
+- **token_bill SSOT + 输出模式契约**:每次 tier-3 调用回 `token_bill`(counts + 逻辑模型名 + `path`),
+  输出走 `DocEnvelope`(narrative / structured,§3.5 输出模式一等公民)。
+
+### 🔒 Security / Privacy(§5.2.0b adversarial review 闭环)
+
+- **付费门必须服务端验证(C1)**:`POST /member/login-token` 旧实现仅凭客户端自报 `{tier:paid,
+  license_id:<非空>}` 即置 `Paid`,doc-intel 是首个把**计费云端 LLM 花费**挂在该门上的功能 →
+  伪造即盗刷。新增 `MemberVerifier`(默认 `CloudMemberVerifier`,凭持久化 cloud session 向账号服务端
+  核验 license,**fail-closed**:空 / 无 session / 云不可达 / license 不属本账号 / 已吊销 → 拒,绝不授 Paid)。
+  伪造请求回 `403 paid-verification-failed`。
+- **doc-intel 云端出网脱敏(I1,恢复 F-17)**:compare / deep_summary / chapters 旧路径把**原文**直发
+  云端 LLM;新增 `RedactingLlmProvider` 装饰器在 trait 边界统一脱敏出网 payload(手机/邮箱/身份证 →
+  reversible placeholder,与 chat.rs 同一 `redact_batch` 边界),响应再 restore。
+- **尊重隐私「关闭云端 LLM」开关(I2)**:任何 tier-3 云端操作先查 `app_settings.privacy.llm`(v1.0.6
+  Privacy Logic Strategy,默认关、wizard 引导开);关闭时回 `403 cloud-llm-disabled` 拒绝,**不静默发往
+  DeepSeek**。结构/文本本地 diff 不受影响。
+
+### ⚠️ Breaking
+- **无 Breaking Change**。全部新增 `/api/v1/documents/*` 路径 + 新 CLI 子命令 + 新 UI 视图,
+  不改任何现有 route / CLI / schema 契约;老 client / 老 UI 完全不受影响。
+
+### Migration
+- **本版无需数据/schema 迁移**。`chunk_summaries` 表复用现有结构,仅新增 strategy 取值
+  `deepsum:<level>`(与现有 chat-compress strategy 命名空间隔离,`(chunk_hash, strategy)` 复合键
+  REPLACE 幂等)。`settings` 新增 `model_routing` 块,缺省回退 default_model,无需迁移老配置。
+
+### Known Limitations
+- **省 token 是 workload/size-dependent,不是一刀切 ≥60%**:旗舰兑现作用域 = **长文档 re-read
+  (warm cache)**;结构上长文档 cold-run 仅 34-56%(map 必读 extractive 候选 ≥40% by-token +
+  bounded reduce 恒按输入计费,cold-run 整体 ≥60% 不可达 — 见 spec §8.5/§9.1 三条诚实论证);
+  短文档(< 1500 tok)map-reduce net-negative,已走单次 standard call bypass。**warm-cache 的具体
+  by-token 节省比例尚无 committed benchmark(PENDING-VERIFY,§6.3)** —— 此前 "实测 93-96%" 援引
+  的 `reports/2026-06-06_deepsum-savings.md` 未落盘,已撤回该数字,待 warm-cache 量化测据补齐。
+  **不是** flat ≥60%;USD 节省因 cheap/capable 分级更高但定价敏感,故主指标按 token 数。
+- **lazy-DEK follow-up(已登记,next-sprint candidate)**:`summarize` 路由对 inline-text / 无 item_id
+  的请求仍 fetch DEK(`vault.dek_db()`)供缓存层使用,而该路径缓存从不命中 → 强制 vault-unlock。
+  live leg(§7.3 真部署)发现;OUT of 本 sprint scope,候选下一 sprint 改为按需 lazy-DEK。
+- **model-tier:deepseek-chat 实测全过 floor(§9.2,N=3)**:`doc_intel_real_llm_gate.rs` 对
+  deepseek-chat 跑 N=3 —— compare-verdict macro-F1 **1.000 ± 0.000**(0 parse-fail)、deep_summary
+  keypoint-recall **0.833 ± 0.068**、chapters-ask grounded-rate **1.000 ± 0.000**,三 agent 全过
+  各自 floor(`reports/2026-06-07_doc-intel-real-llm-matrix.md` +
+  raw `reports/runs/2026-06-11T080906_doc-intel-deepseek/`)。**跨多 tier(qwen-turbo /
+  deepseek-reasoner)的 spread 对照尚未 committed(PENDING-VERIFY,§6.3)** —— 不再 claim 未落盘的
+  三 tier spread=0.047;最低 tier 标注待多 tier 测据补齐前保守不下结论。弱本地 3B map 质量塌方时
+  按 §4.5 退化到纯 extractive(免 LLM 仍可用)。
+- **`/api/v1/member/*` 仍绕过 bearer/vault guard(残留,本 sprint 部分闭环)**:C1 已堵住「伪造 Paid
+  盗刷计费」的核心洞(login-token 现走服务端 license 核验,fail-closed);但 member 路由整体仍未要求
+  bearer token —— 本地 self-host 单用户场景可接受,**NAS / 暴露端口部署下** 远端调用者仍能翻动全局
+  member_state(至多降级到 Free/LoggedOut,无法伪造 Paid)。为 member 路由加鉴权是后续 sprint 候选。
+- **不做(写死,§2.2)**:行业专属对比/总结(= attune-pro)、流式输出、AI 主动建议、建库期偷跑深度总结、
+  后台批量深度总结队列。扫描件/图片 VLM 路径仅单文档(批量后置 v1.1)。
+
 ## v1.2.0 (2026-06-01) — GitConnector + WASM 跨平台 agent + 一键依赖部署
 
 ### Highlights
@@ -1486,7 +1697,7 @@ W2 batch 1 placeholder 状态 → 标记 RESOLVED in W3 batch A（本批次）�
 - **W1 已 retrofit**：`attune-server::state::start_{classify,rescan,queue,skill_evolver}_worker` 4 个生产 worker；`attune-core::queue::QueueWorker` 库路径
 - **测试**：30 组合 snapshot + 28 单元 + 4 集成 + 1 ignored 真烧 CPU（本地实测 32 burner 线程 + Conservative 15% 阈值 → throttled=50/allowed=0，治理 100% 生效）
 - **跨平台**：sysinfo 0.32 全 Linux/Windows/macOS；CPU 采样 250ms 缓存防 sysinfo MINIMUM_CPU_UPDATE_INTERVAL 退化
-- 设计文档：[`docs/superpowers/specs/2026-04-27-resource-governor-design.md`](../docs/superpowers/specs/2026-04-27-resource-governor-design.md)
+- 设计决策：[`docs/adr/0006-resource-governor-cost-tier.md`](../docs/adr/0006-resource-governor-cost-tier.md)
 
 ## 已发布
 

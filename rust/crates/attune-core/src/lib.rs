@@ -99,6 +99,7 @@ pub mod chat_reliability;
 pub mod chunker;
 pub mod context_compress;
 pub mod context_budget;
+pub mod document_intelligence;
 pub mod plugin_hub;
 pub mod plugin_loader;
 pub mod plugin_registry;
@@ -121,9 +122,25 @@ pub mod agent_runner;
 // 不走 Ed25519 SignedLicense, 这些类型只有 attune-accounts 在用, 留在 attune-core
 // 是 footgun. 删了它们, 同时把 LicenseCache 启动时的死代码也从 state.rs 删掉.
 pub mod member_session;
+pub mod member_verifier;
 pub mod cloud_client;
+// Cloud device fingerprint — 授权码激活时绑定本机到 license。指纹字段顺序逐字节
+// 对齐 cloud accounts `_compute_fingerprint_sig`(device_id|hostname|os|cpu_brand|
+// hardware_uuid)。区别于 quarantine 的 attune-accounts::device_binding(不同契约)。
+pub mod device_fingerprint;
+// SPKI cert-pinning for cloud accounts connections (slice8 §3.2). Layers a leaf
+// SubjectPublicKeyInfo pin on top of standard webpki chain validation; defends
+// against DNS-hijack / network MITM. See cert_pin.rs.
+pub mod cert_pin;
 pub mod plugin_sync;
 pub mod plugin_sig;
+// W1 plugin trust-anchor allowlist (cloud slice8 §5.6.1). The immutable trust
+// root for auto-installed plugins; defends against a compromised accounts server
+// substituting an attacker signing key. See plugin_anchor.rs.
+pub mod plugin_anchor;
+pub mod entitlement_anchor;  // trust-chain SEC-1: entitlement signing-key anchor + verify
+pub mod entitlement;  // trust-chain T5: EntitlementCache + grace state machine + clock-rollback
+pub mod entitlement_reverify;  // trust-chain T8: re-verify orchestration (SEC-1/2 worker integration)
 pub mod classifier;
 pub mod clusterer;
 pub mod crypto;
@@ -142,8 +159,11 @@ pub mod ollama_setup;
 pub mod ocr;  // v0.6.0-rc.3: pub for ai_stack status API
 pub mod asr;
 pub mod office_job_queue;
+pub mod organizer;
+pub mod job_handler;  // G5: per-kind durable job dispatch (JobHandler + run_one_job)
 pub mod parser;
 pub mod pii;
+pub mod redacting_llm;
 pub mod platform;
 pub mod memory_consolidation;
 pub mod memory;

@@ -25,12 +25,22 @@ type SearchResult = {
 // Build view shortcuts inside the component (locale-reactive) — module-level
 // const would snapshot the initial locale and never refresh on setLocale().
 function buildViewShortcuts(): SearchResult[] {
+  // Icons mirror Sidebar PRIMARY_NAV / MORE_NAV so ⌘K reaches every routable view
+  // (including workbench/quota/doc-intel wired in Round 3/B), not just the original 5.
   return [
-    { kind: 'view', id: 'v-chat',       title: `💬 ${t('cmd.view.chat')}`,       action: () => (currentView.value = 'chat') },
-    { kind: 'view', id: 'v-items',      title: `📄 ${t('cmd.view.items')}`,      action: () => (currentView.value = 'items') },
-    { kind: 'view', id: 'v-remote',     title: `🔗 ${t('cmd.view.remote')}`,     action: () => (currentView.value = 'remote') },
-    { kind: 'view', id: 'v-knowledge',  title: `📊 ${t('cmd.view.knowledge')}`,  action: () => (currentView.value = 'knowledge') },
-    { kind: 'view', id: 'v-settings',   title: `⚙ ${t('cmd.view.settings')}`,   action: () => (currentView.value = 'settings') },
+    { kind: 'view', id: 'v-chat',        title: `💬 ${t('cmd.view.chat')}`,        action: () => (currentView.value = 'chat') },
+    { kind: 'view', id: 'v-workbench',   title: `🛠 ${t('cmd.view.workbench')}`,    action: () => (currentView.value = 'workbench') },
+    { kind: 'view', id: 'v-items',       title: `📄 ${t('cmd.view.items')}`,        action: () => (currentView.value = 'items') },
+    { kind: 'view', id: 'v-projects',    title: `🗂 ${t('cmd.view.projects')}`,     action: () => (currentView.value = 'projects') },
+    { kind: 'view', id: 'v-knowledge',   title: `📊 ${t('cmd.view.knowledge')}`,    action: () => (currentView.value = 'knowledge') },
+    { kind: 'view', id: 'v-remote',      title: `🔗 ${t('cmd.view.remote')}`,       action: () => (currentView.value = 'remote') },
+    { kind: 'view', id: 'v-skills',      title: `🧠 ${t('cmd.view.skills')}`,       action: () => (currentView.value = 'skills') },
+    { kind: 'view', id: 'v-office',      title: `📋 ${t('cmd.view.office')}`,       action: () => (currentView.value = 'office') },
+    { kind: 'view', id: 'v-docintel',    title: `📄 ${t('cmd.view.docintel')}`,     action: () => (currentView.value = 'doc-intel') },
+    { kind: 'view', id: 'v-marketplace', title: `🏪 ${t('cmd.view.marketplace')}`,  action: () => (currentView.value = 'marketplace') },
+    { kind: 'view', id: 'v-privacy',     title: `🔐 ${t('cmd.view.privacy')}`,      action: () => (currentView.value = 'privacy') },
+    { kind: 'view', id: 'v-quota',       title: `📊 ${t('cmd.view.quota')}`,        action: () => (currentView.value = 'quota') },
+    { kind: 'view', id: 'v-settings',    title: `⚙ ${t('cmd.view.settings')}`,     action: () => (currentView.value = 'settings') },
   ];
 }
 

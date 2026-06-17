@@ -21,9 +21,23 @@ import { loadSessions, clearActiveSession } from '../hooks/useChat';
 import { t } from '../i18n';
 import { api, clearToken } from '../store/api';
 import { toast } from '../components/Toast';
+import { confirmDialog } from '../components/ConfirmModal';
 
 const SIDEBAR_WIDTH = 280;
 const SIDEBAR_COLLAPSED_WIDTH = 64;
+
+// 锁定 vault 单一路径（与 SettingsView 一致）：confirm → /vault/lock → 清 token → reload。
+// 顶栏常驻锁按钮 + AccountMenu 菜单项共用，避免逻辑漂移。
+async function lockVault(): Promise<void> {
+  if (!(await confirmDialog({ title: t('confirm.title.lockVault'), message: t('sidebar.menu.lock_vault.confirm'), danger: true }))) return;
+  try {
+    await api.post('/vault/lock');
+    clearToken();
+    location.reload();
+  } catch (e) {
+    toast('error', `${t('sidebar.menu.lock_vault.error')}：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 export function Sidebar(): JSX.Element {
   const collapsed = sidebarCollapsed.value;
@@ -89,23 +103,27 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
         >
           🌿 {!collapsed && t('app.name')}
         </span>
-        <button
-          type="button"
-          onClick={() => (sidebarCollapsed.value = !collapsed)}
-          aria-label={collapsed ? t('sidebar.action.expand') : t('sidebar.action.collapse')}
-          className="interactive"
-          style={{
-            padding: '4px 6px',
-            background: 'transparent',
-            border: 'none',
-            borderRadius: 'var(--radius-sm)',
-            color: 'var(--color-text-secondary)',
-            cursor: 'pointer',
-            fontSize: 'var(--text-base)',
-          }}
-        >
-          {collapsed ? '»' : '«'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+          {/* 全局顶栏常驻锁定按钮：vault 解锁时一键锁定，折叠态仍可见 */}
+          <LockVaultButton />
+          <button
+            type="button"
+            onClick={() => (sidebarCollapsed.value = !collapsed)}
+            aria-label={collapsed ? t('sidebar.action.expand') : t('sidebar.action.collapse')}
+            className="interactive"
+            style={{
+              padding: '4px 6px',
+              background: 'transparent',
+              border: 'none',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--color-text-secondary)',
+              cursor: 'pointer',
+              fontSize: 'var(--text-base)',
+            }}
+          >
+            {collapsed ? '»' : '«'}
+          </button>
+        </div>
       </div>
       {!collapsed && (
         <button
@@ -149,6 +167,32 @@ function BrandAndSearch({ collapsed }: { collapsed: boolean }): JSX.Element {
         </button>
       )}
     </div>
+  );
+}
+
+// 全局顶栏常驻锁按钮 — 仅在 vault 解锁时显示（已锁/未知态无意义）
+function LockVaultButton(): JSX.Element | null {
+  if (vaultState.value !== 'unlocked') return null;
+  return (
+    <button
+      type="button"
+      onClick={() => void lockVault()}
+      title={t('sidebar.menu.lock_vault')}
+      aria-label={t('sidebar.menu.lock_vault')}
+      className="interactive"
+      style={{
+        padding: '4px 6px',
+        background: 'transparent',
+        border: 'none',
+        borderRadius: 'var(--radius-sm)',
+        color: 'var(--color-text-secondary)',
+        cursor: 'pointer',
+        fontSize: 'var(--text-base)',
+        lineHeight: 1,
+      }}
+    >
+      <span aria-hidden="true">🔒</span>
+    </button>
   );
 }
 
@@ -284,6 +328,7 @@ type NavItem = { view: View; icon: string; labelKey: string };
 
 // Primary tier — always visible
 const PRIMARY_NAV: NavItem[] = [
+  { view: 'workbench', icon: '🛠', labelKey: 'sidebar.nav.workbench' },
   { view: 'items', icon: '📄', labelKey: 'sidebar.nav.items' },
   { view: 'projects', icon: '🗂', labelKey: 'sidebar.nav.projects' },
   { view: 'knowledge', icon: '📊', labelKey: 'sidebar.nav.knowledge' },
@@ -294,8 +339,10 @@ const MORE_NAV: NavItem[] = [
   { view: 'remote', icon: '🔗', labelKey: 'sidebar.nav.remote' },
   { view: 'skills', icon: '🧠', labelKey: 'sidebar.nav.skills' },
   { view: 'office', icon: '📋', labelKey: 'sidebar.nav.office' },
+  { view: 'doc-intel', icon: '📄', labelKey: 'sidebar.nav.docintel' }, // T-10: 文档对比/总结/逐章
   { view: 'marketplace', icon: '🏪', labelKey: 'sidebar.nav.marketplace' },
   { view: 'privacy', icon: '🔐', labelKey: 'sidebar.nav.privacy' }, // v1.0.6
+  { view: 'quota', icon: '📊', labelKey: 'sidebar.nav.quota' }, // v1.0.7: 用量配额仪表板
 ];
 
 const MORE_VIEWS = new Set<View>(MORE_NAV.map((i) => i.view));
@@ -519,17 +566,9 @@ function AccountMenu({ onClose }: { onClose: () => void }): JSX.Element {
         {t('sidebar.menu.settings')}
       </MenuItem>
       <MenuItem onClick={async () => {
-        // UI-S8 fix (2026-05-02): 之前仅关闭菜单，**未实际锁定 vault**。
-        // 现在走与 SettingsView 同一路径：调 /vault/lock + 清 token + reload。
+        // 走顶栏常驻锁同一 lockVault() 路径（confirm → /vault/lock → 清 token → reload）
         onClose();
-        if (!confirm(t('sidebar.menu.lock_vault.confirm'))) return;
-        try {
-          await api.post('/vault/lock');
-          clearToken();
-          location.reload();
-        } catch (e) {
-          toast('error', `${t('sidebar.menu.lock_vault.error')}：${e instanceof Error ? e.message : String(e)}`);
-        }
+        await lockVault();
       }}>
         {t('sidebar.menu.lock_vault')}
       </MenuItem>

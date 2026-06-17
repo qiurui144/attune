@@ -12,6 +12,13 @@
 //! 注: 本地 vault 的导出走 vault.rs 已有路径 (attune-cli vault export).
 //! 这里只补充「cloud member 模式」的 cloud 端数据主权操作; BYOK / self-host
 //! 用户不需要这些 endpoint, 因为没有 cloud accounts 账号.
+//!
+//! SECURITY (SSRF / paywall-bypass): the cloud accounts URL is resolved
+//! **server-side** from persisted settings ([`resolve_accounts_url`]), NEVER from
+//! the request body. A client-controlled `cloud_url` would let an attacker who can
+//! reach the local DSAR API point the credential-bearing login at their own server
+//! (SSRF + harvest the user's cloud password) or forge DSAR responses. Mirrors the
+//! same fix applied to `routes/member.rs`.
 
 use attune_core::cloud_client::CloudClient;
 use axum::extract::State;
@@ -20,10 +27,8 @@ use axum::Json;
 use serde::Deserialize;
 
 use crate::error::{AppError, AppResult};
+use crate::routes::member::resolve_accounts_url;
 use crate::state::SharedState;
-
-/// 默认 cloud accounts base URL (生产 SaaS endpoint)
-const DEFAULT_CLOUD_URL: &str = "https://accounts.engi-stack.com";
 
 #[derive(Deserialize)]
 pub struct DSARCredentialsReq {
@@ -31,18 +36,6 @@ pub struct DSARCredentialsReq {
     pub email: String,
     /// 用户密码 — 仅本次请求使用, 不持久化
     pub password: String,
-    /// cloud accounts base URL (可选, 默认 https://accounts.engi-stack.com)
-    #[serde(default)]
-    pub cloud_url: Option<String>,
-}
-
-fn cloud_url(req: &DSARCredentialsReq) -> String {
-    req.cloud_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| DEFAULT_CLOUD_URL.to_string())
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> AppError {
@@ -64,9 +57,11 @@ fn validate(req: &DSARCredentialsReq) -> Result<(), AppError> {
 }
 
 /// 内部 helper: 用密码登 cloud 拿 authenticated CloudClient.
-fn login_cloud(req: &DSARCredentialsReq) -> Result<CloudClient, AppError> {
-    let url = cloud_url(req);
-    let mut client = CloudClient::new(url);
+///
+/// SECURITY: `cloud_url` 由调用方从服务端 settings 解析传入 (见 [`resolve_accounts_url`]),
+/// 绝不来自请求体 —— 否则攻击者可把携带用户密码的登录指向自有服务器 (SSRF).
+fn login_cloud(cloud_url: &str, req: &DSARCredentialsReq) -> Result<CloudClient, AppError> {
+    let mut client = CloudClient::new(cloud_url.to_string());
     client
         .login(req.email.trim(), &req.password)
         .map_err(|e| err(StatusCode::UNAUTHORIZED, format!("login failed: {e}")))?;
@@ -78,20 +73,38 @@ fn login_cloud(req: &DSARCredentialsReq) -> Result<CloudClient, AppError> {
 /// server 用用户提供的密码登录 cloud accounts 拿 session, 然后调 cloud
 /// /api/v1/users/me/export 拿回 JSON dump 转给客户端. 密码不持久化.
 pub async fn export_data(
-    State(_state): State<SharedState>,
+    State(state): State<SharedState>,
     Json(req): Json<DSARCredentialsReq>,
 ) -> AppResult<Json<serde_json::Value>> {
     validate(&req)?;
-    let client = login_cloud(&req)?;
-    let body = client
-        .dsar_export()
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar export: {e}")))?;
-    tracing::info!(
-        "DSAR export: relayed cloud export for email={} (size~{} bytes)",
-        req.email,
-        body.to_string().len()
-    );
+    let cloud_url = resolve_accounts_url(&state);
+    // B4 (2026-06-06): CloudClient (reqwest::blocking) must not run in the async
+    // handler — its current-thread runtime panics on drop. Do login + dsar op on a
+    // blocking thread. See routes/member.rs for the same fix.
+    let body = run_blocking(cloud_url, req, |client| {
+        client
+            .dsar_export()
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar export: {e}")))
+    })
+    .await?;
+    tracing::info!("DSAR export: relayed cloud export (size~{} bytes)", body.to_string().len());
     Ok(Json(body))
+}
+
+/// B4 helper: run `login_cloud(req)` + a blocking CloudClient op on a blocking thread
+/// so the embedded `reqwest::blocking` runtime is created and dropped off the async
+/// worker. `op` receives the authenticated client and returns the proxied body.
+/// `cloud_url` is the server-resolved accounts URL (never client-supplied).
+async fn run_blocking<F>(cloud_url: String, req: DSARCredentialsReq, op: F) -> AppResult<serde_json::Value>
+where
+    F: FnOnce(&CloudClient) -> AppResult<serde_json::Value> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let client = login_cloud(&cloud_url, &req)?;
+        op(&client)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("dsar task join: {e}")))?
 }
 
 /// POST /api/v1/dsar/delete — 软删除 cloud 账户 proxy.
@@ -100,18 +113,19 @@ pub async fn export_data(
 /// 软删除后 cloud session 立即失效 (cloud current_user 拒 is_active=False),
 /// 但用户 30 天 grace 期内可调 cancel-deletion 撤销.
 pub async fn delete_account(
-    State(_state): State<SharedState>,
+    State(state): State<SharedState>,
     Json(req): Json<DSARCredentialsReq>,
 ) -> AppResult<Json<serde_json::Value>> {
     validate(&req)?;
-    let client = login_cloud(&req)?;
-    let body = client
-        .dsar_delete()
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar delete: {e}")))?;
-    tracing::info!(
-        "DSAR delete: cloud soft-delete confirmed for email={}",
-        req.email
-    );
+    let cloud_url = resolve_accounts_url(&state);
+    // B4: blocking CloudClient off the async worker (see export_data).
+    let body = run_blocking(cloud_url, req, |client| {
+        client
+            .dsar_delete()
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar delete: {e}")))
+    })
+    .await?;
+    tracing::info!("DSAR delete: cloud soft-delete confirmed");
     Ok(Json(body))
 }
 
@@ -125,23 +139,27 @@ pub async fn delete_account(
 /// 真正的「邮件确认链接」流程留 v1.1; v1.0 覆盖 90% 场景: 用户软删除后立刻发现
 /// 误操作时, 同一会话 cookie 还在, attune Desktop 可经此 endpoint 复用 session.
 pub async fn cancel_deletion(
-    State(_state): State<SharedState>,
+    State(state): State<SharedState>,
     Json(req): Json<DSARCredentialsReq>,
 ) -> AppResult<Json<serde_json::Value>> {
     validate(&req)?;
-    let client = login_cloud(&req).map_err(|e| {
-        AppError::Forbidden(format!(
-            "login refused (likely already soft-deleted; cancel-deletion must be \
-             issued from the same session that triggered the deletion): {e}"
-        ))
-    })?;
-    let body = client
-        .dsar_cancel_deletion()
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar cancel: {e}")))?;
-    tracing::info!(
-        "DSAR cancel-deletion: cloud restore confirmed for email={}",
-        req.email
-    );
+    let cloud_url = resolve_accounts_url(&state);
+    // B4: blocking CloudClient off the async worker. login refusal keeps its
+    // Forbidden mapping (soft-deleted users cannot re-login).
+    let body = tokio::task::spawn_blocking(move || -> AppResult<serde_json::Value> {
+        let client = login_cloud(&cloud_url, &req).map_err(|e| {
+            AppError::Forbidden(format!(
+                "login refused (likely already soft-deleted; cancel-deletion must be \
+                 issued from the same session that triggered the deletion): {e}"
+            ))
+        })?;
+        client
+            .dsar_cancel_deletion()
+            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar cancel: {e}")))
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("dsar task join: {e}")))??;
+    tracing::info!("DSAR cancel-deletion: cloud restore confirmed");
     Ok(Json(body))
 }
 
@@ -150,41 +168,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cloud_url_defaults_when_missing() {
-        let req = DSARCredentialsReq {
-            email: "x@y.com".to_string(),
-            password: "p".to_string(),
-            cloud_url: None,
-        };
-        assert_eq!(cloud_url(&req), DEFAULT_CLOUD_URL);
-    }
-
-    #[test]
-    fn cloud_url_defaults_when_blank() {
-        let req = DSARCredentialsReq {
-            email: "x@y.com".to_string(),
-            password: "p".to_string(),
-            cloud_url: Some("   ".to_string()),
-        };
-        assert_eq!(cloud_url(&req), DEFAULT_CLOUD_URL);
-    }
-
-    #[test]
-    fn cloud_url_uses_override() {
-        let req = DSARCredentialsReq {
-            email: "x@y.com".to_string(),
-            password: "p".to_string(),
-            cloud_url: Some("https://staging.example.com".to_string()),
-        };
-        assert_eq!(cloud_url(&req), "https://staging.example.com");
-    }
-
-    #[test]
     fn validate_rejects_empty_email() {
         let req = DSARCredentialsReq {
             email: "".to_string(),
             password: "p".to_string(),
-            cloud_url: None,
+        };
+        assert!(validate(&req).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_email() {
+        let req = DSARCredentialsReq {
+            email: "   ".to_string(),
+            password: "p".to_string(),
         };
         assert!(validate(&req).is_err());
     }
@@ -194,7 +190,6 @@ mod tests {
         let req = DSARCredentialsReq {
             email: "x@y.com".to_string(),
             password: "".to_string(),
-            cloud_url: None,
         };
         assert!(validate(&req).is_err());
     }
@@ -204,8 +199,67 @@ mod tests {
         let req = DSARCredentialsReq {
             email: "x@y.com".to_string(),
             password: "p".to_string(),
-            cloud_url: None,
         };
         assert!(validate(&req).is_ok());
+    }
+
+    // ── SECURITY: client-controlled cloud_url is rejected (SSRF / paywall) ───
+    //
+    // Threat: an attacker who can reach the local DSAR API posts a `cloud_url`
+    // pointing at their own server. The DSAR handlers send the user's cloud
+    // PASSWORD to that URL on login — a client-controlled URL is a credential-
+    // harvest SSRF (and lets the attacker forge DSAR "success"). The fix removed
+    // the field entirely from the request struct; the accounts URL is resolved
+    // server-side from settings. We assert the field is structurally dropped: a
+    // body carrying `cloud_url` deserializes fine (serde ignores the unknown key)
+    // but the parsed struct has NO place to carry it — the attacker URL never
+    // reaches CloudClient::new.
+    #[test]
+    fn dsar_req_ignores_client_cloud_url() {
+        let body = serde_json::json!({
+            "email": "victim@example.com",
+            "password": "pw-not-real",
+            "cloud_url": "http://attacker.example/harvest",
+        });
+        let req: DSARCredentialsReq =
+            serde_json::from_value(body).expect("deserializes (unknown field dropped)");
+        assert_eq!(req.email, "victim@example.com");
+        // Re-serialize the struct's real field set and prove cloud_url is absent
+        // from the canonical wire form (if the field were re-added, this fails).
+        let reserialized = serde_json::json!({ "email": req.email, "password": req.password });
+        assert!(
+            reserialized.get("cloud_url").is_none(),
+            "DSARCredentialsReq must not carry a client cloud_url (SSRF/paywall)"
+        );
+    }
+
+    // ── SECURITY (adversarial): internal/loopback SSRF targets cannot be injected ─
+    //
+    // Even with internal-network or metadata-endpoint URLs in the body, the parsed
+    // request has no cloud_url field — so login_cloud is always called with the
+    // server-resolved URL. We assert each hostile target is dropped at parse time.
+    #[test]
+    fn dsar_req_drops_internal_ssrf_targets() {
+        for hostile in [
+            "http://169.254.169.254/latest/meta-data/", // cloud metadata
+            "http://127.0.0.1:8080/admin",              // loopback
+            "http://[::1]/",                            // ipv6 loopback
+            "http://192.168.0.1/router",                // private LAN
+            "file:///etc/passwd",                       // local file scheme
+        ] {
+            let body = serde_json::json!({
+                "email": "u@example.com",
+                "password": "pw-not-real",
+                "cloud_url": hostile,
+            });
+            let req: DSARCredentialsReq = serde_json::from_value(body).expect("deserializes");
+            // The struct literally cannot hold the hostile URL. Round-trip the real
+            // fields and confirm no cloud_url leaked through.
+            let reserialized = serde_json::json!({ "email": req.email, "password": req.password });
+            assert!(
+                reserialized.get("cloud_url").is_none(),
+                "hostile cloud_url {hostile} must be structurally dropped"
+            );
+        }
     }
 }

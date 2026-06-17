@@ -153,6 +153,26 @@ impl Store {
         Ok(out)
     }
 
+    /// 列出某文件系统路径前缀下所有已索引文件的 item_id（"文件夹一键整理"按目录圈选）。
+    /// prefix LIKE 匹配：传一个目录路径 → 命中该目录及其子目录下所有索引文件。
+    /// WHY LIKE 而非递归遍历:indexed_files.path 是绝对路径,前缀即可圈定子树,无需触盘。
+    /// 顺带返回的是去重后的 item_id（一文件一 item;同 item 多文件极少见,DISTINCT 兜底）。
+    pub fn list_item_ids_under_path(&self, prefix: &str) -> Result<Vec<String>> {
+        // ESCAPE '\\': 用户路径可能含 LIKE 元字符 % / _,转义后按字面匹配,
+        // 避免 "/a_b" 误命中 "/axb"。前缀已转义,再拼通配 '%'。
+        let escaped = prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let pattern = format!("{escaped}%");
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT item_id FROM indexed_files WHERE path LIKE ?1 ESCAPE '\\'",
+        )?;
+        let rows = stmt.query_map(params![pattern], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for r in rows {
+            ids.push(r?);
+        }
+        Ok(ids)
+    }
+
     /// 删除一条 indexed_files 记录（按 path）。git 增量删除上游消失文件时调。
     pub fn delete_indexed_file(&self, path: &str) -> Result<()> {
         self.conn
@@ -181,5 +201,52 @@ impl Store {
             params![id, dir_id, path, file_hash, item_id, now],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::crypto::Key32;
+    use crate::store::Store;
+
+    /// Bind a dir, insert real items, link them via indexed_files, then verify
+    /// `list_item_ids_under_path` selects the subtree (and LIKE metachars in the
+    /// prefix match literally, not as wildcards).
+    #[test]
+    fn list_item_ids_under_path_selects_subtree() {
+        let s = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let dir_id = s.bind_directory("/docs", true, &["txt"]).unwrap();
+
+        let mk = |name: &str, path: &str| -> String {
+            let id = s.insert_item(&dek, name, "body", None, "note", None, None).unwrap();
+            s.upsert_indexed_file(&dir_id, path, "h", &id).unwrap();
+            id
+        };
+        let a = mk("a", "/docs/a.txt");
+        let b = mk("b", "/docs/sub/b.txt");
+        let _c = mk("c", "/other/c.txt"); // outside prefix
+
+        let mut got = s.list_item_ids_under_path("/docs").unwrap();
+        got.sort();
+        let mut want = vec![a, b];
+        want.sort();
+        assert_eq!(got, want, "subtree under /docs, excluding /other");
+    }
+
+    #[test]
+    fn list_item_ids_under_path_escapes_like_metachars() {
+        let s = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let dir_id = s.bind_directory("/root", true, &["txt"]).unwrap();
+
+        let id_underscore = s.insert_item(&dek, "u", "b", None, "note", None, None).unwrap();
+        s.upsert_indexed_file(&dir_id, "/a_b/x.txt", "h", &id_underscore).unwrap();
+        let id_decoy = s.insert_item(&dek, "d", "b", None, "note", None, None).unwrap();
+        s.upsert_indexed_file(&dir_id, "/axb/y.txt", "h", &id_decoy).unwrap();
+
+        // "/a_b" must match only the literal underscore path, NOT "/axb".
+        let got = s.list_item_ids_under_path("/a_b").unwrap();
+        assert_eq!(got, vec![id_underscore], "underscore is escaped, /axb not matched");
     }
 }

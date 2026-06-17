@@ -3,7 +3,8 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { Button, EmptyState, Modal, Input } from '../components';
+import { Button, EmptyState, Modal, Input, Skeleton } from '../components';
+import { confirmDialog } from '../components/ConfirmModal';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import {
@@ -38,7 +39,7 @@ export function RemoteView(): JSX.Element {
   }, []);
 
   async function handleUnbind(d: BoundDir) {
-    if (!confirm(t('remote.confirm.unbind', { path: d.path }))) return;
+    if (!(await confirmDialog({ title: t('confirm.title.unbindFolder'), message: t('remote.confirm.unbind', { path: d.path }), danger: true }))) return;
     const ok = await unbindDir(d.id);
     if (ok) {
       toast('success', t('remote.toast.unbind_success'));
@@ -82,7 +83,14 @@ export function RemoteView(): JSX.Element {
       </header>
 
       {loading.value ? (
-        <div style={{ color: 'var(--color-text-secondary)' }}>{t('common.loading')}</div>
+        <div
+          role="status"
+          aria-label={t('common.loading')}
+          style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}
+        >
+          <Skeleton height={56} />
+          <Skeleton height={56} />
+        </div>
       ) : dirs.value.length === 0 ? (
         <EmptyState
           icon="🔗"
@@ -472,7 +480,7 @@ function EmailSection(): JSX.Element {
   }
 
   async function handleDelete(a: EmailAccount) {
-    if (!confirm(t('email.confirm.delete', { username: a.username }))) return;
+    if (!(await confirmDialog({ title: t('confirm.title.deleteEmail'), message: t('email.confirm.delete', { username: a.username }), danger: true }))) return;
     const ok = await deleteEmailAccount(a.dir_id);
     if (ok) {
       toast('success', t('email.toast.delete_success'));
