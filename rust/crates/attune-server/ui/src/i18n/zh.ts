@@ -243,7 +243,6 @@ export const zh = {
 
   // ─── ItemsView ──────────────────────────────────────
   'items.empty.bind_folder': '绑定文件夹',
-  'items.empty.bind_folder_toast': '跳转到远程绑定（Phase 6.3 接入）',
   'items.search.placeholder': '🔍 按标题搜索…',
   'items.source.all': '全部来源',
   'items.source.web': '网页',

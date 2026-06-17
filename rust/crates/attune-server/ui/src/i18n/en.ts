@@ -250,7 +250,6 @@ export const en = {
 
   // ─── ItemsView ──────────────────────────────────────
   'items.empty.bind_folder': 'Bind folder',
-  'items.empty.bind_folder_toast': 'Jump to Remote binding (Phase 6.3 wiring)',
   'items.search.placeholder': '🔍 Search by title…',
   'items.source.all': 'All sources',
   'items.source.web': 'Web',

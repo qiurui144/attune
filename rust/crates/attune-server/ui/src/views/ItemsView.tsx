@@ -5,7 +5,7 @@ import { useEffect, useRef } from 'preact/hooks';
 import { useSignal, useComputed } from '@preact/signals';
 import { Button, EmptyState } from '../components';
 import { t } from '../i18n';
-import { items, drawerContent } from '../store/signals';
+import { items, drawerContent, currentView } from '../store/signals';
 import type { Item } from '../store/signals';
 import { loadItems, deleteItem } from '../hooks/useItems';
 import { toast } from '../components/Toast';
@@ -54,7 +54,8 @@ export function ItemsView(): JSX.Element {
           actions={[
             {
               label: t('items.empty.bind_folder'),
-              onClick: () => toast('info', t('items.empty.bind_folder_toast')),
+              // 真导航到 Remote 视图（本地 / WebDAV / Git 目录绑定 UI），不再只弹提示
+              onClick: () => (currentView.value = 'remote'),
               variant: 'primary',
             },
           ]}
