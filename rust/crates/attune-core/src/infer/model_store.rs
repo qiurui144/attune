@@ -3,6 +3,20 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::PathBuf;
 
+/// 逃生开关：HF_HUB_OFFLINE 是否置位（非空且非 "0"/"false"）。
+///
+/// air-gapped / CI 离线环境置此变量，所有底座模型下载点(embedding/reranker/ocr/asr)
+/// 在缓存缺失时直接报错而非尝试联网，让失败可预期且不挂在网络超时上。
+pub fn hf_offline() -> bool {
+    match std::env::var("HF_HUB_OFFLINE") {
+        Ok(v) => {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        }
+        Err(_) => false,
+    }
+}
+
 /// 给定 HuggingFace repo_id，返回本地缓存目录路径
 /// repo_id 中的 '/' 替换为 '_'，避免目录层级问题
 pub fn model_cache_dir(repo_id: &str) -> PathBuf {
