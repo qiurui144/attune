@@ -23,7 +23,9 @@ pub mod handwriting;
 pub mod layout;
 pub mod stamp_signature;
 pub mod table_structure;
+pub mod vision_capability;
 pub mod vlm_escalate;
+pub mod vlm_router;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

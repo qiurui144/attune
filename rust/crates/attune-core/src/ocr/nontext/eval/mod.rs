@@ -165,7 +165,7 @@ pub fn run_model_eval(
                 by_kind.entry(fx.kind).or_default().push(FixtureScore { value_score: 0.0, grounding_precision: 0.0 });
                 continue;
             };
-            let (res, _tel) = escalate_region(vlm, token, fx.kind, model, geom);
+            let (res, _tel) = escalate_region(vlm, &token, fx.kind, model, geom);
             let score = match res {
                 Ok(r) => score_prediction(&fx.truth, &r, chart_tol),
                 // A hard failure (provider error / parse-fail after retries) scores zero, never skipped.
