@@ -6,7 +6,12 @@
 //! MemberState::Paid。
 //!
 //! 全程走真 axum router + 真 (in-memory) vault + 一个本地 mock cloud server,
-//! 不 mock 内部逻辑;断言 §6.1 happy / 边界 / 异常三类。
+//! 不 mock 内部逻辑;断言 §6.1 happy / 边界 / 异常三类。**完全离线确定性**:
+//! mock cloud 跑在 127.0.0.1:0,activate-license 走的 accounts_url 由**服务端
+//! settings** (`cloud.accounts_url`) 决定 —— 测试通过 settings API 把它指向 mock
+//! (请求体不再带 `cloud_url`:client-controlled cloud_url 是 SSRF/付费墙绕过,
+//! 已被服务端丢弃,见 868e893)。因此本测试**不依赖任何 live gateway**,验的是
+//! client 解析 + gateway wiring 逻辑。
 //!
 //! **单 test fn**(同 member_auth_test):server 用 set_var 把 HOME/XDG 重定向到
 //! tempdir,多 fn 在同一进程内并行竞争 set_var 不安全,故所有断言(边界 / 错误 /
@@ -14,20 +19,44 @@
 
 use std::sync::Arc;
 
-/// 起一个极简 mock cloud:`POST /api/v1/member/activate` 返回固定的 activate 契约。
+/// 起一个本地 mock cloud,服务授权码激活全链需要的两个端点:
+/// - `POST /api/v1/member/activate` → 固定的 activate 契约 (status/body 可控)。
+/// - `POST /api/v1/devices/activate` → 固定的设备绑定成功响应 (好路径需它成功
+///   才能 200;否则 device 绑定失败会让 activate-license 返回 409/403/502)。
+///
 /// 返回 (base_url, JoinHandle)。
 async fn spawn_mock_cloud(
-    body: serde_json::Value,
-    status: u16,
+    activate_body: serde_json::Value,
+    activate_status: u16,
 ) -> (String, tokio::task::JoinHandle<()>) {
     use axum::{routing::post, Json, Router};
-    let app = Router::new().route(
-        "/api/v1/member/activate",
-        post(move || {
-            let body = body.clone();
-            async move { (axum::http::StatusCode::from_u16(status).unwrap(), Json(body)) }
-        }),
-    );
+    let device_body = serde_json::json!({
+        "device_token": "dev-token-not-real",
+        "device_id": "test-device-id",
+        "plan": "pro",
+        "max_activations": 3,
+        "current_activations": 1
+    });
+    let app = Router::new()
+        .route(
+            "/api/v1/member/activate",
+            post(move || {
+                let body = activate_body.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::from_u16(activate_status).unwrap(),
+                        Json(body),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/api/v1/devices/activate",
+            post(move || {
+                let body = device_body.clone();
+                async move { (axum::http::StatusCode::OK, Json(body)) }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
@@ -56,6 +85,23 @@ async fn get_settings(client: &reqwest::Client, base: &str) -> serde_json::Value
         .json()
         .await
         .unwrap()
+}
+
+/// 把服务端 `cloud.accounts_url` 设为 `url`(指向本地 mock)。activate-license 由此
+/// 解析要调的 cloud,而**不是**请求体里的 cloud_url(SSRF/付费墙绕过,已丢弃)。
+/// 需 vault 已解锁(settings 写 vault meta)。
+async fn set_accounts_url(client: &reqwest::Client, base: &str, url: &str) {
+    let resp = client
+        .patch(format!("{base}/api/v1/settings"))
+        .json(&serde_json::json!({ "cloud": { "accounts_url": url } }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "set accounts_url must succeed: {}",
+        resp.status()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -106,11 +152,23 @@ async fn activate_license_full_contract() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"], "license-key-required");
 
+    // ── 解锁 vault:settings (accounts_url) + gateway settings + entitlements 都
+    //    要写 vault meta,需先解锁。 ───────────────────────────────────────────
+    let resp = client
+        .post(format!("{base}/api/v1/vault/setup"))
+        .json(&serde_json::json!({ "password": "P@ss-activate-not-real" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "vault setup: {}", resp.status());
+
     // ── 异常: cloud 4xx (无效授权码) → 502 activate-failed, NOT Paid ──────────
+    // 把服务端 accounts_url 指向返回 403 的 mock(请求体不带 cloud_url,SSRF-safe)。
     let (bad_cloud, bad) = spawn_mock_cloud(serde_json::json!({"error": "invalid"}), 403).await;
+    set_accounts_url(&client, &base, &bad_cloud).await;
     let resp = client
         .post(format!("{base}/api/v1/member/activate-license"))
-        .json(&serde_json::json!({ "license_key": "ATTUNE-LIC-BAD", "cloud_url": bad_cloud }))
+        .json(&serde_json::json!({ "license_key": "ATTUNE-LIC-BAD" }))
         .send()
         .await
         .unwrap();
@@ -122,9 +180,10 @@ async fn activate_license_full_contract() {
     bad.abort();
 
     // ── 异常: cloud unreachable → 502 ────────────────────────────────────────
+    set_accounts_url(&client, &base, "http://127.0.0.1:1").await;
     let resp = client
         .post(format!("{base}/api/v1/member/activate-license"))
-        .json(&serde_json::json!({ "license_key": "ATTUNE-LIC-X", "cloud_url": "http://127.0.0.1:1" }))
+        .json(&serde_json::json!({ "license_key": "ATTUNE-LIC-X" }))
         .send()
         .await
         .unwrap();
@@ -137,15 +196,6 @@ async fn activate_license_full_contract() {
         "failed activation must NOT set Paid (fail-closed)"
     );
 
-    // ── 解锁 vault,才能持久化 gateway settings + entitlements ─────────────────
-    let resp = client
-        .post(format!("{base}/api/v1/vault/setup"))
-        .json(&serde_json::json!({ "password": "P@ss-activate-not-real" }))
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success(), "vault setup: {}", resp.status());
-
     // ── 异常: cloud 200 但 gateway 字段缺 (manual 会员无 gateway) → 仍 Paid,但
     //    不写 gateway settings (此时 vault 刚 unlock,llm 未配置 → api_key_set 应仍 false)。
     //    必须在 full-contract 写入之前断言,否则会读到后写入的 gateway key。
@@ -154,9 +204,10 @@ async fn activate_license_full_contract() {
         200,
     )
     .await;
+    set_accounts_url(&client, &base, &nogw_cloud).await;
     let resp = client
         .post(format!("{base}/api/v1/member/activate-license"))
-        .json(&serde_json::json!({ "license_key": "ATTUNE-LIC-NOGW", "cloud_url": nogw_cloud }))
+        .json(&serde_json::json!({ "license_key": "ATTUNE-LIC-NOGW" }))
         .send()
         .await
         .unwrap();
@@ -186,9 +237,10 @@ async fn activate_license_full_contract() {
         200,
     )
     .await;
+    set_accounts_url(&client, &base, &good_cloud).await;
     let resp = client
         .post(format!("{base}/api/v1/member/activate-license"))
-        .json(&serde_json::json!({ "license_key": "ATTUNE-LIC-VALID", "cloud_url": good_cloud }))
+        .json(&serde_json::json!({ "license_key": "ATTUNE-LIC-VALID" }))
         .send()
         .await
         .unwrap();

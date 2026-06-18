@@ -545,18 +545,41 @@ mod tests {
         );
     }
 
+    /// Build a controlled empty model directory + return guaranteed-absent layout/table
+    /// model paths INSIDE it, and pin `platform::data_dir()` to it. This isolates the
+    /// "no layout model" invariant from the host/CI env: a real `layout.onnx` present in
+    /// the host's data dir (or downloaded by an earlier test) must not flip
+    /// ScaffoldNoLayoutModel → LayoutError. Returns (guard, layout_path, table_path); the
+    /// guard restores the previous data-dir override on drop.
+    struct NoModelEnv {
+        _tmp: tempfile::TempDir,
+        prev: Option<std::path::PathBuf>,
+        layout: std::path::PathBuf,
+        table: std::path::PathBuf,
+    }
+    impl Drop for NoModelEnv {
+        fn drop(&mut self) {
+            crate::platform::set_dir_override_for_test(self.prev.take());
+        }
+    }
+    fn no_model_env() -> NoModelEnv {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let layout = tmp.path().join("absent-layout.onnx");
+        let table = tmp.path().join("absent-slanet.onnx");
+        // Pin data_dir to the empty temp dir so default_model_path() (if ever consulted)
+        // also resolves to a model-less location — no host model can leak in.
+        let prev = crate::platform::set_dir_override_for_test(Some(tmp.path().to_path_buf()));
+        NoModelEnv { _tmp: tmp, prev, layout, table }
+    }
+
     #[test]
     fn recognize_page_missing_models_degrades_to_empty() {
         // The shared capability entry point: no layout/table model present → empty regions,
         // empty report, zero cost, never errors (the 🆓 degrade-to-plain-OCR invariant, R1).
         // HONEST status: no layout model → ScaffoldNoLayoutModel (recognition not functional).
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let out = recognize_page(
-            tmp.path(),
-            std::path::Path::new("/nonexistent/layout.onnx"),
-            std::path::Path::new("/nonexistent/slanet.onnx"),
-            &[],
-        );
+        let env = no_model_env();
+        let page = tempfile::NamedTempFile::new().unwrap();
+        let out = recognize_page(page.path(), &env.layout, &env.table, &[]);
         assert!(out.regions.is_empty());
         assert_eq!(out.local_regions, 0);
         assert_eq!(out.escalated_regions, 0);
@@ -568,13 +591,9 @@ mod tests {
     #[test]
     fn scaffold_status_serializes_honestly() {
         // The C1 truth must be machine-readable: callers see engine-status = scaffold string.
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let out = recognize_page(
-            tmp.path(),
-            std::path::Path::new("/nonexistent/layout.onnx"),
-            std::path::Path::new("/nonexistent/slanet.onnx"),
-            &[],
-        );
+        let env = no_model_env();
+        let page = tempfile::NamedTempFile::new().unwrap();
+        let out = recognize_page(page.path(), &env.layout, &env.table, &[]);
         let j = serde_json::to_string(&out).unwrap();
         assert!(
             j.contains(r#""engine_status":"scaffold-no-layout-model""#),
