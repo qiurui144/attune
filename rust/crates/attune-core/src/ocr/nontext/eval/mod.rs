@@ -504,4 +504,112 @@ mod tests {
         );
         assert_eq!(s.n_seed, 3);
     }
+
+    /// REAL-VLM grounding + N=3 accuracy on a CONTENT-bearing fixture (not the blank smoke). Uses the
+    /// committed `ocr_image/known_text.png` (white canvas, black "ATTUNE OCR TEST 2026") as a
+    /// text-kind region: the real qwen multimodal model must (a) read the actual text — proving it
+    /// does NOT over-reject true content — and (b) locate it with an in-crop `sub_bbox` — proving I1
+    /// grounding works on real pixels, not just the mock lane. N=3 seeds → token-F1 mean ± std vs the
+    /// known GT. Asserts a non-trivial floor (text-F1 ≥ 0.5: the model recovered most of the GT
+    /// tokens) + grounding precision ≈ 1.0 (every kept value was located). Paid cloud call (§1.3).
+    #[test]
+    #[ignore = "real-VLM lane: needs DASHSCOPE_API_KEY + cost authorization (§1.3); run with --ignored"]
+    fn real_vlm_grounding_n3_on_known_text() {
+        let Some((vlm, model)) = qwen_vlm_from_env() else {
+            eprintln!("real-VLM grounding PENDING-KEY: no DASHSCOPE_API_KEY/ATTUNE_VLM_API_KEY — skipping");
+            return;
+        };
+        // Committed content fixture (CARGO_MANIFEST_DIR-relative): real text on a white canvas.
+        let img = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/ocr_image/known_text.png");
+        assert!(img.exists(), "known_text.png fixture must be committed: {}", img.display());
+        let fixtures = vec![VisionFixture {
+            id: "known-text-01".into(),
+            kind: RegionKind::Handwriting, // text-transcription kind (token-F1 scored)
+            image_path: img,
+            truth: VisionTruth::Text("ATTUNE OCR TEST 2026".into()),
+        }];
+        let scores = run_model_eval(&*vlm, &model, &fixtures, DEFAULT_SEEDS, 0.05);
+        assert_eq!(scores.len(), 1);
+        let s = &scores[0];
+        eprintln!(
+            "real-VLM grounding/N=3: model={} kind={:?} n_seed={} text_f1={:.3}±{:.3} grounding_prec={:.3} (GT=\"ATTUNE OCR TEST 2026\")",
+            s.model, s.kind, s.n_seed, s.value_f1_mean, s.value_f1_std, s.grounding_precision_mean
+        );
+        assert_eq!(s.n_seed, 3);
+        // Accuracy floor: the model recovered most GT tokens (does not over-reject true content).
+        assert!(
+            s.value_f1_mean >= 0.5,
+            "real VLM should read most of the known text (token-F1 ≥ 0.5); got {:.3}",
+            s.value_f1_mean
+        );
+        // Grounding: every kept value carried an in-crop sub_bbox (I1 works on real pixels).
+        assert!(
+            s.grounding_precision_mean >= 0.99,
+            "kept values must be grounded (precision ≈ 1.0); got {:.3}",
+            s.grounding_precision_mean
+        );
+    }
+
+    /// REAL multimodal FAILOVER (I3): a dead primary (always-erroring provider) must fail over to a
+    /// LIVE qwen candidate on DashScope, and the live candidate produces a grounded result. Proves the
+    /// router's provider-error → next-candidate path works against a REAL backend (the mock lane only
+    /// proved it against scripted errors). Cost: exactly one real call (the dead primary errors
+    /// without a network round-trip). Paid cloud call for the backup (§1.3).
+    #[test]
+    #[ignore = "real-VLM lane: needs DASHSCOPE_API_KEY + cost authorization (§1.3); run with --ignored"]
+    fn real_vlm_failover_dead_primary_to_live_qwen() {
+        use crate::ocr::nontext::vlm_router::{VlmCandidate, VlmRouter};
+        use std::path::Path;
+
+        let Some((live, model)) = qwen_vlm_from_env() else {
+            eprintln!("real-VLM failover PENDING-KEY: no DASHSCOPE_API_KEY/ATTUNE_VLM_API_KEY — skipping");
+            return;
+        };
+
+        // A dead primary: healthy probe (so it is TRIED, not skipped) but every call errors —
+        // forcing the router down the provider-error failover path to the live qwen backup.
+        struct DeadVlm;
+        impl VlmProvider for DeadVlm {
+            fn caption(&self, _: &Path) -> crate::error::Result<String> {
+                Err(crate::error::VaultError::LlmUnavailable("dead primary".into()))
+            }
+            fn vqa(&self, _: &Path, _: &str) -> crate::error::Result<String> {
+                Err(crate::error::VaultError::LlmUnavailable("dead primary".into()))
+            }
+            fn probe(&self) -> bool {
+                true
+            }
+            fn vlm_model_name(&self) -> &str {
+                "dead-primary"
+            }
+        }
+
+        let router = VlmRouter::new(vec![
+            VlmCandidate::new(std::sync::Arc::new(DeadVlm), "dead-primary", 9),
+            VlmCandidate::new(live, model.clone(), 5),
+        ]);
+
+        // Mint a real gated token from the content fixture (the live qwen sees the downscaled crop).
+        let img = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/ocr_image/known_text.png");
+        let token = mint_eval_token(&img).expect("egress token for known_text.png");
+        let geom = geom_for_image(&img);
+        let out = router.escalate(&token, RegionKind::Handwriting, geom);
+
+        eprintln!(
+            "real-VLM failover: tried={:?} winning_model={} failed_over={} result_ok={}",
+            out.tried,
+            out.winning_model(),
+            out.failed_over(),
+            out.result.is_ok()
+        );
+        assert!(out.failed_over(), "dead primary must trigger a real failover");
+        assert_eq!(out.tried.first().map(String::as_str), Some("dead-primary"));
+        assert_eq!(out.winning_model(), model, "live qwen backup must win");
+        assert!(out.result.is_ok(), "live backup must produce a parseable (grounded) result");
+        // The dead primary is recorded as a provider failure; the live backup is not.
+        assert!(router.failure_rate(RegionKind::Handwriting, "dead-primary") > 0.0);
+        assert_eq!(router.failure_rate(RegionKind::Handwriting, &model), 0.0);
+    }
 }
