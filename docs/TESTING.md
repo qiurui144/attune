@@ -349,6 +349,18 @@ cargo test -p attune-core --test stress_large_scale_test
 # 降级路径默认走 mock，遍布各集成套件（无需额外命令）
 ```
 
+**CI 持续纪律门（W4 #93）**：六类下限不再仅靠约定，已固化为 CI 硬门：
+- `scripts/test-floor-check.sh`（CI job `test-floor`，纯 bash 秒级）以
+  `rust/agent_quality_manifest.yaml` 为 SSOT，硬性校验：每个确定性 agent golden ≥10、
+  **新 agent 必须同 PR 带 gate + golden**（`tests/golden/<agent>` 无对应 manifest gate 即 fail）、
+  以及 §2.6 A–K 维度矩阵在本文件存在；proptest/边界/error 计数为 advisory WARN。本机跑
+  `bash scripts/test-floor-check.sh`（`--warn` 只报不 fail）。
+- `agent_gate_orchestrator.rs`（跑在 `cargo test --workspace` 内）= 阈值 ratchet 只升不降 +
+  `#[ignore]` 突增守卫（baseline+2）。
+- real-LLM N=3 floor 走 secret-gated CI job `real-llm-secret-gated`：配了
+  `DEEPSEEK_API_KEY` / `DASHSCOPE_API_KEY` CI secret 时对真模型跑 N=3 F1 floor；未配则
+  skip（标 PENDING，不 block）。另有 `nightly-real-llm.yml`（自建 Ollama runner）跑同套 gate。
+
 ---
 
 ### 2.6 文档智能 — 全维测试覆盖矩阵（release 验收硬门 · 2026-06-08）
