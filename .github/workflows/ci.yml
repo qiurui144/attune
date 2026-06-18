@@ -1159,3 +1159,136 @@ jobs:
       - name: cargo test slow E2E (with --include-ignored)
         working-directory: rust
         run: cargo test --workspace --release -- --include-ignored
+
+  test-floor:
+    # W4 #93 — six-class test-floor guard. Mechanically enforces CLAUDE.md §6.1
+    # 六类测试下限 + Agent 验证铁律 as a HARD PR gate, driven by the workspace
+    # SSOT rust/agent_quality_manifest.yaml:
+    #   • golden ≥ 10 per deterministic agent
+    #   • NEW-AGENT guard — a tests/golden/<agent> dir with no manifest gate FAILS
+    #     (a new agent must ship a gate + golden in the SAME PR)
+    #   • docs/TESTING.md must still carry the A–K dimension matrix (release Gate anchor)
+    # Pure bash (no toolchain / no network) — runs in seconds, complements the
+    # deterministic agent_gate_orchestrator.rs ratchet (which runs inside
+    # cargo test --workspace on rust-test-core). proptest/boundary/error counts
+    # are reported as WARN (advisory) on day one; the structural checks above are HARD.
+    name: Test-Floor Guard (six-class)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run six-class test-floor check (hard structural gate)
+        run: bash scripts/test-floor-check.sh
+
+  real-llm-secret-gated:
+    # W4 #93 — secret-gated real-LLM N=3 gate (does NOT depend on the self-hosted
+    # Ollama runner used by nightly-real-llm.yml). Runs the OSS doc-intel +
+    # oss-agent real-LLM #[ignore] gates against a REAL OpenAI-compatible model
+    # (DeepSeek / DashScope), N=3 seeds, hard floors per agent. Maps a CI secret
+    # → the test's provider-agnostic env contract (ATTUNE_LLM_*). NO key is in
+    # the repo (CLAUDE.md §1.4); the key is read ONLY from a GitHub Actions secret
+    # and never echoed.
+    #
+    # SKIP-not-BLOCK: if neither DEEPSEEK_API_KEY nor DASHSCOPE_API_KEY is
+    # configured, the job records PENDING and exits 0 (a fork / a repo without the
+    # secret is never red-failed by a key it cannot have). Once the secret is set,
+    # the floor (compare macro-F1 ≥ 0.80 etc., per doc_intel_real_llm_gate.rs) is
+    # enforced — a real degradation fails the job (only-up ratchet, no goalposts).
+    name: Real-LLM N=3 (secret-gated)
+    runs-on: ubuntu-latest
+    # Only on push/PR to the long-lived branches + manual; the Ollama lane owns
+    # the nightly schedule. Light job (compile attune-core tests + N=3 API calls).
+    if: github.event_name != 'schedule'
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+      ATTUNE_REAL_LLM_SEEDS: "3"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve LLM secret → provider env (skip if unset)
+        id: keycheck
+        # Map DEEPSEEK_API_KEY (preferred) or DASHSCOPE_API_KEY into the test's
+        # ATTUNE_LLM_* contract. Secrets are referenced via env (never inlined in
+        # run:), and the key is written to $GITHUB_ENV (masked) — never to a log.
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+        run: |
+          if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+            {
+              echo "ATTUNE_LLM_PROVIDER=openai_compat"
+              echo "ATTUNE_LLM_ENDPOINT=https://api.deepseek.com/v1"
+              echo "ATTUNE_LLM_API_KEY=${DEEPSEEK_API_KEY}"
+              echo "ATTUNE_LLM_MODEL=deepseek-chat"
+            } >> "$GITHUB_ENV"
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "[real-llm] DeepSeek secret present — real-LLM N=3 gate WILL run."
+          elif [ -n "${DASHSCOPE_API_KEY:-}" ]; then
+            {
+              echo "ATTUNE_LLM_PROVIDER=openai_compat"
+              echo "ATTUNE_LLM_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1"
+              echo "ATTUNE_LLM_API_KEY=${DASHSCOPE_API_KEY}"
+              echo "ATTUNE_LLM_MODEL=qwen-plus"
+            } >> "$GITHUB_ENV"
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "[real-llm] DashScope secret present — real-LLM N=3 gate WILL run."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=real-llm-secret-gated::PENDING — no DEEPSEEK_API_KEY / DASHSCOPE_API_KEY secret configured; real-LLM N=3 gate SKIPPED (not a failure)."
+          fi
+
+      - name: Free disk space
+        if: steps.keycheck.outputs.configured == 'true'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.keycheck.outputs.configured == 'true'
+
+      - name: Cache cargo
+        if: steps.keycheck.outputs.configured == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: real-llm-secret-gated-v1
+
+      - name: Build real-LLM gate tests
+        if: steps.keycheck.outputs.configured == 'true'
+        working-directory: rust
+        run: cargo build -p attune-core --release --tests
+
+      - name: Run OSS real-LLM N=3 gates (DeepSeek/DashScope)
+        if: steps.keycheck.outputs.configured == 'true'
+        id: gate
+        working-directory: rust
+        run: |
+          set -o pipefail
+          OUT="$RUNNER_TEMP/real-llm-secret.log"; : > "$OUT"
+          rc=0
+          # ATTUNE_LLM_* (incl. the masked key) come from $GITHUB_ENV set above;
+          # ATTUNE_REAL_LLM_SEEDS=3 is the job-level env. Serial, single-thread.
+          for t in doc_intel_real_llm_gate oss_agent_real_llm_gate; do
+            echo "=== $t (N=$ATTUNE_REAL_LLM_SEEDS) ===" | tee -a "$OUT"
+            if ! cargo test -p attune-core --release --test "$t" \
+                 -- real_llm --ignored --nocapture --test-threads=1 2>&1 | tee -a "$OUT"; then
+              rc=1
+            fi
+          done
+          {
+            echo "## Real-LLM N=3 gate (secret-gated)"
+            echo '```'
+            grep -E "===|RESULT|macro-F1|floor|mean=" "$OUT" | tail -40 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=real-llm-secret-gated::A real-LLM N=3 gate fell below its floor. Per Agent 验证铁律: raise the model tier in RELEASE.md or fix the prompt/schema — do NOT relax the floor."
+          fi
+          exit "$rc"
