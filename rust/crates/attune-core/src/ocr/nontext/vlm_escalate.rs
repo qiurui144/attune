@@ -5,7 +5,9 @@
 //! ## Egress is STRUCTURALLY (type-) enforced — not a doc-comment promise
 //!
 //! The ONLY way to call the VLM is [`escalate_region`], and it requires a
-//! [`VlmEgressToken`] by value. A token can ONLY be minted by [`gate_vlm_egress`],
+//! [`VlmEgressToken`] (borrowed, so one gated token can be reused across failover
+//! candidates by [`super::vlm_router::VlmRouter`] without re-gating). A token can ONLY
+//! be minted by [`gate_vlm_egress`],
 //! which (a) runs the [`OutboundGate`] on the redacted string descriptor AND
 //! (b) takes an image-level refuse/allow decision on the ACTUAL bytes that leave
 //! the device ([`ImageEgressDecision`]). There is no public `VlmEgressToken`
@@ -25,6 +27,31 @@ use std::path::{Path, PathBuf};
 
 /// Max retries when VLM JSON is invalid (spec §4.5 B).
 pub const MAX_RETRIES: u32 = 3;
+
+/// Test-only: mint a real (gated) [`VlmEgressToken`] for use by other modules' unit tests
+/// (notably `vlm_router`). It goes through the real [`gate_vlm_egress`] under an allow policy, so the
+/// type-enforcement invariant is preserved even in tests (no fabricated tokens). The downscaled crop
+/// is written under a temp dir that is intentionally leaked so the path stays valid for the duration
+/// of the test (the tiny PNG is cleaned by the OS temp reaper; tests never read its bytes via a
+/// scripted provider).
+#[cfg(test)]
+pub(crate) fn test_egress_token() -> VlmEgressToken {
+    let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir"))).path();
+    let redactor = Redactor::new();
+    let src = dir.join("src.png");
+    image::DynamicImage::new_rgb8(8, 8).save(&src).expect("png");
+    let dst = dir.join("egress.png");
+    gate_vlm_egress(
+        true,
+        true,
+        false,
+        Some(&redactor),
+        "region-crop",
+        &src,
+        ImageEgressDecision::AllowDownscaled(dst),
+    )
+    .expect("gate should mint a token under allow policy")
+}
 
 /// Default longest-edge (px) the gate downscales a region crop to before it leaves the
 /// device (C3 image-level minimization). 1024 keeps chart/formula legibility while shedding
@@ -465,13 +492,15 @@ pub const UNGROUNDED_ERROR_KIND: &str = "grounding";
 /// like a parse error and retried; after MAX_RETRIES the value is KEPT but the telemetry error_kind
 /// is `grounding` and `ungrounded` is set so the caller flags it (never drop, never fabricate, §7).
 ///
-/// SECURITY (C2): requires a [`VlmEgressToken`] by value — the ONLY way to obtain one is
-/// [`gate_vlm_egress`]. This makes VLM egress type-enforced: no token ⇒ this function is
-/// uncallable, so the gate cannot be bypassed. The VLM only ever sees the token's minimized
-/// (downscaled, PII-considered) crop path — never a caller-supplied raw original.
+/// SECURITY (C2): requires a [`VlmEgressToken`] — the ONLY way to obtain one is
+/// [`gate_vlm_egress`]. The token is borrowed (`&`) so the [`super::vlm_router::VlmRouter`] can hand
+/// the SAME gated bytes to each failover candidate without re-gating (I3); ownership of a token still
+/// cannot be forged (no public constructor), so VLM egress stays type-enforced: no token ⇒ this
+/// function is uncallable, so the gate cannot be bypassed. The VLM only ever sees the token's
+/// minimized (downscaled, PII-considered) crop path — never a caller-supplied raw original.
 pub fn escalate_region(
     vlm: &dyn VlmProvider,
-    token: VlmEgressToken,
+    token: &VlmEgressToken,
     kind: RegionKind,
     model_name: &str,
     geom: RegionGeom,
@@ -645,7 +674,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&[GROUNDED_HW]);
         let (res, tel) =
-            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
         assert!(res.is_ok());
         assert_eq!(tel.retry_count, 0);
         assert_eq!(tel.error_kind, None);
@@ -655,7 +684,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&["garbage", GROUNDED_HW]);
         let (res, tel) =
-            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
         assert!(res.is_ok());
         assert_eq!(tel.retry_count, 1);
     }
@@ -664,7 +693,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&["bad1", "bad2", "bad3", "bad4"]);
         let (res, tel) =
-            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
         assert!(res.is_err());
         assert_eq!(tel.retry_count, MAX_RETRIES);
         assert_eq!(tel.error_kind.as_deref(), Some("parse"));
@@ -679,7 +708,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&[GROUNDED_HW]);
         let (res, tel) =
-            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
         let r = res.unwrap();
         assert_eq!(tel.error_kind, None);
         match r {
@@ -702,7 +731,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&[r#"{"text":"ok"}"#, r#"{"text":"ok"}"#, r#"{"text":"ok"}"#]);
         let (res, tel) =
-            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
         let r = res.expect("value must be KEPT, not dropped (spec §7)");
         assert_eq!(tel.retry_count, MAX_RETRIES);
         assert_eq!(tel.error_kind.as_deref(), Some(UNGROUNDED_ERROR_KIND));
@@ -719,7 +748,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&[r#"{"text":"ok"}"#, GROUNDED_HW]);
         let (res, tel) =
-            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
         assert!(res.is_ok());
         assert_eq!(tel.retry_count, 1);
         assert_eq!(tel.error_kind, None);
@@ -733,7 +762,7 @@ mod tests {
         let oob = r#"{"text":"ok","grounding":{"sub_bbox":{"x":50,"y":50,"w":3,"h":3}}}"#;
         let vlm = script(&[oob, oob, oob]);
         let (res, tel) =
-            escalate_region(&vlm, gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
         assert!(res.is_ok());
         assert_eq!(tel.error_kind.as_deref(), Some(UNGROUNDED_ERROR_KIND));
     }
@@ -771,7 +800,7 @@ mod tests {
         assert!(token.egress_crop_path().starts_with(dir.path()));
         assert!(token.egress_crop_path().exists(), "minimized crop must be materialized");
         let vlm = script(&[GROUNDED_HW]);
-        let (res, _) = escalate_region(&vlm, token, RegionKind::Handwriting, "qwen-vl", test_geom());
+        let (res, _) = escalate_region(&vlm, &token, RegionKind::Handwriting, "qwen-vl", test_geom());
         assert!(res.is_ok());
     }
 

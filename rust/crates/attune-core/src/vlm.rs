@@ -28,6 +28,24 @@ pub trait VlmProvider: Send + Sync {
 
     /// 视觉问答：针对 `image_path` 回答 `question`。
     fn vqa(&self, image_path: &Path, question: &str) -> Result<String>;
+
+    /// I3 (spec §3.2 / §10): cheap health probe for the `VlmRouter` candidate matrix. The router
+    /// calls this to decide whether a candidate is currently usable before sending a real (💰)
+    /// escalation through it. The default impl returns `true` (assume available) so existing
+    /// providers (`LlmVlmProvider` / `MockVlmProvider` / `RecordingMockVlm`) compile unchanged —
+    /// the trait stays back-compatible. A real cloud provider may override this with a cheap
+    /// reachability check (e.g. a `/v1/models` HEAD) so a known-down model is skipped without
+    /// burning a full VQA round-trip.
+    fn probe(&self) -> bool {
+        true
+    }
+
+    /// I3: the model identifier this provider speaks to (used as the failover candidate key and as
+    /// the telemetry `vlm_model` so failures are attributed to the right model). Default `"vlm"`
+    /// keeps existing impls compiling; routed candidates carry their real model name.
+    fn vlm_model_name(&self) -> &str {
+        "vlm"
+    }
 }
 
 /// 基于 `LlmProvider` 的 VLM 薄适配器。

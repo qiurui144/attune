@@ -889,6 +889,8 @@ feature-OFF 必须仍全绿（`cargo test -p attune-core` / `-p attune-server` /
 | 隐私/出网（C2/C3） | `ocr/nontext/vlm_escalate.rs` `#[cfg(test)]` + doctest | VLM 出网类型强制：`VlmEgressToken` 无公开构造器，唯一来源 `gate_vlm_egress`（`compile_fail` doctest 证明无法绕过）；图片级 refuse/allow + 下采样到 `EGRESS_MAX_EDGE`，离开的是缩小副本非原图，读图失败 fail-closed |
 | 属性 (proptest) | `ocr/nontext/...proptest` | cross-validation 不变量：no auto-correct（R5）、total = confirmed+conflicts+discrepancies |
 | 集成 E2E | `attune-cli/tests/cli_recognize_regions_smoke.rs` | subprocess 真跑 `attune recognize-regions` — 插件 dispatch 的契约 |
+| 模型矩阵 failover（I3） | `ocr/nontext/vlm_router.rs` `#[cfg(test)]` | healthy primary 不 failover 且 backup 零调用（failover ≠ fan-out, §8）；primary provider err → 切 backup；probe=false → 跳过未调用 + 仍计入聚合（R2 不掩盖死 primary）；全候选失败 → degrade local 不 panic；空矩阵 degrade；失败率 >30% → suggest-higher-tier hint（§4.5-F 复用 `FAILURE_RATE_ALERT_THRESHOLD`） |
+| agent-invocable 暴露（I5） | `ocr/nontext/vision_capability.rs` `#[cfg(test)]` | `vision.recognize` 返回 typed `VisionRecognizeResult`（`schema_version` + flatten `RecognizePageResult` + `vlm_hint`）；router 聚合 → hint；零行业绑定（ADR-0008/R8） |
 | 回归 | golden set 永久 | 阈值 ratchet 只升不降（≥8 conflict floor） |
 
 ### agent-invocable 面（ADR-0008）
@@ -897,6 +899,17 @@ feature-OFF 必须仍全绿（`cargo test -p attune-core` / `-p attune-server` /
 `cost`）到 stdout — 任意插件经 subprocess capability 契约（`CapabilityInvocation`）调用、拿
 通用 `RegionResult`，再叠加行业语义。REST `POST /api/v1/ocr/recognize` + CLI 共用 core 单一
 orchestrator `nontext::recognize_page`（成本/质量/遥测单一调优点）。
+
+**I5 in-process capability（W3 #92）**：`nontext::vision_capability::recognize`（capability id
+`vision.recognize`，`SCHEMA_VERSION=1`）是 ADR-0008 的 agent-invocable 暴露面 —— 插件/agent 直接
+在进程内拿同一份 typed `VisionRecognizeResult`（`RecognizePageResult` + `vlm_hint`），无需 REST
+自调、不重造 agent 框架（复用 `recognize_page` + `VlmRouter`，R9）。
+
+**I3 模型矩阵 failover（W3 #92）**：`nontext::vlm_router::VlmRouter` 把单 `VlmProvider` 升级为
+「优先级候选 + `probe()` 健康探测 + 顺序 failover」。primary 失败（provider err / 不健康）→ 切下
+一候选；全失败 → degrade 纯 local（既有 §7 路径）。failover 是顺序而非并发（一次只付一个候选的
+💰，cost contract §8）；一个 gated `VlmEgressToken` 借用复用给每个候选（不 re-gate，出网不绕过
+`gate_vlm_egress`）。`(kind×model)` 失败率聚合驱动 §4.5-F 的 `vlm_hint`。
 
 ### 💰 VLM 路径 — multi-seed + 3-tier 兼容矩阵（ship 前必跑，per §4.5 D + Agent 验证铁律）
 

@@ -37,6 +37,12 @@ pub struct OcrRecognizeResponse {
     /// Page-level warnings surfaced (e.g. a Stage1 inference error), empty on happy path.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub validation_warnings: Vec<String>,
+    /// I4 (spec §5.1): the VLM failure-rate hint surfaced to the UI ("建议切高 tier"). This route
+    /// runs Stage1-3 only (Stage4 VLM escalation is the caller's gated step), so when no VlmRouter
+    /// telemetry has accumulated the hint is empty — we surface the CONTRACT field honestly rather
+    /// than fabricate failure rates for calls that did not happen.
+    #[serde(default)]
+    pub vlm_hint: attune_core::ocr::nontext::vision_capability::VlmHint,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -149,6 +155,8 @@ fn run_recognize(
         engine_status: out.engine_status,
         vlm_escalation: policy,
         validation_warnings: out.validation_warnings,
+        // No router telemetry on this sync Stage1-3 route → empty hint (honest no-data, §5.1).
+        vlm_hint: Default::default(),
     }
 }
 
@@ -205,6 +213,7 @@ mod tests {
             engine_status: EngineStatus::Functional,
             vlm_escalation: VlmEscalationPolicy::Off,
             validation_warnings: vec![],
+            vlm_hint: Default::default(),
         };
         let j = serde_json::to_string(&resp).unwrap();
         assert!(j.contains(r#""local_regions":3"#));
