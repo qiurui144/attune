@@ -22,12 +22,25 @@ use super::{GroundingKind, GroundingRef, Segment, SourceMaterial};
 #[derive(Debug, Clone)]
 pub struct GroundingConfig {
     /// Minimum shared tokens between a segment and a source for the segment to count as
-    /// grounded to that source.
+    /// grounded to that source — the **absolute** path (long-segment / high-overlap case).
     pub min_overlap_tokens: usize,
     /// A segment with fewer than this many content tokens carries no real factual claim
     /// (a connective / framing sentence) and is treated as trivially verified — it cannot
     /// hallucinate a fact it does not assert.
     pub min_claim_tokens: usize,
+    /// **Proportional** grounding path (recall for short, abstractive sentences): a segment
+    /// also grounds if `overlap / segment_tokens ≥ min_overlap_ratio` AND
+    /// `overlap ≥ min_overlap_abs_floor`. A short paraphrase that genuinely restates a source
+    /// point shares a *large fraction* of its own (few) tokens with that source even when the
+    /// absolute count is below `min_overlap_tokens`. The `min_overlap_abs_floor` guard keeps
+    /// the no-fabrication invariant intact: a fabricated fact appears in NO source, so it
+    /// shares at most one incidental token — below the floor — and still lands unverified.
+    /// This raises grounding RECALL without relaxing the fabrication bar (spec §11 risk F:
+    /// the *absolute* threshold is unchanged; this is an additive OR, never a lowering).
+    pub min_overlap_ratio: f32,
+    /// Hard floor on shared tokens for the proportional path. ≥ 2 means a single shared token
+    /// can never ground a segment — the safety guard for the recall path.
+    pub min_overlap_abs_floor: usize,
 }
 
 impl Default for GroundingConfig {
@@ -35,15 +48,48 @@ impl Default for GroundingConfig {
         Self {
             min_overlap_tokens: 3,
             min_claim_tokens: 2,
+            min_overlap_ratio: 0.34,
+            min_overlap_abs_floor: 2,
         }
     }
 }
 
+impl GroundingConfig {
+    /// Does `overlap` (shared tokens) over a segment of `seg_tokens` content tokens count as
+    /// grounded? Absolute path (`≥ min_overlap_tokens`) OR proportional path (a large fraction
+    /// of a short segment's tokens overlap, guarded by `min_overlap_abs_floor`).
+    fn is_grounded(&self, overlap: usize, seg_tokens: usize) -> bool {
+        if overlap >= self.min_overlap_tokens {
+            return true;
+        }
+        if overlap < self.min_overlap_abs_floor || seg_tokens == 0 {
+            return false;
+        }
+        (overlap as f32) / (seg_tokens as f32) >= self.min_overlap_ratio
+    }
+}
+
+/// Fold fullwidth ASCII (`Ａ-Ｚ ０-９` …, U+FF01..U+FF5E) to their halfwidth equivalents and
+/// the ideographic space (U+3000) to a normal space, so a synthesis sentence that uses fullwidth
+/// punctuation/letters still token-matches a halfwidth source (and vice-versa). Recall only — a
+/// fabricated fact still shares no real tokens after folding.
+fn fold_width(s: &str) -> String {
+    s.chars()
+        .map(|c| match c as u32 {
+            0xFF01..=0xFF5E => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            0x3000 => ' ',
+            _ => c,
+        })
+        .collect()
+}
+
 /// Tokenize the same way `chat_reliability` does: ≥3-char ASCII words + 2-gram CJK windows
-/// over the normalized text. Kept in lock-step with `chat_reliability::agent::tokenize`.
+/// over the normalized text. Kept in lock-step with `chat_reliability::agent::tokenize`, with an
+/// extra fullwidth→halfwidth fold (additive recall; does not change the token notion for ASCII /
+/// CJK that is already halfwidth).
 fn tokenize(s: &str) -> HashSet<String> {
     let mut out = HashSet::new();
-    let norm = normalize_text(s);
+    let norm = normalize_text(&fold_width(s));
     for tok in norm.split(|c: char| c.is_whitespace() || c == '-' || c == '/' || c == '_') {
         let t = tok.trim();
         if t.chars().count() >= 3 && t.chars().any(|c| c.is_ascii_alphanumeric()) {
@@ -150,7 +196,7 @@ pub fn ground_segments(
         let mut best: Option<(&SourceMaterial, usize)> = None;
         for (src, toks) in &source_tokens {
             let ov = token_overlap(&seg_tokens, toks);
-            if ov >= cfg.min_overlap_tokens && best.map(|(_, b)| ov > b).unwrap_or(true) {
+            if cfg.is_grounded(ov, seg_tokens.len()) && best.map(|(_, b)| ov > b).unwrap_or(true) {
                 best = Some((src, ov));
             }
         }
@@ -338,6 +384,76 @@ mod tests {
         ));
     }
 
+    // ── proportional-overlap recall path (the grounding uplift) ──
+
+    #[test]
+    fn is_grounded_absolute_path_unchanged() {
+        let cfg = GroundingConfig::default();
+        // overlap ≥ 3 always grounds, regardless of segment length (absolute path).
+        assert!(cfg.is_grounded(3, 100));
+        assert!(cfg.is_grounded(5, 5));
+        // overlap 2 over a LONG segment → ratio 2/100 < 0.34 → not grounded (absolute miss,
+        // proportional miss). The fabrication guard: a long fabricated sentence that shares only
+        // 2 incidental tokens stays unverified.
+        assert!(!cfg.is_grounded(2, 100));
+    }
+
+    #[test]
+    fn is_grounded_proportional_path_recovers_short_paraphrase() {
+        let cfg = GroundingConfig::default();
+        // A short abstractive sentence: 5 content tokens, 2 overlap with the source point.
+        // Absolute path fails (2 < 3) but 2/5 = 0.40 ≥ 0.34 AND 2 ≥ floor(2) → grounded.
+        // This is the exact false-negative class deepseek-chat produced on weak-tier synthesis.
+        assert!(cfg.is_grounded(2, 5));
+    }
+
+    #[test]
+    fn is_grounded_abs_floor_blocks_single_token_fabrication() {
+        let cfg = GroundingConfig::default();
+        // A 1-token incidental overlap can NEVER ground, even on a tiny segment where the ratio
+        // would otherwise pass (1/2 = 0.5 ≥ 0.34). This keeps the no-fabrication invariant: a
+        // fabricated fact that happens to share one common word with a source stays unverified.
+        assert!(!cfg.is_grounded(1, 2));
+        assert!(!cfg.is_grounded(1, 1));
+    }
+
+    #[test]
+    fn proportional_path_grounds_short_cjk_paraphrase() {
+        // GT computed INDEPENDENTLY of ground_segments by tokenizing both sides directly:
+        let seg_text = "索引查询";
+        let src_text = "索引能加快查询";
+        let seg_toks = tokenize(seg_text);
+        let src_toks = tokenize(src_text);
+        let overlap = seg_toks.intersection(&src_toks).count();
+        let cfg = GroundingConfig::default();
+        // Independent GT: overlap is 2 (索引 + 查询), seg has 3 bigrams. Absolute-3 fails (2 < 3),
+        // proportional path: 2/3 ≈ 0.67 ≥ 0.34 AND 2 ≥ floor(2) → SHOULD ground (recall fix).
+        assert_eq!(overlap, 2, "GT: exactly 2 shared bigrams (索引,查询)");
+        assert!(seg_toks.len() >= 3, "GT: segment has ≥3 content bigrams");
+        assert!(overlap < cfg.min_overlap_tokens, "GT: below the old absolute threshold");
+        assert!(cfg.is_grounded(overlap, seg_toks.len()), "GT: proportional path accepts");
+
+        // Now run the production path and confirm the segment grounds, while a fabricated control
+        // ("量子计算将取代经典计算机") sharing nothing stays unverified (no-fabrication held).
+        let mut segs = vec![
+            seg(seg_text, [0, 4]),
+            seg("量子计算将取代经典计算机", [4, 16]),
+        ];
+        let sources = vec![SourceMaterial::new("s1", src_text)];
+        let unverified = ground_segments(&mut segs, &sources, &cfg);
+        assert!(segs[0].verified, "short paraphrase must ground via proportional path");
+        assert!(!segs[1].verified, "fabricated sentence must stay unverified");
+        assert_eq!(unverified, vec![[4, 16]]);
+    }
+
+    #[test]
+    fn fullwidth_folds_to_halfwidth_for_grounding() {
+        // GT independent: fullwidth "ＲＮＮ" and "ＣＮＮ" should token-match the halfwidth source.
+        let a = tokenize("ＲＮＮ model trains slowly");
+        let b = tokenize("rnn model trains slowly");
+        assert_eq!(a, b, "fullwidth latin must fold to halfwidth before tokenizing");
+    }
+
     #[test]
     fn span_located_for_verbatim_segment() {
         let src = "Rust's borrow checker enforces memory safety.";
@@ -384,6 +500,24 @@ mod tests {
                     prop_assert!(e <= src_u16, "offset end {} > source len {}", e, src_u16);
                 }
             }
+        }
+
+        // ④ NO-FABRICATION SAFETY (the property that guards the recall uplift): a segment whose
+        //    alphabet is DISJOINT from the source's can never be marked verified by the
+        //    proportional path. seg uses [a-m], source uses [n-z] — zero shared ASCII words → the
+        //    only way seg verifies is the non-claim branch (no claim asserted). So: verified ⇒
+        //    non-claim. A fabricated fact (which shares no real token) can NOT be grounded.
+        #[test]
+        fn prop_disjoint_alphabet_never_falsely_grounds(
+            seg_text in "[a-m]{3,12}( [a-m]{3,12}){0,6}",
+            src_text in "[n-z]{3,12}( [n-z]{3,12}){0,6}",
+        ) {
+            let sources = vec![SourceMaterial::new("s1", &src_text)];
+            let mut segs = vec![seg(&seg_text, [0, 1])];
+            ground_segments(&mut segs, &sources, &GroundingConfig::default());
+            // No grounding ref may form across disjoint vocabularies, and verified can only be
+            // true via the non-claim (too-few-tokens) branch — never via overlap.
+            prop_assert!(segs[0].grounding.is_empty(), "disjoint vocab must not produce a grounding ref");
         }
 
         // ③ a verified segment has either grounding refs OR is a non-claim (few content

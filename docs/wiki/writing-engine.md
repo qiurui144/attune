@@ -47,8 +47,20 @@
 | draft grounding-precision | **1.000 ± 0.000** | 0.90 |
 | draft fact-consistency | **0.972 ± 0.039** | 0.85 |
 | rewrite fact-preservation | **0.917 ± 0.068** | 0.90 |
+| synthesis (W5) grounding-precision | **0.826 ± 0.038** ⚠ 低于 floor | 0.90 |
+| synthesis (W5) fact-consistency | **1.000 ± 0.000** | 0.85 |
 
-run-log：`rust/reports/runs/<ts>-writing-real-llm-deepseek/run.log`。real-LLM gate 默认
+> **W5 综述 grounding 已知限制（诚实记录，floor 不下调）**：W5 多源综述的 grounding-precision
+> 在 deepseek-v4-flash N=3 实测 **0.826**（经比例重叠召回算法 + 全半角归一从 0.779 提升），
+> 安全不变量 **fact-consistency = 1.000（零编造）** 成立。仍 < 0.90 floor。
+> **根因 = 确定性 token-overlap 校验器对抽象式综述句的召回天花板**，**不是模型能力差**：
+> deepseek-**v4-pro** 同测 **0.816 ± 0.019**，与 flash 持平 → 换更强生成模型无可测增益
+> （印证模型策略 §4.5H）。残余缺口是「语义等价但用词远离原文」的释义句，token-overlap 无法
+> 信用化；彻底闭合需后续增量的 **LLM-judge grounding 步骤**（而非更强生成模型）。在此之前
+> W5 综述标 **Beta / 需 LLM-judge grounding 增量**，floor 0.90 作为该增量必须达到的硬门保留。
+
+run-log：`rust/reports/runs/<ts>-writing-real-llm-deepseek/run.log`（W1/W2）·
+`rust/reports/runs/2026-06-20_synthesis-grounding-uplift/`（W5 综述 N=3）。real-LLM gate 默认
 `#[ignore]`，接 secret-gated CI lane；golden corpus 为人工标注 GT（≥10 真实 + 1 sentinel /
 每能力，**禁 LLM 生成 GT**），阈值 ratchet 只升不降。
 
