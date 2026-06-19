@@ -11,11 +11,16 @@ export type SuggestionCostHint = { tier: 'free' | 'local' | 'cloud'; note: strin
 export type SuggestionCard = {
   id: string;
   signature: string;
-  kind: 'organize' | 'enrich' | 'retrieval' | 'profile';
+  kind: 'organize' | 'enrich' | 'retrieval' | 'profile' | 'connect_source';
   title: string;
   detail: string;
   ref_ids: string[];
-  action_kind: 'open_organize_wizard' | 'open_search' | 'run_skill_evolution' | 'open_profile';
+  action_kind:
+    | 'open_organize_wizard'
+    | 'open_search'
+    | 'run_skill_evolution'
+    | 'open_profile'
+    | 'open_accounts_panel';
   cost_hint: SuggestionCostHint;
 };
 
