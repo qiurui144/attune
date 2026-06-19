@@ -36,6 +36,7 @@ export type View =
   | 'privacy'      // v1.0.6: Privacy dashboard (5 outbound points)
   | 'quota'        // v1.0.7: cloud quota dashboard
   | 'doc-intel'    // doc-intel: compare/summarize/chapters (T-10)
+  | 'writing'      // writing engine: draft/rewrite/outline/synthesis/cite/templates (W1-W6)
   | 'workbench'    // 行业场景直接入口（bypass chat-trigger）
   | 'settings';
 export const currentView = signal<View>('chat');

@@ -11,5 +11,6 @@ export { QuotaView } from './QuotaView';              // v1.0.7: cloud quota das
 export { PrivacyView } from './PrivacyView';          // v1.0.6: Privacy dashboard (5 outbound points)
 export { PrivacyTour } from './PrivacyTour';          // v1.0.6: one-shot welcome modal
 export { DocIntelView } from './DocIntelView';        // doc-intel: compare/summarize/chapters (T-10)
+export { WritingView } from './WritingView';          // writing engine: draft/rewrite/outline/synthesis/cite/templates (W1-W6)
 export { WorkbenchView } from './WorkbenchView';      // 行业场景直接入口（bypass chat-trigger）
 export { SettingsView } from './SettingsView';

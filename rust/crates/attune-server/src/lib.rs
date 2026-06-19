@@ -93,9 +93,16 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/documents/compare", post(routes::documents::compare_docs))
         .route("/api/v1/documents/summarize", post(routes::documents::summarize_doc))
         .route("/api/v1/documents/chapters", post(routes::documents::chapters_doc))
-        // Writing Engine (draft / rewrite) — grounded narrative generation, member-gated tier-3
+        // Writing Engine — grounded narrative generation.
+        //   draft / rewrite / outline(forward) / synthesis — 💰 tier-3, member-gated.
+        //   outline(reverse) / cite / terms / templates — 🆓/⚡ zero-LLM, ungated.
         .route("/api/v1/writing/draft", post(routes::writing::draft_writing))
         .route("/api/v1/writing/rewrite", post(routes::writing::rewrite_writing))
+        .route("/api/v1/writing/outline", post(routes::writing::outline_writing))
+        .route("/api/v1/writing/cite", post(routes::writing::cite_writing))
+        .route("/api/v1/writing/synthesis", post(routes::writing::synthesis_writing))
+        .route("/api/v1/writing/terms", post(routes::writing::terms_writing))
+        .route("/api/v1/writing/templates", get(routes::writing::templates_writing))
         // Ingest + Items + Search
         .route("/api/v1/ingest", post(routes::ingest::ingest))
         .route("/api/v1/feedback", post(routes::feedback::submit_feedback))

@@ -11,6 +11,9 @@
 //!     must not invent facts absent from the sources. Floor ≥ 0.85.
 //!   - **rewrite-fact-preservation** (rewrite) — a rewrite must not drift: no `unverified_spans`
 //!     (drift) AND each must-preserve fact retained. Floor ≥ 0.90.
+//!   - **synthesis grounding-precision / fact-consistency** (W5) — a multi-source synthesis must
+//!     ground each section back to its sources and invent no fact absent from every source. Same
+//!     floors as draft (≥ 0.90 / ≥ 0.85).
 //!
 //! The production `draft()` / `rewrite()` paths are exercised verbatim (schema-guided JSON +
 //! ≤3 retry-validate + few-shot + PII redact + deterministic grounding). `require_llm()` PANICS
@@ -42,6 +45,7 @@ use std::path::PathBuf;
 use attune_core::llm::{LlmProvider, OllamaLlmProvider, OpenAiLlmProvider};
 use attune_core::writing::draft::{draft, DraftRequest};
 use attune_core::writing::rewrite::{rewrite, RewriteOutput, RewriteRequest};
+use attune_core::writing::synthesis::{synthesize, SynthLlms, SynthesisRequest, SynthesisStructure};
 use attune_core::writing::{SourceMaterial, StyleTarget};
 use serde::Deserialize;
 
@@ -136,6 +140,20 @@ struct RewriteCase {
     must_preserve_facts: Vec<String>,
     #[serde(default)]
     forbidden_new_facts: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SynthesisCorpus {
+    cases: Vec<SynthesisCase>,
+}
+#[derive(Debug, Deserialize)]
+struct SynthesisCase {
+    id: String,
+    sources: Vec<GoldenSource>,
+    #[serde(default)]
+    must_ground_terms: Vec<String>,
+    #[serde(default)]
+    forbidden_facts: Vec<String>,
 }
 
 fn corpus_path(dir: &str) -> PathBuf {
@@ -316,6 +334,101 @@ fn rewrite_real_llm_fact_preservation() {
     );
 }
 
+#[test]
+#[ignore = "real LLM; secret/Ollama-gated. Run via the CI secret lane or manually."]
+fn synthesis_real_llm_grounding_and_consistency() {
+    // W5: a multi-source synthesis must ground each section back to its sources and must not
+    // invent facts absent from every source. Same floors as draft (grounding ≥0.90, fact ≥0.85).
+    let llm = require_llm();
+    let text = std::fs::read_to_string(corpus_path("writing_synthesis"))
+        .expect("read writing_synthesis corpus");
+    let corpus: SynthesisCorpus = serde_yaml::from_str(&text).expect("parse synthesis corpus");
+    let n_seeds = seeds();
+    println!(
+        "\n=== WRITING [synthesis] real LLM ({}), {n_seeds} seeds, {} cases ===",
+        model_name(),
+        corpus.cases.len()
+    );
+
+    let mut gp_per_seed = Vec::new();
+    let mut fc_per_seed = Vec::new();
+
+    for seed in 0..n_seeds {
+        let mut verified_factual = 0usize;
+        let mut total_factual = 0usize;
+        let mut consistent_cases = 0usize;
+        for case in &corpus.cases {
+            let sources: Vec<SourceMaterial> = case
+                .sources
+                .iter()
+                .map(|s| SourceMaterial::new(&s.item_id, &s.text))
+                .collect();
+            // One cloud provider drives both the MAP and REDUCE legs (production parity).
+            let llms = SynthLlms {
+                cheap: llm.as_ref(),
+                reasoning: llm.as_ref(),
+            };
+            let req = SynthesisRequest {
+                sources,
+                structure: SynthesisStructure::Thematic,
+                max_sources: 0,
+            };
+            let r = synthesize(&llms, &req)
+                .unwrap_or_else(|e| panic!("[synthesis] case {} err: {e:?}", case.id));
+
+            let mut case_verified = 0usize;
+            let mut case_factual = 0usize;
+            for seg in &r.segments {
+                let is_factual = case
+                    .must_ground_terms
+                    .iter()
+                    .any(|t| seg.text.contains(t.as_str()));
+                if is_factual {
+                    case_factual += 1;
+                    if seg.verified {
+                        case_verified += 1;
+                    }
+                }
+            }
+            verified_factual += case_verified;
+            total_factual += case_factual;
+
+            let consistent = !contains_forbidden(&r.content, &case.forbidden_facts);
+            if consistent {
+                consistent_cases += 1;
+            }
+            println!(
+                "  [seed {seed}] {:<26} factual={case_factual} verified={case_verified} consistent={consistent}",
+                case.id
+            );
+        }
+        let gp = if total_factual == 0 {
+            1.0
+        } else {
+            verified_factual as f64 / total_factual as f64
+        };
+        let fc = consistent_cases as f64 / corpus.cases.len() as f64;
+        println!("  [seed {seed}] grounding-precision={gp:.3} fact-consistency={fc:.3}");
+        gp_per_seed.push(gp);
+        fc_per_seed.push(fc);
+    }
+
+    let (gp_m, gp_s) = mean_std(&gp_per_seed);
+    let (fc_m, fc_s) = mean_std(&fc_per_seed);
+    println!(
+        "\n[RESULT] synthesis grounding-precision={gp_m:.3}±{gp_s:.3} (floor {GROUNDING_PRECISION_FLOOR}) \
+         fact-consistency={fc_m:.3}±{fc_s:.3} (floor {FACT_CONSISTENCY_FLOOR})"
+    );
+    assert!(
+        gp_m >= GROUNDING_PRECISION_FLOOR,
+        "synthesis grounding-precision {gp_m:.3} below floor {GROUNDING_PRECISION_FLOOR} — label min tier in RELEASE.md, do NOT relax floor"
+    );
+    assert!(
+        fc_m >= FACT_CONSISTENCY_FLOOR,
+        "synthesis fact-consistency {fc_m:.3} below floor {FACT_CONSISTENCY_FLOOR}"
+    );
+}
+
 // A non-ignored guard so the corpora are always parseable in CI (catches YAML rot without an
 // LLM). It does NOT call the LLM.
 #[test]
@@ -337,4 +450,16 @@ fn corpora_parse_and_meet_floor_count() {
         rc.cases.len()
     );
     assert!(rc.cases.iter().all(|c| !c.text.trim().is_empty()), "every rewrite case needs text");
+
+    let s = std::fs::read_to_string(corpus_path("writing_synthesis")).expect("read synthesis corpus");
+    let sc: SynthesisCorpus = serde_yaml::from_str(&s).expect("parse synthesis corpus");
+    assert!(
+        sc.cases.len() >= 11,
+        "synthesis golden must have ≥10 real + 1 sentinel = ≥11 cases, got {}",
+        sc.cases.len()
+    );
+    assert!(
+        sc.cases.iter().all(|c| c.sources.len() >= 2),
+        "every synthesis case needs ≥2 sources (it's multi-source synthesis)"
+    );
 }

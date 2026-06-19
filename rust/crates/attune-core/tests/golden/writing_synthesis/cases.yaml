@@ -1,0 +1,115 @@
+# Writing-engine W5 (synthesis) — human-authored golden corpus.
+#
+# GT DERIVATION (Agent 验证铁律 — NEVER agent-generated):
+#   Each case gives ≥2 KB sources (real, general-domain facts) on a shared topic and the human-
+#   labeled ground truth used to score a real-LLM synthesis:
+#     - must_ground_terms: content terms that, if the synthesis states the fact, MUST be traceable
+#       to a source (grounding-precision: the produced section carrying this term must be
+#       `verified` against the sources by the deterministic validator).
+#     - forbidden_facts: facts ABSENT from every source that a faithful synthesis must NOT invent
+#       (fact-consistency: any appearance is a violation).
+#   The scorer (writing_real_llm_gate.rs::synthesis_*) runs the production synthesize() map-reduce
+#   path, grounds the output deterministically, and measures grounding-precision + fact-
+#   consistency. No GT calls synthesize().
+mode: synthesis
+cases:
+  - id: rust-memory-safety
+    sources:
+      - item_id: s1
+        text: "Rust 的所有权系统在编译期检查每个值的生命周期，从而保证内存安全。"
+      - item_id: s2
+        text: "Rust 不使用垃圾回收，依靠所有权与借用规则在编译期管理内存。"
+    must_ground_terms: ["所有权", "编译期", "内存安全"]
+    forbidden_facts: ["运行时垃圾回收", "Rust 由谷歌发明", "2015 年首次发布于火星"]
+
+  - id: transformer-vs-rnn
+    sources:
+      - item_id: s1
+        text: "Transformer 的自注意力机制可以并行处理整个序列。"
+      - item_id: s2
+        text: "RNN 必须按时间步串行计算，难以并行，长序列上训练较慢。"
+    must_ground_terms: ["自注意力", "并行", "RNN"]
+    forbidden_facts: ["Transformer 无需训练数据", "RNN 已被法律禁止"]
+
+  - id: photosynthesis-review
+    sources:
+      - item_id: s1
+        text: "Photosynthesis converts light energy into chemical energy stored in glucose."
+      - item_id: s2
+        text: "During photosynthesis plants take in carbon dioxide and release oxygen."
+    must_ground_terms: ["photosynthesis", "glucose", "oxygen"]
+    forbidden_facts: ["occurs only at night", "produces nitrogen gas", "discovered in 1850"]
+
+  - id: vaccine-mechanism
+    sources:
+      - item_id: s1
+        text: "疫苗让免疫系统接触病原体的无害部分，从而训练免疫应答。"
+      - item_id: s2
+        text: "接种后身体能在日后更快识别并清除真正的病原体。"
+    must_ground_terms: ["疫苗", "免疫", "病原体"]
+    forbidden_facts: ["含有完整活体病毒", "改变接种者 DNA", "百分百永久免疫"]
+
+  - id: climate-greenhouse
+    sources:
+      - item_id: s1
+        text: "Greenhouse gases such as CO2 trap heat in the atmosphere."
+      - item_id: s2
+        text: "Rising greenhouse gas concentrations are linked to global average temperature increases."
+    must_ground_terms: ["greenhouse", "CO2", "temperature"]
+    forbidden_facts: ["caused only by volcanoes", "cools the planet", "banned worldwide in 1990"]
+
+  - id: tcp-vs-udp
+    sources:
+      - item_id: s1
+        text: "TCP 提供可靠、有序的字节流传输，通过确认与重传保证送达。"
+      - item_id: s2
+        text: "UDP 无连接、不保证送达，开销更小，适合实时场景。"
+    must_ground_terms: ["TCP", "UDP", "可靠"]
+    forbidden_facts: ["TCP 比 UDP 更省电", "UDP 已被弃用", "两者都加密"]
+
+  - id: db-index-tradeoff
+    sources:
+      - item_id: s1
+        text: "数据库索引可以显著加快查询，尤其是按索引列过滤时。"
+      - item_id: s2
+        text: "索引会增加写入开销，并占用额外存储空间。"
+    must_ground_terms: ["索引", "查询", "写入"]
+    forbidden_facts: ["索引使数据库永不出错", "索引让写入更快", "索引免费不占空间"]
+
+  - id: solar-vs-wind
+    sources:
+      - item_id: s1
+        text: "Solar power generates electricity from sunlight using photovoltaic panels."
+      - item_id: s2
+        text: "Wind power converts the kinetic energy of moving air into electricity via turbines."
+    must_ground_terms: ["solar", "wind", "electricity"]
+    forbidden_facts: ["both run only at night", "produce no electricity", "use fossil fuels"]
+
+  - id: caffeine-effects
+    sources:
+      - item_id: s1
+        text: "咖啡因是一种中枢神经兴奋剂，可短期提升警觉性。"
+      - item_id: s2
+        text: "摄入过量咖啡因可能导致失眠和心悸。"
+    must_ground_terms: ["咖啡因", "警觉", "失眠"]
+    forbidden_facts: ["咖啡因可治愈感冒", "咖啡因永久提高智商", "完全无副作用"]
+
+  - id: git-branching
+    sources:
+      - item_id: s1
+        text: "Git 分支允许在不影响主线的情况下并行开发新功能。"
+      - item_id: s2
+        text: "合并分支时如有冲突需要手动解决。"
+    must_ground_terms: ["分支", "并行", "合并"]
+    forbidden_facts: ["Git 自动解决所有冲突", "分支会删除主线", "Git 不支持合并"]
+
+  # SENTINEL — neither source mentions any specific number or commercial claim. A faithful
+  # synthesis must NOT invent a market-size / percentage figure under a "write a review" prompt.
+  - id: sentinel-no-invented-stat
+    sources:
+      - item_id: s1
+        text: "电动汽车使用电池而非内燃机提供动力。"
+      - item_id: s2
+        text: "电动汽车在行驶时不产生尾气排放。"
+    must_ground_terms: ["电动汽车", "电池", "排放"]
+    forbidden_facts: ["市场份额达 70%", "续航一千公里", "2030 年全面取代燃油车", "增长 50%"]
