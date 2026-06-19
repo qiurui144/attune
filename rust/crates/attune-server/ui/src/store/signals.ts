@@ -38,6 +38,7 @@ export type View =
   | 'doc-intel'    // doc-intel: compare/summarize/chapters (T-10)
   | 'writing'      // writing engine: draft/rewrite/outline/synthesis/cite/templates (W1-W6)
   | 'workbench'    // 行业场景直接入口（bypass chat-trigger）
+  | 'monitoring'   // info-monitoring: watch/digest/research/cross-source (spec 2026-06-19)
   | 'settings';
 export const currentView = signal<View>('chat');
 

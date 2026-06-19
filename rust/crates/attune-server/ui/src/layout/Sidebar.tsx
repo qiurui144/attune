@@ -341,6 +341,7 @@ const MORE_NAV: NavItem[] = [
   { view: 'office', icon: '📋', labelKey: 'sidebar.nav.office' },
   { view: 'doc-intel', icon: '📄', labelKey: 'sidebar.nav.docintel' }, // T-10: 文档对比/总结/逐章
   { view: 'writing', icon: '✍️', labelKey: 'sidebar.nav.writing' }, // W1-W6: 起草/改写/大纲/综述/引用/模板
+  { view: 'monitoring', icon: '📡', labelKey: 'sidebar.nav.monitoring' }, // info-monitoring (spec 2026-06-19)
   { view: 'marketplace', icon: '🏪', labelKey: 'sidebar.nav.marketplace' },
   { view: 'privacy', icon: '🔐', labelKey: 'sidebar.nav.privacy' }, // v1.0.6
   { view: 'quota', icon: '📊', labelKey: 'sidebar.nav.quota' }, // v1.0.7: 用量配额仪表板

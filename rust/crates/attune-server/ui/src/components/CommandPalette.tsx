@@ -37,6 +37,7 @@ function buildViewShortcuts(): SearchResult[] {
     { kind: 'view', id: 'v-skills',      title: `🧠 ${t('cmd.view.skills')}`,       action: () => (currentView.value = 'skills') },
     { kind: 'view', id: 'v-office',      title: `📋 ${t('cmd.view.office')}`,       action: () => (currentView.value = 'office') },
     { kind: 'view', id: 'v-docintel',    title: `📄 ${t('cmd.view.docintel')}`,     action: () => (currentView.value = 'doc-intel') },
+    { kind: 'view', id: 'v-monitoring',  title: `📡 ${t('cmd.view.monitoring')}`,   action: () => (currentView.value = 'monitoring') },
     { kind: 'view', id: 'v-marketplace', title: `🏪 ${t('cmd.view.marketplace')}`,  action: () => (currentView.value = 'marketplace') },
     { kind: 'view', id: 'v-privacy',     title: `🔐 ${t('cmd.view.privacy')}`,      action: () => (currentView.value = 'privacy') },
     { kind: 'view', id: 'v-quota',       title: `📊 ${t('cmd.view.quota')}`,        action: () => (currentView.value = 'quota') },

@@ -19,6 +19,7 @@ import {
   DocIntelView,
   WritingView,
   WorkbenchView,
+  MonitoringView,
   SettingsView,
 } from '../views';
 import { currentView } from '../store/signals';
@@ -58,6 +59,7 @@ export function MainShell(): JSX.Element {
         {view === 'doc-intel' && <DocIntelView />}
         {view === 'writing' && <WritingView />}
         {view === 'workbench' && <WorkbenchView />}
+        {view === 'monitoring' && <MonitoringView />}
         {view === 'settings' && <SettingsView />}
       </main>
       <DrawerHost />

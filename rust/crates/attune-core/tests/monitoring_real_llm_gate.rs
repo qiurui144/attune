@@ -170,6 +170,69 @@ fn deep_research_synthesis_real_llm() {
     assert!(mean >= 0.75, "deep-research recall floor 0.75, got {mean:.3} (label tier in RELEASE, do NOT relax)");
 }
 
+// ── Gate C: cross-source verification — recall + grounding + conflict detect ─
+
+#[test]
+#[ignore = "requires real LLM — openai_compat (DeepSeek) via env, or Ollama"]
+fn cross_source_verification_real_llm() {
+    use attune_core::monitoring::deep_research::Verification;
+
+    let llm = require_llm();
+    let n_seeds = seeds();
+    println!("\n=== GATE C: cross-source verification — {} ({n_seeds} seeds) ===", model_name());
+
+    // Two distinct sources state the SAME fact in DIFFERENT words (must cluster → confirmed),
+    // plus one independent single-source fact (must stay single). This is exactly what the
+    // deterministic exact-title path CANNOT do, so it isolates the LLM semantic step.
+    let docs = vec![
+        ResearchDoc { kind: SourceKind::Vault, reference: "item-1".into(),
+            title: "RVV ratified".into(),
+            snippet: "The RVV 1.0 vector extension was ratified this week.".into() },
+        ResearchDoc { kind: SourceKind::Web, reference: "https://lwn.net/x".into(),
+            title: "RISC-V finalizes vectors".into(),
+            snippet: "RISC-V International has finalized the 1.0 vector extension specification.".into() },
+        ResearchDoc { kind: SourceKind::Vault, reference: "item-2".into(),
+            title: "GCC 14 autovec".into(),
+            snippet: "GCC 14 adds RISC-V autovectorization, unrelated to ratification.".into() },
+    ];
+    let n_docs = docs.len();
+    let opts = ResearchOpts::default();
+
+    // recall = (found a confirmed multi-source claim) ; grounding = every claim's sources are real.
+    let real_refs: std::collections::HashSet<&str> =
+        docs.iter().map(|d| d.reference.as_str()).collect();
+
+    let mut recall_per_seed = Vec::new();
+    let mut all_grounded = true;
+    let mut conflict_false_positive = false;
+    for seed in 0..n_seeds {
+        let report = DeepResearch.run("RISC-V vector ratification", &docs, &opts, Some(llm.as_ref()));
+        // grounding: every source reference in every claim must be a real doc reference.
+        let grounded = report.claims.iter().all(|c| {
+            !c.sources.is_empty() && c.sources.iter().all(|s| real_refs.contains(s.reference.as_str()))
+        });
+        all_grounded &= grounded;
+        // recall: did it confirm the cross-worded ratification fact as multi-source?
+        let confirmed_multi = report.claims.iter().any(|c| {
+            c.verification == Verification::MultiSourceConfirmed && c.sources.len() >= 2
+        });
+        // these sources genuinely agree → a 'conflicting' verdict here is a false positive.
+        if report.claims.iter().any(|c| c.verification == Verification::Conflicting) {
+            conflict_false_positive = true;
+        }
+        let recall = if confirmed_multi { 1.0 } else { 0.0 };
+        recall_per_seed.push(recall);
+        // grounding-floor on doc-index range is structural (validator), so refs are always in-range;
+        // n_docs printed for context.
+        println!("  seed {seed}: grounded={grounded} confirmed_multi={confirmed_multi} (n_docs={n_docs})");
+    }
+    let (mean, std) = mean_std(&recall_per_seed);
+    println!("  cross-source confirm-recall mean={mean:.3} std={std:.3}");
+    assert!(all_grounded, "every claim's sources must trace to a real doc (grounding-precision = 1.00)");
+    assert!(!conflict_false_positive, "agreeing sources must not be labeled conflicting (false-positive guard)");
+    assert!(mean >= 0.80, "cross-source confirm-recall floor 0.80, got {mean:.3} (label tier in RELEASE, do NOT relax)");
+}
+
 /// Extract every `[n]` integer ref from markdown; true if all are in 1..=max.
 fn refs_in_range(md: &str, max: usize) -> bool {
     let mut ok = true;
