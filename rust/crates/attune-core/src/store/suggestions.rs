@@ -82,6 +82,30 @@ impl Store {
         Ok(out)
     }
 
+    /// 聚合反复落空的查询:对 search_miss 信号按 query 分组计数,返回 count ≥
+    /// `min_count` 的前 `limit` 个(降序)。零成本纯 SQL,供建议引擎 enrich 规则用。
+    ///
+    /// 空 query 不计(record_signal_event 的非 search_miss kind query 为空)。
+    pub fn aggregate_missed_queries(
+        &self,
+        min_count: u32,
+        limit: usize,
+    ) -> Result<Vec<crate::suggestions::MissedQuery>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT query, COUNT(*) AS c FROM skill_signals \
+             WHERE kind = 'search_miss' AND query <> '' \
+             GROUP BY query HAVING c >= ?1 ORDER BY c DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![min_count as i64, limit as i64], |r| {
+            Ok(crate::suggestions::MissedQuery {
+                query: r.get::<_, String>(0)?,
+                miss_count: r.get::<_, i64>(1)?.max(0) as u32,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| e.into())
+    }
+
     /// 清理超过 `days_threshold` 天的 dismiss 记录(signature 会随信号变化失效,
     /// 长期保留无意义)。mute 永久不清。返回删除行数。
     pub fn purge_dismissed_suggestions_older_than_days(&self, days_threshold: u32) -> Result<usize> {
@@ -187,6 +211,28 @@ mod tests {
         assert_eq!(removed, 1);
         let got = s.list_dismissed_signatures().unwrap();
         assert_eq!(got, vec!["fresh"]);
+    }
+
+    #[test]
+    fn aggregate_missed_queries_groups_and_filters() {
+        let s = store();
+        // "rust gc" 落空 3 次,"async" 1 次。
+        for _ in 0..3 {
+            s.record_skill_signal("rust gc", 0, false).unwrap();
+        }
+        s.record_skill_signal("async", 0, false).unwrap();
+        // 一条非 search_miss 信号(空 query)不该混进来。
+        s.record_signal_event("doc_create", "item-1", None).unwrap();
+
+        let got = s.aggregate_missed_queries(3, 10).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].query, "rust gc");
+        assert_eq!(got[0].miss_count, 3);
+
+        // min_count=1 → 两条都出,降序。
+        let all = s.aggregate_missed_queries(1, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].query, "rust gc"); // 3 > 1
     }
 
     #[test]
