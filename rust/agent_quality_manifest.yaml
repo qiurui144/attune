@@ -121,6 +121,31 @@ gates:
       falls below threshold, label the agent Beta in RELEASE.md — do NOT relax
       the threshold here (only-up ratchet).
 
+  # ── attune-core OSS ai_annotation real-LLM gate (2026-06-19 reliability backfill) ──
+  # agent-capabilities.md §5.2 gap #1: the ai_annotation plugin (risk/outdated/
+  # highlights/questions) was OSS attune's WEAKEST real-LLM gate (1 ignore +
+  # silent-pass on missing model + Highlights-only + no F1/ratchet). This gate adds
+  # 4 per-angle real-LLM legs (micro-F1 over human-authored holdout, N>=3) and is
+  # wired into BOTH the secret-gated PR lane (ci.yml) and nightly-real-llm.yml.
+  # claims the tests/golden/ai_annotation/ dir for the NEW-AGENT guard.
+  - id: ai_annotation
+    plugin: oss-core
+    tier: llm
+    crate: attune-core
+    test_name: ai_annotation_real_llm_gate
+    metric_kind: micro_f1
+    threshold: 0.50            # per-angle micro-F1 floor over human GT — real measured floor
+    ratchet_baseline: 0.50
+    fixture_min: 10            # >= 10 holdout cases per angle (risk/outdated/highlights/questions)
+    ignored: true              # requires a real model (DeepSeek/DashScope/Ollama)
+    ci: secret-gated           # ci.yml real-llm-secret-gated + nightly-real-llm.yml
+    note: >
+      4 angles share generate_annotations (schema-guided + retry-validate + few-shot
+      + PII redact). Real DeepSeek N=3: highlights 0.735 / outdated 0.826 / questions
+      0.544 / risk 0.553 (all >= 0.50; reports/runs/20260619_ai-annotation-deepseek).
+      Silent-pass fixed: require_llm() panics when no model reachable. Per Agent
+      验证铁律: below floor → label Beta in RELEASE.md, do NOT relax the floor.
+
   # ── attune-server office engine gates (machine-checkable, PR lane) ────────
   # Numeric red lines; real PP-OCR / whisper.cpp engines over fixtures (no LLM).
   # Recorded at the STRICTEST scene/lang red line (audit :62-67, :198-245).
@@ -175,4 +200,8 @@ ignore_baseline:
   # 2026-06-11 re-baselined 43→46: non-text recognition real-model smokes (layout
   # ONNX + CLI recognize) + doc-intel real-LLM lanes ×3 + documents_member_gate
   # real-LLM leg — all env-gated real-model/real-LLM lanes, NOT failure-skips.
-  attune-core: 46
+  # 2026-06-19 re-baselined 46→51: ai_annotation 4-angle real-LLM gate (+4 #[ignore])
+  # — the reliability backfill closing agent-capabilities.md §5.2 gap #1; all 4 are
+  # env-gated real-LLM legs (DeepSeek/DashScope/Ollama), NOT failure-skips. Observed
+  # was 47 pre-change (within the 46+2 budget); +4 → 51, so the ceiling is raised to 51.
+  attune-core: 51
