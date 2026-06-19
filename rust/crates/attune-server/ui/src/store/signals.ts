@@ -37,6 +37,7 @@ export type View =
   | 'quota'        // v1.0.7: cloud quota dashboard
   | 'doc-intel'    // doc-intel: compare/summarize/chapters (T-10)
   | 'workbench'    // 行业场景直接入口（bypass chat-trigger）
+  | 'monitoring'   // info-monitoring: watch/digest/research/cross-source (spec 2026-06-19)
   | 'settings';
 export const currentView = signal<View>('chat');
 

@@ -18,6 +18,7 @@ import {
   QuotaView,
   DocIntelView,
   WorkbenchView,
+  MonitoringView,
   SettingsView,
 } from '../views';
 import { currentView } from '../store/signals';
@@ -56,6 +57,7 @@ export function MainShell(): JSX.Element {
         {view === 'quota' && <QuotaView />}
         {view === 'doc-intel' && <DocIntelView />}
         {view === 'workbench' && <WorkbenchView />}
+        {view === 'monitoring' && <MonitoringView />}
         {view === 'settings' && <SettingsView />}
       </main>
       <DrawerHost />

@@ -12,4 +12,5 @@ export { PrivacyView } from './PrivacyView';          // v1.0.6: Privacy dashboa
 export { PrivacyTour } from './PrivacyTour';          // v1.0.6: one-shot welcome modal
 export { DocIntelView } from './DocIntelView';        // doc-intel: compare/summarize/chapters (T-10)
 export { WorkbenchView } from './WorkbenchView';      // 行业场景直接入口（bypass chat-trigger）
+export { MonitoringView } from './MonitoringView';    // info-monitoring: watch/digest/research/cross-source (spec 2026-06-19)
 export { SettingsView } from './SettingsView';
