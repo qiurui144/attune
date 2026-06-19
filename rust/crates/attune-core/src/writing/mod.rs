@@ -40,13 +40,24 @@
 //! injection instructions ([`source_has_injection_instruction`]) **before** any model
 //! call so a poisoned source cannot steer generation or fabricate citations.
 
+pub mod cite;
 pub mod draft;
 pub mod grounding;
+pub mod outline;
 pub mod rewrite;
+pub mod synthesis;
+pub mod templates;
 
 use serde::{Deserialize, Serialize};
 
+pub use cite::{build_citations, find_inline_anchors, CiteError, CiteStyle, Citation, InlineAnchor, SourceMeta};
 pub use grounding::{ground_segments, source_has_injection_instruction, GroundingConfig};
+pub use outline::{outline_forward, outline_reverse, OutlineNode, OutlineResult};
+pub use synthesis::{synthesize, SynthLlms, SynthesisRequest, SynthesisStructure};
+pub use templates::{
+    fill_template, FillResult, GeneralTemplate, RedLine, TemplateRegistry, WorkedExample,
+    WritingTemplate, OSS_TEMPLATE_IDS,
+};
 
 use crate::document_intelligence::token_bill::TokenBill;
 
@@ -61,6 +72,8 @@ pub enum WritingMode {
     Draft,
     /// W2 — rewrite/polish selected text (tone/length/audience), preserving facts.
     Rewrite,
+    /// W5 — multi-source synthesis / literature review.
+    Synthesis,
 }
 
 /// Where a generated segment's facts come from (grounding — a first-class citizen).
