@@ -180,6 +180,7 @@ pub mod tag_index;
 pub mod taxonomy;
 pub mod vault;
 pub mod vectors;
+pub mod writing;
 pub mod skill_evolution;
 pub mod suggestions;  // 零成本主动建议引擎(确定性信号→规则→卡;编译期 no-LLM 守卫)
 
