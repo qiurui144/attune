@@ -12,6 +12,7 @@ mod queue;
 mod history;
 mod conversations;
 mod signals;
+mod suggestions;         // 建议卡 dismiss + per-kind mute 持久化(零成本建议引擎 A1)
 mod chunk_summaries;
 mod annotations;
 mod organization;        // 文件夹一键整理:organization_proposals 缓存 + 加密 CRUD + TTL
@@ -846,6 +847,7 @@ impl Store {
         Self::migrate_chunk_summaries_deepsum_strategy(conn)?;
         Self::migrate_organization_proposals(conn)?;
         Self::migrate_memory_migrations(conn)?;
+        Self::migrate_suggestions(conn)?;
         Self::ensure_schema_version(conn)?;
         Ok(())
     }
@@ -864,6 +866,7 @@ impl Store {
         Self::migrate_memories_multilayer(&conn)?;
         Self::migrate_organization_proposals(&conn)?;
         Self::migrate_memory_migrations(&conn)?;
+        Self::migrate_suggestions(&conn)?;
         Self::ensure_schema_version(&conn)?;
         Ok(Self { conn })
     }
