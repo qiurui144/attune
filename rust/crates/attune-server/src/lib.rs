@@ -322,6 +322,31 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/sources/rss/feeds/{id}/poll",
             post(routes::rss::poll_feed_now),
         )
+        // 信息监控闭环 —— watch / digest / triage / 问答 / 深度研究 (spec 2026-06-19)
+        .route("/api/v1/monitoring/watches", get(routes::watches::list_watches))
+        .route("/api/v1/monitoring/watches", post(routes::watches::create_watch))
+        .route(
+            "/api/v1/monitoring/watches/{id}",
+            axum::routing::patch(routes::watches::patch_watch),
+        )
+        .route(
+            "/api/v1/monitoring/watches/{id}",
+            delete(routes::watches::delete_watch),
+        )
+        .route(
+            "/api/v1/monitoring/watches/{id}/hits",
+            get(routes::watches::list_hits),
+        )
+        .route(
+            "/api/v1/monitoring/watches/{id}/digest",
+            post(routes::watches::trigger_digest),
+        )
+        .route(
+            "/api/v1/monitoring/watches/{id}/ask",
+            post(routes::watches::ask_watch),
+        )
+        .route("/api/v1/monitoring/scan", post(routes::watches::scan_now))
+        .route("/api/v1/monitoring/research", post(routes::watches::research))
         .route("/api/v1/index/unbind", delete(routes::index::unbind_directory))
         .route("/api/v1/index/status", get(routes::index::index_status))
         // File upload（multipart body limit 匹配 MAX_UPLOAD_BYTES 100MB；

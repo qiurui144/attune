@@ -167,6 +167,7 @@ pub mod redacting_llm;
 pub mod platform;
 pub mod memory_consolidation;
 pub mod memory;
+pub mod monitoring;  // 信息监控闭环: watch / digest / triage / dedup / deep-research (spec 2026-06-19)
 pub mod project_recommender;
 pub mod queue;
 pub mod backup;

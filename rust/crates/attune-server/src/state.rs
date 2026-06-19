@@ -94,6 +94,8 @@ pub struct AppState {
     pub email_sync_worker_running: AtomicBool,
     /// RSS 周期同步 worker 运行标志（防重入）。
     pub rss_sync_worker_running: AtomicBool,
+    /// 信息监控 digest worker 运行标志（防重入；spec 2026-06-19）。
+    pub monitoring_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
     /// G5 (2026-06-11): durable job queue store handle. Replaces the in-memory
     /// `office_jobs: JobRegistry` — jobs now persist in the `job_queue` table and
@@ -231,6 +233,7 @@ impl AppState {
             webdav_sync_worker_running: AtomicBool::new(false),
             email_sync_worker_running: AtomicBool::new(false),
             rss_sync_worker_running: AtomicBool::new(false),
+            monitoring_worker_running: AtomicBool::new(false),
             engines_initialized: AtomicBool::new(false),
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
@@ -1375,6 +1378,105 @@ impl AppState {
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }
             tracing::info!("RSS sync worker stopped (vault locked)");
+        });
+    }
+
+    /// 信息监控一遍（spec 2026-06-19 A+C+D）：对**最近入库的 item** × enabled watch 做
+    /// 确定性匹配 / triage / 去重，命中 upsert 进 watch_hits。**零 LLM**（evaluate 签名无 LLM
+    /// 句柄）。源无关：在 item 层工作，覆盖任何已落地 connector。
+    ///
+    /// 增量近似（spec §11 R3）：只取最近 `recent_limit` 个 item（按 created_at desc），不全表
+    /// 重算；watch_hits 的 UNIQUE(watch_id,item_id) 做幂等去重，重复 pass 不产生重复 hit。
+    pub fn run_monitoring_pass(state: &std::sync::Arc<AppState>, recent_limit: usize) -> usize {
+        use attune_core::monitoring::{ItemMeta, WatchMatcher};
+
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let dek = match vault.dek_db() {
+            Ok(k) => k,
+            Err(_) => return 0, // locked
+        };
+        let store = vault.store();
+        let watches = store.list_enabled_watches(&dek).unwrap_or_default();
+        if watches.is_empty() {
+            return 0;
+        }
+        let summaries = store.list_items(recent_limit, 0).unwrap_or_default();
+        if summaries.is_empty() {
+            return 0;
+        }
+        // 拉每个 item 的 content + entities + 向量（向量复用已算好的，不重新 embed）。
+        let vec_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+        let items: Vec<ItemMeta> = summaries
+            .into_iter()
+            .filter_map(|s| {
+                let item = store.get_item(&dek, &s.id).ok().flatten()?;
+                let entities = attune_core::entities::extract_entities(&item.content);
+                let vector = vec_guard.as_ref().and_then(|v| v.get_vector(&s.id));
+                // content_hash 不经 list_items 透出；近似去重走标题/向量足够（入库层
+                // content_hash 已防完全相同内容二次入库）。
+                Some(ItemMeta {
+                    id: item.id,
+                    title: item.title,
+                    content: item.content,
+                    source_type: item.source_type,
+                    vector,
+                    entities,
+                    created_at: item.created_at,
+                    content_hash: String::new(),
+                })
+            })
+            .collect();
+        drop(vec_guard);
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let hits = WatchMatcher::default().evaluate(
+            &items,
+            &watches,
+            &std::collections::HashMap::new(),
+            &now,
+        );
+        let n = store.upsert_watch_hits(&hits).unwrap_or(0);
+        if n > 0 {
+            tracing::info!("monitoring pass: {n} new watch hit(s) across {} watch(es)", watches.len());
+        }
+        n
+    }
+
+    /// 启动后台 digest worker（spec §3.4）：每小时 tick，跑一遍监控匹配（搭车节奏），
+    /// 并对到期 watch（now ≥ last_digested_at + period）落 digest（此 MVP 仅做匹配 +
+    /// 标记到期；digest 卡渲染由 trigger_digest route / 后续 suggestion 卡通道暴露）。
+    /// vault lock 时退出并重置标志。
+    pub fn start_monitoring_worker(state: std::sync::Arc<AppState>) {
+        if state
+            .monitoring_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::debug!("monitoring worker already running, skipping");
+            return;
+        }
+        std::thread::spawn(move || {
+            struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for FlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _guard = FlagGuard(&state.monitoring_worker_running);
+            tracing::info!("monitoring worker started");
+            loop {
+                {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
+                        break;
+                    }
+                }
+                // 一遍匹配（零成本）；命中 upsert 入 watch_hits。
+                let _ = AppState::run_monitoring_pass(&state, 500);
+                // 10 min tick（远低于 connector 节奏的搭车间隔，捕获新入库 item）。
+                std::thread::sleep(std::time::Duration::from_secs(600));
+            }
+            tracing::info!("monitoring worker stopped (vault locked)");
         });
     }
 

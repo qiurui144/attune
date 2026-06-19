@@ -39,6 +39,7 @@ pub use agent_state::{AgentStateKind, AgentStateRow};
 pub mod state_migration;  // ACP-6 Task 3: learned-state migration + orphan quarantine (§2.3)
 pub use state_migration::{MigratedRow, MigrationReport, MigrationStep, OrphanRow};
 pub mod job_queue;        // G5: durable multi-kind job queue (generalizes reindex_queue)
+pub mod watches;          // info-monitoring loop: watches / watch_hits CRUD (spec 2026-06-19)
 pub use job_queue::RecoverSummary;
 
 pub use types::*;
@@ -749,6 +750,46 @@ CREATE TABLE IF NOT EXISTS agent_state_orphans (
     detected_at    TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (agent_id, plugin_id, state_kind, schema_version)
 );
+
+-- 信息监控闭环 (spec 2026-06-19-info-monitoring-loop §3.2)。纯追加表：
+-- 老 vault 下次 open 自动获得空表，SCHEMA_VERSION 不 bump。无 watch = 空表 = 当前行为。
+-- anchor_vec_enc 是 dek 加密的 anchor 向量 BLOB（语义 anchor，与 items 同加密模型）；
+-- NULL = 纯关键词/实体匹配。keywords/entities/source_ids/source_weights 走 JSON 文本列。
+CREATE TABLE IF NOT EXISTS watches (
+    id                   TEXT PRIMARY KEY,
+    label                TEXT NOT NULL DEFAULT '',
+    keywords_json        TEXT NOT NULL DEFAULT '[]',
+    entities_json        TEXT NOT NULL DEFAULT '[]',
+    anchor_text          TEXT NOT NULL DEFAULT '',
+    anchor_vec_enc       BLOB,
+    source_ids_json      TEXT NOT NULL DEFAULT '[]',
+    match_threshold      REAL NOT NULL DEFAULT 0.55,
+    source_weights_json  TEXT NOT NULL DEFAULT '{}',
+    digest_period        TEXT NOT NULL DEFAULT 'weekly',
+    llm_summary          INTEGER NOT NULL DEFAULT 0,
+    notify               INTEGER NOT NULL DEFAULT 0,
+    last_digested_marker TEXT,
+    last_digested_at     TEXT,
+    enabled              INTEGER NOT NULL DEFAULT 1,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_watches_enabled ON watches(enabled);
+
+-- watch 命中（去重后），供 digest 聚合 + triage 排序。
+-- UNIQUE(watch_id,item_id) 是去重防线；digested 标志做跨时间去重（已 digest 不重推）。
+CREATE TABLE IF NOT EXISTS watch_hits (
+    id           TEXT PRIMARY KEY,
+    watch_id     TEXT NOT NULL,
+    item_id      TEXT NOT NULL,
+    score        REAL NOT NULL,
+    reasons_json TEXT NOT NULL DEFAULT '[]',
+    dedup_group  TEXT,
+    digested     INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL,
+    UNIQUE(watch_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_watch_hits_watch_digested ON watch_hits(watch_id, digested);
 "#;
 
 pub struct Store {
