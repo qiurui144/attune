@@ -180,6 +180,7 @@ pub mod tag_index;
 pub mod taxonomy;
 pub mod vault;
 pub mod vectors;
+pub mod writing;
 pub mod skill_evolution;
 
 pub mod cost;

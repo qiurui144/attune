@@ -91,6 +91,12 @@ pub async fn vault_guard(
         // (routes/documents.rs::resolve_doc). Bypassing here lets the stronger member-gate run
         // and keeps zero-cost text ops usable pre-unlock (mirrors the chat/search eval bypass).
         || path.starts_with("/api/v1/documents")
+        // /api/v1/writing/* — writing-engine (draft/rewrite). Same rationale as documents:
+        // inline `extraSources` ops + the member-gate (403 membership-required for unpaid) must
+        // work WITHOUT an unlocked vault; the handler enforces `vault-locked` itself only when a
+        // request carries `item_ids` that need the DEK (routes/writing.rs::load_sources).
+        // Bypassing here lets the stronger member-gate + privacy-gate run pre-unlock.
+        || path.starts_with("/api/v1/writing")
         // memory import: the handler itself rejects sealed/locked vaults with a
         // user-actionable 400 `vault-not-ready` ("先建库并解锁") instead of the
         // guard's generic 403; bypass here so that more specific guidance reaches

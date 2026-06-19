@@ -1,0 +1,91 @@
+# Writing-engine W2 (rewrite) — human-authored golden corpus.
+#
+# GT DERIVATION (Agent 验证铁律 — NEVER agent-generated):
+#   Each case gives an original text + a style target. The ground truth scores
+#   fact-PRESERVATION: a faithful rewrite changes wording only, never facts.
+#     - must_preserve_facts: each entry is a "|"-separated VARIANT SET — the fact is preserved
+#       if the rewrite contains ANY accepted surface form. This is deliberate: a faithful
+#       rewrite may legitimately paraphrase or translate a term (e.g. "涨"→"上升",
+#       "caffeine"→"咖啡因") while still conveying the same fact, so an exact-substring check
+#       would wrongly penalise correct rewrites. Variants are derived by a human from the
+#       original's meaning, NOT by running the model.
+#     - forbidden_new_facts: facts ABSENT from the original that a faithful rewrite must NOT
+#       introduce (fact-precision: any appearance is a fabrication violation).
+#   The scorer runs the production rewrite() narrative path and measures
+#   rewrite-fact-preservation = (no forbidden new fact) AND (every must-preserve variant-set
+#   matched). No GT calls rewrite().
+mode: rewrite
+cases:
+  - id: casual-to-formal
+    text: "这个方案我觉得还行吧，编译期能保证内存安全，可能可以试试。"
+    tone: "formal"
+    must_preserve_facts: ["编译期|编译阶段|编译时", "内存安全"]
+    forbidden_new_facts: ["运行时", "性能提升三倍", "已通过审批"]
+
+  - id: shorten-meeting
+    text: "我们的项目评审会议原定在本周五下午三点举行，地点是 A 楼 301 会议室，请大家务必准时参加。"
+    length: "shorter"
+    must_preserve_facts: ["周五", "301"]
+    forbidden_new_facts: ["改到周一", "线上举行", "取消"]
+
+  - id: expert-to-beginner
+    text: "TCP 三次握手通过 SYN、SYN-ACK、ACK 三个报文建立可靠连接。"
+    audience: "beginner"
+    must_preserve_facts: ["三次握手|三次|三步", "连接"]
+    forbidden_new_facts: ["四次握手", "UDP", "加密"]
+
+  - id: polish-email
+    text: "嗨，那个事儿我搞定了，后端认证模块写完了，明天给你看。"
+    tone: "professional"
+    must_preserve_facts: ["认证"]
+    forbidden_new_facts: ["已上线", "出现故障", "需要加班"]
+
+  - id: tighten-econ
+    text: "在市场里啊，如果想买的人比能卖的多，那价格就会往上涨，反过来就会跌。"
+    tone: "academic"
+    must_preserve_facts: ["价格", "涨|上升|上涨|升高", "跌|下降|下跌|降低"]
+    forbidden_new_facts: ["政府定价", "通货膨胀率为百分之三", "与供需无关"]
+
+  - id: lengthen-note
+    text: "光合作用把光能变成化学能，存进葡萄糖里。"
+    length: "longer"
+    must_preserve_facts: ["光合作用", "化学能", "葡萄糖"]
+    forbidden_new_facts: ["只在夜间", "产生氮气", "1990 年发现"]
+
+  - id: en-formal
+    text: "the caffeine thing basically blocks adenosine so you feel less sleepy."
+    tone: "formal"
+    must_preserve_facts: ["caffeine|咖啡因|Caffeine", "adenosine|腺苷|Adenosine"]
+    forbidden_new_facts: ["cures insomnia", "is a vitamin", "lowers blood pressure"]
+
+  - id: en-concise
+    text: "A git commit, in essence, is a thing that records a complete snapshot of all of the changes that you have staged in your repository at a given point in time."
+    length: "shorter"
+    must_preserve_facts: ["commit", "snapshot|快照"]
+    forbidden_new_facts: ["deletes history", "needs network", "auto-pushes"]
+
+  - id: tone-down-claim
+    text: "我们的产品在编译期保证内存安全，这是一个核心优势。"
+    audience: "expert"
+    must_preserve_facts: ["编译期|编译阶段|编译时", "内存安全"]
+    forbidden_new_facts: ["市场第一", "零 bug", "已获专利"]
+
+  - id: simplify-vaccine
+    text: "疫苗通过让免疫系统接触病原体的无害部分来进行训练，从而使身体日后能识别并对抗真正的病原体。"
+    audience: "beginner"
+    must_preserve_facts: ["疫苗", "免疫", "病原体|病菌|病原|病毒"]
+    forbidden_new_facts: ["含有完整活体病毒", "永久百分百免疫", "改变 DNA"]
+
+  - id: status-formal
+    text: "这周后端把用户认证做完了，前端登录页也好了，下周开始集成测试。"
+    tone: "formal"
+    must_preserve_facts: ["认证", "登录", "集成测试|集成"]
+    forbidden_new_facts: ["项目已上线", "预算超支", "延期"]
+
+  # SENTINEL — the original asserts NO numeric figure; a faithful "make it punchier" rewrite
+  # must not invent one. Catches the rewrite path fabricating facts under a vague style prompt.
+  - id: sentinel-no-invented-number
+    text: "本季度公司发布了新产品并扩展了销售团队。"
+    tone: "punchy"
+    must_preserve_facts: ["新产品|产品", "销售|团队"]
+    forbidden_new_facts: ["营收一千万", "增长百分之五十", "增长 50%", "营收 1000 万"]

@@ -48,4 +48,5 @@ pub mod upload;
 pub mod vault;
 pub mod version;
 pub mod web_search_cache;
+pub mod writing;
 pub mod ws;

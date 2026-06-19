@@ -1,0 +1,112 @@
+# Writing-engine W1 (draft) — human-authored golden corpus.
+#
+# GT DERIVATION (Agent 验证铁律 — NEVER agent-generated):
+#   Each case gives an outline + KB sources (real, general-domain facts) and the
+#   human-labeled ground truth used to score a real-LLM draft:
+#     - must_ground_terms: content terms that, if the model writes the fact, MUST be
+#       traceable to a source (used by grounding-precision: the produced segment carrying
+#       this term must be `verified` against the sources).
+#     - forbidden_facts: specific facts ABSENT from the sources that a faithful draft must
+#       NOT invent (used by fact-consistency: if any appears in the output it is a violation).
+#   The scorer (writing_real_llm_gate.rs) runs the production draft() path, grounds the
+#   output deterministically, and measures grounding-precision (verified factual segments /
+#   all factual segments) + fact-consistency (1 - forbidden-fact hits). No GT calls draft().
+mode: draft
+cases:
+  - id: rust-ownership
+    outline: "解释 Rust 所有权如何保证内存安全"
+    sources:
+      - item_id: rust-book
+        text: "Rust 的所有权系统在编译期检查每个值的生命周期，从而在不使用垃圾回收的情况下保证内存安全。"
+    must_ground_terms: ["所有权", "编译期", "内存安全"]
+    forbidden_facts: ["运行时垃圾回收", "Rust 由微软开发", "2005 年"]
+
+  - id: photosynthesis
+    outline: "Summarize how photosynthesis works"
+    sources:
+      - item_id: bio-notes
+        text: "Photosynthesis converts light energy into chemical energy stored in glucose, using carbon dioxide and water, releasing oxygen."
+    must_ground_terms: ["photosynthesis", "chemical energy", "glucose"]
+    forbidden_facts: ["discovered in 1990", "occurs only at night", "produces nitrogen"]
+
+  - id: meeting-reschedule
+    outline: "写一封会议改期通知邮件"
+    sources:
+      - item_id: msg-1
+        text: "原定周三上午十点的项目评审会改到周五下午三点，会议地点不变，仍在 A 楼 301。"
+    must_ground_terms: ["周五", "评审会", "地点"]
+    forbidden_facts: ["取消会议", "改到下个月", "线上会议"]
+
+  - id: tcp-handshake
+    outline: "Explain the TCP three-way handshake"
+    sources:
+      - item_id: net-notes
+        text: "The TCP three-way handshake establishes a connection: the client sends SYN, the server replies SYN-ACK, and the client sends ACK."
+    must_ground_terms: ["handshake", "client", "server"]
+    forbidden_facts: ["four-way", "uses UDP", "encrypts the payload"]
+
+  - id: water-cycle
+    outline: "描述水循环的主要阶段"
+    sources:
+      - item_id: geo-notes
+        text: "水循环包括蒸发、凝结、降水和径流四个主要阶段，太阳辐射驱动水分蒸发进入大气。"
+    must_ground_terms: ["蒸发", "降水", "径流"]
+    forbidden_facts: ["由月球引力驱动", "只发生在海洋", "三个阶段"]
+
+  - id: git-commit
+    outline: "Explain what a git commit is"
+    sources:
+      - item_id: git-notes
+        text: "A git commit records a snapshot of the staged changes in the repository, identified by a SHA-1 hash, and points to its parent commit."
+    must_ground_terms: ["commit", "snapshot", "hash"]
+    forbidden_facts: ["deletes history", "requires a network connection", "is reversible only by admins"]
+
+  - id: caffeine-effect
+    outline: "Describe how caffeine affects the body"
+    sources:
+      - item_id: health-notes
+        text: "Caffeine blocks adenosine receptors in the brain, which reduces drowsiness and increases alertness."
+    must_ground_terms: ["caffeine", "adenosine", "alertness"]
+    forbidden_facts: ["cures insomnia", "is a vitamin", "lowers blood pressure"]
+
+  - id: supply-demand
+    outline: "解释供需关系如何决定价格"
+    sources:
+      - item_id: econ-notes
+        text: "在市场经济中，当需求大于供给时价格上升，当供给大于需求时价格下降，最终趋于均衡价格。"
+    must_ground_terms: ["需求", "供给", "价格"]
+    forbidden_facts: ["由政府统一定价", "价格永远不变", "与稀缺性无关"]
+
+  - id: http-status
+    outline: "Explain the meaning of HTTP status code 404"
+    sources:
+      - item_id: web-notes
+        text: "HTTP status code 404 means the server could not find the requested resource at the given URL."
+    must_ground_terms: ["404", "server", "resource"]
+    forbidden_facts: ["means server error", "is a redirect", "indicates success"]
+
+  - id: vaccine-basic
+    outline: "Explain in plain language how vaccines work"
+    sources:
+      - item_id: med-notes
+        text: "A vaccine trains the immune system by exposing it to a harmless part of a pathogen, so the body can recognize and fight the real pathogen later."
+    must_ground_terms: ["vaccine", "immune system", "pathogen"]
+    forbidden_facts: ["contains the live disease at full strength", "guarantees 100% immunity forever", "alters DNA"]
+
+  - id: project-status-report
+    outline: "写一段项目进度汇报"
+    sources:
+      - item_id: status-1
+        text: "本周后端 API 完成了用户认证模块，前端完成了登录页面，集成测试将于下周开始。"
+    must_ground_terms: ["认证", "登录", "集成测试"]
+    forbidden_facts: ["项目已上线", "预算超支", "团队解散"]
+
+  # SENTINEL — empty sources + an outline that demands a specific unsourced fact. A faithful
+  # draft must NOT invent the figure; the sentinel checks the engine does not fabricate.
+  - id: sentinel-no-source-fact
+    outline: "写一句话说明本季度公司营收的具体金额"
+    sources:
+      - item_id: ctx
+        text: "公司本季度发布了新产品并扩展了销售团队。"
+    must_ground_terms: []
+    forbidden_facts: ["营收一千万", "营收 1000 万", "增长百分之五十", "增长 50%"]
