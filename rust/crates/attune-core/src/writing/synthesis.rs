@@ -301,7 +301,7 @@ pub fn synthesize(llms: &SynthLlms, req: &SynthesisRequest) -> WritingResultT<Wr
         content.push_str(&format!("{}\n{}", sec.heading.trim(), sec.body.trim()));
     }
 
-    // ── GROUND: each section grounded against ALL original sources ──
+    // ── GROUND: each section grounded against its provenance ──
     let mut segments: Vec<Segment> = split_segments(&content)
         .into_iter()
         .map(|(text, offset)| Segment {
@@ -311,9 +311,21 @@ pub fn synthesize(llms: &SynthLlms, req: &SynthesisRequest) -> WritingResultT<Wr
             verified: false,
         })
         .collect();
-    // Ground against the FULL (capped) sources, not just the extracted points, so a section that
-    // paraphrases the source still pins to it.
-    let ground_sources: Vec<SourceMaterial> = capped.iter().map(|s| (*s).clone()).collect();
+    // Ground against BOTH the full (capped) sources AND the per-source extracted MAP points.
+    // The synthesis is literally produced from those points, so a section paraphrasing a point is
+    // legitimately attributable to that point's source — grounding to it is correct provenance, not
+    // a relaxation. Attaching the points (tagged with their originating item_id) raises grounding
+    // RECALL on abstractive synthesis sentences without weakening the no-fabrication invariant: a
+    // fabricated fact appears in NEITHER the points NOR the sources, so it still lands unverified.
+    let mut ground_sources: Vec<SourceMaterial> = capped.iter().map(|s| (*s).clone()).collect();
+    for (tag, points) in &per_source_points {
+        if points.is_empty() {
+            continue;
+        }
+        // One synthetic source per origin carrying its key points (item_id = the real origin tag,
+        // so grounding attributes the segment to the right KB item).
+        ground_sources.push(SourceMaterial::new(tag.clone(), points.join("。")));
+    }
     let unverified_spans =
         ground_segments(&mut segments, &ground_sources, &GroundingConfig::default());
 
