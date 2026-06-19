@@ -100,6 +100,7 @@ pub async fn vault_setup(
     crate::state::AppState::start_webdav_sync_worker(state.clone());
     crate::state::AppState::start_email_sync_worker(state.clone());
     crate::state::AppState::start_rss_sync_worker(state.clone());
+    crate::state::AppState::start_monitoring_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
     crate::state::AppState::start_entitlement_worker(state.clone());
@@ -138,6 +139,7 @@ pub async fn vault_unlock(
     crate::state::AppState::start_webdav_sync_worker(state.clone());
     crate::state::AppState::start_email_sync_worker(state.clone());
     crate::state::AppState::start_rss_sync_worker(state.clone());
+    crate::state::AppState::start_monitoring_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
     crate::state::AppState::start_entitlement_worker(state.clone());
@@ -253,6 +255,7 @@ pub async fn vault_reset_with_recovery_key(
     crate::state::AppState::start_webdav_sync_worker(state.clone());
     crate::state::AppState::start_email_sync_worker(state.clone());
     crate::state::AppState::start_rss_sync_worker(state.clone());
+    crate::state::AppState::start_monitoring_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
 

@@ -47,5 +47,6 @@ pub mod ui;
 pub mod upload;
 pub mod vault;
 pub mod version;
+pub mod watches;  // info-monitoring loop: watch / digest / triage / ask / research (spec 2026-06-19)
 pub mod web_search_cache;
 pub mod ws;
