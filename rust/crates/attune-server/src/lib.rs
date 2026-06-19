@@ -280,6 +280,17 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/suggestions/mute",
             post(routes::suggestions::mute).delete(routes::suggestions::unmute),
         )
+        // 第三方账号统一管理(波 C / 能力 B):加密凭据 CRUD,响应脱敏(绝不回 secret)。
+        // 连接源数量驱动 suggestions 的 ConnectSource 卡。零 LLM / 零出网。
+        .route(
+            "/api/v1/accounts",
+            get(routes::third_party_accounts::list_accounts)
+                .post(routes::third_party_accounts::add_account),
+        )
+        .route(
+            "/api/v1/accounts/{id}",
+            axum::routing::delete(routes::third_party_accounts::delete_account),
+        )
         // v0.6 Phase A.5.3 隐私出网审计日志（GET 列表 + CSV 导出）
         // 写入由 attune-core::Store::record_outbound 在 LLM provider hook 中触发，不暴露 POST
         .route("/api/v1/audit/outbound", get(routes::audit::list))

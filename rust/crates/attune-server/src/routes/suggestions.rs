@@ -54,6 +54,12 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
     let cluster_candidates = gather_cluster_candidates(store, &dek);
     let muted_kinds = store.list_muted_suggestion_kinds().unwrap_or_default();
     let dismissed_signatures = store.list_dismissed_signatures().unwrap_or_default();
+    // 已连接第三方源数量(ConnectSource 卡驱动)。Some(0) → 出连接卡(若用户活跃);
+    // 读失败退化为 None(未评估,不出连接卡)—— 不因 store 抖动误弹。
+    let connected_source_count = store
+        .connected_provider_kinds()
+        .ok()
+        .map(|kinds| kinds.len().min(u32::MAX as usize) as u32);
 
     let ctx = SignalContext {
         missed_queries,
@@ -63,6 +69,7 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
         annotation_marker_count,
         muted_kinds,
         dismissed_signatures,
+        connected_source_count,
     };
 
     let cards = suggestions::evaluate(&ctx);
