@@ -77,6 +77,8 @@ impl DigestBuilder {
     ///
     /// `hits` 应已按 triage 分降序（evaluate 已排好）。`content` 提供正文做 extractive 预览。
     /// dedup_group 合并：同组只保留分最高的一条，sources 汇总组内各 item 的源。
+    // 参数较多是 spec §5 的固定 API 契约（watch_id/label/hits/content/sources/now），不抽 struct。
+    #[allow(clippy::too_many_arguments)]
     pub fn build_default(
         &self,
         watch_id: &str,
@@ -121,6 +123,7 @@ impl DigestBuilder {
     ///
     /// **此方法是唯一带 `&dyn LlmProvider` 的 digest 入口** —— 编译期把"偷跑 LLM"挡在
     /// `build_default` 之外。
+    #[allow(clippy::too_many_arguments)]
     pub fn build_llm_summary(
         &self,
         watch_id: &str,
@@ -383,8 +386,7 @@ mod tests {
 
     #[test]
     fn resource_max_entries_cap() {
-        let mut b = DigestBuilder::default();
-        b.max_entries = 3;
+        let b = DigestBuilder { max_entries: 3, ..Default::default() };
         let hits: Vec<WatchHit> = (0..20)
             .map(|i| hit(&format!("i{i}"), &format!("t{i}"), 1.0 - i as f32 * 0.01, None))
             .collect();

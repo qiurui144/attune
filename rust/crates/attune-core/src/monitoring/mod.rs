@@ -278,6 +278,8 @@ impl WatchMatcher {
     /// 性能（spec §11 R3）：exact 键（content_hash + 归一标题）走 hash bucket O(n)；向量
     /// 相似只在**同标题前缀 bucket 内**两两比较，不做全量 O(n²) cosine（大批量同 watch 命中
     /// 时全量 cosine 会炸）。归一标题预计算一次，避免内层循环重复 alloc。
+    // union-find + 多个并行 vec（metas/norm_titles/group）按下标对齐索引，迭代器写法反而更晦涩。
+    #[allow(clippy::needless_range_loop)]
     fn assign_dedup_groups(&self, hits: &mut [WatchHit], items: &[ItemMeta]) {
         let n = hits.len();
         if n < 2 {

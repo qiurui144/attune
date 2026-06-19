@@ -169,7 +169,7 @@ fn adversarial_regex_metachars_treated_literally() {
     // keyword with regex metachars must NOT be executed as regex.
     let w = kw_watch("w", &[".*", "a+b"]);
     let it = item("i", "lit", "this has a+b literally and .* too", "2026-06-18T00:00:00Z");
-    let hits = WatchMatcher::default().evaluate(&[it.clone()], &[w], &HashMap::new(), NOW);
+    let hits = WatchMatcher::default().evaluate(&[it], &[w], &HashMap::new(), NOW);
     assert_eq!(hits.len(), 1);
     // a control item that would match `.*` if it were regex but lacks the literal.
     let w2 = kw_watch("w2", &[".*"]);

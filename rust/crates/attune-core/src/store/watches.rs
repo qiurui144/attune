@@ -233,7 +233,7 @@ impl Store {
             binds.push(Box::new(t as f64));
         }
         if sets.is_empty() {
-            return Ok(self.get_watch_exists(id)?);
+            return self.get_watch_exists(id);
         }
         sets.push("updated_at = ?".into());
         binds.push(Box::new(now));
