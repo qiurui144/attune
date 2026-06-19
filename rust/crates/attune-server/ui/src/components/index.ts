@@ -50,3 +50,5 @@ export type {
 
 export { PluginForm } from './PluginForm';
 export type { PluginFormProps } from './PluginForm';
+
+export { SuggestionsPanel } from './SuggestionsPanel';
