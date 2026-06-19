@@ -43,6 +43,7 @@ pub mod settings;
 pub mod skills;
 pub mod status;
 pub mod suggestions;  // 零成本主动建议引擎 REST(A2)
+pub mod third_party_accounts;  // 第三方账号统一管理 REST(波 C / 能力 B):加密凭据 CRUD,脱敏响应
 pub mod tags;
 pub mod ui;
 pub mod upload;

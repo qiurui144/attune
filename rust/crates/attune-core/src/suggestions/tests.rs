@@ -104,6 +104,118 @@ fn happy_multiple_clusters_multiple_cards() {
     assert_ne!(cards[0].signature, cards[1].signature);
 }
 
+// === ConnectSource(第 5 类卡)golden / 边界 / 异常 ===
+
+#[test]
+fn happy_connect_source_card_when_zero_sources_and_active() {
+    // 用户有活动信号(search_miss)且已连接 0 个源 → 出连接卡。
+    let ctx = SignalContext {
+        unprocessed_search_miss: 2,
+        connected_source_count: Some(0),
+        ..Default::default()
+    };
+    let cards = evaluate(&ctx);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].kind, SuggestionKind::ConnectSource);
+    assert_eq!(cards[0].action_kind, ActionKind::OpenAccountsPanel);
+    // 连接动作本身零成本(只加密保存凭据)。
+    assert_eq!(cards[0].cost_tier, CostTier::Free);
+    assert!(cards[0].ref_ids.is_empty());
+}
+
+#[test]
+fn connect_source_none_means_unevaluated_no_card() {
+    // 默认 connected_source_count = None(caller 未评估)→ 即使活跃也不出连接卡。
+    let ctx = SignalContext {
+        unprocessed_search_miss: 9,
+        connected_source_count: None,
+        ..Default::default()
+    };
+    let cards = evaluate(&ctx);
+    assert!(cards.iter().all(|c| c.kind != SuggestionKind::ConnectSource));
+}
+
+#[test]
+fn connect_source_suppressed_when_already_connected() {
+    // 已连接 ≥1 个源 → 不再提示连接(即使活跃)。
+    let ctx = SignalContext {
+        unprocessed_search_miss: 9,
+        connected_source_count: Some(1),
+        ..Default::default()
+    };
+    let cards = evaluate(&ctx);
+    assert!(cards.iter().all(|c| c.kind != SuggestionKind::ConnectSource));
+}
+
+#[test]
+fn connect_source_suppressed_on_fresh_empty_vault() {
+    // 全新空 vault(零活动 + 0 源)不弹连接卡 —— 避免开箱即弹打扰。
+    let ctx = SignalContext {
+        connected_source_count: Some(0),
+        ..Default::default()
+    };
+    assert!(evaluate(&ctx).is_empty());
+}
+
+#[test]
+fn connect_source_muted_filters_only_that_kind() {
+    let ctx = SignalContext {
+        missed_queries: vec![miss("q", 9)],
+        connected_source_count: Some(0),
+        muted_kinds: vec![SuggestionKind::ConnectSource],
+        ..Default::default()
+    };
+    let cards = evaluate(&ctx);
+    // enrich 卡照出,connect_source 被静音。
+    assert!(cards.iter().all(|c| c.kind != SuggestionKind::ConnectSource));
+    assert!(cards.iter().any(|c| c.kind == SuggestionKind::Enrich));
+}
+
+#[test]
+fn connect_source_dismiss_filters_signature() {
+    let ctx0 = SignalContext {
+        unprocessed_search_miss: 2,
+        connected_source_count: Some(0),
+        ..Default::default()
+    };
+    let sig = evaluate(&ctx0)[0].signature.clone();
+    let ctx = SignalContext {
+        unprocessed_search_miss: 2,
+        connected_source_count: Some(0),
+        dismissed_signatures: vec![sig],
+        ..Default::default()
+    };
+    assert!(evaluate(&ctx).is_empty(), "dismissed connect card must not reappear");
+}
+
+#[test]
+fn connect_source_serializes_snake_case() {
+    let ctx = SignalContext {
+        unprocessed_search_miss: 2,
+        connected_source_count: Some(0),
+        ..Default::default()
+    };
+    let card = &evaluate(&ctx)[0];
+    let json = serde_json::to_string(card).unwrap();
+    assert!(json.contains("\"kind\":\"connect_source\""));
+    assert!(json.contains("\"action_kind\":\"open_accounts_panel\""));
+}
+
+#[test]
+fn happy_all_five_kinds_together() {
+    let ctx = SignalContext {
+        cluster_candidates: vec![cluster(4, &["e"])],
+        missed_queries: vec![miss("q", 5)],
+        unprocessed_search_miss: 6,
+        browse_signal_count: 12,
+        connected_source_count: Some(0),
+        ..Default::default()
+    };
+    let cards = evaluate(&ctx);
+    let kinds: std::collections::HashSet<_> = cards.iter().map(|c| c.kind).collect();
+    assert_eq!(kinds.len(), 5, "expected all 5 kinds, got {kinds:?}");
+}
+
 // === Edge (≥5) ===
 
 #[test]
@@ -316,8 +428,9 @@ mod proptests {
             prop::collection::vec((1usize..10, 0usize..4), 0..4),
             0u32..40,
             0u32..40,
+            prop::option::of(0u32..5),
         )
-            .prop_map(|(misses, usm, clusters, browse, anno)| SignalContext {
+            .prop_map(|(misses, usm, clusters, browse, anno, connected)| SignalContext {
                 missed_queries: misses
                     .into_iter()
                     .map(|(q, c)| MissedQuery {
@@ -337,6 +450,7 @@ mod proptests {
                 annotation_marker_count: anno,
                 muted_kinds: vec![],
                 dismissed_signatures: vec![],
+                connected_source_count: connected,
             })
     }
 

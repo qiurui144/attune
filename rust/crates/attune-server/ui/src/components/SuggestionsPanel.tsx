@@ -43,6 +43,10 @@ function routeAction(card: SuggestionCard): void {
     case 'open_profile':
       currentView.value = 'privacy';
       break;
+    case 'open_accounts_panel':
+      // 第三方账号管理面板挂在 Remote 视图(波 C)。
+      currentView.value = 'remote';
+      break;
   }
 }
 
