@@ -111,6 +111,78 @@ pub fn validate_outbound_url(
     })
 }
 
+/// 校验开放网络出站 URL（无 host allowlist）—— 用于 RSS/Atom feed 抓取。
+///
+/// 与 [`validate_outbound_url`] 的区别：RSS feed 可托管在**任意公网 host**，没有
+/// 固定的托管平台白名单可言，所以本变体**跳过 ③ host allowlist**，但保留其余
+/// 三层 SSRF 防御：
+///   ① scheme 仅 http(s)；
+///   ② host 解析为 IP，逐个拒绝 loopback / private / link-local / metadata 等内网；
+///   ④ 返回已解析 IP 供调用方按 IP 连接（缓解 DNS rebinding）。
+///
+/// 仍**拒绝裸 IP 字面量 host**：强制走域名，使 ② 的解析-校验对所有目标生效，
+/// 杜绝 `http://169.254.169.254/...` 这类直接绕过域名解析的 metadata SSRF。
+///
+/// 失败返回 `VaultError::InvalidInput`，消息以稳定 kebab code 开头
+/// （`outbound-blocked` / `invalid-feed-url`），**不回显内网 IP**（信息泄露面）。
+pub fn validate_open_outbound_url(
+    raw: &str,
+    resolve: &dyn Fn(&str) -> std::io::Result<Vec<IpAddr>>,
+) -> Result<ValidatedUrl> {
+    let url = Url::parse(raw.trim())
+        .map_err(|e| VaultError::InvalidInput(format!("invalid-feed-url: parse: {e}")))?;
+
+    // ① scheme 白名单。
+    match url.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(VaultError::InvalidInput(format!(
+                "outbound-blocked: scheme {other} not allowed (http/https only)"
+            )));
+        }
+    }
+
+    let host = url
+        .host()
+        .ok_or_else(|| VaultError::InvalidInput("invalid-feed-url: missing host".into()))?;
+
+    let (host_str, literal_ip): (String, Option<IpAddr>) = match &host {
+        Host::Domain(d) => (d.to_ascii_lowercase(), None),
+        Host::Ipv4(ip) => (ip.to_string(), Some(IpAddr::V4(*ip))),
+        Host::Ipv6(ip) => (ip.to_string(), Some(IpAddr::V6(*ip))),
+    };
+
+    // 裸 IP host 一律拒（强制域名 → 解析-校验对所有目标生效，杜绝 metadata 直连）。
+    if literal_ip.is_some() {
+        return Err(VaultError::InvalidInput(
+            "outbound-blocked: raw IP host not permitted (use a hostname)".into(),
+        ));
+    }
+
+    // ② 解析 host → IP，逐个拒内网。
+    let ips = resolve(&host_str).map_err(|e| {
+        VaultError::InvalidInput(format!("invalid-feed-url: resolve {host_str}: {e}"))
+    })?;
+    if ips.is_empty() {
+        return Err(VaultError::InvalidInput(format!(
+            "invalid-feed-url: {host_str} resolved to no addresses"
+        )));
+    }
+    for ip in &ips {
+        if is_blocked_ip(ip) {
+            return Err(VaultError::InvalidInput(format!(
+                "outbound-blocked: {host_str} resolves to a non-public address"
+            )));
+        }
+    }
+
+    Ok(ValidatedUrl {
+        url,
+        host: host_str,
+        resolved_ips: ips,
+    })
+}
+
 /// host 是否命中 allowlist —— 精确或子域（`.github.com`）。
 fn host_allowed(host: &str, extra: &[String]) -> bool {
     let check = |allowed: &str| {
@@ -303,6 +375,96 @@ mod tests {
         assert!(!is_blocked_ip(&IpAddr::V4(Ipv4Addr::new(140, 82, 112, 3))));
     }
 
+    // ===== validate_open_outbound_url（RSS：无 allowlist，保留 SSRF 核心）=====
+
+    #[test]
+    fn open_accepts_arbitrary_public_host() {
+        // RSS 没有 host allowlist —— 任意公网 host 应通过（只要解析到公网 IP）。
+        let v = validate_open_outbound_url(
+            "https://blog.random-author.example/feed.xml",
+            &resolves_to(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+        )
+        .unwrap();
+        assert_eq!(v.host, "blog.random-author.example");
+        assert_eq!(v.resolved_ips, vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
+    }
+
+    #[test]
+    fn open_rejects_non_http_scheme() {
+        for u in [
+            "file:///etc/passwd",
+            "ftp://feeds.example/x",
+            "gopher://feeds.example/x",
+            "ssh://feeds.example/x",
+        ] {
+            let e = validate_open_outbound_url(u, &allow_github_ip);
+            assert!(e.is_err(), "scheme must be rejected: {u}");
+            assert!(
+                e.unwrap_err().to_string().contains("outbound-blocked"),
+                "{u} should carry outbound-blocked code"
+            );
+        }
+    }
+
+    #[test]
+    fn open_rejects_raw_ip_literal_hosts() {
+        // 裸 IP（含 metadata / 八进制 / 十进制 / IPv6）—— 强制走域名。
+        for u in [
+            "http://169.254.169.254/latest/meta-data/",  // cloud metadata 字面量
+            "http://127.0.0.1:8080/feed",                // loopback 字面量
+            "http://192.168.0.1/feed",                   // 私网字面量
+            "http://[::1]/feed",                         // IPv6 loopback 字面量
+            "http://[fe80::1]/feed",                     // IPv6 link-local 字面量
+            "http://2130706433/feed",  // 十进制 127.0.0.1（url crate 解析为 domain → 解析失败/拒）
+            "http://0177.0.0.1/feed",  // 八进制 loopback 形式
+        ] {
+            assert!(
+                validate_open_outbound_url(u, &allow_github_ip).is_err(),
+                "raw/encoded IP host must be rejected: {u}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_rejects_dns_rebind_to_internal() {
+        // host 公网域名，但 DNS 解析到内网 → 拒（DNS rebinding 缓解）。
+        for internal in [
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)), // metadata
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),       // loopback
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),        // private
+            IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),      // private
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),     // private
+            IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)), // ULA
+        ] {
+            let e = validate_open_outbound_url(
+                "https://innocent-feed.example/feed.xml",
+                &resolves_to(internal),
+            );
+            assert!(e.is_err(), "rebind to {internal} must be rejected");
+            assert!(
+                e.unwrap_err().to_string().contains("outbound-blocked"),
+                "rebind block must carry outbound-blocked code"
+            );
+        }
+    }
+
+    #[test]
+    fn open_rejects_mixed_public_and_internal_resolution() {
+        // 多 A 记录：一个公网 + 一个内网 → 整体拒（任一内网即拒）。
+        let mixed = |_h: &str| {
+            Ok(vec![
+                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            ])
+        };
+        assert!(validate_open_outbound_url("https://feed.example/x", &mixed).is_err());
+    }
+
+    #[test]
+    fn open_empty_resolution_is_error() {
+        assert!(validate_open_outbound_url("https://feed.example/x", &no_resolve).is_err());
+    }
+
     // proptest #1：host_allowed 幂等 —— 大小写不影响判定。
     proptest::proptest! {
         #[test]
@@ -330,6 +492,20 @@ mod tests {
             if scheme == "http" || scheme == "https" { return Ok(()); }
             let u = format!("{scheme}://github.com/x");
             proptest::prop_assert!(validate_outbound_url(&u, &[], &allow_github_ip).is_err());
+        }
+
+        // proptest #4：open 变体对任何 private v4 解析结果永远拒（SSRF 不漏）。
+        #[test]
+        fn open_never_accepts_private_resolution(b in 0u8..=255, c in 0u8..=255, d in 0u8..=255) {
+            for ip in [
+                IpAddr::V4(Ipv4Addr::new(10, b, c, d)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, c, d)),
+                IpAddr::V4(Ipv4Addr::new(127, b, c, d)),
+            ] {
+                proptest::prop_assert!(
+                    validate_open_outbound_url("https://feed.example/x", &resolves_to(ip)).is_err()
+                );
+            }
         }
     }
 }
