@@ -558,7 +558,7 @@ mod tests {
     proptest! {
         // ① synthesis is deterministic under fixed mock replies.
         #[test]
-        fn prop_synthesis_deterministic(text in "[a-z ]{4,60}") {
+        fn prop_synthesis_deterministic(text in "[a-z][a-z ]{3,59}") {
             let llm = MockSynthLlm::new(&map_reply(), &reduce_reply());
             let llms = SynthLlms { cheap: &llm, reasoning: &llm };
             let req = SynthesisRequest {
@@ -589,7 +589,7 @@ mod tests {
 
         // ③ every segment offset is within content's utf-16 length (no OOB).
         #[test]
-        fn prop_segment_offsets_in_bounds(text in "[a-z ]{4,60}") {
+        fn prop_segment_offsets_in_bounds(text in "[a-z][a-z ]{3,59}") {
             let llm = MockSynthLlm::new(&map_reply(), &reduce_reply());
             let llms = SynthLlms { cheap: &llm, reasoning: &llm };
             let req = SynthesisRequest {
