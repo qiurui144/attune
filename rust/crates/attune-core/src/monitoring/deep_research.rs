@@ -118,8 +118,12 @@ impl DeepResearch {
             };
         }
 
-        // 跨源核实（确定性聚合）。
-        let claims = self.verify_claims(&docs, opts.max_claims);
+        // 跨源核实：有 LLM → 语义聚类 + 冲突检测（§2-G，schema-guided + 重试 + grounding，
+        // 失败保守回退确定性）；无 LLM → 确定性精确归并。
+        let claims = match llm {
+            Some(llm) => self.verify_claims_llm(&docs, opts.max_claims, llm),
+            None => self.verify_claims(&docs, opts.max_claims),
+        };
 
         // 综合：有 LLM → 叙述报告；无 LLM → 退化为检索列表。
         match llm {
@@ -186,6 +190,162 @@ impl DeepResearch {
         claims
     }
 
+    /// 跨源交叉验证（**LLM 语义步**，spec §2-G + §9.2 floor F1≥0.80）。
+    ///
+    /// 确定性 `verify_claims` 只能并同**精确同标题**的多源材料；现实里"同一事实"常以不同
+    /// 措辞出现在不同源（RSS vs 云盘 vs web）。本方法让 LLM 把编号材料聚成 claim 簇，并对每簇
+    /// 标 confirmed / single / conflicting：
+    /// - **grounding 强制**（spec §11 R6 准确性北极星）：每簇 `doc_indices` 必须是真实材料下标
+    ///   1..=N，且每条断言 trace 回这些下标对应的 reference —— **不编造源**。validator 拒绝
+    ///   越界 / 空 / 重复下标；越界即重试（≤3）。
+    /// - **保守裁决**：只有 ≥2 个**独立 reference**（去重后）覆盖同一簇才标 confirmed；LLM 说
+    ///   confirmed 但去重后独立源 < 2 → 降级 single（不被 LLM 的乐观说法带偏，防误标）。
+    /// - **失败兜底**（§4.5.E + §7）：JSON 不可解析 / 重试耗尽 / LLM 报错 → 回退确定性
+    ///   `verify_claims`（保守精确归并），**绝不**因 LLM 不稳而误标或 panic。
+    fn verify_claims_llm(
+        &self,
+        docs: &[&ResearchDoc],
+        max_claims: usize,
+        llm: &dyn LlmProvider,
+    ) -> Vec<VerifiedClaim> {
+        let deterministic = self.verify_claims(docs, max_claims);
+        if docs.len() < 2 {
+            // 单材料无跨源可言，确定性已足（且省一次 LLM 调用）。
+            return deterministic;
+        }
+
+        let n = docs.len();
+        let mut ctx = String::new();
+        for (i, d) in docs.iter().enumerate() {
+            let kind = match d.kind {
+                SourceKind::Vault => "本地",
+                SourceKind::Web => "网络",
+            };
+            ctx.push_str(&format!("[{}] ({kind}) {} — {}\n", i + 1, d.title, d.snippet));
+        }
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "claims": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "doc_indices": {"type": "array", "items": {"type": "integer"}},
+                            "verdict": {"type": "string", "enum": ["confirmed", "single", "conflicting"]}
+                        },
+                        "required": ["text", "doc_indices", "verdict"]
+                    }
+                }
+            },
+            "required": ["claims"]
+        });
+        let system = "你是跨源事实核实助手。给定若干编号材料（每条带来源类别 [n]），\
+            把表达**同一事实主张**的材料聚成一个 claim 簇（即便措辞不同）。规则：\
+            (1) 每个 claim 的 doc_indices 必须是材料编号（1 起），且只能包含真实出现的编号，不得编造；\
+            (2) verdict: 同一主张被 ≥2 条**不同**材料覆盖=confirmed；仅 1 条=single；\
+            不同材料对同一主张说法**相互矛盾**=conflicting；\
+            (3) text 用中文简述该主张；(4) 不要把无关材料硬塞进一个簇。";
+        let schema_system = format!(
+            "{system}\n\n输出必须是符合此 schema 的合法 JSON（不要 markdown 围栏，不要多余文字）：\n{schema}"
+        );
+        let user = format!("材料：\n{ctx}\n\n请输出 JSON 格式的跨源核实结果。");
+
+        // §4.5-B validator: JSON 可解析 + 每个 doc_index 在 1..=n（grounding）+ 非空。
+        let validator = move |raw: &str| -> std::result::Result<(), String> {
+            let parsed = parse_claim_clusters(raw).map_err(|e| format!("JSON parse: {e}"))?;
+            if parsed.claims.is_empty() {
+                return Err("claims empty".into());
+            }
+            for c in &parsed.claims {
+                if c.doc_indices.is_empty() {
+                    return Err("a claim has no doc_indices (grounding)".into());
+                }
+                for idx in &c.doc_indices {
+                    if *idx < 1 || *idx as usize > n {
+                        return Err(format!("doc_index {idx} out of range 1..={n}"));
+                    }
+                }
+            }
+            Ok(())
+        };
+
+        match llm.chat_with_retry(&schema_system, &user, 3, &validator) {
+            Ok((raw, _usage)) => match parse_claim_clusters(&raw) {
+                Ok(parsed) => self.build_claims_from_clusters(docs, &parsed.claims, max_claims),
+                Err(e) => {
+                    log::warn!("cross-source verify: parse after retry failed, fallback: {e}");
+                    deterministic
+                }
+            },
+            Err(e) => {
+                log::warn!("cross-source verify LLM failed, fallback to deterministic: {e}");
+                deterministic
+            }
+        }
+    }
+
+    /// 把 LLM 聚出的簇转成 [`VerifiedClaim`]，**确定性地重算 verdict**（防 LLM 误标）：
+    /// 独立 reference 去重计数 ≥2 → confirmed；LLM 标 conflicting 且确有 ≥2 独立源 → 保留
+    /// conflicting；其余 → single。源引用全部 trace 回真实材料（grounding）。
+    fn build_claims_from_clusters(
+        &self,
+        docs: &[&ResearchDoc],
+        clusters: &[ClaimCluster],
+        max_claims: usize,
+    ) -> Vec<VerifiedClaim> {
+        let mut out: Vec<VerifiedClaim> = Vec::new();
+        for c in clusters.iter().take(max_claims) {
+            // 去重 doc_indices → 去重 reference（同一 reference 多次不算多源）。
+            let mut seen_idx: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut seen_ref: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut sources: Vec<ClaimSource> = Vec::new();
+            for idx in &c.doc_indices {
+                let i = *idx as usize;
+                if i < 1 || i > docs.len() || !seen_idx.insert(i) {
+                    continue;
+                }
+                let d = docs[i - 1];
+                if seen_ref.insert(d.reference.clone()) {
+                    sources.push(ClaimSource {
+                        kind: d.kind,
+                        reference: d.reference.clone(),
+                    });
+                }
+            }
+            if sources.is_empty() {
+                continue; // grounding：簇无任何真实源 → 丢弃，绝不产无源 claim。
+            }
+            // 确定性重算 verdict：独立源 ≥2 才可能 confirmed/conflicting；否则 single。
+            let verification = if sources.len() >= 2 {
+                match c.verdict.as_str() {
+                    "conflicting" => Verification::Conflicting,
+                    _ => Verification::MultiSourceConfirmed,
+                }
+            } else {
+                Verification::SingleSource
+            };
+            out.push(VerifiedClaim {
+                text: if c.text.trim().is_empty() {
+                    docs[(c.doc_indices[0] as usize).clamp(1, docs.len()) - 1]
+                        .title
+                        .clone()
+                } else {
+                    c.text.trim().to_string()
+                },
+                verification,
+                sources,
+            });
+        }
+        if out.is_empty() {
+            // LLM 簇全被 grounding 丢弃 → 回退确定性，保证非空有结论。
+            return self.verify_claims(docs, max_claims);
+        }
+        out
+    }
+
     /// LLM 综合：把材料 reduce 成带 [n] 引用的叙述报告。schema-free 但要求带引用。
     fn synthesize(&self, topic: &str, docs: &[&ResearchDoc], llm: &dyn LlmProvider) -> String {
         let mut ctx = String::new();
@@ -228,6 +388,44 @@ fn normalize(s: &str) -> String {
         .collect()
 }
 
+// ── 跨源验证 LLM schema 解析（schema-guided JSON）─────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct ClaimClusters {
+    claims: Vec<ClaimCluster>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimCluster {
+    #[serde(default)]
+    text: String,
+    doc_indices: Vec<i64>,
+    #[serde(default)]
+    verdict: String,
+}
+
+/// 容错解析跨源验证 JSON（剥 markdown 围栏 + 截首个 `{`..末个 `}`，对齐 digest 解析）。
+fn parse_claim_clusters(raw: &str) -> std::result::Result<ClaimClusters, String> {
+    let cleaned = strip_json_fence(raw);
+    serde_json::from_str::<ClaimClusters>(&cleaned).map_err(|e| e.to_string())
+}
+
+fn strip_json_fence(raw: &str) -> String {
+    let s = raw.trim();
+    let s = s
+        .strip_prefix("```json")
+        .or_else(|| s.strip_prefix("```"))
+        .unwrap_or(s);
+    let s = s.strip_suffix("```").unwrap_or(s);
+    let s = s.trim();
+    if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
+        if end >= start {
+            return s[start..=end].to_string();
+        }
+    }
+    s.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +445,9 @@ mod tests {
     #[test]
     fn happy_synthesize_with_llm() {
         let llm = MockLlmProvider::new("mock");
+        // run() with ≥2 docs now calls the LLM twice: (1) cross-source verify, (2) synthesize.
+        // Mock is FIFO → queue verify JSON first, then the narrative.
+        llm.push_response(r#"{"claims":[{"text":"a","doc_indices":[1],"verdict":"single"},{"text":"b","doc_indices":[2],"verdict":"single"}]}"#);
         llm.push_response("综述结论 [1][2]。");
         let docs = vec![
             doc(SourceKind::Vault, "item-1", "Topic A", "vault snippet"),
@@ -260,13 +461,14 @@ mod tests {
 
     #[test]
     fn happy_multi_source_confirmed() {
-        // two distinct sources, same normalized title → confirmed.
+        // two distinct sources, same fact → LLM clusters them → confirmed.
         let docs = vec![
             doc(SourceKind::Vault, "item-1", "RISC-V RVA23 ratified", "a"),
             doc(SourceKind::Web, "https://lwn.net", "risc-v rva23 ratified", "b"),
         ];
         let llm = MockLlmProvider::new("mock");
-        llm.push_response("ok [1][2]");
+        llm.push_response(r#"{"claims":[{"text":"RVA23 ratified","doc_indices":[1,2],"verdict":"confirmed"}]}"#);
+        llm.push_response("ok [1][2]"); // synthesize
         let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
         assert_eq!(r.claims.len(), 1, "same claim merged across two sources");
         assert_eq!(r.claims[0].verification, Verification::MultiSourceConfirmed);
@@ -290,7 +492,10 @@ mod tests {
             doc(SourceKind::Vault, "item-1", "dup ref claim", "second"),
         ];
         let llm = MockLlmProvider::new("mock");
-        llm.push_response("ok [1]");
+        // even if the LLM clusters both indices, they map to the same reference → 1 independent
+        // source → single (the conservative re-verdict must not be fooled).
+        llm.push_response(r#"{"claims":[{"text":"dup","doc_indices":[1,2],"verdict":"confirmed"}]}"#);
+        llm.push_response("ok [1]"); // synthesize
         let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
         assert_eq!(r.claims[0].sources.len(), 1, "deduped reference");
         assert_eq!(r.claims[0].verification, Verification::SingleSource);
@@ -353,5 +558,127 @@ mod tests {
         let opts = ResearchOpts { max_claims: 5, use_web: true };
         let r = DeepResearch.run("t", &docs, &opts, None);
         assert_eq!(r.claims.len(), 5, "capped at max_claims");
+    }
+
+    // ── cross-source verification LLM agent (§2-G) ──────────────────────────
+    //
+    // These exercise the new LLM semantic clustering step that groups same-fact
+    // materials across DIFFERENT wordings (which the deterministic exact-title path
+    // cannot), with grounding + conservative re-verdict + graceful fallback.
+
+    fn docrefs() -> Vec<ResearchDoc> {
+        vec![
+            doc(SourceKind::Vault, "item-1", "RVV 1.0 ratified", "The RVV vector ext was ratified."),
+            doc(SourceKind::Web, "https://lwn.net/x", "Vector extension finalized", "RISC-V finalized its vector spec."),
+            doc(SourceKind::Vault, "item-2", "Unrelated note", "Something else entirely."),
+        ]
+    }
+
+    /// happy: LLM clusters two differently-worded sources into one confirmed claim
+    /// (the deterministic path would have kept them separate as two single-source claims).
+    #[test]
+    fn xsource_llm_clusters_synonymous_sources_confirmed() {
+        let docs = docrefs();
+        let llm = MockLlmProvider::new("mock");
+        // [1] and [2] are the same fact in different words; [3] is its own single source.
+        llm.push_response(r#"{"claims":[
+            {"text":"RISC-V vector extension was ratified","doc_indices":[1,2],"verdict":"confirmed"},
+            {"text":"unrelated","doc_indices":[3],"verdict":"single"}
+        ]}"#);
+        // synthesize is also called by run(); queue a second response for it.
+        llm.push_response("综述 [1][2][3]");
+        let r = DeepResearch.run("topic", &docs, &ResearchOpts::default(), Some(&llm));
+        let confirmed: Vec<_> = r.claims.iter()
+            .filter(|c| c.verification == Verification::MultiSourceConfirmed).collect();
+        assert_eq!(confirmed.len(), 1, "synonymous cross-source merged & confirmed");
+        assert_eq!(confirmed[0].sources.len(), 2);
+    }
+
+    /// adversarial: LLM optimistically labels a single-source cluster "confirmed".
+    /// Our deterministic re-verdict MUST downgrade it to single (never overclaim, §11 R6).
+    #[test]
+    fn xsource_llm_overclaim_downgraded_to_single() {
+        let docs = docrefs();
+        let llm = MockLlmProvider::new("mock");
+        llm.push_response(r#"{"claims":[
+            {"text":"lone fact","doc_indices":[3],"verdict":"confirmed"}
+        ]}"#);
+        llm.push_response("综述 [3]");
+        let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
+        assert!(r.claims.iter().all(|c| c.verification != Verification::MultiSourceConfirmed),
+            "single-source cluster cannot be confirmed even if LLM says so");
+    }
+
+    /// conflicting: LLM marks conflicting + there really are ≥2 independent sources → kept.
+    #[test]
+    fn xsource_llm_conflicting_preserved_when_multisource() {
+        let docs = docrefs();
+        let llm = MockLlmProvider::new("mock");
+        llm.push_response(r#"{"claims":[
+            {"text":"sources disagree on the date","doc_indices":[1,2],"verdict":"conflicting"}
+        ]}"#);
+        llm.push_response("综述 [1][2]");
+        let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
+        assert!(r.claims.iter().any(|c| c.verification == Verification::Conflicting));
+    }
+
+    /// grounding (adversarial): LLM hallucinates an out-of-range doc index. The validator
+    /// rejects all 3 attempts → graceful fallback to the deterministic claims (no fabricated source).
+    #[test]
+    fn xsource_llm_out_of_range_index_falls_back() {
+        let docs = docrefs();
+        let llm = MockLlmProvider::new("mock");
+        // doc_index 9 does not exist (only 3 docs) → rejected each attempt.
+        llm.push_response(r#"{"claims":[{"text":"x","doc_indices":[9],"verdict":"confirmed"}]}"#);
+        llm.push_response(r#"{"claims":[{"text":"y","doc_indices":[8],"verdict":"confirmed"}]}"#);
+        llm.push_response(r#"{"claims":[{"text":"z","doc_indices":[7],"verdict":"confirmed"}]}"#);
+        llm.push_response("综述"); // synthesize
+        let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
+        // fell back to deterministic: each distinct title is its own single-source claim,
+        // and crucially every source ref is real (in the docs).
+        let all_refs: Vec<&str> = r.claims.iter().flat_map(|c| c.sources.iter()).map(|s| s.reference.as_str()).collect();
+        assert!(all_refs.iter().all(|rf| docs.iter().any(|d| d.reference == *rf)),
+            "no fabricated source after fallback");
+        assert!(!r.claims.is_empty());
+    }
+
+    /// error: LLM returns garbage 3× → fallback to deterministic, no panic.
+    #[test]
+    fn xsource_llm_garbage_falls_back() {
+        let docs = docrefs();
+        let llm = MockLlmProvider::new("mock");
+        llm.push_response("not json");
+        llm.push_response("still not json");
+        llm.push_response("nope");
+        llm.push_response("综述");
+        let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
+        assert!(!r.claims.is_empty(), "deterministic fallback produced claims");
+    }
+
+    /// edge: single doc → no LLM cross-source call needed, deterministic single-source.
+    #[test]
+    fn xsource_single_doc_no_llm_clustering() {
+        let docs = vec![doc(SourceKind::Vault, "item-1", "Solo", "x")];
+        let llm = MockLlmProvider::new("mock");
+        // only synthesize should consume a response; verify_claims_llm short-circuits at <2 docs.
+        llm.push_response("综述 [1]");
+        let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
+        assert_eq!(r.claims.len(), 1);
+        assert_eq!(r.claims[0].verification, Verification::SingleSource);
+    }
+
+    /// grounding: same reference cited twice within one cluster must not count as multi-source.
+    #[test]
+    fn xsource_duplicate_reference_in_cluster_is_single() {
+        let docs = vec![
+            doc(SourceKind::Vault, "item-1", "A", "first wording"),
+            doc(SourceKind::Vault, "item-1", "A again", "second wording, same item"),
+        ];
+        let llm = MockLlmProvider::new("mock");
+        llm.push_response(r#"{"claims":[{"text":"same fact","doc_indices":[1,2],"verdict":"confirmed"}]}"#);
+        llm.push_response("综述 [1][2]");
+        let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
+        assert_eq!(r.claims[0].sources.len(), 1, "same reference deduped → single independent source");
+        assert_eq!(r.claims[0].verification, Verification::SingleSource);
     }
 }
