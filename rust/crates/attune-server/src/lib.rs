@@ -262,6 +262,14 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/auto_bookmarks",
                get(routes::auto_bookmarks::list)
                    .delete(routes::auto_bookmarks::delete))
+        // 零成本主动建议引擎(A2):确定性信号→规则→卡。GET 列卡 / dismiss / mute。
+        // 成本契约:此 route 零 LLM(evaluate 编译期无 LLM 句柄)。
+        .route("/api/v1/suggestions", get(routes::suggestions::list))
+        .route("/api/v1/suggestions/{id}/dismiss", post(routes::suggestions::dismiss))
+        .route(
+            "/api/v1/suggestions/mute",
+            post(routes::suggestions::mute).delete(routes::suggestions::unmute),
+        )
         // v0.6 Phase A.5.3 隐私出网审计日志（GET 列表 + CSV 导出）
         // 写入由 attune-core::Store::record_outbound 在 LLM provider hook 中触发，不暴露 POST
         .route("/api/v1/audit/outbound", get(routes::audit::list))

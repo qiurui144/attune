@@ -42,6 +42,7 @@ pub mod search;
 pub mod settings;
 pub mod skills;
 pub mod status;
+pub mod suggestions;  // 零成本主动建议引擎 REST(A2)
 pub mod tags;
 pub mod ui;
 pub mod upload;

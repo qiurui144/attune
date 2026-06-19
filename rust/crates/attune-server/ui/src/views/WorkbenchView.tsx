@@ -13,7 +13,7 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { Button, EmptyState, Modal, PluginForm, toast } from '../components';
+import { Button, EmptyState, Modal, PluginForm, SuggestionsPanel, toast } from '../components';
 import { api } from '../store/api';
 import { currentView, settingsInitialTab, drawerContent } from '../store/signals';
 import { t } from '../i18n';
@@ -119,6 +119,7 @@ export function WorkbenchView(): JSX.Element {
     return (
       <div style={{ padding: 'var(--space-6)' }}>
         <Header />
+        <SuggestionsPanel />
         <EmptyState
           icon="🛠"
           title={t('workbench.empty_title')}
@@ -146,6 +147,7 @@ export function WorkbenchView(): JSX.Element {
   return (
     <div style={{ padding: 'var(--space-6)', display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
       <Header />
+      <SuggestionsPanel />
       {[...groups.entries()].map(([pluginId, g]) => (
         <section key={pluginId}>
           <h3
