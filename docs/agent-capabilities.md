@@ -76,7 +76,7 @@ provider 走 `ATTUNE_LLM_*` env，默认 Ollama qwen2.5:3b / DeepSeek openai-com
 | grounding（`grounding.rs`） | bbox/空间验证（防 VLM 引用错位/越界） | `validate_grounding`：None→Missing；region_bbox/page 不符→OutOfBounds；零面积→EmptyArea；sub_bbox 未完全含于 region→OutOfBounds（u64 防 u32 溢出假通过）。fail 原因反馈进重试 prompt | 确定性几何校验（喂 VLM 重试） | 15 `#[test]` |
 | N=3 eval（`nontext/eval/`） | 多 seed 真 VLM eval（feature `vision-eval`，离线） | `DEFAULT_SEEDS=3`；每 fixture×3 seed 走真 `escalate_region`，metrics（chart series F1 / latex Levenshtein / token-F1 / grounding precision）mean±std per (kind×model)，对 floor `compute_verdict` | **真 lane = 3 个 `#[ignore]` nightly**（需 `DASHSCOPE_API_KEY` + 成本授权），默认 model id `qwen3-vl-plus`，仅断言 floor（value-F1≥0.5 / grounding-precision≥0.99），**eprintln 打印不落档**。无 key→PENDING-KEY 不假通过 | 14 `#[test]`（含 3 ignore） |
 
-> **关于"qwen3-vl-plus F1 1.0"**：默认 model id 确为 `qwen3-vl-plus`，但**源码树内未找到 F1=1.0 的落档证据**（ignore 测试只断言 floor 且 eprintln 不持久化）。该 1.0 数字须来自**外部 run-log / 报告**（本会话 #92 验证），**接地以外部证据为准 → 标 待确认（源码侧）**。
+> **关于"qwen3-vl-plus F1 1.0"（2026-06-19 收口）**：默认 model id 为 `qwen3-vl-plus`。真 DashScope N=3 run-log 已落档 `reports/runs/20260619-204227_vision-qwen3vl-dashscope/`：known-text **token-F1 1.000±0.000 + grounding-precision 1.000**（floor text-F1≥0.5 / gp≥0.99）+ 真 failover（dead-primary→live qwen）。先前"eprintln 不持久化"已修，CI 新增 DASHSCOPE-gated vision real-VLM step（`ci.yml`）。
 
 ### 2.3 OCR（PP-OCR，base）
 
@@ -110,10 +110,13 @@ provider 走 `ATTUNE_LLM_*` env，默认 Ollama qwen2.5:3b / DeepSeek openai-com
 | 3 | `ai_annotation_highlights` | 提炼值得长期记忆的核心要点（⭐ 要点，绿） | 同上 |
 | 4 | `ai_annotation_questions` | 抛出疑点/追问（🤔 疑点，蓝） | 同上 |
 
-**真 LLM gate 状态（修正旧 flag "ai_annotator 无真 LLM"）**：gate **存在但不达 doc-intel/vision 标准**：
-- `real_llm_ai_annotator_produces_located_findings`（ai_annotator.rs:770-809）用 `OllamaLlmProvider::auto_detect()`（非 Mock），断非空 located findings + offset 在界。
-- **但**：① `#[ignore]`（非默认 CI）；② Ollama 不可达时 **skip 返回 Ok 不 fail**（缺模型=静默通过）；③ 仅测 **Highlights 一个角度**，risk/outdated/questions **无真 LLM 覆盖**；④ **无 3-tier 兼容矩阵 + 无 F1≥0.85 ratchet**（只二元"非空 located findings"）。
-- **待确认**：是否有 CI job 真带 provisioned Ollama 跑该 ignore lane（仓内未见 workflow 调 `-- --ignored real_llm`）；RELEASE.md 是否声明 AI 批注最低 model tier。
+**真 LLM gate 状态（2026-06-19 reliability backfill 已补齐，原 §5.2 gap #1 收口）**：
+- **新 4 角度真 LLM gate** `tests/ai_annotation_real_llm_gate.rs`：risk/outdated/highlights/questions **各**有独立 gate，N≥3 seed，对 human-authored holdout（`tests/golden/ai_annotation/<angle>.yaml`，≥10 case/角度，GT 非 agent 生成）算**真 micro-F1**，floor 0.50（只升不降 ratchet，进 `agent_quality_manifest.yaml`）。
+- **静默通过已修**：`require_llm()` 在无模型时 **panic**（fail-to-run，不再返回 Ok 静默绿）；run-vs-SKIP 在 **CI job 层**决定（skip-not-pass），不在测试内。
+- **接进 CI**：`ci.yml` `real-llm-secret-gated`（DeepSeek/DashScope，PR/push 触发）+ `nightly-real-llm.yml`（Ollama）两条 lane 都跑。
+- **真 DeepSeek N=3 实证**（`reports/runs/20260619-201722_ai-annotation-deepseek/`）：highlights 0.735 / outdated 0.826 / questions 0.544 / risk 0.553 —— 全 ≥ 0.50 floor（4 passed）。questions/risk 贴近 floor（snippet-overlap 评分天然比 doc-intel 4 类 verdict 更模糊），数据如实登记未放水。
+- **旧** `real_llm_ai_annotator_produces_located_findings`（ai_annotator.rs:770-809，Highlights only、skip-on-unavailable）保留为快速 smoke，不再是唯一真 LLM 覆盖。
+- **待确认（剩余）**：Tier-1 弱本地（qwen2.5:3b）floor 未单独跑（DeepSeek=Tier-2 已过）；RELEASE.md 标 AI 批注最低 tier 为 ≥ weak-cloud。
 
 **测试**：核心 `generate_annotations` 共 ~27 mock 单测（drop/locate/cap/reject/bad-JSON/relaxed/prefix-anchor）+ 4 hardening 单测 + 1 个 `#[ignore]` 真 LLM gate。
 **路由 `ai_analyze` 本身无测试**，无 `tests/` 集成/subprocess，无 golden YAML。
@@ -146,21 +149,21 @@ provider 走 `ATTUNE_LLM_*` env，默认 Ollama qwen2.5:3b / DeepSeek openai-com
 | doc-intel `chapters` | ✅ 有 | 同 gate C | ❌ `#[ignore]` | floor grounded-answer≥0.80 |
 | doc-intel `extractive`/`token_bill`/`model_routing` | N/A | 零 LLM | ✅ 确定性测试全跑 | — |
 | vision `vision.recognize`/escalate/failover | ✅ 有 | `eval/` N=3 + 3 ignore real-VLM | ❌ `#[ignore]` | floor value-F1≥0.5 / grounding-prec≥0.99；**"qwen3-vl-plus F1 1.0" 须外部 run-log（#92），源码侧待确认** |
-| **ai_annotation（4 个）** | ⚠️ **弱**（1 个 ignore + skip-on-unavailable + 仅 Highlights） | `real_llm_ai_annotator_*` | ❌ `#[ignore]` + 缺模型静默 pass | **无 F1，无 3-tier 矩阵，无 ratchet**（仅二元非空） |
+| **ai_annotation（4 个）** | ✅ 有（2026-06-19 补齐） | `ai_annotation_real_llm_gate.rs`（4 角度各 1 leg）+ holdout `tests/golden/ai_annotation/` | ❌ `#[ignore]`（secret-gated CI + nightly 跑） | **真 micro-F1，floor 0.50，ratchet**；DeepSeek N=3 实证 hl 0.735 / outdated 0.826 / q 0.544 / risk 0.553（`reports/runs/20260619-201722_ai-annotation-deepseek/`）。静默 pass 已修 |
 
 **结论 — 真 LLM/VLM gate 计数**：
 - **doc-intel = 3 个** agent（compare/deep_summary/chapters）有**真 floor≥0.80 gate**（A/B/C，但 `#[ignore]` 非默认 CI）。
 - **vision = 有真 N=3 gate**（escalate/failover/grounding，3 个 `#[ignore]` real-VLM，floor 制）。
-- **ai_annotation = 4 个角度共享 1 个弱 gate**（ignore + skip-on-unavailable + 仅 Highlights，无 F1/无 ratchet）—— **最大短板**。
+- **ai_annotation = 4 个角度各有真 micro-F1 gate**（2026-06-19 补齐；floor 0.50 + ratchet，DeepSeek N=3 实证全过）—— 原最大短板已收口。
 
 ### 5.2 缺口清单（供新需求对照）
 
-1. **ai_annotation 真 LLM gate 弱**（最高优先）：只 Highlights 一角度有真 LLM 断言、`#[ignore]`、缺模型静默通过、无 F1≥0.85 ratchet、无 3-tier 矩阵。risk/outdated/questions 三角度**零真 LLM 覆盖**。
-2. **doc-intel real-LLM gate 全 `#[ignore]`**：gate 代码齐但**默认 CI 不跑**，真 provider run-log **未落档**（§6.3 应有 `reports/runs/<ts>/` 引用）→ "deepseek 三 tier 全过 floor" 待确认是否真执行。
-3. **`vlm_extract` 未经 doc-intel HTTP 路由暴露**：实现 + 单测齐，但 `documents.rs` 零引用 → 扫描件/图片文档**走不到** doc-intel 的 VLM 文本提取链（待确认是否别处接入或确为缺口）。
-4. **`table_structure` 真 SLANet 推理未接**：model 在也只出空 HTML/空表（确定性占位），表格结构识别**尚不可用**。
+1. ~~**ai_annotation 真 LLM gate 弱**~~ **✅ 已补齐（2026-06-19）**：4 角度各 1 真 LLM leg（`ai_annotation_real_llm_gate.rs`）+ human-GT holdout（≥10/角度）+ 真 micro-F1 floor 0.50 ratchet + 接进 secret-gated/nightly CI + 静默 pass 修复。剩余：Tier-1 弱本地（qwen2.5:3b）floor 单跑待补。
+2. ~~**doc-intel real-LLM gate run-log 未落档**~~ **✅ 已落档（2026-06-19）**：DeepSeek N=3 实证 compare macro-F1 1.000（0 parse fail）/ deep_summary recall 0.944 / chapters grounded 1.000，全 ≥ 0.80 floor（`reports/runs/20260619-202901_doc-intel-deepseek/`）—— 坐实 RELEASE v1.3.0 §9.2 "deepseek 实测" claim。gate 仍 `#[ignore]`（secret-gated/nightly CI 跑，非默认 PR）。
+3. **`vlm_extract` 未经 doc-intel HTTP 路由暴露**：实现 + 单测齐，但 `documents.rs` 零引用 → 扫描件/图片文档**走不到** doc-intel 的 VLM 文本提取链（**确为缺口**，记 backlog，非本任务 impl）。
+4. **`table_structure` 真 SLANet 推理未接**：model 在也只出空 HTML/空表（确定性占位），表格结构识别**尚不可用**（记 backlog，非本任务 impl）。
 5. **layout 检测精度未对标注集验证**（无 mAP）：版面检测功能在但准确度无量化证据。
-6. **vision real-VLM F1 落档缺**：N=3 eval lane 只 eprintln 不持久化 → 任何 F1 claim（含 1.0）须配外部 run-log。
+6. ~~**vision real-VLM F1 落档缺**~~ **✅ 已落档（2026-06-19）**：qwen3-vl-plus N=3 known-text token-F1 1.000 + grounding-precision 1.000 + 真 failover（`reports/runs/20260619-204227_vision-qwen3vl-dashscope/`）—— "qwen3-vl-plus F1 1.0" 不再 eprintln-only，源码侧 待确认 收口。新接 `ci.yml` vision real-VLM step（DASHSCOPE-gated）。
 7. **知识库级 RAG（vault-wide）未接**：doc-intel chapters/deep_summary 仅**文档内**检索；跨文档 vault RAG 是 v.next（接 `search::search_with_context` 进 chapters ask / deep_summary context）。
 8. **organize 自动整理 workflow + 精修 UI 偏薄**：后端 analyze→apply 引擎真，但"自动把文件夹整理成案卷"的端到端 workflow/UI 仍是较弱面。
 9. **OSS 当前无 domain agent**：chat/search/RAG/organize/memory 是 base 能力，非 agent；行业 agent 全在 attune-pro。未来 OSS 加 agent 须复制 attune-pro 的 `agent_golden_gate.rs` reliability framework（per CLAUDE.md「Agent 验证铁律」）。

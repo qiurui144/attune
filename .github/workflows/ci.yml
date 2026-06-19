@@ -1238,6 +1238,14 @@ jobs:
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=real-llm-secret-gated::PENDING — no DEEPSEEK_API_KEY / DASHSCOPE_API_KEY secret configured; real-LLM N=3 gate SKIPPED (not a failure)."
           fi
+          # Independent flag for the VISION real-VLM lane (#92): qwen3-vl needs the raw
+          # DashScope key regardless of which TEXT provider was selected above.
+          if [ -n "${DASHSCOPE_API_KEY:-}" ]; then
+            echo "dashscope_present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dashscope_present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=vision-real-vlm::PENDING — no DASHSCOPE_API_KEY; vision real-VLM N=3 lane SKIPPED (not a failure)."
+          fi
 
       - name: Free disk space
         if: steps.keycheck.outputs.configured == 'true'
@@ -1275,7 +1283,9 @@ jobs:
           rc=0
           # ATTUNE_LLM_* (incl. the masked key) come from $GITHUB_ENV set above;
           # ATTUNE_REAL_LLM_SEEDS=3 is the job-level env. Serial, single-thread.
-          for t in doc_intel_real_llm_gate oss_agent_real_llm_gate; do
+          # ai_annotation_real_llm_gate (4 angles, micro-F1 floor 0.50) joined 2026-06-19:
+          # it was OSS attune's weakest real-LLM gate (agent-capabilities.md §5.2 gap #1).
+          for t in doc_intel_real_llm_gate oss_agent_real_llm_gate ai_annotation_real_llm_gate; do
             echo "=== $t (N=$ATTUNE_REAL_LLM_SEEDS) ===" | tee -a "$OUT"
             if ! cargo test -p attune-core --release --test "$t" \
                  -- real_llm --ignored --nocapture --test-threads=1 2>&1 | tee -a "$OUT"; then
@@ -1292,3 +1302,34 @@ jobs:
             echo "::error title=real-llm-secret-gated::A real-LLM N=3 gate fell below its floor. Per Agent 验证铁律: raise the model tier in RELEASE.md or fix the prompt/schema — do NOT relax the floor."
           fi
           exit "$rc"
+
+      # ── Vision real-VLM N=3 lane (#92), DashScope qwen3-vl-plus only ──
+      # Runs the `vision-eval` feature's real-VLM #[ignore] tests (escalate → ground →
+      # score, N=3) against a REAL qwen3 multimodal model. Independent of the text gate
+      # above (it needs the raw DASHSCOPE_API_KEY → ATTUNE_VLM_API_KEY, not the text
+      # ATTUNE_LLM_* env). SKIP-not-BLOCK: no DashScope secret → the keycheck recorded
+      # PENDING and this step is skipped. Lands the §6.3 evidence the eprintln-only lane
+      # never persisted (the "qwen3-vl-plus F1 1.0" claim).
+      - name: Run vision real-VLM N=3 lane (DashScope qwen3-vl)
+        if: steps.keycheck.outputs.dashscope_present == 'true'
+        env:
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          ATTUNE_VLM_MODEL: qwen3-vl-plus
+        working-directory: rust
+        run: |
+          set -o pipefail
+          OUT="$RUNNER_TEMP/vision-real-vlm.log"; : > "$OUT"
+          # DASHSCOPE_API_KEY comes from the step env (masked); the eval lane reads it
+          # directly (qwen_vlm_from_env). Serial, single-thread. Floors are asserted
+          # inside the tests (text-F1 ≥ 0.5, grounding-precision ≥ 0.99).
+          if ! cargo test -p attune-core --release --features vision-eval --lib \
+               -- real_vlm --ignored --nocapture --test-threads=1 2>&1 | tee -a "$OUT"; then
+            echo "::error title=vision-real-vlm::Vision real-VLM N=3 lane fell below its floor. Per Agent 验证铁律: raise the VLM tier in RELEASE.md or fix grounding/prompt — do NOT relax the floor."
+            exit 1
+          fi
+          {
+            echo "## Vision real-VLM N=3 lane (qwen3-vl-plus)"
+            echo '```'
+            grep -E "real-VLM|text_f1|value_f1|grounding_prec|failover|test result:" "$OUT" | tail -20 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

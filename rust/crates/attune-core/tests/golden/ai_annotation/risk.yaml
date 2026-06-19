@@ -1,0 +1,98 @@
+# Holdout corpus for ai_annotation_risk — human-authored GT (Agent 验证铁律: GT is
+# NEVER agent-generated). Each case is a note + the set of GT "target spans" that a
+# correct ⚠️风险 annotation must hit. A located finding is a TP when its snippet
+# overlaps a target span; targets with no matching finding are FN; findings matching
+# no target are FP. Micro-F1 over the corpus is the real-LLM gate metric (floor 0.50).
+#
+# `targets` are VERBATIM substrings of `text` (so a faithful model can reproduce them).
+# `expect_empty: true` cases are precision controls — a benign note with no real risk;
+# any located finding there is a false positive (penalises over-eager models).
+angle: risk
+cases:
+  - id: risk-01-sql-injection
+    text: |
+      后端用户登录接口的查询语句直接把用户名拼进 SQL：SELECT * FROM users WHERE name = '" + name + "'，没有用参数化查询。前端做了长度校验但后端没有再次校验。
+    targets:
+      - "直接把用户名拼进 SQL"
+      - "没有用参数化查询"
+
+  - id: risk-02-hardcoded-secret
+    text: |
+      部署脚本里把数据库密码 admin123 硬编码在 config.py 顶部，提交进了 git 仓库历史。轮换密码时需要同时改三个地方。
+    targets:
+      - "把数据库密码 admin123 硬编码"
+      - "提交进了 git 仓库历史"
+
+  - id: risk-03-missing-error-handling
+    text: |
+      文件上传 handler 用 unwrap() 解析用户传来的 JSON，遇到非法输入会直接 panic 让整个服务崩溃。生产环境没有 catch_unwind 兜底。
+    targets:
+      - "用 unwrap() 解析用户传来的 JSON"
+      - "直接 panic 让整个服务崩溃"
+
+  - id: risk-04-race-condition
+    text: |
+      余额扣减逻辑先读 balance 再写回，两个并发请求之间没有加锁，会出现超卖。压测时偶现负余额。
+    targets:
+      - "先读 balance 再写回"
+      - "没有加锁，会出现超卖"
+
+  - id: risk-05-incomplete-condition
+    text: |
+      退款规则只判断了订单状态为已支付，没有判断退款金额是否超过原始支付金额，可能被构造请求多退。
+    targets:
+      - "没有判断退款金额是否超过原始支付金额"
+      - "可能被构造请求多退"
+
+  - id: risk-06-deprecated-crypto
+    text: |
+      旧系统密码用 MD5 单向哈希存储，没有加盐。一旦库泄露，彩虹表可以快速反查弱口令。
+    targets:
+      - "密码用 MD5 单向哈希存储，没有加盐"
+
+  - id: risk-07-path-traversal
+    text: |
+      下载接口把 URL 里的 filename 参数直接拼到磁盘路径上读取文件，没有过滤 ../，攻击者可读取 /etc/passwd。
+    targets:
+      - "直接拼到磁盘路径上读取文件，没有过滤 ../"
+      - "可读取 /etc/passwd"
+
+  - id: risk-08-no-rate-limit
+    text: |
+      短信验证码接口没有任何频率限制，同一手机号一秒可触发上百次，既被刷爆短信费用又可被用于轰炸他人。
+    targets:
+      - "没有任何频率限制"
+
+  - id: risk-09-trusting-client-input
+    text: |
+      会员等级是前端传过来的 isVip 字段，后端直接信任并据此发放折扣，客户端可篡改请求伪造 VIP。
+    targets:
+      - "后端直接信任"
+      - "客户端可篡改请求伪造 VIP"
+
+  - id: risk-10-resource-leak
+    text: |
+      每次请求都新建一个数据库连接却从不关闭，连接池很快耗尽，几小时后服务拒绝所有新请求。
+    targets:
+      - "新建一个数据库连接却从不关闭"
+      - "连接池很快耗尽"
+
+  - id: risk-11-legal-compliance
+    text: |
+      用户注册时默认勾选了"同意把个人信息共享给第三方营销公司"，且没有提供取消勾选的入口，可能违反个人信息保护相关规定。
+    targets:
+      - "默认勾选"
+      - "可能违反个人信息保护相关规定"
+
+  # ── precision controls (no real risk; any finding = false positive) ──
+  - id: risk-12-benign-empty
+    text: |
+      今天整理了厨房的调味料架，按使用频率重新排了顺序，最常用的盐和糖放在了最顺手的位置。周末打算试做一道番茄牛腩。
+    targets: []
+    expect_empty: true
+
+  - id: risk-13-benign-empty
+    text: |
+      读完了一本关于古典音乐欣赏的入门书，了解到奏鸣曲式通常由呈示部、展开部和再现部三个部分组成，对理解交响乐结构很有帮助。
+    targets: []
+    expect_empty: true
