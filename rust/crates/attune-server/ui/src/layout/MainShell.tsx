@@ -17,6 +17,7 @@ import {
   PrivacyView,
   QuotaView,
   DocIntelView,
+  WritingView,
   WorkbenchView,
   SettingsView,
 } from '../views';
@@ -55,6 +56,7 @@ export function MainShell(): JSX.Element {
         {view === 'privacy' && <PrivacyView />}
         {view === 'quota' && <QuotaView />}
         {view === 'doc-intel' && <DocIntelView />}
+        {view === 'writing' && <WritingView />}
         {view === 'workbench' && <WorkbenchView />}
         {view === 'settings' && <SettingsView />}
       </main>
