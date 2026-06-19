@@ -30,6 +30,9 @@ pub enum SuggestionKind {
     Retrieval,
     /// 画像类:浏览/批注行为积累到阈值,可查看行为画像。
     Profile,
+    /// 连接源类:尚未连接任何第三方账号(WebDAV / IMAP / RSS / Git / …),
+    /// 提示打开账号管理面板连接一个,扩大可被检索的知识来源。
+    ConnectSource,
 }
 
 impl SuggestionKind {
@@ -40,6 +43,7 @@ impl SuggestionKind {
             SuggestionKind::Enrich => "enrich",
             SuggestionKind::Retrieval => "retrieval",
             SuggestionKind::Profile => "profile",
+            SuggestionKind::ConnectSource => "connect_source",
         }
     }
 
@@ -50,16 +54,18 @@ impl SuggestionKind {
             "enrich" => Some(SuggestionKind::Enrich),
             "retrieval" => Some(SuggestionKind::Retrieval),
             "profile" => Some(SuggestionKind::Profile),
+            "connect_source" => Some(SuggestionKind::ConnectSource),
             _ => None,
         }
     }
 
     /// 所有 kind(UI 枚举 / 测试遍历)。
-    pub const ALL: [SuggestionKind; 4] = [
+    pub const ALL: [SuggestionKind; 5] = [
         SuggestionKind::Organize,
         SuggestionKind::Enrich,
         SuggestionKind::Retrieval,
         SuggestionKind::Profile,
+        SuggestionKind::ConnectSource,
     ];
 }
 
@@ -72,6 +78,9 @@ pub enum ActionKind {
     OpenSearch,
     RunSkillEvolution,
     OpenProfile,
+    /// 打开第三方账号管理面板(连接 WebDAV / IMAP / RSS / Git / … 凭据)。
+    /// 连接动作本身零成本(只是把凭据加密落库);采集/同步走既有显式路径。
+    OpenAccountsPanel,
 }
 
 impl ActionKind {
@@ -81,6 +90,7 @@ impl ActionKind {
             ActionKind::OpenSearch => "open_search",
             ActionKind::RunSkillEvolution => "run_skill_evolution",
             ActionKind::OpenProfile => "open_profile",
+            ActionKind::OpenAccountsPanel => "open_accounts_panel",
         }
     }
 }
@@ -171,6 +181,11 @@ pub struct SignalContext {
     pub muted_kinds: Vec<SuggestionKind>,
     /// 用户已 dismiss 的卡 signature 集(本层过滤,避免重复打扰)。
     pub dismissed_signatures: Vec<String>,
+    /// 已连接的第三方账号源数量(WebDAV / IMAP / RSS / Git / …)。
+    /// `None` = 调用方未评估源清单(默认,不出连接卡);`Some(n)` = 已评估,n 个已连接,
+    /// `Some(0)`(≤ 阈值)→ 出"连接第三方账号"卡。纯计数,无凭据/secret。
+    /// 用 Option 区分"未知"与"确为 0",使既有 4 类卡的 caller(默认 None)行为不变。
+    pub connected_source_count: Option<u32>,
 }
 
 // === 阈值常量(确定性,复用已验证语义) ===
@@ -183,6 +198,8 @@ pub const RETRIEVAL_SIGNAL_THRESHOLD: u32 = 5;
 pub const ORGANIZE_MIN_GROUP: usize = 3;
 /// 浏览 + 批注信号合计达此值 → 出"查看画像"卡。
 pub const PROFILE_SIGNAL_THRESHOLD: u32 = 10;
+/// 已连接源数量 ≤ 此值 → 出"连接第三方账号"卡(0 = 一个都没连)。
+pub const CONNECT_SOURCE_THRESHOLD: u32 = 0;
 /// 单卡 ref_ids 上限(防超量膨胀 UI / DB)。
 pub const MAX_REF_IDS: usize = 50;
 
@@ -200,6 +217,12 @@ pub fn evaluate(ctx: &SignalContext) -> Vec<SuggestionCard> {
     run_rule_isolated(&mut cards, ctx, SuggestionKind::Enrich, rule_enrich);
     run_rule_isolated(&mut cards, ctx, SuggestionKind::Retrieval, rule_retrieval);
     run_rule_isolated(&mut cards, ctx, SuggestionKind::Profile, rule_profile);
+    run_rule_isolated(
+        &mut cards,
+        ctx,
+        SuggestionKind::ConnectSource,
+        rule_connect_source,
+    );
 
     // dismiss 过滤(用户已忽略的 signature 不再出现)。
     cards.retain(|c| !ctx.dismissed_signatures.contains(&c.signature));
@@ -334,6 +357,46 @@ fn rule_profile(ctx: &SignalContext) -> Vec<SuggestionCard> {
         action_kind: ActionKind::OpenProfile,
         cost_tier: CostTier::Free,
         cost_note: "画像基于本地确定性统计,免费".into(),
+    }]
+}
+
+/// 连接源类:用户已连接的第三方账号源 ≤ 阈值(默认 0 = 一个都没连)→ 一张
+/// "连接第三方账号"卡(单卡)。仅在用户**已在使用 attune**(有其它确定性活动信号)
+/// 时才出 —— 全新空 vault 不打扰(避免开箱即弹)。
+///
+/// 卡生成零成本:连接动作本身只是把凭据加密落库(Free);采集/同步是点击后既有
+/// 显式路径。signature 用固定 token,在"未连接源"期间稳定(去重幂等)。
+fn rule_connect_source(ctx: &SignalContext) -> Vec<SuggestionCard> {
+    // None = caller 未评估源清单 → 不出卡(既有 4 类卡 caller 默认行为不变)。
+    let connected = match ctx.connected_source_count {
+        Some(n) => n,
+        None => return Vec::new(),
+    };
+    if connected > CONNECT_SOURCE_THRESHOLD {
+        return Vec::new();
+    }
+    // 全新空 vault(零活动)不弹:要求用户至少有一类其它确定性活动信号。
+    let user_is_active = !ctx.missed_queries.is_empty()
+        || !ctx.cluster_candidates.is_empty()
+        || ctx.unprocessed_search_miss > 0
+        || ctx.browse_signal_count > 0
+        || ctx.annotation_marker_count > 0;
+    if !user_is_active {
+        return Vec::new();
+    }
+    let key = vec!["connect_source".to_string()];
+    let signature = SuggestionCard::make_signature(SuggestionKind::ConnectSource, &key);
+    vec![SuggestionCard {
+        signature,
+        kind: SuggestionKind::ConnectSource,
+        title: "还没连接任何外部知识源,要不要连一个?".into(),
+        detail: "连接网盘 / 邮箱 / RSS / Git 等账号,让更多资料能被检索(凭据本地加密保存)"
+            .into(),
+        ref_ids: vec![],
+        action_kind: ActionKind::OpenAccountsPanel,
+        // 连接本身零成本(只是加密保存凭据);采集/同步走既有显式路径,届时另有成本提示。
+        cost_tier: CostTier::Free,
+        cost_note: "连接账号免费(凭据本地 AES-256 加密保存);采集/同步由你显式触发".into(),
     }]
 }
 

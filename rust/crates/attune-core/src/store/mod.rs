@@ -7,6 +7,7 @@ pub mod webdav_remotes;
 pub mod email_accounts;
 pub mod rss_feeds;
 pub mod git_sources;
+pub mod third_party_accounts; // 通用第三方账号凭据保险柜(波 C):加密落库 + 脱敏视图 + connected_source 计数
 mod dirs;
 mod queue;
 mod history;
@@ -889,6 +890,7 @@ impl Store {
         Self::migrate_organization_proposals(conn)?;
         Self::migrate_memory_migrations(conn)?;
         Self::migrate_suggestions(conn)?;
+        Self::migrate_third_party_accounts(conn)?;
         Self::ensure_schema_version(conn)?;
         Ok(())
     }
@@ -908,6 +910,7 @@ impl Store {
         Self::migrate_organization_proposals(&conn)?;
         Self::migrate_memory_migrations(&conn)?;
         Self::migrate_suggestions(&conn)?;
+        Self::migrate_third_party_accounts(&conn)?;
         Self::ensure_schema_version(&conn)?;
         Ok(Self { conn })
     }
