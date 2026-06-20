@@ -23,6 +23,7 @@
 
 use crate::llm::LlmProvider;
 use crate::writing::draft::{draft, DraftRequest};
+use crate::writing::grounding::{ground_segments_with_judge, GroundingConfig, JudgeConfig};
 use crate::writing::{outline_reverse, OutlineNode, SourceMaterial, StyleTarget, WritingError};
 
 /// The structured output of reference-driven generation: ordered (heading, body) sections plus the
@@ -95,11 +96,42 @@ pub fn reference_generate(
             structured: true,
         };
         match draft(llm, &req) {
-            Ok(wr) => {
+            Ok(mut wr) => {
                 any_success = true;
                 merge_bill(&mut bill, &wr.token_bill);
-                if !wr.unverified_spans.is_empty() || wr.is_entirely_unverified() {
+                // `draft` grounds deterministically only; a reference-generated body legitimately
+                // paraphrases the source data (it is not a verbatim copy), so the token-overlap
+                // pass under-credits faithful sections. Re-ground with the LLM-judge fallback (the
+                // §4.5 anti-fabrication path, same one synthesis uses) so a faithful paraphrase
+                // verifies while a fabricated body still cannot (re-link guard intact).
+                let judge_cfg = JudgeConfig { enabled: true, ..Default::default() };
+                let outcome = ground_segments_with_judge(
+                    &mut wr.segments,
+                    source_data,
+                    &GroundingConfig::default(),
+                    &judge_cfg,
+                    Some(llm),
+                );
+                let body_unverified = wr
+                    .segments
+                    .iter()
+                    .any(|s| !s.verified && s.text.trim().chars().count() > 8);
+                if body_unverified || (!wr.segments.is_empty() && wr.segments.iter().all(|s| !s.verified)) {
                     unverified_sections.push(i);
+                }
+                // The judge fallback adds a (small) billable leg; keep cost visible.
+                if outcome.judge_calls > 0 {
+                    bill.judge_llm_tokens.r#in = bill
+                        .judge_llm_tokens
+                        .r#in
+                        .saturating_add(200u32.saturating_mul(outcome.judge_calls));
+                    bill.judge_llm_tokens.out = bill
+                        .judge_llm_tokens
+                        .out
+                        .saturating_add(16u32.saturating_mul(outcome.judge_calls));
+                    if bill.judge_llm_tokens.model.is_empty() {
+                        bill.judge_llm_tokens.model = llm.model_name().to_string();
+                    }
                 }
                 sections.push((heading.clone(), wr.content));
             }
