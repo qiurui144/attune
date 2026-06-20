@@ -204,4 +204,10 @@ ignore_baseline:
   # — the reliability backfill closing agent-capabilities.md §5.2 gap #1; all 4 are
   # env-gated real-LLM legs (DeepSeek/DashScope/Ollama), NOT failure-skips. Observed
   # was 47 pre-change (within the 46+2 budget); +4 → 51, so the ceiling is raised to 51.
-  attune-core: 51
+  # 2026-06-20 re-baselined 51→57: weak-leg increment waves added env-gated real-LLM
+  # gates — monitoring_real_llm_gate ×4 (cross-source verify + digest summary +
+  # deep-research) and writing_real_llm_gate's synthesis + judge legs. Each ignore
+  # reason is "requires real LLM — openai_compat (DeepSeek) via env, or Ollama" /
+  # "real LLM; secret/Ollama-gated" — audited: all real-LLM nightly lanes, ZERO
+  # failure-skips. Observed 57; ceiling raised to 57 (per §7.2 Gate 2 honest bump).
+  attune-core: 57
