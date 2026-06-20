@@ -372,6 +372,10 @@ fn synthesis_real_llm_grounding_and_consistency() {
                 sources,
                 structure: SynthesisStructure::Thematic,
                 max_sources: 0,
+                // Exercise the production path verbatim: the semantic-judge grounding fallback is ON
+                // (it is the fix that lifts abstractive-synthesis grounding above the floor). The
+                // judge re-link guard keeps fact-consistency at 1.0 (no fabrication credited).
+                judge_grounding: true,
             };
             let r = synthesize(&llms, &req)
                 .unwrap_or_else(|e| panic!("[synthesis] case {} err: {e:?}", case.id));

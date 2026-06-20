@@ -23,7 +23,9 @@ use crate::document_intelligence::token_bill::TokenBill;
 use crate::llm::LlmProvider;
 use crate::pii::Redactor;
 
-use super::grounding::{ground_segments, source_has_injection_instruction, GroundingConfig};
+use super::grounding::{
+    ground_segments_with_judge, source_has_injection_instruction, GroundingConfig, JudgeConfig,
+};
 use super::{
     split_segments, Segment, SourceMaterial, WritingError, WritingMode, WritingResult,
     WritingResultT, WRITING_SCHEMA_VERSION,
@@ -57,6 +59,22 @@ pub struct SynthesisRequest {
     pub structure: SynthesisStructure,
     /// Cap on sources actually fed to the model (the rest are dropped with a note). 0 ⇒ no cap.
     pub max_sources: usize,
+    /// Enable the LLM-judge grounding fallback for abstractive sections the deterministic
+    /// token-overlap validator leaves unverified (spec 2026-06-20-semantic-judge-grounding). The
+    /// judge re-link guard preserves the no-fabrication invariant; default `true` (the fix). Set
+    /// `false` to force the pure-deterministic legacy path (e.g. fully offline / cost-sensitive).
+    pub judge_grounding: bool,
+}
+
+impl Default for SynthesisRequest {
+    fn default() -> Self {
+        Self {
+            sources: Vec::new(),
+            structure: SynthesisStructure::default(),
+            max_sources: 0,
+            judge_grounding: true,
+        }
+    }
 }
 
 const MAX_SOURCE_CHARS: usize = 3_000;
@@ -326,8 +344,21 @@ pub fn synthesize(llms: &SynthLlms, req: &SynthesisRequest) -> WritingResultT<Wr
         // so grounding attributes the segment to the right KB item).
         ground_sources.push(SourceMaterial::new(tag.clone(), points.join("。")));
     }
-    let unverified_spans =
-        ground_segments(&mut segments, &ground_sources, &GroundingConfig::default());
+    // Deterministic grounding, then (opt-in) an LLM-judge fallback over the abstractive sections the
+    // token-overlap validator leaves unverified. The judge runs on the reasoning leg and only ever
+    // turns unverified→verified through the deterministic re-link guard (no-fabrication preserved).
+    let judge_cfg = JudgeConfig {
+        enabled: req.judge_grounding,
+        ..Default::default()
+    };
+    let outcome = ground_segments_with_judge(
+        &mut segments,
+        &ground_sources,
+        &GroundingConfig::default(),
+        &judge_cfg,
+        Some(llms.reasoning),
+    );
+    let unverified_spans = outcome.unverified_spans;
 
     let reduce_out = cost::estimate_tokens(&content, llms.reasoning.model_name()) as u32;
     let naive_baseline_tokens: u32 = capped
@@ -349,6 +380,15 @@ pub fn synthesize(llms: &SynthLlms, req: &SynthesisRequest) -> WritingResultT<Wr
     token_bill.reduce_llm_tokens.out = reduce_out;
     token_bill.reduce_llm_tokens.model = llms.reasoning.model_name().to_string();
     token_bill.new_chunks = capped.len() as u32;
+    // Judge leg (💰): estimated tokens for the grounding fallback so cost stays visible (spec §8).
+    // Each judge call ships ~(one unverified sentence + the candidate-span block) in, a tiny JSON
+    // verdict out; estimate from the section content + a per-call span-block proxy.
+    if outcome.judge_calls > 0 {
+        let span_block_est = cost::estimate_tokens(&content, llms.reasoning.model_name()) as u32;
+        token_bill.judge_llm_tokens.r#in = span_block_est.saturating_mul(outcome.judge_calls);
+        token_bill.judge_llm_tokens.out = 16u32.saturating_mul(outcome.judge_calls);
+        token_bill.judge_llm_tokens.model = llms.reasoning.model_name().to_string();
+    }
 
     Ok(WritingResult {
         schema_version: WRITING_SCHEMA_VERSION,
@@ -440,6 +480,7 @@ mod tests {
             sources: sources(),
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
+            judge_grounding: false,
         };
         let r = synthesize(&llms, &req).unwrap();
         assert_eq!(r.mode, WritingMode::Synthesis);
@@ -459,6 +500,7 @@ mod tests {
             sources: vec![SourceMaterial::new("s1", "   ")],
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
+            judge_grounding: false,
         };
         assert_eq!(synthesize(&llms, &req).unwrap_err(), WritingError::NoSourceMaterial);
     }
@@ -472,6 +514,7 @@ mod tests {
             sources: sources(),
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
+            judge_grounding: false,
         };
         assert_eq!(synthesize(&llms, &req).unwrap_err(), WritingError::LlmUnavailable);
     }
@@ -487,6 +530,7 @@ mod tests {
             ],
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
+            judge_grounding: false,
         };
         assert_eq!(synthesize(&llms, &req).unwrap_err(), WritingError::SourceInjection);
         assert_eq!(*llm.map_calls.lock().unwrap(), 0, "no map call when a source is poisoned");
@@ -500,6 +544,7 @@ mod tests {
             sources: sources(),
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
+            judge_grounding: false,
         };
         assert_eq!(synthesize(&llms, &req).unwrap_err().code(), "generation-unavailable");
     }
@@ -514,6 +559,7 @@ mod tests {
             sources: src,
             structure: SynthesisStructure::Thematic,
             max_sources: 2,
+            judge_grounding: false,
         };
         let r = synthesize(&llms, &req).unwrap();
         assert_eq!(*llm.map_calls.lock().unwrap(), 2, "max_sources=2 caps map calls");
@@ -532,6 +578,7 @@ mod tests {
             sources: vec![SourceMaterial::new("s1", "Rust ownership prevents data races.")],
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
+            judge_grounding: false,
         };
         let r = synthesize(&llms, &req).unwrap();
         assert!(!r.unverified_spans.is_empty(), "ungrounded synthesis section must be flagged");
@@ -545,6 +592,7 @@ mod tests {
             sources: sources(),
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
+            judge_grounding: false,
         };
         let r = synthesize(&llms, &req).unwrap();
         let bill = serde_json::to_string(&r.token_bill).unwrap();
@@ -565,6 +613,7 @@ mod tests {
                 sources: vec![SourceMaterial::new("s1", &text)],
                 structure: SynthesisStructure::Thematic,
                 max_sources: 0,
+                judge_grounding: false,
             };
             let a = synthesize(&llms, &req);
             // run twice with a fresh mock (same replies) → identical content.
@@ -582,7 +631,7 @@ mod tests {
             let src: Vec<SourceMaterial> = (0..n)
                 .map(|i| SourceMaterial::new(format!("s{i}"), "所有权在编译期检查内存安全。"))
                 .collect();
-            let req = SynthesisRequest { sources: src, structure: SynthesisStructure::Thematic, max_sources: 0 };
+            let req = SynthesisRequest { sources: src, structure: SynthesisStructure::Thematic, max_sources: 0, judge_grounding: false };
             let _ = synthesize(&llms, &req).unwrap();
             prop_assert_eq!(*llm.map_calls.lock().unwrap(), n);
         }
@@ -596,6 +645,7 @@ mod tests {
                 sources: vec![SourceMaterial::new("s1", &text)],
                 structure: SynthesisStructure::Thematic,
                 max_sources: 0,
+                judge_grounding: false,
             };
             let r = synthesize(&llms, &req).unwrap();
             let total: u32 = r.content.chars().map(|c| c.len_utf16() as u32).sum();
@@ -604,5 +654,120 @@ mod tests {
                 prop_assert!(s.offset[1] <= total);
             }
         }
+    }
+
+    // ── judge-grounding integration (spec 2026-06-20-semantic-judge-grounding §9 E2E) ──
+
+    /// A 3-way mock: MAP / REDUCE / JUDGE distinguished by system-prompt marker. Lets us drive the
+    /// full synthesize() judge fallback deterministically.
+    struct MockSynth3 {
+        map_reply: String,
+        reduce_reply: String,
+        judge_reply: String,
+        judge_calls: Mutex<usize>,
+    }
+    impl MockSynth3 {
+        fn reply_for(&self, system: &str) -> String {
+            if system.contains("要点抽取") {
+                self.map_reply.clone()
+            } else if system.contains("事实归因判定") {
+                *self.judge_calls.lock().unwrap() += 1;
+                self.judge_reply.clone()
+            } else {
+                self.reduce_reply.clone()
+            }
+        }
+    }
+    impl LlmProvider for MockSynth3 {
+        fn chat(&self, system: &str, _u: &str) -> crate::error::Result<(String, TokenUsage)> {
+            Ok((self.reply_for(system), TokenUsage::empty("mock", "mock-model")))
+        }
+        fn chat_with_format_json(
+            &self,
+            system: &str,
+            _u: &str,
+            _schema: Option<&Value>,
+        ) -> crate::error::Result<(String, TokenUsage)> {
+            Ok((self.reply_for(system), TokenUsage::empty("mock", "mock-model")))
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "mock-model"
+        }
+    }
+
+    // An abstractive section that the token-overlap path misses but the judge supports with a REAL
+    // source quote → judge credits it; unverified_spans shrinks; judge token leg is billed.
+    #[test]
+    fn synthesis_judge_credits_abstractive_section() {
+        // REDUCE emits an abstractive paraphrase that shares few literal tokens with the source
+        // (GT: disjoint surface → deterministic grounding misses it).
+        let reduce = json!({"sections":[
+            {"heading":"并行性","body":"该架构可同时计算各位置，无需逐步迭代。"}
+        ]}).to_string();
+        // Judge quotes a real substring of the source.
+        let judge = json!({
+            "supported": true, "span_id": "c1",
+            "evidence_quote": "自注意力机制可以并行处理整个序列"
+        }).to_string();
+        let llm = MockSynth3 {
+            map_reply: json!({"points":["自注意力机制可以并行处理整个序列"]}).to_string(),
+            reduce_reply: reduce,
+            judge_reply: judge,
+            judge_calls: Mutex::new(0),
+        };
+        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
+        let src = vec![SourceMaterial::new(
+            "s1",
+            "Transformer 的自注意力机制可以并行处理整个序列，因此训练速度更快。",
+        )];
+
+        // With judge OFF: the abstractive section stays unverified (the below-floor symptom).
+        let req_off = SynthesisRequest {
+            sources: src.clone(),
+            structure: SynthesisStructure::Thematic,
+            max_sources: 0,
+            judge_grounding: false,
+        };
+        let r_off = synthesize(&llms, &req_off).unwrap();
+        assert!(!r_off.unverified_spans.is_empty(), "GT: deterministic leaves the abstractive section unverified");
+
+        // With judge ON: the section is credited and drops out of unverified.
+        let req_on = SynthesisRequest { judge_grounding: true, ..req_off.clone() };
+        let r_on = synthesize(&llms, &req_on).unwrap();
+        assert!(r_on.unverified_spans.is_empty(), "judge with a real quote grounds the section");
+        assert!(r_on.segments.iter().any(|s| s.verified && s.grounding.iter().any(|g| g.judge_elevated)));
+        assert!(r_on.token_bill.judge_llm_tokens.r#in > 0, "judge cost must be billed (visible)");
+        assert!(*llm.judge_calls.lock().unwrap() >= 1);
+    }
+
+    // The adversarial integration test: a fabricated section + a lying judge whose quote is NOT in
+    // any source → re-link guard rejects; the section stays unverified (fact-consistency preserved).
+    #[test]
+    fn synthesis_judge_cannot_credit_fabricated_section() {
+        let reduce = json!({"sections":[
+            {"heading":"无关","body":"该模型由谷歌在火星发布。"}
+        ]}).to_string();
+        let bogus = json!({"supported": true, "span_id": "c1", "evidence_quote": "谷歌在火星发布"}).to_string();
+        let llm = MockSynth3 {
+            map_reply: json!({"points":["Rust 在编译期检查内存安全"]}).to_string(),
+            reduce_reply: reduce,
+            judge_reply: bogus,
+            judge_calls: Mutex::new(0),
+        };
+        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
+        let src = vec![SourceMaterial::new("s1", "Rust 的所有权系统在编译期检查内存安全。")];
+        let req = SynthesisRequest {
+            sources: src,
+            structure: SynthesisStructure::Thematic,
+            max_sources: 0,
+            judge_grounding: true,
+        };
+        let r = synthesize(&llms, &req).unwrap();
+        assert!(!r.unverified_spans.is_empty(), "fabricated section must stay unverified despite a lying judge");
+        assert!(r.segments.iter().all(|s| !s.grounding.iter().any(|g| g.judge_elevated)),
+            "no judge_elevated ref may form for a fabricated quote (no-fabrication red line)");
     }
 }

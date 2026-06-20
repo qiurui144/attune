@@ -57,6 +57,11 @@ pub struct TokenBill {
     pub map_llm_tokens: ModelLeg,
     /// Reduce leg (reasoning LLM, final synthesis ×1).
     pub reduce_llm_tokens: ModelLeg,
+    /// Judge leg (W5 synthesis semantic-grounding fallback, ×N ungrounded sentences). 0 unless the
+    /// LLM-judge grounding fallback ran. Additive (`#[serde(default)]`) — old clients read a zeroed
+    /// leg and the serialized shape stays back-compatible (spec §10). NOT a secret.
+    #[serde(default)]
+    pub judge_llm_tokens: ModelLeg,
     /// Vendor prompt-cache read tokens (cheap; counted, billed at cache rate).
     pub cache_read_tokens: u32,
     /// Number of chunks served from the chunk_summaries cache (0 new LLM tokens).
@@ -82,6 +87,8 @@ impl TokenBill {
             .saturating_add(self.map_llm_tokens.out)
             .saturating_add(self.reduce_llm_tokens.r#in)
             .saturating_add(self.reduce_llm_tokens.out)
+            .saturating_add(self.judge_llm_tokens.r#in)
+            .saturating_add(self.judge_llm_tokens.out)
     }
 
     /// Headline savings by **token count** (spec §8.5 primary metric):
@@ -109,7 +116,8 @@ impl TokenBill {
         }
         let map_usd = self.map_llm_tokens.usd().unwrap_or(0.0);
         let reduce_usd = self.reduce_llm_tokens.usd().unwrap_or(0.0);
-        let actual_usd = map_usd + reduce_usd;
+        let judge_usd = self.judge_llm_tokens.usd().unwrap_or(0.0);
+        let actual_usd = map_usd + reduce_usd + judge_usd;
         Some((1.0 - actual_usd / naive_usd).clamp(0.0, 1.0))
     }
 

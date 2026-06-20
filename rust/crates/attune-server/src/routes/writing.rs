@@ -367,6 +367,11 @@ pub async fn synthesis_writing(
         sources,
         structure,
         max_sources: body.max_sources,
+        // Semantic-judge grounding fallback ON in production (spec 2026-06-20): it lifts
+        // abstractive-synthesis grounding above the floor while the re-link guard keeps the
+        // no-fabrication invariant. The judge rides the same cloud reasoning provider (💰, only on
+        // sentences the deterministic validator left unverified — user-triggered synthesis only).
+        judge_grounding: true,
     };
     // Same single cloud provider drives both the cheap MAP and reasoning REDUCE legs (parity with
     // documents.rs deep_summary; per-stage model selection is a later routing slice).
