@@ -462,6 +462,7 @@ dependencies = [
  "attune-core",
  "axum",
  "axum-server",
+ "base64 0.22.1",
  "calamine",
  "chrono",
  "clap",
