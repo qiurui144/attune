@@ -150,7 +150,7 @@ pub fn detect_style(citation: &str) -> Option<CiteStyle> {
     }
 
     // Pick the unique top scorer ≥ floor. Tie at the top → ambiguous → None.
-    scores.sort_by(|a, b| b.1.cmp(&a.1));
+    scores.sort_by_key(|s| std::cmp::Reverse(s.1));
     let (top_style, top_score) = scores[0];
     if top_score < STYLE_FLOOR {
         return None;
