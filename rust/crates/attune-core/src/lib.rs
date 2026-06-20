@@ -183,6 +183,7 @@ pub mod vault;
 pub mod vectors;
 pub mod writing;
 pub mod export;  // artifact export engine: IR → xlsx/csv/md/docx/pdf (零成本,无 LLM)
+pub mod skill_runtime;  // skills 编排运行时: retrieve→agent→render→export (💰多步,用户触发,成本上限)
 pub mod skill_evolution;
 pub mod suggestions;  // 零成本主动建议引擎(确定性信号→规则→卡;编译期 no-LLM 守卫)
 
