@@ -41,6 +41,7 @@
 //! call so a poisoned source cannot steer generation or fabricate citations.
 
 pub mod cite;
+pub mod cite_normalize;
 pub mod draft;
 pub mod grounding;
 pub mod outline;
@@ -51,6 +52,10 @@ pub mod templates;
 use serde::{Deserialize, Serialize};
 
 pub use cite::{build_citations, find_inline_anchors, CiteError, CiteStyle, Citation, InlineAnchor, SourceMeta};
+pub use cite_normalize::{
+    check_document, detect_style, normalize_to, scan_citations, CiteConsistencyReport,
+    ConsistencyReport, DetectedCitation,
+};
 pub use grounding::{
     ground_segments, ground_segments_with_judge, source_has_injection_instruction, GroundingConfig,
     JudgeConfig, JudgeGroundOutcome,
