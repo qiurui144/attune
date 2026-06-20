@@ -16,10 +16,17 @@
 
 import type { JSX } from 'preact';
 import { useSignal } from '@preact/signals';
-import { Button } from '../components';
+import { Button, ExportButton } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api, ApiError } from '../store/api';
+import {
+  documentArtifact,
+  tableArtifact,
+  type ExportArtifact,
+  type ExportBlock,
+  type ExportFormat,
+} from '../hooks/useExport';
 
 // ─── response shapes (mirror routes/documents.rs DocEnvelope) ───
 interface Annotation {
@@ -48,6 +55,43 @@ interface DocEnvelope {
 }
 
 type Tab = 'compare' | 'summarize' | 'chapters';
+
+/**
+ * Turn a doc-intelligence result envelope into a downloadable export artifact
+ * (🆓 zero-cost). The narrative report → a Document (md/docx/pdf); an annotation
+ * set → a Table (xlsx/csv/md/pdf). Returns null when there is nothing to export.
+ */
+function buildExportFromEnvelope(
+  env: DocEnvelope,
+): { artifact: ExportArtifact; formats: ExportFormat[]; filename: string } | null {
+  if (env.narrative && env.narrative.trim()) {
+    const blocks: ExportBlock[] = env.narrative
+      .split(/\n{2,}/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((text) => ({ kind: 'paragraph', text }));
+    return {
+      artifact: documentArtifact(blocks, t('docIntel.narrativeHeading')),
+      formats: ['md', 'docx', 'pdf'],
+      filename: 'attune-report',
+    };
+  }
+  const anns = env.annotations ?? [];
+  if (anns.length > 0) {
+    const headers = [
+      t('docIntel.export.colKind'),
+      t('docIntel.export.colSeverity'),
+      t('docIntel.export.colNote'),
+    ];
+    const rows = anns.map((a) => [a.kind, String(a.severity), a.note]);
+    return {
+      artifact: tableArtifact(headers, rows, { title: t('docIntel.export.tableTitle') }),
+      formats: ['xlsx', 'csv', 'md', 'pdf'],
+      filename: 'attune-annotations',
+    };
+  }
+  return null;
+}
 
 function actualBillable(b: TokenBill): number {
   return (b.mapLlmTokens?.in ?? 0) + (b.mapLlmTokens?.out ?? 0) + (b.reduceLlmTokens?.in ?? 0) + (b.reduceLlmTokens?.out ?? 0);
@@ -257,7 +301,23 @@ export function DocIntelView(): JSX.Element {
 
       {env && (
         <div class="doc-intel-result">
-          <CostChip bill={env.tokenBill} />
+          <div
+            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}
+          >
+            <CostChip bill={env.tokenBill} />
+            {(() => {
+              const built = buildExportFromEnvelope(env);
+              if (!built) return null;
+              return (
+                <ExportButton
+                  artifact={built.artifact}
+                  formats={built.formats}
+                  filename={built.filename}
+                  data-testid="docintel-export"
+                />
+              );
+            })()}
+          </div>
 
           {/* compare → marked overlay on the source (right doc) */}
           {env.outputMode === 'marked' && (

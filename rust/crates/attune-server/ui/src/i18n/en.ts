@@ -13,6 +13,12 @@ export const en = {
   'common.close': 'Close',
   'common.back': 'Back',
   'common.next': 'Next',
+  // ─── Artifact export (table/document → xlsx/csv/md/docx/pdf, free download) ──
+  'export.button': 'Export',
+  'export.rendering': 'Rendering…',
+  'export.success': 'Download started',
+  'export.error.generic': 'Export failed, please retry',
+  'export.error.membership': 'This export requires a membership',
   'common.saving': 'Saving…',
   // ─── Third-party account management (wave C / capability B) ──
   'accounts.title': 'Third-party accounts',
@@ -1187,6 +1193,10 @@ export const en = {
   'docIntel.memberGateNotice': 'Semantic verdict / deep summary / chapter Q&A require a paid membership; zero-cost structural compare and chapter list are free.',
   'docIntel.markedHeading': 'Changes highlighted (anchored on the new document)',
   'docIntel.narrativeHeading': 'Layered summary report',
+  'docIntel.export.tableTitle': 'Annotation summary',
+  'docIntel.export.colKind': 'Kind',
+  'docIntel.export.colSeverity': 'Severity',
+  'docIntel.export.colNote': 'Note',
   'docIntel.reviewHeading': 'Chapter-by-chapter review',
   'docIntel.structuredHeading': 'Structured result',
   'docIntel.costTitle': 'Token bill for this call: naive vs actual',
