@@ -438,45 +438,55 @@ pub async fn ask_watch(
     if req.question.trim().is_empty() {
         return Err(AppError::BadRequest("question must not be empty".into()));
     }
-    let llm = state.llm();
+    // tier-3 会员门（free-tier 不得花 token；direct request 同样拒绝）。
+    enforce_member_gate(&state)?;
     let emb = state.embedding();
 
-    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let dek = vault.dek_db()?;
-    let store = vault.store();
-    if store.get_watch(&dek, &id)?.is_none() {
-        return Err(AppError::NotFound("watch-not-found".into()));
-    }
-    // watch-scoped item 集（命中 + 已 digest，取较宽范围）。
-    let scope: std::collections::HashSet<String> = store
-        .list_pending_hits(&id, 500)?
-        .into_iter()
-        .map(|h| h.item_id)
-        .collect();
-
-    // 检索（复用 search）→ 过滤到 scope。
-    let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
-    let vec_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
-    let ctx = attune_core::search::SearchContext {
-        fulltext: ft_guard.as_ref(),
-        vectors: vec_guard.as_ref(),
-        embedding: emb,
-        reranker: None,
-        store,
-        dek: &dek,
+    // dek 在独立 vault 锁段取出（Key32 是 Clone），并在该段内做 watch 存在校验 + scope 收集，
+    // 然后 drop vault guard —— 绝不与 fulltext/vectors 同时持有（防 ABBA 死锁，对齐 search.rs）。
+    let (dek, scope) = {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let dek = vault.dek_db()?;
+        let store = vault.store();
+        if store.get_watch(&dek, &id)?.is_none() {
+            return Err(AppError::NotFound("watch-not-found".into()));
+        }
+        // watch-scoped item 集（命中 + 已 digest，取较宽范围）。
+        let scope: std::collections::HashSet<String> = store
+            .list_pending_hits(&id, 500)?
+            .into_iter()
+            .map(|h| h.item_id)
+            .collect();
+        (dek, scope)
     };
-    let params = attune_core::search::SearchParams::with_defaults(20);
-    let results = attune_core::search::search_with_context(&ctx, req.question.trim(), &params)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // 检索（复用 search）→ 过滤到 scope。锁序严格 fulltext → vectors → vault（热点路径序，
+    // 见 routes/search.rs:178-180），三锁在同一作用域内取齐、用完即 drop。
+    let results = {
+        let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+        let vec_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+        let vault_guard = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let ctx = attune_core::search::SearchContext {
+            fulltext: ft_guard.as_ref(),
+            vectors: vec_guard.as_ref(),
+            embedding: emb,
+            reranker: None,
+            store: vault_guard.store(),
+            dek: &dek,
+        };
+        let params = attune_core::search::SearchParams::with_defaults(20);
+        attune_core::search::search_with_context(&ctx, req.question.trim(), &params)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+    };
     let scoped: Vec<_> = results
         .into_iter()
         .filter(|r| scope.is_empty() || scope.contains(&r.item_id))
         .take(8)
         .collect();
 
-    let Some(llm) = llm else {
-        return Err(AppError::ServiceUnavailable("research-llm-unavailable".into()));
-    };
+    // tier-3 隐私门 + PII 脱敏：privacy.llm 关 → 403；开 → provider 经 RedactingLlmProvider 包裹，
+    // 出网内容（解密 vault 片段 + 用户问题）先脱敏（对齐 writing.rs / chat.rs）。
+    let llm = cloud_llm_or_refuse(&state)?;
 
     // 构造带编号源的 context（grounding 引用核验）。
     let mut ctx_text = String::new();
