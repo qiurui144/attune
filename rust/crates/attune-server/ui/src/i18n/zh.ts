@@ -9,6 +9,12 @@ export const zh = {
   'common.close': '关闭',
   'common.back': '返回',
   'common.next': '下一步',
+  // ─── 交付物导出(表格/文档 → xlsx/csv/md/docx/pdf,零成本下载) ─────
+  'export.button': '导出下载',
+  'export.rendering': '生成中…',
+  'export.success': '已开始下载',
+  'export.error.generic': '导出失败,请重试',
+  'export.error.membership': '该导出需要会员',
   'common.saving': '保存中…',
   // ─── 第三方账号统一管理(波 C / 能力 B) ──────────────────
   'accounts.title': '第三方账号',
@@ -1182,6 +1188,10 @@ export const zh = {
   'docIntel.memberGateNotice': '语义裁决 / 深度总结 / 章节问答需付费会员解锁；零成本的结构对比、章节列表免费可用。',
   'docIntel.markedHeading': '变更高亮（锚在新版文档）',
   'docIntel.narrativeHeading': '分层总结报告',
+  'docIntel.export.tableTitle': '批注汇总',
+  'docIntel.export.colKind': '类型',
+  'docIntel.export.colSeverity': '严重度',
+  'docIntel.export.colNote': '说明',
   'docIntel.reviewHeading': '逐章批阅',
   'docIntel.structuredHeading': '结构化结果',
   'docIntel.costTitle': '本次调用的 token 账单：原始对照实际',

@@ -99,6 +99,10 @@ pub async fn vault_guard(
         // that need the DEK (routes/writing.rs::load_sources). Bypassing here lets the stronger
         // member-gate + privacy-gate run pre-unlock.
         || path.starts_with("/api/v1/writing")
+        // /api/v1/export — artifact export renders client-supplied IR to a
+        // downloadable file. It never touches the vault DEK (no stored data is
+        // read), so it must work pre-unlock just like writing/documents.
+        || path.starts_with("/api/v1/export")
         // memory import: the handler itself rejects sealed/locked vaults with a
         // user-actionable 400 `vault-not-ready` ("先建库并解锁") instead of the
         // guard's generic 403; bypass here so that more specific guidance reaches

@@ -22,6 +22,9 @@ export type { DrawerProps } from './Drawer';
 export { ToastContainer, toast, dismissToast } from './Toast';
 export type { ToastKind, ToastItem } from './Toast';
 
+export { ExportButton } from './ExportButton';
+export type { ExportButtonProps } from './ExportButton';
+
 export { Skeleton } from './Skeleton';
 export type { SkeletonProps } from './Skeleton';
 

@@ -67,6 +67,20 @@ toml = "0.8"
 tempfile = "3"
 pdf-extract = "0.8"
 zip = "2"
+# ── Artifact export engine (export/) — pure-Rust renderers, no system deps ──
+# rust_xlsxwriter: write .xlsx (Excel 2007+). Pure Rust, cross-platform.
+rust_xlsxwriter = "0.95"
+# csv: RFC 4180 CSV writer/reader for csv export (xlsx round-trip re-uses calamine, already a dep).
+csv = "1"
+# docx-rs: write .docx. Pure Rust (also targets WASM). Round-trip verified by unzipping document.xml.
+docx-rs = "0.4"
+# typst-as-lib + typst: pure-Rust typesetting → PDF. CJK font embedded via include_bytes!
+# (assets/fonts/AttuneCJK-subset.ttf) so Chinese renders with no system font (spec R1 top risk).
+# typst-as-lib 0.15.5 pins typst 0.14 — the typst stack must stay on 0.14 to share
+# the same `Document` trait (mismatch → trait-bound errors). Bump all four together.
+typst-as-lib = "0.15"
+typst = "0.14"  # re-exports typst::layout::PagedDocument (typst_library); compile target for typst-pdf
+typst-pdf = "0.14"
 # .attunepkg (tar.gz) 解压 —— 纯 Rust，跨平台含 Windows P0，不依赖系统 tar
 tar = "0.4"
 flate2 = "1"
@@ -154,6 +168,13 @@ attune-core = { path = ".", features = ["test-utils"] }
 # memory_consolidation_agent (L2 → L3 deterministic promotion) — 属性测试需要 proptest.
 # 与 attune-server 同版本（workspace 内统一），dev profile only.
 proptest = "1"
+# export round-trip accuracy gate (tests/export_roundtrip.rs) — independent
+# re-parsers to verify rendered files (incl. CJK PDF un-garbled). Same versions
+# as the library deps so no second copy is pulled.
+calamine = { version = "0.26", features = ["dates"] }
+csv = "1"
+zip = "2"
+pdf-extract = "0.8"
 
 [lints]
 workspace = true

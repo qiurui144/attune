@@ -103,6 +103,9 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/writing/synthesis", post(routes::writing::synthesis_writing))
         .route("/api/v1/writing/terms", post(routes::writing::terms_writing))
         .route("/api/v1/writing/templates", get(routes::writing::templates_writing))
+        // Artifact export — IR → downloadable xlsx/csv/md/docx/pdf. 🆓 zero-cost,
+        // no LLM, no member gate ("输出表格并下载" / "可直接下载的 doc 或 pdf").
+        .route("/api/v1/export", post(routes::export::export_artifact))
         // Ingest + Items + Search
         .route("/api/v1/ingest", post(routes::ingest::ingest))
         .route("/api/v1/feedback", post(routes::feedback::submit_feedback))
