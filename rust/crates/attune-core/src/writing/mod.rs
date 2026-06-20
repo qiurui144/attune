@@ -51,7 +51,10 @@ pub mod templates;
 use serde::{Deserialize, Serialize};
 
 pub use cite::{build_citations, find_inline_anchors, CiteError, CiteStyle, Citation, InlineAnchor, SourceMeta};
-pub use grounding::{ground_segments, source_has_injection_instruction, GroundingConfig};
+pub use grounding::{
+    ground_segments, ground_segments_with_judge, source_has_injection_instruction, GroundingConfig,
+    JudgeConfig, JudgeGroundOutcome,
+};
 pub use outline::{outline_forward, outline_reverse, OutlineNode, OutlineResult};
 pub use synthesis::{synthesize, SynthLlms, SynthesisRequest, SynthesisStructure};
 pub use templates::{
@@ -96,6 +99,13 @@ pub struct GroundingRef {
     /// Number of tokens the segment shares with the source (grounding strength;
     /// the same token-overlap notion as `chat_reliability`).
     pub overlap_tokens: u32,
+    /// `true` iff this ref was credited by the LLM-judge fallback (semantic grounding)
+    /// rather than the deterministic token-overlap path. A judge-elevated ref is always
+    /// re-link verified: its evidence quote is a real substring of the source (the
+    /// no-fabrication guard, spec §11 A). Additive (`#[serde(default)]`) — old clients
+    /// read `false` and treat it like any grounded ref; no schema bump (spec §10).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub judge_elevated: bool,
 }
 
 /// The flavor of a [`GroundingRef`].
