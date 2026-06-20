@@ -16,8 +16,12 @@ use crate::export::{Artifact, ExportFormat};
 use crate::llm::LlmProvider;
 use crate::skill_runtime::compare_to_table::{compare_to_table, ParamComparison};
 use crate::skill_runtime::cost::{self, MAX_TOTAL_TOKENS};
+use crate::skill_runtime::doc_render::{sections_to_document, writing_to_document};
+use crate::skill_runtime::reference_generate::reference_generate;
 use crate::skill_runtime::render::comparison_to_table;
+use crate::skill_runtime::research_synthesis::{parse_structure, research_synthesis};
 use crate::skill_runtime::schema::{InputType, Skill, SkillStep};
+use crate::writing::SourceMaterial;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -28,9 +32,23 @@ use std::collections::BTreeMap;
 pub trait RagResolver {
     /// Return the concatenated text of the given item ids (in order), skipping ids not found.
     fn resolve_items(&self, item_ids: &[String]) -> Result<String, String>;
+
+    /// Return one [`SourceMaterial`] (item_id + text) per resolved id, skipping ids not found.
+    ///
+    /// Document-mode skills (synthesis / reference) need **per-source** material so each retrieved
+    /// item can be grounded independently (a concatenated blob loses provenance). Default impl
+    /// derives a single-source bundle from [`Self::resolve_items`] so existing resolvers stay
+    /// valid; resolvers that can preserve ids should override it (the server's does).
+    fn resolve_sources(&self, item_ids: &[String]) -> Result<Vec<SourceMaterial>, String> {
+        let text = self.resolve_items(item_ids)?;
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![SourceMaterial::new(String::new(), text)])
+    }
 }
 
-/// An in-memory resolver for tests + offline skills.
+/// An in-memory resolver for tests + offline skills. Preserves item ids for per-source grounding.
 pub struct MapResolver(pub BTreeMap<String, String>);
 
 impl RagResolver for MapResolver {
@@ -42,6 +60,16 @@ impl RagResolver for MapResolver {
             }
         }
         Ok(parts.join("\n\n"))
+    }
+
+    fn resolve_sources(&self, item_ids: &[String]) -> Result<Vec<SourceMaterial>, String> {
+        let mut out = Vec::new();
+        for id in item_ids {
+            if let Some(t) = self.0.get(id) {
+                out.push(SourceMaterial::new(id.clone(), t.clone()));
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -158,13 +186,20 @@ pub fn run_skill(
         match step {
             SkillStep::Rag(s) => {
                 let item_ids = resolve_item_ids(&s.input, inputs, &state);
-                let text = resolver
-                    .resolve_items(&item_ids)
+                // Resolve per-source (item_id + text) so document skills keep provenance, and also
+                // derive the concatenated text for table/compare skills — one rag step serves both.
+                let sources = resolver
+                    .resolve_sources(&item_ids)
                     .map_err(|e| SkillError::StepFailed { step_id: s.id.clone(), cause: e })?;
-                state.insert(s.output.clone(), StepValue::Text(text));
+                let text = sources
+                    .iter()
+                    .map(|m| m.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                state.insert(s.output.clone(), StepValue::Rag { text, sources });
             }
             SkillStep::Agent(s) => {
-                // Dispatch by capability id. Only the OSS compare_to_table agent is wired.
+                // Dispatch by capability id (typo → error, never a silent no-op).
                 match s.agent.as_str() {
                     "document_intelligence.compare_to_table" => {
                         let text = lookup_text(&s.input, "text", inputs, &state);
@@ -177,6 +212,65 @@ pub fn run_skill(
                             partial = true;
                         }
                         state.insert(s.output.clone(), StepValue::Comparison(cmp));
+                    }
+                    // research_synthesis (用户例 1/2): multi-domain sources → grounded document.
+                    "writing.research_synthesis" => {
+                        let sources = lookup_sources(&s.input, "sources", &state);
+                        let structure = {
+                            let raw = lookup_string(&s.input, "structure", inputs, &state);
+                            parse_structure(&raw)
+                        };
+                        match research_synthesis(&sources, structure, 0, llm) {
+                            Ok(wr) => {
+                                merge_bill(&mut bill, &wr.token_bill);
+                                if !wr.unverified_spans.is_empty() {
+                                    warnings.push(format!(
+                                        "{} 段综述结论未能回溯到来源，已标记需核实",
+                                        wr.unverified_spans.len()
+                                    ));
+                                    partial = true;
+                                }
+                                state.insert(s.output.clone(), StepValue::Writing(wr));
+                            }
+                            Err(e) => {
+                                // Degrade: record a warning + an empty writing result so the
+                                // terminal export still yields a (degraded) downloadable file.
+                                warnings.push(format!("综述生成失败（{}）", e.code()));
+                                partial = true;
+                                state.insert(s.output.clone(), StepValue::Writing(empty_writing()));
+                            }
+                        }
+                    }
+                    // reference_generate (用户例 4): reference doc + source data → new document.
+                    "writing.reference_generate" => {
+                        let reference = lookup_text(&s.input, "reference", inputs, &state);
+                        let sources = lookup_sources(&s.input, "sources", &state);
+                        let title = lookup_string(&s.input, "title", inputs, &state);
+                        match reference_generate(&reference, &sources, &title, llm) {
+                            Ok(doc) => {
+                                merge_bill(&mut bill, &doc.token_bill);
+                                if !doc.unverified_sections.is_empty() {
+                                    warnings.push(format!(
+                                        "{} 个章节内容未能回溯到素材，已标记需核实",
+                                        doc.unverified_sections.len()
+                                    ));
+                                    partial = true;
+                                }
+                                if !doc.warnings.is_empty() {
+                                    warnings.extend(doc.warnings.iter().cloned());
+                                    partial = true;
+                                }
+                                state.insert(s.output.clone(), StepValue::Reference(doc));
+                            }
+                            Err(e) => {
+                                warnings.push(format!("参考式生成失败（{}）", e.code()));
+                                partial = true;
+                                state.insert(
+                                    s.output.clone(),
+                                    StepValue::Reference(empty_reference()),
+                                );
+                            }
+                        }
                     }
                     other => {
                         return Err(SkillError::StepFailed {
@@ -192,27 +286,52 @@ pub fn run_skill(
                 }
             }
             SkillStep::Synthesize(s) => {
-                // Reserved for document skills; not used by compare_to_table. A skill that
-                // declares it without wiring is a config error → fail (never silent no-op).
-                return Err(SkillError::StepFailed {
-                    step_id: s.id.clone(),
-                    cause: "synthesize step not supported in this OSS slice".to_string(),
-                });
+                // `synthesize` step = a grounded multi-source synthesis over a `rag` step's sources
+                // (same engine as the `writing.research_synthesis` agent; declarable as a step too).
+                let sources = lookup_sources(&s.input, "sources", &state);
+                let structure = parse_structure(&lookup_string(&s.input, "structure", inputs, &state));
+                match research_synthesis(&sources, structure, 0, llm) {
+                    Ok(wr) => {
+                        merge_bill(&mut bill, &wr.token_bill);
+                        if !wr.unverified_spans.is_empty() {
+                            warnings.push(format!(
+                                "{} 段综述结论未能回溯到来源，已标记需核实",
+                                wr.unverified_spans.len()
+                            ));
+                            partial = true;
+                        }
+                        state.insert(s.output.clone(), StepValue::Writing(wr));
+                    }
+                    Err(e) => {
+                        warnings.push(format!("综述生成失败（{}）", e.code()));
+                        partial = true;
+                        state.insert(s.output.clone(), StepValue::Writing(empty_writing()));
+                    }
+                }
+                let used = bill.actual_billable_tokens();
+                if used > MAX_TOTAL_TOKENS {
+                    return Err(SkillError::CostCapExceeded { used, cap: cost::MAX_TOTAL_TOKENS });
+                }
             }
             SkillStep::Render(s) => {
                 let title = lookup_string(&s.input, "title", inputs, &state);
                 let title = if title.is_empty() { skill.title.clone() } else { title };
-                // The render source must be a comparison (compare_to_table skill).
                 let from_key = ref_key(&s.input, "from");
-                let cmp = from_key
-                    .and_then(|k| state.get(&k))
-                    .and_then(|v| v.as_comparison());
-                let artifact = match cmp {
-                    Some(c) => comparison_to_table(c, &title),
-                    None => {
+                let from = from_key.and_then(|k| state.get(&k));
+                let artifact = match from {
+                    // table render ← a parameter comparison.
+                    Some(StepValue::Comparison(c)) => comparison_to_table(c, &title),
+                    // document render ← a writing result (synthesis).
+                    Some(StepValue::Writing(w)) => writing_to_document(w, &title),
+                    // document render ← a reference-generated section list.
+                    Some(StepValue::Reference(r)) => {
+                        sections_to_document(&title, &r.sections, &r.unverified_sections)
+                    }
+                    _ => {
                         return Err(SkillError::StepFailed {
                             step_id: s.id.clone(),
-                            cause: "render `from` did not resolve to a comparison".to_string(),
+                            cause: "render `from` did not resolve to a renderable step output"
+                                .to_string(),
                         });
                     }
                 };
@@ -255,24 +374,33 @@ pub fn run_skill(
 }
 
 /// A value flowing between steps. Typed (not stringly) so the render/export steps can pull a
-/// real `Comparison`/`Artifact` without re-parsing JSON.
+/// real `Comparison`/`Writing`/`Artifact` without re-parsing JSON.
 #[derive(Debug, Clone)]
 enum StepValue {
-    Text(String),
+    /// A `rag` step's output: the concatenated text (for table/compare skills) AND the per-source
+    /// material with ids preserved (for document/synthesis skills).
+    Rag {
+        text: String,
+        sources: Vec<SourceMaterial>,
+    },
     Comparison(ParamComparison),
+    /// A writing-engine result (synthesis) destined for a document render.
+    Writing(crate::writing::WritingResult),
+    /// A reference-generated section list destined for a document render.
+    Reference(crate::skill_runtime::reference_generate::ReferenceDoc),
     Artifact(Artifact),
 }
 
 impl StepValue {
     fn as_text(&self) -> Option<&str> {
         match self {
-            StepValue::Text(t) => Some(t),
+            StepValue::Rag { text, .. } => Some(text),
             _ => None,
         }
     }
-    fn as_comparison(&self) -> Option<&ParamComparison> {
+    fn as_sources(&self) -> Option<&[SourceMaterial]> {
         match self {
-            StepValue::Comparison(c) => Some(c),
+            StepValue::Rag { sources, .. } => Some(sources),
             _ => None,
         }
     }
@@ -281,6 +409,29 @@ impl StepValue {
             StepValue::Artifact(a) => Some(a),
             _ => None,
         }
+    }
+}
+
+/// An empty-but-valid writing result for the degrade path (so a failed synthesis still exports).
+fn empty_writing() -> crate::writing::WritingResult {
+    crate::writing::WritingResult {
+        schema_version: crate::writing::WRITING_SCHEMA_VERSION,
+        mode: crate::writing::WritingMode::Synthesis,
+        content: String::new(),
+        segments: Vec::new(),
+        annotations: Vec::new(),
+        unverified_spans: Vec::new(),
+        token_bill: TokenBill::default(),
+    }
+}
+
+/// An empty-but-valid reference doc for the degrade path.
+fn empty_reference() -> crate::skill_runtime::reference_generate::ReferenceDoc {
+    crate::skill_runtime::reference_generate::ReferenceDoc {
+        sections: Vec::new(),
+        unverified_sections: Vec::new(),
+        warnings: Vec::new(),
+        token_bill: TokenBill::default(),
     }
 }
 
@@ -361,8 +512,8 @@ fn resolve_ref_to_strings(
             _ => Vec::new(),
         };
     }
-    if let Some(StepValue::Text(t)) = state.get(head) {
-        return vec![t.clone()];
+    if let Some(t) = state.get(head).and_then(|v| v.as_text()) {
+        return vec![t.to_string()];
     }
     Vec::new()
 }
@@ -381,6 +532,26 @@ fn lookup_string(
         .into_iter()
         .next()
         .unwrap_or_default()
+}
+
+/// Resolve an input field that references a `rag` step's per-source material (`${rag_output}`).
+/// Returns the source list with item ids preserved; empty if the ref does not resolve to a rag
+/// step output.
+fn lookup_sources(
+    input: &BTreeMap<String, serde_yaml::Value>,
+    field: &str,
+    state: &BTreeMap<String, StepValue>,
+) -> Vec<SourceMaterial> {
+    let Some(raw) = input.get(field).and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    if let Some(inner) = raw.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        let head = inner.split('.').next().unwrap_or(inner);
+        if let Some(sources) = state.get(head).and_then(|v| v.as_sources()) {
+            return sources.to_vec();
+        }
+    }
+    Vec::new()
 }
 
 /// Resolve an input field to a text blob (a step's Text output, e.g. the RAG bundle).

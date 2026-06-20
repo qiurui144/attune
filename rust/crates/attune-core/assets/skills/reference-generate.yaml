@@ -1,0 +1,53 @@
+# OSS 通用 skill: 参考式文档生成 (用户例 4 基础形态)
+# "参考一个标书 + 知识库设备参数文档 → 形成新文档 → 可下载 doc/pdf"
+#
+# 步骤: rag(取参考文档) + rag(取素材文档, 保留每源 item_id)
+#        → agent(复用参考结构骨架 + 用素材逐节生成 grounded 内容)
+#        → render(成 Document IR, 未回溯素材的章节标记 [需核实]) → export(docx, 也可 pdf)
+# 💰 多步 LLM skill → 必须用户显式触发 (trigger.on=manual)。
+# OSS 基础形态: 参考式生成是通用写作 (零行业逻辑); 标书评分增强版走 attune-pro (CAP-4)。
+id: reference-generate
+type: skill
+version: "1.0.0"
+title: 参考式文档生成
+description: 参考一份范文/模板的结构 + 用知识库素材生成新文档（内容回溯素材，未核实章节标记），可下载 docx/pdf
+cost_tier: llm_multi_step
+trigger:
+  on: manual
+  scope: project
+inputs:
+  - { name: reference, type: item_id, required: true }
+  - { name: source_data, type: string_list, required: true }
+  - { name: title, type: string, required: false }
+steps:
+  - type: rag
+    id: load_ref
+    input:
+      item_ids: ["${reference}"]
+    output: ref
+  - type: rag
+    id: load_src
+    input:
+      item_ids: ["${source_data}"]
+    output: src
+  - type: agent
+    id: gen
+    agent: writing.reference_generate
+    input:
+      reference: "${ref}"
+      sources: "${src}"
+      title: "${title}"
+    output: document
+  - type: render
+    id: build
+    as_kind: document
+    input:
+      from: "${document}"
+      title: "${title}"
+    output: artifact
+  - type: export
+    id: out
+    input:
+      artifact: "${artifact}"
+      format: docx
+    output: file

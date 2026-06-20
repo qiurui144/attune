@@ -18,15 +18,21 @@
 
 pub mod compare_to_table;
 pub mod cost;
+pub mod doc_render;
+pub mod reference_generate;
 pub mod registry;
 pub mod render;
+pub mod research_synthesis;
 pub mod runner;
 pub mod schema;
 
 pub use compare_to_table::{compare_to_table, ParamComparison, ParamRow};
 pub use cost::{estimate, SkillEstimate, StepEstimate, MAX_TOTAL_TOKENS};
+pub use doc_render::{sections_to_document, writing_to_document, UNVERIFIED_MARKER};
+pub use reference_generate::{reference_generate, ReferenceDoc};
 pub use registry::{RegisteredSkill, SkillRegistry};
 pub use render::comparison_to_table;
+pub use research_synthesis::{parse_structure, research_synthesis};
 pub use runner::{
     run_skill, validate_inputs, MapResolver, RagResolver, SkillError, SkillRunResult,
 };
