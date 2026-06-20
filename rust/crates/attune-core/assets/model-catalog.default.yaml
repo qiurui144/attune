@@ -1,0 +1,181 @@
+# attune 内置 baseline 模型选型 catalog —— 离线/首发兜底(编进二进制,include_str!)。
+#
+# 设计:本文件是 bench→attune SSOT 数据管道的"freeze 现状"层(spec
+# docs/superpowers/specs/2026-06-20-model-selection-from-bench-drivers.md §10 migration)。
+# 远程签名 catalog(company-mirror)校验通过时覆盖本文件;失败/无网/签名错 → 回退本文件。
+#
+# 每个 role entry 必含 verdict + source(§6.3 数据有源):
+#   verdict: PASS(bench 实测通过) / MEASURED(测了但指标未全验) / PENDING-VERIFY(未实测)
+#   source : vlm-llm-benchmark 仓内 reports 文件:行号,或 attune 现状代码:行号
+#
+# tier key 与 infer/accel.rs 的硬件分类对齐(见 catalog.rs Tier 推导)。
+# 实测源仓: /data/company/project/vlm-llm-benchmark (整仓为 SSOT,用户 2026-06-20 确认)
+
+schema_version: 1
+generated_at: "2026-06-20T00:00:00Z"
+harness_version: "freeze-baseline"   # 内置 baseline,非 bench 导出;远程 catalog 会带真 bench RELEASE 版本
+source_repo: "vlm-llm-benchmark"
+
+tiers:
+  # ─── AMD Ryzen AI (Windows, XDNA NPU + RDNA iGPU) ───────────────────────
+  amd-win:
+    embedding:
+      repo: "Xenova/qwen3-embedding-0.6b"
+      file: "onnx/model_quantized.onnx"
+      dims: 1024
+      ep: directml
+      verdict: PASS
+      metric: "embed hit@1 1.000 nDCG 1.000 p50 875ms"
+      source: "reports/2026-06-19-all-model-matrix-results.en.md:41"
+    rerank:
+      repo: "Xenova/bge-reranker-base"
+      file: "onnx/model_quantized.onnx"
+      ep: cpu
+      verdict: PASS
+      metric: "rerank nDCG 1.000 MRR 1.000 p50 78ms"
+      source: "reports/2026-06-19-all-model-matrix-results.en.md:44"
+    ocr:
+      engine: rapidocr
+      ep: directml                       # AMD DirectML OCR 比 CPU 快 3.4x(468ms vs 1592ms)
+      verdict: PASS
+      metric: "ocr CER 7.04% p50 468ms (CPU 1592ms)"
+      source: "reports/2026-06-19-all-model-matrix-results.en.md:32"
+    asr:
+      engine: sensevoice
+      model: sensevoice-small
+      ep: directml
+      verdict: PASS
+      metric: "asr CER 7.69% RTF 0.073"
+      source: "reports/2026-06-19-all-model-matrix-results.en.md:36"
+
+  # ─── Intel Core Ultra (Windows, NPU + Arc/Iris iGPU) ────────────────────
+  intel-win:
+    embedding:
+      repo: "Xenova/qwen3-embedding-0.6b"
+      file: "onnx/model_quantized.onnx"
+      dims: 1024
+      ep: openvino
+      verdict: PASS
+      metric: "embed hit@1 1.000 nDCG 1.000 p50 617ms"
+      source: "reports/2026-06-19-all-model-matrix-results.en.md:52"
+    rerank:
+      repo: "Xenova/bge-reranker-base"
+      file: "onnx/model_quantized.onnx"
+      ep: cpu
+      verdict: PASS
+      metric: "rerank nDCG 1.000 MRR 1.000 p50 148ms"
+      source: "reports/2026-06-19-all-model-matrix-results.en.md:54"
+    ocr:
+      engine: rapidocr
+      ep: openvino                       # ⚠️ Intel DirectML OCR 全废 CER 202.35% → 强制 OpenVINO
+      verdict: PASS
+      metric: "ocr CER 7.04% p50 797ms (DirectML FAIL CER 202.35%)"
+      source: "reports/2026-06-19-all-model-matrix-results.en.md:33-34"
+    asr:
+      engine: sensevoice
+      model: sensevoice-small
+      ep: openvino
+      verdict: PASS
+      metric: "asr CER 7.69% RTF 0.341"
+      source: "reports/2026-06-19-all-model-matrix-results.en.md:37"
+
+  # ─── NVIDIA (Linux/Win, CUDA) — PENDING-VERIFY ─────────────────────────
+  # bench 有 jetson-agx(cuda) target 但 reports 无 dGPU CUDA 底座实测 → baseline = CPU-tier 模型 + CUDA EP。
+  nvidia-cuda:
+    embedding:
+      repo: "Xenova/bge-m3"
+      file: "onnx/model_quantized.onnx"
+      dims: 1024
+      ep: cuda
+      verdict: PENDING-VERIFY
+      metric: "no dGPU CUDA bench yet"
+      source: "spec:284 (PENDING-VERIFY)"
+    rerank:
+      repo: "Xenova/bge-reranker-base"
+      file: "onnx/model_quantized.onnx"
+      ep: cuda
+      verdict: PENDING-VERIFY
+      metric: ""
+      source: "spec:284 (PENDING-VERIFY)"
+    ocr:
+      engine: rapidocr
+      ep: cuda
+      verdict: PENDING-VERIFY
+      metric: ""
+      source: "spec:284 (PENDING-VERIFY)"
+    asr:
+      engine: whisper
+      model: whisper-small
+      ep: cuda
+      verdict: PENDING-VERIFY
+      metric: ""
+      source: "spec:286 (PENDING-VERIFY)"
+
+  # ─── RISC-V K3 一体机 (SpacemiT K3, llama.cpp RVV) ──────────────────────
+  # 底座 embedding/rerank/ASR/OCR 在 K3 走 K3 推理服务(:8090 收口),非本 catalog 的 ONNX 路径。
+  # 此处仅登记本地 LLM 选型(K3 throughput 1.4 t/s,不适交互/并发)。
+  riscv-k3:
+    llm:
+      model: "qwen2.5-0.5b"
+      ep: cpu
+      verdict: MEASURED
+      metric: "TTFT p50 640ms TPS 1.4 t/s gsm8k 66%"
+      source: "reports/k3-riscv.en.md:20"
+
+  # ─── Rockchip RK1820 PCIe NPU (Linux) ──────────────────────────────────
+  rk1820-npu:
+    llm:
+      model: "qwen3-vl-2b-rk1820"
+      ep: rknn
+      verdict: PASS
+      metric: "TTFT p50 144.6ms TPS 109 t/s translation PASS"
+      source: "reports/rk3588.en.md:40,64-73"
+    asr:
+      engine: rk-asr
+      model: "rk-asr-rk1820"
+      ep: rknn
+      verdict: MEASURED                  # RTF measured; CER PENDING-VERIFY
+      metric: "RTF 0.040-0.066; CER PENDING-VERIFY"
+      source: "reports/rk3588.en.md:41,75-81"
+
+  # ─── Rockchip RK3588 RKNPU3 (Linux) ────────────────────────────────────
+  rk3588-rknpu:
+    embedding:
+      repo: "minicpm-embed-rk3588"
+      file: ""
+      dims: 0
+      ep: rknn
+      verdict: PASS
+      metric: "embed hit@1 1.000 p50 143ms"
+      source: "reports/rk3588.en.md:58,83-91"
+
+  # ─── CPU-fallback (无加速硬件 / 离线首发 = attune 现状 freeze) ──────────
+  cpu-fallback:
+    embedding:
+      repo: "Xenova/bge-m3"               # = embedding.rs 现状默认
+      file: "onnx/model_quantized.onnx"
+      dims: 1024
+      ep: cpu
+      verdict: PASS
+      metric: "current attune default (frozen)"
+      source: "crates/attune-core/src/infer/embedding.rs:52-54"
+    rerank:
+      repo: "Xenova/bge-reranker-base"    # = reranker.rs 现状默认
+      file: "onnx/model_quantized.onnx"
+      ep: cpu
+      verdict: PASS
+      metric: "current attune default (frozen)"
+      source: "crates/attune-core/src/infer/reranker.rs:61"
+    ocr:
+      engine: ppocr                       # = ocr/ppocr.rs 现状 PP-OCRv5 mobile
+      ep: cpu
+      verdict: PASS
+      metric: "rapidocr-cpu CER 7.04% p50 1592ms (bench)"
+      source: "reports/2026-06-19-all-model-matrix-results.en.md:29"
+    asr:
+      engine: whisper                     # CPU tier 保留 whisper:sensevoice CPU FAIL CER 23%
+      model: whisper-small
+      ep: cpu
+      verdict: PASS
+      metric: "sensevoice CPU FAIL CER 23.08% → whisper retained for CPU"
+      source: "reports/2026-06-19-all-model-matrix-results.en.md:35"
