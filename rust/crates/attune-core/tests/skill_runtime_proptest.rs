@@ -78,7 +78,7 @@ proptest! {
     fn render_table_is_rectangular_and_exports(
         params in proptest::collection::vec(token(), 0..8),
     ) {
-        let doc: String = params.iter().cloned().collect::<Vec<_>>().join(" ") + " VALA VALB";
+        let doc: String = params.join(" ") + " VALA VALB";
         let rows_json: Vec<String> = params
             .iter()
             .map(|p| format!(

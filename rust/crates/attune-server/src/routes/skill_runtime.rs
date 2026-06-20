@@ -149,10 +149,8 @@ pub async fn run_runtime_skill(
 
     // A skill with an LLM step is tier-3: enforce the paid member gate + privacy I1/I2.
     let has_llm = skill.steps.iter().any(|s| s.is_llm());
-    if has_llm {
-        if !is_paid(&state) {
-            return Err(membership_required());
-        }
+    if has_llm && !is_paid(&state) {
+        return Err(membership_required());
     }
 
     // Pre-fetch the referenced item text into an in-memory resolver (so the runner never holds
@@ -184,7 +182,7 @@ pub async fn run_runtime_skill(
         mime: result.format.mime().to_string(),
         size_bytes: result.artifact_bytes.len(),
         artifact_base64: b64,
-        artifact: serde_json::to_value(&result.artifact).unwrap_or_else(|_| json!(null)),
+        artifact: serde_json::to_value(&result.artifact).unwrap_or(Value::Null),
         token_bill: serde_json::to_value(&result.token_bill).unwrap_or_else(|_| json!({})),
         warnings: result.warnings,
         partial: result.partial,
