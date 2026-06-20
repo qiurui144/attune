@@ -18,6 +18,7 @@ import {
   QuotaView,
   DocIntelView,
   WritingView,
+  SkillRunnerView,
   WorkbenchView,
   MonitoringView,
   SettingsView,
@@ -58,6 +59,7 @@ export function MainShell(): JSX.Element {
         {view === 'quota' && <QuotaView />}
         {view === 'doc-intel' && <DocIntelView />}
         {view === 'writing' && <WritingView />}
+        {view === 'skill-runner' && <SkillRunnerView />}
         {view === 'workbench' && <WorkbenchView />}
         {view === 'monitoring' && <MonitoringView />}
         {view === 'settings' && <SettingsView />}

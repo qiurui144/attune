@@ -25,6 +25,10 @@ tower-http = { version = "0.6", features = ["cors"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
+# CAP-2: inline (base64) artifact return for POST /skill-runtime/skills/{id}/run —
+# avoids a stateful server-side artifact store (spec §2.2 OUT: no cloud storage).
+# Same pure-Rust crate attune-core already depends on; no new transitive risk.
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
