@@ -2,6 +2,7 @@
 
 pub mod accel;
 pub mod bootstrap_status;
+pub mod catalog;
 pub mod embedding;
 pub mod model_source;
 pub mod model_store;

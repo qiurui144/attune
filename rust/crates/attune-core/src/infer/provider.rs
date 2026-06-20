@@ -1,5 +1,5 @@
 use crate::error::{Result, VaultError};
-use crate::infer::accel::{cached_selection, EpChoice, EpSelectionTelemetry, OpenVinoDevice};
+use crate::infer::accel::{cached_selection, EpChoice, EpSelectionTelemetry, InferTask, OpenVinoDevice};
 use ort::execution_providers::{CPUExecutionProvider, ExecutionProviderDispatch};
 use ort::session::Session;
 use std::path::Path;
@@ -15,8 +15,16 @@ use std::path::Path;
 /// 兑现历史 TODO:从 CUDA→CPU 单分支升级为跨厂商 EP 自动选型(CUDA/DirectML/OpenVINO/
 /// ROCm/VitisAI/TensorRT,按硬件 × 编入 feature × env override 选)。
 pub fn build_session(model_path: &Path) -> Result<Session> {
+    build_session_for_task(model_path, InferTask::Generic)
+}
+
+/// 任务感知版 `build_session` —— OCR session 必须经此传 `InferTask::Ocr`,触发 per-task
+/// EP 规则(Intel 禁 DirectML,实测 CER 202%)。其余底座推理传 `InferTask::Generic`。
+///
+/// 不变量与 `build_session` 一致:EP 注册失败 graceful 降级,绝不 panic、绝不 error,末位 CPU。
+pub fn build_session_for_task(model_path: &Path, task: InferTask) -> Result<Session> {
     let sel = cached_selection();
-    let chain = sel.recommend_ep_chain();
+    let chain = sel.recommend_ep_chain_for(task);
     let telemetry = EpSelectionTelemetry::from_chain(&chain);
     log::debug!(
         "ort EP selection for {}: requested={:?} active~={} (approx)",
@@ -106,5 +114,31 @@ mod tests {
         let d = build_ep_dispatches(&chain);
         // CPU 在链末位 → dispatch 至少 1。
         assert!(!d.is_empty());
+    }
+
+    #[test]
+    fn ocr_task_chain_builds_and_is_directml_free_on_intel_via_provider() {
+        use crate::infer::accel::{recommend_ep_chain_for_task, EpChoice, OpenVinoDevice, InferTask};
+        use crate::platform::AccelKind;
+        // 经 provider 层语义验证:OCR 任务在 Intel 机不会喂 DirectML dispatch。
+        let chain = recommend_ep_chain_for_task(
+            "windows",
+            &[AccelKind::IntelIgpu],
+            &[EpChoice::Cpu, EpChoice::DirectMl, EpChoice::OpenVino(OpenVinoDevice::Auto)],
+            None,
+            InferTask::Ocr,
+        );
+        assert!(!chain.contains(&EpChoice::DirectMl));
+        let d = build_ep_dispatches(&chain);
+        assert!(!d.is_empty(), "OCR chain must still build a non-empty dispatch list");
+    }
+
+    #[test]
+    fn build_session_for_task_generic_equals_default() {
+        // build_session 委托 generic 任务;cached chain 一致(纯回归保护,不起真 session)。
+        let sel = cached_selection();
+        let generic = sel.recommend_ep_chain_for(InferTask::Generic);
+        let default = sel.recommend_ep_chain();
+        assert_eq!(generic, default);
     }
 }

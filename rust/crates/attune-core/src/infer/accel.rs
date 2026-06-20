@@ -94,6 +94,23 @@ impl OpenVinoDevice {
     }
 }
 
+/// 推理任务类别 — 不同任务对同一硬件的 EP 选择不同(per-task EP 规则)。
+///
+/// 背景(bench 实测,vlm-llm-bench reports/2026-06-19-all-model-matrix-results.en.md):
+/// **Intel 机器上 PP-OCR/rapidocr 走 DirectML → CER 202%(全废,完全不可用)**;同机
+/// OpenVINO CER 7.04%。AMD 机器 OCR 走 DirectML 反而比 CPU 快 3.4×(matrix:32)。所以
+/// OCR 任务必须按厂商区分 EP,不能复用通用(embedding/rerank)的 EP 链。
+///
+/// `Generic` = 通用底座推理(embedding / rerank / 一般 ONNX),沿用既有 EP 选型不变。
+/// `Ocr` = OCR 专用,触发 per-task 过滤(Intel 禁 DirectML,强制 OpenVINO 或 CPU 兜底)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InferTask {
+    /// 通用底座推理(embedding / rerank / 其他 ONNX)— 无 per-task EP 限制。
+    Generic,
+    /// OCR(PP-OCR / rapidocr)— Intel 禁 DirectML(实测 CER 202%),AMD 用 DirectML。
+    Ocr,
+}
+
 /// `ATTUNE_ORT_EP` 环境覆盖。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EpOverride {
@@ -227,21 +244,38 @@ impl AccelSelection {
         }
     }
 
-    /// 推荐有序 EP 链。**末位永远 `EpChoice::Cpu`**(兜底不变量)。
+    /// 推荐有序 EP 链(通用任务,= `recommend_ep_chain_for(InferTask::Generic)`)。
     ///
-    /// 规则:
+    /// **末位永远 `EpChoice::Cpu`**(兜底不变量)。规则:
     /// 1. `env=off` → `[Cpu]`(强制 CPU-only)。
     /// 2. `env=force(X)` 且 X 已编入 → `[X, Cpu]`;X 未编入 → 退回自动选型(并 warn)。
     /// 3. 自动:遍历硬件优先级,把「硬件命中 ∧ 已编入」的 EP 依次入链,末尾补 CPU。
     ///
     /// 链中**不含**未编入的 EP(`is_available()==false` 已在 `compiled` 里过滤)。
     pub fn recommend_ep_chain(&self) -> Vec<EpChoice> {
-        recommend_ep_chain_pure(self.os, &self.hardware, &self.compiled, self.env_override.as_ref())
+        self.recommend_ep_chain_for(InferTask::Generic)
+    }
+
+    /// 推荐有序 EP 链 — **任务感知**。在通用链基础上叠加 per-task EP 规则
+    /// (`InferTask::Ocr` 在 Intel 硬件上禁 DirectML,实测 CER 202%)。末位仍恒为 CPU。
+    pub fn recommend_ep_chain_for(&self, task: InferTask) -> Vec<EpChoice> {
+        recommend_ep_chain_for_task(
+            self.os,
+            &self.hardware,
+            &self.compiled,
+            self.env_override.as_ref(),
+            task,
+        )
     }
 
     /// 链首(实际首选)EP — telemetry / UI 显示「预计加速:X」。
     pub fn primary_ep(&self) -> EpChoice {
         self.recommend_ep_chain().into_iter().next().unwrap_or(EpChoice::Cpu)
+    }
+
+    /// 任务感知的链首 EP。
+    pub fn primary_ep_for(&self, task: InferTask) -> EpChoice {
+        self.recommend_ep_chain_for(task).into_iter().next().unwrap_or(EpChoice::Cpu)
     }
 }
 
@@ -327,6 +361,67 @@ pub fn recommend_ep_chain_pure(
     }
 
     dedup_with_cpu_tail(chain)
+}
+
+/// 任务感知的 EP 链选型(在通用 `recommend_ep_chain_pure` 上叠加 per-task 规则)。
+///
+/// 当前唯一 per-task 规则:**OCR 在 Intel 硬件上禁 DirectML**(bench 实测 Intel+DirectML
+/// OCR CER 202% 全废 → 必须 OpenVINO 或 CPU 兜底)。AMD OCR 仍用 DirectML(比 CPU 快 3.4×)。
+///
+/// 实现:`Generic` 任务直接走通用链;`Ocr` 任务先算通用链,然后:
+/// 1. 若机器有 Intel 加速器(IntelIgpu / IntelNpu),从链中**剔除 DirectML**
+///    (含 env `Force(DirectMl)` 的情形 — 已知全废组合,不让它产生垃圾输出);
+/// 2. 若剔除后 Intel iGPU 有 OpenVINO 已编入且不在链中,补 OpenVINO(device=GPU)在 CPU 前;
+/// 3. 末位 CPU 兜底不变量恒成立。
+///
+/// 纯函数,无副作用(可任意 os × hardware × compiled × env × task 组合测试)。
+pub fn recommend_ep_chain_for_task(
+    os: &str,
+    hardware: &[AccelKind],
+    compiled: &[EpChoice],
+    over: Option<&EpOverride>,
+    task: InferTask,
+) -> Vec<EpChoice> {
+    let base = recommend_ep_chain_pure(os, hardware, compiled, over);
+
+    match task {
+        InferTask::Generic => base,
+        InferTask::Ocr => apply_ocr_ep_rules(base, hardware, compiled),
+    }
+}
+
+/// 对一条已选 EP 链施加 OCR per-task 规则(见 `recommend_ep_chain_for_task`)。
+fn apply_ocr_ep_rules(
+    base: Vec<EpChoice>,
+    hardware: &[AccelKind],
+    compiled: &[EpChoice],
+) -> Vec<EpChoice> {
+    let has_intel = hardware
+        .iter()
+        .any(|k| matches!(k, AccelKind::IntelIgpu | AccelKind::IntelNpu));
+
+    // 无 Intel 硬件 → OCR 规则不触发(AMD/NVIDIA 链按通用,DirectML on AMD 是实测最优)。
+    if !has_intel {
+        return base;
+    }
+
+    let is_compiled = |c: EpChoice| compiled.iter().any(|x| x.id() == c.id());
+
+    // Intel + OCR:剔除 DirectML(实测全废),其余保序。
+    let mut filtered: Vec<EpChoice> = base.into_iter().filter(|e| *e != EpChoice::DirectMl).collect();
+
+    // 若有 Intel iGPU 且 OpenVINO 已编入但不在链中(被通用链的 Win→DirectML 分支占位挤掉),
+    // 补 OpenVINO(device=GPU)到 CPU 前 —— 给 Intel OCR 一个实测可用的加速 EP。
+    let has_intel_igpu = hardware.iter().any(|k| matches!(k, AccelKind::IntelIgpu));
+    let ov_gpu = EpChoice::OpenVino(OpenVinoDevice::Gpu);
+    let already_has_ov = filtered.iter().any(|e| e.id() == ov_gpu.id());
+    if has_intel_igpu && is_compiled(ov_gpu) && !already_has_ov {
+        // 插到末位 CPU 之前(若有 CPU);否则 push 后由 dedup_with_cpu_tail 收尾。
+        filtered.push(ov_gpu);
+    }
+
+    // 重新整理(去重 + 末位 CPU 不变量)。
+    dedup_with_cpu_tail(filtered)
 }
 
 /// 把 `candidates` 中首个已编入的 EP 压进链(若都没编入则不压,留给 CPU 兜底)。
@@ -672,6 +767,196 @@ mod tests {
         assert_eq!(*chain.last().unwrap(), EpChoice::Cpu);
         // compiled_eps 必含 CPU。
         assert!(sel.compiled.contains(&EpChoice::Cpu));
+    }
+
+    // ── OCR per-task EP 规则(任务 1:GA-level latent bug 修复) ──────────
+    //
+    // bench 实测:Intel + DirectML OCR CER 202%(全废)→ 必须 OpenVINO 或 CPU。
+    // AMD + DirectML OCR 比 CPU 快 3.4×(保留)。各 tier 末位 CPU 兜底。
+
+    #[test]
+    fn ocr_intel_igpu_windows_never_picks_directml() {
+        // 通用链:Intel iGPU + Win + DirectML 编入 → [directml, cpu](当前会全废)。
+        let generic = recommend_ep_chain_for_task(
+            "windows",
+            &[AccelKind::IntelIgpu],
+            &[EpChoice::Cpu, EpChoice::DirectMl],
+            None,
+            InferTask::Generic,
+        );
+        assert_eq!(chain_ids(&generic), ["directml", "cpu"]);
+
+        // OCR 链:DirectML 被剔除;无 OpenVINO 编入 → 落 [cpu](兜底,不全废)。
+        let ocr = recommend_ep_chain_for_task(
+            "windows",
+            &[AccelKind::IntelIgpu],
+            &[EpChoice::Cpu, EpChoice::DirectMl],
+            None,
+            InferTask::Ocr,
+        );
+        assert_eq!(chain_ids(&ocr), ["cpu"], "Intel OCR must NOT use DirectML (CER 202%)");
+        assert!(!ocr.contains(&EpChoice::DirectMl));
+    }
+
+    #[test]
+    fn ocr_intel_igpu_windows_with_openvino_prefers_openvino() {
+        // Intel iGPU + Win, DirectML + OpenVINO 都编入 → OCR 选 OpenVINO(GPU),不选 DirectML。
+        let ocr = recommend_ep_chain_for_task(
+            "windows",
+            &[AccelKind::IntelIgpu],
+            &[EpChoice::Cpu, EpChoice::DirectMl, EpChoice::OpenVino(OpenVinoDevice::Auto)],
+            None,
+            InferTask::Ocr,
+        );
+        assert!(!ocr.contains(&EpChoice::DirectMl), "Intel OCR must drop DirectML");
+        assert!(ocr.iter().any(|e| e.id() == "openvino"), "Intel OCR should use OpenVINO");
+        assert_eq!(*ocr.last().unwrap(), EpChoice::Cpu);
+    }
+
+    #[test]
+    fn ocr_intel_npu_windows_never_picks_directml() {
+        // 同机 Intel NPU + iGPU(常见 Core Ultra)+ Win + DirectML → OCR 不得选 DirectML。
+        let ocr = recommend_ep_chain_for_task(
+            "windows",
+            &[AccelKind::IntelNpu, AccelKind::IntelIgpu],
+            &[EpChoice::Cpu, EpChoice::DirectMl],
+            None,
+            InferTask::Ocr,
+        );
+        assert!(!ocr.contains(&EpChoice::DirectMl));
+        assert_eq!(*ocr.last().unwrap(), EpChoice::Cpu);
+    }
+
+    #[test]
+    fn ocr_intel_force_directml_env_still_dropped() {
+        // 即便用户 env 强制 DirectML,Intel OCR 仍剔除(已知全废组合,不让产生垃圾输出)。
+        let ocr = recommend_ep_chain_for_task(
+            "windows",
+            &[AccelKind::IntelIgpu],
+            &[EpChoice::Cpu, EpChoice::DirectMl],
+            Some(&EpOverride::Force(EpChoice::DirectMl)),
+            InferTask::Ocr,
+        );
+        assert!(!ocr.contains(&EpChoice::DirectMl), "Intel OCR drops DirectML even on env force");
+        assert_eq!(chain_ids(&ocr), ["cpu"]);
+    }
+
+    #[test]
+    fn ocr_amd_gpu_windows_keeps_directml() {
+        // AMD GPU + Win + DirectML → OCR 保留 DirectML(实测比 CPU 快 3.4×)。
+        let ocr = recommend_ep_chain_for_task(
+            "windows",
+            &[AccelKind::AmdGpu],
+            &[EpChoice::Cpu, EpChoice::DirectMl],
+            None,
+            InferTask::Ocr,
+        );
+        assert_eq!(chain_ids(&ocr), ["directml", "cpu"], "AMD OCR keeps DirectML (3.4x faster)");
+    }
+
+    #[test]
+    fn ocr_amd_npu_windows_directml_present_keeps_it() {
+        // AMD NPU 机(也有 AMD iGPU 走 DirectML) — OCR 不受 Intel 规则影响。
+        let ocr = recommend_ep_chain_for_task(
+            "windows",
+            &[AccelKind::AmdGpu, AccelKind::AmdNpu],
+            &[EpChoice::Cpu, EpChoice::DirectMl, EpChoice::VitisAi],
+            None,
+            InferTask::Ocr,
+        );
+        // AMD 机 OCR 链不剔除 DirectML(无 Intel 硬件 → OCR 规则不触发)。
+        assert!(ocr.contains(&EpChoice::DirectMl) || ocr.contains(&EpChoice::VitisAi));
+        assert_eq!(*ocr.last().unwrap(), EpChoice::Cpu);
+    }
+
+    #[test]
+    fn ocr_cpu_only_machine_falls_back_to_cpu() {
+        // 无加速硬件 → OCR 链 = [cpu](各 tier 末位 CPU 兜底)。
+        let ocr = recommend_ep_chain_for_task("linux", &[], &[EpChoice::Cpu], None, InferTask::Ocr);
+        assert_eq!(chain_ids(&ocr), ["cpu"]);
+    }
+
+    #[test]
+    fn ocr_nvidia_cuda_unaffected_by_ocr_rule() {
+        // NVIDIA + CUDA → OCR 规则只针对 Intel DirectML,不动 CUDA。
+        let ocr = recommend_ep_chain_for_task(
+            "linux",
+            &[AccelKind::NvidiaGpu],
+            &[EpChoice::Cpu, EpChoice::Cuda],
+            None,
+            InferTask::Ocr,
+        );
+        assert_eq!(chain_ids(&ocr), ["cuda", "cpu"]);
+    }
+
+    #[test]
+    fn ocr_intel_igpu_linux_uses_openvino_gpu() {
+        // Linux Intel iGPU: 通用链已是 OpenVINO(GPU)(非 DirectML)→ OCR 链相同(无 DirectML 可剔)。
+        let ocr = recommend_ep_chain_for_task(
+            "linux",
+            &[AccelKind::IntelIgpu],
+            &[EpChoice::Cpu, EpChoice::OpenVino(OpenVinoDevice::Auto)],
+            None,
+            InferTask::Ocr,
+        );
+        assert_eq!(ocr[0], EpChoice::OpenVino(OpenVinoDevice::Gpu));
+        assert_eq!(*ocr.last().unwrap(), EpChoice::Cpu);
+    }
+
+    #[test]
+    fn prop_ocr_intel_never_yields_directml() {
+        // 属性:任何 os × compiled × env 组合下,只要硬件含 Intel,OCR 链恒不含 DirectML。
+        let intel_hw_sets: &[&[AccelKind]] = &[
+            &[AccelKind::IntelIgpu],
+            &[AccelKind::IntelNpu],
+            &[AccelKind::IntelNpu, AccelKind::IntelIgpu],
+        ];
+        let all_eps = [
+            EpChoice::Cpu, EpChoice::Cuda, EpChoice::DirectMl,
+            EpChoice::OpenVino(OpenVinoDevice::Auto), EpChoice::Rocm, EpChoice::VitisAi,
+        ];
+        let overrides: &[Option<EpOverride>] = &[
+            None,
+            Some(EpOverride::Force(EpChoice::DirectMl)),
+            Some(EpOverride::Force(EpChoice::OpenVino(OpenVinoDevice::Auto))),
+        ];
+        for os in ["windows", "linux", "macos"] {
+            for hw in intel_hw_sets {
+                for ep_mask in 0u32..(1 << all_eps.len()) {
+                    let mut compiled: Vec<EpChoice> = all_eps.iter().enumerate()
+                        .filter(|(i, _)| ep_mask & (1 << i) != 0).map(|(_, &e)| e).collect();
+                    if !compiled.contains(&EpChoice::Cpu) {
+                        compiled.push(EpChoice::Cpu);
+                    }
+                    for over in overrides {
+                        let chain = recommend_ep_chain_for_task(os, hw, &compiled, over.as_ref(), InferTask::Ocr);
+                        assert!(!chain.contains(&EpChoice::DirectMl),
+                            "Intel OCR must never contain DirectML: os={os} hw={hw:?} compiled={compiled:?} over={over:?} chain={chain:?}");
+                        assert_eq!(*chain.last().unwrap(), EpChoice::Cpu,
+                            "OCR chain must end with CPU: {chain:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prop_ocr_generic_identical_when_no_intel() {
+        // 无 Intel 硬件时,OCR 链 == 通用链(OCR 规则不改 AMD/NVIDIA 行为)。
+        let non_intel_hw: &[&[AccelKind]] = &[
+            &[AccelKind::NvidiaGpu],
+            &[AccelKind::AmdGpu],
+            &[AccelKind::AmdGpu, AccelKind::AmdNpu],
+            &[],
+        ];
+        let compiled = [EpChoice::Cpu, EpChoice::Cuda, EpChoice::DirectMl, EpChoice::Rocm, EpChoice::VitisAi];
+        for os in ["windows", "linux"] {
+            for hw in non_intel_hw {
+                let generic = recommend_ep_chain_for_task(os, hw, &compiled, None, InferTask::Generic);
+                let ocr = recommend_ep_chain_for_task(os, hw, &compiled, None, InferTask::Ocr);
+                assert_eq!(generic, ocr, "non-Intel: OCR chain must equal generic: os={os} hw={hw:?}");
+            }
+        }
     }
 
     // ── telemetry ──────────────────────────────────────────────────────
