@@ -538,7 +538,21 @@ pub async fn research(
     if req.topic.trim().is_empty() {
         return Err(AppError::BadRequest("topic must not be empty".into()));
     }
-    let llm = state.llm();
+    // tier-3 会员门（free-tier 不得花 token；direct request 同样拒绝）。
+    enforce_member_gate(&state)?;
+
+    // tier-3 隐私门 + PII 脱敏：privacy.llm 开 → provider 经 RedactingLlmProvider 包裹后供综合用；
+    // 关 → 不出网（llm=None），退化为纯 vault extractive（DeepResearch 既有 degraded 语义，
+    // 与 web 禁用一致：降级不报错）。绝不把解密内容裸发 cloud LLM。
+    let llm: Option<Arc<dyn LlmProvider>> = if cloud_llm_egress_enabled(&state) {
+        state.llm().map(|inner| {
+            Arc::new(attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner))
+                as Arc<dyn LlmProvider>
+        })
+    } else {
+        None
+    };
+    let llm_disabled = llm.is_none();
     let emb = state.embedding();
     let web = state.web_search();
     let web_enabled = req.use_web && web.is_some();
@@ -546,33 +560,44 @@ pub async fn research(
     // 1. vault RAG（多源搜之 vault 半）。
     let mut docs: Vec<ResearchDoc> = Vec::new();
     {
-        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let dek = vault.dek_db()?;
-        let store = vault.store();
-        let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
-        let vec_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
-        let ctx = attune_core::search::SearchContext {
-            fulltext: ft_guard.as_ref(),
-            vectors: vec_guard.as_ref(),
-            embedding: emb,
-            reranker: None,
-            store,
-            dek: &dek,
+        // dek + watch scope 在独立 vault 锁段取出（Key32 是 Clone），然后 drop guard。
+        let (dek, scope) = {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            let dek = vault.dek_db()?;
+            let store = vault.store();
+            // watch scope（可选）。
+            let scope: Option<std::collections::HashSet<String>> = match &req.watch_id {
+                Some(wid) => Some(
+                    store
+                        .list_pending_hits(wid, 500)?
+                        .into_iter()
+                        .map(|h| h.item_id)
+                        .collect(),
+                ),
+                None => None,
+            };
+            (dek, scope)
         };
-        let params = attune_core::search::SearchParams::with_defaults(12);
-        let results = attune_core::search::search_with_context(&ctx, req.topic.trim(), &params)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
-        // watch scope（可选）。
-        let scope: Option<std::collections::HashSet<String>> = match &req.watch_id {
-            Some(wid) => Some(
-                store
-                    .list_pending_hits(wid, 500)?
-                    .into_iter()
-                    .map(|h| h.item_id)
-                    .collect(),
-            ),
-            None => None,
+
+        // 检索锁序严格 fulltext → vectors → vault（热点路径序，见 routes/search.rs:178-180），
+        // 三锁同作用域取齐、用完即 drop —— 绝不持 vault 时再取 fulltext/vectors（防 ABBA 死锁）。
+        let results = {
+            let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
+            let vec_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
+            let vault_guard = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            let ctx = attune_core::search::SearchContext {
+                fulltext: ft_guard.as_ref(),
+                vectors: vec_guard.as_ref(),
+                embedding: emb,
+                reranker: None,
+                store: vault_guard.store(),
+                dek: &dek,
+            };
+            let params = attune_core::search::SearchParams::with_defaults(12);
+            attune_core::search::search_with_context(&ctx, req.topic.trim(), &params)
+                .map_err(|e| AppError::Internal(e.to_string()))?
         };
+
         for r in results {
             if let Some(s) = &scope {
                 if !s.is_empty() && !s.contains(&r.item_id) {
@@ -629,6 +654,8 @@ pub async fn research(
         "claims": report.claims,
         "degraded": report.degraded,
         "web_disabled": web_disabled_note,
+        // privacy.llm 关 → LLM 综合被门控掉（纯 vault extractive 降级），UI 可据此提示用户开启。
+        "llm_disabled": llm_disabled,
         "item_id": null,
         "cost_hint": { "tier": if report.degraded { "free" } else { "cloud" },
                        "note": "explicit deep research" }
