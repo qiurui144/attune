@@ -186,29 +186,30 @@ async fn monitoring_round_trip_unlocked() {
     let digest2: serde_json::Value = r.json().await.unwrap();
     assert!(digest2["card_id"].is_null(), "digested hits not re-pushed (cross-time dedup)");
 
-    // 9. ask without LLM provider → 503 research-llm-unavailable (graceful).
+    // 9. ask as a non-member (this harness has no member login) → 403 membership-required.
+    //    tier-3 💰 gate: free / logged-out users are blocked BEFORE any token spend (GA P0-1).
+    //    The LLM-unavailable / privacy-gate / redaction paths are covered with a paid login in
+    //    monitoring_gates_test.rs (eval harness).
     let r = client
         .post(format!("{}/watches/{}/ask", mon, watch_id))
         .json(&serde_json::json!({"question": "what about RVV?"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status().as_u16(), 503, "no LLM → graceful 503");
+    assert_eq!(r.status().as_u16(), 403, "non-member ask → 403 (tier-3 member gate)");
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["code"], "membership-required", "ask gate code");
 
-    // 10. research without LLM → 200 degraded retrieval list (no panic, no crash).
+    // 10. research as a non-member → 403 membership-required (tier-3, same gate).
     let r = client
         .post(format!("{}/research", mon))
         .json(&serde_json::json!({"topic": "RVV", "use_web": false}))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status().as_u16(), 200);
-    let research: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(research["degraded"], true, "no LLM → degraded report");
-    assert!(
-        research["report_markdown"].as_str().unwrap().contains("LLM 不可用"),
-        "degraded report states LLM unavailable"
-    );
+    assert_eq!(r.status().as_u16(), 403, "non-member research → 403 (tier-3 member gate)");
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["code"], "membership-required", "research gate code");
 
     // 11. patch + delete.
     let r = client
