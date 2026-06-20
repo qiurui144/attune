@@ -182,6 +182,7 @@ pub mod taxonomy;
 pub mod vault;
 pub mod vectors;
 pub mod writing;
+pub mod export;  // artifact export engine: IR → xlsx/csv/md/docx/pdf (零成本,无 LLM)
 pub mod skill_evolution;
 pub mod suggestions;  // 零成本主动建议引擎(确定性信号→规则→卡;编译期 no-LLM 守卫)
 
