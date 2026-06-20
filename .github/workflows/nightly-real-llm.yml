@@ -117,7 +117,7 @@ jobs:
           result=passed
           # Run each real-LLM gate by name; serial (one binary at a time, single
           # thread) to share the warm model and bound memory.
-          for t in oss_agent_real_llm_gate doc_intel_real_llm_gate ai_annotation_real_llm_gate monitoring_real_llm_gate writing_real_llm_gate; do
+          for t in oss_agent_real_llm_gate doc_intel_real_llm_gate ai_annotation_real_llm_gate monitoring_real_llm_gate writing_real_llm_gate compare_to_table_real_llm_gate; do
             echo "=== $t ===" | tee -a "$OUTPUT_FILE"
             if ! cargo test -p attune-core --release --test "$t" \
                  -- real_llm --ignored --nocapture --test-threads=1 \
