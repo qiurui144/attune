@@ -7,6 +7,10 @@ use std::collections::BTreeMap;
 
 /// The embedded compare-to-table skill (用户例 3).
 const COMPARE_TO_TABLE_YAML: &str = include_str!("../../assets/skills/compare-to-table.yaml");
+/// The embedded research-synthesis skill (用户例 1/2).
+const RESEARCH_SYNTHESIS_YAML: &str = include_str!("../../assets/skills/research-synthesis.yaml");
+/// The embedded reference-generate skill (用户例 4 基础形态).
+const REFERENCE_GENERATE_YAML: &str = include_str!("../../assets/skills/reference-generate.yaml");
 
 /// A loaded skill plus its provenance (`oss` or `pro:<vertical>`), for the `/skills` listing.
 #[derive(Debug, Clone)]
@@ -29,6 +33,8 @@ impl SkillRegistry {
     pub fn with_builtins() -> Self {
         let mut reg = SkillRegistry::default();
         reg.load_builtin(COMPARE_TO_TABLE_YAML);
+        reg.load_builtin(RESEARCH_SYNTHESIS_YAML);
+        reg.load_builtin(REFERENCE_GENERATE_YAML);
         reg
     }
 

@@ -212,14 +212,32 @@ fn build_resolver(
     Ok(Box::new(MapResolver(map)))
 }
 
-/// The set of item ids the skill's `item_id`-typed inputs resolve to in this run payload.
+/// The set of item ids the skill's inputs resolve to in this run payload.
+///
+/// Covers both `item_id`-typed scalar inputs (e.g. `doc` / `reference`) AND `string_list`-typed
+/// inputs that carry KB item ids (e.g. synthesis `item_ids`, reference `source_data`). The latter
+/// is necessary so document skills' multi-item RAG bundle is pre-decrypted before the LLM step.
 fn collect_item_id_inputs(skill: &skill_runtime::Skill, inputs: &Value) -> Vec<String> {
     let mut ids = Vec::new();
     for spec in &skill.inputs {
-        if spec.ty == skill_runtime::InputType::ItemId {
-            if let Some(s) = inputs.get(&spec.name).and_then(|v| v.as_str()) {
-                ids.push(s.to_string());
+        match spec.ty {
+            skill_runtime::InputType::ItemId => {
+                if let Some(s) = inputs.get(&spec.name).and_then(|v| v.as_str()) {
+                    ids.push(s.to_string());
+                }
             }
+            // A string_list MAY carry item ids (synthesis `item_ids` / reference `source_data`).
+            // Pre-fetch them too; a non-id string just resolves to nothing (skipped downstream).
+            skill_runtime::InputType::StringList => {
+                if let Some(arr) = inputs.get(&spec.name).and_then(|v| v.as_array()) {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            ids.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            skill_runtime::InputType::String => {}
         }
     }
     ids
