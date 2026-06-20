@@ -14,14 +14,77 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use attune_core::entities::extract_entities;
+use attune_core::llm::LlmProvider;
 use attune_core::monitoring::deep_research::{
     DeepResearch, ResearchDoc, ResearchOpts, SourceKind,
 };
 use attune_core::monitoring::digest::{ContentSource, DigestBuilder};
 use attune_core::store::watches::{WatchInput, WatchPatch};
+use std::sync::Arc;
 
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
+
+// ── tier-3 gates（会员门 + 隐私门 + PII 脱敏），与 routes/writing.rs 对齐 ──────
+//
+// `ask_watch` / `research` 都是 tier-3 💰（解密 vault 内容 + 用户问题 → cloud LLM）。
+// 三道门缺一不可（GA P0 修复）：
+//   1. 会员门  — is_paid() 否则 403 membership-required（与 writing.rs / documents.rs 一致）。
+//   2. 隐私门  — privacy.llm 关则拒（fail-closed），杜绝默认偷偷出网。
+//   3. PII 脱敏 — RedactingLlmProvider 包裹后再调，出网内容经脱敏（chat.rs / writing.rs 同纪律）。
+
+/// MemberState::is_paid()? — tier-3 操作的会员门（parity with writing.rs）。
+fn is_paid(state: &SharedState) -> bool {
+    state.member_state.lock().map(|g| g.is_paid()).unwrap_or(false)
+}
+
+/// 会员门：tier-3 操作必须付费会员，否则 403。
+fn enforce_member_gate(state: &SharedState) -> AppResult<()> {
+    if is_paid(state) {
+        Ok(())
+    } else {
+        Err(AppError::detailed(
+            axum::http::StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "error": "this operation requires a paid membership",
+                "code": "membership-required"
+            }),
+        ))
+    }
+}
+
+/// 用户是否在 Privacy 设置里开了 cloud-LLM 出网（privacy.llm）？默认 false（fail-closed），
+/// 与 chat.rs::read_privacy_outbound_enabled / writing.rs::cloud_llm_egress_enabled 一致。
+fn cloud_llm_egress_enabled(state: &SharedState) -> bool {
+    let bytes = match state.vault.lock() {
+        Ok(vault) => vault.store().get_meta("app_settings").ok().flatten(),
+        Err(_) => None,
+    };
+    bytes
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|s| s.get("privacy").and_then(|p| p.get("llm")).and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+/// 解析 tier-3 cloud LLM provider，强制隐私出网门（关 → 403）+ PII 脱敏包裹（出网前脱敏）。
+/// 返回的 provider 已被 RedactingLlmProvider 包裹，调用方直接 chat 即出网内容已脱敏。
+fn cloud_llm_or_refuse(state: &SharedState) -> AppResult<Arc<dyn LlmProvider>> {
+    if !cloud_llm_egress_enabled(state) {
+        return Err(AppError::detailed(
+            axum::http::StatusCode::FORBIDDEN,
+            serde_json::json!({
+                "error": "cloud LLM is disabled in Privacy settings; enable it to use this operation",
+                "code": "cloud-llm-disabled"
+            }),
+        ));
+    }
+    let inner = state
+        .llm()
+        .ok_or_else(|| AppError::ServiceUnavailable("research-llm-unavailable".into()))?;
+    Ok(Arc::new(
+        attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner),
+    ))
+}
 
 // ── Watch 管理 ──────────────────────────────────────────────────────────────
 
