@@ -168,6 +168,13 @@ attune-core = { path = ".", features = ["test-utils"] }
 # memory_consolidation_agent (L2 → L3 deterministic promotion) — 属性测试需要 proptest.
 # 与 attune-server 同版本（workspace 内统一），dev profile only.
 proptest = "1"
+# export round-trip accuracy gate (tests/export_roundtrip.rs) — independent
+# re-parsers to verify rendered files (incl. CJK PDF un-garbled). Same versions
+# as the library deps so no second copy is pulled.
+calamine = { version = "0.26", features = ["dates"] }
+csv = "1"
+zip = "2"
+pdf-extract = "0.8"
 
 [lints]
 workspace = true
