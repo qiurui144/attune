@@ -12,6 +12,7 @@ pub mod documents;
 pub mod dsar;
 pub mod email;
 pub mod errors;
+pub mod export;  // artifact export → downloadable xlsx/csv/md/docx/pdf (零成本,无 LLM)
 pub mod feedback;
 pub mod folder_links;
 pub mod forms;

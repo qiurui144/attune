@@ -74,6 +74,10 @@ tokio = { workspace = true, features = ["test-util"] }
 proptest = "1"
 # MockEmbeddingProvider for memory-reindex route tests (test-only, dev-dep scope).
 attune-core = { path = "../attune-core", features = ["test-utils"] }
+# export route round-trip: re-parse downloaded files (xlsx via calamine, pdf via
+# pdf-extract) to prove the HTTP download is accurate, incl. CJK pdf un-garbled.
+calamine = { version = "0.26", features = ["dates"] }
+pdf-extract = "0.8"
 
 [lints]
 workspace = true

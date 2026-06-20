@@ -32,10 +32,7 @@ fn is_forbidden(c: char) -> bool {
 /// traverse out of that directory.
 pub fn safe_stem(raw: &str) -> String {
     // Take only the final path component (defeats "a/b/../../etc" inputs).
-    let last = raw
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(raw);
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
 
     let mut out = String::with_capacity(last.len().min(MAX_STEM_LEN));
     for c in last.chars() {

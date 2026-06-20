@@ -240,8 +240,12 @@ impl Document {
 }
 
 /// The stable export IR. Either a single [`Table`] or a multi-block [`Document`].
+///
+/// Wire shape (adjacently tagged for a clean REST contract):
+/// `{ "type": "table", "data": { …Table… } }` or
+/// `{ "type": "document", "data": { …Document… } }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Artifact {
     Table(Table),
     Document(Document),
