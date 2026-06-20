@@ -25,8 +25,15 @@
 - **draft**:grounding-precision **1.000±0.000**(floor 0.90)· fact-consistency
   **0.972±0.039**(floor 0.85)。
 - **rewrite**:fact-preservation **0.917±0.068**(floor 0.90)。
-- 证据:`rust/reports/runs/20260619-*-writing-real-llm-deepseek/run.log`。real-LLM gate
-  默认 `#[ignore]`,接 secret-gated CI lane;12+1 sentinel golden(人工 GT,禁 LLM 生成)。
+- **synthesis (W5,语义-judge grounding,2026-06-20)**:grounding-precision
+  **0.951±0.044**(floor 0.90,**纯 token-overlap 时 0.826 不达标**)· fact-consistency
+  **1.000±0.000**(floor 0.85,**判官不误 credit 任何编造**)。token-overlap 对改写式综述句
+  产生结构性假阴性,新增 **LLM-judge fallback**:仅对确定性判 ungrounded 的事实句调判官,判官
+  须给出**源文真实子串**的 evidence_quote,代码侧回链校验(子串+长度)通过才 credit —— 编造句
+  在任何源里都无此 quote,故"不编造"红线由代码守住而非信任判官。模型:deepseek-v4-flash。
+- 证据:`rust/reports/runs/20260619-*-writing-real-llm-deepseek/run.log`(draft/rewrite)+
+  `rust/reports/runs/2026-06-20_semantic-judge-grounding/synthesis_judge_on_flash_n3.log`(W5)。
+  real-LLM gate 默认 `#[ignore]`,接 secret-gated CI lane;每路 ≥11 人工 GT golden(禁 LLM 生成)。
 
 ### Breaking
 - 无。纯增量:新 `/api/v1/writing/*` 端点 + 新 `writing` 模块;不改 doc-intel / chat /
@@ -36,7 +43,11 @@
 - 无需迁移(无 DB 变更,首发草稿态不落库)。老 client 不调新端点不受影响。
 
 ### Known Limitations
-- 首发仅 **W1 起草 + W2 改写**;W3 大纲 / W4 引用 / W5 综述 / W6 术语为后续切片(spec §2.3)。
+- **W5 综述语义-judge grounding**:判官走云端 reasoning 模型(💰),仅对确定性 ungrounded 的事实句
+  触发(非每句),用户显式触发的综述动作内跑、永不后台;判官不可用 / JSON 非法 / quote 非源文子串
+  时降级为纯确定性结果(不 fail、不编造)。判官只能把 unverified→verified,且必过回链校验。
+- 写作引擎覆盖 **W1 起草 + W2 改写 + W5 综述**(judge grounding 已达 floor);W3 大纲 / W4 引用 /
+  W6 术语为后续切片(spec §2.3)。
 - 行业起草(法律文书 / 专利权利要求 / 标书)在 **pro**,经 `WritingTemplate` trait 消费本引擎,
   **不在 OSS**(本期仅通用引擎,trait 扩展点为后续)。
 - 生成走云端 token,需会员 + 已开启 Privacy 云 LLM 出网;弱本地模型(qwen2.5:3b)质量塌时
