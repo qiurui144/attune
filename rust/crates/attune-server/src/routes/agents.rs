@@ -34,7 +34,7 @@ use std::time::Duration;
 /// `LLM_MODEL`（见 capability_dispatch 协议注释 "LLM_ENDPOINT / LLM_API_KEY"）。
 /// 历史 bug：曾发 `ATTUNE_LLM_*`，与 agent 读取的裸 `LLM_*` 不匹配 → LLM agent
 /// 即使配置了 LLM 也恒 exit 4 "LLM_ENDPOINT not set"（§7.3 env-wiring trap）。
-fn llm_env_from_settings(settings: &serde_json::Value) -> Vec<(String, String)> {
+pub fn llm_env_from_settings(settings: &serde_json::Value) -> Vec<(String, String)> {
     let mut env = Vec::new();
     let Some(llm) = settings.get("llm") else { return env };
     if let Some(v) = llm.get("provider").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {

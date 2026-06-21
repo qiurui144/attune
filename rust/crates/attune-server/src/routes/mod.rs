@@ -42,6 +42,7 @@ pub mod scenarios;
 pub mod search;
 pub mod settings;
 pub mod skills;
+pub mod skill_dispatch;  // pro plugin-agent dispatcher for skill_runtime (CAP-4b)
 pub mod skill_runtime;  // skills 编排运行时 REST: list / estimate / run (💰 用户触发)
 pub mod status;
 pub mod suggestions;  // 零成本主动建议引擎 REST(A2)

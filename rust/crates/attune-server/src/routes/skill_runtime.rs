@@ -28,7 +28,7 @@ use std::sync::Arc;
 use attune_core::export::sanitize::download_filename;
 use attune_core::llm::LlmProvider;
 use attune_core::skill_runtime::{
-    self, run_skill, MapResolver, RagResolver, SkillError, SkillRegistry,
+    self, run_skill_with_dispatcher, MapResolver, RagResolver, SkillError, SkillRegistry,
 };
 
 use crate::error::{AppError, AppResult};
@@ -218,8 +218,32 @@ pub async fn run_runtime_skill(
     };
     let model = model_name(&state);
 
-    let result = run_skill(skill, &req.inputs, req.confirm_cost, resolver.as_ref(), llm.as_ref(), &model)
-        .map_err(map_skill_err)?;
+    // If the skill chains a **pro plugin agent** (any agent id outside the OSS namespaces), build
+    // the subprocess-backed dispatcher (install + entitlement + timeout + LLM-env gated). The skill
+    // run is blocking (a pro agent spawns a binary), so the whole `run_skill` moves into
+    // spawn_blocking to avoid stalling a tokio worker. The dispatcher is rebuilt here (resolves
+    // LLM env once, holds cloned Arc handles) so nothing borrows `state` across the blocking call.
+    let dispatcher = crate::routes::skill_dispatch::SubprocessAgentDispatcher::from_state(&state);
+    let confirm_cost = req.confirm_cost;
+    let inputs = req.inputs.clone();
+    let skill_owned = skill.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        run_skill_with_dispatcher(
+            &skill_owned,
+            &inputs,
+            confirm_cost,
+            resolver.as_ref(),
+            llm.as_ref(),
+            &model,
+            dispatcher.as_ref().map(|d| d as &dyn attune_core::skill_runtime::AgentDispatcher),
+        )
+    })
+    .await
+    .map_err(|e| AppError::detailed(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        json!({ "error": format!("skill run join: {e}"), "code": "internal" }),
+    ))?
+    .map_err(map_skill_err)?;
 
     let filename = download_filename(
         result.artifact.title().unwrap_or(&skill.title),
