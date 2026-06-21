@@ -324,12 +324,17 @@ impl SidecarController {
                 module_args: vec![],
             }));
         }
-        // 3) `python -m community_browser_automation` (bundled interpreter).
+        // 3) `python -m community_browser_automation.cli` (bundled interpreter).
+        // NOTE: the package has no top-level `__main__.py`, so
+        // `python -m community_browser_automation` fails — we must target the
+        // `.cli` submodule, whose `if __name__ == "__main__"` block calls
+        // `main()`. Verified against the real tool's `scan` smoke (the bare
+        // package target prints "cannot be directly executed").
         for py in ["python3", "python"] {
             if let Some(p) = which(py) {
                 return Ok(Self::new(SidecarProgram {
                     program: p,
-                    module_args: vec!["-m".into(), "community_browser_automation".into()],
+                    module_args: vec!["-m".into(), "community_browser_automation.cli".into()],
                 }));
             }
         }
@@ -624,6 +629,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(c.program().module_args, vec!["-m", "community_browser_automation"]);
+        // Must target the `.cli` submodule — the bare package has no __main__.py.
+        assert_eq!(
+            c.program().module_args,
+            vec!["-m", "community_browser_automation.cli"]
+        );
     }
 }
