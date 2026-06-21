@@ -7,15 +7,19 @@
 //!
 //! Decoupling: RAG retrieval is behind the [`RagResolver`] trait so the runner is testable
 //! without a live encrypted `Store` (the server passes a `Store`-backed resolver; tests pass an
-//! in-memory map). The agent step dispatches by capability id — only the OSS
-//! `document_intelligence.compare_to_table` agent is wired here; unknown agents error (so a typo
-//! is caught, not silently no-op'd).
+//! in-memory map). The agent step dispatches by capability id: the OSS in-process agents
+//! (`compare_to_table` / `research_synthesis` / `reference_generate`) are wired here directly;
+//! **any other agent id is a pro plugin agent** and is routed through the optional
+//! [`AgentDispatcher`] to that plugin's binary subprocess. With no dispatcher (or a typo'd id the
+//! dispatcher rejects) the step fails-soft into a warning, so a misconfigured skill never silently
+//! ships an empty deliverable — it ships a degraded one with the failure surfaced.
 
 use crate::document_intelligence::token_bill::TokenBill;
 use crate::export::{Artifact, ExportFormat};
 use crate::llm::LlmProvider;
 use crate::skill_runtime::compare_to_table::{compare_to_table, ParamComparison};
 use crate::skill_runtime::cost::{self, MAX_TOTAL_TOKENS};
+use crate::skill_runtime::dispatch::{agent_doc_to_document, parse_agent_doc, AgentDispatcher, AgentDocOutput};
 use crate::skill_runtime::doc_render::{sections_to_document, writing_to_document};
 use crate::skill_runtime::reference_generate::reference_generate;
 use crate::skill_runtime::render::comparison_to_table;
@@ -29,7 +33,7 @@ use std::collections::BTreeMap;
 ///
 /// Implemented by the server over a `Store` + DEK; in tests, an in-memory map. Returning `Ok`
 /// with fewer items than requested is allowed (missing ids are skipped with a warning).
-pub trait RagResolver {
+pub trait RagResolver: Send {
     /// Return the concatenated text of the given item ids (in order), skipping ids not found.
     fn resolve_items(&self, item_ids: &[String]) -> Result<String, String>;
 
@@ -168,6 +172,24 @@ pub fn run_skill(
     llm: &dyn LlmProvider,
     model: &str,
 ) -> Result<SkillRunResult, SkillError> {
+    run_skill_with_dispatcher(skill, inputs, confirm_cost, resolver, llm, model, None)
+}
+
+/// Like [`run_skill`] but with an [`AgentDispatcher`] for **pro plugin agent** steps (law
+/// `legal_drafter`, patent `oa_response`, …). OSS agent ids are still handled in-process; any
+/// other id is routed to `dispatcher`. `None` ⇒ OSS-only (a plugin agent step then fails-soft to
+/// a degraded artifact + warning, never a panic). The server passes a subprocess-backed
+/// dispatcher (which enforces the install + entitlement + timeout + LLM-env boundary).
+#[allow(clippy::too_many_arguments)]
+pub fn run_skill_with_dispatcher(
+    skill: &Skill,
+    inputs: &Value,
+    confirm_cost: bool,
+    resolver: &dyn RagResolver,
+    llm: &dyn LlmProvider,
+    model: &str,
+    dispatcher: Option<&dyn AgentDispatcher>,
+) -> Result<SkillRunResult, SkillError> {
     validate_inputs(skill, inputs)?;
 
     // Cost-confirmation gate for paid skills (spec §8).
@@ -272,11 +294,61 @@ pub fn run_skill(
                             }
                         }
                     }
-                    other => {
+                    // A typo'd OSS capability (an id in the reserved OSS namespaces that didn't
+                    // match an in-process arm) is a build error, not a plugin agent — caught hard
+                    // so a misspelled built-in is never silently degraded.
+                    other if is_reserved_oss_namespace(other) => {
                         return Err(SkillError::StepFailed {
                             step_id: s.id.clone(),
-                            cause: format!("unknown agent capability `{other}`"),
+                            cause: format!("unknown OSS agent capability `{other}`"),
                         });
+                    }
+                    // Any other agent id is a **pro plugin agent** — route to the dispatcher
+                    // (subprocess on the server, stub in tests). Fail-soft: a dispatch failure
+                    // (no dispatcher / unknown id / not installed / timeout / non-zero exit)
+                    // records a warning + an empty doc so the export still yields a (degraded)
+                    // file rather than aborting the whole skill.
+                    plugin_agent => {
+                        let agent_input = build_agent_input(&s.input, inputs, &state);
+                        match dispatcher {
+                            None => {
+                                warnings.push(format!(
+                                    "插件 agent `{plugin_agent}` 未接入调度器，已跳过（请安装对应 pro 插件）"
+                                ));
+                                partial = true;
+                                state.insert(s.output.clone(), StepValue::AgentDoc(AgentDocOutput::default()));
+                            }
+                            Some(d) => match d.dispatch(plugin_agent, &agent_input) {
+                                Ok(out) => {
+                                    bill.map_llm_tokens.r#in =
+                                        bill.map_llm_tokens.r#in.saturating_add(out.llm_tokens);
+                                    if bill.map_llm_tokens.model.is_empty() {
+                                        bill.map_llm_tokens.model = model.to_string();
+                                    }
+                                    let doc = parse_agent_doc(&out.envelope);
+                                    if !doc.red_lines.is_empty() {
+                                        warnings.push(format!(
+                                            "插件 agent `{plugin_agent}` 触发 {} 条红线，已在文书顶部标注",
+                                            doc.red_lines.len()
+                                        ));
+                                        partial = true;
+                                    }
+                                    if !doc.needs_confirm_idx.is_empty() {
+                                        warnings.push(format!(
+                                            "{} 处需人工确认，已在对应段落标记",
+                                            doc.needs_confirm_idx.len()
+                                        ));
+                                        partial = true;
+                                    }
+                                    state.insert(s.output.clone(), StepValue::AgentDoc(doc));
+                                }
+                                Err(e) => {
+                                    warnings.push(format!("插件 agent `{plugin_agent}` 调度失败（{e}）"));
+                                    partial = true;
+                                    state.insert(s.output.clone(), StepValue::AgentDoc(AgentDocOutput::default()));
+                                }
+                            },
+                        }
                     }
                 }
                 // Cost cap check after each LLM step (spec R3).
@@ -327,6 +399,8 @@ pub fn run_skill(
                     Some(StepValue::Reference(r)) => {
                         sections_to_document(&title, &r.sections, &r.unverified_sections)
                     }
+                    // document render ← a pro plugin agent's document-shaped output.
+                    Some(StepValue::AgentDoc(d)) => agent_doc_to_document(d, &title),
                     _ => {
                         return Err(SkillError::StepFailed {
                             step_id: s.id.clone(),
@@ -388,6 +462,8 @@ enum StepValue {
     Writing(crate::writing::WritingResult),
     /// A reference-generated section list destined for a document render.
     Reference(crate::skill_runtime::reference_generate::ReferenceDoc),
+    /// A pro plugin agent's document-shaped output (from the [`AgentDispatcher`]).
+    AgentDoc(AgentDocOutput),
     Artifact(Artifact),
 }
 
@@ -445,6 +521,90 @@ fn merge_bill(into: &mut TokenBill, from: &TokenBill) {
     into.reduce_llm_tokens.out = into.reduce_llm_tokens.out.saturating_add(from.reduce_llm_tokens.out);
     if into.reduce_llm_tokens.model.is_empty() {
         into.reduce_llm_tokens.model = from.reduce_llm_tokens.model.clone();
+    }
+}
+
+/// The reserved namespaces of the OSS in-process agents. An agent id in one of these that did
+/// not match an in-process arm is a typo (a misspelled built-in), caught as a hard error rather
+/// than degraded as if it were a plugin agent. Plugin agent ids (e.g. `legal_drafter`,
+/// `oa_response_agent`) are bare names outside these namespaces and route to the dispatcher.
+const RESERVED_OSS_NAMESPACES: [&str; 2] = ["document_intelligence.", "writing."];
+
+/// True if `agent` is in a reserved OSS namespace (so an unmatched id is a built-in typo).
+fn is_reserved_oss_namespace(agent: &str) -> bool {
+    RESERVED_OSS_NAMESPACES.iter().any(|ns| agent.starts_with(ns))
+}
+
+/// Build the stdin JSON object a **plugin agent** receives, from a skill agent-step's `input`
+/// map. Each YAML value is resolved: a `"${ref}"` string is replaced with the resolved value
+/// (user input scalar/list, or a prior rag step's text blob); a nested mapping/sequence is
+/// recursively resolved; any other literal (string/number/bool) passes through. This is how the
+/// declarative skill yaml feeds a typed agent input (e.g. `legal_drafter`'s `{ docType, caseId,
+/// facts: { freeText } }`) without the runner knowing each agent's schema.
+fn build_agent_input(
+    input: &BTreeMap<String, serde_yaml::Value>,
+    user_inputs: &Value,
+    state: &BTreeMap<String, StepValue>,
+) -> Value {
+    let mut obj = serde_json::Map::new();
+    for (k, v) in input {
+        obj.insert(k.clone(), resolve_yaml_value(v, user_inputs, state));
+    }
+    Value::Object(obj)
+}
+
+/// Resolve one yaml value into JSON, expanding `${...}` string refs and recursing into
+/// maps/sequences. A `${ref}` that does not resolve becomes JSON null (the agent's schema
+/// validation then decides — a required field missing surfaces as the agent's own input error).
+fn resolve_yaml_value(
+    v: &serde_yaml::Value,
+    user_inputs: &Value,
+    state: &BTreeMap<String, StepValue>,
+) -> Value {
+    match v {
+        serde_yaml::Value::String(s) => {
+            if s.starts_with("${") && s.ends_with('}') {
+                // Prefer a list expansion (user string_list) → JSON array; else first scalar; else
+                // a rag step's text blob; else null.
+                let resolved = resolve_ref_to_strings(s, user_inputs, state);
+                match resolved.len() {
+                    0 => {
+                        // maybe it's a ${rag_output} text ref.
+                        let inner = s.trim_start_matches("${").trim_end_matches('}');
+                        let head = inner.split('.').next().unwrap_or(inner);
+                        if let Some(t) = state.get(head).and_then(|sv| sv.as_text()) {
+                            Value::String(t.to_string())
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    1 => Value::String(resolved.into_iter().next().unwrap()),
+                    _ => Value::Array(resolved.into_iter().map(Value::String).collect()),
+                }
+            } else {
+                Value::String(s.clone())
+            }
+        }
+        serde_yaml::Value::Mapping(m) => {
+            let mut obj = serde_json::Map::new();
+            for (mk, mv) in m {
+                if let Some(key) = mk.as_str() {
+                    obj.insert(key.to_string(), resolve_yaml_value(mv, user_inputs, state));
+                }
+            }
+            Value::Object(obj)
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            Value::Array(seq.iter().map(|e| resolve_yaml_value(e, user_inputs, state)).collect())
+        }
+        serde_yaml::Value::Bool(b) => Value::Bool(*b),
+        serde_yaml::Value::Number(n) => {
+            serde_json::Number::from_f64(n.as_f64().unwrap_or(0.0))
+                .map(Value::Number)
+                .unwrap_or(Value::Null)
+        }
+        serde_yaml::Value::Null => Value::Null,
+        _ => Value::Null,
     }
 }
 
@@ -699,5 +859,211 @@ steps:
         let Artifact::Table(t) = &res.artifact else { panic!() };
         assert_eq!(t.headers[1], "甲");
         assert_eq!(t.headers[2], "乙");
+    }
+
+    // ───────────────── pro plugin agent dispatch (CAP-4b) ─────────────────
+
+    use crate::skill_runtime::dispatch::{AgentDispatcher, DispatchOutput};
+    use std::cell::RefCell;
+
+    /// A pro-agent skill: rag → (plugin) agent → document render → export docx.
+    const PRO_SKILL_YAML: &str = r#"
+id: complaint-draft-pro
+type: skill
+version: "1.0.0"
+title: 起诉状起草
+cost_tier: llm_multi_step
+trigger: { on: manual, scope: project }
+inputs:
+  - { name: caseId, type: string, required: true }
+  - { name: facts, type: string, required: true }
+steps:
+  - type: agent
+    id: draft
+    agent: legal_drafter
+    input:
+      docType: complaint
+      caseId: "${caseId}"
+      facts: { freeText: "${facts}", useExtracted: false }
+    output: drafted
+  - type: render
+    id: build
+    as_kind: document
+    input: { from: "${drafted}", title: "民事起诉状" }
+    output: artifact
+  - type: export
+    id: out
+    input: { artifact: "${artifact}", format: docx }
+    output: file
+"#;
+
+    /// A stub dispatcher recording the (agent_id, input) it was called with and returning a
+    /// canned envelope. Lets the runner be exercised without a live plugin subprocess.
+    struct StubDispatcher {
+        calls: RefCell<Vec<(String, Value)>>,
+        result: Result<DispatchOutput, String>,
+    }
+    impl StubDispatcher {
+        fn ok(envelope: Value, tokens: u32) -> Self {
+            StubDispatcher {
+                calls: RefCell::new(Vec::new()),
+                result: Ok(DispatchOutput { envelope, llm_tokens: tokens }),
+            }
+        }
+        fn err(msg: &str) -> Self {
+            StubDispatcher { calls: RefCell::new(Vec::new()), result: Err(msg.to_string()) }
+        }
+    }
+    impl AgentDispatcher for StubDispatcher {
+        fn dispatch(&self, agent_id: &str, input: &Value) -> Result<DispatchOutput, String> {
+            self.calls.borrow_mut().push((agent_id.to_string(), input.clone()));
+            self.result.clone()
+        }
+    }
+
+    fn empty_resolver() -> MapResolver {
+        MapResolver(BTreeMap::new())
+    }
+
+    fn draft_envelope() -> Value {
+        json!({
+            "computation": {
+                "docType": "complaint",
+                "draft": "全文……",
+                "sections": [
+                    { "heading": "诉讼请求", "body": "请求判令被告偿还借款本金 10 万元及利息。" },
+                    { "heading": "事实与理由", "body": "原告与被告于 2024 年签订借款合同，被告逾期未还。" }
+                ],
+                "unresolved": [],
+                "disclaimer": "本文书为 AI 辅助初稿，须经执业律师审核后使用。"
+            },
+            "red_lines_violated": [],
+            "missing_evidence": [],
+            "followups": []
+        })
+    }
+
+    #[test]
+    fn pro_agent_dispatched_and_rendered_to_docx() {
+        let skill = parse_skill_yaml(PRO_SKILL_YAML).unwrap();
+        let inputs = json!({ "caseId": "case-1", "facts": "借款 10 万逾期未还" });
+        let disp = StubDispatcher::ok(draft_envelope(), 4200);
+        let res = run_skill_with_dispatcher(
+            &skill, &inputs, true, &empty_resolver(), &good_llm(), "deepseek-v4-flash", Some(&disp),
+        )
+        .unwrap();
+        // dispatcher was called with the right agent id + resolved typed input.
+        let calls = disp.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "legal_drafter");
+        assert_eq!(calls[0].1["docType"], "complaint");
+        assert_eq!(calls[0].1["caseId"], "case-1");
+        assert_eq!(calls[0].1["facts"]["freeText"], "借款 10 万逾期未还");
+        assert_eq!(calls[0].1["facts"]["useExtracted"], false);
+        // a docx file was produced.
+        assert_eq!(res.format, ExportFormat::Docx);
+        assert!(!res.artifact_bytes.is_empty());
+        assert_eq!(&res.artifact_bytes[..2], b"PK", "docx is a zip");
+        // the rendered document carries the drafted sections + disclaimer.
+        let Artifact::Document(d) = &res.artifact else { panic!() };
+        assert_eq!(d.title.as_deref(), Some("民事起诉状"));
+        let s = serde_json::to_string(d).unwrap();
+        assert!(s.contains("诉讼请求"));
+        assert!(s.contains("执业律师"));
+        assert!(!res.partial, "clean draft is not partial");
+        assert_eq!(res.token_bill.map_llm_tokens.r#in, 4200, "agent tokens billed");
+    }
+
+    #[test]
+    fn pro_agent_without_dispatcher_degrades_not_aborts() {
+        // No dispatcher → the plugin agent step fails-soft (warning + empty doc), export still runs.
+        let skill = parse_skill_yaml(PRO_SKILL_YAML).unwrap();
+        let inputs = json!({ "caseId": "case-1", "facts": "x" });
+        let res = run_skill_with_dispatcher(
+            &skill, &inputs, true, &empty_resolver(), &good_llm(), "deepseek", None,
+        )
+        .unwrap();
+        assert!(res.partial);
+        assert!(res.warnings.iter().any(|w| w.contains("legal_drafter") && w.contains("未接入调度器")));
+        assert!(!res.artifact_bytes.is_empty(), "degraded run still yields a downloadable file");
+    }
+
+    #[test]
+    fn pro_agent_dispatch_error_degrades_with_warning() {
+        // dispatcher returns Err (unknown id / not installed / timeout) → warning + degraded doc.
+        let skill = parse_skill_yaml(PRO_SKILL_YAML).unwrap();
+        let inputs = json!({ "caseId": "case-1", "facts": "x" });
+        let disp = StubDispatcher::err("agent 'legal_drafter' not found in any loaded plugin");
+        let res = run_skill_with_dispatcher(
+            &skill, &inputs, true, &empty_resolver(), &good_llm(), "deepseek", Some(&disp),
+        )
+        .unwrap();
+        assert!(res.partial);
+        assert!(res.warnings.iter().any(|w| w.contains("调度失败") && w.contains("not found")));
+    }
+
+    #[test]
+    fn pro_agent_red_line_surfaced_as_warning_and_marked() {
+        let skill = parse_skill_yaml(PRO_SKILL_YAML).unwrap();
+        let inputs = json!({ "caseId": "c", "facts": "f" });
+        let mut env = draft_envelope();
+        env["red_lines_violated"] = json!(["no_hallucinated_citation"]);
+        let disp = StubDispatcher::ok(env, 100);
+        let res = run_skill_with_dispatcher(
+            &skill, &inputs, true, &empty_resolver(), &good_llm(), "deepseek", Some(&disp),
+        )
+        .unwrap();
+        assert!(res.partial);
+        assert!(res.warnings.iter().any(|w| w.contains("红线")));
+        let s = serde_json::to_string(&res.artifact).unwrap();
+        assert!(s.contains("no_hallucinated_citation"), "red line surfaced in document");
+    }
+
+    #[test]
+    fn pro_agent_tokens_count_toward_cost_cap() {
+        // A dispatched agent reporting > MAX_TOTAL_TOKENS aborts with cost-cap-exceeded.
+        let skill = parse_skill_yaml(PRO_SKILL_YAML).unwrap();
+        let inputs = json!({ "caseId": "c", "facts": "f" });
+        let disp = StubDispatcher::ok(draft_envelope(), MAX_TOTAL_TOKENS + 1);
+        let err = run_skill_with_dispatcher(
+            &skill, &inputs, true, &empty_resolver(), &good_llm(), "deepseek", Some(&disp),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "cost-cap-exceeded");
+    }
+
+    #[test]
+    fn typod_oss_capability_still_hard_errors_with_dispatcher() {
+        // An id in a reserved OSS namespace (document_intelligence.*) that doesn't match a built-in
+        // is a typo → hard error EVEN with a dispatcher present (never degraded as a plugin agent).
+        let yaml = SKILL_YAML.replace(
+            "document_intelligence.compare_to_table",
+            "document_intelligence.does_not_exist",
+        );
+        let skill = parse_skill_yaml(&yaml).unwrap();
+        let inputs = json!({ "doc": "item-1", "entities": ["A", "B"] });
+        let disp = StubDispatcher::ok(draft_envelope(), 1);
+        let err = run_skill_with_dispatcher(
+            &skill, &inputs, true, &resolver("x"), &good_llm(), "deepseek", Some(&disp),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "partial-failure");
+        assert!(disp.calls.borrow().is_empty(), "typo'd OSS id must NOT hit the dispatcher");
+    }
+
+    #[test]
+    fn oss_agent_never_reaches_dispatcher() {
+        // The compare-to-table OSS agent must run in-process even when a dispatcher is present
+        // (the dispatcher must NOT be called for an OSS agent id).
+        let skill = parse_skill_yaml(SKILL_YAML).unwrap();
+        let inputs = json!({ "doc": "item-1", "entities": ["设备 A", "设备 B"] });
+        let disp = StubDispatcher::err("should not be called");
+        let res = run_skill_with_dispatcher(
+            &skill, &inputs, true,
+            &resolver("设备 A 1080p。设备 B 4K。"), &good_llm(), "deepseek", Some(&disp),
+        )
+        .unwrap();
+        assert!(disp.calls.borrow().is_empty(), "OSS agent must not hit the dispatcher");
+        assert_eq!(res.format, ExportFormat::Xlsx);
     }
 }
