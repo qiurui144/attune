@@ -129,9 +129,17 @@ pub fn parse_agent_doc(envelope: &Value) -> AgentDocOutput {
         out.red_lines = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
     }
 
-    // Fallback body when there were no structured sections.
+    // Fallback when there were no structured sections: try a whole-document text field first
+    // (covers the deliverable agents whose computation is a single body string under different
+    // names — law `draft`, medical `redacted_text`, patent `response_text`, tech `report`/etc),
+    // else derive readable sections from the computation's structured fields so a structured
+    // deliverable (patent OA grounds / tech postmortem) still renders a meaningful document.
     if out.sections.is_empty() {
-        for key in ["draft", "content", "text"] {
+        const TEXT_KEYS: [&str; 8] = [
+            "draft", "content", "text", "redacted_text", "response_text", "markdown", "report",
+            "body",
+        ];
+        for key in TEXT_KEYS {
             if let Some(s) = comp.get(key).and_then(|v| v.as_str()) {
                 if !s.trim().is_empty() {
                     out.fallback_body = s.to_string();
@@ -139,9 +147,65 @@ pub fn parse_agent_doc(envelope: &Value) -> AgentDocOutput {
                 }
             }
         }
+        if out.fallback_body.is_empty() {
+            out.sections = derive_sections_from_structured(comp);
+        }
     }
 
     out
+}
+
+/// Last-resort renderer for a structured computation with no `sections`/text body: turn each
+/// top-level field into a `(heading, body)` section. A scalar becomes a one-line body; an array
+/// of strings becomes a bullet-ish joined body; an array of objects renders each object's string
+/// fields. Internal/noise keys (`schema_version`, `cost_used`, …) are skipped. This keeps a
+/// vertical-agnostic deliverable readable (patent OA grounds, tech postmortem chain) without the
+/// runner knowing each agent's schema — the agent's *own* deliverable shape is still preferred
+/// (sections / text body) when present.
+fn derive_sections_from_structured(comp: &Value) -> Vec<(String, String)> {
+    const SKIP_KEYS: [&str; 4] = ["schema_version", "cost_used", "doc_type", "docType"];
+    let Some(obj) = comp.as_object() else { return Vec::new() };
+    let mut out = Vec::new();
+    for (key, val) in obj {
+        if SKIP_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        let body = match val {
+            Value::String(s) if !s.trim().is_empty() => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Array(arr) if !arr.is_empty() => arr
+                .iter()
+                .map(stringify_item)
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => continue,
+        };
+        if !body.trim().is_empty() {
+            out.push((key.clone(), body));
+        }
+    }
+    out
+}
+
+/// Render one array element to a readable line: a string passes through; an object joins its
+/// string/scalar fields as `k: v`; anything else is JSON-stringified compactly.
+fn stringify_item(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Object(m) => m
+            .iter()
+            .filter_map(|(k, val)| match val {
+                Value::String(s) if !s.trim().is_empty() => Some(format!("{k}: {s}")),
+                Value::Number(n) => Some(format!("{k}: {n}")),
+                Value::Bool(b) => Some(format!("{k}: {b}")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("；"),
+        other => other.to_string(),
+    }
 }
 
 /// Render an [`AgentDocOutput`] into a [`Document`] [`Artifact`] (zero-cost). Red lines become a
@@ -287,6 +351,59 @@ mod tests {
         };
         let Artifact::Document(d) = agent_doc_to_document(&doc, "文书") else { panic!() };
         assert!(d.blocks.iter().any(|b| matches!(b, Block::Paragraph { text } if text == "无分段正文。")));
+    }
+
+    #[test]
+    fn medical_redacted_text_used_as_body() {
+        // medical deidentify computation = { spans, redacted_text } → redacted_text is the body.
+        let env = json!({ "computation": { "spans": [], "redacted_text": "患者[name]因[date]就诊……" } });
+        let doc = parse_agent_doc(&env);
+        assert!(doc.sections.is_empty());
+        assert_eq!(doc.fallback_body, "患者[name]因[date]就诊……");
+    }
+
+    #[test]
+    fn structured_computation_derives_sections() {
+        // patent OA: computation = { grounds: [{article, ground, response_path}] } (no sections/text)
+        // → a section per top-level field, array-of-objects joined readably.
+        let env = json!({
+            "computation": {
+                "schema_version": "1.0",
+                "grounds": [
+                    { "article": "22.3", "ground": "创造性不足", "response_path": "陈述意见" }
+                ]
+            }
+        });
+        let doc = parse_agent_doc(&env);
+        assert!(doc.fallback_body.is_empty());
+        assert_eq!(doc.sections.len(), 1);
+        assert_eq!(doc.sections[0].0, "grounds");
+        assert!(doc.sections[0].1.contains("22.3"));
+        assert!(doc.sections[0].1.contains("创造性不足"));
+        // schema_version is skipped (noise key).
+        assert!(!doc.sections.iter().any(|(h, _)| h == "schema_version"));
+    }
+
+    #[test]
+    fn structured_postmortem_derives_summary_and_chain() {
+        let env = json!({
+            "computation": {
+                "schema_version": "1.0",
+                "summary": "服务在高峰期不可用 30 分钟。",
+                "root_cause_chain": [
+                    { "why": "连接池耗尽", "process_level": false },
+                    { "why": "无背压保护", "process_level": true }
+                ],
+                "action_items": ["加连接池上限告警"]
+            }
+        });
+        let doc = parse_agent_doc(&env);
+        let headings: Vec<&str> = doc.sections.iter().map(|(h, _)| h.as_str()).collect();
+        assert!(headings.contains(&"summary"));
+        assert!(headings.contains(&"root_cause_chain"));
+        assert!(headings.contains(&"action_items"));
+        let chain = doc.sections.iter().find(|(h, _)| h == "root_cause_chain").unwrap();
+        assert!(chain.1.contains("连接池耗尽"));
     }
 
     #[test]
