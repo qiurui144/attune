@@ -82,6 +82,9 @@ attune-core = { path = "../attune-core", features = ["test-utils"] }
 # pdf-extract) to prove the HTTP download is accurate, incl. CJK pdf un-garbled.
 calamine = { version = "0.26", features = ["dates"] }
 pdf-extract = "0.8"
+# export privacy gate test: unzip docx OOXML to prove no plaintext PII in the
+# downloaded file bytes (INT-2 adversarial).
+zip = "2"
 
 [lints]
 workspace = true

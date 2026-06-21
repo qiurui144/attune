@@ -103,6 +103,12 @@ pub async fn vault_guard(
         // downloadable file. It never touches the vault DEK (no stored data is
         // read), so it must work pre-unlock just like writing/documents.
         || path.starts_with("/api/v1/export")
+        // /api/v1/doc-privacy/* — classify text + dry-run the export egress gate.
+        // Pure regex+dictionary scan (no LLM, no vault DEK), so the UI can warn
+        // about a confidential / PII-bearing download before unlock, mirroring
+        // /export which it gates. export-preview reads optional pro keywords from
+        // settings best-effort (lock-tolerant).
+        || path.starts_with("/api/v1/doc-privacy")
         // memory import: the handler itself rejects sealed/locked vaults with a
         // user-actionable 400 `vault-not-ready` ("先建库并解锁") instead of the
         // guard's generic 403; bypass here so that more specific guidance reaches
