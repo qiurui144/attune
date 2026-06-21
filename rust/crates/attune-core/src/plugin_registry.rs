@@ -170,6 +170,28 @@ impl PluginRegistry {
         out
     }
 
+    /// INT-2 doc_privacy pro 写入端：聚合所有已装 plugin 声明的行业机密词
+    /// (`confidential_keywords`)，去重后返回。注入 attune doc_privacy classifier 的
+    /// 机密词集 —— 含任一行业标记的文档导出 fail-closed 拦截。
+    ///
+    /// **OSS 边界**：OSS classifier 只内置通用机密词；行业词由 pro 插件经 plugin.yaml
+    /// `confidential_keywords:` 注入。OSS 裸装 → plugins 空 → 返空 Vec → classifier
+    /// 仅通用集（无行业泄漏）。复用 [`all_pii_patterns`] 同款插件发现机制。
+    pub fn all_confidential_keywords(&self) -> Vec<String> {
+        use std::collections::HashSet;
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for p in self.plugins.values() {
+            for kw in &p.manifest.confidential_keywords {
+                let s = kw.trim();
+                if !s.is_empty() && seen.insert(s.to_string()) {
+                    out.push(s.to_string());
+                }
+            }
+        }
+        out
+    }
+
     /// v0.6 新增：聚合所有 plugin 的 chat_trigger.project_keywords（去重后返回）
     ///
     /// project_recommender::recommend_for_chat 调用方典型用法：
@@ -803,6 +825,56 @@ pii_patterns:
         assert!(names.contains("case_no"));
         assert!(names.contains("court_seal"));
         assert!(names.contains("medical_record_no"));
+    }
+
+    // ── INT-2: confidential_keywords pro 写入端聚合 ──
+
+    #[test]
+    fn confidential_keywords_empty_oss_default() {
+        // OSS 裸装无 plugin → 行业机密词为空 → classifier 仅通用集（无行业泄漏）。
+        let reg = PluginRegistry::new();
+        assert!(reg.all_confidential_keywords().is_empty());
+    }
+
+    #[test]
+    fn confidential_keywords_aggregated_and_deduped() {
+        let tmp = TempDir::new().expect("tmp");
+        write_plugin_dir(
+            tmp.path(),
+            "law-pro",
+            r#"
+id: law-pro
+name: 律师插件
+type: industry
+version: "1.0.0"
+confidential_keywords:
+  - 案卷密
+  - 不公开审理
+"#,
+        );
+        write_plugin_dir(
+            tmp.path(),
+            "medical-pro",
+            r#"
+id: medical-pro
+name: 医生插件
+type: industry
+version: "1.0.0"
+confidential_keywords:
+  - 病历
+  - 案卷密
+"#,
+        );
+        let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(errs.is_empty(), "scan errors: {:?}", errs);
+        let kws = reg.all_confidential_keywords();
+        let unique: std::collections::HashSet<&str> = kws.iter().map(|s| s.as_str()).collect();
+        // 案卷密 在两个 plugin 中, 只应出现一次 → 3 unique (案卷密/不公开审理/病历)
+        assert_eq!(unique.len(), 3, "deduped industry markers: {:?}", kws);
+        assert_eq!(kws.len(), unique.len(), "no duplicates");
+        assert!(kws.iter().any(|s| s == "案卷密"));
+        assert!(kws.iter().any(|s| s == "病历"));
+        assert!(kws.iter().any(|s| s == "不公开审理"));
     }
 
     #[test]

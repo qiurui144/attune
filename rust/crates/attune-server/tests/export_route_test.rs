@@ -178,6 +178,15 @@ async fn export_classified_artifact_blocked_fail_closed() {
         );
         let v: Value = resp.json().await.unwrap();
         assert_eq!(v["code"], "doc-classified", "{fmt}");
+        // INT-2 PDF terminal decision: a blocked PDF surfaces an actionable
+        // alt-format path (byte-level PDF redaction is out of scope); non-PDF
+        // formats do not.
+        if fmt == "pdf" {
+            assert_eq!(v["pdf_redaction"], "alt-format", "pdf must offer alt-format");
+            assert_eq!(v["alt_format"], "md", "pdf alt format is md");
+        } else {
+            assert!(v["pdf_redaction"].is_null(), "{fmt} must not carry pdf hint");
+        }
     }
 }
 
@@ -240,6 +249,55 @@ async fn export_clean_artifact_unchanged() {
     let csv = String::from_utf8(resp.bytes().await.unwrap().to_vec()).unwrap();
     // device table has no PII → content intact
     assert!(csv.contains("电压") && csv.contains("220V"));
+}
+
+/// INT-2 pro write-end (settings path): an industry confidential marker injected
+/// via `settings.privacy.export_confidential_keywords` blocks an export that the
+/// generic OSS set would have allowed — proving pro markers extend the block set.
+/// Adversarial: the generic set does NOT contain 案卷密, so without the injection
+/// the same doc exports; with it, the doc is fail-closed refused.
+#[tokio::test]
+async fn export_pro_confidential_keyword_blocks_industry_doc() {
+    use attune_server::test_support::spawn_eval_server_with_recording_llm;
+    let (srv, _rec) = spawn_eval_server_with_recording_llm().await;
+    let base = srv.url();
+    let client = reqwest::Client::new();
+
+    // An industry doc whose only "secret" marker is the law-firm term 案卷密 —
+    // not in the generic OSS confidential set.
+    let industry_doc = json!({
+        "type": "document",
+        "data": { "title": "卷宗", "blocks": [{ "kind": "paragraph", "text": "本卷宗为案卷密级，含当事人信息" }] }
+    });
+
+    // 1) Baseline: generic set only → exports (not blocked).
+    let resp = post_export(&base, json!({ "artifact": industry_doc, "format": "md" })).await;
+    assert_eq!(resp.status().as_u16(), 200, "without pro keyword the doc must export");
+
+    // 2) Inject the industry marker via the settings override (pro write-end).
+    let patch = client
+        .patch(format!("{base}/api/v1/settings"))
+        .json(&json!({ "privacy": { "export_confidential_keywords": ["案卷密"] } }))
+        .send()
+        .await
+        .expect("patch settings");
+    assert!(patch.status().is_success(), "settings patch must succeed: {}", patch.status());
+
+    // 3) Now the same doc is fail-closed blocked (422 doc-classified).
+    let resp = post_export(&base, json!({ "artifact": industry_doc, "format": "md" })).await;
+    assert_eq!(resp.status().as_u16(), 422, "pro keyword must block the industry doc");
+    let v: Value = resp.json().await.unwrap();
+    assert_eq!(v["code"], "doc-classified");
+
+    // Adversarial: the preview endpoint reports the SAME verdict (UI parity).
+    let pv = client
+        .post(format!("{base}/api/v1/doc-privacy/export-preview"))
+        .json(&json!({ "artifact": industry_doc }))
+        .send()
+        .await
+        .unwrap();
+    let pvv: Value = pv.json().await.unwrap();
+    assert_eq!(pvv["decision"], "blocked", "preview must match real export verdict");
 }
 
 /// The dry-run preview endpoint reports the same verdict the real export would,

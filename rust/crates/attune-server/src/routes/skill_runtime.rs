@@ -255,11 +255,16 @@ pub async fn run_runtime_skill(
     );
     let (artifact_bytes, gated_artifact, warnings) = {
         let redactor = attune_core::pii::Redactor::default();
+        // INT-2 pro write-end: installed pro plugins inject industry confidential
+        // markers via plugin.yaml `confidential_keywords:` so a pro-agent delivery
+        // carrying an industry secret marker is fail-closed blocked. OSS-only →
+        // empty → generic markers only (no industry leak).
+        let extra_keywords = state.plugin_registry.all_confidential_keywords();
         match attune_core::doc_privacy::enforce_artifact_egress(
             &redactor,
             &result.artifact,
             attune_core::doc_privacy::RedactMode::Reversible,
-            &[],
+            &extra_keywords,
         ) {
             attune_core::doc_privacy::ArtifactEgressOutcome::Blocked { reason } => {
                 return Err(AppError::detailed(
