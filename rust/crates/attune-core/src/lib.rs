@@ -163,6 +163,7 @@ pub mod organizer;
 pub mod job_handler;  // G5: per-kind durable job dispatch (JobHandler + run_one_job)
 pub mod parser;
 pub mod pii;
+pub mod doc_privacy;  // 文档文件级隐私: 检测/分级/可逆脱敏/机密 fail-closed (spec 2026-06-20, INT-2 借鉴 kvm)
 pub mod redacting_llm;
 pub mod platform;
 pub mod memory_consolidation;
