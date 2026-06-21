@@ -48,6 +48,9 @@
 
 pub mod ai_annotator;
 pub mod annotation_weight;
+// INT-1: browser login-assist sidecar (community-browser-automation subprocess).
+// SidecarController (JSON-over-CLI contract G1-G6) + recipe + L-7 entry_url guard.
+pub mod browser_login;
 // v1.0.6 Privacy Logic Strategy — single outbound enforcement entry-point.
 // Every network egress (LLM / Cloud SaaS / WebDAV / Web Search / Telemetry)
 // MUST be wrapped by OutboundGate::enforce so settings + PII redactor are

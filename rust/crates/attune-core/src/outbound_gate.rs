@@ -49,6 +49,13 @@ pub enum OutboundKind {
     /// cloud embedding endpoints are subject to the full L0 + PII gate.
     /// (#82 P0 privacy fix — embed was the only egress point missing gate wiring.)
     Embedding,
+    /// Browser-driven login-gated content crawl (`browser_login` sidecar).
+    /// Distinct from `WebSearch`: WebSearch hits public SERPs, BrowserCrawl
+    /// reuses a user-authorized session to fetch login-walled member content
+    /// into the local vault. The destination is always a user-approved
+    /// third-party site (never a local LLM), so callers pass
+    /// `local_destination: false`. (INT-1 browser-autologin integration.)
+    BrowserCrawl,
 }
 
 impl OutboundKind {
@@ -61,6 +68,7 @@ impl OutboundKind {
             OutboundKind::WebSearch => "web_search",
             OutboundKind::Telemetry => "telemetry",
             OutboundKind::Embedding => "embedding",
+            OutboundKind::BrowserCrawl => "browser_crawl",
         }
     }
 
@@ -299,6 +307,7 @@ mod tests {
         assert_eq!(OutboundKind::WebSearch.as_str(), "web_search");
         assert_eq!(OutboundKind::Telemetry.as_str(), "telemetry");
         assert_eq!(OutboundKind::Embedding.as_str(), "embedding");
+        assert_eq!(OutboundKind::BrowserCrawl.as_str(), "browser_crawl");
     }
 
     #[test]
@@ -311,6 +320,7 @@ mod tests {
             OutboundKind::WebSearch,
             OutboundKind::Telemetry,
             OutboundKind::Embedding,
+            OutboundKind::BrowserCrawl,
         ] {
             let p = pol(k, false, true, true);
             assert!(
