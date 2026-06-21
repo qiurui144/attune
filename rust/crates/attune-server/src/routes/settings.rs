@@ -333,7 +333,10 @@ pub async fn update_settings(
     // 嵌套对象键：这些字段的子字段支持 deep merge（客户端省略某子字段时保留原值）。
     // 主要为了 `llm.api_key` —— GET 响应已 redact，客户端若只改 model/provider 而不重填 key，
     // 我们不应把 key 抹成 null。
-    const DEEP_MERGE_KEYS: &[&str] = &["llm", "ocr"];
+    // `privacy` deep-merges so a partial patch (e.g. UI writing only
+    // `doc_redact_mode` or `export_confidential_keywords`) does not clobber the
+    // 5 outbound toggles, and vice-versa.
+    const DEEP_MERGE_KEYS: &[&str] = &["llm", "ocr", "privacy"];
     if let (Some(current_obj), Some(body_obj)) = (current.as_object_mut(), body.as_object()) {
         for (k, v) in body_obj {
             if !ALLOWED_KEYS.contains(&k.as_str()) { continue; }

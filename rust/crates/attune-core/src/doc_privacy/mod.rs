@@ -183,7 +183,28 @@ pub fn enforce_file_egress(
 
 // ── Artifact-IR egress (the export / skill-runtime download point) ──────────
 
-use crate::export::{Artifact, Block, Document, Table};
+use crate::export::{Artifact, Block, Document, ExportFormat, Table};
+
+/// PDF terminal decision (INT-2 §PDF, 务实/option-b): byte-level PDF redaction
+/// stays **out of scope** (font/encoding-map rewriting risks emitting a
+/// half-redacted / garbled file). Instead, when a PDF egress is refused (a
+/// confidential PDF) or carries PII, callers offer a **redacted alternative
+/// format** built from the same IR. This returns the recommended alt format for
+/// a requested PDF export (`Md` — universally renderable + losslessly redactable;
+/// callers can also offer `Docx`). `None` for any non-PDF format (those redact
+/// in place and need no alternative).
+///
+/// Note: the *artifact* export path (IR → file) already redacts PDF safely
+/// because it re-renders from the redacted IR, not the raw PDF bytes. This hint
+/// is for the **confidential-block** case (fail-closed) and the raw-PDF-file
+/// path ([`enforce_file_egress`], which fails closed on PDF) so the UI always has
+/// an actionable "export as redacted docx/txt instead" path.
+pub fn pdf_alt_format(requested: ExportFormat) -> Option<ExportFormat> {
+    match requested {
+        ExportFormat::Pdf => Some(ExportFormat::Md),
+        _ => None,
+    }
+}
 
 /// Outcome of the export/skill-runtime artifact egress gate.
 pub enum ArtifactEgressOutcome {
@@ -417,6 +438,17 @@ mod tests {
             gate_for_classification(Classification::SensitivePartial),
             GateDecision::AllowRedacted { mandatory_redact: true }
         );
+    }
+
+    #[test]
+    fn pdf_alt_format_suggests_md_for_pdf_only() {
+        use crate::export::ExportFormat;
+        assert_eq!(pdf_alt_format(ExportFormat::Pdf), Some(ExportFormat::Md));
+        // Non-PDF formats redact in place → no alternative needed.
+        assert_eq!(pdf_alt_format(ExportFormat::Docx), None);
+        assert_eq!(pdf_alt_format(ExportFormat::Md), None);
+        assert_eq!(pdf_alt_format(ExportFormat::Csv), None);
+        assert_eq!(pdf_alt_format(ExportFormat::Xlsx), None);
     }
 
     #[test]

@@ -90,27 +90,52 @@ fn content_disposition(filename: &str) -> String {
     )
 }
 
-/// Read the optional `privacy.export_confidential_keywords` list (industry markers
-/// injected by a pro plugin) from settings. Vault locked / unreadable → empty
-/// (generic OSS confidential set only). Never fails the export.
+/// Industry confidential markers (INT-2 pro write-end) that extend the generic
+/// OSS confidential set. Two sources, merged + de-duplicated:
+///
+/// 1. **Installed pro plugins** — each vertical plugin declares its industry
+///    markers in `plugin.yaml::confidential_keywords:` (律所「案卷密」/ 医院「病历」);
+///    aggregated via [`PluginRegistry::all_confidential_keywords`]. This is the
+///    primary, zero-config path — install a pro pack and its markers take effect.
+/// 2. **`settings.privacy.export_confidential_keywords`** — a user/admin override
+///    list (manually-curated markers).
+///
+/// **OSS boundary**: the generic markers live in the OSS classifier; this list is
+/// industry-only and empty on a bare OSS install. Vault locked / unreadable →
+/// plugin markers still apply (registry needs no DEK). Never fails the export.
 fn export_extra_keywords(state: &SharedState) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+
+    // 1) Installed pro plugins (primary, no DEK / settings write needed).
+    for kw in state.plugin_registry.all_confidential_keywords() {
+        if seen.insert(kw.clone()) {
+            out.push(kw);
+        }
+    }
+
+    // 2) Settings override list (optional, vault-backed).
     let bytes = match state.vault.lock() {
         Ok(v) => v.store().get_meta("app_settings").ok().flatten(),
         Err(e) => e.into_inner().store().get_meta("app_settings").ok().flatten(),
     };
-    bytes
+    if let Some(arr) = bytes
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|s| {
             s.get("privacy")
                 .and_then(|p| p.get("export_confidential_keywords"))
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
+                .and_then(|v| v.as_array().cloned())
         })
-        .unwrap_or_default()
+    {
+        for kw in arr.iter().filter_map(|v| v.as_str()) {
+            let s = kw.trim();
+            if !s.is_empty() && seen.insert(s.to_string()) {
+                out.push(s.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// POST /api/v1/export — render IR → downloadable file (privacy-gated).
@@ -145,15 +170,24 @@ pub async fn export_artifact(
         &extra_keywords,
     ) {
         ArtifactEgressOutcome::Blocked { reason } => {
-            return AppError::detailed(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                json!({
-                    "error": format!("export blocked: confidential document — {reason}"),
-                    "code": "doc-classified",
-                    "hint": "机密文档不可导出；如需分享请改用脱敏后的内容 / Confidential documents cannot be exported",
-                }),
-            )
-            .into_response();
+            // Format-aware actionable path: a confidential doc is fail-closed for
+            // every format (content-based), but for a PDF request we additionally
+            // surface the alt-format redaction route (byte-level PDF redaction is
+            // out of scope; a redacted docx/txt is the supported alternative).
+            let mut body = json!({
+                "error": format!("export blocked: confidential document — {reason}"),
+                "code": "doc-classified",
+                "hint": "机密文档不可导出；如需分享请改用脱敏后的内容 / Confidential documents cannot be exported",
+            });
+            if let Some(alt) = attune_core::doc_privacy::pdf_alt_format(format) {
+                body["pdf_redaction"] = json!("alt-format");
+                body["alt_format"] = json!(alt.extension());
+                body["hint"] = json!(
+                    "PDF 不支持逐字节脱敏；如需脱敏导出请改用 docx / txt 等替代格式 / \
+                     PDF byte-level redaction is unsupported — export as redacted docx/txt instead"
+                );
+            }
+            return AppError::detailed(StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
         }
         ArtifactEgressOutcome::Allowed { artifact, redacted, .. } => {
             if redacted > 0 {

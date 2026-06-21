@@ -38,6 +38,18 @@ interface PrivacyStatus {
   privacy_tour_seen?: boolean;
 }
 
+// INT-2 doc-privacy scan result (POST /doc-privacy/scan) — privacy-first: never
+// carries PII values, only a grade + summary counts.
+interface DocScanResult {
+  classification: 'normal' | 'sensitive_partial' | 'classified';
+  blocked: boolean;
+  block_reason: string | null;
+  warning: string | null;
+  pii_count: number;
+}
+
+type RedactMode = 'reversible' | 'irreversible';
+
 const LABEL_KEY_FOR: Record<OutboundKey, string> = {
   llm: 'privacy.outbound.llm',
   cloud_saas: 'privacy.outbound.cloudSaas',
@@ -59,6 +71,12 @@ export function PrivacyView(): JSX.Element {
   const busyKey = useSignal<OutboundKey | null>(null);
   const { confirm, confirmModal } = useConfirm();
 
+  // INT-2 doc-export panel interactive state.
+  const scanText = useSignal('');
+  const scanResult = useSignal<DocScanResult | null>(null);
+  const scanBusy = useSignal(false);
+  const redactMode = useSignal<RedactMode>('reversible');
+
   async function refresh(): Promise<void> {
     try {
       const data = await api.get<PrivacyStatus>('/privacy/status');
@@ -70,9 +88,47 @@ export function PrivacyView(): JSX.Element {
     }
   }
 
+  // Load the persisted doc-redaction mode (settings.privacy.doc_redact_mode).
+  async function loadRedactMode(): Promise<void> {
+    try {
+      const settings = await api.get<{ privacy?: { doc_redact_mode?: string } }>('/settings');
+      const m = settings.privacy?.doc_redact_mode;
+      if (m === 'irreversible' || m === 'reversible') {
+        redactMode.value = m;
+      }
+    } catch {
+      /* settings unreadable (vault locked) → keep default reversible */
+    }
+  }
+
   useEffect(() => {
     void refresh();
+    void loadRedactMode();
   }, []);
+
+  // INT-2: scan arbitrary text for confidentiality grade + PII count (🆓, no DEK).
+  async function runScan(): Promise<void> {
+    const text = scanText.value.trim();
+    if (text.length === 0) return;
+    scanBusy.value = true;
+    try {
+      scanResult.value = await api.post<DocScanResult>('/doc-privacy/scan', { text });
+    } catch {
+      toast('error', t('privacy.docExport.scanFailed'));
+    } finally {
+      scanBusy.value = false;
+    }
+  }
+
+  // INT-2: persist the redaction mode (reversible [KIND_N] vs irreversible mask).
+  async function setRedactMode(mode: RedactMode): Promise<void> {
+    redactMode.value = mode;
+    try {
+      await api.patch('/settings', { privacy: { doc_redact_mode: mode } });
+    } catch {
+      toast('error', t('privacy.errors.saveFailed'));
+    }
+  }
 
   async function toggle(key: OutboundKey, next: boolean): Promise<void> {
     busyKey.value = key;
@@ -366,6 +422,102 @@ export function PrivacyView(): JSX.Element {
         >
           {t('privacy.docExport.pdfHint')}
         </p>
+
+        {/* ── Redaction mode (reversible / irreversible) ── */}
+        <div style={{ marginTop: 'var(--space-4)', borderTop: '1px solid var(--color-border)', paddingTop: 'var(--space-3)' }}>
+          <div style={{ fontSize: 'var(--text-sm)', fontWeight: 500, marginBottom: 'var(--space-2)' }}>
+            {t('privacy.docExport.modeTitle')}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            {(['reversible', 'irreversible'] as RedactMode[]).map((m) => (
+              <label
+                key={m}
+                style={{ display: 'flex', alignItems: 'flex-start', gap: 'var(--space-2)', cursor: 'pointer', fontSize: 'var(--text-sm)' }}
+              >
+                <input
+                  type="radio"
+                  name="doc-redact-mode"
+                  data-testid={`redact-mode-${m}`}
+                  checked={redactMode.value === m}
+                  onChange={() => void setRedactMode(m)}
+                  style={{ marginTop: '3px' }}
+                />
+                <span>
+                  <span style={{ color: 'var(--color-text)' }}>
+                    {m === 'reversible' ? t('privacy.docExport.modeReversible') : t('privacy.docExport.modeIrreversible')}
+                  </span>
+                  <span style={{ display: 'block', fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', lineHeight: 1.5 }}>
+                    {m === 'reversible' ? t('privacy.docExport.modeReversibleDesc') : t('privacy.docExport.modeIrreversibleDesc')}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Scan / export-preview entry ── */}
+        <div style={{ marginTop: 'var(--space-4)', borderTop: '1px solid var(--color-border)', paddingTop: 'var(--space-3)' }}>
+          <div style={{ fontSize: 'var(--text-sm)', fontWeight: 500, marginBottom: 'var(--space-2)' }}>
+            {t('privacy.docExport.scanTitle')}
+          </div>
+          <textarea
+            data-testid="doc-scan-input"
+            value={scanText.value}
+            onInput={(e: Event) => {
+              scanText.value = (e.currentTarget as HTMLTextAreaElement).value;
+            }}
+            placeholder={t('privacy.docExport.scanPlaceholder')}
+            rows={3}
+            style={{
+              width: '100%',
+              boxSizing: 'border-box',
+              fontSize: 'var(--text-sm)',
+              padding: 'var(--space-2)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--color-bg)',
+              color: 'var(--color-text)',
+              resize: 'vertical',
+            }}
+          />
+          <div style={{ marginTop: 'var(--space-2)' }}>
+            <Button
+              variant="secondary"
+              size="sm"
+              data-testid="doc-scan-button"
+              onClick={() => void runScan()}
+              disabled={scanBusy.value || scanText.value.trim().length === 0}
+            >
+              {scanBusy.value ? t('common.loading') : t('privacy.docExport.scanButton')}
+            </Button>
+          </div>
+          {scanResult.value !== null && (
+            <div
+              data-testid="doc-scan-result"
+              style={{
+                marginTop: 'var(--space-3)',
+                fontSize: 'var(--text-sm)',
+                padding: 'var(--space-3)',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--color-border)',
+                background: 'var(--color-bg)',
+              }}
+            >
+              <div style={{ fontWeight: 500, color: scanResult.value.blocked ? 'var(--color-danger)' : 'var(--color-text)' }}>
+                {scanResult.value.classification === 'classified'
+                  ? t('privacy.docExport.gradeClassified')
+                  : scanResult.value.classification === 'sensitive_partial'
+                    ? t('privacy.docExport.gradeSensitive')
+                    : t('privacy.docExport.gradeNormal')}
+              </div>
+              <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', marginTop: 'var(--space-1)' }}>
+                {scanResult.value.blocked
+                  ? t('privacy.docExport.scanBlocked')
+                  : t('privacy.docExport.scanPiiCount', { n: scanResult.value.pii_count })}
+              </div>
+            </div>
+          )}
+        </div>
       </Panel>
 
       {/* ── DSAR + Audit ───────────────────────── */}

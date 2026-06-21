@@ -90,6 +90,17 @@ pub struct PluginManifest {
     #[serde(default)]
     pub pii_patterns: Vec<PiiPatternSpec>,
 
+    /// doc_privacy 行业机密词（INT-2 pro 写入端）。vertical plugin 声明本行业的
+    /// 保密标记字符串（如 律所「案卷密」/ 医院「病历」/ 专利「未公开申请」）。
+    /// 由 `PluginRegistry::all_confidential_keywords` 聚合，注入 attune doc_privacy
+    /// classifier 的机密词集——含任一标记的文档导出 fail-closed 拦截。
+    ///
+    /// **OSS 边界**（CLAUDE.md / classifier.rs）：OSS classifier 只内置**通用**机密词
+    /// （绝密/机密/confidential/…）；行业机密词由 pro 插件经此字段注入，**永不**硬编码
+    /// 进 OSS。OSS 裸装 → 列表空 → classifier 仅通用集。
+    #[serde(default)]
+    pub confidential_keywords: Vec<String>,
+
     /// 定价层级. free → yaml 明文; paid/trial → yaml 加密.
     #[serde(default)]
     pub pricing: Option<PluginPricing>,

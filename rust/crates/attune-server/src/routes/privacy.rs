@@ -321,22 +321,40 @@ pub async fn wipe_cloud_session(State(state): State<SharedState>) -> RouteResult
 // per docs/superpowers/specs/2026-06-20-privacy-layer-enhancement.md §5
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Read the pro-plugin confidential-keyword extension list (industry markers).
-/// Mirrors `routes::export::export_extra_keywords`. Empty → generic OSS set.
+/// Industry confidential markers (INT-2 pro write-end) — merged from installed
+/// pro plugins (`plugin.yaml::confidential_keywords:`) + the optional
+/// `settings.privacy.export_confidential_keywords` override. Mirrors
+/// `routes::export::export_extra_keywords` exactly so the preview verdict matches
+/// the real export. Empty on a bare OSS install (generic markers only).
 fn export_extra_keywords(state: &SharedState) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for kw in state.plugin_registry.all_confidential_keywords() {
+        if seen.insert(kw.clone()) {
+            out.push(kw);
+        }
+    }
     let bytes = {
         let g = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         g.store().get_meta("app_settings").ok().flatten()
     };
-    bytes
+    if let Some(arr) = bytes
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .and_then(|s| {
             s.get("privacy")
                 .and_then(|p| p.get("export_confidential_keywords"))
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .and_then(|v| v.as_array().cloned())
         })
-        .unwrap_or_default()
+    {
+        for kw in arr.iter().filter_map(|v| v.as_str()) {
+            let s = kw.trim();
+            if !s.is_empty() && seen.insert(s.to_string()) {
+                out.push(s.to_string());
+            }
+        }
+    }
+    out
 }
 
 #[derive(Deserialize)]
