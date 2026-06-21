@@ -210,4 +210,9 @@ ignore_baseline:
   # reason is "requires real LLM — openai_compat (DeepSeek) via env, or Ollama" /
   # "real LLM; secret/Ollama-gated" — audited: all real-LLM nightly lanes, ZERO
   # failure-skips. Observed 57; ceiling raised to 57 (per §7.2 Gate 2 honest bump).
-  attune-core: 57
+  # 2026-06-21 re-baselined 57→61: (a) pre-existing drift — develop had accumulated to
+  # observed 60 without a bump (stale, masked since the prior wave), and (b) +1 from the
+  # CAP-4 closure pro-skill real-LLM E2E (proskill_real_llm_e2e: academic thesis-chapter-draft
+  # → real DeepSeek → docx round-trip). Audited: all env-gated real-LLM/real-model nightly
+  # lanes, ZERO failure-skips. Observed 61; ceiling raised to 61 (per §7.2 Gate 2 honest bump).
+  attune-core: 61
