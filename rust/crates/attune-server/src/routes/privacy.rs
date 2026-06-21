@@ -15,11 +15,17 @@
 //!
 //! UI 用途：Settings → Privacy 页面根据该 endpoint 渲染 toggle 状态 + 升级提示。
 
+use attune_core::doc_privacy::{
+    enforce_artifact_egress, ArtifactEgressOutcome, DocPrivacyScanner, RedactMode,
+};
+use attune_core::export::Artifact;
 use attune_core::llm_settings::SETTINGS_META_KEY as SETTINGS_KEY;
+use attune_core::pii::Redactor;
 use attune_core::platform::{classify_hardware, Tier};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::state::SharedState;
@@ -308,4 +314,87 @@ pub async fn wipe_cloud_session(State(state): State<SharedState>) -> RouteResult
         // Remote logout is best-effort; documented as not-guaranteed-success.
         "remote_logout": "best-effort",
     })))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Document-privacy (INT-2) — classification + export-egress preview
+// per docs/superpowers/specs/2026-06-20-privacy-layer-enhancement.md §5
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Read the pro-plugin confidential-keyword extension list (industry markers).
+/// Mirrors `routes::export::export_extra_keywords`. Empty → generic OSS set.
+fn export_extra_keywords(state: &SharedState) -> Vec<String> {
+    let bytes = {
+        let g = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        g.store().get_meta("app_settings").ok().flatten()
+    };
+    bytes
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|s| {
+            s.get("privacy")
+                .and_then(|p| p.get("export_confidential_keywords"))
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+pub struct DocScanRequest {
+    /// Plain extracted document text to classify.
+    pub text: String,
+}
+
+/// `POST /api/v1/doc-privacy/scan` — classify already-extracted document text.
+///
+/// Returns the document grade + PII summary (privacy-first: **no PII values**).
+/// `blocked == true` ⇔ a confidential marker was found ⇔ export is fail-closed.
+/// 🆓 zero-cost (regex + dictionary, no LLM, no vault DEK needed).
+pub async fn doc_scan(Json(req): Json<DocScanRequest>) -> Json<serde_json::Value> {
+    let redactor = Redactor::default();
+    let scanner = DocPrivacyScanner::new(&redactor);
+    let report = scanner.analyze_text(&req.text);
+    Json(json!({
+        "classification": report.classification.as_str(),
+        "blocked": report.blocked,
+        "block_reason": report.block_reason,
+        "warning": report.warning,
+        "pii_summary": report.summary,
+        "pii_count": report.entities.len(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ExportPreviewRequest {
+    /// The export IR (Table | Document) the UI is about to download.
+    pub artifact: Artifact,
+}
+
+/// `POST /api/v1/doc-privacy/export-preview` — dry-run the export egress gate.
+///
+/// Tells the UI **before** it hits `/export` whether the artifact would be
+/// blocked (confidential) or redacted (and how many PII spans), so it can show a
+/// "this download will be redacted / cannot be exported" notice. Does NOT render
+/// any file or leak PII values. 🆓 zero-cost.
+pub async fn doc_export_preview(
+    State(state): State<SharedState>,
+    Json(req): Json<ExportPreviewRequest>,
+) -> Json<serde_json::Value> {
+    let redactor = Redactor::default();
+    let extra = export_extra_keywords(&state);
+    match enforce_artifact_egress(&redactor, &req.artifact, RedactMode::Reversible, &extra) {
+        ArtifactEgressOutcome::Blocked { reason } => Json(json!({
+            "decision": "blocked",
+            "blocked": true,
+            "reason": reason,
+            "classification": "classified",
+        })),
+        ArtifactEgressOutcome::Allowed { redacted, classification, .. } => Json(json!({
+            "decision": "allowed",
+            "blocked": false,
+            "will_redact": redacted > 0,
+            "redacted_count": redacted,
+            "classification": classification.as_str(),
+        })),
+    }
 }

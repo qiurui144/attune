@@ -316,6 +316,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/privacy/settings", axum::routing::patch(routes::privacy::settings_patch))
         .route("/api/v1/privacy/lock", post(routes::privacy::lock))
         .route("/api/v1/privacy/wipe-cloud-session", post(routes::privacy::wipe_cloud_session))
+        // INT-2 document privacy — classify text + dry-run the export egress gate
+        // per docs/superpowers/specs/2026-06-20-privacy-layer-enhancement.md §5
+        .route("/api/v1/doc-privacy/scan", post(routes::privacy::doc_scan))
+        .route("/api/v1/doc-privacy/export-preview", post(routes::privacy::doc_export_preview))
         // Status (full status requires vault access)
         .route("/api/v1/status", get(routes::status::status))
         // Index management

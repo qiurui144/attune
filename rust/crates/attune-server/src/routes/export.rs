@@ -6,9 +6,19 @@
 //! "filename": "设备参数差异" }` → the rendered file as an attachment download.
 //!
 //! **Cost contract (CLAUDE.md §成本契约)**: export is **tier-🆓** — pure-Rust
-//! rendering, no LLM, no member gate, no privacy egress. Anyone (even with the
-//! vault locked) can render IR they already hold. The route never touches an
-//! `LlmProvider`.
+//! rendering, no LLM, no member gate. Anyone (even with the vault locked) can
+//! render IR they already hold. The route never touches an `LlmProvider`.
+//!
+//! **Privacy egress gate (INT-2 closure)**: a rendered office file built from
+//! decrypted vault content + LLM output is a genuine **file egress** — those bytes
+//! leave the device as a download, historically bypassing the redactor. Every
+//! export now flows through [`attune_core::doc_privacy::enforce_artifact_egress`]:
+//! a **confidential** artifact (绝密/机密/… marker, plus any pro-plugin markers)
+//! is **fail-closed blocked** (HTTP 422 `doc-classified`), and a normal artifact
+//! has its text fields **PII-redacted in place** (reversible `[KIND_N]` tokens)
+//! before rendering, so the downloaded file never carries plaintext PII. This is
+//! the single gate the `/export` HTTP route and the skill-runtime export step
+//! both pass through.
 //!
 //! **Security**: the download filename is sanitised against path traversal
 //! (`attune_core::export::sanitize::download_filename`) and RFC-5987-encoded so a
@@ -17,15 +27,20 @@
 
 use crate::error::AppError;
 use crate::routes::errors::internal;
+use crate::state::SharedState;
 use axum::body::Body;
+use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
+use attune_core::doc_privacy::{enforce_artifact_egress, ArtifactEgressOutcome};
+use attune_core::doc_privacy::RedactMode;
 use attune_core::export::sanitize::download_filename;
 use attune_core::export::{Artifact, ExportFormat};
+use attune_core::pii::Redactor;
 
 #[derive(Debug, Deserialize)]
 pub struct ExportRequest {
@@ -75,8 +90,34 @@ fn content_disposition(filename: &str) -> String {
     )
 }
 
-/// POST /api/v1/export — render IR → downloadable file.
-pub async fn export_artifact(Json(req): Json<ExportRequest>) -> Response {
+/// Read the optional `privacy.export_confidential_keywords` list (industry markers
+/// injected by a pro plugin) from settings. Vault locked / unreadable → empty
+/// (generic OSS confidential set only). Never fails the export.
+fn export_extra_keywords(state: &SharedState) -> Vec<String> {
+    let bytes = match state.vault.lock() {
+        Ok(v) => v.store().get_meta("app_settings").ok().flatten(),
+        Err(e) => e.into_inner().store().get_meta("app_settings").ok().flatten(),
+    };
+    bytes
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|s| {
+            s.get("privacy")
+                .and_then(|p| p.get("export_confidential_keywords"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
+/// POST /api/v1/export — render IR → downloadable file (privacy-gated).
+pub async fn export_artifact(
+    State(state): State<SharedState>,
+    Json(req): Json<ExportRequest>,
+) -> Response {
     let format = match ExportFormat::parse(&req.format) {
         Some(f) => f,
         None => {
@@ -91,7 +132,38 @@ pub async fn export_artifact(Json(req): Json<ExportRequest>) -> Response {
         }
     };
 
-    let bytes = match req.artifact.render(format) {
+    // INT-2 egress gate: scan the artifact → fail-closed block a confidential
+    // doc, else PII-redact every text field before rendering. Reversible tokens
+    // so the user can restore from the returned mappings (export is reversible by
+    // default; the download itself carries no plaintext PII).
+    let redactor = Redactor::default();
+    let extra_keywords = export_extra_keywords(&state);
+    let gated = match enforce_artifact_egress(
+        &redactor,
+        &req.artifact,
+        RedactMode::Reversible,
+        &extra_keywords,
+    ) {
+        ArtifactEgressOutcome::Blocked { reason } => {
+            return AppError::detailed(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                json!({
+                    "error": format!("export blocked: confidential document — {reason}"),
+                    "code": "doc-classified",
+                    "hint": "机密文档不可导出；如需分享请改用脱敏后的内容 / Confidential documents cannot be exported",
+                }),
+            )
+            .into_response();
+        }
+        ArtifactEgressOutcome::Allowed { artifact, redacted, .. } => {
+            if redacted > 0 {
+                tracing::info!("export: redacted {redacted} PII span(s) before render");
+            }
+            artifact
+        }
+    };
+
+    let bytes = match gated.render(format) {
         Ok(b) => b,
         Err(e) => {
             let status = match attune_core::export::http_status_for(e.code()) {

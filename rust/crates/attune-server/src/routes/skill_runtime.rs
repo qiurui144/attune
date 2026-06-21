@@ -245,22 +245,70 @@ pub async fn run_runtime_skill(
     ))?
     .map_err(map_skill_err)?;
 
+    // INT-2 file-egress gate: the rendered artifact (built from decrypted vault
+    // content + LLM output) is a real file download. Scan it → fail-closed block a
+    // confidential artifact (422 doc-classified), else PII-redact every text field
+    // and **re-render** the redacted bytes so the download carries no plaintext PII.
     let filename = download_filename(
         result.artifact.title().unwrap_or(&skill.title),
         result.format.extension(),
     );
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&result.artifact_bytes);
+    let (artifact_bytes, gated_artifact, warnings) = {
+        let redactor = attune_core::pii::Redactor::default();
+        match attune_core::doc_privacy::enforce_artifact_egress(
+            &redactor,
+            &result.artifact,
+            attune_core::doc_privacy::RedactMode::Reversible,
+            &[],
+        ) {
+            attune_core::doc_privacy::ArtifactEgressOutcome::Blocked { reason } => {
+                return Err(AppError::detailed(
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    json!({
+                        "error": format!("skill output blocked: confidential document — {reason}"),
+                        "code": "doc-classified",
+                    }),
+                ));
+            }
+            attune_core::doc_privacy::ArtifactEgressOutcome::Allowed { artifact, redacted, .. } => {
+                let mut warns = result.warnings.clone();
+                if redacted > 0 {
+                    // Re-render the redacted IR so the downloadable bytes are clean.
+                    // If re-render fails, fall closed: refuse rather than ship the
+                    // original (plaintext-PII) bytes.
+                    match artifact.render(result.format) {
+                        Ok(bytes) => {
+                            warns.push(format!("已对导出交付物脱敏 {redacted} 处 PII"));
+                            (bytes, artifact, warns)
+                        }
+                        Err(e) => {
+                            return Err(AppError::detailed(
+                                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                                json!({
+                                    "error": format!("redacted artifact re-render failed: {e}"),
+                                    "code": "render-failed",
+                                }),
+                            ));
+                        }
+                    }
+                } else {
+                    (result.artifact_bytes.clone(), artifact, warns)
+                }
+            }
+        }
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&artifact_bytes);
 
     Ok(Json(RunResponse {
         skill_id: result.skill_id,
         filename,
         format: result.format.extension().to_string(),
         mime: result.format.mime().to_string(),
-        size_bytes: result.artifact_bytes.len(),
+        size_bytes: artifact_bytes.len(),
         artifact_base64: b64,
-        artifact: serde_json::to_value(&result.artifact).unwrap_or(Value::Null),
+        artifact: serde_json::to_value(&gated_artifact).unwrap_or(Value::Null),
         token_bill: serde_json::to_value(&result.token_bill).unwrap_or_else(|_| json!({})),
-        warnings: result.warnings,
+        warnings,
         partial: result.partial,
     }))
 }

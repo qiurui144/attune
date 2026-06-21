@@ -329,6 +329,45 @@ export function PrivacyView(): JSX.Element {
         </p>
       </Panel>
 
+      {/* ── Document export protection (INT-2) ──── */}
+      <Panel title={t('privacy.docExport.title')}>
+        <p
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--color-text-secondary)',
+            margin: 0,
+            marginBottom: 'var(--space-3)',
+            lineHeight: 1.6,
+          }}
+        >
+          {t('privacy.docExport.note')}
+        </p>
+        <div
+          data-testid="doc-export-protection"
+          style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}
+        >
+          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)' }}>
+            {t('privacy.docExport.classifyActive')}
+          </span>
+          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)' }}>
+            {t('privacy.docExport.confidentialBlock')}
+          </span>
+          <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)' }}>
+            {t('privacy.docExport.piiRedact')}
+          </span>
+        </div>
+        <p
+          style={{
+            fontSize: 'var(--text-xs)',
+            color: 'var(--color-text-secondary)',
+            margin: 'var(--space-3) 0 0',
+            lineHeight: 1.5,
+          }}
+        >
+          {t('privacy.docExport.pdfHint')}
+        </p>
+      </Panel>
+
       {/* ── DSAR + Audit ───────────────────────── */}
       <Panel title={t('privacy.dsar.title')}>
         <p

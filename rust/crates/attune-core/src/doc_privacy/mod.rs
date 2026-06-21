@@ -181,6 +181,189 @@ pub fn enforce_file_egress(
     }
 }
 
+// ── Artifact-IR egress (the export / skill-runtime download point) ──────────
+
+use crate::export::{Artifact, Block, Document, Table};
+
+/// Outcome of the export/skill-runtime artifact egress gate.
+pub enum ArtifactEgressOutcome {
+    /// Egress refused — the artifact's text carries a confidential marker.
+    Blocked { reason: String },
+    /// Egress allowed; `artifact` is the **redacted** IR safe to render to a
+    /// downloadable file. `mappings` lets the caller `restore()` later (reversible
+    /// mode); `redacted` is the number of PII spans masked.
+    Allowed {
+        artifact: Artifact,
+        mappings: Vec<crate::pii::PiiMatch>,
+        redacted: usize,
+        classification: Classification,
+    },
+}
+
+/// Collect every user-visible text field of an [`Artifact`] in a stable order so
+/// the egress gate can scan + redact it. Order is the render order; the same
+/// order is used to write the redacted strings back in [`apply_redacted_strings`].
+fn collect_artifact_strings(a: &Artifact) -> Vec<String> {
+    let mut out = Vec::new();
+    match a {
+        Artifact::Table(t) => collect_table_strings(t, &mut out),
+        Artifact::Document(d) => {
+            if let Some(t) = &d.title {
+                out.push(t.clone());
+            }
+            for b in &d.blocks {
+                match b {
+                    Block::Heading { text, .. } | Block::Paragraph { text } => out.push(text.clone()),
+                    Block::List { items, .. } => out.extend(items.iter().cloned()),
+                    Block::Table(t) => collect_table_strings(t, &mut out),
+                }
+            }
+        }
+    }
+    out
+}
+
+fn collect_table_strings(t: &Table, out: &mut Vec<String>) {
+    if let Some(title) = &t.title {
+        out.push(title.clone());
+    }
+    out.extend(t.headers.iter().cloned());
+    for row in &t.rows {
+        out.extend(row.iter().cloned());
+    }
+}
+
+/// Write the redacted strings back into a copy of the artifact, consuming
+/// `redacted` in the exact same order [`collect_artifact_strings`] produced them.
+fn apply_redacted_strings(a: &Artifact, redacted: &[String]) -> Artifact {
+    let mut it = redacted.iter().cloned();
+    let mut next = |slot: &mut String| {
+        if let Some(v) = it.next() {
+            *slot = v;
+        }
+    };
+    match a {
+        Artifact::Table(t) => {
+            let mut t = t.clone();
+            apply_table(&mut t, &mut next);
+            Artifact::Table(t)
+        }
+        Artifact::Document(d) => {
+            let mut d: Document = d.clone();
+            if let Some(title) = &mut d.title {
+                next(title);
+            }
+            for b in &mut d.blocks {
+                match b {
+                    Block::Heading { text, .. } | Block::Paragraph { text } => next(text),
+                    Block::List { items, .. } => {
+                        for item in items.iter_mut() {
+                            next(item);
+                        }
+                    }
+                    Block::Table(t) => apply_table(t, &mut next),
+                }
+            }
+            Artifact::Document(d)
+        }
+    }
+}
+
+fn apply_table(t: &mut Table, next: &mut impl FnMut(&mut String)) {
+    if let Some(title) = &mut t.title {
+        next(title);
+    }
+    for h in t.headers.iter_mut() {
+        next(h);
+    }
+    for row in t.rows.iter_mut() {
+        for cell in row.iter_mut() {
+            next(cell);
+        }
+    }
+}
+
+/// Single correct entry-point for the **export / skill-runtime file download**
+/// egress (spec §3 "all egress points must flow through one gate"; closes the
+/// INT-2 "document export bypasses redaction" hole for the rendered-artifact path).
+///
+/// A rendered office file (xlsx / docx / pdf / …) built from decrypted vault
+/// content + LLM output is a genuine file egress: those bytes leave the device as
+/// a download. This gate scans the artifact's text:
+/// - confidential marker (`Classified`) ⇒ [`ArtifactEgressOutcome::Blocked`]
+///   (fail-closed — the file is never rendered);
+/// - otherwise the artifact's text fields are PII-redacted **in place** (reusing
+///   the same engine as the LLM egress path) so the rendered file carries no
+///   plaintext PII. Redaction is `Reversible` (`[KIND_N]` tokens) so the user can
+///   `restore()` from `mappings`; pass `Irreversible` for untrusted sharing.
+///
+/// `extra_keywords` lets a pro plugin extend the confidential-keyword set
+/// (industry markers); pass an empty slice for the generic OSS set.
+pub fn enforce_artifact_egress(
+    redactor: &Redactor,
+    artifact: &Artifact,
+    mode: RedactMode,
+    extra_keywords: &[String],
+) -> ArtifactEgressOutcome {
+    let classifier = if extra_keywords.is_empty() {
+        DocClassifier::new()
+    } else {
+        let combined = classifier::DEFAULT_CONFIDENTIAL_KEYWORDS
+            .iter()
+            .map(|s| s.to_string())
+            .chain(extra_keywords.iter().cloned());
+        DocClassifier::with_keywords(combined)
+    };
+
+    let strings = collect_artifact_strings(artifact);
+    // Scan the concatenated text once for the confidentiality grade. We join with
+    // a newline so multi-keyword phrases never form across field boundaries.
+    let joined = strings.join("\n");
+    let cls = classifier.classify(&joined, &[]);
+
+    if let GateDecision::Block = gate_for_classification(cls.classification) {
+        return ArtifactEgressOutcome::Blocked {
+            reason: cls
+                .block_reason
+                .unwrap_or_else(|| "classified artifact".to_string()),
+        };
+    }
+
+    // Redact every text field with globally-unique placeholders, then write back.
+    let (redacted_segments, mut mappings) = redactor.redact_batch(&strings);
+    let redacted_count = mappings.len();
+
+    // Irreversible mode: collapse placeholders to a fixed mask, drop mappings.
+    let (final_segments, final_mappings) = match mode {
+        RedactMode::Reversible => (redacted_segments, mappings),
+        RedactMode::Irreversible => {
+            const MASK: &str = "\u{2588}\u{2588}\u{2588}\u{2588}";
+            // Replace longest placeholders first to avoid [PHONE_1] vs [PHONE_10].
+            mappings.sort_by_key(|m| std::cmp::Reverse(m.placeholder.len()));
+            let masked: Vec<String> = redacted_segments
+                .into_iter()
+                .map(|mut s| {
+                    for m in &mappings {
+                        if s.contains(&m.placeholder) {
+                            s = s.replace(&m.placeholder, MASK);
+                        }
+                    }
+                    s
+                })
+                .collect();
+            (masked, Vec::new())
+        }
+    };
+
+    let redacted_artifact = apply_redacted_strings(artifact, &final_segments);
+    ArtifactEgressOutcome::Allowed {
+        artifact: redacted_artifact,
+        mappings: final_mappings,
+        redacted: redacted_count,
+        classification: cls.classification,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +501,171 @@ mod tests {
             matches!(res, Err(RedactError::UnsupportedFormat(ref f)) if f == "pdf"),
             "PDF export must fail closed, never emit a half-redacted file"
         );
+    }
+
+    // ── enforce_artifact_egress: the export / skill-runtime download closure ──
+
+    use crate::export::{Artifact, Block, Document, Table};
+
+    fn doc_with(title: &str, paras: &[&str]) -> Artifact {
+        Artifact::Document(Document {
+            title: Some(title.to_string()),
+            blocks: paras
+                .iter()
+                .map(|p| Block::Paragraph { text: p.to_string() })
+                .collect(),
+        })
+    }
+
+    /// Adversarial: a confidential artifact (classified marker in a paragraph) is
+    /// fail-closed blocked — the file is never rendered.
+    #[test]
+    fn artifact_egress_blocks_classified_export() {
+        let r = Redactor::new();
+        let art = doc_with("交付物", &["绝密：本报告禁止外传，含电话 13800138000"]);
+        match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &[]) {
+            ArtifactEgressOutcome::Blocked { reason } => assert!(reason.contains("绝密")),
+            ArtifactEgressOutcome::Allowed { .. } => {
+                panic!("classified artifact must be blocked from export")
+            }
+        }
+    }
+
+    /// A normal artifact carrying PII is exported **redacted** — the rendered text
+    /// (and the IR fed to the renderer) carries no plaintext PII; reversible.
+    #[test]
+    fn artifact_egress_redacts_normal_export_no_plaintext_pii() {
+        let r = Redactor::new();
+        let art = doc_with(
+            "客户清单",
+            &["张三 电话 13800138000", "李四 邮箱 c@d.com"],
+        );
+        match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &[]) {
+            ArtifactEgressOutcome::Allowed { artifact, mappings, redacted, classification } => {
+                assert_eq!(classification, Classification::Normal);
+                assert!(redacted >= 2, "phone + email detected; got {redacted}");
+                // Render to markdown and prove no plaintext PII leaves.
+                let bytes = artifact.render(crate::export::ExportFormat::Md).unwrap();
+                let md = String::from_utf8(bytes).unwrap();
+                assert!(!md.contains("13800138000"), "rendered file must not carry phone");
+                assert!(!md.contains("c@d.com"), "rendered file must not carry email");
+                // Reversible: the placeholders restore to originals.
+                let restored = r.restore(&md, &mappings);
+                assert!(restored.contains("13800138000"));
+                assert!(restored.contains("c@d.com"));
+            }
+            ArtifactEgressOutcome::Blocked { .. } => panic!("normal artifact must be exportable"),
+        }
+    }
+
+    /// Table cells carrying PII are redacted across all rows.
+    #[test]
+    fn artifact_egress_redacts_table_cells() {
+        let r = Redactor::new();
+        let art = Artifact::Table(Table {
+            title: Some("联系人".to_string()),
+            headers: vec!["姓名".to_string(), "电话".to_string()],
+            rows: vec![
+                vec!["张三".to_string(), "13800138000".to_string()],
+                vec!["李四".to_string(), "13900139000".to_string()],
+            ],
+            aligns: vec![],
+        });
+        match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &[]) {
+            ArtifactEgressOutcome::Allowed { artifact, redacted, .. } => {
+                assert_eq!(redacted, 2, "two phones masked");
+                let bytes = artifact.render(crate::export::ExportFormat::Csv).unwrap();
+                let csv = String::from_utf8(bytes).unwrap();
+                assert!(!csv.contains("13800138000"));
+                assert!(!csv.contains("13900139000"));
+                // structure preserved: header + 2 rows still render
+                assert!(csv.contains("姓名") && csv.contains("张三") && csv.contains("李四"));
+            }
+            ArtifactEgressOutcome::Blocked { .. } => panic!("table must be exportable"),
+        }
+    }
+
+    /// Irreversible mode masks PII with the block char and emits no restore map.
+    #[test]
+    fn artifact_egress_irreversible_has_no_mappings() {
+        let r = Redactor::new();
+        let art = doc_with("x", &["phone 13800138000"]);
+        match enforce_artifact_egress(&r, &art, RedactMode::Irreversible, &[]) {
+            ArtifactEgressOutcome::Allowed { artifact, mappings, .. } => {
+                assert!(mappings.is_empty(), "irreversible mode emits no restore map");
+                let bytes = artifact.render(crate::export::ExportFormat::Md).unwrap();
+                let md = String::from_utf8(bytes).unwrap();
+                assert!(!md.contains("13800138000"));
+                assert!(md.contains('\u{2588}'), "irreversible mask expected");
+            }
+            ArtifactEgressOutcome::Blocked { .. } => panic!("must export"),
+        }
+    }
+
+    /// A clean artifact (no PII, no markers) passes through unchanged.
+    #[test]
+    fn artifact_egress_clean_passes_through() {
+        let r = Redactor::new();
+        let art = doc_with("公开报告", &["这是一份公开的技术说明，无敏感信息。"]);
+        match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &[]) {
+            ArtifactEgressOutcome::Allowed { redacted, classification, .. } => {
+                assert_eq!(redacted, 0);
+                assert_eq!(classification, Classification::Normal);
+            }
+            ArtifactEgressOutcome::Blocked { .. } => panic!("clean artifact must export"),
+        }
+    }
+
+    /// Pro-plugin extra keywords extend the block set (industry marker).
+    #[test]
+    fn artifact_egress_extra_keywords_block() {
+        let r = Redactor::new();
+        let art = doc_with("案卷", &["本案卷密，禁止公开"]);
+        // generic set does NOT contain 案卷密 → not blocked
+        assert!(matches!(
+            enforce_artifact_egress(&r, &art, RedactMode::Reversible, &[]),
+            ArtifactEgressOutcome::Allowed { .. }
+        ));
+        // pro plugin injects 案卷密 → blocked
+        match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &["案卷密".to_string()]) {
+            ArtifactEgressOutcome::Blocked { reason } => assert!(reason.contains("案卷密")),
+            ArtifactEgressOutcome::Allowed { .. } => panic!("pro keyword must block"),
+        }
+    }
+
+    /// Round-trip field-order invariant: redacted strings map back to the exact
+    /// same slots (title, headings, list items, nested table) they came from.
+    #[test]
+    fn artifact_egress_preserves_field_order_with_nested_blocks() {
+        let r = Redactor::new();
+        let art = Artifact::Document(Document {
+            title: Some("报告 13800138000".to_string()),
+            blocks: vec![
+                Block::Heading { level: 1, text: "概述 c@d.com".to_string() },
+                Block::List { ordered: false, items: vec!["项目 13900139000".to_string()] },
+                Block::Table(Table {
+                    title: None,
+                    headers: vec!["列".to_string()],
+                    rows: vec![vec!["x@y.com".to_string()]],
+                    aligns: vec![],
+                }),
+            ],
+        });
+        match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &[]) {
+            ArtifactEgressOutcome::Allowed { artifact, mappings, redacted, .. } => {
+                assert_eq!(redacted, 4, "4 PII spans across title/heading/list/table");
+                let bytes = artifact.render(crate::export::ExportFormat::Md).unwrap();
+                let md = String::from_utf8(bytes).unwrap();
+                for raw in ["13800138000", "c@d.com", "13900139000", "x@y.com"] {
+                    assert!(!md.contains(raw), "raw {raw} must be redacted");
+                }
+                // restore recovers every original (proves correct slot mapping)
+                let restored = r.restore(&md, &mappings);
+                for raw in ["13800138000", "c@d.com", "13900139000", "x@y.com"] {
+                    assert!(restored.contains(raw), "restore must recover {raw}");
+                }
+            }
+            ArtifactEgressOutcome::Blocked { .. } => panic!("must export"),
+        }
     }
 }
