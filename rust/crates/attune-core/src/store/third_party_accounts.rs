@@ -21,15 +21,31 @@ use crate::store::Store;
 /// 已知第三方源 provider 允许集。新 provider 必须先入此白名单 —— 拒绝 typo 静默写入
 /// unknown provider 让 suggestions 规则引擎「按 provider 判稀缺」永远算错。
 pub const KNOWN_PROVIDERS: &[&str] = &[
-    "webdav", // 网盘 WebDAV
-    "imap",   // 邮箱 IMAP
-    "rss",    // RSS / Atom（带鉴权的私有 feed）
-    "git",    // git 仓 token
-    "other",  // 其他 OpenAI-compat / 自定义源
+    "webdav",        // 网盘 WebDAV
+    "imap",          // 邮箱 IMAP
+    "rss",           // RSS / Atom（带鉴权的私有 feed）
+    "git",           // git 仓 token
+    "browser_login", // INT-1: 浏览器登入协助会话（storage_state JSON 经 DEK 加密落 secret_enc）
+    "other",         // 其他 OpenAI-compat / 自定义源
 ];
 
 pub fn is_known_provider(provider: &str) -> bool {
     KNOWN_PROVIDERS.contains(&provider)
+}
+
+/// 通用凭据 secret 上限（password / token / app-password 足够）。
+const MAX_SECRET_LEN: usize = 8192;
+/// `browser_login` 会话上限：Playwright `storage_state` JSON（cookies + localStorage）
+/// 可达数十 KB。放宽到 256 KB；超限**报错而非截断**（截断会破坏 JSON → 会话失效）。
+const MAX_BROWSER_LOGIN_SECRET_LEN: usize = 256 * 1024;
+
+/// provider 对应的 secret 字节上限。`browser_login` 走会话上限，其余走通用上限。
+fn max_secret_len(provider: &str) -> usize {
+    if provider == "browser_login" {
+        MAX_BROWSER_LOGIN_SECRET_LEN
+    } else {
+        MAX_SECRET_LEN
+    }
 }
 
 /// 写入用的第三方账号配置（明文 secret，调用方持有；落库前由本模块加密）。
@@ -74,9 +90,14 @@ fn validate(input: &ThirdPartyAccountInput) -> Result<()> {
     if input.endpoint.trim().is_empty() {
         return Err(VaultError::Crypto("endpoint must not be empty".into()));
     }
-    // defense-in-depth：超长字段会膨胀表 / 拖慢解密。
-    if input.secret.len() > 8192 {
-        return Err(VaultError::Crypto("secret too long (max 8192)".into()));
+    // defense-in-depth：超长字段会膨胀表 / 拖慢解密。上限按 provider 区分
+    // （browser_login 会话 JSON 远大于普通凭据）。超限报错**不截断**。
+    let limit = max_secret_len(&input.provider);
+    if input.secret.len() > limit {
+        return Err(VaultError::Crypto(format!(
+            "secret too long (max {limit} for provider {:?})",
+            input.provider
+        )));
     }
     Ok(())
 }

@@ -17,6 +17,8 @@ pub enum SourceKind {
     CloudDrive,
     /// Git 仓库（GitHub / GitLab / Gitea / Bitbucket / 任意 HTTPS git host）。
     GitRepo,
+    /// 登录墙后内容（INT-1 browser login-assist：经会话复用爬取会员页入库）。
+    LoginAssist,
 }
 
 impl SourceKind {
@@ -29,6 +31,7 @@ impl SourceKind {
             SourceKind::Rss => "rss",
             SourceKind::CloudDrive => "cloud_drive",
             SourceKind::GitRepo => "git_repo",
+            SourceKind::LoginAssist => "login_assist",
         }
     }
 
