@@ -852,6 +852,7 @@ mod tests {
             revoked_at: None,
             last_used_at: None,
             created_at: None,
+            vertical: None,
             entitled_plugins: entitled,
         }
     }

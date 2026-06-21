@@ -12,6 +12,8 @@ import { useEffect, useState } from 'preact/hooks';
 import { api } from '../store/api';
 import { toast } from '../components';
 import { t } from '../i18n';
+import { memberVertical } from '../store/signals';
+import { verticalLabel } from '../hooks/useMember';
 
 interface PluginListing {
   id: string;
@@ -149,6 +151,12 @@ export function MarketplaceView(): JSX.Element {
             {' · '}
             {t('market.hub_version', { version: data.hub_version })}
           </div>
+          {/* GAP-B: cloud 下发的会员场景 (vertical) — 纯展示文案,不参与门禁。 */}
+          {memberVertical.value && (
+            <div style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>
+              {t('market.current_vertical', { vertical: verticalLabel(memberVertical.value) })}
+            </div>
+          )}
         </div>
         {data.user_plan === 'individual' && (
           <a

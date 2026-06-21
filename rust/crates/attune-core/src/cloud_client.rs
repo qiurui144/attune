@@ -400,6 +400,17 @@ pub struct UserInfo {
     /// 老版 accounts server 不返回此字段 → None,attune-server 不写入 model 保持兼容。
     #[serde(default)]
     pub gateway_default_model: Option<String>,
+    /// 会员场景 (vertical):law / medical / patent / presales / tech / academic。
+    /// per spec 2026-06-20-membership-auto-plugin-provision.md §5。
+    ///
+    /// SECURITY (§11 R2):**纯 UI 文案,不参与任何插件门禁**。装哪些插件的权威是签名
+    /// 快照里的 `allowed_plugins`(SEC-1 Ed25519 + SEC-2 nonce),即便此明文字段被伪造
+    /// 也无法越权。client 也**不自报** vertical(只读 cloud 下发,防伪造越权)。
+    ///
+    /// 向后兼容:老 cloud 不返回 → None(serde default);未知字符串值客户端容忍
+    /// (前向兼容未来 vertical),UI 映射对未知值有兜底文案。
+    #[serde(default)]
+    pub vertical: Option<String>,
 }
 
 /// accounts `GET /api/v1/licenses` 的单条 license 响应
@@ -418,6 +429,10 @@ pub struct License {
     pub last_used_at: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
+    /// 会员场景 (vertical),仅 UI 展示用;老 cloud 不返回 → None。语义同
+    /// [`UserInfo::vertical`](不参与门禁)。
+    #[serde(default)]
+    pub vertical: Option<String>,
     /// pro 插件清单 (pluginhub 下发)
     #[serde(default)]
     pub entitled_plugins: Vec<EntitledPlugin>,
@@ -448,6 +463,10 @@ pub struct ActivateResult {
     /// 云端下发默认 model (如 "deepseek-v4-flash");老 cloud 不返回 → None
     #[serde(default)]
     pub gateway_default_model: Option<String>,
+    /// 会员场景 (vertical),语义同 [`UserInfo::vertical`]:纯 UI 文案,**不参与门禁**
+    /// (装什么仍由签名快照 `allowed_plugins` 决定),client 不自报。老 cloud → None。
+    #[serde(default)]
+    pub vertical: Option<String>,
 }
 
 /// `POST /api/v1/devices/activate` 成功响应 — cloud 颁发的设备绑定凭据.
@@ -653,6 +672,16 @@ impl EntitlementSnapshot {
     pub fn is_unsigned_response(&self) -> bool {
         self.signature.is_none() || self.signed_payload.is_none()
     }
+}
+
+/// 已知 vertical 枚举(spec §11 裁决:cloud 端枚举校验,client 端容忍任意字符串以
+/// 前向兼容未来 vertical)。client **不**拒绝未知值 —— 仅用此集合区分"已知场景"(可给
+/// 本地化文案)与"未知场景"(UI 走兜底原样显示)。**绝不**用 vertical 做门禁决策。
+pub const KNOWN_VERTICALS: &[&str] = &["law", "medical", "patent", "presales", "tech", "academic"];
+
+/// vertical 是否为已知枚举值(用于决定 UI 是否有本地化文案;不是门禁)。空/None 不算已知。
+pub fn is_known_vertical(vertical: &str) -> bool {
+    KNOWN_VERTICALS.contains(&vertical)
 }
 
 fn http_err(e: reqwest::Error) -> VaultError {
@@ -1167,6 +1196,88 @@ mod tests {
             "canonical keys must be lexicographically sorted: {s}");
         // No whitespace (compact).
         assert!(!s.contains(": ") && !s.contains(", "), "canonical must be compact: {s}");
+    }
+
+    // ── vertical 透传 (spec 2026-06-20 §5) ──────────────────────────────────
+    //
+    // 向后兼容:老 cloud 无 vertical → None;新 cloud 下发 → Some。未知字符串容忍
+    // (前向兼容)。vertical 是纯 UI 文案,不参与门禁(R2),client 不自报。
+
+    #[test]
+    fn user_info_parses_vertical() {
+        let json = r#"{
+            "id": 9, "email": "lawyer@x.com", "plan": "pro",
+            "gateway_token": "sk-x", "gateway_url": "https://gw/v1",
+            "vertical": "law"
+        }"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(u.vertical.as_deref(), Some("law"));
+    }
+
+    #[test]
+    fn user_info_old_cloud_vertical_is_none() {
+        // 老 cloud 不返回 vertical → serde default None(向后兼容)。
+        let json = r#"{"id": 1, "email": "free@example.com", "plan": "individual"}"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert!(u.vertical.is_none(), "old cloud → vertical None");
+    }
+
+    #[test]
+    fn user_info_unknown_vertical_string_tolerated() {
+        // 前向兼容:client 不拒绝未知 vertical 值(未来 cloud 可能新增 vertical)。
+        let json = r#"{"id": 1, "email": "x@y.com", "plan": "pro", "vertical": "future-vertical"}"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(u.vertical.as_deref(), Some("future-vertical"));
+        assert!(!is_known_vertical("future-vertical"), "unknown → UI uses fallback label");
+    }
+
+    #[test]
+    fn user_info_null_vertical_is_none() {
+        // cloud 显式 null(未指定场景的 pro 用户)→ None,不 panic。
+        let json = r#"{"id": 1, "email": "x@y.com", "plan": "pro", "vertical": null}"#;
+        let u: UserInfo = serde_json::from_str(json).unwrap();
+        assert!(u.vertical.is_none());
+    }
+
+    #[test]
+    fn activate_result_parses_vertical() {
+        let json = r#"{
+            "plan": "pro", "expires_at": "2027-06-20T00:00:00Z",
+            "vertical": "patent", "allowed_plugins": ["patent-pro"],
+            "gateway_token": "sk-y", "gateway_url": "https://gw/v1"
+        }"#;
+        let r: ActivateResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.vertical.as_deref(), Some("patent"));
+        assert_eq!(r.allowed_plugins, vec!["patent-pro"]);
+    }
+
+    #[test]
+    fn activate_result_old_cloud_vertical_none() {
+        let r: ActivateResult = serde_json::from_str(r#"{"plan": "pro"}"#).unwrap();
+        assert!(r.vertical.is_none());
+    }
+
+    #[test]
+    fn license_parses_vertical_for_ui() {
+        let json = r#"{
+            "id": 42, "plan": "pro", "license_key": "lk-x", "license_id": 7,
+            "vertical": "academic",
+            "entitled_plugins": []
+        }"#;
+        let lic: License = serde_json::from_str(json).unwrap();
+        assert_eq!(lic.vertical.as_deref(), Some("academic"));
+    }
+
+    #[test]
+    fn is_known_vertical_covers_six_enum_values() {
+        for v in ["law", "medical", "patent", "presales", "tech", "academic"] {
+            assert!(is_known_vertical(v), "{v} must be a known vertical");
+        }
+        // unknown / empty / case-sensitive → not known (UI fallback).
+        assert!(!is_known_vertical("Law"), "case-sensitive: 'Law' != 'law'");
+        assert!(!is_known_vertical(""), "empty is not a vertical");
+        assert!(!is_known_vertical("finance"), "未列入枚举 → 未知");
+        assert_eq!(KNOWN_VERTICALS.len(), 6, "exactly 6 verticals per spec");
     }
 
     #[test]

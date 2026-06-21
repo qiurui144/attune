@@ -1672,6 +1672,8 @@ function MemberPanel(): JSX.Element {
     logging.value = false;
     if (result.ok) {
       toast('success', t('settings.member.login_ok'));
+      // GAP-B: 若 cloud 下发了会员场景且按场景自动装了插件,提示"已为〔律师〕场景安装 …"。
+      if (result.verticalMessage) toast('success', result.verticalMessage);
       email.value = '';
       password.value = '';
     } else {

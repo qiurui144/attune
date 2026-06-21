@@ -2,12 +2,59 @@
  *  对接 /api/v1/member/{state,locks,logout}.
  */
 import { api } from '../store/api';
+import { t } from '../i18n';
 import {
   memberState,
+  memberVertical,
   settingsLocks,
   type MemberStateKind,
   type SettingsLocksMap,
 } from '../store/signals';
+
+/** 会员场景 (vertical) → 本地化场景名 i18n key.
+ *  GAP-B (spec 2026-06-20): vertical 是 cloud 下发的会员场景属性,**纯展示文案**,
+ *  不参与任何插件门禁(装什么由签名快照 allowed_plugins 决定)。未知 vertical 走
+ *  兜底原样显示 (前向兼容未来 cloud 新增 vertical)。 */
+const VERTICAL_LABEL_KEYS: Record<string, string> = {
+  law: 'member.vertical.law',
+  medical: 'member.vertical.medical',
+  patent: 'member.vertical.patent',
+  presales: 'member.vertical.presales',
+  tech: 'member.vertical.tech',
+  academic: 'member.vertical.academic',
+};
+
+/** vertical id → 本地化场景名;未知值原样返回 (兜底,不 panic / 不丢信息)。 */
+export function verticalLabel(vertical: string | null | undefined): string {
+  if (!vertical) return '';
+  const key = VERTICAL_LABEL_KEYS[vertical];
+  return key ? t(key) : vertical;
+}
+
+/** 会员入口 (login / activate) 的透传响应形态 (vertical + plugin_sync)。 */
+type MemberPluginSync = {
+  installed?: string[];
+  skipped_already_installed?: string[];
+  failed?: { plugin_id: string; reason: string }[];
+};
+type MemberLoginResp = {
+  vertical?: string | null;
+  plugin_sync?: MemberPluginSync | null;
+};
+
+/** 构建"已为〔{场景}〕场景安装 {plugins}"提示文案.
+ *  vertical 缺省 (未指定场景的 pro 用户) 或无新装插件 → 返回 null (不弹该提示)。 */
+export function verticalInstallMessage(resp: MemberLoginResp | null | undefined): string | null {
+  if (!resp) return null;
+  const label = verticalLabel(resp.vertical);
+  if (!label) return null;
+  const installed = resp.plugin_sync?.installed ?? [];
+  if (installed.length === 0) return null;
+  return t('member.vertical.installed_for', {
+    vertical: label,
+    plugins: installed.join('、'),
+  });
+}
 
 type RawState = {
   state:
@@ -97,15 +144,19 @@ export async function loadSettingsLocks(): Promise<void> {
 export async function memberLoginPassword(
   email: string,
   password: string,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; verticalMessage?: string | null }> {
   try {
     // SECURITY: the accounts URL is resolved server-side from settings
     // (settings.cloud.accounts_url) — never sent from the client (SSRF/paywall).
     // Self-host operators configure it once under Settings → cloud.
-    await api.post('/member/login-password', { email, password });
+    const resp = await api.post<MemberLoginResp>('/member/login-password', { email, password });
     await loadMemberState();
     await loadSettingsLocks();
-    return { ok: true };
+    // GAP-B: remember the cloud-issued vertical for display (Marketplace "current
+    // scene" + login toast). vertical is UI copy only (never a gate); the client
+    // only relays the cloud value, it never self-reports one.
+    memberVertical.value = resp.vertical ?? null;
+    return { ok: true, verticalMessage: verticalInstallMessage(resp) };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, error: msg };
@@ -116,6 +167,7 @@ export async function memberLogout(): Promise<boolean> {
   try {
     await api.post('/member/logout', {});
     memberState.value = null;
+    memberVertical.value = null;
     await loadSettingsLocks();
     return true;
   } catch {
