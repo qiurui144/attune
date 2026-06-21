@@ -135,6 +135,52 @@ pub fn classification_to_tier(c: Classification) -> PrivacyTier {
     }
 }
 
+/// Outcome of the one-call file-egress gate.
+pub enum FileEgressOutcome {
+    /// Egress refused — classified document must not leave the device.
+    Blocked { reason: String },
+    /// Egress allowed; `bytes` are the **redacted** file to put on the wire.
+    Allowed(RedactionOutput),
+}
+
+/// Single correct entry-point for **any file-export / share / WebDAV egress**
+/// (spec §3 "all egress points must flow through one gate"; closes the INT-2
+/// "document export bypasses redaction" hole).
+///
+/// Pipeline: extract text upstream → scan/grade → classified ⇒ fail-closed
+/// block → otherwise byte-level redact the file before it leaves.
+///
+/// `extracted_text` is the document's text layer (from the existing parser/OCR);
+/// `ext` + `data` are the raw file. On `Classified` the function never produces
+/// output bytes (defense in depth with the OutboundGate L0 check).
+pub fn enforce_file_egress(
+    redactor: &Redactor,
+    extracted_text: &str,
+    ext: &str,
+    data: &[u8],
+    mode: RedactMode,
+) -> Result<FileEgressOutcome, RedactError> {
+    let scanner = DocPrivacyScanner::new(redactor);
+    let report = scanner.analyze_text(extracted_text);
+
+    match gate_for_classification(report.classification) {
+        GateDecision::Block => Ok(FileEgressOutcome::Blocked {
+            reason: report
+                .block_reason
+                .unwrap_or_else(|| "classified document".to_string()),
+        }),
+        GateDecision::AllowRedacted { .. } => {
+            let out = DocRedactor::new(redactor).redact_bytes(
+                ext,
+                data,
+                report.classification,
+                mode,
+            )?;
+            Ok(FileEgressOutcome::Allowed(out))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +267,56 @@ mod tests {
         assert!(
             matches!(verdict, Err(OutboundError::L0CloudBlocked)),
             "classified doc must be blocked at the real gate; got {verdict:?}"
+        );
+    }
+
+    // ── enforce_file_egress: the INT-2 "export bypasses redaction" closure ────
+
+    #[test]
+    fn file_egress_blocks_classified_export() {
+        let r = Redactor::new();
+        let classified_text = "绝密：本文件禁止外传，含电话 13800138000";
+        let out = enforce_file_egress(
+            &r,
+            classified_text,
+            "txt",
+            classified_text.as_bytes(),
+            RedactMode::Reversible,
+        )
+        .unwrap();
+        match out {
+            FileEgressOutcome::Blocked { reason } => assert!(reason.contains("绝密")),
+            FileEgressOutcome::Allowed(_) => panic!("classified file must be blocked from export"),
+        }
+    }
+
+    #[test]
+    fn file_egress_redacts_normal_export_no_plaintext_pii() {
+        let r = Redactor::new();
+        let text = "客户电话 13800138000 邮箱 c@d.com";
+        let out = enforce_file_egress(&r, text, "txt", text.as_bytes(), RedactMode::Reversible)
+            .unwrap();
+        match out {
+            FileEgressOutcome::Allowed(redaction) => {
+                let s = String::from_utf8(redaction.bytes.clone()).unwrap();
+                // The exported file carries NO plaintext PII (hole closed).
+                assert!(!s.contains("13800138000"), "exported file must not carry phone");
+                assert!(!s.contains("c@d.com"), "exported file must not carry email");
+                // reversible: importer can restore
+                let restored = r.restore(&s, &redaction.mappings);
+                assert_eq!(restored, text);
+            }
+            FileEgressOutcome::Blocked { .. } => panic!("normal doc must be exportable (redacted)"),
+        }
+    }
+
+    #[test]
+    fn file_egress_unsupported_pdf_fails_closed() {
+        let r = Redactor::new();
+        let res = enforce_file_egress(&r, "phone 13800138000", "pdf", b"%PDF", RedactMode::Reversible);
+        assert!(
+            matches!(res, Err(RedactError::UnsupportedFormat(ref f)) if f == "pdf"),
+            "PDF export must fail closed, never emit a half-redacted file"
         );
     }
 }
