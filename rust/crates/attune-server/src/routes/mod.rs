@@ -6,6 +6,7 @@ pub mod auto_bookmarks;
 pub mod demo;
 pub mod behavior;
 pub mod browse_signals;
+pub mod browser_login;  // GAP-A: 浏览器登入协助 REST(触发/列/删登入会话,脱敏,桌面可点)
 pub mod chat;
 pub mod chat_sessions;
 pub mod documents;

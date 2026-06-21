@@ -299,6 +299,21 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/accounts/{id}",
             axum::routing::delete(routes::third_party_accounts::delete_account),
         )
+        // GAP-A 浏览器登入协助:触发登入(scan/人在回路 login)→ 捕获会话入保险柜;
+        // 列已连接会话(脱敏,绝不回凭据);移除会话。auto 默认关 + 会员门(L-5)。
+        // 出网走 OutboundKind::BrowserCrawl 隐私开关 + vault-unlocked + L-7 allowlist。
+        .route(
+            "/api/v1/browser-login/connect",
+            post(routes::browser_login::connect),
+        )
+        .route(
+            "/api/v1/browser-login/sessions",
+            get(routes::browser_login::list_sessions),
+        )
+        .route(
+            "/api/v1/browser-login/sessions/{id}",
+            axum::routing::delete(routes::browser_login::delete_session),
+        )
         // v0.6 Phase A.5.3 隐私出网审计日志（GET 列表 + CSV 导出）
         // 写入由 attune-core::Store::record_outbound 在 LLM provider hook 中触发，不暴露 POST
         .route("/api/v1/audit/outbound", get(routes::audit::list))

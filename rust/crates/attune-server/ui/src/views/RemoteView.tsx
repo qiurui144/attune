@@ -3,7 +3,7 @@
 import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { Button, EmptyState, Modal, Input, Skeleton, AccountsPanel } from '../components';
+import { Button, EmptyState, Modal, Input, Skeleton, AccountsPanel, BrowserLoginPanel } from '../components';
 import { confirmDialog } from '../components/ConfirmModal';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
@@ -169,6 +169,9 @@ export function RemoteView(): JSX.Element {
 
       {/* 第三方账号统一管理(波 C):连接 WebDAV/IMAP/RSS/Git/其它源凭据。ConnectSource 建议卡点击落到此处。 */}
       <AccountsPanel />
+
+      {/* 浏览器登入协助(GAP-A):连接登录墙后的源,人在回路捕获会话入保险柜。 */}
+      <BrowserLoginPanel />
     </div>
   );
 }
