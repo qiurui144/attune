@@ -56,3 +56,4 @@ export type { PluginFormProps } from './PluginForm';
 
 export { SuggestionsPanel } from './SuggestionsPanel';
 export { AccountsPanel } from './AccountsPanel';
+export { BrowserLoginPanel } from './BrowserLoginPanel';
