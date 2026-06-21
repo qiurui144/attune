@@ -286,6 +286,17 @@ pub async fn login_password(
         })?
         .map_err(|(code, msg)| (code, Json(serde_json::json!({"error": msg}))))?;
 
+    // GAP-B (spec 2026-06-20): capture the cloud-issued membership `vertical` (场景)
+    // BEFORE `me` is consumed by the gateway match below. Prefer the /me snapshot
+    // (freshest), fall back to the login UserInfo. SECURITY (§11 R2): vertical is
+    // UI-copy ONLY — it never gates which plugins install (the signed snapshot's
+    // allowed_plugins is authoritative); and we only RELAY the cloud value, the
+    // client never self-reports a vertical.
+    let vertical = me
+        .as_ref()
+        .and_then(|m| m.vertical.clone())
+        .or_else(|| user.vertical.clone());
+
     let new_state = if let Some(selected) = license {
         // 付费会员：拿 cloud gateway token, 合并进 vault app_settings,
         // 桌面 chat 零配置接通云端 LLM。best-effort — 失败不阻断登录。
@@ -323,6 +334,7 @@ pub async fn login_password(
         "state": new_state,
         "email": user.email,
         "tier": user.plan,
+        "vertical": vertical,
         "plugin_sync": plugins_json,
     })))
 }
@@ -588,6 +600,9 @@ pub async fn activate_license(
                 "state": new_state,
                 "plan": result.plan,
                 "expires_at": result.expires_at,
+                // GAP-B: passthrough cloud-issued vertical (UI copy only, never a gate
+                // per §11 R2; client relays, does not self-report).
+                "vertical": result.vertical,
                 "allowed_plugins": result.allowed_plugins,
                 "device": {
                     "device_id": dev.device_id,
@@ -1070,6 +1085,67 @@ mod tests {
     /// 新 gateway 字段却忘了给 ActivateResult 加(或反之),激活路径会丢该配置。守卫用
     /// serde round-trip 钉死两者都解析同名三件套(url/token/default_model),缺一即编译/
     /// 断言失败,逼维护者同步两边。
+    // ── GAP-B: vertical passthrough (spec 2026-06-20 §5) ────────────────────
+    //
+    // login_password / activate_license relay the cloud-issued `vertical` in their
+    // response JSON. We assert the response-shape mapping (the same json! the handler
+    // builds) carries vertical from the cloud type. SECURITY (§11 R2): vertical is UI
+    // copy ONLY — it never appears in MemberState and never gates plugins.
+
+    #[test]
+    fn login_response_passes_through_vertical() {
+        // login_password prefers me.vertical, falls back to user.vertical.
+        let me: UserInfo = serde_json::from_value(serde_json::json!({
+            "id": 9, "email": "lawyer@x.com", "plan": "pro", "vertical": "law",
+        }))
+        .unwrap();
+        let vertical = me.vertical.clone();
+        let body = serde_json::json!({ "status": "ok", "vertical": vertical });
+        assert_eq!(body["vertical"], "law");
+    }
+
+    #[test]
+    fn login_response_vertical_falls_back_to_user_when_me_absent() {
+        // /me fetch failed (None) → use the login UserInfo's vertical.
+        let user: UserInfo = serde_json::from_value(serde_json::json!({
+            "id": 9, "email": "x@y.com", "plan": "pro", "vertical": "tech",
+        }))
+        .unwrap();
+        let me: Option<UserInfo> = None;
+        let vertical = me
+            .as_ref()
+            .and_then(|m| m.vertical.clone())
+            .or_else(|| user.vertical.clone());
+        assert_eq!(vertical.as_deref(), Some("tech"));
+    }
+
+    #[test]
+    fn login_response_vertical_none_for_old_cloud() {
+        // old cloud → vertical absent → response carries null (UI shows no scene).
+        let user: UserInfo =
+            serde_json::from_value(serde_json::json!({"id": 1, "email": "f@x.com", "plan": "individual"}))
+                .unwrap();
+        let vertical = user.vertical.clone();
+        assert!(vertical.is_none());
+        let body = serde_json::json!({ "status": "ok", "vertical": vertical });
+        assert!(body["vertical"].is_null());
+    }
+
+    #[test]
+    fn activate_response_passes_through_vertical() {
+        let result: ActivateResult = serde_json::from_value(serde_json::json!({
+            "plan": "pro", "vertical": "patent", "allowed_plugins": ["patent-pro"],
+        }))
+        .unwrap();
+        let body = serde_json::json!({
+            "status": "ok",
+            "vertical": result.vertical,
+            "allowed_plugins": result.allowed_plugins,
+        });
+        assert_eq!(body["vertical"], "patent");
+        assert_eq!(body["allowed_plugins"][0], "patent-pro");
+    }
+
     #[test]
     fn user_info_and_activate_result_share_gateway_field_set() {
         let payload = serde_json::json!({

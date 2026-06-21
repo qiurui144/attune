@@ -81,6 +81,9 @@ export type MemberSnapshot = {
   is_paid: boolean;
 };
 export const memberState = signal<MemberSnapshot | null>(null);
+// 会员场景 (vertical) — cloud 登录/激活时下发,纯展示文案 (不参与门禁,GAP-B)。
+// null = 未登录 / 未指定场景 / 老 cloud 不返回。MarketplaceView 据此显示"当前场景"。
+export const memberVertical = signal<string | null>(null);
 
 // SettingsLocks (调 /api/v1/member/locks) — 6 字段, 决定 UI 灰显
 export type LockState = 'editable' | 'locked';

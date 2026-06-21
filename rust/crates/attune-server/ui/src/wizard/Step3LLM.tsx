@@ -6,6 +6,7 @@ import { Button, Input, Tooltip, LocalModelReadiness } from '../components';
 import { t } from '../i18n';
 import { api } from '../store/api';
 import { toast } from '../components/Toast';
+import { verticalInstallMessage } from '../hooks/useMember';
 import type { WizardContext } from './types';
 
 type OllamaStatus = 'checking' | 'ready' | 'missing';
@@ -297,13 +298,19 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
     }
     setMemberLoggingIn(true);
     try {
-      await api.post('/member/login-password', {
-        email: ctx.memberEmail,
-        password: ctx.memberPassword,
-        license_code: ctx.memberLicenseCode?.trim() || null,
-      });
+      const resp = await api.post<{ vertical?: string | null; plugin_sync?: { installed?: string[] } | null }>(
+        '/member/login-password',
+        {
+          email: ctx.memberEmail,
+          password: ctx.memberPassword,
+          license_code: ctx.memberLicenseCode?.trim() || null,
+        },
+      );
       setMemberReady(true);
       toast('success', t('wizard.llm.member.login_ok'));
+      // GAP-B: cloud 下发会员场景 + 已按场景自动装插件 → 提示"已为〔律师〕场景安装 …"。
+      const vMsg = verticalInstallMessage(resp);
+      if (vMsg) toast('success', vMsg);
       return true;
     } catch (e) {
       setMemberReady(false);
