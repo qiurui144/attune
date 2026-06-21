@@ -108,6 +108,27 @@ impl PluginRegistry {
         self.trust.get(id).copied()
     }
 
+    /// 每个已装 plugin 声明的 skill-runtime skill yaml(`registers_skills`),连同
+    /// plugin id + 真实 trust 级别。供 server 的 `build_skill_registry` 把 pro 交付物
+    /// skill 注册进 `SkillRegistry` —— 注册前 server 还需按 settings 过滤 disabled。
+    ///
+    /// 只 yield 真正声明了 `registers_skills` 的 plugin(其余 yaml 列表为空,自然不贡献)。
+    /// OSS 裸装 → plugins 空 → 返空 Vec。
+    pub fn plugin_registered_skills(
+        &self,
+    ) -> Vec<(&str, crate::plugin_sig::Trust, &[String])> {
+        let mut out = Vec::new();
+        for p in self.plugins.values() {
+            if p.registered_skill_yamls.is_empty() {
+                continue;
+            }
+            let id = p.manifest.id.as_str();
+            let trust = self.trust.get(id).copied().unwrap_or(crate::plugin_sig::Trust::Unsigned);
+            out.push((id, trust, p.registered_skill_yamls.as_slice()));
+        }
+        out
+    }
+
     pub fn workflows(&self) -> &[LoadedWorkflow] {
         &self.workflows
     }

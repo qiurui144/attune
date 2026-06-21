@@ -34,6 +34,58 @@ use attune_core::skill_runtime::{
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 
+const SETTINGS_KEY: &str = "app_settings";
+
+/// Build the skill registry the runtime serves: OSS built-ins **plus** the declarative skills
+/// every installed + enabled plugin registered via its `registers_skills:` manifest field.
+///
+/// This is the closure that makes pro deliverable skills (academic thesis draft, presales bid
+/// doc, …) actually appear in `/skill-runtime/skills` and be runnable — without it the runtime
+/// only ever exposed the 3 OSS built-ins.
+///
+/// **Trust + boundary**: a plugin only reaches `plugin_registry` after passing the scan-time
+/// signature/trust gate (`scan_with_trust`), so anything here is already trust-allowed for the
+/// configured mode. We additionally skip plugins the user has disabled in settings. Each skill is
+/// namespaced by its plugin id (`pro:<plugin_id>` source) so two plugins can't shadow each other.
+/// A single bad skill yaml is skipped with a warn — it never aborts the whole registry build.
+pub fn build_skill_registry(state: &SharedState) -> SkillRegistry {
+    let mut reg = SkillRegistry::with_builtins();
+    let disabled = load_disabled_plugin_ids(state);
+    for (plugin_id, _trust, yamls) in state.plugin_registry.plugin_registered_skills() {
+        if disabled.iter().any(|d| d == plugin_id) {
+            continue;
+        }
+        for yaml in yamls {
+            if let Err(e) = reg.register_plugin_skill(plugin_id, yaml) {
+                tracing::warn!("skill-runtime: plugin '{plugin_id}' skill register failed: {e}");
+            }
+        }
+    }
+    reg
+}
+
+/// Read `plugins.disabled` from settings (same logic as `routes/scenarios`/`routes/plugins`).
+/// Vault locked / unreadable → empty (default: everything enabled).
+fn load_disabled_plugin_ids(state: &SharedState) -> Vec<String> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    if vault.dek_db().is_err() {
+        return Vec::new();
+    }
+    let raw = match vault.store().get_meta(SETTINGS_KEY) {
+        Ok(Some(b)) => b,
+        _ => return Vec::new(),
+    };
+    let json: Value = match serde_json::from_slice(&raw) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    json.get("plugins")
+        .and_then(|p| p.get("disabled"))
+        .and_then(|d| d.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
 // ───────────────────────────── list ─────────────────────────────
 
 #[derive(Serialize)]
@@ -56,8 +108,8 @@ pub struct SkillInputInfo {
 }
 
 /// GET /api/v1/skill-runtime/skills — list registered skills (🆓, no LLM).
-pub async fn list_runtime_skills(State(_state): State<SharedState>) -> Json<Value> {
-    let reg = SkillRegistry::with_builtins();
+pub async fn list_runtime_skills(State(state): State<SharedState>) -> Json<Value> {
+    let reg = build_skill_registry(&state);
     let skills: Vec<SkillInfo> = reg
         .list()
         .into_iter()
@@ -97,7 +149,7 @@ pub async fn estimate_skill(
     Path(id): Path<String>,
     Json(req): Json<EstimateRequest>,
 ) -> AppResult<Json<Value>> {
-    let reg = SkillRegistry::with_builtins();
+    let reg = build_skill_registry(&state);
     let reg_skill = reg
         .get(&id)
         .ok_or_else(|| skill_not_found(&id))?;
@@ -143,7 +195,7 @@ pub async fn run_runtime_skill(
     Path(id): Path<String>,
     Json(req): Json<RunRequest>,
 ) -> AppResult<Json<RunResponse>> {
-    let reg = SkillRegistry::with_builtins();
+    let reg = build_skill_registry(&state);
     let reg_skill = reg.get(&id).ok_or_else(|| skill_not_found(&id))?;
     let skill = &reg_skill.skill;
 
@@ -346,4 +398,141 @@ fn vault_locked() -> AppError {
         axum::http::StatusCode::UNAUTHORIZED,
         json!({ "error": "vault is locked", "code": "vault-locked" }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal but *valid* declarative skill yaml (paid llm_multi_step, manual trigger so it
+    /// passes the registry cost guard). `id` is templated so each plugin can have a unique id.
+    fn skill_yaml(id: &str) -> String {
+        format!(
+            r#"id: {id}
+type: skill
+version: "1.0.0"
+title: 测试技能 {id}
+cost_tier: llm_multi_step
+trigger: {{ on: manual, scope: project }}
+inputs:
+  - {{ name: item_ids, type: string_list, required: true }}
+steps:
+  - type: agent
+    id: synth
+    agent: writing.research_synthesis
+    input: {{}}
+    output: synthesis
+  - type: render
+    id: build
+    as_kind: document
+    input: {{}}
+    output: artifact
+  - type: export
+    id: out
+    input: {{}}
+    output: file
+"#
+        )
+    }
+
+    /// Write a plugin dir with a plugin.yaml that registers the given skill yaml files.
+    fn write_plugin(
+        plugins_root: &std::path::Path,
+        plugin_id: &str,
+        skills: &[(&str, &str)], // (rel_path, yaml_content)
+    ) {
+        let dir = plugins_root.join(plugin_id);
+        std::fs::create_dir_all(dir.join("skills")).expect("mkdir skills");
+        let mut reg_lines = String::new();
+        for (rel, content) in skills {
+            std::fs::write(dir.join(rel), content).expect("write skill yaml");
+            reg_lines.push_str(&format!("  - {rel}\n"));
+        }
+        let manifest = format!(
+            "id: {plugin_id}\nname: {plugin_id}\ntype: industry\nversion: \"1.0.0\"\nregisters_skills:\n{reg_lines}"
+        );
+        std::fs::write(dir.join("plugin.yaml"), manifest).expect("write plugin.yaml");
+    }
+
+    fn state_with_plugins(tmp: &std::path::Path) -> SharedState {
+        let vault = attune_core::vault::Vault::open_memory(tmp).expect("vault");
+        vault.setup("P@ss-skillreg-not-real").expect("setup");
+        std::sync::Arc::new(crate::state::AppState::new(vault, false))
+    }
+
+    /// 0 plugins → only the 3 OSS built-ins, no pro skills.
+    #[test]
+    fn build_registry_no_plugins_only_builtins() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let _g = crate::test_support::override_data_dir(tmp.path().join("attune"));
+        let state = state_with_plugins(tmp.path());
+        let reg = build_skill_registry(&state);
+        // Built-ins present; none tagged pro.
+        assert!(reg.get("research-synthesis").is_some());
+        assert!(reg.list().iter().all(|r| r.source == "oss"));
+    }
+
+    /// Multi-plugin: two installed plugins each contribute their skill, both prefixed by plugin id.
+    #[test]
+    fn build_registry_multi_plugin_registers_all() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let _g = crate::test_support::override_data_dir(tmp.path().join("attune"));
+        let plugins = tmp.path().join("attune").join("plugins");
+        write_plugin(&plugins, "academic-pro", &[("skills/a.yaml", &skill_yaml("acad-thesis"))]);
+        write_plugin(&plugins, "presales-pro", &[("skills/b.yaml", &skill_yaml("presales-bid"))]);
+        let state = state_with_plugins(tmp.path());
+        let reg = build_skill_registry(&state);
+        assert_eq!(reg.get("acad-thesis").unwrap().source, "pro:academic-pro");
+        assert_eq!(reg.get("presales-bid").unwrap().source, "pro:presales-pro");
+        // built-ins still there.
+        assert!(reg.get("research-synthesis").is_some());
+    }
+
+    /// A malformed skill yaml is skipped — the rest of the registry (built-ins + good plugin) survives.
+    #[test]
+    fn build_registry_bad_yaml_skipped_not_fatal() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let _g = crate::test_support::override_data_dir(tmp.path().join("attune"));
+        let plugins = tmp.path().join("attune").join("plugins");
+        // background-triggered paid skill → registry rejects it (cost guard), must be skipped.
+        let bad = "id: sneaky\ntype: skill\nversion: \"1\"\ntitle: x\ncost_tier: llm_multi_step\ntrigger: { on: file_added, scope: project }\nsteps:\n  - type: export\n    id: out\n    input: {}\n    output: file\n";
+        write_plugin(&plugins, "evil-pro", &[("skills/bad.yaml", bad)]);
+        let state = state_with_plugins(tmp.path());
+        let reg = build_skill_registry(&state);
+        assert!(reg.get("sneaky").is_none(), "rejected skill not registered");
+        assert!(reg.get("research-synthesis").is_some(), "built-ins survive bad plugin");
+    }
+
+    /// Disabled plugins (settings.plugins.disabled) don't contribute skills.
+    #[test]
+    fn build_registry_skips_disabled_plugin() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let _g = crate::test_support::override_data_dir(tmp.path().join("attune"));
+        let plugins = tmp.path().join("attune").join("plugins");
+        write_plugin(&plugins, "academic-pro", &[("skills/a.yaml", &skill_yaml("acad-thesis"))]);
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-skillreg-not-real").expect("setup");
+        let settings = serde_json::json!({ "plugins": { "disabled": ["academic-pro"] } });
+        vault
+            .store()
+            .set_meta(SETTINGS_KEY, settings.to_string().as_bytes())
+            .expect("write settings");
+        let state = std::sync::Arc::new(crate::state::AppState::new(vault, false));
+        let reg = build_skill_registry(&state);
+        assert!(reg.get("acad-thesis").is_none(), "disabled plugin skill not registered");
+    }
+
+    /// list endpoint exposes a pro plugin's registered skill (end-to-end through the handler).
+    #[tokio::test]
+    async fn list_endpoint_includes_pro_skill() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let _g = crate::test_support::override_data_dir(tmp.path().join("attune"));
+        let plugins = tmp.path().join("attune").join("plugins");
+        write_plugin(&plugins, "academic-pro", &[("skills/a.yaml", &skill_yaml("acad-thesis"))]);
+        let state = state_with_plugins(tmp.path());
+        let resp = list_runtime_skills(State(state)).await;
+        let skills = resp.0["skills"].as_array().expect("skills array");
+        let found = skills.iter().any(|s| s["id"] == "acad-thesis" && s["source"] == "pro:academic-pro");
+        assert!(found, "pro skill must appear in /skill-runtime/skills listing");
+    }
 }

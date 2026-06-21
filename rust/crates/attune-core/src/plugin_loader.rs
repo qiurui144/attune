@@ -102,6 +102,14 @@ pub struct PluginManifest {
     #[serde(default)]
     pub registers_case_kinds: Vec<CaseKindRegistration>,
 
+    /// 声明式 skill-runtime skill — 相对本 plugin 目录的 skill yaml 路径列表
+    /// (如 `skills/thesis-chapter-draft.yaml`). 这些是 `skill_runtime` 编排式交付物
+    /// (rag→agent→render→export), 区别于上面原子能力 `skills:` (SkillSpec).
+    /// server 启动时把列出的 yaml 注册进 SkillRegistry, 令 pro 交付物出现在
+    /// `/skill-runtime/skills` 且可 run。路径仅允许 plugin 目录内的相对路径 (防穿越)。
+    #[serde(default)]
+    pub registers_skills: Vec<String>,
+
     /// Skills — 原子能力 (纯函数, 可缓存).
     #[serde(default)]
     pub skills: Vec<SkillSpec>,
@@ -441,6 +449,12 @@ pub struct PluginOutputSpec {
 pub struct LoadedPlugin {
     pub manifest: PluginManifest,
     pub prompt: String,
+    /// The raw YAML content of every `registers_skills` entry, loaded from the plugin dir at
+    /// scan time (so the server can register skills without re-resolving the dir or handling
+    /// decryption again). Empty unless the manifest declared `registers_skills`. Entries whose
+    /// file failed to load (missing / not-utf8 / path-traversal) are simply absent — the scan
+    /// records those as best-effort `errors`.
+    pub registered_skill_yamls: Vec<String>,
 }
 
 /// 校验一个 wasi_cap 字符串是否在白名单内。
@@ -500,7 +514,9 @@ impl LoadedPlugin {
         let manifest: PluginManifest = serde_yaml::from_str(yaml)
             .map_err(|e| VaultError::InvalidInput(format!("plugin yaml parse: {e}")))?;
         validate_capabilities(&manifest)?;
-        Ok(Self { manifest, prompt: prompt.to_string() })
+        // from_strings has no on-disk dir → cannot load registers_skills yaml files; that path is
+        // only for built-in (string-embedded) plugins, which don't declare registers_skills.
+        Ok(Self { manifest, prompt: prompt.to_string(), registered_skill_yamls: Vec::new() })
     }
 
     /// 从文件系统路径加载（外部插件走这条路径）。
@@ -565,8 +581,48 @@ impl LoadedPlugin {
         } else {
             String::new()
         };
-        Ok(Self { manifest, prompt })
+
+        // Load every declared skill-runtime skill yaml from the plugin dir (best-effort: a missing
+        // or unreadable entry is warned + skipped, never fails the whole plugin). Path-traversal
+        // guarded — the resolved file must stay inside `plugin_dir`.
+        let registered_skill_yamls = load_registered_skill_yamls(plugin_dir, &manifest.registers_skills);
+
+        Ok(Self { manifest, prompt, registered_skill_yamls })
     }
+}
+
+/// Resolve + read each `registers_skills` relative path under `plugin_dir`. Skips (with a warn)
+/// any entry that is absolute, escapes the plugin dir (`..`), or fails to read / is not utf-8.
+fn load_registered_skill_yamls(plugin_dir: &std::path::Path, rel_paths: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    // Canonicalize the plugin dir once for the containment check; fall back to the raw path if
+    // canonicalize fails (e.g. on a test tmpfs the dir always exists, so this rarely fails).
+    let base = std::fs::canonicalize(plugin_dir).unwrap_or_else(|_| plugin_dir.to_path_buf());
+    for rel in rel_paths {
+        let candidate = plugin_dir.join(rel);
+        // Reject absolute paths and obvious traversal before touching the fs.
+        if std::path::Path::new(rel).is_absolute() || rel.split(['/', '\\']).any(|c| c == "..") {
+            log::warn!("plugin registers_skills: rejecting unsafe path '{rel}'");
+            continue;
+        }
+        // Resolve and confirm the real file is inside the plugin dir (defense in depth vs symlink).
+        let resolved = match std::fs::canonicalize(&candidate) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("plugin registers_skills: cannot read '{rel}': {e}");
+                continue;
+            }
+        };
+        if !resolved.starts_with(&base) {
+            log::warn!("plugin registers_skills: '{rel}' escapes plugin dir, skipping");
+            continue;
+        }
+        match std::fs::read_to_string(&resolved) {
+            Ok(yaml) => out.push(yaml),
+            Err(e) => log::warn!("plugin registers_skills: read '{rel}' failed: {e}"),
+        }
+    }
+    out
 }
 
 /// AI 批注角度专属配置（从 manifest 的 annotation_angle 字段组装）
@@ -910,5 +966,40 @@ agents:
 
         let none_agent = m.agents.iter().find(|a| a.id == "a_none").unwrap();
         assert!(none_agent.output_modes.is_none());
+    }
+
+    #[test]
+    fn registers_skills_yaml_loaded_from_dir() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("skills")).expect("mkdir");
+        std::fs::write(dir.join("skills/draft.yaml"), "id: draft\nfoo: bar\n").expect("skill");
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: academic-pro\nname: x\ntype: industry\nversion: \"1.0.0\"\nregisters_skills:\n  - skills/draft.yaml\n",
+        )
+        .expect("manifest");
+        let p = LoadedPlugin::from_dir(dir).expect("load");
+        assert_eq!(p.manifest.registers_skills, vec!["skills/draft.yaml"]);
+        assert_eq!(p.registered_skill_yamls.len(), 1);
+        assert!(p.registered_skill_yamls[0].contains("id: draft"));
+    }
+
+    #[test]
+    fn registers_skills_rejects_traversal_and_missing() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let dir = tmp.path();
+        // a secret file one level above the plugin dir — must never be slurped.
+        std::fs::write(tmp.path().join("secret.yaml"), "id: secret\n").ok();
+        let pdir = dir.join("academic-pro");
+        std::fs::create_dir_all(&pdir).expect("mkdir");
+        std::fs::write(
+            pdir.join("plugin.yaml"),
+            "id: academic-pro\nname: x\ntype: industry\nversion: \"1.0.0\"\nregisters_skills:\n  - ../secret.yaml\n  - skills/nope.yaml\n",
+        )
+        .expect("manifest");
+        let p = LoadedPlugin::from_dir(&pdir).expect("load");
+        // traversal rejected + missing file skipped → nothing loaded, plugin still loads.
+        assert!(p.registered_skill_yamls.is_empty(), "traversal + missing both skipped");
     }
 }
