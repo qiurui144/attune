@@ -41,6 +41,8 @@ pub mod state_migration;  // ACP-6 Task 3: learned-state migration + orphan quar
 pub use state_migration::{MigratedRow, MigrationReport, MigrationStep, OrphanRow};
 pub mod job_queue;        // G5: durable multi-kind job queue (generalizes reindex_queue)
 pub mod watches;          // info-monitoring loop: watches / watch_hits CRUD (spec 2026-06-19)
+pub mod scoped_token;     // G2: MCP agent scoped token 元数据 (3-scope, revocable)
+pub mod agent_audit;      // G2: MCP 工具调用审计 (0 敏感内容, allow+deny 留痕)
 pub use job_queue::RecoverSummary;
 
 pub use types::*;
@@ -791,6 +793,29 @@ CREATE TABLE IF NOT EXISTS watch_hits (
     UNIQUE(watch_id, item_id)
 );
 CREATE INDEX IF NOT EXISTS idx_watch_hits_watch_digested ON watch_hits(watch_id, digested);
+
+-- G2: MCP agent scoped token 元数据 (token 明文不落库, 只落 token_id + 权限位 +
+-- label + 过期 + 吊销标志). additive CREATE TABLE IF NOT EXISTS — 老 vault 自动获空表.
+CREATE TABLE IF NOT EXISTS scoped_tokens (
+    token_id    TEXT PRIMARY KEY,
+    label       TEXT NOT NULL,
+    scopes      TEXT NOT NULL,            -- 逗号分隔, 子集 ⊆ {search,chat,ingest}
+    expires_at  INTEGER NOT NULL,         -- epoch secs
+    revoked     INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL          -- epoch secs
+);
+
+-- G2: MCP 工具调用审计 (0 敏感内容 — 只 agent_source/tool/decision/deny_reason).
+-- allow 与 deny 都落 (deny 留痕是入侵检测面). 明文存储 (审计员直接读).
+CREATE TABLE IF NOT EXISTS agent_audit (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms        INTEGER NOT NULL,
+    agent_source TEXT NOT NULL,
+    tool         TEXT NOT NULL,
+    decision     TEXT NOT NULL,           -- 'allow' | 'deny'
+    deny_reason  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_agent_audit_ts ON agent_audit(ts_ms);
 "#;
 
 pub struct Store {
