@@ -112,9 +112,40 @@ tiers:
       source: "spec:286 (PENDING-VERIFY)"
 
   # ─── RISC-V K3 一体机 (SpacemiT K3, llama.cpp RVV) ──────────────────────
-  # 底座 embedding/rerank/ASR/OCR 在 K3 走 K3 推理服务(:8090 收口),非本 catalog 的 ONNX 路径。
-  # 此处仅登记本地 LLM 选型(K3 throughput 1.4 t/s,不适交互/并发)。
+  # K3 把全部本地推理统一收口到 k3-scheduler :8090(OpenAI/Ollama-compat,禁旁路直连
+  # worker)。底座 embedding/rerank/ASR/OCR 经 :8090 服务,**非本 catalog 的 ONNX 下载路径**:
+  # ep=k3-scheduler 是"经 :8090 服务、预置不下载"的哨兵 EP(repo/file 留空表示无 HF 下载),
+  # attune 把对应 provider 的 base_url 指向 :8090 即可(2026-06-22 K3 调度层集成 spec)。
+  # LLM 默认仍走云端会员 token(K3 throughput 1.4 t/s,不适交互/并发);本地 LLM 可选。
   riscv-k3:
+    embedding:
+      repo: ""                            # 经 :8090 服务,无 HF 下载
+      file: ""
+      dims: 1024
+      ep: k3-scheduler                    # 哨兵:经 k3-scheduler :8090 (/v1/embeddings),预置不下载
+      verdict: PENDING-VERIFY
+      metric: "served via k3-scheduler :8090; on-device bench PENDING-真机"
+      source: "docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md:§3"
+    rerank:
+      repo: ""
+      file: ""
+      ep: k3-scheduler
+      verdict: PENDING-VERIFY
+      metric: "served via k3-scheduler :8090; PENDING-真机"
+      source: "docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md:§3"
+    ocr:
+      engine: ppocr
+      ep: k3-scheduler                    # K3 PPOCRv5 经 :8090
+      verdict: PENDING-VERIFY
+      metric: "served via k3-scheduler :8090; PENDING-真机"
+      source: "docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md:§3"
+    asr:
+      engine: whisper
+      model: whisper-small
+      ep: k3-scheduler                    # K3 whisper Q8 IME 经 :8090
+      verdict: PENDING-VERIFY
+      metric: "served via k3-scheduler :8090; PENDING-真机"
+      source: "docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md:§3"
     llm:
       model: "qwen2.5-0.5b"
       ep: cpu

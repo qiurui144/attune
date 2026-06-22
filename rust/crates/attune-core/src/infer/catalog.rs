@@ -438,6 +438,37 @@ mod tests {
         assert_eq!(c.resolve("rk3588-rknpu", Role::Embedding).unwrap().repo, "minicpm-embed-rk3588");
     }
 
+    // ── K3 调度层集成 (2026-06-22):riscv-k3 本地能力经 k3-scheduler :8090 收口 ──
+
+    /// K3 一体机:embedding/rerank/ocr/asr 全部 resolve 到 ep=k3-scheduler 哨兵
+    /// (经 :8090 服务,预置不下载)。这是「:8090 统一收口」的 catalog 兑现。
+    #[test]
+    fn k3_local_capabilities_route_to_scheduler() {
+        let c = Catalog::builtin_default();
+        for role in [Role::Embedding, Role::Rerank, Role::Ocr, Role::Asr] {
+            let (hit_tier, choice) = c
+                .resolve_with_tier("riscv-k3", role)
+                .unwrap_or_else(|| panic!("riscv-k3 must have {} entry", role.id()));
+            assert_eq!(hit_tier, "riscv-k3", "{} must hit riscv-k3 (not cpu-fallback)", role.id());
+            assert_eq!(
+                choice.ep, "k3-scheduler",
+                "{} on K3 must route to k3-scheduler :8090 sentinel EP",
+                role.id()
+            );
+        }
+        // LLM 仍在(本地慢 LLM 可选);云端默认由 settings 决定,不在 catalog。
+        assert_eq!(c.resolve("riscv-k3", Role::Llm).unwrap().model, "qwen2.5-0.5b");
+    }
+
+    /// k3-scheduler 哨兵条目无 HF 下载(repo/file 空)—— 预置模型,wizard 跳过下载步。
+    #[test]
+    fn k3_scheduler_entries_have_no_hf_download() {
+        let c = Catalog::builtin_default();
+        let emb = c.resolve("riscv-k3", Role::Embedding).unwrap();
+        assert!(emb.repo.is_empty(), "k3-scheduler embedding has no HF repo (served via :8090)");
+        assert!(emb.file.is_empty(), "k3-scheduler embedding has no HF file");
+    }
+
     // ── 边界:缺 tier / 缺 role / 回退 cpu-fallback ─────────────────────
 
     #[test]
@@ -451,16 +482,19 @@ mod tests {
     #[test]
     fn tier_missing_role_falls_back_to_cpu() {
         let c = Catalog::builtin_default();
-        // riscv-k3 只有 llm,无 embedding → 回退 cpu-fallback embedding。
-        let e = c.resolve("riscv-k3", Role::Embedding).unwrap();
-        assert_eq!(e.repo, "Xenova/bge-m3");
+        // rk3588-rknpu 只有 embedding,无 llm → 回退 cpu-fallback。
+        // (cpu-fallback 也没有 llm → resolve(llm)=None,验在 missing_role_everywhere_returns_none。
+        //  此处验"缺 role 回退到 cpu-fallback 的 role"用 rk1820-npu 缺 embedding 的场景。)
+        let e = c.resolve("rk1820-npu", Role::Embedding).unwrap();
+        assert_eq!(e.repo, "Xenova/bge-m3", "rk1820-npu 无 embedding → cpu-fallback bge-m3");
     }
 
     #[test]
     fn resolve_with_tier_reports_fallback() {
         let c = Catalog::builtin_default();
-        let (hit_tier, _) = c.resolve_with_tier("riscv-k3", Role::Ocr).unwrap();
-        assert_eq!(hit_tier, CPU_FALLBACK_TIER, "K3 has no OCR → reports cpu-fallback");
+        // rk3588-rknpu 无 OCR → 回退 cpu-fallback(riscv-k3 现已有自己的 OCR,改用 rk3588)。
+        let (hit_tier, _) = c.resolve_with_tier("rk3588-rknpu", Role::Ocr).unwrap();
+        assert_eq!(hit_tier, CPU_FALLBACK_TIER, "rk3588 has no OCR → reports cpu-fallback");
         let (hit_tier2, _) = c.resolve_with_tier("amd-win", Role::Ocr).unwrap();
         assert_eq!(hit_tier2, "amd-win");
     }
