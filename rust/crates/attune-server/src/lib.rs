@@ -67,6 +67,8 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/vault/forgot-password-reset", post(routes::vault::vault_forgot_password_reset))
         .route("/api/v1/vault/device-secret/export", get(routes::vault::export_device_secret))
         .route("/api/v1/vault/device-secret/import", post(routes::vault::import_device_secret))
+        .route("/api/v1/vault/staging-status", get(routes::vault::vault_staging_status))
+        .route("/api/v1/vault/auto-unlock", get(routes::vault::vault_get_auto_unlock).put(routes::vault::vault_set_auto_unlock))
         // Status (health check bypasses guard)
         .route("/api/v1/status/health", get(routes::status::health))
         .route("/api/v1/status/diagnostics", get(routes::status::diagnostics))

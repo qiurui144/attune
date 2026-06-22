@@ -96,6 +96,9 @@ pub struct AppState {
     pub rss_sync_worker_running: AtomicBool,
     /// 信息监控 digest worker 运行标志（防重入；spec 2026-06-19）。
     pub monitoring_worker_running: AtomicBool,
+    /// G3① locked-mode staging drain worker 运行标志（防重入）。解锁后启动,
+    /// 把 LOCKED 期间暂存的 inbound 文档补跑进 ingest pipeline,跑完即退出。
+    pub staging_drain_worker_running: AtomicBool,
     pub search_cache: Mutex<LruCache<u64, CachedSearch>>,
     /// G5 (2026-06-11): durable job queue store handle. Replaces the in-memory
     /// `office_jobs: JobRegistry` — jobs now persist in the `job_queue` table and
@@ -234,6 +237,7 @@ impl AppState {
             email_sync_worker_running: AtomicBool::new(false),
             rss_sync_worker_running: AtomicBool::new(false),
             monitoring_worker_running: AtomicBool::new(false),
+            staging_drain_worker_running: AtomicBool::new(false),
             engines_initialized: AtomicBool::new(false),
             search_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
@@ -1084,6 +1088,104 @@ impl AppState {
             }
             // flag 复位由 WorkerFlagGuard::drop 接管（含 panic 路径）
             tracing::info!("Reindex worker stopped (vault locked)");
+        });
+    }
+
+    /// G3① locked-mode staging drain. Started on unlock; drains the encrypted staging
+    /// area (inbound documents accepted while LOCKED) through the normal ingest pipeline,
+    /// then exits. Idempotent: a staged file present == pending; on success the file is
+    /// removed (the commit point), so a mid-drain crash leaves remaining files for the
+    /// next unlock and never double-ingests (the pipeline's content_hash short-circuit
+    /// covers anything ingested-but-not-yet-removed).
+    ///
+    /// Lock ordering: only takes the vault lock in a SHORT critical section per item
+    /// (dek clone + ingest_document), never nesting vectors/fulltext, so it cannot ABBA
+    /// with the search/chat hot path. Embedding enqueue is done inside ingest_document
+    /// against the store; the reindex/embed workers (already running post-unlock) pick up.
+    pub fn start_staging_drain_worker(state: std::sync::Arc<AppState>) {
+        if state
+            .staging_drain_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::debug!("Staging drain worker already running, skipping");
+            return;
+        }
+
+        std::thread::spawn(move || {
+            struct FlagGuard<'a>(&'a std::sync::atomic::AtomicBool);
+            impl Drop for FlagGuard<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _guard = FlagGuard(&state.staging_drain_worker_running);
+
+            let staging = attune_core::staging::IngestStaging::open_default();
+            let pending = staging.list_pending();
+            if pending.is_empty() {
+                return;
+            }
+            tracing::info!("Staging drain: {} pending locked-mode ingests", pending.len());
+
+            let mut drained = 0usize;
+            for id in pending {
+                // Stop early if the vault got re-locked mid-drain (degrade gracefully).
+                {
+                    let v = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    if !matches!(v.state(), attune_core::vault::VaultState::Unlocked) {
+                        tracing::info!("Staging drain: vault re-locked, stopping (will resume on next unlock)");
+                        break;
+                    }
+                }
+
+                let item = match staging.load(&id) {
+                    Ok(it) => it,
+                    Err(e) => {
+                        // Corrupt blob/meta: skip + RETAIN for manual inspection. Never
+                        // delete (would silently lose data); never crash the loop.
+                        tracing::warn!("Staging drain: skip corrupt item {id}: {e}");
+                        continue;
+                    }
+                };
+
+                let raw = attune_core::ingest::RawDocument {
+                    uri: item.meta.uri.clone(),
+                    title: item.meta.title.clone(),
+                    content: item.content,
+                    mime_hint: item.meta.mime_hint.clone(),
+                    source_kind: attune_core::ingest::SourceKind::LocalFolder,
+                    source_ref: item.meta.uri.clone(),
+                    modified_marker: None,
+                    domain: item.meta.domain.clone(),
+                    tags: item.meta.tags.clone(),
+                    corpus_domain: item.meta.corpus_domain.clone(),
+                    metadata: std::collections::HashMap::new(),
+                };
+
+                let ingest_result = {
+                    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                    match vault.dek_db() {
+                        Ok(dek) => attune_core::ingest::ingest_document(vault.store(), &dek, &raw),
+                        Err(e) => Err(e),
+                    }
+                };
+
+                match ingest_result {
+                    Ok(_) => {
+                        // Commit point: remove staging files (idempotent done marker).
+                        let _ = staging.remove(&id);
+                        drained += 1;
+                        state.invalidate_search_cache();
+                    }
+                    Err(e) => {
+                        // Retain for retry on next unlock; content_hash short-circuit
+                        // prevents duplicate insert if it partially succeeded.
+                        tracing::warn!("Staging drain: ingest failed for {id}: {e}, retaining for retry");
+                    }
+                }
+            }
+            tracing::info!("Staging drain: drained {drained} item(s)");
         });
     }
 

@@ -74,6 +74,53 @@ pub async fn upload_file(
         }
     }
 
+    // G3① locked-mode degrade: when the vault is LOCKED there is no DEK to ingest
+    // with. Instead of dropping the upload (the old 403), stage it encrypted-at-rest
+    // and return 202; a drain worker ingests it on unlock. Checked under a SHORT vault
+    // lock (state read only), then the stage write happens after the lock drops.
+    if matches!(
+        {
+            let v = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            v.state()
+        },
+        attune_core::vault::VaultState::Locked
+    ) {
+        let staging = attune_core::staging::IngestStaging::open_default();
+        let meta = attune_core::staging::StagedMeta {
+            uri: format!("upload://{filename}"),
+            title: String::new(),
+            mime_hint: Some(mime_from_filename(&filename).to_string()),
+            source_kind: "localfolder".into(),
+            domain: None,
+            tags: None,
+            corpus_domain: None,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+        let staging_id = staging.stage(&meta, &data[..]).map_err(|e| match e {
+            attune_core::error::VaultError::StagingFull => AppError::detailed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error": "staging full: too many pending locked-mode ingests, retry after unlock",
+                    "code": "staging-full",
+                    "retry_after_seconds": 60,
+                }),
+            ),
+            attune_core::error::VaultError::DeviceSecretMissing(_) => AppError::detailed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error": "staging unavailable: vault not yet initialized",
+                    "code": "staging-unavailable",
+                }),
+            ),
+            other => AppError::Internal(other.to_string()),
+        })?;
+        return Ok(Json(serde_json::json!({
+            "status": "staged",
+            "staging_id": staging_id,
+            "note": "vault locked; file queued for ingest on unlock",
+        })));
+    }
+
     // Now lock vault for DB operations (no more await points after this)
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault

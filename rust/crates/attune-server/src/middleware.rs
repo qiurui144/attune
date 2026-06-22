@@ -114,6 +114,14 @@ pub async fn vault_guard(
         // guard's generic 403; bypass here so that more specific guidance reaches
         // the client (the handler still requires Unlocked before touching the DEK).
         || path == "/api/v1/memory/import"
+        // G3① locked-mode ingest staging: /api/v1/upload must reach its handler even
+        // when the vault is LOCKED so the upload can be encrypted into the staging area
+        // (drained on unlock) instead of being lost to a 403. The handler itself decides:
+        // UNLOCKED → normal ingest (needs DEK); LOCKED → stage. (bearer_auth_guard still
+        // applies independently when require_auth is on — locked ≠ unauthenticated.)
+        // (/api/v1/vault/staging-status is already covered by the /api/v1/vault prefix
+        //  bypass above; it counts staging files with no DEK, usable while LOCKED.)
+        || path == "/api/v1/upload"
     {
         return next.run(request).await;
     }
