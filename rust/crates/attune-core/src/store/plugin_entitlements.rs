@@ -219,7 +219,7 @@ mod tests {
             tier: "paid".to_string(),
             status: status.to_string(),
             trial_expires: Some("2026-12-31T00:00:00+00:00".to_string()),
-            signing_pubkey_hex: "8866ae9b8f0026aaa99902a34fa06223b5e88d5a8f933c7f084342cb9953bcac"
+            signing_pubkey_hex: "d6b221f44abe6daa85f041e80fb0293ac9904b6ec563c20432b1af01c015c01e"
                 .to_string(),
             last_verified_at: "2026-06-12T00:00:00+00:00".to_string(),
             grace_started_at: None,
