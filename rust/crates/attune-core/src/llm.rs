@@ -2113,4 +2113,53 @@ mod tests {
         let (s, _u) = mock.chat_few_shot("sys", &examples, "user-final").unwrap();
         assert_eq!(s, "final-reply");
     }
+
+    /// K3 调度层集成 mock-compat (2026-06-22):证明 OpenAiLlmProvider 把 chat 请求路由到
+    /// **可配置** :8090 端点(k3-scheduler OpenAI-compat 收口),并解析 /chat/completions
+    /// 响应。单次 TcpListener mock(无新 dev-dep),验 attune→:8090 契约对接(§6.1 mock-compat
+    /// 维度;真 K3 :8090 端到端是 §7.3 PENDING-真机)。
+    #[test]
+    fn openai_llm_routes_chat_to_custom_8090_endpoint() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let cap2 = captured.clone();
+
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            *cap2.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+            // OpenAI /v1/chat/completions response shape.
+            let body = r#"{"choices":[{"message":{"content":"k3 reply"}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        });
+
+        // Endpoint shaped exactly like the K3-scheduler收口 (loopback :8090/v1).
+        let endpoint = format!("http://127.0.0.1:{port}/v1");
+        let provider = OpenAiLlmProvider::new(&endpoint, "sk-k3", "qwen2.5-0.5b");
+        let (reply, usage) = provider.chat("you are helpful", "hi k3").expect("chat ok");
+
+        handle.join().unwrap();
+
+        assert_eq!(reply, "k3 reply");
+        assert_eq!(usage.tokens_in, 5);
+        assert_eq!(usage.tokens_out, 2);
+
+        let req = captured.lock().unwrap().clone();
+        let req_lc = req.to_lowercase();
+        // Routed to the configured endpoint's /chat/completions path with the configured model.
+        assert!(req.starts_with("POST /v1/chat/completions "), "request line was: {req}");
+        assert!(req_lc.contains("authorization: bearer sk-k3"), "missing bearer auth: {req}");
+        assert!(req.contains("\"model\":\"qwen2.5-0.5b\""), "model not in body: {req}");
+    }
 }

@@ -169,6 +169,35 @@ export function Step4Hardware({
     onContinue();
   }
 
+  // K3 一体机:embedding/rerank/OCR/ASR 由 k3-scheduler :8090 提供,模型预装 → 跳过模型下载步
+  // (2026-06-22 K3 调度层集成 spec §2/§4 wizard K3 profile)。仅 K3 形态生效,不影响其他形态。
+  if (ctx.llmMode === 'k3') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+        <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
+          {t('wizard.hw.k3.heading')}
+        </h2>
+        <div
+          style={{
+            padding: 'var(--space-4)',
+            background: 'rgba(34, 197, 94, 0.06)',
+            border: '1px solid var(--color-success)',
+            borderRadius: 'var(--radius-md)',
+            fontSize: 'var(--text-sm)',
+            color: 'var(--color-text-secondary)',
+          }}
+        >
+          {t('wizard.hw.k3.preinstalled')}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <Button variant="primary" size="lg" onClick={onContinue}>
+            {t('wizard.hw.k3.continue')} →
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   // v0.6.0-rc.4: Tier 0 (unsupported) 拒绝继续，显示明确错误信息
   const tierUnsupported = aiStack?.hardware?.supported === false;
   const localChatBlocked =

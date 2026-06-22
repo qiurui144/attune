@@ -398,10 +398,12 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
 
     // 形态分裂的 LLM 默认配置
     let llm_default = if form_factor == FormFactor::K3Appliance {
-        // K3 一体机：本地 Ollama 优先，但不预设具体 chat 模型
+        // K3 一体机：本地 LLM 经 k3-scheduler :8090 统一收口(OpenAI/Ollama-compat,推理
+        // 统一收口、禁旁路直连 worker；2026-06-22 K3 调度层集成 spec),不预设具体 chat 模型。
+        // 重 LLM 仍可由用户切云端会员 token(K3 1.4 t/s,不适交互/并发)。
         serde_json::json!({
             "provider": "ollama",
-            "endpoint": "http://localhost:11434/v1",
+            "endpoint": "http://127.0.0.1:8090/v1",
                 "model": null,
             "api_key": null
         })
@@ -437,9 +439,21 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
         // ── 本地 AI 底座（per CLAUDE.md "本地仅捆绑必要底座"决策）──
         // Embedding / Rerank / OCR / ASR 都是本地零费用，自动加载，用户无需配置。
         // 状态查询: GET /api/v1/ai_stack
-        "embedding": {
-            "model": "bge-m3",
-            "ollama_url": "http://localhost:11434"
+        // K3 一体机:embedding 经 k3-scheduler :8090 OpenAI-compat (/v1/embeddings) 收口。
+        //   :8090 是 loopback → embedding_endpoint_is_local() 判 local → L0 内容合法留设备
+        //   (隐私不变量:本地能力永不出网,2026-06-22 K3 调度层集成 spec §3)。
+        // 其余形态:本地 ONNX/Ollama in-process,ollama_url 保留兼容。
+        "embedding": if form_factor == FormFactor::K3Appliance {
+            serde_json::json!({
+                "model": "bge-m3",
+                "endpoint": "http://127.0.0.1:8090/v1",   // OpenAI-compat,经 k3-scheduler
+                "dims": 1024
+            })
+        } else {
+            serde_json::json!({
+                "model": "bge-m3",
+                "ollama_url": "http://localhost:11434"
+            })
         },
         "rerank": {
             "enabled": true,                  // bge-reranker-v2-m3 自动从 HuggingFace 拉取
@@ -680,16 +694,27 @@ mod tests {
         assert!(llm.get("api_key").map_or(true, |v| v.is_null()));
     }
 
-    /// K3 一体机形态：LLM 默认走本地 Ollama，但不预设具体 chat 模型。
-    /// — v0.6.1 新增的形态分裂路径。
+    /// K3 一体机形态:LLM + embedding 默认经 k3-scheduler :8090 统一收口,不预设具体 chat 模型。
+    /// — 2026-06-22 K3 调度层集成:由 :11434 改 :8090(推理统一收口)。
     #[test]
-    fn k3_form_factor_uses_local_ollama() {
+    fn k3_form_factor_uses_scheduler_8090() {
         let s = default_settings("qwen2.5:3b", FormFactor::K3Appliance);
         let llm = s.get("llm").expect("llm key");
         assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("ollama"));
-        assert_eq!(llm.get("endpoint").and_then(|v| v.as_str()), Some("http://localhost:11434/v1"));
-            assert!(llm.get("model").map_or(true, |v| v.is_null()),
-                "K3 model must stay unset so runtime can auto-detect a lighter local model, got: {:?}", llm.get("model"));
+        assert_eq!(
+            llm.get("endpoint").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:8090/v1"),
+            "K3 LLM 经 k3-scheduler :8090(OpenAI/Ollama-compat 统一收口)"
+        );
+        assert!(llm.get("model").map_or(true, |v| v.is_null()),
+            "K3 model must stay unset so runtime can auto-detect a lighter local model, got: {:?}", llm.get("model"));
+        // embedding 同样经 :8090(loopback → 判 local → L0 留设备,隐私不变量)。
+        let emb = s.get("embedding").expect("embedding key");
+        assert_eq!(
+            emb.get("endpoint").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:8090/v1"),
+            "K3 embedding 经 k3-scheduler :8090 OpenAI-compat"
+        );
     }
 
     /// Server / Unknown 形态：与 Laptop 同行为（远端 token 默认）
@@ -742,18 +767,22 @@ mod tests {
         }
     }
 
-    /// 关键不变量：除 llm 之外的字段在所有形态下保持一致
-    /// （form_factor 只影响 LLM 默认路径，不影响 web_search / embedding / reranker 等本地底座）
+    /// 关键不变量：本地底座字段在所有形态下保持一致(form_factor 只影响推理路由)。
+    /// 2026-06-22 K3 调度层集成:embedding 现也按形态分裂(K3 经 :8090 收口,余形态本地
+    /// ONNX/Ollama),故从"identical"列移出;web_search / rerank / ocr / asr 仍一致。
     #[test]
     fn non_llm_settings_invariant_across_form_factors() {
         let laptop = default_settings("qwen2.5:3b", FormFactor::Laptop);
         let k3 = default_settings("qwen2.5:3b", FormFactor::K3Appliance);
 
-        // Embedding / web_search / rerank / OCR 这些"本地底座"应该完全相同
-        for key in &["web_search", "embedding", "rerank", "ocr", "asr"] {
+        // web_search / rerank / OCR / ASR 这些本地底座配置应跨形态完全相同。
+        for key in &["web_search", "rerank", "ocr", "asr"] {
             assert_eq!(laptop.get(key), k3.get(key),
-                "{} should be identical across form factors (only LLM differs)", key);
+                "{} should be identical across form factors (only LLM + embedding routing differ)", key);
         }
+        // embedding 按形态分裂:K3 经 :8090,laptop 本地 ONNX/Ollama → 必然不同。
+        assert_ne!(laptop.get("embedding"), k3.get("embedding"),
+            "K3 embedding routes to :8090 scheduler; laptop stays local — they differ by design");
     }
 
     // ── Bug-2 fix: SettingsLocks 粒度 (spec 2026-05-24) ─────────────────────
