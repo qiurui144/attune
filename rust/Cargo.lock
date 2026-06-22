@@ -468,6 +468,7 @@ dependencies = [
  "clap",
  "dirs",
  "dunce",
+ "futures-util",
  "hex",
  "local-ip-address",
  "lru 0.18.0",
