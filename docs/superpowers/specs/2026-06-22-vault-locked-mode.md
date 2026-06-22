@@ -1,6 +1,7 @@
 # Spec: Vault Locked-Mode 降级运转 + 可选 Auto-Unlock (K3 G3)
 
-> Status: DRAFT (G3 impl in-progress) · 2026-06-22 · 关联 K3 gap spec `2026-06-22-k3-scheduler-integration.md` §对齐 G1-G8 / 任务 #141
+> Status: IMPLEMENTED (G3① 主体 + G3② 框架) · 2026-06-22 · 关联 K3 gap spec `2026-06-22-k3-scheduler-integration.md` §对齐 G1-G8 / 任务 #141
+> Impl: `attune-core/src/staging.rs` (13 单测) + server wiring (upload/vault_guard/drain worker/auto-unlock routes) + E2E `vault_locked_mode_staging_test.rs`。G3② 真密钥封装仍 PENDING-安全评审(只落开关+威胁提示,不存密钥)。
 > 范围:G3① locked-mode 语义(主体,可独立 ship)+ G3② 可选 auto-unlock(框架,密钥封装 PENDING-安全评审)
 
 ## 1. 目标定位
