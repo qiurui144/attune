@@ -2685,9 +2685,13 @@ impl AppState {
 /// 按 settings + 硬件构建 LLM provider。
 ///
 /// 四级优先级：
-/// 1. settings.llm.endpoint 非空 → OpenAI-compatible（hiapi / DeepSeek / Qwen 等）
+/// 1. settings.llm.endpoint 非空 → OpenAI-compatible（hiapi / DeepSeek / Qwen 等；
+///    **K3 一体机默认走这条** —— default settings 带 endpoint `http://127.0.0.1:8090/v1`
+///    指向 k3-scheduler 统一收口，OpenAiLlmProvider 路由 :8090，**不直连 Ollama**）
 /// 2. settings.llm.provider == "local" + model 非空 → OllamaLlmProvider::with_model
 /// 3. form_factor.prefers_local_llm() (K3 一体机) → Ollama auto-detect
+///    （**末位降级兜底**：仅当 K3 的 :8090 endpoint 被用户清空才落到这；正常 K3 路径
+///    走优先级 1 的 :8090 收口，不经此直连 :11434）
 /// 4. 其他笔电 / 服务器 + 无 cloud config → None（chat 返回 503 引导配置）
 ///
 /// 抽出为自由函数后，可以同时被 init_search_engines (启动 unlock 一次)
