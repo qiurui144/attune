@@ -443,6 +443,7 @@ jobs:
     # windows clears the compile; ubuntu stays tight at 50min.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
+      HF_HUB_OFFLINE: "1"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
       CARGO_PROFILE_RELEASE_DEBUG: "false"
@@ -536,6 +537,7 @@ jobs:
     name: rust-test-server-a2-${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
+      HF_HUB_OFFLINE: "1"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
       CARGO_PROFILE_RELEASE_DEBUG: "false"
@@ -618,6 +620,7 @@ jobs:
     name: rust-test-server-b-${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
+      HF_HUB_OFFLINE: "1"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
       CARGO_PROFILE_RELEASE_DEBUG: "false"
@@ -875,6 +878,7 @@ jobs:
     name: rust-test-server-c-${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 50 }}
     env:
+      HF_HUB_OFFLINE: "1"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "false"
       CARGO_PROFILE_RELEASE_DEBUG: "false"
