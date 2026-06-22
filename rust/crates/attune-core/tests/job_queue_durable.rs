@@ -197,6 +197,41 @@ fn resource_exhaust_thousand_jobs_queue_and_drain() {
 }
 
 #[test]
+fn auto_backoff_retry_then_succeed_across_restart() {
+    // Spec §7: a transient failure auto-retries with backoff (no operator), and the
+    // backoff schedule survives a restart (durable next_attempt_ms on disk).
+    let (_dir, path) = open_disk();
+    let id;
+    let now;
+    {
+        let store = Store::open(&path).unwrap();
+        id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.increment_job_attempts(&id).unwrap(); // attempts=1
+        store.fail_job(&id, "asr-engine-failed", "transient").unwrap();
+        now = chrono::Utc::now().timestamp_millis();
+        let n = store.auto_retry_failed_jobs(now, 5, 5_000).unwrap();
+        assert_eq!(n, 1, "transient failure auto-retried");
+        assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Queued);
+        // process "killed" mid-backoff.
+    }
+    {
+        // Reopen: the queued-with-backoff job is on disk; before backoff elapses it
+        // is NOT claimable; after, it is.
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Queued);
+        assert!(
+            store.claim_next_job_at(now + 1_000).unwrap().is_none(),
+            "backoff window persisted across restart"
+        );
+        let claimed = store.claim_next_job_at(now + 10_000).unwrap().unwrap();
+        assert_eq!(claimed.id, id);
+        store.complete_job(&id, "{}").unwrap();
+        assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Done);
+    }
+}
+
+#[test]
 fn poison_job_parked_after_max_attempts() {
     // Attempts guard at the worker layer (run_one_job) parks poison jobs even
     // if an operator keeps requeueing them.

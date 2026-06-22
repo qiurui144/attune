@@ -1,6 +1,6 @@
 //! G5 durable job queue — SQLite-backed CRUD on the `job_queue` table.
 //! Mirrors the reindex_queue idiom (store/items.rs) generalized to multi-kind jobs.
-//! Spec: docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md
+//! Spec: docs/superpowers/specs/2026-06-22-durable-job-queue.md
 
 use crate::error::Result;
 use crate::office_job_queue::{JobError, JobKind, JobRecord, JobState};
@@ -12,10 +12,21 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Whether a failed job's error code is a *transient* failure worth an automatic
+/// backoff retry (spec §7). Anything not listed here is a permanent / non-retryable
+/// failure (bad input, missing source, no handler, cancelled, already maxed out) and
+/// goes straight to dead-letter — re-running it would just fail again the same way.
+pub fn is_retryable_code(code: &str) -> bool {
+    matches!(
+        code,
+        "asr-engine-failed" | "ocr-engine-failed" | "job-timeout" | "transient-io"
+    )
+}
+
 /// Column list for `row_to_record`. Order MUST match the `row.get(idx)` indices.
 const SELECT_COLS: &str = "id, kind, state, stage_json, progress, priority, payload_json, \
      result_json, error_code, error_message, warnings_json, attempts, \
-     created_ms, started_ms, finished_ms, deadline_ms";
+     created_ms, started_ms, finished_ms, deadline_ms, next_attempt_ms";
 
 fn row_to_record(row: &Row) -> rusqlite::Result<JobRecord> {
     let kind_s: String = row.get(1)?;
@@ -47,6 +58,7 @@ fn row_to_record(row: &Row) -> rusqlite::Result<JobRecord> {
         started_ms: row.get(13)?,
         finished_ms: row.get(14)?,
         deadline_ms: row.get(15)?,
+        next_attempt_ms: row.get(16)?,
     })
 }
 
@@ -100,13 +112,22 @@ impl Store {
     /// ever transitioned to Running by two workers. (Verified by the integration
     /// N-worker race test in tests/job_queue_durable.rs.)
     pub fn claim_next_job(&self) -> Result<Option<JobRecord>> {
-        let now = now_ms();
+        self.claim_next_job_at(now_ms())
+    }
+
+    /// Backoff-aware claim with an injectable `now` (for deterministic tests).
+    /// A job whose `next_attempt_ms` is in the future (set by [`Store::auto_retry_failed_jobs`])
+    /// is NOT claimable yet — it waits out its exponential backoff window. NULL
+    /// next_attempt_ms = claimable immediately (the common case / pre-backoff rows).
+    pub fn claim_next_job_at(&self, now: i64) -> Result<Option<JobRecord>> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "UPDATE job_queue SET state = 'running', started_ms = ?1 \
              WHERE id = ( \
                  SELECT id FROM job_queue WHERE state = 'queued' \
+                   AND (next_attempt_ms IS NULL OR next_attempt_ms <= ?1) \
                  ORDER BY priority DESC, created_ms ASC, id ASC LIMIT 1 \
              ) AND state = 'queued' \
+               AND (next_attempt_ms IS NULL OR next_attempt_ms <= ?1) \
              RETURNING {SELECT_COLS}",
         ))?;
         let mut rows = stmt.query_map(params![now], row_to_record)?;
@@ -217,7 +238,7 @@ impl Store {
     pub fn requeue_job(&self, id: &str) -> Result<bool> {
         let n = self.conn.execute(
             "UPDATE job_queue SET state = 'queued', started_ms = NULL, finished_ms = NULL, \
-             error_code = NULL, error_message = NULL \
+             error_code = NULL, error_message = NULL, next_attempt_ms = NULL \
              WHERE id = ?1 AND state IN ('failed', 'cancelled')",
             params![id],
         )?;
@@ -289,7 +310,8 @@ impl Store {
             match delivery {
                 crate::office_job_queue::DeliveryContract::AtLeastOnce => {
                     self.conn.execute(
-                        "UPDATE job_queue SET state = 'queued', started_ms = NULL WHERE id = ?1",
+                        "UPDATE job_queue SET state = 'queued', started_ms = NULL, \
+                         next_attempt_ms = NULL WHERE id = ?1",
                         params![id],
                     )?;
                     summary.requeued += 1;
@@ -318,6 +340,76 @@ impl Store {
             params![now_ms],
         )?;
         Ok(n)
+    }
+
+    /// Auto-retry failed jobs with exponential backoff (spec §7). For each Failed
+    /// job whose `attempts < max_attempts` AND whose error_code is in the retryable
+    /// set, requeue it with `next_attempt_ms = now + min(base * 2^(attempts-1), CAP)`
+    /// so it waits out a growing backoff before the worker can re-claim it. Jobs that
+    /// are at/over max_attempts, or whose code is NOT retryable (bad-payload,
+    /// source-missing, no-handler, max-attempts, interrupted-no-retry, cancelled),
+    /// stay Failed permanently — that is the dead-letter terminal state.
+    ///
+    /// This is the unattended-retry path the 24h K3 box needs: a 3am batch that hits
+    /// a transient `asr-engine-failed` retries on its own instead of waiting for an
+    /// operator to `requeue_job`. Returns the number of jobs scheduled for retry.
+    ///
+    /// Idempotency: it only touches state='failed' rows, and the requeue flips them
+    /// to 'queued', so re-running the sweep in the same tick never double-schedules.
+    pub fn auto_retry_failed_jobs(
+        &self,
+        now_ms: i64,
+        max_attempts: i64,
+        base_backoff_ms: i64,
+    ) -> Result<usize> {
+        /// Cap a single backoff window. 1h is sensible for a nightly K3 batch box.
+        const BACKOFF_CAP_MS: i64 = 3_600_000;
+        // Read retry candidates: failed, under the attempts cap, retryable code.
+        // `attempts >= 1` is implied (a job only reaches failed after a run that
+        // incremented attempts), so 2^(attempts-1) has a non-negative exponent.
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, attempts FROM job_queue \
+             WHERE state = 'failed' AND attempts < ?1 AND error_code IS NOT NULL",
+        )?;
+        let candidates: Vec<(String, i64)> = stmt
+            .query_map(params![max_attempts], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut scheduled = 0usize;
+        for (id, attempts) in candidates {
+            // Per-row code check (cheap, candidate set is small on a 24h box).
+            let code: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT error_code FROM job_queue WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            if !code.as_deref().map(is_retryable_code).unwrap_or(false) {
+                continue; // dead-letter: not retryable
+            }
+            let exp = (attempts - 1).clamp(0, 20) as u32; // clamp to avoid i64 overflow
+            let backoff = base_backoff_ms
+                .saturating_mul(1i64.checked_shl(exp).unwrap_or(i64::MAX))
+                .min(BACKOFF_CAP_MS);
+            let next = now_ms.saturating_add(backoff);
+            // Requeue but keep started_ms/finished_ms cleared; preserve attempts so
+            // the next failure backs off further. Guard on state='failed' so a
+            // concurrent cancel/operator-requeue is not clobbered.
+            let n = self.conn.execute(
+                "UPDATE job_queue SET state = 'queued', started_ms = NULL, \
+                 finished_ms = NULL, error_code = NULL, error_message = NULL, \
+                 next_attempt_ms = ?2 WHERE id = ?1 AND state = 'failed'",
+                params![id, next],
+            )?;
+            if n > 0 {
+                scheduled += 1;
+            }
+        }
+        Ok(scheduled)
     }
 
     /// TTL purge: delete terminal (done/failed/cancelled) jobs whose retention
@@ -723,6 +815,149 @@ mod tests {
 
     fn now_ms_test() -> i64 {
         chrono::Utc::now().timestamp_millis()
+    }
+
+    #[test]
+    fn auto_retry_requeues_transient_failure_with_backoff() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.increment_job_attempts(&id).unwrap(); // attempts=1, as a real run would
+        store.fail_job(&id, "asr-engine-failed", "whisper crashed").unwrap();
+        let now = now_ms_test();
+        let n = super::Store::auto_retry_failed_jobs(&store, now, 5, 1000).unwrap();
+        assert_eq!(n, 1, "transient failure under max is auto-retried");
+        let j = store.get_job(&id).unwrap().unwrap();
+        assert_eq!(j.state, JobState::Queued);
+        assert_eq!(j.attempts, 1, "attempts preserved across auto-retry");
+        // attempts=1 → backoff = base * 2^0 = 1000ms; next_attempt ~ now+1000.
+        let next = j.next_attempt_ms.expect("backoff scheduled");
+        assert!(next >= now + 1000 && next <= now + 2000, "next_attempt_ms={next}");
+        assert!(j.error.is_none(), "error cleared on retry");
+    }
+
+    #[test]
+    fn auto_retry_job_not_claimable_before_backoff_elapses() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.increment_job_attempts(&id).unwrap();
+        store.fail_job(&id, "job-timeout", "deadline").unwrap();
+        let now = now_ms_test();
+        store.auto_retry_failed_jobs(now, 5, 10_000).unwrap(); // ~10s backoff
+        // Before backoff elapses: not claimable.
+        assert!(
+            store.claim_next_job_at(now + 5_000).unwrap().is_none(),
+            "job in backoff window must not be claimed"
+        );
+        // After backoff elapses: claimable again.
+        let claimed = store.claim_next_job_at(now + 20_000).unwrap();
+        assert_eq!(claimed.unwrap().id, id, "job claimable once backoff elapsed");
+    }
+
+    #[test]
+    fn auto_retry_skips_non_retryable_codes_dead_letter() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.increment_job_attempts(&id).unwrap();
+        // bad-payload is a permanent failure: never auto-retried.
+        store.fail_job(&id, "bad-payload", "missing file_path").unwrap();
+        let n = store.auto_retry_failed_jobs(now_ms_test(), 5, 1000).unwrap();
+        assert_eq!(n, 0, "non-retryable code stays dead-lettered");
+        assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Failed);
+    }
+
+    #[test]
+    fn auto_retry_stops_at_max_attempts_dead_letter() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        // attempts already at max.
+        for _ in 0..3 {
+            store.increment_job_attempts(&id).unwrap();
+        }
+        store.fail_job(&id, "asr-engine-failed", "again").unwrap();
+        let n = store.auto_retry_failed_jobs(now_ms_test(), 3, 1000).unwrap();
+        assert_eq!(n, 0, "at/over max_attempts → no more retries (dead-letter)");
+        assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Failed);
+    }
+
+    #[test]
+    fn auto_retry_backoff_grows_exponentially_and_caps() {
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        // Drive attempts high so 2^(attempts-1) would exceed the 1h cap.
+        for _ in 0..20 {
+            store.increment_job_attempts(&id).unwrap();
+        }
+        store.fail_job(&id, "asr-engine-failed", "x").unwrap();
+        let now = now_ms_test();
+        store.auto_retry_failed_jobs(now, 100, 60_000).unwrap();
+        let next = store.get_job(&id).unwrap().unwrap().next_attempt_ms.unwrap();
+        // Capped at 1h regardless of the huge exponent (no overflow panic).
+        assert!(next <= now + 3_600_000, "backoff capped at 1h: {}", next - now);
+        assert!(next >= now + 3_600_000 - 1, "backoff hit the cap");
+    }
+
+    #[test]
+    fn manual_requeue_from_failed_has_no_backoff_immediate_claim() {
+        // Operator path: a manual `requeue_job` on a FAILED job (before any auto-retry
+        // scheduled a backoff) leaves next_attempt_ms NULL → claimable immediately,
+        // unlike auto_retry which sets a backoff window.
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.increment_job_attempts(&id).unwrap();
+        store.fail_job(&id, "job-timeout", "x").unwrap();
+        let now = now_ms_test();
+        assert!(store.requeue_job(&id).unwrap());
+        assert!(
+            store.get_job(&id).unwrap().unwrap().next_attempt_ms.is_none(),
+            "manual requeue has no backoff"
+        );
+        assert_eq!(
+            store.claim_next_job_at(now).unwrap().unwrap().id,
+            id,
+            "manually-requeued job is claimable immediately"
+        );
+    }
+
+    #[test]
+    fn requeue_clears_backoff_set_by_prior_auto_retry() {
+        // A job that was auto-retried (queued + future next_attempt_ms), failed AGAIN,
+        // and is then manually requeued by an operator: requeue clears the carried-over
+        // backoff so the operator's retry is immediate.
+        let store = Store::open_memory().unwrap();
+        let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
+        store.claim_next_job().unwrap();
+        store.increment_job_attempts(&id).unwrap();
+        store.fail_job(&id, "asr-engine-failed", "1").unwrap();
+        let now = now_ms_test();
+        store.auto_retry_failed_jobs(now, 5, 600_000).unwrap(); // queued + 10min backoff
+        // Claim after backoff, fail again → failed with no next_attempt cleared by fail.
+        let j = store.get_job(&id).unwrap().unwrap();
+        assert!(j.next_attempt_ms.is_some(), "auto-retry set a backoff");
+        store.claim_next_job_at(now + 700_000).unwrap();
+        store.increment_job_attempts(&id).unwrap();
+        store.fail_job(&id, "asr-engine-failed", "2").unwrap();
+        // Operator requeues from failed → backoff cleared, immediately claimable.
+        assert!(store.requeue_job(&id).unwrap());
+        assert!(store.get_job(&id).unwrap().unwrap().next_attempt_ms.is_none());
+        assert_eq!(store.claim_next_job_at(now).unwrap().unwrap().id, id);
+    }
+
+    #[test]
+    fn is_retryable_code_classification() {
+        assert!(super::is_retryable_code("asr-engine-failed"));
+        assert!(super::is_retryable_code("ocr-engine-failed"));
+        assert!(super::is_retryable_code("job-timeout"));
+        assert!(!super::is_retryable_code("bad-payload"));
+        assert!(!super::is_retryable_code("source-missing"));
+        assert!(!super::is_retryable_code("no-handler"));
+        assert!(!super::is_retryable_code("interrupted-no-retry"));
+        assert!(!super::is_retryable_code("cancelled"));
     }
 
     #[test]

@@ -106,7 +106,7 @@ pub struct AppState {
     /// usage aggregator, this is its **own** `Arc<Mutex<Store>>` opened on
     /// `db_path` (job_queue is an unencrypted table; SQLite WAL makes the extra
     /// connection safe). `None` until `install_job_store` succeeds at boot.
-    /// See docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md.
+    /// See docs/superpowers/specs/2026-06-22-durable-job-queue.md.
     pub job_store: Mutex<Option<std::sync::Arc<std::sync::Mutex<attune_core::store::Store>>>>,
     /// 防止重复启动 G5 durable job worker 后台 task
     pub job_worker_running: AtomicBool,

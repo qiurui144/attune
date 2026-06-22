@@ -1,6 +1,6 @@
 //! G5: durable job-queue management routes (K3 nightly batch panel).
 //! GET /api/v1/jobs?kind=&state=  ·  POST /jobs/{id}/cancel  ·  POST /jobs/{id}/requeue
-//! Spec: docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md §5
+//! Spec: docs/superpowers/specs/2026-06-22-durable-job-queue.md §5
 
 use crate::state::SharedState;
 use axum::extract::{Path, Query, State};

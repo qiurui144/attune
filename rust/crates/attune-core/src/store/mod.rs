@@ -353,7 +353,7 @@ CREATE TABLE IF NOT EXISTS reindex_queue (
 CREATE INDEX IF NOT EXISTS idx_reindex_queue_created ON reindex_queue(created_at);
 CREATE INDEX IF NOT EXISTS idx_reindex_queue_item ON reindex_queue(item_id);
 
--- G5 durable job queue (per docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md).
+-- G5 durable job queue (per docs/superpowers/specs/2026-06-22-durable-job-queue.md).
 -- Generalizes reindex_queue to multiple job kinds (asr/ocr/agent/ingest_batch).
 -- Survives restart: boot recovery requeues Running→Queued for idempotent kinds
 -- (see Store::recover_on_boot) instead of the old in-memory JobRegistry which
@@ -377,7 +377,11 @@ CREATE TABLE IF NOT EXISTS job_queue (
     created_ms    INTEGER NOT NULL,
     started_ms    INTEGER,
     finished_ms   INTEGER,
-    deadline_ms   INTEGER
+    deadline_ms   INTEGER,
+    -- G5 auto-backoff: earliest epoch-ms this row may be claimed again after a
+    -- failed retry. NULL = claimable immediately (equiv. pre-backoff behavior).
+    -- Added on older vaults by the idempotent migrate_job_queue_backoff ALTER.
+    next_attempt_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_job_queue_state_prio ON job_queue(state, priority DESC, created_ms);
 CREATE INDEX IF NOT EXISTS idx_job_queue_kind ON job_queue(kind);
@@ -884,6 +888,7 @@ impl Store {
         Self::migrate_items_privacy_tier(conn)?;
         Self::migrate_corpus_domain(conn)?;
         Self::migrate_items_content_hash(conn)?;
+        Self::migrate_job_queue_backoff(conn)?;
         Self::migrate_skill_signals_v07(conn)?;
         Self::migrate_memories_multilayer(conn)?;
         Self::migrate_chunk_summaries_deepsum_strategy(conn)?;
@@ -905,6 +910,7 @@ impl Store {
         Self::migrate_items_privacy_tier(&conn)?;
         Self::migrate_corpus_domain(&conn)?;
         Self::migrate_items_content_hash(&conn)?;
+        Self::migrate_job_queue_backoff(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
         Self::migrate_organization_proposals(&conn)?;
@@ -1293,6 +1299,20 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_items_content_hash ON items(content_hash)",
             [],
         )?;
+        Ok(())
+    }
+
+    /// G5 迁移：job_queue 新增 next_attempt_ms 列（自动退避重试，幂等）。
+    /// 老 vault（R2 时建表无此列）打开即补；NULL = 立即可 claim（等价旧行为）。
+    fn migrate_job_queue_backoff(conn: &Connection) -> Result<()> {
+        let has_col: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('job_queue') WHERE name = 'next_attempt_ms'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_col == 0 {
+            conn.execute("ALTER TABLE job_queue ADD COLUMN next_attempt_ms INTEGER", [])?;
+        }
         Ok(())
     }
 
