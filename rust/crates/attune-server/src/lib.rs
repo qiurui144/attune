@@ -185,6 +185,11 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
                 .patch(routes::items::set_item_privacy),
         )
         .route("/api/v1/settings", get(routes::settings::get_settings).patch(routes::settings::update_settings))
+        // 后台任务控制 + 电源策略(L_hw 电源层 0.4):暂停/恢复 + 电池策略读写 + 状态。
+        .route("/api/v1/background/status", get(routes::background::status))
+        .route("/api/v1/background/pause", post(routes::background::pause))
+        .route("/api/v1/background/resume", post(routes::background::resume))
+        .route("/api/v1/background/power-policy", post(routes::background::set_power_policy))
         .route("/api/v1/search", get(routes::search::search))
         .route("/api/v1/search/relevant", post(routes::search::search_relevant))
         .route("/api/v1/classify/rebuild", post(routes::classify::rebuild))

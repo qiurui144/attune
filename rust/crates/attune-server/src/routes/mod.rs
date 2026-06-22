@@ -3,6 +3,7 @@ pub mod ai_stack;
 pub mod annotations;
 pub mod audit;
 pub mod auto_bookmarks;
+pub mod background;
 pub mod demo;
 pub mod behavior;
 pub mod browse_signals;
