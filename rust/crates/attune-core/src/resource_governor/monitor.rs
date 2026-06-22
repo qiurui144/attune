@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sysinfo::{CpuRefreshKind, Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+use crate::platform::PowerState;
+
 /// CPU sample 缓存窗口 — 必须 ≥ sysinfo MINIMUM_CPU_UPDATE_INTERVAL。
 /// 250ms 在所有平台都安全且对 worker 节流粒度足够。
 const REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -28,6 +30,10 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 pub struct Sample {
     pub cpu_pct: f32,
     pub rss_bytes: u64,
+    /// 电源/电池/热状态快照 — 喂给 governor 的电源感知策略（电池→节流/暂停）。
+    /// `#[serde(default)]`：旧序列化样本无此字段时回退 `Unknown`（= 按 AC 处理）。
+    #[serde(default)]
+    pub power: PowerState,
     /// Sample 生成时的 monotonic 秒数。仅内部时间差用，对外不序列化。
     #[serde(skip)]
     pub(crate) captured_secs: u64,
@@ -38,6 +44,7 @@ impl Default for Sample {
         Self {
             cpu_pct: 0.0,
             rss_bytes: 0,
+            power: PowerState::default(),
             captured_secs: 0,
         }
     }
@@ -51,6 +58,17 @@ impl Sample {
         Self {
             cpu_pct,
             rss_bytes,
+            power: PowerState::default(),
+            captured_secs: 0,
+        }
+    }
+
+    /// Inject a sample with an explicit power state — for power-aware governor tests.
+    pub fn with_power(cpu_pct: f32, rss_bytes: u64, power: PowerState) -> Self {
+        Self {
+            cpu_pct,
+            rss_bytes,
+            power,
             captured_secs: 0,
         }
     }
@@ -91,6 +109,7 @@ impl SysinfoMonitor {
             .map(|p| Sample {
                 cpu_pct: 0.0,
                 rss_bytes: p.memory(),
+                power: PowerState::default(),
                 captured_secs: 0,
             })
             .unwrap_or_default();
@@ -152,6 +171,9 @@ impl ResourceMonitor for SysinfoMonitor {
         let sample = Sample {
             cpu_pct: global_cpu,
             rss_bytes: rss,
+            // Power probe shares the 250ms refresh cache — cheap (sysfs read / wmic),
+            // never panics (degrades to Unknown = AC). Background governor reads it.
+            power: crate::platform::power::probe(),
             captured_secs: captured,
         };
         state.last_refresh = Instant::now();
@@ -201,6 +223,7 @@ mod tests {
         let m = MockMonitor::new(Sample {
             cpu_pct: 42.0,
             rss_bytes: 1024,
+            power: PowerState::default(),
             captured_secs: 0,
         });
         let s = m.sample_self();
@@ -214,6 +237,7 @@ mod tests {
         m.set(Sample {
             cpu_pct: 99.0,
             rss_bytes: 0,
+            power: PowerState::default(),
             captured_secs: 5,
         });
         assert_eq!(m.sample_self().cpu_pct, 99.0);

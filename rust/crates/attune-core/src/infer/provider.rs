@@ -24,13 +24,19 @@ pub fn build_session(model_path: &Path) -> Result<Session> {
 /// 不变量与 `build_session` 一致:EP 注册失败 graceful 降级,绝不 panic、绝不 error,末位 CPU。
 pub fn build_session_for_task(model_path: &Path, task: InferTask) -> Result<Session> {
     let sel = cached_selection();
-    let chain = sel.recommend_ep_chain_for(task);
+    // 电源感知(L_hw 电源层,session 构造时杠杆):能效约束态(电池/saver/热)把 NPU
+    // 重排到链首(bench 能效最优)。AC/Unknown → 性能档不变。注意:EP 在 session 构造时
+    // 锁定,运行时电源切换不重建(切 embedding EP 会全库重嵌);运行时由 resource_governor
+    // 节流/暂停应对。OCR/ASR 短 session 按需重建即走当时电源态。
+    let power = crate::platform::power::probe();
+    let chain = sel.recommend_ep_chain_for_power(task, &power);
     let telemetry = EpSelectionTelemetry::from_chain(&chain);
     log::debug!(
-        "ort EP selection for {}: requested={:?} active~={} (approx)",
+        "ort EP selection for {}: requested={:?} active~={} (approx) power={:?}",
         model_path.display(),
         telemetry.requested,
-        telemetry.active
+        telemetry.active,
+        power.source
     );
 
     let dispatches = build_ep_dispatches(&chain);

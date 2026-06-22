@@ -3,11 +3,13 @@ use std::path::PathBuf;
 pub mod accel;
 pub mod cpu_db;
 pub mod npu;
+pub mod power;
 pub mod region;
 pub mod tier;
 
 pub use npu::{Danger, NpuInstallPlan, NpuStatus};
 pub use accel::{AccelCapabilities, AccelKind, Accelerator};
+pub use power::{PowerProfile, PowerSource, PowerState};
 pub use region::{detect_region, Region};
 pub use tier::{classify_hardware, ModelRecommendation, Tier};
 

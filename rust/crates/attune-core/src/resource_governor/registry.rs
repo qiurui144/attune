@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
-use super::governor::{TaskGovernor, TaskStatus};
+use super::governor::{PowerPolicy, TaskGovernor, TaskStatus};
 use super::monitor::{ResourceMonitor, SysinfoMonitor};
 use super::profiles::{Profile, TaskKind};
 
@@ -18,6 +18,7 @@ pub struct GovernorRegistry {
     governors: RwLock<HashMap<TaskKind, Arc<TaskGovernor>>>,
     monitor: Arc<dyn ResourceMonitor>,
     profile: RwLock<Profile>,
+    power_policy: RwLock<PowerPolicy>,
 }
 
 impl GovernorRegistry {
@@ -32,6 +33,7 @@ impl GovernorRegistry {
             governors: RwLock::new(HashMap::new()),
             monitor,
             profile: RwLock::new(Profile::default()),
+            power_policy: RwLock::new(PowerPolicy::default()),
         }
     }
 
@@ -56,6 +58,12 @@ impl GovernorRegistry {
             Err(p) => *p.into_inner(),
         };
         let g = Arc::new(TaskGovernor::new(kind, profile, Arc::clone(&self.monitor)));
+        // 应用当前全局电源策略（之后 set_power_policy 也会广播到此 governor）。
+        let pp = match self.power_policy.read() {
+            Ok(g) => *g,
+            Err(p) => *p.into_inner(),
+        };
+        g.set_power_policy(pp);
         map.insert(kind, Arc::clone(&g));
         g
     }
@@ -102,6 +110,24 @@ impl GovernorRegistry {
         }
     }
 
+    /// 全局电源策略 —— settings 路由更新时调用，广播到所有已注册 governor。
+    /// 之后 register 的 governor 也会取到新策略。
+    pub fn set_power_policy(&self, pp: PowerPolicy) {
+        if let Ok(mut g) = self.power_policy.write() {
+            *g = pp;
+        }
+        for g in self.snapshot_governors() {
+            g.set_power_policy(pp);
+        }
+    }
+
+    pub fn current_power_policy(&self) -> PowerPolicy {
+        match self.power_policy.read() {
+            Ok(g) => *g,
+            Err(p) => *p.into_inner(),
+        }
+    }
+
     /// 所有任务的状态快照 — 喂给 H5 `attune --diag` 与未来 H6 telemetry chart。
     /// 顺序按 TaskKind 字符串 id 字典序，便于 diff。
     pub fn snapshot(&self) -> Vec<TaskStatus> {
@@ -138,6 +164,7 @@ mod tests {
         GovernorRegistry::with_monitor(Arc::new(MockMonitor::new(Sample {
             cpu_pct: 5.0,
             rss_bytes: 100 * 1024 * 1024,
+            power: crate::platform::PowerState::default(),
             captured_secs: 0,
         })))
     }

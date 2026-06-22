@@ -268,6 +268,26 @@ impl AccelSelection {
         )
     }
 
+    /// **电源感知** EP 链 — 能效约束态(电池/saver/热)把 NPU 重排到链首
+    /// (VitisAi/OpenVino-NPU 是 bench 实测的能效最优路径:OCR 同精度、功耗远低于
+    /// GPU)。AC/Unknown → 与 `recommend_ep_chain_for` 字节一致(性能档不变)。
+    ///
+    /// 注意(两层调度约束):此偏好只在 **session 构造时**生效;运行时 AC↔电池切换不
+    /// 重建 session(切 embedding EP 会触发全库重嵌),由 resource_governor 节流/暂停
+    /// 应对(运行时主杠杆)。无 NPU 机器在电池下保持 GPU 链但靠 governor 重度节流兜底。
+    pub fn recommend_ep_chain_for_power(
+        &self,
+        task: InferTask,
+        power: &crate::platform::PowerState,
+    ) -> Vec<EpChoice> {
+        if power.is_energy_constrained() {
+            let hw = reorder_npu_first(&self.hardware);
+            recommend_ep_chain_for_task(self.os, &hw, &self.compiled, self.env_override.as_ref(), task)
+        } else {
+            self.recommend_ep_chain_for(task)
+        }
+    }
+
     /// 链首(实际首选)EP — telemetry / UI 显示「预计加速:X」。
     pub fn primary_ep(&self) -> EpChoice {
         self.recommend_ep_chain().into_iter().next().unwrap_or(EpChoice::Cpu)
@@ -361,6 +381,16 @@ pub fn recommend_ep_chain_pure(
     }
 
     dedup_with_cpu_tail(chain)
+}
+
+/// 能效约束态(电池/saver/热)把 NPU 类硬件重排到序首,其余保持相对优先序。
+/// NPU(AMD XDNA / Intel NPU)是 vlm-llm-bench 实测的能效最优路径,故电池下优先。
+/// 纯函数,可测。
+fn reorder_npu_first(hw: &[AccelKind]) -> Vec<AccelKind> {
+    let is_npu = |h: &AccelKind| matches!(h, AccelKind::AmdNpu | AccelKind::IntelNpu);
+    let mut out: Vec<AccelKind> = hw.iter().copied().filter(is_npu).collect();
+    out.extend(hw.iter().copied().filter(|h| !is_npu(h)));
+    out
 }
 
 /// 任务感知的 EP 链选型(在通用 `recommend_ep_chain_pure` 上叠加 per-task 规则)。
@@ -986,5 +1016,74 @@ mod tests {
         assert_eq!(EpChoice::OpenVino(OpenVinoDevice::Auto).runtime_stack(), Some("openvino"));
         assert_eq!(EpChoice::Rocm.runtime_stack(), Some("rocm"));
         assert_eq!(EpChoice::VitisAi.runtime_stack(), Some("vitisai"));
+    }
+
+    // ── 电源感知 EP 偏好 (0.3) ──
+    use crate::platform::{PowerProfile, PowerSource, PowerState};
+
+    fn battery_state() -> PowerState {
+        PowerState {
+            source: PowerSource::Battery,
+            battery_pct: Some(70),
+            profile: PowerProfile::Balanced,
+            thermal_pressure: false,
+        }
+    }
+
+    #[test]
+    fn reorder_npu_first_moves_npu_ahead() {
+        let hw = vec![AccelKind::IntelIgpu, AccelKind::IntelNpu, AccelKind::Cpu];
+        let out = reorder_npu_first(&hw);
+        assert_eq!(out[0], AccelKind::IntelNpu, "NPU 重排到序首");
+        assert_eq!(out[1], AccelKind::IntelIgpu);
+    }
+
+    #[test]
+    fn reorder_npu_first_noop_when_no_npu() {
+        let hw = vec![AccelKind::AmdGpu, AccelKind::Cpu];
+        assert_eq!(reorder_npu_first(&hw), hw, "无 NPU → 顺序不变");
+    }
+
+    #[test]
+    fn power_ac_keeps_gpu_first_battery_prefers_npu() {
+        // Intel 笔电:iGPU(性能优先序在前) + NPU。compiled 含两者 EP。
+        let sel = AccelSelection {
+            os: "windows",
+            hardware: vec![AccelKind::IntelIgpu, AccelKind::IntelNpu],
+            compiled: vec![
+                EpChoice::DirectMl,
+                EpChoice::OpenVino(OpenVinoDevice::Npu),
+                EpChoice::Cpu,
+            ],
+            env_override: None,
+        };
+        // AC：iGPU 优先 → DirectML 链首。
+        let ac = sel.recommend_ep_chain_for_power(InferTask::Generic, &PowerState::default());
+        assert_eq!(ac[0], EpChoice::DirectMl, "AC 性能档:GPU 链首");
+        // 电池：NPU 重排到首 → OpenVINO(NPU) 链首(能效路径)。
+        let bat = sel.recommend_ep_chain_for_power(InferTask::Generic, &battery_state());
+        assert_eq!(
+            bat[0],
+            EpChoice::OpenVino(OpenVinoDevice::Npu),
+            "电池能效档:NPU 链首"
+        );
+        // 末位恒 CPU 兜底(两种电源态都成立)。
+        assert_eq!(*ac.last().unwrap(), EpChoice::Cpu);
+        assert_eq!(*bat.last().unwrap(), EpChoice::Cpu);
+    }
+
+    #[test]
+    fn power_no_npu_battery_keeps_chain_governor_throttles() {
+        // 无 NPU 机器:电池下链不变(GPU 仍在),靠 resource_governor 节流兜底。
+        let sel = AccelSelection {
+            os: "windows",
+            hardware: vec![AccelKind::AmdGpu],
+            compiled: vec![EpChoice::DirectMl, EpChoice::Cpu],
+            env_override: None,
+        };
+        let ac = sel.recommend_ep_chain_for_power(InferTask::Generic, &PowerState::default());
+        let bat = sel.recommend_ep_chain_for_power(InferTask::Generic, &battery_state());
+        assert_eq!(ac, bat, "无 NPU → 电源态不改 EP 链(governor 负责节流)");
+        assert_eq!(ac[0], EpChoice::DirectMl);
     }
 }

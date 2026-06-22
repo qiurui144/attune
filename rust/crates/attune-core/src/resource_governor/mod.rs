@@ -18,7 +18,7 @@ pub mod profiles;
 pub mod registry;
 
 pub use budget::{Budget, IoPriority};
-pub use governor::{TaskGovernor, TaskStatus};
+pub use governor::{BatteryPolicy, PowerPolicy, TaskGovernor, TaskStatus};
 pub use monitor::{MockMonitor, ResourceMonitor, Sample, SysinfoMonitor};
 pub use profiles::{Profile, TaskKind};
 pub use registry::{global_registry, GovernorRegistry};
