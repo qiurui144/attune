@@ -433,31 +433,47 @@ mod tests {
     #[test]
     fn npu_tiers_present_with_verdicts() {
         let c = Catalog::builtin_default();
-        assert_eq!(c.resolve("riscv-k3", Role::Llm).unwrap().model, "qwen2.5-0.5b");
+        // riscv-k3 LLM 选型对齐 bianbu §3.1 / k3-16g(16G 主推 Qwen2.5-7B q4)。
+        assert_eq!(c.resolve("riscv-k3", Role::Llm).unwrap().model, "qwen2.5-7b");
         assert_eq!(c.resolve("rk1820-npu", Role::Llm).unwrap().verdict, Verdict::Pass);
         assert_eq!(c.resolve("rk3588-rknpu", Role::Embedding).unwrap().repo, "minicpm-embed-rk3588");
     }
 
     // ── K3 调度层集成 (2026-06-22):riscv-k3 本地能力经 k3-scheduler :8090 收口 ──
 
-    /// K3 一体机:embedding/rerank/ocr/asr 全部 resolve 到 ep=k3-scheduler 哨兵
-    /// (经 :8090 服务,预置不下载)。这是「:8090 统一收口」的 catalog 兑现。
+    /// K3 一体机:embedding/rerank/ocr/asr **+ llm** 全部 resolve 到 ep=k3-scheduler 哨兵
+    /// (经 :8090 服务,预置不下载)。这是「:8090 统一收口、禁旁路直连 worker」的 catalog 兑现 ——
+    /// LLM 也归口(2026-06-22 reconcile:由 ep=cpu 直跑改 ep=k3-scheduler,与 settings
+    /// provider=openai_compat :8090 一致)。
     #[test]
     fn k3_local_capabilities_route_to_scheduler() {
         let c = Catalog::builtin_default();
-        for role in [Role::Embedding, Role::Rerank, Role::Ocr, Role::Asr] {
+        for role in [Role::Embedding, Role::Rerank, Role::Ocr, Role::Asr, Role::Llm] {
             let (hit_tier, choice) = c
                 .resolve_with_tier("riscv-k3", role)
                 .unwrap_or_else(|| panic!("riscv-k3 must have {} entry", role.id()));
             assert_eq!(hit_tier, "riscv-k3", "{} must hit riscv-k3 (not cpu-fallback)", role.id());
             assert_eq!(
                 choice.ep, "k3-scheduler",
-                "{} on K3 must route to k3-scheduler :8090 sentinel EP",
+                "{} on K3 must route to k3-scheduler :8090 sentinel EP (禁旁路直连)",
                 role.id()
             );
         }
-        // LLM 仍在(本地慢 LLM 可选);云端默认由 settings 决定,不在 catalog。
-        assert_eq!(c.resolve("riscv-k3", Role::Llm).unwrap().model, "qwen2.5-0.5b");
+        // LLM 选型对齐 bianbu §3.1 / k3-16g(16G 主推 Qwen2.5-7B q4)。
+        assert_eq!(c.resolve("riscv-k3", Role::Llm).unwrap().model, "qwen2.5-7b");
+    }
+
+    /// riscv-k3 ASR 选型对齐 bianbu §3.1 = sherpa SenseVoice(非 whisper)。
+    /// 回归门:防止 catalog ASR 引擎漂回 whisper(设备实跑 sensevoice + diarization)。
+    #[test]
+    fn k3_asr_is_sensevoice_aligned_with_bianbu() {
+        let c = Catalog::builtin_default();
+        let asr = c.resolve("riscv-k3", Role::Asr).unwrap();
+        assert_eq!(asr.engine, "sensevoice", "K3 ASR 对齐 bianbu §3.1 = sherpa SenseVoice");
+        assert_eq!(asr.ep, "k3-scheduler", "K3 ASR 经 :8090 收口");
+        // rerank/ocr 选型注解对齐
+        assert_eq!(c.resolve("riscv-k3", Role::Rerank).unwrap().model, "bge-reranker-base");
+        assert_eq!(c.resolve("riscv-k3", Role::Ocr).unwrap().model, "pp-ocrv4-layout");
     }
 
     /// k3-scheduler 哨兵条目无 HF 下载(repo/file 空)—— 预置模型,wizard 跳过下载步。
