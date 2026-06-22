@@ -179,6 +179,7 @@ pub mod reindex;
 pub mod resource_governor;
 pub mod scanner;
 pub mod scanner_webdav;
+pub mod staging;  // G3① locked-mode ingest staging (encrypted-at-rest, drains on unlock)
 pub mod search;
 pub mod store;
 pub mod tag_index;
