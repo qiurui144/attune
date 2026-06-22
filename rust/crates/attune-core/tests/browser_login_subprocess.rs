@@ -46,9 +46,20 @@ fn controller_for(script: PathBuf) -> SidecarController {
     .with_timeout(Duration::from_secs(10))
 }
 
+/// Serialize each test's write-then-exec. Under `cargo test` parallelism a fake
+/// sidecar's still-open write fd in one thread leaks (via fork) into another
+/// thread's spawn child, so overlapping write+exec windows hit ETXTBSY ("Text
+/// file busy"). Held for each test's whole body, this keeps those windows from
+/// overlapping without forcing a global `--test-threads=1`.
+fn browser_login_serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 // ── happy path: scan → ok (exit 0) ──────────────────────────────────────────
 #[test]
 fn scan_returns_ok_status_and_success_outcome() {
+    let _serial = browser_login_serial();
     let tmp = tempfile::tempdir().unwrap();
     // G1: print a single JSON document; G2: exit 0 for "ok".
     let script = write_fake_sidecar(
@@ -72,6 +83,7 @@ exit 0
 // ── E2E flow: scan needs-login → login (resume) → run crawls a record ────────
 #[test]
 fn full_flow_scan_needslogin_then_run_crawls_record() {
+    let _serial = browser_login_serial();
     let tmp = tempfile::tempdir().unwrap();
     let state = tmp.path().join("session.json");
 
@@ -139,6 +151,7 @@ exit 0
 // ── needs-human (CAPTCHA/MFA) → exit 10 ─────────────────────────────────────
 #[test]
 fn needs_human_status_routes_to_needshuman() {
+    let _serial = browser_login_serial();
     let tmp = tempfile::tempdir().unwrap();
     let script = write_fake_sidecar(
         tmp.path(),
@@ -159,6 +172,7 @@ exit 10
 // ── restricted (paywall) → exit 11 ──────────────────────────────────────────
 #[test]
 fn restricted_status_routes_to_restricted() {
+    let _serial = browser_login_serial();
     let tmp = tempfile::tempdir().unwrap();
     let script = write_fake_sidecar(
         tmp.path(),
@@ -178,6 +192,7 @@ exit 11
 // ── error path: bad JSON on stdout → BadOutput ──────────────────────────────
 #[test]
 fn non_json_stdout_is_bad_output_error() {
+    let _serial = browser_login_serial();
     let tmp = tempfile::tempdir().unwrap();
     let script = write_fake_sidecar(
         tmp.path(),
@@ -197,6 +212,7 @@ exit 0
 // ── error path: schema mismatch (major version 2) → SchemaMismatch ──────────
 #[test]
 fn unsupported_schema_version_is_rejected() {
+    let _serial = browser_login_serial();
     let tmp = tempfile::tempdir().unwrap();
     let script = write_fake_sidecar(
         tmp.path(),
@@ -216,6 +232,7 @@ exit 0
 // ── timeout: child sleeps past the cap → killed + Timeout error ─────────────
 #[test]
 fn run_that_exceeds_timeout_is_killed() {
+    let _serial = browser_login_serial();
     let tmp = tempfile::tempdir().unwrap();
     let script = write_fake_sidecar(
         tmp.path(),
@@ -243,6 +260,7 @@ exit 0
 // ── tool-not-found: spawn a non-existent program → SpawnFailed ──────────────
 #[test]
 fn missing_program_yields_spawn_failed() {
+    let _serial = browser_login_serial();
     let ctrl = SidecarController::new(SidecarProgram {
         program: PathBuf::from("/nonexistent/attune-fake-sidecar-xyz"),
         module_args: vec![],
@@ -260,6 +278,7 @@ fn missing_program_yields_spawn_failed() {
 // credential values never appear there (they must arrive over stdin only).
 #[test]
 fn auto_credentials_never_appear_in_argv() {
+    let _serial = browser_login_serial();
     let tmp = tempfile::tempdir().unwrap();
     let argv_dump = tmp.path().join("argv.txt");
     let stdin_dump = tmp.path().join("stdin.txt");
