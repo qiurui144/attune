@@ -57,6 +57,11 @@ pub mod browser_login;
 // consulted in one place. See docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md.
 pub mod outbound_gate;
 pub use outbound_gate::{OutboundError, OutboundGate, OutboundKind, OutboundPolicy};
+// edge_cloud: 端云协同调度 Model 1 — attune governor 接 k3-scheduler /capacity，
+// 按 capability/load/cost/privacy 四维路由（仅 K3 形态激活；个人版 0 回退）。
+// 隐私门（L0 永不出网 + 脱敏）仍在 OutboundGate；本模块只决定「在哪跑」。
+// spec: docs/superpowers/specs/2026-06-22-edge-cloud-model1.md
+pub mod edge_cloud;
 // v1.0.6 Privacy Logic Strategy — default-off telemetry queue.
 // Stub for v1.0.6: ships queue + default-false persistence, no HTTP send yet.
 // Actual send gated behind future v1.1 toggle AND privacy.telemetry == true.
