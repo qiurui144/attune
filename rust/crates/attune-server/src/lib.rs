@@ -1,6 +1,7 @@
 pub mod acp_chat;
 pub mod error;
 pub mod eval;
+pub mod mcp;
 pub mod routes;
 pub mod state;
 pub(crate) mod job_worker;
@@ -200,6 +201,19 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/plugins/{id}/toggle", post(routes::plugins::toggle))
         // law-pro 接入阶段 2: 前端触发 plugin agent binary（civil_loan_agent 算金额）
         .route("/api/v1/agents/{agent_id}/run", post(routes::agents::run_agent))
+        // G1 原生 MCP transport (JSON-RPC over HTTP + SSE). scoped-token 自有认证,
+        // bypass vault_guard / bearer_auth_guard (见 middleware.rs)。工具契约兼容 attune-mcp-bridge。
+        .route("/mcp", post(mcp::transport::mcp_http))
+        .route("/mcp/sse", get(mcp::transport::mcp_sse))
+        // G2 scoped-token 管理 (settings 面板, admin: 需 unlock + session bearer)
+        .route(
+            "/api/v1/scoped-tokens",
+            get(routes::scoped_tokens::list).post(routes::scoped_tokens::issue),
+        )
+        .route(
+            "/api/v1/scoped-tokens/{id}",
+            delete(routes::scoped_tokens::revoke),
+        )
         // 行业工作台: 聚合已装插件场景卡片（直接入口，bypass chat-trigger）
         .route("/api/v1/scenarios", get(routes::scenarios::list))
         // E4 (2026-05-01) — PluginHub marketplace (默认 Mock provider；attune-pro 注入 hub-client)

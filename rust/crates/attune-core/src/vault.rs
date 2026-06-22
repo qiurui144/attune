@@ -474,6 +474,113 @@ impl Vault {
         Ok(format!("{payload}.{}", hex::encode(sig)))
     }
 
+    // ── G2: scoped token (MCP agent 最小权限授权) ──────────────────────────
+    //
+    // 与 session token 共信任根 (HMAC over master_key) 但独立命名空间 (payload 前缀
+    // `scoped:`) + 独立权限位 (DB scoped_tokens 行) + 独立吊销 (DB revoked 标志,
+    // 不走 session nonce —— 24h headless agent 访问不应被 vault lock/unlock 失效)。
+    //
+    // payload 格式: `scoped:{token_id}:{expires}`  →  `{payload}.{hmac_hex}`
+
+    /// 签发一个 scoped token (需 vault unlock)。token 明文**仅此一次**返回,
+    /// 元数据落 `scoped_tokens` 表。`scopes` 必须 ⊆ {search,chat,ingest}。
+    /// `ttl_secs` 是相对当前的有效期 (上限 90 天, 默认 30 天)。
+    pub fn issue_scoped_token(
+        &self,
+        label: &str,
+        scopes: &[String],
+        ttl_secs: Option<i64>,
+    ) -> Result<(String, crate::store::scoped_token::ScopedTokenMeta)> {
+        crate::store::scoped_token::validate_scopes(scopes)
+            .map_err(VaultError::InvalidInput)?;
+
+        let guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = guard.as_ref().ok_or(VaultError::Locked)?;
+        let mk = keys.master_key.clone();
+        drop(guard);
+
+        const DEFAULT_TTL: i64 = 30 * 24 * 3600;
+        const MAX_TTL: i64 = 90 * 24 * 3600;
+        let ttl = ttl_secs.unwrap_or(DEFAULT_TTL).clamp(1, MAX_TTL);
+        let now = chrono::Utc::now().timestamp();
+        let expires = now + ttl;
+        let token_id = uuid::Uuid::new_v4().simple().to_string();
+
+        let payload = format!("scoped:{token_id}:{expires}");
+        let sig = crypto::hmac_sign(&mk, payload.as_bytes());
+        let token = format!("{payload}.{}", hex::encode(sig));
+
+        let meta = crate::store::scoped_token::ScopedTokenMeta {
+            token_id,
+            label: label.to_string(),
+            scopes: scopes.to_vec(),
+            expires_at: expires,
+            revoked: false,
+            created_at: now,
+        };
+        self.store.insert_scoped_token(&meta)?;
+        Ok((token, meta))
+    }
+
+    /// 校验一个 scoped token,返回其权限元数据 (需 vault unlock 验 HMAC)。
+    /// 拒绝条件: HMAC 无效 / 命名空间不符 / token_id 不存在 / 已吊销 / 已过期。
+    /// **不接受 session token** (无 `scoped:` 前缀 → SessionInvalid)。
+    pub fn verify_scoped_token(
+        &self,
+        token: &str,
+    ) -> Result<crate::store::scoped_token::ScopedTokenMeta> {
+        let guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = guard.as_ref().ok_or(VaultError::Locked)?;
+        let mk = keys.master_key.clone();
+        drop(guard);
+
+        let dot_pos = token.rfind('.').ok_or(VaultError::SessionInvalid)?;
+        let payload = &token[..dot_pos];
+        let sig_hex = &token[dot_pos + 1..];
+        let sig = hex::decode(sig_hex).map_err(|_| VaultError::SessionInvalid)?;
+        if !crypto::hmac_verify(&mk, payload.as_bytes(), &sig) {
+            return Err(VaultError::SessionInvalid);
+        }
+
+        // payload: scoped:{token_id}:{expires}  —— 命名空间隔离 session token。
+        let rest = payload
+            .strip_prefix("scoped:")
+            .ok_or(VaultError::SessionInvalid)?;
+        let (token_id, expires_str) = rest.rsplit_once(':').ok_or(VaultError::SessionInvalid)?;
+        let expires: i64 = expires_str.parse().map_err(|_| VaultError::SessionInvalid)?;
+
+        let now = chrono::Utc::now().timestamp();
+        if now > expires {
+            return Err(VaultError::SessionExpired);
+        }
+
+        // DB 是吊销 + 权限位的 SSOT (即时生效, 不缓存)。
+        let meta = self
+            .store
+            .get_scoped_token(token_id)?
+            .ok_or(VaultError::SessionInvalid)?;
+        if meta.revoked {
+            return Err(VaultError::SessionInvalid);
+        }
+        Ok(meta)
+    }
+
+    /// 吊销一个 scoped token (settings 面板)。返回是否改动了行。需 vault unlock。
+    pub fn revoke_scoped_token(&self, token_id: &str) -> Result<bool> {
+        let guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = guard.as_ref().ok_or(VaultError::Locked)?;
+        drop(guard);
+        self.store.revoke_scoped_token(token_id)
+    }
+
+    /// 列出 scoped token 元数据 (settings 面板, 不含 token 明文)。需 vault unlock。
+    pub fn list_scoped_tokens(&self) -> Result<Vec<crate::store::scoped_token::ScopedTokenMeta>> {
+        let guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = guard.as_ref().ok_or(VaultError::Locked)?;
+        drop(guard);
+        self.store.list_scoped_tokens()
+    }
+
     /// 忘记密码后的本地重置：清空 vault 数据并回到 SEALED。
     ///
     /// 安全边界：
@@ -707,6 +814,81 @@ mod tests {
         };
         let tampered = format!("x{token}");
         assert!(vault.verify_session(&tampered).is_err());
+    }
+
+    // ── G2 scoped token 测试 ───────────────────────────────────────────────
+
+    #[test]
+    fn scoped_token_issue_verify_revoke() {
+        let (vault, _tmp) = test_vault();
+        vault.setup("pw").unwrap();
+        let scopes = vec!["search".to_string(), "chat".to_string()];
+        let (token, meta) = vault.issue_scoped_token("agentA", &scopes, None).unwrap();
+
+        let claims = vault.verify_scoped_token(&token).unwrap();
+        assert_eq!(claims.token_id, meta.token_id);
+        assert_eq!(claims.label, "agentA");
+        assert_eq!(claims.scopes, scopes);
+
+        // 吊销后立即拒绝(nonce-free, DB revoked SSOT)
+        assert!(vault.revoke_scoped_token(&meta.token_id).unwrap());
+        assert!(vault.verify_scoped_token(&token).is_err());
+    }
+
+    #[test]
+    fn scoped_token_tampered_and_namespace_isolation() {
+        let (vault, _tmp) = test_vault();
+        vault.setup("pw").unwrap();
+
+        let (token, _) = vault
+            .issue_scoped_token("a", &["search".into()], None)
+            .unwrap();
+        assert!(vault.verify_scoped_token(&format!("{token}ff")).is_err());
+
+        // session token 不能当 scoped token 用
+        let session = {
+            let guard = vault.unlocked.lock().unwrap();
+            let keys = guard.as_ref().unwrap();
+            vault.create_session_token(&keys.master_key).unwrap()
+        };
+        assert!(
+            vault.verify_scoped_token(&session).is_err(),
+            "session token must not verify as scoped token"
+        );
+        // scoped token 不能当 session token 用
+        assert!(
+            vault.verify_session(&token).is_err(),
+            "scoped token must not verify as session token"
+        );
+    }
+
+    #[test]
+    fn scoped_token_rejects_invalid_scope_and_clamps_ttl() {
+        let (vault, _tmp) = test_vault();
+        vault.setup("pw").unwrap();
+        assert!(vault
+            .issue_scoped_token("a", &["delete".into()], None)
+            .is_err());
+        let huge = 10 * 365 * 24 * 3600;
+        let (_t, meta) = vault
+            .issue_scoped_token("a", &["search".into()], Some(huge))
+            .unwrap();
+        let max = chrono::Utc::now().timestamp() + 90 * 24 * 3600 + 5;
+        assert!(meta.expires_at <= max, "ttl should clamp to 90d");
+    }
+
+    #[test]
+    fn scoped_token_requires_unlock() {
+        let (vault, _tmp) = test_vault();
+        vault.setup("pw").unwrap();
+        let (token, meta) = vault
+            .issue_scoped_token("a", &["search".into()], None)
+            .unwrap();
+        vault.lock().unwrap();
+        assert!(vault.issue_scoped_token("b", &["chat".into()], None).is_err());
+        assert!(vault.verify_scoped_token(&token).is_err());
+        assert!(vault.revoke_scoped_token(&meta.token_id).is_err());
+        assert!(vault.list_scoped_tokens().is_err());
     }
 
     #[test]

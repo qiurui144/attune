@@ -320,3 +320,18 @@ pub struct EvalBlock {
     #[serde(default)]
     pub abstention_reason: Option<String>,
 }
+
+/// Test-only: build an in-memory, **unlocked** [`AppState`] with no LLM wired.
+///
+/// Used by the MCP gate/protocol unit tests (mcp::*): they need a vault that is
+/// unlocked (so scoped-token HMAC + audit writes work) but do NOT need any real
+/// LLM / index. The vault lives in a leaked tempdir for the test's lifetime.
+/// `require_auth=false`. No process-global env mutation (uses `Vault::open_memory`
+/// with a tempdir config dir).
+#[doc(hidden)]
+pub fn unlocked_state() -> Arc<crate::state::AppState> {
+    let tmp = Box::leak(Box::new(tempfile::TempDir::new().expect("tempdir")));
+    let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    vault.setup("test-pass-not-real").expect("vault setup unlocks");
+    Arc::new(crate::state::AppState::new(vault, false))
+}
