@@ -194,6 +194,9 @@ export const en = {
   'wizard.hw.model.change': 'Change model',
   'wizard.hw.auto_download': 'Auto-download these models via Ollama',
   'wizard.hw.apply': 'Apply recommendation',
+  'wizard.hw.k3.heading': 'K3 appliance detected',
+  'wizard.hw.k3.preinstalled': 'Embedding, rerank, OCR and ASR run on the K3 scheduler (:8090). Models are pre-installed — no download needed.',
+  'wizard.hw.k3.continue': 'Continue',
 
   // ─── Wizard Step 5 · Data ───────────────────────────
   'wizard.data.heading': 'Where to start accumulating?',

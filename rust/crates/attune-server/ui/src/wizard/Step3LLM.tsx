@@ -54,7 +54,8 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
   const [prefersLocal, setPrefersLocal] = useState<boolean>(false);
   const [localChatAllowed, setLocalChatAllowed] = useState<boolean>(false);
   const [localBlockReason, setLocalBlockReason] = useState<string>(t('wizard.llm.block.default_reason'));
-  const [k3Endpoint, setK3Endpoint] = useState('http://192.168.100.166:8080/v1');
+  // K3 一体机 = k3-scheduler :8090 统一收口(OpenAI/Ollama-compat,2026-06-22 集成 spec)。
+  const [k3Endpoint, setK3Endpoint] = useState('http://192.168.100.166:8090/v1');
   const [k3Detecting, setK3Detecting] = useState(false);
   const [k3DetectResult, setK3DetectResult] = useState<string | null>(null);
   // 本地模型一键就绪：目标 chat 模型 = 硬件推荐 (fallback qwen2.5:3b)。

@@ -187,6 +187,9 @@ export const zh = {
   'wizard.hw.model.change': '换模型',
   'wizard.hw.auto_download': '让 Ollama 自动下载这些模型',
   'wizard.hw.apply': '应用推荐',
+  'wizard.hw.k3.heading': '已识别 K3 一体机',
+  'wizard.hw.k3.preinstalled': 'Embedding、rerank、OCR、ASR 由 K3 调度服务（:8090）提供，模型已预装，无需下载。',
+  'wizard.hw.k3.continue': '继续',
 
   // ─── Wizard Step 5 · 数据 ─────────────────────────────
   'wizard.data.heading': '从哪里开始积累？',
