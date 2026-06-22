@@ -23,6 +23,12 @@ pub enum VaultError {
     #[error("device secret mismatch")]
     DeviceSecretMismatch,
 
+    /// G3① locked-mode staging area is at its hard cap (`STAGING_MAX_PENDING`).
+    /// Inbound documents are rejected with backpressure rather than filling the disk
+    /// of an unattended LOCKED device; the backlog drains on unlock.
+    #[error("staging full: too many pending locked-mode ingests")]
+    StagingFull,
+
     #[error("session expired")]
     SessionExpired,
 

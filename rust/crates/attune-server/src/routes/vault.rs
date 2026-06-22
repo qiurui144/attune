@@ -104,6 +104,8 @@ pub async fn vault_setup(
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
     crate::state::AppState::start_entitlement_worker(state.clone());
+    // G3①: drain any locked-mode staged ingests now that the DEK is available.
+    crate::state::AppState::start_staging_drain_worker(state.clone());
     Ok(Json(serde_json::json!({
         "status": "ok",
         "state": "unlocked",
@@ -143,6 +145,8 @@ pub async fn vault_unlock(
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
     crate::state::AppState::start_entitlement_worker(state.clone());
+    // G3①: drain any locked-mode staged ingests now that the DEK is available.
+    crate::state::AppState::start_staging_drain_worker(state.clone());
     Ok(Json(serde_json::json!({"status": "ok", "token": token})))
 }
 
@@ -258,10 +262,84 @@ pub async fn vault_reset_with_recovery_key(
     crate::state::AppState::start_monitoring_worker(state.clone());
     crate::state::AppState::start_queue_worker(state.clone());
     crate::state::AppState::start_skill_evolver(state.clone());
+    // G3①: drain any locked-mode staged ingests now that the DEK is available.
+    crate::state::AppState::start_staging_drain_worker(state.clone());
 
     Ok(Json(serde_json::json!({
         "status": "ok",
         "state": "unlocked",
         "token": token,
+    })))
+}
+
+/// G3① observability: pending locked-mode staged ingest count. Readable in ANY vault
+/// state (no DEK needed) so a UI / monitor can show "N files queued, waiting for unlock".
+pub async fn vault_staging_status(
+    State(_state): State<SharedState>,
+) -> Json<serde_json::Value> {
+    let pending = attune_core::staging::IngestStaging::open_default().count();
+    Json(serde_json::json!({ "pending": pending }))
+}
+
+/// G3② auto-unlock threat-model copy. The real key-sealing mechanism (TPM / OS keyring /
+/// secure enclave) is PENDING a dedicated security review; enabling auto-unlock changes
+/// the threat model (a host-key-sealed vault is readable by anyone with physical access to
+/// the device). This text is surfaced in the UI next to the toggle.
+const AUTO_UNLOCK_THREAT_MODEL: &str = "Enabling auto-unlock seals the vault key on this \
+device so it unlocks without your password after a reboot. This changes the threat model: \
+anyone with physical access to the device can then read your vault. The key-sealing \
+mechanism is pending a security review and is NOT yet implemented — turning this on only \
+records your intent and shows this warning; no key is written to disk.";
+
+#[derive(Deserialize)]
+pub struct AutoUnlockRequest {
+    pub enabled: bool,
+}
+
+/// Path to the auto-unlock intent flag. Stored as a tiny non-secret file under config_dir
+/// (a single byte `0`/`1`) so it is readable/settable regardless of vault lock state.
+/// Deliberately holds NO key material — the real sealing is PENDING-security-review.
+fn auto_unlock_flag_path() -> std::path::PathBuf {
+    attune_core::platform::config_dir().join("auto_unlock.flag")
+}
+
+fn read_auto_unlock_flag() -> bool {
+    std::fs::read(auto_unlock_flag_path())
+        .ok()
+        .and_then(|b| b.first().copied())
+        .map(|b| b == b'1')
+        .unwrap_or(false)
+}
+
+/// GET auto-unlock state. `implemented:false` signals the real sealing is not yet built.
+pub async fn vault_get_auto_unlock(
+    State(_state): State<SharedState>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": read_auto_unlock_flag(),
+        "implemented": false,
+        "threat_model": AUTO_UNLOCK_THREAT_MODEL,
+    }))
+}
+
+/// PUT auto-unlock intent. Records the flag and returns the threat-model warning. Because
+/// the real key-sealing is PENDING-security-review, enabling does NOT actually seal a key
+/// or auto-unlock anything — it only persists the intent + warns. This avoids shipping a
+/// half-built, insecure key store.
+pub async fn vault_set_auto_unlock(
+    State(_state): State<SharedState>,
+    Json(body): Json<AutoUnlockRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let path = auto_unlock_flag_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, if body.enabled { b"1" } else { b"0" })
+        .map_err(|e| AppError::Internal(format!("persist auto-unlock flag: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "enabled": body.enabled,
+        "implemented": false,
+        "warning": if body.enabled { AUTO_UNLOCK_THREAT_MODEL } else { "" },
+        "code": "auto-unlock-pending-security-review",
     })))
 }
