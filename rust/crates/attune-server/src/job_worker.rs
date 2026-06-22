@@ -15,6 +15,10 @@ use std::sync::Arc;
 const JOB_MAX_ATTEMPTS: i64 = 5;
 /// done/failed/cancelled rows older than this are TTL-purged (spec §8).
 const JOB_TTL_DAYS: i64 = 30;
+/// Base exponential-backoff window for an auto-retried failed job (spec §7).
+/// attempt N waits base * 2^(N-1), capped at 1h inside auto_retry_failed_jobs.
+/// 30s base → 30s, 1m, 2m, 4m … for a transient nightly-batch failure.
+const JOB_RETRY_BASE_BACKOFF_MS: i64 = 30_000;
 
 /// ASR handler — runs whisper via subprocess, same pipeline the old inline
 /// office.rs spawn used. Payload: {"file_path": "...", "diarization": bool}.
@@ -159,6 +163,10 @@ pub fn start_job_worker(state: Arc<AppState>) {
             {
                 let s = store.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = s.sweep_timeouts(now);
+                // Auto-retry transient failures with exponential backoff before the
+                // TTL purge sees them — an unattended K3 nightly batch retries on its
+                // own (spec §7) instead of waiting for an operator requeue.
+                let _ = s.auto_retry_failed_jobs(now, JOB_MAX_ATTEMPTS, JOB_RETRY_BASE_BACKOFF_MS);
                 let _ = s.purge_terminal_jobs(now, JOB_TTL_DAYS);
             }
             // Drain serially until the queue is empty for this tick. run_one_job

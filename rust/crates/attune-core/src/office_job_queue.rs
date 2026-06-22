@@ -98,6 +98,9 @@ pub struct JobRecord {
     pub started_ms: Option<i64>,
     pub finished_ms: Option<i64>,
     pub deadline_ms: Option<i64>,
+    /// G5 auto-backoff: earliest epoch-ms the job may be claimed again after a
+    /// failed retry was scheduled. None = claimable immediately.
+    pub next_attempt_ms: Option<i64>,
 }
 
 #[cfg(test)]
