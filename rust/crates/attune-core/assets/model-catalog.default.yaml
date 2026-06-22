@@ -117,41 +117,50 @@ tiers:
   # ep=k3-scheduler 是"经 :8090 服务、预置不下载"的哨兵 EP(repo/file 留空表示无 HF 下载),
   # attune 把对应 provider 的 base_url 指向 :8090 即可(2026-06-22 K3 调度层集成 spec)。
   # LLM 默认仍走云端会员 token(K3 throughput 1.4 t/s,不适交互/并发);本地 LLM 可选。
+  # 模型选型对齐 rv-bianbu-nas/docs/ARCHITECTURE.md §3.1 (16G 列) +
+  # attune-k3/docs/k3-16g-model-selection.md(设备侧 SSOT)。catalog = attune 消费侧
+  # 路由契约(名要与 scheduler 一致便于路由);模型实体在 scheduler,经 :8090 服务。
   riscv-k3:
     embedding:
+      model: bge-m3                       # 对齐 bianbu §3.1 / k3-16g(bge-m3 ONNX)
       repo: ""                            # 经 :8090 服务,无 HF 下载
       file: ""
       dims: 1024
       ep: k3-scheduler                    # 哨兵:经 k3-scheduler :8090 (/v1/embeddings),预置不下载
       verdict: PENDING-VERIFY
       metric: "served via k3-scheduler :8090; on-device bench PENDING-真机"
-      source: "docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md:§3"
+      source: "rv-bianbu-nas/docs/ARCHITECTURE.md:§3.1; k3-scheduler-integration.md:§3"
     rerank:
+      model: bge-reranker-base            # full(非 Xenova 量化);对齐 k3-16g(中文长文档 full 才正确)
       repo: ""
       file: ""
       ep: k3-scheduler
       verdict: PENDING-VERIFY
-      metric: "served via k3-scheduler :8090; PENDING-真机"
-      source: "docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md:§3"
+      metric: "bge-reranker-base full; served via :8090; PENDING-真机"
+      source: "rv-bianbu-nas/docs/ARCHITECTURE.md:§3.1; k3-16g-model-selection.md:30"
     ocr:
       engine: ppocr
-      ep: k3-scheduler                    # K3 PPOCRv5 经 :8090
+      model: pp-ocrv4-layout              # PP-OCRv4 + layout PicoDet(CDLA);对齐 bianbu §3.1
+      ep: k3-scheduler                    # K3 PP-OCRv4 经 :8090
       verdict: PENDING-VERIFY
-      metric: "served via k3-scheduler :8090; PENDING-真机"
-      source: "docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md:§3"
+      metric: "PP-OCRv4 + layout; served via :8090; PENDING-真机"
+      source: "rv-bianbu-nas/docs/ARCHITECTURE.md:§3.1; k3-16g-model-selection.md:31"
     asr:
-      engine: whisper
-      model: whisper-small
-      ep: k3-scheduler                    # K3 whisper Q8 IME 经 :8090
+      engine: sensevoice                  # sherpa SenseVoice + diarization(对齐 bianbu §3.1;
+      model: sensevoice-small             #   RTF 0.17 比 whisper 快 10×,en/zh/ja 准 + 4 人分离)
+      ep: k3-scheduler                    # 经 :8090(sherpa-onnx worker)
       verdict: PENDING-VERIFY
-      metric: "served via k3-scheduler :8090; PENDING-真机"
-      source: "docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md:§3"
+      metric: "sherpa SenseVoice + diarization; served via :8090; PENDING-真机"
+      source: "rv-bianbu-nas/docs/ARCHITECTURE.md:§3.1; k3-16g-model-selection.md:32"
     llm:
-      model: "qwen2.5-0.5b"
-      ep: cpu
-      verdict: MEASURED
-      metric: "TTFT p50 640ms TPS 1.4 t/s gsm8k 66%"
-      source: "reports/k3-riscv.en.md:20"
+      # 选型对齐 bianbu §3.1 / k3-16g:16G 主推 Qwen2.5-7B q4(3B 低资源兜底)。
+      # 经 :8090 收口(llama.cpp+IME2 worker);32G 设备走 Qwen3.6-35B-A3B(另 tier/部署指定)。
+      model: "qwen2.5-7b"
+      ep: k3-scheduler                    # 经 :8090(非 cpu 直跑;统一收口)
+      verdict: PENDING-VERIFY              # 16G t/s + 内存峰值 PENDING-真机(k3-16g §验证清单)
+      metric: "Qwen2.5-7B q4 served via :8090 (llama.cpp+IME2); 16G 主推; on-device t/s PENDING-真机. \
+        v0.2 smoke 实测过 qwen2.5-0.5b cpu: TTFT p50 640ms TPS 1.4 gsm8k 66% (reports/k3-riscv.en.md:20)"
+      source: "rv-bianbu-nas/docs/ARCHITECTURE.md:§3.1; k3-16g-model-selection.md:48"
 
   # ─── Rockchip RK1820 PCIe NPU (Linux) ──────────────────────────────────
   rk1820-npu:

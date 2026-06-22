@@ -102,7 +102,10 @@ pub fn models_dir() -> PathBuf {
 ///
 /// **背景**：attune 在两类形态上有不同的"默认体验"：
 /// - **Laptop**（默认）：本地不预装 LLM，default `llm.provider = "openai_compat"`，wizard 引导用户填远端 endpoint + API key
-/// - **K3Appliance**：K3 一体机镜像预装 Ollama + qwen2.5:1.5b/3b，default `llm.provider = "ollama"`，wizard Ollama 卡片为主推
+/// - **K3Appliance**：K3 一体机本地推理经 **k3-scheduler :8090 统一收口**
+///   （OpenAI/Ollama-compat），default `llm.provider = "openai_compat"` + endpoint
+///   `http://127.0.0.1:8090/v1`。**attune 不直连 Ollama :11434** —— Ollama/llama.cpp
+///   是 scheduler 内部 worker，attune 经 :8090 路由，禁旁路直连（2026-06-22 K3 调度层集成 spec §3）。
 /// - **Server**：headless 服务器，行为同 Laptop（远端 token 默认）
 /// - **Unknown**：检测失败，按 Laptop 处理
 ///
@@ -120,7 +123,15 @@ pub enum FormFactor {
 }
 
 impl FormFactor {
-    /// 是否应该默认走本地 Ollama（K3 一体机）
+    /// 是否默认走**本地推理收口**（仅 K3 一体机）。
+    ///
+    /// 语义 = "默认 LLM 在设备本地解决"。K3 形态本地推理经 **k3-scheduler :8090 统一收口**
+    /// （OpenAI/Ollama-compat），**不是**直连 Ollama :11434 —— 命名保留 `local_llm` 是相对
+    /// "云端 token"而言（本地 vs 远端），不表示"直连 Ollama"。
+    ///
+    /// 调用点：`build_llm_from_settings` 在 `settings.llm.endpoint` 为空时的**末位降级兜底**
+    /// 才用本函数走 Ollama auto-detect；K3 默认 settings 已带 :8090 endpoint（优先级 1），
+    /// 正常路径下不会落到该兜底（兜底仅在用户清空 endpoint 的异常态下生效）。
     pub fn prefers_local_llm(&self) -> bool {
         matches!(self, FormFactor::K3Appliance)
     }
@@ -796,7 +807,7 @@ mod tests {
 
     #[test]
     fn prefers_local_llm_only_for_k3() {
-        // K3 一体机预装本地 Ollama → 主推本地；其他形态走远端 token
+        // K3 一体机本地推理经 :8090 scheduler 收口(本地解决,非直连 Ollama);其他形态走远端 token
         assert!(FormFactor::K3Appliance.prefers_local_llm());
         assert!(!FormFactor::Laptop.prefers_local_llm());
         assert!(!FormFactor::Server.prefers_local_llm());

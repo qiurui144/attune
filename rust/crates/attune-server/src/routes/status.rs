@@ -182,7 +182,7 @@ pub async fn diagnostics(
             "has_intel_npu": hw.has_intel_npu,
             "has_accelerator": hw.has_accelerator(),
             "recommended_summary_model": hw.recommended_summary_model(),
-            // form_factor 决定 LLM 默认路径：Laptop/Server/Unknown → 远端 token；K3Appliance → 本地 Ollama
+            // form_factor 决定 LLM 默认路径：Laptop/Server/Unknown → 远端 token；K3Appliance → 本地推理经 k3-scheduler :8090 收口（不直连 Ollama）
             "form_factor": match hw.form_factor {
                 attune_core::platform::FormFactor::Laptop => "laptop",
                 attune_core::platform::FormFactor::K3Appliance => "k3",

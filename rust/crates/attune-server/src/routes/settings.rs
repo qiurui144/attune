@@ -389,7 +389,9 @@ pub async fn update_settings(
 /// 默认设置。`recommended_summary` 仅作为"用户主动选本地"时的硬件推荐 fallback；
 /// `form_factor` 决定 LLM 默认 provider 路径：
 /// - `Laptop` / `Server` / `Unknown` → `openai_compat`（远端 token，wizard 引导填 endpoint + key）
-/// - `K3Appliance` → `ollama`（K3 镜像默认本地 Ollama，但不预设具体 chat 模型）
+/// - `K3Appliance` → `openai_compat` + endpoint `http://127.0.0.1:8090/v1`
+///   （k3-scheduler 统一收口，**不直连 Ollama :11434**；推理经 :8090 OpenAI-compat，
+///   禁旁路直连 worker。2026-06-22 K3 调度层集成 spec §3）
 ///
 /// **v0.6.0-rc.3 起 LLM 默认走远端 token**（per CLAUDE.md M2 决策 + 用户反馈），
 /// 避免本地 3B 模型在大多数硬件上 OOM 或效果差；K3 一体机形态例外（硬件预选过、镜像预装模型）。
@@ -400,11 +402,16 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
     let llm_default = if form_factor == FormFactor::K3Appliance {
         // K3 一体机：本地 LLM 经 k3-scheduler :8090 统一收口(OpenAI/Ollama-compat,推理
         // 统一收口、禁旁路直连 worker；2026-06-22 K3 调度层集成 spec),不预设具体 chat 模型。
-        // 重 LLM 仍可由用户切云端会员 token(K3 1.4 t/s,不适交互/并发)。
+        // 重 LLM 仍可由用户切云端会员 token(K3 7B q4 主推,小模型兜底)。
+        //
+        // provider="openai_compat"(非 "ollama"):K3 不直连 Ollama :11434,而是经 scheduler
+        // 的 OpenAI-compat /v1。build_llm_from_settings 优先级 1(endpoint 非空 →
+        // OpenAiLlmProvider)使该字段对路由实际生效;写 "ollama" 会误导(K3 收口禁旁路直连
+        // worker,Ollama 是 scheduler 内部 worker,attune 经 :8090 不直连)。
         serde_json::json!({
-            "provider": "ollama",
+            "provider": "openai_compat",
             "endpoint": "http://127.0.0.1:8090/v1",
-                "model": null,
+            "model": null,
             "api_key": null
         })
     } else {
@@ -696,18 +703,30 @@ mod tests {
 
     /// K3 一体机形态:LLM + embedding 默认经 k3-scheduler :8090 统一收口,不预设具体 chat 模型。
     /// — 2026-06-22 K3 调度层集成:由 :11434 改 :8090(推理统一收口)。
+    /// — 个人版↔K3 reconcile:provider 由 "ollama" 改 "openai_compat"(K3 收口禁旁路直连
+    ///   Ollama :11434;build_llm_from_settings 优先级 1 endpoint 非空 → OpenAiLlmProvider,
+    ///   provider 字段写 "ollama" 会误导且与收口契约矛盾)。
     #[test]
     fn k3_form_factor_uses_scheduler_8090() {
         let s = default_settings("qwen2.5:3b", FormFactor::K3Appliance);
         let llm = s.get("llm").expect("llm key");
-        assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("ollama"));
         assert_eq!(
-            llm.get("endpoint").and_then(|v| v.as_str()),
+            llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"),
+            "K3 LLM provider 必须 openai_compat(经 :8090 收口,不直连 Ollama)"
+        );
+        let llm_ep = llm.get("endpoint").and_then(|v| v.as_str());
+        assert_eq!(
+            llm_ep,
             Some("http://127.0.0.1:8090/v1"),
             "K3 LLM 经 k3-scheduler :8090(OpenAI/Ollama-compat 统一收口)"
         );
+        // 收口不变量:K3 LLM 默认 endpoint 绝不指向 Ollama 直连端口 :11434。
+        assert!(
+            !llm_ep.unwrap_or_default().contains(":11434"),
+            "K3 LLM 禁旁路直连 Ollama :11434(必须经 scheduler :8090),got: {llm_ep:?}"
+        );
         assert!(llm.get("model").map_or(true, |v| v.is_null()),
-            "K3 model must stay unset so runtime can auto-detect a lighter local model, got: {:?}", llm.get("model"));
+            "K3 model must stay unset so the scheduler picks the served local model, got: {:?}", llm.get("model"));
         // embedding 同样经 :8090(loopback → 判 local → L0 留设备,隐私不变量)。
         let emb = s.get("embedding").expect("embedding key");
         assert_eq!(
@@ -715,6 +734,27 @@ mod tests {
             Some("http://127.0.0.1:8090/v1"),
             "K3 embedding 经 k3-scheduler :8090 OpenAI-compat"
         );
+    }
+
+    /// 个人版无回退证明:Laptop/Server/Unknown 的 LLM 默认 endpoint 必须 null(远端 token
+    /// wizard 引导),绝不被 K3 的 :8090 收口改动污染。这是「个人版行为 0 回退」硬约束的回归门。
+    #[test]
+    fn personal_form_factors_llm_endpoint_unchanged_by_k3_wiring() {
+        for ff in [FormFactor::Laptop, FormFactor::Server, FormFactor::Unknown] {
+            let s = default_settings("qwen2.5:3b", ff);
+            let llm = s.get("llm").expect("llm key");
+            assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"),
+                "FormFactor::{ff:?} provider 必须保持 openai_compat(远端 token)");
+            assert!(llm.get("endpoint").map_or(true, |v| v.is_null()),
+                "FormFactor::{ff:?} endpoint 必须保持 null(个人版无 :8090 / :11434 注入), got: {:?}",
+                llm.get("endpoint"));
+            // 个人版 embedding 仍走本地 ollama_url(非 :8090 scheduler endpoint)。
+            let emb = s.get("embedding").expect("embedding key");
+            assert!(emb.get("endpoint").is_none(),
+                "FormFactor::{ff:?} embedding 必须无 scheduler endpoint(本地 ONNX/Ollama)");
+            assert!(emb.get("ollama_url").and_then(|v| v.as_str()).is_some(),
+                "FormFactor::{ff:?} embedding 保留本地 ollama_url 兼容字段");
+        }
     }
 
     /// Server / Unknown 形态：与 Laptop 同行为（远端 token 默认）
