@@ -353,7 +353,7 @@ CREATE TABLE IF NOT EXISTS reindex_queue (
 CREATE INDEX IF NOT EXISTS idx_reindex_queue_created ON reindex_queue(created_at);
 CREATE INDEX IF NOT EXISTS idx_reindex_queue_item ON reindex_queue(item_id);
 
--- G5 durable job queue (per docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md).
+-- G5 durable job queue (per docs/superpowers/specs/2026-06-22-durable-job-queue.md).
 -- Generalizes reindex_queue to multiple job kinds (asr/ocr/agent/ingest_batch).
 -- Survives restart: boot recovery requeues Running→Queued for idempotent kinds
 -- (see Store::recover_on_boot) instead of the old in-memory JobRegistry which

@@ -4,7 +4,7 @@
 //! replaced by the durable SQLite job queue (`crate::store::job_queue` +
 //! `crate::job_handler`). Jobs now survive restart: `Store::recover_on_boot`
 //! requeues interrupted idempotent kinds instead of mass-cancelling.
-//! Spec: docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md
+//! Spec: docs/superpowers/specs/2026-06-22-durable-job-queue.md
 
 use serde::{Deserialize, Serialize};
 

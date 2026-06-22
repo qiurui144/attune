@@ -1,7 +1,7 @@
 //! G5: per-kind job handler trait + registry + a poll-and-run worker step.
 //! The worker claims jobs from the durable [`crate::store::Store`] job_queue and
 //! dispatches to the registered handler for that kind.
-//! Spec: docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md §6
+//! Spec: docs/superpowers/specs/2026-06-22-durable-job-queue.md §6
 
 use crate::office_job_queue::JobKind;
 use std::collections::HashMap;

@@ -1,6 +1,6 @@
 //! G5 durable job queue — SQLite-backed CRUD on the `job_queue` table.
 //! Mirrors the reindex_queue idiom (store/items.rs) generalized to multi-kind jobs.
-//! Spec: docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md
+//! Spec: docs/superpowers/specs/2026-06-22-durable-job-queue.md
 
 use crate::error::Result;
 use crate::office_job_queue::{JobError, JobKind, JobRecord, JobState};

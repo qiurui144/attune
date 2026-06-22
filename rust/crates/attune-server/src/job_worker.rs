@@ -3,7 +3,7 @@
 //! Replaces office.rs's inline `tokio::task::spawn_blocking` per request: jobs are
 //! enqueued to the durable `job_queue` table and drained here, so they survive a
 //! restart (recover_on_boot requeues idempotent kinds) and respect deadlines.
-//! Spec: docs/superpowers/specs/2026-06-10-k3-g5-durable-job-queue.md §4/§6.
+//! Spec: docs/superpowers/specs/2026-06-22-durable-job-queue.md §4/§6.
 
 use crate::state::AppState;
 use attune_core::job_handler::{JobControl, JobHandler, JobHandlerRegistry};
