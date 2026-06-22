@@ -2,7 +2,7 @@
 
 import type { JSX } from 'preact';
 import { useState, useRef } from 'preact/hooks';
-import { Button, Tooltip } from '../components';
+import { Button, Input, Tooltip } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api } from '../store/api';
@@ -20,15 +20,38 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
   const [mode, setMode] = useState<DataMode | null>(ctx.dataMode);
   const [folderPaths, setFolderPaths] = useState<string[]>(ctx.boundFolders ?? []);
   const [folderPicking, setFolderPicking] = useState(false);
+  const [manualPath, setManualPath] = useState('');
   const [importing, setImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Tauri 桌面壳里才有原生目录选择器;headless/浏览器(K3 一体机纯 Web)回退到手填
+  // 绝对路径(与 RemoteView LocalForm / SettingsView 文件夹管理一致)。两条路径都
+  // push 到同一个 folderPaths,统一走 /index/bind,headless 首次开箱不再被卡死。
   const canPickFolder = typeof window !== 'undefined'
     && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 
+  function addFolderPath(raw: string): boolean {
+    const path = raw.trim();
+    if (!path) return false;
+    let added = false;
+    setFolderPaths((current) => {
+      if (current.includes(path)) return current;
+      added = true;
+      return [...current, path];
+    });
+    return added;
+  }
+
+  function submitManualPath() {
+    if (addFolderPath(manualPath)) {
+      setManualPath('');
+    }
+  }
+
   async function pickFolder() {
     if (!canPickFolder) {
-      toast('warning', t('wizard.data.folder.toast_browser_only'));
+      // headless/浏览器无原生选择器 → 引导用户使用下方手填路径框,不再死路一条。
+      toast('info', t('wizard.data.folder.toast_manual_hint'));
       return;
     }
 
@@ -41,19 +64,8 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
         title: t('wizard.data.folder.dialog_title'),
       });
       const chosen = Array.isArray(selected) ? selected : selected ? [selected] : [];
-      const normalized = chosen
-        .map((path) => path.trim())
-        .filter((path) => path.length > 0);
-      if (normalized.length > 0) {
-        setFolderPaths((current) => {
-          const next = [...current];
-          for (const path of normalized) {
-            if (!next.includes(path)) {
-              next.push(path);
-            }
-          }
-          return next;
-        });
+      for (const path of chosen) {
+        addFolderPath(path);
       }
     } catch (e) {
       toast('error', e instanceof Error ? e.message : String(e));
@@ -132,45 +144,79 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
         <Option
           icon="📂"
           title={t('wizard.data.folder.title')}
-          desc={canPickFolder ? t('wizard.data.folder.desc') : t('wizard.data.folder.desc_browser_only')}
+          desc={canPickFolder ? t('wizard.data.folder.desc') : t('wizard.data.folder.desc_manual')}
           selected={mode === 'folder'}
           onClick={() => setMode('folder')}
         >
           {mode === 'folder' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-              <div
-                role="button"
-                tabIndex={0}
-                aria-disabled={folderPicking || !canPickFolder}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void pickFolder();
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
+              {canPickFolder ? (
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-disabled={folderPicking}
+                  onClick={(e) => {
                     e.stopPropagation();
                     void pickFolder();
-                  }
-                }}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  minHeight: 36,
-                  padding: '0 var(--space-3)',
-                  borderRadius: 'var(--radius-sm)',
-                  border: '1px solid var(--color-border)',
-                  background: folderPicking || !canPickFolder ? 'var(--color-surface-muted)' : 'var(--color-surface)',
-                  color: folderPicking || !canPickFolder ? 'var(--color-text-secondary)' : 'var(--color-text)',
-                  cursor: folderPicking || !canPickFolder ? 'not-allowed' : 'pointer',
-                  userSelect: 'none',
-                  fontSize: 'var(--text-xs)',
-                  fontWeight: 600,
-                }}
-              >
-                {folderPicking ? t('wizard.data.folder.btn_picking') : t('wizard.data.folder.btn_add')}
-              </div>
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      void pickFolder();
+                    }
+                  }}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    minHeight: 36,
+                    padding: '0 var(--space-3)',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid var(--color-border)',
+                    background: folderPicking ? 'var(--color-surface-muted)' : 'var(--color-surface)',
+                    color: folderPicking ? 'var(--color-text-secondary)' : 'var(--color-text)',
+                    cursor: folderPicking ? 'not-allowed' : 'pointer',
+                    userSelect: 'none',
+                    fontSize: 'var(--text-xs)',
+                    fontWeight: 600,
+                  }}
+                >
+                  {folderPicking ? t('wizard.data.folder.btn_picking') : t('wizard.data.folder.btn_add')}
+                </div>
+              ) : (
+                // headless/纯 Web:手填绝对路径 + 添加按钮(无原生选择器时的等价入口)
+                <div
+                  style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'flex-end' }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div style={{ flex: 1 }}>
+                    <Input
+                      label={t('wizard.data.folder.manual_label')}
+                      value={manualPath}
+                      onInput={(e) => setManualPath(e.currentTarget.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          submitManualPath();
+                        }
+                      }}
+                      placeholder={t('wizard.data.folder.manual_placeholder')}
+                    />
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={!manualPath.trim()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      submitManualPath();
+                    }}
+                  >
+                    {t('wizard.data.folder.btn_add')}
+                  </Button>
+                </div>
+              )}
               <div
                 style={{
                   minHeight: 56,
