@@ -256,6 +256,16 @@ jobs:
           --test migration_roundtrip_test
           --test model_boundary_audit
           --test multilayer_memory_integration
+          --test ai_annotation_real_llm_gate
+          --test browser_login_real_smoke
+          --test browser_login_session_vault
+          --test browser_login_subprocess
+          --test catalog_integration_test
+          --test compare_to_table_real_llm_gate
+          --test doc_privacy_proptests
+          --test doc_skills_real_llm_gate
+          --test doc_skills_test
+          --test edge_cloud_capacity
 
       - name: WASM cross-platform golden (same .wasm on linux + windows)
         working-directory: rust
@@ -384,6 +394,15 @@ jobs:
           --test stress_large_scale_test
           --test webdav_remotes_test
           --test workflow_test
+          --test export_roundtrip
+          --test monitoring_cost_contract
+          --test monitoring_real_llm_gate
+          --test proskill_real_llm_e2e
+          --test skill_runtime_proptest
+          --test skill_runtime_test
+          --test suggestions_e2e_test
+          --test third_party_accounts_test
+          --test writing_real_llm_gate
 
   # attune-server is the HOG and is sharded into FIVE parallel jobs (its 36
   # integration tests each boot a real attune_server + do an argon2 vault setup,
@@ -580,6 +599,11 @@ jobs:
           --test organize_e2e_test
           --test organize_route_test
           --test privacy_endpoints_test
+          --test export_route_test
+          --test browser_login_routes_test
+          --test monitoring_routes_test
+          --test third_party_accounts_routes_test
+          --test writing_routes
 
   rust-test-server-b:
     # Second non-office server integration shard (GROUP B — the lighter, mostly
@@ -666,6 +690,9 @@ jobs:
           --test session_test
           --test store_queue_test
           --test version_privacy_gate
+          --test ai_stack_ep_matrix_test
+          --test member_activate_test
+          --test monitoring_gates_test
 
   rust-test-server-office:
     # Office/engine integration shard A: 5 office_* binaries that each boot a
@@ -910,6 +937,8 @@ jobs:
           --test system_wizard_full_flow_test
           --test vault_recovery_test
           --test vault_setup_test
+          --test model_bootstrap_test
+          --test vault_locked_mode_staging_test
 
   rust-test-cli:
     # attune-cli (light: 4 smoke tests). Folds the attune-agent-sdk leaf-crate

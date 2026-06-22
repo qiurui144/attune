@@ -25,7 +25,10 @@ linker_golden_gate memory_consolidation_agent_golden_gate \
 memory_consolidation_agent_integration memory_consolidation_agent_proptests \
 memory_consolidation_integration memory_moat_integration \
 memory_token_reduction_benchmark migration_roundtrip_test model_boundary_audit \
-multilayer_memory_integration"
+multilayer_memory_integration \
+ai_annotation_real_llm_gate browser_login_real_smoke browser_login_session_vault \
+browser_login_subprocess catalog_integration_test compare_to_table_real_llm_gate \
+doc_privacy_proptests doc_skills_real_llm_gate doc_skills_test edge_cloud_capacity"
 
 HALF_B="job_queue_durable memory_continuity_golden_gate nontext_cross_validate_golden organize_golden_gate \
 ocr_image_test ocr_long_page_audit office_adversarial_test \
@@ -37,7 +40,10 @@ rag_w2_batch1_integration rag_w3_batch_a_integration rag_w3_batch_b_integration 
 reranker_long_doc_audit retrieval_quality_test rss_feeds_test \
 self_evolving_skill_agent_golden_gate self_evolving_skill_agent_integration \
 self_evolving_skill_agent_proptests session_revoke_test stress_large_scale_test \
-webdav_remotes_test workflow_test"
+webdav_remotes_test workflow_test \
+export_roundtrip monitoring_cost_contract monitoring_real_llm_gate \
+proskill_real_llm_e2e skill_runtime_proptest skill_runtime_test \
+suggestions_e2e_test third_party_accounts_test writing_real_llm_gate"
 
 covered=$(echo "$GATES $HALF_A $HALF_B" | tr ' ' '\n' | grep -v '^$' | sort -u)
 ondisk=$(for f in crates/attune-core/tests/*.rs; do basename "$f" .rs; done | sort -u)

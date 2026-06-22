@@ -26,16 +26,19 @@ GROUP_A1="ai_stack_web_search_test documents_member_gate documents_redaction \
 git_route_subprocess lock_order_abba_test ocr_profiles_routes_test vault_lock_endpoint_test"
 
 GROUP_A2="documents_routes marketplace_install_test memory_continuity_e2e memory_route_test \
-organize_e2e_test organize_route_test privacy_endpoints_test"
+organize_e2e_test organize_route_test privacy_endpoints_test \
+export_route_test browser_login_routes_test monitoring_routes_test \
+third_party_accounts_routes_test writing_routes"
 
 GROUP_B="acp4_governor_wire_test acp5_chat_flow_wire_test amd_laptop_e2e_smoke \
 api_v1_version_test chat_cost_estimate_test egress_guard eval_determinism_test \
 eval_response_surface_test forms_routes_test index_path_test lib_runtime_test \
 member_auth_test member_routes_test session_test store_queue_test \
-version_privacy_gate"
+version_privacy_gate ai_stack_ep_matrix_test member_activate_test monitoring_gates_test"
 
 GROUP_C="form_factor_integration projects_routes_test settings_lock_test \
-system_wizard_full_flow_test vault_recovery_test vault_setup_test"
+system_wizard_full_flow_test vault_recovery_test vault_setup_test \
+model_bootstrap_test vault_locked_mode_staging_test"
 
 covered=$(echo "$OFFICE_A $OFFICE_B $GROUP_A1 $GROUP_A2 $GROUP_B $GROUP_C" | tr ' ' '\n' | grep -v '^$' | sort -u)
 ondisk=$(for f in crates/attune-server/tests/*.rs; do basename "$f" .rs; done | sort -u)
