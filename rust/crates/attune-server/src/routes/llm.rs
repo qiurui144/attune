@@ -124,8 +124,14 @@ pub async fn probe_k3(
         }
     }
 
-    // 2) 本机回环兜底
-    for ep in ["http://127.0.0.1:8080/v1", "http://localhost:8080/v1"] {
+    // 2) 本机回环兜底。:8090 = k3-scheduler 统一收口口(OpenAI/Ollama-compat,推理统一
+    //    收口,2026-06-22 K3 调度层集成 spec),优先探;:8080 = 旧 K3 推理服务口,保留兼容。
+    for ep in [
+        "http://127.0.0.1:8090/v1",
+        "http://localhost:8090/v1",
+        "http://127.0.0.1:8080/v1",
+        "http://localhost:8080/v1",
+    ] {
         let ep = ep.to_string();
         if dedup.insert(ep.clone()) {
             candidates.push(ep);
@@ -273,13 +279,16 @@ fn discover_local_subnet_candidates() -> Vec<String> {
 
         let oct = v4.octets();
         let my_host = oct[3];
+        // K3 一体机在 LAN 上对外收口 :8090(k3-scheduler);:8080 旧推理口保留兼容。
         for host in 1u8..=254u8 {
             if host == my_host {
                 continue;
             }
-            let ep = format!("http://{}.{}.{}.{}:8080/v1", oct[0], oct[1], oct[2], host);
-            if seen.insert(ep.clone()) {
-                out.push(ep);
+            for port in [8090u16, 8080] {
+                let ep = format!("http://{}.{}.{}.{}:{}/v1", oct[0], oct[1], oct[2], host, port);
+                if seen.insert(ep.clone()) {
+                    out.push(ep);
+                }
             }
         }
     }
