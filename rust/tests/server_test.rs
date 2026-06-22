@@ -495,13 +495,17 @@ async fn test_upload_rtf_bytes_parsed() {
 }
 
 #[tokio::test]
-async fn test_upload_when_locked_returns_403() {
+async fn test_upload_when_locked_stages_for_ingest() {
     let (state, _tmp) = make_unlocked_state();
     // lock first
     do_post(state.clone(), "/api/v1/vault/lock", serde_json::json!({})).await;
 
-    let (status, _) = do_upload(state, "test.md", b"content").await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "upload while locked should be 403");
+    // G3 locked-mode degrade (#141): a locked vault no longer rejects the upload
+    // with 403 — it stages the bytes encrypted-at-rest and queues them for ingest
+    // on unlock, returning 200 + {status:"staged"}. (Old 403 expectation predates G3.)
+    let (status, body) = do_upload(state, "test.md", b"content").await;
+    assert_eq!(status, StatusCode::OK, "locked upload should stage (G3), got {status}: {body}");
+    assert_eq!(body["status"], "staged", "locked upload should be staged for ingest on unlock");
 }
 
 #[tokio::test]
