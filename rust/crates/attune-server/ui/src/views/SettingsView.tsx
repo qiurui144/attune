@@ -252,7 +252,183 @@ function GeneralPanel(): JSX.Element {
           </select>
         </SettingRow>
       </Section>
+      <BackgroundComputeSection />
     </>
+  );
+}
+
+// ============ Background compute / Power ============
+
+interface PowerStatus {
+  governors: Array<{ id?: string; profile?: string; paused?: boolean; last_cpu_pct?: number }>;
+  power: {
+    source: 'Ac' | 'Battery' | 'Unknown';
+    battery_pct: number | null;
+    profile: 'Performance' | 'Balanced' | 'Saver';
+    thermal_pressure: boolean;
+    energy_constrained: boolean;
+  };
+  policy: { mode: 'throttle' | 'pause' | 'off'; low_battery_pct: number };
+}
+
+type PowerPolicyMode = 'throttle' | 'pause' | 'off';
+
+function BackgroundComputeSection(): JSX.Element {
+  const status = useSignal<PowerStatus | null>(null);
+  const loading = useSignal(false);
+  const busy = useSignal(false);
+  // 草稿值（下限输入即时反映，下发走 onChange/blur）
+  const draftLowBattery = useSignal(20);
+
+  const load = async (): Promise<void> => {
+    loading.value = true;
+    try {
+      const s = await api.get<PowerStatus>('/background/status');
+      status.value = s;
+      draftLowBattery.value = s.policy.low_battery_pct;
+    } catch (e) {
+      toast('error', t('settings.power.load_fail', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      loading.value = false;
+    }
+  };
+
+  // 仅挂载时拉一次；其余靠手动刷新（避免激进轮询）。
+  useEffect(() => { void load(); }, []);
+
+  const savePolicy = async (mode: PowerPolicyMode, lowBatteryPct: number): Promise<void> => {
+    busy.value = true;
+    try {
+      await api.post('/background/power-policy', { mode, low_battery_pct: lowBatteryPct });
+      toast('success', t('settings.power.policy.saved'));
+      await load();
+    } catch (e) {
+      toast('error', t('settings.power.policy.save_fail', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      busy.value = false;
+    }
+  };
+
+  const toggleTasks = async (pause: boolean): Promise<void> => {
+    busy.value = true;
+    try {
+      await api.post(pause ? '/background/pause' : '/background/resume');
+      toast('success', pause ? t('settings.power.tasks.paused_ok') : t('settings.power.tasks.resumed_ok'));
+      await load();
+    } catch (e) {
+      toast('error', t('settings.power.tasks.toggle_fail', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      busy.value = false;
+    }
+  };
+
+  const s = status.value;
+  const anyPaused = (s?.governors ?? []).some((g) => g.paused);
+  const govCount = s?.governors?.length ?? 0;
+
+  const sourceLabel = (src: PowerStatus['power']['source']): string => {
+    if (src === 'Ac') return t('settings.power.source.ac');
+    if (src === 'Battery') return t('settings.power.source.battery');
+    return t('settings.power.source.unknown');
+  };
+  const profileLabel = (p: PowerStatus['power']['profile']): string => {
+    if (p === 'Performance') return t('settings.power.profile.performance');
+    if (p === 'Saver') return t('settings.power.profile.saver');
+    return t('settings.power.profile.balanced');
+  };
+  const yesNo = (v: boolean): string => (v ? t('settings.power.yes') : t('settings.power.no'));
+
+  return (
+    <Section title={t('settings.power.title')} desc={t('settings.power.desc')}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <Button variant="ghost" size="sm" disabled={loading.value} onClick={() => void load()}>
+          {loading.value ? t('settings.power.loading') : t('settings.power.refresh')}
+        </Button>
+      </div>
+
+      {s && (
+        <>
+          <SettingRow label={t('settings.power.source')}>
+            <span style={{ fontSize: 'var(--text-sm)' }}>
+              {sourceLabel(s.power.source)}
+              {s.power.battery_pct !== null
+                ? ` · ${t('settings.power.battery_pct')} ${s.power.battery_pct}%`
+                : ''}
+            </span>
+          </SettingRow>
+          <SettingRow label={t('settings.power.profile')}>
+            <span style={{ fontSize: 'var(--text-sm)' }}>{profileLabel(s.power.profile)}</span>
+          </SettingRow>
+          <SettingRow label={t('settings.power.energy_constrained')}>
+            <span style={{ fontSize: 'var(--text-sm)' }}>{yesNo(s.power.energy_constrained)}</span>
+          </SettingRow>
+          <SettingRow label={t('settings.power.thermal_pressure')}>
+            <span style={{ fontSize: 'var(--text-sm)' }}>{yesNo(s.power.thermal_pressure)}</span>
+          </SettingRow>
+
+          <div style={{ marginTop: 'var(--space-2)' }} />
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+            {t('settings.power.policy.desc')}
+          </p>
+          <SettingRow label={t('settings.power.policy.title')}>
+            <select
+              value={s.policy.mode}
+              disabled={busy.value}
+              onChange={(e) => void savePolicy(e.currentTarget.value as PowerPolicyMode, draftLowBattery.value)}
+              style={selectStyle}
+            >
+              <option value="throttle">{t('settings.power.policy.throttle')}</option>
+              <option value="pause">{t('settings.power.policy.pause')}</option>
+              <option value="off">{t('settings.power.policy.off')}</option>
+            </select>
+          </SettingRow>
+
+          {s.policy.mode === 'throttle' && (
+            <SettingRow label={t('settings.power.low_battery')}>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={draftLowBattery.value}
+                disabled={busy.value}
+                aria-label={t('settings.power.low_battery')}
+                onInput={(e) => {
+                  const v = Number(e.currentTarget.value);
+                  draftLowBattery.value = Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : 0;
+                }}
+                onBlur={() => void savePolicy(s.policy.mode, draftLowBattery.value)}
+                style={{ ...inputStyle, minWidth: 80, fontFamily: 'inherit', textAlign: 'right' }}
+              />
+            </SettingRow>
+          )}
+          {s.policy.mode === 'throttle' && (
+            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', margin: 0 }}>
+              {t('settings.power.low_battery.desc')}
+            </p>
+          )}
+
+          <div style={{ marginTop: 'var(--space-2)' }} />
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
+            {t('settings.power.tasks.desc')}
+          </p>
+          <SettingRow
+            label={
+              (anyPaused ? t('settings.power.tasks.paused') : t('settings.power.tasks.running')) +
+              ` · ${t('settings.power.tasks.count', { count: govCount })}`
+            }
+          >
+            <Button
+              variant={anyPaused ? 'primary' : 'secondary'}
+              size="sm"
+              disabled={busy.value}
+              onClick={() => void toggleTasks(!anyPaused)}
+            >
+              {anyPaused ? t('settings.power.tasks.resume_btn') : t('settings.power.tasks.pause_btn')}
+            </Button>
+          </SettingRow>
+        </>
+      )}
+    </Section>
   );
 }
 

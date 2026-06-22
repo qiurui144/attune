@@ -9,11 +9,14 @@
 //! memory) auto-throttle on battery via the default Throttle policy even
 //! without these endpoints; this surface is for user control + status.
 
+use axum::extract::State;
 use axum::Json;
 
+use attune_core::llm_settings::SETTINGS_META_KEY as SETTINGS_KEY;
 use attune_core::resource_governor::{global_registry, PowerPolicy};
 
 use crate::error::{AppError, AppResult};
+use crate::state::SharedState;
 
 /// `GET /api/v1/background/status` — governor snapshot + live power state + policy.
 pub async fn status() -> Json<serde_json::Value> {
@@ -46,14 +49,38 @@ pub async fn resume() -> Json<serde_json::Value> {
 
 /// `POST /api/v1/background/power-policy` — set the battery/power policy.
 /// Body: `{"mode": "throttle"|"pause"|"off", "low_battery_pct": 20}`.
+///
+/// Applies to the live registry immediately AND persists to settings.background
+/// (best-effort — needs vault unlocked) so the choice survives restart
+/// (get_settings re-applies it on next boot).
 pub async fn set_power_policy(
+    State(state): State<SharedState>,
     Json(body): Json<PowerPolicy>,
 ) -> AppResult<Json<serde_json::Value>> {
     if body.low_battery_pct > 100 {
-        return Err(AppError::BadRequest(
-            "low_battery_pct must be 0-100".into(),
-        ));
+        return Err(AppError::BadRequest("low_battery_pct must be 0-100".into()));
     }
+    // 1. 立即生效到 governor。
     global_registry().set_power_policy(body);
-    Ok(Json(serde_json::json!({ "ok": true, "policy": body })))
+    // 2. 持久化到 settings.background(best-effort:vault 锁定则跳过,registry 已生效)。
+    let mut persisted = false;
+    if let Ok(vault) = state.vault.lock() {
+        if vault.dek_db().is_ok() {
+            if let Ok(existing) = vault.store().get_meta(SETTINGS_KEY) {
+                let mut current: serde_json::Value = existing
+                    .and_then(|d| serde_json::from_slice(&d).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(obj) = current.as_object_mut() {
+                    obj.insert(
+                        "background".into(),
+                        serde_json::to_value(body).unwrap_or_default(),
+                    );
+                    if let Ok(data) = serde_json::to_vec(&current) {
+                        persisted = vault.store().set_meta(SETTINGS_KEY, &data).is_ok();
+                    }
+                }
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "policy": body, "persisted": persisted })))
 }

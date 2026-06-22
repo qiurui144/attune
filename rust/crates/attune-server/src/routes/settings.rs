@@ -23,11 +23,26 @@ pub async fn get_settings(
             .unwrap_or_else(|_| default_settings(recommended_summary, form_factor)),
         None => default_settings(recommended_summary, form_factor),
     };
+    // 电源策略持久化恢复(L_hw 0.4):启动时 UI 拉 settings → 把持久化的电池策略幂等
+    // 应用到 resource_governor(默认 Throttle/20 已在引擎层兜底;此处恢复用户的非默认档)。
+    apply_persisted_power_policy(&json);
     // 🔐 安全：redact api_key —— 即便 vault 已解锁，GET 响应也不该回传明文密钥。
     // 前端检测 `api_key_set: true` 表示已配置，显示占位 "●●●●●" 而非实际值。
     // 用户改 key 时必须重新填（否则保留旧值不变，见 update_settings::body 合并）
     redact_api_key(&mut json);
     Ok(Json(json))
+}
+
+/// 把 settings.background(PowerPolicy JSON: {mode, low_battery_pct})幂等应用到
+/// resource_governor。解析失败 / 缺字段 → no-op(引擎默认 Throttle/20 兜底)。
+pub(crate) fn apply_persisted_power_policy(settings: &serde_json::Value) {
+    if let Some(bg) = settings.get("background") {
+        if let Ok(pp) = serde_json::from_value::<attune_core::resource_governor::PowerPolicy>(
+            bg.clone(),
+        ) {
+            attune_core::resource_governor::global_registry().set_power_policy(pp);
+        }
+    }
 }
 
 /// 只接受 http:// 或 https:// 前缀，拒绝 javascript: / data: / file: 等危险 scheme
@@ -243,6 +258,7 @@ pub async fn update_settings(
         "privacy", // v1.0.6 Privacy Logic Strategy: { llm, cloud_saas, webdav, web_search, telemetry, privacy_tour_seen }
         "plugin_trust_mode", // Trust-chain T11: "off" | "warn" | "strict" (default warn)
         "plugin_trusted_pubkeys", // Trust-chain T11: user-whitelisted third-party signer pubkeys (64-hex[])
+        "background", // L_hw 0.4: 电源/后台策略 { mode: throttle|pause|off, low_battery_pct }
     ];
 
     // v1.0.6 Privacy Logic: telemetry 必须通过 isolation patch 切换,
@@ -435,6 +451,10 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
         // (cloud) 避免要求笔电先装 Ollama 才能用摘要。弱机用户可在 Settings 改 off 纯检索。
         "summary": if form_factor == FormFactor::K3Appliance { "local" } else { "cloud" },
         "context_strategy": "economical",      // economical(150字) / accurate(300字+片段) / raw(不压缩，仅本地)
+        // 后台算力电源策略(L_hw 0.4):电池下后台 KB 建库节流/暂停 + 优先 NPU,避免笔电
+        // 后台拉满 GPU 烧电池/热降频。mode: throttle(默认) / pause / off。引擎默认即此值,
+        // 持久化此处让用户的非默认档跨重启恢复(get_settings 启动时 apply 到 governor)。
+        "background": { "mode": "throttle", "low_battery_pct": 20 },
         "web_search": {
             "enabled": true,
             "engine": "duckduckgo",
