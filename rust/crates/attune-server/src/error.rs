@@ -100,6 +100,21 @@ impl AppError {
         AppError::Detailed { status, body }
     }
 
+    /// 公开取 (HTTP status, 人类可读 message) —— MCP 层把 AppError 映射成 json-rpc error
+    /// 时用 (不经 HTTP 响应)。`Detailed` 取其 body.error 字段, 其余取 Display。
+    pub fn status_and_message(&self) -> (StatusCode, String) {
+        if let AppError::Detailed { status, body } = self {
+            let msg = body
+                .get("error")
+                .and_then(|e| e.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| format!("error ({})", status.as_u16()));
+            return (*status, msg);
+        }
+        let (status, _code) = self.parts();
+        (status, self.to_string())
+    }
+
     /// 将 AppError 映射到 HTTP status + 稳定 code 字符串 (客户端契约).
     /// `Detailed` 由 `into_response` 短路处理, 不经此函数 (此 arm 仅为穷尽性).
     fn parts(&self) -> (StatusCode, &'static str) {

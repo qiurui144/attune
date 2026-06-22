@@ -40,6 +40,7 @@ pub mod projects;
 pub mod remote;
 pub mod rss;
 pub mod scenarios;
+pub mod scoped_tokens;     // G2: MCP agent scoped token 签发/列举/吊销
 pub mod search;
 pub mod settings;
 pub mod skills;

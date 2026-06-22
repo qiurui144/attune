@@ -46,6 +46,9 @@ local-ip-address = "0.6"
 dunce = "1"
 # thiserror: 统一 AppError derive (OPT-3 / ARCH-A). 各 route 复用 IntoResponse.
 thiserror = "2"
+# futures-util: G1 MCP SSE transport 的 Stream 组合 (stream::once + Sse)。
+# 纯 Rust, attune-core 已传递依赖 futures 0.3, 无新传输风险。
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # RSS worker 到期判断需要解析 last_polled_at RFC3339 时间戳。
 chrono = { workspace = true }
 # Office helper (v0.7.1): OCR 端点写 multipart bytes 到临时文件喂 PP-OCR provider.

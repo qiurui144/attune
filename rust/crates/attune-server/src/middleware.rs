@@ -114,6 +114,12 @@ pub async fn vault_guard(
         // guard's generic 403; bypass here so that more specific guidance reaches
         // the client (the handler still requires Unlocked before touching the DEK).
         || path == "/api/v1/memory/import"
+        // /mcp + /mcp/sse — G1 原生 MCP transport. 走 scoped-token 自有认证
+        // (mcp::transport::authenticate → vault.verify_scoped_token), 不走 vault session.
+        // 必须 bypass vault_guard: vault locked 时 MCP 应返回干净的 JSON-RPC unauthorized
+        // (verify_scoped_token → Locked → unauthorized), 而非 guard 的通用 403。
+        || path == "/mcp"
+        || path.starts_with("/mcp/")
     {
         return next.run(request).await;
     }
@@ -264,6 +270,12 @@ pub async fn bearer_auth_guard(
             || path == "/api/v1/vault/status"
             || path == "/api/v1/vault/reset-with-recovery-key"
             || path == "/api/v1/vault/forgot-password-reset"
+            // /mcp* — G1 MCP transport carries a scoped-token (not a vault session
+            // token); it does its own auth in mcp::transport::authenticate. Bypass
+            // the session bearer guard so external agent hosts can reach MCP even
+            // when require_auth is on. (vault_guard also bypasses /mcp*.)
+            || path == "/mcp"
+            || path.starts_with("/mcp/")
             // R1.1a (2026-06-11): the former blanket `starts_with("/api/v1/member")`
             // bypass is removed — NO member endpoint is exempt from bearer auth.
             // Caller audit: every member call happens after a session token exists
