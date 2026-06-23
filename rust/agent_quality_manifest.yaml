@@ -160,7 +160,7 @@ gates:
     tier: llm
     crate: attune-core
     test_name: writing_real_llm_gate
-    metric_kind: grounding_precision
+    metric_kind: pass_rate     # grounding-precision is a 0-1 quality rate (verified/all factual segments)
     threshold: 0.90            # GROUNDING_PRECISION_FLOOR (draft); fact-consistency >= 0.85 co-asserted
     ratchet_baseline: 0.90
     fixture_min: 11            # >= 10 real + 1 sentinel (have 12)
@@ -176,7 +176,7 @@ gates:
     tier: llm
     crate: attune-core
     test_name: writing_real_llm_gate
-    metric_kind: fact_preservation
+    metric_kind: pass_rate     # rewrite fact-preservation is a 0-1 rate (no forbidden + all preserved)
     threshold: 0.90            # REWRITE_PRESERVATION_FLOOR
     ratchet_baseline: 0.90
     fixture_min: 11            # >= 10 real + 1 sentinel (have 12)
@@ -192,7 +192,7 @@ gates:
     tier: llm
     crate: attune-core
     test_name: writing_real_llm_gate
-    metric_kind: grounding_precision
+    metric_kind: pass_rate     # synthesis grounding-precision is a 0-1 quality rate
     threshold: 0.90            # GROUNDING_PRECISION_FLOOR (synthesis); fact-consistency >= 0.85 co-asserted
     ratchet_baseline: 0.90
     fixture_min: 11            # >= 10 real + 1 sentinel (have 11)
