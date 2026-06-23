@@ -146,6 +146,63 @@ gates:
       Silent-pass fixed: require_llm() panics when no model reachable. Per Agent
       验证铁律: below floor → label Beta in RELEASE.md, do NOT relax the floor.
 
+  # ── writing-engine real-LLM gates (W1 draft / W2 rewrite / W5 synthesis) ──
+  # Human-authored golden corpora (tests/golden/writing_{draft,rewrite,synthesis}/
+  # cases.yaml, GT-DERIVATION headers — NEVER agent-generated). Scorer =
+  # writing_real_llm_gate.rs runs the production draft()/rewrite()/synthesize()
+  # path on a REAL model + deterministic grounding validator. Floors are the
+  # test's own consts (GROUNDING_PRECISION_FLOOR / FACT_CONSISTENCY_FLOOR /
+  # REWRITE_PRESERVATION_FLOOR); below floor → label min tier in RELEASE.md,
+  # NEVER relax. Real DeepSeek N=3 recorded honestly (§6.3).
+
+  - id: writing_draft
+    plugin: oss-core
+    tier: llm
+    crate: attune-core
+    test_name: writing_real_llm_gate
+    metric_kind: grounding_precision
+    threshold: 0.90            # GROUNDING_PRECISION_FLOOR (draft); fact-consistency >= 0.85 co-asserted
+    ratchet_baseline: 0.90
+    fixture_min: 11            # >= 10 real + 1 sentinel (have 12)
+    ignored: true              # requires a real model (DeepSeek/DashScope/Ollama)
+    ci: secret-gated           # ci.yml real-llm-secret-gated + nightly-real-llm.yml
+    note: >
+      draft_real_llm_grounding_and_consistency: production draft() grounded
+      deterministically; grounding-precision >= 0.90 AND fact-consistency >= 0.85
+      (no invented facts). GT = human must_ground_terms / forbidden_facts.
+
+  - id: writing_rewrite
+    plugin: oss-core
+    tier: llm
+    crate: attune-core
+    test_name: writing_real_llm_gate
+    metric_kind: fact_preservation
+    threshold: 0.90            # REWRITE_PRESERVATION_FLOOR
+    ratchet_baseline: 0.90
+    fixture_min: 11            # >= 10 real + 1 sentinel (have 12)
+    ignored: true
+    ci: secret-gated
+    note: >
+      rewrite_real_llm_fact_preservation: production rewrite() narrative path;
+      fact-preservation >= 0.90 = (no forbidden new fact) AND every must-preserve
+      variant-set retained. GT = human variant sets, not model-derived.
+
+  - id: writing_synthesis
+    plugin: oss-core
+    tier: llm
+    crate: attune-core
+    test_name: writing_real_llm_gate
+    metric_kind: grounding_precision
+    threshold: 0.90            # GROUNDING_PRECISION_FLOOR (synthesis); fact-consistency >= 0.85 co-asserted
+    ratchet_baseline: 0.90
+    fixture_min: 11            # >= 10 real + 1 sentinel (have 11)
+    ignored: true
+    ci: secret-gated
+    note: >
+      synthesis_real_llm_grounding_and_consistency: production synthesize()
+      map-reduce path grounded deterministically; grounding-precision >= 0.90 AND
+      fact-consistency >= 0.85 over >=2 KB sources. GT = human-labeled.
+
   # ── attune-server office engine gates (machine-checkable, PR lane) ────────
   # Numeric red lines; real PP-OCR / whisper.cpp engines over fixtures (no LLM).
   # Recorded at the STRICTEST scene/lang red line (audit :62-67, :198-245).
