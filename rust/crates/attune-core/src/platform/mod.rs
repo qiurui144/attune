@@ -278,15 +278,27 @@ impl HardwareProfile {
                 .unwrap_or_else(|| "Apple".to_string());
         }
 
-        // Windows：wmic memorychip + cpu name（两个命令，失败保持 0/empty）
+        // Windows：sysinfo 读总内存 + CPU（原 wmic.exe 在 Win11 24H2+ 已默认移除，
+        // 子进程失败 → RAM=0/cpu="" → tier=unsupported → EP 栈不自动配置；sysinfo 走
+        // 原生 API 不依赖 wmic.exe）。GPU 走 PowerShell CIM（sysinfo 不覆盖 GPU）。
         #[cfg(target_os = "windows")]
         {
-            if let Some(ram) = wmic_total_physical_memory() {
-                p.total_ram_bytes = ram;
-            }
-            if let Some((vendor, model)) = wmic_cpu_info() {
-                p.cpu_vendor = vendor;
-                p.cpu_model = model;
+            {
+                let sys = sysinfo::System::new_all();
+                let ram = sys.total_memory(); // sysinfo 0.32：字节
+                if ram > 0 {
+                    p.total_ram_bytes = ram;
+                }
+                if let Some(cpu) = sys.cpus().first() {
+                    let model = cpu.brand().trim().to_string();
+                    if !model.is_empty() {
+                        p.cpu_model = model;
+                    }
+                    let vendor = cpu.vendor_id().trim().to_string();
+                    if !vendor.is_empty() {
+                        p.cpu_vendor = vendor;
+                    }
+                }
             }
             let (has_nv, has_amd, has_intel, label) = detect_windows_gpu_vendors();
             p.has_nvidia_gpu = p.has_nvidia_gpu || has_nv;
@@ -548,49 +560,20 @@ fn sysctl_string(key: &str) -> Option<String> {
 }
 
 /// Windows 物理内存：wmic computersystem 的 TotalPhysicalMemory 字段（bytes）
-#[cfg(target_os = "windows")]
-fn wmic_total_physical_memory() -> Option<u64> {
-    use std::process::Command;
-    let out = Command::new("wmic")
-        .args(["computersystem", "get", "TotalPhysicalMemory", "/value"])
-        .output().ok()?;
-    if !out.status.success() { return None; }
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        if let Some(v) = line.strip_prefix("TotalPhysicalMemory=") {
-            if let Ok(n) = v.trim().parse::<u64>() {
-                return Some(n);
-            }
-        }
-    }
-    None
-}
-
-/// Windows CPU 厂商+型号：wmic cpu get Manufacturer,Name
-#[cfg(target_os = "windows")]
-fn wmic_cpu_info() -> Option<(String, String)> {
-    use std::process::Command;
-    let out = Command::new("wmic")
-        .args(["cpu", "get", "Manufacturer,Name", "/value"])
-        .output().ok()?;
-    if !out.status.success() { return None; }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut vendor = String::new();
-    let mut model = String::new();
-    for line in text.lines() {
-        if let Some(v) = line.strip_prefix("Manufacturer=") { vendor = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("Name=") { model = v.trim().to_string(); }
-    }
-    if vendor.is_empty() && model.is_empty() { None } else { Some((vendor, model)) }
-}
-
-/// Windows NVIDIA 探测：扫描 Win32_VideoController 是否含 "NVIDIA"
+/// Windows GPU 厂商探测：PowerShell CIM `Win32_VideoController`（替代已移除的 wmic.exe）。
+/// 扫描显卡名含 NVIDIA / AMD(Radeon) / Intel(Arc) 关键字。
 #[cfg(target_os = "windows")]
 fn detect_windows_gpu_vendors() -> (bool, bool, bool, Option<String>) {
     use std::process::Command;
-    let out = match Command::new("wmic")
-        .args(["path", "win32_VideoController", "get", "Name", "/value"])
-        .output() {
+    let out = match Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-CimInstance Win32_VideoController).Name -join ';'",
+        ])
+        .output()
+    {
         Ok(o) => o,
         Err(_) => return (false, false, false, None),
     };
@@ -600,7 +583,7 @@ fn detect_windows_gpu_vendors() -> (bool, bool, bool, Option<String>) {
     let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
     let has_nv = text.contains("nvidia");
     let has_amd = text.contains("amd") || text.contains("radeon");
-    let has_intel = text.contains("intel");
+    let has_intel = text.contains("intel") || text.contains("arc");
     let label = if has_nv {
         Some("NVIDIA GPU".to_string())
     } else if has_amd {
