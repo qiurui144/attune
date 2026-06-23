@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "attune-desktop"
-version = "1.0.7"
+version = "1.4.0"
 dependencies = [
  "attune-server",
  "reqwest 0.12.28",
