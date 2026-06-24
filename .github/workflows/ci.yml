@@ -236,6 +236,26 @@ jobs:
         # prebuilt; build.rs picks the .lib/.dll set — no MSVC C++ source compile).
         run: cargo test --release -p attune-core --test sensevoice_quality_gate -- --nocapture --test-threads=1
 
+      - name: SenseVoice ASR smoke — two-onnxruntime coexistence (make-or-break)
+        shell: bash
+        working-directory: rust
+        env:
+          ATTUNE_SENSEVOICE_MODEL_DIR: ${{ runner.temp }}/sensevoice
+        # 🔴 Proves ort's libonnxruntime AND sherpa's libonnxruntime run in ONE process
+        # without crash/symbol clash (both load orders + interleaved). Blocking on both OSes:
+        # if the two dynamic onnxruntime clash on windows, this is where it surfaces.
+        run: cargo test --release -p attune-core --test onnxruntime_coexistence -- --nocapture --test-threads=1
+
+      - name: SenseVoice ASR smoke — mp3 whisper fallback (non-WAV path)
+        shell: bash
+        working-directory: rust
+        env:
+          ATTUNE_SENSEVOICE_MODEL_DIR: ${{ runner.temp }}/sensevoice
+        # sherpa is WAV-only; mp3 must fall back to whisper-cli (if present) without crashing.
+        # The whisper-fallback leg self-skips loudly when whisper-cli is absent on the runner;
+        # the sherpa-rejects-mp3 leg always asserts. Blocking (no crash on non-WAV).
+        run: cargo test --release -p attune-core --test sensevoice_mp3_fallback -- --nocapture --test-threads=1
+
       # ── attune-core lib + integration HALF-A: BOTH legs ──
       # attune-core has 66 integration test binaries; each statically links the
       # full release dep tree (wasmtime/tantivy/usearch/ort). On a 4-vCPU windows
