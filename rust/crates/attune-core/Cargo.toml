@@ -155,6 +155,14 @@ wasmtime-wasi = { version = "45", optional = true }
 # (the wasm leaf crate is attune-agent-sdk; runtime: wasm agents run via the wasmtime host).
 sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries"], optional = true }
 
+# Pure-Rust audio pre-decode → 16 kHz mono i16 WAV, so the in-process SenseVoice path no
+# longer depends on whisper-cli for non-WAV containers (mp3 / m4a / flac / ogg) or for
+# resampling non-16kHz WAV. symphonia decodes the containers; hound writes the canonical
+# WAV that sherpa's `read_audio_file` accepts. Both are pure Rust → no cross-compile / no
+# C toolchain, unlike a whisper-cli subprocess. Tied to the ASR provider (asr-sensevoice).
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "isomp4", "aac", "flac", "ogg", "vorbis", "wav", "pcm"], optional = true }
+hound = { version = "3.5", optional = true }
+
 [features]
 # wasm-runtime 默认开(per spec §8 决策);size-constrained / riscv 极小镜像可
 # `--no-default-features` 关闭以剔除 wasmtime(纯 native cap 路径)。
@@ -162,7 +170,7 @@ sherpa-rs = { version = "0.6.8", default-features = false, features = ["download
 # cap 路径可 `--no-default-features` 剔除 sherpa-onnx C 链接(ASR 自动降级到 whisper-cli 兜底)。
 default = ["wasm-runtime", "asr-sensevoice"]
 wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
-asr-sensevoice = ["dep:sherpa-rs"]
+asr-sensevoice = ["dep:sherpa-rs", "dep:symphonia", "dep:hound"]
 # ── ONNX Runtime Execution Provider feature passthrough(全矩阵,默认全 OFF) ──
 # 每个 EP = 一个 ort cargo feature(+ 多数需对应 ORT 二进制变体 / 系统 userspace
 # runtime;runtime 栈由 infer::stack_installer 按需拉取,非全量打包,护 thin-deb)。
