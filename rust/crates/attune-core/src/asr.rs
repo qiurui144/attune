@@ -100,14 +100,33 @@ pub fn detect_asr_engine() -> Option<AsrEngine> {
 /// Transcribe via the selected engine (plain text, no diarization).
 ///
 /// SenseVoice path is in-process (sherpa-onnx); whisper path is the existing subprocess.
-/// On a SenseVoice runtime failure the caller may retry with [`detect_asr_backend`] +
-/// [`transcribe_audio`] (whisper fallback), but the parser's diarization path already
-/// routes whisper through [`transcribe_with_diarization`].
+///
+/// **Transcribe-time whisper fallback (real, not just a comment).** sherpa's
+/// `read_audio_file` is WAV-only AND requires exactly 16 kHz i16 — so `.mp3` / `.m4a` /
+/// `.flac` / non-16 kHz WAV all `Err` out of SenseVoice. Rather than break formats that
+/// whisper-cli handles natively, on **any** SenseVoice runtime failure we fall back to a
+/// whisper-cli backend if one is available on this machine. So a user uploading an `.mp3`
+/// on a sensevoice tier still gets a transcript (via whisper) instead of an ingest error.
+/// If whisper is also unavailable, the original SenseVoice error is surfaced (no silent
+/// swallow). The parser's multi-speaker path stays on whisper diarization separately.
 pub fn transcribe_with_engine(engine: &AsrEngine, audio_path: &Path) -> Result<String> {
     match engine {
         AsrEngine::Whisper(backend) => transcribe_audio(backend, audio_path),
         AsrEngine::SenseVoice(backend) => {
-            crate::asr_sensevoice::transcribe_sensevoice(backend, audio_path)
+            match crate::asr_sensevoice::transcribe_sensevoice(backend, audio_path) {
+                Ok(text) => Ok(text),
+                Err(sv_err) => match detect_asr_backend() {
+                    Some(whisper) => {
+                        log::warn!(
+                            "ASR: SenseVoice failed ({sv_err}); falling back to whisper-cli \
+                             for '{}' (non-WAV/non-16kHz audio or sherpa decode error)",
+                            audio_path.display()
+                        );
+                        transcribe_audio(&whisper, audio_path)
+                    }
+                    None => Err(sv_err),
+                },
+            }
         }
     }
 }

@@ -143,9 +143,12 @@ pub fn ensure_sensevoice_model() -> Result<SenseVoiceBackend> {
 /// - Empty / ultra-short audio → empty string (not a panic).
 /// - sherpa init / decode failure → `Err` (caller decides whisper fallback vs surface).
 ///
-/// `read_audio_file` (sherpa built-in) reads 16 kHz mono WAV → `Vec<f32>` + sample_rate.
-/// Non-16 kHz input is handled by sherpa's reader where supported; callers that need
-/// arbitrary container formats (mp3/m4a) should pre-decode to WAV (parser does this).
+/// `read_audio_file` (sherpa built-in) is **WAV-only and requires exactly 16 kHz i16** — it
+/// `Err`s on `.mp3` / `.m4a` / `.flac` / non-16 kHz WAV. attune does NOT pre-decode here; the
+/// engine dispatcher [`crate::asr::transcribe_with_engine`] catches this `Err` and falls back
+/// to whisper-cli (which handles those containers natively), so unsupported-format audio still
+/// transcribes instead of failing ingest. This function therefore only handles the 16 kHz-WAV
+/// happy path and returns `Err` (never panics) for everything else.
 #[cfg(feature = "asr-sensevoice")]
 pub fn transcribe_sensevoice(backend: &SenseVoiceBackend, audio_path: &Path) -> Result<String> {
     use sherpa_rs::sense_voice::{SenseVoiceConfig, SenseVoiceRecognizer};
