@@ -45,9 +45,13 @@ tiers:
       model: sensevoice-small
       repo: "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"  # S8 runtime-fetch: model.int8.onnx + tokens.txt
       file: "model.int8.onnx"
-      ep: directml
+      ep: cpu                              # sherpa-onnx SenseVoice runs CPU (provider="cpu"); int8 ~7x realtime.
+                                           # `ep` here is informational only — sherpa does NOT use ORT EPs like
+                                           # rapidocr/embedding do (it has its own runtime). CER 7.69% below is the
+                                           # CPU-provider figure (re-verified: tests/sensevoice_quality_gate.rs,
+                                           # tests/onnxruntime_coexistence.rs — both provider="cpu").
       verdict: PASS
-      metric: "asr CER 7.69% RTF 0.073"
+      metric: "asr CER 7.69% RTF 0.073 (sherpa CPU provider — int8)"
       source: "reports/2026-06-19-all-model-matrix-results.en.md:36"
 
   # ─── Intel Core Ultra (Windows, NPU + Arc/Iris iGPU) ────────────────────
@@ -78,9 +82,10 @@ tiers:
       model: sensevoice-small
       repo: "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"  # S8 runtime-fetch: model.int8.onnx + tokens.txt
       file: "model.int8.onnx"
-      ep: openvino
+      ep: cpu                              # sherpa-onnx SenseVoice runs CPU (provider="cpu"); see amd-win note.
+                                           # CER 7.69% is the CPU-provider int8 figure (re-verified in tests).
       verdict: PASS
-      metric: "asr CER 7.69% RTF 0.341"
+      metric: "asr CER 7.69% RTF 0.341 (sherpa CPU provider — int8)"
       source: "reports/2026-06-19-all-model-matrix-results.en.md:37"
 
   # ─── NVIDIA (Linux/Win, CUDA) — PENDING-VERIFY ─────────────────────────
@@ -217,9 +222,16 @@ tiers:
       metric: "rapidocr-cpu CER 7.04% p50 1592ms (bench)"
       source: "reports/2026-06-19-all-model-matrix-results.en.md:29"
     asr:
-      engine: whisper                     # CPU tier 保留 whisper:sensevoice CPU FAIL CER 23%
-      model: whisper-small
-      ep: cpu
+      engine: whisper                     # CPU-tier keeps whisper. NOTE (adversarial review C1):
+      model: whisper-small                #   the 23.08% below is NOT the sherpa int8-CPU path the
+      ep: cpu                             #   amd/intel-win tiers ship — that one measures CER 7.69%
+                                          #   on provider="cpu" (re-verified: sensevoice_quality_gate.rs +
+                                          #   onnxruntime_coexistence.rs). The 23.08% is a *different*
+                                          #   config from the matrix run (a non-int8 / different sensevoice
+                                          #   variant). whisper is retained on the cpu-fallback tier for
+                                          #   diarization (whisperx/pyannote) + format breadth, NOT because
+                                          #   sherpa int8 CPU is unfit. 23.08% provenance: PENDING-VERIFY
+                                          #   (source report not in-repo; do not treat as the int8 figure).
       verdict: PASS
-      metric: "sensevoice CPU FAIL CER 23.08% → whisper retained for CPU"
+      metric: "whisper retained for cpu-fallback (diarization + format breadth); sherpa int8 CPU = 7.69% (verified), the 23.08% is a different sensevoice config (PENDING-VERIFY provenance)"
       source: "reports/2026-06-19-all-model-matrix-results.en.md:35"
