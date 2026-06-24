@@ -166,6 +166,7 @@ pub mod llm_settings;
 pub mod ollama_setup;
 pub mod ocr;  // v0.6.0-rc.3: pub for ai_stack status API
 pub mod asr;
+pub mod asr_decode;  // pure-Rust audio pre-decode → 16 kHz mono WAV (feature: asr-sensevoice)
 pub mod asr_sensevoice;  // SenseVoice (sherpa-onnx) in-process ASR provider (feature: asr-sensevoice)
 pub mod office_job_queue;
 pub mod organizer;

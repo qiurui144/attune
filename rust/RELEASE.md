@@ -53,6 +53,21 @@
 - 生成走云端 token,需会员 + 已开启 Privacy 云 LLM 出网;弱本地模型(qwen2.5:3b)质量塌时
   按 §4.5E 应在客户端 disable —— 当前默认 tier = **`deepseek-v4-flash` 级**(real-LLM 实测达标)。
 - 不做富文本编辑器 / 协作 / 流式 / 查重(写死 §2.2);UI(WritingView)为后续切片,本期出 API。
+- **SenseVoice ASR — 随包 native lib(rc.5 打包硬门,spec §9)**:in-process SenseVoice
+  (sherpa-onnx)消除了「按平台 bundle 二进制」的 whisper-cli bug 类,但引入 **3 个随包
+  native shared lib**(`libonnxruntime` / `libsherpa-onnx-c-api` / `libsherpa-onnx-cxx-api`,
+  ~20 MB/平台)。它们经 `attune-desktop/build.rs` 从 cargo target 暂存到 `resources/lib/<平台>/`,
+  并经 tauri.conf 打入产物:Linux 走 deb/rpm/appimage `files` → `/usr/lib/Attune/lib/linux/`
+  + 主二进制 rpath `$ORIGIN/../lib/Attune/lib/linux`;Windows 走 `resources` + NSIS POSTINSTALL
+  hook copy 到 exe 同目录。**lib 缺失时**:sherpa 是 DT_NEEDED 硬链接,若产物缺 lib 主程序
+  无法启动(故必须随包);若 lib 在但 SenseVoice 模型未拉,`SenseVoiceRecognizer::new` 干净
+  返 `Err` → 引擎派发回退 whisper-cli(不裸 crash)。**Linux deb/AppImage ASR-load 真打包
+  冒烟本地已可验路径;Windows 真包加载 = PENDING-rc.5-CI(真 runner + 真机)**。
+- **SenseVoice 非-WAV 转写已脱离 whisper-cli**:`.mp3` / `.m4a` / `.flac` / `.ogg` / 非-16kHz
+  WAV 现经纯 Rust 预解码(symphonia + hound → 16 kHz 单声道 WAV)在进程内转写,**转写不再需要
+  whisper-cli 二进制**。whisper-cli 仅保留为(a)说话人分离(diarization,whisperx/pyannote)
+  基座 与(b)显式 CPU-tier 兜底。**diarization 仍依赖平台 whisper-cli;Windows 上若 whisper-cli
+  打包/可用性有问题,diarization 为 known-limitation(RC 可接受),单人转写不受影响**。
 
 ## v1.4.0 (2026-06-16) — 文件夹一键整理→案卷 · 记忆延续可迁移 · 行业直达工作台 · 隐私出网门 · ABBA/并发开库修复
 

@@ -20,6 +20,17 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; SenseVoice ASR native libs (sherpa-onnx + bundled onnxruntime) must sit BESIDE the
+  ; main exe so the Windows loader (which searches the exe's own directory) resolves the
+  ; hard-linked sherpa DLLs at launch. Tauri bundles them (via tauri.conf `resources`)
+  ; into $INSTDIR\lib\windows\ ; copy them next to the exe ($INSTDIR). If the build had no
+  ; asr-sensevoice feature, the dir is absent and we skip — ASR degrades to whisper-cli.
+  ; PENDING-rc.5-CI: real Windows package load smoke.
+  ${If} ${FileExists} "$INSTDIR\lib\windows\*.dll"
+    DetailPrint "Installing SenseVoice ASR runtime libraries..."
+    CopyFiles /SILENT "$INSTDIR\lib\windows\*.dll" "$INSTDIR"
+  ${EndIf}
+
   DetailPrint "attune installation complete."
   DetailPrint "First-run wizard will detect Ollama and guide model setup."
 !macroend

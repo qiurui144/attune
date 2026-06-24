@@ -144,11 +144,12 @@ pub fn ensure_sensevoice_model() -> Result<SenseVoiceBackend> {
 /// - sherpa init / decode failure → `Err` (caller decides whisper fallback vs surface).
 ///
 /// `read_audio_file` (sherpa built-in) is **WAV-only and requires exactly 16 kHz i16** — it
-/// `Err`s on `.mp3` / `.m4a` / `.flac` / non-16 kHz WAV. attune does NOT pre-decode here; the
-/// engine dispatcher [`crate::asr::transcribe_with_engine`] catches this `Err` and falls back
-/// to whisper-cli (which handles those containers natively), so unsupported-format audio still
-/// transcribes instead of failing ingest. This function therefore only handles the 16 kHz-WAV
-/// happy path and returns `Err` (never panics) for everything else.
+/// `Err`s on `.mp3` / `.m4a` / `.flac` / `.ogg` / non-16 kHz WAV. To keep transcription
+/// **whisper-cli-free** for those formats, this function pre-decodes them in-process via
+/// [`crate::asr_decode::decode_to_wav16k_mono`] (pure Rust: symphonia + hound) and retries.
+/// Only if that pre-decode *also* fails does it surface an `Err` — at which point the engine
+/// dispatcher [`crate::asr::transcribe_with_engine`] still has a last-resort whisper-cli
+/// fallback. So the common `.mp3` ingest path no longer needs a whisper-cli binary at all.
 #[cfg(feature = "asr-sensevoice")]
 pub fn transcribe_sensevoice(backend: &SenseVoiceBackend, audio_path: &Path) -> Result<String> {
     use sherpa_rs::sense_voice::{SenseVoiceConfig, SenseVoiceRecognizer};
@@ -163,9 +164,32 @@ pub fn transcribe_sensevoice(backend: &SenseVoiceBackend, audio_path: &Path) -> 
         VaultError::InvalidInput("sensevoice tokens path not utf-8".to_string())
     })?;
 
-    let (samples, sample_rate) = sherpa_rs::read_audio_file(audio_str).map_err(|e| {
-        VaultError::InvalidInput(format!("sensevoice read_audio_file failed: {e}"))
-    })?;
+    // Fast path: already a 16 kHz WAV → sherpa reads it directly. Otherwise pre-decode the
+    // container (mp3/m4a/flac/ogg/non-16kHz WAV) to a temp 16 kHz mono WAV and read that.
+    // `_decoded_keep` holds the TempDir alive until after the recognizer has read the samples.
+    let mut _decoded_keep: Option<tempfile::TempDir> = None;
+    let (samples, sample_rate) = match sherpa_rs::read_audio_file(audio_str) {
+        Ok(pair) => pair,
+        Err(direct_err) => {
+            let (tmp, wav16) =
+                crate::asr_decode::decode_to_wav16k_mono(audio_path).map_err(|decode_err| {
+                    VaultError::InvalidInput(format!(
+                        "sensevoice could not read audio: direct read failed ({direct_err}); \
+                         pre-decode failed ({decode_err})"
+                    ))
+                })?;
+            let wav_str = wav16.to_str().ok_or_else(|| {
+                VaultError::InvalidInput("decoded wav path not utf-8".to_string())
+            })?;
+            let pair = sherpa_rs::read_audio_file(wav_str).map_err(|e| {
+                VaultError::InvalidInput(format!(
+                    "sensevoice read of pre-decoded wav failed: {e}"
+                ))
+            })?;
+            _decoded_keep = Some(tmp);
+            pair
+        }
+    };
     // Empty / ultra-short audio → empty transcript, not a recognizer error.
     if samples.is_empty() {
         return Ok(String::new());
