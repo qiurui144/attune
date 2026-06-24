@@ -125,12 +125,35 @@ url = "2"
 # feature-gated(默认开,极小镜像可 --no-default-features 关)。
 wasmtime = { version = "45", default-features = false, features = ["cranelift", "runtime", "std"], optional = true }
 wasmtime-wasi = { version = "45", optional = true }
+# SenseVoice ASR (sherpa-onnx in-process) — replaces the platform-specific whisper-cli
+# binary, killing the "Linux ELF shipped in a Windows package" bug class by construction.
+#
+# Linkage = `download-binaries` (DYNAMIC), NOT `static`. The spec preferred `static` (one
+# self-contained artifact), but attune-core ALREADY statically links onnxruntime via the
+# `ort` crate (ort_sys). sherpa-rs `static` bundles its OWN onnxruntime .a archive → the two
+# collide at link time (duplicate `onnxruntime::common::Status::*` symbols, verified: rust-lld
+# "duplicate symbol" on the test binary). `download-binaries` links sherpa-onnx's onnxruntime
+# DYNAMICALLY (libonnxruntime.so / .dll loaded at runtime), so there is no static-archive
+# symbol collision with ort_sys. This is exactly what the feasibility spike used (and it ran,
+# CER 7.69%). Packaging cost: 3 shared libs (~20 MB) shipped beside the binary per platform
+# (libonnxruntime / libsherpa-onnx-c-api / -cxx-api), copied by build.rs; the desktop/server
+# release workflow must place them next to the binary (or set rpath $ORIGIN). On Windows this
+# is a .dll set — still per-target-correct, never a Linux ELF, so the original bug is gone.
+#
+# `tts` default feature dropped (attune is ASR-only, smaller build). feature-gated behind
+# `asr-sensevoice` (default-on): keeps the C-linked sherpa-onnx libs out of any non-ASR /
+# size-constrained build path. WASM is unaffected — attune-core is never compiled to wasm32
+# (the wasm leaf crate is attune-agent-sdk; runtime: wasm agents run via the wasmtime host).
+sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries"], optional = true }
 
 [features]
 # wasm-runtime 默认开(per spec §8 决策);size-constrained / riscv 极小镜像可
 # `--no-default-features` 关闭以剔除 wasmtime(纯 native cap 路径)。
-default = ["wasm-runtime"]
+# asr-sensevoice 默认开(desktop/server in-process SenseVoice ASR);极小镜像 / 纯 native
+# cap 路径可 `--no-default-features` 剔除 sherpa-onnx C 链接(ASR 自动降级到 whisper-cli 兜底)。
+default = ["wasm-runtime", "asr-sensevoice"]
 wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
+asr-sensevoice = ["dep:sherpa-rs"]
 # ── ONNX Runtime Execution Provider feature passthrough(全矩阵,默认全 OFF) ──
 # 每个 EP = 一个 ort cargo feature(+ 多数需对应 ORT 二进制变体 / 系统 userspace
 # runtime;runtime 栈由 infer::stack_installer 按需拉取,非全量打包,护 thin-deb)。
