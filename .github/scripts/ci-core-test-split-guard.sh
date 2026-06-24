@@ -10,7 +10,7 @@
 # This script recomputes HALF_A ∪ HALF_B ∪ GATES and compares to the on-disk set.
 set -euo pipefail
 
-GATES="parse_golden_set_regression agent_gate_orchestrator wasm_capability_gate"
+GATES="parse_golden_set_regression agent_gate_orchestrator wasm_capability_gate sensevoice_quality_gate"
 
 HALF_A="asr_ingest_test change_password_test chat_reliability_golden_gate \
 chat_reliability_integration chat_reliability_proptests chunking_quality_test \

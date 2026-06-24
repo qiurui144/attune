@@ -205,6 +205,37 @@ jobs:
         # #[ignore]-spike guard (per §7.2 Gate 2). spec: 2026-05-29-ai-agents-governance-orchestration.md §9
         run: cargo test --release -p attune-core --test agent_gate_orchestrator
 
+      # ── SenseVoice ASR smoke (linux + windows): the cross-platform proof that the
+      #    in-process sherpa-onnx provider builds AND transcribes on BOTH OS targets —
+      #    the whole point of replacing the platform-specific whisper-cli ELF.
+      #    Fetches the int8 model + tokens from HF (not bundled), then runs the real
+      #    quality gate (CER ≤ 15%, zh.wav). Windows = PENDING-VERIFY: this step is the
+      #    first execution on a real windows-latest runner (spec §9 / risk #2 rc.5 gate).
+      - name: SenseVoice ASR smoke — fetch model
+        shell: bash
+        working-directory: rust
+        env:
+          SV_DIR: ${{ runner.temp }}/sensevoice
+          # csukuangfj repo on HF; HF_ENDPOINT mirror honored if set as a repo secret/var.
+          SV_BASE: ${{ vars.HF_ENDPOINT || 'https://huggingface.co' }}/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main
+        run: |
+          set -euo pipefail
+          mkdir -p "$SV_DIR/test_wavs"
+          echo "Fetching SenseVoice int8 model + tokens from $SV_BASE"
+          curl -fSL --retry 5 -o "$SV_DIR/model.int8.onnx" "$SV_BASE/model.int8.onnx"
+          curl -fSL --retry 5 -o "$SV_DIR/tokens.txt"      "$SV_BASE/tokens.txt"
+          ls -la "$SV_DIR"
+
+      - name: SenseVoice ASR smoke — quality gate (CER ≤ 15%, zh.wav)
+        shell: bash
+        working-directory: rust
+        env:
+          ATTUNE_SENSEVOICE_MODEL_DIR: ${{ runner.temp }}/sensevoice
+        # Real transcription on both OSes. Windows leg is PENDING-VERIFY until this
+        # passes on a real windows-latest runner (dist.json has x86_64-pc-windows-msvc
+        # prebuilt; build.rs picks the .lib/.dll set — no MSVC C++ source compile).
+        run: cargo test --release -p attune-core --test sensevoice_quality_gate -- --nocapture --test-threads=1
+
       # ── attune-core lib + integration HALF-A: BOTH legs ──
       # attune-core has 66 integration test binaries; each statically links the
       # full release dep tree (wasmtime/tantivy/usearch/ort). On a 4-vCPU windows

@@ -19,15 +19,22 @@ use std::path::PathBuf;
 const GT: &str = "开放时间早上9点至下午5点";
 const CER_THRESHOLD: f64 = 0.15;
 
+/// Locate the SenseVoice model dir, in priority order:
+/// 1. `ATTUNE_SENSEVOICE_MODEL_DIR` (explicit; dev + CI set this).
+/// 2. attune `models_dir()/asr/sensevoice` (where CI fetches + where ensure() lands).
+/// 3. the local VLM-benchmark copy (dev default on this machine).
 fn model_dir() -> PathBuf {
-    std::env::var("ATTUNE_SENSEVOICE_MODEL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(
-                "/data/company/project/vlm-llm-benchmark/datasets/asr/models/\
+    if let Ok(d) = std::env::var("ATTUNE_SENSEVOICE_MODEL_DIR") {
+        return PathBuf::from(d);
+    }
+    let runtime = attune_core::asr_sensevoice::sensevoice_model_dir();
+    if runtime.join("model.int8.onnx").exists() {
+        return runtime;
+    }
+    PathBuf::from(
+        "/data/company/project/vlm-llm-benchmark/datasets/asr/models/\
 sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
-            )
-        })
+    )
 }
 
 /// Levenshtein edit distance over chars (CER numerator).
