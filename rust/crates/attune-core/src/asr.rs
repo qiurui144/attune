@@ -14,8 +14,103 @@
 //! 入库（不报错，仅记 warn）。
 
 use crate::error::{Result, VaultError};
+use crate::asr_sensevoice::SenseVoiceBackend;
 use std::path::Path;
 use std::process::Command;
+
+// ── ASR engine abstraction (whisper | sensevoice) ───────────────────────────
+//
+// Catalog (`model-catalog.default.yaml` `asr.engine`) drives which engine a given
+// hardware tier uses. SenseVoice (in-process sherpa-onnx ONNX) is the default for the
+// AMD/Intel Windows tiers (and any catalog `engine: sensevoice`); whisper-cli is kept
+// as the CPU-tier fallback + diarization path (sensevoice pure-CPU FAILs CER 23%, but
+// whisper-cli's per-platform binary is the packaging bug we are removing on the ONNX
+// tiers). Adding a variant extends to future rk-asr / official k2-fsa bindings (spec §6).
+
+/// Selected ASR engine + its resolved backend.
+#[derive(Debug, Clone)]
+pub enum AsrEngine {
+    /// whisper.cpp subprocess (CPU-tier fallback + diarization base).
+    Whisper(AsrBackend),
+    /// in-process SenseVoice (sherpa-onnx) — no per-platform binary to bundle.
+    SenseVoice(SenseVoiceBackend),
+}
+
+impl AsrEngine {
+    /// Stable engine label for telemetry / the `/ai_stack` `asr.engine` field.
+    pub fn label(&self) -> &'static str {
+        match self {
+            AsrEngine::Whisper(_) => "whisper.cpp",
+            AsrEngine::SenseVoice(_) => "sensevoice",
+        }
+    }
+
+    /// Model-name string for the `/ai_stack` `asr.model` field.
+    pub fn model_label(&self) -> Option<String> {
+        match self {
+            AsrEngine::Whisper(b) => Some(b.model_name.clone()),
+            AsrEngine::SenseVoice(_) => Some("sensevoice-small".to_string()),
+        }
+    }
+}
+
+/// Resolve the catalog ASR engine name for the current hardware, without constructing
+/// a backend. Returns e.g. `"sensevoice"` / `"whisper"`. Catalog-driven (built-in baseline
+/// or the verified remote catalog when loaded); falls back to `"whisper"` if the catalog
+/// has no ASR entry for the resolved tier (pre-sensevoice behavior).
+pub fn catalog_asr_engine() -> String {
+    use crate::infer::catalog::{tier_for_hardware, Catalog, Role};
+    let sel = crate::infer::accel::cached_selection();
+    let tier = tier_for_hardware(sel.os, &sel.hardware);
+    let catalog = Catalog::builtin_default();
+    catalog
+        .resolve(&tier, Role::Asr)
+        .map(|c| c.engine.clone())
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| "whisper".to_string())
+}
+
+/// Detect the active ASR engine driven by the catalog + on-disk model availability.
+///
+/// Selection (graceful, never panics — `None` ⇒ ASR unavailable, parser skips audio):
+/// 1. catalog ASR engine for the resolved hardware tier.
+/// 2. `engine == "sensevoice"` (and the `asr-sensevoice` feature is compiled in) and the
+///    SenseVoice model is present on disk → `SenseVoice`. If the model is missing or the
+///    feature is off, fall through to whisper (CPU fallback — spec §7 degradation).
+/// 3. otherwise → `Whisper` via [`detect_asr_backend`].
+///
+/// Note: this does **not** download the SenseVoice model — that is the `ai-stack/ensure`
+/// path (server) / [`crate::asr_sensevoice::ensure_sensevoice_model`]. Detection only
+/// reports what is usable *now*, so a fresh install (no model yet) degrades to whisper
+/// rather than blocking.
+pub fn detect_asr_engine() -> Option<AsrEngine> {
+    let engine = catalog_asr_engine();
+    if engine == "sensevoice" && cfg!(feature = "asr-sensevoice") {
+        if let Some(sv) = SenseVoiceBackend::detect() {
+            return Some(AsrEngine::SenseVoice(sv));
+        }
+        log::info!(
+            "ASR: catalog selects sensevoice but model not present on disk yet; \
+             falling back to whisper-cli (run ai-stack/ensure to fetch SenseVoice)"
+        );
+    }
+    detect_asr_backend().map(AsrEngine::Whisper)
+}
+
+/// Transcribe via the selected engine (plain text, no diarization).
+///
+/// SenseVoice path is in-process (sherpa-onnx); whisper path is the existing subprocess.
+/// On a SenseVoice runtime failure the caller may retry with [`detect_asr_backend`] +
+/// [`transcribe_audio`] (whisper fallback), but the parser's diarization path already
+/// routes whisper through [`transcribe_with_diarization`].
+pub fn transcribe_with_engine(engine: &AsrEngine, audio_path: &Path) -> Result<String> {
+    match engine {
+        AsrEngine::Whisper(backend) => transcribe_audio(backend, audio_path),
+        AsrEngine::SenseVoice(backend) => {
+            crate::asr_sensevoice::transcribe_sensevoice(backend, audio_path)
+        }
+    }
+}
 
 /// ASR backend 能力探测结果
 #[derive(Debug, Clone)]

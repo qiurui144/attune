@@ -191,7 +191,7 @@ pub fn parse_bytes_with_profile(
             Ok((title, content))
         }
         ".mp3" | ".wav" | ".m4a" | ".flac" | ".ogg" | ".aac" | ".opus" | ".wma" => {
-            let Some(backend) = crate::asr::detect_asr_backend() else {
+            let Some(engine) = crate::asr::detect_asr_engine() else {
                 return Err(VaultError::InvalidInput("ASR backend unavailable".to_string()));
             };
             let mut tmp = tempfile::Builder::new()
@@ -201,10 +201,20 @@ pub fn parse_bytes_with_profile(
             use std::io::Write;
             tmp.write_all(data).map_err(VaultError::Io)?;
             tmp.flush().map_err(VaultError::Io)?;
-            let diarization = crate::asr::detect_diarization_backend();
-            let (_, content) = crate::asr::transcribe_with_diarization(
-                &backend, tmp.path(), diarization.as_ref(),
-            )?;
+            // SenseVoice = plain in-process transcription (no diarization). Whisper keeps
+            // the diarization path (whisperx/pyannote) so multi-speaker audio is unaffected.
+            let content = match &engine {
+                crate::asr::AsrEngine::Whisper(backend) => {
+                    let diarization = crate::asr::detect_diarization_backend();
+                    let (_, c) = crate::asr::transcribe_with_diarization(
+                        backend, tmp.path(), diarization.as_ref(),
+                    )?;
+                    c
+                }
+                crate::asr::AsrEngine::SenseVoice(_) => {
+                    crate::asr::transcribe_with_engine(&engine, tmp.path())?
+                }
+            };
             let title = first_line_title(&content, &stem);
             Ok((title, content))
         }
@@ -780,14 +790,22 @@ fn parse_image_file(path: &Path, stem: &str) -> Result<(String, String)> {
     Ok((title, content))
 }
 
-/// 音频文件 → ASR 转写（自动检测 diarization 后端）
+/// 音频文件 → ASR 转写（引擎派发：SenseVoice in-process / whisper + diarization）
 fn parse_audio_file(path: &Path, stem: &str) -> Result<(String, String)> {
-    let backend = crate::asr::detect_asr_backend()
-        .ok_or_else(|| VaultError::InvalidInput("ASR backend unavailable — install whisper.cpp".to_string()))?;
-    let diarization = crate::asr::detect_diarization_backend();
-    let (_, content) = crate::asr::transcribe_with_diarization(
-        &backend, path, diarization.as_ref(),
-    )?;
+    let engine = crate::asr::detect_asr_engine()
+        .ok_or_else(|| VaultError::InvalidInput("ASR backend unavailable — install whisper.cpp or fetch SenseVoice".to_string()))?;
+    // SenseVoice = plain in-process transcription (no diarization). Whisper keeps the
+    // diarization path so multi-speaker audio is unaffected.
+    let content = match &engine {
+        crate::asr::AsrEngine::Whisper(backend) => {
+            let diarization = crate::asr::detect_diarization_backend();
+            let (_, c) = crate::asr::transcribe_with_diarization(backend, path, diarization.as_ref())?;
+            c
+        }
+        crate::asr::AsrEngine::SenseVoice(_) => {
+            crate::asr::transcribe_with_engine(&engine, path)?
+        }
+    };
     if content.trim().is_empty() {
         return Err(VaultError::InvalidInput("ASR returned empty transcript".to_string()));
     }
