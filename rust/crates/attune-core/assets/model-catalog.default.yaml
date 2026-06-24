@@ -43,6 +43,8 @@ tiers:
     asr:
       engine: sensevoice
       model: sensevoice-small
+      repo: "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"  # S8 runtime-fetch: model.int8.onnx + tokens.txt
+      file: "model.int8.onnx"
       ep: directml
       verdict: PASS
       metric: "asr CER 7.69% RTF 0.073"
@@ -74,6 +76,8 @@ tiers:
     asr:
       engine: sensevoice
       model: sensevoice-small
+      repo: "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"  # S8 runtime-fetch: model.int8.onnx + tokens.txt
+      file: "model.int8.onnx"
       ep: openvino
       verdict: PASS
       metric: "asr CER 7.69% RTF 0.341"

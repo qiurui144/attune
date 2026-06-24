@@ -430,6 +430,22 @@ mod tests {
         assert_eq!(c.resolve(CPU_FALLBACK_TIER, Role::Asr).unwrap().engine, "whisper");
     }
 
+    /// SenseVoice 模型 fetch repo 与 asr_sensevoice 的 S8 fetch const 对齐 —— 防 catalog
+    /// 的 repo 与运行时 download_with_failover 的 repo_id 漂移(S8 runtime-fetch 契约)。
+    #[test]
+    fn amd_intel_asr_sensevoice_repo_matches_fetch_const() {
+        let c = Catalog::builtin_default();
+        for tier in ["amd-win", "intel-win"] {
+            let asr = c.resolve(tier, Role::Asr).unwrap();
+            assert_eq!(
+                asr.repo,
+                crate::asr_sensevoice::SENSEVOICE_REPO,
+                "{tier} sensevoice repo must match asr_sensevoice::SENSEVOICE_REPO (S8 fetch source)"
+            );
+            assert_eq!(asr.file, crate::asr_sensevoice::SENSEVOICE_MODEL_FILE);
+        }
+    }
+
     #[test]
     fn npu_tiers_present_with_verdicts() {
         let c = Catalog::builtin_default();
