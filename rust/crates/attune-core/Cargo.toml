@@ -125,12 +125,44 @@ url = "2"
 # feature-gated(默认开,极小镜像可 --no-default-features 关)。
 wasmtime = { version = "45", default-features = false, features = ["cranelift", "runtime", "std"], optional = true }
 wasmtime-wasi = { version = "45", optional = true }
+# SenseVoice ASR (sherpa-onnx in-process) — replaces the platform-specific whisper-cli
+# binary, killing the "Linux ELF shipped in a Windows package" bug class by construction.
+#
+# Linkage = `download-binaries` (DYNAMIC), NOT `static` — for sherpa here, matching ort.
+# Accurate rationale (corrected per adversarial review I1): attune-core's `ort` crate is ALSO
+# `download-binaries` (see the `ort = …` line above) — it links onnxruntime *dynamically* (a
+# libonnxruntime.so/.dll loaded at runtime); it does NOT statically archive onnxruntime. So
+# the conflict is NOT "static ort vs static sherpa". It is: sherpa-rs's `static` feature would
+# bundle its OWN onnxruntime `.a` and statically link it, whose `onnxruntime::*` symbols then
+# collide with the onnxruntime ort's build pulls in → rust-lld "duplicate symbol" at link of
+# the test binary (observed). Keeping sherpa on `download-binaries` makes BOTH link their
+# onnxruntime dynamically → no static-archive symbol collision. The remaining concern — TWO
+# dynamic libonnxruntime in ONE process at runtime (ort's + sherpa's, possible ABI/version
+# skew, shared global Ort* state) — is explicitly verified safe by
+# `tests/onnxruntime_coexistence.rs`: a real ort Session inference and a real sherpa SenseVoice
+# transcription run in the SAME process (both load orders + interleaved), all pass, no crash /
+# symbol clash. This is what the feasibility spike used (CER 7.69% on the CPU provider,
+# re-verified by tests/sensevoice_quality_gate.rs). Packaging cost: 3 shared libs (~20 MB)
+# shipped beside the binary per platform (libonnxruntime / libsherpa-onnx-c-api / -cxx-api),
+# copied by build.rs; the desktop/server release workflow must place them next to the binary
+# (or set rpath $ORIGIN) — tracked as an rc.5 packaging HARD GATE (spec §9, risk #2). On
+# Windows this is a .dll set — still per-target-correct, never a Linux ELF, so the original
+# "wrong-OS binary in package" bug class is gone.
+#
+# `tts` default feature dropped (attune is ASR-only, smaller build). feature-gated behind
+# `asr-sensevoice` (default-on): keeps the C-linked sherpa-onnx libs out of any non-ASR /
+# size-constrained build path. WASM is unaffected — attune-core is never compiled to wasm32
+# (the wasm leaf crate is attune-agent-sdk; runtime: wasm agents run via the wasmtime host).
+sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries"], optional = true }
 
 [features]
 # wasm-runtime 默认开(per spec §8 决策);size-constrained / riscv 极小镜像可
 # `--no-default-features` 关闭以剔除 wasmtime(纯 native cap 路径)。
-default = ["wasm-runtime"]
+# asr-sensevoice 默认开(desktop/server in-process SenseVoice ASR);极小镜像 / 纯 native
+# cap 路径可 `--no-default-features` 剔除 sherpa-onnx C 链接(ASR 自动降级到 whisper-cli 兜底)。
+default = ["wasm-runtime", "asr-sensevoice"]
 wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
+asr-sensevoice = ["dep:sherpa-rs"]
 # ── ONNX Runtime Execution Provider feature passthrough(全矩阵,默认全 OFF) ──
 # 每个 EP = 一个 ort cargo feature(+ 多数需对应 ORT 二进制变体 / 系统 userspace
 # runtime;runtime 栈由 infer::stack_installer 按需拉取,非全量打包,护 thin-deb)。

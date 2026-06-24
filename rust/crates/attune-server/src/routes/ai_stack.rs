@@ -34,12 +34,22 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         .map(|p| p.name().to_string())
         .unwrap_or_else(|| "none".into());
 
-    let asr_backend = attune_core::asr::detect_asr_backend();
-    let asr_available = asr_backend.is_some();
-    let asr_model: Option<String> = asr_backend.as_ref().map(|b| b.model_name.clone());
-    // F-16 hardware utilization: expose whisper.cpp GPU build status so Settings
-    // UI can warn user when CPU-only build limits ASR throughput (10x slower).
-    let asr_gpu_capable: Option<bool> = asr_backend.as_ref().map(|b| b.gpu_capable);
+    // ASR engine is catalog-driven (sensevoice on AMD/Intel-Win + model-present; whisper
+    // CPU fallback). `engine` is no longer hardcoded "whisper.cpp" — it reflects the
+    // actually-selected backend so Settings UI shows the real engine.
+    let asr_engine_sel = attune_core::asr::detect_asr_engine();
+    let asr_available = asr_engine_sel.is_some();
+    let asr_engine: String = asr_engine_sel
+        .as_ref()
+        .map(|e| e.label().to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let asr_model: Option<String> = asr_engine_sel.as_ref().and_then(|e| e.model_label());
+    // F-16 hardware utilization: GPU-build flag only meaningful for whisper.cpp;
+    // SenseVoice is in-process ONNX (CPU int8 ~7x realtime) → no GPU-build concept.
+    let asr_gpu_capable: Option<bool> = match asr_engine_sel.as_ref() {
+        Some(attune_core::asr::AsrEngine::Whisper(b)) => Some(b.gpu_capable),
+        _ => None,
+    };
 
     // v0.6.0-rc.4: 硬件 tier + 模型推荐 + region
     let hw = &state.hardware;
@@ -122,11 +132,11 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         },
         "asr": {
             "available": asr_available,
-            "engine": "whisper.cpp",
+            "engine": asr_engine,
             "model": asr_model,
             // F-16 GPU build flag — false 时 60s 音频转写 ~60s, true 时 GPU build ~5s (10x)
             "gpu_capable": asr_gpu_capable,
-            "note": note(asr_available, "装 whisper.cpp + 下载 ggml-small.bin 到 ~/.local/share/attune/models/whisper/"),
+            "note": note(asr_available, "装 whisper.cpp 或一键拉取 SenseVoice (ai-stack/ensure) 到 ~/.local/share/attune/models/asr/sensevoice/"),
             "gpu_note": match asr_gpu_capable {
                 Some(false) => Some("⚠ whisper.cpp 是 CPU-only build, 60s 音频可能耗时 60s+. 装 GPU build (CUDA/Metal/Vulkan) 可获 10x 加速.".to_string()),
                 Some(true) => None,
@@ -160,6 +170,9 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
     let tier = attune_core::platform::classify_hardware(&state.hardware);
     let asr_ggml = attune_core::platform::ModelRecommendation::for_tier(tier)
         .map(|r| r.asr_ggml.to_string());
+    // Catalog-driven ASR engine: when sensevoice is selected for this hardware, fetch the
+    // SenseVoice ONNX model + tokens instead of the whisper ggml. CPU-tier stays whisper.
+    let asr_is_sensevoice = attune_core::asr::catalog_asr_engine() == "sensevoice";
 
     let state_for_persist = state.clone();
     tokio::spawn(async move {
@@ -173,8 +186,22 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
             Ok(Err(e)) => tracing::warn!("ai-stack ensure: OCR download failed: {e}"),
             Err(e) => tracing::warn!("ai-stack ensure: OCR task join error: {e}"),
         }
-        // ASR ggml：按 tier 选模型，缺失才拉。
-        if let Some(ggml) = asr_ggml {
+        // ASR 模型：catalog 选 sensevoice → 拉 SenseVoice ONNX + tokens；否则按 tier 拉
+        // whisper ggml。缺失才拉，失败不 panic（§4.5 graceful）。
+        if asr_is_sensevoice {
+            let r = tokio::task::spawn_blocking(
+                attune_core::asr_sensevoice::ensure_sensevoice_model,
+            )
+            .await;
+            match r {
+                Ok(Ok(b)) => tracing::info!(
+                    "ai-stack ensure: SenseVoice model ready at {}",
+                    b.model_path.display()
+                ),
+                Ok(Err(e)) => tracing::warn!("ai-stack ensure: SenseVoice download failed: {e}"),
+                Err(e) => tracing::warn!("ai-stack ensure: SenseVoice task join error: {e}"),
+            }
+        } else if let Some(ggml) = asr_ggml {
             let r = tokio::task::spawn_blocking(move || {
                 attune_core::asr::ensure_whisper_model(&ggml)
             })
