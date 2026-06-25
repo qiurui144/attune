@@ -46,6 +46,16 @@
 //! let _scope = CacheScope::Llm;
 //! ```
 
+// ── ORT 链接模型守卫:恰开 ort-bundled 或 ort-dynamic 之一(见 Cargo.toml [features])──
+#[cfg(all(feature = "ort-bundled", feature = "ort-dynamic"))]
+compile_error!(
+    "features `ort-bundled` and `ort-dynamic` are mutually exclusive — pick one onnxruntime linkage model"
+);
+#[cfg(not(any(feature = "ort-bundled", feature = "ort-dynamic")))]
+compile_error!(
+    "one of `ort-bundled` (default, download-binaries) or `ort-dynamic` (load-dynamic) must be enabled"
+);
+
 pub mod ai_annotator;
 pub mod annotation_weight;
 // INT-1: browser login-assist sidecar (community-browser-automation subprocess).

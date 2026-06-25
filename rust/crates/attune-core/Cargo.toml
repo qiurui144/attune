@@ -84,7 +84,11 @@ typst-pdf = "0.14"
 # .attunepkg (tar.gz) 解压 —— 纯 Rust，跨平台含 Windows P0，不依赖系统 tar
 tar = "0.4"
 flate2 = "1"
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "tracing", "tls-rustls", "copy-dylibs", "api-24", "download-binaries"] }
+# onnxruntime 链接模型由互斥 feature 决定(见 [features] ort-bundled / ort-dynamic):
+# 默认 ort-bundled = download-binaries(build 期下载 + copy 自包含 onnxruntime,现状);
+# ort-dynamic = load-dynamic(运行时经 ORT_DYLIB_PATH dlopen 含 provider 的 onnxruntime,
+# 用于 OpenVINO/ROCm 等 pyke 预编译不含的 EP)。download-binaries/copy-dylibs 不再常开。
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "tracing", "tls-rustls", "api-24"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 # PP-OCR (P2-P4): 用 kreuzberg-paddle-ocr 替代自实现 DBNet+CRNN+CTC。
 # MIT 兼容 Apache-2.0；ort 2.0.0-rc.12 与本 crate 已对齐
@@ -168,9 +172,17 @@ hound = { version = "3.5", optional = true }
 # `--no-default-features` 关闭以剔除 wasmtime(纯 native cap 路径)。
 # asr-sensevoice 默认开(desktop/server in-process SenseVoice ASR);极小镜像 / 纯 native
 # cap 路径可 `--no-default-features` 剔除 sherpa-onnx C 链接(ASR 自动降级到 whisper-cli 兜底)。
-default = ["wasm-runtime", "asr-sensevoice"]
+default = ["wasm-runtime", "asr-sensevoice", "ort-bundled"]
 wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
 asr-sensevoice = ["dep:sherpa-rs", "dep:symphonia", "dep:hound"]
+# ── ORT 链接模型(互斥;恰开一个,lib.rs compile_error 守卫)──
+# ort-bundled(默认):download-binaries —— build 期下载 + copy 自包含 onnxruntime(现状,
+#   DirectML/CUDA/CPU/sherpa-ASR 全靠它,零回归)。
+# ort-dynamic:load-dynamic —— ort 不 bundle onnxruntime,运行时经 ORT_DYLIB_PATH 加载
+#   ep-stacks/<stack>/libonnxruntime(含 OpenVINO/ROCm provider)。openvino 变体专用。
+#   该变体不开 asr-sensevoice(避免 sherpa 第二份 onnxruntime ABI 冲突 R1,ASR 回退 whisper-cli)。
+ort-bundled = ["ort/download-binaries", "ort/copy-dylibs"]
+ort-dynamic = ["ort/load-dynamic"]
 # anthropic-cache: opt-in helper building Anthropic-native message JSON with a
 # `cache_control:{type:"ephemeral"}` breakpoint on the stable prefix (§4.5-G2).
 # OFF by default — production speaks OpenAI-compat (auto prefix-cache, no marker

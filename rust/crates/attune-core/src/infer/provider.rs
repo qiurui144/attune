@@ -23,6 +23,7 @@ pub fn build_session(model_path: &Path) -> Result<Session> {
 ///
 /// 不变量与 `build_session` 一致:EP 注册失败 graceful 降级,绝不 panic、绝不 error,末位 CPU。
 pub fn build_session_for_task(model_path: &Path, task: InferTask) -> Result<Session> {
+    init_ort_dylib();
     let sel = cached_selection();
     // 电源感知(L_hw 电源层,session 构造时杠杆):能效约束态(电池/saver/热)把 NPU
     // 重排到链首(bench 能效最优)。AC/Unknown → 性能档不变。注意:EP 在 session 构造时
@@ -49,6 +50,61 @@ pub fn build_session_for_task(model_path: &Path, task: InferTask) -> Result<Sess
         .commit_from_file(model_path)
         .map_err(|e| VaultError::Crypto(format!("ort commit_from_file: {e}")))
 }
+
+/// load-dynamic 变体:首个 ORT Session 前把 `ORT_DYLIB_PATH` 指向 ep-stacks 里**含 provider**
+/// 的 onnxruntime 动态库(openvino 栈的 libonnxruntime),令 OpenVINO/ROCm EP 经 dlopen 生效
+/// (EP 随注入的 dylib 走,不随 ort crate feature 走)。幂等(Once)。
+///
+/// **ort-bundled(默认)= no-op** —— 用 ort build 期 copy 的自包含 onnxruntime,行为零变化。
+/// 找不到栈库 → **不 set env** → ort 走默认查找 → 最终 graceful 落 CPU(绝不 panic,§7 不变量)。
+/// 已显式设了 `ORT_DYLIB_PATH`(高级用户/测试)→ 尊重不覆盖。
+#[cfg(feature = "ort-dynamic")]
+fn init_ort_dylib() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("ORT_DYLIB_PATH").is_some() {
+            return; // 显式指定优先
+        }
+        let libnames: &[&str] = {
+            #[cfg(target_os = "windows")]
+            {
+                &["onnxruntime.dll"]
+            }
+            #[cfg(target_os = "macos")]
+            {
+                &["libonnxruntime.dylib"]
+            }
+            #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+            {
+                &["libonnxruntime.so"]
+            }
+        };
+        // 已就绪的 EP 栈里找 onnxruntime 动态库(openvino 优先;后续 rocm 同理)。
+        for stack in ["openvino", "rocm"] {
+            if !crate::infer::stack_installer::probe_stack(stack) {
+                continue;
+            }
+            let dir = crate::infer::stack_installer::stack_dir(stack);
+            for lib in libnames {
+                let p = dir.join(lib);
+                if p.exists() {
+                    std::env::set_var("ORT_DYLIB_PATH", &p);
+                    log::info!("ort-dynamic: ORT_DYLIB_PATH → {} (stack={stack})", p.display());
+                    return;
+                }
+            }
+        }
+        log::warn!(
+            "ort-dynamic: no ep-stack onnxruntime dylib found (openvino/rocm not .ready) → ORT default lookup → likely CPU"
+        );
+    });
+}
+
+/// ort-bundled(默认):no-op —— onnxruntime 由 ort download-binaries 自包含,无需注入。
+#[cfg(not(feature = "ort-dynamic"))]
+#[inline]
+fn init_ort_dylib() {}
 
 /// 把 `EpChoice` 链 build 成 ORT `ExecutionProviderDispatch` 列表。
 ///
