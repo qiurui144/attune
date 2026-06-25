@@ -48,6 +48,60 @@ impl ChatMessage {
     }
 }
 
+/// Anthropic-native prompt-cache request builder (§4.5-G2).
+///
+/// OpenAI-compat providers (DeepSeek / Qwen via new-api — the production
+/// backends) get prefix-cache automatically from a stable message prefix and
+/// need **no** explicit marker, so this is feature-gated OFF by default. It
+/// exists for a future *native* Anthropic path: Anthropic only caches a prefix
+/// when a `cache_control:{type:"ephemeral"}` breakpoint is placed on the last
+/// block of the cacheable prefix (the system prompt + any fixed leading turns).
+///
+/// Wire shape (per platform.claude.com Messages API): `system` is its own
+/// field (array of text blocks); conversational turns go in `messages`, each
+/// `content` an array of `{"type":"text","text":...}` blocks. The breakpoint
+/// is attached to the final block of `system` (the stable, reusable prefix).
+#[cfg(feature = "anthropic-cache")]
+pub fn build_anthropic_cached_request(
+    messages: &[ChatMessage],
+    model: &str,
+) -> serde_json::Value {
+    use serde_json::json;
+
+    // Split off system turns (the stable prefix) from the conversational turns.
+    let system_text: String = messages
+        .iter()
+        .filter(|m| m.role == "system")
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    // Anthropic `system` = array of text blocks; the cache breakpoint sits on
+    // the LAST block of the prefix so everything up to here is cache-eligible.
+    let system_blocks = json!([{
+        "type": "text",
+        "text": system_text,
+        "cache_control": { "type": "ephemeral" },
+    }]);
+
+    let convo: Vec<serde_json::Value> = messages
+        .iter()
+        .filter(|m| m.role != "system")
+        .map(|m| {
+            json!({
+                "role": m.role,
+                "content": [{ "type": "text", "text": m.content }],
+            })
+        })
+        .collect();
+
+    json!({
+        "model": model,
+        "system": system_blocks,
+        "messages": convo,
+    })
+}
+
 /// Eval-mode call options — opt-in deterministic knobs.
 ///
 /// Per spec docs/superpowers/specs/2026-05-28-kb-memory-vs-vlm-llm-bench-validation.md
@@ -1953,6 +2007,31 @@ mod tests {
             &log[1][..],
             "retry must extend, not rewrite, the conversation"
         );
+    }
+
+    #[cfg(feature = "anthropic-cache")]
+    #[test]
+    fn anthropic_request_puts_cache_breakpoint_on_system_prefix() {
+        let msgs = vec![
+            ChatMessage::system("SYSTEM PREFIX"),
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi"),
+            ChatMessage::user("again"),
+        ];
+        let req = build_anthropic_cached_request(&msgs, "claude-3-5-sonnet");
+        assert_eq!(req["model"], "claude-3-5-sonnet");
+        // System carries the ephemeral cache breakpoint (the reusable prefix).
+        let sys = &req["system"][0];
+        assert_eq!(sys["text"], "SYSTEM PREFIX");
+        assert_eq!(sys["cache_control"]["type"], "ephemeral");
+        // Conversational turns: system filtered out, blocks well-formed, order kept.
+        let convo = req["messages"].as_array().unwrap();
+        assert_eq!(convo.len(), 3, "system excluded from messages");
+        assert_eq!(convo[0]["role"], "user");
+        assert_eq!(convo[0]["content"][0]["text"], "hello");
+        assert_eq!(convo[2]["content"][0]["text"], "again");
+        // No cache_control leaks onto conversational turns.
+        assert!(convo[0]["content"][0].get("cache_control").is_none());
     }
 
     #[test]

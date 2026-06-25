@@ -171,6 +171,11 @@ hound = { version = "3.5", optional = true }
 default = ["wasm-runtime", "asr-sensevoice"]
 wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi"]
 asr-sensevoice = ["dep:sherpa-rs", "dep:symphonia", "dep:hound"]
+# anthropic-cache: opt-in helper building Anthropic-native message JSON with a
+# `cache_control:{type:"ephemeral"}` breakpoint on the stable prefix (§4.5-G2).
+# OFF by default — production speaks OpenAI-compat (auto prefix-cache, no marker
+# needed); this is only for a future native-Anthropic path. Pure builder, no deps.
+anthropic-cache = []
 # ── ONNX Runtime Execution Provider feature passthrough(全矩阵,默认全 OFF) ──
 # 每个 EP = 一个 ort cargo feature(+ 多数需对应 ORT 二进制变体 / 系统 userspace
 # runtime;runtime 栈由 infer::stack_installer 按需拉取,非全量打包,护 thin-deb)。
