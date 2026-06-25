@@ -67,6 +67,21 @@ fn company_mirror_endpoint() -> String {
         .unwrap_or_else(|| "https://models.engi-stack.com".to_string())
 }
 
+/// 单独取出 company-mirror 候选源(EP-stack fetch 用:这些 artifact 是 company-mirror-only,
+/// HF/HF-mirror 上 401/404 → **必须 region-agnostic 把 company-mirror 放失败链首**,不能走
+/// region-aware 的 `resolve_sources_for`(International region 会把 HF 提前 → 对 mirror-only
+/// artifact 必 401)。返回的源 coverage=Full、region_hint=None(任意区域中性),与
+/// `builtin_sources()` 里的 company-mirror 条目一致。
+pub fn company_mirror_source() -> ModelSource {
+    ModelSource {
+        id: "company-mirror".to_string(),
+        endpoint: company_mirror_endpoint(),
+        priority: 100,
+        region_hint: None,
+        coverage: SourceCoverage::Full,
+    }
+}
+
 /// 内置候选源注册表(优先级降序)。§12:company-mirror(最高)> ModelScope(CN)
 /// > hf-mirror > HF 官方(海外)。
 ///
@@ -539,6 +554,23 @@ mod tests {
         assert!(company.priority > modelscope.priority);
         assert!(modelscope.priority > hf.priority || hf.region_hint == Some(Region::International));
         assert_eq!(company.coverage, SourceCoverage::Full);
+    }
+
+    #[test]
+    fn company_mirror_source_is_full_region_agnostic() {
+        // EP-stack fetch 依赖此源:必须 Full 覆盖 + region-agnostic(region_hint=None),
+        // 才能对 mirror-only artifact 在任意 region 当失败链首。
+        let c = company_mirror_source();
+        assert_eq!(c.id, "company-mirror");
+        assert_eq!(c.coverage, SourceCoverage::Full);
+        assert_eq!(c.region_hint, None, "company-mirror must be region-neutral");
+        assert!(!c.endpoint.ends_with('/'), "endpoint must not end with /");
+        // 与注册表里的 company-mirror 条目 endpoint 一致(同一契约 URL)。
+        let from_registry = builtin_sources()
+            .into_iter()
+            .find(|s| s.id == "company-mirror")
+            .unwrap();
+        assert_eq!(c.endpoint, from_registry.endpoint);
     }
 
     #[test]
