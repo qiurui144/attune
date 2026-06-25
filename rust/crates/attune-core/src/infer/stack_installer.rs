@@ -91,11 +91,29 @@ fn offline() -> bool {
 
 /// 一个 EP 运行时栈的 failover 下载候选(endpoint 是 HF-resolve 兼容根)。
 ///
-/// 复用 `model_source` 的源注册表(company-mirror → ModelScope → hf-mirror → HF):栈包
-/// 与底座模型放在同源镜像下的 `attune-ep-stacks/<stack>` "repo" 命名空间里,走完全相同的
-/// `{endpoint}/{repo}/resolve/main/{file}` URL 约定 + 有界超时下载原语。
-fn stack_sources(stack_repo: &str) -> Vec<crate::infer::model_source::ModelSource> {
-    crate::infer::model_source::resolve_sources_for(stack_repo)
+/// **EP-stack ≠ 普通模型**:`attune-ep-stacks/<stack>` artifact 是 **company-mirror-only**
+/// (HF/HF-mirror 上 401/404,实测 rc.6 真机)。因此 EP-stack **不能**走 `model_source` 的
+/// region-aware `resolve_sources_for`(International region 会把 HF region-boost ×1.5 提到
+/// company-mirror 前 → 对 mirror-only artifact 必 401 → 浪费 3 次 attempt 后 directml 装不上)。
+///
+/// 这里**强制 region-agnostic**:company-mirror 始终在失败链首,后接 Full-coverage 的上游源
+/// (hf-official / hf-mirror)作"万一将来 artifact 上了 HF"的兜底。**ModelScope 排除**——
+/// 它 `OnlyXenovaOnnx` 不覆盖 `attune-ep-stacks/*`,放进去只会必 404 空转。
+///
+/// 区别于普通模型(走 HF + 多镜像 + region 路由,见 `model_source::resolve_sources_for`):
+/// 那条路径**不变**;只有 mirror-only 的 EP-stack 在此强制 company-mirror 首位。
+fn stack_sources(_stack_repo: &str) -> Vec<crate::infer::model_source::ModelSource> {
+    use crate::infer::model_source::company_mirror_source;
+    // company-mirror 永远首位(region-agnostic);其余 Full 源作 region-agnostic 兜底。
+    let mut chain = vec![company_mirror_source()];
+    for s in crate::infer::model_source::builtin_sources() {
+        // 已含 company-mirror;ModelScope 不覆盖 EP-stack 命名空间 → 排除(必 404)。
+        if s.id == "company-mirror" || s.coverage == crate::infer::model_source::SourceCoverage::OnlyXenovaOnnx {
+            continue;
+        }
+        chain.push(s);
+    }
+    chain
 }
 
 /// 某栈在镜像上的 "repo" 命名空间 + 平台包文件名。
@@ -471,6 +489,35 @@ mod tests {
         std::env::set_var("ATTUNE_EP_STACK_OPENVINO", "/nonexistent/path/xyz");
         assert!(!probe_stack("openvino"), "env pointing to missing dir → not present (no marker)");
         std::env::remove_var("ATTUNE_EP_STACK_OPENVINO");
+    }
+
+    #[test]
+    fn stack_sources_company_mirror_first_region_agnostic() {
+        // EP-stack artifact 是 company-mirror-only(HF 401)。无论 region 探测结果如何,
+        // EP-stack 的 failover 源链**首位必须是 company-mirror**(rc.6 真机:International
+        // region 把 HF 提前 → 对 mirror-only artifact 必 401 → directml 装不上)。
+        let sources = stack_sources("attune-ep-stacks/directml");
+        assert!(!sources.is_empty(), "EP-stack must have at least company-mirror");
+        assert_eq!(
+            sources[0].id, "company-mirror",
+            "EP-stack source chain head must be company-mirror (region-agnostic), got {}",
+            sources[0].id
+        );
+        // 首位 company-mirror 必须 region-neutral(不因 region 被降权/跳过)。
+        assert_eq!(sources[0].region_hint, None);
+        // 不得包含 ModelScope(OnlyXenovaOnnx 不覆盖 attune-ep-stacks/* → 必 404,无谓重试)。
+        assert!(
+            !sources.iter().any(|s| s.id == "modelscope"),
+            "ModelScope does not cover EP-stack namespace; must not be in chain"
+        );
+        // 所有源都必须 Full 覆盖(EP-stack repo 只有 Full 源能命中)。
+        for s in &sources {
+            assert!(
+                s.coverage.covers("attune-ep-stacks/directml"),
+                "source {} does not cover EP-stack repo",
+                s.id
+            );
+        }
     }
 
     #[test]
