@@ -874,10 +874,19 @@ struct OpenAiUsage {
     prompt_tokens: Option<u32>,
     #[serde(default)]
     completion_tokens: Option<u32>,
-    /// Prompt-cache hits (OpenAI ≥ 2024-10 + Anthropic prompt-cache). Many
-    /// gateways do not pass this through — treat absent as 0.
+    /// Prompt-cache hits, OpenAI ≥ 2024-10 nested form
+    /// (`usage.prompt_tokens_details.cached_tokens`). Canonical/most precise.
     #[serde(default)]
     prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+    /// DeepSeek context-cache hits, top-level form
+    /// (`usage.prompt_cache_hit_tokens`). DeepSeek does NOT populate the nested
+    /// `prompt_tokens_details`, so this field is the only cache signal it gives.
+    #[serde(default)]
+    prompt_cache_hit_tokens: Option<u32>,
+    /// Anthropic-via-gateway cache reads (`usage.cache_read_input_tokens`),
+    /// surfaced top-level when an OpenAI-compat gateway proxies Anthropic.
+    #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -888,10 +897,16 @@ struct OpenAiPromptTokensDetails {
 
 impl OpenAiUsage {
     fn into_token_usage(self, model: &str, provider: &str) -> crate::usage::TokenUsage {
+        // Cross-provider cache signal: prefer the OpenAI-canonical nested
+        // `cached_tokens` (most precise); fall back to DeepSeek's
+        // `prompt_cache_hit_tokens` then Anthropic's `cache_read_input_tokens`.
+        // Many gateways forward only one of the three — treat all-absent as 0.
         let cached_in = self
             .prompt_tokens_details
             .as_ref()
             .and_then(|d| d.cached_tokens)
+            .or(self.prompt_cache_hit_tokens)
+            .or(self.cache_read_input_tokens)
             .unwrap_or(0);
         crate::usage::TokenUsage {
             tokens_in: self.prompt_tokens.unwrap_or(0),
@@ -1774,6 +1789,76 @@ mod tests {
         let p = OpenAiLlmProvider::new("https://api.openai.com/v1", "sk-test", "gpt-4o-mini");
         assert_eq!(p.model_name(), "gpt-4o-mini");
         assert!(p.is_available());
+    }
+
+    // ── Vendor prompt-cache usage parsing (cross-provider field names) ──
+    // OpenAI ≥ 2024-10: usage.prompt_tokens_details.cached_tokens (nested).
+    // DeepSeek context-cache: usage.prompt_cache_hit_tokens (top-level).
+    // Anthropic-via-gateway: usage.cache_read_input_tokens (top-level).
+    // The parser must read whichever the gateway forwards → TokenUsage.cached_in.
+
+    #[test]
+    fn usage_parses_openai_nested_cached_tokens() {
+        let usage: OpenAiUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":50,
+                "prompt_tokens_details":{"cached_tokens":768}}"#,
+        )
+        .unwrap();
+        let tu = usage.into_token_usage("gpt-4o-mini", "openai_compat");
+        assert_eq!(tu.tokens_in, 1000);
+        assert_eq!(tu.cached_in, 768, "nested OpenAI cached_tokens must map to cached_in");
+    }
+
+    #[test]
+    fn usage_parses_deepseek_top_level_cache_hit_tokens() {
+        // DeepSeek does NOT use prompt_tokens_details; cache lives top-level.
+        let usage: OpenAiUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":50,
+                "prompt_cache_hit_tokens":640,"prompt_cache_miss_tokens":360}"#,
+        )
+        .unwrap();
+        let tu = usage.into_token_usage("deepseek-chat", "openai_compat");
+        assert_eq!(
+            tu.cached_in, 640,
+            "DeepSeek top-level prompt_cache_hit_tokens must map to cached_in"
+        );
+    }
+
+    #[test]
+    fn usage_parses_anthropic_gateway_cache_read_tokens() {
+        // Anthropic-via-gateway surfaces cache_read_input_tokens top-level.
+        let usage: OpenAiUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":50,
+                "cache_read_input_tokens":512}"#,
+        )
+        .unwrap();
+        let tu = usage.into_token_usage("claude-3-5-sonnet", "openai_compat");
+        assert_eq!(
+            tu.cached_in, 512,
+            "Anthropic cache_read_input_tokens must map to cached_in"
+        );
+    }
+
+    #[test]
+    fn usage_cached_absent_is_zero() {
+        let usage: OpenAiUsage =
+            serde_json::from_str(r#"{"prompt_tokens":100,"completion_tokens":10}"#).unwrap();
+        let tu = usage.into_token_usage("m", "p");
+        assert_eq!(tu.cached_in, 0, "absent cache fields → 0 (no false positives)");
+    }
+
+    #[test]
+    fn usage_nested_takes_precedence_over_top_level_when_both_present() {
+        // Defensive: if a gateway echoes both, prefer the OpenAI-canonical nested
+        // field (it is the most precise per-request signal).
+        let usage: OpenAiUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,
+                "prompt_tokens_details":{"cached_tokens":700},
+                "prompt_cache_hit_tokens":640}"#,
+        )
+        .unwrap();
+        let tu = usage.into_token_usage("m", "p");
+        assert_eq!(tu.cached_in, 700, "nested cached_tokens wins when both present");
     }
 
     #[test]
