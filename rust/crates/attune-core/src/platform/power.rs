@@ -150,12 +150,11 @@ fn probe_linux() -> PowerState {
         }
     }
 
-    // Linux exposes no portable "power plan"; infer Saver only from battery here.
-    st.profile = if st.source == PowerSource::Battery {
-        PowerProfile::Balanced
-    } else {
-        PowerProfile::Balanced
-    };
+    // Linux exposes no portable "power plan"; we cannot distinguish Saver from
+    // Balanced from sysfs alone, so report Balanced regardless of source until a
+    // real power-plan probe lands. (Both branches were already Balanced — collapse
+    // to satisfy clippy::if_same_then_else without changing behavior.)
+    st.profile = PowerProfile::Balanced;
     st
 }
 

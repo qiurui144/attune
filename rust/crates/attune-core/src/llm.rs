@@ -30,7 +30,7 @@ where
 }
 
 /// 对话消息（公开，用于多轮对话）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,    // "system" / "user" / "assistant"
     pub content: String,
@@ -46,6 +46,60 @@ impl ChatMessage {
     pub fn assistant(content: &str) -> Self {
         Self { role: "assistant".into(), content: content.into() }
     }
+}
+
+/// Anthropic-native prompt-cache request builder (§4.5-G2).
+///
+/// OpenAI-compat providers (DeepSeek / Qwen via new-api — the production
+/// backends) get prefix-cache automatically from a stable message prefix and
+/// need **no** explicit marker, so this is feature-gated OFF by default. It
+/// exists for a future *native* Anthropic path: Anthropic only caches a prefix
+/// when a `cache_control:{type:"ephemeral"}` breakpoint is placed on the last
+/// block of the cacheable prefix (the system prompt + any fixed leading turns).
+///
+/// Wire shape (per platform.claude.com Messages API): `system` is its own
+/// field (array of text blocks); conversational turns go in `messages`, each
+/// `content` an array of `{"type":"text","text":...}` blocks. The breakpoint
+/// is attached to the final block of `system` (the stable, reusable prefix).
+#[cfg(feature = "anthropic-cache")]
+pub fn build_anthropic_cached_request(
+    messages: &[ChatMessage],
+    model: &str,
+) -> serde_json::Value {
+    use serde_json::json;
+
+    // Split off system turns (the stable prefix) from the conversational turns.
+    let system_text: String = messages
+        .iter()
+        .filter(|m| m.role == "system")
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    // Anthropic `system` = array of text blocks; the cache breakpoint sits on
+    // the LAST block of the prefix so everything up to here is cache-eligible.
+    let system_blocks = json!([{
+        "type": "text",
+        "text": system_text,
+        "cache_control": { "type": "ephemeral" },
+    }]);
+
+    let convo: Vec<serde_json::Value> = messages
+        .iter()
+        .filter(|m| m.role != "system")
+        .map(|m| {
+            json!({
+                "role": m.role,
+                "content": [{ "type": "text", "text": m.content }],
+            })
+        })
+        .collect();
+
+    json!({
+        "model": model,
+        "system": system_blocks,
+        "messages": convo,
+    })
 }
 
 /// Eval-mode call options — opt-in deterministic knobs.
@@ -874,10 +928,19 @@ struct OpenAiUsage {
     prompt_tokens: Option<u32>,
     #[serde(default)]
     completion_tokens: Option<u32>,
-    /// Prompt-cache hits (OpenAI ≥ 2024-10 + Anthropic prompt-cache). Many
-    /// gateways do not pass this through — treat absent as 0.
+    /// Prompt-cache hits, OpenAI ≥ 2024-10 nested form
+    /// (`usage.prompt_tokens_details.cached_tokens`). Canonical/most precise.
     #[serde(default)]
     prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+    /// DeepSeek context-cache hits, top-level form
+    /// (`usage.prompt_cache_hit_tokens`). DeepSeek does NOT populate the nested
+    /// `prompt_tokens_details`, so this field is the only cache signal it gives.
+    #[serde(default)]
+    prompt_cache_hit_tokens: Option<u32>,
+    /// Anthropic-via-gateway cache reads (`usage.cache_read_input_tokens`),
+    /// surfaced top-level when an OpenAI-compat gateway proxies Anthropic.
+    #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -888,10 +951,16 @@ struct OpenAiPromptTokensDetails {
 
 impl OpenAiUsage {
     fn into_token_usage(self, model: &str, provider: &str) -> crate::usage::TokenUsage {
+        // Cross-provider cache signal: prefer the OpenAI-canonical nested
+        // `cached_tokens` (most precise); fall back to DeepSeek's
+        // `prompt_cache_hit_tokens` then Anthropic's `cache_read_input_tokens`.
+        // Many gateways forward only one of the three — treat all-absent as 0.
         let cached_in = self
             .prompt_tokens_details
             .as_ref()
             .and_then(|d| d.cached_tokens)
+            .or(self.prompt_cache_hit_tokens)
+            .or(self.cache_read_input_tokens)
             .unwrap_or(0);
         crate::usage::TokenUsage {
             tokens_in: self.prompt_tokens.unwrap_or(0),
@@ -1469,6 +1538,10 @@ pub struct MockLlmProvider {
     /// 测试用 — 记录最后一次 chat_with_history 收到的全部 messages (system + history
     /// + user)。F-17 G3 用此验证 L0 内容是否泄漏进出网 payload (注入在 system prompt)。
     last_messages: Mutex<Vec<ChatMessage>>,
+    /// 测试用 — append-only log of every `chat`/`chat_with_history` invocation's
+    /// full message vector. Lets prefix-stability tests assert that the stable
+    /// prefix (system + first user) does not drift across retry attempts.
+    call_log: Mutex<Vec<Vec<ChatMessage>>>,
     /// T1 — runtime-flippable determinism level so a single mock instance can
     /// serve both `Exact` and `Temp0` flavored tests
     /// (see `eval_determinism_test.rs::anthropic_provider_degrades_to_temp0`).
@@ -1482,6 +1555,7 @@ impl MockLlmProvider {
             model: model.to_string(),
             last_user: Mutex::new(String::new()),
             last_messages: Mutex::new(Vec::new()),
+            call_log: Mutex::new(Vec::new()),
             // Defaults to Exact so tests that call `chat_with_options` without
             // explicit configuration see the "happy path" deterministic-seed
             // semantics. Other call sites (legacy mock-driven unit tests)
@@ -1512,6 +1586,13 @@ impl MockLlmProvider {
             .join("\n")
     }
 
+    /// 测试用 — every message vector this mock was called with, in order.
+    /// `chat(system,user)` is logged as `[system, user]`. Used to assert
+    /// retry-loop prefix stability.
+    pub fn call_log(&self) -> Vec<Vec<ChatMessage>> {
+        self.call_log.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// T1 — Override the mock's reported [`DeterminismLevel`] (used by
     /// `eval_determinism_test::anthropic_provider_degrades_to_temp0` to make
     /// a single mock instance impersonate an Anthropic-flavored provider).
@@ -1526,6 +1607,10 @@ impl MockLlmProvider {
 impl LlmProvider for MockLlmProvider {
     fn chat(&self, _system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
         *self.last_user.lock().unwrap_or_else(|e| e.into_inner()) = user.to_string();
+        self.call_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(vec![ChatMessage::system(_system), ChatMessage::user(user)]);
         let mut guard = self.responses.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_empty() {
             return Err(VaultError::Classification("no mock response".into()));
@@ -1542,7 +1627,18 @@ impl LlmProvider for MockLlmProvider {
         // tests can assert L0 content never reached the (cloud) LLM. Mock still
         // returns the next preset, ignoring message content for the response.
         *self.last_messages.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
-        self.chat("", "")
+        self.call_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(messages.to_vec());
+        // Pop one preset directly (do NOT delegate to chat() — that would push a
+        // spurious empty ["",""] entry into call_log and corrupt prefix checks).
+        let mut guard = self.responses.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_empty() {
+            return Err(VaultError::Classification("no mock response".into()));
+        }
+        let response = guard.remove(0);
+        Ok((response, crate::usage::TokenUsage::empty("mock", &self.model)))
     }
 
     /// T1 — deterministic answer of the form `mock-<seed>-<hash(last_user)>`
@@ -1776,6 +1872,76 @@ mod tests {
         assert!(p.is_available());
     }
 
+    // ── Vendor prompt-cache usage parsing (cross-provider field names) ──
+    // OpenAI ≥ 2024-10: usage.prompt_tokens_details.cached_tokens (nested).
+    // DeepSeek context-cache: usage.prompt_cache_hit_tokens (top-level).
+    // Anthropic-via-gateway: usage.cache_read_input_tokens (top-level).
+    // The parser must read whichever the gateway forwards → TokenUsage.cached_in.
+
+    #[test]
+    fn usage_parses_openai_nested_cached_tokens() {
+        let usage: OpenAiUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":50,
+                "prompt_tokens_details":{"cached_tokens":768}}"#,
+        )
+        .unwrap();
+        let tu = usage.into_token_usage("gpt-4o-mini", "openai_compat");
+        assert_eq!(tu.tokens_in, 1000);
+        assert_eq!(tu.cached_in, 768, "nested OpenAI cached_tokens must map to cached_in");
+    }
+
+    #[test]
+    fn usage_parses_deepseek_top_level_cache_hit_tokens() {
+        // DeepSeek does NOT use prompt_tokens_details; cache lives top-level.
+        let usage: OpenAiUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":50,
+                "prompt_cache_hit_tokens":640,"prompt_cache_miss_tokens":360}"#,
+        )
+        .unwrap();
+        let tu = usage.into_token_usage("deepseek-chat", "openai_compat");
+        assert_eq!(
+            tu.cached_in, 640,
+            "DeepSeek top-level prompt_cache_hit_tokens must map to cached_in"
+        );
+    }
+
+    #[test]
+    fn usage_parses_anthropic_gateway_cache_read_tokens() {
+        // Anthropic-via-gateway surfaces cache_read_input_tokens top-level.
+        let usage: OpenAiUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,"completion_tokens":50,
+                "cache_read_input_tokens":512}"#,
+        )
+        .unwrap();
+        let tu = usage.into_token_usage("claude-3-5-sonnet", "openai_compat");
+        assert_eq!(
+            tu.cached_in, 512,
+            "Anthropic cache_read_input_tokens must map to cached_in"
+        );
+    }
+
+    #[test]
+    fn usage_cached_absent_is_zero() {
+        let usage: OpenAiUsage =
+            serde_json::from_str(r#"{"prompt_tokens":100,"completion_tokens":10}"#).unwrap();
+        let tu = usage.into_token_usage("m", "p");
+        assert_eq!(tu.cached_in, 0, "absent cache fields → 0 (no false positives)");
+    }
+
+    #[test]
+    fn usage_nested_takes_precedence_over_top_level_when_both_present() {
+        // Defensive: if a gateway echoes both, prefer the OpenAI-canonical nested
+        // field (it is the most precise per-request signal).
+        let usage: OpenAiUsage = serde_json::from_str(
+            r#"{"prompt_tokens":1000,
+                "prompt_tokens_details":{"cached_tokens":700},
+                "prompt_cache_hit_tokens":640}"#,
+        )
+        .unwrap();
+        let tu = usage.into_token_usage("m", "p");
+        assert_eq!(tu.cached_in, 700, "nested cached_tokens wins when both present");
+    }
+
     #[test]
     fn openai_is_local_uses_exact_host_not_substring() {
         let local = |ep: &str| OpenAiLlmProvider::new(ep, "k", "m").is_local();
@@ -1791,6 +1957,81 @@ mod tests {
         assert!(!local("https://localhost.evil.com/v1"), "子串 localhost 不得绕过");
         assert!(!local("https://127.0.0.1.evil.com/v1"), "子串 127.0.0.1 不得绕过");
         assert!(!local("https://api.openai.com/v1?proxy=localhost"), "query 不参与判定");
+    }
+
+    // ── Retry-loop prefix stability (prefix-cache prerequisite, §4.5-G2/G3) ──
+    // Vendor prefix-cache only hits when the leading messages are byte-stable
+    // across calls. The retry-validation loop must APPEND error feedback, never
+    // mutate the [system, user] prefix — otherwise every retry busts the cache.
+
+    #[test]
+    fn retry_loop_keeps_stable_prefix_across_attempts() {
+        let mock = MockLlmProvider::new("m");
+        // 3 responses: first two fail validation, third passes.
+        mock.push_response("bad-1");
+        mock.push_response("bad-2");
+        mock.push_response("good");
+        let validator = |raw: &str| {
+            if raw == "good" {
+                Ok(())
+            } else {
+                Err(format!("not good: {raw}"))
+            }
+        };
+        let (out, _usage) = mock
+            .chat_with_retry("SYS", "USER", 3, &validator)
+            .expect("retry should succeed on 3rd attempt");
+        assert_eq!(out, "good");
+
+        let log = mock.call_log();
+        assert_eq!(log.len(), 3, "expected exactly 3 LLM calls");
+
+        // Every attempt's first two messages (the stable prefix) must be
+        // byte-identical: same system, same first user turn.
+        for (i, call) in log.iter().enumerate() {
+            assert!(call.len() >= 2, "call {i} too short: {call:?}");
+            assert_eq!(call[0].role, "system");
+            assert_eq!(call[0].content, "SYS", "call {i}: system prefix drifted");
+            assert_eq!(call[1].role, "user");
+            assert_eq!(call[1].content, "USER", "call {i}: first user turn drifted");
+        }
+
+        // The growth is append-only: attempt 2 = prefix + [assistant(bad-1), user(feedback)],
+        // attempt 3 = attempt-2 messages + [assistant(bad-2), user(feedback)].
+        assert_eq!(log[0].len(), 2, "attempt 1 is just the prefix");
+        assert_eq!(log[1].len(), 4, "attempt 2 appends one assistant+feedback pair");
+        assert_eq!(log[2].len(), 6, "attempt 3 appends another pair");
+        // Confirm attempt 3's first 4 messages == attempt 2's full vector (no rewrite).
+        assert_eq!(
+            &log[2][..4],
+            &log[1][..],
+            "retry must extend, not rewrite, the conversation"
+        );
+    }
+
+    #[cfg(feature = "anthropic-cache")]
+    #[test]
+    fn anthropic_request_puts_cache_breakpoint_on_system_prefix() {
+        let msgs = vec![
+            ChatMessage::system("SYSTEM PREFIX"),
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi"),
+            ChatMessage::user("again"),
+        ];
+        let req = build_anthropic_cached_request(&msgs, "claude-3-5-sonnet");
+        assert_eq!(req["model"], "claude-3-5-sonnet");
+        // System carries the ephemeral cache breakpoint (the reusable prefix).
+        let sys = &req["system"][0];
+        assert_eq!(sys["text"], "SYSTEM PREFIX");
+        assert_eq!(sys["cache_control"]["type"], "ephemeral");
+        // Conversational turns: system filtered out, blocks well-formed, order kept.
+        let convo = req["messages"].as_array().unwrap();
+        assert_eq!(convo.len(), 3, "system excluded from messages");
+        assert_eq!(convo[0]["role"], "user");
+        assert_eq!(convo[0]["content"][0]["text"], "hello");
+        assert_eq!(convo[2]["content"][0]["text"], "again");
+        // No cache_control leaks onto conversational turns.
+        assert!(convo[0]["content"][0].get("cache_control").is_none());
     }
 
     #[test]
