@@ -373,6 +373,124 @@ impl NpuStatus {
     }
 }
 
+// ── VitisAI 运行时探测 + 下载推荐(零再分发:仅检测 + 指向 AMD 官方)──────────
+//
+// 法律边界(2026-06-25 用户拍板):attune **不托管 / 不再分发** AMD Ryzen AI SDK
+// (闭源 `vai_rt`/`voe`/`xclbin`,EULA 经官方门户点击接受)。本节只做三件事:
+//   (1) 检测用户**是否已自行安装** Ryzen AI 运行时(VitisAI EP);
+//   (2) NPU 在但运行时缺 → 产出**指向 AMD 官方下载页**的推荐 + benchmark 数据;
+//   (3) EP 选型链已是「有 vitis(编入+可用)就用,否则 DirectML→CPU」(见 accel.rs)。
+// 数据源:vlm-llm-bench(2026-06-19)rapidocr-amd-npu(VitisAI) CER 7.04% / p50 2031ms
+// vs DirectML CER ~7% / p50 468ms —— **同精度,NPU 更省电(电池场景优),DirectML 更快**。
+
+/// AMD 官方 Ryzen AI Software 安装指引(下载 + EULA 接受在 AMD 站点完成)。
+pub const RYZEN_AI_INSTALL_URL: &str = "https://ryzenai.docs.amd.com/en/latest/inst.html";
+
+/// VitisAI 运行时是否就位 —— 纯函数,便于测试。
+///
+/// `env_install_path`：`RYZEN_AI_INSTALLATION_PATH`(AMD installer 设置,权威信号)。
+/// `ep_lib_present`：已知 VitisAI EP 运行时库(Win `onnxruntime_vitisai_ep.dll` /
+/// Linux `libvitisai_ep` 等)是否存在于磁盘。任一为真即视为已安装。
+pub fn vitisai_runtime_from_signals(env_install_path: Option<&str>, ep_lib_present: bool) -> bool {
+    env_install_path.map(|p| !p.trim().is_empty()).unwrap_or(false) || ep_lib_present
+}
+
+/// 真机探测 VitisAI 运行时是否已由用户安装(不安装、不下载、只读探测)。
+pub fn vitisai_runtime_present() -> bool {
+    let env_path = std::env::var("RYZEN_AI_INSTALLATION_PATH").ok();
+    // 若 env 指向安装根,顺带查 deployment 下的 EP 库是否真在(env 可能 stale)。
+    let ep_lib_present = env_path
+        .as_deref()
+        .map(|root| {
+            let p = std::path::Path::new(root);
+            p.join("deployment").join("onnxruntime_vitisai_ep.dll").exists()
+                || p.join("onnxruntime_vitisai_ep.dll").exists()
+        })
+        .unwrap_or(false);
+    vitisai_runtime_from_signals(env_path.as_deref(), ep_lib_present)
+}
+
+/// VitisAI 引导状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VitisAiStatus {
+    /// 运行时就位 + 二进制编入 vitis → NPU 路径生效中。
+    Active,
+    /// 运行时就位但本构建未编 `vitis` feature → 需 vitis 构建变体才能用(罕见)。
+    RuntimeReadyBuildLacksVitis,
+    /// NPU 硬件在,但运行时未装 → 推荐用户从 AMD 官方安装。
+    RecommendInstall,
+}
+
+/// benchmark 对照(vlm-llm-bench 实测,§6.3 有源)。
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct VitisAiBenchmark {
+    pub npu_ocr_cer_pct: f32,
+    pub directml_ocr_cer_pct: f32,
+    pub npu_p50_ms: u32,
+    pub directml_p50_ms: u32,
+    pub note: &'static str,
+}
+
+impl VitisAiBenchmark {
+    /// vlm-llm-bench 2026-06-19:rapidocr-amd-npu(VitisAI) vs rapidocr-amd-directml。
+    pub const BENCH: VitisAiBenchmark = VitisAiBenchmark {
+        npu_ocr_cer_pct: 7.04,
+        directml_ocr_cer_pct: 7.04,
+        npu_p50_ms: 2031,
+        directml_p50_ms: 468,
+        note: "同精度;NPU 更省电(电池/后台场景优),DirectML 更快(交互场景优)",
+    };
+}
+
+/// AMD NPU 加速引导(给 wizard / Settings 的「监测 + 推荐 + 数据」一站式 payload)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct VitisAiAdvice {
+    pub npu_present: bool,
+    pub runtime_present: bool,
+    pub vitis_compiled: bool,
+    pub status: VitisAiStatus,
+    /// 是否建议用户去 AMD 官方安装 Ryzen AI(仅 RecommendInstall 为 true)。
+    pub recommend_install: bool,
+    pub download_url: &'static str,
+    pub rationale: &'static str,
+    pub benchmark: VitisAiBenchmark,
+}
+
+/// 构建引导建议 —— 纯函数。`None` = 无 AMD XDNA NPU,不展示任何引导。
+pub fn vitisai_advice(npu_present: bool, runtime_present: bool, vitis_compiled: bool) -> Option<VitisAiAdvice> {
+    if !npu_present {
+        return None;
+    }
+    let (status, recommend_install, rationale) = match (runtime_present, vitis_compiled) {
+        (true, true) => (
+            VitisAiStatus::Active,
+            false,
+            "AMD NPU(VitisAI)路径生效中:与 DirectML 同精度,后台/电池场景更省电。",
+        ),
+        (true, false) => (
+            VitisAiStatus::RuntimeReadyBuildLacksVitis,
+            false,
+            "已检测到 Ryzen AI 运行时,但当前安装包未含 VitisAI 加速变体;暂用 DirectML(GPU),精度相同。",
+        ),
+        (false, _) => (
+            VitisAiStatus::RecommendInstall,
+            true,
+            "检测到 AMD NPU。安装 AMD 官方 Ryzen AI 运行时可启用更省电的 NPU 路径(与 DirectML 同精度);未安装时已自动用 AMD GPU(DirectML)+ CPU 兜底,无需操作即可使用。",
+        ),
+    };
+    Some(VitisAiAdvice {
+        npu_present,
+        runtime_present,
+        vitis_compiled,
+        status,
+        recommend_install,
+        download_url: RYZEN_AI_INSTALL_URL,
+        rationale,
+        benchmark: VitisAiBenchmark::BENCH,
+    })
+}
+
 // ── 平台辅助(真机读取) ────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -657,5 +775,66 @@ mod tests {
     fn detect_amd_does_not_panic_on_current_host() {
         // 只断言不 panic;CI 机器通常无 NPU → None。
         let _ = NpuStatus::detect_amd();
+    }
+
+    // ── VitisAI 运行时探测 + 引导 ─────────────────────────────────
+
+    #[test]
+    fn runtime_signals_env_or_lib_means_present() {
+        assert!(vitisai_runtime_from_signals(Some(r"C:\Program Files\RyzenAI\1.7.1"), false));
+        assert!(vitisai_runtime_from_signals(None, true));
+        assert!(vitisai_runtime_from_signals(Some("/opt/ryzen-ai"), true));
+    }
+
+    #[test]
+    fn runtime_signals_absent_or_blank_means_not_present() {
+        assert!(!vitisai_runtime_from_signals(None, false));
+        assert!(!vitisai_runtime_from_signals(Some("   "), false)); // env 设了但空白
+        assert!(!vitisai_runtime_from_signals(Some(""), false));
+    }
+
+    #[test]
+    fn runtime_present_does_not_panic_on_current_host() {
+        let _ = vitisai_runtime_present();
+    }
+
+    #[test]
+    fn advice_none_without_amd_npu() {
+        assert!(vitisai_advice(false, false, false).is_none());
+        assert!(vitisai_advice(false, true, true).is_none());
+    }
+
+    #[test]
+    fn advice_recommends_install_when_npu_but_no_runtime() {
+        let a = vitisai_advice(true, false, false).unwrap();
+        assert_eq!(a.status, VitisAiStatus::RecommendInstall);
+        assert!(a.recommend_install);
+        assert_eq!(a.download_url, RYZEN_AI_INSTALL_URL);
+        // 数据一定带上(同精度 CER + 双路 p50)。
+        assert_eq!(a.benchmark.npu_ocr_cer_pct, a.benchmark.directml_ocr_cer_pct);
+        assert!(a.benchmark.npu_p50_ms > a.benchmark.directml_p50_ms); // NPU 慢但省电
+    }
+
+    #[test]
+    fn advice_active_when_runtime_present_and_vitis_compiled() {
+        let a = vitisai_advice(true, true, true).unwrap();
+        assert_eq!(a.status, VitisAiStatus::Active);
+        assert!(!a.recommend_install);
+    }
+
+    #[test]
+    fn advice_flags_runtime_ready_but_build_lacks_vitis() {
+        let a = vitisai_advice(true, true, false).unwrap();
+        assert_eq!(a.status, VitisAiStatus::RuntimeReadyBuildLacksVitis);
+        assert!(!a.recommend_install); // 已装运行时,不再劝装;但本构建用不上
+    }
+
+    #[test]
+    fn advice_serializes_with_kebab_status() {
+        let a = vitisai_advice(true, false, false).unwrap();
+        let j = serde_json::to_string(&a).unwrap();
+        assert!(j.contains("\"recommend-install\""), "status kebab-case: {j}");
+        assert!(j.contains("\"benchmark\""));
+        assert!(j.contains("ryzenai.docs.amd.com"));
     }
 }

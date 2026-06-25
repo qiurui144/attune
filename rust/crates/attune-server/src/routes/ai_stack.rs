@@ -102,6 +102,14 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         // 平行 model_bootstrap:栈像底座模型一样首次运行按需拉取(内核驱动除外)。UI 轮询
         // 此字段显示「安装中 / 已就绪 / 失败」。栈装不上 → 对应 EP 降级 CPU。
         "ep_runtime_stacks": state.stack_install.snapshot(),
+        // AMD NPU(VitisAI)监测 + 下载推荐 + benchmark 数据。零再分发:仅检测用户是否
+        // 已自行装 Ryzen AI 运行时;缺则指向 AMD 官方下载页(非托管)。无 AMD NPU → null。
+        // 「有 vitis 就用,没有就 AMD GPU(DirectML)+ CPU 兜底」由 ep_chain 落地。
+        "vitisai_advice": attune_core::platform::npu::vitisai_advice(
+            hw.has_amd_xdna_npu,
+            attune_core::platform::npu::vitisai_runtime_present(),
+            cfg!(feature = "vitis"),
+        ),
         "region": {
             "detected": region.label(),
             "hf_endpoint": region.hf_endpoint(),
