@@ -311,6 +311,11 @@ impl StackInstallStatus {
         self.with(|m| m.get(stack).map(|e| e.phase.clone()))
     }
 
+    /// 读取某栈完整条目快照(phase + attempts + size),供再入守卫判断尝试预算。
+    pub fn entry_snapshot(&self, stack: &str) -> Option<StackEntry> {
+        self.with(|m| m.get(stack).cloned())
+    }
+
     /// JSON 快照(供 status 端点嵌入,平行 model_bootstrap)。
     pub fn snapshot(&self) -> serde_json::Value {
         self.with(|m| {
@@ -323,20 +328,58 @@ impl StackInstallStatus {
     }
 }
 
-/// 后台按需安装一组 EP 运行时栈(非阻塞,顺序,最多 3 次重试 + 退避)。
+/// 单个栈累计安装尝试上限(跨 bootstrap 再调用累计,**不**每次 unlock 清零)。
+///
+/// rc.5 真机回归:`spawn_stack_bootstrap` 每次 vault unlock 都被 `state::spawn_stack_bootstrap`
+/// 重新调用且**无终态守卫**,每次重跑完整 3-attempt 循环 + 重新 `mark_installing`(attempts +=1)
+/// → 真机抓到 `directml attempts=4 state=installing`(不是源缺;源实在 —— company-mirror 上
+/// `directml-runtime-windows-x86_64.tar.gz` 实测 9.4MB gzip 在线)。守卫 = 已终态(Installed/
+/// Present)或已耗尽尝试预算的栈,后续 unlock 不再重跑,attempts 不再无限涨。
+pub const STACK_MAX_ATTEMPTS: u32 = 3;
+
+/// 后台按需安装一组 EP 运行时栈(非阻塞,顺序,每栈累计最多 `STACK_MAX_ATTEMPTS` 次)。
 ///
 /// `wanted` = EP 选型链里需要 userspace 栈的那些(`EpChoice::runtime_stack()` 去重)。
 /// 已就位(probe 命中)→ 标 Present 跳过;缺失 → ensure_stack(下载+解压)。失败标 Failed
 /// 不 panic;离线 / 平台不支持 → 一次失败即停(重试无意义)。
 ///
+/// **再入守卫(rc.6)**:每栈已是终态(Present/Installed)→ 跳过;已累计达
+/// `STACK_MAX_ATTEMPTS` 次尝试(无论当前 Failed 还是被快照抓到 Installing)→ 不再重试
+/// (避免每次 unlock 重跑令 attempts 无限涨)。要重置须重启进程(冷启动清 status)。
+///
 /// 进度落 `status`,经 status 端点暴露。装不上的栈 → 对应 EP 在选型链运行时注册失败
 /// → ORT 降级 CPU(已被 provider.rs 的 no-error_on_failure 兜住)。
 pub fn spawn_stack_bootstrap(status: StackInstallStatus, wanted: Vec<String>) {
     std::thread::spawn(move || {
-        const MAX_ATTEMPTS: u32 = 3;
+        const MAX_ATTEMPTS: u32 = STACK_MAX_ATTEMPTS;
         for stack in wanted {
             if !KNOWN_STACKS.contains(&stack.as_str()) {
                 continue;
+            }
+            // 再入守卫:已终态(Present/Installed)→ 跳过;已耗尽尝试预算 → 不再重跑。
+            // 这让重复 unlock 不会令 attempts 无限累加(rc.5 真机 directml attempts=4 根因)。
+            if let Some(entry) = status.entry_snapshot(&stack) {
+                if entry.phase.is_usable() {
+                    log::debug!("EP stack {stack} already terminal ({:?}); skipping re-bootstrap", entry.phase);
+                    continue;
+                }
+                if entry.attempts >= MAX_ATTEMPTS {
+                    // 已用满预算:若仍非 Failed(被快照抓在 Installing),固化为 Failed,
+                    // 不再重跑。后续 unlock 直接命中本守卫跳过。
+                    if !matches!(entry.phase, StackPhase::Failed { .. }) {
+                        status.mark_failed(
+                            &stack,
+                            format!(
+                                "exhausted {MAX_ATTEMPTS} install attempts across sessions; not retrying until restart"
+                            ),
+                        );
+                    }
+                    log::warn!(
+                        "EP stack {stack} reached attempt budget ({}/{MAX_ATTEMPTS}); not re-bootstrapping",
+                        entry.attempts
+                    );
+                    continue;
+                }
             }
             // 已就位:标 Present,跳过下载。
             if probe_stack(&stack) {
@@ -347,7 +390,11 @@ pub fn spawn_stack_bootstrap(status: StackInstallStatus, wanted: Vec<String>) {
             let offline = offline();
             let mut last_err = String::new();
             let mut done = false;
-            for n in 1..=MAX_ATTEMPTS {
+            // Budget-aware: only consume the remaining attempts so the cross-session total
+            // never exceeds MAX_ATTEMPTS (each mark_installing increments the persisted count).
+            let already = status.entry_snapshot(&stack).map(|e| e.attempts).unwrap_or(0);
+            let remaining = MAX_ATTEMPTS.saturating_sub(already);
+            for n in 1..=remaining {
                 status.mark_installing(&stack);
                 match ensure_stack(&stack) {
                     Ok(_) => {
@@ -566,5 +613,101 @@ mod tests {
         s.mark_installing("vitisai");
         s.mark_installing("vitisai");
         assert_eq!(s.snapshot()["stacks"]["vitisai"]["attempts"], 3);
+    }
+
+    #[test]
+    fn entry_snapshot_reports_phase_and_attempts() {
+        let s = StackInstallStatus::new();
+        assert!(s.entry_snapshot("cuda").is_none());
+        s.mark_installing("cuda");
+        s.mark_installing("cuda");
+        let e = s.entry_snapshot("cuda").unwrap();
+        assert_eq!(e.attempts, 2);
+        assert_eq!(e.phase, StackPhase::Installing);
+    }
+
+    // ── rc.6: stack bootstrap re-entry guard (bounded attempts across unlocks) ──
+    //
+    // rc.5 真机：spawn_stack_bootstrap 每次 vault unlock 重跑无守卫 → directml attempts
+    // 累加到 4 还 state=installing。守卫断言：跨多次 bootstrap 调用，单栈 attempts 不超
+    // STACK_MAX_ATTEMPTS，且达上限后固化为 Failed（不再 Installing 无限重试）。
+
+    /// 用一个不支持平台的栈触发即时失败（不联网），多次调用 bootstrap，断言 attempts 封顶。
+    #[test]
+    fn stack_bootstrap_caps_attempts_across_invocations() {
+        // directml on linux is unsupported → ensure_stack errors instantly (no network),
+        // so each bootstrap attempt is deterministic + offline-safe in CI.
+        #[cfg(target_os = "linux")]
+        {
+            let s = StackInstallStatus::new();
+            // Invoke the bootstrap several times (simulating repeated vault unlocks).
+            for _ in 0..5 {
+                spawn_stack_bootstrap(s.clone(), vec!["directml".to_string()]);
+                // join: the spawned thread is short (instant unsupported-platform error).
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }
+            // Wait for terminal state.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                if let Some(e) = s.entry_snapshot("directml") {
+                    if matches!(e.phase, StackPhase::Failed { .. }) {
+                        // The critical invariant: attempts never exceeds the budget,
+                        // even though we invoked bootstrap 5 times.
+                        assert!(
+                            e.attempts <= STACK_MAX_ATTEMPTS,
+                            "attempts {} must be capped at {STACK_MAX_ATTEMPTS} across re-invocations",
+                            e.attempts
+                        );
+                        break;
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "stack should reach Failed terminal state; snapshot={}",
+                    s.snapshot()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+
+    /// 已终态(Installed)的栈，再次 bootstrap 直接跳过（不重置 / 不重试）。
+    #[test]
+    fn stack_bootstrap_skips_terminal_installed() {
+        let s = StackInstallStatus::new();
+        s.mark_installed("cuda");
+        let before = s.entry_snapshot("cuda").unwrap().attempts;
+        spawn_stack_bootstrap(s.clone(), vec!["cuda".to_string()]);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let after = s.entry_snapshot("cuda").unwrap();
+        assert_eq!(after.phase, StackPhase::Installed, "must stay Installed");
+        assert_eq!(after.attempts, before, "terminal stack must not be re-attempted");
+    }
+
+    /// 达到 attempts 预算但被抓在 Installing（真机 directml=4 场景），再入应固化为 Failed。
+    #[test]
+    fn stack_bootstrap_seals_stuck_installing_at_budget() {
+        let s = StackInstallStatus::new();
+        // Simulate a snapshot caught mid-installing at the attempt budget.
+        for _ in 0..STACK_MAX_ATTEMPTS {
+            s.mark_installing("openvino");
+        }
+        assert_eq!(s.entry_snapshot("openvino").unwrap().phase, StackPhase::Installing);
+        // Re-invoke bootstrap: the guard must seal it to Failed (no further retry).
+        spawn_stack_bootstrap(s.clone(), vec!["openvino".to_string()]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let e = s.entry_snapshot("openvino").unwrap();
+            if matches!(e.phase, StackPhase::Failed { .. }) {
+                assert_eq!(e.attempts, STACK_MAX_ATTEMPTS, "attempts must not exceed budget");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stuck-installing at budget must be sealed to Failed; got {:?}",
+                e.phase
+            );
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
     }
 }

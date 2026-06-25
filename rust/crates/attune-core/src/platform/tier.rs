@@ -89,6 +89,20 @@ impl Tier {
     }
 }
 
+/// ASR 引擎类型（决定 bootstrap 拉哪种模型）。
+///
+/// `Whisper` → 拉 whisper.cpp ggml（`asr_ggml`）。`SenseVoice` → 拉 sherpa-onnx
+/// SenseVoice ONNX + tokens（in-process，无平台二进制）。catalog（`model-catalog.default.yaml`
+/// `asr.engine`）才是 engine 路由 SSOT；本枚举是 tier-recommendation 层的镜像，让
+/// `/ai_stack` 推荐显示 + 自动 bootstrap 与 catalog 选型一致（rc.5 真机：自动 bootstrap
+/// 拉 whisper 而 catalog 选 sensevoice → 新装机 ASR 不自动可用，本字段消除该漂移）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsrEngineKind {
+    Whisper,
+    SenseVoice,
+}
+
 /// 模型推荐（按 tier 选合适大小）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRecommendation {
@@ -98,7 +112,12 @@ pub struct ModelRecommendation {
     pub embedding_size_mb: u32,
     pub reranker_repo: &'static str,
     pub reranker_size_mb: u32,
-    /// whisper.cpp ggml 模型名 (如 "ggml-small-q8_0.bin")
+    /// ASR 引擎（whisper ggml vs in-process SenseVoice ONNX）。
+    /// bootstrap 据此拉对的模型；whisper-ggml 仅 CPU-fallback / 弱 tier 保留。
+    pub asr_engine: AsrEngineKind,
+    /// whisper.cpp ggml 模型名 (如 "ggml-small-q8_0.bin")。
+    /// `asr_engine == SenseVoice` 时此字段仍填一个 ggml 名作 whisper-cli fallback 提示，
+    /// 但 bootstrap 优先按 `asr_engine` 拉 SenseVoice。
     pub asr_ggml: &'static str,
     pub asr_size_mb: u32,
 }
@@ -112,23 +131,32 @@ impl ModelRecommendation {
             // - turbo 比 large-v3 快 8x，CPU 30s 音频推理 ~30s 可接受
             // - q5_0 量化 574 MB，平衡准确率/体积/速度最佳点
             // - 低 tier 笔电（< 16GB）下载可选 medium-q5 (480 MB) 作 fallback
+            // Low (CPU-fallback class hardware): whisper ggml — sensevoice pure-CPU FAILs
+            // CER 23% on this class, and whisper retains diarization + format breadth.
             Tier::Low => Some(Self {
                 tier,
                 embedding_repo: "BAAI/bge-small-zh-v1.5",
                 embedding_size_mb: 100,
                 reranker_repo: "Xenova/bge-reranker-base",
                 reranker_size_mb: 50,
+                asr_engine: AsrEngineKind::Whisper,
                 asr_ggml: "ggml-medium-q5_0.bin",
                 asr_size_mb: 480,
             }),
+            // Mid+ (capable hardware → amd-win/intel-win/nvidia catalog tiers): default to
+            // in-process SenseVoice (~234 MB int8 ONNX + tokens, CER 7.69%, no per-platform
+            // binary). The authoritative per-machine engine is still the catalog
+            // (`catalog_asr_engine()`, which also sees OS + accelerators) — this is the
+            // tier-recommendation mirror so /ai_stack display + auto-bootstrap match catalog.
             Tier::Mid => Some(Self {
                 tier,
                 embedding_repo: "BAAI/bge-base-zh-v1.5",
                 embedding_size_mb: 400,
                 reranker_repo: "Xenova/bge-reranker-base",
                 reranker_size_mb: 50,
+                asr_engine: AsrEngineKind::SenseVoice,
                 asr_ggml: "ggml-large-v3-turbo-q5_0.bin",
-                asr_size_mb: 574,
+                asr_size_mb: 234,
             }),
             Tier::High => Some(Self {
                 tier,
@@ -136,8 +164,9 @@ impl ModelRecommendation {
                 embedding_size_mb: 1200,
                 reranker_repo: "BAAI/bge-reranker-v2-m3",
                 reranker_size_mb: 570,
+                asr_engine: AsrEngineKind::SenseVoice,
                 asr_ggml: "ggml-large-v3-turbo-q5_0.bin",
-                asr_size_mb: 574,
+                asr_size_mb: 234,
             }),
             Tier::Flagship => Some(Self {
                 tier,
@@ -145,8 +174,9 @@ impl ModelRecommendation {
                 embedding_size_mb: 1200,
                 reranker_repo: "BAAI/bge-reranker-v2-m3",
                 reranker_size_mb: 570,
+                asr_engine: AsrEngineKind::SenseVoice,
                 asr_ggml: "ggml-large-v3-turbo-q5_0.bin",
-                asr_size_mb: 574,
+                asr_size_mb: 234,
             }),
         }
     }
@@ -293,5 +323,44 @@ mod tests {
         // 用户拍板（2026-05-01）：High/Mid 都升 large-v3-turbo（中文 WER 5-7%）
         let rec = ModelRecommendation::for_tier(Tier::High).unwrap();
         assert!(rec.asr_ggml.contains("large-v3-turbo"));
+    }
+
+    // ── rc.6: ASR engine awareness (capable tiers auto-fetch SenseVoice) ─────
+    //
+    // rc.5 真机回归：自动 bootstrap 按 tier 拉 whisper ggml，但 catalog 选 sensevoice →
+    // 新装机 ASR 不自动可用。recommendation 现在带 asr_engine，capable tier = SenseVoice。
+
+    #[test]
+    fn model_recommendation_capable_tiers_select_sensevoice() {
+        for tier in [Tier::Mid, Tier::High, Tier::Flagship] {
+            let rec = ModelRecommendation::for_tier(tier).unwrap();
+            assert_eq!(
+                rec.asr_engine,
+                AsrEngineKind::SenseVoice,
+                "{} (capable) tier must auto-fetch SenseVoice, not whisper ggml",
+                tier.label()
+            );
+        }
+    }
+
+    #[test]
+    fn model_recommendation_low_tier_keeps_whisper() {
+        // CPU-fallback class hardware: sensevoice pure-CPU FAILs CER 23% → keep whisper.
+        let rec = ModelRecommendation::for_tier(Tier::Low).unwrap();
+        assert_eq!(rec.asr_engine, AsrEngineKind::Whisper);
+        assert!(rec.asr_ggml.contains("medium") || rec.asr_ggml.contains("small"));
+    }
+
+    #[test]
+    fn asr_engine_kind_serializes_snake_case() {
+        // /ai_stack JSON shape stability: engine kind is snake_case in the API.
+        assert_eq!(
+            serde_json::to_string(&AsrEngineKind::SenseVoice).unwrap(),
+            "\"sense_voice\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AsrEngineKind::Whisper).unwrap(),
+            "\"whisper\""
+        );
     }
 }

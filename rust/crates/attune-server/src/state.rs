@@ -846,11 +846,15 @@ impl AppState {
                     .map_err(|e| e.to_string())
             });
 
-            // 4) ASR（whisper ggml，按硬件 tier 选大小）。tier 不支持则跳过（标 ready）。
+            // 4) ASR（engine-aware：catalog 选 sensevoice 的 capable tier 拉 SenseVoice ONNX，
+            //    否则按 tier 拉 whisper ggml）。tier 不支持则跳过（标 ready）。
+            //    rc.5 真机回归根因：此处之前无脑 fetch_for_tier（只拉 whisper），而 catalog
+            //    选 sensevoice → 新装机 ASR 不自动可用，要手动 /ai-stack/ensure 才行。改用
+            //    fetch_asr_for_tier 把决策收口到 catalog（与 ensure 同源）。
             let tier = attune_core::platform::classify_hardware(&state.hardware);
             if tier.is_supported() {
                 run_with_retry(status, "asr", MAX_ATTEMPTS, || {
-                    attune_core::asr::fetch_for_tier(tier)
+                    attune_core::asr::fetch_asr_for_tier(tier)
                         .map(|_| ())
                         .map_err(|e| e.to_string())
                 });

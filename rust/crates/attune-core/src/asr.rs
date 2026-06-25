@@ -895,11 +895,47 @@ pub fn ensure_whisper_model(ggml_filename: &str) -> crate::error::Result<std::pa
 ///
 /// 由 state.rs::init_search_engines spawn 在 tokio runtime 中调用。
 /// 失败不阻塞启动，仅 warn 日志（用户可以晚点用 ASR 时再 retry）。
+///
+/// 注：这是 **whisper-only** 路径，保留作弱机 / CPU-fallback 用。catalog 选 sensevoice
+/// 的 capable tier 走 [`fetch_asr_for_tier`]（engine-aware），别直接调本函数。
 pub fn fetch_for_tier(tier: crate::platform::Tier) -> crate::error::Result<std::path::PathBuf> {
     let rec = crate::platform::ModelRecommendation::for_tier(tier).ok_or_else(|| {
         crate::error::VaultError::InvalidInput(format!("tier {} not supported", tier.label()))
     })?;
     ensure_whisper_model(rec.asr_ggml)
+}
+
+/// 拉指定 ASR 引擎的模型（engine-aware）。
+///
+/// `engine == "sensevoice"` → 拉 SenseVoice ONNX + tokens（in-process，无平台二进制）；
+/// 否则按 tier 拉 whisper ggml。返回已就位的模型文件路径（sensevoice 返 model.int8.onnx）。
+///
+/// 这是 boot bootstrap（`state::spawn_model_bootstrap`）与 `/ai-stack/ensure` 共享的纯函数：
+/// 把 "catalog 选哪个引擎 → 拉哪个模型" 的决策收口到一处，消除 rc.5 真机暴露的漂移
+/// （自动 bootstrap 拉 whisper，而 catalog 选 sensevoice → 新装机 ASR 不自动可用）。
+pub fn fetch_asr_model(
+    engine: &str,
+    tier: crate::platform::Tier,
+) -> crate::error::Result<std::path::PathBuf> {
+    if engine == "sensevoice" {
+        // SenseVoice fetch（与 /ai-stack/ensure 同一逻辑，feature-gated 由 asr_sensevoice 内部处理）。
+        let backend = crate::asr_sensevoice::ensure_sensevoice_model()?;
+        Ok(backend.model_path)
+    } else {
+        fetch_for_tier(tier)
+    }
+}
+
+/// 启动时按硬件 catalog 选型拉对的 ASR 模型（engine-aware bootstrap 入口）。
+///
+/// 流程：`catalog_asr_engine()` 解析当前硬件 tier 的 ASR 引擎 → [`fetch_asr_model`] 拉对应模型。
+/// capable tier（amd-win / intel-win / nvidia / k3）→ SenseVoice；CPU-fallback → whisper ggml。
+///
+/// 由 `state::spawn_model_bootstrap` 调用，取代之前无脑 `fetch_for_tier`（只拉 whisper）。
+pub fn fetch_asr_for_tier(tier: crate::platform::Tier) -> crate::error::Result<std::path::PathBuf> {
+    let engine = catalog_asr_engine();
+    log::info!("ASR bootstrap: catalog engine='{engine}' for tier '{}'", tier.label());
+    fetch_asr_model(&engine, tier)
 }
 
 #[cfg(test)]
@@ -912,6 +948,103 @@ mod tests {
         assert_eq!(extract_model_name("/x/ggml-large-v3.bin"), "large");
         assert_eq!(extract_model_name("/x/ggml-base.bin"), "base");
         assert_eq!(extract_model_name("/x/ggml-tiny-q8.bin"), "tiny");
+    }
+
+    // ── rc.6: engine-aware ASR fetch (capable tier auto-fetches SenseVoice) ──
+    //
+    // These assert the ROUTING (which model class the fetcher targets) deterministically,
+    // WITHOUT touching global HOME/HF_HUB_OFFLINE env (which would race other modules' tests
+    // in this shared process). We pre-seed the on-disk model so the fetcher early-returns the
+    // already-present file — the returned path's directory proves which engine was routed to.
+    //
+    // We serialize via a module lock + RAII HOME restore (same idiom as model_source.rs's
+    // HF_ENV_LOCK) because models_dir() derives from HOME; offline is forced only for the
+    // negative (missing-model) assertion where the engine marker in the error is the proof.
+
+    static ASR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct HomeGuard {
+        prev_home: Option<std::ffi::OsString>,
+        prev_xdg: Option<std::ffi::OsString>,
+        _tmp: tempfile::TempDir,
+    }
+    impl HomeGuard {
+        fn set(tmp: tempfile::TempDir) -> Self {
+            let prev_home = std::env::var_os("HOME");
+            let prev_xdg = std::env::var_os("XDG_DATA_HOME");
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::set_var("HOME", tmp.path());
+                std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
+            }
+            Self { prev_home, prev_xdg, _tmp: tmp }
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            #[allow(unsafe_code)]
+            unsafe {
+                match &self.prev_home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.prev_xdg {
+                    Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                    None => std::env::remove_var("XDG_DATA_HOME"),
+                }
+            }
+        }
+    }
+
+    /// `fetch_asr_model("sensevoice", _)` routes to the SenseVoice fetcher: with the model
+    /// pre-seeded on disk it early-returns the SenseVoice `model.int8.onnx` (NOT a whisper ggml).
+    #[test]
+    fn fetch_asr_model_sensevoice_routes_to_sensevoice() {
+        let _lock = ASR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _home = HomeGuard::set(tmp);
+
+        // Pre-seed SenseVoice assets so the fetcher early-returns (no network).
+        let dir = crate::asr_sensevoice::sensevoice_model_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::asr_sensevoice::SENSEVOICE_MODEL_FILE), b"fake").unwrap();
+        std::fs::write(dir.join(crate::asr_sensevoice::SENSEVOICE_TOKENS_FILE), b"fake").unwrap();
+
+        let path = fetch_asr_model("sensevoice", crate::platform::Tier::High)
+            .expect("sensevoice fetch must succeed when model pre-seeded");
+        assert!(
+            path.ends_with(crate::asr_sensevoice::SENSEVOICE_MODEL_FILE),
+            "sensevoice engine must route to SenseVoice model; got: {}",
+            path.display()
+        );
+        assert!(
+            !path.to_string_lossy().contains("ggml"),
+            "must NOT route to whisper ggml; got: {}",
+            path.display()
+        );
+    }
+
+    /// `fetch_asr_model("whisper", _)` routes to whisper ggml: with the ggml pre-seeded it
+    /// early-returns that file (NOT a SenseVoice onnx).
+    #[test]
+    fn fetch_asr_model_whisper_routes_to_whisper() {
+        let _lock = ASR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _home = HomeGuard::set(tmp);
+
+        // Low tier → ggml-medium-q5_0.bin; pre-seed it so the fetcher early-returns.
+        let rec = crate::platform::ModelRecommendation::for_tier(crate::platform::Tier::Low).unwrap();
+        let wdir = crate::platform::data_dir().join("models").join("whisper");
+        std::fs::create_dir_all(&wdir).unwrap();
+        std::fs::write(wdir.join(rec.asr_ggml), b"fake").unwrap();
+
+        let path = fetch_asr_model("whisper", crate::platform::Tier::Low)
+            .expect("whisper fetch must succeed when ggml pre-seeded");
+        assert!(
+            path.to_string_lossy().contains("ggml") && !path.to_string_lossy().contains("sensevoice"),
+            "whisper engine must route to whisper ggml; got: {}",
+            path.display()
+        );
     }
 
     // ── F-16 hardware utilization: whisper.cpp GPU build detection ──────────
