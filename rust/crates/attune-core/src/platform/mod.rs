@@ -307,6 +307,11 @@ impl HardwareProfile {
             if p.gpu_label.is_none() {
                 p.gpu_label = label;
             }
+            // NPU 探测（Linux 走 /dev/accel + /proc/modules；Windows 走 CIM PnP
+            // ComputeAccelerator）。VEN_8086→Intel NPU(OpenVINO)；VEN_1022→AMD XDNA(VitisAI)。
+            let (intel_npu, amd_npu) = detect_windows_npu();
+            p.has_intel_npu = p.has_intel_npu || intel_npu;
+            p.has_amd_xdna_npu = p.has_amd_xdna_npu || amd_npu;
         }
 
         // 通用 fallback label（如果上面还没给）
@@ -596,6 +601,78 @@ fn detect_windows_gpu_vendors() -> (bool, bool, bool, Option<String>) {
     (has_nv, has_amd, has_intel, label)
 }
 
+/// 解析 Windows NPU PnP 探测输出 → `(has_intel_npu, has_amd_xdna_npu)`。
+///
+/// 输入是 `detect_windows_npu` 收集的逐行 `"<DeviceID>|<Name>"`（CIM
+/// `Win32_PnPEntity` where `PNPClass='ComputeAccelerator'`）。跨厂商干净信号：
+/// - DeviceID 含 `VEN_8086` → Intel NPU（Core Ultra "AI Boost"）
+/// - DeviceID 含 `VEN_1022` → AMD XDNA NPU（Ryzen AI "NPU Compute Accelerator Device"）
+///
+/// DeviceID 缺可识别 `VEN_` 时回退到 Name 关键字（`ai boost`→Intel；
+/// `npu compute accelerator`→AMD），保证厂商不带 PCI vendor 时仍能分流。
+///
+/// 纯函数、大小写无关、跨平台编译（Linux 上可单测，无需真 Windows 硬件）。空输入 /
+/// 噪声 → `(false, false)`，永不 panic。
+//
+// 生产中仅 Windows 的 `detect_windows_npu` 调用；非 Windows 编译时只有 `#[cfg(test)]`
+// 引用，故非 windows + 非 test build 标 dead_code allow（解析逻辑仍跨平台单测覆盖）。
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn parse_windows_npu_pnp(out: &str) -> (bool, bool) {
+    let mut has_intel = false;
+    let mut has_amd = false;
+    for line in out.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lc = line.to_ascii_lowercase();
+        // 优先用 PCI vendor id（最干净跨厂商信号）。
+        if lc.contains("ven_8086") {
+            has_intel = true;
+        } else if lc.contains("ven_1022") {
+            has_amd = true;
+        } else if lc.contains("ai boost") {
+            // Name 回退：Intel Core Ultra NPU 暴露为 "Intel(R) AI Boost"。
+            has_intel = true;
+        } else if lc.contains("npu compute accelerator") {
+            // Name 回退：AMD XDNA NPU 暴露为 "NPU Compute Accelerator Device"。
+            has_amd = true;
+        }
+    }
+    (has_intel, has_amd)
+}
+
+/// Windows NPU 探测：PowerShell CIM `Win32_PnPEntity` where PNPClass='ComputeAccelerator'。
+///
+/// 仿 [`detect_windows_gpu_vendors`] 的 CIM 模式（替代已移除的 wmic.exe）。每行输出
+/// `"<DeviceID>|<Name>"`，交给纯解析器 [`parse_windows_npu_pnp`] 按 VEN_8086(Intel)/
+/// VEN_1022(AMD) 分流。子进程失败 / 无 NPU → `(false, false)`，graceful 不 panic。
+#[cfg(target_os = "windows")]
+fn detect_windows_npu() -> (bool, bool) {
+    use std::process::Command;
+    // ComputeAccelerator class 是 Win11 24H2+ 上 Intel/AMD NPU 的统一 PNPClass；
+    // 同时按 Name 兜底匹配，覆盖个别驱动版本不归类到该 class 的情形。
+    let out = match Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_PnPEntity | \
+             Where-Object { $_.PNPClass -eq 'ComputeAccelerator' -or \
+             $_.Name -match 'AI Boost|NPU Compute Accelerator' } | \
+             ForEach-Object { \"$($_.DeviceID)|$($_.Name)\" }",
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return (false, false),
+    };
+    if !out.status.success() {
+        return (false, false);
+    }
+    parse_windows_npu_pnp(&String::from_utf8_lossy(&out.stdout))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,6 +729,157 @@ mod tests {
         assert_eq!(restored, Some(pinned));
         assert_eq!(data_dir(), prod_data, "data_dir restored byte-identical to production");
         assert_eq!(config_dir(), prod_config, "config_dir restored byte-identical to production");
+    }
+
+    // ── Windows NPU PnP 解析（跨厂商 ComputeAccelerator） ───────────────────
+    //
+    // 真机探测（CIM Win32_PnPEntity，PNPClass='ComputeAccelerator'）：
+    // - Intel Core Ultra 7 155H：Name="Intel(R) AI Boost"，DeviceID 含 VEN_8086 → Intel NPU
+    // - AMD Ryzen 7 8845H：Name="NPU Compute Accelerator Device"，DeviceID 含 VEN_1022 → AMD XDNA NPU
+    // 跨厂商干净信号：PNPClass='ComputeAccelerator'；VEN_8086=Intel / VEN_1022=AMD 区分。
+    //
+    // 解析器吃 PowerShell 每行 "<DeviceID>|<Name>" 的输出，吐 (has_intel_npu, has_amd_xdna_npu)。
+    // 纯函数（跨平台编译，可在 Linux 上单测，无需真 Windows 硬件）。
+
+    #[test]
+    fn parse_npu_pnp_intel_ai_boost_sets_intel_only() {
+        let out = "PCI\\VEN_8086&DEV_7D1D&SUBSYS_00000000&REV_04\\3&11583659&0&88|Intel(R) AI Boost";
+        let (intel, amd) = parse_windows_npu_pnp(out);
+        assert!(intel, "VEN_8086 ComputeAccelerator → Intel NPU");
+        assert!(!amd, "no AMD NPU on Intel-only machine");
+    }
+
+    #[test]
+    fn parse_npu_pnp_amd_xdna_sets_amd_only() {
+        let out = "PCI\\VEN_1022&DEV_1502&SUBSYS_00000000&REV_00\\3&2411e6fe&0&41|NPU Compute Accelerator Device";
+        let (intel, amd) = parse_windows_npu_pnp(out);
+        assert!(amd, "VEN_1022 ComputeAccelerator → AMD XDNA NPU");
+        assert!(!intel, "no Intel NPU on AMD-only machine");
+    }
+
+    #[test]
+    fn parse_npu_pnp_empty_or_garbage_is_false() {
+        // 无 NPU 机器（空输出 / 噪声）→ 两者皆 false，不 panic。
+        assert_eq!(parse_windows_npu_pnp(""), (false, false));
+        assert_eq!(parse_windows_npu_pnp("   \n  \n"), (false, false));
+        assert_eq!(parse_windows_npu_pnp("some unrelated device|Foo Bar"), (false, false));
+    }
+
+    #[test]
+    fn parse_npu_pnp_name_match_fallback_without_vendor_id() {
+        // DeviceID 没有可识别 VEN_ 时，回退到 Name 关键字匹配（AI Boost → Intel；
+        // NPU Compute Accelerator → AMD），保证厂商缺 DeviceID 时仍能分流。
+        let intel_by_name = parse_windows_npu_pnp("ACPI\\SOMETHING\\0|Intel(R) AI Boost");
+        assert_eq!(intel_by_name, (true, false));
+        let amd_by_name = parse_windows_npu_pnp("ACPI\\SOMETHING\\0|NPU Compute Accelerator Device");
+        assert_eq!(amd_by_name, (false, true));
+    }
+
+    #[test]
+    fn parse_npu_pnp_both_vendors_present() {
+        // 防御性：两行不同厂商（理论上单机不会，但解析器须能同时置位）。
+        let out = "PCI\\VEN_8086&DEV_7D1D\\x|Intel(R) AI Boost\nPCI\\VEN_1022&DEV_1502\\y|NPU Compute Accelerator Device";
+        assert_eq!(parse_windows_npu_pnp(out), (true, true));
+    }
+
+    #[test]
+    fn parse_npu_pnp_case_insensitive() {
+        // PowerShell 大小写 / 厂商 ID 大小写无关。
+        let out = "pci\\ven_8086&dev_7d1d\\x|intel(r) ai boost";
+        assert_eq!(parse_windows_npu_pnp(out), (true, false));
+    }
+
+    // ── 端到端接线：Windows NPU profile → AccelCapabilities → EP 链 → wanted 栈 ──
+    //
+    // 证明 Windows NPU 探测一旦置位 has_intel_npu / has_amd_xdna_npu，下游 EP 选型自动
+    // 把 openvino(Intel)/vitisai(AMD) 入链 → runtime_stack 进 wanted 集（spawn_stack_
+    // bootstrap 据此装栈）。这是本任务的核心交付：Intel→openvino、AMD→vitisai wanted。
+
+    use crate::infer::accel::{
+        recommend_ep_chain_pure, EpChoice, OpenVinoDevice,
+    };
+    use crate::platform::accel::AccelCapabilities;
+
+    /// 从 profile 推导 driver-ready 硬件类别（复用生产 from_profile 路径）。
+    fn ready_hw(p: &HardwareProfile) -> Vec<crate::platform::AccelKind> {
+        AccelCapabilities::from_profile(p)
+            .accelerators
+            .iter()
+            .filter(|a| a.driver_ready)
+            .map(|a| a.kind)
+            .collect()
+    }
+
+    /// EP 链 → 需 userspace 栈的 wanted 集（去重），= state.rs 的 wanted 计算逻辑。
+    fn wanted_stacks(chain: &[EpChoice]) -> Vec<&'static str> {
+        let mut w = Vec::new();
+        for ep in chain {
+            if let Some(s) = ep.runtime_stack() {
+                if !w.contains(&s) {
+                    w.push(s);
+                }
+            }
+        }
+        w
+    }
+
+    #[test]
+    fn windows_intel_npu_profile_wants_openvino() {
+        // 模拟 Intel Core Ultra 7 155H：has_intel_npu=true（CIM 探测置位）。
+        let p = HardwareProfile {
+            os: "windows",
+            has_intel_npu: true,
+            ..Default::default()
+        };
+        let hw = ready_hw(&p);
+        assert!(hw.contains(&crate::platform::AccelKind::IntelNpu), "Intel NPU classified");
+
+        // artifact 编入 openvino + cpu → EP 链含 openvino(NPU)。
+        let compiled = [EpChoice::Cpu, EpChoice::OpenVino(OpenVinoDevice::Auto)];
+        let chain = recommend_ep_chain_pure("windows", &hw, &compiled, None);
+        assert!(chain.iter().any(|e| e.id() == "openvino"), "Intel NPU → openvino in chain: {chain:?}");
+        assert_eq!(*chain.last().unwrap(), EpChoice::Cpu, "CPU 兜底末位");
+
+        // wanted 栈含 openvino（Intel NPU 自动配置 OpenVINO 栈）。
+        assert!(wanted_stacks(&chain).contains(&"openvino"),
+            "Intel NPU machine must want openvino stack");
+    }
+
+    #[test]
+    fn windows_amd_xdna_npu_profile_wants_vitisai() {
+        // 模拟 AMD Ryzen 7 8845H：has_amd_xdna_npu=true（CIM 探测置位）。
+        let p = HardwareProfile {
+            os: "windows",
+            has_amd_xdna_npu: true,
+            ..Default::default()
+        };
+        let hw = ready_hw(&p);
+        assert!(hw.contains(&crate::platform::AccelKind::AmdNpu), "AMD XDNA NPU classified");
+
+        let compiled = [EpChoice::Cpu, EpChoice::VitisAi];
+        let chain = recommend_ep_chain_pure("windows", &hw, &compiled, None);
+        assert!(chain.iter().any(|e| e.id() == "vitisai"), "AMD XDNA → vitisai in chain: {chain:?}");
+        assert_eq!(*chain.last().unwrap(), EpChoice::Cpu);
+
+        assert!(wanted_stacks(&chain).contains(&"vitisai"),
+            "AMD XDNA NPU machine must want vitisai stack");
+    }
+
+    #[test]
+    fn windows_no_npu_profile_wants_neither_openvino_nor_vitisai() {
+        // 无 NPU 的纯 CPU Windows 机：openvino/vitisai 都不入 wanted。
+        let p = HardwareProfile { os: "windows", ..Default::default() };
+        let hw = ready_hw(&p);
+        let compiled = [
+            EpChoice::Cpu,
+            EpChoice::OpenVino(OpenVinoDevice::Auto),
+            EpChoice::VitisAi,
+        ];
+        let chain = recommend_ep_chain_pure("windows", &hw, &compiled, None);
+        let w = wanted_stacks(&chain);
+        assert!(!w.contains(&"openvino"), "no NPU → no openvino wanted: {w:?}");
+        assert!(!w.contains(&"vitisai"), "no NPU → no vitisai wanted: {w:?}");
+        assert_eq!(chain, vec![EpChoice::Cpu], "bare Windows → CPU-only chain");
     }
 
     #[test]
