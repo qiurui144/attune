@@ -84,8 +84,9 @@ pub struct AmdNpuChip {
 /// 已核实的 AMD Ryzen AI NPU 芯片表。
 ///
 /// 与 Python `detector.py::AMD_NPU_CHIPS` 对齐;PCI id/revision 据 kernel.org + Gentoo wiki 核实。
-/// 注:Phoenix/Hawk Point 共用 `1022:1502` rev 0x00,靠 CPU 名区分;Strix Point/Halo 共用
-/// `1022:17f0`,rev 0x10=Strix Point、0x11=Strix Halo(本表归 Strix Point,代差不影响驱动)。
+/// 注:Phoenix/Hawk Point 共用 `1022:1502` rev 0x00,靠 CPU 名区分;Strix 系共用 `1022:17f0`,
+/// 本表 rev 0x10=Strix Point、0x11=Krackan Point(均 XDNA2;Strix Halo 亦 17f0 系)。代差不影响
+/// NPU 驱动选型,PCI 命中后再靠 CPU 名细分。
 pub const AMD_NPU_CHIPS: &[AmdNpuChip] = &[
     AmdNpuChip {
         chip_id: "strix_point",
@@ -513,24 +514,16 @@ fn read_cpu_model() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn read_cpu_model() -> Option<String> {
-    use std::process::Command;
-    let out = Command::new("wmic")
-        .args(["cpu", "get", "Name", "/value"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    // `wmic.exe` 在 Win11 24H2+ 已默认移除 —— 旧实现子进程失败 → CPU 型号取不到 →
+    // `identify_chip_by_cpu` 认不出 Ryzen AI 代际 → NPU 安装计划退化。改走 sysinfo 原生
+    // API(与 `platform::mod.rs::HardwareProfile::detect` 同源,不依赖 wmic.exe)。
+    let sys = sysinfo::System::new_all();
+    let model = sys.cpus().first()?.brand().trim().to_string();
+    if model.is_empty() {
+        None
+    } else {
+        Some(model)
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        if let Some(v) = line.strip_prefix("Name=") {
-            let s = v.trim();
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
-        }
-    }
-    None
 }
 
 #[cfg(target_os = "linux")]
