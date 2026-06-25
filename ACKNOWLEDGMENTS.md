@@ -102,6 +102,24 @@ For full software-license attribution of dependencies, see `Cargo.lock` (Rust) a
 
 ---
 
+## Bundled / Fetched Model Weights
+
+Attune fetches a small set of base model weights at first run (and mirrors them on its own
+download CDN for reliable cold-start). Each is redistributed under a license that permits it,
+with attribution retained per that license:
+
+| Model (role) | Author / source | License | Attribution note |
+|--------------|-----------------|---------|------------------|
+| **SenseVoice** (default ASR) | Alibaba **FunAudioLLM** (FunASR); ONNX repackage by [csukuangfj/sherpa-onnx](https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17) | [FunASR Model License v1.1](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE) (permits copy + share; requires source/author + model-name attribution) | "SenseVoice" model name retained; © Alibaba Group |
+| Whisper GGML (ASR fallback) | [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp); OpenAI Whisper weights | MIT | — |
+| bge-m3 / bge-reranker-base (embedding / rerank) | BAAI; ONNX by [Xenova](https://huggingface.co/Xenova) | MIT | — |
+| PP-OCRv4 / v5 + mobile cls (OCR) | PaddlePaddle PP-OCR; packaged by [SWHL/RapidOCR](https://huggingface.co/SWHL/RapidOCR) | Apache-2.0 | — |
+
+DirectML runtime (Windows GPU EP) ships via the OS-provided redistributable; no proprietary
+NPU runtime (e.g. AMD VitisAI / Ryzen AI) is bundled or redistributed (see RELEASE.md Known Limitations).
+
+---
+
 ## Negative Examples (Explicitly Avoided)
 
 These projects taught us **what not to do** — equally valuable:

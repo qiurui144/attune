@@ -20,6 +20,18 @@
   **必须用户显式触发,永不后台偷跑**;每个响应挂 `tokenBill`(naive vs 实际,无 secret 字段)。
 - **§4.5 兜底全开**:schema-guided JSON + 重试-验证(≤3)+ few-shot + PII redact,复用
   `ai_annotator` 同款 `llm_chat_redacted_hardened` 栈。
+- **🖥️ 硬件加速一键化诚实收口(rc.7)**:把「能合法 + 真能用」的加速/模型路径全做成一键,
+  对用不了的诚实标注,不出空跑 SKU:
+  - **AMD NPU 监测卡**:wizard 硬件页检测 AMD XDNA NPU(Win PnP / Linux amdxdna),如实告知
+    「已用 AMD GPU(DirectML)+ CPU,与 NPU 同精度,开箱即用」+ benchmark 数据(OCR CER 7.04%
+    NPU=DirectML);NPU(VitisAI)加速标为路线图(待 ORT 升级),**不**做「装了就能用」误导推荐
+    —— 经核实 attune 当前无法调用 VitisAI(`ort/vitis` 空 cfg + pykeio 预编译不含 VitisAI EP
+    + ABI 不兼容)。AMD Ryzen AI(闭源 EULA)**不托管不再分发**,栈保持 pointer-only。
+  - **SenseVoice ASR 模型一键**:默认 ASR 模型(FunASR Model License v1.1,允许 share + 署名)
+    纳入 company-mirror 托管 → CN 冷启动 ASR 不再穿透 HF(原仅 bge/whisper/ppocr 托管,SenseVoice
+    漏托管会 fail)。署名见 ACKNOWLEDGMENTS。
+  - **DirectML EP 栈拉取修复**:rc.6 真机回归(155H International region)DirectML 栈 401-on-HF
+    耗尽重试预算 → 改 company-mirror-first 区域无关链(`company_mirror_source()`)。
 
 ### Quality (real-LLM N=3, deepseek-chat/v4)
 - **draft**:grounding-precision **1.000±0.000**(floor 0.90)· fact-consistency
@@ -68,6 +80,17 @@
   whisper-cli 二进制**。whisper-cli 仅保留为(a)说话人分离(diarization,whisperx/pyannote)
   基座 与(b)显式 CPU-tier 兜底。**diarization 仍依赖平台 whisper-cli;Windows 上若 whisper-cli
   打包/可用性有问题,diarization 为 known-limitation(RC 可接受),单人转写不受影响**。
+- **ONNX EP 加速面 — 当前仅 DirectML/CUDA 真生效(rc.7 诚实收口)**:attune 经 `ort` crate
+  的 pykeio `download-binaries` 预编译 onnxruntime,其内置 EP 仅 directml/cuda/tensorrt/coreml/
+  webgpu。**OpenVINO / ROCm / VitisAI 的 `ort` feature 是空 cfg 开关**(预编译不含这些 EP),
+  且 `stack_installer` 下载的 `ep-stacks/<stack>/` userspace 栈**当前未被注入 ORT 库路径**
+  (代码实证:运行时无 `ORT_DYLIB_PATH` / lib-path 注入消费者)。⇒ 实际加速可用面:
+  - **Windows**:DirectML(GPU,OS 自带运行时,✅ 一键)/ CPU 兜底。
+  - **Linux**:CUDA(需机器自带 CUDA userspace)/ CPU 兜底。
+  - **OpenVINO(Intel iGPU/NPU)/ ROCm(AMD Linux GPU)/ VitisAI(AMD NPU)= 暂不可用**,
+    硬件在场也回退 CPU(不报错、不崩),wizard 如实标注。真正解锁需一个 **ORT 升级 + EP 插件
+    动态加载**重构(`ort` 升 load-dynamic + 换含 provider 的 onnxruntime + 把 `ep-stacks/` 注入
+    库路径),已登记为后续 sprint。本 rc 不加 openvino/vitis 构建变体以**避免产出空跑 SKU**。
 
 ## v1.4.0 (2026-06-16) — 文件夹一键整理→案卷 · 记忆延续可迁移 · 行业直达工作台 · 隐私出网门 · ABBA/并发开库修复
 
