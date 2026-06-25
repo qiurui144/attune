@@ -14,7 +14,10 @@ name = "attune-server-headless"
 path = "src/bin/headless.rs"
 
 [dependencies]
-attune-core = { path = "../attune-core" }
+# default-features=false + server default 显式回填 attune-core 的 3 个默认(ort-bundled /
+# asr-sensevoice / wasm-runtime)→ 默认 build 解析的 feature 集**完全不变**(零回归),
+# 但允许 openvino 变体经 --no-default-features 关掉 ort-bundled、改开 ort-dynamic。
+attune-core = { path = "../attune-core", default-features = false }
 # #82: URL host parsing for embedding-endpoint local/RFC-1918 detection (anchored,
 # not starts_with) — closes the OutboundGate privacy bypass. Same pure-Rust crate
 # attune-core already depends on; no new transitive risk.
@@ -59,7 +62,13 @@ sha2 = "0.10"
 hex = "0.4"
 
 [features]
-default = []
+# 回填 attune-core 默认(dep 已 default-features=false);openvino 变体 --no-default-features
+# 时去掉 ort-bundled + asr-sensevoice,改 ort-dynamic(见 ort-bundled/ort-dynamic 互斥)。
+default = ["ort-bundled", "asr-sensevoice", "wasm-runtime"]
+ort-bundled = ["attune-core/ort-bundled"]
+ort-dynamic = ["attune-core/ort-dynamic"]
+asr-sensevoice = ["attune-core/asr-sensevoice"]
+wasm-runtime = ["attune-core/wasm-runtime"]
 # Non-text content recognition endpoint (POST /api/v1/ocr/recognize + report/accept).
 # Forwards to attune-core's `nontext` feature. Default-OFF, mirroring attune-core.
 nontext = ["attune-core/nontext"]

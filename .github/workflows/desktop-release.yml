@@ -49,6 +49,23 @@ jobs:
             bundles: nsis,msi
             variant: directml
             features: directml
+          # ── OpenVINO 变体(Intel iGPU/NPU)= load-dynamic(ort-dynamic)──
+          # pyke 预编译不含 OpenVINO EP → 必须 ort-dynamic + 运行时经 ORT_DYLIB_PATH 加载
+          # ep-stacks/openvino 的含 provider onnxruntime(首次按需下,§1.6 生效真机验)。
+          # 走 --no-default-features 关掉 ort-bundled(与 ort-dynamic 互斥)+ asr-sensevoice
+          # (避免 sherpa 第二份 onnxruntime ABI 冲突,该变体 ASR 回退 whisper-cli)。
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+            variant: openvino
+            features: custom-protocol,ort-dynamic,openvino,wasm-runtime
+            no_default: "--no-default-features"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+            variant: openvino
+            features: custom-protocol,ort-dynamic,openvino,wasm-runtime
+            no_default: "--no-default-features"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -91,9 +108,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           BUNDLES: ${{ matrix.bundles }}
           FEATURES: ${{ matrix.features }}
-        # FEATURES 空 = 基础 CPU 包(默认 build,行为不变);非空 = GPU EP 变体
-        # (cuda/directml),经 attune-desktop→server→core 的 feature passthrough 到 ort/<ep>。
-        run: cargo tauri build --bundles "$BUNDLES" ${FEATURES:+--features "$FEATURES"}
+          NO_DEFAULT: ${{ matrix.no_default }}
+        # FEATURES 空 = 基础 CPU 包(默认 build,行为不变);非空 = EP 变体,经 desktop→
+        # server→core feature passthrough 到 ort/<ep>。NO_DEFAULT(仅 openvino 变体设
+        # `--no-default-features`)关掉默认 ort-bundled + asr-sensevoice,改 ort-dynamic;
+        # 其余变体 NO_DEFAULT 空 → 行为不变(custom-protocol 等默认仍在)。
+        run: cargo tauri build --bundles "$BUNDLES" $NO_DEFAULT ${FEATURES:+--features "$FEATURES"}
 
       # GPU 变体:给所有 installer(+ .sig)在最终扩展名前插入 -<variant>,避免与
       # 基础 CPU 包在同一 Release 撞名;基础包(variant 空)跳过此步,名字不变。

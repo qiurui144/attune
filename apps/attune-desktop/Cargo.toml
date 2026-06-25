@@ -25,11 +25,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-attune-server = { path = "../../rust/crates/attune-server" }
+# default-features=false + desktop default 显式回填 3 个默认 → 默认包行为零变化;
+# openvino 变体 --no-default-features 时去掉 ort-bundled,改 ort-dynamic(见下)。
+attune-server = { path = "../../rust/crates/attune-server", default-features = false }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
-default = ["custom-protocol"]
+default = ["custom-protocol", "ort-bundled", "asr-sensevoice", "wasm-runtime"]
+# ORT 链接模型链式透传(ort-bundled 默认;openvino 变体走 ort-dynamic + 去 asr-sensevoice)。
+ort-bundled = ["attune-server/ort-bundled"]
+ort-dynamic = ["attune-server/ort-dynamic"]
+asr-sensevoice = ["attune-server/asr-sensevoice"]
+wasm-runtime = ["attune-server/wasm-runtime"]
 # ── ONNX Runtime EP passthrough → attune-server → attune-core (默认全 OFF) ──
 # desktop-release workflow 为 GPU 变体包传 `cargo tauri build --features <ep>`,
 # 经此链式到 attune-core 的 ort/<ep>。默认 build 不开任一 EP = 纯 CPU 包(基础包不变)。
