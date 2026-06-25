@@ -54,9 +54,9 @@ type VitisAiAdvice = {
   npu_present: boolean;
   runtime_present: boolean;
   vitis_compiled: boolean;
-  status: 'active' | 'runtime-ready-build-lacks-vitis' | 'recommend-install';
-  recommend_install: boolean;
-  download_url: string;
+  status: 'active' | 'directml-active-npu-roadmap';
+  npu_roadmap: boolean;
+  learn_more_url: string;
   rationale: string;
   benchmark: {
     npu_ocr_cer_pct: number;
@@ -428,25 +428,18 @@ function VitisAiCard({ advice }: { advice: VitisAiAdvice }): JSX.Element {
           dmlMs: String(b.directml_p50_ms),
         })}
       </div>
-      {advice.recommend_install && (
+      {advice.npu_roadmap && (
         <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
           <a
-            href={advice.download_url}
+            href={advice.learn_more_url}
             target="_blank"
             rel="noreferrer noopener"
             style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 'var(--space-2)',
-              padding: 'var(--space-2) var(--space-3)',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--color-border)',
               fontSize: 'var(--text-xs)',
-              color: 'var(--color-text)',
-              textDecoration: 'none',
+              color: 'var(--color-text-secondary)',
             }}
           >
-            {t('wizard.hw.vitisai.download')} ↗
+            {t('wizard.hw.vitisai.learn_more')} ↗
           </a>
         </div>
       )}

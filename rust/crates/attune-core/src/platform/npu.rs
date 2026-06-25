@@ -411,15 +411,21 @@ pub fn vitisai_runtime_present() -> bool {
 }
 
 /// VitisAI 引导状态。
+///
+/// 诚实边界(2026-06-25 ort 可行性调研结论):attune 当前**无法**自动调用 VitisAI NPU
+/// —— `ort/vitis` 是空 cfg 开关,pykeio download-binaries 预编译**不含** VitisAI EP
+/// (AMD 定制 build),且 attune host ORT(~1.20)与 Ryzen AI 1.7.1 的 ORT(~1.23)ABI
+/// 不兼容。⇒ 即便用户自装 Ryzen AI,本版也不会用它。故**不做**「装了就能用」误导性推荐;
+/// AMD NPU 在场时如实告知「已用 DirectML+CPU 同精度,NPU 加速在路线图上」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VitisAiStatus {
-    /// 运行时就位 + 二进制编入 vitis → NPU 路径生效中。
+    /// 运行时就位 + 二进制真编入可用的 vitis EP → NPU 生效中。
+    /// **前向兼容**:当前 shipped 构建恒不满足(见上),保留以备 ORT 升级 sprint 解锁。
     Active,
-    /// 运行时就位但本构建未编 `vitis` feature → 需 vitis 构建变体才能用(罕见)。
-    RuntimeReadyBuildLacksVitis,
-    /// NPU 硬件在,但运行时未装 → 推荐用户从 AMD 官方安装。
-    RecommendInstall,
+    /// AMD NPU 在场,但本版经 DirectML(GPU)+ CPU 推理(与 NPU 同精度,开箱即用);
+    /// NPU(VitisAI)硬件加速在路线图上(待 ORT 升级),当前版本不调用。
+    DirectmlActiveNpuRoadmap,
 }
 
 /// benchmark 对照(vlm-llm-bench 实测,§6.3 有源)。
@@ -443,49 +449,50 @@ impl VitisAiBenchmark {
     };
 }
 
-/// AMD NPU 加速引导(给 wizard / Settings 的「监测 + 推荐 + 数据」一站式 payload)。
+/// AMD NPU 加速引导(给 wizard / Settings 的「监测 + 数据」一站式 payload)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct VitisAiAdvice {
     pub npu_present: bool,
     pub runtime_present: bool,
     pub vitis_compiled: bool,
     pub status: VitisAiStatus,
-    /// 是否建议用户去 AMD 官方安装 Ryzen AI(仅 RecommendInstall 为 true)。
-    pub recommend_install: bool,
-    pub download_url: &'static str,
+    /// AMD NPU 加速是否为「路线图未解锁」状态(当前 shipped 构建恒 true 当 NPU 在场)。
+    /// 不做「装了就能用」CTA:attune 当前无法调用 VitisAI(见 VitisAiStatus 文档)。
+    pub npu_roadmap: bool,
+    /// AMD 官方 Ryzen AI 了解链接(信息性,非「装了就能用」承诺)。
+    pub learn_more_url: &'static str,
     pub rationale: &'static str,
     pub benchmark: VitisAiBenchmark,
 }
 
 /// 构建引导建议 —— 纯函数。`None` = 无 AMD XDNA NPU,不展示任何引导。
+///
+/// 诚实:当前 shipped 构建 `vitis_compiled` 恒 false(见 VitisAiStatus),故 NPU 在场时
+/// 一律 `DirectmlActiveNpuRoadmap` —— 如实告知「已用 DirectML+CPU 同精度,NPU 在路线图上」,
+/// **不**诱导用户去装 Ryzen AI(装了本版也用不上)。`Active` 仅前向兼容保留。
 pub fn vitisai_advice(npu_present: bool, runtime_present: bool, vitis_compiled: bool) -> Option<VitisAiAdvice> {
     if !npu_present {
         return None;
     }
-    let (status, recommend_install, rationale) = match (runtime_present, vitis_compiled) {
-        (true, true) => (
+    let active = runtime_present && vitis_compiled; // 当前 shipped 恒 false
+    let (status, rationale) = if active {
+        (
             VitisAiStatus::Active,
-            false,
             "AMD NPU(VitisAI)路径生效中:与 DirectML 同精度,后台/电池场景更省电。",
-        ),
-        (true, false) => (
-            VitisAiStatus::RuntimeReadyBuildLacksVitis,
-            false,
-            "已检测到 Ryzen AI 运行时,但当前安装包未含 VitisAI 加速变体;暂用 DirectML(GPU),精度相同。",
-        ),
-        (false, _) => (
-            VitisAiStatus::RecommendInstall,
-            true,
-            "检测到 AMD NPU。安装 AMD 官方 Ryzen AI 运行时可启用更省电的 NPU 路径(与 DirectML 同精度);未安装时已自动用 AMD GPU(DirectML)+ CPU 兜底,无需操作即可使用。",
-        ),
+        )
+    } else {
+        (
+            VitisAiStatus::DirectmlActiveNpuRoadmap,
+            "已用 AMD GPU(DirectML)+ CPU 推理,与 NPU 同精度,开箱即用无需操作。NPU(VitisAI)硬件加速在路线图上(待 ORT 升级解锁),当前版本暂不调用。",
+        )
     };
     Some(VitisAiAdvice {
         npu_present,
         runtime_present,
         vitis_compiled,
         status,
-        recommend_install,
-        download_url: RYZEN_AI_INSTALL_URL,
+        npu_roadmap: !active,
+        learn_more_url: RYZEN_AI_INSTALL_URL,
         rationale,
         benchmark: VitisAiBenchmark::BENCH,
     })
@@ -805,36 +812,33 @@ mod tests {
     }
 
     #[test]
-    fn advice_recommends_install_when_npu_but_no_runtime() {
-        let a = vitisai_advice(true, false, false).unwrap();
-        assert_eq!(a.status, VitisAiStatus::RecommendInstall);
-        assert!(a.recommend_install);
-        assert_eq!(a.download_url, RYZEN_AI_INSTALL_URL);
-        // 数据一定带上(同精度 CER + 双路 p50)。
-        assert_eq!(a.benchmark.npu_ocr_cer_pct, a.benchmark.directml_ocr_cer_pct);
-        assert!(a.benchmark.npu_p50_ms > a.benchmark.directml_p50_ms); // NPU 慢但省电
+    fn advice_directml_active_npu_roadmap_when_no_usable_vitis() {
+        // 当前 shipped 现实:vitis 未编入 → NPU 在场也走 DirectML+CPU,NPU 列路线图。
+        for &(rt, compiled) in &[(false, false), (true, false), (false, true)] {
+            let a = vitisai_advice(true, rt, compiled).unwrap();
+            assert_eq!(a.status, VitisAiStatus::DirectmlActiveNpuRoadmap, "rt={rt} compiled={compiled}");
+            assert!(a.npu_roadmap);
+            // 数据一定带上(同精度 CER + 双路 p50)。
+            assert_eq!(a.benchmark.npu_ocr_cer_pct, a.benchmark.directml_ocr_cer_pct);
+            assert!(a.benchmark.npu_p50_ms > a.benchmark.directml_p50_ms); // NPU 慢但省电
+        }
     }
 
     #[test]
-    fn advice_active_when_runtime_present_and_vitis_compiled() {
+    fn advice_active_only_when_runtime_present_and_vitis_compiled() {
+        // 前向兼容:仅当 ORT 升级后真编入 vitis + 运行时在场,才置 Active。
         let a = vitisai_advice(true, true, true).unwrap();
         assert_eq!(a.status, VitisAiStatus::Active);
-        assert!(!a.recommend_install);
-    }
-
-    #[test]
-    fn advice_flags_runtime_ready_but_build_lacks_vitis() {
-        let a = vitisai_advice(true, true, false).unwrap();
-        assert_eq!(a.status, VitisAiStatus::RuntimeReadyBuildLacksVitis);
-        assert!(!a.recommend_install); // 已装运行时,不再劝装;但本构建用不上
+        assert!(!a.npu_roadmap);
     }
 
     #[test]
     fn advice_serializes_with_kebab_status() {
         let a = vitisai_advice(true, false, false).unwrap();
         let j = serde_json::to_string(&a).unwrap();
-        assert!(j.contains("\"recommend-install\""), "status kebab-case: {j}");
+        assert!(j.contains("\"directml-active-npu-roadmap\""), "status kebab-case: {j}");
         assert!(j.contains("\"benchmark\""));
         assert!(j.contains("ryzenai.docs.amd.com"));
+        assert!(!j.contains("recommend"), "no misleading install CTA: {j}");
     }
 }
