@@ -173,6 +173,12 @@ pub struct AppState {
     /// 经 `register()` 注入 `LawCaseStrategy` 等行业策略。`Arc` 让 analyze handler
     /// 廉价 clone 出 `Arc<dyn OrganizationStrategy>` 而不持 AppState 锁。
     pub strategy_registry: std::sync::Arc<attune_core::organizer::strategy::StrategyRegistry>,
+    /// Capability Registry (P0 ②, spec 2026-06-26): 「重能力」元数据的单一真相源。
+    /// 在 `new` 里 seed 9 个内置 OSS 重能力(embedding/reranker/ocr/asr/llm/vlm/
+    /// web-search/pluginhub/marketplace);health/enabled 由 `refresh_capability_health`
+    /// 从既有 model_bootstrap/provider presence/member_state 投影。独立锁(内部
+    /// Arc<RwLock>),从不嵌套在 vault/vectors/fulltext guard 内。
+    pub capabilities: attune_core::capability::CapabilityRegistry,
 }
 
 impl AppState {
@@ -208,7 +214,7 @@ impl AppState {
                 std::sync::Arc::new(attune_core::plugin_registry::PluginRegistry::new())
             }
         };
-        Self {
+        let state = Self {
             vault: Mutex::new(vault),
             fulltext: Mutex::new(None),
             vectors: Mutex::new(None),
@@ -294,7 +300,117 @@ impl AppState {
             strategy_registry: std::sync::Arc::new(
                 attune_core::organizer::strategy::StrategyRegistry::new(),
             ),
+            // Capability Registry starts empty; seeded below before returning.
+            capabilities: attune_core::capability::CapabilityRegistry::new(),
+        };
+        // P0 ②: seed the 9 builtin OSS heavy-capability descriptors. health/enabled
+        // are placeholders here (Ok / default); real runtime health is projected at
+        // request time by `refresh_capability_health` (the diagnostics handler).
+        state.register_builtin_capabilities();
+        state
+    }
+
+    /// P0 ② (spec 2026-06-26): seed the static builtin OSS capability descriptors.
+    /// Called once at the end of `AppState::new`. Pure metadata — registers nothing
+    /// Pro/Enterprise (OSS boundary: attune-core/attune-server self-register only OSS;
+    /// attune-pro extends the registry separately). Idempotent on id.
+    fn register_builtin_capabilities(&self) {
+        use attune_core::capability::{Capability, CapabilityKind};
+        let r = &self.capabilities;
+        // Local-first models (require a local model, no outbound by default).
+        r.register(
+            Capability::builtin("embedding", "Embedding", CapabilityKind::Model)
+                .requires_local_model(true),
+        );
+        r.register(
+            Capability::builtin("reranker", "Reranker", CapabilityKind::Model)
+                .requires_local_model(true),
+        );
+        r.register(
+            Capability::builtin("ocr", "OCR", CapabilityKind::Feature).requires_local_model(true),
+        );
+        r.register(
+            Capability::builtin("asr", "ASR", CapabilityKind::Feature).requires_local_model(true),
+        );
+        // Cloud-default models (outbound by default; LLM not bundled per M2).
+        r.register(
+            Capability::builtin("llm", "LLM", CapabilityKind::Model).allows_outbound(true),
+        );
+        r.register(
+            Capability::builtin("vlm", "VLM", CapabilityKind::Model).allows_outbound(true),
+        );
+        // Outbound source.
+        r.register(
+            Capability::builtin("web-search", "Web Search", CapabilityKind::Source)
+                .allows_outbound(true),
+        );
+        // Member-gated feature that reaches the hub over the network.
+        r.register(
+            Capability::builtin("pluginhub", "Plugin Hub", CapabilityKind::Feature)
+                .requires_member(true)
+                .allows_outbound(true),
+        );
+        // OSS plugin marketplace surface (tier=Oss — NOT a Pro vertical).
+        r.register(Capability::builtin(
+            "marketplace",
+            "Marketplace",
+            CapabilityKind::Feature,
+        ));
+    }
+
+    /// P0 ② (spec 2026-06-26): project current runtime signals onto the registry's
+    /// `health` + `enabled` fields. Cheap, no I/O, no item/vault-content read.
+    /// Called by the diagnostics handler before snapshotting.
+    ///
+    /// Data sources (all already in `AppState`): `model_bootstrap` phases for the
+    /// four base models; provider presence (`llm()`/`vlm()`/`web_search()`); and
+    /// `member_state` for the member-gated `pluginhub`. Lock discipline: the only
+    /// foreign lock taken is `member_state` (independent of vault/vectors/fulltext);
+    /// the registry write lock is independent too — never nested with the index
+    /// hot-path locks, so this cannot ABBA-deadlock (spec §11 锁序).
+    pub fn refresh_capability_health(&self) {
+        use attune_core::capability::CapabilityHealth as H;
+        use attune_core::infer::bootstrap_status::ModelPhase;
+
+        // Base models: map ModelPhase → health, enabled iff Ready.
+        for (id, class) in [
+            ("embedding", "embedding"),
+            ("reranker", "reranker"),
+            ("ocr", "ocr"),
+            ("asr", "asr"),
+        ] {
+            let h = match self.model_bootstrap.phase(class) {
+                Some(ModelPhase::Ready) => H::Ok,
+                Some(ModelPhase::Downloading) | Some(ModelPhase::Pending) => H::Installing,
+                Some(ModelPhase::Failed { .. }) | None => H::Unavailable,
+            };
+            self.capabilities.set_health(id, h);
+            self.capabilities.set_enabled(id, h == H::Ok);
         }
+
+        // llm / vlm / web-search: provider presence.
+        for (id, present) in [
+            ("llm", self.llm().is_some()),
+            ("vlm", self.vlm().is_some()),
+            ("web-search", self.web_search().is_some()),
+        ] {
+            self.capabilities
+                .set_health(id, if present { H::Ok } else { H::Unavailable });
+            self.capabilities.set_enabled(id, present);
+        }
+
+        // pluginhub: enabled iff a paid member; available-but-gated otherwise.
+        let paid = self
+            .member_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_paid();
+        self.capabilities.set_enabled("pluginhub", paid);
+        self.capabilities
+            .set_health("pluginhub", if paid { H::Ok } else { H::Degraded });
+
+        // marketplace: OSS browse surface is always reachable.
+        self.capabilities.set_health("marketplace", H::Ok);
     }
 
     /// 整理策略注册表的廉价句柄(Arc clone)。analyze handler 用它 resolve
