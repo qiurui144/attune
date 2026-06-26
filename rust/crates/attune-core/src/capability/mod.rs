@@ -310,3 +310,78 @@ mod tests {
         assert_send_sync::<CapabilityRegistry>();
     }
 }
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// list()/snapshot() 始终按 id 升序,与插入顺序无关(golden 测试可依赖的决定性顺序)。
+        #[test]
+        fn list_is_always_id_sorted(
+            ids in proptest::collection::vec("[a-z][a-z0-9-]{0,8}", 0..20)
+        ) {
+            let r = CapabilityRegistry::new();
+            for id in &ids {
+                r.register(Capability::builtin(id, id, CapabilityKind::Feature));
+            }
+            let listed: Vec<String> = r.list().into_iter().map(|c| c.id).collect();
+            let mut sorted = listed.clone();
+            sorted.sort();
+            prop_assert_eq!(listed.clone(), sorted);
+            // snapshot 与 list 同序同内容(别名语义)。
+            let snap: Vec<String> = r.snapshot().into_iter().map(|c| c.id).collect();
+            prop_assert_eq!(snap, listed);
+        }
+
+        /// register 按 id 幂等:最终条数 == 唯一 id 数(同 id 覆盖不增条)。
+        #[test]
+        fn count_equals_unique_ids(
+            ids in proptest::collection::vec("[a-z]{1,6}", 0..30)
+        ) {
+            let r = CapabilityRegistry::new();
+            for id in &ids {
+                r.register(Capability::builtin(id, id, CapabilityKind::Model));
+            }
+            let unique: std::collections::BTreeSet<_> = ids.iter().collect();
+            prop_assert_eq!(r.list().len(), unique.len());
+        }
+
+        /// JSON 序列化→反序列化 roundtrip 保留全字段(snapshot 稳定性)。
+        #[test]
+        fn capability_json_roundtrip(
+            member in any::<bool>(),
+            outbound in any::<bool>(),
+            vis in any::<bool>(),
+            local in any::<bool>()
+        ) {
+            let c = Capability::builtin("x", "X", CapabilityKind::Source)
+                .requires_member(member)
+                .allows_outbound(outbound)
+                .requires_local_model(local)
+                .ui_visible(vis);
+            let json = serde_json::to_string(&c).unwrap();
+            let back: Capability = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(c, back);
+        }
+
+        /// set_health 只改存在的 id:对随机不存在 id 返 false 且不插入(注册集合不变)。
+        #[test]
+        fn set_health_only_mutates_existing(
+            present in "[a-z]{1,6}",
+            absent in "[A-Z]{1,6}"  // 大写域,与小写 present 永不相交
+        ) {
+            let r = CapabilityRegistry::new();
+            r.register(Capability::builtin(&present, &present, CapabilityKind::Model));
+            let before = r.list().len();
+            // 存在的 id → true 且 health 改变。
+            prop_assert!(r.set_health(&present, CapabilityHealth::Installing));
+            prop_assert_eq!(r.get(&present).unwrap().health, CapabilityHealth::Installing);
+            // 不存在的 id → false 且不插入。
+            prop_assert!(!r.set_health(&absent, CapabilityHealth::Ok));
+            prop_assert!(r.get(&absent).is_none());
+            prop_assert_eq!(r.list().len(), before);
+        }
+    }
+}
