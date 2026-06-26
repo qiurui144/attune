@@ -127,6 +127,16 @@ fn prepend_lib_search_path(dir: &std::path::Path) {
 #[inline]
 fn init_ort_dylib() {}
 
+/// OpenVINO 编译缓存目录(`models/ov-cache/`)。首次编译量化图的产物落盘,后续 session
+/// 加载跳过重编译(155H 实测 iGPU 36s → 缓存命中后 ~1-2s)。建不了目录 → None(不设
+/// cache_dir,OV 退化为每次重编译,功能仍可用,只是慢)。
+#[cfg(feature = "openvino")]
+fn ov_cache_dir() -> Option<String> {
+    let dir = crate::platform::models_dir().join("ov-cache");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.to_string_lossy().into_owned())
+}
+
 /// 把 `EpChoice` 链 build 成 ORT `ExecutionProviderDispatch` 列表。
 ///
 /// 每个非默认 EP 走 `#[cfg(feature=...)]` 门:未编入该 feature 时不会引用对应 `ort::ep`
@@ -148,7 +158,15 @@ fn build_ep_dispatches(chain: &[EpChoice]) -> Vec<ExecutionProviderDispatch> {
             EpChoice::CoreMl => out.push(ort::ep::CoreML::default().build()),
             #[cfg(feature = "openvino")]
             EpChoice::OpenVino(dev) => {
-                out.push(ort::ep::OpenVINO::default().with_device_type(dev.device_type()).build())
+                // OV 首次编译量化图(bge-m3 INT8 QDQ)昂贵 —— 155H 实测 iGPU 36s / NPU 首推 75s /
+                // CPU 10s。无缓存时每次 unlock 都重编译(embedding+reranker 双 session 串行 ~72s),
+                // CPU 饱和拖垮 tokio → unlock 超时(崩因 #158-#2 根因:不是崩/挂,是未缓存的慢编译)。
+                // cache_dir 把编译产物落盘 → 后续加载秒级。建不了缓存目录则退化为每次编译(仍可用)。
+                let mut b = ort::ep::OpenVINO::default().with_device_type(dev.device_type());
+                if let Some(cache) = ov_cache_dir() {
+                    b = b.with_cache_dir(cache);
+                }
+                out.push(b.build())
             }
             #[cfg(feature = "rocm")]
             EpChoice::Rocm => out.push(ort::ep::ROCm::default().build()),

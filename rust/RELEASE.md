@@ -1,6 +1,6 @@
 # attune 版本记录
 
-## v1.5.0-alpha.1 (Unreleased) — OpenVINO 硬件加速(Intel iGPU/NPU 真生效)
+## v1.5.0-alpha.3 (Unreleased) — OpenVINO 硬件加速(Intel iGPU/NPU 真生效)
 
 > 版本说明:v1.4.0 GA 仍 pending(等 rc.7 用户 exe 验收),其 GA tag 将从 rc.7 commit 切;
 > 本 1.5.0 线在 develop 并行推进。下方「写作引擎核心」节是 1.4.0 内容(rc.7 已含),GA 时归 v1.4.0。
@@ -9,8 +9,14 @@
 - **🖥️ OpenVINO EP 经 ort load-dynamic 真生效(#158,实验)**:解决「硬件在场也回退 CPU」——
   pyke 预编译不含 OpenVINO provider,故 openvino 变体改 `ort-dynamic`(load-dynamic),运行时经
   `ORT_DYLIB_PATH` 加载 ep-stacks/openvino 里**含 OpenVINO provider 的完整 libonnxruntime**
-  (onnxruntime-openvino 1.24.1 wheel,MIT+OpenVINO Apache-2.0,company-mirror 托管)。Intel
-  iGPU/NPU 上 embedding/rerank/OCR 真跑加速器。
+  (onnxruntime-openvino 1.24.1 wheel + OpenVINO 2025.4.1,MIT+Apache-2.0,company-mirror 托管)。
+  155H 实测 OV 真接管 bge-m3:iGPU 推理 0.22s vs CPU 0.47s(**~2× 加速**)。
+- **🔧 alpha.3 两修复(155H 真机攻坚出)**:① **DLL 搜索路径**(1503299)—— onnxruntime.dll 经
+  ORT_DYLIB_PATH 加载后,其兄弟依赖 openvino.dll 同目录但 Windows 不搜被 dlopen 的 dll 自身目录,
+  故 init_ort_dylib 设 ORT_DYLIB_PATH 前先把栈目录 prepend 进 PATH/LD_LIBRARY_PATH(缺则 OV 失败回落
+  CPU 无加速)。② **OV 编译缓存 `with_cache_dir`(`models/ov-cache/`)**—— OV 首次编译 bge-m3
+  量化图昂贵(155H iGPU 36s / NPU 首推 75s),无缓存时每次 unlock 重编译 embedding+reranker 双
+  session(~72s)拖垮启动;cache_dir 落盘 → 首次一次性,后续 unlock 秒级。
 - **零回归保证**:base/directml/cuda 变体 ort 链接**一行不改**(留 download-binaries);openvino
   是**新增 opt-in 变体**(`Attune_*-openvino.{exe,deb}`)。互斥 feature `ort-bundled`(默认)/
   `ort-dynamic`,cargo tree 实证默认三层 feature 集不变。
@@ -19,15 +25,21 @@
 - 无。新增 opt-in 变体 + 内部 feature 重构;默认/已发变体行为不变。
 
 ### Migration
-- 无需迁移。openvino 变体用户:首次运行联网下 openvino 栈(~90MB,同底座模型按需)。
+- 无需迁移。openvino 变体用户:首次运行联网下 openvino 栈(~90MB,同底座模型按需);
+  **首次 unlock 会编译 OV 图(iGPU ~36s),编译产物缓存到 `models/ov-cache/`,之后 unlock 秒级**。
 
 ### Known Limitations
 - **openvino 变体强依赖 ep-stacks/openvino 栈**:load-dynamic = **不捆绑 onnxruntime**,故栈未
   就位时**所有 ONNX 推理(embedding/rerank/OCR)不可用**(graceful Err,不崩;Chat 云 LLM 仍可用)。
-  栈首次联网按需下;company-mirror 须先托管该栈(mirror-sync 组装 + pin sha)。
-- **OpenVINO 生效 = 实验,待 155H 真机验证(§1.6)**:`ai_stack.active_ep==openvino` + 真跑
-  iGPU/NPU + 时延/功耗对照 = PENDING-真机。**Windows OV 版本匹配**(onnxruntime-openvino 1.24.1 ↔
-  openvino 2026.2.1 ABI)是最大未知,须 155H 定;不符则钉精确 OV 版本。
+  栈首次联网按需下,落 `models/ep-stacks/openvino/`(注意是 `models/` 下);company-mirror 须先托管。
+- **OpenVINO 生效 = 实验,155H 真机部分验证**:OV 真接管 bge-m3 + 加速已实证(Python 隔离);
+  **待 alpha.3 二进制(含上述两修复)装机端到端验**:`ai_stack.active_ep==openvino` + 二次 unlock
+  秒级(缓存命中)+ 时延/功耗对照 = PENDING-alpha.3-真机。OV 版本已定 **2025.4.1**(配 onnxruntime-openvino
+  1.24.1,非 2026.2.1)。
+- **首次 unlock OV 编译耗时**:iGPU 首编译 ~36s(缓存后秒级);NPU 首次推理含编译 ~75s。后台线程
+  建 session,不阻塞 UI 渲染,但首次嵌入就绪有延迟(进度经 /ai_stack 暴露)。
+- **openvino 变体当前不含 in-app OCR**:`nontext`(OCR)feature 默认关且未加入变体 feature 集,故
+  desktop openvino 变体 OV 仅作用 embedding/reranker。Intel 禁 DirectML 的 OCR 场景需另启 nontext。
 - ROCm / VitisAI 机制就绪但本期不托管:ROCm=GB 级 runtime 用户自装 + EP 在 ORT 1.23 已移除;
   VitisAI=AMD 闭源 EULA 不可托管(仅用户自装 Ryzen AI)。
 
