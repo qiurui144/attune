@@ -1,9 +1,10 @@
 # attune 版本记录
 
-## v1.5.0-alpha.3 (Unreleased) — OpenVINO 硬件加速(Intel iGPU/NPU 真生效)
+## v1.5.0-rc.1 (Unreleased) — OpenVINO 硬件加速(Intel iGPU/NPU 真生效,155H 真机验证 PASS)
 
 > 版本说明:v1.4.0 GA 仍 pending(等 rc.7 用户 exe 验收),其 GA tag 将从 rc.7 commit 切;
 > 本 1.5.0 线在 develop 并行推进。下方「写作引擎核心」节是 1.4.0 内容(rc.7 已含),GA 时归 v1.4.0。
+> **rc.1 = OpenVINO 两修复(DLL 搜索路径 + cache_dir)经 155H 真机 E2E 验证通过,冻结不加新功能。**
 
 ### Highlights
 - **🖥️ OpenVINO EP 经 ort load-dynamic 真生效(#158,实验)**:解决「硬件在场也回退 CPU」——
@@ -32,12 +33,17 @@
 - **openvino 变体强依赖 ep-stacks/openvino 栈**:load-dynamic = **不捆绑 onnxruntime**,故栈未
   就位时**所有 ONNX 推理(embedding/rerank/OCR)不可用**(graceful Err,不崩;Chat 云 LLM 仍可用)。
   栈首次联网按需下,落 `models/ep-stacks/openvino/`(注意是 `models/` 下);company-mirror 须先托管。
-- **OpenVINO 生效 = 实验,155H 真机部分验证**:OV 真接管 bge-m3 + 加速已实证(Python 隔离);
-  **待 alpha.3 二进制(含上述两修复)装机端到端验**:`ai_stack.active_ep==openvino` + 二次 unlock
-  秒级(缓存命中)+ 时延/功耗对照 = PENDING-alpha.3-真机。OV 版本已定 **2025.4.1**(配 onnxruntime-openvino
-  1.24.1,非 2026.2.1)。
-- **首次 unlock OV 编译耗时**:iGPU 首编译 ~36s(缓存后秒级);NPU 首次推理含编译 ~75s。后台线程
-  建 session,不阻塞 UI 渲染,但首次嵌入就绪有延迟(进度经 /ai_stack 暴露)。
+- **OpenVINO 生效 = 155H 真机 E2E PASS(rc.1)**:alpha.3 openvino 变体装 155H(Intel Core Ultra 7
+  155H),app stdout 实证 `[OpenVINO-EP] Choosing Device: NPU` + `Successfully registered
+  OpenVINOExecutionProvider` + `config: device_type=NPU cache_dir=models/ov-cache`(两修复均生效)+
+  `Model is fully supported by OpenVINO` + `Session successfully initialized` + embedding/reranker/ocr/asr
+  全 `all_ready=true`;**unlock 1.7s 快速返回(不再 90s 阻塞)**,cold+warm 两周期均 PASS,无崩无挂。
+  OV 版本 **2025.4.1**(配 onnxruntime-openvino 1.24.1)。
+- **NPU 首次推理慢(~75s)**:NPU session 编译快(~3s),但**首次实际推理含设备编译 ~75s**(Python 实证),
+  发生在首次 chat/嵌入(非 bootstrap),之后正常。iGPU 路径首编译 ~36s 经 cache_dir 落盘后秒级;NPU
+  驱动内缓存,blob 不落 models/ov-cache。
+- **auto-update 暂不可用**:Tauri updater 依赖 cloud download-mirror(`dl.` 子域 + 签名 latest.json),
+  当前 cloud 侧未部署 → updater 报 endpoint 无响应(非崩,手动下装可用)。属 cloud v4 部署 gap。
 - **openvino 变体当前不含 in-app OCR**:`nontext`(OCR)feature 默认关且未加入变体 feature 集,故
   desktop openvino 变体 OV 仅作用 embedding/reranker。Intel 禁 DirectML 的 OCR 场景需另启 nontext。
 - ROCm / VitisAI 机制就绪但本期不托管:ROCm=GB 级 runtime 用户自装 + EP 在 ORT 1.23 已移除;
