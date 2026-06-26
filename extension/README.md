@@ -6,9 +6,9 @@ Attune 私有 AI 知识伙伴的浏览器伴侣 — Manifest V3 + Preact + Vite�
 
 - **AI 对话捕获**：ChatGPT / Claude / Gemini 三大平台对话自动入库（MutationObserver + 2s debounce + djb2 去重）
 - **浏览状态信号**：除 AI/登录/密码管理域名外，G1 通用浏览摄取（`<all_urls>` 配置在 manifest）
-- **侧栏（Side Panel）**：搜索 / 时间线 / 文件 / 状态
+- **侧栏（Side Panel）**：搜索 / 时间线 / 状态
 - **状态指示器**：4 态（disabled / processing / captured / offline）
-- **后端联动**：心跳 + 会话感知加权 + 文件拖拽上传
+- **后端联动**：心跳 + 会话感知加权 + 一键保存当前页到知识库
 
 > v0.6.0 之前提供向 AI 网站注入前缀的功能，cleanup-r15 删除（产品方向改为内置 Chat + RAG，不再向 AI 网站 DOM 注入修改对话）。捕获能力保留。
 
