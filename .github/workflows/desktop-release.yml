@@ -110,10 +110,17 @@ jobs:
           FEATURES: ${{ matrix.features }}
           NO_DEFAULT: ${{ matrix.no_default }}
         # FEATURES 空 = 基础 CPU 包(默认 build,行为不变);非空 = EP 变体,经 desktop→
-        # server→core feature passthrough 到 ort/<ep>。NO_DEFAULT(仅 openvino 变体设
-        # `--no-default-features`)关掉默认 ort-bundled + asr-sensevoice,改 ort-dynamic;
-        # 其余变体 NO_DEFAULT 空 → 行为不变(custom-protocol 等默认仍在)。
-        run: cargo tauri build --bundles "$BUNDLES" $NO_DEFAULT ${FEATURES:+--features "$FEATURES"}
+        # server→core feature passthrough 到 ort/<ep>。
+        # NO_DEFAULT(仅 openvino 变体设 `--no-default-features`):`cargo tauri build` **不认**
+        # `--no-default-features` 为自身 flag(它走 tauri-cli arg 解析)→ 必须经 `--` 转发给
+        # cargo。故 openvino 变体把 no-default + features 全放 `--` 之后给 cargo;其余变体
+        # (base/cuda/directml)保持原 tauri `--features` 路径,**零行为变化**。
+        run: |
+          if [ -n "$NO_DEFAULT" ]; then
+            cargo tauri build --bundles "$BUNDLES" -- $NO_DEFAULT ${FEATURES:+--features "$FEATURES"}
+          else
+            cargo tauri build --bundles "$BUNDLES" ${FEATURES:+--features "$FEATURES"}
+          fi
 
       # GPU 变体:给所有 installer(+ .sig)在最终扩展名前插入 -<variant>,避免与
       # 基础 CPU 包在同一 Release 撞名;基础包(variant 空)跳过此步,名字不变。
