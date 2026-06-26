@@ -328,8 +328,11 @@ jobs:
       - name: attune-core builds with wasm-runtime feature OFF (K3 极小镜像路径)
         if: matrix.os == 'ubuntu-latest'
         working-directory: rust
-        # GA checklist:--no-default-features 去 wasmtime 后 native cap 仍编译过。
-        run: cargo build --release -p attune-core --no-default-features
+        # GA checklist:去 wasmtime(wasm-runtime)后 native cap 仍编译过。
+        # 注:ort 非 optional dep,必须选链接模型(ort-bundled XOR ort-dynamic,见 lib.rs 守卫);
+        # 纯 --no-default-features 三默认全丢 → 撞 ort 互斥 compile_error。故只丢 wasm-runtime,
+        # 显式保留 ort-bundled + asr-sensevoice(本守卫只验 wasm-off 形态,x86 用 ort-bundled)。
+        run: cargo build --release -p attune-core --no-default-features --features ort-bundled,asr-sensevoice
       - name: WASM leaf build guard (attune-agent-sdk 必须可编 wasm32-wasip1)
         # leaf crate 零 native dep 守卫:任一 native-only crate(rusqlite/tokio/
         # reqwest/usearch/tantivy/hdbscan/socket2/serde_yaml/chrono)回流即编译失败,
