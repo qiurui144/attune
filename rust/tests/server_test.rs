@@ -9,26 +9,38 @@ use attune_server::state::AppState;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+/// 测试环境守卫：持有 TempDir + data-dir override guard，仅需保活到测试结束（无方法）。
+/// 关键:override 让 `platform::{data_dir,config_dir}()` 返回隔离的 app_dir,于是 vault 的
+/// `device.key` 与 `IngestStaging::open_default()` 解析到**同一根**——否则锁定态 upload 的
+/// staging 走真实 `~/.config/attune`(CI 为空)读不到 device key → 503 staging-unavailable
+/// (修 CI 失败 `test_upload_when_locked_stages_for_ingest`,纯测试 harness 路径对齐,零生产改动)。
+struct TestEnv {
+    _tmp: TempDir,
+    _guard: attune_server::test_support::DataDirGuard,
+}
+
 /// 创建一个 Sealed（未初始化）状态的 AppState
-fn make_sealed_state() -> (Arc<AppState>, TempDir) {
+fn make_sealed_state() -> (Arc<AppState>, TestEnv) {
     let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join("vault.db");
-    let config_dir = tmp.path().join("config");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    let vault = Vault::open(&db_path, &config_dir).unwrap();
+    let app_dir = tmp.path().join("attune");
+    std::fs::create_dir_all(&app_dir).unwrap();
+    // override 让 vault 的 device.key 与 open_default() staging 同根（见 TestEnv 文档）。
+    let guard = attune_server::test_support::override_data_dir(app_dir.clone());
+    let db_path = app_dir.join("vault.db");
+    let vault = Vault::open(&db_path, &app_dir).unwrap();
     // require_auth=false：测试中不携带 Bearer token
     let state = Arc::new(AppState::new(vault, false));
-    (state, tmp)
+    (state, TestEnv { _tmp: tmp, _guard: guard })
 }
 
 /// 创建已 setup 并处于 Unlocked 状态的 AppState
-fn make_unlocked_state() -> (Arc<AppState>, TempDir) {
-    let (state, tmp) = make_sealed_state();
+fn make_unlocked_state() -> (Arc<AppState>, TestEnv) {
+    let (state, env) = make_sealed_state();
     {
         let vault = state.vault.lock().unwrap();
         vault.setup("test-password").unwrap();
     }
-    (state, tmp)
+    (state, env)
 }
 
 async fn do_get(state: Arc<AppState>, uri: &str) -> (StatusCode, Value) {

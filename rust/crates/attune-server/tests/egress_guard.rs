@@ -119,6 +119,15 @@ const ALLOWLIST: &[(&str, usize, &str)] = &[
          class as ppocr.rs (one-time asset fetch from release mirror); no OutboundGate \
          needed for asset downloads that carry no user content.",
     ),
+    (
+        "attune-core/src/edge_cloud/capacity.rs",
+        1,
+        "k3-scheduler /capacity probe (edge-cloud Model 1, #144). Default base is \
+         hardcoded loopback http://127.0.0.1:8090 (spec §5.E: never exposed via frpc). \
+         Local destination — only the model-name string on the wire, no vault data; any \
+         failure degrades to CapacityState::Unknown. Same class as status.rs Ollama \
+         loopback probe — local, no OutboundGate required.",
+    ),
 ];
 
 const PATTERNS: &[&str] = &[
