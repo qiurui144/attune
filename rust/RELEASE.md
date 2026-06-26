@@ -48,6 +48,13 @@
   desktop openvino 变体 OV 仅作用 embedding/reranker。Intel 禁 DirectML 的 OCR 场景需另启 nontext。
 - ROCm / VitisAI 机制就绪但本期不托管:ROCm=GB 级 runtime 用户自装 + EP 在 ORT 1.23 已移除;
   VitisAI=AMD 闭源 EULA 不可托管(仅用户自装 Ryzen AI)。
+- **已知 transitive 漏洞 RUSTSEC-2026-0187(lopdf 0.34 PDF 解析 DoS,已 allowlist)**:深度嵌套
+  PDF(约 21KB 构造)可触发 lopdf 栈溢出 `SIGABRT`,无法 `catch_unwind` 捕获 → 解析不可信 PDF
+  的路径存在 DoS 风险。patched ≥0.42.0,但 lopdf **仅经 pdf-extract 0.8.2 transitive 引入**,
+  而 pdf-extract 0.8 pin `lopdf = "^0.34"`(semver 排除 0.42);修复需 pdf-extract 0.8 → 0.12
+  跨 4 个 minor 的 breaking API 升级(ingest 关键路径),**超出 rc.1 feature-freeze 范围**,已在
+  `deny.toml`/`.cargo/audit.toml`/`audit.toml` allowlist 并**计划下个 minor 升 pdf-extract 清除**。
+  缓解:当前 PDF 摄入面向用户自有文档(非公开不可信上传),实际暴露面有限。
 
 ---
 

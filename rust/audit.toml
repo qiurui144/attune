@@ -11,4 +11,9 @@ ignore = [
   "RUSTSEC-2026-0002",
   # rand unsound — 仅 custom logger 用 rand::rng() 场景触发, 我方未触发.
   "RUSTSEC-2026-0097",
+  # lopdf 0.34 深嵌套 PDF 栈溢出 DoS (RUSTSEC-2026-0187). 仅经 pdf-extract 0.8.2
+  # transitive (其 pin `lopdf = "^0.34"`, 排除 patched 0.42). 修复需 pdf-extract
+  # 0.8 → 0.12 (ingest 路径 breaking API), 推迟到 rc.1 feature-freeze 之后的下个 minor.
+  # 见 RELEASE.md Known Limitations.
+  "RUSTSEC-2026-0187",
 ]

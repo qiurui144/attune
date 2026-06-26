@@ -232,6 +232,37 @@ jobs:
           curl -fSL --retry 5 -o "$SV_DIR/tokens.txt"      "$SV_BASE/tokens.txt"
           ls -la "$SV_DIR"
 
+      # CI-B fix B (reports/2026-06-26-rc1-ci-16fail-rootcause.md): sherpa-rs-sys build.rs
+      # only copies libsherpa-onnx-c-api.so into target/.../deps/ when build.rs RE-RUNS
+      # (cache MISS). On a rust-cache HIT the build.rs fingerprint is unchanged → no copy,
+      # and rust-cache prunes loose .so from target/ on save → runtime loader can't find it
+      # ("cannot open shared object file"). Decouple runtime resolution from build.rs rerun
+      # by pointing the loader at the sherpa-rs download cache (always restored via
+      # cache-directories ~/.cache/sherpa-rs). Cache-MISS: .so not downloaded yet → find is
+      # empty, build.rs will copy into deps/ during the build → || echo tolerates, no fail.
+      - name: Expose sherpa-rs runtime dylib (linux — decouple from build.rs rerun)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          SO_DIR=$(find ~/.cache/sherpa-rs -name 'libsherpa-onnx-c-api.so' -printf '%h\n' 2>/dev/null | head -1)
+          if [ -n "$SO_DIR" ]; then
+            echo "LD_LIBRARY_PATH=$SO_DIR:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+            echo "sherpa dylib dir → LD_LIBRARY_PATH: $SO_DIR"
+          else
+            echo "sherpa .so not in cache yet (cache MISS) — build.rs will copy into target deps/."
+          fi
+      - name: Expose sherpa-rs runtime dylib (windows — decouple from build.rs rerun)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          DLL_DIR=$(find ~/.cache/sherpa-rs -name 'sherpa-onnx-c-api.dll' -printf '%h\n' 2>/dev/null | head -1)
+          if [ -n "$DLL_DIR" ]; then
+            cygpath -w "$DLL_DIR" >> "$GITHUB_PATH"
+            echo "sherpa dll dir → PATH: $DLL_DIR"
+          else
+            echo "sherpa .dll not in cache yet (cache MISS) — build.rs will copy into target deps/."
+          fi
+
       - name: SenseVoice ASR smoke — quality gate (CER ≤ 15%, zh.wav)
         shell: bash
         working-directory: rust
@@ -416,6 +447,34 @@ jobs:
           cache-directories: |
             ~/.cache/ort.pyke.io
             ~/.cache/sherpa-rs
+
+      # CI-B fix B (reports/2026-06-26-rc1-ci-16fail-rootcause.md): on a rust-cache HIT the
+      # sherpa-rs build.rs does NOT re-run, so libsherpa-onnx-c-api.so is never re-copied into
+      # target/.../deps/ and the test binary fails at runtime with "cannot open shared object
+      # file". Point the loader at the always-restored ~/.cache/sherpa-rs download cache.
+      # Cache MISS: find empty → build.rs copies into deps/ during build → || branch tolerates.
+      - name: Expose sherpa-rs runtime dylib (linux — decouple from build.rs rerun)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          SO_DIR=$(find ~/.cache/sherpa-rs -name 'libsherpa-onnx-c-api.so' -printf '%h\n' 2>/dev/null | head -1)
+          if [ -n "$SO_DIR" ]; then
+            echo "LD_LIBRARY_PATH=$SO_DIR:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+            echo "sherpa dylib dir → LD_LIBRARY_PATH: $SO_DIR"
+          else
+            echo "sherpa .so not in cache yet (cache MISS) — build.rs will copy into target deps/."
+          fi
+      - name: Expose sherpa-rs runtime dylib (windows — decouple from build.rs rerun)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          DLL_DIR=$(find ~/.cache/sherpa-rs -name 'sherpa-onnx-c-api.dll' -printf '%h\n' 2>/dev/null | head -1)
+          if [ -n "$DLL_DIR" ]; then
+            cygpath -w "$DLL_DIR" >> "$GITHUB_PATH"
+            echo "sherpa dll dir → PATH: $DLL_DIR"
+          else
+            echo "sherpa .dll not in cache yet (cache MISS) — build.rs will copy into target deps/."
+          fi
 
       - name: Guard — core integration split covers every non-gate core test
         shell: bash
@@ -1045,6 +1104,8 @@ jobs:
           --test vault_setup_test
           --test model_bootstrap_test
           --test vault_locked_mode_staging_test
+          --test capability_registry_test
+          --test diagnostics_route_test
 
   rust-test-cli:
     # attune-cli (light: 4 smoke tests). Folds the attune-agent-sdk leaf-crate
