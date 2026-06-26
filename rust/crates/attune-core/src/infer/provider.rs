@@ -89,8 +89,14 @@ fn init_ort_dylib() {
             for lib in libnames {
                 let p = dir.join(lib);
                 if p.exists() {
+                    // ⭐ onnxruntime 的兄弟依赖(OV provider DLL + OV runtime libs)与它**同目录**,
+                    // 但 Windows 加载被 dlopen 的 dll 时**不搜索该 dll 自身的目录** → onnxruntime.dll
+                    // 找不到 onnxruntime_providers_openvino.dll / openvino*.dll → native crash
+                    // (155H 实证:不加此路径 app 启动即崩;加了存活)。故先把栈目录加进 DLL/so 搜索路径。
+                    // Linux 的 wheel .so 多带 $ORIGIN rpath 自解析,但加 LD_LIBRARY_PATH 兜底无害。
+                    prepend_lib_search_path(&dir);
                     std::env::set_var("ORT_DYLIB_PATH", &p);
-                    log::info!("ort-dynamic: ORT_DYLIB_PATH → {} (stack={stack})", p.display());
+                    log::info!("ort-dynamic: ORT_DYLIB_PATH → {} (+lib search path, stack={stack})", p.display());
                     return;
                 }
             }
@@ -99,6 +105,21 @@ fn init_ort_dylib() {
             "ort-dynamic: no ep-stack onnxruntime dylib found (openvino/rocm not .ready) → ORT default lookup → likely CPU"
         );
     });
+}
+
+/// 把 `dir` 加进当前进程的动态库搜索路径(Windows=PATH / Linux=LD_LIBRARY_PATH),让被
+/// dlopen 的 onnxruntime 能解析与它同目录的兄弟依赖(OV provider + OV runtime libs)。幂等。
+#[cfg(feature = "ort-dynamic")]
+fn prepend_lib_search_path(dir: &std::path::Path) {
+    let key = if cfg!(target_os = "windows") { "PATH" } else { "LD_LIBRARY_PATH" };
+    let sep = if cfg!(target_os = "windows") { ';' } else { ':' };
+    let d = dir.to_string_lossy().to_string();
+    let cur = std::env::var(key).unwrap_or_default();
+    if cur.split(sep).any(|p| p == d) {
+        return; // 已在路径里
+    }
+    let next = if cur.is_empty() { d } else { format!("{d}{sep}{cur}") };
+    std::env::set_var(key, next);
 }
 
 /// ort-bundled(默认):no-op —— onnxruntime 由 ort download-binaries 自包含,无需注入。
