@@ -191,7 +191,13 @@ jobs:
         with:
           workspaces: rust
           # Per-job key so the parallel jobs each own a cache slot (no thrash).
-          key: core-${{ matrix.os }}-v3
+          key: core-${{ matrix.os }}-v4
+          # CI-B 根因修复(reports/2026-06-26-ci-B-rootcause.md):ort/sherpa
+          # 的 dylib 落 ~/.cache(非 target/),须随 target 同缓存,否则
+          # build-script fingerprint 命中→跳过下载→链接缺库。v3→v4 强制重建。
+          cache-directories: |
+            ~/.cache/ort.pyke.io
+            ~/.cache/sherpa-rs
 
       # ── Heavy deterministic gates (attune-core-scoped): ubuntu only ──
       - name: K2 Parse Golden Gate (W3 batch C, gate <95% blocks PR)
@@ -403,7 +409,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: core-b-${{ matrix.os }}-v3
+          key: core-b-${{ matrix.os }}-v4
+          # CI-B 根因修复(reports/2026-06-26-ci-B-rootcause.md):ort/sherpa
+          # 的 dylib 落 ~/.cache(非 target/),须随 target 同缓存,否则
+          # build-script fingerprint 命中→跳过下载→链接缺库。v3→v4 强制重建。
+          cache-directories: |
+            ~/.cache/ort.pyke.io
+            ~/.cache/sherpa-rs
 
       - name: Guard — core integration split covers every non-gate core test
         shell: bash
@@ -543,7 +555,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: server-${{ matrix.os }}-v3
+          key: server-${{ matrix.os }}-v4
+          # CI-B 根因修复(reports/2026-06-26-ci-B-rootcause.md):ort/sherpa
+          # 的 dylib 落 ~/.cache(非 target/),须随 target 同缓存,否则
+          # build-script fingerprint 命中→跳过下载→链接缺库。v3→v4 强制重建。
+          cache-directories: |
+            ~/.cache/ort.pyke.io
+            ~/.cache/sherpa-rs
 
       - name: Guard — server test split covers every server test (office+A+B+C)
         shell: bash
@@ -637,7 +655,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: server-a2-${{ matrix.os }}-v3
+          key: server-a2-${{ matrix.os }}-v4
+          # CI-B 根因修复(reports/2026-06-26-ci-B-rootcause.md):ort/sherpa
+          # 的 dylib 落 ~/.cache(非 target/),须随 target 同缓存,否则
+          # build-script fingerprint 命中→跳过下载→链接缺库。v3→v4 强制重建。
+          cache-directories: |
+            ~/.cache/ort.pyke.io
+            ~/.cache/sherpa-rs
 
       - name: Guard — server test split covers every server test (office+A1+A2+B+C)
         shell: bash
@@ -720,7 +744,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: server-b-${{ matrix.os }}-v3
+          key: server-b-${{ matrix.os }}-v4
+          # CI-B 根因修复(reports/2026-06-26-ci-B-rootcause.md):ort/sherpa
+          # 的 dylib 落 ~/.cache(非 target/),须随 target 同缓存,否则
+          # build-script fingerprint 命中→跳过下载→链接缺库。v3→v4 强制重建。
+          cache-directories: |
+            ~/.cache/ort.pyke.io
+            ~/.cache/sherpa-rs
 
       - name: Guard — server test split covers every server test (office+A+B+C)
         shell: bash
@@ -821,7 +851,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: server-office-${{ matrix.os }}-v3
+          key: server-office-${{ matrix.os }}-v4
+          # CI-B 根因修复(reports/2026-06-26-ci-B-rootcause.md):ort/sherpa
+          # 的 dylib 落 ~/.cache(非 target/),须随 target 同缓存,否则
+          # build-script fingerprint 命中→跳过下载→链接缺库。v3→v4 强制重建。
+          cache-directories: |
+            ~/.cache/ort.pyke.io
+            ~/.cache/sherpa-rs
 
       - name: Guard — server test split covers every server test (office+A+B+C)
         shell: bash
@@ -900,7 +936,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: server-office-b-${{ matrix.os }}-v3
+          key: server-office-b-${{ matrix.os }}-v4
+          # CI-B 根因修复(reports/2026-06-26-ci-B-rootcause.md):ort/sherpa
+          # 的 dylib 落 ~/.cache(非 target/),须随 target 同缓存,否则
+          # build-script fingerprint 命中→跳过下载→链接缺库。v3→v4 强制重建。
+          cache-directories: |
+            ~/.cache/ort.pyke.io
+            ~/.cache/sherpa-rs
 
       - name: Guard — server test split covers every server test (office+A+B+C)
         shell: bash
@@ -978,7 +1020,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: server-c-${{ matrix.os }}-v3
+          key: server-c-${{ matrix.os }}-v4
+          # CI-B 根因修复(reports/2026-06-26-ci-B-rootcause.md):ort/sherpa
+          # 的 dylib 落 ~/.cache(非 target/),须随 target 同缓存,否则
+          # build-script fingerprint 命中→跳过下载→链接缺库。v3→v4 强制重建。
+          cache-directories: |
+            ~/.cache/ort.pyke.io
+            ~/.cache/sherpa-rs
 
       - name: Guard — server test split covers every server test (office+A+B+C)
         shell: bash
@@ -1054,7 +1102,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: cli-${{ matrix.os }}-v3
+          key: cli-${{ matrix.os }}-v4
+          # CI-B 根因修复(reports/2026-06-26-ci-B-rootcause.md):ort/sherpa
+          # 的 dylib 落 ~/.cache(非 target/),须随 target 同缓存,否则
+          # build-script fingerprint 命中→跳过下载→链接缺库。v3→v4 强制重建。
+          cache-directories: |
+            ~/.cache/ort.pyke.io
+            ~/.cache/sherpa-rs
 
       - name: cargo test -p attune-cli -p attune-agent-sdk
         working-directory: rust
@@ -1093,7 +1147,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-          key: clippy-ubuntu-latest-v3
+          key: clippy-ubuntu-latest-v4
+          # CI-B 根因修复(reports/2026-06-26-ci-B-rootcause.md):ort/sherpa
+          # 的 dylib 落 ~/.cache(非 target/),须随 target 同缓存,否则
+          # build-script fingerprint 命中→跳过下载→链接缺库。v3→v4 强制重建。
+          cache-directories: |
+            ~/.cache/ort.pyke.io
+            ~/.cache/sherpa-rs
 
       - name: cargo clippy (non-blocking)
         working-directory: rust
