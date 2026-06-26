@@ -293,6 +293,12 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/ai_stack", get(routes::ai_stack::status))
         // 本地底座模型一键拉取（OCR + ASR）
         .route("/api/v1/ai-stack/ensure", post(routes::ai_stack::ensure))
+        // 诊断中心（P0 ②, spec 2026-06-26）— Capability Registry 只读元数据投影。
+        // vault_guard bypass /diagnostics → 锁屏可用（只读元数据，不触 DEK）。
+        .route(
+            "/api/v1/diagnostics/capabilities",
+            get(routes::diagnostics::capabilities),
+        )
         // G2 Auto bookmark candidates (W4, 2026-04-27)
         // POST 不暴露：仅由 routes::browse_signals::record_batch high_engagement 路径写
         .route("/api/v1/auto-bookmarks",

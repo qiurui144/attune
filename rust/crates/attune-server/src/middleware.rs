@@ -128,6 +128,10 @@ pub async fn vault_guard(
         // (verify_scoped_token → Locked → unauthorized), 而非 guard 的通用 403。
         || path == "/mcp"
         || path.starts_with("/mcp/")
+        // /api/v1/diagnostics/* — Capability Registry projection (P0 ②). Read-only
+        // capability metadata (install/enable/health/tier), no DEK, no vault content
+        // read — usable pre-unlock so the diagnostics center renders on the lock screen.
+        || path.starts_with("/api/v1/diagnostics")
     {
         return next.run(request).await;
     }

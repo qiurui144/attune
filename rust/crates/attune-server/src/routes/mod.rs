@@ -10,6 +10,7 @@ pub mod browse_signals;
 pub mod browser_login;  // GAP-A: 浏览器登入协助 REST(触发/列/删登入会话,脱敏,桌面可点)
 pub mod chat;
 pub mod chat_sessions;
+pub mod diagnostics;  // P0 ②: read-only Capability Registry projection (/diagnostics/capabilities)
 pub mod documents;
 pub mod dsar;
 pub mod email;
