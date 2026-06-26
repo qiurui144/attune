@@ -83,6 +83,7 @@ pub mod async_fs;
 // spec: docs/superpowers/specs/2026-05-28-cache-context-token-standard-api.md
 // Public surface frozen at Task M for Plan A2 routing consumers.
 pub mod cache;
+pub mod capability;
 pub mod usage;
 // agent_quality: ACP-2 unified quality gate orchestration (workspace manifest SSOT).
 // spec: docs/superpowers/specs/2026-05-29-ai-agents-governance-orchestration.md §3 ACP-2
