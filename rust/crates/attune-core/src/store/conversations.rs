@@ -50,11 +50,33 @@ impl Store {
     }
 
     pub fn list_conversations(&self, dek: &Key32, limit: usize, offset: usize) -> Result<Vec<ConversationSummary>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, title, created_at, updated_at, project_id FROM conversations
-             ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2",
-        )?;
-        let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
+        // 旧行为 = 不按项目过滤;委托 scoped 版传 None(无 WHERE)。
+        self.list_conversations_scoped(dek, None, limit, offset)
+    }
+
+    /// 按项目过滤列对话(chat-centric IA, 2026-06-26)。`project_filter`:
+    ///   - `None`            → 全部(旧行为)
+    ///   - `Some(None)`      → 仅松散(`project_id IS NULL`)
+    ///   - `Some(Some(pid))` → 仅该项目
+    pub fn list_conversations_scoped(
+        &self,
+        dek: &Key32,
+        project_filter: Option<Option<&str>>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<ConversationSummary>> {
+        // 三态构造 WHERE。仅 Some(Some(pid)) 绑定 project_id 参,故 SQL 分两形态。
+        let where_clause = match project_filter {
+            None => "",
+            Some(None) => "WHERE project_id IS NULL",
+            Some(Some(_)) => "WHERE project_id = ?3",
+        };
+        let sql = format!(
+            "SELECT id, title, created_at, updated_at, project_id FROM conversations \
+             {where_clause} ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let map_row = |row: &rusqlite::Row| {
             let enc_title: Vec<u8> = row.get(1)?;
             Ok((
                 row.get::<_, String>(0)?,
@@ -63,7 +85,13 @@ impl Store {
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<String>>(4)?,
             ))
-        })?;
+        };
+        let rows = match project_filter {
+            Some(Some(pid)) => {
+                stmt.query_map(params![limit as i64, offset as i64, pid], map_row)?
+            }
+            _ => stmt.query_map(params![limit as i64, offset as i64], map_row)?,
+        };
         let mut results = Vec::new();
         for row in rows {
             let (id, enc_title, created_at, updated_at, project_id) =
@@ -241,5 +269,44 @@ mod tests {
     fn get_conversation_project_id_missing_returns_none() {
         let store = Store::open_memory().unwrap();
         assert_eq!(store.get_conversation_project_id("nope").unwrap(), None);
+    }
+
+    #[test]
+    fn list_conversations_scoped_three_modes() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        store.create_conversation(&dek, "a", None).unwrap();
+        store.create_conversation(&dek, "b", None).unwrap();
+        store.create_conversation(&dek, "c", Some("p1")).unwrap();
+        store.create_conversation(&dek, "d", Some("p2")).unwrap();
+        // None → all 4
+        assert_eq!(
+            store.list_conversations_scoped(&dek, None, 100, 0).unwrap().len(),
+            4
+        );
+        // Some(None) → loose only (2)
+        assert_eq!(
+            store
+                .list_conversations_scoped(&dek, Some(None), 100, 0)
+                .unwrap()
+                .len(),
+            2
+        );
+        // Some(Some("p1")) → that project only (1)
+        let p1 = store
+            .list_conversations_scoped(&dek, Some(Some("p1")), 100, 0)
+            .unwrap();
+        assert_eq!(p1.len(), 1);
+        assert_eq!(p1[0].project_id.as_deref(), Some("p1"));
+    }
+
+    #[test]
+    fn list_conversations_delegates_to_scoped_unfiltered() {
+        // The legacy list_conversations must still return everything (delegation).
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        store.create_conversation(&dek, "a", None).unwrap();
+        store.create_conversation(&dek, "b", Some("p1")).unwrap();
+        assert_eq!(store.list_conversations(&dek, 100, 0).unwrap().len(), 2);
     }
 }
