@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{self, Key32};
 use crate::error::{Result, VaultError};
+use crate::memory::MemoryScope;
 use crate::store::Store;
 
 // 钉死的 Argon2id 下限:64 MiB / 3 pass / 1 lane。离线 bundle 比在线解锁更需抗暴破,
@@ -76,9 +77,8 @@ fn derive_portable_key(passphrase: &str, salt: &[u8]) -> Result<Key32> {
     Ok(Key32::from_bytes(out))
 }
 
-/// 把当前 vault 的全部记忆收集为可移植结构(summary 已 DEK 解密 → 明文)。
-fn collect_portable_memories(store: &Store, dek: &Key32) -> Result<Vec<PortableMemory>> {
-    let rows = store.list_recent_memories(dek, usize::MAX)?;
+/// 把一组 MemoryRow 转为可移植结构(summary 已 DEK 解密 → 明文)。
+fn rows_to_portable(store: &Store, rows: Vec<crate::store::MemoryRow>) -> Result<Vec<PortableMemory>> {
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let vector = store.get_memory_vector(&r.id)?.map(|v| PortableVector {
@@ -100,17 +100,58 @@ fn collect_portable_memories(store: &Store, dek: &Key32) -> Result<Vec<PortableM
     Ok(out)
 }
 
+/// 把当前 vault 的全部记忆收集为可移植结构(summary 已 DEK 解密 → 明文)。
+fn collect_portable_memories(store: &Store, dek: &Key32) -> Result<Vec<PortableMemory>> {
+    let rows = store.list_recent_memories(dek, usize::MAX)?;
+    rows_to_portable(store, rows)
+}
+
+/// 仅收集某作用域(`Project(P) ∪ global` / `Conversation` → 仅 global)的 live 记忆。
+/// chat-centric IA (2026-06-26):支持「只导出某项目记忆」。覆盖 episodic + semantic
+/// 两类(cold 行也含,导出语义=全量可迁移,不限于热记忆)。
+fn collect_portable_memories_scoped(
+    store: &Store,
+    dek: &Key32,
+    scope: &MemoryScope,
+) -> Result<Vec<PortableMemory>> {
+    let mut rows = Vec::new();
+    for kind in ["episodic", "semantic"] {
+        // include_cold = true:导出是全量迁移语义,cold 记忆也要带走。
+        rows.extend(store.list_live_memories_scoped(dek, kind, true, scope)?);
+    }
+    rows_to_portable(store, rows)
+}
+
 /// 导出全量记忆为口令加密 bundle。
 ///
 /// 物理格式:`[manifest-json]\n[salt(16B)][ciphertext]`。manifest 明文在头部
 /// 供 import 在派生 key 前校验格式版本 + 条数;salt 随机(每次导出不同密文);
 /// ciphertext = AES-256-GCM(portable_key, JSON(memories))。
 pub fn export_memory_bundle(store: &Store, dek: &Key32, passphrase: &str) -> Result<Vec<u8>> {
+    // 全量导出(scope=None):行为不变(委托 scoped 版传 None)。
+    export_memory_bundle_scoped(store, dek, passphrase, None)
+}
+
+/// scope-aware 导出(chat-centric IA, 2026-06-26)。`scope`:
+///   - `None`               → 全量(与 [`export_memory_bundle`] 相同,含 superseded 行)
+///   - `Some(Project(P))`   → 仅该项目 live 记忆 ∪ global live 记忆
+///   - `Some(Conversation)` / `Some(Global)` → 仅 global live 记忆
+///
+/// 物理格式与全量导出一致;import 端无需改动(缺 scope 字段的记录天然落 global)。
+pub fn export_memory_bundle_scoped(
+    store: &Store,
+    dek: &Key32,
+    passphrase: &str,
+    scope: Option<&MemoryScope>,
+) -> Result<Vec<u8>> {
     let salt = crypto::generate_salt();
     let salt = &salt[..BUNDLE_SALT_LEN];
     let pkey = derive_portable_key(passphrase, salt)?;
 
-    let mems = collect_portable_memories(store, dek)?;
+    let mems = match scope {
+        None => collect_portable_memories(store, dek)?,
+        Some(s) => collect_portable_memories_scoped(store, dek, s)?,
+    };
     let payload = serde_json::to_vec(&mems)?;
     let enc = crypto::encrypt(&pkey, &payload)?;
 
@@ -312,6 +353,83 @@ mod tests {
         assert_eq!(r2.imported, 0);
         assert_eq!(r2.skipped, 5);
         assert_eq!(store2.list_recent_memories(&dek2, 100).unwrap().len(), 5);
+    }
+
+    /// Decrypt a bundle's summaries with the matching passphrase (test helper).
+    fn decode_summaries(bundle: &[u8], passphrase: &str) -> Vec<String> {
+        let nl = bundle.iter().position(|&b| b == b'\n').unwrap();
+        let rest = &bundle[nl + 1..];
+        let (salt, ct) = rest.split_at(BUNDLE_SALT_LEN);
+        let pkey = derive_portable_key(passphrase, salt).unwrap();
+        let plain = crypto::decrypt(&pkey, ct).unwrap();
+        let mems: Vec<PortableMemory> = serde_json::from_slice(&plain).unwrap();
+        mems.into_iter().map(|m| m.summary).collect()
+    }
+
+    #[test]
+    fn export_scope_only_includes_project_and_global() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["g".into()], "global-mem", "m", 0, &MemoryScope::Global)
+            .unwrap();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["a".into()], "projA-mem", "m", 0, &MemoryScope::Project("A".into()))
+            .unwrap();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["b".into()], "projB-mem", "m", 0, &MemoryScope::Project("B".into()))
+            .unwrap();
+
+        // Scoped export for project A → only A's + global, never B's.
+        let bundle = export_memory_bundle_scoped(
+            &store, &dek, "correct horse battery", Some(&MemoryScope::Project("A".into())),
+        )
+        .unwrap();
+        let sums = decode_summaries(&bundle, "correct horse battery");
+        assert!(sums.contains(&"projA-mem".to_string()));
+        assert!(sums.contains(&"global-mem".to_string()));
+        assert!(
+            !sums.contains(&"projB-mem".to_string()),
+            "scoped export of project A must NOT include project B memory"
+        );
+    }
+
+    #[test]
+    fn full_export_includes_all_scopes() {
+        // scope=None (legacy) keeps exporting everything.
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["g".into()], "global-mem", "m", 0, &MemoryScope::Global)
+            .unwrap();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["a".into()], "projA-mem", "m", 0, &MemoryScope::Project("A".into()))
+            .unwrap();
+        let bundle = export_memory_bundle(&store, &dek, "correct horse battery").unwrap();
+        let sums = decode_summaries(&bundle, "correct horse battery");
+        assert!(sums.contains(&"global-mem".to_string()));
+        assert!(sums.contains(&"projA-mem".to_string()), "full export sees project rows too");
+    }
+
+    #[test]
+    fn import_scoped_bundle_falls_back_to_global_scope() {
+        // A scoped export then imported into a fresh vault: rows land as global
+        // (PortableMemory carries no scope field → A3 default 'global' on insert).
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["a".into()], "projA-mem", "m", 0, &MemoryScope::Project("A".into()))
+            .unwrap();
+        let bundle = export_memory_bundle_scoped(
+            &store, &dek, "pw-correct-1", Some(&MemoryScope::Project("A".into())),
+        )
+        .unwrap();
+        let (store2, dek2) = empty_unlocked_store();
+        let r = import_memory_bundle(&store2, &dek2, &bundle, "pw-correct-1").unwrap();
+        assert_eq!(r.imported, 1);
+        let rows = store2.list_recent_memories(&dek2, 100).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].scope_kind, "global", "imported rows default to global scope");
     }
 
     #[test]

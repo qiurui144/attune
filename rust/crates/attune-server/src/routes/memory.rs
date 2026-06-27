@@ -80,6 +80,15 @@ pub async fn export(
         return Err(AppError::BadRequest("passphrase too short".into()));
     }
 
+    // chat-centric IA (2026-06-26): optional scope filter — body `scope: {kind, id}`.
+    // Absent → full export (legacy). kind="project" + id → only that project + global.
+    // Unknown / malformed kind falls back to Global (= global-only) via from_columns.
+    let scope = body.get("scope").and_then(|s| {
+        let kind = s.get("kind").and_then(|v| v.as_str())?;
+        let id = s.get("id").and_then(|v| v.as_str());
+        Some(attune_core::memory::MemoryScope::from_columns(kind, id))
+    });
+
     // dek 必须在 vault Unlocked 时取;锁内只取 dek + 调 export(不与 vectors/fulltext 交叠)。
     let bundle = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
@@ -87,8 +96,13 @@ pub async fn export(
             return Err(AppError::Forbidden("vault locked".into()));
         }
         let dek = vault.dek_db().map_err(int)?;
-        attune_core::memory::portability::export_memory_bundle(vault.store(), &dek, pw)
-            .map_err(int)?
+        attune_core::memory::portability::export_memory_bundle_scoped(
+            vault.store(),
+            &dek,
+            pw,
+            scope.as_ref(),
+        )
+        .map_err(int)?
     };
 
     Ok((
