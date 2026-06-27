@@ -206,6 +206,8 @@ async fn call_chat(state: &SharedState, args: &Value) -> AppResult<Value> {
         message,
         history,
         session_id,
+        // MCP chat tool maps to a loose conversation (no project binding).
+        project_id: None,
     };
     let json = chat(State(state.clone()), HeaderMap::new(), Json(body)).await?;
     Ok(json.0)

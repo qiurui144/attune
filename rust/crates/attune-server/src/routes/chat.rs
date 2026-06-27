@@ -19,6 +19,12 @@ pub struct ChatRequest {
     #[serde(default)]
     pub history: Vec<HistoryMessage>,
     pub session_id: Option<String>,
+    /// chat-centric IA (2026-06-26): bind this conversation to a project (case-file).
+    /// `Some(pid)` → project-branch conversation + memory scope = project:pid;
+    /// `None`/absent → loose conversation (conversation/global scope). Optional +
+    /// default-None → old clients (Chrome ext / desktop) are byte-identical.
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -124,6 +130,32 @@ pub async fn chat(
     if body.history.len() > MAX_HISTORY_DEPTH {
         let drop = body.history.len() - MAX_HISTORY_DEPTH;
         body.history.drain(..drop);
+    }
+
+    // chat-centric IA (2026-06-26): validate optional project_id up front. A given
+    // project_id that does not exist is a 400 `project-not-found` — never silently
+    // demoted to a loose conversation (spec §7). Absent project_id → loose, no check.
+    if let Some(pid) = body.project_id.as_deref() {
+        let exists = {
+            let vault = state
+                .vault
+                .lock()
+                .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
+            vault
+                .store()
+                .get_project(pid)
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .is_some()
+        };
+        if !exists {
+            return Err(AppError::detailed(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": format!("project '{pid}' not found"),
+                    "code": "project-not-found",
+                }),
+            ));
+        }
     }
 
     // Sprint 1 Phase B: chat keyword trigger for project recommendation
@@ -533,6 +565,39 @@ pub async fn chat(
         );
     }
 
+    // chat-centric IA (2026-06-26): resolve this turn's memory scope.
+    //   - body.project_id given (validated above) → Project(pid)
+    //   - else existing session bound to a project   → Project(that project)
+    //   - else                                       → Conversation(session) (loose)
+    // The scope drives assemble_context_scoped so a project conversation only sees
+    // project:P ∪ global memory, and a loose one sees global + its own lazy recall.
+    let memory_scope: attune_core::memory::MemoryScope = if let Some(pid) = body.project_id.clone() {
+        attune_core::memory::MemoryScope::Project(pid)
+    } else {
+        let bound_project = match body.session_id.as_deref() {
+            Some(sid) => {
+                let vault = state
+                    .vault
+                    .lock()
+                    .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
+                vault
+                    .store()
+                    .get_conversation_project_id(sid)
+                    .map_err(|e| AppError::Internal(e.to_string()))?
+            }
+            None => None,
+        };
+        match bound_project {
+            Some(pid) => attune_core::memory::MemoryScope::Project(pid),
+            // Loose: scope to the (possibly not-yet-created) conversation id. An
+            // empty id (brand-new conversation, no session_id) derives no recall —
+            // harmless: library retrieval still returns global.
+            None => attune_core::memory::MemoryScope::Conversation(
+                body.session_id.clone().unwrap_or_default(),
+            ),
+        }
+    };
+
     // 2a-. 多层记忆：tier-aware 上下文装配（2026-05-18）
     //
     // recall/overview 形态的 query 用紧凑的 L2/L3 记忆摘要替代 L0 原始 chunk，
@@ -559,14 +624,17 @@ pub async fn chat(
             let dek_asm = dek.clone();
             let query_asm = body.message.clone();
             let l0_in = search_results.clone();
+            let scope_asm = memory_scope.clone();
             let assembled = tokio::task::spawn_blocking(move || {
                 let idx_guard = state_asm.memory_index.lock().unwrap_or_else(|e| e.into_inner());
                 let idx = idx_guard.as_ref()?;
                 let emb = state_asm.embedding.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
                 let vault = state_asm.vault.lock().unwrap_or_else(|e| e.into_inner());
-                attune_core::memory::assemble_context(
+                // chat-centric IA: scope-aware assembly — project conversations only
+                // see project:P ∪ global memory; loose ones see global + lazy recall.
+                attune_core::memory::assemble_context_scoped(
                     vault.store(), &dek_asm, idx, emb.as_ref(),
-                    &query_asm, &l0_in, memory_cfg,
+                    &query_asm, &l0_in, memory_cfg, &scope_asm,
                 )
                 .ok()
             })
@@ -575,23 +643,35 @@ pub async fn chat(
             .flatten();
             if let Some(ctx) = assembled {
                 context_tier = ctx.tier_used;
+                let to_result = |b: attune_core::memory::ContextBlock| {
+                    attune_core::search::SearchResult {
+                        item_id: b.item_id,
+                        score: b.score,
+                        title: b.title,
+                        content: b.content.clone(),
+                        source_type: "memory".to_string(),
+                        inject_content: Some(b.content),
+                        ..Default::default()
+                    }
+                };
                 if ctx.tier_used != "L0" {
                     // 记忆层应答 → 用装配后的 block 替换 search_results。
                     // 记忆 block item_id 为空 → 下游压缩按 web/临时 chunk passthrough。
-                    search_results = ctx
+                    search_results = ctx.blocks.into_iter().map(to_result).collect();
+                    tracing::info!("chat: tiered assembler answered from {}", context_tier);
+                } else {
+                    // L0 path but a loose conversation may still carry a lazily-derived
+                    // CONV recall block — append it additively (don't displace L0).
+                    let recalls: Vec<_> = ctx
                         .blocks
                         .into_iter()
-                        .map(|b| attune_core::search::SearchResult {
-                            item_id: b.item_id,
-                            score: b.score,
-                            title: b.title,
-                            content: b.content.clone(),
-                            source_type: "memory".to_string(),
-                            inject_content: Some(b.content),
-                            ..Default::default()
-                        })
+                        .filter(|b| b.tier == attune_core::memory::CONVERSATION_RECALL_TIER)
+                        .map(to_result)
                         .collect();
-                    tracing::info!("chat: tiered assembler answered from {}", context_tier);
+                    if !recalls.is_empty() {
+                        tracing::info!("chat: appended {} loose-conversation recall block(s)", recalls.len());
+                        search_results.extend(recalls);
+                    }
                 }
             }
         }
@@ -1057,15 +1137,15 @@ pub async fn chat(
                     Ok(Some(_)) => Some(id.clone()),
                     _ => {
                         tracing::warn!("session_id {id} not found, creating new session");
-                        // B1: pass None for now; Task C4 wires body.project_id here.
-                        vault.store().create_conversation(&dek, &title, None)
+                        // chat-centric IA: new conversation inherits the request's project_id.
+                        vault.store().create_conversation(&dek, &title, body.project_id.as_deref())
                             .map_err(|e| tracing::warn!("create_conversation failed: {e}"))
                             .ok()
                     }
                 }
             }
-            // B1: pass None for now; Task C4 wires body.project_id here.
-            None => vault.store().create_conversation(&dek, &title, None)
+            // chat-centric IA: new loose/project conversation per request project_id.
+            None => vault.store().create_conversation(&dek, &title, body.project_id.as_deref())
                 .map_err(|e| tracing::warn!("create_conversation failed: {e}"))
                 .ok(),
         };
