@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::crypto::{self, Key32};
 use crate::error::{Result, VaultError};
+use crate::memory::MemoryScope;
 use crate::store::types::MemoryRow;
 use crate::store::Store;
 
@@ -88,6 +89,7 @@ impl Store {
     /// 写入一条 memory。`source_chunk_hashes` 必须**升序排序**（调用方保证）；
     /// 唯一索引会拒绝重复 (kind, hashes_json) 组合 → 返回 0 表示已存在。
     /// 返回 1 = 新增，0 = 已存在跳过。
+    /// 旧签名 = 全局作用域;委托 [`Store::insert_memory_scoped`] 传 `Global`。
     #[allow(clippy::too_many_arguments)]
     pub fn insert_memory(
         &self,
@@ -100,6 +102,34 @@ impl Store {
         model: &str,
         now_secs: i64,
     ) -> Result<usize> {
+        self.insert_memory_scoped(
+            dek,
+            kind,
+            window_start,
+            window_end,
+            sorted_chunk_hashes,
+            summary,
+            model,
+            now_secs,
+            &MemoryScope::Global,
+        )
+    }
+
+    /// scope-aware 写入(chat-centric IA, 2026-06-26):在 [`Store::insert_memory`]
+    /// 基础上多写 `scope_kind, scope_id` 两列(经 `scope.to_columns()`)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_memory_scoped(
+        &self,
+        dek: &Key32,
+        kind: &str,
+        window_start: i64,
+        window_end: i64,
+        sorted_chunk_hashes: &[String],
+        summary: &str,
+        model: &str,
+        now_secs: i64,
+        scope: &MemoryScope,
+    ) -> Result<usize> {
         if sorted_chunk_hashes.is_empty() {
             return Err(VaultError::InvalidInput(
                 "memory must reference at least 1 chunk".into(),
@@ -109,11 +139,12 @@ impl Store {
             .map_err(|e| VaultError::InvalidInput(format!("hashes serialize: {e}")))?;
         let summary_enc = crypto::encrypt(dek, summary.as_bytes())?;
         let id = Uuid::new_v4().to_string();
+        let (scope_kind, scope_id) = scope.to_columns();
         let affected = self.conn.execute(
             "INSERT OR IGNORE INTO memories \
                 (id, kind, window_start, window_end, source_chunk_hashes, source_chunk_count, \
-                 summary_encrypted, model, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 summary_encrypted, model, created_at, scope_kind, scope_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 kind,
@@ -124,6 +155,8 @@ impl Store {
                 summary_enc,
                 model,
                 now_secs,
+                scope_kind,
+                scope_id,
             ],
         )?;
         Ok(affected)
@@ -175,33 +208,74 @@ impl Store {
 
     /// 列出 live（未 superseded、可选排除 cold）的指定 kind memory。
     /// 多层记忆检索的入口 — assembler 经 memory_vectors 排序后用此解密正文。
+    /// 旧签名 = 全作用域;委托 scoped 版传 `Global`(其 allowlist = global,
+    /// 但 Global 不收紧 — 见下:`list_live_memories_scoped` 对 Global 返回全部)。
     pub fn list_live_memories(
         &self,
         dek: &Key32,
         kind: &str,
         include_cold: bool,
     ) -> Result<Vec<MemoryRow>> {
-        let sql = if include_cold {
-            "SELECT id, kind, window_start, window_end, source_chunk_hashes, \
-                    summary_encrypted, model, created_at, topic_key, cold, superseded_by, \
-                    scope_kind, scope_id \
-             FROM memories \
-             WHERE kind = ?1 AND superseded_by IS NULL \
-             ORDER BY created_at DESC"
-        } else {
-            "SELECT id, kind, window_start, window_end, source_chunk_hashes, \
-                    summary_encrypted, model, created_at, topic_key, cold, superseded_by, \
-                    scope_kind, scope_id \
-             FROM memories \
-             WHERE kind = ?1 AND superseded_by IS NULL AND cold = 0 \
-             ORDER BY created_at DESC"
+        self.list_live_memories_scoped(dek, kind, include_cold, &MemoryScope::Global)
+    }
+
+    /// scope-aware live 列表(chat-centric IA, 2026-06-26)。仅返回该 scope 检索
+    /// allowlist 内的 live 记忆 —— 这是跨项目隔离的核心断言落点。
+    ///   - `Project(P)`      → 该项目记忆 ∪ global(不含别项目/松散对话记忆)
+    ///   - `Conversation(_)` → 仅 global(对话记忆走惰性派生,不在表)
+    ///   - `Global`          → **全部 live**(向后兼容:旧 list_live_memories 行为不变;
+    ///     Global 是"看 everything"语义,非"仅 scope_kind=global 的行")
+    pub fn list_live_memories_scoped(
+        &self,
+        dek: &Key32,
+        kind: &str,
+        include_cold: bool,
+        scope: &MemoryScope,
+    ) -> Result<Vec<MemoryRow>> {
+        let cold_clause = if include_cold { "" } else { "AND cold = 0" };
+        // scope 过滤:Global = 不加(全部可见,旧行为);否则用 allowlist OR 串联。
+        // allowlist 项形如 ("project", Some(P)) / ("global", None)。
+        let scope_clause: String = match scope {
+            MemoryScope::Global => String::new(),
+            other => {
+                let ors: Vec<String> = other
+                    .retrieval_allowlist()
+                    .iter()
+                    .map(|(k, id)| match id {
+                        Some(_) => format!("(scope_kind = '{k}' AND scope_id = ?2)"),
+                        None => format!("(scope_kind = '{k}' AND scope_id IS NULL)"),
+                    })
+                    .collect();
+                format!("AND ({})", ors.join(" OR "))
+            }
         };
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt
-            .query_map(params![kind], Self::row_to_memory)?
-            .filter_map(|r| r.ok());
+        let sql = format!(
+            "SELECT id, kind, window_start, window_end, source_chunk_hashes, \
+                    summary_encrypted, model, created_at, topic_key, cold, superseded_by, \
+                    scope_kind, scope_id \
+             FROM memories \
+             WHERE kind = ?1 AND superseded_by IS NULL {cold_clause} {scope_clause} \
+             ORDER BY created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        // 至多一个作用域引用 id 参(?2):allowlist 中唯一带 Some(id) 的项是该 scope 自身
+        // (Project(P) → P;Conversation/Global 的非 global 项没有,故 None)。
+        let scope_param: Option<String> = match scope {
+            MemoryScope::Project(p) => Some(p.clone()),
+            _ => None,
+        };
+        let raw_rows: Vec<RawMemory> = match scope_param {
+            Some(p) => stmt
+                .query_map(params![kind, p], Self::row_to_memory)?
+                .filter_map(|r| r.ok())
+                .collect(),
+            None => stmt
+                .query_map(params![kind], Self::row_to_memory)?
+                .filter_map(|r| r.ok())
+                .collect(),
+        };
         let mut out = Vec::new();
-        for raw in rows {
+        for raw in raw_rows {
             out.push(raw.decrypt(dek));
         }
         Ok(out)
@@ -576,5 +650,92 @@ mod tests {
         // 无 semantic memory → 不该降级（即便足够老）
         let demoted = store.demote_cold_memories(400 * day, 180 * day).unwrap();
         assert_eq!(demoted, 0);
+    }
+
+    // ── B3: scope-aware insert + list_live (core isolation invariant) ────────
+
+    #[test]
+    fn insert_memory_scoped_persists_scope_columns() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        store
+            .insert_memory_scoped(
+                &dek,
+                "episodic",
+                0,
+                1,
+                &["a".into()],
+                "projA-mem",
+                "m",
+                0,
+                &MemoryScope::Project("A".into()),
+            )
+            .unwrap();
+        let rows = store.list_recent_memories(&dek, 10).unwrap();
+        let a = rows.iter().find(|r| r.summary == "projA-mem").unwrap();
+        assert_eq!(a.scope_kind, "project");
+        assert_eq!(a.scope_id.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn list_live_scoped_project_sees_own_and_global_not_other_project() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["g".into()], "global-mem", "m", 0, &MemoryScope::Global)
+            .unwrap();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["a".into()], "projA-mem", "m", 0, &MemoryScope::Project("A".into()))
+            .unwrap();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["b".into()], "projB-mem", "m", 0, &MemoryScope::Project("B".into()))
+            .unwrap();
+        let a = store
+            .list_live_memories_scoped(&dek, "episodic", false, &MemoryScope::Project("A".into()))
+            .unwrap();
+        let sums: Vec<&str> = a.iter().map(|m| m.summary.as_str()).collect();
+        assert!(sums.contains(&"projA-mem"));
+        assert!(sums.contains(&"global-mem"));
+        assert!(
+            !sums.contains(&"projB-mem"),
+            "ISOLATION: project A must NOT see project B memory"
+        );
+    }
+
+    #[test]
+    fn list_live_scoped_conversation_sees_global_only() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["g".into()], "global-mem", "m", 0, &MemoryScope::Global)
+            .unwrap();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["a".into()], "projA-mem", "m", 0, &MemoryScope::Project("A".into()))
+            .unwrap();
+        let c = store
+            .list_live_memories_scoped(&dek, "episodic", false, &MemoryScope::Conversation("c1".into()))
+            .unwrap();
+        let sums: Vec<&str> = c.iter().map(|m| m.summary.as_str()).collect();
+        assert_eq!(
+            sums,
+            vec!["global-mem"],
+            "loose conversation library-retrieval sees global only"
+        );
+    }
+
+    #[test]
+    fn list_live_scoped_global_sees_everything_backcompat() {
+        // Global scope = "see everything" (legacy list_live_memories behavior),
+        // NOT "only scope_kind='global' rows".
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["g".into()], "global-mem", "m", 0, &MemoryScope::Global)
+            .unwrap();
+        store
+            .insert_memory_scoped(&dek, "episodic", 0, 1, &["a".into()], "projA-mem", "m", 0, &MemoryScope::Project("A".into()))
+            .unwrap();
+        let all = store.list_live_memories(&dek, "episodic", false).unwrap();
+        assert_eq!(all.len(), 2, "legacy list_live sees all scopes");
     }
 }
