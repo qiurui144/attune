@@ -325,8 +325,15 @@ CREATE TABLE IF NOT EXISTS conversations (
     id          TEXT PRIMARY KEY,
     title       BLOB NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    -- chat-centric IA (2026-06-26): NULL = loose conversation; non-NULL = a
+    -- project's branch conversation. Old vaults get this column via the
+    -- idempotent migrate_conversations_project_id ALTER (default NULL = loose,
+    -- zero behavior change).
+    project_id  TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_conversations_project
+    ON conversations(project_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
     id              TEXT PRIMARY KEY,
@@ -916,6 +923,7 @@ impl Store {
         Self::migrate_job_queue_backoff(conn)?;
         Self::migrate_skill_signals_v07(conn)?;
         Self::migrate_memories_multilayer(conn)?;
+        Self::migrate_conversations_project_id(conn)?;
         Self::migrate_chunk_summaries_deepsum_strategy(conn)?;
         Self::migrate_organization_proposals(conn)?;
         Self::migrate_memory_migrations(conn)?;
@@ -938,6 +946,7 @@ impl Store {
         Self::migrate_job_queue_backoff(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
+        Self::migrate_conversations_project_id(&conn)?;
         Self::migrate_organization_proposals(&conn)?;
         Self::migrate_memory_migrations(&conn)?;
         Self::migrate_suggestions(&conn)?;
@@ -1187,6 +1196,27 @@ impl Store {
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_topic \
              ON memories(kind, topic_key) WHERE topic_key IS NOT NULL",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// 迁移：conversations 新增 project_id 列 + 索引 (chat-centric IA, 2026-06-26)。
+    /// NULL = 松散对话(零行为变化)；非 NULL = 某项目的分支对话。幂等。
+    /// 与 migrate_corpus_domain 同形：pragma 探测 → ALTER → INDEX(提到 if 块外)。
+    pub(crate) fn migrate_conversations_project_id(conn: &Connection) -> Result<()> {
+        let has_col: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'project_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_col == 0 {
+            conn.execute("ALTER TABLE conversations ADD COLUMN project_id TEXT", [])?;
+        }
+        // INDEX CREATE 提到 if 块外(R16 理由)：列就位后建索引，幂等。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_project \
+             ON conversations(project_id, updated_at DESC)",
             [],
         )?;
         Ok(())
@@ -1559,6 +1589,36 @@ mod tests {
     fn open_memory_creates_tables() {
         let store = Store::open_memory().unwrap();
         assert!(!store.has_meta("nonexistent").unwrap());
+    }
+
+    #[test]
+    fn migrate_conversations_project_id_idempotent_and_defaults_null() {
+        // Simulate an old vault: a conversations table without project_id.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversations (id TEXT PRIMARY KEY, title BLOB NOT NULL,
+             created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             INSERT INTO conversations VALUES ('c1', x'00', 'now', 'now');",
+        )
+        .unwrap();
+        // Running twice must not panic (idempotent ALTER + IF NOT EXISTS index).
+        Store::migrate_conversations_project_id(&conn).unwrap();
+        Store::migrate_conversations_project_id(&conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name='project_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "project_id column must be present exactly once");
+        // Existing row defaults to NULL (loose) — zero behavior change.
+        let pid: Option<String> = conn
+            .query_row("SELECT project_id FROM conversations WHERE id='c1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(pid, None, "old conversations default to NULL = loose");
     }
 
     // ── ACP-6 Task 1: PRAGMA user_version + schema version gate ──────────
