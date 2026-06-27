@@ -1057,13 +1057,15 @@ pub async fn chat(
                     Ok(Some(_)) => Some(id.clone()),
                     _ => {
                         tracing::warn!("session_id {id} not found, creating new session");
-                        vault.store().create_conversation(&dek, &title)
+                        // B1: pass None for now; Task C4 wires body.project_id here.
+                        vault.store().create_conversation(&dek, &title, None)
                             .map_err(|e| tracing::warn!("create_conversation failed: {e}"))
                             .ok()
                     }
                 }
             }
-            None => vault.store().create_conversation(&dek, &title)
+            // B1: pass None for now; Task C4 wires body.project_id here.
+            None => vault.store().create_conversation(&dek, &title, None)
                 .map_err(|e| tracing::warn!("create_conversation failed: {e}"))
                 .ok(),
         };

@@ -14,15 +14,39 @@ use crate::store::types::*;
 impl Store {
     // ── Conversation Session CRUD ─────────────────────────────────────────────
 
-    pub fn create_conversation(&self, dek: &Key32, title: &str) -> Result<String> {
+    /// 创建对话。`project_id`:`Some(pid)` = 该项目的分支对话;`None` = 松散对话
+    /// (零行为变化,与旧三参版语义一致)。chat-centric IA (2026-06-26)。
+    pub fn create_conversation(
+        &self,
+        dek: &Key32,
+        title: &str,
+        project_id: Option<&str>,
+    ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let enc_title = crypto::encrypt(dek, title.as_bytes())?;
         self.conn.execute(
-            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
-            params![id, enc_title, now],
+            "INSERT INTO conversations (id, title, created_at, updated_at, project_id) \
+             VALUES (?1, ?2, ?3, ?3, ?4)",
+            params![id, enc_title, now, project_id],
         )?;
         Ok(id)
+    }
+
+    /// 取对话归属项目 id(检索作用域决策用)。`None` = 松散对话或对话不存在。
+    pub fn get_conversation_project_id(&self, conv_id: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let pid = self
+            .conn
+            .query_row(
+                "SELECT project_id FROM conversations WHERE id = ?1",
+                params![conv_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(VaultError::Database)?;
+        // 外层 Option = 行存在与否;内层 Option = project_id 是否 NULL。两者皆 None→None。
+        Ok(pid.flatten())
     }
 
     pub fn list_conversations(&self, dek: &Key32, limit: usize, offset: usize) -> Result<Vec<ConversationSummary>> {
@@ -193,5 +217,29 @@ impl Store {
             }
             None => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_conversation_persists_project_id() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let loose = store.create_conversation(&dek, "t", None).unwrap();
+        let proj = store.create_conversation(&dek, "t", Some("p1")).unwrap();
+        assert_eq!(store.get_conversation_project_id(&loose).unwrap(), None);
+        assert_eq!(
+            store.get_conversation_project_id(&proj).unwrap(),
+            Some("p1".into())
+        );
+    }
+
+    #[test]
+    fn get_conversation_project_id_missing_returns_none() {
+        let store = Store::open_memory().unwrap();
+        assert_eq!(store.get_conversation_project_id("nope").unwrap(), None);
     }
 }

@@ -2076,8 +2076,8 @@ mod tests {
     fn test_create_and_list_conversations() {
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
-        let id1 = store.create_conversation(&dek, "第一个会话").unwrap();
-        let _id2 = store.create_conversation(&dek, "第二个会话").unwrap();
+        let id1 = store.create_conversation(&dek, "第一个会话", None).unwrap();
+        let _id2 = store.create_conversation(&dek, "第二个会话", None).unwrap();
         let list = store.list_conversations(&dek, 10, 0).unwrap();
         assert_eq!(list.len(), 2);
         let ids: Vec<&str> = list.iter().map(|s| s.id.as_str()).collect();
@@ -2088,7 +2088,7 @@ mod tests {
     fn test_append_and_get_messages() {
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
-        let conv_id = store.create_conversation(&dek, "测试会话").unwrap();
+        let conv_id = store.create_conversation(&dek, "测试会话", None).unwrap();
         store.append_message(&dek, &conv_id, "user", "你好", &[]).unwrap();
         store.append_message(&dek, &conv_id, "assistant", "你好！有什么可以帮你的？", &[]).unwrap();
         let msgs = store.get_conversation_messages(&dek, &conv_id).unwrap();
@@ -2102,7 +2102,7 @@ mod tests {
     fn test_delete_conversation_cascades() {
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
-        let conv_id = store.create_conversation(&dek, "待删除").unwrap();
+        let conv_id = store.create_conversation(&dek, "待删除", None).unwrap();
         store.append_message(&dek, &conv_id, "user", "消息内容", &[]).unwrap();
         store.delete_conversation(&conv_id).unwrap();
         let msgs = store.get_conversation_messages(&dek, &conv_id).unwrap();
@@ -2115,7 +2115,7 @@ mod tests {
     fn test_citations_json_roundtrip() {
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
-        let conv_id = store.create_conversation(&dek, "带引用").unwrap();
+        let conv_id = store.create_conversation(&dek, "带引用", None).unwrap();
         let citations = vec![
             Citation { item_id: "abc".to_string(), title: "文档A".to_string(), relevance: 0.9 },
         ];

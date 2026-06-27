@@ -73,9 +73,9 @@ where
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_sessions_route_returns_seeded_sessions_with_envelope() {
     let (base, client) = spawn_with_seed(|vault, dek| {
-        let s1 = vault.store().create_conversation(dek, "第一个会话").unwrap();
+        let s1 = vault.store().create_conversation(dek, "第一个会话", None).unwrap();
         vault.store().append_message(dek, &s1, "user", "hello", &[]).unwrap();
-        vault.store().create_conversation(dek, "第二个会话").unwrap();
+        vault.store().create_conversation(dek, "第二个会话", None).unwrap();
     })
     .await;
 
@@ -98,7 +98,7 @@ async fn list_sessions_route_returns_seeded_sessions_with_envelope() {
 async fn list_sessions_pagination_clamps_limit_via_query() {
     let (base, client) = spawn_with_seed(|vault, dek| {
         for i in 0..5 {
-            vault.store().create_conversation(dek, &format!("会话{i}")).unwrap();
+            vault.store().create_conversation(dek, &format!("会话{i}"), None).unwrap();
         }
     })
     .await;
@@ -126,7 +126,7 @@ async fn get_session_route_returns_session_and_messages() {
     let seeded_id = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let captured = Arc::clone(&seeded_id);
     let (base, client) = spawn_with_seed(move |vault, dek| {
-        let sid = vault.store().create_conversation(dek, "带消息的会话").unwrap();
+        let sid = vault.store().create_conversation(dek, "带消息的会话", None).unwrap();
         vault.store().append_message(dek, &sid, "user", "问题", &[]).unwrap();
         vault.store().append_message(dek, &sid, "assistant", "回答", &[]).unwrap();
         *captured.lock().unwrap() = sid;
@@ -166,7 +166,7 @@ async fn delete_session_route_returns_204_and_removes_it() {
     let seeded_id = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let captured = Arc::clone(&seeded_id);
     let (base, client) = spawn_with_seed(move |vault, dek| {
-        let sid = vault.store().create_conversation(dek, "要删除").unwrap();
+        let sid = vault.store().create_conversation(dek, "要删除", None).unwrap();
         vault.store().append_message(dek, &sid, "user", "x", &[]).unwrap();
         *captured.lock().unwrap() = sid;
     })
@@ -238,7 +238,7 @@ mod store_invariants {
     fn delete_conversation_cascades_messages() {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
-        let sid = store.create_conversation(&dek, "会话").unwrap();
+        let sid = store.create_conversation(&dek, "会话", None).unwrap();
         store.append_message(&dek, &sid, "user", "m1", &[]).unwrap();
         store.append_message(&dek, &sid, "assistant", "m2", &[]).unwrap();
         assert_eq!(store.get_conversation_messages(&dek, &sid).unwrap().len(), 2);
