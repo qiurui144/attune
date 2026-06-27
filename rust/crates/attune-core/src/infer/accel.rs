@@ -161,6 +161,24 @@ fn env_override() -> Option<EpOverride> {
 ///
 /// `is_available()` 返回 `Ok(true)` ⟺ ORT 编进了该 EP。**注意**:返回 true 仍可能
 /// 运行时注册失败(缺 driver / 缺 runtime DLL),那一层交给 ORT 链式 fallback(E2)。
+///
+/// ⚠️ **ort-dynamic clean-install hang(155H 真机实证)**:openvino/rocm 变体走
+/// `ort-dynamic`(不捆绑 onnxruntime),其 dylib 在首次运行下载的 EP 栈里。栈未就位时
+/// 调 `ort::ep::*::is_available()` → ORT `LoadLibrary` 一个不存在的 dll → **Windows 上
+/// 卡死**。该函数经 `cached_selection()` 在 vault setup handler **同步路径**调用,故
+/// clean install 时 vault setup 阻塞 120s+,且卡点使 EP 栈永不下载(双症同源)。
+/// 因此 ort-dynamic 下,dylib 尚不可加载时**跳过 live 探测、乐观纳入**该 EP(让
+/// `spawn_stack_bootstrap` 去拉栈;真可用性留待实际 session build,缺则 graceful CPU)。
+#[cfg(all(feature = "ort-dynamic", any(feature = "openvino", feature = "rocm", feature = "vitis")))]
+fn ort_dylib_loadable() -> bool {
+    if std::env::var_os("ORT_DYLIB_PATH").is_some() {
+        return true;
+    }
+    ["openvino", "rocm", "vitisai"]
+        .iter()
+        .any(|s| crate::infer::stack_installer::probe_stack(s))
+}
+
 pub fn compiled_eps() -> Vec<EpChoice> {
     // `is_available()` 来自 `ort::ep::ExecutionProvider` trait —— 仅在某 EP feature 开启
     // 时才需要在 scope(默认 build 全 EP off 时此 import 未用,故 cfg 门 + allow)。
@@ -197,17 +215,49 @@ pub fn compiled_eps() -> Vec<EpChoice> {
     if ort::ep::CoreML::default().is_available().unwrap_or(false) {
         eps.push(EpChoice::CoreMl);
     }
+    // openvino/rocm/vitis 走 ort-dynamic:dylib 未就位时跳过会卡死的 live 探测,
+    // 乐观纳入(详见 ort_dylib_loadable)。ort-bundled 下照常探测。
     #[cfg(feature = "openvino")]
-    if ort::ep::OpenVINO::default().is_available().unwrap_or(false) {
-        eps.push(EpChoice::OpenVino(OpenVinoDevice::Auto));
+    {
+        #[cfg(feature = "ort-dynamic")]
+        let available = if ort_dylib_loadable() {
+            ort::ep::OpenVINO::default().is_available().unwrap_or(false)
+        } else {
+            true
+        };
+        #[cfg(not(feature = "ort-dynamic"))]
+        let available = ort::ep::OpenVINO::default().is_available().unwrap_or(false);
+        if available {
+            eps.push(EpChoice::OpenVino(OpenVinoDevice::Auto));
+        }
     }
     #[cfg(feature = "rocm")]
-    if ort::ep::ROCm::default().is_available().unwrap_or(false) {
-        eps.push(EpChoice::Rocm);
+    {
+        #[cfg(feature = "ort-dynamic")]
+        let available = if ort_dylib_loadable() {
+            ort::ep::ROCm::default().is_available().unwrap_or(false)
+        } else {
+            true
+        };
+        #[cfg(not(feature = "ort-dynamic"))]
+        let available = ort::ep::ROCm::default().is_available().unwrap_or(false);
+        if available {
+            eps.push(EpChoice::Rocm);
+        }
     }
     #[cfg(feature = "vitis")]
-    if ort::ep::Vitis::default().is_available().unwrap_or(false) {
-        eps.push(EpChoice::VitisAi);
+    {
+        #[cfg(feature = "ort-dynamic")]
+        let available = if ort_dylib_loadable() {
+            ort::ep::Vitis::default().is_available().unwrap_or(false)
+        } else {
+            true
+        };
+        #[cfg(not(feature = "ort-dynamic"))]
+        let available = ort::ep::Vitis::default().is_available().unwrap_or(false);
+        if available {
+            eps.push(EpChoice::VitisAi);
+        }
     }
 
     eps
