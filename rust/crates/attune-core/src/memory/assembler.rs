@@ -230,6 +230,46 @@ pub fn assemble_context_scoped(
     config: MemoryConfig,
     scope: &MemoryScope,
 ) -> Result<AssembledContext> {
+    // Tier selection + scoped memory retrieval (unchanged core flow).
+    let mut assembled = assemble_context_core(
+        store, dek, memory_index, embedder, query, l0_results, config, scope,
+    )?;
+
+    // chat-centric IA: a loose conversation's own working memory is lazily derived
+    // from its recent messages (never persisted — see conversation_recall). Append
+    // it as an extra block so the loose chat can reference its own recent context
+    // on top of the global library hits. Project / Global scopes do not get this
+    // (project recall lives in scoped memory rows; global has no single conversation).
+    if let MemoryScope::Conversation(conv_id) = scope {
+        if let Ok(Some(recall)) =
+            crate::memory::derive_conversation_recall(store, dek, conv_id, CONV_RECALL_MAX_TURNS)
+        {
+            assembled.est_tokens +=
+                estimate_tokens(&recall.title) + estimate_tokens(&recall.content);
+            assembled.blocks.push(recall);
+        }
+    }
+
+    Ok(assembled)
+}
+
+/// How many recent messages a loose conversation's lazy recall block summarizes.
+const CONV_RECALL_MAX_TURNS: usize = 6;
+
+/// The original (scope-aware) tier-selection + coverage-gate flow. Returns the
+/// library-derived blocks; loose-conversation recall is appended by the public
+/// [`assemble_context_scoped`] wrapper.
+#[allow(clippy::too_many_arguments)]
+fn assemble_context_core(
+    store: &Store,
+    dek: &Key32,
+    memory_index: &MemoryVectorIndex,
+    embedder: &dyn EmbeddingProvider,
+    query: &str,
+    l0_results: &[SearchResult],
+    config: MemoryConfig,
+    scope: &MemoryScope,
+) -> Result<AssembledContext> {
     let l0_blocks: Vec<ContextBlock> = l0_results.iter().map(l0_block).collect();
 
     // Escape hatch — assembler off reproduces today's behavior exactly.
@@ -645,5 +685,49 @@ mod tests {
                 && !b.content.contains("麻婆豆腐")),
             "ISOLATION: project A assembly must NOT contain project B memory content"
         );
+    }
+
+    #[test]
+    fn conversation_scope_appends_lazy_recall_block() {
+        // A loose conversation's own recent messages are appended as a CONV block,
+        // even when there is no library memory hit (L0 path).
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let idx = MemoryVectorIndex::new(64).unwrap();
+        let emb = MockEmbeddingProvider::new(64);
+        let c = store.create_conversation(&dek, "t", None).unwrap();
+        store
+            .append_conversation_turn(&dek, &c, "我在研究 tokio 调度", "tokio 是异步运行时", &[])
+            .unwrap();
+
+        let l0 = make_l0(2);
+        let out = assemble_context_scoped(
+            &store, &dek, &idx, &emb, "总结一下", &l0, MemoryConfig::default(),
+            &MemoryScope::Conversation(c.clone()),
+        )
+        .unwrap();
+        assert!(
+            out.blocks.iter().any(|b| b.tier == "CONV" && b.content.contains("tokio")),
+            "loose conversation assembly must append its lazy recall block"
+        );
+        // No memory row was created by deriving recall.
+        assert_eq!(store.memory_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn project_scope_does_not_append_conversation_recall() {
+        // Project scope must not carry a CONV recall block (project recall lives in
+        // scoped memory rows, not derived from a single conversation).
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let idx = MemoryVectorIndex::new(64).unwrap();
+        let emb = MockEmbeddingProvider::new(64);
+        let l0 = make_l0(2);
+        let out = assemble_context_scoped(
+            &store, &dek, &idx, &emb, "总结一下", &l0, MemoryConfig::default(),
+            &MemoryScope::Project("A".into()),
+        )
+        .unwrap();
+        assert!(out.blocks.iter().all(|b| b.tier != "CONV"));
     }
 }

@@ -15,12 +15,14 @@
 
 pub mod assembler;
 pub mod consolidation_agent;
+pub mod conversation_recall;
 pub mod migration;
 pub mod portability;
 pub mod retrieval;
 pub mod scope;
 pub mod semantic;
 
+pub use conversation_recall::{derive_conversation_recall, CONVERSATION_RECALL_TIER};
 pub use scope::MemoryScope;
 
 pub use assembler::{
