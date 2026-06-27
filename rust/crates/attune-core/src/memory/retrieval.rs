@@ -12,6 +12,7 @@ use usearch::ffi::{IndexOptions, MetricKind, ScalarKind};
 use crate::crypto::Key32;
 use crate::embed::EmbeddingProvider;
 use crate::error::{Result, VaultError};
+use crate::memory::MemoryScope;
 use crate::search::TimeFilter;
 use crate::store::MemoryRow;
 use crate::store::Store;
@@ -145,6 +146,10 @@ impl MemoryVectorIndex {
 /// `kind` is `"episodic"` (L2) or `"semantic"` (L3). Cold memories are always excluded
 /// — they remain queryable only via explicit time-travel search elsewhere.
 /// Returns at most `top_k` hits sorted by descending score.
+///
+/// Legacy signature = cross-everything retrieval; delegates to
+/// [`search_memories_scoped`] with [`MemoryScope::Global`] so existing callers and
+/// tests keep byte-identical behavior (chat-centric IA, 2026-06-26).
 #[allow(clippy::too_many_arguments)]
 pub fn search_memories(
     store: &Store,
@@ -156,6 +161,39 @@ pub fn search_memories(
     time_filter: Option<TimeFilter>,
     top_k: usize,
 ) -> Result<Vec<MemoryHit>> {
+    search_memories_scoped(
+        store,
+        dek,
+        index,
+        embedder,
+        query,
+        kind,
+        time_filter,
+        top_k,
+        &MemoryScope::Global,
+    )
+}
+
+/// scope-aware variant of [`search_memories`] (chat-centric IA, 2026-06-26).
+///
+/// Identical ranking to `search_memories`, but the live-memory candidate map is
+/// drawn from [`Store::list_live_memories_scoped`] — so vector hits whose rows fall
+/// outside the scope's retrieval allowlist are naturally dropped (they never enter
+/// the `live` map). This is the cross-project privacy invariant's retrieval-layer
+/// landing point: a `Project(P)` query can only surface `project:P` ∪ `global` rows;
+/// a `Conversation(_)` query surfaces `global` only.
+#[allow(clippy::too_many_arguments)]
+pub fn search_memories_scoped(
+    store: &Store,
+    dek: &Key32,
+    index: &MemoryVectorIndex,
+    embedder: &dyn EmbeddingProvider,
+    query: &str,
+    kind: &str,
+    time_filter: Option<TimeFilter>,
+    top_k: usize,
+    scope: &MemoryScope,
+) -> Result<Vec<MemoryHit>> {
     if index.is_empty() || query.trim().is_empty() {
         return Ok(vec![]);
     }
@@ -165,16 +203,18 @@ pub fn search_memories(
         .next()
         .ok_or_else(|| VaultError::Crypto("embedder returned no vector".into()))?;
 
-    // Over-fetch: vector hits may include other-kind / out-of-window memories that
-    // get filtered out below, so pull a wider candidate set first.
+    // Over-fetch: vector hits may include other-kind / out-of-window / out-of-scope
+    // memories that get filtered out below, so pull a wider candidate set first.
     let raw = index.search(&query_vec, top_k.saturating_mul(4).max(top_k))?;
     if raw.is_empty() {
         return Ok(vec![]);
     }
 
-    // Live (non-cold, non-superseded) memories of the requested kind, by id.
+    // Live (non-cold, non-superseded) in-scope memories of the requested kind, by id.
+    // Out-of-scope rows are excluded here → a vector hit on another project's memory
+    // simply has no `live` entry and is skipped (isolation).
     let live: HashMap<String, MemoryRow> = store
-        .list_live_memories(dek, kind, false)?
+        .list_live_memories_scoped(dek, kind, false, scope)?
         .into_iter()
         .map(|m| (m.id.clone(), m))
         .collect();
@@ -304,5 +344,113 @@ mod tests {
         idx.upsert("m1", &[1.0, 0.0, 0.0, 0.0]).unwrap();
         idx.upsert("m1", &[0.0, 1.0, 0.0, 0.0]).unwrap();
         assert_eq!(idx.len(), 1, "re-embedding same memory must not duplicate");
+    }
+
+    /// Seed a scoped episodic memory and index its embedding; returns its id.
+    fn seed_scoped_episodic(
+        store: &Store,
+        dek: &Key32,
+        idx: &mut MemoryVectorIndex,
+        emb: &MockEmbeddingProvider,
+        hash: &str,
+        summary: &str,
+        scope: &MemoryScope,
+    ) -> String {
+        store
+            .insert_memory_scoped(dek, "episodic", 0, 86400, &[hash.into()], summary, "m", 0, scope)
+            .unwrap();
+        let id = store
+            .list_recent_memories(dek, 1000)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.source_chunk_hashes == vec![hash])
+            .unwrap()
+            .id;
+        let v = emb.embed(&[summary]).unwrap().0.pop().unwrap();
+        idx.upsert(&id, &v).unwrap();
+        id
+    }
+
+    #[test]
+    fn scoped_search_project_a_excludes_project_b() {
+        // Core isolation invariant at the retrieval layer: a project-scoped search
+        // must never surface another project's memory even when its vector ranks high.
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let emb = MockEmbeddingProvider::new(256);
+        let mut idx = MemoryVectorIndex::new(256).unwrap();
+
+        let topic = "用户研究了 Rust 所有权 借用 生命周期";
+        let id_global =
+            seed_scoped_episodic(&store, &dek, &mut idx, &emb, "g", topic, &MemoryScope::Global);
+        let id_a = seed_scoped_episodic(
+            &store, &dek, &mut idx, &emb, "a", topic, &MemoryScope::Project("A".into()),
+        );
+        let id_b = seed_scoped_episodic(
+            &store, &dek, &mut idx, &emb, "b", topic, &MemoryScope::Project("B".into()),
+        );
+
+        let hits = search_memories_scoped(
+            &store, &dek, &idx, &emb, "Rust 所有权 研究", "episodic", None, 10,
+            &MemoryScope::Project("A".into()),
+        )
+        .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.memory.id.as_str()).collect();
+        assert!(ids.contains(&id_a.as_str()), "project A search must see project A memory");
+        assert!(ids.contains(&id_global.as_str()), "project A search must see global memory");
+        assert!(
+            !ids.contains(&id_b.as_str()),
+            "ISOLATION: project A search must NOT surface project B memory"
+        );
+    }
+
+    #[test]
+    fn scoped_search_conversation_sees_global_only() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let emb = MockEmbeddingProvider::new(256);
+        let mut idx = MemoryVectorIndex::new(256).unwrap();
+
+        let topic = "用户研究了 tokio async 调度";
+        let id_global =
+            seed_scoped_episodic(&store, &dek, &mut idx, &emb, "g", topic, &MemoryScope::Global);
+        let id_a = seed_scoped_episodic(
+            &store, &dek, &mut idx, &emb, "a", topic, &MemoryScope::Project("A".into()),
+        );
+
+        let hits = search_memories_scoped(
+            &store, &dek, &idx, &emb, "tokio async 调度", "episodic", None, 10,
+            &MemoryScope::Conversation("c1".into()),
+        )
+        .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.memory.id.as_str()).collect();
+        assert!(ids.contains(&id_global.as_str()), "loose conversation must see global memory");
+        assert!(
+            !ids.contains(&id_a.as_str()),
+            "loose conversation library retrieval must NOT surface any project memory"
+        );
+    }
+
+    #[test]
+    fn legacy_search_global_sees_all_scopes() {
+        // Backward-compat: the legacy `search_memories` (Global delegate) keeps
+        // seeing everything, so existing chat behavior is byte-identical.
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let emb = MockEmbeddingProvider::new(256);
+        let mut idx = MemoryVectorIndex::new(256).unwrap();
+
+        let topic = "用户研究了 Rust 所有权";
+        let id_g =
+            seed_scoped_episodic(&store, &dek, &mut idx, &emb, "g", topic, &MemoryScope::Global);
+        let id_a = seed_scoped_episodic(
+            &store, &dek, &mut idx, &emb, "a", topic, &MemoryScope::Project("A".into()),
+        );
+
+        let hits =
+            search_memories(&store, &dek, &idx, &emb, "Rust 所有权", "episodic", None, 10).unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.memory.id.as_str()).collect();
+        assert!(ids.contains(&id_g.as_str()));
+        assert!(ids.contains(&id_a.as_str()), "Global delegate must still see project rows");
     }
 }

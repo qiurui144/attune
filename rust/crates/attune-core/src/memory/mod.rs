@@ -24,8 +24,8 @@ pub mod semantic;
 pub use scope::MemoryScope;
 
 pub use assembler::{
-    assemble_context, classify_query_shape, compact_history, AssembledContext, ContextBlock,
-    MemoryConfig, QueryShape,
+    assemble_context, assemble_context_scoped, classify_query_shape, compact_history,
+    AssembledContext, ContextBlock, MemoryConfig, QueryShape,
 };
 pub use consolidation_agent::{
     access_count_for_chunks, compute_score, promoted_topic_key, rank_candidates,
@@ -33,7 +33,7 @@ pub use consolidation_agent::{
     PromotionConfig, PromotionCycleResult, PromotionRecord, ACCESS_WEIGHT, DEFAULT_MIN_SCORE,
     DENSITY_WEIGHT, MAX_PROMOTIONS_HARD_CAP, RECENCY_WEIGHT,
 };
-pub use retrieval::{search_memories, MemoryHit, MemoryVectorIndex};
+pub use retrieval::{search_memories, search_memories_scoped, MemoryHit, MemoryVectorIndex};
 pub use semantic::{
     apply_semantic_result, generate_one_semantic_memory, prepare_semantic_cycle, SemanticCluster,
     MAX_TOPICS_PER_CYCLE, MIN_MEMS_PER_TOPIC,

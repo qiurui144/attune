@@ -11,7 +11,8 @@ use crate::context_compress::estimate_tokens;
 use crate::crypto::Key32;
 use crate::embed::EmbeddingProvider;
 use crate::error::Result;
-use crate::memory::retrieval::{search_memories, MemoryHit, MemoryVectorIndex};
+use crate::memory::retrieval::{search_memories_scoped, MemoryHit, MemoryVectorIndex};
+use crate::memory::MemoryScope;
 use crate::search::{parse_time_filter, parse_time_filter_with_now, SearchResult, TimeFilter};
 use crate::store::Store;
 
@@ -198,6 +199,37 @@ pub fn assemble_context(
     l0_results: &[SearchResult],
     config: MemoryConfig,
 ) -> Result<AssembledContext> {
+    // Legacy signature = cross-everything assembly; delegates to the scoped version
+    // with `Global` so existing chat behavior is byte-identical (chat-centric IA).
+    assemble_context_scoped(
+        store,
+        dek,
+        memory_index,
+        embedder,
+        query,
+        l0_results,
+        config,
+        &MemoryScope::Global,
+    )
+}
+
+/// scope-aware variant of [`assemble_context`] (chat-centric IA, 2026-06-26).
+///
+/// Same tier-selection + coverage-gate logic, but memory retrieval is scoped: a
+/// `Project(P)` conversation only assembles `project:P` ∪ `global` memory summaries,
+/// never another project's. The cross-project isolation invariant therefore holds at
+/// the context-assembly layer too, not only the raw store query.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_context_scoped(
+    store: &Store,
+    dek: &Key32,
+    memory_index: &MemoryVectorIndex,
+    embedder: &dyn EmbeddingProvider,
+    query: &str,
+    l0_results: &[SearchResult],
+    config: MemoryConfig,
+    scope: &MemoryScope,
+) -> Result<AssembledContext> {
     let l0_blocks: Vec<ContextBlock> = l0_results.iter().map(l0_block).collect();
 
     // Escape hatch — assembler off reproduces today's behavior exactly.
@@ -232,7 +264,7 @@ pub fn assemble_context(
     };
     let time_filter = recall_time_filter(query, shape);
 
-    let candidates = search_memories(
+    let candidates = search_memories_scoped(
         store,
         dek,
         memory_index,
@@ -241,6 +273,7 @@ pub fn assemble_context(
         kind,
         time_filter,
         3,
+        scope,
     )
     .unwrap_or_default();
 
@@ -549,5 +582,68 @@ mod tests {
         let dek = Key32::generate();
         let llm = MockLlmProvider::new("m");
         assert!(compact_history(&store, &dek, &llm, "s", &[]).is_none());
+    }
+
+    /// Seed a scoped L3-style semantic memory row + index its embedding, returning id.
+    /// (Uses `insert_memory_scoped` with kind="semantic" so the row carries the scope
+    /// columns — `insert_semantic_memory` always writes global, which we don't want here.)
+    fn seed_scoped_semantic(
+        store: &Store,
+        dek: &Key32,
+        idx: &mut MemoryVectorIndex,
+        emb: &MockEmbeddingProvider,
+        hash: &str,
+        summary: &str,
+        scope: &MemoryScope,
+    ) -> String {
+        store
+            .insert_memory_scoped(dek, "semantic", 0, 1000, &[hash.into()], summary, "m", 1000, scope)
+            .unwrap();
+        let id = store
+            .list_recent_memories(dek, 1000)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.source_chunk_hashes == vec![hash])
+            .unwrap()
+            .id;
+        let v = emb.embed(&[summary]).unwrap().0.pop().unwrap();
+        idx.upsert(&id, &v).unwrap();
+        id
+    }
+
+    #[test]
+    fn assemble_scoped_project_a_excludes_project_b_memory() {
+        // Overview query scoped to Project(A) must assemble only A's (and global)
+        // semantic summary — project B's summary must never appear in any block.
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let emb = MockEmbeddingProvider::new(256);
+        let mut idx = MemoryVectorIndex::new(256).unwrap();
+
+        let topic_a = "用户对 Rust 所有权 借用 生命周期 形成了系统理解";
+        let topic_b = "用户对 川菜 麻婆豆腐 宫保鸡丁 形成了系统理解";
+        let _id_a = seed_scoped_semantic(
+            &store, &dek, &mut idx, &emb, "ma", topic_a, &MemoryScope::Project("A".into()),
+        );
+        let _id_b = seed_scoped_semantic(
+            &store, &dek, &mut idx, &emb, "mb", topic_b, &MemoryScope::Project("B".into()),
+        );
+
+        // Overview-marker query closest to A's topic, scoped to Project(A).
+        let l0 = make_l0(5);
+        let out = assemble_context_scoped(
+            &store, &dek, &idx, &emb,
+            "总结 用户对 Rust 所有权 借用 生命周期 形成了系统理解",
+            &l0, MemoryConfig::default(), &MemoryScope::Project("A".into()),
+        )
+        .unwrap();
+        assert_eq!(out.shape, QueryShape::Overview);
+        // The assembled blocks must not contain project B's summary, regardless of
+        // whether the A memory cleared the coverage gate.
+        assert!(
+            out.blocks.iter().all(|b| !b.content.contains("川菜")
+                && !b.content.contains("麻婆豆腐")),
+            "ISOLATION: project A assembly must NOT contain project B memory content"
+        );
     }
 }
