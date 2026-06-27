@@ -373,14 +373,38 @@ pub fn download_with_failover(
     filename: &str,
     dst: &std::path::Path,
 ) -> crate::error::Result<String> {
-    use crate::error::VaultError;
-
     // 向后兼容逃生门:显式 HF_ENDPOINT → 单源直下,不 failover(运维/测试显式注入优先)。
     if let Some(explicit) = explicit_hf_endpoint_override() {
         crate::infer::model_store::download_hf_file_from(&explicit, repo_id, filename, dst)?;
         return Ok(format!("env:{explicit}"));
     }
+    download_failover_chain(sources, repo_id, filename, dst)
+}
 
+/// 强制走 `sources` 失败链,**无视 HF_ENDPOINT 逃生门**。
+///
+/// **EP-stack 专用**:`attune-ep-stacks/*` 是 company-mirror-only(HF/HF-mirror 上 401/404),
+/// `stack_sources()` 已把 company-mirror 强制放链首(region-agnostic)。但 `init_search_engines`
+/// 会把 region 默认 `HF_ENDPOINT`(International→huggingface.co)`set_var` 进 env,而
+/// `explicit_hf_endpoint_override()` 无法区分"region 默认"与"用户显式注入" → 普通
+/// `download_with_failover` 会误走逃生门,把 mirror-only 的 EP-stack 下载劫持到 huggingface.co
+/// → **401**(155H rc.2 真机实证)。故 EP-stack 下载走本函数,绕过逃生门,确保 company-mirror 首位。
+pub fn download_with_failover_forced(
+    sources: &[ModelSource],
+    repo_id: &str,
+    filename: &str,
+    dst: &std::path::Path,
+) -> crate::error::Result<String> {
+    download_failover_chain(sources, repo_id, filename, dst)
+}
+
+fn download_failover_chain(
+    sources: &[ModelSource],
+    repo_id: &str,
+    filename: &str,
+    dst: &std::path::Path,
+) -> crate::error::Result<String> {
+    use crate::error::VaultError;
     if sources.is_empty() {
         return Err(VaultError::ModelLoad(format!(
             "no eligible model source for {repo_id}/{filename} (all unreachable or uncovered); engine degraded"

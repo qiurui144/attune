@@ -181,7 +181,10 @@ pub fn ensure_stack(stack: &str) -> Result<PathBuf> {
 
     let archive = dir.join(&filename);
     let sources = stack_sources(&repo);
-    crate::infer::model_source::download_with_failover(&sources, &repo, &filename, &archive)?;
+    // EP-stack 是 company-mirror-only:必须走 forced 变体绕过 HF_ENDPOINT 逃生门,否则
+    // init_search_engines 设的 region 默认 HF_ENDPOINT 会把下载劫持到 huggingface.co → 401
+    // (155H rc.2 真机实证)。company-mirror 始终在 stack_sources 链首。
+    crate::infer::model_source::download_with_failover_forced(&sources, &repo, &filename, &archive)?;
 
     // 解压 tar.gz 到 stack_dir(纯 Rust flate2+tar,跨平台,不依赖系统 tar)。
     extract_tar_gz(&archive, &dir)?;
