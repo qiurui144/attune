@@ -151,6 +151,9 @@ pub struct ConversationSummary {
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
+    /// chat-centric IA (2026-06-26): owning project, or None = loose conversation.
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,4 +274,16 @@ pub struct MemoryRow {
     pub cold: bool,
     /// 被更新的 L3 行取代后，指向新行 id；live 行为 None。
     pub superseded_by: Option<String>,
+    /// chat-centric IA (2026-06-26): 检索隔离作用域。'global'(老行+文档记忆默认)
+    /// / 'project'(scope_id=项目 id) / 'conversation'(暂不落库)。
+    #[serde(default = "default_scope_kind")]
+    pub scope_kind: String,
+    /// 作用域引用 id；scope_kind='global' 时为 None。
+    #[serde(default)]
+    pub scope_id: Option<String>,
+}
+
+/// serde 默认：缺 scope_kind 字段的旧序列化数据回落 'global'(零行为变化)。
+fn default_scope_kind() -> String {
+    "global".to_string()
 }

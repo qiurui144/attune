@@ -27,7 +27,7 @@ impl Store {
 
     pub fn list_conversations(&self, dek: &Key32, limit: usize, offset: usize) -> Result<Vec<ConversationSummary>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, created_at, updated_at FROM conversations
+            "SELECT id, title, created_at, updated_at, project_id FROM conversations
              ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
@@ -37,14 +37,22 @@ impl Store {
                 enc_title,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?;
         let mut results = Vec::new();
         for row in rows {
-            let (id, enc_title, created_at, updated_at) = row.map_err(VaultError::Database)?;
+            let (id, enc_title, created_at, updated_at, project_id) =
+                row.map_err(VaultError::Database)?;
             let title = String::from_utf8(crypto::decrypt(dek, &enc_title)?)
                 .map_err(|e| VaultError::Crypto(format!("conversation title utf8: {e}")))?;
-            results.push(ConversationSummary { id, title, created_at, updated_at });
+            results.push(ConversationSummary {
+                id,
+                title,
+                created_at,
+                updated_at,
+                project_id,
+            });
         }
         Ok(results)
     }
@@ -165,22 +173,23 @@ impl Store {
         use rusqlite::OptionalExtension;
         let row = self.conn
             .query_row(
-                "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?1",
+                "SELECT id, title, created_at, updated_at, project_id FROM conversations WHERE id = ?1",
                 params![conv_id],
                 |row| Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Vec<u8>>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 )),
             )
             .optional()
             .map_err(VaultError::Database)?;
         match row {
-            Some((id, enc_title, created_at, updated_at)) => {
+            Some((id, enc_title, created_at, updated_at, project_id)) => {
                 let title = String::from_utf8(crypto::decrypt(dek, &enc_title)?)
                 .map_err(|e| VaultError::Crypto(format!("conversation title utf8: {e}")))?;
-                Ok(Some(ConversationSummary { id, title, created_at, updated_at }))
+                Ok(Some(ConversationSummary { id, title, created_at, updated_at, project_id }))
             }
             None => Ok(None),
         }

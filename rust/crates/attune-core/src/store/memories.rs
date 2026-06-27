@@ -133,7 +133,8 @@ impl Store {
     pub fn list_recent_memories(&self, dek: &Key32, limit: usize) -> Result<Vec<MemoryRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, window_start, window_end, source_chunk_hashes, \
-                    summary_encrypted, model, created_at, topic_key, cold, superseded_by \
+                    summary_encrypted, model, created_at, topic_key, cold, superseded_by, \
+                    scope_kind, scope_id \
              FROM memories \
              ORDER BY created_at DESC \
              LIMIT ?1",
@@ -182,13 +183,15 @@ impl Store {
     ) -> Result<Vec<MemoryRow>> {
         let sql = if include_cold {
             "SELECT id, kind, window_start, window_end, source_chunk_hashes, \
-                    summary_encrypted, model, created_at, topic_key, cold, superseded_by \
+                    summary_encrypted, model, created_at, topic_key, cold, superseded_by, \
+                    scope_kind, scope_id \
              FROM memories \
              WHERE kind = ?1 AND superseded_by IS NULL \
              ORDER BY created_at DESC"
         } else {
             "SELECT id, kind, window_start, window_end, source_chunk_hashes, \
-                    summary_encrypted, model, created_at, topic_key, cold, superseded_by \
+                    summary_encrypted, model, created_at, topic_key, cold, superseded_by, \
+                    scope_kind, scope_id \
              FROM memories \
              WHERE kind = ?1 AND superseded_by IS NULL AND cold = 0 \
              ORDER BY created_at DESC"
@@ -336,6 +339,8 @@ impl Store {
             topic_key: r.get(8)?,
             cold: r.get::<_, i64>(9)? != 0,
             superseded_by: r.get(10)?,
+            scope_kind: r.get(11)?,
+            scope_id: r.get(12)?,
         })
     }
 }
@@ -353,6 +358,8 @@ struct RawMemory {
     topic_key: Option<String>,
     cold: bool,
     superseded_by: Option<String>,
+    scope_kind: String,
+    scope_id: Option<String>,
 }
 
 impl RawMemory {
@@ -375,6 +382,8 @@ impl RawMemory {
             topic_key: self.topic_key,
             cold: self.cold,
             superseded_by: self.superseded_by,
+            scope_kind: self.scope_kind,
+            scope_id: self.scope_id,
         }
     }
 }
@@ -474,6 +483,9 @@ mod tests {
         assert_eq!(row.topic_key, None);
         assert!(!row.cold);
         assert_eq!(row.superseded_by, None);
+        // A4: legacy insert_memory has no scope → defaults to global / NULL.
+        assert_eq!(row.scope_kind, "global");
+        assert_eq!(row.scope_id, None);
     }
 
     #[test]
