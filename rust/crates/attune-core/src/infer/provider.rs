@@ -86,18 +86,24 @@ fn init_ort_dylib() {
                 continue;
             }
             let dir = crate::infer::stack_installer::stack_dir(stack);
-            for lib in libnames {
-                let p = dir.join(lib);
-                if p.exists() {
-                    // ⭐ onnxruntime 的兄弟依赖(OV provider DLL + OV runtime libs)与它**同目录**,
-                    // 但 Windows 加载被 dlopen 的 dll 时**不搜索该 dll 自身的目录** → onnxruntime.dll
-                    // 找不到 onnxruntime_providers_openvino.dll / openvino*.dll → native crash
-                    // (155H 实证:不加此路径 app 启动即崩;加了存活)。故先把栈目录加进 DLL/so 搜索路径。
-                    // Linux 的 wheel .so 多带 $ORIGIN rpath 自解析,但加 LD_LIBRARY_PATH 兜底无害。
-                    prepend_lib_search_path(&dir);
-                    std::env::set_var("ORT_DYLIB_PATH", &p);
-                    log::info!("ort-dynamic: ORT_DYLIB_PATH → {} (+lib search path, stack={stack})", p.display());
-                    return;
+            // dll 可能在栈根,也可能在 `bin/` 子目录 —— company-mirror 的 OV 栈
+            // (onnxruntime-openvino + OpenVINO runtime)就是 `bin/` 布局,所有 .dll
+            //(onnxruntime.dll / onnxruntime_providers_openvino.dll / openvino*.dll)在 bin/ 下
+            //(155H rc.3 真机实证)。两个候选目录都查。
+            for cand in [dir.clone(), dir.join("bin")] {
+                for lib in libnames {
+                    let p = cand.join(lib);
+                    if p.exists() {
+                        // ⭐ onnxruntime 的兄弟依赖(OV provider DLL + OV runtime libs)与它**同目录**,
+                        // 但 Windows 加载被 dlopen 的 dll 时**不搜索该 dll 自身的目录** → onnxruntime.dll
+                        // 找不到 onnxruntime_providers_openvino.dll / openvino*.dll → native crash
+                        // (155H 实证:不加此路径 app 启动即崩;加了存活)。故先把 dll 所在目录加进搜索路径。
+                        // Linux 的 wheel .so 多带 $ORIGIN rpath 自解析,但加 LD_LIBRARY_PATH 兜底无害。
+                        prepend_lib_search_path(&cand);
+                        std::env::set_var("ORT_DYLIB_PATH", &p);
+                        log::info!("ort-dynamic: ORT_DYLIB_PATH → {} (+lib search path, stack={stack})", p.display());
+                        return;
+                    }
                 }
             }
         }
