@@ -98,6 +98,35 @@ impl Store {
         Ok(())
     }
 
+    /// 取某 file(item)归属的项目 id(chat-centric IA, 2026-06-26)。
+    /// `None` = 该 item 不属任何 project。一个 item 理论上可被关联到多个 project;
+    /// 本方法只取第一个(按 added_at 升序),供 consolidation 的「单一归属」判定用 —
+    /// 跨项目归属由调用方(apply_consolidation_result_scoped)显式收敛为 global。
+    pub fn project_id_for_item(&self, file_id: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let pid: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT project_id FROM project_file WHERE file_id = ?1 \
+                 ORDER BY added_at ASC LIMIT 1",
+                params![file_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(pid)
+    }
+
+    /// 取某 file(item)归属的**所有**项目 id(去重)。consolidation 用此判定一个
+    /// bundle 内的 chunk 是否同属单一项目(跨项目→收敛 global,不误归)。
+    pub fn project_ids_for_item(&self, file_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT project_id FROM project_file WHERE file_id = ?1 \
+             ORDER BY project_id ASC",
+        )?;
+        let rows = stmt.query_map(params![file_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.into())
+    }
+
     pub fn list_files_for_project(&self, project_id: &str) -> Result<Vec<ProjectFile>> {
         let mut stmt = self.conn.prepare(
             "SELECT project_id, file_id, role, added_at FROM project_file \
@@ -214,6 +243,32 @@ mod tests {
         let roles: Vec<_> = files.iter().map(|f| f.role.as_str()).collect();
         assert!(roles.contains(&"evidence"));
         assert!(roles.contains(&"pleading"));
+    }
+
+    #[test]
+    fn project_id_for_item_resolves_and_defaults_none() {
+        let store = Store::open_memory().expect("open");
+        let p = store.create_project("P", "generic").expect("c");
+        store.add_file_to_project(&p.id, "file-1", "evidence").expect("add");
+        // owned item → Some(project)
+        assert_eq!(store.project_id_for_item("file-1").unwrap(), Some(p.id.clone()));
+        // unowned item → None
+        assert_eq!(store.project_id_for_item("file-unknown").unwrap(), None);
+    }
+
+    #[test]
+    fn project_ids_for_item_returns_all_distinct_projects() {
+        let store = Store::open_memory().expect("open");
+        let p1 = store.create_project("P1", "generic").expect("c1");
+        let p2 = store.create_project("P2", "generic").expect("c2");
+        store.add_file_to_project(&p1.id, "shared-file", "evidence").expect("a1");
+        store.add_file_to_project(&p2.id, "shared-file", "evidence").expect("a2");
+        let ids = store.project_ids_for_item("shared-file").unwrap();
+        assert_eq!(ids.len(), 2, "item belongs to two projects");
+        assert!(ids.contains(&p1.id));
+        assert!(ids.contains(&p2.id));
+        // unowned → empty
+        assert!(store.project_ids_for_item("nope").unwrap().is_empty());
     }
 
     #[test]

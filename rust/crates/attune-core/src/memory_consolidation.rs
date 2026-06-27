@@ -10,11 +10,12 @@
 //!   3. [`apply_consolidation_result`] **持 vault 锁**：`INSERT OR IGNORE` 写 memories；
 //!      返回新增条数。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::crypto::{self, Key32};
 use crate::error::{Result, VaultError};
 use crate::llm::{ChatMessage, LlmProvider};
+use crate::memory::MemoryScope;
 use crate::store::Store;
 
 /// 默认时间窗口：1 天。
@@ -214,6 +215,60 @@ pub fn apply_consolidation_result(
     model: &str,
     now_secs: i64,
 ) -> Result<usize> {
+    // Legacy signature = all memories global; delegate to the scoped version with
+    // scope-derivation disabled so behavior is byte-identical (chat-centric IA).
+    apply_consolidation_result_inner(store, dek, bundles, summaries, model, now_secs, false)
+}
+
+/// scope-aware apply (chat-centric IA, 2026-06-26): derive each bundle's memory
+/// scope from its source items' project membership.
+///
+/// Scope derivation per bundle (decision: never misattribute across projects):
+///   - every chunk's item unowned → `Global`
+///   - the union of project ids over all chunks is exactly one project P → `Project(P)`
+///   - the union spans ≥ 2 projects (or mixes owned + a different project) → `Global`
+///
+/// Episodic memories come from `chunk_summaries` (document-derived), not from loose
+/// conversations — so this path only ever assigns `Project(P)` or `Global`, never
+/// `Conversation(_)` (that recall is lazily derived, Task C3).
+pub fn apply_consolidation_result_scoped(
+    store: &Store,
+    dek: &Key32,
+    bundles: &[ConsolidationBundle],
+    summaries: &[Option<String>],
+    model: &str,
+    now_secs: i64,
+) -> Result<usize> {
+    apply_consolidation_result_inner(store, dek, bundles, summaries, model, now_secs, true)
+}
+
+/// Resolve a bundle's memory scope from its chunks' item→project_file membership.
+/// `Global` unless every owned chunk resolves to one and the same single project.
+fn derive_bundle_scope(store: &Store, bundle: &ConsolidationBundle) -> Result<MemoryScope> {
+    let mut projects: BTreeSet<String> = BTreeSet::new();
+    for chunk in &bundle.chunks {
+        for pid in store.project_ids_for_item(&chunk.item_id)? {
+            projects.insert(pid);
+        }
+    }
+    let mut iter = projects.into_iter();
+    match (iter.next(), iter.next()) {
+        // exactly one project across all chunks → that project's scope
+        (Some(only), None) => Ok(MemoryScope::Project(only)),
+        // none owned, or spans ≥ 2 projects → global (do not misattribute)
+        _ => Ok(MemoryScope::Global),
+    }
+}
+
+fn apply_consolidation_result_inner(
+    store: &Store,
+    dek: &Key32,
+    bundles: &[ConsolidationBundle],
+    summaries: &[Option<String>],
+    model: &str,
+    now_secs: i64,
+    scoped: bool,
+) -> Result<usize> {
     if bundles.len() != summaries.len() {
         return Err(VaultError::InvalidInput(format!(
             "bundles ({}) and summaries ({}) length mismatch",
@@ -225,7 +280,12 @@ pub fn apply_consolidation_result(
     for (bundle, summary) in bundles.iter().zip(summaries.iter()) {
         let Some(s) = summary else { continue };
         let hashes = bundle.sorted_hashes();
-        match store.insert_memory(
+        let scope = if scoped {
+            derive_bundle_scope(store, bundle)?
+        } else {
+            MemoryScope::Global
+        };
+        match store.insert_memory_scoped(
             dek,
             "episodic",
             bundle.window_start,
@@ -234,6 +294,7 @@ pub fn apply_consolidation_result(
             s,
             model,
             now_secs,
+            &scope,
         ) {
             Ok(n) => inserted += n,
             Err(e) => {
@@ -467,6 +528,91 @@ mod tests {
         // 二次 apply 同样的 bundle → INSERT OR IGNORE 返回 0
         let n2 = apply_consolidation_result(&store, &dek, &bundles, &summaries, "m", 0).unwrap();
         assert_eq!(n2, 0);
+    }
+
+    fn one_chunk_bundle(hash: &str, item_id: &str) -> ConsolidationBundle {
+        ConsolidationBundle {
+            window_start: 1000,
+            window_end: 2000,
+            chunks: vec![BundleChunk {
+                chunk_hash: hash.into(),
+                item_id: item_id.into(),
+                summary: "s".into(),
+            }],
+        }
+    }
+
+    fn scope_of_only_memory(store: &Store, dek: &Key32) -> (String, Option<String>) {
+        let rows = store.list_recent_memories(dek, 100).unwrap();
+        assert_eq!(rows.len(), 1, "expected exactly one consolidated memory");
+        (rows[0].scope_kind.clone(), rows[0].scope_id.clone())
+    }
+
+    #[test]
+    fn consolidation_scopes_to_project_when_chunks_belong_to_project() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let p = store.create_project("Case", "generic").unwrap();
+        store.add_file_to_project(&p.id, "item-1", "evidence").unwrap();
+
+        let bundles = vec![one_chunk_bundle("h1", "item-1")];
+        let summaries = vec![Some("project summary".to_string())];
+        let n = apply_consolidation_result_scoped(&store, &dek, &bundles, &summaries, "m", 0).unwrap();
+        assert_eq!(n, 1);
+        let (kind, id) = scope_of_only_memory(&store, &dek);
+        assert_eq!(kind, "project");
+        assert_eq!(id, Some(p.id), "memory must carry the owning project's scope");
+    }
+
+    #[test]
+    fn consolidation_global_when_chunks_unowned() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let bundles = vec![one_chunk_bundle("h1", "item-unowned")];
+        let summaries = vec![Some("global summary".to_string())];
+        apply_consolidation_result_scoped(&store, &dek, &bundles, &summaries, "m", 0).unwrap();
+        let (kind, id) = scope_of_only_memory(&store, &dek);
+        assert_eq!(kind, "global", "unowned item → global scope");
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn consolidation_global_when_chunks_span_multiple_projects() {
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let pa = store.create_project("A", "generic").unwrap();
+        let pb = store.create_project("B", "generic").unwrap();
+        store.add_file_to_project(&pa.id, "item-a", "evidence").unwrap();
+        store.add_file_to_project(&pb.id, "item-b", "evidence").unwrap();
+        // one bundle whose two chunks belong to two different projects
+        let bundle = ConsolidationBundle {
+            window_start: 1000,
+            window_end: 2000,
+            chunks: vec![
+                BundleChunk { chunk_hash: "ha".into(), item_id: "item-a".into(), summary: "s".into() },
+                BundleChunk { chunk_hash: "hb".into(), item_id: "item-b".into(), summary: "s".into() },
+            ],
+        };
+        let summaries = vec![Some("spanning summary".to_string())];
+        apply_consolidation_result_scoped(&store, &dek, &[bundle], &summaries, "m", 0).unwrap();
+        let (kind, id) = scope_of_only_memory(&store, &dek);
+        assert_eq!(kind, "global", "cross-project bundle must NOT misattribute → global");
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn legacy_apply_consolidation_writes_global_scope() {
+        // Backward-compat: the non-scoped apply must keep writing global rows.
+        let store = Store::open_memory().unwrap();
+        let dek = Key32::generate();
+        let p = store.create_project("Case", "generic").unwrap();
+        store.add_file_to_project(&p.id, "item-1", "evidence").unwrap();
+        let bundles = vec![one_chunk_bundle("h1", "item-1")];
+        let summaries = vec![Some("s".to_string())];
+        apply_consolidation_result(&store, &dek, &bundles, &summaries, "m", 0).unwrap();
+        let (kind, id) = scope_of_only_memory(&store, &dek);
+        assert_eq!(kind, "global", "legacy apply ignores project membership");
+        assert_eq!(id, None);
     }
 
     #[test]

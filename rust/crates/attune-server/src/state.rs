@@ -2228,7 +2228,10 @@ impl AppState {
                         Ok(d) => d,
                         Err(_) => break,
                     };
-                    match attune_core::memory_consolidation::apply_consolidation_result(
+                    // chat-centric IA: derive each bundle's memory scope from its
+                    // source items' project membership (item→project_file→project:P),
+                    // else global. Within the same vault guard — no new lock.
+                    match attune_core::memory_consolidation::apply_consolidation_result_scoped(
                         vault.store(), &dek, &bundles, &summaries, &model_name, now_secs,
                     ) {
                         Ok(0) => tracing::debug!("Memory consolidator: no new memories"),
