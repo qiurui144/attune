@@ -18,7 +18,10 @@ pub mod consolidation_agent;
 pub mod migration;
 pub mod portability;
 pub mod retrieval;
+pub mod scope;
 pub mod semantic;
+
+pub use scope::MemoryScope;
 
 pub use assembler::{
     assemble_context, classify_query_shape, compact_history, AssembledContext, ContextBlock,
