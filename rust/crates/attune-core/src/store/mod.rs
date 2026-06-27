@@ -524,10 +524,17 @@ CREATE TABLE IF NOT EXISTS memories (
     -- cold flags demoted episodic rows, superseded_by points to a refreshed L3 row.
     topic_key             TEXT,
     cold                  INTEGER NOT NULL DEFAULT 0,
-    superseded_by         TEXT
+    superseded_by         TEXT,
+    -- chat-centric IA (2026-06-26): retrieval-isolation scope. 'global' = visible
+    -- to every conversation (old rows + document-derived memory default);
+    -- 'project' + scope_id=<project_id> = a project's case-file memory. Old vaults
+    -- get these via migrate_memories_scope (default 'global' = zero behavior change).
+    scope_kind            TEXT NOT NULL DEFAULT 'global',
+    scope_id              TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_window ON memories(window_start, window_end);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope_kind, scope_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_source ON memories(kind, source_chunk_hashes);
 -- idx_memories_cold / uq_memories_topic 不在此建 —— cold/topic_key 在老 vault 上由
 -- migrate_memories_multilayer 的 ALTER 补列，两索引随之在该函数内（列就位后）创建。
@@ -923,6 +930,7 @@ impl Store {
         Self::migrate_job_queue_backoff(conn)?;
         Self::migrate_skill_signals_v07(conn)?;
         Self::migrate_memories_multilayer(conn)?;
+        Self::migrate_memories_scope(conn)?;
         Self::migrate_conversations_project_id(conn)?;
         Self::migrate_chunk_summaries_deepsum_strategy(conn)?;
         Self::migrate_organization_proposals(conn)?;
@@ -946,6 +954,7 @@ impl Store {
         Self::migrate_job_queue_backoff(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
+        Self::migrate_memories_scope(&conn)?;
         Self::migrate_conversations_project_id(&conn)?;
         Self::migrate_organization_proposals(&conn)?;
         Self::migrate_memory_migrations(&conn)?;
@@ -1217,6 +1226,37 @@ impl Store {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversations_project \
              ON conversations(project_id, updated_at DESC)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// 迁移：memories 新增 scope_kind / scope_id 列 + 索引 (chat-centric IA, 2026-06-26)。
+    /// scope_kind 默认 'global'(老行回填全局可见，零行为变化)；scope_id 可空。
+    /// 同 migrate_memories_multilayer 形态(pragma 探测 → ALTER → INDEX 提到 if 块外)。
+    pub(crate) fn migrate_memories_scope(conn: &Connection) -> Result<()> {
+        let has_kind: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'scope_kind'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_kind == 0 {
+            conn.execute(
+                "ALTER TABLE memories ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'global'",
+                [],
+            )?;
+        }
+        let has_id: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'scope_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_id == 0 {
+            conn.execute("ALTER TABLE memories ADD COLUMN scope_id TEXT", [])?;
+        }
+        // INDEX CREATE 提到 if 块外(R16 理由)：列就位后建。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope_kind, scope_id)",
             [],
         )?;
         Ok(())
@@ -1619,6 +1659,32 @@ mod tests {
             })
             .unwrap();
         assert_eq!(pid, None, "old conversations default to NULL = loose");
+    }
+
+    #[test]
+    fn migrate_memories_scope_backfills_global() {
+        // Old memories table (no scope columns) with one existing row.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (id TEXT PRIMARY KEY, kind TEXT NOT NULL,
+             window_start INTEGER NOT NULL, window_end INTEGER NOT NULL,
+             source_chunk_hashes TEXT NOT NULL, source_chunk_count INTEGER NOT NULL,
+             summary_encrypted BLOB NOT NULL, model TEXT NOT NULL, created_at INTEGER NOT NULL);
+             INSERT INTO memories VALUES ('m1','episodic',0,1,'[\"h\"]',1,x'00','m',0);",
+        )
+        .unwrap();
+        Store::migrate_memories_scope(&conn).unwrap();
+        Store::migrate_memories_scope(&conn).unwrap(); // idempotent
+        let sk: String = conn
+            .query_row("SELECT scope_kind FROM memories WHERE id='m1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(sk, "global", "old rows must default to global (zero behavior change)");
+        let sid: Option<String> = conn
+            .query_row("SELECT scope_id FROM memories WHERE id='m1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sid, None, "old rows have NULL scope_id");
     }
 
     // ── ACP-6 Task 1: PRAGMA user_version + schema version gate ──────────
