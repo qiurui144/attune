@@ -248,6 +248,11 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/projects/{id}/timeline",
             get(routes::projects::list_project_timeline),
         )
+        // chat-centric IA (2026-06-26): a project's branch conversations.
+        .route(
+            "/api/v1/projects/{id}/conversations",
+            get(routes::projects::list_project_conversations),
+        )
         // 文件夹一键智能整理 → 案卷（auto-organize folder-to-project, 2026-06-15）
         .route("/api/v1/organize/analyze", post(routes::organize::analyze))
         .route("/api/v1/organize/apply", post(routes::organize::apply))

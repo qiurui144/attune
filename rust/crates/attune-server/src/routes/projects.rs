@@ -12,11 +12,11 @@
 //! 拦截 locked 情形并返 403；handler 内仍保留 defensive check 以防中间件配置变更）。
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
-use attune_core::store::{Project, ProjectFile, ProjectTimelineEntry};
+use attune_core::store::{ConversationSummary, Project, ProjectFile, ProjectTimelineEntry};
 use attune_core::vault::VaultState;
 use serde::{Deserialize, Serialize};
 
@@ -163,6 +163,55 @@ pub async fn list_project_files(
         .list_files_for_project(&id)
         .map_err(internal_error)?;
     Ok(Json(FilesListResponse { files }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConversationsQuery {
+    #[serde(default = "default_conv_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_conv_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectConversationsResponse {
+    pub conversations: Vec<ConversationSummary>,
+    pub total: usize,
+}
+
+/// GET /api/v1/projects/:id/conversations
+///
+/// chat-centric IA (2026-06-26): list a project's branch conversations (the chats
+/// created under this project). 404 if the project does not exist; loose
+/// conversations are never included.
+pub async fn list_project_conversations(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Query(q): Query<ConversationsQuery>,
+) -> Result<Json<ProjectConversationsResponse>, AppError> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    if !matches!(vault.state(), VaultState::Unlocked) {
+        return Err(vault_locked_error());
+    }
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
+    // Project must exist → 404 otherwise (do not return an empty list for a
+    // nonexistent project, which would mask a client bug).
+    if vault.store().get_project(&id).map_err(internal_error)?.is_none() {
+        return Err(AppError::NotFound("project not found".into()));
+    }
+    let limit = q.limit.min(200);
+    let conversations = vault
+        .store()
+        .list_conversations_scoped(&dek, Some(Some(&id)), limit, q.offset)
+        .map_err(internal_error)?;
+    let total = conversations.len();
+    Ok(Json(ProjectConversationsResponse { conversations, total }))
 }
 
 /// GET /api/v1/projects/:id/timeline
