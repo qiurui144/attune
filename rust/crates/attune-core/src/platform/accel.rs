@@ -27,7 +27,7 @@ pub enum AccelKind {
     AmdGpu,
     /// AMD XDNA NPU（Ryzen AI，走 VitisAI EP）。
     AmdNpu,
-    /// Intel iGPU（Arc / Iris Xe，走 OpenVINO / DirectML）。
+    /// Intel iGPU（Arc / Iris Xe，走 OpenVINO）。
     IntelIgpu,
     /// Intel NPU（Core Ultra AI Boost，走 OpenVINO）。
     IntelNpu,
@@ -130,7 +130,7 @@ impl AccelCapabilities {
     /// | AMD XDNA NPU              | `vitisai`    | `vitisai`    | —      |
     /// | Intel NPU                 | `openvino`   | `openvino`   | —      |
     /// | AMD RDNA GPU              | `rocm`       | `directml`   | —      |
-    /// | Intel iGPU                | `openvino`   | `directml`   | —      |
+    /// | Intel iGPU                | `openvino`   | `openvino`   | —      |
     /// | (none) / macOS            | `cpu`        | `cpu`        | `cpu`  |
     ///
     /// macOS 上 ORT 的 GPU EP（CoreML）此项目暂不投入（per CLAUDE.md macOS 暂不做），
@@ -202,7 +202,7 @@ fn classify_intel_igpu(present: bool) -> Accelerator {
         vendor: "intel",
         present,
         driver_ready: present,
-        notes: "Intel iGPU Arc/Iris Xe (OpenVINO/DirectML EP)".to_string(),
+        notes: "Intel iGPU Arc/Iris Xe (OpenVINO EP)".to_string(),
     }
 }
 
@@ -237,7 +237,7 @@ fn recommended_ep_for(os: &str, accels: &[Accelerator]) -> &'static str {
     } else if ready(AccelKind::AmdGpu) {
         if windows { "directml" } else { "rocm" }
     } else if ready(AccelKind::IntelIgpu) {
-        if windows { "directml" } else { "openvino" }
+        "openvino"
     } else {
         "cpu"
     }
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(AccelCapabilities::from_profile(&p).recommended_ep_hint(), "openvino"); // linux
 
         p.os = "windows";
-        assert_eq!(AccelCapabilities::from_profile(&p).recommended_ep_hint(), "directml"); // windows
+        assert_eq!(AccelCapabilities::from_profile(&p).recommended_ep_hint(), "openvino"); // windows
     }
 
     #[test]

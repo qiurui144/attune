@@ -30,7 +30,7 @@ pub enum EpChoice {
     Cuda,
     /// NVIDIA TensorRT(进阶,需 TensorRT runtime)。
     TensorRt,
-    /// Windows DirectML(对 NV/AMD/Intel GPU 统一,Win 最稳)。
+    /// Windows DirectML(AMD/NVIDIA Windows GPU;Intel 自动策略优先 OpenVINO)。
     DirectMl,
     /// Apple CoreML(macOS;本项目 macOS 暂不投入,保留 feature)。
     CoreMl,
@@ -98,10 +98,10 @@ impl OpenVinoDevice {
 ///
 /// 背景(bench 实测,vlm-llm-bench reports/2026-06-19-all-model-matrix-results.en.md):
 /// **Intel 机器上 PP-OCR/rapidocr 走 DirectML → CER 202%(全废,完全不可用)**;同机
-/// OpenVINO CER 7.04%。AMD 机器 OCR 走 DirectML 反而比 CPU 快 3.4×(matrix:32)。所以
-/// OCR 任务必须按厂商区分 EP,不能复用通用(embedding/rerank)的 EP 链。
+/// OpenVINO CER 7.04%。AMD 机器 OCR 走 DirectML 反而比 CPU 快 3.4×(matrix:32)。
+/// 因此 Intel 通用底座自动选型也优先 OpenVINO;AMD Windows GPU 仍保留 DirectML。
 ///
-/// `Generic` = 通用底座推理(embedding / rerank / 一般 ONNX),沿用既有 EP 选型不变。
+/// `Generic` = 通用底座推理(embedding / rerank / 一般 ONNX),按平台实测矩阵选型。
 /// `Ocr` = OCR 专用,触发 per-task 过滤(Intel 禁 DirectML,强制 OpenVINO 或 CPU 兜底)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InferTask {
@@ -412,17 +412,15 @@ pub fn recommend_ep_chain_pure(
                     &[EpChoice::Rocm]
                 }
             }
-            // Intel iGPU → Win:DirectML;Linux:OpenVINO(device=GPU)。
+            // Intel iGPU → OpenVINO(device=GPU). vlm-llm-benchmark reports show
+            // Intel Arc/iGPU should use OpenVINO for OCR/embedding/rerank/LLM paths;
+            // DirectML OCR is invalid (CER 202%) and must not be the automatic hint.
             AccelKind::IntelIgpu => {
-                if windows {
-                    push_first_compiled(&mut chain, &[EpChoice::DirectMl], &is_compiled);
-                } else {
-                    push_first_compiled(
-                        &mut chain,
-                        &[EpChoice::OpenVino(OpenVinoDevice::Gpu)],
-                        &is_compiled,
-                    );
-                }
+                push_first_compiled(
+                    &mut chain,
+                    &[EpChoice::OpenVino(OpenVinoDevice::Gpu)],
+                    &is_compiled,
+                );
                 continue;
             }
             AccelKind::Cpu => continue, // CPU 由末尾兜底统一加
@@ -490,7 +488,7 @@ fn apply_ocr_ep_rules(
     // Intel + OCR:剔除 DirectML(实测全废),其余保序。
     let mut filtered: Vec<EpChoice> = base.into_iter().filter(|e| *e != EpChoice::DirectMl).collect();
 
-    // 若有 Intel iGPU 且 OpenVINO 已编入但不在链中(被通用链的 Win→DirectML 分支占位挤掉),
+    // 若有 Intel iGPU 且 OpenVINO 已编入但不在链中(例如 env 覆盖/旧策略造成),
     // 补 OpenVINO(device=GPU)到 CPU 前 —— 给 Intel OCR 一个实测可用的加速 EP。
     let has_intel_igpu = hardware.iter().any(|k| matches!(k, AccelKind::IntelIgpu));
     let ov_gpu = EpChoice::OpenVino(OpenVinoDevice::Gpu);
@@ -635,6 +633,18 @@ mod tests {
         );
         assert_eq!(chain_ids(&chain), ["openvino", "cpu"]);
         // device 应是 GPU(Intel iGPU 命中 → OpenVINO device=GPU)
+        assert_eq!(chain[0], EpChoice::OpenVino(OpenVinoDevice::Gpu));
+    }
+
+    #[test]
+    fn intel_igpu_windows_with_openvino_compiled_picks_openvino_gpu() {
+        let chain = recommend_ep_chain_pure(
+            "windows",
+            &[AccelKind::IntelIgpu],
+            &[EpChoice::Cpu, EpChoice::DirectMl, EpChoice::OpenVino(OpenVinoDevice::Auto)],
+            None,
+        );
+        assert_eq!(chain_ids(&chain), ["openvino", "cpu"]);
         assert_eq!(chain[0], EpChoice::OpenVino(OpenVinoDevice::Gpu));
     }
 
@@ -790,7 +800,7 @@ mod tests {
             &[EpChoice::Cpu, EpChoice::Cuda, EpChoice::DirectMl],
             None,
         );
-        // NVIDIA→cuda 首;AMD GPU + Intel iGPU 在 Win 都映射 DirectML(去重一次)→ cuda, directml, cpu
+        // NVIDIA→cuda 首;AMD GPU 在 Win 映射 DirectML;Intel iGPU 只在 OpenVINO 编入时补 OpenVINO。
         assert_eq!(chain_ids(&chain), ["cuda", "directml", "cpu"]);
     }
 
@@ -856,7 +866,7 @@ mod tests {
 
     #[test]
     fn ocr_intel_igpu_windows_never_picks_directml() {
-        // 通用链:Intel iGPU + Win + DirectML 编入 → [directml, cpu](当前会全废)。
+        // 通用链:Intel iGPU + Win + 只编 DirectML → 不再误走 DirectML,直接 CPU 兜底。
         let generic = recommend_ep_chain_for_task(
             "windows",
             &[AccelKind::IntelIgpu],
@@ -864,7 +874,7 @@ mod tests {
             None,
             InferTask::Generic,
         );
-        assert_eq!(chain_ids(&generic), ["directml", "cpu"]);
+        assert_eq!(chain_ids(&generic), ["cpu"]);
 
         // OCR 链:DirectML 被剔除;无 OpenVINO 编入 → 落 [cpu](兜底,不全废)。
         let ocr = recommend_ep_chain_for_task(

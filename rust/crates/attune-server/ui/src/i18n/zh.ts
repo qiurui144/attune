@@ -129,7 +129,7 @@ export const zh = {
   'app.promise': '本地决定，全网增强，越用越懂你的专业。',
   'app.boot.failed': '启动失败',
   'app.boot.loading': 'Attune 正在启动…',
-  'app.tauri.dropped_files': '已检测到拖入 {count} 个文件（占位提示）：\n{paths}',
+  'app.tauri.dropped_files': '已检测到拖入 {count} 个文件：\n{paths}',
   'app.tauri.upload_ok': '已上传 {count} 个拖入文件',
   'app.tauri.upload_fail': '{count} 个文件上传失败',
   'app.tauri.upload_err': '拖入文件上传出错',
@@ -292,7 +292,7 @@ export const zh = {
 
   // ─── 快捷键 ───────────────────────────────────────────
   'shortcut.search': '全局搜索',
-  'shortcut.new_chat': '新对话',
+  'shortcut.new_chat': '临时对话',
   'shortcut.settings': '设置',
   'shortcut.help': '快捷键',
   'shortcut.send': '发送消息',
@@ -303,7 +303,7 @@ export const zh = {
   'sidebar.action.new_chat': '新对话',
 
   // ─── Sidebar 导航（v0.6.0-rc.3 i18n 补全）──────────────
-  'sidebar.new_chat': '新对话',
+  'sidebar.new_chat': '临时对话',
   'sidebar.no_sessions': '还没有对话',
   'sidebar.untitled_session': '未命名对话',
   'sidebar.nav.items': '条目',
@@ -362,7 +362,7 @@ export const zh = {
   'sidebar.menu.about.toast': 'Attune · 私有 AI 知识伙伴 · 详见 README.md',
 
   // ─── ChatView ───────────────────────────────────────
-  'chat.new_session_title': '新对话',
+  'chat.new_session_title': '临时对话',
   'chat.model.auto': '自动',
   'chat.model.change': '切换模型',
   'chat.sample.summarize_recent': '帮我总结最近上传的文件',
@@ -429,6 +429,16 @@ export const zh = {
   'knowledge.empty.desc': '需要至少 20 条记录，后台 HDBSCAN 聚类会自动发现主题群组',
   'knowledge.empty.action_items': '查看知识条目',
   'knowledge.empty.action_remote': '关联目录 / 数据源',
+  'knowledge.overview.desc': '查看已导入知识、来源结构，并进入项目级工作区。',
+  'knowledge.metric.items': '知识条目',
+  'knowledge.metric.sources': '来源类型',
+  'knowledge.metric.domains': '域名来源',
+  'knowledge.action.refresh': '刷新',
+  'knowledge.action.items': '打开条目',
+  'knowledge.action.sources': '管理来源',
+  'knowledge.action.projects': '项目工作区',
+  'knowledge.recent.title': '最近知识',
+  'knowledge.recent.empty': '还没有知识条目。请先关联目录或导入文档。',
 
   // ─── CommandPalette ─────────────────────────────────
   'cmd.view.chat': '对话',

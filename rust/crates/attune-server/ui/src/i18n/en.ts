@@ -134,7 +134,7 @@ export const en = {
     'Local-first, globally augmented, increasingly attuned to your expertise.',
   'app.boot.failed': 'Startup failed',
   'app.boot.loading': 'Attune is starting…',
-  'app.tauri.dropped_files': 'Detected {count} dropped files (placeholder):\n{paths}',
+  'app.tauri.dropped_files': 'Detected {count} dropped files:\n{paths}',
   'app.tauri.upload_ok': 'Uploaded {count} dropped file(s)',
   'app.tauri.upload_fail': '{count} file(s) failed to upload',
   'app.tauri.upload_err': 'Failed to upload dropped files',
@@ -299,7 +299,7 @@ export const en = {
 
   // ─── Shortcuts ──────────────────────────────────────
   'shortcut.search': 'Global search',
-  'shortcut.new_chat': 'New chat',
+  'shortcut.new_chat': 'Temporary chat',
   'shortcut.settings': 'Settings',
   'shortcut.help': 'Shortcuts',
   'shortcut.send': 'Send message',
@@ -310,7 +310,7 @@ export const en = {
   'sidebar.action.new_chat': 'New chat',
 
   // ─── Sidebar nav (v0.6.0-rc.3 i18n) ─────────────────
-  'sidebar.new_chat': 'New chat',
+  'sidebar.new_chat': 'Temporary chat',
   'sidebar.no_sessions': 'No sessions yet',
   'sidebar.untitled_session': 'Untitled',
   'sidebar.nav.items': 'Items',
@@ -369,7 +369,7 @@ export const en = {
   'sidebar.menu.about.toast': 'Attune · Private AI Knowledge Companion · see README.md',
 
   // ─── ChatView ───────────────────────────────────────
-  'chat.new_session_title': 'New Chat',
+  'chat.new_session_title': 'Temporary chat',
   'chat.model.auto': 'Auto',
   'chat.model.change': 'Change model',
   'chat.sample.summarize_recent': 'Summarize my recently uploaded files',
@@ -434,6 +434,16 @@ export const en = {
   'knowledge.empty.desc': 'At least 20 records are needed; backend HDBSCAN will discover topic groups automatically',
   'knowledge.empty.action_items': 'Browse knowledge items',
   'knowledge.empty.action_remote': 'Link folders / data sources',
+  'knowledge.overview.desc': 'Operational overview of imported knowledge, sources, and project entry points.',
+  'knowledge.metric.items': 'Items',
+  'knowledge.metric.sources': 'Source types',
+  'knowledge.metric.domains': 'Domains',
+  'knowledge.action.refresh': 'Refresh',
+  'knowledge.action.items': 'Open items',
+  'knowledge.action.sources': 'Manage sources',
+  'knowledge.action.projects': 'Project workspace',
+  'knowledge.recent.title': 'Recent knowledge',
+  'knowledge.recent.empty': 'No knowledge items yet. Add a folder or import documents to start.',
 
   // ─── CommandPalette ─────────────────────────────────
   'cmd.view.chat': 'Chat',

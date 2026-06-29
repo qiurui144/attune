@@ -1,0 +1,59 @@
+{
+  "source_root": "/data/company/project/vlm-llm-benchmark/reports",
+  "documents": [
+    {
+      "file": "intel-windows.en.md",
+      "title": "Benchmark Intel Windows overview",
+      "tags": ["kb-longloop", "benchmark", "intel"]
+    },
+    {
+      "file": "intel-windows-igpu.en.md",
+      "title": "Benchmark Intel Windows iGPU OpenVINO",
+      "tags": ["kb-longloop", "benchmark", "intel", "openvino"]
+    },
+    {
+      "file": "amd-windows.en.md",
+      "title": "Benchmark AMD Windows overview",
+      "tags": ["kb-longloop", "benchmark", "amd"]
+    },
+    {
+      "file": "amd-windows-igpu.en.md",
+      "title": "Benchmark AMD Windows iGPU DirectML Vulkan",
+      "tags": ["kb-longloop", "benchmark", "amd", "directml"]
+    },
+    {
+      "file": "amd-windows-npu.en.md",
+      "title": "Benchmark AMD Windows NPU VitisAI",
+      "tags": ["kb-longloop", "benchmark", "amd", "vitisai"]
+    }
+  ],
+  "queries": [
+    {
+      "q": "Intel DirectML OCR CER 202 OpenVINO",
+      "expect_any": ["Intel", "OpenVINO", "DirectML", "CER 202"]
+    },
+    {
+      "q": "Intel Arc iGPU OpenVINO embedding reranker latency",
+      "expect_any": ["Intel", "Arc", "OpenVINO", "Reranker"]
+    },
+    {
+      "q": "AMD Radeon 780M OCR DirectML fastest path",
+      "expect_any": ["AMD", "Radeon 780M", "DirectML", "OCR"]
+    },
+    {
+      "q": "AMD XDNA 1 NPU LLM not supported 8845H",
+      "expect_any": ["XDNA 1", "LLM", "NOT SUPPORTED", "8845H"]
+    },
+    {
+      "q": "qwen2.5 7b amd win translation fail en zh",
+      "expect_any": ["qwen2.5-7b", "translation", "FAIL", "en"]
+    }
+  ],
+  "pro_blocked_cases": [
+    "civil-loan",
+    "labor-dispute",
+    "traffic-accident",
+    "defamation"
+  ]
+}
+
