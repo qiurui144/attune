@@ -24,6 +24,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// 从 app_settings JSON 中提取 LLM env vars，供 agent subprocess 使用。
@@ -60,6 +61,25 @@ const AGENT_RUN_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct RunAgentRequest {
     /// agent stdin JSON。原样序列化后喂给 agent binary 的 stdin。
     pub input: serde_json::Value,
+}
+
+fn current_plugin_registry(
+    state: &SharedState,
+) -> Arc<attune_core::plugin_registry::PluginRegistry> {
+    match attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
+        .and_then(|dir| attune_core::plugin_registry::PluginRegistry::scan(&dir))
+    {
+        Ok((registry, warnings)) => {
+            for warning in warnings {
+                tracing::warn!("plugin live-scan warning before agent run: {warning}");
+            }
+            Arc::new(registry)
+        }
+        Err(e) => {
+            tracing::warn!("plugin live-scan failed before agent run; using startup registry: {e}");
+            state.plugin_registry.clone()
+        }
+    }
 }
 
 /// Trust-chain T10 (spec §7.2): entitlement dispatch gate. Returns `Ok(())` when the
@@ -104,7 +124,7 @@ pub async fn run_agent(
     if agent_id.len() > 128 {
         return Err(AppError::BadRequest("agent_id too long".into()));
     }
-    let registry = state.plugin_registry.clone();
+    let registry = current_plugin_registry(&state);
 
     // 1. agent_id → 所属 plugin_id + agent spec (registry.list_agents 返回 (plugin_id, AgentSpec))
     let (plugin_id, agent_runtime) = registry
