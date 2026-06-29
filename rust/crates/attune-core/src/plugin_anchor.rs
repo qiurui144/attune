@@ -45,8 +45,8 @@
 /// then drop the old anchor in a later release (§5.6.1 W1-D, isomorphic with the
 /// §7.2 dual-pin CA-rotation gate).
 pub const OFFICIAL_PLUGIN_ANCHORS: &[&str] = &[
-    // 官方锚 2026-06-22 (轮换 — 旧钥私钥丢失) — law-pro publisher key (cloud accounts/config.py SSOT).
-    "d6b221f44abe6daa85f041e80fb0293ac9904b6ec563c20432b1af01c015c01e",
+    // 官方锚 2026-06-30 (旧钥私钥不可用后重签) — law-pro publisher key (cloud accounts/config.py SSOT).
+    "3fc9afb5b7a7bc8c7863cdb33070e7effad930efaf234069dc5d2bcdf993c6d4",
     // "新锚..."  // rotation window: pre-fill the next anchor here (≤ 3 total).
 ];
 
@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn official_anchor_matches_exact() {
         assert!(is_official_anchor(
-            "d6b221f44abe6daa85f041e80fb0293ac9904b6ec563c20432b1af01c015c01e"
+            "3fc9afb5b7a7bc8c7863cdb33070e7effad930efaf234069dc5d2bcdf993c6d4"
         ));
     }
 
@@ -84,14 +84,14 @@ mod tests {
     fn official_anchor_is_case_insensitive() {
         // entitlement may arrive upper-cased from a different serializer.
         assert!(is_official_anchor(
-            "D6B221F44ABE6DAA85F041E80FB0293AC9904B6EC563C20432B1AF01C015C01E"
+            "3FC9AFB5B7A7BC8C7863CDB33070E7EFFAD930EFAF234069DC5D2BCDF993C6D4"
         ));
     }
 
     #[test]
     fn official_anchor_tolerates_surrounding_whitespace() {
         assert!(is_official_anchor(
-            "  d6b221f44abe6daa85f041e80fb0293ac9904b6ec563c20432b1af01c015c01e\n"
+            "  3fc9afb5b7a7bc8c7863cdb33070e7effad930efaf234069dc5d2bcdf993c6d4\n"
         ));
     }
 
@@ -124,7 +124,7 @@ mod tests {
         assert!(!is_official_anchor("8866ae9b"));
         // Trailing extra char.
         assert!(!is_official_anchor(
-            "d6b221f44abe6daa85f041e80fb0293ac9904b6ec563c20432b1af01c015c01ef"
+            "3fc9afb5b7a7bc8c7863cdb33070e7effad930efaf234069dc5d2bcdf993c6d4f"
         ));
     }
 
