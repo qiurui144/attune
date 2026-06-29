@@ -536,11 +536,8 @@ fn install_plugin_package_inner(
 
 fn download_to_file(url: &str, license_key: &str, dest: &std::path::Path) -> Result<()> {
     if std::env::var_os("ATTUNE_ALLOW_LOCAL_PLUGINHUB").is_none() {
-        crate::net::url_guard::validate_open_outbound_url(
-            url,
-            &crate::net::url_guard::system_resolve,
-        )
-        .map_err(|e| VaultError::InvalidInput(format!("plugin download url blocked: {e}")))?;
+        validate_plugin_package_download_url(url, &crate::net::url_guard::system_resolve)
+            .map_err(|e| VaultError::InvalidInput(format!("plugin download url blocked: {e}")))?;
     }
     // PluginHub requires Bearer authorization; reqwest::blocking::get() is a bare fn with
     // no header support, so we build a one-shot Client here.
@@ -567,6 +564,75 @@ fn download_to_file(url: &str, license_key: &str, dest: &std::path::Path) -> Res
         .map_err(|e| VaultError::Io(std::io::Error::other(format!("read body: {e}"))))?;
     std::fs::write(dest, &bytes).map_err(VaultError::Io)?;
     Ok(())
+}
+
+fn validate_plugin_package_download_url(
+    raw: &str,
+    resolve: &dyn Fn(&str) -> std::io::Result<Vec<std::net::IpAddr>>,
+) -> Result<()> {
+    match crate::net::url_guard::validate_open_outbound_url(raw, resolve) {
+        Ok(_) => return Ok(()),
+        Err(open_err) => {
+            if !is_official_plugin_package_url(raw) {
+                return Err(open_err);
+            }
+
+            let host = "hub.engi-stack.com";
+            let ips = resolve(host).map_err(|e| {
+                VaultError::InvalidInput(format!("invalid-feed-url: resolve {host}: {e}"))
+            })?;
+            if ips.is_empty() {
+                return Err(VaultError::InvalidInput(format!(
+                    "invalid-feed-url: {host} resolved to no addresses"
+                )));
+            }
+            if ips.iter().all(is_proxy_fake_ip) {
+                return Ok(());
+            }
+            Err(open_err)
+        }
+    }
+}
+
+fn is_official_plugin_package_url(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw.trim()) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return false;
+    }
+    if url
+        .host_str()
+        .map(|h| h.eq_ignore_ascii_case("hub.engi-stack.com"))
+        != Some(true)
+    {
+        return false;
+    }
+    if url.port().is_some_and(|port| port != 443) {
+        return false;
+    }
+    let Some(mut segments) = url.path_segments() else {
+        return false;
+    };
+    let parts: Vec<_> = segments.by_ref().collect();
+    matches!(
+        parts.as_slice(),
+        ["api", "v1", "packages", filename]
+            if !filename.is_empty() && filename.ends_with(".tar.gz")
+    )
+}
+
+fn is_proxy_fake_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
+        }
+        std::net::IpAddr::V6(_) => false,
+    }
 }
 
 fn extract_tarball(pkg: &std::path::Path, dest: &std::path::Path) -> Result<()> {
@@ -722,7 +788,12 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
     use tempfile::TempDir;
+
+    fn resolves_to(ip: IpAddr) -> impl Fn(&str) -> std::io::Result<Vec<IpAddr>> {
+        move |_host: &str| Ok(vec![ip])
+    }
 
     #[test]
     fn list_installed_empty_dir_returns_empty() {
@@ -769,6 +840,47 @@ mod tests {
         std::fs::write(sub.join("plugin.yaml"), "id: law-pro").unwrap();
         let found = locate_plugin_dir(tmp.path()).expect("locate");
         assert_eq!(found, sub);
+    }
+
+    #[test]
+    fn official_plugin_package_url_allows_proxy_fake_dns_ip() {
+        let fake_ip = resolves_to(IpAddr::V4(Ipv4Addr::new(198, 18, 2, 80)));
+        validate_plugin_package_download_url(
+            "https://hub.engi-stack.com/api/v1/packages/law-pro-1.0.8-windows-x86_64.tar.gz",
+            &fake_ip,
+        )
+        .expect("official package URLs must work behind fake-IP proxy DNS");
+    }
+
+    #[test]
+    fn official_plugin_package_url_still_rejects_private_dns_ip() {
+        let private_ip = resolves_to(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)));
+        let err = validate_plugin_package_download_url(
+            "https://hub.engi-stack.com/api/v1/packages/law-pro-1.0.8.tar.gz",
+            &private_ip,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("outbound-blocked"));
+    }
+
+    #[test]
+    fn non_official_package_url_rejects_proxy_fake_dns_ip() {
+        let fake_ip = resolves_to(IpAddr::V4(Ipv4Addr::new(198, 18, 2, 80)));
+        let err = validate_plugin_package_download_url(
+            "https://evil.example.com/api/v1/packages/law-pro-1.0.8.tar.gz",
+            &fake_ip,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("outbound-blocked"));
+    }
+
+    #[test]
+    fn official_host_proxy_fake_dns_requires_package_path() {
+        let fake_ip = resolves_to(IpAddr::V4(Ipv4Addr::new(198, 18, 2, 80)));
+        let err =
+            validate_plugin_package_download_url("https://hub.engi-stack.com/admin", &fake_ip)
+                .unwrap_err();
+        assert!(format!("{err}").contains("outbound-blocked"));
     }
 
     #[test]
