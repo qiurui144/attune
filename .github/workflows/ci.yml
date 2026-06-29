@@ -17,6 +17,14 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  maintenance-audit:
+    name: Maintenance Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run maintenance-audit.sh
+        run: bash scripts/maintenance-audit.sh
+
   privacy-audit:
     # v1.0.6 Privacy Logic SSOT gate. Static analysis only; no untrusted
     # input is interpolated into shell commands.
@@ -93,6 +101,26 @@ jobs:
           name: attune-extension-dist
           path: extension/dist/
           retention-days: 30
+
+  ui-build:
+    name: Embedded UI Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: rust/crates/attune-server/ui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: rust/crates/attune-server/ui
+        run: npm ci
+
+      - name: Typecheck and build
+        working-directory: rust/crates/attune-server/ui
+        run: npm run build
 
   # ───────────────────────────────────────────────────────────────────────────
   # Rust 商用线 CI — split into PARALLEL per-crate jobs (2026-06-09).
