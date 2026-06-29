@@ -92,14 +92,25 @@ jobs:
       - name: Install tauri-cli
         run: cargo install --locked tauri-cli --version "^2.0"
 
-      # Tauri 在 build 时检测到 TAURI_SIGNING_PRIVATE_KEY 即自动对 updater-eligible
-      # bundle (Linux AppImage / Windows NSIS) 签名,产生 *.sig 同名文件.
-      # 未设 secret 时跳过签名(本地 dev 也无需配置).
+      # Release tag 必须配置 TAURI_SIGNING_PRIVATE_KEY；Tauri 用它给
+      # updater-eligible bundle (Linux AppImage tarball / Windows NSIS) 签名。
+      # 本地/dev 非 tag 构建仍允许不签名。
       #
       # shell: bash 必须显式声明 — windows-latest 默认 shell 是 pwsh,
       # 不识别 bash 风格 $BUNDLES (pwsh 用 $env:BUNDLES). 上次 desktop-v1.0.0
       # Windows build 即因此 fail (--bundles "" 触发 clap "value is required").
       # 用 Git Bash (Windows runner 预装) 让 BUNDLES 正常展开,与 Linux 一致.
+      - name: Require updater signing for release tags
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error title=missing-updater-signing-key::TAURI_SIGNING_PRIVATE_KEY is required for desktop-v* releases; unsigned bundles produce an unusable latest.json."
+            exit 1
+          fi
+
       - name: Build Tauri bundles
         working-directory: apps/attune-desktop
         shell: bash
@@ -171,6 +182,7 @@ jobs:
             apps/attune-desktop/target/release/bundle/msi/*.msi
             apps/attune-desktop/target/release/bundle/deb/*.deb
             apps/attune-desktop/target/release/bundle/appimage/*.AppImage
+            apps/attune-desktop/target/release/bundle/appimage/*.AppImage.tar.gz
             apps/attune-desktop/target/release/bundle/appimage/*.sig
             apps/attune-desktop/target/release/bundle/rpm/*.rpm
 
@@ -228,6 +240,7 @@ jobs:
           GITHUB_REPO_NAME: ${{ github.event.repository.name }}
           GITHUB_TAG: ${{ github.ref_name }}
           VERSION: ${{ steps.version.outputs.version }}
+          ATTUNE_REQUIRE_UPDATER_PLATFORMS: windows-x86_64,linux-x86_64
         run: |
           ./scripts/gen-latest-json.sh "$VERSION" ./bundle > latest.json
           echo "--- latest.json ---"

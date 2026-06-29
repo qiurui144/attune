@@ -51,12 +51,26 @@ if [ -n "$NOTES_FILE" ] && [ -f "$NOTES_FILE" ]; then
   notes="$(cat "$NOTES_FILE")"
 fi
 
-# Locate platform artefacts + signatures
-# Tauri produces *.sig sidecar next to each signed bundle.
-linux_appimage=$(find "$BUNDLE_ROOT/appimage" -maxdepth 1 -name "*.AppImage" 2>/dev/null | head -1 || true)
+# Locate updater artefacts + signatures. Tauri 2 generates updater-specific
+# Linux payloads as *.AppImage.tar.gz; Windows updater payloads are NSIS .exe.
+find_signed_artifact() {
+  local dir="$1"
+  shift
+  local pattern f
+  for pattern in "$@"; do
+    while IFS= read -r f; do
+      if [ -f "${f}.sig" ]; then
+        printf '%s\n' "$f"
+        return 0
+      fi
+    done < <(find "$dir" -maxdepth 1 -type f -name "$pattern" 2>/dev/null | sort)
+  done
+}
+
+linux_appimage=$(find_signed_artifact "$BUNDLE_ROOT/appimage" "*.AppImage.tar.gz" "*.AppImage" || true)
 linux_appimage_sig="${linux_appimage}.sig"
 
-windows_nsis=$(find "$BUNDLE_ROOT/nsis" -maxdepth 1 -name "*.exe" 2>/dev/null | head -1 || true)
+windows_nsis=$(find_signed_artifact "$BUNDLE_ROOT/nsis" "*_x64-setup.exe" "*.exe" || true)
 windows_nsis_sig="${windows_nsis}.sig"
 
 # Helper to read a .sig file (Tauri stores it as one-line base64)
@@ -86,10 +100,25 @@ if [ -n "$windows_nsis" ] && [ -f "$windows_nsis_sig" ]; then
     '$cur + {"windows-x86_64": {"signature": $sig, "url": $url}}')
 fi
 
-# Compose final manifest
-jq -n \
+manifest=$(jq -n \
   --arg version "$VERSION" \
   --arg pub_date "$pub_date" \
   --arg notes "$notes" \
   --argjson platforms "$platforms_obj" \
-  '{version: $version, pub_date: $pub_date, notes: $notes, platforms: $platforms}'
+  '{version: $version, pub_date: $pub_date, notes: $notes, platforms: $platforms}')
+
+if [ -n "${ATTUNE_REQUIRE_UPDATER_PLATFORMS:-}" ]; then
+  IFS=',' read -ra required_platforms <<< "$ATTUNE_REQUIRE_UPDATER_PLATFORMS"
+  for platform in "${required_platforms[@]}"; do
+    platform="$(printf '%s' "$platform" | xargs)"
+    [ -z "$platform" ] && continue
+    if ! jq -e --arg platform "$platform" \
+      '.platforms[$platform].url and (.platforms[$platform].signature | length > 0)' \
+      >/dev/null <<< "$manifest"; then
+      echo "error: missing signed updater artifact for ${platform}" >&2
+      exit 3
+    fi
+  done
+fi
+
+printf '%s\n' "$manifest"
