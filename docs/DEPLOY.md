@@ -144,10 +144,10 @@ attune-cli k3 upgrade  # 从 engi-stack.com/firmware/k3 拉最新
 
 ```bash
 # CLI（轻量，无 UI）
-docker pull ghcr.io/qiurui144/attune-cli:v1.0.0
+docker pull ghcr.io/qiurui144/attune-cli:v1.5.0
 
 # Headless server（含嵌入式 Web UI，端口 18900）
-docker pull ghcr.io/qiurui144/attune-server:v1.0.0
+docker pull ghcr.io/qiurui144/attune-server:v1.5.0
 
 # 或用 latest（跟随最新 GA）
 docker pull ghcr.io/qiurui144/attune-server:latest
@@ -157,21 +157,21 @@ docker pull ghcr.io/qiurui144/attune-server:latest
 
 ```bash
 # 最简启动（vault 数据存容器内，重建会丢失）
-docker run -d -p 18900:18900 ghcr.io/qiurui144/attune-server:v1.0.0
+docker run -d -p 18900:18900 ghcr.io/qiurui144/attune-server:v1.5.0
 
 # 推荐：挂载数据卷持久化 vault
 docker run -d \
   -p 18900:18900 \
   -v $HOME/.attune:/data \
   -e ATTUNE_DATA_DIR=/data \
-  ghcr.io/qiurui144/attune-server:v1.0.0
+  ghcr.io/qiurui144/attune-server:v1.5.0
 
 # 带 TLS（Let's Encrypt 证书）
 docker run -d \
   -p 18900:18900 \
   -v /etc/letsencrypt:/certs:ro \
   -v $HOME/.attune:/data \
-  ghcr.io/qiurui144/attune-server:v1.0.0 \
+  ghcr.io/qiurui144/attune-server:v1.5.0 \
   --tls-cert /certs/live/attune.example.com/fullchain.pem \
   --tls-key /certs/live/attune.example.com/privkey.pem
 ```
@@ -203,28 +203,28 @@ Packages tab 可以看到（`ghcr.io/qiurui144/attune-desktop-installers`）。
 
 ```bash
 # 拉取指定版本
-docker pull ghcr.io/qiurui144/attune-desktop-installers:1.0.0
+docker pull ghcr.io/qiurui144/attune-desktop-installers:1.5.0
 
 # 查看镜像内所有 installer 文件
-docker run --rm ghcr.io/qiurui144/attune-desktop-installers:1.0.0 ls /installers/
+docker run --rm ghcr.io/qiurui144/attune-desktop-installers:1.5.0 ls /installers/
 
 # 提取 Linux .deb 到当前目录
 docker run --rm \
   -v "$PWD:/out" \
-  ghcr.io/qiurui144/attune-desktop-installers:1.0.0 \
-  cp /installers/Attune_1.0.0_amd64.deb /out/
+  ghcr.io/qiurui144/attune-desktop-installers:1.5.0 \
+  cp /installers/Attune_1.5.0_amd64.deb /out/
 
 # 提取 Windows NSIS installer
 docker run --rm \
   -v "$PWD:/out" \
-  ghcr.io/qiurui144/attune-desktop-installers:1.0.0 \
-  cp /installers/Attune_1.0.0_x64-setup.exe /out/
+  ghcr.io/qiurui144/attune-desktop-installers:1.5.0 \
+  cp /installers/Attune_1.5.0_x64-setup.exe /out/
 
 # 提取全部 installer（bash glob 写法）
 docker run --rm \
   -v "$PWD:/out" \
   --entrypoint sh \
-  ghcr.io/qiurui144/attune-desktop-installers:1.0.0 \
+  ghcr.io/qiurui144/attune-desktop-installers:1.5.0 \
   -c "cp /installers/* /out/"
 ```
 

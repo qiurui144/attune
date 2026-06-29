@@ -58,7 +58,7 @@ https://github.com/qiurui144/attune
 EOF
 
 git add Formula/attune.rb README.md
-git commit -m "Initial tap with attune 1.0.0"
+git commit -m "Initial tap with attune 1.5.0"
 git push origin main
 ```
 
@@ -70,17 +70,17 @@ git push origin main
 ```bash
 # macOS ARM(Apple Silicon)
 curl -L -o /tmp/attune-macos-aarch64.tar.gz \
-  https://github.com/qiurui144/attune/releases/download/v1.0.0/attune-macos-aarch64.tar.gz
+  https://github.com/qiurui144/attune/releases/download/v1.5.0/attune-macos-aarch64.tar.gz
 shasum -a 256 /tmp/attune-macos-aarch64.tar.gz
 
 # Linux x86_64
 curl -L -o /tmp/attune-linux-x86_64.tar.gz \
-  https://github.com/qiurui144/attune/releases/download/v1.0.0/attune-linux-x86_64.tar.gz
+  https://github.com/qiurui144/attune/releases/download/v1.5.0/attune-linux-x86_64.tar.gz
 sha256sum /tmp/attune-linux-x86_64.tar.gz
 
 # Linux aarch64
 curl -L -o /tmp/attune-linux-aarch64.tar.gz \
-  https://github.com/qiurui144/attune/releases/download/v1.0.0/attune-linux-aarch64.tar.gz
+  https://github.com/qiurui144/attune/releases/download/v1.5.0/attune-linux-aarch64.tar.gz
 sha256sum /tmp/attune-linux-aarch64.tar.gz
 ```
 
@@ -92,7 +92,7 @@ sha256sum /tmp/attune-linux-aarch64.tar.gz
 brew tap qiurui144/attune
 brew install attune
 attune --version
-# 期望: attune 1.0.0 (...)
+# 期望: attune 1.5.0 (...)
 
 # 或带 audit
 brew audit --strict --online attune

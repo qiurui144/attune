@@ -30,7 +30,7 @@ fail=0
 allow_files='rust/crates/attune-core/src/(outbound_gate|chat|cloud_client|telemetry|web_search_browser|web_search|web_search_engines|llm|embed|asr|mcp_client)\.rs|rust/crates/attune-core/src/(sync/webdav|infer/embedding|ocr/.*)\.rs|rust/crates/attune-server/src/routes/(llm|status|version)\.rs|rust/crates/attune-server/src/test_support\.rs'
 
 echo "==> 1. Outbound HTTP clients must route through OutboundGate"
-hits=$(grep -rnE 'reqwest::(Client|get|post|Request)\b' rust/crates/attune-*/src 2>/dev/null \
+hits=$(git grep -nE 'reqwest::(Client|get|post|Request)\b' -- 'rust/crates/attune-*/src' 2>/dev/null \
   | grep -vE "$allow_files" \
   | grep -vE '^[^:]+:[0-9]+:\s*//' \
   || true)
@@ -50,8 +50,8 @@ echo "==> 2. Hardcoded API keys (OpenAI sk-… / AWS AKIA… / Google AIza…)"
 #   - Any test file (`tests/` directory or `_test.rs` suffix) — same
 #     reason: fixtures that exercise the redactor.
 #   - This audit script itself (the patterns above match its own regex).
-hits=$(grep -rnE '(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})' \
-        rust extension docs scripts 2>/dev/null \
+hits=$(git grep -nE '(sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})' \
+        -- rust extension docs scripts 2>/dev/null \
         | grep -vE '^[^:]+:[0-9]+:\s*(\*|//|#)' \
         | grep -vE 'scripts/privacy-audit\.sh' \
         | grep -vE 'rust/crates/attune-core/src/pii/' \
@@ -67,8 +67,8 @@ else
 fi
 
 echo "==> 3. Telemetry call sites outside telemetry.rs"
-hits=$(grep -rnE 'telemetry::|Telemetry::new|TelemetryEvent' \
-        rust/crates/attune-*/src 2>/dev/null \
+hits=$(git grep -nE 'telemetry::|Telemetry::new|TelemetryEvent' \
+        -- 'rust/crates/attune-*/src' 2>/dev/null \
         | grep -v 'rust/crates/attune-core/src/telemetry.rs' \
         | grep -vE '^[^:]+:[0-9]+:\s*(\*|//)' \
         || true)
@@ -113,14 +113,14 @@ fi
 echo "==> 5. OutboundGate Result must be honored (no discarded enforce / no-op markers)"
 gate_allow='rust/crates/attune-core/src/cloud_client\.rs' # wipe_session: intentional always-allow
 # 5a. `let _ = ... OutboundGate::enforce` — discarded fail-closed Result.
-noop_hits=$(grep -rnE 'let[[:space:]]+_[[:space:]]*=.*OutboundGate::enforce' \
-              rust/crates/attune-*/src 2>/dev/null \
+noop_hits=$(git grep -nE 'let[[:space:]]+_[[:space:]]*=.*OutboundGate::enforce' \
+              -- 'rust/crates/attune-*/src' 2>/dev/null \
             | grep -vE "$gate_allow" \
             | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
             || true)
 # 5b. The historical no-op marker comment (a stub that never wired real state).
-marker_hits=$(grep -rnE 'wired in Task 7|non-rejecting call site marker|hardcoded.*OutboundPolicy' \
-                rust/crates/attune-*/src 2>/dev/null || true)
+marker_hits=$(git grep -nE 'wired in Task 7|non-rejecting call site marker|hardcoded.*OutboundPolicy' \
+                -- 'rust/crates/attune-*/src' 2>/dev/null || true)
 if [ -n "$noop_hits" ] || [ -n "$marker_hits" ]; then
   echo "FAIL: OutboundGate enforcement is a no-op at one or more egress points:"
   [ -n "$noop_hits" ] && { echo "  -- discarded Result (let _ = enforce):"; echo "$noop_hits"; }

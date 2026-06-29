@@ -51,7 +51,7 @@ https://github.com/qiurui144/attune
 "@ | Out-File README.md -Encoding utf8
 
 git add bucket/attune.json README.md
-git commit -m "Initial bucket with attune 1.0.0"
+git commit -m "Initial bucket with attune 1.5.0"
 git push origin main
 ```
 
@@ -63,18 +63,18 @@ Linux/macOS 同样可以,把 PowerShell 命令换 bash 即可(`mkdir bucket && c
 
 ```powershell
 # 下载 release asset
-Invoke-WebRequest -Uri "https://github.com/qiurui144/attune/releases/download/v1.0.0/attune-windows-x86_64.tar.gz" -OutFile attune.tar.gz
+Invoke-WebRequest -Uri "https://github.com/qiurui144/attune/releases/download/v1.5.0/attune-windows-x86_64.zip" -OutFile attune.zip
 
 # 计算
-Get-FileHash -Algorithm SHA256 attune.tar.gz
+Get-FileHash -Algorithm SHA256 attune.zip
 ```
 
 或 bash:
 
 ```bash
-curl -L -o /tmp/attune-windows.tar.gz \
-  https://github.com/qiurui144/attune/releases/download/v1.0.0/attune-windows-x86_64.tar.gz
-sha256sum /tmp/attune-windows.tar.gz
+curl -L -o /tmp/attune-windows.zip \
+  https://github.com/qiurui144/attune/releases/download/v1.5.0/attune-windows-x86_64.zip
+sha256sum /tmp/attune-windows.zip
 ```
 
 把 hash 写入 `bucket/attune.json` 的 `architecture.64bit.hash` 后 commit + push.
@@ -85,7 +85,7 @@ sha256sum /tmp/attune-windows.tar.gz
 scoop bucket add attune https://github.com/qiurui144/scoop-attune
 scoop install attune
 attune --version
-# 期望: attune 1.0.0 (...)
+# 期望: attune 1.5.0 (...)
 
 # 或带 strict checker
 scoop checkup

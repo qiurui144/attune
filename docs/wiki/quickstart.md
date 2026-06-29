@@ -5,19 +5,18 @@
 ### Linux
 
 ```bash
-# AppImage (推荐，无需 root) — v1.0.0
-wget https://github.com/qiurui144/attune/releases/download/v1.0.0/attune.AppImage
-chmod +x attune.AppImage
-./attune.AppImage
+# AppImage (推荐，无需 root)
+# 到 GitHub Releases 下载当前版本的 Attune_*_amd64.AppImage
+xdg-open https://github.com/qiurui144/attune/releases/latest
 
 # 或 deb 包
-wget https://github.com/qiurui144/attune/releases/download/v1.0.0/attune.deb
-sudo dpkg -i attune.deb
+# 到 GitHub Releases 下载当前版本的 Attune_*_amd64.deb
+sudo dpkg -i Attune_*_amd64.deb
 ```
 
 ### Windows
 
-下载 MSI 安装包 [v1.0.0](https://github.com/qiurui144/attune/releases/tag/v1.0.0)，双击安装。
+下载当前稳定版 [NSIS/MSI 安装包](https://github.com/qiurui144/attune/releases/latest)，双击安装。
 
 ### Chrome 扩展
 

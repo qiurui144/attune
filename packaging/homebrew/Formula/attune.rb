@@ -16,12 +16,12 @@
 class Attune < Formula
   desc "Private AI Knowledge Companion — local-first hybrid intelligence"
   homepage "https://engi-stack.com"
-  version "1.0.0"
+  version "1.5.0"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/qiurui144/attune/releases/download/v1.0.0/attune-macos-aarch64.tar.gz"
+      url "https://github.com/qiurui144/attune/releases/download/v1.5.0/attune-macos-aarch64.tar.gz"
       # 首次发版后必须替换为实际 sha256(per packaging/homebrew/SETUP.md §Step 3)
       sha256 "REPLACE_WITH_ACTUAL_SHA256_FROM_RELEASE_ASSET"
     end
@@ -30,11 +30,11 @@ class Attune < Formula
 
   on_linux do
     on_intel do
-      url "https://github.com/qiurui144/attune/releases/download/v1.0.0/attune-linux-x86_64.tar.gz"
+      url "https://github.com/qiurui144/attune/releases/download/v1.5.0/attune-linux-x86_64.tar.gz"
       sha256 "REPLACE_WITH_ACTUAL_SHA256_FROM_RELEASE_ASSET"
     end
     on_arm do
-      url "https://github.com/qiurui144/attune/releases/download/v1.0.0/attune-linux-aarch64.tar.gz"
+      url "https://github.com/qiurui144/attune/releases/download/v1.5.0/attune-linux-aarch64.tar.gz"
       sha256 "REPLACE_WITH_ACTUAL_SHA256_FROM_RELEASE_ASSET"
     end
   end

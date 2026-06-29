@@ -430,7 +430,7 @@ attune-server-headless          # 启动 server 在 :18900
 
 ```bash
 attune --version
-# 期望输出: attune 1.0.0 (...)
+# 期望输出: attune 1.5.0 (...)
 ```
 
 ```bash

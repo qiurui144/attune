@@ -101,7 +101,7 @@ Attune 是一个**私有知识库 + 记忆增强系统**：
 ## 资源
 
 - 源代码：[github.com/qiurui144/attune](https://github.com/qiurui144/attune)
-- 下载 v1.0.0：[GitHub Releases](https://github.com/qiurui144/attune/releases/tag/v1.0.0) (Linux deb/AppImage + Windows MSI)
+- 下载当前稳定版：[GitHub Releases](https://github.com/qiurui144/attune/releases/latest) (Linux deb/AppImage + Windows NSIS/MSI)
 - 中文 README：[README.zh-CN.md](https://github.com/qiurui144/attune/blob/develop/README.zh-CN.md)
 - Benchmark 详情：[docs/benchmarks/](https://github.com/qiurui144/attune/blob/develop/docs/benchmarks/)
 - Reliability framework：[docs/superpowers/specs/](https://github.com/qiurui144/attune/blob/develop/docs/superpowers/specs/)

@@ -119,6 +119,17 @@ require_grep 'working-directory: rust/crates/attune-server/ui' ".github/workflow
 require_grep 'cargo audit' ".github/workflows/ci.yml" "CI runs cargo security audit"
 require_grep 'openvino' ".github/workflows/desktop-release.yml" "desktop release includes OpenVINO bundle"
 
+# 21-25: package-manager seed manifests follow the current release shape.
+require_grep 'PackageVersion: 1\.5\.0' "packaging/winget/qiurui144.Attune.yaml" "WinGet version seed matches current release"
+require_grep 'desktop-v1\.5\.0/Attune_1\.5\.0_x64-setup\.exe' "packaging/winget/qiurui144.Attune.installer.yaml" "WinGet installer URL matches desktop release"
+require_grep '"version": "1\.5\.0"' "packaging/scoop/attune.json" "Scoop version seed matches current release"
+require_grep 'attune-windows-x86_64\.zip' "packaging/scoop/attune.json" "Scoop uses Windows zip release asset"
+require_grep 'version "1\.5\.0"' "packaging/homebrew/Formula/attune.rb" "Homebrew formula version seed matches current release"
+require_grep 'python/tests/e2e && npm ci && npx playwright test' "scripts/test-pyramid.sh" "test pyramid E2E path matches current Playwright suite"
+require_no_grep_many 'releases/download/v1\.0\.0|desktop-v1\.0\.0|attune-server:v1\.0\.0|attune-desktop-installers:1\.0\.0' \
+  "active install docs do not point users to v1.0.0 artifacts" \
+  docs/DEPLOY.md docs/INSTALL.md docs/wiki/index.md docs/wiki/quickstart.md packaging
+
 printf '\nMaintenance audit summary: %s passed, %s failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -ne 0 ]; then
   exit 1
