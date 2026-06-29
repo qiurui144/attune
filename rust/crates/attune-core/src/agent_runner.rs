@@ -47,8 +47,19 @@ fn resolve_agent_entry(plugin_dir: &Path, agent: &AgentSpec) -> Option<AgentEntr
     }
     resolve_dispatch_binary(plugin_dir).map(|path| AgentEntry {
         path,
-        agent_arg: Some(agent.id.clone()),
+        agent_arg: Some(dispatch_arg_for_agent(agent)),
     })
+}
+
+fn dispatch_arg_for_agent(agent: &AgentSpec) -> String {
+    agent
+        .binary
+        .as_deref()
+        .and_then(|rel| Path::new(rel).file_stem())
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| agent.id.clone())
 }
 
 fn resolve_dispatch_binary(plugin_dir: &Path) -> Option<PathBuf> {
@@ -292,6 +303,23 @@ mod tests {
         let entry = resolve_agent_entry(
             tmp.path(),
             &agent_spec("agent_civil_loan", Some("bin/agent_civil_loan")),
+        )
+        .unwrap();
+        assert_eq!(entry.path, dispatch);
+        assert_eq!(entry.agent_arg.as_deref(), Some("agent_civil_loan"));
+    }
+
+    #[test]
+    fn resolve_agent_entry_fallback_uses_declared_binary_stem_not_registry_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let dispatch = bin.join("law_pro_agents.exe");
+        std::fs::write(&dispatch, b"").unwrap();
+
+        let entry = resolve_agent_entry(
+            tmp.path(),
+            &agent_spec("civil_loan_agent", Some("bin/agent_civil_loan")),
         )
         .unwrap();
         assert_eq!(entry.path, dispatch);
