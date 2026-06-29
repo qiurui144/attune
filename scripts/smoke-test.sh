@@ -36,6 +36,12 @@ BINARY="${ATTUNE_SERVER_BIN:-rust/target/release/attune-server-headless}"
 PORT="${ATTUNE_SMOKE_PORT:-18901}"
 HOST="${ATTUNE_SMOKE_HOST:-127.0.0.1}"
 BASE_URL="http://${HOST}:${PORT}"
+BIN_DIR="$(cd "$(dirname "$BINARY")" && pwd)"
+if [ -d "$BIN_DIR/deps" ]; then
+    export LD_LIBRARY_PATH="$BIN_DIR:$BIN_DIR/deps:${LD_LIBRARY_PATH:-}"
+else
+    export LD_LIBRARY_PATH="$BIN_DIR:${LD_LIBRARY_PATH:-}"
+fi
 
 if [ ! -x "$BINARY" ]; then
     warn "二进制不存在: $BINARY，尝试构建..."
@@ -127,10 +133,11 @@ echo "$DIAG" | grep -q '"form_factor":"k3"' || fail "Test 8/10: 期望 form_fact
 echo "$DIAG" | grep -q '"prefers_local_llm":true' || fail "Test 8/10: K3 形态应 prefers_local_llm=true"
 ok "Test 8/10: F-09-FORMFACTOR /diagnostics 报 form_factor=k3 + prefers_local_llm=true"
 
-# ── 测试 9: F-09-FORMFACTOR — settings 默认 LLM = ollama (K3) ────
+# ── 测试 9: F-09-FORMFACTOR — settings 默认 LLM = K3 scheduler endpoint ────
 SETTINGS=$(curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/v1/settings")
-echo "$SETTINGS" | grep -q '"provider":"ollama"' || fail "Test 9/10: K3 形态应默认 llm.provider=ollama: $(echo "$SETTINGS" | head -c 200)"
-ok "Test 9/10: F-09-FORMFACTOR K3 settings 默认 ollama"
+echo "$SETTINGS" | grep -q '"provider":"openai_compat"' || fail "Test 9/10: K3 形态应默认 llm.provider=openai_compat: $(echo "$SETTINGS" | head -c 240)"
+echo "$SETTINGS" | grep -q '"endpoint":"http://127.0.0.1:8090/v1"' || fail "Test 9/10: K3 形态应默认走 k3-scheduler endpoint: $(echo "$SETTINGS" | head -c 240)"
+ok "Test 9/10: F-09-FORMFACTOR K3 settings 默认 k3-scheduler OpenAI-compatible endpoint"
 
 # ── 测试 10: 关键安全不变量 — settings GET 必须 redact api_key ────
 # 即使 vault 解锁，GET /settings 也不应回传 api_key 明文

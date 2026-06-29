@@ -53,13 +53,13 @@ test.describe('Wizard golden flow (F-01-VAULT + F-09-FORMFACTOR)', () => {
     await expect(cta).toBeVisible({ timeout: 10_000 });
     await cta.click();
 
-    // Step 2 Password heading visible (zh "设置 Master Password" / en "Set Master Password")
+    // Step 2 Password heading visible.
     await expect(
-      page.getByText(/设置 Master Password|Set Master Password/i)
+      page.getByText(/设置.*Master Password|Set (Vault )?Master Password/i)
     ).toBeVisible({ timeout: 5_000 });
 
     // Two password inputs visible (Password + Confirm)
-    const pwdInputs = page.locator('input[type=password]');
+    const pwdInputs = page.locator('input[type=password]:visible');
     await expect(pwdInputs).toHaveCount(2, { timeout: 5_000 });
   });
 
@@ -82,7 +82,7 @@ test.describe('Wizard golden flow (F-01-VAULT + F-09-FORMFACTOR)', () => {
     await page.getByRole('button', { name: /开始设置|Get started/i }).click();
 
     // Step 2 form: 2 password inputs + Submit button reachable
-    const pwdInputs = page.locator('input[type=password]');
+    const pwdInputs = page.locator('input[type=password]:visible');
     await expect(pwdInputs).toHaveCount(2, { timeout: 5_000 });
 
     // Verify input is editable (UI not in disabled/loading state)

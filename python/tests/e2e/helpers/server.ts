@@ -52,6 +52,12 @@ export async function spawnAttuneServer(opts: SpawnOptions = {}): Promise<Server
     XDG_DATA_HOME: path.join(tmpDir, 'data'),
     XDG_CONFIG_HOME: path.join(tmpDir, 'config'),
   };
+  const binDir = path.dirname(binary);
+  const depsDir = path.join(binDir, 'deps');
+  const libraryDirs = fs.existsSync(depsDir) ? [binDir, depsDir] : [binDir];
+  env.LD_LIBRARY_PATH = [...libraryDirs, process.env.LD_LIBRARY_PATH].filter(Boolean).join(path.delimiter);
+  env.DYLD_LIBRARY_PATH = [...libraryDirs, process.env.DYLD_LIBRARY_PATH].filter(Boolean).join(path.delimiter);
+  env.PATH = [...libraryDirs, process.env.PATH].filter(Boolean).join(path.delimiter);
   if (opts.formFactor) {
     env.ATTUNE_FORM_FACTOR = opts.formFactor;
   } else {

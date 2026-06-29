@@ -79,6 +79,9 @@ if [ "$SKIP_BUILD" = false ]; then
 fi
 cp "$ATTUNE_ROOT/rust/target/release/attune" "$INSTALL_PREFIX/bin/attune"
 cp "$ATTUNE_ROOT/rust/target/release/attune-server-headless" "$INSTALL_PREFIX/bin/attune-server-headless"
+find "$ATTUNE_ROOT/rust/target/release" -maxdepth 1 -type f \
+  \( -name 'libsherpa-onnx-c-api.so*' -o -name 'libsherpa-onnx-c-api.dylib*' -o -name 'sherpa-onnx-c-api.dll' \) \
+  -exec cp {} "$INSTALL_PREFIX/bin/" \;
 info "✓ binaries installed to $INSTALL_PREFIX/bin/"
 info "  注意: 把 $INSTALL_PREFIX/bin 加入 PATH 如果没加"
 
@@ -117,6 +120,7 @@ ExecStart=$INSTALL_PREFIX/bin/attune-server-headless --host 127.0.0.1 --port 189
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
+Environment=LD_LIBRARY_PATH=$INSTALL_PREFIX/bin
 
 [Install]
 WantedBy=default.target

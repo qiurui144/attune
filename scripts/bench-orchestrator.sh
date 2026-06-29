@@ -67,6 +67,7 @@ trap cleanup EXIT
 
 XDG_DATA_HOME="$XDG_DATA_HOME_BENCH" \
 XDG_CONFIG_HOME="$XDG_DATA_HOME_BENCH/config" \
+LD_LIBRARY_PATH="$PROJECT_ROOT/rust/target/release:$PROJECT_ROOT/rust/target/release/deps:${LD_LIBRARY_PATH:-}" \
     ./target/release/attune-server-headless --port "$PORT" >/tmp/attune-bench-server.log 2>&1 &
 SERVER_PID=$!
 log "Server pid=$SERVER_PID, log=/tmp/attune-bench-server.log"

@@ -103,6 +103,10 @@ require_grep '^reports/$' ".gitignore" "reports directory ignored by default"
 require_grep 'ATTUNE_DESKTOP_PORT' "apps/attune-desktop/src/embedded_server.rs" "desktop port is configurable"
 require_grep 'attune-desktop-startup\.log' "apps/attune-desktop/src/main.rs" "desktop startup log is explicit"
 require_grep 'SERVER_ERROR' "apps/attune-desktop/src/embedded_server.rs" "desktop readiness exposes startup error"
+require_grep 'LD_LIBRARY_PATH=.*\$BIN_DIR' "scripts/smoke-test.sh" "smoke test exports headless server native library path"
+require_grep 'LD_LIBRARY_PATH' "python/tests/e2e/helpers/server.ts" "Playwright server helper exports native library path"
+require_grep 'libsherpa-onnx-c-api' ".github/workflows/rust-release.yml" "Linux release bundles sherpa runtime library"
+require_grep 'LD_LIBRARY_PATH=.*INSTALL_PREFIX/bin' "scripts/install-local.sh" "local install systemd service sees bundled native libs"
 
 # 13-14: port consistency for current embedded server contract.
 require_grep '18900' "tests/e2e/kb_longloop_windows.ps1" "Windows KB loop targets desktop port 18900"
