@@ -536,6 +536,15 @@ fn extract_code_or(body: &str, fallback: &str) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformPackage {
+    pub platform: String,
+    pub download_url: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntitledPlugin {
     pub plugin_id: String,
     pub version: String,
@@ -545,6 +554,12 @@ pub struct EntitledPlugin {
     /// not provide package integrity metadata.
     #[serde(default)]
     pub sha256: String,
+    /// Optional platform-specific packages. New accounts servers include this
+    /// so Windows clients receive `.exe` agent binaries instead of the legacy
+    /// Linux symlink package. Old servers omit it and the client falls back to
+    /// `download_url` + `sha256`.
+    #[serde(default)]
+    pub platform_packages: Vec<PlatformPackage>,
     /// 公钥 hex (用于客户端 verify_with_key 校验 plugin.sig)
     pub signing_pubkey_hex: String,
     /// 加密 key (paid plugin 用; free 可空)

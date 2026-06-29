@@ -267,6 +267,56 @@ fn list_installed_plugin_ids(
     Ok(out)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectedPackage<'a> {
+    download_url: &'a str,
+    sha256: &'a str,
+    platform: Option<&'a str>,
+}
+
+fn current_plugin_platform() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => "windows-x86_64",
+        ("linux", "x86_64") => "linux-x86_64",
+        ("macos", "x86_64") => "macos-x86_64",
+        ("macos", "aarch64") => "macos-aarch64",
+        _ => "unknown",
+    }
+}
+
+fn select_plugin_package(ep: &EntitledPlugin) -> Result<SelectedPackage<'_>> {
+    let target = current_plugin_platform();
+    if let Some(pkg) = ep
+        .platform_packages
+        .iter()
+        .find(|pkg| pkg.platform == target)
+    {
+        if pkg.download_url.trim().is_empty() {
+            return Err(VaultError::InvalidInput(format!(
+                "platform package {} for {} has empty download_url",
+                pkg.platform, ep.plugin_id
+            )));
+        }
+        return Ok(SelectedPackage {
+            download_url: pkg.download_url.as_str(),
+            sha256: pkg.sha256.as_str(),
+            platform: Some(pkg.platform.as_str()),
+        });
+    }
+
+    if ep.download_url.trim().is_empty() {
+        return Err(VaultError::InvalidInput(format!(
+            "entitled plugin {} has no download_url for platform {target}",
+            ep.plugin_id
+        )));
+    }
+    Ok(SelectedPackage {
+        download_url: ep.download_url.as_str(),
+        sha256: ep.sha256.as_str(),
+        platform: None,
+    })
+}
+
 fn install_one_plugin(
     ep: &EntitledPlugin,
     license_key: &str,
@@ -275,9 +325,13 @@ fn install_one_plugin(
     // 1. 下载 .tar.gz (PluginHub 要求 Bearer license_key 鉴权)
     let tmp = tempfile::tempdir().map_err(VaultError::Io)?;
     let pkg_path = tmp.path().join(format!("{}.tar.gz", ep.plugin_id));
-    download_to_file(&ep.download_url, license_key, &pkg_path)?;
+    let selected = select_plugin_package(ep)?;
+    download_to_file(selected.download_url, license_key, &pkg_path)?;
     let pkg_bytes = std::fs::read(&pkg_path).map_err(VaultError::Io)?;
-    verify_plugin_package_sha256(&pkg_bytes, &ep.sha256)?;
+    verify_plugin_package_sha256(&pkg_bytes, selected.sha256).map_err(|e| {
+        let source = selected.platform.unwrap_or("legacy");
+        VaultError::Crypto(format!("{source} package integrity failed: {e}"))
+    })?;
 
     // 2. 解压到临时目录
     let extract_dir = tmp.path().join("extracted");
@@ -1012,9 +1066,47 @@ mod tests {
             version: "1.0.5".into(),
             download_url: "https://hub.engi-stack.com/api/v1/packages/law-pro-1.0.5.tar.gz".into(),
             sha256: String::new(),
+            platform_packages: Vec::new(),
             signing_pubkey_hex: signing_pubkey_hex.into(),
             decrypt_key: None,
         }
+    }
+
+    #[test]
+    fn select_plugin_package_prefers_current_platform_package() {
+        let target = current_plugin_platform();
+        let mut ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        ep.sha256 = "legacy-sha".into();
+        ep.platform_packages = vec![
+            crate::cloud_client::PlatformPackage {
+                platform: "not-current".into(),
+                download_url: "https://hub.example/other.tar.gz".into(),
+                sha256: "other-sha".into(),
+                size: None,
+            },
+            crate::cloud_client::PlatformPackage {
+                platform: target.into(),
+                download_url: "https://hub.example/current.tar.gz".into(),
+                sha256: "current-sha".into(),
+                size: Some(123),
+            },
+        ];
+
+        let selected = select_plugin_package(&ep).expect("select");
+        assert_eq!(selected.download_url, "https://hub.example/current.tar.gz");
+        assert_eq!(selected.sha256, "current-sha");
+        assert_eq!(selected.platform, Some(target));
+    }
+
+    #[test]
+    fn select_plugin_package_falls_back_to_legacy_download_url() {
+        let mut ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        ep.sha256 = "legacy-sha".into();
+
+        let selected = select_plugin_package(&ep).expect("select");
+        assert_eq!(selected.download_url, ep.download_url);
+        assert_eq!(selected.sha256, "legacy-sha");
+        assert_eq!(selected.platform, None);
     }
 
     #[test]
