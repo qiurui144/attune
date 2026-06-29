@@ -206,6 +206,50 @@ fn init_observability() -> std::path::PathBuf {
     log_dir
 }
 
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn desktop_headless_mode() -> bool {
+    env_flag_enabled("ATTUNE_DESKTOP_HEADLESS") || env_flag_enabled("ATTUNE_DESKTOP_SERVER_ONLY")
+}
+
+fn run_headless_server(log_dir: &std::path::Path) -> Result<(), String> {
+    let config = attune_server::ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: embedded_server::server_port(),
+        tls_cert: None,
+        tls_key: None,
+        no_auth: false,
+    };
+    tracing::info!(
+        "attune-desktop headless mode: embedded server only at {}",
+        embedded_server::server_url()
+    );
+    append_startup_line(
+        log_dir,
+        &format!(
+            "headless server mode enabled at {}",
+            embedded_server::server_url()
+        ),
+    );
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime
+        .block_on(attune_server::run_in_runtime(config))
+        .map_err(|e| e.to_string())
+}
+
 fn main() {
     // webkit2gtk 2.42+ 默认启用 DMABUF/GBM EGL 渲染器,在 NVIDIA 私有驱动(及部分虚拟
     // 显示)上初始化 GBM EGL 失败 → "Could not create GBM EGL display:
@@ -217,6 +261,15 @@ fn main() {
     }
 
     let log_dir = init_observability();
+
+    if desktop_headless_mode() {
+        if let Err(e) = run_headless_server(&log_dir) {
+            tracing::error!("attune-desktop headless server exited with error: {e}");
+            append_startup_line(&log_dir, &format!("headless server exited with error: {e}"));
+            std::process::exit(1);
+        }
+        return;
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -355,4 +408,100 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running attune-desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn with_env<T>(name: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var(name).ok();
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+        let out = f();
+        match old {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+        out
+    }
+
+    fn with_two_envs<T>(
+        first: (&str, Option<&str>),
+        second: (&str, Option<&str>),
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let first_old = std::env::var(first.0).ok();
+        let second_old = std::env::var(second.0).ok();
+        match first.1 {
+            Some(value) => std::env::set_var(first.0, value),
+            None => std::env::remove_var(first.0),
+        }
+        match second.1 {
+            Some(value) => std::env::set_var(second.0, value),
+            None => std::env::remove_var(second.0),
+        }
+        let out = f();
+        match first_old {
+            Some(value) => std::env::set_var(first.0, value),
+            None => std::env::remove_var(first.0),
+        }
+        match second_old {
+            Some(value) => std::env::set_var(second.0, value),
+            None => std::env::remove_var(second.0),
+        }
+        out
+    }
+
+    #[test]
+    fn env_flag_accepts_common_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "on", " On "] {
+            with_env("ATTUNE_TEST_FLAG", Some(value), || {
+                assert!(env_flag_enabled("ATTUNE_TEST_FLAG"));
+            });
+        }
+    }
+
+    #[test]
+    fn env_flag_rejects_missing_and_falsey_values() {
+        with_env("ATTUNE_TEST_FLAG", None, || {
+            assert!(!env_flag_enabled("ATTUNE_TEST_FLAG"));
+        });
+        for value in ["0", "false", "no", "off", ""] {
+            with_env("ATTUNE_TEST_FLAG", Some(value), || {
+                assert!(!env_flag_enabled("ATTUNE_TEST_FLAG"));
+            });
+        }
+    }
+
+    #[test]
+    fn desktop_headless_mode_supports_canonical_and_legacy_env_names() {
+        with_two_envs(
+            ("ATTUNE_DESKTOP_HEADLESS", Some("1")),
+            ("ATTUNE_DESKTOP_SERVER_ONLY", None),
+            || {
+                assert!(desktop_headless_mode());
+            },
+        );
+        with_two_envs(
+            ("ATTUNE_DESKTOP_HEADLESS", None),
+            ("ATTUNE_DESKTOP_SERVER_ONLY", Some("true")),
+            || {
+                assert!(desktop_headless_mode());
+            },
+        );
+    }
 }
