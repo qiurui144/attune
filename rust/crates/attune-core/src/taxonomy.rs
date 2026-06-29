@@ -50,7 +50,7 @@ impl Plugin {
 // plugins/<vertical>-pro/builtin/dimensions.yaml。OSS attune 不再内置任何行业分类维度。
 //
 // 加载顺序：attune-server 启动 → load_builtin_plugins() 返回空 Vec
-// → 用户安装 vertical plugin pack (attune-pro/.attunepkg) 后从 plugin_registry 动态加载
+// → 用户安装 vertical plugin pack (attune-pro/.tar.gz) 后从 plugin_registry 动态加载
 // 详见 attune-pro/INTEGRATION.md §13 OSS 委托给 Pro 的 vertical-specific functionality。
 
 pub struct Taxonomy {
@@ -105,7 +105,7 @@ impl Taxonomy {
     }
 
     /// v0.6 OSS 瘦身：所有 id 都返 unknown（无 builtin 行业 plugin）。
-    /// 行业插件由 attune-pro/.attunepkg 安装后通过 PluginRegistry::scan 动态加载。
+    /// 行业插件由 attune-pro/.tar.gz 安装后通过 PluginRegistry::scan 动态加载。
     pub fn load_builtin_plugin(id: &str) -> Result<Plugin> {
         Err(VaultError::Taxonomy(format!(
             "no builtin plugin '{id}': install attune-pro vertical plugin pack instead"

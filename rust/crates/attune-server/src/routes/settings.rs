@@ -1,21 +1,21 @@
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::Json;
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use attune_core::llm_settings::SETTINGS_META_KEY as SETTINGS_KEY;
+use axum::Json;
+use axum::extract::State;
+use axum::http::StatusCode;
 
-pub async fn get_settings(
-    State(state): State<SharedState>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn get_settings(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     let recommended_summary = state.hardware.recommended_summary_model();
     let form_factor = state.hardware.form_factor;
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let _ = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
-    let settings = vault.store().get_meta(SETTINGS_KEY)
+    let settings = vault
+        .store()
+        .get_meta(SETTINGS_KEY)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let mut json: serde_json::Value = match settings {
@@ -37,9 +37,9 @@ pub async fn get_settings(
 /// resource_governor。解析失败 / 缺字段 → no-op(引擎默认 Throttle/20 兜底)。
 pub(crate) fn apply_persisted_power_policy(settings: &serde_json::Value) {
     if let Some(bg) = settings.get("background") {
-        if let Ok(pp) = serde_json::from_value::<attune_core::resource_governor::PowerPolicy>(
-            bg.clone(),
-        ) {
+        if let Ok(pp) =
+            serde_json::from_value::<attune_core::resource_governor::PowerPolicy>(bg.clone())
+        {
             attune_core::resource_governor::global_registry().set_power_policy(pp);
         }
     }
@@ -51,13 +51,42 @@ fn is_safe_http_url(s: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
+fn validate_pluginhub_url(raw: &str) -> Result<(), String> {
+    if raw.trim().is_empty() || std::env::var_os("ATTUNE_ALLOW_LOCAL_PLUGINHUB").is_some() {
+        return Ok(());
+    }
+    let url = url::Url::parse(raw.trim()).map_err(|e| format!("pluginhub.url 无效:{e}"))?;
+    let Some(host) = url.host_str() else {
+        return Err("pluginhub.url 缺少 host".into());
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(
+            "pluginhub.url 不能指向 localhost; 本地开发需设置 ATTUNE_ALLOW_LOCAL_PLUGINHUB=1"
+                .into(),
+        );
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if attune_core::net::url_guard::is_blocked_ip(&ip) {
+            return Err("pluginhub.url 不能指向 loopback/private/link-local 地址".into());
+        }
+        return Err("pluginhub.url 不允许裸 IP host; 请使用公网域名".into());
+    }
+    Ok(())
+}
+
 /// 全字段设置校验:所有设置保存前必须有效,拒绝静默接受无效值(URL scheme / 枚举 / 数值范围)。
 /// 返回 Err(用户可读信息);调用方映射为 400。与上方 4 个 ad-hoc 检查(endpoint/browser_path/
 /// skills.disabled/ocr.active_profile)互补,这里补齐其余字段。
 fn validate_settings_fields(body: &serde_json::Value) -> Result<(), String> {
-    let Some(obj) = body.as_object() else { return Ok(()) };
+    let Some(obj) = body.as_object() else {
+        return Ok(());
+    };
     let nested = |sect: &str, key: &str| -> Option<String> {
-        obj.get(sect)?.as_object()?.get(key)?.as_str().map(str::to_string)
+        obj.get(sect)?
+            .as_object()?
+            .get(key)?
+            .as_str()
+            .map(str::to_string)
     };
 
     // 1. 所有 URL 字段统一 http/https scheme 校验(对齐 llm.endpoint,防 javascript:/data: + 明显无效)
@@ -73,6 +102,9 @@ fn validate_settings_fields(body: &serde_json::Value) -> Result<(), String> {
             }
         }
     }
+    if let Some(v) = nested("pluginhub", "url") {
+        validate_pluginhub_url(&v)?;
+    }
 
     // 2. 顶层枚举字段
     for (key, allowed) in [
@@ -83,25 +115,45 @@ fn validate_settings_fields(body: &serde_json::Value) -> Result<(), String> {
     ] {
         if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
             if !allowed.contains(&v) {
-                return Err(format!("{key} 取值无效:'{v}'(允许:{})", allowed.join(" / ")));
+                return Err(format!(
+                    "{key} 取值无效:'{v}'(允许:{})",
+                    allowed.join(" / ")
+                ));
             }
         }
     }
     if let Some(p) = nested("llm", "provider") {
-        const PROVIDERS: &[&str] = &["openai_compat", "anthropic", "deepseek", "qwen", "ollama", "claude", "gemini"];
+        const PROVIDERS: &[&str] = &[
+            "openai_compat",
+            "anthropic",
+            "deepseek",
+            "qwen",
+            "ollama",
+            "claude",
+            "gemini",
+        ];
         if !PROVIDERS.contains(&p.as_str()) {
-            return Err(format!("llm.provider 无效:'{p}'(允许:{})", PROVIDERS.join(" / ")));
+            return Err(format!(
+                "llm.provider 无效:'{p}'(允许:{})",
+                PROVIDERS.join(" / ")
+            ));
         }
     }
     if let Some(e) = nested("web_search", "engine") {
         const ENGINES: &[&str] = &["duckduckgo", "bing", "google", "searxng"];
         if !ENGINES.contains(&e.as_str()) {
-            return Err(format!("web_search.engine 无效:'{e}'(允许:{})", ENGINES.join(" / ")));
+            return Err(format!(
+                "web_search.engine 无效:'{e}'(允许:{})",
+                ENGINES.join(" / ")
+            ));
         }
     }
 
     // 3. 数值范围
-    if let Some(b) = obj.get("injection_budget").and_then(serde_json::Value::as_i64) {
+    if let Some(b) = obj
+        .get("injection_budget")
+        .and_then(serde_json::Value::as_i64)
+    {
         if !(100..=32_768).contains(&b) {
             return Err(format!("injection_budget 须在 100-32768(当前 {b})"));
         }
@@ -120,11 +172,16 @@ fn validate_settings_fields(body: &serde_json::Value) -> Result<(), String> {
             }
         }
     }
-    if let Some(ms) = obj.get("web_search").and_then(|v| v.as_object())
-        .and_then(|o| o.get("min_interval_ms")).and_then(serde_json::Value::as_i64)
+    if let Some(ms) = obj
+        .get("web_search")
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("min_interval_ms"))
+        .and_then(serde_json::Value::as_i64)
     {
         if !(0..=600_000).contains(&ms) {
-            return Err(format!("web_search.min_interval_ms 须在 0-600000(当前 {ms})"));
+            return Err(format!(
+                "web_search.min_interval_ms 须在 0-600000(当前 {ms})"
+            ));
         }
     }
 
@@ -132,7 +189,10 @@ fn validate_settings_fields(body: &serde_json::Value) -> Result<(), String> {
     if let Some(m) = obj.get("plugin_trust_mode").and_then(|v| v.as_str()) {
         const MODES: &[&str] = &["off", "warn", "strict"];
         if !MODES.contains(&m) {
-            return Err(format!("plugin_trust_mode 无效:'{m}'(允许:{})", MODES.join(" / ")));
+            return Err(format!(
+                "plugin_trust_mode 无效:'{m}'(允许:{})",
+                MODES.join(" / ")
+            ));
         }
     }
     if let Some(keys) = obj.get("plugin_trusted_pubkeys") {
@@ -216,8 +276,11 @@ pub(crate) fn check_settings_locks(
 /// 把 settings JSON 中的 `llm.api_key` 明文替换为 `null`，同时加 `llm.api_key_set` bool。
 /// 用于 GET 响应 —— 前端永远拿不到明文 key。
 fn redact_api_key(json: &mut serde_json::Value) {
-    let Some(llm) = json.get_mut("llm").and_then(|v| v.as_object_mut()) else { return; };
-    let has_key = llm.get("api_key")
+    let Some(llm) = json.get_mut("llm").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    let has_key = llm
+        .get("api_key")
         .and_then(|v| v.as_str())
         .map(|s| !s.is_empty())
         .unwrap_or(false);
@@ -232,12 +295,14 @@ pub async fn update_settings(
     let recommended_summary = state.hardware.recommended_summary_model();
     let form_factor = state.hardware.form_factor;
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let _ = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
     // Merge with existing settings
-    let existing = vault.store().get_meta(SETTINGS_KEY)
+    let existing = vault
+        .store()
+        .get_meta(SETTINGS_KEY)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let mut current: serde_json::Value = match existing {
@@ -248,12 +313,21 @@ pub async fn update_settings(
 
     // 白名单校验：只允许写入已知配置键，防止任意键污染 vault_meta
     const ALLOWED_KEYS: &[&str] = &[
-        "injection_mode", "injection_budget", "excluded_domains",
-        "search", "embedding", "web_search", "llm",
-        "summary_model", "summary", "context_strategy", "theme", "language",
-        "skills",  // Sprint 2 Skills Router: { disabled: string[] }
-        "wizard",  // wizard completion state: { complete: bool, current_step: int }
-        "pluginhub", // G2 (2026-05-01): { url, license_key }
+        "injection_mode",
+        "injection_budget",
+        "excluded_domains",
+        "search",
+        "embedding",
+        "web_search",
+        "llm",
+        "summary_model",
+        "summary",
+        "context_strategy",
+        "theme",
+        "language",
+        "skills",                 // Sprint 2 Skills Router: { disabled: string[] }
+        "wizard",                 // wizard completion state: { complete: bool, current_step: int }
+        "pluginhub",              // G2 (2026-05-01): { url, license_key }
         "cloud", // FEAT-1 (2026-05-14): { accounts_url } — 自部署 / 私有 cloud 环境覆盖默认 engi-stack.com
         "privacy", // v1.0.6 Privacy Logic Strategy: { llm, cloud_saas, webdav, web_search, telemetry, privacy_tour_seen }
         "plugin_trust_mode", // Trust-chain T11: "off" | "warn" | "strict" (default warn)
@@ -282,7 +356,8 @@ pub async fn update_settings(
                 // 浏览器路径是文件路径，不是 URL；但不允许以 - 开头（防 argv 注入）
                 if bp.starts_with('-') {
                     return Err(AppError::BadRequest(
-                        "web_search.browser_path cannot start with '-' (argv injection risk)".into(),
+                        "web_search.browser_path cannot start with '-' (argv injection risk)"
+                            .into(),
                     ));
                 }
             }
@@ -302,7 +377,10 @@ pub async fn update_settings(
         // Sprint 2 Skills Router: 校验 skills.disabled 必须是 string[]
         if let Some(skills_obj) = body_obj.get("skills").and_then(|v| v.as_object()) {
             if let Some(d) = skills_obj.get("disabled") {
-                let arr_ok = d.as_array().map(|arr| arr.iter().all(|x| x.is_string())).unwrap_or(false);
+                let arr_ok = d
+                    .as_array()
+                    .map(|arr| arr.iter().all(|x| x.is_string()))
+                    .unwrap_or(false);
                 if !arr_ok {
                     return Err(AppError::BadRequest(
                         "skills.disabled must be an array of strings".into(),
@@ -326,13 +404,20 @@ pub async fn update_settings(
 
     // 全字段校验:所有设置保存前必须有效(URL scheme / 枚举 / 数值范围),拒绝静默接受无效值。
     if let Err(msg) = validate_settings_fields(&body) {
-        return Err(AppError::detailed(StatusCode::BAD_REQUEST, serde_json::json!({
-            "error": msg, "code": "invalid-setting"
-        })));
+        return Err(AppError::detailed(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "error": msg, "code": "invalid-setting"
+            }),
+        ));
     }
 
     // SettingsLocks enforce — 会员锁定字段拒绝更新.
-    let member_state = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let member_state = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let locks = attune_core::member_session::SettingsLocks::for_state(&member_state);
     if let Some(violation) = check_settings_locks(&body, &locks) {
         return Err(AppError::detailed(
@@ -355,7 +440,9 @@ pub async fn update_settings(
     const DEEP_MERGE_KEYS: &[&str] = &["llm", "ocr", "privacy"];
     if let (Some(current_obj), Some(body_obj)) = (current.as_object_mut(), body.as_object()) {
         for (k, v) in body_obj {
-            if !ALLOWED_KEYS.contains(&k.as_str()) { continue; }
+            if !ALLOWED_KEYS.contains(&k.as_str()) {
+                continue;
+            }
             if DEEP_MERGE_KEYS.contains(&k.as_str()) {
                 // Deep merge：取 current_obj[k] 和 body_obj[k] 两个对象，子字段逐个覆盖
                 if let (Some(cur_sub), Some(new_sub)) = (
@@ -372,17 +459,26 @@ pub async fn update_settings(
         }
     }
 
-    let data = serde_json::to_vec(&current)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    vault.store().set_meta(SETTINGS_KEY, &data)
+    let data = serde_json::to_vec(&current).map_err(|e| AppError::Internal(e.to_string()))?;
+    vault
+        .store()
+        .set_meta(SETTINGS_KEY, &data)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     // 准备热切参数（仍持 vault lock），值复制完释放再触发 reload，避免死锁
     let pluginhub_url = body.get("pluginhub").and_then(|_| {
-        current.get("pluginhub").and_then(|p| p.get("url")).and_then(|v| v.as_str()).map(|s| s.to_string())
+        current
+            .get("pluginhub")
+            .and_then(|p| p.get("url"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     });
     let pluginhub_key = body.get("pluginhub").and_then(|_| {
-        current.get("pluginhub").and_then(|p| p.get("license_key")).and_then(|v| v.as_str()).map(|s| s.to_string())
+        current
+            .get("pluginhub")
+            .and_then(|p| p.get("license_key"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     });
     let need_llm_reload = body.get("llm").is_some();
     drop(vault);
@@ -411,7 +507,10 @@ pub async fn update_settings(
 ///
 /// **v0.6.0-rc.3 起 LLM 默认走远端 token**（per CLAUDE.md M2 决策 + 用户反馈），
 /// 避免本地 3B 模型在大多数硬件上 OOM 或效果差；K3 一体机形态例外（硬件预选过、镜像预装模型）。
-fn default_settings(_recommended_summary: &str, form_factor: attune_core::platform::FormFactor) -> serde_json::Value {
+fn default_settings(
+    _recommended_summary: &str,
+    form_factor: attune_core::platform::FormFactor,
+) -> serde_json::Value {
     use attune_core::platform::FormFactor;
 
     // 形态分裂的 LLM 默认配置
@@ -568,7 +667,9 @@ fn default_settings(_recommended_summary: &str, form_factor: attune_core::platfo
 ///
 /// per spec `docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md` §4.2 #⑤.
 pub fn is_telemetry_path_allowed(body: &serde_json::Value) -> bool {
-    let Some(obj) = body.as_object() else { return true };
+    let Some(obj) = body.as_object() else {
+        return true;
+    };
     let touches_telemetry = obj
         .get("privacy")
         .and_then(|p| p.as_object())
@@ -598,7 +699,9 @@ mod tests {
             "fresh vault must default plugin_trust_mode to warn"
         );
         assert_eq!(
-            d.get("plugin_trusted_pubkeys").and_then(|v| v.as_array()).map(|a| a.len()),
+            d.get("plugin_trusted_pubkeys")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
             Some(0),
             "default whitelist is empty"
         );
@@ -612,13 +715,17 @@ mod tests {
     /// `verify_with_whitelist` — never `Official` (§9 adversarial 2, defends downgrade).
     #[test]
     fn settings_pubkey_cannot_override_official() {
-        use attune_core::plugin_sig::{verify_with_whitelist, SigOutcome};
+        use attune_core::plugin_sig::{SigOutcome, verify_with_whitelist};
         // A user-whitelisted key signs a plugin; the SigOutcome must be ThirdParty,
         // not Official — settings pubkeys are a separate, lower trust domain.
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("p");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plugin.yaml"), "id: p\nname: P\ntype: industry\nversion: \"1.0.0\"\n").unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: p\nname: P\ntype: industry\nversion: \"1.0.0\"\n",
+        )
+        .unwrap();
         // generate a fresh signer + sign the plugin dir contents.
         let sk = attune_core::plugin_sig::generate_signing_key();
         attune_core::plugin_sig::sign_plugin(&dir, &sk).expect("sign");
@@ -635,7 +742,10 @@ mod tests {
         // And: there is no settings key that mutates the official anchor const — the
         // settings schema only carries plugin_trusted_pubkeys (third-party domain).
         let d = default_settings("qwen2.5:3b", FormFactor::Laptop);
-        assert!(d.get("official_pubkeys").is_none(), "no settings path to official anchor");
+        assert!(
+            d.get("official_pubkeys").is_none(),
+            "no settings path to official anchor"
+        );
     }
 
     /// plugin_trusted_pubkeys validates as a 64-hex array and round-trips through the
@@ -647,9 +757,15 @@ mod tests {
             "plugin_trust_mode": "strict",
             "plugin_trusted_pubkeys": [valid.clone()],
         });
-        assert!(validate_settings_fields(&body).is_ok(), "valid 64-hex pubkey accepted");
+        assert!(
+            validate_settings_fields(&body).is_ok(),
+            "valid 64-hex pubkey accepted"
+        );
         // round-trip: the array survives a clone through the settings value shape.
-        assert_eq!(body["plugin_trusted_pubkeys"][0], serde_json::Value::String(valid));
+        assert_eq!(
+            body["plugin_trusted_pubkeys"][0],
+            serde_json::Value::String(valid)
+        );
         assert_eq!(body["plugin_trust_mode"], "strict");
 
         // reject malformed: not 64-hex, non-string, bad mode.
@@ -660,7 +776,10 @@ mod tests {
             serde_json::json!({"plugin_trusted_pubkeys": "not-an-array"}),
             serde_json::json!({"plugin_trust_mode": "paranoid"}),
         ] {
-            assert!(validate_settings_fields(&bad).is_err(), "should reject {bad:?}");
+            assert!(
+                validate_settings_fields(&bad).is_err(),
+                "should reject {bad:?}"
+            );
         }
     }
 
@@ -685,7 +804,10 @@ mod tests {
             serde_json::json!({"cloud": {"accounts_url": "not-a-url"}}),
             serde_json::json!({"cloud": {"gateway_url": "data:text/html,x"}}),
         ] {
-            assert!(validate_settings_fields(&bad).is_err(), "should reject {bad:?}");
+            assert!(
+                validate_settings_fields(&bad).is_err(),
+                "should reject {bad:?}"
+            );
         }
         // 无效枚举 + 越界
         for bad in [
@@ -701,10 +823,41 @@ mod tests {
             serde_json::json!({"search": {"vector_weight": 1.5}}),
             serde_json::json!({"web_search": {"min_interval_ms": -1}}),
         ] {
-            assert!(validate_settings_fields(&bad).is_err(), "should reject {bad:?}");
+            assert!(
+                validate_settings_fields(&bad).is_err(),
+                "should reject {bad:?}"
+            );
         }
         // 空 URL 视为"清空",允许
-        assert!(validate_settings_fields(&serde_json::json!({"cloud": {"accounts_url": ""}})).is_ok());
+        assert!(
+            validate_settings_fields(&serde_json::json!({"cloud": {"accounts_url": ""}})).is_ok()
+        );
+    }
+
+    #[test]
+    fn pluginhub_url_rejects_local_and_raw_ip_hosts() {
+        for bad in [
+            serde_json::json!({"pluginhub": {"url": "http://localhost:8080"}}),
+            serde_json::json!({"pluginhub": {"url": "http://127.0.0.1:8080"}}),
+            serde_json::json!({"pluginhub": {"url": "http://192.168.1.10"}}),
+            serde_json::json!({"pluginhub": {"url": "http://169.254.169.254/latest"}}),
+            serde_json::json!({"pluginhub": {"url": "https://8.8.8.8"}}),
+        ] {
+            assert!(
+                validate_settings_fields(&bad).is_err(),
+                "should reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pluginhub_url_accepts_public_hostname() {
+        assert!(
+            validate_settings_fields(&serde_json::json!({
+                "pluginhub": {"url": "https://hub.engi-stack.com"}
+            }))
+            .is_ok()
+        );
     }
 
     /// Laptop 形态：LLM 默认走远端 token (openai_compat + null endpoint/model)
@@ -713,11 +866,20 @@ mod tests {
     fn laptop_form_factor_uses_remote_token() {
         let s = default_settings("qwen2.5:3b", FormFactor::Laptop);
         let llm = s.get("llm").expect("llm key");
-        assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
-        assert!(llm.get("endpoint").map_or(true, |v| v.is_null()),
-            "Laptop endpoint must be null (UI 引导填), got: {:?}", llm.get("endpoint"));
-        assert!(llm.get("model").map_or(true, |v| v.is_null()),
-            "Laptop model must be null (UI 引导填), got: {:?}", llm.get("model"));
+        assert_eq!(
+            llm.get("provider").and_then(|v| v.as_str()),
+            Some("openai_compat")
+        );
+        assert!(
+            llm.get("endpoint").map_or(true, |v| v.is_null()),
+            "Laptop endpoint must be null (UI 引导填), got: {:?}",
+            llm.get("endpoint")
+        );
+        assert!(
+            llm.get("model").map_or(true, |v| v.is_null()),
+            "Laptop model must be null (UI 引导填), got: {:?}",
+            llm.get("model")
+        );
         assert!(llm.get("api_key").map_or(true, |v| v.is_null()));
     }
 
@@ -731,7 +893,8 @@ mod tests {
         let s = default_settings("qwen2.5:3b", FormFactor::K3Appliance);
         let llm = s.get("llm").expect("llm key");
         assert_eq!(
-            llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"),
+            llm.get("provider").and_then(|v| v.as_str()),
+            Some("openai_compat"),
             "K3 LLM provider 必须 openai_compat(经 :8090 收口,不直连 Ollama)"
         );
         let llm_ep = llm.get("endpoint").and_then(|v| v.as_str());
@@ -745,8 +908,11 @@ mod tests {
             !llm_ep.unwrap_or_default().contains(":11434"),
             "K3 LLM 禁旁路直连 Ollama :11434(必须经 scheduler :8090),got: {llm_ep:?}"
         );
-        assert!(llm.get("model").map_or(true, |v| v.is_null()),
-            "K3 model must stay unset so the scheduler picks the served local model, got: {:?}", llm.get("model"));
+        assert!(
+            llm.get("model").map_or(true, |v| v.is_null()),
+            "K3 model must stay unset so the scheduler picks the served local model, got: {:?}",
+            llm.get("model")
+        );
         // embedding 同样经 :8090(loopback → 判 local → L0 留设备,隐私不变量)。
         let emb = s.get("embedding").expect("embedding key");
         assert_eq!(
@@ -763,17 +929,26 @@ mod tests {
         for ff in [FormFactor::Laptop, FormFactor::Server, FormFactor::Unknown] {
             let s = default_settings("qwen2.5:3b", ff);
             let llm = s.get("llm").expect("llm key");
-            assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"),
-                "FormFactor::{ff:?} provider 必须保持 openai_compat(远端 token)");
-            assert!(llm.get("endpoint").map_or(true, |v| v.is_null()),
+            assert_eq!(
+                llm.get("provider").and_then(|v| v.as_str()),
+                Some("openai_compat"),
+                "FormFactor::{ff:?} provider 必须保持 openai_compat(远端 token)"
+            );
+            assert!(
+                llm.get("endpoint").map_or(true, |v| v.is_null()),
                 "FormFactor::{ff:?} endpoint 必须保持 null(个人版无 :8090 / :11434 注入), got: {:?}",
-                llm.get("endpoint"));
+                llm.get("endpoint")
+            );
             // 个人版 embedding 仍走本地 ollama_url(非 :8090 scheduler endpoint)。
             let emb = s.get("embedding").expect("embedding key");
-            assert!(emb.get("endpoint").is_none(),
-                "FormFactor::{ff:?} embedding 必须无 scheduler endpoint(本地 ONNX/Ollama)");
-            assert!(emb.get("ollama_url").and_then(|v| v.as_str()).is_some(),
-                "FormFactor::{ff:?} embedding 保留本地 ollama_url 兼容字段");
+            assert!(
+                emb.get("endpoint").is_none(),
+                "FormFactor::{ff:?} embedding 必须无 scheduler endpoint(本地 ONNX/Ollama)"
+            );
+            assert!(
+                emb.get("ollama_url").and_then(|v| v.as_str()).is_some(),
+                "FormFactor::{ff:?} embedding 保留本地 ollama_url 兼容字段"
+            );
         }
     }
 
@@ -784,8 +959,10 @@ mod tests {
             let s = default_settings("qwen2.5:3b", ff);
             let llm = s.get("llm").expect("llm key");
             assert_eq!(
-                llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"),
-                "FormFactor::{:?} should fall back to openai_compat", ff
+                llm.get("provider").and_then(|v| v.as_str()),
+                Some("openai_compat"),
+                "FormFactor::{:?} should fall back to openai_compat",
+                ff
             );
         }
     }
@@ -797,14 +974,16 @@ mod tests {
     fn summary_default_splits_by_form_factor() {
         assert_eq!(
             default_settings("qwen2.5:3b", FormFactor::K3Appliance)
-                .get("summary").and_then(|v| v.as_str()),
+                .get("summary")
+                .and_then(|v| v.as_str()),
             Some("local"),
             "K3 预装本地模型 → summary=local"
         );
         for ff in [FormFactor::Laptop, FormFactor::Server, FormFactor::Unknown] {
             assert_eq!(
                 default_settings("qwen2.5:3b", ff)
-                    .get("summary").and_then(|v| v.as_str()),
+                    .get("summary")
+                    .and_then(|v| v.as_str()),
                 Some("cloud"),
                 "FormFactor::{ff:?} LLM 默认远端 → summary=cloud"
             );
@@ -815,8 +994,10 @@ mod tests {
     #[test]
     fn summary_default_is_valid_enum() {
         for ff in [
-            FormFactor::Laptop, FormFactor::Server,
-            FormFactor::Unknown, FormFactor::K3Appliance,
+            FormFactor::Laptop,
+            FormFactor::Server,
+            FormFactor::Unknown,
+            FormFactor::K3Appliance,
         ] {
             let v = default_settings("qwen2.5:3b", ff);
             let summary = v.get("summary").and_then(|x| x.as_str()).unwrap_or("");
@@ -837,12 +1018,19 @@ mod tests {
 
         // web_search / rerank / OCR / ASR 这些本地底座配置应跨形态完全相同。
         for key in &["web_search", "rerank", "ocr", "asr"] {
-            assert_eq!(laptop.get(key), k3.get(key),
-                "{} should be identical across form factors (only LLM + embedding routing differ)", key);
+            assert_eq!(
+                laptop.get(key),
+                k3.get(key),
+                "{} should be identical across form factors (only LLM + embedding routing differ)",
+                key
+            );
         }
         // embedding 按形态分裂:K3 经 :8090,laptop 本地 ONNX/Ollama → 必然不同。
-        assert_ne!(laptop.get("embedding"), k3.get("embedding"),
-            "K3 embedding routes to :8090 scheduler; laptop stays local — they differ by design");
+        assert_ne!(
+            laptop.get("embedding"),
+            k3.get("embedding"),
+            "K3 embedding routes to :8090 scheduler; laptop stays local — they differ by design"
+        );
     }
 
     // ── Bug-2 fix: SettingsLocks 粒度 (spec 2026-05-24) ─────────────────────
@@ -858,15 +1046,19 @@ mod tests {
     }
 
     fn free_locks() -> SettingsLocks {
-        SettingsLocks::for_state(&MemberState::Free { account_id: "u1".into() })
+        SettingsLocks::for_state(&MemberState::Free {
+            account_id: "u1".into(),
+        })
     }
 
     #[test]
     fn paid_user_can_change_llm_model() {
         // Bug-2 核心:付费会员只改 model(channel 内 alias),应放行,不触发 cloud_llm 锁
         let body = serde_json::json!({"llm": {"model": "deepseek-v4-pro"}});
-        assert!(check_settings_locks(&body, &paid_locks()).is_none(),
-            "paid user should be able to swap model under same channel");
+        assert!(
+            check_settings_locks(&body, &paid_locks()).is_none(),
+            "paid user should be able to swap model under same channel"
+        );
     }
 
     #[test]
@@ -921,8 +1113,11 @@ mod tests {
         // 免费用户没有 cloud_llm 锁,endpoint/api_key/model 都可改
         for k in ["model", "endpoint", "api_key", "provider"] {
             let body = serde_json::json!({"llm": {k: "anything"}});
-            assert!(check_settings_locks(&body, &free_locks()).is_none(),
-                "free user should change llm.{}", k);
+            assert!(
+                check_settings_locks(&body, &free_locks()).is_none(),
+                "free user should change llm.{}",
+                k
+            );
         }
     }
 
@@ -931,8 +1126,10 @@ mod tests {
         // pluginhub 是整对象锁;但 P0 fix 后付费会员 plugin_install=Editable
         // → 这里应该放行 (per member_session.rs::paid_locks_cloud_llm_and_plugin_uninstall_only)
         let body = serde_json::json!({"pluginhub": {"url": "https://hub.engi-stack.com"}});
-        assert!(check_settings_locks(&body, &paid_locks()).is_none(),
-            "付费用户应能改 pluginhub URL(plugin_install 解锁)");
+        assert!(
+            check_settings_locks(&body, &paid_locks()).is_none(),
+            "付费用户应能改 pluginhub URL(plugin_install 解锁)"
+        );
     }
 
     // ── v1.0.6 Privacy Logic Strategy — default-false block + telemetry isolation ──
@@ -942,29 +1139,59 @@ mod tests {
     #[test]
     fn default_settings_has_privacy_block_all_outbound_disabled_except_llm_off_by_default() {
         let settings = default_settings("", FormFactor::Laptop);
-        let privacy = settings.get("privacy").expect("settings should contain privacy block");
-        assert_eq!(privacy.get("telemetry"), Some(&serde_json::json!(false)),
-            "telemetry MUST default to false");
-        assert_eq!(privacy.get("web_search"), Some(&serde_json::json!(false)),
-            "web_search MUST default to false");
-        assert_eq!(privacy.get("cloud_saas"), Some(&serde_json::json!(false)),
-            "cloud_saas MUST default to false (login required to enable)");
-        assert_eq!(privacy.get("webdav"), Some(&serde_json::json!(false)),
-            "webdav MUST default to false (user configures explicitly)");
-        assert_eq!(privacy.get("llm"), Some(&serde_json::json!(false)),
-            "llm MUST default to false (wizard step enables it)");
-        assert_eq!(privacy.get("privacy_tour_seen"), Some(&serde_json::json!(false)));
+        let privacy = settings
+            .get("privacy")
+            .expect("settings should contain privacy block");
+        assert_eq!(
+            privacy.get("telemetry"),
+            Some(&serde_json::json!(false)),
+            "telemetry MUST default to false"
+        );
+        assert_eq!(
+            privacy.get("web_search"),
+            Some(&serde_json::json!(false)),
+            "web_search MUST default to false"
+        );
+        assert_eq!(
+            privacy.get("cloud_saas"),
+            Some(&serde_json::json!(false)),
+            "cloud_saas MUST default to false (login required to enable)"
+        );
+        assert_eq!(
+            privacy.get("webdav"),
+            Some(&serde_json::json!(false)),
+            "webdav MUST default to false (user configures explicitly)"
+        );
+        assert_eq!(
+            privacy.get("llm"),
+            Some(&serde_json::json!(false)),
+            "llm MUST default to false (wizard step enables it)"
+        );
+        assert_eq!(
+            privacy.get("privacy_tour_seen"),
+            Some(&serde_json::json!(false))
+        );
     }
 
     /// privacy block 在 K3 / Server / Unknown 形态下也必须全 false(form_factor 不影响 privacy).
     #[test]
     fn default_settings_privacy_block_invariant_across_form_factors() {
-        for ff in [FormFactor::Laptop, FormFactor::Server, FormFactor::Unknown, FormFactor::K3Appliance] {
+        for ff in [
+            FormFactor::Laptop,
+            FormFactor::Server,
+            FormFactor::Unknown,
+            FormFactor::K3Appliance,
+        ] {
             let s = default_settings("qwen2.5:3b", ff);
-            let privacy = s.get("privacy").unwrap_or_else(|| panic!("privacy missing for {ff:?}"));
+            let privacy = s
+                .get("privacy")
+                .unwrap_or_else(|| panic!("privacy missing for {ff:?}"));
             for key in &["llm", "cloud_saas", "webdav", "web_search", "telemetry"] {
-                assert_eq!(privacy.get(*key), Some(&serde_json::json!(false)),
-                    "{ff:?}: privacy.{key} must default false");
+                assert_eq!(
+                    privacy.get(*key),
+                    Some(&serde_json::json!(false)),
+                    "{ff:?}: privacy.{key} must default false"
+                );
             }
         }
     }
@@ -975,31 +1202,42 @@ mod tests {
     fn telemetry_only_togglable_through_explicit_privacy_patch() {
         // 1. 非 privacy patch → allowed (无 telemetry 触碰)
         let llm_only = serde_json::json!({ "llm": { "model": "deepseek-v4-pro" } });
-        assert!(is_telemetry_path_allowed(&llm_only),
-            "non-privacy patches must be allowed when they don't touch telemetry");
+        assert!(
+            is_telemetry_path_allowed(&llm_only),
+            "non-privacy patches must be allowed when they don't touch telemetry"
+        );
 
         // 2. 纯 privacy patch 切 telemetry → allowed
         let privacy_only = serde_json::json!({ "privacy": { "telemetry": true } });
-        assert!(is_telemetry_path_allowed(&privacy_only),
-            "isolated privacy patch toggling telemetry must be allowed");
+        assert!(
+            is_telemetry_path_allowed(&privacy_only),
+            "isolated privacy patch toggling telemetry must be allowed"
+        );
 
         // 3. privacy.telemetry + llm 混合 → rejected
-        let mixed = serde_json::json!({ "privacy": { "telemetry": true }, "llm": { "model": "x" } });
-        assert!(!is_telemetry_path_allowed(&mixed),
-            "mixed patch with telemetry must be rejected to prevent accidental enabling");
+        let mixed =
+            serde_json::json!({ "privacy": { "telemetry": true }, "llm": { "model": "x" } });
+        assert!(
+            !is_telemetry_path_allowed(&mixed),
+            "mixed patch with telemetry must be rejected to prevent accidental enabling"
+        );
 
         // 4. privacy.telemetry + theme → rejected
         let mixed_theme = serde_json::json!({ "privacy": { "telemetry": false }, "theme": "dark" });
-        assert!(!is_telemetry_path_allowed(&mixed_theme),
-            "even disabling telemetry must be isolated to keep audit-log meaningful");
+        assert!(
+            !is_telemetry_path_allowed(&mixed_theme),
+            "even disabling telemetry must be isolated to keep audit-log meaningful"
+        );
 
         // 5. privacy 块改其他 key (不含 telemetry) + llm → allowed
         let privacy_non_telemetry_mixed = serde_json::json!({
             "privacy": { "web_search": true },
             "llm": { "model": "x" }
         });
-        assert!(is_telemetry_path_allowed(&privacy_non_telemetry_mixed),
-            "non-telemetry privacy keys may piggyback (only telemetry is super-protected)");
+        assert!(
+            is_telemetry_path_allowed(&privacy_non_telemetry_mixed),
+            "non-telemetry privacy keys may piggyback (only telemetry is super-protected)"
+        );
 
         // 6. 非 object body → allowed(其他错误会拦截)
         let not_obj = serde_json::json!([1, 2, 3]);

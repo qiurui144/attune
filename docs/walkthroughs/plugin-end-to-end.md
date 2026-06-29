@@ -39,21 +39,21 @@ $ attune plugin-sign /path/to/law-pro/ --priv-file ~/.secrets/law-pro.signing-ke
   signature (base64): UrpOJ6041/e2mCRGGuXkuV9yH5Z...
 ```
 
-### 4. 打包分发 (.attunepkg = tar.gz of plugin dir)
+### 4. 打包分发 (.tar.gz of plugin dir)
 
 ```bash
-$ cd /path/to/law-pro/.. && tar czf law-pro-0.2.0.attunepkg law-pro/
+$ cd /path/to/law-pro/.. && tar czf law-pro-0.2.0.tar.gz law-pro/
 ```
 
 发布到 attune-enterprise/pluginhub (attune-cloud 软链共享).
 
 ## Phase B: 律师侧 (安装 + 使用)
 
-### 1. 下载 + 解压 .attunepkg
+### 1. 下载 + 解压 `.tar.gz`
 
 ```bash
-$ curl -O https://hub.engi-stack.com/plugins/law-pro/0.2.0.attunepkg
-$ tar xzf law-pro-0.2.0.attunepkg
+$ curl -O https://hub.engi-stack.com/api/v1/packages/law-pro-0.2.0.tar.gz
+$ tar xzf law-pro-0.2.0.tar.gz
 ```
 
 ### 2. 装载到 attune (CLI 自动校验签名 + 解密)

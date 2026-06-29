@@ -48,7 +48,7 @@ sudo dnf install attune
 v1.0→v1.2 在 GA 核心之上叠加生产级治理与跨平台能力。完整发布说明见 [`rust/RELEASE.md`](rust/RELEASE.md)；各能力 × 模块 × 技术栈映射见 [`rust/DEVELOP.md` → 能力矩阵 × 技术栈选型](rust/DEVELOP.md#能力矩阵--技术栈选型)。
 
 - **Agent Control Plane（ACP，v1.1.0）** — 中央 agent 注册表 + typed handoff，声明式 DAG flow 执行器，每 `agent×model` 失败 telemetry，cost-aware 调度器，workspace 级质量门（阈值只升不降）。把整个 agent 生态当一个工程组织治理。
-- **跨平台 agent 分发（WASM，v1.2.0）** — 确定性 agent/skill 可编到 `wasm32-wasip1`，由内嵌 `wasmtime` 执行；一个 `.attunepkg` 含一份 `.wasm` 即在 Windows / Linux / riscv64 全平台运行。WASM-safe 的 `attune-agent-sdk` leaf crate 让 `Agent` trait 零 native 依赖。
+- **跨平台 agent 分发（WASM，v1.2.0）** — 确定性 agent/skill 可编到 `wasm32-wasip1`，由内嵌 `wasmtime` 执行；一个签名 `.tar.gz` 插件包含一份 `.wasm` 即在 Windows / Linux / riscv64 全平台运行。WASM-safe 的 `attune-agent-sdk` leaf crate 让 `Agent` trait 零 native 依赖。
 - **GitConnector（v1.2.0）** — 直接从 Git 仓库导入知识库（GitHub / GitLab / Gitea / Bitbucket / Codeberg / sr.ht 的 HTTPS）：clone → glob 过滤 → 入库 → 跟随上游 commit。本地完成、导入路径零 LLM 调用，带 SSRF 防护。
 - **隐私出网门 OutboundGate + `PrivacyTier::L0`「永不出网」** — 每个网络 egress（LLM / Cloud / WebDAV / Web Search / Telemetry）统一经一处 gate 裁决 settings + PII 脱敏；标 L0 的内容拒绝任何云端 LLM 调用。
 - **一键依赖部署** — Ollama readiness 检测 + 应用内一键 install/pull、底座模型一键 ensure、LM Studio 端点自动识别，非技术用户无需碰终端。
@@ -75,7 +75,7 @@ Chrome 扩展协议相同，两个后端可任意切换。
 | 产品 | License | 形态 | 用户群 |
 |------|---------|------|--------|
 | **`attune`**（本仓） | Apache-2.0 | Tauri 桌面 / Chrome 扩展 | **个人通用用户** — 通用 RAG / 加密 vault / 浏览捕获 / MCP outlet |
-| **`attune-pro`**（私有） | Proprietary | Plugin packs (.attunepkg signed) 装载到 attune | **个人行业用户** — 律师 / 售前 / 专利 / 技术 / 医疗 / 学术 纵向 packs |
+| **`attune-pro`**（私有） | Proprietary | 签名 `.tar.gz` plugin packs 装载到 attune | **个人行业用户** — 律师 / 售前 / 专利 / 技术 / 医疗 / 学术 纵向 packs |
 | **`attune-enterprise`**（独立产品） | Proprietary | Django + Vue B2B SaaS | **律所小团队** — 多租户 RBAC + 案件分配 + 多人协作 |
 
 **等式**：
@@ -386,7 +386,7 @@ chat_trigger:
 
 **5. 打开 Settings → Skills 标签**。新 skill 会列出，关键词高亮显示，toggle 启用 / 禁用即时生效，全程不再碰 YAML。
 
-**分发给别人**：把目录打包为 `<plugin-id>.attunepkg`，对方解压到同样的 plugins 目录即装即用。Pro 版的行业 skill 集（律师 / 售前 / 学术）走完全一样的路径，只是出厂预装。
+**分发给别人**：把目录打包为 `<plugin-id>-<version>.tar.gz`，通过 PluginHub 安装，或在本地测试时解压到同样的 plugins 目录。Pro 版的行业 skill 集（律师 / 售前 / 学术）走同一包格式；官方远端包必须带签名并通过完整性校验。
 
 ## 贡献
 

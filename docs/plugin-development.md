@@ -100,7 +100,7 @@ Argon2id + AES-GCM, OsRng nonce + salt).
 
 1. 用户在 marketplace UI 看到 plugin 卡 (来自 `pluginhub.url` 或本地 plugins/)
 2. 点 "安装" → POST /api/v1/marketplace/plugins/{id}/install
-3. attune-server 调 pluginhub HTTP 下载 .attpkg
+3. attune-server 调 pluginhub HTTP 下载 `.tar.gz` 包
 4. plugin_sig::verify 签名校验
 5. (付费) plugin_encryption::decrypt_yaml 解密
 6. 写入 ~/.local/share/attune/plugins/{id}/

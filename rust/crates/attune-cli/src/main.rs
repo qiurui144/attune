@@ -230,7 +230,7 @@ enum Commands {
         cloud_url: String,
     },
     /// 打包 + 上传 plugin 到 pluginhub (开发者侧分发流程)
-    /// 流程: 1) tar plugin dir → .attunepkg  2) POST 到 pluginhub /admin/plugins
+    /// 流程: 1) tar plugin dir → .tar.gz  2) POST 到 pluginhub /api/v1/admin/plugins/*
     PluginPublish {
         /// plugin 源目录 (含 plugin.yaml / bin/ / plugin.sig)
         plugin_dir: std::path::PathBuf,
@@ -1510,9 +1510,9 @@ fn run_plugin_publish(
     let version = plugin.manifest.version.clone();
     eprintln!("✓ plugin: id={id}, version={version}");
 
-    // 2. tar plugin dir → .attunepkg (临时文件)
+    // 2. tar plugin dir → .tar.gz (PluginHub package contract)
     let tmp = tempfile::tempdir().map_err(attune_core::error::VaultError::Io)?;
-    let pkg_path = tmp.path().join(format!("{id}-{version}.attunepkg"));
+    let pkg_path = tmp.path().join(format!("{id}-{version}.tar.gz"));
     let status = std::process::Command::new("tar")
         .args(["czf"])
         .arg(&pkg_path)
@@ -1570,8 +1570,8 @@ fn run_plugin_publish(
         .part(
             "file",
             reqwest::blocking::multipart::Part::bytes(bytes)
-                .file_name(format!("{id}-{version}.attunepkg"))
-                .mime_str("application/octet-stream")
+                .file_name(format!("{id}-{version}.tar.gz"))
+                .mime_str("application/gzip")
                 .unwrap(),
         )
         .text("changelog", "")
@@ -1590,7 +1590,23 @@ fn run_plugin_publish(
             "publish failed: {ver_status} body={ver_body}"
         ))));
     }
-    eprintln!("✓ published {id}@{version}: {ver_body}");
+    let upload: serde_json::Value = serde_json::from_str(&ver_body).map_err(|e| {
+        attune_core::error::VaultError::Io(std::io::Error::other(format!(
+            "publish response is not JSON: {e}; body={ver_body}"
+        )))
+    })?;
+    let sha256 = upload.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
+    let download_path = upload
+        .get("download_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let expected_path = format!("/api/v1/packages/{id}-{version}.tar.gz");
+    if sha256.len() != 64 || download_path != expected_path {
+        return Err(attune_core::error::VaultError::Io(std::io::Error::other(format!(
+            "publish response missing integrity/download metadata: body={ver_body}"
+        ))));
+    }
+    eprintln!("✓ published {id}@{version}: sha256={sha256} download_path={download_path}");
     Ok(())
 }
 

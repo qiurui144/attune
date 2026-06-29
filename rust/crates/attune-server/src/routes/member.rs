@@ -4,19 +4,21 @@ use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use attune_core::cloud_client::{CloudClient, License, UserInfo};
 use attune_core::entitlement::EntitlementCache;
-use attune_core::entitlement_reverify::{apply_refresh_rounds, RefreshSummary, ReverifyOutcome};
+use attune_core::entitlement_reverify::{RefreshSummary, ReverifyOutcome, apply_refresh_rounds};
 use attune_core::llm_settings::SETTINGS_META_KEY;
 use attune_core::member_session::{MemberState, SettingsLocks};
+use attune_core::plugin_hub::PluginHubProvider;
 use attune_core::plugin_sig::TrustMode;
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 
 /// Default public cloud accounts endpoint when the self-host override
 /// (`settings.cloud.accounts_url`) is unset/empty.
 const DEFAULT_ACCOUNTS_URL: &str = "https://accounts.engi-stack.com";
+const DEFAULT_PLUGINHUB_URL: &str = "https://hub.engi-stack.com";
 
 /// Resolve the cloud accounts base URL **server-side** from persisted settings
 /// (`app_settings.cloud.accounts_url`), defaulting to the public engi-stack
@@ -43,6 +45,25 @@ pub(crate) fn resolve_accounts_url(state: &SharedState) -> String {
     configured.unwrap_or_else(|| DEFAULT_ACCOUNTS_URL.to_string())
 }
 
+fn resolve_pluginhub_url(state: &SharedState) -> String {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let configured = vault
+        .store()
+        .get_meta(SETTINGS_META_KEY)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|v| {
+            v.get("pluginhub")
+                .and_then(|p| p.get("url"))
+                .and_then(|u| u.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    configured.unwrap_or_else(|| DEFAULT_PLUGINHUB_URL.to_string())
+}
+
 /// SECURITY: redact a license_key for log/identity use. Never log the raw key
 /// (§1.4) — emit a stable `lic:<8-hex>` digest prefix so operators can correlate
 /// without the credential ever reaching a log sink.
@@ -67,7 +88,11 @@ struct CloudLoginData {
 
 /// GET /api/v1/member/state — 当前会员状态 (UI 展示)
 pub async fn get_state(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let m = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     Json(serde_json::json!({
         "state": m,
         "is_logged_in": m.is_logged_in(),
@@ -78,7 +103,11 @@ pub async fn get_state(State(state): State<SharedState>) -> Json<serde_json::Val
 
 /// GET /api/v1/member/locks — 当前 SettingsLocks (UI 灰显字段决策)
 pub async fn get_locks(State(state): State<SharedState>) -> Json<SettingsLocks> {
-    let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let m = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     Json(SettingsLocks::for_state(&m))
 }
 
@@ -101,7 +130,9 @@ pub async fn login_token(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let is_paid = req.tier.as_str() == "paid";
     let new_state = match req.tier.as_str() {
-        "free" => MemberState::Free { account_id: req.account_id },
+        "free" => MemberState::Free {
+            account_id: req.account_id,
+        },
         "paid" => {
             // C1 paywall-bypass fix: a "paid" claim MUST be verified server-side before it can
             // gate billable cloud-LLM spend (doc-intel is the first such consumer). The previous
@@ -183,7 +214,10 @@ fn member_session_sync_plugins() -> Option<attune_core::plugin_sync::SyncReport>
     let json = std::fs::read_to_string(&path).ok()?;
     let sess: serde_json::Value = serde_json::from_str(&json).ok()?;
     let cloud_url = sess.get("cloud_url").and_then(|v| v.as_str())?;
-    let session = sess.get("session").and_then(|v| v.as_str()).filter(|s| !s.is_empty())?;
+    let session = sess
+        .get("session")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
     let client = CloudClient::with_session(cloud_url, session);
     Some(attune_core::plugin_sync::best_effort_sync_plugins(&client))
 }
@@ -239,44 +273,66 @@ pub async fn login_password(
     let email = req.email.trim().to_string();
     let password = std::mem::take(&mut req.password);
     let license_code = req.license_code.clone();
-    let blocking = tokio::task::spawn_blocking(move || -> Result<CloudLoginData, (StatusCode, String)> {
-        let mut client = CloudClient::new(cloud_url);
-        let user = client
-            .login(&email, &password)
-            .map_err(|e| (StatusCode::UNAUTHORIZED, format!("login failed: {e}")))?;
-        let is_paid = matches!(user.plan.as_str(), "pro" | "pro_plus" | "enterprise");
-        if !is_paid {
-            return Ok(CloudLoginData { user, license: None, me: None, plugin_sync: None });
-        }
-        let licenses = client
-            .list_licenses()
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("list licenses failed: {e}")))?;
-        let selected = if let Some(code) = license_code.as_deref() {
-            let code = code.trim();
-            if code.is_empty() {
-                licenses.into_iter().next()
-            } else {
-                licenses
-                    .into_iter()
-                    .find(|lic| lic.license_key == code || lic.id.to_string() == code)
+    let blocking =
+        tokio::task::spawn_blocking(move || -> Result<CloudLoginData, (StatusCode, String)> {
+            let mut client = CloudClient::new(cloud_url);
+            let user = client
+                .login(&email, &password)
+                .map_err(|e| (StatusCode::UNAUTHORIZED, format!("login failed: {e}")))?;
+            let is_paid = matches!(user.plan.as_str(), "pro" | "pro_plus" | "enterprise");
+            if !is_paid {
+                return Ok(CloudLoginData {
+                    user,
+                    license: None,
+                    me: None,
+                    plugin_sync: None,
+                });
             }
-        } else {
-            licenses.into_iter().next()
-        }
-        .ok_or((StatusCode::BAD_REQUEST, "paid user has no matching license".to_string()))?;
-        // best-effort gateway token fetch — a failure here must not block login.
-        let me = client.me().ok();
-        // B5 (2026-06-06): auto-install entitled pro plugins (e.g. law-pro) so
-        // domain-specific agents work right after login, no manual `attune
-        // sync-plugins`. Runs on THIS blocking thread (reusing the authenticated
-        // client + its session cookie). best_effort_* never returns Err — a sync
-        // failure logs + yields an empty report; the login still succeeds (§4.5).
-        // Signature verification (verify_with_key) inside sync is NOT bypassed:
-        // an unverified package fails closed and is reported in `failed`.
-        let plugin_sync = Some(attune_core::plugin_sync::best_effort_sync_plugins(&client));
-        Ok(CloudLoginData { user, license: Some(selected), me, plugin_sync })
-    });
-    let CloudLoginData { user, license, me, plugin_sync } = blocking
+            let licenses = client.list_licenses().map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("list licenses failed: {e}"),
+                )
+            })?;
+            let selected = if let Some(code) = license_code.as_deref() {
+                let code = code.trim();
+                if code.is_empty() {
+                    licenses.into_iter().next()
+                } else {
+                    licenses
+                        .into_iter()
+                        .find(|lic| lic.license_key == code || lic.id.to_string() == code)
+                }
+            } else {
+                licenses.into_iter().next()
+            }
+            .ok_or((
+                StatusCode::BAD_REQUEST,
+                "paid user has no matching license".to_string(),
+            ))?;
+            // best-effort gateway token fetch — a failure here must not block login.
+            let me = client.me().ok();
+            // B5 (2026-06-06): auto-install entitled pro plugins (e.g. law-pro) so
+            // domain-specific agents work right after login, no manual `attune
+            // sync-plugins`. Runs on THIS blocking thread (reusing the authenticated
+            // client + its session cookie). best_effort_* never returns Err — a sync
+            // failure logs + yields an empty report; the login still succeeds (§4.5).
+            // Signature verification (verify_with_key) inside sync is NOT bypassed:
+            // an unverified package fails closed and is reported in `failed`.
+            let plugin_sync = Some(attune_core::plugin_sync::best_effort_sync_plugins(&client));
+            Ok(CloudLoginData {
+                user,
+                license: Some(selected),
+                me,
+                plugin_sync,
+            })
+        });
+    let CloudLoginData {
+        user,
+        license,
+        me,
+        plugin_sync,
+    } = blocking
         .await
         .map_err(|e| {
             (
@@ -310,7 +366,9 @@ pub async fn login_password(
                     &user.email,
                 );
             }
-            None => tracing::warn!("member login: fetch /me failed — user keeps current LLM settings"),
+            None => {
+                tracing::warn!("member login: fetch /me failed — user keeps current LLM settings")
+            }
         }
 
         MemberState::Paid {
@@ -349,7 +407,9 @@ pub async fn login_password(
 /// - cloud 完全不可达(所有 verify 5xx/transport)→ 502 `{code: cloud-unreachable}`,
 ///   **本地缓存原样不动**(spec §7.2 error 5)。
 /// - 否则 → 200 `{refreshed, statuses}`。
-pub async fn refresh_entitlements(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
+pub async fn refresh_entitlements(
+    State(state): State<SharedState>,
+) -> AppResult<Json<serde_json::Value>> {
     // R1.1: 必须已登录(free 或 paid 都可手动 refresh;未登录拒)。
     {
         let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner());
@@ -430,17 +490,26 @@ fn writeback_accepted(state: &SharedState, rounds: &[(String, ReverifyOutcome, O
             // 显式降级:直接 UPDATE,无 rank guard(merge 不会吃掉吊销)。
             // 用 verified_at 作 freshness 基准;空则退回行内 last_verified_at。
             let last_verified = if va.is_empty() {
-                cache.last_verified_at(plugin_id).map(|d| d.to_rfc3339()).unwrap_or_default()
+                cache
+                    .last_verified_at(plugin_id)
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_default()
             } else {
                 va.to_string()
             };
-            if let Err(e) = vault.store().set_entitlement_status(plugin_id, new_status, &last_verified) {
+            if let Err(e) =
+                vault
+                    .store()
+                    .set_entitlement_status(plugin_id, new_status, &last_verified)
+            {
                 tracing::error!(
                     "reverify: failed to persist verified deny for {plugin_id} (status={new_status}): {e}"
                 );
             }
-        } else if let Some(mut row) =
-            cache.snapshot().into_iter().find(|r| &r.plugin_id == plugin_id)
+        } else if let Some(mut row) = cache
+            .snapshot()
+            .into_iter()
+            .find(|r| &r.plugin_id == plugin_id)
         {
             row.status = new_status.to_string();
             if !va.is_empty() {
@@ -448,7 +517,9 @@ fn writeback_accepted(state: &SharedState, rounds: &[(String, ReverifyOutcome, O
             }
             row.updated_at = va.to_string();
             if let Err(e) = vault.store().upsert_entitlement(&dek, &row) {
-                tracing::error!("reverify: failed to persist active write-back for {plugin_id}: {e}");
+                tracing::error!(
+                    "reverify: failed to persist active write-back for {plugin_id}: {e}"
+                );
             }
         }
     }
@@ -461,7 +532,10 @@ fn cloud_client_from_session() -> Option<CloudClient> {
     let json = std::fs::read_to_string(&path).ok()?;
     let sess: serde_json::Value = serde_json::from_str(&json).ok()?;
     let cloud_url = sess.get("cloud_url").and_then(|v| v.as_str())?;
-    let session = sess.get("session").and_then(|v| v.as_str()).filter(|s| !s.is_empty())?;
+    let session = sess
+        .get("session")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
     Some(CloudClient::with_session(cloud_url, session))
 }
 
@@ -473,7 +547,9 @@ fn resolve_trust_mode(state: &SharedState) -> TrustMode {
     let Ok(data) = vault.store().get_meta(SETTINGS_META_KEY) else {
         return TrustMode::Warn;
     };
-    let Some(bytes) = data else { return TrustMode::Warn };
+    let Some(bytes) = data else {
+        return TrustMode::Warn;
+    };
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return TrustMode::Warn;
     };
@@ -500,6 +576,11 @@ struct ActivationOutcome {
         attune_core::cloud_client::DeviceActivateResult,
         attune_core::cloud_client::DeviceActivateError,
     >,
+    /// Best-effort pro plugin install driven by activation-code entitlements.
+    /// Unlike password/session login, this path has no cloud session cookie, so it
+    /// talks to PluginHub with the license key. Failure is surfaced in the report
+    /// but never rolls back Paid/gateway state.
+    plugin_sync: attune_core::plugin_sync::SyncReport,
 }
 
 /// POST /api/v1/member/activate-license — 授权码 (license_key) 激活全链。
@@ -528,12 +609,15 @@ pub async fn activate_license(
     if license_key.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "license_key required", "code": "license-key-required"})),
+            Json(
+                serde_json::json!({"error": "license_key required", "code": "license-key-required"}),
+            ),
         ));
     }
     // SECURITY: accounts URL 来自服务端 settings(不接受请求体覆盖)—— 见
     // resolve_accounts_url(SSRF / 付费墙绕过)。
     let cloud_url = resolve_accounts_url(&state);
+    let pluginhub_url = resolve_pluginhub_url(&state);
 
     // B4 约束:CloudClient = reqwest::blocking → spawn_blocking,async tail 留本线程。
     // 两次 cloud 调用(authorize + device bind)在**同一** blocking 线程里串行完成,
@@ -548,7 +632,13 @@ pub async fn activate_license(
             // 阶段二:绑定本机设备(授权已成功;绑定结果按分类错误带回,不在此抛)。
             let fp = attune_core::device_fingerprint::device_fingerprint();
             let device = client.device_activate(&key_for_blocking, &fp);
-            Ok(ActivationOutcome { activate, device })
+            let plugin_sync = sync_activation_plugins(
+                &pluginhub_url,
+                &key_for_blocking,
+                &activate.allowed_plugins,
+                Some(fp.fingerprint_sig.as_str()),
+            );
+            Ok(ActivationOutcome { activate, device, plugin_sync })
         },
     )
     .await
@@ -566,7 +656,11 @@ pub async fn activate_license(
         )
     })?;
 
-    let ActivationOutcome { activate: result, device } = outcome;
+    let ActivationOutcome {
+        activate: result,
+        device,
+        plugin_sync,
+    } = outcome;
 
     // ── 授权成功:配 gateway LLM + 落 entitlement + 置 Paid(与 login_password 同逻辑)──
     // best-effort:写失败不阻断激活(用户仍是 Paid,只是 chat 需手填 key,§4.5)。
@@ -604,6 +698,7 @@ pub async fn activate_license(
                 // per §11 R2; client relays, does not self-report).
                 "vertical": result.vertical,
                 "allowed_plugins": result.allowed_plugins,
+                "plugin_sync": sync_report_to_json(&plugin_sync),
                 "device": {
                     "device_id": dev.device_id,
                     "max_activations": dev.max_activations,
@@ -613,6 +708,113 @@ pub async fn activate_license(
         }
         Err(e) => Err(device_binding_error(&e)),
     }
+}
+
+fn sync_activation_plugins(
+    hub_url: &str,
+    license_key: &str,
+    allowed_plugins: &[String],
+    device_fp: Option<&str>,
+) -> attune_core::plugin_sync::SyncReport {
+    let hub = attune_core::plugin_hub::HttpPluginHubProvider::new(hub_url, license_key);
+    match attune_core::plugin_registry::PluginRegistry::default_plugins_dir() {
+        Ok(plugins_dir) => {
+            sync_activation_plugins_with_hub(&hub, allowed_plugins, device_fp, &plugins_dir)
+        }
+        Err(e) => {
+            activation_sync_failed_for_all(allowed_plugins, format!("plugins dir unavailable: {e}"))
+        }
+    }
+}
+
+fn activation_sync_failed_for_all(
+    allowed_plugins: &[String],
+    reason: String,
+) -> attune_core::plugin_sync::SyncReport {
+    attune_core::plugin_sync::SyncReport {
+        installed: Vec::new(),
+        skipped_already_installed: Vec::new(),
+        failed: allowed_plugins
+            .iter()
+            .map(|plugin_id| (plugin_id.clone(), reason.clone()))
+            .collect(),
+    }
+}
+
+fn sync_activation_plugins_with_hub(
+    hub: &dyn PluginHubProvider,
+    allowed_plugins: &[String],
+    device_fp: Option<&str>,
+    plugins_dir: &std::path::Path,
+) -> attune_core::plugin_sync::SyncReport {
+    let mut report = attune_core::plugin_sync::SyncReport {
+        installed: Vec::new(),
+        skipped_already_installed: Vec::new(),
+        failed: Vec::new(),
+    };
+    if allowed_plugins.is_empty() {
+        return report;
+    }
+
+    if let Err(e) = std::fs::create_dir_all(plugins_dir) {
+        return activation_sync_failed_for_all(
+            allowed_plugins,
+            format!("create plugins dir failed: {e}"),
+        );
+    }
+
+    for plugin_id in allowed_plugins {
+        let dst = plugins_dir.join(plugin_id);
+        if dst.is_dir() {
+            report.skipped_already_installed.push(plugin_id.clone());
+            continue;
+        }
+
+        let install = match hub.install_plugin(plugin_id, device_fp) {
+            Ok(resp) => resp,
+            Err(e) => {
+                report
+                    .failed
+                    .push((plugin_id.clone(), format!("hub install failed: {e}")));
+                continue;
+            }
+        };
+        let pkg = match hub.download_plugin(plugin_id, &install.version) {
+            Ok(pkg) => pkg,
+            Err(e) => {
+                report
+                    .failed
+                    .push((plugin_id.clone(), format!("hub download failed: {e}")));
+                continue;
+            }
+        };
+        if let Err(e) =
+            attune_core::plugin_sync::verify_plugin_package_sha256(&pkg, &install.sha256)
+        {
+            report.failed.push((
+                plugin_id.clone(),
+                format!("plugin package integrity check failed: {e}"),
+            ));
+            continue;
+        }
+        match attune_core::plugin_sync::install_official_plugin_package(
+            plugin_id,
+            &pkg,
+            plugins_dir,
+        ) {
+            Ok(path) => {
+                tracing::info!(
+                    "activate: installed plugin {plugin_id} → {}",
+                    path.display()
+                );
+                report.installed.push(plugin_id.clone());
+            }
+            Err(e) => report
+                .failed
+                .push((plugin_id.clone(), format!("plugin install failed: {e}"))),
+        }
+    }
+    report
 }
 
 /// 把设备绑定失败映射为 HTTP 响应(可操作提示)。授权已成功(gateway 已配),
@@ -653,7 +855,10 @@ fn device_binding_error(
 /// best-effort 把 cloud 颁发的 device binding(device_token + device_id + 配额)落 vault
 /// meta(`DEVICE_BINDING_META_KEY`)。后续 heartbeat / cert 签发读它。vault 锁短取,
 /// 不嵌套 fulltext/vectors(lock-ordering)。失败仅 warn,不阻断激活。
-fn store_device_binding(state: &SharedState, dev: &attune_core::cloud_client::DeviceActivateResult) {
+fn store_device_binding(
+    state: &SharedState,
+    dev: &attune_core::cloud_client::DeviceActivateResult,
+) {
     let payload = serde_json::json!({
         "device_token": dev.device_token,
         "device_id": dev.device_id,
@@ -712,12 +917,16 @@ fn wire_cloud_gateway(
                     gateway_written = true;
                 }
                 Ok(false) => {
-                    tracing::info!("member gateway: user has own LLM config — gateway not auto-applied");
+                    tracing::info!(
+                        "member gateway: user has own LLM config — gateway not auto-applied"
+                    );
                 }
                 Err(e) => tracing::warn!("member gateway: settings not written: {e}"),
             }
         }
-        _ => tracing::info!("member gateway: no gateway token for {who} — keeps current LLM settings"),
+        _ => tracing::info!(
+            "member gateway: no gateway token for {who} — keeps current LLM settings"
+        ),
     }
     // Reload in-memory LLM provider so chat works immediately, no server restart.
     // MUST run AFTER apply_gateway_to_vault_settings released its vault lock.
@@ -729,7 +938,11 @@ fn wire_cloud_gateway(
 /// best-effort 把激活授权的 `allowed_plugins` 落进 entitlement 缓存 + vault。
 /// 这是 pluginhub 安装授权 + 周期 re-verify 的本地基准。vault 锁短取,不嵌套
 /// fulltext/vectors(lock-ordering)。失败仅 warn,绝不阻断激活。
-fn store_activation_entitlements(state: &SharedState, license_id: &str, allowed_plugins: &[String]) {
+fn store_activation_entitlements(
+    state: &SharedState,
+    license_id: &str,
+    allowed_plugins: &[String],
+) {
     if allowed_plugins.is_empty() {
         return;
     }
@@ -787,9 +1000,7 @@ fn apply_gateway_to_vault_settings(
 ) -> Result<bool, String> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     // Parity with settings.rs: surface a clear "vault locked" error before touching meta.
-    let _ = vault
-        .dek_db()
-        .map_err(|e| format!("vault locked: {e}"))?;
+    let _ = vault.dek_db().map_err(|e| format!("vault locked: {e}"))?;
     let existing = vault
         .store()
         .get_meta(SETTINGS_META_KEY)
@@ -821,10 +1032,12 @@ fn apply_gateway_to_vault_settings(
 mod tests {
     use attune_core::cloud_client::CloudClient;
     use attune_core::entitlement::{EntStatus, EntitlementCache};
-    use attune_core::entitlement_reverify::{apply_refresh_rounds, ReverifyOutcome};
+    use attune_core::entitlement_reverify::{ReverifyOutcome, apply_refresh_rounds};
     use attune_core::llm_settings::{gateway_should_apply, merge_gateway_into_settings};
+    use attune_core::plugin_hub::{InstallResponse, PluginHubProvider, PluginListingResponse};
     use attune_core::store::plugin_entitlements::EntitlementRow;
     use chrono::{DateTime, Utc};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn ts(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
@@ -842,6 +1055,102 @@ mod tests {
             grace_started_at: None,
             updated_at: last_verified.into(),
         }
+    }
+
+    struct CountingHub {
+        install_calls: AtomicUsize,
+        download_calls: AtomicUsize,
+    }
+
+    impl CountingHub {
+        fn new() -> Self {
+            Self {
+                install_calls: AtomicUsize::new(0),
+                download_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl PluginHubProvider for CountingHub {
+        fn list_plugins(&self) -> attune_core::error::Result<PluginListingResponse> {
+            Ok(PluginListingResponse {
+                hub_version: "test".into(),
+                user_plan: "pro".into(),
+                upgrade_url: "https://accounts.engi-stack.com/upgrade".into(),
+                plugins: Vec::new(),
+            })
+        }
+
+        fn install_plugin(
+            &self,
+            plugin_id: &str,
+            _device_fp: Option<&str>,
+        ) -> attune_core::error::Result<InstallResponse> {
+            self.install_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(InstallResponse {
+                install_id: 1,
+                plugin_id: plugin_id.into(),
+                version: "1.0.0".into(),
+                sha256: "test".into(),
+                trial_started: None,
+                trial_expires: None,
+                download_url: format!("/api/v1/packages/{plugin_id}-1.0.0.tar.gz"),
+            })
+        }
+
+        fn download_plugin(
+            &self,
+            _plugin_id: &str,
+            _version: &str,
+        ) -> attune_core::error::Result<Vec<u8>> {
+            self.download_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(b"not-a-valid-plugin-tarball".to_vec())
+        }
+
+        fn name(&self) -> &str {
+            "counting-test"
+        }
+    }
+
+    #[test]
+    fn activation_allowed_plugins_drive_pluginhub_install_attempt() {
+        let hub = CountingHub::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let allowed = vec!["law-pro".to_string()];
+
+        let report =
+            super::sync_activation_plugins_with_hub(&hub, &allowed, Some("fp-test"), tmp.path());
+
+        assert_eq!(hub.install_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(hub.download_calls.load(Ordering::SeqCst), 1);
+        assert!(report.installed.is_empty());
+        assert!(report.skipped_already_installed.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, "law-pro");
+        assert!(
+            report.failed[0]
+                .1
+                .contains("package integrity check failed"),
+            "unexpected failure reason: {}",
+            report.failed[0].1
+        );
+    }
+
+    #[test]
+    fn activation_plugin_sync_skips_already_installed_plugin() {
+        let hub = CountingHub::new();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("law-pro")).unwrap();
+        let allowed = vec!["law-pro".to_string()];
+
+        let report =
+            super::sync_activation_plugins_with_hub(&hub, &allowed, Some("fp-test"), tmp.path());
+
+        assert_eq!(hub.install_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(hub.download_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(report.skipped_already_installed, vec!["law-pro"]);
+        assert!(report.installed.is_empty());
+        assert!(report.failed.is_empty());
     }
 
     // ── T8: refresh 200 → cache updated + {refreshed, statuses} ──────────────
@@ -900,15 +1209,15 @@ mod tests {
         let before = cache.snapshot();
 
         // Cloud unreachable: every plugin's round is a NetworkError.
-        let rounds = vec![(
-            "law-pro".to_string(),
-            ReverifyOutcome::NetworkError,
-            None,
-        )];
+        let rounds = vec![("law-pro".to_string(), ReverifyOutcome::NetworkError, None)];
         let summary = apply_refresh_rounds(&cache, &rounds, &now);
 
         // cache UNCHANGED — the load-bearing §7.2 error-5 invariant.
-        assert_eq!(cache.snapshot(), before, "network error must not mutate the cache");
+        assert_eq!(
+            cache.snapshot(),
+            before,
+            "network error must not mutate the cache"
+        );
         assert_eq!(summary.refreshed, 0);
         assert!(summary.all_network_error, "all-network-error → 502 branch");
 
@@ -937,7 +1246,10 @@ mod tests {
         })
         .await
         .expect("spawn_blocking join must succeed (no worker panic)");
-        assert!(result.is_err(), "login against an unreachable host must be Err, not panic/Ok");
+        assert!(
+            result.is_err(),
+            "login against an unreachable host must be Err, not panic/Ok"
+        );
     }
 
     // Guards the anti-pattern the fix removed: doing the same blocking call WITHOUT
@@ -959,14 +1271,23 @@ mod tests {
             None,
         );
         let llm = merged.get("llm").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
+        assert_eq!(
+            llm.get("provider").and_then(|v| v.as_str()),
+            Some("openai_compat")
+        );
         assert_eq!(
             llm.get("endpoint").and_then(|v| v.as_str()),
             Some("https://gateway.engi-stack.com/v1")
         );
-        assert_eq!(llm.get("api_key").and_then(|v| v.as_str()), Some("sk-newapi-abc"));
+        assert_eq!(
+            llm.get("api_key").and_then(|v| v.as_str()),
+            Some("sk-newapi-abc")
+        );
         // preexisting fields preserved
-        assert_eq!(llm.get("model").and_then(|v| v.as_str()), Some("qwen2.5:3b"));
+        assert_eq!(
+            llm.get("model").and_then(|v| v.as_str()),
+            Some("qwen2.5:3b")
+        );
     }
 
     /// Bug-1 regression (spec 2026-05-24): fresh vault paid 用户 login,gateway 写入
@@ -981,13 +1302,19 @@ mod tests {
             Some("deepseek-v4-flash"),
         );
         let llm = merged.get("llm").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
+        assert_eq!(
+            llm.get("provider").and_then(|v| v.as_str()),
+            Some("openai_compat")
+        );
         assert_eq!(
             llm.get("model").and_then(|v| v.as_str()),
             Some("deepseek-v4-flash"),
             "fresh vault paid 用户 login 应自动写入 cloud 下发的 default model"
         );
-        assert_eq!(llm.get("api_key").and_then(|v| v.as_str()), Some("sk-newapi-fresh"));
+        assert_eq!(
+            llm.get("api_key").and_then(|v| v.as_str()),
+            Some("sk-newapi-fresh")
+        );
     }
 
     // ── configure-if-unconfigured gating ────────────────────────────────────
@@ -1002,7 +1329,8 @@ mod tests {
     #[test]
     fn gateway_skipped_when_user_has_endpoint() {
         // User has configured a local Ollama endpoint — gateway must not overwrite.
-        let settings = serde_json::json!({"llm": {"api_key": "", "endpoint": "http://localhost:11434/v1"}});
+        let settings =
+            serde_json::json!({"llm": {"api_key": "", "endpoint": "http://localhost:11434/v1"}});
         assert!(!gateway_should_apply(&settings));
     }
 
@@ -1075,7 +1403,10 @@ mod tests {
         );
         // And it really is the full three-piece config (provider + endpoint + api_key + model).
         let llm = merged_login.get("llm").and_then(|v| v.as_object()).unwrap();
-        assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
+        assert_eq!(
+            llm.get("provider").and_then(|v| v.as_str()),
+            Some("openai_compat")
+        );
         assert_eq!(llm.get("endpoint").and_then(|v| v.as_str()), Some(url));
         assert_eq!(llm.get("api_key").and_then(|v| v.as_str()), Some(token));
         assert_eq!(llm.get("model").and_then(|v| v.as_str()), Some(model));
@@ -1122,9 +1453,10 @@ mod tests {
     #[test]
     fn login_response_vertical_none_for_old_cloud() {
         // old cloud → vertical absent → response carries null (UI shows no scene).
-        let user: UserInfo =
-            serde_json::from_value(serde_json::json!({"id": 1, "email": "f@x.com", "plan": "individual"}))
-                .unwrap();
+        let user: UserInfo = serde_json::from_value(
+            serde_json::json!({"id": 1, "email": "f@x.com", "plan": "individual"}),
+        )
+        .unwrap();
         let vertical = user.vertical.clone();
         assert!(vertical.is_none());
         let body = serde_json::json!({ "status": "ok", "vertical": vertical });
@@ -1233,7 +1565,10 @@ mod tests {
     }
     impl From<&LoginPasswordReq> for SerLoginShape {
         fn from(r: &LoginPasswordReq) -> Self {
-            Self { email: r.email.clone(), license_code: r.license_code.clone() }
+            Self {
+                email: r.email.clone(),
+                license_code: r.license_code.clone(),
+            }
         }
     }
 
@@ -1263,25 +1598,31 @@ mod tests {
     }
 
     // ── device binding (授权码激活 ① 设备绑定) ─────────────────────────────────
+    use crate::routes::member::{DEVICE_BINDING_META_KEY, device_binding_error};
     use attune_core::cloud_client::{DeviceActivateError, DeviceActivateResult};
-    use crate::routes::member::{device_binding_error, DEVICE_BINDING_META_KEY};
     use axum::http::StatusCode;
 
     /// 超设备数 → 409 max-devices-reached + 可操作 hint,且 status=activated-not-bound
     /// (会员已授权,本机未绑定 —— 明确 surface,不静默)。
     #[test]
     fn device_binding_max_devices_maps_to_409() {
-        let (status, body) = device_binding_error(&DeviceActivateError::MaxDevicesReached("c".into()));
+        let (status, body) =
+            device_binding_error(&DeviceActivateError::MaxDevicesReached("c".into()));
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body.0["code"], "max-devices-reached");
         assert_eq!(body.0["status"], "activated-not-bound");
-        assert!(body.0["hint"].as_str().unwrap().contains("设备上限"), "actionable hint present");
+        assert!(
+            body.0["hint"].as_str().unwrap().contains("设备上限"),
+            "actionable hint present"
+        );
     }
 
     /// 指纹/license 被拒 → 403 device-rejected。
     #[test]
     fn device_binding_rejected_maps_to_403() {
-        let (status, body) = device_binding_error(&DeviceActivateError::Rejected("fingerprint-mismatch".into()));
+        let (status, body) = device_binding_error(&DeviceActivateError::Rejected(
+            "fingerprint-mismatch".into(),
+        ));
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body.0["code"], "device-rejected");
         assert_eq!(body.0["status"], "activated-not-bound");
@@ -1290,7 +1631,8 @@ mod tests {
     /// cloud 不可达 → 502 device-activate-unavailable(fail-closed,不静默放行)。
     #[test]
     fn device_binding_unavailable_maps_to_502() {
-        let (status, body) = device_binding_error(&DeviceActivateError::Unavailable("transport".into()));
+        let (status, body) =
+            device_binding_error(&DeviceActivateError::Unavailable("transport".into()));
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body.0["code"], "device-activate-unavailable");
     }

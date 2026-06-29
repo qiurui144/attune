@@ -49,7 +49,7 @@ The Tauri desktop app also has a **built-in auto-updater** — once installed, n
 The v1.0→v1.2 line layers production-grade governance and cross-platform reach onto the GA core. Full notes in [`rust/RELEASE.md`](rust/RELEASE.md); the per-module × tech-stack map lives in [`rust/DEVELOP.md` → 能力矩阵 × 技术栈选型](rust/DEVELOP.md#能力矩阵--技术栈选型).
 
 - **Agent Control Plane (ACP, v1.1.0)** — central agent registry + typed handoffs, declarative DAG flow executor, per-`agent×model` failure telemetry, cost-aware scheduler, and a workspace-level quality gate (ratchet-only thresholds). Governs the whole agent ecosystem as one engineering org.
-- **Cross-platform agent distribution (WASM, v1.2.0)** — deterministic agents/skills compile to `wasm32-wasip1` and run via an embedded `wasmtime`; one `.attunepkg` with one `.wasm` runs on Windows / Linux / riscv64. The WASM-safe `attune-agent-sdk` leaf crate keeps the `Agent` trait free of native deps.
+- **Cross-platform agent distribution (WASM, v1.2.0)** — deterministic agents/skills compile to `wasm32-wasip1` and run via an embedded `wasmtime`; one signed `.tar.gz` plugin package with one `.wasm` runs on Windows / Linux / riscv64. The WASM-safe `attune-agent-sdk` leaf crate keeps the `Agent` trait free of native deps.
 - **GitConnector (v1.2.0)** — import a knowledge base directly from a Git repo (GitHub / GitLab / Gitea / Bitbucket / Codeberg / sr.ht over HTTPS): clone → glob filter → ingest → follow upstream commits. Local-only, zero-LLM import path, with SSRF protection.
 - **Privacy OutboundGate + `PrivacyTier::L0` "never leaves device"** — every network egress (LLM / Cloud / WebDAV / Web Search / Telemetry) is funneled through one gate that consults settings + PII redaction; L0-tagged content refuses any cloud LLM call.
 - **One-click dependency deploy** — Ollama readiness detection + in-app install/pull, base-model auto-ensure, and LM Studio endpoint auto-detect, so non-technical users never touch a terminal.
@@ -76,7 +76,7 @@ Validated Python features get promoted to the Rust line. See [`rust/README.md`](
 | Product | License | Form | User group |
 |---------|---------|------|------------|
 | **`attune`** (this repo) | Apache-2.0 | Tauri desktop / Chrome extension | **Personal generic users** — universal RAG, encrypted vault, browser capture, MCP outlet |
-| **`attune-pro`** (private) | Proprietary | Plugin packs (.attunepkg signed) loaded into `attune` | **Personal industry users** — law / presales / patent / tech / medical / academic vertical packs |
+| **`attune-pro`** (private) | Proprietary | Signed `.tar.gz` plugin packs loaded into `attune` | **Personal industry users** — law / presales / patent / tech / medical / academic vertical packs |
 | **`attune-enterprise`** (separate product) | Proprietary | Django + Vue B2B SaaS | **Law-firm small teams** — multi-tenant RBAC + case assignment + multi-user collaboration |
 
 **Equation:**
@@ -224,7 +224,7 @@ chat_trigger:
 
 **5. Open Settings → Skills tab.** Your skill appears with its keywords; toggle it on/off without touching YAML again.
 
-Distributing skills to others: zip the folder as `<plugin-id>.attunepkg` — recipients drop it into the same plugins folder. Pro skills (legal / sales / academic packs) ship through the same path; the only difference is they come pre-installed.
+Distributing skills to others: package the folder as `<plugin-id>-<version>.tar.gz` — recipients install it through PluginHub or extract it into the same plugins folder for local testing. Pro skills (legal / sales / academic packs) ship through the same package contract; the only difference is that official remote packages must be signed and integrity-checked.
 
 ---
 

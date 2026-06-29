@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright
 
 # cleanup-r15: 旧硬编码 /data/company/project/npu-webhook/extension 已失效（项目改名 attune）
 # 默认相对仓库根目录的 extension/，可用 ATTUNE_EXT_PATH 覆盖
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 EXT_PATH = os.environ.get("ATTUNE_EXT_PATH", str(_REPO_ROOT / "extension"))
 BACKEND_URL = "http://localhost:18900"
 

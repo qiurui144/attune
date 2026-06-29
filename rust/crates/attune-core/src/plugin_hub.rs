@@ -73,7 +73,7 @@ pub trait PluginHubProvider: Send + Sync {
     /// - device_fp: 与 license-key-design 同步的设备指纹
     fn install_plugin(&self, plugin_id: &str, device_fp: Option<&str>) -> Result<InstallResponse>;
 
-    /// 下载 .attunepkg 字节流
+    /// 下载 .tar.gz 字节流
     fn download_plugin(&self, plugin_id: &str, version: &str) -> Result<Vec<u8>>;
 
     /// hub 名（用于诊断）："real-hub" / "mock"
@@ -145,7 +145,10 @@ impl PluginHubProvider for MockPluginHubProvider {
             sha256: "mock-sha256".into(),
             trial_started: None,
             trial_expires: None,
-            download_url: format!("/api/v1/packages/{plugin_id}-{}.tar.gz", plugin.latest_version),
+            download_url: format!(
+                "/api/v1/packages/{plugin_id}-{}.tar.gz",
+                plugin.latest_version
+            ),
         })
     }
 
@@ -188,6 +191,18 @@ impl HttpPluginHubProvider {
 
     fn auth_header(&self) -> String {
         format!("Bearer {}", self.license_key)
+    }
+
+    fn validate_base_url(&self) -> Result<()> {
+        if std::env::var_os("ATTUNE_ALLOW_LOCAL_PLUGINHUB").is_some() {
+            return Ok(());
+        }
+        crate::net::url_guard::validate_open_outbound_url(
+            &self.base_url,
+            &crate::net::url_guard::system_resolve,
+        )
+        .map(|_| ())
+        .map_err(|e| VaultError::InvalidInput(format!("pluginhub-url-blocked: {e}")))
     }
 }
 
@@ -259,6 +274,7 @@ struct ServerInstallResp {
 
 impl PluginHubProvider for HttpPluginHubProvider {
     fn list_plugins(&self) -> Result<PluginListingResponse> {
+        self.validate_base_url()?;
         let resp: ServerIndexResponse = self
             .client
             .get(self.url("/api/v1/index.json"))
@@ -295,6 +311,7 @@ impl PluginHubProvider for HttpPluginHubProvider {
     }
 
     fn install_plugin(&self, plugin_id: &str, device_fp: Option<&str>) -> Result<InstallResponse> {
+        self.validate_base_url()?;
         let url = self.url(&format!("/api/v1/plugins/{plugin_id}/install"));
         let body = InstallReq { device_fp };
 
@@ -339,6 +356,7 @@ impl PluginHubProvider for HttpPluginHubProvider {
     }
 
     fn download_plugin(&self, plugin_id: &str, version: &str) -> Result<Vec<u8>> {
+        self.validate_base_url()?;
         let url = self.url(&format!("/api/v1/packages/{plugin_id}-{version}.tar.gz"));
         let bytes = self
             .client
@@ -428,9 +446,15 @@ mod tests {
     #[test]
     fn http_provider_url_join() {
         let h = HttpPluginHubProvider::new("https://hub.engi-stack.com/", "key");
-        assert_eq!(h.url("/api/v1/index.json"), "https://hub.engi-stack.com/api/v1/index.json");
+        assert_eq!(
+            h.url("/api/v1/index.json"),
+            "https://hub.engi-stack.com/api/v1/index.json"
+        );
         let h2 = HttpPluginHubProvider::new("https://hub.engi-stack.com", "key");
-        assert_eq!(h2.url("/api/v1/index.json"), "https://hub.engi-stack.com/api/v1/index.json");
+        assert_eq!(
+            h2.url("/api/v1/index.json"),
+            "https://hub.engi-stack.com/api/v1/index.json"
+        );
     }
 
     #[test]
@@ -443,5 +467,15 @@ mod tests {
     fn http_provider_name_distinguishes_from_mock() {
         let h = HttpPluginHubProvider::new("https://x", "k");
         assert_eq!(h.name(), "http-pluginhub");
+    }
+
+    #[test]
+    fn http_provider_rejects_local_pluginhub_url_by_default() {
+        let h = HttpPluginHubProvider::new("http://localhost:8080", "k");
+        let err = h.validate_base_url().unwrap_err();
+        assert!(
+            err.to_string().contains("pluginhub-url-blocked"),
+            "local pluginhub URL must be blocked before sending license key, got: {err}"
+        );
     }
 }

@@ -3,7 +3,7 @@
 //! 流程:
 //! 1. cloud_client::list_licenses() 拿用户所有 license + entitled_plugins
 //! 2. 比对本地已装 (plugin_registry::default_plugins_dir() 内目录列表)
-//! 3. 差异: 缺的 → 下载 .attunepkg + verify sig + 解密 + install
+//! 3. 差异: 缺的 → 下载 .tar.gz + verify sig + 解密 + install
 //!    多余的 → 留着 (用户手动卸载, 防误删自装插件)
 //!
 //! ## ACP-6 boundary invariant: plugin-shipped ⊥ user-accumulated
@@ -30,8 +30,9 @@
 use crate::cloud_client::{CloudClient, EntitledPlugin, License};
 use crate::crypto::Key32;
 use crate::error::{Result, VaultError};
-use crate::store::plugin_entitlements::EntitlementRow;
 use crate::store::Store;
+use crate::store::plugin_entitlements::EntitlementRow;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Optional vault sink for install-time entitlement snapshots (T7). Threaded as
@@ -47,7 +48,11 @@ pub type EntitlementSink<'a> = (&'a Store, &'a Key32);
 /// status is `active` at install (the entitlement was just granted — re-verify
 /// (T8) is the authority that can later flip it to suspended/revoked). No
 /// network, no DB, no lock — easy to unit-test.
-pub fn entitlement_row_for(ep: &EntitledPlugin, lic: &License, now_rfc3339: &str) -> EntitlementRow {
+pub fn entitlement_row_for(
+    ep: &EntitledPlugin,
+    lic: &License,
+    now_rfc3339: &str,
+) -> EntitlementRow {
     // Plan → tier mapping. "trial" plans seed a trial tier; everything else paid.
     let tier = if lic.plan.eq_ignore_ascii_case("trial") {
         "trial"
@@ -175,7 +180,10 @@ pub fn sync_plugins(cloud: &CloudClient) -> Result<SyncReport> {
 /// 只经 store API 写 vault DB,不在 `plugins/<id>/` 落授权态);已装但无 entitlement
 /// 行的插件做 **lazy backfill**(spec §10 grandfather,如已装 law-pro)。写失败静默
 /// (`let _ =`,不阻塞 install 主流程,per 项目信号约定)。
-pub fn sync_plugins_with_store(cloud: &CloudClient, sink: Option<EntitlementSink<'_>>) -> Result<SyncReport> {
+pub fn sync_plugins_with_store(
+    cloud: &CloudClient,
+    sink: Option<EntitlementSink<'_>>,
+) -> Result<SyncReport> {
     let licenses = cloud.list_licenses()?;
     let plugins_dir = crate::plugin_registry::PluginRegistry::default_plugins_dir()?;
     std::fs::create_dir_all(&plugins_dir).map_err(VaultError::Io)?;
@@ -195,7 +203,12 @@ pub fn sync_plugins_with_store(cloud: &CloudClient, sink: Option<EntitlementSink
                 // Lazy backfill: already installed but no entitlement row yet
                 // (e.g. pre-T4 law-pro) → write one now (§10 grandfather).
                 if let Some((store, dek)) = sink {
-                    if store.get_entitlement(dek, &ep.plugin_id).ok().flatten().is_none() {
+                    if store
+                        .get_entitlement(dek, &ep.plugin_id)
+                        .ok()
+                        .flatten()
+                        .is_none()
+                    {
                         let _ = persist_entitlement(store, dek, ep, lic, &now);
                     }
                 }
@@ -217,12 +230,20 @@ pub fn sync_plugins_with_store(cloud: &CloudClient, sink: Option<EntitlementSink
 
 /// Write a single entitlement snapshot row to the vault table (T7). Errors are
 /// the caller's to swallow (best-effort, never blocks install).
-fn persist_entitlement(store: &Store, dek: &Key32, ep: &EntitledPlugin, lic: &License, now_rfc3339: &str) -> Result<()> {
+fn persist_entitlement(
+    store: &Store,
+    dek: &Key32,
+    ep: &EntitledPlugin,
+    lic: &License,
+    now_rfc3339: &str,
+) -> Result<()> {
     let row = entitlement_row_for(ep, lic, now_rfc3339);
     store.upsert_entitlement(dek, &row)
 }
 
-fn list_installed_plugin_ids(plugins_dir: &std::path::Path) -> Result<std::collections::HashSet<String>> {
+fn list_installed_plugin_ids(
+    plugins_dir: &std::path::Path,
+) -> Result<std::collections::HashSet<String>> {
     let mut out = std::collections::HashSet::new();
     if !plugins_dir.exists() {
         return Ok(out);
@@ -246,13 +267,19 @@ fn list_installed_plugin_ids(plugins_dir: &std::path::Path) -> Result<std::colle
     Ok(out)
 }
 
-fn install_one_plugin(ep: &EntitledPlugin, license_key: &str, plugins_dir: &std::path::Path) -> Result<()> {
-    // 1. 下载 .attunepkg (PluginHub 要求 Bearer license_key 鉴权)
+fn install_one_plugin(
+    ep: &EntitledPlugin,
+    license_key: &str,
+    plugins_dir: &std::path::Path,
+) -> Result<()> {
+    // 1. 下载 .tar.gz (PluginHub 要求 Bearer license_key 鉴权)
     let tmp = tempfile::tempdir().map_err(VaultError::Io)?;
-    let pkg_path = tmp.path().join(format!("{}.attunepkg", ep.plugin_id));
+    let pkg_path = tmp.path().join(format!("{}.tar.gz", ep.plugin_id));
     download_to_file(&ep.download_url, license_key, &pkg_path)?;
+    let pkg_bytes = std::fs::read(&pkg_path).map_err(VaultError::Io)?;
+    verify_plugin_package_sha256(&pkg_bytes, &ep.sha256)?;
 
-    // 2. 解压到临时目录 (假定 .attunepkg 是 tar.gz)
+    // 2. 解压到临时目录
     let extract_dir = tmp.path().join("extracted");
     std::fs::create_dir_all(&extract_dir).map_err(VaultError::Io)?;
     extract_tarball(&pkg_path, &extract_dir)?;
@@ -324,7 +351,7 @@ fn guard_install_target(plugins_dir: &Path) -> Result<()> {
     assert_vault_db_outside_plugins_dir(plugins_dir, &vault_db)
 }
 
-/// 从 `.attunepkg` 字节流安装一个插件到 plugins 目录 —— marketplace 下载安装路径用。
+/// 从 `.tar.gz` 字节流安装一个插件到 plugins 目录 —— marketplace 下载安装路径用。
 ///
 /// 与 `sync_plugins` 的 entitlement 路径不同：marketplace 不下发 Ed25519 pubkey，
 /// 故以"解压后能被 plugin_loader 以 Trusted source 装载"作为包结构合法性判据。
@@ -333,6 +360,54 @@ pub fn install_plugin_package(
     plugin_id: &str,
     pkg_bytes: &[u8],
     plugins_dir: &std::path::Path,
+) -> Result<PathBuf> {
+    install_plugin_package_inner(plugin_id, pkg_bytes, plugins_dir, false)
+}
+
+/// Install a remotely downloaded official plugin package.
+///
+/// This is the PluginHub/marketplace install surface. Unlike local/community
+/// plugin loading, a remote package is executable plugin code fetched with a
+/// member license token, so it must be signed by one of the compile-time official
+/// anchors. Do not use this for user-authored local plugin folders.
+pub fn install_official_plugin_package(
+    plugin_id: &str,
+    pkg_bytes: &[u8],
+    plugins_dir: &std::path::Path,
+) -> Result<PathBuf> {
+    install_plugin_package_inner(plugin_id, pkg_bytes, plugins_dir, true)
+}
+
+/// Verify a PluginHub package body against the server-declared SHA-256 digest.
+///
+/// Empty digests are tolerated for legacy/community hubs, but any non-empty
+/// digest must be a 64-character hex SHA-256 and must match the downloaded
+/// package before install is attempted.
+pub fn verify_plugin_package_sha256(pkg_bytes: &[u8], expected_sha256: &str) -> Result<()> {
+    let expected = expected_sha256.trim().to_ascii_lowercase();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(VaultError::InvalidInput(
+            "plugin package sha256 must be a 64-character hex digest".into(),
+        ));
+    }
+
+    let actual = hex::encode(Sha256::digest(pkg_bytes));
+    if actual != expected {
+        return Err(VaultError::Crypto(format!(
+            "plugin package sha256 mismatch: expected {expected}, got {actual}"
+        )));
+    }
+    Ok(())
+}
+
+fn install_plugin_package_inner(
+    plugin_id: &str,
+    pkg_bytes: &[u8],
+    plugins_dir: &std::path::Path,
+    require_official_signature: bool,
 ) -> Result<PathBuf> {
     // plugin_id 直接落成目录名 —— 白名单校验，杜绝路径穿越 / NUL / 异常字符
     if plugin_id.is_empty()
@@ -347,7 +422,7 @@ pub fn install_plugin_package(
     }
 
     let tmp = tempfile::tempdir().map_err(VaultError::Io)?;
-    let pkg_path = tmp.path().join(format!("{plugin_id}.attunepkg"));
+    let pkg_path = tmp.path().join(format!("{plugin_id}.tar.gz"));
     std::fs::write(&pkg_path, pkg_bytes).map_err(VaultError::Io)?;
 
     let extract_dir = tmp.path().join("extracted");
@@ -367,6 +442,20 @@ pub fn install_plugin_package(
             "package plugin id '{}' mismatches expected '{plugin_id}'",
             loaded.manifest.id
         )));
+    }
+    if require_official_signature {
+        match crate::plugin_sig::verify_with_whitelist(
+            &plugin_src,
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+            &[],
+        )? {
+            crate::plugin_sig::SigOutcome::Official => {}
+            other => {
+                return Err(VaultError::InvalidInput(format!(
+                    "remote plugin package must be signed by an official pinned key; got {other:?}"
+                )));
+            }
+        }
     }
 
     // ACP-6 boundary: never let a plugin-dir wipe touch the vault DB.
@@ -391,6 +480,10 @@ pub fn install_plugin_package(
 }
 
 fn download_to_file(url: &str, license_key: &str, dest: &std::path::Path) -> Result<()> {
+    if std::env::var_os("ATTUNE_ALLOW_LOCAL_PLUGINHUB").is_none() {
+        crate::net::url_guard::validate_open_outbound_url(url, &crate::net::url_guard::system_resolve)
+            .map_err(|e| VaultError::InvalidInput(format!("plugin download url blocked: {e}")))?;
+    }
     // PluginHub requires Bearer authorization; reqwest::blocking::get() is a bare fn with
     // no header support, so we build a one-shot Client here.
     let client = reqwest::blocking::Client::builder()
@@ -399,7 +492,10 @@ fn download_to_file(url: &str, license_key: &str, dest: &std::path::Path) -> Res
         .map_err(|e| VaultError::Io(std::io::Error::other(format!("build client: {e}"))))?;
     let resp = client
         .get(url)
-        .header(reqwest::header::AUTHORIZATION, format!("Bearer {license_key}"))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {license_key}"),
+        )
         .send()
         .map_err(|e| VaultError::Io(std::io::Error::other(format!("download: {e}"))))?;
     if !resp.status().is_success() {
@@ -445,7 +541,8 @@ fn extract_tarball(pkg: &std::path::Path, dest: &std::path::Path) -> Result<()> 
         .map_err(VaultError::Io)?;
     if !status.success() {
         return Err(VaultError::Io(std::io::Error::other(format!(
-            "tar exit {:?}", status.code()
+            "tar exit {:?}",
+            status.code()
         ))));
     }
     Ok(())
@@ -467,7 +564,7 @@ fn locate_plugin_dir(extract_dir: &std::path::Path) -> Result<PathBuf> {
         }
     }
     Err(VaultError::InvalidInput(
-        "no plugin.yaml found in extracted .attunepkg".into(),
+        "no plugin.yaml found in extracted plugin tarball".into(),
     ))
 }
 
@@ -487,10 +584,8 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
                 use std::os::unix::fs::PermissionsExt;
                 if let Ok(meta) = std::fs::metadata(&path) {
                     let mode = meta.permissions().mode();
-                    let _ = std::fs::set_permissions(
-                        &target,
-                        std::fs::Permissions::from_mode(mode),
-                    );
+                    let _ =
+                        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode));
                 }
             }
         }
@@ -512,7 +607,8 @@ mod tests {
 
     #[test]
     fn list_installed_nonexistent_dir_returns_empty() {
-        let ids = list_installed_plugin_ids(std::path::Path::new("/nonexistent-xyz")).expect("list");
+        let ids =
+            list_installed_plugin_ids(std::path::Path::new("/nonexistent-xyz")).expect("list");
         assert!(ids.is_empty());
     }
 
@@ -592,6 +688,39 @@ mod tests {
         let dst = install_plugin_package("demo-plugin", &bytes, &plugins_dir).expect("install");
         assert_eq!(dst, plugins_dir.join("demo-plugin"));
         assert!(dst.join("plugin.yaml").exists());
+    }
+
+    #[test]
+    fn verify_plugin_package_sha256_accepts_empty_and_matching_digest() {
+        verify_plugin_package_sha256(b"package", "").expect("legacy empty digest allowed");
+        let digest = hex::encode(Sha256::digest(b"package"));
+        verify_plugin_package_sha256(b"package", &digest).expect("matching digest accepted");
+    }
+
+    #[test]
+    fn verify_plugin_package_sha256_rejects_invalid_or_mismatched_digest() {
+        let invalid = verify_plugin_package_sha256(b"package", "mock-sha256").unwrap_err();
+        assert!(format!("{invalid}").contains("64-character hex"));
+
+        let other = hex::encode(Sha256::digest(b"other"));
+        let mismatched = verify_plugin_package_sha256(b"package", &other).unwrap_err();
+        assert!(format!("{mismatched}").contains("sha256 mismatch"));
+    }
+
+    #[test]
+    fn install_official_plugin_package_rejects_unsigned_remote_package() {
+        let tmp = TempDir::new().expect("tmp");
+        let bytes = make_pkg(tmp.path(), "demo-plugin", "demo-plugin");
+        let plugins_dir = tmp.path().join("plugins");
+        let err = install_official_plugin_package("demo-plugin", &bytes, &plugins_dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("official pinned key"),
+            "remote packages must fail closed unless officially signed, got: {err}"
+        );
+        assert!(
+            !plugins_dir.join("demo-plugin").exists(),
+            "rejected remote package must not land on disk"
+        );
     }
 
     #[test]
@@ -732,7 +861,12 @@ mod tests {
             "plugin upgrade must NOT drop user-accumulated agent_state"
         );
         let row = store
-            .get_agent_state(&dek, "defamation_extractor", "law-pro", AgentStateKind::SkillExpansion)
+            .get_agent_state(
+                &dek,
+                "defamation_extractor",
+                "law-pro",
+                AgentStateKind::SkillExpansion,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(row.payload, b"user-learned-terms");
@@ -776,7 +910,8 @@ mod tests {
         EntitledPlugin {
             plugin_id: "law-pro".into(),
             version: "1.0.5".into(),
-            download_url: "https://hub.engi-stack.com/p/law-pro-1.0.5.attunepkg".into(),
+            download_url: "https://hub.engi-stack.com/api/v1/packages/law-pro-1.0.5.tar.gz".into(),
+            sha256: String::new(),
             signing_pubkey_hex: signing_pubkey_hex.into(),
             decrypt_key: None,
         }
@@ -801,7 +936,10 @@ mod tests {
         let err = verify_plugin_anchor(&ep).unwrap_err();
         match err {
             VaultError::AnchorNotPinned(key) => {
-                assert_eq!(key, attacker, "error must carry the off-allowlist key for telemetry");
+                assert_eq!(
+                    key, attacker,
+                    "error must carry the off-allowlist key for telemetry"
+                );
             }
             other => panic!("expected AnchorNotPinned, got {other:?}"),
         }
@@ -831,9 +969,8 @@ mod tests {
         // verify_with_key. We assert the gate alone rejects an off-allowlist key
         // (so a forged package signed by an attacker key never reaches sig verify,
         // which would otherwise "succeed" against the attacker's own key).
-        let attacker_signed = ep_with_pubkey(
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        );
+        let attacker_signed =
+            ep_with_pubkey("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         assert!(
             verify_plugin_anchor(&attacker_signed).is_err(),
             "trust-root gate must reject before any signature math against the attacker key"
@@ -866,7 +1003,10 @@ mod tests {
         assert_eq!(row.tier, "paid");
         assert_eq!(row.status, "active");
         assert_eq!(row.license_id, "7");
-        assert_eq!(row.signing_pubkey_hex, crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        assert_eq!(
+            row.signing_pubkey_hex,
+            crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]
+        );
     }
 
     #[test]
@@ -883,7 +1023,10 @@ mod tests {
         let mut lic = make_license("pro", vec![ep.clone()]);
         lic.revoked_at = Some("2026-06-10T00:00:00+00:00".into());
         let row = entitlement_row_for(&ep, &lic, "2026-06-12T00:00:00+00:00");
-        assert_eq!(row.status, "revoked", "revoked license → fail-closed status at install");
+        assert_eq!(
+            row.status, "revoked",
+            "revoked license → fail-closed status at install"
+        );
     }
 
     #[test]
@@ -900,7 +1043,10 @@ mod tests {
         let got = store.get_entitlement(&dek, "law-pro").unwrap().unwrap();
         assert_eq!(got.tier, "paid");
         assert_eq!(got.status, "active");
-        assert_eq!(got.signing_pubkey_hex, crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        assert_eq!(
+            got.signing_pubkey_hex,
+            crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]
+        );
     }
 
     #[test]
@@ -953,9 +1099,17 @@ mod tests {
         let lic = make_license("pro", vec![ep.clone()]);
         // No row yet → backfill condition true.
         assert!(store.get_entitlement(&dek, "law-pro").unwrap().is_none());
-        if store.get_entitlement(&dek, "law-pro").ok().flatten().is_none() {
+        if store
+            .get_entitlement(&dek, "law-pro")
+            .ok()
+            .flatten()
+            .is_none()
+        {
             persist_entitlement(&store, &dek, &ep, &lic, "2026-06-12T00:00:00+00:00").unwrap();
         }
-        assert!(store.get_entitlement(&dek, "law-pro").unwrap().is_some(), "lazy backfill landed the row");
+        assert!(
+            store.get_entitlement(&dek, "law-pro").unwrap().is_some(),
+            "lazy backfill landed the row"
+        );
     }
 }

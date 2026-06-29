@@ -17,7 +17,7 @@
 //! ```
 //!
 //! 启动时 `PluginRegistry::scan(plugins_root)` 扫所有子目录加载。
-//! 商业插件包 (`.attunepkg`) 解压到 `~/.local/share/attune/plugins/<plugin_id>/`。
+//! 商业插件包 (`.tar.gz`) 解压到 `~/.local/share/attune/plugins/<plugin_id>/`。
 
 use crate::error::{Result, VaultError};
 use crate::plugin_loader::{LoadedPlugin, PiiPatternSpec};

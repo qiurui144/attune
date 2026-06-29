@@ -541,6 +541,10 @@ pub struct EntitledPlugin {
     pub version: String,
     /// pluginhub 下载 URL (含签名 token)
     pub download_url: String,
+    /// PluginHub package SHA-256 hex digest. Empty means legacy cloud/hub did
+    /// not provide package integrity metadata.
+    #[serde(default)]
+    pub sha256: String,
     /// 公钥 hex (用于客户端 verify_with_key 校验 plugin.sig)
     pub signing_pubkey_hex: String,
     /// 加密 key (paid plugin 用; free 可空)
@@ -750,12 +754,14 @@ mod tests {
         let json = r#"{
             "plugin_id": "law-pro",
             "version": "0.2.0",
-            "download_url": "https://hub.engi-stack.com/plugins/law-pro-0.2.0.attunepkg?token=abc",
+            "download_url": "https://hub.engi-stack.com/api/v1/packages/law-pro-0.2.0.tar.gz?token=abc",
+            "sha256": "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
             "signing_pubkey_hex": "12fe0471d5a37735428704baa5ea7a55a937fcc490cddf5e325ef4a303e6affc",
             "decrypt_key": "device-license-token"
         }"#;
         let p: EntitledPlugin = serde_json::from_str(json).unwrap();
         assert_eq!(p.plugin_id, "law-pro");
+        assert_eq!(p.sha256.len(), 64);
         assert_eq!(p.signing_pubkey_hex.len(), 64);
     }
 
@@ -788,7 +794,8 @@ mod tests {
                 {
                     "plugin_id": "law-pro",
                     "version": "0.2.0",
-                    "download_url": "https://hub.engi-stack.com/plugins/law-pro-0.2.0.attunepkg",
+                    "download_url": "https://hub.engi-stack.com/api/v1/packages/law-pro-0.2.0.tar.gz",
+                    "sha256": "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
                     "signing_pubkey_hex": "12fe0471d5a37735428704baa5ea7a55a937fcc490cddf5e325ef4a303e6affc",
                     "decrypt_key": "device-token"
                 }
@@ -798,6 +805,7 @@ mod tests {
         assert_eq!(lic.id, 7);
         assert_eq!(lic.entitled_plugins.len(), 1);
         assert_eq!(lic.entitled_plugins[0].plugin_id, "law-pro");
+        assert_eq!(lic.entitled_plugins[0].sha256.len(), 64);
     }
 
     #[test]
@@ -1015,11 +1023,12 @@ mod tests {
         let json = r#"{
             "plugin_id": "free-skill",
             "version": "1.0.0",
-            "download_url": "https://x.com/x.attunepkg",
+            "download_url": "https://x.com/x.tar.gz",
             "signing_pubkey_hex": "deadbeef"
         }"#;
         let p: EntitledPlugin = serde_json::from_str(json).unwrap();
         assert!(p.decrypt_key.is_none());
+        assert!(p.sha256.is_empty());
     }
 
     // UserInfo: plan_expires + is_admin defaults

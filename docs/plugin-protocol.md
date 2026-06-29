@@ -171,7 +171,7 @@ pub struct AgentOutput {
 | free (OSS / 社区) | ❌ 明文 (审计透明) |
 | paid / trial (attune-pro 等) | ✅ Argon2id + AES-256-GCM (复用 vault 加密体系) |
 
-加密形式: `<plugin>.attunepkg` 含 `plugin.yaml.enc`, 装载时由 plugin_loader 解密.
+加密形式: `<plugin>-<version>.tar.gz` 含 `plugin.yaml.enc`, 装载时由 plugin_loader 解密.
 
 ### Schema yaml
 
@@ -298,7 +298,7 @@ mcp.start_heartbeat(Duration::from_secs(30), 3);
 | 模块 | 现状 | 缺口 |
 |------|------|------|
 | `plugin_loader.rs` PluginManifest | 有 capabilities + workflows | 加 pricing / resources / registers_case_kinds / skills / agents / mcp_servers / ui_components |
-| | 无加密 | 加 .attunepkg 解密 (Argon2id+AES-GCM) |
+| | 无加密 | 加密 tar.gz 内的 `plugin.yaml.enc` 解密 (Argon2id+AES-GCM) |
 | | trust 验签 | 联动 pricing.tier (paid 必须 Trusted/Official) |
 | `plugin_registry.rs` | match_chat_trigger ✅ (已实装) | 升级支持 per-agent chat_trigger / 加 agents_by_case_kind / list_skills / list_mcp_servers / all_registered_case_kinds |
 | `capability_dispatch.rs` | subprocess ✅ (已实装) | 复用 |
@@ -449,7 +449,7 @@ async fn boot_device_check() -> Result<DeviceLicense> {
 - Plugin 安装 / 升级 / 卸载工具链 (单独 spec)
 - Plugin Hub 商店 / 评分 (M3+)
 - Plugin 国际化 i18n (M4+)
-- 跨平台分发包 .attunepkg binary layout 详细 (单独 spec)
+- 跨平台分发包 `.tar.gz` binary layout 详细 (单独 spec)
 - accounts 服务 SaaS 部署细节 (attune-cloud 仓)
 
 ---
