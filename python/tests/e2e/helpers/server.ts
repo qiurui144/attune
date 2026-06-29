@@ -37,7 +37,7 @@ export async function spawnAttuneServer(opts: SpawnOptions = {}): Promise<Server
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attune-e2e-'));
 
   const binary =
-    opts.binary ?? path.resolve(__dirname, '../../../rust/target/release/attune-server-headless');
+    opts.binary ?? path.resolve(__dirname, '../../../../rust/target/release/attune-server-headless');
 
   if (!fs.existsSync(binary)) {
     throw new Error(

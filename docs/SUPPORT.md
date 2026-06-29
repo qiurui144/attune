@@ -75,7 +75,6 @@ attune 的支持响应分级。OSS 主线 best-effort，Attune Pro 会员有更�
 | GitHub Issues | P1 / P2 bug 上报 | https://github.com/qiurui144/attune-core/issues |
 | GitHub Discussions | P3 feature / 使用问题 / 讨论 | https://github.com/qiurui144/attune-core/discussions |
 | Email（私下） | P0 安全漏洞 / 数据安全 issue | happyqiuqiu9604@gmail.com |
-| Discord（占位） | 实时讨论（待开启） | TBD |
 
 ## 上报模板
 

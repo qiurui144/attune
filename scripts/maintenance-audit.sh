@@ -129,6 +129,7 @@ require_grep 'python/tests/e2e && npm ci && npx playwright test' "scripts/test-p
 require_no_grep_many 'releases/download/v1\.0\.0|desktop-v1\.0\.0|attune-server:v1\.0\.0|attune-desktop-installers:1\.0\.0' \
   "active install docs do not point users to v1.0.0 artifacts" \
   docs/DEPLOY.md docs/INSTALL.md docs/wiki/index.md docs/wiki/quickstart.md packaging
+require_no_grep 'Discord|TBD|占位' "docs/SUPPORT.md" "support channels list only live contact paths"
 
 printf '\nMaintenance audit summary: %s passed, %s failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -ne 0 ]; then

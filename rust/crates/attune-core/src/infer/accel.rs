@@ -1111,15 +1111,19 @@ mod tests {
             os: "windows",
             hardware: vec![AccelKind::IntelIgpu, AccelKind::IntelNpu],
             compiled: vec![
-                EpChoice::DirectMl,
+                EpChoice::OpenVino(OpenVinoDevice::Gpu),
                 EpChoice::OpenVino(OpenVinoDevice::Npu),
                 EpChoice::Cpu,
             ],
             env_override: None,
         };
-        // AC：iGPU 优先 → DirectML 链首。
+        // AC：iGPU 优先 → OpenVINO(GPU) 链首(Intel DirectML OCR/embedding/rerank 不作为自动首选)。
         let ac = sel.recommend_ep_chain_for_power(InferTask::Generic, &PowerState::default());
-        assert_eq!(ac[0], EpChoice::DirectMl, "AC 性能档:GPU 链首");
+        assert_eq!(
+            ac[0],
+            EpChoice::OpenVino(OpenVinoDevice::Gpu),
+            "AC 性能档:Intel OpenVINO GPU 链首"
+        );
         // 电池：NPU 重排到首 → OpenVINO(NPU) 链首(能效路径)。
         let bat = sel.recommend_ep_chain_for_power(InferTask::Generic, &battery_state());
         assert_eq!(
