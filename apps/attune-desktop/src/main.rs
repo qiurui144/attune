@@ -5,6 +5,7 @@ mod tray;
 mod update_feed;
 
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 /// Auto-updater 状态机:UI 通过监听 `attune-update-status` 事件获得这些状态.
 /// 维持纯字符串(不引入额外 serde 类型),前端 JS 直接 switch.
@@ -97,6 +98,7 @@ fn restart_for_update(app: AppHandle) {
 async fn upload_dropped_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
     let client = reqwest::Client::new();
     let token = std::env::var("ATTUNE_DEV_TOKEN").unwrap_or_default();
+    let upload_url = format!("{}/api/v1/upload", embedded_server::server_url());
     let mut results = Vec::new();
     for path_str in paths {
         let path = std::path::Path::new(&path_str);
@@ -120,9 +122,7 @@ async fn upload_dropped_paths(paths: Vec<String>) -> Result<Vec<String>, String>
             .mime_str("application/octet-stream")
             .map_err(|e| e.to_string())?;
         let form = reqwest::multipart::Form::new().part("file", part);
-        let mut req = client
-            .post("http://127.0.0.1:18900/api/v1/upload")
-            .multipart(form);
+        let mut req = client.post(&upload_url).multipart(form);
         if !token.is_empty() {
             req = req.bearer_auth(&token);
         }
@@ -141,6 +141,71 @@ async fn upload_dropped_paths(paths: Vec<String>) -> Result<Vec<String>, String>
     Ok(results)
 }
 
+fn app_log_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("ATTUNE_LOG_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    #[cfg(windows)]
+    {
+        if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+            return std::path::PathBuf::from(base).join("attune").join("logs");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("attune")
+                .join("logs");
+        }
+    }
+    std::path::PathBuf::from("logs")
+}
+
+fn append_startup_line(log_dir: &std::path::Path, line: &str) {
+    let _ = std::fs::create_dir_all(log_dir);
+    let path = log_dir.join("attune-desktop-startup.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{:?} {line}", std::time::SystemTime::now());
+    }
+}
+
+fn init_observability() -> std::path::PathBuf {
+    let log_dir = app_log_dir();
+    let _ = std::fs::create_dir_all(&log_dir);
+    append_startup_line(&log_dir, "process entry");
+
+    let panic_log_dir = log_dir.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        append_startup_line(&panic_log_dir, &format!("panic: {info}"));
+        eprintln!("attune-desktop panic: {info}");
+    }));
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "attune-desktop");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    Box::leak(Box::new(guard));
+
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("info".parse().expect("'info' is a valid log directive"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stderr.and(non_blocking))
+        .try_init();
+
+    tracing::info!(
+        "attune-desktop observability initialized; log_dir={}",
+        log_dir.display()
+    );
+    log_dir
+}
+
 fn main() {
     // webkit2gtk 2.42+ 默认启用 DMABUF/GBM EGL 渲染器,在 NVIDIA 私有驱动(及部分虚拟
     // 显示)上初始化 GBM EGL 失败 → "Could not create GBM EGL display:
@@ -151,12 +216,7 @@ fn main() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("info".parse().expect("'info' is a valid log directive")),
-        )
-        .init();
+    let log_dir = init_observability();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -176,6 +236,11 @@ fn main() {
             restart_for_update
         ])
         .setup(|app| {
+            tracing::info!(
+                "attune-desktop setup: server_url={} log_dir={}",
+                embedded_server::server_url(),
+                log_dir.display()
+            );
             // 1. spawn 内嵌 axum
             let _server_handle = embedded_server::spawn_server();
 
@@ -189,7 +254,9 @@ fn main() {
                         if let Err(e) = WebviewWindowBuilder::new(
                             &app_handle,
                             "main",
-                            WebviewUrl::External(url.parse().expect("embedded server URL is well-formed")),
+                            WebviewUrl::External(
+                                url.parse().expect("embedded server URL is well-formed"),
+                            ),
                         )
                         .title("Attune")
                         .inner_size(1280.0, 800.0)
@@ -210,19 +277,17 @@ fn main() {
                                     api.prevent_close();
                                     let _ = win_clone.hide();
                                 }
-                                tauri::WindowEvent::DragDrop(
-                                    tauri::DragDropEvent::Drop { paths, .. },
-                                ) => {
+                                tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop {
+                                    paths,
+                                    ..
+                                }) => {
                                     let payload: Vec<String> = paths
                                         .iter()
                                         .map(|p| p.to_string_lossy().into_owned())
                                         .collect();
-                                    if let Err(e) =
-                                        app_for_drop.emit("attune-file-drop", &payload)
+                                    if let Err(e) = app_for_drop.emit("attune-file-drop", &payload)
                                     {
-                                        tracing::warn!(
-                                            "failed to emit attune-file-drop: {e}"
-                                        );
+                                        tracing::warn!("failed to emit attune-file-drop: {e}");
                                     }
                                 }
                                 _ => {}
@@ -277,6 +342,10 @@ fn main() {
                     }
                     Err(e) => {
                         tracing::error!("embedded server failed to start: {e}");
+                        append_startup_line(
+                            &log_dir,
+                            &format!("embedded server failed to start: {e}"),
+                        );
                         std::process::exit(1);
                     }
                 }

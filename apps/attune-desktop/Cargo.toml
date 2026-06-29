@@ -24,6 +24,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # default-features=false + desktop default 显式回填 3 个默认 → 默认包行为零变化;
 # openvino 变体 --no-default-features 时去掉 ort-bundled,改 ort-dynamic(见下)。

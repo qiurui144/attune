@@ -1,5 +1,5 @@
 param(
-  [string]$Base = "http://127.0.0.1:28630",
+  [string]$Base = "http://127.0.0.1:18900",
   [string]$Docs = "C:\attune-e2e\kb-longloop-docs",
   [string]$ReportGlob = "C:\attune-e2e\full-user-e2e-*.json",
   [int]$Loops = 10,

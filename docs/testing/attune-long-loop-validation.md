@@ -87,7 +87,9 @@ Intel Windows host result on 2026-06-29:
   - `models/Xenova_bge-m3`
   - `models/ep-stacks`
   - `lib/windows`
-- Health endpoint was unreachable at `http://127.0.0.1:28630/api/v1/status/health`.
+- Health endpoint was unreachable at `http://127.0.0.1:28630/api/v1/status/health`
+  during the old E2E run. The canonical desktop/headless port is `18900`; the
+  long-loop script now defaults to `http://127.0.0.1:18900`.
 - `attune-desktop.exe`/`attune-server` were not running after SSH-side start.
 - Application log file existed but was empty: `%LOCALAPPDATA%\Attune\logs\attune-server.2026-06-29`.
 - Windows Event Log recorded `attune-desktop.exe 1.5.0.0` with
@@ -98,6 +100,17 @@ Intel Windows host result on 2026-06-29:
 E2E blocker: the current Windows package can deploy files/models, but the desktop
 service did not stay up, so knowledge import/search and Pro login validation
 cannot proceed from the GitHub exe until package startup is fixed.
+
+Startup observability fix for the next package:
+
+- Desktop and embedded server logs share a file sink under the app data log
+  directory, with daily files named `attune-desktop.YYYY-MM-DD`.
+- Early process entry, readiness failure, and panic messages are also appended
+  to `attune-desktop-startup.log`.
+- The desktop server port is canonical `18900` by default and can be overridden
+  with `ATTUNE_DESKTOP_PORT` for isolated E2E runs.
+- The drag-and-drop upload command, readiness probe, and long-loop script all use
+  the same resolved server URL instead of hard-coded divergent ports.
 
 ## UI Entry Audit
 
