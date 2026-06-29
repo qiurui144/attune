@@ -538,11 +538,6 @@ fn detect_linux_render_gpu_vendors() -> (bool, bool, Option<String>) {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn detect_linux_render_gpu_vendors() -> (bool, bool, Option<String>) {
-    (false, false, None)
-}
-
-#[cfg(not(target_os = "linux"))]
 fn detect_amd_gfx_target() -> Option<String> { None }
 
 /// macOS sysctl 辅助：读取 u64 类型的系统参数（hw.memsize 等）
