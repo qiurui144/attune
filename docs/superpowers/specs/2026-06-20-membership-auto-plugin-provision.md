@@ -95,7 +95,7 @@ pro 用户，无论其真实场景。本 spec 的核心增量 = **给会员账�
 ┌──────────────────────────────────────────────┐                          │
 │ install_one_plugin(ep):                       │   ④ GET download_url     │
 │  ④ download_to_file(ep.download_url, Bearer ──┼─────────────────────────►│ pluginhub
-│     license_key)            → .attunepkg      │      (付费门 Bearer)      │ /api/v1/packages
+│     license_key)            → signed .tar.gz plugin package      │      (付费门 Bearer)      │ /api/v1/packages
 │  ⑤ verify_plugin_anchor(ep)  ← W1 allowlist   │ ◄────────────────────────┤   /{id}-{v}.tar.gz
 │     (signing_pubkey_hex ∈ OFFICIAL_ANCHORS?)  │      tar.gz bytes         └──────────────┘
 │     miss → AnchorNotPinned (fail-closed)      │

@@ -32,7 +32,7 @@ For the OSS × attune-pro feature boundary, see [`docs/oss-pro-strategy.md`](../
 The capability sections below describe the GA core. The v1.0→v1.2 line adds production-grade governance and cross-platform reach on top — full notes in [`RELEASE.md`](RELEASE.md), and the per-capability × module × tech-stack map in [`DEVELOP.md` → 能力矩阵 × 技术栈选型](DEVELOP.md#能力矩阵--技术栈选型):
 
 - **Agent Control Plane (ACP, v1.1.0)** — central agent registry + typed handoffs, declarative DAG flow executor, per-`agent×model` failure telemetry, cost-aware scheduler, workspace-level ratchet-only quality gate.
-- **Cross-platform agent distribution (WASM, v1.2.0)** — deterministic agents/skills compile to `wasm32-wasip1`, run via embedded `wasmtime`; one `.attunepkg` + one `.wasm` runs on Windows / Linux / riscv64. WASM-safe `attune-agent-sdk` leaf crate keeps the `Agent` trait native-dep-free.
+- **Cross-platform agent distribution (WASM, v1.2.0)** — deterministic agents/skills compile to `wasm32-wasip1`, run via embedded `wasmtime`; one signed `.tar.gz` plugin package + one `.wasm` runs on Windows / Linux / riscv64. WASM-safe `attune-agent-sdk` leaf crate keeps the `Agent` trait native-dep-free.
 - **GitConnector (v1.2.0)** — import a knowledge base from a Git repo (GitHub / GitLab / Gitea / Bitbucket / Codeberg / sr.ht over HTTPS); clone → glob filter → ingest → follow upstream commits; local-only, zero-LLM import path, SSRF-protected.
 - **Privacy OutboundGate + `PrivacyTier::L0`** — every network egress (LLM / Cloud / WebDAV / Web Search / Telemetry) routes through one gate consulting settings + PII redaction; L0-tagged content refuses any cloud LLM call (`outbound_gate.rs`).
 - **One-click dependency deploy** — Ollama readiness detection + in-app install/pull, base-model auto-ensure, LM Studio endpoint auto-detect — no terminal required.
@@ -323,7 +323,7 @@ attune-server scans `~/.local/share/attune/plugins/` at startup. Each subdirecto
 Trigger registry: file_added events match plugin workflows where `trigger.on == 'file_added'`,
 each spawn-and-run with workflow_complete pushed via WebSocket.
 
-attune-pro `.attunepkg` bundles unpack into this dir. Empty plugin dir = no-op (no workflows fire).
+attune-pro signed `.tar.gz` plugin packages unpack into this dir. Empty plugin dir = no-op (no workflows fire).
 
 ### UI Notifications (Sprint 1 Phase D)
 

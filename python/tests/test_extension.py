@@ -6,8 +6,10 @@ WebKit. 历史原因: Chromium 与生产 Chrome 在 MV3 + 扩展加载行为不�
 """
 
 import os
+import json
 import subprocess
 import time
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -55,32 +57,95 @@ def browser_ctx(_ensure_built, _ensure_backend):
     不退化到 Chromium (per CLAUDE.md 全局规则).
     """
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            user_data_dir="",  # 空字符串 = 临时目录
-            channel="chrome",  # CLAUDE.md 硬约束: 禁止 Chromium / Firefox / WebKit
-            headless=False,
-            args=[
-                f"--disable-extensions-except={EXT_PATH}",
-                f"--load-extension={EXT_PATH}",
-                "--no-first-run",
-            ],
-        )
-        # 等待 Service Worker 就绪（最多 30 秒）
-        if not ctx.service_workers:
+        with tempfile.TemporaryDirectory(prefix="attune-ext-e2e-") as profile_dir:
+            ctx = p.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
+                channel="chrome",  # CLAUDE.md 硬约束: 禁止 Chromium / Firefox / WebKit
+                headless=False,
+                args=[
+                    f"--disable-extensions-except={EXT_PATH}",
+                    f"--load-extension={EXT_PATH}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+            )
+            exe_path = ""
             try:
-                ctx.wait_for_event("serviceworker", timeout=30000)
+                exe_path = ctx.browser.browser_type.executable_path
             except Exception:
                 pass
+            if (
+                "ms-playwright/chromium" in exe_path
+                and os.environ.get("ATTUNE_ALLOW_PLAYWRIGHT_CHROMIUM_EXTENSION_E2E") != "1"
+            ):
+                ctx.close()
+                pytest.skip(
+                    "系统 Chrome 不可用，Playwright 回退到 bundled Chromium；"
+                    f"跳过 MV3 扩展 E2E: {exe_path}"
+                )
 
-        yield ctx
-        ctx.close()
+            # MV3 service worker may be lazy. Read the unpacked extension id from
+            # the Chrome profile, then open extension UI once to force activation.
+            extension_ids = _extension_ids_from_profile(Path(profile_dir))
+            for candidate in extension_ids:
+                try:
+                    pg = ctx.new_page()
+                    pg.goto(f"chrome-extension://{candidate}/dist/popup/index.html", wait_until="domcontentloaded")
+                    pg.close()
+                    break
+                except Exception:
+                    try:
+                        pg.close()
+                    except Exception:
+                        pass
+
+            if not ctx.service_workers:
+                try:
+                    ctx.wait_for_event("serviceworker", timeout=30000)
+                except Exception:
+                    pass
+
+            ctx._attune_profile_dir = profile_dir
+            ctx._attune_extension_ids = extension_ids
+            yield ctx
+            ctx.close()
+
+
+def _extension_ids_from_profile(profile_dir: Path) -> list[str]:
+    """Return unpacked extension ids from Chrome Preferences."""
+    prefs = profile_dir / "Default" / "Preferences"
+    deadline = time.time() + 10
+    while time.time() < deadline and not prefs.exists():
+        time.sleep(0.1)
+    if not prefs.exists():
+        return []
+
+    try:
+        data = json.loads(prefs.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    settings = data.get("extensions", {}).get("settings", {})
+    ids = []
+    ext_root = str(Path(EXT_PATH).resolve())
+    for ext_id, meta in settings.items():
+        path = meta.get("path") or meta.get("manifest", {}).get("path")
+        if path and str(Path(path).resolve()) == ext_root:
+            ids.append(ext_id)
+    return ids
 
 
 @pytest.fixture(scope="module")
 def ext_id(browser_ctx):
     """获取扩展 ID"""
     sw = browser_ctx.service_workers
-    assert sw, "Service Worker 未启动"
+    assert sw, (
+        "Service Worker 未启动; "
+        f"EXT_PATH={EXT_PATH}; "
+        f"ids={getattr(browser_ctx, '_attune_extension_ids', [])}; "
+        f"worker_exists={Path(EXT_PATH, 'dist/background/worker.js').exists()}; "
+        f"profile={getattr(browser_ctx, '_attune_profile_dir', '')}"
+    )
     return sw[0].url.split("/")[2]
 
 
@@ -472,7 +537,7 @@ class TestStatusPage:
 
 
 class TestContentScript:
-    """Content Script 注入测试（单次访问 ChatGPT，避免触发 Cloudflare）"""
+    """Content Script 注入测试（用本地 HTML fulfill ChatGPT URL，避免 Cloudflare）"""
 
     @pytest.fixture(scope="class")
     def chatgpt_page(self, browser_ctx):
@@ -480,13 +545,32 @@ class TestContentScript:
         pg = browser_ctx.new_page()
         logs = []
         pg.on("console", lambda m: logs.append(m.text))
+        pg.route(
+            "https://chatgpt.com/**",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/html",
+                body="""
+                <!doctype html>
+                <html>
+                  <head><title>ChatGPT fixture</title></head>
+                  <body>
+                    <main>
+                      <h1>ChatGPT fixture</h1>
+                      <textarea data-testid="prompt-textarea">hello</textarea>
+                      <div data-message-author-role="assistant">fixture reply</div>
+                    </main>
+                  </body>
+                </html>
+                """,
+            ),
+        )
 
         pg.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=30000)
 
-        # 等待 Cloudflare 验证完成 + content script 注入
-        # 最多等 20 秒，每 2 秒检查一次指示器
+        # 等待 content script 注入；真实网络被 route fulfill 到本地 HTML。
         for _ in range(10):
-            time.sleep(2)
+            time.sleep(0.5)
             if pg.query_selector(".npu-webhook-indicator"):
                 break
 
@@ -529,6 +613,14 @@ class TestContentScript:
 
     def test_no_indicator_on_other_sites(self, page, ext_id):
         """非 AI 平台页面不注入指示器"""
+        page.route(
+            "https://www.example.com/**",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/html",
+                body="<!doctype html><html><body><h1>Example fixture</h1></body></html>",
+            ),
+        )
         page.goto("https://www.example.com/", timeout=10000)
         time.sleep(2)
         indicator = page.query_selector(".npu-webhook-indicator")

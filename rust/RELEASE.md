@@ -372,7 +372,7 @@
   基于 libgit2(git2 crate),不依赖系统 git。SSRF 防护:host allowlist + 拒内网/loopback/
   link-local/云 metadata,token 不落盘明文。
 - **Agent 跨平台分发(WASM runtime)**:确定性 agent/skill 可编到 `wasm32-wasip1`,由内嵌
-  wasmtime(45.0.0)执行 —— **一个 `.attunepkg` 含一份 `.wasm` 即在所有平台运行**
+  wasmtime(45.0.0)执行 —— **一个 signed `.tar.gz` plugin package 含一份 `.wasm` 即在所有平台运行**
   (Windows P0 / Linux P1 / riscv64 K3 P2),与现有 subprocess 契约对齐(stdin JSON →
   stdout JSON → exit code 0/1/2/-1)。`plugin.yaml` 新增 `runtime: wasm` + `wasm:` 路径 +
   `wasi_caps`(白名单 `stdio`/`clock`/`read:<path>`/`env:<KEY>`,默认无 fs/net)。

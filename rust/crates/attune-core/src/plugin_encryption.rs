@@ -11,7 +11,7 @@ use rand::RngCore;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
-const MAGIC: &[u8] = b"ATTPKGE1"; // attune-pkg encrypted v1
+const MAGIC: &[u8] = b"ATTPKGE1"; // encrypted plugin.yaml v1
 
 /// 加密 plugin.yaml 明文 → 字节流 (含 magic + salt + nonce + ciphertext).
 ///

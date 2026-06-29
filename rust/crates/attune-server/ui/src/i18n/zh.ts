@@ -696,7 +696,7 @@ export const zh = {
   // ─── SkillsView ──────────────────────────────────────
   'skills.title': '🧠 Skills',
   'skills.refresh': '刷新',
-  'skills.intro.before': 'chat 关键词触发到你安装的 skill。免费版和 Pro 版机制相同；自己写或下载 .attunepkg 解压到 ',
+  'skills.intro.before': 'chat 关键词触发到你安装的 skill。免费版和 Pro 版机制相同；自己写或下载签名 .tar.gz 插件包解压到 ',
   'skills.intro.after': ' 即可。',
   'skills.empty.title': '还没安装任何技能',
   'skills.empty.desc': '在插件市场可以浏览并安装社区分享的技能与智能助手。',

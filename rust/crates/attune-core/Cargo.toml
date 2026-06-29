@@ -81,7 +81,7 @@ docx-rs = "0.4"
 typst-as-lib = "0.15"
 typst = "0.14"  # re-exports typst::layout::PagedDocument (typst_library); compile target for typst-pdf
 typst-pdf = "0.14"
-# .attunepkg (tar.gz) 解压 —— 纯 Rust，跨平台含 Windows P0，不依赖系统 tar
+# plugin .tar.gz 解压 —— 纯 Rust，跨平台含 Windows P0，不依赖系统 tar
 tar = "0.4"
 flate2 = "1"
 # onnxruntime 链接模型由互斥 feature 决定(见 [features] ort-bundled / ort-dynamic):

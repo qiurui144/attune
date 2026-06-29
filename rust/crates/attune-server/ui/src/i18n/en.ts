@@ -701,7 +701,7 @@ export const en = {
   // ─── SkillsView ──────────────────────────────────────
   'skills.title': '🧠 Skills',
   'skills.refresh': 'Refresh',
-  'skills.intro.before': 'Chat keywords trigger your installed skills. Free and Pro work the same way; write your own or download a .attunepkg and extract it to ',
+  'skills.intro.before': 'Chat keywords trigger your installed skills. Free and Pro work the same way; write your own or download a signed .tar.gz plugin package and extract it to ',
   'skills.intro.after': '.',
   'skills.empty.title': 'No skills installed yet',
   'skills.empty.desc': 'Browse and install community skills and assistants in the marketplace.',

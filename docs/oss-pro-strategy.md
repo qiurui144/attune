@@ -23,7 +23,7 @@ Attune 是两个一起发版的仓库：
 - **`attune`**（本仓，Apache-2.0）— 通用 RAG 引擎、加密 vault、插件框架、Chrome 扩展、桌面应用。
 - **`attune-pro`**（私有，Proprietary）— 行业纵向插件（law-pro、presales-pro 等）+ 商业服务（cloud-sync、plugin-registry、llm-proxy）。
 
-分离的工程基建已经就位（Cargo git-tag 依赖、Ed25519 插件签名、`.attunepkg` 包格式、5 档 license key）。在这份文档之前**缺**的是清晰的政策回答 *"什么进哪里、为什么、什么时候"* — 这样贡献者不会误把商业代码 backport 到开源仓，付费用户也能看到一致的价值阶梯。
+分离的工程基建已经就位（Cargo git-tag 依赖、Ed25519 插件签名、signed `.tar.gz` plugin package 包格式、5 档 license key）。在这份文档之前**缺**的是清晰的政策回答 *"什么进哪里、为什么、什么时候"* — 这样贡献者不会误把商业代码 backport 到开源仓，付费用户也能看到一致的价值阶梯。
 
 这份文档就是这个政策。
 
@@ -102,7 +102,7 @@ W3+W4 全部交付都是开源：混合 RAG、J1 路径前缀 chunker、J3 显�
 | 产品 | License | 形态 | 用户群 | 内容 |
 |------|---------|------|--------|------|
 | **attune (OSS)** | Apache-2.0 | Tauri 桌面 / Chrome 扩展，单机 vault | **个人通用用户** | 纯通用知识库 — RAG / 加密 / 浏览捕获 / 自动 bookmark / MCP / benchmark — **零行业绑定** |
-| **attune-pro** | Proprietary | Plugin pack (.attunepkg signed)，由 attune 装载 | **个人行业用户**（律师 / 医生 / 学者 / 售前 / 工程师 / 专利代理）| 6 vertical packs：law-pro / presales-pro / medical-pro / academic-pro / patent-pro / tech-pro |
+| **attune-pro** | Proprietary | Plugin pack (signed .tar.gz plugin package signed)，由 attune 装载 | **个人行业用户**（律师 / 医生 / 学者 / 售前 / 工程师 / 专利代理）| 6 vertical packs：law-pro / presales-pro / medical-pro / academic-pro / patent-pro / tech-pro |
 | **attune-enterprise** | Proprietary | Django + Vue + 19 容器 B2B SaaS | **律所 / 小团队**（RBAC / 多租户 / 多渠道）| 行业小规模团队方案 |
 
 **等式**：
@@ -217,7 +217,7 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 | 里程碑 | 周 | 目标 | OSS 侧 | Pro 侧 |
 |--------|----|------|--------|--------|
 | **M1** | 现在 → +2 | OSS v0.6.0 GA | rc.1 (今天) → soak 7 天 → GA | bump cargo dep tag = v0.6.0；law-pro 烟测新 attune-core |
-| **M2** | +3 → +4 | law-pro 跑通新 attune | 维护为主 (W4 followups #1-#5) | 全部 5 个 law-pro capabilities 接 J5 confidence + breadcrumb sidecar；plugin-build pipeline 自动签名 `.attunepkg` |
+| **M2** | +3 → +4 | law-pro 跑通新 attune | 维护为主 (W4 followups #1-#5) | 全部 5 个 law-pro capabilities 接 J5 confidence + breadcrumb sidecar；plugin-build pipeline 自动签名 signed `.tar.gz` plugin package |
 | **M3** | +5 → +8 | 商业化 v1 上线 | 维护 + W5 K1 sleeptime / A2 conflict detection 起步 | License key 后端 (Ed25519 + 离线校验) ；订阅页 (Lite ¥0 / Pro ¥99 / Pro+ ¥299) 上线；10–30 律师种子用户 |
 | **M4** | +9 → +16 | K3 一体机 v1 | 维护 + W7-8 plugin SDK 双语 + CRDT 准备 | K3 OS image 捆绑 attune + Qwen 1.5B；售前流程 + 上门安装 SOP；首批 10 台硬件用户 |
 | **M5** | +17 → +24 | cloud-sync + plugin registry | 维护 + W9-10 K3 items keys (per Standard Notes 004 spec) | 加密同步后端 (DEK 永不离机)；内部 plugin marketplace beta |
@@ -267,7 +267,7 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 
 - 基于 `attune-core` 公开 API 的某个 tag 编译（从 v0.6.0 起步）
 - 插件清单 = `plugin.yaml` + 可选 `prompt.md` + Rust crate (或纯 prompt)
-- 分发：签名 `.attunepkg` artifact (Ed25519)。允许自分发；Pro `plugin-registry` 是可选分发渠道之一，不是唯一
+- 分发：签名 signed `.tar.gz` plugin package artifact (Ed25519)。允许自分发；Pro `plugin-registry` 是可选分发渠道之一，不是唯一
 - License：自己选。MIT/Apache/GPL 插件都可以。需要付费 license 的插件可以用 Attune license key 系统 (M5+) 或自己实现
 - 收入分成 (仅 Pro `plugin-registry`，M5+)：作者 70%，Attune 30% (托管 + 签名 + 支付)。发布前调整
 - Contributor License Agreement (CLA) *不要求* `attune` 的 OSS 贡献 — 仅商业插件分发到 `attune-pro` 时要求
