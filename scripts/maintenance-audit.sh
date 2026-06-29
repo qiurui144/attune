@@ -107,6 +107,8 @@ require_grep 'LD_LIBRARY_PATH=.*\$BIN_DIR' "scripts/smoke-test.sh" "smoke test e
 require_grep 'LD_LIBRARY_PATH' "python/tests/e2e/helpers/server.ts" "Playwright server helper exports native library path"
 require_grep 'libsherpa-onnx-c-api' ".github/workflows/rust-release.yml" "Linux release bundles sherpa runtime library"
 require_grep 'LD_LIBRARY_PATH=.*INSTALL_PREFIX/bin' "scripts/install-local.sh" "local install systemd service sees bundled native libs"
+require_grep 'QuietUninstallString' "apps/attune-desktop/scripts/installer.nsh" "Windows installer registers quiet uninstall command"
+require_grep 'lib\\windows\\\*\.dll' "apps/attune-desktop/scripts/installer.nsh" "Windows installer places native ASR DLLs beside exe"
 
 # 13-14: port consistency for current embedded server contract.
 require_grep '18900' "tests/e2e/kb_longloop_windows.ps1" "Windows KB loop targets desktop port 18900"
@@ -117,13 +119,34 @@ require_no_grep_many '28630' "no stale 28630 port in active code/scripts/workflo
 require_no_grep 'href=\\{?["'\''](#|javascript:|)["'\'']' "rust/crates/attune-server/ui/src" "embedded UI has no empty/javascript links"
 require_no_grep 'onClick=\\{\\(\\) => \\{\\}\\}' "rust/crates/attune-server/ui/src" "embedded UI has no inert click handlers"
 
-# 17-20: CI and release coverage hooks.
+# 17-31: desktop product surface coverage (settings/update/account/logs/models/data).
+require_grep 'check_for_update_now' "apps/attune-desktop/src/main.rs" "desktop exposes manual update command"
+require_grep 'restart_for_update' "apps/attune-desktop/src/main.rs" "desktop exposes restart after update command"
+require_grep 'attune-update-status' "apps/attune-desktop/src/main.rs" "desktop emits updater status events"
+require_grep 'ATTUNE_UPDATE_FEED_URL' "apps/attune-desktop/src/update_feed.rs" "desktop supports update feed override"
+require_grep 'attune-desktop-startup\.log' "apps/attune-desktop/src/main.rs" "desktop writes early startup diagnostics before server readiness"
+require_grep 'panic:' "apps/attune-desktop/src/main.rs" "desktop panic hook writes startup diagnostics"
+require_grep 'settings.about.update.check' "rust/crates/attune-server/ui/src/i18n/en.ts" "settings about page has update check copy"
+require_grep 'settings.about.services.ensure_btn' "rust/crates/attune-server/ui/src/i18n/en.ts" "settings exposes local model download action"
+require_grep 'settings.about.storage.data_dir' "rust/crates/attune-server/ui/src/i18n/en.ts" "settings exposes storage/data directory"
+require_grep 'settings.about.hardware.gpu' "rust/crates/attune-server/ui/src/i18n/en.ts" "settings exposes hardware/GPU info"
+require_grep 'settings.member.logout' "rust/crates/attune-server/ui/src/i18n/en.ts" "settings exposes member logout"
+require_grep 'privacy.actions.exportData' "rust/crates/attune-server/ui/src/i18n/en.ts" "privacy page exposes data export"
+require_grep 'privacy.actions.wipeCloudSession' "rust/crates/attune-server/ui/src/i18n/en.ts" "privacy page exposes cloud session wipe"
+require_grep '/api/v1/ai_stack' "rust/crates/attune-server/src/lib.rs" "server exposes AI stack diagnostics"
+require_grep '/api/v1/ai-stack/ensure' "rust/crates/attune-server/src/lib.rs" "server exposes model bootstrap controls"
+require_grep '/api/v1/status/diagnostics' "rust/crates/attune-server/src/lib.rs" "server exposes status diagnostics"
+require_grep '/api/v1/member/logout' "rust/crates/attune-server/src/lib.rs" "server exposes member logout endpoint"
+require_grep 'intel_igpu_windows_with_openvino_compiled_picks_openvino_gpu' "rust/crates/attune-core/src/infer/accel.rs" "Intel Windows OpenVINO strategy is unit-guarded"
+require_grep 'ocr_intel_igpu_windows_never_picks_directml' "rust/crates/attune-core/src/infer/accel.rs" "Intel OCR never auto-selects DirectML"
+
+# 36-39: CI and release coverage hooks.
 require_grep 'maintenance-audit\.sh' ".github/workflows/ci.yml" "CI runs maintenance audit"
 require_grep 'working-directory: rust/crates/attune-server/ui' ".github/workflows/ci.yml" "CI builds embedded UI"
 require_grep 'cargo audit' ".github/workflows/ci.yml" "CI runs cargo security audit"
 require_grep 'openvino' ".github/workflows/desktop-release.yml" "desktop release includes OpenVINO bundle"
 
-# 21-25: package-manager seed manifests follow the current release shape.
+# 40-44: package-manager seed manifests follow the current release shape.
 require_grep 'PackageVersion: 1\.5\.0' "packaging/winget/qiurui144.Attune.yaml" "WinGet version seed matches current release"
 require_grep 'desktop-v1\.5\.0/Attune_1\.5\.0_x64-setup\.exe' "packaging/winget/qiurui144.Attune.installer.yaml" "WinGet installer URL matches desktop release"
 require_grep '"version": "1\.5\.0"' "packaging/scoop/attune.json" "Scoop version seed matches current release"

@@ -31,6 +31,12 @@
     CopyFiles /SILENT "$INSTDIR\lib\windows\*.dll" "$INSTDIR"
   ${EndIf}
 
+  ; Enterprise deployment tools need a non-interactive uninstall command for
+  ; rollback / fleet removal. Tauri registers UninstallString by default; add the
+  ; quiet variant explicitly for winget/SCCM/GPO style automation.
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Attune" \
+    "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
+
   DetailPrint "attune installation complete."
   DetailPrint "First-run wizard will detect Ollama and guide model setup."
 !macroend

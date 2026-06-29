@@ -83,26 +83,48 @@ pub async fn wait_for_ready() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn with_desktop_port_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var("ATTUNE_DESKTOP_PORT").ok();
+        match value {
+            Some(v) => std::env::set_var("ATTUNE_DESKTOP_PORT", v),
+            None => std::env::remove_var("ATTUNE_DESKTOP_PORT"),
+        }
+        let out = f();
+        match old {
+            Some(v) => std::env::set_var("ATTUNE_DESKTOP_PORT", v),
+            None => std::env::remove_var("ATTUNE_DESKTOP_PORT"),
+        }
+        out
+    }
 
     #[test]
     fn server_port_defaults_to_canonical_port() {
-        std::env::remove_var("ATTUNE_DESKTOP_PORT");
-        assert_eq!(server_port(), 18900);
-        assert_eq!(server_url(), "http://127.0.0.1:18900");
+        with_desktop_port_env(None, || {
+            assert_eq!(server_port(), 18900);
+            assert_eq!(server_url(), "http://127.0.0.1:18900");
+        });
     }
 
     #[test]
     fn server_port_uses_valid_env_override() {
-        std::env::set_var("ATTUNE_DESKTOP_PORT", "19090");
-        assert_eq!(server_port(), 19090);
-        assert_eq!(server_url(), "http://127.0.0.1:19090");
-        std::env::remove_var("ATTUNE_DESKTOP_PORT");
+        with_desktop_port_env(Some("19090"), || {
+            assert_eq!(server_port(), 19090);
+            assert_eq!(server_url(), "http://127.0.0.1:19090");
+        });
     }
 
     #[test]
     fn server_port_ignores_invalid_env_override() {
-        std::env::set_var("ATTUNE_DESKTOP_PORT", "not-a-port");
-        assert_eq!(server_port(), 18900);
-        std::env::remove_var("ATTUNE_DESKTOP_PORT");
+        with_desktop_port_env(Some("not-a-port"), || {
+            assert_eq!(server_port(), 18900);
+        });
     }
 }
