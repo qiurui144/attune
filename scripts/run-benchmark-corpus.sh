@@ -52,25 +52,15 @@ for i in {1..30}; do
     sleep 1
 done
 
-# TODO (v0.6.0 GA PR): unlock vault, bind corpora, wait for indexing, run benchmark
-# Skeleton for the GA reviewer:
-#   1. POST /api/v1/vault/init with bench password
-#   2. POST /api/v1/vault/unlock
-#   3. POST /api/v1/index/bind for each corpus in queries.json _corpus_pins
-#   4. Poll /api/v1/index/status until done (timeout 30 min)
-#   5. cargo test --release -p attune-core --test rag_quality_benchmark -- \
-#        --ignored --nocapture > /tmp/raw.txt
-#   6. parse raw.txt → write $OUT_JSON
+cat >&2 <<'EOF'
+[J6] Real-corpus benchmark is not implemented yet.
 
-cat <<EOF >"$OUT_JSON"
-{
-  "_status": "placeholder — v0.6.0 GA benchmark PR will replace this",
-  "_generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "_attune_version": "v0.6.0-rc.1",
-  "_methodology_doc": "docs/benchmarks/2026-Q2.md",
-  "scenarios": []
-}
+Refusing to write a placeholder baseline. A valid implementation must:
+  1. initialize and unlock the ephemeral vault;
+  2. bind every corpus pinned by rust/tests/golden/queries.json;
+  3. wait for indexing to complete;
+  4. execute the queries against /api/v1/search;
+  5. aggregate Hit@K / Recall@K / MRR;
+  6. write the requested output JSON only from real measured results.
 EOF
-
-echo "[J6] Wrote placeholder $OUT_JSON"
-echo "[J6] To complete: implement steps 1-6 in this script per the TODO above."
+exit 2

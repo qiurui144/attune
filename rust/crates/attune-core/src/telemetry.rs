@@ -1,23 +1,24 @@
 //! Telemetry queue — default-off, opt-in only.
 //!
-//! v1.0.6 ships the queue + default-false persistence only; **actual HTTP
-//! send is not implemented** and is gated behind a future v1.1 toggle AND
-//! `settings.privacy.telemetry == true`. Today, [`Telemetry::send`] returns
-//! [`SendOutcome::SkippedDisabled`] when the user hasn't opted in, and
-//! [`SendOutcome::SkippedNotImplemented`] when they have (no HTTP backend yet).
+//! v1.1 ships an actual HTTP send path, but it remains default-false and
+//! opt-in only. [`Telemetry::send`] returns [`SendOutcome::SkippedDisabled`]
+//! when the user hasn't opted in and [`SendOutcome::SkippedNoEndpoint`] when
+//! no endpoint is configured.
 //!
 //! per spec `docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md` §4.2
 //! #⑤: telemetry is **never** auto-opt-in; first-launch must not surface a
 //! "share telemetry" prompt; crash dumps stay local until the user explicitly
-//! flips `privacy.telemetry=true` AND we ship a HTTP send path.
+//! flips `privacy.telemetry=true` AND an endpoint is configured.
 //!
 //! **Task 5 of v1.0.6 Privacy Logic Implementation Plan.**
 
 use crate::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
+use serde::Serialize;
+use std::time::Duration;
 
 /// One queued telemetry event. Payloads are redacted-metadata only — never
 /// chat prompts, never response text, never API keys.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TelemetryEvent {
     /// ISO-8601 timestamp at event creation.
     pub ts_iso: String,
@@ -32,14 +33,16 @@ pub struct TelemetryEvent {
 /// Outcome of attempting to send a [`TelemetryEvent`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum SendOutcome {
-    /// Sent successfully (v1.0.6 never returns this — no HTTP path yet).
+    /// Sent successfully.
     Sent,
     /// User has not opted into telemetry; event dropped.
     SkippedDisabled,
-    /// User has opted in, but v1.0.6 ships no HTTP backend; event dropped.
-    SkippedNotImplemented,
+    /// User has opted in, but no endpoint is configured; event dropped.
+    SkippedNoEndpoint,
     /// OutboundGate refused the call (e.g. payload check failed).
     SkippedGate,
+    /// HTTP/backend failure; event not persisted remotely.
+    Failed,
 }
 
 /// Telemetry sink. Constructed with the current `privacy.telemetry` flag.
@@ -48,50 +51,102 @@ pub enum SendOutcome {
 /// user has explicitly flipped the toggle through the Privacy dashboard.
 pub struct Telemetry {
     pub enabled: bool,
+    pub endpoint: Option<String>,
+    pub install_id: Option<String>,
 }
 
 impl Telemetry {
     /// Constructor takes the value loaded from `settings.privacy.telemetry`.
     /// **Default**: callers without a settings snapshot should pass `false`.
     pub fn new(enabled: bool) -> Self {
-        Self { enabled }
+        Self {
+            enabled,
+            endpoint: std::env::var("ATTUNE_TELEMETRY_ENDPOINT").ok(),
+            install_id: None,
+        }
+    }
+
+    /// Constructor used by settings/cloud-session aware callers.
+    pub fn with_endpoint(
+        enabled: bool,
+        endpoint: Option<String>,
+        install_id: Option<String>,
+    ) -> Self {
+        Self {
+            enabled,
+            endpoint,
+            install_id,
+        }
     }
 
     /// Disabled-by-default convenience constructor — matches "no settings
     /// loaded yet" semantics. Always returns a Telemetry with `enabled=false`.
     pub fn disabled() -> Self {
-        Self { enabled: false }
+        Self {
+            enabled: false,
+            endpoint: None,
+            install_id: None,
+        }
     }
 
-    /// Always returns [`SendOutcome::SkippedDisabled`] when not enabled.
-    /// Returns [`SendOutcome::SkippedNotImplemented`] when enabled — v1.0.6
-    /// ships **no actual HTTP send**, by design.
-    ///
-    /// Even when enabled, the call still routes through [`OutboundGate`] so
-    /// the audit script's grep guard sees `OutboundGate::enforce` here.
-    pub fn send(&self, _event: &TelemetryEvent) -> SendOutcome {
+    /// Always returns [`SendOutcome::SkippedDisabled`] when not enabled. When enabled,
+    /// routes through [`OutboundGate`] and POSTs a redacted metadata envelope.
+    pub fn send(&self, event: &TelemetryEvent) -> SendOutcome {
         if !self.enabled {
             return SendOutcome::SkippedDisabled;
         }
-
-        // v1.0.6: defensively route through the gate for audit-script visibility.
-        // Telemetry payload is empty here — we don't have an HTTP backend, so the
-        // gate's redactor isn't needed.
         // Telemetry is exempt from vault-locked (no vault data) and never
         // carries item content (no L0 tier). `cloud()` defaults both privacy-
         // tier fields safely; vault_unlocked=false is harmless because the gate
         // skips the vault check for OutboundKind::Telemetry.
-        let policy = OutboundPolicy::cloud(
-            OutboundKind::Telemetry,
-            self.enabled,
-            false,
-            None,
-        );
-        match OutboundGate::enforce(&policy, "") {
-            Ok(_) => SendOutcome::SkippedNotImplemented,
-            Err(_) => SendOutcome::SkippedGate,
+        let policy = OutboundPolicy::cloud(OutboundKind::Telemetry, self.enabled, false, None);
+        let endpoint = match self
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(v) => v,
+            None => return SendOutcome::SkippedNoEndpoint,
+        };
+        let payload = TelemetryEnvelope {
+            schema_version: 1,
+            install_id: self.install_id.as_deref(),
+            event,
+        };
+        let body = match serde_json::to_string(&payload) {
+            Ok(v) => v,
+            Err(_) => return SendOutcome::Failed,
+        };
+        match OutboundGate::enforce(&policy, &body) {
+            Ok(_) => {}
+            Err(_) => return SendOutcome::SkippedGate,
+        }
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return SendOutcome::Failed,
+        };
+        match client
+            .post(endpoint)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+        {
+            Ok(resp) if resp.status().is_success() => SendOutcome::Sent,
+            _ => SendOutcome::Failed,
         }
     }
+}
+
+#[derive(Serialize)]
+struct TelemetryEnvelope<'a> {
+    schema_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install_id: Option<&'a str>,
+    event: &'a TelemetryEvent,
 }
 
 impl Default for Telemetry {
@@ -136,25 +191,24 @@ mod tests {
         assert_eq!(t.send(&ev()), SendOutcome::SkippedDisabled);
     }
 
-    /// `Telemetry::new(true)` returns `SkippedNotImplemented` — opt-in is
-    /// honored but no HTTP send happens in v1.0.6.
+    /// `Telemetry::new(true)` without an endpoint honors opt-in but does not fabricate send.
     #[test]
-    fn new_true_returns_skipped_not_implemented_in_v1_0_6() {
-        let t = Telemetry::new(true);
-        // Even with consent, v1.0.6 has no HTTP backend — must not pretend to send.
-        assert_eq!(t.send(&ev()), SendOutcome::SkippedNotImplemented);
+    fn new_true_without_endpoint_returns_skipped_no_endpoint() {
+        let t = Telemetry::with_endpoint(true, None, None);
+        assert_eq!(t.send(&ev()), SendOutcome::SkippedNoEndpoint);
     }
 
-    /// Telemetry must never return `Sent` in v1.0.6.
     #[test]
-    fn never_returns_sent_in_v1_0_6() {
-        for enabled in [false, true] {
-            let t = Telemetry::new(enabled);
-            assert_ne!(
-                t.send(&ev()),
-                SendOutcome::Sent,
-                "v1.0.6 must never return Sent (no HTTP backend yet)"
-            );
-        }
+    fn envelope_serializes_without_prompt_fields() {
+        let event = ev();
+        let body = serde_json::to_string(&TelemetryEnvelope {
+            schema_version: 1,
+            install_id: Some("install-1"),
+            event: &event,
+        })
+        .unwrap();
+        assert!(body.contains("vault_lock"));
+        assert!(body.contains("install-1"));
+        assert!(!body.contains("prompt"));
     }
 }

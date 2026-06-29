@@ -25,13 +25,18 @@ use crate::error::AppError;
 use crate::state::SharedState;
 use attune_core::document_intelligence::chapters::{self, ChapterReadResult};
 use attune_core::document_intelligence::compare::{self, CompareMode, DiffReport};
-use attune_core::document_intelligence::deep_summary::{self, DeepSummaryConfig, Summary, SummaryLevel};
+use attune_core::document_intelligence::deep_summary::{
+    self, DeepSummaryConfig, Summary, SummaryLevel,
+};
 use attune_core::document_intelligence::model_routing::ModelRouter;
 use attune_core::document_intelligence::token_bill::TokenBill;
+use attune_core::document_intelligence::vlm_extract::{self, DocSource};
 use attune_core::llm::LlmProvider;
+use attune_core::vlm::VlmProvider;
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::Path;
 use std::sync::Arc;
 
 type AppResult<T> = std::result::Result<T, AppError>;
@@ -53,7 +58,11 @@ fn invalid_input(msg: &str) -> AppError {
     doc_err(axum::http::StatusCode::BAD_REQUEST, "invalid-input", msg)
 }
 fn item_not_found() -> AppError {
-    doc_err(axum::http::StatusCode::NOT_FOUND, "item-not-found", "document not found")
+    doc_err(
+        axum::http::StatusCode::NOT_FOUND,
+        "item-not-found",
+        "document not found",
+    )
 }
 fn document_too_large() -> AppError {
     doc_err(
@@ -69,6 +78,13 @@ fn llm_unavailable() -> AppError {
         "no LLM provider is configured",
     )
 }
+fn vlm_unavailable() -> AppError {
+    doc_err(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "vlm-unavailable",
+        "no VLM provider is configured",
+    )
+}
 /// I2: the user disabled cloud LLM in Privacy settings (`privacy.llm != true`). A tier-3 op that
 /// needs the cloud LLM must refuse rather than silently send private doc content to the cloud.
 fn cloud_llm_disabled() -> AppError {
@@ -79,7 +95,11 @@ fn cloud_llm_disabled() -> AppError {
     )
 }
 fn vault_locked() -> AppError {
-    doc_err(axum::http::StatusCode::UNAUTHORIZED, "vault-locked", "vault is locked")
+    doc_err(
+        axum::http::StatusCode::UNAUTHORIZED,
+        "vault-locked",
+        "vault is locked",
+    )
 }
 
 /// Hard upper bound on input chars (defends against OOM; spec §7 document-too-large).
@@ -92,8 +112,26 @@ const MAX_DOC_CHARS: usize = 2_000_000;
 pub struct DocRef {
     pub item_id: Option<String>,
     pub text: Option<String>,
+    /// Optional local image/scanned-document path. If text is absent, image paths are routed
+    /// through the VLM text extractor before the normal doc-intel pipeline.
+    pub path: Option<String>,
     #[allow(dead_code)]
     pub name: Option<String>,
+}
+
+impl DocRef {
+    fn needs_vlm(&self) -> bool {
+        self.text
+            .as_ref()
+            .map(|t| t.trim().is_empty())
+            .unwrap_or(true)
+            && self.item_id.is_none()
+            && self
+                .path
+                .as_ref()
+                .map(|p| is_image_path(p))
+                .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +165,7 @@ fn default_level() -> String {
 pub struct ChaptersRequest {
     pub item_id: Option<String>,
     pub text: Option<String>,
+    pub path: Option<String>,
     pub action: String,
     pub chapter_idx: Option<usize>,
     pub question: Option<String>,
@@ -171,16 +210,47 @@ fn enforce_gate(is_tier3: bool, is_paid: bool) -> AppResult<()> {
 
 // ─────────────────────────── shared helpers ───────────────────────────
 
-/// Resolve a DocRef to text: prefer inline `text`, else load the item by id (decrypt with the
-/// vault DEK). `vault-locked` if the vault is not unlocked; `item-not-found` if absent.
-fn resolve_doc(state: &SharedState, item_id: &Option<String>, text: &Option<String>) -> AppResult<String> {
-    if let Some(t) = text {
+fn is_image_path(path: &str) -> bool {
+    matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff")
+    )
+}
+
+/// Resolve a DocRef to text: prefer inline `text`, else use VLM for an image path, else load
+/// the item by id (decrypt with the vault DEK). `vault-locked` if the vault is not unlocked;
+/// `item-not-found` if absent.
+fn resolve_doc(
+    state: &SharedState,
+    doc: &DocRef,
+    vlm: Option<&dyn VlmProvider>,
+) -> AppResult<String> {
+    if let Some(t) = &doc.text {
         if t.chars().count() > MAX_DOC_CHARS {
             return Err(document_too_large());
         }
         return Ok(t.clone());
     }
-    let id = item_id.as_deref().ok_or_else(|| invalid_input("either text or item_id is required"))?;
+    if let Some(path) = &doc.path {
+        if !is_image_path(path) {
+            return Err(invalid_input("path must point to an image document"));
+        }
+        let vlm = vlm.ok_or_else(vlm_unavailable)?;
+        let source = DocSource::from_path(Path::new(path), None);
+        let text = vlm_extract::resolve_text(&source, vlm).map_err(map_core_err)?;
+        if text.chars().count() > MAX_DOC_CHARS {
+            return Err(document_too_large());
+        }
+        return Ok(text);
+    }
+    let id = doc
+        .item_id
+        .as_deref()
+        .ok_or_else(|| invalid_input("text, item_id, or image path is required"))?;
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|_| vault_locked())?;
     let item = vault
@@ -223,7 +293,11 @@ fn cloud_llm_egress_enabled(state: &SharedState) -> bool {
     };
     bytes
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|s| s.get("privacy").and_then(|p| p.get("llm")).and_then(|v| v.as_bool()))
+        .and_then(|s| {
+            s.get("privacy")
+                .and_then(|p| p.get("llm"))
+                .and_then(|v| v.as_bool())
+        })
         .unwrap_or(false)
 }
 
@@ -242,8 +316,19 @@ fn cloud_llm_or_refuse(state: &SharedState) -> AppResult<Arc<dyn LlmProvider>> {
     ))
 }
 
+fn cloud_vlm_or_refuse(state: &SharedState) -> AppResult<Arc<dyn VlmProvider>> {
+    if !cloud_llm_egress_enabled(state) {
+        return Err(cloud_llm_disabled());
+    }
+    state.vlm().ok_or_else(vlm_unavailable)
+}
+
 fn is_paid(state: &SharedState) -> bool {
-    state.member_state.lock().map(|g| g.is_paid()).unwrap_or(false)
+    state
+        .member_state
+        .lock()
+        .map(|g| g.is_paid())
+        .unwrap_or(false)
 }
 
 fn parse_level(s: &str) -> AppResult<SummaryLevel> {
@@ -273,10 +358,16 @@ pub async fn compare_docs(
 ) -> AppResult<Json<DocEnvelope>> {
     let mode = parse_compare_mode(&body.mode)?;
     // T-08 gate: semantic compare is tier-3.
-    enforce_gate(is_tier3_compare(&body.mode), is_paid(&state))?;
+    let needs_vlm = body.left.needs_vlm() || body.right.needs_vlm();
+    enforce_gate(is_tier3_compare(&body.mode) || needs_vlm, is_paid(&state))?;
 
-    let left = resolve_doc(&state, &body.left.item_id, &body.left.text)?;
-    let right = resolve_doc(&state, &body.right.item_id, &body.right.text)?;
+    let vlm = if needs_vlm {
+        Some(cloud_vlm_or_refuse(&state)?)
+    } else {
+        None
+    };
+    let left = resolve_doc(&state, &body.left, vlm.as_deref())?;
+    let right = resolve_doc(&state, &body.right, vlm.as_deref())?;
 
     // §3.5 default = marked; structured override accepted.
     let output_mode = match body.output_mode.as_deref() {
@@ -297,7 +388,10 @@ pub async fn compare_docs(
         let inner = state.llm().ok_or_else(llm_unavailable)?;
         Arc::new(attune_core::redacting_llm::RedactingLlmProvider::with_default_redactor(inner))
     };
-    let llms = compare::StageLlms { cheap: llm.as_ref(), reasoning: llm.as_ref() };
+    let llms = compare::StageLlms {
+        cheap: llm.as_ref(),
+        reasoning: llm.as_ref(),
+    };
 
     let report: DiffReport = compare::compare(
         &left,
@@ -333,7 +427,12 @@ pub async fn summarize_doc(
     // T-08 gate: summarize is always tier-3.
     enforce_gate(true, is_paid(&state))?;
     let level = parse_level(&body.level)?;
-    let full_text = resolve_doc(&state, &body.source.item_id, &body.source.text)?;
+    let vlm = if body.source.needs_vlm() {
+        Some(cloud_vlm_or_refuse(&state)?)
+    } else {
+        None
+    };
+    let full_text = resolve_doc(&state, &body.source, vlm.as_deref())?;
     if full_text.trim().is_empty() {
         return Err(doc_err(
             axum::http::StatusCode::BAD_REQUEST,
@@ -346,22 +445,41 @@ pub async fn summarize_doc(
     let router = router_from_state(&state);
     // summarize is always tier-3 → privacy-gate (I2) + redact (I1).
     let llm = cloud_llm_or_refuse(&state)?;
-    let llms = deep_summary::StageLlms { cheap: llm.as_ref(), reasoning: llm.as_ref() };
+    let llms = deep_summary::StageLlms {
+        cheap: llm.as_ref(),
+        reasoning: llm.as_ref(),
+    };
 
     // store + dek for the cache layer (only when a real item_id was given).
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|_| vault_locked())?;
     let cfg = DeepSummaryConfig::default();
-    let (summary, bill): (Summary, TokenBill) =
-        deep_summary::summarize(&full_text, level, &item_id, &router, &llms, vault.store(), &dek, &cfg)
-            .map_err(map_core_err)?;
+    let (summary, bill): (Summary, TokenBill) = deep_summary::summarize(
+        &full_text,
+        level,
+        &item_id,
+        &router,
+        &llms,
+        vault.store(),
+        &dek,
+        &cfg,
+    )
+    .map_err(map_core_err)?;
     drop(vault);
 
     // §3.5 default for summarize = narrative.
     let structured = matches!(body.output_mode.as_deref(), Some("structured"));
-    let narrative = if structured { None } else { Some(render_narrative(&summary)) };
+    let narrative = if structured {
+        None
+    } else {
+        Some(render_narrative(&summary))
+    };
     Ok(Json(DocEnvelope {
-        output_mode: if structured { "structured".into() } else { "narrative".into() },
+        output_mode: if structured {
+            "structured".into()
+        } else {
+            "narrative".into()
+        },
         result: serde_json::to_value(&summary).unwrap_or(Value::Null),
         annotations: None,
         narrative,
@@ -375,8 +493,23 @@ pub async fn chapters_doc(
     Json(body): Json<ChaptersRequest>,
 ) -> AppResult<Json<DocEnvelope>> {
     // T-08 gate: summarize/ask are tier-3; list is free.
-    enforce_gate(is_tier3_chapters(&body.action), is_paid(&state))?;
-    let full_text = resolve_doc(&state, &body.item_id, &body.text)?;
+    let doc_ref = DocRef {
+        item_id: body.item_id.clone(),
+        text: body.text.clone(),
+        path: body.path.clone(),
+        name: None,
+    };
+    let needs_vlm = doc_ref.needs_vlm();
+    enforce_gate(
+        is_tier3_chapters(&body.action) || needs_vlm,
+        is_paid(&state),
+    )?;
+    let vlm = if needs_vlm {
+        Some(cloud_vlm_or_refuse(&state)?)
+    } else {
+        None
+    };
+    let full_text = resolve_doc(&state, &doc_ref, vlm.as_deref())?;
 
     match body.action.as_str() {
         "list" => {
@@ -390,18 +523,27 @@ pub async fn chapters_doc(
             }))
         }
         "summarize" | "ask" => {
-            let idx = body.chapter_idx.ok_or_else(|| invalid_input("chapter_idx is required"))?;
+            let idx = body
+                .chapter_idx
+                .ok_or_else(|| invalid_input("chapter_idx is required"))?;
             let chs = chapters::split_chapters(&full_text);
             let router = router_from_state(&state);
             // chapter summarize/ask are tier-3 → privacy-gate (I2) + redact (I1).
             let llm = cloud_llm_or_refuse(&state)?;
             let structured = matches!(body.output_mode.as_deref(), Some("structured"));
-            let om = if structured { chapters::OutputMode::Structured } else { chapters::OutputMode::Review };
+            let om = if structured {
+                chapters::OutputMode::Structured
+            } else {
+                chapters::OutputMode::Review
+            };
 
             let res: ChapterReadResult = if body.action == "summarize" {
                 chapters::summarize_chapter(&chs, idx, om, llm.as_ref(), &router)
             } else {
-                let q = body.question.as_deref().ok_or_else(|| invalid_input("question is required for ask"))?;
+                let q = body
+                    .question
+                    .as_deref()
+                    .ok_or_else(|| invalid_input("question is required for ask"))?;
                 chapters::ask(&chs, idx, q, om, llm.as_ref(), &router)
             }
             .map_err(map_core_err)?;
@@ -433,7 +575,11 @@ fn render_narrative(s: &Summary) -> String {
     if !s.per_chapter.is_empty() {
         out.push_str("\n\n");
         for ch in &s.per_chapter {
-            let h = if ch.heading_path.is_empty() { "(无标题)" } else { ch.heading_path.as_str() };
+            let h = if ch.heading_path.is_empty() {
+                "(无标题)"
+            } else {
+                ch.heading_path.as_str()
+            };
             out.push_str(&format!("• 【{h}】{}\n", ch.summary));
         }
     }
@@ -463,6 +609,41 @@ mod tests {
         assert!(is_tier3_chapters("summarize"));
         assert!(is_tier3_chapters("ask"));
         assert!(!is_tier3_chapters("list"));
+    }
+
+    #[test]
+    fn test_doc_ref_vlm_detection_is_image_only_and_text_wins() {
+        let image = DocRef {
+            item_id: None,
+            text: None,
+            path: Some("/tmp/scan.png".into()),
+            name: None,
+        };
+        assert!(image.needs_vlm());
+
+        let text_wins = DocRef {
+            item_id: None,
+            text: Some("already extracted".into()),
+            path: Some("/tmp/scan.png".into()),
+            name: None,
+        };
+        assert!(!text_wins.needs_vlm());
+
+        let item_wins = DocRef {
+            item_id: Some("item-1".into()),
+            text: None,
+            path: Some("/tmp/scan.png".into()),
+            name: None,
+        };
+        assert!(!item_wins.needs_vlm());
+
+        let non_image = DocRef {
+            item_id: None,
+            text: None,
+            path: Some("/tmp/file.pdf".into()),
+            name: None,
+        };
+        assert!(!non_image.needs_vlm());
     }
 
     #[test]
