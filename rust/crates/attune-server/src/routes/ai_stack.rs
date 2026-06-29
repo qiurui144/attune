@@ -79,7 +79,7 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "cpu_passmark": passmark,
             "npu_tops": npu_tops,
             "ram_gb": hw.total_ram_bytes / (1024 * 1024 * 1024),
-            "has_gpu": hw.has_nvidia_gpu || hw.has_amd_gpu,
+            "has_gpu": hw.has_nvidia_gpu || hw.has_amd_gpu || hw.has_intel_igpu || hw.has_intel_npu,
         },
         "accel": {
             "recommended_ep_hint": accel.recommended_ep_hint(),

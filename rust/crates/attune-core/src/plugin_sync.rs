@@ -30,8 +30,8 @@
 use crate::cloud_client::{CloudClient, EntitledPlugin, License};
 use crate::crypto::Key32;
 use crate::error::{Result, VaultError};
-use crate::store::Store;
 use crate::store::plugin_entitlements::EntitlementRow;
+use crate::store::Store;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -443,6 +443,7 @@ fn install_plugin_package_inner(
             loaded.manifest.id
         )));
     }
+    validate_plugin_binaries_for_os(&plugin_src, std::env::consts::OS)?;
     if require_official_signature {
         match crate::plugin_sig::verify_with_whitelist(
             &plugin_src,
@@ -481,8 +482,11 @@ fn install_plugin_package_inner(
 
 fn download_to_file(url: &str, license_key: &str, dest: &std::path::Path) -> Result<()> {
     if std::env::var_os("ATTUNE_ALLOW_LOCAL_PLUGINHUB").is_none() {
-        crate::net::url_guard::validate_open_outbound_url(url, &crate::net::url_guard::system_resolve)
-            .map_err(|e| VaultError::InvalidInput(format!("plugin download url blocked: {e}")))?;
+        crate::net::url_guard::validate_open_outbound_url(
+            url,
+            &crate::net::url_guard::system_resolve,
+        )
+        .map_err(|e| VaultError::InvalidInput(format!("plugin download url blocked: {e}")))?;
     }
     // PluginHub requires Bearer authorization; reqwest::blocking::get() is a bare fn with
     // no header support, so we build a one-shot Client here.
@@ -568,6 +572,74 @@ fn locate_plugin_dir(extract_dir: &std::path::Path) -> Result<PathBuf> {
     ))
 }
 
+fn validate_plugin_binaries_for_os(plugin_dir: &std::path::Path, os: &str) -> Result<()> {
+    let bin_dir = plugin_dir.join("bin");
+    if !bin_dir.exists() {
+        return Ok(());
+    }
+    validate_plugin_binary_tree(&bin_dir, os)
+}
+
+fn validate_plugin_binary_tree(dir: &std::path::Path, os: &str) -> Result<()> {
+    for entry in std::fs::read_dir(dir).map_err(VaultError::Io)? {
+        let entry = entry.map_err(VaultError::Io)?;
+        let path = entry.path();
+        if path.is_dir() {
+            validate_plugin_binary_tree(&path, os)?;
+            continue;
+        }
+        validate_plugin_binary_file(&path, os)?;
+    }
+    Ok(())
+}
+
+fn validate_plugin_binary_file(path: &std::path::Path, os: &str) -> Result<()> {
+    use std::io::Read;
+
+    let mut magic = [0u8; 4];
+    let mut f = std::fs::File::open(path).map_err(VaultError::Io)?;
+    let n = f.read(&mut magic).map_err(VaultError::Io)?;
+    let kind = if n >= 4 && magic == [0x7f, b'E', b'L', b'F'] {
+        Some("Linux ELF")
+    } else if n >= 2 && magic[..2] == [b'M', b'Z'] {
+        Some("Windows PE")
+    } else if n >= 4
+        && matches!(
+            magic,
+            [0xfe, 0xed, 0xfa, 0xce]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xce, 0xfa, 0xed, 0xfe]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xca, 0xfe, 0xba, 0xbf]
+        )
+    {
+        Some("macOS Mach-O")
+    } else {
+        None
+    };
+    let Some(kind) = kind else {
+        return Ok(());
+    };
+
+    let incompatible = matches!(
+        (os, kind),
+        ("windows", "Linux ELF")
+            | ("windows", "macOS Mach-O")
+            | ("linux", "Windows PE")
+            | ("linux", "macOS Mach-O")
+            | ("macos", "Linux ELF")
+            | ("macos", "Windows PE")
+    );
+    if incompatible {
+        return Err(VaultError::InvalidInput(format!(
+            "plugin package contains {kind} binary incompatible with {os} host: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(dst).map_err(VaultError::Io)?;
     for entry in std::fs::read_dir(src).map_err(VaultError::Io)? {
@@ -651,6 +723,34 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("empty")).unwrap();
         let err = locate_plugin_dir(tmp.path()).unwrap_err();
         assert!(format!("{err}").contains("no plugin.yaml"));
+    }
+
+    #[test]
+    fn platform_validation_rejects_elf_for_windows_plugin_bin() {
+        let tmp = TempDir::new().expect("tmp");
+        let plugin = tmp.path().join("law-pro");
+        std::fs::create_dir_all(plugin.join("bin")).unwrap();
+        std::fs::write(plugin.join("bin").join("agent_civil_loan"), b"\x7fELFdemo").unwrap();
+
+        let err = validate_plugin_binaries_for_os(&plugin, "windows").unwrap_err();
+        assert!(
+            format!("{err}").contains("Linux ELF binary incompatible with windows"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn platform_validation_rejects_pe_for_linux_plugin_bin() {
+        let tmp = TempDir::new().expect("tmp");
+        let plugin = tmp.path().join("law-pro");
+        std::fs::create_dir_all(plugin.join("bin")).unwrap();
+        std::fs::write(plugin.join("bin").join("agent_civil_loan.exe"), b"MZdemo").unwrap();
+
+        let err = validate_plugin_binaries_for_os(&plugin, "linux").unwrap_err();
+        assert!(
+            format!("{err}").contains("Windows PE binary incompatible with linux"),
+            "got: {err}"
+        );
     }
 
     #[test]
