@@ -1,5 +1,11 @@
 use std::path::PathBuf;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 pub mod accel;
 pub mod cpu_db;
 pub mod npu;
@@ -540,6 +546,13 @@ fn detect_linux_render_gpu_vendors() -> (bool, bool, Option<String>) {
 #[cfg(not(target_os = "linux"))]
 fn detect_amd_gfx_target() -> Option<String> { None }
 
+#[cfg(target_os = "windows")]
+fn windows_command_no_window(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 /// macOS sysctl 辅助：读取 u64 类型的系统参数（hw.memsize 等）
 #[cfg(target_os = "macos")]
 fn sysctl_u64(key: &str) -> Option<u64> {
@@ -564,8 +577,7 @@ fn sysctl_string(key: &str) -> Option<String> {
 /// 扫描显卡名含 NVIDIA / AMD(Radeon) / Intel(Arc) 关键字。
 #[cfg(target_os = "windows")]
 fn detect_windows_gpu_vendors() -> (bool, bool, bool, Option<String>) {
-    use std::process::Command;
-    let out = match Command::new("powershell")
+    let out = match windows_command_no_window("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -644,10 +656,9 @@ fn parse_windows_npu_pnp(out: &str) -> (bool, bool) {
 /// VEN_1022(AMD) 分流。子进程失败 / 无 NPU → `(false, false)`，graceful 不 panic。
 #[cfg(target_os = "windows")]
 fn detect_windows_npu() -> (bool, bool) {
-    use std::process::Command;
     // ComputeAccelerator class 是 Win11 24H2+ 上 Intel/AMD NPU 的统一 PNPClass；
     // 同时按 Name 兜底匹配，覆盖个别驱动版本不归类到该 class 的情形。
-    let out = match Command::new("powershell")
+    let out = match windows_command_no_window("powershell")
         .args([
             "-NoProfile",
             "-NonInteractive",

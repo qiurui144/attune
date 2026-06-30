@@ -161,13 +161,25 @@ fn probe_linux() -> PowerState {
 // ───────────────────────────── Windows ─────────────────────────────
 
 #[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(target_os = "windows")]
+fn windows_command_no_window(program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+#[cfg(target_os = "windows")]
 fn probe_windows() -> PowerState {
     let mut st = PowerState::default();
     // Win32_Battery.BatteryStatus: 1=Discharging(on battery), 2=AC.
     // EstimatedChargeRemaining: 0-100. No FFI — match the wmic idiom used by
     // HardwareProfile::detect (wmic_cpu_info / wmic_total_physical_memory).
-    use std::process::Command;
-    if let Ok(out) = Command::new("wmic")
+    if let Ok(out) = windows_command_no_window("wmic")
         .args([
             "path",
             "Win32_Battery",
@@ -190,7 +202,7 @@ fn probe_windows() -> PowerState {
         st.source = PowerSource::Ac;
     }
     // Power plan (best-effort): powercfg active scheme GUID → profile.
-    if let Ok(out) = Command::new("powercfg").args(["/getactivescheme"]).output() {
+    if let Ok(out) = windows_command_no_window("powercfg").args(["/getactivescheme"]).output() {
         if out.status.success() {
             st.profile = parse_win_power_plan(&String::from_utf8_lossy(&out.stdout));
         }

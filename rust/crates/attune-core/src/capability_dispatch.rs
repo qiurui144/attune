@@ -18,6 +18,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Capability binary 调用结果
 #[derive(Debug, Clone)]
 pub struct CapabilityResult {
@@ -101,6 +107,12 @@ pub fn dispatch(invocation: &CapabilityInvocation) -> Result<CapabilityResult> {
     }
 
     let mut cmd = Command::new(&invocation.binary);
+    #[cfg(windows)]
+    {
+        // attune-desktop is a GUI app on Windows. Plugin agents are console
+        // binaries, so suppress the transient shell window during dispatch.
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     cmd.args(&invocation.args);
     for (k, v) in &invocation.env {
         cmd.env(k, v);
