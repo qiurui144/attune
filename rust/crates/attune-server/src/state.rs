@@ -995,23 +995,36 @@ impl AppState {
     /// 栈装不上 → 对应 EP 运行时注册失败 → ORT 静默降级 CPU（provider.rs 不用
     /// error_on_failure 已兜住）。内核驱动不在此装（#6 consent-gated）。
     pub fn spawn_stack_bootstrap(state: std::sync::Arc<AppState>) {
-        let sel = attune_core::infer::accel::cached_selection();
-        let chain = sel.recommend_ep_chain();
-        // 去重收集链上需要 userspace 栈的标识（CPU/CoreML 返回 None，自动排除）。
-        let mut wanted: Vec<String> = Vec::new();
-        for ep in &chain {
-            if let Some(stack) = ep.runtime_stack() {
-                if !wanted.iter().any(|s| s == stack) {
-                    wanted.push(stack.to_string());
+        let spawn_result = std::thread::Builder::new()
+            .name("attune-ep-stack-bootstrap".to_string())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let sel = attune_core::infer::accel::cached_selection();
+                    let chain = sel.recommend_ep_chain();
+                    // 去重收集链上需要 userspace 栈的标识（CPU/CoreML 返回 None，自动排除）。
+                    let mut wanted: Vec<String> = Vec::new();
+                    for ep in &chain {
+                        if let Some(stack) = ep.runtime_stack() {
+                            if !wanted.iter().any(|s| s == stack) {
+                                wanted.push(stack.to_string());
+                            }
+                        }
+                    }
+                    if wanted.is_empty() {
+                        // 纯 CPU 链（默认 build / 无加速硬件）：无栈可装，直接返回。
+                        return;
+                    }
+                    tracing::info!("EP stack bootstrap: ensuring runtime stacks {wanted:?} (userspace only, drivers excluded)");
+                    attune_core::infer::stack_installer::spawn_stack_bootstrap(state.stack_install.clone(), wanted);
+                }));
+                if result.is_err() {
+                    tracing::error!("EP stack bootstrap panicked");
                 }
-            }
+            });
+
+        if let Err(err) = spawn_result {
+            tracing::warn!("failed to spawn EP stack bootstrap thread: {err}");
         }
-        if wanted.is_empty() {
-            // 纯 CPU 链（默认 build / 无加速硬件）：无栈可装，直接返回。
-            return;
-        }
-        tracing::info!("EP stack bootstrap: ensuring runtime stacks {wanted:?} (userspace only, drivers excluded)");
-        attune_core::infer::stack_installer::spawn_stack_bootstrap(state.stack_install.clone(), wanted);
     }
 
     /// 启动后台分类 worker（需要在 init_search_engines 之后调用）

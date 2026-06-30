@@ -20,6 +20,41 @@ fn hydrate_entitlement_cache(state: &SharedState) {
     state.entitlement_cache.hydrate_from_rows(rows);
 }
 
+fn spawn_post_unlock_services(state: SharedState) {
+    // Keep unlock/setup responsive: crypto unlock returns the bearer token immediately,
+    // while local indexes, model bootstrap, EP stack probing, and workers warm up in the
+    // background. LLM and entitlement cache hydration stay synchronous because they are
+    // short local reads and make post-login/chat routes usable right away.
+    state.reload_llm();
+    hydrate_entitlement_cache(&state);
+
+    tokio::task::spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.init_search_engines();
+            // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
+            crate::state::AppState::spawn_model_bootstrap(state.clone());
+            // EP 运行时软件栈(cuda/openvino/rocm/directml/vitisai userspace)按需安装,
+            // 缺则像底座模型一样后台拉取(内核驱动除外,走 #6 consent)。
+            crate::state::AppState::spawn_stack_bootstrap(state.clone());
+            crate::state::AppState::start_classify_worker(state.clone());
+            crate::state::AppState::start_rescan_worker(state.clone());
+            crate::state::AppState::start_reindex_worker(state.clone());
+            crate::state::AppState::start_webdav_sync_worker(state.clone());
+            crate::state::AppState::start_email_sync_worker(state.clone());
+            crate::state::AppState::start_rss_sync_worker(state.clone());
+            crate::state::AppState::start_monitoring_worker(state.clone());
+            crate::state::AppState::start_queue_worker(state.clone());
+            crate::state::AppState::start_skill_evolver(state.clone());
+            crate::state::AppState::start_entitlement_worker(state.clone());
+            // G3①: drain any locked-mode staged ingests now that the DEK is available.
+            crate::state::AppState::start_staging_drain_worker(state);
+        }));
+        if result.is_err() {
+            tracing::error!("vault post-unlock service bootstrap panicked");
+        }
+    });
+}
+
 #[derive(Deserialize)]
 pub struct SetupRequest {
     pub password: String,
@@ -81,31 +116,10 @@ pub async fn vault_setup(
         })?;
         (token, recovery_key)
     };
-    // Initialize search engines after vault setup (vault mutex released)
-    state.init_search_engines();
-    // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
-    crate::state::AppState::spawn_model_bootstrap(state.clone());
-    // EP 运行时软件栈(cuda/openvino/rocm/directml/vitisai userspace)按需安装,
-    // 缺则像底座模型一样后台拉取(内核驱动除外,走 #6 consent)。
-    crate::state::AppState::spawn_stack_bootstrap(state.clone());
     // Bug-C: vault unlock 后立即触发 reload_llm,确保 settings 中已有的 llm config
     // 在 server restart 后第一次 chat 即可工作(不再依赖 member-login gateway_should_apply
-    // 走 reload_llm 分支)。init_search_engines 内部 compare_exchange 保证 LLM 也只 init 一次;
-    // 但 server 跨次重启后第二次 unlock 不会重跑 init_search_engines 的 LLM 块,故此处显式 reload。
-    state.reload_llm();
-    hydrate_entitlement_cache(&state);
-    crate::state::AppState::start_classify_worker(state.clone());
-    crate::state::AppState::start_rescan_worker(state.clone());
-    crate::state::AppState::start_reindex_worker(state.clone());
-    crate::state::AppState::start_webdav_sync_worker(state.clone());
-    crate::state::AppState::start_email_sync_worker(state.clone());
-    crate::state::AppState::start_rss_sync_worker(state.clone());
-    crate::state::AppState::start_monitoring_worker(state.clone());
-    crate::state::AppState::start_queue_worker(state.clone());
-    crate::state::AppState::start_skill_evolver(state.clone());
-    crate::state::AppState::start_entitlement_worker(state.clone());
-    // G3①: drain any locked-mode staged ingests now that the DEK is available.
-    crate::state::AppState::start_staging_drain_worker(state.clone());
+    // 走 reload_llm 分支)。
+    spawn_post_unlock_services(state.clone());
     Ok(Json(serde_json::json!({
         "status": "ok",
         "state": "unlocked",
@@ -124,29 +138,9 @@ pub async fn vault_unlock(
             AppError::Unauthorized(e.to_string())
         })?
     };
-    // Initialize search engines after vault unlock (vault mutex released)
-    state.init_search_engines();
-    // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
-    crate::state::AppState::spawn_model_bootstrap(state.clone());
-    // EP 运行时软件栈(cuda/openvino/rocm/directml/vitisai userspace)按需安装,
-    // 缺则像底座模型一样后台拉取(内核驱动除外,走 #6 consent)。
-    crate::state::AppState::spawn_stack_bootstrap(state.clone());
     // Bug-C: per setup 同步注释,unlock 后强制 reload_llm,杜绝
     // "server restart → unlock → chat 503" 的 P3。
-    state.reload_llm();
-    hydrate_entitlement_cache(&state);
-    crate::state::AppState::start_classify_worker(state.clone());
-    crate::state::AppState::start_rescan_worker(state.clone());
-    crate::state::AppState::start_reindex_worker(state.clone());
-    crate::state::AppState::start_webdav_sync_worker(state.clone());
-    crate::state::AppState::start_email_sync_worker(state.clone());
-    crate::state::AppState::start_rss_sync_worker(state.clone());
-    crate::state::AppState::start_monitoring_worker(state.clone());
-    crate::state::AppState::start_queue_worker(state.clone());
-    crate::state::AppState::start_skill_evolver(state.clone());
-    crate::state::AppState::start_entitlement_worker(state.clone());
-    // G3①: drain any locked-mode staged ingests now that the DEK is available.
-    crate::state::AppState::start_staging_drain_worker(state.clone());
+    spawn_post_unlock_services(state.clone());
     Ok(Json(serde_json::json!({"status": "ok", "token": token})))
 }
 
@@ -245,25 +239,8 @@ pub async fn vault_reset_with_recovery_key(
         })?
     };
 
-    state.init_search_engines();
-    // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
-    crate::state::AppState::spawn_model_bootstrap(state.clone());
-    // EP 运行时软件栈(cuda/openvino/rocm/directml/vitisai userspace)按需安装,
-    // 缺则像底座模型一样后台拉取(内核驱动除外,走 #6 consent)。
-    crate::state::AppState::spawn_stack_bootstrap(state.clone());
     // Bug-C: reset 后也走 unlock 同样路径,显式 reload_llm。
-    state.reload_llm();
-    crate::state::AppState::start_classify_worker(state.clone());
-    crate::state::AppState::start_rescan_worker(state.clone());
-    crate::state::AppState::start_reindex_worker(state.clone());
-    crate::state::AppState::start_webdav_sync_worker(state.clone());
-    crate::state::AppState::start_email_sync_worker(state.clone());
-    crate::state::AppState::start_rss_sync_worker(state.clone());
-    crate::state::AppState::start_monitoring_worker(state.clone());
-    crate::state::AppState::start_queue_worker(state.clone());
-    crate::state::AppState::start_skill_evolver(state.clone());
-    // G3①: drain any locked-mode staged ingests now that the DEK is available.
-    crate::state::AppState::start_staging_drain_worker(state.clone());
+    spawn_post_unlock_services(state.clone());
 
     Ok(Json(serde_json::json!({
         "status": "ok",
