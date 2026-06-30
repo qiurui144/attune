@@ -884,8 +884,9 @@ plain OCR，`regions: None`，字节级旧行为）。
 > `recognize_page` / CLI / REST 响应都带显式 `engine_status` 字段，调用方据此**知道**识别状态。
 > Stage1 产出 region 后 R6 stamp / R7 checkbox 等识别器跑在真实 per-region 裁剪上。
 >
-> ⚠️ **诚实边界（不可过度宣称）**：检测**准确率尚未对标注集验证**（无 mAP 实测）。后续：SLANet
-> 表格结构模型 + 💰 VLM Stage4 升级路径（type-enforced gate，当前未接入）。
+> ⚠️ **诚实边界（不可过度宣称）**：检测**准确率尚未对标注集验证**（无 mAP 实测）。SLANet
+> 表格结构已接 ONNX 推理链路，但 release 环境还需确认模型 provisioning、结构字典匹配与标注集结构
+> F1/准确率；💰 VLM Stage4 升级路径仍按 type-enforced gate 验证。
 
 **运行**：`cargo test -p attune-core --features nontext`（lib + golden）；
 `cargo test -p attune-cli --features nontext`（agent-invocable CLI E2E）。

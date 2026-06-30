@@ -13,6 +13,7 @@
 //! **Task 5 of v1.0.6 Privacy Logic Implementation Plan.**
 
 use crate::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
+use crate::pii::Redactor;
 use serde::Serialize;
 use std::time::Duration;
 
@@ -99,7 +100,13 @@ impl Telemetry {
         // carries item content (no L0 tier). `cloud()` defaults both privacy-
         // tier fields safely; vault_unlocked=false is harmless because the gate
         // skips the vault check for OutboundKind::Telemetry.
-        let policy = OutboundPolicy::cloud(OutboundKind::Telemetry, self.enabled, false, None);
+        let redactor = Redactor::new();
+        let policy = OutboundPolicy::cloud(
+            OutboundKind::Telemetry,
+            self.enabled,
+            false,
+            Some(&redactor),
+        );
         let endpoint = match self
             .endpoint
             .as_deref()
@@ -118,10 +125,10 @@ impl Telemetry {
             Ok(v) => v,
             Err(_) => return SendOutcome::Failed,
         };
-        match OutboundGate::enforce(&policy, &body) {
-            Ok(_) => {}
+        let body = match OutboundGate::enforce(&policy, &body) {
+            Ok(redacted) => redacted,
             Err(_) => return SendOutcome::SkippedGate,
-        }
+        };
         let client = match reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -159,12 +166,28 @@ impl Default for Telemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     fn ev() -> TelemetryEvent {
         TelemetryEvent {
             ts_iso: "2026-05-28T00:00:00Z".into(),
             kind: "vault_lock".into(),
             redacted_meta: serde_json::json!({}),
+        }
+    }
+
+    fn ev_with_pii() -> TelemetryEvent {
+        TelemetryEvent {
+            ts_iso: "2026-05-28T00:00:00Z".into(),
+            kind: "settings_changed".into(),
+            redacted_meta: serde_json::json!({
+                "field": "phone",
+                "sample": "13800138000",
+            }),
         }
     }
 
@@ -210,5 +233,77 @@ mod tests {
         assert!(body.contains("vault_lock"));
         assert!(body.contains("install-1"));
         assert!(!body.contains("prompt"));
+    }
+
+    #[test]
+    fn enabled_with_endpoint_posts_redacted_envelope() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local telemetry fixture");
+        let addr = listener.local_addr().expect("fixture addr");
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept telemetry request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut tmp).expect("read request");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(header_end) = find_header_end(&buf) {
+                    let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                    let content_len = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            if name.eq_ignore_ascii_case("content-length") {
+                                value.trim().parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    let expected = header_end + 4 + content_len;
+                    while buf.len() < expected {
+                        let n = stream.read(&mut tmp).expect("read request body");
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .expect("write response");
+            tx.send(String::from_utf8_lossy(&buf).to_string())
+                .expect("send captured request");
+        });
+
+        let telemetry = Telemetry::with_endpoint(
+            true,
+            Some(format!("http://{addr}/v1/events")),
+            Some("install-1".into()),
+        );
+        assert_eq!(telemetry.send(&ev_with_pii()), SendOutcome::Sent);
+        let request = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured telemetry request");
+        handle.join().expect("fixture thread");
+        assert!(request.starts_with("POST /v1/events HTTP/1.1"));
+        assert!(request.contains("\"schema_version\":1"));
+        assert!(request.contains("\"install_id\":\"install-1\""));
+        assert!(request.contains("\"kind\":\"settings_changed\""));
+        assert!(request.contains("[PHONE_1]"));
+        assert!(!request.contains("13800138000"));
+        assert!(!request.contains("prompt"));
+    }
+
+    fn find_header_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n")
     }
 }

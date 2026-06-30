@@ -64,7 +64,7 @@ provider 走 `ATTUNE_LLM_*` env，默认 Ollama qwen2.5:3b / DeepSeek openai-com
 | `stamp_signature.rs` | 🆓 presence：印章=红墨比≥0.02 / 签名=暗比 0.01–0.40 | 存在性 | text/type → VLM |
 | `chart.rs` | 🆓 类型/series 不臆造 | type="unknown", series=[], axis=OCR 行 | series 值 → VLM |
 | `figure.rs` / `formula.rs` / `handwriting.rs` | 🆓 框定 | figure class / formula raw_ocr / — | caption / latex / 转写 → VLM |
-| `table_structure.rs` | SLANet ONNX 适配 | `parse_html_table` 解析 `<tr>/<td>/rowspan/colspan` | **待确认**：真 SLANet 推理未接（model 在→空 HTML→空表；model 缺→`UnrecognizedV1{model-missing}`） |
+| `table_structure.rs` | SLANet ONNX 适配 | 488×488 NCHW 预处理 → ORT session → structure logits 解码 → HTML → `parse_html_table` 解析 `<tr>/<td>/rowspan/colspan`。model 缺失时显式 `UnrecognizedV1{model-missing}`，不伪造空表 | **真链路已接**；剩余边界是 SLANet 模型文件 provisioning / 变体字典匹配 / 标注集准确率验证 |
 
 ### 2.2 关键能力
 
@@ -161,7 +161,7 @@ provider 走 `ATTUNE_LLM_*` env，默认 Ollama qwen2.5:3b / DeepSeek openai-com
 1. ~~**ai_annotation 真 LLM gate 弱**~~ **✅ 已补齐（2026-06-19）**：4 角度各 1 真 LLM leg（`ai_annotation_real_llm_gate.rs`）+ human-GT holdout（≥10/角度）+ 真 micro-F1 floor 0.50 ratchet + 接进 secret-gated/nightly CI + 静默 pass 修复。剩余：Tier-1 弱本地（qwen2.5:3b）floor 单跑待补。
 2. ~~**doc-intel real-LLM gate run-log 未落档**~~ **✅ 已落档（2026-06-19）**：DeepSeek N=3 实证 compare macro-F1 1.000（0 parse fail）/ deep_summary recall 0.944 / chapters grounded 1.000，全 ≥ 0.80 floor（`reports/runs/20260619-202901_doc-intel-deepseek/`）—— 坐实 RELEASE v1.3.0 §9.2 "deepseek 实测" claim。gate 仍 `#[ignore]`（secret-gated/nightly CI 跑，非默认 PR）。
 3. **`vlm_extract` 未经 doc-intel HTTP 路由暴露**：实现 + 单测齐，但 `documents.rs` 零引用 → 扫描件/图片文档**走不到** doc-intel 的 VLM 文本提取链（**确为缺口**，记 backlog，非本任务 impl）。
-4. **`table_structure` 真 SLANet 推理未接**：model 在也只出空 HTML/空表（确定性占位），表格结构识别**尚不可用**（记 backlog，非本任务 impl）。
+4. **`table_structure` 已从占位切到真 SLANet 推理链路**：当前代码执行 ORT 推理并解码结构 token；仍需在 release 环境确认模型文件 provisioning 与真实标注集准确率（不把“已接线”等同于“mAP/结构 F1 已验证”）。
 5. **layout 检测精度未对标注集验证**（无 mAP）：版面检测功能在但准确度无量化证据。
 6. ~~**vision real-VLM F1 落档缺**~~ **✅ 已落档（2026-06-19）**：qwen3-vl-plus N=3 known-text token-F1 1.000 + grounding-precision 1.000 + 真 failover（`reports/runs/20260619-204227_vision-qwen3vl-dashscope/`）—— "qwen3-vl-plus F1 1.0" 不再 eprintln-only，源码侧 待确认 收口。新接 `ci.yml` vision real-VLM step（DASHSCOPE-gated）。
 7. **知识库级 RAG（vault-wide）未接**：doc-intel chapters/deep_summary 仅**文档内**检索；跨文档 vault RAG 是 v.next（接 `search::search_with_context` 进 chapters ask / deep_summary context）。

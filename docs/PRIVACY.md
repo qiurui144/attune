@@ -41,7 +41,7 @@ on the sidebar, icon 🔐) shows the status of all five. They map 1:1 to
 | 2 | **Attune Cloud** (`cloud_saas`) | off | Account ID + session token to `gateway.engi-stack.com` for Pro membership token gateway and quota sync. **No vault contents.** | Privacy → Attune Cloud toggle. The "Wipe cloud session" button below immediately revokes the token. |
 | 3 | **WebDAV** (`webdav`) | off | Encrypted vault blocks (ciphertext) to your own WebDAV server. Remote sees only ciphertext. | Privacy → WebDAV toggle. |
 | 4 | **Web search** (`web_search`) | off | Query string only, via headless browser to Bing / Google. Results are fetched then injected as Chat context. | Privacy → Web search toggle. |
-| 5 | **Telemetry** (`telemetry`) | off | **Nothing in v1.0.6.** The send path returns `SendOutcome::SkippedNotImplemented`; the queue stub exists so future opt-in releases have a guarded path. | Privacy → Telemetry toggle. |
+| 5 | **Telemetry** (`telemetry`) | off | Opt-in only. When disabled it returns `SkippedDisabled`; when enabled without endpoint it returns `SkippedNoEndpoint`; when enabled with a configured endpoint it POSTs a redacted metadata envelope through `OutboundGate` and the shared PII redactor. No prompt text, response text, API keys, or vault content are allowed in telemetry payloads. | Privacy → Telemetry toggle plus configured telemetry endpoint. |
 
 Every code path that performs network I/O is wrapped by
 `OutboundGate::enforce(&policy, payload)`. The audit script

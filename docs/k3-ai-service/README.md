@@ -59,6 +59,6 @@ attune-k3 `docs/2026-06-18-followup-optimizations.md` 明确这两项是 **attun
 | 缺口 | 主线现状 | 实施路径（主线） |
 |------|---------|------|
 | **① 原生 sherpa-onnx ASR provider** | `attune-core/src/asr.rs` `AsrBackend` 是单一 whisper-cli 结构；ASR 增强当前经 k3 桥功能交付 | `AsrBackend` struct→enum（`WhisperCli` / `SherpaOnnx`），`transcribe_*` 按 backend 分派，`detect_asr_backend` 优先探测 sherpa；原生 diarization（`DiarizationBackend::SherpaOnnx`，替代 RISC-V 不可用的 WhisperX/pyannote torch）。**全 edition 受益**，非仅 K3 |
-| **② SLANet 表格结构 ONNX 推理接线** | `attune-core/src/ocr/nontext/table_structure.rs:69` 是 **stub**（`let html = String::new()`）；`parse_html_table` 解析器已就绪，SLANet ONNX 推理未接线 → 表格 cell 结构返回空 | 选定 SLANet ONNX 变体 + structure 字典 → wire ort session（488 预处理 / token 解码 → HTML）→ 喂现有 `parse_html_table` |
+| **② SLANet 表格结构 ONNX 推理接线** | `attune-core/src/ocr/nontext/table_structure.rs` 已接 488 预处理、ORT session、structure logits 解码、字典覆盖与 HTML→cell 解析；model 缺失仍显式返回 `UnrecognizedV1{model-missing}` | K3/桌面 release 环境需确认 SLANet 模型文件 provisioning、字典与所选 ONNX 变体一致，并补真实标注集结构 F1/准确率报告 |
 
 > 同源 headless 落差（G6 audit，`attune-k3 reports/2026-06-11_g6-headless-parity-audit.md`）：浏览器态文件拖拽 fallback（#2，纯前端）/ 文件夹路径输入（#1/#3）/ locked-mode 降级（#4，前置 G3）等属主线 headless Web UI backlog，同样走主线 SDLC，不在本同步轮内塞码。
