@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod desktop;
 mod embedded_server;
 mod tray;
 mod update_feed;
@@ -77,10 +78,7 @@ async fn check_for_update_now(app: AppHandle, source: Option<String>) -> Result<
             msg
         })?;
 
-    let _ = app.emit(
-        EV_UPDATE_STATUS,
-        serde_json::json!({"state": "ready"}),
-    );
+    let _ = app.emit(EV_UPDATE_STATUS, serde_json::json!({"state": "ready"}));
     tracing::info!("update installed; user must restart");
     Ok(true)
 }
@@ -91,6 +89,46 @@ async fn check_for_update_now(app: AppHandle, source: Option<String>) -> Result<
 fn restart_for_update(app: AppHandle) {
     tracing::info!("restart-for-update invoked");
     app.restart();
+}
+
+#[tauri::command]
+fn desktop_app_info() -> desktop::DesktopAppInfo {
+    desktop::desktop_app_info()
+}
+
+#[tauri::command]
+fn open_desktop_path(kind: String) -> Result<String, String> {
+    desktop::open_desktop_path(&kind)
+}
+
+#[tauri::command]
+fn create_diagnostic_bundle() -> Result<String, String> {
+    desktop::create_diagnostic_bundle()
+}
+
+#[tauri::command]
+fn reveal_diagnostic_bundle(path: String) -> Result<(), String> {
+    desktop::reveal_diagnostic_bundle(&path)
+}
+
+#[tauri::command]
+fn get_launch_at_login() -> desktop::LaunchAtLoginState {
+    desktop::get_launch_at_login()
+}
+
+#[tauri::command]
+fn set_launch_at_login(enabled: bool) -> Result<desktop::LaunchAtLoginState, String> {
+    desktop::set_launch_at_login(enabled)
+}
+
+#[tauri::command]
+fn get_close_behavior() -> desktop::DesktopPreferences {
+    desktop::load_preferences()
+}
+
+#[tauri::command]
+fn set_close_behavior(close_action: String) -> Result<desktop::DesktopPreferences, String> {
+    desktop::set_close_action(&close_action)
 }
 
 /// Tauri command: upload local file paths to the embedded server's /api/v1/upload endpoint.
@@ -143,26 +181,7 @@ async fn upload_dropped_paths(paths: Vec<String>) -> Result<Vec<String>, String>
 }
 
 fn app_log_dir() -> std::path::PathBuf {
-    if let Some(dir) = std::env::var_os("ATTUNE_LOG_DIR") {
-        return std::path::PathBuf::from(dir);
-    }
-    #[cfg(windows)]
-    {
-        if let Some(base) = std::env::var_os("LOCALAPPDATA") {
-            return std::path::PathBuf::from(base).join("attune").join("logs");
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        if let Some(home) = std::env::var_os("HOME") {
-            return std::path::PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("attune")
-                .join("logs");
-        }
-    }
-    std::path::PathBuf::from("logs")
+    desktop::log_dir()
 }
 
 fn append_startup_line(log_dir: &std::path::Path, line: &str) {
@@ -262,6 +281,7 @@ fn main() {
     }
 
     let log_dir = init_observability();
+    let start_in_background = desktop::is_background_launch();
 
     if desktop_headless_mode() {
         if let Err(e) = run_headless_server(&log_dir) {
@@ -287,9 +307,17 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             upload_dropped_paths,
             check_for_update_now,
-            restart_for_update
+            restart_for_update,
+            desktop_app_info,
+            open_desktop_path,
+            create_diagnostic_bundle,
+            reveal_diagnostic_bundle,
+            get_launch_at_login,
+            set_launch_at_login,
+            get_close_behavior,
+            set_close_behavior
         ])
-        .setup(|app| {
+        .setup(move |app| {
             tracing::info!(
                 "attune-desktop setup: server_url={} log_dir={}",
                 embedded_server::server_url(),
@@ -315,6 +343,7 @@ fn main() {
                         .title("Attune")
                         .inner_size(1280.0, 800.0)
                         .min_inner_size(800.0, 600.0)
+                        .visible(!start_in_background)
                         .build()
                         {
                             tracing::error!("failed to build main window: {e}");
@@ -328,8 +357,14 @@ fn main() {
                             let app_for_drop = app_handle.clone();
                             window.on_window_event(move |event| match event {
                                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                                    api.prevent_close();
-                                    let _ = win_clone.hide();
+                                    if crate::desktop::close_action() == "tray" {
+                                        api.prevent_close();
+                                        let _ = win_clone.hide();
+                                        let _ = app_for_drop.emit(
+                                            "attune-window-hidden",
+                                            serde_json::json!({"reason": "close-request"}),
+                                        );
+                                    }
                                 }
                                 tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop {
                                     paths,

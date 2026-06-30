@@ -540,6 +540,7 @@ name = "attune-desktop"
 version = "1.5.0"
 dependencies = [
  "attune-server",
+ "dirs 6.0.0",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -552,6 +553,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "zip 0.6.6",
 ]
 
 [[package]]

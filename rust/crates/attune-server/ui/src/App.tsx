@@ -22,8 +22,9 @@ import { Wizard, LoginScreen } from './wizard';
 import { MainShell } from './layout';
 import { PrivacyTour } from './views/PrivacyTour';
 import { useShortcut } from './hooks/useShortcut';
-import { api, ApiError, getToken } from './store/api';
-import { vaultState, sidebarCollapsed } from './store/signals';
+import { api, ApiError, clearToken, getToken } from './store/api';
+import { currentView, settingsInitialTab, vaultState, sidebarCollapsed } from './store/signals';
+import type { SettingsTabId, View } from './store/signals';
 import { startConnectionMonitor } from './store/connection';
 import { startProgressWS } from './store/ws';
 import { t } from './i18n';
@@ -82,7 +83,7 @@ export function App(): JSX.Element {
     // Tauri 桌面模式:监听 OS 文件拖拽 → 调 upload_dropped_paths 上传。
     // 经 @tauri-apps/api(__TAURI_INTERNALS__ 始终注入);不用 window.__TAURI__
     // (withGlobalTauri 默认 false,那条路径不存在 → 旧实现是死代码)。
-    let unlisten: (() => void) | null = null;
+    const unlisteners: Array<() => void> = [];
     if (typeof window !== 'undefined' && (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
       void (async () => {
         try {
@@ -90,7 +91,7 @@ export function App(): JSX.Element {
             import('@tauri-apps/api/event'),
             import('@tauri-apps/api/core'),
           ]);
-          unlisten = await listen<string[]>('attune-file-drop', async (event) => {
+          unlisteners.push(await listen<string[]>('attune-file-drop', async (event) => {
             const paths = event.payload ?? [];
             if (paths.length === 0) return;
             try {
@@ -102,15 +103,93 @@ export function App(): JSX.Element {
             } catch (e) {
               toast('error', e instanceof Error ? e.message : t('app.tauri.upload_err'));
             }
-          });
+          }));
+          unlisteners.push(await listen<{ view?: string; settingsTab?: string }>('attune-navigate', (event) => {
+            const view = event.payload?.view;
+            const tab = event.payload?.settingsTab;
+            if (isView(view)) currentView.value = view;
+            if (isSettingsTab(tab)) settingsInitialTab.value = tab;
+          }));
+          unlisteners.push(await listen('attune-lock-vault', async () => {
+            await lockVaultFromShell();
+          }));
+          unlisteners.push(await listen<{ state?: string }>('attune-update-status', (event) => {
+            switch (event.payload?.state) {
+              case 'available':
+                toast('info', t('app.update.available_toast'));
+                break;
+              case 'ready':
+                toast('success', t('app.update.ready_toast'));
+                break;
+              case 'error':
+                toast('error', t('app.update.error_toast'));
+                break;
+            }
+          }));
+          unlisteners.push(await listen('attune-window-hidden', () => {
+            const key = 'attune.close_to_tray.hint_seen';
+            if (localStorage.getItem(key) !== '1') {
+              localStorage.setItem(key, '1');
+              toast('info', t('app.tray.hidden_toast'));
+            }
+          }));
         } catch (e) {
-          console.warn('failed to attach attune-file-drop listener:', e);
+          console.warn('failed to attach Tauri desktop listeners:', e);
         }
       })();
     }
 
-    return () => { if (unlisten) unlisten(); };
+    let autoLockTimer: number | null = null;
+    const clearAutoLockTimer = (): void => {
+      if (autoLockTimer !== null) {
+        window.clearTimeout(autoLockTimer);
+        autoLockTimer = null;
+      }
+    };
+    const autoLockNow = async (): Promise<void> => {
+      if (vaultState.value !== 'unlocked') return;
+      try {
+        await api.post('/vault/lock');
+        clearToken();
+        vaultState.value = 'locked';
+        toast('info', t('app.security.auto_locked'));
+        window.location.reload();
+      } catch {
+        clearAutoLockTimer();
+      }
+    };
+    const scheduleAutoLock = (): void => {
+      clearAutoLockTimer();
+      const raw = localStorage.getItem('attune.security.auto_lock_minutes') ?? '0';
+      const minutes = Number(raw);
+      if (!Number.isFinite(minutes) || minutes <= 0 || vaultState.value !== 'unlocked') return;
+      autoLockTimer = window.setTimeout(() => {
+        void autoLockNow();
+      }, minutes * 60 * 1000);
+    };
+    const activityEvents = ['pointerdown', 'keydown', 'wheel', 'touchstart'];
+    for (const event of activityEvents) window.addEventListener(event, scheduleAutoLock, { passive: true });
+    window.addEventListener('attune-auto-lock-config-changed', scheduleAutoLock);
+    scheduleAutoLock();
+
+    return () => {
+      for (const unlisten of unlisteners) unlisten();
+      for (const event of activityEvents) window.removeEventListener(event, scheduleAutoLock);
+      window.removeEventListener('attune-auto-lock-config-changed', scheduleAutoLock);
+      clearAutoLockTimer();
+    };
   }, []);
+
+  async function lockVaultFromShell(): Promise<void> {
+    try {
+      await api.post('/vault/lock');
+      clearToken();
+      vaultState.value = 'locked';
+      window.location.reload();
+    } catch (e) {
+      toast('error', e instanceof Error ? e.message : t('sidebar.menu.lock_vault.error'));
+    }
+  }
 
   async function bootstrap() {
     try {
@@ -265,6 +344,35 @@ export function App(): JSX.Element {
   );
 }
 
+const KNOWN_VIEWS: readonly View[] = [
+  'chat',
+  'items',
+  'projects',
+  'remote',
+  'knowledge',
+  'skills',
+  'marketplace',
+  'office',
+  'privacy',
+  'quota',
+  'doc-intel',
+  'writing',
+  'skill-runner',
+  'workbench',
+  'monitoring',
+  'settings',
+];
+
+const SETTINGS_TABS: readonly SettingsTabId[] = ['general', 'ai', 'data', 'plugins', 'member', 'privacy', 'about'];
+
+function isView(value: string | undefined): value is View {
+  return typeof value === 'string' && (KNOWN_VIEWS as readonly string[]).includes(value);
+}
+
+function isSettingsTab(value: string | undefined): value is SettingsTabId {
+  return typeof value === 'string' && (SETTINGS_TABS as readonly string[]).includes(value);
+}
+
 function BootingSplash(): JSX.Element {
   return (
     <div
@@ -290,4 +398,3 @@ function BootingSplash(): JSX.Element {
     </div>
   );
 }
-

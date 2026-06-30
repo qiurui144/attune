@@ -82,6 +82,25 @@ const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
 
 type SettingsTab = 'general' | 'ai' | 'data' | 'plugins' | 'member' | 'privacy' | 'about';
 
+type DesktopAppInfo = {
+  version: string;
+  platform: string;
+  exe_path: string;
+  data_dir: string;
+  config_dir: string;
+  log_dir: string;
+};
+
+type LaunchAtLoginState = {
+  supported: boolean;
+  enabled: boolean;
+  detail?: string | null;
+};
+
+type CloseBehavior = {
+  close_action: 'tray' | 'quit' | string;
+};
+
 const TABS: Array<{ key: SettingsTab; icon: string; labelKey: string }> = [
   { key: 'general', icon: '⚙', labelKey: 'settings.tab.general' },
   { key: 'ai', icon: '🤖', labelKey: 'settings.tab.ai' },
@@ -109,6 +128,13 @@ export function SettingsView(): JSX.Element {
       .then((d) => (hardware.value = (d.hardware as Record<string, unknown> | undefined) ?? d))
       .catch(() => {});
   }, []);
+  useEffect(() => {
+    // Settings 已经挂载时，托盘/其他入口仍可切换目标 tab。
+    if (settingsInitialTab.value) {
+      activeTab.value = settingsInitialTab.value;
+      settingsInitialTab.value = null;
+    }
+  }, [settingsInitialTab.value]);
 
   return (
     <div style={{ height: '100%', display: 'flex', minWidth: 0 }}>
@@ -252,8 +278,86 @@ function GeneralPanel(): JSX.Element {
           </select>
         </SettingRow>
       </Section>
+      <DesktopBehaviorSection />
       <BackgroundComputeSection />
     </>
+  );
+}
+
+function DesktopBehaviorSection(): JSX.Element | null {
+  const isTauri = isTauriRuntime();
+  const launchAtLogin = useSignal<LaunchAtLoginState | null>(null);
+  const closeAction = useSignal<'tray' | 'quit'>('tray');
+  const busy = useSignal(false);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    void (async () => {
+      try {
+        const [launch, close] = await Promise.all([
+          invokeDesktopCommand<LaunchAtLoginState>('get_launch_at_login'),
+          invokeDesktopCommand<CloseBehavior>('get_close_behavior'),
+        ]);
+        launchAtLogin.value = launch;
+        closeAction.value = close.close_action === 'quit' ? 'quit' : 'tray';
+      } catch (e) {
+        toast('error', t('settings.desktop.load_failed', { message: e instanceof Error ? e.message : String(e) }));
+      }
+    })();
+  }, []);
+
+  if (!isTauri) return null;
+
+  async function setLaunchAtLogin(enabled: boolean): Promise<void> {
+    busy.value = true;
+    try {
+      launchAtLogin.value = await invokeDesktopCommand<LaunchAtLoginState>('set_launch_at_login', { enabled });
+      toast('success', enabled ? t('settings.desktop.launch_login.enabled') : t('settings.desktop.launch_login.disabled'));
+    } catch (e) {
+      toast('error', t('settings.desktop.save_failed', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function setCloseAction(action: 'tray' | 'quit'): Promise<void> {
+    busy.value = true;
+    try {
+      const next = await invokeDesktopCommand<CloseBehavior>('set_close_behavior', { closeAction: action });
+      closeAction.value = next.close_action === 'quit' ? 'quit' : 'tray';
+      toast('success', t('settings.desktop.close_action.saved'));
+    } catch (e) {
+      toast('error', t('settings.desktop.save_failed', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  return (
+    <Section title={t('settings.desktop.title')} desc={t('settings.desktop.desc')}>
+      <SettingRow label={t('settings.desktop.launch_login.label')}>
+        <Toggle
+          value={Boolean(launchAtLogin.value?.enabled)}
+          onChange={(v) => void setLaunchAtLogin(v)}
+        />
+      </SettingRow>
+      {launchAtLogin.value?.detail ? (
+        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', margin: 0 }}>
+          {launchAtLogin.value.detail}
+        </p>
+      ) : null}
+      <SettingRow label={t('settings.desktop.close_action.label')}>
+        <select
+          value={closeAction.value}
+          disabled={busy.value}
+          onChange={(e) => void setCloseAction(e.currentTarget.value === 'quit' ? 'quit' : 'tray')}
+          style={selectStyle}
+        >
+          <option value="tray">{t('settings.desktop.close_action.tray')}</option>
+          <option value="quit">{t('settings.desktop.close_action.quit')}</option>
+        </select>
+      </SettingRow>
+    </Section>
   );
 }
 
@@ -1020,6 +1124,7 @@ function PrivacyPanel(): JSX.Element {
           </Button>
         </SettingRow>
       </Section>
+      <VaultManagementSection />
 
       {/* v0.6 Phase A.5.5: 隐私分级状态 */}
       <Section title={t('settings.privacy.redact.title')}>
@@ -1080,6 +1185,195 @@ function PrivacyPanel(): JSX.Element {
         </p>
       </Section>
     </>
+  );
+}
+
+function VaultManagementSection(): JSX.Element {
+  const changeOpen = useSignal(false);
+  const importOpen = useSignal(false);
+  const oldPassword = useSignal('');
+  const newPassword = useSignal('');
+  const confirmPassword = useSignal('');
+  const deviceSecret = useSignal('');
+  const busy = useSignal(false);
+  const autoLockMinutes = useSignal(loadAutoLockMinutes());
+
+  async function changePassword(): Promise<void> {
+    if (newPassword.value.length < 12 || newPassword.value !== confirmPassword.value) {
+      toast('error', t('settings.vault.change_password.invalid'));
+      return;
+    }
+    busy.value = true;
+    try {
+      await api.post('/vault/change-password', {
+        old_password: oldPassword.value,
+        new_password: newPassword.value,
+      });
+      oldPassword.value = '';
+      newPassword.value = '';
+      confirmPassword.value = '';
+      changeOpen.value = false;
+      toast('success', t('settings.vault.change_password.ok'));
+    } catch (e) {
+      toast('error', t('settings.vault.change_password.fail', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function exportDeviceSecret(): Promise<void> {
+    busy.value = true;
+    try {
+      const secret = await api.get<{ device_secret: string }>('/vault/device-secret/export');
+      downloadTextFile('attune-device-secret.txt', secret.device_secret);
+      toast('success', t('settings.vault.device_secret.export_ok'));
+    } catch (e) {
+      toast('error', t('settings.vault.device_secret.export_fail', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function importDeviceSecret(): Promise<void> {
+    const value = deviceSecret.value.trim();
+    if (!value) return;
+    busy.value = true;
+    try {
+      await api.post('/vault/device-secret/import', { device_secret: value });
+      deviceSecret.value = '';
+      importOpen.value = false;
+      toast('success', t('settings.vault.device_secret.import_ok'));
+    } catch (e) {
+      toast('error', t('settings.vault.device_secret.import_fail', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  function setAutoLockMinutes(value: number): void {
+    autoLockMinutes.value = value;
+    localStorage.setItem('attune.security.auto_lock_minutes', String(value));
+    window.dispatchEvent(new Event('attune-auto-lock-config-changed'));
+    toast('success', value > 0
+      ? t('settings.vault.auto_lock.saved', { minutes: value })
+      : t('settings.vault.auto_lock.disabled'));
+  }
+
+  return (
+    <Section title={t('settings.vault.title')} desc={t('settings.vault.desc')}>
+      <SettingRow label={t('settings.vault.change_password.label')}>
+        <Button variant="secondary" size="sm" onClick={() => (changeOpen.value = true)}>
+          {t('settings.vault.change_password.open')}
+        </Button>
+      </SettingRow>
+      <SettingRow label={t('settings.vault.device_secret.label')}>
+        <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <Button variant="secondary" size="sm" loading={busy.value} onClick={() => void exportDeviceSecret()}>
+            {t('settings.vault.device_secret.export')}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => (importOpen.value = true)}>
+            {t('settings.vault.device_secret.import')}
+          </Button>
+        </div>
+      </SettingRow>
+      <SettingRow label={t('settings.vault.auto_lock.label')}>
+        <select
+          value={String(autoLockMinutes.value)}
+          onChange={(e) => setAutoLockMinutes(Number(e.currentTarget.value))}
+          style={selectStyle}
+        >
+          <option value="0">{t('settings.vault.auto_lock.never')}</option>
+          <option value="5">{t('settings.vault.auto_lock.minutes', { minutes: 5 })}</option>
+          <option value="15">{t('settings.vault.auto_lock.minutes', { minutes: 15 })}</option>
+          <option value="30">{t('settings.vault.auto_lock.minutes', { minutes: 30 })}</option>
+          <option value="60">{t('settings.vault.auto_lock.minutes', { minutes: 60 })}</option>
+        </select>
+      </SettingRow>
+
+      <Modal
+        open={changeOpen.value}
+        onClose={() => (changeOpen.value = false)}
+        title={t('settings.vault.change_password.title')}
+        disableBackdropClose
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <Input
+            type="password"
+            label={t('settings.vault.change_password.old')}
+            value={oldPassword.value}
+            onInput={(e) => (oldPassword.value = e.currentTarget.value)}
+            autoFocus
+            required
+          />
+          <Input
+            type="password"
+            label={t('settings.vault.change_password.new')}
+            hint={t('settings.vault.change_password.hint')}
+            value={newPassword.value}
+            onInput={(e) => (newPassword.value = e.currentTarget.value)}
+            required
+          />
+          <Input
+            type="password"
+            label={t('settings.vault.change_password.confirm')}
+            value={confirmPassword.value}
+            onInput={(e) => (confirmPassword.value = e.currentTarget.value)}
+            required
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+            <Button variant="ghost" size="sm" onClick={() => (changeOpen.value = false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={busy.value}
+              disabled={!oldPassword.value || !newPassword.value || !confirmPassword.value}
+              onClick={() => void changePassword()}
+            >
+              {t('settings.vault.change_password.submit')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={importOpen.value}
+        onClose={() => (importOpen.value = false)}
+        title={t('settings.vault.device_secret.import_title')}
+        disableBackdropClose
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <textarea
+            value={deviceSecret.value}
+            onInput={(e) => (deviceSecret.value = e.currentTarget.value)}
+            placeholder={t('settings.vault.device_secret.placeholder')}
+            autoFocus
+            style={{
+              ...inputStyle,
+              minHeight: 120,
+              resize: 'vertical',
+              width: '100%',
+              boxSizing: 'border-box',
+            }}
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+            <Button variant="ghost" size="sm" onClick={() => (importOpen.value = false)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={busy.value}
+              disabled={!deviceSecret.value.trim()}
+              onClick={() => void importDeviceSecret()}
+            >
+              {t('settings.vault.device_secret.import_submit')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    </Section>
   );
 }
 
@@ -1185,11 +1479,20 @@ function UpdaterRow(): JSX.Element | null {
 function AboutPanel(): JSX.Element {
   const hw = hardware.value;
   const m = memberState.value;
+  const isTauri = isTauriRuntime();
   // 调 ai_stack 看底座 + cloud 状态 (一次性, AboutPanel 挂载时)
   const aiStack = useSignal<Record<string, unknown> | null>(null);
+  const desktopInfo = useSignal<DesktopAppInfo | null>(null);
+  const diagnosticPath = useSignal<string | null>(null);
+  const diagnosticBusy = useSignal(false);
   useEffect(() => {
     void api.get<Record<string, unknown>>('/ai_stack').then((d) => (aiStack.value = d)).catch(() => {});
     void loadMemberState();
+    if (isTauri) {
+      void invokeDesktopCommand<DesktopAppInfo>('desktop_app_info')
+        .then((info) => (desktopInfo.value = info))
+        .catch(() => {});
+    }
   }, []);
 
   const stackStatus = (key: string): { ok: boolean; note?: string } => {
@@ -1202,13 +1505,39 @@ function AboutPanel(): JSX.Element {
   const asr = stackStatus('asr');
   const ws = stackStatus('web_search');
 
-  // 数据目录: Linux/macOS = ~/.local/share/attune, Windows = %APPDATA%\attune
-  const dataDir = (() => {
-    if (typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('win')) {
-      return '%APPDATA%\\attune';
+  const dataDir = desktopInfo.value?.data_dir ?? (
+    typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('win')
+      ? '%LOCALAPPDATA%\\attune'
+      : '~/.local/share/attune'
+  );
+  const logDir = desktopInfo.value?.log_dir ?? `${dataDir}/logs`;
+  const configDir = desktopInfo.value?.config_dir ?? (
+    typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('win')
+      ? '%APPDATA%\\attune'
+      : '~/.config/attune'
+  );
+
+  async function openDesktopPath(kind: 'data' | 'config' | 'logs'): Promise<void> {
+    try {
+      await invokeDesktopCommand<string>('open_desktop_path', { kind });
+    } catch (e) {
+      toast('error', t('settings.about.storage.open_failed', { message: e instanceof Error ? e.message : String(e) }));
     }
-    return '~/.local/share/attune';
-  })();
+  }
+
+  async function exportDiagnostics(): Promise<void> {
+    diagnosticBusy.value = true;
+    try {
+      const path = await invokeDesktopCommand<string>('create_diagnostic_bundle');
+      diagnosticPath.value = path;
+      toast('success', t('settings.about.diagnostics.created'));
+      await invokeDesktopCommand('reveal_diagnostic_bundle', { path });
+    } catch (e) {
+      toast('error', t('settings.about.diagnostics.failed', { message: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      diagnosticBusy.value = false;
+    }
+  }
 
   const memberLabel = !m
     ? t('settings.about.member.not_logged_in')
@@ -1232,7 +1561,7 @@ function AboutPanel(): JSX.Element {
           {t('settings.about.app.tagline')}
         </p>
         <SettingRow label={t('settings.about.app.version')}>
-          <code style={codeStyle}>0.7.0-dev</code>
+          <code style={codeStyle}>{desktopInfo.value?.version ?? '1.5.0'}</code>
         </SettingRow>
         <UpdaterRow />
         <SettingRow label={t('settings.about.app.license')}>
@@ -1292,7 +1621,32 @@ function AboutPanel(): JSX.Element {
 
       <Section title={t('settings.about.storage.title')}>
         <SettingRow label={t('settings.about.storage.data_dir')}>
-          <code style={codeStyle}>{dataDir}</code>
+          <PathValue path={dataDir} kind="data" canOpen={isTauri} onOpen={openDesktopPath} />
+        </SettingRow>
+        <SettingRow label={t('settings.about.storage.log_dir')}>
+          <PathValue path={logDir} kind="logs" canOpen={isTauri} onOpen={openDesktopPath} />
+        </SettingRow>
+        <SettingRow label={t('settings.about.storage.config_dir')}>
+          <PathValue path={configDir} kind="config" canOpen={isTauri} onOpen={openDesktopPath} />
+        </SettingRow>
+        {isTauri && (
+          <SettingRow label={t('settings.about.diagnostics.label')}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', alignItems: 'flex-end', minWidth: 0 }}>
+              <Button variant="secondary" size="sm" loading={diagnosticBusy.value} onClick={() => void exportDiagnostics()}>
+                {t('settings.about.diagnostics.export')}
+              </Button>
+              {diagnosticPath.value && (
+                <code style={{ ...codeStyle, maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {diagnosticPath.value}
+                </code>
+              )}
+            </div>
+          </SettingRow>
+        )}
+        <SettingRow label={t('settings.about.storage.exe_path')}>
+          <code style={{ ...codeStyle, maxWidth: 480, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {desktopInfo.value?.exe_path ?? '—'}
+          </code>
         </SettingRow>
         <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', margin: 0, lineHeight: 1.5 }}>
           {t('settings.about.storage.note')}
@@ -1337,6 +1691,31 @@ function AboutPanel(): JSX.Element {
   );
 }
 
+function PathValue({
+  path,
+  kind,
+  canOpen,
+  onOpen,
+}: {
+  path: string;
+  kind: 'data' | 'config' | 'logs';
+  canOpen: boolean;
+  onOpen: (kind: 'data' | 'config' | 'logs') => Promise<void>;
+}): JSX.Element {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 'var(--space-2)', minWidth: 0 }}>
+      <code style={{ ...codeStyle, maxWidth: 480, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {path}
+      </code>
+      {canOpen && (
+        <Button variant="secondary" size="sm" onClick={() => void onOpen(kind)}>
+          {t('settings.about.storage.open')}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 function ServiceStatus({ ok, note }: { ok: boolean; note?: string }): JSX.Element {
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--text-sm)' }}>
@@ -1350,6 +1729,32 @@ function ServiceStatus({ ok, note }: { ok: boolean; note?: string }): JSX.Elemen
       )}
     </span>
   );
+}
+
+function isTauriRuntime(): boolean {
+  return typeof window !== 'undefined'
+    && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
+async function invokeDesktopCommand<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return await invoke<T>(cmd, args);
+}
+
+function loadAutoLockMinutes(): number {
+  if (typeof localStorage === 'undefined') return 0;
+  const value = Number(localStorage.getItem('attune.security.auto_lock_minutes') ?? '0');
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function downloadTextFile(filename: string, contents: string): void {
+  const blob = new Blob([contents], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ── 共享组件 ─────────────────────────────────────────────────
