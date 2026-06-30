@@ -15,7 +15,7 @@
 import type { JSX } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
-import { ToastContainer, RecommendationOverlay, ConfirmHost } from './components';
+import { Button, ToastContainer, RecommendationOverlay, ConfirmHost } from './components';
 import { toast } from './components/Toast';
 import { CommandPalette } from './components/CommandPalette';
 import { Wizard, LoginScreen } from './wizard';
@@ -47,10 +47,19 @@ type AppPhase =
   | { kind: 'login' }
   | { kind: 'main' };
 
+type UpdateNotice = {
+  state: 'available' | 'downloading' | 'ready' | 'error';
+  from?: string;
+  to?: string;
+  percent?: number;
+  message?: string;
+};
+
 export function App(): JSX.Element {
   const phase = useSignal<AppPhase>({ kind: 'booting' });
   const paletteOpen = useSignal(false);
   const [bootError, setBootError] = useState<string | null>(null);
+  const [updateNotice, setUpdateNotice] = useState<UpdateNotice | null>(null);
 
   // Minor 3.4 修复：theme attribute 已经在 store/signals.ts 的 subscribe 里写过了，
   // 这里移除重复写入避免双源。
@@ -113,15 +122,22 @@ export function App(): JSX.Element {
           unlisteners.push(await listen('attune-lock-vault', async () => {
             await lockVaultFromShell();
           }));
-          unlisteners.push(await listen<{ state?: string }>('attune-update-status', (event) => {
-            switch (event.payload?.state) {
+          unlisteners.push(await listen<UpdateNotice>('attune-update-status', (event) => {
+            const payload = event.payload;
+            switch (payload?.state) {
               case 'available':
+                setUpdateNotice(payload);
                 toast('info', t('app.update.available_toast'));
                 break;
+              case 'downloading':
+                setUpdateNotice(payload);
+                break;
               case 'ready':
+                setUpdateNotice(payload);
                 toast('success', t('app.update.ready_toast'));
                 break;
               case 'error':
+                setUpdateNotice(payload);
                 toast('error', t('app.update.error_toast'));
                 break;
             }
@@ -140,6 +156,8 @@ export function App(): JSX.Element {
     }
 
     let autoLockTimer: number | null = null;
+    let autoLockAuditTimer: number | null = null;
+    let lastActivityAt = Date.now();
     const clearAutoLockTimer = (): void => {
       if (autoLockTimer !== null) {
         window.clearTimeout(autoLockTimer);
@@ -163,19 +181,37 @@ export function App(): JSX.Element {
       const raw = localStorage.getItem('attune.security.auto_lock_minutes') ?? '0';
       const minutes = Number(raw);
       if (!Number.isFinite(minutes) || minutes <= 0 || vaultState.value !== 'unlocked') return;
+      const timeoutMs = minutes * 60 * 1000;
+      const remainingMs = timeoutMs - (Date.now() - lastActivityAt);
+      if (remainingMs <= 0) {
+        void autoLockNow();
+        return;
+      }
       autoLockTimer = window.setTimeout(() => {
         void autoLockNow();
-      }, minutes * 60 * 1000);
+      }, remainingMs);
+    };
+    const recordActivity = (): void => {
+      lastActivityAt = Date.now();
+      scheduleAutoLock();
     };
     const activityEvents = ['pointerdown', 'keydown', 'wheel', 'touchstart'];
-    for (const event of activityEvents) window.addEventListener(event, scheduleAutoLock, { passive: true });
+    for (const event of activityEvents) window.addEventListener(event, recordActivity, { passive: true });
     window.addEventListener('attune-auto-lock-config-changed', scheduleAutoLock);
+    window.addEventListener('focus', scheduleAutoLock);
+    window.addEventListener('pageshow', scheduleAutoLock);
+    document.addEventListener('visibilitychange', scheduleAutoLock);
+    autoLockAuditTimer = window.setInterval(scheduleAutoLock, 60_000);
     scheduleAutoLock();
 
     return () => {
       for (const unlisten of unlisteners) unlisten();
-      for (const event of activityEvents) window.removeEventListener(event, scheduleAutoLock);
+      for (const event of activityEvents) window.removeEventListener(event, recordActivity);
       window.removeEventListener('attune-auto-lock-config-changed', scheduleAutoLock);
+      window.removeEventListener('focus', scheduleAutoLock);
+      window.removeEventListener('pageshow', scheduleAutoLock);
+      document.removeEventListener('visibilitychange', scheduleAutoLock);
+      if (autoLockAuditTimer !== null) window.clearInterval(autoLockAuditTimer);
       clearAutoLockTimer();
     };
   }, []);
@@ -335,12 +371,94 @@ export function App(): JSX.Element {
   return (
     <>
       <MainShell />
+      <DesktopUpdateBanner notice={updateNotice} onDismiss={() => setUpdateNotice(null)} />
       <PrivacyTour />
       <CommandPalette open={paletteOpen.value} onClose={() => (paletteOpen.value = false)} />
       <RecommendationOverlay />
       <ConfirmHost />
       <ToastContainer />
     </>
+  );
+}
+
+function DesktopUpdateBanner({
+  notice,
+  onDismiss,
+}: {
+  notice: UpdateNotice | null;
+  onDismiss: () => void;
+}): JSX.Element | null {
+  if (!notice) return null;
+
+  const title = (() => {
+    switch (notice.state) {
+      case 'available': return t('app.update.banner.available');
+      case 'downloading': return t('app.update.banner.downloading', { percent: notice.percent ?? 0 });
+      case 'ready': return t('app.update.banner.ready');
+      case 'error': return t('app.update.banner.error');
+    }
+  })();
+  const detail = notice.to
+    ? t('app.update.banner.version', { from: notice.from ?? '-', to: notice.to })
+    : notice.message ?? '';
+
+  async function restart(): Promise<void> {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('restart_for_update');
+    } catch (e) {
+      toast('error', e instanceof Error ? e.message : t('app.update.error_toast'));
+    }
+  }
+
+  function openUpdateSettings(): void {
+    settingsInitialTab.value = 'about';
+    currentView.value = 'settings';
+  }
+
+  return (
+    <div
+      role={notice.state === 'error' ? 'alert' : 'status'}
+      style={{
+        position: 'fixed',
+        top: 'var(--space-4)',
+        right: 'var(--space-4)',
+        zIndex: 1900,
+        width: 'min(520px, calc(100vw - 32px))',
+        padding: 'var(--space-3)',
+        background: 'var(--color-surface)',
+        border: `1px solid ${notice.state === 'error' ? 'var(--color-error)' : 'var(--color-accent)'}`,
+        borderRadius: 'var(--radius-md)',
+        boxShadow: 'var(--shadow-lg)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--space-3)',
+      }}
+    >
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--color-text)' }}>
+          {title}
+        </div>
+        {detail && (
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {detail}
+          </div>
+        )}
+      </div>
+      {notice.state === 'ready' && (
+        <Button size="sm" variant="primary" onClick={() => void restart()}>
+          {t('app.update.banner.restart')}
+        </Button>
+      )}
+      {notice.state !== 'downloading' && notice.state !== 'ready' && (
+        <Button size="sm" variant="secondary" onClick={openUpdateSettings}>
+          {t('app.update.banner.settings')}
+        </Button>
+      )}
+      <Button size="sm" variant="ghost" aria-label={t('common.close')} onClick={onDismiss}>
+        x
+      </Button>
+    </div>
   );
 }
 

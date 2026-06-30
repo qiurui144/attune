@@ -29,6 +29,13 @@ pub struct DesktopAppInfo {
     pub data_dir: String,
     pub config_dir: String,
     pub log_dir: String,
+    pub diagnostic: DesktopDiagnosticNotice,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DesktopDiagnosticNotice {
+    pub last_error: Option<String>,
+    pub log_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,6 +90,7 @@ pub fn desktop_app_info() -> DesktopAppInfo {
         data_dir: data_dir().to_string_lossy().into_owned(),
         config_dir: config_dir().to_string_lossy().into_owned(),
         log_dir: log_dir().to_string_lossy().into_owned(),
+        diagnostic: desktop_diagnostic_notice(),
     }
 }
 
@@ -186,6 +194,44 @@ pub fn create_diagnostic_bundle() -> Result<String, String> {
 
     zip.finish().map_err(|e| e.to_string())?;
     Ok(bundle.to_string_lossy().into_owned())
+}
+
+fn desktop_diagnostic_notice() -> DesktopDiagnosticNotice {
+    let path = log_dir().join("attune-desktop-startup.log");
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return DesktopDiagnosticNotice {
+            last_error: None,
+            log_file: None,
+        };
+    };
+
+    for line in contents.lines().rev() {
+        if line.contains("panic:")
+            || line.contains("failed to start")
+            || line.contains("exited with error")
+        {
+            return DesktopDiagnosticNotice {
+                last_error: Some(truncate_for_ui(line, 600)),
+                log_file: Some(path.to_string_lossy().into_owned()),
+            };
+        }
+    }
+
+    DesktopDiagnosticNotice {
+        last_error: None,
+        log_file: None,
+    }
+}
+
+fn truncate_for_ui(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in value.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
 }
 
 pub fn reveal_diagnostic_bundle(path: &str) -> Result<(), String> {
@@ -434,6 +480,12 @@ mod tests {
     fn close_action_rejects_unknown_values() {
         assert!(matches!("quit", "quit" | "tray"));
         assert!(!matches!("close", "quit" | "tray"));
+    }
+
+    #[test]
+    fn truncate_for_ui_keeps_short_strings() {
+        assert_eq!(truncate_for_ui("abc", 10), "abc");
+        assert_eq!(truncate_for_ui("abcdef", 3), "abc...");
     }
 
     #[cfg(target_os = "linux")]

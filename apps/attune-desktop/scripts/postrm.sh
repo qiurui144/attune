@@ -12,8 +12,28 @@ set -e
 LOG_TAG="attune-postrm"
 log() { logger -t "$LOG_TAG" -- "$1"; printf '[attune-postrm] %s\n' "$1"; }
 
+remove_autostart_file() {
+  HOME_DIR="$1"
+  FILE="$HOME_DIR/.config/autostart/attune.desktop"
+  if [ -f "$FILE" ] && grep -q 'Name=Attune' "$FILE" 2>/dev/null; then
+    log "removing autostart file $FILE"
+    rm -f "$FILE" || true
+  fi
+}
+
+remove_known_autostart_files() {
+  remove_autostart_file "${HOME:-/root}"
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    if [ -n "$USER_HOME" ]; then
+      remove_autostart_file "$USER_HOME"
+    fi
+  fi
+}
+
 ACTION="${1:-remove}"
 log "action=$ACTION"
+remove_known_autostart_files
 
 case "$ACTION" in
   purge)
@@ -25,6 +45,7 @@ case "$ACTION" in
     ;;
   remove)
     log "remove complete (data + Ollama preserved)"
+    log "per-user autostart files are preserved unless disabled in Attune before uninstall: ~/.config/autostart/attune.desktop"
     ;;
   *)
     # upgrade / failed-upgrade / disappear — 都是 dpkg/rpm 内部状态，不做实际清理

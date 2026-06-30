@@ -89,6 +89,10 @@ type DesktopAppInfo = {
   data_dir: string;
   config_dir: string;
   log_dir: string;
+  diagnostic?: {
+    last_error?: string | null;
+    log_file?: string | null;
+  };
 };
 
 type LaunchAtLoginState = {
@@ -1643,6 +1647,20 @@ function AboutPanel(): JSX.Element {
             </div>
           </SettingRow>
         )}
+        {desktopInfo.value?.diagnostic?.last_error ? (
+          <SettingRow label={t('settings.about.diagnostics.recent_issue')}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', alignItems: 'flex-end', minWidth: 0 }}>
+              <code style={{ ...codeStyle, maxWidth: 520, whiteSpace: 'normal', wordBreak: 'break-word' }}>
+                {desktopInfo.value.diagnostic.last_error}
+              </code>
+              {isTauri && (
+                <Button variant="secondary" size="sm" onClick={() => void openDesktopPath('logs')}>
+                  {t('settings.about.storage.open')}
+                </Button>
+              )}
+            </div>
+          </SettingRow>
+        ) : null}
         <SettingRow label={t('settings.about.storage.exe_path')}>
           <code style={{ ...codeStyle, maxWidth: 480, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {desktopInfo.value?.exe_path ?? '—'}

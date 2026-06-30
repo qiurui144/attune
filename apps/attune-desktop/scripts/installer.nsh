@@ -47,6 +47,7 @@
   Pop $0
   nsExec::ExecToStack 'taskkill /F /IM attune-desktop.exe /T'
   Pop $0
+  Delete "$APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Attune.lnk"
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
