@@ -116,6 +116,7 @@ pub fn assert_vault_db_outside_plugins_dir(plugins_dir: &Path, vault_db: &Path) 
 #[derive(Debug, Clone)]
 pub struct SyncReport {
     pub installed: Vec<String>,
+    pub updated: Vec<String>,
     pub skipped_already_installed: Vec<String>,
     pub failed: Vec<(String, String)>, // (plugin_id, reason)
 }
@@ -147,6 +148,13 @@ pub fn best_effort_sync_plugins(cloud: &CloudClient) -> SyncReport {
                     report.installed
                 );
             }
+            if !report.updated.is_empty() {
+                log::info!(
+                    "member login: updated {} entitled plugin(s): {:?}",
+                    report.updated.len(),
+                    report.updated
+                );
+            }
             if !report.failed.is_empty() {
                 // Non-fatal: individual packages failed to verify/install. Login proceeds.
                 log::warn!(
@@ -163,6 +171,7 @@ pub fn best_effort_sync_plugins(cloud: &CloudClient) -> SyncReport {
             log::warn!("member login: plugin auto-sync skipped (login NOT blocked): {e}");
             SyncReport {
                 installed: Vec::new(),
+                updated: Vec::new(),
                 skipped_already_installed: Vec::new(),
                 failed: Vec::new(),
             }
@@ -187,18 +196,20 @@ pub fn sync_plugins_with_store(
     let licenses = cloud.list_licenses()?;
     let plugins_dir = crate::plugin_registry::PluginRegistry::default_plugins_dir()?;
     std::fs::create_dir_all(&plugins_dir).map_err(VaultError::Io)?;
-    let installed_ids: std::collections::HashSet<String> = list_installed_plugin_ids(&plugins_dir)?;
+    let mut installed_versions = list_installed_plugins(&plugins_dir)?;
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut report = SyncReport {
         installed: Vec::new(),
+        updated: Vec::new(),
         skipped_already_installed: Vec::new(),
         failed: Vec::new(),
     };
 
     for lic in &licenses {
         for ep in &lic.entitled_plugins {
-            if installed_ids.contains(&ep.plugin_id) {
+            let installed_version = installed_versions.get(&ep.plugin_id);
+            if !plugin_needs_install(&installed_versions, ep) {
                 report.skipped_already_installed.push(ep.plugin_id.clone());
                 // Lazy backfill: already installed but no entitlement row yet
                 // (e.g. pre-T4 law-pro) → write one now (§10 grandfather).
@@ -214,12 +225,18 @@ pub fn sync_plugins_with_store(
                 }
                 continue;
             }
+            let is_update = installed_version.is_some();
             match install_one_plugin(ep, &lic.license_key, &plugins_dir) {
                 Ok(()) => {
-                    report.installed.push(ep.plugin_id.clone());
+                    if is_update {
+                        report.updated.push(ep.plugin_id.clone());
+                    } else {
+                        report.installed.push(ep.plugin_id.clone());
+                    }
                     if let Some((store, dek)) = sink {
                         let _ = persist_entitlement(store, dek, ep, lic, &now);
                     }
+                    installed_versions.insert(ep.plugin_id.clone(), ep.version.clone());
                 }
                 Err(e) => report.failed.push((ep.plugin_id.clone(), format!("{e}"))),
             }
@@ -241,10 +258,10 @@ fn persist_entitlement(
     store.upsert_entitlement(dek, &row)
 }
 
-fn list_installed_plugin_ids(
+fn list_installed_plugins(
     plugins_dir: &std::path::Path,
-) -> Result<std::collections::HashSet<String>> {
-    let mut out = std::collections::HashSet::new();
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
     if !plugins_dir.exists() {
         return Ok(out);
     }
@@ -261,10 +278,26 @@ fn list_installed_plugin_ids(
             None,
             Some(crate::plugin_sig::Trust::ThirdParty),
         ) {
-            out.insert(plugin.manifest.id);
+            out.insert(plugin.manifest.id, plugin.manifest.version);
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+fn list_installed_plugin_ids(
+    plugins_dir: &std::path::Path,
+) -> Result<std::collections::HashSet<String>> {
+    Ok(list_installed_plugins(plugins_dir)?.into_keys().collect())
+}
+
+fn plugin_needs_install(
+    installed_versions: &std::collections::HashMap<String, String>,
+    ep: &EntitledPlugin,
+) -> bool {
+    !installed_versions
+        .get(&ep.plugin_id)
+        .is_some_and(|version| version == &ep.version)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -923,11 +956,26 @@ mod tests {
     fn sync_report_default_empty() {
         let r = SyncReport {
             installed: vec![],
+            updated: vec![],
             skipped_already_installed: vec![],
             failed: vec![],
         };
         assert!(r.installed.is_empty());
+        assert!(r.updated.is_empty());
         assert!(r.failed.is_empty());
+    }
+
+    #[test]
+    fn plugin_needs_install_when_entitlement_version_differs() {
+        let mut installed = std::collections::HashMap::new();
+        installed.insert("law-pro".to_string(), "1.0.8".to_string());
+
+        let mut ep = ep_with_pubkey(crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS[0]);
+        ep.version = "1.0.8".into();
+        assert!(!plugin_needs_install(&installed, &ep));
+
+        ep.version = "1.0.9".into();
+        assert!(plugin_needs_install(&installed, &ep));
     }
 
     /// 把一个最小插件目录打成 tar.gz 字节流

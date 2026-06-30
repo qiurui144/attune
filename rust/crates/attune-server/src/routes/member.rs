@@ -227,6 +227,7 @@ fn member_session_sync_plugins() -> Option<attune_core::plugin_sync::SyncReport>
 fn sync_report_to_json(r: &attune_core::plugin_sync::SyncReport) -> serde_json::Value {
     serde_json::json!({
         "installed": r.installed,
+        "updated": r.updated,
         "skipped_already_installed": r.skipped_already_installed,
         "failed": r.failed
             .iter()
@@ -733,6 +734,7 @@ fn activation_sync_failed_for_all(
 ) -> attune_core::plugin_sync::SyncReport {
     attune_core::plugin_sync::SyncReport {
         installed: Vec::new(),
+        updated: Vec::new(),
         skipped_already_installed: Vec::new(),
         failed: allowed_plugins
             .iter()
@@ -749,6 +751,7 @@ fn sync_activation_plugins_with_hub(
 ) -> attune_core::plugin_sync::SyncReport {
     let mut report = attune_core::plugin_sync::SyncReport {
         installed: Vec::new(),
+        updated: Vec::new(),
         skipped_already_installed: Vec::new(),
         failed: Vec::new(),
     };
