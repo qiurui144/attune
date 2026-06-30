@@ -1,12 +1,13 @@
 //! Plugin marketplace routes.
 //! W4 E1 (2026-04-27): 加 enabled 字段 + toggle 端点支持 marketplace UI。
 
-use axum::extract::{Path, State};
-use axum::Json;
-use crate::routes::errors::{internal, vault_locked};
 use crate::error::AppResult;
+use crate::routes::errors::{internal, vault_locked};
 use crate::state::SharedState;
 use attune_core::taxonomy::Taxonomy;
+use axum::extract::{Path, State};
+use axum::Json;
+use std::sync::Arc;
 
 const SETTINGS_KEY: &str = "app_settings";
 
@@ -36,12 +37,32 @@ fn load_disabled_plugin_ids(state: &SharedState) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn current_plugin_registry(
+    state: &SharedState,
+) -> Arc<attune_core::plugin_registry::PluginRegistry> {
+    match attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
+        .and_then(|dir| attune_core::plugin_registry::PluginRegistry::scan(&dir))
+    {
+        Ok((registry, warnings)) => {
+            for warning in warnings {
+                tracing::warn!("plugin live-scan warning before plugin list: {warning}");
+            }
+            Arc::new(registry)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "plugin live-scan failed before plugin list; using startup registry: {e}"
+            );
+            state.plugin_registry.clone()
+        }
+    }
+}
+
 /// GET /api/v1/plugins — 列出所有可用插件（内置 taxonomy + plugin_registry 装载）+ enabled 状态
-pub async fn list(
-    State(state): State<SharedState>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     let disabled = load_disabled_plugin_ids(&state);
     let is_enabled = |id: &str| !disabled.iter().any(|d| d == id);
+    let registry = current_plugin_registry(&state);
 
     // Trust-chain T10 (spec §5.1): each plugin reports `trust` (real verify result,
     // T9 — not hardcoded) + `entitlement_status` (runtime state from EntitlementCache).
@@ -49,8 +70,7 @@ pub async fn list(
     // "unsigned" when the registry has no verified label (builtin taxonomy plugins).
     let now = chrono::Utc::now();
     let trust_of = |id: &str| -> &'static str {
-        state
-            .plugin_registry
+        registry
             .plugin_trust(id)
             .map(|t| t.as_api_str())
             .unwrap_or("unsigned")
@@ -64,7 +84,12 @@ pub async fn list(
     let mut list: Vec<serde_json::Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    if let Some(tax) = state.taxonomy.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+    if let Some(tax) = state
+        .taxonomy
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
         for p in &tax.plugins {
             seen.insert(p.id.clone());
             list.push(serde_json::json!({
@@ -87,24 +112,36 @@ pub async fn list(
     }
 
     // plugin_registry: 用户安装的 plugins (attune-pro vertical 等)
-    for plugin in state.plugin_registry.plugins() {
+    for plugin in registry.plugins() {
         let m = &plugin.manifest;
         if seen.contains(&m.id) {
             continue; // 避免重复
         }
-        let agents = m.agents.iter().map(|a| serde_json::json!({
-            "id": a.id,
-            "description": a.description,
-            // case_kinds 非空 = 项目级 agent（绑 project.kind）；空 = 独立。
-            // 前端据此把触发入口路由到 Project 详情 vs Skills。
-            "case_kinds": a.case_kinds,
-        })).collect::<Vec<_>>();
+        let agents = m
+            .agents
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "id": a.id,
+                    "description": a.description,
+                    // case_kinds 非空 = 项目级 agent（绑 project.kind）；空 = 独立。
+                    // 前端据此把触发入口路由到 Project 详情 vs Skills。
+                    "case_kinds": a.case_kinds,
+                })
+            })
+            .collect::<Vec<_>>();
         // ui_components：插件声明的 plugin-form（PluginForm 渲染 + agent-run 触发）
-        let ui_components = m.ui_components.iter().map(|c| serde_json::json!({
-            "id": c.id,
-            "target": c.target,
-            "description": c.description,
-        })).collect::<Vec<_>>();
+        let ui_components = m
+            .ui_components
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "target": c.target,
+                    "description": c.description,
+                })
+            })
+            .collect::<Vec<_>>();
         list.push(serde_json::json!({
             "id": m.id,
             "name": m.name,
@@ -126,22 +163,28 @@ pub async fn list(
     }
 
     // Fallback: vault locked, only return builtins (assumed enabled)
-    let plugins = Taxonomy::load_builtin_plugins().map_err(|e| internal("load_builtin_plugins", e))?;
-    let list: Vec<serde_json::Value> = plugins.iter().map(|p| serde_json::json!({
-        "id": p.id,
-        "name": p.name,
-        "version": p.version,
-        "description": p.description,
-        "source": "builtin",
-        "enabled": true,
-        "trust": trust_of(&p.id),
-        "entitlement_status": entitlement_status_of(&p.id),
-        "dimensions": p.dimensions.iter().map(|d| serde_json::json!({
-            "name": d.name,
-            "label": d.label,
-            "description": d.description,
-        })).collect::<Vec<_>>(),
-    })).collect();
+    let plugins =
+        Taxonomy::load_builtin_plugins().map_err(|e| internal("load_builtin_plugins", e))?;
+    let list: Vec<serde_json::Value> = plugins
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "name": p.name,
+                "version": p.version,
+                "description": p.description,
+                "source": "builtin",
+                "enabled": true,
+                "trust": trust_of(&p.id),
+                "entitlement_status": entitlement_status_of(&p.id),
+                "dimensions": p.dimensions.iter().map(|d| serde_json::json!({
+                    "name": d.name,
+                    "label": d.label,
+                    "description": d.description,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
     Ok(Json(serde_json::json!({"plugins": list})))
 }
 
@@ -240,7 +283,9 @@ mod tests {
         vault.setup("P@ss-plugins-trust-not-real").expect("setup");
         let state = Arc::new(crate::state::AppState::new(vault, false));
         // Seed entitlement cache: test-pro is a paid, active license → status "active".
-        state.entitlement_cache.upsert(ent_row("test-pro", "paid", "active"));
+        state
+            .entitlement_cache
+            .upsert(ent_row("test-pro", "paid", "active"));
 
         let resp = list(axum::extract::State(state)).await.expect("list ok");
         let body = resp.0; // Json(Value)
@@ -251,8 +296,40 @@ mod tests {
             .expect("test-pro listed");
 
         // Unsigned user plugin (no plugin.sig) → real verify yields trust "unsigned".
-        assert_eq!(entry["trust"], "unsigned", "trust is the real verify result, not hardcoded");
+        assert_eq!(
+            entry["trust"], "unsigned",
+            "trust is the real verify result, not hardcoded"
+        );
         // Seeded paid active license → entitlement_status "active".
         assert_eq!(entry["entitlement_status"], "active");
+    }
+
+    #[tokio::test]
+    async fn list_live_scans_plugins_installed_after_startup() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let data_dir = tmp.path().join("attune");
+        let _dir = crate::test_support::override_data_dir(data_dir.clone());
+
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-plugin-live-scan").expect("setup");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+
+        let plugin_dir = data_dir.join("plugins").join("late-pro");
+        std::fs::create_dir_all(&plugin_dir).expect("mkdir plugin");
+        std::fs::write(
+            plugin_dir.join("plugin.yaml"),
+            "id: late-pro\nname: Late Pro\ntype: industry\nversion: \"1.2.3\"\n",
+        )
+        .expect("write plugin.yaml");
+
+        let resp = list(axum::extract::State(state)).await.expect("list ok");
+        let body = resp.0;
+        let plugins = body["plugins"].as_array().expect("plugins array");
+        let entry = plugins
+            .iter()
+            .find(|p| p["id"] == "late-pro")
+            .expect("late-pro listed after startup");
+
+        assert_eq!(entry["version"], "1.2.3");
     }
 }
