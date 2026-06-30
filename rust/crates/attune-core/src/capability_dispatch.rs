@@ -181,7 +181,7 @@ pub fn dispatch(invocation: &CapabilityInvocation) -> Result<CapabilityResult> {
 
 /// Capability 执行运行时分流类型 (spec §5.3).
 ///
-/// - `RustBinary`: 现有 subprocess(平台相关二进制)
+/// - `RustBinary`: 现有 subprocess/rust_binary(平台相关二进制)
 /// - `Wasm`: wasm32-wasip1 模块,wasmtime 执行(一包通吃所有平台)
 /// - `DataOnly`: 无执行体(纯 prompt + JSON schema,宿主侧组合)
 ///
@@ -196,10 +196,11 @@ pub enum CapabilityRuntime {
 
 /// 解析 manifest runtime 字符串到 `CapabilityRuntime`。
 ///
-/// `python_subprocess` / 任何未知值 → `unsupported-runtime` Err。
+/// `subprocess` 是 `rust_binary` 的历史 manifest 别名;`python_subprocess` /
+/// 任何未知值 → `unsupported-runtime` Err。
 pub fn parse_runtime(s: &str) -> Result<CapabilityRuntime> {
     match s {
-        "rust_binary" => Ok(CapabilityRuntime::RustBinary),
+        "rust_binary" | "subprocess" => Ok(CapabilityRuntime::RustBinary),
         "wasm" => Ok(CapabilityRuntime::Wasm),
         "data_only" => Ok(CapabilityRuntime::DataOnly),
         "python_subprocess" => Err(VaultError::InvalidInput(
@@ -372,6 +373,7 @@ mod tests {
     #[test]
     fn parse_runtime_known_values() {
         assert_eq!(parse_runtime("rust_binary").unwrap(), CapabilityRuntime::RustBinary);
+        assert_eq!(parse_runtime("subprocess").unwrap(), CapabilityRuntime::RustBinary);
         assert_eq!(parse_runtime("wasm").unwrap(), CapabilityRuntime::Wasm);
         assert_eq!(parse_runtime("data_only").unwrap(), CapabilityRuntime::DataOnly);
     }
