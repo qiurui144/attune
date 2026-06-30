@@ -37,17 +37,35 @@ use std::time::Duration;
 /// 即使配置了 LLM 也恒 exit 4 "LLM_ENDPOINT not set"（§7.3 env-wiring trap）。
 pub fn llm_env_from_settings(settings: &serde_json::Value) -> Vec<(String, String)> {
     let mut env = Vec::new();
-    let Some(llm) = settings.get("llm") else { return env };
-    if let Some(v) = llm.get("provider").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    let Some(llm) = settings.get("llm") else {
+        return env;
+    };
+    if let Some(v) = llm
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         env.push(("LLM_PROVIDER".into(), v.into()));
     }
-    if let Some(v) = llm.get("endpoint").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(v) = llm
+        .get("endpoint")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         env.push(("LLM_ENDPOINT".into(), v.into()));
     }
-    if let Some(v) = llm.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(v) = llm
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         env.push(("LLM_MODEL".into(), v.into()));
     }
-    if let Some(v) = llm.get("api_key").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(v) = llm
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         env.push(("LLM_API_KEY".into(), v.into()));
     }
     env
@@ -82,16 +100,55 @@ fn current_plugin_registry(
     }
 }
 
+pub(crate) fn plugin_requires_entitlement(
+    registry: &attune_core::plugin_registry::PluginRegistry,
+    plugin_id: &str,
+) -> bool {
+    if plugin_id.ends_with("-pro") {
+        return true;
+    }
+    registry
+        .get_plugin(plugin_id)
+        .and_then(|plugin| plugin.manifest.pricing.as_ref())
+        .map(|pricing| !pricing.tier.trim().eq_ignore_ascii_case("free"))
+        .unwrap_or(false)
+}
+
 /// Trust-chain T10 (spec §7.2): entitlement dispatch gate. Returns `Ok(())` when the
 /// owning plugin is entitled to run (free / active / trial / paid-grace / degraded);
-/// returns a kebab-coded `AppError::Forbidden` when blocked (`trial-expired` /
-/// `license-revoked`). The plugin's installed data is NOT touched — only the run is
-/// refused, so re-subscribing re-enables it (spec §7.2 "插件保留已装"). Pure read of
-/// the in-memory cache (O(1) keyed lookup); no vault / network.
-fn entitlement_gate(state: &SharedState, plugin_id: &str) -> AppResult<()> {
+/// returns a kebab-coded `AppError::Forbidden` when blocked (`plugin-entitlement-required`
+/// / `trial-expired` / `license-revoked`). The plugin's installed data is NOT touched
+/// — only the run is refused, so re-subscribing re-enables it (spec §7.2 "插件保留已装").
+/// Pure read of the in-memory cache (O(1) keyed lookup); no vault / network.
+fn entitlement_gate(
+    state: &SharedState,
+    plugin_id: &str,
+    requires_entitlement: bool,
+) -> AppResult<()> {
+    if requires_entitlement {
+        let tier = state.entitlement_cache.tier(plugin_id);
+        if tier
+            .as_deref()
+            .map(|t| t.trim().eq_ignore_ascii_case("free"))
+            .unwrap_or(true)
+        {
+            return missing_entitlement_to_result(plugin_id);
+        }
+    }
     let now = chrono::Utc::now();
     let decision = state.entitlement_cache.is_entitled(plugin_id, &now);
     gate_decision_to_result(plugin_id, decision)
+}
+
+fn missing_entitlement_to_result(plugin_id: &str) -> AppResult<()> {
+    Err(AppError::detailed(
+        StatusCode::FORBIDDEN,
+        json!({
+            "error": "agent dispatch blocked by entitlement",
+            "code": "plugin-entitlement-required",
+            "plugin_id": plugin_id,
+        }),
+    ))
 }
 
 /// Map an [`attune_core::entitlement::EntitlementDecision`] to the dispatch route's
@@ -135,12 +192,14 @@ pub async fn run_agent(
         .ok_or_else(|| {
             AppError::NotFound(format!("agent '{agent_id}' not found in any loaded plugin"))
         })?;
+    let requires_entitlement = plugin_requires_entitlement(&registry, &plugin_id);
 
     // Trust-chain T10 (spec §7.2): entitlement gate BEFORE any dispatch work. A
-    // trial-expired / revoked license rejects with a kebab code (plugin data is
-    // preserved — only the run is blocked); paid-grace / degraded allow (fail-open);
-    // free / unregistered plugins always allow. O(1) EntitlementCache keyed lookup.
-    entitlement_gate(&state, &plugin_id)?;
+    // pro plugin with no entitlement row is rejected before any subprocess is touched
+    // (copied-directory guard). Trial-expired / revoked rejects with a kebab code
+    // (plugin data is preserved — only the run is blocked); paid-grace / degraded
+    // allow (fail-open). O(1) EntitlementCache keyed lookup.
+    entitlement_gate(&state, &plugin_id, requires_entitlement)?;
 
     // Bug-D: runtime: library 的 agent (如 interest_calculator) 不暴露独立 binary —
     // 由其他 agent 内部以 lib 方式调用,不应通过 HTTP route 直接 dispatch。
@@ -186,8 +245,8 @@ pub async fn run_agent(
     let plugin_dir = plugins_root.join(&plugin_id);
 
     // 3. agent stdin JSON
-    let stdin_json = serde_json::to_string(&body.input)
-        .map_err(|e| internal("serialize agent input", e))?;
+    let stdin_json =
+        serde_json::to_string(&body.input).map_err(|e| internal("serialize agent input", e))?;
 
     // 3b. 从 app_settings 读取 LLM env vars，转发给 agent subprocess。
     // LLM-heavy agents (fact_extractor 等) 依赖裸 `LLM_*` env 来初始化 LLM client；
@@ -198,7 +257,11 @@ pub async fn run_agent(
             .lock()
             .ok()
             .and_then(|vault| {
-                vault.store().get_meta("app_settings").ok().flatten()
+                vault
+                    .store()
+                    .get_meta("app_settings")
+                    .ok()
+                    .flatten()
                     .and_then(|data| serde_json::from_slice(&data).ok())
             })
             .unwrap_or_else(|| serde_json::json!({}));
@@ -266,6 +329,7 @@ mod tests {
     use attune_core::entitlement::{EntitlementCache, EntitlementDecision};
     use attune_core::store::plugin_entitlements::EntitlementRow;
     use chrono::{DateTime, Utc};
+    use std::sync::Arc;
 
     fn ts(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
@@ -293,27 +357,100 @@ mod tests {
 
     // ── T10: dispatch gate (spec §7.2) ──────────────────────────────────────
 
+    #[test]
+    fn pro_suffix_requires_entitlement_even_without_pricing_block() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let plugin_dir = tmp.path().join("law-pro");
+        std::fs::create_dir_all(&plugin_dir).expect("mkdir plugin");
+        std::fs::write(
+            plugin_dir.join("plugin.yaml"),
+            "id: law-pro\nname: Law Pro\ntype: industry\nversion: \"1.0.0\"\n",
+        )
+        .expect("write plugin.yaml");
+        let (registry, warnings) =
+            attune_core::plugin_registry::PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        assert!(plugin_requires_entitlement(&registry, "law-pro"));
+    }
+
+    #[test]
+    fn free_plugin_does_not_require_entitlement() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let plugin_dir = tmp.path().join("local-helper");
+        std::fs::create_dir_all(&plugin_dir).expect("mkdir plugin");
+        std::fs::write(
+            plugin_dir.join("plugin.yaml"),
+            "id: local-helper\nname: Local Helper\ntype: skill\nversion: \"1.0.0\"\npricing:\n  tier: free\n",
+        )
+        .expect("write plugin.yaml");
+        let (registry, warnings) =
+            attune_core::plugin_registry::PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        assert!(!plugin_requires_entitlement(&registry, "local-helper"));
+    }
+
+    #[test]
+    fn dispatch_blocks_required_plugin_without_entitlement_row() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+
+        let err = entitlement_gate(&state, "law-pro", true).unwrap_err();
+        assert!(
+            matches!(err, AppError::Detailed { status, .. } if status == StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn dispatch_allows_free_plugin_without_entitlement_row() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+
+        assert!(entitlement_gate(&state, "local-helper", false).is_ok());
+    }
+
     /// trial-expired → dispatch blocked with kebab code `trial-expired`; the plugin's
     /// installed data is untouched (gate only refuses the run, cache row still present).
     #[test]
     fn dispatch_blocked_when_trial_expired() {
         let cache = EntitlementCache::new();
-        cache.upsert(row("law-pro", "trial", "active", Some("2026-06-10T00:00:00+00:00"), None));
+        cache.upsert(row(
+            "law-pro",
+            "trial",
+            "active",
+            Some("2026-06-10T00:00:00+00:00"),
+            None,
+        ));
         let now = ts("2026-06-12T00:00:00+00:00"); // past trial_expires
         let decision = cache.is_entitled("law-pro", &now);
         assert_eq!(decision, EntitlementDecision::Reject("trial-expired"));
         let res = gate_decision_to_result("law-pro", decision);
         let err = res.unwrap_err();
         // 403 + kebab code via AppError::detailed; plugin row still in cache (data preserved).
-        assert!(matches!(err, AppError::Detailed { status, .. } if status == StatusCode::FORBIDDEN));
-        assert_eq!(cache.snapshot().len(), 1, "trial-expired must NOT delete the plugin row");
+        assert!(
+            matches!(err, AppError::Detailed { status, .. } if status == StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            cache.snapshot().len(),
+            1,
+            "trial-expired must NOT delete the plugin row"
+        );
     }
 
     /// paid in-grace (cloud unreachable, < 14d) → dispatch ALLOWED (fail-open).
     #[test]
     fn dispatch_allowed_in_grace_paid() {
         let cache = EntitlementCache::new();
-        cache.upsert(row("law-pro", "paid", "active", None, Some("2026-06-10T00:00:00+00:00")));
+        cache.upsert(row(
+            "law-pro",
+            "paid",
+            "active",
+            None,
+            Some("2026-06-10T00:00:00+00:00"),
+        ));
         let now = ts("2026-06-12T00:00:00+00:00"); // 2d into grace, < 14d
         let decision = cache.is_entitled("law-pro", &now);
         assert_eq!(decision, EntitlementDecision::Allow);
@@ -329,8 +466,14 @@ mod tests {
         let decision = cache.is_entitled("law-pro", &now);
         assert_eq!(decision, EntitlementDecision::Reject("license-revoked"));
         let res = gate_decision_to_result("law-pro", decision);
-        assert!(matches!(res.unwrap_err(), AppError::Detailed { status, .. } if status == StatusCode::FORBIDDEN));
-        assert_eq!(cache.snapshot().len(), 1, "revoked must NOT delete the plugin row (data preserved)");
+        assert!(
+            matches!(res.unwrap_err(), AppError::Detailed { status, .. } if status == StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            cache.snapshot().len(),
+            1,
+            "revoked must NOT delete the plugin row (data preserved)"
+        );
     }
 
     #[test]
@@ -346,10 +489,18 @@ mod tests {
         let env = llm_env_from_settings(&settings);
         // Bare-prefix names must match attune-agent-sdk prepare_llm_env reader
         // (§7.3 env-wiring trap: ATTUNE_LLM_* mismatch caused recurring exit-4).
-        assert!(env.iter().any(|(k, v)| k == "LLM_PROVIDER" && v == "openai_compat"));
-        assert!(env.iter().any(|(k, v)| k == "LLM_ENDPOINT" && v == "https://api.deepseek.com/v1"));
-        assert!(env.iter().any(|(k, v)| k == "LLM_MODEL" && v == "deepseek-chat"));
-        assert!(env.iter().any(|(k, v)| k == "LLM_API_KEY" && v == "sk-test123"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "LLM_PROVIDER" && v == "openai_compat"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "LLM_ENDPOINT" && v == "https://api.deepseek.com/v1"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "LLM_MODEL" && v == "deepseek-chat"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "LLM_API_KEY" && v == "sk-test123"));
         assert_eq!(env.len(), 4);
     }
 
@@ -467,10 +618,19 @@ mod tests {
                 _ => false,
             }
         }
-        assert!(is_empty(&serde_json::json!({})), "empty object should be empty");
+        assert!(
+            is_empty(&serde_json::json!({})),
+            "empty object should be empty"
+        );
         assert!(is_empty(&serde_json::Value::Null), "null should be empty");
-        assert!(!is_empty(&serde_json::json!({"x": 1})), "non-empty object should not be empty");
-        assert!(!is_empty(&serde_json::json!([])), "empty array is non-object, not treated as empty (agent decides)");
+        assert!(
+            !is_empty(&serde_json::json!({"x": 1})),
+            "non-empty object should not be empty"
+        );
+        assert!(
+            !is_empty(&serde_json::json!([])),
+            "empty array is non-object, not treated as empty (agent decides)"
+        );
         assert!(!is_empty(&serde_json::json!("string")), "string non-empty");
         assert!(!is_empty(&serde_json::json!(42)), "number non-empty");
     }

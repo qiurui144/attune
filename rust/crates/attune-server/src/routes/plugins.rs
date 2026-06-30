@@ -75,8 +75,21 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
             .map(|t| t.as_api_str())
             .unwrap_or("unsigned")
     };
-    let entitlement_status_of =
-        |id: &str| -> &'static str { state.entitlement_cache.status(id, &now).as_api_str() };
+    let entitlement_status_of = |id: &str, requires_entitlement: bool| -> &'static str {
+        if requires_entitlement && !state.entitlement_cache.contains(id) {
+            return "unlicensed";
+        }
+        let tier = state.entitlement_cache.tier(id);
+        if requires_entitlement
+            && tier
+                .as_deref()
+                .map(|t| t.trim().eq_ignore_ascii_case("free"))
+                .unwrap_or(true)
+        {
+            return "unlicensed";
+        }
+        state.entitlement_cache.status(id, &now).as_api_str()
+    };
 
     // 收集两个数据源:
     // 1. taxonomy.plugins (内置 dimensions yaml)
@@ -100,7 +113,7 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
                 "source": if ["tech", "law", "presales", "patent"].contains(&p.id.as_str()) { "builtin" } else { "user" },
                 "enabled": is_enabled(&p.id),
                 "trust": trust_of(&p.id),
-                "entitlement_status": entitlement_status_of(&p.id),
+                "entitlement_status": entitlement_status_of(&p.id, false),
                 "type": "taxonomy",
                 "dimensions": p.dimensions.iter().map(|d| serde_json::json!({
                     "name": d.name,
@@ -117,6 +130,8 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
         if seen.contains(&m.id) {
             continue; // 避免重复
         }
+        let requires_entitlement =
+            crate::routes::agents::plugin_requires_entitlement(&registry, &m.id);
         let agents = m
             .agents
             .iter()
@@ -150,7 +165,7 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
             "source": "user",
             "enabled": is_enabled(&m.id),
             "trust": trust_of(&m.id),
-            "entitlement_status": entitlement_status_of(&m.id),
+            "entitlement_status": entitlement_status_of(&m.id, requires_entitlement),
             "type": m.plugin_type.clone(),
             "agents": agents,
             "ui_components": ui_components,
@@ -176,7 +191,7 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
                 "source": "builtin",
                 "enabled": true,
                 "trust": trust_of(&p.id),
-                "entitlement_status": entitlement_status_of(&p.id),
+                "entitlement_status": entitlement_status_of(&p.id, false),
                 "dimensions": p.dimensions.iter().map(|d| serde_json::json!({
                     "name": d.name,
                     "label": d.label,
@@ -331,5 +346,6 @@ mod tests {
             .expect("late-pro listed after startup");
 
         assert_eq!(entry["version"], "1.2.3");
+        assert_eq!(entry["entitlement_status"], "unlicensed");
     }
 }

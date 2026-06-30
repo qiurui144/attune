@@ -120,16 +120,19 @@ impl Entitlement {
     /// 从 vault 行解析(时间字段解析一次)。解析失败的时间字段视为缺失(保守:
     /// 不可解析的 trial_expires → 当作已过期)。
     pub fn from_row(row: &EntitlementRow) -> Self {
-        let parse = |s: &str| DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc));
+        let parse = |s: &str| {
+            DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
+        };
         Entitlement {
             plugin_id: row.plugin_id.clone(),
             tier: row.tier.clone(),
             raw_status: row.status.clone(),
             trial_expires: row.trial_expires.as_deref().and_then(parse),
             // 不可解析的 last_verified_at 退化为 epoch(强制 re-verify / 过期处理)。
-            last_verified_at: parse(&row.last_verified_at).unwrap_or_else(|| {
-                DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is valid")
-            }),
+            last_verified_at: parse(&row.last_verified_at)
+                .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is valid")),
             grace_started_at: row.grace_started_at.as_deref().and_then(parse),
         }
     }
@@ -292,6 +295,19 @@ impl EntitlementCache {
         }
     }
 
+    /// Whether an entitlement row exists for the plugin. Pro dispatch uses this as
+    /// the "copied plugin directory" guard before the free-plugin fallback below.
+    pub fn contains(&self, plugin_id: &str) -> bool {
+        let map = self.inner.read().expect("entitlement cache poisoned");
+        map.contains_key(plugin_id)
+    }
+
+    /// The stored entitlement tier for the plugin, if any. Kept O(1) for dispatch gates.
+    pub fn tier(&self, plugin_id: &str) -> Option<String> {
+        let map = self.inner.read().expect("entitlement cache poisoned");
+        map.get(plugin_id).map(|row| row.tier.clone())
+    }
+
     /// dispatch gate(spec §7.2)—— **O(1) HashMap 命中**(PERF-1,dispatch 热点)。
     /// 未在缓存(免费 / 无授权依赖)→ Allow。命中 → 解析宽限态后判定。
     pub fn is_entitled(&self, plugin_id: &str, now: &DateTime<Utc>) -> EntitlementDecision {
@@ -377,7 +393,10 @@ mod tests {
         e.trial_expires = Some(ts("2026-06-20T00:00:00+00:00"));
         let now = ts("2026-06-15T00:00:00+00:00");
         assert_eq!(grace_transition(&e, &now), EntStatus::Trial);
-        assert_eq!(dispatch_decision(EntStatus::Trial), EntitlementDecision::Allow);
+        assert_eq!(
+            dispatch_decision(EntStatus::Trial),
+            EntitlementDecision::Allow
+        );
     }
 
     #[test]
@@ -394,7 +413,10 @@ mod tests {
         cache.upsert(row("law-pro", "paid", "active"));
         let now = ts("2026-06-12T00:00:01+00:00");
         assert_eq!(cache.status("law-pro", &now), EntStatus::Active);
-        assert_eq!(cache.is_entitled("law-pro", &now), EntitlementDecision::Allow);
+        assert_eq!(
+            cache.is_entitled("law-pro", &now),
+            EntitlementDecision::Allow
+        );
     }
 
     // ── edge: trial / grace boundaries ──────────────────────────────────────
@@ -450,7 +472,10 @@ mod tests {
         let now = ts("2026-06-15T00:01:00+00:00"); // > 14d
         assert_eq!(grace_transition(&e, &now), EntStatus::Degraded);
         // fail-open: degraded paid is still dispatchable.
-        assert_eq!(dispatch_decision(EntStatus::Degraded), EntitlementDecision::Allow);
+        assert_eq!(
+            dispatch_decision(EntStatus::Degraded),
+            EntitlementDecision::Allow
+        );
     }
 
     // ── error: cloud unreachable / revoked ──────────────────────────────────
@@ -570,7 +595,21 @@ mod tests {
             EntitlementDecision::Reject("license-revoked")
         );
         // keyed miss → Allow.
-        assert_eq!(cache.is_entitled("not-present", &now), EntitlementDecision::Allow);
+        assert_eq!(
+            cache.is_entitled("not-present", &now),
+            EntitlementDecision::Allow
+        );
+    }
+
+    #[test]
+    fn contains_and_tier_are_keyed_lookups() {
+        let cache = EntitlementCache::new();
+        assert!(!cache.contains("law-pro"));
+        assert_eq!(cache.tier("law-pro"), None);
+
+        cache.upsert(row("law-pro", "paid", "active"));
+        assert!(cache.contains("law-pro"));
+        assert_eq!(cache.tier("law-pro").as_deref(), Some("paid"));
     }
 
     // ── PERF-5: best-status pre-resolved at upsert ──────────────────────────
@@ -586,7 +625,14 @@ mod tests {
         let now = ts("2026-06-12T00:00:01+00:00");
         assert_eq!(cache.status("law-pro", &now), EntStatus::Active);
         // exactly one row per plugin (no multi-license accumulation in the cache).
-        assert_eq!(cache.snapshot().iter().filter(|r| r.plugin_id == "law-pro").count(), 1);
+        assert_eq!(
+            cache
+                .snapshot()
+                .iter()
+                .filter(|r| r.plugin_id == "law-pro")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -595,7 +641,11 @@ mod tests {
         cache.upsert(row("law-pro", "paid", "active"));
         cache.upsert(row("law-pro", "paid", "suspended")); // lower rank
         let now = ts("2026-06-12T00:00:01+00:00");
-        assert_eq!(cache.status("law-pro", &now), EntStatus::Active, "merge keeps best");
+        assert_eq!(
+            cache.status("law-pro", &now),
+            EntStatus::Active,
+            "merge keeps best"
+        );
     }
 
     // ── hydrate ─────────────────────────────────────────────────────────────
@@ -603,7 +653,10 @@ mod tests {
     #[test]
     fn hydrate_from_rows_populates_cache() {
         let cache = EntitlementCache::new();
-        cache.hydrate_from_rows(vec![row("law-pro", "paid", "active"), row("med-pro", "trial", "active")]);
+        cache.hydrate_from_rows(vec![
+            row("law-pro", "paid", "active"),
+            row("med-pro", "trial", "active"),
+        ]);
         let now = ts("2026-06-12T00:00:01+00:00");
         assert_eq!(cache.snapshot().len(), 2);
         assert_eq!(cache.status("law-pro", &now), EntStatus::Active);
@@ -613,7 +666,9 @@ mod tests {
     fn hydrate_from_store_roundtrip() {
         let store = crate::store::Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
-        store.upsert_entitlement(&dek, &row("law-pro", "paid", "active")).unwrap();
+        store
+            .upsert_entitlement(&dek, &row("law-pro", "paid", "active"))
+            .unwrap();
         let cache = EntitlementCache::new();
         cache.hydrate(&store, &dek).unwrap();
         let now = ts("2026-06-12T00:00:01+00:00");
@@ -626,6 +681,9 @@ mod tests {
         cache.upsert(row("free-plug", "free", "active"));
         let now = ts("2026-06-12T00:00:01+00:00");
         assert_eq!(cache.status("free-plug", &now), EntStatus::Free);
-        assert_eq!(cache.is_entitled("free-plug", &now), EntitlementDecision::Allow);
+        assert_eq!(
+            cache.is_entitled("free-plug", &now),
+            EntitlementDecision::Allow
+        );
     }
 }

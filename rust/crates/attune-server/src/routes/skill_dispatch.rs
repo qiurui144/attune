@@ -9,9 +9,10 @@
 //! 1. **Agent must be declared by an installed plugin.** `list_agents()` only yields agents from
 //!    plugins that passed the scan-time signature/trust gate (`scan_with_trust`); an id not in
 //!    that set is rejected (`agent-not-found`) — no arbitrary binary can be invoked.
-//! 2. **Entitlement gate (T10).** The owning plugin's license must be entitled to run
-//!    (free/active/trial/paid-grace/degraded); trial-expired / revoked rejects. Same gate as the
-//!    HTTP dispatch route, so a skill can't bypass licensing.
+//! 2. **Entitlement gate (T10).** Pro/paid/trial plugins must have a local entitlement row and
+//!    the owning plugin's license must be entitled to run (active/trial/paid-grace/degraded);
+//!    trial-expired / revoked rejects. Same gate as the HTTP dispatch route, so a skill can't
+//!    bypass licensing.
 //! 3. **`library`-runtime agents are not directly dispatchable** (called internally by other
 //!    agents) — rejected, mirroring the HTTP route.
 //! 4. **Timeout + resource bound.** The subprocess is killed past [`AGENT_RUN_TIMEOUT`]; the
@@ -84,7 +85,20 @@ impl AgentDispatcher for SubprocessAgentDispatcher {
             .resolve_owning_plugin(agent_id)
             .ok_or_else(|| format!("agent '{agent_id}' not found in any installed plugin"))?;
 
-        // (2) entitlement gate (T10) — trial-expired / revoked blocks the run.
+        // (2) entitlement gate (T10) — copied pro plugin dirs without entitlement rows are
+        // rejected, and trial-expired / revoked blocks the run.
+        if crate::routes::agents::plugin_requires_entitlement(&self.registry, &plugin_id) {
+            let tier = self.entitlement_cache.tier(&plugin_id);
+            if tier
+                .as_deref()
+                .map(|t| t.trim().eq_ignore_ascii_case("free"))
+                .unwrap_or(true)
+            {
+                return Err(format!(
+                    "plugin '{plugin_id}' not entitled: plugin-entitlement-required"
+                ));
+            }
+        }
         let now = chrono::Utc::now();
         if let attune_core::entitlement::EntitlementDecision::Reject(code) =
             self.entitlement_cache.is_entitled(&plugin_id, &now)
@@ -115,20 +129,31 @@ impl AgentDispatcher for SubprocessAgentDispatcher {
         .map_err(|e| format!("agent run: {e}"))?;
 
         if result.timed_out {
-            return Err(format!("agent '{agent_id}' timed out (>{}s)", AGENT_RUN_TIMEOUT.as_secs()));
+            return Err(format!(
+                "agent '{agent_id}' timed out (>{}s)",
+                AGENT_RUN_TIMEOUT.as_secs()
+            ));
         }
         match result.exit_code {
             // 0 = success, 2 = business red line (still a valid envelope with red_lines_violated).
             0 | 2 => {
-                let envelope: Value = serde_json::from_str(&result.stdout).map_err(|e| {
-                    format!("agent '{agent_id}' stdout not JSON: {e}")
-                })?;
+                let envelope: Value = serde_json::from_str(&result.stdout)
+                    .map_err(|e| format!("agent '{agent_id}' stdout not JSON: {e}"))?;
                 let llm_tokens = extract_llm_tokens(&envelope);
-                Ok(DispatchOutput { envelope, llm_tokens })
+                Ok(DispatchOutput {
+                    envelope,
+                    llm_tokens,
+                })
             }
-            3 => Err(format!("agent '{agent_id}' rejected input: {}", result.stderr.trim())),
+            3 => Err(format!(
+                "agent '{agent_id}' rejected input: {}",
+                result.stderr.trim()
+            )),
             4 => Err(format!("agent '{agent_id}' has no LLM configured (exit 4)")),
-            other => Err(format!("agent '{agent_id}' exit {other}: {}", result.stderr.trim())),
+            other => Err(format!(
+                "agent '{agent_id}' exit {other}: {}",
+                result.stderr.trim()
+            )),
         }
     }
 }
@@ -186,5 +211,31 @@ mod tests {
     fn extract_llm_tokens_clamps_overflow() {
         let env = json!({ "computation": { "cost_used": { "llm_tokens": 9_999_999_999_u64 } } });
         assert_eq!(extract_llm_tokens(&env), u32::MAX);
+    }
+
+    #[test]
+    fn dispatch_blocks_pro_plugin_without_entitlement_before_subprocess() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let plugin_dir = tmp.path().join("law-pro");
+        std::fs::create_dir_all(&plugin_dir).expect("mkdir plugin");
+        std::fs::write(
+            plugin_dir.join("plugin.yaml"),
+            "id: law-pro\nname: Law Pro\ntype: industry\nversion: \"1.0.0\"\nagents:\n  - id: legal_drafter\n    runtime: rust_binary\n    binary: bin/missing\n",
+        )
+        .expect("write plugin.yaml");
+        let (registry, warnings) = PluginRegistry::scan(tmp.path()).expect("scan pro plugin");
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+
+        let dispatcher = SubprocessAgentDispatcher {
+            registry: Arc::new(registry),
+            entitlement_cache: attune_core::entitlement::EntitlementCache::new(),
+            llm_env: Vec::new(),
+            plugins_root: tmp.path().to_path_buf(),
+        };
+        let err = dispatcher
+            .dispatch("legal_drafter", &json!({"facts": "x"}))
+            .unwrap_err();
+
+        assert!(err.contains("plugin-entitlement-required"));
     }
 }
