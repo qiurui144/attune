@@ -14,9 +14,9 @@
 //! 入库（不报错，仅记 warn）。
 
 use crate::error::{Result, VaultError};
+use crate::process::command_no_window;
 use crate::asr_sensevoice::SenseVoiceBackend;
 use std::path::Path;
-use std::process::Command;
 
 // ── ASR engine abstraction (whisper | sensevoice) ───────────────────────────
 //
@@ -160,7 +160,7 @@ impl AsrBackend {
 ///
 /// 失败时（命令执行错 / help 输出空）保守返 false（避免误判）。
 fn probe_whisper_gpu_capable(whisper_path: &str) -> bool {
-    let output = match Command::new(whisper_path).arg("--help").output() {
+    let output = match command_no_window(whisper_path).arg("--help").output() {
         Ok(o) => o,
         Err(_) => return false,
     };
@@ -317,7 +317,7 @@ pub fn transcribe_audio(backend: &AsrBackend, audio_path: &Path) -> Result<Strin
     );
 
     let lang_arg = if backend.language == "auto" { "auto" } else { &backend.language };
-    let output = Command::new(&backend.whisper_path)
+    let output = command_no_window(&backend.whisper_path)
         .args([
             "-m",
             &backend.model_path,
@@ -421,7 +421,7 @@ pub fn detect_diarization_backend() -> Option<DiarizationBackend> {
     let python = detect_python()?;
 
     // 1. whisperX（优先）
-    let wx_check = Command::new(&python)
+    let wx_check = command_no_window(&python)
         .args(["-c", "import whisperx; print('ok')"])
         .output();
     if let Ok(out) = wx_check {
@@ -432,7 +432,7 @@ pub fn detect_diarization_backend() -> Option<DiarizationBackend> {
     }
 
     // 2. pyannote-audio
-    let py_check = Command::new(&python)
+    let py_check = command_no_window(&python)
         .args(["-c", "import pyannote.audio; print('ok')"])
         .output();
     if let Ok(out) = py_check {
@@ -481,7 +481,7 @@ pub fn transcribe_audio_with_timestamps(
             .unwrap_or("audio"),
     );
     let lang_arg = if backend.language == "auto" { "auto" } else { &backend.language };
-    let output = Command::new(&backend.whisper_path)
+    let output = command_no_window(&backend.whisper_path)
         .args([
             "-m",
             &backend.model_path,
@@ -647,7 +647,7 @@ fn transcribe_whisperx(
     let lang = if asr.language == "auto" { "zh" } else { &asr.language };
     // whisperx 命令：--model 来自 asr backend 名（如 small/medium/large）
     // --output_format json --output_dir <tmp>
-    let output = Command::new(python_path)
+    let output = command_no_window(python_path)
         .args([
             "-m", "whisperx",
             audio_str,
@@ -764,7 +764,7 @@ except Exception as e:
         audio = audio_str.replace('\\', "\\\\").replace('\'', "\\'"),
     );
 
-    let output = Command::new(python_path)
+    let output = command_no_window(python_path)
         .args(["-c", &py_script])
         .output()
         .map_err(VaultError::Io)?;

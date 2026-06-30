@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::SharedState;
 use attune_core::llm::{ChatMessage, LlmProvider, OpenAiLlmProvider};
 use attune_core::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
+use attune_core::process::tokio_command_no_window;
 use attune_core::vault::VaultState;
 
 /// 同一时间最多 2 个 ollama pull 进程（防资源耗尽，见 CRITICAL 1.2）
@@ -371,7 +372,7 @@ pub async fn pull_model(
 
     // 后台跑 `ollama pull <model>`（不等待；进度推送由 WS 侧实现）
     tokio::spawn(async move {
-        let out = tokio::process::Command::new("ollama")
+        let out = tokio_command_no_window("ollama")
             .arg("pull")
             .arg(&model)
             .output()
@@ -515,7 +516,7 @@ pub async fn install_ollama() -> Result<Json<InstallResponse>, ApiError> {
             // 后台执行 install.sh；完成后尝试 `ollama serve`（install.sh 在多数 Linux
             // 上会装 systemd unit 并自启，serve 作为 fallback 不阻塞、失败静默）。
             tokio::spawn(async move {
-                let out = tokio::process::Command::new("sh")
+                let out = tokio_command_no_window("sh")
                     .arg("-c")
                     .arg(&cmd)
                     .output()
@@ -524,7 +525,7 @@ pub async fn install_ollama() -> Result<Json<InstallResponse>, ApiError> {
                     Ok(o) if o.status.success() => {
                         tracing::info!("ollama install done (task={task_id})");
                         // best-effort 拉起 daemon（install.sh 通常已自启）
-                        let _ = tokio::process::Command::new("ollama")
+                        let _ = tokio_command_no_window("ollama")
                             .arg("serve")
                             .spawn();
                     }

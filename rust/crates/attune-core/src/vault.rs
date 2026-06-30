@@ -652,7 +652,7 @@ fn restrict_file_permissions(path: &std::path::Path) -> Result<()> {
         // 等效于: icacls <path> /inheritance:r /grant:r "%USERNAME%:(R,W)"
         let path_str = path.to_string_lossy().to_string();
         let username = std::env::var("USERNAME").unwrap_or_else(|_| "CURRENT_USER".to_string());
-        let _ = std::process::Command::new("icacls")
+        let _ = crate::process::command_no_window("icacls")
             .args([&path_str, "/inheritance:r", "/grant:r", &format!("{username}:(R,W)")])
             .output(); // 忽略错误: 比不设权限好，但不应阻塞 vault 启动
     }

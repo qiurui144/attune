@@ -171,9 +171,8 @@ fn machine_uuid() -> Option<String> {
     }
     #[cfg(target_os = "windows")]
     {
-        use std::process::Command;
         // reg query 读 MachineGuid;失败保持 None(签名计入 "null")。
-        let out = Command::new("reg")
+        let out = crate::process::command_no_window("reg")
             .args([
                 "query",
                 r"HKLM\SOFTWARE\Microsoft\Cryptography",
@@ -198,8 +197,7 @@ fn machine_uuid() -> Option<String> {
     }
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
-        let out = Command::new("ioreg")
+        let out = crate::process::command_no_window("ioreg")
             .args(["-rd1", "-c", "IOPlatformExpertDevice"])
             .output()
             .ok()?;

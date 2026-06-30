@@ -1106,9 +1106,13 @@ function UpdaterRow(): JSX.Element | null {
       try {
         const { listen } = await import('@tauri-apps/api/event');
         unlisten = await listen<{ state?: string; percent?: number }>('attune-update-status', (e) => {
-          if (e.payload?.state) state.value = e.payload.state;
+          if (e.payload?.state) {
+            state.value = e.payload.state;
+            if (!['checking', 'available', 'downloading'].includes(e.payload.state)) {
+              busy.value = false;
+            }
+          }
           if (typeof e.payload?.percent === 'number') pct.value = e.payload.percent;
-          if (e.payload?.state && e.payload.state !== 'downloading') busy.value = false;
         });
       } catch { /* 桌面 event API 不可用时静默 */ }
     })();
@@ -1117,14 +1121,14 @@ function UpdaterRow(): JSX.Element | null {
 
   if (!isTauri) return null;
 
-  async function invokeCmd(cmd: string): Promise<void> {
+  async function invokeCmd(cmd: string, args?: Record<string, unknown>): Promise<void> {
     const { invoke } = await import('@tauri-apps/api/core');
-    await invoke(cmd);
+    await invoke(cmd, args);
   }
   async function check(): Promise<void> {
     busy.value = true;
     state.value = 'checking';
-    try { await invokeCmd('check_for_update_now'); }
+    try { await invokeCmd('check_for_update_now', { source: source.value }); }
     catch (e) {
       state.value = 'idle';
       busy.value = false;
@@ -1143,6 +1147,7 @@ function UpdaterRow(): JSX.Element | null {
       case 'downloading': return t('settings.about.update.downloading', { percent: pct.value });
       case 'ready': return t('settings.about.update.ready');
       case 'up-to-date': return t('settings.about.update.uptodate');
+      case 'error': return t('settings.about.update.error');
       default: return t('settings.about.update.idle');
     }
   })();

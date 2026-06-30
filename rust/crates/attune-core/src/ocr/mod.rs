@@ -27,9 +27,9 @@ pub mod structured;
 pub mod nontext;
 
 use crate::error::{Result, VaultError};
+use crate::process::command_no_window;
 use profile::OcrProfile;
 use std::path::Path;
-use std::process::Command;
 
 // When `nontext` is off, the Region/report types are unavailable; alias to a
 // zero-variant placeholder so OcrOutput's Option<...> fields type-check and are
@@ -180,7 +180,7 @@ pub fn extract_text_from_pdf_with_dpi(
 
     // PDF → 多页 PNG (DPI 由 profile 决定: 200 票据 / 300 合同 / 600 古籍)
     let dpi_str = dpi.to_string();
-    let status = Command::new(&pdftoppm)
+    let status = command_no_window(&pdftoppm)
         .args(["-r", dpi_str.as_str(), "-png"])
         .arg(pdf_path)
         .arg(prefix_str)
@@ -255,7 +255,7 @@ pub fn extract_text_from_pdf_with_profile(
         ))
     })?;
     let dpi_str = dpi.to_string();
-    let status = Command::new(&pdftoppm)
+    let status = command_no_window(&pdftoppm)
         .args(["-r", dpi_str.as_str(), "-png"])
         .arg(pdf_path)
         .arg(prefix_str)

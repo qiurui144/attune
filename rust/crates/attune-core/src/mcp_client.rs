@@ -8,10 +8,11 @@
 //! 生命周期 (eager): spawn 后常驻, 每 30s 调 ping, 失败 N 次重启.
 
 use crate::error::{Result, VaultError};
+use crate::process::command_no_window;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -107,7 +108,7 @@ impl McpServer {
     }
 
     fn start_process(&self) -> Result<()> {
-        let mut cmd = Command::new(&self.config.command);
+        let mut cmd = command_no_window(&self.config.command);
         cmd.args(&self.config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

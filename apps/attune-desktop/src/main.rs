@@ -13,16 +13,17 @@ const EV_UPDATE_STATUS: &str = "attune-update-status";
 
 /// Tauri command:UI 主动触发检查更新.成功命中时 (latest > current) 先 emit
 /// `available`,随后下载+安装 (含进度 emit `downloading` / `installing`),完成 emit
-/// `restart-required`,失败 emit `error`.无新版返回 false 不 emit.
+/// `ready`,失败 emit `error`.无新版返回 false 不 emit.
 ///
 /// 返回 Ok(true) = 有更新且已开始下载; Ok(false) = 无更新; Err = 检查/下载/安装失败.
 #[tauri::command]
-async fn check_for_update_now(app: AppHandle) -> Result<bool, String> {
+async fn check_for_update_now(app: AppHandle, source: Option<String>) -> Result<bool, String> {
     use tauri_plugin_updater::UpdaterExt;
     // Resolve feed endpoints at runtime (company mirror first, GitHub fallback)
     // instead of the compile-time tauri.conf.json default. Signature pubkey is
     // unchanged → still verified against whichever endpoint serves latest.json.
-    let endpoints = update_feed::resolve_endpoints_from_env();
+    let endpoints = update_feed::resolve_endpoints_for_source(source.as_deref());
+    let _ = app.emit(EV_UPDATE_STATUS, serde_json::json!({"state": "checking"}));
     let updater = app
         .updater_builder()
         .endpoints(endpoints.iter().filter_map(|e| e.parse().ok()).collect())
@@ -78,7 +79,7 @@ async fn check_for_update_now(app: AppHandle) -> Result<bool, String> {
 
     let _ = app.emit(
         EV_UPDATE_STATUS,
-        serde_json::json!({"state": "restart-required"}),
+        serde_json::json!({"state": "ready"}),
     );
     tracing::info!("update installed; user must restart");
     Ok(true)

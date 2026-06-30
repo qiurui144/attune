@@ -31,7 +31,8 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use crate::process::command_no_window;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -368,7 +369,7 @@ impl SidecarController {
     }
 
     fn run_inner(&self, cmd: &SidecarCommand) -> Result<(RunResult, RunOutcome), SidecarError> {
-        let mut command = Command::new(&self.program.program);
+        let mut command = command_no_window(&self.program.program);
         command.args(&self.program.module_args);
         command.args(cmd.argv());
         command.stdin(Stdio::piped());

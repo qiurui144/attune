@@ -656,7 +656,7 @@ fn extract_tarball(pkg: &std::path::Path, dest: &std::path::Path) -> Result<()> 
         archive.unpack(dest).map_err(VaultError::Io)?;
         return Ok(());
     }
-    let status = std::process::Command::new("tar")
+    let status = crate::process::command_no_window("tar")
         .args(["xf"])
         .arg(pkg)
         .arg("-C")
