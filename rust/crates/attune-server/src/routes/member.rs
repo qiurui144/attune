@@ -4,14 +4,14 @@ use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use attune_core::cloud_client::{CloudClient, License, UserInfo};
 use attune_core::entitlement::EntitlementCache;
-use attune_core::entitlement_reverify::{RefreshSummary, ReverifyOutcome, apply_refresh_rounds};
+use attune_core::entitlement_reverify::{apply_refresh_rounds, RefreshSummary, ReverifyOutcome};
 use attune_core::llm_settings::SETTINGS_META_KEY;
 use attune_core::member_session::{MemberState, SettingsLocks};
 use attune_core::plugin_hub::PluginHubProvider;
 use attune_core::plugin_sig::TrustMode;
-use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::Json;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 
@@ -371,6 +371,8 @@ pub async fn login_password(
                 tracing::warn!("member login: fetch /me failed — user keeps current LLM settings")
             }
         }
+
+        store_login_entitlements(&state, &selected);
 
         MemberState::Paid {
             account_id: user.id.to_string(),
@@ -981,6 +983,36 @@ fn store_activation_entitlements(
     }
 }
 
+/// best-effort 把账号密码登录返回的 `license.entitled_plugins` 落进 entitlement
+/// 缓存 + vault。不同于授权码激活路径,这里 cloud 已经给了完整 EntitledPlugin
+/// 元数据(版本、签名公钥、平台包),所以复用 core 的 entitlement_row_for。
+/// 失败仅 warn,不阻断登录；但成功时 `/plugins` 的 entitlement_status 和 dispatch
+/// gate 会立即看到 active。
+fn store_login_entitlements(state: &SharedState, license: &attune_core::cloud_client::License) {
+    if license.entitled_plugins.is_empty() {
+        return;
+    }
+    let now = Utc::now().to_rfc3339();
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let dek = match vault.dek_db() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("member login: vault locked — entitlements not persisted: {e}");
+            return;
+        }
+    };
+    for ep in &license.entitled_plugins {
+        let row = attune_core::plugin_sync::entitlement_row_for(ep, license, &now);
+        state.entitlement_cache.upsert(row.clone());
+        if let Err(e) = vault.store().upsert_entitlement(&dek, &row) {
+            tracing::warn!(
+                "member login: failed to persist entitlement {}: {e}",
+                ep.plugin_id
+            );
+        }
+    }
+}
+
 /// POST /api/v1/member/logout — 重置会员状态为 LoggedOut
 pub async fn logout(State(state): State<SharedState>) -> Json<serde_json::Value> {
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = MemberState::LoggedOut;
@@ -1035,12 +1067,13 @@ fn apply_gateway_to_vault_settings(
 mod tests {
     use attune_core::cloud_client::CloudClient;
     use attune_core::entitlement::{EntStatus, EntitlementCache};
-    use attune_core::entitlement_reverify::{ReverifyOutcome, apply_refresh_rounds};
+    use attune_core::entitlement_reverify::{apply_refresh_rounds, ReverifyOutcome};
     use attune_core::llm_settings::{gateway_should_apply, merge_gateway_into_settings};
     use attune_core::plugin_hub::{InstallResponse, PluginHubProvider, PluginListingResponse};
     use attune_core::store::plugin_entitlements::EntitlementRow;
     use chrono::{DateTime, Utc};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn ts(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
@@ -1058,6 +1091,64 @@ mod tests {
             grace_started_at: None,
             updated_at: last_verified.into(),
         }
+    }
+
+    #[test]
+    fn login_entitlements_seed_cache_and_vault() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let data_dir = tmp.path().join("attune");
+        let _dir = crate::test_support::override_data_dir(data_dir);
+
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-login-entitlements").expect("setup");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+
+        let license = attune_core::cloud_client::License {
+            id: 18,
+            name: Some("Pro".into()),
+            plan: "pro".into(),
+            license_key: "lic-test".into(),
+            license_id: Some(18),
+            revoked_at: None,
+            last_used_at: None,
+            created_at: None,
+            vertical: Some("law".into()),
+            entitled_plugins: vec![attune_core::cloud_client::EntitledPlugin {
+                plugin_id: "law-pro".into(),
+                version: "1.0.9".into(),
+                download_url: "https://hub.engi-stack.com/api/v1/packages/law-pro-1.0.9.tar.gz"
+                    .into(),
+                sha256: "b59f94e8153ff358073e88acbe980c230c2f58755617aac57eb213ec5affbd78".into(),
+                platform_packages: Vec::new(),
+                signing_pubkey_hex:
+                    "3fc9afb5b7a7bc8c7863cdb33070e7effad930efaf234069dc5d2bcdf993c6d4".into(),
+                decrypt_key: None,
+            }],
+        };
+
+        super::store_login_entitlements(&state, &license);
+
+        let now = Utc::now();
+        assert_eq!(
+            state.entitlement_cache.status("law-pro", &now),
+            EntStatus::Active
+        );
+
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let dek = vault.dek_db().expect("dek");
+        let row = vault
+            .store()
+            .get_entitlement(&dek, "law-pro")
+            .expect("read entitlement")
+            .expect("entitlement row");
+        assert_eq!(row.plugin_id, "law-pro");
+        assert_eq!(row.license_id, "18");
+        assert_eq!(row.tier, "paid");
+        assert_eq!(row.status, "active");
+        assert_eq!(
+            row.signing_pubkey_hex,
+            "3fc9afb5b7a7bc8c7863cdb33070e7effad930efaf234069dc5d2bcdf993c6d4"
+        );
     }
 
     struct CountingHub {
@@ -1601,7 +1692,7 @@ mod tests {
     }
 
     // ── device binding (授权码激活 ① 设备绑定) ─────────────────────────────────
-    use crate::routes::member::{DEVICE_BINDING_META_KEY, device_binding_error};
+    use crate::routes::member::{device_binding_error, DEVICE_BINDING_META_KEY};
     use attune_core::cloud_client::{DeviceActivateError, DeviceActivateResult};
     use axum::http::StatusCode;
 
