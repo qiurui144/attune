@@ -12,6 +12,10 @@ cd "$REPO"
 
 PASS=0
 FAIL=0
+HAVE_RG=0
+if command -v rg >/dev/null 2>&1; then
+  HAVE_RG=1
+fi
 
 ok() {
   printf 'OK   %s\n' "$*"
@@ -45,7 +49,13 @@ require_grep() {
   local pattern="$1"
   local path="$2"
   local label="$3"
-  if rg -q "$pattern" "$path"; then ok "$label"; else bad "$label not found in $path"; fi
+  if [ "$HAVE_RG" -eq 1 ]; then
+    if rg -q "$pattern" "$path"; then ok "$label"; else bad "$label not found in $path"; fi
+  elif grep -REq "$pattern" "$path" 2>/dev/null; then
+    ok "$label"
+  else
+    bad "$label not found in $path"
+  fi
 }
 
 require_no_grep() {
@@ -53,7 +63,11 @@ require_no_grep() {
   local path="$2"
   local label="$3"
   local out
-  out=$(rg -n "$pattern" "$path" 2>/dev/null || true)
+  if [ "$HAVE_RG" -eq 1 ]; then
+    out=$(rg -n "$pattern" "$path" 2>/dev/null || true)
+  else
+    out=$(grep -REn "$pattern" "$path" 2>/dev/null || true)
+  fi
   if [ -z "$out" ]; then
     ok "$label"
   else
@@ -67,7 +81,11 @@ require_no_grep_many() {
   local label="$2"
   shift 2
   local out
-  out=$(rg -n --glob '!scripts/maintenance-audit.sh' "$pattern" "$@" 2>/dev/null || true)
+  if [ "$HAVE_RG" -eq 1 ]; then
+    out=$(rg -n --glob '!scripts/maintenance-audit.sh' "$pattern" "$@" 2>/dev/null || true)
+  else
+    out=$(grep -REn "$pattern" "$@" 2>/dev/null | grep -v '^scripts/maintenance-audit.sh:' || true)
+  fi
   if [ -z "$out" ]; then
     ok "$label"
   else
