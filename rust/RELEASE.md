@@ -1186,7 +1186,7 @@ W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
 - integration tests: memory_moat_integration **14 passed**
 - E2E 套件: 9 脚本 **90 断言全绿**（含真实 Ollama RAG / Playwright UI / crash recovery）
 - perf 实测（release）: 100KB reindex 834ms / 500KB 1.95s / 100KB upload ~1.1s
-- `python/tests/MANUAL_TEST_CHECKLIST.md` 含 8 条 Memory Moat 验收
+- `tests/MANUAL_TEST_CHECKLIST.md` 含 8 条 Memory Moat 验收
 
 #### Commits (cumulative, 21 commits)
 

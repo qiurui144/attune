@@ -1224,8 +1224,8 @@ jobs:
 
   rust-clippy:
     # Lint as its own parallel job (was an inline non-blocking step). Stays
-    # non-blocking (continue-on-error) to preserve prior behavior — the Python
-    # prototype line + Rust workspace lint is advisory, not a PR hard-gate here.
+    # non-blocking (continue-on-error) to preserve prior behavior — Rust
+    # workspace lint is advisory, not a PR hard-gate here.
     runs-on: ubuntu-latest
     name: rust-clippy
     timeout-minutes: 50

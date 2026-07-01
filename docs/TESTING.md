@@ -782,7 +782,7 @@ Email IMAP 采集源与 `SourceConnector` 统一抽象（`ingest/connector.rs`�
 | Unit — pipeline enum | `ingest/pipeline.rs` 内联 | `IngestOutcome` derive 特征（Debug/Clone/PartialEq/Eq）四 variant 全覆盖 |
 | Integration — email | `tests/ingest_email_test.rs` | `parse_email_bytes`（plain/HTML/attachment/invalid）；`EmailConnector` mock fetcher；UID 增量游标；attachment RawDocument 独立产出；正文 RawDocument 可过 `ingest_document` |
 | Integration — pipeline | `tests/ingest_pipeline_test.rs` | `ingest_document` 四态（Inserted/Duplicate/Updated/Skipped）；domain/tags 透传；corpus_domain 前缀；`ingest_document_replacing` + 第三方 hash 防护；`ingest_document_with_profile` 命名 profile；raw.title 优先于 parser title |
-| Manual | `python/tests/MANUAL_TEST_CHECKLIST.md` § "Email IMAP 采集源" | 添加 IMAP 账号、手动同步、UID 游标增量、附件索引 — 需真实 IMAP 账号，不进 CI |
+| Manual | `tests/MANUAL_TEST_CHECKLIST.md` § "Email IMAP 采集源" | 添加 IMAP 账号、手动同步、UID 游标增量、附件索引 — 需真实 IMAP 账号，不进 CI |
 
 跑法：
 
@@ -803,7 +803,7 @@ cargo test -p attune-core --test ingest_pipeline_test       # pipeline integrati
 |----|------|------|
 | Unit | — | TypeScript 类型检查：`npm run typecheck`（`tsc --noEmit`） |
 | E2E | `tests/e2e_rust/`（C.2 规划后） | 待建立 Playwright 层后补充导航交互测试 |
-| Manual | `python/tests/MANUAL_TEST_CHECKLIST.md` § "两级侧边栏导航" | 主级常驻可见、折叠模式图标、"更多"展开/折叠、激活指示器、活跃视图自动展开、Settings 位置 |
+| Manual | `tests/MANUAL_TEST_CHECKLIST.md` § "两级侧边栏导航" | 主级常驻可见、折叠模式图标、"更多"展开/折叠、激活指示器、活跃视图自动展开、Settings 位置 |
 
 跑法：
 
@@ -812,7 +812,7 @@ cd rust/crates/attune-server/ui
 npm run typecheck   # TypeScript 类型检查（覆盖 Sidebar.tsx props/signal 类型）
 ```
 
-人工验收在 `python/tests/MANUAL_TEST_CHECKLIST.md` 维护，每次 release 前必须人工跑一遍。
+人工验收在 `tests/MANUAL_TEST_CHECKLIST.md` 维护，每次 release 前必须人工跑一遍。
 
 ## RSS / Atom 采集源测试矩阵（v0.7，2026-05-20）
 
@@ -825,7 +825,7 @@ npm run typecheck   # TypeScript 类型检查（覆盖 Sidebar.tsx props/signal 
 | Unit — connector | `ingest/rss.rs` 内联 | RSS 2.0 + Atom 解析；HTML body 剥标签；entry dedup（last_entry_guid 命中即 break）；304 路径不 emit；200 last_response 透出 ETag/Last-Modified；垃圾 XML 拒绝 |
 | Unit — store CRUD | `tests/rss_feeds_test.rs` | add/get/list/delete 全流程；URL 加密落盘 + 解密回明文；明文 URL 绝不在 BLOB 里；update_etag_lastmod / touch_polled_at / update_last_entry / update_feed_settings 幂等性 |
 | Integration — connector | `tests/ingest_rss_test.rs` | 端到端 first-poll → 全 emit；conditional-GET 透传 ETag；dedup invariant（cursor 推进后二次 poll → 0 新条目）；fetch Err 传播；空 entry 跳过；RawDocument 真正过 ingest_document |
-| Manual | `python/tests/MANUAL_TEST_CHECKLIST.md` § "RSS 订阅采集源"（待补） | 添加真实 LWN / GitHub releases RSS；poll-now；周期 worker 到期触发；304 路径；删除订阅；禁用订阅 |
+| Manual | `tests/MANUAL_TEST_CHECKLIST.md` § "RSS 订阅采集源"（待补） | 添加真实 LWN / GitHub releases RSS；poll-now；周期 worker 到期触发；304 路径；删除订阅；禁用订阅 |
 
 跑法：
 
@@ -948,7 +948,7 @@ VLM 升级路径（Stage4，schema-guided + 重试-验证 ≤3 + telemetry）一
 
 ## 附录 A：人工验收清单
 
-某些 UX / 集成场景无法自动化（需要真实 Chrome 实例 / 真实 USB / 真实账号登录等），这些用 [`python/tests/MANUAL_TEST_CHECKLIST.md`](../python/tests/MANUAL_TEST_CHECKLIST.md) 维护勾选式步骤（含 v0.7 Memory Moat 验收节）。
+某些 UX / 集成场景无法自动化（需要真实 Chrome 实例 / 真实 USB / 真实账号登录等），这些用 [`tests/MANUAL_TEST_CHECKLIST.md`](../tests/MANUAL_TEST_CHECKLIST.md) 维护勾选式步骤（含 v0.7 Memory Moat 验收节）。
 
 每次 release 前，必须人工跑一遍清单。
 
