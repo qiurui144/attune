@@ -18,6 +18,24 @@ use crate::error::{Result, VaultError};
 use crate::process::command_no_window;
 use std::path::Path;
 
+fn join_text<'a>(parts: impl IntoIterator<Item = &'a str>, separator: &str) -> String {
+    let mut parts = parts.into_iter();
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+
+    let mut out = String::from(first);
+    for part in parts {
+        out.push_str(separator);
+        out.push_str(part);
+    }
+    out
+}
+
+fn stderr_excerpt(stderr: &str, max_lines: usize) -> String {
+    join_text(stderr.lines().take(max_lines), " ")
+}
+
 // ── ASR engine abstraction (whisper | sensevoice) ───────────────────────────
 //
 // Catalog (`model-catalog.default.yaml` `asr.engine`) drives which engine a given
@@ -344,7 +362,7 @@ pub fn transcribe_audio(backend: &AsrBackend, audio_path: &Path) -> Result<Strin
         return Err(VaultError::InvalidInput(format!(
             "whisper.cpp failed (exit {}): {}",
             output.status.code().unwrap_or(-1),
-            stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            stderr_excerpt(&stderr, 3)
         )));
     }
 
@@ -515,7 +533,7 @@ pub fn transcribe_audio_with_timestamps(
         return Err(VaultError::InvalidInput(format!(
             "whisper.cpp (srt) failed (exit {}): {}",
             output.status.code().unwrap_or(-1),
-            stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            stderr_excerpt(&stderr, 3)
         )));
     }
 
@@ -687,7 +705,7 @@ fn transcribe_whisperx(
         return Err(VaultError::InvalidInput(format!(
             "whisperX failed (exit {}): {}",
             output.status.code().unwrap_or(-1),
-            stderr.lines().take(5).collect::<Vec<_>>().join(" ")
+            stderr_excerpt(&stderr, 5)
         )));
     }
 
@@ -808,14 +826,10 @@ except Exception as e:
         let stderr = String::from_utf8_lossy(&output.stderr);
         log::warn!(
             "pyannote diarization failed: {}. Falling back to no-speaker output.",
-            stderr.lines().take(2).collect::<Vec<_>>().join(" ")
+            stderr_excerpt(&stderr, 2)
         );
         // 不报错，退化为无说话人
-        let full = segments
-            .iter()
-            .map(|s| s.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let full = join_text(segments.iter().map(|s| s.text.as_str()), "\n");
         return Ok((segments, full));
     }
 
@@ -991,6 +1005,20 @@ pub fn fetch_asr_for_tier(tier: crate::platform::Tier) -> crate::error::Result<s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_text_matches_slice_join_semantics() {
+        let parts = ["alpha", "", " beta "];
+
+        assert_eq!(join_text(parts, "|"), parts.join("|"));
+        assert_eq!(join_text(Vec::<&str>::new(), "\n"), "");
+    }
+
+    #[test]
+    fn stderr_excerpt_limits_lines() {
+        assert_eq!(stderr_excerpt("one\ntwo\nthree", 2), "one two");
+        assert_eq!(stderr_excerpt("", 3), "");
+    }
 
     #[test]
     fn extract_model_name_basic() {
