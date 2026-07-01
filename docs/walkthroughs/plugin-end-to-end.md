@@ -189,7 +189,7 @@ $ echo '{"facts":{...,"principal":null,...},...}' | agent_civil_loan
 | Phase B agent | civil_loan_agent::happy_path_outputs_audit_trail (单测) |
 | Phase B agent | agent_civil_loan binary subprocess (本 walkthrough Step 7C) |
 | Phase B UI | forms_routes_test::forms_endpoints_return_404_for_unknown_plugin |
-| Phase B UI | playwright_forms_v2_test (preflight + 友好提示) |
+| Phase B UI | forms_routes_test::forms_endpoints_return_404_for_unknown_plugin |
 | Phase C 设备 | attune_accounts::third_device_returns_409_with_existing |
 | Phase C 设备 | attune_accounts::re_register_same_device_renews |
 | Phase D 红线 | civil_loan_agent::red_line_no_loan_doc_returns_safe_output |
