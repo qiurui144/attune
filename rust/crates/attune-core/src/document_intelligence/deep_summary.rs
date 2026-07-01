@@ -154,7 +154,11 @@ pub fn summarize(
     if full_text.trim().is_empty() {
         bill.path = "empty".to_string();
         return Ok((
-            Summary { level: level.as_str().to_string(), overview: String::new(), per_chapter: Vec::new() },
+            Summary {
+                level: level.as_str().to_string(),
+                overview: String::new(),
+                per_chapter: Vec::new(),
+            },
             bill,
         ));
     }
@@ -166,7 +170,14 @@ pub fn summarize(
     // (candidate ≤ full text) and is never worse than what map-reduce would have billed.
     if bill.naive_baseline_tokens < cfg.min_tokens_for_pipeline {
         bill.path = "single-call".to_string();
-        return single_call_bypass(full_text, level, llms.reasoning, cfg, bill, &reasoning_model);
+        return single_call_bypass(
+            full_text,
+            level,
+            llms.reasoning,
+            cfg,
+            bill,
+            &reasoning_model,
+        );
     }
     bill.path = "map-reduce".to_string();
 
@@ -191,8 +202,11 @@ pub fn summarize(
 
     for (heading, block) in &blocks {
         let block_tokens = estimate_tokens(block);
-        let heading_words: Vec<String> =
-            heading.split(['/', ' ']).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+        let heading_words: Vec<String> = heading
+            .split(['/', ' '])
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
 
         // STAGE 1: extractive pre-cut (zero LLM). Short blocks pass through verbatim.
         let is_short = block_tokens < cfg.short_block_tokens;
@@ -201,7 +215,8 @@ pub fn summarize(
         } else {
             extractive::extract_candidates(block, cfg.extractive_keep_ratio, &heading_words)
         };
-        extractive_kept_tokens = extractive_kept_tokens.saturating_add(estimate_tokens(&candidate) as u32);
+        extractive_kept_tokens =
+            extractive_kept_tokens.saturating_add(estimate_tokens(&candidate) as u32);
 
         // STAGE 2: cache query (only when we have a real item_id). Done BEFORE the short-block
         // short-circuit so that on a re-read EVERY block (short ones included) is served from
@@ -220,7 +235,15 @@ pub fn summarize(
             // Short block: use its text directly as its "summary" (no LLM, like chat.rs is_short),
             // but DO cache it (write-back below) so a re-read hits the cache like any other block.
             if !item_id.is_empty() {
-                store.put_chunk_summary(dek, &hash, &strategy, item_id, "extractive-short", &candidate, block.chars().count())?;
+                store.put_chunk_summary(
+                    dek,
+                    &hash,
+                    &strategy,
+                    item_id,
+                    "extractive-short",
+                    &candidate,
+                    block.chars().count(),
+                )?;
             }
             block_summaries.push((heading.clone(), candidate));
             continue;
@@ -284,7 +307,14 @@ pub fn summarize(
     bill.extractive_kept_tokens = extractive_kept_tokens;
 
     // STAGE 4 — bounded REDUCE: reasoning LLM ×1 (or ≤⌈n/FANIN⌉ fan-in).
-    let summary = reduce(level, &block_summaries, llms.reasoning, cfg, &mut bill, &reasoning_model)?;
+    let summary = reduce(
+        level,
+        &block_summaries,
+        llms.reasoning,
+        cfg,
+        &mut bill,
+        &reasoning_model,
+    )?;
     Ok((summary, bill))
 }
 
@@ -364,34 +394,32 @@ fn reduce(
     let per_chapter = group_by_chapter(block_summaries);
 
     // Compose the reduce input: chapter skeleton + each block summary.
-    let fold_one = |reasoning: &dyn LlmProvider,
-                    bill: &mut TokenBill,
-                    payload: &str|
-     -> Result<String> {
-        let messages = [
-            ChatMessage::system(REDUCE_SYSTEM_PROMPT),
-            ChatMessage::user(payload),
-        ];
-        let (text, usage) = reasoning.chat_with_history(&messages)?;
-        if usage.tokens_in == 0 {
-            // Same tokenizer as the naive baseline (model-aware cost::estimate_tokens), see the
-            // map-stage note above — keeps the savings ratio apples-to-apples for CJK.
-            bill.reduce_llm_tokens.r#in = bill
-                .reduce_llm_tokens
-                .r#in
-                .saturating_add(cost::estimate_tokens(payload, reasoning_model) as u32);
-            bill.reduce_llm_tokens.out = bill
-                .reduce_llm_tokens
-                .out
-                .saturating_add(cost::estimate_tokens(&text, reasoning_model) as u32);
-            if bill.reduce_llm_tokens.model.is_empty() {
-                bill.reduce_llm_tokens.model = reasoning_model.to_string();
+    let fold_one =
+        |reasoning: &dyn LlmProvider, bill: &mut TokenBill, payload: &str| -> Result<String> {
+            let messages = [
+                ChatMessage::system(REDUCE_SYSTEM_PROMPT),
+                ChatMessage::user(payload),
+            ];
+            let (text, usage) = reasoning.chat_with_history(&messages)?;
+            if usage.tokens_in == 0 {
+                // Same tokenizer as the naive baseline (model-aware cost::estimate_tokens), see the
+                // map-stage note above — keeps the savings ratio apples-to-apples for CJK.
+                bill.reduce_llm_tokens.r#in = bill
+                    .reduce_llm_tokens
+                    .r#in
+                    .saturating_add(cost::estimate_tokens(payload, reasoning_model) as u32);
+                bill.reduce_llm_tokens.out = bill
+                    .reduce_llm_tokens
+                    .out
+                    .saturating_add(cost::estimate_tokens(&text, reasoning_model) as u32);
+                if bill.reduce_llm_tokens.model.is_empty() {
+                    bill.reduce_llm_tokens.model = reasoning_model.to_string();
+                }
+            } else {
+                bill.reduce_llm_tokens.add(&usage);
             }
-        } else {
-            bill.reduce_llm_tokens.add(&usage);
-        }
-        Ok(text)
-    };
+            Ok(text)
+        };
 
     let n = block_summaries.len();
     let fanin = cfg.reduce_fanin.max(1);
@@ -426,7 +454,11 @@ fn reduce(
 fn compose_reduce_payload(level: SummaryLevel, block_summaries: &[(String, String)]) -> String {
     let mut s = format!("目标级别：{}\n章节摘要：\n", level.as_str());
     for (heading, summary) in block_summaries {
-        let h = if heading.is_empty() { "(无标题)" } else { heading.as_str() };
+        let h = if heading.is_empty() {
+            "(无标题)"
+        } else {
+            heading.as_str()
+        };
         s.push_str(&format!("- 【{h}】{summary}\n"));
     }
     s
@@ -477,25 +509,53 @@ mod tests {
             .with_response("第一章压缩摘要")
             .with_response("第二章压缩摘要");
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("全文导语 + 每章要点");
-        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+        let llms = StageLlms {
+            cheap: &cheap,
+            reasoning: &reasoning,
+        };
         let (store, dek) = mem_store_dek();
         let r = router();
         // Force the multi-stage path so this small fixture exercises map-reduce mechanics (it is
         // below DEEPSUM_MIN_TOK and would otherwise take the STAGE -1 single-call bypass).
-        let cfg = DeepSummaryConfig { min_tokens_for_pipeline: 0, ..DeepSummaryConfig::default() };
+        let cfg = DeepSummaryConfig {
+            min_tokens_for_pipeline: 0,
+            ..DeepSummaryConfig::default()
+        };
 
-        let (summary, bill) =
-            summarize(&doc(), SummaryLevel::Standard, "item-1", &r, &llms, &store, &dek, &cfg).unwrap();
+        let (summary, bill) = summarize(
+            &doc(),
+            SummaryLevel::Standard,
+            "item-1",
+            &r,
+            &llms,
+            &store,
+            &dek,
+            &cfg,
+        )
+        .unwrap();
 
         // map calls used the cheap model; reduce used the reasoning model.
-        assert!(cheap.call_count() >= 2, "at least one map call per long section");
+        assert!(
+            cheap.call_count() >= 2,
+            "at least one map call per long section"
+        );
         assert!(cheap.calls().iter().all(|c| c.model == "gpt-4o-mini"));
-        assert_eq!(reasoning.calls().iter().filter(|c| c.model == "gpt-4o").count(), reasoning.call_count());
+        assert_eq!(
+            reasoning
+                .calls()
+                .iter()
+                .filter(|c| c.model == "gpt-4o")
+                .count(),
+            reasoning.call_count()
+        );
         // reduce called ≤ ⌈n/FANIN⌉ (+ final fold). For ≤ FANIN blocks: exactly 1.
         assert!(reasoning.call_count() >= 1);
         assert_eq!(summary.level, "standard");
         assert!(!summary.overview.is_empty());
-        assert!(summary.per_chapter.len() >= 2, "≥2-section doc → ≥2 per_chapter");
+        assert!(
+            summary.per_chapter.len() >= 2,
+            "≥2-section doc → ≥2 per_chapter"
+        );
         assert_eq!(bill.baseline_model, "gpt-4o");
     }
 
@@ -505,34 +565,71 @@ mod tests {
         // the extractive candidate for that block, NOT crash the whole summary. Preload empty map
         // responses; the reduce still gets real (candidate-derived) block content.
         let cheap = RecordingMockLlm::new("gpt-4o-mini")
-            .with_response("")        // section 1 map → empty
+            .with_response("") // section 1 map → empty
             .with_response("   \n  "); // section 2 map → whitespace
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("全文导语 + 每章要点");
-        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+        let llms = StageLlms {
+            cheap: &cheap,
+            reasoning: &reasoning,
+        };
         let (store, dek) = mem_store_dek();
         let r = router();
-        let cfg = DeepSummaryConfig { min_tokens_for_pipeline: 0, ..DeepSummaryConfig::default() };
+        let cfg = DeepSummaryConfig {
+            min_tokens_for_pipeline: 0,
+            ..DeepSummaryConfig::default()
+        };
 
         // Must NOT panic / error despite empty map output.
-        let (summary, _bill) =
-            summarize(&doc(), SummaryLevel::Standard, "item-degrade", &r, &llms, &store, &dek, &cfg).unwrap();
-        assert!(!summary.overview.is_empty(), "reduce still synthesizes from degraded blocks");
+        let (summary, _bill) = summarize(
+            &doc(),
+            SummaryLevel::Standard,
+            "item-degrade",
+            &r,
+            &llms,
+            &store,
+            &dek,
+            &cfg,
+        )
+        .unwrap();
+        assert!(
+            !summary.overview.is_empty(),
+            "reduce still synthesizes from degraded blocks"
+        );
         // Each per_chapter point came from the extractive candidate fallback (non-empty).
-        assert!(summary.per_chapter.iter().all(|c| !c.summary.trim().is_empty()),
-            "degraded block summaries fall back to non-empty extractive candidate");
+        assert!(
+            summary
+                .per_chapter
+                .iter()
+                .all(|c| !c.summary.trim().is_empty()),
+            "degraded block summaries fall back to non-empty extractive candidate"
+        );
     }
 
     #[test]
     fn test_naive_baseline_exact() {
-        let cheap = RecordingMockLlm::new("gpt-4o-mini").with_response("摘要A").with_response("摘要B");
+        let cheap = RecordingMockLlm::new("gpt-4o-mini")
+            .with_response("摘要A")
+            .with_response("摘要B");
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("总结");
-        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+        let llms = StageLlms {
+            cheap: &cheap,
+            reasoning: &reasoning,
+        };
         let (store, dek) = mem_store_dek();
         let r = router();
         let cfg = DeepSummaryConfig::default();
         let text = doc();
-        let (_s, bill) =
-            summarize(&text, SummaryLevel::Standard, "item-x", &r, &llms, &store, &dek, &cfg).unwrap();
+        let (_s, bill) = summarize(
+            &text,
+            SummaryLevel::Standard,
+            "item-x",
+            &r,
+            &llms,
+            &store,
+            &dek,
+            &cfg,
+        )
+        .unwrap();
         assert_eq!(
             bill.naive_baseline_tokens,
             cost::estimate_tokens(&text, "gpt-4o") as u32,
@@ -548,9 +645,19 @@ mod tests {
         let (store, dek) = mem_store_dek();
         let h = chunk_hash("some block text");
         store
-            .put_chunk_summary(&dek, &h, "deepsum:standard", "item-rt", "gpt-4o-mini", "摘要", 16)
+            .put_chunk_summary(
+                &dek,
+                &h,
+                "deepsum:standard",
+                "item-rt",
+                "gpt-4o-mini",
+                "摘要",
+                16,
+            )
             .expect("put deepsum:standard must succeed");
-        let got = store.get_chunk_summary(&dek, &h, "deepsum:standard").unwrap();
+        let got = store
+            .get_chunk_summary(&dek, &h, "deepsum:standard")
+            .unwrap();
         assert_eq!(got.as_deref(), Some("摘要"), "deepsum cache roundtrip");
     }
 
@@ -559,18 +666,36 @@ mod tests {
         let r = router();
         // Force the multi-stage path: the cache lever lives in map-reduce; a small fixture would
         // otherwise route to the single-call bypass (no cache by design).
-        let cfg = DeepSummaryConfig { min_tokens_for_pipeline: 0, ..DeepSummaryConfig::default() };
+        let cfg = DeepSummaryConfig {
+            min_tokens_for_pipeline: 0,
+            ..DeepSummaryConfig::default()
+        };
         let (store, dek) = mem_store_dek();
         let text = doc();
 
         // First run: populates the cache.
         {
             let cheap = RecordingMockLlm::new("gpt-4o-mini")
-                .with_response("摘要1").with_response("摘要2").with_response("摘要3").with_response("摘要4");
+                .with_response("摘要1")
+                .with_response("摘要2")
+                .with_response("摘要3")
+                .with_response("摘要4");
             let reasoning = RecordingMockLlm::new("gpt-4o").with_response("总结");
-            let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
-            let (_s, bill1) =
-                summarize(&text, SummaryLevel::Standard, "item-cache", &r, &llms, &store, &dek, &cfg).unwrap();
+            let llms = StageLlms {
+                cheap: &cheap,
+                reasoning: &reasoning,
+            };
+            let (_s, bill1) = summarize(
+                &text,
+                SummaryLevel::Standard,
+                "item-cache",
+                &r,
+                &llms,
+                &store,
+                &dek,
+                &cfg,
+            )
+            .unwrap();
             assert!(bill1.new_chunks > 0, "first run has new chunks");
             assert!(cheap.call_count() > 0);
         }
@@ -578,14 +703,36 @@ mod tests {
         // Second run on identical input + same item_id → all map calls served from cache.
         let cheap2 = RecordingMockLlm::new("gpt-4o-mini"); // no responses preloaded
         let reasoning2 = RecordingMockLlm::new("gpt-4o").with_response("总结2");
-        let llms2 = StageLlms { cheap: &cheap2, reasoning: &reasoning2 };
-        let (_s2, bill2) =
-            summarize(&text, SummaryLevel::Standard, "item-cache", &r, &llms2, &store, &dek, &cfg).unwrap();
+        let llms2 = StageLlms {
+            cheap: &cheap2,
+            reasoning: &reasoning2,
+        };
+        let (_s2, bill2) = summarize(
+            &text,
+            SummaryLevel::Standard,
+            "item-cache",
+            &r,
+            &llms2,
+            &store,
+            &dek,
+            &cfg,
+        )
+        .unwrap();
 
-        assert_eq!(cheap2.call_count(), 0, "second run: zero map LLM calls (full cache hit)");
-        assert_eq!(bill2.map_llm_tokens.r#in, 0, "second run: zero new map input tokens");
+        assert_eq!(
+            cheap2.call_count(),
+            0,
+            "second run: zero map LLM calls (full cache hit)"
+        );
+        assert_eq!(
+            bill2.map_llm_tokens.r#in, 0,
+            "second run: zero new map input tokens"
+        );
         assert_eq!(bill2.new_chunks, 0, "second run: zero new chunks");
-        assert!(bill2.cache_hit_chunks > 0, "second run: chunks served from cache");
+        assert!(
+            bill2.cache_hit_chunks > 0,
+            "second run: chunks served from cache"
+        );
         // Second-run cost is ONLY the single reduce fold over cached summaries — map is free.
         // Savings is high (>0.8) but not exactly 1.0 because the reduce ×1 still bills against
         // the naive (full-text) baseline. The cache-hit invariants above are the real proof.
@@ -601,27 +748,61 @@ mod tests {
         // A doc whose only block is below the short threshold → no map call.
         let cheap = RecordingMockLlm::new("gpt-4o-mini");
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("短文总结");
-        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+        let llms = StageLlms {
+            cheap: &cheap,
+            reasoning: &reasoning,
+        };
         let (store, dek) = mem_store_dek();
         let r = router();
         let cfg = DeepSummaryConfig::default();
-        let (_s, bill) =
-            summarize("简短一句话。", SummaryLevel::Brief, "item-short", &r, &llms, &store, &dek, &cfg).unwrap();
-        assert_eq!(cheap.call_count(), 0, "short block must not call the map LLM");
+        let (_s, bill) = summarize(
+            "简短一句话。",
+            SummaryLevel::Brief,
+            "item-short",
+            &r,
+            &llms,
+            &store,
+            &dek,
+            &cfg,
+        )
+        .unwrap();
+        assert_eq!(
+            cheap.call_count(),
+            0,
+            "short block must not call the map LLM"
+        );
         assert_eq!(bill.new_chunks, 0);
     }
 
     #[test]
     fn test_reduce_called_once_for_small_doc() {
-        let cheap = RecordingMockLlm::new("gpt-4o-mini").with_response("a").with_response("b");
+        let cheap = RecordingMockLlm::new("gpt-4o-mini")
+            .with_response("a")
+            .with_response("b");
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("总结");
-        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+        let llms = StageLlms {
+            cheap: &cheap,
+            reasoning: &reasoning,
+        };
         let (store, dek) = mem_store_dek();
         let r = router();
         let cfg = DeepSummaryConfig::default(); // fanin=16, doc has 2 blocks
-        let (_s, _bill) =
-            summarize(&doc(), SummaryLevel::Standard, "i", &r, &llms, &store, &dek, &cfg).unwrap();
-        assert_eq!(reasoning.call_count(), 1, "≤FANIN blocks → exactly one reduce call");
+        let (_s, _bill) = summarize(
+            &doc(),
+            SummaryLevel::Standard,
+            "i",
+            &r,
+            &llms,
+            &store,
+            &dek,
+            &cfg,
+        )
+        .unwrap();
+        assert_eq!(
+            reasoning.call_count(),
+            1,
+            "≤FANIN blocks → exactly one reduce call"
+        );
     }
 
     // --- T-13: short-doc single-call bypass (spec §3.2 STAGE -1, §9.1; G3-flagship Option 3) ---
@@ -660,21 +841,50 @@ mod tests {
         let (store, dek) = mem_store_dek();
 
         let naive = cost::estimate_tokens(&text, "gpt-4o") as u32;
-        assert!(naive < DEEPSUM_MIN_TOK, "fixture must be a short doc, naive={naive}");
+        assert!(
+            naive < DEEPSUM_MIN_TOK,
+            "fixture must be a short doc, naive={naive}"
+        );
 
         // Bypass run: cheap (map) must NEVER be called; reasoning gets exactly one call.
         let cheap = RecordingMockLlm::new("gpt-4o-mini");
-        let reasoning = RecordingMockLlm::new("gpt-4o").with_response("Rust 所有权与借用的简明总结。");
-        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
-        let (summary, bill) =
-            summarize(&text, SummaryLevel::Standard, "item-shortbypass", &r, &llms, &store, &dek, &cfg)
-                .unwrap();
+        let reasoning =
+            RecordingMockLlm::new("gpt-4o").with_response("Rust 所有权与借用的简明总结。");
+        let llms = StageLlms {
+            cheap: &cheap,
+            reasoning: &reasoning,
+        };
+        let (summary, bill) = summarize(
+            &text,
+            SummaryLevel::Standard,
+            "item-shortbypass",
+            &r,
+            &llms,
+            &store,
+            &dek,
+            &cfg,
+        )
+        .unwrap();
 
-        assert_eq!(bill.path, "single-call", "short doc must take the single-call bypass");
-        assert_eq!(cheap.call_count(), 0, "bypass must NOT call the map (cheap) LLM");
-        assert_eq!(reasoning.call_count(), 1, "bypass = exactly one standard summarize call");
+        assert_eq!(
+            bill.path, "single-call",
+            "short doc must take the single-call bypass"
+        );
+        assert_eq!(
+            cheap.call_count(),
+            0,
+            "bypass must NOT call the map (cheap) LLM"
+        );
+        assert_eq!(
+            reasoning.call_count(),
+            1,
+            "bypass = exactly one standard summarize call"
+        );
         assert_eq!(bill.new_chunks, 0, "no map chunks billed on the bypass");
-        assert!(!summary.overview.is_empty(), "bypass still returns a summary");
+        assert!(
+            !summary.overview.is_empty(),
+            "bypass still returns a summary"
+        );
 
         // (a1) the single call reads NO MORE input than naive (summarizes the extractive candidate).
         assert!(
@@ -686,15 +896,33 @@ mod tests {
 
         // (a2) the hard guarantee: the bypass is NEVER worse than map-reduce on the same short doc.
         let cheap_mr = RecordingMockLlm::new("gpt-4o-mini")
-            .with_response("块摘要1").with_response("块摘要2");
-        let reasoning_mr = RecordingMockLlm::new("gpt-4o").with_response("Rust 所有权与借用的简明总结。");
-        let llms_mr = StageLlms { cheap: &cheap_mr, reasoning: &reasoning_mr };
-        let cfg_force_mr = DeepSummaryConfig { min_tokens_for_pipeline: 0, ..DeepSummaryConfig::default() };
+            .with_response("块摘要1")
+            .with_response("块摘要2");
+        let reasoning_mr =
+            RecordingMockLlm::new("gpt-4o").with_response("Rust 所有权与借用的简明总结。");
+        let llms_mr = StageLlms {
+            cheap: &cheap_mr,
+            reasoning: &reasoning_mr,
+        };
+        let cfg_force_mr = DeepSummaryConfig {
+            min_tokens_for_pipeline: 0,
+            ..DeepSummaryConfig::default()
+        };
         let (_s_mr, bill_mr) = summarize(
-            &text, SummaryLevel::Standard, "item-shortbypass-mr", &r, &llms_mr, &store, &dek, &cfg_force_mr,
+            &text,
+            SummaryLevel::Standard,
+            "item-shortbypass-mr",
+            &r,
+            &llms_mr,
+            &store,
+            &dek,
+            &cfg_force_mr,
         )
         .unwrap();
-        assert_eq!(bill_mr.path, "map-reduce", "forced-pipeline run takes the multi-stage path");
+        assert_eq!(
+            bill_mr.path, "map-reduce",
+            "forced-pipeline run takes the multi-stage path"
+        );
         assert!(
             bill.actual_billable_tokens() <= bill_mr.actual_billable_tokens(),
             "bypass actual {} must NOT exceed map-reduce actual {} (net-negative eliminated)",
@@ -723,24 +951,47 @@ mod tests {
         for i in 0..10 {
             reasoning = reasoning.with_response(&format!("总结{i}"));
         }
-        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+        let llms = StageLlms {
+            cheap: &cheap,
+            reasoning: &reasoning,
+        };
         let (store, dek) = mem_store_dek();
         let r = router();
         let cfg = DeepSummaryConfig::default(); // DEFAULT cutoff — proves real routing
         let text = long_doc();
 
         let naive = cost::estimate_tokens(&text, "gpt-4o") as u32;
-        assert!(naive >= DEEPSUM_MIN_TOK, "long_doc() must exceed the cutoff, naive={naive}");
+        assert!(
+            naive >= DEEPSUM_MIN_TOK,
+            "long_doc() must exceed the cutoff, naive={naive}"
+        );
 
-        let (summary, bill) =
-            summarize(&text, SummaryLevel::Standard, "item-long", &r, &llms, &store, &dek, &cfg)
-                .unwrap();
+        let (summary, bill) = summarize(
+            &text,
+            SummaryLevel::Standard,
+            "item-long",
+            &r,
+            &llms,
+            &store,
+            &dek,
+            &cfg,
+        )
+        .unwrap();
 
-        assert_eq!(bill.path, "map-reduce", "long doc must take the multi-stage path");
+        assert_eq!(
+            bill.path, "map-reduce",
+            "long doc must take the multi-stage path"
+        );
         assert!(cheap.call_count() >= 2, "long doc still runs the map stage");
-        assert!(summary.per_chapter.len() >= 2, "multi-stage produces per-chapter view");
+        assert!(
+            summary.per_chapter.len() >= 2,
+            "multi-stage produces per-chapter view"
+        );
         // The 93-96% re-read figure rests on warm-cache savings; first run still bills map+reduce.
-        assert!(bill.new_chunks > 0, "long-doc cold run bills new map chunks");
+        assert!(
+            bill.new_chunks > 0,
+            "long-doc cold run bills new map chunks"
+        );
     }
 
     /// W2 (adversarial review): empty/whitespace doc spends ZERO LLM calls at the core (not only
@@ -749,15 +1000,30 @@ mod tests {
     fn test_empty_doc_spends_no_llm() {
         let cheap = RecordingMockLlm::new("gpt-4o-mini");
         let reasoning = RecordingMockLlm::new("gpt-4o");
-        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+        let llms = StageLlms {
+            cheap: &cheap,
+            reasoning: &reasoning,
+        };
         let (store, dek) = mem_store_dek();
         let r = router();
         let cfg = DeepSummaryConfig::default();
-        let (summary, bill) =
-            summarize("   \n\t ", SummaryLevel::Standard, "item-empty", &r, &llms, &store, &dek, &cfg)
-                .unwrap();
+        let (summary, bill) = summarize(
+            "   \n\t ",
+            SummaryLevel::Standard,
+            "item-empty",
+            &r,
+            &llms,
+            &store,
+            &dek,
+            &cfg,
+        )
+        .unwrap();
         assert_eq!(cheap.call_count(), 0, "empty doc: no map LLM call");
-        assert_eq!(reasoning.call_count(), 0, "empty doc: no reasoning LLM call");
+        assert_eq!(
+            reasoning.call_count(),
+            0,
+            "empty doc: no reasoning LLM call"
+        );
         assert_eq!(bill.actual_billable_tokens(), 0, "empty doc: zero bill");
         assert_eq!(bill.path, "empty");
         assert!(summary.overview.is_empty());
@@ -766,17 +1032,41 @@ mod tests {
     #[test]
     fn test_fanin_tree_for_many_blocks() {
         // Force a tiny fan-in so a 2-block doc triggers the tree path (2 group folds + 1 final).
-        let cheap = RecordingMockLlm::new("gpt-4o-mini").with_response("a").with_response("b");
+        let cheap = RecordingMockLlm::new("gpt-4o-mini")
+            .with_response("a")
+            .with_response("b");
         let reasoning = RecordingMockLlm::new("gpt-4o")
-            .with_response("g1").with_response("g2").with_response("final");
-        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+            .with_response("g1")
+            .with_response("g2")
+            .with_response("final");
+        let llms = StageLlms {
+            cheap: &cheap,
+            reasoning: &reasoning,
+        };
         let (store, dek) = mem_store_dek();
         let r = router();
         // Force the multi-stage path (small fixture would otherwise hit the single-call bypass).
-        let cfg = DeepSummaryConfig { reduce_fanin: 1, min_tokens_for_pipeline: 0, ..Default::default() };
-        let (_s, _bill) =
-            summarize(&doc(), SummaryLevel::Standard, "i", &r, &llms, &store, &dek, &cfg).unwrap();
+        let cfg = DeepSummaryConfig {
+            reduce_fanin: 1,
+            min_tokens_for_pipeline: 0,
+            ..Default::default()
+        };
+        let (_s, _bill) = summarize(
+            &doc(),
+            SummaryLevel::Standard,
+            "i",
+            &r,
+            &llms,
+            &store,
+            &dek,
+            &cfg,
+        )
+        .unwrap();
         // 2 blocks / fanin 1 = 2 group folds + 1 final fold = 3 reduce calls.
-        assert_eq!(reasoning.call_count(), 3, "fan-in tree: ⌈n/f⌉ group folds + 1 final");
+        assert_eq!(
+            reasoning.call_count(),
+            3,
+            "fan-in tree: ⌈n/f⌉ group folds + 1 final"
+        );
     }
 }

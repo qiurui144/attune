@@ -47,7 +47,10 @@ pub struct PowerPolicy {
 
 impl Default for PowerPolicy {
     fn default() -> Self {
-        PowerPolicy { mode: BatteryPolicy::Throttle, low_battery_pct: 20 }
+        PowerPolicy {
+            mode: BatteryPolicy::Throttle,
+            low_battery_pct: 20,
+        }
     }
 }
 
@@ -68,11 +71,7 @@ pub struct TaskGovernor {
 }
 
 impl TaskGovernor {
-    pub fn new(
-        kind: TaskKind,
-        profile: Profile,
-        monitor: Arc<dyn ResourceMonitor>,
-    ) -> Self {
+    pub fn new(kind: TaskKind, profile: Profile, monitor: Arc<dyn ResourceMonitor>) -> Self {
         let budget = profile.budget_for(kind);
         Self {
             kind,
@@ -129,9 +128,7 @@ impl TaskGovernor {
             }
             match policy.mode {
                 // Pause 模式：任何电池供电即停全部后台。
-                BatteryPolicy::Pause
-                    if matches!(sample.power.source, PowerSource::Battery) =>
-                {
+                BatteryPolicy::Pause if matches!(sample.power.source, PowerSource::Battery) => {
                     return false;
                 }
                 // Throttle 模式：能效约束态(电池/saver/热)收紧到 Conservative 档。
@@ -346,7 +343,7 @@ mod tests {
         // 触发一次 sample 写入 last_sample
         let _ = g.should_run();
         let d = g.after_work();
-        assert_eq!(d, Duration::from_millis(1000));  // Balanced throttle
+        assert_eq!(d, Duration::from_millis(1000)); // Balanced throttle
     }
 
     #[test]
@@ -387,7 +384,7 @@ mod tests {
     #[test]
     fn task_status_round_trips_state() {
         let g = governor_with_cpu(TaskKind::FileScanner, Profile::Conservative, 7.5);
-        let _ = g.should_run();  // 触发 sample 写入
+        let _ = g.should_run(); // 触发 sample 写入
         let s = TaskStatus::from_governor(&g);
         assert_eq!(s.id, "file_scanner");
         assert_eq!(s.profile, Profile::Conservative);
@@ -403,7 +400,10 @@ mod tests {
         let ac = governor_with_power(20.0, PowerState::default());
         assert!(ac.should_run(), "AC 20% < 25% budget → run");
         let bat = governor_with_power(20.0, battery(80));
-        assert!(!bat.should_run(), "battery caps to 15% → 20% exceeds → throttle");
+        assert!(
+            !bat.should_run(),
+            "battery caps to 15% → 20% exceeds → throttle"
+        );
         // 电池但 CPU 低于 15% → 仍跑（慢速推进）
         let bat_low_cpu = governor_with_power(10.0, battery(80));
         assert!(bat_low_cpu.should_run(), "battery 10% < 15% cap → run");

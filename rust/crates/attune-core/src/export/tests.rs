@@ -136,10 +136,7 @@ fn zero_column_table_rejected() {
 fn document_multi_table_to_csv_rejected() {
     let d = Document {
         title: None,
-        blocks: vec![
-            Block::Table(sample_table()),
-            Block::Table(sample_table()),
-        ],
+        blocks: vec![Block::Table(sample_table()), Block::Table(sample_table())],
     };
     let err = Artifact::document(d).render(ExportFormat::Csv).unwrap_err();
     assert_eq!(err.code(), "unsupported-artifact");
@@ -151,7 +148,9 @@ fn document_no_table_to_xlsx_rejected() {
         title: None,
         blocks: vec![Block::Paragraph { text: "x".into() }],
     };
-    let err = Artifact::document(d).render(ExportFormat::Xlsx).unwrap_err();
+    let err = Artifact::document(d)
+        .render(ExportFormat::Xlsx)
+        .unwrap_err();
     assert_eq!(err.code(), "unsupported-artifact");
 }
 

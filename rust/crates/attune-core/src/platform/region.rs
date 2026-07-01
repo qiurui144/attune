@@ -163,7 +163,9 @@ mod tests {
             Region::China.hf_endpoint()
         );
         assert!(!Region::China.hf_endpoint().contains("hf-mirror"));
-        assert!(Region::International.hf_endpoint().contains("huggingface.co"));
+        assert!(Region::International
+            .hf_endpoint()
+            .contains("huggingface.co"));
     }
 
     #[test]

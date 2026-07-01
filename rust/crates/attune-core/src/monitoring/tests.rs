@@ -50,14 +50,31 @@ fn kw_watch(id: &str, keywords: &[&str]) -> Watch {
 fn happy_keyword_match_with_reasons() {
     let m = WatchMatcher::default();
     let items = vec![
-        item("i1", "RVV news", "the RVV extension lands", "2026-06-18T00:00:00Z"),
-        item("i2", "Other", "totally unrelated topic", "2026-06-18T00:00:00Z"),
-        item("i3", "RVV deep", "more about RVV vectors", "2026-06-18T00:00:00Z"),
+        item(
+            "i1",
+            "RVV news",
+            "the RVV extension lands",
+            "2026-06-18T00:00:00Z",
+        ),
+        item(
+            "i2",
+            "Other",
+            "totally unrelated topic",
+            "2026-06-18T00:00:00Z",
+        ),
+        item(
+            "i3",
+            "RVV deep",
+            "more about RVV vectors",
+            "2026-06-18T00:00:00Z",
+        ),
     ];
     let w = kw_watch("w1", &["RVV"]);
     let hits = m.evaluate(&items, &[w], &HashMap::new(), NOW);
     assert_eq!(hits.len(), 2, "2 items contain RVV");
-    assert!(hits.iter().all(|h| h.reasons.iter().any(|r| r.contains("RVV"))));
+    assert!(hits
+        .iter()
+        .all(|h| h.reasons.iter().any(|r| r.contains("RVV"))));
     assert!(hits.iter().all(|h| h.watch_id == "w1"));
 }
 
@@ -70,7 +87,10 @@ fn happy_triage_orders_by_score_then_recency() {
         item("new", "RVV new", "RVV here", "2026-06-18T00:00:00Z"),
     ];
     let hits = m.evaluate(&items, &[kw_watch("w", &["RVV"])], &HashMap::new(), NOW);
-    assert_eq!(hits[0].item_id, "new", "more recent ranks first (recency factor)");
+    assert_eq!(
+        hits[0].item_id, "new",
+        "more recent ranks first (recency factor)"
+    );
     assert!(hits[0].score >= hits[1].score);
 }
 
@@ -150,15 +170,20 @@ fn error_anchor_dim_mismatch_degrades_no_panic() {
     w.anchor_vec = Some(vec![1.0, 0.0]); // dim 2
     let mut it = item("i", "RVV", "RVV body", "2026-06-18T00:00:00Z");
     it.vector = Some(vec![1.0, 0.0, 0.0]); // dim 3 — mismatch
-    // keyword still matches; vector silently contributes 0 (no panic).
+                                           // keyword still matches; vector silently contributes 0 (no panic).
     let hits = WatchMatcher::default().evaluate(&[it], &[w], &HashMap::new(), NOW);
-    assert_eq!(hits.len(), 1, "keyword carries the match despite vec mismatch");
+    assert_eq!(
+        hits.len(),
+        1,
+        "keyword carries the match despite vec mismatch"
+    );
 }
 
 #[test]
 fn error_malformed_created_at_no_panic() {
     let items = vec![item("i", "RVV", "RVV", "not-a-date")];
-    let hits = WatchMatcher::default().evaluate(&items, &[kw_watch("w", &["RVV"])], &HashMap::new(), NOW);
+    let hits =
+        WatchMatcher::default().evaluate(&items, &[kw_watch("w", &["RVV"])], &HashMap::new(), NOW);
     assert_eq!(hits.len(), 1, "bad date → recency 1.0, still matches");
 }
 
@@ -168,14 +193,26 @@ fn error_malformed_created_at_no_panic() {
 fn adversarial_regex_metachars_treated_literally() {
     // keyword with regex metachars must NOT be executed as regex.
     let w = kw_watch("w", &[".*", "a+b"]);
-    let it = item("i", "lit", "this has a+b literally and .* too", "2026-06-18T00:00:00Z");
+    let it = item(
+        "i",
+        "lit",
+        "this has a+b literally and .* too",
+        "2026-06-18T00:00:00Z",
+    );
     let hits = WatchMatcher::default().evaluate(&[it], &[w], &HashMap::new(), NOW);
     assert_eq!(hits.len(), 1);
     // a control item that would match `.*` if it were regex but lacks the literal.
     let w2 = kw_watch("w2", &[".*"]);
-    let plain = item("p", "plain", "no metachar sequence present here", "2026-06-18T00:00:00Z");
+    let plain = item(
+        "p",
+        "plain",
+        "no metachar sequence present here",
+        "2026-06-18T00:00:00Z",
+    );
     assert!(
-        WatchMatcher::default().evaluate(&[plain], &[w2], &HashMap::new(), NOW).is_empty(),
+        WatchMatcher::default()
+            .evaluate(&[plain], &[w2], &HashMap::new(), NOW)
+            .is_empty(),
         "'.*' must be literal, not match-anything"
     );
 }
@@ -190,7 +227,10 @@ fn adversarial_keyword_repetition_does_not_inflate_score() {
     let hits = WatchMatcher::default().evaluate(&[it_many, it_one], &[w], &HashMap::new(), NOW);
     // both fully match (ratio 1.0), score difference comes only from recency (equal) → equal.
     assert_eq!(hits.len(), 2);
-    assert!((hits[0].score - hits[1].score).abs() < 1e-4, "repetition does not inflate");
+    assert!(
+        (hits[0].score - hits[1].score).abs() < 1e-4,
+        "repetition does not inflate"
+    );
 }
 
 #[test]
@@ -220,22 +260,37 @@ fn dedup_same_item_twice_in_batch_unique() {
 
 #[test]
 fn dedup_same_content_hash_grouped() {
-    let mut a = item("a", "RVV Title A", "RVV from source A", "2026-06-18T00:00:00Z");
-    let mut b = item("b", "RVV Title B", "RVV from source B", "2026-06-18T00:00:00Z");
+    let mut a = item(
+        "a",
+        "RVV Title A",
+        "RVV from source A",
+        "2026-06-18T00:00:00Z",
+    );
+    let mut b = item(
+        "b",
+        "RVV Title B",
+        "RVV from source B",
+        "2026-06-18T00:00:00Z",
+    );
     a.content_hash = "same".to_string();
     b.content_hash = "same".to_string();
-    let hits = WatchMatcher::default().evaluate(&[a, b], &[kw_watch("w", &["RVV"])], &HashMap::new(), NOW);
+    let hits =
+        WatchMatcher::default().evaluate(&[a, b], &[kw_watch("w", &["RVV"])], &HashMap::new(), NOW);
     assert_eq!(hits.len(), 2);
     let g0 = hits[0].dedup_group.clone();
     let g1 = hits[1].dedup_group.clone();
-    assert!(g0.is_some() && g0 == g1, "same content_hash → same dedup_group");
+    assert!(
+        g0.is_some() && g0 == g1,
+        "same content_hash → same dedup_group"
+    );
 }
 
 #[test]
 fn dedup_same_normalized_title_grouped() {
     let a = item("a", "RVV Update!", "RVV body a", "2026-06-18T00:00:00Z");
     let b = item("b", "rvv update", "RVV body b", "2026-06-18T00:00:00Z"); // same after normalize
-    let hits = WatchMatcher::default().evaluate(&[a, b], &[kw_watch("w", &["RVV"])], &HashMap::new(), NOW);
+    let hits =
+        WatchMatcher::default().evaluate(&[a, b], &[kw_watch("w", &["RVV"])], &HashMap::new(), NOW);
     let groups: Vec<_> = hits.iter().filter_map(|h| h.dedup_group.clone()).collect();
     assert_eq!(groups.len(), 2);
     assert_eq!(groups[0], groups[1], "normalized-title match → same group");
@@ -244,9 +299,18 @@ fn dedup_same_normalized_title_grouped() {
 #[test]
 fn dedup_distinct_items_not_grouped() {
     let a = item("a", "RVV alpha", "RVV alpha body", "2026-06-18T00:00:00Z");
-    let b = item("b", "RVV beta different", "RVV beta body", "2026-06-18T00:00:00Z");
-    let hits = WatchMatcher::default().evaluate(&[a, b], &[kw_watch("w", &["RVV"])], &HashMap::new(), NOW);
-    assert!(hits.iter().all(|h| h.dedup_group.is_none()), "distinct titles → no group");
+    let b = item(
+        "b",
+        "RVV beta different",
+        "RVV beta body",
+        "2026-06-18T00:00:00Z",
+    );
+    let hits =
+        WatchMatcher::default().evaluate(&[a, b], &[kw_watch("w", &["RVV"])], &HashMap::new(), NOW);
+    assert!(
+        hits.iter().all(|h| h.dedup_group.is_none()),
+        "distinct titles → no group"
+    );
 }
 
 // ── triage: source weight + interaction ──────────────────────────────────
@@ -268,7 +332,12 @@ fn triage_interaction_signal_boosts() {
     let a = item("a", "RVV a", "RVV body", "2026-06-18T00:00:00Z");
     let b = item("b", "RVV b", "RVV body", "2026-06-18T00:00:00Z");
     let mut sig = HashMap::new();
-    sig.insert("b".to_string(), InteractionSignals { interaction_count: 20 });
+    sig.insert(
+        "b".to_string(),
+        InteractionSignals {
+            interaction_count: 20,
+        },
+    );
     let hits = WatchMatcher::default().evaluate(&[a, b], &[w], &sig, NOW);
     assert_eq!(hits[0].item_id, "b", "interacted item ranks first");
     assert!(hits[0].reasons.iter().any(|r| r.contains("历史交互")));
@@ -280,16 +349,28 @@ fn triage_interaction_signal_boosts() {
 fn resource_100_watch_500_item_linear() {
     let m = WatchMatcher::default();
     let items: Vec<ItemMeta> = (0..500)
-        .map(|i| item(&format!("i{i}"), &format!("title {i}"), &format!("RVV content {i}"), "2026-06-18T00:00:00Z"))
+        .map(|i| {
+            item(
+                &format!("i{i}"),
+                &format!("title {i}"),
+                &format!("RVV content {i}"),
+                "2026-06-18T00:00:00Z",
+            )
+        })
         .collect();
-    let watches: Vec<Watch> = (0..100).map(|i| kw_watch(&format!("w{i}"), &["RVV"])).collect();
+    let watches: Vec<Watch> = (0..100)
+        .map(|i| kw_watch(&format!("w{i}"), &["RVV"]))
+        .collect();
     let start = std::time::Instant::now();
     let hits = m.evaluate(&items, &watches, &HashMap::new(), NOW);
     let elapsed = start.elapsed();
     // 100 watch × 500 item all contain "RVV" → 50_000 hits.
     assert_eq!(hits.len(), 50_000);
     // sanity: incremental match over new batch is tractable (not O(N^2) over full vault).
-    assert!(elapsed.as_secs() < 10, "scale case must stay tractable, took {elapsed:?}");
+    assert!(
+        elapsed.as_secs() < 10,
+        "scale case must stay tractable, took {elapsed:?}"
+    );
 }
 
 // ── idempotence ───────────────────────────────────────────────────────────

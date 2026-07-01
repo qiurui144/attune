@@ -1,11 +1,11 @@
+use crate::error::{AppError, AppResult};
+use crate::state::SharedState;
 use attune_core::reindex;
 use attune_core::store::audit::PrivacyTier;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
-use crate::error::{AppError, AppResult};
-use crate::state::SharedState;
 
 #[derive(Deserialize)]
 pub struct ListQuery {
@@ -15,33 +15,42 @@ pub struct ListQuery {
     pub offset: usize,
 }
 
-fn default_limit() -> usize { 20 }
+fn default_limit() -> usize {
+    20
+}
 
 pub async fn list_items(
     State(state): State<SharedState>,
     Query(params): Query<ListQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock()
+    let vault = state
+        .vault
+        .lock()
         .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let _ = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
     let limit = params.limit.min(200);
-    let items = vault.store().list_items(limit, params.offset).map_err(|e| {
-        AppError::Internal(e.to_string())
-    })?;
-    Ok(Json(serde_json::json!({"items": items, "count": items.len()})))
+    let items = vault
+        .store()
+        .list_items(limit, params.offset)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({"items": items, "count": items.len()}),
+    ))
 }
 
 pub async fn get_item(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock()
+    let vault = state
+        .vault
+        .lock()
         .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
-    let dek = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
     match vault.store().get_item(&dek, &id) {
         Ok(Some(item)) => Ok(Json(serde_json::json!(item))),
         Ok(None) => Err(AppError::NotFound("not found".into())),
@@ -57,11 +66,13 @@ pub async fn get_item_original(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> AppResult<axum::response::Response> {
-    let vault = state.vault.lock()
+    let vault = state
+        .vault
+        .lock()
         .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
-    let dek = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
     match vault.store().get_item_blob(&dek, &id) {
         Ok(Some(blob)) => {
             use axum::http::header;
@@ -72,9 +83,7 @@ pub async fn get_item_original(
                 .header(header::CONTENT_DISPOSITION, "inline")
                 .header(header::CACHE_CONTROL, "no-store")
                 .body(axum::body::Body::from(blob.bytes))
-                .map_err(|e| {
-                    AppError::Internal(e.to_string())
-                })
+                .map_err(|e| AppError::Internal(e.to_string()))
         }
         Ok(None) => Err(AppError::NotFound(
             "no original file retained for this item".into(),
@@ -112,7 +121,11 @@ pub async fn update_item(
     if body.title.as_ref().is_some_and(|t| t.len() > MAX_TITLE_LEN) {
         return Err(AppError::PayloadTooLarge("title too long".into()));
     }
-    if body.content.as_ref().is_some_and(|c| c.len() > MAX_CONTENT_LEN) {
+    if body
+        .content
+        .as_ref()
+        .is_some_and(|c| c.len() > MAX_CONTENT_LEN)
+    {
         return Err(AppError::PayloadTooLarge("content too large".into()));
     }
 
@@ -121,13 +134,16 @@ pub async fn update_item(
     // ABBA deadlock with search/chat paths that acquire fulltext→vectors→vault in that order.
     // We release vault here and re-acquire it narrowly in later phases.
     let (outcome, item_for_reindex) = {
-        let vault = state.vault.lock()
+        let vault = state
+            .vault
+            .lock()
             .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
-        let dek = vault.dek_db().map_err(|e| {
-            AppError::Forbidden(e.to_string())
-        })?;
+        let dek = vault
+            .dek_db()
+            .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
-        let outcome = vault.store()
+        let outcome = vault
+            .store()
             .update_item(&dek, &id, body.title.as_deref(), body.content.as_deref())
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
@@ -137,7 +153,9 @@ pub async fn update_item(
 
         // Read item data as owned Strings before dropping vault guard.
         let item = if outcome.content_changed {
-            let item = vault.store().get_item(&dek, &id)
+            let item = vault
+                .store()
+                .get_item(&dek, &id)
                 .map_err(|e| AppError::Internal(e.to_string()))?
                 .ok_or_else(|| AppError::NotFound("race: item gone".into()))?;
             Some(item)
@@ -156,9 +174,7 @@ pub async fn update_item(
         // Clear stale embed queue and chunk summaries before touching index structures.
         let queue_cleared = {
             let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-            let queue_cleared = vault.store()
-                .purge_embed_queue_for_item(&id)
-                .unwrap_or(0);
+            let queue_cleared = vault.store().purge_embed_queue_for_item(&id).unwrap_or(0);
             // QW-5: chunk_summary entries keyed by old chunk_hash become stale on content change.
             let _ = vault.store().delete_chunk_summaries_for_item(&id);
             // vault guard drops here
@@ -176,7 +192,9 @@ pub async fn update_item(
             // (ABBA: search holds fulltext waits vectors; this holds vectors waits fulltext).
             let fulltext_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
             let mut vectors_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
-            if let (Some(vectors), Some(fulltext)) = (vectors_guard.as_mut(), fulltext_guard.as_ref()) {
+            if let (Some(vectors), Some(fulltext)) =
+                (vectors_guard.as_mut(), fulltext_guard.as_ref())
+            {
                 match vectors.delete_by_item_id(&id) {
                     Ok(n) => vectors_deleted = n,
                     Err(e) => tracing::warn!("vectors.delete_by_item_id failed for {id}: {e}"),
@@ -184,7 +202,9 @@ pub async fn update_item(
                 if let Err(e) = fulltext.delete_document(&id) {
                     tracing::warn!("fulltext.delete_document failed for {id}: {e}");
                 }
-                if let Err(e) = fulltext.add_document(&id, &item.title, &item.content, &item.source_type) {
+                if let Err(e) =
+                    fulltext.add_document(&id, &item.title, &item.content, &item.source_type)
+                {
                     tracing::warn!("fulltext.add_document failed for {id}: {e} — search 可能短暂 stale，下次 update 重试");
                 }
             } else {
@@ -201,8 +221,17 @@ pub async fn update_item(
             let sections = attune_core::chunker::extract_sections(&item.content);
             let mut enqueue_ok = true;
             for (section_idx, section_text) in &sections {
-                if section_text.trim().is_empty() { continue; }
-                if let Err(e) = vault.store().enqueue_embedding(&id, chunk_counter, section_text, 1, 1, *section_idx) {
+                if section_text.trim().is_empty() {
+                    continue;
+                }
+                if let Err(e) = vault.store().enqueue_embedding(
+                    &id,
+                    chunk_counter,
+                    section_text,
+                    1,
+                    1,
+                    *section_idx,
+                ) {
                     tracing::warn!("enqueue_embedding L1 failed for {id}: {e}");
                     enqueue_ok = false;
                     break;
@@ -211,8 +240,19 @@ pub async fn update_item(
             }
             if enqueue_ok {
                 for (section_idx, section_text) in &sections {
-                    for chunk_text in attune_core::chunker::chunk(section_text, attune_core::chunker::DEFAULT_CHUNK_SIZE, attune_core::chunker::DEFAULT_OVERLAP) {
-                        if let Err(e) = vault.store().enqueue_embedding(&id, chunk_counter, &chunk_text, 2, 2, *section_idx) {
+                    for chunk_text in attune_core::chunker::chunk(
+                        section_text,
+                        attune_core::chunker::DEFAULT_CHUNK_SIZE,
+                        attune_core::chunker::DEFAULT_OVERLAP,
+                    ) {
+                        if let Err(e) = vault.store().enqueue_embedding(
+                            &id,
+                            chunk_counter,
+                            &chunk_text,
+                            2,
+                            2,
+                            *section_idx,
+                        ) {
                             tracing::warn!("enqueue_embedding L2 failed for {id}: {e}");
                             break;
                         }
@@ -270,13 +310,15 @@ pub async fn delete_item(
     // delete so search never sees a "DB deleted but vectors still present" state.
     let fulltext_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
     let mut vectors_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
-    let vault = state.vault.lock()
+    let vault = state
+        .vault
+        .lock()
         .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
     // vault Locked/Sealed 时拒绝删除（与 update_item / list_items 等
     // mutating handler 一致 — "锁着的 vault 不可被改"语义）。
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let _ = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
     // 先清索引（vector + FTS + queue），再 SQL 软删 — 让 search 在删除窗口内
     // 不会读到"DB 已删但向量还在"的 partial 状态
@@ -302,7 +344,7 @@ pub async fn delete_item(
                     "queue_cleared": s.queue_cleared,
                 })),
             })))
-        },
+        }
         Ok(false) => Err(AppError::NotFound("not found".into())),
         Err(e) => Err(AppError::Internal(e.to_string())),
     }
@@ -316,35 +358,46 @@ pub struct StaleQuery {
     pub limit: i64,
 }
 
-fn default_stale_days() -> i64 { 30 }
-fn default_stale_limit() -> i64 { 50 }
+fn default_stale_days() -> i64 {
+    30
+}
+fn default_stale_limit() -> i64 {
+    50
+}
 
 pub async fn list_stale_items(
     State(state): State<SharedState>,
     Query(params): Query<StaleQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock()
+    let vault = state
+        .vault
+        .lock()
         .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let _ = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
     let limit = params.limit.min(200);
-    let items = vault.store().list_stale_items(params.days, limit).map_err(|e| {
-        AppError::Internal(e.to_string())
-    })?;
+    let items = vault
+        .store()
+        .list_stale_items(params.days, limit)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     let count = items.len();
-    Ok(Json(serde_json::json!({"items": items, "count": count, "days": params.days})))
+    Ok(Json(
+        serde_json::json!({"items": items, "count": count, "days": params.days}),
+    ))
 }
 
 pub async fn get_item_stats(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock()
+    let vault = state
+        .vault
+        .lock()
         .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let _ = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
     match vault.store().get_item_stats(&id) {
         Ok(Some(stats)) => Ok(Json(serde_json::json!(stats))),
         Ok(None) => Err(AppError::NotFound("not found".into())),
@@ -388,21 +441,27 @@ pub async fn set_item_privacy(
     Json(body): Json<PrivacyTierBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     let tier = parse_tier(&body.tier)?;
-    let vault = state.vault.lock().map_err(|_| {
-        AppError::Internal("vault lock poisoned".into())
-    })?;
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
-    vault.store().set_item_privacy_tier(&id, tier).map_err(|e| {
-        let m = e.to_string();
-        if m.contains("not found") {
-            AppError::NotFound(m)
-        } else {
-            AppError::Internal(m)
-        }
-    })?;
-    Ok(Json(serde_json::json!({"id": id, "privacy_tier": tier_str(tier)})))
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
+    let _ = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
+    vault
+        .store()
+        .set_item_privacy_tier(&id, tier)
+        .map_err(|e| {
+            let m = e.to_string();
+            if m.contains("not found") {
+                AppError::NotFound(m)
+            } else {
+                AppError::Internal(m)
+            }
+        })?;
+    Ok(Json(
+        serde_json::json!({"id": id, "privacy_tier": tier_str(tier)}),
+    ))
 }
 
 /// GET /api/v1/items/{id}/privacy_tier
@@ -410,12 +469,13 @@ pub async fn get_item_privacy(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock().map_err(|_| {
-        AppError::Internal("vault lock poisoned".into())
-    })?;
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
+    let _ = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
     let tier = vault.store().get_item_privacy_tier(&id).map_err(|e| {
         let m = e.to_string();
         if m.contains("not found") {
@@ -424,22 +484,26 @@ pub async fn get_item_privacy(
             AppError::Internal(m)
         }
     })?;
-    Ok(Json(serde_json::json!({"id": id, "privacy_tier": tier_str(tier)})))
+    Ok(Json(
+        serde_json::json!({"id": id, "privacy_tier": tier_str(tier)}),
+    ))
 }
 
 /// GET /api/v1/items/protected — 列出所有标记为 L0 的 item id（Settings UI "受保护文件"）
 pub async fn list_protected_items(
     State(state): State<SharedState>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let vault = state.vault.lock().map_err(|_| {
-        AppError::Internal("vault lock poisoned".into())
-    })?;
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
-    let ids = vault.store().list_l0_item_ids().map_err(|e| {
-        AppError::Internal(e.to_string())
-    })?;
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
+    let _ = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
+    let ids = vault
+        .store()
+        .list_l0_item_ids()
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     let count = ids.len();
     Ok(Json(serde_json::json!({"items": ids, "count": count})))
 }

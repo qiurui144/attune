@@ -95,20 +95,26 @@ pub async fn create_annotation(
     let color = body.color.as_deref().unwrap_or("yellow");
     let content = body.content.as_deref().unwrap_or("");
     validate_common(
-        body.offset_start, body.offset_end,
-        &body.text_snippet, body.label.as_deref(), color, content,
+        body.offset_start,
+        body.offset_end,
+        &body.text_snippet,
+        body.label.as_deref(),
+        color,
+        content,
     )?;
     validate_source(body.source.as_deref())?;
 
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let dek = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
     // 拉取条目：既校验存在性（404 清晰于 SQL 外键错），又拿 content 长度做 offset 越界校验
-    let item = vault.store().get_item(&dek, &body.item_id).map_err(|e| {
-        AppError::Internal(e.to_string())
-    })?.ok_or_else(|| AppError::NotFound("item not found".into()))?;
+    let item = vault
+        .store()
+        .get_item(&dek, &body.item_id)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound("item not found".into()))?;
 
     // offset 上界：按 UTF-16 code unit（与前端 JS String index 对齐）
     let content_utf16_len = item.content.encode_utf16().count() as i64;
@@ -120,9 +126,10 @@ pub async fn create_annotation(
     }
 
     // 单条目批注数上限
-    let existing = vault.store().count_annotations(&body.item_id).map_err(|e| {
-        AppError::Internal(e.to_string())
-    })?;
+    let existing = vault
+        .store()
+        .count_annotations(&body.item_id)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     if existing >= MAX_ANNOTATIONS_PER_ITEM {
         return Err(AppError::TooManyRequests(format!(
             "annotation limit {MAX_ANNOTATIONS_PER_ITEM} reached for this item"
@@ -138,16 +145,21 @@ pub async fn create_annotation(
         content: content.to_string(),
         source: body.source,
     };
-    let id = vault.store().create_annotation(&dek, &body.item_id, &input).map_err(|e| {
-        AppError::Unprocessable(e.to_string())
-    })?;
+    let id = vault
+        .store()
+        .create_annotation(&dek, &body.item_id, &input)
+        .map_err(|e| AppError::Unprocessable(e.to_string()))?;
 
     // v0.7 自学习闭环 Phase B hook 3：annotation_marker 信号喂 skill_evolution。
     // 用户标 ⭐ 重点 / 🤔 存疑 / ❓ 不懂 都是高价值偏好信号 — skill_evolution 用
     // ref_id（item_id）反查附近 chunk 在最近 search 里的命中情况：
     // - 重点 → 该 chunk 同义词应保留 / 加权
     // - 存疑/不懂 → query 可能召回了"看起来相关实则用户不满"的 chunk，需扩展词补强
-    if let Err(e) = vault.store().record_signal_event("annotation_marker", &body.item_id, input.label.as_deref()) {
+    if let Err(e) = vault.store().record_signal_event(
+        "annotation_marker",
+        &body.item_id,
+        input.label.as_deref(),
+    ) {
         tracing::debug!(signal = "annotation_marker", error = %e, "record_signal_event failed (non-fatal)");
     }
 
@@ -163,12 +175,13 @@ pub async fn list_annotations(
         return Err(bad_request("item_id too long"));
     }
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let dek = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
-    let anns = vault.store().list_annotations(&dek, &q.item_id).map_err(|e| {
-        AppError::Internal(e.to_string())
-    })?;
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
+    let anns = vault
+        .store()
+        .list_annotations(&dek, &q.item_id)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(serde_json::json!({"annotations": anns})))
 }
 
@@ -189,9 +202,9 @@ pub async fn update_annotation(
     validate_source(body.source.as_deref())?;
 
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let dek = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
     // 读现有记录以保留 offset/snippet（update 路径不接受改定位）
     let input = AnnotationInput {
@@ -204,14 +217,19 @@ pub async fn update_annotation(
         source: body.source,
     };
 
-    vault.store().update_annotation(&dek, &id, &input).map_err(|e| {
-        AppError::NotFound(e.to_string())
-    })?;
+    vault
+        .store()
+        .update_annotation(&dek, &id, &input)
+        .map_err(|e| AppError::NotFound(e.to_string()))?;
 
     // 用户改批注（如 ⭐ 重点 → 🤔 存疑）是态度反转，evolver 应可见。
     // 反查 item_id（annotation update 不带 item_id 字段），写 annotation_marker 信号。
     if let Ok(Some(item_id)) = vault.store().get_annotation_item_id(&id) {
-        if let Err(e) = vault.store().record_signal_event("annotation_marker", &item_id, input.label.as_deref()) {
+        if let Err(e) =
+            vault
+                .store()
+                .record_signal_event("annotation_marker", &item_id, input.label.as_deref())
+        {
             tracing::debug!(signal = "annotation_marker", error = %e, "record_signal_event failed (non-fatal)");
         }
     }
@@ -231,7 +249,9 @@ pub struct AiAnalyzeRequest {
     pub selection_end: Option<i64>,
 }
 
-fn default_scope() -> String { "whole_item".to_string() }
+fn default_scope() -> String {
+    "whole_item".to_string()
+}
 
 /// POST /api/v1/annotations/ai — AI 分析指定条目，生成 source='ai' 批注。
 ///
@@ -254,16 +274,20 @@ pub async fn ai_analyze(
     // 2. 锁 vault 拉内容 + LLM 句柄（放在一个锁临时作用域里避免长持有）
     let (item_content, llm_arc) = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let dek = vault.dek_db().map_err(|e| {
-            AppError::Forbidden(e.to_string())
-        })?;
-        let item = vault.store().get_item(&dek, &body.item_id).map_err(|e| {
-            AppError::Internal(e.to_string())
-        })?.ok_or_else(|| {
-            AppError::NotFound("item not found".into())
-        })?;
-        let llm = state.llm.lock().unwrap_or_else(|e| e.into_inner())
-            .as_ref().cloned();
+        let dek = vault
+            .dek_db()
+            .map_err(|e| AppError::Forbidden(e.to_string()))?;
+        let item = vault
+            .store()
+            .get_item(&dek, &body.item_id)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .ok_or_else(|| AppError::NotFound("item not found".into()))?;
+        let llm = state
+            .llm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned();
         (item.content, llm)
     };
 
@@ -278,7 +302,9 @@ pub async fn ai_analyze(
         let s = body.selection_start.unwrap_or(-1);
         let e = body.selection_end.unwrap_or(-1);
         if s < 0 || e <= s {
-            return Err(bad_request("selection requires positive selection_start < selection_end"));
+            return Err(bad_request(
+                "selection requires positive selection_start < selection_end",
+            ));
         }
         // 按 UTF-16 index 切 substring —— 前端传来的 offset 是 JS String index。
         // Rust 端用 char_indices 手动切（不能直接 &str[s..e]）。
@@ -302,7 +328,8 @@ pub async fn ai_analyze(
             scope_base,
             angle,
         )
-    }).await
+    })
+    .await
     .map_err(|e| AppError::Internal(format!("tokio join: {e}")))?
     .map_err(|e| AppError::BadGateway(format!("LLM error: {e}")))?;
 
@@ -310,15 +337,17 @@ pub async fn ai_analyze(
     let label = angle.label_prefix().to_string();
     let color = angle.default_color().to_string();
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let dek = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let dek = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
     // TOCTOU 防御：步骤 2 释放锁后到此，item 可能被删。提前探测给 404，避免所有 INSERT
     // 因外键失败 + 返回 200 created_count=0 的歧义。
-    if !vault.store().item_exists(&body.item_id).map_err(|e| {
-        AppError::Internal(e.to_string())
-    })? {
+    if !vault
+        .store()
+        .item_exists(&body.item_id)
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    {
         return Err(AppError::NotFound(
             "item was deleted during AI analysis".into(),
         ));
@@ -358,7 +387,9 @@ fn substring_by_utf16(s: &str, start: usize, end: usize) -> String {
     let mut i = 0usize;
     for ch in s.chars() {
         let step = ch.len_utf16();
-        if i >= end { break; }
+        if i >= end {
+            break;
+        }
         if i >= start {
             out.push(ch);
         }
@@ -376,17 +407,22 @@ pub async fn delete_annotation(
         return Err(bad_request("id too long"));
     }
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = vault.dek_db().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let _ = vault
+        .dek_db()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
     // 先取 item_id 用于信号；再删。撤回批注（如撤掉之前的 ⭐）也是
     // evolver 必要的负向信号（防止单方面累积"重点"权重导致 search 偏倚）。
     let item_id_for_signal = vault.store().get_annotation_item_id(&id).ok().flatten();
-    vault.store().delete_annotation(&id).map_err(|e| {
-        AppError::NotFound(e.to_string())
-    })?;
+    vault
+        .store()
+        .delete_annotation(&id)
+        .map_err(|e| AppError::NotFound(e.to_string()))?;
     if let Some(item_id) = item_id_for_signal {
-        if let Err(e) = vault.store().record_signal_event("annotation_marker", &item_id, Some("deleted")) {
+        if let Err(e) =
+            vault
+                .store()
+                .record_signal_event("annotation_marker", &item_id, Some("deleted"))
+        {
             tracing::debug!(signal = "annotation_marker", error = %e, "record_signal_event failed (non-fatal)");
         }
     }

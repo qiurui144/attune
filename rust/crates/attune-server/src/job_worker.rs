@@ -61,7 +61,10 @@ impl JobHandler for AsrJobHandler {
         // Honor cancellation at the boundaries we can (pre-detection, pre-subprocess) —
         // the cheapest savings for a job cancelled while still queued behind a slow one.
         if ctl.is_cancelled() {
-            return Err(("cancelled".to_string(), "cancelled before start".to_string()));
+            return Err((
+                "cancelled".to_string(),
+                "cancelled before start".to_string(),
+            ));
         }
 
         let backend = attune_core::asr::detect_asr_backend().ok_or_else(|| {
@@ -79,7 +82,10 @@ impl JobHandler for AsrJobHandler {
         // Last pre-subprocess cancel checkpoint. Beyond this the whisper call is
         // uninterruptible (see struct doc).
         if ctl.is_cancelled() {
-            return Err(("cancelled".to_string(), "cancelled before transcribe".to_string()));
+            return Err((
+                "cancelled".to_string(),
+                "cancelled before transcribe".to_string(),
+            ));
         }
 
         let (segments, _full_text_legacy) = attune_core::asr::transcribe_with_diarization(

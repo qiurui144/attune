@@ -48,7 +48,10 @@ async fn post(base: &str, path: &str, body: Value) -> (u16, Value) {
 /// Assert no raw PII string appears in ANY recorded outbound LLM call (system + user).
 fn assert_no_raw_pii_on_wire(rec: &attune_core::llm::RecordingMockLlm) {
     let calls = rec.calls();
-    assert!(!calls.is_empty(), "expected at least one LLM call to inspect");
+    assert!(
+        !calls.is_empty(),
+        "expected at least one LLM call to inspect"
+    );
     let wire = calls
         .iter()
         .map(|c| format!("{}\n{}", c.system, c.user))

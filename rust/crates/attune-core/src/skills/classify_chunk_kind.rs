@@ -53,33 +53,110 @@ impl ChunkKind {
 
 /// 关键词权重表: 命中即累计得分; 最终得分高的 kind 胜出.
 const KIND_KEYWORDS: &[(ChunkKind, &[&str])] = &[
-    (ChunkKind::BorrowingDoc, &[
-        "借条", "借款合同", "借据", "出借人", "借款人", "本金", "月利率", "年利率",
-        "利息", "约定利息", "还款期限", "履行期限",
-    ]),
-    (ChunkKind::Contract, &[
-        "甲方", "乙方", "丙方", "合同", "协议", "标的", "违约责任", "争议解决",
-        "签订日期", "履约", "承诺", "保证",
-    ]),
-    (ChunkKind::BankStatement, &[
-        "交易日期", "交易金额", "余额", "对方账号", "对方户名", "他行来账", "网银",
-        "卡号", "账号", "汇入", "汇出", "活期", "结算账户",
-    ]),
-    (ChunkKind::Chat, &[
-        "[微信]", "微信聊天", "微信记录", "短信", "聊天记录", "对话",
-        "下午好", "晚上好", "嗯嗯", "哦哦", "[图片]", "[语音]",
-    ]),
-    (ChunkKind::Receipt, &[
-        "收据", "发票", "收条", "凭证", "今收到", "兹收到", "开票日期",
-        "发票代码", "发票号码", "购买方", "销售方",
-    ]),
-    (ChunkKind::Judgment, &[
-        "判决书", "裁定书", "本院查明", "本院认为", "判决如下", "裁定如下",
-        "审判长", "审判员", "书记员", "案号",
-    ]),
-    (ChunkKind::IdDoc, &[
-        "身份证号", "公民身份号码", "出生日期", "户口本", "户籍",
-    ]),
+    (
+        ChunkKind::BorrowingDoc,
+        &[
+            "借条",
+            "借款合同",
+            "借据",
+            "出借人",
+            "借款人",
+            "本金",
+            "月利率",
+            "年利率",
+            "利息",
+            "约定利息",
+            "还款期限",
+            "履行期限",
+        ],
+    ),
+    (
+        ChunkKind::Contract,
+        &[
+            "甲方",
+            "乙方",
+            "丙方",
+            "合同",
+            "协议",
+            "标的",
+            "违约责任",
+            "争议解决",
+            "签订日期",
+            "履约",
+            "承诺",
+            "保证",
+        ],
+    ),
+    (
+        ChunkKind::BankStatement,
+        &[
+            "交易日期",
+            "交易金额",
+            "余额",
+            "对方账号",
+            "对方户名",
+            "他行来账",
+            "网银",
+            "卡号",
+            "账号",
+            "汇入",
+            "汇出",
+            "活期",
+            "结算账户",
+        ],
+    ),
+    (
+        ChunkKind::Chat,
+        &[
+            "[微信]",
+            "微信聊天",
+            "微信记录",
+            "短信",
+            "聊天记录",
+            "对话",
+            "下午好",
+            "晚上好",
+            "嗯嗯",
+            "哦哦",
+            "[图片]",
+            "[语音]",
+        ],
+    ),
+    (
+        ChunkKind::Receipt,
+        &[
+            "收据",
+            "发票",
+            "收条",
+            "凭证",
+            "今收到",
+            "兹收到",
+            "开票日期",
+            "发票代码",
+            "发票号码",
+            "购买方",
+            "销售方",
+        ],
+    ),
+    (
+        ChunkKind::Judgment,
+        &[
+            "判决书",
+            "裁定书",
+            "本院查明",
+            "本院认为",
+            "判决如下",
+            "裁定如下",
+            "审判长",
+            "审判员",
+            "书记员",
+            "案号",
+        ],
+    ),
+    (
+        ChunkKind::IdDoc,
+        &["身份证号", "公民身份号码", "出生日期", "户口本", "户籍"],
+    ),
 ];
 
 /// 高优先级专属标识 (anchor keywords) — 一旦命中, 该 kind 必须胜出, 不被
@@ -93,11 +170,24 @@ const KIND_KEYWORDS: &[(ChunkKind, &[&str])] = &[
 ///   - 多 anchor 命中时按 kind 总命中数 tiebreak
 ///   - 没有任何 anchor 命中时退回普通"命中最多胜出"逻辑
 const KIND_ANCHORS: &[(ChunkKind, &[&str])] = &[
-    (ChunkKind::Judgment, &["判决书", "裁定书", "本院查明", "本院认为", "判决如下", "裁定如下"]),
+    (
+        ChunkKind::Judgment,
+        &[
+            "判决书",
+            "裁定书",
+            "本院查明",
+            "本院认为",
+            "判决如下",
+            "裁定如下",
+        ],
+    ),
     (ChunkKind::Receipt, &["收据", "收条", "今收到", "兹收到"]),
     (ChunkKind::Chat, &["[微信]", "微信聊天", "短信", "聊天记录"]),
     (ChunkKind::BorrowingDoc, &["借条", "借款合同", "借据"]),
-    (ChunkKind::BankStatement, &["交易日期", "交易金额", "对方户名", "对方账号"]),
+    (
+        ChunkKind::BankStatement,
+        &["交易日期", "交易金额", "对方户名", "对方账号"],
+    ),
     (ChunkKind::IdDoc, &["身份证号", "公民身份号码", "户口本"]),
 ];
 
@@ -141,8 +231,10 @@ pub fn classify(text: &str) -> Classification {
                 .find(|(ak, _)| ak == k)
                 .map(|(_, kws)| *kws)
                 .unwrap_or(&[]);
-            let anchor_count =
-                anchors.iter().filter(|a| matched_kws.iter().any(|m| m == *a)).count();
+            let anchor_count = anchors
+                .iter()
+                .filter(|a| matched_kws.iter().any(|m| m == *a))
+                .count();
             (k.clone(), anchor_count, matched_kws.len())
         })
         .collect();
@@ -199,7 +291,8 @@ mod tests {
 
     #[test]
     fn classify_bank_statement() {
-        let text = "交易日期 2023-01-15  对方户名 张三  交易金额 +500000.00  余额 1234567.89  汇入 网银";
+        let text =
+            "交易日期 2023-01-15  对方户名 张三  交易金额 +500000.00  余额 1234567.89  汇入 网银";
         let r = classify(text);
         assert_eq!(r.kind, ChunkKind::BankStatement);
         assert!(r.matched_keywords.contains(&"交易日期".to_string()));

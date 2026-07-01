@@ -80,7 +80,11 @@ impl OcrProfile {
                 description: "适合扫描合同、判决书、起诉状等结构化法律文档".to_string(),
                 languages: "chi_sim+eng".to_string(),
                 dpi: 300,
-                tags: vec!["合同".to_string(), "判决书".to_string(), "起诉状".to_string()],
+                tags: vec![
+                    "合同".to_string(),
+                    "判决书".to_string(),
+                    "起诉状".to_string(),
+                ],
                 builtin: true,
                 reconstruct_tables: false,
                 deskew: true,
@@ -137,10 +141,17 @@ impl OcrProfile {
             OcrProfile {
                 id: "table".to_string(),
                 name: "表格 / 报表".to_string(),
-                description: "适合 Excel 导出表格、财务报表、数据汇总等规整表格文档，输出 Markdown 表格格式".to_string(),
+                description:
+                    "适合 Excel 导出表格、财务报表、数据汇总等规整表格文档，输出 Markdown 表格格式"
+                        .to_string(),
                 languages: "chi_sim+eng".to_string(),
                 dpi: 300,
-                tags: vec!["表格".to_string(), "报表".to_string(), "数据".to_string(), "财务".to_string()],
+                tags: vec![
+                    "表格".to_string(),
+                    "报表".to_string(),
+                    "数据".to_string(),
+                    "财务".to_string(),
+                ],
                 builtin: true,
                 reconstruct_tables: true,
                 deskew: true,
@@ -152,7 +163,8 @@ impl OcrProfile {
             OcrProfile {
                 id: "form".to_string(),
                 name: "表单 / 填写项".to_string(),
-                description: "适合申请表、问卷、登记表等有填写字段的表单，识别字段名与填写内容".to_string(),
+                description: "适合申请表、问卷、登记表等有填写字段的表单，识别字段名与填写内容"
+                    .to_string(),
                 languages: "chi_sim+eng".to_string(),
                 dpi: 200,
                 tags: vec!["表单".to_string(), "申请表".to_string(), "问卷".to_string()],
@@ -170,7 +182,11 @@ impl OcrProfile {
                 description: "适合身份证、营业执照、名片等小尺寸证件类图片".to_string(),
                 languages: "chi_sim+eng".to_string(),
                 dpi: 300,
-                tags: vec!["身份证".to_string(), "营业执照".to_string(), "名片".to_string()],
+                tags: vec![
+                    "身份证".to_string(),
+                    "营业执照".to_string(),
+                    "名片".to_string(),
+                ],
                 builtin: true,
                 reconstruct_tables: false,
                 deskew: false,
@@ -193,7 +209,11 @@ impl OcrProfile {
         if self.id.trim().is_empty() {
             return Err("id 不能为空".to_string());
         }
-        if !self.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        if !self
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
             return Err("id 只允许 [a-zA-Z0-9_-]".to_string());
         }
         if self.name.trim().is_empty() {
@@ -215,7 +235,18 @@ mod tests {
         let bs = OcrProfile::builtins();
         assert_eq!(bs.len(), 7);
         let ids: Vec<&str> = bs.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids, vec!["contract", "receipt", "screenshot", "ancient", "table", "form", "card"]);
+        assert_eq!(
+            ids,
+            vec![
+                "contract",
+                "receipt",
+                "screenshot",
+                "ancient",
+                "table",
+                "form",
+                "card"
+            ]
+        );
     }
 
     #[test]
@@ -270,11 +301,20 @@ mod tests {
     fn reconstruct_tables_flag_on_table_profile() {
         let bs = OcrProfile::builtins();
         let table = bs.iter().find(|p| p.id == "table").unwrap();
-        assert!(table.reconstruct_tables, "table profile must have reconstruct_tables=true");
+        assert!(
+            table.reconstruct_tables,
+            "table profile must have reconstruct_tables=true"
+        );
         let form = bs.iter().find(|p| p.id == "form").unwrap();
-        assert!(form.reconstruct_tables, "form profile must have reconstruct_tables=true");
+        assert!(
+            form.reconstruct_tables,
+            "form profile must have reconstruct_tables=true"
+        );
         let contract = bs.iter().find(|p| p.id == "contract").unwrap();
-        assert!(!contract.reconstruct_tables, "contract profile should not force table reconstruction");
+        assert!(
+            !contract.reconstruct_tables,
+            "contract profile should not force table reconstruction"
+        );
     }
 
     #[test]
@@ -310,6 +350,9 @@ mod tests {
         let p: OcrProfile = serde_json::from_str(legacy_json).expect("deserialize legacy");
         assert!(!p.recognize_nontext);
         assert!(p.nontext_kinds.is_empty());
-        assert_eq!(p.vlm_escalation, crate::ocr::profile::VlmEscalationPolicy::Off);
+        assert_eq!(
+            p.vlm_escalation,
+            crate::ocr::profile::VlmEscalationPolicy::Off
+        );
     }
 }

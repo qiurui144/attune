@@ -1,6 +1,6 @@
+use attune_core::vault::VaultState;
 use axum::extract::State;
 use axum::Json;
-use attune_core::vault::VaultState;
 
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
@@ -28,9 +28,24 @@ pub async fn status(State(state): State<SharedState>) -> AppResult<Json<serde_js
     // Drop vault lock before accessing other mutexes
     drop(vault);
 
-    let has_embedding = state.embedding.lock().ok().map(|g| g.is_some()).unwrap_or(false);
-    let has_vectors = state.vectors.lock().ok().map(|g| g.is_some()).unwrap_or(false);
-    let has_fulltext = state.fulltext.lock().ok().map(|g| g.is_some()).unwrap_or(false);
+    let has_embedding = state
+        .embedding
+        .lock()
+        .ok()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    let has_vectors = state
+        .vectors
+        .lock()
+        .ok()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    let has_fulltext = state
+        .fulltext
+        .lock()
+        .ok()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
 
     Ok(Json(serde_json::json!({
         "state": vault_state,
@@ -89,7 +104,11 @@ async fn probe_ollama_gpu_active() -> Option<bool> {
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .unwrap_or_default();
-    let resp = client.get("http://localhost:11434/api/ps").send().await.ok()?;
+    let resp = client
+        .get("http://localhost:11434/api/ps")
+        .send()
+        .await
+        .ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -107,33 +126,67 @@ async fn probe_ollama_gpu_active() -> Option<bool> {
 }
 
 /// GET /api/v1/status/diagnostics — AI 后端健康检查
-pub async fn diagnostics(
-    State(state): State<SharedState>,
-) -> Json<serde_json::Value> {
-    let vault_state = state.vault.lock().unwrap_or_else(|e| e.into_inner()).state();
+pub async fn diagnostics(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let vault_state = state
+        .vault
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .state();
 
-    let embedding_available = state.embedding.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-    let classifier_ready = state.classifier.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+    let embedding_available = state
+        .embedding
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
+    let classifier_ready = state
+        .classifier
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
 
-    let chat_model = state.llm.lock().unwrap_or_else(|e| e.into_inner())
+    let chat_model = state
+        .llm
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .map(|l| l.model_name().to_string())
         .unwrap_or_default();
 
     let pending_tasks = if matches!(vault_state, VaultState::Unlocked) {
-        state.vault.lock().unwrap_or_else(|e| e.into_inner()).store().pending_embedding_count().unwrap_or(0)
-    } else { 0 };
+        state
+            .vault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .store()
+            .pending_embedding_count()
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
-    let fulltext_ready = state.fulltext.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-    let vector_ready = state.vectors.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-    let tag_index_count = state.tag_index.lock().unwrap_or_else(|e| e.into_inner())
-        .as_ref().map(|i| i.item_count()).unwrap_or(0);
+    let fulltext_ready = state
+        .fulltext
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
+    let vector_ready = state
+        .vectors
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
+    let tag_index_count = state
+        .tag_index
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|i| i.item_count())
+        .unwrap_or(0);
 
     // Determine overall AI status
     let ai_status = if classifier_ready && embedding_available {
         "ready"
     } else if embedding_available {
-        "partial"  // embedding works but no chat model for classification
+        "partial" // embedding works but no chat model for classification
     } else {
         "unavailable"
     };

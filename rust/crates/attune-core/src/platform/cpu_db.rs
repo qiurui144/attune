@@ -35,144 +35,585 @@ pub struct CpuEntry {
 pub const CPU_DB: &[CpuEntry] = &[
     // ─── Apple Silicon ─────────────────────────────────────────────
     // Neural Engine TOPS：M1=11, M2=15.8, M3=18, M4=38（Apple keynote）
-    CpuEntry { model_substr: "Apple M4 Max",   passmark: 37450, npu_tops: Some(38.0) },
-    CpuEntry { model_substr: "Apple M4 Pro",   passmark: 27620, npu_tops: Some(38.0) },
-    CpuEntry { model_substr: "Apple M4",       passmark: 18570, npu_tops: Some(38.0) },
-    CpuEntry { model_substr: "Apple M3 Max",   passmark: 33730, npu_tops: Some(18.0) },
-    CpuEntry { model_substr: "Apple M3 Pro",   passmark: 23900, npu_tops: Some(18.0) },
-    CpuEntry { model_substr: "Apple M3",       passmark: 14870, npu_tops: Some(18.0) },
-    CpuEntry { model_substr: "Apple M2 Ultra", passmark: 38020, npu_tops: Some(15.8) },
-    CpuEntry { model_substr: "Apple M2 Max",   passmark: 26910, npu_tops: Some(15.8) },
-    CpuEntry { model_substr: "Apple M2 Pro",   passmark: 25190, npu_tops: Some(15.8) },
-    CpuEntry { model_substr: "Apple M2",       passmark: 15330, npu_tops: Some(15.8) },
-    CpuEntry { model_substr: "Apple M1 Ultra", passmark: 36810, npu_tops: Some(11.0) },
-    CpuEntry { model_substr: "Apple M1 Max",   passmark: 23110, npu_tops: Some(11.0) },
-    CpuEntry { model_substr: "Apple M1 Pro",   passmark: 22050, npu_tops: Some(11.0) },
-    CpuEntry { model_substr: "Apple M1",       passmark: 14860, npu_tops: Some(11.0) },
-
+    CpuEntry {
+        model_substr: "Apple M4 Max",
+        passmark: 37450,
+        npu_tops: Some(38.0),
+    },
+    CpuEntry {
+        model_substr: "Apple M4 Pro",
+        passmark: 27620,
+        npu_tops: Some(38.0),
+    },
+    CpuEntry {
+        model_substr: "Apple M4",
+        passmark: 18570,
+        npu_tops: Some(38.0),
+    },
+    CpuEntry {
+        model_substr: "Apple M3 Max",
+        passmark: 33730,
+        npu_tops: Some(18.0),
+    },
+    CpuEntry {
+        model_substr: "Apple M3 Pro",
+        passmark: 23900,
+        npu_tops: Some(18.0),
+    },
+    CpuEntry {
+        model_substr: "Apple M3",
+        passmark: 14870,
+        npu_tops: Some(18.0),
+    },
+    CpuEntry {
+        model_substr: "Apple M2 Ultra",
+        passmark: 38020,
+        npu_tops: Some(15.8),
+    },
+    CpuEntry {
+        model_substr: "Apple M2 Max",
+        passmark: 26910,
+        npu_tops: Some(15.8),
+    },
+    CpuEntry {
+        model_substr: "Apple M2 Pro",
+        passmark: 25190,
+        npu_tops: Some(15.8),
+    },
+    CpuEntry {
+        model_substr: "Apple M2",
+        passmark: 15330,
+        npu_tops: Some(15.8),
+    },
+    CpuEntry {
+        model_substr: "Apple M1 Ultra",
+        passmark: 36810,
+        npu_tops: Some(11.0),
+    },
+    CpuEntry {
+        model_substr: "Apple M1 Max",
+        passmark: 23110,
+        npu_tops: Some(11.0),
+    },
+    CpuEntry {
+        model_substr: "Apple M1 Pro",
+        passmark: 22050,
+        npu_tops: Some(11.0),
+    },
+    CpuEntry {
+        model_substr: "Apple M1",
+        passmark: 14860,
+        npu_tops: Some(11.0),
+    },
     // ─── Intel Core Ultra (含 NPU) ─────────────────────────────────
     // Lunar Lake / Arrow Lake / Meteor Lake — Copilot+ PC 平台
-    CpuEntry { model_substr: "Core Ultra 9 285H",  passmark: 28780, npu_tops: Some(13.0) },
-    CpuEntry { model_substr: "Core Ultra 9 285K",  passmark: 53480, npu_tops: Some(13.0) },
-    CpuEntry { model_substr: "Core Ultra 7 268V",  passmark: 24180, npu_tops: Some(48.0) },
-    CpuEntry { model_substr: "Core Ultra 7 258V",  passmark: 22440, npu_tops: Some(48.0) },
-    CpuEntry { model_substr: "Core Ultra 7 165U",  passmark: 16860, npu_tops: Some(11.5) },
-    CpuEntry { model_substr: "Core Ultra 7 165H",  passmark: 25080, npu_tops: Some(11.5) },
-    CpuEntry { model_substr: "Core Ultra 7 155H",  passmark: 23730, npu_tops: Some(11.5) },
-    CpuEntry { model_substr: "Core Ultra 5 235U",  passmark: 16120, npu_tops: Some(13.0) },
-    CpuEntry { model_substr: "Core Ultra 5 135U",  passmark: 15780, npu_tops: Some(11.5) },
-    CpuEntry { model_substr: "Core Ultra 5 125H",  passmark: 19560, npu_tops: Some(11.5) },
-
+    CpuEntry {
+        model_substr: "Core Ultra 9 285H",
+        passmark: 28780,
+        npu_tops: Some(13.0),
+    },
+    CpuEntry {
+        model_substr: "Core Ultra 9 285K",
+        passmark: 53480,
+        npu_tops: Some(13.0),
+    },
+    CpuEntry {
+        model_substr: "Core Ultra 7 268V",
+        passmark: 24180,
+        npu_tops: Some(48.0),
+    },
+    CpuEntry {
+        model_substr: "Core Ultra 7 258V",
+        passmark: 22440,
+        npu_tops: Some(48.0),
+    },
+    CpuEntry {
+        model_substr: "Core Ultra 7 165U",
+        passmark: 16860,
+        npu_tops: Some(11.5),
+    },
+    CpuEntry {
+        model_substr: "Core Ultra 7 165H",
+        passmark: 25080,
+        npu_tops: Some(11.5),
+    },
+    CpuEntry {
+        model_substr: "Core Ultra 7 155H",
+        passmark: 23730,
+        npu_tops: Some(11.5),
+    },
+    CpuEntry {
+        model_substr: "Core Ultra 5 235U",
+        passmark: 16120,
+        npu_tops: Some(13.0),
+    },
+    CpuEntry {
+        model_substr: "Core Ultra 5 135U",
+        passmark: 15780,
+        npu_tops: Some(11.5),
+    },
+    CpuEntry {
+        model_substr: "Core Ultra 5 125H",
+        passmark: 19560,
+        npu_tops: Some(11.5),
+    },
     // ─── Intel Core 14th Gen (Raptor Lake Refresh) ─────────────────
-    CpuEntry { model_substr: "i9-14900K",  passmark: 60880, npu_tops: None },
-    CpuEntry { model_substr: "i9-14900",   passmark: 49100, npu_tops: None },
-    CpuEntry { model_substr: "i7-14700K",  passmark: 50650, npu_tops: None },
-    CpuEntry { model_substr: "i7-14700",   passmark: 41370, npu_tops: None },
-    CpuEntry { model_substr: "i5-14600K",  passmark: 40690, npu_tops: None },
-    CpuEntry { model_substr: "i5-14400",   passmark: 24570, npu_tops: None },
-
+    CpuEntry {
+        model_substr: "i9-14900K",
+        passmark: 60880,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i9-14900",
+        passmark: 49100,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-14700K",
+        passmark: 50650,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-14700",
+        passmark: 41370,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-14600K",
+        passmark: 40690,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-14400",
+        passmark: 24570,
+        npu_tops: None,
+    },
     // ─── Intel Core 13th Gen (Raptor Lake) ─────────────────────────
-    CpuEntry { model_substr: "i9-13900K",  passmark: 59920, npu_tops: None },
-    CpuEntry { model_substr: "i9-13900HX", passmark: 53200, npu_tops: None },
-    CpuEntry { model_substr: "i9-13900H",  passmark: 30490, npu_tops: None },
-    CpuEntry { model_substr: "i7-13700K",  passmark: 45290, npu_tops: None },
-    CpuEntry { model_substr: "i7-13700H",  passmark: 28310, npu_tops: None },
-    CpuEntry { model_substr: "i7-13620H",  passmark: 21330, npu_tops: None },
-    CpuEntry { model_substr: "i5-13600K",  passmark: 38230, npu_tops: None },
-    CpuEntry { model_substr: "i5-13500H",  passmark: 22810, npu_tops: None },
-    CpuEntry { model_substr: "i5-13420H",  passmark: 18570, npu_tops: None },
-    CpuEntry { model_substr: "i3-13100",   passmark: 13780, npu_tops: None },
-
+    CpuEntry {
+        model_substr: "i9-13900K",
+        passmark: 59920,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i9-13900HX",
+        passmark: 53200,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i9-13900H",
+        passmark: 30490,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-13700K",
+        passmark: 45290,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-13700H",
+        passmark: 28310,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-13620H",
+        passmark: 21330,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-13600K",
+        passmark: 38230,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-13500H",
+        passmark: 22810,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-13420H",
+        passmark: 18570,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i3-13100",
+        passmark: 13780,
+        npu_tops: None,
+    },
     // ─── Intel Core 12th Gen (Alder Lake) ──────────────────────────
-    CpuEntry { model_substr: "i9-12900K",  passmark: 41530, npu_tops: None },
-    CpuEntry { model_substr: "i7-12700K",  passmark: 34530, npu_tops: None },
-    CpuEntry { model_substr: "i7-1280P",   passmark: 18060, npu_tops: None },
-    CpuEntry { model_substr: "i7-1260P",   passmark: 16880, npu_tops: None },
-    CpuEntry { model_substr: "i5-12600K",  passmark: 27870, npu_tops: None },
-    CpuEntry { model_substr: "i5-12500H",  passmark: 22560, npu_tops: None },
-    CpuEntry { model_substr: "i5-1240P",   passmark: 15570, npu_tops: None },
-    CpuEntry { model_substr: "i5-12400",   passmark: 19450, npu_tops: None },
-    CpuEntry { model_substr: "i3-1215U",   passmark: 8220,  npu_tops: None },
-
+    CpuEntry {
+        model_substr: "i9-12900K",
+        passmark: 41530,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-12700K",
+        passmark: 34530,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-1280P",
+        passmark: 18060,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-1260P",
+        passmark: 16880,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-12600K",
+        passmark: 27870,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-12500H",
+        passmark: 22560,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-1240P",
+        passmark: 15570,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-12400",
+        passmark: 19450,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i3-1215U",
+        passmark: 8220,
+        npu_tops: None,
+    },
     // ─── Intel Core 11th Gen / 老款 ────────────────────────────────
-    CpuEntry { model_substr: "i7-11700K",  passmark: 26450, npu_tops: None },
-    CpuEntry { model_substr: "i7-1185G7",  passmark: 11210, npu_tops: None },
-    CpuEntry { model_substr: "i7-1165G7",  passmark: 10310, npu_tops: None },
-    CpuEntry { model_substr: "i5-11400",   passmark: 17440, npu_tops: None },
-    CpuEntry { model_substr: "i5-1135G7",  passmark: 9970,  npu_tops: None },
-    CpuEntry { model_substr: "i7-10750H",  passmark: 12690, npu_tops: None },
-    CpuEntry { model_substr: "i5-10210U",  passmark: 6530,  npu_tops: None },
-    CpuEntry { model_substr: "i7-8750H",   passmark: 11420, npu_tops: None },
-
+    CpuEntry {
+        model_substr: "i7-11700K",
+        passmark: 26450,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-1185G7",
+        passmark: 11210,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-1165G7",
+        passmark: 10310,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-11400",
+        passmark: 17440,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-1135G7",
+        passmark: 9970,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-10750H",
+        passmark: 12690,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i5-10210U",
+        passmark: 6530,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "i7-8750H",
+        passmark: 11420,
+        npu_tops: None,
+    },
     // ─── Intel Atom / Celeron / Pentium (低端) ─────────────────────
-    CpuEntry { model_substr: "i3-N305",          passmark: 7980,  npu_tops: None },
-    CpuEntry { model_substr: "Celeron N5105",    passmark: 3570,  npu_tops: None },  // Tier 0
-    CpuEntry { model_substr: "Celeron N5095",    passmark: 3160,  npu_tops: None },  // Tier 0
-    CpuEntry { model_substr: "Celeron N4500",    passmark: 1820,  npu_tops: None },  // Tier 0
-    CpuEntry { model_substr: "Celeron J4125",    passmark: 2250,  npu_tops: None },  // Tier 0
-    CpuEntry { model_substr: "Celeron N100",     passmark: 5380,  npu_tops: None },
-    CpuEntry { model_substr: "Atom x6212RE",     passmark: 1060,  npu_tops: None },  // Tier 0
-
+    CpuEntry {
+        model_substr: "i3-N305",
+        passmark: 7980,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Celeron N5105",
+        passmark: 3570,
+        npu_tops: None,
+    }, // Tier 0
+    CpuEntry {
+        model_substr: "Celeron N5095",
+        passmark: 3160,
+        npu_tops: None,
+    }, // Tier 0
+    CpuEntry {
+        model_substr: "Celeron N4500",
+        passmark: 1820,
+        npu_tops: None,
+    }, // Tier 0
+    CpuEntry {
+        model_substr: "Celeron J4125",
+        passmark: 2250,
+        npu_tops: None,
+    }, // Tier 0
+    CpuEntry {
+        model_substr: "Celeron N100",
+        passmark: 5380,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Atom x6212RE",
+        passmark: 1060,
+        npu_tops: None,
+    }, // Tier 0
     // ─── AMD Ryzen 桌面 ────────────────────────────────────────────
-    CpuEntry { model_substr: "Ryzen 9 9950X",    passmark: 71500, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 9 9900X",    passmark: 56450, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 7 9700X",    passmark: 39520, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 5 9600X",    passmark: 32510, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 9 7950X",    passmark: 63030, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 9 7900X",    passmark: 52270, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 7 7800X3D",  passmark: 35710, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 7 7700X",    passmark: 35020, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 5 7600X",    passmark: 28430, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 5 7600",     passmark: 27090, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 9 5950X",    passmark: 45960, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 9 5900X",    passmark: 39360, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 7 5800X3D",  passmark: 28370, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 7 5800X",    passmark: 28010, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 7 5700X",    passmark: 26200, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 5 5600X",    passmark: 22020, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 5 5600",     passmark: 22020, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 5 5500",     passmark: 18980, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 5 3600",     passmark: 17880, npu_tops: None },
-
+    CpuEntry {
+        model_substr: "Ryzen 9 9950X",
+        passmark: 71500,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 9 9900X",
+        passmark: 56450,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 9700X",
+        passmark: 39520,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 9600X",
+        passmark: 32510,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 9 7950X",
+        passmark: 63030,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 9 7900X",
+        passmark: 52270,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 7800X3D",
+        passmark: 35710,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 7700X",
+        passmark: 35020,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 7600X",
+        passmark: 28430,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 7600",
+        passmark: 27090,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 9 5950X",
+        passmark: 45960,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 9 5900X",
+        passmark: 39360,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 5800X3D",
+        passmark: 28370,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 5800X",
+        passmark: 28010,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 5700X",
+        passmark: 26200,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 5600X",
+        passmark: 22020,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 5600",
+        passmark: 22020,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 5500",
+        passmark: 18980,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 3600",
+        passmark: 17880,
+        npu_tops: None,
+    },
     // ─── AMD Ryzen AI 移动 (含 XDNA NPU) ──────────────────────────
     // Strix Halo / Strix Point / Hawk Point: NPU TOPS 16-50
-    CpuEntry { model_substr: "Ryzen AI Max+ 395", passmark: 38470, npu_tops: Some(50.0) },
-    CpuEntry { model_substr: "Ryzen AI Max 390",  passmark: 35580, npu_tops: Some(50.0) },
-    CpuEntry { model_substr: "Ryzen AI 9 HX 375", passmark: 30650, npu_tops: Some(50.0) },
-    CpuEntry { model_substr: "Ryzen AI 9 HX 370", passmark: 30270, npu_tops: Some(50.0) },
-    CpuEntry { model_substr: "Ryzen AI 9 365",    passmark: 27090, npu_tops: Some(50.0) },
-    CpuEntry { model_substr: "Ryzen 9 8945HS",    passmark: 27270, npu_tops: Some(16.0) },
-    CpuEntry { model_substr: "Ryzen 7 8845HS",    passmark: 24650, npu_tops: Some(16.0) },
-    CpuEntry { model_substr: "Ryzen 5 8645HS",    passmark: 21550, npu_tops: Some(16.0) },
-
+    CpuEntry {
+        model_substr: "Ryzen AI Max+ 395",
+        passmark: 38470,
+        npu_tops: Some(50.0),
+    },
+    CpuEntry {
+        model_substr: "Ryzen AI Max 390",
+        passmark: 35580,
+        npu_tops: Some(50.0),
+    },
+    CpuEntry {
+        model_substr: "Ryzen AI 9 HX 375",
+        passmark: 30650,
+        npu_tops: Some(50.0),
+    },
+    CpuEntry {
+        model_substr: "Ryzen AI 9 HX 370",
+        passmark: 30270,
+        npu_tops: Some(50.0),
+    },
+    CpuEntry {
+        model_substr: "Ryzen AI 9 365",
+        passmark: 27090,
+        npu_tops: Some(50.0),
+    },
+    CpuEntry {
+        model_substr: "Ryzen 9 8945HS",
+        passmark: 27270,
+        npu_tops: Some(16.0),
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 8845HS",
+        passmark: 24650,
+        npu_tops: Some(16.0),
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 8645HS",
+        passmark: 21550,
+        npu_tops: Some(16.0),
+    },
     // ─── AMD Ryzen 移动（普通） ────────────────────────────────────
-    CpuEntry { model_substr: "Ryzen 9 7945HX",    passmark: 51450, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 9 7940HS",    passmark: 28210, npu_tops: Some(16.0) },
-    CpuEntry { model_substr: "Ryzen 7 7840HS",    passmark: 28780, npu_tops: Some(16.0) },
-    CpuEntry { model_substr: "Ryzen 5 7640HS",    passmark: 22070, npu_tops: Some(16.0) },
-    CpuEntry { model_substr: "Ryzen 7 6800H",     passmark: 22510, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 7 5800H",     passmark: 21260, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 5 5600H",     passmark: 17070, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 7 5800U",     passmark: 16020, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 7 5700U",     passmark: 15310, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 5 5500U",     passmark: 14070, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 5 4500U",     passmark: 11700, npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 3 5300U",     passmark: 8830,  npu_tops: None },
-    CpuEntry { model_substr: "Ryzen 3 3250U",     passmark: 3840,  npu_tops: None },  // Tier 0
-
+    CpuEntry {
+        model_substr: "Ryzen 9 7945HX",
+        passmark: 51450,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 9 7940HS",
+        passmark: 28210,
+        npu_tops: Some(16.0),
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 7840HS",
+        passmark: 28780,
+        npu_tops: Some(16.0),
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 7640HS",
+        passmark: 22070,
+        npu_tops: Some(16.0),
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 6800H",
+        passmark: 22510,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 5800H",
+        passmark: 21260,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 5600H",
+        passmark: 17070,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 5800U",
+        passmark: 16020,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 7 5700U",
+        passmark: 15310,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 5500U",
+        passmark: 14070,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 5 4500U",
+        passmark: 11700,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 3 5300U",
+        passmark: 8830,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Ryzen 3 3250U",
+        passmark: 3840,
+        npu_tops: None,
+    }, // Tier 0
     // ─── Snapdragon (Windows on ARM) ───────────────────────────────
-    CpuEntry { model_substr: "Snapdragon X Elite", passmark: 22920, npu_tops: Some(45.0) },
-    CpuEntry { model_substr: "Snapdragon X Plus",  passmark: 18650, npu_tops: Some(45.0) },
-    CpuEntry { model_substr: "Snapdragon 8cx Gen3", passmark: 7160,  npu_tops: None },
-
+    CpuEntry {
+        model_substr: "Snapdragon X Elite",
+        passmark: 22920,
+        npu_tops: Some(45.0),
+    },
+    CpuEntry {
+        model_substr: "Snapdragon X Plus",
+        passmark: 18650,
+        npu_tops: Some(45.0),
+    },
+    CpuEntry {
+        model_substr: "Snapdragon 8cx Gen3",
+        passmark: 7160,
+        npu_tops: None,
+    },
     // ─── ARM 嵌入式 (RPi / RK3588 / SpacemiT) ─────────────────────
     // 注：SpacemiT X100 (K3 一体机) Passmark 数据不公开，按 8 核 RVA22 估算
-    CpuEntry { model_substr: "Cortex-A78AE",     passmark: 6800,  npu_tops: None },
-    CpuEntry { model_substr: "Cortex-A76",       passmark: 4520,  npu_tops: None },  // RK3588 4 大核
-    CpuEntry { model_substr: "Cortex-A72",       passmark: 1760,  npu_tops: None },  // Tier 0 (RPi 4)
-    CpuEntry { model_substr: "Cortex-A53",       passmark: 980,   npu_tops: None },  // Tier 0
-    CpuEntry { model_substr: "RK3588",           passmark: 6300,  npu_tops: Some(6.0) },  // 6 TOPS NPU
-    CpuEntry { model_substr: "X100",             passmark: 5500,  npu_tops: Some(2.0) },  // K3 SpacemiT 估算
+    CpuEntry {
+        model_substr: "Cortex-A78AE",
+        passmark: 6800,
+        npu_tops: None,
+    },
+    CpuEntry {
+        model_substr: "Cortex-A76",
+        passmark: 4520,
+        npu_tops: None,
+    }, // RK3588 4 大核
+    CpuEntry {
+        model_substr: "Cortex-A72",
+        passmark: 1760,
+        npu_tops: None,
+    }, // Tier 0 (RPi 4)
+    CpuEntry {
+        model_substr: "Cortex-A53",
+        passmark: 980,
+        npu_tops: None,
+    }, // Tier 0
+    CpuEntry {
+        model_substr: "RK3588",
+        passmark: 6300,
+        npu_tops: Some(6.0),
+    }, // 6 TOPS NPU
+    CpuEntry {
+        model_substr: "X100",
+        passmark: 5500,
+        npu_tops: Some(2.0),
+    }, // K3 SpacemiT 估算
 ];
 
 /// Normalize CPU model 字符串，便于 substring 匹配：

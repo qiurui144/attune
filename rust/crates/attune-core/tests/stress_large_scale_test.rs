@@ -27,7 +27,9 @@ fn mock_vector_64(seed: u64) -> Vec<f32> {
     let mut x = seed.wrapping_add(1);
     let mut v = Vec::with_capacity(64);
     for _ in 0..64 {
-        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         // map to [-1, 1]
         let f = ((x >> 32) as f32) / (u32::MAX as f32) * 2.0 - 1.0;
         v.push(f);
@@ -81,11 +83,27 @@ fn stress_10k_items_fts_search_latency_p99_under_500ms() {
     for i in 0..N {
         let content = make_doc_content(i);
         let id = store
-            .insert_item(&dek, &format!("Doc {i}"), &content, None, "note", None, None)
+            .insert_item(
+                &dek,
+                &format!("Doc {i}"),
+                &content,
+                None,
+                "note",
+                None,
+                None,
+            )
             .unwrap();
         // reindex for FTS (skip embedding write — queue only)
-        reindex::reindex_item(&store, &mut vectors, &fulltext, &id, &format!("Doc {i}"), &content, "note")
-            .unwrap();
+        reindex::reindex_item(
+            &store,
+            &mut vectors,
+            &fulltext,
+            &id,
+            &format!("Doc {i}"),
+            &content,
+            "note",
+        )
+        .unwrap();
     }
     let insert_ms = t_insert.elapsed().as_millis();
     println!("[stress] insert+reindex {N} items: {insert_ms}ms");
@@ -152,7 +170,11 @@ fn stress_100k_vectors_recall_does_not_degrade() {
         }
     }
     let recall = hits as f64 / probe_indices.len() as f64;
-    println!("[stress] recall@1 over {} probes: {:.1}%", probe_indices.len(), recall * 100.0);
+    println!(
+        "[stress] recall@1 over {} probes: {:.1}%",
+        probe_indices.len(),
+        recall * 100.0
+    );
     assert!(
         recall >= 0.8,
         "10万向量下 recall@1 必须 >= 80%，实际 = {:.1}%",
@@ -185,7 +207,10 @@ fn stress_100k_docs_fulltext_query_latency_p95_under_200ms() {
     println!("[stress] fulltext build {N} docs: {build_ms}ms");
 
     let doc_count = fulltext.doc_count().unwrap();
-    assert!(doc_count >= N / 2, "doc count 应接近 {N}，实际 = {doc_count}");
+    assert!(
+        doc_count >= N / 2,
+        "doc count 应接近 {N}，实际 = {doc_count}"
+    );
 
     // 50 queries，取 P95
     let queries = [

@@ -9,10 +9,10 @@
 //! This proves the route reads the live Arc rather than returning a
 //! compile-time constant — a hardcoded `false` would fail case 2.
 
-use std::sync::Arc;
-use std::time::Duration;
 use attune_core::error::Result as CoreResult;
 use attune_core::web_search::{WebSearchProvider, WebSearchResult};
+use std::sync::Arc;
+use std::time::Duration;
 
 // ── Minimal stub that satisfies WebSearchProvider ────────────────────────────
 
@@ -68,13 +68,14 @@ async fn ai_stack_web_search_available_tracks_state() {
     // the setup assert fail deterministically. Unlocking the Vault directly puts
     // it in the Unlocked state that vault_guard requires, with zero dependence
     // on provider init / network / Chrome detection (per §测试隔离规范).
-    let vault =
-        attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
     vault.setup("ai-stack-test-pw").expect("vault setup");
     vault.unlock("ai-stack-test-pw").expect("vault unlock");
 
     // Build AppState directly so we hold a reference for later mutation.
-    let state = Arc::new(attune_server::state::AppState::new(vault, false /* require_auth */));
+    let state = Arc::new(attune_server::state::AppState::new(
+        vault, false, /* require_auth */
+    ));
 
     // Start from a known-None web_search baseline, independent of whether Chrome
     // is installed on the host (the route reads this live Arc).
@@ -141,9 +142,7 @@ async fn ai_stack_web_search_available_tracks_state() {
         assert_eq!(resp.status().as_u16(), 200, "/ai_stack must return 200");
 
         let body: serde_json::Value = resp.json().await.expect("json body");
-        let ws = body
-            .get("web_search")
-            .expect("`web_search` field missing");
+        let ws = body.get("web_search").expect("`web_search` field missing");
 
         let available = ws.get("available").expect("`web_search.available` missing");
         assert!(

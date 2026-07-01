@@ -64,7 +64,15 @@ fn concurrent_read_write_no_deadlock() {
                 let id = store
                     .lock()
                     .unwrap()
-                    .insert_item(&dek, &format!("W{w}-{i}"), &content, None, "note", None, None)
+                    .insert_item(
+                        &dek,
+                        &format!("W{w}-{i}"),
+                        &content,
+                        None,
+                        "note",
+                        None,
+                        None,
+                    )
                     .unwrap();
                 ids.push(id);
             }
@@ -230,7 +238,15 @@ fn embed_queue_multi_consumer_exactly_once() {
             "Section beta content for retrieval. ".repeat(4),
         );
         let id = store_setup
-            .insert_item(&dek, &format!("Item {i}"), &content, None, "note", None, None)
+            .insert_item(
+                &dek,
+                &format!("Item {i}"),
+                &content,
+                None,
+                "note",
+                None,
+                None,
+            )
             .unwrap();
         let stats = reindex::reindex_item(
             &store_setup,

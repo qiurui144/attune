@@ -239,7 +239,11 @@ pub fn extract_text_from_pdf_with_profile(
     pdf_path: &Path,
     profile: &OcrProfile,
 ) -> Result<String> {
-    let dpi = if (72..=1200).contains(&profile.dpi) { profile.dpi } else { 300 };
+    let dpi = if (72..=1200).contains(&profile.dpi) {
+        profile.dpi
+    } else {
+        300
+    };
     let pdftoppm = which::which("pdftoppm").map_err(|_| {
         VaultError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -300,7 +304,10 @@ pub fn extract_text_from_pdf_with_profile(
     }
     log::info!(
         "{} PDF structured pipeline: {} pages ok, {} failed, {} bytes text",
-        provider.name(), pages.len() - failed, failed, all.len()
+        provider.name(),
+        pages.len() - failed,
+        failed,
+        all.len()
     );
     Ok(all)
 }
@@ -419,7 +426,11 @@ pub fn auto_detect_scene(filename: &str) -> &'static str {
 
 /// 判断 PDF 是否需要 OCR（pdf_extract 产出文字量低于阈值）
 pub fn needs_ocr(extracted_text: &str) -> bool {
-    extracted_text.chars().filter(|c| !c.is_whitespace()).count() < 100
+    extracted_text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .count()
+        < 100
 }
 
 #[cfg(test)]
@@ -522,7 +533,16 @@ mod office_types_tests {
 
     #[test]
     fn raw_line_serde_roundtrip() {
-        let l = RawLine { text: "hi".into(), bbox: BBox { x: 1, y: 2, w: 3, h: 4 }, confidence: 0.9 };
+        let l = RawLine {
+            text: "hi".into(),
+            bbox: BBox {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4,
+            },
+            confidence: 0.9,
+        };
         let s = serde_json::to_string(&l).unwrap();
         let d: RawLine = serde_json::from_str(&s).unwrap();
         assert_eq!(d.text, "hi");
@@ -535,7 +555,12 @@ mod office_types_tests {
 
     #[test]
     fn bbox_copy_and_clone() {
-        let b = BBox { x: 1, y: 2, w: 3, h: 4 };
+        let b = BBox {
+            x: 1,
+            y: 2,
+            w: 3,
+            h: 4,
+        };
         let b2 = b; // Copy
         assert_eq!(b2.x, b.x);
     }
@@ -572,6 +597,9 @@ mod office_types_tests {
             Path::new("/x.png"),
             &crate::ocr::profile::OcrProfile::default(),
         );
-        assert!(out.unwrap().is_empty(), "default impl must return empty regions");
+        assert!(
+            out.unwrap().is_empty(),
+            "default impl must return empty regions"
+        );
     }
 }

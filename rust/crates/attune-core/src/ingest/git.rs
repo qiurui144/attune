@@ -123,7 +123,11 @@ pub fn normalize_url(raw: &str) -> Result<NormalizedRepo> {
     // 不构成 SSRF 面（无远程 fetch）。
     if parsed.scheme() == "file" {
         let p = parsed.path().trim_end_matches('/');
-        let repo = p.rsplit('/').next().unwrap_or("repo").trim_end_matches(".git");
+        let repo = p
+            .rsplit('/')
+            .next()
+            .unwrap_or("repo")
+            .trim_end_matches(".git");
         return Ok(NormalizedRepo {
             clone_url: trimmed.to_string(),
             host: "localhost".into(),
@@ -191,7 +195,10 @@ impl Git2Cloner {
         match token {
             // x-access-token 是 GitHub PAT over HTTPS 的惯例用户名；GitLab/Gitea
             // 也接受 `<token>@host` 形态。错误信息不回显此串（脱敏）。
-            Some(t) => format!("https://x-access-token:{t}@{}", repo.clone_url.trim_start_matches("https://")),
+            Some(t) => format!(
+                "https://x-access-token:{t}@{}",
+                repo.clone_url.trim_start_matches("https://")
+            ),
             None => repo.clone_url.clone(),
         }
     }
@@ -275,7 +282,10 @@ fn walk_and_collect(
         let rel_str = rel.to_string_lossy().replace('\\', "/");
 
         // path traversal 防御（symlink 逃出工作树 / `..`）—— relpath 不得含 `..`。
-        if rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             continue;
         }
 
@@ -379,7 +389,10 @@ impl GitConnector {
     /// 编译 include/exclude glob matcher。include 空 → 默认知识类。
     fn build_globs(&self) -> Result<(GlobSet, GlobSet)> {
         let include_src: Vec<String> = if self.config.include_glob.is_empty() {
-            GitSourceConfig::DEFAULT_INCLUDE.iter().map(|s| s.to_string()).collect()
+            GitSourceConfig::DEFAULT_INCLUDE
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         } else {
             self.config.include_glob.clone()
         };
@@ -653,10 +666,7 @@ mod tests {
     fn connector_respects_max_files_and_max_file_bytes() {
         let mut config = GitSourceConfig::new("https://github.com/o/r");
         config.max_files = 1;
-        let conn = mock_connector(
-            vec![("a.md", b"a"), ("b.md", b"b"), ("c.md", b"c")],
-            config,
-        );
+        let conn = mock_connector(vec![("a.md", b"a"), ("b.md", b"b"), ("c.md", b"c")], config);
         assert_eq!(drain(&conn).len(), 1, "max_files=1 截断");
 
         let mut config2 = GitSourceConfig::new("https://github.com/o/r");

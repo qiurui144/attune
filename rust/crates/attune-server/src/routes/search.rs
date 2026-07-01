@@ -1,8 +1,8 @@
+use attune_core::search::{allocate_budget, SearchResult, INJECTION_BUDGET};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::Deserialize;
-use attune_core::search::{allocate_budget, SearchResult, INJECTION_BUDGET};
 
 use crate::eval as eval_surface;
 use crate::state::SharedState;
@@ -11,8 +11,12 @@ use crate::state::SharedState;
 /// 未配置时返回 false（保守默认：LLM 不可用时不应在后台静默等待）。
 fn query_rewrite_enabled(state: &crate::state::AppState) -> bool {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let Ok(Some(data)) = vault.store().get_meta("app_settings") else { return false; };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) else { return false; };
+    let Ok(Some(data)) = vault.store().get_meta("app_settings") else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) else {
+        return false;
+    };
     json.get("search")
         .and_then(|s| s.get("query_rewrite"))
         .and_then(|qr| qr.get("enabled"))
@@ -21,10 +25,7 @@ fn query_rewrite_enabled(state: &crate::state::AppState) -> bool {
 }
 
 /// 若开关开启且 LLM 可用，改写 query；失败或关闭时降级返回原始 query。
-async fn maybe_rewrite_query(
-    state: &crate::state::AppState,
-    query: &str,
-) -> String {
+async fn maybe_rewrite_query(state: &crate::state::AppState, query: &str) -> String {
     if !query_rewrite_enabled(state) {
         return query.to_string();
     }
@@ -106,7 +107,10 @@ pub async fn search(
 
     let cache_key = hash_query(&params.q);
     {
-        let mut cache = state.search_cache.lock().map_err(|_| err_500("cache lock poisoned"))?;
+        let mut cache = state
+            .search_cache
+            .lock()
+            .map_err(|_| err_500("cache lock poisoned"))?;
         if let Some(entry) = cache.get(&cache_key) {
             // 验证原始 query 字符串防止哈希碰撞返回错误结果
             if entry.query == params.q && !entry.is_expired() {
@@ -142,13 +146,20 @@ pub async fn search(
     // 命中某 plugin domain（如 'legal'）→ 跨领域文档 score *= 0.4
     // OSS 裸装无 plugin / 未命中（None）→ 不应用 penalty（generic ranking，向后兼容）
     let domain_keywords = state.plugin_registry.all_chat_trigger_keywords_by_domain();
-    let detected_domain = attune_core::search::detect_query_domain(&effective_query, &domain_keywords);
+    let detected_domain =
+        attune_core::search::detect_query_domain(&effective_query, &domain_keywords);
 
     let search_params = {
         let mut p = attune_core::search::SearchParams::with_defaults(params.top_k);
-        if let Some(ik) = params.initial_k { p.initial_k = ik; }
-        if let Some(imk) = params.intermediate_k { p.intermediate_k = imk; }
-        if let Some(d) = detected_domain.as_ref() { p.domain_hint = Some(d.clone()); }
+        if let Some(ik) = params.initial_k {
+            p.initial_k = ik;
+        }
+        if let Some(imk) = params.intermediate_k {
+            p.intermediate_k = imk;
+        }
+        if let Some(d) = detected_domain.as_ref() {
+            p.domain_hint = Some(d.clone());
+        }
         // T1 (v1.0.6 KB-bench): forward eval knobs into SearchParams. Today
         // only `skip_rewrite` actively gates the rewrite call above; `seed`
         // and `skip_rerank` flow through to attune-core for v1.1 when
@@ -162,7 +173,10 @@ pub async fn search(
     };
 
     let dek = {
-        let vault = state.vault.lock().map_err(|_| err_500("vault lock poisoned"))?;
+        let vault = state
+            .vault
+            .lock()
+            .map_err(|_| err_500("vault lock poisoned"))?;
         vault.dek_db().map_err(|e| {
             (
                 StatusCode::FORBIDDEN,
@@ -171,8 +185,16 @@ pub async fn search(
         })?
     };
 
-    let reranker = state.reranker.lock().map_err(|_| err_500("reranker lock"))?.clone();
-    let emb = state.embedding.lock().map_err(|_| err_500("emb lock"))?.clone();
+    let reranker = state
+        .reranker
+        .lock()
+        .map_err(|_| err_500("reranker lock"))?
+        .clone();
+    let emb = state
+        .embedding
+        .lock()
+        .map_err(|_| err_500("emb lock"))?
+        .clone();
 
     let results = {
         let ft_guard = state.fulltext.lock().map_err(|_| err_500("ft lock"))?;
@@ -201,7 +223,11 @@ pub async fn search(
     // (BM25 给真实命中 ~0.5，但 RRF 与 vector 结果合并后 normalize 大幅降低)。
     // cutoff 取 0.001 — 仍能过滤纯 fallback noise 但允许低-mid score 真实结果通过。
     const SCORE_CUTOFF: f32 = 0.001;
-    let cutoff_filtered: Vec<_> = results.iter().filter(|r| r.score >= SCORE_CUTOFF).cloned().collect();
+    let cutoff_filtered: Vec<_> = results
+        .iter()
+        .filter(|r| r.score >= SCORE_CUTOFF)
+        .cloned()
+        .collect();
     let total_before_cutoff = results.len();
     let total_after_cutoff = cutoff_filtered.len();
     let results = if cutoff_filtered.is_empty() && !results.is_empty() {
@@ -212,12 +238,18 @@ pub async fn search(
     };
 
     {
-        let mut cache = state.search_cache.lock().map_err(|_| err_500("cache lock poisoned"))?;
-        cache.put(cache_key, crate::state::CachedSearch {
-            query: params.q.clone(),
-            results: results.clone(),
-            created_at: std::time::Instant::now(),
-        });
+        let mut cache = state
+            .search_cache
+            .lock()
+            .map_err(|_| err_500("cache lock poisoned"))?;
+        cache.put(
+            cache_key,
+            crate::state::CachedSearch {
+                query: params.q.clone(),
+                results: results.clone(),
+                created_at: std::time::Instant::now(),
+            },
+        );
     }
 
     let search_latency_ms = t_search_start.elapsed().as_millis() as u64;
@@ -254,17 +286,27 @@ pub async fn search_relevant(
 
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供；OSS 裸装 → None。
     let domain_keywords = state.plugin_registry.all_chat_trigger_keywords_by_domain();
-    let detected_domain = attune_core::search::detect_query_domain(&effective_query, &domain_keywords);
+    let detected_domain =
+        attune_core::search::detect_query_domain(&effective_query, &domain_keywords);
     let search_params = {
         let mut p = attune_core::search::SearchParams::with_defaults(top_k);
-        if let Some(ik) = body.initial_k { p.initial_k = ik; }
-        if let Some(imk) = body.intermediate_k { p.intermediate_k = imk; }
-        if let Some(d) = detected_domain.as_ref() { p.domain_hint = Some(d.clone()); }
+        if let Some(ik) = body.initial_k {
+            p.initial_k = ik;
+        }
+        if let Some(imk) = body.intermediate_k {
+            p.intermediate_k = imk;
+        }
+        if let Some(d) = detected_domain.as_ref() {
+            p.domain_hint = Some(d.clone());
+        }
         p
     };
 
     let dek = {
-        let vault = state.vault.lock().map_err(|_| err_500("vault lock poisoned"))?;
+        let vault = state
+            .vault
+            .lock()
+            .map_err(|_| err_500("vault lock poisoned"))?;
         vault.dek_db().map_err(|e| {
             (
                 StatusCode::FORBIDDEN,
@@ -273,8 +315,16 @@ pub async fn search_relevant(
         })?
     };
 
-    let reranker = state.reranker.lock().map_err(|_| err_500("reranker lock"))?.clone();
-    let emb = state.embedding.lock().map_err(|_| err_500("emb lock"))?.clone();
+    let reranker = state
+        .reranker
+        .lock()
+        .map_err(|_| err_500("reranker lock"))?
+        .clone();
+    let emb = state
+        .embedding
+        .lock()
+        .map_err(|_| err_500("emb lock"))?
+        .clone();
 
     let mut results: Vec<SearchResult> = {
         let ft_guard = state.fulltext.lock().map_err(|_| err_500("ft lock"))?;
@@ -346,7 +396,8 @@ mod tests {
         let json: serde_json::Value = serde_json::json!({
             "search": { "query_rewrite": { "enabled": true } }
         });
-        let enabled = json.get("search")
+        let enabled = json
+            .get("search")
             .and_then(|s| s.get("query_rewrite"))
             .and_then(|qr| qr.get("enabled"))
             .and_then(|v| v.as_bool())
@@ -357,7 +408,8 @@ mod tests {
         let json: serde_json::Value = serde_json::json!({
             "search": { "query_rewrite": { "enabled": false } }
         });
-        let enabled = json.get("search")
+        let enabled = json
+            .get("search")
             .and_then(|s| s.get("query_rewrite"))
             .and_then(|qr| qr.get("enabled"))
             .and_then(|v| v.as_bool())
@@ -366,7 +418,8 @@ mod tests {
 
         // 无配置时默认 false（LLM 不可用时保守策略）
         let json: serde_json::Value = serde_json::json!({});
-        let enabled = json.get("search")
+        let enabled = json
+            .get("search")
             .and_then(|s| s.get("query_rewrite"))
             .and_then(|qr| qr.get("enabled"))
             .and_then(|v| v.as_bool())
@@ -382,8 +435,10 @@ mod tests {
             "search": { "query_rewrite": { "enabled": false } }
         });
         let enabled = json_disabled
-            .get("search").and_then(|s| s.get("query_rewrite"))
-            .and_then(|qr| qr.get("enabled")).and_then(|v| v.as_bool())
+            .get("search")
+            .and_then(|s| s.get("query_rewrite"))
+            .and_then(|qr| qr.get("enabled"))
+            .and_then(|v| v.as_bool())
             .unwrap_or(false);
         assert!(!enabled, "开关 false 时不应触发 rewrite");
     }

@@ -35,7 +35,9 @@ async fn start_server() -> String {
     let router = attune_server::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
     let base = format!("http://127.0.0.1:{port}");
     wait_for_server(&base).await;
     let client = reqwest::Client::new();
@@ -81,7 +83,11 @@ async fn five_concurrent_bad_ocr_requests_all_return_invalid_input() {
         statuses.push(h.await.unwrap());
     }
     // All 5 should be 400 (missing profile → invalid-input)
-    assert_eq!(statuses, vec![400u16; 5], "all concurrent requests should 400 cleanly");
+    assert_eq!(
+        statuses,
+        vec![400u16; 5],
+        "all concurrent requests should 400 cleanly"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -103,7 +109,10 @@ async fn concurrent_transcribe_submits_create_independent_jobs() {
                 .send()
                 .await
                 .expect("post");
-            (resp.status().as_u16(), resp.text().await.unwrap_or_default())
+            (
+                resp.status().as_u16(),
+                resp.text().await.unwrap_or_default(),
+            )
         }));
     }
     let mut results = Vec::new();
@@ -139,7 +148,10 @@ async fn concurrent_get_unknown_jobs_all_404() {
     for h in handles {
         statuses.push(h.await.unwrap());
     }
-    assert!(statuses.iter().all(|s| *s == 404), "all should be 404; got {statuses:?}");
+    assert!(
+        statuses.iter().all(|s| *s == 404),
+        "all should be 404; got {statuses:?}"
+    );
 }
 
 #[test]

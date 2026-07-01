@@ -202,8 +202,10 @@ impl Store {
 
     /// 删一条 entitlement(uninstall / 用户清理)。
     pub fn delete_entitlement(&self, plugin_id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM plugin_entitlements WHERE plugin_id = ?1", rusqlite::params![plugin_id])?;
+        self.conn.execute(
+            "DELETE FROM plugin_entitlements WHERE plugin_id = ?1",
+            rusqlite::params![plugin_id],
+        )?;
         Ok(())
     }
 }
@@ -234,7 +236,10 @@ mod tests {
         let r = row("law-pro", "active");
         store.upsert_entitlement(&dek, &r).unwrap();
         let got = store.get_entitlement(&dek, "law-pro").unwrap().unwrap();
-        assert_eq!(got, r, "roundtrip must preserve all fields (incl decrypted license_id)");
+        assert_eq!(
+            got, r,
+            "roundtrip must preserve all fields (incl decrypted license_id)"
+        );
         // license_id was encrypted at rest — confirm the BLOB is not the plaintext.
         let raw_blob: Vec<u8> = store
             .raw_connection_for_test()
@@ -244,7 +249,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_ne!(raw_blob, r.license_id.as_bytes(), "license_id must be encrypted at rest");
+        assert_ne!(
+            raw_blob,
+            r.license_id.as_bytes(),
+            "license_id must be encrypted at rest"
+        );
     }
 
     #[test]
@@ -252,7 +261,10 @@ mod tests {
         // open_memory runs SCHEMA_SQL which includes the CREATE TABLE IF NOT EXISTS.
         let store = Store::open_memory().unwrap();
         // SCHEMA_VERSION must NOT be bumped by an additive table.
-        assert_eq!(store.schema_version().unwrap(), crate::store::SCHEMA_VERSION);
+        assert_eq!(
+            store.schema_version().unwrap(),
+            crate::store::SCHEMA_VERSION
+        );
         // Table exists and is queryable (empty).
         let dek = Key32::generate();
         assert!(store.list_entitlements(&dek).unwrap().is_empty());
@@ -263,27 +275,40 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
         // First write a suspended row, then an active row for the SAME plugin.
-        store.upsert_entitlement(&dek, &row("law-pro", "suspended")).unwrap();
-        store.upsert_entitlement(&dek, &row("law-pro", "active")).unwrap();
+        store
+            .upsert_entitlement(&dek, &row("law-pro", "suspended"))
+            .unwrap();
+        store
+            .upsert_entitlement(&dek, &row("law-pro", "active"))
+            .unwrap();
         let got = store.get_entitlement(&dek, "law-pro").unwrap().unwrap();
         // PERF-5: best status (active > trial > others) is resolved AT upsert time;
         // get returns the merged-best directly with no runtime scan of multiple rows.
         assert_eq!(got.status, "active", "active must win over suspended");
 
         // Now a lower-priority status must NOT downgrade the stored active.
-        store.upsert_entitlement(&dek, &row("law-pro", "revoked")).unwrap();
+        store
+            .upsert_entitlement(&dek, &row("law-pro", "revoked"))
+            .unwrap();
         // Exception: revoke is a deliberate downgrade and IS allowed via explicit path,
         // but the generic upsert keeps best-status (revoke goes through re-verify, see T5/T8).
         let after = store.get_entitlement(&dek, "law-pro").unwrap().unwrap();
-        assert_eq!(after.status, "active", "generic upsert never silently downgrades active");
+        assert_eq!(
+            after.status, "active",
+            "generic upsert never silently downgrades active"
+        );
     }
 
     #[test]
     fn list_all_for_hydrate() {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
-        store.upsert_entitlement(&dek, &row("law-pro", "active")).unwrap();
-        store.upsert_entitlement(&dek, &row("med-pro", "trial")).unwrap();
+        store
+            .upsert_entitlement(&dek, &row("law-pro", "active"))
+            .unwrap();
+        store
+            .upsert_entitlement(&dek, &row("med-pro", "trial"))
+            .unwrap();
         let all = store.list_entitlements(&dek).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].plugin_id, "law-pro");
@@ -294,7 +319,9 @@ mod tests {
     fn delete_removes_row() {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
-        store.upsert_entitlement(&dek, &row("law-pro", "active")).unwrap();
+        store
+            .upsert_entitlement(&dek, &row("law-pro", "active"))
+            .unwrap();
         store.delete_entitlement("law-pro").unwrap();
         assert!(store.get_entitlement(&dek, "law-pro").unwrap().is_none());
     }
@@ -313,7 +340,9 @@ mod tests {
         {
             let store = Store::open(&path).unwrap();
             // Paid plugin installed → active row on disk.
-            store.upsert_entitlement(&dek, &row("law-pro", "active")).unwrap();
+            store
+                .upsert_entitlement(&dek, &row("law-pro", "active"))
+                .unwrap();
             // Cloud revokes; re-verify worker persists the VERIFIED deny via the
             // explicit-downgrade path (NOT upsert, which would be eaten by the merge).
             store
@@ -321,7 +350,10 @@ mod tests {
                 .unwrap();
             // Sanity within the same Store: the downgrade landed despite prior active.
             let same = store.get_entitlement(&dek, "law-pro").unwrap().unwrap();
-            assert_eq!(same.status, "revoked", "explicit downgrade must overwrite active");
+            assert_eq!(
+                same.status, "revoked",
+                "explicit downgrade must overwrite active"
+            );
         }
 
         // (1) Durable: reopen a FRESH Store on the same DB path — revoke survived.
@@ -352,12 +384,17 @@ mod tests {
         let dek = Key32::generate();
         {
             let store = Store::open(&path).unwrap();
-            store.upsert_entitlement(&dek, &row("law-pro", "active")).unwrap();
+            store
+                .upsert_entitlement(&dek, &row("law-pro", "active"))
+                .unwrap();
         }
         // Re-open: the row survives (persisted, not memory-only).
         let store2 = Store::open(&path).unwrap();
         let got = store2.get_entitlement(&dek, "law-pro").unwrap().unwrap();
         assert_eq!(got.status, "active");
-        assert_eq!(store2.schema_version().unwrap(), crate::store::SCHEMA_VERSION);
+        assert_eq!(
+            store2.schema_version().unwrap(),
+            crate::store::SCHEMA_VERSION
+        );
     }
 }

@@ -50,23 +50,40 @@ impl ScoreAdjust {
 /// **不用 substring**：用户自由输入的 "非过时" / "过时信息的反例" 会触发
 /// 反向 drop，属于静默丢数据 bug。见 annotation_weight Round 1+2 review。
 const DROP_LABELS: &[&str] = &[
-    "过时", "🗑过时", "🗑 过时",   // user 批注（popup 预设）
-    "🕰过时", "🕰 过时",            // AI Outdated angle
+    "过时",
+    "🗑过时",
+    "🗑 过时", // user 批注（popup 预设）
+    "🕰过时",
+    "🕰 过时", // AI Outdated angle
 ];
 
 /// 强 boost（×1.5）：用户的"重点" / AI 的"要点" 和"风险"。
 const STRONG_BOOST_LABELS: &[&str] = &[
-    "重点", "⭐重点", "⭐ 重点",    // user
-    "要点", "⭐要点", "⭐ 要点",    // AI Highlights angle
-    "风险", "⚠️风险", "⚠️ 风险",  // AI Risk angle
+    "重点",
+    "⭐重点",
+    "⭐ 重点", // user
+    "要点",
+    "⭐要点",
+    "⭐ 要点", // AI Highlights angle
+    "风险",
+    "⚠️风险",
+    "⚠️ 风险", // AI Risk angle
 ];
 
 /// 中 boost（×1.2）：用户的思考类标签 + AI 的疑点。
 const MEDIUM_BOOST_LABELS: &[&str] = &[
-    "待深入", "📍待深入", "📍 待深入",  // user
-    "存疑", "🤔存疑", "🤔 存疑",      // user
-    "不懂", "❓不懂", "❓ 不懂",      // user
-    "疑点", "🤔疑点", "🤔 疑点",      // AI Questions angle
+    "待深入",
+    "📍待深入",
+    "📍 待深入", // user
+    "存疑",
+    "🤔存疑",
+    "🤔 存疑", // user
+    "不懂",
+    "❓不懂",
+    "❓ 不懂", // user
+    "疑点",
+    "🤔疑点",
+    "🤔 疑点", // AI Questions angle
 ];
 
 /// 根据一组批注计算 item 级评分调整。使用**精确 label 白名单**匹配，
@@ -125,7 +142,8 @@ mod tests {
         Annotation {
             id: "x".into(),
             item_id: "i".into(),
-            offset_start: 0, offset_end: 1,
+            offset_start: 0,
+            offset_end: 1,
             text_snippet: "s".into(),
             label: Some(label.into()),
             color: "yellow".into(),
@@ -164,8 +182,11 @@ mod tests {
     fn thinking_labels_boost_1_2() {
         for lbl in &["📍待深入", "🤔存疑", "❓不懂"] {
             let anns = vec![ann(lbl)];
-            assert_eq!(compute_adjust(&anns), ScoreAdjust::Multiply(1.2),
-                "label {lbl} should boost 1.2");
+            assert_eq!(
+                compute_adjust(&anns),
+                ScoreAdjust::Multiply(1.2),
+                "label {lbl} should boost 1.2"
+            );
         }
     }
 
@@ -185,7 +206,7 @@ mod tests {
     #[test]
     fn empty_label_neutral() {
         let mut a = ann("重点");
-        a.label = None;  // 无 label 批注（纯高亮）
+        a.label = None; // 无 label 批注（纯高亮）
         assert_eq!(compute_adjust(&[a]), ScoreAdjust::Multiply(1.0));
     }
 
@@ -209,19 +230,28 @@ mod tests {
     #[test]
     fn ai_label_highlights_recognized() {
         // AI 批注用"⭐ 要点"（Highlights angle）—— 视为强 boost
-        assert_eq!(compute_adjust(&[ann("⭐ 要点")]), ScoreAdjust::Multiply(1.5));
+        assert_eq!(
+            compute_adjust(&[ann("⭐ 要点")]),
+            ScoreAdjust::Multiply(1.5)
+        );
     }
 
     #[test]
     fn ai_label_risk_recognized_as_strong_boost() {
         // AI 的风险批注 —— 值得立即关注，强 boost
-        assert_eq!(compute_adjust(&[ann("⚠️ 风险")]), ScoreAdjust::Multiply(1.5));
+        assert_eq!(
+            compute_adjust(&[ann("⚠️ 风险")]),
+            ScoreAdjust::Multiply(1.5)
+        );
     }
 
     #[test]
     fn ai_label_questions_recognized() {
         // AI 的疑点批注 —— 中 boost
-        assert_eq!(compute_adjust(&[ann("🤔 疑点")]), ScoreAdjust::Multiply(1.2));
+        assert_eq!(
+            compute_adjust(&[ann("🤔 疑点")]),
+            ScoreAdjust::Multiply(1.2)
+        );
     }
 
     #[test]
@@ -241,7 +271,10 @@ mod tests {
     #[test]
     fn descriptive_label_containing_outdated_does_not_drop() {
         // 用户自由输入包含"过时"二字的描述性 label 不应被误判
-        assert_eq!(compute_adjust(&[ann("过时信息的反例")]), ScoreAdjust::Multiply(1.0));
+        assert_eq!(
+            compute_adjust(&[ann("过时信息的反例")]),
+            ScoreAdjust::Multiply(1.0)
+        );
     }
 
     #[test]
@@ -253,14 +286,23 @@ mod tests {
     #[test]
     fn label_with_leading_trailing_whitespace_normalized() {
         // trim 兼容 user 输入前后的空格
-        assert_eq!(compute_adjust(&[ann("  ⭐重点  ")]), ScoreAdjust::Multiply(1.5));
+        assert_eq!(
+            compute_adjust(&[ann("  ⭐重点  ")]),
+            ScoreAdjust::Multiply(1.5)
+        );
         assert_eq!(compute_adjust(&[ann(" 🗑过时 ")]), ScoreAdjust::Drop);
     }
 
     #[test]
     fn custom_label_neutral() {
         // 任何未登记的自定义标签都视为中性，用户要扩展必须改常量
-        assert_eq!(compute_adjust(&[ann("work_log")]), ScoreAdjust::Multiply(1.0));
-        assert_eq!(compute_adjust(&[ann("客户需求")]), ScoreAdjust::Multiply(1.0));
+        assert_eq!(
+            compute_adjust(&[ann("work_log")]),
+            ScoreAdjust::Multiply(1.0)
+        );
+        assert_eq!(
+            compute_adjust(&[ann("客户需求")]),
+            ScoreAdjust::Multiply(1.0)
+        );
     }
 }

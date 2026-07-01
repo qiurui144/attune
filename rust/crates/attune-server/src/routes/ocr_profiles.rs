@@ -34,7 +34,11 @@ fn registry_err(e: attune_core::error::VaultError) -> (StatusCode, Json<serde_js
 }
 
 fn can_write(state: &SharedState) -> bool {
-    let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let m = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     SettingsLocks::for_state(&m).can_edit("ocr_profiles")
 }
 

@@ -100,7 +100,8 @@ fn narrative_few_shot() -> Vec<(String, String)> {
             json!({"rewritten":"经评估，该方案具备可行性，建议予以试行。"}).to_string(),
         ),
         (
-            "原文：\n会议在周五下午三点，地点 A 楼 301，请准时。\n（要求：长度=shorter）".to_string(),
+            "原文：\n会议在周五下午三点，地点 A 楼 301，请准时。\n（要求：长度=shorter）"
+                .to_string(),
             json!({"rewritten":"会议：周五 15:00，A 楼 301，请准时。"}).to_string(),
         ),
     ]
@@ -243,7 +244,8 @@ pub fn rewrite(llm: &dyn LlmProvider, req: &RewriteRequest) -> WritingResultT<Wr
                 path: "single-call".to_string(),
                 ..Default::default()
             };
-            token_bill.reduce_llm_tokens.r#in = cost::estimate_tokens(&user, llm.model_name()) as u32;
+            token_bill.reduce_llm_tokens.r#in =
+                cost::estimate_tokens(&user, llm.model_name()) as u32;
             token_bill.reduce_llm_tokens.out = out_tokens;
             token_bill.reduce_llm_tokens.model = llm.model_name().to_string();
             token_bill.new_chunks = 1;
@@ -303,7 +305,8 @@ pub fn rewrite(llm: &dyn LlmProvider, req: &RewriteRequest) -> WritingResultT<Wr
                 path: "single-call".to_string(),
                 ..Default::default()
             };
-            token_bill.reduce_llm_tokens.r#in = cost::estimate_tokens(&user, llm.model_name()) as u32;
+            token_bill.reduce_llm_tokens.r#in =
+                cost::estimate_tokens(&user, llm.model_name()) as u32;
             token_bill.reduce_llm_tokens.out = bill_out;
             token_bill.reduce_llm_tokens.model = llm.model_name().to_string();
             token_bill.new_chunks = 1;
@@ -362,7 +365,8 @@ mod tests {
     #[test]
     fn narrative_rewrite_preserving_facts_is_verified() {
         // Rewrite reuses the original's key terms → grounds back to the original.
-        let reply = json!({"rewritten":"该方案在编译期保证内存安全，无需垃圾回收机制。"}).to_string();
+        let reply =
+            json!({"rewritten":"该方案在编译期保证内存安全，无需垃圾回收机制。"}).to_string();
         let llm = MockRewriteLlm::new(&reply);
         let req = RewriteRequest {
             text: "这个方案在编译期保证内存安全，无需垃圾回收机制吧。".into(),
@@ -374,7 +378,10 @@ mod tests {
         };
         let r = rewrite(&llm, &req).unwrap();
         assert_eq!(r.mode, WritingMode::Rewrite);
-        assert!(r.unverified_spans.is_empty(), "fact-preserving rewrite must verify");
+        assert!(
+            r.unverified_spans.is_empty(),
+            "fact-preserving rewrite must verify"
+        );
         assert!(r.segments.iter().all(|s| s.verified));
     }
 
@@ -389,7 +396,10 @@ mod tests {
             output: RewriteOutput::Narrative,
         };
         let r = rewrite(&llm, &req).unwrap();
-        assert!(!r.unverified_spans.is_empty(), "fact drift must be flagged, not silently accepted");
+        assert!(
+            !r.unverified_spans.is_empty(),
+            "fact drift must be flagged, not silently accepted"
+        );
     }
 
     #[test]
@@ -412,7 +422,10 @@ mod tests {
             target: StyleTarget::default(),
             output: RewriteOutput::Narrative,
         };
-        assert_eq!(rewrite(&llm, &req).unwrap_err(), WritingError::LlmUnavailable);
+        assert_eq!(
+            rewrite(&llm, &req).unwrap_err(),
+            WritingError::LlmUnavailable
+        );
     }
 
     #[test]
@@ -423,7 +436,10 @@ mod tests {
             target: StyleTarget::default(),
             output: RewriteOutput::Narrative,
         };
-        assert_eq!(rewrite(&llm, &req).unwrap_err().code(), "generation-unavailable");
+        assert_eq!(
+            rewrite(&llm, &req).unwrap_err().code(),
+            "generation-unavailable"
+        );
     }
 
     #[test]
@@ -449,7 +465,8 @@ mod tests {
         // `original` not present in the text → cannot anchor → dropped (no invented offset).
         let reply = json!({"suggestions":[
             {"original":"完全不存在于原文的句子","suggestion":"x","reason":"y"}
-        ]}).to_string();
+        ]})
+        .to_string();
         let llm = MockRewriteLlm::new(&reply);
         let req = RewriteRequest {
             text: "原文内容在此。".into(),

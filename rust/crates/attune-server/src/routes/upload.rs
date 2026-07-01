@@ -152,11 +152,14 @@ pub async fn upload_file(
     .map_err(|e| AppError::Unprocessable(e.to_string()))?;
 
     let (item_id, chunks_queued, is_new) = match &outcome {
-        attune_core::ingest::IngestOutcome::Inserted { item_id, chunks_enqueued } => {
-            (item_id.clone(), *chunks_enqueued, true)
-        }
+        attune_core::ingest::IngestOutcome::Inserted {
+            item_id,
+            chunks_enqueued,
+        } => (item_id.clone(), *chunks_enqueued, true),
         attune_core::ingest::IngestOutcome::Duplicate { item_id } => {
-            tracing::info!("upload content_hash dedup hit: filename={filename} existing_item={item_id}");
+            tracing::info!(
+                "upload content_hash dedup hit: filename={filename} existing_item={item_id}"
+            );
             // dedup 分支 response 与成功分支字段对齐，client 两分支读同名字段。
             return Ok(Json(serde_json::json!({
                 "id": item_id,
@@ -232,7 +235,10 @@ pub async fn upload_file(
         tokio::spawn(async move {
             let vault_guard = state_clone.vault.lock();
             let vault_guard = vault_guard.unwrap_or_else(|e| e.into_inner());
-            if !matches!(vault_guard.state(), attune_core::vault::VaultState::Unlocked) {
+            if !matches!(
+                vault_guard.state(),
+                attune_core::vault::VaultState::Unlocked
+            ) {
                 return;
             }
             // 抽 entities — 用 filename 当样本（chunk-level entities 可在 Phase D 优化）
@@ -247,12 +253,18 @@ pub async fn upload_file(
             };
             let project_ents_storage: Vec<(String, Vec<attune_core::entities::Entity>)> = projects
                 .iter()
-                .map(|p| (p.id.clone(), attune_core::entities::extract_entities(&p.title)))
+                .map(|p| {
+                    (
+                        p.id.clone(),
+                        attune_core::entities::extract_entities(&p.title),
+                    )
+                })
                 .collect();
-            let project_entities: Vec<(&String, Vec<attune_core::entities::Entity>)> = project_ents_storage
-                .iter()
-                .map(|(id, ents)| (id, ents.clone()))
-                .collect();
+            let project_entities: Vec<(&String, Vec<attune_core::entities::Entity>)> =
+                project_ents_storage
+                    .iter()
+                    .map(|(id, ents)| (id, ents.clone()))
+                    .collect();
             let candidates = attune_core::project_recommender::recommend_for_file(
                 vault_guard.store(),
                 &item_id_clone,
@@ -291,7 +303,10 @@ pub async fn upload_file(
     tokio::spawn(async move {
         let vault_guard = state_for_wf.vault.lock();
         let vault_guard = vault_guard.unwrap_or_else(|e| e.into_inner());
-        if !matches!(vault_guard.state(), attune_core::vault::VaultState::Unlocked) {
+        if !matches!(
+            vault_guard.state(),
+            attune_core::vault::VaultState::Unlocked
+        ) {
             return;
         }
         // 找该 file_id 归属的 project
@@ -358,7 +373,9 @@ pub async fn upload_file(
                 Err(e) => {
                     tracing::warn!(
                         "workflow {} (plugin {}) failed: {}",
-                        workflow.id, plugin_id, e
+                        workflow.id,
+                        plugin_id,
+                        e
                     );
                 }
             }
@@ -391,9 +408,7 @@ fn mime_from_filename(filename: &str) -> &'static str {
         "gif" => "image/gif",
         "txt" | "md" => "text/plain; charset=utf-8",
         "csv" => "text/csv; charset=utf-8",
-        "docx" => {
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        }
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "doc" => "application/msword",
         "mp3" => "audio/mpeg",
         "wav" => "audio/wav",

@@ -35,22 +35,37 @@ pub const CROSS_LANG_PENALTY: f32 = 0.3;
 ///   - ASCII letter >= 70% → En
 ///   - 其他 → Mixed（不降权，因为专业术语常中英混用）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lang { Zh, En, Mixed }
+pub enum Lang {
+    Zh,
+    En,
+    Mixed,
+}
 
 pub fn detect_lang(s: &str) -> Lang {
     let (mut cjk, mut ascii_alpha, mut total) = (0usize, 0usize, 0usize);
     for c in s.chars() {
-        if c.is_whitespace() { continue; }
+        if c.is_whitespace() {
+            continue;
+        }
         total += 1;
-        if ('\u{4e00}'..='\u{9fff}').contains(&c) { cjk += 1; }
-        else if c.is_ascii_alphabetic() { ascii_alpha += 1; }
+        if ('\u{4e00}'..='\u{9fff}').contains(&c) {
+            cjk += 1;
+        } else if c.is_ascii_alphabetic() {
+            ascii_alpha += 1;
+        }
     }
-    if total == 0 { return Lang::Mixed; }
+    if total == 0 {
+        return Lang::Mixed;
+    }
     let cjk_ratio = cjk as f32 / total as f32;
     let ascii_ratio = ascii_alpha as f32 / total as f32;
-    if cjk_ratio >= 0.30 { Lang::Zh }
-    else if ascii_ratio >= 0.70 { Lang::En }
-    else { Lang::Mixed }
+    if cjk_ratio >= 0.30 {
+        Lang::Zh
+    } else if ascii_ratio >= 0.70 {
+        Lang::En
+    } else {
+        Lang::Mixed
+    }
 }
 
 /// 对 SearchResult 列表按 query/content 语言匹配降权。
@@ -304,7 +319,8 @@ pub fn allocate_budget(results: &mut [SearchResult], budget: usize) {
         let per_item = (budget / results.len().max(1)).max(100);
         for r in results.iter_mut() {
             let content = &r.content;
-            let end = content.char_indices()
+            let end = content
+                .char_indices()
                 .nth(per_item)
                 .map(|(i, _)| i)
                 .unwrap_or(content.len());
@@ -316,7 +332,8 @@ pub fn allocate_budget(results: &mut [SearchResult], budget: usize) {
         let share = r.score / total_score;
         let alloc = (budget as f32 * share).max(100.0) as usize;
         let content = &r.content;
-        let end = content.char_indices()
+        let end = content
+            .char_indices()
             .nth(alloc)
             .map(|(i, _)| i)
             .unwrap_or(content.len());
@@ -343,11 +360,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// 当 query 向量可用且结果集实际数量不超过 `RERANK_TOP_K_THRESHOLD` 时调用。
 /// 原地修改 `results` 的 `score` 字段并重新排序。
-pub fn rerank(
-    query_vec: &[f32],
-    results: &mut [SearchResult],
-    vector_index: &VectorIndex,
-) {
+pub fn rerank(query_vec: &[f32], results: &mut [SearchResult], vector_index: &VectorIndex) {
     for result in results.iter_mut() {
         let rrf_score = result.score;
         let rerank_score = vector_index
@@ -356,7 +369,11 @@ pub fn rerank(
             .unwrap_or(0.0);
         result.score = RERANK_VECTOR_WEIGHT * rerank_score + RERANK_RRF_WEIGHT * rrf_score;
     }
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 /// 三阶段搜索：initial_k 粗召回 → intermediate_k RRF 融合 → Rerank → top_k 返回
@@ -370,11 +387,14 @@ pub fn search_with_context(
     params: &SearchParams,
 ) -> crate::error::Result<Vec<SearchResult>> {
     // 1. 全文搜索（initial_k）
-    let ft_results = ctx.fulltext
-        .map(|ft| ft.search(query, params.initial_k).unwrap_or_else(|e| {
-            log::warn!("fulltext search error: {e}");
-            vec![]
-        }))
+    let ft_results = ctx
+        .fulltext
+        .map(|ft| {
+            ft.search(query, params.initial_k).unwrap_or_else(|e| {
+                log::warn!("fulltext search error: {e}");
+                vec![]
+            })
+        })
         .unwrap_or_default();
 
     // 2. 向量搜索（initial_k）
@@ -382,33 +402,32 @@ pub fn search_with_context(
     // 低于阈值的进 RRF 前丢弃，避免噪音污染融合排序。
     let (vec_results, query_vec): (Vec<(String, f32)>, Option<Vec<f32>>) =
         match (&ctx.embedding, &ctx.vectors) {
-            (Some(emb), Some(vecs)) => {
-                match emb.embed(&[query]) {
-                    Ok((e, _usage)) if !e.is_empty() => {
-                        let qv = e[0].clone();
-                        let raw: Vec<(String, f32)> = vecs.search(&qv, params.initial_k)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|(meta, score)| (meta.item_id, score))
-                            .collect();
-                        let filtered: Vec<(String, f32)> = match params.min_score {
-                            Some(threshold) => {
-                                let kept: Vec<_> = raw.into_iter()
-                                    .filter(|(_, s)| *s >= threshold)
-                                    .collect();
-                                log::info!(
-                                    "search J3: vector min_score={:.3} kept {} results",
-                                    threshold, kept.len()
-                                );
-                                kept
-                            }
-                            None => raw,
-                        };
-                        (filtered, Some(qv))
-                    }
-                    _ => (vec![], None),
+            (Some(emb), Some(vecs)) => match emb.embed(&[query]) {
+                Ok((e, _usage)) if !e.is_empty() => {
+                    let qv = e[0].clone();
+                    let raw: Vec<(String, f32)> = vecs
+                        .search(&qv, params.initial_k)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(meta, score)| (meta.item_id, score))
+                        .collect();
+                    let filtered: Vec<(String, f32)> = match params.min_score {
+                        Some(threshold) => {
+                            let kept: Vec<_> =
+                                raw.into_iter().filter(|(_, s)| *s >= threshold).collect();
+                            log::info!(
+                                "search J3: vector min_score={:.3} kept {} results",
+                                threshold,
+                                kept.len()
+                            );
+                            kept
+                        }
+                        None => raw,
+                    };
+                    (filtered, Some(qv))
                 }
-            }
+                _ => (vec![], None),
+            },
             _ => (vec![], None),
         };
 
@@ -420,7 +439,13 @@ pub fn search_with_context(
     );
 
     // 3. RRF 融合 → intermediate_k
-    let fused = rrf_fuse(&vec_results, &ft_results, DEFAULT_VECTOR_WEIGHT, DEFAULT_FULLTEXT_WEIGHT, params.intermediate_k);
+    let fused = rrf_fuse(
+        &vec_results,
+        &ft_results,
+        DEFAULT_VECTOR_WEIGHT,
+        DEFAULT_FULLTEXT_WEIGHT,
+        params.intermediate_k,
+    );
     log::info!("search stages: rrf_fused={}", fused.len());
 
     // 4. 获取并解密 items + F2 (W3 batch A) 拉 breadcrumb sidecar
@@ -482,7 +507,8 @@ pub fn search_with_context(
         } else {
             log::info!(
                 "search stages: reranker skipped (candidates={} < {})",
-                results.len(), RERANK_MIN_CANDIDATES
+                results.len(),
+                RERANK_MIN_CANDIDATES
             );
         }
     } else if results.len() <= RERANK_TOP_K_THRESHOLD {
@@ -501,8 +527,11 @@ pub fn search_with_context(
     apply_cross_domain_penalty(&mut results, params.domain_hint.as_deref());
 
     // 最终排序
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score)
-        .unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // 6. 截取 top_k（保护：如果 top_k=0，别截成空）
     let final_k = params.top_k.max(1);
@@ -523,8 +552,14 @@ mod tests {
 
     #[test]
     fn detect_lang_pure_english() {
-        assert_eq!(detect_lang("What is rust ownership and borrowing"), Lang::En);
-        assert_eq!(detect_lang("Box T smart pointer reference cycles"), Lang::En);
+        assert_eq!(
+            detect_lang("What is rust ownership and borrowing"),
+            Lang::En
+        );
+        assert_eq!(
+            detect_lang("Box T smart pointer reference cycles"),
+            Lang::En
+        );
     }
 
     #[test]
@@ -539,28 +574,46 @@ mod tests {
     fn cross_lang_penalty_en_query_cn_doc_downweighted() {
         let mut results = vec![
             SearchResult {
-                item_id: "1".into(), score: 0.2, title: "references-and-borrowing".into(),
-                content: "In Rust, references allow you to refer to a value without taking ownership.".into(),
-                source_type: "file".into(), inject_content: None, ..Default::default() },
+                item_id: "1".into(),
+                score: 0.2,
+                title: "references-and-borrowing".into(),
+                content:
+                    "In Rust, references allow you to refer to a value without taking ownership."
+                        .into(),
+                source_type: "file".into(),
+                inject_content: None,
+                ..Default::default()
+            },
             SearchResult {
-                item_id: "2".into(), score: 0.3, title: "民法典".into(),
+                item_id: "2".into(),
+                score: 0.3,
+                title: "民法典".into(),
                 content: "中华人民共和国民法典第一编 总则".into(),
-                source_type: "file".into(), inject_content: None, ..Default::default() },
+                source_type: "file".into(),
+                inject_content: None,
+                ..Default::default()
+            },
         ];
         apply_cross_lang_penalty(&mut results, Lang::En);
         assert_eq!(results[0].score, 0.2, "英文文档不降权");
-        assert!(results[1].score < 0.1, "中文文档应被降权 (0.3 * 0.3 = 0.09): {}",
-            results[1].score);
+        assert!(
+            results[1].score < 0.1,
+            "中文文档应被降权 (0.3 * 0.3 = 0.09): {}",
+            results[1].score
+        );
     }
 
     #[test]
     fn cross_lang_penalty_mixed_query_no_penalty() {
-        let mut results = vec![
-            SearchResult {
-                item_id: "1".into(), score: 0.5, title: "rust 所有权".into(),
-                content: "Rust ownership system...".into(),
-                source_type: "file".into(), inject_content: None, ..Default::default() },
-        ];
+        let mut results = vec![SearchResult {
+            item_id: "1".into(),
+            score: 0.5,
+            title: "rust 所有权".into(),
+            content: "Rust ownership system...".into(),
+            source_type: "file".into(),
+            inject_content: None,
+            ..Default::default()
+        }];
         apply_cross_lang_penalty(&mut results, Lang::Mixed);
         assert_eq!(results[0].score, 0.5, "Mixed query 不应降权任何结果");
     }
@@ -579,7 +632,10 @@ mod tests {
         // 这是 oss-pro-strategy §4.3 边界规则的代码层验证：行业 domain detection 不在 OSS。
         let empty: Vec<(&str, Vec<&str>)> = Vec::new();
         assert_eq!(detect_query_domain("反洗钱合同纠纷怎么处理", &empty), None);
-        assert_eq!(detect_query_domain("Rust ownership and borrowing", &empty), None);
+        assert_eq!(
+            detect_query_domain("Rust ownership and borrowing", &empty),
+            None
+        );
     }
 
     #[test]
@@ -609,19 +665,13 @@ mod tests {
     #[test]
     fn detect_query_domain_tie_prefers_input_order() {
         // 两个 domain 各命中 1 词（平手）→ 按传入顺序取首个（legal 先于 tech）。
-        let domains = dk(&[
-            ("legal", &["合同"]),
-            ("tech", &["索引"]),
-        ]);
+        let domains = dk(&[("legal", &["合同"]), ("tech", &["索引"])]);
         assert_eq!(
             detect_query_domain("合同里的索引字段", &domains).as_deref(),
             Some("legal")
         );
         // 顺序反转 → tech 胜出，证明的确是 input-order 而非字母序。
-        let domains_rev = dk(&[
-            ("tech", &["索引"]),
-            ("legal", &["合同"]),
-        ]);
+        let domains_rev = dk(&[("tech", &["索引"]), ("legal", &["合同"])]);
         assert_eq!(
             detect_query_domain("合同里的索引字段", &domains_rev).as_deref(),
             Some("tech")
@@ -632,7 +682,7 @@ mod tests {
     fn detect_query_domain_most_hits_wins() {
         // 命中数多的 domain 胜出（不受 input order 影响）。
         let domains = dk(&[
-            ("tech", &["索引"]),                 // 1 命中
+            ("tech", &["索引"]),                  // 1 命中
             ("legal", &["合同", "诉讼", "赔偿"]), // 3 命中
         ]);
         assert_eq!(
@@ -655,9 +705,14 @@ mod tests {
     fn detect_query_domain_drives_cross_domain_penalty_only_with_plugin() {
         // 端到端：plugin 提供词表 → detect → penalty 生效；无 plugin → 无 penalty。
         let mk = |dom: &str| SearchResult {
-            item_id: "x".into(), score: 1.0, title: "t".into(), content: "c".into(),
-            source_type: "file".into(), inject_content: None,
-            corpus_domain: dom.into(), ..Default::default()
+            item_id: "x".into(),
+            score: 1.0,
+            title: "t".into(),
+            content: "c".into(),
+            source_type: "file".into(),
+            inject_content: None,
+            corpus_domain: dom.into(),
+            ..Default::default()
         };
         // OSS 裸装：detect → None → penalty no-op
         let empty: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -670,18 +725,17 @@ mod tests {
         let d = detect_query_domain("反洗钱诉讼", &domains);
         let mut results = vec![mk("tech")];
         apply_cross_domain_penalty(&mut results, d.as_deref());
-        assert!((results[0].score - CROSS_DOMAIN_PENALTY).abs() < 1e-6,
-            "legal query + tech doc 应降权到 {CROSS_DOMAIN_PENALTY}: {}", results[0].score);
+        assert!(
+            (results[0].score - CROSS_DOMAIN_PENALTY).abs() < 1e-6,
+            "legal query + tech doc 应降权到 {CROSS_DOMAIN_PENALTY}: {}",
+            results[0].score
+        );
     }
 
     #[test]
     fn rrf_fuse_basic() {
-        let vec_results = vec![
-            ("a".into(), 0.9), ("b".into(), 0.7), ("c".into(), 0.5),
-        ];
-        let ft_results = vec![
-            ("b".into(), 10.0), ("a".into(), 8.0), ("d".into(), 5.0),
-        ];
+        let vec_results = vec![("a".into(), 0.9), ("b".into(), 0.7), ("c".into(), 0.5)];
+        let ft_results = vec![("b".into(), 10.0), ("a".into(), 8.0), ("d".into(), 5.0)];
 
         let fused = rrf_fuse(&vec_results, &ft_results, 0.6, 0.4, 10);
         assert!(!fused.is_empty());
@@ -715,9 +769,15 @@ mod tests {
         for tk in [1usize, 5, 10, 20, 21, 30, 50, 99, 100] {
             let p = SearchParams::with_defaults(tk);
             assert!(p.initial_k >= 20, "initial_k floor at 20 for top_k={tk}");
-            assert!(p.intermediate_k >= tk, "intermediate_k must be >= top_k for top_k={tk}");
+            assert!(
+                p.intermediate_k >= tk,
+                "intermediate_k must be >= top_k for top_k={tk}"
+            );
             // intermediate_k 上限 200 防止 rerank 过度膨胀（每个候选都过 ONNX 推理）
-            assert!(p.intermediate_k <= 200, "intermediate_k ceiling 200 for top_k={tk}");
+            assert!(
+                p.intermediate_k <= 200,
+                "intermediate_k ceiling 200 for top_k={tk}"
+            );
             assert_eq!(p.top_k, tk);
         }
     }
@@ -726,18 +786,33 @@ mod tests {
     fn allocate_budget_proportional() {
         let mut results = vec![
             SearchResult {
-                item_id: "a".into(), score: 0.8, title: "A".into(),
-                content: "A".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
+                item_id: "a".into(),
+                score: 0.8,
+                title: "A".into(),
+                content: "A".repeat(3000),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
             SearchResult {
-                item_id: "b".into(), score: 0.2, title: "B".into(),
-                content: "B".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
+                item_id: "b".into(),
+                score: 0.2,
+                title: "B".into(),
+                content: "B".repeat(3000),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
         ];
         allocate_budget(&mut results, 2000);
 
         let a_len = results[0].inject_content.as_ref().unwrap().chars().count();
         let b_len = results[1].inject_content.as_ref().unwrap().chars().count();
         // "a" has 80% score, should get ~1600 chars; "b" has 20%, should get ~400 (min 100)
-        assert!(a_len > b_len, "Higher score should get more budget: a={a_len} b={b_len}");
+        assert!(
+            a_len > b_len,
+            "Higher score should get more budget: a={a_len} b={b_len}"
+        );
         assert!(b_len >= 100, "Minimum budget should be 100: got {b_len}");
     }
 
@@ -745,11 +820,23 @@ mod tests {
     fn allocate_budget_zero_scores() {
         let mut results = vec![
             SearchResult {
-                item_id: "a".into(), score: 0.0, title: "A".into(),
-                content: "A".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
+                item_id: "a".into(),
+                score: 0.0,
+                title: "A".into(),
+                content: "A".repeat(3000),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
             SearchResult {
-                item_id: "b".into(), score: 0.0, title: "B".into(),
-                content: "B".repeat(3000), source_type: "note".into(), inject_content: None, ..Default::default() },
+                item_id: "b".into(),
+                score: 0.0,
+                title: "B".into(),
+                content: "B".repeat(3000),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
         ];
         allocate_budget(&mut results, 2000);
         // Equal distribution when scores are 0
@@ -770,16 +857,53 @@ mod tests {
         use crate::vectors::{VectorIndex, VectorMeta};
 
         let mut idx = VectorIndex::new(2).unwrap();
-        idx.add(&[1.0, 0.0], VectorMeta { item_id: "close".into(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
-        idx.add(&[0.0, 1.0], VectorMeta { item_id: "far".into(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
+        idx.add(
+            &[1.0, 0.0],
+            VectorMeta {
+                item_id: "close".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
+        idx.add(
+            &[0.0, 1.0],
+            VectorMeta {
+                item_id: "far".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
 
         let mut results = vec![
-            SearchResult { item_id: "far".into(),   score: 0.9, title: "Far".into(),   content: "c".into(), source_type: "note".into(), inject_content: None, ..Default::default() },
-            SearchResult { item_id: "close".into(), score: 0.5, title: "Close".into(), content: "c".into(), source_type: "note".into(), inject_content: None, ..Default::default() },
+            SearchResult {
+                item_id: "far".into(),
+                score: 0.9,
+                title: "Far".into(),
+                content: "c".into(),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "close".into(),
+                score: 0.5,
+                title: "Close".into(),
+                content: "c".into(),
+                source_type: "note".into(),
+                inject_content: None,
+                ..Default::default()
+            },
         ];
 
         rerank(&[1.0, 0.0], &mut results, &idx);
-        assert_eq!(results[0].item_id, "close", "Reranker should elevate closer vector");
+        assert_eq!(
+            results[0].item_id, "close",
+            "Reranker should elevate closer vector"
+        );
     }
 
     #[test]
@@ -788,8 +912,22 @@ mod tests {
 
         let idx = VectorIndex::new(2).unwrap();
         let mut results = vec![
-            SearchResult { item_id: "a".into(), score: 0.8, title: "A".into(), content: "c".into(), source_type: "note".into(), ..Default::default() },
-            SearchResult { item_id: "b".into(), score: 0.3, title: "B".into(), content: "c".into(), source_type: "note".into(), ..Default::default() },
+            SearchResult {
+                item_id: "a".into(),
+                score: 0.8,
+                title: "A".into(),
+                content: "c".into(),
+                source_type: "note".into(),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "b".into(),
+                score: 0.3,
+                title: "B".into(),
+                content: "c".into(),
+                source_type: "note".into(),
+                ..Default::default()
+            },
         ];
         rerank(&[1.0, 0.0], &mut results, &idx);
         assert!(results[0].score >= results[1].score);
@@ -799,13 +937,13 @@ mod tests {
     fn search_params_defaults_clamp_correctly() {
         let p = SearchParams::with_defaults(5);
         assert_eq!(p.top_k, 5);
-        assert_eq!(p.initial_k, 25);   // 5*5=25, in [20,500]
+        assert_eq!(p.initial_k, 25); // 5*5=25, in [20,500]
         assert_eq!(p.intermediate_k, 10); // 5*2=10
-        // 通用 search 默认不启用 min_score 阈值，保持向后行为契约
+                                          // 通用 search 默认不启用 min_score 阈值，保持向后行为契约
         assert_eq!(p.min_score, None);
 
         let p2 = SearchParams::with_defaults(1);
-        assert_eq!(p2.initial_k, 20);  // min clamp
+        assert_eq!(p2.initial_k, 20); // min clamp
         assert_eq!(p2.intermediate_k, 2); // max(1, 2) = 2
 
         // top_k=20: 旧契约 intermediate_k=40 (max clamp), 新契约 intermediate_k=40 (top_k*2)
@@ -831,11 +969,8 @@ mod tests {
     #[test]
     fn min_score_filter_keeps_above_threshold() {
         // 模拟 vecs.search 返回 [0.50, 0.70, 0.85]
-        let raw: Vec<(String, f32)> = vec![
-            ("a".into(), 0.50),
-            ("b".into(), 0.70),
-            ("c".into(), 0.85),
-        ];
+        let raw: Vec<(String, f32)> =
+            vec![("a".into(), 0.50), ("b".into(), 0.70), ("c".into(), 0.85)];
         let kept_065: Vec<_> = raw.iter().filter(|(_, s)| *s >= 0.65).cloned().collect();
         assert_eq!(kept_065.len(), 2, "0.65 阈值应保留 2 个 (0.70 + 0.85)");
         assert_eq!(kept_065[0].0, "b");
@@ -854,14 +989,18 @@ mod tests {
         let rag = SearchParams::with_defaults_for_rag(5);
         assert_eq!(rag.min_score, Some(0.65));
         assert_eq!(rag.top_k, 5);
-        assert_eq!(rag.initial_k, 25);  // 与通用版同构
+        assert_eq!(rag.initial_k, 25); // 与通用版同构
     }
 
     #[test]
     fn min_score_threshold_curve_documented_in_spec() {
         // 锁住吴师兄文章给出的曲线值，避免有人未读 spec 误改默认
         let rag = SearchParams::with_defaults_for_rag(5);
-        assert_eq!(rag.min_score, Some(0.65), "RAG 默认 0.65（保守端，召回优先）");
+        assert_eq!(
+            rag.min_score,
+            Some(0.65),
+            "RAG 默认 0.65（保守端，召回优先）"
+        );
         // 0.72 是吴师兄推荐的"精度优先"档，未来 Settings 提供
         // 0.78 开始漏边缘 case，仅极端精度场景用
     }
@@ -876,8 +1015,28 @@ mod tests {
         let dek = crate::crypto::Key32::generate();
 
         // 插入两条 item
-        store.insert_item(&dek, "低分文档", "content about cats", None, "note", None, None).unwrap();
-        store.insert_item(&dek, "高分文档", "content about dogs", None, "note", None, None).unwrap();
+        store
+            .insert_item(
+                &dek,
+                "低分文档",
+                "content about cats",
+                None,
+                "note",
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .insert_item(
+                &dek,
+                "高分文档",
+                "content about dogs",
+                None,
+                "note",
+                None,
+                None,
+            )
+            .unwrap();
 
         // Reranker 固定返回固定分数（第二条评分更高）
         let reranker: std::sync::Arc<dyn crate::infer::RerankProvider> =
@@ -895,7 +1054,10 @@ mod tests {
         // 无 FTS 也无向量时 fused 为空，search_with_context 返回空但不 panic
         let params = SearchParams::with_defaults(5);
         let results = search_with_context(&ctx, "dogs", &params);
-        assert!(results.is_ok(), "search_with_context should not fail with reranker");
+        assert!(
+            results.is_ok(),
+            "search_with_context should not fail with reranker"
+        );
         // 无数据源时结果为空
         assert!(results.unwrap().is_empty());
     }
@@ -1018,18 +1180,18 @@ fn parse_n_units_ago(q: &str, now_unix: i64) -> Option<TimeFilter> {
     };
 
     // 找数字 — 阿拉伯优先，否则中文单字
-    let n: Option<i64> = q
-        .chars()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .find_map(|w| {
-            // 阿拉伯数字（最多 3 位）
-            if w[0].is_ascii_digit() {
-                let s: String = q.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
-                return s.parse::<i64>().ok();
-            }
-            cn_digit(w[0])
-        });
+    let n: Option<i64> = q.chars().collect::<Vec<_>>().windows(2).find_map(|w| {
+        // 阿拉伯数字（最多 3 位）
+        if w[0].is_ascii_digit() {
+            let s: String = q
+                .chars()
+                .skip_while(|c| !c.is_ascii_digit())
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            return s.parse::<i64>().ok();
+        }
+        cn_digit(w[0])
+    });
 
     let n = n?;
     if n <= 0 || n > 365 {
@@ -1044,13 +1206,19 @@ fn parse_n_units_ago(q: &str, now_unix: i64) -> Option<TimeFilter> {
     if q.contains("周前") || q.contains("weeks ago") || q.contains("week ago") {
         let start = now_unix - n * 7 * DAY;
         let end = start + 7 * DAY - 1;
-        return Some(TimeFilter { start_unix: start, end_unix: end });
+        return Some(TimeFilter {
+            start_unix: start,
+            end_unix: end,
+        });
     }
     if q.contains("月前") || q.contains("months ago") || q.contains("month ago") {
         // 近似 30 天
         let start = now_unix - n * 30 * DAY;
         let end = start + 30 * DAY - 1;
-        return Some(TimeFilter { start_unix: start, end_unix: end });
+        return Some(TimeFilter {
+            start_unix: start,
+            end_unix: end,
+        });
     }
 
     None
@@ -1082,7 +1250,10 @@ fn week_range(now_unix: i64, offset_weeks: i64) -> TimeFilter {
 
 fn month_range(now_unix: i64, offset_months: i64) -> TimeFilter {
     use chrono::{Datelike, TimeZone, Utc};
-    let now = Utc.timestamp_opt(now_unix, 0).single().unwrap_or_else(Utc::now);
+    let now = Utc
+        .timestamp_opt(now_unix, 0)
+        .single()
+        .unwrap_or_else(Utc::now);
     let (mut year, mut month) = (now.year(), now.month() as i32);
     month += offset_months as i32;
     while month < 1 {
@@ -1099,7 +1270,11 @@ fn month_range(now_unix: i64, offset_months: i64) -> TimeFilter {
         .map(|d| d.timestamp())
         .unwrap_or(now_unix);
     // 月末 = 下月 1 日 - 1 秒
-    let (next_year, next_month) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
     let next_start = Utc
         .with_ymd_and_hms(next_year, next_month as u32, 1, 0, 0, 0)
         .single()

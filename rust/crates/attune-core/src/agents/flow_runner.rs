@@ -73,7 +73,10 @@ impl<'a> GovernedStepRunner<'a> {
         vec![
             ChatMessage::system(&format!(
                 "You are the {} agent. Capability: {}. Input type: {}. Output type: {}.",
-                agent.id, agent.capability_boundary, input.type_name(), agent.handoff.produces
+                agent.id,
+                agent.capability_boundary,
+                input.type_name(),
+                agent.handoff.produces
             )),
             ChatMessage::user(&input.value().to_string()),
         ]

@@ -142,7 +142,8 @@ pub fn draft(llm: &dyn LlmProvider, req: &DraftRequest) -> WritingResultT<Writin
     let mut kept_tokens = 0u32;
     for (i, s) in req.sources.iter().enumerate() {
         let cut = precut(&s.text);
-        kept_tokens = kept_tokens.saturating_add(cost::estimate_tokens(&cut, llm.model_name()) as u32);
+        kept_tokens =
+            kept_tokens.saturating_add(cost::estimate_tokens(&cut, llm.model_name()) as u32);
         let tag = if s.item_id.is_empty() {
             format!("来源 ext{}", i + 1)
         } else {
@@ -168,8 +169,8 @@ pub fn draft(llm: &dyn LlmProvider, req: &DraftRequest) -> WritingResultT<Writin
     );
 
     // Naive baseline: all source material + outline → reasoning model in one shot.
-    let naive_baseline_tokens =
-        cost::estimate_tokens(&user, llm.model_name()) as u32 + cost::estimate_tokens(SYSTEM_PROMPT, llm.model_name()) as u32;
+    let naive_baseline_tokens = cost::estimate_tokens(&user, llm.model_name()) as u32
+        + cost::estimate_tokens(SYSTEM_PROMPT, llm.model_name()) as u32;
 
     let redactor = Redactor::default();
     let schema = draft_schema();
@@ -187,8 +188,8 @@ pub fn draft(llm: &dyn LlmProvider, req: &DraftRequest) -> WritingResultT<Writin
     )
     .map_err(|e| WritingError::GenerationUnavailable(e.to_string()))?;
 
-    let parsed: DraftJson =
-        serde_json::from_str(&raw).map_err(|e| WritingError::GenerationUnavailable(format!("parse: {e}")))?;
+    let parsed: DraftJson = serde_json::from_str(&raw)
+        .map_err(|e| WritingError::GenerationUnavailable(format!("parse: {e}")))?;
     let content = parsed.paragraphs.join("\n\n");
 
     // Split into segments + compute offsets, then ground each.
@@ -201,7 +202,8 @@ pub fn draft(llm: &dyn LlmProvider, req: &DraftRequest) -> WritingResultT<Writin
             verified: false,
         })
         .collect();
-    let unverified_spans = ground_segments(&mut segments, &req.sources, &GroundingConfig::default());
+    let unverified_spans =
+        ground_segments(&mut segments, &req.sources, &GroundingConfig::default());
 
     // Token bill: naive baseline vs the single reasoning call (map leg unused for draft; the
     // whole generation is one reduce-class call). Output tokens estimated from the content.
@@ -275,7 +277,8 @@ mod tests {
     }
 
     fn ok_reply() -> String {
-        json!({"paragraphs":["Rust 通过所有权系统在编译期保证内存安全，无需垃圾回收。"]}).to_string()
+        json!({"paragraphs":["Rust 通过所有权系统在编译期保证内存安全，无需垃圾回收。"]})
+            .to_string()
     }
 
     #[test]
@@ -302,7 +305,10 @@ mod tests {
     fn no_source_material_rejected() {
         let llm = MockDraftLlm::new(&ok_reply());
         let req = DraftRequest::default();
-        assert_eq!(draft(&llm, &req).unwrap_err(), WritingError::NoSourceMaterial);
+        assert_eq!(
+            draft(&llm, &req).unwrap_err(),
+            WritingError::NoSourceMaterial
+        );
     }
 
     #[test]
@@ -327,7 +333,10 @@ mod tests {
             )],
             ..Default::default()
         };
-        assert_eq!(draft(&llm, &req).unwrap_err(), WritingError::SourceInjection);
+        assert_eq!(
+            draft(&llm, &req).unwrap_err(),
+            WritingError::SourceInjection
+        );
         // The model must NOT have been called.
         assert!(llm.seen_user.lock().unwrap().is_empty());
     }
@@ -347,15 +356,22 @@ mod tests {
     #[test]
     fn ungrounded_fact_lands_in_unverified_spans() {
         // Model emits a paragraph unrelated to the (different) source.
-        let reply = json!({"paragraphs":["明年量子计算机将彻底取代所有经典计算机体系结构。"]}).to_string();
+        let reply =
+            json!({"paragraphs":["明年量子计算机将彻底取代所有经典计算机体系结构。"]}).to_string();
         let llm = MockDraftLlm::new(&reply);
         let req = DraftRequest {
             outline: "topic".into(),
-            sources: vec![SourceMaterial::new("s1", "Rust ownership prevents data races.")],
+            sources: vec![SourceMaterial::new(
+                "s1",
+                "Rust ownership prevents data races.",
+            )],
             ..Default::default()
         };
         let r = draft(&llm, &req).unwrap();
-        assert!(!r.unverified_spans.is_empty(), "ungrounded fact must be flagged");
+        assert!(
+            !r.unverified_spans.is_empty(),
+            "ungrounded fact must be flagged"
+        );
         assert!(r.is_entirely_unverified());
     }
 
@@ -364,7 +380,10 @@ mod tests {
         let llm = MockDraftLlm::new(&ok_reply());
         let req = DraftRequest {
             outline: "Rust 内存安全".into(),
-            sources: vec![SourceMaterial::new("s1", "Rust 所有权在编译期保证内存安全。")],
+            sources: vec![SourceMaterial::new(
+                "s1",
+                "Rust 所有权在编译期保证内存安全。",
+            )],
             ..Default::default()
         };
         let r = draft(&llm, &req).unwrap();

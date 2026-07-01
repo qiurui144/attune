@@ -393,15 +393,24 @@ mod tests {
     fn extract_sections_markdown() {
         let content = "# Title\n\nIntro paragraph.\n\n## Section 1\n\nContent 1.\n\n## Section 2\n\nContent 2.";
         let sections = extract_sections(content);
-        assert!(sections.len() >= 2, "Should split on ## headings: got {}", sections.len());
+        assert!(
+            sections.len() >= 2,
+            "Should split on ## headings: got {}",
+            sections.len()
+        );
         assert!(sections[0].1.contains("Title"));
     }
 
     #[test]
     fn extract_sections_code() {
-        let content = "fn main() {\n    println!(\"hello\");\n}\n\npub fn helper() {\n    // code\n}";
+        let content =
+            "fn main() {\n    println!(\"hello\");\n}\n\npub fn helper() {\n    // code\n}";
         let sections = extract_sections(content);
-        assert!(sections.len() >= 2, "Should split on fn boundaries: got {}", sections.len());
+        assert!(
+            sections.len() >= 2,
+            "Should split on fn boundaries: got {}",
+            sections.len()
+        );
     }
 
     #[test]
@@ -426,7 +435,8 @@ mod tests {
     fn chunk_preserves_code_fence_balanced_in_each_chunk() {
         // markdown 含一个会被 chunk 切到中间的 code block
         let prose = "前置说明。".repeat(80); // ~480 chars 中文
-        let code = "\n```rust\nfn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n```\n";
+        let code =
+            "\n```rust\nfn main() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n```\n";
         let after = "\n后续段落。".repeat(80);
         let text = format!("{prose}{code}{after}");
         let chunks = chunk(&text, 500, 100);
@@ -473,17 +483,27 @@ mod tests {
 
     #[test]
     fn extract_sections_with_path_markdown_nested() {
-        let content = "# 公司手册\n\n概述。\n\n## 第三章 福利\n\n福利总览。\n\n### 3.2 假期\n\n年假 15 天。";
+        let content =
+            "# 公司手册\n\n概述。\n\n## 第三章 福利\n\n福利总览。\n\n### 3.2 假期\n\n年假 15 天。";
         let secs = extract_sections_with_path(content);
         // 4 sections: 概述（path=[公司手册]） / 福利总览（[公司手册, 第三章 福利]）/
         // 假期（[公司手册, 第三章 福利, 3.2 假期]） — 第一个标题前内容如果有则 path=空
         // 当前 content "公司手册" 直接是第一个标题，所以无 path-empty section
-        assert!(secs.len() >= 3, "期望 ≥3 sections, got {}: {:?}", secs.len(), secs);
+        assert!(
+            secs.len() >= 3,
+            "期望 ≥3 sections, got {}: {:?}",
+            secs.len(),
+            secs
+        );
         // 验证最后一个 section 的 path 三层
         let last = &secs[secs.len() - 1];
         assert_eq!(
             last.path,
-            vec!["公司手册".to_string(), "第三章 福利".to_string(), "3.2 假期".to_string()]
+            vec![
+                "公司手册".to_string(),
+                "第三章 福利".to_string(),
+                "3.2 假期".to_string()
+            ]
         );
         assert!(last.content.contains("年假 15 天"));
     }
@@ -494,8 +514,16 @@ mod tests {
         let content = "# A\n内容 A\n\n## B\n内容 B\n\n# C\n内容 C";
         let secs = extract_sections_with_path(content);
         // 找 path 包含 "C" 的 section
-        let c_section = secs.iter().find(|s| s.content.contains("内容 C")).expect("missing C");
-        assert_eq!(c_section.path, vec!["C".to_string()], "dedent must reset to depth-1: got {:?}", c_section.path);
+        let c_section = secs
+            .iter()
+            .find(|s| s.content.contains("内容 C"))
+            .expect("missing C");
+        assert_eq!(
+            c_section.path,
+            vec!["C".to_string()],
+            "dedent must reset to depth-1: got {:?}",
+            c_section.path
+        );
     }
 
     #[test]
@@ -504,7 +532,11 @@ mod tests {
         let content = "fn foo() {\n    println!(\"foo\");\n}\n\npub fn bar() {\n    helper();\n}";
         let secs = extract_sections_with_path(content);
         for s in &secs {
-            assert!(s.path.len() <= 1, "代码 boundary 路径深度不应 > 1: {:?}", s.path);
+            assert!(
+                s.path.len() <= 1,
+                "代码 boundary 路径深度不应 > 1: {:?}",
+                s.path
+            );
         }
     }
 
@@ -533,7 +565,9 @@ mod tests {
             secs.iter().map(|s| s.path.last().cloned()).collect::<Vec<_>>()
         );
         // 应该有一个 Real Heading section
-        assert!(secs.iter().any(|s| s.path == vec!["Real Heading".to_string()]));
+        assert!(secs
+            .iter()
+            .any(|s| s.path == vec!["Real Heading".to_string()]));
         // 不应该有 fn foo / fn bar / impl 等作为 section path
         for s in &secs {
             for p in &s.path {
@@ -566,9 +600,16 @@ mod tests {
         let secs = extract_sections_with_path(content);
         // 第一个 section 的 path 应为空（preamble）
         assert!(!secs.is_empty());
-        assert!(secs[0].path.is_empty(), "preamble path 应为空，得到 {:?}", secs[0].path);
+        assert!(
+            secs[0].path.is_empty(),
+            "preamble path 应为空，得到 {:?}",
+            secs[0].path
+        );
         // 第二个 section 的 path 应有 1 层
-        let after = secs.iter().find(|s| s.content.contains("章节正文")).expect("missing post-heading");
+        let after = secs
+            .iter()
+            .find(|s| s.content.contains("章节正文"))
+            .expect("missing post-heading");
         assert_eq!(after.path, vec!["后来的标题".to_string()]);
     }
 
@@ -668,13 +709,9 @@ mod tests {
             for &len in &[100usize, 500, 1000, 2000, 5000] {
                 let text = deterministic_text(seed, len);
                 let chunks = chunk(&text, 512, 128);
-                assert!(
-                    !chunks.is_empty(),
-                    "seed={} len={} chunks empty",
-                    seed,
-                    len
-                );
-                let first_chunk_starts_with_text_start = text.starts_with(&chunks[0][..chunks[0].len().min(50)])
+                assert!(!chunks.is_empty(), "seed={} len={} chunks empty", seed, len);
+                let first_chunk_starts_with_text_start = text
+                    .starts_with(&chunks[0][..chunks[0].len().min(50)])
                     || chunks[0].starts_with(&text[..text.len().min(50)]);
                 assert!(
                     first_chunk_starts_with_text_start,
@@ -716,13 +753,13 @@ mod tests {
     fn chunk_property_no_panic_on_edge_inputs() {
         // 防御: chunker 不应 panic 即使输入异常
         let cases = vec![
-            "",                                                 // empty
-            "\n\n\n",                                           // only newlines
-            "                                            ",     // only spaces
-            "```",                                              // unclosed fence
-            "```rust\nfn x()\n",                                // unclosed code block
-            "a",                                                // single char
-            "🌿🌿🌿🌿🌿",                                            // multi-byte unicode
+            "",                                             // empty
+            "\n\n\n",                                       // only newlines
+            "                                            ", // only spaces
+            "```",                                          // unclosed fence
+            "```rust\nfn x()\n",                            // unclosed code block
+            "a",                                            // single char
+            "🌿🌿🌿🌿🌿",                                   // multi-byte unicode
         ];
         for input in cases {
             // Must not panic
@@ -730,7 +767,11 @@ mod tests {
             // Empty input → may or may not return [""] — both are valid behaviors
             // for caller (parser typically filters empty content before chunking)
             if !input.is_empty() && !input.trim().is_empty() {
-                assert!(!chunks.is_empty(), "non-empty input {:?} produced 0 chunks", input);
+                assert!(
+                    !chunks.is_empty(),
+                    "non-empty input {:?} produced 0 chunks",
+                    input
+                );
             }
         }
     }
@@ -740,7 +781,7 @@ mod tests {
         // 防死循环: overlap >= chunk_size 时 chunker 应自动 clamp
         let text: String = "a".repeat(2000);
         let chunks = chunk(&text, 512, 999); // overlap > chunk_size
-        // 不应死循环, chunks 数量有限 (<2000 chunks)
+                                             // 不应死循环, chunks 数量有限 (<2000 chunks)
         assert!(
             chunks.len() < 2000,
             "pathological overlap caused {} chunks (likely infinite loop signal)",
@@ -778,7 +819,8 @@ mod tests {
         for (i, c) in chunks.iter().enumerate() {
             assert!(
                 c.chars().count() <= 1024,
-                "chunk[{i}] {} chars > 2*512", c.chars().count()
+                "chunk[{i}] {} chars > 2*512",
+                c.chars().count()
             );
         }
     }

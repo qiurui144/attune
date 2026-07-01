@@ -118,15 +118,15 @@ mod tests {
     use crate::ocr::nontext::{Region, RegionKind, RegionResult, RegionSource};
     use crate::ocr::BBox;
 
-    fn region(
-        kind: RegionKind,
-        result: RegionResult,
-        source: RegionSource,
-        conf: f32,
-    ) -> Region {
+    fn region(kind: RegionKind, result: RegionResult, source: RegionSource, conf: f32) -> Region {
         Region {
             kind,
-            bbox: BBox { x: 0, y: 0, w: 1, h: 1 },
+            bbox: BBox {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
             page: 0,
             det_confidence: 0.9,
             result,
@@ -147,7 +147,10 @@ mod tests {
     #[test]
     fn conflict_always_escalates() {
         assert_eq!(decide(Agreement::ContentConflict, 0.99), Decision::Escalate);
-        assert_eq!(decide(Agreement::StructureDiscrepancy, 0.99), Decision::Escalate);
+        assert_eq!(
+            decide(Agreement::StructureDiscrepancy, 0.99),
+            Decision::Escalate
+        );
     }
     #[test]
     fn content_compare_normalizes_whitespace() {
@@ -157,13 +160,19 @@ mod tests {
     #[test]
     fn table_structure_diff_is_discrepancy() {
         assert_eq!(compare_table_structure(3, 4, 3, 4), Agreement::Agree);
-        assert_eq!(compare_table_structure(3, 4, 4, 4), Agreement::StructureDiscrepancy);
+        assert_eq!(
+            compare_table_structure(3, 4, 4, 4),
+            Agreement::StructureDiscrepancy
+        );
     }
     #[test]
     fn build_report_marks_agree_no_correction() {
         let regions = vec![region(
             RegionKind::Handwriting,
-            RegionResult::HandwritingV1 { text: Some("foo".into()), grounding: None },
+            RegionResult::HandwritingV1 {
+                text: Some("foo".into()),
+                grounding: None,
+            },
             RegionSource::CrossConfirmed,
             0.9,
         )];
@@ -176,7 +185,10 @@ mod tests {
     fn build_report_conflict_keeps_both_values() {
         let regions = vec![region(
             RegionKind::Handwriting,
-            RegionResult::HandwritingV1 { text: Some("1OO".into()), grounding: None },
+            RegionResult::HandwritingV1 {
+                text: Some("1OO".into()),
+                grounding: None,
+            },
             RegionSource::Vlm,
             0.7,
         )];

@@ -221,7 +221,12 @@ impl DeepResearch {
                 SourceKind::Vault => "本地",
                 SourceKind::Web => "网络",
             };
-            ctx.push_str(&format!("[{}] ({kind}) {} — {}\n", i + 1, d.title, d.snippet));
+            ctx.push_str(&format!(
+                "[{}] ({kind}) {} — {}\n",
+                i + 1,
+                d.title,
+                d.snippet
+            ));
         }
 
         let schema = serde_json::json!({
@@ -354,7 +359,12 @@ impl DeepResearch {
                 SourceKind::Vault => "本地",
                 SourceKind::Web => "网络",
             };
-            ctx.push_str(&format!("[{}] ({kind}) {} — {}\n", i + 1, d.title, d.snippet));
+            ctx.push_str(&format!(
+                "[{}] ({kind}) {} — {}\n",
+                i + 1,
+                d.title,
+                d.snippet
+            ));
         }
         let system = "你是研究助手。基于给定的编号材料，就用户主题写一份简明研究综述。\
             规则：(1) 每个论断后用 [n] 标注来源编号；(2) 只用材料中出现的信息，不编造；\
@@ -371,9 +381,7 @@ impl DeepResearch {
 
     /// 退化报告：LLM 不可用时只列检索命中（明示无综合段，spec §7）。
     fn degraded_report(&self, topic: &str, docs: &[&ResearchDoc]) -> String {
-        let mut s = format!(
-            "# {topic}\n\n（LLM 不可用，仅提供检索结果，无综合段）\n\n"
-        );
+        let mut s = format!("# {topic}\n\n（LLM 不可用，仅提供检索结果，无综合段）\n\n");
         for (i, d) in docs.iter().enumerate() {
             s.push_str(&format!("{}. **{}** — {}\n", i + 1, d.title, d.snippet));
         }
@@ -464,10 +472,17 @@ mod tests {
         // two distinct sources, same fact → LLM clusters them → confirmed.
         let docs = vec![
             doc(SourceKind::Vault, "item-1", "RISC-V RVA23 ratified", "a"),
-            doc(SourceKind::Web, "https://lwn.net", "risc-v rva23 ratified", "b"),
+            doc(
+                SourceKind::Web,
+                "https://lwn.net",
+                "risc-v rva23 ratified",
+                "b",
+            ),
         ];
         let llm = MockLlmProvider::new("mock");
-        llm.push_response(r#"{"claims":[{"text":"RVA23 ratified","doc_indices":[1,2],"verdict":"confirmed"}]}"#);
+        llm.push_response(
+            r#"{"claims":[{"text":"RVA23 ratified","doc_indices":[1,2],"verdict":"confirmed"}]}"#,
+        );
         llm.push_response("ok [1][2]"); // synthesize
         let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
         assert_eq!(r.claims.len(), 1, "same claim merged across two sources");
@@ -481,7 +496,11 @@ mod tests {
         let llm = MockLlmProvider::new("mock");
         llm.push_response("ok [1]");
         let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
-        assert_eq!(r.claims[0].verification, Verification::SingleSource, "never overclaim as confirmed");
+        assert_eq!(
+            r.claims[0].verification,
+            Verification::SingleSource,
+            "never overclaim as confirmed"
+        );
     }
 
     #[test]
@@ -494,7 +513,9 @@ mod tests {
         let llm = MockLlmProvider::new("mock");
         // even if the LLM clusters both indices, they map to the same reference → 1 independent
         // source → single (the conservative re-verdict must not be fooled).
-        llm.push_response(r#"{"claims":[{"text":"dup","doc_indices":[1,2],"verdict":"confirmed"}]}"#);
+        llm.push_response(
+            r#"{"claims":[{"text":"dup","doc_indices":[1,2],"verdict":"confirmed"}]}"#,
+        );
         llm.push_response("ok [1]"); // synthesize
         let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
         assert_eq!(r.claims[0].sources.len(), 1, "deduped reference");
@@ -519,13 +540,19 @@ mod tests {
             doc(SourceKind::Vault, "item-1", "Vault", "v"),
             doc(SourceKind::Web, "https://x", "Web", "w"),
         ];
-        let opts = ResearchOpts { use_web: false, ..Default::default() };
+        let opts = ResearchOpts {
+            use_web: false,
+            ..Default::default()
+        };
         let llm = MockLlmProvider::new("mock");
         llm.push_response("ok [1]");
         let r = DeepResearch.run("t", &docs, &opts, Some(&llm));
         // only the vault claim survives.
         assert_eq!(r.claims.len(), 1);
-        assert!(r.claims[0].sources.iter().all(|s| s.kind == SourceKind::Vault));
+        assert!(r.claims[0]
+            .sources
+            .iter()
+            .all(|s| s.kind == SourceKind::Vault));
     }
 
     #[test]
@@ -553,9 +580,19 @@ mod tests {
     #[test]
     fn resource_max_claims_cap() {
         let docs: Vec<ResearchDoc> = (0..50)
-            .map(|i| doc(SourceKind::Vault, &format!("item-{i}"), &format!("Title {i}"), "s"))
+            .map(|i| {
+                doc(
+                    SourceKind::Vault,
+                    &format!("item-{i}"),
+                    &format!("Title {i}"),
+                    "s",
+                )
+            })
             .collect();
-        let opts = ResearchOpts { max_claims: 5, use_web: true };
+        let opts = ResearchOpts {
+            max_claims: 5,
+            use_web: true,
+        };
         let r = DeepResearch.run("t", &docs, &opts, None);
         assert_eq!(r.claims.len(), 5, "capped at max_claims");
     }
@@ -568,9 +605,24 @@ mod tests {
 
     fn docrefs() -> Vec<ResearchDoc> {
         vec![
-            doc(SourceKind::Vault, "item-1", "RVV 1.0 ratified", "The RVV vector ext was ratified."),
-            doc(SourceKind::Web, "https://lwn.net/x", "Vector extension finalized", "RISC-V finalized its vector spec."),
-            doc(SourceKind::Vault, "item-2", "Unrelated note", "Something else entirely."),
+            doc(
+                SourceKind::Vault,
+                "item-1",
+                "RVV 1.0 ratified",
+                "The RVV vector ext was ratified.",
+            ),
+            doc(
+                SourceKind::Web,
+                "https://lwn.net/x",
+                "Vector extension finalized",
+                "RISC-V finalized its vector spec.",
+            ),
+            doc(
+                SourceKind::Vault,
+                "item-2",
+                "Unrelated note",
+                "Something else entirely.",
+            ),
         ]
     }
 
@@ -588,9 +640,16 @@ mod tests {
         // synthesize is also called by run(); queue a second response for it.
         llm.push_response("综述 [1][2][3]");
         let r = DeepResearch.run("topic", &docs, &ResearchOpts::default(), Some(&llm));
-        let confirmed: Vec<_> = r.claims.iter()
-            .filter(|c| c.verification == Verification::MultiSourceConfirmed).collect();
-        assert_eq!(confirmed.len(), 1, "synonymous cross-source merged & confirmed");
+        let confirmed: Vec<_> = r
+            .claims
+            .iter()
+            .filter(|c| c.verification == Verification::MultiSourceConfirmed)
+            .collect();
+        assert_eq!(
+            confirmed.len(),
+            1,
+            "synonymous cross-source merged & confirmed"
+        );
         assert_eq!(confirmed[0].sources.len(), 2);
     }
 
@@ -600,13 +659,19 @@ mod tests {
     fn xsource_llm_overclaim_downgraded_to_single() {
         let docs = docrefs();
         let llm = MockLlmProvider::new("mock");
-        llm.push_response(r#"{"claims":[
+        llm.push_response(
+            r#"{"claims":[
             {"text":"lone fact","doc_indices":[3],"verdict":"confirmed"}
-        ]}"#);
+        ]}"#,
+        );
         llm.push_response("综述 [3]");
         let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
-        assert!(r.claims.iter().all(|c| c.verification != Verification::MultiSourceConfirmed),
-            "single-source cluster cannot be confirmed even if LLM says so");
+        assert!(
+            r.claims
+                .iter()
+                .all(|c| c.verification != Verification::MultiSourceConfirmed),
+            "single-source cluster cannot be confirmed even if LLM says so"
+        );
     }
 
     /// conflicting: LLM marks conflicting + there really are ≥2 independent sources → kept.
@@ -614,12 +679,17 @@ mod tests {
     fn xsource_llm_conflicting_preserved_when_multisource() {
         let docs = docrefs();
         let llm = MockLlmProvider::new("mock");
-        llm.push_response(r#"{"claims":[
+        llm.push_response(
+            r#"{"claims":[
             {"text":"sources disagree on the date","doc_indices":[1,2],"verdict":"conflicting"}
-        ]}"#);
+        ]}"#,
+        );
         llm.push_response("综述 [1][2]");
         let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
-        assert!(r.claims.iter().any(|c| c.verification == Verification::Conflicting));
+        assert!(r
+            .claims
+            .iter()
+            .any(|c| c.verification == Verification::Conflicting));
     }
 
     /// grounding (adversarial): LLM hallucinates an out-of-range doc index. The validator
@@ -636,9 +706,18 @@ mod tests {
         let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
         // fell back to deterministic: each distinct title is its own single-source claim,
         // and crucially every source ref is real (in the docs).
-        let all_refs: Vec<&str> = r.claims.iter().flat_map(|c| c.sources.iter()).map(|s| s.reference.as_str()).collect();
-        assert!(all_refs.iter().all(|rf| docs.iter().any(|d| d.reference == *rf)),
-            "no fabricated source after fallback");
+        let all_refs: Vec<&str> = r
+            .claims
+            .iter()
+            .flat_map(|c| c.sources.iter())
+            .map(|s| s.reference.as_str())
+            .collect();
+        assert!(
+            all_refs
+                .iter()
+                .all(|rf| docs.iter().any(|d| d.reference == *rf)),
+            "no fabricated source after fallback"
+        );
         assert!(!r.claims.is_empty());
     }
 
@@ -652,7 +731,10 @@ mod tests {
         llm.push_response("nope");
         llm.push_response("综述");
         let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
-        assert!(!r.claims.is_empty(), "deterministic fallback produced claims");
+        assert!(
+            !r.claims.is_empty(),
+            "deterministic fallback produced claims"
+        );
     }
 
     /// edge: single doc → no LLM cross-source call needed, deterministic single-source.
@@ -672,13 +754,24 @@ mod tests {
     fn xsource_duplicate_reference_in_cluster_is_single() {
         let docs = vec![
             doc(SourceKind::Vault, "item-1", "A", "first wording"),
-            doc(SourceKind::Vault, "item-1", "A again", "second wording, same item"),
+            doc(
+                SourceKind::Vault,
+                "item-1",
+                "A again",
+                "second wording, same item",
+            ),
         ];
         let llm = MockLlmProvider::new("mock");
-        llm.push_response(r#"{"claims":[{"text":"same fact","doc_indices":[1,2],"verdict":"confirmed"}]}"#);
+        llm.push_response(
+            r#"{"claims":[{"text":"same fact","doc_indices":[1,2],"verdict":"confirmed"}]}"#,
+        );
         llm.push_response("综述 [1][2]");
         let r = DeepResearch.run("t", &docs, &ResearchOpts::default(), Some(&llm));
-        assert_eq!(r.claims[0].sources.len(), 1, "same reference deduped → single independent source");
+        assert_eq!(
+            r.claims[0].sources.len(),
+            1,
+            "same reference deduped → single independent source"
+        );
         assert_eq!(r.claims[0].verification, Verification::SingleSource);
     }
 }

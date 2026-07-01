@@ -119,7 +119,11 @@ impl Store {
             params![id],
             |row| row.get(0),
         )?;
-        let new_status = if attempts >= max_attempts { "abandoned" } else { "pending" };
+        let new_status = if attempts >= max_attempts {
+            "abandoned"
+        } else {
+            "pending"
+        };
         tx.execute(
             "UPDATE embed_queue SET status = ?1 WHERE id = ?2",
             params![new_status, id],
@@ -242,7 +246,9 @@ mod tests {
         // 1 pending
         store.enqueue_embedding(&item_id, 0, "p", 2, 1, 0).unwrap();
         // 1 processing
-        store.enqueue_embedding(&item_id, 1, "ing", 2, 1, 0).unwrap();
+        store
+            .enqueue_embedding(&item_id, 1, "ing", 2, 1, 0)
+            .unwrap();
         store
             .conn
             .execute(

@@ -74,7 +74,10 @@ impl LlmVlmProvider {
 impl VlmProvider for LlmVlmProvider {
     fn caption(&self, image_path: &Path) -> Result<String> {
         let (data_uri, mime) = Self::read_image_as_data_uri(image_path)?;
-        let attachment = Attachment::Image { url_or_data_uri: data_uri, mime };
+        let attachment = Attachment::Image {
+            url_or_data_uri: data_uri,
+            mime,
+        };
         // chat_multimodal 是同步调用，直接转发；LLM 内部走独立 llm_rt Runtime.
         // Plan A1 Task I: discard TokenUsage here — VLM caption is invoked from
         // batch ingest paths without a recorder context. When Task U wires the
@@ -90,7 +93,10 @@ impl VlmProvider for LlmVlmProvider {
 
     fn vqa(&self, image_path: &Path, question: &str) -> Result<String> {
         let (data_uri, mime) = Self::read_image_as_data_uri(image_path)?;
-        let attachment = Attachment::Image { url_or_data_uri: data_uri, mime };
+        let attachment = Attachment::Image {
+            url_or_data_uri: data_uri,
+            mime,
+        };
         self.llm
             .chat_multimodal(
                 "You are a precise visual question answering assistant.",
@@ -103,7 +109,12 @@ impl VlmProvider for LlmVlmProvider {
 
 /// 从文件扩展名推断图片 MIME type。
 fn mime_from_path(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("webp") => "image/webp",
@@ -196,14 +207,21 @@ mod tests {
     fn mock_caption_does_not_touch_filesystem() {
         // 不存在的路径也应返回, 证明 mock 没读盘
         let p = MockVlmProvider::new();
-        let got = p.caption(&PathBuf::from("/definitely/does/not/exist.png")).unwrap();
+        let got = p
+            .caption(&PathBuf::from("/definitely/does/not/exist.png"))
+            .unwrap();
         assert_eq!(got, "[mock image caption]");
     }
 
     #[test]
     fn mock_vqa_echoes_question() {
         let p = MockVlmProvider::new();
-        let got = p.vqa(&PathBuf::from("/tmp/chart.png"), "Which line represents Q1 2024?").unwrap();
+        let got = p
+            .vqa(
+                &PathBuf::from("/tmp/chart.png"),
+                "Which line represents Q1 2024?",
+            )
+            .unwrap();
         assert!(got.contains("Which line represents Q1 2024?"));
         assert!(got.starts_with("[mock vqa answer to:"));
     }
@@ -211,7 +229,9 @@ mod tests {
     #[test]
     fn mock_vqa_supports_chinese_question() {
         let p = MockVlmProvider::new();
-        let got = p.vqa(&PathBuf::from("/tmp/x.png"), "图里有几条折线？").unwrap();
+        let got = p
+            .vqa(&PathBuf::from("/tmp/x.png"), "图里有几条折线？")
+            .unwrap();
         assert!(got.contains("图里有几条折线"));
     }
 
@@ -236,15 +256,11 @@ mod tests {
         // 写最小有效 PNG 文件（1×1 像素）
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         let tiny_png: &[u8] = &[
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-            0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41,
-            0x54, 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
-            0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc,
-            0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
-            0x44, 0xae, 0x42, 0x60, 0x82,
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc,
+            0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ];
         tmp.write_all(tiny_png).unwrap();
         // NamedTempFile 无 .png 扩展名，复制一份带扩展名的
@@ -297,11 +313,7 @@ mod tests {
     }
 
     impl LlmProvider for RecordingLlm {
-        fn chat(
-            &self,
-            _system: &str,
-            _user: &str,
-        ) -> Result<(String, crate::usage::TokenUsage)> {
+        fn chat(&self, _system: &str, _user: &str) -> Result<(String, crate::usage::TokenUsage)> {
             Ok((
                 "text-only".to_string(),
                 crate::usage::TokenUsage::empty("mock", "recording-mock"),
@@ -313,7 +325,9 @@ mod tests {
             _user: &str,
             attachments: &[Attachment],
         ) -> Result<(String, crate::usage::TokenUsage)> {
-            let has_image = attachments.iter().any(|a| matches!(a, Attachment::Image { .. }));
+            let has_image = attachments
+                .iter()
+                .any(|a| matches!(a, Attachment::Image { .. }));
             *self.image_seen.lock().unwrap_or_else(|e| e.into_inner()) = has_image;
             Ok((
                 "recorded".to_string(),
@@ -336,7 +350,9 @@ mod tests {
         let png = tmp.path().with_extension("png");
         std::fs::copy(tmp.path(), &png).unwrap();
 
-        let rec = Arc::new(RecordingLlm { image_seen: std::sync::Mutex::new(false) });
+        let rec = Arc::new(RecordingLlm {
+            image_seen: std::sync::Mutex::new(false),
+        });
         let vlm = LlmVlmProvider::new(rec.clone());
         let out = vlm.caption(&png).unwrap();
         assert_eq!(out, "recorded");

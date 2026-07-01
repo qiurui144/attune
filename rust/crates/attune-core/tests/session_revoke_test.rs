@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
     use attune_core::vault::Vault;
+    use tempfile::TempDir;
 
     #[test]
     fn token_revoked_after_lock() {

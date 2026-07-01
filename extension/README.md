@@ -33,14 +33,12 @@ npm run watch       # 开发模式 + 热重载
 
 ## 测试
 
-E2E 测试在 [`../python/tests/test_extension.py`](../python/tests/test_extension.py)（Playwright + 真 Chrome，遵守 CLAUDE.md `channel="chrome"` 约束）：
-
 ```bash
-cd python
-pytest tests/test_extension.py -v
+cd extension
+npm run build
 ```
 
-CI 默认 `--ignore` 该测试（GHA runner 无系统 Chrome）。本地手工跑。
+当前扩展 CI 以 Vite 构建和产物存在性检查为硬门。
 
 ## 目录结构
 
@@ -75,4 +73,3 @@ Chrome 商店审查时会要求对 `<all_urls>` 提供 justification — 文案�
 
 - [../README.md](../README.md) — 仓库总览
 - [../CLAUDE.md](../CLAUDE.md) — Chrome 限制 + Playwright 测试规则
-- [../python/tests/test_extension.py](../python/tests/test_extension.py) — E2E 测试入口

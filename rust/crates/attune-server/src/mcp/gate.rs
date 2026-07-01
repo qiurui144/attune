@@ -30,8 +30,16 @@ pub const ERR_UNKNOWN_TOOL: i64 = -32601;
 /// 即使未来某个 MCP 工具叫这些名字、或 token 错配了含这些字样的权限位,gate 也先在此挡掉。
 /// 本 spec 的 6 工具均不在此列(MCP 不暴露 export/delete/settings)。
 pub const HIGH_RISK_TOOLS: &[&str] = &[
-    "export", "delete", "settings", "vault_export", "vault_delete", "delete_item",
-    "update_settings", "purge", "wipe", "reset",
+    "export",
+    "delete",
+    "settings",
+    "vault_export",
+    "vault_delete",
+    "delete_item",
+    "update_settings",
+    "purge",
+    "wipe",
+    "reset",
 ];
 
 /// 纯决策:给定工具名 + token 已校验的权限位集,返回放行/拒绝。
@@ -78,12 +86,27 @@ mod tests {
 
     #[test]
     fn allow_when_scope_granted() {
-        assert_eq!(decide("vault_search", &scopes(&["search"])), GateDecision::Allow);
-        assert_eq!(decide("vault_chat", &scopes(&["chat"])), GateDecision::Allow);
+        assert_eq!(
+            decide("vault_search", &scopes(&["search"])),
+            GateDecision::Allow
+        );
+        assert_eq!(
+            decide("vault_chat", &scopes(&["chat"])),
+            GateDecision::Allow
+        );
         assert_eq!(decide("ingest", &scopes(&["ingest"])), GateDecision::Allow);
-        assert_eq!(decide("annotate", &scopes(&["ingest"])), GateDecision::Allow);
-        assert_eq!(decide("agent_invoke", &scopes(&["chat"])), GateDecision::Allow);
-        assert_eq!(decide("job_status", &scopes(&["search"])), GateDecision::Allow);
+        assert_eq!(
+            decide("annotate", &scopes(&["ingest"])),
+            GateDecision::Allow
+        );
+        assert_eq!(
+            decide("agent_invoke", &scopes(&["chat"])),
+            GateDecision::Allow
+        );
+        assert_eq!(
+            decide("job_status", &scopes(&["search"])),
+            GateDecision::Allow
+        );
     }
 
     #[test]

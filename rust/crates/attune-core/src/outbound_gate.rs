@@ -198,7 +198,12 @@ impl OutboundGate {
 mod tests {
     use super::*;
 
-    fn pol(kind: OutboundKind, enabled: bool, vault_unlocked: bool, with_redactor: bool) -> OutboundPolicy<'static> {
+    fn pol(
+        kind: OutboundKind,
+        enabled: bool,
+        vault_unlocked: bool,
+        with_redactor: bool,
+    ) -> OutboundPolicy<'static> {
         // Leak a Redactor so we can return a 'static reference (test only).
         let redactor: Option<&'static Redactor> = if with_redactor {
             Some(Box::leak(Box::new(Redactor::new())))
@@ -245,7 +250,10 @@ mod tests {
     fn vault_locked_blocks_llm() {
         let p = pol(OutboundKind::Llm, true, false, true);
         assert!(
-            matches!(OutboundGate::enforce(&p, "hello"), Err(OutboundError::VaultLocked)),
+            matches!(
+                OutboundGate::enforce(&p, "hello"),
+                Err(OutboundError::VaultLocked)
+            ),
             "vault-locked LLM call must be refused"
         );
     }
@@ -256,7 +264,10 @@ mod tests {
         let p = pol(OutboundKind::Telemetry, true, false, true);
         // Empty payload is fine; just verify it's not VaultLocked.
         let out = OutboundGate::enforce(&p, "");
-        assert!(out.is_ok(), "telemetry must not be vault-gated; got {out:?}");
+        assert!(
+            out.is_ok(),
+            "telemetry must not be vault-gated; got {out:?}"
+        );
     }
 
     #[test]
@@ -324,7 +335,10 @@ mod tests {
         ] {
             let p = pol(k, false, true, true);
             assert!(
-                matches!(OutboundGate::enforce(&p, "data"), Err(OutboundError::Disabled(_))),
+                matches!(
+                    OutboundGate::enforce(&p, "data"),
+                    Err(OutboundError::Disabled(_))
+                ),
                 "{k:?} did not refuse when disabled"
             );
         }
@@ -366,7 +380,10 @@ mod tests {
             contains_l0: true,
         };
         let out = OutboundGate::enforce(&p, "敏感内容 L0 本地允许");
-        assert!(out.is_ok(), "L0 to local embedding must be allowed; got {out:?}");
+        assert!(
+            out.is_ok(),
+            "L0 to local embedding must be allowed; got {out:?}"
+        );
     }
 
     /// Cloud embedding disabled → gate refuses.
@@ -401,7 +418,10 @@ mod tests {
             contains_l0: false,
         };
         let out = OutboundGate::enforce(&p, "public knowledge document");
-        assert!(out.is_ok(), "non-L0 cloud embedding must be allowed; got {out:?}");
+        assert!(
+            out.is_ok(),
+            "non-L0 cloud embedding must be allowed; got {out:?}"
+        );
     }
 
     // ── G3: L0 "永不出网" enforcement ────────────────────────────────────
@@ -427,14 +447,19 @@ mod tests {
         let out = OutboundGate::enforce(&p, "敏感证据 phone 13800138000")
             .expect("L0 to local LLM must be allowed");
         // Redaction still applies even on local.
-        assert!(!out.contains("13800138000"), "phone still redacted; got: {out}");
+        assert!(
+            !out.contains("13800138000"),
+            "phone still redacted; got: {out}"
+        );
     }
 
     #[test]
     fn l0_blocked_takes_precedence_over_redactor_required() {
         // L0 + cloud + NO redactor → L0CloudBlocked (the stronger refusal),
         // not RedactorRequired. The order proves L0 is checked first.
-        let p = l0_pol(/* local_destination */ false, /* redactor */ false);
+        let p = l0_pol(
+            /* local_destination */ false, /* redactor */ false,
+        );
         assert!(
             matches!(
                 OutboundGate::enforce(&p, "敏感证据"),

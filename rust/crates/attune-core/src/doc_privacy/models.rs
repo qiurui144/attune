@@ -104,7 +104,10 @@ mod tests {
     #[test]
     fn classification_wire_values_match_kvm_snake_case() {
         assert_eq!(Classification::Normal.as_str(), "normal");
-        assert_eq!(Classification::SensitivePartial.as_str(), "sensitive_partial");
+        assert_eq!(
+            Classification::SensitivePartial.as_str(),
+            "sensitive_partial"
+        );
         assert_eq!(Classification::Classified.as_str(), "classified");
     }
 
@@ -129,9 +132,27 @@ mod tests {
     #[test]
     fn summary_counts_by_kind_prefix() {
         let ents = vec![
-            DocEntity { kind: PiiKind::Phone, page: 0, layer: "text".into(), byte_start: Some(0), byte_end: Some(11) },
-            DocEntity { kind: PiiKind::Phone, page: 1, layer: "text".into(), byte_start: Some(20), byte_end: Some(31) },
-            DocEntity { kind: PiiKind::Email, page: 0, layer: "text".into(), byte_start: Some(40), byte_end: Some(55) },
+            DocEntity {
+                kind: PiiKind::Phone,
+                page: 0,
+                layer: "text".into(),
+                byte_start: Some(0),
+                byte_end: Some(11),
+            },
+            DocEntity {
+                kind: PiiKind::Phone,
+                page: 1,
+                layer: "text".into(),
+                byte_start: Some(20),
+                byte_end: Some(31),
+            },
+            DocEntity {
+                kind: PiiKind::Email,
+                page: 0,
+                layer: "text".into(),
+                byte_start: Some(40),
+                byte_end: Some(55),
+            },
         ];
         let s = DetectionReport::build_summary(&ents);
         assert_eq!(s.get("PHONE"), Some(&2));
@@ -167,6 +188,9 @@ mod tests {
         };
         let json = serde_json::to_string(&report).unwrap();
         // The struct has no `value`/`original` field, so the secret can't appear.
-        assert!(!json.contains("11010119900307"), "report JSON must not carry PII value");
+        assert!(
+            !json.contains("11010119900307"),
+            "report JSON must not carry PII value"
+        );
     }
 }

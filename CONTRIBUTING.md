@@ -12,8 +12,7 @@ duplicate it — it links to it and states the contribution expectations.
 See **[DEVELOP.md → 环境搭建 / 编译命令汇总](DEVELOP.md)** for toolchain, build,
 and test commands. In short:
 
-- **Rust 商用线** (`rust/`): `cd rust && cargo build` / `cargo test --workspace`.
-- **Python 原型线** (`python/`): venv + `pip install -e .[dev]` + `pytest`.
+- **Rust production** (`rust/`): `cd rust && cargo build` / `cargo test --workspace`.
 - **Chrome extension** (`extension/`): `npm install && npm run build`.
 
 Third-party attribution lives in [NOTICE](NOTICE) / [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
@@ -41,11 +40,10 @@ Full table in [DEVELOP.md → 分支模型](DEVELOP.md). The essentials:
 
 Before requesting review / opening a PR:
 
-1. **Tests pass**: `cargo test --workspace` (Rust) and/or `pytest` (Python) green
+1. **Tests pass**: `cargo test --workspace` (Rust) green
    for the code you touched. New behaviour ships with new tests — cover the
    happy path, edge cases, and error cases (see [docs/TESTING.md](docs/TESTING.md)).
-2. **Lint clean**: `cargo clippy --workspace --all-targets -- -D warnings` (Rust),
-   `ruff` (Python). No new warnings.
+2. **Lint clean**: `cargo clippy --workspace --all-targets -- -D warnings` (Rust). No new warnings.
 3. **i18n**: any user-visible UI string goes through `t()` with matching keys in
    both `i18n/zh.ts` and `i18n/en.ts` — no hard-coded literals (see CLAUDE.md i18n rule).
 4. Every PR gets at least one review. Reviewers check correctness, edge/error
@@ -87,8 +85,7 @@ contact instead.
 
 工具链、构建、测试命令见 **[DEVELOP.md](DEVELOP.md)**。简言之：
 
-- **Rust 商用线** (`rust/`)：`cd rust && cargo build` / `cargo test --workspace`。
-- **Python 原型线** (`python/`)：venv + `pip install -e .[dev]` + `pytest`。
+- **Rust 生产线** (`rust/`)：`cd rust && cargo build` / `cargo test --workspace`。
 - **Chrome 扩展** (`extension/`)：`npm install && npm run build`。
 
 第三方署名见 [NOTICE](NOTICE) / [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)。
@@ -115,11 +112,10 @@ contact instead.
 
 请求评审 / 开 PR 前：
 
-1. **测试通过**：改动相关的 `cargo test --workspace`（Rust）/ `pytest`（Python）全绿。
+1. **测试通过**：改动相关的 `cargo test --workspace`（Rust）全绿。
    新行为必须带新测试 —— 覆盖 happy path、边界、错误场景（见
    [docs/TESTING.md](docs/TESTING.md)）。
-2. **Lint 干净**：`cargo clippy --workspace --all-targets -- -D warnings`（Rust）、
-   `ruff`（Python），无新增告警。
+2. **Lint 干净**：`cargo clippy --workspace --all-targets -- -D warnings`（Rust），无新增告警。
 3. **i18n**：任何用户可见 UI 字符串走 `t()`，且 `i18n/zh.ts` 与 `i18n/en.ts` key 一致，
    零硬编码字面量（见 CLAUDE.md i18n 规范）。
 4. 每个 PR 至少一次评审。评审检查正确性、边界/错误处理、安全、测试覆盖、项目约定。

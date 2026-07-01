@@ -46,11 +46,11 @@ pub struct EntryConfig {
 /// without spawning a process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentExit {
-    Success,         // 0
-    Internal,        // 1 — IO / serialize / Agent::run error
-    RedLine,         // 2 — business red line (only when cfg.red_line_exit2)
-    ClientError,     // 3 — empty stdin / JSON parse failure
-    LlmUnavailable,  // 4 — LLM agent, endpoint unset / provider unavailable
+    Success,        // 0
+    Internal,       // 1 — IO / serialize / Agent::run error
+    RedLine,        // 2 — business red line (only when cfg.red_line_exit2)
+    ClientError,    // 3 — empty stdin / JSON parse failure
+    LlmUnavailable, // 4 — LLM agent, endpoint unset / provider unavailable
 }
 
 impl AgentExit {
@@ -84,7 +84,11 @@ pub fn prepare_llm_env(default_model: &str) -> Result<LlmEnv, AgentExit> {
         eprintln!("LLM_ENDPOINT not set — fact extraction requires an LLM");
         return Err(AgentExit::LlmUnavailable);
     }
-    Ok(LlmEnv { endpoint, api_key, model })
+    Ok(LlmEnv {
+        endpoint,
+        api_key,
+        model,
+    })
 }
 
 /// Production entry: reads real stdin, writes real stdout/stderr.
@@ -201,14 +205,22 @@ mod tests {
     impl Agent for MockAgent {
         type Input = MockInput;
         type Output = MockOutput;
-        fn id(&self) -> &str { "mock" }
-        fn description(&self) -> &str { "mock agent for helper tests" }
-        fn case_kinds(&self) -> &[&str] { &[] }
+        fn id(&self) -> &str {
+            "mock"
+        }
+        fn description(&self) -> &str {
+            "mock agent for helper tests"
+        }
+        fn case_kinds(&self) -> &[&str] {
+            &[]
+        }
         fn run(&self, input: Self::Input) -> AgentResult<AgentOutput<Self::Output>> {
             match input.cmd.as_str() {
                 "runerr" => Err(AgentError::Computation("forced error".into())),
                 "redline" => Ok(AgentOutput {
-                    computation: MockOutput { echoed: "rl".into() },
+                    computation: MockOutput {
+                        echoed: "rl".into(),
+                    },
                     audit_trail: "trail".into(),
                     red_lines_violated: vec!["violated".into()],
                     missing_evidence: vec![],
@@ -216,7 +228,9 @@ mod tests {
                     confidence: 1.0,
                 }),
                 _ => Ok(AgentOutput {
-                    computation: MockOutput { echoed: "ok".into() },
+                    computation: MockOutput {
+                        echoed: "ok".into(),
+                    },
                     audit_trail: "trail".into(),
                     red_lines_violated: vec![],
                     missing_evidence: vec![],
@@ -238,13 +252,7 @@ mod tests {
     fn run_with(stdin: &str, cfg: &EntryConfig) -> (AgentExit, Vec<u8>, Vec<u8>) {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let exit = run_agent_with(
-            stdin.as_bytes(),
-            &mut out,
-            &mut err,
-            || MockAgent,
-            cfg,
-        );
+        let exit = run_agent_with(stdin.as_bytes(), &mut out, &mut err, || MockAgent, cfg);
         (exit, out, err)
     }
 
@@ -325,9 +333,21 @@ mod tests {
         const CFG: EntryConfig = EntryConfig {
             red_line_exit2: false,
             sections: &[
-                Section { title: "RL", field: SectionField::RedLines, bullet: "⚠️  " },
-                Section { title: "MISS", field: SectionField::MissingEvidence, bullet: "- " },
-                Section { title: "FOLLOW", field: SectionField::Followups, bullet: "- " },
+                Section {
+                    title: "RL",
+                    field: SectionField::RedLines,
+                    bullet: "⚠️  ",
+                },
+                Section {
+                    title: "MISS",
+                    field: SectionField::MissingEvidence,
+                    bullet: "- ",
+                },
+                Section {
+                    title: "FOLLOW",
+                    field: SectionField::Followups,
+                    bullet: "- ",
+                },
             ],
             input_name: "MockInput",
         };
@@ -336,9 +356,15 @@ mod tests {
         impl Agent for A3 {
             type Input = MockInput;
             type Output = MockOutput;
-            fn id(&self) -> &str { "a3" }
-            fn description(&self) -> &str { "" }
-            fn case_kinds(&self) -> &[&str] { &[] }
+            fn id(&self) -> &str {
+                "a3"
+            }
+            fn description(&self) -> &str {
+                ""
+            }
+            fn case_kinds(&self) -> &[&str] {
+                &[]
+            }
             fn run(&self, _i: Self::Input) -> AgentResult<AgentOutput<Self::Output>> {
                 Ok(AgentOutput {
                     computation: MockOutput { echoed: "x".into() },
@@ -352,7 +378,13 @@ mod tests {
         }
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let _ = run_agent_with("{\"cmd\":\"ok\"}".as_bytes(), &mut out, &mut err, || A3, &CFG);
+        let _ = run_agent_with(
+            "{\"cmd\":\"ok\"}".as_bytes(),
+            &mut out,
+            &mut err,
+            || A3,
+            &CFG,
+        );
         let e = String::from_utf8(err).unwrap();
         assert_eq!(
             e,
@@ -364,7 +396,11 @@ mod tests {
     fn empty_section_is_skipped() {
         const CFG: EntryConfig = EntryConfig {
             red_line_exit2: false,
-            sections: &[Section { title: "MISS", field: SectionField::MissingEvidence, bullet: "- " }],
+            sections: &[Section {
+                title: "MISS",
+                field: SectionField::MissingEvidence,
+                bullet: "- ",
+            }],
             input_name: "MockInput",
         };
         // MockAgent "ok" has empty missing_evidence → section header must NOT appear.

@@ -11,8 +11,8 @@ use axum::response::Response;
 use axum::Json;
 use serde::Deserialize;
 
-use crate::routes::errors::{internal, vault_locked};
 use crate::error::AppResult;
+use crate::routes::errors::{internal, vault_locked};
 use crate::state::SharedState;
 
 #[derive(Deserialize)]
@@ -129,12 +129,16 @@ pub async fn list_log(
 
     let store = vault.store();
     let items = match q.since {
-        Some(s) => store.audit_log_list_since(s).map_err(|e| internal("audit log list_since", e))?,
+        Some(s) => store
+            .audit_log_list_since(s)
+            .map_err(|e| internal("audit log list_since", e))?,
         None => store
             .audit_log_list(q.limit.min(10_000), q.offset)
             .map_err(|e| internal("audit log list", e))?,
     };
-    let total = store.audit_log_count().map_err(|e| internal("audit log count", e))?;
+    let total = store
+        .audit_log_count()
+        .map_err(|e| internal("audit log count", e))?;
     Ok(Json(serde_json::json!({
         "total": total,
         "items": items,
@@ -151,7 +155,9 @@ pub async fn export_log_csv(
 
     let store = vault.store();
     let items = match q.since {
-        Some(s) => store.audit_log_list_since(s).map_err(|e| internal("audit log list_since", e))?,
+        Some(s) => store
+            .audit_log_list_since(s)
+            .map_err(|e| internal("audit log list_since", e))?,
         None => store
             .audit_log_list(1_000_000, 0)
             .map_err(|e| internal("audit log list", e))?,

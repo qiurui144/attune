@@ -42,12 +42,20 @@ async fn compare_default_output_mode_is_marked_with_annotations() {
     )
     .await;
     assert_eq!(status, 200, "textual compare free + 200: {v}");
-    assert_eq!(v["outputMode"], "marked", "compare default output mode is marked (§3.5)");
+    assert_eq!(
+        v["outputMode"], "marked",
+        "compare default output mode is marked (§3.5)"
+    );
     // marked mode carries annotations anchored to b's offsets.
-    let anns = v["annotations"].as_array().expect("marked → annotations array");
+    let anns = v["annotations"]
+        .as_array()
+        .expect("marked → annotations array");
     assert!(!anns.is_empty(), "marked compare yields annotations: {v}");
     for ann in anns {
-        assert!(ann.get("offsetStart").is_some(), "annotation has offsetStart");
+        assert!(
+            ann.get("offsetStart").is_some(),
+            "annotation has offsetStart"
+        );
         assert!(ann.get("offsetEnd").is_some(), "annotation has offsetEnd");
     }
     assert!(v.get("tokenBill").is_some(), "envelope carries tokenBill");
@@ -66,8 +74,14 @@ async fn compare_structured_override_omits_marked_overlay() {
     assert_eq!(status, 200);
     assert_eq!(v["outputMode"], "structured", "structured override honored");
     // structured mode → no top-level annotations overlay (the DiffReport still inside result).
-    assert!(v.get("annotations").is_none() || v["annotations"].is_null(), "structured omits overlay: {v}");
-    assert!(v["result"].get("structuralDiffs").is_some() || v["result"].get("textualDiffs").is_some(), "result carries DiffReport: {v}");
+    assert!(
+        v.get("annotations").is_none() || v["annotations"].is_null(),
+        "structured omits overlay: {v}"
+    );
+    assert!(
+        v["result"].get("structuralDiffs").is_some() || v["result"].get("textualDiffs").is_some(),
+        "result carries DiffReport: {v}"
+    );
 }
 
 #[tokio::test]
@@ -84,7 +98,13 @@ async fn chapters_list_is_structured_envelope_free() {
     assert_eq!(v["outputMode"], "structured");
     let chapters = v["result"]["chapters"].as_array().expect("chapters array");
     assert_eq!(chapters.len(), 2);
-    assert!(chapters[0]["extractivePreview"].as_str().map(|s| !s.is_empty()).unwrap_or(false), "preview non-empty");
+    assert!(
+        chapters[0]["extractivePreview"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "preview non-empty"
+    );
 }
 
 #[tokio::test]
@@ -136,7 +156,10 @@ async fn item_not_found_maps_to_404() {
     )
     .await;
     // Either vault-locked (401) if the harness vault is locked, or item-not-found (404).
-    assert!(status == 404 || status == 401, "missing item → 404 or vault-locked 401, got {status}: {v}");
+    assert!(
+        status == 404 || status == 401,
+        "missing item → 404 or vault-locked 401, got {status}: {v}"
+    );
     assert!(
         v["code"] == "item-not-found" || v["code"] == "vault-locked",
         "spec §7 code, got {}",

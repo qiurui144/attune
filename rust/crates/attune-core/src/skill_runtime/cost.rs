@@ -66,12 +66,8 @@ pub fn estimate(skill: &Skill, input_chars: usize, model: &str) -> SkillEstimate
     }
 
     // USD via existing per-model pricing; treat est tokens as half-in/half-out for a rough USD.
-    let est_usd = crate::cost::estimate_cost_usd(
-        (total / 2) as usize,
-        (total / 2) as usize,
-        model,
-    )
-    .unwrap_or(0.0);
+    let est_usd = crate::cost::estimate_cost_usd((total / 2) as usize, (total / 2) as usize, model)
+        .unwrap_or(0.0);
 
     // ~1s per LLM step + a flat 1s for render/export.
     let llm_steps = skill.steps.iter().filter(|s| s.is_llm()).count() as u32;
@@ -125,7 +121,7 @@ steps:
     fn free_steps_cost_zero_llm_steps_charged() {
         let skill = parse_skill_yaml(YAML).unwrap();
         let est = estimate(&skill, 3000, "gpt-4o-mini"); // 3000 chars → ~1000 input tokens
-        // rag/render/export are free; only `extract` (agent) is charged.
+                                                         // rag/render/export are free; only `extract` (agent) is charged.
         let charged: Vec<_> = est.steps.iter().filter(|s| s.est_tokens > 0).collect();
         assert_eq!(charged.len(), 1);
         assert_eq!(charged[0].id, "extract");

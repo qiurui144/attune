@@ -119,9 +119,13 @@ impl rustls::client::danger::ServerCertVerifier for SpkiPinVerifier {
         now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         // 1. Standard chain + hostname + validity verification (NOT bypassed).
-        let verified =
-            self.inner
-                .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
+        let verified = self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
         // 2. Additional SPKI pin constraint on the leaf.
         if !cert_matches_pin(end_entity.as_ref()) {
             return Err(rustls::Error::General(
@@ -214,10 +218,12 @@ pub fn pinned_client_config() -> rustls::ClientConfig {
     // on a process-default provider being installed elsewhere.
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
-    let inner =
-        rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
-            .build()
-            .expect("build webpki verifier from bundled roots");
+    let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        provider.clone(),
+    )
+    .build()
+    .expect("build webpki verifier from bundled roots");
 
     let verifier = Arc::new(SpkiPinVerifier { inner });
 
@@ -266,9 +272,15 @@ mod tests {
     fn spki_pin_is_stable_base64_sha256() {
         let pin1 = spki_pin_of_cert_der(LEAF_A_DER).expect("extract spki");
         let pin2 = spki_pin_of_cert_der(LEAF_A_DER).expect("extract spki again");
-        assert_eq!(pin1, pin2, "SPKI pin must be deterministic for the same cert");
+        assert_eq!(
+            pin1, pin2,
+            "SPKI pin must be deterministic for the same cert"
+        );
         assert_eq!(pin1.len(), 44, "base64(sha256) is 44 chars");
-        assert!(pin1.ends_with('='), "32-byte digest base64 has one pad char");
+        assert!(
+            pin1.ends_with('='),
+            "32-byte digest base64 has one pad char"
+        );
         assert!(pin1
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
@@ -280,7 +292,10 @@ mod tests {
     fn different_keypairs_have_different_pins() {
         let pin_a = spki_pin_of_cert_der(LEAF_A_DER).unwrap();
         let pin_b = spki_pin_of_cert_der(LEAF_B_DER).unwrap();
-        assert_ne!(pin_a, pin_b, "distinct key pairs must yield distinct SPKI pins");
+        assert_ne!(
+            pin_a, pin_b,
+            "distinct key pairs must yield distinct SPKI pins"
+        );
     }
 
     /// Garbage bytes are not a parseable cert → no pin (and, with pinning enabled,
@@ -376,7 +391,11 @@ mod tests {
         std::env::set_var("ATTUNE_CLOUD_CA_PEM", &pem);
         let mut roots = rustls::RootCertStore::empty();
         add_custom_cloud_ca(&mut roots);
-        assert_eq!(roots.len(), 1, "inline PEM CA must be added to the trust store");
+        assert_eq!(
+            roots.len(),
+            1,
+            "inline PEM CA must be added to the trust store"
+        );
 
         std::env::remove_var("ATTUNE_CLOUD_CA_PEM");
         let mut roots2 = rustls::RootCertStore::empty();

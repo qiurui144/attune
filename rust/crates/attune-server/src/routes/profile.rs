@@ -1,9 +1,9 @@
-use axum::extract::State;
-use axum::Json;
-use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::routes::errors::{internal, vault_locked};
 use crate::state::SharedState;
+use axum::extract::State;
+use axum::Json;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VaultProfile {
@@ -24,9 +24,7 @@ pub struct VaultProfile {
 }
 
 /// GET /api/v1/profile/export — 导出当前分类结果 + 聚类 + 直方图
-pub async fn export(
-    State(state): State<SharedState>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn export(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     // #83 P0: 分批读取，每页单独加释放 vault lock，避免大 vault 持锁 30s+。
     const EXPORT_PAGE: usize = 500;
     let mut tags_map = std::collections::HashMap::new();
@@ -35,8 +33,12 @@ pub async fn export(
     let mut offset = 0usize;
     loop {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let dek = vault.dek_db().map_err(|e| AppError::Forbidden(e.to_string()))?;
-        let ids = vault.store().list_item_ids_paged(offset, EXPORT_PAGE)
+        let dek = vault
+            .dek_db()
+            .map_err(|e| AppError::Forbidden(e.to_string()))?;
+        let ids = vault
+            .store()
+            .list_item_ids_paged(offset, EXPORT_PAGE)
             .map_err(|e| AppError::Internal(e.to_string()))?;
         let n = ids.len();
         for id in &ids {
@@ -56,16 +58,27 @@ pub async fn export(
         }
         drop(vault); // release lock between pages
         offset += n;
-        if n < EXPORT_PAGE { break; }
+        if n < EXPORT_PAGE {
+            break;
+        }
     }
 
     // Histograms snapshot
     let mut histograms = std::collections::HashMap::new();
-    if let Some(index) = state.tag_index.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+    if let Some(index) = state
+        .tag_index
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
         for dim in index.all_dimensions() {
-            if dim == "entities" { continue; }
+            if dim == "entities" {
+                continue;
+            }
             let hist = index.histogram(&dim);
-            let values: Vec<serde_json::Value> = hist.into_iter().take(20)
+            let values: Vec<serde_json::Value> = hist
+                .into_iter()
+                .take(20)
                 .map(|(v, c)| serde_json::json!({"value": v, "count": c}))
                 .collect();
             histograms.insert(dim, values);
@@ -73,13 +86,16 @@ pub async fn export(
     }
 
     // Cluster snapshot
-    let cluster_snapshot = state.cluster_snapshot.lock().unwrap_or_else(|e| e.into_inner())
+    let cluster_snapshot = state
+        .cluster_snapshot
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
         .as_ref()
         .and_then(|s| serde_json::to_value(s).ok());
 
     let item_count = tags_map.len();
     let profile = VaultProfile {
-        version: 2,  // v2：包含 annotations
+        version: 2, // v2：包含 annotations
         exported_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs().to_string())
@@ -89,10 +105,16 @@ pub async fn export(
         tags: tags_map,
         cluster_snapshot,
         histograms,
-        annotations: if all_annotations.is_empty() { None } else { Some(all_annotations) },
+        annotations: if all_annotations.is_empty() {
+            None
+        } else {
+            Some(all_annotations)
+        },
     };
 
-    Ok(Json(serde_json::to_value(&profile).unwrap_or(serde_json::json!({}))))
+    Ok(Json(
+        serde_json::to_value(&profile).unwrap_or(serde_json::json!({})),
+    ))
 }
 
 /// POST /api/v1/profile/import — 导入分类结果（合并，覆盖已有同 ID 条目的 tags）
@@ -114,12 +136,17 @@ pub async fn import(
         let mut offset = 0usize;
         loop {
             let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-            let ids = vault.store().list_item_ids_paged(offset, PAGE).unwrap_or_default();
+            let ids = vault
+                .store()
+                .list_item_ids_paged(offset, PAGE)
+                .unwrap_or_default();
             let n = ids.len();
             set.extend(ids);
             drop(vault);
             offset += n;
-            if n < PAGE { break; }
+            if n < PAGE {
+                break;
+            }
         }
         set
     };
@@ -130,15 +157,21 @@ pub async fn import(
     // Apply merged tags — short-lived lock per batch.
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let dek = vault.dek_db().map_err(|e| AppError::Forbidden(e.to_string()))?;
+        let dek = vault
+            .dek_db()
+            .map_err(|e| AppError::Forbidden(e.to_string()))?;
         for (item_id, tags_value) in &profile.tags {
             if !existing_ids.contains(item_id) {
                 skipped += 1;
                 continue;
             }
-            let json_str = serde_json::to_string(tags_value)
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            if vault.store().update_tags(&dek, item_id, &json_str).unwrap_or(false) {
+            let json_str =
+                serde_json::to_string(tags_value).map_err(|e| AppError::Internal(e.to_string()))?;
+            if vault
+                .store()
+                .update_tags(&dek, item_id, &json_str)
+                .unwrap_or(false)
+            {
                 merged += 1;
             }
         }
@@ -147,9 +180,9 @@ pub async fn import(
     // Rebuild tag index to pick up merged tags
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let dek = vault.dek_db().map_err(|e| {
-            AppError::Forbidden(e.to_string())
-        })?;
+        let dek = vault
+            .dek_db()
+            .map_err(|e| AppError::Forbidden(e.to_string()))?;
         if let Ok(new_index) = attune_core::tag_index::TagIndex::build(vault.store(), &dek) {
             *state.tag_index.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_index);
         }

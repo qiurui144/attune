@@ -29,9 +29,9 @@
 //! If none is found → [`SidecarError::ToolNotFound`] (kebab
 //! `browser-tool-not-found`); the capability disables gracefully, never panics.
 
+use crate::process::command_no_window;
 use std::io::Write;
 use std::path::PathBuf;
-use crate::process::command_no_window;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -297,10 +297,7 @@ impl SidecarController {
     /// Resolution order: `ATTUNE_BROWSER_TOOL` → `community-browser` on PATH →
     /// `python -m community_browser_automation`.
     pub fn locate() -> Result<Self, SidecarError> {
-        Self::locate_with(
-            |k| std::env::var(k).ok(),
-            |name| which::which(name).ok(),
-        )
+        Self::locate_with(|k| std::env::var(k).ok(), |name| which::which(name).ok())
     }
 
     /// Locate with injected env + PATH lookup (testable, offline).
@@ -517,7 +514,10 @@ mod tests {
 
     #[test]
     fn parse_empty_stdout_is_bad_output() {
-        assert!(matches!(parse_run_result("   "), Err(SidecarError::BadOutput(_))));
+        assert!(matches!(
+            parse_run_result("   "),
+            Err(SidecarError::BadOutput(_))
+        ));
     }
 
     #[test]
@@ -549,8 +549,14 @@ mod tests {
         };
         let argv = cmd.argv();
         let joined = argv.join(" ");
-        assert!(!joined.contains("alice"), "username leaked into argv: {joined}");
-        assert!(!joined.contains("topsecret"), "password leaked into argv: {joined}");
+        assert!(
+            !joined.contains("alice"),
+            "username leaked into argv: {joined}"
+        );
+        assert!(
+            !joined.contains("topsecret"),
+            "password leaked into argv: {joined}"
+        );
         assert!(argv.iter().any(|a| a == "--credentials-stdin"));
     }
 

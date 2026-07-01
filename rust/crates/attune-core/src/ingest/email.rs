@@ -37,8 +37,8 @@ pub const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 
 /// 受支持的文档类附件扩展名（与 parser 支持集对齐，二进制媒体不入库）。
 const SUPPORTED_ATTACHMENT_EXTS: &[&str] = &[
-    "md", "txt", "py", "js", "ts", "rs", "go", "java", "pdf", "docx", "html", "htm", "csv",
-    "rtf", "pptx", "xlsx", "png", "jpg", "jpeg",
+    "md", "txt", "py", "js", "ts", "rs", "go", "java", "pdf", "docx", "html", "htm", "csv", "rtf",
+    "pptx", "xlsx", "png", "jpg", "jpeg",
 ];
 
 fn is_supported_attachment(filename: &str) -> bool {
@@ -136,7 +136,9 @@ pub fn parse_email_bytes(raw: &[u8]) -> Result<MailMessage> {
         || parsed.from().is_some()
         || parsed.date().is_some();
     if !has_headers && parsed.body_text(0).is_none() && parsed.body_html(0).is_none() {
-        return Err(VaultError::LlmUnavailable("email parse failed: no recognisable content".into()));
+        return Err(VaultError::LlmUnavailable(
+            "email parse failed: no recognisable content".into(),
+        ));
     }
 
     let subject = parsed.subject().unwrap_or_default().to_string();
@@ -179,7 +181,10 @@ pub fn parse_email_bytes(raw: &[u8]) -> Result<MailMessage> {
             _ => continue,
         };
         if bytes.len() > MAX_ATTACHMENT_BYTES {
-            log::warn!("email: skip oversized attachment {filename} ({} bytes)", bytes.len());
+            log::warn!(
+                "email: skip oversized attachment {filename} ({} bytes)",
+                bytes.len()
+            );
             continue;
         }
         attachments.push(MailAttachment {
@@ -457,7 +462,10 @@ impl RealImapFetcher {
                 match item {
                     Ok(fetch) => {
                         if let Some(body) = fetch.body() {
-                            out.push(FetchedMail { uid, raw: body.to_vec() });
+                            out.push(FetchedMail {
+                                uid,
+                                raw: body.to_vec(),
+                            });
                         }
                     }
                     Err(e) => log::warn!("email: fetch stream uid {uid} error: {e}"),
@@ -498,13 +506,25 @@ mod tests {
     fn html_to_text_drops_style_and_script_blocks() {
         let style_html = "<style>.foo { color: red; }</style><p>Real content</p>";
         let style_text = html_to_text(style_html);
-        assert!(!style_text.contains("color"), "CSS 'color' should be suppressed");
-        assert!(!style_text.contains("red"), "CSS 'red' should be suppressed");
-        assert!(style_text.contains("Real content"), "body text must be kept");
+        assert!(
+            !style_text.contains("color"),
+            "CSS 'color' should be suppressed"
+        );
+        assert!(
+            !style_text.contains("red"),
+            "CSS 'red' should be suppressed"
+        );
+        assert!(
+            style_text.contains("Real content"),
+            "body text must be kept"
+        );
 
         let script_html = "<script>alert('x')</script><p>Body</p>";
         let script_text = html_to_text(script_html);
-        assert!(!script_text.contains("alert"), "JS 'alert' should be suppressed");
+        assert!(
+            !script_text.contains("alert"),
+            "JS 'alert' should be suppressed"
+        );
         assert!(script_text.contains("Body"), "body text must be kept");
     }
 

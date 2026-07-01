@@ -185,18 +185,20 @@ impl Store {
             )
             .ok();
 
-        Ok(row.and_then(|(qp, expansions_json, gen_by, conf, created, updated)| {
-            let expansions: Vec<String> = serde_json::from_str(&expansions_json).ok()?;
-            let generated_by = ExpansionSource::parse(&gen_by)?;
-            Some(SkillExpansionRow {
-                query_pattern: qp,
-                expansions,
-                generated_by,
-                confidence: conf as f32,
-                created_at: created,
-                updated_at: updated,
-            })
-        }))
+        Ok(
+            row.and_then(|(qp, expansions_json, gen_by, conf, created, updated)| {
+                let expansions: Vec<String> = serde_json::from_str(&expansions_json).ok()?;
+                let generated_by = ExpansionSource::parse(&gen_by)?;
+                Some(SkillExpansionRow {
+                    query_pattern: qp,
+                    expansions,
+                    generated_by,
+                    confidence: conf as f32,
+                    created_at: created,
+                    updated_at: updated,
+                })
+            }),
+        )
     }
 
     /// List rows in `updated_at DESC` order (newest first). UI rendering /
@@ -220,7 +222,9 @@ impl Store {
         for r in rows {
             let (qp, exp_json, gen_by, conf, c, u) = r?;
             let expansions: Vec<String> = serde_json::from_str(&exp_json).unwrap_or_default();
-            let Some(source) = ExpansionSource::parse(&gen_by) else { continue };
+            let Some(source) = ExpansionSource::parse(&gen_by) else {
+                continue;
+            };
             out.push(SkillExpansionRow {
                 query_pattern: qp,
                 expansions,
@@ -248,11 +252,11 @@ impl Store {
 
     /// Total row count (cheap stat for UI / agent governance).
     pub fn count_skill_expansions(&self) -> Result<usize> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM skill_expansions",
-            [],
-            |row| row.get(0),
-        )?;
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM skill_expansions", [], |row| {
+                row.get(0)
+            })?;
         Ok(n as usize)
     }
 }
@@ -284,12 +288,7 @@ mod tests {
     fn llm_replaces_heuristic_but_not_vice_versa() {
         let store = Store::open_memory().unwrap();
         store
-            .upsert_skill_expansion(
-                "q",
-                &["a".into()],
-                ExpansionSource::Heuristic,
-                0.4,
-            )
+            .upsert_skill_expansion("q", &["a".into()], ExpansionSource::Heuristic, 0.4)
             .unwrap();
         // LLM upgrades.
         let upgraded = store

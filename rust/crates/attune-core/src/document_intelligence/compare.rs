@@ -93,9 +93,17 @@ impl DiffVerdict {
 
     fn from_llm_token(s: &str) -> DiffVerdict {
         let t = s.trim().to_lowercase();
-        if t.contains("stance") || t.contains("reversal") || t.contains("立场") || t.contains("反转") {
+        if t.contains("stance")
+            || t.contains("reversal")
+            || t.contains("立场")
+            || t.contains("反转")
+        {
             DiffVerdict::StanceReversal
-        } else if t.contains("numeric") || t.contains("number") || t.contains("数值") || t.contains("数字") {
+        } else if t.contains("numeric")
+            || t.contains("number")
+            || t.contains("数值")
+            || t.contains("数字")
+        {
             DiffVerdict::NumericChange
         } else if t.contains("substant") || t.contains("实质") {
             DiffVerdict::Substantive
@@ -201,7 +209,8 @@ pub struct StageLlms<'a> {
 // so even weak models lock onto the shape. `verdict_schema()` is passed to
 // `chat_with_format_json` so OpenAI-compatible providers (DeepSeek) enforce it server-side via
 // `response_format`, with an automatic json_object fallback when json_schema is unsupported.
-const VERDICT_SYSTEM_PROMPT: &str = "你是文档差异裁决器。给你同一段落的旧版(A)与新版(B)，判定变更类型。\
+const VERDICT_SYSTEM_PROMPT: &str =
+    "你是文档差异裁决器。给你同一段落的旧版(A)与新版(B)，判定变更类型。\
 只输出一个 JSON 对象，不要任何前后缀、不要 markdown 代码块。字段：\
 `verdict` 取四选一英文标签 rewrite（仅改写措辞）/ substantive（实质内容变化）/ \
 stance-reversal（立场反转）/ numeric-change（数字变化）；`rationale` 一句中文理由。\
@@ -211,7 +220,8 @@ stance-reversal（立场反转）/ numeric-change（数字变化）；`rationale
 输入【旧版 A】预算为 100 万。【新版 B】预算为 250 万。\n\
 输出 {\"verdict\":\"numeric-change\",\"rationale\":\"预算数字由 100 万改为 250 万\"}";
 
-const SUMMARY_SYSTEM_PROMPT: &str = "你是文档差异总结器。基于给定的逐段差异，用简洁中文概述两份文档的总体变化。直接输出总结。";
+const SUMMARY_SYSTEM_PROMPT: &str =
+    "你是文档差异总结器。基于给定的逐段差异，用简洁中文概述两份文档的总体变化。直接输出总结。";
 
 /// JSON schema for the verdict object (§4.5.A). Passed to `chat_with_format_json`; OpenAI-compat
 /// providers (DeepSeek) enforce it via `response_format=json_schema` and fall back to json_object.
@@ -282,7 +292,11 @@ pub fn compare(
         // Unmatched in b = added (or moved if the same heading exists unmatched in a).
         for (ib, matched) in b_matched.iter().enumerate() {
             if !*matched {
-                let kind = if heads_a.iter().enumerate().any(|(ia, h)| !a_matched[ia] && h == &heads_b[ib]) {
+                let kind = if heads_a
+                    .iter()
+                    .enumerate()
+                    .any(|(ia, h)| !a_matched[ia] && h == &heads_b[ib])
+                {
                     "moved"
                 } else {
                     "added"
@@ -296,7 +310,12 @@ pub fn compare(
         }
         // Unmatched in a (and not a move target) = removed.
         for (ia, matched) in a_matched.iter().enumerate() {
-            if !*matched && !heads_b.iter().enumerate().any(|(ib, h)| !b_matched[ib] && h == &heads_a[ia]) {
+            if !*matched
+                && !heads_b
+                    .iter()
+                    .enumerate()
+                    .any(|(ib, h)| !b_matched[ib] && h == &heads_a[ia])
+            {
                 structural_diffs.push(StructuralDiff {
                     kind: "removed".into(),
                     heading_path: heads_a[ia].clone(),
@@ -333,7 +352,10 @@ pub fn compare(
                     }
                 }
             }
-            textual_diffs.push(TextualDiff { section_idx: ib, hunks });
+            textual_diffs.push(TextualDiff {
+                section_idx: ib,
+                hunks,
+            });
         }
     }
 
@@ -346,7 +368,10 @@ pub fn compare(
         // Per changed span: Cheap-model verdict via schema-guided JSON (§4.5.A + .B + .C).
         let schema = verdict_schema();
         for span in &changed_spans {
-            let user = format!("【旧版 A】\n{}\n\n【新版 B】\n{}", span.old_text, span.new_text);
+            let user = format!(
+                "【旧版 A】\n{}\n\n【新版 B】\n{}",
+                span.old_text, span.new_text
+            );
             // Schema-guided call: OpenAI-compat (DeepSeek) enforces `response_format`; weak/local
             // models fall back to the prompt-hinted default impl. A retry-validate loop (≤3) reissues
             // the call when the output cannot be parsed into the 4-class enum, feeding the error
@@ -375,9 +400,18 @@ pub fn compare(
             .map(|v| format!("- 章节{} [{}]: {}", v.section_idx, v.verdict, v.rationale))
             .collect::<Vec<_>>()
             .join("\n");
-        let msgs = [ChatMessage::system(SUMMARY_SYSTEM_PROMPT), ChatMessage::user(&payload)];
+        let msgs = [
+            ChatMessage::system(SUMMARY_SYSTEM_PROMPT),
+            ChatMessage::user(&payload),
+        ];
         let (sum, usage) = llms.reasoning.chat_with_history(&msgs)?;
-        account_leg(&mut bill.reduce_llm_tokens, &usage, &payload, &sum, &reasoning_model);
+        account_leg(
+            &mut bill.reduce_llm_tokens,
+            &usage,
+            &payload,
+            &sum,
+            &reasoning_model,
+        );
         summary = Some(sum);
     } else if output_mode == OutputMode::Marked {
         // marked mode WITHOUT semantic verdicts (non-member or structural/textual mode):
@@ -455,7 +489,9 @@ fn verdict_call(
     let validator = |raw: &str| -> std::result::Result<(), String> {
         match parse_verdict_json(raw) {
             Some(_) => Ok(()),
-            None => Err("输出不是可解析的 verdict JSON 对象（需含 verdict 四选一 + rationale）".into()),
+            None => {
+                Err("输出不是可解析的 verdict JSON 对象（需含 verdict 四选一 + rationale）".into())
+            }
         }
     };
     // First try the strict schema-guided path (real response_format on DeepSeek/OpenAI).
@@ -469,9 +505,12 @@ fn verdict_call(
         Ok((raw, usage)) => (raw, usage),
         // Every structured attempt failed: degrade to one plain call so a verdict is still emitted
         // from the keyword heuristic (graceful degradation, §4.5.E — never crash the diff).
-        Err(_) => llm
-            .chat(system, user)
-            .unwrap_or_else(|_| (String::new(), crate::usage::TokenUsage::empty("compare", ""))),
+        Err(_) => llm.chat(system, user).unwrap_or_else(|_| {
+            (
+                String::new(),
+                crate::usage::TokenUsage::empty("compare", ""),
+            )
+        }),
     }
 }
 
@@ -490,7 +529,11 @@ fn parse_verdict(resp: &str) -> (DiffVerdict, String) {
     let first = lines.next().unwrap_or("");
     let verdict = DiffVerdict::from_llm_token(first);
     let rationale = lines.collect::<Vec<_>>().join(" ").trim().to_string();
-    let rationale = if rationale.is_empty() { first.trim().to_string() } else { rationale };
+    let rationale = if rationale.is_empty() {
+        first.trim().to_string()
+    } else {
+        rationale
+    };
     (verdict, rationale)
 }
 
@@ -579,7 +622,10 @@ fn line_diff(a: &str, b: &str) -> Vec<TextualHunk> {
         }
         match hunks.last_mut() {
             Some(last) if last.op == op => last.text.push_str(text),
-            _ => hunks.push(TextualHunk { op, text: text.to_string() }),
+            _ => hunks.push(TextualHunk {
+                op,
+                text: text.to_string(),
+            }),
         }
     };
     for &(la, lb) in &lcs {
@@ -667,14 +713,37 @@ mod tests {
         let doc = "# 第一章\n\n相同的内容这里。\n\n# 第二章\n\n第二章内容相同。\n";
         let cheap = RecordingMockLlm::new("gpt-4o-mini");
         let reasoning = RecordingMockLlm::new("gpt-4o");
-        let r = compare(doc, doc, CompareMode::Semantic, OutputMode::Marked, true, &router(), &llms(&cheap, &reasoning)).unwrap();
-        assert!(r.structural_diffs.is_empty(), "identical docs → no structural diff");
-        assert!(r.textual_diffs.is_empty(), "identical docs → no textual diff");
+        let r = compare(
+            doc,
+            doc,
+            CompareMode::Semantic,
+            OutputMode::Marked,
+            true,
+            &router(),
+            &llms(&cheap, &reasoning),
+        )
+        .unwrap();
+        assert!(
+            r.structural_diffs.is_empty(),
+            "identical docs → no structural diff"
+        );
+        assert!(
+            r.textual_diffs.is_empty(),
+            "identical docs → no textual diff"
+        );
         assert!(r.semantic_verdicts.is_empty());
         assert!(r.annotations.is_empty());
-        assert_eq!(cheap.call_count(), 0, "identical docs must not call any LLM");
+        assert_eq!(
+            cheap.call_count(),
+            0,
+            "identical docs must not call any LLM"
+        );
         assert_eq!(reasoning.call_count(), 0);
-        assert_eq!(r.token_bill.actual_billable_tokens(), 0, "token_bill all-zero");
+        assert_eq!(
+            r.token_bill.actual_billable_tokens(),
+            0,
+            "token_bill all-zero"
+        );
     }
 
     #[test]
@@ -683,10 +752,25 @@ mod tests {
         let b = "# 引言\n\n引言内容。\n\n# 结果\n\n新增的结果章节。\n";
         let cheap = RecordingMockLlm::new("gpt-4o-mini");
         let reasoning = RecordingMockLlm::new("gpt-4o");
-        let r = compare(a, b, CompareMode::Structural, OutputMode::Structured, false, &router(), &llms(&cheap, &reasoning)).unwrap();
+        let r = compare(
+            a,
+            b,
+            CompareMode::Structural,
+            OutputMode::Structured,
+            false,
+            &router(),
+            &llms(&cheap, &reasoning),
+        )
+        .unwrap();
         // "方法" removed, "结果" added.
-        assert!(r.structural_diffs.iter().any(|d| d.kind == "removed" && d.heading_path == "方法"));
-        assert!(r.structural_diffs.iter().any(|d| d.kind == "added" && d.heading_path == "结果"));
+        assert!(r
+            .structural_diffs
+            .iter()
+            .any(|d| d.kind == "removed" && d.heading_path == "方法"));
+        assert!(r
+            .structural_diffs
+            .iter()
+            .any(|d| d.kind == "added" && d.heading_path == "结果"));
         assert_eq!(cheap.call_count(), 0, "structural mode never calls LLM");
     }
 
@@ -696,10 +780,29 @@ mod tests {
         let b = "# 标题\n\n第一行保持。\n新的第二行替换。\n";
         let cheap = RecordingMockLlm::new("gpt-4o-mini");
         let reasoning = RecordingMockLlm::new("gpt-4o");
-        let r = compare(a, b, CompareMode::Textual, OutputMode::Structured, false, &router(), &llms(&cheap, &reasoning)).unwrap();
-        let td = r.textual_diffs.iter().find(|d| d.hunks.iter().any(|h| h.op == HunkOp::Ins)).expect("an insert hunk");
-        assert!(td.hunks.iter().any(|h| h.op == HunkOp::Eq), "shared line is an eq hunk");
-        assert!(td.hunks.iter().any(|h| h.op == HunkOp::Ins && h.text.contains("新的第二行替换")));
+        let r = compare(
+            a,
+            b,
+            CompareMode::Textual,
+            OutputMode::Structured,
+            false,
+            &router(),
+            &llms(&cheap, &reasoning),
+        )
+        .unwrap();
+        let td = r
+            .textual_diffs
+            .iter()
+            .find(|d| d.hunks.iter().any(|h| h.op == HunkOp::Ins))
+            .expect("an insert hunk");
+        assert!(
+            td.hunks.iter().any(|h| h.op == HunkOp::Eq),
+            "shared line is an eq hunk"
+        );
+        assert!(td
+            .hunks
+            .iter()
+            .any(|h| h.op == HunkOp::Ins && h.text.contains("新的第二行替换")));
         assert_eq!(cheap.call_count(), 0, "textual mode never calls LLM");
     }
 
@@ -711,12 +814,27 @@ mod tests {
             .with_response(r#"{"verdict":"stance-reversal","rationale":"立场从支持反转为反对"}"#);
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("总体立场反转");
         // member=false → semantic layer is skipped (LLM not called), verdicts empty.
-        let r = compare(a, b, CompareMode::Semantic, OutputMode::Marked, false, &router(), &llms(&cheap, &reasoning)).unwrap();
-        assert!(r.semantic_verdicts.is_empty(), "non-member: no semantic verdicts");
+        let r = compare(
+            a,
+            b,
+            CompareMode::Semantic,
+            OutputMode::Marked,
+            false,
+            &router(),
+            &llms(&cheap, &reasoning),
+        )
+        .unwrap();
+        assert!(
+            r.semantic_verdicts.is_empty(),
+            "non-member: no semantic verdicts"
+        );
         assert_eq!(cheap.call_count(), 0, "non-member: no LLM call");
         assert_eq!(reasoning.call_count(), 0);
         // marked mode still anchors a neutral 'modified' annotation to the changed span.
-        assert!(!r.annotations.is_empty(), "marked mode anchors changed spans even without LLM");
+        assert!(
+            !r.annotations.is_empty(),
+            "marked mode anchors changed spans even without LLM"
+        );
     }
 
     #[test]
@@ -726,13 +844,36 @@ mod tests {
         let cheap = RecordingMockLlm::new("gpt-4o-mini")
             .with_response(r#"{"verdict":"stance-reversal","rationale":"立场从支持反转为反对"}"#);
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("总体立场反转");
-        let r = compare(a, b, CompareMode::Semantic, OutputMode::Marked, true, &router(), &llms(&cheap, &reasoning)).unwrap();
-        assert_eq!(r.semantic_verdicts.len(), 1, "one changed span → one verdict");
+        let r = compare(
+            a,
+            b,
+            CompareMode::Semantic,
+            OutputMode::Marked,
+            true,
+            &router(),
+            &llms(&cheap, &reasoning),
+        )
+        .unwrap();
+        assert_eq!(
+            r.semantic_verdicts.len(),
+            1,
+            "one changed span → one verdict"
+        );
         assert_eq!(r.semantic_verdicts[0].verdict, "stance-reversal");
-        assert_eq!(r.semantic_verdicts[0].model, "gpt-4o-mini", "verdict uses Cheap model");
-        assert_eq!(r.semantic_verdicts[0].rationale, "立场从支持反转为反对", "rationale read from JSON field");
+        assert_eq!(
+            r.semantic_verdicts[0].model, "gpt-4o-mini",
+            "verdict uses Cheap model"
+        );
+        assert_eq!(
+            r.semantic_verdicts[0].rationale, "立场从支持反转为反对",
+            "rationale read from JSON field"
+        );
         // exactly one cheap call (schema path validated on first try → no retry storm).
-        assert_eq!(cheap.call_count(), 1, "schema-valid verdict is a single cheap call");
+        assert_eq!(
+            cheap.call_count(),
+            1,
+            "schema-valid verdict is a single cheap call"
+        );
         // reasoning model used for the ×1 overall summary.
         assert_eq!(reasoning.call_count(), 1, "summary is one reasoning call");
         assert!(r.summary.is_some());
@@ -753,9 +894,14 @@ mod tests {
     fn test_parse_verdict_json_markdown_fenced() {
         // DeepSeek frequently wraps JSON in ```json fences — the legacy first-line parser would
         // see "```json" as line 1 and silently default to `rewrite`. The defensive parser recovers.
-        let raw = "```json\n{\"verdict\": \"numeric-change\", \"rationale\": \"金额由100改为250\"}\n```";
+        let raw =
+            "```json\n{\"verdict\": \"numeric-change\", \"rationale\": \"金额由100改为250\"}\n```";
         let (v, r) = parse_verdict(raw);
-        assert_eq!(v, DiffVerdict::NumericChange, "fenced JSON must still parse, not fall to rewrite");
+        assert_eq!(
+            v,
+            DiffVerdict::NumericChange,
+            "fenced JSON must still parse, not fall to rewrite"
+        );
         assert_eq!(r, "金额由100改为250");
     }
 
@@ -816,11 +962,30 @@ mod tests {
             cheap = cheap.with_response("完全无关的散文，没有任何 JSON 结构。");
         }
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("数值变化");
-        let r = compare(a, b, CompareMode::Semantic, OutputMode::Marked, true, &router(), &llms(&cheap, &reasoning)).unwrap();
+        let r = compare(
+            a,
+            b,
+            CompareMode::Semantic,
+            OutputMode::Marked,
+            true,
+            &router(),
+            &llms(&cheap, &reasoning),
+        )
+        .unwrap();
         // A verdict is STILL produced (keyword heuristic on the junk → conservative), report intact.
-        assert_eq!(r.semantic_verdicts.len(), 1, "verdict always emitted even when parsing fails");
-        assert!(cheap.call_count() >= 3, "retry loop attempted ≥3 times before degrading");
-        assert!(r.summary.is_some(), "report still produced despite verdict-parse failure");
+        assert_eq!(
+            r.semantic_verdicts.len(),
+            1,
+            "verdict always emitted even when parsing fails"
+        );
+        assert!(
+            cheap.call_count() >= 3,
+            "retry loop attempted ≥3 times before degrading"
+        );
+        assert!(
+            r.summary.is_some(),
+            "report still produced despite verdict-parse failure"
+        );
     }
 
     #[test]
@@ -832,9 +997,21 @@ mod tests {
         let cheap = RecordingMockLlm::new("gpt-4o-mini")
             .with_response(r#"{"verdict":"numeric-change","rationale":"数值由100变为250"}"#);
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("数值变化");
-        let r = compare(a, b, CompareMode::Semantic, OutputMode::Marked, true, &router(), &llms(&cheap, &reasoning)).unwrap();
+        let r = compare(
+            a,
+            b,
+            CompareMode::Semantic,
+            OutputMode::Marked,
+            true,
+            &router(),
+            &llms(&cheap, &reasoning),
+        )
+        .unwrap();
 
-        assert!(!r.annotations.is_empty(), "marked mode produces annotations");
+        assert!(
+            !r.annotations.is_empty(),
+            "marked mode produces annotations"
+        );
         let b_chars: Vec<char> = b.chars().collect();
         for ann in &r.annotations {
             assert!(ann.offset_end <= b_chars.len(), "offset within b");
@@ -842,7 +1019,10 @@ mod tests {
             let span: String = b_chars[ann.offset_start..ann.offset_end].iter().collect();
             // The annotated span must be REAL changed text present in b (the new line).
             assert!(b.contains(&span), "annotated span exists verbatim in b");
-            assert!(span.contains("新的数值是 250"), "annotation anchors the actual changed span, got: {span:?}");
+            assert!(
+                span.contains("新的数值是 250"),
+                "annotation anchors the actual changed span, got: {span:?}"
+            );
         }
         // numeric-change kind carried through to the marked annotation.
         assert!(r.annotations.iter().any(|x| x.kind == "numeric-change"));
@@ -854,7 +1034,16 @@ mod tests {
         let b = "# T\n\neq line.\nnew.\n";
         let cheap = RecordingMockLlm::new("gpt-4o-mini");
         let reasoning = RecordingMockLlm::new("gpt-4o");
-        let r = compare(a, b, CompareMode::Textual, OutputMode::Marked, false, &router(), &llms(&cheap, &reasoning)).unwrap();
+        let r = compare(
+            a,
+            b,
+            CompareMode::Textual,
+            OutputMode::Marked,
+            false,
+            &router(),
+            &llms(&cheap, &reasoning),
+        )
+        .unwrap();
         let js = serde_json::to_string(&r).unwrap();
         let back: DiffReport = serde_json::from_str(&js).unwrap();
         assert_eq!(back.output_mode, "marked");
@@ -866,10 +1055,28 @@ mod tests {
         let cheap = RecordingMockLlm::new("gpt-4o-mini");
         let reasoning = RecordingMockLlm::new("gpt-4o");
         // empty vs empty → no diffs, no panic.
-        let r = compare("", "", CompareMode::Semantic, OutputMode::Marked, true, &router(), &llms(&cheap, &reasoning)).unwrap();
+        let r = compare(
+            "",
+            "",
+            CompareMode::Semantic,
+            OutputMode::Marked,
+            true,
+            &router(),
+            &llms(&cheap, &reasoning),
+        )
+        .unwrap();
         assert!(r.structural_diffs.is_empty() && r.textual_diffs.is_empty());
         // single plain paragraph (no heading) vs changed paragraph.
-        let r2 = compare("只有一段文字没有标题。", "改了的一段文字没有标题。", CompareMode::Textual, OutputMode::Structured, false, &router(), &llms(&cheap, &reasoning)).unwrap();
+        let r2 = compare(
+            "只有一段文字没有标题。",
+            "改了的一段文字没有标题。",
+            CompareMode::Textual,
+            OutputMode::Structured,
+            false,
+            &router(),
+            &llms(&cheap, &reasoning),
+        )
+        .unwrap();
         // degenerate single-section: textual diff present, no panic.
         let _ = r2;
         assert_eq!(cheap.call_count(), 0);

@@ -61,21 +61,30 @@ fn ok_with_retries_persists_as_retry_but_classifies_ok() {
     let ev = r.to_usage_event(0);
     assert!(matches!(ev.outcome, CallOutcome::Retry { attempt: 2 }));
     // Retry that ultimately succeeded is NOT a failure for the rate.
-    assert_eq!(AgentOutcome::from_call_outcome(ev.outcome), AgentOutcome::Ok);
+    assert_eq!(
+        AgentOutcome::from_call_outcome(ev.outcome),
+        AgentOutcome::Ok
+    );
 }
 
 #[test]
 fn schema_invalid_and_network_and_other_classify_into_telemetry_buckets() {
     assert_eq!(
-        AgentOutcome::from_call_outcome(CallOutcome::Fail { error_kind: ErrorKind::SchemaInvalid }),
+        AgentOutcome::from_call_outcome(CallOutcome::Fail {
+            error_kind: ErrorKind::SchemaInvalid
+        }),
         AgentOutcome::ParseErr
     );
     assert_eq!(
-        AgentOutcome::from_call_outcome(CallOutcome::Fail { error_kind: ErrorKind::Network }),
+        AgentOutcome::from_call_outcome(CallOutcome::Fail {
+            error_kind: ErrorKind::Network
+        }),
         AgentOutcome::Timeout
     );
     assert_eq!(
-        AgentOutcome::from_call_outcome(CallOutcome::Fail { error_kind: ErrorKind::Other }),
+        AgentOutcome::from_call_outcome(CallOutcome::Fail {
+            error_kind: ErrorKind::Other
+        }),
         AgentOutcome::ParseErr
     );
 }
@@ -86,7 +95,10 @@ fn schema_invalid_and_network_and_other_classify_into_telemetry_buckets() {
 fn health_failure_rate_computed_correctly() {
     let h = AgentModelHealth::new("a".into(), "m".into(), 10, 3);
     assert!((h.failure_rate - 0.30).abs() < 1e-9);
-    assert!(!h.should_suggest_higher_tier(), "exactly 0.30 is NOT > threshold");
+    assert!(
+        !h.should_suggest_higher_tier(),
+        "exactly 0.30 is NOT > threshold"
+    );
 }
 
 #[test]
@@ -116,7 +128,10 @@ fn health_all_fail_is_rate_one() {
 fn store_records_agent_call_to_usage_events() {
     let store = Store::open_memory().unwrap();
     store
-        .record_agent_call(&record("fact_extractor", "qwen2.5:3b", AgentOutcome::Ok), 1000)
+        .record_agent_call(
+            &record("fact_extractor", "qwen2.5:3b", AgentOutcome::Ok),
+            1000,
+        )
         .unwrap();
     // The row landed in usage_events with the agent tag.
     let conn = store.raw_connection_for_test();
@@ -136,7 +151,12 @@ fn store_records_agent_call_to_usage_events() {
 fn store_rolls_up_per_agent_model_failure_rate() {
     let store = Store::open_memory().unwrap();
     // defamation_extractor on qwen: 1 ok + 3 parse-fails = 0.75 fail rate.
-    store.record_agent_call(&record("defamation_extractor", "qwen2.5:3b", AgentOutcome::Ok), 100).unwrap();
+    store
+        .record_agent_call(
+            &record("defamation_extractor", "qwen2.5:3b", AgentOutcome::Ok),
+            100,
+        )
+        .unwrap();
     for ts in [200, 300, 400] {
         store
             .record_agent_call(
@@ -146,8 +166,18 @@ fn store_rolls_up_per_agent_model_failure_rate() {
             .unwrap();
     }
     // fact_extractor on qwen: 2 ok = 0.0 fail rate.
-    store.record_agent_call(&record("fact_extractor", "qwen2.5:3b", AgentOutcome::Ok), 500).unwrap();
-    store.record_agent_call(&record("fact_extractor", "qwen2.5:3b", AgentOutcome::Ok), 600).unwrap();
+    store
+        .record_agent_call(
+            &record("fact_extractor", "qwen2.5:3b", AgentOutcome::Ok),
+            500,
+        )
+        .unwrap();
+    store
+        .record_agent_call(
+            &record("fact_extractor", "qwen2.5:3b", AgentOutcome::Ok),
+            600,
+        )
+        .unwrap();
 
     let health = store.agent_model_health(0, 10_000).unwrap();
     let def = health
@@ -159,7 +189,10 @@ fn store_rolls_up_per_agent_model_failure_rate() {
     assert!((def.failure_rate - 0.75).abs() < 1e-9);
     assert!(def.should_suggest_higher_tier(), "0.75 > 0.30 threshold");
 
-    let fact = health.iter().find(|h| h.agent_id == "fact_extractor").unwrap();
+    let fact = health
+        .iter()
+        .find(|h| h.agent_id == "fact_extractor")
+        .unwrap();
     assert_eq!(fact.total_calls, 2);
     assert_eq!(fact.failures, 0);
     assert!(!fact.should_suggest_higher_tier());
@@ -169,10 +202,30 @@ fn store_rolls_up_per_agent_model_failure_rate() {
 fn store_rollup_splits_same_agent_across_models() {
     // §4.5-F is per (agent × model): the same agent on two models is two rows.
     let store = Store::open_memory().unwrap();
-    store.record_agent_call(&record("defamation_extractor", "qwen2.5:3b", AgentOutcome::ParseErr), 100).unwrap();
-    store.record_agent_call(&record("defamation_extractor", "qwen2.5:3b", AgentOutcome::ParseErr), 200).unwrap();
-    store.record_agent_call(&record("defamation_extractor", "gpt-4o-mini", AgentOutcome::Ok), 300).unwrap();
-    store.record_agent_call(&record("defamation_extractor", "gpt-4o-mini", AgentOutcome::Ok), 400).unwrap();
+    store
+        .record_agent_call(
+            &record("defamation_extractor", "qwen2.5:3b", AgentOutcome::ParseErr),
+            100,
+        )
+        .unwrap();
+    store
+        .record_agent_call(
+            &record("defamation_extractor", "qwen2.5:3b", AgentOutcome::ParseErr),
+            200,
+        )
+        .unwrap();
+    store
+        .record_agent_call(
+            &record("defamation_extractor", "gpt-4o-mini", AgentOutcome::Ok),
+            300,
+        )
+        .unwrap();
+    store
+        .record_agent_call(
+            &record("defamation_extractor", "gpt-4o-mini", AgentOutcome::Ok),
+            400,
+        )
+        .unwrap();
 
     let health = store.agent_model_health(0, 10_000).unwrap();
     let qwen = health.iter().find(|h| h.model == "qwen2.5:3b").unwrap();
@@ -198,13 +251,20 @@ fn store_rollup_ignores_non_agent_rows() {
         usage: usage("qwen2.5:3b"),
         cost_usd: None,
         cache: CacheOutcome::Miss,
-        outcome: CallOutcome::Fail { error_kind: ErrorKind::Parse },
+        outcome: CallOutcome::Fail {
+            error_kind: ErrorKind::Parse,
+        },
         latency_ms: 10,
         agent_id: None,
         query_hash: None,
     };
     store.record_usage(&direct).unwrap();
-    store.record_agent_call(&record("fact_extractor", "qwen2.5:3b", AgentOutcome::Ok), 200).unwrap();
+    store
+        .record_agent_call(
+            &record("fact_extractor", "qwen2.5:3b", AgentOutcome::Ok),
+            200,
+        )
+        .unwrap();
 
     let health = store.agent_model_health(0, 10_000).unwrap();
     assert_eq!(health.len(), 1, "only the agent-tagged row counts");
@@ -237,12 +297,15 @@ fn render_health_empty_is_friendly() {
 fn render_health_flags_only_above_threshold() {
     let rows = vec![
         AgentModelHealth::new("defamation_extractor".into(), "qwen2.5:3b".into(), 10, 5), // 0.5 → flag
-        AgentModelHealth::new("fact_extractor".into(), "qwen2.5:3b".into(), 10, 1),        // 0.1 → no flag
+        AgentModelHealth::new("fact_extractor".into(), "qwen2.5:3b".into(), 10, 1), // 0.1 → no flag
     ];
     let out = render_health(&rows);
     assert!(out.contains("defamation_extractor"));
     assert!(out.contains("fact_extractor"));
-    assert!(out.contains("switch to higher tier"), "high-failure row flagged");
+    assert!(
+        out.contains("switch to higher tier"),
+        "high-failure row flagged"
+    );
     // The flag must attach to the defamation row only — count occurrences.
     assert_eq!(out.matches("switch to higher tier").count(), 1);
 }

@@ -21,7 +21,9 @@ use serde_json::json;
 /// Unzip `word/document.xml` from docx bytes (the docx round-trip oracle).
 fn docx_text(bytes: &[u8]) -> String {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes.to_vec())).expect("docx is a zip");
-    let mut f = zip.by_name("word/document.xml").expect("docx has word/document.xml");
+    let mut f = zip
+        .by_name("word/document.xml")
+        .expect("docx has word/document.xml");
     let mut xml = String::new();
     f.read_to_string(&mut xml).unwrap();
     xml
@@ -87,12 +89,19 @@ fn academic_thesis_chapter_draft_real_deepseek_docx_roundtrip() {
         .expect("real-LLM skill run succeeds");
 
     // Terminal artifact must be a downloadable docx.
-    assert_eq!(result.format.extension(), "docx", "thesis skill exports docx");
+    assert_eq!(
+        result.format.extension(),
+        "docx",
+        "thesis skill exports docx"
+    );
     assert!(!result.artifact_bytes.is_empty(), "docx bytes produced");
 
     // Round-trip: unzip the docx and confirm Chinese content survived (not garbled / empty).
     let xml = docx_text(&result.artifact_bytes);
-    assert!(xml.contains("综述") || xml.contains("章节"), "title Chinese present in docx");
+    assert!(
+        xml.contains("综述") || xml.contains("章节"),
+        "title Chinese present in docx"
+    );
     // The synthesized body must reference the source material's domain terms (grounding signal).
     let grounded = ["卷积", "网络", "ResNet", "ImageNet", "残差", "深度"]
         .iter()

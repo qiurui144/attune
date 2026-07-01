@@ -118,12 +118,18 @@ pub async fn bind_directory(
     let file_type_strs: Vec<&str> = body.file_types.iter().map(|s| s.as_str()).collect();
     let dir_id = vault
         .store()
-        .bind_directory_with_domain(&canonical_str, body.recursive, &file_type_strs, &body.corpus_domain)
+        .bind_directory_with_domain(
+            &canonical_str,
+            body.recursive,
+            &file_type_strs,
+            &body.corpus_domain,
+        )
         .map_err(|e| {
             // 错误信息脱敏: Rust/SQLite 原文不能直接给用户看
             let msg = e.to_string();
             let user_msg = if msg.contains("FOREIGN KEY") || msg.contains("constraint failed") {
-                "添加目录失败：数据状态异常，请尝试在「设置 → 数据」中先解绑同名目录后重试".to_string()
+                "添加目录失败：数据状态异常，请尝试在「设置 → 数据」中先解绑同名目录后重试"
+                    .to_string()
             } else if msg.contains("UNIQUE") {
                 "该目录已绑定，无需重复添加".to_string()
             } else if msg.contains("locked") || msg.contains("Locked") {
@@ -139,21 +145,27 @@ pub async fn bind_directory(
         })?;
 
     // Scan directory synchronously
-    let scan_result =
-        scanner::scan_directory(vault.store(), &dek, &dir_id, &canonical, body.recursive, &body.file_types)
-            .map_err(|e| {
-                let msg = e.to_string();
-                tracing::error!(target: "access", "scan_directory failed for {canonical_str}: {msg}");
-                let user_msg = if msg.contains("Permission denied") {
-                    "无法读取该目录：请检查访问权限".to_string()
-                } else {
-                    "扫描目录失败，请稍后重试".to_string()
-                };
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": user_msg})),
-                )
-            })?;
+    let scan_result = scanner::scan_directory(
+        vault.store(),
+        &dek,
+        &dir_id,
+        &canonical,
+        body.recursive,
+        &body.file_types,
+    )
+    .map_err(|e| {
+        let msg = e.to_string();
+        tracing::error!(target: "access", "scan_directory failed for {canonical_str}: {msg}");
+        let user_msg = if msg.contains("Permission denied") {
+            "无法读取该目录：请检查访问权限".to_string()
+        } else {
+            "扫描目录失败，请稍后重试".to_string()
+        };
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": user_msg})),
+        )
+    })?;
 
     // 释放 bind/scan 阶段持有的 vault，再以规范锁序 fulltext → vault 重取做 FTS
     // rebuild。绝不在持 vault 时取 fulltext（那会反转 fulltext → vectors → vault
@@ -189,7 +201,9 @@ pub async fn bind_directory(
                     let _ = ft.add_document(id, title, content, source_type);
                 }
                 fts_offset += FTS_PAGE;
-                if n < FTS_PAGE { break; }
+                if n < FTS_PAGE {
+                    break;
+                }
             }
         }
     }
@@ -218,12 +232,15 @@ pub async fn unbind_directory(
         )
     })?;
 
-    vault.store().unbind_directory(&params.dir_id).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-    })?;
+    vault
+        .store()
+        .unbind_directory(&params.dir_id)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
 
     Ok(Json(serde_json::json!({"status": "ok"})))
 }

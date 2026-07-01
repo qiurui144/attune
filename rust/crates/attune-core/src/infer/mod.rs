@@ -25,7 +25,9 @@ pub struct MockRerankProvider {
 
 impl MockRerankProvider {
     pub fn new(scores: Vec<f32>) -> Self {
-        Self { scores: std::sync::Mutex::new(scores) }
+        Self {
+            scores: std::sync::Mutex::new(scores),
+        }
     }
 }
 

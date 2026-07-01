@@ -113,9 +113,7 @@ impl Store {
                     max_total_bytes, last_commit_sha, last_synced_at
              FROM git_sources WHERE dir_id = ?1",
         )?;
-        let row = stmt
-            .query_row(params![dir_id], Self::map_git_row)
-            .ok();
+        let row = stmt.query_row(params![dir_id], Self::map_git_row).ok();
         match row {
             None => Ok(None),
             Some(raw) => Ok(Some(Self::decrypt_git_row(dek, raw)?)),

@@ -1,8 +1,12 @@
-use clap::{Parser, Subcommand};
 use attune_core::vault::Vault;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "attune", version, about = "Attune CLI — Private AI Knowledge Companion")]
+#[command(
+    name = "attune",
+    version,
+    about = "Attune CLI — Private AI Knowledge Companion"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -28,9 +32,7 @@ enum Commands {
         source_type: String,
     },
     /// Get a knowledge item by ID
-    Get {
-        id: String,
-    },
+    Get { id: String },
     /// List knowledge items
     List {
         #[arg(short, long, default_value = "20")]
@@ -200,9 +202,7 @@ enum Commands {
         force: bool,
     },
     /// 卸载 plugin (从 plugins 目录删除)
-    PluginUninstall {
-        plugin_id: String,
-    },
+    PluginUninstall { plugin_id: String },
     /// 把一个第三方签名公钥加入信任白名单 (settings.plugin_trusted_pubkeys).
     /// 该公钥签名的插件验签后标 ThirdParty (可在 strict 模式加载)。**不能**把插件
     /// 抬成 Official —— 官方信任根是编译期 const,白名单是独立的低信任域 (T11)。
@@ -252,9 +252,7 @@ enum Commands {
     /// 列出所有 OCR 场景预设 (builtin + 用户自定义)
     OcrProfileList,
     /// 查看指定 OCR profile 详情 (JSON)
-    OcrProfileShow {
-        id: String,
-    },
+    OcrProfileShow { id: String },
     /// 新建 OCR profile (用户自定义, builtin=false)
     OcrProfileCreate {
         /// slug id, e.g. medical-scan
@@ -276,9 +274,7 @@ enum Commands {
         tags: String,
     },
     /// 删除 OCR profile (builtin 拒绝)
-    OcrProfileDelete {
-        id: String,
-    },
+    OcrProfileDelete { id: String },
     /// v1.0.1 C4: 列出 / 回滚 vault 备份。
     /// 无 --version 列出 ~/.local/share/Attune/backups/ 内备份(时间 / size / SHA256)。
     /// 带 --version 选最近一份回滚 vault.db(自动备份 current 防双失)。
@@ -478,25 +474,42 @@ fn main() {
 fn run(cli: Cli) -> attune_core::error::Result<()> {
     // Plugin pack 子命令组不需要 vault — 早 return
     match &cli.command {
-        Commands::PluginEncrypt { plugin_dir, key, delete_plain } => {
+        Commands::PluginEncrypt {
+            plugin_dir,
+            key,
+            delete_plain,
+        } => {
             return run_plugin_encrypt(plugin_dir, key.as_deref(), *delete_plain);
         }
         Commands::PluginDecrypt { plugin_dir, key } => {
             return run_plugin_decrypt(plugin_dir, key.as_deref());
         }
-        Commands::PluginVerify { plugin_dir, key, trust } => {
+        Commands::PluginVerify {
+            plugin_dir,
+            key,
+            trust,
+        } => {
             return run_plugin_verify(plugin_dir, key.as_deref(), trust);
         }
         Commands::PluginKeygen { out_priv } => {
             return run_plugin_keygen(out_priv.as_deref());
         }
-        Commands::PluginSign { plugin_dir, priv_key, priv_file } => {
+        Commands::PluginSign {
+            plugin_dir,
+            priv_key,
+            priv_file,
+        } => {
             return run_plugin_sign(plugin_dir, priv_key.as_deref(), priv_file.as_deref());
         }
         Commands::PluginVerifySig { plugin_dir, pubkey } => {
             return run_plugin_verify_sig(plugin_dir, pubkey);
         }
-        Commands::PluginInstall { src, key, pubkey, force } => {
+        Commands::PluginInstall {
+            src,
+            key,
+            pubkey,
+            force,
+        } => {
             return run_plugin_install(src, key.as_deref(), pubkey.as_deref(), *force);
         }
         Commands::PluginUninstall { plugin_id } => {
@@ -517,12 +530,23 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         Commands::LinkFolder { folder, project } => {
             return run_link_folder(folder, project);
         }
-        Commands::PluginPublish { plugin_dir, hub_url, admin_token } => {
+        Commands::PluginPublish {
+            plugin_dir,
+            hub_url,
+            admin_token,
+        } => {
             return run_plugin_publish(plugin_dir, hub_url, admin_token.as_deref());
         }
         Commands::OcrProfileList => return run_ocr_profile_list(),
         Commands::OcrProfileShow { id } => return run_ocr_profile_show(id),
-        Commands::OcrProfileCreate { id, name, description, languages, dpi, tags } => {
+        Commands::OcrProfileCreate {
+            id,
+            name,
+            description,
+            languages,
+            dpi,
+            tags,
+        } => {
             return run_ocr_profile_create(id, name, description, languages, *dpi, tags);
         }
         Commands::OcrProfileDelete { id } => return run_ocr_profile_delete(id),
@@ -533,9 +557,7 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         // ACP-3 health needs the unlocked vault → falls through to the post-open match.
         Commands::Agent { action } => match action {
             AgentAction::Gate { manifest } => return run_agent_gate(manifest.as_deref()),
-            AgentAction::Registry { registry } => {
-                return run_agent_registry(registry.as_deref())
-            }
+            AgentAction::Registry { registry } => return run_agent_registry(registry.as_deref()),
             // ACP-5 flow inspection operates on workspace files — vault-free.
             AgentAction::Flow { action } => return run_agent_flow(action),
             // ACP-3 health + tune need the unlocked vault → handled after open.
@@ -551,7 +573,14 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         _ => {}
     }
     // OCR / Deploy 子命令不需要 vault — 早 return 避免 zero-state 报错
-    if let Commands::Ocr { image, profile, id_card_subtype, json, bbox } = &cli.command {
+    if let Commands::Ocr {
+        image,
+        profile,
+        id_card_subtype,
+        json,
+        bbox,
+    } = &cli.command
+    {
         // ── D5.7 pre-validation: friendly errors with structured exit codes ──
         // (1) Profile id must be known (or None for plain mode). Validated FIRST so typo
         //     diagnostics surface before file-not-found (user often types wrong flag, not wrong path).
@@ -562,17 +591,24 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
                 "image file not found: {}\n\
                  hint: check the path; cwd is {}",
                 image.display(),
-                std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "<unknown>".into()),
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "<unknown>".into()),
             )));
         }
 
         let provider = attune_core::ocr::detect_default_provider().ok_or_else(|| {
             attune_core::error::VaultError::ModelLoad(
-                "PP-OCR models missing — run `attune deploy` or apt install --reinstall attune".into(),
+                "PP-OCR models missing — run `attune deploy` or apt install --reinstall attune"
+                    .into(),
             )
         })?;
-        eprintln!("[attune ocr] engine: {} | image: {} | profile: {}",
-            provider.name(), image.display(), profile.as_deref().unwrap_or("(plain)"));
+        eprintln!(
+            "[attune ocr] engine: {} | image: {} | profile: {}",
+            provider.name(),
+            image.display(),
+            profile.as_deref().unwrap_or("(plain)")
+        );
         let start = std::time::Instant::now();
         let ocr_profile = attune_core::ocr::profile_for_id(profile.as_deref());
         let out = provider.extract_structured(image, &ocr_profile)?;
@@ -596,7 +632,8 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             serde_json::to_value(&lines).unwrap_or(serde_json::Value::Null)
         } else {
             serde_json::Value::Array(
-                lines.iter()
+                lines
+                    .iter()
                     .map(|l| serde_json::json!({ "text": l.text, "confidence": l.confidence }))
                     .collect(),
             )
@@ -618,17 +655,30 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         }
         return Ok(());
     }
-    if let Commands::RecognizeRegions { image, profile, vlm_escalation } = &cli.command {
+    if let Commands::RecognizeRegions {
+        image,
+        profile,
+        vlm_escalation,
+    } = &cli.command
+    {
         return run_recognize_regions(image, profile.as_deref(), vlm_escalation);
     }
-    if let Commands::Transcribe { audio, diarization, json, wait } = &cli.command {
+    if let Commands::Transcribe {
+        audio,
+        diarization,
+        json,
+        wait,
+    } = &cli.command
+    {
         // ── D5.7 pre-validation: friendly errors with structured exit codes ──
         if !audio.exists() {
             return Err(attune_core::error::VaultError::InvalidInput(format!(
                 "audio file not found: {}\n\
                  hint: check the path; cwd is {}",
                 audio.display(),
-                std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "<unknown>".into()),
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "<unknown>".into()),
             )));
         }
         // `--no-wait` (async mode) is reserved for future REST/daemon path; in-process is always sync.
@@ -644,8 +694,11 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
                 "ASR backend missing — whisper-cli not installed or model not downloaded".into(),
             )
         })?;
-        eprintln!("[attune transcribe] model: {} | audio: {}",
-            backend.model_name, audio.display());
+        eprintln!(
+            "[attune transcribe] model: {} | audio: {}",
+            backend.model_name,
+            audio.display()
+        );
         let diar = if *diarization {
             attune_core::asr::detect_diarization_backend()
         } else {
@@ -655,7 +708,10 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         let (segments, _legacy_text) =
             attune_core::asr::transcribe_with_diarization(&backend, audio, diar.as_ref())?;
         let elapsed_ms = start.elapsed().as_millis() as u64;
-        eprintln!("[attune transcribe] {elapsed_ms}ms elapsed, {} segments", segments.len());
+        eprintln!(
+            "[attune transcribe] {elapsed_ms}ms elapsed, {} segments",
+            segments.len()
+        );
         if *json {
             let value = serde_json::json!({
                 "model": backend.model_name,
@@ -690,8 +746,13 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             }
             let recovery_key = vault.setup_with_recovery_key(&password)?;
             println!("Vault initialized and unlocked.");
-            println!("Device secret saved to: {}", attune_core::platform::device_secret_path().display());
-            println!("IMPORTANT: Back up your device.key file — you need it to unlock on other devices.");
+            println!(
+                "Device secret saved to: {}",
+                attune_core::platform::device_secret_path().display()
+            );
+            println!(
+                "IMPORTANT: Back up your device.key file — you need it to unlock on other devices."
+            );
             println!("Recovery key (store offline, needed for password reset without data loss):");
             println!("{recovery_key}");
         }
@@ -718,17 +779,35 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
                 "data_dir": attune_core::platform::data_dir(),
                 "config_dir": attune_core::platform::config_dir(),
             });
-            println!("{}", serde_json::to_string_pretty(&status).expect("status JSON object is serializable"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&status).expect("status JSON object is serializable")
+            );
         }
-        Commands::Insert { title, content, source_type } => {
+        Commands::Insert {
+            title,
+            content,
+            source_type,
+        } => {
             let dek = vault.dek_db()?;
-            let id = vault.store().insert_item(&dek, &title, &content, None, &source_type, None, None)?;
+            let id = vault.store().insert_item(
+                &dek,
+                &title,
+                &content,
+                None,
+                &source_type,
+                None,
+                None,
+            )?;
             println!("Inserted: {id}");
         }
         Commands::Get { id } => {
             let dek = vault.dek_db()?;
             match vault.store().get_item(&dek, &id)? {
-                Some(item) => println!("{}", serde_json::to_string_pretty(&item).expect("Item is serializable")),
+                Some(item) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&item).expect("Item is serializable")
+                ),
                 None => {
                     eprintln!("Item not found: {id}");
                     std::process::exit(1);
@@ -738,12 +817,17 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
         Commands::List { limit } => {
             let _ = vault.dek_db()?;
             let items = vault.store().list_items(limit, 0)?;
-            println!("{}", serde_json::to_string_pretty(&items).expect("Vec<Item> is serializable"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&items).expect("Vec<Item> is serializable")
+            );
         }
         Commands::VaultExport { dest } => {
             // 必须 locked，否则 SQLite WAL 文件可能不一致
             if matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
-                eprintln!("Refusing to export while vault is UNLOCKED — please run `attune lock` first.");
+                eprintln!(
+                    "Refusing to export while vault is UNLOCKED — please run `attune lock` first."
+                );
                 eprintln!("Reason: SQLite WAL must be checkpointed; locking forces a consistent snapshot.");
                 std::process::exit(1);
             }
@@ -762,28 +846,37 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             let ftx_src = data.join("tantivy");
             if ftx_src.is_dir() {
                 let ftx_dst = dest.join("tantivy");
-                copy_dir_recursive(&ftx_src, &ftx_dst).map_err(attune_core::error::VaultError::Io)?;
+                copy_dir_recursive(&ftx_src, &ftx_dst)
+                    .map_err(attune_core::error::VaultError::Io)?;
                 copied += 1;
             }
             println!("Exported {copied} entries to {}", dest.display());
-            println!("IMPORTANT: separately back up your device.key at {}",
-                attune_core::platform::device_secret_path().display());
+            println!(
+                "IMPORTANT: separately back up your device.key at {}",
+                attune_core::platform::device_secret_path().display()
+            );
         }
         Commands::Ocr { .. } => unreachable!("Ocr handled before vault open"),
         Commands::RecognizeRegions { .. } => {
             unreachable!("RecognizeRegions handled before vault open")
         }
         Commands::Transcribe { .. } => unreachable!("Transcribe handled before vault open"),
-        Commands::Deploy { no_models, dry_run, script } => {
+        Commands::Deploy {
+            no_models,
+            dry_run,
+            script,
+        } => {
             // R-deploy: 调底层 bash 脚本。Linux-only。
             if !cfg!(target_os = "linux") {
-                eprintln!("attune deploy 当前仅支持 Linux（当前平台 = {}）。", std::env::consts::OS);
+                eprintln!(
+                    "attune deploy 当前仅支持 Linux（当前平台 = {}）。",
+                    std::env::consts::OS
+                );
                 eprintln!("Windows: 用 MSI 安装包；macOS: 暂不支持。");
                 std::process::exit(2);
             }
-            let script_path = script.unwrap_or_else(|| {
-                std::path::PathBuf::from("scripts/deploy-linux.sh")
-            });
+            let script_path =
+                script.unwrap_or_else(|| std::path::PathBuf::from("scripts/deploy-linux.sh"));
             if !script_path.exists() {
                 eprintln!("deploy script 不存在: {}", script_path.display());
                 eprintln!("请从源码仓库根目录运行 `attune deploy`，或用 --script <path> 指定。");
@@ -791,8 +884,12 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             }
             let mut cmd = std::process::Command::new("bash");
             cmd.arg(&script_path);
-            if no_models { cmd.arg("--no-models"); }
-            if dry_run { cmd.arg("--dry-run"); }
+            if no_models {
+                cmd.arg("--no-models");
+            }
+            if dry_run {
+                cmd.arg("--dry-run");
+            }
             let status = cmd.status().map_err(attune_core::error::VaultError::Io)?;
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
@@ -808,15 +905,26 @@ fn run(cli: Cli) -> attune_core::error::Result<()> {
             unreachable!("VaultImport handled before vault open")
         }
         // Plugin / cloud / OCR profile 子命令在 run() 头部已 handle, 这里 unreachable
-        Commands::PluginEncrypt { .. } | Commands::PluginDecrypt { .. } | Commands::PluginVerify { .. }
-        | Commands::PluginKeygen { .. } | Commands::PluginSign { .. } | Commands::PluginVerifySig { .. }
-        | Commands::PluginInstall { .. } | Commands::PluginUninstall { .. } | Commands::PluginList
+        Commands::PluginEncrypt { .. }
+        | Commands::PluginDecrypt { .. }
+        | Commands::PluginVerify { .. }
+        | Commands::PluginKeygen { .. }
+        | Commands::PluginSign { .. }
+        | Commands::PluginVerifySig { .. }
+        | Commands::PluginInstall { .. }
+        | Commands::PluginUninstall { .. }
+        | Commands::PluginList
         | Commands::PluginTrustAdd { .. }
-        | Commands::Login { .. } | Commands::SyncPlugins { .. } | Commands::LinkFolder { .. }
+        | Commands::Login { .. }
+        | Commands::SyncPlugins { .. }
+        | Commands::LinkFolder { .. }
         | Commands::PluginPublish { .. }
-        | Commands::OcrProfileList | Commands::OcrProfileShow { .. }
-        | Commands::OcrProfileCreate { .. } | Commands::OcrProfileDelete { .. }
-        | Commands::Rollback { .. } | Commands::PreUpgradeBackup
+        | Commands::OcrProfileList
+        | Commands::OcrProfileShow { .. }
+        | Commands::OcrProfileCreate { .. }
+        | Commands::OcrProfileDelete { .. }
+        | Commands::Rollback { .. }
+        | Commands::PreUpgradeBackup
         | Commands::Doc { .. } => {
             unreachable!("plugin/cloud/ocr-profile/doc commands handled before vault open")
         }
@@ -862,7 +970,9 @@ fn run_recognize_regions(
             "image file not found: {}\n\
              hint: check the path; cwd is {}",
             image.display(),
-            std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "<unknown>".into()),
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<unknown>".into()),
         )));
     }
 
@@ -987,7 +1097,6 @@ fn read_password(prompt: &str) -> attune_core::error::Result<String> {
     rpassword::read_password().map_err(attune_core::error::VaultError::Io)
 }
 
-
 fn read_plugin_key(arg_key: Option<&str>) -> attune_core::error::Result<Vec<u8>> {
     if let Some(k) = arg_key {
         return Ok(k.as_bytes().to_vec());
@@ -1017,7 +1126,11 @@ fn run_plugin_encrypt(
     let plain = std::fs::read(&yaml_path).map_err(attune_core::error::VaultError::Io)?;
     let cipher = attune_core::plugin_encryption::encrypt_yaml(&plain, &key)?;
     std::fs::write(&enc_path, &cipher).map_err(attune_core::error::VaultError::Io)?;
-    eprintln!("✓ encrypted to {} ({} bytes)", enc_path.display(), cipher.len());
+    eprintln!(
+        "✓ encrypted to {} ({} bytes)",
+        enc_path.display(),
+        cipher.len()
+    );
     if delete_plain {
         std::fs::remove_file(&yaml_path).map_err(attune_core::error::VaultError::Io)?;
         eprintln!("✓ removed plaintext plugin.yaml");
@@ -1041,7 +1154,11 @@ fn run_plugin_decrypt(
     let cipher = std::fs::read(&enc_path).map_err(attune_core::error::VaultError::Io)?;
     let plain = attune_core::plugin_encryption::decrypt_yaml(&cipher, &key)?;
     std::fs::write(&yaml_path, &plain).map_err(attune_core::error::VaultError::Io)?;
-    eprintln!("✓ decrypted to {} ({} bytes)", yaml_path.display(), plain.len());
+    eprintln!(
+        "✓ decrypted to {} ({} bytes)",
+        yaml_path.display(),
+        plain.len()
+    );
     Ok(())
 }
 
@@ -1067,15 +1184,20 @@ fn run_plugin_verify(
         key_bytes.as_deref(),
         Some(trust_enum),
     )?;
-    eprintln!("✓ plugin loaded: id={}, version={}, type={}",
-        plugin.manifest.id, plugin.manifest.version, plugin.manifest.plugin_type);
+    eprintln!(
+        "✓ plugin loaded: id={}, version={}, type={}",
+        plugin.manifest.id, plugin.manifest.version, plugin.manifest.plugin_type
+    );
     if let Some(p) = &plugin.manifest.pricing {
         eprintln!("  pricing: tier={}", p.tier);
     }
     eprintln!("  skills: {}", plugin.manifest.skills.len());
     eprintln!("  agents: {}", plugin.manifest.agents.len());
     eprintln!("  mcp_servers: {}", plugin.manifest.mcp_servers.len());
-    eprintln!("  case_kinds: {}", plugin.manifest.registers_case_kinds.len());
+    eprintln!(
+        "  case_kinds: {}",
+        plugin.manifest.registers_case_kinds.len()
+    );
     eprintln!("  trust verified: {trust}");
     Ok(())
 }
@@ -1093,7 +1215,10 @@ fn run_plugin_keygen(out_priv: Option<&std::path::Path>) -> attune_core::error::
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
         }
-        eprintln!("✓ private key written to {} (chmod 600 on Unix)", path.display());
+        eprintln!(
+            "✓ private key written to {} (chmod 600 on Unix)",
+            path.display()
+        );
     } else {
         println!("PRIVATE_KEY={sk_hex}");
         eprintln!("⚠️  Private key printed to stdout — save it offline immediately and clear shell history.");
@@ -1123,10 +1248,9 @@ fn read_signing_key(
     };
     let bytes = hex::decode(hex_str.trim())
         .map_err(|e| attune_core::error::VaultError::InvalidInput(format!("bad hex: {e}")))?;
-    bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| attune_core::error::VaultError::InvalidInput("private key must be 32 bytes".into()))
+    bytes.as_slice().try_into().map_err(|_| {
+        attune_core::error::VaultError::InvalidInput("private key must be 32 bytes".into())
+    })
 }
 
 fn run_plugin_sign(
@@ -1136,7 +1260,10 @@ fn run_plugin_sign(
 ) -> attune_core::error::Result<()> {
     let sk = read_signing_key(priv_key, priv_file)?;
     let sig = attune_core::plugin_sig::sign_plugin(plugin_dir, &sk)?;
-    eprintln!("✓ plugin.sig written to {}", plugin_dir.join("plugin.sig").display());
+    eprintln!(
+        "✓ plugin.sig written to {}",
+        plugin_dir.join("plugin.sig").display()
+    );
     eprintln!("  signature (base64): {sig}");
     Ok(())
 }
@@ -1190,7 +1317,10 @@ fn run_plugin_install(
         Some(trust),
     )?;
     let plugin_id = plugin.manifest.id.clone();
-    eprintln!("✓ parsed plugin: id={plugin_id}, version={}", plugin.manifest.version);
+    eprintln!(
+        "✓ parsed plugin: id={plugin_id}, version={}",
+        plugin.manifest.version
+    );
 
     // 3. 解析目标安装目录
     let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()?;
@@ -1243,9 +1373,9 @@ fn run_plugin_trust_add(pubkey: &str, server_url: &str) -> attune_core::error::R
         ));
     }
     let base = server_url.trim_end_matches('/');
-    let client = reqwest::blocking::Client::builder()
-        .build()
-        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!("http client: {e}"))))?;
+    let client = reqwest::blocking::Client::builder().build().map_err(|e| {
+        attune_core::error::VaultError::Io(std::io::Error::other(format!("http client: {e}")))
+    })?;
 
     // 1) GET current settings to read the existing whitelist (vault must be unlocked).
     let cur: serde_json::Value = client
@@ -1253,13 +1383,19 @@ fn run_plugin_trust_add(pubkey: &str, server_url: &str) -> attune_core::error::R
         .send()
         .and_then(|r| r.error_for_status())
         .and_then(|r| r.json())
-        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!(
-            "GET settings failed (is attune-server running + vault unlocked?): {e}"
-        ))))?;
+        .map_err(|e| {
+            attune_core::error::VaultError::Io(std::io::Error::other(format!(
+                "GET settings failed (is attune-server running + vault unlocked?): {e}"
+            )))
+        })?;
     let mut keys: Vec<String> = cur
         .get("plugin_trusted_pubkeys")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     if keys.iter().any(|k| k == &pk) {
         eprintln!("✓ pubkey already trusted: {pk}");
@@ -1273,9 +1409,11 @@ fn run_plugin_trust_add(pubkey: &str, server_url: &str) -> attune_core::error::R
         .json(&serde_json::json!({ "plugin_trusted_pubkeys": keys }))
         .send()
         .and_then(|r| r.error_for_status())
-        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!(
-            "PATCH settings failed: {e}"
-        ))))?;
+        .map_err(|e| {
+            attune_core::error::VaultError::Io(std::io::Error::other(format!(
+                "PATCH settings failed: {e}"
+            )))
+        })?;
     let _ = resp;
     eprintln!("✓ added trusted pubkey: {pk}");
     Ok(())
@@ -1284,7 +1422,10 @@ fn run_plugin_trust_add(pubkey: &str, server_url: &str) -> attune_core::error::R
 fn run_plugin_list() -> attune_core::error::Result<()> {
     let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()?;
     if !plugins_root.exists() {
-        println!("No plugins installed (dir does not exist: {})", plugins_root.display());
+        println!(
+            "No plugins installed (dir does not exist: {})",
+            plugins_root.display()
+        );
         return Ok(());
     }
     let mut count = 0usize;
@@ -1302,15 +1443,25 @@ fn run_plugin_list() -> attune_core::error::Result<()> {
         let real_trust = attune_core::plugin_sig::verify_loose(&path)
             .map(|r| r.trust)
             .unwrap_or(attune_core::plugin_sig::Trust::Unsigned);
-        match attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(&path, None, Some(real_trust)) {
+        match attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(
+            &path,
+            None,
+            Some(real_trust),
+        ) {
             Ok(plugin) => {
                 count += 1;
                 let m = &plugin.manifest;
                 let tier = m.pricing.as_ref().map(|p| p.tier.as_str()).unwrap_or("?");
                 println!(
                     "  {} (v{}, type={}, tier={}, trust={}, agents={}, skills={}, mcps={})",
-                    m.id, m.version, m.plugin_type, tier, real_trust.as_str(),
-                    m.agents.len(), m.skills.len(), m.mcp_servers.len()
+                    m.id,
+                    m.version,
+                    m.plugin_type,
+                    tier,
+                    real_trust.as_str(),
+                    m.agents.len(),
+                    m.skills.len(),
+                    m.mcp_servers.len()
                 );
             }
             Err(e) => {
@@ -1319,7 +1470,10 @@ fn run_plugin_list() -> attune_core::error::Result<()> {
             }
         }
     }
-    println!("{count} plugin(s) installed at {} ({errors} errors)", plugins_root.display());
+    println!(
+        "{count} plugin(s) installed at {} ({errors} errors)",
+        plugins_root.display()
+    );
     Ok(())
 }
 
@@ -1342,7 +1496,10 @@ fn run_login(email: &str, cloud_url: &str) -> attune_core::error::Result<()> {
                 let name_str = lic.name.as_deref().unwrap_or("-");
                 eprintln!(
                     "  - id={} name={} plan={} plugins={}",
-                    lic.id, name_str, lic.plan, lic.entitled_plugins.len()
+                    lic.id,
+                    name_str,
+                    lic.plan,
+                    lic.entitled_plugins.len()
                 );
                 if !lic.entitled_plugins.is_empty() {
                     eprintln!("    entitled plugins:");
@@ -1357,7 +1514,9 @@ fn run_login(email: &str, cloud_url: &str) -> attune_core::error::Result<()> {
             // accounts 下发的 license_key 是 Bearer token, 不是 SignedLicense code.
             // 客户端登录目的: 鉴权 + session 持久化; paid plugin 解密 key 走 plugin_sync
             // 从 EntitledPlugin.decrypt_key 字段直拿, 不需要本地 cache.
-            eprintln!("  (info: cloud accounts uses bearer tokens — no local license cache needed)");
+            eprintln!(
+                "  (info: cloud accounts uses bearer tokens — no local license cache needed)"
+            );
         }
         Err(e) => eprintln!("⚠️  list licenses failed: {e}"),
     }
@@ -1396,7 +1555,9 @@ fn persist_cloud_session(cloud_url: &str, session_token: &str) -> attune_core::e
 }
 
 /// 从 config_dir/cloud-session.json 读回 session, 构造已鉴权的 CloudClient
-fn load_cloud_client_with_session(cloud_url: &str) -> attune_core::error::Result<attune_core::cloud_client::CloudClient> {
+fn load_cloud_client_with_session(
+    cloud_url: &str,
+) -> attune_core::error::Result<attune_core::cloud_client::CloudClient> {
     use attune_core::error::VaultError;
     let path = attune_core::platform::config_dir().join("cloud-session.json");
     if !path.exists() {
@@ -1408,7 +1569,11 @@ fn load_cloud_client_with_session(cloud_url: &str) -> attune_core::error::Result
     let sess: CloudSession = serde_json::from_str(&json)
         .map_err(|e| VaultError::Crypto(format!("cloud session parse: {e}")))?;
     // cloud_url 参数优先 (CLI flag); 文件里的 url 作为 fallback
-    let effective_url = if !cloud_url.is_empty() { cloud_url } else { &sess.cloud_url };
+    let effective_url = if !cloud_url.is_empty() {
+        cloud_url
+    } else {
+        &sess.cloud_url
+    };
     Ok(attune_core::cloud_client::CloudClient::with_session(
         effective_url,
         &sess.session,
@@ -1423,7 +1588,10 @@ fn run_sync_plugins(cloud_url: &str) -> attune_core::error::Result<()> {
     for p in &report.installed {
         eprintln!("    + {p}");
     }
-    eprintln!("  · skipped (already installed): {}", report.skipped_already_installed.len());
+    eprintln!(
+        "  · skipped (already installed): {}",
+        report.skipped_already_installed.len()
+    );
     for p in &report.skipped_already_installed {
         eprintln!("    = {p}");
     }
@@ -1474,7 +1642,8 @@ fn run_link_folder(folder: &std::path::Path, project: &str) -> attune_core::erro
     std::fs::write(
         &links_path,
         serde_json::to_string_pretty(&links).expect("ser"),
-    ).map_err(attune_core::error::VaultError::Io)?;
+    )
+    .map_err(attune_core::error::VaultError::Io)?;
 
     eprintln!("✓ linked {} to project '{}'", abs.display(), project);
     eprintln!("  link saved to {}", links_path.display());
@@ -1497,14 +1666,18 @@ fn run_plugin_publish(
     let admin_token = admin_token_arg
         .map(String::from)
         .or_else(|| std::env::var("PLUGINHUB_ADMIN_TOKEN").ok())
-        .ok_or_else(|| attune_core::error::VaultError::InvalidInput(
-            "admin token required (--admin-token or env PLUGINHUB_ADMIN_TOKEN)".into(),
-        ))?;
+        .ok_or_else(|| {
+            attune_core::error::VaultError::InvalidInput(
+                "admin token required (--admin-token or env PLUGINHUB_ADMIN_TOKEN)".into(),
+            )
+        })?;
 
     // 1. 解析 manifest 拿 id + version
     // T2 占位: 类型迁移为 Trust enum; T9 接入真验签结果。
     let plugin = attune_core::plugin_loader::LoadedPlugin::from_dir_with_key(
-        plugin_dir, None, Some(attune_core::plugin_sig::Trust::ThirdParty),
+        plugin_dir,
+        None,
+        Some(attune_core::plugin_sig::Trust::ThirdParty),
     )?;
     let id = plugin.manifest.id.clone();
     let version = plugin.manifest.version.clone();
@@ -1516,14 +1689,21 @@ fn run_plugin_publish(
     let status = std::process::Command::new("tar")
         .args(["czf"])
         .arg(&pkg_path)
-        .args(["-C", plugin_dir.parent().unwrap_or(std::path::Path::new(".")).to_string_lossy().as_ref()])
+        .args([
+            "-C",
+            plugin_dir
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_string_lossy()
+                .as_ref(),
+        ])
         .arg(plugin_dir.file_name().unwrap_or_default())
         .status()
         .map_err(attune_core::error::VaultError::Io)?;
     if !status.success() {
-        return Err(attune_core::error::VaultError::Io(std::io::Error::other(format!(
-            "tar exit {:?}", status.code()
-        ))));
+        return Err(attune_core::error::VaultError::Io(std::io::Error::other(
+            format!("tar exit {:?}", status.code()),
+        )));
     }
     let size = std::fs::metadata(&pkg_path).map(|m| m.len()).unwrap_or(0);
     eprintln!("✓ packaged: {} ({} bytes)", pkg_path.display(), size);
@@ -1534,10 +1714,16 @@ fn run_plugin_publish(
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!("http client: {e}"))))?;
+        .map_err(|e| {
+            attune_core::error::VaultError::Io(std::io::Error::other(format!("http client: {e}")))
+        })?;
 
     let meta_url = format!("{base}/api/v1/admin/plugins/");
-    let category = if plugin.manifest.category.is_empty() { "general" } else { &plugin.manifest.category };
+    let category = if plugin.manifest.category.is_empty() {
+        "general"
+    } else {
+        &plugin.manifest.category
+    };
     let meta_form = reqwest::blocking::multipart::Form::new()
         .text("id", id.clone())
         .text("name", plugin.manifest.name.clone())
@@ -1550,15 +1736,17 @@ fn run_plugin_publish(
         .header("Authorization", format!("Bearer {admin_token}"))
         .multipart(meta_form)
         .send()
-        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!("metadata: {e}"))))?;
+        .map_err(|e| {
+            attune_core::error::VaultError::Io(std::io::Error::other(format!("metadata: {e}")))
+        })?;
     let meta_status = meta_resp.status();
     let meta_body = meta_resp.text().unwrap_or_default();
     if meta_status == reqwest::StatusCode::CONFLICT {
         eprintln!("  plugin already exists (409), skipping metadata creation");
     } else if !meta_status.is_success() {
-        return Err(attune_core::error::VaultError::Io(std::io::Error::other(format!(
-            "metadata failed: {meta_status} body={meta_body}"
-        ))));
+        return Err(attune_core::error::VaultError::Io(std::io::Error::other(
+            format!("metadata failed: {meta_status} body={meta_body}"),
+        )));
     } else {
         eprintln!("✓ metadata created: {meta_body}");
     }
@@ -1582,13 +1770,15 @@ fn run_plugin_publish(
         .header("Authorization", format!("Bearer {admin_token}"))
         .multipart(ver_form)
         .send()
-        .map_err(|e| attune_core::error::VaultError::Io(std::io::Error::other(format!("upload: {e}"))))?;
+        .map_err(|e| {
+            attune_core::error::VaultError::Io(std::io::Error::other(format!("upload: {e}")))
+        })?;
     let ver_status = ver_resp.status();
     let ver_body = ver_resp.text().unwrap_or_default();
     if !ver_status.is_success() {
-        return Err(attune_core::error::VaultError::Io(std::io::Error::other(format!(
-            "publish failed: {ver_status} body={ver_body}"
-        ))));
+        return Err(attune_core::error::VaultError::Io(std::io::Error::other(
+            format!("publish failed: {ver_status} body={ver_body}"),
+        )));
     }
     let upload: serde_json::Value = serde_json::from_str(&ver_body).map_err(|e| {
         attune_core::error::VaultError::Io(std::io::Error::other(format!(
@@ -1602,9 +1792,9 @@ fn run_plugin_publish(
         .unwrap_or("");
     let expected_path = format!("/api/v1/packages/{id}-{version}.tar.gz");
     if sha256.len() != 64 || download_path != expected_path {
-        return Err(attune_core::error::VaultError::Io(std::io::Error::other(format!(
-            "publish response missing integrity/download metadata: body={ver_body}"
-        ))));
+        return Err(attune_core::error::VaultError::Io(std::io::Error::other(
+            format!("publish response missing integrity/download metadata: body={ver_body}"),
+        )));
     }
     eprintln!("✓ published {id}@{version}: sha256={sha256} download_path={download_path}");
     Ok(())
@@ -1616,14 +1806,20 @@ fn run_plugin_publish(
 
 fn run_ocr_profile_list() -> attune_core::error::Result<()> {
     let reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
-    println!("{:<14} {:<6} {:<5} {:<14} name", "id", "type", "dpi", "tags");
+    println!(
+        "{:<14} {:<6} {:<5} {:<14} name",
+        "id", "type", "dpi", "tags"
+    );
     println!("{}", "-".repeat(70));
     for p in reg.list() {
         let t = if p.builtin { "builtin" } else { "custom" };
         let tags = p.tags.join(",");
         // 中文 UTF-8 边界安全: 按 char 截断 (避免字节中切)
         let tags_short: String = tags.chars().take(14).collect();
-        println!("{:<14} {:<6} {:<5} {:<14} {}", p.id, t, p.dpi, tags_short, p.name);
+        println!(
+            "{:<14} {:<6} {:<5} {:<14} {}",
+            p.id, t, p.dpi, tags_short, p.name
+        );
     }
     Ok(())
 }
@@ -1637,7 +1833,9 @@ fn run_ocr_profile_show(id: &str) -> attune_core::error::Result<()> {
             println!("{body}");
             Ok(())
         }
-        None => Err(attune_core::error::VaultError::NotFound(format!("profile {id}"))),
+        None => Err(attune_core::error::VaultError::NotFound(format!(
+            "profile {id}"
+        ))),
     }
 }
 
@@ -1674,7 +1872,10 @@ fn run_ocr_profile_create(
     };
     let mut reg = attune_core::ocr::profile_registry::ProfileRegistry::load_default()?;
     reg.upsert(p)?;
-    eprintln!("✓ profile {id} 已写入 {}", attune_core::ocr::profile_registry::ProfileRegistry::default_path().display());
+    eprintln!(
+        "✓ profile {id} 已写入 {}",
+        attune_core::ocr::profile_registry::ProfileRegistry::default_path().display()
+    );
     Ok(())
 }
 
@@ -1768,10 +1969,10 @@ fn run_agent_flow(action: &FlowAction) -> attune_core::error::Result<()> {
                 )
             })?,
         };
-        let reg =
-            AgentRegistry::from_path(&reg_path).map_err(attune_core::error::VaultError::InvalidInput)?;
-        let flow_set =
-            FlowSet::from_path(&flows_path).map_err(attune_core::error::VaultError::InvalidInput)?;
+        let reg = AgentRegistry::from_path(&reg_path)
+            .map_err(attune_core::error::VaultError::InvalidInput)?;
+        let flow_set = FlowSet::from_path(&flows_path)
+            .map_err(attune_core::error::VaultError::InvalidInput)?;
         // Validate the typed-handoff chain against the registry before printing,
         // so `flow list` surfaces a load-time mis-wiring as an error.
         flow_set
@@ -1819,7 +2020,10 @@ fn run_agent_flow(action: &FlowAction) -> attune_core::error::Result<()> {
                 let opt = if optional { " [optional]" } else { "" };
                 match reg.get(step) {
                     None => {
-                        println!("    {}. {step}{opt} — UNREGISTERED (would skip/degrade)", i + 1);
+                        println!(
+                            "    {}. {step}{opt} — UNREGISTERED (would skip/degrade)",
+                            i + 1
+                        );
                     }
                     Some(agent) => {
                         let decision = scheduler.route(agent, None);
@@ -1943,7 +2147,10 @@ fn locate_named(name: &str) -> Option<std::path::PathBuf> {
 fn run_rollback(index: Option<usize>, yes: bool) -> attune_core::error::Result<()> {
     let entries = attune_core::backup::list_backups()?;
     if entries.is_empty() {
-        eprintln!("没有可用 backup(目录: {})", attune_core::backup::backup_dir()?.display());
+        eprintln!(
+            "没有可用 backup(目录: {})",
+            attune_core::backup::backup_dir()?.display()
+        );
         eprintln!("提示:升级前先跑 `attune pre-upgrade-backup` 创建备份。");
         return Ok(());
     }
@@ -1960,10 +2167,14 @@ fn run_rollback(index: Option<usize>, yes: bool) -> attune_core::error::Result<(
         Some(n) => {
             // 回滚模式
             if !yes {
-                eprintln!("⚠️  即将回滚 vault.db 到 backup #{}(自动备份当前 vault 防双失)。", n);
+                eprintln!(
+                    "⚠️  即将回滚 vault.db 到 backup #{}(自动备份当前 vault 防双失)。",
+                    n
+                );
                 eprintln!("    继续? 输入 'yes' 确认:");
                 let mut input = String::new();
-                std::io::stdin().read_line(&mut input)
+                std::io::stdin()
+                    .read_line(&mut input)
                     .map_err(attune_core::error::VaultError::Io)?;
                 if input.trim() != "yes" {
                     eprintln!("中止。");
@@ -1985,7 +2196,10 @@ fn run_vault_import(src: &std::path::Path, force: bool) -> attune_core::error::R
     let data = attune_core::platform::data_dir();
     let target_db = data.join("vault.db");
     if target_db.exists() && !force {
-        eprintln!("Refusing to import — {} already exists.", target_db.display());
+        eprintln!(
+            "Refusing to import — {} already exists.",
+            target_db.display()
+        );
         eprintln!("Use --force to overwrite (DANGEROUS, replaces current vault).");
         std::process::exit(1);
     }
@@ -2016,15 +2230,17 @@ fn run_vault_import(src: &std::path::Path, force: bool) -> attune_core::error::R
     }
     println!("Imported {copied} entries from {}", src.display());
     println!("Run `attune unlock` to verify with the matching master password.");
-    println!("If unlock fails, ensure device.key matches: {}",
-        attune_core::platform::device_secret_path().display());
+    println!(
+        "If unlock fails, ensure device.key matches: {}",
+        attune_core::platform::device_secret_path().display()
+    );
     Ok(())
 }
 
 /// `attune doc <action>` (T-11) — document intelligence on local files, vault-free.
 fn run_doc(action: &DocAction) -> attune_core::error::Result<()> {
-    use attune_core::document_intelligence::{compare, deep_summary, chapters};
     use attune_core::document_intelligence::model_routing::ModelRouter;
+    use attune_core::document_intelligence::{chapters, compare, deep_summary};
     use attune_core::llm::OllamaLlmProvider;
     use serde_json::json;
 
@@ -2032,16 +2248,33 @@ fn run_doc(action: &DocAction) -> attune_core::error::Result<()> {
     let router = ModelRouter::from_settings(&json!({}));
 
     match action {
-        DocAction::Compare { left, right, mode, model } => {
-            let a = std::fs::read_to_string(left)
-                .map_err(|e| attune_core::error::VaultError::InvalidInput(format!("read {}: {e}", left.display())))?;
-            let b = std::fs::read_to_string(right)
-                .map_err(|e| attune_core::error::VaultError::InvalidInput(format!("read {}: {e}", right.display())))?;
+        DocAction::Compare {
+            left,
+            right,
+            mode,
+            model,
+        } => {
+            let a = std::fs::read_to_string(left).map_err(|e| {
+                attune_core::error::VaultError::InvalidInput(format!(
+                    "read {}: {e}",
+                    left.display()
+                ))
+            })?;
+            let b = std::fs::read_to_string(right).map_err(|e| {
+                attune_core::error::VaultError::InvalidInput(format!(
+                    "read {}: {e}",
+                    right.display()
+                ))
+            })?;
             let cmode = match mode.as_str() {
                 "structural" => compare::CompareMode::Structural,
                 "textual" => compare::CompareMode::Textual,
                 "semantic" => compare::CompareMode::Semantic,
-                other => return Err(attune_core::error::VaultError::InvalidInput(format!("invalid mode: {other}"))),
+                other => {
+                    return Err(attune_core::error::VaultError::InvalidInput(format!(
+                        "invalid mode: {other}"
+                    )))
+                }
             };
             // semantic needs a local model; a CLI run is treated as a "member" so the layer runs.
             let member = cmode == compare::CompareMode::Semantic && model.is_some();
@@ -2049,29 +2282,59 @@ fn run_doc(action: &DocAction) -> attune_core::error::Result<()> {
                 Some(m) => Box::new(OllamaLlmProvider::with_model(m)),
                 None => Box::new(attune_core::llm::MockLlmProvider::new("none")),
             };
-            let llms = compare::StageLlms { cheap: llm.as_ref(), reasoning: llm.as_ref() };
-            let report = compare::compare(&a, &b, cmode, compare::OutputMode::Structured, member, &router, &llms)?;
+            let llms = compare::StageLlms {
+                cheap: llm.as_ref(),
+                reasoning: llm.as_ref(),
+            };
+            let report = compare::compare(
+                &a,
+                &b,
+                cmode,
+                compare::OutputMode::Structured,
+                member,
+                &router,
+                &llms,
+            )?;
             println!("structural diffs: {}", report.structural_diffs.len());
             for d in &report.structural_diffs {
-                println!("  [{}] {} (section {})", d.kind, d.heading_path, d.section_idx);
+                println!(
+                    "  [{}] {} (section {})",
+                    d.kind, d.heading_path, d.section_idx
+                );
             }
             println!("textual diff sections: {}", report.textual_diffs.len());
             if !report.semantic_verdicts.is_empty() {
                 println!("semantic verdicts:");
                 for v in &report.semantic_verdicts {
-                    println!("  section {}: {} — {}", v.section_idx, v.verdict, v.rationale);
+                    println!(
+                        "  section {}: {} — {}",
+                        v.section_idx, v.verdict, v.rationale
+                    );
                 }
             }
             print_bill(&report.token_bill);
         }
-        DocAction::Summarize { file, level, cheap_model, reasoning_model } => {
-            let text = std::fs::read_to_string(file)
-                .map_err(|e| attune_core::error::VaultError::InvalidInput(format!("read {}: {e}", file.display())))?;
+        DocAction::Summarize {
+            file,
+            level,
+            cheap_model,
+            reasoning_model,
+        } => {
+            let text = std::fs::read_to_string(file).map_err(|e| {
+                attune_core::error::VaultError::InvalidInput(format!(
+                    "read {}: {e}",
+                    file.display()
+                ))
+            })?;
             let lvl = match level.as_str() {
                 "brief" => deep_summary::SummaryLevel::Brief,
                 "standard" => deep_summary::SummaryLevel::Standard,
                 "detailed" => deep_summary::SummaryLevel::Detailed,
-                other => return Err(attune_core::error::VaultError::InvalidInput(format!("invalid level: {other}"))),
+                other => {
+                    return Err(attune_core::error::VaultError::InvalidInput(format!(
+                        "invalid level: {other}"
+                    )))
+                }
             };
             // Deep summary is a tier-3 LLM op (map+reduce). The CLI requires a local model;
             // without one we'd have nothing to call the reduce stage with. Per spec §11 R1 the
@@ -2083,29 +2346,47 @@ fn run_doc(action: &DocAction) -> attune_core::error::Result<()> {
                 )
             })?;
             let reasoning_name = reasoning_model.as_ref().unwrap_or(cheap_name);
-            let cheap: Box<dyn attune_core::llm::LlmProvider> = Box::new(OllamaLlmProvider::with_model(cheap_name));
-            let reasoning: Box<dyn attune_core::llm::LlmProvider> = Box::new(OllamaLlmProvider::with_model(reasoning_name));
-            let llms = deep_summary::StageLlms { cheap: cheap.as_ref(), reasoning: reasoning.as_ref() };
+            let cheap: Box<dyn attune_core::llm::LlmProvider> =
+                Box::new(OllamaLlmProvider::with_model(cheap_name));
+            let reasoning: Box<dyn attune_core::llm::LlmProvider> =
+                Box::new(OllamaLlmProvider::with_model(reasoning_name));
+            let llms = deep_summary::StageLlms {
+                cheap: cheap.as_ref(),
+                reasoning: reasoning.as_ref(),
+            };
             // Empty item_id → no cache layer (CLI is one-shot).
             let store = attune_core::store::Store::open_memory()?;
             let dek = attune_core::crypto::Key32::generate();
             let cfg = deep_summary::DeepSummaryConfig::default();
-            let (summary, bill) = deep_summary::summarize(&text, lvl, "", &router, &llms, &store, &dek, &cfg)?;
+            let (summary, bill) =
+                deep_summary::summarize(&text, lvl, "", &router, &llms, &store, &dek, &cfg)?;
             println!("== {} summary ==", summary.level);
             println!("{}", summary.overview);
             for ch in &summary.per_chapter {
-                let h = if ch.heading_path.is_empty() { "(untitled)" } else { ch.heading_path.as_str() };
+                let h = if ch.heading_path.is_empty() {
+                    "(untitled)"
+                } else {
+                    ch.heading_path.as_str()
+                };
                 println!("  • [{h}] {}", ch.summary);
             }
             print_bill(&bill);
         }
         DocAction::Chapters { file } => {
-            let text = std::fs::read_to_string(file)
-                .map_err(|e| attune_core::error::VaultError::InvalidInput(format!("read {}: {e}", file.display())))?;
+            let text = std::fs::read_to_string(file).map_err(|e| {
+                attune_core::error::VaultError::InvalidInput(format!(
+                    "read {}: {e}",
+                    file.display()
+                ))
+            })?;
             let entries = chapters::list(&text, 0.5);
             println!("chapters: {}", entries.len());
             for c in &entries {
-                let h = if c.heading_path.is_empty() { "(untitled)" } else { c.heading_path.as_str() };
+                let h = if c.heading_path.is_empty() {
+                    "(untitled)"
+                } else {
+                    c.heading_path.as_str()
+                };
                 let preview: String = c.extractive_preview.chars().take(60).collect();
                 println!("  [{}] {h}\n      {preview}", c.idx);
             }
@@ -2166,7 +2447,10 @@ mod cli_helpers_tests {
         let err = validate_ocr_profile_or_suggest(Some("zzzzzzzzzzzz")).unwrap_err();
         let msg = err.to_string();
         // No suggestion (edit distance too large); just lists valid set.
-        assert!(msg.contains("valid profiles"), "should list valid set: {msg}");
+        assert!(
+            msg.contains("valid profiles"),
+            "should list valid set: {msg}"
+        );
         assert!(msg.contains("document"));
     }
 

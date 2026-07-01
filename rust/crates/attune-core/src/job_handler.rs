@@ -216,7 +216,10 @@ mod tests {
         assert_eq!(j.state, JobState::Done);
         assert!(j.result_json.unwrap().contains("echo"));
         // initial stage surfaced while running, persisted after done.
-        assert_eq!(j.stage_json.as_deref(), Some("{\"stage\":\"transcribing\"}"));
+        assert_eq!(
+            j.stage_json.as_deref(),
+            Some("{\"stage\":\"transcribing\"}")
+        );
         assert_eq!(j.attempts, 1);
     }
 

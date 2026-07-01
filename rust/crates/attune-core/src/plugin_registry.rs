@@ -114,16 +114,18 @@ impl PluginRegistry {
     ///
     /// 只 yield 真正声明了 `registers_skills` 的 plugin(其余 yaml 列表为空,自然不贡献)。
     /// OSS 裸装 → plugins 空 → 返空 Vec。
-    pub fn plugin_registered_skills(
-        &self,
-    ) -> Vec<(&str, crate::plugin_sig::Trust, &[String])> {
+    pub fn plugin_registered_skills(&self) -> Vec<(&str, crate::plugin_sig::Trust, &[String])> {
         let mut out = Vec::new();
         for p in self.plugins.values() {
             if p.registered_skill_yamls.is_empty() {
                 continue;
             }
             let id = p.manifest.id.as_str();
-            let trust = self.trust.get(id).copied().unwrap_or(crate::plugin_sig::Trust::Unsigned);
+            let trust = self
+                .trust
+                .get(id)
+                .copied()
+                .unwrap_or(crate::plugin_sig::Trust::Unsigned);
             out.push((id, trust, p.registered_skill_yamls.as_slice()));
         }
         out
@@ -142,8 +144,13 @@ impl PluginRegistry {
     }
 
     /// 按 plugin_type 过滤已加载 plugin
-    pub fn plugins_by_type<'a>(&'a self, ptype: &'a str) -> impl Iterator<Item = &'a LoadedPlugin> + 'a {
-        self.plugins.values().filter(move |p| p.manifest.plugin_type == ptype)
+    pub fn plugins_by_type<'a>(
+        &'a self,
+        ptype: &'a str,
+    ) -> impl Iterator<Item = &'a LoadedPlugin> + 'a {
+        self.plugins
+            .values()
+            .filter(move |p| p.manifest.plugin_type == ptype)
     }
 
     /// v0.6 新增：聚合所有 plugin 的 PII 正则（按 name 去重；同名仅保留第一个）。
@@ -245,7 +252,9 @@ impl PluginRegistry {
             if domain.is_empty() {
                 continue;
             }
-            let Some(ct) = p.manifest.chat_trigger.as_ref() else { continue };
+            let Some(ct) = p.manifest.chat_trigger.as_ref() else {
+                continue;
+            };
             if ct.project_keywords.is_empty() {
                 continue;
             }
@@ -330,7 +339,11 @@ impl PluginRegistry {
         let mut out = Vec::new();
         for (pid, p) in &self.plugins {
             let m = &p.manifest;
-            let plugin_label = if m.name.is_empty() { pid.clone() } else { m.name.clone() };
+            let plugin_label = if m.name.is_empty() {
+                pid.clone()
+            } else {
+                m.name.clone()
+            };
             for a in &m.agents {
                 // library runtime 不暴露独立 binary → 不出卡(与 agents.rs dispatch gate 一致)。
                 if a.runtime == "library" {
@@ -393,14 +406,18 @@ impl PluginRegistry {
         use regex::Regex;
         let mut best: Option<ChatTriggerMatch> = None;
         for (plugin_id, p) in &self.plugins {
-            let Some(ct) = p.manifest.chat_trigger.as_ref() else { continue };
+            let Some(ct) = p.manifest.chat_trigger.as_ref() else {
+                continue;
+            };
             if !ct.enabled {
                 continue;
             }
 
             // 否决检查
             let excluded = ct.exclude_patterns.iter().any(|pat| {
-                Regex::new(pat).map(|r| r.is_match(user_msg)).unwrap_or(false)
+                Regex::new(pat)
+                    .map(|r| r.is_match(user_msg))
+                    .unwrap_or(false)
             });
             if excluded {
                 continue;
@@ -408,11 +425,17 @@ impl PluginRegistry {
 
             // pattern 命中
             let pattern_hit = ct.patterns.iter().any(|pat| {
-                Regex::new(pat).map(|r| r.is_match(user_msg)).unwrap_or(false)
+                Regex::new(pat)
+                    .map(|r| r.is_match(user_msg))
+                    .unwrap_or(false)
             });
 
             // keywords 命中数
-            let kw_hits = ct.keywords.iter().filter(|kw| user_msg.contains(kw.as_str())).count();
+            let kw_hits = ct
+                .keywords
+                .iter()
+                .filter(|kw| user_msg.contains(kw.as_str()))
+                .count();
             let kw_match = kw_hits >= ct.min_keyword_match.max(1);
 
             if pattern_hit || kw_match {
@@ -423,7 +446,11 @@ impl PluginRegistry {
                     needs_confirm: ct.needs_confirm,
                     keyword_hits: kw_hits,
                 };
-                if best.as_ref().map(|b| m.priority > b.priority).unwrap_or(true) {
+                if best
+                    .as_ref()
+                    .map(|b| m.priority > b.priority)
+                    .unwrap_or(true)
+                {
                     best = Some(m);
                 }
             }
@@ -434,10 +461,19 @@ impl PluginRegistry {
     /// 扫描 plugins_root, 自动解密 paid plugin (如提供 key) — 后续扩展用.
     ///
     /// 调用方典型: 在 attune-server 启动时, 从用户 license 拿 decrypt_key 透传.
-    pub fn scan_with_key(plugins_root: &Path, decrypt_key: Option<&[u8]>) -> Result<(Self, Vec<String>)> {
+    pub fn scan_with_key(
+        plugins_root: &Path,
+        decrypt_key: Option<&[u8]>,
+    ) -> Result<(Self, Vec<String>)> {
         // 默认 trust_mode = Off(load-all,保持现有行为);trust 标签来自**真实**验签。
         // 按 trust_mode 过滤的 server 路径走 [`scan_with_trust`](T11 settings 注入 mode)。
-        Self::scan_impl(plugins_root, decrypt_key, crate::plugin_sig::TrustMode::Off, &[], crate::plugin_sig::OFFICIAL_PUBLIC_KEYS)
+        Self::scan_impl(
+            plugins_root,
+            decrypt_key,
+            crate::plugin_sig::TrustMode::Off,
+            &[],
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+        )
     }
 
     /// 扫描 plugins_root 下每个一级子目录作为一个 plugin。
@@ -445,7 +481,13 @@ impl PluginRegistry {
     ///
     /// **best-effort 加载** — 单个 plugin 失败不影响其他。返回错误数量供 caller 决定是否告警。
     pub fn scan(plugins_root: &Path) -> Result<(Self, Vec<String>)> {
-        Self::scan_impl(plugins_root, None, crate::plugin_sig::TrustMode::Off, &[], crate::plugin_sig::OFFICIAL_PUBLIC_KEYS)
+        Self::scan_impl(
+            plugins_root,
+            None,
+            crate::plugin_sig::TrustMode::Off,
+            &[],
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+        )
     }
 
     /// T9:按真实签名验证 + `trust_mode` 三态门过滤扫描。每个 plugin dir 跑
@@ -459,7 +501,13 @@ impl PluginRegistry {
         mode: crate::plugin_sig::TrustMode,
         user_pubkeys: &[String],
     ) -> Result<(Self, Vec<String>)> {
-        Self::scan_impl(plugins_root, decrypt_key, mode, user_pubkeys, crate::plugin_sig::OFFICIAL_PUBLIC_KEYS)
+        Self::scan_impl(
+            plugins_root,
+            decrypt_key,
+            mode,
+            user_pubkeys,
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+        )
     }
 
     /// 内核。`official_keys` 可注入(测试走 Official 路径 —— 内嵌 anchor const 无私钥)。
@@ -494,10 +542,16 @@ impl PluginRegistry {
                     .unwrap_or(SigOutcome::Unsigned);
                 let real_trust: Trust = outcome.trust();
                 // dir name (for the reject error message) — best-effort.
-                let dir_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+                let dir_name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_string();
                 match gate(outcome, mode) {
                     TrustDecision::Reject(code) => {
-                        errors.push(format!("[{code}] {dir_name}: rejected by trust_mode={mode:?}"));
+                        errors.push(format!(
+                            "[{code}] {dir_name}: rejected by trust_mode={mode:?}"
+                        ));
                         continue;
                     }
                     TrustDecision::Allow | TrustDecision::AllowWarn(_) => {}
@@ -519,9 +573,7 @@ impl PluginRegistry {
                                     continue;
                                 }
                                 Err(e) => {
-                                    errors.push(format!(
-                                        "[invalid-min-version] {pid}: {e}"
-                                    ));
+                                    errors.push(format!("[invalid-min-version] {pid}: {e}"));
                                     continue;
                                 }
                             }
@@ -537,10 +589,12 @@ impl PluginRegistry {
                                     if wfp.extension().and_then(|s| s.to_str()) == Some("yaml") {
                                         match std::fs::read_to_string(&wfp) {
                                             Ok(yaml) => match parse_workflow_yaml(&yaml) {
-                                                Ok(workflow) => reg.workflows.push(LoadedWorkflow {
-                                                    plugin_id: pid.clone(),
-                                                    workflow,
-                                                }),
+                                                Ok(workflow) => {
+                                                    reg.workflows.push(LoadedWorkflow {
+                                                        plugin_id: pid.clone(),
+                                                        workflow,
+                                                    })
+                                                }
                                                 Err(e) => errors.push(format!(
                                                     "{}: workflow yaml parse: {}",
                                                     wfp.display(),
@@ -566,7 +620,10 @@ impl PluginRegistry {
                                     if cap_path.is_dir() && cap_path.join("plugin.yaml").exists() {
                                         match LoadedPlugin::from_dir(&cap_path) {
                                             Ok(cap_plugin) => {
-                                                reg.plugins.insert(cap_plugin.manifest.id.clone(), cap_plugin);
+                                                reg.plugins.insert(
+                                                    cap_plugin.manifest.id.clone(),
+                                                    cap_plugin,
+                                                );
                                             }
                                             Err(e) => errors.push(format!(
                                                 "{}: capability load: {}",
@@ -668,9 +725,13 @@ min_attune_version: "99.0.0"
 "#,
         );
         let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
-        assert!(reg.get_plugin("future-plugin").is_none(), "incompatible plugin must be skipped");
         assert!(
-            errs.iter().any(|e| e.starts_with("[incompatible]") && e.contains("future-plugin")),
+            reg.get_plugin("future-plugin").is_none(),
+            "incompatible plugin must be skipped"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.starts_with("[incompatible]") && e.contains("future-plugin")),
             "expected [incompatible] warning, got {errs:?}"
         );
     }
@@ -690,7 +751,10 @@ min_attune_version: "0.0.1"
 "#,
         );
         let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
-        assert!(reg.get_plugin("compat-plugin").is_some(), "satisfiable min must load");
+        assert!(
+            reg.get_plugin("compat-plugin").is_some(),
+            "satisfiable min must load"
+        );
         assert!(errs.is_empty(), "no warning expected, got {errs:?}");
     }
 
@@ -728,7 +792,10 @@ min_attune_version: "not-a-semver"
 "#,
         );
         let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
-        assert!(reg.get_plugin("bad-version-plugin").is_none(), "invalid min must skip");
+        assert!(
+            reg.get_plugin("bad-version-plugin").is_none(),
+            "invalid min must skip"
+        );
         assert!(
             errs.iter().any(|e| e.starts_with("[invalid-min-version]") && e.contains("bad-version-plugin")),
             "expected [invalid-min-version] warning, got {errs:?}"
@@ -925,7 +992,11 @@ steps:
         // 这是 oss-pro-strategy v2 §4.3 边界规则的代码层验证.
         let reg = PluginRegistry::new();
         let kws = reg.all_chat_trigger_project_keywords();
-        assert!(kws.is_empty(), "OSS-only registry must have no keywords, got: {:?}", kws);
+        assert!(
+            kws.is_empty(),
+            "OSS-only registry must have no keywords, got: {:?}",
+            kws
+        );
     }
 
     #[test]
@@ -974,7 +1045,12 @@ chat_trigger:
         let kws = reg.all_chat_trigger_project_keywords();
         // dedupe: "案件" 在两个 plugin 中, 只应出现一次
         let unique: std::collections::HashSet<&str> = kws.iter().copied().collect();
-        assert_eq!(unique.len(), 5, "5 unique keywords (诉讼/合同/案件/专利/申请), got: {:?}", kws);
+        assert_eq!(
+            unique.len(),
+            5,
+            "5 unique keywords (诉讼/合同/案件/专利/申请), got: {:?}",
+            kws
+        );
         assert!(kws.contains(&"案件"));
         assert!(kws.contains(&"诉讼"));
         assert!(kws.contains(&"专利"));
@@ -1050,7 +1126,12 @@ chat_trigger:
         let by_domain = reg.all_chat_trigger_keywords_by_domain();
         let domains: std::collections::HashSet<&str> =
             by_domain.iter().map(|(d, _)| d.as_str()).collect();
-        assert_eq!(domains.len(), 2, "只有 legal/medical 两 domain，nocat 被跳过: {:?}", by_domain);
+        assert_eq!(
+            domains.len(),
+            2,
+            "只有 legal/medical 两 domain，nocat 被跳过: {:?}",
+            by_domain
+        );
         assert!(domains.contains("legal"));
         assert!(domains.contains("medical"));
         assert!(!domains.contains(""), "空 category 不得成为 domain");
@@ -1105,7 +1186,12 @@ chat_trigger:
         assert!(errs.is_empty(), "scan errors: {:?}", errs);
 
         let by_domain = reg.all_chat_trigger_keywords_by_domain();
-        assert_eq!(by_domain.len(), 1, "合并为单个 legal domain: {:?}", by_domain);
+        assert_eq!(
+            by_domain.len(),
+            1,
+            "合并为单个 legal domain: {:?}",
+            by_domain
+        );
         let (dom, kws) = &by_domain[0];
         assert_eq!(dom, "legal");
         let unique: std::collections::HashSet<&str> = kws.iter().copied().collect();
@@ -1160,7 +1246,9 @@ chat_trigger:
         let (reg, _) = PluginRegistry::scan(tmp.path()).expect("scan");
 
         // 命中 1 个关键词 → match (min_keyword_match=1)
-        let m = reg.match_chat_trigger("我想问问任其坤应付多少利息").expect("match");
+        let m = reg
+            .match_chat_trigger("我想问问任其坤应付多少利息")
+            .expect("match");
         assert_eq!(m.plugin_id, "law-pro");
         assert_eq!(m.priority, 10);
         assert!(m.keyword_hits >= 2); // "应付" + "利息"
@@ -1332,7 +1420,7 @@ mcp_servers:
         assert_eq!(mcps.len(), 1);
         assert_eq!(mcps[0].1.id, "lpr_history");
         assert_eq!(mcps[0].1.transport, "stdio");
-        assert_eq!(mcps[0].1.lifecycle, "eager");  // 默认值
+        assert_eq!(mcps[0].1.lifecycle, "eager"); // 默认值
         assert_eq!(mcps[0].1.heartbeat_interval_seconds, 30);
     }
 
@@ -1446,8 +1534,14 @@ chat_trigger:
             &[&official_hex],
         )
         .unwrap();
-        assert!(errs.is_empty(), "official plugin must load in strict, got: {errs:?}");
-        assert_eq!(reg.plugin_trust("off-plug"), Some(crate::plugin_sig::Trust::Official));
+        assert!(
+            errs.is_empty(),
+            "official plugin must load in strict, got: {errs:?}"
+        );
+        assert_eq!(
+            reg.plugin_trust("off-plug"),
+            Some(crate::plugin_sig::Trust::Official)
+        );
     }
 
     #[test]
@@ -1466,15 +1560,25 @@ chat_trigger:
             &[&official_hex],
         )
         .unwrap();
-        assert!(reg.get_plugin("tampered-plug").is_none(), "invalid sig must be rejected in warn");
-        assert!(errs.iter().any(|e| e.contains("plugin-sig-invalid")), "errors: {errs:?}");
+        assert!(
+            reg.get_plugin("tampered-plug").is_none(),
+            "invalid sig must be rejected in warn"
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("plugin-sig-invalid")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
     fn unsigned_dir_rejected_in_strict() {
         // Hand-copied unsigned plugin dir (no plugin.sig) → strict rejects at scan.
         let tmp = TempDir::new().unwrap();
-        write_plugin_dir(tmp.path(), "unsigned-plug", "id: unsigned-plug\nname: U\ntype: industry\nversion: \"1.0.0\"\n");
+        write_plugin_dir(
+            tmp.path(),
+            "unsigned-plug",
+            "id: unsigned-plug\nname: U\ntype: industry\nversion: \"1.0.0\"\n",
+        );
         let (reg, errs) = PluginRegistry::scan_with_injected_official(
             tmp.path(),
             crate::plugin_sig::TrustMode::Strict,
@@ -1482,8 +1586,14 @@ chat_trigger:
             &[],
         )
         .unwrap();
-        assert!(reg.get_plugin("unsigned-plug").is_none(), "unsigned rejected in strict");
-        assert!(errs.iter().any(|e| e.contains("plugin-unsigned-strict")), "errors: {errs:?}");
+        assert!(
+            reg.get_plugin("unsigned-plug").is_none(),
+            "unsigned rejected in strict"
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("plugin-unsigned-strict")),
+            "errors: {errs:?}"
+        );
     }
 
     #[test]
@@ -1491,7 +1601,11 @@ chat_trigger:
         // In warn, an unsigned plugin loads but with the REAL Trust::Unsigned label
         // (not a hardcoded Official/ThirdParty).
         let tmp = TempDir::new().unwrap();
-        write_plugin_dir(tmp.path(), "u2", "id: u2\nname: U\ntype: industry\nversion: \"1.0.0\"\n");
+        write_plugin_dir(
+            tmp.path(),
+            "u2",
+            "id: u2\nname: U\ntype: industry\nversion: \"1.0.0\"\n",
+        );
         let (reg, _errs) = PluginRegistry::scan_with_injected_official(
             tmp.path(),
             crate::plugin_sig::TrustMode::Warn,
@@ -1499,7 +1613,10 @@ chat_trigger:
             &[],
         )
         .unwrap();
-        assert_eq!(reg.plugin_trust("u2"), Some(crate::plugin_sig::Trust::Unsigned));
+        assert_eq!(
+            reg.plugin_trust("u2"),
+            Some(crate::plugin_sig::Trust::Unsigned)
+        );
     }
 
     /// T12 §10 grandfather regression: an already-installed UNSIGNED plugin must still
@@ -1509,7 +1626,11 @@ chat_trigger:
     #[test]
     fn grandfather_unsigned_loads_in_warn() {
         let tmp = TempDir::new().unwrap();
-        write_plugin_dir(tmp.path(), "legacy-unsigned", "id: legacy-unsigned\nname: Legacy\ntype: industry\nversion: \"1.0.0\"\n");
+        write_plugin_dir(
+            tmp.path(),
+            "legacy-unsigned",
+            "id: legacy-unsigned\nname: Legacy\ntype: industry\nversion: \"1.0.0\"\n",
+        );
         let (reg, _errs) = PluginRegistry::scan_with_injected_official(
             tmp.path(),
             crate::plugin_sig::TrustMode::Warn,
@@ -1518,8 +1639,14 @@ chat_trigger:
         )
         .unwrap();
         // Loaded (grandfathered) AND labelled with the real unsigned trust (yellow badge).
-        assert!(reg.get_plugin("legacy-unsigned").is_some(), "warn must grandfather an unsigned plugin");
-        assert_eq!(reg.plugin_trust("legacy-unsigned"), Some(crate::plugin_sig::Trust::Unsigned));
+        assert!(
+            reg.get_plugin("legacy-unsigned").is_some(),
+            "warn must grandfather an unsigned plugin"
+        );
+        assert_eq!(
+            reg.plugin_trust("legacy-unsigned"),
+            Some(crate::plugin_sig::Trust::Unsigned)
+        );
     }
 
     #[test]
@@ -1536,8 +1663,14 @@ chat_trigger:
             &[],
         )
         .unwrap();
-        assert!(errs.is_empty(), "whitelisted third-party loads in strict, got: {errs:?}");
-        assert_eq!(reg.plugin_trust("tp-plug"), Some(crate::plugin_sig::Trust::ThirdParty));
+        assert!(
+            errs.is_empty(),
+            "whitelisted third-party loads in strict, got: {errs:?}"
+        );
+        assert_eq!(
+            reg.plugin_trust("tp-plug"),
+            Some(crate::plugin_sig::Trust::ThirdParty)
+        );
     }
 
     #[test]
@@ -1545,9 +1678,16 @@ chat_trigger:
         // The public scan() (mode=Off) now labels an unsigned plugin as the REAL
         // Trust::Unsigned — proving the hardcoded Trust::ThirdParty is gone.
         let tmp = TempDir::new().unwrap();
-        write_plugin_dir(tmp.path(), "p", "id: p\nname: P\ntype: industry\nversion: \"1.0.0\"\n");
+        write_plugin_dir(
+            tmp.path(),
+            "p",
+            "id: p\nname: P\ntype: industry\nversion: \"1.0.0\"\n",
+        );
         let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
-        assert_eq!(reg.plugin_trust("p"), Some(crate::plugin_sig::Trust::Unsigned));
+        assert_eq!(
+            reg.plugin_trust("p"),
+            Some(crate::plugin_sig::Trust::Unsigned)
+        );
     }
 
     // ── all_scenarios() 派生 (spec §9 单元下限 ≥6) ───────────────────────────
@@ -1594,7 +1734,10 @@ ui_components:
         let scenarios = reg.all_scenarios();
         assert_eq!(scenarios.len(), 2, "two non-library agents → two cards");
 
-        let loan = scenarios.iter().find(|s| s.agent_id == "civil_loan_agent").unwrap();
+        let loan = scenarios
+            .iter()
+            .find(|s| s.agent_id == "civil_loan_agent")
+            .unwrap();
         assert_eq!(loan.label, "借贷本息计算", "label 取 scenario");
         assert_eq!(loan.plugin_label, "律师助手");
         assert_eq!(loan.cost_tier, "free");
@@ -1603,7 +1746,10 @@ ui_components:
         assert!(loan.has_form);
         assert_eq!(loan.form_ref.as_ref().unwrap().form_id, "civil_loan");
 
-        let fact = scenarios.iter().find(|s| s.agent_id == "fact_extractor_agent").unwrap();
+        let fact = scenarios
+            .iter()
+            .find(|s| s.agent_id == "fact_extractor_agent")
+            .unwrap();
         assert_eq!(fact.cost_tier, "cloud", "llm_tokens>0 → cloud");
         assert!(fact.llm_required);
         assert!(!fact.has_form, "no ui_component for this agent");
@@ -1659,8 +1805,14 @@ agents:
         );
         let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
         let scenarios = reg.all_scenarios();
-        let desc = scenarios.iter().find(|s| s.agent_id == "a_with_desc").unwrap();
-        assert_eq!(desc.label, "医学术语规范化", "缺 scenario → 回退 description");
+        let desc = scenarios
+            .iter()
+            .find(|s| s.agent_id == "a_with_desc")
+            .unwrap();
+        assert_eq!(
+            desc.label, "医学术语规范化",
+            "缺 scenario → 回退 description"
+        );
         let bare = scenarios.iter().find(|s| s.agent_id == "a_bare").unwrap();
         assert_eq!(bare.label, "a_bare", "全缺 → 回退 agent_id");
     }
@@ -1687,7 +1839,10 @@ agents:
         let (reg, _) = PluginRegistry::scan(tmp.path()).unwrap();
         let scenarios = reg.all_scenarios();
         assert_eq!(scenarios.len(), 1);
-        assert_eq!(scenarios[0].case_kind, None, "无 case_kind → None,不绑 Project");
+        assert_eq!(
+            scenarios[0].case_kind, None,
+            "无 case_kind → None,不绑 Project"
+        );
         assert_eq!(scenarios[0].cost_tier, "free", "未声明 llm_tokens → free");
     }
 

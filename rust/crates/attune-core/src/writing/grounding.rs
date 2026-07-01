@@ -149,7 +149,11 @@ fn locate_span_u16(source: &str, segment_text: &str) -> Option<[u32; 2]> {
     // Try the whole normalized segment, then progressively shorter leading windows so a
     // lightly-reworded segment still pins to its source region (recall over precision).
     let seg_chars: Vec<char> = norm_seg.chars().collect();
-    for take in [seg_chars.len(), seg_chars.len() * 3 / 4, seg_chars.len() / 2] {
+    for take in [
+        seg_chars.len(),
+        seg_chars.len() * 3 / 4,
+        seg_chars.len() / 2,
+    ] {
         if take < 4 {
             break;
         }
@@ -540,7 +544,8 @@ pub fn ground_segments_with_judge(
         // Only spend a judge call on a real factual claim (mirrors the deterministic non-claim gate)
         // and only while budget remains.
         let seg_token_count = tokenize(&seg.text).len();
-        if seg_token_count < cfg.min_claim_tokens || (judge_calls as usize) >= cfg_judge.max_judge_calls
+        if seg_token_count < cfg.min_claim_tokens
+            || (judge_calls as usize) >= cfg_judge.max_judge_calls
         {
             still_unverified.push(seg.offset);
             continue;
@@ -662,7 +667,10 @@ mod tests {
     #[test]
     fn non_claim_segment_is_trivially_verified() {
         let mut segs = vec![seg("综上。", [0, 3])];
-        let sources = vec![SourceMaterial::new("item-1", "unrelated content here entirely")];
+        let sources = vec![SourceMaterial::new(
+            "item-1",
+            "unrelated content here entirely",
+        )];
         let unverified = ground_segments(&mut segs, &sources, &GroundingConfig::default());
         assert!(unverified.is_empty());
         assert!(segs[0].verified);
@@ -670,10 +678,7 @@ mod tests {
 
     #[test]
     fn picks_highest_overlap_source() {
-        let mut segs = vec![seg(
-            "ownership and borrowing prevent data races",
-            [0, 10],
-        )];
+        let mut segs = vec![seg("ownership and borrowing prevent data races", [0, 10])];
         let sources = vec![
             SourceMaterial::new("weak", "ownership is a concept"),
             SourceMaterial::new(
@@ -687,7 +692,10 @@ mod tests {
 
     #[test]
     fn external_source_grounds_as_external_kind() {
-        let mut segs = vec![seg("photosynthesis converts light into chemical energy", [0, 10])];
+        let mut segs = vec![seg(
+            "photosynthesis converts light into chemical energy",
+            [0, 10],
+        )];
         let sources = vec![SourceMaterial::new(
             "", // empty item_id ⇒ external
             "Photosynthesis converts light energy into chemical energy stored in glucose.",
@@ -764,8 +772,14 @@ mod tests {
         // proportional path: 2/3 ≈ 0.67 ≥ 0.34 AND 2 ≥ floor(2) → SHOULD ground (recall fix).
         assert_eq!(overlap, 2, "GT: exactly 2 shared bigrams (索引,查询)");
         assert!(seg_toks.len() >= 3, "GT: segment has ≥3 content bigrams");
-        assert!(overlap < cfg.min_overlap_tokens, "GT: below the old absolute threshold");
-        assert!(cfg.is_grounded(overlap, seg_toks.len()), "GT: proportional path accepts");
+        assert!(
+            overlap < cfg.min_overlap_tokens,
+            "GT: below the old absolute threshold"
+        );
+        assert!(
+            cfg.is_grounded(overlap, seg_toks.len()),
+            "GT: proportional path accepts"
+        );
 
         // Now run the production path and confirm the segment grounds, while a fabricated control
         // ("量子计算将取代经典计算机") sharing nothing stays unverified (no-fabrication held).
@@ -775,8 +789,14 @@ mod tests {
         ];
         let sources = vec![SourceMaterial::new("s1", src_text)];
         let unverified = ground_segments(&mut segs, &sources, &cfg);
-        assert!(segs[0].verified, "short paraphrase must ground via proportional path");
-        assert!(!segs[1].verified, "fabricated sentence must stay unverified");
+        assert!(
+            segs[0].verified,
+            "short paraphrase must ground via proportional path"
+        );
+        assert!(
+            !segs[1].verified,
+            "fabricated sentence must stay unverified"
+        );
         assert_eq!(unverified, vec![[4, 16]]);
     }
 
@@ -785,7 +805,10 @@ mod tests {
         // GT independent: fullwidth "ＲＮＮ" and "ＣＮＮ" should token-match the halfwidth source.
         let a = tokenize("ＲＮＮ model trains slowly");
         let b = tokenize("rnn model trains slowly");
-        assert_eq!(a, b, "fullwidth latin must fold to halfwidth before tokenizing");
+        assert_eq!(
+            a, b,
+            "fullwidth latin must fold to halfwidth before tokenizing"
+        );
     }
 
     #[test]
@@ -876,18 +899,19 @@ mod tests {
     #[test]
     fn integration_split_then_ground() {
         // Both generated sentences reuse ≥3 source content words → both ground.
-        let content = "The ownership system enforces memory safety. The borrow checker runs at compile time.";
+        let content =
+            "The ownership system enforces memory safety. The borrow checker runs at compile time.";
         let pairs = split_segments(content);
-        let mut segs: Vec<Segment> = pairs
-            .into_iter()
-            .map(|(t, off)| seg(&t, off))
-            .collect();
+        let mut segs: Vec<Segment> = pairs.into_iter().map(|(t, off)| seg(&t, off)).collect();
         let sources = vec![SourceMaterial::new(
             "rust-book",
             "The ownership system enforces memory safety without a garbage collector. The borrow checker runs at compile time to validate references.",
         )];
         let unverified = ground_segments(&mut segs, &sources, &GroundingConfig::default());
-        assert!(unverified.is_empty(), "both sentences should ground: {unverified:?}");
+        assert!(
+            unverified.is_empty(),
+            "both sentences should ground: {unverified:?}"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -907,13 +931,20 @@ mod tests {
     }
     impl MockJudge {
         fn new(verdict_json: &str) -> Self {
-            Self { verdict_json: verdict_json.to_string(), available: true, calls: std::sync::Mutex::new(0) }
+            Self {
+                verdict_json: verdict_json.to_string(),
+                available: true,
+                calls: std::sync::Mutex::new(0),
+            }
         }
     }
     impl _LlmProviderTrait for MockJudge {
         fn chat(&self, _s: &str, _u: &str) -> crate::error::Result<(String, TokenUsage)> {
             *self.calls.lock().unwrap() += 1;
-            Ok((self.verdict_json.clone(), TokenUsage::empty("mock", "mock-judge")))
+            Ok((
+                self.verdict_json.clone(),
+                TokenUsage::empty("mock", "mock-judge"),
+            ))
         }
         fn chat_with_format_json(
             &self,
@@ -922,7 +953,10 @@ mod tests {
             _schema: Option<&Value>,
         ) -> crate::error::Result<(String, TokenUsage)> {
             *self.calls.lock().unwrap() += 1;
-            Ok((self.verdict_json.clone(), TokenUsage::empty("mock", "mock-judge")))
+            Ok((
+                self.verdict_json.clone(),
+                TokenUsage::empty("mock", "mock-judge"),
+            ))
         }
         fn is_available(&self) -> bool {
             self.available
@@ -933,7 +967,10 @@ mod tests {
     }
 
     fn judge_cfg_on() -> JudgeConfig {
-        JudgeConfig { enabled: true, ..Default::default() }
+        JudgeConfig {
+            enabled: true,
+            ..Default::default()
+        }
     }
 
     // ① HAPPY: an abstractive sentence the token-overlap path misses, that the judge supports with
@@ -950,20 +987,40 @@ mod tests {
         // Confirm the deterministic path alone would leave it unverified (GT for the uplift).
         let mut det = segs.clone();
         let det_unv = ground_segments(&mut det, &sources, &GroundingConfig::default());
-        assert!(det_unv.contains(&[0, 18]), "GT: deterministic leaves the abstractive sentence unverified");
+        assert!(
+            det_unv.contains(&[0, 18]),
+            "GT: deterministic leaves the abstractive sentence unverified"
+        );
 
         let verdict = json!({
             "supported": true, "span_id": "c1",
             "evidence_quote": "自注意力机制可以并行处理整个序列"
-        }).to_string();
+        })
+        .to_string();
         let judge = MockJudge::new(&verdict);
         let out = ground_segments_with_judge(
-            &mut segs, &sources, &GroundingConfig::default(), &judge_cfg_on(), Some(&judge),
+            &mut segs,
+            &sources,
+            &GroundingConfig::default(),
+            &judge_cfg_on(),
+            Some(&judge),
         );
-        assert!(segs[0].verified, "judge with a real quote must credit the sentence");
-        assert!(segs[0].grounding[0].judge_elevated, "credited ref must be judge_elevated");
-        assert_eq!(segs[0].grounding[0].overlap_tokens, 0, "judge-elevated ref carries 0 token-overlap");
-        assert!(out.unverified_spans.is_empty(), "credited sentence drops out of unverified");
+        assert!(
+            segs[0].verified,
+            "judge with a real quote must credit the sentence"
+        );
+        assert!(
+            segs[0].grounding[0].judge_elevated,
+            "credited ref must be judge_elevated"
+        );
+        assert_eq!(
+            segs[0].grounding[0].overlap_tokens, 0,
+            "judge-elevated ref carries 0 token-overlap"
+        );
+        assert!(
+            out.unverified_spans.is_empty(),
+            "credited sentence drops out of unverified"
+        );
         assert_eq!(out.judge_credited, 1);
     }
 
@@ -984,14 +1041,25 @@ mod tests {
         let mut segs = vec![seg(fabricated, [0, 12])];
         let sources = vec![SourceMaterial::new("s1", src_text)];
         // Judge maliciously claims support with a quote that is not in the source.
-        let verdict = json!({"supported": true, "span_id": "c1", "evidence_quote": bogus_quote}).to_string();
+        let verdict =
+            json!({"supported": true, "span_id": "c1", "evidence_quote": bogus_quote}).to_string();
         let judge = MockJudge::new(&verdict);
         let out = ground_segments_with_judge(
-            &mut segs, &sources, &GroundingConfig::default(), &judge_cfg_on(), Some(&judge),
+            &mut segs,
+            &sources,
+            &GroundingConfig::default(),
+            &judge_cfg_on(),
+            Some(&judge),
         );
-        assert!(!segs[0].verified, "fabricated sentence must NOT be credited (no-fabrication red line)");
+        assert!(
+            !segs[0].verified,
+            "fabricated sentence must NOT be credited (no-fabrication red line)"
+        );
         assert!(segs[0].grounding.is_empty());
-        assert_eq!(out.judge_credited, 0, "the re-link guard rejected the lying judge");
+        assert_eq!(
+            out.judge_credited, 0,
+            "the re-link guard rejected the lying judge"
+        );
         assert!(out.unverified_spans.contains(&[0, 12]));
     }
 
@@ -1004,10 +1072,16 @@ mod tests {
         let mut segs = vec![seg("绿色植物制造养分。", [0, 9])];
         let sources = vec![SourceMaterial::new("s1", src_text)];
         // Real quote but a span_id that does not exist among candidates → reject.
-        let verdict = json!({"supported": true, "span_id": "c999", "evidence_quote": "葡萄糖中的化学能"}).to_string();
+        let verdict =
+            json!({"supported": true, "span_id": "c999", "evidence_quote": "葡萄糖中的化学能"})
+                .to_string();
         let judge = MockJudge::new(&verdict);
         let out = ground_segments_with_judge(
-            &mut segs, &sources, &GroundingConfig::default(), &judge_cfg_on(), Some(&judge),
+            &mut segs,
+            &sources,
+            &GroundingConfig::default(),
+            &judge_cfg_on(),
+            Some(&judge),
         );
         assert!(!segs[0].verified, "nonexistent span_id must not credit");
         assert_eq!(out.judge_credited, 0);
@@ -1022,11 +1096,20 @@ mod tests {
         let mut segs = vec![seg("它显著提升检索效率。", [0, 10])];
         let sources = vec![SourceMaterial::new("s1", src_text)];
         // "查询" (2 chars) is a real substring but shorter than the default min_evidence_chars (6).
-        let verdict = json!({"supported": true, "span_id": "c1", "evidence_quote": "查询"}).to_string();
+        let verdict =
+            json!({"supported": true, "span_id": "c1", "evidence_quote": "查询"}).to_string();
         let judge = MockJudge::new(&verdict);
-        let cfg = JudgeConfig { enabled: true, min_evidence_chars: 6, ..Default::default() };
+        let cfg = JudgeConfig {
+            enabled: true,
+            min_evidence_chars: 6,
+            ..Default::default()
+        };
         let out = ground_segments_with_judge(
-            &mut segs, &sources, &GroundingConfig::default(), &cfg, Some(&judge),
+            &mut segs,
+            &sources,
+            &GroundingConfig::default(),
+            &cfg,
+            Some(&judge),
         );
         assert!(!segs[0].verified, "too-short quote must not credit");
         assert_eq!(out.judge_credited, 0);
@@ -1041,11 +1124,19 @@ mod tests {
         let verdict = json!({"supported": false, "span_id": "", "evidence_quote": ""}).to_string();
         let judge = MockJudge::new(&verdict);
         let out = ground_segments_with_judge(
-            &mut segs, &sources, &GroundingConfig::default(), &judge_cfg_on(), Some(&judge),
+            &mut segs,
+            &sources,
+            &GroundingConfig::default(),
+            &judge_cfg_on(),
+            Some(&judge),
         );
         assert!(!segs[0].verified);
         assert_eq!(out.judge_credited, 0);
-        assert_eq!(*judge.calls.lock().unwrap(), 1, "a judge call was spent on the factual claim");
+        assert_eq!(
+            *judge.calls.lock().unwrap(),
+            1,
+            "a judge call was spent on the factual claim"
+        );
     }
 
     // ⑥ EDGE: judge None → pure deterministic (no panic, identical to ground_segments).
@@ -1057,9 +1148,16 @@ mod tests {
         let sources = vec![SourceMaterial::new("s1", src_text)];
         let det = ground_segments(&mut segs_a, &sources, &GroundingConfig::default());
         let out = ground_segments_with_judge(
-            &mut segs_b, &sources, &GroundingConfig::default(), &judge_cfg_on(), None,
+            &mut segs_b,
+            &sources,
+            &GroundingConfig::default(),
+            &judge_cfg_on(),
+            None,
         );
-        assert_eq!(out.unverified_spans, det, "judge=None must equal the deterministic result");
+        assert_eq!(
+            out.unverified_spans, det,
+            "judge=None must equal the deterministic result"
+        );
         assert_eq!(out.judge_calls, 0);
         assert_eq!(segs_a[0].verified, segs_b[0].verified);
     }
@@ -1070,13 +1168,25 @@ mod tests {
         let src_text = "Rust 在编译期检查内存安全。";
         let mut segs = vec![seg("它编造了一个无关事实。", [0, 11])];
         let sources = vec![SourceMaterial::new("s1", src_text)];
-        let verdict = json!({"supported": true, "span_id": "c1", "evidence_quote": "内存安全"}).to_string();
+        let verdict =
+            json!({"supported": true, "span_id": "c1", "evidence_quote": "内存安全"}).to_string();
         let judge = MockJudge::new(&verdict);
-        let cfg = JudgeConfig { enabled: false, ..Default::default() };
+        let cfg = JudgeConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let out = ground_segments_with_judge(
-            &mut segs, &sources, &GroundingConfig::default(), &cfg, Some(&judge),
+            &mut segs,
+            &sources,
+            &GroundingConfig::default(),
+            &cfg,
+            Some(&judge),
         );
-        assert_eq!(*judge.calls.lock().unwrap(), 0, "disabled judge must not be called");
+        assert_eq!(
+            *judge.calls.lock().unwrap(),
+            0,
+            "disabled judge must not be called"
+        );
         assert_eq!(out.judge_calls, 0);
     }
 
@@ -1086,10 +1196,16 @@ mod tests {
         let src_text = "光合作用释放氧气。";
         let mut segs = vec![seg("某编造句完全无关于此。", [0, 11])];
         let sources = vec![SourceMaterial::new("s1", src_text)];
-        let mut judge = MockJudge::new(&json!({"supported": true, "span_id": "c1", "evidence_quote": "释放氧气"}).to_string());
+        let mut judge = MockJudge::new(
+            &json!({"supported": true, "span_id": "c1", "evidence_quote": "释放氧气"}).to_string(),
+        );
         judge.available = false;
         let out = ground_segments_with_judge(
-            &mut segs, &sources, &GroundingConfig::default(), &judge_cfg_on(), Some(&judge),
+            &mut segs,
+            &sources,
+            &GroundingConfig::default(),
+            &judge_cfg_on(),
+            Some(&judge),
         );
         assert_eq!(out.judge_calls, 0, "unavailable judge is never called");
         assert!(!segs[0].verified);
@@ -1101,10 +1217,21 @@ mod tests {
         let src_text = "Transformer 自注意力可并行。";
         let mut segs = vec![seg("它能并行处理。", [0, 7])];
         let sources = vec![SourceMaterial::new("s1", src_text)];
-        let judge = MockJudge::new(&json!({"supported": true, "span_id": "c1", "evidence_quote": "自注意力可并行"}).to_string());
-        let cfg = JudgeConfig { enabled: true, max_judge_calls: 0, ..Default::default() };
+        let judge = MockJudge::new(
+            &json!({"supported": true, "span_id": "c1", "evidence_quote": "自注意力可并行"})
+                .to_string(),
+        );
+        let cfg = JudgeConfig {
+            enabled: true,
+            max_judge_calls: 0,
+            ..Default::default()
+        };
         let out = ground_segments_with_judge(
-            &mut segs, &sources, &GroundingConfig::default(), &cfg, Some(&judge),
+            &mut segs,
+            &sources,
+            &GroundingConfig::default(),
+            &cfg,
+            Some(&judge),
         );
         assert_eq!(out.judge_calls, 0);
         assert_eq!(*judge.calls.lock().unwrap(), 0);
@@ -1119,9 +1246,16 @@ mod tests {
         let sources = vec![SourceMaterial::new("s1", src_text)];
         let judge = MockJudge::new("not json at all");
         let out = ground_segments_with_judge(
-            &mut segs, &sources, &GroundingConfig::default(), &judge_cfg_on(), Some(&judge),
+            &mut segs,
+            &sources,
+            &GroundingConfig::default(),
+            &judge_cfg_on(),
+            Some(&judge),
         );
-        assert!(!segs[0].verified, "unparseable judge output must not credit");
+        assert!(
+            !segs[0].verified,
+            "unparseable judge output must not credit"
+        );
         assert_eq!(out.judge_credited, 0);
     }
 
@@ -1131,15 +1265,34 @@ mod tests {
         // This sentence grounds deterministically (≥3 shared tokens). Even a hostile judge that
         // says `supported:false` is never consulted for it (already verified).
         let src_text = "The borrow checker enforces memory safety at compile time.";
-        let mut segs = vec![seg("The borrow checker enforces memory safety at compile time.", [0, 10])];
+        let mut segs = vec![seg(
+            "The borrow checker enforces memory safety at compile time.",
+            [0, 10],
+        )];
         let sources = vec![SourceMaterial::new("s1", src_text)];
-        let judge = MockJudge::new(&json!({"supported": false, "span_id": "", "evidence_quote": ""}).to_string());
-        let out = ground_segments_with_judge(
-            &mut segs, &sources, &GroundingConfig::default(), &judge_cfg_on(), Some(&judge),
+        let judge = MockJudge::new(
+            &json!({"supported": false, "span_id": "", "evidence_quote": ""}).to_string(),
         );
-        assert!(segs[0].verified, "deterministically grounded sentence stays verified");
-        assert!(!segs[0].grounding[0].judge_elevated, "it was NOT judge-elevated");
-        assert_eq!(*judge.calls.lock().unwrap(), 0, "judge never consulted for a grounded sentence");
+        let out = ground_segments_with_judge(
+            &mut segs,
+            &sources,
+            &GroundingConfig::default(),
+            &judge_cfg_on(),
+            Some(&judge),
+        );
+        assert!(
+            segs[0].verified,
+            "deterministically grounded sentence stays verified"
+        );
+        assert!(
+            !segs[0].grounding[0].judge_elevated,
+            "it was NOT judge-elevated"
+        );
+        assert_eq!(
+            *judge.calls.lock().unwrap(),
+            0,
+            "judge never consulted for a grounded sentence"
+        );
         assert!(out.unverified_spans.is_empty());
     }
 

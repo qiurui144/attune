@@ -22,10 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use attune_core::organizer::{
-    analyze_items,
-    strategy::StrategyRegistry,
-    types::ItemView,
-    OrganizeError,
+    analyze_items, strategy::StrategyRegistry, types::ItemView, OrganizeError,
 };
 use serde::Deserialize;
 
@@ -128,8 +125,7 @@ fn load_cases() -> Vec<GoldenCase> {
         .iter()
         .map(|p| {
             let txt = std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {p:?}: {e}"));
-            serde_yaml::from_str::<GoldenCase>(&txt)
-                .unwrap_or_else(|e| panic!("parse {p:?}: {e}"))
+            serde_yaml::from_str::<GoldenCase>(&txt).unwrap_or_else(|e| panic!("parse {p:?}: {e}"))
         })
         .collect()
 }
@@ -204,7 +200,10 @@ fn organize_golden_gate_all_pass() {
         if want.labels_non_empty {
             for g in &proposal.groups {
                 if g.label.trim().is_empty() {
-                    failures.push(format!("[{}] group {} has empty label", case.id, g.group_id));
+                    failures.push(format!(
+                        "[{}] group {} has empty label",
+                        case.id, g.group_id
+                    ));
                 }
             }
         }
@@ -269,7 +268,9 @@ fn organize_golden_gate_all_pass() {
 #[ignore = "needs a real LLM stack (Ollama/cloud) + §1.3 compute approval; driven by scripts/run-organize-tier-matrix.sh, never in CI"]
 fn organize_tier_matrix_naming() {
     use attune_core::llm::{LlmProvider, OllamaLlmProvider};
-    use attune_core::organizer::strategy::{ClusterLabel, GenericStrategy, LabelCtx, OrganizationStrategy};
+    use attune_core::organizer::strategy::{
+        ClusterLabel, GenericStrategy, LabelCtx, OrganizationStrategy,
+    };
     use attune_core::organizer::types::ClusterView;
 
     let model = std::env::var("ATTUNE_MATRIX_MODEL").unwrap_or_else(|_| "qwen2.5:3b".to_string());
@@ -287,10 +288,26 @@ fn organize_tier_matrix_naming() {
         // Build one ClusterView over the first lobe's items (a representative
         // group) and ask the LLM to name it — measures the naming path only.
         let members: Vec<ItemView> = items.into_iter().take(6).collect();
-        let view = ClusterView { group_id: 0, items: &members };
-        match strat.label_cluster(&view, &LabelCtx { llm: Some(llm.as_ref()) }) {
-            Ok(ClusterLabel { name, summary, source, .. }) => {
-                eprintln!("[{}] name={name:?} summary={summary:?} source={source:?}", case.id);
+        let view = ClusterView {
+            group_id: 0,
+            items: &members,
+        };
+        match strat.label_cluster(
+            &view,
+            &LabelCtx {
+                llm: Some(llm.as_ref()),
+            },
+        ) {
+            Ok(ClusterLabel {
+                name,
+                summary,
+                source,
+                ..
+            }) => {
+                eprintln!(
+                    "[{}] name={name:?} summary={summary:?} source={source:?}",
+                    case.id
+                );
             }
             Err(e) => eprintln!("[{}] LLM naming error: {e}", case.id),
         }

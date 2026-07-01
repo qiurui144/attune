@@ -283,8 +283,7 @@ fn classify_block(p: &Paragraph, lines: &[RawLine]) -> BlockKind {
         .unwrap_or(1);
     let in_footer_zone = (p.bbox.y as f32) > (max_y as f32 * 0.9);
     if in_footer_zone {
-        let footer_re =
-            regex::Regex::new(r"^\s*(第\s*\d+\s*页|Page\s*\d+|\d{1,3})\s*$").unwrap();
+        let footer_re = regex::Regex::new(r"^\s*(第\s*\d+\s*页|Page\s*\d+|\d{1,3})\s*$").unwrap();
         if footer_re.is_match(t) {
             return BlockKind::Footer;
         }
@@ -347,7 +346,12 @@ mod tests {
 
     #[test]
     fn empty_input_returns_no_blocks() {
-        let StructuredFields::DocumentV1 { fields, unrecognized_fields, .. } = extract(&[]) else {
+        let StructuredFields::DocumentV1 {
+            fields,
+            unrecognized_fields,
+            ..
+        } = extract(&[])
+        else {
             unreachable!()
         };
         assert!(fields.blocks.is_empty());
@@ -414,8 +418,15 @@ mod tests {
             unreachable!()
         };
         let footer_block = fields.blocks.iter().find(|b| b.kind == BlockKind::Footer);
-        assert!(footer_block.is_some(), "should detect footer; got blocks: {:?}",
-            fields.blocks.iter().map(|b| (&b.kind, &b.text)).collect::<Vec<_>>());
+        assert!(
+            footer_block.is_some(),
+            "should detect footer; got blocks: {:?}",
+            fields
+                .blocks
+                .iter()
+                .map(|b| (&b.kind, &b.text))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -445,7 +456,7 @@ mod tests {
     fn title_detected_for_large_font_first_block() {
         // 大字号标题 + 普通段落
         let lines = vec![
-            rl("Big Title", 10, 10, 400, 60), // h=60 (大)
+            rl("Big Title", 10, 10, 400, 60),           // h=60 (大)
             rl("Body paragraph one.", 10, 90, 400, 25), // h=25
             rl("Body paragraph two.", 10, 150, 400, 25),
         ];

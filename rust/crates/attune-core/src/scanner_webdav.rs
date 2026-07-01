@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Result, VaultError};
 use crate::ingest::{DocumentSink, RawDocument, SourceConnector, SourceKind};
 
-
 /// WebDAV 采集目录配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebDavConfig {
@@ -28,8 +27,8 @@ const MAX_REMOTE_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// 远端受支持的扩展名（与 parser 支持集对齐的子集 — 二进制媒体不远程拉取）。
 const SUPPORTED_REMOTE_EXTS: &[&str] = &[
-    "md", "txt", "py", "js", "ts", "rs", "go", "java", "pdf", "docx", "html", "htm", "csv",
-    "rtf", "pptx", "xlsx",
+    "md", "txt", "py", "js", "ts", "rs", "go", "java", "pdf", "docx", "html", "htm", "csv", "rtf",
+    "pptx", "xlsx",
 ];
 
 /// 判断文件名扩展名是否属于受支持的远端采集类型。
@@ -118,11 +117,9 @@ impl WebDavConnector {
 
     /// 构造带鉴权的 reqwest_dav 客户端。
     fn build_client(&self) -> Result<reqwest_dav::Client> {
-        let mut builder =
-            reqwest_dav::ClientBuilder::new().set_host(self.config.url.clone());
+        let mut builder = reqwest_dav::ClientBuilder::new().set_host(self.config.url.clone());
         if let (Some(user), Some(pass)) = (&self.config.username, &self.config.password) {
-            builder =
-                builder.set_auth(reqwest_dav::Auth::Basic(user.clone(), pass.clone()));
+            builder = builder.set_auth(reqwest_dav::Auth::Basic(user.clone(), pass.clone()));
         }
         builder
             .build()

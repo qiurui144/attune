@@ -9,7 +9,10 @@ use axum::Json;
 use serde::Deserialize;
 
 fn err(code: StatusCode, kebab: &str, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (code, Json(serde_json::json!({ "error": msg, "code": kebab })))
+    (
+        code,
+        Json(serde_json::json!({ "error": msg, "code": kebab })),
+    )
 }
 
 fn store_or_503(
@@ -132,7 +135,10 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         assert!(store.cancel_job(&id).unwrap(), "queued → cancelled");
-        assert!(!store.cancel_job(&id).unwrap(), "terminal not re-cancellable");
+        assert!(
+            !store.cancel_job(&id).unwrap(),
+            "terminal not re-cancellable"
+        );
         assert!(store.requeue_job(&id).unwrap(), "cancelled → queued");
         assert!(!store.requeue_job(&id).unwrap(), "queued not requeuable");
     }

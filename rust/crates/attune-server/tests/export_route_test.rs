@@ -182,10 +182,16 @@ async fn export_classified_artifact_blocked_fail_closed() {
         // alt-format path (byte-level PDF redaction is out of scope); non-PDF
         // formats do not.
         if fmt == "pdf" {
-            assert_eq!(v["pdf_redaction"], "alt-format", "pdf must offer alt-format");
+            assert_eq!(
+                v["pdf_redaction"], "alt-format",
+                "pdf must offer alt-format"
+            );
             assert_eq!(v["alt_format"], "md", "pdf alt format is md");
         } else {
-            assert!(v["pdf_redaction"].is_null(), "{fmt} must not carry pdf hint");
+            assert!(
+                v["pdf_redaction"].is_null(),
+                "{fmt} must not carry pdf hint"
+            );
         }
     }
 }
@@ -213,7 +219,10 @@ async fn export_pii_artifact_downloads_redacted_no_plaintext() {
     let bytes = resp.bytes().await.unwrap().to_vec();
     let md = String::from_utf8(bytes).unwrap();
     for raw in ["13800138000", "zhangsan@example.com", "13900139000"] {
-        assert!(!md.contains(raw), "downloaded md must not carry plaintext {raw}; got {md}");
+        assert!(
+            !md.contains(raw),
+            "downloaded md must not carry plaintext {raw}; got {md}"
+        );
     }
     // structure preserved (title + names still present)
     assert!(md.contains("客户联系清单") && md.contains("张三") && md.contains("李四"));
@@ -232,7 +241,10 @@ async fn export_pii_artifact_downloads_redacted_no_plaintext() {
         .read_to_string(&mut doc_xml)
         .unwrap();
     for raw in ["13800138000", "zhangsan@example.com", "13900139000"] {
-        assert!(!doc_xml.contains(raw), "docx document.xml must not carry {raw}");
+        assert!(
+            !doc_xml.contains(raw),
+            "docx document.xml must not carry {raw}"
+        );
     }
 }
 
@@ -272,7 +284,11 @@ async fn export_pro_confidential_keyword_blocks_industry_doc() {
 
     // 1) Baseline: generic set only → exports (not blocked).
     let resp = post_export(&base, json!({ "artifact": industry_doc, "format": "md" })).await;
-    assert_eq!(resp.status().as_u16(), 200, "without pro keyword the doc must export");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "without pro keyword the doc must export"
+    );
 
     // 2) Inject the industry marker via the settings override (pro write-end).
     let patch = client
@@ -281,11 +297,19 @@ async fn export_pro_confidential_keyword_blocks_industry_doc() {
         .send()
         .await
         .expect("patch settings");
-    assert!(patch.status().is_success(), "settings patch must succeed: {}", patch.status());
+    assert!(
+        patch.status().is_success(),
+        "settings patch must succeed: {}",
+        patch.status()
+    );
 
     // 3) Now the same doc is fail-closed blocked (422 doc-classified).
     let resp = post_export(&base, json!({ "artifact": industry_doc, "format": "md" })).await;
-    assert_eq!(resp.status().as_u16(), 422, "pro keyword must block the industry doc");
+    assert_eq!(
+        resp.status().as_u16(),
+        422,
+        "pro keyword must block the industry doc"
+    );
     let v: Value = resp.json().await.unwrap();
     assert_eq!(v["code"], "doc-classified");
 
@@ -297,7 +321,10 @@ async fn export_pro_confidential_keyword_blocks_industry_doc() {
         .await
         .unwrap();
     let pvv: Value = pv.json().await.unwrap();
-    assert_eq!(pvv["decision"], "blocked", "preview must match real export verdict");
+    assert_eq!(
+        pvv["decision"], "blocked",
+        "preview must match real export verdict"
+    );
 }
 
 /// The dry-run preview endpoint reports the same verdict the real export would,
@@ -357,5 +384,8 @@ async fn doc_privacy_scan_text() {
     assert_eq!(v["blocked"], true);
     // privacy-first: the response body must not echo the phone value
     let body = serde_json::to_string(&v).unwrap();
-    assert!(!body.contains("13800138000"), "scan must not leak PII value");
+    assert!(
+        !body.contains("13800138000"),
+        "scan must not leak PII value"
+    );
 }

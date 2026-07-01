@@ -158,12 +158,7 @@ pub fn create_pre_upgrade_backup() -> Result<BackupEntry> {
     create_backup_at(&vault_db, &dir, &stamp, &filename)
 }
 
-fn create_backup_at(
-    src: &Path,
-    dir: &Path,
-    stamp: &str,
-    filename: &str,
-) -> Result<BackupEntry> {
+fn create_backup_at(src: &Path, dir: &Path, stamp: &str, filename: &str) -> Result<BackupEntry> {
     let dest = dir.join(filename);
     std::fs::copy(src, &dest).map_err(VaultError::Io)?;
     let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
@@ -203,9 +198,10 @@ pub fn prune_old_backups(dir: &Path, keep: usize) -> Result<usize> {
     entries.sort_by(|a, b| b.0.cmp(&a.0));
     let mut removed = 0;
     for (_, path) in entries.into_iter().skip(keep) {
-        let sha_path = path.with_extension(
-            format!("{}.sha256", path.extension().and_then(|s| s.to_str()).unwrap_or("")),
-        );
+        let sha_path = path.with_extension(format!(
+            "{}.sha256",
+            path.extension().and_then(|s| s.to_str()).unwrap_or("")
+        ));
         // The companion file naming is `vault.db.bak.<stamp>.sha256` — derive it more robustly:
         let mut companion = path.clone();
         let fname = companion
@@ -226,7 +222,9 @@ pub fn prune_old_backups(dir: &Path, keep: usize) -> Result<usize> {
 /// Returns Ok(true) when matched, Ok(false) when companion is missing,
 /// Err on hash mismatch.
 pub fn verify_backup(entry: &BackupEntry) -> Result<bool> {
-    let companion = entry.path.with_file_name(format!("{}.sha256", entry.filename));
+    let companion = entry
+        .path
+        .with_file_name(format!("{}.sha256", entry.filename));
     if !companion.exists() {
         return Ok(false);
     }
@@ -403,7 +401,10 @@ mod tests {
             let restored = restore_from_index(1).expect("restore");
             assert_eq!(restored.filename, entry.filename);
             let after = std::fs::read(&vault).unwrap();
-            assert_eq!(after, b"original-v1.0.0", "vault.db restored to backup contents");
+            assert_eq!(
+                after, b"original-v1.0.0",
+                "vault.db restored to backup contents"
+            );
             // Safety: pre-restore vault.db moved aside
             let safety_files: Vec<_> = std::fs::read_dir(platform::data_dir())
                 .unwrap()
@@ -411,7 +412,10 @@ mod tests {
                 .map(|e| e.file_name().to_string_lossy().to_string())
                 .filter(|n| n.starts_with("vault.db.before-rollback."))
                 .collect();
-            assert!(!safety_files.is_empty(), "before-rollback safety file present");
+            assert!(
+                !safety_files.is_empty(),
+                "before-rollback safety file present"
+            );
         });
     }
 

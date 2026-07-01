@@ -220,7 +220,11 @@ async fn k3_form_factor_drives_settings_llm_default() {
         .send()
         .await
         .expect("vault setup");
-    assert_eq!(setup_resp.status().as_u16(), 200, "vault setup should be 200");
+    assert_eq!(
+        setup_resp.status().as_u16(),
+        200,
+        "vault setup should be 200"
+    );
     let setup_body: serde_json::Value = setup_resp.json().await.expect("json");
     let token = setup_body["token"]
         .as_str()

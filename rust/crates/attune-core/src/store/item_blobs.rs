@@ -64,7 +64,11 @@ impl Store {
         match row {
             Some((filename, mime, encrypted)) => {
                 let bytes = crypto::decrypt(dek, &encrypted)?;
-                Ok(Some(ItemBlob { filename, mime, bytes }))
+                Ok(Some(ItemBlob {
+                    filename,
+                    mime,
+                    bytes,
+                }))
             }
             None => Ok(None),
         }
@@ -99,7 +103,10 @@ mod tests {
             .expect("insert blob");
 
         assert!(store.has_item_blob(&item_id).expect("has"));
-        let got = store.get_item_blob(&dek, &item_id).expect("get").expect("some");
+        let got = store
+            .get_item_blob(&dek, &item_id)
+            .expect("get")
+            .expect("some");
         assert_eq!(got.filename, "借条.png");
         assert_eq!(got.mime, "image/png");
         assert_eq!(got.bytes, original.to_vec());
@@ -163,7 +170,10 @@ mod tests {
         store
             .insert_item_blob(&dek, &item_id, "v2.jpg", "image/jpeg", b"second")
             .expect("blob v2");
-        let got = store.get_item_blob(&dek, &item_id).expect("get").expect("some");
+        let got = store
+            .get_item_blob(&dek, &item_id)
+            .expect("get")
+            .expect("some");
         assert_eq!(got.bytes, b"second".to_vec());
     }
 }

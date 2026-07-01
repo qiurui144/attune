@@ -146,9 +146,7 @@ pub fn find_value_after_anchor(
     for (i, l) in lines.iter().enumerate() {
         if let Some(m) = anchor_re.find(&l.text) {
             // 同行右侧 (剥 anchor 后的剩余 + 剥分隔符)
-            let after = l.text[m.end()..].trim_start_matches(|c: char| {
-                c == ':' || c == '：' || c == ' ' || c == '\t'
-            });
+            let after = l.text[m.end()..].trim_start_matches([':', '：', ' ', '\t']);
             if !after.is_empty() {
                 return Some((i, after.to_string(), l.confidence));
             }

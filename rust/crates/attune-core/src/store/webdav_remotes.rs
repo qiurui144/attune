@@ -94,8 +94,9 @@ impl Store {
             Some((dir_id, url, username, password_enc, depth, corpus_domain, last_etag_sync)) => {
                 let password = match password_enc {
                     Some(blob) => Some(
-                        String::from_utf8(crypto::decrypt(dek, &blob)?)
-                            .map_err(|e| VaultError::Crypto(format!("webdav password utf8: {e}")))?,
+                        String::from_utf8(crypto::decrypt(dek, &blob)?).map_err(|e| {
+                            VaultError::Crypto(format!("webdav password utf8: {e}"))
+                        })?,
                     ),
                     None => None,
                 };

@@ -19,8 +19,7 @@ use attune_core::outbound_gate::{OutboundError, OutboundGate, OutboundKind, Outb
 use attune_core::store::third_party_accounts::{is_known_provider, ThirdPartyAccountInput};
 use attune_core::store::Store;
 
-const SAMPLE_SESSION: &str =
-    r#"{"cookies":[{"name":"sess","value":"SESSION_PLAINTEXT_SECRET_42","domain":"members.example"}],"origins":[]}"#;
+const SAMPLE_SESSION: &str = r#"{"cookies":[{"name":"sess","value":"SESSION_PLAINTEXT_SECRET_42","domain":"members.example"}],"origins":[]}"#;
 
 fn session_input(session_json: &str) -> ThirdPartyAccountInput {
     ThirdPartyAccountInput {
@@ -57,7 +56,10 @@ fn session_blob_has_no_plaintext() {
         !raw_str.contains("SESSION_PLAINTEXT_SECRET_42"),
         "session plaintext must NOT appear in the encrypted BLOB"
     );
-    assert!(!raw_str.contains("\"cookies\""), "no structural plaintext either");
+    assert!(
+        !raw_str.contains("\"cookies\""),
+        "no structural plaintext either"
+    );
     assert!(!raw.is_empty(), "BLOB must hold ciphertext");
 }
 
@@ -112,7 +114,10 @@ fn oversized_session_is_refused() {
     let dek = Key32::generate();
     let too_big = "x".repeat(256 * 1024 + 1);
     let err = store.add_third_party_account(&dek, &session_input(&too_big));
-    assert!(err.is_err(), "session over 256 KB must be refused (not truncated)");
+    assert!(
+        err.is_err(),
+        "session over 256 KB must be refused (not truncated)"
+    );
 }
 
 // ── normal (non-browser_login) providers keep the tight 8 KB limit ──────────

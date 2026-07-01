@@ -62,7 +62,9 @@ async fn spawn_with_stale_vector(vec_model: &str) -> (String, reqwest::Client) {
             1,
         )
         .expect("insert memory");
-    let id = vault.store().list_recent_memories(&dek, 1).expect("list")[0].id.clone();
+    let id = vault.store().list_recent_memories(&dek, 1).expect("list")[0]
+        .id
+        .clone();
     vault
         .store()
         .put_memory_vector(&id, &[0.0; 3], vec_model, 1)
@@ -104,7 +106,10 @@ async fn migration_status_reports_current_model_and_stale_count() {
         body["current_model"], "embed-dim4",
         "current_model is the active embedder's dimension key"
     );
-    assert_eq!(body["current_dim"], 4, "current_dim mirrors the embedder dims");
+    assert_eq!(
+        body["current_dim"], 4,
+        "current_dim mirrors the embedder dims"
+    );
     assert_eq!(
         body["stale"].as_u64().unwrap(),
         1,
@@ -126,7 +131,11 @@ async fn status_reports_zero_stale_when_vector_matches_current_model() {
         .json()
         .await
         .expect("json");
-    assert_eq!(body["stale"].as_u64().unwrap(), 0, "matching model ⇒ 0 stale");
+    assert_eq!(
+        body["stale"].as_u64().unwrap(),
+        0,
+        "matching model ⇒ 0 stale"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -289,7 +298,11 @@ async fn export_import_round_trip_over_http() {
         .send()
         .await
         .expect("import");
-    assert_eq!(resp.status().as_u16(), 200, "import into unlocked vault ⇒ 200");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "import into unlocked vault ⇒ 200"
+    );
     let body: serde_json::Value = resp.json().await.expect("json");
     assert!(
         body["imported"].as_u64().unwrap() >= 1,
@@ -311,7 +324,10 @@ async fn export_import_round_trip_over_http() {
         .expect("import wrong pw");
     assert_eq!(resp_wrong.status().as_u16(), 400, "wrong passphrase ⇒ 400");
     let wb: serde_json::Value = resp_wrong.json().await.expect("json");
-    assert_eq!(wb["error"], "bad-passphrase", "explicit bad-passphrase code");
+    assert_eq!(
+        wb["error"], "bad-passphrase",
+        "explicit bad-passphrase code"
+    );
 }
 
 /// An unlocked vault with NO seeded memories (distinct source_chunk_hash space).

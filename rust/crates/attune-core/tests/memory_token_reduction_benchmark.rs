@@ -36,7 +36,7 @@ fn l0_for(topic: &str) -> Vec<SearchResult> {
             score: 0.85 - (i as f32) * 0.05,
             title: format!("文档 {i}"),
             // ~1.2 K chars of raw chunk text mentioning the topic.
-            content: format!("{topic} 相关的详细原始文档内容片段。", ).repeat(60),
+            content: format!("{topic} 相关的详细原始文档内容片段。",).repeat(60),
             source_type: "note".into(),
             ..Default::default()
         })
@@ -86,19 +86,32 @@ fn injected_token_reduction_meets_acceptance_target() {
         // L2 episodic — windowed to cover today so a recall ("今天") filter overlaps.
         store
             .insert_memory(
-                &dek, "episodic", today_start, today_start + DAY,
+                &dek,
+                "episodic",
+                today_start,
+                today_start + DAY,
                 &[format!("ep-{t}")],
                 &format!("用户研究了 {topic} 的核心要点"),
-                "m", now,
+                "m",
+                now,
             )
             .unwrap();
         // L3 semantic — standing topic memory.
         store
             .insert_semantic_memory(
-                &dek, &format!("topic-{t}"),
-                &[format!("m{t}a"), format!("m{t}b"), format!("m{t}c"), format!("m{t}d")],
+                &dek,
+                &format!("topic-{t}"),
+                &[
+                    format!("m{t}a"),
+                    format!("m{t}b"),
+                    format!("m{t}c"),
+                    format!("m{t}d"),
+                ],
                 &format!("用户对 {topic} 形成了系统的长期认知与理解"),
-                "m", 0, now, now,
+                "m",
+                0,
+                now,
+                now,
             )
             .unwrap();
     }
@@ -128,7 +141,10 @@ fn injected_token_reduction_meets_acceptance_target() {
     ];
 
     let cfg_on = MemoryConfig::default();
-    let cfg_off = MemoryConfig { tiered_assembler_enabled: false, memory_confidence: 0.70 };
+    let cfg_off = MemoryConfig {
+        tiered_assembler_enabled: false,
+        memory_confidence: 0.70,
+    };
 
     let mut memory_subset_reductions: Vec<f64> = Vec::new();
     let mut precise_subset_reductions: Vec<f64> = Vec::new();
@@ -150,8 +166,15 @@ fn injected_token_reduction_meets_acceptance_target() {
         }
         eprintln!(
             "[{}] tier={} on={} off={} reduction={:.1}%",
-            if is_memory_shaped { "memory" } else { "precise" },
-            on.tier_used, on_tok as usize, off_tok as usize, reduction * 100.0,
+            if is_memory_shaped {
+                "memory"
+            } else {
+                "precise"
+            },
+            on.tier_used,
+            on_tok as usize,
+            off_tok as usize,
+            reduction * 100.0,
         );
         if is_memory_shaped {
             memory_subset_reductions.push(reduction);
@@ -174,9 +197,18 @@ fn injected_token_reduction_meets_acceptance_target() {
     let precise_median = median(precise_subset_reductions.clone());
 
     eprintln!("=== Token-reduction benchmark (multi-layer memory §5.3) ===");
-    eprintln!("recall+overview subset: median injected-token reduction = {:.1}%", memory_median * 100.0);
-    eprintln!("precise subset:         median injected-token reduction = {:.1}%", precise_median * 100.0);
-    eprintln!("memory-tier hits: {}/4 recall+overview queries", memory_tier_hits);
+    eprintln!(
+        "recall+overview subset: median injected-token reduction = {:.1}%",
+        memory_median * 100.0
+    );
+    eprintln!(
+        "precise subset:         median injected-token reduction = {:.1}%",
+        precise_median * 100.0
+    );
+    eprintln!(
+        "memory-tier hits: {}/4 recall+overview queries",
+        memory_tier_hits
+    );
 
     // Acceptance §5.3: ≥ 30% median reduction on recall+overview.
     assert!(

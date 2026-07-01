@@ -108,7 +108,10 @@ impl Store {
 
     /// 清理超过 `days_threshold` 天的 dismiss 记录(signature 会随信号变化失效,
     /// 长期保留无意义)。mute 永久不清。返回删除行数。
-    pub fn purge_dismissed_suggestions_older_than_days(&self, days_threshold: u32) -> Result<usize> {
+    pub fn purge_dismissed_suggestions_older_than_days(
+        &self,
+        days_threshold: u32,
+    ) -> Result<usize> {
         let modifier = format!("-{days_threshold} days");
         let n = self.conn.execute(
             "DELETE FROM suggestion_dismissed WHERE dismissed_at < datetime('now', ?1)",

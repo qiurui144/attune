@@ -428,8 +428,8 @@ mod tests {
         .expect("extract ok");
         assert_eq!(out.succeeded, 1);
         // 输出是合法 JSON。
-        let v: serde_json::Value = serde_json::from_str(out.results[0].output.as_ref().unwrap())
-            .expect("valid json");
+        let v: serde_json::Value =
+            serde_json::from_str(out.results[0].output.as_ref().unwrap()).expect("valid json");
         assert!(v.is_object());
     }
 
@@ -508,7 +508,13 @@ mod tests {
         let params = BatchParams {
             rewrite_instruction: Some("   \t  ".into()),
         };
-        let r = run_batch(&llm, &items(1), BatchCapability::Rewrite, &params, |_, _| {});
+        let r = run_batch(
+            &llm,
+            &items(1),
+            BatchCapability::Rewrite,
+            &params,
+            |_, _| {},
+        );
         assert!(r.is_err());
     }
 
@@ -528,8 +534,8 @@ mod tests {
         let params = BatchParams {
             rewrite_instruction: Some("正式化".into()),
         };
-        let out = run_batch(&llm, &its, BatchCapability::Rewrite, &params, |_, _| {})
-            .expect("batch ok");
+        let out =
+            run_batch(&llm, &its, BatchCapability::Rewrite, &params, |_, _| {}).expect("batch ok");
         assert_eq!(out.succeeded, 1);
         assert_eq!(out.failed, 1);
         assert_eq!(out.results[1].id, "blank");

@@ -44,39 +44,45 @@ pub async fn get_form(
     //   - "forms/<form_id>.yaml" — 标准 FormSchema yaml (优先)
     //   - "ui/civil_loan_stage3.html" — 静态 HTML 文件
     let plugins_root = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
-        .map_err(|e| (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("plugins_dir: {e}")})),
-        ))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("plugins_dir: {e}")})),
+            )
+        })?;
     let component_path = plugins_root.join(&plugin_id).join(&component.html);
 
     // OPT-7: 避免 std::Path::exists 在 async 内阻塞 stat 调用
     let exists = attune_core::async_fs::try_exists(&component_path)
         .await
         .unwrap_or(false);
-    let html = if exists
-        && component_path.extension().and_then(|s| s.to_str()) == Some("yaml")
-    {
+    let html = if exists && component_path.extension().and_then(|s| s.to_str()) == Some("yaml") {
         // 真读 yaml 渲染 (async_fs 包装 spawn_blocking, 防 Axum worker 阻塞)
         let yaml_str = attune_core::async_fs::read_to_string(&component_path)
             .await
-            .map_err(|e| (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("read form yaml: {e}")})),
-            ))?;
-        let schema: FormSchema = serde_yaml::from_str(&yaml_str).map_err(|e| (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error": format!("parse form yaml: {e}")})),
-        ))?;
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("read form yaml: {e}")})),
+                )
+            })?;
+        let schema: FormSchema = serde_yaml::from_str(&yaml_str).map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": format!("parse form yaml: {e}")})),
+            )
+        })?;
         render_html(&schema)
     } else if exists {
         // HTML 文件直接返
         attune_core::async_fs::read_to_string(&component_path)
             .await
-            .map_err(|e| (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("read html: {e}")})),
-            ))?
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("read html: {e}")})),
+                )
+            })?
     } else {
         // Fallback: 返 stub schema (开发期 plugin 还没提供 form 文件)
         let schema = FormSchema {
@@ -84,8 +90,7 @@ pub async fn get_form(
             title: format!("Form: {}", component.id),
             description: format!(
                 "{} (stub — plugin dir 未提供 {})",
-                component.description,
-                component.html
+                component.description, component.html
             ),
             submit_target: component.target.clone(),
             fields: vec![],
@@ -177,9 +182,7 @@ pub async fn get_form_schema(
         .await
         .unwrap_or(false);
 
-    let schema = if exists
-        && component_path.extension().and_then(|s| s.to_str()) == Some("yaml")
-    {
+    let schema = if exists && component_path.extension().and_then(|s| s.to_str()) == Some("yaml") {
         let yaml_str = attune_core::async_fs::read_to_string(&component_path)
             .await
             .map_err(|e| {

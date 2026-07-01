@@ -22,7 +22,11 @@ async fn wait_staging_pending(
     let deadline = std::time::Instant::now() + timeout;
     let mut last = -1;
     while std::time::Instant::now() < deadline {
-        if let Ok(resp) = client.get(format!("{base}/api/v1/vault/staging-status")).send().await {
+        if let Ok(resp) = client
+            .get(format!("{base}/api/v1/vault/staging-status"))
+            .send()
+            .await
+        {
             if let Ok(v) = resp.json::<serde_json::Value>().await {
                 last = v["pending"].as_i64().unwrap_or(-1);
                 if last == target {
@@ -101,9 +105,16 @@ async fn locked_mode_stages_and_drains_on_unlock() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200, "locked upload must be accepted (staged), not rejected");
+    assert_eq!(
+        r.status(),
+        200,
+        "locked upload must be accepted (staged), not rejected"
+    );
     let jv = r.json::<serde_json::Value>().await.unwrap();
-    assert_eq!(jv["status"], "staged", "locked upload must report staged: {jv}");
+    assert_eq!(
+        jv["status"], "staged",
+        "locked upload must report staged: {jv}"
+    );
     assert!(jv["staging_id"].is_string());
 
     // 3. staging-status reports pending == 1 while LOCKED (no DEK needed)
@@ -156,5 +167,8 @@ async fn locked_mode_stages_and_drains_on_unlock() {
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
-    assert!(found, "drained doc must be searchable (proves it went through the real ingest pipeline)");
+    assert!(
+        found,
+        "drained doc must be searchable (proves it went through the real ingest pipeline)"
+    );
 }

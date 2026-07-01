@@ -91,7 +91,13 @@ mod tests {
     #[test]
     fn red_block_detected_as_stamp() {
         let r = StampRecognizer
-            .recognize(&solid(30, 30, [220, 20, 20]), &RegionCtx { ocr_lines: vec![], page: 0 })
+            .recognize(
+                &solid(30, 30, [220, 20, 20]),
+                &RegionCtx {
+                    ocr_lines: vec![],
+                    page: 0,
+                },
+            )
             .unwrap();
         assert!(matches!(r, RegionResult::StampV1 { present: true, .. }));
     }
@@ -99,7 +105,13 @@ mod tests {
     #[test]
     fn white_block_no_stamp() {
         let r = StampRecognizer
-            .recognize(&solid(30, 30, [255, 255, 255]), &RegionCtx { ocr_lines: vec![], page: 0 })
+            .recognize(
+                &solid(30, 30, [255, 255, 255]),
+                &RegionCtx {
+                    ocr_lines: vec![],
+                    page: 0,
+                },
+            )
             .unwrap();
         assert!(matches!(r, RegionResult::StampV1 { present: false, .. }));
     }
@@ -108,17 +120,35 @@ mod tests {
     fn solid_black_is_not_signature() {
         // fully black = 1.0 dark > SIG_MAX_DARK → not a signature (it's a filled block)
         let r = SignatureRecognizer
-            .recognize(&solid(30, 30, [0, 0, 0]), &RegionCtx { ocr_lines: vec![], page: 0 })
+            .recognize(
+                &solid(30, 30, [0, 0, 0]),
+                &RegionCtx {
+                    ocr_lines: vec![],
+                    page: 0,
+                },
+            )
             .unwrap();
-        assert!(matches!(r, RegionResult::SignatureV1 { present: false, .. }));
+        assert!(matches!(
+            r,
+            RegionResult::SignatureV1 { present: false, .. }
+        ));
     }
 
     #[test]
     fn blank_is_not_signature() {
         let r = SignatureRecognizer
-            .recognize(&solid(30, 30, [255, 255, 255]), &RegionCtx { ocr_lines: vec![], page: 0 })
+            .recognize(
+                &solid(30, 30, [255, 255, 255]),
+                &RegionCtx {
+                    ocr_lines: vec![],
+                    page: 0,
+                },
+            )
             .unwrap();
-        assert!(matches!(r, RegionResult::SignatureV1 { present: false, .. }));
+        assert!(matches!(
+            r,
+            RegionResult::SignatureV1 { present: false, .. }
+        ));
     }
 
     #[test]

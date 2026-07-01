@@ -11,7 +11,10 @@ pub fn partition_by_majority_dim(items: Vec<ItemView>) -> (Vec<ItemView>, Vec<No
             *dim_count.entry(e.len()).or_default() += 1;
         }
     }
-    let majority = dim_count.into_iter().max_by_key(|(_, c)| *c).map(|(d, _)| d);
+    let majority = dim_count
+        .into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(d, _)| d);
     let mut clean = Vec::new();
     let mut noise = Vec::new();
     let mut mismatch = 0usize;
@@ -20,10 +23,16 @@ pub fn partition_by_majority_dim(items: Vec<ItemView>) -> (Vec<ItemView>, Vec<No
             (Some(e), Some(maj)) if e.len() == maj => clean.push(it),
             (Some(_), Some(_)) => {
                 mismatch += 1;
-                noise.push(NoiseItem { item_id: it.item_id, title: it.title });
+                noise.push(NoiseItem {
+                    item_id: it.item_id,
+                    title: it.title,
+                });
             }
             // 无向量 item 无法聚类,直接入 noise
-            _ => noise.push(NoiseItem { item_id: it.item_id, title: it.title }),
+            _ => noise.push(NoiseItem {
+                item_id: it.item_id,
+                title: it.title,
+            }),
         }
     }
     (clean, noise, mismatch)
@@ -33,7 +42,10 @@ pub fn partition_by_majority_dim(items: Vec<ItemView>) -> (Vec<ItemView>, Vec<No
 pub fn fallback_group_by_dir(items: &[ItemView]) -> Vec<(String, Vec<String>)> {
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for it in items {
-        groups.entry(it.dir.clone()).or_default().push(it.item_id.clone());
+        groups
+            .entry(it.dir.clone())
+            .or_default()
+            .push(it.item_id.clone());
     }
     groups.into_iter().collect()
 }
@@ -66,7 +78,11 @@ mod tests {
     }
     #[test]
     fn fallback_groups_by_subdir_when_too_few() {
-        let items = vec![iv("a", "/x", None), iv("b", "/x", None), iv("c", "/y", None)];
+        let items = vec![
+            iv("a", "/x", None),
+            iv("b", "/x", None),
+            iv("c", "/y", None),
+        ];
         let groups = fallback_group_by_dir(&items);
         assert_eq!(groups.len(), 2); // /x, /y
     }

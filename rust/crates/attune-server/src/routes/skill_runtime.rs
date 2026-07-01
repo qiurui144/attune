@@ -82,7 +82,11 @@ fn load_disabled_plugin_ids(state: &SharedState) -> Vec<String> {
     json.get("plugins")
         .and_then(|p| p.get("disabled"))
         .and_then(|d| d.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -150,16 +154,16 @@ pub async fn estimate_skill(
     Json(req): Json<EstimateRequest>,
 ) -> AppResult<Json<Value>> {
     let reg = build_skill_registry(&state);
-    let reg_skill = reg
-        .get(&id)
-        .ok_or_else(|| skill_not_found(&id))?;
+    let reg_skill = reg.get(&id).ok_or_else(|| skill_not_found(&id))?;
 
     // The estimate's input size = the total chars of the referenced items (best-effort; a
     // missing item just contributes 0). Reading item text is a 🆓 local op.
     let input_chars = referenced_input_chars(&state, reg_skill, &req.inputs);
     let model = model_name(&state);
     let est = skill_runtime::estimate(&reg_skill.skill, input_chars, &model);
-    Ok(Json(serde_json::to_value(&est).unwrap_or_else(|_| json!({}))))
+    Ok(Json(
+        serde_json::to_value(&est).unwrap_or_else(|_| json!({})),
+    ))
 }
 
 // ───────────────────────────── run ─────────────────────────────
@@ -235,14 +239,18 @@ pub async fn run_runtime_skill(
             resolver.as_ref(),
             llm.as_ref(),
             &model,
-            dispatcher.as_ref().map(|d| d as &dyn attune_core::skill_runtime::AgentDispatcher),
+            dispatcher
+                .as_ref()
+                .map(|d| d as &dyn attune_core::skill_runtime::AgentDispatcher),
         )
     })
     .await
-    .map_err(|e| AppError::detailed(
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        json!({ "error": format!("skill run join: {e}"), "code": "internal" }),
-    ))?
+    .map_err(|e| {
+        AppError::detailed(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "error": format!("skill run join: {e}"), "code": "internal" }),
+        )
+    })?
     .map_err(map_skill_err)?;
 
     // INT-2 file-egress gate: the rendered artifact (built from decrypted vault
@@ -275,7 +283,9 @@ pub async fn run_runtime_skill(
                     }),
                 ));
             }
-            attune_core::doc_privacy::ArtifactEgressOutcome::Allowed { artifact, redacted, .. } => {
+            attune_core::doc_privacy::ArtifactEgressOutcome::Allowed {
+                artifact, redacted, ..
+            } => {
                 let mut warns = result.warnings.clone();
                 if redacted > 0 {
                     // Re-render the redacted IR so the downloadable bytes are clean.
@@ -409,7 +419,11 @@ fn model_name(state: &SharedState) -> String {
 }
 
 fn is_paid(state: &SharedState) -> bool {
-    state.member_state.lock().map(|g| g.is_paid()).unwrap_or(false)
+    state
+        .member_state
+        .lock()
+        .map(|g| g.is_paid())
+        .unwrap_or(false)
 }
 
 /// I2 egress gate (default off) — has the user opted into cloud-LLM egress?
@@ -420,7 +434,11 @@ fn cloud_llm_egress_enabled(state: &SharedState) -> bool {
     };
     bytes
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|s| s.get("privacy").and_then(|p| p.get("llm")).and_then(|v| v.as_bool()))
+        .and_then(|s| {
+            s.get("privacy")
+                .and_then(|p| p.get("llm"))
+                .and_then(|v| v.as_bool())
+        })
         .unwrap_or(false)
 }
 
@@ -555,8 +573,16 @@ steps:
         let tmp = tempfile::TempDir::new().expect("tmp");
         let _g = crate::test_support::override_data_dir(tmp.path().join("attune"));
         let plugins = tmp.path().join("attune").join("plugins");
-        write_plugin(&plugins, "academic-pro", &[("skills/a.yaml", &skill_yaml("acad-thesis"))]);
-        write_plugin(&plugins, "presales-pro", &[("skills/b.yaml", &skill_yaml("presales-bid"))]);
+        write_plugin(
+            &plugins,
+            "academic-pro",
+            &[("skills/a.yaml", &skill_yaml("acad-thesis"))],
+        );
+        write_plugin(
+            &plugins,
+            "presales-pro",
+            &[("skills/b.yaml", &skill_yaml("presales-bid"))],
+        );
         let state = state_with_plugins(tmp.path());
         let reg = build_skill_registry(&state);
         assert_eq!(reg.get("acad-thesis").unwrap().source, "pro:academic-pro");
@@ -577,7 +603,10 @@ steps:
         let state = state_with_plugins(tmp.path());
         let reg = build_skill_registry(&state);
         assert!(reg.get("sneaky").is_none(), "rejected skill not registered");
-        assert!(reg.get("research-synthesis").is_some(), "built-ins survive bad plugin");
+        assert!(
+            reg.get("research-synthesis").is_some(),
+            "built-ins survive bad plugin"
+        );
     }
 
     /// Disabled plugins (settings.plugins.disabled) don't contribute skills.
@@ -586,7 +615,11 @@ steps:
         let tmp = tempfile::TempDir::new().expect("tmp");
         let _g = crate::test_support::override_data_dir(tmp.path().join("attune"));
         let plugins = tmp.path().join("attune").join("plugins");
-        write_plugin(&plugins, "academic-pro", &[("skills/a.yaml", &skill_yaml("acad-thesis"))]);
+        write_plugin(
+            &plugins,
+            "academic-pro",
+            &[("skills/a.yaml", &skill_yaml("acad-thesis"))],
+        );
         let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
         vault.setup("P@ss-skillreg-not-real").expect("setup");
         let settings = serde_json::json!({ "plugins": { "disabled": ["academic-pro"] } });
@@ -596,7 +629,10 @@ steps:
             .expect("write settings");
         let state = std::sync::Arc::new(crate::state::AppState::new(vault, false));
         let reg = build_skill_registry(&state);
-        assert!(reg.get("acad-thesis").is_none(), "disabled plugin skill not registered");
+        assert!(
+            reg.get("acad-thesis").is_none(),
+            "disabled plugin skill not registered"
+        );
     }
 
     /// list endpoint exposes a pro plugin's registered skill (end-to-end through the handler).
@@ -605,11 +641,20 @@ steps:
         let tmp = tempfile::TempDir::new().expect("tmp");
         let _g = crate::test_support::override_data_dir(tmp.path().join("attune"));
         let plugins = tmp.path().join("attune").join("plugins");
-        write_plugin(&plugins, "academic-pro", &[("skills/a.yaml", &skill_yaml("acad-thesis"))]);
+        write_plugin(
+            &plugins,
+            "academic-pro",
+            &[("skills/a.yaml", &skill_yaml("acad-thesis"))],
+        );
         let state = state_with_plugins(tmp.path());
         let resp = list_runtime_skills(State(state)).await;
         let skills = resp.0["skills"].as_array().expect("skills array");
-        let found = skills.iter().any(|s| s["id"] == "acad-thesis" && s["source"] == "pro:academic-pro");
-        assert!(found, "pro skill must appear in /skill-runtime/skills listing");
+        let found = skills
+            .iter()
+            .any(|s| s["id"] == "acad-thesis" && s["source"] == "pro:academic-pro");
+        assert!(
+            found,
+            "pro skill must appear in /skill-runtime/skills listing"
+        );
     }
 }

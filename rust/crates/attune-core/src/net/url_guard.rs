@@ -88,8 +88,9 @@ pub fn validate_outbound_url(
     }
 
     // ② 解析 host → IP，逐个拒内网。
-    let ips = resolve(&host_str)
-        .map_err(|e| VaultError::InvalidInput(format!("git-network-error: resolve {host_str}: {e}")))?;
+    let ips = resolve(&host_str).map_err(|e| {
+        VaultError::InvalidInput(format!("git-network-error: resolve {host_str}: {e}"))
+    })?;
     if ips.is_empty() {
         return Err(VaultError::InvalidInput(format!(
             "git-network-error: {host_str} resolved to no addresses"
@@ -260,19 +261,20 @@ mod tests {
 
     #[test]
     fn accepts_public_github_https() {
-        let v = validate_outbound_url(
-            "https://github.com/rust-lang/book",
-            &[],
-            &allow_github_ip,
-        )
-        .unwrap();
+        let v = validate_outbound_url("https://github.com/rust-lang/book", &[], &allow_github_ip)
+            .unwrap();
         assert_eq!(v.host, "github.com");
         assert_eq!(v.resolved_ips.len(), 1);
     }
 
     #[test]
     fn rejects_non_http_scheme() {
-        for u in ["ssh://git@github.com/x", "git@github.com:x/y.git", "file:///etc/passwd", "ftp://github.com/x"] {
+        for u in [
+            "ssh://git@github.com/x",
+            "git@github.com:x/y.git",
+            "file:///etc/passwd",
+            "ftp://github.com/x",
+        ] {
             assert!(
                 validate_outbound_url(u, &[], &allow_github_ip).is_err(),
                 "scheme should be rejected: {u}"
@@ -316,7 +318,9 @@ mod tests {
 
     #[test]
     fn rejects_host_not_in_allowlist() {
-        assert!(validate_outbound_url("https://evil.example.com/x", &[], &allow_github_ip).is_err());
+        assert!(
+            validate_outbound_url("https://evil.example.com/x", &[], &allow_github_ip).is_err()
+        );
     }
 
     #[test]
@@ -350,7 +354,9 @@ mod tests {
         // 子域信任）。确认行为明确（不是 bug）：host_allowed 命中。
         assert!(v.is_ok());
         // 真正的攻击构造 `github.com.evil.com` 不以 .github.com 结尾 → 拒。
-        assert!(validate_outbound_url("https://github.com.evil.com/x", &[], &allow_github_ip).is_err());
+        assert!(
+            validate_outbound_url("https://github.com.evil.com/x", &[], &allow_github_ip).is_err()
+        );
     }
 
     #[test]
@@ -360,11 +366,17 @@ mod tests {
 
     #[test]
     fn ipv6_unique_local_and_linklocal_blocked() {
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1))));
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1))));
+        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
+            0xfc00, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::new(
+            0xfe80, 0, 0, 0, 0, 0, 0, 1
+        ))));
         assert!(is_blocked_ip(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
         // IPv4-mapped loopback。
-        assert!(is_blocked_ip(&IpAddr::V6(Ipv4Addr::new(127, 0, 0, 1).to_ipv6_mapped())));
+        assert!(is_blocked_ip(&IpAddr::V6(
+            Ipv4Addr::new(127, 0, 0, 1).to_ipv6_mapped()
+        )));
     }
 
     #[test]
@@ -410,13 +422,13 @@ mod tests {
     fn open_rejects_raw_ip_literal_hosts() {
         // 裸 IP（含 metadata / 八进制 / 十进制 / IPv6）—— 强制走域名。
         for u in [
-            "http://169.254.169.254/latest/meta-data/",  // cloud metadata 字面量
-            "http://127.0.0.1:8080/feed",                // loopback 字面量
-            "http://192.168.0.1/feed",                   // 私网字面量
-            "http://[::1]/feed",                         // IPv6 loopback 字面量
-            "http://[fe80::1]/feed",                     // IPv6 link-local 字面量
-            "http://2130706433/feed",  // 十进制 127.0.0.1（url crate 解析为 domain → 解析失败/拒）
-            "http://0177.0.0.1/feed",  // 八进制 loopback 形式
+            "http://169.254.169.254/latest/meta-data/", // cloud metadata 字面量
+            "http://127.0.0.1:8080/feed",               // loopback 字面量
+            "http://192.168.0.1/feed",                  // 私网字面量
+            "http://[::1]/feed",                        // IPv6 loopback 字面量
+            "http://[fe80::1]/feed",                    // IPv6 link-local 字面量
+            "http://2130706433/feed", // 十进制 127.0.0.1（url crate 解析为 domain → 解析失败/拒）
+            "http://0177.0.0.1/feed", // 八进制 loopback 形式
         ] {
             assert!(
                 validate_open_outbound_url(u, &allow_github_ip).is_err(),

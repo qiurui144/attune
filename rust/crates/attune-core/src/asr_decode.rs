@@ -67,7 +67,12 @@ fn decode_to_f32(src: &Path) -> Result<(Vec<f32>, u32, u16)> {
     }
 
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .map_err(|e| VaultError::InvalidInput(format!("audio probe failed: {e}")))?;
     let mut format = probed.format;
 
@@ -91,9 +96,7 @@ fn decode_to_f32(src: &Path) -> Result<(Vec<f32>, u32, u16)> {
         let packet = match format.next_packet() {
             Ok(p) => p,
             // Clean EOF (symphonia signals end-of-stream as an IoError UnexpectedEof).
-            Err(SymphoniaError::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
+            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 break;
             }
             Err(SymphoniaError::ResetRequired) => break,

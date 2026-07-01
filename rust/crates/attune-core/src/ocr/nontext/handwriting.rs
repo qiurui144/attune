@@ -9,7 +9,10 @@ impl RegionRecognizer for HandwritingRecognizer {
         RegionKind::Handwriting
     }
     fn recognize(&self, _crop: &DynamicImage, _ctx: &RegionCtx) -> Result<RegionResult> {
-        Ok(RegionResult::HandwritingV1 { text: None, grounding: None }) // transcription needs 💰 VLM
+        Ok(RegionResult::HandwritingV1 {
+            text: None,
+            grounding: None,
+        }) // transcription needs 💰 VLM
     }
     fn cost_tier(&self) -> CostTier {
         CostTier::Local
@@ -24,7 +27,10 @@ mod tests {
         let r = HandwritingRecognizer
             .recognize(
                 &DynamicImage::new_rgb8(1, 1),
-                &RegionCtx { ocr_lines: vec![], page: 0 },
+                &RegionCtx {
+                    ocr_lines: vec![],
+                    page: 0,
+                },
             )
             .unwrap();
         assert!(matches!(r, RegionResult::HandwritingV1 { text: None, .. }));

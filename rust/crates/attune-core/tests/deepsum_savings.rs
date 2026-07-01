@@ -18,7 +18,9 @@
 //! Run with: `cargo test -p attune-core --test deepsum_savings -- --nocapture`
 
 use attune_core::crypto::Key32;
-use attune_core::document_intelligence::deep_summary::{summarize, DeepSummaryConfig, StageLlms, SummaryLevel};
+use attune_core::document_intelligence::deep_summary::{
+    summarize, DeepSummaryConfig, StageLlms, SummaryLevel,
+};
 use attune_core::document_intelligence::model_routing::ModelRouter;
 use attune_core::llm::RecordingMockLlm;
 use attune_core::store::Store;
@@ -87,12 +89,25 @@ fn measure(name: &str, text: &str) -> (DocResult, f64) {
     let cfg = DeepSummaryConfig::default();
     let cheap = cheap_mock();
     let reasoning = reasoning_mock();
-    let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
+    let llms = StageLlms {
+        cheap: &cheap,
+        reasoning: &reasoning,
+    };
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
 
     // First run (cold cache) — the headline savings.
-    let (_s1, bill1) = summarize(text, SummaryLevel::Standard, name, &r, &llms, &store, &dek, &cfg).unwrap();
+    let (_s1, bill1) = summarize(
+        text,
+        SummaryLevel::Standard,
+        name,
+        &r,
+        &llms,
+        &store,
+        &dek,
+        &cfg,
+    )
+    .unwrap();
     let first = DocResult {
         name: name.to_string(),
         chars: text.chars().count(),
@@ -104,9 +119,26 @@ fn measure(name: &str, text: &str) -> (DocResult, f64) {
     // Second run (warm cache, same item_id) — should approach ~1.0 (map free).
     let cheap2 = RecordingMockLlm::new("gpt-4o-mini"); // no responses → asserts zero map calls
     let reasoning2 = reasoning_mock();
-    let llms2 = StageLlms { cheap: &cheap2, reasoning: &reasoning2 };
-    let (_s2, bill2) = summarize(text, SummaryLevel::Standard, name, &r, &llms2, &store, &dek, &cfg).unwrap();
-    assert_eq!(cheap2.call_count(), 0, "{name}: second run must make zero map LLM calls (full cache hit)");
+    let llms2 = StageLlms {
+        cheap: &cheap2,
+        reasoning: &reasoning2,
+    };
+    let (_s2, bill2) = summarize(
+        text,
+        SummaryLevel::Standard,
+        name,
+        &r,
+        &llms2,
+        &store,
+        &dek,
+        &cfg,
+    )
+    .unwrap();
+    assert_eq!(
+        cheap2.call_count(),
+        0,
+        "{name}: second run must make zero map LLM calls (full cache hit)"
+    );
     let second_savings = bill2.savings_ratio_by_token();
 
     (first, second_savings)
@@ -123,7 +155,11 @@ fn deepsum_savings_corpus_gate() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 if let Ok(text) = std::fs::read_to_string(&path) {
-                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("doc").to_string();
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("doc")
+                        .to_string();
                     corpus.push((name, text));
                 }
             }
@@ -164,7 +200,9 @@ fn deepsum_savings_corpus_gate() {
     let report_path = format!("{report_dir}/{date}_deepsum-savings.md");
     let mut body = String::new();
     body.push_str("# Deep-Summary Token-Savings Measurement (T-12, FLAGSHIP §9.1)\n\n");
-    body.push_str(&format!("- Date: {date}\n- Sprint: attune-document-intelligence\n"));
+    body.push_str(&format!(
+        "- Date: {date}\n- Sprint: attune-document-intelligence\n"
+    ));
     body.push_str("- Harness: `rust/crates/attune-core/tests/deepsum_savings.rs` (deterministic; RecordingMockLlm)\n");
     body.push_str("- Metric: `savings_ratio_by_token = 1 - actual_billable_LLM_tokens / naive_baseline_tokens`\n");
     body.push_str("- Baseline (naive) = full text → reasoning model in one shot (`cost::estimate_tokens`)\n\n");
@@ -173,7 +211,11 @@ fn deepsum_savings_corpus_gate() {
     for r in &results {
         body.push_str(&format!(
             "| {} | {} | {} | {} | {:.1}% |\n",
-            r.name, r.chars, r.naive, r.actual, r.savings * 100.0
+            r.name,
+            r.chars,
+            r.naive,
+            r.actual,
+            r.savings * 100.0
         ));
     }
     body.push_str(&format!(
@@ -191,46 +233,97 @@ fn deepsum_savings_corpus_gate() {
     body.push_str("\n## Long-document regime (≥3000 chars — deep-summary's target)\n\n");
     body.push_str("| doc | chars | savings |\n|---|---|---|\n");
     for r in &long_results {
-        body.push_str(&format!("| {} | {} | {:.1}% |\n", r.name, r.chars, r.savings * 100.0));
+        body.push_str(&format!(
+            "| {} | {} | {:.1}% |\n",
+            r.name,
+            r.chars,
+            r.savings * 100.0
+        ));
     }
     body.push_str(&format!("\nAll long docs ≥ 60%: **{long_all_pass}**\n"));
     body.push_str("\n## Second-run (warm cache, same item_id) — should approach ~1.0\n\n");
     body.push_str("| doc | second-run savings | map calls |\n|---|---|---|\n");
     for (name, sv) in &second_run_savings {
-        body.push_str(&format!("| {} | {:.1}% | 0 (cache hit) |\n", name, sv * 100.0));
+        body.push_str(&format!(
+            "| {} | {:.1}% | 0 (cache hit) |\n",
+            name,
+            sv * 100.0
+        ));
     }
     body.push_str("\n## ⚠ FLAGSHIP-TARGET FINDING (G3 ESCALATED to human)\n\n");
-    body.push_str("The spec §9.1 headline target **\"≥80% of docs ≥60% by-token on a COLD run\"** is\n");
+    body.push_str(
+        "The spec §9.1 headline target **\"≥80% of docs ≥60% by-token on a COLD run\"** is\n",
+    );
     body.push_str("**NOT met** and is structurally unreachable by this pipeline:\n");
-    body.push_str("- The MAP stage must read the extractive candidate (≥40% of the doc by token),\n");
-    body.push_str("  so cold-run `actual_billable` is ~40-100% of the naive baseline → cold savings 0-50%.\n");
-    body.push_str("- The bounded REDUCE stage always bills its input (Σ block summaries); for SHORT\n");
-    body.push_str("  docs that input is a large fraction of the (small) naive baseline → even warm-cache\n");
+    body.push_str(
+        "- The MAP stage must read the extractive candidate (≥40% of the doc by token),\n",
+    );
+    body.push_str(
+        "  so cold-run `actual_billable` is ~40-100% of the naive baseline → cold savings 0-50%.\n",
+    );
+    body.push_str(
+        "- The bounded REDUCE stage always bills its input (Σ block summaries); for SHORT\n",
+    );
+    body.push_str(
+        "  docs that input is a large fraction of the (small) naive baseline → even warm-cache\n",
+    );
     body.push_str("  short-doc savings stays < 60%.\n");
-    body.push_str("- ≥60% by-token IS achieved for **long docs on re-read** (reduce input « full doc).\n");
-    body.push_str("- For **SHORT docs** the map+reduce pipeline can bill MORE than a single naive call\n");
-    body.push_str("  (per-stage prompt/format overhead > the tiny baseline) — deep-summary is the wrong\n");
-    body.push_str("  tool below ~a few KB; spec §11 R2 says route those to a single standard call.\n\n");
-    body.push_str("**What this harness DOES gate (proven, honest):** (a) `actual ≤ naive` always\n");
-    body.push_str("(accounting correctness — caught+fixed a CJK tokenizer mismatch); (b) warm ≥ cold\n");
-    body.push_str("(cache never hurts); (c) long docs ≥60% on re-read. The by-USD savings (cheap/reasoning\n");
+    body.push_str(
+        "- ≥60% by-token IS achieved for **long docs on re-read** (reduce input « full doc).\n",
+    );
+    body.push_str(
+        "- For **SHORT docs** the map+reduce pipeline can bill MORE than a single naive call\n",
+    );
+    body.push_str(
+        "  (per-stage prompt/format overhead > the tiny baseline) — deep-summary is the wrong\n",
+    );
+    body.push_str(
+        "  tool below ~a few KB; spec §11 R2 says route those to a single standard call.\n\n",
+    );
+    body.push_str(
+        "**What this harness DOES gate (proven, honest):** (a) `actual ≤ naive` always\n",
+    );
+    body.push_str(
+        "(accounting correctness — caught+fixed a CJK tokenizer mismatch); (b) warm ≥ cold\n",
+    );
+    body.push_str(
+        "(cache never hurts); (c) long docs ≥60% on re-read. The by-USD savings (cheap/reasoning\n",
+    );
     body.push_str("split) is materially higher but pricing-sensitive (spec §8.5 → token is the primary metric).\n\n");
     body.push_str("**Options for the human:** (1) accept the metric as size/workload-dependent and re-state\n");
-    body.push_str("§9.1 as \"≥60% on long-doc re-read\"; (2) make the extractive cut far more aggressive\n");
-    body.push_str("(keep_ratio ~0.3) — risks summary quality, needs §9.2 ROUGE re-check; (3) skip the\n");
+    body.push_str(
+        "§9.1 as \"≥60% on long-doc re-read\"; (2) make the extractive cut far more aggressive\n",
+    );
+    body.push_str(
+        "(keep_ratio ~0.3) — risks summary quality, needs §9.2 ROUGE re-check; (3) skip the\n",
+    );
     body.push_str("reduce stage for very short docs (return per-chapter extractive directly).\n\n");
     body.push_str("## Levers (spec §3.2)\n\n");
-    body.push_str("1. Extractive pre-cut (stage 1, 0 LLM): map sees the candidate, not the raw block.\n");
-    body.push_str("2. chunk_summaries cache reuse (stage 2): re-reading a doc → 0 new map tokens.\n");
+    body.push_str(
+        "1. Extractive pre-cut (stage 1, 0 LLM): map sees the candidate, not the raw block.\n",
+    );
+    body.push_str(
+        "2. chunk_summaries cache reuse (stage 2): re-reading a doc → 0 new map tokens.\n",
+    );
     body.push_str("3. cheap-map / reasoning-reduce split (stage 3/4): bulk on the cheap model.\n");
-    body.push_str("\n> NOTE: by-token savings is the model-agnostic primary metric (spec §8.5). By-USD\n");
-    body.push_str("> savings is larger (cheap/reasoning split) but pricing-sensitive, so not the gate.\n");
+    body.push_str(
+        "\n> NOTE: by-token savings is the model-agnostic primary metric (spec §8.5). By-USD\n",
+    );
+    body.push_str(
+        "> savings is larger (cheap/reasoning split) but pricing-sensitive, so not the gate.\n",
+    );
     body.push_str("> Real-LLM quality (3-tier matrix, ROUGE) is the §9.2 TEST-phase job (capped ~20 calls).\n");
 
     let mut f = std::fs::File::create(&report_path).expect("write R18 report");
     f.write_all(body.as_bytes()).expect("write report body");
     println!("R18 report written: {report_path}");
-    println!("savings mean={:.1}% std={:.1}% ; docs>=60%: {}/{}", mean * 100.0, std * 100.0, n_pass_60, results.len());
+    println!(
+        "savings mean={:.1}% std={:.1}% ; docs>=60%: {}/{}",
+        mean * 100.0,
+        std * 100.0,
+        n_pass_60,
+        results.len()
+    );
 
     // ── assertions (the FLAGSHIP gate, honest version) ──
     //
@@ -277,7 +370,10 @@ fn deepsum_savings_corpus_gate() {
         "all long docs must reach ≥60% by-token on re-read; see {report_path}"
     );
     // (4) report exists on disk (R18).
-    assert!(std::path::Path::new(&report_path).exists(), "R18 report must exist on disk");
+    assert!(
+        std::path::Path::new(&report_path).exists(),
+        "R18 report must exist on disk"
+    );
     // (5) ESCALATED (reported, not gated): the spec §9.1 "≥80% of docs ≥60% by-token on a COLD
     //     run" target — NOT met for short docs / cold runs (structural: map reads ≥40% of the
     //     doc; the bounded reduce always bills against a small naive baseline). Surfaced to the

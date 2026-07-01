@@ -45,7 +45,10 @@ fn pdf_ingest_then_search_cn_and_en_real_vector() {
     let (title, content) =
         attune_core::parser::parse_file(&pdf).expect("parse mixed-zhen.pdf via real pdf_extract");
     eprintln!("[1] parsed mixed-zhen.pdf: title={title:?} content={content:?}");
-    assert!(!content.trim().is_empty(), "parsed PDF content must be non-empty");
+    assert!(
+        !content.trim().is_empty(),
+        "parsed PDF content must be non-empty"
+    );
 
     // ── 2. Real encrypted ingest ───────────────────────────────────────────
     let store = Store::open_memory().expect("open encrypted store");
@@ -154,6 +157,10 @@ fn pdf_ingest_then_search_cn_and_en_real_vector() {
 
     eprintln!(
         "[OK] E2E passed (vector leg: {})",
-        if real_vector { "REAL bge-m3" } else { "FTS-ONLY (no real vector)" }
+        if real_vector {
+            "REAL bge-m3"
+        } else {
+            "FTS-ONLY (no real vector)"
+        }
     );
 }

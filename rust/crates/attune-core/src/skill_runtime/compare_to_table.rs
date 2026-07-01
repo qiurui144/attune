@@ -183,7 +183,10 @@ fn extract_call(
     let validator = |raw: &str| -> std::result::Result<(), String> {
         match parse_rows(raw) {
             Some(_) => Ok(()),
-            None => Err("输出不是可解析的 JSON 对象（需含 rows 数组，每项有 name + value_a/value_b）".into()),
+            None => Err(
+                "输出不是可解析的 JSON 对象（需含 rows 数组，每项有 name + value_a/value_b）"
+                    .into(),
+            ),
         }
     };
     // Strict schema-guided path first (real response_format on DeepSeek/OpenAI).
@@ -328,9 +331,8 @@ mod tests {
     #[test]
     fn ungrounded_value_dropped_to_none() {
         // Model hallucinates "8K" for B which is NOT in the doc → grounding guard nulls it.
-        let llm = RecordingMockLlm::new("deepseek").with_response(
-            r#"{"rows":[{"name":"分辨率","value_a":"1080p","value_b":"8K"}]}"#,
-        );
+        let llm = RecordingMockLlm::new("deepseek")
+            .with_response(r#"{"rows":[{"name":"分辨率","value_a":"1080p","value_b":"8K"}]}"#);
         let cmp = compare_to_table(doc(), "设备 A", "设备 B", &llm, "deepseek");
         let row = &cmp.rows[0];
         assert_eq!(row.value_a.as_deref(), Some("1080p"), "grounded value kept");
@@ -342,9 +344,8 @@ mod tests {
 
     #[test]
     fn absent_param_is_null_not_invented() {
-        let llm = RecordingMockLlm::new("deepseek").with_response(
-            r#"{"rows":[{"name":"价格","value_a":null,"value_b":null}]}"#,
-        );
+        let llm = RecordingMockLlm::new("deepseek")
+            .with_response(r#"{"rows":[{"name":"价格","value_a":null,"value_b":null}]}"#);
         let cmp = compare_to_table(doc(), "设备 A", "设备 B", &llm, "deepseek");
         assert_eq!(cmp.rows[0].value_a, None);
         assert_eq!(cmp.rows[0].value_b, None);
@@ -370,14 +371,16 @@ mod tests {
         let cmp = compare_to_table(doc(), "设备 A", "设备 B", &llm, "deepseek");
         assert!(cmp.rows.is_empty(), "no rows on total parse failure");
         assert!(cmp.warnings.iter().any(|w| w.contains("抽取失败")));
-        assert!(llm.call_count() >= 3, "retry loop attempted before degrading");
+        assert!(
+            llm.call_count() >= 3,
+            "retry loop attempted before degrading"
+        );
     }
 
     #[test]
     fn serde_roundtrip() {
-        let llm = RecordingMockLlm::new("deepseek").with_response(
-            r#"{"rows":[{"name":"功耗","value_a":"5W","value_b":"12W"}]}"#,
-        );
+        let llm = RecordingMockLlm::new("deepseek")
+            .with_response(r#"{"rows":[{"name":"功耗","value_a":"5W","value_b":"12W"}]}"#);
         let cmp = compare_to_table(doc(), "设备 A", "设备 B", &llm, "deepseek");
         let js = serde_json::to_string(&cmp).unwrap();
         let back: ParamComparison = serde_json::from_str(&js).unwrap();

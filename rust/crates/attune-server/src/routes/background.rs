@@ -82,5 +82,7 @@ pub async fn set_power_policy(
             }
         }
     }
-    Ok(Json(serde_json::json!({ "ok": true, "policy": body, "persisted": persisted })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "policy": body, "persisted": persisted }),
+    ))
 }

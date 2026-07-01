@@ -37,14 +37,18 @@ impl RawItem {
                     .ok()
                     .or_else(|| {
                         // 新版：ClassificationResult 格式。读取 user_tags（如果有）或降级为空
-                        serde_json::from_slice::<serde_json::Value>(&plain).ok().map(|v| {
-                            v.get("user_tags")
-                                .and_then(|t| t.as_array())
-                                .map(|arr| arr.iter()
-                                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                                    .collect())
-                                .unwrap_or_default()
-                        })
+                        serde_json::from_slice::<serde_json::Value>(&plain)
+                            .ok()
+                            .map(|v| {
+                                v.get("user_tags")
+                                    .and_then(|t| t.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            })
                     });
                 parsed
             }
@@ -258,11 +262,11 @@ pub struct ProjectTimelineEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRow {
     pub id: String,
-    pub kind: String,            // 'episodic' (L2) / 'semantic' (L3)
-    pub window_start: i64,       // unix epoch 秒
+    pub kind: String,      // 'episodic' (L2) / 'semantic' (L3)
+    pub window_start: i64, // unix epoch 秒
     pub window_end: i64,
-    pub source_chunk_hashes: Vec<String>,  // 升序
-    pub summary: String,         // 已解密
+    pub source_chunk_hashes: Vec<String>, // 升序
+    pub summary: String,                  // 已解密
     pub model: String,
     pub created_at: i64,
     /// 语义层去重键（L3）；episodic 行为 None。

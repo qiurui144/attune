@@ -88,7 +88,9 @@ pub struct CloudMemberVerifier<S: CloudSessionSource = DiskCloudSession> {
 
 impl Default for CloudMemberVerifier<DiskCloudSession> {
     fn default() -> Self {
-        Self { session: DiskCloudSession }
+        Self {
+            session: DiskCloudSession,
+        }
     }
 }
 
@@ -104,7 +106,10 @@ impl<S: CloudSessionSource> MemberVerifier for CloudMemberVerifier<S> {
             return Err(MemberVerifyError::MissingLicenseId);
         }
         // No persisted cloud session ⇒ nothing to verify against ⇒ fail closed.
-        let (cloud_url, session) = self.session.load().ok_or(MemberVerifyError::NoCloudSession)?;
+        let (cloud_url, session) = self
+            .session
+            .load()
+            .ok_or(MemberVerifyError::NoCloudSession)?;
 
         // Ask the authoritative source: list the account's licenses. Any transport/HTTP error is
         // treated as "unavailable" and fails closed — an attacker who blocks the cloud must NOT be
@@ -146,7 +151,9 @@ pub struct WhitelistMemberVerifier {
 impl WhitelistMemberVerifier {
     /// Approve exactly `expected_license` (and nothing else).
     pub fn new(expected_license: impl Into<String>) -> Self {
-        Self { expected_license: expected_license.into() }
+        Self {
+            expected_license: expected_license.into(),
+        }
     }
 }
 
@@ -226,7 +233,10 @@ mod tests {
         let v = WhitelistMemberVerifier::new("lic-known");
         // The one whitelisted license passes — a real match, not a blanket Ok.
         assert!(v.verify_paid("acct", "lic-known").is_ok());
-        assert!(v.verify_paid("acct", " lic-known ").is_ok(), "trims whitespace");
+        assert!(
+            v.verify_paid("acct", " lic-known ").is_ok(),
+            "trims whitespace"
+        );
         // Anything else is rejected exactly like production.
         assert_eq!(
             v.verify_paid("acct", "lic-other").unwrap_err(),

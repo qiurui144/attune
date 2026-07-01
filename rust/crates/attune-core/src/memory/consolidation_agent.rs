@@ -185,7 +185,11 @@ impl Candidate {
     }
 
     pub fn score(&self, now_secs: i64) -> f64 {
-        compute_score(self.access_count, self.chunk_count(), self.recency_days(now_secs))
+        compute_score(
+            self.access_count,
+            self.chunk_count(),
+            self.recency_days(now_secs),
+        )
     }
 }
 
@@ -343,7 +347,10 @@ pub fn run_promotion_cycle(
         let score = c.score(now_secs);
         let reasoning = format!(
             "access={} chunks={} recency_days={:.2} score={:.3}",
-            c.access_count, c.chunk_count(), recency_days, score,
+            c.access_count,
+            c.chunk_count(),
+            recency_days,
+            score,
         );
 
         match store.insert_semantic_memory(
@@ -447,8 +454,14 @@ mod tests {
     fn boundary_empty_store_returns_idle() {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
-        let r = run_promotion_cycle(&store, &dek, &PromotionConfig::default(), 1_700_000_000, "v1")
-            .unwrap();
+        let r = run_promotion_cycle(
+            &store,
+            &dek,
+            &PromotionConfig::default(),
+            1_700_000_000,
+            "v1",
+        )
+        .unwrap();
         assert_eq!(r.considered, 0);
         assert_eq!(r.promoted.len(), 0);
         assert_eq!(r.gated_by_access, 0);
@@ -474,7 +487,10 @@ mod tests {
         // candidate isn't window-filtered out → considered + (with score gate off) promoted
         assert_eq!(r.considered, 1);
         assert_eq!(
-            r.promoted.iter().filter(|p| p.semantic_id.is_some()).count(),
+            r.promoted
+                .iter()
+                .filter(|p| p.semantic_id.is_some())
+                .count(),
             1
         );
     }
@@ -511,7 +527,11 @@ mod tests {
             ..PromotionConfig::default()
         };
         let r = run_promotion_cycle(&store, &dek, &cfg, 1_700_086_400, "v1").unwrap();
-        let promoted_count = r.promoted.iter().filter(|p| p.semantic_id.is_some()).count();
+        let promoted_count = r
+            .promoted
+            .iter()
+            .filter(|p| p.semantic_id.is_some())
+            .count();
         assert_eq!(promoted_count, 3, "cap of 3 must be honored");
     }
 
@@ -521,10 +541,21 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
         store
-            .insert_memory(&dek, "episodic", 0, 86400, &["h".into()], "s", "m", 1_700_000_000)
+            .insert_memory(
+                &dek,
+                "episodic",
+                0,
+                86400,
+                &["h".into()],
+                "s",
+                "m",
+                1_700_000_000,
+            )
             .unwrap();
         for _ in 0..4 {
-            store.record_signal_event("citation_hit", "h", None).unwrap();
+            store
+                .record_signal_event("citation_hit", "h", None)
+                .unwrap();
         }
         let cfg = PromotionConfig {
             promotion_window_days: 0,
@@ -532,10 +563,21 @@ mod tests {
         };
         let r1 = run_promotion_cycle(&store, &dek, &cfg, 1_700_086_400, "v1").unwrap();
         let r2 = run_promotion_cycle(&store, &dek, &cfg, 1_700_086_400, "v1").unwrap();
-        let new_in_r1 = r1.promoted.iter().filter(|p| p.semantic_id.is_some()).count();
-        let new_in_r2 = r2.promoted.iter().filter(|p| p.semantic_id.is_some()).count();
+        let new_in_r1 = r1
+            .promoted
+            .iter()
+            .filter(|p| p.semantic_id.is_some())
+            .count();
+        let new_in_r2 = r2
+            .promoted
+            .iter()
+            .filter(|p| p.semantic_id.is_some())
+            .count();
         assert_eq!(new_in_r1, 1);
-        assert_eq!(new_in_r2, 0, "second cycle on same data must promote nothing new");
+        assert_eq!(
+            new_in_r2, 0,
+            "second cycle on same data must promote nothing new"
+        );
         assert_eq!(r2.already_promoted, 1);
     }
 
@@ -545,18 +587,33 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
         store
-            .insert_memory(&dek, "episodic", 0, 86400, &["h".into()], "s", "m", 1_700_000_000)
+            .insert_memory(
+                &dek,
+                "episodic",
+                0,
+                86400,
+                &["h".into()],
+                "s",
+                "m",
+                1_700_000_000,
+            )
             .unwrap();
         // Only 2 hits — strictly below default min_access_count=3.
         for _ in 0..2 {
-            store.record_signal_event("citation_hit", "h", None).unwrap();
+            store
+                .record_signal_event("citation_hit", "h", None)
+                .unwrap();
         }
         let cfg = PromotionConfig {
             promotion_window_days: 0,
             ..PromotionConfig::default()
         };
         let r = run_promotion_cycle(&store, &dek, &cfg, 1_700_086_400, "v1").unwrap();
-        let new_count = r.promoted.iter().filter(|p| p.semantic_id.is_some()).count();
+        let new_count = r
+            .promoted
+            .iter()
+            .filter(|p| p.semantic_id.is_some())
+            .count();
         assert_eq!(new_count, 0);
         assert_eq!(r.gated_by_access, 1);
     }

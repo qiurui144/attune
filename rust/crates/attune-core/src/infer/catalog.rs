@@ -45,7 +45,11 @@ pub enum Verdict {
     Measured,
     /// 未实测 —— 可下发但 UI 须标"未校准"(§6.3 不冒充实证)。默认(最保守)。
     #[default]
-    #[serde(alias = "PENDING-VERIFY", alias = "pending_verify", alias = "PENDING_VERIFY")]
+    #[serde(
+        alias = "PENDING-VERIFY",
+        alias = "pending_verify",
+        alias = "PENDING_VERIFY"
+    )]
     PendingVerify,
 }
 
@@ -185,7 +189,9 @@ impl Catalog {
     /// - `catalog-schema-unsupported` — schema_version 高于本 attune 支持。
     pub fn parse(yaml: &str) -> Result<Self> {
         let cat: Catalog = serde_yaml::from_str(yaml).map_err(|e| {
-            VaultError::ModelLoad(format!("catalog parse: {e}. error-code=catalog-parse-failed"))
+            VaultError::ModelLoad(format!(
+                "catalog parse: {e}. error-code=catalog-parse-failed"
+            ))
         })?;
         if cat.schema_version > SUPPORTED_SCHEMA_VERSION {
             return Err(VaultError::ModelLoad(format!(
@@ -306,27 +312,36 @@ pub fn verify_catalog_signature(catalog_bytes: &[u8], signature_b64: &str) -> Re
     let sig_bytes = base64::engine::general_purpose::STANDARD
         .decode(signature_b64.trim())
         .map_err(|e| {
-            VaultError::ModelLoad(format!("catalog sig base64 decode: {e}. error-code=catalog-sig-invalid"))
+            VaultError::ModelLoad(format!(
+                "catalog sig base64 decode: {e}. error-code=catalog-sig-invalid"
+            ))
         })?;
     let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
-        VaultError::ModelLoad("catalog sig not 64 bytes. error-code=catalog-sig-invalid".to_string())
+        VaultError::ModelLoad(
+            "catalog sig not 64 bytes. error-code=catalog-sig-invalid".to_string(),
+        )
     })?;
     let signature = Signature::from_bytes(&sig_arr);
 
     let digest = Sha256::digest(catalog_bytes);
 
     for key_hex in CATALOG_PUBLIC_KEYS {
-        let Ok(key_bytes) = hex::decode(key_hex) else { continue };
+        let Ok(key_bytes) = hex::decode(key_hex) else {
+            continue;
+        };
         let Ok(key_arr): std::result::Result<[u8; 32], _> = key_bytes.as_slice().try_into() else {
             continue;
         };
-        let Ok(vk) = VerifyingKey::from_bytes(&key_arr) else { continue };
+        let Ok(vk) = VerifyingKey::from_bytes(&key_arr) else {
+            continue;
+        };
         if vk.verify(&digest, &signature).is_ok() {
             return Ok(());
         }
     }
     Err(VaultError::ModelLoad(
-        "catalog signature did not match any trust anchor. error-code=catalog-sig-invalid".to_string(),
+        "catalog signature did not match any trust anchor. error-code=catalog-sig-invalid"
+            .to_string(),
     ))
 }
 
@@ -343,13 +358,22 @@ pub fn fetch_remote_or_builtin(
     sig_dst: &std::path::Path,
 ) -> Catalog {
     // ① catalog 正文。
-    if let Err(e) = crate::infer::model_source::download_with_failover(sources, CATALOG_REPO, CATALOG_FILE, dst) {
-        log::warn!("catalog fetch failed ({e}); using built-in baseline. error-code=catalog-fetch-failed");
+    if let Err(e) =
+        crate::infer::model_source::download_with_failover(sources, CATALOG_REPO, CATALOG_FILE, dst)
+    {
+        log::warn!(
+            "catalog fetch failed ({e}); using built-in baseline. error-code=catalog-fetch-failed"
+        );
         return Catalog::builtin_default();
     }
     // ② 签名文件。
     let sig_file = format!("{CATALOG_FILE}.sig");
-    if let Err(e) = crate::infer::model_source::download_with_failover(sources, CATALOG_REPO, &sig_file, sig_dst) {
+    if let Err(e) = crate::infer::model_source::download_with_failover(
+        sources,
+        CATALOG_REPO,
+        &sig_file,
+        sig_dst,
+    ) {
         log::warn!("catalog signature fetch failed ({e}); using built-in baseline. error-code=catalog-fetch-failed");
         return Catalog::builtin_default();
     }
@@ -391,16 +415,25 @@ mod tests {
     fn amd_ocr_uses_directml() {
         let c = Catalog::builtin_default();
         let ocr = c.resolve("amd-win", Role::Ocr).unwrap();
-        assert_eq!(ocr.ep, "directml", "AMD OCR uses DirectML (3.4x faster, bench:32)");
+        assert_eq!(
+            ocr.ep, "directml",
+            "AMD OCR uses DirectML (3.4x faster, bench:32)"
+        );
         assert_eq!(ocr.verdict, Verdict::Pass);
-        assert!(!ocr.source.is_empty(), "every entry must cite a source (§6.3)");
+        assert!(
+            !ocr.source.is_empty(),
+            "every entry must cite a source (§6.3)"
+        );
     }
 
     #[test]
     fn intel_ocr_uses_openvino_not_directml() {
         let c = Catalog::builtin_default();
         let ocr = c.resolve("intel-win", Role::Ocr).unwrap();
-        assert_eq!(ocr.ep, "openvino", "Intel OCR MUST be OpenVINO (DirectML CER 202%, bench:33-34)");
+        assert_eq!(
+            ocr.ep, "openvino",
+            "Intel OCR MUST be OpenVINO (DirectML CER 202%, bench:33-34)"
+        );
         assert_ne!(ocr.ep, "directml");
         assert!(ocr.source.contains("33-34"));
     }
@@ -408,26 +441,50 @@ mod tests {
     #[test]
     fn amd_intel_embedding_qwen3() {
         let c = Catalog::builtin_default();
-        assert_eq!(c.resolve("amd-win", Role::Embedding).unwrap().repo, "Xenova/qwen3-embedding-0.6b");
-        assert_eq!(c.resolve("intel-win", Role::Embedding).unwrap().repo, "Xenova/qwen3-embedding-0.6b");
+        assert_eq!(
+            c.resolve("amd-win", Role::Embedding).unwrap().repo,
+            "Xenova/qwen3-embedding-0.6b"
+        );
+        assert_eq!(
+            c.resolve("intel-win", Role::Embedding).unwrap().repo,
+            "Xenova/qwen3-embedding-0.6b"
+        );
     }
 
     #[test]
     fn cpu_fallback_freezes_current_attune_defaults() {
         let c = Catalog::builtin_default();
         // §10 migration:cpu-fallback = 现状 freeze。
-        assert_eq!(c.resolve(CPU_FALLBACK_TIER, Role::Embedding).unwrap().repo, "Xenova/bge-m3");
-        assert_eq!(c.resolve(CPU_FALLBACK_TIER, Role::Rerank).unwrap().repo, "Xenova/bge-reranker-base");
-        assert_eq!(c.resolve(CPU_FALLBACK_TIER, Role::Asr).unwrap().engine, "whisper");
+        assert_eq!(
+            c.resolve(CPU_FALLBACK_TIER, Role::Embedding).unwrap().repo,
+            "Xenova/bge-m3"
+        );
+        assert_eq!(
+            c.resolve(CPU_FALLBACK_TIER, Role::Rerank).unwrap().repo,
+            "Xenova/bge-reranker-base"
+        );
+        assert_eq!(
+            c.resolve(CPU_FALLBACK_TIER, Role::Asr).unwrap().engine,
+            "whisper"
+        );
     }
 
     #[test]
     fn amd_intel_asr_sensevoice_cpu_whisper() {
         let c = Catalog::builtin_default();
-        assert_eq!(c.resolve("amd-win", Role::Asr).unwrap().engine, "sensevoice");
-        assert_eq!(c.resolve("intel-win", Role::Asr).unwrap().engine, "sensevoice");
+        assert_eq!(
+            c.resolve("amd-win", Role::Asr).unwrap().engine,
+            "sensevoice"
+        );
+        assert_eq!(
+            c.resolve("intel-win", Role::Asr).unwrap().engine,
+            "sensevoice"
+        );
         // CPU tier 保留 whisper(sensevoice CPU FAIL CER 23%)。
-        assert_eq!(c.resolve(CPU_FALLBACK_TIER, Role::Asr).unwrap().engine, "whisper");
+        assert_eq!(
+            c.resolve(CPU_FALLBACK_TIER, Role::Asr).unwrap().engine,
+            "whisper"
+        );
     }
 
     /// SenseVoice 模型 fetch repo 与 asr_sensevoice 的 S8 fetch const 对齐 —— 防 catalog
@@ -450,9 +507,18 @@ mod tests {
     fn npu_tiers_present_with_verdicts() {
         let c = Catalog::builtin_default();
         // riscv-k3 LLM 选型对齐 bianbu §3.1 / k3-16g(16G 主推 Qwen2.5-7B q4)。
-        assert_eq!(c.resolve("riscv-k3", Role::Llm).unwrap().model, "qwen2.5-7b");
-        assert_eq!(c.resolve("rk1820-npu", Role::Llm).unwrap().verdict, Verdict::Pass);
-        assert_eq!(c.resolve("rk3588-rknpu", Role::Embedding).unwrap().repo, "minicpm-embed-rk3588");
+        assert_eq!(
+            c.resolve("riscv-k3", Role::Llm).unwrap().model,
+            "qwen2.5-7b"
+        );
+        assert_eq!(
+            c.resolve("rk1820-npu", Role::Llm).unwrap().verdict,
+            Verdict::Pass
+        );
+        assert_eq!(
+            c.resolve("rk3588-rknpu", Role::Embedding).unwrap().repo,
+            "minicpm-embed-rk3588"
+        );
     }
 
     // ── K3 调度层集成 (2026-06-22):riscv-k3 本地能力经 k3-scheduler :8090 收口 ──
@@ -464,19 +530,34 @@ mod tests {
     #[test]
     fn k3_local_capabilities_route_to_scheduler() {
         let c = Catalog::builtin_default();
-        for role in [Role::Embedding, Role::Rerank, Role::Ocr, Role::Asr, Role::Llm] {
+        for role in [
+            Role::Embedding,
+            Role::Rerank,
+            Role::Ocr,
+            Role::Asr,
+            Role::Llm,
+        ] {
             let (hit_tier, choice) = c
                 .resolve_with_tier("riscv-k3", role)
                 .unwrap_or_else(|| panic!("riscv-k3 must have {} entry", role.id()));
-            assert_eq!(hit_tier, "riscv-k3", "{} must hit riscv-k3 (not cpu-fallback)", role.id());
             assert_eq!(
-                choice.ep, "k3-scheduler",
+                hit_tier,
+                "riscv-k3",
+                "{} must hit riscv-k3 (not cpu-fallback)",
+                role.id()
+            );
+            assert_eq!(
+                choice.ep,
+                "k3-scheduler",
                 "{} on K3 must route to k3-scheduler :8090 sentinel EP (禁旁路直连)",
                 role.id()
             );
         }
         // LLM 选型对齐 bianbu §3.1 / k3-16g(16G 主推 Qwen2.5-7B q4)。
-        assert_eq!(c.resolve("riscv-k3", Role::Llm).unwrap().model, "qwen2.5-7b");
+        assert_eq!(
+            c.resolve("riscv-k3", Role::Llm).unwrap().model,
+            "qwen2.5-7b"
+        );
     }
 
     /// riscv-k3 ASR 选型对齐 bianbu §3.1 = sherpa SenseVoice(非 whisper)。
@@ -485,11 +566,20 @@ mod tests {
     fn k3_asr_is_sensevoice_aligned_with_bianbu() {
         let c = Catalog::builtin_default();
         let asr = c.resolve("riscv-k3", Role::Asr).unwrap();
-        assert_eq!(asr.engine, "sensevoice", "K3 ASR 对齐 bianbu §3.1 = sherpa SenseVoice");
+        assert_eq!(
+            asr.engine, "sensevoice",
+            "K3 ASR 对齐 bianbu §3.1 = sherpa SenseVoice"
+        );
         assert_eq!(asr.ep, "k3-scheduler", "K3 ASR 经 :8090 收口");
         // rerank/ocr 选型注解对齐
-        assert_eq!(c.resolve("riscv-k3", Role::Rerank).unwrap().model, "bge-reranker-base");
-        assert_eq!(c.resolve("riscv-k3", Role::Ocr).unwrap().model, "pp-ocrv4-layout");
+        assert_eq!(
+            c.resolve("riscv-k3", Role::Rerank).unwrap().model,
+            "bge-reranker-base"
+        );
+        assert_eq!(
+            c.resolve("riscv-k3", Role::Ocr).unwrap().model,
+            "pp-ocrv4-layout"
+        );
     }
 
     /// k3-scheduler 哨兵条目无 HF 下载(repo/file 空)—— 预置模型,wizard 跳过下载步。
@@ -497,7 +587,10 @@ mod tests {
     fn k3_scheduler_entries_have_no_hf_download() {
         let c = Catalog::builtin_default();
         let emb = c.resolve("riscv-k3", Role::Embedding).unwrap();
-        assert!(emb.repo.is_empty(), "k3-scheduler embedding has no HF repo (served via :8090)");
+        assert!(
+            emb.repo.is_empty(),
+            "k3-scheduler embedding has no HF repo (served via :8090)"
+        );
         assert!(emb.file.is_empty(), "k3-scheduler embedding has no HF file");
     }
 
@@ -518,7 +611,10 @@ mod tests {
         // (cpu-fallback 也没有 llm → resolve(llm)=None,验在 missing_role_everywhere_returns_none。
         //  此处验"缺 role 回退到 cpu-fallback 的 role"用 rk1820-npu 缺 embedding 的场景。)
         let e = c.resolve("rk1820-npu", Role::Embedding).unwrap();
-        assert_eq!(e.repo, "Xenova/bge-m3", "rk1820-npu 无 embedding → cpu-fallback bge-m3");
+        assert_eq!(
+            e.repo, "Xenova/bge-m3",
+            "rk1820-npu 无 embedding → cpu-fallback bge-m3"
+        );
     }
 
     #[test]
@@ -526,7 +622,10 @@ mod tests {
         let c = Catalog::builtin_default();
         // rk3588-rknpu 无 OCR → 回退 cpu-fallback(riscv-k3 现已有自己的 OCR,改用 rk3588)。
         let (hit_tier, _) = c.resolve_with_tier("rk3588-rknpu", Role::Ocr).unwrap();
-        assert_eq!(hit_tier, CPU_FALLBACK_TIER, "rk3588 has no OCR → reports cpu-fallback");
+        assert_eq!(
+            hit_tier, CPU_FALLBACK_TIER,
+            "rk3588 has no OCR → reports cpu-fallback"
+        );
         let (hit_tier2, _) = c.resolve_with_tier("amd-win", Role::Ocr).unwrap();
         assert_eq!(hit_tier2, "amd-win");
     }
@@ -534,7 +633,8 @@ mod tests {
     #[test]
     fn missing_role_everywhere_returns_none() {
         // 一个最小 catalog,cpu-fallback 也没有 llm → resolve(llm) = None。
-        let yaml = "schema_version: 1\ntiers:\n  cpu-fallback:\n    embedding: {repo: x, ep: cpu}\n";
+        let yaml =
+            "schema_version: 1\ntiers:\n  cpu-fallback:\n    embedding: {repo: x, ep: cpu}\n";
         let c = Catalog::parse(yaml).unwrap();
         assert!(c.resolve("cpu-fallback", Role::Llm).is_none());
         assert!(c.resolve("whatever", Role::Llm).is_none());
@@ -554,7 +654,10 @@ mod tests {
         let yaml = "schema_version: 999\ntiers: {}\n";
         let r = Catalog::parse(yaml);
         assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("catalog-schema-unsupported"));
+        assert!(r
+            .unwrap_err()
+            .to_string()
+            .contains("catalog-schema-unsupported"));
     }
 
     #[test]
@@ -576,7 +679,10 @@ mod tests {
     #[test]
     fn empty_anchor_rejects_any_signature() {
         // R4 安全默认:无 catalog 信任锚 → 任何远程 catalog 验签失败。
-        assert!(CATALOG_PUBLIC_KEYS.is_empty(), "no catalog anchor configured yet (R4 PENDING)");
+        assert!(
+            CATALOG_PUBLIC_KEYS.is_empty(),
+            "no catalog anchor configured yet (R4 PENDING)"
+        );
         let r = verify_catalog_signature(b"any catalog body", "AAAA");
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("catalog-sig-invalid"));
@@ -599,24 +705,49 @@ mod tests {
 
     #[test]
     fn missing_verdict_defaults_pending_verify() {
-        let yaml = "schema_version: 1\ntiers:\n  amd-win:\n    ocr: {engine: rapidocr, ep: directml}\n";
+        let yaml =
+            "schema_version: 1\ntiers:\n  amd-win:\n    ocr: {engine: rapidocr, ep: directml}\n";
         let c = Catalog::parse(yaml).unwrap();
-        assert_eq!(c.resolve("amd-win", Role::Ocr).unwrap().verdict, Verdict::PendingVerify);
+        assert_eq!(
+            c.resolve("amd-win", Role::Ocr).unwrap().verdict,
+            Verdict::PendingVerify
+        );
     }
 
     // ── tier 派生 ───────────────────────────────────────────────────────
 
     #[test]
     fn tier_derivation_maps_hardware() {
-        assert_eq!(tier_for_hardware("windows", &[AccelKind::AmdNpu]), "amd-win");
-        assert_eq!(tier_for_hardware("windows", &[AccelKind::AmdGpu]), "amd-win");
-        assert_eq!(tier_for_hardware("windows", &[AccelKind::IntelIgpu]), "intel-win");
-        assert_eq!(tier_for_hardware("windows", &[AccelKind::IntelNpu]), "intel-win");
-        assert_eq!(tier_for_hardware("linux", &[AccelKind::NvidiaGpu]), "nvidia-cuda");
-        assert_eq!(tier_for_hardware("windows", &[AccelKind::NvidiaGpu]), "nvidia-cuda");
+        assert_eq!(
+            tier_for_hardware("windows", &[AccelKind::AmdNpu]),
+            "amd-win"
+        );
+        assert_eq!(
+            tier_for_hardware("windows", &[AccelKind::AmdGpu]),
+            "amd-win"
+        );
+        assert_eq!(
+            tier_for_hardware("windows", &[AccelKind::IntelIgpu]),
+            "intel-win"
+        );
+        assert_eq!(
+            tier_for_hardware("windows", &[AccelKind::IntelNpu]),
+            "intel-win"
+        );
+        assert_eq!(
+            tier_for_hardware("linux", &[AccelKind::NvidiaGpu]),
+            "nvidia-cuda"
+        );
+        assert_eq!(
+            tier_for_hardware("windows", &[AccelKind::NvidiaGpu]),
+            "nvidia-cuda"
+        );
         // 无加速 / Linux Intel iGPU(无专用 Linux tier)→ cpu-fallback。
         assert_eq!(tier_for_hardware("linux", &[]), CPU_FALLBACK_TIER);
-        assert_eq!(tier_for_hardware("linux", &[AccelKind::Cpu]), CPU_FALLBACK_TIER);
+        assert_eq!(
+            tier_for_hardware("linux", &[AccelKind::Cpu]),
+            CPU_FALLBACK_TIER
+        );
     }
 
     #[test]
@@ -634,7 +765,13 @@ mod tests {
     fn every_entry_has_source_and_verdict() {
         let c = Catalog::builtin_default();
         for (tier, entry) in &c.tiers {
-            for role in [Role::Embedding, Role::Rerank, Role::Ocr, Role::Asr, Role::Llm] {
+            for role in [
+                Role::Embedding,
+                Role::Rerank,
+                Role::Ocr,
+                Role::Asr,
+                Role::Llm,
+            ] {
                 if let Some(choice) = entry.role(role) {
                     assert!(
                         !choice.source.is_empty(),

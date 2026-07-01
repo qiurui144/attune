@@ -127,7 +127,10 @@ fn raw_doc(content: Vec<u8>, filename: &str) -> RawDocument {
 }
 
 fn mem_store() -> (Store, Key32) {
-    (Store::open_memory().expect("open_memory"), Key32::generate())
+    (
+        Store::open_memory().expect("open_memory"),
+        Key32::generate(),
+    )
 }
 
 /// Ingest one fixture and return its stored item (content after parse).
@@ -140,7 +143,10 @@ fn ingest_fixture(name: &str) -> (Store, Key32, String, DecryptedItem) {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("{name} should Insert (has searchable content), got {other:?}"),
     };
-    let item = store.get_item(&dek, &item_id).unwrap().expect("item exists");
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("item exists");
     (store, dek, item_id, item)
 }
 
@@ -153,12 +159,24 @@ fn ingest_fixture(name: &str) -> (Store, Key32, String, DecryptedItem) {
 #[test]
 fn utf8_scripts_ingest_without_panic_and_preserve_markers() {
     let cases: &[(&str, &[&str])] = &[
-        ("japanese.md", &["JPMARKER", "ALPHA_TOKEN_JP", "東京", "機械学習"]),
-        ("korean.md", &["KRMARKER", "ALPHA_TOKEN_KR", "서울", "자연어"]),
-        ("traditional_chinese.md", &["TWMARKER", "ALPHA_TOKEN_TW", "臺北", "股東決議"]),
+        (
+            "japanese.md",
+            &["JPMARKER", "ALPHA_TOKEN_JP", "東京", "機械学習"],
+        ),
+        (
+            "korean.md",
+            &["KRMARKER", "ALPHA_TOKEN_KR", "서울", "자연어"],
+        ),
+        (
+            "traditional_chinese.md",
+            &["TWMARKER", "ALPHA_TOKEN_TW", "臺北", "股東決議"],
+        ),
         ("arabic_rtl.md", &["ARMARKER", "ALPHA_TOKEN_AR", "القاهرة"]),
         ("hebrew_rtl.txt", &["HEMARKER", "ALPHA_TOKEN_HE", "ירושלים"]),
-        ("emoji_heavy.md", &["EMOJIMARKER", "RUSTACEAN_TOKEN", "中文检索", "🦀"]),
+        (
+            "emoji_heavy.md",
+            &["EMOJIMARKER", "RUSTACEAN_TOKEN", "中文检索", "🦀"],
+        ),
     ];
     for (file, markers) in cases {
         let (_s, _d, _id, item) = ingest_fixture(file);
@@ -232,7 +250,13 @@ fn emoji_doc_non_emoji_token_still_searchable() {
     let mut vectors = VectorIndex::new(64).unwrap();
     let fulltext = FulltextIndex::open_memory().unwrap();
     reindex::reindex_item(
-        &store, &mut vectors, &fulltext, &item_id, &item.title, &item.content, "file",
+        &store,
+        &mut vectors,
+        &fulltext,
+        &item_id,
+        &item.title,
+        &item.content,
+        "file",
     )
     .expect("emoji doc reindex must not panic");
 
@@ -267,7 +291,12 @@ fn cjk_and_kanji_native_queries_hit_via_jieba() {
     .unwrap();
 
     // Japanese kanji compounds segment + hit.
-    for (q, want) in [("東京", "jp"), ("日本", "jp"), ("首都", "jp"), ("機械学習", "jp")] {
+    for (q, want) in [
+        ("東京", "jp"),
+        ("日本", "jp"),
+        ("首都", "jp"),
+        ("機械学習", "jp"),
+    ] {
         let hits = idx.search(q, 10).unwrap();
         assert!(
             hits.iter().any(|(id, _)| id == want),
@@ -289,7 +318,13 @@ fn cjk_and_kanji_native_queries_hit_via_jieba() {
 #[test]
 fn english_lowercased_and_stemmed_in_mixed_doc() {
     let idx = FulltextIndex::open_memory().unwrap();
-    idx.add_document("mix", "Mixed 混合", "Running 検索 RUSTACEAN searches", "note").unwrap();
+    idx.add_document(
+        "mix",
+        "Mixed 混合",
+        "Running 検索 RUSTACEAN searches",
+        "note",
+    )
+    .unwrap();
     for q in ["running", "run", "rustacean", "search"] {
         let hits = idx.search(q, 10).unwrap();
         assert!(
@@ -298,7 +333,11 @@ fn english_lowercased_and_stemmed_in_mixed_doc() {
         );
     }
     // CJK in the same mixed doc still segments.
-    assert!(idx.search("検索", 10).unwrap().iter().any(|(id, _)| id == "mix"));
+    assert!(idx
+        .search("検索", 10)
+        .unwrap()
+        .iter()
+        .any(|(id, _)| id == "mix"));
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -342,16 +381,24 @@ fn hangul_arabic_hebrew_are_character_level_matched_documented_gap() {
     let idx = FulltextIndex::open_memory().unwrap();
     // Two unrelated Korean docs that share the syllable 학 but are different
     // words: 학교(school) in kr_a, 학생(student) in kr_b.
-    idx.add_document("kr_a", "t", "서울 학교 도서관", "note").unwrap();
-    idx.add_document("kr_b", "t", "부산 학생 공원", "note").unwrap();
+    idx.add_document("kr_a", "t", "서울 학교 도서관", "note")
+        .unwrap();
+    idx.add_document("kr_b", "t", "부산 학생 공원", "note")
+        .unwrap();
 
     // (a) own-word recall works.
     assert!(
-        idx.search("서울", 10).unwrap().iter().any(|(id, _)| id == "kr_a"),
+        idx.search("서울", 10)
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == "kr_a"),
         "Korean own-word 서울 should match its doc kr_a"
     );
     assert!(
-        idx.search("학생", 10).unwrap().iter().any(|(id, _)| id == "kr_b"),
+        idx.search("학생", 10)
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == "kr_b"),
         "Korean own-word 학생 should match its doc kr_b"
     );
 
@@ -359,7 +406,10 @@ fn hangul_arabic_hebrew_are_character_level_matched_documented_gap() {
     // NOT return kr_a even though kr_a shares the syllable 학 (학교). Pins that
     // the gap is per-CHARACTER, not "any shared syllable poisons recall".
     assert!(
-        !idx.search("학생", 10).unwrap().iter().any(|(id, _)| id == "kr_a"),
+        !idx.search("학생", 10)
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == "kr_a"),
         "학생 must NOT match kr_a (which only shares 학) — conjunction/BM25 filters it"
     );
 
@@ -377,10 +427,15 @@ fn hangul_arabic_hebrew_are_character_level_matched_documented_gap() {
 
     // Arabic: same per-LETTER fallback. Single shared letter ة over-matches both.
     let aidx = FulltextIndex::open_memory().unwrap();
-    aidx.add_document("ar_a", "t", "القاهرة عاصمة مصر", "note").unwrap();
-    aidx.add_document("ar_b", "t", "مدينة كبيرة جميلة", "note").unwrap();
+    aidx.add_document("ar_a", "t", "القاهرة عاصمة مصر", "note")
+        .unwrap();
+    aidx.add_document("ar_b", "t", "مدينة كبيرة جميلة", "note")
+        .unwrap();
     assert!(
-        aidx.search("القاهرة", 10).unwrap().iter().any(|(id, _)| id == "ar_a"),
+        aidx.search("القاهرة", 10)
+            .unwrap()
+            .iter()
+            .any(|(id, _)| id == "ar_a"),
         "Arabic own-word القاهرة should match its doc ar_a"
     );
     let letter = aidx.search("ة", 10).unwrap();
@@ -405,13 +460,28 @@ fn print_lexical_multilingual_support_map() {
         }
     };
     println!("\n=== FTS lexical multilingual support map (JiebaTokenizer→LowerCaser→Stemmer) ===");
-    probe("en", "t", "Running searches RUSTACEAN", &["running", "run", "rustacean"]);
+    probe(
+        "en",
+        "t",
+        "Running searches RUSTACEAN",
+        &["running", "run", "rustacean"],
+    );
     probe("zh", "t", "向量检索 股东决议", &["检索", "股东决议"]);
-    probe("jp", "t", "東京は日本の首都です 機械学習", &["東京", "機械学習", "首都"]);
+    probe(
+        "jp",
+        "t",
+        "東京は日本の首都です 機械学習",
+        &["東京", "機械学習", "首都"],
+    );
     probe("kr", "t", "서울은 대한민국의 수도", &["서울", "수도"]);
     probe("ar", "t", "القاهرة عاصمة مصر", &["القاهرة", "مصر"]);
     probe("he", "t", "ירושלים בירת ישראל", &["ירושלים", "ישראל"]);
-    probe("emoji", "t", "🚀 RUSTACEAN 中文检索 😀", &["rustacean", "检索", "🚀"]);
+    probe(
+        "emoji",
+        "t",
+        "🚀 RUSTACEAN 中文检索 😀",
+        &["rustacean", "检索", "🚀"],
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -440,13 +510,20 @@ fn every_script_is_valid_embedding_input_correct_dim() {
     let (vecs, _usage) = emb.embed(&texts).expect("embed all scripts without error");
     assert_eq!(vecs.len(), samples.len(), "one vector per input");
     for ((label, _), v) in samples.iter().zip(&vecs) {
-        assert_eq!(v.len(), DIM, "{label}: embedding must have provider dim {DIM}");
+        assert_eq!(
+            v.len(),
+            DIM,
+            "{label}: embedding must have provider dim {DIM}"
+        );
         assert!(
             v.iter().all(|x| x.is_finite()),
             "{label}: embedding must contain no NaN/Inf (cos-distance safety)"
         );
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(norm > 0.0, "{label}: embedding must be non-zero (usearch unit-vector)");
+        assert!(
+            norm > 0.0,
+            "{label}: embedding must be non-zero (usearch unit-vector)"
+        );
     }
     assert_eq!(emb.dimensions(), DIM);
 }
@@ -461,11 +538,11 @@ fn multiscript_doc_indexes_into_vector_index_via_mock() {
     let mut vectors = VectorIndex::new(DIM).unwrap();
 
     let chunks = [
-        "東京 機械学習",            // JP kanji
-        "股東決議 智慧財產權",       // Traditional Chinese
-        "서울 자연어 처리",          // Korean
-        "القاهرة التعلم الآلي",     // Arabic
-        "🦀 RUSTACEAN 中文检索",     // emoji + ascii + CJK
+        "東京 機械学習",         // JP kanji
+        "股東決議 智慧財產權",   // Traditional Chinese
+        "서울 자연어 처리",      // Korean
+        "القاهرة التعلم الآلي",   // Arabic
+        "🦀 RUSTACEAN 中文检索", // emoji + ascii + CJK
     ];
     for (i, c) in chunks.iter().enumerate() {
         let (vv, _) = emb.embed(&[c]).unwrap();
@@ -483,5 +560,8 @@ fn multiscript_doc_indexes_into_vector_index_via_mock() {
     // Query with a CJK chunk → returns nearest (at least itself), no dim panic.
     let (qv, _) = emb.embed(&["東京 機械学習"]).unwrap();
     let res = vectors.search(&qv[0], 3).unwrap();
-    assert!(!res.is_empty(), "multiscript vector search must return results");
+    assert!(
+        !res.is_empty(),
+        "multiscript vector search must return results"
+    );
 }

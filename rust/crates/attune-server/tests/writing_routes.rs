@@ -35,7 +35,10 @@ async fn login(base: &str, tier: &str) {
     } else if tier == "free" {
         json!({ "tier": "free", "account_id": "u-test" })
     } else {
-        let _ = client.post(format!("{base}/api/v1/member/logout")).send().await;
+        let _ = client
+            .post(format!("{base}/api/v1/member/logout"))
+            .send()
+            .await;
         return;
     };
     let r = client
@@ -81,7 +84,10 @@ async fn paid_but_cloud_llm_disabled_is_403_cloud_llm_disabled() {
     login(&base, "paid").await;
     // Did NOT enable cloud LLM egress → privacy gate refuses.
     let (status, v) = post(&base, "writing/draft", draft_body()).await;
-    assert_eq!(status, 403, "paid without cloud egress must be 403, body={v}");
+    assert_eq!(
+        status, 403,
+        "paid without cloud egress must be 403, body={v}"
+    );
     assert_eq!(v["code"], "cloud-llm-disabled");
 }
 
@@ -109,7 +115,11 @@ async fn injection_source_is_rejected_400_and_llm_not_called() {
     let (status, v) = post(&base, "writing/draft", body).await;
     assert_eq!(status, 400, "injection source must be 400, body={v}");
     assert_eq!(v["code"], "source-injection-detected");
-    assert_eq!(rec.call_count(), 0, "LLM must NOT be called when a source is poisoned");
+    assert_eq!(
+        rec.call_count(),
+        0,
+        "LLM must NOT be called when a source is poisoned"
+    );
 }
 
 #[tokio::test]

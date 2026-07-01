@@ -1,13 +1,12 @@
 // npu-vault/crates/vault-core/src/parser.rs
 
-use std::path::Path;
 use crate::error::{Result, VaultError};
+use std::{io::Write, path::Path};
 
 /// 代码文件扩展名
 const CODE_EXTENSIONS: &[&str] = &[
-    ".py", ".js", ".ts", ".rs", ".go", ".java", ".c", ".cpp", ".h",
-    ".rb", ".php", ".swift", ".kt", ".scala", ".sh", ".bash", ".zsh",
-    ".toml", ".yaml", ".yml", ".json", ".xml", ".html", ".css",
+    ".py", ".js", ".ts", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".rb", ".php", ".swift", ".kt",
+    ".scala", ".sh", ".bash", ".zsh", ".toml", ".yaml", ".yml", ".json", ".xml", ".html", ".css",
 ];
 
 /// 解析文件 → (title, content). 等价于 `parse_file_with_profile(path, None)`.
@@ -16,17 +15,17 @@ pub fn parse_file(path: &Path) -> Result<(String, String)> {
 }
 
 /// 解析文件, 指定 OCR profile (PDF 扫描件走自定义 DPI). None = 走默认 300 DPI.
-pub fn parse_file_with_profile(
-    path: &Path,
-    profile_id: Option<&str>,
-) -> Result<(String, String)> {
-    let ext = path.extension()
+pub fn parse_file_with_profile(path: &Path, profile_id: Option<&str>) -> Result<(String, String)> {
+    let ext = path
+        .extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
         .unwrap_or_default();
-    let filename = path.file_name()
+    let filename = path
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let stem = path.file_stem()
+    let stem = path
+        .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| filename.clone());
 
@@ -54,8 +53,7 @@ pub fn parse_file_with_profile(
                     "unsupported file format '{ext}': only text, code, documents, spreadsheets, images and audio are accepted"
                 )));
             }
-            let content = std::fs::read_to_string(path)
-                .map_err(VaultError::Io)?;
+            let content = std::fs::read_to_string(path).map_err(VaultError::Io)?;
             parse_content(&content, &filename)
         }
     }
@@ -85,11 +83,15 @@ pub fn parse_bytes_with_profile(
     match ext.as_str() {
         ".pdf" => {
             // 上传路径走内存，但 OCR 需要磁盘文件（pdftoppm 读文件）。
-            // 先试文字层提取；失败或文字过少则写临时文件跑 OCR。
+            // 先试文字层提取；失败或文字过少则写临时文件跑 pdftotext / OCR。
             let extract_result = pdf_extract::extract_text_from_mem(data);
             let content = match extract_result {
                 Ok(text) if !crate::ocr::needs_ocr(&text) => text,
                 Ok(thin_text) => {
+                    if let Some(pdftotext) = try_pdftotext_from_bytes(data) {
+                        let title = first_line_title(&pdftotext, &stem);
+                        return Ok((title, pdftotext));
+                    }
                     if let Some(ocr_text) = try_ocr_from_bytes_with_dpi(data, dpi) {
                         let title = first_line_title(&ocr_text, &stem);
                         return Ok((title, ocr_text));
@@ -97,7 +99,11 @@ pub fn parse_bytes_with_profile(
                     thin_text
                 }
                 Err(e) => {
-                    log::info!("pdf_extract failed for uploaded bytes ({e}); trying OCR");
+                    log::info!("pdf_extract failed for uploaded bytes ({e}); trying pdftotext/OCR");
+                    if let Some(pdftotext) = try_pdftotext_from_bytes(data) {
+                        let title = first_line_title(&pdftotext, &stem);
+                        return Ok((title, pdftotext));
+                    }
                     if let Some(ocr_text) = try_ocr_from_bytes_with_dpi(data, dpi) {
                         let title = first_line_title(&ocr_text, &stem);
                         return Ok((title, ocr_text));
@@ -114,11 +120,12 @@ pub fn parse_bytes_with_profile(
         ".docx" => {
             use std::io::Cursor;
             let cursor = Cursor::new(data);
-            let mut archive = zip::ZipArchive::new(cursor)
-                .map_err(|e| VaultError::Io(std::io::Error::new(
+            let mut archive = zip::ZipArchive::new(cursor).map_err(|e| {
+                VaultError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("DOCX zip open failed: {e}"),
-                )))?;
+                ))
+            })?;
             let doc_xml = if let Ok(mut entry) = archive.by_name("word/document.xml") {
                 read_zip_entry_string_bounded(&mut entry)?
             } else {
@@ -164,7 +171,9 @@ pub fn parse_bytes_with_profile(
         }
         ".png" | ".jpg" | ".jpeg" | ".webp" | ".bmp" | ".tiff" | ".tif" | ".gif" => {
             let Some(provider) = crate::ocr::detect_default_provider() else {
-                return Err(VaultError::InvalidInput("OCR provider unavailable".to_string()));
+                return Err(VaultError::InvalidInput(
+                    "OCR provider unavailable".to_string(),
+                ));
             };
             let scene = crate::ocr::auto_detect_scene(filename);
             let profile = crate::ocr::profile_for_id(Some(scene));
@@ -192,7 +201,9 @@ pub fn parse_bytes_with_profile(
         }
         ".mp3" | ".wav" | ".m4a" | ".flac" | ".ogg" | ".aac" | ".opus" | ".wma" => {
             let Some(engine) = crate::asr::detect_asr_engine() else {
-                return Err(VaultError::InvalidInput("ASR backend unavailable".to_string()));
+                return Err(VaultError::InvalidInput(
+                    "ASR backend unavailable".to_string(),
+                ));
             };
             let mut tmp = tempfile::Builder::new()
                 .suffix(&ext)
@@ -207,7 +218,9 @@ pub fn parse_bytes_with_profile(
                 crate::asr::AsrEngine::Whisper(backend) => {
                     let diarization = crate::asr::detect_diarization_backend();
                     let (_, c) = crate::asr::transcribe_with_diarization(
-                        backend, tmp.path(), diarization.as_ref(),
+                        backend,
+                        tmp.path(),
+                        diarization.as_ref(),
                     )?;
                     c
                 }
@@ -238,11 +251,7 @@ pub fn parse_bytes_with_profile(
 /// dpi 由调用方按 OcrProfile 决定 — 默认走 `dpi_for_profile(None) = 300`.
 fn try_ocr_from_bytes_with_dpi(data: &[u8], dpi: u32) -> Option<String> {
     let provider = crate::ocr::detect_default_provider()?;
-    let mut tmp = tempfile::Builder::new()
-        .suffix(".pdf")
-        .tempfile()
-        .ok()?;
-    use std::io::Write;
+    let mut tmp = tempfile::Builder::new().suffix(".pdf").tempfile().ok()?;
     tmp.write_all(data).ok()?;
     tmp.flush().ok()?;
     match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), tmp.path(), dpi) {
@@ -258,6 +267,44 @@ fn try_ocr_from_bytes_with_dpi(data: &[u8], dpi: u32) -> Option<String> {
     }
 }
 
+fn try_pdftotext_from_bytes(data: &[u8]) -> Option<String> {
+    let mut tmp = tempfile::Builder::new().suffix(".pdf").tempfile().ok()?;
+    tmp.write_all(data).ok()?;
+    tmp.flush().ok()?;
+    try_pdftotext_from_path(tmp.path())
+}
+
+fn try_pdftotext_from_path(path: &Path) -> Option<String> {
+    let pdftotext = which::which("pdftotext").ok()?;
+    let output = match crate::process::command_no_window(&pdftotext)
+        .args(["-enc", "UTF-8"])
+        .arg(path)
+        .arg("-")
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            log::warn!("pdftotext failed to start for {}: {e}", path.display());
+            return None;
+        }
+    };
+    if !output.status.success() {
+        log::warn!(
+            "pdftotext failed for {}: exit {:?}; stderr={}",
+            path.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 fn parse_pdf_file_with_dpi(path: &Path, stem: &str, dpi: u32) -> Result<(String, String)> {
     // 1. 先尝试 pdf_extract 直接取文字层
     let bytes = std::fs::read(path)?;
@@ -268,7 +315,10 @@ fn parse_pdf_file_with_dpi(path: &Path, stem: &str, dpi: u32) -> Result<(String,
     let content = match extract_result {
         Ok(text) => text,
         Err(e) => {
-            log::info!("pdf_extract failed for {} ({e}); trying OCR directly", path.display());
+            log::info!(
+                "pdf_extract failed for {} ({e}); trying OCR directly",
+                path.display()
+            );
             if let Some(provider) = crate::ocr::detect_default_provider() {
                 match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), path, dpi) {
                     Ok(ocr_text) if !ocr_text.trim().is_empty() => {
@@ -286,12 +336,19 @@ fn parse_pdf_file_with_dpi(path: &Path, stem: &str, dpi: u32) -> Result<(String,
         }
     };
 
-    // 2b. 成功但文字量 < 100 字符（扫描版文字层空）→ 尝试 OCR
+    // 2b. 成功但文字量 < 100 字符（扫描版文字层空，或 pdf_extract 对混排文字层
+    //     退化）→ 先试 poppler 的 pdftotext，再尝试 OCR。
     if crate::ocr::needs_ocr(&content) {
+        if let Some(pdftotext) = try_pdftotext_from_path(path) {
+            let title = first_line_title(&pdftotext, stem);
+            return Ok((title, pdftotext));
+        }
         if let Some(provider) = crate::ocr::detect_default_provider() {
-            log::info!("PDF text layer thin ({} chars); falling back to OCR ({})",
+            log::info!(
+                "PDF text layer thin ({} chars); falling back to OCR ({})",
                 content.chars().filter(|c| !c.is_whitespace()).count(),
-                provider.name());
+                provider.name()
+            );
             match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), path, dpi) {
                 Ok(ocr_text) if !ocr_text.trim().is_empty() => {
                     let title = first_line_title(&ocr_text, stem);
@@ -301,8 +358,10 @@ fn parse_pdf_file_with_dpi(path: &Path, stem: &str, dpi: u32) -> Result<(String,
                 Err(e) => log::warn!("OCR failed for {}: {}", path.display(), e),
             }
         } else {
-            log::debug!("PDF has no text layer but OCR provider not available; \
-                returning thin text. Re-run apt install / attune deploy to fix.");
+            log::debug!(
+                "PDF has no text layer but OCR provider not available; \
+                returning thin text. Re-run apt install / attune deploy to fix."
+            );
         }
     }
 
@@ -312,11 +371,12 @@ fn parse_pdf_file_with_dpi(path: &Path, stem: &str, dpi: u32) -> Result<(String,
 
 fn parse_docx_file(path: &Path, stem: &str) -> Result<(String, String)> {
     let file = std::fs::File::open(path)?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| VaultError::Io(std::io::Error::new(
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+        VaultError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("DOCX zip open failed: {e}"),
-        )))?;
+        ))
+    })?;
 
     let doc_xml = if let Ok(mut entry) = archive.by_name("word/document.xml") {
         read_zip_entry_string_bounded(&mut entry)?
@@ -334,7 +394,9 @@ fn parse_docx_file(path: &Path, stem: &str) -> Result<(String, String)> {
 
 /// 从首行提取标题，若首行为空或过长则使用 stem
 fn first_line_title(content: &str, stem: &str) -> String {
-    content.lines().next()
+    content
+        .lines()
+        .next()
         .filter(|l| !l.trim().is_empty() && l.len() < 200)
         .map(|l| l.trim().to_string())
         .unwrap_or_else(|| stem.to_string())
@@ -367,7 +429,8 @@ fn strip_xml_tags(xml: &str) -> String {
     }
 
     // Normalize whitespace
-    result.split_whitespace()
+    result
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .replace(" .", ".")
@@ -386,7 +449,8 @@ fn parse_content(content: &str, filename: &str) -> Result<(String, String)> {
 
     let title = if ext == ".md" {
         // Markdown: 提取第一个 # 标题
-        content.lines()
+        content
+            .lines()
             .find(|l| l.trim().starts_with("# "))
             .map(|l| l.trim().trim_start_matches("# ").trim().to_string())
             .unwrap_or(stem)
@@ -394,7 +458,9 @@ fn parse_content(content: &str, filename: &str) -> Result<(String, String)> {
         filename.to_string()
     } else {
         // TXT 等: 首行作标题
-        content.lines().next()
+        content
+            .lines()
+            .next()
             .filter(|l| !l.trim().is_empty())
             // char-safe truncation: byte-slicing [..100] panics when byte 100 lands
             // mid-codepoint on a >100-byte multibyte first line (emoji/CJK) — take 100 chars.
@@ -407,7 +473,8 @@ fn parse_content(content: &str, filename: &str) -> Result<(String, String)> {
 
 /// 检查文件是否为支持的类型
 pub fn is_supported(path: &Path) -> bool {
-    let ext = path.extension()
+    let ext = path
+        .extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
         .unwrap_or_default();
     matches!(
@@ -426,7 +493,7 @@ pub fn is_supported(path: &Path) -> bool {
 
 /// 计算文件的 SHA-256 hash
 pub fn file_hash(path: &Path) -> Result<String> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let data = std::fs::read(path)?;
     let hash = Sha256::digest(&data);
     Ok(hex::encode(hash))
@@ -474,17 +541,24 @@ fn parse_html_file(path: &Path, stem: &str) -> Result<(String, String)> {
 fn text_excluding_script_style(el: scraper::ElementRef) -> String {
     let mut out: Vec<String> = Vec::new();
     for node in el.descendants() {
-        let Some(t) = node.value().as_text() else { continue };
+        let Some(t) = node.value().as_text() else {
+            continue;
+        };
         // 文本节点的任一祖先是 script/style → 跳过
         let mut ancestor = node.parent();
         let mut skip = false;
         while let Some(a) = ancestor {
             if let Some(e) = a.value().as_element() {
-                if e.name() == "script" || e.name() == "style" { skip = true; break; }
+                if e.name() == "script" || e.name() == "style" {
+                    skip = true;
+                    break;
+                }
             }
             ancestor = a.parent();
         }
-        if !skip { out.push(t.to_string()); }
+        if !skip {
+            out.push(t.to_string());
+        }
     }
     out.join(" ")
 }
@@ -495,14 +569,17 @@ fn html_to_text(html: &str) -> String {
     let document = Html::parse_document(html);
 
     // 尝试提取 <title>
-    let title_text = Selector::parse("title").ok()
+    let title_text = Selector::parse("title")
+        .ok()
         .and_then(|sel| document.select(&sel).next())
         .map(|el| el.text().collect::<String>())
         .unwrap_or_default();
 
     // body 文本：剔除 <script>/<style> 子树(防脚本/样式源码泄漏进索引)
     let body_text = if let Ok(body_sel) = Selector::parse("body") {
-        document.select(&body_sel).next()
+        document
+            .select(&body_sel)
+            .next()
             .map(text_excluding_script_style)
             .unwrap_or_default()
     } else {
@@ -529,20 +606,23 @@ fn parse_epub_file(path: &Path, stem: &str) -> Result<(String, String)> {
 fn epub_bytes_to_text(data: &[u8]) -> Result<String> {
     use std::io::Cursor;
     let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| VaultError::Io(std::io::Error::new(
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| {
+        VaultError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("EPUB zip open failed: {e}"),
-        )))?;
+        ))
+    })?;
 
     let mut parts: Vec<String> = Vec::new();
     let mut total: u64 = 0; // 累计解压字节，防"多条目累加"型炸弹
     let count = archive.len();
     for i in 0..count {
-        let mut entry = archive.by_index(i)
-            .map_err(|e| VaultError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData, format!("{e}"),
-            )))?;
+        let mut entry = archive.by_index(i).map_err(|e| {
+            VaultError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{e}"),
+            ))
+        })?;
         let name = entry.name().to_lowercase();
         if !name.ends_with(".xhtml") && !name.ends_with(".html") && !name.ends_with(".htm") {
             continue;
@@ -567,15 +647,19 @@ fn epub_bytes_to_text(data: &[u8]) -> Result<String> {
 /// XLSX / XLS 文件 → 纯文本（calamine 读取所有 sheet，每行 tab 分隔）
 fn parse_xlsx_file(path: &Path, stem: &str) -> Result<(String, String)> {
     let data = std::fs::read(path).map_err(VaultError::Io)?;
-    let content = xlsx_bytes_to_text(&data, &path.extension()
-        .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
-        .unwrap_or_default())?;
+    let content = xlsx_bytes_to_text(
+        &data,
+        &path
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
+            .unwrap_or_default(),
+    )?;
     let title = first_line_title(&content, stem);
     Ok((title, content))
 }
 
 fn xlsx_bytes_to_text(data: &[u8], ext: &str) -> Result<String> {
-    use calamine::{Reader, open_workbook_from_rs, Xls, Xlsx, Data};
+    use calamine::{open_workbook_from_rs, Data, Reader, Xls, Xlsx};
     use std::io::Cursor;
 
     // calamine 在内部物化 workbook（shared/inline strings 累积进内存，无解压上限），
@@ -611,22 +695,26 @@ fn xlsx_bytes_to_text(data: &[u8], ext: &str) -> Result<String> {
     // calamine 根据 ext 选解析器
     macro_rules! read_sheets {
         ($wb:expr) => {{
-            let mut wb = $wb.map_err(|e| VaultError::InvalidInput(format!("Excel read failed: {e}")))?;
+            let mut wb =
+                $wb.map_err(|e| VaultError::InvalidInput(format!("Excel read failed: {e}")))?;
             for sheet_name in wb.sheet_names().to_vec() {
                 if let Ok(range) = wb.worksheet_range(&sheet_name) {
                     parts.push(format!("## {sheet_name}"));
                     for row in range.rows() {
-                        let cells: Vec<String> = row.iter().map(|cell| match cell {
-                            Data::Empty => String::new(),
-                            Data::String(s) => s.clone(),
-                            Data::Float(f) => format!("{f}"),
-                            Data::Int(i) => format!("{i}"),
-                            Data::Bool(b) => format!("{b}"),
-                            Data::Error(_) => "#ERR".to_string(),
-                            Data::DateTime(dt) => format!("{dt}"),
-                            Data::DateTimeIso(s) => s.clone(),
-                            Data::DurationIso(s) => s.clone(),
-                        }).collect();
+                        let cells: Vec<String> = row
+                            .iter()
+                            .map(|cell| match cell {
+                                Data::Empty => String::new(),
+                                Data::String(s) => s.clone(),
+                                Data::Float(f) => format!("{f}"),
+                                Data::Int(i) => format!("{i}"),
+                                Data::Bool(b) => format!("{b}"),
+                                Data::Error(_) => "#ERR".to_string(),
+                                Data::DateTime(dt) => format!("{dt}"),
+                                Data::DateTimeIso(s) => s.clone(),
+                                Data::DurationIso(s) => s.clone(),
+                            })
+                            .collect();
                         parts.push(cells.join("\t"));
                     }
                 }
@@ -654,31 +742,36 @@ fn parse_pptx_file(path: &Path, stem: &str) -> Result<(String, String)> {
 fn pptx_bytes_to_text(data: &[u8]) -> Result<String> {
     use std::io::Cursor;
     let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| VaultError::Io(std::io::Error::new(
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| {
+        VaultError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("PPTX zip open failed: {e}"),
-        )))?;
+        ))
+    })?;
 
     let mut slides: Vec<(String, String)> = Vec::new();
     let mut total: u64 = 0; // 累计解压字节，防"多 slide 累加"型炸弹
     let count = archive.len();
     for i in 0..count {
         let name = {
-            let entry = archive.by_index(i)
-                .map_err(|e| VaultError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData, format!("{e}"),
-                )))?;
+            let entry = archive.by_index(i).map_err(|e| {
+                VaultError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{e}"),
+                ))
+            })?;
             entry.name().to_string()
         };
         // ppt/slides/slide1.xml, slide2.xml, ...
         if !name.starts_with("ppt/slides/slide") || !name.ends_with(".xml") {
             continue;
         }
-        let mut entry = archive.by_index(i)
-            .map_err(|e| VaultError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData, format!("{e}"),
-            )))?;
+        let mut entry = archive.by_index(i).map_err(|e| {
+            VaultError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{e}"),
+            ))
+        })?;
         // 单条目带解压上限；任一 slide 超限即拒绝整份（zip bomb）。
         let buf = read_zip_entry_string_bounded(&mut entry)?;
         total = total.saturating_add(buf.len() as u64);
@@ -694,14 +787,27 @@ fn pptx_bytes_to_text(data: &[u8]) -> Result<String> {
     }
     // Sort slides by natural order (slide1, slide2, ...)
     slides.sort_by(|(a, _), (b, _)| {
-        let num_a: u32 = a.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
-        let num_b: u32 = b.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+        let num_a: u32 = a
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0);
+        let num_b: u32 = b
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0);
         num_a.cmp(&num_b)
     });
 
-    Ok(slides.iter().enumerate().map(|(i, (_, text))| {
-        format!("## Slide {}\n{}", i + 1, text)
-    }).collect::<Vec<_>>().join("\n\n"))
+    Ok(slides
+        .iter()
+        .enumerate()
+        .map(|(i, (_, text))| format!("## Slide {}\n{}", i + 1, text))
+        .collect::<Vec<_>>()
+        .join("\n\n"))
 }
 
 /// RTF 文件 → 纯文本（去除控制字序列和分组括号）
@@ -719,13 +825,19 @@ fn rtf_to_text(rtf: &str) -> String {
     while let Some(ch) = chars.next() {
         match ch {
             '{' => depth += 1,
-            '}' => { if depth > 0 { depth -= 1; } }
+            '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
             '\\' => {
                 // control word or symbol
                 if let Some(&next) = chars.peek() {
                     if next == '\\' || next == '{' || next == '}' {
                         chars.next();
-                        if depth == 1 { result.push(next); }
+                        if depth == 1 {
+                            result.push(next);
+                        }
                     } else if next == '\'' {
                         // hex-encoded char: \'XX
                         chars.next();
@@ -740,19 +852,28 @@ fn rtf_to_text(rtf: &str) -> String {
                         chars.next();
                     } else {
                         // skip control word + optional numeric parameter
-                        while chars.peek().is_some_and(|c| c.is_alphanumeric() || *c == '-') {
+                        while chars
+                            .peek()
+                            .is_some_and(|c| c.is_alphanumeric() || *c == '-')
+                        {
                             chars.next();
                         }
                         // skip optional trailing space
-                        if chars.peek() == Some(&' ') { chars.next(); }
+                        if chars.peek() == Some(&' ') {
+                            chars.next();
+                        }
                     }
                 }
             }
             '\n' | '\r' => {
-                if depth <= 1 { result.push('\n'); }
+                if depth <= 1 {
+                    result.push('\n');
+                }
             }
             _ => {
-                if depth == 1 { result.push(ch); }
+                if depth == 1 {
+                    result.push(ch);
+                }
             }
         }
     }
@@ -768,12 +889,14 @@ fn parse_csv_file(path: &Path, stem: &str) -> Result<(String, String)> {
 
 /// 图片文件 → OCR 提取文本（自动场景检测）
 fn parse_image_file(path: &Path, stem: &str) -> Result<(String, String)> {
-    let filename = path.file_name()
+    let filename = path
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| stem.to_string());
 
-    let provider = crate::ocr::detect_default_provider()
-        .ok_or_else(|| VaultError::InvalidInput("OCR provider unavailable — install PP-OCR".to_string()))?;
+    let provider = crate::ocr::detect_default_provider().ok_or_else(|| {
+        VaultError::InvalidInput("OCR provider unavailable — install PP-OCR".to_string())
+    })?;
     let scene = crate::ocr::auto_detect_scene(&filename);
     let profile = crate::ocr::profile_for_id(Some(scene));
     let output = provider.extract_structured(path, &profile)?;
@@ -784,7 +907,9 @@ fn parse_image_file(path: &Path, stem: &str) -> Result<(String, String)> {
         output.text
     };
     if content.trim().is_empty() {
-        return Err(VaultError::InvalidInput("OCR returned empty text".to_string()));
+        return Err(VaultError::InvalidInput(
+            "OCR returned empty text".to_string(),
+        ));
     }
     let title = first_line_title(&content, stem);
     Ok((title, content))
@@ -792,22 +917,26 @@ fn parse_image_file(path: &Path, stem: &str) -> Result<(String, String)> {
 
 /// 音频文件 → ASR 转写（引擎派发：SenseVoice in-process / whisper + diarization）
 fn parse_audio_file(path: &Path, stem: &str) -> Result<(String, String)> {
-    let engine = crate::asr::detect_asr_engine()
-        .ok_or_else(|| VaultError::InvalidInput("ASR backend unavailable — install whisper.cpp or fetch SenseVoice".to_string()))?;
+    let engine = crate::asr::detect_asr_engine().ok_or_else(|| {
+        VaultError::InvalidInput(
+            "ASR backend unavailable — install whisper.cpp or fetch SenseVoice".to_string(),
+        )
+    })?;
     // SenseVoice = plain in-process transcription (no diarization). Whisper keeps the
     // diarization path so multi-speaker audio is unaffected.
     let content = match &engine {
         crate::asr::AsrEngine::Whisper(backend) => {
             let diarization = crate::asr::detect_diarization_backend();
-            let (_, c) = crate::asr::transcribe_with_diarization(backend, path, diarization.as_ref())?;
+            let (_, c) =
+                crate::asr::transcribe_with_diarization(backend, path, diarization.as_ref())?;
             c
         }
-        crate::asr::AsrEngine::SenseVoice(_) => {
-            crate::asr::transcribe_with_engine(&engine, path)?
-        }
+        crate::asr::AsrEngine::SenseVoice(_) => crate::asr::transcribe_with_engine(&engine, path)?,
     };
     if content.trim().is_empty() {
-        return Err(VaultError::InvalidInput("ASR returned empty transcript".to_string()));
+        return Err(VaultError::InvalidInput(
+            "ASR returned empty transcript".to_string(),
+        ));
     }
     let title = first_line_title(&content, stem);
     Ok((title, content))
@@ -822,10 +951,14 @@ mod tests {
 
     #[test]
     fn html_to_text_extracts_title_and_body() {
-        let html = r#"<html><head><title>My Page</title></head><body><p>Hello world</p></body></html>"#;
+        let html =
+            r#"<html><head><title>My Page</title></head><body><p>Hello world</p></body></html>"#;
         let text = html_to_text(html);
         assert!(text.contains("My Page"), "title should appear: {text}");
-        assert!(text.contains("Hello world"), "body text should appear: {text}");
+        assert!(
+            text.contains("Hello world"),
+            "body text should appear: {text}"
+        );
     }
 
     #[test]
@@ -834,22 +967,35 @@ mod tests {
         let text = html_to_text(html);
         // script/style text may leak through scraper text() but the key is no code execution
         // and the real content is still present
-        assert!(text.contains("Real content"), "should contain real content: {text}");
+        assert!(
+            text.contains("Real content"),
+            "should contain real content: {text}"
+        );
     }
 
     #[test]
     fn html_to_text_missing_title_uses_first_p() {
         let html = "<html><body><p>First paragraph content here</p></body></html>";
         let text = html_to_text(html);
-        assert!(text.contains("First paragraph"), "body text should appear: {text}");
+        assert!(
+            text.contains("First paragraph"),
+            "body text should appear: {text}"
+        );
     }
 
     #[test]
     fn parse_bytes_html_roundtrip() {
-        let html = b"<html><head><title>HTML Doc</title></head><body><p>Some body text</p></body></html>";
+        let html =
+            b"<html><head><title>HTML Doc</title></head><body><p>Some body text</p></body></html>";
         let (title, content) = parse_bytes(html, "page.html").unwrap();
-        assert!(title.starts_with("HTML Doc"), "title should start with page title: {title}");
-        assert!(content.contains("Some body text"), "content should contain body: {content}");
+        assert!(
+            title.starts_with("HTML Doc"),
+            "title should start with page title: {title}"
+        );
+        assert!(
+            content.contains("Some body text"),
+            "content should contain body: {content}"
+        );
     }
 
     // ─── RTF ──────────────────────────────────────────────────────────────────
@@ -876,15 +1022,24 @@ mod tests {
     fn rtf_to_text_skips_control_words() {
         let rtf = r"{\rtf1\ansi\deff0 {\fonttbl{\f0 Arial;}} \f0\pard Visible text\par}";
         let text = rtf_to_text(rtf);
-        assert!(text.contains("Visible"), "control words should be stripped, text visible: {text}");
-        assert!(!text.contains("\\f0"), "control word \\f0 should not appear: {text}");
+        assert!(
+            text.contains("Visible"),
+            "control words should be stripped, text visible: {text}"
+        );
+        assert!(
+            !text.contains("\\f0"),
+            "control word \\f0 should not appear: {text}"
+        );
     }
 
     #[test]
     fn parse_bytes_rtf_roundtrip() {
         let rtf = br"{\rtf1\ansi\pard Test RTF content\par}";
         let (_, content) = parse_bytes(rtf, "test.rtf").unwrap();
-        assert!(content.contains("Test"), "rtf content should parse: {content}");
+        assert!(
+            content.contains("Test"),
+            "rtf content should parse: {content}"
+        );
     }
 
     // ─── PPTX ─────────────────────────────────────────────────────────────────
@@ -910,8 +1065,14 @@ mod tests {
             </p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#;
         let data = make_pptx_zip(&[("ppt/slides/slide1.xml", slide_xml)]);
         let text = pptx_bytes_to_text(&data).unwrap();
-        assert!(text.contains("Slide One Text"), "should extract slide text: {text}");
-        assert!(text.contains("Slide 1"), "should include slide header: {text}");
+        assert!(
+            text.contains("Slide One Text"),
+            "should extract slide text: {text}"
+        );
+        assert!(
+            text.contains("Slide 1"),
+            "should include slide header: {text}"
+        );
     }
 
     #[test]
@@ -926,7 +1087,10 @@ mod tests {
         let text = pptx_bytes_to_text(&data).unwrap();
         let pos1 = text.find("Alpha").unwrap_or(usize::MAX);
         let pos2 = text.find("Beta").unwrap_or(usize::MAX);
-        assert!(pos1 < pos2, "slide1 (Alpha) should come before slide2 (Beta): {text}");
+        assert!(
+            pos1 < pos2,
+            "slide1 (Alpha) should come before slide2 (Beta): {text}"
+        );
     }
 
     #[test]
@@ -956,7 +1120,10 @@ mod tests {
             <body><p>EPUB chapter content here.</p></body></html>"#;
         let data = make_epub_zip(&[("OEBPS/chapter1.xhtml", xhtml)]);
         let text = epub_bytes_to_text(&data).unwrap();
-        assert!(text.contains("EPUB chapter content"), "should extract xhtml: {text}");
+        assert!(
+            text.contains("EPUB chapter content"),
+            "should extract xhtml: {text}"
+        );
     }
 
     #[test]
@@ -965,10 +1132,13 @@ mod tests {
         let data = make_epub_zip(&[
             ("OEBPS/content.xhtml", xhtml),
             ("META-INF/container.xml", "<container/>"), // not xhtml
-            ("images/cover.jpg", "fake jpg bytes"),       // not xhtml
+            ("images/cover.jpg", "fake jpg bytes"),     // not xhtml
         ]);
         let text = epub_bytes_to_text(&data).unwrap();
-        assert!(text.contains("Real content"), "should extract xhtml content: {text}");
+        assert!(
+            text.contains("Real content"),
+            "should extract xhtml content: {text}"
+        );
     }
 
     #[test]
@@ -983,8 +1153,14 @@ mod tests {
     fn parse_bytes_csv_passthrough() {
         let csv = b"name,age,city\nAlice,30,Beijing\nBob,25,Shanghai\n";
         let (_, content) = parse_bytes(csv, "data.csv").unwrap();
-        assert!(content.contains("Alice"), "CSV content should pass through: {content}");
-        assert!(content.contains("Shanghai"), "CSV content should pass through: {content}");
+        assert!(
+            content.contains("Alice"),
+            "CSV content should pass through: {content}"
+        );
+        assert!(
+            content.contains("Shanghai"),
+            "CSV content should pass through: {content}"
+        );
     }
 
     // ─── is_supported audio / video boundary ──────────────────────────────────
@@ -1001,7 +1177,10 @@ mod tests {
     fn is_supported_rejects_video_and_archives() {
         for ext in &["mp4", "mkv", "avi", "zip", "tar", "gz"] {
             let path = format!("file.{ext}");
-            assert!(!is_supported(Path::new(&path)), ".{ext} should NOT be supported");
+            assert!(
+                !is_supported(Path::new(&path)),
+                ".{ext} should NOT be supported"
+            );
         }
     }
 
@@ -1012,7 +1191,10 @@ mod tests {
             let result = parse_bytes(b"binary content", filename);
             assert!(result.is_err(), "{filename} should return error");
             let err = result.unwrap_err().to_string();
-            assert!(err.contains("unsupported"), "error should mention 'unsupported': {err}");
+            assert!(
+                err.contains("unsupported"),
+                "error should mention 'unsupported': {err}"
+            );
         }
         // .json (CODE_EXTENSION) must still pass
         let result = parse_bytes(b"{\"key\": \"value\"}", "config.json");
@@ -1025,9 +1207,18 @@ mod tests {
     fn strip_xml_tags_nested_and_attrs() {
         let xml = r#"<root attr="x"><child>Inner text</child>More text</root>"#;
         let result = strip_xml_tags(xml);
-        assert!(result.contains("Inner text"), "should keep inner text: {result}");
-        assert!(result.contains("More text"), "should keep trailing text: {result}");
-        assert!(!result.contains('<'), "should strip all angle brackets: {result}");
+        assert!(
+            result.contains("Inner text"),
+            "should keep inner text: {result}"
+        );
+        assert!(
+            result.contains("More text"),
+            "should keep trailing text: {result}"
+        );
+        assert!(
+            !result.contains('<'),
+            "should strip all angle brackets: {result}"
+        );
     }
 
     #[test]

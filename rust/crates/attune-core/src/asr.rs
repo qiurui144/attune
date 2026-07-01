@@ -13,9 +13,9 @@
 //! 可选择性使用：若 `detect_asr_backend()` 返回 None，parser.rs 自动跳过音频文件
 //! 入库（不报错，仅记 warn）。
 
+use crate::asr_sensevoice::SenseVoiceBackend;
 use crate::error::{Result, VaultError};
 use crate::process::command_no_window;
-use crate::asr_sensevoice::SenseVoiceBackend;
 use std::path::Path;
 
 // ── ASR engine abstraction (whisper | sensevoice) ───────────────────────────
@@ -316,15 +316,19 @@ pub fn transcribe_audio(backend: &AsrBackend, audio_path: &Path) -> Result<Strin
             .unwrap_or("audio"),
     );
 
-    let lang_arg = if backend.language == "auto" { "auto" } else { &backend.language };
+    let lang_arg = if backend.language == "auto" {
+        "auto"
+    } else {
+        &backend.language
+    };
     let output = command_no_window(&backend.whisper_path)
         .args([
             "-m",
             &backend.model_path,
             "-f",
-            audio_path.to_str().ok_or_else(|| {
-                VaultError::InvalidInput("audio path not utf-8".to_string())
-            })?,
+            audio_path
+                .to_str()
+                .ok_or_else(|| VaultError::InvalidInput("audio path not utf-8".to_string()))?,
             "-l",
             lang_arg,
             "-otxt",
@@ -427,7 +431,9 @@ pub fn detect_diarization_backend() -> Option<DiarizationBackend> {
     if let Ok(out) = wx_check {
         if out.status.success() {
             log::info!("ASR diarization: whisperX found at {python}");
-            return Some(DiarizationBackend::WhisperX { python_path: python.clone() });
+            return Some(DiarizationBackend::WhisperX {
+                python_path: python.clone(),
+            });
         }
     }
 
@@ -438,7 +444,9 @@ pub fn detect_diarization_backend() -> Option<DiarizationBackend> {
     if let Ok(out) = py_check {
         if out.status.success() {
             log::info!("ASR diarization: pyannote.audio found at {python}");
-            return Some(DiarizationBackend::Pyannote { python_path: python });
+            return Some(DiarizationBackend::Pyannote {
+                python_path: python,
+            });
         }
     }
 
@@ -480,15 +488,19 @@ pub fn transcribe_audio_with_timestamps(
             .and_then(|s| s.to_str())
             .unwrap_or("audio"),
     );
-    let lang_arg = if backend.language == "auto" { "auto" } else { &backend.language };
+    let lang_arg = if backend.language == "auto" {
+        "auto"
+    } else {
+        &backend.language
+    };
     let output = command_no_window(&backend.whisper_path)
         .args([
             "-m",
             &backend.model_path,
             "-f",
-            audio_path.to_str().ok_or_else(|| {
-                VaultError::InvalidInput("audio path not utf-8".to_string())
-            })?,
+            audio_path
+                .to_str()
+                .ok_or_else(|| VaultError::InvalidInput("audio path not utf-8".to_string()))?,
             "-l",
             lang_arg,
             "-osrt",
@@ -590,10 +602,7 @@ fn parse_srt_time(s: &str) -> Option<u32> {
     if hms.len() != 3 {
         return None;
     }
-    let ms: u32 = parts
-        .get(1)
-        .and_then(|m| m.parse().ok())
-        .unwrap_or(0);
+    let ms: u32 = parts.get(1).and_then(|m| m.parse().ok()).unwrap_or(0);
     Some(hms[0] * 3_600_000 + hms[1] * 60_000 + hms[2] * 1000 + ms)
 }
 
@@ -624,7 +633,11 @@ pub fn transcribe_with_diarization(
         None => {
             // 退化：普通时间戳转写，speaker = None
             let segments = transcribe_audio_with_timestamps(asr, audio_path)?;
-            let full = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("\n");
+            let full = segments
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
             Ok((segments, full))
         }
     }
@@ -641,20 +654,29 @@ fn transcribe_whisperx(
     audio_path: &Path,
 ) -> Result<(Vec<TranscriptSegment>, String)> {
     let tmp = tempfile::TempDir::new().map_err(VaultError::Io)?;
-    let audio_str = audio_path.to_str().ok_or_else(|| {
-        VaultError::InvalidInput("audio path not utf-8".to_string())
-    })?;
-    let lang = if asr.language == "auto" { "zh" } else { &asr.language };
+    let audio_str = audio_path
+        .to_str()
+        .ok_or_else(|| VaultError::InvalidInput("audio path not utf-8".to_string()))?;
+    let lang = if asr.language == "auto" {
+        "zh"
+    } else {
+        &asr.language
+    };
     // whisperx 命令：--model 来自 asr backend 名（如 small/medium/large）
     // --output_format json --output_dir <tmp>
     let output = command_no_window(python_path)
         .args([
-            "-m", "whisperx",
+            "-m",
+            "whisperx",
             audio_str,
-            "--model", &asr.model_name,
-            "--language", lang,
-            "--output_format", "json",
-            "--output_dir", tmp.path().to_str().unwrap_or("."),
+            "--model",
+            &asr.model_name,
+            "--language",
+            lang,
+            "--output_format",
+            "json",
+            "--output_dir",
+            tmp.path().to_str().unwrap_or("."),
             "--diarize",
         ])
         .output()
@@ -670,12 +692,15 @@ fn transcribe_whisperx(
     }
 
     // 找 JSON 输出文件（whisperX 输出到 <audio_stem>.json）
-    let json_path = tmp.path().join(
-        audio_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("audio"),
-    ).with_extension("json");
+    let json_path = tmp
+        .path()
+        .join(
+            audio_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("audio"),
+        )
+        .with_extension("json");
 
     if !json_path.exists() {
         // 尝试找任何 .json 文件
@@ -684,7 +709,9 @@ fn transcribe_whisperx(
             .filter_map(|e| e.ok())
             .find(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"));
         if let Some(entry) = any_json {
-            return parse_whisperx_json(&std::fs::read_to_string(entry.path()).map_err(VaultError::Io)?);
+            return parse_whisperx_json(
+                &std::fs::read_to_string(entry.path()).map_err(VaultError::Io)?,
+            );
         }
         return Err(VaultError::InvalidInput(format!(
             "whisperX did not produce expected JSON at {}",
@@ -697,9 +724,8 @@ fn transcribe_whisperx(
 
 /// 解析 whisperX JSON 输出 → (segments, full_text)。
 fn parse_whisperx_json(json_str: &str) -> Result<(Vec<TranscriptSegment>, String)> {
-    let v: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
-        VaultError::InvalidInput(format!("whisperX JSON parse error: {e}"))
-    })?;
+    let v: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| VaultError::InvalidInput(format!("whisperX JSON parse error: {e}")))?;
     let segs_arr = v["segments"].as_array().ok_or_else(|| {
         VaultError::InvalidInput("whisperX JSON missing 'segments' array".to_string())
     })?;
@@ -711,7 +737,12 @@ fn parse_whisperx_json(json_str: &str) -> Result<(Vec<TranscriptSegment>, String
             let start_ms = (s["start"].as_f64()? * 1000.0) as u32;
             let end_ms = (s["end"].as_f64()? * 1000.0) as u32;
             let speaker = s["speaker"].as_str().map(|sp| sp.to_string());
-            Some(TranscriptSegment { text, start_ms, end_ms, speaker })
+            Some(TranscriptSegment {
+                text,
+                start_ms,
+                end_ms,
+                speaker,
+            })
         })
         .collect();
 
@@ -734,9 +765,9 @@ fn transcribe_pyannote(
     }
 
     // Step 2: pyannote 说话人分离（Python one-liner → JSON）
-    let audio_str = audio_path.to_str().ok_or_else(|| {
-        VaultError::InvalidInput("audio path not utf-8".to_string())
-    })?;
+    let audio_str = audio_path
+        .to_str()
+        .ok_or_else(|| VaultError::InvalidInput("audio path not utf-8".to_string()))?;
     let hf_token = std::env::var("HF_TOKEN")
         .or_else(|_| std::env::var("HUGGINGFACE_TOKEN"))
         .unwrap_or_default();
@@ -760,7 +791,11 @@ except Exception as e:
     print(json.dumps({{"error": str(e)}}), file=sys.stderr)
     sys.exit(1)
 "#,
-        token = if hf_token.is_empty() { "None".to_string() } else { format!("'{hf_token}'") },
+        token = if hf_token.is_empty() {
+            "None".to_string()
+        } else {
+            format!("'{hf_token}'")
+        },
         audio = audio_str.replace('\\', "\\\\").replace('\'', "\\'"),
     );
 
@@ -776,7 +811,11 @@ except Exception as e:
             stderr.lines().take(2).collect::<Vec<_>>().join(" ")
         );
         // 不报错，退化为无说话人
-        let full = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("\n");
+        let full = segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         return Ok((segments, full));
     }
 
@@ -785,7 +824,11 @@ except Exception as e:
         Ok(v) => v,
         Err(e) => {
             log::warn!("pyannote JSON parse error: {e}. Falling back to no-speaker output.");
-            let full = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("\n");
+            let full = segments
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
             return Ok((segments, full));
         }
     };
@@ -826,7 +869,9 @@ pub fn format_diarized_text(segments: &[TranscriptSegment]) -> String {
         match &seg.speaker {
             Some(sp) => {
                 if current_speaker != Some(sp.as_str()) {
-                    if !out.is_empty() { out.push('\n'); }
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
                     out.push('[');
                     out.push_str(sp);
                     out.push_str("]: ");
@@ -837,7 +882,9 @@ pub fn format_diarized_text(segments: &[TranscriptSegment]) -> String {
                 out.push_str(&seg.text);
             }
             None => {
-                if !out.is_empty() { out.push('\n'); }
+                if !out.is_empty() {
+                    out.push('\n');
+                }
                 out.push_str(&seg.text);
             }
         }
@@ -934,7 +981,10 @@ pub fn fetch_asr_model(
 /// 由 `state::spawn_model_bootstrap` 调用，取代之前无脑 `fetch_for_tier`（只拉 whisper）。
 pub fn fetch_asr_for_tier(tier: crate::platform::Tier) -> crate::error::Result<std::path::PathBuf> {
     let engine = catalog_asr_engine();
-    log::info!("ASR bootstrap: catalog engine='{engine}' for tier '{}'", tier.label());
+    log::info!(
+        "ASR bootstrap: catalog engine='{engine}' for tier '{}'",
+        tier.label()
+    );
     fetch_asr_model(&engine, tier)
 }
 
@@ -977,7 +1027,11 @@ mod tests {
                 std::env::set_var("HOME", tmp.path());
                 std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
             }
-            Self { prev_home, prev_xdg, _tmp: tmp }
+            Self {
+                prev_home,
+                prev_xdg,
+                _tmp: tmp,
+            }
         }
     }
     impl Drop for HomeGuard {
@@ -1007,8 +1061,16 @@ mod tests {
         // Pre-seed SenseVoice assets so the fetcher early-returns (no network).
         let dir = crate::asr_sensevoice::sensevoice_model_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(crate::asr_sensevoice::SENSEVOICE_MODEL_FILE), b"fake").unwrap();
-        std::fs::write(dir.join(crate::asr_sensevoice::SENSEVOICE_TOKENS_FILE), b"fake").unwrap();
+        std::fs::write(
+            dir.join(crate::asr_sensevoice::SENSEVOICE_MODEL_FILE),
+            b"fake",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(crate::asr_sensevoice::SENSEVOICE_TOKENS_FILE),
+            b"fake",
+        )
+        .unwrap();
 
         let path = fetch_asr_model("sensevoice", crate::platform::Tier::High)
             .expect("sensevoice fetch must succeed when model pre-seeded");
@@ -1033,7 +1095,8 @@ mod tests {
         let _home = HomeGuard::set(tmp);
 
         // Low tier → ggml-medium-q5_0.bin; pre-seed it so the fetcher early-returns.
-        let rec = crate::platform::ModelRecommendation::for_tier(crate::platform::Tier::Low).unwrap();
+        let rec =
+            crate::platform::ModelRecommendation::for_tier(crate::platform::Tier::Low).unwrap();
         let wdir = crate::platform::data_dir().join("models").join("whisper");
         std::fs::create_dir_all(&wdir).unwrap();
         std::fs::write(wdir.join(rec.asr_ggml), b"fake").unwrap();
@@ -1041,7 +1104,8 @@ mod tests {
         let path = fetch_asr_model("whisper", crate::platform::Tier::Low)
             .expect("whisper fetch must succeed when ggml pre-seeded");
         assert!(
-            path.to_string_lossy().contains("ggml") && !path.to_string_lossy().contains("sensevoice"),
+            path.to_string_lossy().contains("ggml")
+                && !path.to_string_lossy().contains("sensevoice"),
             "whisper engine must route to whisper ggml; got: {}",
             path.display()
         );
@@ -1077,9 +1141,18 @@ mod tests {
             language: "auto".into(),
             gpu_capable: false, // not relevant for this WER threshold test
         };
-        assert!(!mk("tiny").supports_chinese_well(), "tiny WER 35-40% 不达标");
-        assert!(!mk("base").supports_chinese_well(), "base WER 25-30% 不达标");
-        assert!(mk("small").supports_chinese_well(), "small Q8 中文 WER < 20%");
+        assert!(
+            !mk("tiny").supports_chinese_well(),
+            "tiny WER 35-40% 不达标"
+        );
+        assert!(
+            !mk("base").supports_chinese_well(),
+            "base WER 25-30% 不达标"
+        );
+        assert!(
+            mk("small").supports_chinese_well(),
+            "small Q8 中文 WER < 20%"
+        );
         assert!(mk("medium").supports_chinese_well());
         assert!(mk("large").supports_chinese_well());
     }
@@ -1197,9 +1270,24 @@ World
     #[test]
     fn format_diarized_text_groups_same_speaker() {
         let segs = vec![
-            TranscriptSegment { text: "Hello".to_string(), start_ms: 0, end_ms: 1000, speaker: Some("SPEAKER_00".to_string()) },
-            TranscriptSegment { text: "world".to_string(), start_ms: 1000, end_ms: 2000, speaker: Some("SPEAKER_00".to_string()) },
-            TranscriptSegment { text: "Hi".to_string(), start_ms: 2000, end_ms: 3000, speaker: Some("SPEAKER_01".to_string()) },
+            TranscriptSegment {
+                text: "Hello".to_string(),
+                start_ms: 0,
+                end_ms: 1000,
+                speaker: Some("SPEAKER_00".to_string()),
+            },
+            TranscriptSegment {
+                text: "world".to_string(),
+                start_ms: 1000,
+                end_ms: 2000,
+                speaker: Some("SPEAKER_00".to_string()),
+            },
+            TranscriptSegment {
+                text: "Hi".to_string(),
+                start_ms: 2000,
+                end_ms: 3000,
+                speaker: Some("SPEAKER_01".to_string()),
+            },
         ];
         let text = format_diarized_text(&segs);
         // SPEAKER_00 consecutive → should be on same line
@@ -1210,13 +1298,26 @@ World
     #[test]
     fn format_diarized_text_no_speaker_plain_text() {
         let segs = vec![
-            TranscriptSegment { text: "第一句".to_string(), start_ms: 0, end_ms: 1000, speaker: None },
-            TranscriptSegment { text: "第二句".to_string(), start_ms: 1000, end_ms: 2000, speaker: None },
+            TranscriptSegment {
+                text: "第一句".to_string(),
+                start_ms: 0,
+                end_ms: 1000,
+                speaker: None,
+            },
+            TranscriptSegment {
+                text: "第二句".to_string(),
+                start_ms: 1000,
+                end_ms: 2000,
+                speaker: None,
+            },
         ];
         let text = format_diarized_text(&segs);
         assert!(text.contains("第一句"), "got: {text}");
         assert!(text.contains("第二句"), "got: {text}");
-        assert!(!text.contains("SPEAKER"), "no speaker labels expected; got: {text}");
+        assert!(
+            !text.contains("SPEAKER"),
+            "no speaker labels expected; got: {text}"
+        );
     }
 
     // ── whisperX JSON parser ────────────────────────────────────────────────

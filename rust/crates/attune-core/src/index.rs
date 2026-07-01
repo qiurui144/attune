@@ -48,17 +48,36 @@ impl FulltextIndex {
         let schema = Self::build_schema();
         let index = Index::create_in_ram(schema.clone());
         Self::register_tokenizers(&index);
-        let f_item_id = schema.get_field("item_id").expect("schema field 'item_id' defined in build_schema");
-        let f_title = schema.get_field("title").expect("schema field 'title' defined in build_schema");
-        let f_content = schema.get_field("content").expect("schema field 'content' defined in build_schema");
-        let f_source_type = schema.get_field("source_type").expect("schema field 'source_type' defined in build_schema");
-        let writer = index.writer(HEAP_SIZE)
+        let f_item_id = schema
+            .get_field("item_id")
+            .expect("schema field 'item_id' defined in build_schema");
+        let f_title = schema
+            .get_field("title")
+            .expect("schema field 'title' defined in build_schema");
+        let f_content = schema
+            .get_field("content")
+            .expect("schema field 'content' defined in build_schema");
+        let f_source_type = schema
+            .get_field("source_type")
+            .expect("schema field 'source_type' defined in build_schema");
+        let writer = index
+            .writer(HEAP_SIZE)
             .map_err(|e| VaultError::Crypto(format!("tantivy writer: {e}")))?;
-        let reader = index.reader_builder()
+        let reader = index
+            .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()
             .map_err(|e| VaultError::Crypto(format!("tantivy reader: {e}")))?;
-        Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type, writer: Mutex::new(writer), reader })
+        Ok(Self {
+            index,
+            schema,
+            f_item_id,
+            f_title,
+            f_content,
+            f_source_type,
+            writer: Mutex::new(writer),
+            reader,
+        })
     }
 
     /// 打开持久化索引
@@ -71,8 +90,7 @@ impl FulltextIndex {
         Self::migrate_tokenizer_version(dir)?;
         let schema = Self::build_schema();
         let index = if dir.join("meta.json").exists() {
-            Index::open_in_dir(dir)
-                .map_err(|e| VaultError::Crypto(format!("tantivy open: {e}")))?
+            Index::open_in_dir(dir).map_err(|e| VaultError::Crypto(format!("tantivy open: {e}")))?
         } else {
             Index::create_in_dir(dir, schema.clone())
                 .map_err(|e| VaultError::Crypto(format!("tantivy create: {e}")))?
@@ -83,17 +101,36 @@ impl FulltextIndex {
             dir.join(TOKENIZER_VERSION_FILE),
             TOKENIZER_VERSION.to_string(),
         );
-        let f_item_id = schema.get_field("item_id").expect("schema field 'item_id' defined in build_schema");
-        let f_title = schema.get_field("title").expect("schema field 'title' defined in build_schema");
-        let f_content = schema.get_field("content").expect("schema field 'content' defined in build_schema");
-        let f_source_type = schema.get_field("source_type").expect("schema field 'source_type' defined in build_schema");
-        let writer = index.writer(HEAP_SIZE)
+        let f_item_id = schema
+            .get_field("item_id")
+            .expect("schema field 'item_id' defined in build_schema");
+        let f_title = schema
+            .get_field("title")
+            .expect("schema field 'title' defined in build_schema");
+        let f_content = schema
+            .get_field("content")
+            .expect("schema field 'content' defined in build_schema");
+        let f_source_type = schema
+            .get_field("source_type")
+            .expect("schema field 'source_type' defined in build_schema");
+        let writer = index
+            .writer(HEAP_SIZE)
             .map_err(|e| VaultError::Crypto(format!("tantivy writer: {e}")))?;
-        let reader = index.reader_builder()
+        let reader = index
+            .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()
             .map_err(|e| VaultError::Crypto(format!("tantivy reader: {e}")))?;
-        Ok(Self { index, schema, f_item_id, f_title, f_content, f_source_type, writer: Mutex::new(writer), reader })
+        Ok(Self {
+            index,
+            schema,
+            f_item_id,
+            f_title,
+            f_content,
+            f_source_type,
+            writer: Mutex::new(writer),
+            reader,
+        })
     }
 
     /// 检查磁盘索引的分词器版本标记；缺失或不符 → 删除整个索引目录内容，
@@ -136,8 +173,7 @@ impl FulltextIndex {
         let jieba_indexing = TextFieldIndexing::default()
             .set_tokenizer("jieba")
             .set_index_option(IndexRecordOption::WithFreqsAndPositions);
-        let jieba_text = TextOptions::default()
-            .set_indexing_options(jieba_indexing.clone());
+        let jieba_text = TextOptions::default().set_indexing_options(jieba_indexing.clone());
         let jieba_text_stored = TextOptions::default()
             .set_indexing_options(jieba_indexing)
             .set_stored();
@@ -171,7 +207,10 @@ impl FulltextIndex {
 fn tokenize_cjk_query(index: &Index, q: &str) -> String {
     use tantivy::tokenizer::TokenStream;
     let mut tokenizer = match index.tokenizer_for_field(
-        index.schema().get_field("content").expect("schema field 'content' defined in build_schema")
+        index
+            .schema()
+            .get_field("content")
+            .expect("schema field 'content' defined in build_schema"),
     ) {
         Ok(t) => t,
         Err(_) => return q.to_string(),
@@ -183,28 +222,41 @@ fn tokenize_cjk_query(index: &Index, q: &str) -> String {
             tokens.push(tok.text.clone());
         }
     }
-    if tokens.is_empty() { q.to_string() } else { tokens.join(" ") }
+    if tokens.is_empty() {
+        q.to_string()
+    } else {
+        tokens.join(" ")
+    }
 }
 
 impl FulltextIndex {
-
     /// 添加文档到索引（upsert 语义：先删除同 item_id 的旧文档再添加）
-    pub fn add_document(&self, item_id: &str, title: &str, content: &str, source_type: &str) -> Result<()> {
+    pub fn add_document(
+        &self,
+        item_id: &str,
+        title: &str,
+        content: &str,
+        source_type: &str,
+    ) -> Result<()> {
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         // Delete existing document with same item_id (upsert semantics)
         let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
         writer.delete_term(term);
-        writer.add_document(doc!(
-            self.f_item_id => item_id,
-            self.f_title => title,
-            self.f_content => content,
-            self.f_source_type => source_type,
-        )).map_err(|e| VaultError::Crypto(format!("tantivy add: {e}")))?;
-        writer.commit()
+        writer
+            .add_document(doc!(
+                self.f_item_id => item_id,
+                self.f_title => title,
+                self.f_content => content,
+                self.f_source_type => source_type,
+            ))
+            .map_err(|e| VaultError::Crypto(format!("tantivy add: {e}")))?;
+        writer
+            .commit()
             .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
         // OSS-S13 P0 fix: 写后立即 reload 让全局 reader 看到新 commit，
         // 避免 OnCommitWithDelay 在测试 / 紧跟读场景下的延迟可见性
-        self.reader.reload()
+        self.reader
+            .reload()
             .map_err(|e| VaultError::Crypto(format!("tantivy reload: {e}")))?;
         Ok(())
     }
@@ -214,10 +266,12 @@ impl FulltextIndex {
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
         writer.delete_term(term);
-        writer.commit()
+        writer
+            .commit()
             .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
         // OSS-S13 P0 fix: 写后立即 reload，同 add_document 注释
-        self.reader.reload()
+        self.reader
+            .reload()
             .map_err(|e| VaultError::Crypto(format!("tantivy reload: {e}")))?;
         Ok(())
     }
@@ -241,22 +295,28 @@ impl FulltextIndex {
         let searcher = self.reader.searcher();
 
         // 若含中文，先 jieba 分词再拼回空格分隔
-        let effective_query = if query_str.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
+        let effective_query = if query_str
+            .chars()
+            .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+        {
             tokenize_cjk_query(&self.index, query_str)
         } else {
             query_str.to_string()
         };
 
         let query_parser = QueryParser::for_index(&self.index, vec![self.f_title, self.f_content]);
-        let query = query_parser.parse_query(&effective_query)
+        let query = query_parser
+            .parse_query(&effective_query)
             .map_err(|e| VaultError::Crypto(format!("tantivy query: {e}")))?;
 
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(top_k))
+        let top_docs = searcher
+            .search(&query, &TopDocs::with_limit(top_k))
             .map_err(|e| VaultError::Crypto(format!("tantivy search: {e}")))?;
 
         let mut results = Vec::new();
         for (score, doc_address) in top_docs {
-            let doc: TantivyDocument = searcher.doc(doc_address)
+            let doc: TantivyDocument = searcher
+                .doc(doc_address)
                 .map_err(|e| VaultError::Crypto(format!("tantivy doc: {e}")))?;
             if let Some(item_id) = doc.get_first(self.f_item_id).and_then(|v| v.as_str()) {
                 results.push((item_id.to_string(), score));
@@ -284,8 +344,10 @@ mod tests {
     #[test]
     fn add_and_search() {
         let idx = FulltextIndex::open_memory().unwrap();
-        idx.add_document("item1", "Rust编程", "Rust是一门系统编程语言", "note").unwrap();
-        idx.add_document("item2", "Python学习", "Python是一门脚本语言", "note").unwrap();
+        idx.add_document("item1", "Rust编程", "Rust是一门系统编程语言", "note")
+            .unwrap();
+        idx.add_document("item2", "Python学习", "Python是一门脚本语言", "note")
+            .unwrap();
 
         let results = idx.search("Rust", 10).unwrap();
         assert!(!results.is_empty(), "Should find Rust document");
@@ -295,7 +357,8 @@ mod tests {
     #[test]
     fn delete_document() {
         let idx = FulltextIndex::open_memory().unwrap();
-        idx.add_document("item1", "Test", "Content", "note").unwrap();
+        idx.add_document("item1", "Test", "Content", "note")
+            .unwrap();
         assert_eq!(idx.doc_count().unwrap(), 1);
 
         idx.delete_document("item1").unwrap();
@@ -310,7 +373,8 @@ mod tests {
         // Create and add
         {
             let idx = FulltextIndex::open(&path).unwrap();
-            idx.add_document("id1", "Title", "Content here", "note").unwrap();
+            idx.add_document("id1", "Title", "Content here", "note")
+                .unwrap();
         }
         // Reopen and verify
         {
@@ -330,7 +394,8 @@ mod tests {
         // 1) 建索引 + 加文档，open 会写当前版本标记。
         {
             let idx = FulltextIndex::open(&path).unwrap();
-            idx.add_document("id1", "Title", "Running content", "note").unwrap();
+            idx.add_document("id1", "Title", "Running content", "note")
+                .unwrap();
             assert_eq!(idx.doc_count().unwrap(), 1);
         }
         assert!(path.join("meta.json").exists());
@@ -351,7 +416,8 @@ mod tests {
             let v = std::fs::read_to_string(path.join(super::TOKENIZER_VERSION_FILE)).unwrap();
             assert_eq!(v.trim(), super::TOKENIZER_VERSION.to_string());
             // 重灌后可正常工作（多语言 analyzer 生效）。
-            idx.add_document("id2", "T", "Running 检索", "note").unwrap();
+            idx.add_document("id2", "T", "Running 检索", "note")
+                .unwrap();
             assert!(!idx.search("running", 10).unwrap().is_empty());
         }
 
@@ -380,7 +446,11 @@ mod tests {
         assert!(path.join("meta.json").exists());
 
         let idx = FulltextIndex::open(&path).unwrap();
-        assert_eq!(idx.doc_count().unwrap(), 0, "marker-less index must be wiped");
+        assert_eq!(
+            idx.doc_count().unwrap(),
+            0,
+            "marker-less index must be wiped"
+        );
     }
 
     /// 多语言分词：英文大小写不敏感（LowerCaser）+ 词干归并（Stemmer）+ CJK 仍走 jieba。
@@ -390,8 +460,13 @@ mod tests {
     #[test]
     fn multilingual_tokenizer_lowercases_english_and_keeps_cjk() {
         let idx = FulltextIndex::open_memory().unwrap();
-        idx.add_document("doc1", "项目 Running 测试", "向量 search 检索 hybrid recall", "note")
-            .unwrap();
+        idx.add_document(
+            "doc1",
+            "项目 Running 测试",
+            "向量 search 检索 hybrid recall",
+            "note",
+        )
+        .unwrap();
 
         // 1) 英文大小写不敏感：原文 "Running"（大写 R），搜小写 "running" 必须命中。
         let r = idx.search("running", 10).unwrap();
@@ -427,7 +502,8 @@ mod tests {
                 &format!("Title {i}"),
                 "Rust 编程 trait closure",
                 "note",
-            ).unwrap();
+            )
+            .unwrap();
         }
         // 1000 次 search — 修复前会反复 build IndexReader，修复后只复用 self.reader
         for _ in 0..1000 {

@@ -114,8 +114,8 @@ fn candidate_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".into());
-        let pf86 = std::env::var("ProgramFiles(x86)")
-            .unwrap_or_else(|_| "C:\\Program Files (x86)".into());
+        let pf86 =
+            std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| "C:\\Program Files (x86)".into());
         let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
 
         paths.push(PathBuf::from(format!(
@@ -289,12 +289,20 @@ impl WebSearchProvider for BrowserSearchProvider {
         log::info!("web search: GET {}", url);
         let html = self.fetch_html(&url)?;
         let results = self.engine.parse(&html, limit.clamp(1, 10));
-        log::info!("web search: parsed {} results from {}", results.len(), self.engine.name());
+        log::info!(
+            "web search: parsed {} results from {}",
+            results.len(),
+            self.engine.name()
+        );
         Ok(results)
     }
 
-    fn provider_name(&self) -> &str { "browser" }
-    fn is_configured(&self) -> bool { self.browser_path.exists() }
+    fn provider_name(&self) -> &str {
+        "browser"
+    }
+    fn is_configured(&self) -> bool {
+        self.browser_path.exists()
+    }
 }
 
 // ── 集成测试（需要系统装 Chrome，默认 ignored） ──────────────────────────────
@@ -313,9 +321,13 @@ mod browser_integration {
                 return;
             }
         };
-        let results = provider.search("rust programming language", 3)
+        let results = provider
+            .search("rust programming language", 3)
             .expect("search should succeed on a live system");
-        assert!(!results.is_empty(), "DuckDuckGo should return at least 1 result");
+        assert!(
+            !results.is_empty(),
+            "DuckDuckGo should return at least 1 result"
+        );
         for r in &results {
             assert!(!r.title.is_empty());
             assert!(r.url.starts_with("http"));
@@ -341,10 +353,11 @@ mod tests {
         //   macOS "Google Chrome" 含 "Chrome"
         //   Windows chrome.exe 含 "chrome" (但 ends_with .exe)
         // 用 contains 而不是 ends_with 才跨平台稳健
-        let result = detect_with(|p: &Path| {
-            p.to_string_lossy().to_lowercase().contains("chrome")
-        });
-        assert!(result.is_some(), "should find a matching candidate (some chrome variant)");
+        let result = detect_with(|p: &Path| p.to_string_lossy().to_lowercase().contains("chrome"));
+        assert!(
+            result.is_some(),
+            "should find a matching candidate (some chrome variant)"
+        );
     }
 
     #[test]
@@ -409,7 +422,10 @@ mod tests {
     fn browser_cache_dir_returns_some_path() {
         // dirs::cache_dir 在所有支持平台都 Some, 仅极端无 HOME 环境才 None.
         let dir = browser_cache_dir();
-        assert!(dir.is_some(), "expected dirs::cache_dir / attune / browser path");
+        assert!(
+            dir.is_some(),
+            "expected dirs::cache_dir / attune / browser path"
+        );
         assert!(dir.unwrap().to_string_lossy().contains("attune"));
     }
 

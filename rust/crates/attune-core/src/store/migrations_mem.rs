@@ -108,7 +108,16 @@ mod tests {
     /// rejected. Mirrors the memory_vectors test helper pattern.
     fn seed_memory(store: &Store, dek: &Key32, hash: &str, created_at: i64) -> String {
         store
-            .insert_memory(dek, "episodic", 0, 100, &[hash.into()], "summary", "m", created_at)
+            .insert_memory(
+                dek,
+                "episodic",
+                0,
+                100,
+                &[hash.into()],
+                "summary",
+                "m",
+                created_at,
+            )
             .unwrap();
         // most-recent memory (ORDER BY created_at DESC) is the one we just inserted;
         // distinct created_at keeps the ordering deterministic across seeds.
@@ -121,8 +130,10 @@ mod tests {
         let dek = Key32::generate();
         let m1 = seed_memory(&s, &dek, "h1", 1);
         let m2 = seed_memory(&s, &dek, "h2", 2);
-        s.put_memory_vector(&m1, &[1.0, 2.0], "old-model", 1).unwrap();
-        s.put_memory_vector(&m2, &[1.0, 2.0, 3.0], "bge-m3", 1).unwrap();
+        s.put_memory_vector(&m1, &[1.0, 2.0], "old-model", 1)
+            .unwrap();
+        s.put_memory_vector(&m2, &[1.0, 2.0, 3.0], "bge-m3", 1)
+            .unwrap();
 
         let stale = s.list_stale_memory_ids("bge-m3").unwrap();
         assert_eq!(stale, vec![m1.clone()]); // m2 already on current model

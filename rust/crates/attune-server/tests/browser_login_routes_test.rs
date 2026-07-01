@@ -217,7 +217,9 @@ exit 0
         "missing tool must degrade gracefully (503/502), got {status}: {body}"
     );
     assert!(
-        !serde_json::to_string(&body).unwrap().contains("SUPERSECRET"),
+        !serde_json::to_string(&body)
+            .unwrap()
+            .contains("SUPERSECRET"),
         "no secret in error body"
     );
 
@@ -253,7 +255,10 @@ exit 0
         .expect("connect login");
     assert_eq!(r.status().as_u16(), 200, "login should 200");
     let body: serde_json::Value = r.json().await.unwrap();
-    assert_eq!(body["captured"], true, "login should capture session: {body}");
+    assert_eq!(
+        body["captured"], true,
+        "login should capture session: {body}"
+    );
     let session_id = body["id"].as_str().expect("session id").to_string();
     // ── (5 凭据不泄) connect 响应绝不含 storage_state / cookie 值.
     let connect_json = serde_json::to_string(&body).unwrap();
@@ -288,9 +293,7 @@ exit 0
 
     // ── (3 删) DELETE session.
     let r = client
-        .delete(format!(
-            "{base}/api/v1/browser-login/sessions/{session_id}"
-        ))
+        .delete(format!("{base}/api/v1/browser-login/sessions/{session_id}"))
         .send()
         .await
         .expect("delete session");
@@ -331,7 +334,11 @@ async fn assert_non_dns_boundaries(base: &str, client: &reqwest::Client) {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status().as_u16(), 400, "loopback entry_url must be rejected");
+    assert_eq!(
+        r.status().as_u16(),
+        400,
+        "loopback entry_url must be rejected"
+    );
 
     // bad mode → 400(mode 校验在 DNS 之前)。
     let r = client

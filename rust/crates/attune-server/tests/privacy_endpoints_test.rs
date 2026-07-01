@@ -169,7 +169,11 @@ async fn patch_privacy_settings_silently_drops_unknown_keys() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let applied = body.get("applied").expect("applied key").as_object().unwrap();
+    let applied = body
+        .get("applied")
+        .expect("applied key")
+        .as_object()
+        .unwrap();
     assert!(applied.contains_key("web_search"));
     assert!(!applied.contains_key("unknown_key"));
     assert!(!applied.contains_key("another_unknown"));
@@ -221,7 +225,10 @@ async fn post_privacy_lock_inner() {
     let body: serde_json::Value = resp.json().await.unwrap();
     // Accept 200 (lock succeeded) or 409 (already locked) — both prove the
     // endpoint is reachable and returns valid JSON.
-    assert!(status == 200 || status == 409, "got status {status} body={body}");
+    assert!(
+        status == 200 || status == 409,
+        "got status {status} body={body}"
+    );
 
     if status == 200 {
         assert_eq!(body.get("ok"), Some(&serde_json::json!(true)));
@@ -412,10 +419,7 @@ async fn privacy_audit_events_carry_zero_payload_counters() {
             .get("redacted_count")
             .and_then(|v| v.as_i64())
             .unwrap_or(-1);
-        let ol = e
-            .get("original_len")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(-1);
+        let ol = e.get("original_len").and_then(|v| v.as_i64()).unwrap_or(-1);
         assert_eq!(
             rc, 0,
             "privacy event must carry redacted_count=0 (no PII payload): {e:?}"

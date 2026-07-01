@@ -21,8 +21,12 @@ use proptest::prelude::*;
 // ─── Strategies ─────────────────────────────────────────────────────────────
 
 fn arb_bbox() -> impl Strategy<Value = BBox> {
-    (any::<u32>(), any::<u32>(), any::<u32>(), any::<u32>())
-        .prop_map(|(x, y, w, h)| BBox { x, y, w, h })
+    (any::<u32>(), any::<u32>(), any::<u32>(), any::<u32>()).prop_map(|(x, y, w, h)| BBox {
+        x,
+        y,
+        w,
+        h,
+    })
 }
 
 fn arb_raw_line() -> impl Strategy<Value = RawLine> {
@@ -57,7 +61,10 @@ fn arb_structured_fields() -> impl Strategy<Value = StructuredFields> {
         }),
         arb_field_value().prop_map(|fv| {
             StructuredFields::ReceiptV1 {
-                fields: ReceiptFields { invoice_no: fv, ..Default::default() },
+                fields: ReceiptFields {
+                    invoice_no: fv,
+                    ..Default::default()
+                },
                 unrecognized_fields: vec![],
                 validation_warnings: vec![],
             }
@@ -69,28 +76,40 @@ fn arb_structured_fields() -> impl Strategy<Value = StructuredFields> {
         }),
         arb_field_value().prop_map(|fv| {
             StructuredFields::CardV1 {
-                fields: CardFields { name: fv, ..Default::default() },
+                fields: CardFields {
+                    name: fv,
+                    ..Default::default()
+                },
                 unrecognized_fields: vec![],
                 validation_warnings: vec![],
             }
         }),
         arb_field_value().prop_map(|fv| {
             StructuredFields::IdCardCnV1 {
-                fields: IdCardCnFields { name: fv, ..Default::default() },
+                fields: IdCardCnFields {
+                    name: fv,
+                    ..Default::default()
+                },
                 unrecognized_fields: vec![],
                 validation_warnings: vec![],
             }
         }),
         arb_field_value().prop_map(|fv| {
             StructuredFields::BankCardV1 {
-                fields: BankCardFields { card_number: fv, ..Default::default() },
+                fields: BankCardFields {
+                    card_number: fv,
+                    ..Default::default()
+                },
                 unrecognized_fields: vec![],
                 validation_warnings: vec![],
             }
         }),
         arb_field_value().prop_map(|fv| {
             StructuredFields::BusinessLicenseV1 {
-                fields: BusinessLicenseFields { company_name: fv, ..Default::default() },
+                fields: BusinessLicenseFields {
+                    company_name: fv,
+                    ..Default::default()
+                },
                 unrecognized_fields: vec![],
                 validation_warnings: vec![],
             }

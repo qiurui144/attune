@@ -20,9 +20,7 @@ async fn run_in_runtime_starts_and_responds_on_health() {
         no_auth: true,
     };
 
-    let handle = tokio::spawn(async move {
-        attune_server::run_in_runtime(config).await
-    });
+    let handle = tokio::spawn(async move { attune_server::run_in_runtime(config).await });
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 

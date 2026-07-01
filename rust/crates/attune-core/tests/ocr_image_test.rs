@@ -137,7 +137,10 @@ fn image_empty_bytes_err_gracefully_all_exts() {
 /// unsupported, proving image routing is specific — not "any binary → OCR".
 #[test]
 fn executable_extension_is_not_routed_to_ocr() {
-    assert!(!is_supported(Path::new("tool.exe")), ".exe must NOT be supported");
+    assert!(
+        !is_supported(Path::new("tool.exe")),
+        ".exe must NOT be supported"
+    );
     let err = parse_bytes(b"MZ\x90\x00", "tool.exe")
         .expect_err(".exe must Err")
         .to_string()
@@ -183,8 +186,8 @@ fn real_ocr_reads_known_text_within_cer() {
             eprintln!("skip {name}: fixture missing — run gen_ocr_image_fixtures.py");
             continue;
         }
-        let (title, content) = parse_file(&path)
-            .unwrap_or_else(|e| panic!("real OCR on {name} must succeed: {e}"));
+        let (title, content) =
+            parse_file(&path).unwrap_or_else(|e| panic!("real OCR on {name} must succeed: {e}"));
         let got = normalize(&content);
         let cer = char_error_rate(&want, &got);
         eprintln!("real OCR {name}: title={title:?}");
@@ -205,7 +208,13 @@ fn normalize(s: &str) -> String {
     let cleaned: String = s
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect();
     cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -241,7 +250,10 @@ mod cer_self_tests {
 
     #[test]
     fn cer_identical_is_zero() {
-        assert_eq!(char_error_rate("attune ocr test 2026", "attune ocr test 2026"), 0.0);
+        assert_eq!(
+            char_error_rate("attune ocr test 2026", "attune ocr test 2026"),
+            0.0
+        );
     }
 
     #[test]
@@ -252,6 +264,9 @@ mod cer_self_tests {
 
     #[test]
     fn normalize_collapses_and_lowercases() {
-        assert_eq!(normalize("ATTUNE  OCR\nTEST, 2026!"), "attune ocr test 2026");
+        assert_eq!(
+            normalize("ATTUNE  OCR\nTEST, 2026!"),
+            "attune ocr test 2026"
+        );
     }
 }

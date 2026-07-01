@@ -124,8 +124,14 @@ mod tests {
 
     #[test]
     fn error_display_messages() {
-        assert_eq!(VaultError::Sealed.to_string(), "vault is sealed: run setup first");
-        assert_eq!(VaultError::Locked.to_string(), "vault is locked: unlock required");
+        assert_eq!(
+            VaultError::Sealed.to_string(),
+            "vault is sealed: run setup first"
+        );
+        assert_eq!(
+            VaultError::Locked.to_string(),
+            "vault is locked: unlock required"
+        );
         assert_eq!(VaultError::InvalidPassword.to_string(), "invalid password");
         assert_eq!(
             VaultError::DeviceSecretMissing("/path".into()).to_string(),
@@ -136,22 +142,52 @@ mod tests {
     #[test]
     fn error_display_all_static_variants() {
         // 锁定所有无参 variant 的 display 输出 (PR 改文案会破坏前端 error code 映射)
-        assert_eq!(VaultError::AlreadyUnlocked.to_string(), "vault is already unlocked");
-        assert_eq!(VaultError::AlreadyInitialized.to_string(), "vault is already initialized");
-        assert_eq!(VaultError::DeviceSecretMismatch.to_string(), "device secret mismatch");
+        assert_eq!(
+            VaultError::AlreadyUnlocked.to_string(),
+            "vault is already unlocked"
+        );
+        assert_eq!(
+            VaultError::AlreadyInitialized.to_string(),
+            "vault is already initialized"
+        );
+        assert_eq!(
+            VaultError::DeviceSecretMismatch.to_string(),
+            "device secret mismatch"
+        );
         assert_eq!(VaultError::SessionExpired.to_string(), "session expired");
         assert_eq!(VaultError::SessionInvalid.to_string(), "session invalid");
     }
 
     #[test]
     fn error_display_parameterized_variants() {
-        assert_eq!(VaultError::Crypto("decrypt failed".into()).to_string(), "crypto error: decrypt failed");
-        assert_eq!(VaultError::LlmUnavailable("timeout".into()).to_string(), "llm unavailable: timeout");
-        assert_eq!(VaultError::Classification("bad json".into()).to_string(), "classification failed: bad json");
-        assert_eq!(VaultError::Taxonomy("cycle".into()).to_string(), "taxonomy error: cycle");
-        assert_eq!(VaultError::NotFound("item-123".into()).to_string(), "not found: item-123");
-        assert_eq!(VaultError::InvalidInput("empty".into()).to_string(), "invalid input: empty");
-        assert_eq!(VaultError::ModelLoad("size".into()).to_string(), "model load error: size");
+        assert_eq!(
+            VaultError::Crypto("decrypt failed".into()).to_string(),
+            "crypto error: decrypt failed"
+        );
+        assert_eq!(
+            VaultError::LlmUnavailable("timeout".into()).to_string(),
+            "llm unavailable: timeout"
+        );
+        assert_eq!(
+            VaultError::Classification("bad json".into()).to_string(),
+            "classification failed: bad json"
+        );
+        assert_eq!(
+            VaultError::Taxonomy("cycle".into()).to_string(),
+            "taxonomy error: cycle"
+        );
+        assert_eq!(
+            VaultError::NotFound("item-123".into()).to_string(),
+            "not found: item-123"
+        );
+        assert_eq!(
+            VaultError::InvalidInput("empty".into()).to_string(),
+            "invalid input: empty"
+        );
+        assert_eq!(
+            VaultError::ModelLoad("size".into()).to_string(),
+            "model load error: size"
+        );
     }
 
     // From<io::Error> conversion
@@ -187,7 +223,11 @@ mod tests {
     #[test]
     fn result_alias_usable() {
         fn helper(ok: bool) -> Result<i32> {
-            if ok { Ok(42) } else { Err(VaultError::InvalidInput("nope".into())) }
+            if ok {
+                Ok(42)
+            } else {
+                Err(VaultError::InvalidInput("nope".into()))
+            }
         }
         assert_eq!(helper(true).unwrap(), 42);
         assert!(helper(false).is_err());

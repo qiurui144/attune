@@ -99,7 +99,9 @@ steps = ["extractor", "damages"]
     // ACP-3: the LLM step recorded a usage event tagged with the agent id.
     let events = usage.recent(16);
     assert!(
-        events.iter().any(|e| e.agent_id.as_deref() == Some("extractor")),
+        events
+            .iter()
+            .any(|e| e.agent_id.as_deref() == Some("extractor")),
         "extractor LLM call must record telemetry; got {events:?}"
     );
 }
@@ -122,9 +124,8 @@ on_step_fail = "partial"
     // Mock with NO pushed response → the extractor LLM call errors. The flow must
     // degrade (partial), never cascade-panic.
     let provider = MockLlmProvider::new("qwen2.5:3b");
-    let mut dispatch = |_a: &crate::agents::registry::AgentSpec, _i: &Payload| {
-        Ok(serde_json::json!({}))
-    };
+    let mut dispatch =
+        |_a: &crate::agents::registry::AgentSpec, _i: &Payload| Ok(serde_json::json!({}));
     let mut runner = GovernedStepRunner::new(
         &provider,
         None,
@@ -159,9 +160,8 @@ steps = ["damages"]
     .unwrap();
     let flow = flows.get("f").unwrap();
     let provider = MockLlmProvider::new("qwen2.5:3b");
-    let mut dispatch = |_a: &crate::agents::registry::AgentSpec, _i: &Payload| {
-        Err("binary crashed".to_string())
-    };
+    let mut dispatch =
+        |_a: &crate::agents::registry::AgentSpec, _i: &Payload| Err("binary crashed".to_string());
     let mut runner = GovernedStepRunner::new(
         &provider,
         None,

@@ -21,9 +21,7 @@
 //!    contains zero entities, the agent finds no signal and confidence
 //!    is exactly 1.0.
 
-use attune_core::chat_reliability::{
-    evaluate_response, ChatReliabilityConfig, RetrievedChunk,
-};
+use attune_core::chat_reliability::{evaluate_response, ChatReliabilityConfig, RetrievedChunk};
 use proptest::prelude::*;
 
 // ── Strategy helpers ─────────────────────────────────────────────────────────

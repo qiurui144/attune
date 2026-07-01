@@ -113,7 +113,10 @@ fn paid_plugin_with_unsigned_trust_rejected() {
     fs::write(tmp.path().join("plugin.yaml"), PAID_PLUGIN_YAML).expect("write");
 
     let result = LoadedPlugin::from_dir_with_key(tmp.path(), None, Some(Trust::Unsigned));
-    assert!(result.is_err(), "paid plugin with Unsigned trust must reject");
+    assert!(
+        result.is_err(),
+        "paid plugin with Unsigned trust must reject"
+    );
     let msg = format!("{:?}", result.unwrap_err());
     assert!(msg.contains("paid/trial") || msg.contains("Trusted") || msg.contains("Official"));
 }
@@ -161,7 +164,10 @@ fn document_classifier_via_agent_trait() {
     assert!(agent.case_kinds().is_empty()); // 通用
 
     let docs = vec![
-        ("借条.pdf".to_string(), "借条 出借人 借款人 本金".to_string()),
+        (
+            "借条.pdf".to_string(),
+            "借条 出借人 借款人 本金".to_string(),
+        ),
         ("流水.pdf".to_string(), "交易日期 余额 对方户名".to_string()),
     ];
     let out = agent.run(docs).expect("run");
@@ -288,7 +294,11 @@ fn registry_scan_with_key_loads_encrypted_paid_plugin() {
     // scan_with_key() 提供 key 但插件 UNSIGNED → paid+Unsigned 被 pricing↔trust 拒载
     // (T9 杀掉硬编码 Trusted 后的新安全不变量,非 bug)。
     let (reg, errs) = PluginRegistry::scan_with_key(tmp.path(), Some(key)).expect("scan");
-    assert_eq!(reg.plugins().count(), 0, "unsigned paid plugin must be rejected (paid ⇒ signed)");
+    assert_eq!(
+        reg.plugins().count(),
+        0,
+        "unsigned paid plugin must be rejected (paid ⇒ signed)"
+    );
     assert!(!errs.is_empty(), "rejection surfaced in errors");
 
     // 合法路径:对插件签名(签名作用于 plaintext plugin.yaml 的 digest),把签名公钥
@@ -305,7 +315,11 @@ fn registry_scan_with_key_loads_encrypted_paid_plugin() {
         &[pubkey_hex],
     )
     .expect("scan");
-    assert_eq!(reg.plugins().count(), 1, "signed (whitelisted ThirdParty) paid plugin loads");
+    assert_eq!(
+        reg.plugins().count(),
+        1,
+        "signed (whitelisted ThirdParty) paid plugin loads"
+    );
     assert!(errs.is_empty(), "errors: {errs:?}");
     let p = reg.plugins().next().unwrap();
     assert_eq!(p.manifest.id, "law-pro");
@@ -384,14 +398,19 @@ exit 0
     let (reg, errs) = PluginRegistry::scan(tmp.path()).expect("scan");
     assert!(errs.is_empty(), "plugin scan errors: {errs:?}");
     assert!(
-        reg.list_agents().iter().any(|(_, a)| a.id == "llm_echo_agent"),
+        reg.list_agents()
+            .iter()
+            .any(|(_, a)| a.id == "llm_echo_agent"),
         "llm_echo_agent should be registered"
     );
 
     // 场景 1：传 env → exit 0，stdout 含 endpoint
     let env_with_llm = vec![
         ("LLM_PROVIDER".to_string(), "openai_compat".to_string()),
-        ("LLM_ENDPOINT".to_string(), "https://api.deepseek.com/v1".to_string()),
+        (
+            "LLM_ENDPOINT".to_string(),
+            "https://api.deepseek.com/v1".to_string(),
+        ),
         ("LLM_MODEL".to_string(), "deepseek-chat".to_string()),
         ("LLM_API_KEY".to_string(), "sk-test".to_string()),
     ];
@@ -404,7 +423,11 @@ exit 0
         Duration::from_secs(5),
     )
     .expect("run with env");
-    assert_eq!(result.exit_code, 0, "exit with env: {} | {}", result.stdout, result.stderr);
+    assert_eq!(
+        result.exit_code, 0,
+        "exit with env: {} | {}",
+        result.stdout, result.stderr
+    );
     assert!(
         result.stdout.contains("deepseek.com"),
         "stdout should contain endpoint: {}",
@@ -424,8 +447,7 @@ exit 0
     assert_eq!(
         result_no_env.exit_code, 4,
         "exit without env should be 4 (LLM_ENDPOINT not set): {} | {}",
-        result_no_env.stdout,
-        result_no_env.stderr
+        result_no_env.stdout, result_no_env.stderr
     );
     assert!(
         result_no_env.stderr.contains("LLM_ENDPOINT not set"),

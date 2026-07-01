@@ -15,12 +15,12 @@
 //! - Assert: response contains original PII (because restore worked) AND
 //!   tracking that the LLM "saw" placeholders (verified by intermediate state).
 
-use attune_core::ChatEngine;
 use attune_core::crypto::derive_master_key;
 use attune_core::index::FulltextIndex;
 use attune_core::llm::MockLlmProvider;
 use attune_core::store::Store;
 use attune_core::vectors::VectorIndex;
+use attune_core::ChatEngine;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
@@ -126,25 +126,43 @@ fn multiple_pii_kinds_redacted_and_restored_independently() {
 
     // Mock LLM response carrying all 3 placeholders
     // (per pii::PiiKind::placeholder_prefix(): ApiKey → "APIKEY" not "API_KEY")
-    let mock_response =
-        "Echo: phone=[PHONE_1] email=[EMAIL_1] key=[APIKEY_1]\n[置信度: 5/5]";
+    let mock_response = "Echo: phone=[PHONE_1] email=[EMAIL_1] key=[APIKEY_1]\n[置信度: 5/5]";
     let engine = setup_engine_with_echo_llm(&tmp, mock_response);
 
     let user_msg = "phone=13800138000 email=alice@example.com key=sk-1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF";
     let result = engine.chat(user_msg, &[], &test_dek()).expect("chat ok");
 
     // All 3 originals must be restored
-    assert!(result.content.contains("13800138000"), "phone restored: {}", result.content);
-    assert!(result.content.contains("alice@example.com"), "email restored: {}", result.content);
     assert!(
-        result.content.contains("sk-1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF"),
+        result.content.contains("13800138000"),
+        "phone restored: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("alice@example.com"),
+        "email restored: {}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("sk-1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF"),
         "api_key restored: {}",
         result.content
     );
     // No placeholders left in user-facing response
-    assert!(!result.content.contains("[PHONE_"), "no PHONE placeholder left");
-    assert!(!result.content.contains("[EMAIL_"), "no EMAIL placeholder left");
-    assert!(!result.content.contains("[APIKEY_"), "no APIKEY placeholder left");
+    assert!(
+        !result.content.contains("[PHONE_"),
+        "no PHONE placeholder left"
+    );
+    assert!(
+        !result.content.contains("[EMAIL_"),
+        "no EMAIL placeholder left"
+    );
+    assert!(
+        !result.content.contains("[APIKEY_"),
+        "no APIKEY placeholder left"
+    );
 }
 
 /// covers F-17-PRIVACY: messages WITHOUT PII pass through unchanged (no
@@ -160,7 +178,11 @@ fn pii_free_message_passes_through_unchanged() {
     let result = engine.chat(user_msg, &[], &test_dek()).expect("chat ok");
 
     // Response is exactly the mock response (after confidence stripping)
-    assert!(result.content.contains("Hello back!"), "got: {}", result.content);
+    assert!(
+        result.content.contains("Hello back!"),
+        "got: {}",
+        result.content
+    );
 }
 
 /// covers F-17-PRIVACY v0.6.3 全路径接入: history.content 中的 PII 也被 redact + restore.
@@ -183,7 +205,9 @@ fn history_with_pii_is_redacted_and_restored() {
     ];
     let user_msg = "I'm now using 13812345678 instead";
 
-    let result = engine.chat(user_msg, &history, &test_dek()).expect("chat ok");
+    let result = engine
+        .chat(user_msg, &history, &test_dek())
+        .expect("chat ok");
 
     // 两个 phone 都应该 restore 回原值（不再含 placeholder）
     assert!(

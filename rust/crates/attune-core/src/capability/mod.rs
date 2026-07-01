@@ -290,7 +290,11 @@ mod tests {
     #[test]
     fn set_health_and_enabled_mutate_existing_only() {
         let r = CapabilityRegistry::new();
-        r.register(Capability::builtin("embedding", "Embedding", CapabilityKind::Model));
+        r.register(Capability::builtin(
+            "embedding",
+            "Embedding",
+            CapabilityKind::Model,
+        ));
         assert!(r.set_health("embedding", CapabilityHealth::Installing));
         assert!(r.set_enabled("embedding", false));
         let c = r.get("embedding").unwrap();

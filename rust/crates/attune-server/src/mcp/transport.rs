@@ -34,15 +34,22 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
 
 /// 校验 scoped token → CallCtx。返回 Err((reason, code)) 供上层转 JSON-RPC error。
 fn authenticate(state: &SharedState, headers: &HeaderMap) -> Result<CallCtx, (String, i64)> {
-    let token = extract_bearer(headers)
-        .ok_or_else(|| ("missing bearer scoped-token".to_string(), gate::ERR_UNAUTHORIZED))?;
+    let token = extract_bearer(headers).ok_or_else(|| {
+        (
+            "missing bearer scoped-token".to_string(),
+            gate::ERR_UNAUTHORIZED,
+        )
+    })?;
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     match vault.verify_scoped_token(&token) {
         Ok(meta) => Ok(CallCtx {
             agent_source: meta.label,
             scopes: meta.scopes,
         }),
-        Err(e) => Err((format!("scoped-token rejected: {e}"), gate::ERR_UNAUTHORIZED)),
+        Err(e) => Err((
+            format!("scoped-token rejected: {e}"),
+            gate::ERR_UNAUTHORIZED,
+        )),
     }
 }
 
@@ -125,7 +132,10 @@ mod tests {
         assert_eq!(code, gate::ERR_UNAUTHORIZED);
 
         let mut bad = HeaderMap::new();
-        bad.insert("authorization", HeaderValue::from_static("Bearer not.a.real.token"));
+        bad.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer not.a.real.token"),
+        );
         assert!(authenticate(&state, &bad).is_err());
     }
 

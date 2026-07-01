@@ -52,8 +52,8 @@ fn run_skill_xlsx(doc: &str, entities: [&str; 2], llm_json: &str) -> (Vec<u8>, A
     let skill = parse_skill_yaml(SKILL_YAML).expect("built-in skill parses");
     let llm = ScriptedLlm(llm_json.to_string());
     let inputs = json!({ "doc": "item-1", "entities": [entities[0], entities[1]] });
-    let res = run_skill(&skill, &inputs, true, &resolver(doc), &llm, "test-model")
-        .expect("skill run ok");
+    let res =
+        run_skill(&skill, &inputs, true, &resolver(doc), &llm, "test-model").expect("skill run ok");
     assert_eq!(res.format, ExportFormat::Xlsx);
     (res.artifact_bytes, res.artifact)
 }
@@ -72,7 +72,11 @@ fn read_xlsx(bytes: &[u8]) -> Vec<Vec<String>> {
                 Some(Data::String(s)) => s.clone(),
                 Some(Data::Int(i)) => i.to_string(),
                 Some(Data::Float(f)) => {
-                    if f.fract() == 0.0 { (*f as i64).to_string() } else { f.to_string() }
+                    if f.fract() == 0.0 {
+                        (*f as i64).to_string()
+                    } else {
+                        f.to_string()
+                    }
                 }
                 Some(Data::Empty) | None => String::new(),
                 other => format!("{other:?}"),
@@ -195,7 +199,10 @@ const GOLDEN: &[Golden] = &[
 
 #[test]
 fn golden_end_to_end_xlsx_accuracy() {
-    assert!(GOLDEN.len() >= 10, "golden set must have ≥10 cases (+ sentinel)");
+    assert!(
+        GOLDEN.len() >= 10,
+        "golden set must have ≥10 cases (+ sentinel)"
+    );
     for g in GOLDEN {
         let (bytes, _ir) = run_skill_xlsx(g.doc, g.entities, g.llm_json);
         // round-trip: re-read the produced xlsx and assert cell-exact content.
@@ -204,7 +211,8 @@ fn golden_end_to_end_xlsx_accuracy() {
         assert_eq!(
             sheet[0],
             vec!["参数", g.entities[0], g.entities[1], "差异"],
-            "[{}] header", g.name
+            "[{}] header",
+            g.name
         );
         assert_eq!(sheet.len() - 1, g.expect.len(), "[{}] row count", g.name);
         for (i, (param, a, b)) in g.expect.iter().enumerate() {
@@ -215,7 +223,11 @@ fn golden_end_to_end_xlsx_accuracy() {
             // independently-computed diff ground truth: differ iff both present and unequal.
             let want_diff = *a != ABSENT && *b != ABSENT && a != b;
             let got_diff = row[3] == "✓";
-            assert_eq!(got_diff, want_diff, "[{}] row {i} ({param}) diff mark", g.name);
+            assert_eq!(
+                got_diff, want_diff,
+                "[{}] row {i} ({param}) diff mark",
+                g.name
+            );
         }
     }
 }
@@ -224,7 +236,11 @@ fn golden_end_to_end_xlsx_accuracy() {
 
 #[test]
 fn edge_empty_extraction_yields_headers_only_xlsx() {
-    let (bytes, _) = run_skill_xlsx("设备 A 与设备 B 的简介。", ["设备 A", "设备 B"], r#"{"rows":[]}"#);
+    let (bytes, _) = run_skill_xlsx(
+        "设备 A 与设备 B 的简介。",
+        ["设备 A", "设备 B"],
+        r#"{"rows":[]}"#,
+    );
     let sheet = read_xlsx(&bytes);
     assert_eq!(sheet.len(), 1, "headers-only when nothing extracted");
     assert_eq!(sheet[0], vec!["参数", "设备 A", "设备 B", "差异"]);
@@ -233,7 +249,11 @@ fn edge_empty_extraction_yields_headers_only_xlsx() {
 #[test]
 fn edge_csv_format_also_works() {
     // The skill defaults to xlsx, but export to csv via /export of the same IR must also round-trip.
-    let (_b, ir) = run_skill_xlsx("甲 5W 乙 12W", ["甲", "乙"], r#"{"rows":[{"name":"功耗","value_a":"5W","value_b":"12W"}]}"#);
+    let (_b, ir) = run_skill_xlsx(
+        "甲 5W 乙 12W",
+        ["甲", "乙"],
+        r#"{"rows":[{"name":"功耗","value_a":"5W","value_b":"12W"}]}"#,
+    );
     let csv = ir.render(ExportFormat::Csv).unwrap();
     let text = String::from_utf8(csv).unwrap();
     assert!(text.contains("功耗"));
@@ -242,7 +262,11 @@ fn edge_csv_format_also_works() {
 
 #[test]
 fn edge_md_format_renders_table() {
-    let (_b, ir) = run_skill_xlsx("甲 5W 乙 12W", ["甲", "乙"], r#"{"rows":[{"name":"功耗","value_a":"5W","value_b":"12W"}]}"#);
+    let (_b, ir) = run_skill_xlsx(
+        "甲 5W 乙 12W",
+        ["甲", "乙"],
+        r#"{"rows":[{"name":"功耗","value_a":"5W","value_b":"12W"}]}"#,
+    );
     let md = String::from_utf8(ir.render(ExportFormat::Md).unwrap()).unwrap();
     assert!(md.contains("| 参数 |") || md.contains("|参数|") || md.contains("参数"));
     assert!(md.contains("功耗"));
@@ -312,7 +336,10 @@ fn adversarial_csv_formula_injection_neutralized() {
     let (_b, ir) = run_skill_xlsx(doc, ["甲", "乙"], json);
     let csv = String::from_utf8(ir.render(ExportFormat::Csv).unwrap()).unwrap();
     // The dangerous cell must be prefixed with a single quote so a spreadsheet does not execute it.
-    assert!(csv.contains("'=cmd") || csv.contains("\"'=cmd"), "formula-injection neutralized: {csv}");
+    assert!(
+        csv.contains("'=cmd") || csv.contains("\"'=cmd"),
+        "formula-injection neutralized: {csv}"
+    );
 }
 
 #[test]
@@ -325,7 +352,10 @@ fn adversarial_ungrounded_value_cannot_reach_table() {
         r#"{"rows":[{"name":"分辨率","value_a":"1080p","value_b":"幻觉8K不在文档"}]}"#,
     );
     let sheet = read_xlsx(&bytes);
-    assert_eq!(sheet[1][2], ABSENT, "ungrounded value must be （未提供）, never the fabrication");
+    assert_eq!(
+        sheet[1][2], ABSENT,
+        "ungrounded value must be （未提供）, never the fabrication"
+    );
     assert_eq!(sheet[1][3], "", "one side absent → not flagged as a diff");
 }
 
@@ -431,5 +461,9 @@ fn degrade_llm_garbage_still_downloads() {
     assert!(res.partial, "degraded run flagged partial");
     assert!(!res.warnings.is_empty());
     let sheet = read_xlsx(&res.artifact_bytes);
-    assert_eq!(sheet[0], vec!["参数", "设备 A", "设备 B", "差异"], "still a valid downloadable table");
+    assert_eq!(
+        sheet[0],
+        vec!["参数", "设备 A", "设备 B", "差异"],
+        "still a valid downloadable table"
+    );
 }

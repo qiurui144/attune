@@ -107,9 +107,8 @@ mod tests {
     // still has 6 oss-core agents.
     #[test]
     fn load_workspace_flows_loads_and_validates() {
-        let (flows, reg) =
-            super::load_workspace_flows("agents.registry.toml", "agent_flows.toml")
-                .expect("workspace flows must load + validate");
+        let (flows, reg) = super::load_workspace_flows("agents.registry.toml", "agent_flows.toml")
+            .expect("workspace flows must load + validate");
         assert!(!reg.is_empty(), "registry must have oss-core agents");
         // S4b: legal_defamation moved to attune-pro — OSS flow set is empty.
         assert!(

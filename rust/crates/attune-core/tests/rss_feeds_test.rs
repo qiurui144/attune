@@ -26,7 +26,10 @@ fn add_then_get_round_trips_with_decrypted_url() {
     let got = store.get_rss_feed(&dek, &id).unwrap().expect("feed exists");
     assert_eq!(got.id, id);
     assert_eq!(got.name, "LWN");
-    assert_eq!(got.url, "https://lwn.net/headlines/rss", "url 必须能解密回明文");
+    assert_eq!(
+        got.url, "https://lwn.net/headlines/rss",
+        "url 必须能解密回明文"
+    );
     assert!(got.enabled, "默认启用");
     assert_eq!(got.poll_interval_minutes, DEFAULT_POLL_INTERVAL_MINUTES);
     assert!(got.etag.is_none());
@@ -40,7 +43,10 @@ fn url_is_not_stored_in_plaintext() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
     let id = store
-        .add_rss_feed(&dek, &sample_input("Secret", "https://PLAINTEXT_MARKER_XYZ/feed.xml"))
+        .add_rss_feed(
+            &dek,
+            &sample_input("Secret", "https://PLAINTEXT_MARKER_XYZ/feed.xml"),
+        )
         .unwrap();
     let raw = store.debug_raw_rss_url_enc(&id).unwrap();
     assert!(!raw.is_empty(), "url_enc 应已写入");
@@ -87,7 +93,11 @@ fn update_etag_lastmod_persists_and_touches_polled_at() {
         .add_rss_feed(&dek, &sample_input("etag", "https://ex.com/feed.xml"))
         .unwrap();
     store
-        .update_rss_etag_lastmod(&id, Some("\"abc123\""), Some("Wed, 21 Oct 2025 07:28:00 GMT"))
+        .update_rss_etag_lastmod(
+            &id,
+            Some("\"abc123\""),
+            Some("Wed, 21 Oct 2025 07:28:00 GMT"),
+        )
         .unwrap();
 
     let got = store.get_rss_feed(&dek, &id).unwrap().unwrap();
@@ -96,7 +106,10 @@ fn update_etag_lastmod_persists_and_touches_polled_at() {
         got.last_modified.as_deref(),
         Some("Wed, 21 Oct 2025 07:28:00 GMT")
     );
-    assert!(got.last_polled_at.is_some(), "200 OK 路径应 touch last_polled_at");
+    assert!(
+        got.last_polled_at.is_some(),
+        "200 OK 路径应 touch last_polled_at"
+    );
 }
 
 #[test]
@@ -166,7 +179,9 @@ fn update_feed_settings_can_disable_and_change_interval() {
     assert_eq!(got2.poll_interval_minutes, 15);
 
     // 重新启用
-    store.update_rss_feed_settings(&id, Some(true), None).unwrap();
+    store
+        .update_rss_feed_settings(&id, Some(true), None)
+        .unwrap();
     let got3 = store.get_rss_feed(&dek, &id).unwrap().unwrap();
     assert!(got3.enabled);
 }

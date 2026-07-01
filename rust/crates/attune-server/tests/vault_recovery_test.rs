@@ -67,7 +67,8 @@ async fn vault_setup_returns_recovery_key() {
     std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
 
     let port = free_port();
-    let handle = tokio::spawn(async move { attune_server::run_in_runtime(start_server_config(port)).await });
+    let handle =
+        tokio::spawn(async move { attune_server::run_in_runtime(start_server_config(port)).await });
 
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}/api/v1", port);
@@ -83,10 +84,19 @@ async fn vault_setup_returns_recovery_key() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["state"], "unlocked");
 
-    let rk = body["recovery_key"].as_str().expect("recovery_key must be in setup response");
-    assert!(rk.starts_with("ATN-"), "recovery_key must start with ATN-: {rk}");
+    let rk = body["recovery_key"]
+        .as_str()
+        .expect("recovery_key must be in setup response");
+    assert!(
+        rk.starts_with("ATN-"),
+        "recovery_key must start with ATN-: {rk}"
+    );
     // generate_recovery_key() = "ATN-" + 16hex + "-" + 16hex = 4 + 16 + 1 + 16 = 37 chars.
-    assert_eq!(rk.len(), 37, "recovery_key format: \"ATN-\"(4) + 16hex + \"-\"(1) + 16hex = 37 chars: {rk}");
+    assert_eq!(
+        rk.len(),
+        37,
+        "recovery_key format: \"ATN-\"(4) + 16hex + \"-\"(1) + 16hex = 37 chars: {rk}"
+    );
 
     handle.abort();
 }
@@ -103,7 +113,8 @@ async fn reset_with_recovery_key_allows_new_password() {
     std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
 
     let port = free_port();
-    let handle = tokio::spawn(async move { attune_server::run_in_runtime(start_server_config(port)).await });
+    let handle =
+        tokio::spawn(async move { attune_server::run_in_runtime(start_server_config(port)).await });
 
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}/api/v1", port);
@@ -139,10 +150,17 @@ async fn reset_with_recovery_key_allows_new_password() {
         .send()
         .await
         .unwrap();
-    assert_eq!(unlock_old_resp.status(), 200, "old password should still work before reset");
+    assert_eq!(
+        unlock_old_resp.status(),
+        200,
+        "old password should still work before reset"
+    );
     let unlock_old: serde_json::Value = unlock_old_resp.json().await.unwrap();
     // lock again
-    let tok2 = unlock_old["token"].as_str().expect("unlock must return token").to_string();
+    let tok2 = unlock_old["token"]
+        .as_str()
+        .expect("unlock must return token")
+        .to_string();
     assert!(!tok2.is_empty());
     client
         .post(format!("{base}/vault/lock"))
@@ -161,7 +179,11 @@ async fn reset_with_recovery_key_allows_new_password() {
         .send()
         .await
         .unwrap();
-    assert_eq!(reset_resp.status(), 200, "reset-with-recovery-key should return 200");
+    assert_eq!(
+        reset_resp.status(),
+        200,
+        "reset-with-recovery-key should return 200"
+    );
     let reset_body: serde_json::Value = reset_resp.json().await.unwrap();
     assert_eq!(reset_body["status"], "ok");
 
@@ -173,7 +195,10 @@ async fn reset_with_recovery_key_allows_new_password() {
         .await
         .unwrap()
         .status();
-    assert_eq!(old_unlock_status, 401, "old password must be rejected after reset");
+    assert_eq!(
+        old_unlock_status, 401,
+        "old password must be rejected after reset"
+    );
 
     // 6. 新密码 unlock 应成功（HTTP 200 + 颁发 token）
     let new_unlock_resp = client
@@ -182,9 +207,15 @@ async fn reset_with_recovery_key_allows_new_password() {
         .send()
         .await
         .unwrap();
-    assert_eq!(new_unlock_resp.status(), 200, "new password must unlock vault");
+    assert_eq!(
+        new_unlock_resp.status(),
+        200,
+        "new password must unlock vault"
+    );
     let new_unlock: serde_json::Value = new_unlock_resp.json().await.unwrap();
-    let new_token = new_unlock["token"].as_str().expect("unlock must return token");
+    let new_token = new_unlock["token"]
+        .as_str()
+        .expect("unlock must return token");
     assert!(!new_token.is_empty());
 
     handle.abort();
@@ -202,7 +233,8 @@ async fn reset_with_wrong_recovery_key_returns_400() {
     std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
 
     let port = free_port();
-    let handle = tokio::spawn(async move { attune_server::run_in_runtime(start_server_config(port)).await });
+    let handle =
+        tokio::spawn(async move { attune_server::run_in_runtime(start_server_config(port)).await });
 
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}/api/v1", port);
@@ -229,7 +261,10 @@ async fn reset_with_wrong_recovery_key_returns_400() {
         .await
         .unwrap()
         .status();
-    assert_eq!(status, 400, "wrong recovery key must return 400, got {status}");
+    assert_eq!(
+        status, 400,
+        "wrong recovery key must return 400, got {status}"
+    );
 
     handle.abort();
 }

@@ -107,7 +107,16 @@ impl Store {
             .ok();
         match row {
             None => Ok(None),
-            Some((dir_id, host, port, username, password_enc, folders, corpus_domain, last_sync)) => {
+            Some((
+                dir_id,
+                host,
+                port,
+                username,
+                password_enc,
+                folders,
+                corpus_domain,
+                last_sync,
+            )) => {
                 let password = String::from_utf8(crypto::decrypt(dek, &password_enc)?)
                     .map_err(|e| VaultError::Crypto(format!("email password utf8: {e}")))?;
                 Ok(Some(EmailAccountRow {
@@ -164,8 +173,10 @@ impl Store {
 
     /// 删除一条 Email 账户配置（email_folder_uids 经 ON DELETE CASCADE 一并清）。
     pub fn delete_email_account(&self, dir_id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM email_accounts WHERE dir_id = ?1", params![dir_id])?;
+        self.conn.execute(
+            "DELETE FROM email_accounts WHERE dir_id = ?1",
+            params![dir_id],
+        )?;
         Ok(())
     }
 

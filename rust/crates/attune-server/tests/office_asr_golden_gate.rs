@@ -52,8 +52,12 @@ fn edit_distance(a: &str, b: &str) -> usize {
     let av: Vec<char> = a.chars().collect();
     let bv: Vec<char> = b.chars().collect();
     let (m, n) = (av.len(), bv.len());
-    if m == 0 { return n; }
-    if n == 0 { return m; }
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
     let mut prev: Vec<usize> = (0..=n).collect();
     let mut cur = vec![0usize; n + 1];
     for i in 1..=m {
@@ -103,7 +107,10 @@ fn run_lang(lang_dir: &str) -> AsrLangStats {
     let mut stats = AsrLangStats::default();
 
     if !dir.exists() {
-        eprintln!("[asr-gate {lang_dir}] dir missing, skipping: {}", dir.display());
+        eprintln!(
+            "[asr-gate {lang_dir}] dir missing, skipping: {}",
+            dir.display()
+        );
         return stats;
     }
 
@@ -268,9 +275,13 @@ fn asr_meeting_speaker_count_basic() {
 
     for entry in std::fs::read_dir(&dir).expect("read meeting dir") {
         let path = entry.expect("entry").path();
-        if !path.is_file() { continue; }
+        if !path.is_file() {
+            continue;
+        }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !name.ends_with(".expected.yaml") { continue; }
+        if !name.ends_with(".expected.yaml") {
+            continue;
+        }
         let yaml_str = std::fs::read_to_string(&path).expect("read yaml");
         let exp: AsrExpected = match serde_yaml::from_str(&yaml_str) {
             Ok(v) => v,
@@ -286,7 +297,9 @@ fn asr_meeting_speaker_count_basic() {
         samples_with_audio += 1;
 
         let (segments, _) = match attune_core::asr::transcribe_with_diarization(
-            &backend, &audio_full, diar.as_ref(),
+            &backend,
+            &audio_full,
+            diar.as_ref(),
         ) {
             Ok(s) => s,
             Err(_) => continue,
@@ -299,8 +312,10 @@ fn asr_meeting_speaker_count_basic() {
         let expected = exp.expected_speakers.unwrap_or(0);
         // Allow ±1 speaker tolerance (over-segmentation 常见)
         if (actual as i32 - expected as i32).abs() > 1 {
-            speaker_count_failures
-                .push(format!("{} expected {} speakers, got {}", exp.id, expected, actual));
+            speaker_count_failures.push(format!(
+                "{} expected {} speakers, got {}",
+                exp.id, expected, actual
+            ));
         }
     }
 

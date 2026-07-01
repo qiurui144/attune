@@ -45,7 +45,9 @@ const SETTINGS_KEY: &str = "app_settings";
 pub fn run_evolution_cycle(store: &Store, llm: &dyn LlmProvider) -> Result<usize> {
     // 保持便于测试的单调用 API；生产路径应该用下面 prepare / generate / apply 三阶段
     // 拆分，避免 vault lock 在 LLM 调用期间被持有（见 state.rs::start_skill_evolver）。
-    let Some(signals) = prepare_evolution_cycle(store)? else { return Ok(0); };
+    let Some(signals) = prepare_evolution_cycle(store)? else {
+        return Ok(0);
+    };
     let expansions = generate_expansions(llm, &signals)?;
     apply_evolution_result(store, &signals, &expansions)
 }
@@ -72,9 +74,9 @@ pub fn generate_expansions(
 ) -> Result<Vec<(String, Vec<String>)>> {
     let prompt = build_evolution_prompt(signals);
     let messages = vec![crate::llm::ChatMessage::user(&prompt)];
-    let (raw_response, _usage) = llm.chat_with_history(&messages).map_err(|e| {
-        VaultError::LlmUnavailable(format!("skill evolution LLM call: {e}"))
-    })?;
+    let (raw_response, _usage) = llm
+        .chat_with_history(&messages)
+        .map_err(|e| VaultError::LlmUnavailable(format!("skill evolution LLM call: {e}")))?;
     Ok(parse_expansion_response(&raw_response))
 }
 
@@ -224,13 +226,20 @@ fn merge_expansions_into_settings(
     for (topic, terms) in expansions {
         let key = topic.to_lowercase();
         let new_val = serde_json::Value::Array(
-            terms.iter().map(|t| serde_json::Value::String(t.clone())).collect(),
+            terms
+                .iter()
+                .map(|t| serde_json::Value::String(t.clone()))
+                .collect(),
         );
         // 合并：已有的保留，新词追加（避免 LLM 幻觉覆盖有效词）
         let existing_terms: Vec<String> = map
             .get(&key)
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let mut merged_terms = existing_terms;
@@ -243,7 +252,10 @@ fn merge_expansions_into_settings(
         merged_terms.truncate(8);
 
         let merged_val = serde_json::Value::Array(
-            merged_terms.iter().map(|t| serde_json::Value::String(t.clone())).collect(),
+            merged_terms
+                .iter()
+                .map(|t| serde_json::Value::String(t.clone()))
+                .collect(),
         );
 
         if map.get(&key) != Some(&new_val) {
@@ -343,8 +355,14 @@ mod tests {
             }
         });
         let expanded = expand_query("专利检索方法", &settings);
-        assert!(expanded.contains("IPC分类"), "should append expansion terms");
-        assert!(expanded.starts_with("专利检索方法"), "original query preserved");
+        assert!(
+            expanded.contains("IPC分类"),
+            "should append expansion terms"
+        );
+        assert!(
+            expanded.starts_with("专利检索方法"),
+            "original query preserved"
+        );
     }
 
     #[test]
@@ -366,20 +384,31 @@ mod tests {
     fn merge_expansions_into_settings_deduplicates() {
         let store = Store::open_memory().unwrap();
         // 第一次写入
-        let expansions1 = vec![("专利".to_string(), vec!["IPC分类".to_string(), "权利要求".to_string()])];
+        let expansions1 = vec![(
+            "专利".to_string(),
+            vec!["IPC分类".to_string(), "权利要求".to_string()],
+        )];
         let n = merge_expansions_into_settings(&store, &expansions1).unwrap();
         assert_eq!(n, 1);
 
         // 第二次写入相同主题，追加新词
-        let expansions2 = vec![("专利".to_string(), vec!["权利要求".to_string(), "说明书".to_string()])];
+        let expansions2 = vec![(
+            "专利".to_string(),
+            vec!["权利要求".to_string(), "说明书".to_string()],
+        )];
         merge_expansions_into_settings(&store, &expansions2).unwrap();
 
         // 验证合并后词表包含所有词，无重复
-        let settings: serde_json::Value = serde_json::from_slice(
-            &store.get_meta("app_settings").unwrap().unwrap()
-        ).unwrap();
-        let terms = settings["search"]["learned_expansions"]["专利"].as_array().unwrap();
-        assert!(terms.len() == 3, "should have 3 unique terms, got {}", terms.len());
+        let settings: serde_json::Value =
+            serde_json::from_slice(&store.get_meta("app_settings").unwrap().unwrap()).unwrap();
+        let terms = settings["search"]["learned_expansions"]["专利"]
+            .as_array()
+            .unwrap();
+        assert!(
+            terms.len() == 3,
+            "should have 3 unique terms, got {}",
+            terms.len()
+        );
     }
 
     #[test]
@@ -396,7 +425,9 @@ mod tests {
         assert!(!sigs[0].web_used);
         assert!(sigs[1].web_used);
 
-        store.mark_signals_processed(&[sigs[0].id, sigs[1].id]).unwrap();
+        store
+            .mark_signals_processed(&[sigs[0].id, sigs[1].id])
+            .unwrap();
         assert_eq!(store.count_unprocessed_signals().unwrap(), 0);
     }
 }

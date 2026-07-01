@@ -14,7 +14,11 @@ fn upsert_then_get_round_trips_with_decrypted_password() {
 
     // FK 前置：建 bound_dirs 行，取得真实 dir_id。
     let dir_id = store
-        .bind_directory("webdav:https://dav.example.com/remote.php/dav/files/u/", false, &["md"])
+        .bind_directory(
+            "webdav:https://dav.example.com/remote.php/dav/files/u/",
+            false,
+            &["md"],
+        )
         .unwrap();
 
     let input = WebDavRemoteInput {
@@ -33,7 +37,11 @@ fn upsert_then_get_round_trips_with_decrypted_password() {
         .expect("remote row exists");
     assert_eq!(got.url, input.url);
     assert_eq!(got.username.as_deref(), Some("alice"));
-    assert_eq!(got.password.as_deref(), Some("s3cr3t-app-pw"), "password 必须能解密回明文");
+    assert_eq!(
+        got.password.as_deref(),
+        Some("s3cr3t-app-pw"),
+        "password 必须能解密回明文"
+    );
     assert_eq!(got.depth, 1);
     assert_eq!(got.corpus_domain, "legal");
 }
@@ -45,7 +53,11 @@ fn password_is_not_stored_in_plaintext() {
     let dek = Key32::generate();
 
     let dir_id = store
-        .bind_directory("webdav:https://dav.example.com/plain-check/", false, &["md"])
+        .bind_directory(
+            "webdav:https://dav.example.com/plain-check/",
+            false,
+            &["md"],
+        )
         .unwrap();
 
     let input = WebDavRemoteInput {

@@ -171,9 +171,10 @@ impl EmbeddingProvider for OllamaProvider {
             // F-16 Ollama 模型驻留: keep_alive=1h 让 GPU 加载的模型保留 1 小时,
             // 避免默认 5min 后卸载导致下次 chat 重新加载 (7B 模型 5-10s 重启延迟).
             // 用户可通过 ATTUNE_OLLAMA_KEEP_ALIVE env var override (e.g. "-1" 永久 / "30m" 短驻留).
-            let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
-                .unwrap_or_else(|_| "1h".to_string());
-            let body = serde_json::json!({"model": model, "input": input, "keep_alive": keep_alive});
+            let keep_alive =
+                std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "1h".to_string());
+            let body =
+                serde_json::json!({"model": model, "input": input, "keep_alive": keep_alive});
             client
                 .post(&url)
                 .json(&body)
@@ -195,7 +196,11 @@ impl EmbeddingProvider for OllamaProvider {
             if empty_indices.contains(&i) {
                 out.push(vec![0.0f32; self.dims]);
             } else {
-                out.push(non_empty_iter.next().unwrap_or_else(|| vec![0.0f32; self.dims]));
+                out.push(
+                    non_empty_iter
+                        .next()
+                        .unwrap_or_else(|| vec![0.0f32; self.dims]),
+                );
             }
         }
         Ok((out, usage))
@@ -314,7 +319,11 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
             if empty_indices.contains(&i) {
                 out.push(vec![0.0f32; self.dims]);
             } else {
-                out.push(non_empty_iter.next().unwrap_or_else(|| vec![0.0f32; self.dims]));
+                out.push(
+                    non_empty_iter
+                        .next()
+                        .unwrap_or_else(|| vec![0.0f32; self.dims]),
+                );
             }
         }
         Ok((out, usage))
@@ -333,7 +342,11 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
             if !api_key.is_empty() {
                 req = req.header("Authorization", format!("Bearer {api_key}"));
             }
-            Ok(req.send().await.map(|r| r.status().is_success()).unwrap_or(false))
+            Ok(req
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false))
         })
         .unwrap_or(false)
     }
@@ -434,7 +447,13 @@ mod tests {
         let p = MockEmbeddingProvider::new(1024);
         let sig = current_embedding_signature(&p);
         // 维度键:与 state.rs:1950 写 memory_vectors 的 "embed-dim<N>" 一致
-        assert_eq!(sig, EmbeddingSignature { model: "embed-dim1024".into(), dim: 1024 });
+        assert_eq!(
+            sig,
+            EmbeddingSignature {
+                model: "embed-dim1024".into(),
+                dim: 1024
+            }
+        );
     }
 
     #[test]
@@ -454,7 +473,12 @@ mod tests {
 
     #[test]
     fn openai_embedding_provider_creation_trims_endpoint() {
-        let p = OpenAiEmbeddingProvider::new("https://api.openai.com/v1/", "sk-x", "text-embedding-3-small", 1536);
+        let p = OpenAiEmbeddingProvider::new(
+            "https://api.openai.com/v1/",
+            "sk-x",
+            "text-embedding-3-small",
+            1536,
+        );
         assert_eq!(p.dimensions(), 1536);
         assert_eq!(p.endpoint, "https://api.openai.com/v1"); // trailing slash trimmed
     }
@@ -505,9 +529,18 @@ mod tests {
         let req = captured.lock().unwrap().clone();
         let req_lc = req.to_lowercase();
         // Routed to the configured endpoint's /embeddings path, with bearer auth + the configured model.
-        assert!(req.starts_with("POST /v1/embeddings "), "request line was: {req}");
-        assert!(req_lc.contains("authorization: bearer sk-test"), "missing bearer auth: {req}");
-        assert!(req.contains("\"model\":\"k3-embed\""), "model not in body: {req}");
+        assert!(
+            req.starts_with("POST /v1/embeddings "),
+            "request line was: {req}"
+        );
+        assert!(
+            req_lc.contains("authorization: bearer sk-test"),
+            "missing bearer auth: {req}"
+        );
+        assert!(
+            req.contains("\"model\":\"k3-embed\""),
+            "model not in body: {req}"
+        );
     }
 
     /// Empty / whitespace inputs short-circuit to a zero vector without any network

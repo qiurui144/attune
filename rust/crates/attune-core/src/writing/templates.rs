@@ -172,9 +172,10 @@ fn email() -> GeneralTemplate {
     GeneralTemplate {
         id: "email".into(),
         display_name: "Email".into(),
-        system_prompt: "你是邮件撰写助手。基于素材写一封措辞得体、结构清晰的邮件，含称呼与落款占位。\
+        system_prompt:
+            "你是邮件撰写助手。基于素材写一封措辞得体、结构清晰的邮件，含称呼与落款占位。\
             只陈述素材中的事实，不臆造。只输出 JSON：{\"paragraphs\":[\"...\"]}。"
-            .into(),
+                .into(),
         few_shot: vec![
             WorkedExample::new(
                 "大纲：会议改期\n素材：[来源 s1] 周三评审会改到周五下午三点。",
@@ -472,7 +473,9 @@ mod tests {
         for id in r.ids() {
             let t = r.get(&id).unwrap();
             assert!(
-                t.red_lines().iter().any(|rl| rl.id == "no-hallucinated-citation"),
+                t.red_lines()
+                    .iter()
+                    .any(|rl| rl.id == "no-hallucinated-citation"),
                 "template {id} missing universal red line"
             );
         }
@@ -523,7 +526,10 @@ mod tests {
 
     #[test]
     fn fill_replaces_known_slots() {
-        let r = fill_template("Dear {{name}}, see {{topic}}.", &vmap(&[("name", "Bob"), ("topic", "Q3")]));
+        let r = fill_template(
+            "Dear {{name}}, see {{topic}}.",
+            &vmap(&[("name", "Bob"), ("topic", "Q3")]),
+        );
         assert_eq!(r.filled, "Dear Bob, see Q3.");
         assert!(r.missing_slots.is_empty());
         assert!(r.unused_values.is_empty());
@@ -545,7 +551,10 @@ mod tests {
     #[test]
     fn fill_cjk_body_offsets_safe() {
         // CJK + emoji surrounding a placeholder must copy byte-correctly (no panic / no mojibake).
-        let r = fill_template("尊敬的{{name}}您好😀，关于{{topic}}。", &vmap(&[("name", "张三"), ("topic", "改期")]));
+        let r = fill_template(
+            "尊敬的{{name}}您好😀，关于{{topic}}。",
+            &vmap(&[("name", "张三"), ("topic", "改期")]),
+        );
         assert_eq!(r.filled, "尊敬的张三您好😀，关于改期。");
     }
 

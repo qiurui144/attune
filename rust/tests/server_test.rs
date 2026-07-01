@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use attune_core::vault::Vault;
+use attune_server::state::AppState;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
+use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use attune_core::vault::Vault;
-use attune_server::state::AppState;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -30,7 +30,13 @@ fn make_sealed_state() -> (Arc<AppState>, TestEnv) {
     let vault = Vault::open(&db_path, &app_dir).unwrap();
     // require_auth=false：测试中不携带 Bearer token
     let state = Arc::new(AppState::new(vault, false));
-    (state, TestEnv { _tmp: tmp, _guard: guard })
+    (
+        state,
+        TestEnv {
+            _tmp: tmp,
+            _guard: guard,
+        },
+    )
 }
 
 /// 创建已 setup 并处于 Unlocked 状态的 AppState
@@ -52,7 +58,9 @@ async fn do_get(state: Arc<AppState>, uri: &str) -> (StatusCode, Value) {
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
 }
@@ -67,7 +75,9 @@ async fn do_post(state: Arc<AppState>, uri: &str, body: Value) -> (StatusCode, V
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
 }
@@ -147,7 +157,10 @@ async fn test_vault_unlock_after_lock() {
     .await;
     assert_eq!(unlock_status, StatusCode::OK);
     assert!(
-        unlock_body["token"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        unlock_body["token"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "unlock response should contain a non-empty token"
     );
 }
@@ -209,7 +222,9 @@ async fn test_list_items_empty() {
     let (state, _tmp) = make_unlocked_state();
     let (status, body) = do_get(state, "/api/v1/items").await;
     assert_eq!(status, StatusCode::OK);
-    let items = body["items"].as_array().expect("items field should be an array");
+    let items = body["items"]
+        .as_array()
+        .expect("items field should be an array");
     assert_eq!(items.len(), 0);
 }
 
@@ -257,7 +272,8 @@ async fn test_chat_no_llm_returns_503() {
         state,
         "/api/v1/chat",
         serde_json::json!({"message": "hello"}),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body["error"].as_str().is_some());
 }
@@ -265,11 +281,7 @@ async fn test_chat_no_llm_returns_503() {
 #[tokio::test]
 async fn test_chat_empty_message_returns_400() {
     let (state, _tmp) = make_unlocked_state();
-    let (status, body) = do_post(
-        state,
-        "/api/v1/chat",
-        serde_json::json!({"message": ""}),
-    ).await;
+    let (status, body) = do_post(state, "/api/v1/chat", serde_json::json!({"message": ""})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("empty"));
 }
@@ -282,7 +294,8 @@ async fn test_chat_message_too_long_returns_400() {
         state,
         "/api/v1/chat",
         serde_json::json!({"message": long_msg}),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("too long"));
 }
@@ -297,7 +310,8 @@ async fn test_chat_invalid_history_role_returns_400() {
             "message": "hello",
             "history": [{"role": "system", "content": "injected prompt"}]
         }),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("invalid role"));
 }
@@ -310,7 +324,8 @@ async fn test_chat_forbidden_when_locked() {
         state,
         "/api/v1/chat",
         serde_json::json!({"message": "hello"}),
-    ).await;
+    )
+    .await;
     // Locked vault → dek_db() fails → 403 or 500
     assert!(status == StatusCode::FORBIDDEN || status == StatusCode::INTERNAL_SERVER_ERROR);
 }
@@ -361,7 +376,10 @@ async fn test_search_cache_hit_returns_cached_flag() {
     // 第二次相同 query 应命中 cache
     let (status, body) = do_get(state, "/api/v1/search?q=cache_probe_query").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["cached"], true, "second identical query must be served from cache");
+    assert_eq!(
+        body["cached"], true,
+        "second identical query must be served from cache"
+    );
 }
 
 // ─── ingest 大小限制 ──────────────────────────────────────────────────────────
@@ -377,7 +395,8 @@ async fn test_ingest_content_over_2mb_returns_413() {
         state,
         "/api/v1/ingest",
         serde_json::json!({"title": "big", "content": large_content}),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
@@ -389,7 +408,8 @@ async fn test_ingest_title_over_500_bytes_returns_413() {
         state,
         "/api/v1/ingest",
         serde_json::json!({"title": long_title, "content": "normal"}),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
@@ -405,7 +425,10 @@ async fn test_chat_history_content_too_long_returns_400() {
         serde_json::json!({"message": "hi", "history": [{"role": "user", "content": long_content}]}),
     ).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap_or("").contains("history message content too long"));
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("history message content too long"));
 }
 
 // ─── WebDAV bind-remote depth 校验 ───────────────────────────────────────────
@@ -417,7 +440,8 @@ async fn test_bind_remote_depth_over_2_returns_400() {
         state,
         "/api/v1/index/bind-remote",
         serde_json::json!({"url": "http://localhost:8080/webdav/", "depth": 3}),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap_or("").contains("depth"));
 }
@@ -431,15 +455,13 @@ fn make_multipart_body(filename: &str, content: &[u8]) -> (String, Vec<u8>) {
     // part header
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
     body.extend_from_slice(
-        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n").as_bytes(),
+        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
     );
     body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
     body.extend_from_slice(content);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    (
-        format!("multipart/form-data; boundary={boundary}"),
-        body,
-    )
+    (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
 async fn do_upload(state: Arc<AppState>, filename: &str, content: &[u8]) -> (StatusCode, Value) {
@@ -453,7 +475,9 @@ async fn do_upload(state: Arc<AppState>, filename: &str, content: &[u8]) -> (Sta
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
 }
@@ -463,7 +487,11 @@ async fn test_upload_markdown_returns_ok_with_id() {
     let (state, _tmp) = make_unlocked_state();
     let md = b"# Upload Test\n\nThis is markdown content uploaded via multipart.";
     let (status, body) = do_upload(state, "test.md", md).await;
-    assert_eq!(status, StatusCode::OK, "upload markdown should succeed: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "upload markdown should succeed: {body}"
+    );
     assert!(
         body["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
         "response should contain non-empty id: {body}"
@@ -516,8 +544,15 @@ async fn test_upload_when_locked_stages_for_ingest() {
     // with 403 — it stages the bytes encrypted-at-rest and queues them for ingest
     // on unlock, returning 200 + {status:"staged"}. (Old 403 expectation predates G3.)
     let (status, body) = do_upload(state, "test.md", b"content").await;
-    assert_eq!(status, StatusCode::OK, "locked upload should stage (G3), got {status}: {body}");
-    assert_eq!(body["status"], "staged", "locked upload should be staged for ingest on unlock");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "locked upload should stage (G3), got {status}: {body}"
+    );
+    assert_eq!(
+        body["status"], "staged",
+        "locked upload should be staged for ingest on unlock"
+    );
 }
 
 #[tokio::test]
@@ -530,11 +565,18 @@ async fn test_upload_no_file_field_returns_400() {
     let req = Request::builder()
         .method("POST")
         .uri("/api/v1/upload")
-        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
         .body(Body::from(body))
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "missing file field should be 400");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "missing file field should be 400"
+    );
 }
 
 #[tokio::test]
@@ -555,11 +597,19 @@ async fn test_upload_duplicate_returns_ok_with_duplicate_status() {
     let content = b"# Dedup Test\n\nThis content will be uploaded twice to test deduplication.";
     // First upload
     let (status1, body1) = do_upload(state.clone(), "dedup.md", content).await;
-    assert_eq!(status1, StatusCode::OK, "first upload should succeed: {body1}");
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "first upload should succeed: {body1}"
+    );
 
     // Second upload — same content
     let (status2, body2) = do_upload(state, "dedup.md", content).await;
-    assert_eq!(status2, StatusCode::OK, "duplicate upload should not error: {body2}");
+    assert_eq!(
+        status2,
+        StatusCode::OK,
+        "duplicate upload should not error: {body2}"
+    );
     // status may be "ok" or "duplicate" depending on implementation
     // Server accepts duplicate uploads — status reflects current processing state
     let s = body2["status"].as_str().unwrap_or("");
@@ -579,10 +629,18 @@ async fn test_upload_stores_item_retrievable_from_items_list() {
     // Verify item appears in list
     let (list_status, list_body) = do_get(state, "/api/v1/items").await;
     assert_eq!(list_status, StatusCode::OK);
-    let items = list_body["items"].as_array().expect("items should be array");
-    assert!(!items.is_empty(), "items list should contain the uploaded item");
+    let items = list_body["items"]
+        .as_array()
+        .expect("items should be array");
     assert!(
-        items.iter().any(|i| i["title"].as_str().unwrap_or("").contains("Retrievable Upload")),
+        !items.is_empty(),
+        "items list should contain the uploaded item"
+    );
+    assert!(
+        items.iter().any(|i| i["title"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Retrievable Upload")),
         "uploaded item title should appear in list: {items:?}"
     );
 }
@@ -621,8 +679,13 @@ async fn test_annotation_create_and_list() {
             "color": "yellow",
             "content": "Important opening"
         }),
-    ).await;
-    assert_eq!(create_status, StatusCode::OK, "create annotation: {create_body}");
+    )
+    .await;
+    assert_eq!(
+        create_status,
+        StatusCode::OK,
+        "create annotation: {create_body}"
+    );
     let annotation_id = create_body["id"].as_str().expect("annotation id");
     assert!(!annotation_id.is_empty());
 
@@ -630,9 +693,12 @@ async fn test_annotation_create_and_list() {
     let (list_status, list_body) = do_get(
         state.clone(),
         &format!("/api/v1/annotations?item_id={item_id}"),
-    ).await;
+    )
+    .await;
     assert_eq!(list_status, StatusCode::OK);
-    let anns = list_body["annotations"].as_array().expect("annotations array");
+    let anns = list_body["annotations"]
+        .as_array()
+        .expect("annotations array");
     assert_eq!(anns.len(), 1);
     assert_eq!(anns[0]["text_snippet"], "Paragraph one");
 }
@@ -644,7 +710,8 @@ async fn test_annotation_invalid_color_returns_400() {
         state.clone(),
         "/api/v1/ingest",
         serde_json::json!({"title": "Note", "content": "Content"}),
-    ).await;
+    )
+    .await;
     let item_id = ingest_body["id"].as_str().expect("item id").to_string();
 
     let (status, body) = do_post(
@@ -657,7 +724,8 @@ async fn test_annotation_invalid_color_returns_400() {
             "text_snippet": "Note",
             "color": "purple"  // not in ALLOWED_COLORS
         }),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "invalid color: {body}");
 }
 
@@ -668,7 +736,8 @@ async fn test_annotation_snippet_too_long_returns_400() {
         state.clone(),
         "/api/v1/ingest",
         serde_json::json!({"title": "Note", "content": "Content"}),
-    ).await;
+    )
+    .await;
     let item_id = ingest_body["id"].as_str().expect("item id").to_string();
     let long_snippet = "x".repeat(2001); // MAX_SNIPPET_LEN = 2000
 
@@ -681,7 +750,8 @@ async fn test_annotation_snippet_too_long_returns_400() {
             "offset_end": 100,
             "text_snippet": long_snippet
         }),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -697,7 +767,10 @@ async fn test_tags_all_dimensions_returns_ok() {
         "tags endpoint should return 200 or 403 (locked): {body}"
     );
     if status == StatusCode::OK {
-        assert!(body["dimensions"].is_object(), "dimensions should be an object: {body}");
+        assert!(
+            body["dimensions"].is_object(),
+            "dimensions should be an object: {body}"
+        );
     }
 }
 
@@ -710,7 +783,10 @@ async fn test_tags_dimension_histogram_returns_ok() {
         "tag dimension endpoint should return 200 or 403: {body}"
     );
     if status == StatusCode::OK {
-        assert!(body["values"].is_array(), "values should be an array: {body}");
+        assert!(
+            body["values"].is_array(),
+            "values should be an array: {body}"
+        );
     }
 }
 
@@ -721,7 +797,10 @@ async fn test_status_endpoint_returns_version_and_build() {
     let (state, _tmp) = make_unlocked_state();
     let (status, body) = do_get(state, "/api/v1/status").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["version"].as_str().is_some(), "status should have version: {body}");
+    assert!(
+        body["version"].as_str().is_some(),
+        "status should have version: {body}"
+    );
 }
 
 // ─── behavior signals ────────────────────────────────────────────────────────
@@ -731,7 +810,9 @@ async fn test_behavior_list_returns_ok_or_forbidden() {
     let (state, _tmp) = make_unlocked_state();
     let (status, body) = do_get(state, "/api/v1/behavior").await;
     assert!(
-        status == StatusCode::OK || status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        status == StatusCode::OK
+            || status == StatusCode::FORBIDDEN
+            || status == StatusCode::NOT_FOUND,
         "behavior endpoint should return 200/403/404: {status} {body}"
     );
 }
@@ -750,7 +831,10 @@ async fn test_clusters_list_returns_ok_or_service_unavailable() {
         "clusters endpoint should return 200/503/403: {status} {body}"
     );
     if status == StatusCode::OK {
-        assert!(body["clusters"].is_array(), "clusters should be an array: {body}");
+        assert!(
+            body["clusters"].is_array(),
+            "clusters should be an array: {body}"
+        );
     }
 }
 

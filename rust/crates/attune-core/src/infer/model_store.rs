@@ -45,10 +45,7 @@ fn file_sha256(path: &std::path::Path) -> Result<String> {
 /// - 无 .sha256 文件：首次，计算并写入，通过
 /// - 有 .sha256 文件：比对，不匹配则删除两个文件并返回 Err
 fn verify_or_record_sha256(file_path: &std::path::Path) -> Result<()> {
-    let ext = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let sha_path = file_path.with_extension(format!("{ext}.sha256"));
     let actual = file_sha256(file_path)?;
     if sha_path.exists() {
@@ -162,7 +159,10 @@ pub fn ensure_models(
 
     // 取文件名末段（model_filename 可能含路径如 "onnx/model_quantized.onnx"）
     let model_basename = model_filename.rsplit('/').next().unwrap_or(model_filename);
-    let tokenizer_basename = tokenizer_filename.rsplit('/').next().unwrap_or(tokenizer_filename);
+    let tokenizer_basename = tokenizer_filename
+        .rsplit('/')
+        .next()
+        .unwrap_or(tokenizer_filename);
 
     let model_path = cache_dir.join(model_basename);
     let tokenizer_path = cache_dir.join(tokenizer_basename);

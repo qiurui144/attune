@@ -18,7 +18,9 @@ use attune_core::asr_sensevoice::{transcribe_sensevoice, SenseVoiceBackend};
 use std::path::PathBuf;
 
 fn assets() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("assets")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("assets")
 }
 
 fn sensevoice_dir() -> Option<PathBuf> {
@@ -50,7 +52,11 @@ fn sensevoice_backend() -> Option<SenseVoiceBackend> {
 #[test]
 fn mp3_transcribes_in_process_via_predecode() {
     let mp3 = assets().join("zh.mp3");
-    assert!(mp3.exists(), "test asset zh.mp3 missing at {}", mp3.display());
+    assert!(
+        mp3.exists(),
+        "test asset zh.mp3 missing at {}",
+        mp3.display()
+    );
 
     let Some(backend) = sensevoice_backend() else {
         eprintln!(
@@ -78,7 +84,11 @@ fn mp3_transcribes_in_process_via_predecode() {
 #[test]
 fn dispatcher_mp3_transcribes_without_whisper() {
     let mp3 = assets().join("zh.mp3");
-    assert!(mp3.exists(), "test asset zh.mp3 missing at {}", mp3.display());
+    assert!(
+        mp3.exists(),
+        "test asset zh.mp3 missing at {}",
+        mp3.display()
+    );
 
     let Some(backend) = sensevoice_backend() else {
         eprintln!("SKIP-CONDITION: SenseVoice model assets not on disk; dispatcher test skipped.");

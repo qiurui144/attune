@@ -61,11 +61,17 @@ pub struct FixtureScore {
 }
 
 /// Score one parsed `RegionResult` against a fixture's GT (pure logic, deterministic). Used per seed.
-pub fn score_prediction(truth: &VisionTruth, predicted: &RegionResult, chart_tol: f64) -> FixtureScore {
+pub fn score_prediction(
+    truth: &VisionTruth,
+    predicted: &RegionResult,
+    chart_tol: f64,
+) -> FixtureScore {
     match (truth, predicted) {
         (VisionTruth::Chart(gt), RegionResult::ChartV1 { series, .. }) => {
-            let pred: Vec<(String, Vec<f64>)> =
-                series.iter().map(|s| (s.name.clone(), s.values.clone())).collect();
+            let pred: Vec<(String, Vec<f64>)> = series
+                .iter()
+                .map(|s| (s.name.clone(), s.values.clone()))
+                .collect();
             let total = series.len();
             let grounded = series.iter().filter(|s| s.grounding.is_some()).count();
             FixtureScore {
@@ -73,7 +79,12 @@ pub fn score_prediction(truth: &VisionTruth, predicted: &RegionResult, chart_tol
                 grounding_precision: metrics::grounding_precision(grounded, total),
             }
         }
-        (VisionTruth::Formula(gt), RegionResult::FormulaV1 { latex, grounding, .. }) => {
+        (
+            VisionTruth::Formula(gt),
+            RegionResult::FormulaV1 {
+                latex, grounding, ..
+            },
+        ) => {
             let pred = latex.as_deref().unwrap_or("");
             let total = usize::from(latex.is_some());
             let grounded = usize::from(grounding.is_some());
@@ -91,16 +102,25 @@ pub fn score_prediction(truth: &VisionTruth, predicted: &RegionResult, chart_tol
         }
         // Kind/GT mismatch (recognizer returned a different variant than the fixture expects) →
         // worst score, never silently treated as a pass.
-        _ => FixtureScore { value_score: 0.0, grounding_precision: 0.0 },
+        _ => FixtureScore {
+            value_score: 0.0,
+            grounding_precision: 0.0,
+        },
     }
 }
 
 /// Pull the free-text value + its grounding presence out of a text-bearing RegionResult variant.
 fn extract_text_and_grounding(r: &RegionResult) -> (String, usize, usize) {
     match r {
-        RegionResult::HandwritingV1 { text, grounding } => text_grounded(text.as_deref(), grounding.is_some()),
-        RegionResult::StampV1 { text, grounding, .. } => text_grounded(text.as_deref(), grounding.is_some()),
-        RegionResult::FigureV1 { caption, grounding, .. } => text_grounded(caption.as_deref(), grounding.is_some()),
+        RegionResult::HandwritingV1 { text, grounding } => {
+            text_grounded(text.as_deref(), grounding.is_some())
+        }
+        RegionResult::StampV1 {
+            text, grounding, ..
+        } => text_grounded(text.as_deref(), grounding.is_some()),
+        RegionResult::FigureV1 {
+            caption, grounding, ..
+        } => text_grounded(caption.as_deref(), grounding.is_some()),
         _ => (String::new(), 0, 0),
     }
 }
@@ -162,14 +182,20 @@ pub fn run_model_eval(
             // Mint a fresh egress token per call (the gate downscales/redacts a temp copy).
             let Some(token) = mint_eval_token(&fx.image_path) else {
                 // Can't gate the image (decode/IO) → worst score for this run, never skip silently.
-                by_kind.entry(fx.kind).or_default().push(FixtureScore { value_score: 0.0, grounding_precision: 0.0 });
+                by_kind.entry(fx.kind).or_default().push(FixtureScore {
+                    value_score: 0.0,
+                    grounding_precision: 0.0,
+                });
                 continue;
             };
             let (res, _tel) = escalate_region(vlm, &token, fx.kind, model, geom);
             let score = match res {
                 Ok(r) => score_prediction(&fx.truth, &r, chart_tol),
                 // A hard failure (provider error / parse-fail after retries) scores zero, never skipped.
-                Err(_) => FixtureScore { value_score: 0.0, grounding_precision: 0.0 },
+                Err(_) => FixtureScore {
+                    value_score: 0.0,
+                    grounding_precision: 0.0,
+                },
             };
             by_kind.entry(fx.kind).or_default().push(score);
         }
@@ -218,10 +244,9 @@ pub fn compute_verdict(
     for kind_dbg in &kinds {
         // First model in weakest→strongest order that passes the floor for this kind.
         for tier in tier_order {
-            if let Some(s) = scores
-                .iter()
-                .find(|s| &format!("{:?}", s.kind) == kind_dbg && &s.model == tier && s.value_f1_mean >= floor)
-            {
+            if let Some(s) = scores.iter().find(|s| {
+                &format!("{:?}", s.kind) == kind_dbg && &s.model == tier && s.value_f1_mean >= floor
+            }) {
                 min_tier_per_kind.insert(s.kind, tier.clone());
                 break;
             }
@@ -240,14 +265,20 @@ pub fn compute_verdict(
 /// image's real dimensions as the crop coordinate system the VLM grounds against.
 fn geom_for_image(path: &Path) -> RegionGeom {
     let (w, h) = image::image_dimensions(path).unwrap_or((1, 1));
-    RegionGeom { page_bbox: BBox { x: 0, y: 0, w, h }, page: 0, crop_w: w, crop_h: h }
+    RegionGeom {
+        page_bbox: BBox { x: 0, y: 0, w, h },
+        page: 0,
+        crop_w: w,
+        crop_h: h,
+    }
 }
 
 /// Mint an egress token for an eval image the SAME way production does (real gate: redact + downscale
 /// + outbound gate). Non-L0 (holdout fixtures are public test images). `None` on decode/IO failure.
 fn mint_eval_token(image_path: &Path) -> Option<super::vlm_escalate::VlmEgressToken> {
     let redactor = Redactor::new();
-    let dst = std::env::temp_dir().join(format!("vision-eval-egress-{}.png", uuid_like(image_path)));
+    let dst =
+        std::env::temp_dir().join(format!("vision-eval-egress-{}.png", uuid_like(image_path)));
     gate_vlm_egress(
         true,
         true,
@@ -275,10 +306,12 @@ pub fn qwen_vlm_from_env() -> Option<(std::sync::Arc<dyn VlmProvider>, String)> 
         .or_else(|_| std::env::var("DASHSCOPE_API_KEY"))
         .ok()
         .filter(|k| !k.trim().is_empty())?;
-    let base = std::env::var("ATTUNE_VLM_BASE_URL").unwrap_or_else(|_| DASHSCOPE_OPENAI_COMPAT.to_string());
+    let base = std::env::var("ATTUNE_VLM_BASE_URL")
+        .unwrap_or_else(|_| DASHSCOPE_OPENAI_COMPAT.to_string());
     let model = std::env::var("ATTUNE_VLM_MODEL").unwrap_or_else(|_| "qwen3-vl-plus".to_string());
     let llm = std::sync::Arc::new(crate::llm::OpenAiLlmProvider::new(&base, &key, &model));
-    let vlm: std::sync::Arc<dyn VlmProvider> = std::sync::Arc::new(crate::vlm::LlmVlmProvider::new(llm));
+    let vlm: std::sync::Arc<dyn VlmProvider> =
+        std::sync::Arc::new(crate::vlm::LlmVlmProvider::new(llm));
     Some((vlm, model))
 }
 
@@ -312,7 +345,15 @@ mod tests {
             series: vec![Series {
                 name: "Q1".into(),
                 values: vec![1.0],
-                grounding: Some(crate::ocr::nontext::grounding::GroundingRef::region(BBox { x: 0, y: 0, w: 8, h: 8 }, 0)),
+                grounding: Some(crate::ocr::nontext::grounding::GroundingRef::region(
+                    BBox {
+                        x: 0,
+                        y: 0,
+                        w: 8,
+                        h: 8,
+                    },
+                    0,
+                )),
             }],
             axis_labels: vec![],
         };
@@ -326,7 +367,11 @@ mod tests {
         let truth = VisionTruth::Chart(vec![("Q1".into(), vec![1.0])]);
         let pred = RegionResult::ChartV1 {
             chart_type: "bar".into(),
-            series: vec![Series { name: "Q1".into(), values: vec![1.0], grounding: None }],
+            series: vec![Series {
+                name: "Q1".into(),
+                values: vec![1.0],
+                grounding: None,
+            }],
             axis_labels: vec![],
         };
         let s = score_prediction(&truth, &pred, 0.05);
@@ -337,14 +382,21 @@ mod tests {
     #[test]
     fn score_formula_similarity() {
         let truth = VisionTruth::Formula("E=mc^2".into());
-        let pred = RegionResult::FormulaV1 { latex: Some("E=mc^2".into()), raw_ocr: None, grounding: None };
+        let pred = RegionResult::FormulaV1 {
+            latex: Some("E=mc^2".into()),
+            raw_ocr: None,
+            grounding: None,
+        };
         assert_eq!(score_prediction(&truth, &pred, 0.05).value_score, 1.0);
     }
 
     #[test]
     fn score_text_token_f1() {
         let truth = VisionTruth::Text("hello world".into());
-        let pred = RegionResult::HandwritingV1 { text: Some("hello world".into()), grounding: None };
+        let pred = RegionResult::HandwritingV1 {
+            text: Some("hello world".into()),
+            grounding: None,
+        };
         assert_eq!(score_prediction(&truth, &pred, 0.05).value_score, 1.0);
     }
 
@@ -352,7 +404,11 @@ mod tests {
     fn score_kind_mismatch_is_zero() {
         // GT is a chart but the recognizer returned formula → worst score (never a silent pass).
         let truth = VisionTruth::Chart(vec![("Q1".into(), vec![1.0])]);
-        let pred = RegionResult::FormulaV1 { latex: Some("x".into()), raw_ocr: None, grounding: None };
+        let pred = RegionResult::FormulaV1 {
+            latex: Some("x".into()),
+            raw_ocr: None,
+            grounding: None,
+        };
         let s = score_prediction(&truth, &pred, 0.05);
         assert_eq!(s.value_score, 0.0);
         assert_eq!(s.grounding_precision, 0.0);
@@ -382,7 +438,9 @@ mod tests {
             truth: VisionTruth::Text("hello".into()),
         }];
         // Returns the exact GT text + an in-crop sub_bbox → value_score 1.0, grounding 1.0.
-        let vlm = FixedVlm(r#"{"text":"hello","grounding":{"sub_bbox":{"x":1,"y":1,"w":2,"h":2}}}"#.into());
+        let vlm = FixedVlm(
+            r#"{"text":"hello","grounding":{"sub_bbox":{"x":1,"y":1,"w":2,"h":2}}}"#.into(),
+        );
         let scores = run_model_eval(&vlm, "mock-qwen", &fixtures, DEFAULT_SEEDS, 0.05);
         assert_eq!(scores.len(), 1);
         let s = &scores[0];
@@ -404,7 +462,9 @@ mod tests {
             image_path: img,
             truth: VisionTruth::Text("expected text".into()),
         }];
-        let vlm = FixedVlm(r#"{"text":"totally wrong","grounding":{"sub_bbox":{"x":1,"y":1,"w":2,"h":2}}}"#.into());
+        let vlm = FixedVlm(
+            r#"{"text":"totally wrong","grounding":{"sub_bbox":{"x":1,"y":1,"w":2,"h":2}}}"#.into(),
+        );
         let scores = run_model_eval(&vlm, "mock-qwen", &fixtures, DEFAULT_SEEDS, 0.05);
         assert_eq!(scores[0].value_f1_mean, 0.0);
     }
@@ -426,16 +486,34 @@ mod tests {
     #[test]
     fn verdict_passes_when_all_default_models_meet_floor() {
         let scores = vec![score(RegionKind::Chart, "qwen-3.7-max", 0.9)];
-        let v = compute_verdict(&scores, 0.7, &["qwen-3.7-max".into()], &["qwen-3.7-max".into()]);
+        let v = compute_verdict(
+            &scores,
+            0.7,
+            &["qwen-3.7-max".into()],
+            &["qwen-3.7-max".into()],
+        );
         assert!(v.gate_pass);
-        assert_eq!(v.min_tier_per_kind.get(&RegionKind::Chart).map(|s| s.as_str()), Some("qwen-3.7-max"));
+        assert_eq!(
+            v.min_tier_per_kind
+                .get(&RegionKind::Chart)
+                .map(|s| s.as_str()),
+            Some("qwen-3.7-max")
+        );
     }
 
     #[test]
     fn verdict_fails_when_a_default_model_below_floor() {
         let scores = vec![score(RegionKind::Chart, "qwen-3.6-flash", 0.4)];
-        let v = compute_verdict(&scores, 0.7, &["qwen-3.6-flash".into()], &["qwen-3.6-flash".into()]);
-        assert!(!v.gate_pass, "a default model below floor must fail the gate");
+        let v = compute_verdict(
+            &scores,
+            0.7,
+            &["qwen-3.6-flash".into()],
+            &["qwen-3.6-flash".into()],
+        );
+        assert!(
+            !v.gate_pass,
+            "a default model below floor must fail the gate"
+        );
     }
 
     #[test]
@@ -446,11 +524,20 @@ mod tests {
             score(RegionKind::Chart, "qwen-3.7-plus", 0.8),
             score(RegionKind::Chart, "qwen-3.7-max", 0.9),
         ];
-        let tiers = vec!["qwen-3.6-flash".into(), "qwen-3.7-plus".into(), "qwen-3.7-max".into()];
+        let tiers = vec![
+            "qwen-3.6-flash".into(),
+            "qwen-3.7-plus".into(),
+            "qwen-3.7-max".into(),
+        ];
         // Only the strong tier is a DEFAULT, so gate passes; min_tier reports the weakest passing.
         let v = compute_verdict(&scores, 0.7, &["qwen-3.7-max".into()], &tiers);
         assert!(v.gate_pass);
-        assert_eq!(v.min_tier_per_kind.get(&RegionKind::Chart).map(|s| s.as_str()), Some("qwen-3.7-plus"));
+        assert_eq!(
+            v.min_tier_per_kind
+                .get(&RegionKind::Chart)
+                .map(|s| s.as_str()),
+            Some("qwen-3.7-plus")
+        );
     }
 
     #[test]
@@ -465,7 +552,9 @@ mod tests {
         // Honesty contract (§6.3): no key → None (real-VLM lane is PENDING-KEY, never a fake pass).
         // We can't unset another test's env safely in parallel, so just assert the type contract:
         // when neither override nor DASHSCOPE_API_KEY is set the builder yields None. Run isolated:
-        if std::env::var("DASHSCOPE_API_KEY").is_err() && std::env::var("ATTUNE_VLM_API_KEY").is_err() {
+        if std::env::var("DASHSCOPE_API_KEY").is_err()
+            && std::env::var("ATTUNE_VLM_API_KEY").is_err()
+        {
             assert!(qwen_vlm_from_env().is_none());
         }
     }
@@ -481,7 +570,9 @@ mod tests {
     #[ignore = "real-VLM lane: needs DASHSCOPE_API_KEY + cost authorization (§1.3); run with --ignored"]
     fn real_vlm_eval_smoke_n3() {
         let Some((vlm, model)) = qwen_vlm_from_env() else {
-            eprintln!("real-VLM eval PENDING-KEY: no DASHSCOPE_API_KEY/ATTUNE_VLM_API_KEY set — skipping");
+            eprintln!(
+                "real-VLM eval PENDING-KEY: no DASHSCOPE_API_KEY/ATTUNE_VLM_API_KEY set — skipping"
+            );
             return;
         };
         // A synthetic single-line handwriting-style image. (Real golden fixtures with human GT are a
@@ -522,7 +613,11 @@ mod tests {
         // Committed content fixture (CARGO_MANIFEST_DIR-relative): real text on a white canvas.
         let img = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/ocr_image/known_text.png");
-        assert!(img.exists(), "known_text.png fixture must be committed: {}", img.display());
+        assert!(
+            img.exists(),
+            "known_text.png fixture must be committed: {}",
+            img.display()
+        );
         let fixtures = vec![VisionFixture {
             id: "known-text-01".into(),
             kind: RegionKind::Handwriting, // text-transcription kind (token-F1 scored)
@@ -563,7 +658,9 @@ mod tests {
         use std::path::Path;
 
         let Some((live, model)) = qwen_vlm_from_env() else {
-            eprintln!("real-VLM failover PENDING-KEY: no DASHSCOPE_API_KEY/ATTUNE_VLM_API_KEY — skipping");
+            eprintln!(
+                "real-VLM failover PENDING-KEY: no DASHSCOPE_API_KEY/ATTUNE_VLM_API_KEY — skipping"
+            );
             return;
         };
 
@@ -572,10 +669,14 @@ mod tests {
         struct DeadVlm;
         impl VlmProvider for DeadVlm {
             fn caption(&self, _: &Path) -> crate::error::Result<String> {
-                Err(crate::error::VaultError::LlmUnavailable("dead primary".into()))
+                Err(crate::error::VaultError::LlmUnavailable(
+                    "dead primary".into(),
+                ))
             }
             fn vqa(&self, _: &Path, _: &str) -> crate::error::Result<String> {
-                Err(crate::error::VaultError::LlmUnavailable("dead primary".into()))
+                Err(crate::error::VaultError::LlmUnavailable(
+                    "dead primary".into(),
+                ))
             }
             fn probe(&self) -> bool {
                 true
@@ -604,10 +705,16 @@ mod tests {
             out.failed_over(),
             out.result.is_ok()
         );
-        assert!(out.failed_over(), "dead primary must trigger a real failover");
+        assert!(
+            out.failed_over(),
+            "dead primary must trigger a real failover"
+        );
         assert_eq!(out.tried.first().map(String::as_str), Some("dead-primary"));
         assert_eq!(out.winning_model(), model, "live qwen backup must win");
-        assert!(out.result.is_ok(), "live backup must produce a parseable (grounded) result");
+        assert!(
+            out.result.is_ok(),
+            "live backup must produce a parseable (grounded) result"
+        );
         // The dead primary is recorded as a provider failure; the live backup is not.
         assert!(router.failure_rate(RegionKind::Handwriting, "dead-primary") > 0.0);
         assert_eq!(router.failure_rate(RegionKind::Handwriting, &model), 0.0);

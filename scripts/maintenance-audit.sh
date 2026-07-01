@@ -105,7 +105,6 @@ require_dir "tests/e2e" "repo e2e scripts exist"
 # 5-7: reproducible dependency inputs.
 require_tracked "rust/Cargo.lock" "Rust lockfile tracked"
 require_tracked "rust/crates/attune-server/ui/package-lock.json" "embedded UI lockfile tracked"
-require_tracked "python/tests/e2e/package-lock.json" "Python e2e Playwright lockfile tracked"
 
 # 8-9: runtime artifacts do not become source.
 tracked_logs=$(git ls-files '*.log' 'logs/**' '.playwright-mcp/**' '.remember/**' 'tmp/**' 'reports/runs/**' 2>/dev/null || true)
@@ -122,7 +121,6 @@ require_grep 'ATTUNE_DESKTOP_PORT' "apps/attune-desktop/src/embedded_server.rs" 
 require_grep 'attune-desktop-startup\.log' "apps/attune-desktop/src/main.rs" "desktop startup log is explicit"
 require_grep 'SERVER_ERROR' "apps/attune-desktop/src/embedded_server.rs" "desktop readiness exposes startup error"
 require_grep 'LD_LIBRARY_PATH=.*\$BIN_DIR' "scripts/smoke-test.sh" "smoke test exports headless server native library path"
-require_grep 'LD_LIBRARY_PATH' "python/tests/e2e/helpers/server.ts" "Playwright server helper exports native library path"
 require_grep 'libsherpa-onnx-c-api' ".github/workflows/rust-release.yml" "Linux release bundles sherpa runtime library"
 require_grep 'LD_LIBRARY_PATH=.*INSTALL_PREFIX/bin' "scripts/install-local.sh" "local install systemd service sees bundled native libs"
 require_grep 'QuietUninstallString' "apps/attune-desktop/scripts/installer.nsh" "Windows installer registers quiet uninstall command"
@@ -170,7 +168,7 @@ require_grep 'desktop-v1\.5\.0/Attune_1\.5\.0_x64-setup\.exe' "packaging/winget/
 require_grep '"version": "1\.5\.0"' "packaging/scoop/attune.json" "Scoop version seed matches current release"
 require_grep 'attune-windows-x86_64\.zip' "packaging/scoop/attune.json" "Scoop uses Windows zip release asset"
 require_grep 'version "1\.5\.0"' "packaging/homebrew/Formula/attune.rb" "Homebrew formula version seed matches current release"
-require_grep 'python/tests/e2e && npm ci && npx playwright test' "scripts/test-pyramid.sh" "test pyramid E2E path matches current Playwright suite"
+require_grep 'tests/e2e/run_all.sh' "scripts/test-pyramid.sh" "test pyramid E2E path matches current suite"
 require_no_grep_many 'releases/download/v1\.0\.0|desktop-v1\.0\.0|attune-server:v1\.0\.0|attune-desktop-installers:1\.0\.0' \
   "active install docs do not point users to v1.0.0 artifacts" \
   docs/DEPLOY.md docs/INSTALL.md docs/wiki/index.md docs/wiki/quickstart.md packaging

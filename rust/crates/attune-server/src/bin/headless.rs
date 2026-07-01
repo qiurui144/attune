@@ -7,7 +7,11 @@ use attune_server::{run_in_runtime, ServerConfig};
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "attune-server-headless", version, about = "Attune HTTP API server (headless mode)")]
+#[command(
+    name = "attune-server-headless",
+    version,
+    about = "Attune HTTP API server (headless mode)"
+)]
 struct Cli {
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -53,10 +57,12 @@ async fn main() {
             Ok(()) => eprintln!("✓ PP-OCR models ready"),
             Err(e) => {
                 eprintln!("✗ PP-OCR bootstrap failed: {e}");
-                eprintln!("  CN 镜像: HF_ENDPOINT=https://hf-mirror.com {} --bootstrap-only",
+                eprintln!(
+                    "  CN 镜像: HF_ENDPOINT=https://hf-mirror.com {} --bootstrap-only",
                     std::env::current_exe()
                         .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "attune-server-headless".into()));
+                        .unwrap_or_else(|_| "attune-server-headless".into())
+                );
                 std::process::exit(1);
             }
         }

@@ -11,9 +11,9 @@
 //!   cargo test -p attune-core --release --test rag_flow_audit -- --ignored --nocapture
 
 use attune_core::embed::EmbeddingProvider;
-use attune_core::infer::RerankProvider;
 use attune_core::infer::embedding::OrtEmbeddingProvider;
 use attune_core::infer::reranker::OrtRerankProvider;
+use attune_core::infer::RerankProvider;
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let mut dot = 0.0;
@@ -76,7 +76,9 @@ fn rag_flow_e2e_audit() {
     let mut chunks: Vec<(String, String)> = Vec::new();
     for f in wanted {
         let p = corpus_dir.join(f);
-        if !p.exists() { continue; }
+        if !p.exists() {
+            continue;
+        }
         let txt = fs::read_to_string(&p).unwrap_or_default();
         // simple sliding window chunking
         let chars: Vec<char> = txt.chars().collect();
@@ -90,7 +92,9 @@ fn rag_flow_e2e_audit() {
             if c.trim().len() > 100 {
                 chunks.push((f.to_string(), c));
             }
-            if end >= chars.len() { break; }
+            if end >= chars.len() {
+                break;
+            }
             i += step;
         }
     }
@@ -101,9 +105,16 @@ fn rag_flow_e2e_audit() {
     let texts: Vec<&str> = chunks.iter().map(|(_, t)| t.as_str()).collect();
     let chunk_embeds = match emb.embed(&texts) {
         Ok((v, _usage)) => v,
-        Err(e) => { eprintln!("embed err: {e}"); return; }
+        Err(e) => {
+            eprintln!("embed err: {e}");
+            return;
+        }
     };
-    eprintln!("✅ embed {} chunks in {:.1}s", chunk_embeds.len(), t0.elapsed().as_secs_f64());
+    eprintln!(
+        "✅ embed {} chunks in {:.1}s",
+        chunk_embeds.len(),
+        t0.elapsed().as_secs_f64()
+    );
 
     // 5. queries
     let queries = [
@@ -125,8 +136,11 @@ fn rag_flow_e2e_audit() {
         let q_vec = &q_emb[0];
 
         // 5b. cosine top-10
-        let mut scored: Vec<(usize, f32)> = chunk_embeds.iter().enumerate()
-            .map(|(i, v)| (i, cosine(q_vec, v))).collect();
+        let mut scored: Vec<(usize, f32)> = chunk_embeds
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, cosine(q_vec, v)))
+            .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         let top10_idx: Vec<usize> = scored.iter().take(10).map(|(i, _)| *i).collect();
 
@@ -140,7 +154,9 @@ fn rag_flow_e2e_audit() {
         total_e2e_lat += lat_ms;
         let top1 = &chunks[paired[0].0].0;
         let hit = top1.starts_with(gt_prefix);
-        if hit { hits += 1; }
+        if hit {
+            hits += 1;
+        }
         eprintln!(
             "  q='{}' → top1={} (rr score={:.3}) {}ms {}",
             q,
@@ -153,6 +169,14 @@ fn rag_flow_e2e_audit() {
 
     eprintln!("\n=== SUMMARY ===");
     eprintln!("queries: {}", queries.len());
-    eprintln!("hit@1 (after reranker): {}/{} = {:.0}%", hits, queries.len(), hits as f32 / queries.len() as f32 * 100.0);
-    eprintln!("avg e2e latency: {}ms (embed + cosine + rerank)", total_e2e_lat / queries.len() as u128);
+    eprintln!(
+        "hit@1 (after reranker): {}/{} = {:.0}%",
+        hits,
+        queries.len(),
+        hits as f32 / queries.len() as f32 * 100.0
+    );
+    eprintln!(
+        "avg e2e latency: {}ms (embed + cosine + rerank)",
+        total_e2e_lat / queries.len() as u128
+    );
 }

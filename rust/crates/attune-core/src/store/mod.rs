@@ -1,48 +1,48 @@
 // npu-vault/crates/vault-core/src/store.rs
 
-mod types;
-pub mod items;
-pub mod item_blobs;
-pub mod webdav_remotes;
-pub mod email_accounts;
-pub mod rss_feeds;
-pub mod git_sources;
-pub mod third_party_accounts; // 通用第三方账号凭据保险柜(波 C):加密落库 + 脱敏视图 + connected_source 计数
-mod dirs;
-mod queue;
-mod history;
-mod conversations;
-mod signals;
-mod suggestions;         // 建议卡 dismiss + per-kind mute 持久化(零成本建议引擎 A1)
-mod chunk_summaries;
 mod annotations;
-mod organization;        // 文件夹一键整理:organization_proposals 缓存 + 加密 CRUD + TTL
+mod chunk_summaries;
+mod conversations;
+mod dirs;
+pub mod email_accounts;
+pub mod git_sources;
+mod history;
+pub mod item_blobs;
+pub mod items;
+mod organization;
+mod queue;
+pub mod rss_feeds;
+mod signals;
+mod suggestions; // 建议卡 dismiss + per-kind mute 持久化(零成本建议引擎 A1)
+pub mod third_party_accounts; // 通用第三方账号凭据保险柜(波 C):加密落库 + 脱敏视图 + connected_source 计数
+mod types;
+pub mod webdav_remotes; // 文件夹一键整理:organization_proposals 缓存 + 加密 CRUD + TTL
 pub use organization::{ApplyResult, ConfirmedGroup};
-mod project;
+mod chunk_breadcrumbs;
+mod links;
 mod memories;
 mod memory_vectors;
-mod migrations_mem;      // 记忆延续:memory_migrations 进度表 + list_stale_memory_ids
-mod web_search_cache;
-mod chunk_breadcrumbs;
-mod links;               // internal knowledge linker — item_entities + item_links tables
+mod migrations_mem; // 记忆延续:memory_migrations 进度表 + list_stale_memory_ids
+mod project;
+mod web_search_cache; // internal knowledge linker — item_entities + item_links tables
 pub use links::LinkRow;
-mod skill_expansions;    // self_evolving_skill_agent — per-query learned expansions
+mod skill_expansions; // self_evolving_skill_agent — per-query learned expansions
 pub use skill_expansions::{ExpansionSource, SkillExpansionRow, MAX_EXPANSIONS_PER_PATTERN};
-pub mod browse_signals;  // pub: BrowseSignalInput / BrowseSignalRow 给 attune-server route 用
-pub mod auto_bookmarks;  // W4 G2: high engagement auto bookmark candidates (G3 staging)
-pub mod audit;            // v0.6 Phase A.5.3: 出网审计日志
-pub mod usage;            // Plan A1 Task D: usage_events CRUD + UsageSummary
-pub mod agent_telemetry;  // ACP-3 §4.5-F: per-(agent×model) failure-rate roll-up over usage_events
-pub mod cache;            // Plan A1 Task D: llm_cache / embed_cache CRUD
-pub mod agent_state;      // ACP-6: versioned, plugin-scoped, encrypted learned/user state
-pub mod plugin_entitlements; // trust-chain: client entitlement cache (license/trial/status)
+pub mod agent_state; // ACP-6: versioned, plugin-scoped, encrypted learned/user state
+pub mod agent_telemetry; // ACP-3 §4.5-F: per-(agent×model) failure-rate roll-up over usage_events
+pub mod audit; // v0.6 Phase A.5.3: 出网审计日志
+pub mod auto_bookmarks; // W4 G2: high engagement auto bookmark candidates (G3 staging)
+pub mod browse_signals; // pub: BrowseSignalInput / BrowseSignalRow 给 attune-server route 用
+pub mod cache; // Plan A1 Task D: llm_cache / embed_cache CRUD
+pub mod plugin_entitlements;
+pub mod usage; // Plan A1 Task D: usage_events CRUD + UsageSummary // trust-chain: client entitlement cache (license/trial/status)
 pub use agent_state::{AgentStateKind, AgentStateRow};
-pub mod state_migration;  // ACP-6 Task 3: learned-state migration + orphan quarantine (§2.3)
+pub mod state_migration; // ACP-6 Task 3: learned-state migration + orphan quarantine (§2.3)
 pub use state_migration::{MigratedRow, MigrationReport, MigrationStep, OrphanRow};
-pub mod job_queue;        // G5: durable multi-kind job queue (generalizes reindex_queue)
-pub mod watches;          // info-monitoring loop: watches / watch_hits CRUD (spec 2026-06-19)
-pub mod scoped_token;     // G2: MCP agent scoped token 元数据 (3-scope, revocable)
-pub mod agent_audit;      // G2: MCP 工具调用审计 (0 敏感内容, allow+deny 留痕)
+pub mod agent_audit;
+pub mod job_queue; // G5: durable multi-kind job queue (generalizes reindex_queue)
+pub mod scoped_token; // G2: MCP agent scoped token 元数据 (3-scope, revocable)
+pub mod watches; // info-monitoring loop: watches / watch_hits CRUD (spec 2026-06-19) // G2: MCP 工具调用审计 (0 敏感内容, allow+deny 留痕)
 pub use job_queue::RecoverSummary;
 
 pub use types::*;
@@ -51,10 +51,10 @@ pub use types::*;
 pub use web_search_cache::DEFAULT_TTL_SECS as DEFAULT_WEB_SEARCH_TTL_SECS;
 
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::collections::HashMap;
 
 /// Process-wide registry of per-DB-path open locks.
 ///
@@ -862,7 +862,9 @@ impl Store {
             );
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+        )?;
         // Concurrent-open safety: `Store::open` runs on every vault unlock, the
         // job-store/usage-aggregator install, and each background worker — and
         // these can race on the *same* DB file at boot (e.g. install_job_store
@@ -951,7 +953,9 @@ impl Store {
     /// ACP-6 Task 1. Returns 0 for a pre-version-gate ("old") vault that has
     /// not yet been opened by version-aware code.
     pub fn schema_version(&self) -> Result<i64> {
-        let v: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let v: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         Ok(v)
     }
 
@@ -1285,10 +1289,7 @@ impl Store {
             |row| row.get(0),
         )?;
         if has_ref == 0 {
-            conn.execute(
-                "ALTER TABLE skill_signals ADD COLUMN ref_id TEXT",
-                [],
-            )?;
+            conn.execute("ALTER TABLE skill_signals ADD COLUMN ref_id TEXT", [])?;
         }
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_skill_sig_kind ON skill_signals(kind, processed, created_at)",
@@ -1336,7 +1337,10 @@ impl Store {
             |row| row.get(0),
         )?;
         if has_col == 0 {
-            conn.execute("ALTER TABLE job_queue ADD COLUMN next_attempt_ms INTEGER", [])?;
+            conn.execute(
+                "ALTER TABLE job_queue ADD COLUMN next_attempt_ms INTEGER",
+                [],
+            )?;
         }
         Ok(())
     }
@@ -1418,7 +1422,8 @@ impl Store {
 
     /// Checkpoint WAL to main DB file (for testing at-rest encryption)
     pub fn checkpoint(&self) -> Result<()> {
-        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
 
@@ -1433,7 +1438,9 @@ impl Store {
     }
 
     pub fn get_meta(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let mut stmt = self.conn.prepare("SELECT value FROM vault_meta WHERE key = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM vault_meta WHERE key = ?1")?;
         let result = stmt.query_row(params![key], |row| row.get::<_, Vec<u8>>(0));
         match result {
             Ok(v) => Ok(Some(v)),
@@ -1450,7 +1457,9 @@ impl Store {
     pub fn get_token_nonce(&self) -> Result<u64> {
         match self.get_meta("token_nonce")? {
             Some(bytes) if bytes.len() == 8 => {
-                let arr: [u8; 8] = bytes.as_slice().try_into()
+                let arr: [u8; 8] = bytes
+                    .as_slice()
+                    .try_into()
                     .map_err(|_| VaultError::Crypto("token nonce size mismatch".into()))?;
                 Ok(u64::from_le_bytes(arr))
             }
@@ -1506,7 +1515,9 @@ impl Store {
         tx.commit()?;
         // WAL 模式下 DELETE 是逻辑删除, 必须 checkpoint+VACUUM 才能保证物理擦除
         // (不然下次 open conn 看到 WAL 残留, 触发 FK violation 等异常状态)
-        let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;");
+        let _ = self
+            .conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;");
         self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
         // 后置 assert: 所有表必须 0 行 (per feedback_reset_vault_incomplete_wipe)
@@ -1523,7 +1534,6 @@ impl Store {
         }
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -1551,7 +1561,9 @@ mod tests {
             handles.push(std::thread::spawn(move || Store::open(&p).map(|_| ())));
         }
         for h in handles {
-            h.join().unwrap().expect("concurrent Store::open must not Err");
+            h.join()
+                .unwrap()
+                .expect("concurrent Store::open must not Err");
         }
     }
 
@@ -1584,7 +1596,9 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
         // Old vault: user_version untouched (defaults to 0).
-        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v, 0, "precondition: simulated old vault is at version 0");
 
         // Insert a learned-state row so we can prove the upgrade is non-destructive.
@@ -1598,8 +1612,13 @@ mod tests {
         // Run the version gate (what open() calls on an existing connection).
         Store::ensure_schema_version(&conn).unwrap();
 
-        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, SCHEMA_VERSION, "old vault must be lazily stamped to current");
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "old vault must be lazily stamped to current"
+        );
 
         // Non-destructive: the pre-existing row is still there.
         let n: i64 = conn
@@ -1614,7 +1633,9 @@ mod tests {
         conn.execute_batch(SCHEMA_SQL).unwrap();
         Store::ensure_schema_version(&conn).unwrap();
         Store::ensure_schema_version(&conn).unwrap();
-        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
     }
 
@@ -1626,9 +1647,12 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
         let future = SCHEMA_VERSION + 5;
-        conn.execute_batch(&format!("PRAGMA user_version = {future};")).unwrap();
+        conn.execute_batch(&format!("PRAGMA user_version = {future};"))
+            .unwrap();
         Store::ensure_schema_version(&conn).unwrap();
-        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v, future, "must not downgrade a future-versioned vault");
     }
 
@@ -1698,9 +1722,11 @@ mod tests {
         // 直接读取原始 BLOB，验证不是明文
         let raw: Vec<u8> = store
             .conn
-            .query_row("SELECT content FROM items WHERE id = ?1", params![id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT content FROM items WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
             .unwrap();
         let raw_str = String::from_utf8_lossy(&raw);
         assert!(
@@ -1757,7 +1783,15 @@ mod tests {
         let dek = test_dek();
         let url = "https://patents.google.com/patent/US10000000/en";
         let id = store
-            .insert_item(&dek, "Patent Title", "abstract text", Some(url), "patent", None, None)
+            .insert_item(
+                &dek,
+                "Patent Title",
+                "abstract text",
+                Some(url),
+                "patent",
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(store.find_item_by_url(url).unwrap(), Some(id));
     }
@@ -1765,7 +1799,10 @@ mod tests {
     #[test]
     fn find_item_by_url_returns_none_when_absent() {
         let store = Store::open_memory().unwrap();
-        assert!(store.find_item_by_url("https://missing.example.com").unwrap().is_none());
+        assert!(store
+            .find_item_by_url("https://missing.example.com")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1777,7 +1814,10 @@ mod tests {
             .insert_item(&dek, "Patent", "content", Some(url), "patent", None, None)
             .unwrap();
         store.delete_item(&id).unwrap();
-        assert!(store.find_item_by_url(url).unwrap().is_none(), "soft-deleted item must not be found by URL");
+        assert!(
+            store.find_item_by_url(url).unwrap().is_none(),
+            "soft-deleted item must not be found by URL"
+        );
     }
 
     #[test]
@@ -1805,11 +1845,16 @@ mod tests {
         // 这里验证：(a) classify 任务能入队 (b) dequeue_embeddings 正确过滤
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
-        let id = store.insert_item(&dek, "T", "C", None, "note", None, None).unwrap();
+        let id = store
+            .insert_item(&dek, "T", "C", None, "note", None, None)
+            .unwrap();
         store.enqueue_classify(&id, 3).unwrap();
         // dequeue_embeddings 只看 embed 任务 → 应返回空
         let tasks = store.dequeue_embeddings(10).unwrap();
-        assert!(tasks.is_empty(), "dequeue_embeddings 不应返回 classify 任务");
+        assert!(
+            tasks.is_empty(),
+            "dequeue_embeddings 不应返回 classify 任务"
+        );
         // 但 pending_count_by_type 能看到这条 classify
         assert_eq!(store.pending_count_by_type("classify").unwrap(), 1);
     }
@@ -1818,7 +1863,9 @@ mod tests {
     fn update_and_get_tags() {
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
-        let id = store.insert_item(&dek, "T", "C", None, "note", None, None).unwrap();
+        let id = store
+            .insert_item(&dek, "T", "C", None, "note", None, None)
+            .unwrap();
         let tags_json = r#"{"core":{"domain":["技术"]}}"#;
         assert!(store.update_tags(&dek, &id, tags_json).unwrap());
         let retrieved = store.get_tags_json(&dek, &id).unwrap().unwrap();
@@ -1865,22 +1912,32 @@ mod tests {
         store.log_search(&dek, "SECRET_QUERY_XYZ", 0).unwrap();
 
         // Read raw row
-        let raw: Vec<u8> = store.conn.query_row(
-            "SELECT query FROM search_history LIMIT 1",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let raw: Vec<u8> = store
+            .conn
+            .query_row("SELECT query FROM search_history LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         let raw_str = String::from_utf8_lossy(&raw);
-        assert!(!raw_str.contains("SECRET_QUERY_XYZ"), "Query should be encrypted");
+        assert!(
+            !raw_str.contains("SECRET_QUERY_XYZ"),
+            "Query should be encrypted"
+        );
     }
 
     #[test]
     fn list_all_item_ids_excludes_deleted() {
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
-        let a = store.insert_item(&dek, "A", "c", None, "note", None, None).unwrap();
-        store.insert_item(&dek, "B", "c", None, "note", None, None).unwrap();
-        let c = store.insert_item(&dek, "C", "c", None, "note", None, None).unwrap();
+        let a = store
+            .insert_item(&dek, "A", "c", None, "note", None, None)
+            .unwrap();
+        store
+            .insert_item(&dek, "B", "c", None, "note", None, None)
+            .unwrap();
+        let c = store
+            .insert_item(&dek, "C", "c", None, "note", None, None)
+            .unwrap();
         store.delete_item(&c).unwrap();
         let ids = store.list_all_item_ids().unwrap();
         assert_eq!(ids.len(), 2);
@@ -1892,8 +1949,12 @@ mod tests {
         use chrono::{Duration, Utc};
         let store = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
-        let id = store.insert_item(&dek, "New", "content", None, "note", None, None).unwrap();
-        let old_ts = (Utc::now() - Duration::days(40)).format("%Y-%m-%dT%H:%M:%S").to_string();
+        let id = store
+            .insert_item(&dek, "New", "content", None, "note", None, None)
+            .unwrap();
+        let old_ts = (Utc::now() - Duration::days(40))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
         store.set_updated_at(&id, &old_ts).unwrap();
         let stale = store.list_stale_items(30, 50).unwrap();
         assert_eq!(stale.len(), 1);
@@ -1911,11 +1972,16 @@ mod tests {
     fn get_item_stats_basic() {
         let store = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
-        let id = store.insert_item(&dek, "Test", "content", None, "note", None, None).unwrap();
+        let id = store
+            .insert_item(&dek, "Test", "content", None, "note", None, None)
+            .unwrap();
         let stats = store.get_item_stats(&id).unwrap().unwrap();
         assert_eq!(stats.id, id);
         assert!(stats.chunk_count >= 0);
-        assert_eq!(stats.embedding_pending + stats.embedding_done, stats.chunk_count);
+        assert_eq!(
+            stats.embedding_pending + stats.embedding_done,
+            stats.chunk_count
+        );
     }
 
     #[test]
@@ -1928,7 +1994,9 @@ mod tests {
     #[test]
     fn insert_feedback_valid() {
         let store = Store::open_memory().unwrap();
-        let id = store.insert_feedback("item-1", "relevant", Some("my query")).unwrap();
+        let id = store
+            .insert_feedback("item-1", "relevant", Some("my query"))
+            .unwrap();
         assert!(id > 0);
     }
 
@@ -1963,8 +2031,12 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
         let conv_id = store.create_conversation(&dek, "测试会话").unwrap();
-        store.append_message(&dek, &conv_id, "user", "你好", &[]).unwrap();
-        store.append_message(&dek, &conv_id, "assistant", "你好！有什么可以帮你的？", &[]).unwrap();
+        store
+            .append_message(&dek, &conv_id, "user", "你好", &[])
+            .unwrap();
+        store
+            .append_message(&dek, &conv_id, "assistant", "你好！有什么可以帮你的？", &[])
+            .unwrap();
         let msgs = store.get_conversation_messages(&dek, &conv_id).unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
@@ -1977,7 +2049,9 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
         let conv_id = store.create_conversation(&dek, "待删除").unwrap();
-        store.append_message(&dek, &conv_id, "user", "消息内容", &[]).unwrap();
+        store
+            .append_message(&dek, &conv_id, "user", "消息内容", &[])
+            .unwrap();
         store.delete_conversation(&conv_id).unwrap();
         let msgs = store.get_conversation_messages(&dek, &conv_id).unwrap();
         assert!(msgs.is_empty());
@@ -1990,10 +2064,14 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
         let conv_id = store.create_conversation(&dek, "带引用").unwrap();
-        let citations = vec![
-            Citation { item_id: "abc".to_string(), title: "文档A".to_string(), relevance: 0.9 },
-        ];
-        store.append_message(&dek, &conv_id, "assistant", "回答内容", &citations).unwrap();
+        let citations = vec![Citation {
+            item_id: "abc".to_string(),
+            title: "文档A".to_string(),
+            relevance: 0.9,
+        }];
+        store
+            .append_message(&dek, &conv_id, "assistant", "回答内容", &citations)
+            .unwrap();
         let msgs = store.get_conversation_messages(&dek, &conv_id).unwrap();
         assert_eq!(msgs[0].citations.len(), 1);
         assert_eq!(msgs[0].citations[0].item_id, "abc");
@@ -2006,7 +2084,10 @@ mod tests {
         let dek = test_dek();
         // 直接向不存在的 conv_id 追加消息，应返回 Err（外键约束失败）
         let result = store.append_message(&dek, "nonexistent-conv-id", "user", "hello", &[]);
-        assert!(result.is_err(), "append_message to nonexistent conversation should fail");
+        assert!(
+            result.is_err(),
+            "append_message to nonexistent conversation should fail"
+        );
     }
 
     // #13: get_conversation_by_id 不存在返回 None
@@ -2014,7 +2095,9 @@ mod tests {
     fn test_get_conversation_by_id_not_found() {
         let store = Store::open_memory().unwrap();
         let dek = test_dek();
-        let result = store.get_conversation_by_id(&dek, "does-not-exist").unwrap();
+        let result = store
+            .get_conversation_by_id(&dek, "does-not-exist")
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -2038,11 +2121,15 @@ mod tests {
         {
             let conn = Connection::open(&db_path).unwrap();
             // 显式设 NONE 让本测试不依赖默认值
-            conn.execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;").unwrap();
+            conn.execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
+                .unwrap();
             conn.execute_batch(
-                "CREATE TABLE legacy_table (id INTEGER); INSERT INTO legacy_table VALUES (1);"
-            ).unwrap();
-            let mode: i64 = conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).unwrap();
+                "CREATE TABLE legacy_table (id INTEGER); INSERT INTO legacy_table VALUES (1);",
+            )
+            .unwrap();
+            let mode: i64 = conn
+                .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+                .unwrap();
             assert_eq!(mode, 0, "test precondition: legacy vault should be NONE");
         }
 
@@ -2073,7 +2160,15 @@ mod tests {
         for i in 0..10 {
             let title = format!("t{i}");
             store
-                .insert_item(&dek, &title, "x".repeat(1000).as_str(), None, "note", None, None)
+                .insert_item(
+                    &dek,
+                    &title,
+                    "x".repeat(1000).as_str(),
+                    None,
+                    "note",
+                    None,
+                    None,
+                )
                 .unwrap();
         }
         // 拿到 IDs 删掉
@@ -2087,7 +2182,10 @@ mod tests {
         }
         for id in &ids {
             // 硬删而非软删让 page 真的进 freelist
-            store.conn.execute("DELETE FROM items WHERE id = ?1", [id]).unwrap();
+            store
+                .conn
+                .execute("DELETE FROM items WHERE id = ?1", [id])
+                .unwrap();
         }
         // incremental_vacuum 不报错（可能 0 页因为 SQLite 实际页释放策略）
         let _ = store.incremental_vacuum(100).unwrap();
@@ -2106,7 +2204,9 @@ mod tests_dir {
     #[test]
     fn test_bind_directory_returns_id() {
         let store = open_store();
-        let id = store.bind_directory("/tmp/docs", true, &["md", "txt"]).unwrap();
+        let id = store
+            .bind_directory("/tmp/docs", true, &["md", "txt"])
+            .unwrap();
         assert!(!id.is_empty());
     }
 
@@ -2337,9 +2437,7 @@ mod tests_embed_queue {
         let store = open_store();
         let item_id = insert_test_item(&store);
         let text = "Unicode text: 中文 \u{1F511}";
-        store
-            .enqueue_embedding(&item_id, 0, text, 1, 1, 0)
-            .unwrap();
+        store.enqueue_embedding(&item_id, 0, text, 1, 1, 0).unwrap();
         let tasks = store.dequeue_embeddings(1).unwrap();
         assert_eq!(tasks[0].chunk_text, text);
     }
@@ -2354,12 +2452,25 @@ mod tests_annotations {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
         let item_id = store
-            .insert_item(&dek, "test item", "hello world body", None, "note", None, None)
+            .insert_item(
+                &dek,
+                "test item",
+                "hello world body",
+                None,
+                "note",
+                None,
+                None,
+            )
             .unwrap();
         (store, dek, item_id)
     }
 
-    fn make_input(offset_start: i64, offset_end: i64, text: &str, label: Option<&str>) -> AnnotationInput {
+    fn make_input(
+        offset_start: i64,
+        offset_end: i64,
+        text: &str,
+        label: Option<&str>,
+    ) -> AnnotationInput {
         AnnotationInput {
             offset_start,
             offset_end,
@@ -2394,8 +2505,12 @@ mod tests_annotations {
     fn list_orders_by_offset() {
         let (store, dek, item_id) = setup();
         // 故意乱序插入，断言返回按 offset 升序
-        store.create_annotation(&dek, &item_id, &make_input(6, 11, "world", None)).unwrap();
-        store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None)).unwrap();
+        store
+            .create_annotation(&dek, &item_id, &make_input(6, 11, "world", None))
+            .unwrap();
+        store
+            .create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None))
+            .unwrap();
         let anns = store.list_annotations(&dek, &item_id).unwrap();
         assert_eq!(anns.len(), 2);
         assert_eq!(anns[0].offset_start, 0);
@@ -2407,7 +2522,8 @@ mod tests_annotations {
         let (store, dek, item_id) = setup();
         let secret = "my private thought 隐私思考";
         let input = AnnotationInput {
-            offset_start: 0, offset_end: 5,
+            offset_start: 0,
+            offset_end: 5,
             text_snippet: "hello".into(),
             label: None,
             color: "red".into(),
@@ -2416,13 +2532,15 @@ mod tests_annotations {
         };
         store.create_annotation(&dek, &item_id, &input).unwrap();
         // 直接读取密文
-        let enc: Vec<u8> = store.conn.query_row(
-            "SELECT content FROM annotations LIMIT 1",
-            [], |r| r.get(0),
-        ).unwrap();
+        let enc: Vec<u8> = store
+            .conn
+            .query_row("SELECT content FROM annotations LIMIT 1", [], |r| r.get(0))
+            .unwrap();
         // 密文不应包含明文
-        assert!(!enc.windows(secret.len()).any(|w| w == secret.as_bytes()),
-            "encrypted content must not contain plaintext");
+        assert!(
+            !enc.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "encrypted content must not contain plaintext"
+        );
         // 解密 list 回读应该还原
         let anns = store.list_annotations(&dek, &item_id).unwrap();
         assert_eq!(anns[0].content, secret);
@@ -2439,11 +2557,14 @@ mod tests_annotations {
         // 用户"手动编辑"：不指定 source → 应回到 user
         let mut edited = make_input(0, 5, "hello", Some("edited"));
         edited.content = "user revised".into();
-        edited.source = None;  // 默认 user
+        edited.source = None; // 默认 user
         store.update_annotation(&dek, &id, &edited).unwrap();
 
         let anns = store.list_annotations(&dek, &item_id).unwrap();
-        assert_eq!(anns[0].source, "user", "human edit must reset source to user");
+        assert_eq!(
+            anns[0].source, "user",
+            "human edit must reset source to user"
+        );
         assert_eq!(anns[0].content, "user revised");
         assert_eq!(anns[0].label.as_deref(), Some("edited"));
     }
@@ -2451,7 +2572,9 @@ mod tests_annotations {
     #[test]
     fn update_respects_explicit_ai_source() {
         let (store, dek, item_id) = setup();
-        let id = store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None)).unwrap();
+        let id = store
+            .create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None))
+            .unwrap();
 
         // AI 工作流：显式写 source='ai'
         let mut ai_input = make_input(0, 5, "hello", Some("风险条款"));
@@ -2474,7 +2597,9 @@ mod tests_annotations {
     #[test]
     fn delete_removes_annotation() {
         let (store, dek, item_id) = setup();
-        let id = store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None)).unwrap();
+        let id = store
+            .create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None))
+            .unwrap();
         assert_eq!(store.count_annotations(&item_id).unwrap(), 1);
         store.delete_annotation(&id).unwrap();
         assert_eq!(store.count_annotations(&item_id).unwrap(), 0);
@@ -2483,12 +2608,20 @@ mod tests_annotations {
     #[test]
     fn delete_cascades_on_item_delete() {
         let (store, dek, item_id) = setup();
-        store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None)).unwrap();
+        store
+            .create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None))
+            .unwrap();
         assert_eq!(store.count_annotations(&item_id).unwrap(), 1);
         // items 表硬删除会触发 ON DELETE CASCADE
-        store.conn.execute("DELETE FROM items WHERE id = ?1", params![item_id]).unwrap();
-        assert_eq!(store.count_annotations(&item_id).unwrap(), 0,
-            "annotation should cascade-delete when item is removed");
+        store
+            .conn
+            .execute("DELETE FROM items WHERE id = ?1", params![item_id])
+            .unwrap();
+        assert_eq!(
+            store.count_annotations(&item_id).unwrap(),
+            0,
+            "annotation should cascade-delete when item is removed"
+        );
     }
 
     #[test]
@@ -2514,7 +2647,9 @@ mod tests_annotations {
     fn soft_deleting_item_cascades_to_annotations() {
         // 用户软删除 item 后：annotations 也应被清除（delete_item 级联 + list 过滤双保险）
         let (store, dek, item_id) = setup();
-        store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", Some("⭐重点"))).unwrap();
+        store
+            .create_annotation(&dek, &item_id, &make_input(0, 5, "hello", Some("⭐重点")))
+            .unwrap();
         assert_eq!(store.list_annotations(&dek, &item_id).unwrap().len(), 1);
 
         let deleted = store.delete_item(&item_id).unwrap();
@@ -2522,11 +2657,18 @@ mod tests_annotations {
 
         // list 过滤软删除 → 返回空
         let anns = store.list_annotations(&dek, &item_id).unwrap();
-        assert_eq!(anns.len(), 0, "soft-deleted item's annotations must not be returned");
+        assert_eq!(
+            anns.len(),
+            0,
+            "soft-deleted item's annotations must not be returned"
+        );
 
         // DELETE 语义：实际也被硬删掉了（"忘记"）
-        assert_eq!(store.count_annotations(&item_id).unwrap(), 0,
-            "delete_item should cascade-delete annotations");
+        assert_eq!(
+            store.count_annotations(&item_id).unwrap(),
+            0,
+            "delete_item should cascade-delete annotations"
+        );
     }
 
     #[test]
@@ -2534,12 +2676,17 @@ mod tests_annotations {
         // 即便绕过 delete_item 路径直接 UPDATE is_deleted=1（模拟历史遗留 / 未来测试路径），
         // list_annotations 的 JOIN 过滤也应挡住。
         let (store, dek, item_id) = setup();
-        store.create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None)).unwrap();
+        store
+            .create_annotation(&dek, &item_id, &make_input(0, 5, "hello", None))
+            .unwrap();
         // 直接 UPDATE 跳过 delete_item 的级联
-        store.conn.execute(
-            "UPDATE items SET is_deleted = 1 WHERE id = ?1",
-            params![item_id],
-        ).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE items SET is_deleted = 1 WHERE id = ?1",
+                params![item_id],
+            )
+            .unwrap();
         // 批注还在表里但不应被 list 出
         assert_eq!(store.list_annotations(&dek, &item_id).unwrap().len(), 0);
         // count 是裸 SQL 查表 —— 还能看到（作为内部指标），但外部不可见
@@ -2609,13 +2756,23 @@ mod tests_skill_signals_migration {
         seed_old_schema(&path);
 
         // Before B3 fix this returned Err(no such column: kind). It must now succeed.
-        let store = Store::open(&path).expect("open() must upgrade a kind-less skill_signals table");
+        let store =
+            Store::open(&path).expect("open() must upgrade a kind-less skill_signals table");
 
         // kind + ref_id columns added by the migrate fn.
-        assert!(has_column(&store.conn, "kind"), "kind column must be present after upgrade");
-        assert!(has_column(&store.conn, "ref_id"), "ref_id column must be present after upgrade");
+        assert!(
+            has_column(&store.conn, "kind"),
+            "kind column must be present after upgrade"
+        );
+        assert!(
+            has_column(&store.conn, "ref_id"),
+            "ref_id column must be present after upgrade"
+        );
         // The index is now built in the migrate fn (after the ALTER).
-        assert!(has_index(&store.conn, "idx_skill_sig_kind"), "idx_skill_sig_kind must be built");
+        assert!(
+            has_index(&store.conn, "idx_skill_sig_kind"),
+            "idx_skill_sig_kind must be built"
+        );
 
         // Zero data loss: the legacy row survives and defaults to kind='search_miss'.
         let (count, kind): (i64, String) = store
@@ -2626,8 +2783,14 @@ mod tests_skill_signals_migration {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(count, 1, "legacy skill_signals row must not be dropped on upgrade");
-        assert_eq!(kind, "search_miss", "legacy row must default to kind='search_miss'");
+        assert_eq!(
+            count, 1,
+            "legacy skill_signals row must not be dropped on upgrade"
+        );
+        assert_eq!(
+            kind, "search_miss",
+            "legacy row must default to kind='search_miss'"
+        );
     }
 
     #[test]
@@ -2647,6 +2810,9 @@ mod tests_skill_signals_migration {
         // must still exist so fresh + in-memory DBs are not regressed.
         let store = Store::open_memory().unwrap();
         assert!(has_column(&store.conn, "kind"));
-        assert!(has_index(&store.conn, "idx_skill_sig_kind"), "fresh DB must still have idx_skill_sig_kind");
+        assert!(
+            has_index(&store.conn, "idx_skill_sig_kind"),
+            "fresh DB must still have idx_skill_sig_kind"
+        );
     }
 }

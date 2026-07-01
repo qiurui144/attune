@@ -9,7 +9,7 @@
 
 use attune_core::export::{Artifact, ExportFormat};
 use attune_core::llm::{ChatMessage, LlmProvider};
-use attune_core::skill_runtime::{comparison_to_table, compare_to_table};
+use attune_core::skill_runtime::{compare_to_table, comparison_to_table};
 use attune_core::usage::TokenUsage;
 use proptest::prelude::*;
 
@@ -18,7 +18,10 @@ impl LlmProvider for FixedLlm {
     fn chat(&self, _s: &str, _u: &str) -> attune_core::error::Result<(String, TokenUsage)> {
         Ok((self.0.clone(), TokenUsage::empty("p", "m")))
     }
-    fn chat_with_history(&self, _m: &[ChatMessage]) -> attune_core::error::Result<(String, TokenUsage)> {
+    fn chat_with_history(
+        &self,
+        _m: &[ChatMessage],
+    ) -> attune_core::error::Result<(String, TokenUsage)> {
         Ok((self.0.clone(), TokenUsage::empty("p", "m")))
     }
     fn is_available(&self) -> bool {

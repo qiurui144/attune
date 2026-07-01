@@ -150,7 +150,9 @@ impl ResourceMonitor for SysinfoMonitor {
             return s;
         }
         // 全局 CPU + process RSS 配对刷新
-        state.sys.refresh_cpu_specifics(CpuRefreshKind::new().with_cpu_usage());
+        state
+            .sys
+            .refresh_cpu_specifics(CpuRefreshKind::new().with_cpu_usage());
         state.sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[self.pid]),
             true,
@@ -163,11 +165,7 @@ impl ResourceMonitor for SysinfoMonitor {
         } else {
             cpus.iter().map(|c| c.cpu_usage()).sum::<f32>() / cpus.len() as f32
         };
-        let rss = state
-            .sys
-            .process(self.pid)
-            .map(|p| p.memory())
-            .unwrap_or(0);
+        let rss = state.sys.process(self.pid).map(|p| p.memory()).unwrap_or(0);
         let sample = Sample {
             cpu_pct: global_cpu,
             rss_bytes: rss,
@@ -249,7 +247,10 @@ mod tests {
         // 真 monitor 至少能拿到当前进程的 RSS（>0），CPU% 首次可能为 0 是预期。
         let m = SysinfoMonitor::new();
         let s = m.sample_self();
-        assert!(s.rss_bytes > 0, "RSS should be positive for a running test process");
+        assert!(
+            s.rss_bytes > 0,
+            "RSS should be positive for a running test process"
+        );
     }
 
     #[test]

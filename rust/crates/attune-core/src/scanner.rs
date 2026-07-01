@@ -30,7 +30,9 @@ pub fn scan_directory(
     file_types: &[String],
 ) -> Result<ScanResult> {
     use crate::ingest::local::LocalFolderConnector;
-    use crate::ingest::{ingest_document, ingest_document_replacing, IngestOutcome, SourceConnector};
+    use crate::ingest::{
+        ingest_document, ingest_document_replacing, IngestOutcome, SourceConnector,
+    };
 
     let mut result = ScanResult {
         total_files: 0,
@@ -121,7 +123,10 @@ pub fn scan_directory(
 }
 
 /// 创建文件监听器（返回 watcher 和事件接收器）
-pub fn create_watcher() -> Result<(RecommendedWatcher, mpsc::Receiver<notify::Result<notify::Event>>)> {
+pub fn create_watcher() -> Result<(
+    RecommendedWatcher,
+    mpsc::Receiver<notify::Result<notify::Event>>,
+)> {
     let (tx, rx) = mpsc::channel();
     let watcher = RecommendedWatcher::new(
         move |res| {
@@ -134,7 +139,11 @@ pub fn create_watcher() -> Result<(RecommendedWatcher, mpsc::Receiver<notify::Re
 }
 
 /// 添加监听路径
-pub fn watch_directory(watcher: &mut RecommendedWatcher, path: &Path, recursive: bool) -> Result<()> {
+pub fn watch_directory(
+    watcher: &mut RecommendedWatcher,
+    path: &Path,
+    recursive: bool,
+) -> Result<()> {
     let mode = if recursive {
         RecursiveMode::Recursive
     } else {
@@ -165,9 +174,15 @@ mod tests {
         let dir_id = store
             .bind_directory(tmp.path().to_str().unwrap(), true, &["md", "txt"])
             .unwrap();
-        let result =
-            scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into(), "txt".into()])
-                .unwrap();
+        let result = scan_directory(
+            &store,
+            &dek,
+            &dir_id,
+            tmp.path(),
+            true,
+            &["md".into(), "txt".into()],
+        )
+        .unwrap();
         assert_eq!(result.total_files, 0);
     }
 
@@ -177,7 +192,8 @@ mod tests {
 
         // Create test files
         let mut f1 = std::fs::File::create(tmp.path().join("doc1.md")).unwrap();
-        f1.write_all(b"# Title 1\n\nContent of document 1.").unwrap();
+        f1.write_all(b"# Title 1\n\nContent of document 1.")
+            .unwrap();
 
         let mut f2 = std::fs::File::create(tmp.path().join("doc2.txt")).unwrap();
         f2.write_all(b"Plain text document content here.").unwrap();
@@ -188,9 +204,15 @@ mod tests {
         let dir_id = store
             .bind_directory(tmp.path().to_str().unwrap(), true, &["md", "txt"])
             .unwrap();
-        let result =
-            scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into(), "txt".into()])
-                .unwrap();
+        let result = scan_directory(
+            &store,
+            &dek,
+            &dir_id,
+            tmp.path(),
+            true,
+            &["md".into(), "txt".into()],
+        )
+        .unwrap();
 
         assert_eq!(result.total_files, 2, "Should find 2 supported files");
         assert_eq!(result.new_files + result.updated_files, 2);
@@ -261,8 +283,18 @@ mod tests {
             .unwrap();
         scan_directory(&store, &dek, &dir_id, tmp.path(), true, &["md".into()]).unwrap();
 
-        assert!(store.count_embed_queue_by_level(1).unwrap() >= 1, "L1 必须入队");
-        assert!(store.count_embed_queue_by_level(2).unwrap() >= 1, "L2 必须入队");
-        assert_eq!(store.pending_count_by_type("classify").unwrap(), 1, "classify 必须入队");
+        assert!(
+            store.count_embed_queue_by_level(1).unwrap() >= 1,
+            "L1 必须入队"
+        );
+        assert!(
+            store.count_embed_queue_by_level(2).unwrap() >= 1,
+            "L2 必须入队"
+        );
+        assert_eq!(
+            store.pending_count_by_type("classify").unwrap(),
+            1,
+            "classify 必须入队"
+        );
     }
 }

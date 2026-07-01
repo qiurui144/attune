@@ -9,7 +9,7 @@
 #   3. Smoke         — scripts/smoke-test.sh  (~30s, 必跑)
 #   4. Corpus        — scripts/run-benchmark-corpus.sh  (~5min, 可选 --with-corpus)
 #   5. Quality       — cargo test --release rag_quality_benchmark  (~10s, 必跑)
-#   6. E2E (browser) — Playwright in python/tests/e2e/ (~5min, 可选 --with-e2e)
+#   6. E2E (browser) — repo tests/e2e (~5min, 可选 --with-e2e)
 #
 # 默认: 跑 1+2+3+5（必跑层），合计 ~3-4 min。
 # 可选: --with-corpus 加第 4 层；--with-e2e 加第 6 层。
@@ -133,10 +133,10 @@ else
     warn "Layer 4: Corpus Integration (skipped, 加 --with-corpus 启用)"
 fi
 
-# ── 6. E2E Browser Tests (httpx + Playwright via Python) ──────
+# ── 6. E2E Browser Tests ──────────────────────────────────────
 if [ "$WITH_E2E" = "true" ]; then
     run_layer "e2e" "Layer 6: E2E (server binary + httpx + browser)" \
-    "cd $PROJECT_DIR/python/tests/e2e && npm ci && npx playwright test"
+    "bash $PROJECT_DIR/tests/e2e/run_all.sh"
 else
     RESULTS[e2e]="⏭️ SKIP"
     TIMINGS[e2e]="-"
@@ -151,7 +151,7 @@ fi
     echo "| 3. Smoke         | ${RESULTS[smoke]} | ${COUNTS[smoke]} | ${TIMINGS[smoke]} | binary + API ping |"
     echo "| 4. Corpus        | ${RESULTS[corpus]} | ${COUNTS[corpus]} | ${TIMINGS[corpus]} | real GitHub corpus |"
     echo "| 5. Quality       | ${RESULTS[quality]} | ${COUNTS[quality]} | ${TIMINGS[quality]} | golden set MRR |"
-    echo "| 6. E2E           | ${RESULTS[e2e]} | ${COUNTS[e2e]} | ${TIMINGS[e2e]} | Playwright Chrome |"
+    echo "| 6. E2E           | ${RESULTS[e2e]} | ${COUNTS[e2e]} | ${TIMINGS[e2e]} | tests/e2e |"
     echo ""
     echo "## Summary"
     echo ""

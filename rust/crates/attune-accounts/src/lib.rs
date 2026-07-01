@@ -42,7 +42,10 @@ pub struct AccountsState {
 impl AccountsState {
     /// 注入 license signing key (生产从 env ATTUNE_LICENSE_SIGN_KEY 读取)
     pub fn set_signing_key(&self, sk: [u8; 32]) {
-        *self.license_signing_key.lock().unwrap_or_else(|e| e.into_inner()) = Some(sk);
+        *self
+            .license_signing_key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(sk);
     }
 }
 
@@ -85,7 +88,10 @@ pub fn router(state: AccountsState) -> Router {
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/verify", post(verify_license))
         // License 管理 (admin) — 离线激活码 + 集体授权
-        .route("/api/v1/admin/licenses/generate", post(admin_generate_license))
+        .route(
+            "/api/v1/admin/licenses/generate",
+            post(admin_generate_license),
+        )
         .route("/api/v1/licenses/activate", post(activate_license))
         // 云端 LLM gateway
         .route("/api/v1/admin/llm/configure", post(admin_configure_llm))
@@ -104,7 +110,9 @@ async fn register_device(
     Json(req): Json<RegisterReq>,
 ) -> impl IntoResponse {
     let mut devices = state.devices.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = devices.entry(req.account_id.clone()).or_insert_with(Vec::new);
+    let entry = devices
+        .entry(req.account_id.clone())
+        .or_insert_with(Vec::new);
 
     // 已绑定 (按 device_id) → 续期返回新 license
     if let Some(existing) = entry
@@ -263,14 +271,21 @@ pub struct GenerateLicenseReq {
     pub note: String,
 }
 
-fn default_max_devices() -> usize { 2 }
-fn default_validity_days() -> i64 { 365 }
+fn default_max_devices() -> usize {
+    2
+}
+fn default_validity_days() -> i64 {
+    365
+}
 
 async fn admin_generate_license(
     State(state): State<AccountsState>,
     Json(req): Json<GenerateLicenseReq>,
 ) -> impl IntoResponse {
-    let key_guard = state.license_signing_key.lock().unwrap_or_else(|e| e.into_inner());
+    let key_guard = state
+        .license_signing_key
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let sk = match *key_guard {
         Some(k) => k,
         None => {
@@ -345,7 +360,10 @@ async fn activate_license(
             Json(serde_json::json!({"error": "license expired"})),
         );
     }
-    let mut activated = state.activated_licenses.lock().unwrap_or_else(|e| e.into_inner());
+    let mut activated = state
+        .activated_licenses
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if activated.contains_key(&signed.claims.license_id) {
         // 已激活, 幂等返回原信息
         return (
@@ -384,7 +402,10 @@ async fn admin_configure_llm(
     Json(cfg): Json<LlmGatewayConfig>,
 ) -> impl IntoResponse {
     *state.llm_config.lock().unwrap_or_else(|e| e.into_inner()) = Some(cfg);
-    (StatusCode::OK, Json(serde_json::json!({"status": "configured"})))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "configured"})),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,20 +428,28 @@ async fn get_llm_endpoint(
         }
     };
     // 2. 检查激活状态 + 过期
-    let activated = state.activated_licenses.lock().unwrap_or_else(|e| e.into_inner());
+    let activated = state
+        .activated_licenses
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let act = match activated.get(&signed.claims.license_id) {
         Some(a) => a.clone(),
         None => {
             return (
                 StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "license not activated; call /licenses/activate first"})),
+                Json(
+                    serde_json::json!({"error": "license not activated; call /licenses/activate first"}),
+                ),
             );
         }
     };
     drop(activated);
     let now = chrono::Utc::now().timestamp();
     if signed.claims.is_expired(now) {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "license expired"})));
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "license expired"})),
+        );
     }
     if signed.claims.llm_monthly_quota == 0 {
         return (
@@ -469,7 +498,10 @@ async fn get_llm_endpoint(
 
 fn next_month_start(now_unix: i64) -> i64 {
     use chrono::{Datelike, NaiveDate, TimeZone, Utc};
-    let now = Utc.timestamp_opt(now_unix, 0).single().unwrap_or_else(Utc::now);
+    let now = Utc
+        .timestamp_opt(now_unix, 0)
+        .single()
+        .unwrap_or_else(Utc::now);
     let (y, m) = if now.month() == 12 {
         (now.year() + 1, 1)
     } else {
@@ -608,7 +640,9 @@ mod tests {
 
     fn signing_key() -> [u8; 32] {
         let mut k = [0u8; 32];
-        for (i, slot) in k.iter_mut().enumerate() { *slot = i as u8 + 1; }
+        for (i, slot) in k.iter_mut().enumerate() {
+            *slot = i as u8 + 1;
+        }
         k
     }
 
@@ -636,30 +670,37 @@ mod tests {
         .await
         .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let code = val.get("license_code").and_then(|v| v.as_str()).unwrap().to_string();
+        let code = val
+            .get("license_code")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
 
         // 客户端独立校验 (无云端联系即可)
         let signed = SignedLicense::from_code(&code).unwrap();
-        signed.verify(&pubkey_hex(), chrono::Utc::now().timestamp()).unwrap();
+        signed
+            .verify(&pubkey_hex(), chrono::Utc::now().timestamp())
+            .unwrap();
 
         // 2. 客户端激活
         let resp = activate_license(
             State(state.clone()),
-            Json(ActivateReq { license_code: code.clone() }),
+            Json(ActivateReq {
+                license_code: code.clone(),
+            }),
         )
         .await
         .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
 
         // 3. 再次激活幂等
-        let resp = activate_license(
-            State(state),
-            Json(ActivateReq { license_code: code }),
-        )
-        .await
-        .into_response();
+        let resp = activate_license(State(state), Json(ActivateReq { license_code: code }))
+            .await
+            .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -711,12 +752,9 @@ mod tests {
         );
         let code = signed.to_code().unwrap();
 
-        let resp = get_llm_endpoint(
-            State(state),
-            Json(LlmEndpointReq { license_code: code }),
-        )
-        .await
-        .into_response();
+        let resp = get_llm_endpoint(State(state), Json(LlmEndpointReq { license_code: code }))
+            .await
+            .into_response();
         // 未激活 → 403
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
@@ -750,20 +788,21 @@ mod tests {
         // 激活
         let _ = activate_license(
             State(state.clone()),
-            Json(ActivateReq { license_code: code.clone() }),
+            Json(ActivateReq {
+                license_code: code.clone(),
+            }),
         )
         .await
         .into_response();
 
         // 拿 endpoint
-        let resp = get_llm_endpoint(
-            State(state),
-            Json(LlmEndpointReq { license_code: code }),
-        )
-        .await
-        .into_response();
+        let resp = get_llm_endpoint(State(state), Json(LlmEndpointReq { license_code: code }))
+            .await
+            .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let endpoint = val.get("endpoint").and_then(|v| v.as_str()).unwrap();
         assert_eq!(endpoint, "https://gateway.engi-stack.com/v1");
@@ -791,7 +830,7 @@ mod tests {
                 account_id: "a3".into(),
                 tier: "free".into(),
                 max_devices: 1,
-                llm_monthly_quota: 0,  // 没 LLM 权益
+                llm_monthly_quota: 0, // 没 LLM 权益
                 issued_at: chrono::Utc::now().timestamp(),
                 expires_at: 0,
                 note: "".into(),
@@ -801,16 +840,15 @@ mod tests {
         let code = signed.to_code().unwrap();
         let _ = activate_license(
             State(state.clone()),
-            Json(ActivateReq { license_code: code.clone() }),
+            Json(ActivateReq {
+                license_code: code.clone(),
+            }),
         )
         .await
         .into_response();
-        let resp = get_llm_endpoint(
-            State(state),
-            Json(LlmEndpointReq { license_code: code }),
-        )
-        .await
-        .into_response();
+        let resp = get_llm_endpoint(State(state), Json(LlmEndpointReq { license_code: code }))
+            .await
+            .into_response();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 

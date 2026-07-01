@@ -22,8 +22,8 @@ use crate::error::{Result, VaultError};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
-use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::p1::WasiP1Ctx;
+use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
 /// wasm linear memory 上限(256 MB,per spec §7)。
@@ -112,7 +112,10 @@ impl WasmRunner {
         let stderr = MemoryOutputPipe::new(OUTPUT_PIPE_CAPACITY);
 
         let mut builder = WasiCtxBuilder::new();
-        builder.stdin(stdin).stdout(stdout.clone()).stderr(stderr.clone());
+        builder
+            .stdin(stdin)
+            .stdout(stdout.clone())
+            .stderr(stderr.clone());
 
         // env:<KEY> 白名单:只注入声明了的 env(从 invocation.env 取值)。
         for cap in wasi_caps {
@@ -160,9 +163,8 @@ impl WasmRunner {
 
         // ── linker:挂 WASI preview1 ──
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
-        let link_res = wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |s: &mut HostState| {
-            &mut s.wasi
-        });
+        let link_res =
+            wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |s: &mut HostState| &mut s.wasi);
         if let Err(e) = link_res {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = ticker.join();
@@ -214,9 +216,8 @@ impl WasmRunner {
                     .downcast_ref::<wasmtime::Trap>()
                     .map(|t| matches!(t, wasmtime::Trap::Interrupt))
                     .unwrap_or(false);
-                let is_timeout = is_interrupt_trap
-                    || elapsed >= invocation.timeout
-                    || msg.contains("interrupt");
+                let is_timeout =
+                    is_interrupt_trap || elapsed >= invocation.timeout || msg.contains("interrupt");
                 if is_timeout {
                     return Ok(CapabilityResult {
                         exit_code: -1,
@@ -249,7 +250,10 @@ mod tests {
     /// R1.2 happy path: 常规环境下 shared() 必须成功(行为与旧版一致)。
     #[test]
     fn shared_engine_initializes_ok() {
-        assert!(WasmRunner::shared().is_ok(), "engine init should succeed in a normal env");
+        assert!(
+            WasmRunner::shared().is_ok(),
+            "engine init should succeed in a normal env"
+        );
     }
 
     /// R1.2 degradation: 缓存了 Err 的初始化结果 → 每次取用得到
@@ -261,7 +265,13 @@ mod tests {
             Err("simulated engine init failure".into());
         let err = WasmRunner::from_init(&cached).err().expect("must be Err");
         let msg = err.to_string();
-        assert!(msg.contains("wasm-runtime-unavailable"), "stable error code missing: {msg}");
-        assert!(msg.contains("simulated engine init failure"), "root cause missing: {msg}");
+        assert!(
+            msg.contains("wasm-runtime-unavailable"),
+            "stable error code missing: {msg}"
+        );
+        assert!(
+            msg.contains("simulated engine init failure"),
+            "root cause missing: {msg}"
+        );
     }
 }

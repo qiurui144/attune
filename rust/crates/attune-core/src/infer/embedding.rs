@@ -23,7 +23,11 @@ impl OrtEmbeddingProvider {
         let session = super::provider::build_session(model_path)?;
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| VaultError::Crypto(format!("load tokenizer: {e}")))?;
-        Ok(Self { session: Mutex::new(session), tokenizer, dims })
+        Ok(Self {
+            session: Mutex::new(session),
+            tokenizer,
+            dims,
+        })
     }
 
     /// 便捷构造：自动下载 ONNX embedding 模型。
@@ -55,11 +59,8 @@ impl OrtEmbeddingProvider {
                 1024usize,
             ),
         };
-        let (model_path, tokenizer_path) = super::model_store::ensure_models(
-            repo,
-            file,
-            "tokenizer.json",
-        )?;
+        let (model_path, tokenizer_path) =
+            super::model_store::ensure_models(repo, file, "tokenizer.json")?;
         Self::new(&model_path, &tokenizer_path, dims)
     }
 
@@ -74,7 +75,8 @@ impl OrtEmbeddingProvider {
         }
 
         // 1. Tokenize（截断到 MAX_SEQ_LEN）
-        let encoding = self.tokenizer
+        let encoding = self
+            .tokenizer
             .encode(text, false)
             .map_err(|e| VaultError::Crypto(format!("tokenize: {e}")))?;
 
@@ -84,22 +86,26 @@ impl OrtEmbeddingProvider {
             return Ok(vec![0.0f32; self.dims]);
         }
         let ids: Vec<i64> = encoding.get_ids()[..seq_len]
-            .iter().map(|&x| x as i64).collect();
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
         let masks: Vec<i64> = encoding.get_attention_mask()[..seq_len]
-            .iter().map(|&x| x as i64).collect();
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
 
         // 2. 构建 ort Tensor，使用 (shape_vec, data_vec) 形式
-        let ids_tensor = Tensor::<i64>::from_array(
-            (vec![1usize, seq_len], ids)
-        ).map_err(|e| VaultError::Crypto(format!("ids tensor: {e}")))?;
+        let ids_tensor = Tensor::<i64>::from_array((vec![1usize, seq_len], ids))
+            .map_err(|e| VaultError::Crypto(format!("ids tensor: {e}")))?;
 
         // clone before move: masks 后续用于均值池化
-        let masks_tensor = Tensor::<i64>::from_array(
-            (vec![1usize, seq_len], masks.clone())
-        ).map_err(|e| VaultError::Crypto(format!("masks tensor: {e}")))?;
+        let masks_tensor = Tensor::<i64>::from_array((vec![1usize, seq_len], masks.clone()))
+            .map_err(|e| VaultError::Crypto(format!("masks tensor: {e}")))?;
 
         // 3. ONNX 推理
-        let mut session = self.session.lock()
+        let mut session = self
+            .session
+            .lock()
             .map_err(|_| VaultError::Crypto("session mutex poisoned".into()))?;
         let mut outputs = session
             .run(ort::inputs! {
@@ -110,7 +116,8 @@ impl OrtEmbeddingProvider {
 
         // 4. 取 last_hidden_state 输出（Qwen3-Embedding 标准输出名），shape: [1, seq_len, hidden_dim]
         // 不使用 keys().next() 以避免 HashMap 迭代顺序不确定问题
-        let output_value = outputs.remove("last_hidden_state")
+        let output_value = outputs
+            .remove("last_hidden_state")
             .ok_or_else(|| VaultError::Crypto("ort output 'last_hidden_state' missing".into()))?;
 
         let (shape, flat) = output_value
@@ -119,9 +126,10 @@ impl OrtEmbeddingProvider {
 
         // shape: [batch=1, seq_len, hidden_dim]  (Shape deref to [i64])
         if shape.len() < 3 {
-            return Err(VaultError::Crypto(
-                format!("unexpected tensor rank {}", shape.len())
-            ));
+            return Err(VaultError::Crypto(format!(
+                "unexpected tensor rank {}",
+                shape.len()
+            )));
         }
         let hidden_dim = shape[2] as usize;
 
@@ -141,11 +149,17 @@ impl OrtEmbeddingProvider {
                 }
             }
         }
-        for v in &mut mean { *v /= valid; }
+        for v in &mut mean {
+            *v /= valid;
+        }
 
         // 6. L2 归一化
         let norm: f32 = mean.iter().map(|v| v * v).sum::<f32>().sqrt();
-        if norm > 1e-8 { for v in &mut mean { *v /= norm; } }
+        if norm > 1e-8 {
+            for v in &mut mean {
+                *v /= norm;
+            }
+        }
 
         Ok(mean)
     }

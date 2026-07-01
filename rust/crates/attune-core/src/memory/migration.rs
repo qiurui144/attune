@@ -29,7 +29,12 @@ pub fn reindex_one(
     if v.is_empty() {
         return Ok(0);
     }
-    store.put_memory_vector(memory_id, &v, &emb.model_name(), chrono::Utc::now().timestamp())?;
+    store.put_memory_vector(
+        memory_id,
+        &v,
+        &emb.model_name(),
+        chrono::Utc::now().timestamp(),
+    )?;
     Ok(1)
 }
 
@@ -44,11 +49,22 @@ mod tests {
         let dek = Key32::generate();
         // FK: memory_vectors.memory_id → memories(id) —— 必须先建真记忆拿到真实 UUID。
         store
-            .insert_memory(&dek, "episodic", 1, 2, &["h1".into()], "summary text", "old-model", 1)
+            .insert_memory(
+                &dek,
+                "episodic",
+                1,
+                2,
+                &["h1".into()],
+                "summary text",
+                "old-model",
+                1,
+            )
             .unwrap();
         let id = store.list_recent_memories(&dek, 1).unwrap()[0].id.clone();
         // 旧 model 向量(3 维)入库
-        store.put_memory_vector(&id, &[0.0; 3], "old-model", 1).unwrap();
+        store
+            .put_memory_vector(&id, &[0.0; 3], "old-model", 1)
+            .unwrap();
 
         // 当前 provider 是 4 维 mock → model_name == "embed-dim4"
         let emb = MockEmbeddingProvider::new(4);

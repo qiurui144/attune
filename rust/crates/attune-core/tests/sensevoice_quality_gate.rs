@@ -92,7 +92,11 @@ fn sensevoice_zh_wav_cer_under_threshold() {
         .join("tests")
         .join("assets")
         .join("zh.wav");
-    assert!(wav.exists(), "bundled test wav missing at {}", wav.display());
+    assert!(
+        wav.exists(),
+        "bundled test wav missing at {}",
+        wav.display()
+    );
 
     let backend = SenseVoiceBackend::from_paths(&model, &tokens)
         .expect("construct SenseVoice backend from real assets");

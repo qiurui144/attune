@@ -42,6 +42,6 @@
 pub mod agent;
 
 pub use agent::{
-    compute_links_for_item, purge_links_for_item, ComputedLink, LinkKind,
-    LinkThresholds, LinkerStats,
+    compute_links_for_item, purge_links_for_item, ComputedLink, LinkKind, LinkThresholds,
+    LinkerStats,
 };

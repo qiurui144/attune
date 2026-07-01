@@ -106,9 +106,18 @@ async fn logged_out_user_can_save_full_byok_llm_config() {
         .await
         .expect("json");
     let llm = got.get("llm").expect("llm block");
-    assert_eq!(llm.get("provider").and_then(|v| v.as_str()), Some("openai_compat"));
-    assert_eq!(llm.get("endpoint").and_then(|v| v.as_str()), Some("https://api.openai.com/v1"));
-    assert_eq!(llm.get("model").and_then(|v| v.as_str()), Some("gpt-4o-mini"));
+    assert_eq!(
+        llm.get("provider").and_then(|v| v.as_str()),
+        Some("openai_compat")
+    );
+    assert_eq!(
+        llm.get("endpoint").and_then(|v| v.as_str()),
+        Some("https://api.openai.com/v1")
+    );
+    assert_eq!(
+        llm.get("model").and_then(|v| v.as_str()),
+        Some("gpt-4o-mini")
+    );
     assert_eq!(
         llm.get("api_key_set").and_then(|v| v.as_bool()),
         Some(true),
@@ -143,7 +152,10 @@ async fn free_member_can_save_full_byok_llm_config() {
         .await
         .expect("json");
     assert_eq!(
-        locks.get("cloud_llm").and_then(|v| v.as_str()).unwrap_or(""),
+        locks
+            .get("cloud_llm")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
         "editable",
         "free tier must keep cloud_llm editable for BYOK"
     );
@@ -211,7 +223,10 @@ async fn paid_member_byok_llm_config_is_blocked() {
         "paid member changing endpoint/api_key/provider must be blocked (gateway-metered)"
     );
     let v: serde_json::Value = resp.json().await.unwrap_or(json!({}));
-    assert_eq!(v["error"], "setting_locked_by_member_tier", "stable lock error: {v}");
+    assert_eq!(
+        v["error"], "setting_locked_by_member_tier",
+        "stable lock error: {v}"
+    );
 }
 
 /// C1 regression: a paid login-token carrying a license the verifier does NOT approve (forged /
@@ -240,7 +255,10 @@ async fn forged_paid_license_does_not_upgrade_to_paid() {
         "a forged paid license must be rejected (not silently granted Paid)"
     );
     let v: serde_json::Value = resp.json().await.unwrap_or(json!({}));
-    assert_eq!(v["code"], "paid-verification-failed", "stable wire code: {v}");
+    assert_eq!(
+        v["code"], "paid-verification-failed",
+        "stable wire code: {v}"
+    );
 
     // The member state must NOT be paid: cloud_llm stays editable (free/logged-out matrix).
     let locks: serde_json::Value = client
@@ -252,7 +270,10 @@ async fn forged_paid_license_does_not_upgrade_to_paid() {
         .await
         .expect("json");
     assert_eq!(
-        locks.get("cloud_llm").and_then(|v| v.as_str()).unwrap_or(""),
+        locks
+            .get("cloud_llm")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
         "editable",
         "a rejected paid claim must NOT lock cloud_llm — the user is not Paid"
     );

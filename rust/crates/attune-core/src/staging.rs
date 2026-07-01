@@ -247,7 +247,9 @@ mod tests {
     #[test]
     fn stage_then_load_roundtrip() {
         let (s, _t) = test_staging();
-        let id = s.stage(&meta("upload://a.txt"), b"hello secret world").unwrap();
+        let id = s
+            .stage(&meta("upload://a.txt"), b"hello secret world")
+            .unwrap();
         assert_eq!(s.count(), 1);
         let item = s.load(&id).unwrap();
         assert_eq!(item.content, b"hello secret world");
@@ -284,7 +286,9 @@ mod tests {
     #[test]
     fn unicode_uri_roundtrips() {
         let (s, _t) = test_staging();
-        let id = s.stage(&meta("upload://报告_2026.pdf"), "内容".as_bytes()).unwrap();
+        let id = s
+            .stage(&meta("upload://报告_2026.pdf"), "内容".as_bytes())
+            .unwrap();
         let item = s.load(&id).unwrap();
         assert_eq!(item.meta.uri, "upload://报告_2026.pdf");
         assert_eq!(item.content, "内容".as_bytes());
@@ -376,8 +380,11 @@ mod tests {
         for i in 0..8 {
             let s = Arc::clone(&s);
             handles.push(thread::spawn(move || {
-                s.stage(&meta(&format!("upload://c{i}")), format!("data{i}").as_bytes())
-                    .unwrap()
+                s.stage(
+                    &meta(&format!("upload://c{i}")),
+                    format!("data{i}").as_bytes(),
+                )
+                .unwrap()
             }));
         }
         let ids: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();

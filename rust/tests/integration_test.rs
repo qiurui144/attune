@@ -1,6 +1,6 @@
-use tempfile::TempDir;
 use attune_core::error::VaultError;
 use attune_core::vault::{Vault, VaultState};
+use tempfile::TempDir;
 
 fn setup_vault() -> (Vault, TempDir) {
     let tmp = TempDir::new().unwrap();
@@ -23,11 +23,18 @@ fn e2e_full_lifecycle() {
 
     // 3. Insert encrypted item
     let dek = vault.dek_db().unwrap();
-    let id = vault.store().insert_item(
-        &dek, "我的笔记", "这是机密内容：API key = sk-12345",
-        Some("https://notes.example.com"), "note", Some("notes.example.com"),
-        Some(&["工作".into(), "密钥".into()]),
-    ).unwrap();
+    let id = vault
+        .store()
+        .insert_item(
+            &dek,
+            "我的笔记",
+            "这是机密内容：API key = sk-12345",
+            Some("https://notes.example.com"),
+            "note",
+            Some("notes.example.com"),
+            Some(&["工作".into(), "密钥".into()]),
+        )
+        .unwrap();
 
     // 4. Read back — content decrypted
     let item = vault.store().get_item(&dek, &id).unwrap().unwrap();
@@ -59,13 +66,18 @@ fn e2e_full_lifecycle() {
     vault.verify_session(&token).unwrap();
 
     // 10. Change password
-    vault.change_password("master-pw-123", "new-password").unwrap();
+    vault
+        .change_password("master-pw-123", "new-password")
+        .unwrap();
     vault.lock().unwrap();
     assert!(vault.unlock("master-pw-123").is_err());
     vault.unlock("new-password").unwrap();
     let dek3 = vault.dek_db().unwrap();
     let item3 = vault.store().get_item(&dek3, &id).unwrap().unwrap();
-    assert_eq!(item3.content, "这是机密内容：API key = sk-12345", "Data survives password change");
+    assert_eq!(
+        item3.content, "这是机密内容：API key = sk-12345",
+        "Data survives password change"
+    );
 
     // 11. Delete item
     assert!(vault.store().delete_item(&id).unwrap());
@@ -80,7 +92,18 @@ fn e2e_content_encrypted_at_rest() {
 
     let dek = vault.dek_db().unwrap();
     let distinctive_title = "DistinctivePlaintextTitleForVerification";
-    vault.store().insert_item(&dek, distinctive_title, "SUPER_SECRET_CONTENT_THAT_MUST_BE_ENCRYPTED", None, "note", None, None).unwrap();
+    vault
+        .store()
+        .insert_item(
+            &dek,
+            distinctive_title,
+            "SUPER_SECRET_CONTENT_THAT_MUST_BE_ENCRYPTED",
+            None,
+            "note",
+            None,
+            None,
+        )
+        .unwrap();
 
     // Flush WAL to main database file so we can inspect it
     vault.store().checkpoint().ok();
@@ -110,9 +133,18 @@ fn e2e_multiple_items() {
     let dek = vault.dek_db().unwrap();
 
     for i in 0..10 {
-        vault.store().insert_item(
-            &dek, &format!("Item {i}"), &format!("Content {i}"), None, "note", None, None,
-        ).unwrap();
+        vault
+            .store()
+            .insert_item(
+                &dek,
+                &format!("Item {i}"),
+                &format!("Content {i}"),
+                None,
+                "note",
+                None,
+                None,
+            )
+            .unwrap();
     }
 
     assert_eq!(vault.store().item_count().unwrap(), 10);

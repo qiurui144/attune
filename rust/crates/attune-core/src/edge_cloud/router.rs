@@ -68,7 +68,10 @@ impl From<&crate::member_session::MemberState> for AccountContext {
     fn from(m: &crate::member_session::MemberState) -> Self {
         use crate::member_session::MemberState;
         match m {
-            MemberState::Paid { llm_quota_remaining, .. } => AccountContext {
+            MemberState::Paid {
+                llm_quota_remaining,
+                ..
+            } => AccountContext {
                 tier: AccountTier::Paid,
                 llm_quota_remaining: *llm_quota_remaining,
                 cloud_enabled: *llm_quota_remaining > 0,
@@ -160,7 +163,9 @@ pub fn decide_route(
     if privacy.is_local_only() {
         if !entry.local_capable {
             // L0 不可云 + 本地跑不了 → 宁拒不泄。
-            return RouteDecision::Reject { reason: RejectReason::NotCapableAnywhere };
+            return RouteDecision::Reject {
+                reason: RejectReason::NotCapableAnywhere,
+            };
         }
         return match signal.state {
             // 本地空闲 / Unknown(probe 失败但 local_capable) → 直接本地。
@@ -176,7 +181,9 @@ pub fn decide_route(
 
     // ── 2. 能力图准入：端云都不可行 → 拒 ───────────────────────────────
     if !entry.local_capable && !entry.cloud_capable {
-        return RouteDecision::Reject { reason: RejectReason::NotCapableAnywhere };
+        return RouteDecision::Reject {
+            reason: RejectReason::NotCapableAnywhere,
+        };
     }
 
     // 云准入预算（账户层）。
@@ -201,7 +208,9 @@ pub fn decide_route(
         return if cloud_ok {
             RouteDecision::Cloud
         } else {
-            RouteDecision::Reject { reason: cloud_reject_reason() }
+            RouteDecision::Reject {
+                reason: cloud_reject_reason(),
+            }
         };
     }
 
@@ -238,7 +247,9 @@ pub fn decide_route(
                 RouteDecision::QueueLocal
             } else {
                 // 本地不可用 + 云不准入 → 拒（本地此刻真跑不了）。
-                RouteDecision::Reject { reason: cloud_reject_reason() }
+                RouteDecision::Reject {
+                    reason: cloud_reject_reason(),
+                }
             }
         }
     }
@@ -250,31 +261,64 @@ mod tests {
     use crate::edge_cloud::capacity::CapacitySignal;
 
     fn sig(state: CapacityState) -> CapacitySignal {
-        CapacitySignal { state, eta_ms: 0, mem_headroom_mb: 1024 }
+        CapacitySignal {
+            state,
+            eta_ms: 0,
+            mem_headroom_mb: 1024,
+        }
     }
     fn local_pref() -> CapabilityEntry {
-        CapabilityEntry { local_capable: true, cloud_capable: true, preference: Preference::LocalPreferred }
+        CapabilityEntry {
+            local_capable: true,
+            cloud_capable: true,
+            preference: Preference::LocalPreferred,
+        }
     }
     fn local_strong() -> CapabilityEntry {
-        CapabilityEntry { local_capable: true, cloud_capable: true, preference: Preference::LocalStrong }
+        CapabilityEntry {
+            local_capable: true,
+            cloud_capable: true,
+            preference: Preference::LocalStrong,
+        }
     }
     fn cloud_only() -> CapabilityEntry {
-        CapabilityEntry { local_capable: false, cloud_capable: true, preference: Preference::CloudPreferred }
+        CapabilityEntry {
+            local_capable: false,
+            cloud_capable: true,
+            preference: Preference::CloudPreferred,
+        }
     }
     fn paid(quota: u64) -> AccountContext {
-        AccountContext { tier: AccountTier::Paid, llm_quota_remaining: quota, cloud_enabled: quota > 0 }
+        AccountContext {
+            tier: AccountTier::Paid,
+            llm_quota_remaining: quota,
+            cloud_enabled: quota > 0,
+        }
     }
     fn free_cloud() -> AccountContext {
-        AccountContext { tier: AccountTier::Free, llm_quota_remaining: 0, cloud_enabled: true }
+        AccountContext {
+            tier: AccountTier::Free,
+            llm_quota_remaining: 0,
+            cloud_enabled: true,
+        }
     }
-    fn l1() -> PrivacyClass { PrivacyClass(PrivacyTier::L1) }
-    fn l0() -> PrivacyClass { PrivacyClass(PrivacyTier::L0) }
+    fn l1() -> PrivacyClass {
+        PrivacyClass(PrivacyTier::L1)
+    }
+    fn l0() -> PrivacyClass {
+        PrivacyClass(PrivacyTier::L0)
+    }
 
     // ── happy ──────────────────────────────────────────────────────────────
 
     #[test]
     fn ready_fast_local_capable_routes_local() {
-        let d = decide_route(local_pref(), sig(CapacityState::ReadyFast), l1(), &paid(1000));
+        let d = decide_route(
+            local_pref(),
+            sig(CapacityState::ReadyFast),
+            l1(),
+            &paid(1000),
+        );
         assert_eq!(d, RouteDecision::Local);
     }
 
@@ -286,7 +330,12 @@ mod tests {
 
     #[test]
     fn unavailable_local_capable_spills_to_cloud() {
-        let d = decide_route(local_pref(), sig(CapacityState::Unavailable), l1(), &paid(1000));
+        let d = decide_route(
+            local_pref(),
+            sig(CapacityState::Unavailable),
+            l1(),
+            &paid(1000),
+        );
         assert_eq!(d, RouteDecision::Cloud);
     }
 
@@ -302,7 +351,12 @@ mod tests {
     #[test]
     fn l0_busy_never_goes_cloud_queues_local() {
         // L0 + 本地忙 → 排队本地，绝不 Cloud（核心红线）。
-        let d = decide_route(local_pref(), sig(CapacityState::Queued), l0(), &paid(1_000_000));
+        let d = decide_route(
+            local_pref(),
+            sig(CapacityState::Queued),
+            l0(),
+            &paid(1_000_000),
+        );
         assert_eq!(d, RouteDecision::QueueLocal);
         assert!(!d.requires_egress(), "L0 must never require egress");
     }
@@ -310,33 +364,62 @@ mod tests {
     #[test]
     fn l0_unavailable_never_goes_cloud_queues_local() {
         // L0 + 本地 Unavailable（即使有充足配额、云可行）→ 仍排队本地，不溢出云。
-        let d = decide_route(local_pref(), sig(CapacityState::Unavailable), l0(), &paid(1_000_000));
+        let d = decide_route(
+            local_pref(),
+            sig(CapacityState::Unavailable),
+            l0(),
+            &paid(1_000_000),
+        );
         assert_eq!(d, RouteDecision::QueueLocal);
         assert!(!d.requires_egress());
     }
 
     #[test]
     fn l0_ready_fast_routes_local() {
-        let d = decide_route(local_pref(), sig(CapacityState::ReadyFast), l0(), &paid(1000));
+        let d = decide_route(
+            local_pref(),
+            sig(CapacityState::ReadyFast),
+            l0(),
+            &paid(1000),
+        );
         assert_eq!(d, RouteDecision::Local);
     }
 
     #[test]
     fn l0_not_local_capable_rejects_never_cloud() {
         // L0 + 本地跑不了（35B）→ 宁拒不泄，绝不去云。
-        let d = decide_route(cloud_only(), sig(CapacityState::Unknown), l0(), &paid(1_000_000));
-        assert_eq!(d, RouteDecision::Reject { reason: RejectReason::NotCapableAnywhere });
+        let d = decide_route(
+            cloud_only(),
+            sig(CapacityState::Unknown),
+            l0(),
+            &paid(1_000_000),
+        );
+        assert_eq!(
+            d,
+            RouteDecision::Reject {
+                reason: RejectReason::NotCapableAnywhere
+            }
+        );
         assert!(!d.requires_egress());
     }
 
     #[test]
     fn l0_probe_unknown_routes_local_not_cloud() {
         // L0 + probe 失败(Unknown) + local_capable → 本地（绝不因 Unknown 去云）。
-        let d = decide_route(cloud_only_but_local(), sig(CapacityState::Unknown), l0(), &paid(1000));
+        let d = decide_route(
+            cloud_only_but_local(),
+            sig(CapacityState::Unknown),
+            l0(),
+            &paid(1000),
+        );
         assert_eq!(d, RouteDecision::Local);
     }
     fn cloud_only_but_local() -> CapabilityEntry {
-        CapabilityEntry { local_capable: true, cloud_capable: true, preference: Preference::CloudPreferred }
+        CapabilityEntry {
+            local_capable: true,
+            cloud_capable: true,
+            preference: Preference::CloudPreferred,
+        }
     }
 
     // ── 配额 / 准入 ──────────────────────────────────────────────────────────
@@ -359,15 +442,29 @@ mod tests {
     fn quota_exhausted_cloud_only_rejects_with_upgrade_hint() {
         // 配额=0 + 仅云可行（35B）→ 拒 + 升级提示。
         let d = decide_route(cloud_only(), sig(CapacityState::Unknown), l1(), &paid(0));
-        assert_eq!(d, RouteDecision::Reject { reason: RejectReason::QuotaExhaustedNoLocal });
+        assert_eq!(
+            d,
+            RouteDecision::Reject {
+                reason: RejectReason::QuotaExhaustedNoLocal
+            }
+        );
     }
 
     #[test]
     fn cloud_disabled_cloud_only_rejects() {
         // 用户禁用云 + 仅云可行 → 拒（cloud-disabled）。
-        let acct = AccountContext { tier: AccountTier::Free, llm_quota_remaining: 0, cloud_enabled: false };
+        let acct = AccountContext {
+            tier: AccountTier::Free,
+            llm_quota_remaining: 0,
+            cloud_enabled: false,
+        };
         let d = decide_route(cloud_only(), sig(CapacityState::Unknown), l1(), &acct);
-        assert_eq!(d, RouteDecision::Reject { reason: RejectReason::CloudDisabledNoLocal });
+        assert_eq!(
+            d,
+            RouteDecision::Reject {
+                reason: RejectReason::CloudDisabledNoLocal
+            }
+        );
     }
 
     // ── 本地强偏好（OCR/ASR/rerank 隐私敏感）─────────────────────────────────
@@ -375,14 +472,24 @@ mod tests {
     #[test]
     fn local_strong_busy_queues_local_not_cloud() {
         // 本地强偏好（OCR/ASR）+ 本地忙 → 排队本地，不溢云（即使可云有配额）。
-        let d = decide_route(local_strong(), sig(CapacityState::Queued), l1(), &paid(1_000_000));
+        let d = decide_route(
+            local_strong(),
+            sig(CapacityState::Queued),
+            l1(),
+            &paid(1_000_000),
+        );
         assert_eq!(d, RouteDecision::QueueLocal);
     }
 
     #[test]
     fn local_strong_unavailable_spills_cloud_if_admissible() {
         // 本地强偏好 + Unavailable（本地真跑不了）+ 可云 → 溢出云（非隐私拒，可降级）。
-        let d = decide_route(local_strong(), sig(CapacityState::Unavailable), l1(), &paid(1000));
+        let d = decide_route(
+            local_strong(),
+            sig(CapacityState::Unavailable),
+            l1(),
+            &paid(1000),
+        );
         assert_eq!(d, RouteDecision::Cloud);
     }
 
@@ -397,14 +504,23 @@ mod tests {
 
     #[test]
     fn unknown_cloud_preferred_local_capable_routes_cloud_if_admissible() {
-        let e = CapabilityEntry { local_capable: true, cloud_capable: true, preference: Preference::CloudPreferred };
+        let e = CapabilityEntry {
+            local_capable: true,
+            cloud_capable: true,
+            preference: Preference::CloudPreferred,
+        };
         let d = decide_route(e, sig(CapacityState::Unknown), l1(), &paid(1000));
         assert_eq!(d, RouteDecision::Cloud);
     }
 
     #[test]
     fn free_user_with_own_key_routes_cloud_on_spill() {
-        let d = decide_route(local_pref(), sig(CapacityState::Queued), l1(), &free_cloud());
+        let d = decide_route(
+            local_pref(),
+            sig(CapacityState::Queued),
+            l1(),
+            &free_cloud(),
+        );
         assert_eq!(d, RouteDecision::Cloud);
     }
 
@@ -412,14 +528,20 @@ mod tests {
     fn account_context_from_member_state() {
         use crate::member_session::MemberState;
         let paid = MemberState::Paid {
-            account_id: "a".into(), license_id: "l".into(), llm_quota_remaining: 500,
+            account_id: "a".into(),
+            license_id: "l".into(),
+            llm_quota_remaining: 500,
         };
         let ctx: AccountContext = (&paid).into();
         assert_eq!(ctx.tier, AccountTier::Paid);
         assert_eq!(ctx.llm_quota_remaining, 500);
         assert!(ctx.cloud_enabled);
 
-        let paid0 = MemberState::Paid { account_id: "a".into(), license_id: "l".into(), llm_quota_remaining: 0 };
+        let paid0 = MemberState::Paid {
+            account_id: "a".into(),
+            license_id: "l".into(),
+            llm_quota_remaining: 0,
+        };
         let ctx0: AccountContext = (&paid0).into();
         assert!(!ctx0.cloud_enabled, "quota=0 → cloud not enabled");
 
@@ -432,7 +554,13 @@ mod tests {
         assert_eq!(RouteDecision::Local.as_str(), "local");
         assert_eq!(RouteDecision::QueueLocal.as_str(), "queue-local");
         assert_eq!(RouteDecision::Cloud.as_str(), "cloud");
-        assert_eq!(RouteDecision::Reject { reason: RejectReason::QuotaExhaustedNoLocal }.as_str(), "reject");
+        assert_eq!(
+            RouteDecision::Reject {
+                reason: RejectReason::QuotaExhaustedNoLocal
+            }
+            .as_str(),
+            "reject"
+        );
     }
 
     // ── proptest：隐私不变量 + 永不 panic ──────────────────────────────────
@@ -452,12 +580,20 @@ mod tests {
         (any::<bool>(), any::<bool>(), 0u8..3).prop_map(|(l, c, p)| CapabilityEntry {
             local_capable: l,
             cloud_capable: c,
-            preference: match p { 0 => Preference::LocalPreferred, 1 => Preference::LocalStrong, _ => Preference::CloudPreferred },
+            preference: match p {
+                0 => Preference::LocalPreferred,
+                1 => Preference::LocalStrong,
+                _ => Preference::CloudPreferred,
+            },
         })
     }
     fn arb_account() -> impl Strategy<Value = AccountContext> {
         (0u8..3, any::<u64>(), any::<bool>()).prop_map(|(t, q, e)| AccountContext {
-            tier: match t { 0 => AccountTier::LoggedOut, 1 => AccountTier::Free, _ => AccountTier::Paid },
+            tier: match t {
+                0 => AccountTier::LoggedOut,
+                1 => AccountTier::Free,
+                _ => AccountTier::Paid,
+            },
             llm_quota_remaining: q,
             cloud_enabled: e,
         })

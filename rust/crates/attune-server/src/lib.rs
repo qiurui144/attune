@@ -1,15 +1,15 @@
 pub mod acp_chat;
 pub mod error;
 pub mod eval;
+pub(crate) mod ingest_email;
+pub(crate) mod ingest_git;
+pub(crate) mod ingest_rss;
+pub(crate) mod ingest_webdav;
+pub(crate) mod job_worker;
 pub mod mcp;
+pub(crate) mod middleware;
 pub mod routes;
 pub mod state;
-pub(crate) mod job_worker;
-pub(crate) mod middleware;
-pub(crate) mod ingest_webdav;
-pub(crate) mod ingest_email;
-pub(crate) mod ingest_rss;
-pub(crate) mod ingest_git;
 
 // T1 (v1.0.6 KB-bench, plan 2026-05-28-kb-bench-integration.md Step 9):
 // in-process eval-mode harness used by `tests/eval_determinism_test.rs`.
@@ -20,14 +20,14 @@ pub(crate) mod ingest_git;
 #[doc(hidden)]
 pub mod test_support;
 
+use axum::http::{HeaderValue, Method};
 use axum::middleware as axum_mw;
 use axum::routing::{delete, get, post};
-use axum::http::{HeaderValue, Method};
 use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::EnvFilter;
 
 pub fn is_allowed_origin(s: &str) -> bool {
     s.starts_with("chrome-extension://")
@@ -63,16 +63,40 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/vault/setup", post(routes::vault::vault_setup))
         .route("/api/v1/vault/unlock", post(routes::vault::vault_unlock))
         .route("/api/v1/vault/lock", post(routes::vault::vault_lock))
-        .route("/api/v1/vault/reset-with-recovery-key", post(routes::vault::vault_reset_with_recovery_key))
-        .route("/api/v1/vault/change-password", post(routes::vault::vault_change_password))
-        .route("/api/v1/vault/forgot-password-reset", post(routes::vault::vault_forgot_password_reset))
-        .route("/api/v1/vault/device-secret/export", get(routes::vault::export_device_secret))
-        .route("/api/v1/vault/device-secret/import", post(routes::vault::import_device_secret))
-        .route("/api/v1/vault/staging-status", get(routes::vault::vault_staging_status))
-        .route("/api/v1/vault/auto-unlock", get(routes::vault::vault_get_auto_unlock).put(routes::vault::vault_set_auto_unlock))
+        .route(
+            "/api/v1/vault/reset-with-recovery-key",
+            post(routes::vault::vault_reset_with_recovery_key),
+        )
+        .route(
+            "/api/v1/vault/change-password",
+            post(routes::vault::vault_change_password),
+        )
+        .route(
+            "/api/v1/vault/forgot-password-reset",
+            post(routes::vault::vault_forgot_password_reset),
+        )
+        .route(
+            "/api/v1/vault/device-secret/export",
+            get(routes::vault::export_device_secret),
+        )
+        .route(
+            "/api/v1/vault/device-secret/import",
+            post(routes::vault::import_device_secret),
+        )
+        .route(
+            "/api/v1/vault/staging-status",
+            get(routes::vault::vault_staging_status),
+        )
+        .route(
+            "/api/v1/vault/auto-unlock",
+            get(routes::vault::vault_get_auto_unlock).put(routes::vault::vault_set_auto_unlock),
+        )
         // Status (health check bypasses guard)
         .route("/api/v1/status/health", get(routes::status::health))
-        .route("/api/v1/status/diagnostics", get(routes::status::diagnostics))
+        .route(
+            "/api/v1/status/diagnostics",
+            get(routes::status::diagnostics),
+        )
         // v1.0.1 active version notification(per spec C3)
         .route("/api/v1/version", get(routes::version::get_version))
         // LLM 运维端点（Wizard + Settings）
@@ -80,32 +104,65 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/llm/probe-k3", post(routes::llm::probe_k3))
         .route("/api/v1/models/pull", post(routes::llm::pull_model))
         // 本地模型一键就绪：Ollama 三态 readiness + 一键安装 + LM Studio 探测
-        .route("/api/v1/ollama/readiness", get(routes::llm::ollama_readiness))
+        .route(
+            "/api/v1/ollama/readiness",
+            get(routes::llm::ollama_readiness),
+        )
         .route("/api/v1/ollama/install", post(routes::llm::install_ollama))
         .route("/api/v1/lmstudio/probe", get(routes::llm::lmstudio_probe))
         // Chat (RAG)
         .route("/api/v1/chat", post(routes::chat::chat))
         .route("/api/v1/chat/history", get(routes::chat::chat_history))
         // Chat Sessions
-        .route("/api/v1/chat/sessions", get(routes::chat_sessions::list_sessions))
+        .route(
+            "/api/v1/chat/sessions",
+            get(routes::chat_sessions::list_sessions),
+        )
         .route(
             "/api/v1/chat/sessions/{id}",
             get(routes::chat_sessions::get_session).delete(routes::chat_sessions::delete_session),
         )
         // Document Intelligence (compare / summarize / chapters) — member-gated tier-3
-        .route("/api/v1/documents/compare", post(routes::documents::compare_docs))
-        .route("/api/v1/documents/summarize", post(routes::documents::summarize_doc))
-        .route("/api/v1/documents/chapters", post(routes::documents::chapters_doc))
+        .route(
+            "/api/v1/documents/compare",
+            post(routes::documents::compare_docs),
+        )
+        .route(
+            "/api/v1/documents/summarize",
+            post(routes::documents::summarize_doc),
+        )
+        .route(
+            "/api/v1/documents/chapters",
+            post(routes::documents::chapters_doc),
+        )
         // Writing Engine — grounded narrative generation.
         //   draft / rewrite / outline(forward) / synthesis — 💰 tier-3, member-gated.
         //   outline(reverse) / cite / terms / templates — 🆓/⚡ zero-LLM, ungated.
-        .route("/api/v1/writing/draft", post(routes::writing::draft_writing))
-        .route("/api/v1/writing/rewrite", post(routes::writing::rewrite_writing))
-        .route("/api/v1/writing/outline", post(routes::writing::outline_writing))
+        .route(
+            "/api/v1/writing/draft",
+            post(routes::writing::draft_writing),
+        )
+        .route(
+            "/api/v1/writing/rewrite",
+            post(routes::writing::rewrite_writing),
+        )
+        .route(
+            "/api/v1/writing/outline",
+            post(routes::writing::outline_writing),
+        )
         .route("/api/v1/writing/cite", post(routes::writing::cite_writing))
-        .route("/api/v1/writing/synthesis", post(routes::writing::synthesis_writing))
-        .route("/api/v1/writing/terms", post(routes::writing::terms_writing))
-        .route("/api/v1/writing/templates", get(routes::writing::templates_writing))
+        .route(
+            "/api/v1/writing/synthesis",
+            post(routes::writing::synthesis_writing),
+        )
+        .route(
+            "/api/v1/writing/terms",
+            post(routes::writing::terms_writing),
+        )
+        .route(
+            "/api/v1/writing/templates",
+            get(routes::writing::templates_writing),
+        )
         // Artifact export — IR → downloadable xlsx/csv/md/docx/pdf. 🆓 zero-cost,
         // no LLM, no member gate ("输出表格并下载" / "可直接下载的 doc 或 pdf").
         .route("/api/v1/export", post(routes::export::export_artifact))
@@ -113,91 +170,163 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/ingest", post(routes::ingest::ingest))
         .route("/api/v1/feedback", post(routes::feedback::submit_feedback))
         // Plugin UI form runtime
-        .route("/api/v1/forms/{plugin_id}/{form_id}", get(routes::forms::get_form))
-        .route("/api/v1/forms/{plugin_id}/{form_id}/schema", get(routes::forms::get_form_schema))
-        .route("/api/v1/forms/{plugin_id}/{form_id}/submit", post(routes::forms::submit_form))
+        .route(
+            "/api/v1/forms/{plugin_id}/{form_id}",
+            get(routes::forms::get_form),
+        )
+        .route(
+            "/api/v1/forms/{plugin_id}/{form_id}/schema",
+            get(routes::forms::get_form_schema),
+        )
+        .route(
+            "/api/v1/forms/{plugin_id}/{form_id}/submit",
+            post(routes::forms::submit_form),
+        )
         // Member state + settings locks (UI 灰显决策源)
         .route("/api/v1/member/state", get(routes::member::get_state))
         .route("/api/v1/member/locks", get(routes::member::get_locks))
-        .route("/api/v1/member/login-token", post(routes::member::login_token))
-        .route("/api/v1/member/login-password", post(routes::member::login_password))
-        .route("/api/v1/member/activate-license", post(routes::member::activate_license))
+        .route(
+            "/api/v1/member/login-token",
+            post(routes::member::login_token),
+        )
+        .route(
+            "/api/v1/member/login-password",
+            post(routes::member::login_password),
+        )
+        .route(
+            "/api/v1/member/activate-license",
+            post(routes::member::activate_license),
+        )
         .route("/api/v1/member/logout", post(routes::member::logout))
         // Trust-chain T8: 手动触发一轮 entitlement re-verify (SEC-1/2 gated transition)
-        .route("/api/v1/member/entitlements/refresh", post(routes::member::refresh_entitlements))
+        .route(
+            "/api/v1/member/entitlements/refresh",
+            post(routes::member::refresh_entitlements),
+        )
         // DSAR (GDPR Art.15/17/20 + 中国 PIPL §44-50) — cloud member 数据主权操作
         // 桌面 UI 经此 proxy 到 cloud accounts，密码不持久化
         .route("/api/v1/dsar/export", post(routes::dsar::export_data))
         .route("/api/v1/dsar/delete", post(routes::dsar::delete_account))
-        .route("/api/v1/dsar/cancel-deletion", post(routes::dsar::cancel_deletion))
+        .route(
+            "/api/v1/dsar/cancel-deletion",
+            post(routes::dsar::cancel_deletion),
+        )
         // OCR 场景预设 (CRUD, builtin 不可删/改)
-        .route("/api/v1/ocr/profiles",
-            get(routes::ocr_profiles::list_profiles)
-                .post(routes::ocr_profiles::create_profile))
-        .route("/api/v1/ocr/profiles/{id}",
+        .route(
+            "/api/v1/ocr/profiles",
+            get(routes::ocr_profiles::list_profiles).post(routes::ocr_profiles::create_profile),
+        )
+        .route(
+            "/api/v1/ocr/profiles/{id}",
             axum::routing::put(routes::ocr_profiles::update_profile)
-                .delete(routes::ocr_profiles::delete_profile))
+                .delete(routes::ocr_profiles::delete_profile),
+        )
         // Office helper (v0.7.1) — OCR 同步 + ASR 异步 + WS 进度
-        .route("/api/v1/office/ocr",
-            axum::routing::post(routes::office::post_ocr))
-        .route("/api/v1/office/transcribe",
-            axum::routing::post(routes::office::post_transcribe))
-        .route("/api/v1/office/jobs/{job_id}",
-            get(routes::office::get_job)
-                .delete(routes::office::delete_job))
-        .route("/api/v1/office/jobs/ws",
-            get(routes::office::ws_jobs))
+        .route(
+            "/api/v1/office/ocr",
+            axum::routing::post(routes::office::post_ocr),
+        )
+        .route(
+            "/api/v1/office/transcribe",
+            axum::routing::post(routes::office::post_transcribe),
+        )
+        .route(
+            "/api/v1/office/jobs/{job_id}",
+            get(routes::office::get_job).delete(routes::office::delete_job),
+        )
+        .route("/api/v1/office/jobs/ws", get(routes::office::ws_jobs))
         // G5 durable job queue — 管理面板 (list / cancel / requeue)
         .route("/api/v1/jobs", get(routes::jobs::list_jobs))
-        .route("/api/v1/jobs/{id}/cancel",
-            axum::routing::post(routes::jobs::cancel_job))
-        .route("/api/v1/jobs/{id}/requeue",
-            axum::routing::post(routes::jobs::requeue_job))
+        .route(
+            "/api/v1/jobs/{id}/cancel",
+            axum::routing::post(routes::jobs::cancel_job),
+        )
+        .route(
+            "/api/v1/jobs/{id}/requeue",
+            axum::routing::post(routes::jobs::requeue_job),
+        )
         // Folder links — 只读 (写入由 attune-cli link-folder)
-        .route("/api/v1/folder-links", get(routes::folder_links::list_folder_links))
+        .route(
+            "/api/v1/folder-links",
+            get(routes::folder_links::list_folder_links),
+        )
         // 批注（annotations）CRUD — 所有调用都是用户显式操作，不在建库流水线里自动触发
-        .route("/api/v1/annotations",
-            get(routes::annotations::list_annotations)
-                .post(routes::annotations::create_annotation))
+        .route(
+            "/api/v1/annotations",
+            get(routes::annotations::list_annotations).post(routes::annotations::create_annotation),
+        )
         // AI 分析 — 💰 层：用户显式点"🤖 AI 分析"才触发。不走建库管道。
-        .route("/api/v1/annotations/ai", post(routes::annotations::ai_analyze))
-        .route("/api/v1/annotations/{id}",
+        .route(
+            "/api/v1/annotations/ai",
+            post(routes::annotations::ai_analyze),
+        )
+        .route(
+            "/api/v1/annotations/{id}",
             axum::routing::patch(routes::annotations::update_annotation)
-                .delete(routes::annotations::delete_annotation))
+                .delete(routes::annotations::delete_annotation),
+        )
         .route("/api/v1/items", get(routes::items::list_items))
         .route("/api/v1/items/stale", get(routes::items::list_stale_items))
         // PATCH content 需与 /upload 同享 100MB body limit。
         // 否则 axum 默认 2MB 先拦截，update_item 的 MAX_CONTENT_LEN=100MB 检查成死代码，
         // 且用户能 upload 100MB 文档却无法 PATCH 编辑（2MB 上限）。GET/DELETE 无 body 不受影响。
-        .route("/api/v1/items/{id}",
+        .route(
+            "/api/v1/items/{id}",
             get(routes::items::get_item)
                 .delete(routes::items::delete_item)
                 .patch(routes::items::update_item)
-                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)))
-        .route("/api/v1/items/{id}/stats", get(routes::items::get_item_stats))
+                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)),
+        )
+        .route(
+            "/api/v1/items/{id}/stats",
+            get(routes::items::get_item_stats),
+        )
         // 取回原始证据文件（变体 A「查看证据原文」）
-        .route("/api/v1/items/{id}/original", get(routes::items::get_item_original))
+        .route(
+            "/api/v1/items/{id}/original",
+            get(routes::items::get_item_original),
+        )
         // v0.6 Phase A.5.4 per-file 隐私分级
-        .route("/api/v1/items/protected", get(routes::items::list_protected_items))
+        .route(
+            "/api/v1/items/protected",
+            get(routes::items::list_protected_items),
+        )
         .route(
             "/api/v1/items/{id}/privacy_tier",
-            get(routes::items::get_item_privacy)
-                .patch(routes::items::set_item_privacy),
+            get(routes::items::get_item_privacy).patch(routes::items::set_item_privacy),
         )
-        .route("/api/v1/settings", get(routes::settings::get_settings).patch(routes::settings::update_settings))
+        .route(
+            "/api/v1/settings",
+            get(routes::settings::get_settings).patch(routes::settings::update_settings),
+        )
         // 后台任务控制 + 电源策略(L_hw 电源层 0.4):暂停/恢复 + 电池策略读写 + 状态。
         .route("/api/v1/background/status", get(routes::background::status))
         .route("/api/v1/background/pause", post(routes::background::pause))
-        .route("/api/v1/background/resume", post(routes::background::resume))
-        .route("/api/v1/background/power-policy", post(routes::background::set_power_policy))
+        .route(
+            "/api/v1/background/resume",
+            post(routes::background::resume),
+        )
+        .route(
+            "/api/v1/background/power-policy",
+            post(routes::background::set_power_policy),
+        )
         .route("/api/v1/search", get(routes::search::search))
-        .route("/api/v1/search/relevant", post(routes::search::search_relevant))
+        .route(
+            "/api/v1/search/relevant",
+            post(routes::search::search_relevant),
+        )
         .route("/api/v1/classify/rebuild", post(routes::classify::rebuild))
         .route("/api/v1/classify/drain", post(routes::classify::drain))
         .route("/api/v1/classify/status", get(routes::classify::status))
-        .route("/api/v1/classify/{id}", post(routes::classify::classify_one))
+        .route(
+            "/api/v1/classify/{id}",
+            post(routes::classify::classify_one),
+        )
         .route("/api/v1/tags", get(routes::tags::all_dimensions))
-        .route("/api/v1/tags/{dimension}", get(routes::tags::dimension_histogram))
+        .route(
+            "/api/v1/tags/{dimension}",
+            get(routes::tags::dimension_histogram),
+        )
         .route("/api/v1/clusters", get(routes::clusters::list))
         .route("/api/v1/clusters/rebuild", post(routes::clusters::rebuild))
         .route("/api/v1/clusters/{id}", get(routes::clusters::detail))
@@ -205,7 +334,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // E1 marketplace toggle (W4, 2026-04-27)
         .route("/api/v1/plugins/{id}/toggle", post(routes::plugins::toggle))
         // law-pro 接入阶段 2: 前端触发 plugin agent binary（civil_loan_agent 算金额）
-        .route("/api/v1/agents/{agent_id}/run", post(routes::agents::run_agent))
+        .route(
+            "/api/v1/agents/{agent_id}/run",
+            post(routes::agents::run_agent),
+        )
         // G1 原生 MCP transport (JSON-RPC over HTTP + SSE). scoped-token 自有认证,
         // bypass vault_guard / bearer_auth_guard (见 middleware.rs)。工具契约兼容 attune-mcp-bridge。
         .route("/mcp", post(mcp::transport::mcp_http))
@@ -222,18 +354,36 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // 行业工作台: 聚合已装插件场景卡片（直接入口，bypass chat-trigger）
         .route("/api/v1/scenarios", get(routes::scenarios::list))
         // E4 (2026-05-01) — PluginHub marketplace (默认 Mock provider；attune-pro 注入 hub-client)
-        .route("/api/v1/marketplace/plugins", get(routes::marketplace::list_plugins))
-        .route("/api/v1/marketplace/plugins/{id}/install", post(routes::marketplace::install_plugin))
+        .route(
+            "/api/v1/marketplace/plugins",
+            get(routes::marketplace::list_plugins),
+        )
+        .route(
+            "/api/v1/marketplace/plugins/{id}/install",
+            post(routes::marketplace::install_plugin),
+        )
         .route("/api/v1/skills", get(routes::skills::list_skills))
         // Skills orchestration runtime (CAP-2) — list / estimate (🆓) / run (💰 user-triggered).
         // Distinct from /skills (SkillClaw plugin listing). A run produces a downloadable artifact.
-        .route("/api/v1/skill-runtime/skills", get(routes::skill_runtime::list_runtime_skills))
-        .route("/api/v1/skill-runtime/skills/{id}/estimate", post(routes::skill_runtime::estimate_skill))
-        .route("/api/v1/skill-runtime/skills/{id}/run", post(routes::skill_runtime::run_runtime_skill))
+        .route(
+            "/api/v1/skill-runtime/skills",
+            get(routes::skill_runtime::list_runtime_skills),
+        )
+        .route(
+            "/api/v1/skill-runtime/skills/{id}/estimate",
+            post(routes::skill_runtime::estimate_skill),
+        )
+        .route(
+            "/api/v1/skill-runtime/skills/{id}/run",
+            post(routes::skill_runtime::run_runtime_skill),
+        )
         .route("/api/v1/profile/export", get(routes::profile::export))
         .route("/api/v1/profile/import", post(routes::profile::import))
         // F1 topic distribution (W4, 2026-04-27) — 桌面"我的画像"页后端
-        .route("/api/v1/profile/topic_distribution", get(routes::profile::topic_distribution))
+        .route(
+            "/api/v1/profile/topic_distribution",
+            get(routes::profile::topic_distribution),
+        )
         // Projects / Case 卷宗（Sprint 1 Phase B）
         .route(
             "/api/v1/projects",
@@ -272,22 +422,28 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // G1 Browse signals (W3 batch B, 2026-04-27)
         // per spec docs/superpowers/specs/2026-04-27-w3-batch-b-design.md §3
         // OPT-5 kebab unification: /browse-signals 是新 canonical, /browse_signals 旧 alias 留 1 release
-        .route("/api/v1/browse-signals",
-               post(routes::browse_signals::record_batch)
-                   .get(routes::browse_signals::list)
-                   .delete(routes::browse_signals::delete))
-        .route("/api/v1/browse_signals",
-               post(routes::browse_signals::record_batch)
-                   .get(routes::browse_signals::list)
-                   .delete(routes::browse_signals::delete))
+        .route(
+            "/api/v1/browse-signals",
+            post(routes::browse_signals::record_batch)
+                .get(routes::browse_signals::list)
+                .delete(routes::browse_signals::delete),
+        )
+        .route(
+            "/api/v1/browse_signals",
+            post(routes::browse_signals::record_batch)
+                .get(routes::browse_signals::list)
+                .delete(routes::browse_signals::delete),
+        )
         // C1 Web search cache (W4-002, 2026-04-27) — close C1 loop
         // Settings UI "清空 Web 搜索缓存" 入口
-        .route("/api/v1/web-search-cache",
-               get(routes::web_search_cache::count)
-                   .delete(routes::web_search_cache::delete))
-        .route("/api/v1/web_search_cache",
-               get(routes::web_search_cache::count)
-                   .delete(routes::web_search_cache::delete))
+        .route(
+            "/api/v1/web-search-cache",
+            get(routes::web_search_cache::count).delete(routes::web_search_cache::delete),
+        )
+        .route(
+            "/api/v1/web_search_cache",
+            get(routes::web_search_cache::count).delete(routes::web_search_cache::delete),
+        )
         // AI 底座状态（v0.6.0-rc.3, 2026-04-27）— Embedding / Rerank / OCR / ASR / LLM 可用性
         .route("/api/v1/ai-stack", get(routes::ai_stack::status))
         .route("/api/v1/ai_stack", get(routes::ai_stack::status))
@@ -301,16 +457,21 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         )
         // G2 Auto bookmark candidates (W4, 2026-04-27)
         // POST 不暴露：仅由 routes::browse_signals::record_batch high_engagement 路径写
-        .route("/api/v1/auto-bookmarks",
-               get(routes::auto_bookmarks::list)
-                   .delete(routes::auto_bookmarks::delete))
-        .route("/api/v1/auto_bookmarks",
-               get(routes::auto_bookmarks::list)
-                   .delete(routes::auto_bookmarks::delete))
+        .route(
+            "/api/v1/auto-bookmarks",
+            get(routes::auto_bookmarks::list).delete(routes::auto_bookmarks::delete),
+        )
+        .route(
+            "/api/v1/auto_bookmarks",
+            get(routes::auto_bookmarks::list).delete(routes::auto_bookmarks::delete),
+        )
         // 零成本主动建议引擎(A2):确定性信号→规则→卡。GET 列卡 / dismiss / mute。
         // 成本契约:此 route 零 LLM(evaluate 编译期无 LLM 句柄)。
         .route("/api/v1/suggestions", get(routes::suggestions::list))
-        .route("/api/v1/suggestions/{id}/dismiss", post(routes::suggestions::dismiss))
+        .route(
+            "/api/v1/suggestions/{id}/dismiss",
+            post(routes::suggestions::dismiss),
+        )
         .route(
             "/api/v1/suggestions/mute",
             post(routes::suggestions::mute).delete(routes::suggestions::unmute),
@@ -344,7 +505,10 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // v0.6 Phase A.5.3 隐私出网审计日志（GET 列表 + CSV 导出）
         // 写入由 attune-core::Store::record_outbound 在 LLM provider hook 中触发，不暴露 POST
         .route("/api/v1/audit/outbound", get(routes::audit::list))
-        .route("/api/v1/audit/outbound/export.csv", get(routes::audit::export_csv))
+        .route(
+            "/api/v1/audit/outbound/export.csv",
+            get(routes::audit::export_csv),
+        )
         // v0.7 F1: 新 audit_log 表 + RFC4180 CSV
         .route("/api/v1/audit/log", get(routes::audit::list_log))
         .route("/api/v1/audit/log.csv", get(routes::audit::export_log_csv))
@@ -355,21 +519,36 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         // v1.0.6 Privacy Logic Strategy — 5 outbound points 总览 + 切换 + lock + wipe
         // per docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md §5.1
         .route("/api/v1/privacy/status", get(routes::privacy::status))
-        .route("/api/v1/privacy/settings", axum::routing::patch(routes::privacy::settings_patch))
+        .route(
+            "/api/v1/privacy/settings",
+            axum::routing::patch(routes::privacy::settings_patch),
+        )
         .route("/api/v1/privacy/lock", post(routes::privacy::lock))
-        .route("/api/v1/privacy/wipe-cloud-session", post(routes::privacy::wipe_cloud_session))
+        .route(
+            "/api/v1/privacy/wipe-cloud-session",
+            post(routes::privacy::wipe_cloud_session),
+        )
         // INT-2 document privacy — classify text + dry-run the export egress gate
         // per docs/superpowers/specs/2026-06-20-privacy-layer-enhancement.md §5
         .route("/api/v1/doc-privacy/scan", post(routes::privacy::doc_scan))
-        .route("/api/v1/doc-privacy/export-preview", post(routes::privacy::doc_export_preview))
+        .route(
+            "/api/v1/doc-privacy/export-preview",
+            post(routes::privacy::doc_export_preview),
+        )
         // Status (full status requires vault access)
         .route("/api/v1/status", get(routes::status::status))
         // Index management
         .route("/api/v1/index/bind", post(routes::index::bind_directory))
-        .route("/api/v1/index/bind-remote", post(routes::remote::bind_remote))
+        .route(
+            "/api/v1/index/bind-remote",
+            post(routes::remote::bind_remote),
+        )
         .route("/api/v1/index/bind-git", post(routes::git::bind_git))
         .route("/api/v1/index/sync-git", post(routes::git::sync_git))
-        .route("/api/v1/index/email-accounts", get(routes::email::list_email_accounts))
+        .route(
+            "/api/v1/index/email-accounts",
+            get(routes::email::list_email_accounts),
+        )
         .route("/api/v1/index/bind-email", post(routes::email::bind_email))
         .route(
             "/api/v1/index/email-accounts/{dir_id}",
@@ -395,8 +574,14 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             post(routes::rss::poll_feed_now),
         )
         // 信息监控闭环 —— watch / digest / triage / 问答 / 深度研究 (spec 2026-06-19)
-        .route("/api/v1/monitoring/watches", get(routes::watches::list_watches))
-        .route("/api/v1/monitoring/watches", post(routes::watches::create_watch))
+        .route(
+            "/api/v1/monitoring/watches",
+            get(routes::watches::list_watches),
+        )
+        .route(
+            "/api/v1/monitoring/watches",
+            post(routes::watches::create_watch),
+        )
         .route(
             "/api/v1/monitoring/watches/{id}",
             axum::routing::patch(routes::watches::patch_watch),
@@ -418,23 +603,34 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             post(routes::watches::ask_watch),
         )
         .route("/api/v1/monitoring/scan", post(routes::watches::scan_now))
-        .route("/api/v1/monitoring/research", post(routes::watches::research))
-        .route("/api/v1/index/unbind", delete(routes::index::unbind_directory))
+        .route(
+            "/api/v1/monitoring/research",
+            post(routes::watches::research),
+        )
+        .route(
+            "/api/v1/index/unbind",
+            delete(routes::index::unbind_directory),
+        )
         .route("/api/v1/index/status", get(routes::index::index_status))
         // File upload（multipart body limit 匹配 MAX_UPLOAD_BYTES 100MB；
         // axum 默认 2MB 对扫描版 PDF 不够）。
         // ⚠ 100MB 必须与 routes::upload::MAX_UPLOAD_BYTES 同步。两处都存在是有意设计
         // （此处是框架层拦截 + upload.rs 是应用层第二道防线），见 upload.rs 注释。
-        .route("/api/v1/upload",
+        .route(
+            "/api/v1/upload",
             post(routes::upload::upload_file)
-                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)))
+                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)),
+        )
         // WebSocket endpoints (no vault_guard needed)
         .route("/ws/scan-progress", get(routes::ws::scan_progress))
         // Web UI (embedded single-page HTML)
         .route("/", get(routes::ui::index))
         .route("/ui", get(routes::ui::index))
         // favicon：返回 204 避免浏览器自动请求落空刷 console error
-        .route("/favicon.ico", get(|| async { axum::http::StatusCode::NO_CONTENT }));
+        .route(
+            "/favicon.ico",
+            get(|| async { axum::http::StatusCode::NO_CONTENT }),
+        );
 
     // Non-text content recognition (shared visual-understanding capability, ADR-0008).
     // Feature-gated: only present when built with `--features nontext`; otherwise the
@@ -444,11 +640,20 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
 
     router
         // Guard middleware for all other routes
-        .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::vault_guard))
-        .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::bearer_auth_guard))
+        .layer(axum_mw::from_fn_with_state(
+            shared_state.clone(),
+            middleware::vault_guard,
+        ))
+        .layer(axum_mw::from_fn_with_state(
+            shared_state.clone(),
+            middleware::bearer_auth_guard,
+        ))
         // 访问日志 — 放最外层 (axum middleware 调用顺序: 外 -> 内 -> handler -> 内 -> 外),
         // 保证 4xx 也能记 (即便 vault_guard 拒了请求, access_log 仍记 status).
-        .layer(axum_mw::from_fn_with_state(shared_state.clone(), middleware::access_log))
+        .layer(axum_mw::from_fn_with_state(
+            shared_state.clone(),
+            middleware::access_log,
+        ))
         .layer(cors)
         .with_state(shared_state)
 }
@@ -555,14 +760,18 @@ pub async fn run_in_runtime(
     let is_loopback = {
         use std::net::IpAddr;
         config.host == "localhost"
-            || config.host
+            || config
+                .host
                 .parse::<IpAddr>()
                 .map(|ip| ip.is_loopback())
                 .unwrap_or(false)
     };
     let has_tls = config.tls_cert.is_some() && config.tls_key.is_some();
     if !is_loopback && !has_tls {
-        tracing::warn!("⚠  Server bound to non-loopback '{}' without TLS.", config.host);
+        tracing::warn!(
+            "⚠  Server bound to non-loopback '{}' without TLS.",
+            config.host
+        );
     }
     if !is_loopback && !require_auth {
         tracing::warn!("⚠  Auth disabled on non-loopback '{}'.", config.host);
@@ -625,4 +834,3 @@ pub async fn run_in_runtime(
     tracing::info!("attune-server shut down cleanly");
     Ok(())
 }
-

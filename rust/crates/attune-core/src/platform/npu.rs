@@ -232,7 +232,8 @@ impl NpuStatus {
 
         if self.os == "windows" {
             // Windows:NPU 驱动经 AMD Ryzen AI Software installer。无法可靠探测 → 一律 Manual 引导。
-            plan.missing.push("Windows NPU 驱动状态需人工确认".to_string());
+            plan.missing
+                .push("Windows NPU 驱动状态需人工确认".to_string());
             plan.steps.push(InstallStep {
                 description: "在设备管理器查看 \"AMD IPU Device\" / \"Neural processors\";\
                               缺失则从 AMD Ryzen AI Software 安装 NPU 驱动 (RyzenAI-SW)"
@@ -251,8 +252,10 @@ impl NpuStatus {
 
         // Linux 分支
         if !self.kernel_ok {
-            plan.missing
-                .push(format!("内核 >= {}（当前 {}）", self.min_kernel, self.current_kernel));
+            plan.missing.push(format!(
+                "内核 >= {}（当前 {}）",
+                self.min_kernel, self.current_kernel
+            ));
             plan.steps.push(InstallStep {
                 description: format!(
                     "amdxdna 主线驱动需要内核 >= {}。升级内核(如 Ubuntu HWE 内核或 25.04+)后重试",
@@ -285,7 +288,8 @@ impl NpuStatus {
         }
 
         if !self.firmware_present {
-            plan.missing.push("NPU firmware (/lib/firmware/amdnpu/) 缺失".to_string());
+            plan.missing
+                .push("NPU firmware (/lib/firmware/amdnpu/) 缺失".to_string());
             plan.steps.push(InstallStep {
                 description: "安装/更新 linux-firmware 以获得 amdnpu 固件".to_string(),
                 command: Some("sudo apt-get install -y linux-firmware".to_string()),
@@ -362,7 +366,10 @@ impl NpuStatus {
     /// 人类可读一行诊断。
     pub fn summary(&self) -> String {
         if self.is_ready() {
-            format!("{} — NPU 就绪 ({} TOPS, XDNA{})", self.chip_name, self.tops, self.xdna_version)
+            format!(
+                "{} — NPU 就绪 ({} TOPS, XDNA{})",
+                self.chip_name, self.tops, self.xdna_version
+            )
         } else {
             let plan = self.install_plan();
             format!(
@@ -393,7 +400,10 @@ pub const RYZEN_AI_INSTALL_URL: &str = "https://ryzenai.docs.amd.com/en/latest/i
 /// `ep_lib_present`：已知 VitisAI EP 运行时库(Win `onnxruntime_vitisai_ep.dll` /
 /// Linux `libvitisai_ep` 等)是否存在于磁盘。任一为真即视为已安装。
 pub fn vitisai_runtime_from_signals(env_install_path: Option<&str>, ep_lib_present: bool) -> bool {
-    env_install_path.map(|p| !p.trim().is_empty()).unwrap_or(false) || ep_lib_present
+    env_install_path
+        .map(|p| !p.trim().is_empty())
+        .unwrap_or(false)
+        || ep_lib_present
 }
 
 /// 真机探测 VitisAI 运行时是否已由用户安装(不安装、不下载、只读探测)。
@@ -404,7 +414,9 @@ pub fn vitisai_runtime_present() -> bool {
         .as_deref()
         .map(|root| {
             let p = std::path::Path::new(root);
-            p.join("deployment").join("onnxruntime_vitisai_ep.dll").exists()
+            p.join("deployment")
+                .join("onnxruntime_vitisai_ep.dll")
+                .exists()
                 || p.join("onnxruntime_vitisai_ep.dll").exists()
         })
         .unwrap_or(false);
@@ -471,7 +483,11 @@ pub struct VitisAiAdvice {
 /// 诚实:当前 shipped 构建 `vitis_compiled` 恒 false(见 VitisAiStatus),故 NPU 在场时
 /// 一律 `DirectmlActiveNpuRoadmap` —— 如实告知「已用 DirectML+CPU 同精度,NPU 在路线图上」,
 /// **不**诱导用户去装 Ryzen AI(装了本版也用不上)。`Active` 仅前向兼容保留。
-pub fn vitisai_advice(npu_present: bool, runtime_present: bool, vitis_compiled: bool) -> Option<VitisAiAdvice> {
+pub fn vitisai_advice(
+    npu_present: bool,
+    runtime_present: bool,
+    vitis_compiled: bool,
+) -> Option<VitisAiAdvice> {
     if !npu_present {
         return None;
     }
@@ -559,9 +575,7 @@ fn scan_pci_for_npu() -> Option<&'static AmdNpuChip> {
             continue;
         };
         let revision = parse_hex("revision").unwrap_or(0) as u8;
-        if let Some(chip) =
-            identify_chip_by_pci(vendor as u16, device as u16, revision)
-        {
+        if let Some(chip) = identify_chip_by_pci(vendor as u16, device as u16, revision) {
             return Some(chip);
         }
     }
@@ -633,7 +647,10 @@ mod tests {
     fn pci_revision_fallback_to_device_only() {
         // 未知 revision 但 device 命中 → 退化到 device-only 匹配,不返回 None
         let c = identify_chip_by_pci(0x1022, 0x17f0, 0xff);
-        assert!(c.is_some(), "unknown revision should fall back to device-only match");
+        assert!(
+            c.is_some(),
+            "unknown revision should fall back to device-only match"
+        );
     }
 
     // ── 内核版本比较 ──────────────────────────────────────────
@@ -657,7 +674,15 @@ mod tests {
 
     #[test]
     fn status_all_signals_ready() {
-        let s = NpuStatus::from_signals(chip("strix_point"), true, true, true, "6.14.0-27", true, "linux");
+        let s = NpuStatus::from_signals(
+            chip("strix_point"),
+            true,
+            true,
+            true,
+            "6.14.0-27",
+            true,
+            "linux",
+        );
         assert!(s.is_ready());
         assert!(s.install_plan().is_ready());
         assert!(s.summary().contains("就绪"));
@@ -665,7 +690,8 @@ mod tests {
 
     #[test]
     fn status_driver_not_loaded_yields_consent_modprobe() {
-        let s = NpuStatus::from_signals(chip("phoenix"), false, true, false, "6.14.0", true, "linux");
+        let s =
+            NpuStatus::from_signals(chip("phoenix"), false, true, false, "6.14.0", true, "linux");
         assert!(!s.is_ready());
         let plan = s.install_plan();
         assert!(plan.missing.iter().any(|m| m.contains("amdxdna")));
@@ -680,7 +706,15 @@ mod tests {
 
     #[test]
     fn status_firmware_missing_yields_safe_auto() {
-        let s = NpuStatus::from_signals(chip("strix_point"), true, false, true, "6.14.0", true, "linux");
+        let s = NpuStatus::from_signals(
+            chip("strix_point"),
+            true,
+            false,
+            true,
+            "6.14.0",
+            true,
+            "linux",
+        );
         let plan = s.install_plan();
         assert!(plan.missing.iter().any(|m| m.contains("firmware")));
         let fw = plan
@@ -693,21 +727,33 @@ mod tests {
 
     #[test]
     fn status_old_kernel_yields_manual_upgrade() {
-        let s = NpuStatus::from_signals(chip("strix_point"), false, false, false, "6.8.0-50", true, "linux");
+        let s = NpuStatus::from_signals(
+            chip("strix_point"),
+            false,
+            false,
+            false,
+            "6.8.0-50",
+            true,
+            "linux",
+        );
         assert!(!s.kernel_ok);
         let plan = s.install_plan();
         assert!(plan.missing.iter().any(|m| m.contains("内核")));
         // 老内核下 amdxdna 步骤应为 Manual(不给裸 modprobe)
         assert!(plan.steps.iter().any(|st| st.danger == Danger::Manual));
         assert!(
-            !plan.steps.iter().any(|st| st.command.as_deref() == Some("sudo modprobe amdxdna")),
+            !plan
+                .steps
+                .iter()
+                .any(|st| st.command.as_deref() == Some("sudo modprobe amdxdna")),
             "must not suggest modprobe when kernel too old"
         );
     }
 
     #[test]
     fn status_iommu_off_flagged_manual() {
-        let s = NpuStatus::from_signals(chip("phoenix"), true, true, true, "6.14.0", false, "linux");
+        let s =
+            NpuStatus::from_signals(chip("phoenix"), true, true, true, "6.14.0", false, "linux");
         assert!(!s.is_ready());
         let plan = s.install_plan();
         assert!(plan.missing.iter().any(|m| m.contains("IOMMU")));
@@ -726,13 +772,24 @@ mod tests {
         for &all_present in &[true, false] {
             let s = NpuStatus::from_signals(
                 chip("strix_point"),
-                all_present, all_present, all_present, "6.8.0", all_present, "linux",
+                all_present,
+                all_present,
+                all_present,
+                "6.8.0",
+                all_present,
+                "linux",
             );
             for st in s.install_plan().steps {
                 if let Some(cmd) = &st.command {
-                    assert!(st.consent_required, "command step must require consent: {cmd}");
+                    assert!(
+                        st.consent_required,
+                        "command step must require consent: {cmd}"
+                    );
                     assert!(!cmd.contains("rm "), "no rm in any auto command: {cmd}");
-                    assert!(!cmd.contains("dkms"), "dkms is manual-only, never a command: {cmd}");
+                    assert!(
+                        !cmd.contains("dkms"),
+                        "dkms is manual-only, never a command: {cmd}"
+                    );
                     assert!(
                         !cmd.contains("reboot") && !cmd.contains("mkinitcpio"),
                         "no kernel-altering auto command: {cmd}"
@@ -748,12 +805,23 @@ mod tests {
 
     #[test]
     fn windows_plan_is_manual_installer_guidance() {
-        let s = NpuStatus::from_signals(chip("strix_point"), false, false, false, "0", true, "windows");
+        let s = NpuStatus::from_signals(
+            chip("strix_point"),
+            false,
+            false,
+            false,
+            "0",
+            true,
+            "windows",
+        );
         let plan = s.install_plan();
         assert!(!plan.steps.is_empty());
         let step = &plan.steps[0];
         assert_eq!(step.danger, Danger::Manual);
-        assert!(step.command.is_none(), "windows install has no auto command");
+        assert!(
+            step.command.is_none(),
+            "windows install has no auto command"
+        );
         assert!(step.description.contains("RyzenAI-SW"));
     }
 
@@ -781,7 +849,10 @@ mod tests {
 
     #[test]
     fn runtime_signals_env_or_lib_means_present() {
-        assert!(vitisai_runtime_from_signals(Some(r"C:\Program Files\RyzenAI\1.7.1"), false));
+        assert!(vitisai_runtime_from_signals(
+            Some(r"C:\Program Files\RyzenAI\1.7.1"),
+            false
+        ));
         assert!(vitisai_runtime_from_signals(None, true));
         assert!(vitisai_runtime_from_signals(Some("/opt/ryzen-ai"), true));
     }
@@ -809,10 +880,17 @@ mod tests {
         // 当前 shipped 现实:vitis 未编入 → NPU 在场也走 DirectML+CPU,NPU 列路线图。
         for &(rt, compiled) in &[(false, false), (true, false), (false, true)] {
             let a = vitisai_advice(true, rt, compiled).unwrap();
-            assert_eq!(a.status, VitisAiStatus::DirectmlActiveNpuRoadmap, "rt={rt} compiled={compiled}");
+            assert_eq!(
+                a.status,
+                VitisAiStatus::DirectmlActiveNpuRoadmap,
+                "rt={rt} compiled={compiled}"
+            );
             assert!(a.npu_roadmap);
             // 数据一定带上(同精度 CER + 双路 p50)。
-            assert_eq!(a.benchmark.npu_ocr_cer_pct, a.benchmark.directml_ocr_cer_pct);
+            assert_eq!(
+                a.benchmark.npu_ocr_cer_pct,
+                a.benchmark.directml_ocr_cer_pct
+            );
             assert!(a.benchmark.npu_p50_ms > a.benchmark.directml_p50_ms); // NPU 慢但省电
         }
     }
@@ -829,7 +907,10 @@ mod tests {
     fn advice_serializes_with_kebab_status() {
         let a = vitisai_advice(true, false, false).unwrap();
         let j = serde_json::to_string(&a).unwrap();
-        assert!(j.contains("\"directml-active-npu-roadmap\""), "status kebab-case: {j}");
+        assert!(
+            j.contains("\"directml-active-npu-roadmap\""),
+            "status kebab-case: {j}"
+        );
         assert!(j.contains("\"benchmark\""));
         assert!(j.contains("ryzenai.docs.amd.com"));
         assert!(!j.contains("recommend"), "no misleading install CTA: {j}");

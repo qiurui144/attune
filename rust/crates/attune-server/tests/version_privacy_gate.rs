@@ -21,7 +21,11 @@ async fn version_update_check_gated_off_by_default() {
         .send()
         .await
         .expect("vault setup");
-    assert!(resp.status().is_success(), "vault setup failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "vault setup failed: {}",
+        resp.status()
+    );
 
     let t = std::time::Instant::now();
     let resp = client
@@ -42,7 +46,9 @@ async fn version_update_check_gated_off_by_default() {
         "no latest_available when gated; body={body}"
     );
     assert!(
-        body.get("current").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()),
+        body.get("current")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty()),
         "current version always present; body={body}"
     );
     // Gated path never touches the network — generous CI bound, but well under

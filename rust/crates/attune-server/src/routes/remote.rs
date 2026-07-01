@@ -65,7 +65,10 @@ pub async fn bind_remote(
             username: body.username.clone(),
             password: body.password.clone(),
             depth: body.depth,
-            corpus_domain: body.corpus_domain.clone().unwrap_or_else(|| "general".into()),
+            corpus_domain: body
+                .corpus_domain
+                .clone()
+                .unwrap_or_else(|| "general".into()),
         };
         if let Err(e) = vault.store().upsert_webdav_remote(&dek, &input) {
             return Err(AppError::Internal(format!("persist webdav remote: {e}")));
@@ -73,7 +76,10 @@ pub async fn bind_remote(
     }
 
     // WebDAV I/O 是阻塞的 —— 在 spawn_blocking 里跑，不阻塞 axum worker。
-    let corpus_domain = body.corpus_domain.clone().unwrap_or_else(|| "general".into());
+    let corpus_domain = body
+        .corpus_domain
+        .clone()
+        .unwrap_or_else(|| "general".into());
     let state_clone = state.clone();
     let dir_id_clone = dir_id.clone();
     let scan = tokio::task::spawn_blocking(move || {

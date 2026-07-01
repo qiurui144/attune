@@ -162,11 +162,7 @@ impl SourceHealth {
 /// `probe_repo` / `probe_file`:探测用的标准小文件(各源都该有);默认用 embedding tokenizer
 /// (各 HF 兼容源通常都有 Xenova/bge-m3)。该 repo 必须落在源的 `coverage` 内,否则探测必 404
 /// —— 调用方(`probe_source`)对 `OnlyXenovaOnnx` 源已用 Xenova repo,匹配。
-fn probe_source_with(
-    source: &ModelSource,
-    probe_repo: &str,
-    probe_file: &str,
-) -> SourceHealth {
+fn probe_source_with(source: &ModelSource, probe_repo: &str, probe_file: &str) -> SourceHealth {
     // WHY 独立线程:`reqwest::blocking::Client` 内部自建 tokio runtime,其析构会 block
     // 关闭后台线程。本函数是同步 API,但可被 async 上下文同步调用(vault/setup handler →
     // init_search_engines → resolve_sources → 此处),那时 client 在 tokio worker 线程上
@@ -174,7 +170,10 @@ fn probe_source_with(
     // 把整段 blocking HTTP 隔离到普通 OS 线程(blocking 合法),与 embed.rs/llm.rs 同模式 —
     // runtime 在该线程内创建并析构,与调用方是否 async 无关。
     let source_id = source.id.clone();
-    let url = format!("{}/{}/resolve/main/{}", source.endpoint, probe_repo, probe_file);
+    let url = format!(
+        "{}/{}/resolve/main/{}",
+        source.endpoint, probe_repo, probe_file
+    );
     let id_in = source_id.clone();
     let handle = std::thread::spawn(move || -> SourceHealth {
         let client = match reqwest::blocking::Client::builder()
@@ -335,14 +334,23 @@ fn resolve_sources_with(
     let order = select_failover_order(&probed, repo_id, region);
     {
         let mut cache = resolution_cache().lock().unwrap_or_else(|e| e.into_inner());
-        cache.insert(key, CachedResolution { order: order.clone(), cached_at_unix: now });
+        cache.insert(
+            key,
+            CachedResolution {
+                order: order.clone(),
+                cached_at_unix: now,
+            },
+        );
     }
     order
 }
 
 /// 清空进程内选源缓存(测试隔离 / 显式"强制重探"用,如用户在 Settings 手动切区域)。
 pub fn clear_resolution_cache() {
-    resolution_cache().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    resolution_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 /// 当前(检测区域,Full-class)缓存桶的首选源 id —— 供下载后持久化(`persist_used_source`)。
@@ -544,7 +552,10 @@ pub fn seed_resolution_cache_from_settings(settings: &serde_json::Value, region:
     for is_xenova in [false, true] {
         cache.insert(
             (region == Region::China, is_xenova),
-            CachedResolution { order: vec![seeded.clone()], cached_at_unix: sel.probed_at_unix },
+            CachedResolution {
+                order: vec![seeded.clone()],
+                cached_at_unix: sel.probed_at_unix,
+            },
         );
         n += 1;
     }
@@ -554,10 +565,7 @@ pub fn seed_resolution_cache_from_settings(settings: &serde_json::Value, region:
 /// 把刚成功用过的源(`source_id`)持久化进 `app_settings`(供下次冷启动 seed)。纯函数返回
 /// 新 JSON(调用方负责落 store),对齐 `write_selected_source` 的无 IO 约定。`None` = 未知源
 /// (不写)。这让 `download_with_failover` 报出的 winning source 真正进入持久层(非死代码)。
-pub fn persist_used_source(
-    settings: serde_json::Value,
-    source_id: &str,
-) -> serde_json::Value {
+pub fn persist_used_source(settings: serde_json::Value, source_id: &str) -> serde_json::Value {
     let Some(source) = builtin_sources().into_iter().find(|s| s.id == source_id) else {
         return settings; // env: 覆盖等非注册表源不持久化
     };
@@ -625,7 +633,10 @@ mod tests {
         }
         let ms = builtin_sources();
         let c = ms.iter().find(|s| s.id == "company-mirror").unwrap();
-        assert!(!c.endpoint.ends_with('/'), "endpoint must have no trailing slash");
+        assert!(
+            !c.endpoint.ends_with('/'),
+            "endpoint must have no trailing slash"
+        );
     }
 
     #[test]
@@ -772,14 +783,32 @@ mod tests {
     fn select_filters_unreachable_and_uncovered() {
         let probed = vec![
             // 不覆盖 whisper(OnlyXenovaOnnx)→ 剔除
-            (srch("ms", 80, Some(Region::China), SourceCoverage::OnlyXenovaOnnx), health("ms", true, 5e6)),
+            (
+                srch(
+                    "ms",
+                    80,
+                    Some(Region::China),
+                    SourceCoverage::OnlyXenovaOnnx,
+                ),
+                health("ms", true, 5e6),
+            ),
             // 不可达 → 剔除
-            (srch("dead", 100, None, SourceCoverage::Full), health("dead", false, 0.0)),
+            (
+                srch("dead", 100, None, SourceCoverage::Full),
+                health("dead", false, 0.0),
+            ),
             // healthy + 覆盖 → 保留
-            (srch("ok", 60, None, SourceCoverage::Full), health("ok", true, 1e6)),
+            (
+                srch("ok", 60, None, SourceCoverage::Full),
+                health("ok", true, 1e6),
+            ),
         ];
         let order = select_failover_order(&probed, "ggerganov/whisper.cpp", Region::International);
-        assert_eq!(order.len(), 1, "only the covering+reachable source survives");
+        assert_eq!(
+            order.len(),
+            1,
+            "only the covering+reachable source survives"
+        );
         assert_eq!(order[0].id, "ok");
     }
 
@@ -788,8 +817,14 @@ mod tests {
         // 两源都 Full + healthy:throughput×priority 决定序。
         // fast: 4MB/s × 50 = 2e8;slow: 1MB/s × 100 = 1e8 → fast 应在前。
         let probed = vec![
-            (srch("slow", 100, None, SourceCoverage::Full), health("slow", true, 1e6)),
-            (srch("fast", 50, None, SourceCoverage::Full), health("fast", true, 4e6)),
+            (
+                srch("slow", 100, None, SourceCoverage::Full),
+                health("slow", true, 1e6),
+            ),
+            (
+                srch("fast", 50, None, SourceCoverage::Full),
+                health("fast", true, 4e6),
+            ),
         ];
         let order = select_failover_order(&probed, "Xenova/bge-m3", Region::International);
         assert_eq!(order[0].id, "fast", "higher throughput×priority wins");
@@ -800,8 +835,19 @@ mod tests {
     fn select_region_hint_boosts_same_region() {
         // 两源 throughput×priority 持平(都 = 1e6×60 = 6e7);CN 区时 CN-hint 源因 1.5x 偏置抬前。
         let probed = vec![
-            (srch("intl", 60, Some(Region::International), SourceCoverage::Full), health("intl", true, 1e6)),
-            (srch("cn", 60, Some(Region::China), SourceCoverage::Full), health("cn", true, 1e6)),
+            (
+                srch(
+                    "intl",
+                    60,
+                    Some(Region::International),
+                    SourceCoverage::Full,
+                ),
+                health("intl", true, 1e6),
+            ),
+            (
+                srch("cn", 60, Some(Region::China), SourceCoverage::Full),
+                health("cn", true, 1e6),
+            ),
         ];
         let order = select_failover_order(&probed, "Xenova/bge-m3", Region::China);
         assert_eq!(order[0].id, "cn", "CN-region source boosted in CN region");
@@ -812,22 +858,45 @@ mod tests {
         // region 偏置只是 1.5x,不该让一个极慢的同区源压过区外快源(§12:实测能翻盘)。
         // cn(同区): 1e5 × 60 × 1.5 = 9e6;intl(区外): 1e6 × 60 × 1 = 6e7 → intl 仍在前。
         let probed = vec![
-            (srch("cn", 60, Some(Region::China), SourceCoverage::Full), health("cn", true, 1e5)),
-            (srch("intl", 60, Some(Region::International), SourceCoverage::Full), health("intl", true, 1e6)),
+            (
+                srch("cn", 60, Some(Region::China), SourceCoverage::Full),
+                health("cn", true, 1e5),
+            ),
+            (
+                srch(
+                    "intl",
+                    60,
+                    Some(Region::International),
+                    SourceCoverage::Full,
+                ),
+                health("intl", true, 1e6),
+            ),
         ];
         let order = select_failover_order(&probed, "Xenova/bge-m3", Region::China);
-        assert_eq!(order[0].id, "intl", "fast out-of-region must beat slow in-region");
+        assert_eq!(
+            order[0].id, "intl",
+            "fast out-of-region must beat slow in-region"
+        );
     }
 
     #[test]
     fn select_empty_when_no_eligible() {
         let probed = vec![
-            (srch("dead", 100, None, SourceCoverage::Full), health("dead", false, 0.0)),
-            (srch("ms", 80, None, SourceCoverage::OnlyXenovaOnnx), health("ms", true, 5e6)),
+            (
+                srch("dead", 100, None, SourceCoverage::Full),
+                health("dead", false, 0.0),
+            ),
+            (
+                srch("ms", 80, None, SourceCoverage::OnlyXenovaOnnx),
+                health("ms", true, 5e6),
+            ),
         ];
         // whisper 不被 OnlyXenovaOnnx 覆盖,dead 不可达 → 空
         let order = select_failover_order(&probed, "ggerganov/whisper.cpp", Region::China);
-        assert!(order.is_empty(), "no eligible source → empty failover order");
+        assert!(
+            order.is_empty(),
+            "no eligible source → empty failover order"
+        );
     }
 
     // --- download_with_failover(集成:逐源下载 + 切次优)。这些测试 mutate HF_ENDPOINT
@@ -936,7 +1005,10 @@ mod tests {
         let first = resolve_sources_with("Xenova/bge-m3", Region::China, &probe);
         let after_first = count.load(std::sync::atomic::Ordering::SeqCst);
         assert!(after_first > 0, "first resolve must probe at least once");
-        assert!(!first.is_empty(), "company-mirror healthy → non-empty order");
+        assert!(
+            !first.is_empty(),
+            "company-mirror healthy → non-empty order"
+        );
 
         // 第二次同 (region, class):fresh 命中 → probe_fn 零调用,顺序一致。
         let second = resolve_sources_with("Xenova/bge-reranker-base", Region::China, &probe);
@@ -967,7 +1039,10 @@ mod tests {
         let after_full = count.load(std::sync::atomic::Ordering::SeqCst);
         let _ = resolve_sources_with("Xenova/bge-m3", Region::China, &probe);
         let after_xenova = count.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(after_xenova > after_full, "distinct class bucket must probe (not reuse Full bucket)");
+        assert!(
+            after_xenova > after_full,
+            "distinct class bucket must probe (not reuse Full bucket)"
+        );
         clear_resolution_cache();
     }
 
@@ -992,7 +1067,11 @@ mod tests {
             health(&s.id, true, 1e6)
         };
         let order = resolve_sources_with("SWHL/RapidOCR", Region::China, &probe);
-        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0, "seeded cache → no probe");
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "seeded cache → no probe"
+        );
         assert_eq!(order.first().map(|s| s.id.as_str()), Some("company-mirror"));
         clear_resolution_cache();
     }
@@ -1008,7 +1087,10 @@ mod tests {
             probed_at_unix: now_unix().saturating_sub(SELECTED_SOURCE_TTL_SECS + 100),
         };
         let settings = write_selected_source(serde_json::json!({}), &sel);
-        assert_eq!(seed_resolution_cache_from_settings(&settings, Region::China), 0);
+        assert_eq!(
+            seed_resolution_cache_from_settings(&settings, Region::China),
+            0
+        );
         clear_resolution_cache();
     }
 
@@ -1021,7 +1103,10 @@ mod tests {
         assert_eq!(back.source_id, "modelscope");
         // 非注册表源(env: 覆盖)不写。
         let unchanged = persist_used_source(serde_json::json!({"x": 2}), "env:http://foo");
-        assert!(read_selected_source(&unchanged).is_none(), "non-registry source not persisted");
+        assert!(
+            read_selected_source(&unchanged).is_none(),
+            "non-registry source not persisted"
+        );
     }
 
     // --- 选定源缓存(§12.3:settings 持久化 + TTL 新鲜度)。纯 JSON,无 IO/无 env。 ---
@@ -1074,9 +1159,15 @@ mod tests {
         // 刚探测 → 新鲜
         assert!(selected_source_is_fresh(&sel, 1000));
         // TTL 内 → 新鲜
-        assert!(selected_source_is_fresh(&sel, 1000 + SELECTED_SOURCE_TTL_SECS - 1));
+        assert!(selected_source_is_fresh(
+            &sel,
+            1000 + SELECTED_SOURCE_TTL_SECS - 1
+        ));
         // 超 TTL → 过期(应重探)
-        assert!(!selected_source_is_fresh(&sel, 1000 + SELECTED_SOURCE_TTL_SECS + 1));
+        assert!(!selected_source_is_fresh(
+            &sel,
+            1000 + SELECTED_SOURCE_TTL_SECS + 1
+        ));
         // 时钟回拨(now < probed_at)→ 视为新鲜,不误判过期
         assert!(selected_source_is_fresh(&sel, 500));
     }
@@ -1093,7 +1184,10 @@ mod tests {
         let used = download_with_failover(&sources, "Xenova/bge-m3", "model.bin", &dst)
             .expect("explicit HF_ENDPOINT must be honored");
         handle.join().unwrap();
-        assert!(used.starts_with("env:"), "must report env override, got {used}");
+        assert!(
+            used.starts_with("env:"),
+            "must report env override, got {used}"
+        );
         assert_eq!(std::fs::read(&dst).unwrap(), b"VIA-ENV");
     }
 

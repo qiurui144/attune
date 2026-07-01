@@ -167,9 +167,9 @@ impl Store {
 
     /// Read a job by id. None if absent.
     pub fn get_job(&self, id: &str) -> Result<Option<JobRecord>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(&format!("SELECT {SELECT_COLS} FROM job_queue WHERE id = ?1"))?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SELECT_COLS} FROM job_queue WHERE id = ?1"
+        ))?;
         let mut rows = stmt.query_map(params![id], row_to_record)?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
@@ -458,7 +458,8 @@ impl Store {
             binds.iter().map(|b| b as &dyn rusqlite::ToSql).collect();
         p.push(&limit_i);
         let rows = stmt.query_map(p.as_slice(), row_to_record)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 }
 
@@ -507,12 +508,18 @@ mod tests {
     fn claim_next_transitions_queued_to_running_and_sets_started() {
         let store = Store::open_memory().unwrap();
         let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
-        let claimed = store.claim_next_job().unwrap().expect("a queued job exists");
+        let claimed = store
+            .claim_next_job()
+            .unwrap()
+            .expect("a queued job exists");
         assert_eq!(claimed.id, id);
         assert_eq!(claimed.state, JobState::Running);
         assert!(claimed.started_ms.is_some());
         // Re-reading confirms it is durably Running (claim is committed, not in-memory).
-        assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Running);
+        assert_eq!(
+            store.get_job(&id).unwrap().unwrap().state,
+            JobState::Running
+        );
     }
 
     #[test]
@@ -524,8 +531,12 @@ mod tests {
     #[test]
     fn claim_respects_priority_then_fifo() {
         let store = Store::open_memory().unwrap();
-        let _low = store.enqueue_job(JobKind::Asr, "{\"n\":1}", 0, None).unwrap();
-        let high = store.enqueue_job(JobKind::Asr, "{\"n\":2}", 10, None).unwrap();
+        let _low = store
+            .enqueue_job(JobKind::Asr, "{\"n\":1}", 0, None)
+            .unwrap();
+        let high = store
+            .enqueue_job(JobKind::Asr, "{\"n\":2}", 10, None)
+            .unwrap();
         // Higher priority claimed first despite being enqueued later.
         assert_eq!(store.claim_next_job().unwrap().unwrap().id, high);
     }
@@ -535,13 +546,16 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         store.claim_next_job().unwrap().unwrap(); // now Running
-        // Nothing left to claim.
+                                                  // Nothing left to claim.
         assert!(store.claim_next_job().unwrap().is_none());
         // A cancelled job is also never claimed.
         let c = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         store.cancel_job(&c).unwrap();
         let next = store.claim_next_job().unwrap();
-        assert!(next.is_none(), "cancelled job must not be claimed; got {next:?}");
+        assert!(
+            next.is_none(),
+            "cancelled job must not be claimed; got {next:?}"
+        );
         let _ = id;
     }
 
@@ -590,7 +604,10 @@ mod tests {
             .update_job_progress(&id, Some("{\"stage\":\"transcribing\"}"), 0.5)
             .unwrap();
         let j = store.get_job(&id).unwrap().unwrap();
-        assert_eq!(j.stage_json.as_deref(), Some("{\"stage\":\"transcribing\"}"));
+        assert_eq!(
+            j.stage_json.as_deref(),
+            Some("{\"stage\":\"transcribing\"}")
+        );
         assert!((j.progress - 0.5).abs() < 1e-6);
     }
 
@@ -615,7 +632,10 @@ mod tests {
         store.claim_next_job().unwrap();
         store.cancel_job(&id).unwrap();
         assert!(!store.complete_job(&id, "{}").unwrap());
-        assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Cancelled);
+        assert_eq!(
+            store.get_job(&id).unwrap().unwrap().state,
+            JobState::Cancelled
+        );
     }
 
     #[test]
@@ -623,7 +643,9 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         store.claim_next_job().unwrap();
-        assert!(store.fail_job(&id, "asr-engine-failed", "whisper exited 1").unwrap());
+        assert!(store
+            .fail_job(&id, "asr-engine-failed", "whisper exited 1")
+            .unwrap());
         let j = store.get_job(&id).unwrap().unwrap();
         assert_eq!(j.state, JobState::Failed);
         let e = j.error.unwrap();
@@ -671,7 +693,10 @@ mod tests {
         assert!(store.set_job_priority(&id, 7).unwrap());
         assert_eq!(store.get_job(&id).unwrap().unwrap().priority, 7);
         store.claim_next_job().unwrap();
-        assert!(!store.set_job_priority(&id, 9).unwrap(), "running job not reprioritizable");
+        assert!(
+            !store.set_job_priority(&id, 9).unwrap(),
+            "running job not reprioritizable"
+        );
     }
 
     #[test]
@@ -691,7 +716,11 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert_eq!(store.job_queue_position(&high).unwrap(), 0, "high prio is next");
+        assert_eq!(
+            store.job_queue_position(&high).unwrap(),
+            0,
+            "high prio is next"
+        );
         assert_eq!(store.job_queue_position(&a).unwrap(), 1);
         assert_eq!(store.job_queue_position(&b).unwrap(), 2);
         // Unknown / non-queued → 0 (JobRegistry parity).
@@ -736,7 +765,10 @@ mod tests {
         let queued = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         store.recover_on_boot().unwrap();
         assert_eq!(store.get_job(&done).unwrap().unwrap().state, JobState::Done);
-        assert_eq!(store.get_job(&queued).unwrap().unwrap().state, JobState::Queued);
+        assert_eq!(
+            store.get_job(&queued).unwrap().unwrap().state,
+            JobState::Queued
+        );
     }
 
     #[test]
@@ -806,7 +838,10 @@ mod tests {
             )
             .unwrap();
         let removed = store.purge_terminal_jobs(now, 30).unwrap();
-        assert_eq!(removed, 0, "recently-finished job must survive despite old created_ms");
+        assert_eq!(
+            removed, 0,
+            "recently-finished job must survive despite old created_ms"
+        );
         assert!(
             store.get_job(&id).unwrap().is_some(),
             "result must still be retrievable right after completion"
@@ -823,7 +858,9 @@ mod tests {
         let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         store.claim_next_job().unwrap();
         store.increment_job_attempts(&id).unwrap(); // attempts=1, as a real run would
-        store.fail_job(&id, "asr-engine-failed", "whisper crashed").unwrap();
+        store
+            .fail_job(&id, "asr-engine-failed", "whisper crashed")
+            .unwrap();
         let now = now_ms_test();
         let n = super::Store::auto_retry_failed_jobs(&store, now, 5, 1000).unwrap();
         assert_eq!(n, 1, "transient failure under max is auto-retried");
@@ -832,7 +869,10 @@ mod tests {
         assert_eq!(j.attempts, 1, "attempts preserved across auto-retry");
         // attempts=1 → backoff = base * 2^0 = 1000ms; next_attempt ~ now+1000.
         let next = j.next_attempt_ms.expect("backoff scheduled");
-        assert!(next >= now + 1000 && next <= now + 2000, "next_attempt_ms={next}");
+        assert!(
+            next >= now + 1000 && next <= now + 2000,
+            "next_attempt_ms={next}"
+        );
         assert!(j.error.is_none(), "error cleared on retry");
     }
 
@@ -845,14 +885,18 @@ mod tests {
         store.fail_job(&id, "job-timeout", "deadline").unwrap();
         let now = now_ms_test();
         store.auto_retry_failed_jobs(now, 5, 10_000).unwrap(); // ~10s backoff
-        // Before backoff elapses: not claimable.
+                                                               // Before backoff elapses: not claimable.
         assert!(
             store.claim_next_job_at(now + 5_000).unwrap().is_none(),
             "job in backoff window must not be claimed"
         );
         // After backoff elapses: claimable again.
         let claimed = store.claim_next_job_at(now + 20_000).unwrap();
-        assert_eq!(claimed.unwrap().id, id, "job claimable once backoff elapsed");
+        assert_eq!(
+            claimed.unwrap().id,
+            id,
+            "job claimable once backoff elapsed"
+        );
     }
 
     #[test]
@@ -862,8 +906,12 @@ mod tests {
         store.claim_next_job().unwrap();
         store.increment_job_attempts(&id).unwrap();
         // bad-payload is a permanent failure: never auto-retried.
-        store.fail_job(&id, "bad-payload", "missing file_path").unwrap();
-        let n = store.auto_retry_failed_jobs(now_ms_test(), 5, 1000).unwrap();
+        store
+            .fail_job(&id, "bad-payload", "missing file_path")
+            .unwrap();
+        let n = store
+            .auto_retry_failed_jobs(now_ms_test(), 5, 1000)
+            .unwrap();
         assert_eq!(n, 0, "non-retryable code stays dead-lettered");
         assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Failed);
     }
@@ -878,7 +926,9 @@ mod tests {
             store.increment_job_attempts(&id).unwrap();
         }
         store.fail_job(&id, "asr-engine-failed", "again").unwrap();
-        let n = store.auto_retry_failed_jobs(now_ms_test(), 3, 1000).unwrap();
+        let n = store
+            .auto_retry_failed_jobs(now_ms_test(), 3, 1000)
+            .unwrap();
         assert_eq!(n, 0, "at/over max_attempts → no more retries (dead-letter)");
         assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Failed);
     }
@@ -895,9 +945,18 @@ mod tests {
         store.fail_job(&id, "asr-engine-failed", "x").unwrap();
         let now = now_ms_test();
         store.auto_retry_failed_jobs(now, 100, 60_000).unwrap();
-        let next = store.get_job(&id).unwrap().unwrap().next_attempt_ms.unwrap();
+        let next = store
+            .get_job(&id)
+            .unwrap()
+            .unwrap()
+            .next_attempt_ms
+            .unwrap();
         // Capped at 1h regardless of the huge exponent (no overflow panic).
-        assert!(next <= now + 3_600_000, "backoff capped at 1h: {}", next - now);
+        assert!(
+            next <= now + 3_600_000,
+            "backoff capped at 1h: {}",
+            next - now
+        );
         assert!(next >= now + 3_600_000 - 1, "backoff hit the cap");
     }
 
@@ -914,7 +973,12 @@ mod tests {
         let now = now_ms_test();
         assert!(store.requeue_job(&id).unwrap());
         assert!(
-            store.get_job(&id).unwrap().unwrap().next_attempt_ms.is_none(),
+            store
+                .get_job(&id)
+                .unwrap()
+                .unwrap()
+                .next_attempt_ms
+                .is_none(),
             "manual requeue has no backoff"
         );
         assert_eq!(
@@ -936,7 +1000,7 @@ mod tests {
         store.fail_job(&id, "asr-engine-failed", "1").unwrap();
         let now = now_ms_test();
         store.auto_retry_failed_jobs(now, 5, 600_000).unwrap(); // queued + 10min backoff
-        // Claim after backoff, fail again → failed with no next_attempt cleared by fail.
+                                                                // Claim after backoff, fail again → failed with no next_attempt cleared by fail.
         let j = store.get_job(&id).unwrap().unwrap();
         assert!(j.next_attempt_ms.is_some(), "auto-retry set a backoff");
         store.claim_next_job_at(now + 700_000).unwrap();
@@ -944,7 +1008,12 @@ mod tests {
         store.fail_job(&id, "asr-engine-failed", "2").unwrap();
         // Operator requeues from failed → backoff cleared, immediately claimable.
         assert!(store.requeue_job(&id).unwrap());
-        assert!(store.get_job(&id).unwrap().unwrap().next_attempt_ms.is_none());
+        assert!(store
+            .get_job(&id)
+            .unwrap()
+            .unwrap()
+            .next_attempt_ms
+            .is_none());
         assert_eq!(store.claim_next_job_at(now).unwrap().unwrap().id, id);
     }
 
@@ -971,7 +1040,11 @@ mod tests {
         store.claim_next_job().unwrap();
         // Terminal jobs drop out of in-flight.
         let running = store.get_job(&d).unwrap().unwrap();
-        let done_id = if running.state == JobState::Running { d.clone() } else { q.clone() };
+        let done_id = if running.state == JobState::Running {
+            d.clone()
+        } else {
+            q.clone()
+        };
         store.complete_job(&done_id, "{}").unwrap();
         assert_eq!(store.in_flight_job_count().unwrap(), 2);
     }

@@ -57,14 +57,15 @@ v1.0→v1.2 在 GA 核心之上叠加生产级治理与跨平台能力。完整�
 
 ---
 
-## 双产品线
+## 仓库结构
 
-本仓库包含两条并行的产品线：
+本仓库为 Rust-first；当前运行时代码在 Rust workspace 与浏览器/桌面前端中维护。
 
-- **Python 原型线**（`python/src/attune_python/`）— 快速验证算法与实验特性。基于 FastAPI + ChromaDB + SQLite FTS5
-- **Rust 商用线**（`rust/`）— 面向**任何领域个人知识工作者**的通用 AI 知识库：主动进化、对话式、混合智能、本地加密。详见 [`rust/README.md`](rust/README.md)
+- **Rust 生产线**（`rust/`）— 面向**任何领域个人知识工作者**的通用 AI 知识库：主动进化、对话式、混合智能、本地加密。详见 [`rust/README.md`](rust/README.md)
+- **Chrome 扩展**（`extension/`）— 浏览器采集与侧栏入口，对接 Rust HTTP API。
+- **桌面壳**（`apps/attune-desktop/`）— Tauri 桌面封装。
 
-Chrome 扩展协议相同，两个后端可任意切换。
+Chrome 扩展和桌面端统一对接 Rust 后端。
 
 ---
 
@@ -180,20 +181,17 @@ Attune 走 **OpenAI 兼容 chat 协议**，任何暴露 `/v1/chat/completions` �
 
 **推荐**：日常用 DeepSeek（性价比最高），有 16 GB+ GPU 选 Ollama 本地，重要场景上 OpenAI。
 
-### Python 原型线
-
-#### 1. 后端
+### Rust 后端
 
 ```bash
-git clone <repo-url> && cd attune/python
-python -m venv .venv && source .venv/bin/activate
-pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[dev]"
-uvicorn attune_python.main:app --reload --port 18900
+cd rust
+cargo build --release
+./target/release/attune-server-headless --host 127.0.0.1 --port 18900
 ```
 
-验证：`curl http://localhost:18900/api/v1/status/health` → `{"status":"ok"}`
+验证：`curl http://localhost:18900/api/v1/status/health`
 
-#### 2. Embedding 模型
+#### Embedding 模型
 
 **Ollama（推荐）：**
 
@@ -206,7 +204,7 @@ ollama pull bge-m3
 
 **ONNX（可选）：** 将 `model.onnx` + `tokenizer.json` 放到 `~/.local/share/attune/models/bge-m3/`。
 
-#### 3. Chrome 扩展
+#### Chrome 扩展
 
 ```bash
 cd extension
@@ -216,18 +214,11 @@ npm run build
 
 Chrome → `chrome://extensions` → 开发者模式 → 加载已解压的扩展 → 选择 `extension/` 目录。
 
-#### 4. 部署检查
+#### 测试
 
 ```bash
-curl -s -X POST http://localhost:18900/api/v1/models/check | python3 -m json.tool
-```
-
-返回内核 / 芯片 / 驱动 / 模型 / 依赖完整报告和一键安装命令。
-
-#### 5. 测试
-
-```bash
-pytest tests/ -v    # 78 个测试（36 后端单元 + 42 扩展 E2E）
+cd rust && cargo test --workspace
+cd extension && npm run build
 ```
 
 ## 使用手册

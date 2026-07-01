@@ -130,7 +130,10 @@ mod sanitize_tests {
     fn keeps_cjk_and_basic() {
         assert_eq!(safe_stem("设备参数差异"), "设备参数差异");
         assert_eq!(safe_stem("report-2026"), "report-2026");
-        assert_eq!(download_filename("设备参数差异", "xlsx"), "设备参数差异.xlsx");
+        assert_eq!(
+            download_filename("设备参数差异", "xlsx"),
+            "设备参数差异.xlsx"
+        );
     }
 
     #[test]

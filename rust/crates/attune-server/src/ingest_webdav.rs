@@ -30,10 +30,7 @@ pub fn sync_webdav_dir(
     // privacy block ⇒ disabled (matches the 5-egress default-off contract).
     let (webdav_enabled, vault_unlocked) = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let unlocked = matches!(
-            vault.state(),
-            attune_core::vault::VaultState::Unlocked
-        );
+        let unlocked = matches!(vault.state(), attune_core::vault::VaultState::Unlocked);
         let enabled = vault
             .store()
             .get_meta(attune_core::llm_settings::SETTINGS_META_KEY)
@@ -73,7 +70,11 @@ pub fn sync_webdav_dir(
 
         let source_ref = doc.source_ref.clone();
         let etag = doc.modified_marker.clone().unwrap_or_default();
-        let filename = source_ref.rsplit('/').next().unwrap_or(&source_ref).to_string();
+        let filename = source_ref
+            .rsplit('/')
+            .next()
+            .unwrap_or(&source_ref)
+            .to_string();
 
         // 每个文档单独拿锁：增量判断 + ingest + upsert_indexed_file，完成即 drop。
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());

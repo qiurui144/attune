@@ -34,8 +34,7 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
     if let Some((idx, raw, conf)) = find_value_after_anchor(lines, &anchor_invoice, 1) {
         let cleaned: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
         if cleaned.len() >= 6 {
-            fields.invoice_no =
-                FieldValue::from_line(cleaned, conf.min(0.95), &lines[idx], idx);
+            fields.invoice_no = FieldValue::from_line(cleaned, conf.min(0.95), &lines[idx], idx);
         } else {
             unrecognized.push("invoice_no");
         }
@@ -47,11 +46,9 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
     let anchor_date = regex::Regex::new(r"开票日期|开\s*票\s*日\s*期|Issue\s*Date").unwrap();
     if let Some((idx, raw, conf)) = find_value_after_anchor(lines, &anchor_date, 1) {
         if let Some(iso) = normalize::normalize_date(&raw) {
-            fields.issue_date =
-                FieldValue::from_line(iso, conf.min(0.95), &lines[idx], idx);
+            fields.issue_date = FieldValue::from_line(iso, conf.min(0.95), &lines[idx], idx);
         } else {
-            fields.issue_date =
-                FieldValue::from_line(raw.clone(), conf * 0.5, &lines[idx], idx);
+            fields.issue_date = FieldValue::from_line(raw.clone(), conf * 0.5, &lines[idx], idx);
             warnings.push(format!("issue_date raw value '{raw}' failed date parse"));
         }
     } else {
@@ -75,8 +72,7 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
         regex::Regex::new(r"价税合计|合计金额|应付金额|应\s*付|Total\s*Amount").unwrap();
     if let Some((idx, raw, conf)) = find_value_after_anchor(lines, &anchor_total, 1) {
         if let Some(amt) = normalize::normalize_amount(&raw) {
-            fields.amount_total =
-                FieldValue::from_line(amt, conf.min(0.95), &lines[idx], idx);
+            fields.amount_total = FieldValue::from_line(amt, conf.min(0.95), &lines[idx], idx);
         } else {
             unrecognized.push("amount_total");
         }
@@ -100,8 +96,7 @@ pub fn extract(lines: &[RawLine]) -> StructuredFields {
                     }
                 }
             }
-            fields.tax_amount =
-                FieldValue::from_line(amt, conf_adjusted, &lines[idx], idx);
+            fields.tax_amount = FieldValue::from_line(amt, conf_adjusted, &lines[idx], idx);
         } else {
             unrecognized.push("tax_amount");
         }
@@ -143,7 +138,9 @@ fn extract_party(lines: &[RawLine], anchor: &str) -> (FieldValue, Option<usize>)
             continue;
         }
         for off in 0..=4 {
-            let Some(line) = lines.get(i + off) else { break };
+            let Some(line) = lines.get(i + off) else {
+                break;
+            };
             if !line.text.contains("名称") {
                 continue;
             }
@@ -162,12 +159,7 @@ fn extract_party(lines: &[RawLine], anchor: &str) -> (FieldValue, Option<usize>)
                 let t = next.text.trim().to_string();
                 if !t.is_empty() && !t.contains("名称") && !t.contains("税号") {
                     return (
-                        FieldValue::from_line(
-                            t,
-                            next.confidence.min(0.85),
-                            next,
-                            i + off + 1,
-                        ),
+                        FieldValue::from_line(t, next.confidence.min(0.85), next, i + off + 1),
                         Some(i + off + 1),
                     );
                 }
@@ -278,7 +270,12 @@ mod tests {
     fn rl(text: &str, y: u32) -> RawLine {
         RawLine {
             text: text.into(),
-            bbox: BBox { x: 0, y, w: 200, h: 30 },
+            bbox: BBox {
+                x: 0,
+                y,
+                w: 200,
+                h: 30,
+            },
             confidence: 0.95,
         }
     }
@@ -296,24 +293,27 @@ mod tests {
     #[test]
     fn extracts_invoice_no_next_line() {
         let lines = vec![rl("发票号码", 0), rl("87654321", 40)];
-        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.invoice_no.value.as_deref(), Some("87654321"));
     }
 
     #[test]
     fn extracts_issue_date_iso() {
         let lines = vec![rl("开票日期: 2026年05月18日", 0)];
-        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.issue_date.value.as_deref(), Some("2026-05-18"));
     }
 
     #[test]
     fn extracts_amount_total_and_tax() {
-        let lines = vec![
-            rl("价税合计: ￥1234.56", 0),
-            rl("税额: 137.17", 40),
-        ];
-        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let lines = vec![rl("价税合计: ￥1234.56", 0), rl("税额: 137.17", 40)];
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.amount_total.value.as_deref(), Some("1234.56"));
         assert_eq!(fields.tax_amount.value.as_deref(), Some("137.17"));
     }
@@ -325,17 +325,21 @@ mod tests {
             rl("税额: 50.00", 40),
             rl("价税合计: 500.00", 80),
         ];
-        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.tax_amount.value.as_deref(), Some("50.00"));
     }
 
     #[test]
     fn validates_tax_le_total() {
-        let lines = vec![
-            rl("价税合计: 100.00", 0),
-            rl("税额: 200.00", 40),
-        ];
-        let StructuredFields::ReceiptV1 { fields, validation_warnings, .. } = extract(&lines) else {
+        let lines = vec![rl("价税合计: 100.00", 0), rl("税额: 200.00", 40)];
+        let StructuredFields::ReceiptV1 {
+            fields,
+            validation_warnings,
+            ..
+        } = extract(&lines)
+        else {
             unreachable!()
         };
         assert!(validation_warnings.iter().any(|w| w.contains("tax_amount")));
@@ -350,7 +354,9 @@ mod tests {
             rl("购买方", 200),
             rl("名称: XYZ 咨询有限公司", 240),
         ];
-        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.seller.value.as_deref(), Some("ABC 科技有限公司"));
         assert_eq!(fields.buyer.value.as_deref(), Some("XYZ 咨询有限公司"));
     }
@@ -361,11 +367,19 @@ mod tests {
             rl("价税合计: 1234.56", 0),
             rl("大写: 壹仟贰佰叁拾肆元伍角陆分", 40),
         ];
-        let StructuredFields::ReceiptV1 { fields, validation_warnings, .. } = extract(&lines) else {
+        let StructuredFields::ReceiptV1 {
+            fields,
+            validation_warnings,
+            ..
+        } = extract(&lines)
+        else {
             unreachable!()
         };
         assert!(fields.amount_chinese.value.is_some());
-        assert!(validation_warnings.is_empty(), "no validation warning expected, got {validation_warnings:?}");
+        assert!(
+            validation_warnings.is_empty(),
+            "no validation warning expected, got {validation_warnings:?}"
+        );
         assert!(fields.amount_chinese.confidence > 0.6);
     }
 
@@ -375,16 +389,27 @@ mod tests {
             rl("价税合计: 9999.99", 0),
             rl("大写: 壹仟贰佰叁拾肆元伍角陆分", 40),
         ];
-        let StructuredFields::ReceiptV1 { fields, validation_warnings, .. } = extract(&lines) else {
+        let StructuredFields::ReceiptV1 {
+            fields,
+            validation_warnings,
+            ..
+        } = extract(&lines)
+        else {
             unreachable!()
         };
-        assert!(validation_warnings.iter().any(|w| w.contains("amount_chinese")));
+        assert!(validation_warnings
+            .iter()
+            .any(|w| w.contains("amount_chinese")));
         assert!(fields.amount_chinese.confidence < 0.6);
     }
 
     #[test]
     fn returns_unrecognized_for_empty_lines() {
-        let StructuredFields::ReceiptV1 { unrecognized_fields, .. } = extract(&[]) else {
+        let StructuredFields::ReceiptV1 {
+            unrecognized_fields,
+            ..
+        } = extract(&[])
+        else {
             unreachable!()
         };
         assert!(!unrecognized_fields.is_empty());
@@ -395,7 +420,9 @@ mod tests {
     #[test]
     fn invoice_no_strips_non_digits() {
         let lines = vec![rl("发票号码: No.12345-678", 0)];
-        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.invoice_no.value.as_deref(), Some("12345678"));
     }
 
@@ -428,24 +455,39 @@ mod tests {
     #[test]
     fn amount_total_ascii_comma_thousand_separator() {
         let lines = vec![rl("价税合计: ¥1,234.56", 0)];
-        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
-        assert_eq!(fields.amount_total.value.as_deref(), Some("1234.56"),
-            "ASCII comma thousand separator should be stripped");
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
+        assert_eq!(
+            fields.amount_total.value.as_deref(),
+            Some("1234.56"),
+            "ASCII comma thousand separator should be stripped"
+        );
     }
 
     #[test]
     fn amount_total_fullwidth_comma_thousand_separator() {
         let lines = vec![rl("价税合计: ¥1，234.56", 0)];
-        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
-        assert_eq!(fields.amount_total.value.as_deref(), Some("1234.56"),
-            "full-width comma thousand separator should be stripped");
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
+        assert_eq!(
+            fields.amount_total.value.as_deref(),
+            Some("1234.56"),
+            "full-width comma thousand separator should be stripped"
+        );
     }
 
     #[test]
     fn amount_total_space_thousand_separator() {
         let lines = vec![rl("价税合计: 1 234.56", 0)];
-        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else { unreachable!() };
-        assert_eq!(fields.amount_total.value.as_deref(), Some("1234.56"),
-            "space thousand separator should be stripped");
+        let StructuredFields::ReceiptV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
+        assert_eq!(
+            fields.amount_total.value.as_deref(),
+            Some("1234.56"),
+            "space thousand separator should be stripped"
+        );
     }
 }

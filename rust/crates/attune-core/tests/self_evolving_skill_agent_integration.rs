@@ -72,8 +72,7 @@ fn heuristic_path_produces_persisted_expansions() {
 
     // expand_query_with_table picks up the row.
     let legacy = serde_json::json!({});
-    let expanded =
-        expand_query_with_table(&store, "transformer attention head", &legacy);
+    let expanded = expand_query_with_table(&store, "transformer attention head", &legacy);
     assert!(
         expanded != "transformer attention head",
         "expand_query_with_table must append expansions (got: {expanded:?})"
@@ -85,8 +84,12 @@ fn heuristic_path_produces_persisted_expansions() {
 fn llm_path_supersedes_heuristic_via_upsert() {
     let (store, _dir) = open_tempfile_store();
     for _ in 0..3 {
-        store.record_skill_signal("kafka consumer group", 0, false).unwrap();
-        store.record_skill_signal("kafka partition rebalance", 0, false).unwrap();
+        store
+            .record_skill_signal("kafka consumer group", 0, false)
+            .unwrap();
+        store
+            .record_skill_signal("kafka partition rebalance", 0, false)
+            .unwrap();
     }
 
     // First cycle: heuristic only.
@@ -99,13 +102,20 @@ fn llm_path_supersedes_heuristic_via_upsert() {
     let buckets = prepare_run(&store, &cfg, NOW_SECS).unwrap().unwrap();
     let records = generate_records(&buckets, None, &cfg);
     apply_records(&store, &buckets, &records).unwrap();
-    let row = store.get_skill_expansion("kafka consumer group").unwrap().unwrap();
+    let row = store
+        .get_skill_expansion("kafka consumer group")
+        .unwrap()
+        .unwrap();
     assert_eq!(row.generated_by, ExpansionSource::Heuristic);
 
     // Second cycle: enable LLM path. New signals seed re-trigger.
     for _ in 0..3 {
-        store.record_skill_signal("kafka consumer group", 0, false).unwrap();
-        store.record_skill_signal("kafka partition rebalance", 0, false).unwrap();
+        store
+            .record_skill_signal("kafka consumer group", 0, false)
+            .unwrap();
+        store
+            .record_skill_signal("kafka partition rebalance", 0, false)
+            .unwrap();
     }
     let llm = MockLlmProvider::new("test");
     llm.push_response(r#"{"terms": ["offset commit", "consumer lag", "rebalance protocol"]}"#);
@@ -122,11 +132,15 @@ fn llm_path_supersedes_heuristic_via_upsert() {
     assert_eq!(stats.used_path, GeneratedBy::Llm);
     assert!(stats.rows_written >= 1);
 
-    let row = store.get_skill_expansion("kafka consumer group").unwrap().unwrap();
+    let row = store
+        .get_skill_expansion("kafka consumer group")
+        .unwrap()
+        .unwrap();
     assert_eq!(row.generated_by, ExpansionSource::Llm);
-    assert!(row.expansions.iter().any(|t| t == "offset commit"
-        || t == "consumer lag"
-        || t == "rebalance protocol"));
+    assert!(row
+        .expansions
+        .iter()
+        .any(|t| t == "offset commit" || t == "consumer lag" || t == "rebalance protocol"));
     assert!((row.confidence - 0.7).abs() < 1e-3);
 }
 
@@ -160,8 +174,12 @@ fn llm_failure_falls_back_to_heuristic() {
 
     let (store, _dir) = open_tempfile_store();
     for _ in 0..3 {
-        store.record_skill_signal("graphql resolver", 0, false).unwrap();
-        store.record_skill_signal("graphql subscription", 0, false).unwrap();
+        store
+            .record_skill_signal("graphql resolver", 0, false)
+            .unwrap();
+        store
+            .record_skill_signal("graphql subscription", 0, false)
+            .unwrap();
     }
 
     let cfg = SkillAgentConfig {
@@ -174,7 +192,10 @@ fn llm_failure_falls_back_to_heuristic() {
     let failing: &dyn LlmProvider = &FailingLlm;
     let records = generate_records(&buckets, Some(failing), &cfg);
     // LLM failed but heuristic still produced records.
-    assert!(!records.is_empty(), "agent must fall back to heuristic on LLM error");
+    assert!(
+        !records.is_empty(),
+        "agent must fall back to heuristic on LLM error"
+    );
     for r in &records {
         assert_eq!(r.generated_by, GeneratedBy::Heuristic);
     }
@@ -190,8 +211,8 @@ fn empty_signals_idle_cycle() {
     let cfg = SkillAgentConfig::default();
     let buckets = prepare_run(&store, &cfg, NOW_SECS).unwrap();
     assert!(buckets.is_none());
-    let stats = attune_core::skill_evolution::agent::run_cycle(&store, None, &cfg, NOW_SECS)
-        .unwrap();
+    let stats =
+        attune_core::skill_evolution::agent::run_cycle(&store, None, &cfg, NOW_SECS).unwrap();
     assert_eq!(stats.rows_written, 0);
     assert_eq!(store.count_skill_expansions().unwrap(), 0);
 }
@@ -202,8 +223,12 @@ fn empty_signals_idle_cycle() {
 fn idempotent_when_replayed_after_persisted() {
     let (store, _dir) = open_tempfile_store();
     for _ in 0..3 {
-        store.record_skill_signal("postgres index btree", 0, false).unwrap();
-        store.record_skill_signal("postgres index hash", 0, false).unwrap();
+        store
+            .record_skill_signal("postgres index btree", 0, false)
+            .unwrap();
+        store
+            .record_skill_signal("postgres index hash", 0, false)
+            .unwrap();
     }
     let cfg = SkillAgentConfig {
         window_days: 0,
@@ -211,8 +236,8 @@ fn idempotent_when_replayed_after_persisted() {
         max_signals_per_cycle: 1000,
         enable_llm: false,
     };
-    let stats1 = attune_core::skill_evolution::agent::run_cycle(&store, None, &cfg, NOW_SECS)
-        .unwrap();
+    let stats1 =
+        attune_core::skill_evolution::agent::run_cycle(&store, None, &cfg, NOW_SECS).unwrap();
     assert!(stats1.rows_written >= 1);
 
     // Re-seed identical signals and run again. Because the new signals are
@@ -220,13 +245,19 @@ fn idempotent_when_replayed_after_persisted() {
     // truncates/replaces rather than inserting duplicates, the rows count
     // stays bounded.
     for _ in 0..3 {
-        store.record_skill_signal("postgres index btree", 0, false).unwrap();
-        store.record_skill_signal("postgres index hash", 0, false).unwrap();
+        store
+            .record_skill_signal("postgres index btree", 0, false)
+            .unwrap();
+        store
+            .record_skill_signal("postgres index hash", 0, false)
+            .unwrap();
     }
-    let _stats2 = attune_core::skill_evolution::agent::run_cycle(&store, None, &cfg, NOW_SECS)
-        .unwrap();
-    assert!(store.count_skill_expansions().unwrap() <= 2,
-        "rows_count must stay bounded across multiple cycles");
+    let _stats2 =
+        attune_core::skill_evolution::agent::run_cycle(&store, None, &cfg, NOW_SECS).unwrap();
+    assert!(
+        store.count_skill_expansions().unwrap() <= 2,
+        "rows_count must stay bounded across multiple cycles"
+    );
 }
 
 /// SCHEMA_SQL migration creates the table on a fresh vault. (Guards against

@@ -26,7 +26,9 @@ fn make_input(provider: &str) -> ThirdPartyAccountInput {
 fn add_then_get_secret_round_trips() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    let id = store.add_third_party_account(&dek, &make_input("webdav")).unwrap();
+    let id = store
+        .add_third_party_account(&dek, &make_input("webdav"))
+        .unwrap();
 
     let secret = store.get_third_party_secret(&dek, &id).unwrap().unwrap();
     assert_eq!(secret, "test-pass-not-real", "secret 必须能解密回明文");
@@ -36,7 +38,9 @@ fn add_then_get_secret_round_trips() {
 fn list_view_never_contains_secret() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    store.add_third_party_account(&dek, &make_input("webdav")).unwrap();
+    store
+        .add_third_party_account(&dek, &make_input("webdav"))
+        .unwrap();
 
     let views = store.list_third_party_accounts().unwrap();
     assert_eq!(views.len(), 1);
@@ -52,7 +56,10 @@ fn list_view_never_contains_secret() {
         "username": v.username, "endpoint": v.endpoint, "status": v.status,
     }))
     .unwrap();
-    assert!(!json.contains("test-pass-not-real"), "脱敏视图绝不能含 secret");
+    assert!(
+        !json.contains("test-pass-not-real"),
+        "脱敏视图绝不能含 secret"
+    );
 }
 
 // ============================================================
@@ -80,7 +87,9 @@ fn tampered_ciphertext_fails_decrypt_not_silent_wrong_value() {
     // 加密对抗：篡改密文 / 用错 dek → 解密必须报错，不能静默返回脏明文。
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    let id = store.add_third_party_account(&dek, &make_input("webdav")).unwrap();
+    let id = store
+        .add_third_party_account(&dek, &make_input("webdav"))
+        .unwrap();
 
     let wrong_dek = Key32::generate();
     let res = store.get_third_party_secret(&wrong_dek, &id);
@@ -142,7 +151,10 @@ fn oversized_secret_rejected() {
 fn get_secret_missing_id_returns_none() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    assert!(store.get_third_party_secret(&dek, "tpa-nope").unwrap().is_none());
+    assert!(store
+        .get_third_party_secret(&dek, "tpa-nope")
+        .unwrap()
+        .is_none());
 }
 
 // ============================================================
@@ -153,17 +165,24 @@ fn get_secret_missing_id_returns_none() {
 fn delete_removes_row() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    let id = store.add_third_party_account(&dek, &make_input("git")).unwrap();
+    let id = store
+        .add_third_party_account(&dek, &make_input("git"))
+        .unwrap();
     assert!(store.delete_third_party_account(&id).unwrap(), "应删一行");
     assert!(store.get_third_party_secret(&dek, &id).unwrap().is_none());
-    assert!(!store.delete_third_party_account(&id).unwrap(), "二次删返回 false");
+    assert!(
+        !store.delete_third_party_account(&id).unwrap(),
+        "二次删返回 false"
+    );
 }
 
 #[test]
 fn set_status_updates_and_reports_missing() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    let id = store.add_third_party_account(&dek, &make_input("rss")).unwrap();
+    let id = store
+        .add_third_party_account(&dek, &make_input("rss"))
+        .unwrap();
     assert!(store.set_third_party_status(&id, "error").unwrap());
     let v = store.list_third_party_accounts().unwrap();
     assert_eq!(v[0].status, "error");
@@ -174,12 +193,22 @@ fn set_status_updates_and_reports_missing() {
 fn connected_provider_kinds_is_distinct() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    store.add_third_party_account(&dek, &make_input("webdav")).unwrap();
-    store.add_third_party_account(&dek, &make_input("webdav")).unwrap();
-    store.add_third_party_account(&dek, &make_input("imap")).unwrap();
+    store
+        .add_third_party_account(&dek, &make_input("webdav"))
+        .unwrap();
+    store
+        .add_third_party_account(&dek, &make_input("webdav"))
+        .unwrap();
+    store
+        .add_third_party_account(&dek, &make_input("imap"))
+        .unwrap();
 
     let kinds = store.connected_provider_kinds().unwrap();
-    assert_eq!(kinds, vec!["imap".to_string(), "webdav".to_string()], "distinct + 排序");
+    assert_eq!(
+        kinds,
+        vec!["imap".to_string(), "webdav".to_string()],
+        "distinct + 排序"
+    );
 }
 
 #[test]

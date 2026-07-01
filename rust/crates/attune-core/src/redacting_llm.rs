@@ -97,7 +97,9 @@ impl LlmProvider for RedactingLlmProvider {
         // would downgrade to a plain `chat` hint. The schema describes output shape, not content,
         // so it is forwarded unchanged.
         let (segs, mappings) = self.redactor.redact_batch(&[system, user]);
-        let (raw, usage) = self.inner.chat_with_format_json(&segs[0], &segs[1], schema)?;
+        let (raw, usage) = self
+            .inner
+            .chat_with_format_json(&segs[0], &segs[1], schema)?;
         Ok((self.redactor.restore(&raw, &mappings), usage))
     }
 
@@ -146,7 +148,10 @@ impl LlmProvider for RedactingLlmProvider {
                 Attachment::TextFile { name, .. } => {
                     let content = segs.get(idx).cloned().unwrap_or_default();
                     idx += 1;
-                    Attachment::TextFile { name: name.clone(), content }
+                    Attachment::TextFile {
+                        name: name.clone(),
+                        content,
+                    }
                 }
                 other => other.clone(),
             })
@@ -187,7 +192,10 @@ impl RedactingLlmProvider {
         let red_msgs = messages
             .iter()
             .zip(red_segs)
-            .map(|(m, content)| ChatMessage { role: m.role.clone(), content })
+            .map(|(m, content)| ChatMessage {
+                role: m.role.clone(),
+                content,
+            })
             .collect();
         (red_msgs, mappings)
     }
@@ -211,12 +219,32 @@ mod tests {
 
         // What the inner (wire-facing) provider actually received must NOT contain the raw PII.
         let seen = inner.calls();
-        let sent = seen.iter().map(|c| c.user.clone()).collect::<Vec<_>>().join(" ")
-            + &seen.iter().map(|c| c.system.clone()).collect::<Vec<_>>().join(" ");
-        assert!(!sent.contains("13800138000"), "phone reached the wire: {sent}");
-        assert!(!sent.contains("zhangsan@example.com"), "email reached the wire: {sent}");
-        assert!(!sent.contains("11010119900307123X"), "ID reached the wire: {sent}");
-        assert!(sent.contains("PHONE_") || sent.contains("EMAIL_"), "placeholders expected: {sent}");
+        let sent = seen
+            .iter()
+            .map(|c| c.user.clone())
+            .collect::<Vec<_>>()
+            .join(" ")
+            + &seen
+                .iter()
+                .map(|c| c.system.clone())
+                .collect::<Vec<_>>()
+                .join(" ");
+        assert!(
+            !sent.contains("13800138000"),
+            "phone reached the wire: {sent}"
+        );
+        assert!(
+            !sent.contains("zhangsan@example.com"),
+            "email reached the wire: {sent}"
+        );
+        assert!(
+            !sent.contains("11010119900307123X"),
+            "ID reached the wire: {sent}"
+        );
+        assert!(
+            sent.contains("PHONE_") || sent.contains("EMAIL_"),
+            "placeholders expected: {sent}"
+        );
     }
 
     #[test]
@@ -237,8 +265,14 @@ mod tests {
             .map(|c| format!("{} {}", c.system, c.user))
             .collect::<Vec<_>>()
             .join(" ");
-        assert!(!joined.contains("13800138000"), "phone reached the wire in history: {joined}");
-        assert!(!joined.contains("zhangsan@example.com"), "email reached the wire: {joined}");
+        assert!(
+            !joined.contains("13800138000"),
+            "phone reached the wire in history: {joined}"
+        );
+        assert!(
+            !joined.contains("zhangsan@example.com"),
+            "email reached the wire: {joined}"
+        );
     }
 
     #[test]
@@ -261,7 +295,10 @@ mod tests {
         let (resp, _u) = wrapped.chat("system", "no pii here at all").unwrap();
         assert_eq!(resp, "answer");
         let seen = inner.calls();
-        assert_eq!(seen[0].user, "no pii here at all", "clean text must be byte-identical");
+        assert_eq!(
+            seen[0].user, "no pii here at all",
+            "clean text must be byte-identical"
+        );
     }
 
     #[test]
@@ -269,15 +306,22 @@ mod tests {
         // compare.rs uses chat_with_format_json — it MUST redact and hit the inner (not the trait
         // default that downgrades to a plain chat hint). RecordingMockLlm uses the default
         // chat_with_format_json (→ chat), which still records the redacted payload.
-        let inner = Arc::new(RecordingMockLlm::new("mock").with_response(r#"{"verdict":"rewrite"}"#));
+        let inner =
+            Arc::new(RecordingMockLlm::new("mock").with_response(r#"{"verdict":"rewrite"}"#));
         let wrapped = RedactingLlmProvider::with_default_redactor(inner.clone());
         let (_r, _u) = wrapped
             .chat_with_format_json("判定差异", pii_doc(), None)
             .unwrap();
         let seen = inner.calls();
         let sent = format!("{} {}", seen[0].system, seen[0].user);
-        assert!(!sent.contains("13800138000"), "format_json must redact phone: {sent}");
-        assert!(!sent.contains("zhangsan@example.com"), "format_json must redact email: {sent}");
+        assert!(
+            !sent.contains("13800138000"),
+            "format_json must redact phone: {sent}"
+        );
+        assert!(
+            !sent.contains("zhangsan@example.com"),
+            "format_json must redact email: {sent}"
+        );
     }
 
     #[test]
@@ -298,9 +342,15 @@ mod tests {
         let (resp, _u) = wrapped
             .chat_with_retry("助手", "我的电话 13800138000", 3, &validator)
             .unwrap();
-        assert!(resp.contains("13800138000"), "caller gets restored response: {resp}");
+        assert!(
+            resp.contains("13800138000"),
+            "caller gets restored response: {resp}"
+        );
         let seen = inner.calls();
         let sent = format!("{} {}", seen[0].system, seen[0].user);
-        assert!(!sent.contains("13800138000"), "inner must only see redacted prompt: {sent}");
+        assert!(
+            !sent.contains("13800138000"),
+            "inner must only see redacted prompt: {sent}"
+        );
     }
 }

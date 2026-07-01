@@ -80,7 +80,11 @@ pub async fn handle_request(state: &SharedState, ctx: &CallCtx, req: &Value) -> 
                 Err((code, msg)) => rpc_err(id, code, &msg),
             }
         }
-        other => rpc_err(id, gate::ERR_UNKNOWN_TOOL, &format!("unknown method '{other}'")),
+        other => rpc_err(
+            id,
+            gate::ERR_UNKNOWN_TOOL,
+            &format!("unknown method '{other}'"),
+        ),
     }
 }
 
@@ -190,9 +194,9 @@ mod tests {
         // 审计应有一条 deny / high-risk-denied
         let vault = s.vault.lock().unwrap();
         let rows = vault.store().list_agent_audit(None, None, 10).unwrap();
-        assert!(rows
-            .iter()
-            .any(|r| r.tool == "export" && r.decision == "deny" && r.deny_reason == "high-risk-denied"));
+        assert!(rows.iter().any(|r| r.tool == "export"
+            && r.decision == "deny"
+            && r.deny_reason == "high-risk-denied"));
     }
 
     #[tokio::test]
@@ -206,9 +210,9 @@ mod tests {
 
         let vault = s.vault.lock().unwrap();
         let rows = vault.store().list_agent_audit(None, None, 10).unwrap();
-        assert!(rows
-            .iter()
-            .any(|r| r.tool == "vault_chat" && r.decision == "deny" && r.deny_reason == "scope-missing"));
+        assert!(rows.iter().any(|r| r.tool == "vault_chat"
+            && r.decision == "deny"
+            && r.deny_reason == "scope-missing"));
     }
 
     #[tokio::test]

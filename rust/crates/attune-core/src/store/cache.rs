@@ -48,7 +48,15 @@ impl Store {
             "INSERT OR REPLACE INTO llm_cache
              (key, model, response, tokens_in, tokens_out, created_ts, last_hit_ts, hit_count)
              VALUES (?1,?2,?3,?4,?5,?6,?7,0)",
-            params![key, value.model, value.bytes, value.tokens_in, value.tokens_out, now, now],
+            params![
+                key,
+                value.model,
+                value.bytes,
+                value.tokens_in,
+                value.tokens_out,
+                now,
+                now
+            ],
         )?;
         Ok(())
     }
@@ -56,9 +64,9 @@ impl Store {
     /// Look up an embedding cache entry. Vectors are not PII so stored plain
     /// (no decryption layer needed).
     pub fn embed_cache_get(&self, key: &str) -> Result<Option<CachedValue>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT model, vector FROM embed_cache WHERE key = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT model, vector FROM embed_cache WHERE key = ?1")?;
         let row = stmt
             .query_row(params![key], |r| {
                 Ok(CachedValue {
@@ -199,7 +207,9 @@ mod cache_test {
 
         let conn = store.raw_connection_for_test();
         let hits: i64 = conn
-            .query_row("SELECT hit_count FROM llm_cache WHERE key='k'", [], |r| r.get(0))
+            .query_row("SELECT hit_count FROM llm_cache WHERE key='k'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(hits, 3);
     }

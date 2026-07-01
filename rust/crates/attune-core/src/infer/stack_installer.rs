@@ -108,7 +108,9 @@ fn stack_sources(_stack_repo: &str) -> Vec<crate::infer::model_source::ModelSour
     let mut chain = vec![company_mirror_source()];
     for s in crate::infer::model_source::builtin_sources() {
         // 已含 company-mirror;ModelScope 不覆盖 EP-stack 命名空间 → 排除(必 404)。
-        if s.id == "company-mirror" || s.coverage == crate::infer::model_source::SourceCoverage::OnlyXenovaOnnx {
+        if s.id == "company-mirror"
+            || s.coverage == crate::infer::model_source::SourceCoverage::OnlyXenovaOnnx
+        {
             continue;
         }
         chain.push(s);
@@ -143,7 +145,9 @@ fn stack_artifact(stack: &str, os: &str) -> Option<(String, String)> {
 /// OS/栈组合返 `Err`(unsupported)。
 pub fn ensure_stack(stack: &str) -> Result<PathBuf> {
     if !KNOWN_STACKS.contains(&stack) {
-        return Err(VaultError::ModelLoad(format!("unknown EP runtime stack: {stack}")));
+        return Err(VaultError::ModelLoad(format!(
+            "unknown EP runtime stack: {stack}"
+        )));
     }
     let dir = stack_dir(stack);
     let marker = stack_ready_marker(stack);
@@ -176,15 +180,18 @@ pub fn ensure_stack(stack: &str) -> Result<PathBuf> {
         )));
     }
 
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| VaultError::ModelLoad(format!("create EP stack dir {}: {e}", dir.display())))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        VaultError::ModelLoad(format!("create EP stack dir {}: {e}", dir.display()))
+    })?;
 
     let archive = dir.join(&filename);
     let sources = stack_sources(&repo);
     // EP-stack 是 company-mirror-only:必须走 forced 变体绕过 HF_ENDPOINT 逃生门,否则
     // init_search_engines 设的 region 默认 HF_ENDPOINT 会把下载劫持到 huggingface.co → 401
     // (155H rc.2 真机实证)。company-mirror 始终在 stack_sources 链首。
-    crate::infer::model_source::download_with_failover_forced(&sources, &repo, &filename, &archive)?;
+    crate::infer::model_source::download_with_failover_forced(
+        &sources, &repo, &filename, &archive,
+    )?;
 
     // 解压 tar.gz 到 stack_dir(纯 Rust flate2+tar,跨平台,不依赖系统 tar)。
     extract_tar_gz(&archive, &dir)?;
@@ -216,7 +223,11 @@ fn extract_tar_gz(archive: &std::path::Path, dest: &std::path::Path) -> Result<(
             .map_err(|e| VaultError::ModelLoad(format!("EP stack tar path: {e}")))?
             .into_owned();
         // 路径穿越守卫:拒绝绝对路径 / `..` 逃逸。
-        if path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return Err(VaultError::ModelLoad(format!(
                 "EP stack archive contains unsafe path {}; aborting. error-code=accel-stack-unsafe-archive",
                 path.display()
@@ -225,12 +236,13 @@ fn extract_tar_gz(archive: &std::path::Path, dest: &std::path::Path) -> Result<(
         let out = dest_canon.join(&path);
         // 文件条目可能没有先于它的目录条目 → 先建父目录,unpack 才不会因缺目录失败。
         if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| VaultError::ModelLoad(format!("create EP stack subdir {}: {e}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                VaultError::ModelLoad(format!("create EP stack subdir {}: {e}", parent.display()))
+            })?;
         }
-        entry
-            .unpack(&out)
-            .map_err(|e| VaultError::ModelLoad(format!("unpack EP stack entry {}: {e}", path.display())))?;
+        entry.unpack(&out).map_err(|e| {
+            VaultError::ModelLoad(format!("unpack EP stack entry {}: {e}", path.display()))
+        })?;
     }
     Ok(())
 }
@@ -270,7 +282,11 @@ pub struct StackEntry {
 
 impl Default for StackEntry {
     fn default() -> Self {
-        Self { phase: StackPhase::NotInstalled, attempts: 0, size_mb: None }
+        Self {
+            phase: StackPhase::NotInstalled,
+            attempts: 0,
+            size_mb: None,
+        }
     }
 }
 
@@ -282,7 +298,9 @@ pub struct StackInstallStatus {
 
 impl StackInstallStatus {
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(BTreeMap::new())) }
+        Self {
+            inner: Arc::new(Mutex::new(BTreeMap::new())),
+        }
     }
 
     fn with<R>(&self, f: impl FnOnce(&mut BTreeMap<String, StackEntry>) -> R) -> R {
@@ -322,7 +340,9 @@ impl StackInstallStatus {
     pub fn mark_failed(&self, stack: &str, error: impl Into<String>) {
         self.with(|m| {
             let e = m.entry(stack.to_string()).or_default();
-            e.phase = StackPhase::Failed { error: error.into() };
+            e.phase = StackPhase::Failed {
+                error: error.into(),
+            };
             e.size_mb = stack_size_mb(stack);
         });
     }
@@ -342,7 +362,10 @@ impl StackInstallStatus {
         self.with(|m| {
             let mut stacks = serde_json::Map::new();
             for (k, v) in m.iter() {
-                stacks.insert(k.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null));
+                stacks.insert(
+                    k.clone(),
+                    serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+                );
             }
             serde_json::json!({ "stacks": serde_json::Value::Object(stacks) })
         })
@@ -381,7 +404,10 @@ pub fn spawn_stack_bootstrap(status: StackInstallStatus, wanted: Vec<String>) {
             // 这让重复 unlock 不会令 attempts 无限累加(rc.5 真机 directml attempts=4 根因)。
             if let Some(entry) = status.entry_snapshot(&stack) {
                 if entry.phase.is_usable() {
-                    log::debug!("EP stack {stack} already terminal ({:?}); skipping re-bootstrap", entry.phase);
+                    log::debug!(
+                        "EP stack {stack} already terminal ({:?}); skipping re-bootstrap",
+                        entry.phase
+                    );
                     continue;
                 }
                 if entry.attempts >= MAX_ATTEMPTS {
@@ -413,7 +439,10 @@ pub fn spawn_stack_bootstrap(status: StackInstallStatus, wanted: Vec<String>) {
             let mut done = false;
             // Budget-aware: only consume the remaining attempts so the cross-session total
             // never exceeds MAX_ATTEMPTS (each mark_installing increments the persisted count).
-            let already = status.entry_snapshot(&stack).map(|e| e.attempts).unwrap_or(0);
+            let already = status
+                .entry_snapshot(&stack)
+                .map(|e| e.attempts)
+                .unwrap_or(0);
             let remaining = MAX_ATTEMPTS.saturating_sub(already);
             for n in 1..=remaining {
                 status.mark_installing(&stack);
@@ -452,12 +481,22 @@ mod tests {
         use crate::infer::accel::{EpChoice, OpenVinoDevice};
         // 每个 EpChoice 的 runtime_stack(如有)都必须在 KNOWN_STACKS 里。
         let eps = [
-            EpChoice::Cpu, EpChoice::Cuda, EpChoice::TensorRt, EpChoice::DirectMl,
-            EpChoice::CoreMl, EpChoice::OpenVino(OpenVinoDevice::Auto), EpChoice::Rocm, EpChoice::VitisAi,
+            EpChoice::Cpu,
+            EpChoice::Cuda,
+            EpChoice::TensorRt,
+            EpChoice::DirectMl,
+            EpChoice::CoreMl,
+            EpChoice::OpenVino(OpenVinoDevice::Auto),
+            EpChoice::Rocm,
+            EpChoice::VitisAi,
         ];
         for ep in eps {
             if let Some(s) = ep.runtime_stack() {
-                assert!(KNOWN_STACKS.contains(&s), "{} stack {s} must be known", ep.id());
+                assert!(
+                    KNOWN_STACKS.contains(&s),
+                    "{} stack {s} must be known",
+                    ep.id()
+                );
             }
         }
     }
@@ -465,7 +504,10 @@ mod tests {
     #[test]
     fn stack_size_known_for_all() {
         for s in KNOWN_STACKS {
-            assert!(stack_size_mb(s).is_some(), "{s} should have a size estimate");
+            assert!(
+                stack_size_mb(s).is_some(),
+                "{s} should have a size estimate"
+            );
         }
         assert!(stack_size_mb("bogus").is_none());
     }
@@ -488,9 +530,15 @@ mod tests {
     fn probe_respects_env_pointer() {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ATTUNE_EP_STACK_OPENVINO", dir.path());
-        assert!(probe_stack("openvino"), "env pointing to existing dir → present");
+        assert!(
+            probe_stack("openvino"),
+            "env pointing to existing dir → present"
+        );
         std::env::set_var("ATTUNE_EP_STACK_OPENVINO", "/nonexistent/path/xyz");
-        assert!(!probe_stack("openvino"), "env pointing to missing dir → not present (no marker)");
+        assert!(
+            !probe_stack("openvino"),
+            "env pointing to missing dir → not present (no marker)"
+        );
         std::env::remove_var("ATTUNE_EP_STACK_OPENVINO");
     }
 
@@ -500,7 +548,10 @@ mod tests {
         // EP-stack 的 failover 源链**首位必须是 company-mirror**(rc.6 真机:International
         // region 把 HF 提前 → 对 mirror-only artifact 必 401 → directml 装不上)。
         let sources = stack_sources("attune-ep-stacks/directml");
-        assert!(!sources.is_empty(), "EP-stack must have at least company-mirror");
+        assert!(
+            !sources.is_empty(),
+            "EP-stack must have at least company-mirror"
+        );
         assert_eq!(
             sources[0].id, "company-mirror",
             "EP-stack source chain head must be company-mirror (region-agnostic), got {}",
@@ -546,7 +597,9 @@ mod tests {
         if let Err(e) = r {
             let msg = e.to_string();
             assert!(
-                msg.contains("offline") || msg.contains("unsupported") || msg.contains("HF_HUB_OFFLINE"),
+                msg.contains("offline")
+                    || msg.contains("unsupported")
+                    || msg.contains("HF_HUB_OFFLINE"),
                 "offline missing stack should be a bounded Err: {msg}"
             );
         }
@@ -572,7 +625,9 @@ mod tests {
             // typeflag '0' = regular file
             block[156] = b'0';
             // checksum: fill with spaces, compute, write octal
-            for b in &mut block[148..156] { *b = b' '; }
+            for b in &mut block[148..156] {
+                *b = b' ';
+            }
             let sum: u32 = block.iter().map(|&b| b as u32).sum();
             let chk = format!("{sum:06o}\0 ");
             block[148..148 + chk.len()].copy_from_slice(chk.as_bytes());
@@ -593,10 +648,15 @@ mod tests {
         let r = extract_tar_gz(&archive, &dest);
         assert!(r.is_err(), "path-traversal archive must be rejected");
         assert!(
-            r.unwrap_err().to_string().contains("accel-stack-unsafe-archive"),
+            r.unwrap_err()
+                .to_string()
+                .contains("accel-stack-unsafe-archive"),
             "must reject via our explicit guard"
         );
-        assert!(!dir.path().join("evil.txt").exists(), "traversal file must not be written");
+        assert!(
+            !dir.path().join("evil.txt").exists(),
+            "traversal file must not be written"
+        );
     }
 
     #[test]
@@ -611,7 +671,9 @@ mod tests {
             let mut header = tar::Header::new_gnu();
             header.set_size(data.len() as u64);
             header.set_cksum();
-            builder.append_data(&mut header, "lib/foo.so", &data[..]).unwrap();
+            builder
+                .append_data(&mut header, "lib/foo.so", &data[..])
+                .unwrap();
             builder.into_inner().unwrap().finish().unwrap();
         }
         let dest = dir.path().join("out");
@@ -731,7 +793,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(150));
         let after = s.entry_snapshot("cuda").unwrap();
         assert_eq!(after.phase, StackPhase::Installed, "must stay Installed");
-        assert_eq!(after.attempts, before, "terminal stack must not be re-attempted");
+        assert_eq!(
+            after.attempts, before,
+            "terminal stack must not be re-attempted"
+        );
     }
 
     /// 达到 attempts 预算但被抓在 Installing（真机 directml=4 场景），再入应固化为 Failed。
@@ -742,14 +807,20 @@ mod tests {
         for _ in 0..STACK_MAX_ATTEMPTS {
             s.mark_installing("openvino");
         }
-        assert_eq!(s.entry_snapshot("openvino").unwrap().phase, StackPhase::Installing);
+        assert_eq!(
+            s.entry_snapshot("openvino").unwrap().phase,
+            StackPhase::Installing
+        );
         // Re-invoke bootstrap: the guard must seal it to Failed (no further retry).
         spawn_stack_bootstrap(s.clone(), vec!["openvino".to_string()]);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             let e = s.entry_snapshot("openvino").unwrap();
             if matches!(e.phase, StackPhase::Failed { .. }) {
-                assert_eq!(e.attempts, STACK_MAX_ATTEMPTS, "attempts must not exceed budget");
+                assert_eq!(
+                    e.attempts, STACK_MAX_ATTEMPTS,
+                    "attempts must not exceed budget"
+                );
                 break;
             }
             assert!(

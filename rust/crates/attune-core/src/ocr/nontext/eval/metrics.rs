@@ -62,7 +62,10 @@ pub fn chart_series_f1(
     let series_matches = |p: &(String, Vec<f64>), t: &(String, Vec<f64>)| -> bool {
         p.0 == t.0
             && p.1.len() == t.1.len()
-            && p.1.iter().zip(t.1.iter()).all(|(pv, tv)| relative_error(*pv, *tv) <= tol)
+            && p.1
+                .iter()
+                .zip(t.1.iter())
+                .all(|(pv, tv)| relative_error(*pv, *tv) <= tol)
     };
     let tp = predicted
         .iter()
@@ -182,8 +185,14 @@ mod tests {
     #[test]
     fn chart_series_f1_wrong_name_or_arity_misses() {
         let t = vec![("Q1".to_string(), vec![100.0])];
-        assert_eq!(chart_series_f1(&[("Q2".to_string(), vec![100.0])], &t, 0.05), 0.0);
-        assert_eq!(chart_series_f1(&[("Q1".to_string(), vec![100.0, 1.0])], &t, 0.05), 0.0);
+        assert_eq!(
+            chart_series_f1(&[("Q2".to_string(), vec![100.0])], &t, 0.05),
+            0.0
+        );
+        assert_eq!(
+            chart_series_f1(&[("Q1".to_string(), vec![100.0, 1.0])], &t, 0.05),
+            0.0
+        );
     }
 
     #[test]

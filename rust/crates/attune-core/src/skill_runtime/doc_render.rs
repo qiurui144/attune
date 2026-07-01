@@ -35,7 +35,9 @@ pub fn writing_to_document(result: &WritingResult, title: &str) -> Artifact {
                 // A body may contain multiple paragraphs (blank-line separated within a section
                 // is unusual, but split defensively so each becomes its own paragraph block).
                 for para in b.split("\n\n").map(str::trim).filter(|p| !p.is_empty()) {
-                    blocks.push(Block::Paragraph { text: para.to_string() });
+                    blocks.push(Block::Paragraph {
+                        text: para.to_string(),
+                    });
                 }
             }
         }
@@ -43,7 +45,9 @@ pub fn writing_to_document(result: &WritingResult, title: &str) -> Artifact {
     // Never emit a structurally-empty document: if the model produced nothing parseable, keep at
     // least one paragraph carrying the (possibly empty) content so the export still yields a file.
     if blocks.is_empty() && !marked.trim().is_empty() {
-        blocks.push(Block::Paragraph { text: marked.trim().to_string() });
+        blocks.push(Block::Paragraph {
+            text: marked.trim().to_string(),
+        });
     }
     Artifact::document(Document {
         title: Some(title.to_string()),
@@ -62,14 +66,19 @@ pub fn sections_to_document(
     let mut blocks = Vec::new();
     for (i, (heading, body)) in sections.iter().enumerate() {
         if !heading.trim().is_empty() {
-            blocks.push(Block::Heading { level: 2, text: heading.trim().to_string() });
+            blocks.push(Block::Heading {
+                level: 2,
+                text: heading.trim().to_string(),
+            });
         }
         let mut body = body.trim().to_string();
         if unverified_idx.contains(&i) && !body.is_empty() {
             body.push_str(UNVERIFIED_MARKER);
         }
         for para in body.split("\n\n").map(str::trim).filter(|p| !p.is_empty()) {
-            blocks.push(Block::Paragraph { text: para.to_string() });
+            blocks.push(Block::Paragraph {
+                text: para.to_string(),
+            });
         }
     }
     Artifact::document(Document {
@@ -130,7 +139,8 @@ fn annotate_unverified(result: &WritingResult) -> String {
         acc += ch.len_utf16() as u32;
         u16_at.push(acc);
     }
-    let mut out = String::with_capacity(result.content.len() + ends.len() * UNVERIFIED_MARKER.len());
+    let mut out =
+        String::with_capacity(result.content.len() + ends.len() * UNVERIFIED_MARKER.len());
     let mut next_end = 0usize; // index into `ends`
     for (i, ch) in chars.iter().enumerate() {
         out.push(*ch);
@@ -174,7 +184,9 @@ mod tests {
     fn sections_become_heading_and_paragraph_blocks() {
         let content = "背景\n这是背景内容。\n\n方案\n这是方案内容。";
         let art = writing_to_document(&result(content, vec![]), "研究综合");
-        let Artifact::Document(d) = art else { panic!("expected document") };
+        let Artifact::Document(d) = art else {
+            panic!("expected document")
+        };
         assert_eq!(d.title.as_deref(), Some("研究综合"));
         // 2 headings + 2 paragraphs
         assert_eq!(d.blocks.len(), 4);
@@ -192,7 +204,10 @@ mod tests {
         let art = writing_to_document(&result(content, vec![[0, total]]), "doc");
         let Artifact::Document(d) = art else { panic!() };
         // body paragraph must carry the marker
-        let has_marker = d.blocks.iter().any(|b| matches!(b, Block::Paragraph { text } if text.contains(UNVERIFIED_MARKER)));
+        let has_marker = d
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Paragraph { text } if text.contains(UNVERIFIED_MARKER)));
         assert!(has_marker, "unverified body must be marked: {:?}", d.blocks);
     }
 
@@ -205,12 +220,20 @@ mod tests {
         let art = sections_to_document("标书", &secs, &[1]);
         let Artifact::Document(d) = art else { panic!() };
         // section 1 (依据) body must carry the marker; section 0 must not.
-        let para_texts: Vec<&String> = d.blocks.iter().filter_map(|b| match b {
-            Block::Paragraph { text } => Some(text),
-            _ => None,
-        }).collect();
-        assert!(para_texts.iter().any(|t| t.contains("未核实依据") && t.contains(UNVERIFIED_MARKER)));
-        assert!(para_texts.iter().any(|t| t.contains("已核实背景") && !t.contains(UNVERIFIED_MARKER)));
+        let para_texts: Vec<&String> = d
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Paragraph { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(para_texts
+            .iter()
+            .any(|t| t.contains("未核实依据") && t.contains(UNVERIFIED_MARKER)));
+        assert!(para_texts
+            .iter()
+            .any(|t| t.contains("已核实背景") && !t.contains(UNVERIFIED_MARKER)));
     }
 
     #[test]

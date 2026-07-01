@@ -103,7 +103,12 @@ async fn spawn_with_vectors(n: usize) -> (String, reqwest::Client, Vec<String>) 
             v[lobe + 1] = 0.01 * (i as f32 + 1.0); // tiny jitter, keep the lobe tight
             idx.add(
                 &v,
-                VectorMeta { item_id: id.clone(), chunk_idx: 0, level: 2, section_idx: 0 },
+                VectorMeta {
+                    item_id: id.clone(),
+                    chunk_idx: 0,
+                    level: 2,
+                    section_idx: 0,
+                },
             )
             .expect("add vector");
         }
@@ -144,21 +149,33 @@ async fn folder_seed_to_organized_project_e2e() {
         .expect("analyze");
     assert_eq!(analyze.status().as_u16(), 200, "analyze returns 200");
     let prop: serde_json::Value = analyze.json().await.expect("json");
-    let pid = prop["proposal_id"].as_str().expect("proposal_id").to_string();
+    let pid = prop["proposal_id"]
+        .as_str()
+        .expect("proposal_id")
+        .to_string();
 
     // Real clustering path: with 6 same-dim vectors none are dropped for dim
     // mismatch, so mismatch count is 0 (proves vectors reached the engine).
-    assert_eq!(prop["dimension_mismatch_count"], 0, "all 12 vectors same dim → 0 mismatch");
+    assert_eq!(
+        prop["dimension_mismatch_count"], 0,
+        "all 12 vectors same dim → 0 mismatch"
+    );
 
     // Union invariant: every input item appears exactly once across groups+noise.
     let covered = covered_ids(&prop);
     let mut want = ids.clone();
     want.sort();
-    assert_eq!(covered, want, "analyze proposal covers all 12 input items exactly once");
+    assert_eq!(
+        covered, want,
+        "analyze proposal covers all 12 input items exactly once"
+    );
 
     // At least one non-noise group must form (the two tight lobes cluster).
     let group_count = prop["groups"].as_array().map(|a| a.len()).unwrap_or(0);
-    assert!(group_count >= 1, "real clustering yields ≥1 named group, got {group_count}");
+    assert!(
+        group_count >= 1,
+        "real clustering yields ≥1 named group, got {group_count}"
+    );
     // GenericStrategy (no member) labels every group non-empty (extractive).
     for g in prop["groups"].as_array().unwrap() {
         assert!(
@@ -175,7 +192,10 @@ async fn folder_seed_to_organized_project_e2e() {
         .expect("get_one");
     assert_eq!(got.status().as_u16(), 200, "get_one 200");
     let got_body: serde_json::Value = got.json().await.expect("json");
-    assert_eq!(got_body["proposal_id"], pid, "decrypted proposal id matches");
+    assert_eq!(
+        got_body["proposal_id"], pid,
+        "decrypted proposal id matches"
+    );
 
     // 3. apply — confirm every group as create; file ALL group items.
     let confirmed: Vec<serde_json::Value> = prop["groups"]
@@ -222,7 +242,10 @@ async fn folder_seed_to_organized_project_e2e() {
         !applied["created"].as_array().unwrap().is_empty(),
         "at least one project created"
     );
-    assert_eq!(applied["already_applied"], false, "first apply not a short-circuit");
+    assert_eq!(
+        applied["already_applied"], false,
+        "first apply not a short-circuit"
+    );
 }
 
 /// Idempotency through the E2E route surface: re-applying the same proposal files

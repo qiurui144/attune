@@ -169,7 +169,10 @@ fn env_override() -> Option<EpOverride> {
 /// clean install 时 vault setup 阻塞 120s+,且卡点使 EP 栈永不下载(双症同源)。
 /// 因此 ort-dynamic 下,dylib 尚不可加载时**跳过 live 探测、乐观纳入**该 EP(让
 /// `spawn_stack_bootstrap` 去拉栈;真可用性留待实际 session build,缺则 graceful CPU)。
-#[cfg(all(feature = "ort-dynamic", any(feature = "openvino", feature = "rocm", feature = "vitis")))]
+#[cfg(all(
+    feature = "ort-dynamic",
+    any(feature = "openvino", feature = "rocm", feature = "vitis")
+))]
 fn ort_dylib_loadable() -> bool {
     if std::env::var_os("ORT_DYLIB_PATH").is_some() {
         return true;
@@ -332,7 +335,13 @@ impl AccelSelection {
     ) -> Vec<EpChoice> {
         if power.is_energy_constrained() {
             let hw = reorder_npu_first(&self.hardware);
-            recommend_ep_chain_for_task(self.os, &hw, &self.compiled, self.env_override.as_ref(), task)
+            recommend_ep_chain_for_task(
+                self.os,
+                &hw,
+                &self.compiled,
+                self.env_override.as_ref(),
+                task,
+            )
         } else {
             self.recommend_ep_chain_for(task)
         }
@@ -340,12 +349,18 @@ impl AccelSelection {
 
     /// 链首(实际首选)EP — telemetry / UI 显示「预计加速:X」。
     pub fn primary_ep(&self) -> EpChoice {
-        self.recommend_ep_chain().into_iter().next().unwrap_or(EpChoice::Cpu)
+        self.recommend_ep_chain()
+            .into_iter()
+            .next()
+            .unwrap_or(EpChoice::Cpu)
     }
 
     /// 任务感知的链首 EP。
     pub fn primary_ep_for(&self, task: InferTask) -> EpChoice {
-        self.recommend_ep_chain_for(task).into_iter().next().unwrap_or(EpChoice::Cpu)
+        self.recommend_ep_chain_for(task)
+            .into_iter()
+            .next()
+            .unwrap_or(EpChoice::Cpu)
     }
 }
 
@@ -401,7 +416,11 @@ pub fn recommend_ep_chain_pure(
             AccelKind::AmdNpu => &[EpChoice::VitisAi],
             // Intel NPU → OpenVINO(device=NPU)。
             AccelKind::IntelNpu => {
-                push_first_compiled(&mut chain, &[EpChoice::OpenVino(OpenVinoDevice::Npu)], &is_compiled);
+                push_first_compiled(
+                    &mut chain,
+                    &[EpChoice::OpenVino(OpenVinoDevice::Npu)],
+                    &is_compiled,
+                );
                 continue;
             }
             // AMD RDNA GPU → Win:DirectML;Linux:ROCm。
@@ -486,7 +505,10 @@ fn apply_ocr_ep_rules(
     let is_compiled = |c: EpChoice| compiled.iter().any(|x| x.id() == c.id());
 
     // Intel + OCR:剔除 DirectML(实测全废),其余保序。
-    let mut filtered: Vec<EpChoice> = base.into_iter().filter(|e| *e != EpChoice::DirectMl).collect();
+    let mut filtered: Vec<EpChoice> = base
+        .into_iter()
+        .filter(|e| *e != EpChoice::DirectMl)
+        .collect();
 
     // 若有 Intel iGPU 且 OpenVINO 已编入但不在链中(例如 env 覆盖/旧策略造成),
     // 补 OpenVINO(device=GPU)到 CPU 前 —— 给 Intel OCR 一个实测可用的加速 EP。
@@ -550,13 +572,21 @@ impl EpSelectionTelemetry {
     /// 从一条 EP 链构造 telemetry。`active` 取链首(best-effort)。
     pub fn from_chain(chain: &[EpChoice]) -> Self {
         let requested: Vec<String> = chain.iter().map(|e| e.id().to_string()).collect();
-        let active = chain.first().map(|e| e.id().to_string()).unwrap_or_else(|| "cpu".into());
+        let active = chain
+            .first()
+            .map(|e| e.id().to_string())
+            .unwrap_or_else(|| "cpu".into());
         let fallback_reason = if chain.len() == 1 && chain[0] == EpChoice::Cpu {
             Some("no hardware accelerator EP compiled/available; using CPU. error-code=accel-ep-not-compiled".to_string())
         } else {
             None
         };
-        Self { requested, active, approx: true, fallback_reason }
+        Self {
+            requested,
+            active,
+            approx: true,
+            fallback_reason,
+        }
     }
 }
 
@@ -585,23 +615,14 @@ mod tests {
     #[test]
     fn intel_igpu_not_compiled_falls_to_cpu() {
         // 硬件有 Intel iGPU 但 artifact 只编了 CPU(v1 Linux deb 常态)→ [Cpu]。
-        let chain = recommend_ep_chain_pure(
-            "linux",
-            &[AccelKind::IntelIgpu],
-            &[EpChoice::Cpu],
-            None,
-        );
+        let chain =
+            recommend_ep_chain_pure("linux", &[AccelKind::IntelIgpu], &[EpChoice::Cpu], None);
         assert_eq!(chain_ids(&chain), ["cpu"]);
     }
 
     #[test]
     fn amd_npu_not_compiled_falls_to_cpu() {
-        let chain = recommend_ep_chain_pure(
-            "linux",
-            &[AccelKind::AmdNpu],
-            &[EpChoice::Cpu],
-            None,
-        );
+        let chain = recommend_ep_chain_pure("linux", &[AccelKind::AmdNpu], &[EpChoice::Cpu], None);
         assert_eq!(chain_ids(&chain), ["cpu"]);
     }
 
@@ -614,12 +635,8 @@ mod tests {
     #[test]
     fn cuda_hardware_but_artifact_lacks_cuda_falls_to_cpu() {
         // 有 NVIDIA 卡,但当前 artifact 没编 cuda → [Cpu](E1)。
-        let chain = recommend_ep_chain_pure(
-            "linux",
-            &[AccelKind::NvidiaGpu],
-            &[EpChoice::Cpu],
-            None,
-        );
+        let chain =
+            recommend_ep_chain_pure("linux", &[AccelKind::NvidiaGpu], &[EpChoice::Cpu], None);
         assert_eq!(chain_ids(&chain), ["cpu"]);
     }
 
@@ -641,7 +658,11 @@ mod tests {
         let chain = recommend_ep_chain_pure(
             "windows",
             &[AccelKind::IntelIgpu],
-            &[EpChoice::Cpu, EpChoice::DirectMl, EpChoice::OpenVino(OpenVinoDevice::Auto)],
+            &[
+                EpChoice::Cpu,
+                EpChoice::DirectMl,
+                EpChoice::OpenVino(OpenVinoDevice::Auto),
+            ],
             None,
         );
         assert_eq!(chain_ids(&chain), ["openvino", "cpu"]);
@@ -695,20 +716,36 @@ mod tests {
     fn prop_chain_always_ends_with_cpu() {
         // 任意 hardware × compiled × env → 末位恒 CPU。
         let all_hw = [
-            AccelKind::NvidiaGpu, AccelKind::AmdGpu, AccelKind::AmdNpu,
-            AccelKind::IntelIgpu, AccelKind::IntelNpu, AccelKind::Cpu,
+            AccelKind::NvidiaGpu,
+            AccelKind::AmdGpu,
+            AccelKind::AmdNpu,
+            AccelKind::IntelIgpu,
+            AccelKind::IntelNpu,
+            AccelKind::Cpu,
         ];
         let all_eps = [
-            EpChoice::Cpu, EpChoice::Cuda, EpChoice::DirectMl,
-            EpChoice::OpenVino(OpenVinoDevice::Auto), EpChoice::Rocm, EpChoice::VitisAi,
+            EpChoice::Cpu,
+            EpChoice::Cuda,
+            EpChoice::DirectMl,
+            EpChoice::OpenVino(OpenVinoDevice::Auto),
+            EpChoice::Rocm,
+            EpChoice::VitisAi,
         ];
         for os in ["linux", "windows", "macos", "unknown"] {
             for hw_mask in 0u32..(1 << all_hw.len()) {
-                let hw: Vec<AccelKind> = all_hw.iter().enumerate()
-                    .filter(|(i, _)| hw_mask & (1 << i) != 0).map(|(_, &k)| k).collect();
+                let hw: Vec<AccelKind> = all_hw
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| hw_mask & (1 << i) != 0)
+                    .map(|(_, &k)| k)
+                    .collect();
                 for ep_mask in 0u32..(1 << all_eps.len()) {
-                    let mut compiled: Vec<EpChoice> = all_eps.iter().enumerate()
-                        .filter(|(i, _)| ep_mask & (1 << i) != 0).map(|(_, &e)| e).collect();
+                    let mut compiled: Vec<EpChoice> = all_eps
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| ep_mask & (1 << i) != 0)
+                        .map(|(_, &e)| e)
+                        .collect();
                     if !compiled.contains(&EpChoice::Cpu) {
                         compiled.push(EpChoice::Cpu); // CPU 必在(invariant)
                     }
@@ -722,30 +759,60 @@ mod tests {
 
     #[test]
     fn prop_chain_only_contains_compiled_eps() {
-        let all_hw = [AccelKind::NvidiaGpu, AccelKind::AmdGpu, AccelKind::IntelIgpu, AccelKind::IntelNpu, AccelKind::AmdNpu];
+        let all_hw = [
+            AccelKind::NvidiaGpu,
+            AccelKind::AmdGpu,
+            AccelKind::IntelIgpu,
+            AccelKind::IntelNpu,
+            AccelKind::AmdNpu,
+        ];
         // compiled 故意只给 CPU:任何硬件都不该让非编入 EP 入链。
         for os in ["linux", "windows"] {
             for hw_mask in 0u32..(1 << all_hw.len()) {
-                let hw: Vec<AccelKind> = all_hw.iter().enumerate()
-                    .filter(|(i, _)| hw_mask & (1 << i) != 0).map(|(_, &k)| k).collect();
+                let hw: Vec<AccelKind> = all_hw
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| hw_mask & (1 << i) != 0)
+                    .map(|(_, &k)| k)
+                    .collect();
                 let chain = recommend_ep_chain_pure(os, &hw, &[EpChoice::Cpu], None);
-                assert_eq!(chain, vec![EpChoice::Cpu],
-                    "with only CPU compiled, chain must be [Cpu] regardless of hw={hw:?}");
+                assert_eq!(
+                    chain,
+                    vec![EpChoice::Cpu],
+                    "with only CPU compiled, chain must be [Cpu] regardless of hw={hw:?}"
+                );
             }
         }
     }
 
     #[test]
     fn prop_env_off_always_cpu_only() {
-        let all_hw = [AccelKind::NvidiaGpu, AccelKind::AmdGpu, AccelKind::IntelIgpu];
-        let compiled = [EpChoice::Cpu, EpChoice::Cuda, EpChoice::DirectMl, EpChoice::Rocm];
+        let all_hw = [
+            AccelKind::NvidiaGpu,
+            AccelKind::AmdGpu,
+            AccelKind::IntelIgpu,
+        ];
+        let compiled = [
+            EpChoice::Cpu,
+            EpChoice::Cuda,
+            EpChoice::DirectMl,
+            EpChoice::Rocm,
+        ];
         for os in ["linux", "windows", "macos"] {
             for hw_mask in 0u32..(1 << all_hw.len()) {
-                let hw: Vec<AccelKind> = all_hw.iter().enumerate()
-                    .filter(|(i, _)| hw_mask & (1 << i) != 0).map(|(_, &k)| k).collect();
-                let chain = recommend_ep_chain_pure(os, &hw, &compiled, Some(&EpOverride::DisableAccel));
-                assert_eq!(chain, vec![EpChoice::Cpu],
-                    "env=off must force CPU-only regardless of hw={hw:?}");
+                let hw: Vec<AccelKind> = all_hw
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| hw_mask & (1 << i) != 0)
+                    .map(|(_, &k)| k)
+                    .collect();
+                let chain =
+                    recommend_ep_chain_pure(os, &hw, &compiled, Some(&EpOverride::DisableAccel));
+                assert_eq!(
+                    chain,
+                    vec![EpChoice::Cpu],
+                    "env=off must force CPU-only regardless of hw={hw:?}"
+                );
             }
         }
     }
@@ -773,9 +840,15 @@ mod tests {
 
     #[test]
     fn boundary_env_parse_case_and_whitespace() {
-        assert_eq!(parse_ep_override("  CUDA  ").unwrap(), EpOverride::Force(EpChoice::Cuda));
+        assert_eq!(
+            parse_ep_override("  CUDA  ").unwrap(),
+            EpOverride::Force(EpChoice::Cuda)
+        );
         assert_eq!(parse_ep_override("Off").unwrap(), EpOverride::DisableAccel);
-        assert_eq!(parse_ep_override("DML").unwrap(), EpOverride::Force(EpChoice::DirectMl));
+        assert_eq!(
+            parse_ep_override("DML").unwrap(),
+            EpOverride::Force(EpChoice::DirectMl)
+        );
         assert!(parse_ep_override("nonsense").is_err());
     }
 
@@ -796,7 +869,11 @@ mod tests {
         // 同机 NVIDIA + AMD GPU + Intel iGPU,全部编入 → NVIDIA 链首(硬件顺序优先级)。
         let chain = recommend_ep_chain_pure(
             "windows",
-            &[AccelKind::NvidiaGpu, AccelKind::AmdGpu, AccelKind::IntelIgpu],
+            &[
+                AccelKind::NvidiaGpu,
+                AccelKind::AmdGpu,
+                AccelKind::IntelIgpu,
+            ],
             &[EpChoice::Cpu, EpChoice::Cuda, EpChoice::DirectMl],
             None,
         );
@@ -824,7 +901,10 @@ mod tests {
             if bad.trim().is_empty() {
                 continue;
             }
-            assert!(parse_ep_override(bad).is_err(), "{bad:?} should be unrecognized");
+            assert!(
+                parse_ep_override(bad).is_err(),
+                "{bad:?} should be unrecognized"
+            );
         }
     }
 
@@ -884,7 +964,11 @@ mod tests {
             None,
             InferTask::Ocr,
         );
-        assert_eq!(chain_ids(&ocr), ["cpu"], "Intel OCR must NOT use DirectML (CER 202%)");
+        assert_eq!(
+            chain_ids(&ocr),
+            ["cpu"],
+            "Intel OCR must NOT use DirectML (CER 202%)"
+        );
         assert!(!ocr.contains(&EpChoice::DirectMl));
     }
 
@@ -894,12 +978,22 @@ mod tests {
         let ocr = recommend_ep_chain_for_task(
             "windows",
             &[AccelKind::IntelIgpu],
-            &[EpChoice::Cpu, EpChoice::DirectMl, EpChoice::OpenVino(OpenVinoDevice::Auto)],
+            &[
+                EpChoice::Cpu,
+                EpChoice::DirectMl,
+                EpChoice::OpenVino(OpenVinoDevice::Auto),
+            ],
             None,
             InferTask::Ocr,
         );
-        assert!(!ocr.contains(&EpChoice::DirectMl), "Intel OCR must drop DirectML");
-        assert!(ocr.iter().any(|e| e.id() == "openvino"), "Intel OCR should use OpenVINO");
+        assert!(
+            !ocr.contains(&EpChoice::DirectMl),
+            "Intel OCR must drop DirectML"
+        );
+        assert!(
+            ocr.iter().any(|e| e.id() == "openvino"),
+            "Intel OCR should use OpenVINO"
+        );
         assert_eq!(*ocr.last().unwrap(), EpChoice::Cpu);
     }
 
@@ -927,7 +1021,10 @@ mod tests {
             Some(&EpOverride::Force(EpChoice::DirectMl)),
             InferTask::Ocr,
         );
-        assert!(!ocr.contains(&EpChoice::DirectMl), "Intel OCR drops DirectML even on env force");
+        assert!(
+            !ocr.contains(&EpChoice::DirectMl),
+            "Intel OCR drops DirectML even on env force"
+        );
         assert_eq!(chain_ids(&ocr), ["cpu"]);
     }
 
@@ -941,7 +1038,11 @@ mod tests {
             None,
             InferTask::Ocr,
         );
-        assert_eq!(chain_ids(&ocr), ["directml", "cpu"], "AMD OCR keeps DirectML (3.4x faster)");
+        assert_eq!(
+            chain_ids(&ocr),
+            ["directml", "cpu"],
+            "AMD OCR keeps DirectML (3.4x faster)"
+        );
     }
 
     #[test]
@@ -1002,8 +1103,12 @@ mod tests {
             &[AccelKind::IntelNpu, AccelKind::IntelIgpu],
         ];
         let all_eps = [
-            EpChoice::Cpu, EpChoice::Cuda, EpChoice::DirectMl,
-            EpChoice::OpenVino(OpenVinoDevice::Auto), EpChoice::Rocm, EpChoice::VitisAi,
+            EpChoice::Cpu,
+            EpChoice::Cuda,
+            EpChoice::DirectMl,
+            EpChoice::OpenVino(OpenVinoDevice::Auto),
+            EpChoice::Rocm,
+            EpChoice::VitisAi,
         ];
         let overrides: &[Option<EpOverride>] = &[
             None,
@@ -1013,17 +1118,30 @@ mod tests {
         for os in ["windows", "linux", "macos"] {
             for hw in intel_hw_sets {
                 for ep_mask in 0u32..(1 << all_eps.len()) {
-                    let mut compiled: Vec<EpChoice> = all_eps.iter().enumerate()
-                        .filter(|(i, _)| ep_mask & (1 << i) != 0).map(|(_, &e)| e).collect();
+                    let mut compiled: Vec<EpChoice> = all_eps
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| ep_mask & (1 << i) != 0)
+                        .map(|(_, &e)| e)
+                        .collect();
                     if !compiled.contains(&EpChoice::Cpu) {
                         compiled.push(EpChoice::Cpu);
                     }
                     for over in overrides {
-                        let chain = recommend_ep_chain_for_task(os, hw, &compiled, over.as_ref(), InferTask::Ocr);
+                        let chain = recommend_ep_chain_for_task(
+                            os,
+                            hw,
+                            &compiled,
+                            over.as_ref(),
+                            InferTask::Ocr,
+                        );
                         assert!(!chain.contains(&EpChoice::DirectMl),
                             "Intel OCR must never contain DirectML: os={os} hw={hw:?} compiled={compiled:?} over={over:?} chain={chain:?}");
-                        assert_eq!(*chain.last().unwrap(), EpChoice::Cpu,
-                            "OCR chain must end with CPU: {chain:?}");
+                        assert_eq!(
+                            *chain.last().unwrap(),
+                            EpChoice::Cpu,
+                            "OCR chain must end with CPU: {chain:?}"
+                        );
                     }
                 }
             }
@@ -1039,12 +1157,22 @@ mod tests {
             &[AccelKind::AmdGpu, AccelKind::AmdNpu],
             &[],
         ];
-        let compiled = [EpChoice::Cpu, EpChoice::Cuda, EpChoice::DirectMl, EpChoice::Rocm, EpChoice::VitisAi];
+        let compiled = [
+            EpChoice::Cpu,
+            EpChoice::Cuda,
+            EpChoice::DirectMl,
+            EpChoice::Rocm,
+            EpChoice::VitisAi,
+        ];
         for os in ["windows", "linux"] {
             for hw in non_intel_hw {
-                let generic = recommend_ep_chain_for_task(os, hw, &compiled, None, InferTask::Generic);
+                let generic =
+                    recommend_ep_chain_for_task(os, hw, &compiled, None, InferTask::Generic);
                 let ocr = recommend_ep_chain_for_task(os, hw, &compiled, None, InferTask::Ocr);
-                assert_eq!(generic, ocr, "non-Intel: OCR chain must equal generic: os={os} hw={hw:?}");
+                assert_eq!(
+                    generic, ocr,
+                    "non-Intel: OCR chain must equal generic: os={os} hw={hw:?}"
+                );
             }
         }
     }
@@ -1056,7 +1184,11 @@ mod tests {
         let t = EpSelectionTelemetry::from_chain(&[EpChoice::Cpu]);
         assert_eq!(t.active, "cpu");
         assert!(t.approx);
-        assert!(t.fallback_reason.as_deref().unwrap().contains("accel-ep-not-compiled"));
+        assert!(t
+            .fallback_reason
+            .as_deref()
+            .unwrap()
+            .contains("accel-ep-not-compiled"));
     }
 
     #[test]
@@ -1073,7 +1205,10 @@ mod tests {
         assert_eq!(EpChoice::CoreMl.runtime_stack(), None);
         assert_eq!(EpChoice::Cuda.runtime_stack(), Some("cuda"));
         assert_eq!(EpChoice::DirectMl.runtime_stack(), Some("directml"));
-        assert_eq!(EpChoice::OpenVino(OpenVinoDevice::Auto).runtime_stack(), Some("openvino"));
+        assert_eq!(
+            EpChoice::OpenVino(OpenVinoDevice::Auto).runtime_stack(),
+            Some("openvino")
+        );
         assert_eq!(EpChoice::Rocm.runtime_stack(), Some("rocm"));
         assert_eq!(EpChoice::VitisAi.runtime_stack(), Some("vitisai"));
     }

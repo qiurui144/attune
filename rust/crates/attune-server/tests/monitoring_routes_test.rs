@@ -64,7 +64,9 @@ async fn monitoring_endpoints_locked_vault_rejected() {
     let cases: Vec<(reqwest::RequestBuilder, &str)> = vec![
         (client.get(&watches), "GET watches"),
         (
-            client.post(&watches).json(&serde_json::json!({"label": "x", "keywords": ["RVV"]})),
+            client
+                .post(&watches)
+                .json(&serde_json::json!({"label": "x", "keywords": ["RVV"]})),
             "POST watches",
         ),
         (
@@ -160,7 +162,10 @@ async fn monitoring_round_trip_unlocked() {
     let hits: serde_json::Value = r.json().await.unwrap();
     let arr = hits["hits"].as_array().unwrap();
     assert_eq!(arr.len(), 2);
-    assert!(!arr[0]["reasons"].as_array().unwrap().is_empty(), "explainable reasons");
+    assert!(
+        !arr[0]["reasons"].as_array().unwrap().is_empty(),
+        "explainable reasons"
+    );
     let s0 = arr[0]["score"].as_f64().unwrap();
     let s1 = arr[1]["score"].as_f64().unwrap();
     assert!(s0 >= s1, "triage: score descending");
@@ -174,7 +179,10 @@ async fn monitoring_round_trip_unlocked() {
     assert_eq!(r.status().as_u16(), 200);
     let digest: serde_json::Value = r.json().await.unwrap();
     assert_eq!(digest["entries"].as_u64().unwrap(), 2);
-    assert!(digest["llm_summary"].is_null(), "default digest carries no LLM summary");
+    assert!(
+        digest["llm_summary"].is_null(),
+        "default digest carries no LLM summary"
+    );
     assert_eq!(digest["cost_hint"]["tier"], "free", "zero-cost tier");
 
     // 8. cross-time dedup: after digest, hits marked digested → second digest no-hits.
@@ -184,7 +192,10 @@ async fn monitoring_round_trip_unlocked() {
         .await
         .unwrap();
     let digest2: serde_json::Value = r.json().await.unwrap();
-    assert!(digest2["card_id"].is_null(), "digested hits not re-pushed (cross-time dedup)");
+    assert!(
+        digest2["card_id"].is_null(),
+        "digested hits not re-pushed (cross-time dedup)"
+    );
 
     // 9. ask as a non-member (this harness has no member login) → 403 membership-required.
     //    tier-3 💰 gate: free / logged-out users are blocked BEFORE any token spend (GA P0-1).
@@ -196,7 +207,11 @@ async fn monitoring_round_trip_unlocked() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status().as_u16(), 403, "non-member ask → 403 (tier-3 member gate)");
+    assert_eq!(
+        r.status().as_u16(),
+        403,
+        "non-member ask → 403 (tier-3 member gate)"
+    );
     let body: serde_json::Value = r.json().await.unwrap();
     assert_eq!(body["code"], "membership-required", "ask gate code");
 
@@ -207,7 +222,11 @@ async fn monitoring_round_trip_unlocked() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status().as_u16(), 403, "non-member research → 403 (tier-3 member gate)");
+    assert_eq!(
+        r.status().as_u16(),
+        403,
+        "non-member research → 403 (tier-3 member gate)"
+    );
     let body: serde_json::Value = r.json().await.unwrap();
     assert_eq!(body["code"], "membership-required", "research gate code");
 
@@ -219,9 +238,17 @@ async fn monitoring_round_trip_unlocked() {
         .await
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
-    let r = client.delete(format!("{}/watches/{}", mon, watch_id)).send().await.unwrap();
+    let r = client
+        .delete(format!("{}/watches/{}", mon, watch_id))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status().as_u16(), 200);
     // delete unknown → 404.
-    let r = client.delete(format!("{}/watches/nope", mon)).send().await.unwrap();
+    let r = client
+        .delete(format!("{}/watches/nope", mon))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status().as_u16(), 404, "unknown watch → 404");
 }

@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use attune_core::crypto::Key32;
-use attune_core::ingest::{ingest_document, ingest_document_replacing, IngestOutcome, RawDocument, SourceKind};
+use attune_core::ingest::{
+    ingest_document, ingest_document_replacing, IngestOutcome, RawDocument, SourceKind,
+};
 use attune_core::store::Store;
 
 fn md_doc(source_ref: &str, body: &str) -> RawDocument {
@@ -26,11 +28,17 @@ fn md_doc(source_ref: &str, body: &str) -> RawDocument {
 fn first_ingest_returns_inserted_and_enqueues_two_levels() {
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    let doc = md_doc("/tmp/a.md", "# Title\n\nSome body paragraph here.\n\n# Two\n\nMore body.");
+    let doc = md_doc(
+        "/tmp/a.md",
+        "# Title\n\nSome body paragraph here.\n\n# Two\n\nMore body.",
+    );
 
     let outcome = ingest_document(&store, &dek, &doc).unwrap();
     let item_id = match outcome {
-        IngestOutcome::Inserted { item_id, chunks_enqueued } => {
+        IngestOutcome::Inserted {
+            item_id,
+            chunks_enqueued,
+        } => {
             assert!(chunks_enqueued >= 2, "L1 章节 + L2 段落块都应入队");
             item_id
         }
@@ -86,7 +94,9 @@ fn replacing_old_item_returns_updated() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("expected Inserted, got {other:?}"),
     };
-    store.upsert_indexed_file(&dir_id, &doc_v1.source_ref, "hash-v1", &first_id).unwrap();
+    store
+        .upsert_indexed_file(&dir_id, &doc_v1.source_ref, "hash-v1", &first_id)
+        .unwrap();
 
     // caller 检测到 hash 变化后：软删旧 item + enqueue purge。
     store.delete_item(&first_id).unwrap();
@@ -97,7 +107,10 @@ fn replacing_old_item_returns_updated() {
     let doc_v2 = md_doc("/tmp/a.md", "# V2\n\ncompletely new body.");
     let second = ingest_document_replacing(&store, &dek, &doc_v2, &first_id).unwrap();
     match second {
-        IngestOutcome::Updated { item_id, old_item_id } => {
+        IngestOutcome::Updated {
+            item_id,
+            old_item_id,
+        } => {
             assert_ne!(item_id, old_item_id);
             assert_eq!(old_item_id, first_id);
         }
@@ -129,10 +142,23 @@ fn ingest_passes_through_domain_and_tags() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("expected Inserted, got {other:?}"),
     };
-    let item = store.get_item(&dek, &item_id).unwrap().expect("item exists");
-    assert_eq!(item.domain.as_deref(), Some("blog.example.com"), "domain 必须透传");
-    let tags = store.get_tags_json(&dek, &item_id).unwrap().expect("tags stored");
-    assert!(tags.contains("rust") && tags.contains("ingest"), "tags 必须透传");
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("item exists");
+    assert_eq!(
+        item.domain.as_deref(),
+        Some("blog.example.com"),
+        "domain 必须透传"
+    );
+    let tags = store
+        .get_tags_json(&dek, &item_id)
+        .unwrap()
+        .expect("tags stored");
+    assert!(
+        tags.contains("rust") && tags.contains("ingest"),
+        "tags 必须透传"
+    );
 }
 
 #[test]
@@ -195,24 +221,42 @@ fn raw_title_takes_priority_over_parser_extracted_title() {
     let dek = Key32::generate();
 
     // Branch A: raw.title is non-empty — it must win over the markdown h1.
-    let mut doc_with_title = md_doc("/tmp/titled.md", "# Parser Title\n\ncontent body unique-alpha.");
+    let mut doc_with_title = md_doc(
+        "/tmp/titled.md",
+        "# Parser Title\n\ncontent body unique-alpha.",
+    );
     doc_with_title.title = "Explicit Raw Title".into();
     let id_a = match ingest_document(&store, &dek, &doc_with_title).unwrap() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("expected Inserted, got {other:?}"),
     };
-    let item_a = store.get_item(&dek, &id_a).unwrap().expect("item must exist");
-    assert_eq!(item_a.title, "Explicit Raw Title", "raw.title must take priority");
+    let item_a = store
+        .get_item(&dek, &id_a)
+        .unwrap()
+        .expect("item must exist");
+    assert_eq!(
+        item_a.title, "Explicit Raw Title",
+        "raw.title must take priority"
+    );
 
     // Branch B: raw.title is empty — parser-extracted h1 is used as fallback.
     // Use distinct content so content_hash doesn't deduplicate against Branch A.
-    let doc_no_title = md_doc("/tmp/notitle.md", "# Parser Title\n\ncontent body unique-beta.");
+    let doc_no_title = md_doc(
+        "/tmp/notitle.md",
+        "# Parser Title\n\ncontent body unique-beta.",
+    );
     let id_b = match ingest_document(&store, &dek, &doc_no_title).unwrap() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("expected Inserted, got {other:?}"),
     };
-    let item_b = store.get_item(&dek, &id_b).unwrap().expect("item must exist");
-    assert!(!item_b.title.is_empty(), "parser-extracted title must be used when raw.title is empty");
+    let item_b = store
+        .get_item(&dek, &id_b)
+        .unwrap()
+        .expect("item must exist");
+    assert!(
+        !item_b.title.is_empty(),
+        "parser-extracted title must be used when raw.title is empty"
+    );
 }
 
 #[test]
@@ -223,7 +267,10 @@ fn ingest_with_named_profile_inserts_text_doc_unchanged() {
     use attune_core::ingest::ingest_document_with_profile;
     let store = Store::open_memory().unwrap();
     let dek = Key32::generate();
-    let doc = md_doc("/tmp/scan.txt", "# Scan Result\n\nsome extracted text from scan.");
+    let doc = md_doc(
+        "/tmp/scan.txt",
+        "# Scan Result\n\nsome extracted text from scan.",
+    );
     let outcome = ingest_document_with_profile(&store, &dek, &doc, Some("screenshot")).unwrap();
     assert!(
         matches!(outcome, IngestOutcome::Inserted { .. }),
@@ -263,7 +310,10 @@ fn replacing_with_content_identical_to_third_party_item_inserts_new() {
 
     // 必须返回 Updated（新 item 入库），而非指向 third_party 的 Duplicate。
     match outcome {
-        IngestOutcome::Updated { item_id, old_item_id } => {
+        IngestOutcome::Updated {
+            item_id,
+            old_item_id,
+        } => {
             assert_eq!(old_item_id, old_id);
             assert_ne!(item_id, third_id, "不能复用第三方 item 的 id");
         }

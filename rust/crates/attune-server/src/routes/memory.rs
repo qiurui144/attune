@@ -39,7 +39,10 @@ pub async fn migration_status(
     if !matches!(vault.state(), VaultState::Unlocked) {
         return Err(AppError::Forbidden("vault locked".into()));
     }
-    let stale = vault.store().list_stale_memory_ids(&sig.model).map_err(int)?;
+    let stale = vault
+        .store()
+        .list_stale_memory_ids(&sig.model)
+        .map_err(int)?;
 
     Ok(Json(serde_json::json!({
         "current_model": sig.model,
@@ -60,7 +63,9 @@ pub async fn reindex(
 ) -> AppResult<Json<serde_json::Value>> {
     let pause = body.get("pause").and_then(|b| b.as_bool()).unwrap_or(false);
     state.set_reindex_paused(pause);
-    Ok(Json(serde_json::json!({ "running": !pause, "paused": pause })))
+    Ok(Json(
+        serde_json::json!({ "running": !pause, "paused": pause }),
+    ))
 }
 
 /// POST /api/v1/memory/export   body: {"passphrase": "..."}
@@ -157,20 +162,24 @@ pub async fn import(
     }
     let dek = vault.dek_db().map_err(int)?;
 
-    let r =
-        attune_core::memory::portability::import_memory_bundle(vault.store(), &dek, &bundle, &passphrase)
-            .map_err(|e| match &e {
-                // 口令错:portability 走 crypto::decrypt → InvalidPassword。显式映 400
-                // bad-passphrase(From<VaultError> 默认会映 401,客户端无法区分"权限"vs"口令")。
-                VaultError::InvalidPassword => AppError::BadRequest("bad-passphrase".into()),
-                VaultError::InvalidInput(s) if s.contains("unsupported") => {
-                    AppError::BadRequest("unsupported-bundle-version".into())
-                }
-                VaultError::InvalidInput(s) if s.contains("corrupt") => {
-                    AppError::BadRequest("corrupt-bundle".into())
-                }
-                _ => AppError::Internal(e.to_string()),
-            })?;
+    let r = attune_core::memory::portability::import_memory_bundle(
+        vault.store(),
+        &dek,
+        &bundle,
+        &passphrase,
+    )
+    .map_err(|e| match &e {
+        // 口令错:portability 走 crypto::decrypt → InvalidPassword。显式映 400
+        // bad-passphrase(From<VaultError> 默认会映 401,客户端无法区分"权限"vs"口令")。
+        VaultError::InvalidPassword => AppError::BadRequest("bad-passphrase".into()),
+        VaultError::InvalidInput(s) if s.contains("unsupported") => {
+            AppError::BadRequest("unsupported-bundle-version".into())
+        }
+        VaultError::InvalidInput(s) if s.contains("corrupt") => {
+            AppError::BadRequest("corrupt-bundle".into())
+        }
+        _ => AppError::Internal(e.to_string()),
+    })?;
 
     Ok(Json(serde_json::json!({
         "imported": r.imported,

@@ -38,7 +38,11 @@ fn load_disabled_plugin_ids(state: &SharedState) -> Vec<String> {
     json.get("plugins")
         .and_then(|p| p.get("disabled"))
         .and_then(|d| d.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -53,7 +57,10 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
         .into_iter()
         .map(|s| {
             let enabled = !disabled.iter().any(|d| d == &s.plugin_id);
-            let entitlement_status = state.entitlement_cache.status(&s.plugin_id, &now).as_api_str();
+            let entitlement_status = state
+                .entitlement_cache
+                .status(&s.plugin_id, &now)
+                .as_api_str();
             serde_json::json!({
                 "plugin_id": s.plugin_id,
                 "plugin_label": s.plugin_label,
@@ -124,7 +131,10 @@ ui_components:
         let resp = list(axum::extract::State(state)).await.expect("list ok");
         let body = resp.0;
         let cards = body["scenarios"].as_array().expect("scenarios array");
-        let card = cards.iter().find(|c| c["agent_id"] == "civil_loan_agent").expect("card present");
+        let card = cards
+            .iter()
+            .find(|c| c["agent_id"] == "civil_loan_agent")
+            .expect("card present");
         assert_eq!(card["label"], "借贷本息计算");
         assert_eq!(card["plugin_label"], "律师助手");
         assert_eq!(card["cost_tier"], "free");
@@ -163,7 +173,9 @@ ui_components:
         .expect("write");
 
         let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
-        vault.setup("P@ss-scenarios-disabled-not-real").expect("setup");
+        vault
+            .setup("P@ss-scenarios-disabled-not-real")
+            .expect("setup");
         // 写 settings.plugins.disabled = [law-pro]
         let settings = serde_json::json!({ "plugins": { "disabled": ["law-pro"] } });
         vault
@@ -175,7 +187,10 @@ ui_components:
         let resp = list(axum::extract::State(state)).await.expect("list ok");
         let cards = resp.0["scenarios"].as_array().expect("array").clone();
         let card = cards.iter().find(|c| c["agent_id"] == "a1").expect("card");
-        assert_eq!(card["enabled"], false, "disabled plugin → card enabled=false");
+        assert_eq!(
+            card["enabled"], false,
+            "disabled plugin → card enabled=false"
+        );
     }
 
     /// 派生层永不 silent-fail: cost_tier/has_form 字段恒存在(契约稳定)。

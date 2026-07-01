@@ -88,8 +88,7 @@ pub struct SignedLicense {
 impl SignedLicense {
     /// 编码为单行 base64 字符串 (CLI / UI 复制粘贴友好)
     pub fn to_code(&self) -> Result<String> {
-        let json =
-            serde_json::to_vec(self).map_err(|e| err(format!("license serialize: {e}")))?;
+        let json = serde_json::to_vec(self).map_err(|e| err(format!("license serialize: {e}")))?;
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
     }
 
@@ -242,7 +241,8 @@ mod tests {
         assert!(!code.contains('\n'));
         assert!(!code.contains('/')); // URL_SAFE_NO_PAD 用 - _
         let back = SignedLicense::from_code(&code).expect("decode");
-        back.verify(&pk, 1_700_001_000).expect("verify after roundtrip");
+        back.verify(&pk, 1_700_001_000)
+            .expect("verify after roundtrip");
     }
 
     #[test]

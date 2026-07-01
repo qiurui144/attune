@@ -27,7 +27,9 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::cloud_client::{CloudClient, EntitlementSnapshot};
 use crate::entitlement::EntitlementCache;
-use crate::entitlement_anchor::{authorize_snapshot_fresh, ENTITLEMENT_SIGNING_PUBKEYS, SnapshotAuthorization};
+use crate::entitlement_anchor::{
+    authorize_snapshot_fresh, SnapshotAuthorization, ENTITLEMENT_SIGNING_PUBKEYS,
+};
 use crate::plugin_sig::TrustMode;
 use crate::store::plugin_entitlements::EntitlementRow;
 
@@ -77,15 +79,20 @@ pub fn verify_round(
     now: &DateTime<Utc>,
 ) -> VerifyRound {
     let client_nonce = new_client_nonce();
-    let cloud_resp: Result<EntitlementSnapshot, ()> =
-        client.verify_entitlements(license_id, &client_nonce).map_err(|_| ());
+    let cloud_resp: Result<EntitlementSnapshot, ()> = client
+        .verify_entitlements(license_id, &client_nonce)
+        .map_err(|_| ());
     let verified_at = cloud_resp
         .as_ref()
         .ok()
         .and_then(|s| s.signed_payload.as_ref())
         .map(|p| p.verified_at.clone());
     let outcome = classify_reverify(&cloud_resp, mode, keys, &client_nonce, last_accepted, now);
-    VerifyRound { client_nonce, outcome, verified_at }
+    VerifyRound {
+        client_nonce,
+        outcome,
+        verified_at,
+    }
 }
 
 /// re-verify 一轮的判定结果(供 worker / refresh 路由据此更新缓存)。
@@ -235,7 +242,12 @@ pub fn apply_refresh_rounds(
     let statuses = cache
         .snapshot()
         .iter()
-        .map(|row| (row.plugin_id.clone(), cache.status(&row.plugin_id, now).as_api_str().to_string()))
+        .map(|row| {
+            (
+                row.plugin_id.clone(),
+                cache.status(&row.plugin_id, now).as_api_str().to_string(),
+            )
+        })
         .collect();
     RefreshSummary {
         refreshed,
@@ -263,7 +275,12 @@ mod tests {
         hex::encode(sk.verifying_key().to_bytes())
     }
 
-    fn signed_snap(signer: &SigningKey, status: &str, nonce: &str, verified_at: &str) -> EntitlementSnapshot {
+    fn signed_snap(
+        signer: &SigningKey,
+        status: &str,
+        nonce: &str,
+        verified_at: &str,
+    ) -> EntitlementSnapshot {
         let payload = SignedPayload {
             status: status.into(),
             allowed_plugins: vec!["law-pro".into()],
@@ -302,7 +319,11 @@ mod tests {
         let resp: Result<EntitlementSnapshot, ()> = Err(());
         let now = ts("2026-06-12T00:00:00+00:00");
         let out = classify_reverify(&resp, TrustMode::Strict, &[], "n1", None, &now);
-        assert_eq!(out, ReverifyOutcome::NetworkError, "5xx/transport → grace, not expired");
+        assert_eq!(
+            out,
+            ReverifyOutcome::NetworkError,
+            "5xx/transport → grace, not expired"
+        );
     }
 
     #[test]
@@ -353,12 +374,27 @@ mod tests {
         let official = signing_key(11);
         let keys = [pubkey_hex(&official)];
         let kr: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
-        let old = signed_snap(&official, "active", "old-nonce", "2026-06-10T00:00:00+00:00");
+        let old = signed_snap(
+            &official,
+            "active",
+            "old-nonce",
+            "2026-06-10T00:00:00+00:00",
+        );
         let last = ts("2026-06-11T00:00:00+00:00");
         let now = ts("2026-06-12T00:00:00+00:00");
         // This round's client nonce differs from the replayed response's nonce.
-        let out = classify_reverify(&Ok(old), TrustMode::Strict, &kr, "fresh-nonce", Some(&last), &now);
-        assert!(matches!(out, ReverifyOutcome::Unauthorized(_)), "replay must NOT activate (SEC-2)");
+        let out = classify_reverify(
+            &Ok(old),
+            TrustMode::Strict,
+            &kr,
+            "fresh-nonce",
+            Some(&last),
+            &now,
+        );
+        assert!(
+            matches!(out, ReverifyOutcome::Unauthorized(_)),
+            "replay must NOT activate (SEC-2)"
+        );
     }
 
     // ── apply_reverify cache effects ────────────────────────────────────────
@@ -378,7 +414,12 @@ mod tests {
             updated_at: "2026-06-10T00:00:00+00:00".into(),
         };
         cache.upsert(row);
-        let accepted = apply_reverify(&cache, "law-pro", &ReverifyOutcome::Active, "2026-06-12T00:00:00+00:00");
+        let accepted = apply_reverify(
+            &cache,
+            "law-pro",
+            &ReverifyOutcome::Active,
+            "2026-06-12T00:00:00+00:00",
+        );
         assert!(accepted);
         let now = ts("2026-06-12T00:00:01+00:00");
         assert_eq!(cache.status("law-pro", &now), EntStatus::Active);
@@ -403,7 +444,11 @@ mod tests {
         let before = cache.snapshot();
         let accepted = apply_reverify(&cache, "law-pro", &ReverifyOutcome::NetworkError, "ignored");
         assert!(!accepted);
-        assert_eq!(cache.snapshot(), before, "network error must not mutate cache");
+        assert_eq!(
+            cache.snapshot(),
+            before,
+            "network error must not mutate cache"
+        );
     }
 
     #[test]
@@ -421,7 +466,12 @@ mod tests {
             updated_at: "2026-06-12T00:00:00+00:00".into(),
         };
         cache.upsert(row);
-        apply_reverify(&cache, "law-pro", &ReverifyOutcome::BusinessDeny("revoked".into()), "2026-06-12T01:00:00+00:00");
+        apply_reverify(
+            &cache,
+            "law-pro",
+            &ReverifyOutcome::BusinessDeny("revoked".into()),
+            "2026-06-12T01:00:00+00:00",
+        );
         let now = ts("2026-06-12T01:00:01+00:00");
         assert_eq!(cache.status("law-pro", &now), EntStatus::Suspended);
     }
@@ -443,8 +493,17 @@ mod tests {
         };
         cache.upsert(row);
         let before = cache.snapshot();
-        let accepted = apply_reverify(&cache, "law-pro", &ReverifyOutcome::Unauthorized("entitlement-sig-invalid"), "x");
+        let accepted = apply_reverify(
+            &cache,
+            "law-pro",
+            &ReverifyOutcome::Unauthorized("entitlement-sig-invalid"),
+            "x",
+        );
         assert!(!accepted);
-        assert_eq!(cache.snapshot(), before, "unauthorized must not mutate cache (no forged activation)");
+        assert_eq!(
+            cache.snapshot(),
+            before,
+            "unauthorized must not mutate cache (no forged activation)"
+        );
     }
 }

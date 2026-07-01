@@ -26,10 +26,8 @@ use crate::state::AppState;
 
 /// 把 git_sources 行物化成 connector 配置（token 注入内存，不落盘）。
 fn config_from_row(row: &GitSourceRow, token: Option<String>) -> GitSourceConfig {
-    let include_glob: Vec<String> =
-        serde_json::from_str(&row.include_glob).unwrap_or_default();
-    let exclude_glob: Vec<String> =
-        serde_json::from_str(&row.exclude_glob).unwrap_or_default();
+    let include_glob: Vec<String> = serde_json::from_str(&row.include_glob).unwrap_or_default();
+    let exclude_glob: Vec<String> = serde_json::from_str(&row.exclude_glob).unwrap_or_default();
     GitSourceConfig {
         url: row.url.clone(),
         branch: row.branch.clone(),
@@ -68,8 +66,9 @@ pub fn sync_git_source(
     };
 
     // SSRF 校验（route 入口也会校验, 这里再校验一次防 worker 直调路径）。
-    let connector = GitConnector::with_cloner(config, Box::new(attune_core::ingest::git::Git2Cloner))
-        .map_err(|e| format!("{e}"))?;
+    let connector =
+        GitConnector::with_cloner(config, Box::new(attune_core::ingest::git::Git2Cloner))
+            .map_err(|e| format!("{e}"))?;
     connector
         .check_ssrf(&|h| url_guard::system_resolve(h))
         .map_err(|e| format!("{e}"))?;

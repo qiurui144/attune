@@ -217,7 +217,9 @@ pub async fn connect(
         // vault 必须 unlocked(dek 可派生)—— 会话要加密落库。
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         vault.dek_db().map_err(|_| {
-            AppError::Unauthorized("vault-locked: unlock the vault to capture a login session".into())
+            AppError::Unauthorized(
+                "vault-locked: unlock the vault to capture a login session".into(),
+            )
         })?;
     }
 
@@ -288,14 +290,16 @@ pub async fn connect(
     let controller = controller.with_timeout(Duration::from_secs((wait as u64) + 30));
     let login_recipe_path = recipe_path.clone();
     let login_state_path = state_path.clone();
-    let captured = tokio::task::spawn_blocking(move || -> Result<(RunOutcome, Option<String>), SidecarError> {
-        let cmd = SidecarCommand::Login {
-            recipe_path: login_recipe_path,
-            state_path: login_state_path,
-            wait_seconds: wait,
-        };
-        run_login_and_capture(&controller, cmd)
-    })
+    let captured = tokio::task::spawn_blocking(
+        move || -> Result<(RunOutcome, Option<String>), SidecarError> {
+            let cmd = SidecarCommand::Login {
+                recipe_path: login_recipe_path,
+                state_path: login_state_path,
+                wait_seconds: wait,
+            };
+            run_login_and_capture(&controller, cmd)
+        },
+    )
     .await
     .map_err(|e| AppError::Internal(format!("join: {e}")))?
     .map_err(|e| sidecar_error(&e))?;
@@ -353,9 +357,7 @@ pub async fn connect(
 }
 
 /// GET /api/v1/browser-login/sessions — 列已连接登入会话(**脱敏,无凭据**)。
-pub async fn list_sessions(
-    State(state): State<SharedState>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn list_sessions(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let _ = vault.dek_db()?; // 须解锁(列表读 DB)。
     let rows = vault.store().list_third_party_accounts()?;
@@ -459,7 +461,10 @@ mod tests {
 
     #[test]
     fn host_extraction() {
-        assert_eq!(host_of("https://www.cnki.net/login").unwrap(), "www.cnki.net");
+        assert_eq!(
+            host_of("https://www.cnki.net/login").unwrap(),
+            "www.cnki.net"
+        );
         assert!(host_of("not a url").is_err());
         assert!(host_of("file:///etc/passwd").is_err());
     }
@@ -478,7 +483,10 @@ mod tests {
             updated_at: "now".into(),
         };
         let json = serde_json::to_string(&v).unwrap();
-        assert!(!json.contains("secret"), "session view must not carry secret");
+        assert!(
+            !json.contains("secret"),
+            "session view must not carry secret"
+        );
         assert!(!json.contains("storage_state"), "no session blob in view");
         assert!(json.contains("cnki.net"));
     }
@@ -488,7 +496,10 @@ mod tests {
         assert_eq!(outcome_label(&RunOutcome::Success), "success");
         assert_eq!(outcome_label(&RunOutcome::NeedsHuman), "needs-human");
         assert_eq!(outcome_label(&RunOutcome::Restricted), "restricted");
-        assert_eq!(outcome_label(&RunOutcome::SessionExpired), "session-expired");
+        assert_eq!(
+            outcome_label(&RunOutcome::SessionExpired),
+            "session-expired"
+        );
     }
 
     #[test]
@@ -510,7 +521,13 @@ mod tests {
             "/secret/path/leak topsecret".into(),
         ));
         let rendered = format!("{e:?}");
-        assert!(!rendered.contains("topsecret"), "inner detail leaked: {rendered}");
-        assert!(!rendered.contains("/secret/path"), "path leaked: {rendered}");
+        assert!(
+            !rendered.contains("topsecret"),
+            "inner detail leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("/secret/path"),
+            "path leaked: {rendered}"
+        );
     }
 }

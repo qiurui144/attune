@@ -128,6 +128,13 @@ const ALLOWLIST: &[(&str, usize, &str)] = &[
          failure degrades to CapacityState::Unknown. Same class as status.rs Ollama \
          loopback probe — local, no OutboundGate required.",
     ),
+    (
+        "attune-core/src/telemetry.rs",
+        1,
+        "Telemetry HTTP sink. Default-off and opt-in only; endpoint must be configured \
+         by settings/env. Payload is redacted metadata only, then enforced through \
+         OutboundGate kind=Telemetry before the reqwest send path.",
+    ),
 ];
 
 const PATTERNS: &[&str] = &[

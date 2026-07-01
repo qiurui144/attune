@@ -98,7 +98,8 @@ impl LoginRecipe {
         if let Some(c) = &self.credentials {
             // Heuristic: env var names are SCREAMING_SNAKE_CASE identifiers; a
             // value with spaces / '@' / ':' / long mixed-case is suspicious.
-            if looks_like_secret_value(&c.username_env) || looks_like_secret_value(&c.password_env) {
+            if looks_like_secret_value(&c.username_env) || looks_like_secret_value(&c.password_env)
+            {
                 return Err(RecipeError::RecipeContainsCredential);
             }
         }
@@ -118,7 +119,8 @@ fn looks_like_secret_value(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    !s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    !s.chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// L-7: validate a crawl `entry_url` against a user-approved host allowlist +
@@ -230,7 +232,12 @@ mod tests {
             "http://192.168.1.1/login",
         ] {
             assert!(
-                validate_entry_url(u, &allow, &resolves_to(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))).is_err(),
+                validate_entry_url(
+                    u,
+                    &allow,
+                    &resolves_to(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
+                )
+                .is_err(),
                 "internal/loopback must be refused: {u}"
             );
         }

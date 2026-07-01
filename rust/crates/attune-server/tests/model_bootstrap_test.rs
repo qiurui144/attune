@@ -84,7 +84,10 @@ async fn spawn_model_bootstrap_is_non_blocking_and_schedules_all_four() {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let all_scheduled = MODEL_CLASSES.iter().all(|c| {
-            !matches!(state.model_bootstrap.phase(c), Some(ModelPhase::Pending) | None)
+            !matches!(
+                state.model_bootstrap.phase(c),
+                Some(ModelPhase::Pending) | None
+            )
         });
         if all_scheduled {
             break;
@@ -135,5 +138,8 @@ async fn spawn_model_bootstrap_is_idempotent_when_all_ready() {
     // 再 spawn 应立即 no-op 返回（不起新下载线程改变状态）。
     attune_server::state::AppState::spawn_model_bootstrap(state.clone());
     std::thread::sleep(Duration::from_millis(200));
-    assert!(state.model_bootstrap.all_ready(), "idempotent: stays all ready");
+    assert!(
+        state.model_bootstrap.all_ready(),
+        "idempotent: stays all ready"
+    );
 }

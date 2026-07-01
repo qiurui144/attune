@@ -74,7 +74,7 @@ Attune 是一个**私有知识库 + 记忆增强系统**：
   <a class="product-card" href="architecture/">
     <span style="font-size:2rem">🏗️</span>
     <h3>架构</h3>
-    <p>双产品线（Python 原型 + Rust 商用）+ 检索栈解析</p>
+    <p>Rust 生产架构 + 检索栈解析</p>
   </a>
   <a class="product-card" href="privacy/">
     <span style="font-size:2rem">🔒</span>

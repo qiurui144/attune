@@ -17,10 +17,16 @@ fn cancel_running_job_flips_state() {
     let store = Store::open_memory().unwrap();
     let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
     store.claim_next_job().unwrap(); // → Running
-    assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Running);
+    assert_eq!(
+        store.get_job(&id).unwrap().unwrap().state,
+        JobState::Running
+    );
 
     assert!(store.cancel_job(&id).unwrap(), "running job is cancellable");
-    assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Cancelled);
+    assert_eq!(
+        store.get_job(&id).unwrap().unwrap().state,
+        JobState::Cancelled
+    );
 }
 
 #[test]
@@ -55,7 +61,10 @@ fn ws_disconnect_does_not_change_job_state() {
     let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
     store.claim_next_job().unwrap();
     // (no cancel_job call = WS closed without cancel frame)
-    assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Running);
+    assert_eq!(
+        store.get_job(&id).unwrap().unwrap().state,
+        JobState::Running
+    );
 }
 
 #[test]
@@ -73,8 +82,14 @@ fn restart_requeues_running_instead_of_mass_cancel() {
 
     let summary = store.recover_on_boot().unwrap();
     assert_eq!(summary.requeued, 1);
-    assert_eq!(store.get_job(&running).unwrap().unwrap().state, JobState::Queued);
-    assert_eq!(store.get_job(&queued).unwrap().unwrap().state, JobState::Queued);
+    assert_eq!(
+        store.get_job(&running).unwrap().unwrap().state,
+        JobState::Queued
+    );
+    assert_eq!(
+        store.get_job(&queued).unwrap().unwrap().state,
+        JobState::Queued
+    );
     assert_eq!(store.get_job(&done).unwrap().unwrap().state, JobState::Done);
 }
 

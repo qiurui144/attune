@@ -138,10 +138,15 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
         let store = vault.store();
         match response {
             Some(FeedHttpResponse::Ok {
-                etag, last_modified, ..
+                etag,
+                last_modified,
+                ..
             }) => {
-                let _ =
-                    store.update_rss_etag_lastmod(feed_id, etag.as_deref(), last_modified.as_deref());
+                let _ = store.update_rss_etag_lastmod(
+                    feed_id,
+                    etag.as_deref(),
+                    last_modified.as_deref(),
+                );
             }
             _ => {
                 // 不可达 —— 304 已早 return；fetch Err 已早 return。

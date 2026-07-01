@@ -1,8 +1,3 @@
-use lru::LruCache;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 use attune_core::classifier::Classifier;
 use attune_core::clusterer::ClusterSnapshot;
 use attune_core::embed::{EmbeddingProvider, OllamaProvider, OpenAiEmbeddingProvider};
@@ -17,6 +12,11 @@ use attune_core::vault::Vault;
 use attune_core::vectors::VectorIndex;
 use attune_core::vlm::{LlmVlmProvider, VlmProvider};
 use attune_core::web_search::WebSearchProvider;
+use lru::LruCache;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 const SEARCH_CACHE_CAPACITY: usize = 256;
 const SEARCH_CACHE_TTL_SECS: u64 = 30;
@@ -128,8 +128,7 @@ pub struct AppState {
     /// this before granting `MemberState::Paid` so a forged `{tier:paid, license_id:..}` cannot
     /// reach a billable tier-3 op. Default = `CloudMemberVerifier` (verifies against the cloud
     /// session, fail-closed). Tests inject a verifier that performs a real (offline) match.
-    pub member_verifier:
-        Mutex<std::sync::Arc<dyn attune_core::member_verifier::MemberVerifier>>,
+    pub member_verifier: Mutex<std::sync::Arc<dyn attune_core::member_verifier::MemberVerifier>>,
     /// E2/E4 (2026-05-01): PluginHub 客户端 (Mutex 让 PATCH /settings 能热更新)
     /// 默认 Mock；settings.pluginhub.url + license_key 配齐后切到 HttpPluginHubProvider
     pub plugin_hub: Mutex<std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>>,
@@ -190,30 +189,34 @@ impl AppState {
         // 这里读出来也永远是 None. 直接走明文 scan; encrypted plugin 走 plugin_sync 路径
         // (它从 cloud_client.EntitledPlugin.decrypt_key 直接拿 key, 不经此 cache).
         let cached_license_key: Option<Vec<u8>> = None;
-        let plugin_registry = match attune_core::plugin_registry::PluginRegistry::default_plugins_dir() {
-            Ok(dir) => match attune_core::plugin_registry::PluginRegistry::scan_with_key(&dir, cached_license_key.as_deref()) {
-                Ok((reg, errs)) => {
-                    tracing::info!(
-                        "loaded {} plugins, {} workflows from {}",
-                        reg.plugins().count(),
-                        reg.workflows().len(),
-                        dir.display()
-                    );
-                    for e in &errs {
-                        tracing::warn!("plugin load error: {}", e);
+        let plugin_registry =
+            match attune_core::plugin_registry::PluginRegistry::default_plugins_dir() {
+                Ok(dir) => match attune_core::plugin_registry::PluginRegistry::scan_with_key(
+                    &dir,
+                    cached_license_key.as_deref(),
+                ) {
+                    Ok((reg, errs)) => {
+                        tracing::info!(
+                            "loaded {} plugins, {} workflows from {}",
+                            reg.plugins().count(),
+                            reg.workflows().len(),
+                            dir.display()
+                        );
+                        for e in &errs {
+                            tracing::warn!("plugin load error: {}", e);
+                        }
+                        std::sync::Arc::new(reg)
                     }
-                    std::sync::Arc::new(reg)
-                }
+                    Err(e) => {
+                        tracing::warn!("plugin scan failed: {}", e);
+                        std::sync::Arc::new(attune_core::plugin_registry::PluginRegistry::new())
+                    }
+                },
                 Err(e) => {
-                    tracing::warn!("plugin scan failed: {}", e);
+                    tracing::warn!("cannot resolve plugin dir: {}", e);
                     std::sync::Arc::new(attune_core::plugin_registry::PluginRegistry::new())
                 }
-            },
-            Err(e) => {
-                tracing::warn!("cannot resolve plugin dir: {}", e);
-                std::sync::Arc::new(attune_core::plugin_registry::PluginRegistry::new())
-            }
-        };
+            };
         let state = Self {
             vault: Mutex::new(vault),
             fulltext: Mutex::new(None),
@@ -246,7 +249,8 @@ impl AppState {
             staging_drain_worker_running: AtomicBool::new(false),
             engines_initialized: AtomicBool::new(false),
             search_cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(SEARCH_CACHE_CAPACITY).expect("SEARCH_CACHE_CAPACITY is non-zero const")
+                NonZeroUsize::new(SEARCH_CACHE_CAPACITY)
+                    .expect("SEARCH_CACHE_CAPACITY is non-zero const"),
             )),
             job_store: Mutex::new(None),
             job_worker_running: AtomicBool::new(false),
@@ -288,7 +292,9 @@ impl AppState {
                     Some(std::sync::Arc::new((flows, reg)))
                 }
                 Err(e) => {
-                    tracing::info!("ACP-5: no agent flows loaded ({e}); chat uses free-form RAG only");
+                    tracing::info!(
+                        "ACP-5: no agent flows loaded ({e}); chat uses free-form RAG only"
+                    );
                     None
                 }
             },
@@ -333,12 +339,8 @@ impl AppState {
             Capability::builtin("asr", "ASR", CapabilityKind::Feature).requires_local_model(true),
         );
         // Cloud-default models (outbound by default; LLM not bundled per M2).
-        r.register(
-            Capability::builtin("llm", "LLM", CapabilityKind::Model).allows_outbound(true),
-        );
-        r.register(
-            Capability::builtin("vlm", "VLM", CapabilityKind::Model).allows_outbound(true),
-        );
+        r.register(Capability::builtin("llm", "LLM", CapabilityKind::Model).allows_outbound(true));
+        r.register(Capability::builtin("vlm", "VLM", CapabilityKind::Model).allows_outbound(true));
         // Outbound source.
         r.register(
             Capability::builtin("web-search", "Web Search", CapabilityKind::Source)
@@ -431,7 +433,9 @@ impl AppState {
                     std::sync::Arc::new(attune_core::plugin_hub::HttpPluginHubProvider::new(u, k))
                 }
                 _ => {
-                    tracing::info!("plugin_hub: using MockPluginHubProvider (no url/license configured)");
+                    tracing::info!(
+                        "plugin_hub: using MockPluginHubProvider (no url/license configured)"
+                    );
                     std::sync::Arc::new(attune_core::plugin_hub::MockPluginHubProvider::default())
                 }
             };
@@ -446,7 +450,11 @@ impl AppState {
     pub fn reload_llm(&self) {
         let settings_json = {
             let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-            vault_guard.store().get_meta("app_settings").ok().flatten()
+            vault_guard
+                .store()
+                .get_meta("app_settings")
+                .ok()
+                .flatten()
                 .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
         };
         let llm_result = build_llm_from_settings(&settings_json, &self.hardware);
@@ -454,9 +462,15 @@ impl AppState {
             Some(llm_arc) => {
                 tracing::info!("LLM hot-reload: provider rebuilt from settings");
                 // 同时刷新 classifier (它持有 llm Arc 复本，需要更新)
-                if let Some(tax_arc) = self.taxonomy.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-                    *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(std::sync::Arc::new(Classifier::new(tax_arc, llm_arc.clone())));
+                if let Some(tax_arc) = self
+                    .taxonomy
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                {
+                    *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+                        std::sync::Arc::new(Classifier::new(tax_arc, llm_arc.clone())),
+                    );
                 }
                 // VLM 同步热切（依赖主 LLM，LLM 换了 VLM 也要跟着换）
                 *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -464,7 +478,9 @@ impl AppState {
                 *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(llm_arc);
             }
             None => {
-                tracing::warn!("LLM hot-reload: settings yielded no LLM provider — chat will be disabled");
+                tracing::warn!(
+                    "LLM hot-reload: settings yielded no LLM provider — chat will be disabled"
+                );
                 // 先清依赖 LLM 的 vlm / classifier，再清 llm —— LLM 禁用后二者立即不可用
                 *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -476,7 +492,8 @@ impl AppState {
     /// 初始化搜索引擎 + 分类引擎 (unlock 后调用)
     /// 使用 compare_exchange 保证幂等：并发 unlock 只有第一个线程真正执行初始化。
     pub fn init_search_engines(&self) {
-        if self.engines_initialized
+        if self
+            .engines_initialized
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
@@ -491,8 +508,13 @@ impl AppState {
             // SAFETY: 启动时一次性设置（init_search_engines 由 compare_exchange 保证幂等）
             // 不会有并发 set_var 竞争。
             #[allow(unsafe_code)]
-            unsafe { std::env::set_var("HF_ENDPOINT", endpoint) };
-            tracing::info!("Region detected: {} → HF_ENDPOINT={endpoint}", region.label());
+            unsafe {
+                std::env::set_var("HF_ENDPOINT", endpoint)
+            };
+            tracing::info!(
+                "Region detected: {} → HF_ENDPOINT={endpoint}",
+                region.label()
+            );
         }
 
         // S8 cache: seed the in-memory model-source resolution cache from the persisted
@@ -502,14 +524,22 @@ impl AppState {
         {
             let settings = {
                 let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-                vault_guard.store().get_meta("app_settings").ok().flatten()
+                vault_guard
+                    .store()
+                    .get_meta("app_settings")
+                    .ok()
+                    .flatten()
                     .and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok())
             };
             if let Some(s) = settings {
                 let region = attune_core::platform::detect_region();
-                let n = attune_core::infer::model_source::seed_resolution_cache_from_settings(&s, region);
+                let n = attune_core::infer::model_source::seed_resolution_cache_from_settings(
+                    &s, region,
+                );
                 if n > 0 {
-                    tracing::info!("model-source cache seeded from persisted selection ({n} buckets)");
+                    tracing::info!(
+                        "model-source cache seeded from persisted selection ({n} buckets)"
+                    );
                 }
             }
         }
@@ -535,9 +565,14 @@ impl AppState {
                         };
                         let ids = match vault_guard.store().list_item_ids_paged(offset, PAGE) {
                             Ok(ids) => ids,
-                            Err(e) => { tracing::warn!("#83 FTS rebuild paged query: {e}"); break; }
+                            Err(e) => {
+                                tracing::warn!("#83 FTS rebuild paged query: {e}");
+                                break;
+                            }
                         };
-                        if ids.is_empty() { break; }
+                        if ids.is_empty() {
+                            break;
+                        }
                         let mut out = Vec::with_capacity(ids.len());
                         for id in &ids {
                             if let Ok(Some(item)) = vault_guard.store().get_item(&dek, id) {
@@ -547,7 +582,9 @@ impl AppState {
                         out
                     }; // vault lock released here
                     let n = page_items.len();
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     if let Ok(ft_guard) = self.fulltext.lock() {
                         if let Some(ft) = ft_guard.as_ref() {
                             for (id, title, content, source_type) in page_items {
@@ -556,7 +593,9 @@ impl AppState {
                         }
                     }
                     offset += n;
-                    if n < PAGE { break; }
+                    if n < PAGE {
+                        break;
+                    }
                 }
                 tracing::info!("#83 FTS rebuild complete ({offset} items, paged={PAGE})");
             }
@@ -585,8 +624,11 @@ impl AppState {
                 Some(dek) if vectors_path.exists() => {
                     match VectorIndex::load_encrypted(&dek, &vectors_path, 1024) {
                         Ok(vi) => {
-                            tracing::info!("Vector index loaded from {} ({} entries)",
-                                vectors_path.display(), vi.len());
+                            tracing::info!(
+                                "Vector index loaded from {} ({} entries)",
+                                vectors_path.display(),
+                                vi.len()
+                            );
                             Some(vi)
                         }
                         Err(e) => {
@@ -623,20 +665,31 @@ impl AppState {
         // LLM 四级优先级见 build_llm_from_settings 文档
         let settings_json = {
             let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-            vault_guard.store().get_meta("app_settings").ok().flatten()
+            vault_guard
+                .store()
+                .get_meta("app_settings")
+                .ok()
+                .flatten()
                 .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
         };
 
         let llm_result = build_llm_from_settings(&settings_json, &self.hardware);
 
         let summary_llm_result: Option<Arc<dyn LlmProvider>> = {
-            let summary_model = settings_json.as_ref()
+            let summary_model = settings_json
+                .as_ref()
                 .and_then(|settings| settings.get("summary_model").and_then(|v| v.as_str()))
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| self.hardware.recommended_summary_model())
                 .to_string();
 
-            let preferred_models = [summary_model.as_str(), "qwen2.5:7b", "qwen2.5:3b", "qwen2.5:1.5b", "llama3.2:1b"];
+            let preferred_models = [
+                summary_model.as_str(),
+                "qwen2.5:7b",
+                "qwen2.5:3b",
+                "qwen2.5:1.5b",
+                "llama3.2:1b",
+            ];
             match OllamaLlmProvider::auto_detect_with_preferred(&preferred_models) {
                 Ok(llm) => {
                     tracing::info!("Summary LLM: using Ollama auto-detect with preferred model {summary_model}");
@@ -657,7 +710,8 @@ impl AppState {
                 }
             }
             // Load user plugins from config_dir/plugins/*.yaml
-            let (user_plugins, _errors) = Taxonomy::load_user_plugins(&attune_core::platform::config_dir());
+            let (user_plugins, _errors) =
+                Taxonomy::load_user_plugins(&attune_core::platform::config_dir());
             for p in user_plugins {
                 tax = tax.with_plugin(p);
             }
@@ -687,7 +741,11 @@ impl AppState {
         {
             let settings_json = {
                 let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-                vault_guard.store().get_meta("app_settings").ok().flatten()
+                vault_guard
+                    .store()
+                    .get_meta("app_settings")
+                    .ok()
+                    .flatten()
                     .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
                     .unwrap_or_else(|| serde_json::json!({}))
             };
@@ -699,9 +757,11 @@ impl AppState {
                 }
                 None => {
                     // 诊断：区分 disabled vs 无浏览器 vs 无效路径
-                    let disabled = settings_json.get("web_search")
+                    let disabled = settings_json
+                        .get("web_search")
                         .and_then(|w| w.get("enabled"))
-                        .and_then(|v| v.as_bool()) == Some(false);
+                        .and_then(|v| v.as_bool())
+                        == Some(false);
                     if disabled {
                         tracing::info!("Web search: disabled via settings");
                     } else {
@@ -740,7 +800,13 @@ impl AppState {
     /// 最后标记任务为 done。非 classify 的任务会被重新标记为 pending。
     pub fn drain_classify_batch(&self, batch_size: usize) -> attune_core::error::Result<usize> {
         // 1. 检查 classifier 是否可用
-        let classifier = match self.classifier.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+        let classifier = match self
+            .classifier
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+        {
             Some(c) => c,
             None => return Ok(0),
         };
@@ -750,9 +816,8 @@ impl AppState {
             let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
             let dek = vault.dek_db()?;
             let tasks = vault.store().dequeue_embeddings(batch_size)?;
-            let (classify, other): (Vec<_>, Vec<_>) = tasks
-                .into_iter()
-                .partition(|t| t.task_type == "classify");
+            let (classify, other): (Vec<_>, Vec<_>) =
+                tasks.into_iter().partition(|t| t.task_type == "classify");
             // 非 classify 任务回到 pending 留给 QueueWorker 处理
             for task in &other {
                 vault.store().mark_task_pending(task.id)?;
@@ -770,9 +835,7 @@ impl AppState {
             classify_tasks
                 .iter()
                 .filter_map(|t| match vault.store().get_item(&dek, &t.item_id) {
-                    Ok(Some(item)) => {
-                        Some((t.item_id.clone(), item.title, item.content, t.id))
-                    }
+                    Ok(Some(item)) => Some((t.item_id.clone(), item.title, item.content, t.id)),
                     _ => None,
                 })
                 .collect()
@@ -815,7 +878,12 @@ impl AppState {
                 vault.store().mark_embedding_done(*task_id)?;
             }
 
-            if let Some(index) = self.tag_index.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            if let Some(index) = self
+                .tag_index
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+            {
                 index.upsert(item_id, result);
             }
             processed += 1;
@@ -877,7 +945,9 @@ impl AppState {
                     }
                 }
                 status.mark_failed(class, last_err.clone());
-                tracing::warn!("model bootstrap: {class} giving up after {max_attempts} attempts: {last_err}");
+                tracing::warn!(
+                    "model bootstrap: {class} giving up after {max_attempts} attempts: {last_err}"
+                );
             }
 
             // 1) Embedding（ONNX ~默认 bge-m3 量化；ATTUNE_EMBEDDING_BACKEND=ollama 走 Ollama 无下载）。
@@ -889,13 +959,23 @@ impl AppState {
             // 下载（#2/#5 后台拉取仅针对本地 ONNX/Ollama 底座）。
             let embed_settings_json = {
                 let vault_guard = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                vault_guard.store().get_meta("app_settings").ok().flatten()
+                vault_guard
+                    .store()
+                    .get_meta("app_settings")
+                    .ok()
+                    .flatten()
                     .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
             };
-            let configured_cloud_endpoint = embed_settings_json.as_ref().and_then(|s| {
-                s.get("embedding")?.get("endpoint")?.as_str()
-                    .filter(|e| !e.is_empty()).map(|_| ())
-            }).is_some();
+            let configured_cloud_endpoint = embed_settings_json
+                .as_ref()
+                .and_then(|s| {
+                    s.get("embedding")?
+                        .get("endpoint")?
+                        .as_str()
+                        .filter(|e| !e.is_empty())
+                        .map(|_| ())
+                })
+                .is_some();
             if configured_cloud_endpoint {
                 let (provider, is_local) = build_embedding_from_settings(&embed_settings_json);
                 state.set_embedding(Some(provider));
@@ -907,28 +987,31 @@ impl AppState {
                 .map(|v| v.eq_ignore_ascii_case("ollama"))
                 .unwrap_or(false);
             if !configured_cloud_endpoint {
-            run_with_retry(status, "embedding", MAX_ATTEMPTS, || {
-                let provider: Arc<dyn EmbeddingProvider> = if prefer_ollama {
-                    Arc::new(OllamaProvider::default())
-                } else {
-                    match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
+                run_with_retry(status, "embedding", MAX_ATTEMPTS, || {
+                    let provider: Arc<dyn EmbeddingProvider> = if prefer_ollama {
+                        Arc::new(OllamaProvider::default())
+                    } else {
+                        match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
                         Ok(p) => Arc::new(p),
                         // ONNX 拉取失败时本次记失败（触发重试）；仅最后兜底到 Ollama。
                         Err(e) => return Err(format!("ONNX embedding: {e}")),
                     }
-                };
-                state.set_embedding(Some(provider));
-                Ok(())
-            });
-            // ONNX 三次都失败 → 兜底 Ollama（无下载，至少让 embedding path 可用）。
-            if !state.model_bootstrap.phase("embedding")
-                .map(|p| p.is_ready()).unwrap_or(false)
-                && !prefer_ollama
-            {
-                tracing::info!("model bootstrap: embedding ONNX unavailable, falling back to Ollama bge-m3");
-                state.set_embedding(Some(Arc::new(OllamaProvider::default())));
-                state.model_bootstrap.mark_ready("embedding");
-            }
+                    };
+                    state.set_embedding(Some(provider));
+                    Ok(())
+                });
+                // ONNX 三次都失败 → 兜底 Ollama（无下载，至少让 embedding path 可用）。
+                if !state
+                    .model_bootstrap
+                    .phase("embedding")
+                    .map(|p| p.is_ready())
+                    .unwrap_or(false)
+                    && !prefer_ollama
+                {
+                    tracing::info!("model bootstrap: embedding ONNX unavailable, falling back to Ollama bge-m3");
+                    state.set_embedding(Some(Arc::new(OllamaProvider::default())));
+                    state.model_bootstrap.mark_ready("embedding");
+                }
             } // end if !configured_cloud_endpoint
 
             // embedding 就绪后用真 dims 重建 memory_index（解锁时用 1024 兜底建过一份）。
@@ -938,7 +1021,10 @@ impl AppState {
                     attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), dims)
                 };
                 if let Ok(idx) = built {
-                    tracing::info!("Memory vector index rebuilt with dims={dims} ({} memories)", idx.len());
+                    tracing::info!(
+                        "Memory vector index rebuilt with dims={dims} ({} memories)",
+                        idx.len()
+                    );
                     if let Ok(mut g) = state.memory_index.lock() {
                         *g = Some(idx);
                     }
@@ -975,7 +1061,10 @@ impl AppState {
                         .map_err(|e| e.to_string())
                 });
             } else {
-                tracing::info!("model bootstrap: ASR skipped (hardware tier {} unsupported)", tier.label());
+                tracing::info!(
+                    "model bootstrap: ASR skipped (hardware tier {} unsupported)",
+                    tier.label()
+                );
                 status.mark_ready("asr");
             }
 
@@ -1030,13 +1119,20 @@ impl AppState {
     /// 启动后台分类 worker（需要在 init_search_engines 之后调用）
     /// 使用 AtomicBool 防止重复启动；vault lock 时自动退出并重置标志。
     pub fn start_classify_worker(state: std::sync::Arc<AppState>) {
-        if state.classifier.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        if state
+            .classifier
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+        {
             return; // No classifier, no worker
         }
 
-        if state.classify_worker_running.compare_exchange(
-            false, true, Ordering::SeqCst, Ordering::SeqCst,
-        ).is_err() {
+        if state
+            .classify_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             tracing::debug!("Classify worker already running, skipping");
             return;
         }
@@ -1088,9 +1184,11 @@ impl AppState {
     /// 轮询周期：3 秒（不繁忙时几乎没开销，繁忙时及时清理 orphan）。
     /// vault lock / 引擎未初始化时静默退出并重置 atomic flag。
     pub fn start_reindex_worker(state: std::sync::Arc<AppState>) {
-        if state.reindex_worker_running.compare_exchange(
-            false, true, Ordering::SeqCst, Ordering::SeqCst,
-        ).is_err() {
+        if state
+            .reindex_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             tracing::debug!("Reindex worker already running, skipping");
             return;
         }
@@ -1138,7 +1236,10 @@ impl AppState {
                     //
                     // 之前所有错误统一 bump → 引擎未 ready 的 5 分钟 race 期内，正常任务会被
                     // 错误地 park（attempts ≥ 5），需运维手动 reset 才能恢复。
-                    enum WorkerErr { Transient(String), Task(String) }
+                    enum WorkerErr {
+                        Transient(String),
+                        Task(String),
+                    }
                     let result: Result<(), WorkerErr> = (|| {
                         // Lock order MUST be fulltext → vectors → vault (canonical, matches
                         // the search/chat hot path). Acquiring vault first here would invert
@@ -1146,29 +1247,51 @@ impl AppState {
                         let fulltext_g = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
                         let mut vectors_g = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
                         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                        let dek = vault.dek_db().map_err(|e| WorkerErr::Transient(format!("dek_db: {e}")))?;
-                        let (Some(vectors), Some(fulltext)) = (vectors_g.as_mut(), fulltext_g.as_ref()) else {
-                            return Err(WorkerErr::Transient("vectors/fulltext not initialized".into()));
+                        let dek = vault
+                            .dek_db()
+                            .map_err(|e| WorkerErr::Transient(format!("dek_db: {e}")))?;
+                        let (Some(vectors), Some(fulltext)) =
+                            (vectors_g.as_mut(), fulltext_g.as_ref())
+                        else {
+                            return Err(WorkerErr::Transient(
+                                "vectors/fulltext not initialized".into(),
+                            ));
                         };
                         match action.as_str() {
-                            "purge" => {
-                                attune_core::reindex::purge_item_indexes(vault.store(), vectors, fulltext, &item_id)
-                                    .map(|_| ())
-                                    .map_err(|e| WorkerErr::Task(e.to_string()))
-                            }
+                            "purge" => attune_core::reindex::purge_item_indexes(
+                                vault.store(),
+                                vectors,
+                                fulltext,
+                                &item_id,
+                            )
+                            .map(|_| ())
+                            .map_err(|e| WorkerErr::Task(e.to_string())),
                             // 'reindex' action 实现
                             "reindex" => {
-                                let item = vault.store().get_item(&dek, &item_id)
+                                let item = vault
+                                    .store()
+                                    .get_item(&dek, &item_id)
                                     .map_err(|e| WorkerErr::Task(e.to_string()))?
-                                    .ok_or_else(|| WorkerErr::Task(format!("item {item_id} not found for reindex")))?;
+                                    .ok_or_else(|| {
+                                        WorkerErr::Task(format!(
+                                            "item {item_id} not found for reindex"
+                                        ))
+                                    })?;
                                 attune_core::reindex::reindex_item(
-                                    vault.store(), vectors, fulltext, &item_id,
-                                    &item.title, &item.content, &item.source_type,
+                                    vault.store(),
+                                    vectors,
+                                    fulltext,
+                                    &item_id,
+                                    &item.title,
+                                    &item.content,
+                                    &item.source_type,
                                 )
                                 .map(|_| ())
                                 .map_err(|e| WorkerErr::Task(e.to_string()))
                             }
-                            other => Err(WorkerErr::Task(format!("unknown reindex action: {other}"))),
+                            other => {
+                                Err(WorkerErr::Task(format!("unknown reindex action: {other}")))
+                            }
                         }
                     })();
 
@@ -1259,7 +1382,10 @@ impl AppState {
             if pending.is_empty() {
                 return;
             }
-            tracing::info!("Staging drain: {} pending locked-mode ingests", pending.len());
+            tracing::info!(
+                "Staging drain: {} pending locked-mode ingests",
+                pending.len()
+            );
 
             let mut drained = 0usize;
             for id in pending {
@@ -1267,7 +1393,9 @@ impl AppState {
                 {
                     let v = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     if !matches!(v.state(), attune_core::vault::VaultState::Unlocked) {
-                        tracing::info!("Staging drain: vault re-locked, stopping (will resume on next unlock)");
+                        tracing::info!(
+                            "Staging drain: vault re-locked, stopping (will resume on next unlock)"
+                        );
                         break;
                     }
                 }
@@ -1314,7 +1442,9 @@ impl AppState {
                     Err(e) => {
                         // Retain for retry on next unlock; content_hash short-circuit
                         // prevents duplicate insert if it partially succeeded.
-                        tracing::warn!("Staging drain: ingest failed for {id}: {e}, retaining for retry");
+                        tracing::warn!(
+                            "Staging drain: ingest failed for {id}: {e}, retaining for retry"
+                        );
                     }
                 }
             }
@@ -1333,9 +1463,11 @@ impl AppState {
     /// 写回 vault 时短取 vault 锁,**绝不**在持 entitlement 锁时取 fulltext/vectors/vault。
     /// 原子 flag 防重入 + RAII guard 复位;vault lock → 静默退出。
     pub fn start_entitlement_worker(state: std::sync::Arc<AppState>) {
-        if state.entitlement_worker_running.compare_exchange(
-            false, true, Ordering::SeqCst, Ordering::SeqCst,
-        ).is_err() {
+        if state
+            .entitlement_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             tracing::debug!("Entitlement worker already running, skipping");
             return;
         }
@@ -1373,12 +1505,14 @@ impl AppState {
                 }
 
                 // 一轮 re-verify(blocking 网络 + 短取 vault 锁写回,均在本 worker 线程)。
-                let summary = crate::routes::member::run_refresh_round(&state, &state.entitlement_cache);
+                let summary =
+                    crate::routes::member::run_refresh_round(&state, &state.entitlement_cache);
 
                 // 退避:本轮"全网络错"(cloud 不可达)→ 失败 +1 并按退避延后;否则重置。
                 let interval = if summary.all_network_error {
                     consecutive_failures = consecutive_failures.saturating_add(1);
-                    let backoff = attune_core::entitlement_reverify::backoff_after(consecutive_failures);
+                    let backoff =
+                        attune_core::entitlement_reverify::backoff_after(consecutive_failures);
                     std::time::Duration::from_secs(backoff.num_seconds().max(0) as u64)
                 } else {
                     consecutive_failures = 0;
@@ -1438,7 +1572,11 @@ impl AppState {
                         depth: remote.depth,
                     };
                     // 只打印 dir_id / url，不 log password（避免凭据泄露）。
-                    tracing::info!("WebDAV sync: scanning dir={} url={}", remote.dir_id, remote.url);
+                    tracing::info!(
+                        "WebDAV sync: scanning dir={} url={}",
+                        remote.dir_id,
+                        remote.url
+                    );
                     if let Err(e) = crate::ingest_webdav::sync_webdav_dir(
                         &state,
                         &remote.dir_id,
@@ -1517,10 +1655,7 @@ impl AppState {
                         config,
                         &account.corpus_domain,
                     ) {
-                        tracing::warn!(
-                            "Email sync for account {} failed: {e}",
-                            account.dir_id
-                        );
+                        tracing::warn!("Email sync for account {} failed: {e}", account.dir_id);
                     }
                 }
 
@@ -1586,11 +1721,10 @@ impl AppState {
                         None => true,
                         Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
                             Ok(prev) => {
-                                let elapsed = now
-                                    .signed_duration_since(prev.with_timezone(&chrono::Utc));
-                                elapsed >= chrono::Duration::minutes(
-                                    feed.poll_interval_minutes as i64,
-                                )
+                                let elapsed =
+                                    now.signed_duration_since(prev.with_timezone(&chrono::Utc));
+                                elapsed
+                                    >= chrono::Duration::minutes(feed.poll_interval_minutes as i64)
                             }
                             Err(_) => true,
                         },
@@ -1599,11 +1733,7 @@ impl AppState {
                         continue;
                     }
                     // 只打印 feed_id + name（不含 URL，URL 解密后仅在此函数内消费）。
-                    tracing::info!(
-                        "RSS sync: polling feed id={} name={}",
-                        feed.id,
-                        feed.name
-                    );
+                    tracing::info!("RSS sync: polling feed id={} name={}", feed.id, feed.name);
                     if let Err(e) = crate::ingest_rss::sync_rss_feed(&state, &feed.id) {
                         tracing::warn!("RSS sync for feed {} failed: {e}", feed.id);
                     }
@@ -1672,7 +1802,10 @@ impl AppState {
         );
         let n = store.upsert_watch_hits(&hits).unwrap_or(0);
         if n > 0 {
-            tracing::info!("monitoring pass: {n} new watch hit(s) across {} watch(es)", watches.len());
+            tracing::info!(
+                "monitoring pass: {n} new watch hit(s) across {} watch(es)",
+                watches.len()
+            );
         }
         n
     }
@@ -1718,9 +1851,11 @@ impl AppState {
     /// 启动后台目录重扫 worker（每 30 分钟扫描一次绑定目录）
     /// 使用 AtomicBool 防止重复启动；vault lock 时自动退出并重置标志。
     pub fn start_rescan_worker(state: std::sync::Arc<AppState>) {
-        if state.rescan_worker_running.compare_exchange(
-            false, true, Ordering::SeqCst, Ordering::SeqCst,
-        ).is_err() {
+        if state
+            .rescan_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             tracing::debug!("Rescan worker already running, skipping");
             return;
         }
@@ -1805,9 +1940,11 @@ impl AppState {
     /// 启动后台 embedding queue worker（在 init_search_engines 之后调用）
     /// 使用 AtomicBool 防止重复启动；vault lock 时自动退出并重置 AtomicBool。
     pub fn start_queue_worker(state: std::sync::Arc<AppState>) {
-        if state.queue_worker_running.compare_exchange(
-            false, true, Ordering::SeqCst, Ordering::SeqCst,
-        ).is_err() {
+        if state
+            .queue_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             tracing::debug!("Queue worker already running, skipping");
             return;
         }
@@ -1818,7 +1955,7 @@ impl AppState {
 
         std::thread::spawn(move || {
             tracing::info!("Queue worker started");
-            const BATCH_SIZE: usize = 32;  // 与 attune-core/src/queue.rs 保持一致
+            const BATCH_SIZE: usize = 32; // 与 attune-core/src/queue.rs 保持一致
             const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
             const MAX_ATTEMPTS: i32 = 3;
 
@@ -1843,9 +1980,21 @@ impl AppState {
                 }
 
                 // 检查 embedding + vectors + fulltext 是否就绪
-                let embedding = state.embedding.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let vectors_ready = state.vectors.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-                let fulltext_ready = state.fulltext.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+                let embedding = state
+                    .embedding
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let vectors_ready = state
+                    .vectors
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
+                let fulltext_ready = state
+                    .fulltext
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
 
                 if embedding.is_none() || !vectors_ready || !fulltext_ready {
                     std::thread::sleep(POLL_INTERVAL);
@@ -1908,7 +2057,8 @@ impl AppState {
                         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                         let mut allowed = Vec::with_capacity(embed_tasks.len());
                         for task in embed_tasks {
-                            let is_l0 = vault.store()
+                            let is_l0 = vault
+                                .store()
                                 .get_item_privacy_tier(&task.item_id)
                                 .map(|t| matches!(t, attune_core::store::audit::PrivacyTier::L0))
                                 .unwrap_or(false);
@@ -1954,7 +2104,9 @@ impl AppState {
                     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
 
                     let (Some(vi), Some(ft)) = (vecs_guard.as_mut(), ft_guard.as_ref()) else {
-                        tracing::debug!("Queue worker: vectors/fulltext index unavailable mid-batch");
+                        tracing::debug!(
+                            "Queue worker: vectors/fulltext index unavailable mid-batch"
+                        );
                         drop(ft_guard);
                         drop(vecs_guard);
                         drop(vault);
@@ -1997,16 +2149,23 @@ impl AppState {
                 let should_flush = flush_counter >= FLUSH_BATCH_THRESHOLD
                     || last_flush.elapsed() >= FLUSH_INTERVAL;
                 if should_flush && flush_counter > 0 {
-                    let dek_opt = state.vault.lock().unwrap_or_else(|e| e.into_inner())
-                        .dek_db().ok();
+                    let dek_opt = state
+                        .vault
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .dek_db()
+                        .ok();
                     let vecs = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
                     if let (Some(dek), Some(vi)) = (dek_opt, vecs.as_ref()) {
                         let p = attune_core::platform::data_dir().join("vectors.encbin");
                         if let Err(e) = vi.save_encrypted(&dek, &p) {
                             tracing::warn!("Vector flush failed: {e}");
                         } else {
-                            tracing::info!("Vector index flushed ({} entries after +{} new)",
-                                vi.len(), flush_counter);
+                            tracing::info!(
+                                "Vector index flushed ({} entries after +{} new)",
+                                vi.len(),
+                                flush_counter
+                            );
                         }
                     }
                     flush_counter = 0;
@@ -2022,8 +2181,12 @@ impl AppState {
             // 退出时重置标志 + 最后一次 flush
             state.queue_worker_running.store(false, Ordering::SeqCst);
             if flush_counter > 0 {
-                let dek_opt = state.vault.lock().unwrap_or_else(|e| e.into_inner())
-                    .dek_db().ok();
+                let dek_opt = state
+                    .vault
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .dek_db()
+                    .ok();
                 let vecs = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
                 if let (Some(dek), Some(vi)) = (dek_opt, vecs.as_ref()) {
                     let p = attune_core::platform::data_dir().join("vectors.encbin");
@@ -2040,13 +2203,20 @@ impl AppState {
     /// 并将扩展词静默写入 app_settings，无任何用户通知或新 UI 入口。
     pub fn start_skill_evolver(state: std::sync::Arc<AppState>) {
         // 需要 LLM 才能运行
-        if state.llm.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        if state
+            .llm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+        {
             return;
         }
 
-        if state.evolve_worker_running.compare_exchange(
-            false, true, Ordering::SeqCst, Ordering::SeqCst,
-        ).is_err() {
+        if state
+            .evolve_worker_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             tracing::debug!("Skill evolver already running, skipping");
             return;
         }
@@ -2057,8 +2227,10 @@ impl AppState {
         let governor = global_registry().register(TaskKind::SkillEvolution);
 
         std::thread::spawn(move || {
-            tracing::info!("Skill evolver started (runs every 4h or at {} signals)",
-                attune_core::skill_evolution::EVOLVE_THRESHOLD);
+            tracing::info!(
+                "Skill evolver started (runs every 4h or at {} signals)",
+                attune_core::skill_evolution::EVOLVE_THRESHOLD
+            );
             const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
 
             loop {
@@ -2078,7 +2250,13 @@ impl AppState {
                     continue;
                 }
 
-                let llm = match state.llm.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+                let llm = match state
+                    .llm
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .cloned()
+                {
                     Some(l) => l,
                     None => break,
                 };
@@ -2101,23 +2279,31 @@ impl AppState {
 
                 // H1：LLM 配额检查
                 if !governor.allow_llm_call() {
-                    tracing::info!("Skill evolver LLM quota exceeded (per-hour cap), skipping cycle");
+                    tracing::info!(
+                        "Skill evolver LLM quota exceeded (per-hour cap), skipping cycle"
+                    );
                     continue;
                 }
 
                 // Phase 2（无锁）：LLM 调用，可能耗时 15s+
-                let expansions = match attune_core::skill_evolution::generate_expansions(llm.as_ref(), &signals) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!("Skill evolver LLM error: {}", e);
-                        continue;
-                    }
-                };
+                let expansions =
+                    match attune_core::skill_evolution::generate_expansions(llm.as_ref(), &signals)
+                    {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!("Skill evolver LLM error: {}", e);
+                            continue;
+                        }
+                    };
 
                 // Phase 3（锁）：合并 + 标记已处理
                 {
                     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                    match attune_core::skill_evolution::apply_evolution_result(vault.store(), &signals, &expansions) {
+                    match attune_core::skill_evolution::apply_evolution_result(
+                        vault.store(),
+                        &signals,
+                        &expansions,
+                    ) {
                         Ok(0) => tracing::debug!("Skill evolver: no new expansions"),
                         Ok(n) => tracing::info!("Skill evolver: {} expansion entries updated", n),
                         Err(e) => tracing::warn!("Skill evolver apply error: {}", e),
@@ -2137,13 +2323,20 @@ impl AppState {
     /// 受 H1 [`TaskKind::MemoryConsolidation`] governor 治理 + LLM 配额限制。
     pub fn start_memory_consolidator(state: std::sync::Arc<AppState>) {
         // 需要 LLM 才能运行
-        if state.llm.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        if state
+            .llm
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+        {
             return;
         }
 
-        if state.memory_consolidator_running.compare_exchange(
-            false, true, Ordering::SeqCst, Ordering::SeqCst,
-        ).is_err() {
+        if state
+            .memory_consolidator_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             tracing::debug!("Memory consolidator already running, skipping");
             return;
         }
@@ -2169,7 +2362,13 @@ impl AppState {
                     continue;
                 }
 
-                let llm = match state.llm.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+                let llm = match state
+                    .llm
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .cloned()
+                {
                     Some(l) => l,
                     None => break,
                 };
@@ -2192,7 +2391,9 @@ impl AppState {
                         Err(_) => break,
                     };
                     match attune_core::memory_consolidation::prepare_consolidation_cycle(
-                        vault.store(), &dek, now_secs,
+                        vault.store(),
+                        &dek,
+                        now_secs,
                     ) {
                         Ok(Some(b)) => Some(b),
                         Ok(None) => None,
@@ -2211,12 +2412,15 @@ impl AppState {
                 for bundle in &bundles {
                     if !governor.allow_llm_call() {
                         deferred = bundles.len() - summaries.len();
-                        for _ in 0..deferred { summaries.push(None); }
+                        for _ in 0..deferred {
+                            summaries.push(None);
+                        }
                         break;
                     }
                     summaries.push(
                         attune_core::memory_consolidation::generate_one_episodic_memory(
-                            llm.as_ref(), bundle,
+                            llm.as_ref(),
+                            bundle,
                         ),
                     );
                 }
@@ -2242,7 +2446,12 @@ impl AppState {
                         Err(_) => break,
                     };
                     match attune_core::memory_consolidation::apply_consolidation_result(
-                        vault.store(), &dek, &bundles, &summaries, &model_name, now_secs,
+                        vault.store(),
+                        &dek,
+                        &bundles,
+                        &summaries,
+                        &model_name,
+                        now_secs,
                     ) {
                         Ok(0) => tracing::debug!("Memory consolidator: no new memories"),
                         Ok(n) => tracing::info!("Memory consolidator: {} new episodic memories", n),
@@ -2256,7 +2465,9 @@ impl AppState {
                 Self::run_memory_layering(&state, &governor, &model_name, now_secs);
             }
 
-            state.memory_consolidator_running.store(false, Ordering::SeqCst);
+            state
+                .memory_consolidator_running
+                .store(false, Ordering::SeqCst);
             tracing::info!("Memory consolidator stopped (vault locked)");
         });
     }
@@ -2281,7 +2492,11 @@ impl AppState {
             vault
                 .store()
                 .list_all_memory_vectors()
-                .map(|rows| rows.into_iter().map(|r| (r.memory_id, r.embedding)).collect())
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|r| (r.memory_id, r.embedding))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         let clusters = {
@@ -2303,7 +2518,13 @@ impl AppState {
         };
 
         if let Some(clusters) = clusters {
-            let llm = match state.llm.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+            let llm = match state
+                .llm
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .cloned()
+            {
                 Some(l) => l,
                 None => return,
             };
@@ -2331,13 +2552,19 @@ impl AppState {
                     Err(_) => return,
                 };
                 match attune_core::memory::apply_semantic_result(
-                    vault.store(), &dek, &clusters, &summaries, model_name, now_secs,
+                    vault.store(),
+                    &dek,
+                    &clusters,
+                    &summaries,
+                    model_name,
+                    now_secs,
                 ) {
                     Ok((r, ids)) => {
                         if r.inserted > 0 {
                             tracing::info!(
                                 "Memory consolidator: {} new semantic memories ({} superseded)",
-                                r.inserted, r.superseded,
+                                r.inserted,
+                                r.superseded,
                             );
                         }
                         ids
@@ -2361,7 +2588,9 @@ impl AppState {
             if matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
                 match vault.store().demote_cold_memories(now_secs, COLD_AGE_SECS) {
                     Ok(0) => {}
-                    Ok(n) => tracing::info!("Memory consolidator: {n} episodic memories demoted to cold"),
+                    Ok(n) => {
+                        tracing::info!("Memory consolidator: {n} episodic memories demoted to cold")
+                    }
                     Err(e) => tracing::warn!("cold demotion error: {e}"),
                 }
             }
@@ -2393,7 +2622,13 @@ impl AppState {
         if state.reindex_paused() {
             return;
         }
-        let embedder = match state.embedding.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+        let embedder = match state
+            .embedding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+        {
             Some(e) if e.is_available() => e,
             _ => return,
         };
@@ -2441,13 +2676,22 @@ impl AppState {
         if let Some(mid) = mig_id {
             let _ = store.finish_memory_migration(mid);
         }
-        tracing::info!("memory reindex: re-embedded {done}/{} stale memory vector(s) to {cur_model}", stale.len());
+        tracing::info!(
+            "memory reindex: re-embedded {done}/{} stale memory vector(s) to {cur_model}",
+            stale.len()
+        );
     }
 
     /// Embed every memory that lacks a `memory_vectors` row, write the vector, and
     /// upsert it into the in-memory `memory_index`. Cost tier 2 (local embedding).
     fn embed_pending_memories(state: &std::sync::Arc<AppState>, now_secs: i64) {
-        let embedder = match state.embedding.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned() {
+        let embedder = match state
+            .embedding
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+        {
             Some(e) if e.is_available() => e,
             _ => return,
         };
@@ -2493,7 +2737,10 @@ impl AppState {
             // (they are never L0-tagged). We still run PII redaction below via
             // the gate's payload redaction path (gate returns redacted text).
             // For memories, emit a warn-once tracing so the audit trail shows it.
-            tracing::debug!("#82 embed_pending_memories: cloud endpoint active ({} memories)", pending.len());
+            tracing::debug!(
+                "#82 embed_pending_memories: cloud endpoint active ({} memories)",
+                pending.len()
+            );
         }
 
         // Embedding providers don't expose a model name; the dimension is a stable
@@ -2510,7 +2757,10 @@ impl AppState {
                 if !matches!(vault.state(), attune_core::vault::VaultState::Unlocked) {
                     return;
                 }
-                if let Err(e) = vault.store().put_memory_vector(&mem_id, &vec, &model, now_secs) {
+                if let Err(e) = vault
+                    .store()
+                    .put_memory_vector(&mem_id, &vec, &model, now_secs)
+                {
                     tracing::warn!("put_memory_vector failed for {mem_id}: {e}");
                     continue;
                 }
@@ -2529,16 +2779,23 @@ impl AppState {
     pub fn clear_search_engines(&self) {
         // Persist vectors before clearing（忽略失败：最坏情况重启需重新 embed）
         {
-            let dek_opt = self.vault.lock().unwrap_or_else(|e| e.into_inner())
-                .dek_db().ok();
+            let dek_opt = self
+                .vault
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .dek_db()
+                .ok();
             let vecs = self.vectors.lock().unwrap_or_else(|e| e.into_inner());
             if let (Some(dek), Some(vi)) = (dek_opt, vecs.as_ref()) {
                 let vectors_path = attune_core::platform::data_dir().join("vectors.encbin");
                 if let Err(e) = vi.save_encrypted(&dek, &vectors_path) {
                     tracing::warn!("Vector index flush on lock failed (non-fatal): {e}");
                 } else {
-                    tracing::info!("Vector index persisted to {} ({} entries)",
-                        vectors_path.display(), vi.len());
+                    tracing::info!(
+                        "Vector index persisted to {} ({} entries)",
+                        vectors_path.display(),
+                        vi.len()
+                    );
                 }
             }
         }
@@ -2550,10 +2807,16 @@ impl AppState {
         *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.web_search.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.tag_index.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.cluster_snapshot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .cluster_snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         *self.taxonomy.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.search_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         // 重置初始化标志，确保再次 unlock 后能重新初始化搜索引擎
         self.engines_initialized.store(false, Ordering::SeqCst);
     }
@@ -2568,7 +2831,10 @@ impl AppState {
     ///
     /// 真实 E2E 测试 STEP 4 / STEP 8 实测捕获。任何改动 items / 索引的 path 都必须调。
     pub fn invalidate_search_cache(&self) {
-        self.search_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.search_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     // ── ML provider accessor 方法 (OPT-3 ArcSwap migration prep) ───────────
@@ -2617,9 +2883,7 @@ impl AppState {
 
     /// Snapshot the member-paid verifier (Arc clone, µs critical section). Used by `login_token`
     /// to prove a "paid" claim before granting `MemberState::Paid` (C1 paywall-bypass fix).
-    pub fn member_verifier(
-        &self,
-    ) -> Arc<dyn attune_core::member_verifier::MemberVerifier> {
+    pub fn member_verifier(&self) -> Arc<dyn attune_core::member_verifier::MemberVerifier> {
         self.member_verifier
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2629,10 +2893,7 @@ impl AppState {
     /// Replace the member-paid verifier — TEST seam. Lets a test inject a verifier that performs a
     /// real (offline, deterministic) license match so the member-gate is exercised without a live
     /// cloud, instead of bypassing it via a blanket client claim.
-    pub fn set_member_verifier(
-        &self,
-        v: Arc<dyn attune_core::member_verifier::MemberVerifier>,
-    ) {
+    pub fn set_member_verifier(&self, v: Arc<dyn attune_core::member_verifier::MemberVerifier>) {
         if let Ok(mut g) = self.member_verifier.lock() {
             *g = v;
         }
@@ -2755,9 +3016,7 @@ impl AppState {
     /// G5: the durable job queue's store handle. `None` until
     /// [`AppState::install_job_store`] runs at boot (or if the DB cannot open —
     /// office ASR routes then return 503 `job-store-unavailable`).
-    pub fn job_store(
-        &self,
-    ) -> Option<std::sync::Arc<std::sync::Mutex<attune_core::store::Store>>> {
+    pub fn job_store(&self) -> Option<std::sync::Arc<std::sync::Mutex<attune_core::store::Store>>> {
         self.job_store.lock().ok().and_then(|g| g.clone())
     }
 
@@ -2835,10 +3094,24 @@ fn build_llm_from_settings(
 ) -> Option<Arc<dyn LlmProvider>> {
     let configured_llm = settings_json.as_ref().and_then(|settings| {
         let llm = settings.get("llm")?;
-        let endpoint = llm.get("endpoint").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let api_key = llm.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let model = llm.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let provider = llm.get("provider").and_then(|v| v.as_str()).unwrap_or("local");
+        let endpoint = llm
+            .get("endpoint")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let api_key = llm
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let model = llm
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let provider = llm
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("local");
 
         if let Some(ep) = endpoint.filter(|s| !s.is_empty()) {
             tracing::info!("LLM: using configured endpoint {ep}");
@@ -3018,7 +3291,10 @@ mod tests {
         );
         // set_usage is None-tolerant (no-op when arg is None).
         state.set_usage(None);
-        assert!(state.usage().is_none(), "set_usage(None) leaves aggregator None");
+        assert!(
+            state.usage().is_none(),
+            "set_usage(None) leaves aggregator None"
+        );
     }
 
     /// G4 — settings.embedding.endpoint drives the embedding provider to an
@@ -3036,9 +3312,16 @@ mod tests {
         }));
         let (provider, is_local) = build_embedding_from_settings(&settings);
         // OpenAiEmbeddingProvider reports the configured dims; Ort/Ollama defaults are 1024/0.
-        assert_eq!(provider.dimensions(), 1536, "configured embedding endpoint + dims must route to OpenAI-compatible provider");
+        assert_eq!(
+            provider.dimensions(),
+            1536,
+            "configured embedding endpoint + dims must route to OpenAI-compatible provider"
+        );
         // #82: loopback endpoint must be flagged as local
-        assert!(is_local, "127.0.0.1 endpoint must be classified as local_destination");
+        assert!(
+            is_local,
+            "127.0.0.1 endpoint must be classified as local_destination"
+        );
     }
 
     /// G4 — empty/absent embedding settings must NOT pick the OpenAI path (falls through
@@ -3052,7 +3335,11 @@ mod tests {
         std::env::set_var("ATTUNE_EMBEDDING_BACKEND", "ollama");
         let settings = Some(serde_json::json!({ "embedding": { "endpoint": "" } }));
         let (provider, is_local) = build_embedding_from_settings(&settings);
-        assert_eq!(provider.dimensions(), 1024, "empty endpoint must not route to OpenAI provider");
+        assert_eq!(
+            provider.dimensions(),
+            1024,
+            "empty endpoint must not route to OpenAI provider"
+        );
         assert!(is_local, "Ollama fallback must be classified as local");
         match prev {
             Some(v) => std::env::set_var("ATTUNE_EMBEDDING_BACKEND", v),
@@ -3095,16 +3382,19 @@ mod tests {
         }
         // bypass attempts + genuinely-public → false (gated)
         for ep in [
-            "http://localhost.evil.com/v1",     // suffix on "localhost" prefix
-            "http://127.0.0.1.evil.com/v1",     // suffix on "127." prefix
-            "http://192.168.1.1@evil.com/v1",   // userinfo — real host is evil.com
-            "http://10.0.0.1@evil.com/v1",      // userinfo
-            "http://172.2.0.0/v1",              // PUBLIC, but matched old "172.2" prefix
-            "http://172.32.0.1/v1",             // PUBLIC, just outside RFC1918 172.16-31
-            "https://api.openai.com/v1",        // cloud
-            "http://11.0.0.1/v1",               // public (not 10/8)
+            "http://localhost.evil.com/v1",   // suffix on "localhost" prefix
+            "http://127.0.0.1.evil.com/v1",   // suffix on "127." prefix
+            "http://192.168.1.1@evil.com/v1", // userinfo — real host is evil.com
+            "http://10.0.0.1@evil.com/v1",    // userinfo
+            "http://172.2.0.0/v1",            // PUBLIC, but matched old "172.2" prefix
+            "http://172.32.0.1/v1",           // PUBLIC, just outside RFC1918 172.16-31
+            "https://api.openai.com/v1",      // cloud
+            "http://11.0.0.1/v1",             // public (not 10/8)
         ] {
-            assert!(!embedding_endpoint_is_local(ep), "{ep} must NOT be local (would bypass privacy gate)");
+            assert!(
+                !embedding_endpoint_is_local(ep),
+                "{ep} must NOT be local (would bypass privacy gate)"
+            );
         }
     }
 }

@@ -7,8 +7,8 @@ pub mod power;
 pub mod region;
 pub mod tier;
 
-pub use npu::{Danger, NpuInstallPlan, NpuStatus};
 pub use accel::{AccelCapabilities, AccelKind, Accelerator};
+pub use npu::{Danger, NpuInstallPlan, NpuStatus};
 pub use power::{PowerProfile, PowerSource, PowerState};
 pub use region::{detect_region, Region};
 pub use tier::{classify_hardware, ModelRecommendation, Tier};
@@ -60,7 +60,11 @@ pub fn data_dir() -> PathBuf {
     // 迁移规则：老目录 npu-vault/ 若存在且新目录 attune/ 不存在，返回老路径（就地复用，
     // 避免升级丢数据）。新建用户使用 attune/。
     let base = dirs::data_local_dir()
-        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local/share")))
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".local/share"))
+        })
         .unwrap_or_else(|| PathBuf::from("."));
     resolve_app_dir(base)
 }
@@ -71,7 +75,11 @@ pub fn config_dir() -> PathBuf {
     }
     // 同上，回退到 $HOME/.config 或当前目录
     let base = dirs::config_dir()
-        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".config"))
+        })
         .unwrap_or_else(|| PathBuf::from("."));
     resolve_app_dir(base)
 }
@@ -173,28 +181,33 @@ pub fn detect_npu() -> NpuKind {
 /// 具体的硬件能力报告，用于启动时选择最优配置与打印诊断
 #[derive(Debug, Clone, Default)]
 pub struct HardwareProfile {
-    pub cpu_vendor: String,          // e.g. "AuthenticAMD" / "GenuineIntel"
-    pub cpu_model: String,           // e.g. "AMD Ryzen 7 8845H..."
-    pub has_nvidia_gpu: bool,        // /dev/nvidia0
-    pub has_amd_gpu: bool,           // /dev/kfd + /dev/dri/renderD*（AMD 集显或独显）
-    pub has_intel_igpu: bool,        // Intel iGPU（/dev/dri/renderD* vendor=0x8086）
-    pub amd_gfx_target: Option<String>,  // e.g. "gfx1103" (Radeon 780M)，用于 ROCm 匹配
-    pub has_amd_xdna_npu: bool,      // /dev/accel/accel0 + amdxdna 模块（Ryzen AI）
-    pub has_intel_npu: bool,         // /dev/accel/accel0 + intel_vpu 模块
-    pub total_ram_bytes: u64,        // 总内存字节；硬件档位匹配用
-    pub os: &'static str,            // "linux" | "macos" | "windows"
-    pub form_factor: FormFactor,     // Laptop / K3Appliance / Server / Unknown — 决定 LLM 默认路径
-    pub gpu_label: Option<String>,   // 统一给 UI 的 GPU 描述
+    pub cpu_vendor: String,             // e.g. "AuthenticAMD" / "GenuineIntel"
+    pub cpu_model: String,              // e.g. "AMD Ryzen 7 8845H..."
+    pub has_nvidia_gpu: bool,           // /dev/nvidia0
+    pub has_amd_gpu: bool,              // /dev/kfd + /dev/dri/renderD*（AMD 集显或独显）
+    pub has_intel_igpu: bool,           // Intel iGPU（/dev/dri/renderD* vendor=0x8086）
+    pub amd_gfx_target: Option<String>, // e.g. "gfx1103" (Radeon 780M)，用于 ROCm 匹配
+    pub has_amd_xdna_npu: bool,         // /dev/accel/accel0 + amdxdna 模块（Ryzen AI）
+    pub has_intel_npu: bool,            // /dev/accel/accel0 + intel_vpu 模块
+    pub total_ram_bytes: u64,           // 总内存字节；硬件档位匹配用
+    pub os: &'static str,               // "linux" | "macos" | "windows"
+    pub form_factor: FormFactor, // Laptop / K3Appliance / Server / Unknown — 决定 LLM 默认路径
+    pub gpu_label: Option<String>, // 统一给 UI 的 GPU 描述
 }
 
 impl HardwareProfile {
     /// 检测当前宿主的硬件画像（只读、幂等、无副作用）
     pub fn detect() -> Self {
         let mut p = Self {
-            os: if cfg!(target_os = "linux") { "linux" }
-                else if cfg!(target_os = "macos") { "macos" }
-                else if cfg!(target_os = "windows") { "windows" }
-                else { "unknown" },
+            os: if cfg!(target_os = "linux") {
+                "linux"
+            } else if cfg!(target_os = "macos") {
+                "macos"
+            } else if cfg!(target_os = "windows") {
+                "windows"
+            } else {
+                "unknown"
+            },
             ..Default::default()
         };
 
@@ -202,9 +215,15 @@ impl HardwareProfile {
         #[cfg(target_os = "linux")]
         if let Ok(info) = std::fs::read_to_string("/proc/cpuinfo") {
             for line in info.lines().take(40) {
-                if let Some(v) = line.strip_prefix("vendor_id\t: ") { p.cpu_vendor = v.trim().to_string(); }
-                if let Some(v) = line.strip_prefix("model name\t: ") { p.cpu_model = v.trim().to_string(); }
-                if !p.cpu_vendor.is_empty() && !p.cpu_model.is_empty() { break; }
+                if let Some(v) = line.strip_prefix("vendor_id\t: ") {
+                    p.cpu_vendor = v.trim().to_string();
+                }
+                if let Some(v) = line.strip_prefix("model name\t: ") {
+                    p.cpu_model = v.trim().to_string();
+                }
+                if !p.cpu_vendor.is_empty() && !p.cpu_model.is_empty() {
+                    break;
+                }
             }
         }
 
@@ -239,8 +258,12 @@ impl HardwareProfile {
         // NPU：区分 AMD XDNA vs Intel VPU
         if std::path::Path::new("/dev/accel/accel0").exists() {
             if let Ok(mods) = std::fs::read_to_string("/proc/modules") {
-                if mods.contains("amdxdna") { p.has_amd_xdna_npu = true; }
-                if mods.contains("intel_vpu") { p.has_intel_npu = true; }
+                if mods.contains("amdxdna") {
+                    p.has_amd_xdna_npu = true;
+                }
+                if mods.contains("intel_vpu") {
+                    p.has_intel_npu = true;
+                }
             }
         }
 
@@ -274,8 +297,8 @@ impl HardwareProfile {
                 p.cpu_model = model;
             }
             // Apple Silicon 的 vendor 统一为 "Apple"，Intel Mac 可通过 sysctl 得到
-            p.cpu_vendor = sysctl_string("machdep.cpu.vendor")
-                .unwrap_or_else(|| "Apple".to_string());
+            p.cpu_vendor =
+                sysctl_string("machdep.cpu.vendor").unwrap_or_else(|| "Apple".to_string());
         }
 
         // Windows：sysinfo 读总内存 + CPU（原 wmic.exe 在 Win11 24H2+ 已默认移除，
@@ -366,7 +389,7 @@ impl HardwareProfile {
         }
         match (gb, accel) {
             (32.., true) => "qwen2.5:7b",
-            (32.., false) => "qwen2.5:3b",  // 大内存但纯 CPU，3b 还是能跑
+            (32.., false) => "qwen2.5:3b", // 大内存但纯 CPU，3b 还是能跑
             (16..=31, _) => "qwen2.5:3b",
             (8..=15, _) => "qwen2.5:1.5b",
             _ => "llama3.2:1b",
@@ -383,14 +406,22 @@ impl HardwareProfile {
             const GB: u64 = 1024 * 1024 * 1024;
             parts.push(format!("RAM={} GB", self.total_ram_bytes / GB));
         }
-        if self.has_nvidia_gpu { parts.push("NVIDIA GPU (/dev/nvidia0)".into()); }
+        if self.has_nvidia_gpu {
+            parts.push("NVIDIA GPU (/dev/nvidia0)".into());
+        }
         if self.has_amd_gpu {
             let gfx = self.amd_gfx_target.as_deref().unwrap_or("unknown");
             parts.push(format!("AMD GPU (gfx={})", gfx));
         }
-        if self.has_intel_igpu { parts.push("Intel iGPU (/dev/dri/renderD*)".into()); }
-        if self.has_amd_xdna_npu { parts.push("AMD XDNA NPU (Ryzen AI)".into()); }
-        if self.has_intel_npu { parts.push("Intel NPU (VPU)".into()); }
+        if self.has_intel_igpu {
+            parts.push("Intel iGPU (/dev/dri/renderD*)".into());
+        }
+        if self.has_amd_xdna_npu {
+            parts.push("AMD XDNA NPU (Ryzen AI)".into());
+        }
+        if self.has_intel_npu {
+            parts.push("Intel NPU (VPU)".into());
+        }
         parts.join(" | ")
     }
 
@@ -406,19 +437,22 @@ impl HardwareProfile {
         // 11.0.0 (gfx1100) 才能让 ROCm runtime 接受。
         if self.has_amd_gpu && std::env::var("HSA_OVERRIDE_GFX_VERSION").is_err() {
             let override_ver = match self.amd_gfx_target.as_deref() {
-                Some("gfx1103") | Some("gfx1102") | Some("gfx1150") | Some("gfx1151")
-                    => Some("11.0.0"),
+                Some("gfx1103") | Some("gfx1102") | Some("gfx1150") | Some("gfx1151") => {
+                    Some("11.0.0")
+                }
                 Some("gfx1036") | Some("gfx1035") | Some("gfx1034") | Some("gfx1033")
-                    | Some("gfx1032") | Some("gfx1031") | Some("gfx1030")
-                    => Some("10.3.0"),
+                | Some("gfx1032") | Some("gfx1031") | Some("gfx1030") => Some("10.3.0"),
                 _ => None,
             };
             if let Some(ver) = override_ver {
                 std::env::set_var("HSA_OVERRIDE_GFX_VERSION", ver);
                 applied.push((
                     "HSA_OVERRIDE_GFX_VERSION".into(),
-                    format!("AMD {} → ROCm runtime 兼容 {}",
-                        self.amd_gfx_target.as_deref().unwrap_or("?"), ver),
+                    format!(
+                        "AMD {} → ROCm runtime 兼容 {}",
+                        self.amd_gfx_target.as_deref().unwrap_or("?"),
+                        ver
+                    ),
                 ));
             }
         }
@@ -451,7 +485,7 @@ fn detect_form_factor() -> FormFactor {
             "k3" | "k3appliance" | "appliance" => return FormFactor::K3Appliance,
             "laptop" | "desktop" => return FormFactor::Laptop,
             "server" | "headless" => return FormFactor::Server,
-            _ => {}  // 未识别值，继续 fallback
+            _ => {} // 未识别值，继续 fallback
         }
     }
 
@@ -482,11 +516,15 @@ fn detect_amd_gfx_target() -> Option<String> {
     let entries = std::fs::read_dir(nodes_dir).ok()?;
     for entry in entries.flatten() {
         let props_path = entry.path().join("properties");
-        let Ok(content) = std::fs::read_to_string(&props_path) else { continue };
+        let Ok(content) = std::fs::read_to_string(&props_path) else {
+            continue;
+        };
         for line in content.lines() {
             if let Some(val) = line.strip_prefix("gfx_target_version ") {
                 if let Ok(n) = val.trim().parse::<u32>() {
-                    if n == 0 { continue; }  // CPU 行
+                    if n == 0 {
+                        continue;
+                    } // CPU 行
                     let major = n / 10000;
                     let minor = (n / 100) % 100;
                     let step = n % 100;
@@ -515,7 +553,9 @@ fn detect_linux_render_gpu_vendors() -> (bool, bool, Option<String>) {
             continue;
         }
         let vendor_path = e.path().join("device").join("vendor");
-        let Ok(vendor) = std::fs::read_to_string(vendor_path) else { continue };
+        let Ok(vendor) = std::fs::read_to_string(vendor_path) else {
+            continue;
+        };
         let v = vendor.trim().to_ascii_lowercase();
         if v == "0x1002" {
             has_amd = true;
@@ -538,14 +578,18 @@ fn detect_linux_render_gpu_vendors() -> (bool, bool, Option<String>) {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn detect_amd_gfx_target() -> Option<String> { None }
+fn detect_amd_gfx_target() -> Option<String> {
+    None
+}
 
 /// macOS sysctl 辅助：读取 u64 类型的系统参数（hw.memsize 等）
 #[cfg(target_os = "macos")]
 fn sysctl_u64(key: &str) -> Option<u64> {
     use std::process::Command;
     let out = Command::new("sysctl").args(["-n", key]).output().ok()?;
-    if !out.status.success() { return None; }
+    if !out.status.success() {
+        return None;
+    }
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
@@ -554,9 +598,15 @@ fn sysctl_u64(key: &str) -> Option<u64> {
 fn sysctl_string(key: &str) -> Option<String> {
     use std::process::Command;
     let out = Command::new("sysctl").args(["-n", key]).output().ok()?;
-    if !out.status.success() { return None; }
+    if !out.status.success() {
+        return None;
+    }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 /// Windows 物理内存：wmic computersystem 的 TotalPhysicalMemory 字段（bytes）
@@ -676,8 +726,16 @@ mod tests {
         let dd = data_dir();
         let cd = config_dir();
         let ends_ok = |p: &PathBuf| p.ends_with(APP_DIR) || p.ends_with(LEGACY_APP_DIR);
-        assert!(ends_ok(&dd), "data_dir should end with attune or npu-vault: {:?}", dd);
-        assert!(ends_ok(&cd), "config_dir should end with attune or npu-vault: {:?}", cd);
+        assert!(
+            ends_ok(&dd),
+            "data_dir should end with attune or npu-vault: {:?}",
+            dd
+        );
+        assert!(
+            ends_ok(&cd),
+            "config_dir should end with attune or npu-vault: {:?}",
+            cd
+        );
     }
 
     #[test]
@@ -708,7 +766,10 @@ mod tests {
         // to production — this is the critical invariant for the test-injection seam.
         let prod_data = data_dir();
         let prod_config = config_dir();
-        assert!(dir_override().is_none(), "no override leaked into this test");
+        assert!(
+            dir_override().is_none(),
+            "no override leaked into this test"
+        );
 
         let td = tempfile::tempdir().expect("tempdir");
         let pinned = td.path().to_path_buf();
@@ -720,8 +781,16 @@ mod tests {
         // Restoring None must reproduce production resolution exactly.
         let restored = set_dir_override_for_test(None);
         assert_eq!(restored, Some(pinned));
-        assert_eq!(data_dir(), prod_data, "data_dir restored byte-identical to production");
-        assert_eq!(config_dir(), prod_config, "config_dir restored byte-identical to production");
+        assert_eq!(
+            data_dir(),
+            prod_data,
+            "data_dir restored byte-identical to production"
+        );
+        assert_eq!(
+            config_dir(),
+            prod_config,
+            "config_dir restored byte-identical to production"
+        );
     }
 
     // ── Windows NPU PnP 解析（跨厂商 ComputeAccelerator） ───────────────────
@@ -736,7 +805,8 @@ mod tests {
 
     #[test]
     fn parse_npu_pnp_intel_ai_boost_sets_intel_only() {
-        let out = "PCI\\VEN_8086&DEV_7D1D&SUBSYS_00000000&REV_04\\3&11583659&0&88|Intel(R) AI Boost";
+        let out =
+            "PCI\\VEN_8086&DEV_7D1D&SUBSYS_00000000&REV_04\\3&11583659&0&88|Intel(R) AI Boost";
         let (intel, amd) = parse_windows_npu_pnp(out);
         assert!(intel, "VEN_8086 ComputeAccelerator → Intel NPU");
         assert!(!amd, "no AMD NPU on Intel-only machine");
@@ -755,7 +825,10 @@ mod tests {
         // 无 NPU 机器（空输出 / 噪声）→ 两者皆 false，不 panic。
         assert_eq!(parse_windows_npu_pnp(""), (false, false));
         assert_eq!(parse_windows_npu_pnp("   \n  \n"), (false, false));
-        assert_eq!(parse_windows_npu_pnp("some unrelated device|Foo Bar"), (false, false));
+        assert_eq!(
+            parse_windows_npu_pnp("some unrelated device|Foo Bar"),
+            (false, false)
+        );
     }
 
     #[test]
@@ -764,7 +837,8 @@ mod tests {
         // NPU Compute Accelerator → AMD），保证厂商缺 DeviceID 时仍能分流。
         let intel_by_name = parse_windows_npu_pnp("ACPI\\SOMETHING\\0|Intel(R) AI Boost");
         assert_eq!(intel_by_name, (true, false));
-        let amd_by_name = parse_windows_npu_pnp("ACPI\\SOMETHING\\0|NPU Compute Accelerator Device");
+        let amd_by_name =
+            parse_windows_npu_pnp("ACPI\\SOMETHING\\0|NPU Compute Accelerator Device");
         assert_eq!(amd_by_name, (false, true));
     }
 
@@ -788,9 +862,7 @@ mod tests {
     // 把 openvino(Intel)/vitisai(AMD) 入链 → runtime_stack 进 wanted 集（spawn_stack_
     // bootstrap 据此装栈）。这是本任务的核心交付：Intel→openvino、AMD→vitisai wanted。
 
-    use crate::infer::accel::{
-        recommend_ep_chain_pure, EpChoice, OpenVinoDevice,
-    };
+    use crate::infer::accel::{recommend_ep_chain_pure, EpChoice, OpenVinoDevice};
     use crate::platform::accel::AccelCapabilities;
 
     /// 从 profile 推导 driver-ready 硬件类别（复用生产 from_profile 路径）。
@@ -825,17 +897,25 @@ mod tests {
             ..Default::default()
         };
         let hw = ready_hw(&p);
-        assert!(hw.contains(&crate::platform::AccelKind::IntelNpu), "Intel NPU classified");
+        assert!(
+            hw.contains(&crate::platform::AccelKind::IntelNpu),
+            "Intel NPU classified"
+        );
 
         // artifact 编入 openvino + cpu → EP 链含 openvino(NPU)。
         let compiled = [EpChoice::Cpu, EpChoice::OpenVino(OpenVinoDevice::Auto)];
         let chain = recommend_ep_chain_pure("windows", &hw, &compiled, None);
-        assert!(chain.iter().any(|e| e.id() == "openvino"), "Intel NPU → openvino in chain: {chain:?}");
+        assert!(
+            chain.iter().any(|e| e.id() == "openvino"),
+            "Intel NPU → openvino in chain: {chain:?}"
+        );
         assert_eq!(*chain.last().unwrap(), EpChoice::Cpu, "CPU 兜底末位");
 
         // wanted 栈含 openvino（Intel NPU 自动配置 OpenVINO 栈）。
-        assert!(wanted_stacks(&chain).contains(&"openvino"),
-            "Intel NPU machine must want openvino stack");
+        assert!(
+            wanted_stacks(&chain).contains(&"openvino"),
+            "Intel NPU machine must want openvino stack"
+        );
     }
 
     #[test]
@@ -847,21 +927,32 @@ mod tests {
             ..Default::default()
         };
         let hw = ready_hw(&p);
-        assert!(hw.contains(&crate::platform::AccelKind::AmdNpu), "AMD XDNA NPU classified");
+        assert!(
+            hw.contains(&crate::platform::AccelKind::AmdNpu),
+            "AMD XDNA NPU classified"
+        );
 
         let compiled = [EpChoice::Cpu, EpChoice::VitisAi];
         let chain = recommend_ep_chain_pure("windows", &hw, &compiled, None);
-        assert!(chain.iter().any(|e| e.id() == "vitisai"), "AMD XDNA → vitisai in chain: {chain:?}");
+        assert!(
+            chain.iter().any(|e| e.id() == "vitisai"),
+            "AMD XDNA → vitisai in chain: {chain:?}"
+        );
         assert_eq!(*chain.last().unwrap(), EpChoice::Cpu);
 
-        assert!(wanted_stacks(&chain).contains(&"vitisai"),
-            "AMD XDNA NPU machine must want vitisai stack");
+        assert!(
+            wanted_stacks(&chain).contains(&"vitisai"),
+            "AMD XDNA NPU machine must want vitisai stack"
+        );
     }
 
     #[test]
     fn windows_no_npu_profile_wants_neither_openvino_nor_vitisai() {
         // 无 NPU 的纯 CPU Windows 机：openvino/vitisai 都不入 wanted。
-        let p = HardwareProfile { os: "windows", ..Default::default() };
+        let p = HardwareProfile {
+            os: "windows",
+            ..Default::default()
+        };
         let hw = ready_hw(&p);
         let compiled = [
             EpChoice::Cpu,
@@ -870,7 +961,10 @@ mod tests {
         ];
         let chain = recommend_ep_chain_pure("windows", &hw, &compiled, None);
         let w = wanted_stacks(&chain);
-        assert!(!w.contains(&"openvino"), "no NPU → no openvino wanted: {w:?}");
+        assert!(
+            !w.contains(&"openvino"),
+            "no NPU → no openvino wanted: {w:?}"
+        );
         assert!(!w.contains(&"vitisai"), "no NPU → no vitisai wanted: {w:?}");
         assert_eq!(chain, vec![EpChoice::Cpu], "bare Windows → CPU-only chain");
     }
@@ -893,8 +987,10 @@ mod tests {
     #[test]
     fn hardware_profile_detects_os() {
         let p = HardwareProfile::detect();
-        assert!(!p.os.is_empty() && p.os != "unknown",
-            "os should be one of linux/macos/windows on current target");
+        assert!(
+            !p.os.is_empty() && p.os != "unknown",
+            "os should be one of linux/macos/windows on current target"
+        );
     }
 
     #[test]
@@ -913,7 +1009,10 @@ mod tests {
         std::env::remove_var("HSA_OVERRIDE_GFX_VERSION");
         std::env::remove_var("CUDA_VISIBLE_DEVICES");
         let applied = p.apply_recommended_env();
-        assert!(applied.is_empty(), "bare system should apply no env vars: {applied:?}");
+        assert!(
+            applied.is_empty(),
+            "bare system should apply no env vars: {applied:?}"
+        );
     }
 
     #[test]
@@ -941,7 +1040,10 @@ mod tests {
 
     #[test]
     fn summary_model_picks_1_5b_on_8_15gb() {
-        let mut p = HardwareProfile { total_ram_bytes: 8 * 1024 * 1024 * 1024, ..Default::default() };
+        let mut p = HardwareProfile {
+            total_ram_bytes: 8 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
         assert_eq!(p.recommended_summary_model(), "qwen2.5:1.5b");
 
         p.total_ram_bytes = 15 * 1024 * 1024 * 1024;
@@ -956,13 +1058,19 @@ mod tests {
             has_nvidia_gpu: true,
             ..Default::default()
         };
-        assert_eq!(p.recommended_summary_model(), "qwen2.5:1.5b",
-            "8GB + accel should still pick 1.5b (RAM-bound)");
+        assert_eq!(
+            p.recommended_summary_model(),
+            "qwen2.5:1.5b",
+            "8GB + accel should still pick 1.5b (RAM-bound)"
+        );
     }
 
     #[test]
     fn summary_model_picks_tiny_on_lowend() {
-        let p = HardwareProfile { total_ram_bytes: 4 * 1024 * 1024 * 1024, ..Default::default() };
+        let p = HardwareProfile {
+            total_ram_bytes: 4 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
         assert_eq!(p.recommended_summary_model(), "llama3.2:1b");
     }
 
@@ -977,7 +1085,10 @@ mod tests {
     #[test]
     fn summary_model_big_ram_no_accel_drops_one_tier() {
         // 32GB+ 纯 CPU → 3b (不是 7b)，避免 CPU 推理龟速
-        let p = HardwareProfile { total_ram_bytes: 64 * 1024 * 1024 * 1024, ..Default::default() };
+        let p = HardwareProfile {
+            total_ram_bytes: 64 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
         assert_eq!(p.recommended_summary_model(), "qwen2.5:3b");
     }
 
@@ -994,8 +1105,15 @@ mod tests {
 
     #[test]
     fn ram_reflected_in_summary() {
-        let p = HardwareProfile { total_ram_bytes: 16 * 1024 * 1024 * 1024, ..Default::default() };
-        assert!(p.summary().contains("RAM=16 GB"), "summary should include RAM: {}", p.summary());
+        let p = HardwareProfile {
+            total_ram_bytes: 16 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+        assert!(
+            p.summary().contains("RAM=16 GB"),
+            "summary should include RAM: {}",
+            p.summary()
+        );
     }
 
     // ── FormFactor 测试（v0.6.1 新增） ────────────────────────────────────────
@@ -1049,11 +1167,19 @@ mod tests {
         assert_eq!(detect_form_factor(), FormFactor::K3Appliance);
 
         std::env::set_var("ATTUNE_FORM_FACTOR", "  K3  ");
-        assert_eq!(detect_form_factor(), FormFactor::K3Appliance, "trim whitespace");
+        assert_eq!(
+            detect_form_factor(),
+            FormFactor::K3Appliance,
+            "trim whitespace"
+        );
 
         // 未识别 → fallback 到 Laptop（不 panic）
         std::env::set_var("ATTUNE_FORM_FACTOR", "garbage_value");
-        assert_eq!(detect_form_factor(), FormFactor::Laptop, "unknown value falls back to Laptop");
+        assert_eq!(
+            detect_form_factor(),
+            FormFactor::Laptop,
+            "unknown value falls back to Laptop"
+        );
 
         // 测试结束清理 env var，避免污染其他测试
         std::env::remove_var("ATTUNE_FORM_FACTOR");
@@ -1069,7 +1195,10 @@ mod tests {
         std::env::remove_var("ATTUNE_FORM_FACTOR");
         let p = HardwareProfile::detect();
         // 默认 Laptop（除非系统 DMI 显示 K3/Jetson，CI 环境正常不会）
-        assert!(matches!(p.form_factor, FormFactor::Laptop | FormFactor::K3Appliance),
-            "default form_factor should be Laptop or detected K3, got {:?}", p.form_factor);
+        assert!(
+            matches!(p.form_factor, FormFactor::Laptop | FormFactor::K3Appliance),
+            "default form_factor should be Laptop or detected K3, got {:?}",
+            p.form_factor
+        );
     }
 }

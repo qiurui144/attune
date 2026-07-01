@@ -61,23 +61,26 @@ fn build_table(t: &Table) -> DxTable {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                TableCell::new()
-                    .add_paragraph(Paragraph::new().add_run(run(c)).align(dx_align(t.align_for(i))))
+                TableCell::new().add_paragraph(
+                    Paragraph::new()
+                        .add_run(run(c))
+                        .align(dx_align(t.align_for(i))),
+                )
             })
             .collect();
         rows.push(TableRow::new(cells));
     }
 
-    DxTable::new(rows).set_grid(vec![]).width(9000, WidthType::Dxa)
+    DxTable::new(rows)
+        .set_grid(vec![])
+        .width(9000, WidthType::Dxa)
 }
 
 fn apply_blocks(mut docx: Docx, blocks: &[Block]) -> Docx {
     for block in blocks {
         docx = match block {
             Block::Heading { level, text } => docx.add_paragraph(heading_para(*level, text)),
-            Block::Paragraph { text } => {
-                docx.add_paragraph(Paragraph::new().add_run(run(text)))
-            }
+            Block::Paragraph { text } => docx.add_paragraph(Paragraph::new().add_run(run(text))),
             Block::List { ordered, items } => {
                 for (i, item) in items.iter().enumerate() {
                     let prefix = if *ordered {

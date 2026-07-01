@@ -36,8 +36,8 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use attune_core::doc_privacy::{enforce_artifact_egress, ArtifactEgressOutcome};
 use attune_core::doc_privacy::RedactMode;
+use attune_core::doc_privacy::{enforce_artifact_egress, ArtifactEgressOutcome};
 use attune_core::export::sanitize::download_filename;
 use attune_core::export::{Artifact, ExportFormat};
 use attune_core::pii::Redactor;
@@ -118,7 +118,12 @@ fn export_extra_keywords(state: &SharedState) -> Vec<String> {
     // 2) Settings override list (optional, vault-backed).
     let bytes = match state.vault.lock() {
         Ok(v) => v.store().get_meta("app_settings").ok().flatten(),
-        Err(e) => e.into_inner().store().get_meta("app_settings").ok().flatten(),
+        Err(e) => e
+            .into_inner()
+            .store()
+            .get_meta("app_settings")
+            .ok()
+            .flatten(),
     };
     if let Some(arr) = bytes
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
@@ -189,7 +194,9 @@ pub async fn export_artifact(
             }
             return AppError::detailed(StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
         }
-        ArtifactEgressOutcome::Allowed { artifact, redacted, .. } => {
+        ArtifactEgressOutcome::Allowed {
+            artifact, redacted, ..
+        } => {
             if redacted > 0 {
                 tracing::info!("export: redacted {redacted} PII span(s) before render");
             }
@@ -204,11 +211,8 @@ pub async fn export_artifact(
                 400 => StatusCode::BAD_REQUEST,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            return AppError::detailed(
-                status,
-                json!({ "error": e.to_string(), "code": e.code() }),
-            )
-            .into_response();
+            return AppError::detailed(status, json!({ "error": e.to_string(), "code": e.code() }))
+                .into_response();
         }
     };
 

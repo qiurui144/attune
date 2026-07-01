@@ -55,7 +55,10 @@ fn raw_doc(content: Vec<u8>, filename: &str) -> RawDocument {
 }
 
 fn mem_store() -> (Store, Key32) {
-    (Store::open_memory().expect("open_memory"), Key32::generate())
+    (
+        Store::open_memory().expect("open_memory"),
+        Key32::generate(),
+    )
 }
 
 /// Read a committed fixture, or regenerate the large/binary ones in-process.
@@ -147,7 +150,11 @@ fn empty_file_ingest_is_graceful_skip() {
         matches!(outcome, IngestOutcome::Skipped { .. }),
         "0-byte file must be Skipped, got {outcome:?}"
     );
-    assert_eq!(store.item_count().unwrap(), 0, "empty file must not insert an item");
+    assert_eq!(
+        store.item_count().unwrap(),
+        0,
+        "empty file must not insert an item"
+    );
 }
 
 #[test]
@@ -176,7 +183,10 @@ fn non_utf8_bytes_ingest_graceful_lossy() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("non-utf8 with valid ASCII content should Insert, got {other:?}"),
     };
-    let item = store.get_item(&dek, &item_id).unwrap().expect("item exists");
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("item exists");
     // ASCII survives lossy decode; invalid bytes become U+FFFD, no panic.
     assert!(
         item.content.contains("MARKER_ASCII") && item.content.contains("MARKER_TAIL"),
@@ -208,13 +218,27 @@ fn all_emoji_long_first_line_ingests_without_panic() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("emoji-only file should Insert, got {other:?}"),
     };
-    let item = store.get_item(&dek, &item_id).unwrap().expect("item exists");
-    assert!(item.content.contains('😀'), "emoji must round-trip into stored content");
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("item exists");
+    assert!(
+        item.content.contains('😀'),
+        "emoji must round-trip into stored content"
+    );
 
     let mut vectors = VectorIndex::new(64).unwrap();
     let fulltext = FulltextIndex::open_memory().unwrap();
-    reindex::reindex_item(&store, &mut vectors, &fulltext, &item_id, "emoji", &item.content, "file")
-        .expect("emoji reindex must not panic");
+    reindex::reindex_item(
+        &store,
+        &mut vectors,
+        &fulltext,
+        &item_id,
+        "emoji",
+        &item.content,
+        "file",
+    )
+    .expect("emoji reindex must not panic");
 }
 
 /// Regression lock for the currently-safe path: emoji content whose trimmed
@@ -232,13 +256,24 @@ fn all_emoji_short_first_line_ingests_without_panic() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("emoji file should Insert, got {other:?}"),
     };
-    let item = store.get_item(&dek, &item_id).unwrap().expect("item exists");
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("item exists");
     assert!(item.content.contains('🦀'), "emoji must round-trip");
 
     let mut vectors = VectorIndex::new(64).unwrap();
     let fulltext = FulltextIndex::open_memory().unwrap();
-    reindex::reindex_item(&store, &mut vectors, &fulltext, &item_id, "emoji", &item.content, "file")
-        .expect("emoji reindex must not panic");
+    reindex::reindex_item(
+        &store,
+        &mut vectors,
+        &fulltext,
+        &item_id,
+        "emoji",
+        &item.content,
+        "file",
+    )
+    .expect("emoji reindex must not panic");
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -286,7 +321,10 @@ fn malicious_html_all_payloads_stripped() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("malicious html should Insert extracted text, got {other:?}"),
     };
-    let item = store.get_item(&dek, &item_id).unwrap().expect("item exists");
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("item exists");
     let stored = &item.content;
 
     assert!(
@@ -302,8 +340,20 @@ fn malicious_html_all_payloads_stripped() {
     }
     let mut vectors = VectorIndex::new(64).unwrap();
     let fulltext = FulltextIndex::open_memory().unwrap();
-    reindex::reindex_item(&store, &mut vectors, &fulltext, &item_id, "mal", stored, "file").unwrap();
-    assert!(fulltext.search("XSS_SCRIPT_BODY_MARKER", 10).unwrap().is_empty());
+    reindex::reindex_item(
+        &store,
+        &mut vectors,
+        &fulltext,
+        &item_id,
+        "mal",
+        stored,
+        "file",
+    )
+    .unwrap();
+    assert!(fulltext
+        .search("XSS_SCRIPT_BODY_MARKER", 10)
+        .unwrap()
+        .is_empty());
 }
 
 /// Regression lock for the protection that DOES hold today (so CI stays green
@@ -320,10 +370,16 @@ fn malicious_html_partial_stripping_current_behavior() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("should Insert, got {other:?}"),
     };
-    let item = store.get_item(&dek, &item_id).unwrap().expect("item exists");
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("item exists");
     let stored = &item.content;
 
-    assert!(stored.contains("LEGIT_VISIBLE_MARKER"), "visible text must survive");
+    assert!(
+        stored.contains("LEGIT_VISIBLE_MARKER"),
+        "visible text must survive"
+    );
 
     // These ARE correctly stripped today — lock them so a regression is caught.
     for m in [
@@ -360,9 +416,15 @@ fn xss_in_attributes_not_indexed() {
         IngestOutcome::Inserted { item_id, .. } => item_id,
         other => panic!("attr xss html should Insert, got {other:?}"),
     };
-    let item = store.get_item(&dek, &item_id).unwrap().expect("item exists");
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("item exists");
     let stored = &item.content;
-    assert!(stored.contains("VISIBLE_ATTR_TEST_MARKER"), "visible text must survive");
+    assert!(
+        stored.contains("VISIBLE_ATTR_TEST_MARKER"),
+        "visible text must survive"
+    );
 
     for m in [
         "XSS_ONMOUSEOVER_MARKER",
@@ -395,7 +457,11 @@ fn huge_10mb_ingest_bounded_no_blowup() {
     let dek = Key32::generate();
 
     let bytes = fixture_bytes("huge_10mb.txt");
-    assert!(bytes.len() >= 10 * 1024 * 1024, "fixture must be >= 10MB, got {}", bytes.len());
+    assert!(
+        bytes.len() >= 10 * 1024 * 1024,
+        "fixture must be >= 10MB, got {}",
+        bytes.len()
+    );
     let raw = raw_doc(bytes.clone(), "huge_10mb.txt");
 
     let t0 = Instant::now();
@@ -404,7 +470,9 @@ fn huge_10mb_ingest_bounded_no_blowup() {
     println!("[edge] 10MB ingest took {elapsed:?}");
 
     let chunks = match outcome {
-        IngestOutcome::Inserted { chunks_enqueued, .. } => chunks_enqueued,
+        IngestOutcome::Inserted {
+            chunks_enqueued, ..
+        } => chunks_enqueued,
         other => panic!("10MB text should Insert, got {other:?}"),
     };
     assert!(chunks > 0, "must produce chunks");
@@ -416,7 +484,10 @@ fn huge_10mb_ingest_bounded_no_blowup() {
         "chunk count {chunks} is unbounded relative to 10MB input — possible blowup"
     );
     // Wall-clock sanity: a single 10MB text doc must not take minutes.
-    assert!(elapsed < Duration::from_secs(120), "10MB ingest took too long: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(120),
+        "10MB ingest took too long: {elapsed:?}"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -431,7 +502,11 @@ fn binary_extension_is_rejected_not_oom() {
     let raw = raw_doc(vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF], "payload.exe");
     let res = ingest_document(&store, &dek, &raw);
     assert!(res.is_err(), "binary .exe must be rejected, got {res:?}");
-    assert_eq!(store.item_count().unwrap(), 0, "rejected binary must not insert");
+    assert_eq!(
+        store.item_count().unwrap(),
+        0,
+        "rejected binary must not insert"
+    );
 }
 
 #[test]
@@ -443,7 +518,9 @@ fn oversize_nested_structure_bounded_no_stack_overflow() {
     let raw = raw_doc(fixture_bytes("many_lines.txt"), "many_lines.txt");
     let outcome = ingest_document(&store, &dek, &raw).expect("100k lines must not panic");
     match outcome {
-        IngestOutcome::Inserted { chunks_enqueued, .. } => {
+        IngestOutcome::Inserted {
+            chunks_enqueued, ..
+        } => {
             assert!(chunks_enqueued > 0);
             assert!(
                 chunks_enqueued < 200_000,
@@ -517,7 +594,10 @@ fn concurrent_ingest_distinct_docs_all_indexed_no_deadlock() {
         );
         // join() itself can't take a timeout; rely on the overall deadline
         // check and the fact that ingest is bounded work.
-        let outcome = h.join().expect("worker thread panicked").expect("worker ingest errored");
+        let outcome = h
+            .join()
+            .expect("worker thread panicked")
+            .expect("worker ingest errored");
         if matches!(outcome, IngestOutcome::Inserted { .. }) {
             inserted += 1;
         }
@@ -526,7 +606,11 @@ fn concurrent_ingest_distinct_docs_all_indexed_no_deadlock() {
 
     // Verify the vault really holds N items (no lost writes under contention).
     let store = Store::open(&db_path).unwrap();
-    assert_eq!(store.item_count().unwrap(), N, "vault must hold {N} items after concurrent ingest");
+    assert_eq!(
+        store.item_count().unwrap(),
+        N,
+        "vault must hold {N} items after concurrent ingest"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -540,7 +624,9 @@ fn concurrent_ingest_distinct_docs_all_indexed_no_deadlock() {
 #[test]
 fn lock_order_fulltext_vectors_vault_no_deadlock() {
     let tmp = TempDir::new().unwrap();
-    let store = Arc::new(Mutex::new(Store::open(&tmp.path().join("lock.db")).unwrap()));
+    let store = Arc::new(Mutex::new(
+        Store::open(&tmp.path().join("lock.db")).unwrap(),
+    ));
     let vectors = Arc::new(Mutex::new(VectorIndex::new(64).unwrap()));
     let fulltext = Arc::new(Mutex::new(FulltextIndex::open_memory().unwrap()));
     let dek = Arc::new(Key32::generate());
@@ -551,7 +637,15 @@ fn lock_order_fulltext_vectors_vault_no_deadlock() {
         let s = store.lock().unwrap();
         for i in 0..2 {
             let id = s
-                .insert_item(&dek, &format!("L{i}"), &format!("# L{i}\n\nbody {i} keyword"), None, "file", None, None)
+                .insert_item(
+                    &dek,
+                    &format!("L{i}"),
+                    &format!("# L{i}\n\nbody {i} keyword"),
+                    None,
+                    "file",
+                    None,
+                    None,
+                )
                 .unwrap();
             ids.push(id);
         }
@@ -586,8 +680,15 @@ fn lock_order_fulltext_vectors_vault_no_deadlock() {
 
     let deadline = Instant::now() + Duration::from_secs(30);
     for h in handles {
-        assert!(Instant::now() < deadline, "lock-order workers hung — possible deadlock");
+        assert!(
+            Instant::now() < deadline,
+            "lock-order workers hung — possible deadlock"
+        );
         h.join().expect("lock-order worker panicked");
     }
-    assert_eq!(*done.lock().unwrap(), 2, "both lock-order workers must finish (no deadlock)");
+    assert_eq!(
+        *done.lock().unwrap(),
+        2,
+        "both lock-order workers must finish (no deadlock)"
+    );
 }

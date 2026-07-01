@@ -20,7 +20,7 @@ pub mod agent_main;
 pub mod evidence;
 
 pub use evidence::{
-    Artifact, Confidence, ConfidenceLevel, CapabilityTag, EvidenceEnvelope, EvidenceItem,
+    Artifact, CapabilityTag, Confidence, ConfidenceLevel, EvidenceEnvelope, EvidenceItem,
     EvidenceKind, InputsSnapshot, Severity, StepKind, StepRecord, Warning, WarningKind,
     ENVELOPE_VERSION,
 };

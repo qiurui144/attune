@@ -59,13 +59,26 @@ struct SceneRedLine {
 
 fn red_line(scene: &str) -> SceneRedLine {
     match scene {
-        "document" => SceneRedLine { min_field_accuracy: 0.92, max_p50_ms: 3000 },
-        "receipt" => SceneRedLine { min_field_accuracy: 0.92, max_p50_ms: 2000 },
-        "table" => SceneRedLine { min_field_accuracy: 0.92, max_p50_ms: 4000 },
-        "card" => SceneRedLine { min_field_accuracy: 0.92, max_p50_ms: 1500 },
-        "id_card_cn" | "bank_card" | "business_license" => {
-            SceneRedLine { min_field_accuracy: 0.95, max_p50_ms: 2000 }
-        }
+        "document" => SceneRedLine {
+            min_field_accuracy: 0.92,
+            max_p50_ms: 3000,
+        },
+        "receipt" => SceneRedLine {
+            min_field_accuracy: 0.92,
+            max_p50_ms: 2000,
+        },
+        "table" => SceneRedLine {
+            min_field_accuracy: 0.92,
+            max_p50_ms: 4000,
+        },
+        "card" => SceneRedLine {
+            min_field_accuracy: 0.92,
+            max_p50_ms: 1500,
+        },
+        "id_card_cn" | "bank_card" | "business_license" => SceneRedLine {
+            min_field_accuracy: 0.95,
+            max_p50_ms: 2000,
+        },
         other => panic!("unknown scene: {other}"),
     }
 }
@@ -85,7 +98,9 @@ fn find_image_companion(yaml_path: &Path) -> Option<PathBuf> {
         .to_str()?
         .strip_suffix(".expected.yaml")?;
     let dir = yaml_path.parent()?;
-    for ext in ["png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "gif", "pdf"] {
+    for ext in [
+        "png", "jpg", "jpeg", "webp", "bmp", "tiff", "tif", "gif", "pdf",
+    ] {
         let candidate = dir.join(format!("{stem}.{ext}"));
         if candidate.exists() {
             return Some(candidate);
@@ -140,7 +155,10 @@ fn run_scene(scene: &str) -> SceneStats {
     let mut stats = SceneStats::default();
 
     if !dir.exists() {
-        eprintln!("[golden-gate {scene}] dir missing, skipping: {}", dir.display());
+        eprintln!(
+            "[golden-gate {scene}] dir missing, skipping: {}",
+            dir.display()
+        );
         return stats;
     }
 
@@ -233,8 +251,7 @@ fn run_scene(scene: &str) -> SceneStats {
         );
 
         if let Some(s) = structured {
-            let value =
-                serde_json::to_value(&s).expect("structured serialize");
+            let value = serde_json::to_value(&s).expect("structured serialize");
             for (k, expected) in &exp.expected_fields {
                 stats.field_total += 1;
                 let actual = value

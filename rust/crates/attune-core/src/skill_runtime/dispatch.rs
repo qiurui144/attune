@@ -94,8 +94,16 @@ pub fn parse_agent_doc(envelope: &Value) -> AgentDocOutput {
     // Sections (the document deliverable shape).
     if let Some(arr) = comp.get("sections").and_then(|v| v.as_array()) {
         for s in arr {
-            let heading = s.get("heading").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let body = s.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let heading = s
+                .get("heading")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let body = s
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             out.sections.push((heading, body));
         }
     }
@@ -108,7 +116,8 @@ pub fn parse_agent_doc(envelope: &Value) -> AgentDocOutput {
                 continue;
             }
             for (i, (heading, _)) in out.sections.iter().enumerate() {
-                if !heading.is_empty() && where_.contains(heading.as_str())
+                if !heading.is_empty()
+                    && where_.contains(heading.as_str())
                     && !out.needs_confirm_idx.contains(&i)
                 {
                     out.needs_confirm_idx.push(i);
@@ -125,8 +134,14 @@ pub fn parse_agent_doc(envelope: &Value) -> AgentDocOutput {
         .to_string();
 
     // Red lines (top-level envelope field).
-    if let Some(arr) = envelope.get("red_lines_violated").and_then(|v| v.as_array()) {
-        out.red_lines = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    if let Some(arr) = envelope
+        .get("red_lines_violated")
+        .and_then(|v| v.as_array())
+    {
+        out.red_lines = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
     }
 
     // Fallback when there were no structured sections: try a whole-document text field first
@@ -136,7 +151,13 @@ pub fn parse_agent_doc(envelope: &Value) -> AgentDocOutput {
     // deliverable (patent OA grounds / tech postmortem) still renders a meaningful document.
     if out.sections.is_empty() {
         const TEXT_KEYS: [&str; 8] = [
-            "draft", "content", "text", "redacted_text", "response_text", "markdown", "report",
+            "draft",
+            "content",
+            "text",
+            "redacted_text",
+            "response_text",
+            "markdown",
+            "report",
             "body",
         ];
         for key in TEXT_KEYS {
@@ -164,7 +185,9 @@ pub fn parse_agent_doc(envelope: &Value) -> AgentDocOutput {
 /// (sections / text body) when present.
 fn derive_sections_from_structured(comp: &Value) -> Vec<(String, String)> {
     const SKIP_KEYS: [&str; 4] = ["schema_version", "cost_used", "doc_type", "docType"];
-    let Some(obj) = comp.as_object() else { return Vec::new() };
+    let Some(obj) = comp.as_object() else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for (key, val) in obj {
         if SKIP_KEYS.contains(&key.as_str()) {
@@ -215,7 +238,10 @@ pub fn agent_doc_to_document(doc: &AgentDocOutput, title: &str) -> Artifact {
     let mut blocks = Vec::new();
 
     if !doc.red_lines.is_empty() {
-        blocks.push(Block::Heading { level: 2, text: format!("{NEEDS_CONFIRM_MARKER} 红线提示") });
+        blocks.push(Block::Heading {
+            level: 2,
+            text: format!("{NEEDS_CONFIRM_MARKER} 红线提示"),
+        });
         blocks.push(Block::List {
             ordered: false,
             items: doc.red_lines.clone(),
@@ -224,26 +250,43 @@ pub fn agent_doc_to_document(doc: &AgentDocOutput, title: &str) -> Artifact {
 
     for (i, (heading, body)) in doc.sections.iter().enumerate() {
         if !heading.trim().is_empty() {
-            blocks.push(Block::Heading { level: 2, text: heading.trim().to_string() });
+            blocks.push(Block::Heading {
+                level: 2,
+                text: heading.trim().to_string(),
+            });
         }
         let mut body = body.trim().to_string();
         if doc.needs_confirm_idx.contains(&i) && !body.is_empty() {
             body.push_str(NEEDS_CONFIRM_MARKER);
         }
         for para in body.split("\n\n").map(str::trim).filter(|p| !p.is_empty()) {
-            blocks.push(Block::Paragraph { text: para.to_string() });
+            blocks.push(Block::Paragraph {
+                text: para.to_string(),
+            });
         }
     }
 
     if doc.sections.is_empty() && !doc.fallback_body.trim().is_empty() {
-        for para in doc.fallback_body.split("\n\n").map(str::trim).filter(|p| !p.is_empty()) {
-            blocks.push(Block::Paragraph { text: para.to_string() });
+        for para in doc
+            .fallback_body
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            blocks.push(Block::Paragraph {
+                text: para.to_string(),
+            });
         }
     }
 
     if !doc.disclaimer.trim().is_empty() {
-        blocks.push(Block::Heading { level: 2, text: "免责声明".to_string() });
-        blocks.push(Block::Paragraph { text: doc.disclaimer.trim().to_string() });
+        blocks.push(Block::Heading {
+            level: 2,
+            text: "免责声明".to_string(),
+        });
+        blocks.push(Block::Paragraph {
+            text: doc.disclaimer.trim().to_string(),
+        });
     }
 
     Artifact::document(Document {
@@ -331,14 +374,19 @@ mod tests {
             disclaimer: "须律师审核。".into(),
             red_lines: vec!["no_hallucinated_citation".into()],
         };
-        let Artifact::Document(d) = agent_doc_to_document(&doc, "起诉状") else { panic!() };
+        let Artifact::Document(d) = agent_doc_to_document(&doc, "起诉状") else {
+            panic!()
+        };
         assert_eq!(d.title.as_deref(), Some("起诉状"));
         // leading red-line warning + heading + para ×2 (one marked) + disclaimer heading + para.
         let has_redline = d.blocks.iter().any(|b| matches!(b, Block::List { items, .. } if items.iter().any(|i| i.contains("no_hallucinated_citation"))));
         assert!(has_redline);
         let marked = d.blocks.iter().any(|b| matches!(b, Block::Paragraph { text } if text.contains("合同条款") && text.contains(NEEDS_CONFIRM_MARKER)));
         assert!(marked, "needs-confirm section body must carry the marker");
-        let has_disclaimer = d.blocks.iter().any(|b| matches!(b, Block::Paragraph { text } if text.contains("须律师审核")));
+        let has_disclaimer = d
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Paragraph { text } if text.contains("须律师审核")));
         assert!(has_disclaimer);
         assert!(d.validate().is_ok());
     }
@@ -349,14 +397,20 @@ mod tests {
             fallback_body: "无分段正文。".into(),
             ..Default::default()
         };
-        let Artifact::Document(d) = agent_doc_to_document(&doc, "文书") else { panic!() };
-        assert!(d.blocks.iter().any(|b| matches!(b, Block::Paragraph { text } if text == "无分段正文。")));
+        let Artifact::Document(d) = agent_doc_to_document(&doc, "文书") else {
+            panic!()
+        };
+        assert!(d
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Paragraph { text } if text == "无分段正文。")));
     }
 
     #[test]
     fn medical_redacted_text_used_as_body() {
         // medical deidentify computation = { spans, redacted_text } → redacted_text is the body.
-        let env = json!({ "computation": { "spans": [], "redacted_text": "患者[name]因[date]就诊……" } });
+        let env =
+            json!({ "computation": { "spans": [], "redacted_text": "患者[name]因[date]就诊……" } });
         let doc = parse_agent_doc(&env);
         assert!(doc.sections.is_empty());
         assert_eq!(doc.fallback_body, "患者[name]因[date]就诊……");
@@ -402,7 +456,11 @@ mod tests {
         assert!(headings.contains(&"summary"));
         assert!(headings.contains(&"root_cause_chain"));
         assert!(headings.contains(&"action_items"));
-        let chain = doc.sections.iter().find(|(h, _)| h == "root_cause_chain").unwrap();
+        let chain = doc
+            .sections
+            .iter()
+            .find(|(h, _)| h == "root_cause_chain")
+            .unwrap();
         assert!(chain.1.contains("连接池耗尽"));
     }
 
@@ -412,7 +470,9 @@ mod tests {
         assert!(doc.sections.is_empty());
         assert!(doc.fallback_body.is_empty());
         // an empty doc still renders to a valid (header-only) document.
-        let Artifact::Document(d) = agent_doc_to_document(&doc, "空") else { panic!() };
+        let Artifact::Document(d) = agent_doc_to_document(&doc, "空") else {
+            panic!()
+        };
         assert!(d.validate().is_ok());
     }
 }

@@ -1,7 +1,7 @@
 //! Email 采集源测试 —— 解析层离线测试（不连真 IMAP）+ 连接器测试（mock fetcher）。
 
 use attune_core::ingest::email::{
-    EmailConfig, EmailConnector, FetchedMail, ImapFetcher, parse_email_bytes,
+    parse_email_bytes, EmailConfig, EmailConnector, FetchedMail, ImapFetcher,
 };
 use attune_core::ingest::{DocumentSink, RawDocument, SourceConnector, SourceKind};
 use std::collections::HashMap;
@@ -39,7 +39,10 @@ fn parse_email_with_attachment_extracts_pdf_bytes() {
     assert_eq!(msg.attachments.len(), 1, "应提取 1 个附件");
     let att = &msg.attachments[0];
     assert_eq!(att.filename, "report.pdf");
-    assert!(att.content.starts_with(b"%PDF"), "附件应是解码后的 PDF 字节");
+    assert!(
+        att.content.starts_with(b"%PDF"),
+        "附件应是解码后的 PDF 字节"
+    );
 }
 
 #[test]
@@ -54,7 +57,11 @@ struct MockImapFetcher {
 }
 
 impl ImapFetcher for MockImapFetcher {
-    fn fetch_since(&self, folder: &str, since_uid: u32) -> attune_core::error::Result<Vec<FetchedMail>> {
+    fn fetch_since(
+        &self,
+        folder: &str,
+        since_uid: u32,
+    ) -> attune_core::error::Result<Vec<FetchedMail>> {
         let all = self.by_folder.get(folder).cloned().unwrap_or_default();
         // 模拟 IMAP UID SEARCH since_uid:* 语义 —— 只返回 UID > since_uid。
         Ok(all.into_iter().filter(|m| m.uid > since_uid).collect())
@@ -76,7 +83,10 @@ fn connector_emits_one_rawdocument_per_email() {
     let mut by_folder = HashMap::new();
     by_folder.insert(
         "INBOX".to_string(),
-        vec![FetchedMail { uid: 1, raw: PLAIN.to_vec() }],
+        vec![FetchedMail {
+            uid: 1,
+            raw: PLAIN.to_vec(),
+        }],
     );
     let connector = EmailConnector::with_fetcher(config(), Box::new(MockImapFetcher { by_folder }));
 
@@ -93,9 +103,19 @@ fn connector_emits_one_rawdocument_per_email() {
         doc.source_ref, "<plain-001@example.com>.txt",
         "source_ref = Message-ID + .txt（.txt 后缀驱动 parser 走纯文本分支）"
     );
-    assert_eq!(doc.modified_marker.as_deref(), Some("INBOX:1"), "增量标记 = folder:uid");
-    assert_eq!(doc.metadata.get("from").map(String::as_str), Some("alice@example.com"));
-    assert_eq!(doc.metadata.get("folder").map(String::as_str), Some("INBOX"));
+    assert_eq!(
+        doc.modified_marker.as_deref(),
+        Some("INBOX:1"),
+        "增量标记 = folder:uid"
+    );
+    assert_eq!(
+        doc.metadata.get("from").map(String::as_str),
+        Some("alice@example.com")
+    );
+    assert_eq!(
+        doc.metadata.get("folder").map(String::as_str),
+        Some("INBOX")
+    );
 }
 
 #[test]
@@ -103,7 +123,10 @@ fn connector_emits_extra_rawdocument_per_attachment() {
     let mut by_folder = HashMap::new();
     by_folder.insert(
         "INBOX".to_string(),
-        vec![FetchedMail { uid: 7, raw: WITH_ATTACHMENT.to_vec() }],
+        vec![FetchedMail {
+            uid: 7,
+            raw: WITH_ATTACHMENT.to_vec(),
+        }],
     );
     let connector = EmailConnector::with_fetcher(config(), Box::new(MockImapFetcher { by_folder }));
 
@@ -120,7 +143,10 @@ fn connector_emits_extra_rawdocument_per_attachment() {
         .expect("attachment doc exists");
     // source_ref = "{msg_id}#att{idx}/{filename}" —— #att 后缀防与正文/其它附件碰撞；
     // 末段是文件名，让 RawDocument::parse_filename 取到扩展名供 parser 路由。
-    assert_eq!(attachment_doc.source_ref, "<att-003@example.com>#att0/report.pdf");
+    assert_eq!(
+        attachment_doc.source_ref,
+        "<att-003@example.com>#att0/report.pdf"
+    );
     assert!(attachment_doc.content.starts_with(b"%PDF"));
     assert_eq!(attachment_doc.parse_filename(), "report.pdf");
 }
@@ -131,8 +157,14 @@ fn connector_respects_since_uid_increment() {
     by_folder.insert(
         "INBOX".to_string(),
         vec![
-            FetchedMail { uid: 1, raw: PLAIN.to_vec() },
-            FetchedMail { uid: 2, raw: HTML_ONLY.to_vec() },
+            FetchedMail {
+                uid: 1,
+                raw: PLAIN.to_vec(),
+            },
+            FetchedMail {
+                uid: 2,
+                raw: HTML_ONLY.to_vec(),
+            },
         ],
     );
     let mut cfg = config();
@@ -161,7 +193,10 @@ fn connector_body_rawdocument_ingests_successfully() {
     let mut by_folder = HashMap::new();
     by_folder.insert(
         "INBOX".to_string(),
-        vec![FetchedMail { uid: 1, raw: PLAIN.to_vec() }],
+        vec![FetchedMail {
+            uid: 1,
+            raw: PLAIN.to_vec(),
+        }],
     );
     let connector = EmailConnector::with_fetcher(config(), Box::new(MockImapFetcher { by_folder }));
     let mut docs: Vec<RawDocument> = Vec::new();

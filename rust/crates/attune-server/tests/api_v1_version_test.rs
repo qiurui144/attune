@@ -100,11 +100,10 @@ fn handler_second_call_is_fast_when_gated() {
     rt.block_on(async {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = fresh_state(&tmp);
-        let _ = attune_server::routes::version::get_version(axum::extract::State(state.clone()))
-            .await;
-        let t = std::time::Instant::now();
         let _ =
-            attune_server::routes::version::get_version(axum::extract::State(state)).await;
+            attune_server::routes::version::get_version(axum::extract::State(state.clone())).await;
+        let t = std::time::Instant::now();
+        let _ = attune_server::routes::version::get_version(axum::extract::State(state)).await;
         // gated/no-network 应 < 100ms(给 CI 高负载 runner 留余量)
         assert!(
             t.elapsed() < std::time::Duration::from_millis(100),

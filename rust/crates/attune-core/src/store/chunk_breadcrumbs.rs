@@ -191,7 +191,9 @@ mod tests {
         let dek = Key32::generate();
         let r = store.get_chunk_breadcrumb(&dek, "non-existent", 0).unwrap();
         assert!(r.is_none());
-        let r2 = store.get_first_chunk_breadcrumb(&dek, "non-existent").unwrap();
+        let r2 = store
+            .get_first_chunk_breadcrumb(&dek, "non-existent")
+            .unwrap();
         assert!(r2.is_none());
     }
 
@@ -201,10 +203,14 @@ mod tests {
         let dek = Key32::generate();
         let v1 = "# A\n\n旧";
         let item_id = seed_item(&store, &dek, v1);
-        store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, v1).unwrap();
+        store
+            .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, v1)
+            .unwrap();
         let count_after_v1 = store.chunk_breadcrumbs_count().unwrap();
         let v2 = "# A\n\n新内容";
-        let n = store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, v2).unwrap();
+        let n = store
+            .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, v2)
+            .unwrap();
         assert_eq!(n, count_after_v1);
     }
 
@@ -214,8 +220,13 @@ mod tests {
         let dek = Key32::generate();
         let content = "# 文档根\n\n## 第一章\n\nA\n\n## 第二章\n\nB";
         let item_id = seed_item(&store, &dek, content);
-        store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content).unwrap();
-        let first = store.get_first_chunk_breadcrumb(&dek, &item_id).unwrap().unwrap();
+        store
+            .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content)
+            .unwrap();
+        let first = store
+            .get_first_chunk_breadcrumb(&dek, &item_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(first.1, 0);
     }
 
@@ -224,7 +235,9 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
         let item_id = seed_item(&store, &dek, "placeholder");
-        let n = store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, "").unwrap();
+        let n = store
+            .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, "")
+            .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -234,8 +247,13 @@ mod tests {
         let dek = Key32::generate();
         let content = "# 中文标题 🎉\n\n## 子节 emoji 😀\n\n内容";
         let item_id = seed_item(&store, &dek, content);
-        store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content).unwrap();
-        let r = store.get_chunk_breadcrumb(&dek, &item_id, 0).unwrap().unwrap();
+        store
+            .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content)
+            .unwrap();
+        let r = store
+            .get_chunk_breadcrumb(&dek, &item_id, 0)
+            .unwrap()
+            .unwrap();
         assert!(r.0.iter().any(|p| p.contains("中文") || p.contains("🎉")));
     }
 
@@ -245,10 +263,22 @@ mod tests {
         let dek = Key32::generate();
         let content = "# T\n\n## A\n\n正文";
         let item_id = seed_item(&store, &dek, content);
-        store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content).unwrap();
+        store
+            .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content)
+            .unwrap();
         assert!(store.chunk_breadcrumbs_count().unwrap() > 0);
-        store.conn.execute("DELETE FROM items WHERE id = ?1", rusqlite::params![item_id]).unwrap();
-        assert_eq!(store.chunk_breadcrumbs_count().unwrap(), 0, "CASCADE 应清空 breadcrumbs");
+        store
+            .conn
+            .execute(
+                "DELETE FROM items WHERE id = ?1",
+                rusqlite::params![item_id],
+            )
+            .unwrap();
+        assert_eq!(
+            store.chunk_breadcrumbs_count().unwrap(),
+            0,
+            "CASCADE 应清空 breadcrumbs"
+        );
     }
 
     #[test]
@@ -257,13 +287,18 @@ mod tests {
         let dek = Key32::generate();
         let content = "# 文档\n\n## 章节\n\n正文";
         let item_id = seed_item(&store, &dek, content);
-        store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content).unwrap();
+        store
+            .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content)
+            .unwrap();
         let before = store.chunk_breadcrumbs_count().unwrap();
         assert!(before > 0);
         let deleted = store.delete_item(&item_id).unwrap();
         assert!(deleted, "软删除应成功");
         assert_eq!(store.chunk_breadcrumbs_count().unwrap(), 0);
-        assert!(store.get_first_chunk_breadcrumb(&dek, &item_id).unwrap().is_none());
+        assert!(store
+            .get_first_chunk_breadcrumb(&dek, &item_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -274,9 +309,8 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         // 1. 跑老 schema（仅 chunk_breadcrumbs 这张表，模拟 W3 batch A 末）
-        conn.execute(
-            "CREATE TABLE items (id TEXT PRIMARY KEY)", []
-        ).unwrap();
+        conn.execute("CREATE TABLE items (id TEXT PRIMARY KEY)", [])
+            .unwrap();
         conn.execute(
             "CREATE TABLE chunk_breadcrumbs (\
                 item_id TEXT NOT NULL,\
@@ -287,11 +321,11 @@ mod tests {
                 PRIMARY KEY (item_id, chunk_idx)\
              )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         // 写入老明文行
-        conn.execute(
-            "INSERT INTO items (id) VALUES ('old-item')", []
-        ).unwrap();
+        conn.execute("INSERT INTO items (id) VALUES ('old-item')", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO chunk_breadcrumbs (item_id, chunk_idx, breadcrumb_json, offset_start, offset_end) \
              VALUES ('old-item', 0, '[\"老明文\"]', 0, 100)",
@@ -313,7 +347,9 @@ mod tests {
         assert_eq!(has_old, 0, "老明文列必须被 DROP");
         assert_eq!(has_new, 1, "新加密列必须存在");
         // 老数据已丢（acceptable 因为下次 indexer 重建）
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunk_breadcrumbs", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunk_breadcrumbs", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 0);
     }
 
@@ -323,7 +359,11 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let count_before = store.chunk_breadcrumbs_count().unwrap();
         Store::migrate_breadcrumbs_encrypt(&store.conn).unwrap();
-        assert_eq!(store.chunk_breadcrumbs_count().unwrap(), count_before, "新 schema 下 migrate 应 no-op");
+        assert_eq!(
+            store.chunk_breadcrumbs_count().unwrap(),
+            count_before,
+            "新 schema 下 migrate 应 no-op"
+        );
     }
 
     #[test]
@@ -333,7 +373,9 @@ mod tests {
         let dek = Key32::generate();
         let content = "# 项目分析\n\n## 重点观察\n\n详情";
         let item_id = seed_item(&store, &dek, content);
-        store.upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content).unwrap();
+        store
+            .upsert_chunk_breadcrumbs_from_content(&dek, &item_id, content)
+            .unwrap();
         let raw: Vec<u8> = store
             .conn
             .query_row(
@@ -343,7 +385,13 @@ mod tests {
             )
             .unwrap();
         let raw_str = String::from_utf8_lossy(&raw);
-        assert!(!raw_str.contains("项目分析"), "breadcrumb 必须加密落盘 (P0-1)");
-        assert!(!raw_str.contains("重点观察"), "breadcrumb 必须加密落盘 (P0-1)");
+        assert!(
+            !raw_str.contains("项目分析"),
+            "breadcrumb 必须加密落盘 (P0-1)"
+        );
+        assert!(
+            !raw_str.contains("重点观察"),
+            "breadcrumb 必须加密落盘 (P0-1)"
+        );
     }
 }

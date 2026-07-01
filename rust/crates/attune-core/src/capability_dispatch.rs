@@ -33,9 +33,13 @@ pub struct CapabilityResult {
 
 impl CapabilityResult {
     /// exit code = 0
-    pub fn is_success(&self) -> bool { self.exit_code == 0 && !self.timed_out }
+    pub fn is_success(&self) -> bool {
+        self.exit_code == 0 && !self.timed_out
+    }
     /// exit code = 2 (业务红线)
-    pub fn is_red_line(&self) -> bool { self.exit_code == 2 }
+    pub fn is_red_line(&self) -> bool {
+        self.exit_code == 2
+    }
 }
 
 /// 调用规格
@@ -96,7 +100,10 @@ pub fn dispatch(invocation: &CapabilityInvocation) -> Result<CapabilityResult> {
     if !invocation.binary.exists() {
         return Err(VaultError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("capability binary not found: {}", invocation.binary.display()),
+            format!(
+                "capability binary not found: {}",
+                invocation.binary.display()
+            ),
         )));
     }
 
@@ -372,10 +379,19 @@ mod tests {
 
     #[test]
     fn parse_runtime_known_values() {
-        assert_eq!(parse_runtime("rust_binary").unwrap(), CapabilityRuntime::RustBinary);
-        assert_eq!(parse_runtime("subprocess").unwrap(), CapabilityRuntime::RustBinary);
+        assert_eq!(
+            parse_runtime("rust_binary").unwrap(),
+            CapabilityRuntime::RustBinary
+        );
+        assert_eq!(
+            parse_runtime("subprocess").unwrap(),
+            CapabilityRuntime::RustBinary
+        );
         assert_eq!(parse_runtime("wasm").unwrap(), CapabilityRuntime::Wasm);
-        assert_eq!(parse_runtime("data_only").unwrap(), CapabilityRuntime::DataOnly);
+        assert_eq!(
+            parse_runtime("data_only").unwrap(),
+            CapabilityRuntime::DataOnly
+        );
     }
 
     #[test]

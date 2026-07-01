@@ -34,7 +34,9 @@ fn device_diff_table() -> Table {
 #[test]
 fn csv_roundtrip_exact() {
     let t = device_diff_table();
-    let bytes = Artifact::table(t.clone()).render(ExportFormat::Csv).unwrap();
+    let bytes = Artifact::table(t.clone())
+        .render(ExportFormat::Csv)
+        .unwrap();
 
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(false)
@@ -77,7 +79,9 @@ fn xlsx_roundtrip_exact() {
     use calamine::{Data, Reader, Xlsx};
 
     let t = device_diff_table();
-    let bytes = Artifact::table(t.clone()).render(ExportFormat::Xlsx).unwrap();
+    let bytes = Artifact::table(t.clone())
+        .render(ExportFormat::Xlsx)
+        .unwrap();
 
     let mut wb: Xlsx<_> = calamine::open_workbook_from_rs(Cursor::new(bytes)).unwrap();
     let sheet_names = wb.sheet_names().to_vec();
@@ -147,7 +151,9 @@ fn docx_document_xml(bytes: &[u8]) -> String {
 #[test]
 fn docx_table_roundtrip_contains_all_cells() {
     let t = device_diff_table();
-    let bytes = Artifact::table(t.clone()).render(ExportFormat::Docx).unwrap();
+    let bytes = Artifact::table(t.clone())
+        .render(ExportFormat::Docx)
+        .unwrap();
     let xml = docx_document_xml(&bytes);
 
     // title + every header + every cell value must appear verbatim (incl CJK)
@@ -242,7 +248,9 @@ fn pdf_chinese_roundtrip_not_garbled() {
 #[test]
 fn pdf_table_roundtrip_values_present() {
     let t = device_diff_table();
-    let bytes = Artifact::table(t.clone()).render(ExportFormat::Pdf).unwrap();
+    let bytes = Artifact::table(t.clone())
+        .render(ExportFormat::Pdf)
+        .unwrap();
     let text = pdf_extract::extract_text_from_mem(&bytes).unwrap();
     let normalized: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     for h in &t.headers {
@@ -262,9 +270,13 @@ fn pdf_table_roundtrip_values_present() {
 #[test]
 fn md_table_roundtrip_structure() {
     let t = device_diff_table();
-    let s = String::from_utf8(Artifact::table(t.clone()).render(ExportFormat::Md).unwrap()).unwrap();
+    let s =
+        String::from_utf8(Artifact::table(t.clone()).render(ExportFormat::Md).unwrap()).unwrap();
     // GFM header separator row present + alignment markers honoured (right cols)
-    assert!(s.contains("| 参数 | 设备A | 设备B |"), "md header row:\n{s}");
+    assert!(
+        s.contains("| 参数 | 设备A | 设备B |"),
+        "md header row:\n{s}"
+    );
     assert!(s.contains("---:"), "md right-align marker:\n{s}");
     for row in &t.rows {
         let line = format!("| {} |", row.join(" | "));

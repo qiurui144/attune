@@ -103,7 +103,8 @@ impl QueueWorker {
 
         // 获取一批 pending 任务
         let tasks = {
-            let s = store.lock()
+            let s = store
+                .lock()
                 .map_err(|_| VaultError::Crypto("store lock poisoned".into()))?;
             s.dequeue_embeddings(BATCH_SIZE)?
         };
@@ -119,15 +120,15 @@ impl QueueWorker {
         let mut total = 0;
 
         if !embed_tasks.is_empty() {
-            total +=
-                Self::process_embed_batch(store, embedding, vectors, fulltext, embed_tasks)?;
+            total += Self::process_embed_batch(store, embedding, vectors, fulltext, embed_tasks)?;
         }
 
         if !other_tasks.is_empty() {
             // classify 等任务在 core 层无法处理（需要 Classifier / Taxonomy，属于 server 层），
             // 将其重新标记为 pending，留在队列中等待上层消费者处理。
             // 注意：归还任务不计入 total，避免调用方误认为已处理而进入忙等。
-            let s = store.lock()
+            let s = store
+                .lock()
                 .map_err(|_| VaultError::Crypto("store lock poisoned".into()))?;
             for task in &other_tasks {
                 s.mark_task_pending(task.id)?;
@@ -148,11 +149,14 @@ impl QueueWorker {
         let count = tasks.len();
 
         // 锁顺序：vectors → fulltext → store（与 server::start_queue_worker 一致）
-        let mut vecs = vectors.lock()
+        let mut vecs = vectors
+            .lock()
             .map_err(|_| VaultError::Crypto("vectors lock poisoned".into()))?;
-        let ft = fulltext.lock()
+        let ft = fulltext
+            .lock()
             .map_err(|_| VaultError::Crypto("fulltext lock poisoned".into()))?;
-        let s = store.lock()
+        let s = store
+            .lock()
             .map_err(|_| VaultError::Crypto("store lock poisoned".into()))?;
 
         let result = embed_and_index_batch(&s, embedding.as_ref(), &mut vecs, &ft, &tasks);
@@ -234,7 +238,9 @@ pub fn embed_and_index_batch(
         // 重切 / 被删）→ 跳过写向量，防 stale 向量（大文档实测必现）。
         // task 行已不在表里，不 push done_id（mark_done 也无行可改）。
         // 行还在 OR 查询失败（保守继续）
-        if let Ok(false) = store.embed_task_exists(task.id) { continue }
+        if let Ok(false) = store.embed_task_exists(task.id) {
+            continue;
+        }
         let alive = *alive_cache
             .entry(task.item_id.clone())
             // 查询失败时保守视为存活（继续写，宁可暂时 orphan 也不因瞬时 DB
@@ -297,10 +303,14 @@ mod tests {
             .insert_item(&dek, "test", "content", None, "note", None, None)
             .unwrap();
 
-        store.enqueue_embedding(&item_id, 0, "hello world", 2, 2, 0).unwrap();
+        store
+            .enqueue_embedding(&item_id, 0, "hello world", 2, 2, 0)
+            .unwrap();
         assert_eq!(store.pending_embedding_count().unwrap(), 1);
 
-        store.enqueue_embedding(&item_id, 1, "second chunk", 2, 1, 0).unwrap();
+        store
+            .enqueue_embedding(&item_id, 1, "second chunk", 2, 1, 0)
+            .unwrap();
         assert_eq!(store.pending_embedding_count().unwrap(), 2);
     }
 
@@ -312,7 +322,9 @@ mod tests {
             .insert_item(&dek, "test", "content", None, "note", None, None)
             .unwrap();
 
-        store.enqueue_embedding(&item_id, 0, "chunk text", 2, 2, 0).unwrap();
+        store
+            .enqueue_embedding(&item_id, 0, "chunk text", 2, 2, 0)
+            .unwrap();
         assert_eq!(store.pending_embedding_count().unwrap(), 1);
 
         let tasks = store.dequeue_embeddings(10).unwrap();
@@ -332,8 +344,12 @@ mod tests {
             .insert_item(&dek, "test", "content", None, "note", None, None)
             .unwrap();
 
-        store.enqueue_embedding(&item_id, 0, "chunk a", 2, 2, 0).unwrap();
-        store.enqueue_embedding(&item_id, 1, "chunk b", 2, 2, 0).unwrap();
+        store
+            .enqueue_embedding(&item_id, 0, "chunk a", 2, 2, 0)
+            .unwrap();
+        store
+            .enqueue_embedding(&item_id, 1, "chunk b", 2, 2, 0)
+            .unwrap();
 
         let tasks = store.dequeue_embeddings(10).unwrap();
         assert_eq!(tasks.len(), 2);

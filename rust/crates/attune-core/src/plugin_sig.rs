@@ -110,8 +110,7 @@ fn verify_against_keys(plugin_dir: &Path, official_keys: &[&str]) -> Result<Veri
         });
     }
 
-    let sig_b64 = std::fs::read_to_string(&sig_path)
-        .map_err(VaultError::Io)?;
+    let sig_b64 = std::fs::read_to_string(&sig_path).map_err(VaultError::Io)?;
     let sig_b64 = sig_b64.trim();
 
     let sig_bytes = base64::engine::general_purpose::STANDARD
@@ -131,9 +130,15 @@ fn verify_against_keys(plugin_dir: &Path, official_keys: &[&str]) -> Result<Veri
 
     // 依次尝试官方公钥
     for (idx, pub_hex) in official_keys.iter().enumerate() {
-        let Ok(pub_bytes) = hex::decode(pub_hex) else { continue; };
-        let Ok(pub_arr): std::result::Result<[u8; 32], _> = pub_bytes.as_slice().try_into() else { continue; };
-        let Ok(vk) = VerifyingKey::from_bytes(&pub_arr) else { continue; };
+        let Ok(pub_bytes) = hex::decode(pub_hex) else {
+            continue;
+        };
+        let Ok(pub_arr): std::result::Result<[u8; 32], _> = pub_bytes.as_slice().try_into() else {
+            continue;
+        };
+        let Ok(vk) = VerifyingKey::from_bytes(&pub_arr) else {
+            continue;
+        };
         if vk.verify(&digest, &signature).is_ok() {
             return Ok(VerifyResult {
                 trust: Trust::Official,
@@ -164,7 +169,8 @@ fn verify_strict_against_keys(plugin_dir: &Path, official_keys: &[&str]) -> Resu
     } else {
         Err(VaultError::InvalidInput(format!(
             "strict verify failed for {}: {}",
-            plugin_dir.display(), r.reason
+            plugin_dir.display(),
+            r.reason
         )))
     }
 }
@@ -173,14 +179,12 @@ fn verify_strict_against_keys(plugin_dir: &Path, official_keys: &[&str]) -> Resu
 /// 未来加其他文件（如 few-shot examples.yaml）需在此扩展并升版本号。
 pub fn compute_plugin_digest(plugin_dir: &Path) -> Result<Vec<u8>> {
     let mut hasher = Sha256::new();
-    let yaml = std::fs::read(plugin_dir.join("plugin.yaml"))
-        .map_err(VaultError::Io)?;
+    let yaml = std::fs::read(plugin_dir.join("plugin.yaml")).map_err(VaultError::Io)?;
     hasher.update(&yaml);
-    hasher.update(b"\0");  // 分隔符
+    hasher.update(b"\0"); // 分隔符
     let prompt_path = plugin_dir.join("prompt.md");
     if prompt_path.exists() {
-        let prompt = std::fs::read(&prompt_path)
-            .map_err(VaultError::Io)?;
+        let prompt = std::fs::read(&prompt_path).map_err(VaultError::Io)?;
         hasher.update(&prompt);
     }
     Ok(hasher.finalize().to_vec())
@@ -311,7 +315,7 @@ pub fn gate(outcome: SigOutcome, mode: TrustMode) -> TrustDecision {
 /// 使用 OsRng (crypto-secure 系统熵源). 不用 thread_rng — Ed25519 私钥
 /// 一旦泄露或预测就毁掉整个签名信任链, 必须密码学保证级 RNG.
 pub fn generate_signing_key() -> [u8; 32] {
-    use aes_gcm::aead::{OsRng, rand_core::RngCore};
+    use aes_gcm::aead::{rand_core::RngCore, OsRng};
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     seed
@@ -540,7 +544,11 @@ mod tests {
         let official_keys: &[&str] = &[pk_hex.as_str()];
 
         let r = verify_against_keys(dir.path(), official_keys).expect("verify");
-        assert_eq!(r.trust, Trust::Official, "matching official key must yield Official");
+        assert_eq!(
+            r.trust,
+            Trust::Official,
+            "matching official key must yield Official"
+        );
         assert!(r.reason.contains("official key #0"));
 
         // verify_strict must accept an Official plugin.
@@ -562,7 +570,11 @@ mod tests {
 
         let r = verify_against_keys(dir.path(), official_keys).expect("verify");
         assert_eq!(r.trust, Trust::Official);
-        assert!(r.reason.contains("official key #1"), "should report the matching index: {}", r.reason);
+        assert!(
+            r.reason.contains("official key #1"),
+            "should report the matching index: {}",
+            r.reason
+        );
     }
 
     /// Tampering with prompt.md after signing must break the Official trust:
@@ -578,7 +590,9 @@ mod tests {
 
         // Sanity: signed → Official before tampering.
         assert_eq!(
-            verify_against_keys(dir.path(), official_keys).unwrap().trust,
+            verify_against_keys(dir.path(), official_keys)
+                .unwrap()
+                .trust,
             Trust::Official
         );
 
@@ -586,12 +600,19 @@ mod tests {
         std::fs::write(dir.path().join("prompt.md"), "# MALICIOUS injected prompt").unwrap();
 
         let r = verify_against_keys(dir.path(), official_keys).expect("verify");
-        assert_eq!(r.trust, Trust::Unsigned, "tampered prompt.md must NOT verify as Official");
+        assert_eq!(
+            r.trust,
+            Trust::Unsigned,
+            "tampered prompt.md must NOT verify as Official"
+        );
         assert!(r.reason.contains("no matching official"));
 
         // And strict mode must hard-reject it.
         let err = verify_strict_against_keys(dir.path(), official_keys);
-        assert!(err.is_err(), "strict verify must reject a tampered (now-Unsigned) plugin");
+        assert!(
+            err.is_err(),
+            "strict verify must reject a tampered (now-Unsigned) plugin"
+        );
     }
 
     /// Tampering with plugin.yaml after signing is likewise rejected on the
@@ -624,7 +645,11 @@ mod tests {
         let official_keys: &[&str] = &[official_pk.as_str()];
 
         let r = verify_against_keys(dir.path(), official_keys).expect("verify");
-        assert_eq!(r.trust, Trust::Unsigned, "third-party signature must not be Official");
+        assert_eq!(
+            r.trust,
+            Trust::Unsigned,
+            "third-party signature must not be Official"
+        );
         assert!(verify_strict_against_keys(dir.path(), official_keys).is_err());
     }
 
@@ -661,8 +686,14 @@ mod tests {
     #[test]
     fn gate_unsigned_three_modes() {
         // 无签名: off Allow / warn AllowWarn / strict Reject(plugin-unsigned-strict)
-        assert_eq!(gate(SigOutcome::Unsigned, TrustMode::Off), TrustDecision::AllowWarn("plugin-unsigned"));
-        assert_eq!(gate(SigOutcome::Unsigned, TrustMode::Warn), TrustDecision::AllowWarn("plugin-unsigned"));
+        assert_eq!(
+            gate(SigOutcome::Unsigned, TrustMode::Off),
+            TrustDecision::AllowWarn("plugin-unsigned")
+        );
+        assert_eq!(
+            gate(SigOutcome::Unsigned, TrustMode::Warn),
+            TrustDecision::AllowWarn("plugin-unsigned")
+        );
         assert_eq!(
             gate(SigOutcome::Unsigned, TrustMode::Strict),
             TrustDecision::Reject("plugin-unsigned-strict")
@@ -672,13 +703,19 @@ mod tests {
     #[test]
     fn gate_invalid_three_modes() {
         // 篡改/无效: off Allow(标注) / warn **Reject** / strict Reject
-        assert!(matches!(gate(SigOutcome::Invalid, TrustMode::Off), TrustDecision::AllowWarn(_)));
+        assert!(matches!(
+            gate(SigOutcome::Invalid, TrustMode::Off),
+            TrustDecision::AllowWarn(_)
+        ));
         assert_eq!(
             gate(SigOutcome::Invalid, TrustMode::Warn),
             TrustDecision::Reject("plugin-sig-invalid"),
             "tampered ≠ unsigned: warn must REJECT a sig-invalid plugin"
         );
-        assert_eq!(gate(SigOutcome::Invalid, TrustMode::Strict), TrustDecision::Reject("plugin-sig-invalid"));
+        assert_eq!(
+            gate(SigOutcome::Invalid, TrustMode::Strict),
+            TrustDecision::Reject("plugin-sig-invalid")
+        );
     }
 
     #[test]
@@ -705,8 +742,15 @@ mod tests {
         std::fs::write(dir.path().join("plugin.yaml"), "id: tampered\n").unwrap();
         let official: &[&str] = &[pk.as_str()];
         let outcome = verify_with_whitelist(dir.path(), official, &[]).unwrap();
-        assert_eq!(outcome, SigOutcome::Invalid, "tampered plugin must be Invalid not Unsigned");
-        assert_eq!(gate(outcome, TrustMode::Warn), TrustDecision::Reject("plugin-sig-invalid"));
+        assert_eq!(
+            outcome,
+            SigOutcome::Invalid,
+            "tampered plugin must be Invalid not Unsigned"
+        );
+        assert_eq!(
+            gate(outcome, TrustMode::Warn),
+            TrustDecision::Reject("plugin-sig-invalid")
+        );
     }
 
     #[test]
@@ -732,7 +776,11 @@ mod tests {
         // Even with the signer on the whitelist, the broken sig can't verify.
         let official: &[&str] = &[];
         let outcome = verify_with_whitelist(dir.path(), official, &[pk]).unwrap();
-        assert_eq!(outcome, SigOutcome::Invalid, "broken sig must not be promoted via whitelist");
+        assert_eq!(
+            outcome,
+            SigOutcome::Invalid,
+            "broken sig must not be promoted via whitelist"
+        );
         // And an official-key list of a DIFFERENT key never lifts an invalid sig.
         let other = derive_verifying_key_hex(&generate_signing_key());
         let official2: &[&str] = &[other.as_str()];
@@ -749,7 +797,8 @@ mod tests {
         let pk = sign_with(dir.path(), &signer);
         // signer key is BOTH official and on whitelist → resolves to Official (priority).
         let official: &[&str] = &[pk.as_str()];
-        let outcome = verify_with_whitelist(dir.path(), official, std::slice::from_ref(&pk)).unwrap();
+        let outcome =
+            verify_with_whitelist(dir.path(), official, std::slice::from_ref(&pk)).unwrap();
         assert_eq!(outcome, SigOutcome::Official);
     }
 
@@ -763,7 +812,10 @@ mod tests {
     #[test]
     fn trust_mode_serde_lowercase() {
         assert_eq!(serde_json::to_string(&TrustMode::Warn).unwrap(), "\"warn\"");
-        assert_eq!(serde_json::to_string(&TrustMode::Strict).unwrap(), "\"strict\"");
+        assert_eq!(
+            serde_json::to_string(&TrustMode::Strict).unwrap(),
+            "\"strict\""
+        );
         assert_eq!(serde_json::to_string(&TrustMode::Off).unwrap(), "\"off\"");
         let m: TrustMode = serde_json::from_str("\"strict\"").unwrap();
         assert_eq!(m, TrustMode::Strict);
@@ -786,7 +838,9 @@ mod tests {
         // anchor private key signs → Official
         let official_keys: &[&str] = &[signer_pk.as_str()];
         assert_eq!(
-            verify_against_keys(dir.path(), official_keys).unwrap().trust,
+            verify_against_keys(dir.path(), official_keys)
+                .unwrap()
+                .trust,
             Trust::Official
         );
 
@@ -800,6 +854,9 @@ mod tests {
         );
 
         // And verify_loose now routes through the (non-empty) anchor SSOT.
-        assert_eq!(OFFICIAL_PUBLIC_KEYS, crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS);
+        assert_eq!(
+            OFFICIAL_PUBLIC_KEYS,
+            crate::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS
+        );
     }
 }

@@ -77,7 +77,13 @@ mod tests {
     #[test]
     fn all_white_box_is_unchecked() {
         let r = CheckboxRecognizer
-            .recognize(&solid(40, 40, 255), &RegionCtx { ocr_lines: vec![], page: 0 })
+            .recognize(
+                &solid(40, 40, 255),
+                &RegionCtx {
+                    ocr_lines: vec![],
+                    page: 0,
+                },
+            )
             .unwrap();
         assert!(matches!(r, RegionResult::CheckboxV1 { checked: false }));
     }
@@ -85,7 +91,13 @@ mod tests {
     #[test]
     fn all_black_box_is_checked() {
         let r = CheckboxRecognizer
-            .recognize(&solid(40, 40, 0), &RegionCtx { ocr_lines: vec![], page: 0 })
+            .recognize(
+                &solid(40, 40, 0),
+                &RegionCtx {
+                    ocr_lines: vec![],
+                    page: 0,
+                },
+            )
             .unwrap();
         assert!(matches!(r, RegionResult::CheckboxV1 { checked: true }));
     }
@@ -93,7 +105,13 @@ mod tests {
     #[test]
     fn zero_size_crop_is_unchecked_not_panic() {
         let r = CheckboxRecognizer
-            .recognize(&solid(0, 0, 0), &RegionCtx { ocr_lines: vec![], page: 0 })
+            .recognize(
+                &solid(0, 0, 0),
+                &RegionCtx {
+                    ocr_lines: vec![],
+                    page: 0,
+                },
+            )
             .unwrap();
         assert!(matches!(r, RegionResult::CheckboxV1 { checked: false }));
     }

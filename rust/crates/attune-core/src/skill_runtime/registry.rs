@@ -43,22 +43,24 @@ impl SkillRegistry {
             .unwrap_or_else(|e| panic!("built-in skill yaml failed to parse: {e}"));
         self.by_id.insert(
             skill.id.clone(),
-            RegisteredSkill { skill, source: "oss".to_string() },
+            RegisteredSkill {
+                skill,
+                source: "oss".to_string(),
+            },
         );
     }
 
     /// Register a pro plugin skill (spec §6.4 extension point). Validates the skill before
     /// inserting; returns an error (never panics) so a bad plugin manifest doesn't crash boot.
-    pub fn register_plugin_skill(
-        &mut self,
-        vertical: &str,
-        yaml: &str,
-    ) -> Result<(), String> {
+    pub fn register_plugin_skill(&mut self, vertical: &str, yaml: &str) -> Result<(), String> {
         let skill = parse_skill_yaml(yaml)?;
         validate_skill(&skill)?;
         self.by_id.insert(
             skill.id.clone(),
-            RegisteredSkill { skill, source: format!("pro:{vertical}") },
+            RegisteredSkill {
+                skill,
+                source: format!("pro:{vertical}"),
+            },
         );
         Ok(())
     }
@@ -82,7 +84,9 @@ mod tests {
     #[test]
     fn builtins_load_and_compare_to_table_present() {
         let reg = SkillRegistry::with_builtins();
-        let s = reg.get("compare-to-table").expect("compare-to-table registered");
+        let s = reg
+            .get("compare-to-table")
+            .expect("compare-to-table registered");
         assert_eq!(s.source, "oss");
         assert_eq!(s.skill.cost_tier, CostTier::LlmMultiStep);
         assert_eq!(s.skill.trigger.on, "manual", "paid skill must be manual");

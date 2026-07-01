@@ -150,11 +150,15 @@ pub fn import_memory_bundle(
     let manifest: BundleManifest = serde_json::from_slice(&bundle[..nl])
         .map_err(|_| VaultError::InvalidInput("unsupported-bundle-version".into()))?;
     if manifest.format_version != BUNDLE_FORMAT_VERSION {
-        return Err(VaultError::InvalidInput("unsupported-bundle-version".into()));
+        return Err(VaultError::InvalidInput(
+            "unsupported-bundle-version".into(),
+        ));
     }
     let rest = &bundle[nl + 1..];
     if rest.len() < BUNDLE_SALT_LEN {
-        return Err(VaultError::InvalidInput("corrupt-bundle: truncated salt".into()));
+        return Err(VaultError::InvalidInput(
+            "corrupt-bundle: truncated salt".into(),
+        ));
     }
     let (salt, ct) = rest.split_at(BUNDLE_SALT_LEN);
 
@@ -167,7 +171,9 @@ pub fn import_memory_bundle(
 
     // manifest 校验:解出条数须与头部声明一致,否则拒绝整包(写库前)。
     if mems.len() != manifest.memories {
-        return Err(VaultError::InvalidInput("corrupt-bundle: count mismatch".into()));
+        return Err(VaultError::InvalidInput(
+            "corrupt-bundle: count mismatch".into(),
+        ));
     }
 
     // 安全(对抗审查 High-1):写库前预校验全部记录,任一非法即拒整包,兑现"原子拒绝"

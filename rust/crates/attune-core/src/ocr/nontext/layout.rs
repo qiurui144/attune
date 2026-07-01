@@ -127,12 +127,14 @@ pub fn ensure_model_downloaded() -> Result<()> {
             "layout model not cached and HF_HUB_OFFLINE is set; refusing network download".into(),
         ));
     }
-    let dir = dst.parent().ok_or_else(|| {
-        VaultError::ModelLoad("layout model path has no parent dir".into())
-    })?;
+    let dir = dst
+        .parent()
+        .ok_or_else(|| VaultError::ModelLoad("layout model path has no parent dir".into()))?;
     std::fs::create_dir_all(dir)
         .map_err(|e| VaultError::ModelLoad(format!("create layout dir {}: {e}", dir.display())))?;
-    log::info!("layout: model missing, auto-downloading CDLA PicoDet (~7 MB) via S8 source selection");
+    log::info!(
+        "layout: model missing, auto-downloading CDLA PicoDet (~7 MB) via S8 source selection"
+    );
     // S8: 解析 failover 顺序 + 逐源下载 —— 探测只在此显式下载路径(非请求路径,R3)。
     let sources = crate::infer::model_source::resolve_sources_for(LAYOUT_REPO);
     let used = crate::infer::model_source::download_with_failover(
@@ -141,7 +143,10 @@ pub fn ensure_model_downloaded() -> Result<()> {
         LAYOUT_FILE,
         &dst,
     )?;
-    log::info!("layout: model downloaded ✓ {} via source '{used}'", dst.display());
+    log::info!(
+        "layout: model downloaded ✓ {} via source '{used}'",
+        dst.display()
+    );
     Ok(())
 }
 
@@ -183,9 +188,9 @@ pub fn detect_regions(
     // order). The RapidLayout PicoDet head names cls maps transpose_{0,2,4,6}.tmp_0 and reg
     // maps transpose_{1,3,5,7}.tmp_0; level L uses cls=2L, reg=2L+1.
     let extract = |name: &str| -> Result<(Vec<usize>, Vec<f32>)> {
-        let val = outputs.get(name).ok_or_else(|| {
-            VaultError::ModelLoad(format!("layout output '{name}' missing"))
-        })?;
+        let val = outputs
+            .get(name)
+            .ok_or_else(|| VaultError::ModelLoad(format!("layout output '{name}' missing")))?;
         let (shape, flat) = val
             .try_extract_tensor::<f32>()
             .map_err(|e| VaultError::ModelLoad(format!("layout extract '{name}': {e}")))?;
@@ -243,7 +248,11 @@ struct Det {
 /// Resize to fixed [IN_H, IN_W], ImageNet-normalize, return CHW f32 (len 3*IN_H*IN_W).
 fn preprocess(img: &image::DynamicImage) -> Vec<f32> {
     let resized = img
-        .resize_exact(IN_W as u32, IN_H as u32, image::imageops::FilterType::Triangle)
+        .resize_exact(
+            IN_W as u32,
+            IN_H as u32,
+            image::imageops::FilterType::Triangle,
+        )
         .to_rgb8();
     let mut out = vec![0f32; 3 * IN_H * IN_W];
     let plane = IN_H * IN_W;
@@ -311,7 +320,11 @@ fn decode_picodet(tensors: &[(Vec<usize>, Vec<f32>)]) -> Result<Vec<Det>> {
                 let maxv = bins.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                 let exps: [f32; REG_MAX] = std::array::from_fn(|k| (bins[k] - maxv).exp());
                 let sum: f32 = exps.iter().sum();
-                let acc: f32 = exps.iter().enumerate().map(|(k, &e)| (e / sum) * k as f32).sum();
+                let acc: f32 = exps
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &e)| (e / sum) * k as f32)
+                    .sum();
                 acc * stride as f32
             };
             let (dl, dt, dr, db) = (dfl_dist(0), dfl_dist(1), dfl_dist(2), dfl_dist(3));
@@ -330,7 +343,11 @@ fn decode_picodet(tensors: &[(Vec<usize>, Vec<f32>)]) -> Result<Vec<Det>> {
 
 /// Greedy NMS (score-desc, class-agnostic — matches the verified python reference).
 fn nms(mut dets: Vec<Det>, iou_th: f32) -> Vec<Det> {
-    dets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    dets.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut keep: Vec<Det> = Vec::new();
     'outer: for d in dets {
         for k in &keep {
@@ -378,8 +395,14 @@ mod tests {
         let srcs = crate::infer::model_source::builtin_sources();
         let company = srcs.iter().find(|s| s.id == "company-mirror").unwrap();
         let ms = srcs.iter().find(|s| s.id == "modelscope").unwrap();
-        assert!(company.coverage.covers(LAYOUT_REPO), "company-mirror must cover layout repo");
-        assert!(!ms.coverage.covers(LAYOUT_REPO), "ModelScope must NOT cover layout repo");
+        assert!(
+            company.coverage.covers(LAYOUT_REPO),
+            "company-mirror must cover layout repo"
+        );
+        assert!(
+            !ms.coverage.covers(LAYOUT_REPO),
+            "ModelScope must NOT cover layout repo"
+        );
     }
 
     #[test]
@@ -419,21 +442,63 @@ mod tests {
     fn nms_suppresses_overlapping_lower_score() {
         // Two near-identical boxes → only the higher-score one survives.
         let dets = vec![
-            Det { x1: 0.0, y1: 0.0, x2: 100.0, y2: 100.0, score: 0.9, class: 0 },
-            Det { x1: 5.0, y1: 5.0, x2: 105.0, y2: 105.0, score: 0.6, class: 0 },
-            Det { x1: 500.0, y1: 500.0, x2: 600.0, y2: 600.0, score: 0.7, class: 1 },
+            Det {
+                x1: 0.0,
+                y1: 0.0,
+                x2: 100.0,
+                y2: 100.0,
+                score: 0.9,
+                class: 0,
+            },
+            Det {
+                x1: 5.0,
+                y1: 5.0,
+                x2: 105.0,
+                y2: 105.0,
+                score: 0.6,
+                class: 0,
+            },
+            Det {
+                x1: 500.0,
+                y1: 500.0,
+                x2: 600.0,
+                y2: 600.0,
+                score: 0.7,
+                class: 1,
+            },
         ];
         let kept = nms(dets, 0.5);
-        assert_eq!(kept.len(), 2, "overlapping low-score box should be suppressed");
-        assert!((kept[0].score - 0.9).abs() < 1e-6, "highest score kept first");
+        assert_eq!(
+            kept.len(),
+            2,
+            "overlapping low-score box should be suppressed"
+        );
+        assert!(
+            (kept[0].score - 0.9).abs() < 1e-6,
+            "highest score kept first"
+        );
     }
 
     #[test]
     fn iou_identical_is_one_disjoint_is_zero() {
-        let a = Det { x1: 0.0, y1: 0.0, x2: 10.0, y2: 10.0, score: 1.0, class: 0 };
+        let a = Det {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 10.0,
+            y2: 10.0,
+            score: 1.0,
+            class: 0,
+        };
         let b = a;
         assert!((iou(&a, &b) - 1.0).abs() < 1e-6);
-        let c = Det { x1: 100.0, y1: 100.0, x2: 110.0, y2: 110.0, score: 1.0, class: 0 };
+        let c = Det {
+            x1: 100.0,
+            y1: 100.0,
+            x2: 110.0,
+            y2: 110.0,
+            score: 1.0,
+            class: 0,
+        };
         assert_eq!(iou(&a, &c), 0.0);
     }
 
@@ -450,7 +515,8 @@ mod tests {
             let a = fw * fh;
             let n_class = 10usize;
             tensors.push((vec![1, a, n_class], vec![0.01f32; a * n_class])); // cls
-            tensors.push((vec![1, a, 4 * REG_MAX], vec![0.0f32; a * 4 * REG_MAX])); // reg
+            tensors.push((vec![1, a, 4 * REG_MAX], vec![0.0f32; a * 4 * REG_MAX]));
+            // reg
         }
         // Inject: L0 anchor 0, class "table"(0) prob 0.95. reg all-zero → softmax uniform →
         // each side dist = mean(0..8) * stride = 3.5 * 8 = 28 px from center (cx=cy=4).
@@ -493,7 +559,10 @@ mod tests {
         for r in &regions {
             eprintln!("  {:?} {:?} conf={:.3}", r.kind, r.bbox, r.det_confidence);
         }
-        assert!(!regions.is_empty(), "a real document should yield ≥1 region");
+        assert!(
+            !regions.is_empty(),
+            "a real document should yield ≥1 region"
+        );
         // every region has a positive-area bbox and a plausible confidence
         for r in &regions {
             assert!(r.bbox.w > 0 && r.bbox.h > 0, "positive area: {:?}", r.bbox);

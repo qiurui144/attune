@@ -1,5 +1,7 @@
 use crate::error::{Result, VaultError};
-use crate::infer::accel::{cached_selection, EpChoice, EpSelectionTelemetry, InferTask, OpenVinoDevice};
+use crate::infer::accel::{
+    cached_selection, EpChoice, EpSelectionTelemetry, InferTask, OpenVinoDevice,
+};
 use ort::execution_providers::{CPUExecutionProvider, ExecutionProviderDispatch};
 use ort::session::Session;
 use std::path::Path;
@@ -117,14 +119,26 @@ fn init_ort_dylib() {
 /// dlopen 的 onnxruntime 能解析与它同目录的兄弟依赖(OV provider + OV runtime libs)。幂等。
 #[cfg(feature = "ort-dynamic")]
 fn prepend_lib_search_path(dir: &std::path::Path) {
-    let key = if cfg!(target_os = "windows") { "PATH" } else { "LD_LIBRARY_PATH" };
-    let sep = if cfg!(target_os = "windows") { ';' } else { ':' };
+    let key = if cfg!(target_os = "windows") {
+        "PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
+    let sep = if cfg!(target_os = "windows") {
+        ';'
+    } else {
+        ':'
+    };
     let d = dir.to_string_lossy().to_string();
     let cur = std::env::var(key).unwrap_or_default();
     if cur.split(sep).any(|p| p == d) {
         return; // 已在路径里
     }
-    let next = if cur.is_empty() { d } else { format!("{d}{sep}{cur}") };
+    let next = if cur.is_empty() {
+        d
+    } else {
+        format!("{d}{sep}{cur}")
+    };
     std::env::set_var(key, next);
 }
 
@@ -225,19 +239,28 @@ mod tests {
 
     #[test]
     fn ocr_task_chain_builds_and_is_directml_free_on_intel_via_provider() {
-        use crate::infer::accel::{recommend_ep_chain_for_task, EpChoice, OpenVinoDevice, InferTask};
+        use crate::infer::accel::{
+            recommend_ep_chain_for_task, EpChoice, InferTask, OpenVinoDevice,
+        };
         use crate::platform::AccelKind;
         // 经 provider 层语义验证:OCR 任务在 Intel 机不会喂 DirectML dispatch。
         let chain = recommend_ep_chain_for_task(
             "windows",
             &[AccelKind::IntelIgpu],
-            &[EpChoice::Cpu, EpChoice::DirectMl, EpChoice::OpenVino(OpenVinoDevice::Auto)],
+            &[
+                EpChoice::Cpu,
+                EpChoice::DirectMl,
+                EpChoice::OpenVino(OpenVinoDevice::Auto),
+            ],
             None,
             InferTask::Ocr,
         );
         assert!(!chain.contains(&EpChoice::DirectMl));
         let d = build_ep_dispatches(&chain);
-        assert!(!d.is_empty(), "OCR chain must still build a non-empty dispatch list");
+        assert!(
+            !d.is_empty(),
+            "OCR chain must still build a non-empty dispatch list"
+        );
     }
 
     #[test]

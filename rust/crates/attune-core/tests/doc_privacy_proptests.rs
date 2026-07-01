@@ -26,16 +26,11 @@ use proptest::prelude::*;
 /// Generate a string that interleaves arbitrary text with real PII tokens so
 /// the redactor has something to find.
 fn pii_text() -> impl Strategy<Value = String> {
-    let phones = prop::sample::select(vec![
-        "13800138000",
-        "13912345678",
-        "15011112222",
-    ]);
+    let phones = prop::sample::select(vec!["13800138000", "13912345678", "15011112222"]);
     let emails = prop::sample::select(vec!["alice@example.com", "bob@test.org"]);
     let filler = "[a-z 中文测试0-9]{0,40}";
-    (filler, phones, filler, emails, filler).prop_map(|(a, p, b, e, c)| {
-        format!("{a} 电话{p} {b} 邮箱{e} {c}")
-    })
+    (filler, phones, filler, emails, filler)
+        .prop_map(|(a, p, b, e, c)| format!("{a} 电话{p} {b} 邮箱{e} {c}"))
 }
 
 proptest! {

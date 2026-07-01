@@ -60,7 +60,9 @@ impl AgentOutcome {
                 if retry_count == 0 {
                     CallOutcome::Ok
                 } else {
-                    CallOutcome::Retry { attempt: retry_count }
+                    CallOutcome::Retry {
+                        attempt: retry_count,
+                    }
                 }
             }
             AgentOutcome::ParseErr => CallOutcome::Fail {

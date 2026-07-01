@@ -164,10 +164,18 @@ fn doc_intel_compare_verdict_real_llm() {
     let llm = require_llm();
     let corpus = load_corpus();
     let r = router();
-    let classes = ["rewrite", "substantive", "stance-reversal", "numeric-change"];
+    let classes = [
+        "rewrite",
+        "substantive",
+        "stance-reversal",
+        "numeric-change",
+    ];
     let n_seeds = seeds();
-    println!("\n=== AGENT A: compare verdict — real LLM ({}), {n_seeds} seeds, {} cases ===",
-        model_name(), corpus.cases.len());
+    println!(
+        "\n=== AGENT A: compare verdict — real LLM ({}), {n_seeds} seeds, {} cases ===",
+        model_name(),
+        corpus.cases.len()
+    );
 
     let mut f1_per_seed: Vec<f64> = Vec::new();
     let mut total_parse_fail = 0usize;
@@ -185,9 +193,16 @@ fn doc_intel_compare_verdict_real_llm() {
             let cheap: &dyn LlmProvider = llm.as_ref();
             let reasoning: &dyn LlmProvider = llm.as_ref();
             let llms = StageLlms { cheap, reasoning };
-            let report =
-                compare(&a, &b, CompareMode::Semantic, OutputMode::Marked, true, &r, &llms)
-                    .unwrap_or_else(|e| panic!("case {} compare err: {e:?}", case.id));
+            let report = compare(
+                &a,
+                &b,
+                CompareMode::Semantic,
+                OutputMode::Marked,
+                true,
+                &r,
+                &llms,
+            )
+            .unwrap_or_else(|e| panic!("case {} compare err: {e:?}", case.id));
             // exactly one changed span expected per case → one verdict.
             let got = report
                 .semantic_verdicts
@@ -206,7 +221,10 @@ fn doc_intel_compare_verdict_real_llm() {
                 *fp.entry(leaked(&classes, &got)).or_default() += 1.0;
                 *fn_.entry(want).or_default() += 1.0;
             }
-            println!("  [seed {seed}] {:<20} gold={:<16} got={got}", case.id, want);
+            println!(
+                "  [seed {seed}] {:<20} gold={:<16} got={got}",
+                case.id, want
+            );
         }
         total_parse_fail += parse_fail;
 
@@ -218,7 +236,11 @@ fn doc_intel_compare_verdict_real_llm() {
             let n = *fn_.get(c).unwrap_or(&0.0);
             let prec = if t + p > 0.0 { t / (t + p) } else { 0.0 };
             let rec = if t + n > 0.0 { t / (t + n) } else { 0.0 };
-            let f1 = if prec + rec > 0.0 { 2.0 * prec * rec / (prec + rec) } else { 0.0 };
+            let f1 = if prec + rec > 0.0 {
+                2.0 * prec * rec / (prec + rec)
+            } else {
+                0.0
+            };
             f1s.push(f1);
         }
         let macro_f1 = f1s.iter().sum::<f64>() / f1s.len() as f64;
@@ -227,10 +249,15 @@ fn doc_intel_compare_verdict_real_llm() {
     }
 
     let (mean, std) = mean_std(&f1_per_seed);
-    println!("\n=== compare verdict RESULT: macro-F1 mean={mean:.3} std={std:.3} (N={n_seeds}); \
-              total parse failures={total_parse_fail} ===");
+    println!(
+        "\n=== compare verdict RESULT: macro-F1 mean={mean:.3} std={std:.3} (N={n_seeds}); \
+              total parse failures={total_parse_fail} ==="
+    );
 
-    assert_eq!(total_parse_fail, 0, "§4.5.A: every verdict must parse (zero parse failures)");
+    assert_eq!(
+        total_parse_fail, 0,
+        "§4.5.A: every verdict must parse (zero parse failures)"
+    );
     assert!(
         mean >= 0.80,
         "compare verdict macro-F1 {mean:.3} < 0.80 floor. Per Agent 验证铁律: raise model tier \
@@ -240,7 +267,11 @@ fn doc_intel_compare_verdict_real_llm() {
 
 /// Keep only known classes; an unknown predicted string is bucketed under its own key for FP.
 fn leaked<'a>(classes: &[&'a str], got: &str) -> &'a str {
-    classes.iter().copied().find(|c| *c == got).unwrap_or("rewrite")
+    classes
+        .iter()
+        .copied()
+        .find(|c| *c == got)
+        .unwrap_or("rewrite")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -292,7 +323,10 @@ fn doc_intel_deep_summary_real_llm() {
     let llm = require_llm();
     let r = router();
     let n_seeds = seeds();
-    println!("\n=== AGENT B: deep_summary — real LLM ({}), {n_seeds} seeds ===", model_name());
+    println!(
+        "\n=== AGENT B: deep_summary — real LLM ({}), {n_seeds} seeds ===",
+        model_name()
+    );
 
     let mut recall_per_seed: Vec<f64> = Vec::new();
     let mut any_empty = false;
@@ -322,7 +356,12 @@ fn doc_intel_deep_summary_real_llm() {
             let full = format!(
                 "{} {}",
                 summary.overview,
-                summary.per_chapter.iter().map(|c| c.summary.clone()).collect::<Vec<_>>().join(" ")
+                summary
+                    .per_chapter
+                    .iter()
+                    .map(|c| c.summary.clone())
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
             // HARD truncation guard (the discarded-token-cap regression's actual symptom): the
             // overview must be substantial, not empty / cut mid-thought.
@@ -351,7 +390,9 @@ fn doc_intel_deep_summary_real_llm() {
     }
 
     let (mean, std) = mean_std(&recall_per_seed);
-    println!("\n=== deep_summary RESULT: keypoint-recall mean={mean:.3} std={std:.3} (N={n_seeds}) ===");
+    println!(
+        "\n=== deep_summary RESULT: keypoint-recall mean={mean:.3} std={std:.3} (N={n_seeds}) ==="
+    );
 
     // (1) HARD truncation guard — the discarded-token-cap regression cut summaries mid-thought.
     assert!(
@@ -383,7 +424,10 @@ fn doc_intel_chapter_ask_real_llm() {
     let llm = require_llm();
     let r = router();
     let n_seeds = seeds();
-    println!("\n=== AGENT C: chapters ask — real LLM ({}), {n_seeds} seeds ===", model_name());
+    println!(
+        "\n=== AGENT C: chapters ask — real LLM ({}), {n_seeds} seeds ===",
+        model_name()
+    );
 
     // (chapter_idx, question, a grounding term the answer should reference)
     let questions: &[(usize, &str, &str)] = &[
@@ -414,7 +458,9 @@ fn doc_intel_chapter_ask_real_llm() {
     }
 
     let (mean, std) = mean_std(&rate_per_seed);
-    println!("\n=== chapters ask RESULT: grounded-rate mean={mean:.3} std={std:.3} (N={n_seeds}) ===");
+    println!(
+        "\n=== chapters ask RESULT: grounded-rate mean={mean:.3} std={std:.3} (N={n_seeds}) ==="
+    );
     assert!(
         mean >= 0.80,
         "chapters ask grounded-rate {mean:.3} < 0.80 floor. Per Agent 验证铁律: raise tier in \

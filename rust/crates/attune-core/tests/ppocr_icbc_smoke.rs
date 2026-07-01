@@ -51,7 +51,10 @@ fn ppocr_icbc_dump_first_5_pages() {
         .status()
         .expect("pdftoppm");
     assert!(status.success(), "pdftoppm exit {:?}", status.code());
-    eprintln!("[smoke] pdftoppm done in {:.1}s", t0.elapsed().as_secs_f64());
+    eprintln!(
+        "[smoke] pdftoppm done in {:.1}s",
+        t0.elapsed().as_secs_f64()
+    );
 
     // 收集 PNG
     let mut pages: Vec<_> = std::fs::read_dir(tmp.path())
@@ -86,7 +89,10 @@ fn ppocr_icbc_dump_first_5_pages() {
         }
     }
 
-    eprintln!("\n========== OCR DUMP (first 5 pages, total {} chars) ==========", all_text.len());
+    eprintln!(
+        "\n========== OCR DUMP (first 5 pages, total {} chars) ==========",
+        all_text.len()
+    );
     let dump: String = all_text.chars().take(5000).collect();
     eprintln!("{dump}");
     eprintln!("========== END DUMP ==========\n");
@@ -106,12 +112,26 @@ fn ppocr_icbc_dump_first_5_pages() {
     eprintln!("numeric chars: {iso_dates}");
 
     let amount_pattern = regex::Regex::new(r"\d{1,3}(?:,\d{3})*\.\d{2}").unwrap();
-    let amounts: Vec<_> = amount_pattern.find_iter(&all_text).map(|m| m.as_str()).collect();
-    eprintln!("amount-like patterns: {} (sample: {:?})", amounts.len(), amounts.iter().take(5).collect::<Vec<_>>());
+    let amounts: Vec<_> = amount_pattern
+        .find_iter(&all_text)
+        .map(|m| m.as_str())
+        .collect();
+    eprintln!(
+        "amount-like patterns: {} (sample: {:?})",
+        amounts.len(),
+        amounts.iter().take(5).collect::<Vec<_>>()
+    );
 
     let date_pattern = regex::Regex::new(r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}").unwrap();
-    let dates: Vec<_> = date_pattern.find_iter(&all_text).map(|m| m.as_str()).collect();
-    eprintln!("date patterns: {} (sample: {:?})", dates.len(), dates.iter().take(5).collect::<Vec<_>>());
+    let dates: Vec<_> = date_pattern
+        .find_iter(&all_text)
+        .map(|m| m.as_str())
+        .collect();
+    eprintln!(
+        "date patterns: {} (sample: {:?})",
+        dates.len(),
+        dates.iter().take(5).collect::<Vec<_>>()
+    );
 
     // 不 fail 即诊断成功 — 业务可用性靠人审 dump 决定
     eprintln!("=== Smoke OK (manual review required) ===");

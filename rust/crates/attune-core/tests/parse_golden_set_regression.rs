@@ -57,8 +57,7 @@ fn load_manifest() -> Manifest {
     let path = fixtures_dir().join("manifest.yaml");
     let yaml =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read manifest {path:?}: {e}"));
-    serde_yaml::from_str(&yaml)
-        .unwrap_or_else(|e| panic!("parse manifest yaml: {e}"))
+    serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("parse manifest yaml: {e}"))
 }
 
 fn load_fixture_content(file: &str) -> String {
@@ -67,7 +66,11 @@ fn load_fixture_content(file: &str) -> String {
 }
 
 /// 验证一个 fixture：返回 Ok(()) = 通过，Err(reasons) = 失败原因列表
-fn check_fixture(spec: &FixtureSpec, sections: &[SectionWithPath], full_text: &str) -> Result<(), Vec<String>> {
+fn check_fixture(
+    spec: &FixtureSpec,
+    sections: &[SectionWithPath],
+    full_text: &str,
+) -> Result<(), Vec<String>> {
     let mut failures = Vec::new();
 
     // 1. min_text_chars
@@ -172,7 +175,10 @@ fn k2_baseline_corpus_passes_min_rate() {
 fn k2_manifest_loads() {
     let m = load_manifest();
     assert_eq!(m.fixtures.len(), 5, "baseline 应有 5 fixtures");
-    assert!((m.regression.min_pass_rate - 1.0).abs() < 0.001, "baseline 阈值锁 100%");
+    assert!(
+        (m.regression.min_pass_rate - 1.0).abs() < 0.001,
+        "baseline 阈值锁 100%"
+    );
 }
 
 #[test]
@@ -211,9 +217,11 @@ fn k2_005_academic_paper_passes() {
 
 fn run_single_fixture(id: &str) {
     let m = load_manifest();
-    let spec = m.fixtures.iter().find(|s| s.id == id).unwrap_or_else(|| {
-        panic!("fixture {id} not in manifest")
-    });
+    let spec = m
+        .fixtures
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap_or_else(|| panic!("fixture {id} not in manifest"));
     let content = load_fixture_content(&spec.file);
     let sections = extract_sections_with_path(&content);
     if let Err(failures) = check_fixture(spec, &sections, &content) {

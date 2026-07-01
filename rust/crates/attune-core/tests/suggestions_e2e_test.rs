@@ -9,7 +9,7 @@
 
 use attune_core::store::Store;
 use attune_core::suggestions::{
-    self, ClusterCandidate, SignalContext, ENRICH_MISS_THRESHOLD, SuggestionKind,
+    self, ClusterCandidate, SignalContext, SuggestionKind, ENRICH_MISS_THRESHOLD,
 };
 
 /// 端到端:注入 search_miss + browse 信号 → 聚合 → 出卡 → dismiss → 消失。
@@ -19,7 +19,9 @@ fn e2e_signals_to_cards_then_dismiss() {
 
     // 注入信号(模拟用户行为)。
     for _ in 0..4 {
-        store.record_skill_signal("riscv vector intrinsics", 0, false).unwrap();
+        store
+            .record_skill_signal("riscv vector intrinsics", 0, false)
+            .unwrap();
     }
     for i in 0..12 {
         store
@@ -50,12 +52,24 @@ fn e2e_signals_to_cards_then_dismiss() {
     // 至少出 enrich(query×4)+ retrieval(4 unprocessed < 5? — record_skill_signal 4 条
     // 都是 search_miss 未处理 → unprocessed=4 < 5,retrieval 不出)+ organize + profile(12)。
     let kinds: Vec<_> = cards.iter().map(|c| c.kind).collect();
-    assert!(kinds.contains(&SuggestionKind::Enrich), "expected enrich, got {kinds:?}");
-    assert!(kinds.contains(&SuggestionKind::Organize), "expected organize");
-    assert!(kinds.contains(&SuggestionKind::Profile), "expected profile (12 anno ≥ 10)");
+    assert!(
+        kinds.contains(&SuggestionKind::Enrich),
+        "expected enrich, got {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&SuggestionKind::Organize),
+        "expected organize"
+    );
+    assert!(
+        kinds.contains(&SuggestionKind::Profile),
+        "expected profile (12 anno ≥ 10)"
+    );
 
     // dismiss enrich 卡 → 持久化 → 复查应消失。
-    let enrich = cards.iter().find(|c| c.kind == SuggestionKind::Enrich).unwrap();
+    let enrich = cards
+        .iter()
+        .find(|c| c.kind == SuggestionKind::Enrich)
+        .unwrap();
     store.dismiss_suggestion(&enrich.signature).unwrap();
 
     let after = suggestions::evaluate(&build_ctx(&store));
@@ -82,9 +96,16 @@ fn e2e_mute_persists_across_evaluate() {
 
     assert_eq!(suggestions::evaluate(&build(&store)).len(), 1);
     store.mute_suggestion_kind("organize").unwrap();
-    assert!(suggestions::evaluate(&build(&store)).is_empty(), "muted kind suppressed");
+    assert!(
+        suggestions::evaluate(&build(&store)).is_empty(),
+        "muted kind suppressed"
+    );
     store.unmute_suggestion_kind("organize").unwrap();
-    assert_eq!(suggestions::evaluate(&build(&store)).len(), 1, "unmute restores");
+    assert_eq!(
+        suggestions::evaluate(&build(&store)).len(),
+        1,
+        "unmute restores"
+    );
 }
 
 /// 端到端(嫁接):第三方账号 store → connected_source_count → ConnectSource 卡。
@@ -97,7 +118,9 @@ fn e2e_connect_source_card_lifecycle_via_store() {
 
     // 制造活动信号(模拟用户在用 attune)。
     for _ in 0..3 {
-        store.record_skill_signal("kubernetes operator", 0, false).unwrap();
+        store
+            .record_skill_signal("kubernetes operator", 0, false)
+            .unwrap();
     }
 
     let build = |s: &Store| SignalContext {
@@ -111,7 +134,9 @@ fn e2e_connect_source_card_lifecycle_via_store() {
     // 0 个源 → 出连接卡。
     let cards = suggestions::evaluate(&build(&store));
     assert!(
-        cards.iter().any(|c| c.kind == SuggestionKind::ConnectSource),
+        cards
+            .iter()
+            .any(|c| c.kind == SuggestionKind::ConnectSource),
         "expected connect_source card when zero sources connected, got {:?}",
         cards.iter().map(|c| c.kind).collect::<Vec<_>>()
     );
@@ -132,7 +157,9 @@ fn e2e_connect_source_card_lifecycle_via_store() {
 
     let after = suggestions::evaluate(&build(&store));
     assert!(
-        after.iter().all(|c| c.kind != SuggestionKind::ConnectSource),
+        after
+            .iter()
+            .all(|c| c.kind != SuggestionKind::ConnectSource),
         "connect_source card must disappear after a source is connected"
     );
 }

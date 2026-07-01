@@ -25,8 +25,7 @@ async fn member_routes_require_bearer_when_auth_enabled() {
         std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
     }
 
-    let vault =
-        attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
     // require_auth = true → bearer_auth_guard active on every non-exempt route.
     let state = Arc::new(attune_server::state::AppState::new(vault, true));
     let router = attune_server::build_router(Arc::clone(&state));
@@ -91,7 +90,11 @@ async fn member_routes_require_bearer_when_auth_enabled() {
         .send()
         .await
         .expect("vault setup");
-    assert!(resp.status().is_success(), "vault setup failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "vault setup failed: {}",
+        resp.status()
+    );
     let body: serde_json::Value = resp.json().await.expect("setup json");
     let token = body
         .get("token")

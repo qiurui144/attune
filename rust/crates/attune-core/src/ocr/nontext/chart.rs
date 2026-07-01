@@ -33,7 +33,12 @@ mod tests {
         let ctx = RegionCtx {
             ocr_lines: vec![RawLine {
                 text: "2024".into(),
-                bbox: BBox { x: 0, y: 0, w: 1, h: 1 },
+                bbox: BBox {
+                    x: 0,
+                    y: 0,
+                    w: 1,
+                    h: 1,
+                },
                 confidence: 0.9,
             }],
             page: 0,

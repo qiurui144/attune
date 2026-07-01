@@ -80,15 +80,23 @@ impl Store {
         })?;
         let mut out = Vec::new();
         for r in rows {
-            let (id, item_id, os, oe, snippet, label, color, content_enc, source, created, updated) = r?;
+            let (id, item_id, os, oe, snippet, label, color, content_enc, source, created, updated) =
+                r?;
             let content = crypto::decrypt(dek, &content_enc)
                 .map(|b| String::from_utf8_lossy(&b).into_owned())
                 .unwrap_or_default();
             out.push(Annotation {
-                id, item_id,
-                offset_start: os, offset_end: oe,
-                text_snippet: snippet, label, color, content, source,
-                created_at: created, updated_at: updated,
+                id,
+                item_id,
+                offset_start: os,
+                offset_end: oe,
+                text_snippet: snippet,
+                label,
+                color,
+                content,
+                source,
+                created_at: created,
+                updated_at: updated,
             });
         }
         Ok(out)
@@ -96,12 +104,7 @@ impl Store {
 
     /// 编辑批注。用户手动编辑会把 source 强制置回 'user'（契约：
     /// 任何人类介入都抹掉 AI 标记，避免让用户误以为 AI 参与了最终版本）。
-    pub fn update_annotation(
-        &self,
-        dek: &Key32,
-        id: &str,
-        input: &AnnotationInput,
-    ) -> Result<()> {
+    pub fn update_annotation(&self, dek: &Key32, id: &str, input: &AnnotationInput) -> Result<()> {
         let content_enc = crypto::encrypt(dek, input.content.as_bytes())?;
         // 若调用方明确传 source='ai'（AI 工作流的第二次写入），尊重之；否则回到 user
         let source = input.source.as_deref().unwrap_or("user");
@@ -118,16 +121,22 @@ impl Store {
             params![input.label, input.color, content_enc, source, id],
         )?;
         if n == 0 {
-            return Err(VaultError::InvalidInput(format!("annotation {id} not found")));
+            return Err(VaultError::InvalidInput(format!(
+                "annotation {id} not found"
+            )));
         }
         Ok(())
     }
 
     /// 删除批注（硬删除，不走软删除 — 个人场景无合规留痕需求）
     pub fn delete_annotation(&self, id: &str) -> Result<()> {
-        let n = self.conn.execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
+        let n = self
+            .conn
+            .execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
         if n == 0 {
-            return Err(VaultError::InvalidInput(format!("annotation {id} not found")));
+            return Err(VaultError::InvalidInput(format!(
+                "annotation {id} not found"
+            )));
         }
         Ok(())
     }

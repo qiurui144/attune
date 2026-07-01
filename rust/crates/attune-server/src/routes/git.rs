@@ -76,7 +76,10 @@ fn git_error_response(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
 }
 
 /// POST /api/v1/index/bind-git — 绑定 git 仓并全量导入（对齐 bind-remote）。
-pub async fn bind_git(State(state): State<SharedState>, Json(body): Json<BindGitRequest>) -> RouteResult {
+pub async fn bind_git(
+    State(state): State<SharedState>,
+    Json(body): Json<BindGitRequest>,
+) -> RouteResult {
     // 归一 URL + SSRF 预校验（fail fast，clone 前就拒非法 / 内网）。
     let config = {
         let mut c = attune_core::ingest::git::GitSourceConfig::new(body.url.trim());
@@ -116,19 +119,30 @@ pub async fn bind_git(State(state): State<SharedState>, Json(body): Json<BindGit
     let dir_id = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let _ = vault.dek_db().map_err(|e| {
-            (StatusCode::FORBIDDEN, Json(json!({"error": e.to_string(), "code": "unauthorized"})))
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": e.to_string(), "code": "unauthorized"})),
+            )
         })?;
         vault
             .store()
             .bind_directory(&bind_key, false, &["md", "txt", "rst", "rs", "py"])
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string(), "code": "internal"}))))?
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string(), "code": "internal"})),
+                )
+            })?
     };
 
     // 落库加密配置（token 立即加密；不回 body 明文 / 不入日志）。
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let dek = vault.dek_db().map_err(|e| {
-            (StatusCode::FORBIDDEN, Json(json!({"error": e.to_string(), "code": "unauthorized"})))
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": e.to_string(), "code": "unauthorized"})),
+            )
         })?;
         let input = GitSourceInput {
             dir_id: dir_id.clone(),
@@ -138,7 +152,10 @@ pub async fn bind_git(State(state): State<SharedState>, Json(body): Json<BindGit
             subdir: config.subdir.clone(),
             include_glob: serde_json::to_string(&config.include_glob).unwrap_or_default(),
             exclude_glob: serde_json::to_string(&config.exclude_glob).unwrap_or_default(),
-            corpus_domain: config.corpus_domain.clone().unwrap_or_else(|| "general".into()),
+            corpus_domain: config
+                .corpus_domain
+                .clone()
+                .unwrap_or_else(|| "general".into()),
             // token 明文进 GitSourceInput.token_ref, 由 upsert_git_source 用 dek
             // 加密落 token_ref_enc (不回显 / 不日志)。
             token_ref: body.token.clone(),
@@ -147,7 +164,10 @@ pub async fn bind_git(State(state): State<SharedState>, Json(body): Json<BindGit
             max_total_bytes: config.max_total_bytes,
         };
         if let Err(e) = vault.store().upsert_git_source(&dek, &input) {
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("persist git source: {e}"), "code": "internal"}))));
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("persist git source: {e}"), "code": "internal"})),
+            ));
         }
     }
 
@@ -159,29 +179,50 @@ pub async fn bind_git(State(state): State<SharedState>, Json(body): Json<BindGit
         crate::ingest_git::sync_git_source(&state_clone, &dir_id_clone, token)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string(), "code": "internal"}))))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string(), "code": "internal"})),
+        )
+    })?;
 
     match scan {
-        Ok(scan) => Ok(Json(json!({ "status": "ok", "dir_id": dir_id, "scan": scan }))),
+        Ok(scan) => Ok(Json(
+            json!({ "status": "ok", "dir_id": dir_id, "scan": scan }),
+        )),
         Err(msg) => Err(git_error_response(&msg)),
     }
 }
 
 /// POST /api/v1/index/sync-git — 手动增量同步（token 从加密配置取）。
-pub async fn sync_git(State(state): State<SharedState>, Json(body): Json<SyncGitRequest>) -> RouteResult {
+pub async fn sync_git(
+    State(state): State<SharedState>,
+    Json(body): Json<SyncGitRequest>,
+) -> RouteResult {
     let dir_id = body.dir_id.clone();
     // 取 token（解密）。
     let token = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         let dek = vault.dek_db().map_err(|e| {
-            (StatusCode::FORBIDDEN, Json(json!({"error": e.to_string(), "code": "unauthorized"})))
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": e.to_string(), "code": "unauthorized"})),
+            )
         })?;
         match vault.store().get_git_source(&dek, &dir_id) {
             Ok(Some(row)) => row.token_ref,
             Ok(None) => {
-                return Err((StatusCode::NOT_FOUND, Json(json!({"error": format!("git source {dir_id}"), "code": "not-found"}))))
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": format!("git source {dir_id}"), "code": "not-found"})),
+                ))
             }
-            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string(), "code": "internal"})))),
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string(), "code": "internal"})),
+                ))
+            }
         }
     };
 
@@ -191,10 +232,17 @@ pub async fn sync_git(State(state): State<SharedState>, Json(body): Json<SyncGit
         crate::ingest_git::sync_git_source(&state_clone, &dir_id_clone, token)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string(), "code": "internal"}))))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string(), "code": "internal"})),
+        )
+    })?;
 
     match scan {
-        Ok(scan) => Ok(Json(json!({ "status": "ok", "dir_id": dir_id, "scan": scan }))),
+        Ok(scan) => Ok(Json(
+            json!({ "status": "ok", "dir_id": dir_id, "scan": scan }),
+        )),
         Err(msg) => Err(git_error_response(&msg)),
     }
 }
@@ -205,13 +253,37 @@ mod tests {
 
     #[test]
     fn git_error_response_maps_codes() {
-        assert_eq!(git_error_response("invalid-git-url: x").0, StatusCode::BAD_REQUEST);
-        assert_eq!(git_error_response("git-url-not-allowed: x").0, StatusCode::BAD_REQUEST);
-        assert_eq!(git_error_response("git-auth-failed: x").0, StatusCode::BAD_GATEWAY);
-        assert_eq!(git_error_response("git-repo-not-found: x").0, StatusCode::NOT_FOUND);
-        assert_eq!(git_error_response("git-ref-not-found: x").0, StatusCode::NOT_FOUND);
-        assert_eq!(git_error_response("git-repo-too-large: x").0, StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(git_error_response("git-network-error: x").0, StatusCode::BAD_GATEWAY);
-        assert_eq!(git_error_response("git-cli-missing: x").0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            git_error_response("invalid-git-url: x").0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            git_error_response("git-url-not-allowed: x").0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            git_error_response("git-auth-failed: x").0,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            git_error_response("git-repo-not-found: x").0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            git_error_response("git-ref-not-found: x").0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            git_error_response("git-repo-too-large: x").0,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            git_error_response("git-network-error: x").0,
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            git_error_response("git-cli-missing: x").0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 }

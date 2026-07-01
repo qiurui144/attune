@@ -225,8 +225,9 @@ impl VlmRouter {
     /// .suggest_higher_tier` boolean (spec §5.1 / §I4).
     pub fn any_suggest_higher_tier(&self) -> bool {
         let g = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        g.values()
-            .any(|&(total, fails)| total > 0 && (fails as f64 / total as f64) > VLM_FAILURE_RATE_ALERT_THRESHOLD)
+        g.values().any(|&(total, fails)| {
+            total > 0 && (fails as f64 / total as f64) > VLM_FAILURE_RATE_ALERT_THRESHOLD
+        })
     }
 
     /// Number of registered candidates (0 = degrade-only matrix).
@@ -336,7 +337,12 @@ mod tests {
 
     fn geom() -> RegionGeom {
         RegionGeom {
-            page_bbox: BBox { x: 0, y: 0, w: 100, h: 100 },
+            page_bbox: BBox {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
             page: 0,
             crop_w: 100,
             crop_h: 100,
@@ -380,7 +386,10 @@ mod tests {
         assert_eq!(out.tried, vec!["qwen-3.7-max", "qwen-3.6-flash"]);
         // Aggregator: primary has a failure, backup a success.
         assert!(router.failure_rate(RegionKind::Handwriting, "qwen-3.7-max") > 0.0);
-        assert_eq!(router.failure_rate(RegionKind::Handwriting, "qwen-3.6-flash"), 0.0);
+        assert_eq!(
+            router.failure_rate(RegionKind::Handwriting, "qwen-3.6-flash"),
+            0.0
+        );
     }
 
     #[test]
@@ -413,8 +422,14 @@ mod tests {
             VlmCandidate::new(b, "qwen-3.6-flash", 5),
         ]);
         let out = router.escalate(&test_token(), RegionKind::Handwriting, geom());
-        assert!(out.result.is_err(), "all failed → Err (caller degrades to local)");
-        assert_eq!(out.telemetry.error_kind.as_deref(), Some("all-candidates-failed"));
+        assert!(
+            out.result.is_err(),
+            "all failed → Err (caller degrades to local)"
+        );
+        assert_eq!(
+            out.telemetry.error_kind.as_deref(),
+            Some("all-candidates-failed")
+        );
         assert_eq!(out.tried.len(), 2, "both candidates were tried");
     }
 

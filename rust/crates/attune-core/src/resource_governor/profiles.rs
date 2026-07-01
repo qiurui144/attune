@@ -308,8 +308,14 @@ mod tests {
     fn task_kind_str_ids_are_stable() {
         // 这些 id 会出现在 attune --diag 输出和前端 UI；不可随意改。
         assert_eq!(TaskKind::EmbeddingQueue.as_str(), "embedding_queue");
-        assert_eq!(TaskKind::BrowseSignalIngest.as_str(), "browse_signal_ingest");
-        assert_eq!(TaskKind::MemoryConsolidation.as_str(), "memory_consolidation");
+        assert_eq!(
+            TaskKind::BrowseSignalIngest.as_str(),
+            "browse_signal_ingest"
+        );
+        assert_eq!(
+            TaskKind::MemoryConsolidation.as_str(),
+            "memory_consolidation"
+        );
     }
 
     #[test]
@@ -325,41 +331,230 @@ mod tests {
         type Case = (Profile, TaskKind, f32, u64, u64, Option<u32>);
         let cases: &[Case] = &[
             // EmbeddingQueue
-            (Profile::Conservative, TaskKind::EmbeddingQueue, 15.0, 512, 2000, None),
-            (Profile::Balanced, TaskKind::EmbeddingQueue, 25.0, 1024, 1000, None),
-            (Profile::Aggressive, TaskKind::EmbeddingQueue, 60.0, 2048, 100, None),
+            (
+                Profile::Conservative,
+                TaskKind::EmbeddingQueue,
+                15.0,
+                512,
+                2000,
+                None,
+            ),
+            (
+                Profile::Balanced,
+                TaskKind::EmbeddingQueue,
+                25.0,
+                1024,
+                1000,
+                None,
+            ),
+            (
+                Profile::Aggressive,
+                TaskKind::EmbeddingQueue,
+                60.0,
+                2048,
+                100,
+                None,
+            ),
             // SkillEvolution
-            (Profile::Conservative, TaskKind::SkillEvolution, 10.0, 256, 5000, Some(5)),
-            (Profile::Balanced, TaskKind::SkillEvolution, 20.0, 512, 2000, Some(10)),
-            (Profile::Aggressive, TaskKind::SkillEvolution, 40.0, 1024, 500, Some(30)),
+            (
+                Profile::Conservative,
+                TaskKind::SkillEvolution,
+                10.0,
+                256,
+                5000,
+                Some(5),
+            ),
+            (
+                Profile::Balanced,
+                TaskKind::SkillEvolution,
+                20.0,
+                512,
+                2000,
+                Some(10),
+            ),
+            (
+                Profile::Aggressive,
+                TaskKind::SkillEvolution,
+                40.0,
+                1024,
+                500,
+                Some(30),
+            ),
             // FileScanner
-            (Profile::Conservative, TaskKind::FileScanner, 10.0, 256, 1000, None),
-            (Profile::Balanced, TaskKind::FileScanner, 20.0, 512, 500, None),
-            (Profile::Aggressive, TaskKind::FileScanner, 50.0, 1024, 100, None),
+            (
+                Profile::Conservative,
+                TaskKind::FileScanner,
+                10.0,
+                256,
+                1000,
+                None,
+            ),
+            (
+                Profile::Balanced,
+                TaskKind::FileScanner,
+                20.0,
+                512,
+                500,
+                None,
+            ),
+            (
+                Profile::Aggressive,
+                TaskKind::FileScanner,
+                50.0,
+                1024,
+                100,
+                None,
+            ),
             // WebDavSync
-            (Profile::Conservative, TaskKind::WebDavSync, 10.0, 128, 5000, None),
-            (Profile::Balanced, TaskKind::WebDavSync, 15.0, 256, 2000, None),
-            (Profile::Aggressive, TaskKind::WebDavSync, 30.0, 512, 500, None),
+            (
+                Profile::Conservative,
+                TaskKind::WebDavSync,
+                10.0,
+                128,
+                5000,
+                None,
+            ),
+            (
+                Profile::Balanced,
+                TaskKind::WebDavSync,
+                15.0,
+                256,
+                2000,
+                None,
+            ),
+            (
+                Profile::Aggressive,
+                TaskKind::WebDavSync,
+                30.0,
+                512,
+                500,
+                None,
+            ),
             // BrowserSearch
-            (Profile::Conservative, TaskKind::BrowserSearch, 30.0, 1024, 1000, None),
-            (Profile::Balanced, TaskKind::BrowserSearch, 50.0, 1536, 500, None),
-            (Profile::Aggressive, TaskKind::BrowserSearch, 80.0, 2048, 100, None),
+            (
+                Profile::Conservative,
+                TaskKind::BrowserSearch,
+                30.0,
+                1024,
+                1000,
+                None,
+            ),
+            (
+                Profile::Balanced,
+                TaskKind::BrowserSearch,
+                50.0,
+                1536,
+                500,
+                None,
+            ),
+            (
+                Profile::Aggressive,
+                TaskKind::BrowserSearch,
+                80.0,
+                2048,
+                100,
+                None,
+            ),
             // AiAnnotator
-            (Profile::Conservative, TaskKind::AiAnnotator, 10.0, 256, 3000, None),
-            (Profile::Balanced, TaskKind::AiAnnotator, 20.0, 512, 1000, None),
-            (Profile::Aggressive, TaskKind::AiAnnotator, 50.0, 1024, 200, None),
+            (
+                Profile::Conservative,
+                TaskKind::AiAnnotator,
+                10.0,
+                256,
+                3000,
+                None,
+            ),
+            (
+                Profile::Balanced,
+                TaskKind::AiAnnotator,
+                20.0,
+                512,
+                1000,
+                None,
+            ),
+            (
+                Profile::Aggressive,
+                TaskKind::AiAnnotator,
+                50.0,
+                1024,
+                200,
+                None,
+            ),
             // BrowseSignalIngest (G1)
-            (Profile::Conservative, TaskKind::BrowseSignalIngest, 5.0, 64, 5000, None),
-            (Profile::Balanced, TaskKind::BrowseSignalIngest, 10.0, 128, 2000, None),
-            (Profile::Aggressive, TaskKind::BrowseSignalIngest, 20.0, 256, 500, None),
+            (
+                Profile::Conservative,
+                TaskKind::BrowseSignalIngest,
+                5.0,
+                64,
+                5000,
+                None,
+            ),
+            (
+                Profile::Balanced,
+                TaskKind::BrowseSignalIngest,
+                10.0,
+                128,
+                2000,
+                None,
+            ),
+            (
+                Profile::Aggressive,
+                TaskKind::BrowseSignalIngest,
+                20.0,
+                256,
+                500,
+                None,
+            ),
             // AutoBookmark (G2)
-            (Profile::Conservative, TaskKind::AutoBookmark, 10.0, 256, 5000, None),
-            (Profile::Balanced, TaskKind::AutoBookmark, 20.0, 512, 2000, None),
-            (Profile::Aggressive, TaskKind::AutoBookmark, 40.0, 1024, 500, None),
+            (
+                Profile::Conservative,
+                TaskKind::AutoBookmark,
+                10.0,
+                256,
+                5000,
+                None,
+            ),
+            (
+                Profile::Balanced,
+                TaskKind::AutoBookmark,
+                20.0,
+                512,
+                2000,
+                None,
+            ),
+            (
+                Profile::Aggressive,
+                TaskKind::AutoBookmark,
+                40.0,
+                1024,
+                500,
+                None,
+            ),
             // MemoryConsolidation (A1)
-            (Profile::Conservative, TaskKind::MemoryConsolidation, 15.0, 512, 10000, Some(5)),
-            (Profile::Balanced, TaskKind::MemoryConsolidation, 25.0, 1024, 5000, Some(10)),
-            (Profile::Aggressive, TaskKind::MemoryConsolidation, 50.0, 2048, 1000, Some(30)),
+            (
+                Profile::Conservative,
+                TaskKind::MemoryConsolidation,
+                15.0,
+                512,
+                10000,
+                Some(5),
+            ),
+            (
+                Profile::Balanced,
+                TaskKind::MemoryConsolidation,
+                25.0,
+                1024,
+                5000,
+                Some(10),
+            ),
+            (
+                Profile::Aggressive,
+                TaskKind::MemoryConsolidation,
+                50.0,
+                2048,
+                1000,
+                Some(30),
+            ),
         ];
         assert_eq!(cases.len(), 27, "must cover 3 profiles × 9 kinds");
 
@@ -367,19 +562,25 @@ mod tests {
             let b = profile.budget_for(*kind);
             assert_eq!(
                 b.cpu_pct_max, *expect_cpu,
-                "{:?}/{:?} cpu_pct_max", profile, kind
+                "{:?}/{:?} cpu_pct_max",
+                profile, kind
             );
             assert_eq!(
-                b.ram_bytes_max, expect_ram_mb * MB,
-                "{:?}/{:?} ram_bytes_max", profile, kind
+                b.ram_bytes_max,
+                expect_ram_mb * MB,
+                "{:?}/{:?} ram_bytes_max",
+                profile,
+                kind
             );
             assert_eq!(
                 b.throttle_on_exceed_ms, *expect_throttle,
-                "{:?}/{:?} throttle_on_exceed_ms", profile, kind
+                "{:?}/{:?} throttle_on_exceed_ms",
+                profile, kind
             );
             assert_eq!(
                 b.llm_calls_per_hour, *expect_llm,
-                "{:?}/{:?} llm_calls_per_hour", profile, kind
+                "{:?}/{:?} llm_calls_per_hour",
+                profile, kind
             );
         }
     }

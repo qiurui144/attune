@@ -211,7 +211,10 @@ async fn activate_license_full_contract() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "activate w/o gateway → still 200");
+    assert!(
+        resp.status().is_success(),
+        "activate w/o gateway → still 200"
+    );
     nogw.abort();
     assert_eq!(
         member_state(&client, &base).await["is_paid"],
@@ -244,7 +247,11 @@ async fn activate_license_full_contract() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "activate must 200: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "activate must 200: {}",
+        resp.status()
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["plan"], "pro");
     assert_eq!(body["allowed_plugins"][0], "law-pro");
@@ -266,15 +273,27 @@ async fn activate_license_full_contract() {
         .json()
         .await
         .unwrap();
-    assert_eq!(locks["cloud_llm"], "locked", "Paid → cloud_llm locked: {locks}");
+    assert_eq!(
+        locks["cloud_llm"], "locked",
+        "Paid → cloud_llm locked: {locks}"
+    );
 
     // settings.llm carries the gateway endpoint/provider/model; GET redacts api_key
     // to null + sets api_key_set (settings.rs::redact_api_key).
     let llm = get_settings(&client, &base).await["llm"].clone();
     assert_eq!(llm["provider"], "openai_compat", "gateway provider written");
-    assert_eq!(llm["endpoint"], "https://gateway.engi-stack.com/v1", "gateway endpoint written");
-    assert_eq!(llm["api_key_set"], true, "gateway token written (api_key_set)");
-    assert_eq!(llm["model"], "deepseek-v4-flash", "gateway default model written");
+    assert_eq!(
+        llm["endpoint"], "https://gateway.engi-stack.com/v1",
+        "gateway endpoint written"
+    );
+    assert_eq!(
+        llm["api_key_set"], true,
+        "gateway token written (api_key_set)"
+    );
+    assert_eq!(
+        llm["model"], "deepseek-v4-flash",
+        "gateway default model written"
+    );
 
     srv.abort();
 }

@@ -102,7 +102,10 @@ async fn analyze_returns_proposal_covering_all_bound_items() {
 
     assert!(body["proposal_id"].is_string(), "proposal_id present");
     // No member configured in test ⇒ tier-2 (extractive) + member-required hint.
-    assert_eq!(body["cost"]["tier"], 2, "no member ⇒ tier-2 (extractive labels)");
+    assert_eq!(
+        body["cost"]["tier"], 2,
+        "no member ⇒ tier-2 (extractive labels)"
+    );
     assert_eq!(
         body["code"], "member-required-for-llm-label",
         "non-member response carries the tier hint code"
@@ -122,7 +125,10 @@ async fn analyze_returns_proposal_covering_all_bound_items() {
     covered.sort();
     let mut want = ids.clone();
     want.sort();
-    assert_eq!(covered, want, "all 3 input items covered exactly once (groups ∪ noise)");
+    assert_eq!(
+        covered, want,
+        "all 3 input items covered exactly once (groups ∪ noise)"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -165,7 +171,10 @@ async fn make_proposal(base: &str, client: &reqwest::Client, ids: &[String]) -> 
         .expect("analyze");
     assert_eq!(resp.status().as_u16(), 200, "analyze returns 200");
     let body: serde_json::Value = resp.json().await.expect("json");
-    body["proposal_id"].as_str().expect("proposal_id").to_string()
+    body["proposal_id"]
+        .as_str()
+        .expect("proposal_id")
+        .to_string()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -197,7 +206,10 @@ async fn apply_files_items_then_is_idempotent() {
         Some(1),
         "exactly one project created"
     );
-    assert_eq!(body["already_applied"], false, "first apply not idempotent short-circuit");
+    assert_eq!(
+        body["already_applied"], false,
+        "first apply not idempotent short-circuit"
+    );
 
     // Second apply of the SAME proposal_id → idempotent short-circuit, no new project.
     let again = client
@@ -208,7 +220,10 @@ async fn apply_files_items_then_is_idempotent() {
         .expect("apply again");
     assert_eq!(again.status().as_u16(), 200, "re-apply returns 200");
     let again_body: serde_json::Value = again.json().await.expect("json");
-    assert_eq!(again_body["already_applied"], true, "re-apply is idempotent");
+    assert_eq!(
+        again_body["already_applied"], true,
+        "re-apply is idempotent"
+    );
     assert_eq!(again_body["filed_count"], 0, "re-apply files nothing");
 }
 
@@ -225,7 +240,10 @@ async fn get_one_returns_decrypted_proposal_else_404() {
         .expect("get_one");
     assert_eq!(got.status().as_u16(), 200, "get_one returns 200");
     let body: serde_json::Value = got.json().await.expect("json");
-    assert_eq!(body["proposal_id"], pid, "decrypted proposal carries its id");
+    assert_eq!(
+        body["proposal_id"], pid,
+        "decrypted proposal carries its id"
+    );
     // Plaintext round-trip: groups+noise cover every seeded item.
     let mut covered: Vec<String> = Vec::new();
     let empty = Vec::new();
@@ -261,7 +279,10 @@ async fn list_paginates_proposals() {
 
     // Page 1: limit=1 returns exactly one (most recent first).
     let page1 = client
-        .get(format!("{}/api/v1/organize/proposals?limit=1&offset=0", base))
+        .get(format!(
+            "{}/api/v1/organize/proposals?limit=1&offset=0",
+            base
+        ))
         .send()
         .await
         .expect("list page1");
@@ -274,14 +295,20 @@ async fn list_paginates_proposals() {
 
     // Page 2: offset=1 returns the second row, different id from page 1.
     let page2 = client
-        .get(format!("{}/api/v1/organize/proposals?limit=1&offset=1", base))
+        .get(format!(
+            "{}/api/v1/organize/proposals?limit=1&offset=1",
+            base
+        ))
         .send()
         .await
         .expect("list page2");
     let body2: serde_json::Value = page2.json().await.expect("json");
     let arr2 = body2.as_array().expect("array");
     assert_eq!(arr2.len(), 1, "offset=1 ⇒ one row");
-    assert_ne!(arr1[0]["id"], arr2[0]["id"], "pagination yields distinct rows");
+    assert_ne!(
+        arr1[0]["id"], arr2[0]["id"],
+        "pagination yields distinct rows"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -309,5 +336,8 @@ async fn delete_discards_proposal_returns_204() {
         .iter()
         .map(|r| r["id"].as_str().unwrap_or("").to_string())
         .collect();
-    assert!(!ids_listed.contains(&pid), "discarded proposal not in draft list");
+    assert!(
+        !ids_listed.contains(&pid),
+        "discarded proposal not in draft list"
+    );
 }

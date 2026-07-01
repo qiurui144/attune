@@ -4,9 +4,9 @@
 //! 默认走 Mock 后端；attune-pro 通过覆盖 AppState.plugin_hub 注入真客户端。
 
 use axum::{
-    Json,
     extract::{Path, State},
     http::StatusCode,
+    Json,
 };
 use serde::{Deserialize, Serialize};
 

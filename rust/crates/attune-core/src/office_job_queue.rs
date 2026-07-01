@@ -117,21 +117,36 @@ mod tests {
     #[test]
     fn delivery_contract_default_per_kind() {
         // ASR is idempotent (re-transcribe same file = same result) → at_least_once.
-        assert_eq!(JobKind::Asr.default_delivery(), DeliveryContract::AtLeastOnce);
+        assert_eq!(
+            JobKind::Asr.default_delivery(),
+            DeliveryContract::AtLeastOnce
+        );
         // agent may have side effects (LLM spend, write item) → at_most_once unless deduped.
-        assert_eq!(JobKind::Agent.default_delivery(), DeliveryContract::AtMostOnce);
+        assert_eq!(
+            JobKind::Agent.default_delivery(),
+            DeliveryContract::AtMostOnce
+        );
     }
 
     #[test]
     fn job_record_serde_state_snake_case() {
         // JobState serde must stay snake_case (DB stores 'queued'/'running'/...).
-        assert_eq!(serde_json::to_string(&JobState::Queued).unwrap(), "\"queued\"");
-        assert_eq!(serde_json::to_string(&JobState::Running).unwrap(), "\"running\"");
+        assert_eq!(
+            serde_json::to_string(&JobState::Queued).unwrap(),
+            "\"queued\""
+        );
+        assert_eq!(
+            serde_json::to_string(&JobState::Running).unwrap(),
+            "\"running\""
+        );
     }
 
     #[test]
     fn job_error_serde_roundtrip() {
-        let e = JobError { message: "boom".into(), code: "asr-engine-failed".into() };
+        let e = JobError {
+            message: "boom".into(),
+            code: "asr-engine-failed".into(),
+        };
         let s = serde_json::to_string(&e).unwrap();
         let d: JobError = serde_json::from_str(&s).unwrap();
         assert_eq!(d.message, "boom");

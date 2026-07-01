@@ -159,7 +159,10 @@ async fn wizard_full_flow_end_to_end() {
         .expect("get settings after patch");
     let settings: serde_json::Value = resp.json().await.unwrap();
     let llm = settings.get("llm").expect("llm");
-    assert_eq!(llm["endpoint"].as_str(), Some("https://api.deepseek.com/v1"));
+    assert_eq!(
+        llm["endpoint"].as_str(),
+        Some("https://api.deepseek.com/v1")
+    );
     assert_eq!(llm["model"].as_str(), Some("deepseek-chat"));
     assert!(
         llm["api_key"].is_null(),
@@ -213,7 +216,12 @@ async fn wizard_full_flow_end_to_end() {
         .get("items")
         .and_then(|v| v.as_array())
         .expect("items array");
-    assert_eq!(items.len(), 2, "should have ingested 2 items, got {}", items.len());
+    assert_eq!(
+        items.len(),
+        2,
+        "should have ingested 2 items, got {}",
+        items.len()
+    );
 
     // ── Step 7: POST /vault/lock → state = LOCKED ────────────────────────
     // covers: F-01-VAULT (lock transition + key zeroization)

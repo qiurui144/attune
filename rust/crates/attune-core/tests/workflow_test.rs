@@ -131,7 +131,10 @@ fn deterministic_op_find_overlap_lists_project_files() {
     assert!(roles.contains(&"pleading"));
 
     let summary = obj["summary"].as_str().expect("summary str");
-    assert!(summary.contains("2"), "summary should mention count: {summary}");
+    assert!(
+        summary.contains("2"),
+        "summary should mention count: {summary}"
+    );
 }
 
 #[test]
@@ -158,7 +161,15 @@ fn deterministic_op_write_annotation_persists_with_dek() {
     let dek = Key32::generate();
     // 必须先建 item — annotation 走 FK 关联
     let item_id = store
-        .insert_item(&dek, "wf test item", "hello world body", None, "note", None, None)
+        .insert_item(
+            &dek,
+            "wf test item",
+            "hello world body",
+            None,
+            "note",
+            None,
+            None,
+        )
         .expect("insert item");
 
     // 关联到 project，验证 timeline append 也走通
@@ -181,7 +192,10 @@ fn deterministic_op_write_annotation_persists_with_dek() {
     assert_eq!(result["persisted"], true);
     assert_eq!(result["source"], "ai");
     let annotation_id = result["annotation_id"].as_str().expect("annotation_id str");
-    assert!(!annotation_id.is_empty(), "annotation_id should be non-empty");
+    assert!(
+        !annotation_id.is_empty(),
+        "annotation_id should be non-empty"
+    );
     assert!(
         !annotation_id.starts_with("stub-"),
         "annotation_id should NOT be stub: {annotation_id}"
@@ -217,4 +231,3 @@ fn deterministic_op_write_annotation_fails_without_dek() {
         "error should mention dek required: {err}"
     );
 }
-

@@ -83,12 +83,7 @@ impl Store {
             .map_err(|e| e.into())
     }
 
-    pub fn add_file_to_project(
-        &self,
-        project_id: &str,
-        file_id: &str,
-        role: &str,
-    ) -> Result<()> {
+    pub fn add_file_to_project(&self, project_id: &str, file_id: &str, role: &str) -> Result<()> {
         let now = Utc::now().timestamp();
         self.conn.execute(
             "INSERT OR REPLACE INTO project_file (project_id, file_id, role, added_at) \
@@ -171,12 +166,8 @@ mod tests {
     #[test]
     fn list_projects_excludes_archived_by_default() {
         let store = Store::open_memory().expect("open");
-        let p1 = store
-            .create_project("Active", "generic")
-            .expect("c1");
-        let _p2 = store
-            .create_project("Other", "topic")
-            .expect("c2");
+        let p1 = store.create_project("Active", "generic").expect("c1");
+        let _p2 = store.create_project("Other", "topic").expect("c2");
 
         let active = store.list_projects(false).expect("list");
         assert_eq!(active.len(), 2);
@@ -199,9 +190,7 @@ mod tests {
     #[test]
     fn add_file_and_list() {
         let store = Store::open_memory().expect("open");
-        let p = store
-            .create_project("Project A", "generic")
-            .expect("c");
+        let p = store.create_project("Project A", "generic").expect("c");
         store
             .add_file_to_project(&p.id, "file-uuid-001", "evidence")
             .expect("add evidence");
@@ -219,9 +208,7 @@ mod tests {
     #[test]
     fn timeline_append_and_list() {
         let store = Store::open_memory().expect("open");
-        let p = store
-            .create_project("Project B", "generic")
-            .expect("c");
+        let p = store.create_project("Project B", "generic").expect("c");
         store
             .append_timeline(&p.id, "evidence_added", None)
             .expect("append 1");

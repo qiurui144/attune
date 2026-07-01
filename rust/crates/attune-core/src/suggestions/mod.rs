@@ -390,8 +390,7 @@ fn rule_connect_source(ctx: &SignalContext) -> Vec<SuggestionCard> {
         signature,
         kind: SuggestionKind::ConnectSource,
         title: "还没连接任何外部知识源,要不要连一个?".into(),
-        detail: "连接网盘 / 邮箱 / RSS / Git 等账号,让更多资料能被检索(凭据本地加密保存)"
-            .into(),
+        detail: "连接网盘 / 邮箱 / RSS / Git 等账号,让更多资料能被检索(凭据本地加密保存)".into(),
         ref_ids: vec![],
         action_kind: ActionKind::OpenAccountsPanel,
         // 连接本身零成本(只是加密保存凭据);采集/同步走既有显式路径,届时另有成本提示。

@@ -23,7 +23,9 @@ fn spawn_mock_server(body: &'static str, max_requests: usize) -> String {
     thread::spawn(move || {
         tx.send(()).ok();
         for _ in 0..max_requests {
-            let Ok((mut stream, _)) = listener.accept() else { break };
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
             let mut buf = [0u8; 2048];
             let _ = stream.read(&mut buf); // drain request line/headers (best-effort)
             let resp = format!(
@@ -77,7 +79,10 @@ fn mock_mirror_serves_catalog_download_parse_resolve() {
     assert_eq!(cat.resolve("intel-win", Role::Ocr).unwrap().ep, "openvino");
     assert_eq!(cat.resolve("amd-win", Role::Ocr).unwrap().ep, "directml");
     // 缺 tier 回退 cpu-fallback。
-    assert_eq!(cat.resolve("nope", Role::Embedding).unwrap().repo, "Xenova/bge-m3");
+    assert_eq!(
+        cat.resolve("nope", Role::Embedding).unwrap().repo,
+        "Xenova/bge-m3"
+    );
 }
 
 #[test]
@@ -105,7 +110,10 @@ fn fetch_remote_unsigned_falls_back_to_builtin() {
     let ocr = cat.resolve("intel-win", Role::Ocr).unwrap();
     assert_eq!(ocr.ep, "openvino");
     // 内置 baseline 的 source 引 bench reports(非 mock 的 'test:2')。
-    assert!(ocr.source.contains("33-34"), "fell back to built-in baseline, not mock catalog");
+    assert!(
+        ocr.source.contains("33-34"),
+        "fell back to built-in baseline, not mock catalog"
+    );
 }
 
 #[test]

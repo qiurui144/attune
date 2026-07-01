@@ -9,7 +9,11 @@ use attune_core::store::Store;
 
 fn make_account(store: &Store, path_suffix: &str) -> (String, EmailAccountInput) {
     let dir_id = store
-        .bind_directory(&format!("email:imap.gmail.com/{path_suffix}"), false, &["eml"])
+        .bind_directory(
+            &format!("email:imap.gmail.com/{path_suffix}"),
+            false,
+            &["eml"],
+        )
         .unwrap();
     let input = EmailAccountInput {
         dir_id: dir_id.clone(),
@@ -111,7 +115,10 @@ fn touch_email_account_sync_sets_last_sync() {
     store.upsert_email_account(&dek, &input).unwrap();
 
     let row = store.get_email_account(&dek, &dir_id).unwrap().unwrap();
-    assert!(row.last_sync.is_none(), "刚 upsert 的账户 last_sync 应为 None");
+    assert!(
+        row.last_sync.is_none(),
+        "刚 upsert 的账户 last_sync 应为 None"
+    );
 
     store.touch_email_account_sync(&dir_id).unwrap();
 
@@ -126,10 +133,22 @@ fn folder_uid_cursor_round_trips() {
     let (dir_id, input) = make_account(&store, "uid");
     store.upsert_email_account(&dek, &input).unwrap();
 
-    assert_eq!(store.get_folder_uid(&dir_id, "INBOX").unwrap(), 0, "未设置时默认 0");
+    assert_eq!(
+        store.get_folder_uid(&dir_id, "INBOX").unwrap(),
+        0,
+        "未设置时默认 0"
+    );
     store.set_folder_uid(&dir_id, "INBOX", 1234).unwrap();
     assert_eq!(store.get_folder_uid(&dir_id, "INBOX").unwrap(), 1234);
     store.set_folder_uid(&dir_id, "INBOX", 5678).unwrap();
-    assert_eq!(store.get_folder_uid(&dir_id, "INBOX").unwrap(), 5678, "upsert 覆盖");
-    assert_eq!(store.get_folder_uid(&dir_id, "Sent").unwrap(), 0, "不同 folder 独立");
+    assert_eq!(
+        store.get_folder_uid(&dir_id, "INBOX").unwrap(),
+        5678,
+        "upsert 覆盖"
+    );
+    assert_eq!(
+        store.get_folder_uid(&dir_id, "Sent").unwrap(),
+        0,
+        "不同 folder 独立"
+    );
 }

@@ -17,9 +17,9 @@
 //! - `entities`: 通用语义实体（Person / Money / Date / Org），用于 Project 推荐归类
 //! - `pii`: 敏感字段闭合清单，用于出网前脱敏（输出可逆 placeholder）
 
-pub mod patterns;
 pub mod dictionary;
 pub mod ner;
+pub mod patterns;
 
 // ── F-17 LLM call wrapper helpers ──────────────────────────────────────────
 //
@@ -319,7 +319,8 @@ impl Redactor {
     /// 便利方法：注册一个由 (name, regex) 描述的 PII 模式。
     /// vertical plugin 提供的行业 PII 用这条路径（PluginRegistry::all_pii_patterns 聚合后批量注入）。
     pub fn add_pattern(&mut self, name: &str, regex: &str) -> std::io::Result<()> {
-        self.user_dict.push(dictionary::DictEntry::from_regex(name, regex)?);
+        self.user_dict
+            .push(dictionary::DictEntry::from_regex(name, regex)?);
         Ok(())
     }
 
@@ -386,11 +387,8 @@ impl Redactor {
             .join(SEP);
 
         let result = self.redact(&joined);
-        let redacted_segments: Vec<String> = result
-            .redacted_text
-            .split(SEP)
-            .map(String::from)
-            .collect();
+        let redacted_segments: Vec<String> =
+            result.redacted_text.split(SEP).map(String::from).collect();
 
         // mappings 中的 byte_start/byte_end 是相对 joined 字符串的，对调用方来说
         // 通常只用于 restore（按 placeholder 字面量替换，不依赖 offset），所以
@@ -424,16 +422,51 @@ impl Redactor {
         // 内置 patterns（顺序：长 → 短，减少 overlap 时短的吞掉长的）
         push_matches(&mut raw, PiiKind::Url, patterns::detect_url(text), text);
         push_matches(&mut raw, PiiKind::Email, patterns::detect_email(text), text);
-        push_matches(&mut raw, PiiKind::IdCard, patterns::detect_id_card(text), text);
-        push_matches(&mut raw, PiiKind::CreditCard, patterns::detect_credit_card(text), text);
-        push_matches(&mut raw, PiiKind::BankCard, patterns::detect_bank_card(text), text);
-        push_matches(&mut raw, PiiKind::ApiKey, patterns::detect_api_key(text), text);
+        push_matches(
+            &mut raw,
+            PiiKind::IdCard,
+            patterns::detect_id_card(text),
+            text,
+        );
+        push_matches(
+            &mut raw,
+            PiiKind::CreditCard,
+            patterns::detect_credit_card(text),
+            text,
+        );
+        push_matches(
+            &mut raw,
+            PiiKind::BankCard,
+            patterns::detect_bank_card(text),
+            text,
+        );
+        push_matches(
+            &mut raw,
+            PiiKind::ApiKey,
+            patterns::detect_api_key(text),
+            text,
+        );
         push_matches(&mut raw, PiiKind::Ipv6, patterns::detect_ipv6(text), text);
         push_matches(&mut raw, PiiKind::Ipv4, patterns::detect_ipv4(text), text);
         push_matches(&mut raw, PiiKind::Phone, patterns::detect_phone(text), text);
-        push_matches(&mut raw, PiiKind::PlateNumber, patterns::detect_plate_number(text), text);
-        push_matches(&mut raw, PiiKind::MacAddress, patterns::detect_mac(text), text);
-        push_matches(&mut raw, PiiKind::Coordinate, patterns::detect_gps(text), text);
+        push_matches(
+            &mut raw,
+            PiiKind::PlateNumber,
+            patterns::detect_plate_number(text),
+            text,
+        );
+        push_matches(
+            &mut raw,
+            PiiKind::MacAddress,
+            patterns::detect_mac(text),
+            text,
+        );
+        push_matches(
+            &mut raw,
+            PiiKind::Coordinate,
+            patterns::detect_gps(text),
+            text,
+        );
 
         // 用户词典
         for entry in &self.user_dict {
@@ -810,20 +843,35 @@ mod tests {
         // 模拟 LLM 把所有 placeholder 都 echo 回来
         let llm_response = format!(
             "User reports {} and {}. Earlier said {}. Key={}",
-            redacted[0].split_whitespace().nth(1).unwrap_or(""),  // [PHONE_1]
-            redacted[0].split_whitespace().last().unwrap_or(""),   // [EMAIL_1]
-            redacted[1].split_whitespace().last().unwrap_or(""),   // [PHONE_2]
-            redacted[2].split_whitespace().last().unwrap_or(""),   // [APIKEY_1]
+            redacted[0].split_whitespace().nth(1).unwrap_or(""), // [PHONE_1]
+            redacted[0].split_whitespace().last().unwrap_or(""), // [EMAIL_1]
+            redacted[1].split_whitespace().last().unwrap_or(""), // [PHONE_2]
+            redacted[2].split_whitespace().last().unwrap_or(""), // [APIKEY_1]
         );
 
         let restored = r.restore(&llm_response, &mappings);
 
         // 所有原始 PII 都应该在 restored 中
-        assert!(restored.contains("13812345678"), "user phone restored: {}", restored);
-        assert!(restored.contains("alice@example.com"), "user email restored: {}", restored);
-        assert!(restored.contains("13987654321"), "history phone restored: {}", restored);
-        assert!(restored.contains("sk-1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF"),
-            "api_key restored: {}", restored);
+        assert!(
+            restored.contains("13812345678"),
+            "user phone restored: {}",
+            restored
+        );
+        assert!(
+            restored.contains("alice@example.com"),
+            "user email restored: {}",
+            restored
+        );
+        assert!(
+            restored.contains("13987654321"),
+            "history phone restored: {}",
+            restored
+        );
+        assert!(
+            restored.contains("sk-1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF"),
+            "api_key restored: {}",
+            restored
+        );
     }
 
     // ── R14 v0.6.4 fuzz-style robustness for Redactor::redact ──────────────
@@ -835,26 +883,29 @@ mod tests {
         // 层有 panic 风险 (utf-8 boundary / overlap dedupe / placeholder collision).
         let r = make_redactor();
         let cases: Vec<String> = vec![
-            "".to_string(),                                    // empty
-            "a".repeat(100_000),                               // 100KB plain
-            "a".repeat(1_000_000),                             // 1MB plain (regex linear time check)
-            "@".repeat(10_000),                                // pathological email-like
-            "1".repeat(50_000),                                // 50K digits (id card / phone / bank / credit prefixes)
-            "https://".to_string() + &"a".repeat(50_000),      // long URL
-            "中".repeat(10_000),                               // 10K cn chars
-            "🌿".repeat(5_000),                                  // 5K emoji
+            "".to_string(),                                     // empty
+            "a".repeat(100_000),                                // 100KB plain
+            "a".repeat(1_000_000), // 1MB plain (regex linear time check)
+            "@".repeat(10_000),    // pathological email-like
+            "1".repeat(50_000),    // 50K digits (id card / phone / bank / credit prefixes)
+            "https://".to_string() + &"a".repeat(50_000), // long URL
+            "中".repeat(10_000),   // 10K cn chars
+            "🌿".repeat(5_000),    // 5K emoji
             (0u8..=255).map(|b| b as char).collect::<String>(), // every byte as char
-            "13800138000\n".repeat(10_000),                    // 10K phone numbers
-            "tel://13800138000 ".repeat(1_000),                // mixed real PII
+            "13800138000\n".repeat(10_000), // 10K phone numbers
+            "tel://13800138000 ".repeat(1_000), // mixed real PII
         ];
         for (i, input) in cases.iter().enumerate() {
-            let _result = r.redact(input);  // must not panic
-            // restore must also be panic-safe even with empty mappings
+            let _result = r.redact(input); // must not panic
+                                           // restore must also be panic-safe even with empty mappings
             let _restored = r.restore(input, &[]);
             // round-trip on text WITHOUT PII: redacted_text == original
             let r2 = r.redact(input);
             if r2.mappings.is_empty() {
-                assert_eq!(r2.redacted_text, *input, "case {i}: PII-free input should pass through");
+                assert_eq!(
+                    r2.redacted_text, *input,
+                    "case {i}: PII-free input should pass through"
+                );
             }
         }
     }
@@ -874,7 +925,9 @@ mod tests {
             let restored = r.restore(&result.redacted_text, &result.mappings);
             // 不变量: restore 后所有 placeholder 都被还原
             assert!(
-                !restored.contains("[PHONE_") && !restored.contains("[EMAIL_") && !restored.contains("[URL_"),
+                !restored.contains("[PHONE_")
+                    && !restored.contains("[EMAIL_")
+                    && !restored.contains("[URL_"),
                 "restore should remove all placeholders, got: {}",
                 restored
             );
@@ -885,9 +938,9 @@ mod tests {
     fn redact_invalid_utf8_boundary_safe() {
         // 字节级正则可能落在 multi-byte char 中间. Redactor 必须 char-boundary safe.
         let cases = vec![
-            "前缀 13800138000 中文",                  // CJK bordering ASCII
-            "🌿邮箱alice@example.com🌿",              // emoji + email
-            "测试①13800138000测试②13987654321测试",   // CJK + numbered + phone
+            "前缀 13800138000 中文",                // CJK bordering ASCII
+            "🌿邮箱alice@example.com🌿",            // emoji + email
+            "测试①13800138000测试②13987654321测试", // CJK + numbered + phone
         ];
         let r = make_redactor();
         for input in cases {
@@ -896,7 +949,10 @@ mod tests {
             let restored = r.restore(&result.redacted_text, &result.mappings);
             assert!(restored.is_char_boundary(0));
             assert!(restored.is_char_boundary(restored.len()));
-            assert!(std::str::from_utf8(restored.as_bytes()).is_ok(), "valid UTF-8");
+            assert!(
+                std::str::from_utf8(restored.as_bytes()).is_ok(),
+                "valid UTF-8"
+            );
         }
     }
 

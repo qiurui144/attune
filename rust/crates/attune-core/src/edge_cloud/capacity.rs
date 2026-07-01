@@ -73,7 +73,11 @@ pub struct CapacitySignal {
 impl CapacitySignal {
     /// 降级哨兵：probe 失败 / 非 K3 → Unknown（eta/headroom 归零）。
     pub const fn unknown() -> Self {
-        CapacitySignal { state: CapacityState::Unknown, eta_ms: 0, mem_headroom_mb: 0 }
+        CapacitySignal {
+            state: CapacityState::Unknown,
+            eta_ms: 0,
+            mem_headroom_mb: 0,
+        }
     }
 }
 
@@ -115,7 +119,10 @@ impl HttpCapacityClient {
             .connect_timeout(timeout)
             .build()
             .unwrap_or_default();
-        HttpCapacityClient { base_url: base_url.trim_end_matches('/').to_string(), client }
+        HttpCapacityClient {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            client,
+        }
     }
 }
 
@@ -136,7 +143,10 @@ impl CapacityProbe for HttpCapacityClient {
             }
         };
         if !resp.status().is_success() {
-            log::warn!("capacity probe non-2xx ({}); degrading to Unknown", resp.status());
+            log::warn!(
+                "capacity probe non-2xx ({}); degrading to Unknown",
+                resp.status()
+            );
             return CapacitySignal::unknown();
         }
         match resp.json::<CapacityResponse>() {
@@ -161,7 +171,10 @@ pub struct MockCapacityProbe {
 
 impl MockCapacityProbe {
     pub fn new(signal: CapacitySignal) -> Self {
-        MockCapacityProbe { signal, calls: std::sync::atomic::AtomicUsize::new(0) }
+        MockCapacityProbe {
+            signal,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
     }
 
     /// 永远返回 Unknown（模拟 probe 不可达 / 降级路径）。
@@ -177,7 +190,11 @@ impl MockCapacityProbe {
             CapacityState::ReadySlow => (8000, 1024),
             CapacityState::Unavailable | CapacityState::Unknown => (0, 0),
         };
-        Self::new(CapacitySignal { state, eta_ms: eta, mem_headroom_mb: head })
+        Self::new(CapacitySignal {
+            state,
+            eta_ms: eta,
+            mem_headroom_mb: head,
+        })
     }
 
     /// query 被调用次数（spy；guard 测试断言个人版 = 0）。
@@ -203,7 +220,10 @@ mod tests {
         assert_eq!(CapacityState::parse("ready-fast"), CapacityState::ReadyFast);
         assert_eq!(CapacityState::parse("QUEUED"), CapacityState::Queued);
         assert_eq!(CapacityState::parse("READY_SLOW"), CapacityState::ReadySlow);
-        assert_eq!(CapacityState::parse("UNAVAILABLE"), CapacityState::Unavailable);
+        assert_eq!(
+            CapacityState::parse("UNAVAILABLE"),
+            CapacityState::Unavailable
+        );
     }
 
     #[test]

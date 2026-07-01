@@ -36,7 +36,6 @@ pub enum AppError {
     // 类别由 IntoResponse 的 `code` 字段承载 (parts()). 这样旧 tuple route 迁移
     // 到 AppError 时 wire `error` 文本保持不变 (纯加性: 只多了 code 字段).
     // 类别信息在日志侧由 #[derive(Debug)] 的 variant 名保留.
-
     /// 400 Bad Request — 输入校验失败 / 参数错误 / 路径不合法.
     #[error("{0}")]
     BadRequest(String),
@@ -129,7 +128,9 @@ impl AppError {
             AppError::Unprocessable(_) => (StatusCode::UNPROCESSABLE_ENTITY, "unprocessable"),
             AppError::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "too-many-requests"),
             AppError::BadGateway(_) => (StatusCode::BAD_GATEWAY, "bad-gateway"),
-            AppError::ServiceUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "service-unavailable"),
+            AppError::ServiceUnavailable(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "service-unavailable")
+            }
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
@@ -182,7 +183,9 @@ impl From<attune_core::error::VaultError> for AppError {
             VaultError::Locked => AppError::Unauthorized("vault locked".into()),
             VaultError::Sealed => AppError::ServiceUnavailable("vault not initialized".into()),
             VaultError::InvalidPassword => AppError::Unauthorized("invalid password".into()),
-            VaultError::AlreadyInitialized => AppError::Conflict("vault already initialized".into()),
+            VaultError::AlreadyInitialized => {
+                AppError::Conflict("vault already initialized".into())
+            }
             VaultError::AlreadyUnlocked => AppError::Conflict("vault already unlocked".into()),
             VaultError::SessionExpired | VaultError::SessionInvalid => {
                 AppError::Unauthorized(e.to_string())
@@ -266,8 +269,8 @@ mod tests {
             "pending_embeddings": 12000,
             "retry_after_seconds": 30,
         });
-        let resp = AppError::detailed(StatusCode::SERVICE_UNAVAILABLE, original.clone())
-            .into_response();
+        let resp =
+            AppError::detailed(StatusCode::SERVICE_UNAVAILABLE, original.clone()).into_response();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();

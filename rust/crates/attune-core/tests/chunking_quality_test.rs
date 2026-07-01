@@ -37,7 +37,10 @@ fn l1_sections_split_on_markdown_headings() {
         sections.len() >= 5,
         "expected >= 5 sections from 1 H1 + multiple H2, got {}: {:?}",
         sections.len(),
-        sections.iter().map(|(i, s)| (i, s.lines().next().unwrap_or(""))).collect::<Vec<_>>()
+        sections
+            .iter()
+            .map(|(i, s)| (i, s.lines().next().unwrap_or("")))
+            .collect::<Vec<_>>()
     );
 
     // Every section's FIRST non-empty line should be the heading that opened it
@@ -98,9 +101,8 @@ fn l1_heading_boundary_not_mid_prose() {
             // A markdown heading (`## ...`) appearing here means a boundary was missed.
             // Code-fence interiors are exempt: `#` inside ```...``` is not a heading,
             // but the fixture's code block has no leading-# lines, so this is safe.
-            let is_md_heading = t.starts_with("# ")
-                || t.starts_with("## ")
-                || t.starts_with("### ");
+            let is_md_heading =
+                t.starts_with("# ") || t.starts_with("## ") || t.starts_with("### ");
             assert!(
                 !is_md_heading,
                 "section {idx} contains a heading mid-body (boundary missed): {t:?}"
@@ -132,7 +134,10 @@ fn l2_chunks_respect_size_bound() {
         }
         total_chunks += chunks.len();
     }
-    assert!(total_chunks >= sections.len(), "every section should yield >= 1 chunk");
+    assert!(
+        total_chunks >= sections.len(),
+        "every section should yield >= 1 chunk"
+    );
 }
 
 #[test]
@@ -148,10 +153,21 @@ fn l2_chunk_overlap_preserves_boundary_facts() {
         .expect("missing oversize-paragraph section");
 
     let chunks = chunker::chunk(&para, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP);
-    assert!(chunks.len() >= 2, "oversize section should split into >= 2 chunks, got {}", chunks.len());
+    assert!(
+        chunks.len() >= 2,
+        "oversize section should split into >= 2 chunks, got {}",
+        chunks.len()
+    );
 
     let head: String = para.chars().take(30).collect();
-    let tail: String = para.chars().rev().take(30).collect::<String>().chars().rev().collect();
+    let tail: String = para
+        .chars()
+        .rev()
+        .take(30)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     assert!(
         chunks.iter().any(|c| c.contains(&head)),
         "no chunk contains the section head — start dropped"
@@ -209,7 +225,10 @@ fn code_block_body_not_torn_across_chunks() {
         whole,
         "the rust code block was torn across chunks — no single chunk holds the \
          full body (signature + commit). chunks={:?}",
-        chunks.iter().map(|c| c.chars().take(40).collect::<String>()).collect::<Vec<_>>()
+        chunks
+            .iter()
+            .map(|c| c.chars().take(40).collect::<String>())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -248,7 +267,11 @@ fn oversize_paragraph_chunked_not_dropped() {
 
     // Every chunk-aligned slice of the source must appear in some chunk: sample
     // the start, middle, and end windows.
-    for frac in [0usize, src_chars.len() / 2, src_chars.len().saturating_sub(20)] {
+    for frac in [
+        0usize,
+        src_chars.len() / 2,
+        src_chars.len().saturating_sub(20),
+    ] {
         let end = (frac + 20).min(src_chars.len());
         let window: String = src_chars[frac..end].iter().collect();
         assert!(
@@ -264,14 +287,28 @@ fn oversize_cjk_paragraph_chunked_not_dropped() {
     // not panic on multibyte boundaries and must not drop the tail).
     let para = "知识检索的质量取决于分块。".repeat(80); // ~1040 CJK chars
     let chunks = chunker::chunk(&para, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP);
-    assert!(chunks.len() >= 2, "CJK oversize para should split, got {}", chunks.len());
+    assert!(
+        chunks.len() >= 2,
+        "CJK oversize para should split, got {}",
+        chunks.len()
+    );
 
     let head: String = para.chars().take(8).collect();
-    let tail: String = para.chars().rev().take(8).collect::<String>().chars().rev().collect();
+    let tail: String = para
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     assert!(chunks.iter().any(|c| c.contains(&head)), "CJK head dropped");
     assert!(chunks.iter().any(|c| c.contains(&tail)), "CJK tail dropped");
     for c in &chunks {
-        assert!(c.chars().count() <= 2 * DEFAULT_CHUNK_SIZE, "CJK chunk too large");
+        assert!(
+            c.chars().count() <= 2 * DEFAULT_CHUNK_SIZE,
+            "CJK chunk too large"
+        );
     }
 }
 

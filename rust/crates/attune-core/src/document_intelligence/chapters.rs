@@ -145,13 +145,16 @@ pub fn summarize_chapter(
     router: &ModelRouter,
 ) -> Result<ChapterReadResult> {
     let reasoning_model = router.pick(ModelRole::Reasoning).to_string();
-    let ch = chapters
-        .get(idx)
-        .ok_or_else(|| crate::error::VaultError::InvalidInput(format!("chapter idx {idx} out of range")))?;
+    let ch = chapters.get(idx).ok_or_else(|| {
+        crate::error::VaultError::InvalidInput(format!("chapter idx {idx} out of range"))
+    })?;
 
     let (memory, used) = build_cross_chapter_memory(chapters, idx);
     let user = compose_chapter_payload(&memory, &ch.content);
-    let msgs = [ChatMessage::system(SUMMARIZE_SYSTEM_PROMPT), ChatMessage::user(&user)];
+    let msgs = [
+        ChatMessage::system(SUMMARIZE_SYSTEM_PROMPT),
+        ChatMessage::user(&user),
+    ];
     let (summary, usage) = reasoning.chat_with_history(&msgs)?;
     // §4.5.E: a model that returns an empty/whitespace summary (some weak models do on long input)
     // must yield an honest fallback, not a confusing empty card — degrade to the chapter's local
@@ -190,21 +193,30 @@ pub fn ask(
     router: &ModelRouter,
 ) -> Result<ChapterReadResult> {
     if question.trim().is_empty() {
-        return Err(crate::error::VaultError::InvalidInput("question is required for ask".into()));
+        return Err(crate::error::VaultError::InvalidInput(
+            "question is required for ask".into(),
+        ));
     }
     let reasoning_model = router.pick(ModelRole::Reasoning).to_string();
-    let ch = chapters
-        .get(idx)
-        .ok_or_else(|| crate::error::VaultError::InvalidInput(format!("chapter idx {idx} out of range")))?;
+    let ch = chapters.get(idx).ok_or_else(|| {
+        crate::error::VaultError::InvalidInput(format!("chapter idx {idx} out of range"))
+    })?;
 
     let (memory, used) = build_cross_chapter_memory(chapters, idx);
     let user = format!(
         "{}\n\n【本章正文】\n{}\n\n【问题】{}",
-        if memory.is_empty() { String::new() } else { format!("【前序章节记忆】\n{memory}") },
+        if memory.is_empty() {
+            String::new()
+        } else {
+            format!("【前序章节记忆】\n{memory}")
+        },
         ch.content,
         question
     );
-    let msgs = [ChatMessage::system(ASK_SYSTEM_PROMPT), ChatMessage::user(&user)];
+    let msgs = [
+        ChatMessage::system(ASK_SYSTEM_PROMPT),
+        ChatMessage::user(&user),
+    ];
     let (answer, usage) = reasoning.chat_with_history(&msgs)?;
     // §4.5.E: empty answer → honest fallback (chapter extractive preview) instead of a blank card.
     let answer = degrade_if_empty(answer, &ch.content);
@@ -238,7 +250,8 @@ fn degrade_if_empty(result: String, chapter_content: &str) -> String {
     if !result.trim().is_empty() {
         return result;
     }
-    let preview = crate::document_intelligence::extractive::extract_candidates(chapter_content, 0.5, &[]);
+    let preview =
+        crate::document_intelligence::extractive::extract_candidates(chapter_content, 0.5, &[]);
     if preview.trim().is_empty() {
         // Truly empty chapter — return a short honest marker rather than "".
         "（本章无可提取内容）".to_string()
@@ -254,7 +267,11 @@ fn build_cross_chapter_memory(chapters: &[ChapterCtx], idx: usize) -> (String, V
     let mut used = Vec::new();
     for (i, ch) in chapters.iter().enumerate().take(idx) {
         if let Some(sum) = &ch.cached_summary {
-            let h = if ch.heading_path.is_empty() { format!("章{i}") } else { ch.heading_path.clone() };
+            let h = if ch.heading_path.is_empty() {
+                format!("章{i}")
+            } else {
+                ch.heading_path.clone()
+            };
             parts.push(format!("【{h}】{sum}"));
             used.push(i);
         }
@@ -372,8 +389,14 @@ fn account(
 ) {
     use crate::context_compress::estimate_tokens;
     if usage.tokens_in == 0 {
-        bill.reduce_llm_tokens.r#in = bill.reduce_llm_tokens.r#in.saturating_add(estimate_tokens(user) as u32);
-        bill.reduce_llm_tokens.out = bill.reduce_llm_tokens.out.saturating_add(estimate_tokens(resp) as u32);
+        bill.reduce_llm_tokens.r#in = bill
+            .reduce_llm_tokens
+            .r#in
+            .saturating_add(estimate_tokens(user) as u32);
+        bill.reduce_llm_tokens.out = bill
+            .reduce_llm_tokens
+            .out
+            .saturating_add(estimate_tokens(resp) as u32);
         if bill.reduce_llm_tokens.model.is_empty() {
             bill.reduce_llm_tokens.model = model.to_string();
         }
@@ -406,7 +429,10 @@ mod tests {
         let chapters = list(&three_chapter_doc(), 0.5);
         assert_eq!(chapters.len(), 3, "three headings → three chapters");
         for c in &chapters {
-            assert!(!c.extractive_preview.is_empty(), "every chapter has an extractive preview");
+            assert!(
+                !c.extractive_preview.is_empty(),
+                "every chapter has an extractive preview"
+            );
         }
         assert!(chapters[0].heading_path.contains("第一章"));
         // list takes no LlmProvider → structurally cannot call an LLM (zero-cost free preview).
@@ -420,7 +446,10 @@ mod tests {
         let r = summarize_chapter(&chs, 1, OutputMode::Review, &reasoning, &router()).unwrap();
         assert_eq!(r.chapter_idx, 1);
         assert_eq!(r.output_mode, "review");
-        assert!(!r.annotations.is_empty(), "review mode anchors a chapter annotation");
+        assert!(
+            !r.annotations.is_empty(),
+            "review mode anchors a chapter annotation"
+        );
         // annotation offset aligns to chapter 1's text.
         let ch_chars: Vec<char> = chs[1].content.chars().collect();
         let ann = &r.annotations[0];
@@ -436,21 +465,53 @@ mod tests {
         chs[0].cached_summary = Some("第一章记忆：引言背景XYZ".into());
         chs[1].cached_summary = Some("第二章记忆：方法步骤ABC".into());
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("基于前两章，结果是……");
-        let r = ask(&chs, 2, "结果与方法的关系？", OutputMode::Review, &reasoning, &router()).unwrap();
+        let r = ask(
+            &chs,
+            2,
+            "结果与方法的关系？",
+            OutputMode::Review,
+            &reasoning,
+            &router(),
+        )
+        .unwrap();
         // The LLM prompt must contain the prior chapters' summaries (memory proven via capture).
-        assert!(reasoning.any_call_contains("第一章记忆：引言背景XYZ"), "chapter 0 summary injected");
-        assert!(reasoning.any_call_contains("第二章记忆：方法步骤ABC"), "chapter 1 summary injected");
-        assert_eq!(r.cross_chapter_memory_used, vec![0, 1], "memory_used lists the injected prior chapters");
+        assert!(
+            reasoning.any_call_contains("第一章记忆：引言背景XYZ"),
+            "chapter 0 summary injected"
+        );
+        assert!(
+            reasoning.any_call_contains("第二章记忆：方法步骤ABC"),
+            "chapter 1 summary injected"
+        );
+        assert_eq!(
+            r.cross_chapter_memory_used,
+            vec![0, 1],
+            "memory_used lists the injected prior chapters"
+        );
     }
 
     #[test]
     fn test_ask_no_prior_memory_when_chapter_zero() {
         let chs = split_chapters(&three_chapter_doc());
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("答案");
-        let r = ask(&chs, 0, "引言讲了什么？", OutputMode::Structured, &reasoning, &router()).unwrap();
-        assert!(r.cross_chapter_memory_used.is_empty(), "chapter 0 has no prior chapters");
+        let r = ask(
+            &chs,
+            0,
+            "引言讲了什么？",
+            OutputMode::Structured,
+            &reasoning,
+            &router(),
+        )
+        .unwrap();
+        assert!(
+            r.cross_chapter_memory_used.is_empty(),
+            "chapter 0 has no prior chapters"
+        );
         assert_eq!(r.output_mode, "structured");
-        assert!(r.annotations.is_empty(), "structured mode has no review annotations");
+        assert!(
+            r.annotations.is_empty(),
+            "structured mode has no review annotations"
+        );
     }
 
     #[test]
@@ -460,12 +521,26 @@ mod tests {
         // chapter 1 content contains "方法章节描述了实验设计与步骤"
         let reasoning = RecordingMockLlm::new("gpt-4o")
             .with_response("根据原文「方法章节描述了实验设计与步骤」可知方法清晰。");
-        let r = ask(&chs, 1, "方法如何？", OutputMode::Review, &reasoning, &router()).unwrap();
-        assert!(!r.citations.is_empty(), "answer quoting the chapter yields a citation");
+        let r = ask(
+            &chs,
+            1,
+            "方法如何？",
+            OutputMode::Review,
+            &reasoning,
+            &router(),
+        )
+        .unwrap();
+        assert!(
+            !r.citations.is_empty(),
+            "answer quoting the chapter yields a citation"
+        );
         let ch_chars: Vec<char> = chs[1].content.chars().collect();
         for cit in &r.citations {
             let span: String = ch_chars[cit.offset_start..cit.offset_end].iter().collect();
-            assert!(chs[1].content.contains(&span), "citation span exists verbatim in chapter");
+            assert!(
+                chs[1].content.contains(&span),
+                "citation span exists verbatim in chapter"
+            );
             assert_eq!(cit.kind, "citation");
         }
     }
@@ -483,7 +558,11 @@ mod tests {
         let chs = split_chapters(&three_chapter_doc());
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("x");
         assert!(ask(&chs, 0, "  ", OutputMode::Review, &reasoning, &router()).is_err());
-        assert_eq!(reasoning.call_count(), 0, "empty question short-circuits before any LLM call");
+        assert_eq!(
+            reasoning.call_count(),
+            0,
+            "empty question short-circuits before any LLM call"
+        );
     }
 
     #[test]
@@ -504,16 +583,34 @@ mod tests {
         // Model returns whitespace (weak-model failure mode) — must NOT yield an empty result.
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("   \n  ");
         let r = summarize_chapter(&chs, 0, OutputMode::Review, &reasoning, &router()).unwrap();
-        assert!(!r.result.trim().is_empty(), "empty model output must degrade, not return blank");
-        assert!(r.result.contains("本章要点提取"), "fallback marker present: {:?}", r.result);
+        assert!(
+            !r.result.trim().is_empty(),
+            "empty model output must degrade, not return blank"
+        );
+        assert!(
+            r.result.contains("本章要点提取"),
+            "fallback marker present: {:?}",
+            r.result
+        );
     }
 
     #[test]
     fn test_ask_empty_model_output_degrades() {
         let chs = split_chapters(&three_chapter_doc());
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("");
-        let r = ask(&chs, 0, "引言讲了什么？", OutputMode::Structured, &reasoning, &router()).unwrap();
-        assert!(!r.result.trim().is_empty(), "empty answer must degrade to a non-blank fallback");
+        let r = ask(
+            &chs,
+            0,
+            "引言讲了什么？",
+            OutputMode::Structured,
+            &reasoning,
+            &router(),
+        )
+        .unwrap();
+        assert!(
+            !r.result.trim().is_empty(),
+            "empty answer must degrade to a non-blank fallback"
+        );
     }
 
     #[test]

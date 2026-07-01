@@ -42,8 +42,11 @@ pub fn analyze_items(
 
     // 2. 分组:clean 达到 hdbscan 有效下限 → group_only;否则 fallback 子目录。
     let model_name = llm.map(|l| l.model_name().to_string()).unwrap_or_default();
-    let id_to_item: std::collections::HashMap<String, ItemView> =
-        clean.iter().cloned().map(|i| (i.item_id.clone(), i)).collect();
+    let id_to_item: std::collections::HashMap<String, ItemView> = clean
+        .iter()
+        .cloned()
+        .map(|i| (i.item_id.clone(), i))
+        .collect();
 
     let cluster_threshold = min_cluster_size.max(HDBSCAN_FLOOR);
     let raw_groups: Vec<(i32, Vec<String>)> = if clean.len() >= cluster_threshold {
@@ -73,15 +76,23 @@ pub fn analyze_items(
     let mut groups = Vec::new();
     let mut est_tokens = 0u64;
     for (gid, ids) in raw_groups {
-        let members: Vec<ItemView> =
-            ids.iter().filter_map(|id| id_to_item.get(id).cloned()).collect();
+        let members: Vec<ItemView> = ids
+            .iter()
+            .filter_map(|id| id_to_item.get(id).cloned())
+            .collect();
         if gid == -1 {
             for m in &members {
-                noise.push(NoiseItem { item_id: m.item_id.clone(), title: m.title.clone() });
+                noise.push(NoiseItem {
+                    item_id: m.item_id.clone(),
+                    title: m.title.clone(),
+                });
             }
             continue;
         }
-        let view = ClusterView { group_id: gid, items: &members };
+        let view = ClusterView {
+            group_id: gid,
+            items: &members,
+        };
         let label = match llm {
             Some(l) => {
                 est_tokens += 400;
@@ -137,14 +148,24 @@ mod tests {
     use crate::organizer::strategy::StrategyRegistry;
     use crate::organizer::types::ItemView;
     fn iv(id: &str, emb: Vec<f32>) -> ItemView {
-        ItemView { item_id: id.into(), title: format!("file {id}"), content_snippet: "".into(), dir: "".into(), embedding: Some(emb) }
+        ItemView {
+            item_id: id.into(),
+            title: format!("file {id}"),
+            content_snippet: "".into(),
+            dir: "".into(),
+            embedding: Some(emb),
+        }
     }
     #[test]
     fn analyze_items_covers_all_inputs_no_llm_path() {
         let reg = StrategyRegistry::new();
         let strat = reg.resolve(None);
         // 3 个 item,min_items=2,LLM=None → group_only 聚类 + extractive 命名
-        let items = vec![iv("a", vec![1.0, 0.0]), iv("b", vec![0.9, 0.1]), iv("c", vec![0.0, 1.0])];
+        let items = vec![
+            iv("a", vec![1.0, 0.0]),
+            iv("b", vec![0.9, 0.1]),
+            iv("c", vec![0.0, 1.0]),
+        ];
         let p = analyze_items("p1".into(), None, items, strat.as_ref(), None, 2).unwrap();
         let mut all = p.all_item_ids();
         all.sort();
@@ -158,10 +179,34 @@ mod tests {
         let reg = StrategyRegistry::new();
         let strat = reg.resolve(None);
         let items = vec![
-            ItemView { item_id: "a".into(), title: "a".into(), content_snippet: "".into(), dir: "d1".into(), embedding: Some(vec![1.0, 0.0]) },
-            ItemView { item_id: "b".into(), title: "b".into(), content_snippet: "".into(), dir: "d1".into(), embedding: Some(vec![0.9, 0.1]) },
-            ItemView { item_id: "c".into(), title: "c".into(), content_snippet: "".into(), dir: "d2".into(), embedding: Some(vec![0.0, 1.0]) },
-            ItemView { item_id: "d".into(), title: "d".into(), content_snippet: "".into(), dir: "d2".into(), embedding: Some(vec![0.1, 0.9]) },
+            ItemView {
+                item_id: "a".into(),
+                title: "a".into(),
+                content_snippet: "".into(),
+                dir: "d1".into(),
+                embedding: Some(vec![1.0, 0.0]),
+            },
+            ItemView {
+                item_id: "b".into(),
+                title: "b".into(),
+                content_snippet: "".into(),
+                dir: "d1".into(),
+                embedding: Some(vec![0.9, 0.1]),
+            },
+            ItemView {
+                item_id: "c".into(),
+                title: "c".into(),
+                content_snippet: "".into(),
+                dir: "d2".into(),
+                embedding: Some(vec![0.0, 1.0]),
+            },
+            ItemView {
+                item_id: "d".into(),
+                title: "d".into(),
+                content_snippet: "".into(),
+                dir: "d2".into(),
+                embedding: Some(vec![0.1, 0.9]),
+            },
         ];
         let p = analyze_items("p2".into(), None, items, strat.as_ref(), None, 2).unwrap();
         let mut all = p.all_item_ids();

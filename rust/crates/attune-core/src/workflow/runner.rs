@@ -241,7 +241,10 @@ mod tests {
         let step = det_step("s1", "echo_input", None);
         let wf = workflow_with_steps("wf/no_output", vec![step]);
         let result = run_workflow(&wf, &empty_event(), None, None).expect("ok");
-        assert!(result.outputs.is_empty(), "step without output key should not pollute state");
+        assert!(
+            result.outputs.is_empty(),
+            "step without output key should not pollute state"
+        );
     }
 
     #[test]
@@ -253,7 +256,10 @@ mod tests {
         match err {
             WorkflowError::StepFailed { step_id, cause } => {
                 assert_eq!(step_id, "my_failing_step");
-                assert!(cause.contains("unknown deterministic op"), "got cause: {cause}");
+                assert!(
+                    cause.contains("unknown deterministic op"),
+                    "got cause: {cause}"
+                );
             }
             _ => panic!("expected StepFailed, got {err:?}"),
         }
@@ -266,7 +272,9 @@ mod tests {
     fn event_ref_resolves_to_event_data() {
         let state = BTreeMap::new();
         let mut event = empty_event();
-        event.data.insert("file_id".into(), serde_json::json!("f_123"));
+        event
+            .data
+            .insert("file_id".into(), serde_json::json!("f_123"));
 
         let val = resolve_value(
             &serde_yaml::Value::String("$event.file_id".into()),
@@ -358,11 +366,7 @@ mod tests {
         );
         assert_eq!(bool_val, serde_json::json!(true));
 
-        let null_val = resolve_value(
-            &serde_yaml::Value::Null,
-            &BTreeMap::new(),
-            &empty_event(),
-        );
+        let null_val = resolve_value(&serde_yaml::Value::Null, &BTreeMap::new(), &empty_event());
         assert_eq!(null_val, serde_json::Value::Null);
     }
 
@@ -382,11 +386,7 @@ mod tests {
             serde_yaml::Value::String("hi".into()),
         );
 
-        let val = resolve_value(
-            &serde_yaml::Value::Mapping(inner),
-            &BTreeMap::new(),
-            &event,
-        );
+        let val = resolve_value(&serde_yaml::Value::Mapping(inner), &BTreeMap::new(), &event);
         assert_eq!(val["ref"], serde_json::json!("dynamic"));
         assert_eq!(val["lit"], serde_json::json!("hi"));
     }

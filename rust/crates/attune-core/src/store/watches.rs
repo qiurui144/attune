@@ -194,7 +194,10 @@ impl Store {
 
     /// 取单个 watch。
     pub fn get_watch(&self, dek: &Key32, id: &str) -> Result<Option<WatchRow>> {
-        Ok(self.list_watches(dek)?.into_iter().find(|w| w.watch.id == id))
+        Ok(self
+            .list_watches(dek)?
+            .into_iter()
+            .find(|w| w.watch.id == id))
     }
 
     /// 仅取 enabled watch（监控匹配用）。
@@ -269,11 +272,14 @@ impl Store {
     pub fn upsert_watch_hits(&self, hits: &[WatchHit]) -> Result<usize> {
         let mut inserted = 0usize;
         for h in hits {
-            let existed: bool = self.conn.query_row(
-                "SELECT 1 FROM watch_hits WHERE watch_id = ?1 AND item_id = ?2",
-                params![h.watch_id, h.item_id],
-                |_| Ok(true),
-            ).unwrap_or(false);
+            let existed: bool = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM watch_hits WHERE watch_id = ?1 AND item_id = ?2",
+                    params![h.watch_id, h.item_id],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
             let id = uuid::Uuid::new_v4().to_string();
             let reasons_json = serde_json::to_string(&h.reasons).unwrap_or_else(|_| "[]".into());
             self.conn.execute(
@@ -392,7 +398,10 @@ mod tests {
         assert_eq!(got.watch.keywords, vec!["RVV", "RVA23"]);
         assert_eq!(got.watch.entities.len(), 1);
         assert_eq!(got.watch.anchor_vec.as_ref().unwrap().len(), 3);
-        assert!((got.watch.anchor_vec.unwrap()[1] - 0.2).abs() < 1e-6, "anchor vec decrypted");
+        assert!(
+            (got.watch.anchor_vec.unwrap()[1] - 0.2).abs() < 1e-6,
+            "anchor vec decrypted"
+        );
         assert_eq!(got.digest_period, "daily");
         assert!(got.llm_summary);
     }
@@ -414,7 +423,11 @@ mod tests {
         // we just assert decrypt works and the column is non-null.
         let blob: Option<Vec<u8>> = s
             .raw_connection_for_test()
-            .query_row("SELECT anchor_vec_enc FROM watches WHERE id=?1", params![id], |r| r.get(0))
+            .query_row(
+                "SELECT anchor_vec_enc FROM watches WHERE id=?1",
+                params![id],
+                |r| r.get(0),
+            )
             .unwrap();
         let blob = blob.expect("anchor_vec_enc present");
         // ciphertext is longer than the 8-byte plaintext (nonce + tag).
@@ -425,16 +438,38 @@ mod tests {
     fn patch_and_delete() {
         let (s, dek, _d) = store();
         let id = s
-            .add_watch(&dek, &WatchInput { label: "x".into(), keywords: vec!["k".into()], ..Default::default() })
+            .add_watch(
+                &dek,
+                &WatchInput {
+                    label: "x".into(),
+                    keywords: vec!["k".into()],
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(s
-            .patch_watch(&id, &WatchPatch { enabled: Some(false), llm_summary: Some(true), ..Default::default() })
+            .patch_watch(
+                &id,
+                &WatchPatch {
+                    enabled: Some(false),
+                    llm_summary: Some(true),
+                    ..Default::default()
+                }
+            )
             .unwrap());
         let got = s.get_watch(&dek, &id).unwrap().unwrap();
         assert!(!got.watch.enabled);
         assert!(got.llm_summary);
         // patch nonexistent id → false.
-        assert!(!s.patch_watch("nope", &WatchPatch { enabled: Some(true), ..Default::default() }).unwrap());
+        assert!(!s
+            .patch_watch(
+                "nope",
+                &WatchPatch {
+                    enabled: Some(true),
+                    ..Default::default()
+                }
+            )
+            .unwrap());
         // delete.
         assert!(s.delete_watch(&id).unwrap());
         assert!(s.get_watch(&dek, &id).unwrap().is_none());
@@ -444,7 +479,16 @@ mod tests {
     #[test]
     fn upsert_hits_unique_and_pending() {
         let (s, dek, _d) = store();
-        let id = s.add_watch(&dek, &WatchInput { label: "x".into(), keywords: vec!["k".into()], ..Default::default() }).unwrap();
+        let id = s
+            .add_watch(
+                &dek,
+                &WatchInput {
+                    label: "x".into(),
+                    keywords: vec!["k".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let hit = |item: &str, score: f32| WatchHit {
             watch_id: id.clone(),
             item_id: item.to_string(),
@@ -454,7 +498,9 @@ mod tests {
             dedup_group: None,
             created_at: "2026-06-18T00:00:00Z".into(),
         };
-        let n = s.upsert_watch_hits(&[hit("i1", 0.9), hit("i2", 0.5)]).unwrap();
+        let n = s
+            .upsert_watch_hits(&[hit("i1", 0.9), hit("i2", 0.5)])
+            .unwrap();
         assert_eq!(n, 2);
         // re-upsert same item → conflict update, 0 new.
         let n2 = s.upsert_watch_hits(&[hit("i1", 0.95)]).unwrap();
@@ -463,13 +509,25 @@ mod tests {
         let pending = s.list_pending_hits(&id, 10).unwrap();
         assert_eq!(pending.len(), 2);
         assert!(pending[0].score >= pending[1].score, "score desc");
-        assert!((pending[0].score - 0.95).abs() < 1e-5, "conflict updated score");
+        assert!(
+            (pending[0].score - 0.95).abs() < 1e-5,
+            "conflict updated score"
+        );
     }
 
     #[test]
     fn mark_digested_cross_time_dedup() {
         let (s, dek, _d) = store();
-        let id = s.add_watch(&dek, &WatchInput { label: "x".into(), keywords: vec!["k".into()], ..Default::default() }).unwrap();
+        let id = s
+            .add_watch(
+                &dek,
+                &WatchInput {
+                    label: "x".into(),
+                    keywords: vec!["k".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         s.upsert_watch_hits(&[WatchHit {
             watch_id: id.clone(),
             item_id: "i1".into(),
@@ -481,10 +539,18 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(s.count_pending_hits(&id).unwrap(), 1);
-        s.mark_hits_digested(&id, Some("2026-06-18T00:00:00Z")).unwrap();
-        assert_eq!(s.count_pending_hits(&id).unwrap(), 0, "digested hits not pending");
+        s.mark_hits_digested(&id, Some("2026-06-18T00:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            s.count_pending_hits(&id).unwrap(),
+            0,
+            "digested hits not pending"
+        );
         let got = s.get_watch(&dek, &id).unwrap().unwrap();
         assert!(got.last_digested_at.is_some());
-        assert_eq!(got.last_digested_marker.as_deref(), Some("2026-06-18T00:00:00Z"));
+        assert_eq!(
+            got.last_digested_marker.as_deref(),
+            Some("2026-06-18T00:00:00Z")
+        );
     }
 }

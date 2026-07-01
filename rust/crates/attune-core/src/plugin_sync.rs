@@ -604,7 +604,7 @@ fn validate_plugin_package_download_url(
     resolve: &dyn Fn(&str) -> std::io::Result<Vec<std::net::IpAddr>>,
 ) -> Result<()> {
     match crate::net::url_guard::validate_open_outbound_url(raw, resolve) {
-        Ok(_) => return Ok(()),
+        Ok(_) => Ok(()),
         Err(open_err) => {
             if !is_official_plugin_package_url(raw) {
                 return Err(open_err);

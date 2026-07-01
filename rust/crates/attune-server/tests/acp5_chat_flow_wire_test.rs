@@ -56,13 +56,14 @@ impl LlmProvider for CountingProvider {
 /// (not Err/panic) and return an empty FlowSet; the OSS registry has 6 agents.
 #[test]
 fn workspace_flows_present_for_chat_wire() {
-    let loaded = attune_core::agents::load_workspace_flows(
-        "agents.registry.toml",
-        "agent_flows.toml",
-    );
+    let loaded =
+        attune_core::agents::load_workspace_flows("agents.registry.toml", "agent_flows.toml");
     let (flows, reg) = loaded.expect("workspace flows must load (tests run in the crate dir)");
     // S4b: OSS registry still has oss-core agents.
-    assert!(!reg.is_empty(), "S4b: OSS registry must have oss-core agents");
+    assert!(
+        !reg.is_empty(),
+        "S4b: OSS registry must have oss-core agents"
+    );
     // S4b: legal_defamation moved to attune-pro — OSS flow set is empty.
     assert!(
         flows.get("legal_defamation").is_none(),
@@ -80,11 +81,9 @@ fn workspace_flows_present_for_chat_wire() {
 /// graceful-degrade path: empty FlowSet → run_chat_flow returns None (§7/§11 R8).
 #[test]
 fn defamation_message_falls_back_to_freeform_in_oss() {
-    let (flows, reg) = attune_core::agents::load_workspace_flows(
-        "agents.registry.toml",
-        "agent_flows.toml",
-    )
-    .expect("workspace flows");
+    let (flows, reg) =
+        attune_core::agents::load_workspace_flows("agents.registry.toml", "agent_flows.toml")
+            .expect("workspace flows");
 
     // S4b: OSS flow set must be empty.
     assert!(flows.is_empty(), "S4b: OSS has no declared flows");
@@ -93,9 +92,10 @@ fn defamation_message_falls_back_to_freeform_in_oss() {
         calls: AtomicUsize::new(0),
         model: "qwen2.5:3b".into(),
     };
-    let mut dispatch = |_a: &AgentSpec, _i: &Payload| -> std::result::Result<serde_json::Value, String> {
-        Ok(serde_json::json!({}))
-    };
+    let mut dispatch =
+        |_a: &AgentSpec, _i: &Payload| -> std::result::Result<serde_json::Value, String> {
+            Ok(serde_json::json!({}))
+        };
 
     // "名誉权" cannot route to legal_defamation (absent in OSS) → must fall back to None.
     let out = run_chat_flow(
@@ -127,11 +127,9 @@ fn defamation_message_falls_back_to_freeform_in_oss() {
 /// handler keeps the unchanged free-form RAG path.
 #[test]
 fn irrelevant_message_falls_back_to_freeform() {
-    let (flows, reg) = attune_core::agents::load_workspace_flows(
-        "agents.registry.toml",
-        "agent_flows.toml",
-    )
-    .expect("workspace flows");
+    let (flows, reg) =
+        attune_core::agents::load_workspace_flows("agents.registry.toml", "agent_flows.toml")
+            .expect("workspace flows");
     let provider = CountingProvider {
         calls: AtomicUsize::new(0),
         model: "qwen2.5:3b".into(),
@@ -152,5 +150,9 @@ fn irrelevant_message_falls_back_to_freeform() {
         &mut dispatch,
     );
     assert!(out.is_none(), "non-agent chat must not trigger a flow");
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 0, "no LLM call for plain chat");
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        0,
+        "no LLM call for plain chat"
+    );
 }

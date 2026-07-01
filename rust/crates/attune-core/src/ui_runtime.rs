@@ -206,9 +206,18 @@ mod tests {
                     required: true,
                     placeholder: "".into(),
                     options: vec![
-                        FormOption { value: "day".into(), label: "日利率".into() },
-                        FormOption { value: "month".into(), label: "月利率".into() },
-                        FormOption { value: "year".into(), label: "年利率".into() },
+                        FormOption {
+                            value: "day".into(),
+                            label: "日利率".into(),
+                        },
+                        FormOption {
+                            value: "month".into(),
+                            label: "月利率".into(),
+                        },
+                        FormOption {
+                            value: "year".into(),
+                            label: "年利率".into(),
+                        },
                     ],
                     help: "".into(),
                     default_value: Some("month".into()),

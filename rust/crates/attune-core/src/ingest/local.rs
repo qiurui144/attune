@@ -26,7 +26,12 @@ impl LocalFolderConnector {
         file_types: Vec<String>,
         corpus_domain: Option<String>,
     ) -> Self {
-        Self { root, recursive, file_types, corpus_domain }
+        Self {
+            root,
+            recursive,
+            file_types,
+            corpus_domain,
+        }
     }
 
     /// 扩展名是否被接受。
@@ -56,7 +61,8 @@ impl SourceConnector for LocalFolderConnector {
             WalkDir::new(&self.root).max_depth(1)
         };
         for entry in walker.into_iter().filter_map(|e| {
-            e.map_err(|err| log::warn!("LocalFolderConnector walk error: {err}")).ok()
+            e.map_err(|err| log::warn!("LocalFolderConnector walk error: {err}"))
+                .ok()
         }) {
             let path = entry.path();
             if !path.is_file() || !self.ext_accepted(path) {
@@ -131,9 +137,17 @@ mod tests {
             assert_eq!(doc.source_kind, crate::ingest::SourceKind::LocalFolder);
             assert!(doc.modified_marker.is_some(), "本地文件应带 SHA-256 marker");
             assert!(!doc.content.is_empty());
-            assert_eq!(doc.corpus_domain.as_deref(), Some("legal"), "corpus_domain 应透传");
+            assert_eq!(
+                doc.corpus_domain.as_deref(),
+                Some("legal"),
+                "corpus_domain 应透传"
+            );
             // RFC 8089: file:///path（三斜杠），且不含反斜杠
-            assert!(doc.uri.starts_with("file:///"), "URI 应以 file:/// 开头: {}", doc.uri);
+            assert!(
+                doc.uri.starts_with("file:///"),
+                "URI 应以 file:/// 开头: {}",
+                doc.uri
+            );
             assert!(!doc.uri.contains('\\'), "URI 不应含反斜杠: {}", doc.uri);
         }
     }

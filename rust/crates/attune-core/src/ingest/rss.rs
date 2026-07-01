@@ -90,9 +90,8 @@ impl FeedFetcher for RealFeedFetcher {
     ) -> Result<FeedHttpResponse> {
         // ① SSRF 校验（无 host allowlist：feed 可在任意公网 host；保留拒内网核心）。
         //    生产用 system_resolve；返回校验通过的公网 IP 列表。
-        let validated = url_guard::validate_open_outbound_url(url, &|h| {
-            url_guard::system_resolve(h)
-        })?;
+        let validated =
+            url_guard::validate_open_outbound_url(url, &|h| url_guard::system_resolve(h))?;
 
         // reqwest blocking client：`SourceConnector::fetch_documents` 是同步契约。
         // 与 WebDavConnector / EmailConnector 不同 —— 它们用 tokio 桥接因为底层
@@ -105,10 +104,15 @@ impl FeedFetcher for RealFeedFetcher {
             .redirect(reqwest::redirect::Policy::none());
 
         // 把每个已校验 IP 绑定到 host:port —— reqwest 连接时只用这些 socket。
-        let port = validated
-            .url
-            .port_or_known_default()
-            .unwrap_or(if validated.url.scheme() == "http" { 80 } else { 443 });
+        let port =
+            validated
+                .url
+                .port_or_known_default()
+                .unwrap_or(if validated.url.scheme() == "http" {
+                    80
+                } else {
+                    443
+                });
         for ip in &validated.resolved_ips {
             builder = builder.resolve(&validated.host, std::net::SocketAddr::new(*ip, port));
         }
@@ -275,10 +279,7 @@ pub fn parse_feed_bytes(bytes: &[u8]) -> Result<Vec<ParsedRssEntry>> {
             continue;
         };
 
-        let title = entry
-            .title
-            .map(|t| t.content)
-            .unwrap_or_default();
+        let title = entry.title.map(|t| t.content).unwrap_or_default();
 
         // body: <content> 优先 (Atom recommended / RSS 2 content:encoded)；
         // 缺失回退 <summary> (RSS 2 description)。两者都可能含 HTML，统一剥标签。
@@ -293,10 +294,7 @@ pub fn parse_feed_bytes(bytes: &[u8]) -> Result<Vec<ParsedRssEntry>> {
             raw_body
         };
 
-        let published_at = entry
-            .published
-            .or(entry.updated)
-            .map(|d| d.to_rfc3339());
+        let published_at = entry.published.or(entry.updated).map(|d| d.to_rfc3339());
 
         out.push(ParsedRssEntry {
             guid,
@@ -635,14 +633,21 @@ mod tests {
             "http://10.0.0.5/feed.xml",
             "http://172.16.0.1/feed.xml",
         ] {
-            assert!(f.fetch(u, None, None).is_err(), "must block SSRF target {u}");
+            assert!(
+                f.fetch(u, None, None).is_err(),
+                "must block SSRF target {u}"
+            );
         }
     }
 
     #[test]
     fn real_fetcher_blocks_non_http_scheme() {
         let f = RealFeedFetcher;
-        for u in ["file:///etc/passwd", "ftp://feeds.example/x", "gopher://x/y"] {
+        for u in [
+            "file:///etc/passwd",
+            "ftp://feeds.example/x",
+            "gopher://x/y",
+        ] {
             let e = f.fetch(u, None, None);
             assert!(e.is_err(), "non-http scheme must be blocked: {u}");
             assert!(e.unwrap_err().to_string().contains("outbound-blocked"));
@@ -706,7 +711,10 @@ mod tests {
         assert_eq!(docs[0].source_kind, SourceKind::Rss);
         assert_eq!(docs[0].title, "First post");
         assert_eq!(docs[0].source_ref, "feed-A#tag:ex.com,2026:1.txt");
-        assert_eq!(docs[0].modified_marker.as_deref(), Some("tag:ex.com,2026:1"));
+        assert_eq!(
+            docs[0].modified_marker.as_deref(),
+            Some("tag:ex.com,2026:1")
+        );
         assert_eq!(docs[0].metadata.get("feed_id").unwrap(), "feed-A");
         assert_eq!(
             docs[0].metadata.get("url").unwrap(),

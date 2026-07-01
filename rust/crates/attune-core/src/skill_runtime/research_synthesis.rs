@@ -137,7 +137,10 @@ mod tests {
     }
     impl LlmProvider for MockSynth {
         fn chat(&self, system: &str, _u: &str) -> crate::error::Result<(String, TokenUsage)> {
-            Ok((self.reply_for(system), TokenUsage::empty("mock", "mock-model")))
+            Ok((
+                self.reply_for(system),
+                TokenUsage::empty("mock", "mock-model"),
+            ))
         }
         fn chat_with_format_json(
             &self,
@@ -145,7 +148,10 @@ mod tests {
             _u: &str,
             _schema: Option<&Value>,
         ) -> crate::error::Result<(String, TokenUsage)> {
-            Ok((self.reply_for(system), TokenUsage::empty("mock", "mock-model")))
+            Ok((
+                self.reply_for(system),
+                TokenUsage::empty("mock", "mock-model"),
+            ))
         }
         fn is_available(&self) -> bool {
             self.available
@@ -161,7 +167,8 @@ mod tests {
     fn reduce_reply() -> String {
         json!({"sections":[
             {"heading":"靶点与通路","body":"靶点 X 与通路 Y 相关，中医方剂 Z 调节通路 Y。"}
-        ]}).to_string()
+        ]})
+        .to_string()
     }
 
     fn sources() -> Vec<SourceMaterial> {
@@ -176,23 +183,37 @@ mod tests {
         let llm = MockSynth::new(&map_reply(), &reduce_reply());
         let r = research_synthesis(&sources(), SynthesisStructure::Thematic, 0, &llm).unwrap();
         assert!(!r.content.is_empty());
-        assert_eq!(*llm.map_calls.lock().unwrap(), 2, "one map call per domain source");
-        assert!(r.segments.iter().any(|s| s.verified), "grounded section verifies");
+        assert_eq!(
+            *llm.map_calls.lock().unwrap(),
+            2,
+            "one map call per domain source"
+        );
+        assert!(
+            r.segments.iter().any(|s| s.verified),
+            "grounded section verifies"
+        );
     }
 
     #[test]
     fn parse_structure_variants() {
-        assert_eq!(parse_structure("chronological"), SynthesisStructure::Chronological);
+        assert_eq!(
+            parse_structure("chronological"),
+            SynthesisStructure::Chronological
+        );
         assert_eq!(parse_structure("时序"), SynthesisStructure::Chronological);
         assert_eq!(parse_structure("thematic"), SynthesisStructure::Thematic);
-        assert_eq!(parse_structure("anything-else"), SynthesisStructure::Thematic);
+        assert_eq!(
+            parse_structure("anything-else"),
+            SynthesisStructure::Thematic
+        );
     }
 
     #[test]
     fn llm_unavailable_is_error() {
         let mut llm = MockSynth::new(&map_reply(), &reduce_reply());
         llm.available = false;
-        let err = research_synthesis(&sources(), SynthesisStructure::Thematic, 0, &llm).unwrap_err();
+        let err =
+            research_synthesis(&sources(), SynthesisStructure::Thematic, 0, &llm).unwrap_err();
         assert_eq!(err, WritingError::LlmUnavailable);
     }
 

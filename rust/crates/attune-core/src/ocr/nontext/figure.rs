@@ -28,7 +28,10 @@ mod tests {
         let r = FigureRecognizer
             .recognize(
                 &DynamicImage::new_rgb8(1, 1),
-                &RegionCtx { ocr_lines: vec![], page: 0 },
+                &RegionCtx {
+                    ocr_lines: vec![],
+                    page: 0,
+                },
             )
             .unwrap();
         assert!(matches!(r, RegionResult::FigureV1 { caption: None, .. }));

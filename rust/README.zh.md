@@ -453,7 +453,7 @@ rust/
 - **Phase 2a** ✅ Axum API Server + tantivy + usearch + RRF 混合搜索
 - **Phase 2b** ✅ 文件扫描 + Embedding 队列 + Upload + Index API
 - **搜索集成** ✅ AppState 持有 FulltextIndex/VectorIndex/Ollama，搜索全链路打通
-- **Chrome 兼容** ✅ 扩展使用 13 个 API 端点（对齐 Python 原型）；后端额外暴露 40+ 用于 Web UI / CLI / WebSocket
+- **Chrome 兼容** ✅ 扩展使用 `/api/v1/*` API；后端额外暴露 40+ 用于 Web UI / CLI / WebSocket
 - **Phase 3** ✅ NAS 模式 (TLS + Bearer) + 嵌入式 Web UI + Device Secret 迁移
 - **子系统 A** ✅ AI 自动分类 (qwen2.5 + HDBSCAN + 编程/法律插件 + 最小 UI 集成)
 - **子系统 B** ✅ 行为画像（搜索历史 + 点击追踪 + 热门统计）
@@ -509,7 +509,6 @@ Apache License 2.0 —— 见仓库根目录 [LICENSE](../LICENSE)。覆盖：
 - `rust/crates/*`（attune-core / attune-server / attune-cli）
 - `extension/`（Chrome 扩展）
 - `rust/crates/attune-server/assets/`（嵌入式 Web UI）
-- `python/src/attune_python/`（Python 原型）
 - `plugins/free/*`（免费行业插件：编程、技术类）
 
 你可以自由 fork、修改、商用。Apache-2.0 包含专利授权条款（§3），使用者可放心。

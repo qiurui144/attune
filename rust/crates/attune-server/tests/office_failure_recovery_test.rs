@@ -35,7 +35,9 @@ async fn start_server() -> String {
     let router = attune_server::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
     let base = format!("http://127.0.0.1:{port}");
     wait_for_server(&base).await;
     let client = reqwest::Client::new();
@@ -55,10 +57,11 @@ async fn corrupt_pdf_bytes_returns_error_not_panic() {
     let client = reqwest::Client::new();
     // Garbage bytes with .pdf extension → either ocr-engine-failed or invalid-input,
     // but NOT a 500 panic.
-    let file_part = reqwest::multipart::Part::bytes(b"%PDF-garbage-not-a-real-pdf\x00\xff\xfe".to_vec())
-        .file_name("corrupt.pdf")
-        .mime_str("application/pdf")
-        .unwrap();
+    let file_part =
+        reqwest::multipart::Part::bytes(b"%PDF-garbage-not-a-real-pdf\x00\xff\xfe".to_vec())
+            .file_name("corrupt.pdf")
+            .mime_str("application/pdf")
+            .unwrap();
     let form = reqwest::multipart::Form::new()
         .part("file", file_part)
         .text("profile", "document");
@@ -72,8 +75,10 @@ async fn corrupt_pdf_bytes_returns_error_not_panic() {
     let body: serde_json::Value = resp.json().await.expect("json");
     // Could be 200 (PDF lines empty per D1 limitation) OR 500 ocr-engine-failed.
     // Critical: NOT a panic, server still alive.
-    assert!(status == 200 || status == 500 || status == 400,
-        "unexpected status {status}: {body}");
+    assert!(
+        status == 200 || status == 500 || status == 400,
+        "unexpected status {status}: {body}"
+    );
     if status != 200 {
         let code = body["code"].as_str().expect("error response has code");
         assert!(
@@ -82,8 +87,16 @@ async fn corrupt_pdf_bytes_returns_error_not_panic() {
         );
     }
     // Server still alive: send a sanity request
-    let resp2 = client.get(format!("{}/health", base)).send().await.expect("alive");
-    assert_eq!(resp2.status().as_u16(), 200, "server died after corrupt PDF");
+    let resp2 = client
+        .get(format!("{}/health", base))
+        .send()
+        .await
+        .expect("alive");
+    assert_eq!(
+        resp2.status().as_u16(),
+        200,
+        "server died after corrupt PDF"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -133,7 +146,11 @@ async fn random_junk_bytes_with_image_ext_no_panic() {
         "expected 200 or 500, got {status}"
     );
     // Server still alive
-    let alive = client.get(format!("{}/health", base)).send().await.expect("alive");
+    let alive = client
+        .get(format!("{}/health", base))
+        .send()
+        .await
+        .expect("alive");
     assert_eq!(alive.status().as_u16(), 200);
 }
 
@@ -158,8 +175,14 @@ fn durable_recovery_simulates_server_restart() {
     assert_eq!(summary.requeued, 1);
     assert_eq!(summary.failed_no_retry, 0);
 
-    assert_eq!(store.get_job(&running).unwrap().unwrap().state, JobState::Queued);
-    assert_eq!(store.get_job(&queued).unwrap().unwrap().state, JobState::Queued);
+    assert_eq!(
+        store.get_job(&running).unwrap().unwrap().state,
+        JobState::Queued
+    );
+    assert_eq!(
+        store.get_job(&queued).unwrap().unwrap().state,
+        JobState::Queued
+    );
     // Done preserved (terminal state)
     assert_eq!(store.get_job(&done).unwrap().unwrap().state, JobState::Done);
 }
@@ -174,14 +197,25 @@ fn durable_retry_after_failure_requeues_or_coexists() {
     let store = Store::open_memory().unwrap();
     let attempt1 = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
     store.claim_next_job().unwrap();
-    store.fail_job(&attempt1, "asr-engine-failed", "transient").unwrap();
-    assert_eq!(store.get_job(&attempt1).unwrap().unwrap().state, JobState::Failed);
+    store
+        .fail_job(&attempt1, "asr-engine-failed", "transient")
+        .unwrap();
+    assert_eq!(
+        store.get_job(&attempt1).unwrap().unwrap().state,
+        JobState::Failed
+    );
 
     // Path A: user resubmits → new independent job id.
     let attempt2 = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
     assert_ne!(attempt1, attempt2);
-    assert_eq!(store.get_job(&attempt2).unwrap().unwrap().state, JobState::Queued);
-    assert_eq!(store.get_job(&attempt1).unwrap().unwrap().state, JobState::Failed);
+    assert_eq!(
+        store.get_job(&attempt2).unwrap().unwrap().state,
+        JobState::Queued
+    );
+    assert_eq!(
+        store.get_job(&attempt1).unwrap().unwrap().state,
+        JobState::Failed
+    );
 
     // Path B: operator requeues the failed job in place (error cleared).
     assert!(store.requeue_job(&attempt1).unwrap());

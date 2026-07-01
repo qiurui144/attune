@@ -95,10 +95,7 @@ impl DigestBuilder {
                 Some(body) => extractive_preview(&body, self.preview_chars),
                 None => truncate_chars(&hit.title, self.preview_chars),
             };
-            let sources = hit_sources
-                .get(&hit.item_id)
-                .cloned()
-                .unwrap_or_default();
+            let sources = hit_sources.get(&hit.item_id).cloned().unwrap_or_default();
             entries.push(DigestEntry {
                 item_id: hit.item_id.clone(),
                 title: hit.title.clone(),
@@ -135,8 +132,14 @@ impl DigestBuilder {
         llm: &dyn LlmProvider,
     ) -> DigestCard {
         // 始终先有零成本 digest 兜底（spec §7 graceful degradation）。
-        let mut card =
-            self.build_default(watch_id, watch_label, hits, content, hit_sources, now_rfc3339);
+        let mut card = self.build_default(
+            watch_id,
+            watch_label,
+            hits,
+            content,
+            hit_sources,
+            now_rfc3339,
+        );
         if card.entries.is_empty() {
             return card;
         }
@@ -167,7 +170,8 @@ impl DigestBuilder {
             },
             "required": ["keypoints"]
         });
-        let user = format!("关注主题：{watch_label}\n\n新条目：\n{ctx}\n\n请产出 JSON 格式的本期要点。");
+        let user =
+            format!("关注主题：{watch_label}\n\n新条目：\n{ctx}\n\n请产出 JSON 格式的本期要点。");
         let n_entries = card.entries.len();
 
         // §4.5-B 重试-验证：JSON 可解析 + grounding（refs 落在 entry 范围内）。
@@ -231,7 +235,10 @@ fn parse_keypoints(raw: &str) -> std::result::Result<KeyPoints, String> {
 
 fn strip_json_fence(raw: &str) -> String {
     let s = raw.trim();
-    let s = s.strip_prefix("```json").or_else(|| s.strip_prefix("```")).unwrap_or(s);
+    let s = s
+        .strip_prefix("```json")
+        .or_else(|| s.strip_prefix("```"))
+        .unwrap_or(s);
     let s = s.strip_suffix("```").unwrap_or(s);
     let s = s.trim();
     if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
@@ -312,7 +319,12 @@ mod tests {
     }
 
     fn content_map(pairs: &[(&str, &str)]) -> MapContentSource {
-        MapContentSource(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+        MapContentSource(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
     }
 
     fn sources(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
@@ -327,17 +339,31 @@ mod tests {
     #[test]
     fn happy_default_digest_extractive_preview() {
         let b = DigestBuilder::default();
-        let hits = vec![hit("i1", "RVV news", 0.9, None), hit("i2", "More", 0.5, None)];
+        let hits = vec![
+            hit("i1", "RVV news", 0.9, None),
+            hit("i2", "More", 0.5, None),
+        ];
         let cm = content_map(&[
-            ("i1", "RVV extension finalized today。 second sentence ignored."),
+            (
+                "i1",
+                "RVV extension finalized today。 second sentence ignored.",
+            ),
             ("i2", "Second item body here."),
         ]);
         let card = b.build_default("w", "RISC-V", &hits, &cm, &HashMap::new(), NOW);
         assert_eq!(card.kind, "digest");
         assert_eq!(card.entries.len(), 2);
-        assert!(card.llm_summary.is_none(), "default path = zero LLM, no summary");
-        assert!(card.entries[0].preview.contains("RVV extension finalized today"));
-        assert!(!card.entries[0].preview.contains("second sentence"), "first sentence only");
+        assert!(
+            card.llm_summary.is_none(),
+            "default path = zero LLM, no summary"
+        );
+        assert!(card.entries[0]
+            .preview
+            .contains("RVV extension finalized today"));
+        assert!(
+            !card.entries[0].preview.contains("second sentence"),
+            "first sentence only"
+        );
     }
 
     #[test]
@@ -353,7 +379,14 @@ mod tests {
 
     #[test]
     fn edge_no_hits_empty_card() {
-        let card = DigestBuilder::default().build_default("w", "L", &[], &content_map(&[]), &HashMap::new(), NOW);
+        let card = DigestBuilder::default().build_default(
+            "w",
+            "L",
+            &[],
+            &content_map(&[]),
+            &HashMap::new(),
+            NOW,
+        );
         assert!(card.entries.is_empty());
         assert!(card.llm_summary.is_none());
     }
@@ -361,7 +394,14 @@ mod tests {
     #[test]
     fn edge_missing_content_falls_back_to_title() {
         let hits = vec![hit("i1", "Title Only", 0.9, None)];
-        let card = DigestBuilder::default().build_default("w", "L", &hits, &content_map(&[]), &HashMap::new(), NOW);
+        let card = DigestBuilder::default().build_default(
+            "w",
+            "L",
+            &hits,
+            &content_map(&[]),
+            &HashMap::new(),
+            NOW,
+        );
         assert!(card.entries[0].preview.contains("Title Only"));
     }
 
@@ -376,9 +416,17 @@ mod tests {
             hit("c", "unique", 0.7, None),
         ];
         let cm = content_map(&[("a", "body a"), ("b", "body b"), ("c", "body c")]);
-        let card = DigestBuilder::default().build_default("w", "L", &hits, &cm, &HashMap::new(), NOW);
-        assert_eq!(card.entries.len(), 2, "group dg:a collapsed to 1 + unique = 2");
-        assert!(card.entries.iter().any(|e| e.item_id == "a"), "kept highest-score group member");
+        let card =
+            DigestBuilder::default().build_default("w", "L", &hits, &cm, &HashMap::new(), NOW);
+        assert_eq!(
+            card.entries.len(),
+            2,
+            "group dg:a collapsed to 1 + unique = 2"
+        );
+        assert!(
+            card.entries.iter().any(|e| e.item_id == "a"),
+            "kept highest-score group member"
+        );
         assert!(!card.entries.iter().any(|e| e.item_id == "b"));
     }
 
@@ -386,9 +434,19 @@ mod tests {
 
     #[test]
     fn resource_max_entries_cap() {
-        let b = DigestBuilder { max_entries: 3, ..Default::default() };
+        let b = DigestBuilder {
+            max_entries: 3,
+            ..Default::default()
+        };
         let hits: Vec<WatchHit> = (0..20)
-            .map(|i| hit(&format!("i{i}"), &format!("t{i}"), 1.0 - i as f32 * 0.01, None))
+            .map(|i| {
+                hit(
+                    &format!("i{i}"),
+                    &format!("t{i}"),
+                    1.0 - i as f32 * 0.01,
+                    None,
+                )
+            })
             .collect();
         let cm = content_map(&[]);
         let card = b.build_default("w", "L", &hits, &cm, &HashMap::new(), NOW);
@@ -400,7 +458,10 @@ mod tests {
     #[test]
     fn llm_summary_grounded_keypoints() {
         let b = DigestBuilder::default();
-        let hits = vec![hit("i1", "Item one", 0.9, None), hit("i2", "Item two", 0.8, None)];
+        let hits = vec![
+            hit("i1", "Item one", 0.9, None),
+            hit("i2", "Item two", 0.8, None),
+        ];
         let cm = content_map(&[("i1", "body one"), ("i2", "body two")]);
         let llm = MockLlmProvider::new("mock");
         llm.push_response(r#"{"keypoints":[{"text":"point about one","refs":[1]},{"text":"point about two","refs":[2]}]}"#);
@@ -435,8 +496,15 @@ mod tests {
         llm.push_response("still not json");
         llm.push_response("nope");
         let card = b.build_llm_summary("w", "L", &hits, &cm, &HashMap::new(), NOW, &llm);
-        assert!(card.llm_summary.is_none(), "garbage → fall back to extractive (no summary)");
-        assert_eq!(card.entries.len(), 1, "default digest entries still present");
+        assert!(
+            card.llm_summary.is_none(),
+            "garbage → fall back to extractive (no summary)"
+        );
+        assert_eq!(
+            card.entries.len(),
+            1,
+            "default digest entries still present"
+        );
     }
 
     #[test]
@@ -450,7 +518,10 @@ mod tests {
         llm.push_response(r#"{"keypoints":[{"text":"still bad","refs":[9]}]}"#);
         llm.push_response(r#"{"keypoints":[{"text":"bad again","refs":[3]}]}"#);
         let card = b.build_llm_summary("w", "L", &hits, &cm, &HashMap::new(), NOW, &llm);
-        assert!(card.llm_summary.is_none(), "out-of-range ref = ungrounded → rejected");
+        assert!(
+            card.llm_summary.is_none(),
+            "out-of-range ref = ungrounded → rejected"
+        );
     }
 
     #[test]
@@ -463,6 +534,9 @@ mod tests {
         llm.push_response(r#"{"keypoints":[{"text":"still ungrounded","refs":[]}]}"#);
         llm.push_response(r#"{"keypoints":[{"text":"again","refs":[]}]}"#);
         let card = b.build_llm_summary("w", "L", &hits, &cm, &HashMap::new(), NOW, &llm);
-        assert!(card.llm_summary.is_none(), "empty refs = ungrounded → rejected");
+        assert!(
+            card.llm_summary.is_none(),
+            "empty refs = ungrounded → rejected"
+        );
     }
 }

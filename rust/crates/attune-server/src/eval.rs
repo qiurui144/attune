@@ -36,8 +36,16 @@ use serde::Serialize;
 /// `knowledge` for the legacy shape; this fn replaces that inline `json!{}`
 /// so the new keys live alongside the old.
 pub fn build_citation(k: &serde_json::Value) -> serde_json::Value {
-    let item_id = k.get("item_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let title = k.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let item_id = k
+        .get("item_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let title = k
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let score = k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let chunk_offset_start = k.get("chunk_offset_start").and_then(|v| v.as_u64());
     let chunk_offset_end = k.get("chunk_offset_end").and_then(|v| v.as_u64());
@@ -148,7 +156,11 @@ fn provider_for(model: &str) -> &'static str {
         "google"
     } else if m.contains("deepseek") {
         "deepseek"
-    } else if m.starts_with("qwen") || m.starts_with("llama") || m.starts_with("phi") || m.starts_with("mistral") {
+    } else if m.starts_with("qwen")
+        || m.starts_with("llama")
+        || m.starts_with("phi")
+        || m.starts_with("mistral")
+    {
         "ollama"
     } else if m.starts_with("doubao") || m.starts_with("ernie") || m.contains("baichuan") {
         "tencent"

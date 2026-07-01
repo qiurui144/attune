@@ -19,7 +19,9 @@ use crate::export::{Artifact, ExportFormat};
 use crate::llm::LlmProvider;
 use crate::skill_runtime::compare_to_table::{compare_to_table, ParamComparison};
 use crate::skill_runtime::cost::{self, MAX_TOTAL_TOKENS};
-use crate::skill_runtime::dispatch::{agent_doc_to_document, parse_agent_doc, AgentDispatcher, AgentDocOutput};
+use crate::skill_runtime::dispatch::{
+    agent_doc_to_document, parse_agent_doc, AgentDispatcher, AgentDocOutput,
+};
 use crate::skill_runtime::doc_render::{sections_to_document, writing_to_document};
 use crate::skill_runtime::reference_generate::reference_generate;
 use crate::skill_runtime::render::comparison_to_table;
@@ -125,9 +127,9 @@ impl SkillError {
 /// Validate the run inputs against the skill's `inputs` schema (spec §7 `input-invalid`).
 /// Runs **before any step** so a missing required input never reaches an LLM step.
 pub fn validate_inputs(skill: &Skill, inputs: &Value) -> Result<(), SkillError> {
-    let obj = inputs.as_object().ok_or_else(|| {
-        SkillError::InputInvalid("inputs must be a JSON object".to_string())
-    })?;
+    let obj = inputs
+        .as_object()
+        .ok_or_else(|| SkillError::InputInvalid("inputs must be a JSON object".to_string()))?;
     for spec in &skill.inputs {
         match obj.get(&spec.name) {
             None | Some(Value::Null) => {
@@ -141,9 +143,9 @@ pub fn validate_inputs(skill: &Skill, inputs: &Value) -> Result<(), SkillError> 
             Some(v) => {
                 let ok = match spec.ty {
                     InputType::ItemId | InputType::String => v.is_string(),
-                    InputType::StringList => {
-                        v.as_array().is_some_and(|a| a.iter().all(|x| x.is_string()))
-                    }
+                    InputType::StringList => v
+                        .as_array()
+                        .is_some_and(|a| a.iter().all(|x| x.is_string())),
                 };
                 if !ok {
                     return Err(SkillError::InputInvalid(format!(
@@ -210,9 +212,13 @@ pub fn run_skill_with_dispatcher(
                 let item_ids = resolve_item_ids(&s.input, inputs, &state);
                 // Resolve per-source (item_id + text) so document skills keep provenance, and also
                 // derive the concatenated text for table/compare skills — one rag step serves both.
-                let sources = resolver
-                    .resolve_sources(&item_ids)
-                    .map_err(|e| SkillError::StepFailed { step_id: s.id.clone(), cause: e })?;
+                let sources =
+                    resolver
+                        .resolve_sources(&item_ids)
+                        .map_err(|e| SkillError::StepFailed {
+                            step_id: s.id.clone(),
+                            cause: e,
+                        })?;
                 let text = sources
                     .iter()
                     .map(|m| m.text.as_str())
@@ -316,7 +322,10 @@ pub fn run_skill_with_dispatcher(
                                     "插件 agent `{plugin_agent}` 未接入调度器，已跳过（请安装对应 pro 插件）"
                                 ));
                                 partial = true;
-                                state.insert(s.output.clone(), StepValue::AgentDoc(AgentDocOutput::default()));
+                                state.insert(
+                                    s.output.clone(),
+                                    StepValue::AgentDoc(AgentDocOutput::default()),
+                                );
                             }
                             Some(d) => match d.dispatch(plugin_agent, &agent_input) {
                                 Ok(out) => {
@@ -343,9 +352,14 @@ pub fn run_skill_with_dispatcher(
                                     state.insert(s.output.clone(), StepValue::AgentDoc(doc));
                                 }
                                 Err(e) => {
-                                    warnings.push(format!("插件 agent `{plugin_agent}` 调度失败（{e}）"));
+                                    warnings.push(format!(
+                                        "插件 agent `{plugin_agent}` 调度失败（{e}）"
+                                    ));
                                     partial = true;
-                                    state.insert(s.output.clone(), StepValue::AgentDoc(AgentDocOutput::default()));
+                                    state.insert(
+                                        s.output.clone(),
+                                        StepValue::AgentDoc(AgentDocOutput::default()),
+                                    );
                                 }
                             },
                         }
@@ -354,14 +368,18 @@ pub fn run_skill_with_dispatcher(
                 // Cost cap check after each LLM step (spec R3).
                 let used = bill.actual_billable_tokens();
                 if used > MAX_TOTAL_TOKENS {
-                    return Err(SkillError::CostCapExceeded { used, cap: cost::MAX_TOTAL_TOKENS });
+                    return Err(SkillError::CostCapExceeded {
+                        used,
+                        cap: cost::MAX_TOTAL_TOKENS,
+                    });
                 }
             }
             SkillStep::Synthesize(s) => {
                 // `synthesize` step = a grounded multi-source synthesis over a `rag` step's sources
                 // (same engine as the `writing.research_synthesis` agent; declarable as a step too).
                 let sources = lookup_sources(&s.input, "sources", &state);
-                let structure = parse_structure(&lookup_string(&s.input, "structure", inputs, &state));
+                let structure =
+                    parse_structure(&lookup_string(&s.input, "structure", inputs, &state));
                 match research_synthesis(&sources, structure, 0, llm) {
                     Ok(wr) => {
                         merge_bill(&mut bill, &wr.token_bill);
@@ -382,12 +400,19 @@ pub fn run_skill_with_dispatcher(
                 }
                 let used = bill.actual_billable_tokens();
                 if used > MAX_TOTAL_TOKENS {
-                    return Err(SkillError::CostCapExceeded { used, cap: cost::MAX_TOTAL_TOKENS });
+                    return Err(SkillError::CostCapExceeded {
+                        used,
+                        cap: cost::MAX_TOTAL_TOKENS,
+                    });
                 }
             }
             SkillStep::Render(s) => {
                 let title = lookup_string(&s.input, "title", inputs, &state);
-                let title = if title.is_empty() { skill.title.clone() } else { title };
+                let title = if title.is_empty() {
+                    skill.title.clone()
+                } else {
+                    title
+                };
                 let from_key = ref_key(&s.input, "from");
                 let from = from_key.and_then(|k| state.get(&k));
                 let artifact = match from {
@@ -423,10 +448,12 @@ pub fn run_skill_with_dispatcher(
                     })?;
                 let fmt_str = lookup_string(&s.input, "format", inputs, &state);
                 let format = ExportFormat::parse(&fmt_str).unwrap_or(ExportFormat::Xlsx);
-                let bytes = artifact.render(format).map_err(|e| SkillError::StepFailed {
-                    step_id: s.id.clone(),
-                    cause: format!("{} ({})", e, e.code()),
-                })?;
+                let bytes = artifact
+                    .render(format)
+                    .map_err(|e| SkillError::StepFailed {
+                        step_id: s.id.clone(),
+                        cause: format!("{} ({})", e, e.code()),
+                    })?;
                 final_artifact = Some(artifact);
                 final_bytes = Some((bytes, format));
             }
@@ -512,13 +539,25 @@ fn empty_reference() -> crate::skill_runtime::reference_generate::ReferenceDoc {
 }
 
 fn merge_bill(into: &mut TokenBill, from: &TokenBill) {
-    into.map_llm_tokens.r#in = into.map_llm_tokens.r#in.saturating_add(from.map_llm_tokens.r#in);
-    into.map_llm_tokens.out = into.map_llm_tokens.out.saturating_add(from.map_llm_tokens.out);
+    into.map_llm_tokens.r#in = into
+        .map_llm_tokens
+        .r#in
+        .saturating_add(from.map_llm_tokens.r#in);
+    into.map_llm_tokens.out = into
+        .map_llm_tokens
+        .out
+        .saturating_add(from.map_llm_tokens.out);
     if into.map_llm_tokens.model.is_empty() {
         into.map_llm_tokens.model = from.map_llm_tokens.model.clone();
     }
-    into.reduce_llm_tokens.r#in = into.reduce_llm_tokens.r#in.saturating_add(from.reduce_llm_tokens.r#in);
-    into.reduce_llm_tokens.out = into.reduce_llm_tokens.out.saturating_add(from.reduce_llm_tokens.out);
+    into.reduce_llm_tokens.r#in = into
+        .reduce_llm_tokens
+        .r#in
+        .saturating_add(from.reduce_llm_tokens.r#in);
+    into.reduce_llm_tokens.out = into
+        .reduce_llm_tokens
+        .out
+        .saturating_add(from.reduce_llm_tokens.out);
     if into.reduce_llm_tokens.model.is_empty() {
         into.reduce_llm_tokens.model = from.reduce_llm_tokens.model.clone();
     }
@@ -532,7 +571,9 @@ const RESERVED_OSS_NAMESPACES: [&str; 2] = ["document_intelligence.", "writing."
 
 /// True if `agent` is in a reserved OSS namespace (so an unmatched id is a built-in typo).
 fn is_reserved_oss_namespace(agent: &str) -> bool {
-    RESERVED_OSS_NAMESPACES.iter().any(|ns| agent.starts_with(ns))
+    RESERVED_OSS_NAMESPACES
+        .iter()
+        .any(|ns| agent.starts_with(ns))
 }
 
 /// Build the stdin JSON object a **plugin agent** receives, from a skill agent-step's `input`
@@ -594,15 +635,15 @@ fn resolve_yaml_value(
             }
             Value::Object(obj)
         }
-        serde_yaml::Value::Sequence(seq) => {
-            Value::Array(seq.iter().map(|e| resolve_yaml_value(e, user_inputs, state)).collect())
-        }
+        serde_yaml::Value::Sequence(seq) => Value::Array(
+            seq.iter()
+                .map(|e| resolve_yaml_value(e, user_inputs, state))
+                .collect(),
+        ),
         serde_yaml::Value::Bool(b) => Value::Bool(*b),
-        serde_yaml::Value::Number(n) => {
-            serde_json::Number::from_f64(n.as_f64().unwrap_or(0.0))
-                .map(Value::Number)
-                .unwrap_or(Value::Null)
-        }
+        serde_yaml::Value::Number(n) => serde_json::Number::from_f64(n.as_f64().unwrap_or(0.0))
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
         serde_yaml::Value::Null => Value::Null,
         _ => Value::Null,
     }
@@ -659,9 +700,10 @@ fn resolve_ref_to_strings(
     if let Some(v) = user_inputs.get(head) {
         return match (v, tail) {
             (Value::String(s), None) => vec![s.clone()],
-            (Value::Array(arr), None) => {
-                arr.iter().filter_map(|x| x.as_str().map(String::from)).collect()
-            }
+            (Value::Array(arr), None) => arr
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect(),
             (Value::Array(arr), Some(idx)) => idx
                 .parse::<usize>()
                 .ok()
@@ -790,12 +832,22 @@ steps:
         let skill = parse_skill_yaml(SKILL_YAML).unwrap();
         let doc = "设备 A 分辨率 1080p 功耗 5W。设备 B 分辨率 4K 功耗 12W。";
         let inputs = json!({ "doc": "item-1", "entities": ["设备 A", "设备 B"] });
-        let res = run_skill(&skill, &inputs, true, &resolver(doc), &good_llm(), "deepseek").unwrap();
+        let res = run_skill(
+            &skill,
+            &inputs,
+            true,
+            &resolver(doc),
+            &good_llm(),
+            "deepseek",
+        )
+        .unwrap();
         assert_eq!(res.format, ExportFormat::Xlsx);
         assert!(!res.artifact_bytes.is_empty());
         // xlsx magic: PK zip header.
         assert_eq!(&res.artifact_bytes[..2], b"PK");
-        let Artifact::Table(t) = &res.artifact else { panic!() };
+        let Artifact::Table(t) = &res.artifact else {
+            panic!()
+        };
         assert_eq!(t.headers, vec!["参数", "设备 A", "设备 B", "差异"]);
         assert_eq!(t.rows.len(), 2);
         assert!(!res.partial);
@@ -830,7 +882,15 @@ steps:
         );
         let skill = parse_skill_yaml(&yaml).unwrap();
         let inputs = json!({ "doc": "item-1", "entities": ["A", "B"] });
-        let err = run_skill(&skill, &inputs, true, &resolver("x"), &good_llm(), "deepseek").unwrap_err();
+        let err = run_skill(
+            &skill,
+            &inputs,
+            true,
+            &resolver("x"),
+            &good_llm(),
+            "deepseek",
+        )
+        .unwrap_err();
         assert_eq!(err.code(), "partial-failure");
     }
 
@@ -844,10 +904,21 @@ steps:
             llm = llm.with_response("无关散文无 JSON");
         }
         let inputs = json!({ "doc": "item-1", "entities": ["设备 A", "设备 B"] });
-        let res = run_skill(&skill, &inputs, true, &resolver("设备 A 1080p"), &llm, "deepseek").unwrap();
+        let res = run_skill(
+            &skill,
+            &inputs,
+            true,
+            &resolver("设备 A 1080p"),
+            &llm,
+            "deepseek",
+        )
+        .unwrap();
         assert!(res.partial, "degraded run flagged partial");
         assert!(!res.warnings.is_empty());
-        assert!(!res.artifact_bytes.is_empty(), "still produces a downloadable file");
+        assert!(
+            !res.artifact_bytes.is_empty(),
+            "still produces a downloadable file"
+        );
     }
 
     #[test]
@@ -855,8 +926,18 @@ steps:
         // ${entities.0} / ${entities.1} must pick the right entity labels.
         let skill = parse_skill_yaml(SKILL_YAML).unwrap();
         let inputs = json!({ "doc": "item-1", "entities": ["甲", "乙"] });
-        let res = run_skill(&skill, &inputs, true, &resolver("甲 5W 乙 12W"), &good_llm(), "deepseek").unwrap();
-        let Artifact::Table(t) = &res.artifact else { panic!() };
+        let res = run_skill(
+            &skill,
+            &inputs,
+            true,
+            &resolver("甲 5W 乙 12W"),
+            &good_llm(),
+            "deepseek",
+        )
+        .unwrap();
+        let Artifact::Table(t) = &res.artifact else {
+            panic!()
+        };
         assert_eq!(t.headers[1], "甲");
         assert_eq!(t.headers[2], "乙");
     }
@@ -907,16 +988,24 @@ steps:
         fn ok(envelope: Value, tokens: u32) -> Self {
             StubDispatcher {
                 calls: RefCell::new(Vec::new()),
-                result: Ok(DispatchOutput { envelope, llm_tokens: tokens }),
+                result: Ok(DispatchOutput {
+                    envelope,
+                    llm_tokens: tokens,
+                }),
             }
         }
         fn err(msg: &str) -> Self {
-            StubDispatcher { calls: RefCell::new(Vec::new()), result: Err(msg.to_string()) }
+            StubDispatcher {
+                calls: RefCell::new(Vec::new()),
+                result: Err(msg.to_string()),
+            }
         }
     }
     impl AgentDispatcher for StubDispatcher {
         fn dispatch(&self, agent_id: &str, input: &Value) -> Result<DispatchOutput, String> {
-            self.calls.borrow_mut().push((agent_id.to_string(), input.clone()));
+            self.calls
+                .borrow_mut()
+                .push((agent_id.to_string(), input.clone()));
             self.result.clone()
         }
     }
@@ -949,7 +1038,13 @@ steps:
         let inputs = json!({ "caseId": "case-1", "facts": "借款 10 万逾期未还" });
         let disp = StubDispatcher::ok(draft_envelope(), 4200);
         let res = run_skill_with_dispatcher(
-            &skill, &inputs, true, &empty_resolver(), &good_llm(), "deepseek-v4-flash", Some(&disp),
+            &skill,
+            &inputs,
+            true,
+            &empty_resolver(),
+            &good_llm(),
+            "deepseek-v4-flash",
+            Some(&disp),
         )
         .unwrap();
         // dispatcher was called with the right agent id + resolved typed input.
@@ -965,13 +1060,18 @@ steps:
         assert!(!res.artifact_bytes.is_empty());
         assert_eq!(&res.artifact_bytes[..2], b"PK", "docx is a zip");
         // the rendered document carries the drafted sections + disclaimer.
-        let Artifact::Document(d) = &res.artifact else { panic!() };
+        let Artifact::Document(d) = &res.artifact else {
+            panic!()
+        };
         assert_eq!(d.title.as_deref(), Some("民事起诉状"));
         let s = serde_json::to_string(d).unwrap();
         assert!(s.contains("诉讼请求"));
         assert!(s.contains("执业律师"));
         assert!(!res.partial, "clean draft is not partial");
-        assert_eq!(res.token_bill.map_llm_tokens.r#in, 4200, "agent tokens billed");
+        assert_eq!(
+            res.token_bill.map_llm_tokens.r#in, 4200,
+            "agent tokens billed"
+        );
     }
 
     #[test]
@@ -980,12 +1080,24 @@ steps:
         let skill = parse_skill_yaml(PRO_SKILL_YAML).unwrap();
         let inputs = json!({ "caseId": "case-1", "facts": "x" });
         let res = run_skill_with_dispatcher(
-            &skill, &inputs, true, &empty_resolver(), &good_llm(), "deepseek", None,
+            &skill,
+            &inputs,
+            true,
+            &empty_resolver(),
+            &good_llm(),
+            "deepseek",
+            None,
         )
         .unwrap();
         assert!(res.partial);
-        assert!(res.warnings.iter().any(|w| w.contains("legal_drafter") && w.contains("未接入调度器")));
-        assert!(!res.artifact_bytes.is_empty(), "degraded run still yields a downloadable file");
+        assert!(res
+            .warnings
+            .iter()
+            .any(|w| w.contains("legal_drafter") && w.contains("未接入调度器")));
+        assert!(
+            !res.artifact_bytes.is_empty(),
+            "degraded run still yields a downloadable file"
+        );
     }
 
     #[test]
@@ -995,11 +1107,20 @@ steps:
         let inputs = json!({ "caseId": "case-1", "facts": "x" });
         let disp = StubDispatcher::err("agent 'legal_drafter' not found in any loaded plugin");
         let res = run_skill_with_dispatcher(
-            &skill, &inputs, true, &empty_resolver(), &good_llm(), "deepseek", Some(&disp),
+            &skill,
+            &inputs,
+            true,
+            &empty_resolver(),
+            &good_llm(),
+            "deepseek",
+            Some(&disp),
         )
         .unwrap();
         assert!(res.partial);
-        assert!(res.warnings.iter().any(|w| w.contains("调度失败") && w.contains("not found")));
+        assert!(res
+            .warnings
+            .iter()
+            .any(|w| w.contains("调度失败") && w.contains("not found")));
     }
 
     #[test]
@@ -1010,13 +1131,22 @@ steps:
         env["red_lines_violated"] = json!(["no_hallucinated_citation"]);
         let disp = StubDispatcher::ok(env, 100);
         let res = run_skill_with_dispatcher(
-            &skill, &inputs, true, &empty_resolver(), &good_llm(), "deepseek", Some(&disp),
+            &skill,
+            &inputs,
+            true,
+            &empty_resolver(),
+            &good_llm(),
+            "deepseek",
+            Some(&disp),
         )
         .unwrap();
         assert!(res.partial);
         assert!(res.warnings.iter().any(|w| w.contains("红线")));
         let s = serde_json::to_string(&res.artifact).unwrap();
-        assert!(s.contains("no_hallucinated_citation"), "red line surfaced in document");
+        assert!(
+            s.contains("no_hallucinated_citation"),
+            "red line surfaced in document"
+        );
     }
 
     #[test]
@@ -1026,7 +1156,13 @@ steps:
         let inputs = json!({ "caseId": "c", "facts": "f" });
         let disp = StubDispatcher::ok(draft_envelope(), MAX_TOTAL_TOKENS + 1);
         let err = run_skill_with_dispatcher(
-            &skill, &inputs, true, &empty_resolver(), &good_llm(), "deepseek", Some(&disp),
+            &skill,
+            &inputs,
+            true,
+            &empty_resolver(),
+            &good_llm(),
+            "deepseek",
+            Some(&disp),
         )
         .unwrap_err();
         assert_eq!(err.code(), "cost-cap-exceeded");
@@ -1044,11 +1180,20 @@ steps:
         let inputs = json!({ "doc": "item-1", "entities": ["A", "B"] });
         let disp = StubDispatcher::ok(draft_envelope(), 1);
         let err = run_skill_with_dispatcher(
-            &skill, &inputs, true, &resolver("x"), &good_llm(), "deepseek", Some(&disp),
+            &skill,
+            &inputs,
+            true,
+            &resolver("x"),
+            &good_llm(),
+            "deepseek",
+            Some(&disp),
         )
         .unwrap_err();
         assert_eq!(err.code(), "partial-failure");
-        assert!(disp.calls.borrow().is_empty(), "typo'd OSS id must NOT hit the dispatcher");
+        assert!(
+            disp.calls.borrow().is_empty(),
+            "typo'd OSS id must NOT hit the dispatcher"
+        );
     }
 
     #[test]
@@ -1059,11 +1204,19 @@ steps:
         let inputs = json!({ "doc": "item-1", "entities": ["设备 A", "设备 B"] });
         let disp = StubDispatcher::err("should not be called");
         let res = run_skill_with_dispatcher(
-            &skill, &inputs, true,
-            &resolver("设备 A 1080p。设备 B 4K。"), &good_llm(), "deepseek", Some(&disp),
+            &skill,
+            &inputs,
+            true,
+            &resolver("设备 A 1080p。设备 B 4K。"),
+            &good_llm(),
+            "deepseek",
+            Some(&disp),
         )
         .unwrap();
-        assert!(disp.calls.borrow().is_empty(), "OSS agent must not hit the dispatcher");
+        assert!(
+            disp.calls.borrow().is_empty(),
+            "OSS agent must not hit the dispatcher"
+        );
         assert_eq!(res.format, ExportFormat::Xlsx);
     }
 }

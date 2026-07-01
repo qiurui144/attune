@@ -37,9 +37,7 @@ pub async fn issue(
     let (token, meta) = vault
         .issue_scoped_token(&body.label, &body.scopes, body.ttl_secs)
         .map_err(|e| match e {
-            attune_core::error::VaultError::Locked => {
-                AppError::Unauthorized("vault locked".into())
-            }
+            attune_core::error::VaultError::Locked => AppError::Unauthorized("vault locked".into()),
             attune_core::error::VaultError::InvalidInput(m) => AppError::BadRequest(m),
             other => AppError::Internal(other.to_string()),
         })?;
@@ -54,9 +52,7 @@ pub async fn issue(
 }
 
 /// GET /api/v1/scoped-tokens — 列举 (不含 token 明文)。
-pub async fn list(
-    State(state): State<SharedState>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let items = vault.list_scoped_tokens().map_err(|e| match e {
         attune_core::error::VaultError::Locked => AppError::Unauthorized("vault locked".into()),
@@ -76,7 +72,11 @@ pub async fn revoke(
         other => AppError::Internal(other.to_string()),
     })?;
     if !changed {
-        return Err(AppError::NotFound("token not found or already revoked".into()));
+        return Err(AppError::NotFound(
+            "token not found or already revoked".into(),
+        ));
     }
-    Ok(Json(serde_json::json!({ "revoked": true, "token_id": token_id })))
+    Ok(Json(
+        serde_json::json!({ "revoked": true, "token_id": token_id }),
+    ))
 }

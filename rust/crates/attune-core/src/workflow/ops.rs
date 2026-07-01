@@ -165,7 +165,10 @@ mod tests {
     #[test]
     fn echo_input_with_empty_inputs_returns_empty_object() {
         let out = run_deterministic("echo_input", empty_inputs(), None, None).expect("ok");
-        assert!(out.is_object(), "echo_input should return an object, got {out:?}");
+        assert!(
+            out.is_object(),
+            "echo_input should return an object, got {out:?}"
+        );
         assert_eq!(out.as_object().unwrap().len(), 0);
     }
 
@@ -175,7 +178,10 @@ mod tests {
     fn unknown_op_returns_explicit_error() {
         let err = run_deterministic("does_not_exist", empty_inputs(), None, None).unwrap_err();
         assert!(err.contains("unknown deterministic op"), "got: {err}");
-        assert!(err.contains("does_not_exist"), "error should name the op, got: {err}");
+        assert!(
+            err.contains("does_not_exist"),
+            "error should name the op, got: {err}"
+        );
     }
 
     // ── find_overlap input validation ───────────────────────────────────────
@@ -230,7 +236,10 @@ mod tests {
         inputs.insert("source".into(), json!("hacker"));
         let err = run_deterministic("write_annotation", inputs, None, None).unwrap_err();
         assert!(err.contains("source must be 'user' or 'ai'"), "got: {err}");
-        assert!(err.contains("hacker"), "error should echo bad value, got: {err}");
+        assert!(
+            err.contains("hacker"),
+            "error should echo bad value, got: {err}"
+        );
     }
 
     #[test]
@@ -266,6 +275,9 @@ mod tests {
         inputs.insert("item_id".into(), json!("i_abc"));
         inputs.insert("body".into(), json!("hello"));
         let err = run_deterministic("write_annotation", inputs, None, None).unwrap_err();
-        assert!(err.contains("store required"), "store check must precede dek check, got: {err}");
+        assert!(
+            err.contains("store required"),
+            "store check must precede dek check, got: {err}"
+        );
     }
 }

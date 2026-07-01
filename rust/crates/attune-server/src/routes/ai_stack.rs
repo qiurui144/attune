@@ -13,19 +13,38 @@ use serde_json::json;
 use crate::state::SharedState;
 
 fn note(available: bool, msg: &str) -> Option<String> {
-    if available { None } else { Some(msg.to_string()) }
+    if available {
+        None
+    } else {
+        Some(msg.to_string())
+    }
 }
 
 /// GET /api/v1/ai_stack — 返各底座状态 + 硬件 tier + 模型推荐 + region
 pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let embedding_loaded = state.embedding.lock().ok().map(|g| g.is_some()).unwrap_or(false);
-    let rerank_loaded = state.reranker.lock().ok().map(|g| g.is_some()).unwrap_or(false);
+    let embedding_loaded = state
+        .embedding
+        .lock()
+        .ok()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    let rerank_loaded = state
+        .reranker
+        .lock()
+        .ok()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
     let llm_configured = state.llm.lock().ok().map(|g| g.is_some()).unwrap_or(false);
     // web_search readiness mirrors the actual decision in routes/chat.rs:
     // state.web_search is Some iff a usable browser was auto-detected (or an
     // explicit browser_path was set and verified). Checking the same Arc means
     // the status here stays in sync with whether chat web-search would succeed.
-    let web_search_available = state.web_search.lock().ok().map(|g| g.is_some()).unwrap_or(false);
+    let web_search_available = state
+        .web_search
+        .lock()
+        .ok()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
 
     let ocr_provider = attune_core::ocr::detect_default_provider();
     let ocr_available = ocr_provider.is_some();
@@ -56,10 +75,8 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     let tier = attune_core::platform::classify_hardware(hw);
     let recommendation = attune_core::platform::ModelRecommendation::for_tier(tier);
     let region = attune_core::platform::detect_region();
-    let passmark = attune_core::platform::cpu_db::lookup(&hw.cpu_model)
-        .map(|e| e.passmark);
-    let npu_tops = attune_core::platform::cpu_db::lookup(&hw.cpu_model)
-        .and_then(|e| e.npu_tops);
+    let passmark = attune_core::platform::cpu_db::lookup(&hw.cpu_model).map(|e| e.passmark);
+    let npu_tops = attune_core::platform::cpu_db::lookup(&hw.cpu_model).and_then(|e| e.npu_tops);
 
     // 统一加速器视图：枚举本机所有推理加速器 (CPU/NVIDIA/AMD GPU+NPU/Intel iGPU+NPU)
     // + 每个的就绪度，并给底座 ONNX EP 选择提示 (recommended_ep_hint, 仅硬件视角建议)。
@@ -176,8 +193,8 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
 pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value> {
     // 按硬件 tier 选 ASR ggml（弱机自动落到更小模型）。
     let tier = attune_core::platform::classify_hardware(&state.hardware);
-    let asr_ggml = attune_core::platform::ModelRecommendation::for_tier(tier)
-        .map(|r| r.asr_ggml.to_string());
+    let asr_ggml =
+        attune_core::platform::ModelRecommendation::for_tier(tier).map(|r| r.asr_ggml.to_string());
     // Catalog-driven ASR engine: when sensevoice is selected for this hardware, fetch the
     // SenseVoice ONNX model + tokens instead of the whisper ggml. CPU-tier stays whisper.
     let asr_is_sensevoice = attune_core::asr::catalog_asr_engine() == "sensevoice";
@@ -197,10 +214,9 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
         // ASR 模型：catalog 选 sensevoice → 拉 SenseVoice ONNX + tokens；否则按 tier 拉
         // whisper ggml。缺失才拉，失败不 panic（§4.5 graceful）。
         if asr_is_sensevoice {
-            let r = tokio::task::spawn_blocking(
-                attune_core::asr_sensevoice::ensure_sensevoice_model,
-            )
-            .await;
+            let r =
+                tokio::task::spawn_blocking(attune_core::asr_sensevoice::ensure_sensevoice_model)
+                    .await;
             match r {
                 Ok(Ok(b)) => tracing::info!(
                     "ai-stack ensure: SenseVoice model ready at {}",
@@ -210,12 +226,13 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
                 Err(e) => tracing::warn!("ai-stack ensure: SenseVoice task join error: {e}"),
             }
         } else if let Some(ggml) = asr_ggml {
-            let r = tokio::task::spawn_blocking(move || {
-                attune_core::asr::ensure_whisper_model(&ggml)
-            })
-            .await;
+            let r =
+                tokio::task::spawn_blocking(move || attune_core::asr::ensure_whisper_model(&ggml))
+                    .await;
             match r {
-                Ok(Ok(path)) => tracing::info!("ai-stack ensure: ASR model ready at {}", path.display()),
+                Ok(Ok(path)) => {
+                    tracing::info!("ai-stack ensure: ASR model ready at {}", path.display())
+                }
                 Ok(Err(e)) => tracing::warn!("ai-stack ensure: ASR download failed: {e}"),
                 Err(e) => tracing::warn!("ai-stack ensure: ASR task join error: {e}"),
             }
@@ -224,8 +241,15 @@ pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value>
         // seeds it (makes write_selected_source/persist_used_source live, not dead code).
         // vault guard taken alone — respects lock ordering.
         if let Some(src_id) = attune_core::infer::model_source::current_top_source_id() {
-            let vault_guard = state_for_persist.vault.lock().unwrap_or_else(|e| e.into_inner());
-            let cur = vault_guard.store().get_meta("app_settings").ok().flatten()
+            let vault_guard = state_for_persist
+                .vault
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let cur = vault_guard
+                .store()
+                .get_meta("app_settings")
+                .ok()
+                .flatten()
                 .and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok())
                 .unwrap_or_else(|| serde_json::json!({}));
             let updated = attune_core::infer::model_source::persist_used_source(cur, &src_id);

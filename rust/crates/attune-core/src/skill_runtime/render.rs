@@ -47,17 +47,35 @@ pub fn comparison_to_table(cmp: &ParamComparison, title: &str) -> Artifact {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skill_runtime::compare_to_table::ParamRow;
     use crate::document_intelligence::token_bill::TokenBill;
+    use crate::skill_runtime::compare_to_table::ParamRow;
 
     fn cmp() -> ParamComparison {
         ParamComparison {
             entity_a: "设备 A".into(),
             entity_b: "设备 B".into(),
             rows: vec![
-                ParamRow { name: "分辨率".into(), value_a: Some("1080p".into()), value_b: Some("4K".into()), differs: true, ungrounded: false },
-                ParamRow { name: "重量".into(), value_a: Some("2kg".into()), value_b: Some("2kg".into()), differs: false, ungrounded: false },
-                ParamRow { name: "价格".into(), value_a: None, value_b: Some("999".into()), differs: false, ungrounded: false },
+                ParamRow {
+                    name: "分辨率".into(),
+                    value_a: Some("1080p".into()),
+                    value_b: Some("4K".into()),
+                    differs: true,
+                    ungrounded: false,
+                },
+                ParamRow {
+                    name: "重量".into(),
+                    value_a: Some("2kg".into()),
+                    value_b: Some("2kg".into()),
+                    differs: false,
+                    ungrounded: false,
+                },
+                ParamRow {
+                    name: "价格".into(),
+                    value_a: None,
+                    value_b: Some("999".into()),
+                    differs: false,
+                    ungrounded: false,
+                },
             ],
             token_bill: TokenBill::default(),
             warnings: vec![],
@@ -67,7 +85,9 @@ mod tests {
     #[test]
     fn maps_columns_and_rows() {
         let art = comparison_to_table(&cmp(), "设备参数比对");
-        let Artifact::Table(t) = art else { panic!("expected table") };
+        let Artifact::Table(t) = art else {
+            panic!("expected table")
+        };
         assert_eq!(t.title.as_deref(), Some("设备参数比对"));
         assert_eq!(t.headers, vec!["参数", "设备 A", "设备 B", "差异"]);
         assert_eq!(t.rows.len(), 3);

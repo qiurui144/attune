@@ -296,10 +296,9 @@ impl Store {
 
     /// 显式删除一条 memory（同时级联删除 memory_vectors）。
     pub fn delete_memory_by_id(&self, memory_id: &str) -> Result<usize> {
-        let n = self.conn.execute(
-            "DELETE FROM memories WHERE id = ?1",
-            params![memory_id],
-        )?;
+        let n = self
+            .conn
+            .execute("DELETE FROM memories WHERE id = ?1", params![memory_id])?;
         Ok(n)
     }
 
@@ -390,7 +389,16 @@ mod tests {
         let dek = Key32::generate();
         let hashes = vec!["aaa".to_string(), "bbb".to_string()];
         let n = store
-            .insert_memory(&dek, "episodic", 1000, 2000, &hashes, "summary text", "qwen2.5:3b", 5000)
+            .insert_memory(
+                &dek,
+                "episodic",
+                1000,
+                2000,
+                &hashes,
+                "summary text",
+                "qwen2.5:3b",
+                5000,
+            )
             .unwrap();
         assert_eq!(n, 1);
         assert_eq!(store.memory_count().unwrap(), 1);
@@ -402,11 +410,22 @@ mod tests {
         let dek = Key32::generate();
         let hashes = vec!["aaa".to_string(), "bbb".to_string()];
         let _ = store
-            .insert_memory(&dek, "episodic", 1000, 2000, &hashes, "first", "model", 5000)
+            .insert_memory(
+                &dek, "episodic", 1000, 2000, &hashes, "first", "model", 5000,
+            )
             .unwrap();
         // 二次插入相同 (kind, hashes) → INSERT OR IGNORE 返回 0
         let n = store
-            .insert_memory(&dek, "episodic", 1000, 2000, &hashes, "second attempt", "model", 9999)
+            .insert_memory(
+                &dek,
+                "episodic",
+                1000,
+                2000,
+                &hashes,
+                "second attempt",
+                "model",
+                9999,
+            )
             .unwrap();
         assert_eq!(n, 0, "duplicate insert must be ignored");
         assert_eq!(store.memory_count().unwrap(), 1);
@@ -440,7 +459,16 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
         store
-            .insert_memory(&dek, "episodic", 1000, 2000, &["h1".into()], "the answer is 42", "qwen2.5:3b", 100)
+            .insert_memory(
+                &dek,
+                "episodic",
+                1000,
+                2000,
+                &["h1".into()],
+                "the answer is 42",
+                "qwen2.5:3b",
+                100,
+            )
             .unwrap();
         let rows = store.list_recent_memories(&dek, 10).unwrap();
         assert_eq!(rows.len(), 1);
@@ -511,7 +539,16 @@ mod tests {
             .insert_semantic_memory(&dek, "t-old", &["m1".into()], "old", "m", 0, 100, 1000)
             .unwrap();
         let (new_id, _) = store
-            .insert_semantic_memory(&dek, "t-new", &["m1".into(), "m2".into()], "new", "m", 0, 200, 2000)
+            .insert_semantic_memory(
+                &dek,
+                "t-new",
+                &["m1".into(), "m2".into()],
+                "new",
+                "m",
+                0,
+                200,
+                2000,
+            )
             .unwrap();
         let n = store.mark_memory_superseded(&old_id, &new_id).unwrap();
         assert_eq!(n, 1);
@@ -534,7 +571,16 @@ mod tests {
         // 新 episodic（window_end 接近 now），不该被降级
         let now = 400 * day;
         store
-            .insert_memory(&dek, "episodic", now - day, now, &["fresh".into()], "s", "m", now)
+            .insert_memory(
+                &dek,
+                "episodic",
+                now - day,
+                now,
+                &["fresh".into()],
+                "s",
+                "m",
+                now,
+            )
             .unwrap();
         // 一条 live semantic（created_at 晚于老 episodic 的 window_end）
         store
@@ -548,7 +594,13 @@ mod tests {
         assert_eq!(hot.len(), 1);
         assert_eq!(hot[0].source_chunk_hashes, vec!["fresh"]);
         // include_cold 看得到全部
-        assert_eq!(store.list_live_memories(&dek, "episodic", true).unwrap().len(), 2);
+        assert_eq!(
+            store
+                .list_live_memories(&dek, "episodic", true)
+                .unwrap()
+                .len(),
+            2
+        );
         // 二次跑幂等：无新增降级
         assert_eq!(store.demote_cold_memories(now, cold_age).unwrap(), 0);
     }

@@ -103,8 +103,13 @@ pub fn device_fingerprint() -> DeviceFingerprint {
         profile.cpu_model.clone()
     };
     let form_factor = form_factor_str(profile.form_factor);
-    let fingerprint_sig =
-        DeviceFingerprint::compute_sig(&device_id, &hostname, &os, &cpu_brand, hardware_uuid.as_deref());
+    let fingerprint_sig = DeviceFingerprint::compute_sig(
+        &device_id,
+        &hostname,
+        &os,
+        &cpu_brand,
+        hardware_uuid.as_deref(),
+    );
     DeviceFingerprint {
         device_id,
         hostname,
@@ -288,7 +293,9 @@ mod tests {
     fn sig_is_64_hex_lowercase() {
         let sig = DeviceFingerprint::compute_sig("a", "b", "linux", "c", None);
         assert_eq!(sig.len(), 64, "SHA-256 hex is 64 chars");
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(sig
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     /// 字段顺序敏感:换 hostname / os 位置必产生不同 sig(防止两端顺序漂移未被发现)。
@@ -329,11 +336,21 @@ mod tests {
         let fp2 = device_fingerprint();
         crate::platform::set_dir_override_for_test(prev);
 
-        assert_eq!(fp1.device_id, fp2.device_id, "device_id must be stable across calls");
-        assert_eq!(fp1.fingerprint_sig, fp2.fingerprint_sig, "sig must be stable");
+        assert_eq!(
+            fp1.device_id, fp2.device_id,
+            "device_id must be stable across calls"
+        );
+        assert_eq!(
+            fp1.fingerprint_sig, fp2.fingerprint_sig,
+            "sig must be stable"
+        );
         assert_eq!(fp1, fp2, "whole fingerprint stable across calls");
         // sig 必须与字段自洽。
-        assert_eq!(fp1.fingerprint_sig, fp1.fingerprint_sig(), "self-consistent sig");
+        assert_eq!(
+            fp1.fingerprint_sig,
+            fp1.fingerprint_sig(),
+            "self-consistent sig"
+        );
         assert!(!fp1.device_id.is_empty(), "device_id never empty");
     }
 
@@ -349,7 +366,10 @@ mod tests {
         // 第二次即使传不同 machine_uuid,也必须复用已落盘的值。
         let id2 = stable_device_id(Some("DIFFERENT-machine"));
         crate::platform::set_dir_override_for_test(prev);
-        assert_eq!(id2, "machine-xyz", "persisted device.id must win over a changed machine-id");
+        assert_eq!(
+            id2, "machine-xyz",
+            "persisted device.id must win over a changed machine-id"
+        );
     }
 
     /// 无 machine-id 时生成 UUID v4 并持久化复用(跨调用稳定)。

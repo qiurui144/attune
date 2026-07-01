@@ -17,7 +17,7 @@
 //! exposes them together (a [`ConsistencyReport`]) without forcing either to depend on the other —
 //! callers that only want one axis still call the per-axis functions directly.
 
-use super::cite::{build_citations, CiteError, CiteStyle, Citation, SourceMeta};
+use super::cite::{build_citations, Citation, CiteError, CiteStyle, SourceMeta};
 use crate::terminology::{collect_variants, TermCluster};
 use serde::{Deserialize, Serialize};
 
@@ -183,7 +183,9 @@ fn has_parenthesized_year(s: &str) -> bool {
         if bytes[i] == b'(' {
             if let Some(rel) = s[i + 1..].find(')') {
                 let inner = s[i + 1..i + 1 + rel].trim();
-                if inner == "n.d." || (inner.len() == 4 && inner.bytes().all(|c| c.is_ascii_digit())) {
+                if inner == "n.d."
+                    || (inner.len() == 4 && inner.bytes().all(|c| c.is_ascii_digit()))
+                {
                     return true;
                 }
             }
@@ -319,7 +321,9 @@ mod tests {
             url: None,
             external: false,
         };
-        build_citations(std::slice::from_ref(&m), style).unwrap()[0].formatted.clone()
+        build_citations(std::slice::from_ref(&m), style).unwrap()[0]
+            .formatted
+            .clone()
     }
 
     // ─────────────── detect_style: golden (≥10, one per style + variants) ───────────────
@@ -344,7 +348,12 @@ mod tests {
 
     #[test]
     fn detect_gbt7714_from_real_output() {
-        let s = rendered(CiteStyle::Gbt7714, &["张三", "李四"], "深度学习综述", "2023");
+        let s = rendered(
+            CiteStyle::Gbt7714,
+            &["张三", "李四"],
+            "深度学习综述",
+            "2023",
+        );
         assert_eq!(detect_style(&s), Some(CiteStyle::Gbt7714), "got {s}");
     }
 
@@ -390,7 +399,11 @@ mod tests {
                 _ => (&["Alpha B."], "English Title"),
             };
             let s = rendered(style, authors, title, "2020");
-            assert_eq!(detect_style(&s), Some(style), "style {style:?} mis-detected: {s}");
+            assert_eq!(
+                detect_style(&s),
+                Some(style),
+                "style {style:?} mis-detected: {s}"
+            );
         }
     }
 
@@ -404,7 +417,10 @@ mod tests {
 
     #[test]
     fn detect_plain_prose_is_none() {
-        assert_eq!(detect_style("This is just a sentence with no citation cues"), None);
+        assert_eq!(
+            detect_style("This is just a sentence with no citation cues"),
+            None
+        );
     }
 
     #[test]
@@ -438,7 +454,11 @@ mod tests {
 
     #[test]
     fn normalize_to_propagates_missing_title_error() {
-        let m = SourceMeta { id: "x".into(), title: "  ".into(), ..Default::default() };
+        let m = SourceMeta {
+            id: "x".into(),
+            title: "  ".into(),
+            ..Default::default()
+        };
         let err = normalize_to(std::slice::from_ref(&m), CiteStyle::Ieee).unwrap_err();
         assert_eq!(err, CiteError::MissingTitle("x".into()));
     }

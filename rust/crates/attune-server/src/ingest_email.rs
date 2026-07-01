@@ -79,18 +79,33 @@ pub fn sync_email_account(
                     } else {
                         match ingest_document(store, &dek, &doc) {
                             Ok(IngestOutcome::Inserted { item_id, .. }) => {
-                                let _ = store.upsert_indexed_file(dir_id, &source_ref, &marker, &item_id);
+                                let _ = store.upsert_indexed_file(
+                                    dir_id,
+                                    &source_ref,
+                                    &marker,
+                                    &item_id,
+                                );
                                 new_items += 1;
                                 handled = true;
                             }
                             Ok(IngestOutcome::Updated { item_id, .. }) => {
-                                let _ = store.upsert_indexed_file(dir_id, &source_ref, &marker, &item_id);
+                                let _ = store.upsert_indexed_file(
+                                    dir_id,
+                                    &source_ref,
+                                    &marker,
+                                    &item_id,
+                                );
                                 updated_items += 1;
                                 handled = true;
                             }
                             Ok(IngestOutcome::Duplicate { item_id }) => {
                                 // 内容与已有 item 撞 hash（转发邮件）—— 记 indexed_files 避免下轮重判。
-                                let _ = store.upsert_indexed_file(dir_id, &source_ref, &marker, &item_id);
+                                let _ = store.upsert_indexed_file(
+                                    dir_id,
+                                    &source_ref,
+                                    &marker,
+                                    &item_id,
+                                );
                                 skipped_items += 1;
                                 handled = true;
                             }
@@ -192,7 +207,10 @@ mod tests {
     fn parse_marker_handles_edge_cases() {
         assert_eq!(parse_marker(""), ("".to_string(), None));
         assert_eq!(parse_marker("INBOX:"), ("INBOX".to_string(), None));
-        assert_eq!(parse_marker("INBOX:notanumber"), ("INBOX".to_string(), None));
+        assert_eq!(
+            parse_marker("INBOX:notanumber"),
+            ("INBOX".to_string(), None)
+        );
     }
 
     #[test]

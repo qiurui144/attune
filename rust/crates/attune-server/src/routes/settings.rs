@@ -1,9 +1,9 @@
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use attune_core::llm_settings::SETTINGS_META_KEY as SETTINGS_KEY;
-use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::Json;
 
 pub async fn get_settings(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     let recommended_summary = state.hardware.recommended_summary_model();
@@ -715,7 +715,7 @@ mod tests {
     /// `verify_with_whitelist` — never `Official` (§9 adversarial 2, defends downgrade).
     #[test]
     fn settings_pubkey_cannot_override_official() {
-        use attune_core::plugin_sig::{SigOutcome, verify_with_whitelist};
+        use attune_core::plugin_sig::{verify_with_whitelist, SigOutcome};
         // A user-whitelisted key signs a plugin; the SigOutcome must be ThirdParty,
         // not Official — settings pubkeys are a separate, lower trust domain.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -852,12 +852,10 @@ mod tests {
 
     #[test]
     fn pluginhub_url_accepts_public_hostname() {
-        assert!(
-            validate_settings_fields(&serde_json::json!({
-                "pluginhub": {"url": "https://hub.engi-stack.com"}
-            }))
-            .is_ok()
-        );
+        assert!(validate_settings_fields(&serde_json::json!({
+            "pluginhub": {"url": "https://hub.engi-stack.com"}
+        }))
+        .is_ok());
     }
 
     /// Laptop 形态：LLM 默认走远端 token (openai_compat + null endpoint/model)

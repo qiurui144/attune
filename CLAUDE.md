@@ -51,16 +51,11 @@ per § 版本拆解能力 §4 强制切片表(每行 ≥ 主题 + 交付 + 时�
 - v1.0.4 / v1.0.5 / v1.0.6 三者依赖 v1.0.3 但相互独立 → 6/12-6/25 三 worktree 同跑
 - v1.0.7 / v1.0.8 / v1.0.9 / v1.0.10 / v1.0.11 仅 blockedBy v1.0.2 → 7 月起开 5 worktree 真并行
 
-## 双产品线架构
+## Rust-first 架构
 
-本仓库包含两条并行的产品线，共享 Chrome 扩展协议（`/api/v1/*`）：
+当前运行时代码集中在 Rust workspace，并由 Chrome 扩展与 Tauri 桌面壳对接 `/api/v1/*`。
 
-1. **Python 原型线** (`python/src/attune_python/`) — 实验/验证
-   - FastAPI + ChromaDB + SQLite FTS5
-   - 快速迭代新特性和算法
-   - 73 tests，持续增长
-
-2. **Rust 商用线** (`rust/`) — 生产/发布
+1. **Rust 生产线** (`rust/`) — 生产/发布
    - Axum + rusqlite + tantivy + usearch + hdbscan
    - 加密模型：Argon2id + AES-256-GCM + Device Secret
    - 定位：**私有 AI 知识伙伴**（主动进化 + 对话式 + 混合智能，详见 `docs/superpowers/specs/2026-04-17-product-positioning-design.md`）
@@ -225,16 +220,7 @@ git push origin main
 7. **检测异常状态**：`git log origin/develop..origin/main --first-parent` 看到非 `merge:` commit 立刻报警（必须加 `--first-parent`，否则会误报 develop 的合并 commit）
 
 
-## 技术栈（Python 原型线）
-
-- 后端: FastAPI + Uvicorn, Python 3.11+
-- 向量库: ChromaDB (嵌入式, cosine 相似度)
-- 全文搜索: SQLite FTS5 + jieba 分词（LIKE 回退）
-- Embedding: Ollama bge-m3 (默认) / ONNX Runtime (CPU/DirectML/ROCm) / OpenVINO (Intel NPU/iGPU)
-- Chrome 扩展: Manifest V3 + Preact + Vite 多阶段构建
-- 打包: PyInstaller + AppImage (Linux) / NSIS (Windows)
-
-## 技术栈（Rust 商用线，rust/）
+## 技术栈（Rust 生产线，rust/）
 
 - 后端: Axum 0.8 + Tokio + rustls TLS
 - 数据库: rusqlite + 字段级 AES-256-GCM 加密
@@ -246,23 +232,13 @@ git push origin main
 - AI 分类: Ollama chat (qwen2.5) + hdbscan 聚类 + 编程/法律插件
 - 分发: Rust 主二进制 ~47 MB stripped / 59 MB unstripped（静态链接，含 TLS + 搜索引擎 + Web UI + 分类引擎；R32 实测 2026-05-01 x86_64-linux）。**desktop 安装包 = 瘦包**（2026-06-16 v1.4.0 实测 + 用户拍板）：Linux deb 38M（app binary + whisper-cli binary；系统库 poppler-utils/webkit/gtk/curl 走 apt Depends 自动解析）/ AppImage 110M / Win nsis 23M+msi 41M。**底座模型不捆绑** — embedding/rerank/ASR权重/PP-OCR ONNX/Ollama runtime 在**首次运行经 S8 ModelStack failover 从 company-mirror→hf-mirror→HF 拉取**（非完全离线自包含，装完一次联网初始化即用，失败有 failover+重试兜底）。**LLM 不本地预装** — cloud API（attune Pro 会员 token / 用户 BYOK），K3 一体机镜像例外。（旧"150-200MB 捆绑底座"描述已过时，与实际 thin-deb + runtime-fetch 设计不符。）
 
-## 已实现模块（Phase 0-3）
+## 已实现模块
 
-### 后端
-- `main.py` — lifespan 全链路初始化、路由注册、认证中间件
-- `config.py` — YAML 配置 + Pydantic Settings，默认模型 bge-m3, device auto
-- `core/embedding.py` — OllamaEmbedding (HTTP API) / ONNXEmbedding / OpenVINO (Phase 4)
-- `core/search.py` — RRF 混合搜索引擎 + 两阶段层级检索 (search_relevant) + 动态注入预算
-- `core/chunker.py` — 滑动窗口分块 + extract_sections() 语义章节切割
-- `core/parser.py` — 文件解析 (MD/TXT/代码/PDF/DOCX) + parse_bytes() 内存解析
-- `db/sqlite_db.py` — SQLite (schema/CRUD/FTS5/embedding 队列，含 level/section_idx)
-- `db/chroma_db.py` — ChromaDB 封装
-- `scheduler/queue.py` — Embedding 队列 Worker (后台线程，metadata 含 level/section_idx)
-- `indexer/watcher.py` — watchdog 多目录监听
-- `indexer/pipeline.py` — 解析→两层入队（章节 Level1 + 段落块 Level2）→存储→embedding 管道
-- `platform/detector.py` — 芯片级硬件检测 + 驱动匹配 + 一键安装命令
-- `tray.py` — 系统托盘入口（pystray + uvicorn daemon 线程）
-- API: ingest / upload / search / items / index / status / settings / models / ws
+### Rust 后端
+- `rust/crates/attune-core/` — 加密、存储、搜索、ingest、agent、OCR、LLM、技能运行时
+- `rust/crates/attune-server/` — Axum HTTP API、WebSocket、embedded UI、后台任务
+- `rust/crates/attune-cli/` — 命令行入口与 smoke 路径
+- API: ingest / upload / search / items / index / status / settings / models / ws / agents / skills
 
 ### Chrome 扩展
 - `content/detector.js` — 平台适配器 (ChatGPT/Claude/Gemini, extractMessage/isComplete/setInputContent)
@@ -452,15 +428,6 @@ Settings UI 采用 ChatGPT/Gemini/Claude 共同范式：模态对话框（左 ta
 
 ## 开发规范
 
-### Python 原型线
-- Python 代码使用 ruff 格式化和 lint（line-length=120）
-- 类型注解: 所有公开函数必须有类型注解
-- 测试放 `tests/` 目录, 使用 pytest
-- **扩展 E2E 测试使用 Playwright 真 Chrome (`channel="chrome"`), 禁止退化到 Chromium** (per CLAUDE.md MCP 限制, FIX-4 已落实)
-- 调试代码放 `tmp/`, 使用后删除
-- 使用 venv 管理 Python 依赖
-- pip 使用清华源
-
 ### 通用
 - API 路径前缀: `/api/v1/`
 - 后端端口: 18900
@@ -561,9 +528,9 @@ MarketplaceView / SettingsView / Step3LLM / Step4Hardware 等）。**2026-05-25 
 
 ## 项目结构
 
-- `python/src/attune_python/` — Python 后端
 - `extension/` — Chrome 扩展（Manifest V3 + Preact + Vite）
-- `packaging/` — 打包配置（PyInstaller/AppImage/NSIS）
+- `apps/attune-desktop/` — Tauri 桌面壳
+- `packaging/` — 包管理器与分发配置
 - `.github/workflows/` — CI/CD
 - `tests/` — 测试代码 + conftest.py
 - `docs/screenshots/<topic>/` — 文档/验证用截图（committed）

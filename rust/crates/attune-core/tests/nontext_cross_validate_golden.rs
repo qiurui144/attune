@@ -21,19 +21,67 @@ fn cases() -> Vec<Case> {
     use Agreement::*;
     vec![
         // ── ContentConflict: classic OCR confusions (≥8 required) ──
-        Case { ocr: "1OO", gt: "100", expect: ContentConflict }, // O↔0
-        Case { ocr: "l23", gt: "123", expect: ContentConflict }, // l↔1
-        Case { ocr: "I5", gt: "15", expect: ContentConflict },   // I↔1
-        Case { ocr: "5O0", gt: "500", expect: ContentConflict }, // O↔0
-        Case { ocr: "B8", gt: "88", expect: ContentConflict },   // B↔8
-        Case { ocr: "rn", gt: "m", expect: ContentConflict },    // rn↔m
-        Case { ocr: "S5", gt: "55", expect: ContentConflict },   // S↔5
-        Case { ocr: "Z2", gt: "22", expect: ContentConflict },   // Z↔2
-        Case { ocr: "g9", gt: "99", expect: ContentConflict },   // g↔9
-        Case { ocr: "¥1,OOO", gt: "¥1,000", expect: ContentConflict },
+        Case {
+            ocr: "1OO",
+            gt: "100",
+            expect: ContentConflict,
+        }, // O↔0
+        Case {
+            ocr: "l23",
+            gt: "123",
+            expect: ContentConflict,
+        }, // l↔1
+        Case {
+            ocr: "I5",
+            gt: "15",
+            expect: ContentConflict,
+        }, // I↔1
+        Case {
+            ocr: "5O0",
+            gt: "500",
+            expect: ContentConflict,
+        }, // O↔0
+        Case {
+            ocr: "B8",
+            gt: "88",
+            expect: ContentConflict,
+        }, // B↔8
+        Case {
+            ocr: "rn",
+            gt: "m",
+            expect: ContentConflict,
+        }, // rn↔m
+        Case {
+            ocr: "S5",
+            gt: "55",
+            expect: ContentConflict,
+        }, // S↔5
+        Case {
+            ocr: "Z2",
+            gt: "22",
+            expect: ContentConflict,
+        }, // Z↔2
+        Case {
+            ocr: "g9",
+            gt: "99",
+            expect: ContentConflict,
+        }, // g↔9
+        Case {
+            ocr: "¥1,OOO",
+            gt: "¥1,000",
+            expect: ContentConflict,
+        },
         // ── Agree: true matches (sentinels — must NOT be flagged) ──
-        Case { ocr: "2024-01-15", gt: "2024-01-15", expect: Agree },
-        Case { ocr: "合同编号", gt: "合同编号", expect: Agree },
+        Case {
+            ocr: "2024-01-15",
+            gt: "2024-01-15",
+            expect: Agree,
+        },
+        Case {
+            ocr: "合同编号",
+            gt: "合同编号",
+            expect: Agree,
+        },
     ]
 }
 
@@ -56,7 +104,10 @@ fn ocr_correction_golden_flags_known_confusions() {
         "expected >=8 known OCR-error conflicts in the golden set, got {conflicts}"
     );
     // Sentinels prove we do not over-flag true matches.
-    assert!(agreements >= 2, "expected >=2 true-agreement sentinels, got {agreements}");
+    assert!(
+        agreements >= 2,
+        "expected >=2 true-agreement sentinels, got {agreements}"
+    );
 }
 
 /// R5: cross-validation must NEVER silently rewrite — `compare_content` only classifies,

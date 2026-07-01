@@ -231,7 +231,9 @@ pub struct AgentOutputModes {
 /// 宽松解析 `output_modes`：接受 map / 裸 list / 缺省,绝不因形态不符让加载失败。
 /// 严格 struct 解析会把 tech-pro 的 `[structured]` 当 invalid type 拒绝整个 plugin
 /// (这是引入该字段时的 regression);本函数把 list 归一为 `{default:None, supports:[...]}`。
-fn deserialize_output_modes<'de, D>(de: D) -> std::result::Result<Option<AgentOutputModes>, D::Error>
+fn deserialize_output_modes<'de, D>(
+    de: D,
+) -> std::result::Result<Option<AgentOutputModes>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -243,7 +245,10 @@ where
                 .into_iter()
                 .filter_map(|x| x.as_str().map(String::from))
                 .collect();
-            Some(AgentOutputModes { default: None, supports })
+            Some(AgentOutputModes {
+                default: None,
+                supports,
+            })
         }
         serde_json::Value::Object(_) => serde_json::from_value(v).ok(),
         // 其他标量形态 → 忽略(不阻塞加载)。
@@ -347,9 +352,15 @@ pub struct UiComponentSpec {
     pub description: String,
 }
 
-fn default_eager() -> String { "eager".into() }
-fn default_heartbeat_seconds() -> u64 { 30 }
-fn default_restart_on_failure() -> u32 { 3 }
+fn default_eager() -> String {
+    "eager".into()
+}
+fn default_heartbeat_seconds() -> u64 {
+    30
+}
+fn default_restart_on_failure() -> u32 {
+    3
+}
 
 /// vertical plugin 在 plugin.yaml 中声明的 PII 正则。
 ///
@@ -430,8 +441,12 @@ impl Default for ChatTrigger {
     }
 }
 
-fn default_true() -> bool { true }
-fn default_one() -> usize { 1 }
+fn default_true() -> bool {
+    true
+}
+fn default_one() -> usize {
+    1
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginConstraints {
@@ -527,7 +542,11 @@ impl LoadedPlugin {
         validate_capabilities(&manifest)?;
         // from_strings has no on-disk dir → cannot load registers_skills yaml files; that path is
         // only for built-in (string-embedded) plugins, which don't declare registers_skills.
-        Ok(Self { manifest, prompt: prompt.to_string(), registered_skill_yamls: Vec::new() })
+        Ok(Self {
+            manifest,
+            prompt: prompt.to_string(),
+            registered_skill_yamls: Vec::new(),
+        })
     }
 
     /// 从文件系统路径加载（外部插件走这条路径）。
@@ -596,9 +615,14 @@ impl LoadedPlugin {
         // Load every declared skill-runtime skill yaml from the plugin dir (best-effort: a missing
         // or unreadable entry is warned + skipped, never fails the whole plugin). Path-traversal
         // guarded — the resolved file must stay inside `plugin_dir`.
-        let registered_skill_yamls = load_registered_skill_yamls(plugin_dir, &manifest.registers_skills);
+        let registered_skill_yamls =
+            load_registered_skill_yamls(plugin_dir, &manifest.registers_skills);
 
-        Ok(Self { manifest, prompt, registered_skill_yamls })
+        Ok(Self {
+            manifest,
+            prompt,
+            registered_skill_yamls,
+        })
     }
 }
 
@@ -660,14 +684,17 @@ impl AnnotationAngleConfig {
         }
         if p.manifest.label_prefix.is_empty() {
             return Err(VaultError::InvalidInput(
-                "annotation_angle plugin requires non-empty label_prefix".into()
+                "annotation_angle plugin requires non-empty label_prefix".into(),
             ));
         }
         Ok(Self {
             id: p.manifest.id.clone(),
             label_prefix: p.manifest.label_prefix.clone(),
-            default_color: if p.manifest.default_color.is_empty() { "yellow".into() }
-                           else { p.manifest.default_color.clone() },
+            default_color: if p.manifest.default_color.is_empty() {
+                "yellow".into()
+            } else {
+                p.manifest.default_color.clone()
+            },
             max_findings: p.manifest.constraints.max_findings.unwrap_or(5),
             max_snippet_chars: p.manifest.constraints.max_snippet_chars.unwrap_or(150),
             min_snippet_chars: p.manifest.constraints.min_snippet_chars.unwrap_or(4),
@@ -775,9 +802,9 @@ label_prefix: "X"
 "#;
         let p = LoadedPlugin::from_strings(yaml, "").unwrap();
         let c = AnnotationAngleConfig::from_loaded(&p).unwrap();
-        assert_eq!(c.max_findings, 5);        // 默认
+        assert_eq!(c.max_findings, 5); // 默认
         assert_eq!(c.max_snippet_chars, 150); // 默认
-        assert_eq!(c.min_snippet_chars, 4);   // 默认
+        assert_eq!(c.min_snippet_chars, 4); // 默认
     }
 
     #[test]
@@ -964,7 +991,8 @@ agents:
   - id: a_none
     runtime: subprocess
 "#;
-        let m: PluginManifest = serde_yaml::from_str(map_yaml).expect("parse must not fail on list form");
+        let m: PluginManifest =
+            serde_yaml::from_str(map_yaml).expect("parse must not fail on list form");
         let map_agent = m.agents.iter().find(|a| a.id == "a_map").unwrap();
         let om = map_agent.output_modes.as_ref().unwrap();
         assert_eq!(om.default.as_deref(), Some("structured"));
@@ -1011,6 +1039,9 @@ agents:
         .expect("manifest");
         let p = LoadedPlugin::from_dir(&pdir).expect("load");
         // traversal rejected + missing file skipped → nothing loaded, plugin still loads.
-        assert!(p.registered_skill_yamls.is_empty(), "traversal + missing both skipped");
+        assert!(
+            p.registered_skill_yamls.is_empty(),
+            "traversal + missing both skipped"
+        );
     }
 }

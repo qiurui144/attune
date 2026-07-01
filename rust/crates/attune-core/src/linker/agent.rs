@@ -224,7 +224,10 @@ pub fn compute_links_for_item(
             }
         })
         .collect();
-    apply_degree_cap(&mut shared_entity_links, thresholds.max_links_per_item_per_kind);
+    apply_degree_cap(
+        &mut shared_entity_links,
+        thresholds.max_links_per_item_per_kind,
+    );
     stats.shared_entity_links = shared_entity_links.len();
 
     // 3. Explicit-ref links (directed: this item cites another).
@@ -421,7 +424,10 @@ mod tests {
         assert_eq!(links.len(), 10);
         // Top-10 weights must be 20..30
         let min_kept = links.iter().map(|l| l.weight as i64).min().unwrap();
-        assert!(min_kept >= 20, "expected top-10 kept (weight ≥ 20), got min={min_kept}");
+        assert!(
+            min_kept >= 20,
+            "expected top-10 kept (weight ≥ 20), got min={min_kept}"
+        );
     }
 
     #[test]
@@ -437,13 +443,21 @@ mod tests {
         // Spec §8 "Graph blow-up": caps + DF filter are mandatory, not knobs.
         // Defaults must impose them strictly.
         let t = LinkThresholds::default();
-        assert!(t.max_links_per_item_per_kind <= 50, "out-degree cap must be ≤ 50");
-        assert!(t.shared_entity_max_df_ratio <= 0.5,
-            "DF filter must drop ubiquitous entities (≤ 50%)");
-        assert!(t.shared_entity_min_overlap >= 2,
-            "single-entity overlap is too noisy");
-        assert!(t.semantic_near_min_cosine >= 0.80,
-            "cosine threshold must be high enough to avoid full graph");
+        assert!(
+            t.max_links_per_item_per_kind <= 50,
+            "out-degree cap must be ≤ 50"
+        );
+        assert!(
+            t.shared_entity_max_df_ratio <= 0.5,
+            "DF filter must drop ubiquitous entities (≤ 50%)"
+        );
+        assert!(
+            t.shared_entity_min_overlap >= 2,
+            "single-entity overlap is too noisy"
+        );
+        assert!(
+            t.semantic_near_min_cosine >= 0.80,
+            "cosine threshold must be high enough to avoid full graph"
+        );
     }
 }
-

@@ -33,12 +33,11 @@ pub struct OcrResponse {
 
 const OCR_SOFT_WARN_BYTES: usize = 50 * 1024 * 1024; // 50 MB
 
-fn err(
-    code: &str,
-    msg: &str,
-    status: StatusCode,
-) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({ "error": msg, "code": code })))
+fn err(code: &str, msg: &str, status: StatusCode) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({ "error": msg, "code": code })),
+    )
 }
 
 /// POST /api/v1/office/ocr — sync, multipart/form-data
@@ -77,15 +76,13 @@ pub async fn post_ocr(
         }
     }
 
-    let bytes = file_bytes.ok_or_else(|| {
-        err("invalid-input", "file required", StatusCode::BAD_REQUEST)
-    })?;
+    let bytes =
+        file_bytes.ok_or_else(|| err("invalid-input", "file required", StatusCode::BAD_REQUEST))?;
     if bytes.is_empty() {
         return Err(err("empty-file", "file is empty", StatusCode::BAD_REQUEST));
     }
-    let profile = profile.ok_or_else(|| {
-        err("invalid-input", "profile required", StatusCode::BAD_REQUEST)
-    })?;
+    let profile =
+        profile.ok_or_else(|| err("invalid-input", "profile required", StatusCode::BAD_REQUEST))?;
 
     if profile == "id_card" && id_card_subtype.as_deref().unwrap_or("").is_empty() {
         return Err(err(
@@ -97,8 +94,15 @@ pub async fn post_ocr(
 
     // profile whitelist
     let allowed = [
-        "document", "receipt", "table", "card", "id_card",
-        "screenshot", "ancient", "form", "contract",
+        "document",
+        "receipt",
+        "table",
+        "card",
+        "id_card",
+        "screenshot",
+        "ancient",
+        "form",
+        "contract",
     ];
     if !allowed.contains(&profile.as_str()) {
         return Err(err(
@@ -113,9 +117,15 @@ pub async fn post_ocr(
         .as_deref()
         .map(|n| {
             let l = n.to_lowercase();
-            l.ends_with(".pdf") || l.ends_with(".png") || l.ends_with(".jpg")
-                || l.ends_with(".jpeg") || l.ends_with(".webp") || l.ends_with(".bmp")
-                || l.ends_with(".tiff") || l.ends_with(".tif") || l.ends_with(".gif")
+            l.ends_with(".pdf")
+                || l.ends_with(".png")
+                || l.ends_with(".jpg")
+                || l.ends_with(".jpeg")
+                || l.ends_with(".webp")
+                || l.ends_with(".bmp")
+                || l.ends_with(".tiff")
+                || l.ends_with(".tif")
+                || l.ends_with(".gif")
         })
         .unwrap_or(false);
     if !ext_ok {
@@ -538,7 +548,9 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         store.claim_next_job().unwrap();
-        store.fail_job(&id, "asr-engine-failed", "whisper exited 1").unwrap();
+        store
+            .fail_job(&id, "asr-engine-failed", "whisper exited 1")
+            .unwrap();
         let j = store.get_job(&id).unwrap().unwrap();
         let v = super::job_record_to_status_json(&j);
         assert_eq!(v["state"], "failed");

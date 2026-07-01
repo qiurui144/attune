@@ -229,7 +229,9 @@ async fn boot_server() -> String {
     let router = attune_server::build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
     let base = format!("http://127.0.0.1:{port}");
     wait_for_health(&base).await;
 

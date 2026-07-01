@@ -36,7 +36,8 @@ fn require_llm() -> Box<dyn LlmProvider> {
     let kind = std::env::var("ATTUNE_LLM_PROVIDER").unwrap_or_else(|_| "ollama".into());
     match kind.as_str() {
         "openai_compat" | "openai" => {
-            let endpoint = std::env::var("ATTUNE_LLM_ENDPOINT").expect("ATTUNE_LLM_ENDPOINT required");
+            let endpoint =
+                std::env::var("ATTUNE_LLM_ENDPOINT").expect("ATTUNE_LLM_ENDPOINT required");
             let api_key = std::env::var("ATTUNE_LLM_API_KEY").expect("ATTUNE_LLM_API_KEY required");
             let model = std::env::var("ATTUNE_LLM_MODEL").expect("ATTUNE_LLM_MODEL required");
             let host = endpoint.split("//").nth(1).unwrap_or(&endpoint);
@@ -44,7 +45,8 @@ fn require_llm() -> Box<dyn LlmProvider> {
             Box::new(OpenAiLlmProvider::new(&endpoint, &api_key, &model))
         }
         _ => {
-            let model = std::env::var("ATTUNE_LLM_MODEL").unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.into());
+            let model =
+                std::env::var("ATTUNE_LLM_MODEL").unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.into());
             let p = OllamaLlmProvider::with_model(&model);
             assert!(p.is_available(), "Ollama not reachable on :11434");
             println!("[provider] ollama model={model}");
@@ -57,7 +59,11 @@ fn model_name() -> String {
     std::env::var("ATTUNE_LLM_MODEL").unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.into())
 }
 fn seeds() -> usize {
-    std::env::var("ATTUNE_REAL_LLM_SEEDS").ok().and_then(|s| s.parse().ok()).filter(|n| *n >= 1).unwrap_or(3)
+    std::env::var("ATTUNE_REAL_LLM_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(3)
 }
 fn mean_std(xs: &[f64]) -> (f64, f64) {
     let n = xs.len() as f64;
@@ -85,7 +91,10 @@ fn hit(item_id: &str, title: &str, score: f32) -> WatchHit {
 fn digest_summary_real_llm() {
     let llm = require_llm();
     let n_seeds = seeds();
-    println!("\n=== GATE A: digest LLM summary — {} ({n_seeds} seeds) ===", model_name());
+    println!(
+        "\n=== GATE A: digest LLM summary — {} ({n_seeds} seeds) ===",
+        model_name()
+    );
 
     // Watch "RISC-V toolchain": 4 items each anchored on a distinct seeded term.
     let hits = vec![
@@ -96,9 +105,18 @@ fn digest_summary_real_llm() {
     ];
     let cm = MapContentSource(
         [
-            ("i1", "The RVV 1.0 vector extension specification was ratified this week."),
-            ("i2", "GCC 14 brings major autovectorization improvements for RISC-V."),
-            ("i3", "The LLVM RISC-V backend gained scalable vector support."),
+            (
+                "i1",
+                "The RVV 1.0 vector extension specification was ratified this week.",
+            ),
+            (
+                "i2",
+                "GCC 14 brings major autovectorization improvements for RISC-V.",
+            ),
+            (
+                "i3",
+                "The LLVM RISC-V backend gained scalable vector support.",
+            ),
             ("i4", "The RVA23 application profile was finalized by RVI."),
         ]
         .iter()
@@ -113,8 +131,13 @@ fn digest_summary_real_llm() {
     let mut all_grounded = true;
     for seed in 0..n_seeds {
         let card = builder.build_llm_summary(
-            "w", "RISC-V toolchain", &hits, &cm, &std::collections::HashMap::new(),
-            "2026-06-19T00:00:00Z", llm.as_ref(),
+            "w",
+            "RISC-V toolchain",
+            &hits,
+            &cm,
+            &std::collections::HashMap::new(),
+            "2026-06-19T00:00:00Z",
+            llm.as_ref(),
         );
         let summary = card.llm_summary.clone().unwrap_or_default();
         // grounding: a non-empty summary means the validator passed (every keypoint had an
@@ -128,8 +151,14 @@ fn digest_summary_real_llm() {
     }
     let (mean, std) = mean_std(&recall_per_seed);
     println!("  keypoint-recall mean={mean:.3} std={std:.3}");
-    assert!(all_grounded, "every seed must yield a grounded summary (validator passed)");
-    assert!(mean >= 0.80, "digest keypoint-recall floor 0.80, got {mean:.3} (label tier in RELEASE, do NOT relax)");
+    assert!(
+        all_grounded,
+        "every seed must yield a grounded summary (validator passed)"
+    );
+    assert!(
+        mean >= 0.80,
+        "digest keypoint-recall floor 0.80, got {mean:.3} (label tier in RELEASE, do NOT relax)"
+    );
 }
 
 // ── Gate B: deep-research synthesis — grounded refs + recall ────────────────
@@ -139,15 +168,30 @@ fn digest_summary_real_llm() {
 fn deep_research_synthesis_real_llm() {
     let llm = require_llm();
     let n_seeds = seeds();
-    println!("\n=== GATE B: deep-research synthesis — {} ({n_seeds} seeds) ===", model_name());
+    println!(
+        "\n=== GATE B: deep-research synthesis — {} ({n_seeds} seeds) ===",
+        model_name()
+    );
 
     let docs = vec![
-        ResearchDoc { kind: SourceKind::Vault, reference: "item-1".into(), title: "RVV ratified".into(),
-            snippet: "The RVV 1.0 vector extension was ratified.".into() },
-        ResearchDoc { kind: SourceKind::Web, reference: "https://lwn.net/x".into(), title: "Toolchain support".into(),
-            snippet: "GCC and LLVM now support RVV codegen.".into() },
-        ResearchDoc { kind: SourceKind::Vault, reference: "item-2".into(), title: "RVA23 profile".into(),
-            snippet: "RVA23 mandates the vector extension.".into() },
+        ResearchDoc {
+            kind: SourceKind::Vault,
+            reference: "item-1".into(),
+            title: "RVV ratified".into(),
+            snippet: "The RVV 1.0 vector extension was ratified.".into(),
+        },
+        ResearchDoc {
+            kind: SourceKind::Web,
+            reference: "https://lwn.net/x".into(),
+            title: "Toolchain support".into(),
+            snippet: "GCC and LLVM now support RVV codegen.".into(),
+        },
+        ResearchDoc {
+            kind: SourceKind::Vault,
+            reference: "item-2".into(),
+            title: "RVA23 profile".into(),
+            snippet: "RVA23 mandates the vector extension.".into(),
+        },
     ];
     let n_docs = docs.len();
     let seeded = ["RVV", "RVA23"];
@@ -155,19 +199,31 @@ fn deep_research_synthesis_real_llm() {
     let mut recall_per_seed = Vec::new();
     let mut all_refs_in_range = true;
     for seed in 0..n_seeds {
-        let report = DeepResearch.run("RISC-V vector ecosystem", &docs, &ResearchOpts::default(), Some(llm.as_ref()));
+        let report = DeepResearch.run(
+            "RISC-V vector ecosystem",
+            &docs,
+            &ResearchOpts::default(),
+            Some(llm.as_ref()),
+        );
         let md = &report.report_markdown;
         // grounding-precision: every [n] in the report must be in 1..=n_docs (no fabricated source).
         let in_range = refs_in_range(md, n_docs);
         all_refs_in_range &= in_range;
-        let recall = seeded.iter().filter(|t| md.contains(**t)).count() as f64 / seeded.len() as f64;
+        let recall =
+            seeded.iter().filter(|t| md.contains(**t)).count() as f64 / seeded.len() as f64;
         recall_per_seed.push(recall);
         println!("  seed {seed}: refs_in_range={in_range} recall={recall:.2}");
     }
     let (mean, std) = mean_std(&recall_per_seed);
     println!("  synthesis recall mean={mean:.3} std={std:.3}");
-    assert!(all_refs_in_range, "no fabricated source refs (grounding-precision = 1.00)");
-    assert!(mean >= 0.75, "deep-research recall floor 0.75, got {mean:.3} (label tier in RELEASE, do NOT relax)");
+    assert!(
+        all_refs_in_range,
+        "no fabricated source refs (grounding-precision = 1.00)"
+    );
+    assert!(
+        mean >= 0.75,
+        "deep-research recall floor 0.75, got {mean:.3} (label tier in RELEASE, do NOT relax)"
+    );
 }
 
 // ── Gate C: cross-source verification — recall + grounding + conflict detect ─
@@ -179,21 +235,34 @@ fn cross_source_verification_real_llm() {
 
     let llm = require_llm();
     let n_seeds = seeds();
-    println!("\n=== GATE C: cross-source verification — {} ({n_seeds} seeds) ===", model_name());
+    println!(
+        "\n=== GATE C: cross-source verification — {} ({n_seeds} seeds) ===",
+        model_name()
+    );
 
     // Two distinct sources state the SAME fact in DIFFERENT words (must cluster → confirmed),
     // plus one independent single-source fact (must stay single). This is exactly what the
     // deterministic exact-title path CANNOT do, so it isolates the LLM semantic step.
     let docs = vec![
-        ResearchDoc { kind: SourceKind::Vault, reference: "item-1".into(),
+        ResearchDoc {
+            kind: SourceKind::Vault,
+            reference: "item-1".into(),
             title: "RVV ratified".into(),
-            snippet: "The RVV 1.0 vector extension was ratified this week.".into() },
-        ResearchDoc { kind: SourceKind::Web, reference: "https://lwn.net/x".into(),
+            snippet: "The RVV 1.0 vector extension was ratified this week.".into(),
+        },
+        ResearchDoc {
+            kind: SourceKind::Web,
+            reference: "https://lwn.net/x".into(),
             title: "RISC-V finalizes vectors".into(),
-            snippet: "RISC-V International has finalized the 1.0 vector extension specification.".into() },
-        ResearchDoc { kind: SourceKind::Vault, reference: "item-2".into(),
+            snippet: "RISC-V International has finalized the 1.0 vector extension specification."
+                .into(),
+        },
+        ResearchDoc {
+            kind: SourceKind::Vault,
+            reference: "item-2".into(),
             title: "GCC 14 autovec".into(),
-            snippet: "GCC 14 adds RISC-V autovectorization, unrelated to ratification.".into() },
+            snippet: "GCC 14 adds RISC-V autovectorization, unrelated to ratification.".into(),
+        },
     ];
     let n_docs = docs.len();
     let opts = ResearchOpts::default();
@@ -206,18 +275,31 @@ fn cross_source_verification_real_llm() {
     let mut all_grounded = true;
     let mut conflict_false_positive = false;
     for seed in 0..n_seeds {
-        let report = DeepResearch.run("RISC-V vector ratification", &docs, &opts, Some(llm.as_ref()));
+        let report = DeepResearch.run(
+            "RISC-V vector ratification",
+            &docs,
+            &opts,
+            Some(llm.as_ref()),
+        );
         // grounding: every source reference in every claim must be a real doc reference.
         let grounded = report.claims.iter().all(|c| {
-            !c.sources.is_empty() && c.sources.iter().all(|s| real_refs.contains(s.reference.as_str()))
+            !c.sources.is_empty()
+                && c.sources
+                    .iter()
+                    .all(|s| real_refs.contains(s.reference.as_str()))
         });
         all_grounded &= grounded;
         // recall: did it confirm the cross-worded ratification fact as multi-source?
-        let confirmed_multi = report.claims.iter().any(|c| {
-            c.verification == Verification::MultiSourceConfirmed && c.sources.len() >= 2
-        });
+        let confirmed_multi = report
+            .claims
+            .iter()
+            .any(|c| c.verification == Verification::MultiSourceConfirmed && c.sources.len() >= 2);
         // these sources genuinely agree → a 'conflicting' verdict here is a false positive.
-        if report.claims.iter().any(|c| c.verification == Verification::Conflicting) {
+        if report
+            .claims
+            .iter()
+            .any(|c| c.verification == Verification::Conflicting)
+        {
             conflict_false_positive = true;
         }
         let recall = if confirmed_multi { 1.0 } else { 0.0 };
@@ -228,8 +310,14 @@ fn cross_source_verification_real_llm() {
     }
     let (mean, std) = mean_std(&recall_per_seed);
     println!("  cross-source confirm-recall mean={mean:.3} std={std:.3}");
-    assert!(all_grounded, "every claim's sources must trace to a real doc (grounding-precision = 1.00)");
-    assert!(!conflict_false_positive, "agreeing sources must not be labeled conflicting (false-positive guard)");
+    assert!(
+        all_grounded,
+        "every claim's sources must trace to a real doc (grounding-precision = 1.00)"
+    );
+    assert!(
+        !conflict_false_positive,
+        "agreeing sources must not be labeled conflicting (false-positive guard)"
+    );
     assert!(mean >= 0.80, "cross-source confirm-recall floor 0.80, got {mean:.3} (label tier in RELEASE, do NOT relax)");
 }
 

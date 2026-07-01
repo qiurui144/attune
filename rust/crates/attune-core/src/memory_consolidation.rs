@@ -51,7 +51,6 @@ impl ConsolidationBundle {
     pub fn sorted_hashes(&self) -> Vec<String> {
         self.chunks.iter().map(|c| c.chunk_hash.clone()).collect()
     }
-
 }
 
 // ── Phase 1：prepare（持 vault 锁） ────────────────────────────────────────────
@@ -75,10 +74,11 @@ pub fn prepare_consolidation_cycle(
     for h in heads {
         // 当前窗口起点 = floor(created_at / DEFAULT_WINDOW_SECS) * DEFAULT_WINDOW_SECS
         let window_start = (h.created_at_secs / DEFAULT_WINDOW_SECS) * DEFAULT_WINDOW_SECS;
-        buckets
-            .entry(window_start)
-            .or_default()
-            .push((h.chunk_hash, h.item_id, h.summary_encrypted));
+        buckets.entry(window_start).or_default().push((
+            h.chunk_hash,
+            h.item_id,
+            h.summary_encrypted,
+        ));
     }
 
     // 排除当前正在进行的窗口（now 所在的当天） — 避免半天数据被过早 consolidate。
@@ -327,21 +327,31 @@ mod tests {
         // Day 1: 6 chunks
         for i in 0..6 {
             seed_chunk_summary(
-                &store, &dek, &format!("d1-h{i}"), "item", &format!("summary d1 {i}"),
+                &store,
+                &dek,
+                &format!("d1-h{i}"),
+                "item",
+                &format!("summary d1 {i}"),
                 "2026-04-25 10:00:00",
             );
         }
         // Day 2: 7 chunks
         for i in 0..7 {
             seed_chunk_summary(
-                &store, &dek, &format!("d2-h{i}"), "item", &format!("summary d2 {i}"),
+                &store,
+                &dek,
+                &format!("d2-h{i}"),
+                "item",
+                &format!("summary d2 {i}"),
                 "2026-04-26 14:00:00",
             );
         }
         let now = chrono::DateTime::parse_from_rfc3339("2026-04-27T12:00:00Z")
             .unwrap()
             .timestamp();
-        let bundles = prepare_consolidation_cycle(&store, &dek, now).unwrap().unwrap();
+        let bundles = prepare_consolidation_cycle(&store, &dek, now)
+            .unwrap()
+            .unwrap();
         assert_eq!(bundles.len(), 2, "two distinct day-windows");
         assert!(bundles.iter().all(|b| b.chunks.len() >= 5));
     }
@@ -353,7 +363,14 @@ mod tests {
         let now_iso = "2026-04-27 14:00:00";
         // 当天 6 chunks
         for i in 0..6 {
-            seed_chunk_summary(&store, &dek, &format!("h{i}"), "item", &format!("s {i}"), now_iso);
+            seed_chunk_summary(
+                &store,
+                &dek,
+                &format!("h{i}"),
+                "item",
+                &format!("s {i}"),
+                now_iso,
+            );
         }
         let now = chrono::DateTime::parse_from_rfc3339("2026-04-27T15:00:00Z")
             .unwrap()
@@ -368,7 +385,11 @@ mod tests {
         let dek = Key32::generate();
         for i in 0..6 {
             seed_chunk_summary(
-                &store, &dek, &format!("h{i}"), "item", &format!("s {i}"),
+                &store,
+                &dek,
+                &format!("h{i}"),
+                "item",
+                &format!("s {i}"),
                 "2026-04-25 10:00:00",
             );
         }
@@ -376,14 +397,19 @@ mod tests {
             .unwrap()
             .timestamp();
         // 第一次跑出 1 个 bundle
-        let bundles = prepare_consolidation_cycle(&store, &dek, now).unwrap().unwrap();
+        let bundles = prepare_consolidation_cycle(&store, &dek, now)
+            .unwrap()
+            .unwrap();
         assert_eq!(bundles.len(), 1);
         // 直接 apply 写入 memories
         let summaries = vec![Some("manual summary".to_string())];
         apply_consolidation_result(&store, &dek, &bundles, &summaries, "model", now).unwrap();
         // 第二次跑：相同 bundle 应被排除
         let r2 = prepare_consolidation_cycle(&store, &dek, now).unwrap();
-        assert!(r2.is_none(), "already-consolidated bundle should be excluded");
+        assert!(
+            r2.is_none(),
+            "already-consolidated bundle should be excluded"
+        );
     }
 
     #[test]
@@ -476,7 +502,11 @@ mod tests {
         let err = apply_consolidation_result(
             &store,
             &dek,
-            &[ConsolidationBundle { window_start: 0, window_end: 1, chunks: vec![] }],
+            &[ConsolidationBundle {
+                window_start: 0,
+                window_end: 1,
+                chunks: vec![],
+            }],
             &[],
             "m",
             0,

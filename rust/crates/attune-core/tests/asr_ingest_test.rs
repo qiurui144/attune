@@ -140,7 +140,10 @@ fn audio_extension_with_nonaudio_body_errs_gracefully() {
 /// unsupported — proving the audio routing is specific, not "any binary → ASR".
 #[test]
 fn video_extension_is_not_routed_to_asr() {
-    assert!(!is_supported(Path::new("movie.mp4")), ".mp4 must NOT be supported");
+    assert!(
+        !is_supported(Path::new("movie.mp4")),
+        ".mp4 must NOT be supported"
+    );
     let err = parse_bytes(b"\x00\x00\x00\x18ftypmp42", "movie.mp4")
         .expect_err(".mp4 must Err")
         .to_string()
@@ -217,7 +220,10 @@ fn real_asr_on_tone_is_graceful() {
         let path = fixtures_dir().join(name);
         match parse_file(&path) {
             Ok((_t, content)) => {
-                eprintln!("{name}: Ok, {} chars of (likely no-speech) text", content.len());
+                eprintln!(
+                    "{name}: Ok, {} chars of (likely no-speech) text",
+                    content.len()
+                );
             }
             Err(e) => {
                 let err = e.to_string().to_lowercase();
@@ -238,7 +244,13 @@ fn normalize(s: &str) -> String {
     let cleaned: String = s
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect();
     cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }

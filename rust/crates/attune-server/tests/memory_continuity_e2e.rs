@@ -84,13 +84,27 @@ fn seed_stale_memory(state: &AppState, hash: &str, summary: &str, old_dims: usiz
     let dek = vault.dek_db().expect("dek");
     let store = vault.store();
     store
-        .insert_memory(&dek, "episodic", 1, 2, &[hash.to_string()], summary, "old-model", 1)
+        .insert_memory(
+            &dek,
+            "episodic",
+            1,
+            2,
+            &[hash.to_string()],
+            summary,
+            "old-model",
+            1,
+        )
         .expect("insert memory");
-    let id = store.find_memory_id_by_source("episodic", &[hash.to_string()]).unwrap().unwrap();
+    let id = store
+        .find_memory_id_by_source("episodic", &[hash.to_string()])
+        .unwrap()
+        .unwrap();
     // OLD-model vector (under-dimensioned vs the active embedder) → reads stale.
     let old_emb = MockEmbeddingProvider::new(old_dims);
     let (v, _) = old_emb.embed(&[summary]).unwrap();
-    store.put_memory_vector(&id, &v[0], "old-model", 1).expect("put old vector");
+    store
+        .put_memory_vector(&id, &v[0], "old-model", 1)
+        .expect("put old vector");
 }
 
 /// Drive the real reindex (the same `reindex_one` the background batch worker
@@ -123,8 +137,15 @@ async fn change_model_then_reindex_clears_stale_over_http() {
         .json()
         .await
         .expect("json");
-    assert_eq!(before["current_model"], "embed-dim8", "active model is dim-8 key");
-    assert_eq!(before["stale"].as_u64().unwrap(), 1, "old-model vector is stale");
+    assert_eq!(
+        before["current_model"], "embed-dim8",
+        "active model is dim-8 key"
+    );
+    assert_eq!(
+        before["stale"].as_u64().unwrap(),
+        1,
+        "old-model vector is stale"
+    );
 
     // Reindex via the real reindex_one path (the same code the worker batch runs).
     drive_reindex_to_completion(&state);
@@ -139,7 +160,11 @@ async fn change_model_then_reindex_clears_stale_over_http() {
         .json()
         .await
         .expect("json");
-    assert_eq!(after["stale"].as_u64().unwrap(), 0, "no stale vectors remain after reindex");
+    assert_eq!(
+        after["stale"].as_u64().unwrap(),
+        0,
+        "no stale vectors remain after reindex"
+    );
 
     // The reindexed vector is genuinely under the active model (recall path basis).
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
@@ -149,7 +174,10 @@ async fn change_model_then_reindex_clears_stale_over_http() {
         .unwrap()
         .unwrap();
     let v = vault.store().get_memory_vector(&id).unwrap().unwrap();
-    assert_eq!(v.model, "embed-dim8", "reindexed to the active dimension key");
+    assert_eq!(
+        v.model, "embed-dim8",
+        "reindexed to the active dimension key"
+    );
     assert_eq!(v.dim, 8, "vector re-embedded at the new model's dimension");
 }
 
@@ -157,7 +185,12 @@ async fn change_model_then_reindex_clears_stale_over_http() {
 async fn export_import_round_trip_and_idempotent_skip_over_http() {
     // Source: an unlocked vault with two seeded memories.
     let (src_state, _src_tmp) = spawn_unlocked(4);
-    seed_stale_memory(&src_state, "e1", "tokio async runtime scheduling internals", 4);
+    seed_stale_memory(
+        &src_state,
+        "e1",
+        "tokio async runtime scheduling internals",
+        4,
+    );
     seed_stale_memory(&src_state, "e2", "argon2id key derivation hardening", 4);
     let (src_base, client) = serve(Arc::clone(&src_state)).await;
 
@@ -180,7 +213,10 @@ async fn export_import_round_trip_and_idempotent_skip_over_http() {
         let dst_base = dst_base.clone();
         async move {
             let form = reqwest::multipart::Form::new()
-                .part("file", reqwest::multipart::Part::bytes(b).file_name("memory.attune"))
+                .part(
+                    "file",
+                    reqwest::multipart::Part::bytes(b).file_name("memory.attune"),
+                )
                 .text("passphrase", "pw12345678");
             reqwest::Client::new()
                 .post(format!("{dst_base}/api/v1/memory/import"))
@@ -195,19 +231,41 @@ async fn export_import_round_trip_and_idempotent_skip_over_http() {
     let r1 = import(bundle.to_vec()).await;
     assert_eq!(r1.status().as_u16(), 200, "first import ⇒ 200");
     let b1: serde_json::Value = r1.json().await.expect("json");
-    assert!(b1["imported"].as_u64().unwrap() >= 1, "≥1 imported, got {b1}");
-    assert_eq!(b1["skipped"].as_u64().unwrap(), 0, "nothing skipped on a clean vault");
+    assert!(
+        b1["imported"].as_u64().unwrap() >= 1,
+        "≥1 imported, got {b1}"
+    );
+    assert_eq!(
+        b1["skipped"].as_u64().unwrap(),
+        0,
+        "nothing skipped on a clean vault"
+    );
 
     // Second import of the SAME bundle: pure idempotent skip (zero new rows).
     let r2 = import(bundle.to_vec()).await;
     assert_eq!(r2.status().as_u16(), 200, "second import ⇒ 200");
     let b2: serde_json::Value = r2.json().await.expect("json");
-    assert_eq!(b2["imported"].as_u64().unwrap(), 0, "re-import adds nothing");
-    assert!(b2["skipped"].as_u64().unwrap() >= 1, "re-import skips the existing rows, got {b2}");
+    assert_eq!(
+        b2["imported"].as_u64().unwrap(),
+        0,
+        "re-import adds nothing"
+    );
+    assert!(
+        b2["skipped"].as_u64().unwrap() >= 1,
+        "re-import skips the existing rows, got {b2}"
+    );
 
     // Destination row count is stable after the duplicate import (no growth).
     let vault = dst_state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().expect("dek");
-    let rows = vault.store().list_recent_memories(&dek, usize::MAX).unwrap().len();
-    assert_eq!(rows, b1["imported"].as_u64().unwrap() as usize, "row count == first-import count");
+    let rows = vault
+        .store()
+        .list_recent_memories(&dek, usize::MAX)
+        .unwrap()
+        .len();
+    assert_eq!(
+        rows,
+        b1["imported"].as_u64().unwrap() as usize,
+        "row count == first-import count"
+    );
 }

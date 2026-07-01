@@ -87,7 +87,10 @@ pub async fn export_data(
             .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar export: {e}")))
     })
     .await?;
-    tracing::info!("DSAR export: relayed cloud export (size~{} bytes)", body.to_string().len());
+    tracing::info!(
+        "DSAR export: relayed cloud export (size~{} bytes)",
+        body.to_string().len()
+    );
     Ok(Json(body))
 }
 
@@ -95,7 +98,11 @@ pub async fn export_data(
 /// so the embedded `reqwest::blocking` runtime is created and dropped off the async
 /// worker. `op` receives the authenticated client and returns the proxied body.
 /// `cloud_url` is the server-resolved accounts URL (never client-supplied).
-async fn run_blocking<F>(cloud_url: String, req: DSARCredentialsReq, op: F) -> AppResult<serde_json::Value>
+async fn run_blocking<F>(
+    cloud_url: String,
+    req: DSARCredentialsReq,
+    op: F,
+) -> AppResult<serde_json::Value>
 where
     F: FnOnce(&CloudClient) -> AppResult<serde_json::Value> + Send + 'static,
 {
@@ -104,7 +111,12 @@ where
         op(&client)
     })
     .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("dsar task join: {e}")))?
+    .map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("dsar task join: {e}"),
+        )
+    })?
 }
 
 /// POST /api/v1/dsar/delete — 软删除 cloud 账户 proxy.
@@ -158,7 +170,12 @@ pub async fn cancel_deletion(
             .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("dsar cancel: {e}")))
     })
     .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("dsar task join: {e}")))??;
+    .map_err(|e| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("dsar task join: {e}"),
+        )
+    })??;
     tracing::info!("DSAR cancel-deletion: cloud restore confirmed");
     Ok(Json(body))
 }

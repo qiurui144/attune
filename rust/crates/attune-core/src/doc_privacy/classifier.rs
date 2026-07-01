@@ -57,7 +57,10 @@ impl DocClassifier {
     pub fn with_keywords<I: IntoIterator<Item = String>>(keywords: I) -> Self {
         let keywords_orig: Vec<String> = keywords.into_iter().collect();
         let keywords_lc = keywords_orig.iter().map(|k| k.to_lowercase()).collect();
-        Self { keywords_lc, keywords_orig }
+        Self {
+            keywords_lc,
+            keywords_orig,
+        }
     }
 
     /// Classify a document from its extracted text + detected PII entities.
@@ -120,7 +123,13 @@ mod tests {
     use crate::pii::PiiKind;
 
     fn ent(kind: PiiKind) -> DocEntity {
-        DocEntity { kind, page: 0, layer: "text".into(), byte_start: Some(0), byte_end: Some(1) }
+        DocEntity {
+            kind,
+            page: 0,
+            layer: "text".into(),
+            byte_start: Some(0),
+            byte_end: Some(1),
+        }
     }
 
     #[test]

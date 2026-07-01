@@ -98,7 +98,12 @@ fn golden_corpus_has_floor_and_all_classes() {
         corpus.cases.len()
     );
     // every 4-class verdict represented
-    for want in ["rewrite", "substantive", "stance-reversal", "numeric-change"] {
+    for want in [
+        "rewrite",
+        "substantive",
+        "stance-reversal",
+        "numeric-change",
+    ] {
         assert!(
             corpus.cases.iter().any(|c| c.verdict == want),
             "corpus must include at least one '{want}' case"
@@ -161,14 +166,28 @@ fn compare_pipeline_carries_each_labeled_verdict() {
         let cheap = RecordingMockLlm::new("gpt-4o-mini")
             .with_response(&json!({"verdict": want, "rationale": "测试理由"}).to_string());
         let reasoning = RecordingMockLlm::new("gpt-4o").with_response("总体差异摘要");
-        let llms = StageLlms { cheap: &cheap, reasoning: &reasoning };
-        let r = compare(&a, &b, CompareMode::Semantic, OutputMode::Marked, true, &router(), &llms)
-            .unwrap_or_else(|e| panic!("case {} compare failed: {e:?}", case.id));
+        let llms = StageLlms {
+            cheap: &cheap,
+            reasoning: &reasoning,
+        };
+        let r = compare(
+            &a,
+            &b,
+            CompareMode::Semantic,
+            OutputMode::Marked,
+            true,
+            &router(),
+            &llms,
+        )
+        .unwrap_or_else(|e| panic!("case {} compare failed: {e:?}", case.id));
         assert!(
             r.semantic_verdicts.iter().any(|v| v.verdict == want),
             "case {}: expected a '{want}' verdict in {:?}",
             case.id,
-            r.semantic_verdicts.iter().map(|v| &v.verdict).collect::<Vec<_>>()
+            r.semantic_verdicts
+                .iter()
+                .map(|v| &v.verdict)
+                .collect::<Vec<_>>()
         );
         assert!(
             r.annotations.iter().any(|x| x.kind == want),
@@ -183,12 +202,18 @@ fn compare_pipeline_carries_each_labeled_verdict() {
 #[test]
 fn output_shape_empty_string_degrades_not_panics() {
     // Empty → conservative rewrite, no panic.
-    assert_eq!(DiffVerdict::parse_from_llm_response(""), DiffVerdict::Rewrite);
+    assert_eq!(
+        DiffVerdict::parse_from_llm_response(""),
+        DiffVerdict::Rewrite
+    );
 }
 
 #[test]
 fn output_shape_pure_noise_degrades() {
-    assert_eq!(DiffVerdict::parse_from_llm_response("？？？ %%% ###"), DiffVerdict::Rewrite);
+    assert_eq!(
+        DiffVerdict::parse_from_llm_response("？？？ %%% ###"),
+        DiffVerdict::Rewrite
+    );
 }
 
 #[test]
@@ -209,7 +234,9 @@ fn output_shape_unknown_enum_value_falls_to_keyword_heuristic() {
 #[test]
 fn output_shape_brace_inside_rationale_is_string_safe() {
     assert_eq!(
-        DiffVerdict::parse_from_llm_response(r#"{"verdict":"substantive","rationale":"删除了 {a,b}"}"#),
+        DiffVerdict::parse_from_llm_response(
+            r#"{"verdict":"substantive","rationale":"删除了 {a,b}"}"#
+        ),
         DiffVerdict::Substantive
     );
 }
@@ -217,7 +244,16 @@ fn output_shape_brace_inside_rationale_is_string_safe() {
 #[test]
 fn output_shape_free_text_chinese_keyword_fallback() {
     // No JSON at all → legacy keyword heuristic still classifies the obvious cases.
-    assert_eq!(DiffVerdict::parse_from_llm_response("立场反转"), DiffVerdict::StanceReversal);
-    assert_eq!(DiffVerdict::parse_from_llm_response("数字变化"), DiffVerdict::NumericChange);
-    assert_eq!(DiffVerdict::parse_from_llm_response("实质内容变化"), DiffVerdict::Substantive);
+    assert_eq!(
+        DiffVerdict::parse_from_llm_response("立场反转"),
+        DiffVerdict::StanceReversal
+    );
+    assert_eq!(
+        DiffVerdict::parse_from_llm_response("数字变化"),
+        DiffVerdict::NumericChange
+    );
+    assert_eq!(
+        DiffVerdict::parse_from_llm_response("实质内容变化"),
+        DiffVerdict::Substantive
+    );
 }

@@ -106,11 +106,8 @@ impl TokenBill {
     /// Savings by **USD**: `1 − actual_usd / naive_usd`. `None` if either side cannot be
     /// priced. Larger than the token ratio because map runs on the cheap model.
     pub fn savings_ratio_by_usd(&self) -> Option<f64> {
-        let naive_usd = cost::estimate_cost_usd(
-            self.naive_baseline_tokens as usize,
-            0,
-            &self.baseline_model,
-        )?;
+        let naive_usd =
+            cost::estimate_cost_usd(self.naive_baseline_tokens as usize, 0, &self.baseline_model)?;
         if naive_usd <= 0.0 {
             return None;
         }
@@ -156,7 +153,8 @@ mod tests {
             baseline_model: "gpt-4o".into(),
             ..Default::default()
         };
-        bill.map_llm_tokens.add(&usage("gpt-4o-mini", 30_000, 5_000));
+        bill.map_llm_tokens
+            .add(&usage("gpt-4o-mini", 30_000, 5_000));
         bill.reduce_llm_tokens.add(&usage("gpt-4o", 8_000, 2_000));
         // actual = 30k+5k+8k+2k = 45k ; ratio = 1 - 45k/100k = 0.55
         assert_eq!(bill.actual_billable_tokens(), 45_000);
@@ -170,7 +168,8 @@ mod tests {
             baseline_model: "gpt-4o".into(),
             ..Default::default()
         };
-        bill.map_llm_tokens.add(&usage("gpt-4o-mini", 40_000, 10_000));
+        bill.map_llm_tokens
+            .add(&usage("gpt-4o-mini", 40_000, 10_000));
         bill.reduce_llm_tokens.add(&usage("gpt-4o", 10_000, 2_000));
         // map USD/token must be cheaper than reduce USD/token (cheap vs reasoning split).
         let map_usd = bill.map_llm_tokens.usd().unwrap();

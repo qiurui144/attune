@@ -74,7 +74,10 @@ pub async fn ingest(
     // domain / tags 经 RawDocument 一等字段透传给 insert_item（行为不变）。
     let source_ref = body.url.clone().unwrap_or_else(|| body.title.clone());
     let raw = RawDocument {
-        uri: body.url.clone().unwrap_or_else(|| format!("note://{source_ref}")),
+        uri: body
+            .url
+            .clone()
+            .unwrap_or_else(|| format!("note://{source_ref}")),
         title: body.title.clone(),
         content: body.content.clone().into_bytes(),
         mime_hint: Some("text/plain".into()),
@@ -91,7 +94,10 @@ pub async fn ingest(
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let (id, chunks_queued) = match &outcome {
-        IngestOutcome::Inserted { item_id, chunks_enqueued } => (item_id.clone(), *chunks_enqueued),
+        IngestOutcome::Inserted {
+            item_id,
+            chunks_enqueued,
+        } => (item_id.clone(), *chunks_enqueued),
         IngestOutcome::Duplicate { item_id } => (item_id.clone(), 0),
         IngestOutcome::Updated { item_id, .. } => (item_id.clone(), 0),
         IngestOutcome::Skipped { reason } => {

@@ -61,7 +61,9 @@ pub async fn analyze(
         if !matches!(vault.state(), VaultState::Unlocked) {
             return Err(AppError::Forbidden("vault locked".into()));
         }
-        let dek = vault.dek_db().map_err(|e| AppError::Forbidden(e.to_string()))?;
+        let dek = vault
+            .dek_db()
+            .map_err(|e| AppError::Forbidden(e.to_string()))?;
         let ids = match &req.scope {
             Scope::ByItems { item_ids } => item_ids.clone(),
             Scope::ByPath { bind_path } => vault

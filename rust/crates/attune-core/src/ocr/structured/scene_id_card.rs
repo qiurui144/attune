@@ -65,7 +65,8 @@ fn extract_id_card_cn(lines: &[RawLine]) -> StructuredFields {
     // 姓名
     let anchor_name = regex::Regex::new(r"^\s*姓\s*名").unwrap();
     if let Some((idx, raw, conf)) = find_value_after_anchor(lines, &anchor_name, 1) {
-        fields.name = FieldValue::from_line(raw.trim().to_string(), conf.min(0.95), &lines[idx], idx);
+        fields.name =
+            FieldValue::from_line(raw.trim().to_string(), conf.min(0.95), &lines[idx], idx);
     } else {
         unrecognized.push("name");
     }
@@ -74,27 +75,38 @@ fn extract_id_card_cn(lines: &[RawLine]) -> StructuredFields {
     // find_value_after_anchor 可能取到"民族"标签文本), 退回全文正则扫描.
     let anchor_gender = regex::Regex::new(r"性\s*别").unwrap();
     let gender_fallback_re = regex::Regex::new(r"性\s*别\s*[:：]?\s*(男|女)").unwrap();
-    let gender_val = if let Some((idx, raw, conf)) = find_value_after_anchor(lines, &anchor_gender, 1) {
-        if raw.contains('男') {
-            Some(FieldValue::from_line("男".to_string(), conf.min(0.95), &lines[idx], idx))
-        } else if raw.contains('女') {
-            Some(FieldValue::from_line("女".to_string(), conf.min(0.95), &lines[idx], idx))
+    let gender_val =
+        if let Some((idx, raw, conf)) = find_value_after_anchor(lines, &anchor_gender, 1) {
+            if raw.contains('男') {
+                Some(FieldValue::from_line(
+                    "男".to_string(),
+                    conf.min(0.95),
+                    &lines[idx],
+                    idx,
+                ))
+            } else if raw.contains('女') {
+                Some(FieldValue::from_line(
+                    "女".to_string(),
+                    conf.min(0.95),
+                    &lines[idx],
+                    idx,
+                ))
+            } else {
+                // anchor found but value doesn't contain 男/女 — try full-text fallback
+                lines.iter().enumerate().find_map(|(i, l)| {
+                    gender_fallback_re.captures(&l.text).map(|cap| {
+                        FieldValue::from_line(cap[1].to_string(), l.confidence.min(0.92), l, i)
+                    })
+                })
+            }
         } else {
-            // anchor found but value doesn't contain 男/女 — try full-text fallback
+            // no anchor match at all — try full-text fallback
             lines.iter().enumerate().find_map(|(i, l)| {
                 gender_fallback_re.captures(&l.text).map(|cap| {
                     FieldValue::from_line(cap[1].to_string(), l.confidence.min(0.92), l, i)
                 })
             })
-        }
-    } else {
-        // no anchor match at all — try full-text fallback
-        lines.iter().enumerate().find_map(|(i, l)| {
-            gender_fallback_re.captures(&l.text).map(|cap| {
-                FieldValue::from_line(cap[1].to_string(), l.confidence.min(0.92), l, i)
-            })
-        })
-    };
+        };
     if let Some(fv) = gender_val {
         fields.gender = fv;
     } else {
@@ -116,8 +128,7 @@ fn extract_id_card_cn(lines: &[RawLine]) -> StructuredFields {
         if let Some(iso) = normalize::normalize_date(&raw) {
             fields.birth_date = FieldValue::from_line(iso, conf.min(0.95), &lines[idx], idx);
         } else {
-            fields.birth_date =
-                FieldValue::from_line(raw.clone(), conf * 0.5, &lines[idx], idx);
+            fields.birth_date = FieldValue::from_line(raw.clone(), conf * 0.5, &lines[idx], idx);
             warnings.push(format!("birth_date raw '{raw}' failed parse"));
         }
     } else {
@@ -134,22 +145,17 @@ fn extract_id_card_cn(lines: &[RawLine]) -> StructuredFields {
     }
 
     // 身份证号
-    let anchor_id =
-        regex::Regex::new(r"公\s*民\s*身\s*份\s*号\s*码|身\s*份\s*证\s*号").unwrap();
+    let anchor_id = regex::Regex::new(r"公\s*民\s*身\s*份\s*号\s*码|身\s*份\s*证\s*号").unwrap();
     let mut id_found = false;
     if let Some((idx, raw, conf)) = find_value_after_anchor(lines, &anchor_id, 1) {
         let cleaned: String = raw.chars().filter(|c| c.is_alphanumeric()).collect();
         if cleaned.len() == 18 {
             let mut conf_adj = conf.min(0.95);
             if !normalize::id_card_cn_check(&cleaned) {
-                warnings.push(format!(
-                    "id_number {} 校验位不符 (GB 11643)",
-                    cleaned
-                ));
+                warnings.push(format!("id_number {} 校验位不符 (GB 11643)", cleaned));
                 conf_adj *= 0.5;
             }
-            fields.id_number =
-                FieldValue::from_line(cleaned, conf_adj, &lines[idx], idx);
+            fields.id_number = FieldValue::from_line(cleaned, conf_adj, &lines[idx], idx);
             id_found = true;
         }
     }
@@ -222,15 +228,33 @@ fn extract_bank_card(lines: &[RawLine]) -> StructuredFields {
 
     // bank_name: 常见银行关键词
     let bank_keywords = [
-        "中国工商银行", "工商银行", "工行",
-        "中国农业银行", "农业银行", "农行",
-        "中国建设银行", "建设银行", "建行",
+        "中国工商银行",
+        "工商银行",
+        "工行",
+        "中国农业银行",
+        "农业银行",
+        "农行",
+        "中国建设银行",
+        "建设银行",
+        "建行",
         "中国银行",
-        "交通银行", "交行",
-        "招商银行", "招行",
-        "中信银行", "民生银行", "光大银行", "华夏银行",
-        "兴业银行", "浦发银行", "平安银行", "邮政储蓄",
-        "ICBC", "ABC", "BOC", "CCB", "BoCom",
+        "交通银行",
+        "交行",
+        "招商银行",
+        "招行",
+        "中信银行",
+        "民生银行",
+        "光大银行",
+        "华夏银行",
+        "兴业银行",
+        "浦发银行",
+        "平安银行",
+        "邮政储蓄",
+        "ICBC",
+        "ABC",
+        "BOC",
+        "CCB",
+        "BoCom",
     ];
     for (i, l) in lines.iter().enumerate() {
         if let Some(k) = bank_keywords.iter().find(|k| l.text.contains(*k)) {
@@ -245,7 +269,13 @@ fn extract_bank_card(lines: &[RawLine]) -> StructuredFields {
 
     // card_type: 借记卡 / 信用卡 / 储蓄卡
     let type_keywords = [
-        "借记卡", "信用卡", "储蓄卡", "贷记卡", "准贷记卡", "Debit", "Credit",
+        "借记卡",
+        "信用卡",
+        "储蓄卡",
+        "贷记卡",
+        "准贷记卡",
+        "Debit",
+        "Credit",
     ];
     for (i, l) in lines.iter().enumerate() {
         if let Some(k) = type_keywords.iter().find(|k| l.text.contains(*k)) {
@@ -346,8 +376,7 @@ fn extract_business_license(lines: &[RawLine]) -> StructuredFields {
     let anchor_est = regex::Regex::new(r"成\s*立\s*日\s*期|设\s*立\s*日\s*期").unwrap();
     if let Some((idx, raw, conf)) = find_value_after_anchor(lines, &anchor_est, 1) {
         if let Some(iso) = normalize::normalize_date(&raw) {
-            fields.established_date =
-                FieldValue::from_line(iso, conf.min(0.93), &lines[idx], idx);
+            fields.established_date = FieldValue::from_line(iso, conf.min(0.93), &lines[idx], idx);
         } else {
             fields.established_date =
                 FieldValue::from_line(raw.clone(), conf * 0.5, &lines[idx], idx);
@@ -381,7 +410,12 @@ mod tests {
     fn rl(text: &str, y: u32) -> RawLine {
         RawLine {
             text: text.into(),
-            bbox: BBox { x: 0, y, w: 200, h: 30 },
+            bbox: BBox {
+                x: 0,
+                y,
+                w: 200,
+                h: 30,
+            },
             confidence: 0.95,
         }
     }
@@ -395,11 +429,9 @@ mod tests {
 
     #[test]
     fn id_card_cn_extracts_name_gender_nationality() {
-        let lines = vec![
-            rl("姓名 张三", 0),
-            rl("性别 男 民族 汉", 40),
-        ];
-        let Some(StructuredFields::IdCardCnV1 { fields, .. }) = extract(&lines, "id_card_cn") else {
+        let lines = vec![rl("姓名 张三", 0), rl("性别 男 民族 汉", 40)];
+        let Some(StructuredFields::IdCardCnV1 { fields, .. }) = extract(&lines, "id_card_cn")
+        else {
             unreachable!()
         };
         assert_eq!(fields.name.value.as_deref(), Some("张三"));
@@ -409,7 +441,8 @@ mod tests {
     #[test]
     fn id_card_cn_extracts_birth_date_iso() {
         let lines = vec![rl("出生 1990年01月01日", 0)];
-        let Some(StructuredFields::IdCardCnV1 { fields, .. }) = extract(&lines, "id_card_cn") else {
+        let Some(StructuredFields::IdCardCnV1 { fields, .. }) = extract(&lines, "id_card_cn")
+        else {
             unreachable!()
         };
         assert_eq!(fields.birth_date.value.as_deref(), Some("1990-01-01"));
@@ -419,9 +452,18 @@ mod tests {
     fn id_card_cn_id_number_with_gb_check_valid() {
         // 110101199001010015 is GB 11643 valid (per normalize::tests).
         let lines = vec![rl("公民身份号码 110101199001010015", 0)];
-        let Some(StructuredFields::IdCardCnV1 { fields, validation_warnings, .. }) =
-            extract(&lines, "id_card_cn") else { unreachable!() };
-        assert_eq!(fields.id_number.value.as_deref(), Some("110101199001010015"));
+        let Some(StructuredFields::IdCardCnV1 {
+            fields,
+            validation_warnings,
+            ..
+        }) = extract(&lines, "id_card_cn")
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            fields.id_number.value.as_deref(),
+            Some("110101199001010015")
+        );
         assert!(fields.id_number.confidence > 0.8);
         assert!(validation_warnings.is_empty());
     }
@@ -429,9 +471,18 @@ mod tests {
     #[test]
     fn id_card_cn_id_number_invalid_check_warns_and_downgrades() {
         let lines = vec![rl("公民身份号码 110101199001010019", 0)]; // 末位错
-        let Some(StructuredFields::IdCardCnV1 { fields, validation_warnings, .. }) =
-            extract(&lines, "id_card_cn") else { unreachable!() };
-        assert_eq!(fields.id_number.value.as_deref(), Some("110101199001010019"));
+        let Some(StructuredFields::IdCardCnV1 {
+            fields,
+            validation_warnings,
+            ..
+        }) = extract(&lines, "id_card_cn")
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            fields.id_number.value.as_deref(),
+            Some("110101199001010019")
+        );
         assert!(fields.id_number.confidence < 0.6);
         assert!(validation_warnings.iter().any(|w| w.contains("校验位")));
     }
@@ -441,8 +492,13 @@ mod tests {
         // No anchor — should still find 18-digit ID via fallback scan.
         let lines = vec![rl("110101199001010015", 0)];
         let Some(StructuredFields::IdCardCnV1 { fields, .. }) = extract(&lines, "id_card_cn")
-        else { unreachable!() };
-        assert_eq!(fields.id_number.value.as_deref(), Some("110101199001010015"));
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            fields.id_number.value.as_deref(),
+            Some("110101199001010015")
+        );
     }
 
     // ── bank_card ──
@@ -450,19 +506,34 @@ mod tests {
     #[test]
     fn bank_card_visa_test_number_luhn_valid() {
         let lines = vec![rl("4111 1111 1111 1111", 0)];
-        let Some(StructuredFields::BankCardV1 { fields, validation_warnings, .. }) =
-            extract(&lines, "bank_card") else { unreachable!() };
+        let Some(StructuredFields::BankCardV1 {
+            fields,
+            validation_warnings,
+            ..
+        }) = extract(&lines, "bank_card")
+        else {
+            unreachable!()
+        };
         assert!(fields.card_number.value.is_some());
         assert!(fields.card_number.value.as_ref().unwrap().contains("4111"));
-        assert!(validation_warnings.is_empty(), "no Luhn warning for valid card");
+        assert!(
+            validation_warnings.is_empty(),
+            "no Luhn warning for valid card"
+        );
     }
 
     #[test]
     fn bank_card_invalid_luhn_warns() {
         // 16 digits but bad checksum (last digit flipped)
         let lines = vec![rl("4111 1111 1111 1112", 0)];
-        let Some(StructuredFields::BankCardV1 { fields, validation_warnings, .. }) =
-            extract(&lines, "bank_card") else { unreachable!() };
+        let Some(StructuredFields::BankCardV1 {
+            fields,
+            validation_warnings,
+            ..
+        }) = extract(&lines, "bank_card")
+        else {
+            unreachable!()
+        };
         assert!(fields.card_number.confidence < 0.6);
         assert!(validation_warnings.iter().any(|w| w.contains("Luhn")));
     }
@@ -475,8 +546,9 @@ mod tests {
             rl("借记卡", 60),
             rl("VALID THRU 12/28", 90),
         ];
-        let Some(StructuredFields::BankCardV1 { fields, .. }) =
-            extract(&lines, "bank_card") else { unreachable!() };
+        let Some(StructuredFields::BankCardV1 { fields, .. }) = extract(&lines, "bank_card") else {
+            unreachable!()
+        };
         assert_eq!(fields.bank_name.value.as_deref(), Some("中国工商银行"));
         assert_eq!(fields.card_type.value.as_deref(), Some("借记卡"));
         assert_eq!(fields.valid_thru.value.as_deref(), Some("12/28"));
@@ -494,10 +566,23 @@ mod tests {
             rl("经营范围: 技术开发、技术咨询", 120),
         ];
         let Some(StructuredFields::BusinessLicenseV1 { fields, .. }) =
-            extract(&lines, "business_license") else { unreachable!() };
-        assert!(fields.company_name.value.as_deref().unwrap().contains("ABC"));
+            extract(&lines, "business_license")
+        else {
+            unreachable!()
+        };
+        assert!(fields
+            .company_name
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("ABC"));
         assert_eq!(fields.legal_rep.value.as_deref(), Some("张三"));
-        assert!(fields.registered_capital.value.as_deref().unwrap().contains("100"));
+        assert!(fields
+            .registered_capital
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("100"));
         assert_eq!(fields.established_date.value.as_deref(), Some("2020-01-15"));
         assert!(fields.scope.value.as_deref().unwrap().contains("技术开发"));
     }
@@ -506,8 +591,14 @@ mod tests {
     fn business_license_registration_no_gb32100_invalid_warns() {
         // 18-char string, all digits (no letters), but checksum is bound to fail random one.
         let lines = vec![rl("911100000000000000", 0)];
-        let Some(StructuredFields::BusinessLicenseV1 { fields, validation_warnings, .. }) =
-            extract(&lines, "business_license") else { unreachable!() };
+        let Some(StructuredFields::BusinessLicenseV1 {
+            fields,
+            validation_warnings,
+            ..
+        }) = extract(&lines, "business_license")
+        else {
+            unreachable!()
+        };
         // either found (with low conf + warning) or not found at all
         if fields.registration_no.value.is_some() {
             assert!(fields.registration_no.confidence < 0.6);
@@ -521,13 +612,16 @@ mod tests {
     /// value; 男 is present so direct extraction works.
     #[test]
     fn id_card_cn_gender_same_line_with_nationality() {
-        let lines = vec![
-            rl("姓名 李四", 0),
-            rl("性别 男 民族 汉", 40),
-        ];
+        let lines = vec![rl("姓名 李四", 0), rl("性别 男 民族 汉", 40)];
         let Some(StructuredFields::IdCardCnV1 { fields, .. }) = extract(&lines, "id_card_cn")
-        else { unreachable!() };
-        assert_eq!(fields.gender.value.as_deref(), Some("男"), "should extract 男 from combined line");
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            fields.gender.value.as_deref(),
+            Some("男"),
+            "should extract 男 from combined line"
+        );
     }
 
     /// Regression for Finding-B: OCR mis-lines "性别" label with "民族" value text.
@@ -544,7 +638,13 @@ mod tests {
             rl("性别：女", 80),
         ];
         let Some(StructuredFields::IdCardCnV1 { fields, .. }) = extract(&lines, "id_card_cn")
-        else { unreachable!() };
-        assert_eq!(fields.gender.value.as_deref(), Some("女"), "fallback regex should recover 女");
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            fields.gender.value.as_deref(),
+            Some("女"),
+            "fallback regex should recover 女"
+        );
     }
 }

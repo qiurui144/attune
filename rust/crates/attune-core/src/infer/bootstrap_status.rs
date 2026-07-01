@@ -42,7 +42,10 @@ pub struct ModelEntry {
 
 impl Default for ModelEntry {
     fn default() -> Self {
-        Self { phase: ModelPhase::Pending, attempts: 0 }
+        Self {
+            phase: ModelPhase::Pending,
+            attempts: 0,
+        }
     }
 }
 
@@ -63,7 +66,9 @@ impl ModelBootstrapStatus {
         for k in MODEL_CLASSES {
             m.insert(k.to_string(), ModelEntry::default());
         }
-        Self { inner: Arc::new(Mutex::new(m)) }
+        Self {
+            inner: Arc::new(Mutex::new(m)),
+        }
     }
 
     /// 标记某类进入"下载中"，attempts += 1。
@@ -83,7 +88,9 @@ impl ModelBootstrapStatus {
     /// 标记某类失败（带错误信息，不 panic）。
     pub fn mark_failed(&self, class: &str, error: impl Into<String>) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        g.entry(class.to_string()).or_default().phase = ModelPhase::Failed { error: error.into() };
+        g.entry(class.to_string()).or_default().phase = ModelPhase::Failed {
+            error: error.into(),
+        };
     }
 
     /// 读取某类当前阶段。
@@ -95,16 +102,23 @@ impl ModelBootstrapStatus {
     /// 全部就绪？
     pub fn all_ready(&self) -> bool {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        MODEL_CLASSES.iter().all(|k| g.get(*k).map(|e| e.phase.is_ready()).unwrap_or(false))
+        MODEL_CLASSES
+            .iter()
+            .all(|k| g.get(*k).map(|e| e.phase.is_ready()).unwrap_or(false))
     }
 
     /// JSON 快照（供 /ai_stack 嵌入）。
     pub fn snapshot(&self) -> serde_json::Value {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let all_ready = MODEL_CLASSES.iter().all(|k| g.get(*k).map(|e| e.phase.is_ready()).unwrap_or(false));
+        let all_ready = MODEL_CLASSES
+            .iter()
+            .all(|k| g.get(*k).map(|e| e.phase.is_ready()).unwrap_or(false));
         let mut models = serde_json::Map::new();
         for (k, v) in g.iter() {
-            models.insert(k.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null));
+            models.insert(
+                k.clone(),
+                serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+            );
         }
         serde_json::json!({
             "all_ready": all_ready,
@@ -121,7 +135,11 @@ mod tests {
     fn new_starts_all_pending() {
         let s = ModelBootstrapStatus::new();
         for k in MODEL_CLASSES {
-            assert_eq!(s.phase(k), Some(ModelPhase::Pending), "{k} should start Pending");
+            assert_eq!(
+                s.phase(k),
+                Some(ModelPhase::Pending),
+                "{k} should start Pending"
+            );
         }
         assert!(!s.all_ready());
     }

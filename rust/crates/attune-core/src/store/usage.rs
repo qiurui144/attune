@@ -101,9 +101,10 @@ impl Store {
     /// Delete usage_events older than `cutoff_ms`. Returns row count removed.
     /// Spec §7.2: `usage_events` table > 100k rows triggers `purge_old` worker.
     pub fn purge_usage_older_than(&self, cutoff_ms: i64) -> Result<usize> {
-        let n = self
-            .conn
-            .execute("DELETE FROM usage_events WHERE ts_ms < ?1", params![cutoff_ms])?;
+        let n = self.conn.execute(
+            "DELETE FROM usage_events WHERE ts_ms < ?1",
+            params![cutoff_ms],
+        )?;
         Ok(n)
     }
 
@@ -128,7 +129,14 @@ impl Store {
         )?;
         let (events, ti, to_, cost, hits, cached): (i64, i64, i64, f64, i64, i64) = stmt
             .query_row(params![from_ms, to_ms], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
             })?;
         let cache_hit_rate = if events > 0 {
             hits as f64 / events as f64
@@ -137,7 +145,11 @@ impl Store {
         };
         // Vendor prompt-cache rate is token-weighted (a 768-token-cached call
         // and a 0-cached call are not "half cached"). §4.5-G3 target ≥ 0.50.
-        let prompt_cache_hit_rate = if ti > 0 { cached as f64 / ti as f64 } else { 0.0 };
+        let prompt_cache_hit_rate = if ti > 0 {
+            cached as f64 / ti as f64
+        } else {
+            0.0
+        };
         Ok(UsageSummary {
             events: events as u64,
             tokens_in: ti as u64,
@@ -202,7 +214,9 @@ mod usage_test {
     #[test]
     fn record_usage_inserts_one_row() {
         let store = Store::open_memory().unwrap();
-        store.record_usage(&make_event(1000, CacheOutcome::Miss, Some(0.001))).unwrap();
+        store
+            .record_usage(&make_event(1000, CacheOutcome::Miss, Some(0.001)))
+            .unwrap();
         let summary = store.usage_summary(0, 2000).unwrap();
         assert_eq!(summary.events, 1);
         assert_eq!(summary.tokens_in, 100);
@@ -216,8 +230,12 @@ mod usage_test {
         let store = Store::open_memory().unwrap();
         // Each event: tokens_in=100. cached_in varies. prompt_cache_hit_rate
         // = sum(cached_in) / sum(tokens_in), NOT an event count.
-        store.record_usage(&make_event_cached(100, CacheOutcome::Miss, None, 80)).unwrap();
-        store.record_usage(&make_event_cached(200, CacheOutcome::Miss, None, 20)).unwrap();
+        store
+            .record_usage(&make_event_cached(100, CacheOutcome::Miss, None, 80))
+            .unwrap();
+        store
+            .record_usage(&make_event_cached(200, CacheOutcome::Miss, None, 20))
+            .unwrap();
         let s = store.usage_summary(0, 1000).unwrap();
         // (80 + 20) / (100 + 100) = 0.5
         assert!(
@@ -242,24 +260,45 @@ mod usage_test {
     #[test]
     fn usage_summary_cache_hit_rate() {
         let store = Store::open_memory().unwrap();
-        store.record_usage(&make_event(100, CacheOutcome::Miss, None)).unwrap();
-        store.record_usage(&make_event(200, CacheOutcome::Hit, None)).unwrap();
-        store.record_usage(&make_event(300, CacheOutcome::Hit, None)).unwrap();
-        store.record_usage(&make_event(400, CacheOutcome::Bypass, None)).unwrap();
+        store
+            .record_usage(&make_event(100, CacheOutcome::Miss, None))
+            .unwrap();
+        store
+            .record_usage(&make_event(200, CacheOutcome::Hit, None))
+            .unwrap();
+        store
+            .record_usage(&make_event(300, CacheOutcome::Hit, None))
+            .unwrap();
+        store
+            .record_usage(&make_event(400, CacheOutcome::Bypass, None))
+            .unwrap();
         let s = store.usage_summary(0, 1000).unwrap();
         assert_eq!(s.events, 4);
         // 2 hits out of 4 = 0.5
-        assert!((s.cache_hit_rate - 0.5).abs() < 1e-9, "got {}", s.cache_hit_rate);
+        assert!(
+            (s.cache_hit_rate - 0.5).abs() < 1e-9,
+            "got {}",
+            s.cache_hit_rate
+        );
     }
 
     #[test]
     fn usage_summary_range_filter() {
         let store = Store::open_memory().unwrap();
-        store.record_usage(&make_event(50, CacheOutcome::Miss, None)).unwrap();
-        store.record_usage(&make_event(500, CacheOutcome::Miss, None)).unwrap();
-        store.record_usage(&make_event(1500, CacheOutcome::Miss, None)).unwrap();
+        store
+            .record_usage(&make_event(50, CacheOutcome::Miss, None))
+            .unwrap();
+        store
+            .record_usage(&make_event(500, CacheOutcome::Miss, None))
+            .unwrap();
+        store
+            .record_usage(&make_event(1500, CacheOutcome::Miss, None))
+            .unwrap();
         let s = store.usage_summary(100, 1000).unwrap();
-        assert_eq!(s.events, 1, "only the 500 ms event should be in [100, 1000]");
+        assert_eq!(
+            s.events, 1,
+            "only the 500 ms event should be in [100, 1000]"
+        );
     }
 
     #[test]
@@ -273,9 +312,15 @@ mod usage_test {
     #[test]
     fn purge_usage_older_than_deletes_only_older_rows() {
         let store = Store::open_memory().unwrap();
-        store.record_usage(&make_event(100, CacheOutcome::Miss, None)).unwrap();
-        store.record_usage(&make_event(500, CacheOutcome::Miss, None)).unwrap();
-        store.record_usage(&make_event(900, CacheOutcome::Miss, None)).unwrap();
+        store
+            .record_usage(&make_event(100, CacheOutcome::Miss, None))
+            .unwrap();
+        store
+            .record_usage(&make_event(500, CacheOutcome::Miss, None))
+            .unwrap();
+        store
+            .record_usage(&make_event(900, CacheOutcome::Miss, None))
+            .unwrap();
         let removed = store.purge_usage_older_than(500).unwrap();
         assert_eq!(removed, 1, "only ts_ms=100 < 500");
         assert_eq!(store.usage_summary(0, 9999).unwrap().events, 2);
@@ -284,8 +329,12 @@ mod usage_test {
     #[test]
     fn reset_usage_empties_table() {
         let store = Store::open_memory().unwrap();
-        store.record_usage(&make_event(100, CacheOutcome::Miss, None)).unwrap();
-        store.record_usage(&make_event(200, CacheOutcome::Miss, None)).unwrap();
+        store
+            .record_usage(&make_event(100, CacheOutcome::Miss, None))
+            .unwrap();
+        store
+            .record_usage(&make_event(200, CacheOutcome::Miss, None))
+            .unwrap();
         let removed = store.reset_usage().unwrap();
         assert_eq!(removed, 2);
         assert_eq!(store.usage_summary(0, 9999).unwrap().events, 0);

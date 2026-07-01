@@ -51,7 +51,9 @@ pub mod templates;
 
 use serde::{Deserialize, Serialize};
 
-pub use cite::{build_citations, find_inline_anchors, CiteError, CiteStyle, Citation, InlineAnchor, SourceMeta};
+pub use cite::{
+    build_citations, find_inline_anchors, Citation, CiteError, CiteStyle, InlineAnchor, SourceMeta,
+};
 pub use cite_normalize::{
     check_document, detect_style, normalize_to, scan_citations, CiteConsistencyReport,
     ConsistencyReport, DetectedCitation,
@@ -282,11 +284,18 @@ impl WritingError {
 impl std::fmt::Display for WritingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WritingError::NoSourceMaterial => write!(f, "no source material: both outline and item_ids are empty"),
+            WritingError::NoSourceMaterial => {
+                write!(f, "no source material: both outline and item_ids are empty")
+            }
             WritingError::EmptyInput => write!(f, "empty input"),
             WritingError::LlmUnavailable => write!(f, "no LLM provider is configured"),
-            WritingError::GenerationUnavailable(e) => write!(f, "generation unavailable after retries: {e}"),
-            WritingError::SourceInjection => write!(f, "a source contains an injection instruction; refusing to generate"),
+            WritingError::GenerationUnavailable(e) => {
+                write!(f, "generation unavailable after retries: {e}")
+            }
+            WritingError::SourceInjection => write!(
+                f,
+                "a source contains an injection instruction; refusing to generate"
+            ),
         }
     }
 }
@@ -311,10 +320,7 @@ pub fn split_segments(content: &str) -> Vec<(String, [u32; 2])> {
         u16_pos += ch_u16;
         let is_cjk_term = matches!(ch, '。' | '！' | '？' | '\n');
         let is_ascii_term = matches!(ch, '.' | '!' | '?')
-            && chars
-                .get(i + 1)
-                .map(|n| n.is_whitespace())
-                .unwrap_or(true);
+            && chars.get(i + 1).map(|n| n.is_whitespace()).unwrap_or(true);
         if is_cjk_term || is_ascii_term {
             let trimmed = cur.trim();
             if !trimmed.is_empty() {
@@ -417,7 +423,10 @@ mod tests {
         assert_eq!(WritingError::NoSourceMaterial.code(), "no-source-material");
         assert_eq!(WritingError::EmptyInput.code(), "empty-input");
         assert_eq!(WritingError::LlmUnavailable.code(), "llm-unavailable");
-        assert_eq!(WritingError::SourceInjection.code(), "source-injection-detected");
+        assert_eq!(
+            WritingError::SourceInjection.code(),
+            "source-injection-detected"
+        );
         assert_eq!(
             WritingError::GenerationUnavailable("x".into()).code(),
             "generation-unavailable"

@@ -99,7 +99,11 @@ impl GroundingFail {
 ///
 /// Region-level grounding (no `sub_bbox`) whose `region_bbox`/`page` match the input is accepted:
 /// not every kind can refine to a sub-area (caption / handwriting ground at region level, spec §11 R1).
-pub fn validate_grounding(grounding: Option<&GroundingRef>, region: &BBox, page: u32) -> Result<(), GroundingFail> {
+pub fn validate_grounding(
+    grounding: Option<&GroundingRef>,
+    region: &BBox,
+    page: u32,
+) -> Result<(), GroundingFail> {
     let g = grounding.ok_or(GroundingFail::Missing)?;
     // The ref must point at THIS region (defends against a model echoing a value with a bogus /
     // copy-pasted ref from another region — the doc-intel "citation must come from THIS source" rule).
@@ -132,7 +136,12 @@ mod tests {
     use super::*;
 
     fn region() -> BBox {
-        BBox { x: 100, y: 100, w: 200, h: 200 }
+        BBox {
+            x: 100,
+            y: 100,
+            w: 200,
+            h: 200,
+        }
     }
 
     // ── happy path ───────────────────────────────────────────────────────────
@@ -147,7 +156,12 @@ mod tests {
 
     #[test]
     fn sub_bbox_fully_inside_region_is_valid() {
-        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox { x: 120, y: 120, w: 30, h: 30 });
+        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox {
+            x: 120,
+            y: 120,
+            w: 30,
+            h: 30,
+        });
         assert_eq!(validate_grounding(Some(&g), &region(), 0), Ok(()));
     }
 
@@ -162,43 +176,89 @@ mod tests {
 
     #[test]
     fn missing_grounding_is_missing_fail() {
-        assert_eq!(validate_grounding(None, &region(), 0), Err(GroundingFail::Missing));
+        assert_eq!(
+            validate_grounding(None, &region(), 0),
+            Err(GroundingFail::Missing)
+        );
     }
 
     #[test]
     fn sub_bbox_partially_outside_region_is_out_of_bounds() {
         // Extends past the right edge (x 120 + w 300 = 420 > region right 300).
-        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox { x: 120, y: 120, w: 300, h: 30 });
-        assert_eq!(validate_grounding(Some(&g), &region(), 0), Err(GroundingFail::OutOfBounds));
+        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox {
+            x: 120,
+            y: 120,
+            w: 300,
+            h: 30,
+        });
+        assert_eq!(
+            validate_grounding(Some(&g), &region(), 0),
+            Err(GroundingFail::OutOfBounds)
+        );
     }
 
     #[test]
     fn sub_bbox_entirely_outside_region_is_out_of_bounds() {
-        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox { x: 9000, y: 9000, w: 10, h: 10 });
-        assert_eq!(validate_grounding(Some(&g), &region(), 0), Err(GroundingFail::OutOfBounds));
+        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox {
+            x: 9000,
+            y: 9000,
+            w: 10,
+            h: 10,
+        });
+        assert_eq!(
+            validate_grounding(Some(&g), &region(), 0),
+            Err(GroundingFail::OutOfBounds)
+        );
     }
 
     #[test]
     fn zero_area_sub_bbox_is_empty_area() {
-        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox { x: 120, y: 120, w: 0, h: 30 });
-        assert_eq!(validate_grounding(Some(&g), &region(), 0), Err(GroundingFail::EmptyArea));
-        let g2 = GroundingRef::region(region(), 0).with_sub_bbox(BBox { x: 120, y: 120, w: 30, h: 0 });
-        assert_eq!(validate_grounding(Some(&g2), &region(), 0), Err(GroundingFail::EmptyArea));
+        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox {
+            x: 120,
+            y: 120,
+            w: 0,
+            h: 30,
+        });
+        assert_eq!(
+            validate_grounding(Some(&g), &region(), 0),
+            Err(GroundingFail::EmptyArea)
+        );
+        let g2 = GroundingRef::region(region(), 0).with_sub_bbox(BBox {
+            x: 120,
+            y: 120,
+            w: 30,
+            h: 0,
+        });
+        assert_eq!(
+            validate_grounding(Some(&g2), &region(), 0),
+            Err(GroundingFail::EmptyArea)
+        );
     }
 
     #[test]
     fn ref_pointing_at_a_different_region_is_out_of_bounds() {
         // A model that echoes a value with a ref copied from ANOTHER region must be caught:
         // the region_bbox in the ref doesn't match the region we're validating against.
-        let other = BBox { x: 500, y: 500, w: 50, h: 50 };
+        let other = BBox {
+            x: 500,
+            y: 500,
+            w: 50,
+            h: 50,
+        };
         let g = GroundingRef::region(other, 0);
-        assert_eq!(validate_grounding(Some(&g), &region(), 0), Err(GroundingFail::OutOfBounds));
+        assert_eq!(
+            validate_grounding(Some(&g), &region(), 0),
+            Err(GroundingFail::OutOfBounds)
+        );
     }
 
     #[test]
     fn ref_on_wrong_page_is_out_of_bounds() {
         let g = GroundingRef::region(region(), 3); // ref says page 3
-        assert_eq!(validate_grounding(Some(&g), &region(), 0), Err(GroundingFail::OutOfBounds));
+        assert_eq!(
+            validate_grounding(Some(&g), &region(), 0),
+            Err(GroundingFail::OutOfBounds)
+        );
     }
 
     // ── boundary cases ────────────────────────────────────────────────────────
@@ -206,25 +266,48 @@ mod tests {
     #[test]
     fn sub_bbox_one_pixel_over_edge_is_out_of_bounds() {
         // x 100 + w 201 = 301 > region right 300 → one pixel past the edge is OOB (tight check).
-        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox { x: 100, y: 100, w: 201, h: 10 });
-        assert_eq!(validate_grounding(Some(&g), &region(), 0), Err(GroundingFail::OutOfBounds));
+        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox {
+            x: 100,
+            y: 100,
+            w: 201,
+            h: 10,
+        });
+        assert_eq!(
+            validate_grounding(Some(&g), &region(), 0),
+            Err(GroundingFail::OutOfBounds)
+        );
     }
 
     #[test]
     fn huge_sub_bbox_near_u32_max_does_not_overflow_into_false_pass() {
         // Adversarial: a sub_bbox whose x+w would overflow u32 must NOT wrap to a small value and
         // sneak past the containment check. u64 arithmetic in bbox_contains prevents the wrap.
-        let g = GroundingRef::region(region(), 0)
-            .with_sub_bbox(BBox { x: u32::MAX - 5, y: 100, w: 100, h: 10 });
-        assert_eq!(validate_grounding(Some(&g), &region(), 0), Err(GroundingFail::OutOfBounds));
+        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox {
+            x: u32::MAX - 5,
+            y: 100,
+            w: 100,
+            h: 10,
+        });
+        assert_eq!(
+            validate_grounding(Some(&g), &region(), 0),
+            Err(GroundingFail::OutOfBounds)
+        );
     }
 
     #[test]
     fn empty_takes_precedence_over_out_of_bounds() {
         // A zero-area sub_bbox that's also outside is reported as EmptyArea (checked first) — a
         // stable, deterministic classification so the retry feedback is consistent.
-        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox { x: 9000, y: 9000, w: 0, h: 0 });
-        assert_eq!(validate_grounding(Some(&g), &region(), 0), Err(GroundingFail::EmptyArea));
+        let g = GroundingRef::region(region(), 0).with_sub_bbox(BBox {
+            x: 9000,
+            y: 9000,
+            w: 0,
+            h: 0,
+        });
+        assert_eq!(
+            validate_grounding(Some(&g), &region(), 0),
+            Err(GroundingFail::EmptyArea)
+        );
     }
 
     // ── serde back-compat (spec §10) ──────────────────────────────────────────
@@ -233,14 +316,25 @@ mod tests {
     fn grounding_ref_omits_optional_fields_when_none() {
         let g = GroundingRef::region(region(), 0);
         let j = serde_json::to_string(&g).unwrap();
-        assert!(!j.contains("sub_bbox"), "None sub_bbox must be skipped: {j}");
-        assert!(!j.contains("ocr_line_ref"), "None ocr_line_ref must be skipped: {j}");
+        assert!(
+            !j.contains("sub_bbox"),
+            "None sub_bbox must be skipped: {j}"
+        );
+        assert!(
+            !j.contains("ocr_line_ref"),
+            "None ocr_line_ref must be skipped: {j}"
+        );
     }
 
     #[test]
     fn grounding_ref_round_trips_with_refinements() {
         let g = GroundingRef::region(region(), 2)
-            .with_sub_bbox(BBox { x: 110, y: 110, w: 20, h: 20 })
+            .with_sub_bbox(BBox {
+                x: 110,
+                y: 110,
+                w: 20,
+                h: 20,
+            })
             .with_ocr_line_ref("line:12");
         let j = serde_json::to_string(&g).unwrap();
         let back: GroundingRef = serde_json::from_str(&j).unwrap();
@@ -259,9 +353,16 @@ mod tests {
 
     #[test]
     fn fail_reasons_are_distinct_and_nonempty() {
-        for f in [GroundingFail::Missing, GroundingFail::OutOfBounds, GroundingFail::EmptyArea] {
+        for f in [
+            GroundingFail::Missing,
+            GroundingFail::OutOfBounds,
+            GroundingFail::EmptyArea,
+        ] {
             assert!(f.as_reason().starts_with("grounding-fail:"), "{f:?}");
         }
-        assert_ne!(GroundingFail::Missing.as_reason(), GroundingFail::OutOfBounds.as_reason());
+        assert_ne!(
+            GroundingFail::Missing.as_reason(),
+            GroundingFail::OutOfBounds.as_reason()
+        );
     }
 }

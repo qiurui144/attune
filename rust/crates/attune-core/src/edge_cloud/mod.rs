@@ -37,7 +37,11 @@ pub struct EdgeCloudRouter {
 impl EdgeCloudRouter {
     /// 构造。`form_factor` 决定是否激活协同（仅 K3）。
     pub fn new(form_factor: FormFactor, probe: Box<dyn CapacityProbe>) -> Self {
-        EdgeCloudRouter { map: CapabilityMap::builtin(), probe, form_factor }
+        EdgeCloudRouter {
+            map: CapabilityMap::builtin(),
+            probe,
+            form_factor,
+        }
     }
 
     /// 便捷：K3 形态 + 默认 HTTP 客户端（:8090）。
@@ -81,10 +85,18 @@ mod tests {
     use crate::store::audit::PrivacyTier;
 
     fn paid(quota: u64) -> AccountContext {
-        AccountContext { tier: AccountTier::Paid, llm_quota_remaining: quota, cloud_enabled: quota > 0 }
+        AccountContext {
+            tier: AccountTier::Paid,
+            llm_quota_remaining: quota,
+            cloud_enabled: quota > 0,
+        }
     }
-    fn l1() -> PrivacyClass { PrivacyClass(PrivacyTier::L1) }
-    fn l0() -> PrivacyClass { PrivacyClass(PrivacyTier::L0) }
+    fn l1() -> PrivacyClass {
+        PrivacyClass(PrivacyTier::L1)
+    }
+    fn l0() -> PrivacyClass {
+        PrivacyClass(PrivacyTier::L0)
+    }
 
     // ── 个人版 0 回退（核心 guard）──────────────────────────────────────────
 
@@ -95,7 +107,11 @@ mod tests {
         let spy = std::sync::Arc::new(MockCapacityProbe::with_state(CapacityState::ReadyFast));
         let router = EdgeCloudRouter::new(FormFactor::Laptop, Box::new(ArcProbe(spy.clone())));
         let _ = router.route(Capability::ChatLlm7b, "qwen2.5-7b", l1(), &paid(1000));
-        assert_eq!(spy.call_count(), 0, "personal Laptop must NOT probe scheduler (0-regression)");
+        assert_eq!(
+            spy.call_count(),
+            0,
+            "personal Laptop must NOT probe scheduler (0-regression)"
+        );
         assert!(!router.collaboration_active());
     }
 
@@ -104,7 +120,11 @@ mod tests {
         let spy = std::sync::Arc::new(MockCapacityProbe::with_state(CapacityState::ReadyFast));
         let router = EdgeCloudRouter::new(FormFactor::Server, Box::new(ArcProbe(spy.clone())));
         let _ = router.route(Capability::Embedding, "bge-m3", l1(), &paid(1000));
-        assert_eq!(spy.call_count(), 0, "personal Server must NOT probe scheduler");
+        assert_eq!(
+            spy.call_count(),
+            0,
+            "personal Server must NOT probe scheduler"
+        );
     }
 
     #[test]
@@ -112,7 +132,8 @@ mod tests {
         // 个人版本地优先能力 → Unknown → decide_route 返回 Local（本地兜底）；
         // 但个人版无本地 scheduler，实际由 governor 走 cloud provider。此处验决策稳定不依赖 probe。
         // 关键：决策对个人版**与现状一致**（不因协同层引入新行为）—— probe 0 调用已验。
-        let router = EdgeCloudRouter::new(FormFactor::Laptop, Box::new(MockCapacityProbe::failing()));
+        let router =
+            EdgeCloudRouter::new(FormFactor::Laptop, Box::new(MockCapacityProbe::failing()));
         let d = router.route(Capability::ChatLlm35b, "deepseek-v4", l1(), &paid(1000));
         // 35B cloud-only + 有配额 → Cloud（现状：个人版大模型走云）。
         assert_eq!(d, RouteDecision::Cloud);
@@ -137,7 +158,11 @@ mod tests {
             Box::new(MockCapacityProbe::with_state(CapacityState::Queued)),
         );
         let d = router.route(Capability::ChatLlm7b, "qwen2.5-7b", l1(), &paid(1000));
-        assert_eq!(d, RouteDecision::Cloud, "K3 busy + cloud-admissible → spill to cloud");
+        assert_eq!(
+            d,
+            RouteDecision::Cloud,
+            "K3 busy + cloud-admissible → spill to cloud"
+        );
     }
 
     // ── L0 红线（与形态无关）──────────────────────────────────────────────
@@ -156,10 +181,19 @@ mod tests {
     #[test]
     fn l0_never_cloud_even_on_personal() {
         // 个人版 L0 同样不出网（红线与形态无关）。35B 个人版本地跑不了 → L0 拒（不泄）。
-        let router = EdgeCloudRouter::new(FormFactor::Laptop, Box::new(MockCapacityProbe::failing()));
+        let router =
+            EdgeCloudRouter::new(FormFactor::Laptop, Box::new(MockCapacityProbe::failing()));
         let d = router.route(Capability::ChatLlm35b, "deepseek-v4", l0(), &paid(1000));
-        assert!(!d.requires_egress(), "L0 must never egress on personal form factor");
-        assert_eq!(d, RouteDecision::Reject { reason: RejectReason::NotCapableAnywhere });
+        assert!(
+            !d.requires_egress(),
+            "L0 must never egress on personal form factor"
+        );
+        assert_eq!(
+            d,
+            RouteDecision::Reject {
+                reason: RejectReason::NotCapableAnywhere
+            }
+        );
     }
 
     /// 测试辅助：把 `Arc<MockCapacityProbe>` 适配成 `CapacityProbe`（共享 spy 计数）。

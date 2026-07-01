@@ -104,33 +104,52 @@ impl CapabilityMap {
         // embedding：本地 + 云均可，本地优先（建库阶段零云成本）。
         entries.insert(
             Capability::Embedding,
-            CapabilityEntry { local_capable: true, cloud_capable: true, preference: Preference::LocalPreferred },
+            CapabilityEntry {
+                local_capable: true,
+                cloud_capable: true,
+                preference: Preference::LocalPreferred,
+            },
         );
         // rerank / OCR / ASR：本地可行，云慎用（隐私敏感）→ 本地强偏好。
         for c in [Capability::Rerank, Capability::Ocr, Capability::Asr] {
             entries.insert(
                 c,
-                CapabilityEntry { local_capable: true, cloud_capable: true, preference: Preference::LocalStrong },
+                CapabilityEntry {
+                    local_capable: true,
+                    cloud_capable: true,
+                    preference: Preference::LocalStrong,
+                },
             );
         }
         // chat 3B/7B：本地 + 云均可，本地优先（忙→云）。
         for c in [Capability::ChatLlm3b, Capability::ChatLlm7b] {
             entries.insert(
                 c,
-                CapabilityEntry { local_capable: true, cloud_capable: true, preference: Preference::LocalPreferred },
+                CapabilityEntry {
+                    local_capable: true,
+                    cloud_capable: true,
+                    preference: Preference::LocalPreferred,
+                },
             );
         }
         // chat 35B-A3B：K3 16G 主推形态本地跑不了 → 仅云。
         entries.insert(
             Capability::ChatLlm35b,
-            CapabilityEntry { local_capable: false, cloud_capable: true, preference: Preference::CloudPreferred },
+            CapabilityEntry {
+                local_capable: false,
+                cloud_capable: true,
+                preference: Preference::CloudPreferred,
+            },
         );
         CapabilityMap { entries }
     }
 
     /// 查能力 entry。未登记 → 保守默认（cloud-only preferred），绝不 panic。
     pub fn lookup(&self, c: Capability) -> CapabilityEntry {
-        self.entries.get(&c).copied().unwrap_or_else(CapabilityEntry::conservative_default)
+        self.entries
+            .get(&c)
+            .copied()
+            .unwrap_or_else(CapabilityEntry::conservative_default)
     }
 }
 
@@ -168,7 +187,12 @@ mod tests {
         let m = CapabilityMap::builtin();
         for c in [Capability::Ocr, Capability::Asr, Capability::Rerank] {
             let e = m.lookup(c);
-            assert_eq!(e.preference, Preference::LocalStrong, "{} privacy-sensitive → local strong", c.as_str());
+            assert_eq!(
+                e.preference,
+                Preference::LocalStrong,
+                "{} privacy-sensitive → local strong",
+                c.as_str()
+            );
             assert!(e.local_capable);
         }
     }
@@ -196,7 +220,9 @@ mod tests {
 
     #[test]
     fn empty_map_lookup_returns_conservative_default() {
-        let m = CapabilityMap { entries: BTreeMap::new() };
+        let m = CapabilityMap {
+            entries: BTreeMap::new(),
+        };
         let e = m.lookup(Capability::Embedding);
         assert_eq!(e, CapabilityEntry::conservative_default());
         assert!(!e.local_capable && e.cloud_capable);

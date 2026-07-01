@@ -114,9 +114,8 @@ fn golden_dir() -> PathBuf {
 
 fn load_cases(dir: &Path) -> Vec<(String, GoldenCase)> {
     let mut out = Vec::new();
-    let entries = std::fs::read_dir(dir).unwrap_or_else(|e| {
-        panic!("read_dir({}): {}", dir.display(), e)
-    });
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir({}): {}", dir.display(), e));
     for ent in entries {
         let ent = ent.unwrap();
         let path = ent.path();
@@ -127,7 +126,10 @@ fn load_cases(dir: &Path) -> Vec<(String, GoldenCase)> {
             .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
         let case: GoldenCase = serde_yaml::from_str(&text)
             .unwrap_or_else(|e| panic!("parse {}: {}", path.display(), e));
-        out.push((path.file_name().unwrap().to_string_lossy().into_owned(), case));
+        out.push((
+            path.file_name().unwrap().to_string_lossy().into_owned(),
+            case,
+        ));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -135,13 +137,17 @@ fn load_cases(dir: &Path) -> Vec<(String, GoldenCase)> {
 
 // ── Driver ──────────────────────────────────────────────────────────────────
 
-fn run_case(case: &GoldenCase) -> attune_core::agents::AgentOutput<
-    attune_core::agents::document_classifier::ClassificationOutput,
-> {
+fn run_case(
+    case: &GoldenCase,
+) -> attune_core::agents::AgentOutput<attune_core::agents::document_classifier::ClassificationOutput>
+{
     let docs: Vec<DocumentInput<'_>> = case
         .inputs
         .iter()
-        .map(|i| DocumentInput { file: i.file.as_str(), text: i.text.as_str() })
+        .map(|i| DocumentInput {
+            file: i.file.as_str(),
+            text: i.text.as_str(),
+        })
         .collect();
     run(&docs)
 }
@@ -159,20 +165,40 @@ fn assert_case(name: &str, case: &GoldenCase) {
             out.computation.classified.len(),
             n,
             "{}: classified_count expected {}, got {}",
-            name, n, out.computation.classified.len()
+            name,
+            n,
+            out.computation.classified.len()
         );
     }
 
     // overall confidence
     if let Some(c) = exp.overall_confidence {
         let diff = (out.confidence - c).abs();
-        assert!(diff < 1e-9, "{}: overall_confidence expected {}, got {}", name, c, out.confidence);
+        assert!(
+            diff < 1e-9,
+            "{}: overall_confidence expected {}, got {}",
+            name,
+            c,
+            out.confidence
+        );
     }
     if let Some(c) = exp.overall_confidence_min {
-        assert!(out.confidence >= c, "{}: overall_confidence_min {}, got {}", name, c, out.confidence);
+        assert!(
+            out.confidence >= c,
+            "{}: overall_confidence_min {}, got {}",
+            name,
+            c,
+            out.confidence
+        );
     }
     if let Some(c) = exp.overall_confidence_max {
-        assert!(out.confidence <= c, "{}: overall_confidence_max {}, got {}", name, c, out.confidence);
+        assert!(
+            out.confidence <= c,
+            "{}: overall_confidence_max {}, got {}",
+            name,
+            c,
+            out.confidence
+        );
     }
 
     // red_lines
@@ -181,7 +207,9 @@ fn assert_case(name: &str, case: &GoldenCase) {
             out.red_lines_violated.len(),
             n,
             "{}: red_lines expected {}, got {:?}",
-            name, n, out.red_lines_violated
+            name,
+            n,
+            out.red_lines_violated
         );
     }
 
@@ -191,28 +219,38 @@ fn assert_case(name: &str, case: &GoldenCase) {
             out.missing_evidence.len(),
             n,
             "{}: missing_evidence_count expected {}, got {:?}",
-            name, n, out.missing_evidence
+            name,
+            n,
+            out.missing_evidence
         );
     }
     if let Some(n) = exp.missing_evidence_min {
         assert!(
             out.missing_evidence.len() >= n,
             "{}: missing_evidence_min {}, got {} {:?}",
-            name, n, out.missing_evidence.len(), out.missing_evidence
+            name,
+            n,
+            out.missing_evidence.len(),
+            out.missing_evidence
         );
     }
     if let Some(n) = exp.followups_min {
         assert!(
             out.followups.len() >= n,
             "{}: followups_min {}, got {} {:?}",
-            name, n, out.followups.len(), out.followups
+            name,
+            n,
+            out.followups.len(),
+            out.followups
         );
     }
     if let Some(s) = &exp.followup_must_contain {
         assert!(
             out.followups.iter().any(|f| f.contains(s)),
             "{}: followups must contain '{}', got {:?}",
-            name, s, out.followups
+            name,
+            s,
+            out.followups
         );
     }
 
@@ -228,13 +266,19 @@ fn assert_case(name: &str, case: &GoldenCase) {
             assert!(
                 got_keys.contains(k.as_str()),
                 "{}: kind_summary must contain key '{}', got {:?}",
-                name, k, got_keys
+                name,
+                k,
+                got_keys
             );
         }
     }
     if let Some(total) = exp.kind_summary_total {
         let sum: usize = out.computation.kind_summary.values().sum();
-        assert_eq!(sum, total, "{}: kind_summary_total expected {}, got {}", name, total, sum);
+        assert_eq!(
+            sum, total,
+            "{}: kind_summary_total expected {}, got {}",
+            name, total, sum
+        );
     }
 
     // per_doc
@@ -247,27 +291,40 @@ fn assert_case(name: &str, case: &GoldenCase) {
             .unwrap_or_else(|| panic!("{}: file '{}' not found in classified", name, exp_doc.file));
 
         if let Some(kind) = &exp_doc.kind {
-            assert_eq!(&got.kind, kind, "{}: file {} kind expected {}, got {}", name, got.file, kind, got.kind);
+            assert_eq!(
+                &got.kind, kind,
+                "{}: file {} kind expected {}, got {}",
+                name, got.file, kind, got.kind
+            );
         }
         if let Some(c) = exp_doc.confidence_min {
             assert!(
                 got.confidence >= c,
                 "{}: file {} confidence_min {}, got {}",
-                name, got.file, c, got.confidence
+                name,
+                got.file,
+                c,
+                got.confidence
             );
         }
         if let Some(c) = exp_doc.confidence_max {
             assert!(
                 got.confidence <= c,
                 "{}: file {} confidence_max {}, got {}",
-                name, got.file, c, got.confidence
+                name,
+                got.file,
+                c,
+                got.confidence
             );
         }
         for kw in &exp_doc.keywords_must_contain {
             assert!(
                 got.matched_keywords.iter().any(|k| k.contains(kw)),
                 "{}: file {} matched_keywords must contain '{}', got {:?}",
-                name, got.file, kw, got.matched_keywords
+                name,
+                got.file,
+                kw,
+                got.matched_keywords
             );
         }
         if let Some(ents) = &exp_doc.entities {
@@ -275,28 +332,43 @@ fn assert_case(name: &str, case: &GoldenCase) {
                 assert!(
                     got.entities.persons.len() >= n,
                     "{}: file {} entities.persons_min {}, got {} {:?}",
-                    name, got.file, n, got.entities.persons.len(), got.entities.persons
+                    name,
+                    got.file,
+                    n,
+                    got.entities.persons.len(),
+                    got.entities.persons
                 );
             }
             if let Some(n) = ents.dates_min {
                 assert!(
                     got.entities.dates.len() >= n,
                     "{}: file {} entities.dates_min {}, got {} {:?}",
-                    name, got.file, n, got.entities.dates.len(), got.entities.dates
+                    name,
+                    got.file,
+                    n,
+                    got.entities.dates.len(),
+                    got.entities.dates
                 );
             }
             if let Some(n) = ents.amounts_min {
                 assert!(
                     got.entities.amounts.len() >= n,
                     "{}: file {} entities.amounts_min {}, got {}",
-                    name, got.file, n, got.entities.amounts.len()
+                    name,
+                    got.file,
+                    n,
+                    got.entities.amounts.len()
                 );
             }
             if let Some(n) = ents.locations_min {
                 assert!(
                     got.entities.locations.len() >= n,
                     "{}: file {} entities.locations_min {}, got {} {:?}",
-                    name, got.file, n, got.entities.locations.len(), got.entities.locations
+                    name,
+                    got.file,
+                    n,
+                    got.entities.locations.len(),
+                    got.entities.locations
                 );
             }
         }
@@ -324,7 +396,10 @@ fn document_classifier_golden_gate() {
             sentinel_seen = true;
         }
     }
-    assert!(sentinel_seen, "11-sentinel-regression.yaml must exist and run");
+    assert!(
+        sentinel_seen,
+        "11-sentinel-regression.yaml must exist and run"
+    );
 }
 
 #[test]

@@ -135,8 +135,14 @@ mod tests {
         // 结果必以 http 开头 —— real_duckduckgo_search 的断言契约
         assert!(unwrap_ddg_redirect(redirect).starts_with("http"));
         // 直接 URL → 原样返回
-        assert_eq!(unwrap_ddg_redirect("https://example.com/x"), "https://example.com/x");
+        assert_eq!(
+            unwrap_ddg_redirect("https://example.com/x"),
+            "https://example.com/x"
+        );
         // 协议相对非重定向 → 归一为 https
-        assert_eq!(unwrap_ddg_redirect("//example.com/y"), "https://example.com/y");
+        assert_eq!(
+            unwrap_ddg_redirect("//example.com/y"),
+            "https://example.com/y"
+        );
     }
 }

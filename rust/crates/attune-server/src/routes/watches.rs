@@ -15,9 +15,7 @@ use std::collections::HashMap;
 
 use attune_core::entities::extract_entities;
 use attune_core::llm::LlmProvider;
-use attune_core::monitoring::deep_research::{
-    DeepResearch, ResearchDoc, ResearchOpts, SourceKind,
-};
+use attune_core::monitoring::deep_research::{DeepResearch, ResearchDoc, ResearchOpts, SourceKind};
 use attune_core::monitoring::digest::{ContentSource, DigestBuilder};
 use attune_core::store::watches::{WatchInput, WatchPatch};
 use std::sync::Arc;
@@ -35,7 +33,11 @@ use crate::state::SharedState;
 
 /// MemberState::is_paid()? — tier-3 操作的会员门（parity with writing.rs）。
 fn is_paid(state: &SharedState) -> bool {
-    state.member_state.lock().map(|g| g.is_paid()).unwrap_or(false)
+    state
+        .member_state
+        .lock()
+        .map(|g| g.is_paid())
+        .unwrap_or(false)
 }
 
 /// 会员门：tier-3 操作必须付费会员，否则 403。
@@ -62,7 +64,11 @@ fn cloud_llm_egress_enabled(state: &SharedState) -> bool {
     };
     bytes
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|s| s.get("privacy").and_then(|p| p.get("llm")).and_then(|v| v.as_bool()))
+        .and_then(|s| {
+            s.get("privacy")
+                .and_then(|p| p.get("llm"))
+                .and_then(|v| v.as_bool())
+        })
         .unwrap_or(false)
 }
 
@@ -386,7 +392,13 @@ pub async fn trigger_digest(
         match llm {
             Some(llm) => {
                 let c = builder.build_llm_summary(
-                    &id, &row.watch.label, &hits, &content, &hit_sources, &now, llm.as_ref(),
+                    &id,
+                    &row.watch.label,
+                    &hits,
+                    &content,
+                    &hit_sources,
+                    &now,
+                    llm.as_ref(),
                 );
                 let used = c.llm_summary.is_some();
                 (c, used)
@@ -606,7 +618,9 @@ pub async fn research(
             }
             // extractive 预裁（零 LLM 省 token）。
             let snippet = attune_core::document_intelligence::extractive::extract_candidates(
-                &r.content, 0.25, &[],
+                &r.content,
+                0.25,
+                &[],
             );
             let snippet: String = if snippet.is_empty() {
                 r.content.chars().take(400).collect()

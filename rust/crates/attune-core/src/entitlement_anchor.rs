@@ -111,15 +111,27 @@ pub fn authorize_snapshot(
                     .signed_payload
                     .as_ref()
                     .map(|p| p.status.clone())
-                    .unwrap_or_else(|| if resp.valid { "active".into() } else { "suspended".into() });
+                    .unwrap_or_else(|| {
+                        if resp.valid {
+                            "active".into()
+                        } else {
+                            "suspended".into()
+                        }
+                    });
                 SnapshotAuthorization::AuthorizedWithWarning(status)
             }
         };
     }
 
     // 有签名:验签作用于 canonical signed_payload。
-    let payload = resp.signed_payload.as_ref().expect("checked by is_unsigned_response");
-    let sig = resp.signature.as_deref().expect("checked by is_unsigned_response");
+    let payload = resp
+        .signed_payload
+        .as_ref()
+        .expect("checked by is_unsigned_response");
+    let sig = resp
+        .signature
+        .as_deref()
+        .expect("checked by is_unsigned_response");
     let ok = verify_entitlement_signature(&payload.canonical_bytes(), sig, keys);
     if ok {
         SnapshotAuthorization::Authorized(payload.status.clone())
@@ -177,7 +189,10 @@ pub fn authorize_snapshot_fresh(
     };
 
     // 到此 SEC-1 通过(Authorized)。signed_payload 必在。
-    let payload = resp.signed_payload.as_ref().expect("authorized implies payload");
+    let payload = resp
+        .signed_payload
+        .as_ref()
+        .expect("authorized implies payload");
 
     let reject = |code: &'static str| -> SnapshotAuthorization {
         match mode {
@@ -243,7 +258,10 @@ mod tests {
         let sig = signer.sign(&payload.canonical_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
         let final_payload = if tamper {
-            SignedPayload { status: "active".into(), ..payload }
+            SignedPayload {
+                status: "active".into(),
+                ..payload
+            }
         } else {
             payload
         };
@@ -306,7 +324,10 @@ mod tests {
         let json = r#"{"valid": true, "plan": "pro"}"#; // old cloud, no signature
         let snap: EntitlementSnapshot = serde_json::from_str(json).unwrap();
         let auth = authorize_snapshot(&snap, TrustMode::Warn, &[]);
-        assert!(matches!(auth, SnapshotAuthorization::AuthorizedWithWarning(_)));
+        assert!(matches!(
+            auth,
+            SnapshotAuthorization::AuthorizedWithWarning(_)
+        ));
     }
 
     #[test]
@@ -380,8 +401,16 @@ mod tests {
 
     #[test]
     fn verify_entitlement_signature_rejects_bad_base64() {
-        assert!(!verify_entitlement_signature(b"payload", "not!!base64", &["abcd"]));
-        assert!(!verify_entitlement_signature(b"payload", "c2hvcnQ=", &["abcd"])); // wrong len
+        assert!(!verify_entitlement_signature(
+            b"payload",
+            "not!!base64",
+            &["abcd"]
+        ));
+        assert!(!verify_entitlement_signature(
+            b"payload",
+            "c2hvcnQ=",
+            &["abcd"]
+        )); // wrong len
     }
 
     // ── T-auth-2: SEC-2 anti-replay nonce + verified_at freshness ──────────
@@ -412,7 +441,9 @@ mod tests {
     }
 
     fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc)
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
     }
 
     #[test]
@@ -494,9 +525,19 @@ mod tests {
         let fresh_client_nonce = "fresh-nonce-this-round";
         let prev = ts("2026-06-11T00:00:00+00:00");
         let now = ts("2026-06-12T00:00:00+00:00");
-        let auth = authorize_snapshot_fresh(&old, TrustMode::Strict, &kr, fresh_client_nonce, Some(&prev), &now);
+        let auth = authorize_snapshot_fresh(
+            &old,
+            TrustMode::Strict,
+            &kr,
+            fresh_client_nonce,
+            Some(&prev),
+            &now,
+        );
         // nonce mismatch fires first (replayed response can't echo this round's nonce).
-        assert_eq!(auth, SnapshotAuthorization::Unauthorized("entitlement-nonce-mismatch"));
+        assert_eq!(
+            auth,
+            SnapshotAuthorization::Unauthorized("entitlement-nonce-mismatch")
+        );
     }
 
     /// SEC-1 + SEC-2 吊销逃逸闭合总断言:吊销后攻击者重放"上一条签名有效的 active 快照"
@@ -507,7 +548,12 @@ mod tests {
         let keys = [pubkey_hex(&official)];
         let kr: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
         // The attacker replays a genuinely-signed old "active" snapshot.
-        let old_active = signed_snapshot_at(&official, "active", "round-1-nonce", "2026-06-10T00:00:00+00:00");
+        let old_active = signed_snapshot_at(
+            &official,
+            "active",
+            "round-1-nonce",
+            "2026-06-10T00:00:00+00:00",
+        );
         // This round the client minted a new nonce + has advanced last_accepted.
         let this_round_nonce = generate_nonce();
         let last_accepted = ts("2026-06-11T00:00:00+00:00");

@@ -132,7 +132,9 @@ fn connect_source_none_means_unevaluated_no_card() {
         ..Default::default()
     };
     let cards = evaluate(&ctx);
-    assert!(cards.iter().all(|c| c.kind != SuggestionKind::ConnectSource));
+    assert!(cards
+        .iter()
+        .all(|c| c.kind != SuggestionKind::ConnectSource));
 }
 
 #[test]
@@ -144,7 +146,9 @@ fn connect_source_suppressed_when_already_connected() {
         ..Default::default()
     };
     let cards = evaluate(&ctx);
-    assert!(cards.iter().all(|c| c.kind != SuggestionKind::ConnectSource));
+    assert!(cards
+        .iter()
+        .all(|c| c.kind != SuggestionKind::ConnectSource));
 }
 
 #[test]
@@ -167,7 +171,9 @@ fn connect_source_muted_filters_only_that_kind() {
     };
     let cards = evaluate(&ctx);
     // enrich 卡照出,connect_source 被静音。
-    assert!(cards.iter().all(|c| c.kind != SuggestionKind::ConnectSource));
+    assert!(cards
+        .iter()
+        .all(|c| c.kind != SuggestionKind::ConnectSource));
     assert!(cards.iter().any(|c| c.kind == SuggestionKind::Enrich));
 }
 
@@ -185,7 +191,10 @@ fn connect_source_dismiss_filters_signature() {
         dismissed_signatures: vec![sig],
         ..Default::default()
     };
-    assert!(evaluate(&ctx).is_empty(), "dismissed connect card must not reappear");
+    assert!(
+        evaluate(&ctx).is_empty(),
+        "dismissed connect card must not reappear"
+    );
 }
 
 #[test]
@@ -312,7 +321,10 @@ fn err_dismiss_filters_signature() {
         dismissed_signatures: vec![sig],
         ..Default::default()
     };
-    assert!(evaluate(&ctx).is_empty(), "dismissed card must not reappear");
+    assert!(
+        evaluate(&ctx).is_empty(),
+        "dismissed card must not reappear"
+    );
 }
 
 #[test]
@@ -430,28 +442,30 @@ mod proptests {
             0u32..40,
             prop::option::of(0u32..5),
         )
-            .prop_map(|(misses, usm, clusters, browse, anno, connected)| SignalContext {
-                missed_queries: misses
-                    .into_iter()
-                    .map(|(q, c)| MissedQuery {
-                        query: q,
-                        miss_count: c,
-                    })
-                    .collect(),
-                unprocessed_search_miss: usm,
-                cluster_candidates: clusters
-                    .into_iter()
-                    .map(|(n, e)| ClusterCandidate {
-                        item_ids: (0..n).map(|i| format!("it-{i}")).collect(),
-                        top_entities: (0..e).map(|i| format!("ent-{i}")).collect(),
-                    })
-                    .collect(),
-                browse_signal_count: browse,
-                annotation_marker_count: anno,
-                muted_kinds: vec![],
-                dismissed_signatures: vec![],
-                connected_source_count: connected,
-            })
+            .prop_map(
+                |(misses, usm, clusters, browse, anno, connected)| SignalContext {
+                    missed_queries: misses
+                        .into_iter()
+                        .map(|(q, c)| MissedQuery {
+                            query: q,
+                            miss_count: c,
+                        })
+                        .collect(),
+                    unprocessed_search_miss: usm,
+                    cluster_candidates: clusters
+                        .into_iter()
+                        .map(|(n, e)| ClusterCandidate {
+                            item_ids: (0..n).map(|i| format!("it-{i}")).collect(),
+                            top_entities: (0..e).map(|i| format!("ent-{i}")).collect(),
+                        })
+                        .collect(),
+                    browse_signal_count: browse,
+                    annotation_marker_count: anno,
+                    muted_kinds: vec![],
+                    dismissed_signatures: vec![],
+                    connected_source_count: connected,
+                },
+            )
     }
 
     proptest! {

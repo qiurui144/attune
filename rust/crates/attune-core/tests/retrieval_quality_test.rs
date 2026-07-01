@@ -41,7 +41,7 @@ const MOCK_DIMS: usize = 256;
 // ─────────────────────────────────────────────────────────────────────────
 
 struct Corpus {
-    docs: Vec<(String, String)>,   // (id, content)
+    docs: Vec<(String, String)>,    // (id, content)
     queries: Vec<(String, String)>, // (query, relevant_id)
 }
 
@@ -53,12 +53,13 @@ fn parse_corpus(yaml: &str) -> Corpus {
     let mut cur_content = String::new();
     let mut cur_query: Option<String> = None;
 
-    let flush_doc = |docs: &mut Vec<(String, String)>, id: &mut Option<String>, content: &mut String| {
-        if let Some(i) = id.take() {
-            docs.push((i, content.trim().to_string()));
-            content.clear();
-        }
-    };
+    let flush_doc =
+        |docs: &mut Vec<(String, String)>, id: &mut Option<String>, content: &mut String| {
+            if let Some(i) = id.take() {
+                docs.push((i, content.trim().to_string()));
+                content.clear();
+            }
+        };
 
     for raw in yaml.lines() {
         let line = raw.trim_end();
@@ -106,7 +107,12 @@ fn parse_corpus(yaml: &str) -> Corpus {
 }
 
 fn embed_one(emb: &dyn EmbeddingProvider, text: &str) -> Vec<f32> {
-    emb.embed(&[text]).expect("embed").0.into_iter().next().expect("vec")
+    emb.embed(&[text])
+        .expect("embed")
+        .0
+        .into_iter()
+        .next()
+        .expect("vec")
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -132,13 +138,28 @@ fn rrf_fusion_surfaces_both_lexical_and_semantic_hits() {
     );
 
     let ids: Vec<&str> = fused.iter().map(|(id, _)| id.as_str()).collect();
-    assert!(ids.contains(&"doc-V"), "vector-only doc missing from fusion: {ids:?}");
-    assert!(ids.contains(&"doc-L"), "lexical-only doc missing from fusion: {ids:?}");
-    assert!(ids.contains(&"doc-B"), "both-signal doc missing from fusion: {ids:?}");
+    assert!(
+        ids.contains(&"doc-V"),
+        "vector-only doc missing from fusion: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"doc-L"),
+        "lexical-only doc missing from fusion: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"doc-B"),
+        "both-signal doc missing from fusion: {ids:?}"
+    );
 
     // doc-B got an RRF contribution from BOTH lists, so its fused score must be
     // strictly greater than doc-V's (vector-only) and doc-L's (lexical-only).
-    let score = |id: &str| fused.iter().find(|(d, _)| d == id).map(|(_, s)| *s).unwrap();
+    let score = |id: &str| {
+        fused
+            .iter()
+            .find(|(d, _)| d == id)
+            .map(|(_, s)| *s)
+            .unwrap()
+    };
     assert!(
         score("doc-B") > score("doc-V") && score("doc-B") > score("doc-L"),
         "doc present in both signals should outrank single-signal docs: B={}, V={}, L={}",
@@ -172,7 +193,10 @@ fn rrf_fusion_lexical_doc_survives_when_vector_misses_it() {
     // equal rank weight; the lexical doc's slightly higher fulltext weight is not
     // the point — surfacing it is. (See FINDING in report re: rank-fusion ordering
     // when one doc appears in BOTH lists.)
-    assert!(ids.contains(&"semantic-doc"), "vector-only doc must also survive: {ids:?}");
+    assert!(
+        ids.contains(&"semantic-doc"),
+        "vector-only doc must also survive: {ids:?}"
+    );
 }
 
 #[test]
@@ -182,13 +206,28 @@ fn rrf_dual_signal_doc_can_outrank_stronger_single_signal_doc() {
     // two contributions and can outrank a doc with a much stronger ABSOLUTE score
     // that appears in only one list. This is correct RRF behavior but a known
     // sharp edge: a weak-but-ubiquitous doc can beat a strong exact-term hit.
-    let fulltext = vec![("strong-exact".to_string(), 99.0), ("ubiquitous".to_string(), 1.0)];
+    let fulltext = vec![
+        ("strong-exact".to_string(), 99.0),
+        ("ubiquitous".to_string(), 1.0),
+    ];
     let vector = vec![("ubiquitous".to_string(), 0.50)]; // also present in vector list
-    let fused = rrf_fuse(&vector, &fulltext, DEFAULT_VECTOR_WEIGHT, DEFAULT_FULLTEXT_WEIGHT, 10);
+    let fused = rrf_fuse(
+        &vector,
+        &fulltext,
+        DEFAULT_VECTOR_WEIGHT,
+        DEFAULT_FULLTEXT_WEIGHT,
+        10,
+    );
 
     // "ubiquitous" is rank-0 in vector + rank-1 in fulltext → two contributions.
     // "strong-exact" is rank-0 in fulltext only → one contribution.
-    let score = |id: &str| fused.iter().find(|(d, _)| d == id).map(|(_, s)| *s).unwrap();
+    let score = |id: &str| {
+        fused
+            .iter()
+            .find(|(d, _)| d == id)
+            .map(|(_, s)| *s)
+            .unwrap()
+    };
     assert!(
         score("ubiquitous") > score("strong-exact"),
         "dual-signal doc should outrank single-signal doc under RRF: ubiq={}, exact={}",
@@ -220,7 +259,12 @@ fn run_hybrid_golden(
         let key = vec_idx
             .add(
                 &v,
-                VectorMeta { item_id: id.clone(), chunk_idx, level: 2, section_idx: 0 },
+                VectorMeta {
+                    item_id: id.clone(),
+                    chunk_idx,
+                    level: 2,
+                    section_idx: 0,
+                },
             )
             .expect("add vec");
         key_to_id.insert(key, id.clone());
@@ -253,8 +297,16 @@ fn run_hybrid_golden(
 fn relevance_at_k_golden_set_mock_embed() {
     let yaml = include_str!("fixtures/retrieval/golden_corpus.yaml");
     let corpus = parse_corpus(yaml);
-    assert!(corpus.docs.len() >= 5, "fixture parse: docs={}", corpus.docs.len());
-    assert!(corpus.queries.len() >= 5, "fixture parse: queries={}", corpus.queries.len());
+    assert!(
+        corpus.docs.len() >= 5,
+        "fixture parse: docs={}",
+        corpus.docs.len()
+    );
+    assert!(
+        corpus.queries.len() >= 5,
+        "fixture parse: queries={}",
+        corpus.queries.len()
+    );
 
     let emb = MockEmbeddingProvider::new(MOCK_DIMS);
     let top_k = 3;
@@ -281,9 +333,17 @@ fn relevance_at_k_golden_set_mock_embed() {
     let n = results.len();
     eprintln!(
         "[relevance@{top_k}] recall={}/{} ({:.2}), precision@1={}/{} ({:.2}) [mock-embed]",
-        hits, n, hits as f32 / n as f32, at1, n, at1 as f32 / n as f32
+        hits,
+        n,
+        hits as f32 / n as f32,
+        at1,
+        n,
+        at1 as f32 / n as f32
     );
-    assert_eq!(hits, n, "every golden query must recall its relevant doc in top-{top_k}");
+    assert_eq!(
+        hits, n,
+        "every golden query must recall its relevant doc in top-{top_k}"
+    );
 }
 
 #[test]
@@ -293,18 +353,35 @@ fn relevance_vector_signal_ranks_semantic_neighbor_mock() {
     let emb = MockEmbeddingProvider::new(MOCK_DIMS);
     let mut idx = VectorIndex::new(MOCK_DIMS).unwrap();
     let docs = [
-        ("rust", "Rust ownership and the borrow checker guarantee memory safety"),
-        ("cooking", "Sichuan cuisine uses chili oil and Sichuan peppercorn"),
+        (
+            "rust",
+            "Rust ownership and the borrow checker guarantee memory safety",
+        ),
+        (
+            "cooking",
+            "Sichuan cuisine uses chili oil and Sichuan peppercorn",
+        ),
     ];
     for (i, (id, text)) in docs.iter().enumerate() {
         let v = embed_one(&emb, text);
-        idx.add(&v, VectorMeta { item_id: id.to_string(), chunk_idx: i, level: 2, section_idx: 0 })
-            .unwrap();
+        idx.add(
+            &v,
+            VectorMeta {
+                item_id: id.to_string(),
+                chunk_idx: i,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
     }
     let qv = embed_one(&emb, "Rust ownership borrow checker memory safety");
     let hits = idx.search(&qv, 2).unwrap();
     assert!(!hits.is_empty());
-    assert_eq!(hits[0].0.item_id, "rust", "semantic neighbor mis-ranked: {hits:?}");
+    assert_eq!(
+        hits[0].0.item_id, "rust",
+        "semantic neighbor mis-ranked: {hits:?}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -317,8 +394,14 @@ fn cjk_aware_budget_bounds_injection_no_overflow() {
     // budget plan must NEVER let system + user + knowledge + history exceed the
     // model window — verify for both a CJK-heavy and a Latin user message.
     for (label, user) in [
-        ("cjk", "请根据知识库回答这个关于内存安全与所有权的问题".repeat(3)),
-        ("latin", "please answer this question about memory safety and ownership ".repeat(3)),
+        (
+            "cjk",
+            "请根据知识库回答这个关于内存安全与所有权的问题".repeat(3),
+        ),
+        (
+            "latin",
+            "please answer this question about memory safety and ownership ".repeat(3),
+        ),
     ] {
         let model = "qwen2.5:3b"; // 32K window per context_budget
         let window = context_window(model);
@@ -333,8 +416,9 @@ fn cjk_aware_budget_bounds_injection_no_overflow() {
         let knowledge_chars = plan.knowledge_chars();
         // The realized injected knowledge (in tokens) plus the accounted input
         // must stay within window - response_reserve.
-        let knowledge_tokens_est = estimate_tokens(&"内存安全".repeat(knowledge_chars / 4).to_string())
-            .min(plan.knowledge_tokens);
+        let knowledge_tokens_est =
+            estimate_tokens(&"内存安全".repeat(knowledge_chars / 4).to_string())
+                .min(plan.knowledge_tokens);
         let total = plan.tokens_in_used + knowledge_tokens_est + plan.response_reserve;
         assert!(
             total <= window,
@@ -345,7 +429,10 @@ fn cjk_aware_budget_bounds_injection_no_overflow() {
             plan.response_reserve
         );
         // Knowledge budget must be positive (we did leave room to inject RAG).
-        assert!(plan.knowledge_tokens > 0, "[{label}] no knowledge budget left");
+        assert!(
+            plan.knowledge_tokens > 0,
+            "[{label}] no knowledge budget left"
+        );
     }
 }
 
@@ -356,8 +443,18 @@ fn allocate_budget_proportional_split_no_overflow() {
     // Assert: (a) total injected chars <= budget + floor slack, (b) higher-score
     // result gets >= lower-score result's allocation.
     let mut results = vec![
-        SearchResult { item_id: "hi".into(), score: 0.9, content: "x".repeat(5000), ..Default::default() },
-        SearchResult { item_id: "lo".into(), score: 0.1, content: "y".repeat(5000), ..Default::default() },
+        SearchResult {
+            item_id: "hi".into(),
+            score: 0.9,
+            content: "x".repeat(5000),
+            ..Default::default()
+        },
+        SearchResult {
+            item_id: "lo".into(),
+            score: 0.1,
+            content: "y".repeat(5000),
+            ..Default::default()
+        },
     ];
     let budget = INJECTION_BUDGET; // 2000 chars
     allocate_budget(&mut results, budget);
@@ -366,7 +463,10 @@ fn allocate_budget_proportional_split_no_overflow() {
     let lo_len = results[1].inject_content.as_ref().unwrap().chars().count();
 
     // Proportional: 0.9-score result gets the larger slice.
-    assert!(hi_len > lo_len, "high-score result should get more budget: hi={hi_len} lo={lo_len}");
+    assert!(
+        hi_len > lo_len,
+        "high-score result should get more budget: hi={hi_len} lo={lo_len}"
+    );
 
     // No gross overflow: each share is floored at 100, so total is bounded by
     // budget + (n_results * floor) in the worst case. With 2 results the bound
@@ -400,7 +500,10 @@ fn cjk_content_budget_smaller_char_allocation_than_latin() {
         plan_cjk.knowledge_tokens,
         plan_latin.knowledge_tokens
     );
-    assert!(plan_cjk.knowledge_chars() < plan_cjk.knowledge_tokens, "5/6 char conversion broken");
+    assert!(
+        plan_cjk.knowledge_chars() < plan_cjk.knowledge_tokens,
+        "5/6 char conversion broken"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -414,8 +517,8 @@ fn maybe_real_embed() -> Option<OllamaProvider> {
     }
     let base = std::env::var("ATTUNE_TEST_OLLAMA_URL")
         .unwrap_or_else(|_| "http://localhost:11434".to_string());
-    let model = std::env::var("ATTUNE_TEST_OLLAMA_EMBED_MODEL")
-        .unwrap_or_else(|_| "bge-m3".to_string());
+    let model =
+        std::env::var("ATTUNE_TEST_OLLAMA_EMBED_MODEL").unwrap_or_else(|_| "bge-m3".to_string());
     let p = OllamaProvider::new(&base, &model, 1024);
     if p.is_available() {
         Some(p)
@@ -446,8 +549,16 @@ fn cross_language_cn_doc_by_en_query_real_bge_m3() {
     let mut idx = VectorIndex::new(dims).unwrap();
     for (i, (id, content)) in corpus.docs.iter().enumerate() {
         let v = embed_one(&emb, content);
-        idx.add(&v, VectorMeta { item_id: id.clone(), chunk_idx: i, level: 2, section_idx: 0 })
-            .unwrap();
+        idx.add(
+            &v,
+            VectorMeta {
+                item_id: id.clone(),
+                chunk_idx: i,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
     }
 
     let mut hits_at2 = 0;

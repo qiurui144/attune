@@ -33,15 +33,26 @@ static LLM_CALLS: AtomicUsize = AtomicUsize::new(0);
 struct PanicLlm;
 
 impl LlmProvider for PanicLlm {
-    fn chat(&self, _system: &str, _user: &str) -> attune_core::error::Result<(String, attune_core::usage::TokenUsage)> {
+    fn chat(
+        &self,
+        _system: &str,
+        _user: &str,
+    ) -> attune_core::error::Result<(String, attune_core::usage::TokenUsage)> {
         LLM_CALLS.fetch_add(1, Ordering::SeqCst);
         panic!("COST CONTRACT VIOLATION: zero-cost path invoked the LLM");
     }
-    fn chat_with_history(&self, _messages: &[ChatMessage]) -> attune_core::error::Result<(String, attune_core::usage::TokenUsage)> {
+    fn chat_with_history(
+        &self,
+        _messages: &[ChatMessage],
+    ) -> attune_core::error::Result<(String, attune_core::usage::TokenUsage)> {
         LLM_CALLS.fetch_add(1, Ordering::SeqCst);
         panic!("COST CONTRACT VIOLATION: zero-cost path invoked the LLM (history)");
     }
-    fn chat_with_options(&self, _messages: &[ChatMessage], _opts: &LlmCallOptions) -> attune_core::error::Result<String> {
+    fn chat_with_options(
+        &self,
+        _messages: &[ChatMessage],
+        _opts: &LlmCallOptions,
+    ) -> attune_core::error::Result<String> {
         LLM_CALLS.fetch_add(1, Ordering::SeqCst);
         panic!("COST CONTRACT VIOLATION: zero-cost path invoked the LLM (options)");
     }

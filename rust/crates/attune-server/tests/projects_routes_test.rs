@@ -93,7 +93,10 @@ async fn projects_endpoints_locked_vault_returns_403() {
                 .json(&serde_json::json!({"title": "t", "kind": "case"})),
             "POST /projects",
         ),
-        (client.get(format!("{}/some-id", projects)), "GET /projects/:id"),
+        (
+            client.get(format!("{}/some-id", projects)),
+            "GET /projects/:id",
+        ),
         (
             client.get(format!("{}/some-id/files", projects)),
             "GET /projects/:id/files",
@@ -126,7 +129,11 @@ async fn projects_crud_round_trip_unlocked_vault() {
 
     // 1. Empty list initially.
     let resp = client.get(&projects).send().await.expect("list");
-    assert_eq!(resp.status().as_u16(), 200, "unlocked vault must serve the route");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "unlocked vault must serve the route"
+    );
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["total"], 0, "fresh vault has no projects");
     assert!(body["projects"].as_array().unwrap().is_empty());
@@ -141,7 +148,10 @@ async fn projects_crud_round_trip_unlocked_vault() {
     assert_eq!(resp.status().as_u16(), 201, "create returns 201 CREATED");
     let created: serde_json::Value = resp.json().await.expect("json");
     let pid = created["id"].as_str().expect("project id").to_string();
-    assert_eq!(created["title"], "Acme v Roe", "handler must trim the title");
+    assert_eq!(
+        created["title"], "Acme v Roe",
+        "handler must trim the title"
+    );
     assert_eq!(created["kind"], "case");
 
     // 3. Empty title → 400 (error case through the real handler).
@@ -151,7 +161,11 @@ async fn projects_crud_round_trip_unlocked_vault() {
         .send()
         .await
         .expect("create empty");
-    assert_eq!(resp.status().as_u16(), 400, "empty title must be rejected by the handler");
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "empty title must be rejected by the handler"
+    );
 
     // 4. kind defaults to "generic" when omitted.
     let resp = client
@@ -170,7 +184,11 @@ async fn projects_crud_round_trip_unlocked_vault() {
     assert_eq!(body["total"], 2);
 
     // 6. Get the created one by id → 200.
-    let resp = client.get(format!("{}/{}", projects, pid)).send().await.expect("get");
+    let resp = client
+        .get(format!("{}/{}", projects, pid))
+        .send()
+        .await
+        .expect("get");
     assert_eq!(resp.status().as_u16(), 200);
     let got: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(got["id"], pid);
@@ -222,5 +240,8 @@ async fn projects_crud_round_trip_unlocked_vault() {
         .expect("timeline");
     assert_eq!(resp.status().as_u16(), 200);
     let tl: serde_json::Value = resp.json().await.expect("json");
-    assert!(tl["entries"].is_array(), "timeline returns an entries array");
+    assert!(
+        tl["entries"].is_array(),
+        "timeline returns an entries array"
+    );
 }

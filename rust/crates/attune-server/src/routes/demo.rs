@@ -9,13 +9,11 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
 
-use crate::routes::errors::{internal, vault_locked};
 use crate::error::AppResult;
+use crate::routes::errors::{internal, vault_locked};
 use crate::state::SharedState;
 
-pub async fn load_demo(
-    State(state): State<SharedState>,
-) -> AppResult<impl IntoResponse> {
+pub async fn load_demo(State(state): State<SharedState>) -> AppResult<impl IntoResponse> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|_| vault_locked())?;
     let store = vault.store();
@@ -38,8 +36,7 @@ pub async fn load_demo(
         })));
     }
 
-    let items = attune_core::demo::load_demo_items()
-        .map_err(|e| internal("load_demo_items", e))?;
+    let items = attune_core::demo::load_demo_items().map_err(|e| internal("load_demo_items", e))?;
     let mut loaded = 0usize;
     for it in &items {
         // domain 字段透传；corpus_domain 当前 schema 没有独立列，

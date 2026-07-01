@@ -12,7 +12,12 @@ impl Store {
     // --- bound_dirs ---
 
     /// 绑定监控目录，返回 dir_id（默认 corpus_domain='general'）
-    pub fn bind_directory(&self, path: &str, recursive: bool, file_types: &[&str]) -> Result<String> {
+    pub fn bind_directory(
+        &self,
+        path: &str,
+        recursive: bool,
+        file_types: &[&str],
+    ) -> Result<String> {
         self.bind_directory_with_domain(path, recursive, file_types, "general")
     }
 
@@ -160,7 +165,10 @@ impl Store {
     pub fn list_item_ids_under_path(&self, prefix: &str) -> Result<Vec<String>> {
         // ESCAPE '\\': 用户路径可能含 LIKE 元字符 % / _,转义后按字面匹配,
         // 避免 "/a_b" 误命中 "/axb"。前缀已转义,再拼通配 '%'。
-        let escaped = prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         let pattern = format!("{escaped}%");
         let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT item_id FROM indexed_files WHERE path LIKE ?1 ESCAPE '\\'",
@@ -219,7 +227,9 @@ mod tests {
         let dir_id = s.bind_directory("/docs", true, &["txt"]).unwrap();
 
         let mk = |name: &str, path: &str| -> String {
-            let id = s.insert_item(&dek, name, "body", None, "note", None, None).unwrap();
+            let id = s
+                .insert_item(&dek, name, "body", None, "note", None, None)
+                .unwrap();
             s.upsert_indexed_file(&dir_id, path, "h", &id).unwrap();
             id
         };
@@ -240,13 +250,23 @@ mod tests {
         let dek = Key32::generate();
         let dir_id = s.bind_directory("/root", true, &["txt"]).unwrap();
 
-        let id_underscore = s.insert_item(&dek, "u", "b", None, "note", None, None).unwrap();
-        s.upsert_indexed_file(&dir_id, "/a_b/x.txt", "h", &id_underscore).unwrap();
-        let id_decoy = s.insert_item(&dek, "d", "b", None, "note", None, None).unwrap();
-        s.upsert_indexed_file(&dir_id, "/axb/y.txt", "h", &id_decoy).unwrap();
+        let id_underscore = s
+            .insert_item(&dek, "u", "b", None, "note", None, None)
+            .unwrap();
+        s.upsert_indexed_file(&dir_id, "/a_b/x.txt", "h", &id_underscore)
+            .unwrap();
+        let id_decoy = s
+            .insert_item(&dek, "d", "b", None, "note", None, None)
+            .unwrap();
+        s.upsert_indexed_file(&dir_id, "/axb/y.txt", "h", &id_decoy)
+            .unwrap();
 
         // "/a_b" must match only the literal underscore path, NOT "/axb".
         let got = s.list_item_ids_under_path("/a_b").unwrap();
-        assert_eq!(got, vec![id_underscore], "underscore is escaped, /axb not matched");
+        assert_eq!(
+            got,
+            vec![id_underscore],
+            "underscore is escaped, /axb not matched"
+        );
     }
 }

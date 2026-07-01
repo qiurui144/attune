@@ -50,7 +50,12 @@ impl CiteStyle {
 
     /// All supported styles (for an error message listing valid options).
     pub fn all() -> [CiteStyle; 4] {
-        [CiteStyle::Gbt7714, CiteStyle::Apa, CiteStyle::Ieee, CiteStyle::Mla]
+        [
+            CiteStyle::Gbt7714,
+            CiteStyle::Apa,
+            CiteStyle::Ieee,
+            CiteStyle::Mla,
+        ]
     }
 }
 
@@ -136,7 +141,11 @@ impl std::fmt::Display for CiteError {
 impl std::error::Error for CiteError {}
 
 fn join_authors(authors: &[String], sep: &str, max: usize, et_al: &str) -> String {
-    let cleaned: Vec<&str> = authors.iter().map(|a| a.trim()).filter(|a| !a.is_empty()).collect();
+    let cleaned: Vec<&str> = authors
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| !a.is_empty())
+        .collect();
     if cleaned.is_empty() {
         return String::new();
     }
@@ -148,13 +157,21 @@ fn join_authors(authors: &[String], sep: &str, max: usize, et_al: &str) -> Strin
 }
 
 fn year_or_nd(year: &Option<String>) -> String {
-    year.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("n.d.").to_string()
+    year.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("n.d.")
+        .to_string()
 }
 
 /// Format one source in the given style (pure).
 fn format_one(meta: &SourceMeta, style: CiteStyle) -> String {
     let title = meta.title.trim();
-    let container = meta.container.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let container = meta
+        .container
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let url = meta.url.as_deref().map(str::trim).filter(|s| !s.is_empty());
     match style {
         // GB/T 7714: 作者. 题名[文献类型]. 出版项, 年. URL.
@@ -236,7 +253,10 @@ fn format_one(meta: &SourceMeta, style: CiteStyle) -> String {
 ///
 /// Order is preserved (caller controls source order). Each citation gets a 1-based `seq`. IEEE
 /// entries are prefixed with `[n] `. Errors: [`CiteError::NoSources`], [`CiteError::MissingTitle`].
-pub fn build_citations(sources: &[SourceMeta], style: CiteStyle) -> Result<Vec<Citation>, CiteError> {
+pub fn build_citations(
+    sources: &[SourceMeta],
+    style: CiteStyle,
+) -> Result<Vec<Citation>, CiteError> {
     if sources.is_empty() {
         return Err(CiteError::NoSources);
     }
@@ -351,7 +371,11 @@ mod tests {
 
     #[test]
     fn gbt7714_format_compliance() {
-        let c = build_citations(&[meta("s1", &["张三", "李四"], "深度学习综述", "2023")], CiteStyle::Gbt7714).unwrap();
+        let c = build_citations(
+            &[meta("s1", &["张三", "李四"], "深度学习综述", "2023")],
+            CiteStyle::Gbt7714,
+        )
+        .unwrap();
         assert_eq!(c.len(), 1);
         assert!(c[0].formatted.starts_with("张三, 李四. 深度学习综述. "));
         assert!(c[0].formatted.contains("2023."));
@@ -364,12 +388,20 @@ mod tests {
             CiteStyle::Gbt7714,
         )
         .unwrap();
-        assert!(c[0].formatted.contains("A, B, C, 等"), "got {}", c[0].formatted);
+        assert!(
+            c[0].formatted.contains("A, B, C, 等"),
+            "got {}",
+            c[0].formatted
+        );
     }
 
     #[test]
     fn apa_format_has_year_in_parens() {
-        let c = build_citations(&[meta("s1", &["Smith, J."], "A study", "2024")], CiteStyle::Apa).unwrap();
+        let c = build_citations(
+            &[meta("s1", &["Smith, J."], "A study", "2024")],
+            CiteStyle::Apa,
+        )
+        .unwrap();
         assert!(c[0].formatted.contains("(2024)."));
         assert!(c[0].formatted.contains("A study."));
     }
@@ -377,7 +409,10 @@ mod tests {
     #[test]
     fn ieee_prefixes_bracket_seq_and_quotes_title() {
         let c = build_citations(
-            &[meta("s1", &["A"], "Title One", "2021"), meta("s2", &["B"], "Title Two", "2022")],
+            &[
+                meta("s1", &["A"], "Title One", "2021"),
+                meta("s2", &["B"], "Title Two", "2022"),
+            ],
             CiteStyle::Ieee,
         )
         .unwrap();
@@ -390,7 +425,11 @@ mod tests {
 
     #[test]
     fn mla_format_quotes_title_with_period_inside() {
-        let c = build_citations(&[meta("s1", &["Doe, John"], "On Things", "2019")], CiteStyle::Mla).unwrap();
+        let c = build_citations(
+            &[meta("s1", &["Doe, John"], "On Things", "2019")],
+            CiteStyle::Mla,
+        )
+        .unwrap();
         assert!(c[0].formatted.contains("\"On Things.\""));
     }
 
@@ -413,7 +452,10 @@ mod tests {
 
     #[test]
     fn no_sources_is_error() {
-        assert_eq!(build_citations(&[], CiteStyle::Apa).unwrap_err(), CiteError::NoSources);
+        assert_eq!(
+            build_citations(&[], CiteStyle::Apa).unwrap_err(),
+            CiteError::NoSources
+        );
     }
 
     #[test]
@@ -438,7 +480,11 @@ mod tests {
             ..Default::default()
         };
         let c = build_citations(&[m], CiteStyle::Gbt7714).unwrap();
-        assert!(c[0].formatted.starts_with("Anon Work."), "got {}", c[0].formatted);
+        assert!(
+            c[0].formatted.starts_with("Anon Work."),
+            "got {}",
+            c[0].formatted
+        );
     }
 
     // ── inline anchors ──
@@ -457,7 +503,10 @@ mod tests {
     fn inline_anchor_ignores_unknown_id() {
         let text = "x[cite:ghost]y";
         let anchors = find_inline_anchors(text, &["s1".to_string()]);
-        assert!(anchors.is_empty(), "unknown id must not anchor (no fabricated ref)");
+        assert!(
+            anchors.is_empty(),
+            "unknown id must not anchor (no fabricated ref)"
+        );
     }
 
     #[test]

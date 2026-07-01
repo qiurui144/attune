@@ -198,8 +198,7 @@ pub struct ExportStep {
 /// - **cost guard**: a `LlmMultiStep` skill must declare `trigger.on == "manual"` (spec §7
 ///   — a paid skill can never fire as a background job).
 pub fn parse_skill_yaml(yaml: &str) -> Result<Skill, String> {
-    let skill: Skill =
-        serde_yaml::from_str(yaml).map_err(|e| format!("parse skill yaml: {e}"))?;
+    let skill: Skill = serde_yaml::from_str(yaml).map_err(|e| format!("parse skill yaml: {e}"))?;
     validate_skill(&skill)?;
     Ok(skill)
 }
@@ -207,7 +206,10 @@ pub fn parse_skill_yaml(yaml: &str) -> Result<Skill, String> {
 /// Validate an already-deserialized [`Skill`] (shared by the parser + the registry).
 pub fn validate_skill(skill: &Skill) -> Result<(), String> {
     if skill.kind != "skill" {
-        return Err(format!("skill `type` must be \"skill\", got {:?}", skill.kind));
+        return Err(format!(
+            "skill `type` must be \"skill\", got {:?}",
+            skill.kind
+        ));
     }
     if skill.steps.is_empty() {
         return Err("skill has no steps".to_string());
@@ -217,7 +219,10 @@ pub fn validate_skill(skill: &Skill) -> Result<(), String> {
         .iter()
         .any(|s| matches!(s, SkillStep::Export(_)));
     if !has_export {
-        return Err("skill has no terminal `export` step (must produce a downloadable artifact)".to_string());
+        return Err(
+            "skill has no terminal `export` step (must produce a downloadable artifact)"
+                .to_string(),
+        );
     }
     // Cost contract guard (spec §7 / R3): a paid multi-step skill can never be a background job.
     if skill.cost_tier == CostTier::LlmMultiStep && skill.trigger.on != "manual" {
@@ -275,7 +280,9 @@ steps:
         assert_eq!(skill.inputs.len(), 2);
         assert_eq!(skill.steps.len(), 4);
         assert!(matches!(&skill.steps[0], SkillStep::Rag(_)));
-        assert!(matches!(&skill.steps[1], SkillStep::Agent(a) if a.agent == "document_intelligence.compare_to_table"));
+        assert!(
+            matches!(&skill.steps[1], SkillStep::Agent(a) if a.agent == "document_intelligence.compare_to_table")
+        );
         assert!(matches!(&skill.steps[3], SkillStep::Export(_)));
     }
 
@@ -284,7 +291,10 @@ steps:
         let bad = COMPARE_SKILL_YAML.replace("type: skill", "type: workflow");
         // The first `type: skill` is the top-level kind; replacing it makes kind=workflow.
         let err = parse_skill_yaml(&bad).unwrap_err();
-        assert!(err.contains("must be \"skill\"") || err.contains("parse skill yaml"), "got: {err}");
+        assert!(
+            err.contains("must be \"skill\"") || err.contains("parse skill yaml"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -322,7 +332,10 @@ trigger: { on: manual, scope: project }
 steps: []
 "#;
         let err = parse_skill_yaml(yaml).unwrap_err();
-        assert!(err.contains("no steps") || err.contains("no terminal"), "got: {err}");
+        assert!(
+            err.contains("no steps") || err.contains("no terminal"),
+            "got: {err}"
+        );
     }
 
     #[test]

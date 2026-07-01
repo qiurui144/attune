@@ -21,14 +21,18 @@ impl Store {
         chunk_hash: &str,
         strategy: &str,
     ) -> Result<Option<String>> {
-        let row: Option<Vec<u8>> = self.conn.query_row(
-            "SELECT summary FROM chunk_summaries WHERE chunk_hash = ?1 AND strategy = ?2",
-            params![chunk_hash, strategy],
-            |r| r.get(0),
-        ).map(Some).or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            e => Err(e),
-        })?;
+        let row: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT summary FROM chunk_summaries WHERE chunk_hash = ?1 AND strategy = ?2",
+                params![chunk_hash, strategy],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
         match row {
             Some(enc) => {
                 let plain = crypto::decrypt(dek, &enc)
@@ -55,10 +59,12 @@ impl Store {
         // chat-context strategies are the original two; document-intelligence deep summary
         // adds the `deepsum:<level>` namespace (spec §10 backward-compat: same table,
         // namespace-isolated strategy values, no migration). REPLACE on (chunk_hash, strategy).
-        let known = matches!(strategy, "economical" | "accurate")
-            || strategy.starts_with("deepsum:");
+        let known =
+            matches!(strategy, "economical" | "accurate") || strategy.starts_with("deepsum:");
         if !known {
-            return Err(VaultError::InvalidInput(format!("unknown strategy: {strategy}")));
+            return Err(VaultError::InvalidInput(format!(
+                "unknown strategy: {strategy}"
+            )));
         }
         let enc = crypto::encrypt(dek, summary.as_bytes())?;
         self.conn.execute(
@@ -72,11 +78,9 @@ impl Store {
 
     /// 统计缓存命中率用
     pub fn chunk_summary_count(&self) -> Result<usize> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM chunk_summaries",
-            [],
-            |r| r.get(0),
-        )?;
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunk_summaries", [], |r| r.get(0))?;
         Ok(n as usize)
     }
 
@@ -127,7 +131,13 @@ impl Store {
             "INSERT INTO chunk_summaries \
                 (chunk_hash, strategy, item_id, model, summary, orig_chars, created_at) \
              VALUES (?1, 'economical', ?2, 'test-model', ?3, ?4, ?5)",
-            params![chunk_hash, item_id, enc, summary.len() as i64, created_at_iso],
+            params![
+                chunk_hash,
+                item_id,
+                enc,
+                summary.len() as i64,
+                created_at_iso
+            ],
         )?;
         Ok(())
     }

@@ -1,13 +1,11 @@
+use attune_core::chat_reliability::{evaluate_response, ChatReliabilityConfig, RetrievedChunk};
+use attune_core::cost;
+use attune_core::llm::ChatMessage;
+use attune_core::pii::Redactor;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::Deserialize;
-use attune_core::llm::ChatMessage;
-use attune_core::pii::Redactor;
-use attune_core::cost;
-use attune_core::chat_reliability::{
-    evaluate_response, ChatReliabilityConfig, RetrievedChunk,
-};
 
 use crate::error::{AppError, AppResult};
 use crate::eval as eval_surface;
@@ -137,10 +135,9 @@ pub async fn chat(
         .all_chat_trigger_project_keywords()
         .into_iter()
         .collect();
-    if let Some(hint) = attune_core::project_recommender::recommend_for_chat(
-        &body.message,
-        &project_keywords,
-    ) {
+    if let Some(hint) =
+        attune_core::project_recommender::recommend_for_chat(&body.message, &project_keywords)
+    {
         let payload = serde_json::json!({
             "type": "project_recommendation",
             "trigger": "chat_keyword",
@@ -164,10 +161,16 @@ pub async fn chat(
             };
             bytes
                 .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-                .and_then(|v| v.get("skills")
-                    .and_then(|s| s.get("disabled"))
-                    .and_then(|d| d.as_array())
-                    .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect()))
+                .and_then(|v| {
+                    v.get("skills")
+                        .and_then(|s| s.get("disabled"))
+                        .and_then(|d| d.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                })
                 .unwrap_or_default()
         };
         let has_pending_doc = false;
@@ -189,17 +192,23 @@ pub async fn chat(
     // llm 配置(server restart 后第一次 chat / 老用户 settings 未触发 PATCH 等),
     // reload_llm 会从 settings 重新构建 provider, 避免用户体感 "重启就 503" 的 P3。
     // reload_llm 失败 (无 settings.llm) 仍返 503,行为与之前一致。
-    let llm = state.llm.lock()
+    let llm = state
+        .llm
+        .lock()
         .map_err(|_| AppError::Internal("llm lock poisoned".into()))?
-        .as_ref().cloned();
+        .as_ref()
+        .cloned();
     let llm = match llm {
         Some(l) => l,
         None => {
             tracing::info!("chat: state.llm is None, attempting lazy reload from vault settings");
             state.reload_llm();
-            let retry = state.llm.lock()
+            let retry = state
+                .llm
+                .lock()
                 .map_err(|_| AppError::Internal("llm lock poisoned".into()))?
-                .as_ref().cloned();
+                .as_ref()
+                .cloned();
             match retry {
                 Some(l) => l,
                 None => {
@@ -210,7 +219,7 @@ pub async fn chat(
                             "error": "AI 后端不可用",
                             "hint": "请安装 Ollama，并在本机下载一个 chat 模型（例如轻量模型）"
                         }),
-                    ))
+                    ));
                 }
             }
         }
@@ -255,7 +264,11 @@ pub async fn chat(
                     v.get("agents")
                         .and_then(|s| s.get("disabled"))
                         .and_then(|d| d.as_array())
-                        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
                 })
                 .unwrap_or_default()
         };
@@ -268,12 +281,11 @@ pub async fn chat(
         tokio::task::spawn_blocking(move || {
             // Server has no embedded agent binaries — deterministic steps degrade
             // gracefully (the LLM lead steps still run + are telemetered).
-            let mut dispatch =
-                |_a: &attune_core::agents::registry::AgentSpec,
-                 _i: &attune_core::agents::flow::Payload|
-                 -> std::result::Result<serde_json::Value, String> {
-                    Err("deterministic agent binary not available in server process".to_string())
-                };
+            let mut dispatch = |_a: &attune_core::agents::registry::AgentSpec,
+                                _i: &attune_core::agents::flow::Payload|
+             -> std::result::Result<serde_json::Value, String> {
+                Err("deterministic agent binary not available in server process".to_string())
+            };
             crate::acp_chat::run_chat_flow(
                 &flow_msg,
                 &flows_reg.0,
@@ -296,16 +308,24 @@ pub async fn chat(
     // 按 LLM 上下文窗口精确裁历史（替代写死的固定深度）。
     // 不同 model 窗口差 30×（qwen 32K / gemini 1M）—— 按窗口动态保留最近若干轮，
     let dek = {
-        let vault = state.vault.lock()
+        let vault = state
+            .vault
+            .lock()
             .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
-        vault.dek_db().map_err(|e| AppError::Forbidden(e.to_string()))?
+        vault
+            .dek_db()
+            .map_err(|e| AppError::Forbidden(e.to_string()))?
     };
 
     // 1a. 读取 app_settings（用于查询扩展 + web_search 配置）
     let app_settings: serde_json::Value = {
-        let vault = state.vault.lock()
+        let vault = state
+            .vault
+            .lock()
             .map_err(|_| AppError::Internal("vault lock".into()))?;
-        vault.store().get_meta("app_settings")
+        vault
+            .store()
+            .get_meta("app_settings")
             .ok()
             .flatten()
             .and_then(|data| serde_json::from_slice(&data).ok())
@@ -324,12 +344,8 @@ pub async fn chat(
             .iter()
             .map(|h| (h.role.clone(), h.content.clone()))
             .collect();
-        let plan = attune_core::context_budget::plan_context(
-            llm.model_name(),
-            "",
-            &body.message,
-            &pairs,
-        );
+        let plan =
+            attune_core::context_budget::plan_context(llm.model_name(), "", &body.message, &pairs);
         if plan.history_dropped > 0 {
             let drop = plan.history_dropped;
             let dropped: Vec<(String, String)> = pairs.iter().take(drop).cloned().collect();
@@ -341,7 +357,11 @@ pub async fn chat(
             let rolling = tokio::task::spawn_blocking(move || {
                 let vault = state_hc.vault.lock().unwrap_or_else(|e| e.into_inner());
                 attune_core::memory::compact_history(
-                    vault.store(), &dek_hc, llm_hc.as_ref(), &sid, &dropped,
+                    vault.store(),
+                    &dek_hc,
+                    llm_hc.as_ref(),
+                    &sid,
+                    &dropped,
                 )
             })
             .await
@@ -357,7 +377,10 @@ pub async fn chat(
             };
             body.history.insert(
                 0,
-                HistoryMessage { role: "user".to_string(), content: summary_turn },
+                HistoryMessage {
+                    role: "user".to_string(),
+                    content: summary_turn,
+                },
             );
         }
     }
@@ -375,7 +398,8 @@ pub async fn chat(
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供（attune-pro）。
     // OSS 裸装无 plugin → 空词表 → None → 不降权（generic ranking）。
     let domain_keywords = state.plugin_registry.all_chat_trigger_keywords_by_domain();
-    let detected_domain = attune_core::search::detect_query_domain(&expanded_query, &domain_keywords);
+    let detected_domain =
+        attune_core::search::detect_query_domain(&expanded_query, &domain_keywords);
 
     // 1. Search knowledge base via three-stage pipeline (initial_k → rerank → top_k)
     let mut search_params = attune_core::search::SearchParams::with_defaults(5);
@@ -386,23 +410,30 @@ pub async fn chat(
         // 改 debug 级 + 仅打长度与 domain，不打内容。
         tracing::debug!(domain = %d, query_len = body.message.len(), "F-Pro domain detected");
     }
-    let reranker = state.reranker.lock().map_err(|_| {
-        AppError::Internal("reranker lock".into())
-    })?.clone();
-    let emb = state.embedding.lock().map_err(|_| {
-        AppError::Internal("emb lock".into())
-    })?.clone();
+    let reranker = state
+        .reranker
+        .lock()
+        .map_err(|_| AppError::Internal("reranker lock".into()))?
+        .clone();
+    let emb = state
+        .embedding
+        .lock()
+        .map_err(|_| AppError::Internal("emb lock".into()))?
+        .clone();
 
     let search_results = {
-        let ft_guard = state.fulltext.lock().map_err(|_| {
-            AppError::Internal("ft lock".into())
-        })?;
-        let vec_guard = state.vectors.lock().map_err(|_| {
-            AppError::Internal("vec lock".into())
-        })?;
-        let vault_guard = state.vault.lock().map_err(|_| {
-            AppError::Internal("vault lock".into())
-        })?;
+        let ft_guard = state
+            .fulltext
+            .lock()
+            .map_err(|_| AppError::Internal("ft lock".into()))?;
+        let vec_guard = state
+            .vectors
+            .lock()
+            .map_err(|_| AppError::Internal("vec lock".into()))?;
+        let vault_guard = state
+            .vault
+            .lock()
+            .map_err(|_| AppError::Internal("vault lock".into()))?;
 
         let ctx = attune_core::search::SearchContext {
             fulltext: ft_guard.as_ref(),
@@ -457,9 +488,12 @@ pub async fn chat(
     if !llm.is_local() && !search_results.is_empty() {
         let before = search_results.len();
         search_results = {
-            let vault = state.vault.lock()
+            let vault = state
+                .vault
+                .lock()
                 .map_err(|_| AppError::Internal("vault lock (l0 filter)".into()))?;
-            vault.store()
+            vault
+                .store()
                 .retain_non_l0_for_cloud(&search_results)
                 .map_err(|e| AppError::Internal(format!("l0 filter: {e}")))?
         };
@@ -524,12 +558,18 @@ pub async fn chat(
     search_results = std::mem::take(&mut weighted_results);
 
     // 按新的 score 降序重排（过时已剔除，boost 项自然前移）
-    search_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    search_results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     if weight_stats.items_boosted > 0 || weight_stats.items_dropped > 0 {
         tracing::info!(
             "chat: annotation weighting {} items ({} boosted, {} dropped, {} kept)",
-            weight_stats.items_total, weight_stats.items_boosted,
-            weight_stats.items_dropped, weight_stats.items_kept,
+            weight_stats.items_total,
+            weight_stats.items_boosted,
+            weight_stats.items_dropped,
+            weight_stats.items_kept,
         );
     }
 
@@ -560,13 +600,25 @@ pub async fn chat(
             let query_asm = body.message.clone();
             let l0_in = search_results.clone();
             let assembled = tokio::task::spawn_blocking(move || {
-                let idx_guard = state_asm.memory_index.lock().unwrap_or_else(|e| e.into_inner());
+                let idx_guard = state_asm
+                    .memory_index
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 let idx = idx_guard.as_ref()?;
-                let emb = state_asm.embedding.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+                let emb = state_asm
+                    .embedding
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()?;
                 let vault = state_asm.vault.lock().unwrap_or_else(|e| e.into_inner());
                 attune_core::memory::assemble_context(
-                    vault.store(), &dek_asm, idx, emb.as_ref(),
-                    &query_asm, &l0_in, memory_cfg,
+                    vault.store(),
+                    &dek_asm,
+                    idx,
+                    emb.as_ref(),
+                    &query_asm,
+                    &l0_in,
+                    memory_cfg,
                 )
                 .ok()
             })
@@ -604,9 +656,12 @@ pub async fn chat(
     // (pure summaries, no source item) are kept. Safe-default = deny L0.
     if !llm.is_local() && !search_results.is_empty() {
         let l0_ids: std::collections::HashSet<String> = {
-            let vault = state.vault.lock()
+            let vault = state
+                .vault
+                .lock()
                 .map_err(|_| AppError::Internal("vault lock (l0 post-assembler)".into()))?;
-            vault.store()
+            vault
+                .store()
                 .list_l0_item_ids()
                 .map_err(|e| AppError::Internal(format!("l0 list: {e}")))?
                 .into_iter()
@@ -650,7 +705,11 @@ pub async fn chat(
         // backstop for direct/other callers.
         let web_search_allowed = read_privacy_outbound_enabled(&state, "web_search");
         let ws = if web_search_allowed {
-            state.web_search.lock().unwrap_or_else(|e| e.into_inner()).clone()
+            state
+                .web_search
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
         } else {
             tracing::info!(
                 target: "outbound_audit",
@@ -660,24 +719,27 @@ pub async fn chat(
         };
         if let Some(ws_provider) = ws {
             let query = body.message.clone();
-            let web_results = tokio::task::spawn_blocking(move || {
-                ws_provider.search(&query, 3)
-            })
-            .await
-            .unwrap_or(Ok(vec![]))
-            .unwrap_or_default();
+            let web_results = tokio::task::spawn_blocking(move || ws_provider.search(&query, 3))
+                .await
+                .unwrap_or(Ok(vec![]))
+                .unwrap_or_default();
 
             if !web_results.is_empty() {
                 web_search_used = true;
-                web_results.into_iter().map(|r| serde_json::json!({
-                    "item_id": format!("web:{}", r.url),
-                    "title": r.title,
-                    "inject_content": r.snippet,
-                    "content": r.snippet,
-                    "score": 0.55,
-                    "source_type": "web",
-                    "url": r.url,
-                })).collect()
+                web_results
+                    .into_iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "item_id": format!("web:{}", r.url),
+                            "title": r.title,
+                            "inject_content": r.snippet,
+                            "content": r.snippet,
+                            "score": 0.55,
+                            "source_type": "web",
+                            "url": r.url,
+                        })
+                    })
+                    .collect()
             } else {
                 web_search_used = false;
                 vec![]
@@ -688,18 +750,23 @@ pub async fn chat(
         }
     } else {
         web_search_used = false;
-        search_results.iter().map(|r| serde_json::json!({
-            "item_id": r.item_id,
-            "title": r.title,
-            "inject_content": r.inject_content,
-            "content": r.content,
-            "score": r.score,
-            "source_type": r.source_type,
-            // v0.6 Phase B fix: 透传证据流字段到 chat citations
-            "breadcrumb": r.breadcrumb,
-            "chunk_offset_start": r.chunk_offset_start,
-            "chunk_offset_end": r.chunk_offset_end,
-        })).collect()
+        search_results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "item_id": r.item_id,
+                    "title": r.title,
+                    "inject_content": r.inject_content,
+                    "content": r.content,
+                    "score": r.score,
+                    "source_type": r.source_type,
+                    // v0.6 Phase B fix: 透传证据流字段到 chat citations
+                    "breadcrumb": r.breadcrumb,
+                    "chunk_offset_start": r.chunk_offset_start,
+                    "chunk_offset_end": r.chunk_offset_end,
+                })
+            })
+            .collect()
     };
 
     // 2b+. 上下文压缩（Batch B.1）
@@ -709,7 +776,8 @@ pub async fn chat(
     //   - economical / accurate → sha256(chunk) 查缓存 → 命中 0 成本；缺失调本地 LLM
     //
     // 整个压缩阶段放在 spawn_blocking 里，避免阻塞 async worker（LLM chat 是同步的）。
-    let strategy_str = app_settings.get("context_strategy")
+    let strategy_str = app_settings
+        .get("context_strategy")
         .and_then(|v| v.as_str())
         .unwrap_or("economical")
         .to_string();
@@ -718,11 +786,12 @@ pub async fn chat(
     //   local→ 用 summary_llm (本地 Ollama)
     //   cloud→ 复用主 chat LLM (远端 token)，避免要求笔电先装 Ollama
     // 缺省: 兼容老 vault (无 summary 字段) → "local" 保持历史行为 (summary_llm or chat 兜底)。
-    let summary_mode = app_settings.get("summary")
+    let summary_mode = app_settings
+        .get("summary")
         .and_then(|v| v.as_str())
         .unwrap_or("local")
         .to_string();
-    let mut compression_stats = (0usize, 0usize, 0usize);  // (chunks, hits, orig_total_chars)
+    let mut compression_stats = (0usize, 0usize, 0usize); // (chunks, hits, orig_total_chars)
     let knowledge: Vec<serde_json::Value> = if web_search_used {
         // 网络搜索结果已经是 snippet，不做二次压缩
         knowledge
@@ -730,7 +799,7 @@ pub async fn chat(
         // summary=off：跳过上下文摘要，注入原文 (弱机/离线/省钱)。
         knowledge
     } else {
-        use attune_core::context_compress::{ContextStrategy, chunk_hash, CompressedChunk};
+        use attune_core::context_compress::{chunk_hash, CompressedChunk, ContextStrategy};
         let strategy = ContextStrategy::parse(&strategy_str);
         let summary_use_cloud = summary_mode == "cloud";
         // 敏感模式下跳过上下文压缩。压缩会把证据 content 喂给 summary_llm
@@ -747,16 +816,34 @@ pub async fn chat(
             // **关键 bug 修复（Batch B R1-I1）**：用 `content`（完整内容）而非 `inject_content`
             // 作为 hash 源。原代码用 inject_content 会因 allocate_budget 按分数截断而每次
             // hash 不同，摧毁缓存命中率。content 在同一 item 跨查询是稳定的。
-            let inputs: Vec<(String /*item_id*/, String /*content_for_hash*/, String /*injected_text*/)> =
-                knowledge.iter().map(|k| {
-                    let item_id = k.get("item_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let inputs: Vec<(
+                String, /*item_id*/
+                String, /*content_for_hash*/
+                String, /*injected_text*/
+            )> = knowledge
+                .iter()
+                .map(|k| {
+                    let item_id = k
+                        .get("item_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     // 用全量 content 计算 hash + 喂 LLM（生成 chunk 级摘要）
-                    let content = k.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let content = k
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     // inject 文本是 allocate_budget 后的 —— 做后备（若 content 为空）
-                    let inject = k.get("inject_content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let inject = k
+                        .get("inject_content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let text = if content.is_empty() { inject } else { content };
                     (item_id, text.clone(), text)
-                }).collect();
+                })
+                .collect();
 
             let state_compress = state.clone();
             let dek_compress = dek.clone();
@@ -904,24 +991,41 @@ pub async fn chat(
             // 现在改为：面板错时降级为 raw 注入（保留 knowledge 原样），只是错过压缩收益。
             match compressed_result {
                 Ok(compressed) => {
-                    debug_assert_eq!(knowledge.len(), compressed.len(),
-                        "compression must produce one CompressedChunk per input");
+                    debug_assert_eq!(
+                        knowledge.len(),
+                        compressed.len(),
+                        "compression must produce one CompressedChunk per input"
+                    );
                     for c in &compressed {
                         compression_stats.0 += 1;
-                        if c.cache_hit { compression_stats.1 += 1; }
+                        if c.cache_hit {
+                            compression_stats.1 += 1;
+                        }
                         compression_stats.2 += c.original_chars;
                     }
-                    knowledge.into_iter().zip(compressed).map(|(mut k, c)| {
-                        if let Some(obj) = k.as_object_mut() {
-                            obj.insert("inject_content".into(), serde_json::Value::String(c.injected));
-                            obj.insert("compression_cached".into(), serde_json::Value::Bool(c.cache_hit));
-                        }
-                        k
-                    }).collect()
+                    knowledge
+                        .into_iter()
+                        .zip(compressed)
+                        .map(|(mut k, c)| {
+                            if let Some(obj) = k.as_object_mut() {
+                                obj.insert(
+                                    "inject_content".into(),
+                                    serde_json::Value::String(c.injected),
+                                );
+                                obj.insert(
+                                    "compression_cached".into(),
+                                    serde_json::Value::Bool(c.cache_hit),
+                                );
+                            }
+                            k
+                        })
+                        .collect()
                 }
                 Err(e) => {
-                    tracing::warn!("chat: compression task failed ({e}); falling back to raw RAG injection");
-                    let _ = strategy_str_for_log;  // 已在 warn 里说明
+                    tracing::warn!(
+                        "chat: compression task failed ({e}); falling back to raw RAG injection"
+                    );
+                    let _ = strategy_str_for_log; // 已在 warn 里说明
                     knowledge
                 }
             }
@@ -930,7 +1034,10 @@ pub async fn chat(
     if compression_stats.0 > 0 {
         tracing::info!(
             "chat: context compressed {} chunks ({} cache hits, {} orig chars) strategy={}",
-            compression_stats.0, compression_stats.1, compression_stats.2, strategy_str
+            compression_stats.0,
+            compression_stats.1,
+            compression_stats.2,
+            strategy_str
         );
     }
 
@@ -938,11 +1045,13 @@ pub async fn chat(
     let mut system_prompt = if web_search_used {
         "你是用户的个人知识助手。本地知识库暂无相关内容，以下来自实时网络搜索。\n\
          请基于这些搜索结果回答用户的问题，并在回答末尾标注「来源：[URL]」。\n\
-         如果搜索结果不够可靠，请明确说明并补充你自己的判断。\n\n".to_string()
+         如果搜索结果不够可靠，请明确说明并补充你自己的判断。\n\n"
+            .to_string()
     } else {
         "你是用户的个人知识助手。以下是从用户本地知识库中检索到的相关文档。\n\
          请基于这些知识回答用户的问题。如果引用了某个文档，请标注 [文档标题]。\n\
-         如果知识库中没有相关信息，正常回答即可，不要编造引用。\n\n".to_string()
+         如果知识库中没有相关信息，正常回答即可，不要编造引用。\n\n"
+            .to_string()
     };
 
     if !knowledge.is_empty() {
@@ -955,15 +1064,29 @@ pub async fn chat(
         system_prompt.push_str("\n\n");
         for (i, k) in knowledge.iter().enumerate() {
             let title = k.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-            let content = k.get("inject_content").and_then(|v| v.as_str())
+            let content = k
+                .get("inject_content")
+                .and_then(|v| v.as_str())
                 .or_else(|| k.get("content").and_then(|v| v.as_str()))
                 .unwrap_or("");
             if web_search_used {
                 let url = k.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                system_prompt.push_str(&format!("[{}] 《{}》\nURL: {}\n{}\n\n", i + 1, title, url, content));
+                system_prompt.push_str(&format!(
+                    "[{}] 《{}》\nURL: {}\n{}\n\n",
+                    i + 1,
+                    title,
+                    url,
+                    content
+                ));
             } else {
                 let score = k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                system_prompt.push_str(&format!("[{}] 《{}》(相关度: {:.0}%)\n{}\n\n", i + 1, title, score.max(0.0) * 100.0, content));
+                system_prompt.push_str(&format!(
+                    "[{}] 《{}》(相关度: {:.0}%)\n{}\n\n",
+                    i + 1,
+                    title,
+                    score.max(0.0) * 100.0,
+                    content
+                ));
             }
         }
         system_prompt.push_str("=== 参考内容结束 ===\n");
@@ -982,7 +1105,8 @@ pub async fn chat(
 
     // outbound_audit 日志
     if !all_mappings.is_empty() {
-        let mut by_kind: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut by_kind: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for m in &all_mappings {
             let prefix = m.kind.placeholder_prefix().to_string().to_uppercase();
             *by_kind.entry(prefix).or_insert(0) += 1;
@@ -1027,8 +1151,8 @@ pub async fn chat(
             &gov_opts,
             cache_backend.as_deref(),
             usage_agg.as_deref(),
-            None,        // direct chat → no agent_id
-            None,        // TTL: backend default
+            None, // direct chat → no agent_id
+            None, // TTL: backend default
         )
     })
     .await
@@ -1046,7 +1170,9 @@ pub async fn chat(
 
     // 5. Persist to conversation session
     let session_id = {
-        let vault = state.vault.lock()
+        let vault = state
+            .vault
+            .lock()
             .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
         let title: String = body.message.chars().take(50).collect();
         // 取已有或新建 session；create_conversation 失败时跳过消息持久化（不插入孤悬消息）
@@ -1057,13 +1183,17 @@ pub async fn chat(
                     Ok(Some(_)) => Some(id.clone()),
                     _ => {
                         tracing::warn!("session_id {id} not found, creating new session");
-                        vault.store().create_conversation(&dek, &title)
+                        vault
+                            .store()
+                            .create_conversation(&dek, &title)
                             .map_err(|e| tracing::warn!("create_conversation failed: {e}"))
                             .ok()
                     }
                 }
             }
-            None => vault.store().create_conversation(&dek, &title)
+            None => vault
+                .store()
+                .create_conversation(&dek, &title)
                 .map_err(|e| tracing::warn!("create_conversation failed: {e}"))
                 .ok(),
         };
@@ -1072,14 +1202,26 @@ pub async fn chat(
             let citations_for_session: Vec<attune_core::store::Citation> = knowledge
                 .iter()
                 .map(|k| attune_core::store::Citation {
-                    item_id: k.get("item_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    title: k.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    item_id: k
+                        .get("item_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    title: k
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     relevance: k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
                 })
                 .collect();
             // 使用事务原子写入 user+assistant 一对：任一失败则两条均不写入
             if let Err(e) = vault.store().append_conversation_turn(
-                &dek, sid, &body.message, &response, &citations_for_session,
+                &dek,
+                sid,
+                &body.message,
+                &response,
+                &citations_for_session,
             ) {
                 tracing::warn!("failed to persist conversation turn to session {sid}: {e}");
             }
@@ -1094,10 +1236,8 @@ pub async fn chat(
     //
     //    Fallback for empty breadcrumb (chunker first-chunk before any heading)
     //    is handled inside build_citation.
-    let citations: Vec<serde_json::Value> = knowledge
-        .iter()
-        .map(eval_surface::build_citation)
-        .collect();
+    let citations: Vec<serde_json::Value> =
+        knowledge.iter().map(eval_surface::build_citation).collect();
 
     // v0.7 自学习闭环 Phase B hook 2：citation_hit 信号喂 skill_evolution。
     // chat 引用的 chunk 说明 search 召回 + chunk 内容**对答案质量真有贡献**，是高
@@ -1115,8 +1255,15 @@ pub async fn chat(
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         for (i, k) in knowledge.iter().take(5).enumerate() {
             if let Some(item_id) = k.get("item_id").and_then(|v| v.as_str()) {
-                let q = if i == 0 { Some(truncated.as_str()) } else { None };
-                if let Err(e) = vault.store().record_signal_event("citation_hit", item_id, q) {
+                let q = if i == 0 {
+                    Some(truncated.as_str())
+                } else {
+                    None
+                };
+                if let Err(e) = vault
+                    .store()
+                    .record_signal_event("citation_hit", item_id, q)
+                {
                     tracing::debug!(signal = "citation_hit", error = %e, "record_signal_event failed (non-fatal)");
                 }
             }
@@ -1151,16 +1298,38 @@ pub async fn chat(
 
         // 兜底关键词 (OSS 裸装无 plugin 时仍检测结构化计算 query)
         const FALLBACK_COMPUTE_KEYWORDS: &[&str] = &[
-            "多少元", "多少钱", "合计", "求和", "总计", "总金额", "总额",
-            "笔数", "几笔", "对账", "明细", "应付", "应收", "净流入",
-            "转账明细", "交易明细", "本息", "利息计算",
+            "多少元",
+            "多少钱",
+            "合计",
+            "求和",
+            "总计",
+            "总金额",
+            "总额",
+            "笔数",
+            "几笔",
+            "对账",
+            "明细",
+            "应付",
+            "应收",
+            "净流入",
+            "转账明细",
+            "交易明细",
+            "本息",
+            "利息计算",
         ];
         let q_lower = body.message.to_lowercase();
         let has_amount_pattern = body.message.chars().enumerate().any(|(i, c)| {
-            c.is_ascii_digit() && body.message.chars().skip(i + 1).take(3)
-                .any(|nc| nc == '元' || nc == '万' || nc == '笔' || nc == '张')
+            c.is_ascii_digit()
+                && body
+                    .message
+                    .chars()
+                    .skip(i + 1)
+                    .take(3)
+                    .any(|nc| nc == '元' || nc == '万' || nc == '笔' || nc == '张')
         });
-        let is_compute_query = FALLBACK_COMPUTE_KEYWORDS.iter().any(|k| q_lower.contains(k))
+        let is_compute_query = FALLBACK_COMPUTE_KEYWORDS
+            .iter()
+            .any(|k| q_lower.contains(k))
             || has_amount_pattern;
 
         if let Some(m) = &plugin_match {
@@ -1190,7 +1359,8 @@ pub async fn chat(
              建议:\n\
              1. 装载 attune-pro/law-pro 等行业 plugin pack 后, 通过 capability 精确计算\n\
              2. 或检查知识库 ingest + embedding 是否完成（/api/v1/status 看 pending_embeddings）\n\
-             3. 或换更具体的提问方式（指定文件名 / 当事方姓名 / 时间范围）".to_string()
+             3. 或换更具体的提问方式（指定文件名 / 当事方姓名 / 时间范围）"
+                .to_string()
         } else if !citations.is_empty() && max_rel < 0.001 && !response.trim().is_empty() {
             // 普通 query + 低相关 → 加 disclaimer (OSS-S12 既有行为)
             format!(
@@ -1211,7 +1381,11 @@ pub async fn chat(
         tokens_in += cost::estimate_tokens(&h.content, &llm_model_name);
     }
     let tokens_out = cost::estimate_tokens(&response, &llm_model_name);
-    let cost_usd = if llm_is_local { None } else { cost::estimate_cost_usd(tokens_in, tokens_out, &llm_model_name) };
+    let cost_usd = if llm_is_local {
+        None
+    } else {
+        cost::estimate_cost_usd(tokens_in, tokens_out, &llm_model_name)
+    };
     // input_rate_per_k：直接从定价表取 input 单价，供前端 TokenChip 用 tokens × rate 展示
     // 本地模型无定价返回 null，前端按本地逻辑处理
     let input_rate_per_k: Option<f64> = if llm_is_local {
@@ -1328,11 +1502,16 @@ pub async fn chat(
 
     // 本地无结果 + 浏览器不可用：明确告知用户而非静默失败
     if knowledge.is_empty() {
-        let ws_available = state.web_search.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let ws_available = state
+            .web_search
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
         if !ws_available {
             response_json["hint"] = serde_json::Value::String(
                 "本地知识库无相关内容；网络搜索不可用（未检测到 Chrome 或 Edge 浏览器）。\
-                 请安装 Chromium 内核浏览器后重试，或手动录入相关知识。".into(),
+                 请安装 Chromium 内核浏览器后重试，或手动录入相关知识。"
+                    .into(),
             );
         }
     }
@@ -1342,9 +1521,7 @@ pub async fn chat(
 
 /// GET /api/v1/chat/history -- 已废弃，返回与 /chat/sessions 一致的格式
 /// @deprecated 请使用 GET /api/v1/chat/sessions?limit=50&offset=0
-pub async fn chat_history(
-    State(state): State<SharedState>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn chat_history(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     let vault = state
         .vault
         .lock()
@@ -1359,7 +1536,9 @@ pub async fn chat_history(
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     // 返回与 /chat/sessions 相同的 key 结构，保持 API 一致性
-    Ok(Json(serde_json::json!({"sessions": sessions, "total": sessions.len()})))
+    Ok(Json(
+        serde_json::json!({"sessions": sessions, "total": sessions.len()}),
+    ))
 }
 
 /// 将 LLM provider 返回的 VaultError 映射为客户端可读的 HTTP 响应。
@@ -1587,28 +1766,48 @@ mod tests {
         // Anthropic uses 529 for overload
         let e = VaultError::LlmUnavailable("openai HTTP 529: overloaded".into());
         assert_eq!(status_of(e), 503);
-        assert_eq!(code_of(VaultError::LlmUnavailable("openai HTTP 529: overloaded".into())), "llm-provider-unavailable");
+        assert_eq!(
+            code_of(VaultError::LlmUnavailable(
+                "openai HTTP 529: overloaded".into()
+            )),
+            "llm-provider-unavailable"
+        );
     }
 
     #[test]
     fn upstream_500_maps_to_bad_gateway() {
         let e = VaultError::LlmUnavailable("openai HTTP 500: internal error".into());
         assert_eq!(status_of(e), 502);
-        assert_eq!(code_of(VaultError::LlmUnavailable("openai HTTP 500: internal error".into())), "llm-provider-error");
+        assert_eq!(
+            code_of(VaultError::LlmUnavailable(
+                "openai HTTP 500: internal error".into()
+            )),
+            "llm-provider-error"
+        );
     }
 
     #[test]
     fn upstream_401_maps_to_bad_request_config_error() {
         let e = VaultError::LlmUnavailable("openai HTTP 401: invalid api key".into());
         assert_eq!(status_of(e), 400);
-        assert_eq!(code_of(VaultError::LlmUnavailable("openai HTTP 401: invalid api key".into())), "llm-config-error");
+        assert_eq!(
+            code_of(VaultError::LlmUnavailable(
+                "openai HTTP 401: invalid api key".into()
+            )),
+            "llm-config-error"
+        );
     }
 
     #[test]
     fn ollama_unreachable_no_status_maps_to_500() {
         let e = VaultError::LlmUnavailable("ollama unreachable: connection refused".into());
         assert_eq!(status_of(e), 500);
-        assert_eq!(code_of(VaultError::LlmUnavailable("ollama unreachable: connection refused".into())), "llm-error");
+        assert_eq!(
+            code_of(VaultError::LlmUnavailable(
+                "ollama unreachable: connection refused".into()
+            )),
+            "llm-error"
+        );
     }
 
     #[test]

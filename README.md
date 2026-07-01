@@ -56,16 +56,15 @@ The v1.0→v1.2 line layers production-grade governance and cross-platform reach
 
 > **v1.0 GA (2026-05-25)** delivered the Office Helper (OCR scenes + card/ID checksums + whisper.cpp transcription), 4 OSS deterministic/heuristic agents, a real-LLM verification gate, and the Agent 验证铁律 6-category floor. Per-version notes — including v0.7 Memory Moat and the v0.6 RAG-quality benchmarks — live in [`rust/RELEASE.md`](rust/RELEASE.md) (version SSOT); the benchmark methodology is in [`docs/benchmarks/dual-track-baseline.md`](docs/benchmarks/dual-track-baseline.md).
 
-## Two product lines
+## Repository layout
 
-This repository contains two parallel product lines sharing the Chrome extension protocol (`/api/v1/*`):
+This repository is Rust-first; active runtime code lives in the Rust workspace and browser/desktop frontends.
 
-| Line | Path | Purpose |
+| Area | Path | Purpose |
 |------|------|---------|
-| **Python prototype** | `python/src/attune_python/` | Fast iteration for algorithms and experimental features. FastAPI + ChromaDB + SQLite FTS5 |
-| **Rust production** | [`rust/`](rust/README.md) | Production-grade generic personal knowledge base. Axum + rusqlite + tantivy + usearch + Preact UI |
-
-Validated Python features get promoted to the Rust line. See [`rust/README.md`](rust/README.md) for the full Rust documentation.
+| **Rust production** | [`rust/`](rust/README.md) | Production-grade generic personal knowledge base. Axum + rusqlite + tantivy + usearch + embedded Preact UI |
+| **Chrome extension** | [`extension/`](extension/README.md) | Browser capture and side-panel entrypoints for the Rust API |
+| **Desktop shell** | [`apps/attune-desktop/`](apps/attune-desktop) | Tauri desktop wrapper around the Rust server/UI |
 
 ---
 
@@ -153,17 +152,6 @@ cargo build --release
 ```
 
 Full documentation: [`rust/README.md`](rust/README.md).
-
-### Python prototype
-
-```bash
-cd python
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-uvicorn attune_python.main:app --reload --port 18900
-```
-
----
 
 ## AI model platforms
 
@@ -345,7 +333,6 @@ Intel Meteor/Lunar/Arrow Lake NPU, AMD Phoenix/Hawk Point/Strix Point NPU, and N
 - `rust/crates/*` (attune-core / attune-server / attune-cli)
 - `extension/` (Chrome extension)
 - `rust/crates/attune-server/ui/` (Preact UI)
-- `python/src/attune_python/` (Python prototype)
 - `plugins/free/*` (free community plugins: tech, patent, presales baseline)
 
 Free to fork, modify, and use commercially. Apache-2.0 includes a patent grant (§3).
@@ -377,7 +364,6 @@ Attune is built on the shoulders of outstanding open-source projects. We are gra
 - [Tokio](https://github.com/tokio-rs/tokio) — the async runtime powering the entire server (MIT)
 - [tower-http](https://github.com/tower-rs/tower-http) — HTTP middleware utilities (CORS, tracing) (MIT)
 - [axum-server](https://github.com/programatik29/axum-server) — TLS integration for Axum via rustls (MIT)
-- [FastAPI](https://github.com/fastapi/fastapi) + [Uvicorn](https://github.com/encode/uvicorn) — Python prototype line HTTP layer (MIT)
 
 **数据库与搜索 / Storage & Search**
 
@@ -385,7 +371,6 @@ Attune is built on the shoulders of outstanding open-source projects. We are gra
 - [tantivy](https://github.com/quickwit-oss/tantivy) + [tantivy-jieba](https://github.com/meilisearch/tantivy-jieba) — full-text search engine with Chinese word segmentation (MIT)
 - [usearch](https://github.com/unum-cloud/usearch) — high-performance HNSW vector index (Apache-2.0)
 - [hdbscan](https://github.com/genbio-ai/hdbscan) — density-based clustering for automatic topic grouping (MIT)
-- [ChromaDB](https://github.com/chroma-core/chroma) — vector store used in the Python prototype (Apache-2.0)
 - [SQLAlchemy](https://github.com/sqlalchemy/sqlalchemy) + [Alembic](https://github.com/sqlalchemy/alembic) — ORM and migrations for the pluginhub backend (MIT)
 
 **加密与安全 / Cryptography**
@@ -406,9 +391,7 @@ Attune is built on the shoulders of outstanding open-source projects. We are gra
 
 **文档解析 / Document Parsing**
 
-- [PyMuPDF](https://github.com/pymupdf/PyMuPDF) — PDF rendering and text extraction for the Python line (AGPL-3.0 / commercial)
 - [pdf-extract](https://github.com/jrmuizel/pdf-extract) — pure-Rust PDF text extraction (MIT)
-- [python-docx](https://github.com/python-openxml/python-docx) — .docx reading in the Python prototype (MIT)
 - [calamine](https://github.com/tafia/calamine) — Excel / ODS spreadsheet parsing (MIT / Apache-2.0)
 
 **网络与协议 / Networking**

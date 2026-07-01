@@ -30,10 +30,12 @@ fn reranker_long_doc_no_panic() {
                 It enables Rust to make memory safety guarantees without a garbage collector. \
                 Ownership rules: each value has a variable that's its owner. There can only be \
                 one owner at a time. When the owner goes out of scope, the value is dropped. ";
-    let docs: Vec<(usize, String)> = (1..=10).map(|n| {
-        let txt = base.repeat(n * 50);  // 1x ~ 500 chars, 10x ~ 5000+ chars
-        (txt.chars().count(), txt)
-    }).collect();
+    let docs: Vec<(usize, String)> = (1..=10)
+        .map(|n| {
+            let txt = base.repeat(n * 50); // 1x ~ 500 chars, 10x ~ 5000+ chars
+            (txt.chars().count(), txt)
+        })
+        .collect();
 
     eprintln!("\n=== Reranker stability under long-doc input ===");
     let mut all_ok = true;
@@ -60,6 +62,16 @@ fn reranker_long_doc_no_panic() {
             }
         }
     }
-    eprintln!("\n=== RESULT: {} ===", if all_ok { "✅ all OK — fix (MAX_SEQ_LEN=512) holds" } else { "❌ some failed" });
-    assert!(all_ok, "reranker should not fail on long docs after MAX_SEQ_LEN fix");
+    eprintln!(
+        "\n=== RESULT: {} ===",
+        if all_ok {
+            "✅ all OK — fix (MAX_SEQ_LEN=512) holds"
+        } else {
+            "❌ some failed"
+        }
+    );
+    assert!(
+        all_ok,
+        "reranker should not fail on long docs after MAX_SEQ_LEN fix"
+    );
 }

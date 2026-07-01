@@ -248,7 +248,10 @@ impl AgentRegistry {
         let mut by_keyword: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for a in &self.agents {
             for kw in &a.route_keywords {
-                by_keyword.entry(kw.as_str()).or_default().push(a.id.as_str());
+                by_keyword
+                    .entry(kw.as_str())
+                    .or_default()
+                    .push(a.id.as_str());
             }
         }
         by_keyword

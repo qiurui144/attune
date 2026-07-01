@@ -5,10 +5,10 @@
 //!
 //! 见 spec `2026-04-19-frontend-redesign-design.md §6`。
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 use std::collections::HashSet;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -44,9 +44,7 @@ pub struct LlmTestResponse {
     pub error: Option<String>,
 }
 
-pub async fn test_llm(
-    Json(body): Json<LlmTestRequest>,
-) -> Result<Json<LlmTestResponse>, ApiError> {
+pub async fn test_llm(Json(body): Json<LlmTestRequest>) -> Result<Json<LlmTestResponse>, ApiError> {
     // 输入校验（防 javascript: 注入到"endpoint"）
     let ep = body.endpoint.trim();
     if !(ep.starts_with("http://") || ep.starts_with("https://")) {
@@ -152,12 +150,18 @@ pub async fn probe_k3(
     // go through the OutboundGate (kind=Llm — it's an LLM-endpoint probe) and
     // are silently dropped (graceful: local probing continues) when the gate
     // refuses. Probe payload is empty (bare GET /models), so no redactor needed.
-    let (mut candidates, nonlocal): (Vec<String>, Vec<String>) =
-        candidates.into_iter().partition(|ep| is_local_probe_target(ep));
+    let (mut candidates, nonlocal): (Vec<String>, Vec<String>) = candidates
+        .into_iter()
+        .partition(|ep| is_local_probe_target(ep));
     if !nonlocal.is_empty() {
-        let enabled = super::chat::read_privacy_outbound_enabled(&state, OutboundKind::Llm.as_str());
+        let enabled =
+            super::chat::read_privacy_outbound_enabled(&state, OutboundKind::Llm.as_str());
         let vault_unlocked = matches!(
-            state.vault.lock().unwrap_or_else(|e| e.into_inner()).state(),
+            state
+                .vault
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .state(),
             VaultState::Unlocked
         );
         let policy = OutboundPolicy::cloud(OutboundKind::Llm, enabled, vault_unlocked, None);
@@ -286,7 +290,10 @@ fn discover_local_subnet_candidates() -> Vec<String> {
                 continue;
             }
             for port in [8090u16, 8080] {
-                let ep = format!("http://{}.{}.{}.{}:{}/v1", oct[0], oct[1], oct[2], host, port);
+                let ep = format!(
+                    "http://{}.{}.{}.{}:{}/v1",
+                    oct[0], oct[1], oct[2], host, port
+                );
                 if seen.insert(ep.clone()) {
                     out.push(ep);
                 }
@@ -450,7 +457,9 @@ pub async fn ollama_readiness(
     let configured = q.model.unwrap_or_default();
     let readiness = if configured.trim().is_empty() {
         if reachable {
-            attune_core::ollama_setup::OllamaReadiness::Ready { resolved: String::new() }
+            attune_core::ollama_setup::OllamaReadiness::Ready {
+                resolved: String::new(),
+            }
         } else {
             attune_core::ollama_setup::OllamaReadiness::DaemonDown
         }
@@ -495,7 +504,10 @@ pub async fn install_ollama() -> Result<Json<InstallResponse>, ApiError> {
             status: "manual".into(),
             task_id: None,
             download_url: Some(download_url.clone()),
-            message: format!("当前平台 ({}) 需手动安装 Ollama，请前往下载页", plan.platform),
+            message: format!(
+                "当前平台 ({}) 需手动安装 Ollama，请前往下载页",
+                plan.platform
+            ),
         })),
         M::Script { command } => {
             // 并发守卫：安装是重操作，同时只跑一个。
@@ -525,9 +537,7 @@ pub async fn install_ollama() -> Result<Json<InstallResponse>, ApiError> {
                     Ok(o) if o.status.success() => {
                         tracing::info!("ollama install done (task={task_id})");
                         // best-effort 拉起 daemon（install.sh 通常已自启）
-                        let _ = tokio_command_no_window("ollama")
-                            .arg("serve")
-                            .spawn();
+                        let _ = tokio_command_no_window("ollama").arg("serve").spawn();
                     }
                     Ok(o) => {
                         tracing::warn!(
@@ -715,20 +725,36 @@ mod tests {
     // 这里测试该规则的边界 — invalid chars 应被拒
     #[test]
     fn model_name_validation_rejects_shell_injection() {
-        let invalid_names = ["model;rm -rf /", "../etc/passwd", "model && cat",
-                            "model$(whoami)", "model`id`", "model|cat", "model>file"];
+        let invalid_names = [
+            "model;rm -rf /",
+            "../etc/passwd",
+            "model && cat",
+            "model$(whoami)",
+            "model`id`",
+            "model|cat",
+            "model>file",
+        ];
         for name in invalid_names {
-            let safe = name.chars().all(|c| c.is_ascii_alphanumeric() || ":-.".contains(c));
+            let safe = name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || ":-.".contains(c));
             assert!(!safe, "{name} should be rejected");
         }
     }
 
     #[test]
     fn model_name_validation_accepts_common_models() {
-        let valid_names = ["qwen2.5:3b", "bge-m3", "llama3.2:1b",
-                          "deepseek-coder-v2:16b", "model-7b-q4_0.gguf"];
+        let valid_names = [
+            "qwen2.5:3b",
+            "bge-m3",
+            "llama3.2:1b",
+            "deepseek-coder-v2:16b",
+            "model-7b-q4_0.gguf",
+        ];
         for name in valid_names {
-            let safe = name.chars().all(|c| c.is_ascii_alphanumeric() || ":-.".contains(c));
+            let safe = name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || ":-.".contains(c));
             // _ 是 invalid (per current rule), gguf 后缀 ok 但 _ 不行
             if !name.contains('_') {
                 assert!(safe, "{name} should be accepted");
@@ -748,8 +774,10 @@ mod tests {
         // endpoint 协议校验
         for bad in ["", "ws://", "javascript:", "ftp://host", "   "] {
             let ep = bad.trim();
-            assert!(!(ep.starts_with("http://") || ep.starts_with("https://")),
-                "{bad} should fail validation");
+            assert!(
+                !(ep.starts_with("http://") || ep.starts_with("https://")),
+                "{bad} should fail validation"
+            );
         }
         for good in ["http://h:8080", "https://api.x.com/v1"] {
             assert!(good.starts_with("http://") || good.starts_with("https://"));
@@ -784,7 +812,10 @@ mod tests {
             "https://attacker.tld/v1",
             "http://[2001:db8::1]:8080/v1",
         ] {
-            assert!(!super::is_local_probe_target(ep), "{ep} should be non-local");
+            assert!(
+                !super::is_local_probe_target(ep),
+                "{ep} should be non-local"
+            );
         }
     }
 }

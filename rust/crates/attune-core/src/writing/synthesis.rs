@@ -128,7 +128,8 @@ fn map_few_shot() -> Vec<(String, String)> {
         ),
         (
             "来源：变压器的自注意力机制可并行处理序列，优于 RNN 的串行计算。".to_string(),
-            json!({"points":["自注意力机制可并行处理序列","相比 RNN 的串行计算更高效"]}).to_string(),
+            json!({"points":["自注意力机制可并行处理序列","相比 RNN 的串行计算更高效"]})
+                .to_string(),
         ),
     ]
 }
@@ -163,7 +164,11 @@ fn validate_reduce_json(raw: &str) -> std::result::Result<(), String> {
     }
     for (i, s) in arr.iter().enumerate() {
         for k in ["heading", "body"] {
-            if s.get(k).and_then(|x| x.as_str()).map(|v| v.trim().is_empty()).unwrap_or(true) {
+            if s.get(k)
+                .and_then(|x| x.as_str())
+                .map(|v| v.trim().is_empty())
+                .unwrap_or(true)
+            {
                 return Err(format!("section[{i}] missing non-empty `{k}`"));
             }
         }
@@ -212,8 +217,11 @@ pub struct SynthLlms<'a> {
 /// [`WritingError::LlmUnavailable`], [`WritingError::SourceInjection`],
 /// [`WritingError::GenerationUnavailable`].
 pub fn synthesize(llms: &SynthLlms, req: &SynthesisRequest) -> WritingResultT<WritingResult> {
-    let nonempty: Vec<&SourceMaterial> =
-        req.sources.iter().filter(|s| !s.text.trim().is_empty()).collect();
+    let nonempty: Vec<&SourceMaterial> = req
+        .sources
+        .iter()
+        .filter(|s| !s.text.trim().is_empty())
+        .collect();
     if nonempty.is_empty() {
         return Err(WritingError::NoSourceMaterial);
     }
@@ -252,8 +260,8 @@ pub fn synthesize(llms: &SynthLlms, req: &SynthesisRequest) -> WritingResultT<Wr
             s.item_id.clone()
         };
         let user = format!("来源：{cut}");
-        map_in_tokens =
-            map_in_tokens.saturating_add(cost::estimate_tokens(&user, llms.cheap.model_name()) as u32);
+        map_in_tokens = map_in_tokens
+            .saturating_add(cost::estimate_tokens(&user, llms.cheap.model_name()) as u32);
         let raw = crate::pii::llm_chat_redacted_hardened(
             llms.cheap,
             &redactor,
@@ -302,9 +310,7 @@ pub fn synthesize(llms: &SynthLlms, req: &SynthesisRequest) -> WritingResultT<Wr
         .map_err(|e| WritingError::GenerationUnavailable(format!("reduce parse: {e}")))?;
     // The hardened helper returns the last raw after exhausting retries (best-effort), so re-
     // enforce the non-empty invariant rather than emit an empty synthesis.
-    if parsed.sections.is_empty()
-        || parsed.sections.iter().all(|s| s.body.trim().is_empty())
-    {
+    if parsed.sections.is_empty() || parsed.sections.iter().all(|s| s.body.trim().is_empty()) {
         return Err(WritingError::GenerationUnavailable(
             "model produced no usable synthesis sections".into(),
         ));
@@ -435,7 +441,10 @@ mod tests {
     }
     impl LlmProvider for MockSynthLlm {
         fn chat(&self, system: &str, _u: &str) -> crate::error::Result<(String, TokenUsage)> {
-            Ok((self.reply_for(system), TokenUsage::empty("mock", "mock-model")))
+            Ok((
+                self.reply_for(system),
+                TokenUsage::empty("mock", "mock-model"),
+            ))
         }
         fn chat_with_format_json(
             &self,
@@ -443,7 +452,10 @@ mod tests {
             _u: &str,
             _schema: Option<&Value>,
         ) -> crate::error::Result<(String, TokenUsage)> {
-            Ok((self.reply_for(system), TokenUsage::empty("mock", "mock-model")))
+            Ok((
+                self.reply_for(system),
+                TokenUsage::empty("mock", "mock-model"),
+            ))
         }
         fn is_available(&self) -> bool {
             self.available
@@ -459,7 +471,8 @@ mod tests {
     fn reduce_reply() -> String {
         json!({"sections":[
             {"heading":"内存安全","body":"Rust 通过所有权在编译期检查内存安全，无需垃圾回收。"}
-        ]}).to_string()
+        ]})
+        .to_string()
     }
 
     fn sources() -> Vec<SourceMaterial> {
@@ -486,7 +499,10 @@ mod tests {
         assert_eq!(r.mode, WritingMode::Synthesis);
         assert!(!r.content.is_empty());
         assert_eq!(*llm.map_calls.lock().unwrap(), 2, "one map call per source");
-        assert!(r.segments.iter().any(|s| s.verified), "grounded section must verify");
+        assert!(
+            r.segments.iter().any(|s| s.verified),
+            "grounded section must verify"
+        );
         assert_eq!(r.token_bill.path, "map-reduce");
         assert!(r.token_bill.map_llm_tokens.r#in > 0);
         assert!(r.token_bill.reduce_llm_tokens.r#in > 0);
@@ -495,34 +511,49 @@ mod tests {
     #[test]
     fn no_sources_rejected() {
         let llm = MockSynthLlm::new(&map_reply(), &reduce_reply());
-        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
+        let llms = SynthLlms {
+            cheap: &llm,
+            reasoning: &llm,
+        };
         let req = SynthesisRequest {
             sources: vec![SourceMaterial::new("s1", "   ")],
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
             judge_grounding: false,
         };
-        assert_eq!(synthesize(&llms, &req).unwrap_err(), WritingError::NoSourceMaterial);
+        assert_eq!(
+            synthesize(&llms, &req).unwrap_err(),
+            WritingError::NoSourceMaterial
+        );
     }
 
     #[test]
     fn llm_unavailable_rejected() {
         let mut llm = MockSynthLlm::new(&map_reply(), &reduce_reply());
         llm.available = false;
-        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
+        let llms = SynthLlms {
+            cheap: &llm,
+            reasoning: &llm,
+        };
         let req = SynthesisRequest {
             sources: sources(),
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
             judge_grounding: false,
         };
-        assert_eq!(synthesize(&llms, &req).unwrap_err(), WritingError::LlmUnavailable);
+        assert_eq!(
+            synthesize(&llms, &req).unwrap_err(),
+            WritingError::LlmUnavailable
+        );
     }
 
     #[test]
     fn injection_source_rejected_before_model() {
         let llm = MockSynthLlm::new(&map_reply(), &reduce_reply());
-        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
+        let llms = SynthLlms {
+            cheap: &llm,
+            reasoning: &llm,
+        };
         let req = SynthesisRequest {
             sources: vec![
                 SourceMaterial::new("ok", "正常内容。"),
@@ -532,27 +563,43 @@ mod tests {
             max_sources: 0,
             judge_grounding: false,
         };
-        assert_eq!(synthesize(&llms, &req).unwrap_err(), WritingError::SourceInjection);
-        assert_eq!(*llm.map_calls.lock().unwrap(), 0, "no map call when a source is poisoned");
+        assert_eq!(
+            synthesize(&llms, &req).unwrap_err(),
+            WritingError::SourceInjection
+        );
+        assert_eq!(
+            *llm.map_calls.lock().unwrap(),
+            0,
+            "no map call when a source is poisoned"
+        );
     }
 
     #[test]
     fn invalid_reduce_json_is_generation_unavailable() {
         let llm = MockSynthLlm::new(&map_reply(), "not json");
-        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
+        let llms = SynthLlms {
+            cheap: &llm,
+            reasoning: &llm,
+        };
         let req = SynthesisRequest {
             sources: sources(),
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
             judge_grounding: false,
         };
-        assert_eq!(synthesize(&llms, &req).unwrap_err().code(), "generation-unavailable");
+        assert_eq!(
+            synthesize(&llms, &req).unwrap_err().code(),
+            "generation-unavailable"
+        );
     }
 
     #[test]
     fn max_sources_caps_map_calls() {
         let llm = MockSynthLlm::new(&map_reply(), &reduce_reply());
-        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
+        let llms = SynthLlms {
+            cheap: &llm,
+            reasoning: &llm,
+        };
         let mut src = sources();
         src.push(SourceMaterial::new("s3", "更多内容关于所有权。"));
         let req = SynthesisRequest {
@@ -562,7 +609,11 @@ mod tests {
             judge_grounding: false,
         };
         let r = synthesize(&llms, &req).unwrap();
-        assert_eq!(*llm.map_calls.lock().unwrap(), 2, "max_sources=2 caps map calls");
+        assert_eq!(
+            *llm.map_calls.lock().unwrap(),
+            2,
+            "max_sources=2 caps map calls"
+        );
         assert_eq!(r.token_bill.new_chunks, 2);
     }
 
@@ -571,23 +622,36 @@ mod tests {
         // Reduce emits a section unrelated to the sources → fact drift.
         let reduce = json!({"sections":[
             {"heading":"无关","body":"明年量子计算机将取代所有经典计算机系统架构。"}
-        ]}).to_string();
+        ]})
+        .to_string();
         let llm = MockSynthLlm::new(&map_reply(), &reduce);
-        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
+        let llms = SynthLlms {
+            cheap: &llm,
+            reasoning: &llm,
+        };
         let req = SynthesisRequest {
-            sources: vec![SourceMaterial::new("s1", "Rust ownership prevents data races.")],
+            sources: vec![SourceMaterial::new(
+                "s1",
+                "Rust ownership prevents data races.",
+            )],
             structure: SynthesisStructure::Thematic,
             max_sources: 0,
             judge_grounding: false,
         };
         let r = synthesize(&llms, &req).unwrap();
-        assert!(!r.unverified_spans.is_empty(), "ungrounded synthesis section must be flagged");
+        assert!(
+            !r.unverified_spans.is_empty(),
+            "ungrounded synthesis section must be flagged"
+        );
     }
 
     #[test]
     fn token_bill_has_no_secret() {
         let llm = MockSynthLlm::new(&map_reply(), &reduce_reply());
-        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
+        let llms = SynthLlms {
+            cheap: &llm,
+            reasoning: &llm,
+        };
         let req = SynthesisRequest {
             sources: sources(),
             structure: SynthesisStructure::Thematic,
@@ -680,7 +744,10 @@ mod tests {
     }
     impl LlmProvider for MockSynth3 {
         fn chat(&self, system: &str, _u: &str) -> crate::error::Result<(String, TokenUsage)> {
-            Ok((self.reply_for(system), TokenUsage::empty("mock", "mock-model")))
+            Ok((
+                self.reply_for(system),
+                TokenUsage::empty("mock", "mock-model"),
+            ))
         }
         fn chat_with_format_json(
             &self,
@@ -688,7 +755,10 @@ mod tests {
             _u: &str,
             _schema: Option<&Value>,
         ) -> crate::error::Result<(String, TokenUsage)> {
-            Ok((self.reply_for(system), TokenUsage::empty("mock", "mock-model")))
+            Ok((
+                self.reply_for(system),
+                TokenUsage::empty("mock", "mock-model"),
+            ))
         }
         fn is_available(&self) -> bool {
             true
@@ -706,19 +776,24 @@ mod tests {
         // (GT: disjoint surface → deterministic grounding misses it).
         let reduce = json!({"sections":[
             {"heading":"并行性","body":"该架构可同时计算各位置，无需逐步迭代。"}
-        ]}).to_string();
+        ]})
+        .to_string();
         // Judge quotes a real substring of the source.
         let judge = json!({
             "supported": true, "span_id": "c1",
             "evidence_quote": "自注意力机制可以并行处理整个序列"
-        }).to_string();
+        })
+        .to_string();
         let llm = MockSynth3 {
             map_reply: json!({"points":["自注意力机制可以并行处理整个序列"]}).to_string(),
             reduce_reply: reduce,
             judge_reply: judge,
             judge_calls: Mutex::new(0),
         };
-        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
+        let llms = SynthLlms {
+            cheap: &llm,
+            reasoning: &llm,
+        };
         let src = vec![SourceMaterial::new(
             "s1",
             "Transformer 的自注意力机制可以并行处理整个序列，因此训练速度更快。",
@@ -732,14 +807,29 @@ mod tests {
             judge_grounding: false,
         };
         let r_off = synthesize(&llms, &req_off).unwrap();
-        assert!(!r_off.unverified_spans.is_empty(), "GT: deterministic leaves the abstractive section unverified");
+        assert!(
+            !r_off.unverified_spans.is_empty(),
+            "GT: deterministic leaves the abstractive section unverified"
+        );
 
         // With judge ON: the section is credited and drops out of unverified.
-        let req_on = SynthesisRequest { judge_grounding: true, ..req_off.clone() };
+        let req_on = SynthesisRequest {
+            judge_grounding: true,
+            ..req_off.clone()
+        };
         let r_on = synthesize(&llms, &req_on).unwrap();
-        assert!(r_on.unverified_spans.is_empty(), "judge with a real quote grounds the section");
-        assert!(r_on.segments.iter().any(|s| s.verified && s.grounding.iter().any(|g| g.judge_elevated)));
-        assert!(r_on.token_bill.judge_llm_tokens.r#in > 0, "judge cost must be billed (visible)");
+        assert!(
+            r_on.unverified_spans.is_empty(),
+            "judge with a real quote grounds the section"
+        );
+        assert!(r_on
+            .segments
+            .iter()
+            .any(|s| s.verified && s.grounding.iter().any(|g| g.judge_elevated)));
+        assert!(
+            r_on.token_bill.judge_llm_tokens.r#in > 0,
+            "judge cost must be billed (visible)"
+        );
         assert!(*llm.judge_calls.lock().unwrap() >= 1);
     }
 
@@ -749,16 +839,24 @@ mod tests {
     fn synthesis_judge_cannot_credit_fabricated_section() {
         let reduce = json!({"sections":[
             {"heading":"无关","body":"该模型由谷歌在火星发布。"}
-        ]}).to_string();
-        let bogus = json!({"supported": true, "span_id": "c1", "evidence_quote": "谷歌在火星发布"}).to_string();
+        ]})
+        .to_string();
+        let bogus = json!({"supported": true, "span_id": "c1", "evidence_quote": "谷歌在火星发布"})
+            .to_string();
         let llm = MockSynth3 {
             map_reply: json!({"points":["Rust 在编译期检查内存安全"]}).to_string(),
             reduce_reply: reduce,
             judge_reply: bogus,
             judge_calls: Mutex::new(0),
         };
-        let llms = SynthLlms { cheap: &llm, reasoning: &llm };
-        let src = vec![SourceMaterial::new("s1", "Rust 的所有权系统在编译期检查内存安全。")];
+        let llms = SynthLlms {
+            cheap: &llm,
+            reasoning: &llm,
+        };
+        let src = vec![SourceMaterial::new(
+            "s1",
+            "Rust 的所有权系统在编译期检查内存安全。",
+        )];
         let req = SynthesisRequest {
             sources: src,
             structure: SynthesisStructure::Thematic,
@@ -766,8 +864,15 @@ mod tests {
             judge_grounding: true,
         };
         let r = synthesize(&llms, &req).unwrap();
-        assert!(!r.unverified_spans.is_empty(), "fabricated section must stay unverified despite a lying judge");
-        assert!(r.segments.iter().all(|s| !s.grounding.iter().any(|g| g.judge_elevated)),
-            "no judge_elevated ref may form for a fabricated quote (no-fabrication red line)");
+        assert!(
+            !r.unverified_spans.is_empty(),
+            "fabricated section must stay unverified despite a lying judge"
+        );
+        assert!(
+            r.segments
+                .iter()
+                .all(|s| !s.grounding.iter().any(|g| g.judge_elevated)),
+            "no judge_elevated ref may form for a fabricated quote (no-fabrication red line)"
+        );
     }
 }

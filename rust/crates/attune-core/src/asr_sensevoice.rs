@@ -71,7 +71,10 @@ impl SenseVoiceBackend {
     /// Build a backend from explicit asset paths (test / advanced-config injection).
     ///
     /// Errors (graceful, never panics) when a path is missing.
-    pub fn from_paths(model_path: impl Into<PathBuf>, tokens_path: impl Into<PathBuf>) -> Result<Self> {
+    pub fn from_paths(
+        model_path: impl Into<PathBuf>,
+        tokens_path: impl Into<PathBuf>,
+    ) -> Result<Self> {
         let model_path = model_path.into();
         let tokens_path = tokens_path.into();
         if !model_path.exists() {
@@ -154,15 +157,17 @@ pub fn ensure_sensevoice_model() -> Result<SenseVoiceBackend> {
 pub fn transcribe_sensevoice(backend: &SenseVoiceBackend, audio_path: &Path) -> Result<String> {
     use sherpa_rs::sense_voice::{SenseVoiceConfig, SenseVoiceRecognizer};
 
-    let audio_str = audio_path.to_str().ok_or_else(|| {
-        VaultError::InvalidInput("audio path not utf-8".to_string())
-    })?;
-    let model = backend.model_path.to_str().ok_or_else(|| {
-        VaultError::InvalidInput("sensevoice model path not utf-8".to_string())
-    })?;
-    let tokens = backend.tokens_path.to_str().ok_or_else(|| {
-        VaultError::InvalidInput("sensevoice tokens path not utf-8".to_string())
-    })?;
+    let audio_str = audio_path
+        .to_str()
+        .ok_or_else(|| VaultError::InvalidInput("audio path not utf-8".to_string()))?;
+    let model = backend
+        .model_path
+        .to_str()
+        .ok_or_else(|| VaultError::InvalidInput("sensevoice model path not utf-8".to_string()))?;
+    let tokens = backend
+        .tokens_path
+        .to_str()
+        .ok_or_else(|| VaultError::InvalidInput("sensevoice tokens path not utf-8".to_string()))?;
 
     // Fast path: already a 16 kHz WAV → sherpa reads it directly. Otherwise pre-decode the
     // container (mp3/m4a/flac/ogg/non-16kHz WAV) to a temp 16 kHz mono WAV and read that.
@@ -182,9 +187,7 @@ pub fn transcribe_sensevoice(backend: &SenseVoiceBackend, audio_path: &Path) -> 
                 VaultError::InvalidInput("decoded wav path not utf-8".to_string())
             })?;
             let pair = sherpa_rs::read_audio_file(wav_str).map_err(|e| {
-                VaultError::InvalidInput(format!(
-                    "sensevoice read of pre-decoded wav failed: {e}"
-                ))
+                VaultError::InvalidInput(format!("sensevoice read of pre-decoded wav failed: {e}"))
             })?;
             _decoded_keep = Some(tmp);
             pair
@@ -201,9 +204,8 @@ pub fn transcribe_sensevoice(backend: &SenseVoiceBackend, audio_path: &Path) -> 
         provider: Some(backend.provider.clone()),
         ..Default::default()
     };
-    let mut recognizer = SenseVoiceRecognizer::new(config).map_err(|e| {
-        VaultError::ModelLoad(format!("sensevoice recognizer init failed: {e}"))
-    })?;
+    let mut recognizer = SenseVoiceRecognizer::new(config)
+        .map_err(|e| VaultError::ModelLoad(format!("sensevoice recognizer init failed: {e}")))?;
     let result = recognizer.transcribe(sample_rate, &samples);
     Ok(result.text.trim().to_string())
 }
@@ -228,7 +230,10 @@ mod tests {
 
     #[test]
     fn from_paths_missing_model_errs() {
-        let r = SenseVoiceBackend::from_paths("/nonexistent/model.int8.onnx", "/nonexistent/tokens.txt");
+        let r = SenseVoiceBackend::from_paths(
+            "/nonexistent/model.int8.onnx",
+            "/nonexistent/tokens.txt",
+        );
         assert!(r.is_err());
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("asr-model-offline-missing"), "got: {msg}");

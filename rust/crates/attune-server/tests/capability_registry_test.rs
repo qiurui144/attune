@@ -41,9 +41,16 @@ fn builtin_capabilities_registered_oss_only() {
         "pluginhub",
         "marketplace",
     ] {
-        assert!(ids.contains(&expected), "missing builtin capability {expected}");
+        assert!(
+            ids.contains(&expected),
+            "missing builtin capability {expected}"
+        );
     }
-    assert_eq!(caps.len(), 9, "exactly 9 builtin heavy capabilities expected");
+    assert_eq!(
+        caps.len(),
+        9,
+        "exactly 9 builtin heavy capabilities expected"
+    );
     // OSS boundary core assertion (spec §9): zero Pro/Enterprise tier.
     assert!(
         caps.iter().all(|c| c.tier == CapabilityTier::Oss),
@@ -90,7 +97,10 @@ fn capability_metadata_flags_are_correct() {
 
     let emb = state.capabilities.get("embedding").unwrap();
     assert!(emb.requires_local_model, "embedding requires a local model");
-    assert!(!emb.allows_outbound, "embedding is local-first (no outbound)");
+    assert!(
+        !emb.allows_outbound,
+        "embedding is local-first (no outbound)"
+    );
 
     let reranker = state.capabilities.get("reranker").unwrap();
     assert!(reranker.requires_local_model);
@@ -107,7 +117,10 @@ fn capability_metadata_flags_are_correct() {
 
     let hub = state.capabilities.get("pluginhub").unwrap();
     assert!(hub.requires_member, "pluginhub is a member-gated feature");
-    assert!(hub.allows_outbound, "pluginhub reaches the hub over the network");
+    assert!(
+        hub.allows_outbound,
+        "pluginhub reaches the hub over the network"
+    );
 }
 
 // ── Task 5: health/enabled projection ────────────────────────────────────────
@@ -224,7 +237,11 @@ fn set_health_on_absent_id_is_noop_not_insert() {
         .capabilities
         .set_health("ghost", CapabilityHealth::Installing));
     assert!(state.capabilities.get("ghost").is_none());
-    assert_eq!(state.capabilities.list().len(), before, "no insert on absent id");
+    assert_eq!(
+        state.capabilities.list().len(),
+        before,
+        "no insert on absent id"
+    );
 }
 
 #[test]

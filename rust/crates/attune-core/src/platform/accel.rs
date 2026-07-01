@@ -109,7 +109,10 @@ impl AccelCapabilities {
         // CPU 始终存在（ORT CPU EP 兜底）。
         accelerators.push(classify_cpu(&p.cpu_model));
 
-        Self { os: p.os, accelerators }
+        Self {
+            os: p.os,
+            accelerators,
+        }
     }
 
     /// 是否有任何非 CPU 加速器。
@@ -147,7 +150,11 @@ impl AccelCapabilities {
                 "{}({}{})",
                 a.kind.id(),
                 a.vendor,
-                if a.present && !a.driver_ready { ",no-driver" } else { "" }
+                if a.present && !a.driver_ready {
+                    ",no-driver"
+                } else {
+                    ""
+                }
             ));
         }
         parts.push(format!("ep_hint={}", self.recommended_ep_hint()));
@@ -163,7 +170,13 @@ fn classify_cpu(cpu_model: &str) -> Accelerator {
     } else {
         format!("CPU fallback (ORT CPU EP) — {cpu_model}")
     };
-    Accelerator { kind: AccelKind::Cpu, vendor: "generic", present: true, driver_ready: true, notes }
+    Accelerator {
+        kind: AccelKind::Cpu,
+        vendor: "generic",
+        present: true,
+        driver_ready: true,
+        notes,
+    }
 }
 
 fn classify_nvidia(present: bool) -> Accelerator {
@@ -182,7 +195,13 @@ fn classify_amd_gpu(present: bool, gfx_target: Option<&str>) -> Accelerator {
         Some(g) => format!("AMD RDNA GPU gfx={g} (ROCm/DirectML EP)"),
         None => "AMD RDNA GPU (ROCm/DirectML EP)".to_string(),
     };
-    Accelerator { kind: AccelKind::AmdGpu, vendor: "amd", present, driver_ready: present, notes }
+    Accelerator {
+        kind: AccelKind::AmdGpu,
+        vendor: "amd",
+        present,
+        driver_ready: present,
+        notes,
+    }
 }
 
 fn classify_amd_npu(present: bool) -> Accelerator {
@@ -235,7 +254,11 @@ fn recommended_ep_for(os: &str, accels: &[Accelerator]) -> &'static str {
     } else if ready(AccelKind::IntelNpu) {
         "openvino"
     } else if ready(AccelKind::AmdGpu) {
-        if windows { "directml" } else { "rocm" }
+        if windows {
+            "directml"
+        } else {
+            "rocm"
+        }
     } else if ready(AccelKind::IntelIgpu) {
         "openvino"
     } else {
@@ -249,7 +272,10 @@ mod tests {
 
     /// 构造一个只设了指定加速器 flag 的 HardwareProfile（其余为 Default）。
     fn profile(os: &'static str) -> HardwareProfile {
-        HardwareProfile { os, ..Default::default() }
+        HardwareProfile {
+            os,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -278,7 +304,11 @@ mod tests {
         let mut p = profile("linux");
         p.has_nvidia_gpu = true;
         let caps = AccelCapabilities::from_profile(&p);
-        let nv = caps.accelerators.iter().find(|a| a.kind == AccelKind::NvidiaGpu).unwrap();
+        let nv = caps
+            .accelerators
+            .iter()
+            .find(|a| a.kind == AccelKind::NvidiaGpu)
+            .unwrap();
         assert_eq!(nv.vendor, "nvidia");
         assert!(nv.present && nv.driver_ready);
         assert!(caps.has_hw_accelerator());
@@ -289,7 +319,10 @@ mod tests {
     fn nvidia_hint_is_cuda_on_windows_too() {
         let mut p = profile("windows");
         p.has_nvidia_gpu = true;
-        assert_eq!(AccelCapabilities::from_profile(&p).recommended_ep_hint(), "cuda");
+        assert_eq!(
+            AccelCapabilities::from_profile(&p).recommended_ep_hint(),
+            "cuda"
+        );
     }
 
     #[test]
@@ -297,7 +330,11 @@ mod tests {
         let mut p = profile("linux");
         p.has_amd_xdna_npu = true;
         let caps = AccelCapabilities::from_profile(&p);
-        let npu = caps.accelerators.iter().find(|a| a.kind == AccelKind::AmdNpu).unwrap();
+        let npu = caps
+            .accelerators
+            .iter()
+            .find(|a| a.kind == AccelKind::AmdNpu)
+            .unwrap();
         assert_eq!(npu.vendor, "amd");
         assert_eq!(caps.recommended_ep_hint(), "vitisai");
     }
@@ -307,7 +344,10 @@ mod tests {
         let mut p = profile("linux");
         p.has_intel_npu = true;
         let caps = AccelCapabilities::from_profile(&p);
-        assert!(caps.accelerators.iter().any(|a| a.kind == AccelKind::IntelNpu));
+        assert!(caps
+            .accelerators
+            .iter()
+            .any(|a| a.kind == AccelKind::IntelNpu));
         assert_eq!(caps.recommended_ep_hint(), "openvino");
     }
 
@@ -317,22 +357,39 @@ mod tests {
         p.has_amd_gpu = true;
         p.amd_gfx_target = Some("gfx1103".to_string());
         let caps = AccelCapabilities::from_profile(&p);
-        let gpu = caps.accelerators.iter().find(|a| a.kind == AccelKind::AmdGpu).unwrap();
-        assert!(gpu.notes.contains("gfx1103"), "notes should carry gfx target: {}", gpu.notes);
+        let gpu = caps
+            .accelerators
+            .iter()
+            .find(|a| a.kind == AccelKind::AmdGpu)
+            .unwrap();
+        assert!(
+            gpu.notes.contains("gfx1103"),
+            "notes should carry gfx target: {}",
+            gpu.notes
+        );
         assert_eq!(caps.recommended_ep_hint(), "rocm"); // linux → rocm
 
         p.os = "windows";
-        assert_eq!(AccelCapabilities::from_profile(&p).recommended_ep_hint(), "directml");
+        assert_eq!(
+            AccelCapabilities::from_profile(&p).recommended_ep_hint(),
+            "directml"
+        );
     }
 
     #[test]
     fn intel_igpu_hint_os_dependent() {
         let mut p = profile("linux");
         p.has_intel_igpu = true;
-        assert_eq!(AccelCapabilities::from_profile(&p).recommended_ep_hint(), "openvino"); // linux
+        assert_eq!(
+            AccelCapabilities::from_profile(&p).recommended_ep_hint(),
+            "openvino"
+        ); // linux
 
         p.os = "windows";
-        assert_eq!(AccelCapabilities::from_profile(&p).recommended_ep_hint(), "openvino"); // windows
+        assert_eq!(
+            AccelCapabilities::from_profile(&p).recommended_ep_hint(),
+            "openvino"
+        ); // windows
     }
 
     #[test]
@@ -341,7 +398,10 @@ mod tests {
         let mut p = profile("macos");
         p.has_nvidia_gpu = true;
         p.has_amd_gpu = true;
-        assert_eq!(AccelCapabilities::from_profile(&p).recommended_ep_hint(), "cpu");
+        assert_eq!(
+            AccelCapabilities::from_profile(&p).recommended_ep_hint(),
+            "cpu"
+        );
     }
 
     #[test]
@@ -351,7 +411,10 @@ mod tests {
         p.has_nvidia_gpu = true;
         p.has_amd_xdna_npu = true;
         p.has_amd_gpu = true;
-        assert_eq!(AccelCapabilities::from_profile(&p).recommended_ep_hint(), "cuda");
+        assert_eq!(
+            AccelCapabilities::from_profile(&p).recommended_ep_hint(),
+            "cuda"
+        );
     }
 
     #[test]
@@ -360,7 +423,10 @@ mod tests {
         let mut p = profile("linux");
         p.has_amd_xdna_npu = true;
         p.has_amd_gpu = true;
-        assert_eq!(AccelCapabilities::from_profile(&p).recommended_ep_hint(), "vitisai");
+        assert_eq!(
+            AccelCapabilities::from_profile(&p).recommended_ep_hint(),
+            "vitisai"
+        );
     }
 
     #[test]
@@ -380,8 +446,12 @@ mod tests {
     fn accel_kind_ids_stable_and_unique() {
         use std::collections::HashSet;
         let kinds = [
-            AccelKind::Cpu, AccelKind::NvidiaGpu, AccelKind::AmdGpu,
-            AccelKind::AmdNpu, AccelKind::IntelIgpu, AccelKind::IntelNpu,
+            AccelKind::Cpu,
+            AccelKind::NvidiaGpu,
+            AccelKind::AmdGpu,
+            AccelKind::AmdNpu,
+            AccelKind::IntelIgpu,
+            AccelKind::IntelNpu,
         ];
         let ids: HashSet<_> = kinds.iter().map(|k| k.id()).collect();
         assert_eq!(ids.len(), kinds.len(), "ids must be unique");
@@ -390,10 +460,22 @@ mod tests {
 
     #[test]
     fn cpu_notes_include_model_when_known() {
-        let p = HardwareProfile { os: "linux", cpu_model: "AMD Ryzen 7 8845H".into(), ..Default::default() };
+        let p = HardwareProfile {
+            os: "linux",
+            cpu_model: "AMD Ryzen 7 8845H".into(),
+            ..Default::default()
+        };
         let caps = AccelCapabilities::from_profile(&p);
-        let cpu = caps.accelerators.iter().find(|a| a.kind == AccelKind::Cpu).unwrap();
-        assert!(cpu.notes.contains("8845H"), "cpu notes should carry model: {}", cpu.notes);
+        let cpu = caps
+            .accelerators
+            .iter()
+            .find(|a| a.kind == AccelKind::Cpu)
+            .unwrap();
+        assert!(
+            cpu.notes.contains("8845H"),
+            "cpu notes should carry model: {}",
+            cpu.notes
+        );
     }
 
     #[test]

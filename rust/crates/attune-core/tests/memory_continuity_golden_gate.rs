@@ -126,7 +126,16 @@ fn load_cases() -> Vec<(String, GoldenCase)> {
 fn seed(store: &Store, dek: &Key32, mems: &[Mem]) {
     for (i, m) in mems.iter().enumerate() {
         store
-            .insert_memory(dek, "episodic", 1, 2, std::slice::from_ref(&m.hash), &m.summary, &m.model, i as i64)
+            .insert_memory(
+                dek,
+                "episodic",
+                1,
+                2,
+                std::slice::from_ref(&m.hash),
+                &m.summary,
+                &m.model,
+                i as i64,
+            )
             .expect("insert memory");
     }
 }
@@ -162,7 +171,11 @@ fn recall_hits(store: &Store, dek: &Key32, emb: &dyn EmbeddingProvider, query: &
 #[test]
 fn memory_continuity_golden_gate() {
     let cases = load_cases();
-    assert!(cases.len() >= 10, "≥10 golden fixtures required, found {}", cases.len());
+    assert!(
+        cases.len() >= 10,
+        "≥10 golden fixtures required, found {}",
+        cases.len()
+    );
 
     let mut ran = 0usize;
     for (file, case) in &cases {
@@ -178,7 +191,10 @@ fn memory_continuity_golden_gate() {
         ran += 1;
     }
     assert_eq!(ran, cases.len(), "every fixture must be exercised");
-    eprintln!("memory-continuity golden gate: {ran}/{} cases PASS (1.00)", cases.len());
+    eprintln!(
+        "memory-continuity golden gate: {ran}/{} cases PASS (1.00)",
+        cases.len()
+    );
 }
 
 /// 01-06: export from source vault → import into a fresh (different-DEK) vault →
@@ -210,7 +226,10 @@ fn run_roundtrip_case(file: &str, case: &GoldenCase) {
     if let (Some(q), Some(min)) = (&case.expected.recall_query, case.expected.recall_min_hits) {
         let emb = MockEmbeddingProvider::new(4);
         let hits = recall_hits(&dst, &dst_dek, &emb, q);
-        assert!(hits >= min, "{file}: recall '{q}' got {hits} hits, want ≥{min}");
+        assert!(
+            hits >= min,
+            "{file}: recall '{q}' got {hits} hits, want ≥{min}"
+        );
     }
 }
 
@@ -225,9 +244,14 @@ fn run_reindex_case(file: &str, case: &GoldenCase, spec: &ReindexSpec) {
     // vs the new active model.
     let old_emb = MockEmbeddingProvider::new(spec.from_dim);
     for m in &spec.memories {
-        let id = store.find_memory_id_by_source("episodic", std::slice::from_ref(&m.hash)).unwrap().unwrap();
+        let id = store
+            .find_memory_id_by_source("episodic", std::slice::from_ref(&m.hash))
+            .unwrap()
+            .unwrap();
         let (v, _) = old_emb.embed(&[m.summary.as_str()]).unwrap();
-        store.put_memory_vector(&id, &v[0], &old_emb.model_name(), 1).unwrap();
+        store
+            .put_memory_vector(&id, &v[0], &old_emb.model_name(), 1)
+            .unwrap();
     }
 
     let new_emb = MockEmbeddingProvider::new(spec.to_dim);
@@ -235,7 +259,11 @@ fn run_reindex_case(file: &str, case: &GoldenCase, spec: &ReindexSpec) {
     let stale_before = store.list_stale_memory_ids(&cur_model).unwrap();
     // 09 (from==to) is the idempotent boundary: already current ⇒ 0 stale to begin.
     if spec.from_dim != spec.to_dim {
-        assert_eq!(stale_before.len(), spec.memories.len(), "{file}: all old vectors stale pre-reindex");
+        assert_eq!(
+            stale_before.len(),
+            spec.memories.len(),
+            "{file}: all old vectors stale pre-reindex"
+        );
     }
 
     for id in &stale_before {
@@ -250,7 +278,11 @@ fn run_reindex_case(file: &str, case: &GoldenCase, spec: &ReindexSpec) {
     );
 
     let hits = recall_hits(&store, &dek, &new_emb, &spec.recall_query);
-    assert!(hits >= spec.recall_min_hits, "{file}: post-reindex recall '{}' got {hits}", spec.recall_query);
+    assert!(
+        hits >= spec.recall_min_hits,
+        "{file}: post-reindex recall '{}' got {hits}",
+        spec.recall_query
+    );
 }
 
 /// 10: bundle carries OLD-model vectors → import into a target on a NEW model →
@@ -262,9 +294,13 @@ fn run_combo_case(file: &str, case: &GoldenCase, spec: &ComboSpec) {
     seed(&src, &src_dek, &spec.memories);
     let bundle_emb = MockEmbeddingProvider::new(spec.bundle_dim);
     for m in &spec.memories {
-        let id = src.find_memory_id_by_source("episodic", std::slice::from_ref(&m.hash)).unwrap().unwrap();
+        let id = src
+            .find_memory_id_by_source("episodic", std::slice::from_ref(&m.hash))
+            .unwrap()
+            .unwrap();
         let (v, _) = bundle_emb.embed(&[m.summary.as_str()]).unwrap();
-        src.put_memory_vector(&id, &v[0], &bundle_emb.model_name(), 1).unwrap();
+        src.put_memory_vector(&id, &v[0], &bundle_emb.model_name(), 1)
+            .unwrap();
     }
     let bundle = export_memory_bundle(&src, &src_dek, &spec.passphrase).unwrap();
 
@@ -282,10 +318,18 @@ fn run_combo_case(file: &str, case: &GoldenCase, spec: &ComboSpec) {
         reindex_one(&dst, &dst_dek, &target_emb, &id).unwrap();
     }
     let stale_after = dst.list_stale_memory_ids(&cur_model).unwrap().len();
-    assert_eq!(stale_after, case.expected.stale_after_reindex.unwrap_or(0), "{file}: stale after combo reindex");
+    assert_eq!(
+        stale_after,
+        case.expected.stale_after_reindex.unwrap_or(0),
+        "{file}: stale after combo reindex"
+    );
 
     let hits = recall_hits(&dst, &dst_dek, &target_emb, &spec.recall_query);
-    assert!(hits >= spec.recall_min_hits, "{file}: combo recall '{}' got {hits}", spec.recall_query);
+    assert!(
+        hits >= spec.recall_min_hits,
+        "{file}: combo recall '{}' got {hits}",
+        spec.recall_query
+    );
 }
 
 /// 11-12: a wrong passphrase / a corrupted bundle must be rejected BEFORE any row
@@ -313,8 +357,15 @@ fn run_error_case(file: &str, case: &GoldenCase) {
     if case.expected.import_errors == Some(true) {
         assert!(res.is_err(), "{file}: import must error");
     }
-    let rows = dst.list_recent_memories(&dst_dek, usize::MAX).unwrap().len();
-    assert_eq!(rows, case.expected.rows_after_failed_import.unwrap_or(0), "{file}: zero write on rejected import");
+    let rows = dst
+        .list_recent_memories(&dst_dek, usize::MAX)
+        .unwrap()
+        .len();
+    assert_eq!(
+        rows,
+        case.expected.rows_after_failed_import.unwrap_or(0),
+        "{file}: zero write on rejected import"
+    );
 }
 
 // ── property tests (≥3) ──────────────────────────────────────────────────────

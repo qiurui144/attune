@@ -189,7 +189,10 @@ fn probe_windows() -> PowerState {
         st.source = PowerSource::Ac;
     }
     // Power plan (best-effort): powercfg active scheme GUID → profile.
-    if let Ok(out) = crate::process::command_no_window("powercfg").args(["/getactivescheme"]).output() {
+    if let Ok(out) = crate::process::command_no_window("powercfg")
+        .args(["/getactivescheme"])
+        .output()
+    {
         if out.status.success() {
             st.profile = parse_win_power_plan(&String::from_utf8_lossy(&out.stdout));
         }
@@ -340,13 +343,18 @@ mod tests {
     #[test]
     fn win_power_plan_parser() {
         assert_eq!(
-            parse_win_power_plan("Power Scheme GUID: a1841308-3541-4fab-bc81-f71556f20b4a (Power saver)"),
+            parse_win_power_plan(
+                "Power Scheme GUID: a1841308-3541-4fab-bc81-f71556f20b4a (Power saver)"
+            ),
             PowerProfile::Saver
         );
         assert_eq!(
             parse_win_power_plan("GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c (High performance)"),
             PowerProfile::Performance
         );
-        assert_eq!(parse_win_power_plan("GUID: 381b4222-... (Balanced)"), PowerProfile::Balanced);
+        assert_eq!(
+            parse_win_power_plan("GUID: 381b4222-... (Balanced)"),
+            PowerProfile::Balanced
+        );
     }
 }

@@ -18,8 +18,13 @@ pub fn context_window(model: &str) -> usize {
         1_000_000
     } else if m.contains("claude") {
         200_000
-    } else if m.contains("gpt-4o") || m.contains("gpt-4.1") || m.contains("gpt-4-turbo")
-        || m.contains("glm-4") || m.contains("moonshot") || m.contains("kimi") {
+    } else if m.contains("gpt-4o")
+        || m.contains("gpt-4.1")
+        || m.contains("gpt-4-turbo")
+        || m.contains("glm-4")
+        || m.contains("moonshot")
+        || m.contains("kimi")
+    {
         128_000
     } else if m.contains("deepseek") {
         64_000
@@ -249,8 +254,11 @@ mod tests {
     #[test]
     fn knowledge_chars_zero() {
         let plan = BudgetPlan {
-            window: 8_000, response_reserve: 2_000, knowledge_tokens: 0,
-            history_keep: 0, history_dropped: 0,
+            window: 8_000,
+            response_reserve: 2_000,
+            knowledge_tokens: 0,
+            history_keep: 0,
+            history_dropped: 0,
             tokens_in_used: 0,
         };
         assert_eq!(plan.knowledge_chars(), 0);

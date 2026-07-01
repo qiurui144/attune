@@ -7,7 +7,8 @@ fn cache_key_is_blake3_32_hex_lowercase() {
     let k = cache_key("gpt-4o-mini", "hello world");
     assert_eq!(k.len(), 32, "32-hex prefix of blake3");
     assert!(
-        k.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        k.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "expected all lowercase ascii hex, got: {k}"
     );
 }

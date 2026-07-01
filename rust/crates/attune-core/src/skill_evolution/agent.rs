@@ -276,7 +276,10 @@ pub fn apply_records(
     // Mark all consumed signals processed — even if their row was skipped (the
     // signal has already been "seen"; otherwise the next cycle re-reads them
     // and we burn CPU re-running heuristic on stuck patterns).
-    let ids: Vec<i64> = buckets.iter().flat_map(|b| b.signal_ids.iter().copied()).collect();
+    let ids: Vec<i64> = buckets
+        .iter()
+        .flat_map(|b| b.signal_ids.iter().copied())
+        .collect();
     if !ids.is_empty() {
         store.mark_signals_processed(&ids)?;
     }
@@ -308,13 +311,68 @@ pub fn run_cycle(
 /// emitted as an expansion candidate even if it co-occurs with the query.
 const STOPWORDS: &[&str] = &[
     // English
-    "the", "a", "an", "of", "to", "for", "in", "on", "with", "and", "or",
-    "is", "are", "be", "by", "at", "as", "it", "this", "that", "how", "what",
-    "why", "when", "where", "who", "which", "from", "do", "does", "did",
+    "the",
+    "a",
+    "an",
+    "of",
+    "to",
+    "for",
+    "in",
+    "on",
+    "with",
+    "and",
+    "or",
+    "is",
+    "are",
+    "be",
+    "by",
+    "at",
+    "as",
+    "it",
+    "this",
+    "that",
+    "how",
+    "what",
+    "why",
+    "when",
+    "where",
+    "who",
+    "which",
+    "from",
+    "do",
+    "does",
+    "did",
     // Chinese function words / very common high-frequency words
-    "的", "了", "是", "在", "和", "与", "或", "为", "我", "你", "他", "她",
-    "它", "这", "那", "如何", "怎么", "什么", "怎样", "为什么", "请", "把",
-    "被", "有", "无", "对", "从", "到", "及", "等",
+    "的",
+    "了",
+    "是",
+    "在",
+    "和",
+    "与",
+    "或",
+    "为",
+    "我",
+    "你",
+    "他",
+    "她",
+    "它",
+    "这",
+    "那",
+    "如何",
+    "怎么",
+    "什么",
+    "怎样",
+    "为什么",
+    "请",
+    "把",
+    "被",
+    "有",
+    "无",
+    "对",
+    "从",
+    "到",
+    "及",
+    "等",
 ];
 
 fn is_stopword(token: &str) -> bool {
@@ -412,8 +470,7 @@ fn is_cjk(c: char) -> bool {
 ///
 /// Bounded by [`crate::store::MAX_EXPANSIONS_PER_PATTERN`].
 pub fn heuristic_expansion(target: &str, all_buckets: &[QueryBucket]) -> Vec<String> {
-    let target_tokens: BTreeSet<String> =
-        tokenize_for_heuristic(target).into_iter().collect();
+    let target_tokens: BTreeSet<String> = tokenize_for_heuristic(target).into_iter().collect();
     if target_tokens.is_empty() {
         return Vec::new();
     }
@@ -423,8 +480,9 @@ pub fn heuristic_expansion(target: &str, all_buckets: &[QueryBucket]) -> Vec<Str
         if bucket.query_pattern == target {
             continue;
         }
-        let other_tokens: BTreeSet<String> =
-            tokenize_for_heuristic(&bucket.query_pattern).into_iter().collect();
+        let other_tokens: BTreeSet<String> = tokenize_for_heuristic(&bucket.query_pattern)
+            .into_iter()
+            .collect();
         // Only count "other" buckets that share at least one token with the
         // target — co-occurrence in a *related* failed query.
         if other_tokens.intersection(&target_tokens).next().is_none() {
@@ -451,8 +509,12 @@ pub fn heuristic_expansion(target: &str, all_buckets: &[QueryBucket]) -> Vec<Str
 fn llm_expansion(llm: &dyn LlmProvider, query_pattern: &str) -> Result<Vec<String>> {
     // Detect query script so we can ask the LLM to stay in the same character set.
     let script_hint = match detect_cjk_script(query_pattern) {
-        CjkScript::Simplified => "\n- If you output Chinese terms, use Simplified Chinese characters (简体中文)",
-        CjkScript::Traditional => "\n- If you output Chinese terms, use Traditional Chinese characters (繁體中文)",
+        CjkScript::Simplified => {
+            "\n- If you output Chinese terms, use Simplified Chinese characters (简体中文)"
+        }
+        CjkScript::Traditional => {
+            "\n- If you output Chinese terms, use Traditional Chinese characters (繁體中文)"
+        }
         CjkScript::None => "",
     };
     let prompt = format!(
@@ -521,26 +583,146 @@ pub fn detect_cjk_script(s: &str) -> CjkScript {
         // Source: Unihan + common freq lists for queries about patents/law/tech.
         if matches!(
             c,
-            '专' | '业' | '东' | '义' | '习' | '书' | '产' | '传' | '侦'
-                | '儿' | '关' | '兴' | '农' | '决' | '净' | '减' | '测' | '为' | '发'
-                | '变' | '国' | '图' | '报' | '导' | '实' | '审' | '对' | '应' | '总'
-                | '纸' | '经' | '绪' | '证' | '话' | '请' | '认' | '设' | '输' | '转'
-                | '过' | '进' | '运' | '选' | '问' | '阶' | '电' | '标' | '权' | '机'
-                | '没' | '终' | '结' | '统' | '质' | '赔' | '责' | '贸' | '财' | '货'
-                | '费' | '车' | '连' | '销' | '锁' | '险' | '难' | '际' | '离'
+            '专' | '业'
+                | '东'
+                | '义'
+                | '习'
+                | '书'
+                | '产'
+                | '传'
+                | '侦'
+                | '儿'
+                | '关'
+                | '兴'
+                | '农'
+                | '决'
+                | '净'
+                | '减'
+                | '测'
+                | '为'
+                | '发'
+                | '变'
+                | '国'
+                | '图'
+                | '报'
+                | '导'
+                | '实'
+                | '审'
+                | '对'
+                | '应'
+                | '总'
+                | '纸'
+                | '经'
+                | '绪'
+                | '证'
+                | '话'
+                | '请'
+                | '认'
+                | '设'
+                | '输'
+                | '转'
+                | '过'
+                | '进'
+                | '运'
+                | '选'
+                | '问'
+                | '阶'
+                | '电'
+                | '标'
+                | '权'
+                | '机'
+                | '没'
+                | '终'
+                | '结'
+                | '统'
+                | '质'
+                | '赔'
+                | '责'
+                | '贸'
+                | '财'
+                | '货'
+                | '费'
+                | '车'
+                | '连'
+                | '销'
+                | '锁'
+                | '险'
+                | '难'
+                | '际'
+                | '离'
         ) {
             has_simp = true;
         }
         // Traditional-only common chars (not used in Simplified orthography).
         if matches!(
             c,
-            '專' | '業' | '東' | '義' | '習' | '書' | '產' | '傳' | '偵'
-                | '兒' | '關' | '興' | '農' | '決' | '淨' | '減' | '測' | '為' | '發'
-                | '變' | '國' | '圖' | '報' | '導' | '實' | '審' | '對' | '應' | '總'
-                | '紙' | '經' | '緒' | '證' | '話' | '請' | '認' | '設' | '輸' | '轉'
-                | '過' | '進' | '運' | '選' | '問' | '階' | '電' | '標' | '權' | '機'
-                | '沒' | '終' | '結' | '統' | '質' | '賠' | '責' | '貿' | '財' | '貨'
-                | '費' | '車' | '連' | '銷' | '鎖' | '險' | '難' | '際' | '離'
+            '專' | '業'
+                | '東'
+                | '義'
+                | '習'
+                | '書'
+                | '產'
+                | '傳'
+                | '偵'
+                | '兒'
+                | '關'
+                | '興'
+                | '農'
+                | '決'
+                | '淨'
+                | '減'
+                | '測'
+                | '為'
+                | '發'
+                | '變'
+                | '國'
+                | '圖'
+                | '報'
+                | '導'
+                | '實'
+                | '審'
+                | '對'
+                | '應'
+                | '總'
+                | '紙'
+                | '經'
+                | '緒'
+                | '證'
+                | '話'
+                | '請'
+                | '認'
+                | '設'
+                | '輸'
+                | '轉'
+                | '過'
+                | '進'
+                | '運'
+                | '選'
+                | '問'
+                | '階'
+                | '電'
+                | '標'
+                | '權'
+                | '機'
+                | '沒'
+                | '終'
+                | '結'
+                | '統'
+                | '質'
+                | '賠'
+                | '責'
+                | '貿'
+                | '財'
+                | '貨'
+                | '費'
+                | '車'
+                | '連'
+                | '銷'
+                | '鎖'
+                | '險'
+                | '難'
+                | '際'
+                | '離'
         ) {
             has_trad = true;
         }
@@ -563,14 +745,8 @@ pub fn detect_cjk_script(s: &str) -> CjkScript {
 /// through unchanged (they are typically shared between both orthographies).
 pub fn normalize_to_script(term: &str, target: CjkScript) -> String {
     match target {
-        CjkScript::Simplified => term
-            .chars()
-            .map(|c| trad_to_simp(c).unwrap_or(c))
-            .collect(),
-        CjkScript::Traditional => term
-            .chars()
-            .map(|c| simp_to_trad(c).unwrap_or(c))
-            .collect(),
+        CjkScript::Simplified => term.chars().map(|c| trad_to_simp(c).unwrap_or(c)).collect(),
+        CjkScript::Traditional => term.chars().map(|c| simp_to_trad(c).unwrap_or(c)).collect(),
         CjkScript::None => term.to_string(),
     }
 }
@@ -578,26 +754,105 @@ pub fn normalize_to_script(term: &str, target: CjkScript) -> String {
 /// Map a single Traditional char to its Simplified counterpart, if known.
 fn trad_to_simp(c: char) -> Option<char> {
     Some(match c {
-        '專' => '专', '業' => '业', '東' => '东', '義' => '义', '習' => '习',
-        '書' => '书', '產' => '产', '傳' => '传', '偵' => '侦', '兒' => '儿',
-        '關' => '关', '興' => '兴', '農' => '农', '決' => '决', '淨' => '净',
-        '減' => '减', '測' => '测', '為' => '为', '發' => '发', '變' => '变',
-        '國' => '国', '圖' => '图', '報' => '报', '導' => '导', '實' => '实',
-        '審' => '审', '對' => '对', '應' => '应', '總' => '总', '紙' => '纸',
-        '經' => '经', '緒' => '绪', '證' => '证', '話' => '话', '請' => '请',
-        '認' => '认', '設' => '设', '輸' => '输', '轉' => '转', '過' => '过',
-        '進' => '进', '運' => '运', '選' => '选', '問' => '问', '階' => '阶',
-        '電' => '电', '標' => '标', '權' => '权', '機' => '机', '沒' => '没',
-        '終' => '终', '結' => '结', '統' => '统', '質' => '质', '賠' => '赔',
-        '責' => '责', '貿' => '贸', '財' => '财', '貨' => '货', '費' => '费',
-        '車' => '车', '連' => '连', '銷' => '销', '鎖' => '锁', '險' => '险',
-        '難' => '难', '際' => '际', '離' => '离', '樣' => '样', '歷' => '历',
-        '壓' => '压', '幹' => '干', '點' => '点', '號' => '号', '後' => '后',
-        '處' => '处', '術' => '术', '許' => '许', '論' => '论', '調' => '调',
-        '談' => '谈', '說' => '说', '讓' => '让', '讀' => '读', '貢' => '贡',
-        '賣' => '卖', '買' => '买', '開' => '开', '間' => '间',
-        '陽' => '阳', '隊' => '队', '頁' => '页', '頭' => '头', '題' => '题',
-        '風' => '风', '飛' => '飞', '體' => '体', '驗' => '验', '齊' => '齐',
+        '專' => '专',
+        '業' => '业',
+        '東' => '东',
+        '義' => '义',
+        '習' => '习',
+        '書' => '书',
+        '產' => '产',
+        '傳' => '传',
+        '偵' => '侦',
+        '兒' => '儿',
+        '關' => '关',
+        '興' => '兴',
+        '農' => '农',
+        '決' => '决',
+        '淨' => '净',
+        '減' => '减',
+        '測' => '测',
+        '為' => '为',
+        '發' => '发',
+        '變' => '变',
+        '國' => '国',
+        '圖' => '图',
+        '報' => '报',
+        '導' => '导',
+        '實' => '实',
+        '審' => '审',
+        '對' => '对',
+        '應' => '应',
+        '總' => '总',
+        '紙' => '纸',
+        '經' => '经',
+        '緒' => '绪',
+        '證' => '证',
+        '話' => '话',
+        '請' => '请',
+        '認' => '认',
+        '設' => '设',
+        '輸' => '输',
+        '轉' => '转',
+        '過' => '过',
+        '進' => '进',
+        '運' => '运',
+        '選' => '选',
+        '問' => '问',
+        '階' => '阶',
+        '電' => '电',
+        '標' => '标',
+        '權' => '权',
+        '機' => '机',
+        '沒' => '没',
+        '終' => '终',
+        '結' => '结',
+        '統' => '统',
+        '質' => '质',
+        '賠' => '赔',
+        '責' => '责',
+        '貿' => '贸',
+        '財' => '财',
+        '貨' => '货',
+        '費' => '费',
+        '車' => '车',
+        '連' => '连',
+        '銷' => '销',
+        '鎖' => '锁',
+        '險' => '险',
+        '難' => '难',
+        '際' => '际',
+        '離' => '离',
+        '樣' => '样',
+        '歷' => '历',
+        '壓' => '压',
+        '幹' => '干',
+        '點' => '点',
+        '號' => '号',
+        '後' => '后',
+        '處' => '处',
+        '術' => '术',
+        '許' => '许',
+        '論' => '论',
+        '調' => '调',
+        '談' => '谈',
+        '說' => '说',
+        '讓' => '让',
+        '讀' => '读',
+        '貢' => '贡',
+        '賣' => '卖',
+        '買' => '买',
+        '開' => '开',
+        '間' => '间',
+        '陽' => '阳',
+        '隊' => '队',
+        '頁' => '页',
+        '頭' => '头',
+        '題' => '题',
+        '風' => '风',
+        '飛' => '飞',
+        '體' => '体',
+        '驗' => '验',
+        '齊' => '齐',
         _ => return None,
     })
 }
@@ -605,26 +860,105 @@ fn trad_to_simp(c: char) -> Option<char> {
 /// Map a single Simplified char to its Traditional counterpart, if known.
 fn simp_to_trad(c: char) -> Option<char> {
     Some(match c {
-        '专' => '專', '业' => '業', '东' => '東', '义' => '義', '习' => '習',
-        '书' => '書', '产' => '產', '传' => '傳', '侦' => '偵', '儿' => '兒',
-        '关' => '關', '兴' => '興', '农' => '農', '决' => '決', '净' => '淨',
-        '减' => '減', '测' => '測', '为' => '為', '发' => '發', '变' => '變',
-        '国' => '國', '图' => '圖', '报' => '報', '导' => '導', '实' => '實',
-        '审' => '審', '对' => '對', '应' => '應', '总' => '總', '纸' => '紙',
-        '经' => '經', '绪' => '緒', '证' => '證', '话' => '話', '请' => '請',
-        '认' => '認', '设' => '設', '输' => '輸', '转' => '轉', '过' => '過',
-        '进' => '進', '运' => '運', '选' => '選', '问' => '問', '阶' => '階',
-        '电' => '電', '标' => '標', '权' => '權', '机' => '機', '没' => '沒',
-        '终' => '終', '结' => '結', '统' => '統', '质' => '質', '赔' => '賠',
-        '责' => '責', '贸' => '貿', '财' => '財', '货' => '貨', '费' => '費',
-        '车' => '車', '连' => '連', '销' => '銷', '锁' => '鎖', '险' => '險',
-        '难' => '難', '际' => '際', '离' => '離', '样' => '樣', '历' => '歷',
-        '压' => '壓', '干' => '幹', '点' => '點', '号' => '號', '后' => '後',
-        '处' => '處', '术' => '術', '许' => '許', '论' => '論', '调' => '調',
-        '谈' => '談', '说' => '說', '让' => '讓', '读' => '讀', '贡' => '貢',
-        '卖' => '賣', '买' => '買', '开' => '開', '间' => '間',
-        '阳' => '陽', '队' => '隊', '页' => '頁', '头' => '頭', '题' => '題',
-        '风' => '風', '飞' => '飛', '体' => '體', '验' => '驗', '齐' => '齊',
+        '专' => '專',
+        '业' => '業',
+        '东' => '東',
+        '义' => '義',
+        '习' => '習',
+        '书' => '書',
+        '产' => '產',
+        '传' => '傳',
+        '侦' => '偵',
+        '儿' => '兒',
+        '关' => '關',
+        '兴' => '興',
+        '农' => '農',
+        '决' => '決',
+        '净' => '淨',
+        '减' => '減',
+        '测' => '測',
+        '为' => '為',
+        '发' => '發',
+        '变' => '變',
+        '国' => '國',
+        '图' => '圖',
+        '报' => '報',
+        '导' => '導',
+        '实' => '實',
+        '审' => '審',
+        '对' => '對',
+        '应' => '應',
+        '总' => '總',
+        '纸' => '紙',
+        '经' => '經',
+        '绪' => '緒',
+        '证' => '證',
+        '话' => '話',
+        '请' => '請',
+        '认' => '認',
+        '设' => '設',
+        '输' => '輸',
+        '转' => '轉',
+        '过' => '過',
+        '进' => '進',
+        '运' => '運',
+        '选' => '選',
+        '问' => '問',
+        '阶' => '階',
+        '电' => '電',
+        '标' => '標',
+        '权' => '權',
+        '机' => '機',
+        '没' => '沒',
+        '终' => '終',
+        '结' => '結',
+        '统' => '統',
+        '质' => '質',
+        '赔' => '賠',
+        '责' => '責',
+        '贸' => '貿',
+        '财' => '財',
+        '货' => '貨',
+        '费' => '費',
+        '车' => '車',
+        '连' => '連',
+        '销' => '銷',
+        '锁' => '鎖',
+        '险' => '險',
+        '难' => '難',
+        '际' => '際',
+        '离' => '離',
+        '样' => '樣',
+        '历' => '歷',
+        '压' => '壓',
+        '干' => '幹',
+        '点' => '點',
+        '号' => '號',
+        '后' => '後',
+        '处' => '處',
+        '术' => '術',
+        '许' => '許',
+        '论' => '論',
+        '调' => '調',
+        '谈' => '談',
+        '说' => '說',
+        '让' => '讓',
+        '读' => '讀',
+        '贡' => '貢',
+        '卖' => '賣',
+        '买' => '買',
+        '开' => '開',
+        '间' => '間',
+        '阳' => '陽',
+        '队' => '隊',
+        '页' => '頁',
+        '头' => '頭',
+        '题' => '題',
+        '风' => '風',
+        '飞' => '飛',
+        '体' => '體',
+        '验' => '驗',
+        '齐' => '齊',
         _ => return None,
     })
 }
@@ -736,10 +1070,9 @@ pub fn group_signals_by_pattern(
             if t.timestamp() < cutoff_secs {
                 continue;
             }
-        } else if let Ok(t) = chrono::NaiveDateTime::parse_from_str(
-            &s.created_at,
-            "%Y-%m-%d %H:%M:%S",
-        ) {
+        } else if let Ok(t) =
+            chrono::NaiveDateTime::parse_from_str(&s.created_at, "%Y-%m-%d %H:%M:%S")
+        {
             if t.and_utc().timestamp() < cutoff_secs {
                 continue;
             }
@@ -912,8 +1245,11 @@ mod tests {
         );
         // Should be sorted by frequency desc — the highest-occurrence bucket
         // contributes the first tokens.
-        assert!(exp.iter().any(|t| t == "extraword00"),
-            "highest-occurrence token should be present: {:?}", exp);
+        assert!(
+            exp.iter().any(|t| t == "extraword00"),
+            "highest-occurrence token should be present: {:?}",
+            exp
+        );
     }
 
     // ── tokenizer correctness ────────────────────────────────────────────
@@ -946,7 +1282,9 @@ mod tests {
         let out = parse_llm_terms(resp, "target");
         // Dedup + cap=5
         assert_eq!(out.len(), 5);
-        assert!(out.iter().all(|t| t != "foo" || out.iter().filter(|x| **x == "foo").count() == 1));
+        assert!(out
+            .iter()
+            .all(|t| t != "foo" || out.iter().filter(|x| **x == "foo").count() == 1));
     }
 
     #[test]
@@ -1010,12 +1348,20 @@ mod tests {
         let out = parse_llm_terms(resp, "专利申请");
         // "专利" and "專利" should collapse to one Simplified "专利" (first seen wins).
         let patent_zh_count = out.iter().filter(|t| *t == "专利" || *t == "專利").count();
-        assert_eq!(patent_zh_count, 1, "expected exactly one 专利 entry, got: {out:?}");
+        assert_eq!(
+            patent_zh_count, 1,
+            "expected exactly one 专利 entry, got: {out:?}"
+        );
         // The entry should be Simplified form.
-        assert!(out.contains(&"专利".to_string()), "should be Simplified form: {out:?}");
+        assert!(
+            out.contains(&"专利".to_string()),
+            "should be Simplified form: {out:?}"
+        );
         // English terms preserved as-is (no CJK normalization).
-        assert!(out.contains(&"patent".to_string()) || out.contains(&"Patents".to_string()),
-            "English terms should be present: {out:?}");
+        assert!(
+            out.contains(&"patent".to_string()) || out.contains(&"Patents".to_string()),
+            "English terms should be present: {out:?}"
+        );
     }
 
     #[test]
@@ -1023,10 +1369,14 @@ mod tests {
         // Query is Traditional; LLM returns Simplified term that should be converted.
         let resp = r#"{"terms": ["专利", "patent", "知识产权"]}"#;
         let out = parse_llm_terms(resp, "專利申請");
-        assert!(out.contains(&"專利".to_string()),
-            "Simplified 专利 should be normalized to Traditional 專利: {out:?}");
-        assert!(!out.contains(&"专利".to_string()),
-            "Simplified form should not appear in Traditional-query result: {out:?}");
+        assert!(
+            out.contains(&"專利".to_string()),
+            "Simplified 专利 should be normalized to Traditional 專利: {out:?}"
+        );
+        assert!(
+            !out.contains(&"专利".to_string()),
+            "Simplified form should not appear in Traditional-query result: {out:?}"
+        );
     }
 
     #[test]
@@ -1038,8 +1388,14 @@ mod tests {
         // "专利" appears as-is (no normalization when query has no script), but dedup
         // still collapses the two CJK entries via normalized key.
         // Regardless of script detection outcome, no exact-duplicate should survive.
-        let dupes: Vec<_> = out.iter().filter(|t| **t == "专利" || **t == "專利").collect();
-        assert!(dupes.len() <= 1, "normalization dedup should leave at most 1 variant: {out:?}");
+        let dupes: Vec<_> = out
+            .iter()
+            .filter(|t| **t == "专利" || **t == "專利")
+            .collect();
+        assert!(
+            dupes.len() <= 1,
+            "normalization dedup should leave at most 1 variant: {out:?}"
+        );
         let _ = unique_count; // satisfies unused-var lint
     }
 
@@ -1048,7 +1404,9 @@ mod tests {
         let store = Store::open_memory().unwrap();
         // Seed real signals so mark_signals_processed has something to flip.
         for _ in 0..5 {
-            store.record_skill_signal("rust ownership", 0, false).unwrap();
+            store
+                .record_skill_signal("rust ownership", 0, false)
+                .unwrap();
         }
         let real_signals = store.get_unprocessed_signals(50).unwrap();
         let buckets = vec![QueryBucket {
@@ -1064,8 +1422,14 @@ mod tests {
         }];
         let stats = apply_records(&store, &buckets, &records).unwrap();
         assert_eq!(stats.rows_written, 1);
-        let row = store.get_skill_expansion("rust ownership").unwrap().unwrap();
-        assert_eq!(row.expansions, vec!["borrow".to_string(), "lifetime".to_string()]);
+        let row = store
+            .get_skill_expansion("rust ownership")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.expansions,
+            vec!["borrow".to_string(), "lifetime".to_string()]
+        );
         // Signals marked processed.
         assert_eq!(store.count_unprocessed_signals().unwrap(), 0);
     }
@@ -1075,7 +1439,9 @@ mod tests {
         let store = Store::open_memory().unwrap();
         // 3 "rust ownership" + 3 "rust borrow" failed searches (each crosses min=3)
         for _ in 0..3 {
-            store.record_skill_signal("rust ownership", 0, false).unwrap();
+            store
+                .record_skill_signal("rust ownership", 0, false)
+                .unwrap();
             store.record_skill_signal("rust borrow", 0, false).unwrap();
         }
         let cfg = SkillAgentConfig {
@@ -1084,7 +1450,10 @@ mod tests {
             ..Default::default()
         };
         let stats = run_cycle(&store, None, &cfg, 1_764_547_200).unwrap();
-        assert!(stats.rows_written >= 1, "should learn at least one pattern: {stats:?}");
+        assert!(
+            stats.rows_written >= 1,
+            "should learn at least one pattern: {stats:?}"
+        );
         // Heuristic path used (no LLM provider supplied).
         assert_eq!(stats.used_path, GeneratedBy::Heuristic);
     }
@@ -1125,6 +1494,10 @@ mod tests {
             }
         });
         let expanded = expand_query_with_table(&store, "rust async runtime", &legacy);
-        assert!(expanded.contains("cargo") || expanded.contains("tokio"), "{}", expanded);
+        assert!(
+            expanded.contains("cargo") || expanded.contains("tokio"),
+            "{}",
+            expanded
+        );
     }
 }

@@ -227,7 +227,10 @@ async fn call_ingest(state: &SharedState, args: &Value) -> AppResult<Value> {
             .unwrap_or("note")
             .to_string(),
         url: args.get("url").and_then(|v| v.as_str()).map(String::from),
-        domain: args.get("domain").and_then(|v| v.as_str()).map(String::from),
+        domain: args
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         tags: args.get("tags").and_then(|v| v.as_array()).map(|a| {
             a.iter()
                 .filter_map(|t| t.as_str().map(String::from))
@@ -245,7 +248,10 @@ async fn call_annotate(state: &SharedState, args: &Value) -> AppResult<Value> {
 
     let body = CreateAnnotationRequest {
         item_id: require_str(args, "item_id")?,
-        offset_start: args.get("offset_start").and_then(|v| v.as_i64()).unwrap_or(0),
+        offset_start: args
+            .get("offset_start")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
         offset_end: args.get("offset_end").and_then(|v| v.as_i64()).unwrap_or(0),
         text_snippet: args
             .get("text_snippet")
@@ -254,7 +260,10 @@ async fn call_annotate(state: &SharedState, args: &Value) -> AppResult<Value> {
             .to_string(),
         label: args.get("label").and_then(|v| v.as_str()).map(String::from),
         color: args.get("color").and_then(|v| v.as_str()).map(String::from),
-        content: args.get("content").and_then(|v| v.as_str()).map(String::from),
+        content: args
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         // MCP 调用恒为 ai source (外部 agent 写入)
         source: Some("ai".to_string()),
     };
@@ -319,7 +328,10 @@ mod tests {
     #[test]
     fn list_tools_filters_by_scope() {
         let only_search = list_tools(&["search".to_string()]);
-        let names: Vec<&str> = only_search.iter().filter_map(|t| t["name"].as_str()).collect();
+        let names: Vec<&str> = only_search
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
         assert!(names.contains(&"vault_search"));
         assert!(names.contains(&"job_status"));
         assert!(!names.contains(&"vault_chat"));

@@ -57,7 +57,12 @@ fn ocr_typo_profile_suggests_nearest_match() {
 #[test]
 fn ocr_unknown_profile_lists_valid_set() {
     attune_cmd()
-        .args(["ocr", "--profile", "completely_bogus_xyz", "/tmp/__nonexistent__.png"])
+        .args([
+            "ocr",
+            "--profile",
+            "completely_bogus_xyz",
+            "/tmp/__nonexistent__.png",
+        ])
         .assert()
         .failure()
         .code(1)
@@ -89,7 +94,10 @@ fn ocr_help_succeeds_and_documents_flags() {
 #[test]
 fn transcribe_missing_audio_exits_with_user_input_error() {
     attune_cmd()
-        .args(["transcribe", "/definitely/does/not/exist/__attune_smoke__.wav"])
+        .args([
+            "transcribe",
+            "/definitely/does/not/exist/__attune_smoke__.wav",
+        ])
         .assert()
         .failure()
         .code(1)
@@ -137,7 +145,10 @@ fn vault_import_missing_src_does_not_report_already_exists() {
     let tmp = tempfile::tempdir().expect("tempdir");
     attune_cmd()
         .env("HOME", tmp.path())
-        .args(["vault-import", "/definitely/does/not/exist/__attune_import_smoke__"])
+        .args([
+            "vault-import",
+            "/definitely/does/not/exist/__attune_import_smoke__",
+        ])
         .assert()
         .failure()
         .stderr(

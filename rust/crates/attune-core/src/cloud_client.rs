@@ -196,9 +196,17 @@ impl CloudClient {
         // Map cloud HTTP status → typed, actionable error. 409 = device-count cap;
         // 401/403 = license/fingerprint reject; everything else = unavailable.
         match status.as_u16() {
-            409 => Err(DeviceActivateError::MaxDevicesReached(extract_code_or(&text, "max-devices-reached"))),
-            401 | 403 => Err(DeviceActivateError::Rejected(extract_code_or(&text, "device-rejected"))),
-            _ => Err(DeviceActivateError::Unavailable(format!("status={status} body={text}"))),
+            409 => Err(DeviceActivateError::MaxDevicesReached(extract_code_or(
+                &text,
+                "max-devices-reached",
+            ))),
+            401 | 403 => Err(DeviceActivateError::Rejected(extract_code_or(
+                &text,
+                "device-rejected",
+            ))),
+            _ => Err(DeviceActivateError::Unavailable(format!(
+                "status={status} body={text}"
+            ))),
         }
     }
 
@@ -224,7 +232,11 @@ impl CloudClient {
     /// 解析 entitlement 快照 (§5.2). **网络错 / 5xx → `Err`**(调用方走宽限,§7.2);
     /// **200 + valid=false → `Ok(snapshot)`**(业务拒,调用方据 status 立即关)。两类
     /// 错误严格区分 (per §7.2 error 5) —— 故只有传输层失败抛 Err,业务态走解析快照。
-    pub fn verify_entitlements(&self, license_id: &str, nonce: &str) -> Result<EntitlementSnapshot> {
+    pub fn verify_entitlements(
+        &self,
+        license_id: &str,
+        nonce: &str,
+    ) -> Result<EntitlementSnapshot> {
         let url = format!("{}/api/v1/member/verify", self.base_url);
         let resp = self
             .http
@@ -235,7 +247,10 @@ impl CloudClient {
             .map_err(http_err)?;
         // 5xx / transport → Err (走宽限). 4xx (含 401/403) 也视为不可信 → Err.
         if !resp.status().is_success() {
-            return Err(VaultError::Crypto(format!("verify: status={}", resp.status())));
+            return Err(VaultError::Crypto(format!(
+                "verify: status={}",
+                resp.status()
+            )));
         }
         resp.json().map_err(http_err)
     }
@@ -639,7 +654,10 @@ impl SignedPayload {
             },
         );
         m.insert("nonce", serde_json::Value::String(self.nonce.clone()));
-        m.insert("verified_at", serde_json::Value::String(self.verified_at.clone()));
+        m.insert(
+            "verified_at",
+            serde_json::Value::String(self.verified_at.clone()),
+        );
         // BTreeMap → serde_json::to_vec is compact + key-sorted (JCS subset).
         serde_json::to_vec(&m).expect("canonical serialize never fails for owned values")
     }
@@ -837,7 +855,10 @@ mod tests {
         }"#;
         let u: UserInfo = serde_json::from_str(json).unwrap();
         assert_eq!(u.gateway_token.as_deref(), Some("sk-newapi-abc"));
-        assert_eq!(u.gateway_url.as_deref(), Some("https://gateway.engi-stack.com/v1"));
+        assert_eq!(
+            u.gateway_url.as_deref(),
+            Some("https://gateway.engi-stack.com/v1")
+        );
     }
 
     #[test]
@@ -862,7 +883,10 @@ mod tests {
             "gateway_default_model": "deepseek-v4-flash"
         }"#;
         let u: UserInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(u.gateway_default_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(
+            u.gateway_default_model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
     }
 
     // ── activate_license (授权码激活路径) ────────────────────────────────────
@@ -882,8 +906,14 @@ mod tests {
         assert_eq!(r.expires_at.as_deref(), Some("2026-12-31T00:00:00+00:00"));
         assert_eq!(r.allowed_plugins, vec!["law-pro", "med-pro"]);
         assert_eq!(r.gateway_token.as_deref(), Some("sk-newapi-activate"));
-        assert_eq!(r.gateway_url.as_deref(), Some("https://gateway.engi-stack.com/v1"));
-        assert_eq!(r.gateway_default_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(
+            r.gateway_url.as_deref(),
+            Some("https://gateway.engi-stack.com/v1")
+        );
+        assert_eq!(
+            r.gateway_default_model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
     }
 
     #[test]
@@ -940,26 +970,42 @@ mod tests {
             fingerprint_sig: "sig".into(),
         };
         let err = c.device_activate("LIC-KEY", &fp).unwrap_err();
-        assert!(matches!(err, DeviceActivateError::Unavailable(_)), "unreachable → Unavailable, got {err:?}");
+        assert!(
+            matches!(err, DeviceActivateError::Unavailable(_)),
+            "unreachable → Unavailable, got {err:?}"
+        );
     }
 
     #[test]
     fn extract_code_handles_cloud_shapes() {
         // 403 detail 对象 {error, code}
         assert_eq!(
-            extract_code_or(r#"{"detail":{"error":"fingerprint mismatch","code":"fingerprint-mismatch"}}"#, "x"),
+            extract_code_or(
+                r#"{"detail":{"error":"fingerprint mismatch","code":"fingerprint-mismatch"}}"#,
+                "x"
+            ),
             "fingerprint-mismatch"
         );
         // 409 detail 字符串
-        assert_eq!(extract_code_or(r#"{"detail":"max-devices-reached"}"#, "x"), "max-devices-reached");
+        assert_eq!(
+            extract_code_or(r#"{"detail":"max-devices-reached"}"#, "x"),
+            "max-devices-reached"
+        );
         // 不可解析 → fallback
-        assert_eq!(extract_code_or("not json", "device-rejected"), "device-rejected");
+        assert_eq!(
+            extract_code_or("not json", "device-rejected"),
+            "device-rejected"
+        );
     }
 
     #[test]
     fn device_activate_error_display_is_actionable() {
-        assert!(DeviceActivateError::MaxDevicesReached("c".into()).to_string().contains("max-devices-reached"));
-        assert!(DeviceActivateError::Rejected("c".into()).to_string().contains("device-rejected"));
+        assert!(DeviceActivateError::MaxDevicesReached("c".into())
+            .to_string()
+            .contains("max-devices-reached"));
+        assert!(DeviceActivateError::Rejected("c".into())
+            .to_string()
+            .contains("device-rejected"));
     }
 
     #[test]
@@ -1021,7 +1067,10 @@ mod tests {
         let result = c.logout();
         // Network fails (port 5 unreachable), but local session MUST be cleared.
         assert!(result.is_err(), "network call should fail");
-        assert!(c.session_token().is_none(), "local session cleared unconditionally");
+        assert!(
+            c.session_token().is_none(),
+            "local session cleared unconditionally"
+        );
     }
 
     // Edge: empty email / password 也走 HTTP request (业务校验由 server 端)
@@ -1130,7 +1179,10 @@ mod tests {
         let json = r#"{"valid": true, "plan": "pro"}"#;
         let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
         assert_eq!(s.schema(), 0, "missing entitlements → schema 0 (old cloud)");
-        assert!(s.is_unsigned_response(), "old cloud has no signature → unsigned-response");
+        assert!(
+            s.is_unsigned_response(),
+            "old cloud has no signature → unsigned-response"
+        );
     }
 
     #[test]
@@ -1140,7 +1192,11 @@ mod tests {
             "signed_payload": {"status":"active","allowed_plugins":[],"nonce":"n","verified_at":"t"},
             "signature":"s","nonce":"n"}"#;
         let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
-        assert_eq!(s.schema(), 2, "schema 2 surfaced for caller to route to grace");
+        assert_eq!(
+            s.schema(),
+            2,
+            "schema 2 surfaced for caller to route to grace"
+        );
     }
 
     #[test]
@@ -1171,7 +1227,8 @@ mod tests {
             "entitlements": [{"plugin_id":"law-pro","tier":"paid","status":"active"}],
             "seat_count_v2": 5, "grace_policy_v3": {"days": 14}, "telemetry_opt": false
         }"#;
-        let s: EntitlementSnapshot = serde_json::from_str(json).expect("old client tolerates new cloud fields");
+        let s: EntitlementSnapshot =
+            serde_json::from_str(json).expect("old client tolerates new cloud fields");
         // Core contract still parses correctly despite the unknown additions.
         assert!(s.valid);
         assert_eq!(s.schema(), 1);
@@ -1190,10 +1247,16 @@ mod tests {
         let json = r#"{"valid": true, "plan": "pro"}"#;
         let s: EntitlementSnapshot = serde_json::from_str(json).unwrap();
         assert_eq!(s.schema(), 0, "old cloud (no entitlements) → schema 0");
-        assert!(s.is_unsigned_response(), "old cloud unsigned → grace, not fail-closed");
+        assert!(
+            s.is_unsigned_response(),
+            "old cloud unsigned → grace, not fail-closed"
+        );
         // schema 0 is the signal the consume layer uses to keep a paid license in Grace
         // (spec §10: do NOT lock a paying user just because the cloud hasn't shipped v4).
-        assert!(s.valid, "the paid plan is still surfaced — caller keeps it in grace");
+        assert!(
+            s.valid,
+            "the paid plan is still surfaced — caller keeps it in grace"
+        );
     }
 
     /// JCS canonical 序列化:确定性 (同输入同字节) + 键排序 + 无空白。
@@ -1216,10 +1279,18 @@ mod tests {
         let i_nonce = s.find("nonce").unwrap();
         let i_status = s.find("status").unwrap();
         let i_verified = s.find("verified_at").unwrap();
-        assert!(i_allowed < i_expires && i_expires < i_nonce && i_nonce < i_status && i_status < i_verified,
-            "canonical keys must be lexicographically sorted: {s}");
+        assert!(
+            i_allowed < i_expires
+                && i_expires < i_nonce
+                && i_nonce < i_status
+                && i_status < i_verified,
+            "canonical keys must be lexicographically sorted: {s}"
+        );
         // No whitespace (compact).
-        assert!(!s.contains(": ") && !s.contains(", "), "canonical must be compact: {s}");
+        assert!(
+            !s.contains(": ") && !s.contains(", "),
+            "canonical must be compact: {s}"
+        );
     }
 
     // ── vertical 透传 (spec 2026-06-20 §5) ──────────────────────────────────
@@ -1252,7 +1323,10 @@ mod tests {
         let json = r#"{"id": 1, "email": "x@y.com", "plan": "pro", "vertical": "future-vertical"}"#;
         let u: UserInfo = serde_json::from_str(json).unwrap();
         assert_eq!(u.vertical.as_deref(), Some("future-vertical"));
-        assert!(!is_known_vertical("future-vertical"), "unknown → UI uses fallback label");
+        assert!(
+            !is_known_vertical("future-vertical"),
+            "unknown → UI uses fallback label"
+        );
     }
 
     #[test]
@@ -1314,6 +1388,9 @@ mod tests {
             verified_at: "t".into(),
         };
         let s = String::from_utf8(p.canonical_bytes()).unwrap();
-        assert!(s.contains("\"expires_at\":null"), "None → null in canonical: {s}");
+        assert!(
+            s.contains("\"expires_at\":null"),
+            "None → null in canonical: {s}"
+        );
     }
 }

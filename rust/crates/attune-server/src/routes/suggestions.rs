@@ -43,10 +43,14 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
     let missed_queries = store
         .aggregate_missed_queries(ENRICH_MISS_THRESHOLD, MAX_MISSED_QUERIES)
         .unwrap_or_default();
-    let unprocessed_search_miss =
-        store.count_unprocessed_signals().unwrap_or(0).min(u32::MAX as usize) as u32;
-    let browse_signal_count =
-        store.browse_signals_count().unwrap_or(0).min(u32::MAX as usize) as u32;
+    let unprocessed_search_miss = store
+        .count_unprocessed_signals()
+        .unwrap_or(0)
+        .min(u32::MAX as usize) as u32;
+    let browse_signal_count = store
+        .browse_signals_count()
+        .unwrap_or(0)
+        .min(u32::MAX as usize) as u32;
     let annotation_marker_count = store
         .count_unprocessed_signals_by_kind("annotation_marker")
         .unwrap_or(0)

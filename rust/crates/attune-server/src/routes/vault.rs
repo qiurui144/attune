@@ -1,8 +1,8 @@
+use crate::error::{AppError, AppResult};
+use crate::state::SharedState;
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
-use crate::error::{AppError, AppResult};
-use crate::state::SharedState;
 
 /// Trust-chain T8: hydrate the in-memory [`attune_core::entitlement::EntitlementCache`]
 /// from the `plugin_entitlements` vault table at unlock. Reads rows under a SHORT vault
@@ -87,7 +87,9 @@ pub async fn vault_status(State(state): State<SharedState>) -> Json<serde_json::
     let vault_state = vault.state();
     let item_count = if matches!(vault_state, attune_core::vault::VaultState::Unlocked) {
         vault.store().item_count().unwrap_or(0)
-    } else { 0 };
+    } else {
+        0
+    };
 
     Json(serde_json::json!({
         "state": vault_state,
@@ -103,17 +105,17 @@ pub async fn vault_setup(
     // 让首次安装直接拿到可用 token（避免客户端必须 restart server 再 unlock）。
     let (token, recovery_key) = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        let recovery_key = vault.setup_with_recovery_key(&body.password).map_err(|e| {
-            AppError::BadRequest(e.to_string())
-        })?;
+        let recovery_key = vault
+            .setup_with_recovery_key(&body.password)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
         // setup 自动 Unlocked；先 lock 再 unlock，复用 unlock token 颁发路径。
         // 首次安装一次性操作，多一次 Argon2id 派生可接受。
-        vault.lock().map_err(|e| {
-            AppError::Internal(e.to_string())
-        })?;
-        let token = vault.unlock(&body.password).map_err(|e| {
-            AppError::Internal(e.to_string())
-        })?;
+        vault
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let token = vault
+            .unlock(&body.password)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         (token, recovery_key)
     };
     // Bug-C: vault unlock 后立即触发 reload_llm,确保 settings 中已有的 llm config
@@ -134,9 +136,9 @@ pub async fn vault_unlock(
 ) -> AppResult<Json<serde_json::Value>> {
     let token = {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        vault.unlock(&body.password).map_err(|e| {
-            AppError::Unauthorized(e.to_string())
-        })?
+        vault
+            .unlock(&body.password)
+            .map_err(|e| AppError::Unauthorized(e.to_string()))?
     };
     // Bug-C: per setup 同步注释,unlock 后强制 reload_llm,杜绝
     // "server restart → unlock → chat 503" 的 P3。
@@ -144,16 +146,14 @@ pub async fn vault_unlock(
     Ok(Json(serde_json::json!({"status": "ok", "token": token})))
 }
 
-pub async fn vault_lock(
-    State(state): State<SharedState>,
-) -> AppResult<Json<serde_json::Value>> {
+pub async fn vault_lock(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
     // Clear search engines before locking (no vault mutex held)
     state.clear_search_engines();
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        vault.lock().map_err(|e| {
-            AppError::Internal(e.to_string())
-        })?;
+        vault
+            .lock()
+            .map_err(|e| AppError::Internal(e.to_string()))?;
     }
     Ok(Json(serde_json::json!({"status": "ok", "state": "locked"})))
 }
@@ -162,9 +162,9 @@ pub async fn export_device_secret(
     State(state): State<SharedState>,
 ) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    let secret = vault.export_device_secret().map_err(|e| {
-        AppError::Forbidden(e.to_string())
-    })?;
+    let secret = vault
+        .export_device_secret()
+        .map_err(|e| AppError::Forbidden(e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "device_secret": secret,
@@ -182,9 +182,9 @@ pub async fn import_device_secret(
     Json(body): Json<ImportDeviceSecretRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    vault.import_device_secret(&body.device_secret).map_err(|e| {
-        AppError::BadRequest(e.to_string())
-    })?;
+    vault
+        .import_device_secret(&body.device_secret)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -197,9 +197,9 @@ pub async fn vault_change_password(
     Json(body): Json<ChangePasswordRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    vault.change_password(&body.old_password, &body.new_password).map_err(|e| {
-        AppError::BadRequest(e.to_string())
-    })?;
+    vault
+        .change_password(&body.old_password, &body.new_password)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
@@ -211,9 +211,9 @@ pub async fn vault_forgot_password_reset(
     state.clear_search_engines();
     {
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-        vault.forgot_password_reset(&body.confirmation).map_err(|e| {
-            AppError::BadRequest(e.to_string())
-        })?;
+        vault
+            .forgot_password_reset(&body.confirmation)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
     }
 
     Ok(Json(serde_json::json!({
@@ -231,12 +231,10 @@ pub async fn vault_reset_with_recovery_key(
         let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
         vault
             .reset_password_with_recovery_key(&body.recovery_key, &body.new_password)
-            .map_err(|e| {
-                AppError::BadRequest(e.to_string())
-            })?;
-        vault.unlock(&body.new_password).map_err(|e| {
-            AppError::Unauthorized(e.to_string())
-        })?
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        vault
+            .unlock(&body.new_password)
+            .map_err(|e| AppError::Unauthorized(e.to_string()))?
     };
 
     // Bug-C: reset 后也走 unlock 同样路径,显式 reload_llm。
@@ -251,9 +249,7 @@ pub async fn vault_reset_with_recovery_key(
 
 /// G3① observability: pending locked-mode staged ingest count. Readable in ANY vault
 /// state (no DEK needed) so a UI / monitor can show "N files queued, waiting for unlock".
-pub async fn vault_staging_status(
-    State(_state): State<SharedState>,
-) -> Json<serde_json::Value> {
+pub async fn vault_staging_status(State(_state): State<SharedState>) -> Json<serde_json::Value> {
     let pending = attune_core::staging::IngestStaging::open_default().count();
     Json(serde_json::json!({ "pending": pending }))
 }
@@ -289,9 +285,7 @@ fn read_auto_unlock_flag() -> bool {
 }
 
 /// GET auto-unlock state. `implemented:false` signals the real sealing is not yet built.
-pub async fn vault_get_auto_unlock(
-    State(_state): State<SharedState>,
-) -> Json<serde_json::Value> {
+pub async fn vault_get_auto_unlock(State(_state): State<SharedState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "enabled": read_auto_unlock_flag(),
         "implemented": false,

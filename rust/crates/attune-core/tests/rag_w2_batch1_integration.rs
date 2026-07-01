@@ -10,9 +10,9 @@
 // 设计来源：docs/superpowers/specs/2026-04-27-w2-rag-quality-batch1-design.md
 // 上游参照：吴师兄 RAG 文章 + CRAG arXiv:2401.15884 + Self-RAG arXiv:2310.11511
 
-use attune_core::{parse_confidence, strip_confidence_marker, Citation, ChatResponse};
 use attune_core::chunker::{extract_sections_with_path, SectionWithPath};
 use attune_core::search::SearchParams;
+use attune_core::{parse_confidence, strip_confidence_marker, ChatResponse, Citation};
 
 // ── J1 集成 ────────────────────────────────────────────────────────────
 
@@ -57,7 +57,12 @@ fn j1_realistic_multi_level_doc_path_correct() {
         .find(|s| s.content.contains("不承担给付责任"))
         .expect("找不到等待期内出险章节");
 
-    assert_eq!(target.path.len(), 4, "应有 4 层路径，得到 {:?}", target.path);
+    assert_eq!(
+        target.path.len(),
+        4,
+        "应有 4 层路径，得到 {:?}",
+        target.path
+    );
     assert!(target.path[0].contains("XX 重疾险"));
     assert!(target.path[1].contains("第二章"));
     assert!(target.path[2].contains("2.2 等待期"));
@@ -75,7 +80,10 @@ fn j1_dedent_across_chapters() {
     // 跨章节 dedent：第一章下的内容不应混进第二章的 path
     let doc = "# 文档\n\n## 第一章\n\n### 1.1 节\n\nA\n\n## 第二章\n\nB";
     let sections = extract_sections_with_path(doc);
-    let b_section = sections.iter().find(|s| s.content.contains("\nB")).expect("missing B section");
+    let b_section = sections
+        .iter()
+        .find(|s| s.content.contains("\nB"))
+        .expect("missing B section");
     // B 的 path 应是 [文档, 第二章]，不应包含 "1.1 节"
     assert!(
         b_section.path.iter().all(|p| !p.contains("1.1")),
@@ -117,11 +125,7 @@ fn j5_parse_confidence_realistic_llm_outputs() {
         ("没标 confidence", 3),
     ];
     for (input, expected) in cases {
-        assert_eq!(
-            parse_confidence(input),
-            expected,
-            "input: {input:?}"
-        );
+        assert_eq!(parse_confidence(input), expected, "input: {input:?}");
     }
 }
 
@@ -172,9 +176,18 @@ fn b1_citation_web_source_has_no_offsets() {
         breadcrumb: vec![],
     };
     let json = serde_json::to_string(&citation).unwrap();
-    assert!(!json.contains("chunk_offset_start"), "None offset 字段不应出现在 JSON: {json}");
-    assert!(!json.contains("chunk_offset_end"), "None offset 字段不应出现在 JSON: {json}");
-    assert!(!json.contains("breadcrumb"), "空 breadcrumb 不应出现在 JSON: {json}");
+    assert!(
+        !json.contains("chunk_offset_start"),
+        "None offset 字段不应出现在 JSON: {json}"
+    );
+    assert!(
+        !json.contains("chunk_offset_end"),
+        "None offset 字段不应出现在 JSON: {json}"
+    );
+    assert!(
+        !json.contains("breadcrumb"),
+        "空 breadcrumb 不应出现在 JSON: {json}"
+    );
 }
 
 #[test]
@@ -200,7 +213,10 @@ fn end_to_end_breadcrumb_in_prefix_then_used_as_citation() {
     //   doc → extract_sections_with_path → 拿到 path → 创建 Citation 时填 breadcrumb
     let doc = "# 公司手册\n\n## 第三章 福利\n\n### 3.2 假期\n\n年假 15 天。";
     let sections = extract_sections_with_path(doc);
-    let target = sections.iter().find(|s| s.content.contains("年假")).unwrap();
+    let target = sections
+        .iter()
+        .find(|s| s.content.contains("年假"))
+        .unwrap();
 
     let citation = Citation {
         item_id: "doc-1".into(),
@@ -213,7 +229,11 @@ fn end_to_end_breadcrumb_in_prefix_then_used_as_citation() {
 
     assert_eq!(
         citation.breadcrumb,
-        vec!["公司手册".to_string(), "第三章 福利".to_string(), "3.2 假期".to_string()]
+        vec![
+            "公司手册".to_string(),
+            "第三章 福利".to_string(),
+            "3.2 假期".to_string()
+        ]
     );
     let json = serde_json::to_string(&citation).unwrap();
     assert!(json.contains("3.2 假期"));

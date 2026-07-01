@@ -14,7 +14,7 @@ const INITIAL_CAPACITY: usize = 10_000;
 pub struct VectorMeta {
     pub item_id: String,
     pub chunk_idx: usize,
-    pub level: u8,        // 1=章节, 2=段落
+    pub level: u8, // 1=章节, 2=段落
     pub section_idx: usize,
 }
 
@@ -48,16 +48,24 @@ impl VectorIndex {
         };
         let index = usearch::new_index(&options)
             .map_err(|e| VaultError::Crypto(format!("usearch init: {e}")))?;
-        index.reserve(INITIAL_CAPACITY)
+        index
+            .reserve(INITIAL_CAPACITY)
             .map_err(|e| VaultError::Crypto(format!("usearch reserve: {e}")))?;
-        Ok(Self { index, meta: HashMap::new(), next_key: 0, dims })
+        Ok(Self {
+            index,
+            meta: HashMap::new(),
+            next_key: 0,
+            dims,
+        })
     }
 
     /// 添加向量
     pub fn add(&mut self, vector: &[f32], meta: VectorMeta) -> Result<u64> {
         if vector.len() != self.dims {
             return Err(VaultError::Crypto(format!(
-                "vector dims mismatch: expected {}, got {}", self.dims, vector.len()
+                "vector dims mismatch: expected {}, got {}",
+                self.dims,
+                vector.len()
             )));
         }
         // usearch `add` panics 一旦 size 触及 capacity（"Reserve capacity ahead of
@@ -66,7 +74,8 @@ impl VectorIndex {
         self.ensure_capacity_for_one()?;
         let key = self.next_key;
         self.next_key += 1;
-        self.index.add(key, vector)
+        self.index
+            .add(key, vector)
             .map_err(|e| VaultError::Crypto(format!("usearch add: {e}")))?;
         self.meta.insert(key, meta);
         Ok(key)
@@ -101,7 +110,9 @@ impl VectorIndex {
         if self.index.size() == 0 {
             return Ok(vec![]);
         }
-        let results = self.index.search(query, top_k)
+        let results = self
+            .index
+            .search(query, top_k)
             .map_err(|e| VaultError::Crypto(format!("usearch search: {e}")))?;
 
         let mut output = Vec::new();
@@ -119,13 +130,16 @@ impl VectorIndex {
 
     /// 按 item_id 删除所有向量
     pub fn delete_by_item_id(&mut self, item_id: &str) -> Result<usize> {
-        let keys_to_remove: Vec<u64> = self.meta.iter()
+        let keys_to_remove: Vec<u64> = self
+            .meta
+            .iter()
             .filter(|(_, m)| m.item_id == item_id)
             .map(|(k, _)| *k)
             .collect();
         let count = keys_to_remove.len();
         for key in &keys_to_remove {
-            self.index.remove(*key)
+            self.index
+                .remove(*key)
                 .map_err(|e| VaultError::Crypto(format!("usearch remove: {e}")))?;
             self.meta.remove(key);
         }
@@ -144,8 +158,12 @@ impl VectorIndex {
     ///
     /// 若该 item 不存在任何向量或 usearch get() 失败则返回 None。
     pub fn get_vector(&self, item_id: &str) -> Option<Vec<f32>> {
-        if item_id.is_empty() { return None; }
-        let keys: Vec<u64> = self.meta.iter()
+        if item_id.is_empty() {
+            return None;
+        }
+        let keys: Vec<u64> = self
+            .meta
+            .iter()
             .filter(|(_, m)| m.item_id == item_id)
             .map(|(k, _)| *k)
             .collect();
@@ -182,9 +200,11 @@ impl VectorIndex {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let path_str = path.to_str()
+        let path_str = path
+            .to_str()
             .ok_or_else(|| VaultError::Crypto("non-UTF8 path in save".into()))?;
-        self.index.save(path_str)
+        self.index
+            .save(path_str)
             .map_err(|e| VaultError::Crypto(format!("usearch save: {e}")))?;
         // 保存 meta
         let meta_path = path.with_extension("meta.json");
@@ -206,9 +226,11 @@ impl VectorIndex {
         };
         let index = usearch::new_index(&options)
             .map_err(|e| VaultError::Crypto(format!("usearch init: {e}")))?;
-        let path_str = path.to_str()
+        let path_str = path
+            .to_str()
             .ok_or_else(|| VaultError::Crypto("non-UTF8 path in load".into()))?;
-        index.load(path_str)
+        index
+            .load(path_str)
             .map_err(|e| VaultError::Crypto(format!("usearch load: {e}")))?;
 
         let meta_path = path.with_extension("meta.json");
@@ -224,10 +246,19 @@ impl VectorIndex {
             let bytes = std::fs::read(&key_path)?;
             if bytes.len() == 8 {
                 u64::from_le_bytes(bytes.try_into().expect("8-byte slice (length checked)"))
-            } else { meta.len() as u64 }
-        } else { meta.len() as u64 };
+            } else {
+                meta.len() as u64
+            }
+        } else {
+            meta.len() as u64
+        };
 
-        Ok(Self { index, meta, next_key, dims })
+        Ok(Self {
+            index,
+            meta,
+            next_key,
+            dims,
+        })
     }
 
     /// 保存到加密文件：save 到临时目录 → 打包 main/meta/nextkey → 加密写入目标路径
@@ -277,7 +308,9 @@ impl VectorIndex {
         if bytes.len() < 24 {
             return Err(VaultError::Crypto("vectors file too short".into()));
         }
-        let main_len = u64::from_le_bytes(bytes[0..8].try_into().expect("8-byte slice (range fixed)")) as usize;
+        let main_len =
+            u64::from_le_bytes(bytes[0..8].try_into().expect("8-byte slice (range fixed)"))
+                as usize;
         let mut offset = 8;
         if bytes.len() < offset + main_len + 8 {
             return Err(VaultError::Crypto("vectors file truncated".into()));
@@ -285,7 +318,11 @@ impl VectorIndex {
         let main_bytes = &bytes[offset..offset + main_len];
         offset += main_len;
 
-        let meta_len = u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("8-byte slice (range fixed)")) as usize;
+        let meta_len = u64::from_le_bytes(
+            bytes[offset..offset + 8]
+                .try_into()
+                .expect("8-byte slice (range fixed)"),
+        ) as usize;
         offset += 8;
         if bytes.len() < offset + meta_len + 8 {
             return Err(VaultError::Crypto("vectors file truncated".into()));
@@ -293,7 +330,11 @@ impl VectorIndex {
         let meta_bytes = &bytes[offset..offset + meta_len];
         offset += meta_len;
 
-        let key_len = u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("8-byte slice (range fixed)")) as usize;
+        let key_len = u64::from_le_bytes(
+            bytes[offset..offset + 8]
+                .try_into()
+                .expect("8-byte slice (range fixed)"),
+        ) as usize;
         offset += 8;
         if bytes.len() < offset + key_len {
             return Err(VaultError::Crypto("vectors file truncated".into()));
@@ -331,21 +372,69 @@ mod tests {
         let v1 = vec![1.0, 0.0, 0.0, 0.0];
         let v2 = vec![0.0, 1.0, 0.0, 0.0];
 
-        idx.add(&v1, VectorMeta { item_id: "a".into(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
-        idx.add(&v2, VectorMeta { item_id: "b".into(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
+        idx.add(
+            &v1,
+            VectorMeta {
+                item_id: "a".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
+        idx.add(
+            &v2,
+            VectorMeta {
+                item_id: "b".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
 
         let results = idx.search(&v1, 2).unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0.item_id, "a", "Closest should be identical vector");
+        assert_eq!(
+            results[0].0.item_id, "a",
+            "Closest should be identical vector"
+        );
     }
 
     #[test]
     fn delete_by_item_id() {
         let mut idx = VectorIndex::new(4).unwrap();
         let v = vec![1.0, 0.0, 0.0, 0.0];
-        idx.add(&v, VectorMeta { item_id: "x".into(), chunk_idx: 0, level: 1, section_idx: 0 }).unwrap();
-        idx.add(&v, VectorMeta { item_id: "x".into(), chunk_idx: 1, level: 2, section_idx: 0 }).unwrap();
-        idx.add(&v, VectorMeta { item_id: "y".into(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
+        idx.add(
+            &v,
+            VectorMeta {
+                item_id: "x".into(),
+                chunk_idx: 0,
+                level: 1,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
+        idx.add(
+            &v,
+            VectorMeta {
+                item_id: "x".into(),
+                chunk_idx: 1,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
+        idx.add(
+            &v,
+            VectorMeta {
+                item_id: "y".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
         assert_eq!(idx.len(), 3);
 
         let removed = idx.delete_by_item_id("x").unwrap();
@@ -359,9 +448,16 @@ mod tests {
         let path = dir.path().join("vectors.usearch");
 
         let mut idx = VectorIndex::new(4).unwrap();
-        idx.add(&[1.0, 0.0, 0.0, 0.0], VectorMeta {
-            item_id: "id1".into(), chunk_idx: 0, level: 2, section_idx: 0
-        }).unwrap();
+        idx.add(
+            &[1.0, 0.0, 0.0, 0.0],
+            VectorMeta {
+                item_id: "id1".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
         idx.save(&path).unwrap();
 
         let loaded = VectorIndex::load(&path, 4).unwrap();
@@ -378,9 +474,16 @@ mod tests {
         let key = Key32::generate();
 
         let mut idx = VectorIndex::new(4).unwrap();
-        idx.add(&[1.0, 0.0, 0.0, 0.0], VectorMeta {
-            item_id: "a".into(), chunk_idx: 0, level: 2, section_idx: 0,
-        }).unwrap();
+        idx.add(
+            &[1.0, 0.0, 0.0, 0.0],
+            VectorMeta {
+                item_id: "a".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
 
         idx.save_encrypted(&key, &path).unwrap();
         assert!(path.exists());
@@ -392,24 +495,51 @@ mod tests {
     #[test]
     fn dimension_mismatch_error() {
         let mut idx = VectorIndex::new(4).unwrap();
-        let result = idx.add(&[1.0, 0.0], VectorMeta {
-            item_id: "x".into(), chunk_idx: 0, level: 2, section_idx: 0
-        });
+        let result = idx.add(
+            &[1.0, 0.0],
+            VectorMeta {
+                item_id: "x".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn get_vector_returns_mean() {
         let mut idx = VectorIndex::new(4).unwrap();
-        idx.add(&[1.0, 0.0, 0.0, 0.0], VectorMeta {
-            item_id: "a".into(), chunk_idx: 0, level: 2, section_idx: 0
-        }).unwrap();
-        idx.add(&[0.0, 1.0, 0.0, 0.0], VectorMeta {
-            item_id: "a".into(), chunk_idx: 1, level: 2, section_idx: 0
-        }).unwrap();
-        idx.add(&[0.0, 0.0, 1.0, 0.0], VectorMeta {
-            item_id: "b".into(), chunk_idx: 0, level: 2, section_idx: 0
-        }).unwrap();
+        idx.add(
+            &[1.0, 0.0, 0.0, 0.0],
+            VectorMeta {
+                item_id: "a".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
+        idx.add(
+            &[0.0, 1.0, 0.0, 0.0],
+            VectorMeta {
+                item_id: "a".into(),
+                chunk_idx: 1,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
+        idx.add(
+            &[0.0, 0.0, 1.0, 0.0],
+            VectorMeta {
+                item_id: "b".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
 
         let v = idx.get_vector("a").unwrap();
         assert_eq!(v.len(), 4);
@@ -450,7 +580,12 @@ mod tests {
         for i in 0..N {
             idx.add(
                 &det_vec(DIMS, i as u64),
-                VectorMeta { item_id: format!("item-{i}"), chunk_idx: 0, level: 2, section_idx: 0 },
+                VectorMeta {
+                    item_id: format!("item-{i}"),
+                    chunk_idx: 0,
+                    level: 2,
+                    section_idx: 0,
+                },
             )
             .unwrap_or_else(|e| panic!("add vector {i} (>10k) must not fail: {e}"));
         }
@@ -463,10 +598,14 @@ mod tests {
         // 在干净小集合上覆盖。
         let target = 7777u64;
         let q = det_vec(DIMS, target);
-        let results = idx.search(&q, 16).expect("search over 12k vectors must not fail");
+        let results = idx
+            .search(&q, 16)
+            .expect("search over 12k vectors must not fail");
         assert!(!results.is_empty(), "12k 向量下搜索必须有结果");
         assert!(
-            results.iter().any(|(m, _)| m.item_id == format!("item-{target}")),
+            results
+                .iter()
+                .any(|(m, _)| m.item_id == format!("item-{target}")),
             "扩容后索引未损坏：item-{target} 必须出现在 top-16 召回里，实得 {:?}",
             results.iter().map(|(m, _)| &m.item_id).collect::<Vec<_>>()
         );
@@ -480,7 +619,12 @@ mod tests {
         for i in 0..10_000 {
             idx.add(
                 &det_vec(DIMS, i as u64),
-                VectorMeta { item_id: format!("b-{i}"), chunk_idx: 0, level: 2, section_idx: 0 },
+                VectorMeta {
+                    item_id: format!("b-{i}"),
+                    chunk_idx: 0,
+                    level: 2,
+                    section_idx: 0,
+                },
             )
             .unwrap_or_else(|e| panic!("add at exactly-10000 boundary, i={i}: {e}"));
         }
@@ -488,7 +632,12 @@ mod tests {
         // 第 10_001 个 —— 旧代码在此 panic。
         idx.add(
             &det_vec(DIMS, 10_000),
-            VectorMeta { item_id: "b-10000".into(), chunk_idx: 0, level: 2, section_idx: 0 },
+            VectorMeta {
+                item_id: "b-10000".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
         )
         .expect("the 10_001-th vector must grow capacity, not panic");
         assert_eq!(idx.len(), 10_001);
@@ -497,7 +646,16 @@ mod tests {
     #[test]
     fn get_vector_single_chunk_equals_original() {
         let mut idx = VectorIndex::new(3).unwrap();
-        idx.add(&[1.0, 2.0, 3.0], VectorMeta { item_id: "x".into(), chunk_idx: 0, level: 2, section_idx: 0 }).unwrap();
+        idx.add(
+            &[1.0, 2.0, 3.0],
+            VectorMeta {
+                item_id: "x".into(),
+                chunk_idx: 0,
+                level: 2,
+                section_idx: 0,
+            },
+        )
+        .unwrap();
         let v = idx.get_vector("x").unwrap();
         assert_eq!(v.len(), 3);
         assert!((v[0] - 1.0).abs() < 1e-5);

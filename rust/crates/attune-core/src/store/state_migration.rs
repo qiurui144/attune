@@ -438,7 +438,14 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = dek();
         store
-            .upsert_agent_state(&dek, "old_name", "law-pro", AgentStateKind::Preference, 1, b"hello")
+            .upsert_agent_state(
+                &dek,
+                "old_name",
+                "law-pro",
+                AgentStateKind::Preference,
+                1,
+                b"hello",
+            )
             .unwrap();
 
         let report = store
@@ -468,7 +475,14 @@ mod tests {
         let dek = dek();
         // This row's agent_id is NOT "old_name", so rename_migrator declines it.
         store
-            .upsert_agent_state(&dek, "unclaimed", "law-pro", AgentStateKind::SkillExpansion, 1, b"precious")
+            .upsert_agent_state(
+                &dek,
+                "unclaimed",
+                "law-pro",
+                AgentStateKind::SkillExpansion,
+                1,
+                b"precious",
+            )
             .unwrap();
 
         let report = store
@@ -481,7 +495,10 @@ mod tests {
         let still = store
             .get_agent_state(&dek, "unclaimed", "law-pro", AgentStateKind::SkillExpansion)
             .unwrap();
-        assert!(still.is_some(), "§2.3: original learned-state row must NOT be deleted");
+        assert!(
+            still.is_some(),
+            "§2.3: original learned-state row must NOT be deleted"
+        );
 
         // And it is recoverable from the orphan quarantine, payload intact.
         assert_eq!(store.count_agent_state_orphans().unwrap(), 1);
@@ -545,7 +562,14 @@ mod tests {
         let dek = dek();
         // Already at v2 — below-target query (< 2) must not even see it.
         store
-            .upsert_agent_state(&dek, "future", "law-pro", AgentStateKind::Preference, 2, b"keep")
+            .upsert_agent_state(
+                &dek,
+                "future",
+                "law-pro",
+                AgentStateKind::Preference,
+                2,
+                b"keep",
+            )
             .unwrap();
         let report = store.migrate_agent_state(&dek, 2, &[], None).unwrap();
         assert_eq!(report.migrated, 0);
@@ -583,8 +607,16 @@ mod tests {
             .upsert_agent_state(&dek, "a", "law-pro", AgentStateKind::Preference, 1, b"base")
             .unwrap();
         let steps = [
-            MigrationStep { from_version: 1, to_version: 2, migrate_row: v1_v2 },
-            MigrationStep { from_version: 2, to_version: 3, migrate_row: v2_v3 },
+            MigrationStep {
+                from_version: 1,
+                to_version: 2,
+                migrate_row: v1_v2,
+            },
+            MigrationStep {
+                from_version: 2,
+                to_version: 3,
+                migrate_row: v2_v3,
+            },
         ];
         let report = store.migrate_agent_state(&dek, 3, &steps, None).unwrap();
         assert_eq!(report.migrated, 1);
@@ -643,7 +675,11 @@ mod tests {
         store
             .upsert_agent_state(&dek, "a", "law-pro", AgentStateKind::Preference, 1, b"x")
             .unwrap();
-        let steps = [MigrationStep { from_version: 2, to_version: 3, migrate_row: v2_v3 }];
+        let steps = [MigrationStep {
+            from_version: 2,
+            to_version: 3,
+            migrate_row: v2_v3,
+        }];
         let report = store.migrate_agent_state(&dek, 3, &steps, None).unwrap();
         assert_eq!(report.orphaned, 1);
         assert_eq!(report.migrated, 0);

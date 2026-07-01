@@ -1,20 +1,18 @@
 # Attune 架构
 
-## 双产品线
+## Rust 生产架构
 
 ```
-┌─────────────────────────────┐  ┌─────────────────────────────┐
-│  Python 原型线 (实验)         │  │  Rust 商用线 (生产)          │
-│  src/npu_webhook/           │  │  rust/                       │
-│  • FastAPI + ChromaDB       │  │  • Axum + rusqlite           │
-│  • 78 tests                 │  │  • 900+ tests                │
-│  • 快速迭代新 feature       │  │  • AES-256-GCM 加密 vault    │
-└─────────────────────────────┘  └─────────────────────────────┘
-                ↓ 验证后择优迁移
-                选 Rust 商用线 ship
+┌─────────────────────────────┐
+│  Rust 生产线                 │
+│  rust/                       │
+│  • Axum + rusqlite           │
+│  • tantivy + usearch         │
+│  • AES-256-GCM 加密 vault    │
+└─────────────────────────────┘
 ```
 
-设计取舍：Python 端验证算法 / 集成 / UX；Rust 端打包发版 / 加密 / 性能。
+新功能直接在 Rust workspace、嵌入式 Web UI、Chrome 扩展中实现和验证。
 
 ## Rust 后端模块（v0.7）
 

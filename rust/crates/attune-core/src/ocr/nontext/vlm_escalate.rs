@@ -60,7 +60,12 @@ pub const EGRESS_MAX_EDGE: u32 = 1024;
 
 /// Should this region escalate, given policy + the cross-validate decision + budget?
 /// `discrepant` = the region was flagged conflict/discrepancy or low-confidence.
-pub fn should_escalate(policy: VlmEscalationPolicy, discrepant: bool, used: u32, budget: u32) -> bool {
+pub fn should_escalate(
+    policy: VlmEscalationPolicy,
+    discrepant: bool,
+    used: u32,
+    budget: u32,
+) -> bool {
     if used >= budget {
         return false; // R2 budget cap (escalate_budget)
     }
@@ -206,7 +211,8 @@ fn downscale_for_egress(
     dst: &Path,
     max_edge: u32,
 ) -> std::result::Result<(), EgressError> {
-    let img = image::open(src).map_err(|e| EgressError::Io(format!("open {}: {e}", src.display())))?;
+    let img =
+        image::open(src).map_err(|e| EgressError::Io(format!("open {}: {e}", src.display())))?;
     let (w, h) = (img.width(), img.height());
     let minimized = if w.max(h) > max_edge {
         // Preserves aspect ratio; `thumbnail` is fast nearest-ish and good enough for a VLM.
@@ -266,7 +272,10 @@ pub fn parse_vlm_answer(kind: RegionKind, answer: &str) -> Result<RegionResult> 
         },
         RegionKind::Figure => RegionResult::FigureV1 {
             class: "figure".into(),
-            caption: v.get("caption").and_then(|x| x.as_str()).map(str::to_string),
+            caption: v
+                .get("caption")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
             grounding: parse_grounding(&v),
         },
         RegionKind::Chart => RegionResult::ChartV1 {
@@ -344,7 +353,12 @@ fn parse_grounding(v: &serde_json::Value) -> Option<GroundingRef> {
     // region_bbox is a placeholder here; stamp_grounding overwrites it with the crop-origin region.
     let sub_bbox = bbox("sub_bbox")?;
     Some(GroundingRef {
-        region_bbox: BBox { x: 0, y: 0, w: 0, h: 0 }, // placeholder, overwritten by stamp_grounding
+        region_bbox: BBox {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }, // placeholder, overwritten by stamp_grounding
         page: 0,
         sub_bbox: Some(sub_bbox),
         ocr_line_ref: g
@@ -363,7 +377,11 @@ fn parse_grounding(v: &serde_json::Value) -> Option<GroundingRef> {
 /// chart WITH series requires each series to be grounded. Variants that carry no extracted content
 /// (`UnrecognizedV1`, `CheckboxV1`, `SignatureV1`, `TableV1` — TableV1 cell grounding is a later
 /// increment, spec §5.3 marks it `Option`) are not grounding-gated here.
-pub fn ground_region(result: &RegionResult, region: &BBox, page: u32) -> std::result::Result<(), GroundingFail> {
+pub fn ground_region(
+    result: &RegionResult,
+    region: &BBox,
+    page: u32,
+) -> std::result::Result<(), GroundingFail> {
     match result {
         RegionResult::ChartV1 { series, .. } => {
             for s in series {
@@ -371,7 +389,9 @@ pub fn ground_region(result: &RegionResult, region: &BBox, page: u32) -> std::re
             }
             Ok(())
         }
-        RegionResult::FormulaV1 { latex, grounding, .. } => {
+        RegionResult::FormulaV1 {
+            latex, grounding, ..
+        } => {
             // Only require grounding when a value was actually extracted (latex present).
             if latex.is_some() {
                 validate_grounding(grounding.as_ref(), region, page)?;
@@ -384,13 +404,17 @@ pub fn ground_region(result: &RegionResult, region: &BBox, page: u32) -> std::re
             }
             Ok(())
         }
-        RegionResult::FigureV1 { caption, grounding, .. } => {
+        RegionResult::FigureV1 {
+            caption, grounding, ..
+        } => {
             if caption.is_some() {
                 validate_grounding(grounding.as_ref(), region, page)?;
             }
             Ok(())
         }
-        RegionResult::StampV1 { text, grounding, .. } => {
+        RegionResult::StampV1 {
+            text, grounding, ..
+        } => {
             if text.is_some() {
                 validate_grounding(grounding.as_ref(), region, page)?;
             }
@@ -432,7 +456,12 @@ pub struct RegionGeom {
 impl RegionGeom {
     /// The crop-origin region used to validate the VLM's crop-relative sub_bbox.
     fn crop_region(&self) -> BBox {
-        BBox { x: 0, y: 0, w: self.crop_w, h: self.crop_h }
+        BBox {
+            x: 0,
+            y: 0,
+            w: self.crop_w,
+            h: self.crop_h,
+        }
     }
 }
 
@@ -450,7 +479,9 @@ fn stamp_grounding(result: &mut RegionResult, geom: &RegionGeom) {
         }
     };
     match result {
-        RegionResult::ChartV1 { series, .. } => series.iter_mut().for_each(|s| restamp(&mut s.grounding)),
+        RegionResult::ChartV1 { series, .. } => {
+            series.iter_mut().for_each(|s| restamp(&mut s.grounding))
+        }
         RegionResult::FormulaV1 { grounding, .. } => restamp(grounding),
         RegionResult::HandwritingV1 { grounding, .. } => restamp(grounding),
         RegionResult::FigureV1 { grounding, .. } => restamp(grounding),
@@ -469,7 +500,9 @@ fn finalize_grounding_page_coords(result: &mut RegionResult, geom: &RegionGeom) 
         }
     };
     match result {
-        RegionResult::ChartV1 { series, .. } => series.iter_mut().for_each(|s| set(&mut s.grounding)),
+        RegionResult::ChartV1 { series, .. } => {
+            series.iter_mut().for_each(|s| set(&mut s.grounding))
+        }
         RegionResult::FormulaV1 { grounding, .. } => set(grounding),
         RegionResult::HandwritingV1 { grounding, .. } => set(grounding),
         RegionResult::FigureV1 { grounding, .. } => set(grounding),
@@ -616,7 +649,12 @@ mod tests {
     /// grounding sub_bbox inside 8×8 is valid. Geom for these tests: tiny page bbox + 8×8 crop.
     fn test_geom() -> RegionGeom {
         RegionGeom {
-            page_bbox: BBox { x: 100, y: 200, w: 8, h: 8 },
+            page_bbox: BBox {
+                x: 100,
+                y: 200,
+                w: 8,
+                h: 8,
+            },
             page: 0,
             crop_w: 8,
             crop_h: 8,
@@ -659,7 +697,8 @@ mod tests {
     }
     #[test]
     fn parse_chatty_answer_extracts_json() {
-        let r = parse_vlm_answer(RegionKind::Handwriting, r#"Sure! {"text":"hello"} done"#).unwrap();
+        let r =
+            parse_vlm_answer(RegionKind::Handwriting, r#"Sure! {"text":"hello"} done"#).unwrap();
         match r {
             RegionResult::HandwritingV1 { text, .. } => assert_eq!(text.as_deref(), Some("hello")),
             _ => panic!(),
@@ -673,8 +712,13 @@ mod tests {
     fn first_try_success_zero_retries() {
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&[GROUNDED_HW]);
-        let (res, tel) =
-            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        let (res, tel) = escalate_region(
+            &vlm,
+            &gated_token(dir.path()),
+            RegionKind::Handwriting,
+            "qwen-vl",
+            test_geom(),
+        );
         assert!(res.is_ok());
         assert_eq!(tel.retry_count, 0);
         assert_eq!(tel.error_kind, None);
@@ -683,8 +727,13 @@ mod tests {
     fn retries_then_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&["garbage", GROUNDED_HW]);
-        let (res, tel) =
-            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        let (res, tel) = escalate_region(
+            &vlm,
+            &gated_token(dir.path()),
+            RegionKind::Handwriting,
+            "qwen-vl",
+            test_geom(),
+        );
         assert!(res.is_ok());
         assert_eq!(tel.retry_count, 1);
     }
@@ -692,8 +741,13 @@ mod tests {
     fn three_failures_gives_parse_fail_telemetry() {
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&["bad1", "bad2", "bad3", "bad4"]);
-        let (res, tel) =
-            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        let (res, tel) = escalate_region(
+            &vlm,
+            &gated_token(dir.path()),
+            RegionKind::Handwriting,
+            "qwen-vl",
+            test_geom(),
+        );
         assert!(res.is_err());
         assert_eq!(tel.retry_count, MAX_RETRIES);
         assert_eq!(tel.error_kind.as_deref(), Some("parse"));
@@ -707,8 +761,13 @@ mod tests {
         // authoritative PAGE bbox (not the crop origin) for downstream UI highlight.
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&[GROUNDED_HW]);
-        let (res, tel) =
-            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        let (res, tel) = escalate_region(
+            &vlm,
+            &gated_token(dir.path()),
+            RegionKind::Handwriting,
+            "qwen-vl",
+            test_geom(),
+        );
         let r = res.unwrap();
         assert_eq!(tel.error_kind, None);
         match r {
@@ -716,8 +775,24 @@ mod tests {
                 assert_eq!(text.as_deref(), Some("ok"));
                 let g = grounding.expect("grounded value must carry a GroundingRef");
                 // Finalized to the absolute page bbox the caller supplied (geom.page_bbox).
-                assert_eq!(g.region_bbox, BBox { x: 100, y: 200, w: 8, h: 8 });
-                assert_eq!(g.sub_bbox, Some(BBox { x: 1, y: 1, w: 3, h: 3 }));
+                assert_eq!(
+                    g.region_bbox,
+                    BBox {
+                        x: 100,
+                        y: 200,
+                        w: 8,
+                        h: 8
+                    }
+                );
+                assert_eq!(
+                    g.sub_bbox,
+                    Some(BBox {
+                        x: 1,
+                        y: 1,
+                        w: 3,
+                        h: 3
+                    })
+                );
             }
             _ => panic!("expected HandwritingV1"),
         }
@@ -730,8 +805,13 @@ mod tests {
         // §7) with telemetry error_kind = "grounding".
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&[r#"{"text":"ok"}"#, r#"{"text":"ok"}"#, r#"{"text":"ok"}"#]);
-        let (res, tel) =
-            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        let (res, tel) = escalate_region(
+            &vlm,
+            &gated_token(dir.path()),
+            RegionKind::Handwriting,
+            "qwen-vl",
+            test_geom(),
+        );
         let r = res.expect("value must be KEPT, not dropped (spec §7)");
         assert_eq!(tel.retry_count, MAX_RETRIES);
         assert_eq!(tel.error_kind.as_deref(), Some(UNGROUNDED_ERROR_KIND));
@@ -747,8 +827,13 @@ mod tests {
         // sub_bbox → success. Proves the grounding error feeds back into the SAME retry loop.
         let dir = tempfile::tempdir().unwrap();
         let vlm = script(&[r#"{"text":"ok"}"#, GROUNDED_HW]);
-        let (res, tel) =
-            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        let (res, tel) = escalate_region(
+            &vlm,
+            &gated_token(dir.path()),
+            RegionKind::Handwriting,
+            "qwen-vl",
+            test_geom(),
+        );
         assert!(res.is_ok());
         assert_eq!(tel.retry_count, 1);
         assert_eq!(tel.error_kind, None);
@@ -761,8 +846,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let oob = r#"{"text":"ok","grounding":{"sub_bbox":{"x":50,"y":50,"w":3,"h":3}}}"#;
         let vlm = script(&[oob, oob, oob]);
-        let (res, tel) =
-            escalate_region(&vlm, &gated_token(dir.path()), RegionKind::Handwriting, "qwen-vl", test_geom());
+        let (res, tel) = escalate_region(
+            &vlm,
+            &gated_token(dir.path()),
+            RegionKind::Handwriting,
+            "qwen-vl",
+            test_geom(),
+        );
         assert!(res.is_ok());
         assert_eq!(tel.error_kind.as_deref(), Some(UNGROUNDED_ERROR_KIND));
     }
@@ -771,17 +861,35 @@ mod tests {
     fn ground_region_empty_chart_series_is_vacuously_grounded() {
         // A chart with NO series has no value to ground → ground_region passes (can't fabricate an
         // ungrounded value out of nothing).
-        let crop = BBox { x: 0, y: 0, w: 8, h: 8 };
-        let r = RegionResult::ChartV1 { chart_type: "bar".into(), series: vec![], axis_labels: vec![] };
+        let crop = BBox {
+            x: 0,
+            y: 0,
+            w: 8,
+            h: 8,
+        };
+        let r = RegionResult::ChartV1 {
+            chart_type: "bar".into(),
+            series: vec![],
+            axis_labels: vec![],
+        };
         assert!(ground_region(&r, &crop, 0).is_ok());
     }
 
     #[test]
     fn ground_region_chart_series_missing_grounding_fails() {
-        let crop = BBox { x: 0, y: 0, w: 8, h: 8 };
+        let crop = BBox {
+            x: 0,
+            y: 0,
+            w: 8,
+            h: 8,
+        };
         let r = RegionResult::ChartV1 {
             chart_type: "bar".into(),
-            series: vec![Series { name: "Q1".into(), values: vec![1.0], grounding: None }],
+            series: vec![Series {
+                name: "Q1".into(),
+                values: vec![1.0],
+                grounding: None,
+            }],
             axis_labels: vec![],
         };
         assert_eq!(ground_region(&r, &crop, 0), Err(GroundingFail::Missing));
@@ -798,9 +906,18 @@ mod tests {
         // The egress crop is the gate's downscaled copy, written under our temp dir —
         // NOT some caller-supplied raw original outside the gate.
         assert!(token.egress_crop_path().starts_with(dir.path()));
-        assert!(token.egress_crop_path().exists(), "minimized crop must be materialized");
+        assert!(
+            token.egress_crop_path().exists(),
+            "minimized crop must be materialized"
+        );
         let vlm = script(&[GROUNDED_HW]);
-        let (res, _) = escalate_region(&vlm, &token, RegionKind::Handwriting, "qwen-vl", test_geom());
+        let (res, _) = escalate_region(
+            &vlm,
+            &token,
+            RegionKind::Handwriting,
+            "qwen-vl",
+            test_geom(),
+        );
         assert!(res.is_ok());
     }
 
@@ -810,12 +927,27 @@ mod tests {
     }
     #[test]
     fn on_discrepancy_only_when_flagged() {
-        assert!(should_escalate(VlmEscalationPolicy::OnDiscrepancy, true, 0, 8));
-        assert!(!should_escalate(VlmEscalationPolicy::OnDiscrepancy, false, 0, 8));
+        assert!(should_escalate(
+            VlmEscalationPolicy::OnDiscrepancy,
+            true,
+            0,
+            8
+        ));
+        assert!(!should_escalate(
+            VlmEscalationPolicy::OnDiscrepancy,
+            false,
+            0,
+            8
+        ));
     }
     #[test]
     fn budget_cap_blocks_when_exhausted() {
-        assert!(!should_escalate(VlmEscalationPolicy::Aggressive, true, 8, 8));
+        assert!(!should_escalate(
+            VlmEscalationPolicy::Aggressive,
+            true,
+            8,
+            8
+        ));
         assert!(should_escalate(VlmEscalationPolicy::Aggressive, true, 7, 8));
     }
 
@@ -829,18 +961,31 @@ mod tests {
         let src = write_test_png(dir.path(), "s.png", 8);
         // enabled=false models a local-only / privacy-off destination → refuse cloud egress.
         let err = gate_vlm_egress(
-            false, true, false, None, "region-crop", &src,
+            false,
+            true,
+            false,
+            None,
+            "region-crop",
+            &src,
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )
         .unwrap_err();
-        assert!(matches!(err, EgressError::Gate(OutboundError::Disabled(OutboundKind::Llm))));
+        assert!(matches!(
+            err,
+            EgressError::Gate(OutboundError::Disabled(OutboundKind::Llm))
+        ));
     }
     #[test]
     fn gate_blocks_when_vault_locked() {
         let dir = tempfile::tempdir().unwrap();
         let src = write_test_png(dir.path(), "s.png", 8);
         let err = gate_vlm_egress(
-            true, false, false, None, "region-crop", &src,
+            true,
+            false,
+            false,
+            None,
+            "region-crop",
+            &src,
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )
         .unwrap_err();
@@ -860,7 +1005,12 @@ mod tests {
         let redactor = Redactor::new();
         let dst = dir.path().join("e.png");
         let err = gate_vlm_egress(
-            true, true, /* source_contains_l0 */ true, Some(&redactor), "region-crop", &src,
+            true,
+            true,
+            /* source_contains_l0 */ true,
+            Some(&redactor),
+            "region-crop",
+            &src,
             ImageEgressDecision::AllowDownscaled(dst.clone()),
         )
         .unwrap_err();
@@ -869,7 +1019,10 @@ mod tests {
             "L0-classified source must be refused egress to the cloud VLM; got {err:?}"
         );
         // Fail-closed: the gate refused before minimizing/writing any egress bytes.
-        assert!(!dst.exists(), "no egress crop may be materialized for an L0-refused call");
+        assert!(
+            !dst.exists(),
+            "no egress crop may be materialized for an L0-refused call"
+        );
     }
 
     #[test]
@@ -881,12 +1034,20 @@ mod tests {
         let redactor = Redactor::new();
         let dst = dir.path().join("e.png");
         let tok = gate_vlm_egress(
-            true, true, /* source_contains_l0 */ false, Some(&redactor), "region-crop", &src,
+            true,
+            true,
+            /* source_contains_l0 */ false,
+            Some(&redactor),
+            "region-crop",
+            &src,
             ImageEgressDecision::AllowDownscaled(dst.clone()),
         )
         .expect("non-L0 source under allow policy must mint a token");
         assert_eq!(tok.egress_crop_path(), dst.as_path());
-        assert!(tok.egress_crop_path().exists(), "minimized egress crop must be materialized");
+        assert!(
+            tok.egress_crop_path().exists(),
+            "minimized egress crop must be materialized"
+        );
     }
 
     #[test]
@@ -897,11 +1058,19 @@ mod tests {
         let src = write_test_png(dir.path(), "s.png", 8);
         let redactor = Redactor::new();
         let err = gate_vlm_egress(
-            true, true, /* unknown tier → conservative */ true, Some(&redactor), "region-crop", &src,
+            true,
+            true,
+            /* unknown tier → conservative */ true,
+            Some(&redactor),
+            "region-crop",
+            &src,
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )
         .unwrap_err();
-        assert!(matches!(err, EgressError::Gate(OutboundError::L0CloudBlocked)));
+        assert!(matches!(
+            err,
+            EgressError::Gate(OutboundError::L0CloudBlocked)
+        ));
     }
     #[test]
     fn gate_fails_closed_without_redactor_on_nonempty() {
@@ -909,11 +1078,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = write_test_png(dir.path(), "s.png", 8);
         let err = gate_vlm_egress(
-            true, true, false, None, "sensitive crop descriptor", &src,
+            true,
+            true,
+            false,
+            None,
+            "sensitive crop descriptor",
+            &src,
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )
         .unwrap_err();
-        assert!(matches!(err, EgressError::Gate(OutboundError::RedactorRequired)));
+        assert!(matches!(
+            err,
+            EgressError::Gate(OutboundError::RedactorRequired)
+        ));
     }
     #[test]
     fn gate_allows_with_redactor_and_redacts() {
@@ -922,7 +1099,12 @@ mod tests {
         let redactor = Redactor::new();
         // PII in the descriptor is stripped before it leaves the device.
         let tok = gate_vlm_egress(
-            true, true, false, Some(&redactor), "联系电话 13800138000", &src,
+            true,
+            true,
+            false,
+            Some(&redactor),
+            "联系电话 13800138000",
+            &src,
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )
         .unwrap();
@@ -942,7 +1124,12 @@ mod tests {
         let src = write_test_png(dir.path(), "s.png", 8);
         let redactor = Redactor::new();
         let err = gate_vlm_egress(
-            true, true, false, Some(&redactor), "region-crop", &src,
+            true,
+            true,
+            false,
+            Some(&redactor),
+            "region-crop",
+            &src,
             ImageEgressDecision::Refuse,
         )
         .unwrap_err();
@@ -957,7 +1144,12 @@ mod tests {
         let dst = dir.path().join("egress.png");
         let redactor = Redactor::new();
         let tok = gate_vlm_egress(
-            true, true, false, Some(&redactor), "region-crop", &src,
+            true,
+            true,
+            false,
+            Some(&redactor),
+            "region-crop",
+            &src,
             ImageEgressDecision::AllowDownscaled(dst.clone()),
         )
         .unwrap();
@@ -979,7 +1171,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let redactor = Redactor::new();
         let err = gate_vlm_egress(
-            true, true, false, Some(&redactor), "region-crop",
+            true,
+            true,
+            false,
+            Some(&redactor),
+            "region-crop",
             std::path::Path::new("/nonexistent/crop.png"),
             ImageEgressDecision::AllowDownscaled(dir.path().join("e.png")),
         )

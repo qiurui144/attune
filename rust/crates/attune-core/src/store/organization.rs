@@ -247,7 +247,8 @@ mod tests {
     fn discard_sets_status() {
         let s = store();
         let dek = Key32::generate();
-        s.save_proposal(&dek, "p2", "{}", Some("legal"), "{}").unwrap();
+        s.save_proposal(&dek, "p2", "{}", Some("legal"), "{}")
+            .unwrap();
         s.discard_proposal("p2").unwrap();
         assert_eq!(s.get_proposal(&dek, "p2").unwrap().unwrap().0, "discarded");
     }

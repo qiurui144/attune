@@ -64,7 +64,12 @@ impl Vault {
 
     /// 当前状态
     pub fn state(&self) -> VaultState {
-        if self.unlocked.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        if self
+            .unlocked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
             return VaultState::Unlocked;
         }
         match self.store.has_meta("salt") {
@@ -112,18 +117,27 @@ impl Vault {
 
         // 用 MK 加密 DEK 并存储
         self.store.set_meta("salt", &salt)?;
-        self.store.set_meta("encrypted_dek_db", &crypto::encrypt_dek(&mk, &dek_db)?)?;
-        self.store.set_meta("encrypted_dek_idx", &crypto::encrypt_dek(&mk, &dek_idx)?)?;
-        self.store.set_meta("encrypted_dek_vec", &crypto::encrypt_dek(&mk, &dek_vec)?)?;
+        self.store
+            .set_meta("encrypted_dek_db", &crypto::encrypt_dek(&mk, &dek_db)?)?;
+        self.store
+            .set_meta("encrypted_dek_idx", &crypto::encrypt_dek(&mk, &dek_idx)?)?;
+        self.store
+            .set_meta("encrypted_dek_vec", &crypto::encrypt_dek(&mk, &dek_vec)?)?;
 
         // 额外保存"恢复密钥路径"加密副本：忘记主密码时可用 recovery_key 解 DEK。
         self.store.set_meta("recovery_salt", &recovery_salt)?;
-        self.store
-            .set_meta("encrypted_dek_db_recovery", &crypto::encrypt_dek(&recovery_mk, &dek_db)?)?;
-        self.store
-            .set_meta("encrypted_dek_idx_recovery", &crypto::encrypt_dek(&recovery_mk, &dek_idx)?)?;
-        self.store
-            .set_meta("encrypted_dek_vec_recovery", &crypto::encrypt_dek(&recovery_mk, &dek_vec)?)?;
+        self.store.set_meta(
+            "encrypted_dek_db_recovery",
+            &crypto::encrypt_dek(&recovery_mk, &dek_db)?,
+        )?;
+        self.store.set_meta(
+            "encrypted_dek_idx_recovery",
+            &crypto::encrypt_dek(&recovery_mk, &dek_idx)?,
+        )?;
+        self.store.set_meta(
+            "encrypted_dek_vec_recovery",
+            &crypto::encrypt_dek(&recovery_mk, &dek_vec)?,
+        )?;
 
         // 存储 device secret hash（验证用）
         let ds_hash = sha2_hash(device_secret.as_ref());
@@ -150,7 +164,9 @@ impl Vault {
         new_password: &str,
     ) -> Result<()> {
         if new_password.is_empty() {
-            return Err(VaultError::InvalidInput("new password must not be empty".into()));
+            return Err(VaultError::InvalidInput(
+                "new password must not be empty".into(),
+            ));
         }
         if self.state() == VaultState::Sealed {
             return Err(VaultError::Sealed);
@@ -160,10 +176,9 @@ impl Vault {
         let device_secret_bytes = std::fs::read(&ds_path)
             .map_err(|_| VaultError::DeviceSecretMissing(ds_path.display().to_string()))?;
 
-        let recovery_salt = self
-            .store
-            .get_meta("recovery_salt")?
-            .ok_or_else(|| VaultError::InvalidInput("recovery key is not configured for this vault".into()))?;
+        let recovery_salt = self.store.get_meta("recovery_salt")?.ok_or_else(|| {
+            VaultError::InvalidInput("recovery key is not configured for this vault".into())
+        })?;
         let recovery_mk = crypto::derive_master_key(
             recovery_key.as_bytes(),
             &device_secret_bytes,
@@ -191,7 +206,8 @@ impl Vault {
 
         // 换主密码：只重写主路径 salt + DEK 包装；恢复路径保持不变。
         let new_salt = crypto::generate_salt();
-        let new_mk = crypto::derive_master_key(new_password.as_bytes(), &device_secret_bytes, &new_salt)?;
+        let new_mk =
+            crypto::derive_master_key(new_password.as_bytes(), &device_secret_bytes, &new_salt)?;
         let new_enc_dek_db = crypto::encrypt_dek(&new_mk, &dek_db)?;
         let new_enc_dek_idx = crypto::encrypt_dek(&new_mk, &dek_idx)?;
         let new_enc_dek_vec = crypto::encrypt_dek(&new_mk, &dek_vec)?;
@@ -240,7 +256,9 @@ impl Vault {
         }
 
         // 验证 device secret hash
-        let stored_hash = self.store.get_meta("device_secret_hash")?
+        let stored_hash = self
+            .store
+            .get_meta("device_secret_hash")?
             .ok_or(VaultError::Crypto("missing device_secret_hash".into()))?;
         let actual_hash = sha2_hash(&device_secret_bytes);
         if stored_hash != actual_hash {
@@ -248,20 +266,28 @@ impl Vault {
         }
 
         // 派生 MK
-        let salt = self.store.get_meta("salt")?
+        let salt = self
+            .store
+            .get_meta("salt")?
             .ok_or(VaultError::Crypto("missing salt".into()))?;
         let mk = crypto::derive_master_key(password.as_bytes(), &device_secret_bytes, &salt)?;
 
         // 尝试解密 DEK（如果密码错误，这里会失败）
-        let enc_dek_db = self.store.get_meta("encrypted_dek_db")?
+        let enc_dek_db = self
+            .store
+            .get_meta("encrypted_dek_db")?
             .ok_or(VaultError::Crypto("missing dek_db".into()))?;
         let dek_db = crypto::decrypt_dek(&mk, &enc_dek_db)?;
 
-        let enc_dek_idx = self.store.get_meta("encrypted_dek_idx")?
+        let enc_dek_idx = self
+            .store
+            .get_meta("encrypted_dek_idx")?
             .ok_or(VaultError::Crypto("missing dek_idx".into()))?;
         let dek_idx = crypto::decrypt_dek(&mk, &enc_dek_idx)?;
 
-        let enc_dek_vec = self.store.get_meta("encrypted_dek_vec")?
+        let enc_dek_vec = self
+            .store
+            .get_meta("encrypted_dek_vec")?
             .ok_or(VaultError::Crypto("missing dek_vec".into()))?;
         let dek_vec = crypto::decrypt_dek(&mk, &enc_dek_vec)?;
 
@@ -305,18 +331,24 @@ impl Vault {
         let ds_path = self.config_dir.join("device.key");
         let device_secret_bytes = std::fs::read(&ds_path)
             .map_err(|_| VaultError::DeviceSecretMissing(ds_path.display().to_string()))?;
-        let salt = self.store.get_meta("salt")?
+        let salt = self
+            .store
+            .get_meta("salt")?
             .ok_or(VaultError::Crypto("missing salt".into()))?;
-        let old_mk = crypto::derive_master_key(old_password.as_bytes(), &device_secret_bytes, &salt)?;
+        let old_mk =
+            crypto::derive_master_key(old_password.as_bytes(), &device_secret_bytes, &salt)?;
 
         // 验证旧 MK 能解密 dek_db
-        let enc_dek_db = self.store.get_meta("encrypted_dek_db")?
+        let enc_dek_db = self
+            .store
+            .get_meta("encrypted_dek_db")?
             .ok_or(VaultError::Crypto("missing dek_db".into()))?;
         crypto::decrypt_dek(&old_mk, &enc_dek_db)?; // 如果旧密码错误，这里会报 InvalidPassword
 
         // 生成新 salt + 派生新 MK
         let new_salt = crypto::generate_salt();
-        let new_mk = crypto::derive_master_key(new_password.as_bytes(), &device_secret_bytes, &new_salt)?;
+        let new_mk =
+            crypto::derive_master_key(new_password.as_bytes(), &device_secret_bytes, &new_salt)?;
 
         // 预计算新加密 DEK（在事务外计算，避免持锁时 argon2 长耗时）
         let new_enc_dek_db = crypto::encrypt_dek(&new_mk, &keys.dek_db)?;
@@ -454,11 +486,15 @@ impl Vault {
         let ds_path = self.config_dir.join("device.key");
         let device_secret_bytes = std::fs::read(&ds_path)
             .map_err(|_| VaultError::DeviceSecretMissing(ds_path.display().to_string()))?;
-        let salt = self.store.get_meta("salt")?
+        let salt = self
+            .store
+            .get_meta("salt")?
             .ok_or(VaultError::Crypto("missing salt".into()))?;
         let mk = crypto::derive_master_key(password.as_bytes(), &device_secret_bytes, &salt)?;
         // AEAD 标签校验提供常数时间密码验证（解密失败 = 密码错）
-        let enc_dek_db = self.store.get_meta("encrypted_dek_db")?
+        let enc_dek_db = self
+            .store
+            .get_meta("encrypted_dek_db")?
             .ok_or(VaultError::Crypto("missing dek_db".into()))?;
         let _ = crypto::decrypt_dek(&mk, &enc_dek_db)?;
         self.create_session_token(&mk)
@@ -491,8 +527,7 @@ impl Vault {
         scopes: &[String],
         ttl_secs: Option<i64>,
     ) -> Result<(String, crate::store::scoped_token::ScopedTokenMeta)> {
-        crate::store::scoped_token::validate_scopes(scopes)
-            .map_err(VaultError::InvalidInput)?;
+        crate::store::scoped_token::validate_scopes(scopes).map_err(VaultError::InvalidInput)?;
 
         let guard = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
         let keys = guard.as_ref().ok_or(VaultError::Locked)?;
@@ -547,7 +582,9 @@ impl Vault {
             .strip_prefix("scoped:")
             .ok_or(VaultError::SessionInvalid)?;
         let (token_id, expires_str) = rest.rsplit_once(':').ok_or(VaultError::SessionInvalid)?;
-        let expires: i64 = expires_str.parse().map_err(|_| VaultError::SessionInvalid)?;
+        let expires: i64 = expires_str
+            .parse()
+            .map_err(|_| VaultError::SessionInvalid)?;
 
         let now = chrono::Utc::now().timestamp();
         if now > expires {
@@ -653,7 +690,12 @@ fn restrict_file_permissions(path: &std::path::Path) -> Result<()> {
         let path_str = path.to_string_lossy().to_string();
         let username = std::env::var("USERNAME").unwrap_or_else(|_| "CURRENT_USER".to_string());
         let _ = crate::process::command_no_window("icacls")
-            .args([&path_str, "/inheritance:r", "/grant:r", &format!("{username}:(R,W)")])
+            .args([
+                &path_str,
+                "/inheritance:r",
+                "/grant:r",
+                &format!("{username}:(R,W)"),
+            ])
             .output(); // 忽略错误: 比不设权限好，但不应阻塞 vault 启动
     }
 
@@ -788,7 +830,11 @@ mod tests {
         vault.lock().unwrap();
         vault.unlock("pw").unwrap();
         let dek2 = vault.dek_db().unwrap();
-        assert_eq!(dek1.as_bytes(), dek2.as_bytes(), "DEK should be same after re-unlock");
+        assert_eq!(
+            dek1.as_bytes(),
+            dek2.as_bytes(),
+            "DEK should be same after re-unlock"
+        );
     }
 
     #[test]
@@ -885,7 +931,9 @@ mod tests {
             .issue_scoped_token("a", &["search".into()], None)
             .unwrap();
         vault.lock().unwrap();
-        assert!(vault.issue_scoped_token("b", &["chat".into()], None).is_err());
+        assert!(vault
+            .issue_scoped_token("b", &["chat".into()], None)
+            .is_err());
         assert!(vault.verify_scoped_token(&token).is_err());
         assert!(vault.revoke_scoped_token(&meta.token_id).is_err());
         assert!(vault.list_scoped_tokens().is_err());
@@ -898,7 +946,10 @@ mod tests {
 
         // 插入数据
         let dek = vault.dek_db().unwrap();
-        let id = vault.store().insert_item(&dek, "Title", "Secret", None, "note", None, None).unwrap();
+        let id = vault
+            .store()
+            .insert_item(&dek, "Title", "Secret", None, "note", None, None)
+            .unwrap();
 
         // 改密码
         vault.change_password("old-pw", "new-pw").unwrap();
@@ -911,7 +962,10 @@ mod tests {
         vault.unlock("new-pw").unwrap();
         let dek_new = vault.dek_db().unwrap();
         let item = vault.store().get_item(&dek_new, &id).unwrap().unwrap();
-        assert_eq!(item.content, "Secret", "Data should survive password change");
+        assert_eq!(
+            item.content, "Secret",
+            "Data should survive password change"
+        );
     }
 
     /// Regression test for OSS-S6 (2026-05-02):
@@ -926,12 +980,15 @@ mod tests {
         vault.change_password("old-pw", "new-pw").unwrap();
 
         // 不做 lock+unlock，直接调 reissue_token（即在 unlocked 状态下 unlock("new-pw")）
-        let new_token = vault.unlock("new-pw").expect("reissue_token after change_password");
+        let new_token = vault
+            .unlock("new-pw")
+            .expect("reissue_token after change_password");
 
         // verify_session 必须接受这个 token — 之前会 401 SessionInvalid，因为
         // 内存 MK 还是 old_mk 但 token 用 new_mk 签
-        vault.verify_session(&new_token)
-            .expect("REGRESSION (OSS-S6): verify_session must accept token issued post-change_password");
+        vault.verify_session(&new_token).expect(
+            "REGRESSION (OSS-S6): verify_session must accept token issued post-change_password",
+        );
     }
 
     #[test]
@@ -1053,9 +1110,18 @@ mod tests {
         let dek = vault.dek_db().unwrap();
 
         // Insert
-        let id = vault.store().insert_item(
-            &dek, "My Note", "This is top secret", None, "note", None, None,
-        ).unwrap();
+        let id = vault
+            .store()
+            .insert_item(
+                &dek,
+                "My Note",
+                "This is top secret",
+                None,
+                "note",
+                None,
+                None,
+            )
+            .unwrap();
 
         // Get (unlocked)
         let item = vault.store().get_item(&dek, &id).unwrap().unwrap();
@@ -1063,7 +1129,10 @@ mod tests {
 
         // Lock
         vault.lock().unwrap();
-        assert!(vault.dek_db().is_err(), "DEK should be inaccessible when locked");
+        assert!(
+            vault.dek_db().is_err(),
+            "DEK should be inaccessible when locked"
+        );
 
         // Unlock and verify data intact
         vault.unlock("password123").unwrap();

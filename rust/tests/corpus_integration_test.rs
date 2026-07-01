@@ -108,8 +108,10 @@ fn rust_book_chunker_preserves_code_blocks() {
     let src = match std::fs::read_to_string(&candidate) {
         Ok(s) => s,
         Err(_) => {
-            eprintln!("[SKIP] expected file missing (corpus pin drifted?): {}",
-                candidate.display());
+            eprintln!(
+                "[SKIP] expected file missing (corpus pin drifted?): {}",
+                candidate.display()
+            );
             return;
         }
     };
@@ -127,8 +129,10 @@ fn rust_book_chunker_preserves_code_blocks() {
             "chunk {i} has unbalanced code fences ({fence_count}):\n{chunk}\n----"
         );
     }
-    eprintln!("[rust-book] chunker produced {} balanced chunks for ch04-01",
-        chunks.len());
+    eprintln!(
+        "[rust-book] chunker produced {} balanced chunks for ch04-01",
+        chunks.len()
+    );
 }
 
 // ── Corpus B: CyC2018/CS-Notes (Chinese) ──────────────────────────────────────
@@ -148,8 +152,13 @@ fn cs_notes_chinese_content_present() {
     let sample = corpus.join("notes/算法 - 算法分析.md");
     if sample.exists() {
         let content = std::fs::read_to_string(&sample).unwrap_or_default();
-        let has_chinese = content.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
-        assert!(has_chinese, "expected Chinese characters in cs-notes sample");
+        let has_chinese = content
+            .chars()
+            .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+        assert!(
+            has_chinese,
+            "expected Chinese characters in cs-notes sample"
+        );
     }
     eprintln!("[cs-notes] {md_count} markdown files");
 }
@@ -180,8 +189,12 @@ fn cs_notes_indexing_through_fulltext() {
     for (i, path) in candidates.iter().enumerate() {
         if let Ok(content) = std::fs::read_to_string(path) {
             let id = format!("test_{i}");
-            let title = path.file_stem().and_then(|s| s.to_str()).unwrap_or("sample");
-            ft.add_document(&id, title, &content, "file").expect("add_document");
+            let title = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("sample");
+            ft.add_document(&id, title, &content, "file")
+                .expect("add_document");
             indexed += 1;
         }
     }
@@ -193,8 +206,10 @@ fn cs_notes_indexing_through_fulltext() {
         !results.is_empty(),
         "Chinese keyword search should return results after indexing Chinese content"
     );
-    eprintln!("[cs-notes] indexed {indexed} file(s); search '算法' returned {} hits",
-        results.len());
+    eprintln!(
+        "[cs-notes] indexed {indexed} file(s); search '算法' returned {} hits",
+        results.len()
+    );
 }
 
 // ── Edge cases (Corpus E, synthetic, committed in repo) ───────────────────────

@@ -85,9 +85,9 @@ impl Store {
     /// 读取 item 的 content_hash（未触发解密，便于 update / reindex 入口快速短路）。
     /// 老 vault 未 backfill 时返回空字符串。
     pub fn get_content_hash(&self, id: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT content_hash FROM items WHERE id = ?1 AND is_deleted = 0",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT content_hash FROM items WHERE id = ?1 AND is_deleted = 0")?;
         let r = stmt.query_row(params![id], |row| row.get::<_, String>(0));
         match r {
             Ok(h) => Ok(Some(h)),
@@ -269,8 +269,18 @@ impl Store {
     ///
     /// content_hash 短路：若新 content hash 与 stored hash 相同 → 仅刷 updated_at，
     /// `content_changed=false`，caller 跳过 reindex，省 100KB 文档约 3s embedding。
-    pub fn update_item(&self, dek: &Key32, id: &str, title: Option<&str>, content: Option<&str>) -> Result<UpdateOutcome> {
-        let mut outcome = UpdateOutcome { existed: false, content_changed: false, backfilled_hash: false };
+    pub fn update_item(
+        &self,
+        dek: &Key32,
+        id: &str,
+        title: Option<&str>,
+        content: Option<&str>,
+    ) -> Result<UpdateOutcome> {
+        let mut outcome = UpdateOutcome {
+            existed: false,
+            content_changed: false,
+            backfilled_hash: false,
+        };
 
         // 所有 SQL 包入 unchecked_transaction，避免并发 PATCH
         // 同 item 的中间状态可见性 — 两个 client race 时第二个的 stored_hash 读取与
@@ -344,10 +354,8 @@ impl Store {
         // ON DELETE CASCADE 永远不会触发，所以这里显式连坐。
         // 注意：这是硬删除 —— 批注/摘要不可恢复。与 item 软删除不对称，但与"忘记"语义一致。
         if affected > 0 {
-            self.conn.execute(
-                "DELETE FROM annotations WHERE item_id = ?1",
-                params![id],
-            )?;
+            self.conn
+                .execute("DELETE FROM annotations WHERE item_id = ?1", params![id])?;
             self.conn.execute(
                 "DELETE FROM chunk_summaries WHERE item_id = ?1",
                 params![id],
@@ -363,18 +371,14 @@ impl Store {
             // v0.7 记忆护城河：删 embed_queue 里该 item 所有 pending 任务。
             // 否则 worker 会拿到 stale chunk 继续走 embedding → 浪费 + 给已删 item
             // 写向量（vectors.delete_by_item_id 必须先于此调用，由 reindex::purge 协调）。
-            self.conn.execute(
-                "DELETE FROM embed_queue WHERE item_id = ?1",
-                params![id],
-            )?;
+            self.conn
+                .execute("DELETE FROM embed_queue WHERE item_id = ?1", params![id])?;
             // item 软删除时连坐删原始证据 blob。item_blobs 有 FK CASCADE，
             // 但软删除（is_deleted=1）不触发 CASCADE → 必须显式删。否则用户"忘记"
             // 敏感证据后，加密原件仍留存、GET /items/{id}/original 仍可取回
             // —— 法律证据产品的数据留存漏洞。
-            self.conn.execute(
-                "DELETE FROM item_blobs WHERE item_id = ?1",
-                params![id],
-            )?;
+            self.conn
+                .execute("DELETE FROM item_blobs WHERE item_id = ?1", params![id])?;
         }
         Ok(affected > 0)
     }
@@ -418,11 +422,13 @@ impl Store {
                 row.get::<_, i64>(3)?,
             ))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn mark_reindex_done(&self, task_id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM reindex_queue WHERE id = ?1", params![task_id])?;
+        self.conn
+            .execute("DELETE FROM reindex_queue WHERE id = ?1", params![task_id])?;
         Ok(())
     }
 
@@ -434,11 +440,14 @@ impl Store {
             "UPDATE reindex_queue SET attempts = attempts + 1 WHERE id = ?1",
             params![task_id],
         )?;
-        let n: i64 = self.conn.query_row(
-            "SELECT attempts FROM reindex_queue WHERE id = ?1",
-            params![task_id],
-            |r| r.get(0),
-        ).unwrap_or(5);
+        let n: i64 = self
+            .conn
+            .query_row(
+                "SELECT attempts FROM reindex_queue WHERE id = ?1",
+                params![task_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(5);
         Ok(n)
     }
 
@@ -464,9 +473,9 @@ impl Store {
 
     /// 按 URL 查找未删除 item，用于入库前去重（例如专利记录重复检查）。
     pub fn find_item_by_url(&self, url: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id FROM items WHERE url = ?1 AND is_deleted = 0 LIMIT 1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id FROM items WHERE url = ?1 AND is_deleted = 0 LIMIT 1")?;
         let result = stmt.query_row(params![url], |row| row.get::<_, String>(0));
         match result {
             Ok(id) => Ok(Some(id)),
@@ -506,8 +515,9 @@ impl Store {
             Some(blob) if blob.is_empty() => Ok(None),
             Some(blob) => {
                 let decrypted = crypto::decrypt(dek, &blob)?;
-                Ok(Some(String::from_utf8(decrypted)
-                    .map_err(|e| VaultError::Crypto(format!("tags utf8: {e}")))?))
+                Ok(Some(String::from_utf8(decrypted).map_err(|e| {
+                    VaultError::Crypto(format!("tags utf8: {e}"))
+                })?))
             }
         }
     }
@@ -521,9 +531,7 @@ impl Store {
              GROUP BY source_type
              ORDER BY COUNT(*) DESC",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -556,10 +564,9 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id FROM items WHERE is_deleted = 0 ORDER BY created_at LIMIT ?1 OFFSET ?2",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![limit as i64, offset as i64],
-            |row| row.get::<_, String>(0),
-        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64, offset as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
         let mut ids = Vec::new();
         for row in rows {
             ids.push(row?);
@@ -883,7 +890,11 @@ mod privacy_tier_tests {
             sr("mem-block-1", "memory"),
         ];
         let kept = s.retain_non_l0_for_cloud(&results).unwrap();
-        assert_eq!(kept.len(), 3, "synthetic web/memory items must be preserved");
+        assert_eq!(
+            kept.len(),
+            3,
+            "synthetic web/memory items must be preserved"
+        );
     }
 
     #[test]
@@ -916,7 +927,9 @@ mod privacy_tier_tests {
     fn update_item_content_changed_writes_new_hash() {
         let s = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
-        let id = s.insert_item(&dek, "t", "ORIGINAL", None, "note", None, None).unwrap();
+        let id = s
+            .insert_item(&dek, "t", "ORIGINAL", None, "note", None, None)
+            .unwrap();
         let h0 = s.get_content_hash(&id).unwrap().unwrap();
         assert_eq!(h0, compute_content_hash("ORIGINAL"));
 
@@ -932,10 +945,15 @@ mod privacy_tier_tests {
     fn update_item_same_content_short_circuits_no_reindex_signal() {
         let s = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
-        let id = s.insert_item(&dek, "t", "SAME", None, "note", None, None).unwrap();
+        let id = s
+            .insert_item(&dek, "t", "SAME", None, "note", None, None)
+            .unwrap();
         let outcome = s.update_item(&dek, &id, None, Some("SAME")).unwrap();
         assert!(outcome.existed);
-        assert!(!outcome.content_changed, "相同 hash 必须短路 content_changed=false");
+        assert!(
+            !outcome.content_changed,
+            "相同 hash 必须短路 content_changed=false"
+        );
         assert!(!outcome.backfilled_hash);
     }
 
@@ -944,17 +962,29 @@ mod privacy_tier_tests {
         // existed=true 时无条件刷 updated_at
         let s = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
-        let id = s.insert_item(&dek, "OldTitle", "C", None, "note", None, None).unwrap();
+        let id = s
+            .insert_item(&dek, "OldTitle", "C", None, "note", None, None)
+            .unwrap();
         // 拿 insert 后的 updated_at
-        let t0: String = s.conn
-            .query_row("SELECT updated_at FROM items WHERE id = ?1", params![&id], |r| r.get(0))
+        let t0: String = s
+            .conn
+            .query_row(
+                "SELECT updated_at FROM items WHERE id = ?1",
+                params![&id],
+                |r| r.get(0),
+            )
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
         let outcome = s.update_item(&dek, &id, Some("NewTitle"), None).unwrap();
         assert!(outcome.existed);
         assert!(!outcome.content_changed);
-        let t1: String = s.conn
-            .query_row("SELECT updated_at FROM items WHERE id = ?1", params![&id], |r| r.get(0))
+        let t1: String = s
+            .conn
+            .query_row(
+                "SELECT updated_at FROM items WHERE id = ?1",
+                params![&id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(t1 > t0, "title-only update 必须刷新 updated_at");
     }
@@ -974,8 +1004,14 @@ mod privacy_tier_tests {
 
         let outcome = s.update_item(&dek, id, None, Some("BODY")).unwrap();
         assert!(outcome.existed);
-        assert!(!outcome.content_changed, "backfill 不算 content_changed（避免老 vault 全量 re-embed）");
-        assert!(outcome.backfilled_hash, "stored_hash='' 路径必须标 backfilled_hash=true");
+        assert!(
+            !outcome.content_changed,
+            "backfill 不算 content_changed（避免老 vault 全量 re-embed）"
+        );
+        assert!(
+            outcome.backfilled_hash,
+            "stored_hash='' 路径必须标 backfilled_hash=true"
+        );
         let h = s.get_content_hash(id).unwrap().unwrap();
         assert_eq!(h, compute_content_hash("BODY"));
     }
@@ -993,7 +1029,9 @@ mod privacy_tier_tests {
     fn find_item_by_content_hash_dedup_hits() {
         let s = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
-        let id = s.insert_item(&dek, "t", "DEDUP_CONTENT", None, "note", None, None).unwrap();
+        let id = s
+            .insert_item(&dek, "t", "DEDUP_CONTENT", None, "note", None, None)
+            .unwrap();
         let h = compute_content_hash("DEDUP_CONTENT");
         let found = s.find_item_by_content_hash(&h).unwrap();
         assert_eq!(found, Some(id));
@@ -1004,14 +1042,24 @@ mod privacy_tier_tests {
         // 老 vault 全部 content_hash='' 不应被 dedup 短路误命中
         let s = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
-        let _id = s.insert_item(&dek, "t", "X", None, "note", None, None).unwrap();
+        let _id = s
+            .insert_item(&dek, "t", "X", None, "note", None, None)
+            .unwrap();
         // 手工把 hash 改空
-        s.conn.execute("UPDATE items SET content_hash = ''", []).unwrap();
+        s.conn
+            .execute("UPDATE items SET content_hash = ''", [])
+            .unwrap();
         let found = s.find_item_by_content_hash("").unwrap();
         // SQL `WHERE content_hash = ''` 会真匹配空值 — 测试当前行为，记录到注释
         // caller 必须传非空 hash 才不命中老数据（compute_content_hash 永不返回空字符串）
-        assert!(found.is_some(), "current behavior: 传空字符串会匹配老 vault；caller 必须传非空 hash");
-        assert!(compute_content_hash("anything").len() == 64, "SHA-256 hex 必为 64 字符，永不空");
+        assert!(
+            found.is_some(),
+            "current behavior: 传空字符串会匹配老 vault；caller 必须传非空 hash"
+        );
+        assert!(
+            compute_content_hash("anything").len() == 64,
+            "SHA-256 hex 必为 64 字符，永不空"
+        );
     }
 
     // ── reindex_queue attempts 计数测试 ──
@@ -1020,17 +1068,24 @@ mod privacy_tier_tests {
     fn enqueue_reindex_validates_action() {
         let s = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
-        let id = s.insert_item(&dek, "t", "x", None, "note", None, None).unwrap();
+        let id = s
+            .insert_item(&dek, "t", "x", None, "note", None, None)
+            .unwrap();
         assert!(s.enqueue_reindex(&id, "purge").is_ok());
         assert!(s.enqueue_reindex(&id, "reindex").is_ok());
-        assert!(s.enqueue_reindex(&id, "typo_action").is_err(), "未知 action 必须报错");
+        assert!(
+            s.enqueue_reindex(&id, "typo_action").is_err(),
+            "未知 action 必须报错"
+        );
     }
 
     #[test]
     fn bump_reindex_attempts_increments_and_dequeue_skips_poison() {
         let s = Store::open_memory().unwrap();
         let dek = crate::crypto::Key32::generate();
-        let id = s.insert_item(&dek, "t", "x", None, "note", None, None).unwrap();
+        let id = s
+            .insert_item(&dek, "t", "x", None, "note", None, None)
+            .unwrap();
         s.enqueue_reindex(&id, "purge").unwrap();
 
         let tasks = s.dequeue_reindex_tasks(10).unwrap();
@@ -1048,9 +1103,10 @@ mod privacy_tier_tests {
         let after_park = s.dequeue_reindex_tasks(10).unwrap();
         assert_eq!(after_park.len(), 0, "毒任务必须被 WHERE attempts < 5 过滤");
         // 但表里仍保留（供运维查询，不静默丢失）
-        let total: i64 = s.conn.query_row(
-            "SELECT COUNT(*) FROM reindex_queue", [], |r| r.get(0)
-        ).unwrap();
+        let total: i64 = s
+            .conn
+            .query_row("SELECT COUNT(*) FROM reindex_queue", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(total, 1, "park 后仍保留在表里");
     }
 }
@@ -1115,9 +1171,15 @@ mod list_item_ids_paged_tests {
             let n = page.len();
             collected.extend(page);
             offset += PAGE;
-            if n < PAGE { break; }
+            if n < PAGE {
+                break;
+            }
         }
-        assert_eq!(collected.len(), total, "paged loop must cover all {total} items");
+        assert_eq!(
+            collected.len(),
+            total,
+            "paged loop must cover all {total} items"
+        );
         // No duplicates
         let unique: std::collections::HashSet<_> = collected.iter().collect();
         assert_eq!(unique.len(), total, "no duplicate ids across pages");
@@ -1136,10 +1198,12 @@ mod list_item_ids_paged_tests {
         let s = Store::open_memory().unwrap();
         insert_items(&s, 3);
         // Mark first as deleted
-        s.conn.execute(
-            "UPDATE items SET is_deleted = 1 WHERE id = 'paged-test-0000'",
-            [],
-        ).unwrap();
+        s.conn
+            .execute(
+                "UPDATE items SET is_deleted = 1 WHERE id = 'paged-test-0000'",
+                [],
+            )
+            .unwrap();
         let result = s.list_item_ids_paged(0, 100).unwrap();
         assert_eq!(result.len(), 2, "deleted item must be excluded");
         assert!(!result.contains(&"paged-test-0000".to_string()));

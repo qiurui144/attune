@@ -333,7 +333,11 @@ mod tests {
 
     #[test]
     fn collect_three_way_variant_counts() {
-        let c = collect_variants(&cand(&[("DeepSeek", 2), ("deepseek", 2), ("ＤＥＥＰＳＥＥＫ", 1)]));
+        let c = collect_variants(&cand(&[
+            ("DeepSeek", 2),
+            ("deepseek", 2),
+            ("ＤＥＥＰＳＥＥＫ", 1),
+        ]));
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].variants.len(), 3);
         assert_eq!(c[0].total_count, 5);
@@ -356,8 +360,14 @@ mod tests {
             canonical_key: "openai".into(),
             preferred: "OpenAI".into(),
             variants: vec![
-                TermVariant { text: "OpenAI".into(), count: 3 },
-                TermVariant { text: "openai".into(), count: 2 },
+                TermVariant {
+                    text: "OpenAI".into(),
+                    count: 3,
+                },
+                TermVariant {
+                    text: "openai".into(),
+                    count: 2,
+                },
             ],
             total_count: 5,
         };
@@ -372,8 +382,14 @@ mod tests {
             canonical_key: "x".into(),
             preferred: "X".into(),
             variants: vec![
-                TermVariant { text: "X".into(), count: 1 },
-                TermVariant { text: "x".into(), count: 1 },
+                TermVariant {
+                    text: "X".into(),
+                    count: 1,
+                },
+                TermVariant {
+                    text: "x".into(),
+                    count: 1,
+                },
             ],
             total_count: 2,
         };

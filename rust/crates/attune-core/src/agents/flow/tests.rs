@@ -80,7 +80,10 @@ on_step_fail = "partial"
     let set = FlowSet::from_toml_str(toml).expect("parses");
     assert_eq!(set.len(), 1);
     let f = set.get("legal_defamation").expect("flow present");
-    assert_eq!(f.steps, ["fact_extractor", "defamation_judge", "citation_linker"]);
+    assert_eq!(
+        f.steps,
+        ["fact_extractor", "defamation_judge", "citation_linker"]
+    );
     assert_eq!(f.route_priority, 9);
     assert!(f.is_optional("citation_linker"));
     assert!(!f.is_optional("fact_extractor"));
@@ -140,7 +143,10 @@ id = "cyclic"
 steps = ["a", "b", "a"]
 "#;
     let err = FlowSet::from_toml_str(toml).unwrap_err();
-    assert!(err.contains("cyclic") || err.contains("repeated"), "got: {err}");
+    assert!(
+        err.contains("cyclic") || err.contains("repeated"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -208,7 +214,10 @@ steps = ["fact_extractor", "ghost_agent"]
 "#;
     let set = FlowSet::from_toml_str(toml).expect("parses structurally");
     let err = set.validate_against(&reg).unwrap_err();
-    assert!(err.contains("shadow") || err.contains("unregistered"), "got: {err}");
+    assert!(
+        err.contains("shadow") || err.contains("unregistered"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -220,7 +229,8 @@ id = "solo"
 steps = ["fact_extractor"]
 "#;
     let set = FlowSet::from_toml_str(toml).expect("parses");
-    set.validate_against(&reg).expect("1-step flow has no handoff to check");
+    set.validate_against(&reg)
+        .expect("1-step flow has no handoff to check");
 }
 
 #[test]
@@ -236,7 +246,10 @@ fallback_agent = "no_such_agent"
 "#;
     let set = FlowSet::from_toml_str(toml).expect("parses");
     let err = set.validate_against(&reg).unwrap_err();
-    assert!(err.contains("fallback_agent") && err.contains("not registered"), "got: {err}");
+    assert!(
+        err.contains("fallback_agent") && err.contains("not registered"),
+        "got: {err}"
+    );
 }
 
 // ── Task 1: flow routing ──────────────────────────────────────────────────
@@ -316,7 +329,10 @@ steps = ["a"]
 // agents.registry.toml (S4b: OSS flows intentionally empty after industry move) ──
 
 fn shipped_path(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join(name)
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(name)
 }
 
 /// S4b: OSS agent_flows.toml is intentionally empty (industry flows moved to attune-pro).
@@ -325,8 +341,7 @@ fn shipped_path(name: &str) -> std::path::PathBuf {
 fn shipped_flows_validate_against_shipped_registry() {
     let reg = AgentRegistry::from_path(&shipped_path("agents.registry.toml"))
         .expect("shipped registry loads");
-    let flows =
-        FlowSet::from_path(&shipped_path("agent_flows.toml")).expect("shipped flows parse");
+    let flows = FlowSet::from_path(&shipped_path("agent_flows.toml")).expect("shipped flows parse");
     flows
         .validate_against(&reg)
         .expect("shipped flows must validate against the shipped registry (empty set is valid)");
@@ -347,10 +362,9 @@ fn defamation_dedupe_routes_to_composed_flow_not_individual_agents() {
     // S4b: legal_defamation flow + law-pro agents removed from OSS. OSS has no
     // industry flows. A defamation query on the OSS registry resolves to None
     // (graceful degrade — attune-pro loads the law-pro flow at runtime).
-    let reg = AgentRegistry::from_path(&shipped_path("agents.registry.toml"))
-        .expect("shipped registry");
-    let flows =
-        FlowSet::from_path(&shipped_path("agent_flows.toml")).expect("shipped flows");
+    let reg =
+        AgentRegistry::from_path(&shipped_path("agents.registry.toml")).expect("shipped registry");
+    let flows = FlowSet::from_path(&shipped_path("agent_flows.toml")).expect("shipped flows");
     // OSS has no defamation flow — resolve_flow must degrade gracefully (None/empty).
     let resolved = resolve_flow("他诽谤侮辱我，要求名誉权赔偿", &flows, &reg);
     // Either None or Some with no defamation flow — must not panic.
@@ -362,8 +376,14 @@ fn defamation_dedupe_routes_to_composed_flow_not_individual_agents() {
         );
     }
     // law-pro agents are absent from OSS registry — they must return None.
-    assert!(reg.get("defamation_extractor").is_none(), "S4b: defamation_extractor not in OSS");
-    assert!(reg.get("defamation_agent").is_none(), "S4b: defamation_agent not in OSS");
+    assert!(
+        reg.get("defamation_extractor").is_none(),
+        "S4b: defamation_extractor not in OSS"
+    );
+    assert!(
+        reg.get("defamation_agent").is_none(),
+        "S4b: defamation_agent not in OSS"
+    );
 }
 
 /// S4b: defamation typed-chain test converted to unit test with inline toml (no shipped registry).
@@ -443,7 +463,10 @@ impl ScriptedRunner {
     fn ok(mut self, agent: &str, produces_type: &str) -> Self {
         self.script.insert(
             agent.to_string(),
-            Ok(Payload::new(produces_type, serde_json::json!({"from": agent}))),
+            Ok(Payload::new(
+                produces_type,
+                serde_json::json!({"from": agent}),
+            )),
         );
         self
     }
@@ -468,7 +491,10 @@ impl StepRunner for ScriptedRunner {
     ) -> Result<Payload, StepError> {
         let degraded = matches!(
             decision,
-            ScheduleDecision::Local { degraded_from_cloud: true, .. }
+            ScheduleDecision::Local {
+                degraded_from_cloud: true,
+                ..
+            }
         );
         self.invoked.push((agent.id.clone(), degraded));
         self.script
@@ -545,11 +571,25 @@ steps = ["agent_a", "agent_b", "agent_c"]
         .ok("agent_b", "MidB")
         .ok("agent_c", "Out");
 
-    let result = run_flow(flow, &reg, &sched, Payload::new("In", serde_json::json!({})), &no_disabled(), &mut runner);
+    let result = run_flow(
+        flow,
+        &reg,
+        &sched,
+        Payload::new("In", serde_json::json!({})),
+        &no_disabled(),
+        &mut runner,
+    );
 
     assert!(result.is_complete(), "flow should complete: {result:?}");
     // Autonomous flow: each step's output became the next step's input.
-    assert_eq!(runner.invoked.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>(), ["agent_a", "agent_b", "agent_c"]);
+    assert_eq!(
+        runner
+            .invoked
+            .iter()
+            .map(|(a, _)| a.as_str())
+            .collect::<Vec<_>>(),
+        ["agent_a", "agent_b", "agent_c"]
+    );
     assert_eq!(result.payload().type_name(), "Out");
     // Auditability: a trace entry per step.
     assert_eq!(result.trace().len(), 3);
@@ -582,14 +622,31 @@ on_step_fail = "partial"
         .fail("agent_b", StepFailKind::AgentError)
         .ok("agent_c", "Out");
 
-    let result = run_flow(flow, &reg, &sched, Payload::new("In", serde_json::json!({})), &no_disabled(), &mut runner);
+    let result = run_flow(
+        flow,
+        &reg,
+        &sched,
+        Payload::new("In", serde_json::json!({})),
+        &no_disabled(),
+        &mut runner,
+    );
 
     // The flow completes (agent_c still runs); agent_b's failure was tolerated.
-    assert!(result.is_complete() || result.is_partial(), "must not cascade-fail: {result:?}");
+    assert!(
+        result.is_complete() || result.is_partial(),
+        "must not cascade-fail: {result:?}"
+    );
     // agent_c was still invoked (flow continued past the skipped optional step).
-    assert!(runner.invoked.iter().any(|(a, _)| a == "agent_c"), "agent_c should still run");
+    assert!(
+        runner.invoked.iter().any(|(a, _)| a == "agent_c"),
+        "agent_c should still run"
+    );
     // Trace records agent_b as skipped (auditability).
-    let b_trace = result.trace().iter().find(|t| t.agent_id == "agent_b").unwrap();
+    let b_trace = result
+        .trace()
+        .iter()
+        .find(|t| t.agent_id == "agent_b")
+        .unwrap();
     assert!(!b_trace.ran, "agent_b recorded as not-run (skipped)");
 }
 
@@ -615,12 +672,26 @@ on_step_fail = "partial"
         .ok("agent_a", "MidA")
         .fail("agent_b", StepFailKind::AgentError);
 
-    let result = run_flow(flow, &reg, &sched, Payload::new("In", serde_json::json!({})), &no_disabled(), &mut runner);
+    let result = run_flow(
+        flow,
+        &reg,
+        &sched,
+        Payload::new("In", serde_json::json!({})),
+        &no_disabled(),
+        &mut runner,
+    );
 
     // partial: return the payload accumulated through agent_a, do NOT run agent_c.
     assert!(result.is_partial(), "expected partial: {result:?}");
-    assert!(!runner.invoked.iter().any(|(a, _)| a == "agent_c"), "agent_c must not run after partial stop");
-    assert_eq!(result.payload().type_name(), "MidA", "payload is the last good output");
+    assert!(
+        !runner.invoked.iter().any(|(a, _)| a == "agent_c"),
+        "agent_c must not run after partial stop"
+    );
+    assert_eq!(
+        result.payload().type_name(),
+        "MidA",
+        "payload is the last good output"
+    );
 }
 
 #[test]
@@ -643,7 +714,14 @@ on_step_fail = "abort"
         .ok("agent_a", "MidA")
         .fail("agent_b", StepFailKind::AgentError);
 
-    let result = run_flow(flow, &reg, &sched, Payload::new("In", serde_json::json!({})), &no_disabled(), &mut runner);
+    let result = run_flow(
+        flow,
+        &reg,
+        &sched,
+        Payload::new("In", serde_json::json!({})),
+        &no_disabled(),
+        &mut runner,
+    );
     assert!(result.is_aborted(), "expected abort: {result:?}");
 }
 
@@ -665,15 +743,30 @@ optional = ["agent_b"]
     flows.validate_against(&reg).unwrap();
     let flow = flows.get("f").unwrap();
     let sched = Scheduler::new(Entitlement::free_local());
-    let mut runner = ScriptedRunner::new().ok("agent_a", "MidA").ok("agent_c", "Out");
+    let mut runner = ScriptedRunner::new()
+        .ok("agent_a", "MidA")
+        .ok("agent_c", "Out");
     let mut disabled = HashSet::new();
     disabled.insert("agent_b".to_string());
 
-    let result = run_flow(flow, &reg, &sched, Payload::new("In", serde_json::json!({})), &disabled, &mut runner);
+    let result = run_flow(
+        flow,
+        &reg,
+        &sched,
+        Payload::new("In", serde_json::json!({})),
+        &disabled,
+        &mut runner,
+    );
 
     // agent_b was disabled but optional → skipped; the runner was never asked.
-    assert!(!runner.invoked.iter().any(|(a, _)| a == "agent_b"), "disabled agent must not be invoked");
-    assert!(runner.invoked.iter().any(|(a, _)| a == "agent_c"), "flow continued past skipped step");
+    assert!(
+        !runner.invoked.iter().any(|(a, _)| a == "agent_b"),
+        "disabled agent must not be invoked"
+    );
+    assert!(
+        runner.invoked.iter().any(|(a, _)| a == "agent_c"),
+        "flow continued past skipped step"
+    );
     assert!(result.is_complete() || result.is_partial());
 }
 
@@ -697,9 +790,19 @@ on_step_fail = "partial"
     let mut disabled = HashSet::new();
     disabled.insert("agent_b".to_string());
 
-    let result = run_flow(flow, &reg, &sched, Payload::new("In", serde_json::json!({})), &disabled, &mut runner);
+    let result = run_flow(
+        flow,
+        &reg,
+        &sched,
+        Payload::new("In", serde_json::json!({})),
+        &disabled,
+        &mut runner,
+    );
     // Non-optional disabled step → degrade (partial), never cascade.
-    assert!(result.is_partial() || result.is_degraded(), "expected graceful degrade: {result:?}");
+    assert!(
+        result.is_partial() || result.is_degraded(),
+        "expected graceful degrade: {result:?}"
+    );
     assert!(!runner.invoked.iter().any(|(a, _)| a == "agent_b"));
 }
 
@@ -751,13 +854,31 @@ optional = ["paid_b"]
     let sched = Scheduler::new(Entitlement::free_local());
     let mut runner = ScriptedRunner::new().ok("free_a", "Mid");
 
-    let result = run_flow(flow, &reg, &sched, Payload::new("In", serde_json::json!({})), &no_disabled(), &mut runner);
+    let result = run_flow(
+        flow,
+        &reg,
+        &sched,
+        Payload::new("In", serde_json::json!({})),
+        &no_disabled(),
+        &mut runner,
+    );
     // paid_b blocked but optional → skipped; flow returns what free_a produced.
-    assert!(!runner.invoked.iter().any(|(a, _)| a == "paid_b"), "blocked step never reaches the runner");
+    assert!(
+        !runner.invoked.iter().any(|(a, _)| a == "paid_b"),
+        "blocked step never reaches the runner"
+    );
     assert!(result.is_complete() || result.is_partial());
-    let b_trace = result.trace().iter().find(|t| t.agent_id == "paid_b").unwrap();
+    let b_trace = result
+        .trace()
+        .iter()
+        .find(|t| t.agent_id == "paid_b")
+        .unwrap();
     assert!(!b_trace.ran);
-    assert!(b_trace.note.contains("entitlement") || b_trace.note.contains("blocked"), "note: {}", b_trace.note);
+    assert!(
+        b_trace.note.contains("entitlement") || b_trace.note.contains("blocked"),
+        "note: {}",
+        b_trace.note
+    );
 }
 
 // ── Guarantee: scheduler quota-degrade is recorded in trace (auditable) ─────
@@ -793,10 +914,20 @@ steps = ["cloud_a"]
     let sched = Scheduler::new(Entitlement::paid_with_quota(0));
     let mut runner = ScriptedRunner::new().ok("cloud_a", "Out");
 
-    let result = run_flow(flow, &reg, &sched, Payload::new("In", serde_json::json!({})), &no_disabled(), &mut runner);
+    let result = run_flow(
+        flow,
+        &reg,
+        &sched,
+        Payload::new("In", serde_json::json!({})),
+        &no_disabled(),
+        &mut runner,
+    );
     assert!(result.is_complete());
     // The runner saw a degraded schedule decision (per-step governable + auditable).
-    assert!(runner.invoked.iter().any(|(a, d)| a == "cloud_a" && *d), "degraded-from-cloud flag must be passed to runner");
+    assert!(
+        runner.invoked.iter().any(|(a, d)| a == "cloud_a" && *d),
+        "degraded-from-cloud flag must be passed to runner"
+    );
 }
 
 // ── Single-step flow (1-step = single agent, backward compatible) ───────────
@@ -817,7 +948,14 @@ steps = ["agent_a"]
     let sched = Scheduler::new(Entitlement::free_local());
     let mut runner = ScriptedRunner::new().ok("agent_a", "MidA");
 
-    let result = run_flow(flow, &reg, &sched, Payload::new("In", serde_json::json!({})), &no_disabled(), &mut runner);
+    let result = run_flow(
+        flow,
+        &reg,
+        &sched,
+        Payload::new("In", serde_json::json!({})),
+        &no_disabled(),
+        &mut runner,
+    );
     assert!(result.is_complete());
     assert_eq!(result.trace().len(), 1);
 }
@@ -844,7 +982,14 @@ optional = ["ghost"]
     let sched = Scheduler::new(Entitlement::free_local());
     let mut runner = ScriptedRunner::new().ok("agent_a", "MidA");
 
-    let result = run_flow(flow, &reg, &sched, Payload::new("In", serde_json::json!({})), &no_disabled(), &mut runner);
+    let result = run_flow(
+        flow,
+        &reg,
+        &sched,
+        Payload::new("In", serde_json::json!({})),
+        &no_disabled(),
+        &mut runner,
+    );
     // ghost is unregistered + optional → skipped, flow returns agent_a's output.
     assert!(result.is_complete() || result.is_partial());
     assert!(!runner.invoked.iter().any(|(a, _)| a == "ghost"));
@@ -912,7 +1057,10 @@ steps = ["fact_extractor"]
     .unwrap();
     let resolved = resolve_flow("他诽谤我", &flows, &reg).expect("routes to a flow");
     assert_eq!(resolved.id, "legal_defamation");
-    assert!(!resolved.synthesized, "matched a declared flow, not synthesized");
+    assert!(
+        !resolved.synthesized,
+        "matched a declared flow, not synthesized"
+    );
 }
 
 #[test]
@@ -923,7 +1071,10 @@ fn single_agent_backward_compat_synthesizes_one_step_flow() {
     let flows = FlowSet::default();
     let resolved = resolve_flow("帮我算本金", &flows, &reg).expect("routes to a synthesized flow");
     assert_eq!(resolved.flow.steps, ["civil_loan_agent"]);
-    assert!(resolved.synthesized, "single agent → synthesized 1-step flow");
+    assert!(
+        resolved.synthesized,
+        "single agent → synthesized 1-step flow"
+    );
 }
 
 #[test]

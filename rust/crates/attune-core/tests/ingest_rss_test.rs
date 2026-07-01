@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 use attune_core::crypto::Key32;
 use attune_core::ingest::{
-    ingest_document, parse_feed_bytes, DocumentSink, FeedFetcher, FeedHttpResponse,
-    IngestOutcome, RawDocument, RssConnector, RssFeedFetch, SourceConnector, SourceKind,
+    ingest_document, parse_feed_bytes, DocumentSink, FeedFetcher, FeedHttpResponse, IngestOutcome,
+    RawDocument, RssConnector, RssFeedFetch, SourceConnector, SourceKind,
 };
 use attune_core::store::Store;
 
@@ -258,8 +258,8 @@ fn end_to_end_ingest_rss_entry_into_store() {
     let dek = Key32::generate();
     let mut inserted = 0;
     for doc in &docs {
-        let outcome = ingest_document(&store, &dek, doc)
-            .expect("RSS RawDocument must ingest, not Err");
+        let outcome =
+            ingest_document(&store, &dek, doc).expect("RSS RawDocument must ingest, not Err");
         if matches!(outcome, IngestOutcome::Inserted { .. }) {
             inserted += 1;
         }
@@ -310,7 +310,8 @@ fn empty_body_entry_is_skipped() {
             last_modified: None,
         },
     );
-    let conn = RssConnector::with_fetcher(make_feed(None, None), Box::new(MockFetcher::new(responses)));
+    let conn =
+        RssConnector::with_fetcher(make_feed(None, None), Box::new(MockFetcher::new(responses)));
     let mut docs: Vec<RawDocument> = Vec::new();
     {
         let mut sink: DocumentSink<'_> = Box::new(|d| docs.push(d));

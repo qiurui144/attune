@@ -103,18 +103,17 @@ impl PpOcrProvider {
         // 否则 HF_HUB_OFFLINE=1 对 OCR 路径无效(对抗复核 I1)。
         if crate::infer::model_store::hf_hub_offline() {
             return Err(VaultError::ModelLoad(
-                "PP-OCR models not cached and HF_HUB_OFFLINE is set; refusing network download".into(),
+                "PP-OCR models not cached and HF_HUB_OFFLINE is set; refusing network download"
+                    .into(),
             ));
         }
         let d = Self::models_dir();
-        std::fs::create_dir_all(&d).map_err(|e| {
-            VaultError::ModelLoad(format!("create ppocr dir {}: {e}", d.display()))
-        })?;
+        std::fs::create_dir_all(&d)
+            .map_err(|e| VaultError::ModelLoad(format!("create ppocr dir {}: {e}", d.display())))?;
         log::info!("PP-OCR: models missing, auto-downloading (~16 MB)...");
 
         // S8: 解析 failover 顺序 (RapidOCR repo) —— 探测只在此显式下载路径(非请求路径,R3)。
-        let sources =
-            crate::infer::model_source::resolve_sources_for(Self::RAPIDOCR_REPO);
+        let sources = crate::infer::model_source::resolve_sources_for(Self::RAPIDOCR_REPO);
         download_onnx_models(&sources, &d)?;
 
         // 字典 (需 # prefix + ' ' suffix 满足 kreuzberg-paddle-ocr CTC blank 格式)
@@ -126,12 +125,10 @@ impl PpOcrProvider {
             let tmp_path = d.join("ppocr_keys_v1.txt.tmp");
             download_file(dict_url, &tmp_path)?;
             // wrap with # prefix + ' ' suffix
-            let raw = std::fs::read_to_string(&tmp_path).map_err(|e| {
-                VaultError::ModelLoad(format!("read ppocr dict tmp: {e}"))
-            })?;
-            std::fs::write(&dict_path, format!("#\n{}\n ", raw.trim_end())).map_err(|e| {
-                VaultError::ModelLoad(format!("write ppocr_keys_v1.txt: {e}"))
-            })?;
+            let raw = std::fs::read_to_string(&tmp_path)
+                .map_err(|e| VaultError::ModelLoad(format!("read ppocr dict tmp: {e}")))?;
+            std::fs::write(&dict_path, format!("#\n{}\n ", raw.trim_end()))
+                .map_err(|e| VaultError::ModelLoad(format!("write ppocr_keys_v1.txt: {e}")))?;
             let _ = std::fs::remove_file(&tmp_path);
         }
 
@@ -153,10 +150,7 @@ impl PpOcrProvider {
         let rec_model = d.join("ch_PP-OCRv5_rec_mobile.onnx");
         let char_dict = d.join("ppocr_keys_v1.txt");
 
-        if !det_model.exists()
-            || !cls_model.exists()
-            || !rec_model.exists()
-            || !char_dict.exists()
+        if !det_model.exists() || !cls_model.exists() || !rec_model.exists() || !char_dict.exists()
         {
             return None;
         }
@@ -230,22 +224,22 @@ pub(crate) fn download_onnx_models(
 fn download_file(url: &str, dst: &std::path::Path) -> Result<()> {
     let tmp = dst.with_extension("tmp");
     let client = reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))  // S1: 死源 connect fail-fast,不等内核 TCP 超时
-        .timeout(std::time::Duration::from_secs(600))         // C1: 传输中途 stall 守卫(total,blocking 无 read_timeout)
+        .connect_timeout(std::time::Duration::from_secs(10)) // S1: 死源 connect fail-fast,不等内核 TCP 超时
+        .timeout(std::time::Duration::from_secs(600)) // C1: 传输中途 stall 守卫(total,blocking 无 read_timeout)
         .build()
         .map_err(|e| VaultError::ModelLoad(format!("build http client: {e}")))?;
-    let mut resp = client.get(url).send().map_err(|e| {
-        VaultError::ModelLoad(format!("download GET {url}: {e}"))
-    })?;
+    let mut resp = client
+        .get(url)
+        .send()
+        .map_err(|e| VaultError::ModelLoad(format!("download GET {url}: {e}")))?;
     if !resp.status().is_success() {
         return Err(VaultError::ModelLoad(format!(
             "download {url} returned status {}",
             resp.status()
         )));
     }
-    let mut out = std::fs::File::create(&tmp).map_err(|e| {
-        VaultError::ModelLoad(format!("create tmp file {}: {e}", tmp.display()))
-    })?;
+    let mut out = std::fs::File::create(&tmp)
+        .map_err(|e| VaultError::ModelLoad(format!("create tmp file {}: {e}", tmp.display())))?;
     resp.copy_to(&mut out).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         VaultError::ModelLoad(format!("copy_to {} from {url}: {e}", tmp.display()))
@@ -253,7 +247,11 @@ fn download_file(url: &str, dst: &std::path::Path) -> Result<()> {
     drop(out);
     std::fs::rename(&tmp, dst).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        VaultError::ModelLoad(format!("rename {} -> {}: {e}", tmp.display(), dst.display()))
+        VaultError::ModelLoad(format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            dst.display()
+        ))
     })?;
     Ok(())
 }
@@ -334,10 +332,12 @@ impl OcrProvider for PpOcrProvider {
         let oriented_path: &Path = orient_tmp.as_ref().map_or(image_path, |t| t.path());
 
         // Step 1: deskew preprocessing（如 profile 开启，在已摆正的图上做）
-        let deskewed_tmp: Option<tempfile::NamedTempFile> =
-            if profile.deskew { deskew_image(oriented_path) } else { None };
-        let effective_path: &Path =
-            deskewed_tmp.as_ref().map_or(oriented_path, |t| t.path());
+        let deskewed_tmp: Option<tempfile::NamedTempFile> = if profile.deskew {
+            deskew_image(oriented_path)
+        } else {
+            None
+        };
+        let effective_path: &Path = deskewed_tmp.as_ref().map_or(oriented_path, |t| t.path());
 
         let path_str = effective_path.to_str().ok_or_else(|| {
             VaultError::Io(std::io::Error::new(
@@ -384,7 +384,9 @@ impl OcrProvider for PpOcrProvider {
         }
 
         // Step 6: 行级输出（含 bbox）— office helper 结构化抽取需要
-        let lines: Vec<super::RawLine> = result.text_blocks.iter()
+        let lines: Vec<super::RawLine> = result
+            .text_blocks
+            .iter()
             .filter(|b| !b.text.is_empty())
             .map(|b| {
                 // box_points: [tl, tr, br, bl], Point { x: u32, y: u32 }
@@ -444,7 +446,8 @@ fn normalize_orientation(image_path: &Path) -> Option<tempfile::NamedTempFile> {
         .suffix(".png")
         .tempfile()
         .ok()?;
-    img.write_to(tmp.as_file_mut(), image::ImageFormat::Png).ok()?;
+    img.write_to(tmp.as_file_mut(), image::ImageFormat::Png)
+        .ok()?;
     log::debug!(
         "EXIF orientation normalized ({orientation:?}): {}",
         image_path.display()
@@ -503,8 +506,8 @@ pub fn deskew_image(image_path: &Path) -> Option<tempfile::NamedTempFile> {
     let img = image::open(image_path).ok()?;
     let luma = img.to_luma8();
     let angle_deg = estimate_skew_deg(&luma)?; // > 0.5° 才 Some
-    // 用 imageproc::geometric_transformations::rotate_about_center 做旋转
-    // 注：旋转是顺时针为负角度（图像坐标系 Y 向下），我们纠正倾斜需取反
+                                               // 用 imageproc::geometric_transformations::rotate_about_center 做旋转
+                                               // 注：旋转是顺时针为负角度（图像坐标系 Y 向下），我们纠正倾斜需取反
     let rad = (-angle_deg).to_radians() as f32;
     let rotated = imageproc::geometric_transformations::rotate_about_center(
         &luma,
@@ -521,7 +524,11 @@ pub fn deskew_image(image_path: &Path) -> Option<tempfile::NamedTempFile> {
     dynamic
         .write_to(tmp.as_file_mut(), image::ImageFormat::Png)
         .ok()?;
-    log::debug!("deskew: {:.1}° correction applied to {}", angle_deg, image_path.display());
+    log::debug!(
+        "deskew: {:.1}° correction applied to {}",
+        angle_deg,
+        image_path.display()
+    );
     Some(tmp)
 }
 
@@ -623,10 +630,23 @@ fn reconstruct_table_md(blocks: &[kreuzberg_paddle_ocr::TextBlock]) -> Option<St
             let cx = pts.iter().map(|p| p.x as f32).sum::<f32>() / n;
             let cy = pts.iter().map(|p| p.y as f32).sum::<f32>() / n;
             // height = avg of left and right side heights (need ≥4 pts)
-            let left_h = if pts.len() >= 4 { (pts[3].y as f32 - pts[0].y as f32).abs() } else { 20.0 };
-            let right_h = if pts.len() >= 4 { (pts[2].y as f32 - pts[1].y as f32).abs() } else { 20.0 };
+            let left_h = if pts.len() >= 4 {
+                (pts[3].y as f32 - pts[0].y as f32).abs()
+            } else {
+                20.0
+            };
+            let right_h = if pts.len() >= 4 {
+                (pts[2].y as f32 - pts[1].y as f32).abs()
+            } else {
+                20.0
+            };
             let height = ((left_h + right_h) / 2.0).max(1.0);
-            BlockInfo { text: &b.text, cx, cy, height }
+            BlockInfo {
+                text: &b.text,
+                cx,
+                cy,
+                height,
+            }
         })
         .collect();
 
@@ -640,7 +660,12 @@ fn reconstruct_table_md(blocks: &[kreuzberg_paddle_ocr::TextBlock]) -> Option<St
 
     // 按 cy 升序排列，分行（贪心聚类：cy 差值 ≤ row_tol 属同行）
     let mut sorted: Vec<usize> = (0..infos.len()).collect();
-    sorted.sort_by(|&a, &b| infos[a].cy.partial_cmp(&infos[b].cy).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|&a, &b| {
+        infos[a]
+            .cy
+            .partial_cmp(&infos[b].cy)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for idx in sorted {
@@ -657,7 +682,12 @@ fn reconstruct_table_md(blocks: &[kreuzberg_paddle_ocr::TextBlock]) -> Option<St
 
     // 每行按 cx 排序
     for row in &mut rows {
-        row.sort_by(|&a, &b| infos[a].cx.partial_cmp(&infos[b].cx).unwrap_or(std::cmp::Ordering::Equal));
+        row.sort_by(|&a, &b| {
+            infos[a]
+                .cx
+                .partial_cmp(&infos[b].cx)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     // 检验是否像表格：≥ 2 行 × ≥ 2 列
@@ -847,7 +877,10 @@ mod tests {
         let result = estimate_skew_deg(&img);
         if let Some(angle) = result {
             // 容差 1.5°（合成图可能因量化而有小偏差）
-            assert!(angle.abs() <= 1.5, "expected near-zero skew but got {angle}°");
+            assert!(
+                angle.abs() <= 1.5,
+                "expected near-zero skew but got {angle}°"
+            );
         }
         // None 也是可接受的（0° 不需要校正）
     }
@@ -865,7 +898,10 @@ mod tests {
             box_points: vec![
                 kreuzberg_paddle_ocr::Point { x, y },
                 kreuzberg_paddle_ocr::Point { x: x + 80, y },
-                kreuzberg_paddle_ocr::Point { x: x + 80, y: y + 20 },
+                kreuzberg_paddle_ocr::Point {
+                    x: x + 80,
+                    y: y + 20,
+                },
                 kreuzberg_paddle_ocr::Point { x, y: y + 20 },
             ],
             box_score: 0.9,
@@ -878,7 +914,11 @@ mod tests {
     #[test]
     fn reconstruct_table_md_too_few_blocks_returns_none() {
         // 3 个块不够构成表格
-        let blocks = vec![mk_block("A", 0, 0), mk_block("B", 100, 0), mk_block("C", 0, 30)];
+        let blocks = vec![
+            mk_block("A", 0, 0),
+            mk_block("B", 100, 0),
+            mk_block("C", 0, 30),
+        ];
         assert!(reconstruct_table_md(&blocks).is_none());
     }
 

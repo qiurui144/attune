@@ -38,7 +38,10 @@ async fn login(base: &str, tier: &str) {
     } else {
         // logged-out: explicit logout
         let client = reqwest::Client::new();
-        let _ = client.post(format!("{base}/api/v1/member/logout")).send().await;
+        let _ = client
+            .post(format!("{base}/api/v1/member/logout"))
+            .send()
+            .await;
         return;
     };
     let client = reqwest::Client::new();
@@ -61,10 +64,22 @@ fn doc_b() -> Value {
 /// The three tier-3 operations, as (path, body) builders.
 fn tier3_ops() -> Vec<(&'static str, Value)> {
     vec![
-        ("documents/compare", json!({ "left": doc_a(), "right": doc_b(), "mode": "semantic" })),
-        ("documents/summarize", json!({ "source": doc_a(), "level": "standard" })),
-        ("documents/chapters", json!({ "itemId": null, "text": "# C1\n\n一些足够长的章节正文内容。\n", "action": "summarize", "chapterIdx": 0 })),
-        ("documents/chapters", json!({ "itemId": null, "text": "# C1\n\n一些足够长的章节正文内容。\n", "action": "ask", "chapterIdx": 0, "question": "讲了什么？" })),
+        (
+            "documents/compare",
+            json!({ "left": doc_a(), "right": doc_b(), "mode": "semantic" }),
+        ),
+        (
+            "documents/summarize",
+            json!({ "source": doc_a(), "level": "standard" }),
+        ),
+        (
+            "documents/chapters",
+            json!({ "itemId": null, "text": "# C1\n\n一些足够长的章节正文内容。\n", "action": "summarize", "chapterIdx": 0 }),
+        ),
+        (
+            "documents/chapters",
+            json!({ "itemId": null, "text": "# C1\n\n一些足够长的章节正文内容。\n", "action": "ask", "chapterIdx": 0, "question": "讲了什么？" }),
+        ),
     ]
 }
 
@@ -108,7 +123,10 @@ async fn paid_passes_the_member_gate_on_tier3_ops() {
 
     for (path, body) in tier3_ops() {
         let (status, v) = post(&base, path, body).await;
-        assert_ne!(status, 403, "paid tier3 {path} must NOT be gate-blocked (403), body={v}");
+        assert_ne!(
+            status, 403,
+            "paid tier3 {path} must NOT be gate-blocked (403), body={v}"
+        );
         assert_ne!(
             v["code"], "membership-required",
             "paid tier3 {path} must never get membership-required"
@@ -132,7 +150,10 @@ async fn paid_but_cloud_llm_disabled_refuses_tier3_not_silently_sends() {
 
     for (path, body) in tier3_ops() {
         let (status, v) = post(&base, path, body).await;
-        assert_eq!(status, 403, "tier3 {path} with cloud LLM disabled must be refused, body={v}");
+        assert_eq!(
+            status, 403,
+            "tier3 {path} with cloud LLM disabled must be refused, body={v}"
+        );
         assert_eq!(
             v["code"], "cloud-llm-disabled",
             "tier3 {path} must refuse with cloud-llm-disabled, not send to the cloud"
@@ -169,7 +190,10 @@ async fn forged_unverified_paid_claim_cannot_reach_billable_tier3() {
         let s = r.status().as_u16();
         (s, r.json::<Value>().await.unwrap_or(Value::Null))
     };
-    assert_eq!(login_status, 403, "forged paid login must be rejected: {login_body}");
+    assert_eq!(
+        login_status, 403,
+        "forged paid login must be rejected: {login_body}"
+    );
     assert_eq!(login_body["code"], "paid-verification-failed");
 
     // The billable tier-3 op must NOT be reachable — the member was never granted Paid.
@@ -179,8 +203,14 @@ async fn forged_unverified_paid_claim_cannot_reach_billable_tier3() {
         json!({ "source": doc_a(), "level": "detailed" }),
     )
     .await;
-    assert_eq!(status, 403, "forged-paid summarize must be gate-blocked, body={v}");
-    assert_eq!(v["code"], "membership-required", "the forged claim never reached a billable op");
+    assert_eq!(
+        status, 403,
+        "forged-paid summarize must be gate-blocked, body={v}"
+    );
+    assert_eq!(
+        v["code"], "membership-required",
+        "the forged claim never reached a billable op"
+    );
 }
 
 #[tokio::test]
@@ -231,7 +261,14 @@ async fn free_tier_ops_succeed_without_login() {
     )
     .await;
     assert_eq!(s3, 200, "chapters list is free");
-    assert!(v3["result"]["chapters"].as_array().map(|a| a.len()).unwrap_or(0) >= 2, "list returns chapters: {v3}");
+    assert!(
+        v3["result"]["chapters"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0)
+            >= 2,
+        "list returns chapters: {v3}"
+    );
 }
 
 #[tokio::test]
@@ -264,7 +301,10 @@ async fn sentinel_gateway_token_never_appears_in_any_response() {
                 "[{tier}] response leaked the sentinel gateway token: {s}"
             );
             // Defense-in-depth: no obviously credential-shaped keys in the envelope.
-            assert!(!s.contains("apiKey") && !s.contains("api_key"), "[{tier}] no api_key field: {s}");
+            assert!(
+                !s.contains("apiKey") && !s.contains("api_key"),
+                "[{tier}] no api_key field: {s}"
+            );
             assert!(!s.contains("Bearer "), "[{tier}] no Bearer token: {s}");
         }
     }
@@ -334,14 +374,26 @@ async fn real_llm_paid_summarize_returns_200_happy_path() {
 
     assert_eq!(status, 200, "paid + real LLM summarize must 200, body={v}");
     let overview = v["result"]["overview"].as_str().unwrap_or("");
-    assert!(!overview.is_empty(), "real summary overview must be non-empty: {v}");
+    assert!(
+        !overview.is_empty(),
+        "real summary overview must be non-empty: {v}"
+    );
     // The bypass/pipeline path is recorded (short doc here → single-call).
     assert!(
-        v["tokenBill"]["path"].as_str().map(|p| !p.is_empty()).unwrap_or(false),
+        v["tokenBill"]["path"]
+            .as_str()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false),
         "token_bill.path must be present: {v}"
     );
     // Real LLM in the loop — STILL no gateway-token leak in the live response.
     let s = serde_json::to_string(&v).unwrap();
-    assert!(!s.contains(SENTINEL_GATEWAY_TOKEN), "live response leaked gateway token: {s}");
-    assert!(!s.contains("Bearer "), "live response must not echo a Bearer token: {s}");
+    assert!(
+        !s.contains(SENTINEL_GATEWAY_TOKEN),
+        "live response leaked gateway token: {s}"
+    );
+    assert!(
+        !s.contains("Bearer "),
+        "live response must not echo a Bearer token: {s}"
+    );
 }

@@ -65,11 +65,13 @@ const DEFAULT_OLLAMA_MODEL: &str = "qwen2.5:3b";
 ///
 /// Per CLAUDE.md 红线:env var 注入 key,**禁止 print key**。
 fn require_llm() -> Box<dyn LlmProvider> {
-    let provider_kind = std::env::var("ATTUNE_LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string());
+    let provider_kind =
+        std::env::var("ATTUNE_LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string());
     match provider_kind.as_str() {
         "openai_compat" | "openai" => {
-            let endpoint = std::env::var("ATTUNE_LLM_ENDPOINT")
-                .expect("ATTUNE_LLM_ENDPOINT required for openai_compat (e.g. https://api.deepseek.com/v1)");
+            let endpoint = std::env::var("ATTUNE_LLM_ENDPOINT").expect(
+                "ATTUNE_LLM_ENDPOINT required for openai_compat (e.g. https://api.deepseek.com/v1)",
+            );
             let api_key = std::env::var("ATTUNE_LLM_API_KEY")
                 .expect("ATTUNE_LLM_API_KEY required for openai_compat");
             let model = std::env::var("ATTUNE_LLM_MODEL")
@@ -236,7 +238,11 @@ fn agent_memory_consolidation_real_llm() {
     let mut results: Vec<MemoryCaseResult> = Vec::new();
     for (i, bundle) in bundles.iter().enumerate() {
         let case_no = i + 1;
-        println!("\n[case {case_no}/5] window_start={} chunks={}", bundle.window_start, bundle.chunks.len());
+        println!(
+            "\n[case {case_no}/5] window_start={} chunks={}",
+            bundle.window_start,
+            bundle.chunks.len()
+        );
 
         let out = generate_one_episodic_memory(llm.as_ref(), bundle);
         match out {

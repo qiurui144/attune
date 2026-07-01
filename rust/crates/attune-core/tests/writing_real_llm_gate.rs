@@ -50,7 +50,9 @@ use std::path::PathBuf;
 use attune_core::llm::{LlmProvider, OllamaLlmProvider, OpenAiLlmProvider};
 use attune_core::writing::draft::{draft, DraftRequest};
 use attune_core::writing::rewrite::{rewrite, RewriteOutput, RewriteRequest};
-use attune_core::writing::synthesis::{synthesize, SynthLlms, SynthesisRequest, SynthesisStructure};
+use attune_core::writing::synthesis::{
+    synthesize, SynthLlms, SynthesisRequest, SynthesisStructure,
+};
 use attune_core::writing::{SourceMaterial, StyleTarget};
 use serde::Deserialize;
 
@@ -162,9 +164,15 @@ struct SynthesisCase {
 }
 
 fn corpus_path(dir: &str) -> PathBuf {
-    [env!("CARGO_MANIFEST_DIR"), "tests", "golden", dir, "cases.yaml"]
-        .iter()
-        .collect()
+    [
+        env!("CARGO_MANIFEST_DIR"),
+        "tests",
+        "golden",
+        dir,
+        "cases.yaml",
+    ]
+    .iter()
+    .collect()
 }
 
 /// True if any forbidden phrase appears in the output (a hallucinated fact).
@@ -186,8 +194,8 @@ fn preserved(out: &str, facts: &[String]) -> bool {
 #[ignore = "real LLM; secret/Ollama-gated. Run via the CI secret lane or manually."]
 fn draft_real_llm_grounding_and_consistency() {
     let llm = require_llm();
-    let text = std::fs::read_to_string(corpus_path("writing_draft"))
-        .expect("read writing_draft corpus");
+    let text =
+        std::fs::read_to_string(corpus_path("writing_draft")).expect("read writing_draft corpus");
     let corpus: DraftCorpus = serde_yaml::from_str(&text).expect("parse draft corpus");
     let n_seeds = seeds();
     println!(
@@ -449,7 +457,10 @@ fn corpora_parse_and_meet_floor_count() {
         "draft golden must have ≥10 real + 1 sentinel = ≥11 cases, got {}",
         dc.cases.len()
     );
-    assert!(dc.cases.iter().all(|c| !c.sources.is_empty()), "every draft case needs sources");
+    assert!(
+        dc.cases.iter().all(|c| !c.sources.is_empty()),
+        "every draft case needs sources"
+    );
 
     let r = std::fs::read_to_string(corpus_path("writing_rewrite")).expect("read rewrite corpus");
     let rc: RewriteCorpus = serde_yaml::from_str(&r).expect("parse rewrite corpus");
@@ -458,9 +469,13 @@ fn corpora_parse_and_meet_floor_count() {
         "rewrite golden must have ≥10 real + 1 sentinel = ≥11 cases, got {}",
         rc.cases.len()
     );
-    assert!(rc.cases.iter().all(|c| !c.text.trim().is_empty()), "every rewrite case needs text");
+    assert!(
+        rc.cases.iter().all(|c| !c.text.trim().is_empty()),
+        "every rewrite case needs text"
+    );
 
-    let s = std::fs::read_to_string(corpus_path("writing_synthesis")).expect("read synthesis corpus");
+    let s =
+        std::fs::read_to_string(corpus_path("writing_synthesis")).expect("read synthesis corpus");
     let sc: SynthesisCorpus = serde_yaml::from_str(&s).expect("parse synthesis corpus");
     assert!(
         sc.cases.len() >= 11,

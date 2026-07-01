@@ -252,8 +252,8 @@ pub fn check_ignore_spike(
 /// ignoring occurrences inside line comments.
 fn count_ignore_attrs(dir: &Path) -> Result<u32, String> {
     let mut total = 0u32;
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("cannot scan {}: {e}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot scan {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();

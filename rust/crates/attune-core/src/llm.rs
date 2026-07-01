@@ -32,19 +32,28 @@ where
 /// 对话消息（公开，用于多轮对话）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
-    pub role: String,    // "system" / "user" / "assistant"
+    pub role: String, // "system" / "user" / "assistant"
     pub content: String,
 }
 
 impl ChatMessage {
     pub fn system(content: &str) -> Self {
-        Self { role: "system".into(), content: content.into() }
+        Self {
+            role: "system".into(),
+            content: content.into(),
+        }
     }
     pub fn user(content: &str) -> Self {
-        Self { role: "user".into(), content: content.into() }
+        Self {
+            role: "user".into(),
+            content: content.into(),
+        }
     }
     pub fn assistant(content: &str) -> Self {
-        Self { role: "assistant".into(), content: content.into() }
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+        }
     }
 }
 
@@ -62,10 +71,7 @@ impl ChatMessage {
 /// `content` an array of `{"type":"text","text":...}` blocks. The breakpoint
 /// is attached to the final block of `system` (the stable, reusable prefix).
 #[cfg(feature = "anthropic-cache")]
-pub fn build_anthropic_cached_request(
-    messages: &[ChatMessage],
-    model: &str,
-) -> serde_json::Value {
+pub fn build_anthropic_cached_request(messages: &[ChatMessage], model: &str) -> serde_json::Value {
     use serde_json::json;
 
     // Split off system turns (the stable prefix) from the conversational turns.
@@ -147,7 +153,9 @@ impl LlmCallOptions {
 /// Build the Ollama `options` object from call options. Pure + testable.
 /// `num_predict` is set from the effective output cap (max_tokens or, failing
 /// that, reasoning_budget) so a configured ceiling reaches llama.cpp's sampler.
-pub(crate) fn ollama_options_json(opts: &LlmCallOptions) -> serde_json::Map<String, serde_json::Value> {
+pub(crate) fn ollama_options_json(
+    opts: &LlmCallOptions,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut options_obj = serde_json::Map::new();
     if let Some(s) = opts.seed {
         options_obj.insert("seed".into(), serde_json::json!(s));
@@ -224,7 +232,10 @@ pub enum DeterminismLevel {
 #[derive(Debug, Clone)]
 pub enum Attachment {
     /// 图片 (base64 data URI 或 https URL)
-    Image { url_or_data_uri: String, mime: String },
+    Image {
+        url_or_data_uri: String,
+        mime: String,
+    },
     /// 文件 — 转 text 后拼到 user message (调用方负责 OCR / 提取)
     TextFile { name: String, content: String },
 }
@@ -258,11 +269,7 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// Per spec docs/superpowers/specs/2026-05-28-kb-memory-vs-vlm-llm-bench-validation.md
     /// §11 Risk A. Plan: docs/superpowers/plans/2026-05-28-kb-bench-integration.md T1.
-    fn chat_with_options(
-        &self,
-        messages: &[ChatMessage],
-        opts: &LlmCallOptions,
-    ) -> Result<String> {
+    fn chat_with_options(&self, messages: &[ChatMessage], opts: &LlmCallOptions) -> Result<String> {
         // Plan A1 Task I + C-T1 cross-merge: chat_with_history now returns
         // (String, TokenUsage); chat_with_options keeps single-String signature
         // for eval-mode caller ergonomics — usage is dropped in default impl
@@ -284,11 +291,14 @@ pub trait LlmProvider: Send + Sync {
         messages: &[ChatMessage],
     ) -> Result<(String, crate::usage::TokenUsage)> {
         // 默认实现：取最后一条 user 消息，用第一条 system 消息
-        let system = messages.iter()
+        let system = messages
+            .iter()
             .find(|m| m.role == "system")
             .map(|m| m.content.as_str())
             .unwrap_or("");
-        let user = messages.iter().rev()
+        let user = messages
+            .iter()
+            .rev()
             .find(|m| m.role == "user")
             .map(|m| m.content.as_str())
             .unwrap_or("");
@@ -418,10 +428,8 @@ pub trait LlmProvider: Send + Sync {
                 "chat_with_retry: max_attempts must be >= 1".into(),
             ));
         }
-        let mut messages: Vec<ChatMessage> = vec![
-            ChatMessage::system(system),
-            ChatMessage::user(user),
-        ];
+        let mut messages: Vec<ChatMessage> =
+            vec![ChatMessage::system(system), ChatMessage::user(user)];
         let mut last_err = String::new();
         for attempt in 1..=max_attempts {
             let (raw, usage) = if attempt == 1 {
@@ -536,7 +544,7 @@ const PREFERRED_MODELS: &[&str] = &[
     "deepseek-r1:14b",
     // 大模型（最后兜底）
     "qwen2.5:7b",
-    "qwen3.5:35b-a3b-q3_k_m",  // MoE 30B 总参 / 3B 激活
+    "qwen3.5:35b-a3b-q3_k_m", // MoE 30B 总参 / 3B 激活
     "deepseek-r1:32b",
 ];
 
@@ -574,14 +582,21 @@ impl OllamaLlmProvider {
         let url = format!("{}/api/tags", provider.base_url);
 
         let available: Vec<String> = llm_block_on(async move {
-            let resp = client.get(&url).send().await
+            let resp = client
+                .get(&url)
+                .send()
+                .await
                 .map_err(|e| VaultError::LlmUnavailable(format!("ollama unreachable: {e}")))?;
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                return Err(VaultError::LlmUnavailable(format!("ollama HTTP {status}: {body}")));
+                return Err(VaultError::LlmUnavailable(format!(
+                    "ollama HTTP {status}: {body}"
+                )));
             }
-            let tags: TagsResponse = resp.json().await
+            let tags: TagsResponse = resp
+                .json()
+                .await
                 .map_err(|e| VaultError::LlmUnavailable(format!("parse tags: {e}")))?;
             Ok(tags.models.into_iter().map(|m| m.name).collect())
         })?;
@@ -600,8 +615,8 @@ impl OllamaLlmProvider {
     fn chat_sync(&self, system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
         let url = format!("{}/api/chat", self.base_url);
         // F-16 Ollama 模型驻留: keep_alive=1h. 见 embed.rs 同款注释.
-        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
-            .unwrap_or_else(|_| "1h".to_string());
+        let keep_alive =
+            std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "1h".to_string());
         // Lever 1 (2026-05-22 v1.0 GA defamation F1 push): 当 ATTUNE_OLLAMA_FORMAT_JSON=1
         // 时打开 Ollama 的 schema-guided JSON 模式 — 强制输出 valid JSON, 消除 markdown
         // wrapping / trailing prose / 未转义引号导致的 parse 错误. 默认 OFF, 不影响
@@ -626,17 +641,23 @@ impl OllamaLlmProvider {
         let model = self.model.clone();
 
         llm_block_on(async move {
-            let resp = client.post(&url)
+            let resp = client
+                .post(&url)
                 .header("Content-Type", "application/json")
                 .body(body_json)
-                .send().await
+                .send()
+                .await
                 .map_err(|e| VaultError::LlmUnavailable(format!("chat request: {e}")))?;
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                return Err(VaultError::LlmUnavailable(format!("ollama HTTP {status}: {body}")));
+                return Err(VaultError::LlmUnavailable(format!(
+                    "ollama HTTP {status}: {body}"
+                )));
             }
-            let parsed: OllamaChatResponse = resp.json().await
+            let parsed: OllamaChatResponse = resp
+                .json()
+                .await
                 .map_err(|e| VaultError::Classification(format!("parse chat response: {e}")))?;
             let usage = crate::usage::TokenUsage {
                 tokens_in: parsed.prompt_eval_count,
@@ -660,12 +681,13 @@ impl LlmProvider for OllamaLlmProvider {
         messages: &[ChatMessage],
     ) -> Result<(String, crate::usage::TokenUsage)> {
         let url = format!("{}/api/chat", self.base_url);
-        let ollama_messages: Vec<serde_json::Value> = messages.iter()
+        let ollama_messages: Vec<serde_json::Value> = messages
+            .iter()
             .map(|m| serde_json::json!({"role": &m.role, "content": &m.content}))
             .collect();
         // F-16 Ollama 模型驻留: keep_alive=1h. 见 embed.rs 同款注释.
-        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
-            .unwrap_or_else(|_| "1h".to_string());
+        let keep_alive =
+            std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "1h".to_string());
         let body = serde_json::json!({
             "model": &self.model,
             "messages": ollama_messages,
@@ -677,16 +699,23 @@ impl LlmProvider for OllamaLlmProvider {
         let model = self.model.clone();
 
         llm_block_on(async move {
-            let resp = client.post(&url)
+            let resp = client
+                .post(&url)
                 .header("Content-Type", "application/json")
-                .body(body_bytes).send().await
+                .body(body_bytes)
+                .send()
+                .await
                 .map_err(|e| VaultError::LlmUnavailable(format!("chat: {e}")))?;
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                return Err(VaultError::LlmUnavailable(format!("ollama HTTP {status}: {body}")));
+                return Err(VaultError::LlmUnavailable(format!(
+                    "ollama HTTP {status}: {body}"
+                )));
             }
-            let parsed: OllamaChatResponse = resp.json().await
+            let parsed: OllamaChatResponse = resp
+                .json()
+                .await
                 .map_err(|e| VaultError::Classification(format!("parse: {e}")))?;
             let usage = crate::usage::TokenUsage {
                 tokens_in: parsed.prompt_eval_count,
@@ -713,8 +742,8 @@ impl LlmProvider for OllamaLlmProvider {
             .iter()
             .map(|m| serde_json::json!({"role": &m.role, "content": &m.content}))
             .collect();
-        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
-            .unwrap_or_else(|_| "1h".to_string());
+        let keep_alive =
+            std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "1h".to_string());
         let options_obj = ollama_options_json(opts);
         let body = serde_json::json!({
             "model": &self.model,
@@ -760,18 +789,14 @@ impl LlmProvider for OllamaLlmProvider {
     /// T1 (v1.0.6 KB-bench) — eval-mode entry: forwards `LlmCallOptions` into
     /// the Ollama `options` body field. Ollama documents `seed` / `temperature`
     /// / `top_p` under `options` per https://github.com/ollama/ollama/blob/main/docs/modelfile.md.
-    fn chat_with_options(
-        &self,
-        messages: &[ChatMessage],
-        opts: &LlmCallOptions,
-    ) -> Result<String> {
+    fn chat_with_options(&self, messages: &[ChatMessage], opts: &LlmCallOptions) -> Result<String> {
         let url = format!("{}/api/chat", self.base_url);
         let ollama_messages: Vec<serde_json::Value> = messages
             .iter()
             .map(|m| serde_json::json!({"role": &m.role, "content": &m.content}))
             .collect();
-        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
-            .unwrap_or_else(|_| "1h".to_string());
+        let keep_alive =
+            std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "1h".to_string());
         let options_obj = ollama_options_json(opts);
         let body = serde_json::json!({
             "model": &self.model,
@@ -816,10 +841,14 @@ impl LlmProvider for OllamaLlmProvider {
         let client = self.client.clone();
         let url = format!("{}/api/tags", self.base_url);
         llm_block_on(async move {
-            client.get(&url).send().await
+            client
+                .get(&url)
+                .send()
+                .await
                 .map(|_| ())
                 .map_err(|e| VaultError::LlmUnavailable(e.to_string()))
-        }).is_ok()
+        })
+        .is_ok()
     }
 
     fn model_name(&self) -> &str {
@@ -842,8 +871,8 @@ impl LlmProvider for OllamaLlmProvider {
         schema: Option<&serde_json::Value>,
     ) -> Result<(String, crate::usage::TokenUsage)> {
         let url = format!("{}/api/chat", self.base_url);
-        let keep_alive = std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE")
-            .unwrap_or_else(|_| "1h".to_string());
+        let keep_alive =
+            std::env::var("ATTUNE_OLLAMA_KEEP_ALIVE").unwrap_or_else(|_| "1h".to_string());
         let mut body = serde_json::json!({
             "model": &self.model,
             "messages": [
@@ -862,17 +891,23 @@ impl LlmProvider for OllamaLlmProvider {
         let model = self.model.clone();
 
         llm_block_on(async move {
-            let resp = client.post(&url)
+            let resp = client
+                .post(&url)
                 .header("Content-Type", "application/json")
                 .body(body_json)
-                .send().await
+                .send()
+                .await
                 .map_err(|e| VaultError::LlmUnavailable(format!("chat request: {e}")))?;
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                return Err(VaultError::LlmUnavailable(format!("ollama HTTP {status}: {body}")));
+                return Err(VaultError::LlmUnavailable(format!(
+                    "ollama HTTP {status}: {body}"
+                )));
             }
-            let parsed: OllamaChatResponse = resp.json().await
+            let parsed: OllamaChatResponse = resp
+                .json()
+                .await
                 .map_err(|e| VaultError::Classification(format!("parse chat response: {e}")))?;
             let usage = crate::usage::TokenUsage {
                 tokens_in: parsed.prompt_eval_count,
@@ -1087,7 +1122,8 @@ impl OpenAiLlmProvider {
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {api_key}"))
                 .body(serde_json::to_vec(&first_body).map_err(VaultError::from)?)
-                .send().await
+                .send()
+                .await
                 .map_err(|e| VaultError::LlmUnavailable(format!("openai request: {e}")))?;
             let status = resp.status();
             if !status.is_success() {
@@ -1140,15 +1176,22 @@ impl OpenAiLlmProvider {
                     }
                 }
 
-                return Err(VaultError::LlmUnavailable(format!("openai HTTP {status}: {body}")));
+                return Err(VaultError::LlmUnavailable(format!(
+                    "openai HTTP {status}: {body}"
+                )));
             }
-            let parsed: OpenAiResponse = resp.json().await
+            let parsed: OpenAiResponse = resp
+                .json()
+                .await
                 .map_err(|e| VaultError::Classification(format!("parse openai response: {e}")))?;
             let usage = parsed
                 .usage
                 .unwrap_or_default()
                 .into_token_usage(&model_to_use, "openai_compat");
-            parsed.choices.into_iter().next()
+            parsed
+                .choices
+                .into_iter()
+                .next()
                 .map(|c| (c.message.content, usage))
                 .ok_or_else(|| VaultError::Classification("empty choices".into()))
         })
@@ -1157,10 +1200,7 @@ impl OpenAiLlmProvider {
 
 impl LlmProvider for OpenAiLlmProvider {
     fn chat(&self, system: &str, user: &str) -> Result<(String, crate::usage::TokenUsage)> {
-        self.chat_sync_impl(&[
-            ChatMessage::system(system),
-            ChatMessage::user(user),
-        ])
+        self.chat_sync_impl(&[ChatMessage::system(system), ChatMessage::user(user)])
     }
 
     fn chat_with_history(
@@ -1249,11 +1289,7 @@ impl LlmProvider for OpenAiLlmProvider {
     /// are unambiguous. If `model` is empty / "auto" we fall back to the
     /// legacy path (which surfaces the same fallback model the production
     /// path would have used, keeping behavior intuitive).
-    fn chat_with_options(
-        &self,
-        messages: &[ChatMessage],
-        opts: &LlmCallOptions,
-    ) -> Result<String> {
+    fn chat_with_options(&self, messages: &[ChatMessage], opts: &LlmCallOptions) -> Result<String> {
         let trimmed = self.model.trim();
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
             // Defer to the resolver-aware path; eval block still surfaces
@@ -1330,7 +1366,9 @@ impl LlmProvider for OpenAiLlmProvider {
                     text_with_files.push_str(" ===\n");
                     text_with_files.push_str(content);
                 }
-                Attachment::Image { url_or_data_uri, .. } => {
+                Attachment::Image {
+                    url_or_data_uri, ..
+                } => {
                     image_parts.push(serde_json::json!({
                         "type": "image_url",
                         "image_url": {"url": url_or_data_uri},
@@ -1364,20 +1402,30 @@ impl LlmProvider for OpenAiLlmProvider {
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {api_key}"))
                 .body(body_bytes)
-                .send().await
-                .map_err(|e| VaultError::LlmUnavailable(format!("openai multimodal request: {e}")))?;
+                .send()
+                .await
+                .map_err(|e| {
+                    VaultError::LlmUnavailable(format!("openai multimodal request: {e}"))
+                })?;
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                return Err(VaultError::LlmUnavailable(format!("openai HTTP {status}: {body}")));
+                return Err(VaultError::LlmUnavailable(format!(
+                    "openai HTTP {status}: {body}"
+                )));
             }
-            let parsed: OpenAiResponse = resp.json().await
+            let parsed: OpenAiResponse = resp
+                .json()
+                .await
                 .map_err(|e| VaultError::Classification(format!("parse openai response: {e}")))?;
             let usage = parsed
                 .usage
                 .unwrap_or_default()
                 .into_token_usage(&model, "openai_compat");
-            parsed.choices.into_iter().next()
+            parsed
+                .choices
+                .into_iter()
+                .next()
                 .map(|c| (c.message.content, usage))
                 .ok_or_else(|| VaultError::Classification("empty openai response".into()))
         })
@@ -1566,12 +1614,23 @@ impl MockLlmProvider {
     }
 
     pub fn push_response(&self, json: &str) {
-        self.responses.lock().unwrap_or_else(|e| e.into_inner()).push(json.to_string());
+        self.responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(json.to_string());
     }
 
     pub fn last_received_user(&self) -> Option<String> {
-        let s = self.last_user.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if s.is_empty() { None } else { Some(s) }
+        let s = self
+            .last_user
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
 
     /// 测试用 — 返回最后一次 `chat_with_history` 收到的全部 messages 拼接文本
@@ -1590,17 +1649,17 @@ impl MockLlmProvider {
     /// `chat(system,user)` is logged as `[system, user]`. Used to assert
     /// retry-loop prefix stability.
     pub fn call_log(&self) -> Vec<Vec<ChatMessage>> {
-        self.call_log.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.call_log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// T1 — Override the mock's reported [`DeterminismLevel`] (used by
     /// `eval_determinism_test::anthropic_provider_degrades_to_temp0` to make
     /// a single mock instance impersonate an Anthropic-flavored provider).
     pub fn set_determinism_level(&self, level: DeterminismLevel) {
-        *self
-            .determinism
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = level;
+        *self.determinism.lock().unwrap_or_else(|e| e.into_inner()) = level;
     }
 }
 
@@ -1616,7 +1675,10 @@ impl LlmProvider for MockLlmProvider {
             return Err(VaultError::Classification("no mock response".into()));
         }
         let response = guard.remove(0);
-        Ok((response, crate::usage::TokenUsage::empty("mock", &self.model)))
+        Ok((
+            response,
+            crate::usage::TokenUsage::empty("mock", &self.model),
+        ))
     }
 
     fn chat_with_history(
@@ -1638,18 +1700,17 @@ impl LlmProvider for MockLlmProvider {
             return Err(VaultError::Classification("no mock response".into()));
         }
         let response = guard.remove(0);
-        Ok((response, crate::usage::TokenUsage::empty("mock", &self.model)))
+        Ok((
+            response,
+            crate::usage::TokenUsage::empty("mock", &self.model),
+        ))
     }
 
     /// T1 — deterministic answer of the form `mock-<seed>-<hash(last_user)>`
     /// so integration tests can assert equality / inequality across seeds
     /// without preloading the response queue. Bypasses the response queue
     /// entirely so legacy tests pushing responses are unaffected.
-    fn chat_with_options(
-        &self,
-        messages: &[ChatMessage],
-        opts: &LlmCallOptions,
-    ) -> Result<String> {
+    fn chat_with_options(&self, messages: &[ChatMessage], opts: &LlmCallOptions) -> Result<String> {
         use std::hash::{Hash, Hasher};
         let user = messages
             .iter()
@@ -1666,10 +1727,7 @@ impl LlmProvider for MockLlmProvider {
     }
 
     fn determinism_level(&self) -> DeterminismLevel {
-        *self
-            .determinism
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        *self.determinism.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn is_available(&self) -> bool {
@@ -1690,7 +1748,10 @@ impl LlmProvider for MockLlmProvider {
 struct NoopLlmProvider;
 impl LlmProvider for NoopLlmProvider {
     fn chat(&self, _system: &str, _user: &str) -> Result<(String, crate::usage::TokenUsage)> {
-        Ok((String::new(), crate::usage::TokenUsage::empty("noop", "noop")))
+        Ok((
+            String::new(),
+            crate::usage::TokenUsage::empty("noop", "noop"),
+        ))
     }
     fn is_available(&self) -> bool {
         false
@@ -1887,7 +1948,10 @@ mod tests {
         .unwrap();
         let tu = usage.into_token_usage("gpt-4o-mini", "openai_compat");
         assert_eq!(tu.tokens_in, 1000);
-        assert_eq!(tu.cached_in, 768, "nested OpenAI cached_tokens must map to cached_in");
+        assert_eq!(
+            tu.cached_in, 768,
+            "nested OpenAI cached_tokens must map to cached_in"
+        );
     }
 
     #[test]
@@ -1925,7 +1989,10 @@ mod tests {
         let usage: OpenAiUsage =
             serde_json::from_str(r#"{"prompt_tokens":100,"completion_tokens":10}"#).unwrap();
         let tu = usage.into_token_usage("m", "p");
-        assert_eq!(tu.cached_in, 0, "absent cache fields → 0 (no false positives)");
+        assert_eq!(
+            tu.cached_in, 0,
+            "absent cache fields → 0 (no false positives)"
+        );
     }
 
     #[test]
@@ -1939,7 +2006,10 @@ mod tests {
         )
         .unwrap();
         let tu = usage.into_token_usage("m", "p");
-        assert_eq!(tu.cached_in, 700, "nested cached_tokens wins when both present");
+        assert_eq!(
+            tu.cached_in, 700,
+            "nested cached_tokens wins when both present"
+        );
     }
 
     #[test]
@@ -1954,9 +2024,18 @@ mod tests {
         assert!(!local("https://api.openai.com/v1"));
         assert!(!local("https://hiapi.online/v1"));
         // F1 绕过攻击面：含 "localhost"/"127.0.0.1" 子串的云端地址必须判云端
-        assert!(!local("https://localhost.evil.com/v1"), "子串 localhost 不得绕过");
-        assert!(!local("https://127.0.0.1.evil.com/v1"), "子串 127.0.0.1 不得绕过");
-        assert!(!local("https://api.openai.com/v1?proxy=localhost"), "query 不参与判定");
+        assert!(
+            !local("https://localhost.evil.com/v1"),
+            "子串 localhost 不得绕过"
+        );
+        assert!(
+            !local("https://127.0.0.1.evil.com/v1"),
+            "子串 127.0.0.1 不得绕过"
+        );
+        assert!(
+            !local("https://api.openai.com/v1?proxy=localhost"),
+            "query 不参与判定"
+        );
     }
 
     // ── Retry-loop prefix stability (prefix-cache prerequisite, §4.5-G2/G3) ──
@@ -1999,7 +2078,11 @@ mod tests {
         // The growth is append-only: attempt 2 = prefix + [assistant(bad-1), user(feedback)],
         // attempt 3 = attempt-2 messages + [assistant(bad-2), user(feedback)].
         assert_eq!(log[0].len(), 2, "attempt 1 is just the prefix");
-        assert_eq!(log[1].len(), 4, "attempt 2 appends one assistant+feedback pair");
+        assert_eq!(
+            log[1].len(),
+            4,
+            "attempt 2 appends one assistant+feedback pair"
+        );
         assert_eq!(log[2].len(), 6, "attempt 3 appends another pair");
         // Confirm attempt 3's first 4 messages == attempt 2's full vector (no rewrite).
         assert_eq!(
@@ -2135,15 +2218,27 @@ mod tests {
             ..Default::default()
         };
         let out = apply_cot_hint(&original, &opts);
-        assert_eq!(out.len(), original.len() + 1, "exactly one hint message added");
-        assert_eq!(out[0].content, original[0].content, "original system untouched");
+        assert_eq!(
+            out.len(),
+            original.len() + 1,
+            "exactly one hint message added"
+        );
+        assert_eq!(
+            out[0].content, original[0].content,
+            "original system untouched"
+        );
         assert!(
             out.last().unwrap().role == "system",
             "hint is a system message"
         );
         assert!(
             out.last().unwrap().content.contains("简洁")
-                || out.last().unwrap().content.to_lowercase().contains("concise"),
+                || out
+                    .last()
+                    .unwrap()
+                    .content
+                    .to_lowercase()
+                    .contains("concise"),
             "hint instructs concise / no chain-of-thought output"
         );
     }
@@ -2217,7 +2312,9 @@ mod tests {
                 mime: "image/jpeg".into(),
             },
         ];
-        let (resp, _usage) = mock.chat_multimodal("system", "请分析", &attachments).unwrap();
+        let (resp, _usage) = mock
+            .chat_multimodal("system", "请分析", &attachments)
+            .unwrap();
         assert_eq!(resp, "ack");
         // mock 收到的 user text 应含 file content (拼接)
         let received = mock.last_received_user().unwrap_or_default();
@@ -2275,7 +2372,9 @@ mod tests {
         let mock = MockLlmProvider::new("text-only");
         mock.push_response(r#"[{"f":"a"}]"#);
         let schema = serde_json::json!({"type": "array"});
-        let (s, _u) = mock.chat_with_format_json("sys", "user", Some(&schema)).unwrap();
+        let (s, _u) = mock
+            .chat_with_format_json("sys", "user", Some(&schema))
+            .unwrap();
         assert_eq!(s, r#"[{"f":"a"}]"#);
     }
 
@@ -2284,16 +2383,13 @@ mod tests {
         let mock = MockLlmProvider::new("test");
         mock.push_response("oops bad");
         mock.push_response(r#"{"ok":1}"#);
-        let (raw, _u) = mock.chat_with_retry(
-            "sys",
-            "user",
-            3,
-            &|s: &str| {
+        let (raw, _u) = mock
+            .chat_with_retry("sys", "user", 3, &|s: &str| {
                 serde_json::from_str::<serde_json::Value>(s)
                     .map(|_| ())
                     .map_err(|e| format!("invalid json: {e}"))
-            },
-        ).unwrap();
+            })
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(v["ok"], 1);
     }
@@ -2304,31 +2400,27 @@ mod tests {
         mock.push_response("bad1");
         mock.push_response("bad2");
         mock.push_response("bad3");
-        let result = mock.chat_with_retry(
-            "sys",
-            "user",
-            3,
-            &|s: &str| {
-                serde_json::from_str::<serde_json::Value>(s)
-                    .map(|_| ())
-                    .map_err(|e| format!("invalid: {e}"))
-            },
-        );
+        let result = mock.chat_with_retry("sys", "user", 3, &|s: &str| {
+            serde_json::from_str::<serde_json::Value>(s)
+                .map(|_| ())
+                .map_err(|e| format!("invalid: {e}"))
+        });
         let err = result.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("exhausted"), "err msg should mention exhausted: {msg}");
-        assert!(msg.contains("3 attempts"), "err msg should include max attempts: {msg}");
+        assert!(
+            msg.contains("exhausted"),
+            "err msg should mention exhausted: {msg}"
+        );
+        assert!(
+            msg.contains("3 attempts"),
+            "err msg should include max attempts: {msg}"
+        );
     }
 
     #[test]
     fn chat_with_retry_zero_attempts_errors() {
         let mock = MockLlmProvider::new("test");
-        let result = mock.chat_with_retry(
-            "sys",
-            "user",
-            0,
-            &|_s: &str| Ok(()),
-        );
+        let result = mock.chat_with_retry("sys", "user", 0, &|_s: &str| Ok(()));
         assert!(result.is_err());
     }
 
@@ -2399,8 +2491,17 @@ mod tests {
         let req = captured.lock().unwrap().clone();
         let req_lc = req.to_lowercase();
         // Routed to the configured endpoint's /chat/completions path with the configured model.
-        assert!(req.starts_with("POST /v1/chat/completions "), "request line was: {req}");
-        assert!(req_lc.contains("authorization: bearer sk-k3"), "missing bearer auth: {req}");
-        assert!(req.contains("\"model\":\"qwen2.5-0.5b\""), "model not in body: {req}");
+        assert!(
+            req.starts_with("POST /v1/chat/completions "),
+            "request line was: {req}"
+        );
+        assert!(
+            req_lc.contains("authorization: bearer sk-k3"),
+            "missing bearer auth: {req}"
+        );
+        assert!(
+            req.contains("\"model\":\"qwen2.5-0.5b\""),
+            "model not in body: {req}"
+        );
     }
 }

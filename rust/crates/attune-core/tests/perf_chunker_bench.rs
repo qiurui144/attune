@@ -20,8 +20,7 @@ use std::time::Instant;
 const CORPUS_REL: &str = "../../tests/corpora/rust-book/src";
 
 fn corpus_dir() -> PathBuf {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR")
-        .unwrap_or_else(|_| ".".into());
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
     PathBuf::from(manifest).join(CORPUS_REL)
 }
 
@@ -40,7 +39,11 @@ fn load_corpus_markdown() -> Vec<(String, String)> {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         let content = std::fs::read_to_string(&path).expect("read file");
         files.push((name, content));
     }
@@ -59,10 +62,9 @@ fn perf_chunk_sliding_window_baseline() {
 
     let total_bytes: usize = corpus.iter().map(|(_, c)| c.len()).sum();
     let total_docs = corpus.len();
+    println!("\n=== chunker::chunk (sliding window, 512 chunk / 128 overlap) ===",);
     println!(
-        "\n=== chunker::chunk (sliding window, 512 chunk / 128 overlap) ===",
-    );
-    println!("corpus: {} markdown files, {:.2} MB total",
+        "corpus: {} markdown files, {:.2} MB total",
         total_docs,
         total_bytes as f64 / 1024.0 / 1024.0,
     );
@@ -83,7 +85,10 @@ fn perf_chunk_sliding_window_baseline() {
     println!("docs/s: {:.1}", docs_per_sec);
     println!("chunks/s: {:.0}", chunks_per_sec);
     println!("MB/s: {:.2}", mb_per_sec);
-    println!("avg chunks per doc: {:.1}", total_chunks as f64 / total_docs as f64);
+    println!(
+        "avg chunks per doc: {:.1}",
+        total_chunks as f64 / total_docs as f64
+    );
 
     // 阈值断言：chunker 是纯 CPU 算法，应该 >100 docs/s on dev hardware.
     // 实际数字由 docs/benchmarks/ 累积；本断言只防护重大退化。
@@ -119,7 +124,10 @@ fn perf_extract_sections_baseline() {
     println!("elapsed: {:.3}s", elapsed.as_secs_f64());
     println!("docs/s: {:.1}", docs_per_sec);
     println!("sections/s: {:.0}", sections_per_sec);
-    println!("avg sections per doc: {:.1}", total_sections as f64 / total_docs as f64);
+    println!(
+        "avg sections per doc: {:.1}",
+        total_sections as f64 / total_docs as f64
+    );
 
     assert!(
         docs_per_sec > 50.0,

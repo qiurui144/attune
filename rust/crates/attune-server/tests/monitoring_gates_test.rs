@@ -42,7 +42,10 @@ async fn login(base: &str, tier: &str) {
     } else if tier == "free" {
         json!({ "tier": "free", "account_id": "u-test" })
     } else {
-        let _ = client.post(format!("{base}/api/v1/member/logout")).send().await;
+        let _ = client
+            .post(format!("{base}/api/v1/member/logout"))
+            .send()
+            .await;
         return;
     };
     let r = client
@@ -92,7 +95,12 @@ async fn loggedout_ask_is_403_membership_required() {
         login(&base, "loggedout").await; // …then drop membership for the gated call.
         id
     };
-    let (st, v) = post(&base, &format!("monitoring/watches/{wid}/ask"), json!({"question": "q?"})).await;
+    let (st, v) = post(
+        &base,
+        &format!("monitoring/watches/{wid}/ask"),
+        json!({"question": "q?"}),
+    )
+    .await;
     assert_eq!(st, 403, "loggedout ask must be 403, body={v}");
     assert_eq!(v["code"], "membership-required");
 }
@@ -104,7 +112,12 @@ async fn free_tier_ask_is_403() {
     login(&base, "paid").await;
     let wid = create_watch(&base, "RVV").await;
     login(&base, "free").await;
-    let (st, v) = post(&base, &format!("monitoring/watches/{wid}/ask"), json!({"question": "q?"})).await;
+    let (st, v) = post(
+        &base,
+        &format!("monitoring/watches/{wid}/ask"),
+        json!({"question": "q?"}),
+    )
+    .await;
     assert_eq!(st, 403, "free ask must be 403, body={v}");
     assert_eq!(v["code"], "membership-required");
     assert_eq!(rec.call_count(), 0, "free tier must never reach the LLM");
@@ -115,10 +128,19 @@ async fn free_tier_research_is_403() {
     let (srv, rec) = spawn_eval_server_with_recording_llm().await;
     let base = srv.url();
     login(&base, "free").await;
-    let (st, v) = post(&base, "monitoring/research", json!({"topic": "RVV", "use_web": false})).await;
+    let (st, v) = post(
+        &base,
+        "monitoring/research",
+        json!({"topic": "RVV", "use_web": false}),
+    )
+    .await;
     assert_eq!(st, 403, "free research must be 403, body={v}");
     assert_eq!(v["code"], "membership-required");
-    assert_eq!(rec.call_count(), 0, "free tier research must never reach the LLM");
+    assert_eq!(
+        rec.call_count(),
+        0,
+        "free tier research must never reach the LLM"
+    );
 }
 
 // ───────────────────────────── P0-2 privacy gate ─────────────────────────────
@@ -130,10 +152,19 @@ async fn paid_but_cloud_llm_disabled_ask_is_403_cloud_llm_disabled() {
     login(&base, "paid").await;
     let wid = create_watch(&base, "RVV").await;
     // Did NOT enable cloud LLM egress → privacy gate must refuse before any egress.
-    let (st, v) = post(&base, &format!("monitoring/watches/{wid}/ask"), json!({"question": "q?"})).await;
+    let (st, v) = post(
+        &base,
+        &format!("monitoring/watches/{wid}/ask"),
+        json!({"question": "q?"}),
+    )
+    .await;
     assert_eq!(st, 403, "paid without cloud egress must be 403, body={v}");
     assert_eq!(v["code"], "cloud-llm-disabled");
-    assert_eq!(rec.call_count(), 0, "privacy gate OFF → LLM must NOT be called");
+    assert_eq!(
+        rec.call_count(),
+        0,
+        "privacy gate OFF → LLM must NOT be called"
+    );
 }
 
 #[tokio::test]
@@ -143,10 +174,22 @@ async fn paid_research_with_cloud_disabled_degrades_no_egress() {
     login(&base, "paid").await;
     ingest(&base, "RVV", "the RVV vector extension is finalized").await;
     // privacy.llm OFF → research degrades to vault-only extractive; LLM must NOT be called.
-    let (st, v) = post(&base, "monitoring/research", json!({"topic": "RVV", "use_web": false})).await;
-    assert_eq!(st, 200, "research degrades (not error) when cloud disabled, body={v}");
+    let (st, v) = post(
+        &base,
+        "monitoring/research",
+        json!({"topic": "RVV", "use_web": false}),
+    )
+    .await;
+    assert_eq!(
+        st, 200,
+        "research degrades (not error) when cloud disabled, body={v}"
+    );
     assert_eq!(v["llm_disabled"], true, "response flags llm_disabled");
-    assert_eq!(rec.call_count(), 0, "privacy gate OFF → research must NOT reach the LLM");
+    assert_eq!(
+        rec.call_count(),
+        0,
+        "privacy gate OFF → research must NOT reach the LLM"
+    );
 }
 
 // ─────────────────────── P0-2 PII redaction on the wire ───────────────────────
@@ -178,8 +221,14 @@ async fn ask_redacts_pii_before_cloud_llm() {
     assert!(rec.call_count() >= 1, "the LLM must have been called");
     // The decrypted snippet AND the question both flow through RedactingLlmProvider → the recording
     // provider must never see the raw PII.
-    assert!(!rec.any_call_contains(PII_PHONE), "phone must be redacted before egress");
-    assert!(!rec.any_call_contains(PII_EMAIL), "email must be redacted before egress");
+    assert!(
+        !rec.any_call_contains(PII_PHONE),
+        "phone must be redacted before egress"
+    );
+    assert!(
+        !rec.any_call_contains(PII_EMAIL),
+        "email must be redacted before egress"
+    );
 }
 
 #[tokio::test]
@@ -194,11 +243,22 @@ async fn research_redacts_pii_before_cloud_llm() {
         &format!("RVV details, phone {PII_PHONE}, email {PII_EMAIL}"),
     )
     .await;
-    let (st, v) = post(&base, "monitoring/research", json!({"topic": "RVV", "use_web": false})).await;
+    let (st, v) = post(
+        &base,
+        "monitoring/research",
+        json!({"topic": "RVV", "use_web": false}),
+    )
+    .await;
     assert_eq!(st, 200, "paid+cloud research must pass gates, body={v}");
     assert_eq!(v["llm_disabled"], false, "cloud enabled → llm not disabled");
-    assert!(!rec.any_call_contains(PII_PHONE), "phone must be redacted before egress");
-    assert!(!rec.any_call_contains(PII_EMAIL), "email must be redacted before egress");
+    assert!(
+        !rec.any_call_contains(PII_PHONE),
+        "phone must be redacted before egress"
+    );
+    assert!(
+        !rec.any_call_contains(PII_EMAIL),
+        "email must be redacted before egress"
+    );
 }
 
 // ──────────────────────── P0-1 ABBA deadlock regression ────────────────────────
@@ -215,7 +275,12 @@ async fn concurrent_monitoring_and_search_no_deadlock() {
     login(&base, "paid").await;
     enable_cloud_llm(&base).await;
     for i in 0..5 {
-        ingest(&base, &format!("RVV {i}"), &format!("RVV vector note number {i}")).await;
+        ingest(
+            &base,
+            &format!("RVV {i}"),
+            &format!("RVV vector note number {i}"),
+        )
+        .await;
     }
     let wid = create_watch(&base, "RVV").await;
     let _ = post(&base, "monitoring/scan", json!({})).await;
@@ -228,14 +293,27 @@ async fn concurrent_monitoring_and_search_no_deadlock() {
         tasks.push(tokio::spawn(async move {
             match i % 4 {
                 0 => {
-                    let _ = post(&base, &format!("monitoring/watches/{wid}/ask"), json!({"question": "RVV?"})).await;
+                    let _ = post(
+                        &base,
+                        &format!("monitoring/watches/{wid}/ask"),
+                        json!({"question": "RVV?"}),
+                    )
+                    .await;
                 }
                 1 => {
-                    let _ = post(&base, "monitoring/research", json!({"topic": "RVV", "use_web": false})).await;
+                    let _ = post(
+                        &base,
+                        "monitoring/research",
+                        json!({"topic": "RVV", "use_web": false}),
+                    )
+                    .await;
                 }
                 2 => {
                     let client = reqwest::Client::new();
-                    let _ = client.get(format!("{base}/api/v1/search?q=RVV")).send().await;
+                    let _ = client
+                        .get(format!("{base}/api/v1/search?q=RVV"))
+                        .send()
+                        .await;
                 }
                 _ => {
                     ingest(&base, &format!("more RVV {i}"), "RVV extra note").await;

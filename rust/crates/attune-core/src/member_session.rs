@@ -136,8 +136,14 @@ mod tests {
     #[test]
     fn logged_out_can_edit_all_6_fields() {
         let locks = SettingsLocks::for_state(&MemberState::LoggedOut);
-        for f in ["vault_password", "local_folder_links", "plugin_install",
-                  "plugin_uninstall", "cloud_llm", "ocr_profiles"] {
+        for f in [
+            "vault_password",
+            "local_folder_links",
+            "plugin_install",
+            "plugin_uninstall",
+            "cloud_llm",
+            "ocr_profiles",
+        ] {
             assert!(locks.can_edit(f), "logged_out should edit {f}");
         }
     }
@@ -148,8 +154,14 @@ mod tests {
             account_id: "u1".into(),
         });
         // 普通免费用户: 仍配自己的云端 LLM API key
-        for f in ["vault_password", "local_folder_links", "plugin_install",
-                  "plugin_uninstall", "cloud_llm", "ocr_profiles"] {
+        for f in [
+            "vault_password",
+            "local_folder_links",
+            "plugin_install",
+            "plugin_uninstall",
+            "cloud_llm",
+            "ocr_profiles",
+        ] {
             assert!(locks.can_edit(f), "free user should edit {f}");
         }
     }
@@ -181,7 +193,9 @@ mod tests {
         assert!(!MemberState::LoggedOut.is_logged_in());
         assert!(!MemberState::LoggedOut.is_paid());
 
-        let free = MemberState::Free { account_id: "a".into() };
+        let free = MemberState::Free {
+            account_id: "a".into(),
+        };
         assert!(free.is_logged_in());
         assert!(!free.is_paid());
         assert_eq!(free.account_id(), Some("a"));

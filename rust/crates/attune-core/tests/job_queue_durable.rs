@@ -64,7 +64,12 @@ fn restart_recovery_requeues_running_not_cancels_all() {
             JobState::Done,
             "Done job not re-run"
         );
-        assert!(store.get_job(&running_id).unwrap().unwrap().started_ms.is_none());
+        assert!(store
+            .get_job(&running_id)
+            .unwrap()
+            .unwrap()
+            .started_ms
+            .is_none());
     }
 }
 
@@ -153,7 +158,10 @@ fn cancel_races_claim_cancelled_job_never_runs() {
         store.claim_next_job().unwrap().is_none(),
         "cancelled job must not be claimed"
     );
-    assert_eq!(store.get_job(&id).unwrap().unwrap().state, JobState::Cancelled);
+    assert_eq!(
+        store.get_job(&id).unwrap().unwrap().state,
+        JobState::Cancelled
+    );
 }
 
 #[test]
@@ -185,7 +193,10 @@ fn resource_exhaust_thousand_jobs_queue_and_drain() {
             .enqueue_job(JobKind::Asr, "{}", (i % 10) as i64, None)
             .unwrap();
     }
-    assert_eq!(store.list_jobs(None, Some("queued"), N + 10).unwrap().len(), N);
+    assert_eq!(
+        store.list_jobs(None, Some("queued"), N + 10).unwrap().len(),
+        N
+    );
     // Drain all: every claim succeeds, none double, queue ends empty.
     let mut count = 0usize;
     while let Some(j) = store.claim_next_job().unwrap() {
@@ -193,7 +204,10 @@ fn resource_exhaust_thousand_jobs_queue_and_drain() {
         count += 1;
     }
     assert_eq!(count, N);
-    assert!(store.list_jobs(None, Some("queued"), 10).unwrap().is_empty());
+    assert!(store
+        .list_jobs(None, Some("queued"), 10)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -208,7 +222,9 @@ fn auto_backoff_retry_then_succeed_across_restart() {
         id = store.enqueue_job(JobKind::Asr, "{}", 0, None).unwrap();
         store.claim_next_job().unwrap();
         store.increment_job_attempts(&id).unwrap(); // attempts=1
-        store.fail_job(&id, "asr-engine-failed", "transient").unwrap();
+        store
+            .fail_job(&id, "asr-engine-failed", "transient")
+            .unwrap();
         now = chrono::Utc::now().timestamp_millis();
         let n = store.auto_retry_failed_jobs(now, 5, 5_000).unwrap();
         assert_eq!(n, 1, "transient failure auto-retried");

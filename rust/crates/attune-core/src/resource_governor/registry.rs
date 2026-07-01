@@ -241,14 +241,15 @@ mod tests {
         let mut handles = vec![];
         for _ in 0..10 {
             let r = Arc::clone(&r);
-            handles.push(thread::spawn(move || {
-                r.register(TaskKind::EmbeddingQueue)
-            }));
+            handles.push(thread::spawn(move || r.register(TaskKind::EmbeddingQueue)));
         }
         let firsts: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let baseline = &firsts[0];
         for g in &firsts[1..] {
-            assert!(Arc::ptr_eq(baseline, g), "all concurrent registers must return the same Arc");
+            assert!(
+                Arc::ptr_eq(baseline, g),
+                "all concurrent registers must return the same Arc"
+            );
         }
     }
 }

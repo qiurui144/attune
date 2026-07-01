@@ -88,8 +88,8 @@ const DOMAIN_HASH_PEPPER: &[u8] = b"attune.browse_signals.v1.2026";
 fn hash_domain(domain: &str) -> String {
     use hmac::{Hmac, Mac};
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(DOMAIN_HASH_PEPPER)
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(DOMAIN_HASH_PEPPER).expect("HMAC accepts any key length");
     mac.update(domain.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
@@ -164,14 +164,18 @@ impl Store {
             let url = match crypto::decrypt(dek, &url_enc) {
                 Ok(b) => String::from_utf8(b).unwrap_or_default(),
                 Err(e) => {
-                    log::warn!("G1 list_recent_browse_signals decrypt url failed for row {id}: {e}");
+                    log::warn!(
+                        "G1 list_recent_browse_signals decrypt url failed for row {id}: {e}"
+                    );
                     String::new()
                 }
             };
             let title = match crypto::decrypt(dek, &title_enc) {
                 Ok(b) => String::from_utf8(b).unwrap_or_default(),
                 Err(e) => {
-                    log::warn!("G1 list_recent_browse_signals decrypt title failed for row {id}: {e}");
+                    log::warn!(
+                        "G1 list_recent_browse_signals decrypt title failed for row {id}: {e}"
+                    );
                     String::new()
                 }
             };
@@ -200,9 +204,10 @@ impl Store {
     /// 按 domain（明文 domain，自动 hash 后查）批量删除。
     pub fn clear_browse_signals_for_domain(&self, domain: &str) -> Result<usize> {
         let h = hash_domain(domain);
-        let n = self
-            .conn
-            .execute("DELETE FROM browse_signals WHERE domain_hash = ?1", params![h])?;
+        let n = self.conn.execute(
+            "DELETE FROM browse_signals WHERE domain_hash = ?1",
+            params![h],
+        )?;
         Ok(n)
     }
 
@@ -254,7 +259,11 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
         let id = store
-            .record_browse_signal(&dek, &sample_signal("https://github.com/x/y", 5, 80, 2), 1000)
+            .record_browse_signal(
+                &dek,
+                &sample_signal("https://github.com/x/y", 5, 80, 2),
+                1000,
+            )
             .unwrap();
         assert!(id > 0);
         let rows = store.list_recent_browse_signals(&dek, 10).unwrap();
@@ -278,11 +287,9 @@ mod tests {
             .unwrap();
         let raw_url: Vec<u8> = store
             .conn
-            .query_row(
-                "SELECT url_enc FROM browse_signals LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT url_enc FROM browse_signals LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let raw_str = String::from_utf8_lossy(&raw_url);
         assert!(!raw_str.contains("secret.com"), "url 应加密落盘");
@@ -292,9 +299,15 @@ mod tests {
     fn clear_for_domain_filters() {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
-        store.record_browse_signal(&dek, &sample_signal("https://a.com/x", 5, 80, 2), 1000).unwrap();
-        store.record_browse_signal(&dek, &sample_signal("https://a.com/y", 5, 80, 2), 1001).unwrap();
-        store.record_browse_signal(&dek, &sample_signal("https://b.com/x", 5, 80, 2), 1002).unwrap();
+        store
+            .record_browse_signal(&dek, &sample_signal("https://a.com/x", 5, 80, 2), 1000)
+            .unwrap();
+        store
+            .record_browse_signal(&dek, &sample_signal("https://a.com/y", 5, 80, 2), 1001)
+            .unwrap();
+        store
+            .record_browse_signal(&dek, &sample_signal("https://b.com/x", 5, 80, 2), 1002)
+            .unwrap();
         assert_eq!(store.browse_signals_count().unwrap(), 3);
         let n = store.clear_browse_signals_for_domain("a.com").unwrap();
         assert_eq!(n, 2);
@@ -306,9 +319,13 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
         for i in 0..5 {
-            store.record_browse_signal(
-                &dek, &sample_signal(&format!("https://x{i}.com"), 5, 80, 2), 1000 + i,
-            ).unwrap();
+            store
+                .record_browse_signal(
+                    &dek,
+                    &sample_signal(&format!("https://x{i}.com"), 5, 80, 2),
+                    1000 + i,
+                )
+                .unwrap();
         }
         assert_eq!(store.clear_all_browse_signals().unwrap(), 5);
         assert_eq!(store.browse_signals_count().unwrap(), 0);
@@ -318,8 +335,12 @@ mod tests {
     fn list_returns_descending_by_time() {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
-        store.record_browse_signal(&dek, &sample_signal("https://old.com", 5, 80, 2), 1000).unwrap();
-        store.record_browse_signal(&dek, &sample_signal("https://new.com", 5, 80, 2), 2000).unwrap();
+        store
+            .record_browse_signal(&dek, &sample_signal("https://old.com", 5, 80, 2), 1000)
+            .unwrap();
+        store
+            .record_browse_signal(&dek, &sample_signal("https://new.com", 5, 80, 2), 2000)
+            .unwrap();
         let rows = store.list_recent_browse_signals(&dek, 10).unwrap();
         assert_eq!(rows[0].url, "https://new.com");
         assert_eq!(rows[1].url, "https://old.com");
@@ -335,7 +356,11 @@ mod tests {
         signal.title = huge.clone();
         store.record_browse_signal(&dek, &signal, 1000).unwrap();
         let rows = store.list_recent_browse_signals(&dek, 1).unwrap();
-        assert_eq!(rows[0].title.chars().count(), MAX_TITLE_LEN, "title 必须被截断到上限");
+        assert_eq!(
+            rows[0].title.chars().count(),
+            MAX_TITLE_LEN,
+            "title 必须被截断到上限"
+        );
     }
 
     #[test]
@@ -344,13 +369,21 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let dek_a = Key32::generate();
         let dek_b = Key32::generate();
-        store.record_browse_signal(&dek_a, &sample_signal("https://x.com", 5, 80, 2), 1000).unwrap();
+        store
+            .record_browse_signal(&dek_a, &sample_signal("https://x.com", 5, 80, 2), 1000)
+            .unwrap();
         let rows = store.list_recent_browse_signals(&dek_b, 10).unwrap();
         // 当前 fallback：解密失败 → url/title 空字符串（不崩溃）
         // 未来加 decrypt_ok bool 字段让前端区分
         assert_eq!(rows.len(), 1, "row 仍被列出（不丢条目）");
-        assert_eq!(rows[0].url, "", "wrong DEK → url 解密失败 → 空字符串 fallback");
-        assert_eq!(rows[0].title, "", "wrong DEK → title 解密失败 → 空字符串 fallback");
+        assert_eq!(
+            rows[0].url, "",
+            "wrong DEK → url 解密失败 → 空字符串 fallback"
+        );
+        assert_eq!(
+            rows[0].title, "",
+            "wrong DEK → title 解密失败 → 空字符串 fallback"
+        );
         // domain_hash 明文，不受 DEK 影响 — 攻击向量另由 pepper hash 处理
         assert!(!rows[0].domain_hash.is_empty());
     }

@@ -312,7 +312,9 @@ pub fn recognize_page(
             Vec::new()
         }
     };
-    let layout_errored = page_warnings.iter().any(|w| w.starts_with("layout-inference-error"));
+    let layout_errored = page_warnings
+        .iter()
+        .any(|w| w.starts_with("layout-inference-error"));
     let engine_status = if !model_present {
         // SCAFFOLD: no layout ONNX bundled → recognition not functional (spec R3/R4, C1).
         EngineStatus::ScaffoldNoLayoutModel
@@ -342,8 +344,7 @@ pub fn recognize_page(
         .iter()
         .map(|lr| {
             let crop = crop_region(page_img.as_ref(), &lr.bbox);
-            let res = recognize_region(lr, &crop, &ctx, table_model)
-                .map(|region| region.result);
+            let res = recognize_region(lr, &crop, &ctx, table_model).map(|region| region.result);
             region_from_recognizer_result(lr, ctx.page, res)
         })
         .collect();
@@ -492,12 +493,20 @@ mod tests {
         use image::DynamicImage;
         let lr = layout::LayoutRegion {
             kind: RegionKind::Checkbox,
-            bbox: BBox { x: 0, y: 0, w: 1, h: 1 },
+            bbox: BBox {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
             det_confidence: 0.8,
         };
         // new_rgb8 is all-black → checkbox detector reads it as checked.
         let crop = DynamicImage::new_rgb8(10, 10);
-        let ctx = RegionCtx { ocr_lines: vec![], page: 2 };
+        let ctx = RegionCtx {
+            ocr_lines: vec![],
+            page: 2,
+        };
         let r = recognize_region(&lr, &crop, &ctx, std::path::Path::new("/no.onnx")).unwrap();
         assert_eq!(r.page, 2);
         assert_eq!(r.source, RegionSource::Local);
@@ -509,13 +518,21 @@ mod tests {
         use image::DynamicImage;
         let lr = layout::LayoutRegion {
             kind: RegionKind::Table,
-            bbox: BBox { x: 0, y: 0, w: 1, h: 1 },
+            bbox: BBox {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
             det_confidence: 0.8,
         };
         let r = recognize_region(
             &lr,
             &DynamicImage::new_rgb8(4, 4),
-            &RegionCtx { ocr_lines: vec![], page: 0 },
+            &RegionCtx {
+                ocr_lines: vec![],
+                page: 0,
+            },
             std::path::Path::new("/no.onnx"),
         )
         .unwrap();
@@ -526,7 +543,12 @@ mod tests {
     fn region_round_trips() {
         let r = Region {
             kind: RegionKind::Checkbox,
-            bbox: BBox { x: 1, y: 2, w: 3, h: 4 },
+            bbox: BBox {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4,
+            },
             page: 0,
             det_confidence: 0.9,
             result: RegionResult::CheckboxV1 { checked: true },
@@ -537,7 +559,10 @@ mod tests {
         let j = serde_json::to_string(&r).unwrap();
         let back: Region = serde_json::from_str(&j).unwrap();
         assert_eq!(back.page, 0);
-        assert!(matches!(back.result, RegionResult::CheckboxV1 { checked: true }));
+        assert!(matches!(
+            back.result,
+            RegionResult::CheckboxV1 { checked: true }
+        ));
         // validation_warnings skipped when empty
         assert!(
             !j.contains("validation_warnings"),
@@ -569,7 +594,12 @@ mod tests {
         // Pin data_dir to the empty temp dir so default_model_path() (if ever consulted)
         // also resolves to a model-less location — no host model can leak in.
         let prev = crate::platform::set_dir_override_for_test(Some(tmp.path().to_path_buf()));
-        NoModelEnv { _tmp: tmp, prev, layout, table }
+        NoModelEnv {
+            _tmp: tmp,
+            prev,
+            layout,
+            table,
+        }
     }
 
     #[test]
@@ -619,18 +649,34 @@ mod tests {
         // in output as UnrecognizedV1 + a validation_warning (distinct from never existing).
         let lr = layout::LayoutRegion {
             kind: RegionKind::Table,
-            bbox: BBox { x: 5, y: 6, w: 7, h: 8 },
+            bbox: BBox {
+                x: 5,
+                y: 6,
+                w: 7,
+                h: 8,
+            },
             det_confidence: 0.77,
         };
         let injected = Err(crate::error::VaultError::Io(std::io::Error::other("boom")));
         let region = region_from_recognizer_result(&lr, 3, injected);
         // The region is preserved (same kind/bbox/page), not dropped.
         assert_eq!(region.kind, RegionKind::Table);
-        assert_eq!(region.bbox, BBox { x: 5, y: 6, w: 7, h: 8 });
+        assert_eq!(
+            region.bbox,
+            BBox {
+                x: 5,
+                y: 6,
+                w: 7,
+                h: 8
+            }
+        );
         assert_eq!(region.page, 3);
         assert!(matches!(region.result, RegionResult::UnrecognizedV1 { .. }));
         assert!(
-            region.validation_warnings.iter().any(|w| w.contains("recognizer error")),
+            region
+                .validation_warnings
+                .iter()
+                .any(|w| w.contains("recognizer error")),
             "region must carry a warning explaining recognition failed: {:?}",
             region.validation_warnings
         );
@@ -639,31 +685,100 @@ mod tests {
     #[test]
     fn crop_region_clamps_and_placeholders() {
         // No page → 1×1 placeholder.
-        let ph = crop_region(None, &BBox { x: 0, y: 0, w: 10, h: 10 });
+        let ph = crop_region(
+            None,
+            &BBox {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+            },
+        );
         assert_eq!((ph.width(), ph.height()), (1, 1));
         // Real page, in-bounds bbox → exact crop.
         let page = DynamicImage::new_rgb8(100, 80);
-        let c = crop_region(Some(&page), &BBox { x: 10, y: 20, w: 30, h: 40 });
+        let c = crop_region(
+            Some(&page),
+            &BBox {
+                x: 10,
+                y: 20,
+                w: 30,
+                h: 40,
+            },
+        );
         assert_eq!((c.width(), c.height()), (30, 40));
         // Bbox overflowing the page is clamped, never panics.
-        let c2 = crop_region(Some(&page), &BBox { x: 90, y: 70, w: 999, h: 999 });
+        let c2 = crop_region(
+            Some(&page),
+            &BBox {
+                x: 90,
+                y: 70,
+                w: 999,
+                h: 999,
+            },
+        );
         assert_eq!((c2.width(), c2.height()), (10, 10));
         // Degenerate (zero area after clamp) → 1×1 placeholder.
-        let c3 = crop_region(Some(&page), &BBox { x: 100, y: 80, w: 5, h: 5 });
+        let c3 = crop_region(
+            Some(&page),
+            &BBox {
+                x: 100,
+                y: 80,
+                w: 5,
+                h: 5,
+            },
+        );
         assert_eq!((c3.width(), c3.height()), (1, 1));
     }
 
     #[test]
     fn ocr_text_for_region_matches_lines_inside_bbox() {
         // I2: the real PP-OCR second opinion for a region = OCR lines whose center is inside it.
-        let region = BBox { x: 0, y: 0, w: 100, h: 100 };
+        let region = BBox {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+        };
         let lines = vec![
-            RawLine { text: "inside".into(), bbox: BBox { x: 10, y: 10, w: 20, h: 10 }, confidence: 0.9 },
-            RawLine { text: "outside".into(), bbox: BBox { x: 500, y: 500, w: 20, h: 10 }, confidence: 0.9 },
+            RawLine {
+                text: "inside".into(),
+                bbox: BBox {
+                    x: 10,
+                    y: 10,
+                    w: 20,
+                    h: 10,
+                },
+                confidence: 0.9,
+            },
+            RawLine {
+                text: "outside".into(),
+                bbox: BBox {
+                    x: 500,
+                    y: 500,
+                    w: 20,
+                    h: 10,
+                },
+                confidence: 0.9,
+            },
         ];
-        assert_eq!(ocr_text_for_region(&region, &lines).as_deref(), Some("inside"));
+        assert_eq!(
+            ocr_text_for_region(&region, &lines).as_deref(),
+            Some("inside")
+        );
         // No overlapping line → None (don't invent a comparison).
-        assert_eq!(ocr_text_for_region(&BBox { x: 1000, y: 1000, w: 1, h: 1 }, &lines), None);
+        assert_eq!(
+            ocr_text_for_region(
+                &BBox {
+                    x: 1000,
+                    y: 1000,
+                    w: 1,
+                    h: 1
+                },
+                &lines
+            ),
+            None
+        );
     }
 
     #[test]
@@ -672,7 +787,12 @@ mod tests {
         let out = RecognizePageResult {
             regions: vec![Region {
                 kind: RegionKind::Checkbox,
-                bbox: BBox { x: 0, y: 0, w: 1, h: 1 },
+                bbox: BBox {
+                    x: 0,
+                    y: 0,
+                    w: 1,
+                    h: 1,
+                },
                 page: 0,
                 det_confidence: 0.9,
                 result: RegionResult::CheckboxV1 { checked: true },

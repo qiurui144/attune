@@ -112,7 +112,11 @@ impl<'a> DocRedactor<'a> {
         }
     }
 
-    fn redact_text(&self, text: &str, mode: RedactMode) -> (String, Vec<PiiMatch>, HashMap<String, usize>) {
+    fn redact_text(
+        &self,
+        text: &str,
+        mode: RedactMode,
+    ) -> (String, Vec<PiiMatch>, HashMap<String, usize>) {
         match mode {
             RedactMode::Reversible => {
                 let r = self.redactor.redact(text);
@@ -141,7 +145,11 @@ impl<'a> DocRedactor<'a> {
         }
     }
 
-    fn redact_text_bytes(&self, data: &[u8], mode: RedactMode) -> Result<RedactionOutput, RedactError> {
+    fn redact_text_bytes(
+        &self,
+        data: &[u8],
+        mode: RedactMode,
+    ) -> Result<RedactionOutput, RedactError> {
         let text = String::from_utf8_lossy(data);
         let (out, mappings, counts) = self.redact_text(&text, mode);
         Ok(RedactionOutput {
@@ -236,14 +244,25 @@ mod tests {
         let dr = DocRedactor::new(&r);
         let input = "联系电话 13800138000 邮箱 alice@example.com";
         let out = dr
-            .redact_bytes("txt", input.as_bytes(), Classification::Normal, RedactMode::Reversible)
+            .redact_bytes(
+                "txt",
+                input.as_bytes(),
+                Classification::Normal,
+                RedactMode::Reversible,
+            )
             .unwrap();
         let redacted = String::from_utf8(out.bytes.clone()).unwrap();
         assert!(!redacted.contains("13800138000"), "phone must be masked");
-        assert!(!redacted.contains("alice@example.com"), "email must be masked");
+        assert!(
+            !redacted.contains("alice@example.com"),
+            "email must be masked"
+        );
         // restore brings originals back
         let restored = r.restore(&redacted, &out.mappings);
-        assert_eq!(restored, input, "reversible round-trip must recover original");
+        assert_eq!(
+            restored, input,
+            "reversible round-trip must recover original"
+        );
     }
 
     // ── Core invariant: re-scan finds zero PII (NOT just MD5-differs) ─────────
@@ -254,7 +273,12 @@ mod tests {
         let dr = DocRedactor::new(&r);
         let input = "身份证 110101199003078515 手机 13900139000";
         let out = dr
-            .redact_bytes("txt", input.as_bytes(), Classification::Normal, RedactMode::Reversible)
+            .redact_bytes(
+                "txt",
+                input.as_bytes(),
+                Classification::Normal,
+                RedactMode::Reversible,
+            )
             .unwrap();
         let redacted = String::from_utf8(out.bytes).unwrap();
         // The triple-verification invariant: redacted output, re-scanned, has no PII.
@@ -275,11 +299,23 @@ mod tests {
         let dr = DocRedactor::new(&r);
         let input = "card 4111111111111111";
         let out = dr
-            .redact_bytes("txt", input.as_bytes(), Classification::Normal, RedactMode::Reversible)
+            .redact_bytes(
+                "txt",
+                input.as_bytes(),
+                Classification::Normal,
+                RedactMode::Reversible,
+            )
             .unwrap();
-        assert_ne!(out.bytes, input.as_bytes(), "bytes changed (necessary, not sufficient)");
+        assert_ne!(
+            out.bytes,
+            input.as_bytes(),
+            "bytes changed (necessary, not sufficient)"
+        );
         let redacted = String::from_utf8(out.bytes).unwrap();
-        assert!(!redacted.contains("4111111111111111"), "the real proof: value gone");
+        assert!(
+            !redacted.contains("4111111111111111"),
+            "the real proof: value gone"
+        );
     }
 
     // ── Irreversible mode ────────────────────────────────────────────────────
@@ -290,11 +326,19 @@ mod tests {
         let dr = DocRedactor::new(&r);
         let input = "phone 13800138000";
         let out = dr
-            .redact_bytes("txt", input.as_bytes(), Classification::Normal, RedactMode::Irreversible)
+            .redact_bytes(
+                "txt",
+                input.as_bytes(),
+                Classification::Normal,
+                RedactMode::Irreversible,
+            )
             .unwrap();
         let redacted = String::from_utf8(out.bytes).unwrap();
         assert!(!redacted.contains("13800138000"));
-        assert!(out.mappings.is_empty(), "irreversible mode emits no restore map");
+        assert!(
+            out.mappings.is_empty(),
+            "irreversible mode emits no restore map"
+        );
         assert!(redacted.contains(MASK), "irreversible mask expected");
     }
 
@@ -310,7 +354,10 @@ mod tests {
             Classification::Classified,
             RedactMode::Reversible,
         );
-        assert!(matches!(res, Err(RedactError::Classified(_))), "classified must be refused");
+        assert!(
+            matches!(res, Err(RedactError::Classified(_))),
+            "classified must be refused"
+        );
     }
 
     // ── Unsupported format fail-closed ───────────────────────────────────────
@@ -319,7 +366,12 @@ mod tests {
     fn pdf_is_unsupported_fail_closed_not_passthrough() {
         let r = redactor();
         let dr = DocRedactor::new(&r);
-        let res = dr.redact_bytes("pdf", b"%PDF-1.7 ...", Classification::Normal, RedactMode::Reversible);
+        let res = dr.redact_bytes(
+            "pdf",
+            b"%PDF-1.7 ...",
+            Classification::Normal,
+            RedactMode::Reversible,
+        );
         assert!(
             matches!(res, Err(RedactError::UnsupportedFormat(ref f)) if f == "pdf"),
             "PDF must fail closed (never emit a half-redacted PDF)"
@@ -354,17 +406,37 @@ mod tests {
         let dr = DocRedactor::new(&r);
         let docx = make_docx("客户手机 13800138000 邮箱 bob@example.com");
         let out = dr
-            .redact_bytes("docx", &docx, Classification::Normal, RedactMode::Reversible)
+            .redact_bytes(
+                "docx",
+                &docx,
+                Classification::Normal,
+                RedactMode::Reversible,
+            )
             .unwrap();
         // The output is a valid zip whose document.xml no longer carries the PII.
         let mut ar = zip::ZipArchive::new(std::io::Cursor::new(out.bytes)).unwrap();
         let mut doc_xml = String::new();
-        ar.by_name("word/document.xml").unwrap().read_to_string(&mut doc_xml).unwrap();
-        assert!(!doc_xml.contains("13800138000"), "phone redacted in docx; got {doc_xml}");
-        assert!(!doc_xml.contains("bob@example.com"), "email redacted in docx");
+        ar.by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut doc_xml)
+            .unwrap();
+        assert!(
+            !doc_xml.contains("13800138000"),
+            "phone redacted in docx; got {doc_xml}"
+        );
+        assert!(
+            !doc_xml.contains("bob@example.com"),
+            "email redacted in docx"
+        );
         // other parts preserved
-        assert!(ar.by_name("[Content_Types].xml").is_ok(), "non-text part preserved");
-        assert!(!out.mappings.is_empty(), "reversible mappings recorded for docx");
+        assert!(
+            ar.by_name("[Content_Types].xml").is_ok(),
+            "non-text part preserved"
+        );
+        assert!(
+            !out.mappings.is_empty(),
+            "reversible mappings recorded for docx"
+        );
     }
 
     #[test]
@@ -373,7 +445,12 @@ mod tests {
         let dr = DocRedactor::new(&r);
         let docx = make_docx("这是一份普通文档没有敏感信息");
         let out = dr
-            .redact_bytes("docx", &docx, Classification::Normal, RedactMode::Reversible)
+            .redact_bytes(
+                "docx",
+                &docx,
+                Classification::Normal,
+                RedactMode::Reversible,
+            )
             .unwrap();
         let mut ar = zip::ZipArchive::new(std::io::Cursor::new(out.bytes)).unwrap();
         assert!(ar.by_name("word/document.xml").is_ok());
@@ -403,7 +480,10 @@ mod tests {
             Classification::Normal,
             RedactMode::Reversible,
         );
-        assert!(matches!(res, Err(RedactError::Io(_))), "corrupt docx must error, not panic");
+        assert!(
+            matches!(res, Err(RedactError::Io(_))),
+            "corrupt docx must error, not panic"
+        );
     }
 
     #[test]
@@ -411,7 +491,15 @@ mod tests {
         let r = redactor();
         let dr = DocRedactor::new(&r);
         let bytes = vec![0xff, 0xfe, 0x00, b'p', b'h', b'o', b'n', b'e'];
-        let out = dr.redact_bytes("txt", &bytes, Classification::Normal, RedactMode::Reversible);
-        assert!(out.is_ok(), "invalid utf-8 must be lossily handled, not panic");
+        let out = dr.redact_bytes(
+            "txt",
+            &bytes,
+            Classification::Normal,
+            RedactMode::Reversible,
+        );
+        assert!(
+            out.is_ok(),
+            "invalid utf-8 must be lossily handled, not panic"
+        );
     }
 }

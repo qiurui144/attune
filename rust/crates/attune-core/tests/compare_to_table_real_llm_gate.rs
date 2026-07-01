@@ -89,35 +89,59 @@ const CORPUS: &[Case] = &[
               设备 B：分辨率 4K，功耗 12W，接口 USB，重量 350g。",
         entity_a: "设备 A",
         entity_b: "设备 B",
-        gold: &[("分辨率", "1080p", "4K"), ("功耗", "5W", "12W"), ("接口", "USB", "USB"), ("重量", "200g", "350g")],
+        gold: &[
+            ("分辨率", "1080p", "4K"),
+            ("功耗", "5W", "12W"),
+            ("接口", "USB", "USB"),
+            ("重量", "200g", "350g"),
+        ],
     },
     Case {
         doc: "笔记本 X1：CPU i5-1240P，内存 16GB，屏幕 14 寸，重量 1.2kg。\
               笔记本 X2：CPU i7-1260P，内存 32GB，屏幕 14 寸，重量 1.4kg。",
         entity_a: "笔记本 X1",
         entity_b: "笔记本 X2",
-        gold: &[("CPU", "i5-1240P", "i7-1260P"), ("内存", "16GB", "32GB"), ("屏幕", "14 寸", "14 寸"), ("重量", "1.2kg", "1.4kg")],
+        gold: &[
+            ("CPU", "i5-1240P", "i7-1260P"),
+            ("内存", "16GB", "32GB"),
+            ("屏幕", "14 寸", "14 寸"),
+            ("重量", "1.2kg", "1.4kg"),
+        ],
     },
     Case {
         doc: "Drive A: capacity 512GB, sequential read 3500MB/s, warranty 5y. \
               Drive B: capacity 1TB, sequential read 7000MB/s, warranty 5y.",
         entity_a: "Drive A",
         entity_b: "Drive B",
-        gold: &[("capacity", "512GB", "1TB"), ("sequential read", "3500MB/s", "7000MB/s"), ("warranty", "5y", "5y")],
+        gold: &[
+            ("capacity", "512GB", "1TB"),
+            ("sequential read", "3500MB/s", "7000MB/s"),
+            ("warranty", "5y", "5y"),
+        ],
     },
     Case {
         doc: "路由器 R1：频段 2.4GHz，端口 4 个，速率 300Mbps，天线 2 根。\
               路由器 R2：频段 5GHz，端口 8 个，速率 1200Mbps，天线 4 根。",
         entity_a: "路由器 R1",
         entity_b: "路由器 R2",
-        gold: &[("频段", "2.4GHz", "5GHz"), ("端口", "4 个", "8 个"), ("速率", "300Mbps", "1200Mbps"), ("天线", "2 根", "4 根")],
+        gold: &[
+            ("频段", "2.4GHz", "5GHz"),
+            ("端口", "4 个", "8 个"),
+            ("速率", "300Mbps", "1200Mbps"),
+            ("天线", "2 根", "4 根"),
+        ],
     },
     Case {
         doc: "机型甲：屏幕 6.1 寸，电池 3200mAh，充电 20W。\
               机型乙：屏幕 6.7 寸，电池 4500mAh，充电 67W，防水 IP68。",
         entity_a: "机型甲",
         entity_b: "机型乙",
-        gold: &[("屏幕", "6.1 寸", "6.7 寸"), ("电池", "3200mAh", "4500mAh"), ("充电", "20W", "67W"), ("防水", "", "IP68")],
+        gold: &[
+            ("屏幕", "6.1 寸", "6.7 寸"),
+            ("电池", "3200mAh", "4500mAh"),
+            ("充电", "20W", "67W"),
+            ("防水", "", "IP68"),
+        ],
     },
 ];
 
@@ -125,10 +149,7 @@ const CORPUS: &[Case] = &[
 /// A "predicted item" is a (param-normalized, value_a, value_b) triple; we match it to gold by
 /// param name (normalized: trim + lowercase). TP = a gold param whose A & B values both match
 /// (substring-tolerant). Precision/recall over params; F1 = harmonic mean.
-fn case_f1(
-    cmp: &attune_core::skill_runtime::ParamComparison,
-    gold: &[(&str, &str, &str)],
-) -> f64 {
+fn case_f1(cmp: &attune_core::skill_runtime::ParamComparison, gold: &[(&str, &str, &str)]) -> f64 {
     let norm = |s: &str| s.trim().to_lowercase().replace(' ', "");
     let val_match = |got: Option<&str>, want: &str| -> bool {
         match (got, want) {
@@ -180,14 +201,23 @@ fn compare_to_table_real_llm_f1_floor() {
             // Grounding sanity: no produced value may be absent from the source (anti-fabrication).
             for r in &cmp.rows {
                 if let Some(v) = &r.value_a {
-                    assert!(c.doc.contains(v.trim()), "[seed {seed} case {i}] ungrounded A value leaked: {v:?}");
+                    assert!(
+                        c.doc.contains(v.trim()),
+                        "[seed {seed} case {i}] ungrounded A value leaked: {v:?}"
+                    );
                 }
                 if let Some(v) = &r.value_b {
-                    assert!(c.doc.contains(v.trim()), "[seed {seed} case {i}] ungrounded B value leaked: {v:?}");
+                    assert!(
+                        c.doc.contains(v.trim()),
+                        "[seed {seed} case {i}] ungrounded B value leaked: {v:?}"
+                    );
                 }
             }
             let f1 = case_f1(&cmp, c.gold);
-            println!("[seed {seed}] case {i} F1={f1:.3} ({} rows)", cmp.rows.len());
+            println!(
+                "[seed {seed}] case {i} F1={f1:.3} ({} rows)",
+                cmp.rows.len()
+            );
             case_f1s.push(f1);
         }
         let (mean, _) = mean_std(&case_f1s);
@@ -207,17 +237,26 @@ fn compare_to_table_real_llm_f1_floor() {
 /// A non-ignored guard so the corpus stays well-formed (catches label rot without an LLM).
 #[test]
 fn corpus_is_well_formed() {
-    assert!(CORPUS.len() >= 5, "real-LLM corpus must have ≥5 hand-labeled cases");
+    assert!(
+        CORPUS.len() >= 5,
+        "real-LLM corpus must have ≥5 hand-labeled cases"
+    );
     for (i, c) in CORPUS.iter().enumerate() {
         assert!(!c.doc.is_empty(), "case {i} empty doc");
         assert!(!c.gold.is_empty(), "case {i} no gold rows");
         // every non-empty gold value must actually appear in the doc (so the floor is achievable).
         for (p, a, b) in c.gold {
             if !a.is_empty() {
-                assert!(c.doc.contains(*a), "case {i} gold A value {a:?} (param {p}) not in doc");
+                assert!(
+                    c.doc.contains(*a),
+                    "case {i} gold A value {a:?} (param {p}) not in doc"
+                );
             }
             if !b.is_empty() {
-                assert!(c.doc.contains(*b), "case {i} gold B value {b:?} (param {p}) not in doc");
+                assert!(
+                    c.doc.contains(*b),
+                    "case {i} gold B value {b:?} (param {p}) not in doc"
+                );
             }
         }
     }

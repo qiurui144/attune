@@ -159,11 +159,11 @@ impl ChatEngine {
                     .unwrap_or(0);
 
                 // C1: 先查 web_search_cache（避免重复网络调用）
-                let cached = self
-                    .store
-                    .lock()
-                    .ok()
-                    .and_then(|s| s.get_web_search_cached(dek, user_message, now_secs).ok().flatten());
+                let cached = self.store.lock().ok().and_then(|s| {
+                    s.get_web_search_cached(dek, user_message, now_secs)
+                        .ok()
+                        .flatten()
+                });
 
                 let web_results = match cached {
                     Some(hits) => {
@@ -196,18 +196,21 @@ impl ChatEngine {
 
                 match web_results {
                     Ok(web) if !web.is_empty() => {
-                        let synthetic: Vec<SearchResult> = web.into_iter().map(|r| SearchResult {
-                            item_id: format!("web:{}", r.url),
-                            score: 0.55,
-                            title: r.title,
-                            content: r.snippet.clone(),
-                            source_type: "web".into(),
-                            inject_content: Some(r.snippet),
-                            breadcrumb: Vec::new(),         // F2: web 无源 item 路径
-                            chunk_offset_start: None,
-                            chunk_offset_end: None,
-                            corpus_domain: "general".into(),
-                        }).collect();
+                        let synthetic: Vec<SearchResult> = web
+                            .into_iter()
+                            .map(|r| SearchResult {
+                                item_id: format!("web:{}", r.url),
+                                score: 0.55,
+                                title: r.title,
+                                content: r.snippet.clone(),
+                                source_type: "web".into(),
+                                inject_content: Some(r.snippet),
+                                breadcrumb: Vec::new(), // F2: web 无源 item 路径
+                                chunk_offset_start: None,
+                                chunk_offset_end: None,
+                                corpus_domain: "general".into(),
+                            })
+                            .collect();
                         (synthetic, true)
                     }
                     _ => (local_knowledge, false),
@@ -248,7 +251,9 @@ impl ChatEngine {
                         Ok((response_2, confidence_2)) => (response_2, confidence_2, true),
                         Err(e) => {
                             // 二次 LLM 失败 → 保留第一次响应；secondary_used 仍 true 表示尝试过
-                            log::warn!("J5: secondary LLM call failed: {e}, keeping first response");
+                            log::warn!(
+                                "J5: secondary LLM call failed: {e}, keeping first response"
+                            );
                             (raw_response_1, confidence_1, true)
                         }
                     }
@@ -280,21 +285,24 @@ impl ChatEngine {
         // v0.6 Phase B 加：当 chunker 给 first chunk path=[] 时（文档第一个 section
         // 在第一个 heading 之前，常见于 "# Title\n\n正文..." 格式），fallback 到
         // [title] 让前端 reader 至少能看到一个层级面包屑，不出 "无证据上下文" 的空状态。
-        let citations: Vec<Citation> = knowledge.iter().map(|k| {
-            let breadcrumb = if k.breadcrumb.is_empty() && !k.title.is_empty() {
-                vec![k.title.clone()]
-            } else {
-                k.breadcrumb.clone()
-            };
-            Citation {
-                item_id: k.item_id.clone(),
-                title: k.title.clone(),
-                relevance: k.score,
-                chunk_offset_start: k.chunk_offset_start,
-                chunk_offset_end: k.chunk_offset_end,
-                breadcrumb,
-            }
-        }).collect();
+        let citations: Vec<Citation> = knowledge
+            .iter()
+            .map(|k| {
+                let breadcrumb = if k.breadcrumb.is_empty() && !k.title.is_empty() {
+                    vec![k.title.clone()]
+                } else {
+                    k.breadcrumb.clone()
+                };
+                Citation {
+                    item_id: k.item_id.clone(),
+                    title: k.title.clone(),
+                    relevance: k.score,
+                    chunk_offset_start: k.chunk_offset_start,
+                    chunk_offset_end: k.chunk_offset_end,
+                    breadcrumb,
+                }
+            })
+            .collect();
 
         let knowledge_count = knowledge.len();
 
@@ -351,7 +359,8 @@ impl ChatEngine {
         // F-17 audit log（v0.6.3：覆盖全路径；v0.7+ 持久化到 store::audit_log）
         if !all_mappings.is_empty() {
             // 统计 by_kind
-            let mut by_kind: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut by_kind: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
             for m in &all_mappings {
                 let prefix = m.kind.placeholder_prefix().to_string().to_uppercase();
                 *by_kind.entry(prefix).or_insert(0) += 1;
@@ -423,12 +432,8 @@ impl ChatEngine {
             .iter()
             .map(|m| (m.role.clone(), m.content.clone()))
             .collect();
-        let plan = crate::context_budget::plan_context(
-            self.llm.model_name(),
-            "",
-            user_message,
-            &pairs,
-        );
+        let plan =
+            crate::context_budget::plan_context(self.llm.model_name(), "", user_message, &pairs);
         if plan.history_dropped == 0 {
             return history.to_vec();
         }
@@ -483,17 +488,18 @@ impl ChatEngine {
             .iter()
             .map(|m| (m.role.clone(), m.content.clone()))
             .collect();
-        let plan = crate::context_budget::plan_context(
-            self.llm.model_name(),
-            "",
-            query,
-            &hist_pairs,
-        );
+        let plan =
+            crate::context_budget::plan_context(self.llm.model_name(), "", query, &hist_pairs);
         allocate_budget(&mut results, plan.knowledge_chars());
         Ok(results)
     }
 
-    fn auto_save_conversation(&self, user_msg: &str, assistant_msg: &str, dek: &Key32) -> Result<()> {
+    fn auto_save_conversation(
+        &self,
+        user_msg: &str,
+        assistant_msg: &str,
+        dek: &Key32,
+    ) -> Result<()> {
         let content = format!("用户: {}\n\n助手: {}", user_msg, assistant_msg);
         let title = user_msg.chars().take(50).collect::<String>();
         let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -510,7 +516,8 @@ fn build_rag_system_prompt(knowledge: &[SearchResult], from_web: bool) -> String
     if knowledge.is_empty() {
         return "你是用户的个人知识助手。知识库中暂无与此问题相关的文档，网络搜索也未返回结果。\n\
                 请凭借自身知识正常回答，不要编造引用。\n\
-                回答末尾必须输出【置信度: N/5】（5=完全确定，1=高度不确定）。".into();
+                回答末尾必须输出【置信度: N/5】（5=完全确定，1=高度不确定）。"
+            .into();
     }
 
     let (section_label, intro) = if from_web {
@@ -545,12 +552,17 @@ fn build_rag_system_prompt(knowledge: &[SearchResult], from_web: bool) -> String
         if from_web {
             prompt.push_str(&format!(
                 "[{}] 《{}》\nURL: {}\n{}\n\n",
-                i + 1, item.title, item.item_id.trim_start_matches("web:"), content
+                i + 1,
+                item.title,
+                item.item_id.trim_start_matches("web:"),
+                content
             ));
         } else {
             prompt.push_str(&format!(
                 "[{}] 《{}》(来源: {}, 相关度: {:.0}%)\n{}\n\n",
-                i + 1, item.title, item.source_type,
+                i + 1,
+                item.title,
+                item.source_type,
                 item.score * 100.0,
                 content
             ));
@@ -616,7 +628,8 @@ pub fn strip_confidence_marker(response: &str) -> String {
             return response[..m.start()].trim_end().to_string();
         }
     }
-    let en_marker = regex::Regex::new(r"(?i)[\[\(]\s*confidence[:：]\s*[1-5]\s*/\s*5\s*[\]\)]").ok();
+    let en_marker =
+        regex::Regex::new(r"(?i)[\[\(]\s*confidence[:：]\s*[1-5]\s*/\s*5\s*[\]\)]").ok();
     if let Some(re) = &en_marker {
         if let Some(m) = re.find_iter(response).last() {
             return response[..m.start()].trim_end().to_string();
@@ -700,7 +713,10 @@ mod tests {
         }];
         let prompt = build_rag_system_prompt(&results, false);
         // 强约束的关键 marker
-        assert!(prompt.contains("禁用模糊措辞"), "prompt 必须含禁用模糊措辞规则");
+        assert!(
+            prompt.contains("禁用模糊措辞"),
+            "prompt 必须含禁用模糊措辞规则"
+        );
         assert!(prompt.contains("可能"), "应明确列出禁用词 '可能'");
         assert!(prompt.contains("【置信度: N/5】"), "必须要求置信度自评");
     }

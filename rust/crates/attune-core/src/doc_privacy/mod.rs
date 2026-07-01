@@ -53,12 +53,18 @@ pub struct DocPrivacyScanner<'a> {
 
 impl<'a> DocPrivacyScanner<'a> {
     pub fn new(redactor: &'a Redactor) -> Self {
-        Self { redactor, classifier: DocClassifier::new() }
+        Self {
+            redactor,
+            classifier: DocClassifier::new(),
+        }
     }
 
     /// Use a custom classifier (e.g. pro-plugin-extended confidential keywords).
     pub fn with_classifier(redactor: &'a Redactor, classifier: DocClassifier) -> Self {
-        Self { redactor, classifier }
+        Self {
+            redactor,
+            classifier,
+        }
     }
 
     /// Analyze already-extracted document text (parsing/OCR happens upstream).
@@ -118,9 +124,9 @@ pub enum GateDecision {
 pub fn gate_for_classification(c: Classification) -> GateDecision {
     match c {
         Classification::Classified => GateDecision::Block,
-        Classification::SensitivePartial | Classification::Normal => {
-            GateDecision::AllowRedacted { mandatory_redact: true }
-        }
+        Classification::SensitivePartial | Classification::Normal => GateDecision::AllowRedacted {
+            mandatory_redact: true,
+        },
     }
 }
 
@@ -170,12 +176,8 @@ pub fn enforce_file_egress(
                 .unwrap_or_else(|| "classified document".to_string()),
         }),
         GateDecision::AllowRedacted { .. } => {
-            let out = DocRedactor::new(redactor).redact_bytes(
-                ext,
-                data,
-                report.classification,
-                mode,
-            )?;
+            let out =
+                DocRedactor::new(redactor).redact_bytes(ext, data, report.classification, mode)?;
             Ok(FileEgressOutcome::Allowed(out))
         }
     }
@@ -234,7 +236,9 @@ fn collect_artifact_strings(a: &Artifact) -> Vec<String> {
             }
             for b in &d.blocks {
                 match b {
-                    Block::Heading { text, .. } | Block::Paragraph { text } => out.push(text.clone()),
+                    Block::Heading { text, .. } | Block::Paragraph { text } => {
+                        out.push(text.clone())
+                    }
                     Block::List { items, .. } => out.extend(items.iter().cloned()),
                     Block::Table(t) => collect_table_strings(t, &mut out),
                 }
@@ -398,11 +402,21 @@ mod tests {
         let r = Redactor::new();
         let s = scanner_with(&r);
         let report = s.analyze_text("电话 13800138000 邮箱 a@b.com");
-        assert!(report.entities.len() >= 2, "phone + email detected; got {:?}", report.summary);
+        assert!(
+            report.entities.len() >= 2,
+            "phone + email detected; got {:?}",
+            report.summary
+        );
         // privacy-first: serialized report carries no PII value
         let json = serde_json::to_string(&report).unwrap();
-        assert!(!json.contains("13800138000"), "report must not leak phone value");
-        assert!(!json.contains("a@b.com"), "report must not leak email value");
+        assert!(
+            !json.contains("13800138000"),
+            "report must not leak phone value"
+        );
+        assert!(
+            !json.contains("a@b.com"),
+            "report must not leak email value"
+        );
     }
 
     #[test]
@@ -425,18 +439,25 @@ mod tests {
 
     #[test]
     fn gate_blocks_classified() {
-        assert_eq!(gate_for_classification(Classification::Classified), GateDecision::Block);
+        assert_eq!(
+            gate_for_classification(Classification::Classified),
+            GateDecision::Block
+        );
     }
 
     #[test]
     fn gate_allows_normal_and_sensitive_with_mandatory_redact() {
         assert_eq!(
             gate_for_classification(Classification::Normal),
-            GateDecision::AllowRedacted { mandatory_redact: true }
+            GateDecision::AllowRedacted {
+                mandatory_redact: true
+            }
         );
         assert_eq!(
             gate_for_classification(Classification::SensitivePartial),
-            GateDecision::AllowRedacted { mandatory_redact: true }
+            GateDecision::AllowRedacted {
+                mandatory_redact: true
+            }
         );
     }
 
@@ -453,9 +474,18 @@ mod tests {
 
     #[test]
     fn classification_maps_classified_to_l0() {
-        assert_eq!(classification_to_tier(Classification::Classified), PrivacyTier::L0);
-        assert_eq!(classification_to_tier(Classification::Normal), PrivacyTier::L1);
-        assert_eq!(classification_to_tier(Classification::SensitivePartial), PrivacyTier::L1);
+        assert_eq!(
+            classification_to_tier(Classification::Classified),
+            PrivacyTier::L0
+        );
+        assert_eq!(
+            classification_to_tier(Classification::Normal),
+            PrivacyTier::L1
+        );
+        assert_eq!(
+            classification_to_tier(Classification::SensitivePartial),
+            PrivacyTier::L1
+        );
     }
 
     /// End-to-end adversarial: a classified doc, mapped to L0, fed to the real
@@ -463,7 +493,7 @@ mod tests {
     /// closes the "file export bypasses gate" hole.
     #[test]
     fn classified_doc_blocked_at_real_outbound_gate() {
-        use crate::outbound_gate::{OutboundGate, OutboundKind, OutboundError, OutboundPolicy};
+        use crate::outbound_gate::{OutboundError, OutboundGate, OutboundKind, OutboundPolicy};
         let r = Redactor::new();
         let s = scanner_with(&r);
         let report = s.analyze_text("绝密：导出此文件");
@@ -509,13 +539,16 @@ mod tests {
     fn file_egress_redacts_normal_export_no_plaintext_pii() {
         let r = Redactor::new();
         let text = "客户电话 13800138000 邮箱 c@d.com";
-        let out = enforce_file_egress(&r, text, "txt", text.as_bytes(), RedactMode::Reversible)
-            .unwrap();
+        let out =
+            enforce_file_egress(&r, text, "txt", text.as_bytes(), RedactMode::Reversible).unwrap();
         match out {
             FileEgressOutcome::Allowed(redaction) => {
                 let s = String::from_utf8(redaction.bytes.clone()).unwrap();
                 // The exported file carries NO plaintext PII (hole closed).
-                assert!(!s.contains("13800138000"), "exported file must not carry phone");
+                assert!(
+                    !s.contains("13800138000"),
+                    "exported file must not carry phone"
+                );
                 assert!(!s.contains("c@d.com"), "exported file must not carry email");
                 // reversible: importer can restore
                 let restored = r.restore(&s, &redaction.mappings);
@@ -528,7 +561,13 @@ mod tests {
     #[test]
     fn file_egress_unsupported_pdf_fails_closed() {
         let r = Redactor::new();
-        let res = enforce_file_egress(&r, "phone 13800138000", "pdf", b"%PDF", RedactMode::Reversible);
+        let res = enforce_file_egress(
+            &r,
+            "phone 13800138000",
+            "pdf",
+            b"%PDF",
+            RedactMode::Reversible,
+        );
         assert!(
             matches!(res, Err(RedactError::UnsupportedFormat(ref f)) if f == "pdf"),
             "PDF export must fail closed, never emit a half-redacted file"
@@ -544,7 +583,9 @@ mod tests {
             title: Some(title.to_string()),
             blocks: paras
                 .iter()
-                .map(|p| Block::Paragraph { text: p.to_string() })
+                .map(|p| Block::Paragraph {
+                    text: p.to_string(),
+                })
                 .collect(),
         })
     }
@@ -568,19 +609,27 @@ mod tests {
     #[test]
     fn artifact_egress_redacts_normal_export_no_plaintext_pii() {
         let r = Redactor::new();
-        let art = doc_with(
-            "客户清单",
-            &["张三 电话 13800138000", "李四 邮箱 c@d.com"],
-        );
+        let art = doc_with("客户清单", &["张三 电话 13800138000", "李四 邮箱 c@d.com"]);
         match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &[]) {
-            ArtifactEgressOutcome::Allowed { artifact, mappings, redacted, classification } => {
+            ArtifactEgressOutcome::Allowed {
+                artifact,
+                mappings,
+                redacted,
+                classification,
+            } => {
                 assert_eq!(classification, Classification::Normal);
                 assert!(redacted >= 2, "phone + email detected; got {redacted}");
                 // Render to markdown and prove no plaintext PII leaves.
                 let bytes = artifact.render(crate::export::ExportFormat::Md).unwrap();
                 let md = String::from_utf8(bytes).unwrap();
-                assert!(!md.contains("13800138000"), "rendered file must not carry phone");
-                assert!(!md.contains("c@d.com"), "rendered file must not carry email");
+                assert!(
+                    !md.contains("13800138000"),
+                    "rendered file must not carry phone"
+                );
+                assert!(
+                    !md.contains("c@d.com"),
+                    "rendered file must not carry email"
+                );
                 // Reversible: the placeholders restore to originals.
                 let restored = r.restore(&md, &mappings);
                 assert!(restored.contains("13800138000"));
@@ -604,7 +653,9 @@ mod tests {
             aligns: vec![],
         });
         match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &[]) {
-            ArtifactEgressOutcome::Allowed { artifact, redacted, .. } => {
+            ArtifactEgressOutcome::Allowed {
+                artifact, redacted, ..
+            } => {
                 assert_eq!(redacted, 2, "two phones masked");
                 let bytes = artifact.render(crate::export::ExportFormat::Csv).unwrap();
                 let csv = String::from_utf8(bytes).unwrap();
@@ -623,8 +674,13 @@ mod tests {
         let r = Redactor::new();
         let art = doc_with("x", &["phone 13800138000"]);
         match enforce_artifact_egress(&r, &art, RedactMode::Irreversible, &[]) {
-            ArtifactEgressOutcome::Allowed { artifact, mappings, .. } => {
-                assert!(mappings.is_empty(), "irreversible mode emits no restore map");
+            ArtifactEgressOutcome::Allowed {
+                artifact, mappings, ..
+            } => {
+                assert!(
+                    mappings.is_empty(),
+                    "irreversible mode emits no restore map"
+                );
                 let bytes = artifact.render(crate::export::ExportFormat::Md).unwrap();
                 let md = String::from_utf8(bytes).unwrap();
                 assert!(!md.contains("13800138000"));
@@ -640,7 +696,11 @@ mod tests {
         let r = Redactor::new();
         let art = doc_with("公开报告", &["这是一份公开的技术说明，无敏感信息。"]);
         match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &[]) {
-            ArtifactEgressOutcome::Allowed { redacted, classification, .. } => {
+            ArtifactEgressOutcome::Allowed {
+                redacted,
+                classification,
+                ..
+            } => {
                 assert_eq!(redacted, 0);
                 assert_eq!(classification, Classification::Normal);
             }
@@ -659,7 +719,8 @@ mod tests {
             ArtifactEgressOutcome::Allowed { .. }
         ));
         // pro plugin injects 案卷密 → blocked
-        match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &["案卷密".to_string()]) {
+        match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &["案卷密".to_string()])
+        {
             ArtifactEgressOutcome::Blocked { reason } => assert!(reason.contains("案卷密")),
             ArtifactEgressOutcome::Allowed { .. } => panic!("pro keyword must block"),
         }
@@ -673,8 +734,14 @@ mod tests {
         let art = Artifact::Document(Document {
             title: Some("报告 13800138000".to_string()),
             blocks: vec![
-                Block::Heading { level: 1, text: "概述 c@d.com".to_string() },
-                Block::List { ordered: false, items: vec!["项目 13900139000".to_string()] },
+                Block::Heading {
+                    level: 1,
+                    text: "概述 c@d.com".to_string(),
+                },
+                Block::List {
+                    ordered: false,
+                    items: vec!["项目 13900139000".to_string()],
+                },
                 Block::Table(Table {
                     title: None,
                     headers: vec!["列".to_string()],
@@ -684,7 +751,12 @@ mod tests {
             ],
         });
         match enforce_artifact_egress(&r, &art, RedactMode::Reversible, &[]) {
-            ArtifactEgressOutcome::Allowed { artifact, mappings, redacted, .. } => {
+            ArtifactEgressOutcome::Allowed {
+                artifact,
+                mappings,
+                redacted,
+                ..
+            } => {
                 assert_eq!(redacted, 4, "4 PII spans across title/heading/list/table");
                 let bytes = artifact.render(crate::export::ExportFormat::Md).unwrap();
                 let md = String::from_utf8(bytes).unwrap();

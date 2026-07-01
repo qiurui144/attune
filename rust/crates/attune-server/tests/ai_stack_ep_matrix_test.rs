@@ -37,8 +37,7 @@ async fn ai_stack_exposes_ep_chain_and_runtime_stacks() {
     // Offline so neither model nor stack bootstrap hangs on network.
     std::env::set_var("HF_HUB_OFFLINE", "1");
 
-    let vault =
-        attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
+    let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("open in-memory vault");
     vault.setup("ep-matrix-test-pw").expect("vault setup");
     vault.unlock("ep-matrix-test-pw").expect("vault unlock");
 
@@ -93,7 +92,10 @@ async fn ai_stack_exposes_ep_chain_and_runtime_stacks() {
 
     // active_ep_approx is a bool (best-effort flag, R3).
     assert!(
-        accel.get("active_ep_approx").map(|v| v.is_boolean()).unwrap_or(false),
+        accel
+            .get("active_ep_approx")
+            .map(|v| v.is_boolean())
+            .unwrap_or(false),
         "active_ep_approx must be bool"
     );
 
@@ -109,9 +111,13 @@ async fn ai_stack_exposes_ep_chain_and_runtime_stacks() {
     // On default CI build (no GPU EP feature), chain is CPU-only → no userspace
     // stack scheduled → fallback_reason present.
     if chain.len() == 1 {
-        let fr = accel.get("fallback_reason").expect("fallback_reason key present");
+        let fr = accel
+            .get("fallback_reason")
+            .expect("fallback_reason key present");
         assert!(
-            fr.as_str().map(|s| s.contains("accel-ep-not-compiled")).unwrap_or(false),
+            fr.as_str()
+                .map(|s| s.contains("accel-ep-not-compiled"))
+                .unwrap_or(false),
             "CPU-only chain must explain fallback: {fr}"
         );
     }

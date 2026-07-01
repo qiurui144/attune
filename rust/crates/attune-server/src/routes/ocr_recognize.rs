@@ -65,7 +65,10 @@ pub fn parse_escalation(s: Option<&str>) -> attune_core::ocr::profile::VlmEscala
 }
 
 fn err(code: &str, msg: &str, status: StatusCode) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({ "error": msg, "code": code })))
+    (
+        status,
+        Json(serde_json::json!({ "error": msg, "code": code })),
+    )
 }
 
 type RouteResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
@@ -83,13 +86,21 @@ pub async fn post_recognize(
     let mut vlm_escalation: Option<String> = None;
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
-        err("invalid-input", &format!("multipart parse: {e}"), StatusCode::BAD_REQUEST)
+        err(
+            "invalid-input",
+            &format!("multipart parse: {e}"),
+            StatusCode::BAD_REQUEST,
+        )
     })? {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "file" => {
                 let bytes = field.bytes().await.map_err(|e| {
-                    err("invalid-input", &format!("file read: {e}"), StatusCode::BAD_REQUEST)
+                    err(
+                        "invalid-input",
+                        &format!("file read: {e}"),
+                        StatusCode::BAD_REQUEST,
+                    )
                 })?;
                 file_bytes = Some(bytes.to_vec());
             }
@@ -99,8 +110,8 @@ pub async fn post_recognize(
         }
     }
 
-    let bytes = file_bytes
-        .ok_or_else(|| err("invalid-input", "file required", StatusCode::BAD_REQUEST))?;
+    let bytes =
+        file_bytes.ok_or_else(|| err("invalid-input", "file required", StatusCode::BAD_REQUEST))?;
     if bytes.is_empty() {
         return Err(err("empty-file", "file is empty", StatusCode::BAD_REQUEST));
     }
@@ -109,10 +120,20 @@ pub async fn post_recognize(
     let policy = parse_escalation(vlm_escalation.as_deref());
 
     // Write to a tmp file (PP-OCR + layout models accept a path).
-    let tmp = tempfile::NamedTempFile::new()
-        .map_err(|e| err("internal-error", &format!("tempfile: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
-    std::fs::write(tmp.path(), &bytes)
-        .map_err(|e| err("internal-error", &format!("write tmp: {e}"), StatusCode::INTERNAL_SERVER_ERROR))?;
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| {
+        err(
+            "internal-error",
+            &format!("tempfile: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    std::fs::write(tmp.path(), &bytes).map_err(|e| {
+        err(
+            "internal-error",
+            &format!("write tmp: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
 
     let ocr_profile = ocr::profile_for_id(profile_id.as_deref());
 
@@ -192,8 +213,14 @@ mod tests {
         use attune_core::ocr::profile::VlmEscalationPolicy;
         assert_eq!(parse_escalation(None), VlmEscalationPolicy::Off);
         assert_eq!(parse_escalation(Some("garbage")), VlmEscalationPolicy::Off);
-        assert_eq!(parse_escalation(Some("aggressive")), VlmEscalationPolicy::Aggressive);
-        assert_eq!(parse_escalation(Some("on_discrepancy")), VlmEscalationPolicy::OnDiscrepancy);
+        assert_eq!(
+            parse_escalation(Some("aggressive")),
+            VlmEscalationPolicy::Aggressive
+        );
+        assert_eq!(
+            parse_escalation(Some("on_discrepancy")),
+            VlmEscalationPolicy::OnDiscrepancy
+        );
     }
 
     #[test]
@@ -219,7 +246,10 @@ mod tests {
         assert!(j.contains(r#""local_regions":3"#));
         assert!(j.contains(r#""schema_version":1"#));
         // I3: no fabricated cache_hits field in the serialized response.
-        assert!(!j.contains("cache_hits"), "cache_hits must not be fabricated; got {j}");
+        assert!(
+            !j.contains("cache_hits"),
+            "cache_hits must not be fabricated; got {j}"
+        );
         // I3: the applied policy is echoed honestly.
         assert!(j.contains(r#""vlm_escalation":"off""#));
     }

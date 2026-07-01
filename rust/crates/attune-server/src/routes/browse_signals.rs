@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use attune_core::store::browse_signals::BrowseSignalInput;
 
-use crate::state::SharedState;
 use crate::error::{AppError, AppResult};
+use crate::state::SharedState;
 
 const MAX_BATCH_SIZE: usize = 50;
 
@@ -40,7 +40,9 @@ pub async fn record_batch(
     Json(body): Json<BrowseSignalsBatch>,
 ) -> AppResult<Json<serde_json::Value>> {
     if body.signals.is_empty() {
-        return Ok(Json(serde_json::json!({"recorded": 0, "high_engagement": 0})));
+        return Ok(Json(
+            serde_json::json!({"recorded": 0, "high_engagement": 0}),
+        ));
     }
     if body.signals.len() > MAX_BATCH_SIZE {
         return Err(AppError::PayloadTooLarge(format!(
@@ -91,10 +93,7 @@ pub async fn record_batch(
             // 务实做法: 调用方传 domain 明文 + domain_hash（占用同一组 owned），
             // 让 store 端用 hash_domain 私有 fn 算 — 两表一致性靠同源代码路径保证。
             // 现版本: domain_hash 字段直接传空 + store 自己 hash（小不一致由 W5 收尾）
-            let domain_hash_for_bookmark = format!(
-                "pending:{}",
-                owned.domain()
-            );
+            let domain_hash_for_bookmark = format!("pending:{}", owned.domain());
             if let Err(e) = vault.store().record_auto_bookmark(
                 &dek,
                 &owned.url,

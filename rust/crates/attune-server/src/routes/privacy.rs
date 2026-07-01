@@ -98,19 +98,16 @@ fn read_privacy_block(state: &SharedState) -> serde_json::Value {
         Some(data) => serde_json::from_slice(&data).unwrap_or_else(|_| json!({})),
         None => json!({}),
     };
-    settings
-        .get("privacy")
-        .cloned()
-        .unwrap_or_else(|| {
-            json!({
-                "llm": false,
-                "cloud_saas": false,
-                "webdav": false,
-                "web_search": false,
-                "telemetry": false,
-                "privacy_tour_seen": false,
-            })
+    settings.get("privacy").cloned().unwrap_or_else(|| {
+        json!({
+            "llm": false,
+            "cloud_saas": false,
+            "webdav": false,
+            "web_search": false,
+            "telemetry": false,
+            "privacy_tour_seen": false,
         })
+    })
 }
 
 /// Helper — write a partial privacy patch into settings (merge, not overwrite).
@@ -199,10 +196,7 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
 
     let mut outbound = serde_json::Map::new();
     for key in PRIVACY_KEYS {
-        let enabled = privacy
-            .get(*key)
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let enabled = privacy.get(*key).and_then(|v| v.as_bool()).unwrap_or(false);
         outbound.insert((*key).into(), json!({ "enabled": enabled }));
     }
 
@@ -249,12 +243,8 @@ pub async fn settings_patch(
         )
     })?;
 
-    let applied = write_privacy_patch(&state, patch).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e})),
-        )
-    })?;
+    let applied = write_privacy_patch(&state, patch)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))))?;
 
     record_privacy_event(&state, "settings_changed");
 
@@ -274,10 +264,7 @@ pub async fn lock(State(state): State<SharedState>) -> RouteResult {
             record_privacy_event(&state, "vault_lock");
             Ok(Json(json!({ "ok": true, "vault_state": "locked" })))
         }
-        Err(e) => Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": e.to_string()})),
-        )),
+        Err(e) => Err((StatusCode::CONFLICT, Json(json!({"error": e.to_string()})))),
     }
 }
 
@@ -407,7 +394,11 @@ pub async fn doc_export_preview(
             "reason": reason,
             "classification": "classified",
         })),
-        ArtifactEgressOutcome::Allowed { redacted, classification, .. } => Json(json!({
+        ArtifactEgressOutcome::Allowed {
+            redacted,
+            classification,
+            ..
+        } => Json(json!({
             "decision": "allowed",
             "blocked": false,
             "will_redact": redacted > 0,

@@ -174,7 +174,11 @@ fn overlaps(a: (i64, i64), b: (i64, i64)) -> bool {
 }
 
 /// Score one case → (tp, fp, fn_). Each GT target may be matched by at most one finding.
-fn score_case(text: &str, targets: &[String], findings: &[LocatedFinding]) -> (usize, usize, usize) {
+fn score_case(
+    text: &str,
+    targets: &[String],
+    findings: &[LocatedFinding],
+) -> (usize, usize, usize) {
     let gt: Vec<(i64, i64)> = targets.iter().filter_map(|t| utf16_span(text, t)).collect();
     let mut gt_hit = vec![false; gt.len()];
     let mut tp = 0usize;
@@ -254,11 +258,19 @@ fn run_angle_gate(angle_tag: &str, angle: AiAngle) {
                 "  [seed {seed}] {:<24} located={} tp={ctp} fp={cfp} fn={cfn}{}",
                 case.id,
                 findings.len(),
-                if case.expect_empty { " (precision-control)" } else { "" }
+                if case.expect_empty {
+                    " (precision-control)"
+                } else {
+                    ""
+                }
             );
         }
         let denom = (2 * tp + fp + fn_) as f64;
-        let f1 = if denom > 0.0 { 2.0 * tp as f64 / denom } else { 1.0 };
+        let f1 = if denom > 0.0 {
+            2.0 * tp as f64 / denom
+        } else {
+            1.0
+        };
         println!("  [seed {seed}] micro-F1 = {f1:.3}  (tp={tp} fp={fp} fn={fn_})");
         f1_per_seed.push(f1);
     }
@@ -321,7 +333,11 @@ fn corpus_shape_all_angles() {
         );
         let mut ids = HashMap::new();
         for case in &c.cases {
-            assert!(ids.insert(case.id.clone(), ()).is_none(), "dup id {}", case.id);
+            assert!(
+                ids.insert(case.id.clone(), ()).is_none(),
+                "dup id {}",
+                case.id
+            );
             // every GT target is a verbatim substring of the case text (fair to the model).
             for t in &case.targets {
                 assert!(
@@ -336,7 +352,11 @@ fn corpus_shape_all_angles() {
                 );
             }
             if case.expect_empty {
-                assert!(case.targets.is_empty(), "expect_empty case {} must have no targets", case.id);
+                assert!(
+                    case.targets.is_empty(),
+                    "expect_empty case {} must have no targets",
+                    case.id
+                );
             }
         }
     }

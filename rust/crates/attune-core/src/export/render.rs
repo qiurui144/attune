@@ -33,7 +33,9 @@ pub fn render_md(artifact: &Artifact) -> String {
 
 fn md_escape(s: &str) -> String {
     // Escape pipe and backslash so a cell value can't break the table grid.
-    s.replace('\\', "\\\\").replace('|', "\\|").replace('\n', "<br>")
+    s.replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\n', "<br>")
 }
 
 fn md_align_marker(a: Align) -> &'static str {
@@ -132,7 +134,11 @@ pub fn render_csv(artifact: &Artifact) -> Result<Vec<u8>, ExportError> {
     let table = csv_table(artifact)?;
     let mut wtr = csv::WriterBuilder::new().from_writer(Vec::new());
     // header — escape_cell returns Cow<str>; collect to owned strings (&str: AsRef<[u8]>)
-    let header: Vec<String> = table.headers.iter().map(|h| escape_cell(h).into_owned()).collect();
+    let header: Vec<String> = table
+        .headers
+        .iter()
+        .map(|h| escape_cell(h).into_owned())
+        .collect();
     wtr.write_record(&header)
         .map_err(|e| ExportError::RenderFailed(format!("csv header: {e}")))?;
     for row in &table.rows {

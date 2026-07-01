@@ -106,10 +106,10 @@ mod tests {
     fn preserves_existing_model_field() {
         let existing = json!({"llm": {"model": "gpt-4o", "provider": "ollama"}, "search": {}});
         let out = merge_gateway_into_settings(existing, "https://gw/v1", "sk-xyz", None);
-        assert_eq!(out["llm"]["model"], "gpt-4o");           // kept
+        assert_eq!(out["llm"]["model"], "gpt-4o"); // kept
         assert_eq!(out["llm"]["provider"], "openai_compat"); // overwritten
         assert_eq!(out["llm"]["api_key"], "sk-xyz");
-        assert!(out["search"].is_object());                  // unrelated key kept
+        assert!(out["search"].is_object()); // unrelated key kept
     }
 
     #[test]
@@ -180,16 +180,20 @@ mod tests {
         // 老版 accounts server 不返回 gateway_default_model → None,
         // attune-server 不写 model 字段,保持向后兼容(行为同旧版)。
         let out = merge_gateway_into_settings(json!({}), "https://gw/v1", "sk-abc", None);
-        assert!(out["llm"].get("model").is_none(),
-            "None default_model 时不应写入 model 字段");
+        assert!(
+            out["llm"].get("model").is_none(),
+            "None default_model 时不应写入 model 字段"
+        );
     }
 
     #[test]
     fn skips_default_model_when_cloud_returns_empty_string() {
         // 防御: cloud 返回空串 "" 视同 None,不写入。
         let out = merge_gateway_into_settings(json!({}), "https://gw/v1", "sk-abc", Some(""));
-        assert!(out["llm"].get("model").is_none(),
-            "空串 default_model 不应被写入(防 model='' 触发 new-api 400)");
+        assert!(
+            out["llm"].get("model").is_none(),
+            "空串 default_model 不应被写入(防 model='' 触发 new-api 400)"
+        );
     }
 
     // ── gateway_should_apply ─────────────────────────────────────────────────

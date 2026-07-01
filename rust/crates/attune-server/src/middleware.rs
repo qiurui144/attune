@@ -1,10 +1,10 @@
+use crate::state::SharedState;
+use attune_core::vault::VaultState;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use crate::state::SharedState;
-use attune_core::vault::VaultState;
 
 /// Redact the value of a specific query-string key so it does not appear in access logs.
 ///
@@ -148,28 +148,35 @@ pub async fn vault_guard(
     // Restricted to `/api/v1/chat` / `/api/v1/search*` so we don't widen the
     // bypass surface for unrelated routes (items / files / ingest still
     // require an unlocked vault even if a bench-style header is forwarded).
-    if (path == "/api/v1/chat"
-        || path.starts_with("/api/v1/search"))
+    if (path == "/api/v1/chat" || path.starts_with("/api/v1/search"))
         && request_has_any_eval_header(&request)
     {
         return next.run(request).await;
     }
 
-    let vault_state = state.vault.lock().unwrap_or_else(|e| e.into_inner()).state();
+    let vault_state = state
+        .vault
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .state();
     match vault_state {
         VaultState::Unlocked => next.run(request).await,
-        VaultState::Locked => {
-            (StatusCode::FORBIDDEN, Json(serde_json::json!({
+        VaultState::Locked => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
                 "error": "vault is locked",
                 "hint": "POST /api/v1/vault/unlock to unlock"
-            }))).into_response()
-        }
-        VaultState::Sealed => {
-            (StatusCode::FORBIDDEN, Json(serde_json::json!({
+            })),
+        )
+            .into_response(),
+        VaultState::Sealed => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
                 "error": "vault is sealed",
                 "hint": "POST /api/v1/vault/setup to initialize"
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -194,7 +201,11 @@ pub async fn access_log(
 
     // 抓 member_state 快照 (要 release lock 才能调 next)
     let (member_kind, account_id) = {
-        let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let m = state
+            .member_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let kind = match &m {
             attune_core::member_session::MemberState::LoggedOut => "logged_out",
             attune_core::member_session::MemberState::Free { .. } => "free",
@@ -367,8 +378,14 @@ mod tests {
             out.contains("token=<redacted>"),
             "token key must be present with <redacted>: {out}"
         );
-        assert!(out.contains("foo=bar"), "other params must be unchanged: {out}");
-        assert!(out.contains("baz=qux"), "other params must be unchanged: {out}");
+        assert!(
+            out.contains("foo=bar"),
+            "other params must be unchanged: {out}"
+        );
+        assert!(
+            out.contains("baz=qux"),
+            "other params must be unchanged: {out}"
+        );
     }
 
     #[test]

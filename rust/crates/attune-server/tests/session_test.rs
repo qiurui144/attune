@@ -51,7 +51,9 @@ where
     }
 
     let vault = Vault::open_memory(tmp.path()).expect("open in-memory vault");
-    vault.setup("test-password-not-real").expect("setup leaves vault unlocked");
+    vault
+        .setup("test-password-not-real")
+        .expect("setup leaves vault unlocked");
     let dek = vault.dek_db().expect("vault unlocked → dek available");
     seed(&vault, &dek);
 
@@ -73,9 +75,18 @@ where
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_sessions_route_returns_seeded_sessions_with_envelope() {
     let (base, client) = spawn_with_seed(|vault, dek| {
-        let s1 = vault.store().create_conversation(dek, "第一个会话").unwrap();
-        vault.store().append_message(dek, &s1, "user", "hello", &[]).unwrap();
-        vault.store().create_conversation(dek, "第二个会话").unwrap();
+        let s1 = vault
+            .store()
+            .create_conversation(dek, "第一个会话")
+            .unwrap();
+        vault
+            .store()
+            .append_message(dek, &s1, "user", "hello", &[])
+            .unwrap();
+        vault
+            .store()
+            .create_conversation(dek, "第二个会话")
+            .unwrap();
     })
     .await;
 
@@ -98,7 +109,10 @@ async fn list_sessions_route_returns_seeded_sessions_with_envelope() {
 async fn list_sessions_pagination_clamps_limit_via_query() {
     let (base, client) = spawn_with_seed(|vault, dek| {
         for i in 0..5 {
-            vault.store().create_conversation(dek, &format!("会话{i}")).unwrap();
+            vault
+                .store()
+                .create_conversation(dek, &format!("会话{i}"))
+                .unwrap();
         }
     })
     .await;
@@ -110,7 +124,11 @@ async fn list_sessions_pagination_clamps_limit_via_query() {
         .await
         .expect("page1");
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["sessions"].as_array().unwrap().len(), 3, "limit=3 returns 3");
+    assert_eq!(
+        body["sessions"].as_array().unwrap().len(),
+        3,
+        "limit=3 returns 3"
+    );
 
     let resp = client
         .get(format!("{}/api/v1/chat/sessions?limit=3&offset=3", base))
@@ -118,7 +136,11 @@ async fn list_sessions_pagination_clamps_limit_via_query() {
         .await
         .expect("page2");
     let body: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(body["sessions"].as_array().unwrap().len(), 2, "offset=3 returns remaining 2");
+    assert_eq!(
+        body["sessions"].as_array().unwrap().len(),
+        2,
+        "offset=3 returns remaining 2"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -126,9 +148,18 @@ async fn get_session_route_returns_session_and_messages() {
     let seeded_id = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let captured = Arc::clone(&seeded_id);
     let (base, client) = spawn_with_seed(move |vault, dek| {
-        let sid = vault.store().create_conversation(dek, "带消息的会话").unwrap();
-        vault.store().append_message(dek, &sid, "user", "问题", &[]).unwrap();
-        vault.store().append_message(dek, &sid, "assistant", "回答", &[]).unwrap();
+        let sid = vault
+            .store()
+            .create_conversation(dek, "带消息的会话")
+            .unwrap();
+        vault
+            .store()
+            .append_message(dek, &sid, "user", "问题", &[])
+            .unwrap();
+        vault
+            .store()
+            .append_message(dek, &sid, "assistant", "回答", &[])
+            .unwrap();
         *captured.lock().unwrap() = sid;
     })
     .await;
@@ -158,7 +189,11 @@ async fn get_unknown_session_route_returns_404() {
         .send()
         .await
         .expect("GET missing");
-    assert_eq!(resp.status().as_u16(), 404, "unknown session id → 404 from the real handler");
+    assert_eq!(
+        resp.status().as_u16(),
+        404,
+        "unknown session id → 404 from the real handler"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -167,7 +202,10 @@ async fn delete_session_route_returns_204_and_removes_it() {
     let captured = Arc::clone(&seeded_id);
     let (base, client) = spawn_with_seed(move |vault, dek| {
         let sid = vault.store().create_conversation(dek, "要删除").unwrap();
-        vault.store().append_message(dek, &sid, "user", "x", &[]).unwrap();
+        vault
+            .store()
+            .append_message(dek, &sid, "user", "x", &[])
+            .unwrap();
         *captured.lock().unwrap() = sid;
     })
     .await;
@@ -213,17 +251,35 @@ async fn session_routes_locked_vault_returns_403() {
     let router = attune_server::build_router(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
     let base = format!("http://127.0.0.1:{}", port);
     wait_for_server(&base).await;
     Box::leak(Box::new(tmp));
 
     let client = reqwest::Client::new();
     let acceptable = |s: u16| s == 401 || s == 403;
-    let resp = client.get(format!("{}/api/v1/chat/sessions", base)).send().await.expect("list");
-    assert!(acceptable(resp.status().as_u16()), "list on locked vault: got {}", resp.status());
-    let resp = client.get(format!("{}/api/v1/chat/sessions/x", base)).send().await.expect("get");
-    assert!(acceptable(resp.status().as_u16()), "get on locked vault: got {}", resp.status());
+    let resp = client
+        .get(format!("{}/api/v1/chat/sessions", base))
+        .send()
+        .await
+        .expect("list");
+    assert!(
+        acceptable(resp.status().as_u16()),
+        "list on locked vault: got {}",
+        resp.status()
+    );
+    let resp = client
+        .get(format!("{}/api/v1/chat/sessions/x", base))
+        .send()
+        .await
+        .expect("get");
+    assert!(
+        acceptable(resp.status().as_u16()),
+        "get on locked vault: got {}",
+        resp.status()
+    );
 }
 
 // ── Store-layer invariant (legitimately a store unit, not a route re-impl) ───
@@ -240,11 +296,22 @@ mod store_invariants {
         let dek = Key32::generate();
         let sid = store.create_conversation(&dek, "会话").unwrap();
         store.append_message(&dek, &sid, "user", "m1", &[]).unwrap();
-        store.append_message(&dek, &sid, "assistant", "m2", &[]).unwrap();
-        assert_eq!(store.get_conversation_messages(&dek, &sid).unwrap().len(), 2);
+        store
+            .append_message(&dek, &sid, "assistant", "m2", &[])
+            .unwrap();
+        assert_eq!(
+            store.get_conversation_messages(&dek, &sid).unwrap().len(),
+            2
+        );
 
         store.delete_conversation(&sid).unwrap();
         assert!(store.get_conversation_by_id(&dek, &sid).unwrap().is_none());
-        assert!(store.get_conversation_messages(&dek, &sid).unwrap().is_empty(), "messages cascade-deleted");
+        assert!(
+            store
+                .get_conversation_messages(&dek, &sid)
+                .unwrap()
+                .is_empty(),
+            "messages cascade-deleted"
+        );
     }
 }

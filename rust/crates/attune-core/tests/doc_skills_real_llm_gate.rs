@@ -90,7 +90,10 @@ struct SynthCase {
 const SYNTH_CORPUS: &[SynthCase] = &[
     SynthCase {
         sources: &[
-            ("algo", "靶点 EGFR 在非小细胞肺癌中过表达，与肿瘤增殖密切相关。"),
+            (
+                "algo",
+                "靶点 EGFR 在非小细胞肺癌中过表达，与肿瘤增殖密切相关。",
+            ),
             ("tcm", "中药黄芪具有调节免疫、抗疲劳的作用。"),
         ],
         must_contain: &["EGFR", "黄芪"],
@@ -164,13 +167,18 @@ fn research_synthesis_real_llm_grounding_floor() {
             for bogus in c.must_not_assert {
                 for s in &r.segments {
                     if s.verified && s.text.contains(bogus) {
-                        panic!("[seed {seed} case {i}] fabricated fact shipped as grounded: {bogus:?}");
+                        panic!(
+                            "[seed {seed} case {i}] fabricated fact shipped as grounded: {bogus:?}"
+                        );
                     }
                 }
             }
 
             let g = synth_grounding_score(&r);
-            println!("[seed {seed}] case {i} grounding={g:.3} ({} segs)", r.segments.len());
+            println!(
+                "[seed {seed}] case {i} grounding={g:.3} ({} segs)",
+                r.segments.len()
+            );
             case_scores.push(g);
         }
         let (mean, _) = mean_std(&case_scores);
@@ -178,7 +186,9 @@ fn research_synthesis_real_llm_grounding_floor() {
         seed_scores.push(mean);
     }
     let (mean, std) = mean_std(&seed_scores);
-    println!("[gate] research_synthesis grounding mean={mean:.3} std={std:.3} over {n_seeds} seeds");
+    println!(
+        "[gate] research_synthesis grounding mean={mean:.3} std={std:.3} over {n_seeds} seeds"
+    );
     assert!(
         mean >= SYNTH_GROUND_FLOOR,
         "research_synthesis grounding {mean:.3} < floor {SYNTH_GROUND_FLOOR} on {model}. \
@@ -206,7 +216,10 @@ const REF_CORPUS: &[RefCase] = &[
     },
     RefCase {
         reference: "# Overview\nintro.\n\n# Specifications\nspec.\n\n# Warranty\nwarranty.",
-        source_data: &[("dev", "Resolution 4K, power 12W, interface USB, warranty 5 years.")],
+        source_data: &[(
+            "dev",
+            "Resolution 4K, power 12W, interface USB, warranty 5 years.",
+        )],
         must_contain: &["4K", "USB"],
         headings: &["Overview", "Specifications", "Warranty"],
     },
@@ -271,7 +284,11 @@ fn reference_generate_real_llm_fidelity_floor() {
             }
 
             let s = ref_score(&doc);
-            println!("[seed {seed}] case {i} score={s:.3} ({} sections, {} unverified)", doc.sections.len(), doc.unverified_sections.len());
+            println!(
+                "[seed {seed}] case {i} score={s:.3} ({} sections, {} unverified)",
+                doc.sections.len(),
+                doc.unverified_sections.len()
+            );
             case_scores.push(s);
         }
         let (mean, _) = mean_std(&case_scores);
@@ -312,7 +329,10 @@ fn corpora_well_formed() {
     }
     for (i, c) in REF_CORPUS.iter().enumerate() {
         for h in c.headings {
-            assert!(c.reference.contains(h), "ref case {i} heading {h:?} not in reference");
+            assert!(
+                c.reference.contains(h),
+                "ref case {i} heading {h:?} not in reference"
+            );
         }
         for needle in c.must_contain {
             assert!(

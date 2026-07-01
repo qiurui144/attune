@@ -12,7 +12,8 @@
 pub trait ExtractiveScorer {
     /// Score one sentence given its 0-based position, total sentence count, and the
     /// heading words of the enclosing block. Higher = more salient.
-    fn score(&self, sentence: &str, position: usize, total: usize, heading_words: &[String]) -> f32;
+    fn score(&self, sentence: &str, position: usize, total: usize, heading_words: &[String])
+        -> f32;
 }
 
 /// TF + position prior + heading-word hit + length-norm (default scorer).
@@ -20,7 +21,13 @@ pub trait ExtractiveScorer {
 pub struct TfPositionTitleScorer;
 
 impl ExtractiveScorer for TfPositionTitleScorer {
-    fn score(&self, sentence: &str, position: usize, total: usize, heading_words: &[String]) -> f32 {
+    fn score(
+        &self,
+        sentence: &str,
+        position: usize,
+        total: usize,
+        heading_words: &[String],
+    ) -> f32 {
         let words = tokenize(sentence);
         if words.is_empty() {
             return 0.0;
@@ -168,7 +175,10 @@ mod tests {
                      Ownership is the core memory-safety mechanism. I had coffee.";
         let heading = vec!["ownership".to_string()];
         let kept = extract_candidates(block, 0.5, &heading);
-        assert!(kept.contains("Ownership is the core"), "heading-echo kept: {kept}");
+        assert!(
+            kept.contains("Ownership is the core"),
+            "heading-echo kept: {kept}"
+        );
         assert!(kept.len() < block.len(), "output strictly smaller");
     }
 
@@ -178,7 +188,10 @@ mod tests {
         let heading = vec!["所有权".to_string()];
         let kept = extract_candidates(block, 0.5, &heading);
         // keeps ~2 of 4; the heading-echoing sentence must be present.
-        assert!(kept.contains("所有权是核心"), "cjk heading-echo kept: {kept}");
+        assert!(
+            kept.contains("所有权是核心"),
+            "cjk heading-echo kept: {kept}"
+        );
         assert!(kept.chars().count() < block.chars().count());
     }
 
@@ -217,9 +230,12 @@ mod tests {
         let mut block = String::new();
         for i in 0..20 {
             if i % 5 == 0 {
-                block.push_str("内存安全是系统编程的核心所有权机制保证无数据竞争且零成本抽象非常重要。");
+                block.push_str(
+                    "内存安全是系统编程的核心所有权机制保证无数据竞争且零成本抽象非常重要。",
+                );
             } else {
-                block.push_str("这是一段无关紧要的填充文字用来增加文档长度并稀释关键信息密度内容。");
+                block
+                    .push_str("这是一段无关紧要的填充文字用来增加文档长度并稀释关键信息密度内容。");
             }
         }
         let input_tokens = estimate_tokens(&block);

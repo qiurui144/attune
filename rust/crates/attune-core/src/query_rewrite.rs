@@ -43,10 +43,8 @@ pub async fn rewrite_query(query: &str, llm: Arc<dyn LlmProvider>) -> Result<Str
     // LlmProvider::chat 是同步签名（内部用 llm_block_on），spawn_blocking 包裹避免阻塞 async runtime
     let q = trimmed.to_string();
     let llm_clone = llm.clone();
-    let rewrite_result = tokio::task::spawn_blocking(move || {
-        llm_clone.chat(REWRITE_SYSTEM_PROMPT, &q)
-    })
-    .await;
+    let rewrite_result =
+        tokio::task::spawn_blocking(move || llm_clone.chat(REWRITE_SYSTEM_PROMPT, &q)).await;
 
     match rewrite_result {
         Ok(Ok((raw, _usage))) => Ok(sanitize_keywords(&raw, trimmed)),
@@ -99,11 +97,7 @@ mod tests {
     }
 
     impl LlmProvider for StubLlm {
-        fn chat(
-            &self,
-            _system: &str,
-            _user: &str,
-        ) -> Result<(String, crate::usage::TokenUsage)> {
+        fn chat(&self, _system: &str, _user: &str) -> Result<(String, crate::usage::TokenUsage)> {
             Ok((
                 self.response.clone(),
                 crate::usage::TokenUsage::empty("stub", "stub"),
@@ -120,24 +114,28 @@ mod tests {
             ))
         }
 
-        fn is_available(&self) -> bool { true }
-        fn model_name(&self) -> &str { "stub" }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn model_name(&self) -> &str {
+            "stub"
+        }
     }
 
     /// 失败用 mock — 总是返回 LlmUnavailable
     struct FailingLlm;
 
     impl LlmProvider for FailingLlm {
-        fn chat(
-            &self,
-            _system: &str,
-            _user: &str,
-        ) -> Result<(String, crate::usage::TokenUsage)> {
+        fn chat(&self, _system: &str, _user: &str) -> Result<(String, crate::usage::TokenUsage)> {
             Err(VaultError::LlmUnavailable("test fail".into()))
         }
 
-        fn is_available(&self) -> bool { false }
-        fn model_name(&self) -> &str { "failing" }
+        fn is_available(&self) -> bool {
+            false
+        }
+        fn model_name(&self) -> &str {
+            "failing"
+        }
     }
 
     #[tokio::test]

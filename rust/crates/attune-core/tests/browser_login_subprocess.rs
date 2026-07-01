@@ -53,7 +53,8 @@ fn controller_for(script: PathBuf) -> SidecarController {
 /// overlapping without forcing a global `--test-threads=1`.
 fn browser_login_serial() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // ── happy path: scan → ok (exit 0) ──────────────────────────────────────────
@@ -126,7 +127,10 @@ exit 0
     assert_eq!(o2, RunOutcome::Success);
     assert_eq!(r2.status, "logged-in");
     // temp-state cleanup (§9 case 10): the controller deletes the working state.
-    assert!(!state.exists(), "temp state file must be cleaned up after run");
+    assert!(
+        !state.exists(),
+        "temp state file must be cleaned up after run"
+    );
 
     // run → reuse session, crawl one record (exit 0).
     let run = write_fake_sidecar(
@@ -226,7 +230,10 @@ exit 0
             recipe_path: tmp.path().join("r.json"),
         })
         .unwrap_err();
-    assert!(matches!(err, SidecarError::SchemaMismatch { .. }), "got {err:?}");
+    assert!(
+        matches!(err, SidecarError::SchemaMismatch { .. }),
+        "got {err:?}"
+    );
 }
 
 // ── timeout: child sleeps past the cap → killed + Timeout error ─────────────
@@ -254,7 +261,10 @@ exit 0
         })
         .unwrap_err();
     assert!(matches!(err, SidecarError::Timeout(_)), "got {err:?}");
-    assert!(start.elapsed() < Duration::from_secs(5), "must not wait out the child");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "must not wait out the child"
+    );
 }
 
 // ── tool-not-found: spawn a non-existent program → SpawnFailed ──────────────
@@ -310,13 +320,25 @@ exit 0
     assert_eq!(outcome, RunOutcome::Success);
 
     let argv = std::fs::read_to_string(&argv_dump).unwrap();
-    assert!(!argv.contains("alice_user"), "username leaked into argv: {argv}");
-    assert!(!argv.contains("p@ssw0rd_SECRET"), "password leaked into argv: {argv}");
-    assert!(argv.contains("--credentials-stdin"), "stdin flag must be present");
+    assert!(
+        !argv.contains("alice_user"),
+        "username leaked into argv: {argv}"
+    );
+    assert!(
+        !argv.contains("p@ssw0rd_SECRET"),
+        "password leaked into argv: {argv}"
+    );
+    assert!(
+        argv.contains("--credentials-stdin"),
+        "stdin flag must be present"
+    );
 
     // Conversely, credentials DID arrive over stdin (the only allowed channel).
     let stdin = std::fs::read_to_string(&stdin_dump).unwrap();
-    assert!(stdin.contains("alice_user"), "credentials must arrive over stdin");
+    assert!(
+        stdin.contains("alice_user"),
+        "credentials must arrive over stdin"
+    );
     assert!(stdin.contains("p@ssw0rd_SECRET"));
     let v: serde_json::Value = serde_json::from_str(stdin.trim()).unwrap();
     assert_eq!(v["username"], "alice_user");

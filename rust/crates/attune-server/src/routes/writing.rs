@@ -23,8 +23,8 @@ use attune_core::writing::rewrite::{self, RewriteOutput, RewriteRequest};
 use attune_core::writing::synthesis::{self, SynthLlms, SynthesisRequest, SynthesisStructure};
 use attune_core::writing::templates::{fill_template, FillResult, TemplateRegistry};
 use attune_core::writing::{
-    build_citations, find_inline_anchors, Citation, CiteError, CiteStyle, InlineAnchor, SourceMaterial,
-    SourceMeta, StyleTarget, WritingError, WritingResult,
+    build_citations, find_inline_anchors, Citation, CiteError, CiteStyle, InlineAnchor,
+    SourceMaterial, SourceMeta, StyleTarget, WritingError, WritingResult,
 };
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
@@ -59,7 +59,11 @@ fn membership_required() -> AppError {
     )
 }
 fn vault_locked() -> AppError {
-    werr(axum::http::StatusCode::UNAUTHORIZED, "vault-locked", "vault is locked")
+    werr(
+        axum::http::StatusCode::UNAUTHORIZED,
+        "vault-locked",
+        "vault is locked",
+    )
 }
 fn cloud_llm_disabled() -> AppError {
     werr(
@@ -77,7 +81,11 @@ fn llm_unavailable() -> AppError {
 }
 
 fn is_paid(state: &SharedState) -> bool {
-    state.member_state.lock().map(|g| g.is_paid()).unwrap_or(false)
+    state
+        .member_state
+        .lock()
+        .map(|g| g.is_paid())
+        .unwrap_or(false)
 }
 
 /// Generation is always tier-3 → enforce the member gate.
@@ -97,7 +105,11 @@ fn cloud_llm_egress_enabled(state: &SharedState) -> bool {
     };
     bytes
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|s| s.get("privacy").and_then(|p| p.get("llm")).and_then(|v| v.as_bool()))
+        .and_then(|s| {
+            s.get("privacy")
+                .and_then(|p| p.get("llm"))
+                .and_then(|v| v.as_bool())
+        })
         .unwrap_or(false)
 }
 
@@ -205,7 +217,10 @@ pub async fn draft_writing(
     let mut sources = load_sources(&state, &body.item_ids)?;
     for ex in &body.extra_sources {
         // External/user-supplied: empty item_id ⇒ engine grounds it as External kind.
-        sources.push(SourceMaterial::new(ex.external_ref.clone(), ex.text.clone()));
+        sources.push(SourceMaterial::new(
+            ex.external_ref.clone(),
+            ex.text.clone(),
+        ));
     }
 
     let req = DraftRequest {
@@ -312,7 +327,10 @@ pub async fn cite_writing(Json(body): Json<CiteBody>) -> AppResult<Json<CiteResp
         werr(
             axum::http::StatusCode::BAD_REQUEST,
             "unsupported-cite-style",
-            &format!("unsupported cite style; supported: {}", supported.join(", ")),
+            &format!(
+                "unsupported cite style; supported: {}",
+                supported.join(", ")
+            ),
         )
     })?;
     let citations = build_citations(&body.sources, style).map_err(map_cite_err)?;
@@ -356,7 +374,10 @@ pub async fn synthesis_writing(
 
     let mut sources = load_sources(&state, &body.item_ids)?;
     for ex in &body.extra_sources {
-        sources.push(SourceMaterial::new(ex.external_ref.clone(), ex.text.clone()));
+        sources.push(SourceMaterial::new(
+            ex.external_ref.clone(),
+            ex.text.clone(),
+        ));
     }
 
     let structure = match body.structure.as_deref() {
@@ -432,7 +453,10 @@ mod tests {
         let _ = e; // status assertion is exercised in the subprocess integration test.
 
         assert_eq!(WritingError::EmptyInput.code(), "empty-input");
-        assert_eq!(WritingError::SourceInjection.code(), "source-injection-detected");
+        assert_eq!(
+            WritingError::SourceInjection.code(),
+            "source-injection-detected"
+        );
         assert_eq!(WritingError::LlmUnavailable.code(), "llm-unavailable");
     }
 
@@ -450,7 +474,10 @@ mod tests {
         // exercised in the subprocess integration test).
         let _ = map_cite_err(CiteError::NoSources);
         assert_eq!(CiteError::NoSources.code(), "no-source-material");
-        assert_eq!(CiteError::MissingTitle("x".into()).code(), "citation-missing-title");
+        assert_eq!(
+            CiteError::MissingTitle("x".into()).code(),
+            "citation-missing-title"
+        );
     }
 
     #[test]

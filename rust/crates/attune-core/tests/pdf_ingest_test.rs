@@ -77,8 +77,10 @@ fn mixed_zhen_pdf_preserves_both_languages() {
         .expect("mixed-zhen.pdf should parse via text layer");
     // Known content: "项目 Running 测试 with embedding 向量 search 检索。"
     let flat = despace(&content);
-    let has_english = flat.contains("Running") || flat.contains("search") || flat.contains("embedding");
-    let has_chinese = content.contains("向量") || content.contains("检索") || content.contains("测试");
+    let has_english =
+        flat.contains("Running") || flat.contains("search") || flat.contains("embedding");
+    let has_chinese =
+        content.contains("向量") || content.contains("检索") || content.contains("测试");
     assert!(
         has_english,
         "mixed PDF lost the English token (Running/search); got: {content:?}"
@@ -113,8 +115,7 @@ fn parse_bytes_path_matches_parse_file_for_text_pdf() {
     // The in-memory upload path (parse_bytes) and the disk path (parse_file)
     // must agree for a text-layer PDF — both go through pdf_extract.
     let data = fixture_bytes("text-en.pdf");
-    let (_t, content) =
-        parser::parse_bytes(&data, "text-en.pdf").expect("parse_bytes on text PDF");
+    let (_t, content) = parser::parse_bytes(&data, "text-en.pdf").expect("parse_bytes on text PDF");
     assert!(
         despace(&content).contains("quickbrownfox"),
         "parse_bytes lost text: {content:?}"

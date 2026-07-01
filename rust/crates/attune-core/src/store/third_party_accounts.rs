@@ -157,9 +157,9 @@ impl Store {
 
     /// distinct provider 集合（suggestions 规则引擎判「哪类源已连接」用）。
     pub fn connected_provider_kinds(&self) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT DISTINCT provider FROM third_party_accounts ORDER BY provider")?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT provider FROM third_party_accounts ORDER BY provider",
+        )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
         for row in rows {

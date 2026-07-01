@@ -22,7 +22,11 @@ async fn member_state_default_logged_out() {
     let base = format!("http://127.0.0.1:{}/api/v1/member", port);
 
     // GET /state — 默认未登录
-    let resp = client.get(format!("{base}/state")).send().await.expect("GET state");
+    let resp = client
+        .get(format!("{base}/state"))
+        .send()
+        .await
+        .expect("GET state");
     let status = resp.status().as_u16();
     assert!(
         (200..500).contains(&status),
@@ -30,9 +34,16 @@ async fn member_state_default_logged_out() {
     );
 
     // GET /locks — 应返 SettingsLocks JSON (即便 vault locked 也应能拿)
-    let resp = client.get(format!("{base}/locks")).send().await.expect("GET locks");
+    let resp = client
+        .get(format!("{base}/locks"))
+        .send()
+        .await
+        .expect("GET locks");
     let status = resp.status().as_u16();
-    assert!((200..500).contains(&status), "GET /locks 4xx 或 2xx, got {status}");
+    assert!(
+        (200..500).contains(&status),
+        "GET /locks 4xx 或 2xx, got {status}"
+    );
 
     // POST /login-token — bad tier
     let resp = client
@@ -42,7 +53,10 @@ async fn member_state_default_logged_out() {
         .await
         .expect("POST login-token");
     let status = resp.status().as_u16();
-    assert!((400..500).contains(&status), "bad tier should 4xx, got {status}");
+    assert!(
+        (400..500).contains(&status),
+        "bad tier should 4xx, got {status}"
+    );
 
     handle.abort();
 }

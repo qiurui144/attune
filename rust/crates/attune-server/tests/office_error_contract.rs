@@ -88,7 +88,9 @@ async fn assert_error_envelope(resp: reqwest::Response, expected_status: u16, ex
     );
     // kebab-string sanity: lowercase + hyphens + no underscores/spaces
     assert!(
-        code_str.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+        code_str
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
         "code '{code_str}' is not kebab-case (lowercase + digits + hyphens only)"
     );
     assert!(
@@ -281,6 +283,9 @@ async fn all_error_codes_are_strict_kebab_case() {
             !code.contains('_') && !code.contains(' '),
             "code '{code}' contains forbidden char"
         );
-        assert!(!code.starts_with('-') && !code.ends_with('-'), "code '{code}' bad hyphen");
+        assert!(
+            !code.starts_with('-') && !code.ends_with('-'),
+            "code '{code}' bad hyphen"
+        );
     }
 }

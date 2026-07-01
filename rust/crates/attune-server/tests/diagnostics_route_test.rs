@@ -41,7 +41,11 @@ async fn diagnostics_capabilities_returns_registry_projection() {
 
     let v: serde_json::Value = resp.json().await.expect("json");
     let arr = v.as_array().expect("array of capabilities");
-    assert!(arr.len() >= 9, "expected >=9 capabilities, got {}", arr.len());
+    assert!(
+        arr.len() >= 9,
+        "expected >=9 capabilities, got {}",
+        arr.len()
+    );
 
     // Each entry carries the full schema.
     let first = &arr[0];
@@ -70,7 +74,10 @@ async fn diagnostics_capabilities_returns_registry_projection() {
 
     // OSS boundary audit on the wire (spec §9 核心断言): only oss-tier, no verticals.
     for c in arr {
-        assert_eq!(c["tier"], "oss", "wire response must contain only oss-tier caps");
+        assert_eq!(
+            c["tier"], "oss",
+            "wire response must contain only oss-tier caps"
+        );
         let id = c["id"].as_str().unwrap();
         for banned in ["law", "patent", "presales", "medical", "academic"] {
             assert!(

@@ -91,7 +91,9 @@ pub fn business_license_check(code: &str) -> bool {
         return false;
     }
     const ALPHABET: &str = "0123456789ABCDEFGHJKLMNPQRTUWXY"; // 31 chars
-    const WEIGHTS: [i32; 17] = [1, 3, 9, 27, 19, 26, 16, 17, 20, 29, 25, 13, 8, 24, 10, 30, 28];
+    const WEIGHTS: [i32; 17] = [
+        1, 3, 9, 27, 19, 26, 16, 17, 20, 29, 25, 13, 8, 24, 10, 30, 28,
+    ];
     let mut sum: i32 = 0;
     for (i, w) in WEIGHTS.iter().enumerate() {
         let ch = bytes[i].to_ascii_uppercase();
@@ -115,7 +117,10 @@ mod tests {
 
     #[test]
     fn date_iso_chinese() {
-        assert_eq!(normalize_date("2026年5月18日").as_deref(), Some("2026-05-18"));
+        assert_eq!(
+            normalize_date("2026年5月18日").as_deref(),
+            Some("2026-05-18")
+        );
     }
 
     #[test]

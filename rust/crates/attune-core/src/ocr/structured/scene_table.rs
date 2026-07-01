@@ -133,8 +133,16 @@ pub fn extract_from_cells(cells: &[crate::ocr::nontext::Cell]) -> StructuredFiel
             validation_warnings: vec![],
         };
     }
-    let row_count = cells.iter().map(|c| c.row + c.row_span.max(1)).max().unwrap_or(0);
-    let col_count = cells.iter().map(|c| c.col + c.col_span.max(1)).max().unwrap_or(0);
+    let row_count = cells
+        .iter()
+        .map(|c| c.row + c.row_span.max(1))
+        .max()
+        .unwrap_or(0);
+    let col_count = cells
+        .iter()
+        .map(|c| c.col + c.col_span.max(1))
+        .max()
+        .unwrap_or(0);
     let header_texts: Vec<String> = cells
         .iter()
         .filter(|c| c.row == 0)
@@ -261,7 +269,8 @@ fn detect_headers(mut cells: Vec<Vec<String>>) -> (Option<Vec<String>>, Vec<Vec<
     }
     let all_non_numeric = non_empty.iter().all(|c| {
         let t = c.trim();
-        !t.chars().all(|ch| ch.is_ascii_digit() || ch == '.' || ch == ',' || ch == '-')
+        !t.chars()
+            .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == ',' || ch == '-')
     });
     if all_non_numeric && cells.len() > 1 {
         let h = cells.remove(0);
@@ -305,7 +314,11 @@ mod tests {
 
     #[test]
     fn empty_input_returns_unrecognized_table() {
-        let StructuredFields::TableV1 { unrecognized_fields, .. } = extract(&[]) else {
+        let StructuredFields::TableV1 {
+            unrecognized_fields,
+            ..
+        } = extract(&[])
+        else {
             unreachable!()
         };
         assert!(unrecognized_fields.contains(&"table_structure".to_string()));
@@ -319,7 +332,9 @@ mod tests {
             rl("Alice", 10, 60, 60),
             rl("30", 100, 60, 40),
         ];
-        let StructuredFields::TableV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::TableV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.column_count.value.as_deref(), Some("2"));
         assert_eq!(fields.row_count.value.as_deref(), Some("1"));
         let headers_json = fields.headers.value.as_deref().unwrap();
@@ -338,7 +353,12 @@ mod tests {
             rl("300", 10, 60, 40),
             rl("400", 100, 60, 40),
         ];
-        let StructuredFields::TableV1 { fields, unrecognized_fields, .. } = extract(&lines) else {
+        let StructuredFields::TableV1 {
+            fields,
+            unrecognized_fields,
+            ..
+        } = extract(&lines)
+        else {
             unreachable!()
         };
         assert!(unrecognized_fields.contains(&"headers".to_string()));
@@ -383,7 +403,9 @@ mod tests {
             rl("Bob", 80, 110, 60),
             rl("88", 200, 110, 60),
         ];
-        let StructuredFields::TableV1 { fields, .. } = extract(&lines) else { unreachable!() };
+        let StructuredFields::TableV1 { fields, .. } = extract(&lines) else {
+            unreachable!()
+        };
         assert_eq!(fields.column_count.value.as_deref(), Some("3"));
         assert_eq!(fields.row_count.value.as_deref(), Some("2"));
         let rows_json = fields.rows.value.as_deref().unwrap();
@@ -405,12 +427,7 @@ mod tests {
             text: text.into(),
             confidence: 1.0,
         };
-        let cells = vec![
-            mk(0, 0, "H1"),
-            mk(0, 1, "H2"),
-            mk(1, 0, "a"),
-            mk(1, 1, "b"),
-        ];
+        let cells = vec![mk(0, 0, "H1"), mk(0, 1, "H2"), mk(1, 0, "a"), mk(1, 1, "b")];
         let StructuredFields::TableV1 { fields, .. } = extract_from_cells(&cells) else {
             unreachable!()
         };

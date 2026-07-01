@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use attune_core::ingest::git::{GitConnector, GitSourceConfig};
-use attune_core::ingest::{DocumentSink, RawDocument};
 use attune_core::ingest::SourceConnector;
+use attune_core::ingest::{DocumentSink, RawDocument};
 
 /// 在 `dir` 建一个 bare repo，commit 一组 (relpath, content)，返回 file:// URL。
 fn build_bare_repo(dir: &Path, files: &[(&str, &[u8])]) -> String {
@@ -27,12 +27,15 @@ fn build_bare_repo(dir: &Path, files: &[(&str, &[u8])]) -> String {
     }
 
     let mut index = repo.index().unwrap();
-    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).unwrap();
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .unwrap();
     index.write().unwrap();
     let tree_oid = index.write_tree().unwrap();
     let tree = repo.find_tree(tree_oid).unwrap();
     let sig = git2::Signature::now("Test", "test@example.com").unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
+    repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+        .unwrap();
 
     // file:// URL 指向工作仓（含 .git）—— libgit2 可从本地 .git clone。
     // 跨平台:用 url::Url::from_directory_path 生成 RFC-8089 合规的 file URL。
@@ -69,20 +72,43 @@ fn clones_local_bare_repo_and_emits_markdown() {
     );
     let conn = GitConnector::new(GitSourceConfig::new(url)).unwrap();
     let docs = drain(&conn);
-    let refs: HashMap<String, RawDocument> =
-        docs.into_iter().map(|d| (d.source_ref.clone(), d)).collect();
+    let refs: HashMap<String, RawDocument> = docs
+        .into_iter()
+        .map(|d| (d.source_ref.clone(), d))
+        .collect();
 
     // .md + .rs 入库, .png 二进制跳过。
-    assert!(refs.keys().any(|k| k.ends_with("README.md")), "README.md 应入库");
-    assert!(refs.keys().any(|k| k.ends_with("docs/guide.md")), "guide.md 应入库");
-    assert!(refs.keys().any(|k| k.ends_with("src/main.rs")), "main.rs 应入库");
-    assert!(!refs.keys().any(|k| k.ends_with("logo.png")), "二进制 png 应跳过");
+    assert!(
+        refs.keys().any(|k| k.ends_with("README.md")),
+        "README.md 应入库"
+    );
+    assert!(
+        refs.keys().any(|k| k.ends_with("docs/guide.md")),
+        "guide.md 应入库"
+    );
+    assert!(
+        refs.keys().any(|k| k.ends_with("src/main.rs")),
+        "main.rs 应入库"
+    );
+    assert!(
+        !refs.keys().any(|k| k.ends_with("logo.png")),
+        "二进制 png 应跳过"
+    );
 
     // 内容正确 + commit metadata 存在。
-    let readme = refs.iter().find(|(k, _)| k.ends_with("README.md")).unwrap().1;
-    assert!(std::str::from_utf8(&readme.content).unwrap().contains("Hello world"));
+    let readme = refs
+        .iter()
+        .find(|(k, _)| k.ends_with("README.md"))
+        .unwrap()
+        .1;
+    assert!(std::str::from_utf8(&readme.content)
+        .unwrap()
+        .contains("Hello world"));
     assert!(readme.metadata.contains_key("commit"));
-    assert_eq!(readme.metadata.get("host").map(String::as_str), Some("localhost"));
+    assert_eq!(
+        readme.metadata.get("host").map(String::as_str),
+        Some("localhost")
+    );
 }
 
 #[test]
@@ -103,7 +129,10 @@ fn subdir_limits_to_subtree() {
     let refs: Vec<String> = docs.iter().map(|d| d.source_ref.clone()).collect();
     assert!(refs.iter().any(|r| r.ends_with("src/a.md")));
     assert!(refs.iter().any(|r| r.ends_with("src/sub/b.md")));
-    assert!(!refs.iter().any(|r| r.ends_with("README.md")), "subdir 外的 README 不应入库");
+    assert!(
+        !refs.iter().any(|r| r.ends_with("README.md")),
+        "subdir 外的 README 不应入库"
+    );
 }
 
 #[test]
@@ -111,7 +140,11 @@ fn include_glob_restricts_extensions() {
     let tmp = tempfile::tempdir().unwrap();
     let url = build_bare_repo(
         tmp.path(),
-        &[("a.md", b"# md"), ("b.rs", b"fn b() {}"), ("c.txt", b"text")],
+        &[
+            ("a.md", b"# md"),
+            ("b.rs", b"fn b() {}"),
+            ("c.txt", b"text"),
+        ],
     );
     let mut config = GitSourceConfig::new(url);
     config.include_glob = vec!["**/*.md".into()];
@@ -138,7 +171,10 @@ fn chinese_content_preserved_for_jieba() {
     let tmp = tempfile::tempdir().unwrap();
     let url = build_bare_repo(
         tmp.path(),
-        &[("笔记/反洗钱.md", "# 反洗钱合规\n\n本文介绍尽职调查流程。".as_bytes())],
+        &[(
+            "笔记/反洗钱.md",
+            "# 反洗钱合规\n\n本文介绍尽职调查流程。".as_bytes(),
+        )],
     );
     let conn = GitConnector::new(GitSourceConfig::new(url)).unwrap();
     let docs = drain(&conn);
@@ -162,7 +198,10 @@ fn max_file_bytes_skips_large_file() {
     let docs = drain(&conn);
     let refs: Vec<String> = docs.iter().map(|d| d.source_ref.clone()).collect();
     assert!(refs.iter().any(|r| r.ends_with("small.md")));
-    assert!(!refs.iter().any(|r| r.ends_with("big.md")), "超 max_file_bytes 跳过");
+    assert!(
+        !refs.iter().any(|r| r.ends_with("big.md")),
+        "超 max_file_bytes 跳过"
+    );
 }
 
 #[test]

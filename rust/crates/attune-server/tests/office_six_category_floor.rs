@@ -86,7 +86,11 @@ fn manifest_dir() -> PathBuf {
 
 /// `rust/crates/attune-server/tests/golden/office/ocr/`
 fn ocr_golden_root() -> PathBuf {
-    manifest_dir().join("tests").join("golden").join("office").join("ocr")
+    manifest_dir()
+        .join("tests")
+        .join("golden")
+        .join("office")
+        .join("ocr")
 }
 
 /// `rust/crates/attune-core/`
@@ -203,7 +207,10 @@ impl OcrSceneReport {
             v.push(format!(
                 "[{}] golden count = {} (real={} synth={}) < 5 (need {need} more); \
                  add YAML under tests/golden/office/ocr/<bucket>/",
-                self.name, self.total_golden(), self.real_golden, self.synth_golden,
+                self.name,
+                self.total_golden(),
+                self.real_golden,
+                self.synth_golden,
             ));
         }
         if self.boundary_count < 5 {
