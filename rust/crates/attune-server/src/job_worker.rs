@@ -20,6 +20,20 @@ const JOB_TTL_DAYS: i64 = 30;
 /// 30s base → 30s, 1m, 2m, 4m … for a transient nightly-batch failure.
 const JOB_RETRY_BASE_BACKOFF_MS: i64 = 30_000;
 
+fn join_text_parts<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut parts = parts.into_iter();
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+
+    let mut out = String::from(first);
+    for part in parts {
+        out.push(' ');
+        out.push_str(part);
+    }
+    out
+}
+
 /// ASR handler — runs whisper via subprocess, same pipeline the old inline
 /// office.rs spawn used. Payload: {"file_path": "...", "diarization": bool}.
 /// at_least_once: re-transcribing the same file after a crash is idempotent.
@@ -125,7 +139,7 @@ impl JobHandler for AsrJobHandler {
                 "total_sec": total,
                 "segment_count": count,
             })).collect::<Vec<_>>(),
-            "full_text": segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" "),
+            "full_text": join_text_parts(segments.iter().map(|s| s.text.as_str())),
             "diarization_used": diar_backend.is_some(),
         });
         Ok(result.to_string())
@@ -192,4 +206,17 @@ pub fn start_job_worker(state: Arc<AppState>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_text_parts;
+
+    #[test]
+    fn join_text_parts_matches_slice_join_semantics() {
+        let parts = ["alpha", " beta ", "", "gamma"];
+
+        assert_eq!(join_text_parts(parts), parts.join(" "));
+        assert_eq!(join_text_parts(Vec::<&str>::new()), "");
+    }
 }
