@@ -29,7 +29,7 @@ ok()   { green  "OK  " ; echo " $*"; }
 bold "Doc audit — $REPO"; echo
 
 # ── 1. 根目录 .md 白名单 ─────────────────────────────────────────────────────
-ROOT_ALLOW=(README.md README.zh.md DEVELOP.md RELEASE.md CLAUDE.md ACKNOWLEDGMENTS.md ACKNOWLEDGMENTS.zh.md LICENSE LICENSE.md AGENTS.md GEMINI.md)
+ROOT_ALLOW=(README.md README.zh.md DEVELOP.md RELEASE.md CONTRIBUTING.md CLAUDE.md ACKNOWLEDGMENTS.md ACKNOWLEDGMENTS.zh.md LICENSE LICENSE.md AGENTS.md GEMINI.md)
 
 bold "─ 根目录 .md 白名单 ─"; echo
 violations=()
@@ -52,7 +52,7 @@ echo
 bold "─ 禁止形态扫描 ─"; echo
 
 # 2a release notes 独立文件
-banned=$(find . \( -name "v*-release*.md" -o -name "v*-rc*-test*.md" \) 2>/dev/null | grep -vE "$EXCLUDE_RE" | sort)
+banned=$(find . \( -name "v*-release*.md" -o -name "v*-rc*-test*.md" \) 2>/dev/null | grep -vE "$EXCLUDE_RE|(^|/)v[^/]*-user-testing-guide\.md$" | sort)
 if [ -n "$banned" ]; then
   err "release notes 独立文件(应入 RELEASE.md):"
   echo "$banned" | sed 's/^/    /'
