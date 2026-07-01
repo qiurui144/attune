@@ -12,6 +12,22 @@ use crate::error::Result;
 use crate::store::Store;
 use crate::vectors::VectorIndex;
 
+fn join_strings<I, S>(mut parts: I, separator: &str) -> String
+where
+    I: Iterator<Item = S>,
+    S: AsRef<str>,
+{
+    let Some(first) = parts.next() else {
+        return String::new();
+    };
+    let mut out = String::from(first.as_ref());
+    for part in parts {
+        out.push_str(separator);
+        out.push_str(part.as_ref());
+    }
+    out
+}
+
 /// Link kinds the agent emits. Mechanical / non-LLM — the agent does not
 /// label *why* two items relate, just *how* (which signal triggered the link).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -220,7 +236,7 @@ pub fn compute_links_for_item(
                 item_b: b,
                 kind: LinkKind::SharedEntity,
                 weight: count as f32,
-                evidence: tags.into_iter().collect::<Vec<_>>().join(";"),
+                evidence: join_strings(tags.into_iter(), ";"),
             }
         })
         .collect();

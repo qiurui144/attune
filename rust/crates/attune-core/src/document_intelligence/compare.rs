@@ -528,13 +528,24 @@ fn parse_verdict(resp: &str) -> (DiffVerdict, String) {
     let mut lines = resp.lines();
     let first = lines.next().unwrap_or("");
     let verdict = DiffVerdict::from_llm_token(first);
-    let rationale = lines.collect::<Vec<_>>().join(" ").trim().to_string();
+    let rationale = join_trimmed_lines(lines);
     let rationale = if rationale.is_empty() {
         first.trim().to_string()
     } else {
         rationale
     };
     (verdict, rationale)
+}
+
+fn join_trimmed_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    for line in lines {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(line);
+    }
+    out.trim().to_string()
 }
 
 /// Try to read a `{verdict, rationale}` object out of `resp`. Tolerates markdown code fences and

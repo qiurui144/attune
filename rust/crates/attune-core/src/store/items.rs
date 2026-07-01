@@ -34,6 +34,15 @@ pub struct UpdateOutcome {
 #[allow(unused_imports)]
 use crate::store::types::*;
 
+fn sql_placeholders(count: usize) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    let mut placeholders = "?,".repeat(count);
+    placeholders.pop();
+    placeholders
+}
+
 impl Store {
     // --- items (加密 CRUD) ---
 
@@ -654,7 +663,7 @@ impl Store {
             return Ok(Vec::new());
         }
         // 以 placeholder 拼 IN 子句（数量动态，rusqlite 不直接支持 Vec<&str> 参数绑定）
-        let placeholders = item_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders = sql_placeholders(item_ids.len());
         let sql = format!(
             "SELECT id FROM items WHERE id IN ({placeholders}) \
              AND is_deleted = 0 AND privacy_tier != 'L0'"
