@@ -2169,7 +2169,7 @@ W2 batch 1 placeholder 状态 → 标记 RESOLVED in W3 batch A（本批次）�
 **Chrome 扩展兼容**：
 - 补全 `/api/v1/items/{id}` PATCH（更新 title/content）
 - 补全 `/api/v1/settings` GET/PATCH（存于 vault_meta，合并语义）
-- 完整 18 个 API 端点覆盖 attune Python 原型协议
+- 完整 18 个 API 端点覆盖 attune `/api/v1/*` 协议
 
 **测试**: 72 unit + 3 integration = 75 tests（保持不变）
 

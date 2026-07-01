@@ -8,7 +8,7 @@
 
 | 仓 | 路径 | 版本线 | tag 形态 | RELEASE.md 位置 |
 |----|------|--------|---------|----------------|
-| **attune** (OSS) | `/data/company/project/attune` | SemVer `v0.X.Y` | `v<X.Y.Z>` + `desktop-v<X.Y.Z>` (双轨) | `RELEASE.md` (Python) + `rust/RELEASE.md` (Rust 商用线) + `CHANGELOG.md` (项目级) |
+| **attune** (OSS) | `/data/company/project/attune` | SemVer `v0.X.Y` | `v<X.Y.Z>` + `desktop-v<X.Y.Z>` (双轨) | `RELEASE.md` (索引) + `rust/RELEASE.md` (实现发布记录) |
 | **attune-pro** (private) | `/data/company/project/attune-pro` | **配对 attune 同号** | `v<X.Y.Z>`(整仓快照) + `<pack-id>/v<X.Y.Z>`(单包独立发版) | `RELEASE.md` |
 | **attune-pluginhub** | `/data/company/project/attune-pluginhub` | 平台自身 SemVer + 包级 tag | `v<X.Y.Z>`(平台) + `<pack-id>/v<X.Y.Z>`(发布到 hub 的包) | `RELEASE.md` |
 | **cloud** | `/data/company/cloud` | 独立 SemVer `v2.X.Y` | `cloud-v<X.Y.Z>`(meta) + 服务内 tag(可选,如 `accounts-v1.1.0`) + `deploy/YYYY-MM-DD-HHMM`(部署快照) | `RELEASE.md` |

@@ -135,7 +135,7 @@ RAG Chat 是主界面。每个回答都带可点的 citation chip 在侧栏打�
 
 ---
 
-## 功能（Rust 商用线）
+## 功能
 
 > 各能力 × 实现模块 × 技术栈选型的完整映射见 [`rust/DEVELOP.md` → 能力矩阵 × 技术栈选型](rust/DEVELOP.md#能力矩阵--技术栈选型)（不在此重复版本号 / 模块清单）。
 
@@ -153,7 +153,7 @@ RAG Chat 是主界面。每个回答都带可点的 citation chip 在侧栏打�
 
 ## 快速开始
 
-### 5 步上手（Rust 商用线，推荐）
+### 5 步上手（推荐）
 
 1. **下载** 二进制：从 [Releases](../../releases) 页拿对应平台的包，或源码 `cargo build --release`（见下文「源码编译」）
 2. **运行** Linux：`./attune-server-headless --host 127.0.0.1 --port 18900`；Windows：双击 `attune-server-headless.exe`。首次运行会创建 `~/.local/share/attune/`（或 `%LOCALAPPDATA%\attune\`）

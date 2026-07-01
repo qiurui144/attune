@@ -1,4 +1,4 @@
-# Attune (Rust 商用线)
+# Attune Rust
 
 [English](README.md) · [中文](README.zh.md)
 
@@ -10,7 +10,7 @@ attune 是面向**任何领域个人知识工作者**的本地 AI 知识库（OS
 
 ## 此目录的内容
 
-这是 Rust 商用线源码。三大产品支柱（**主动进化** / **对话伙伴** / **混合智能**）的高层介绍见 [顶层 README](../README.zh.md#三大支柱rust-线)；具体实现细节见下方 [核心能力](#核心能力) 段，然后是安全模型、API 端点、构建指引、测试矩阵。
+这是 Attune 的 Rust 实现源码。三大产品支柱（**主动进化** / **对话伙伴** / **混合智能**）的高层介绍见 [顶层 README](../README.zh.md#三大支柱rust-线)；具体实现细节见下方 [核心能力](#核心能力) 段，然后是安全模型、API 端点、构建指引、测试矩阵。
 
 OSS × attune-pro 功能边界见 [`docs/oss-pro-strategy.zh.md`](../docs/oss-pro-strategy.zh.md)。
 

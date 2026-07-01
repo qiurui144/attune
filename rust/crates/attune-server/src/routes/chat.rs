@@ -277,7 +277,7 @@ pub async fn chat(
         let flow_usage = state.usage();
         let flow_msg = body.message.clone();
         // run_flow is synchronous and may issue governed LLM calls → spawn_blocking
-        // so the async worker is never blocked (per Rust 商用线 async-safe rule).
+        // so the async worker is never blocked (per Rust async-safe rule).
         tokio::task::spawn_blocking(move || {
             // Server has no embedded agent binaries — deterministic steps degrade
             // gracefully (the LLM lead steps still run + are telemetered).

@@ -1,4 +1,4 @@
-# Attune Rust 商用线 — 功能 E2E + 首启硬化测试计划
+# Attune Rust — 功能 E2E + 首启硬化测试计划
 
 > SSOT for sprint `attune-functional-e2e-and-onboarding-fixes` (2026-06-05/06).
 > Spec(§9 矩阵来源): `docs/superpowers/specs/2026-06-05-attune-functional-e2e-and-onboarding-fixes.md`

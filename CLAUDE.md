@@ -78,9 +78,9 @@ per § 版本拆解能力 §4 强制切片表(每行 ≥ 主题 + 交付 + 时�
 - **质量证据（先进性/稳定性/准确性）**：`docs/benchmarks/`（proof points，每条引 commit/runs，PENDING-EXPERT 项明示）。
 - **视觉增强 spec**：`docs/superpowers/specs/2026-06-16-vision-understanding-enhancement.md`（DRAFT，nontext+VLM 已 ship，增量=grounding+N=3 gate+矩阵 failover+共享 agent 暴露）。
 
-Python 验证后，择优特性迁移到 Rust 商用线。对应开发时根据任务选择目录：
-- 涉及算法实验、ML 集成、快速原型 → 改 Python 端
-- 涉及加密、性能、打包分发、生产部署 → 改 Rust 端
+attune 当前实现主线在 `rust/`；算法、集成、UX 与生产能力变更都应落到 Rust 代码和可回归测试。
+- 涉及模型 / 检索 / 集成实验 → 在 Rust 模块或 `tests/e2e/` 中做可回归验证
+- 涉及加密、性能、打包分发、生产部署 → 改 Rust 实现
 
 ## 三产品矩阵 + 边界（与 attune-enterprise、attune-pro 的关系）
 
@@ -474,7 +474,7 @@ MarketplaceView / SettingsView / Step3LLM / Step4Hardware 等）。**2026-05-25 
 残留**（守卫排除 JSDoc comment 行后，所有真 UI 字面量已迁完，zh/en key 集合 diff = 0）。
 **新代码严禁再增**；新增视图保持 grep 守卫 0 输出。
 
-### Rust 商用线约定 (v0.7 sprint 增量：记忆护城河)
+### Rust 实现约定 (v0.7 sprint 增量：记忆护城河)
 
 **文档生命周期协调（v0.7 新规）**:
 - 任何写 items.content 的 path（upload / update / scanner / webdav / ingest）**必须**通过 `attune-core::reindex` 模块走完整 pipeline，禁止直接调 `store.update_item` 后不 reindex
@@ -498,7 +498,7 @@ MarketplaceView / SettingsView / Step3LLM / Step4Hardware 等）。**2026-05-25 
 - upload.rs 入口做（hash 命中 → 返回 status=duplicate 跳过 insert）
 - 老 vault content_hash='' 视为"未 backfill"，update_item 时 lazy 填回；'' 不参与 `find_item_by_content_hash` 命中
 
-### Rust 商用线约定 (v0.6.3 sprint 确立)
+### Rust 实现约定 (v0.6.3 sprint 确立)
 
 **错误处理**:
 - 新 routes 用 `attune_server::error::{AppError, AppResult}` + `?` 链, 统一返回 `{"error": msg, "code": kebab}` JSON shape
@@ -574,7 +574,7 @@ docs/screenshots/v063-ga-verification/
 
 `docs/wizard-flow.md` 可 `![](screenshots/v063-ga-verification/attune-v063-wizard-step1.png)` 引用.
 
-## Rust 商用线跨平台兼容规范
+## Rust 跨平台兼容规范
 
 ### 目标平台矩阵
 
