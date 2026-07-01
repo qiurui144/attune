@@ -31,11 +31,20 @@ from typing import Any
 
 from playwright.sync_api import Page, sync_playwright
 
+
+def env_first(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return default
+
+
 BASE = os.environ.get("ATTUNE_BASE_URL", "http://127.0.0.1:18900")
 PW = os.environ.get("ATTUNE_VAULT_PW", "Attune-E2E-Test-2026")
-LLM_URL = os.environ.get("ATTUNE_LLM_URL", "https://hiapi.online/v1")
-LLM_KEY = os.environ.get("ATTUNE_LLM_KEY", "")
-LLM_MODEL = os.environ.get("ATTUNE_LLM_MODEL", "gemini-2.5-flash")
+LLM_URL = env_first("ATTUNE_CHAT_ENDPOINT", "ATTUNE_LLM_URL", default="https://hiapi.online/v1")
+LLM_KEY = env_first("ATTUNE_CHAT_API_KEY", "ATTUNE_LLM_KEY")
+LLM_MODEL = env_first("ATTUNE_CHAT_MODEL", "ATTUNE_LLM_MODEL", default="gemini-2.5-flash")
 HEADLESS = os.environ.get("ATTUNE_HEADLESS", "1") != "0"
 SHOT_ROOT = "docs/screenshots/v10-ga"
 
@@ -318,7 +327,7 @@ def scene_C(page: Page) -> None:
         except Exception as e:  # noqa: BLE001
             warn("C", f"Chat 发送流程异常: {str(e)[:120]}")
     else:
-        warn("C", "ATTUNE_LLM_KEY 未配置 — 跳过真 LLM 调用，只验证 UI 表面")
+        warn("C", "ATTUNE_CHAT_API_KEY 未配置 — 跳过真 LLM 调用，只验证 UI 表面")
 
 
 # ╔═══════════════════════════════════════════════════════════════
@@ -602,7 +611,7 @@ def scene_J(page: Page) -> None:
 # ╚═══════════════════════════════════════════════════════════════
 def main() -> int:
     if not LLM_KEY:
-        print("WARN: ATTUNE_LLM_KEY 未配置 — Chat 真发送流程会 fallback 到 WARN")
+        print("WARN: ATTUNE_CHAT_API_KEY 未配置 — Chat 真发送流程会 fallback 到 WARN")
     print(f"=== v1.0 GA UI E2E ===  BASE={BASE}  headless={HEADLESS}\n")
     start = time.time()
     with sync_playwright() as p:

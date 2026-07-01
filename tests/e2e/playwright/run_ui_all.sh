@@ -5,9 +5,10 @@
 # L3 Settings / L4 模态 / L5 law-pro 接入。
 #
 # 密钥不入库：在本目录建 .env.local（已 gitignore）填：
-#   ATTUNE_LLM_KEY=sk-...            # 云端 LLM token（hiapi.online 等）
+#   ATTUNE_CHAT_API_KEY=sk-...       # 云端 LLM token（hiapi.online 等）
 #   PLUGINHUB_LICENSE=...            # pluginhub license key
-# 可选覆盖：ATTUNE_BASE_URL / PLUGINHUB_URL / ATTUNE_LLM_URL / ATTUNE_HEADLESS
+# 可选覆盖：ATTUNE_BASE_URL / PLUGINHUB_URL / ATTUNE_CHAT_ENDPOINT / ATTUNE_HEADLESS
+# 兼容期仍读取 ATTUNE_LLM_URL / ATTUNE_LLM_KEY / ATTUNE_LLM_MODEL。
 #
 # 前置：attune-server 已起；law-pro 已在 ~/.local/share/attune/plugins/；
 #       pluginhub 在 PLUGINHUB_URL 可达（自部署可经 SSH 隧道）。
@@ -28,7 +29,10 @@ curl -sf -o /dev/null --max-time 5 "$BASE/" 2>/dev/null \
   || echo "⚠  $BASE 未响应 —— 先起 attune-server-headless --no-auth --port ${BASE##*:}"
 curl -sf -o /dev/null --max-time 5 "$HUB/health" 2>/dev/null \
   || echo "⚠  pluginhub $HUB 未响应 —— L5 Marketplace 用例会 FAIL"
-[ -n "${ATTUNE_LLM_KEY:-}" ] || { echo "ERROR: 未设 ATTUNE_LLM_KEY（见本脚本注释）"; exit 2; }
+[ -n "${ATTUNE_CHAT_API_KEY:-${ATTUNE_LLM_KEY:-}}" ] || {
+  echo "ERROR: 未设 ATTUNE_CHAT_API_KEY（兼容 ATTUNE_LLM_KEY；见本脚本注释）"
+  exit 2
+}
 [ -n "${PLUGINHUB_LICENSE:-}" ] || { echo "ERROR: 未设 PLUGINHUB_LICENSE"; exit 2; }
 
 echo "── 运行 lawpro_ui_e2e.py ──"
