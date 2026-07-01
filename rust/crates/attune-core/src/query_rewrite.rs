@@ -7,6 +7,7 @@
 
 use crate::error::Result;
 use crate::llm::LlmProvider;
+use crate::text_norm::collapse_whitespace;
 use std::sync::Arc;
 
 const REWRITE_SYSTEM_PROMPT: &str = r#"你是一个搜索查询关键词提取器。把用户的自然语言查询改写为最适合全文检索 + 向量检索的关键词序列。
@@ -76,7 +77,7 @@ fn sanitize_keywords(raw: &str, fallback: &str) -> String {
         })
         .collect();
 
-    let collapsed: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(&cleaned);
 
     if collapsed.is_empty() {
         fallback.to_string()

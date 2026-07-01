@@ -20,6 +20,7 @@
 //! `terminology` 永远是 🆓 零成本层。若未来需要语义判断,应另开一个显式标 💰 的
 //! 上层模块,**不污染本模块**。
 
+use crate::text_norm::collapse_whitespace;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -79,27 +80,6 @@ fn fullwidth_to_half(c: char) -> char {
         }
         _ => c,
     }
-}
-
-fn collapse_whitespace(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_ws = false;
-    for ch in s.chars() {
-        if ch.is_whitespace() {
-            if !in_ws && !out.is_empty() {
-                out.push(' ');
-            }
-            in_ws = true;
-        } else {
-            out.push(ch);
-            in_ws = false;
-        }
-    }
-    // 去尾随折叠产生的空格。
-    while out.ends_with(' ') {
-        out.pop();
-    }
-    out
 }
 
 /// 去首尾常见标点 (中英)。中间标点保留 (如 "GB/T 7714" 的 '/')。

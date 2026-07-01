@@ -1,6 +1,7 @@
 // npu-vault/crates/vault-core/src/parser.rs
 
 use crate::error::{Result, VaultError};
+use crate::text_norm::collapse_whitespace;
 use std::{io::Write, path::Path};
 
 /// 代码文件扩展名
@@ -592,7 +593,7 @@ fn html_to_text(html: &str) -> String {
     } else {
         format!("{}\n\n{}", title_text, body_text)
     };
-    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+    collapse_whitespace(&raw)
 }
 
 /// EPUB 文件 → 纯文本（解压 zip，合并所有 XHTML/HTML 条目）
@@ -877,7 +878,7 @@ fn rtf_to_text(rtf: &str) -> String {
             }
         }
     }
-    result.split_whitespace().collect::<Vec<_>>().join(" ")
+    collapse_whitespace(&result)
 }
 
 /// CSV 文件 → 保留原始文本（已由 `_` 分支 fallthrough, 但也可精确处理）
