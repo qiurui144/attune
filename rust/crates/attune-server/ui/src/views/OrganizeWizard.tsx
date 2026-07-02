@@ -14,6 +14,7 @@ import { useSignal } from '@preact/signals';
 import { Button, Modal, toast } from '../components';
 import { api } from '../store/api';
 import { t } from '../i18n';
+import { useFilePicker } from '../hooks/useFilePicker';
 
 // ── 类型（与 attune-core organizer::types 序列化对齐） ─────────────────────────
 interface GroupItem {
@@ -95,6 +96,7 @@ export function OrganizeWizard({
   const error = useSignal<string | null>(null);
   // 当 caller 未传 bindPath / itemIds 时，让用户填一个待整理目录前缀。
   const pathInput = useSignal('');
+  const { picking, pickDirectory } = useFilePicker();
 
   if (!open) return null;
 
@@ -229,22 +231,41 @@ export function OrganizeWizard({
                 }}
               >
                 <span>{t('organize.field.path')}</span>
-                <input
-                  type="text"
-                  value={pathInput.value}
-                  onInput={(e) => (pathInput.value = (e.currentTarget as HTMLInputElement).value)}
-                  placeholder={t('organize.field.path_placeholder')}
-                  autoFocus
-                  style={{
-                    padding: 'var(--space-2) var(--space-3)',
-                    fontSize: 'var(--text-sm)',
-                    background: 'var(--color-bg)',
-                    border: '1px solid var(--color-border)',
-                    borderRadius: 'var(--radius-md)',
-                    color: 'var(--color-text)',
-                    outline: 'none',
-                  }}
-                />
+                <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    value={pathInput.value}
+                    onInput={(e) => (pathInput.value = (e.currentTarget as HTMLInputElement).value)}
+                    placeholder={t('organize.field.path_placeholder')}
+                    autoFocus
+                    style={{
+                      flex: 1,
+                      padding: 'var(--space-2) var(--space-3)',
+                      fontSize: 'var(--text-sm)',
+                      background: 'var(--color-bg)',
+                      border: '1px solid var(--color-border)',
+                      borderRadius: 'var(--radius-md)',
+                      color: 'var(--color-text)',
+                      outline: 'none',
+                    }}
+                  />
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    loading={picking.value}
+                    onClick={async () => {
+                      const paths = await pickDirectory({
+                        multiple: false,
+                        title: t('organize.field.path'),
+                      });
+                      if (paths.length > 0) {
+                        pathInput.value = paths[0];
+                      }
+                    }}
+                  >
+                    {`📂 ${t('picker.browse_folder')}`}
+                  </Button>
+                </div>
               </label>
             )}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
