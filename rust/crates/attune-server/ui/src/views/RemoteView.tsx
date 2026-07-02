@@ -14,6 +14,7 @@ import {
   bindGit,
   unbindDir,
 } from '../hooks/useRemote';
+import { useFilePicker } from '../hooks/useFilePicker';
 import type { BoundDir } from '../hooks/useRemote';
 import {
   listEmailAccounts,
@@ -236,25 +237,16 @@ function LocalForm({
 }): JSX.Element {
   const path = useSignal('');
   const submitting = useSignal(false);
-  const picking = useSignal(false);
-  // Tauri 桌面壳里才有原生目录选择器；浏览器调试模式回退到手填路径。
-  const canPickFolder = typeof window !== 'undefined'
-    && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+  const { isDesktop: canPickFolder, picking, pickDirectory } = useFilePicker();
 
   async function browse() {
     if (!canPickFolder) {
       toast('warning', t('settings.folder.desktop_only'));
       return;
     }
-    picking.value = true;
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const selected = await open({ directory: true, multiple: false, title: t('settings.folder.pick_title') });
-      if (typeof selected === 'string') path.value = selected;
-    } catch (e) {
-      toast('error', e instanceof Error ? e.message : t('settings.folder.add_fail'));
-    } finally {
-      picking.value = false;
+    const paths = await pickDirectory({ multiple: false, title: t('settings.folder.pick_title') });
+    if (paths.length > 0) {
+      path.value = paths[0];
     }
   }
 
