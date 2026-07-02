@@ -137,3 +137,30 @@ Block 项：___________
 | L5 | Chrome 扩展连接本地 server + 侧边栏搜索 | PASS |
 | L6 | Settings 更换 LLM provider | PASS |
 | L7 | v0.5 → v0.6 数据升级（vault schema 幂等） | PASS |
+
+---
+
+## File Manager Picker (v1.5+)
+
+### Desktop (Tauri) mode
+
+- [ ] Wizard Step5: click "选择目录" → native dialog opens → select folder → path appears as chip → click Finish → folder binds OK
+- [ ] Wizard Step5: import mode → click "选择文件" → native file dialog → select .vault-profile → file imports OK
+- [ ] Settings → Data → Folder Links: click "添加文件夹" → native multi-select → select 2 folders → both appear in table
+- [ ] RemoteView → Add Local Folder: click "📂 Browse" → native dialog → select folder → path fills in input → bind OK
+- [ ] OfficeView OCR: click "📂 Browse file" → native dialog → select PDF → file name appears → Extract works
+- [ ] OfficeView Transcribe: click "📂 Browse file" → native dialog → select audio → path fills in text input → Start works
+- [ ] ItemsView: click "上传文件" → native multi-select → select 3 files → all upload → appear in items list
+- [ ] OrganizeWizard (Projects → Organize folder): click "📂 Browse folder" → native dialog → select folder → path fills input → Analyze works
+
+### Desktop cancel
+
+- [ ] Any picker: native dialog → Cancel → no crash, no error toast, no stale state
+
+### Browser/Web fallback
+
+- [ ] Wizard Step5: folder picker shows manual hint toast, folder path can be typed in fallback input
+- [ ] OfficeView OCR: browser `input type=file` works as before
+- [ ] OfficeView Transcribe: "📂 Browse file" → browser file dialog opens → file name fills text input
+- [ ] ItemsView: "上传文件" → browser file dialog opens → multi-select works
+- [ ] OrganizeWizard: "📂 Browse folder" → browser directory picker (if supported) or typed path
