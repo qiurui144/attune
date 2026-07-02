@@ -25,6 +25,7 @@ import {
   type JobState,
   type JobStage,
 } from '../hooks/useOfficeJob';
+import { useFilePicker } from '../hooks/useFilePicker';
 
 type Tab = 'ocr' | 'transcribe';
 
@@ -121,6 +122,7 @@ function OcrPanel(): JSX.Element {
   const idCardSubtype = useSignal<string>('id_card_cn');
   const loading = useSignal(false);
   const result = useSignal<OcrResponse | null>(null);
+  const { isDesktop, picking, pickFiles } = useFilePicker();
 
   async function runExtract() {
     if (!file.value) {
@@ -178,12 +180,34 @@ function OcrPanel(): JSX.Element {
           <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
             {t('office.ocr.label.file')}
           </span>
-          <input
-            type="file"
-            accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.tif,.gif"
-            onChange={onFileSelect}
-            aria-label={t('office.ocr.label.file')}
-          />
+          {isDesktop ? (
+            <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={picking.value}
+                onClick={async () => {
+                  const { files } = await pickFiles({
+                    multiple: false,
+                    accept: '.pdf,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.tif,.gif',
+                    title: t('office.ocr.label.file'),
+                  });
+                  if (files.length > 0) {
+                    file.value = files[0];
+                  }
+                }}
+              >
+                {`📂 ${t('picker.browse_file')}`}
+              </Button>
+            </div>
+          ) : (
+            <input
+              type="file"
+              accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.tif,.gif"
+              onChange={onFileSelect}
+              aria-label={t('office.ocr.label.file')}
+            />
+          )}
           {file.value && (
             <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>
               {file.value.name} · {(file.value.size / 1024).toFixed(1)} KB
@@ -462,6 +486,7 @@ function TranscribePanel(): JSX.Element {
   const result = useSignal<unknown | null>(null);
   const errorMsg = useSignal<string | null>(null);
   const closeWs = useSignal<(() => void) | null>(null);
+  const { picking, pickFiles } = useFilePicker();
 
   // Cleanup WS on unmount
   useEffect(() => {
@@ -559,22 +584,43 @@ function TranscribePanel(): JSX.Element {
           <span style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
             {t('office.transcribe.label.file_path')}
           </span>
-          <input
-            type="text"
-            value={filePath.value}
-            placeholder={t('office.transcribe.placeholder.file_path')}
-            onInput={(e) => (filePath.value = (e.target as HTMLInputElement).value)}
-            aria-label={t('office.transcribe.label.file_path')}
-            style={{
-              padding: 'var(--space-2)',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-base)',
-              background: 'var(--color-bg)',
-              color: 'var(--color-text)',
-              fontFamily: 'monospace',
-              fontSize: 'var(--text-sm)',
-            }}
-          />
+          <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'flex-end' }}>
+            <input
+              type="text"
+              value={filePath.value}
+              placeholder={t('office.transcribe.placeholder.file_path')}
+              onInput={(e) => (filePath.value = (e.target as HTMLInputElement).value)}
+              aria-label={t('office.transcribe.label.file_path')}
+              style={{
+                flex: 1,
+                padding: 'var(--space-2)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-base)',
+                background: 'var(--color-bg)',
+                color: 'var(--color-text)',
+                fontFamily: 'monospace',
+                fontSize: 'var(--text-sm)',
+              }}
+            />
+            <Button
+              variant="secondary"
+              loading={picking.value}
+              onClick={async () => {
+                const { paths, files } = await pickFiles({
+                  multiple: false,
+                  accept: 'audio/*,.wav,.mp3,.m4a,.ogg,.flac',
+                  title: t('office.transcribe.label.file_path'),
+                });
+                if (paths.length > 0) {
+                  filePath.value = paths[0];
+                } else if (files.length > 0) {
+                  filePath.value = (files[0] as any).path ?? files[0].name;
+                }
+              }}
+            >
+              {`📂 ${t('picker.browse_file')}`}
+            </Button>
+          </div>
         </label>
 
         <label
