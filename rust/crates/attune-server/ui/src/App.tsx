@@ -481,7 +481,7 @@ const KNOWN_VIEWS: readonly View[] = [
   'settings',
 ];
 
-const SETTINGS_TABS: readonly SettingsTabId[] = ['general', 'ai', 'data', 'plugins', 'member', 'privacy', 'about'];
+const SETTINGS_TABS: readonly SettingsTabId[] = ['general', 'ai', 'data', 'plugins', 'pluginhub', 'member', 'privacy', 'about'];
 
 function isView(value: string | undefined): value is View {
   return typeof value === 'string' && (KNOWN_VIEWS as readonly string[]).includes(value);

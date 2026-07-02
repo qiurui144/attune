@@ -44,7 +44,7 @@ export type View =
 export const currentView = signal<View>('chat');
 
 // 跳转 Settings 时指定初始 tab（如 ModelChip "更多设置" → 'ai'）；消费后 SettingsView 读一次
-export type SettingsTabId = 'general' | 'ai' | 'data' | 'plugins' | 'member' | 'privacy' | 'about';
+export type SettingsTabId = 'general' | 'ai' | 'data' | 'plugins' | 'pluginhub' | 'member' | 'privacy' | 'about';
 export const settingsInitialTab = signal<SettingsTabId | null>(null);
 
 export type Theme = 'light' | 'dark' | 'auto';

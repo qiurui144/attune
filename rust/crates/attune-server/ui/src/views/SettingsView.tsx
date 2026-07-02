@@ -80,7 +80,7 @@ const LLM_PRESETS: Record<LlmPresetKey, LlmPreset> = {
   },
 };
 
-type SettingsTab = 'general' | 'ai' | 'data' | 'plugins' | 'member' | 'privacy' | 'about';
+type SettingsTab = 'general' | 'ai' | 'data' | 'plugins' | 'pluginhub' | 'member' | 'privacy' | 'about';
 
 type DesktopAppInfo = {
   version: string;
@@ -110,6 +110,7 @@ const TABS: Array<{ key: SettingsTab; icon: string; labelKey: string }> = [
   { key: 'ai', icon: '🤖', labelKey: 'settings.tab.ai' },
   { key: 'data', icon: '📂', labelKey: 'settings.tab.data' },
   { key: 'plugins', icon: '🧩', labelKey: 'settings.tab.plugins' },
+  { key: 'pluginhub', icon: '🏪', labelKey: 'settings.tab.pluginhub' },
   { key: 'member', icon: '👤', labelKey: 'settings.tab.member' },
   { key: 'privacy', icon: '🔐', labelKey: 'settings.tab.privacy' },
   { key: 'about', icon: 'ℹ', labelKey: 'settings.tab.about' },
@@ -211,6 +212,7 @@ export function SettingsView(): JSX.Element {
           {activeTab.value === 'ai' && <AIPanel />}
           {activeTab.value === 'data' && <DataPanel />}
           {activeTab.value === 'plugins' && <PluginsPanel />}
+          {activeTab.value === 'pluginhub' && <PluginHubPanel />}
           {activeTab.value === 'member' && <MemberPanel />}
           {activeTab.value === 'privacy' && <PrivacyPanel />}
           {activeTab.value === 'about' && <AboutPanel />}
@@ -2037,6 +2039,56 @@ function Toggle({
         }}
       />
     </button>
+  );
+}
+
+// ============ PluginHub Panel ============
+
+function PluginHubPanel(): JSX.Element {
+  const hubUrl = useSignal('');
+  const licenseKey = useSignal('');
+
+  useEffect(() => {
+    const pluginhub = settings.value?.pluginhub as { url?: string | null; license_key?: string | null } | undefined;
+    hubUrl.value = pluginhub?.url ?? '';
+    licenseKey.value = pluginhub?.license_key ?? '';
+  }, [settings.value]);
+
+  async function savePluginHubConfig() {
+    const ok = await patchSettings({
+      pluginhub: {
+        url: hubUrl.value.trim() || null,
+        license_key: licenseKey.value.trim() || null,
+      },
+    });
+    if (ok) toast('success', t('settings.pluginhub.save_ok'));
+    else toast('error', t('settings.pluginhub.save_fail'));
+  }
+
+  return (
+    <div>
+      <Section title={t('settings.pluginhub.title')} desc={t('settings.pluginhub.desc')}>
+        <SettingRow label={t('settings.pluginhub.url_label')} hint={t('settings.pluginhub.url_hint')}>
+          <Input
+            type="url"
+            placeholder={t('settings.pluginhub.url_placeholder')}
+            value={hubUrl.value}
+            onInput={(e) => { hubUrl.value = e.currentTarget.value; }}
+          />
+        </SettingRow>
+        <SettingRow label={t('settings.pluginhub.license_key_label')} hint={t('settings.pluginhub.license_key_hint')}>
+          <Input
+            type="text"
+            placeholder={t('settings.pluginhub.license_key_placeholder')}
+            value={licenseKey.value}
+            onInput={(e) => { licenseKey.value = e.currentTarget.value; }}
+          />
+        </SettingRow>
+        <Button variant="primary" onClick={savePluginHubConfig}>
+          {t('settings.pluginhub.save_btn')}
+        </Button>
+      </Section>
+    </div>
   );
 }
 
