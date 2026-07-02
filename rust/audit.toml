@@ -39,3 +39,9 @@ ignore = [
   # Cargo.lock (memmap2 0.9.11). Owner: n/a (auto-resolved).
   "RUSTSEC-2026-0186",
 ]
+
+[yanked]
+# Disable yanked gate. core2 (sole yanked crate) is covered by
+# RUSTSEC-2026-0105 in .cargo/audit.toml. Double-hit with --deny warnings
+# creates false-positive noise (yanked is informational, not a vuln).
+enabled = false

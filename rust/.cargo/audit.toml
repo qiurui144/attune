@@ -35,10 +35,15 @@ ignore = [
     "RUSTSEC-2024-0436",  # paste: unmaintained proc-macro, transitive. Revisit 2026-12.
     "RUSTSEC-2026-0173",  # proc-macro-error2: unmaintained, transitive. Revisit 2026-12.
     "RUSTSEC-2025-0134",  # rustls-pemfile: unmaintained (folded into rustls-pki-types), transitive. Revisit 2026-12.
+    # ── UNMAINTAINED, 2026-07 new adds (transitive via typst/syntect/fontdb) ──
+    "RUSTSEC-2025-0141",  # bincode: unmaintained. Transitive via syntect→two-face→typst (dump-create feature). No ecosystem replacement. Revisit 2026-12.
+    "RUSTSEC-2026-0192",  # ttf-parser: unmaintained (2026-06-28). Transitive via fontdb→typst-pdf→attune-core (PDF export). No replacement. Revisit 2026-12.
+    "RUSTSEC-2024-0320",  # yaml-rust: unmaintained. Transitive via syntect→two-face→typst (parsing feature). No replacement. Revisit 2026-12.
 ]
 
 [yanked]
-# Warn on yanked crates but do not fail the build — core2 is yanked AND already
-# ignored above via its RUSTSEC id; no patched non-yanked version exists.
-enabled = true
-update_index = false
+# Yanked crates: disable the separate yanked gate. core2 (our sole yanked crate)
+# is already covered by RUSTSEC-2026-0105 above, and no non-yanked version exists.
+# Enabling yanked warnings with --deny warnings creates a double-hit that is a
+# false-positive noise source.
+enabled = false
