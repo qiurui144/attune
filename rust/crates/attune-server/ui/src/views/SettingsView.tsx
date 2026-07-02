@@ -23,6 +23,7 @@ import { loadMemberState, loadSettingsLocks, memberLogout, memberLoginPassword }
 import { loadFolderLinks } from '../hooks/useFolderLinks';
 import { unbindDir } from '../hooks/useRemote';
 import { api, clearToken, getToken, ApiError } from '../store/api';
+import { useFilePicker } from '../hooks/useFilePicker';
 
 /** LLM 厂商快捷预设 — 选中后自动填 endpoint + model，用户只需贴 API key。 */
 type LlmPresetKey =
@@ -2289,13 +2290,10 @@ function MemberPanel(): JSX.Element {
 // ============ Folder Links Panel (注入 DataPanel 用, 这里也单独 export) ============
 
 export function FolderLinksSection(): JSX.Element {
-  const picking = useSignal(false);
+  const { isDesktop: canPickFolder, picking, pickDirectory } = useFilePicker();
   const showAddModal = useSignal(false);
   const manualPath = useSignal('');
   const submitting = useSignal(false);
-  // Tauri 桌面壳里才有原生目录选择器；浏览器调试模式回退到手填路径对话框（与 RemoteView LocalForm 一致）。
-  const canPickFolder = typeof window !== 'undefined'
-    && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 
   useEffect(() => {
     void loadFolderLinks();
@@ -2325,16 +2323,9 @@ export function FolderLinksSection(): JSX.Element {
       showAddModal.value = true;
       return;
     }
-    picking.value = true;
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const selected = await open({ directory: true, multiple: true, title: t('settings.folder.pick_title') });
-      const chosen = Array.isArray(selected) ? selected : selected ? [selected] : [];
-      await bindPaths(chosen);
-    } catch (e) {
-      toast('error', e instanceof Error ? e.message : t('settings.folder.add_fail'));
-    } finally {
-      picking.value = false;
+    const paths = await pickDirectory({ multiple: true, title: t('settings.folder.pick_title') });
+    if (paths.length > 0) {
+      await bindPaths(paths);
     }
   }
 
