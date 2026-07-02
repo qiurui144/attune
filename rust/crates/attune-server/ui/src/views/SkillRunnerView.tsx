@@ -23,17 +23,52 @@ import {
   type SkillEstimate,
 } from '../hooks/useSkillRuntime';
 
+// ── shared inline styles ──
+const containerStyle: JSX.CSSProperties = {
+  padding: 'var(--space-6)',
+  maxWidth: 760,
+  margin: '0 auto',
+};
+
+const inputStyle: JSX.CSSProperties = {
+  width: '100%',
+  padding: 'var(--space-2)',
+  background: 'var(--color-bg)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-md)',
+  color: 'var(--color-text)',
+  fontSize: 'var(--text-sm)',
+  boxSizing: 'border-box',
+};
+
+const selectStyle: JSX.CSSProperties = {
+  ...inputStyle,
+};
+
+const labelStyle: JSX.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 'var(--space-1)',
+  fontSize: 'var(--text-sm)',
+  color: 'var(--color-text-secondary)',
+};
+
+const resultCardStyle: JSX.CSSProperties = {
+  marginTop: 'var(--space-4)',
+  padding: 'var(--space-3)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-md)',
+  background: 'var(--color-surface)',
+};
+
 export function SkillRunnerView(): JSX.Element {
   const skills = useSignal<SkillInfo[]>([]);
   const loading = useSignal(true);
   const selectedId = useSignal<string | null>(null);
-  // Per-input string values; string_list inputs are comma-separated in the field.
   const inputs = useSignal<Record<string, string>>({});
   const estimate = useSignal<SkillEstimate | null>(null);
   const running = useSignal(false);
-  const lastResult = useSignal<{ filename: string; warnings: string[]; partial: boolean } | null>(
-    null,
-  );
+  const lastResult = useSignal<{ filename: string; warnings: string[]; partial: boolean } | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -46,12 +81,10 @@ export function SkillRunnerView(): JSX.Element {
         loading.value = false;
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const selected = skills.value.find((s) => s.id === selectedId.value) ?? null;
 
-  /** Build the JSON inputs payload, coercing string_list fields from comma-separated text. */
   function buildInputs(skill: SkillInfo): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     for (const spec of skill.inputs) {
@@ -100,22 +133,28 @@ export function SkillRunnerView(): JSX.Element {
   }
 
   if (loading.value) {
-    return <div style={{ padding: '24px' }}>{t('skillRunner.loading')}</div>;
+    return <div style={containerStyle}>{t('skillRunner.loading')}</div>;
   }
 
   return (
-    <div style={{ padding: '24px', maxWidth: '760px' }}>
-      <h2 style={{ marginTop: 0 }}>{t('skillRunner.title')}</h2>
-      <p style={{ color: 'var(--color-text-muted)' }}>{t('skillRunner.subtitle')}</p>
+    <div style={containerStyle}>
+      <header style={{ marginBottom: 'var(--space-4)' }}>
+        <h2 style={{ fontSize: 'var(--text-2xl)', fontWeight: 600, margin: 0 }}>
+          {t('skillRunner.title')}
+        </h2>
+        <p style={{ color: 'var(--color-text-muted)', marginTop: 'var(--space-2)', fontSize: 'var(--text-sm)' }}>
+          {t('skillRunner.subtitle')}
+        </p>
+      </header>
 
       {skills.value.length === 0 ? (
-        <div data-testid="skillrunner-empty">{t('skillRunner.empty')}</div>
+        <div data-testid="skillrunner-empty" style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+          {t('skillRunner.empty')}
+        </div>
       ) : (
-        <>
-          <label style={{ display: 'block', marginBottom: '12px' }}>
-            <span style={{ display: 'block', marginBottom: '4px' }}>
-              {t('skillRunner.label.skill')}
-            </span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <div style={labelStyle}>
+            <span>{t('skillRunner.label.skill')}</span>
             <select
               data-testid="skillrunner-select"
               value={selectedId.value ?? ''}
@@ -124,7 +163,7 @@ export function SkillRunnerView(): JSX.Element {
                 estimate.value = null;
                 lastResult.value = null;
               }}
-              style={{ width: '100%', padding: '8px' }}
+              style={selectStyle}
             >
               {skills.value.map((s) => (
                 <option key={s.id} value={s.id}>
@@ -132,17 +171,17 @@ export function SkillRunnerView(): JSX.Element {
                 </option>
               ))}
             </select>
-          </label>
+          </div>
 
           {selected && (
             <>
-              <p style={{ color: 'var(--color-text-muted)', fontSize: '0.9em' }}>
+              <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)', margin: 0 }}>
                 {selected.description}
               </p>
 
               {selected.inputs.map((spec) => (
-                <label key={spec.name} style={{ display: 'block', marginBottom: '12px' }}>
-                  <span style={{ display: 'block', marginBottom: '4px' }}>
+                <div key={spec.name} style={labelStyle}>
+                  <span>
                     {spec.name}
                     {spec.required ? ' *' : ''}
                     {spec.ty === 'stringlist' ? ` — ${t('skillRunner.hint.commaList')}` : ''}
@@ -159,28 +198,20 @@ export function SkillRunnerView(): JSX.Element {
                           : ''
                     }
                     onInput={(e) => {
-                      inputs.value = {
-                        ...inputs.value,
-                        [spec.name]: (e.target as HTMLInputElement).value,
-                      };
+                      inputs.value = { ...inputs.value, [spec.name]: (e.target as HTMLInputElement).value };
                       estimate.value = null;
                     }}
-                    style={{ width: '100%', padding: '8px' }}
+                    style={inputStyle}
                   />
-                </label>
+                </div>
               ))}
 
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '8px' }}>
+              <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
                 <Button variant="secondary" size="sm" onClick={() => void doEstimate()}>
                   {t('skillRunner.action.estimate')}
                 </Button>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={running.value}
-                  data-testid="skillrunner-run"
-                  onClick={() => void doRun()}
-                >
+                <Button variant="primary" size="sm" disabled={running.value}
+                  data-testid="skillrunner-run" onClick={() => void doRun()}>
                   {running.value ? t('skillRunner.running') : t('skillRunner.action.run')}
                 </Button>
                 {estimate.value && (
@@ -188,11 +219,12 @@ export function SkillRunnerView(): JSX.Element {
                     data-testid="skillrunner-cost-chip"
                     title={t('skillRunner.cost.title')}
                     style={{
-                      fontSize: '0.85em',
-                      color: estimate.value.over_cap ? 'var(--color-danger)' : 'var(--color-text-muted)',
-                      padding: '4px 8px',
-                      background: 'var(--color-surface-alt, rgba(0,0,0,0.04))',
-                      borderRadius: '6px',
+                      fontSize: 'var(--text-xs)',
+                      color: estimate.value.over_cap ? 'var(--color-danger)' : 'var(--color-text-secondary)',
+                      padding: 'var(--space-1) var(--space-2)',
+                      background: 'var(--color-surface)',
+                      border: '1px solid var(--color-border)',
+                      borderRadius: 'var(--radius-md)',
                     }}
                   >
                     {t('skillRunner.cost.chip', {
@@ -206,31 +238,25 @@ export function SkillRunnerView(): JSX.Element {
               </div>
 
               {lastResult.value && (
-                <div
-                  data-testid="skillrunner-result"
-                  style={{
-                    marginTop: '16px',
-                    padding: '12px',
-                    border: '1px solid var(--color-border)',
-                    borderRadius: '8px',
-                  }}
-                >
-                  <div>{t('skillRunner.result.downloaded', { filename: lastResult.value.filename })}</div>
+                <div data-testid="skillrunner-result" style={resultCardStyle}>
+                  <div style={{ fontSize: 'var(--text-sm)' }}>
+                    {t('skillRunner.result.downloaded', { filename: lastResult.value.filename })}
+                  </div>
                   {lastResult.value.partial && (
-                    <div style={{ color: 'var(--color-danger)', marginTop: '4px' }}>
+                    <div style={{ color: 'var(--color-danger)', marginTop: 'var(--space-1)', fontSize: 'var(--text-sm)' }}>
                       {t('skillRunner.result.partial')}
                     </div>
                   )}
                   {lastResult.value.warnings.map((w, i) => (
-                    <div key={i} style={{ color: 'var(--color-text-muted)', fontSize: '0.85em' }}>
-                      {w}
+                    <div key={i} style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-xs)', marginTop: 'var(--space-1)' }}>
+                      ⚠ {w}
                     </div>
                   ))}
                 </div>
               )}
             </>
           )}
-        </>
+        </div>
       )}
     </div>
   );

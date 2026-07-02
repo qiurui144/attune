@@ -12,6 +12,8 @@
  *
  * Per CLAUDE.md § Cost & Trigger Contract: 用户必须能"一眼看见花了多少 token、
  * 还剩多少 quota、下次 renew 时间"。
+ *
+ * Style: ALL inline (OfficeView pattern); design tokens only.
  */
 
 import type { JSX } from 'preact';
@@ -22,8 +24,6 @@ import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api } from '../store/api';
 
-/** 后端透传的原始跨服务错误码对用户不可读 — 映射为可操作的本地化说明,
- *  匹配不到时回退到 generic 友好提示(原始码仍可在 title 悬浮看到)。 */
 function friendlyServiceError(raw: string): string {
   const r = raw.toUpperCase();
   if (r.includes('EHOSTUNREACH') || r.includes('ENETUNREACH') || r.includes('ENOTFOUND')) {
@@ -87,6 +87,57 @@ function progressColor(percent: number): string {
   return 'var(--color-accent, #3b82f6)';
 }
 
+// ── shared inline styles ──
+const containerStyle: JSX.CSSProperties = {
+  padding: 'var(--space-6)',
+  maxWidth: 880,
+  margin: '0 auto',
+};
+
+const sectionStyle: JSX.CSSProperties = {
+  marginBottom: 'var(--space-5)',
+};
+
+const sectionTitleStyle: JSX.CSSProperties = {
+  fontSize: 'var(--text-base)',
+  fontWeight: 600,
+  margin: '0 0 var(--space-3) 0',
+};
+
+const statCardStyle: JSX.CSSProperties = {
+  padding: 'var(--space-3)',
+  background: 'var(--color-surface)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-md)',
+};
+
+const warnBannerStyle: JSX.CSSProperties = {
+  padding: 'var(--space-3)',
+  background: 'var(--color-warning-bg, #fef3c7)',
+  border: '1px solid var(--color-warning, #f59e0b)',
+  borderRadius: 'var(--radius-md)',
+  marginBottom: 'var(--space-4)',
+  fontSize: 'var(--text-sm)',
+};
+
+const tableStyle: JSX.CSSProperties = {
+  width: '100%',
+  borderCollapse: 'collapse',
+  fontSize: 'var(--text-sm)',
+};
+
+const thStyle: JSX.CSSProperties = {
+  textAlign: 'left' as const,
+  padding: 'var(--space-2) var(--space-1)',
+  borderBottom: '1px solid var(--color-border)',
+  fontWeight: 600,
+};
+
+const tdStyle: JSX.CSSProperties = {
+  padding: 'var(--space-2) var(--space-1)',
+  borderBottom: '1px solid var(--color-border)',
+};
+
 export function QuotaView(): JSX.Element {
   const data = useSignal<QuotaResponse | null>(null);
   const loading = useSignal(true);
@@ -100,8 +151,6 @@ export function QuotaView(): JSX.Element {
     loading.value = true;
     error.value = null;
     try {
-      // /api/v1/users/me/quota — 走 cloud accounts (gateway 透传).
-      // 如果 attune-server 没 wire 到 cloud, 退到本地 stub.
       const resp = await api.get<QuotaResponse>('/users/me/quota');
       data.value = resp;
     } catch (e) {
@@ -113,16 +162,14 @@ export function QuotaView(): JSX.Element {
   }
 
   function openUpgrade(): void {
-    // 跳转 SettingsView member tab — pricing CTA (per memberLogin flow).
-    // 临时方案:开浏览器到 cloud 定价页;后续可改成 in-app modal.
     window.open('https://attune.engi-stack.com/pricing', '_blank');
   }
 
   if (loading.value && !data.value) {
     return (
-      <div style={{ padding: 24 }}>
+      <div style={containerStyle}>
         <Skeleton width="100%" height={120} />
-        <div style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 'var(--space-4)' }}>
           <Skeleton width="100%" height={60} />
         </div>
       </div>
@@ -131,12 +178,8 @@ export function QuotaView(): JSX.Element {
 
   if (error.value && !data.value) {
     return (
-      <EmptyState
-        icon="⚠"
-        title={t('quota.error_title')}
-        description={error.value}
-        actions={[{ label: t('quota.retry'), onClick: refresh }]}
-      />
+      <EmptyState icon="⚠" title={t('quota.error_title')} description={error.value}
+        actions={[{ label: t('quota.retry'), onClick: refresh }]} />
     );
   }
 
@@ -149,38 +192,28 @@ export function QuotaView(): JSX.Element {
   const hasErrors = Object.keys(d.cross_service_errors).length > 0;
 
   return (
-    <div style={{ padding: 24, maxWidth: 880 }}>
+    <div style={containerStyle}>
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--space-5)' }}>
         <div>
-          <h2 style={{ margin: 0 }}>{t('quota.title')}</h2>
-          <p style={{ color: 'var(--color-text-secondary)', marginTop: 4 }}>
+          <h2 style={{ fontSize: 'var(--text-2xl)', fontWeight: 600, margin: 0 }}>
+            {t('quota.title')}
+          </h2>
+          <p style={{ color: 'var(--color-text-secondary)', marginTop: 'var(--space-1)', fontSize: 'var(--text-sm)' }}>
             {t('quota.month_label')}: <strong>{d.month}</strong> · {t('quota.tier_label')}:{' '}
             <strong>{d.tier}</strong>
             {d.plan_expires && ` · ${t('quota.expires_label')}: ${d.plan_expires.slice(0, 10)}`}
           </p>
         </div>
-        <Button variant="secondary" onClick={refresh}>
-          {t('quota.refresh')}
-        </Button>
-      </div>
+        <Button variant="secondary" onClick={refresh}>{t('quota.refresh')}</Button>
+      </header>
 
       {/* Cross-service errors banner */}
       {hasErrors && (
-        <div
-          style={{
-            padding: 12,
-            background: 'var(--color-warning-bg, #fef3c7)',
-            border: '1px solid var(--color-warning, #f59e0b)',
-            borderRadius: 6,
-            marginBottom: 16,
-            fontSize: 13,
-          }}
-        >
+        <div style={warnBannerStyle}>
           <strong>{t('quota.partial_data')}</strong>
-          <ul style={{ margin: '4px 0 0 0', paddingLeft: 20 }}>
+          <ul style={{ margin: 'var(--space-1) 0 0', paddingLeft: 'var(--space-5)' }}>
             {Object.entries(d.cross_service_errors).map(([svc, msg]) => (
-              // title 保留原始错误码供排障,正文显示友好说明
               <li key={svc} title={`${svc}: ${msg}`}>
                 <code>{svc}</code>: {friendlyServiceError(msg)}
               </li>
@@ -190,15 +223,9 @@ export function QuotaView(): JSX.Element {
       )}
 
       {/* Usage section */}
-      <section style={{ marginBottom: 24 }}>
-        <h3 style={{ marginBottom: 12 }}>{t('quota.usage_title')}</h3>
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-            gap: 12,
-          }}
-        >
+      <section style={sectionStyle}>
+        <h3 style={sectionTitleStyle}>{t('quota.usage_title')}</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
           <StatCard label={t('quota.tokens_input')} value={formatNumber(d.usage.llm_tokens_input)} />
           <StatCard label={t('quota.tokens_output')} value={formatNumber(d.usage.llm_tokens_output)} />
           <StatCard label={t('quota.tokens_total')} value={formatNumber(d.usage.llm_tokens_total)} />
@@ -208,55 +235,37 @@ export function QuotaView(): JSX.Element {
       </section>
 
       {/* Quota progress */}
-      <section style={{ marginBottom: 24 }}>
-        <h3 style={{ marginBottom: 12 }}>{t('quota.budget_title')}</h3>
-        <div
-          style={{
-            padding: 16,
-            background: 'var(--color-bg-secondary, #f9fafb)',
-            border: '1px solid var(--color-border, #e5e7eb)',
-            borderRadius: 8,
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-            <span>
+      <section style={sectionStyle}>
+        <h3 style={sectionTitleStyle}>{t('quota.budget_title')}</h3>
+        <div style={{ ...statCardStyle }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 'var(--space-2)' }}>
+            <span style={{ fontSize: 'var(--text-sm)' }}>
               {t('quota.used')}: <strong>{formatNumber(d.usage.llm_tokens_total)}</strong> /{' '}
               {formatNumber(d.quota.llm_tokens_monthly)}
             </span>
-            <span style={{ color: progressColor(d.quota.percent_used) }}>
+            <span style={{ color: progressColor(d.quota.percent_used), fontSize: 'var(--text-sm)' }}>
               <strong>{d.quota.percent_used.toFixed(1)}%</strong>
             </span>
           </div>
-          <div
-            style={{
-              height: 10,
-              background: 'var(--color-bg-tertiary, #e5e7eb)',
-              borderRadius: 5,
-              overflow: 'hidden',
-            }}
-          >
-            <div
-              style={{
-                height: '100%',
-                width: `${Math.min(100, d.quota.percent_used)}%`,
-                background: progressColor(d.quota.percent_used),
-                transition: 'width 200ms ease',
-              }}
-            />
+          <div style={{ height: 10, background: 'var(--color-border)', borderRadius: 5, overflow: 'hidden' }}>
+            <div style={{
+              height: '100%',
+              width: `${Math.min(100, d.quota.percent_used)}%`,
+              background: progressColor(d.quota.percent_used),
+              transition: 'width var(--duration-base)',
+            }} />
           </div>
-          <p style={{ marginTop: 8, fontSize: 13, color: 'var(--color-text-secondary)' }}>
+          <p style={{ marginTop: 'var(--space-2)', fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
             {t('quota.remaining')}: <strong>{formatNumber(d.quota.remaining)}</strong>{' '}
             {t('quota.tokens_unit')}
           </p>
 
           {showUpgrade && (
-            <div style={{ marginTop: 16, padding: 12, background: 'var(--color-accent-bg, #dbeafe)', borderRadius: 6 }}>
-              <p style={{ margin: '0 0 8px 0' }}>
+            <div style={{ marginTop: 'var(--space-4)', padding: 'var(--space-3)', background: 'rgba(212, 165, 116, 0.12)', borderRadius: 'var(--radius-md)' }}>
+              <p style={{ margin: '0 0 var(--space-2) 0', fontSize: 'var(--text-sm)' }}>
                 <strong>{t('quota.upgrade_prompt')}</strong>
               </p>
-              <Button variant="primary" onClick={openUpgrade}>
-                {t('quota.upgrade')}
-              </Button>
+              <Button variant="primary" onClick={openUpgrade}>{t('quota.upgrade')}</Button>
             </div>
           )}
         </div>
@@ -264,24 +273,26 @@ export function QuotaView(): JSX.Element {
 
       {/* History */}
       <section>
-        <h3 style={{ marginBottom: 12 }}>{t('quota.history_title')}</h3>
+        <h3 style={sectionTitleStyle}>{t('quota.history_title')}</h3>
         {d.history.length === 0 ? (
-          <p style={{ color: 'var(--color-text-secondary)', fontSize: 13 }}>{t('quota.history_empty')}</p>
+          <p style={{ color: 'var(--color-text-secondary)', fontSize: 'var(--text-sm)' }}>
+            {t('quota.history_empty')}
+          </p>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
+          <table style={tableStyle}>
             <thead>
-              <tr style={{ borderBottom: '1px solid var(--color-border, #e5e7eb)' }}>
-                <th style={{ textAlign: 'left', padding: '8px 4px' }}>{t('quota.col_month')}</th>
-                <th style={{ textAlign: 'right', padding: '8px 4px' }}>{t('quota.col_tokens')}</th>
-                <th style={{ textAlign: 'right', padding: '8px 4px' }}>{t('quota.col_cost')}</th>
+              <tr>
+                <th style={thStyle}>{t('quota.col_month')}</th>
+                <th style={{ ...thStyle, textAlign: 'right' }}>{t('quota.col_tokens')}</th>
+                <th style={{ ...thStyle, textAlign: 'right' }}>{t('quota.col_cost')}</th>
               </tr>
             </thead>
             <tbody>
               {d.history.map((row) => (
-                <tr key={row.month} style={{ borderBottom: '1px solid var(--color-border-light, #f3f4f6)' }}>
-                  <td style={{ padding: '8px 4px' }}>{row.month}</td>
-                  <td style={{ padding: '8px 4px', textAlign: 'right' }}>{formatNumber(row.llm_tokens_total)}</td>
-                  <td style={{ padding: '8px 4px', textAlign: 'right' }}>{formatCost(row.llm_cost_usd)}</td>
+                <tr key={row.month}>
+                  <td style={tdStyle}>{row.month}</td>
+                  <td style={{ ...tdStyle, textAlign: 'right' }}>{formatNumber(row.llm_tokens_total)}</td>
+                  <td style={{ ...tdStyle, textAlign: 'right' }}>{formatCost(row.llm_cost_usd)}</td>
                 </tr>
               ))}
             </tbody>
@@ -299,16 +310,9 @@ interface StatCardProps {
 
 function StatCard({ label, value }: StatCardProps): JSX.Element {
   return (
-    <div
-      style={{
-        padding: 12,
-        background: 'var(--color-bg-secondary, #f9fafb)',
-        border: '1px solid var(--color-border, #e5e7eb)',
-        borderRadius: 6,
-      }}
-    >
-      <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{label}</div>
-      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 4 }}>{value}</div>
+    <div style={statCardStyle}>
+      <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>{label}</div>
+      <div style={{ fontSize: 'var(--text-xl)', fontWeight: 600, marginTop: 'var(--space-1)' }}>{value}</div>
     </div>
   );
 }
