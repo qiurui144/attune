@@ -56,11 +56,9 @@ interface DocEnvelope {
 
 type Tab = 'compare' | 'summarize' | 'chapters';
 
-/**
- * Turn a doc-intelligence result envelope into a downloadable export artifact
- * (🆓 zero-cost). The narrative report → a Document (md/docx/pdf); an annotation
- * set → a Table (xlsx/csv/md/pdf). Returns null when there is nothing to export.
- */
+/** Turn a doc-intelligence result envelope into a downloadable export artifact
+ *  (🆓 zero-cost). The narrative report → a Document (md/docx/pdf); an annotation
+ *  set → a Table (xlsx/csv/md/pdf). Returns null when there is nothing to export. */
 function buildExportFromEnvelope(
   env: DocEnvelope,
 ): { artifact: ExportArtifact; formats: ExportFormat[]; filename: string } | null {
@@ -101,40 +99,40 @@ function savingsPct(b: TokenBill): number {
   return Math.max(0, Math.min(1, 1 - actualBillable(b) / b.naiveBaselineTokens)) * 100;
 }
 
-/** A DiffVerdict / annotation kind → CSS color class for the marked overlay. */
-function kindClass(kind: string): string {
-  switch (kind) {
-    case 'stance-reversal':
-      return 'doc-ann doc-ann--stance';
-    case 'numeric-change':
-      return 'doc-ann doc-ann--numeric';
-    case 'substantive':
-      return 'doc-ann doc-ann--substantive';
-    case 'citation':
-      return 'doc-ann doc-ann--citation';
-    case 'note':
-      return 'doc-ann doc-ann--note';
-    default:
-      return 'doc-ann doc-ann--modified';
-  }
-}
+/** Annotation kind → colour for the marked overlay. */
+const KIND_COLORS: Record<string, { bg: string; border: string }> = {
+  'stance-reversal': { bg: '#fef2f2', border: '#f87171' },
+  'numeric-change': { bg: '#fefce8', border: '#facc15' },
+  'substantive': { bg: '#fef3c7', border: '#f59e0b' },
+  'citation': { bg: '#ecfdf5', border: '#34d399' },
+  'note': { bg: '#eff6ff', border: '#60a5fa' },
+};
 
-/** Render `text` with `annotations` (char-offset spans) highlighted — the §3.5 marked/review
- * overlay. Splits the text at offset boundaries so each annotated span gets a <mark> with the
- * verdict color and the note as a hover title. This is the offset→span renderer the T-10
- * acceptance judge requires (NOT a JSON dump). */
+/** Render `text` with `annotations` (char-offset spans) highlighted. */
 function renderOverlay(text: string, annotations: Annotation[]): JSX.Element {
   const chars = Array.from(text);
-  const sorted = [...annotations].filter((a) => a.offsetEnd <= chars.length && a.offsetStart < a.offsetEnd).sort((a, b) => a.offsetStart - b.offsetStart);
+  const sorted = [...annotations]
+    .filter((a) => a.offsetEnd <= chars.length && a.offsetStart < a.offsetEnd)
+    .sort((a, b) => a.offsetStart - b.offsetStart);
   const parts: JSX.Element[] = [];
   let cursor = 0;
   sorted.forEach((ann, i) => {
-    if (ann.offsetStart < cursor) return; // skip overlaps for a stable render
+    if (ann.offsetStart < cursor) return;
     if (ann.offsetStart > cursor) {
       parts.push(<span key={`p${i}`}>{chars.slice(cursor, ann.offsetStart).join('')}</span>);
     }
+    const c = KIND_COLORS[ann.kind] ?? { bg: '#f1f5f9', border: '#94a3b8' };
     parts.push(
-      <mark key={`a${i}`} class={kindClass(ann.kind)} title={ann.note || ann.kind}>
+      <mark
+        key={`a${i}`}
+        style={{
+          background: c.bg,
+          borderBottom: `2px solid ${c.border}`,
+          borderRadius: '2px',
+          padding: '0 1px',
+        }}
+        title={ann.note || ann.kind}
+      >
         {chars.slice(ann.offsetStart, ann.offsetEnd).join('')}
       </mark>,
     );
@@ -143,26 +141,106 @@ function renderOverlay(text: string, annotations: Annotation[]): JSX.Element {
   if (cursor < chars.length) {
     parts.push(<span key="tail">{chars.slice(cursor).join('')}</span>);
   }
-  return <pre class="doc-overlay">{parts}</pre>;
+  return (
+    <pre
+      style={{
+        maxHeight: 480,
+        overflow: 'auto',
+        padding: 'var(--space-4)',
+        background: 'var(--color-surface)',
+        border: '1px solid var(--color-border)',
+        borderRadius: 'var(--radius-md)',
+        fontSize: 'var(--text-sm)',
+        fontFamily: 'var(--font-mono, monospace)',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        lineHeight: 1.7,
+        margin: 0,
+      }}
+    >
+      {parts}
+    </pre>
+  );
 }
 
-/** Cost chip — naive-vs-actual token bar + savings % (§8.3 the user must SEE the savings). */
+/** Cost chip — naive-vs-actual token bar + savings %. */
 function CostChip({ bill }: { bill: TokenBill }): JSX.Element {
   const pct = savingsPct(bill);
   return (
-    <div class="doc-cost-chip" title={t('docIntel.costTitle')}>
-      <span class="doc-cost-chip__label">{t('docIntel.tokenSaved')}</span>
-      <div class="doc-cost-bar">
-        <div class="doc-cost-bar__actual" style={{ width: `${100 - pct}%` }} />
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: 'var(--space-2)',
+        padding: 'var(--space-2) var(--space-3)',
+        background: 'var(--color-surface-elevated)',
+        borderRadius: 'var(--radius-md)',
+        fontSize: 'var(--text-xs)',
+        color: 'var(--color-text-secondary)',
+      }}
+      title={t('docIntel.costTitle')}
+    >
+      <span style={{ fontWeight: 600 }}>{t('docIntel.tokenSaved')}</span>
+      <div
+        style={{
+          width: 80,
+          height: 6,
+          background: 'var(--color-border)',
+          borderRadius: 3,
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            width: `${100 - pct}%`,
+            height: '100%',
+            background: 'var(--color-accent)',
+            transition: 'width var(--duration-base)',
+          }}
+        />
       </div>
-      <span class="doc-cost-chip__pct">{pct.toFixed(0)}%</span>
-      <span class="doc-cost-chip__detail">
+      <span style={{ fontWeight: 600 }}>{pct.toFixed(0)}%</span>
+      <span>
         {t('docIntel.naive')}: {bill.naiveBaselineTokens} · {t('docIntel.actual')}: {actualBillable(bill)}
         {bill.cacheHitChunks > 0 ? ` · ${t('docIntel.cacheHit')}: ${bill.cacheHitChunks}` : ''}
       </span>
     </div>
   );
 }
+
+/* ── shared styles ── */
+const textareaStyle: JSX.CSSProperties = {
+  width: '100%',
+  minHeight: 160,
+  padding: 'var(--space-3)',
+  background: 'var(--color-bg)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-md)',
+  color: 'var(--color-text)',
+  fontSize: 'var(--text-sm)',
+  fontFamily: 'var(--font-mono, monospace)',
+  resize: 'vertical',
+  boxSizing: 'border-box',
+};
+
+const labelStyle: JSX.CSSProperties = {
+  fontSize: 'var(--text-sm)',
+  color: 'var(--color-text-muted)',
+  marginBottom: 'var(--space-1)',
+};
+
+const tabBtnBase: JSX.CSSProperties = {
+  padding: 'var(--space-3) var(--space-4)',
+  border: 'none',
+  background: 'transparent',
+  fontSize: 'var(--text-sm)',
+  fontWeight: 400,
+  cursor: 'pointer',
+  borderBottom: '2px solid transparent',
+  marginBottom: -1,
+  color: 'var(--color-text-muted)',
+};
 
 export function DocIntelView(): JSX.Element {
   const tab = useSignal<Tab>('summarize');
@@ -187,8 +265,6 @@ export function DocIntelView(): JSX.Element {
       const env = await api.post<DocEnvelope>(`/documents/${path}`, body);
       envelope.value = env;
     } catch (e) {
-      // ApiError.body is the raw `{"error","code"}` JSON (routes/documents.rs); parse the
-      // stable `code` to distinguish the member-gate 403 from other failures.
       let code = '';
       let message = '';
       if (e instanceof ApiError) {
@@ -216,141 +292,286 @@ export function DocIntelView(): JSX.Element {
   const env = envelope.value;
 
   return (
-    <div class="doc-intel-view">
-      <h2>{t('docIntel.title')}</h2>
-      <div class="doc-intel-tabs" role="tablist">
-        <button class={tab.value === 'compare' ? 'active' : ''} onClick={() => (tab.value = 'compare')}>
-          {t('docIntel.tabCompare')}
-        </button>
-        <button class={tab.value === 'summarize' ? 'active' : ''} onClick={() => (tab.value = 'summarize')}>
-          {t('docIntel.tabSummarize')}
-        </button>
-        <button class={tab.value === 'chapters' ? 'active' : ''} onClick={() => (tab.value = 'chapters')}>
-          {t('docIntel.tabChapters')}
-        </button>
+    <div style={{ padding: 'var(--space-5)', maxWidth: 1100, margin: '0 auto' }}>
+      <header style={{ marginBottom: 'var(--space-4)' }}>
+        <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
+          {t('docIntel.title')}
+        </h2>
+      </header>
+
+      {/* Tab bar */}
+      <div
+        role="tablist"
+        style={{
+          display: 'flex',
+          gap: 'var(--space-2)',
+          borderBottom: '1px solid var(--color-border)',
+          marginBottom: 'var(--space-4)',
+        }}
+      >
+        {(['compare', 'summarize', 'chapters'] as Tab[]).map((tkey) => {
+          const active = tab.value === tkey;
+          return (
+            <button
+              key={tkey}
+              role="tab"
+              aria-selected={active}
+              onClick={() => (tab.value = tkey)}
+              style={{
+                ...tabBtnBase,
+                color: active ? 'var(--color-text)' : 'var(--color-text-muted)',
+                fontWeight: active ? 600 : 400,
+                borderBottomColor: active ? 'var(--color-accent)' : 'transparent',
+              }}
+            >
+              {t(`docIntel.tab${tkey.charAt(0).toUpperCase() + tkey.slice(1)}`)}
+            </button>
+          );
+        })}
       </div>
 
-      {tab.value === 'compare' && (
-        <div class="doc-intel-panel">
-          <textarea
-            value={leftText.value}
-            placeholder={t('docIntel.leftPlaceholder')}
-            onInput={(e) => (leftText.value = (e.target as HTMLTextAreaElement).value)}
-          />
-          <textarea
-            value={rightText.value}
-            placeholder={t('docIntel.rightPlaceholder')}
-            onInput={(e) => (rightText.value = (e.target as HTMLTextAreaElement).value)}
-          />
-          <Button
-            disabled={loading.value}
-            onClick={() =>
-              run('compare', { left: { text: leftText.value }, right: { text: rightText.value }, mode: 'semantic' })
-            }
-          >
-            {t('docIntel.runCompare')}
-          </Button>
-        </div>
-      )}
-
-      {tab.value === 'summarize' && (
-        <div class="doc-intel-panel">
-          <textarea
-            value={sourceText.value}
-            placeholder={t('docIntel.sourcePlaceholder')}
-            onInput={(e) => (sourceText.value = (e.target as HTMLTextAreaElement).value)}
-          />
-          <Button disabled={loading.value} onClick={() => run('summarize', { source: { text: sourceText.value }, level: 'standard' })}>
-            {t('docIntel.runSummarize')}
-          </Button>
-        </div>
-      )}
-
-      {tab.value === 'chapters' && (
-        <div class="doc-intel-panel">
-          <textarea
-            value={sourceText.value}
-            placeholder={t('docIntel.sourcePlaceholder')}
-            onInput={(e) => (sourceText.value = (e.target as HTMLTextAreaElement).value)}
-          />
-          <input
-            type="number"
-            value={chapterIdx.value}
-            aria-label={t('docIntel.chapterIdx')}
-            onInput={(e) => (chapterIdx.value = Number((e.target as HTMLInputElement).value))}
-          />
-          <input
-            type="text"
-            value={question.value}
-            placeholder={t('docIntel.questionPlaceholder')}
-            onInput={(e) => (question.value = (e.target as HTMLInputElement).value)}
-          />
-          <Button disabled={loading.value} onClick={() => run('chapters', { text: sourceText.value, action: 'list' })}>
-            {t('docIntel.listChapters')}
-          </Button>
-          <Button
-            disabled={loading.value}
-            onClick={() => run('chapters', { text: sourceText.value, action: 'ask', chapterIdx: chapterIdx.value, question: question.value })}
-          >
-            {t('docIntel.askChapter')}
-          </Button>
-        </div>
-      )}
-
-      {memberGated.value && <div class="doc-member-gate">{t('docIntel.memberGateNotice')}</div>}
-
-      {env && (
-        <div class="doc-intel-result">
-          <div
-            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}
-          >
-            <CostChip bill={env.tokenBill} />
-            {(() => {
-              const built = buildExportFromEnvelope(env);
-              if (!built) return null;
-              return (
-                <ExportButton
-                  artifact={built.artifact}
-                  formats={built.formats}
-                  filename={built.filename}
-                  data-testid="docintel-export"
+      {/* Panel body */}
+      <div style={{ display: 'flex', gap: 'var(--space-5)', flexDirection: 'column' }}>
+        {/* ── compare ── */}
+        {tab.value === 'compare' && (
+          <div style={{ display: 'flex', gap: 'var(--space-4)', flexDirection: 'column' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-4)' }}>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <span style={labelStyle}>{t('docIntel.leftPlaceholder')}</span>
+                <textarea
+                  value={leftText.value}
+                  placeholder={t('docIntel.leftPlaceholder')}
+                  onInput={(e) => (leftText.value = (e.target as HTMLTextAreaElement).value)}
+                  style={textareaStyle}
                 />
-              );
-            })()}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <span style={labelStyle}>{t('docIntel.rightPlaceholder')}</span>
+                <textarea
+                  value={rightText.value}
+                  placeholder={t('docIntel.rightPlaceholder')}
+                  onInput={(e) => (rightText.value = (e.target as HTMLTextAreaElement).value)}
+                  style={textareaStyle}
+                />
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <Button
+                variant="primary"
+                loading={loading.value}
+                disabled={loading.value}
+                onClick={() =>
+                  run('compare', { left: { text: leftText.value }, right: { text: rightText.value }, mode: 'semantic' })
+                }
+              >
+                {t('docIntel.runCompare')}
+              </Button>
+            </div>
           </div>
+        )}
 
-          {/* compare → marked overlay on the source (right doc) */}
-          {env.outputMode === 'marked' && (
-            <div class="doc-result-marked">
-              <h3>{t('docIntel.markedHeading')}</h3>
-              {renderOverlay(rightText.value, env.annotations ?? [])}
+        {/* ── summarize ── */}
+        {tab.value === 'summarize' && (
+          <div style={{ display: 'flex', gap: 'var(--space-4)', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <span style={labelStyle}>{t('docIntel.sourcePlaceholder')}</span>
+              <textarea
+                value={sourceText.value}
+                placeholder={t('docIntel.sourcePlaceholder')}
+                onInput={(e) => (sourceText.value = (e.target as HTMLTextAreaElement).value)}
+                style={textareaStyle}
+              />
             </div>
-          )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <Button
+                variant="primary"
+                loading={loading.value}
+                disabled={loading.value}
+                onClick={() =>
+                  run('summarize', { source: { text: sourceText.value }, level: 'standard' })
+                }
+              >
+                {t('docIntel.runSummarize')}
+              </Button>
+            </div>
+          </div>
+        )}
 
-          {/* summarize → narrative report */}
-          {env.outputMode === 'narrative' && (
-            <div class="doc-result-narrative">
-              <h3>{t('docIntel.narrativeHeading')}</h3>
-              <pre>{env.narrative ?? ''}</pre>
+        {/* ── chapters ── */}
+        {tab.value === 'chapters' && (
+          <div style={{ display: 'flex', gap: 'var(--space-4)', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <span style={labelStyle}>{t('docIntel.sourcePlaceholder')}</span>
+              <textarea
+                value={sourceText.value}
+                placeholder={t('docIntel.sourcePlaceholder')}
+                onInput={(e) => (sourceText.value = (e.target as HTMLTextAreaElement).value)}
+                style={textareaStyle}
+              />
             </div>
-          )}
+            <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'center', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                <span style={labelStyle}>{t('docIntel.chapterIdx')}</span>
+                <input
+                  type="number"
+                  value={chapterIdx.value}
+                  min={0}
+                  aria-label={t('docIntel.chapterIdx')}
+                  onInput={(e) => (chapterIdx.value = Number((e.target as HTMLInputElement).value))}
+                  style={{
+                    width: 80,
+                    padding: 'var(--space-2)',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius-md)',
+                    background: 'var(--color-bg)',
+                    color: 'var(--color-text)',
+                    fontSize: 'var(--text-sm)',
+                  }}
+                />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 200 }}>
+                <span style={labelStyle}>{t('docIntel.questionPlaceholder')}</span>
+                <input
+                  type="text"
+                  value={question.value}
+                  placeholder={t('docIntel.questionPlaceholder')}
+                  onInput={(e) => (question.value = (e.target as HTMLInputElement).value)}
+                  style={{
+                    padding: 'var(--space-2)',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius-md)',
+                    background: 'var(--color-bg)',
+                    color: 'var(--color-text)',
+                    fontSize: 'var(--text-sm)',
+                  }}
+                />
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+              <Button
+                variant="secondary"
+                loading={loading.value}
+                disabled={loading.value}
+                onClick={() => run('chapters', { text: sourceText.value, action: 'list' })}
+              >
+                {t('docIntel.listChapters')}
+              </Button>
+              <Button
+                variant="primary"
+                loading={loading.value}
+                disabled={loading.value}
+                onClick={() =>
+                  run('chapters', { text: sourceText.value, action: 'ask', chapterIdx: chapterIdx.value, question: question.value })
+                }
+              >
+                {t('docIntel.askChapter')}
+              </Button>
+            </div>
+          </div>
+        )}
 
-          {/* chapters review → margin annotations + citation anchors on the chapter text */}
-          {env.outputMode === 'review' && (
-            <div class="doc-result-review">
-              <h3>{t('docIntel.reviewHeading')}</h3>
-              {renderOverlay(sourceText.value, env.annotations ?? [])}
-            </div>
-          )}
+        {/* ── member gate ── */}
+        {memberGated.value && (
+          <div
+            style={{
+              padding: 'var(--space-4)',
+              background: 'rgba(212, 165, 116, 0.12)',
+              border: '1px solid var(--color-warning)',
+              borderRadius: 'var(--radius-md)',
+              fontSize: 'var(--text-sm)',
+              color: 'var(--color-text)',
+            }}
+          >
+            {t('docIntel.memberGateNotice')}
+          </div>
+        )}
 
-          {env.outputMode === 'structured' && (
-            <div class="doc-result-structured">
-              <h3>{t('docIntel.structuredHeading')}</h3>
-              <pre>{JSON.stringify(env.result, null, 2)}</pre>
+        {/* ── results ── */}
+        {env && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+              <CostChip bill={env.tokenBill} />
+              {(() => {
+                const built = buildExportFromEnvelope(env);
+                if (!built) return null;
+                return (
+                  <ExportButton
+                    artifact={built.artifact}
+                    formats={built.formats}
+                    filename={built.filename}
+                  />
+                );
+              })()}
             </div>
-          )}
-        </div>
-      )}
+
+            {/* compare → marked overlay on the source (right doc) */}
+            {env.outputMode === 'marked' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
+                  {t('docIntel.markedHeading')}
+                </h3>
+                {renderOverlay(rightText.value, env.annotations ?? [])}
+              </div>
+            )}
+
+            {/* summarize → narrative report */}
+            {env.outputMode === 'narrative' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
+                  {t('docIntel.narrativeHeading')}
+                </h3>
+                <pre
+                  style={{
+                    padding: 'var(--space-4)',
+                    background: 'var(--color-surface)',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: 'var(--text-sm)',
+                    whiteSpace: 'pre-wrap',
+                    lineHeight: 1.6,
+                    margin: 0,
+                  }}
+                >
+                  {env.narrative ?? ''}
+                </pre>
+              </div>
+            )}
+
+            {/* chapters review → margin annotations + citation anchors */}
+            {env.outputMode === 'review' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
+                  {t('docIntel.reviewHeading')}
+                </h3>
+                {renderOverlay(sourceText.value, env.annotations ?? [])}
+              </div>
+            )}
+
+            {/* structured JSON dump — fallback for unrecognized outputMode */}
+            {env.outputMode === 'structured' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
+                  {t('docIntel.structuredHeading')}
+                </h3>
+                <pre
+                  style={{
+                    padding: 'var(--space-4)',
+                    background: 'var(--color-surface)',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: 'var(--text-xs)',
+                    fontFamily: 'var(--font-mono, monospace)',
+                    overflow: 'auto',
+                    margin: 0,
+                  }}
+                >
+                  {JSON.stringify(env.result, null, 2)}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
