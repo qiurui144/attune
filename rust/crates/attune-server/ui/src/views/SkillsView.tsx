@@ -40,7 +40,9 @@ export function SkillsView(): JSX.Element {
   return (
     <div
       style={{
-        padding: 'var(--space-5)',
+        padding: 'var(--space-6)',
+        maxWidth: 1200,
+        margin: '0 auto',
         height: '100%',
         display: 'flex',
         flexDirection: 'column',

@@ -196,7 +196,7 @@ export function WorkbenchView(): JSX.Element {
 function Header(): JSX.Element {
   return (
     <div style={{ marginBottom: 'var(--space-2)' }}>
-      <h2 style={{ margin: '0 0 var(--space-1) 0', fontSize: 'var(--text-lg)', fontWeight: 700 }}>
+      <h2 style={{ margin: '0 0 var(--space-1) 0', fontSize: 'var(--text-2xl)', fontWeight: 600 }}>
         {t('workbench.title')}
       </h2>
       <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
@@ -322,7 +322,7 @@ function GenericRunForm({ scenario: s, onClose }: { scenario: Scenario; onClose:
         style={{
           width: '100%',
           fontSize: 'var(--text-sm)',
-          padding: '8px',
+          padding: 'var(--space-2)',
           border: '1px solid var(--color-border)',
           borderRadius: 'var(--radius-sm)',
           resize: 'vertical',

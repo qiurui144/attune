@@ -140,7 +140,7 @@ export function MarketplaceView(): JSX.Element {
   }
 
   return (
-    <div style={{ padding: 'var(--space-5)', maxWidth: 1200, margin: '0 auto' }}>
+    <div style={{ padding: 'var(--space-6)', maxWidth: 1200, margin: '0 auto' }}>
       <header style={{ marginBottom: 'var(--space-5)', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <div>
           <h1 style={{ fontSize: 'var(--text-2xl)', fontWeight: 600, margin: 0 }}>{t('market.title')}</h1>

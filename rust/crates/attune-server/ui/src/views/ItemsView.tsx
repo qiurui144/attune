@@ -329,7 +329,7 @@ function ItemRow({ item: it }: { item: Item }): JSX.Element {
         aria-hidden="true"
         style={{
           padding: '2px 8px',
-          fontSize: 10,
+          fontSize: 'var(--text-xs)',
           background: 'var(--color-bg)',
           border: '1px solid var(--color-border)',
           borderRadius: 'var(--radius-sm)',
