@@ -1540,4 +1540,14 @@ export const en = {
   'monitoring.error.generic': 'Operation failed',
   'sidebar.nav.monitoring': 'Monitoring',
   'cmd.view.monitoring': 'Monitoring',
+
+  // ─── Picker (file-manager integration) ──────────
+  'picker.browse_file': 'Browse file…',
+  'picker.browse_folder': 'Browse folder…',
+  'picker.toast.browser_no_directory': 'Directory selection not supported in this browser. Please use the desktop app or type the path manually.',
+
+  // Wizard Step5 import desktop browse
+  'wizard.data.import.browse': 'Browse file…',
+  'wizard.data.import.dialog_title': 'Select profile file',
+  'wizard.data.err.file_read_failed': 'Could not read the selected file.',
 } as const;

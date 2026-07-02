@@ -1535,6 +1535,16 @@ export const zh = {
   'monitoring.error.generic': '操作失败',
   'sidebar.nav.monitoring': '信息监控',
   'cmd.view.monitoring': '信息监控',
+
+  // ─── Picker（文件管理器集成）──────────
+  'picker.browse_file': '选择文件…',
+  'picker.browse_folder': '选择目录…',
+  'picker.toast.browser_no_directory': '当前浏览器不支持目录选择，请使用桌面应用或手动输入路径。',
+
+  // Wizard Step5 import 桌面选择
+  'wizard.data.import.browse': '选择文件…',
+  'wizard.data.import.dialog_title': '选择 profile 文件',
+  'wizard.data.err.file_read_failed': '无法读取所选文件。',
 } as const;
 
 export type MessageKey = keyof typeof zh;
