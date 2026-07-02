@@ -14,6 +14,7 @@ import {
   chatSessions,
   activeSessionId,
   vaultState,
+  memberState,
   theme,
 } from '../store/signals';
 import type { View } from '../store/signals';
@@ -462,11 +463,21 @@ function SecondaryNav({ collapsed }: { collapsed: boolean }): JSX.Element {
   );
 }
 
+function accountMenuLabel(): string {
+  const vaultLabel = vaultState.value === 'unlocked' ? t('sidebar.vault.unlocked') : t('sidebar.vault.locked');
+  const member = memberState.value;
+  const memberLabel = member?.is_logged_in
+    ? member.is_paid
+      ? t('sidebar.member.paid')
+      : t('sidebar.member.free')
+    : t('sidebar.member.signed_out');
+  return t('sidebar.account.label', { vault: vaultLabel, member: memberLabel });
+}
+
 // ── ⑤ 状态栏（vault + 连接） ────────────────────────────────
 function StatusBar({ collapsed }: { collapsed: boolean }): JSX.Element {
   const menuOpen = useSignal(false);
   const conn = connectionState.value;
-  const vault = vaultState.value;
 
   const connLabel = conn === 'online' ? t('conn.online') : conn === 'reconnecting' ? t('conn.reconnecting') : t('conn.offline');
 
@@ -524,7 +535,7 @@ function StatusBar({ collapsed }: { collapsed: boolean }): JSX.Element {
             U
           </span>
           <span style={{ flex: 1 }}>
-            {vault === 'unlocked' ? t('sidebar.vault.unlocked') : t('sidebar.vault.locked')}
+            {accountMenuLabel()}
           </span>
         </button>
       )}
