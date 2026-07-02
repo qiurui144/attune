@@ -10,6 +10,7 @@ import { items, drawerContent, currentView } from '../store/signals';
 import type { Item } from '../store/signals';
 import { loadItems, deleteItem } from '../hooks/useItems';
 import { toast } from '../components/Toast';
+import { useFilePicker } from '../hooks/useFilePicker';
 
 /** 把后端 source_type 字段 (web/file/note/chat/upload) 翻译为用户友好标签. */
 function sourceLabel(st: string): string {
@@ -154,6 +155,7 @@ export function ItemsView(): JSX.Element {
 function ItemsHeader(): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploading = useSignal(false);
+  const { isDesktop, picking, pickFiles } = useFilePicker();
   // 上传进度：100MB 大文件按文件串行处理，无反馈时用户会以为卡死。
   // progress 显示 当前/总数 + 当前文件名，让用户确认仍在进行。
   const progressDone = useSignal(0);
@@ -239,22 +241,47 @@ function ItemsHeader(): JSX.Element {
                 })}
           </span>
         )}
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept=".pdf,.md,.txt,.docx,.png,.jpg,.jpeg"
-          style={{ display: 'none' }}
-          onChange={(e) => void onUpload((e.target as HTMLInputElement).files)}
-        />
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={uploading.value}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          {uploading.value ? t('items.upload.uploading') : t('items.upload.button')}
-        </Button>
+        {isDesktop ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={picking.value}
+            disabled={uploading.value}
+            onClick={async () => {
+              const { files } = await pickFiles({
+                multiple: true,
+                accept: '.pdf,.md,.txt,.docx,.png,.jpg,.jpeg',
+                title: t('items.upload.button'),
+              });
+              if (files.length > 0) {
+                const dt = new DataTransfer();
+                for (const f of files) dt.items.add(f);
+                await onUpload(dt.files);
+              }
+            }}
+          >
+            {uploading.value ? t('items.upload.uploading') : t('items.upload.button')}
+          </Button>
+        ) : (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.md,.txt,.docx,.png,.jpg,.jpeg"
+              style={{ display: 'none' }}
+              onChange={(e) => void onUpload((e.target as HTMLInputElement).files)}
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={uploading.value}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {uploading.value ? t('items.upload.uploading') : t('items.upload.button')}
+            </Button>
+          </>
+        )}
         <Button
           variant="secondary"
           size="sm"
