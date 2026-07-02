@@ -8,7 +8,7 @@
  *   - 新建 / 删除 session
  */
 
-import { api, apiCall, RETRY_POLICIES } from '../store/api';
+import { api, apiCall, RETRY_POLICIES, ApiError } from '../store/api';
 import {
   chatSessions,
   activeSessionId,
@@ -106,6 +106,20 @@ export type SendOptions = {
 // Important 2.6 修复：并发发送守卫
 let sendInFlight = false;
 
+function isLlmUnavailableError(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 503) return false;
+  try {
+    const body = JSON.parse(error.body) as { code?: unknown; error?: unknown };
+    return (
+      body.code === 'llm-unavailable' ||
+      body.code === 'llm-provider-unavailable' ||
+      (typeof body.error === 'string' && body.error.toLowerCase().includes('llm provider not configured'))
+    );
+  } catch {
+    return error.body.toLowerCase().includes('llm provider not configured');
+  }
+}
+
 export async function sendMessage(
   text: string,
   _opts?: SendOptions,
@@ -199,8 +213,9 @@ export async function sendMessage(
       ];
     }
   } catch (e) {
-    // 超时（abort）与一般失败分别给文案；都暴露重试入口（lastFailedSend）让用户恢复。
-    const content = timedOut
+    // 超时（abort）与一般失败分别给文案；可恢复错误暴露重试入口（lastFailedSend）。
+    const unavailable = isLlmUnavailableError(e);
+    const content = timedOut && !unavailable
       ? `⚠ ${t('chat.error.timeout')}`
       : `⚠ ${t('chat.error.send_failed', { message: e instanceof Error ? e.message : String(e) })}`;
     const errMsg: Message = {
@@ -210,7 +225,7 @@ export async function sendMessage(
       created_at: new Date().toISOString(),
     };
     messages.value = [...messages.value, errMsg];
-    lastFailedSend.value = trimmed; // ChatView 据此显示"重试"
+    lastFailedSend.value = unavailable ? null : trimmed; // ChatView 据此显示"重试"
   } finally {
     sendInFlight = false;
   }
