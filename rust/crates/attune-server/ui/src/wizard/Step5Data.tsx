@@ -6,6 +6,7 @@ import { Button, Input, Tooltip } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api } from '../store/api';
+import { useFilePicker } from '../hooks/useFilePicker';
 import type { WizardContext } from './types';
 
 type DataMode = 'folder' | 'import' | 'skip';
@@ -19,16 +20,12 @@ export type Step5Props = {
 export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element {
   const [mode, setMode] = useState<DataMode | null>(ctx.dataMode);
   const [folderPaths, setFolderPaths] = useState<string[]>(ctx.boundFolders ?? []);
-  const [folderPicking, setFolderPicking] = useState(false);
   const [manualPath, setManualPath] = useState('');
   const [importing, setImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Tauri 桌面壳里才有原生目录选择器;headless/浏览器(K3 一体机纯 Web)回退到手填
-  // 绝对路径(与 RemoteView LocalForm / SettingsView 文件夹管理一致)。两条路径都
-  // push 到同一个 folderPaths,统一走 /index/bind,headless 首次开箱不再被卡死。
-  const canPickFolder = typeof window !== 'undefined'
-    && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+  const { isDesktop: canPickFolder, picking: folderPickingSignal, pickDirectory, pickFiles } = useFilePicker();
+  const folderPicking = folderPickingSignal.value;
 
   function addFolderPath(raw: string): boolean {
     const path = raw.trim();
@@ -50,27 +47,12 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
 
   async function pickFolder() {
     if (!canPickFolder) {
-      // headless/浏览器无原生选择器 → 引导用户使用下方手填路径框,不再死路一条。
       toast('info', t('wizard.data.folder.toast_manual_hint'));
       return;
     }
-
-    setFolderPicking(true);
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const selected = await open({
-        directory: true,
-        multiple: true,
-        title: t('wizard.data.folder.dialog_title'),
-      });
-      const chosen = Array.isArray(selected) ? selected : selected ? [selected] : [];
-      for (const path of chosen) {
-        addFolderPath(path);
-      }
-    } catch (e) {
-      toast('error', e instanceof Error ? e.message : String(e));
-    } finally {
-      setFolderPicking(false);
+    const paths = await pickDirectory({ multiple: true, title: t('wizard.data.folder.dialog_title') });
+    for (const path of paths) {
+      addFolderPath(path);
     }
   }
 
@@ -259,10 +241,41 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
           selected={mode === 'import'}
           onClick={() => {
             setMode('import');
-            fileInputRef.current?.click();
+            if (!canPickFolder) {
+              fileInputRef.current?.click();
+            }
           }}
         >
           <>
+            {canPickFolder && mode === 'import' && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={async (e: Event) => {
+                  e.stopPropagation();
+                  const { paths } = await pickFiles({
+                    multiple: false,
+                    accept: '.json,.vault-profile',
+                    title: t('wizard.data.import.dialog_title'),
+                  });
+                  if (paths.length > 0 && fileInputRef.current) {
+                    // Read file from path for the existing handleFinish flow
+                    try {
+                      const resp = await fetch(`file://${paths[0]}`);
+                      const blob = await resp.blob();
+                      const file = new File([blob], paths[0].split(/[/\\]/).pop() ?? 'profile.vault-profile');
+                      const dt = new DataTransfer();
+                      dt.items.add(file);
+                      fileInputRef.current.files = dt.files;
+                    } catch {
+                      toast('error', t('wizard.data.err.file_read_failed'));
+                    }
+                  }
+                }}
+              >
+                {`📂 ${t('wizard.data.import.browse')}`}
+              </Button>
+            )}
             <input
               ref={fileInputRef}
               type="file"

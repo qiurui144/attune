@@ -2,6 +2,11 @@
 //! POST /api/v1/marketplace/plugins/{id}/install — 启动 trial 或安装
 //!
 //! 默认走 Mock 后端；attune-pro 通过覆盖 AppState.plugin_hub 注入真客户端。
+//!
+//! Local-fs fallback: when the hub returns an empty plugin list and the provider
+//! is "mock", this route also scans the filesystem plugins directory and merges
+//! locally installed plugins into the response so the Marketplace UI shows
+//! something useful instead of "no plugins available".
 
 use axum::{
     extract::{Path, State},
@@ -48,12 +53,26 @@ pub async fn list_plugins(
             format!("plugin hub unavailable: {e}"),
         )
     })?;
+
+    // Local-fs fallback: when the hub is mock and returns an empty catalog,
+    // surface locally installed plugins so the Marketplace UI isn't blank.
+    let mut plugins = resp.plugins;
+    let provider = hub.name().to_string();
+    if provider == "mock" && plugins.is_empty() {
+        let plugins_dir = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
+            .unwrap_or_default();
+        let local = attune_core::plugin_hub::scan_local_plugins(&plugins_dir);
+        if !local.is_empty() {
+            plugins = local;
+        }
+    }
+
     Ok(Json(ListResponse {
         hub_version: resp.hub_version,
         user_plan: resp.user_plan,
         upgrade_url: resp.upgrade_url,
-        plugins: resp.plugins,
-        provider: hub.name().to_string(),
+        plugins,
+        provider,
     }))
 }
 

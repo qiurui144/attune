@@ -102,16 +102,6 @@ impl MockPluginHubProvider {
             user_plan: plan.into(),
         }
     }
-
-    fn _builtin_plugins(&self) -> Vec<PluginListing> {
-        // S4b OSS decoupling (2026-06-03): industry catalog (law-pro / patent-pro /
-        // presales-pro / tech-pro) removed from OSS MockPluginHubProvider.
-        // Real catalog is served by HttpPluginHubProvider from cloud/pluginhub.
-        // Marketplace UI receives [] → shows "no plugins available" (existing fallback UI).
-        // v1.1.x: dynamic loading from pluginhub_url.
-        // See: docs/superpowers/specs/2026-06-02-oss-industry-decoupling.md §4.1 MU-4
-        vec![]
-    }
 }
 
 impl PluginHubProvider for MockPluginHubProvider {
@@ -120,36 +110,16 @@ impl PluginHubProvider for MockPluginHubProvider {
             hub_version: "1.1-mock".into(),
             user_plan: self.user_plan.clone(),
             upgrade_url: "https://accounts.engi-stack.com/upgrade".into(),
-            plugins: self._builtin_plugins(),
+            plugins: vec![],
         })
     }
 
     fn install_plugin(&self, plugin_id: &str, _device_fp: Option<&str>) -> Result<InstallResponse> {
-        let plugins = self._builtin_plugins();
-        let plugin = plugins
-            .iter()
-            .find(|p| p.id == plugin_id)
-            .ok_or_else(|| VaultError::ModelLoad(format!("mock: plugin {plugin_id} not found")))?;
-
-        if !plugin.available && !plugin.trial_available {
-            return Err(VaultError::ModelLoad(format!(
-                "mock: plan_required — {plugin_id} 需要 {} plan",
-                plugin.min_plan
-            )));
-        }
-
-        Ok(InstallResponse {
-            install_id: 1,
-            plugin_id: plugin_id.into(),
-            version: plugin.latest_version.clone(),
-            sha256: "mock-sha256".into(),
-            trial_started: None,
-            trial_expires: None,
-            download_url: format!(
-                "/api/v1/packages/{plugin_id}-{}.tar.gz",
-                plugin.latest_version
-            ),
-        })
+        // Mock install is unsupported — all plugins come from the real HttpPluginHubProvider.
+        // The marketplace route handles local-fs fallback for listing; install always requires a hub.
+        Err(VaultError::ModelLoad(format!(
+            "mock: install not supported for {plugin_id} — configure pluginhub.url + license_key in Settings → PluginHub"
+        )))
     }
 
     fn download_plugin(&self, _plugin_id: &str, _version: &str) -> Result<Vec<u8>> {

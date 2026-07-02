@@ -96,7 +96,7 @@ describe('useFilePicker', () => {
     it('returns paths from desktop dialog on success', async () => {
       (window as any).__TAURI_INTERNALS__ = {};
       const { open } = await import('@tauri-apps/plugin-dialog');
-      open.mockClear();
+      (open as any).mockClear();
       vi.mocked(open).mockResolvedValue('/tmp/doc.pdf');
 
       const picker = useFilePicker();
@@ -131,7 +131,7 @@ describe('useFilePicker', () => {
     it('handles accept string with wildcard', async () => {
       (window as any).__TAURI_INTERNALS__ = {};
       const { open } = await import('@tauri-apps/plugin-dialog');
-      open.mockClear(); // fresh counter for this test
+      (open as any).mockClear();
       vi.mocked(open).mockResolvedValue('/tmp/audio.wav');
 
       const picker = useFilePicker();

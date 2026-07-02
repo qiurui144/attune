@@ -82,7 +82,7 @@ function browserPickFiles(opts: {
     input.multiple = opts.multiple;
     if (opts.accept) input.accept = opts.accept;
     if (opts.directory) {
-      // @ts-expect-error webkitdirectory is non-standard but widely supported
+      // @ts-ignore webkitdirectory is non-standard but widely supported in Chromium/Firefox
       input.webkitdirectory = true;
     }
 
