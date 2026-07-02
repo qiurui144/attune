@@ -184,7 +184,7 @@ export function DocIntelView(): JSX.Element {
     memberGated.value = false;
     envelope.value = null;
     try {
-      const env = await api.post<DocEnvelope>(`/api/v1/documents/${path}`, body);
+      const env = await api.post<DocEnvelope>(`/documents/${path}`, body);
       envelope.value = env;
     } catch (e) {
       // ApiError.body is the raw `{"error","code"}` JSON (routes/documents.rs); parse the
