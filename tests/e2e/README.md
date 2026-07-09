@@ -24,8 +24,9 @@ ATTUNE_E2E_LONGTEXT=1 ATTUNE_LONGTEXT_PROFILE=local_scheduler_comprehensive \
 `~/attune-e2e-corpora/airplane-manual-collection`，通过
 `POST /api/v1/index/bind` 让 Attune 构建向量库，等待
 `pending_embeddings=0`，再跑检索、API 对话评估和 Web UI 评估。对话门禁
-要求综合准确率、citation 命中率达标，并且 local scheduler 30B p95 响应延迟不超过
-10s；Web UI 门禁会打开浏览器验证条目页可见、对话框可问、答案/citation
+要求综合准确率、citation 命中率达标，多轮追问不能跨机型/跨手册漂移，真实飞行
+操作请求必须拒答，并且 local scheduler 30B p95 响应延迟不超过 10s；Web UI 门禁
+会打开浏览器验证条目页可见、对话框可问、答案/citation
 可见，以及 本地调度器状态条在本地 local scheduler 路径下渲染。
 
 本地 scheduler 试点可这样跑；local scheduler 是首个 profile，Windows/Linux x86 高性能平台应复用同一入口：
@@ -67,7 +68,20 @@ ATTUNE_E2E_LONGTEXT=1 \
 | `memory_moat_search_quality_e2e.py` | 8 | RRF 混合检索召回质量 — 6 主题语料 + 针对性 query top-1 命中 + 跨主题区分度 |
 | `memory_moat_stress_loop_e2e.py` | 5 | 120 轮持续操作（600 HTTP 调用）；RSS/FD 监控验证无内存/句柄泄漏 |
 | `memory_moat_chat_e2e.py` | 9 | 真实 Ollama qwen2.5:3b RAG 问答；citation 引用；citation_hit 信号落库（需 Ollama）|
-| `airplane_manual_longtext_e2e.py` | gate | 可选长文本 KB E2E；Attune bind 目录建向量库；检索 Hit/Recall/MRR；chat 准确率/citation/10s p95 |
+| `airplane_manual_longtext_e2e.py` | gate | 可选长文本 KB E2E；Attune bind 目录建向量库；检索 Hit/Recall/MRR；chat 准确率/citation/10s p95；多轮来源连续性和安全拒答；Web UI 交互 |
+
+长文本多轮 API 子门禁可单独运行：
+
+```bash
+python3 scripts/eval-airplane-manual-longtext-multiturn.py \
+  --manifest /tmp/attune-airplane-longtext-local_scheduler_comprehensive.json \
+  --base-url http://localhost:18905 \
+  --profile local_scheduler_comprehensive \
+  --fail-on-targets
+```
+
+`airplane_manual_longtext_e2e.py` 默认会在单轮 chat gate 后调用该脚本。调试纯
+search/chat 单轮时可设 `ATTUNE_LONGTEXT_MULTITURN=0`。
 
 长文本 Web UI 子门禁：
 

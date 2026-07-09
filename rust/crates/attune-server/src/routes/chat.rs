@@ -201,6 +201,193 @@ fn contains_any_ascii(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+fn history_source_followup_query(query: &str) -> bool {
+    contains_any_ascii(
+        query,
+        &[
+            "prior",
+            "previous",
+            "cited",
+            "citation",
+            "referenced",
+            "above",
+            "same source",
+            "that source",
+            "last answer",
+            "上一轮",
+            "上轮",
+            "之前",
+            "前文",
+            "引用",
+            "已引用",
+            "来源",
+        ],
+    )
+}
+
+fn query_source_markers(query: &str) -> Vec<&'static str> {
+    let candidates = [
+        "a220",
+        "a300",
+        "a310",
+        "a318",
+        "a319",
+        "a320",
+        "a321",
+        "a330",
+        "a340",
+        "a350",
+        "a380",
+        "b737",
+        "737",
+        "b747",
+        "747",
+        "b767",
+        "767",
+        "b777",
+        "777",
+        "b787",
+        "787",
+        "qrh",
+        "quick reference",
+        "fcom",
+        "fctm",
+        "amm",
+        "sop",
+        "standard operating",
+        "mel",
+        "hydraulic",
+        "electrical",
+        "fuel",
+        "navigation",
+        "powerplant",
+        "landing gear",
+        "flight controls",
+    ];
+    let lower = query.to_ascii_lowercase();
+    candidates
+        .iter()
+        .copied()
+        .filter(|marker| lower.contains(marker))
+        .collect()
+}
+
+fn source_hint_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let bullet = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("• "))
+        .unwrap_or(trimmed)
+        .trim();
+    if bullet.len() < 4 {
+        return None;
+    }
+    if !trimmed.starts_with("- ")
+        && !trimmed.starts_with("* ")
+        && !trimmed.starts_with("• ")
+        && !bullet.contains('《')
+    {
+        return None;
+    }
+    let lower = bullet.to_ascii_lowercase();
+    if !contains_any_ascii(
+        &lower,
+        &[
+            "source",
+            "manual",
+            "reference",
+            "qrh",
+            "fcom",
+            "fctm",
+            "amm",
+            "sop",
+            "mel",
+            "pdf",
+            "flight crew",
+        ],
+    ) {
+        return None;
+    }
+    let mut hint = bullet.split_whitespace().collect::<Vec<_>>().join(" ");
+    if hint.chars().count() > 260 {
+        hint = hint.chars().take(260).collect();
+    }
+    Some(hint)
+}
+
+fn score_source_hint_for_query(hint: &str, markers: &[&str]) -> usize {
+    if markers.is_empty() {
+        return 1;
+    }
+    let compact_hint = compact_ascii_lower(hint);
+    markers
+        .iter()
+        .filter(|marker| {
+            let compact_marker = compact_ascii_lower(marker);
+            !compact_marker.is_empty() && compact_hint.contains(&compact_marker)
+        })
+        .count()
+}
+
+fn history_source_hints_for_query(
+    query: &str,
+    history: &[HistoryMessage],
+    limit: usize,
+) -> Vec<String> {
+    if limit == 0 || !history_source_followup_query(query) {
+        return Vec::new();
+    }
+    let markers = query_source_markers(query);
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for h in history.iter().rev().filter(|h| h.role == "assistant") {
+        for line in h.content.lines() {
+            let Some(hint) = source_hint_line(line) else {
+                continue;
+            };
+            let key = compact_ascii_lower(&hint);
+            if key.is_empty() || !seen.insert(key) {
+                continue;
+            }
+            let score = score_source_hint_for_query(&hint, &markers);
+            if markers.is_empty() || score > 0 {
+                candidates.push((score, candidates.len(), hint));
+            }
+        }
+        if !candidates.is_empty() {
+            break;
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let best_score = candidates.first().map(|(score, _, _)| *score).unwrap_or(0);
+    candidates
+        .into_iter()
+        .filter(|(score, _, _)| markers.is_empty() || *score == best_score)
+        .take(limit)
+        .map(|(_, _, hint)| hint)
+        .collect()
+}
+
+fn build_history_aware_retrieval_query(query: &str, history: &[HistoryMessage]) -> String {
+    let hints = history_source_hints_for_query(query, history, 3);
+    if hints.is_empty() {
+        return query.to_string();
+    }
+    let markers = query_source_markers(query);
+    let mut out = if markers.is_empty() {
+        "prior cited source".to_string()
+    } else {
+        format!("{} source", markers.join(" "))
+    };
+    out.push_str("\nPrior cited source hints:");
+    for hint in hints {
+        out.push_str("\n- ");
+        out.push_str(&hint);
+    }
+    out
+}
+
 fn local_scheduler_operational_safety_query(query: &str) -> bool {
     let q = query.to_ascii_lowercase();
     let operational = contains_any_ascii(
@@ -748,8 +935,12 @@ pub async fn chat(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // 1b. 用 learned_expansions 自动扩展查询词（语义扩展，透明无感）
-    let expanded_query = attune_core::skill_evolution::expand_query(&body.message, &app_settings);
+    // 1b. 用 learned_expansions 自动扩展查询词（语义扩展，透明无感）。
+    // Short follow-ups such as "use the prior cited source" otherwise lose
+    // the source constraint before retrieval. Only append compact source hints
+    // when the current turn explicitly refers to prior/cited material.
+    let retrieval_query = build_history_aware_retrieval_query(&body.message, &body.history);
+    let expanded_query = attune_core::skill_evolution::expand_query(&retrieval_query, &app_settings);
 
     // v0.6 Phase B F-Pro Stage 4：query 意图 detect → cross-domain penalty。
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供（attune-pro）。
@@ -2583,6 +2774,41 @@ mod tests {
         assert!(local_scheduler_source_lookup_query(
             "A320 RNAV GPS approach standard operating procedure"
         ));
+    }
+
+    #[test]
+    fn history_aware_retrieval_query_keeps_direct_queries_unchanged() {
+        let history = vec![HistoryMessage {
+            role: "assistant".into(),
+            content: "- QRH320 - Flight Crew Operating Manual: FCOM A320 QRH".into(),
+        }];
+        assert_eq!(
+            build_history_aware_retrieval_query("A320 hydraulic source", &history),
+            "A320 hydraulic source"
+        );
+    }
+
+    #[test]
+    fn history_aware_retrieval_query_selects_matching_cited_source() {
+        let history = vec![HistoryMessage {
+            role: "assistant".into(),
+            content: [
+                "根据本地知识库检索，优先使用以下已引用来源回答该问题。",
+                "- QRH320 - Flight Crew Operating Manual: Flight Crew Operating Manual FCOM A320 QRH",
+                "- 787-TBC_OM_TBC_C_100215_QRH_B2P-C - Quick Action Index: Boeing 787 QRH",
+                "- A320-Powerplant: A320 powerplant system description source",
+            ]
+            .join("\n"),
+        }];
+        let query = build_history_aware_retrieval_query(
+            "Using only the prior A320 QRH cited source, identify the manual type.",
+            &history,
+        );
+
+        assert!(query.contains("Prior cited source hints"));
+        assert!(query.contains("QRH320"));
+        assert!(!query.contains("787-TBC"));
+        assert!(!query.contains("A320-Powerplant"));
     }
 
     #[test]

@@ -300,6 +300,34 @@ def run_gates(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
         chat_cmd.append("--fail-on-targets")
     run_cmd(chat_cmd, timeout, dry_run)
 
+    if env_bool("ATTUNE_LONGTEXT_MULTITURN", True):
+        multiturn_cmd = [
+            sys.executable,
+            str(REPO_ROOT / "scripts/eval-airplane-manual-longtext-multiturn.py"),
+            "--manifest",
+            str(manifest),
+            "--base-url",
+            BASE_URL,
+            "--profile",
+            profile,
+            "--timeout",
+            os.environ.get("ATTUNE_LONGTEXT_CHAT_TIMEOUT_SEC", "120"),
+            "--poll-timeout",
+            os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_TIMEOUT_SEC", "180"),
+            "--out",
+            str(result_dir / f"attune-airplane-longtext-{profile}-multiturn.json"),
+        ]
+        if token:
+            multiturn_cmd.extend(["--token", token])
+        query_id = os.environ.get("ATTUNE_LONGTEXT_MULTITURN_QUERY_ID", "").strip()
+        if query_id:
+            multiturn_cmd.extend(["--query-id", query_id])
+        if fail_targets:
+            multiturn_cmd.append("--fail-on-targets")
+        run_cmd(multiturn_cmd, timeout, dry_run)
+    else:
+        print("[longtext] multi-turn chat gate skipped (ATTUNE_LONGTEXT_MULTITURN=0)")
+
 
 def run_web_gate(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
     if not env_bool("ATTUNE_LONGTEXT_UI", True):
