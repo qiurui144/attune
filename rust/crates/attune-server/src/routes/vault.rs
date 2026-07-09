@@ -3,6 +3,150 @@ use crate::state::SharedState;
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
+use std::time::Instant;
+
+const DEFAULT_RETRIEVAL_WARMUP_METADATA_LIMIT: u32 = 4096;
+const DEFAULT_RETRIEVAL_WARMUP_TOP_K: u32 = 5;
+
+fn post_unlock_settings(state: &SharedState) -> serde_json::Value {
+    state
+        .vault
+        .lock()
+        .ok()
+        .and_then(|vault| vault.store().get_meta("app_settings").ok().flatten())
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn retrieval_warmup_queries() -> Vec<String> {
+    let configured = std::env::var("ATTUNE_RETRIEVAL_WARMUP_QUERIES")
+        .ok()
+        .or_else(|| std::env::var("ATTUNE_SCHEDULER_RETRIEVAL_WARMUP_QUERIES").ok());
+    let raw = configured.unwrap_or_else(|| {
+        [
+            "source manual reference",
+            "citation source lookup",
+            "local knowledge source",
+            "来源 手册 引用",
+        ]
+        .join(";")
+    });
+    raw.split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .take(8)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn retrieval_warmup_metadata_limit() -> usize {
+    crate::local_scheduler::env_u32_any(
+        &[
+            "ATTUNE_RETRIEVAL_WARMUP_METADATA_LIMIT",
+            "ATTUNE_SCHEDULER_RETRIEVAL_WARMUP_METADATA_LIMIT",
+        ],
+        DEFAULT_RETRIEVAL_WARMUP_METADATA_LIMIT,
+    ) as usize
+}
+
+fn retrieval_warmup_top_k() -> usize {
+    crate::local_scheduler::env_u32_any(
+        &[
+            "ATTUNE_RETRIEVAL_WARMUP_TOP_K",
+            "ATTUNE_SCHEDULER_RETRIEVAL_WARMUP_TOP_K",
+        ],
+        DEFAULT_RETRIEVAL_WARMUP_TOP_K,
+    )
+    .clamp(1, 20) as usize
+}
+
+fn warm_retrieval_after_unlock(state: &SharedState) {
+    let settings = post_unlock_settings(state);
+    let default_enabled = crate::local_scheduler::native_kb_enabled(&settings, &state.hardware);
+    if !crate::local_scheduler::env_bool_any(
+        &[
+            "ATTUNE_RETRIEVAL_WARMUP",
+            "ATTUNE_SCHEDULER_RETRIEVAL_WARMUP",
+            "ATTUNE_LOCAL_RETRIEVAL_WARMUP",
+        ],
+        default_enabled,
+    ) {
+        return;
+    }
+
+    let started = Instant::now();
+    let metadata_limit = retrieval_warmup_metadata_limit();
+    let top_k = retrieval_warmup_top_k();
+
+    let dek = {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(dek) = vault.dek_db() else { return };
+        let _ = vault.store().list_items(metadata_limit, 0);
+        dek
+    };
+
+    let reranker = state.reranker.lock().ok().and_then(|g| g.clone());
+    let embedding = state.embedding.lock().ok().and_then(|g| g.clone());
+    let queries = retrieval_warmup_queries();
+    let mut warmed = 0usize;
+
+    for query in &queries {
+        let (mut params, _) = crate::retrieval_policy::build_search_params(
+            state.hardware.form_factor,
+            true,
+            query,
+            None,
+            top_k,
+            None,
+            None,
+            None,
+        );
+        params.skip_rerank = true;
+        let result = {
+            let ft_guard = if params.skip_vector {
+                state.fulltext.try_lock().ok()
+            } else {
+                Some(state.fulltext.lock().unwrap_or_else(|e| e.into_inner()))
+            };
+            let vec_guard = if params.skip_vector {
+                None
+            } else {
+                Some(state.vectors.lock().unwrap_or_else(|e| e.into_inner()))
+            };
+            let vault_guard = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            let ctx = attune_core::search::SearchContext {
+                fulltext: ft_guard.as_ref().and_then(|guard| guard.as_ref()),
+                vectors: vec_guard.as_ref().and_then(|guard| guard.as_ref()),
+                embedding: embedding.clone(),
+                reranker: reranker.clone(),
+                store: vault_guard.store(),
+                dek: &dek,
+            };
+            attune_core::search::search_with_context(&ctx, query, &params)
+        };
+        match result {
+            Ok(results) => {
+                warmed += 1;
+                tracing::debug!(
+                    query = %query,
+                    results = results.len(),
+                    skip_vector = params.skip_vector,
+                    "post-unlock retrieval warmup query complete"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(query = %query, error = %e, "post-unlock retrieval warmup query skipped")
+            }
+        }
+    }
+
+    tracing::info!(
+        queries = warmed,
+        metadata_limit,
+        elapsed_ms = started.elapsed().as_millis(),
+        "post-unlock retrieval warmup complete"
+    );
+}
 
 /// Trust-chain T8: hydrate the in-memory [`attune_core::entitlement::EntitlementCache`]
 /// from the `plugin_entitlements` vault table at unlock. Reads rows under a SHORT vault
@@ -36,6 +180,7 @@ fn spawn_post_unlock_services(state: SharedState) {
     tokio::task::spawn_blocking(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             state.init_search_engines();
+            warm_retrieval_after_unlock(&state);
             // #2 #5: 底座模型(embedding/reranker/ocr/asr)后台拉取,解锁不阻塞在 ~330MB 下载上。
             crate::state::AppState::spawn_model_bootstrap(state.clone());
             // EP 运行时软件栈(cuda/openvino/rocm/directml/vitisai userspace)按需安装,
@@ -318,4 +463,90 @@ pub async fn vault_set_auto_unlock(
         "warning": if body.enabled { AUTO_UNLOCK_THREAT_MODEL } else { "" },
         "code": "auto-unlock-pending-security-review",
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WARMUP_ENV_KEYS: &[&str] = &[
+        "ATTUNE_RETRIEVAL_WARMUP_QUERIES",
+        "ATTUNE_SCHEDULER_RETRIEVAL_WARMUP_QUERIES",
+        "ATTUNE_RETRIEVAL_WARMUP_METADATA_LIMIT",
+        "ATTUNE_SCHEDULER_RETRIEVAL_WARMUP_METADATA_LIMIT",
+        "ATTUNE_RETRIEVAL_WARMUP_TOP_K",
+        "ATTUNE_SCHEDULER_RETRIEVAL_WARMUP_TOP_K",
+    ];
+
+    struct EnvSnapshot {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvSnapshot {
+        fn clean(keys: &'static [&'static str]) -> Self {
+            let saved = keys
+                .iter()
+                .map(|key| (*key, std::env::var(key).ok()))
+                .collect();
+            for key in keys {
+                std::env::remove_var(key);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retrieval_warmup_queries_default_to_source_lookups() {
+        let _guard = crate::test_support::lock_test_env();
+        let _env = EnvSnapshot::clean(WARMUP_ENV_KEYS);
+
+        let queries = retrieval_warmup_queries();
+
+        assert!(queries.iter().any(|q| q.contains("source")));
+        assert!(queries.iter().any(|q| q.contains("manual")));
+        assert!(queries.iter().any(|q| q.contains("来源")));
+    }
+
+    #[test]
+    fn retrieval_warmup_queries_use_generic_env_and_cap_count() {
+        let _guard = crate::test_support::lock_test_env();
+        let _env = EnvSnapshot::clean(WARMUP_ENV_KEYS);
+        std::env::set_var(
+            "ATTUNE_RETRIEVAL_WARMUP_QUERIES",
+            " q1 ; ; q2 ; q3 ; q4 ; q5 ; q6 ; q7 ; q8 ; q9 ",
+        );
+        std::env::set_var(
+            "ATTUNE_SCHEDULER_RETRIEVAL_WARMUP_QUERIES",
+            "scheduler-only",
+        );
+
+        let queries = retrieval_warmup_queries();
+
+        assert_eq!(queries.len(), 8);
+        assert_eq!(queries[0], "q1");
+        assert_eq!(queries[7], "q8");
+        assert!(!queries.iter().any(|q| q == "scheduler-only"));
+    }
+
+    #[test]
+    fn retrieval_warmup_limits_use_scheduler_fallbacks_and_top_k_clamp() {
+        let _guard = crate::test_support::lock_test_env();
+        let _env = EnvSnapshot::clean(WARMUP_ENV_KEYS);
+        std::env::set_var("ATTUNE_SCHEDULER_RETRIEVAL_WARMUP_METADATA_LIMIT", "123");
+        std::env::set_var("ATTUNE_SCHEDULER_RETRIEVAL_WARMUP_TOP_K", "99");
+
+        assert_eq!(retrieval_warmup_metadata_limit(), 123);
+        assert_eq!(retrieval_warmup_top_k(), 20);
+    }
 }

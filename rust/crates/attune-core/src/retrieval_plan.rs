@@ -244,8 +244,10 @@ impl RetrievalPlan {
             .find(|c| c.channel == RetrievalChannel::Vector)
             .and_then(|c| c.min_score);
         params.domain_hint = self.domain_hint.clone();
-        params.skip_vector = self.target == RetrievalTarget::LocalScheduler
-            && self.latency_class == RetrievalLatencyClass::Interactive
+        params.skip_vector = matches!(
+            self.target,
+            RetrievalTarget::LocalScheduler | RetrievalTarget::LocalWorkstation
+        ) && self.latency_class == RetrievalLatencyClass::Interactive
             && self.query_features.sourceish
             && !self.query_features.asks_summary;
         params
@@ -757,5 +759,16 @@ mod tests {
         assert!(broad.query_features.sourceish);
         assert!(broad.query_features.asks_summary);
         assert!(!broad.to_search_params().skip_vector);
+    }
+
+    #[test]
+    fn local_workstation_source_queries_use_same_fast_path() {
+        let mut req =
+            RetrievalPlanRequest::local_scheduler_interactive("A320 QRH quick reference source");
+        req.target = RetrievalTarget::LocalWorkstation;
+        let plan = plan_retrieval(req);
+
+        assert!(plan.query_features.sourceish);
+        assert!(plan.to_search_params().skip_vector);
     }
 }

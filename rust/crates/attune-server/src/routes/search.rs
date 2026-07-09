@@ -198,13 +198,21 @@ pub async fn search(
         .clone();
 
     let results = {
-        let ft_guard = state.fulltext.lock().map_err(|_| err_500("ft lock"))?;
-        let vec_guard = state.vectors.lock().map_err(|_| err_500("vec lock"))?;
+        let ft_guard = if search_params.skip_vector {
+            state.fulltext.try_lock().ok()
+        } else {
+            Some(state.fulltext.lock().map_err(|_| err_500("ft lock"))?)
+        };
+        let vec_guard = if search_params.skip_vector {
+            None
+        } else {
+            Some(state.vectors.lock().map_err(|_| err_500("vec lock"))?)
+        };
         let vault_guard = state.vault.lock().map_err(|_| err_500("vault lock"))?;
 
         let ctx = attune_core::search::SearchContext {
-            fulltext: ft_guard.as_ref(),
-            vectors: vec_guard.as_ref(),
+            fulltext: ft_guard.as_ref().and_then(|guard| guard.as_ref()),
+            vectors: vec_guard.as_ref().and_then(|guard| guard.as_ref()),
             embedding: emb,
             reranker,
             store: vault_guard.store(),

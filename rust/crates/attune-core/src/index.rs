@@ -261,6 +261,36 @@ impl FulltextIndex {
         Ok(())
     }
 
+    /// 批量添加文档到索引（upsert 语义），一次 commit/reload。
+    ///
+    /// unlock 后全量重建会经过这里；逐文档 commit 在大 PDF 知识库上会把冷启动
+    /// 放大到几十秒，而批量提交保持搜索可见性语义，同时显著减少 Tantivy I/O。
+    pub fn add_documents(&self, docs: &[(String, String, String, String)]) -> Result<()> {
+        if docs.is_empty() {
+            return Ok(());
+        }
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        for (item_id, title, content, source_type) in docs {
+            let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
+            writer.delete_term(term);
+            writer
+                .add_document(doc!(
+                    self.f_item_id => item_id.as_str(),
+                    self.f_title => title.as_str(),
+                    self.f_content => content.as_str(),
+                    self.f_source_type => source_type.as_str(),
+                ))
+                .map_err(|e| VaultError::Crypto(format!("tantivy add: {e}")))?;
+        }
+        writer
+            .commit()
+            .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
+        self.reader
+            .reload()
+            .map_err(|e| VaultError::Crypto(format!("tantivy reload: {e}")))?;
+        Ok(())
+    }
+
     /// 删除文档（by item_id）
     pub fn delete_document(&self, item_id: &str) -> Result<()> {
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
@@ -351,6 +381,31 @@ mod tests {
 
         let results = idx.search("Rust", 10).unwrap();
         assert!(!results.is_empty(), "Should find Rust document");
+        assert_eq!(results[0].0, "item1");
+    }
+
+    #[test]
+    fn batch_add_and_search() {
+        let idx = FulltextIndex::open_memory().unwrap();
+        idx.add_documents(&[
+            (
+                "item1".to_string(),
+                "A320 QRH".to_string(),
+                "Quick reference handbook abnormal checklist source".to_string(),
+                "file".to_string(),
+            ),
+            (
+                "item2".to_string(),
+                "B737 FCOM".to_string(),
+                "Flight crew operations manual".to_string(),
+                "file".to_string(),
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(idx.doc_count().unwrap(), 2);
+        let results = idx.search("quick reference handbook", 10).unwrap();
+        assert!(!results.is_empty(), "Should find QRH document");
         assert_eq!(results[0].0, "item1");
     }
 

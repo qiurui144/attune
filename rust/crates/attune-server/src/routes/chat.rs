@@ -940,7 +940,8 @@ pub async fn chat(
     // the source constraint before retrieval. Only append compact source hints
     // when the current turn explicitly refers to prior/cited material.
     let retrieval_query = build_history_aware_retrieval_query(&body.message, &body.history);
-    let expanded_query = attune_core::skill_evolution::expand_query(&retrieval_query, &app_settings);
+    let expanded_query =
+        attune_core::skill_evolution::expand_query(&retrieval_query, &app_settings);
 
     // v0.6 Phase B F-Pro Stage 4：query 意图 detect → cross-domain penalty。
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供（attune-pro）。
@@ -990,22 +991,34 @@ pub async fn chat(
         .clone();
 
     let search_results = {
-        let ft_guard = state
-            .fulltext
-            .lock()
-            .map_err(|_| AppError::Internal("ft lock".into()))?;
-        let vec_guard = state
-            .vectors
-            .lock()
-            .map_err(|_| AppError::Internal("vec lock".into()))?;
+        let ft_guard = if search_params.skip_vector {
+            state.fulltext.try_lock().ok()
+        } else {
+            Some(
+                state
+                    .fulltext
+                    .lock()
+                    .map_err(|_| AppError::Internal("ft lock".into()))?,
+            )
+        };
+        let vec_guard = if search_params.skip_vector {
+            None
+        } else {
+            Some(
+                state
+                    .vectors
+                    .lock()
+                    .map_err(|_| AppError::Internal("vec lock".into()))?,
+            )
+        };
         let vault_guard = state
             .vault
             .lock()
             .map_err(|_| AppError::Internal("vault lock".into()))?;
 
         let ctx = attune_core::search::SearchContext {
-            fulltext: ft_guard.as_ref(),
-            vectors: vec_guard.as_ref(),
+            fulltext: ft_guard.as_ref().and_then(|guard| guard.as_ref()),
+            vectors: vec_guard.as_ref().and_then(|guard| guard.as_ref()),
             embedding: emb,
             reranker,
             store: vault_guard.store(),

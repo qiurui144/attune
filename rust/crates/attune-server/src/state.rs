@@ -661,6 +661,64 @@ impl AppState {
                 }
             }
         }
+
+        let settings_json = {
+            let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+            vault_guard
+                .store()
+                .get_meta("app_settings")
+                .ok()
+                .flatten()
+                .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        };
+        let vector_dims = embedding_index_dims_from_settings(&settings_json);
+
+        // Vector index (dims follow the configured embedding provider; bge-m3=1024,
+        // local scheduler embedding-int8=512).
+        //
+        // Load this before the fulltext rebuild so post-unlock vector and
+        // scheduler-native retrieval can serve immediately while Tantivy refreshes
+        // in the background bootstrap task.
+        //
+        // 持久化策略：
+        //   优先从 ~/.local/share/attune/vectors.encbin 加密加载；不存在或损坏
+        //   降级为空 HNSW。写入在 start_queue_worker 批次结束时 flush（每 20 次 or
+        //   每 10 分钟取近者），clear_search_engines 锁定前再 flush 一次。
+        // 全局规范锁序（任意路径同时持多锁时必须遵守）：
+        //   fulltext → vectors → vault  （embedding / search_cache / cluster_snapshot
+        //   各为独立锁，不参与该序）。与 search/chat 热点路径一致；反序持锁 = ABBA 死锁。
+        // 此处不同时持锁：先取 vault 拿 dek（语句结束即释放），再单独取 vectors 装载，
+        // 两锁不重叠，故不违反规范序。
+        let vectors_path = attune_core::platform::data_dir().join("vectors.encbin");
+        let dek_opt = self
+            .vault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .dek_db()
+            .ok();
+        if let Ok(mut guard) = self.vectors.lock() {
+            *guard = match dek_opt {
+                Some(dek) if vectors_path.exists() => {
+                    match VectorIndex::load_encrypted(&dek, &vectors_path, vector_dims) {
+                        Ok(vi) => {
+                            tracing::info!(
+                                "Vector index loaded from {} (dims={}, {} entries)",
+                                vectors_path.display(),
+                                vector_dims,
+                                vi.len()
+                            );
+                            Some(vi)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Vector index load failed ({e}); starting empty");
+                            VectorIndex::new(vector_dims).ok()
+                        }
+                    }
+                }
+                _ => VectorIndex::new(vector_dims).ok(),
+            };
+        }
+
         // Fulltext index (persistent on disk)
         //
         // #83 P0 可用性修复：FTS rebuild 用 paged 查询，每页单独加释放 vault lock，
@@ -705,8 +763,8 @@ impl AppState {
                     }
                     if let Ok(ft_guard) = self.fulltext.lock() {
                         if let Some(ft) = ft_guard.as_ref() {
-                            for (id, title, content, source_type) in page_items {
-                                let _ = ft.add_document(&id, &title, &content, &source_type);
+                            if let Err(e) = ft.add_documents(&page_items) {
+                                tracing::warn!("#83 FTS rebuild batch add failed: {e}");
                             }
                         }
                     }
@@ -717,59 +775,6 @@ impl AppState {
                 }
                 tracing::info!("#83 FTS rebuild complete ({offset} items, paged={PAGE})");
             }
-        }
-
-        let settings_json = {
-            let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-            vault_guard
-                .store()
-                .get_meta("app_settings")
-                .ok()
-                .flatten()
-                .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
-        };
-        let vector_dims = embedding_index_dims_from_settings(&settings_json);
-
-        // Vector index (dims follow the configured embedding provider; bge-m3=1024,
-        // local scheduler embedding-int8=512).
-        //
-        // 持久化策略：
-        //   优先从 ~/.local/share/attune/vectors.encbin 加密加载；不存在或损坏
-        //   降级为空 HNSW。写入在 start_queue_worker 批次结束时 flush（每 20 次 or
-        //   每 10 分钟取近者），clear_search_engines 锁定前再 flush 一次。
-        // 全局规范锁序（任意路径同时持多锁时必须遵守）：
-        //   fulltext → vectors → vault  （embedding / search_cache / cluster_snapshot
-        //   各为独立锁，不参与该序）。与 search/chat 热点路径一致；反序持锁 = ABBA 死锁。
-        // 此处不同时持锁：先取 vault 拿 dek（语句结束即释放），再单独取 vectors 装载，
-        // 两锁不重叠，故不违反规范序。
-        let vectors_path = attune_core::platform::data_dir().join("vectors.encbin");
-        let dek_opt = self
-            .vault
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .dek_db()
-            .ok();
-        if let Ok(mut guard) = self.vectors.lock() {
-            *guard = match dek_opt {
-                Some(dek) if vectors_path.exists() => {
-                    match VectorIndex::load_encrypted(&dek, &vectors_path, vector_dims) {
-                        Ok(vi) => {
-                            tracing::info!(
-                                "Vector index loaded from {} (dims={}, {} entries)",
-                                vectors_path.display(),
-                                vector_dims,
-                                vi.len()
-                            );
-                            Some(vi)
-                        }
-                        Err(e) => {
-                            tracing::warn!("Vector index load failed ({e}); starting empty");
-                            VectorIndex::new(vector_dims).ok()
-                        }
-                    }
-                }
-                _ => VectorIndex::new(vector_dims).ok(),
-            };
         }
 
         // #2 #5: Embedding / Reranker（~330MB ONNX 下载）+ OCR + ASR 的获取**不再**在此

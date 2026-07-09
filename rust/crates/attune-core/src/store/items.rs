@@ -147,7 +147,7 @@ impl Store {
     /// 列出条目（仅标题和元数据，不解密 content）
     pub fn list_items(&self, limit: usize, offset: usize) -> Result<Vec<ItemSummary>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, title, source_type, domain, created_at
+            "SELECT id, title, url, source_type, domain, created_at
              FROM items WHERE is_deleted = 0
              ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
         )?;
@@ -155,9 +155,10 @@ impl Store {
             Ok(ItemSummary {
                 id: row.get(0)?,
                 title: row.get(1)?,
-                source_type: row.get(2)?,
-                domain: row.get(3)?,
-                created_at: row.get(4)?,
+                url: row.get(2)?,
+                source_type: row.get(3)?,
+                domain: row.get(4)?,
+                created_at: row.get(5)?,
             })
         })?;
         let mut items = Vec::new();

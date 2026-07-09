@@ -1770,7 +1770,7 @@ mod tests {
                 &dek,
                 "Item 2",
                 "content2",
-                None,
+                Some("file:///Boeing/B787/FCOM/787-tbc.pdf"),
                 "webpage",
                 Some("example.com"),
                 None,
@@ -1782,6 +1782,9 @@ mod tests {
         // list_items 不包含 content（不需解密）
         assert!(items.iter().any(|i| i.title == "Item 1"));
         assert!(items.iter().any(|i| i.title == "Item 2"));
+        assert!(items
+            .iter()
+            .any(|i| i.url.as_deref() == Some("file:///Boeing/B787/FCOM/787-tbc.pdf")));
     }
 
     #[test]

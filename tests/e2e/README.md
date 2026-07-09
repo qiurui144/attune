@@ -83,6 +83,13 @@ python3 scripts/eval-airplane-manual-longtext-multiturn.py \
 `airplane_manual_longtext_e2e.py` 默认会在单轮 chat gate 后调用该脚本。调试纯
 search/chat 单轮时可设 `ATTUNE_LONGTEXT_MULTITURN=0`。
 
+解锁后，server 会在后台预热本地 scheduler / scheduler-native 检索链路：
+metadata source scan、典型 source lookup query 和 top-k item 解密会先跑一轮，
+用于压低重启后首问冷启动延迟。默认只在本地 scheduler 或 scheduler-native
+provider 配置下启用；可用 `ATTUNE_RETRIEVAL_WARMUP=0` 关闭，或用
+`ATTUNE_RETRIEVAL_WARMUP_QUERIES="source manual reference;来源 手册 引用"`
+覆盖预热 query。
+
 长文本 Web UI 子门禁：
 
 ```bash

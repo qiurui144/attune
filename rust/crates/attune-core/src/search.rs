@@ -371,11 +371,11 @@ fn aircraft_hint_boost(query: &str, source: &str) -> f32 {
             "b737",
             &["b737", "737max", "737 max", "737-8", "737-tbc", "737-"],
         ),
-        ("b747", &["b747", "747-8", "747-400", "747-"]),
-        ("b757", &["b757", "757-"]),
-        ("b767", &["b767", "767-"]),
-        ("b777", &["b777", "777-"]),
-        ("b787", &["b787", "787-"]),
+        ("b747", &["b747", "747-8", "747-400", "747-", "747 "]),
+        ("b757", &["b757", "757-", "757 "]),
+        ("b767", &["b767", "767-", "767 "]),
+        ("b777", &["b777", "777-", "777 "]),
+        ("b787", &["b787", "787-", "787 "]),
         ("mig29", &["mig-29", "mig29", "mikoyan"]),
     ];
 
@@ -636,6 +636,7 @@ fn metadata_source_candidates(
             score: 0.0,
             title: item.title,
             source_type: item.source_type,
+            source_path: item.url,
             corpus_domain: item.domain.unwrap_or_else(|| "general".to_string()),
             ..Default::default()
         };
@@ -742,19 +743,36 @@ pub fn search_with_context(
     query: &str,
     params: &SearchParams,
 ) -> crate::error::Result<Vec<SearchResult>> {
-    // 1. 全文搜索（initial_k）
-    let ft_results = ctx
-        .fulltext
-        .map(|ft| {
-            ft.search(query, params.initial_k).unwrap_or_else(|e| {
-                log::warn!("fulltext search error: {e}");
-                vec![]
+    // 1. Source metadata + fulltext recall.
+    //
+    // For source-shaped interactive queries, metadata titles/paths are usually
+    // the highest-signal channel. Run that first so cold post-unlock traffic is
+    // not forced through Tantivy while the background FTS rebuild is still
+    // committing segments.
+    let metadata_results = if params.skip_vector {
+        metadata_source_candidates(ctx, query, params.initial_k)
+    } else {
+        Vec::new()
+    };
+    let skip_fulltext = params.skip_vector && metadata_results.len() >= params.top_k.max(1);
+    let ft_results = if skip_fulltext {
+        log::info!(
+            "search stages: fulltext skipped; metadata_source_candidates={}",
+            metadata_results.len()
+        );
+        Vec::new()
+    } else {
+        ctx.fulltext
+            .map(|ft| {
+                ft.search(query, params.initial_k).unwrap_or_else(|e| {
+                    log::warn!("fulltext search error: {e}");
+                    vec![]
+                })
             })
-        })
-        .unwrap_or_default();
+            .unwrap_or_default()
+    };
     let ft_results = dedup_ranked_results(ft_results);
     let ft_results = if params.skip_vector {
-        let metadata_results = metadata_source_candidates(ctx, query, params.initial_k);
         log::info!(
             "search stages: metadata_source_candidates={}",
             metadata_results.len()
@@ -1252,6 +1270,36 @@ mod tests {
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
         assert_eq!(results[0].item_id, "b737max-fcom");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_boeing_numeric_model_from_path() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "a320-fcom".into(),
+                score: 0.54,
+                title: "320FCOM1 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/FCOM/320FCOM1.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "b787-fcom".into(),
+                score: 0.42,
+                title: "787-tbc_om_tbc_c_100215_v1v2_b2p-c".into(),
+                source_path: Some(
+                    "file:///Boeing/B787/FCOM/787-tbc_om_tbc_c_100215_v1v2_b2p-c.pdf".into(),
+                ),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "Boeing 787 FCOM flight crew operations manual",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "b787-fcom");
     }
 
     #[test]

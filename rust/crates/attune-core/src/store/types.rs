@@ -85,6 +85,7 @@ pub struct DecryptedItem {
 pub struct ItemSummary {
     pub id: String,
     pub title: String,
+    pub url: Option<String>,
     pub source_type: String,
     pub domain: Option<String>,
     pub created_at: String,
