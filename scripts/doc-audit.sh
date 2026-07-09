@@ -117,7 +117,7 @@ for kw in FEATURES RELEASE CHANGELOG INSTALL TESTING DEPLOY; do
     hits=$(echo "$hits" | grep -vE '^\./RELEASE\.md$' || true)
   fi
   if [ "$kw" = "DEPLOY" ]; then
-    hits=$(echo "$hits" | grep -vE '^\./docs/k3-ai-service/' || true)
+    hits=$(echo "$hits" | grep -vE '^\./docs/.*-ai-service/' || true)
   fi
   count=$(echo "$hits" | grep -c . 2>/dev/null)
   if [ "$count" -gt 1 ]; then

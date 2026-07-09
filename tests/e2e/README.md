@@ -13,7 +13,48 @@ runner 自动：编译 server → 起隔离 server（独立 XDG dir，port 18905
 setup+unlock vault → 配 LLM（若 Ollama 可用）→ 顺序跑全部脚本 → 汇总 → 清理。
 退出码 0 = 全绿。
 
-## 脚本清单（9 脚本 / 90 断言）
+长文本知识库门禁需要显式开启：
+
+```bash
+ATTUNE_E2E_LONGTEXT=1 ATTUNE_LONGTEXT_PROFILE=local_scheduler_comprehensive \
+  bash tests/e2e/run_all.sh
+```
+
+该流程会把 `airplane-manual-collection` 选定 PDF materialize 到
+`~/attune-e2e-corpora/airplane-manual-collection`，通过
+`POST /api/v1/index/bind` 让 Attune 构建向量库，等待
+`pending_embeddings=0`，再跑检索、API 对话评估和 Web UI 评估。对话门禁
+要求综合准确率、citation 命中率达标，并且 local scheduler 30B p95 响应延迟不超过
+10s；Web UI 门禁会打开浏览器验证条目页可见、对话框可问、答案/citation
+可见，以及 本地调度器状态条在本地 local scheduler 路径下渲染。
+
+本地 scheduler 试点可这样跑；local scheduler 是首个 profile，Windows/Linux x86 高性能平台应复用同一入口：
+
+```bash
+ATTUNE_E2E_LONGTEXT=1 \
+ATTUNE_LONGTEXT_PROFILE=local_scheduler_comprehensive \
+ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
+  bash tests/e2e/run_all.sh
+```
+
+`ATTUNE_E2E_LOCAL_SCHEDULER` 会派生本地 scheduler chat 路由和 embedding endpoint，
+并默认使用 `llm-summary`、`embedding-int8`、512 维、`/kb/tasks/kb.query.embed`。
+当前 scheduler 生产接口不是
+尚未落地的 `/v1/embeddings` thin route；需要改 task 时可设
+`ATTUNE_E2E_EMBEDDING_TASK=kb.ingest.embed_batch`。大体量 OCR/解析会让同步 bind
+长时间占用，可用 `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC` 提高超时。
+
+云端或其它 OpenAI-compatible LLM 可通过 runner 环境变量注入：
+
+```bash
+ATTUNE_E2E_LLM_ENDPOINT=https://example.com/v1 \
+ATTUNE_E2E_LLM_MODEL=your-model \
+ATTUNE_E2E_LLM_API_KEY="$API_KEY" \
+ATTUNE_E2E_LONGTEXT=1 \
+  bash tests/e2e/run_all.sh
+```
+
+## 脚本清单（基础 9 脚本 / 90 断言，另有可选长文本 gate）
 
 | 脚本 | 断言 | 覆盖 |
 |------|-----|------|
@@ -26,6 +67,35 @@ setup+unlock vault → 配 LLM（若 Ollama 可用）→ 顺序跑全部脚本 �
 | `memory_moat_search_quality_e2e.py` | 8 | RRF 混合检索召回质量 — 6 主题语料 + 针对性 query top-1 命中 + 跨主题区分度 |
 | `memory_moat_stress_loop_e2e.py` | 5 | 120 轮持续操作（600 HTTP 调用）；RSS/FD 监控验证无内存/句柄泄漏 |
 | `memory_moat_chat_e2e.py` | 9 | 真实 Ollama qwen2.5:3b RAG 问答；citation 引用；citation_hit 信号落库（需 Ollama）|
+| `airplane_manual_longtext_e2e.py` | gate | 可选长文本 KB E2E；Attune bind 目录建向量库；检索 Hit/Recall/MRR；chat 准确率/citation/10s p95 |
+
+长文本 Web UI 子门禁：
+
+```bash
+python3 tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py \
+  --manifest /tmp/attune-airplane-longtext-local_scheduler_comprehensive.json \
+  --base-url http://localhost:18905 \
+  --profile local_scheduler_comprehensive
+```
+
+RISC-V、Windows 或 Linux x86 平台如果 Python Playwright 不可用，使用同语义
+Node fallback，并显式指向系统 Chrome/Chromium：
+
+```bash
+ATTUNE_LONGTEXT_UI_DRIVER=node \
+ATTUNE_PLAYWRIGHT_EXECUTABLE=/usr/bin/chromium \
+node tests/e2e/playwright/airplane_manual_longtext_ui_e2e.js \
+  --manifest /tmp/attune-airplane-longtext-local_scheduler_comprehensive.json \
+  --base-url http://localhost:18905 \
+  --profile local_scheduler_comprehensive
+```
+
+`airplane_manual_longtext_e2e.py` 会在 `ATTUNE_PLAYWRIGHT_EXECUTABLE` 已设置且
+`node` 可用时自动选择这个 fallback；也可显式设置
+`ATTUNE_LONGTEXT_UI_DRIVER=node`。
+
+`airplane_manual_longtext_e2e.py` 默认会在 API gate 后调用这个脚本。调试纯
+API 层时可设 `ATTUNE_LONGTEXT_UI=0`。
 
 ## 前置依赖
 
@@ -33,6 +103,13 @@ setup+unlock vault → 配 LLM（若 Ollama 可用）→ 顺序跑全部脚本 �
 - Python 3（脚本用 stdlib urllib + sqlite3，无第三方依赖）
 - chat E2E 额外需要：Ollama 运行 + 已 pull `qwen2.5:3b` + `bge-m3`
   （无 Ollama 时 runner 自动跳过 chat E2E）
+- 长文本 E2E 额外需要：可访问 GitHub，磁盘空间足够 materialize 所选 PDF；
+  本地 scheduler 模式需 `local-scheduler` 在 loopback `:8090` 可用，或通过
+  `ATTUNE_E2E_LOCAL_SCHEDULER` 指到远端或本机 Windows/Linux x86 本地 scheduler；
+  云端 LLM 可通过
+  `ATTUNE_E2E_LLM_*` 注入。Web UI 子门禁需要
+  Python Playwright 和 Chrome/Chromium；或 Node.js、`node-playwright`/Playwright
+  package，以及可通过 `ATTUNE_PLAYWRIGHT_EXECUTABLE` 指定的系统浏览器。
 
 ## 单独运行某脚本
 

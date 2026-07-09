@@ -2,7 +2,7 @@
 //
 // 用途:
 //   - cloud + attune-server 联合压测,验证 P50/P95/P99 SLO(per docs/PERFORMANCE-BASELINE-v1-0-5.md)
-//   - 不在 sandbox 内真跑,等 user 在 cloud 真服务器(或 K3 一体机)启服后再 dispatch
+//   - 不在 sandbox 内真跑,等 user 在 cloud 真服务器(或本地调度器设备)启服后再 dispatch
 //
 // 运行(等 user 准备真服务器后):
 //   CLOUD_URL=https://gateway.engi-stack.com \
