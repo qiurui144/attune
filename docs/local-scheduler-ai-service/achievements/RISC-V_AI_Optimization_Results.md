@@ -1,6 +1,6 @@
 # RISC-V AI 推理优化成果索引
 
-> 更新: 2026-04-19 | 平台: SpacemiT K3 (192.168.100.209)
+> 更新: 2026-04-19 | 平台: SpacemiT local scheduler
 
 ## 文档结构
 
@@ -47,7 +47,7 @@
 | INT8 GEMM | ORT qgemm_kernel_ime | **3.78x** vs 标量 | IME 快 48% |
 | Q8_0 whisper | ggml + vmadot | **3.83x** vs 标量 | encoder 4.75s |
 
-### 四场景部署 (K3 :8080)
+### 四场景部署 (local scheduler :8090)
 
 | 场景 | 框架 | 延迟 | 指令集 |
 |:-----|:-----|:-----|:-------|

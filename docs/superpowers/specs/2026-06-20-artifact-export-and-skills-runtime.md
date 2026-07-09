@@ -378,7 +378,7 @@ F1/pass ≥ 0.85;低于 floor → RELEASE.md 标 model tier。
   并存(`skill` 是 superset)。
 - **Artifact / Skill schema 加 `schema_version`**,additive 演进(per `WritingResult` 先例)。
 - **新 crate 依赖**(rust_xlsxwriter / docx-rs / typst-as-lib / csv)全 **纯 Rust**,不破坏现有
-  P0/P1 平台(Win/Linux x86_64)交叉编译;K3 riscv64 走镜像化路径同样纯 Rust 可编(见 §11)。
+  P0/P1 平台(Win/Linux x86_64)交叉编译;local scheduler riscv64 走镜像化路径同样纯 Rust 可编(见 §11)。
 - 老 client 不调新端点 → 零影响;`/skills` 列表新增 `cost_tier`/`inputs` 字段 additive。
 
 ---
@@ -394,7 +394,7 @@ F1/pass ≥ 0.85;低于 floor → RELEASE.md 标 model tier。
 | R5 | **docx-rs 表格/复杂结构能力有限** | 中 | 本 slice 只用段落/标题/列表/简单表格(不做样式克隆,§2.2 已 OUT);能力边界写进模板。 |
 | R6 | **部分 agent 失败导致半成品交付** | 中 | §7 partial-failure 契约:terminal export 产降级 artifact + warnings,UI 红标未完成 step;grounding 不足 span 走 `unverified_spans` 红警(复用 writing 先例)。 |
 | R7 | **并发 export temp 冲突** | 低 | 每 run 独立 TempDir + uuid;concurrent 测试覆盖。 |
-| R8 | **K3 riscv64 纯 Rust 库可编性** | 中 | typst/rust_xlsxwriter/docx-rs 纯 Rust;G2 plan 加 riscv64 交叉编译 spike(font include_bytes 同样可用)。 |
+| R8 | **local scheduler riscv64 纯 Rust 库可编性** | 中 | typst/rust_xlsxwriter/docx-rs 纯 Rust;G2 plan 加 riscv64 交叉编译 spike(font include_bytes 同样可用)。 |
 
 ---
 

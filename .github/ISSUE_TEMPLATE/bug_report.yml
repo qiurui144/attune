@@ -27,7 +27,7 @@ body:
         - Linux x86_64 (Ubuntu/Debian/Fedora)
         - Linux x86_64 (Arch/other)
         - Windows 10/11 x86_64
-        - K3 一体机 RVA23 riscv64
+        - 本地调度器设备 riscv64
         - 其他 / Other (在 reproduce steps 说明)
     validations:
       required: true

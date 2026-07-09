@@ -70,7 +70,7 @@ CPU only（ORT 量化）：约 6 chunks/s，1000 页约 14 分钟。
 - **Intel iGPU/NPU**：Ollama 实验级 OpenVINO，建议优先 NVIDIA
 
 ### Q: 能跑在 NAS / 软路由 / Raspberry Pi 上吗？
-- **K3 一体机**（RK3588 16GB+）：✅ 官方支持，本地 LLM + embedding/rerank
+- **本地调度器设备**（RK3588 16GB+）：✅ 官方支持，本地 LLM + embedding/rerank
 - **Raspberry Pi 4/5**：⚠️ 仅 indexing 路径可行，LLM 跑不动
 - **Synology NAS**：实验级（Docker）
 
@@ -101,7 +101,7 @@ v0.6 还在 EAP（Early Access Program）阶段，订阅未上线。详见 [价�
 
 ### Q: 路线图在哪？
 - v0.7：L3 NER + Settings UI 完整 + macOS preview
-- v0.8：K3 一体机全本地链路 + 多 vault
+- v0.8：本地调度器设备全本地链路 + 多 vault
 - v0.9：BC2BC 协议（Cross-vault knowledge sharing）
 
 详见 [GitHub milestones](https://github.com/qiurui144/attune/milestones)。

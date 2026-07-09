@@ -1,7 +1,7 @@
-# 两层调度架构 — 模型调度(K3) × 硬件调度(本地) 规划
+# 两层调度架构 — 模型调度(local scheduler) × 硬件调度(本地) 规划
 
 > 2026-06-22 · 架构规划(草案,待评审)· **impl 等 vlm-llm-bench 结果落地后按验证数据开发**。
-> 用户拍板的职责切分:**K3 调度层 = 走哪个模型;本地调度层 = 走哪个硬件更优(含系统功耗)**。
+> 用户拍板的职责切分:**local scheduler 调度层 = 走哪个模型;本地调度层 = 走哪个硬件更优(含系统功耗)**。
 
 ---
 
@@ -9,11 +9,11 @@
 
 | 层 | 决策**什么** | 输入 | 实现位置 | 状态 |
 |:--|:--|:--|:--|:--|
-| **L_model 模型调度** | 走哪个模型 / 本地 vs 云 / 大小档 | 能力图 + capacity/load + 隐私级 + 账户配额/成本 | **K3**: k3-scheduler :8090(+ A100/X100/IME2 仲裁);attune governor 经 edge-cloud Model 1 协同 | ✅ 已建 |
-| **L_hw 硬件调度** | 走哪个加速器更优(NPU/iGPU/dGPU/CPU)+ 是否并行 | **bench 实测 perf/质量/功耗** + 硬件在场 + **功耗/热/电池/争用** | **本地**: attune `infer/accel`(PC 自管);K3 这层在 scheduler 的设备仲裁 | 🟡 现状=单 EP/task,**缺多加速器并行 + 功耗感知** |
+| **L_model 模型调度** | 走哪个模型 / 本地 vs 云 / 大小档 | 能力图 + capacity/load + 隐私级 + 账户配额/成本 | **local scheduler**: local-scheduler :8090(+ A100/X100/IME2 仲裁);attune governor 经 edge-cloud Model 1 协同 | ✅ 已建 |
+| **L_hw 硬件调度** | 走哪个加速器更优(NPU/iGPU/dGPU/CPU)+ 是否并行 | **bench 实测 perf/质量/功耗** + 硬件在场 + **功耗/热/电池/争用** | **本地**: attune `infer/accel`(PC 自管);local scheduler 这层在 scheduler 的设备仲裁 | 🟡 现状=单 EP/task,**缺多加速器并行 + 功耗感知** |
 
 **两层垂直组合**:`L_model 选出模型(+本地/云)` → 若本地 → `L_hw 为该能力选加速器`。
-- **K3**:两层都在设备侧(k3-scheduler 同时管"哪个模型"+"A100/X100/IME2 哪个跑");attune 只 submit 到 :8090。
+- **local scheduler**:两层都在设备侧(local-scheduler 同时管"哪个模型"+"A100/X100/IME2 哪个跑");attune 只 submit 到 :8090。
 - **PC(个人版)**:`L_model` 退化为"本地 vs 云会员"(简单);`L_hw` 由 attune **本地自管**(无独立 scheduler,attune infer 层就是本地硬件调度器)。← **本规划的主体是 PC 的 L_hw**。
 
 ---
@@ -58,7 +58,7 @@
 ### 2.5 与 L_model / 既有的组合
 - L_model(edge-cloud Model 1)在**上**:先定模型+本地/云;本地 → 交 L_hw 选加速器。
 - L_hw 复用 accel.rs 的 EpChoice + catalog;**新增** = 多能力分配函数 + 功耗探测 + 亲和表(带 power 维) + 加速器队列。
-- K3:L_hw 不在 attune(在 scheduler 的 A100/X100/IME2 仲裁);attune K3 形态只走 L_model→:8090。**所以 L_hw 仅 PC/Server 形态激活**(FormFactor 分叉,个人版 0 回退到现状=单 EP 仍可作 L_hw 的退化实现)。
+- local scheduler:L_hw 不在 attune(在 scheduler 的 A100/X100/IME2 仲裁);attune local scheduler 形态只走 L_model→:8090。**所以 L_hw 仅 PC/Server 形态激活**(FormFactor 分叉,个人版 0 回退到现状=单 EP 仍可作 L_hw 的退化实现)。
 
 ---
 
@@ -81,7 +81,7 @@
 - **S3** `assign_accelerators()` 多能力分配 + 争用队列(替/扩 recommend_ep_chain)。
 - **S4** 功耗策略接入(perf/energy 模式按电源态切)。
 - **S5** 真机验证(Intel Core Ultra / AMD Ryzen AI):OCR∥embedding 并行铺开 + 电池态切 energy 模式实测。
-- 个人版 L_hw 激活;K3 不激活(走 scheduler 设备仲裁);0 回退 guard。
+- 个人版 L_hw 激活;local scheduler 不激活(走 scheduler 设备仲裁);0 回退 guard。
 
 ## 5. 待评审决策
 1. ⏳ 功耗策略默认档:开箱 perf 还是 balanced?电池态是否强制 energy?
@@ -90,4 +90,4 @@
 4. ⏳ 并发上限:同时铺几个加速器(共享内存带宽/总功耗预算约束)。
 
 ## CHANGELOG
-- 2026-06-22: 初版。两层调度职责切分(L_model 走哪个模型@K3-scheduler/edge-cloud · L_hw 走哪个加速器@本地 attune,功耗感知)+ L_hw 设计(多加速器并行分配/功耗热电池策略/争用队列/bench 驱动亲和表)+ bench-results 契约(加功耗 W/J 维度)。impl 等 bench 落地。
+- 2026-06-22: 初版。两层调度职责切分(L_model 走哪个模型@local scheduler/edge-cloud · L_hw 走哪个加速器@本地 attune,功耗感知)+ L_hw 设计(多加速器并行分配/功耗热电池策略/争用队列/bench 驱动亲和表)+ bench-results 契约(加功耗 W/J 维度)。impl 等 bench 落地。

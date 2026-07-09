@@ -1,8 +1,8 @@
 # Spec: 本地模型选型由 vlm-llm-bench/drivers 驱动 + bench→attune SSOT 数据管道
 
 > Status: DRAFT (2026-06-20) — 设计 only,不改代码,本机不跑任何模型/评测(§1.6)。
-> 关联:`2026-06-11-modelstack-lifecycle.md`(S8 ModelStack failover)、`2026-06-10-k3-integration-gaps.md`(G1-G8)、memory `project_hw_accel_matrix_resource_station`。
-> 实测源:`/data/company/project/vlm-llm-benchmark/`(bench harness + drivers + reports)、`/data/company/project/attune-k3/`。
+> 关联:`2026-06-11-modelstack-lifecycle.md`(S8 ModelStack failover)、`2026-06-10-local-scheduler-integration-gaps.md`(G1-G8)、memory `project_hw_accel_matrix_resource_station`。
+> 实测源:`/data/company/project/vlm-llm-benchmark/`(bench harness + drivers + reports)、`/data/company/project/attune-local-scheduler/`。
 
 ---
 
@@ -29,7 +29,7 @@
 - `reranker.rs` 硬写 `Xenova/bge-reranker-base`(且注释记录 known-issue 来回切),无实测背书。
 - `ocr/ppocr.rs` 单引擎 PP-OCRv5 mobile;bench 实测 AMD DirectML OCR 比 CPU 快 3.4×、Intel DirectML OCR **CER 202% 全废**(必须走 OpenVINO)—— attune 完全不知道。
 - ASR(whisper.cpp)与 bench 选定的 `sensevoice-small`(CER 7.69% vs whisper)路线不一致。
-- riscv K3 / RK3588 / RK1820 NPU tier 在 attune 选型里**完全缺席**。
+- riscv local scheduler / RK3588 / RK1820 NPU tier 在 attune 选型里**完全缺席**。
 
 **产品对齐**(attune 北极星 = 降 token + 数据安全 + 硬件感知底座):本地底座选型必须**由实测数据决定**(§6.3 数据有源),且能随 bench 仓持续校准**自动流入** attune,而不是每次手改代码。
 
@@ -47,7 +47,7 @@
 - 不改 bench 仓的 harness/维度逻辑(bench 是上游,attune 是消费方;只读其产物)。
 - 不实现 driver 自动安装(driver 制品分发先做 manifest + 链接 + 校验和;一键安装是 v.next,沿用 stack_installer 模式)。
 - 不在 attune 内嵌评测;attune 永不自测模型性能,只消费 bench 结论(§1.6)。
-- 不做 cloud LLM 选型(LLM 走网关 token,见网关 per-agent 模型策略 memory;本 spec 仅覆盖**本地底座** + K3/RK NPU 本地 LLM)。
+- 不做 cloud LLM 选型(LLM 走网关 token,见网关 per-agent 模型策略 memory;本 spec 仅覆盖**本地底座** + local scheduler/RK NPU 本地 LLM)。
 
 ---
 
@@ -135,7 +135,7 @@ tiers:                                    # tier key 与 attune accel.rs Tier::i
   intel-igpu-win:
     ocr:       { engine: rapidocr, ep: openvino, verdict: PASS, source: "...:34", metric: "CER 7.04%" }   # DirectML 在 Intel 全废
     ...
-  riscv-k3:    { llm: { ... }, ... }      # K3 本地 LLM (bench reports/k3-riscv.en.md)
+  riscv-local-scheduler:    { llm: { ... }, ... }      # local scheduler 本地 LLM (bench reports/local-scheduler-riscv.en.md)
   rk1820-npu:  { llm: { ... }, asr: {...} }
   rk3588-rknpu: { embedding: {...} }
   cpu-fallback: { embedding: {repo: "Xenova/bge-m3", ...}, ... }   # = 内置 baseline
@@ -259,7 +259,7 @@ python scripts/export_attune_catalog.py --out dist/attune-catalog/ --sign <key>
 
 ## 选型表(按硬件 tier × 角色 — 引 bench 实测)
 
-> 来源:`vlm-llm-benchmark/reports/2026-06-19-all-model-matrix-results.en.md`(AMD/Intel Win 矩阵)、`reports/2026-06-18-local-model-limits.en.md`(LLM 上限)、`reports/k3-riscv.en.md`、`reports/rk3588.en.md`(2026-06-20 校准)。**verdict/指标行号见各 entry。**
+> 来源:`vlm-llm-benchmark/reports/2026-06-19-all-model-matrix-results.en.md`(AMD/Intel Win 矩阵)、`reports/2026-06-18-local-model-limits.en.md`(LLM 上限)、`reports/local-scheduler-riscv.en.md`、`reports/rk3588.en.md`(2026-06-20 校准)。**verdict/指标行号见各 entry。**
 
 ### AMD Ryzen AI (Windows, XDNA NPU + RDNA iGPU/Vulkan)
 
@@ -285,13 +285,13 @@ python scripts/export_attune_catalog.py --out dist/attune-catalog/ --sign <key>
 
 bench 有 `jetson-agx`(cuda)target 但 reports 无 dGPU CUDA 实测 → **PENDING-VERIFY**。baseline:embedding `bge-m3` / rerank `bge-reranker-base` / OCR `rapidocr` CUDA EP / ASR whisper.cpp CUDA build。需 bench 补 NVIDIA tier 实测。
 
-### RISC-V K3 一体机 (SpacemiT K3, llama.cpp RVV)
+### RISC-V local scheduler 一体机 (SpacemiT local scheduler, llama.cpp RVV)
 
 | 角色 | 选型 | verdict | 指标 | 源 |
 |---|---|---|---|---|
-| LLM(本地) | `qwen2.5-0.5b` | PASS(partial) | TTFT p50 640ms, TPS 1.4 t/s, gsm8k 66% | k3-riscv:20 |
+| LLM(本地) | `qwen2.5-0.5b` | PASS(partial) | TTFT p50 640ms, TPS 1.4 t/s, gsm8k 66% | local-scheduler-riscv:20 |
 
-> 注:K3 throughput 极低(1.4 t/s),不适合交互/并发;底座 embedding/rerank/ASR/OCR 在 K3 一体机走 K3 推理服务(attune-k3 CLAUDE 推理统一收口 :8090),非本 catalog 的 ONNX 路径。
+> 注:local scheduler throughput 极低(1.4 t/s),不适合交互/并发;底座 embedding/rerank/ASR/OCR 在 local scheduler 一体机走 local scheduler 推理服务(attune-local-scheduler CLAUDE 推理统一收口 :8090),非本 catalog 的 ONNX 路径。
 
 ### Rockchip (RK3588 RKNPU3 + RK1820 PCIe NPU, Linux)
 
@@ -321,7 +321,7 @@ bench 有 `jetson-agx`(cuda)target 但 reports 无 dGPU CUDA 实测 → **PENDIN
 | rerank 硬 `Xenova/bge-reranker-base`(known-issue 来回切) | `bge-reranker-base` 实测 PASS nDCG 1.0,确认为正解 | catalog 固化背书 |
 | OCR 单 PP-OCRv5,**EP 不区分** | **AMD→DirectML(快3.4×)、Intel→OpenVINO(DirectML 全废 CER202%)** | catalog 强制 EP;最高价值修正 |
 | ASR whisper.cpp(所有 tier) | AMD/Intel **sensevoice-small**(CER 7.69%);CPU 保留 whisper(sensevoice CPU FAIL) | catalog tier-aware ASR engine |
-| K3/RK NPU tier 缺席 | K3 qwen2.5-0.5b;RK1820 qwen3-vl-2b/minicpm-embed/rk-asr | catalog 新 tier(K3 走 :8090 收口) |
+| local scheduler/RK NPU tier 缺席 | local scheduler qwen2.5-0.5b;RK1820 qwen3-vl-2b/minicpm-embed/rk-asr | catalog 新 tier(local scheduler 走 :8090 收口) |
 | 选型在代码/CLAUDE 文字 | catalog manifest 由 bench 自动导出 | 建管道,去硬编码 |
 
 > 最高价值单点:**Intel DirectML OCR 实测 CER 202% 完全不可用**——attune 当前无 EP 区分逻辑,若在 Intel 机走 DirectML 会 OCR 全错。catalog 强制 Intel→OpenVINO 直接堵死该 production 事故。

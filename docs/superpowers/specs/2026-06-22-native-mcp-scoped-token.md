@@ -3,24 +3,24 @@
 > **状态**: DRAFT(spec-first,§3.1 11 节)
 > **日期**: 2026-06-22
 > **作者**: G1+G2 实现 agent(原生 MCP + scoped-token/审计)
-> **前置**: `docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md`(K3 :8090 收口)/ attune-k3 G1-G8 缺口(`2026-06-10-k3-integration-gaps.md`,attune-k3 仓回填) / 现有 `attune-mcp-bridge`(K3 仓,过渡桥)
-> **用户拍板**: K3 一体机要接 Hermes / Claude 等 agent host;过渡用 attune-mcp-bridge(MCP server 包装 attune REST)。G1 = attune **原生 MCP**,工具契约 **兼容桥** → 桥退役,K3 零迁移。G2 = MCP 工具粒度权限(scoped token + 审计),同期做。
+> **前置**: `docs/superpowers/specs/2026-06-22-local-scheduler-integration.md`(local scheduler :8090 收口)/ attune-local-scheduler G1-G8 缺口(`2026-06-10-local-scheduler-integration-gaps.md`,attune-local-scheduler 仓回填) / 现有 `attune-mcp-bridge`(local scheduler 仓,过渡桥)
+> **用户拍板**: local scheduler 一体机要接 Hermes / Claude 等 agent host;过渡用 attune-mcp-bridge(MCP server 包装 attune REST)。G1 = attune **原生 MCP**,工具契约 **兼容桥** → 桥退役,local scheduler 零迁移。G2 = MCP 工具粒度权限(scoped token + 审计),同期做。
 
 ---
 
 ## 1. 目标定位
 
-attune-k3 一体机(个人智算存一体机,Law Edition 首发)是 24h 常驻的 headless 服务,需要被外部 **agent host**(Hermes / Claude Desktop / 其它 MCP client)当作「私有知识库 + 记忆」工具调用。MCP(Model Context Protocol)是 agent host 的事实标准工具接口。
+attune-local-scheduler 一体机(个人智算存一体机,Law Edition 首发)是 24h 常驻的 headless 服务,需要被外部 **agent host**(Hermes / Claude Desktop / 其它 MCP client)当作「私有知识库 + 记忆」工具调用。MCP(Model Context Protocol)是 agent host 的事实标准工具接口。
 
-当前 attune 仅暴露私有 REST(`/api/v1/*`)+ WS,agent host 无法直接消费。过渡方案 = `attune-mcp-bridge`(K3 仓的独立 MCP server 进程,把 MCP 工具调用翻译成 attune REST 调用)。该桥是一层多余进程 + 一份需要同步维护的契约。
+当前 attune 仅暴露私有 REST(`/api/v1/*`)+ WS,agent host 无法直接消费。过渡方案 = `attune-mcp-bridge`(local scheduler 仓的独立 MCP server 进程,把 MCP 工具调用翻译成 attune REST 调用)。该桥是一层多余进程 + 一份需要同步维护的契约。
 
-**G1 目标**:attune-server **原生**暴露 MCP(JSON-RPC over HTTP/SSE,headless 24h 常驻),6 个工具 **工具名 + 参数完全兼容 attune-mcp-bridge 契约** → K3 侧把 agent host 的 endpoint 从桥换成 attune 原生 MCP,**零工具调用代码迁移**;桥进程随后退役。
+**G1 目标**:attune-server **原生**暴露 MCP(JSON-RPC over HTTP/SSE,headless 24h 常驻),6 个工具 **工具名 + 参数完全兼容 attune-mcp-bridge 契约** → local scheduler 侧把 agent host 的 endpoint 从桥换成 attune 原生 MCP,**零工具调用代码迁移**;桥进程随后退役。
 
 **G2 目标**:MCP 是「外部 agent 调我的私有知识库」的入口,**必须**比内部 REST 更收紧权限。引入 **scoped token**(settings 签发/吊销,最小权限 `search`/`chat`/`ingest` 三权)+ **高危动作硬黑名单**(export/delete/settings 对 scoped token 永久拒绝,不论权限位)+ **请求级 `agent_source` 审计**(谁调、哪工具、何时,0 敏感内容落本地审计表)。
 
 **用户痛点**:
-- K3 命脉 = 数据不出门(隐私优先,Law Edition 处理敏感卷宗)。外部 agent 接入是最大的「数据出门」风险面 → 必须 scoped + 审计 + 高危黑名单。
-- 桥是技术债:多一个进程、多一份契约、多一次部署。原生 MCP 让 K3 部署面收窄。
+- local scheduler 命脉 = 数据不出门(隐私优先,Law Edition 处理敏感卷宗)。外部 agent 接入是最大的「数据出门」风险面 → 必须 scoped + 审计 + 高危黑名单。
+- 桥是技术债:多一个进程、多一份契约、多一次部署。原生 MCP 让 local scheduler 部署面收窄。
 
 **与产品 positioning 对齐**:
 - **1Password 式私密**:scoped token = 最小权限授权,高危黑名单 = 即使授权也挡不可逆操作。
@@ -40,10 +40,10 @@ attune-k3 一体机(个人智算存一体机,Law Edition 首发)是 24h 常驻�
 **不做(后续 / 他仓)**:
 - stdio transport 完整实现(本 spec HTTP/SSE 优先,stdio 留扩展点 §6,headless 24h 场景 HTTP/SSE 足够)。
 - MCP `resources/*` / `prompts/*`(只做 `tools/*`,资源/提示后置)。
-- attune-mcp-bridge 仓的退役 PR(归 K3 仓,本 spec 只保证契约兼容使其可退役)。
+- attune-mcp-bridge 仓的退役 PR(归 local scheduler 仓,本 spec 只保证契约兼容使其可退役)。
 - scoped token 的 UI 面板美化(本 spec 出 REST 签发/吊销 endpoint + 最小 settings 接线;wizard/精致 UI 后置)。
-- 真 K3 设备 + 真 agent host(Hermes)端到端(§7.3,标 **PENDING-真机**)。
-- G3 vault locked-mode / G5 durable queue / G7 并发基线 — 另任务(#141 / #142 / K3 v0.5)。
+- 真 local scheduler 设备 + 真 agent host(Hermes)端到端(§7.3,标 **PENDING-真机**)。
+- G3 vault locked-mode / G5 durable queue / G7 并发基线 — 另任务(#141 / #142 / local scheduler v0.5)。
 
 **写死(scope creep 防线)**:
 - **6 工具 + 3 权限 + 高危黑名单是封闭集**。新增工具/权限 = 新 spec。
@@ -128,7 +128,7 @@ JSON-RPC 2.0 over HTTP `POST /mcp` + SSE `GET /mcp/sse`。`Authorization: Bearer
 
 ### 5.2 6 工具契约(兼容 attune-mcp-bridge,桥须对齐)
 
-> **桥对齐要求**:工具名 + 参数 key 必须逐字一致。若本地 `attune-mcp-bridge` 源可见以其为准;不可见时按下表定契约,**桥须对齐本表**(在 K3 仓 spec 标注)。
+> **桥对齐要求**:工具名 + 参数 key 必须逐字一致。若本地 `attune-mcp-bridge` 源可见以其为准;不可见时按下表定契约,**桥须对齐本表**(在 local scheduler 仓 spec 标注)。
 
 | 工具名 | 参数(input schema) | 包装的 REST core | required_scope | high_risk |
 |---|---|---|---|---|
@@ -202,7 +202,7 @@ scoped token 的 `chat` 权限 = 「授权这个 agent 花我的 token/算力」
 | **concurrent** | 多 token 并发 `tools/call`(SharedState Arc/Mutex);吊销与调用 race → 吊销后调用拒 | `#[test]` |
 | **resource** | 大量审计 INSERT 不阻塞;token 列表分页;审计表只增不爆(0 内容) | `#[test]` |
 | **agent_source 审计落表** | allow 调用落 `agent_audit`(agent_source/tool/ts/decision=allow);deny 调用落(decision=deny + reason);0 敏感内容(grep 审计行无 query/content) | `#[test]` agent_audit |
-| **真机 §7.3** | K3 真 :8090 + 真 agent host(Hermes)`initialize`→`tools/call` 端到端 | **PENDING-真机** |
+| **真机 §7.3** | local scheduler 真 :8090 + 真 agent host(Hermes)`initialize`→`tools/call` 端到端 | **PENDING-真机** |
 
 通过判据:MCP 协议 / gate / scoped token / 高危拒 / 审计 deterministic PASS rate = 1.00;clippy `-D warnings` 干净;安全对抗 6 项全 PASS(高危永久拒 + scope 拒为硬门)。
 
@@ -211,7 +211,7 @@ scoped token 的 `chat` 权限 = 「授权这个 agent 花我的 token/算力」
 - `scoped_tokens` + `agent_audit` 是**新增表**(`CREATE TABLE IF NOT EXISTS`,additive)→ 老 vault 下次 open 自动获空表,零 migration。
 - MCP 是**新增 transport**(新路由 `/mcp` + `/api/v1/scoped-tokens`),既有 REST `/api/v1/*` + WS **0 改动** → 老 client(Chrome 扩展 / Tauri / attune-pro)零影响。
 - 既有 REST handler 抽 `*_core` 是**纯加性重构**(handler 仍调同函数)→ wire 行为字节级不变,既有测试不回退。
-- `attune-mcp-bridge`(K3 仓桥):本 spec 保证原生 MCP 工具契约兼容桥 → K3 把 agent host endpoint 从桥切到 attune 原生 MCP **零工具调用代码迁移**,桥退役。桥仍可作 fallback 共存一段(两者契约同)。
+- `attune-mcp-bridge`(local scheduler 仓桥):本 spec 保证原生 MCP 工具契约兼容桥 → local scheduler 把 agent host endpoint 从桥切到 attune 原生 MCP **零工具调用代码迁移**,桥退役。桥仍可作 fallback 共存一段(两者契约同)。
 - schema_version 不变(新表用既有惯例,无 schema bump)。
 
 ## 11. 风险登记
@@ -221,7 +221,7 @@ scoped token 的 `chat` 权限 = 「授权这个 agent 花我的 token/算力」
 | **scoped token 提权**:误把高危动作放行 | denylist **先于** scope 检查 + 硬编码常量 + 6 工具均非高危 + adversarial 测试钉死「含 delete 权限位仍挡 delete」 |
 | **token 泄漏**:scoped token 被偷 | 权限最小集(只 3 权) + 高危永远碰不到 + 可吊销(nonce 即时生效) + 过期 + 审计可追溯(哪 token 何时调啥) |
 | **无痕调用**:审计被绕过 | 审计 fail-closed(写不进 → 拒调用);deny 也落审计(入侵检测面) |
-| **桥契约漂移**:原生 MCP 与桥工具名/参数不一致 → K3 迁移要改代码 | §5.2 契约表为 SSOT;桥源可见以源为准,不可见时桥须对齐本表(K3 仓 spec 标注);契约测试钉死工具名+参数 |
+| **桥契约漂移**:原生 MCP 与桥工具名/参数不一致 → local scheduler 迁移要改代码 | §5.2 契约表为 SSOT;桥源可见以源为准,不可见时桥须对齐本表(local scheduler 仓 spec 标注);契约测试钉死工具名+参数 |
 | **被迫改业务代码** | 范围写死「0 业务逻辑改动,只抽 `*_core`」;触发即停报告 |
 | **MCP 出网新口**:vault_chat/agent_invoke 绕过 OutboundGate | MCP 工具调既有 core,core 内部经既有出网门;MCP 不新开出网点(测试断言出网仍经 gate) |
 | **共信任根耦合**:scoped token 与 session 同 master_key | 独立命名空间(payload 含 `scoped:` 前缀)+ 独立权限位 + verify_scoped_token 不接受 session token 反之亦然(测试钉死) |
@@ -238,11 +238,11 @@ scoped token 的 `chat` 权限 = 「授权这个 agent 花我的 token/算力」
 | MCP-S4 | G2 gate | token verify → denylist → scope → audit(纯函数) | server/gate | 本 spec |
 | MCP-S5 | MCP 协议 + 6 工具 | initialize/tools.list/tools.call + 工具表 + transport(HTTP/SSE) | server/mcp | 本 spec |
 | MCP-S6 | scoped-token REST | 签发/列/吊销 endpoint + lib.rs 挂载 | server/routes | 本 spec |
-| MCP-真机 | §7.3 端到端 | K3 :8090 + Hermes agent host | — | **PENDING-真机** |
+| MCP-真机 | §7.3 端到端 | local scheduler :8090 + Hermes agent host | — | **PENDING-真机** |
 
 ---
 
-## 对齐 G1-G8(`2026-06-10-k3-integration-gaps.md`)
+## 对齐 G1-G8(`2026-06-10-local-scheduler-integration-gaps.md`)
 
 | G | 缺口 | 本 spec 覆盖? |
 |---|---|---|
@@ -250,4 +250,4 @@ scoped token 的 `chat` 权限 = 「授权这个 agent 花我的 token/算力」
 | **G2** | agent scoped token + 工具粒度权限 | ✅ **本 spec 覆盖**:3 权最小集 + 高危黑名单 + agent_source 审计 |
 | G3 | vault locked-mode | ➖ 任务 #141 另做 |
 | G5 | durable job queue | ➖ 任务 #142 另做(本 spec `job_status` 工具只读消费其结果) |
-| G7 | 多终端并发基线 | ➖ K3 v0.5 实测定级(本 spec concurrent 测试覆盖正确性,非性能基线) |
+| G7 | 多终端并发基线 | ➖ local scheduler v0.5 实测定级(本 spec concurrent 测试覆盖正确性,非性能基线) |

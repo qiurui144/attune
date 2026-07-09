@@ -22,7 +22,7 @@ body:
     attributes:
       label: 问题描述 / Question
       description: 一句话描述你的问题。What's your question?
-      placeholder: 例:K3 一体机如何离线升级?
+      placeholder: 例:本地调度器设备如何离线升级?
     validations:
       required: true
 
@@ -33,7 +33,7 @@ body:
       description: 列出已 Google / 读 docs / 翻 issues 的关键词或方案
       placeholder: |
         1. 读了 UPGRADING.md §3.4 — 但没说 .img 在哪里下载
-        2. Google "attune k3 ota" 无结果
+        2. Google "attune local scheduler ota" 无结果
         3. 看了 issue #42 — 但场景不同
     validations:
       required: true

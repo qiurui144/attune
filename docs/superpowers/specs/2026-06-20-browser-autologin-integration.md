@@ -219,7 +219,7 @@ attune 接入时必须把它**收窄回"用户本人授权 + 人在回路兜底"
 - **形态**：community-browser-automation 作为**捆绑的 Python sidecar**，attune Rust 经 `std::process::Command` spawn，调其 **CLI**（`scan`/`login`/`run`），**不**起它的 FastAPI web 服务（零网络监听，OUT §2.2）。
 - **凭据注入**：`auto` 模式密码经 DEK 解密 → 写 sidecar **stdin**（或单次性 env，进程退出即失效），**绝不**进 recipe JSON / argv / 日志（L-3）。源工具已是 env-var-only（`models.py`），attune 用**专属随机 env 名 + 单进程生命周期**收窄。
 - **LLM 指向**：sidecar `LLM_BASE_URL/_API_KEY/_MODEL` 注入 **attune 网关 / 用户 BYOK**（默认 deepseek-v4 文本；vision 用 qwen-3.6/3.7，**改掉源工具默认的已下架 qwen-vl**，per CLAUDE §4.5.H）。LLM 出网经 attune 网关即受 OutboundGate 约束。
-- **浏览器**：sidecar 经 `E2E_BROWSER_EXECUTABLE` 指向 attune 检测到的系统 Chrome（`web_search_browser.rs::detect_system_browser`），或 `E2E_CDP_ENDPOINT` 连 attune 起的 headed 浏览器（K3 一体机模式参照源工具 RK3566 用法）。
+- **浏览器**：sidecar 经 `E2E_BROWSER_EXECUTABLE` 指向 attune 检测到的系统 Chrome（`web_search_browser.rs::detect_system_browser`），或 `E2E_CDP_ENDPOINT` 连 attune 起的 headed 浏览器（local scheduler 一体机模式参照源工具 RK3566 用法）。
 - **打包（P0 Win / P1 Linux，§11 R5）**：desktop 安装包捆绑**瘦 Python runtime**（嵌入式 CPython / PyInstaller onedir）+ Playwright + community_browser_automation。Playwright 浏览器二进制**不捆**（用系统 Chrome / 首次运行按需，对齐 attune"thin-deb + runtime-fetch"决策）。体积预算：Python+Playwright wheel ≈ +40-60MB（**plan 首个 gate 实测**）。
 - **License**：源工具 **MIT** → 集成无虞；在 attune `ACKNOWLEDGMENTS.md` + sidecar 目录保留其 MIT LICENSE 与 NOTICE。
 
@@ -388,6 +388,6 @@ struct SidecarRunResult { status: String, url: String, records: Vec<serde_json::
 | recipe JSON（signals/extract/known_selectors/steps） | 存 `login_assist_recipes.recipe_json`（无凭据） |
 | `CredentialSpec` env-var-only | attune 凭据走 vault DEK → 运行期 stdin/短命 env 注入 sidecar |
 | `LLM_*`/`VISION_*`（默认 deepseek-v4 / qwen-vl） | 注入 attune 网关/BYOK；vision 改 qwen-3.6/3.7（qwen-vl 已下架） |
-| `connect_over_cdp` / `E2E_CDP_ENDPOINT`（RK3566 headed Chromium） | 复用：连 attune 起的 headed 浏览器 / K3 一体机模式 |
+| `connect_over_cdp` / `E2E_CDP_ENDPOINT`（RK3566 headed Chromium） | 复用：连 attune 起的 headed 浏览器 / local scheduler 一体机模式 |
 | captcha 中继 / QR 检测 / OTP 等待 / vision 分析 | 仅作"人在回路提示用户手动处理"；**不**暴露自动破解 |
 | 无 consent gate / 无会话过期 | 新增逐源 consent（L-1）+ TTL 自动过期 + 用户 clear（L-2） |

@@ -25,7 +25,7 @@ attune 计划把该工具作 **subprocess sidecar** 用（spec §4.4 选项 A：
 | D5 | **输出 storage_state / cookie** 给保险柜（可控路径 / 可回读） | 会话 DEK 加密存 `third_party_accounts.secret_enc` |
 | D6 | **会话复用采内容进 vault**（`run --state` 无人值守爬 → 结构化 records） | crawl → RawDocument → ingest_document |
 | D7 | **结构化进度 / 状态 / 错误码**（供 Rust 程序化判定，不靠 stderr 文本 scrape） | 区分 logged-in / needs-human / restricted / error 走不同分支 |
-| D8 | **跨平台**（Windows P0 / Linux x86_64 P1），无 GUI 也能跑（headless + CDP attach） | attune 主平台矩阵；K3/无头服务器场景 |
+| D8 | **跨平台**（Windows P0 / Linux x86_64 P1），无 GUI 也能跑（headless + CDP attach） | attune 主平台矩阵；local scheduler/无头服务器场景 |
 | D9 | **可被 Rust subprocess 稳定驱动**（确定性 stdin/stdout 协议，无交互式 prompt 阻塞） | sidecar 生命周期可控、可超时 kill |
 | D10 | **退出码规范**（区分成功/需人工/错误，供 `ExitStatus` 判定） | Rust 不解析文本即可判结果 |
 | D11 | **LLM 端点可注入**（指向 attune 网关 / BYOK，OpenAI-compat） | LLM 出网经 attune 网关受 OutboundGate 约束 |

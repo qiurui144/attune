@@ -153,7 +153,7 @@
 ## v1.4.0 (2026-06-16) — 文件夹一键整理→案卷 · 记忆延续可迁移 · 行业直达工作台 · 隐私出网门 · ABBA/并发开库修复
 
 ### Highlights
-- **G5 durable job queue(K3 24h 夜间批处理底座)**:office ASR(及后续 ocr / agent /
+- **G5 durable job queue(local scheduler 24h 夜间批处理底座)**:office ASR(及后续 ocr / agent /
   ingest_batch)job 持久化到 SQLite `job_queue` 表,**重启不再丢 in-flight job** ——
   幂等 kind(asr/ocr/ingest_batch,`at_least_once`)被 boot recovery 重新排队,非幂等
   kind(agent,`at_most_once`)标 `interrupted-no-retry` 不静默重跑。新增 priority +
@@ -373,11 +373,11 @@
   link-local/云 metadata,token 不落盘明文。
 - **Agent 跨平台分发(WASM runtime)**:确定性 agent/skill 可编到 `wasm32-wasip1`,由内嵌
   wasmtime(45.0.0)执行 —— **一个 signed `.tar.gz` plugin package 含一份 `.wasm` 即在所有平台运行**
-  (Windows P0 / Linux P1 / riscv64 K3 P2),与现有 subprocess 契约对齐(stdin JSON →
+  (Windows P0 / Linux P1 / riscv64 local scheduler P2),与现有 subprocess 契约对齐(stdin JSON →
   stdout JSON → exit code 0/1/2/-1)。`plugin.yaml` 新增 `runtime: wasm` + `wasm:` 路径 +
   `wasi_caps`(白名单 `stdio`/`clock`/`read:<path>`/`env:<KEY>`,默认无 fs/net)。
   边界硬约束:每调用 fresh Store / 内存上限 256 MB / epoch 超时杀失控插件。
-  `wasm-runtime` 默认开 cargo feature,`--no-default-features` 可关(K3 极小镜像)。
+  `wasm-runtime` 默认开 cargo feature,`--no-default-features` 可关(local scheduler 极小镜像)。
   spec:`docs/superpowers/specs/2026-05-31-agent-cross-platform-distribution.md`。
 - **WASM-safe agent SDK(`attune-agent-sdk` 0.1.0)**:抽出零 native 依赖的 leaf crate
   承载 `Agent` trait + `AgentOutput<T>` + wasm-safe `AgentError`/`AgentResult`(仅
@@ -1241,7 +1241,7 @@ W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
 - **D-R23**: cargo doc -p attune-core 通 (15 warning, broken intra-doc 后续修)
 - **D-R24**: docs/wizard-flow.md — 5 步首启 + 失败回退 4 行表
 - **D-R25**: docs/plugin-development.md — yaml schema + signing + encryption + 4 vertical + 本地测试
-- **D-R26**: docs/deploy.md — Laptop / NAS / K3 三形态 + 迁移 + 故障排查
+- **D-R26**: docs/deploy.md — Laptop / NAS / LocalScheduler 三形态 + 迁移 + 故障排查
 
 **4 轮 cross-cutting (D-R27~D-R30)**:
 
@@ -1271,7 +1271,7 @@ W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
 
 **核心变更**（commit 94b57ec merge → main）：
 - **OSS × Pro 边界一致性收敛**（ee859a4）：三产品矩阵叙事正式落地 — attune (OSS 通用) / attune-pro (个人行业增强) / attune-enterprise (B2B 律所)；删除 OSS attune 内 4 个 builtin 行业 yaml + EntityKind::CaseNo + CHAT_TRIGGER_KEYWORDS 律师专属 const，全部迁到 attune-pro/plugins/<vertical>-pro/。
-- **FormFactor 形态感知**（461c4c7）：检测启动环境（Laptop / Server / K3Appliance / Unknown），分裂 LLM 默认路径 — Laptop/Server/Unknown → 远端 token，K3Appliance → 本地 Ollama。8 个新 unit test 覆盖端到端（4b6e205）。
+- **FormFactor 形态感知**（461c4c7）：检测启动环境（Laptop / Server / LocalSchedulerAppliance / Unknown），分裂 LLM 默认路径 — Laptop/Server/Unknown → 远端 token，LocalSchedulerAppliance → 本地 Ollama。8 个新 unit test 覆盖端到端（4b6e205）。
 - **rustls-webpki 0.103.10 → 0.103.13**（b4c7351）：修 3 个 RUSTSEC CVE（TLS 验证链路相关）。
 - **GitFlow Lite 写入 CLAUDE.md**（eded077 / 07f57d0）：分支模型 + tag 双轨 + `--first-parent` 检查命令固化为行为标准。
 - **文档同步**（f5152b8 / f006aed）：README.zh 补 4 章，RELEASE 版本号同步。
@@ -1439,14 +1439,14 @@ W1-W4 30 轮 + R1-R9 滚动深度审计修 1 Critical + 5 P0 + 14 P1。详见
 Wizard 推荐顺序：
 1. ★ **Attune Pro Membership**（默认）— `https://gateway.engi-stack.com/v1`，登录即用 token 配额
 2. **BYOK**：用户已有付费会员 API key — OpenAI / Anthropic / Gemini / DeepSeek / Qwen
-3. **本地 Ollama**（advanced，K3 一体机预装 qwen2.5:1.5b/3b 走本地）
+3. **本地 Ollama**（advanced，local scheduler appliance预装 qwen2.5:1.5b/3b 走本地）
 
 不走第三方 "free API tier"（Gemini Free / Groq 等），避免误导用户。
 不走 MCP backbone，至少 v0.7 不做，简化产品形态。
 
 **Form factor 检测** (`detect_form_factor()` in `attune-core::platform`)：
-1. `ATTUNE_FORM_FACTOR=k3` env var override（K3 镜像构建时 systemd-environment.d）
-2. `/sys/class/dmi/id/product_name` 含 `k3` / `jetson`
+1. `ATTUNE_FORM_FACTOR=local_scheduler` env var override（local scheduler 镜像构建时 systemd-environment.d）
+2. `/sys/class/dmi/id/product_name` 含 `local-scheduler` / `attune-appliance`
 3. 默认 `laptop`
 
 **安装路径全平台覆盖**：
@@ -1457,7 +1457,7 @@ Wizard 推荐顺序：
 
 **关键变更**：
 - 单引擎 OCR — 删 tesseract，PP-OCRv5 mobile 唯一引擎（中文准确率 70-85% → 94-96%）
-- LLM 不本地预装（笔电）— 用户在 wizard 配 cloud API 或 Ollama；K3 镜像例外
+- LLM 不本地预装（笔电）— 用户在 wizard 配 cloud API 或 Ollama；local scheduler 镜像例外
 - whisper.cpp 2.6 MB 静态 binary 进 Tauri bundle resources（替代 apt 包）
 - ROCm gfx1103 自动 HSA_OVERRIDE_GFX_VERSION=11.0.0 写 systemd drop-in
 - graceful shutdown via SIGINT/SIGTERM oneshot（R35）
@@ -1540,7 +1540,7 @@ Wizard 推荐顺序：
 
 - Breadcrumb offset 近似（F2 sidecar 字符计数，非严格 in-document offset）— 严格对齐留 v0.7 J2
 - Web cache 清理 UI 在 v0.6.1（backend `DELETE /api/v1/web_search_cache` 已 wired，Settings UI 按钮 v0.6.1 落地）
-- L3 LLM-based PII redactor v0.7（A.5.6，需 T3+/T4+/K3 硬件 + chinese-roberta-NER ONNX ~300MB；trait scaffolding 已在 `attune-core::pii`）
+- L3 LLM-based PII redactor v0.7（A.5.6，需 T3+/T4+/local scheduler 硬件 + chinese-roberta-NER ONNX ~300MB；trait scaffolding 已在 `attune-core::pii`）
 - Settings → Privacy UI 在 v0.6.1（backend `/api/v1/privacy/tier` + per-file 🔒 toggle 已 live）
 - macOS 暂不支持（Win P0 + Linux P1，macOS 后置）
 - LLM 默认远端 token；本地 LLM 需用户自装 Ollama；`ATTUNE_CHAT_MODEL=<model>` 覆盖自动选
@@ -1575,9 +1575,9 @@ Vault unlock 行为完全不变。Chat / search / citations 在迁移期间/之�
 
 **测试统计**：622 tests passed（lib + integration + binary），0 failed，3 ignored — 比 v0.6.0 GA 报告的 "237+" 增加，因为统计口径含 attune-core lib (535) + attune-server lib (5) + attune-server-headless (3) + 16 integration suites。
 - 4 新 `FormFactor` unit test 覆盖 env-var override / default / `prefers_local_llm` / `HardwareProfile::detect` 集成
-- 4 新 `default_settings` unit test 验证 Laptop → 远端 token，K3 → 本地 Ollama，Server/Unknown → fallback 远端 token，非 LLM settings invariant 跨 form factor 不变
+- 4 新 `default_settings` unit test 验证 Laptop → 远端 token，local scheduler → 本地调度器收口，Server/Unknown → fallback 远端 token，非 LLM settings invariant 跨 form factor 不变
 
-**兼容性**：v0.6.0 笔电用户 zero behavior change；K3 一体机镜像构建方设置 `ATTUNE_FORM_FACTOR=k3` env（或依赖 DMI 关键字检测），wizard 默认本地 Ollama + 预装 `qwen2.5:3b`。无 DB schema 变更，无 vault 迁移。
+**兼容性**：v0.6.0 笔电用户 zero behavior change；local scheduler appliance镜像构建方设置 `ATTUNE_FORM_FACTOR=local_scheduler` env（或依赖 DMI 关键字检测），wizard 默认本地 Ollama + 预装 `qwen2.5:3b`。无 DB schema 变更，无 vault 迁移。
 
 **安装包**：v0.6.1 desktop installer 5 平台（Win NSIS + MSI / Linux deb + AppImage / macOS aarch64 build-from-source）；server tarball 4 平台（Linux x86_64/aarch64 + macOS aarch64 + Windows x86_64）。复现：`cd rust && cargo build --release` → `target/release/attune` (~32 MB) + `target/release/attune-server-headless` (~63 MB)。
 

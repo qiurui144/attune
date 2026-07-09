@@ -1,12 +1,12 @@
-# Spec: Vault Locked-Mode 降级运转 + 可选 Auto-Unlock (K3 G3)
+# Spec: Vault Locked-Mode 降级运转 + 可选 Auto-Unlock (local scheduler G3)
 
-> Status: IMPLEMENTED (G3① 主体 + G3② 框架) · 2026-06-22 · 关联 K3 gap spec `2026-06-22-k3-scheduler-integration.md` §对齐 G1-G8 / 任务 #141
+> Status: IMPLEMENTED (G3① 主体 + G3② 框架) · 2026-06-22 · 关联 local scheduler gap spec `2026-06-22-local-scheduler-integration.md` §对齐 G1-G8 / 任务 #141
 > Impl: `attune-core/src/staging.rs` (13 单测) + server wiring (upload/vault_guard/drain worker/auto-unlock routes) + E2E `vault_locked_mode_staging_test.rs`。G3② 真密钥封装仍 PENDING-安全评审(只落开关+威胁提示,不存密钥)。
 > 范围:G3① locked-mode 语义(主体,可独立 ship)+ G3② 可选 auto-unlock(框架,密钥封装 PENDING-安全评审)
 
 ## 1. 目标定位
 
-K3 一体机 24h 常驻。凌晨断电重启后,attune-server 启动时 vault 是 **LOCKED**(无内存密钥),
+local scheduler 一体机 24h 常驻。凌晨断电重启后,attune-server 启动时 vault 是 **LOCKED**(无内存密钥),
 此时:
 
 - **后台 agents 不启动**:所有 `start_*_worker` 仅在 unlock 路径里启动 → reboot 后到 owner 早上手动
@@ -18,7 +18,7 @@ K3 一体机 24h 常驻。凌晨断电重启后,attune-server 启动时 vault �
 G3 让 attune 在 LOCKED 态**优雅降级运转**:输入安全暂存(加密、不触碰 vault 明文),agents 安静暂停(不报错刷屏),
 解锁后**自动补处理**暂存输入并恢复 agents。
 
-与产品定位对齐:1Password 式"私密优先" + K3"无人值守一体机"形态刚需。LOCKED 态绝不牺牲隐私
+与产品定位对齐:1Password 式"私密优先" + local scheduler"无人值守一体机"形态刚需。LOCKED 态绝不牺牲隐私
 (暂存区无明文),也绝不静默丢数据(暂存 + 解锁补跑)。
 
 ## 2. 范围边界

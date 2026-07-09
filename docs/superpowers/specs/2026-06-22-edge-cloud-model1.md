@@ -1,13 +1,13 @@
-# 端云协同调度 Model 1 — 容量信号协同（attune governor 接 k3-scheduler /capacity）
+# 端云协同调度 Model 1 — 容量信号协同（attune governor 接 local-scheduler /capacity）
 
-> 2026-06-22 · attune 侧实现。设计源 doc：`/data/company/project/attune-k3/docs/edge-cloud-scheduler-collaboration.md`（Model 1 全设计 + 能力图 + 缺口 + 契约）。
-> 任务 #144。本 spec 落 attune **策略层（governor）** 的 Model 1 实现；k3-scheduler 侧（机制层）不在本 spec 范围。
+> 2026-06-22 · attune 侧实现。设计源 doc：`/data/company/project/attune-local-scheduler/docs/edge-cloud-scheduler-collaboration.md`（Model 1 全设计 + 能力图 + 缺口 + 契约）。
+> 任务 #144。本 spec 落 attune **策略层（governor）** 的 Model 1 实现；local-scheduler 侧（机制层）不在本 spec 范围。
 
 ---
 
 ## 1. 目标定位
 
-**用户痛点**：K3 一体机形态下，attune 决定一次推理走「端侧（:8090 本地 A100/X100）还是云端」时**瞎决策** —— local/cloud 是静态二分（FormFactor 偏好），不知道本地此刻忙不忙。结果：本地排长队时该溢出到云却不溢；或反过来把本可本地秒回的任务推去云白花 token。
+**用户痛点**：local scheduler 一体机形态下，attune 决定一次推理走「端侧（:8090 本地 A100/X100）还是云端」时**瞎决策** —— local/cloud 是静态二分（FormFactor 偏好），不知道本地此刻忙不忙。结果：本地排长队时该溢出到云却不溢；或反过来把本可本地秒回的任务推去云白花 token。
 
 **对齐 positioning**：attune = "降低 token + 数据安全" 的私有 AI 知识伙伴。端云协同直接服务这两条北极星：
 - **省 token**：本地空闲就本地跑（零云成本），只在本地忙/跑不动时才花云 token。
@@ -15,7 +15,7 @@
 
 **职责分离（命脉）**：
 - **attune = 策略层（Policy）**：隐私分级、脱敏、账户权益、准入。**隐私门（redaction + L0 永不出网）永远留 attune**。
-- **k3-scheduler = 机制层（Mechanism）**：在 attune 给的隐私/账户约束内，按资源/能力回报「本地此刻忙不忙」（`/capacity` 容量信号）。scheduler **不做脱敏、不知账户**。
+- **local-scheduler = 机制层（Mechanism）**：在 attune 给的隐私/账户约束内，按资源/能力回报「本地此刻忙不忙」（`/capacity` 容量信号）。scheduler **不做脱敏、不知账户**。
 
 ---
 
@@ -23,17 +23,17 @@
 
 ### 做（本 spec / 本次 impl）
 - **能力图 SSOT**（capability map）：每能力（embedding/rerank/ocr/asr/chat-3b/7b/35b）→ {local 可行, cloud 可行, 默认偏好}。落 attune 数据（编进二进制 + 可被 catalog 覆盖路径预留）。
-- **CapacitySignal 类型 + /capacity 客户端**：governor 提交推理前 `GET k3-scheduler /capacity?model=X` → `{state, eta_ms, mem_headroom_mb}`。
+- **CapacitySignal 类型 + /capacity 客户端**：governor 提交推理前 `GET local-scheduler /capacity?model=X` → `{state, eta_ms, mem_headroom_mb}`。
 - **路由决策函数** `decide_route(capability, capacity_signal, privacy_class, account, cost)` → `RouteDecision{ Local | Cloud | QueueLocal | Reject }`。纯函数，可单测。
 - **privacy_class 标注**：每推理任务标隐私级（复用 `PrivacyTier` L0/L1/L3）。L0 = local-only。
 - **account quota/tier → 路由约束**：entitlement/member tier + 剩余配额 → 准入 + 降级（配额耗尽：本地兜底 / 拒 / 提示升级）。
 - **telemetry**：路由决策落审计（复用 `UsageAggregator` + outbound audit），local/cloud 用量可回账户。
-- **仅 K3 形态激活**：`FormFactor::K3Appliance` ∧ scheduler 可达时启用协同路由。**个人版（Laptop/Server）governor 行为 0 改动**（加 guard 测试）。
+- **仅 local scheduler 形态激活**：`FormFactor::LocalSchedulerAppliance` ∧ scheduler 可达时启用协同路由。**个人版（Laptop/Server）governor 行为 0 改动**（加 guard 测试）。
 
 ### 不做（明确写死，后续才做）
 - ❌ **模型 2（统一调度器路由云）**：scheduler 加 cloud worker / policy admission / 统一计量 / cloud failover —— 本 spec 不碰，演进项。
-- ❌ **k3-scheduler 侧任何代码**（`/capacity` 响应补字段、队列按 tier 加权）—— 那是 k3 仓的任务，本 spec 只消费现有契约。
-- ❌ **真机 load-aware 验证**（本地忙 → 真溢出云）—— §7.3 标 PENDING（本机非测试环境 §1.6，需 K3 真设备）。本次只 mock `/capacity` 离线测。
+- ❌ **local-scheduler 侧任何代码**（`/capacity` 响应补字段、队列按 tier 加权）—— 那是 local-scheduler 仓的任务，本 spec 只消费现有契约。
+- ❌ **真机 load-aware 验证**（本地忙 → 真溢出云）—— §7.3 标 PENDING（本机非测试环境 §1.6，需 local scheduler 真设备）。本次只 mock `/capacity` 离线测。
 - ❌ 改既有 `OutboundGate` / `governed_chat` 的契约 —— 协同路由在它们**之上**做决策，云分支仍必经 OutboundGate（不绕）。
 
 ---
@@ -44,7 +44,7 @@
                     ┌──────────────── attune 策略层（本 spec 实现） ────────────────┐
   推理请求 ─────────►│ EdgeCloudRouter::decide(task)                                 │
   (capability,      │   ① capability_map.lookup(capability)  → {local?, cloud?, 偏好} │
-   privacy_class,   │   ② if K3 ∧ scheduler 可达:                                    │
+   privacy_class,   │   ② if local scheduler ∧ scheduler 可达:                                    │
    account)         │        CapacityClient.query(model) → CapacitySignal            │
                     │      else: signal = Unknown (静态二分回退)                      │
                     │   ③ decide_route(cap_entry, signal, privacy_class, account)     │
@@ -57,7 +57,7 @@
             │                       │                        │              (配额耗尽
             ▼                       ▼                        ▼               + 无本地兜底)
       :8090 本地推理         等本地（不去云）          OutboundGate.enforce  → Err + 升级提示
-      (K3 scheduler)        (L0 忙 / 强本地偏好)      (脱敏 + L0 二次拦截)
+      (local scheduler scheduler)        (L0 忙 / 强本地偏好)      (脱敏 + L0 二次拦截)
                                                             │
                                                             ▼
                                                       cloud_client → gateway
@@ -105,7 +105,7 @@ pub struct CapabilityMap { /* BTreeMap<Capability, CapabilityEntry> */ }
 impl CapabilityMap { pub fn builtin() -> Self; pub fn lookup(&self, c: Capability) -> CapabilityEntry; }
 
 // capacity.rs
-pub enum CapacityState { ReadyFast, Queued, ReadySlow, Unavailable, Unknown } // Unknown = 查询失败/非K3
+pub enum CapacityState { ReadyFast, Queued, ReadySlow, Unavailable, Unknown } // Unknown = 查询失败/非local scheduler
 pub struct CapacitySignal { pub state: CapacityState, pub eta_ms: u32, pub mem_headroom_mb: u32 }
 pub trait CapacityProbe: Send + Sync { fn query(&self, model: &str) -> CapacitySignal; } // 失败→Unknown(降级)
 pub struct HttpCapacityClient { /* base_url=http://127.0.0.1:8090, timeout */ }
@@ -126,11 +126,11 @@ pub fn decide_route(
 pub struct EdgeCloudRouter { map: CapabilityMap, probe: Box<dyn CapacityProbe>, form_factor: FormFactor }
 impl EdgeCloudRouter {
     pub fn route(&self, cap: Capability, model: &str, privacy: PrivacyClass, account: &AccountContext) -> RouteDecision;
-    // 个人版（非 K3）→ 一律走 cloud-preferred 静态路径（0 行为变化 guard）
+    // 个人版（非 local scheduler）→ 一律走 cloud-preferred 静态路径（0 行为变化 guard）
 }
 ```
 
-### 外部 HTTP 契约（消费 k3-scheduler，不实现）
+### 外部 HTTP 契约（消费 local-scheduler，不实现）
 
 ```
 GET http://127.0.0.1:8090/capacity?model=<model>
@@ -160,7 +160,7 @@ GET http://127.0.0.1:8090/capacity?model=<model>
 | 配额耗尽（quota=0）+ 任务可本地 | 降级 `Local`/`QueueLocal`（本地兜底）| — |
 | 配额耗尽 + 任务仅云可行（如 35b 本地跑不了）| `Reject{QuotaExhaustedNoLocal}` + UI 提示升级 | `quota-exhausted` |
 | cloud 能力 disabled（用户关）+ 仅云可行 | `Reject{CloudDisabledNoLocal}` | `cloud-disabled` |
-| 非 K3 形态（Laptop/Server）| **不查 /capacity**，走静态 cloud-preferred（=现状）| — |
+| 非 local scheduler 形态（Laptop/Server）| **不查 /capacity**，走静态 cloud-preferred（=现状）| — |
 
 **graceful degradation 总原则**：probe 不可达 → 静态二分（≈ 现状），绝不因协同层失败而 block 推理。
 
@@ -170,7 +170,7 @@ GET http://127.0.0.1:8090/capacity?model=<model>
 
 | 决策 | 归属层 | UI 显示 |
 |:--|:--|:--|
-| `Local` / `QueueLocal` | ⚡ 本地算力（K3 :8090，零云成本）| `~本地 · <eta>s`（QueueLocal 显示排队 eta）|
+| `Local` / `QueueLocal` | ⚡ 本地算力（local scheduler :8090，零云成本）| `~本地 · <eta>s`（QueueLocal 显示排队 eta）|
 | `Cloud` | 💰 时间/金钱（云 token，扣账户配额）| `~<tok> tok · $<cost>` + tier |
 | `Reject{QuotaExhausted}` | — | "本月配额已用完，升级会员 / 等下月重置" |
 
@@ -198,8 +198,8 @@ GET http://127.0.0.1:8090/capacity?model=<model>
 
 ## 10. 向后兼容
 
-- **新增模块，无 DB schema 变更**：`edge_cloud` 是新 path，老部署不触发（仅 K3 形态激活）。
-- **个人版（Laptop/Server）字节级 0 行为变化**：route 在非 K3 短路成静态 cloud-preferred；governor 既有 `governed_chat` 契约不变。
+- **新增模块，无 DB schema 变更**：`edge_cloud` 是新 path，老部署不触发（仅 local scheduler 形态激活）。
+- **个人版（Laptop/Server）字节级 0 行为变化**：route 在非 local scheduler 短路成静态 cloud-preferred；governor 既有 `governed_chat` 契约不变。
 - **OutboundGate / cloud_client 契约不变**：协同层在其上做决策，云分支仍调原 enforce。
 - **capability-map 远程覆盖**（后续）：无远程文件 → 内置 baseline = 当前静态偏好 freeze。
 
@@ -211,7 +211,7 @@ GET http://127.0.0.1:8090/capacity?model=<model>
 |:--|:--|:--|
 | R1 | **L0 隐私泄漏**（协同层 bug 把 L0 路由到云）| decide_route 硬断言 + proptest 不变量 + OutboundGate L0 二次拦截（defense-in-depth，脱敏永在 attune）|
 | R2 | probe 不可达拖垮请求路径 | 短超时（默认 1.5s）+ 失败立即 Unknown 降级；probe 在决策前一次性查，不进推理热路径 |
-| R3 | 个人版被误激活协同 | FormFactor::K3Appliance 单一 gate + guard 测试（probe 调用计数=0）|
+| R3 | 个人版被误激活协同 | FormFactor::LocalSchedulerAppliance 单一 gate + guard 测试（probe 调用计数=0）|
 | R4 | 配额竞态（并发耗尽）| 路由按读时快照决策；真实扣费仍由 cloud gateway 权威，attune 侧仅准入 hint，超扣由 gateway 拒（既有）|
 | R5 | lock ordering | edge_cloud 不持有 vault/vectors/fulltext 锁；probe HTTP 在锁外；决策纯函数无锁 |
 | R6 | 跨平台（probe HTTP）| reqwest+rustls 纯 Rust；mock 离线测；真机 §7.3 PENDING |
@@ -225,5 +225,5 @@ GET http://127.0.0.1:8090/capacity?model=<model>
 | S1 | 能力图 SSOT（capability.rs + yaml + golden 测）| feat(edge-cloud): capability map SSOT |
 | S2 | CapacitySignal + Probe trait + Mock + HttpCapacityClient | feat(edge-cloud): /capacity client + mock |
 | S3 | decide_route 纯函数 + RouteDecision + 隐私不变量测 | feat(edge-cloud): routing decision + L0 invariant |
-| S4 | EdgeCloudRouter 编排 + FormFactor guard + 个人版 0 回退测 | feat(edge-cloud): K3-only router + personal guard |
+| S4 | EdgeCloudRouter 编排 + FormFactor guard + 个人版 0 回退测 | feat(edge-cloud): local scheduler-only router + personal guard |
 | S5 | 集成测（mock scheduler HTTP）+ telemetry 接线 | test(edge-cloud): capacity integration + telemetry |

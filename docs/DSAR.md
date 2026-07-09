@@ -18,7 +18,7 @@ attune 的数据天然分两块：
 
 ### 本地 Vault (BYOK / self-host 用户)
 
-你的所有 vault 数据 (文档 / 批注 / chat / Project) **永远在你本地或你自管的 K3 一体机**。
+你的所有 vault 数据 (文档 / 批注 / chat / Project) **永远在你本地或你自管的 本地调度器设备**。
 导出/删除走 attune CLI:
 ```bash
 # 导出整个 vault (encrypted .tar 文件)

@@ -18,7 +18,7 @@
 │        出网审计日志 + CSV 导出                                  │
 │        适用：普通用户日常 RAG                                  │
 │                                                              │
-│ L3 🔐  LLM 语义脱敏（v0.7 Tier T3+/K3）                       │
+│ L3 🔐  LLM 语义脱敏（v0.7 Tier T3+/local scheduler）                       │
 │        chinese-roberta NER 识别人名/地名/化名/项目代号          │
 │        识别"上次会议提到的客户"等隐含指代                       │
 │        适用：律所核心业务 / 政企合规                            │
@@ -130,6 +130,6 @@ UI（v0.6.1 上线）：文件列表右键 → "标记为 🔒 机密"。
 ## 路线图
 
 - ✅ **v0.6.0** — L1 完整、L0 per-file、出网审计、F-Pro 跨域防御
-- 🟡 **v0.7** — L3 LLM 语义脱敏（chinese-roberta NER + Tier T3+/K3 自动启用）
+- 🟡 **v0.7** — L3 LLM 语义脱敏（chinese-roberta NER + Tier T3+/local scheduler 自动启用）
 - 🟡 **v0.7** — Settings → Privacy 完整 UI（per-folder override + tier 升级提示）
-- 🟡 **v0.8** — K3 一体机 L0 全本地链路（embedding/rerank/LLM 全 K3 服务，0 公网）
+- 🟡 **v0.8** — 本地调度器设备 L0 全本地链路（embedding/rerank/LLM 全 local scheduler 服务，0 公网）

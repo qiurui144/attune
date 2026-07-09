@@ -14,7 +14,7 @@
 - [6. Plugin pack 升级后异常](#6-plugin-pack-升级后异常)
 - [7. attune-pro signing key 泄露](#7-attune-pro-signing-key-泄露)
 - [8. 应急 plain-text export](#8-应急-plain-text-export)
-- [9. K3 一体机离线 rollback](#9-k3-一体机离线-rollback)
+- [9. 本地调度器设备离线 rollback](#9-local-scheduler-一体机离线-rollback)
 - [10. Exit code 速查](#10-exit-code-速查)
 
 ---
@@ -30,7 +30,7 @@
 | attune-pro plugin 启动后崩 | 🟡 high | §6 |
 | minisign 私钥泄露 | 🔴 critical | §7 |
 | backup 也损,要紧急导数据 | 🔴 critical | §8 |
-| K3 一体机镜像启动失败 | 🟡 high | §9 |
+| 本地调度器设备镜像启动失败 | 🟡 high | §9 |
 
 **通用红线**:
 
@@ -271,23 +271,23 @@ sqlite3 ~/.local/share/Attune/vault.db ".dump" > ~/attune-raw-$(date +%Y%m%d).sq
 
 ---
 
-## 9. K3 一体机离线 rollback
+## 9. 本地调度器设备离线 rollback
 
-**触发**:K3 reflash 新镜像后开机 fail(rv-baseos panic / attune service 起不来)。
+**触发**:local scheduler reflash 新镜像后开机 fail(rv-baseos panic / attune service 起不来)。
 
 **流程**(完全离线,无 GitHub 依赖):
 
-1. **拔 K3 电源**,SD card 插宿主机
+1. **拔 local scheduler 电源**,SD card 插宿主机
 2. **dd 老镜像回写**:
    ```bash
-   # 老镜像位于 ~/.cache/attune/k3-images/attune-k3-v1.0.0.img
-   sudo dd if=~/.cache/attune/k3-images/attune-k3-v1.0.0.img of=/dev/sdX bs=4M status=progress
+   # 老镜像位于 ~/.cache/attune/local-scheduler-images/attune-local-scheduler-v1.0.0.img
+   sudo dd if=~/.cache/attune/local-scheduler-images/attune-local-scheduler-v1.0.0.img of=/dev/sdX bs=4M status=progress
    sudo sync
    ```
-3. **SD card 插回 K3** → 启 → 应见 v1.0.0 旧 UI
-4. **若老镜像也无 cache**:走 厂商提供的 recovery tool(参 `docs/k3-ai-service/`)
+3. **SD card 插回 local scheduler** → 启 → 应见 v1.0.0 旧 UI
+4. **若老镜像也无 cache**:走 厂商提供的 recovery tool(参 `docs/local-scheduler-ai-service/`)
 
-**预防**:K3 用户**每次升级前**先 export vault 到 USB,镜像化升级**默认有数据丢失风险**(per UPGRADING.md §3.4)。
+**预防**:本地调度器用户**每次升级前**先 export vault 到 USB,镜像化升级**默认有数据丢失风险**(per UPGRADING.md §3.4)。
 
 ---
 

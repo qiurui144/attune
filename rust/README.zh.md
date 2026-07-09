@@ -478,7 +478,7 @@ Attune 双轨发版，共享同一份 Rust 后端代码：
 | 形态 | 二进制 | 适用场景 |
 |------|--------|---------|
 | **Attune Desktop** | `apps/attune-desktop`（Tauri 2 壳） | 笔电用户 — 双击 MSI / deb 安装，原生窗口 + 托盘 + 拖拽 |
-| **Attune Server**（headless） | `crates/attune-server/bin/headless.rs`（`attune-server-headless`） | K3 一体机 / NAS / 服务器 — `attune-server-headless --host 0.0.0.0 ...` |
+| **Attune Server**（headless） | `crates/attune-server/bin/headless.rs`（`attune-server-headless`） | 本地调度器设备 / NAS / 服务器 — `attune-server-headless --host 0.0.0.0 ...` |
 
 ### 本地构建
 

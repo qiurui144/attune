@@ -47,14 +47,14 @@
 1. **底座 ONNX 推理的 EP 自动选型**:`infer::provider::build_session()` 从单一 CUDA/CPU 判断,升级为 `AccelCapabilities → 推荐 EP 链 → ORT session`。覆盖 embedding / rerank / OCR(`infer/embedding.rs`、`infer/reranker.rs`、`ocr/nontext/layout.rs` 三处 `Session::builder()` 调用点)。
 2. **加速能力检测层** `AccelCapabilities`:综合 (a) `platform::detect_npu()` 硬件结果、(b) 当前 artifact **编译期可用的 EP**(`ort::ep::*::is_available()`)、(c) 环境变量覆盖(`ATTUNE_ORT_EP`),给出有序 EP 推荐链。
 3. **运行时 EP 可用性 probe + graceful CPU fallback**:EP 未编译进 artifact / 运行时注册失败 → 自动降级 CPU,**不 panic、不 error**(§7)。
-4. **Cargo features 矩阵 + 每平台 artifact 内置 EP 决策**(附录 A):明确 Linux deb / Win msi / macOS / K3 riscv64 各内置哪些 EP。
+4. **Cargo features 矩阵 + 每平台 artifact 内置 EP 决策**(附录 A):明确 Linux deb / Win msi / macOS / local scheduler riscv64 各内置哪些 EP。
 5. **EP 选型 telemetry**:每次 session 构建记录 `requested_ep / actual_ep / fallback_reason`,供 UI 显示「当前 embedding 跑在 CUDA / CPU」+ 诊断。
 
 ### 不做(本 spec 范围外,显式排除以防 scope creep)
 
 - **Ollama 后端切换**:Ollama 自管硬件后端(CUDA/ROCm/Vulkan/Metal/OpenVINO),attune 只通过 HTTP 调用,不干预其 EP。Chat/部分 embedding 走 Ollama 路径不受本 spec 影响。
 - **ASR 加速**:whisper.cpp 是独立 subprocess 二进制(可能各带 CPU/CUDA build),其加速由打包二进制决定,不经 `ort`,本 spec 不动。
-- **K3 一体机 IME/RVV 路径**:K3 走自研推理服务(`docs/k3-ai-service/`),底座经 K3 :8080 HTTP,不经本机 `ort` EP。K3 riscv64 artifact 本身只内置 CPU EP(见附录 A)。
+- **local scheduler 一体机 IME/RVV 路径**:local scheduler 走自研推理服务(`docs/local-scheduler-ai-service/`),底座经 local scheduler :8090 HTTP,不经本机 `ort` EP。local scheduler riscv64 artifact 本身只内置 CPU EP(见附录 A)。
 - **本地 LLM**:不在范围(M2 决策:LLM 默认云端 token)。
 - **真正执行驱动安装**:#6 的 `npu.rs` 已确立「只产出 consent-gated 命令字符串,不执行」的安全边界。本 spec **沿用**该边界,不新增任何自动提权/换内核/装运行时的执行能力。OpenVINO runtime / Ryzen AI SW / ROCm 的安装仍是 consent-gated 引导(见 §7 + 附录 A)。
 
@@ -341,7 +341,7 @@ EP 加速归属 **⚡ 本地算力层**(§ 成本感知与触发契约):
 | **AMD NPU(XDNA)** | **VitisAI EP**(Win/Ryzen AI SW;Linux amdxdna 早期) | amdxdna 早期 | 需 Ryzen AI SW 运行时 | n/a | **v1 仅检测(#6 已 ship)+ telemetry,不启用 VitisAI**;真集成 v2。Ollama 不支持 NPU |
 | **NVIDIA** | **CUDA**(已 ship)/ TensorRT(进阶);Ollama:CUDA | ✓(已 ship) | ✓ | n/a | CUDA 已实装;TensorRT v2 |
 | **CPU**(所有平台) | **CPU EP**(ORT 默认) | ✓ | ✓ | ✓ | **始终兜底**,链末位不变量 |
-| **K3 一体机(riscv64)** | CPU EP only(底座经 K3 :8080 HTTP,不经本机 ort) | ✓(CPU) | n/a | n/a | riscv64 artifact 只编 CPU;加速由 K3 服务自管 IME/RVV |
+| **local scheduler 一体机(riscv64)** | CPU EP only(底座经 local scheduler :8090 HTTP,不经本机 ort) | ✓(CPU) | n/a | n/a | riscv64 artifact 只编 CPU;加速由 local scheduler 服务自管 IME/RVV |
 | **macOS** | (CoreML EP 已有 feature) | n/a | n/a | 暂不做 | macOS 平台「暂不做」(§平台优先级);CoreML feature 保留,不投入 v1 验证 |
 
 ### A.3 每平台 artifact「内置哪些 EP」决策(v1 务实范围)
@@ -353,7 +353,7 @@ EP 加速归属 **⚡ 本地算力层**(§ 成本感知与触发契约):
 | **Windows msi**(P0) | CPU + **DirectML** | OpenVINO / VitisAI / CUDA | +DML dylib(**PENDING-VERIFY**,预期 < CUDA) | DirectML 是 Win 上对 NV/AMD/Intel **统一**的最稳 GPU 路径,单一 EP 覆盖多厂商,体积/兼容最优 |
 | **Windows 「Intel/AMD-NPU」可选包**(推后 v2) | CPU + OpenVINO(+ VitisAI) | — | PENDING | 需 OpenVINO / Ryzen AI SW runtime;v2 |
 | **macOS**(暂不做) | (CoreML feature 存在但不验证) | — | — | 平台暂不做 |
-| **K3 riscv64 镜像** | **CPU only** | 全部 GPU/NPU EP | ~0 | 底座经 K3 :8080,本机 ort 只需 CPU |
+| **local scheduler riscv64 镜像** | **CPU only** | 全部 GPU/NPU EP | ~0 | 底座经 local scheduler :8090,本机 ort 只需 CPU |
 
 ### A.4 运行时 EP 可用性 probe 策略
 

@@ -339,7 +339,7 @@ jobs:
         run: cargo test --release -p attune-core --test wasm_capability_gate
 
       # ── Build-shape guards: ubuntu only (host-OS-independent) ──
-      - name: attune-core builds with wasm-runtime feature OFF (K3 极小镜像路径)
+      - name: attune-core builds with wasm-runtime feature OFF (local scheduler 极小镜像路径)
         if: matrix.os == 'ubuntu-latest'
         working-directory: rust
         # GA checklist:去 wasmtime(wasm-runtime)后 native cap 仍编译过。

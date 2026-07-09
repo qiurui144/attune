@@ -1,12 +1,12 @@
 # G6 headless↔桌面功能 parity audit + 补差
 
 - 日期: 2026-06-22
-- 任务: #145 G6 (K3 spec `docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md` 中 G6「headless 二等公民 / 首次开箱纯 Web」标 ⚠️ 部分,完整 headless↔桌面对齐 audit 随 K3 v0.2 — 本轮兑现)
+- 任务: #145 G6 (local scheduler spec `docs/superpowers/specs/2026-06-22-local-scheduler-integration.md` 中 G6「headless 二等公民 / 首次开箱纯 Web」标 ⚠️ 部分,完整 headless↔桌面对齐 audit 随 local scheduler v0.2 — 本轮兑现)
 - base: develop @ c186067(防 stale:`git fetch + reset --hard origin/develop` 已做)
 - 分支: 见 git log
 
-> 注:prompt 引用的 `2026-06-10-k3-integration-gaps.md` 仓内不存在;实际 SSOT 是
-> `2026-06-22-k3-scheduler-integration.md`(其 G1-G8 对齐表逐字引用同一 gaps 文档命名)。
+> 注:prompt 引用的 `2026-06-10-local-scheduler-integration-gaps.md` 仓内不存在;实际 SSOT 是
+> `2026-06-22-local-scheduler-integration.md`(其 G1-G8 对齐表逐字引用同一 gaps 文档命名)。
 > G6 定义与 prompt 完全一致,据此执行。
 
 ---
@@ -43,7 +43,7 @@ webdav/git/email/rss)、search、chat、设置、导出、插件安装/marketpla
 | L2 | 设置→数据 文件夹管理新增目录 | 原生 picker(multiple) | **已有手填回退**:`onAddFolder` 在 Web 弹手填路径 modal(`showAddModal`)。**无落差** | — | 既有,无需动 |
 | L3 | 远程目录(WebDAV/本地)绑定 | 原生 picker(可选) | **已有手填回退**:`RemoteView.LocalForm` 常驻路径输入 + browse 仅桌面显示。**无落差** | — | 既有,无需动 |
 | L4 | OS 文件拖拽上传 | 拖文件进窗口 → `upload_dropped_paths` | Web 用标准 `<input type=file>` / 拖拽区上传(各 View 的 upload 入口)。功能等价,仅缺「拖进 OS 窗口」这一交互糖 | **P2(交互糖,功能不缺)** | 不补:Web 标准文件上传已覆盖「把文件入库」目标;OS-窗口级拖拽是壳特性,headless 无显示窗口本就无意义 |
-| L5 | 应用自动更新器 | 30s 被动检查 + 手动 check/download/restart(SettingsView「应用更新」块) | `isTauri=false` → 整块 `return null`,Web 无更新入口 | **P2(设计如此,非缺口)** | 不补:headless/K3 更新走 **apt/镜像重建/包管理器**(per CLAUDE.md 瘦包 + runtime-fetch 模型),不应也不能由 webview 内 in-app updater 负责。属正确的形态差异 |
+| L5 | 应用自动更新器 | 30s 被动检查 + 手动 check/download/restart(SettingsView「应用更新」块) | `isTauri=false` → 整块 `return null`,Web 无更新入口 | **P2(设计如此,非缺口)** | 不补:headless/local scheduler 更新走 **apt/镜像重建/包管理器**(per CLAUDE.md 瘦包 + runtime-fetch 模型),不应也不能由 webview 内 in-app updater 负责。属正确的形态差异 |
 | L6 | 系统托盘(show/quit) | 有 | headless 无 GUI,托盘无意义;停服走 `systemctl stop` / 进程管理 | **P2(N/A headless)** | 不补:headless 24h 常驻由 systemd/容器管理生命周期,托盘是桌面 GUI 概念 |
 
 **结论**:真正阻断 headless 全流程的 **P0 落差仅 L1 一项**;L2/L3 早已有手填回退(此前
@@ -59,7 +59,7 @@ sprint 修过,L1 被遗漏);L4/L5/L6 是「桌面 GUI/OS 特性」与「headless
 文件:`rust/crates/attune-server/ui/src/wizard/Step5Data.tsx`
 
 - `canPickFolder`(Tauri 存在)→ 保留原生目录弹窗;
-- `!canPickFolder`(纯 Web / K3 一体机)→ 渲染**手填绝对路径输入框 + 「添加文件夹」按钮**
+- `!canPickFolder`(纯 Web / local scheduler 一体机)→ 渲染**手填绝对路径输入框 + 「添加文件夹」按钮**
   (Enter 也可提交),push 进同一 `folderPaths` 状态;
 - 两条路径(picker / 手填)统一走既有 `api.post('/index/bind', {path, recursive:true})`
   —— 复用 server 侧 `bind_directory` + `validate_bind_path`(canonicalize 已拒绝不存在/
@@ -87,7 +87,7 @@ audit 未发现「桌面有 / Web 弱(非阻断)且应补」的 P1:L2/L3 已具�
 | 阶段 | 纯 Web 可达? | 备注 |
 |------|--------------|------|
 | vault init(设密码) | ✅ | wizard Step2,无 Tauri 门控 |
-| LLM wizard(会员网关 / BYOK / 本地 / K3 :8090) | ✅ | wizard Step3,K3 profile 已 ship(K3-S3) |
+| LLM wizard(会员网关 / BYOK / 本地 / local scheduler :8090) | ✅ | wizard Step3,local scheduler profile 已 ship(local-scheduler-S3) |
 | 硬件探测 | ✅ | wizard Step4,纯 Web |
 | **首次开箱关联文件夹** | ✅ **(本轮修复前 ❌)** | L1 手填回退补齐后纯 Web 可绑定监听目录 |
 | 后续加监听目录(设置→数据) | ✅ | L2 既有手填 modal |
@@ -98,7 +98,7 @@ audit 未发现「桌面有 / Web 弱(非阻断)且应补」的 P1:L2/L3 已具�
 | 插件安装 / marketplace | ✅ | MarketplaceView,纯 Web |
 | 备份 / DSAR | ✅ | 设置内,REST |
 
-**结论:补齐 L1 后,K3 headless「开机 → 纯 Web 完成 vault init + LLM/scheduler 配置 +
+**结论:补齐 L1 后,local scheduler headless「开机 → 纯 Web 完成 vault init + LLM/scheduler 配置 +
 采集(含本地目录)+ 搜索/chat + 导出 + 插件」全流程纯 Web 可达,无需桌面。** 唯三需桌面的
 能力(OS 拖拽糖 / in-app 更新器 / 系统托盘)是正当形态差异,headless 各有等价替代(标准
 文件上传 / 包管理器或镜像更新 / systemd 生命周期)。
@@ -139,6 +139,6 @@ build/clippy/test/i18n 门,未起真 server + Chrome;留给 RC/真机验收)。
 - **需桌面的(正当形态差异,不补)**:OS 窗口文件拖拽糖(L4)、in-app 自动更新器(L5)、
   系统托盘(L6)。headless 各有等价替代,补进 Web 无意义。
 - **留 v.next / 真机**:纯 Web headless 全流程 **真起服 + Playwright Chrome E2E**(§6.4 +
-  §7.3)未在本 worktree 执行 —— 属真机/真服验收范畴,建议随 K3 真机(K3_IP :8090)
+  §7.3)未在本 worktree 执行 —— 属真机/真服验收范畴,建议随 local scheduler 真机(LOCAL_SCHEDULER_IP :8090)
   或 GA 验收 §7.2 Gate3 一并跑(本轮已备齐纯 Web 可达性的代码面)。
 - **跨平台**:改动纯 TS/i18n,无 arch 特异代码,跨平台无新债。

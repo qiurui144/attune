@@ -135,7 +135,7 @@ attune 北极星是"**对你关注的内容，尽快获取准确的信息**"。�
 - 深研全自动 agentic 多 hop 浏览（依赖 #66 落地 + 速率/ToS 铁律）。
 - 跨设备 watch/digest 同步。
 - LLM 驱动的"主题自动发现"（从用户行为里聚类出 watch 候选）—— 本 sprint watch 由用户**显式声明**。
-- 定时 cron 级精细调度（本 sprint 复用 connector worker 的 interval 节奏 + 简单日/周 digest 周期；通用 cron 调度依赖 [[2026-06-10-k3-g5-durable-job-queue]] 之上的调度层，那是另一层）。
+- 定时 cron 级精细调度（本 sprint 复用 connector worker 的 interval 节奏 + 简单日/周 digest 周期；通用 cron 调度依赖 [[2026-06-10-local-scheduler-g5-durable-job-queue]] 之上的调度层，那是另一层）。
 
 ---
 

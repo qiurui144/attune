@@ -105,24 +105,24 @@ attune 当前是 single-vault. NAS 多用户场景:
 - 每用户独立 vault.db (用户 ID 进 path: ~/attune-{uid}/vault.db)
 - 后端跑多 process port 隔离 (v0.7 候选: 单进程 多 vault 支持)
 
-## 3. K3 一体机 (RISC-V)
+## 3. 本地调度器设备 (RISC-V)
 
 **目标用户**: 出厂预装, 零配置开机即用.
 
-K3 镜像 build pipeline 在 `rv-spine-triton` + `rv-llama-cpp` 项目, 此处仅描述
-attune 端集成. FormFactor 自动检测为 `K3Appliance`, LLM 默认走本地 Ollama (60 TOPS
+本地调度器镜像 build pipeline 在 `rv-spine-triton` + `rv-llama-cpp` 项目, 此处仅描述
+attune 端集成. FormFactor 自动检测为 `LocalSchedulerAppliance`, LLM 默认走本地 Ollama (60 TOPS
 INT4 via SpacemiT IME).
 
 ### 系统服务
 
-K3 镜像出厂 systemd unit `attune-k3.service` 启动, 含:
+本地调度器镜像出厂 systemd unit `attune-local-scheduler.service` 启动, 含:
 - attune-server-headless on :18900
 - ollama daemon (qwen2.5:3b 预装)
-- 推理服务 :8080 (SpacemiT EP, IME GPU offload)
+- 推理服务 :8090 (SpacemiT EP, IME GPU offload)
 
 ### 网络
 
-K3 出厂 IP DHCP, 用户:
+local scheduler 出厂 IP DHCP, 用户:
 1. 局域网扫 mDNS `_attune._tcp.local`
 2. 浏览器 `attune.local:18900` 即用
 3. 第一次访问 wizard (无主密码), 设密码完成
@@ -131,7 +131,7 @@ K3 出厂 IP DHCP, 用户:
 
 A/B 双分区 + signed firmware, OTA 拉新版 image:
 ```bash
-attune-cli k3 upgrade  # 从 engi-stack.com/firmware/k3 拉最新
+attune-cli local-scheduler upgrade  # 从 engi-stack.com/firmware/local-scheduler 拉最新
 ```
 
 ## 4. Docker / GitHub Container Registry (ghcr.io)
@@ -181,7 +181,7 @@ docker run -d \
 | 形态 | 用途 | UI | Ollama | 推荐场景 |
 |------|------|----|----|------|
 | `.deb` / `.msi` / AppImage | 桌面应用（含系统托盘） | ✅ Tauri WebView | 本机自动检测 | 笔电 / 工作站个人使用 |
-| Docker `attune-server` | Headless server（无桌面） | ✅ 嵌入 Web UI（浏览器访问） | 需宿主机 Ollama 或 K3 推理服务 | NAS / VPS / 团队共享 |
+| Docker `attune-server` | Headless server（无桌面） | ✅ 嵌入 Web UI（浏览器访问） | 需宿主机 Ollama 或 local scheduler 推理服务 | NAS / VPS / 团队共享 |
 | Docker `attune-cli` | 命令行工具（无 UI） | ❌ | ❌ | 脚本自动化 / CI 管道 |
 
 > Docker 镜像不含 Ollama、whisper.cpp 和 PP-OCR 底座模型。
@@ -189,7 +189,7 @@ docker run -d \
 
 ### 平台支持
 
-镜像构建矩阵：`linux/amd64` + `linux/arm64`（aarch64，支持 K3 / 树莓派 / NAS）。
+镜像构建矩阵：`linux/amd64` + `linux/arm64`（aarch64，支持 local scheduler / 树莓派 / NAS）。
 
 ## 5. attune-desktop-installers（企业批量分发）
 

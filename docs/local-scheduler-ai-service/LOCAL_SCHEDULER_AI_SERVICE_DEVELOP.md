@@ -1,9 +1,9 @@
-# K3 AI 服务开发文档
+# local scheduler AI 服务开发文档
 
 ## 架构
 
 ```
-server.py (Flask :8080)
+server.py (Flask :8090)
   ├── AIEngine
   │   ├── TokenizerPool     → simple_tokenizer.py (纯 Python WordPiece)
   │   ├── OrtSessionPool    → onnxruntime (系统 SpacemiT ORT 1.24.2)
@@ -23,13 +23,14 @@ server.py (Flask :8080)
 ## 本地开发
 
 ```bash
-# 在 K3 上直接修改
-ssh root@192.168.100.209
+# 在 local scheduler 上直接修改
+LOCAL_SCHEDULER_HOST=${LOCAL_SCHEDULER_HOST:-local-scheduler.local}
+ssh root@$LOCAL_SCHEDULER_HOST
 cd /root/ai-services
 vim server.py
 
 # 重启
-systemctl restart k3-ai
+systemctl restart local-scheduler-ai
 
 # 查看日志
 tail -f /tmp/ai-service.log
@@ -39,9 +40,9 @@ tail -f /tmp/ai-service.log
 
 ```bash
 # 修改后部署
-sshpass -p 'bianbu' scp server.py simple_tokenizer.py \
-  root@192.168.100.209:/root/ai-services/
-sshpass -p 'bianbu' ssh root@192.168.100.209 "systemctl restart k3-ai"
+LOCAL_SCHEDULER_HOST=${LOCAL_SCHEDULER_HOST:-local-scheduler.local}
+scp server.py simple_tokenizer.py root@$LOCAL_SCHEDULER_HOST:/root/ai-services/
+ssh root@$LOCAL_SCHEDULER_HOST "systemctl restart local-scheduler-ai"
 ```
 
 ## 添加新模型
@@ -53,7 +54,7 @@ sshpass -p 'bianbu' ssh root@192.168.100.209 "systemctl restart k3-ai"
 
 ## ORT 版本说明
 
-服务使用 K3 系统预装的 **SpacemiT ORT 1.24.2**（Python 包）：
+服务使用 local scheduler 系统预装的 **SpacemiT ORT 1.24.2**（Python 包）：
 - 优点：SpacemiT 优化过的 RISC-V kernel，无需额外配置
 - 限制：不支持我们的 `MlasRiscvSetDispatch` API（FP32 dispatch 不生效）
 
@@ -77,7 +78,7 @@ CLEAN_BUILD=1 bash scripts/build-rva23.sh
 cd src/onnxruntime/build/Linux/Release
 cmake --build . --config Release -j24
 # 部署
-scp libonnxruntime.so.1.23.2 root@K3:/opt/rvv-opt/ort-rva23/
+scp libonnxruntime.so.1.23.2 root@local scheduler:/opt/rvv-opt/ort-rva23/
 ```
 
 ### whisper.cpp 交叉编译 (宿主机)
@@ -85,7 +86,7 @@ scp libonnxruntime.so.1.23.2 root@K3:/opt/rvv-opt/ort-rva23/
 ```bash
 cd /home/qiurui/Documents/RV/rv-whisper-cpp
 bash scripts/build-rva23.sh
-scp build/bin/whisper-cli* root@K3:/opt/rvv-opt/whisper-cpp/bin/
+scp build/bin/whisper-cli* root@local scheduler:/opt/rvv-opt/whisper-cpp/bin/
 ```
 
 ## 上游补丁

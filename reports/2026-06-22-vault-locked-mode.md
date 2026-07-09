@@ -1,11 +1,11 @@
-# Report: Vault Locked-Mode 降级运转 + Auto-Unlock 框架 (K3 G3)
+# Report: Vault Locked-Mode 降级运转 + Auto-Unlock 框架 (local scheduler G3)
 
 **Date**: 2026-06-22 · **Task**: #141 · **Branch tip**: a513806 (3 commits on develop, NOT pushed)
 **Spec**: `docs/superpowers/specs/2026-06-22-vault-locked-mode.md` (§3.1 11 节)
 
 ## 背景
 
-K3 一体机 24h 常驻,凌晨断电重启 → server 启动时 vault LOCKED(无内存密钥)。旧行为:
+local scheduler 一体机 24h 常驻,凌晨断电重启 → server 启动时 vault LOCKED(无内存密钥)。旧行为:
 后台 agents 仅在 unlock 路径启动(reboot 后全停),inbound upload 因取不到 DEK 直接 403 丢失。
 G3 补 locked-mode 降级:输入安全暂存(加密、无明文)+ agents 安静暂停 + 解锁自动补处理。
 

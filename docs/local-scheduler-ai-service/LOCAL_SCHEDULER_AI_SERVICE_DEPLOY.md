@@ -1,15 +1,15 @@
-# K3 AI 推理服务部署文档
+# local scheduler AI 推理服务部署文档
 
-> SpacemiT K3 (X100 8核 2.4GHz, VLEN=256, 16GB LPDDR5)
-> IP: 192.168.100.209 | 用户: root | 密码: bianbu
+> SpacemiT local scheduler (X100 8核 2.4GHz, VLEN=256, 16GB LPDDR5)
+> Host: `local-scheduler.local` or the deployment-specific host. Credentials are provisioned by the deployment owner.
 > 更新: 2026-04-19
 
 ## 服务概述
 
-K3 作为 AI 推理计算节点，提供四场景 HTTP API，供 attune/attune-enterprise 远程调用：
+local scheduler 作为 AI 推理计算节点，提供四场景 HTTP API，供 attune/attune-enterprise 远程调用：
 
 ```
-attune (x86/ARM)  ──HTTP──→  K3 :8080
+attune (x86/ARM)  ──HTTP──→  local scheduler :8090
                               ├── POST /v1/embeddings   文本向量化
                               ├── POST /v1/rerank       文档重排序
                               ├── POST /v1/transcribe   语音转文字
@@ -23,23 +23,25 @@ attune (x86/ARM)  ──HTTP──→  K3 :8080
 ### 服务管理
 
 ```bash
+LOCAL_SCHEDULER_HOST=${LOCAL_SCHEDULER_HOST:-local-scheduler.local}
+
 # 启动（IME 商业模式，默认）
-ssh root@192.168.100.209 "systemctl start k3-ai"
+ssh root@$LOCAL_SCHEDULER_HOST "systemctl start local-scheduler-ai"
 
 # 启动（RVV 上游模式）
-ssh root@192.168.100.209 "bash /root/ai-services/start.sh rvv"
+ssh root@$LOCAL_SCHEDULER_HOST "bash /root/ai-services/start.sh rvv"
 
 # 停止
-ssh root@192.168.100.209 "systemctl stop k3-ai"
+ssh root@$LOCAL_SCHEDULER_HOST "systemctl stop local-scheduler-ai"
 
 # 状态
-ssh root@192.168.100.209 "systemctl status k3-ai"
+ssh root@$LOCAL_SCHEDULER_HOST "systemctl status local-scheduler-ai"
 
 # 日志
-ssh root@192.168.100.209 "tail -f /tmp/ai-service.log"
+ssh root@$LOCAL_SCHEDULER_HOST "tail -f /tmp/ai-service.log"
 
 # 开机自启（已启用）
-ssh root@192.168.100.209 "systemctl enable k3-ai"
+ssh root@$LOCAL_SCHEDULER_HOST "systemctl enable local-scheduler-ai"
 ```
 
 ## API 文档
@@ -82,7 +84,7 @@ ssh root@192.168.100.209 "systemctl enable k3-ai"
 ```json
 {
   "query": "RISC-V AI推理优化",
-  "documents": ["向量化指令加速", "天气预报", "SpacemiT K3处理器"],
+  "documents": ["向量化指令加速", "天气预报", "SpacemiT local scheduler处理器"],
   "model": "bge-reranker-base"
 }
 ```
@@ -91,7 +93,7 @@ ssh root@192.168.100.209 "systemctl enable k3-ai"
 ```json
 {
   "results": [
-    {"index": 2, "relevance_score": 0.928, "document": "SpacemiT K3处理器"},
+    {"index": 2, "relevance_score": 0.928, "document": "SpacemiT local scheduler处理器"},
     {"index": 0, "relevance_score": 0.933, "document": "向量化指令加速"},
     {"index": 1, "relevance_score": 0.643, "document": "天气预报"}
   ],
@@ -116,7 +118,7 @@ ssh root@192.168.100.209 "systemctl enable k3-ai"
 
 **请求 (文件上传)**:
 ```bash
-curl -X POST http://192.168.100.209:8080/v1/transcribe \
+curl -X POST http://local-scheduler.local:8090/v1/transcribe \
   -F "file=@audio.wav" -F "model=whisper-small-q8"
 ```
 
@@ -147,7 +149,7 @@ curl -X POST http://192.168.100.209:8080/v1/transcribe \
 
 **请求 (文件上传)**:
 ```bash
-curl -X POST http://192.168.100.209:8080/v1/ocr -F "file=@document.png"
+curl -X POST http://local-scheduler.local:8090/v1/ocr -F "file=@document.png"
 ```
 
 **响应**:
@@ -187,15 +189,15 @@ curl -X POST http://192.168.100.209:8080/v1/ocr -F "file=@document.png"
 use reqwest::Client;
 use serde_json::json;
 
-const K3_URL: &str = "http://192.168.100.209:8080";
+const LOCAL_SCHEDULER_URL: &str = "http://local-scheduler.local:8090";
 
 // Embedding
-let resp = client.post(format!("{K3_URL}/v1/embeddings"))
+let resp = client.post(format!("{LOCAL_SCHEDULER_URL}/v1/embeddings"))
     .json(&json!({"input": texts, "model": "bge-base"}))
     .send().await?;
 
 // Reranker
-let resp = client.post(format!("{K3_URL}/v1/rerank"))
+let resp = client.post(format!("{LOCAL_SCHEDULER_URL}/v1/rerank"))
     .json(&json!({"query": query, "documents": docs}))
     .send().await?;
 ```
@@ -205,20 +207,20 @@ let resp = client.post(format!("{K3_URL}/v1/rerank"))
 ```python
 import requests
 
-K3 = "http://192.168.100.209:8080"
+LOCAL_SCHEDULER = "http://local-scheduler.local:8090"
 
 # Embedding
-r = requests.post(f"{K3}/v1/embeddings",
+r = requests.post(f"{LOCAL_SCHEDULER}/v1/embeddings",
     json={"input": ["文本"], "model": "bge-base"})
 embeddings = r.json()["data"][0]["embedding"]  # 768d vector
 
 # Reranker
-r = requests.post(f"{K3}/v1/rerank",
+r = requests.post(f"{LOCAL_SCHEDULER}/v1/rerank",
     json={"query": "查询", "documents": ["文档1", "文档2"]})
 results = r.json()["results"]  # sorted by relevance_score
 
 # ASR
-r = requests.post(f"{K3}/v1/transcribe",
+r = requests.post(f"{LOCAL_SCHEDULER}/v1/transcribe",
     json={"audio_path": "/path/to/audio.wav"})
 text = r.json()["text"]
 ```
@@ -251,7 +253,7 @@ IME 模式在 INT8 场景比 RVV 快 30-49%，FP32 场景两线一致。
 ├── server.py            # 主服务 (Flask)
 ├── simple_tokenizer.py  # 纯 Python BERT tokenizer
 ├── start.sh             # 管理脚本
-└── k3-ai.service        # systemd unit
+└── local-scheduler-ai.service        # systemd unit
 
 /opt/rvv-opt/ort-rva23/
 ├── libonnxruntime-v5.so.1.23.2   # 我们的 ORT (RVV INT8 + dispatch)
@@ -274,7 +276,7 @@ IME 模式在 INT8 场景比 RVV 快 30-49%，FP32 场景两线一致。
 
 ```bash
 # 服务未响应
-systemctl restart k3-ai
+systemctl restart local-scheduler-ai
 tail -20 /tmp/ai-service.log
 
 # 性能退化

@@ -1,6 +1,6 @@
 # Attune 安装指南
 
-> 跨平台安装路径速查。每条路径都包含 Ollama 自动安装 + 硬件自适应 + 4 必要底座（Embedding / Reranker / ASR / OCR）。**LLM 不在本地必装清单**——笔电默认走远端 token，K3 一体机镜像例外。
+> 跨平台安装路径速查。每条路径都包含 Ollama 自动安装 + 硬件自适应 + 4 必要底座（Embedding / Reranker / ASR / OCR）。**LLM 不在本地必装清单**——笔电默认走远端 token，本地调度器设备镜像例外。
 
 ## 总览
 
@@ -36,7 +36,7 @@ attune 装包后立刻就绪以下底座：
    - Gemini（Gemini Advanced / Google AI Studio）
    - DeepSeek / Qwen / 其他 OpenAI 兼容
 3. **本地 Ollama**（advanced）— 当前不主推，研发成本高
-   - K3 一体机镜像构建时 `ATTUNE_FORM_FACTOR=k3` 让 postinst 预装 qwen2.5:1.5b/3b
+   - 本地调度器设备镜像构建时 `ATTUNE_FORM_FACTOR=local-scheduler` 让 postinst 预装 qwen2.5:1.5b/3b
    - 笔电用户选 Ollama 时手动 `ollama pull qwen2.5:3b`
 
 ## Linux
@@ -68,14 +68,14 @@ attune-desktop                   # 启动 GUI
      - gfx900 / 906 / 908 / 90a / 940 / 942 / 1100 / 1101 / 1200 / 1201 → 原生支持，无 override
   3. **systemd 服务**：启用 ollama systemd 单元 + API ready 探测（15s 超时）；如果 Ollama 安装跳过 systemd（新版 install.sh 在 Ubuntu 25.10+ 默认 user-mode），自己写最小化 unit + 创建 user/group
   4. **Embedding 底座**：`ollama pull bge-m3` 或 `bge-small`（按 RAM tier）
-  5. **K3 路径** (form factor 检测命中)：再 `ollama pull qwen2.5:3b` 或 `1.5b`（**笔电不走这条**）
+  5. **本地调度器路径** (form factor 检测命中)：再 `ollama pull qwen2.5:3b` 或 `1.5b`（**笔电不走这条**）
   6. **ASR 底座**：whisper-cli symlink 到 /usr/local/bin + 下载 ggml-small-q8.bin
   7. **OCR 底座**：下载 PP-OCRv5 mobile 4 个 ONNX 文件到 `~/.local/share/attune/models/ppocr/`
   8. **Reranker**：lazy（首次搜索查询时 hf_hub 自动下载）
 
-**Form factor 检测**（决定是否 K3 路径）：
-- `ATTUNE_FORM_FACTOR=k3` env var override（K3 镜像构建时 systemd-environment.d 写）
-- `/sys/class/dmi/id/product_name` 含 `k3` 或 `jetson` 关键字
+**Form factor 检测**（决定是否 本地调度器路径）：
+- `ATTUNE_FORM_FACTOR=local-scheduler` env var override（本地调度器镜像构建时 systemd-environment.d 写）
+- `/sys/class/dmi/id/product_name` 含 `local-scheduler` 或 `jetson` 关键字
 - 否则默认 `laptop`（不预装 LLM）
 
 **卸载**：

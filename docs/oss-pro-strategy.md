@@ -130,11 +130,11 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 | **Pro+** | ¥299 / 年 | Lite + **全部**纵向插件包 + cloud-sync，3 设备 | 跨学科自由职业者、深度用户 |
 | **Team** | ¥999 / 月起，按席位 | Pro+ + plugin-registry (内部插件) + audit log + 团队协作 | 中小律所、售前团队 (5–50 人) |
 | **Enterprise** | 定制 (年签) | Team + SSO + on-prem 部署 + SLA + 行业咨询 | 大律所、医院、高校 (50+ 人) |
-| **K3 一体机** | ¥6,999 起 (硬件 + Pro+ 一年) | 设备 + 捆绑本地 LLM + 上门安装 + 远程支持 | 不愿装软件的传统行业用户（小诊所、传统律所）|
+| **本地调度器设备** | ¥6,999 起 (硬件 + Pro+ 一年) | 设备 + 捆绑本地 LLM + 上门安装 + 远程支持 | 不愿装软件的传统行业用户（小诊所、传统律所）|
 
 **定价锚点说明：**
 - 律师 ¥99/年 Pro = 每周省 ~1 小时合同审查 ⇒ 5 倍 ROI（律师时薪 ¥500-2000）
-- ¥6,999 K3 = 一台办公电脑同价 ⇒ 新建律所装备级支出能接受
+- ¥6,999 local scheduler = 一台办公电脑同价 ⇒ 新建律所装备级支出能接受
 - ¥999/月 Team 5 席起步 = ¥200/席/月 ⇒ 落在 SMB 专业 SaaS 工具正常范围
 - Lite 永久免费 — 没有定时炸弹试用，没有 nag screen。Lite 用户是漏斗 + 长尾社区
 
@@ -185,7 +185,7 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 | 身份 | SSO (SAML / OIDC) | Enterprise |
 | 部署 | On-prem 部署，私有安装包 + 隔离网支持 | Enterprise |
 | 支持 | 行业咨询、定制 prompt 调优、专属 CSM | Enterprise |
-| 硬件 | K3 一体机 OS image 捆绑 Qwen 1.5B + 上门安装 + 远程支持 | K3 SKU |
+| 硬件 | 本地调度器设备 OS image 捆绑 Qwen 1.5B + 上门安装 + 远程支持 | local scheduler SKU |
 
 ### 4.3 新功能归类决策规则（v2 — 三产品矩阵）
 
@@ -219,8 +219,8 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 | **M1** | 现在 → +2 | OSS v0.6.0 GA | rc.1 (今天) → soak 7 天 → GA | bump cargo dep tag = v0.6.0；law-pro 烟测新 attune-core |
 | **M2** | +3 → +4 | law-pro 跑通新 attune | 维护为主 (W4 followups #1-#5) | 全部 5 个 law-pro capabilities 接 J5 confidence + breadcrumb sidecar；plugin-build pipeline 自动签名 signed `.tar.gz` plugin package |
 | **M3** | +5 → +8 | 商业化 v1 上线 | 维护 + W5 K1 sleeptime / A2 conflict detection 起步 | License key 后端 (Ed25519 + 离线校验) ；订阅页 (Lite ¥0 / Pro ¥99 / Pro+ ¥299) 上线；10–30 律师种子用户 |
-| **M4** | +9 → +16 | K3 一体机 v1 | 维护 + W7-8 plugin SDK 双语 + CRDT 准备 | K3 OS image 捆绑 attune + Qwen 1.5B；售前流程 + 上门安装 SOP；首批 10 台硬件用户 |
-| **M5** | +17 → +24 | cloud-sync + plugin registry | 维护 + W9-10 K3 items keys (per Standard Notes 004 spec) | 加密同步后端 (DEK 永不离机)；内部 plugin marketplace beta |
+| **M4** | +9 → +16 | 本地调度器设备 v1 | 维护 + W7-8 plugin SDK 双语 + CRDT 准备 | local scheduler OS image 捆绑 attune + Qwen 1.5B；售前流程 + 上门安装 SOP；首批 10 台硬件用户 |
+| **M5** | +17 → +24 | cloud-sync + plugin registry | 维护 + W9-10 local scheduler items keys (per Standard Notes 004 spec) | 加密同步后端 (DEK 永不离机)；内部 plugin marketplace beta |
 
 **耦合规则：** Pro 发版滞后 OSS 发版。永远不发依赖未发布 OSS API 的 Pro 功能。`attune-pro/docs/versioning.md` 的跨仓版本矩阵就是契约。
 
@@ -235,7 +235,7 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 | Apache-2.0 vs AGPL 派系争议 | 低 | 暂保持 Apache-2.0。若出现规模化 free-rider 商业 fork，再评估 dual-license (Apache-2.0 + Commercial) — 但不预设限制 |
 | Pro 价值不够 — 用户不付费 | **高** | law-pro 必须证明 3 倍 ROI。W4 J6 公开 RAG 数字是武器：不只 "law-pro 比 law-basic 强"，而是 "law-pro vs 同语料 competitor baseline 的公开数字" |
 | 中外双市场 | 中 | 双语文档已就位。中国优先纵向：律师 / 售前 (现有 RPA + 中文法律语料)。国际优先：academic-pro / medical-pro (英文语料更丰富) |
-| K3 一体机售后成本失控 | 中 | M4 前定 SLA + 远程支持工具链。初期限 10 台/月，控制运营压力 |
+| 本地调度器设备售后成本失控 | 中 | M4 前定 SLA + 远程支持工具链。初期限 10 台/月，控制运营压力 |
 | License key 盗用 / 共享 | 中 | License key 含设备指纹 (per `license-key-design.md`)；公开吊销列表；M5 上线 cloud-sync 用量异常检测 |
 | 商业代码意外 backport 到开源仓 | 高 | M2 计划：CI 规则阻止 `attune` 与 `attune-pro` 之间出现 verbatim 复制（除测试外）。Reviewer 按规则审查 |
 | OSS 贡献者 burnout (没明确变现回路) | 中 | 维护者补贴来自 Pro 收入；M3 起开 OSS 贡献 bounty 计划，资金来自 Pro 利润 |
@@ -278,7 +278,7 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 
 | 问题 | 暂缓原因 | 重审时间 |
 |------|---------|---------|
-| 是否接受 VC 投资加速 K3 硬件？ | 早期 — 先 bootstrap M1-M3 学清楚单位经济 | M4 (首批 10 台 K3 销售后) |
+| 是否接受 VC 投资加速 local scheduler 硬件？ | 早期 — 先 bootstrap M1-M3 学清楚单位经济 | M4 (首批 10 台 local scheduler 销售后) |
 | `cloud-sync` 是否独立 `attune-cloud` 仓？ | 当前规模仓库开销 > 收益 | 当 `attune-pro/services/` 超 5 个服务 |
 | 是否发布 "Pro 等价" 社区插件作为社会公益？ | 影响收入；削弱 Pro 升级路径 | 仅当 Pro 达 ¥10M ARR 且有余力回馈时 |
 | Lite 用户是否给*某种*同步 (如 1 设备免费、3 设备 Pro+)？ | 同步基建成本 > 当前规模 Lite 获客价值 | Lite MAU 达 100k 时重审 |
@@ -303,12 +303,12 @@ case schema）M3+ 商业化时可能放 git submodule (`legal-prompts-pack`) —
 | 日期 | 决策 | 状态 |
 |------|------|------|
 | 2026-04-25 | 行业纵向第一刀切：律师 | Active (CLAUDE.md, industry-attune-design.md) |
-| 2026-04-25 | LLM 不捆绑安装包；远端 token 默认；K3 可捆绑本地 LLM | Active (CLAUDE.md cost & trigger contract) |
+| 2026-04-25 | LLM 不捆绑安装包；远端 token 默认；local scheduler 可捆绑本地 LLM | Active (CLAUDE.md cost & trigger contract) |
 | 2026-04-25 | 平台优先级：Windows P0 → Linux P1 → macOS 暂不做 | Active (CLAUDE.md) |
 | 2026-04-27 | Chrome 扩展 = 通用浏览状态知识源 (不止 AI 对话) | Active (W3 batch B 已发) |
 | 2026-04-27 | 资源治理基线：每个后台任务限流 (H1) | Active (W3 W1 已发) |
 | 2026-04-27 | 双语文档强制要求所有公开材料 | Active |
-| 2026-04-27 (v1) | OSS-Pro 分割 = Thick OSS-core；定价 ¥99 / ¥299 / ¥999/月 / 定制 + ¥6,999 K3 | **被 v2 取代**（定位审计发现 OSS 在行业方向上太厚）|
+| 2026-04-27 (v1) | OSS-Pro 分割 = Thick OSS-core；定价 ¥99 / ¥299 / ¥999/月 / 定制 + ¥6,999 local scheduler | **被 v2 取代**（定位审计发现 OSS 在行业方向上太厚）|
 | **2026-04-27 (v2)** | **三产品矩阵：attune (OSS, 通用) × attune-pro (个人行业增强) × attune-enterprise (B2B 小团队)。OSS 不含任何行业插件。** | **Active** |
 | **2026-04-27 (v2)** | **v0.6.0-rc.2 边界瘦身：删 4 个 builtin yaml + CaseNo extractor + CHAT_TRIGGER_KEYWORDS const；全部迁 attune-pro plugin packs** | **Active** |
 | **2026-04-27 (v2)** | **定价：保留 v1 数字，详细分级策略推迟到 M3 商业化（per "暂时没有任何用户，都可以转身" 用户授权）** | **Active** |

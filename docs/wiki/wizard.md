@@ -54,7 +54,7 @@ Endpoint：https://gateway.engi-stack.com/v1
 
 ### 本地 Ollama（高级）
 
-K3 一体机用户或配备独显的笔电用户，可选择 Ollama 本地 LLM：
+本地调度器设备用户或配备独显的笔电用户，可选择 Ollama 本地 LLM：
 
 ```bash
 # 先安装并启动 Ollama

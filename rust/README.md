@@ -435,7 +435,7 @@ Attune ships in two forms (same Rust backend code):
 | Form | Binary | Use Case |
 |------|--------|----------|
 | **Attune Desktop** | `apps/attune-desktop` (Tauri 2 shell) | Laptop users — double-click MSI/deb, native window + tray + drag-drop |
-| **Attune Server** (headless) | `crates/attune-server/bin/headless.rs` (`attune-server-headless`) | K3 appliance / NAS / server — `attune-server-headless --host 0.0.0.0 ...` |
+| **Attune Server** (headless) | `crates/attune-server/bin/headless.rs` (`attune-server-headless`) | Local scheduler appliance / NAS / server — `attune-server-headless --host 0.0.0.0 ...` |
 
 ### Build (local)
 

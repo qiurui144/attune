@@ -100,7 +100,7 @@ ACP / Agent Flow 质量门（§2.4）同样三视角并存：governor 单元（�
 | F-06-WEBSEARCH | 浏览器自动化网络搜索 + 30d 加密缓存 | F-15-MCP | Python stdio shim 包 REST 供 MCP 客户端 |
 | F-07-EVOLUTION | episodic 记忆固化 + SkillEvolver 失败信号扩展 | F-16-DISTRIBUTION | Tauri 2 桌面（Win MSI/NSIS、Linux deb/AppImage）+ NAS HTTPS + 硬件 profile |
 | F-08-BROWSEEXT | Chrome 扩展 G1/G2/G5：通用浏览捕获 + 自动书签 + 隐私面板 | F-17-PRIVACY | 三级隐私（L0 chunk 隔离 / L1 PII 占位 / L3）+ 跨域防御 |
-| F-09-FORMFACTOR | FormFactor split（Laptop/K3Appliance/Server/Unknown）+ LLM 默认路径 | F-18-QUALITY | K2 Parse golden set（CI 门）+ RAGAS 风格 benchmark harness |
+| F-09-FORMFACTOR | FormFactor split（Laptop/LocalSchedulerAppliance/Server/Unknown）+ LLM 默认路径 | F-18-QUALITY | K2 Parse golden set（CI 门）+ RAGAS 风格 benchmark harness |
 
 简版覆盖概览（v1.1.0 状态，新能力 ACP/Agent Flow 见 §2.4）：
 

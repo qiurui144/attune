@@ -54,7 +54,7 @@ attune 桌面/服务端首次启动走 5 步 wizard, 完成后进入主 UI. 本�
 
 **FormFactor 形态感知** (per [ADR 0002](adr/0002-formfactor-llm-split.md)):
 - Laptop / Server / Unknown → 默认呈现"云端 API"卡片优先
-- K3 一体机 → 额外显示"本地 Ollama" 自动检测卡片
+- 本地调度器设备 → 额外显示"本地 Ollama" 自动检测卡片
 
 ## Step 4 — 硬件
 

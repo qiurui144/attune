@@ -38,7 +38,7 @@
 
 **与产品 positioning 对齐**（CLAUDE.md §成本契约 + 隐私优先）：attune = "降低 token + **数据安全**"。文档级隐私是"数据安全"叙事的最后一块拼图——让用户能**安全导出/分享一份脱敏后的文档**，而非只保护 chat。零行业绑定（OSS 通用），律师/医生/HR 等行业增强走 attune-pro 注册 `PiiExtractor`（已有扩展点）。
 
-**北极星自查**：(a) 服务北极星？✅ 数据安全。(b) 追学术指标？否——复用现成 KVM 代码。(c) 偏离硬件约束？否——纯 CPU 检测/遮罩可跑（RKNN face 是可选 feature，K3/RK3588 才启用）。
+**北极星自查**：(a) 服务北极星？✅ 数据安全。(b) 追学术指标？否——复用现成 KVM 代码。(c) 偏离硬件约束？否——纯 CPU 检测/遮罩可跑（RKNN face 是可选 feature，local scheduler/RK3588 才启用）。
 
 ---
 
@@ -49,7 +49,7 @@
 - **S2 文件字节级脱敏**：移植 `redactors/text.rs` (PDF 内容流等长替换 + OOXML `<w:t>`/sharedStrings 替换)；产出脱敏后文件。复用 attune 已有可逆 placeholder（**改进 KVM**：KVM 是不可逆黑块，attune 走 `[KIND_N]` 可逆 token，导出场景需要可逆性）。
 - **S3 机密文档拦截 (G4)**：移植 `classifier.rs` Aho-Corasick 关键词 + 文档分级 (normal/sensitive/classified)，接入 OutboundGate——`Classified` 文档在导出/出网点 **fail-closed block**。
 - **S4 文档分级 → OutboundGate**：classification 映射到现有 PrivacyTier 决策（classified → 视同 L0 永不出网 / sensitive → 强制脱敏）。
-- **S5 图像脱敏 (G3，可选 feature)**：移植 `redactors/image_red.rs` 黑框遮罩 + `face_det.rs`（`#[cfg(feature="rknn")]`，K3/RK3588 才编）。x86 降级为 regex-only（无图像 PII）。
+- **S5 图像脱敏 (G3，可选 feature)**：移植 `redactors/image_red.rs` 黑框遮罩 + `face_det.rs`（`#[cfg(feature="rknn")]`，local scheduler/RK3588 才编）。x86 降级为 regex-only（无图像 PII）。
 - **S6 检测置信度融合 (借鉴)**：把 KVM 的 `fuse_confidence` 思路并入 attune `dedupe_overlaps`（低优先，nice-to-have）。
 
 ### 不做 (写死，scope creep 禁止)
@@ -72,7 +72,7 @@
  文件 upload ──► parser (PDF/DOCX/XLSX/img) ──► DocPrivacyScanner
                                                    │  ├─ RegexDetector (复用 pii::patterns, 12 类)
                                                    │  ├─ NerDetector   (复用 pii::ner 中文姓名/地址)
-                                                   │  ├─ [feat rknn] FaceDetector (K3/RK3588)
+                                                   │  ├─ [feat rknn] FaceDetector (local scheduler/RK3588)
                                                    │  └─ Classifier (Aho-Corasick 机密词)
                                                    ▼
                                           DetectionReport { classification, entities[bbox/page/layer], blocked }
@@ -154,7 +154,7 @@ impl DocRedactor {
 - **行业机密词**：attune-pro 插件 `plugin.yaml` 增 `confidential_keywords: [...]`，`PluginRegistry` 聚合注入 `Classifier`（复用现有 `all_pii_patterns` 聚合模式）。
 - **行业 PII extractor**：已有 `PiiExtractor` trait 直接被 doc_privacy detector 复用（律所案号、病历号）。
 - **新文件格式**：`parser.rs` 的 `Parser::for_file` dispatch 表加分支（复用 KVM 结构）。
-- **图像后端**：`#[cfg(feature="rknn")]` 边界让 K3/RK3588 启用 NPU face/OCR，x86/CI 默认关闭——**禁止设 default**（per KVM CLAUDE.md 踩坑）。
+- **图像后端**：`#[cfg(feature="rknn")]` 边界让 local scheduler/RK3588 启用 NPU face/OCR，x86/CI 默认关闭——**禁止设 default**（per KVM CLAUDE.md 踩坑）。
 
 ---
 
@@ -179,7 +179,7 @@ impl DocRedactor {
 | 阶段 | 层级 | 触发 |
 |------|------|------|
 | 入库扫描 (parser + regex + ner + classifier) | 🆓 零成本 (CPU 毫秒~秒级) | 建库阶段自动跑（顶栏"暂停后台任务"可停），结果缓存 |
-| 图像/人脸检测 (rknn) | ⚡ 本地算力 (NPU 秒级) | 仅图像文件 + K3/RK3588，建库自动 |
+| 图像/人脸检测 (rknn) | ⚡ 本地算力 (NPU 秒级) | 仅图像文件 + local scheduler/RK3588，建库自动 |
 | 文档分级 LLM 辅助 (v.next) | 💰 时间/金钱 | **不做**（v1.x 仅关键词，零 LLM） |
 
 **绝不**把文档脱敏升级到 LLM 层后台偷跑（per 成本契约第二层）。UI：导出对话框显示"本文档检测到 N 处 PII / 分级=机密，导出将脱敏"——本地、零费用、即时。
@@ -233,6 +233,6 @@ impl DocRedactor {
 | **DP.2** | 字节级脱敏 (可逆) | `doc_privacy/redactor.rs` (PDF/OOXML) + 三重验证 proptest | develop | DP.1 |
 | **DP.3** | 机密拦截 + 分级→gate (G4 最高价值) | classifier→OutboundGate block + `doc_privacy_meta` 表 + 出网点接线 | develop | DP.2 |
 | **DP.4** | REST + UI | `/doc-privacy/{scan,redact,report}` + 导出对话框成本提示 | develop | DP.3 |
-| **DP.5** (可选) | 图像脱敏 | `#[cfg(feature=rknn)]` image_mask + face (K3/RK3588 实测) | develop | DP.2 |
+| **DP.5** (可选) | 图像脱敏 | `#[cfg(feature=rknn)]` image_mask + face (local scheduler/RK3588 实测) | develop | DP.2 |
 
 **复用方式决策**：**移植为主**（kvm-info-privacy 的 parser/detector/classifier/redactor/models 五模块直接搬进 `attune-core/src/doc_privacy/`，Rust 同栈，~1500 行）+ **借鉴设计**（gateway 的 mode/分级/fail-closed/审计 schema 思想）+ **不直接依赖**（不加 git submodule / 不 crate-depend——KVM 是独立服务仓，attune 走进程内模块；且 attune 要改 KVM 的不可逆遮罩为可逆 token，需 fork-and-adapt 而非依赖）。

@@ -191,7 +191,7 @@ pub trait PiiExtractor: Send + Sync { fn name(&self)->&str; fn extract(&self,tex
 |--------|--------|-----|---------|
 | **MITM 透明代理** | ❌ 不开（不装 CA / 不拦浏览器，产品决策） | ✅ 开 | `#[cfg(feature="mitm-proxy")]` — attune 编译时不含 hudsucker/CA |
 | **脱敏可逆性** | `Reversible` 默认（出网可还原） | `Irreversible` 默认（对外分享永久遮罩） | 运行时 `RedactMode` 参数，调用方选 |
-| **图像 / 人脸 NPU** | ❌（x86 无 NPU，UI 明示"不检测图像内 PII"） | ✅ RKNN（K3/RK3588） | `#[cfg(feature="rknn")]`，**禁设 default**（per kvm CLAUDE.md 踩坑） |
+| **图像 / 人脸 NPU** | ❌（x86 无 NPU，UI 明示"不检测图像内 PII"） | ✅ RKNN（local scheduler/RK3588） | `#[cfg(feature="rknn")]`，**禁设 default**（per kvm CLAUDE.md 踩坑） |
 | **审计存储后端** | 本地 SQLite `outbound_audit` | MySQL `privacy_audit_log` + KVM event POST | `trait AuditSink` 各自实现 |
 | **DSAR / 合规** | ✅ `compliance` feature | 暂不需要 | `#[cfg(feature="compliance")]` |
 | **行业机密词 / PII** | attune-pro 插件注册 | kvm 自带配置 | `trait PiiExtractor` + `register_keywords()` |

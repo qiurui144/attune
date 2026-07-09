@@ -3,17 +3,17 @@
 > 状态：实现已落地（核心由 R2 #69 提交，本 spec 为补档 + 自动退避增量）。
 > SSOT：本文件。代码：`attune-core::store::job_queue` + `office_job_queue` + `job_handler`；
 > server 接线 `attune-server::job_worker`。
-> 关联：K3 调度集成 spec `docs/superpowers/specs/2026-06-22-k3-scheduler-integration.md`。
+> 关联：local scheduler 调度集成 spec `docs/superpowers/specs/2026-06-22-local-scheduler-integration.md`。
 >
 > 背景修正：本 spec 取代代码注释里引用但从未入库的
-> `2026-06-10-k3-g5-durable-job-queue.md`（该文件在 R2 worktree 清理时丢失，代码引用成了悬空路径）。
+> `2026-06-10-local-scheduler-g5-durable-job-queue.md`（该文件在 R2 worktree 清理时丢失，代码引用成了悬空路径）。
 > 旧引用路径的注释将在后续清理批次统一指向本文件。
 
 ---
 
 ## 1. 目标定位
 
-K3 一体机是 24h 常开的夜间批处理盒子；attune 桌面端也有锁定态 / 重启场景。
+local scheduler 一体机是 24h 常开的夜间批处理盒子；attune 桌面端也有锁定态 / 重启场景。
 原 `JobRegistry` 是**纯内存**状态机：进程重启 = 所有在飞任务丢失（"服务器重启，请重新提交"），
 锁定态期间排队的任务无处落脚，3am 跑批失败后无人值守自动重试。
 
@@ -135,7 +135,7 @@ CREATE TABLE job_queue (
 瞬态 IO。**不可重试**（直接 dead-letter）：`bad-payload` / `source-missing` / `no-handler` /
 `max-attempts` / `interrupted-no-retry` / `cancelled`。
 
-退避公式：`next_attempt_ms = now + min(base * 2^(attempts-1), cap)`，cap=1h（K3 夜间批合理）。
+退避公式：`next_attempt_ms = now + min(base * 2^(attempts-1), cap)`，cap=1h（local scheduler 夜间批合理）。
 
 ## 8. 成本契约
 

@@ -1,7 +1,7 @@
 # File Manager Picker Support — Unify All Document Path Selection
 
 > 目标：所有文档路径的输入点，在桌面环境（Tauri）下均支持原生文件管理器弹出选择，
-> 在浏览器/K3 Web 环境下提供浏览器所能给予的最佳回退选择体验。
+> 在浏览器/local scheduler Web 环境下提供浏览器所能给予的最佳回退选择体验。
 
 ## 1. 目标定位
 
@@ -9,7 +9,7 @@
   部分文件选择只用浏览器原生 `<input type="file">` 而未在桌面环境下升级到原生 dialog，
   用户体验不统一。
 - 与产品定位对齐：个人通用知识库，桌面优先（Windows P0 → Linux x86_64 P1），
-  但同时兼顾 K3 一体机纯 Web 与浏览器调试模式。
+  但同时兼顾 本地调度器设备纯 Web 与浏览器调试模式。
 
 ## 2. 范围边界
 

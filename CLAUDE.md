@@ -103,7 +103,7 @@ attune 当前实现主线在 `rust/`；算法、集成、UX 与生产能力变�
 **技术上独立**（硬约束保持）：
 - **不调用 attune-enterprise 的任何 API / pluginhub / 服务**。attune 必须能在没有 attune-enterprise 部署的环境中完整工作
 - **不复用 attune-enterprise 代码**（不同技术栈：attune-enterprise = Python + Django；attune = Rust）
-- **数据完全隔离**：attune 的 vault / 批注 / chat / Project 永远在用户本地（或用户自己的 K3），不与任何外部产品同步
+- **数据完全隔离**：attune 的 vault / 批注 / chat / Project 永远在用户本地（或用户自己的 local scheduler），不与任何外部产品同步
 
 **战略上配套**（v2 新增）：
 - 同一团队两个产品分工 — B2C 桌面 vs B2B 律所，不是独立竞品
@@ -230,7 +230,7 @@ git push origin main
 - Web UI: 嵌入式单页 HTML + vanilla JS（`include_str!`）
 - CLI: clap + rpassword
 - AI 分类: Ollama chat (qwen2.5) + hdbscan 聚类 + 编程/法律插件
-- 分发: Rust 主二进制 ~47 MB stripped / 59 MB unstripped（静态链接，含 TLS + 搜索引擎 + Web UI + 分类引擎；R32 实测 2026-05-01 x86_64-linux）。**desktop 安装包 = 瘦包**（2026-06-16 v1.4.0 实测 + 用户拍板）：Linux deb 38M（app binary + whisper-cli binary；系统库 poppler-utils/webkit/gtk/curl 走 apt Depends 自动解析）/ AppImage 110M / Win nsis 23M+msi 41M。**底座模型不捆绑** — embedding/rerank/ASR权重/PP-OCR ONNX/Ollama runtime 在**首次运行经 S8 ModelStack failover 从 company-mirror→hf-mirror→HF 拉取**（非完全离线自包含，装完一次联网初始化即用，失败有 failover+重试兜底）。**LLM 不本地预装** — cloud API（attune Pro 会员 token / 用户 BYOK），K3 一体机镜像例外。（旧"150-200MB 捆绑底座"描述已过时，与实际 thin-deb + runtime-fetch 设计不符。）
+- 分发: Rust 主二进制 ~47 MB stripped / 59 MB unstripped（静态链接，含 TLS + 搜索引擎 + Web UI + 分类引擎；R32 实测 2026-05-01 x86_64-linux）。**desktop 安装包 = 瘦包**（2026-06-16 v1.4.0 实测 + 用户拍板）：Linux deb 38M（app binary + whisper-cli binary；系统库 poppler-utils/webkit/gtk/curl 走 apt Depends 自动解析）/ AppImage 110M / Win nsis 23M+msi 41M。**底座模型不捆绑** — embedding/rerank/ASR权重/PP-OCR ONNX/Ollama runtime 在**首次运行经 S8 ModelStack failover 从 company-mirror→hf-mirror→HF 拉取**（非完全离线自包含，装完一次联网初始化即用，失败有 failover+重试兜底）。**LLM 不本地预装** — cloud API（attune Pro 会员 token / 用户 BYOK），本地调度器设备镜像例外。（旧"150-200MB 捆绑底座"描述已过时，与实际 thin-deb + runtime-fetch 设计不符。）
 
 ## 已实现模块
 
@@ -256,10 +256,10 @@ git push origin main
 
 - **Chat 流式输出**：attune Chat 不实现流式输出（SSE streaming）。等待 LLM 响应期间，Web UI 显示加载指示器（spinner）即可。原因：本地 0.6B-3B 模型响应快，云端 API 等待时有 loading 状态满足体验需求，实现复杂度不值得。
 - **三产品矩阵：attune × attune-pro × attune-enterprise**（2026-04-27 v2，从"独立应用"演进而来）：attune (OSS 通用) + attune-pro (个人行业增强) + attune-enterprise (B2B 小团队)。技术上独立运行；战略上配套分工。可参考 attune-enterprise plugin / RPA / Intent Router 设计模式，但实现完全独立。详见 `docs/oss-pro-strategy.md` v2 决策 2.5 + 上文「三产品矩阵 + 边界」。
-- **行业版第一刀切律师**（2026-04-25）：复用 attune-pro 已有 5 个 law-pro skill + 自研 RPA + Project/Case 卷宗。会员制 SaaS（个人版 / 专业版）+ 一体机（K3）双形态。
-- **本地 AI 底座边界**（2026-04-25）：attune 不是"全本地 AI"，是"**降低 token + 数据安全**"。本地仅捆绑必要底座（Embedding / Rerank / ASR / OCR + Ollama runtime），**LLM 模型不捆绑**，LLM 走远端 token 默认；K3 一体机形态可选装本地 LLM。
-- **平台优先级**（2026-04-25，2026-05-21 修正 K3 架构）：**Windows P0 → Linux x86_64 P1 → macOS 暂不做**。**K3 一体机 = riscv64 RVA23**（SpacemiT K3 X100 SoC，VLEN=256，**非 aarch64**），走 `/data/RV/rv-gcc/install-15.2/` 交叉编译 + 镜像化部署，不走 .deb workflow。Win MSI + Linux deb/AppImage 双轨，K3 单独镜像（per `/home/qiurui/.claude/CLAUDE.md` § RISC-V 验证与优化规范）。
-- **ASR 引擎**（2026-04-25）：whisper.cpp binary + Rust subprocess（与 K3 推理服务一致路径），中文 WER 必须 < 20%（whisper-small Q8 实测满足）才能选默认模型；whisper-tiny WER 35-40% 不可用。
+- **行业版第一刀切律师**（2026-04-25）：复用 attune-pro 已有 5 个 law-pro skill + 自研 RPA + Project/Case 卷宗。会员制 SaaS（个人版 / 专业版）+ 一体机（local scheduler）双形态。
+- **本地 AI 底座边界**（2026-04-25）：attune 不是"全本地 AI"，是"**降低 token + 数据安全**"。本地仅捆绑必要底座（Embedding / Rerank / ASR / OCR + Ollama runtime），**LLM 模型不捆绑**，LLM 走远端 token 默认；本地调度器设备形态可选装本地 LLM。
+- **平台优先级**（2026-04-25，2026-05-21 修正 local scheduler 架构）：**Windows P0 → Linux x86_64 P1 → macOS 暂不做**。**本地调度器设备 = riscv64 RVA23**（SpacemiT local scheduler X100 SoC，VLEN=256，**非 aarch64**），走 `/data/RV/rv-gcc/install-15.2/` 交叉编译 + 镜像化部署，不走 .deb workflow。Win MSI + Linux deb/AppImage 双轨，local scheduler 单独镜像（per `/home/qiurui/.claude/CLAUDE.md` § RISC-V 验证与优化规范）。
+- **ASR 引擎**（2026-04-25）：whisper.cpp binary + Rust subprocess（与 local scheduler 推理服务一致路径），中文 WER 必须 < 20%（whisper-small Q8 实测满足）才能选默认模型；whisper-tiny WER 35-40% 不可用。
 
 ## 磁盘资源管理铁律（强制 — 2026-05-21 用户重申，盘满过踩坑）
 
@@ -279,9 +279,13 @@ git push origin main
 ### target/ 清理
 
 - **cargo build/test 完成后,若未来 1 小时内无再 build 需求 → 立即 `cargo clean`**
-- 主 worktree target/ 可达 100+GB(184G attune / 93G attune-pro 实测)
+- Rust 编译缓存策略:全局 Cargo 使用 `/usr/bin/sccache`;`SCCACHE_DIR=/data/cache/sccache`;`SCCACHE_CACHE_SIZE=20G`;workspace target 分仓隔离到 `/data/cargo-target/attune` 与 `/data/cargo-target/attune-pro`
+- 每轮 cargo build/test 后必须执行一次 `scripts/rust-cache-status.sh`;若 `/data` 可用 < 200G 或任一 target > 30G,本轮结束前执行 `scripts/rust-cache-clean.sh`
+- 主 worktree target/ 可达 100+GB(184G attune / 93G attune-pro 实测);`/data/attune-pro-target` 是旧 attune-pro 外置 Cargo target,已废弃,如再次出现直接删除
+- 清理命令:常规用 `scripts/rust-cache-clean.sh`;需要全量回收时用 `scripts/rust-cache-clean.sh all`
+- 清理前只需确认没有当前 cargo/rustc/对应 agent 二进制进程在跑;不要因为"也许下次还会编译"保留 50G+ target
 - 各 isolated worktree 的 target/ 在 `git worktree remove` 时自动清
-- 不要"留着备用 cache" — cargo incremental 重 build 也快,主 target 200G 不值得占盘
+- 不要"留着备用 target cache" — 复用交给 sccache;target 是链接/增量产物,必须可删
 
 ### worktree 清理
 
@@ -408,8 +412,8 @@ Wizard 推荐顺序：
    - Claude Pro → Anthropic API key
    - Gemini Advanced → Gemini API key（Google AI Studio）
    - DeepSeek / Qwen / 其他 OpenAI 兼容
-3. **本地 Ollama**（K3 一体机镜像 + 笔电 advanced 用户）
-   - K3 form factor 镜像构建时预装 qwen2.5:1.5b/3b
+3. **本地 Ollama**（本地调度器设备镜像 + 笔电 advanced 用户）
+   - local scheduler form factor 镜像构建时预装 qwen2.5:1.5b/3b
    - 笔电用户 wizard 选择 Ollama 时手动 ollama pull
    - 当前**不主推** — 研发成本高（ROCm 配置 / 模型选型 / 推理优化）
 
@@ -420,7 +424,7 @@ Wizard 推荐顺序：
 
 "用户的免费 AI 会员"指 → 浏览器内 ChatGPT.com / Claude.ai / Gemini Advanced **web 会话**，但 attune 不直接对接（不走 MCP / 不注入浏览器）；用户如果有 web 会员，对应付费 plan 通常自带 API quota → 走 BYOK 路径。
 
-**K3 一体机形态**：底座由 K3 推理服务提供（参考 `docs/k3-ai-service/`）；LLM 可选装本地（qwen2.5:1.5b/3b 实测 K3 上可跑），但默认仍是远端 token。
+**本地调度器设备形态**：底座由 local scheduler 推理服务提供（参考 `docs/local-scheduler-ai-service/`）；LLM 可选装本地（qwen2.5:1.5b/3b 实测 local scheduler 上可跑），但默认仍是远端 token。
 
 ### 前端范式
 
@@ -586,9 +590,9 @@ attune 必须在以下平台 + 硬件组合上可编译、可运行、测试通�
 | **P0** | Windows x86_64 + NVIDIA GPU | + CUDA GPU | 同上，Ollama 用 GPU | 待验证 |
 | P1 | Linux x86_64 | Intel/AMD CPU | `x86_64-unknown-linux-gnu` | 主开发平台 ✅ |
 | P1 | Linux x86_64 + NVIDIA GPU | + CUDA GPU | 同上，Ollama 用 GPU | 验证 |
-| P2 | Linux **riscv64**（K3 一体机） | RISC-V RVA23（SpacemiT K3 X100，VLEN=256） | `riscv64gc-unknown-linux-gnu` | 走 `/data/RV/rv-gcc/install-15.2/` + rv-baseos sysroot 交叉编译，**镜像化部署**（非 .deb） |
+| P2 | Linux **riscv64**（本地调度器设备） | RISC-V RVA23（SpacemiT local scheduler X100，VLEN=256） | `riscv64gc-unknown-linux-gnu` | 走 `/data/RV/rv-gcc/install-15.2/` + rv-baseos sysroot 交叉编译，**镜像化部署**（非 .deb） |
 | **暂不做** | macOS | x86_64 + arm64 Universal | `*-apple-darwin` | 资源后置，不投入 v0.6/v0.7 |
-| **暂不做** | Linux aarch64 | ARM64（NAS / 通用 ARM） | `aarch64-unknown-linux-gnu` | 非 K3，无明确需求，v1.x 不投入 |
+| **暂不做** | Linux aarch64 | ARM64（NAS / 通用 ARM） | `aarch64-unknown-linux-gnu` | 非 local scheduler，无明确需求，v1.x 不投入 |
 
 ### 跨平台编译注意事项
 
@@ -609,7 +613,7 @@ attune 必须在以下平台 + 硬件组合上可编译、可运行、测试通�
 rustup target add x86_64-pc-windows-gnu
 # usearch 的 C++ 代码可能需要额外配置，建议在 Windows 原生编译
 
-# Linux → riscv64 (K3 一体机, RVA23) — 走 rv-gcc 15.2 + rv-baseos sysroot
+# Linux → riscv64 (本地调度器设备, RVA23) — 走 rv-gcc 15.2 + rv-baseos sysroot
 # per /home/qiurui/.claude/CLAUDE.md § RISC-V 验证与优化规范
 source /data/RV/rva23-qemu/toolchain/env.sh   # $RVA23_CC / $RVA23_CROSS_SYSROOT
 rustup target add riscv64gc-unknown-linux-gnu
@@ -617,7 +621,7 @@ CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=$RVA23_CC \
 CC_riscv64gc_unknown_linux_gnu=$RVA23_CC \
 CFLAGS_riscv64gc_unknown_linux_gnu="--sysroot=$RVA23_CROSS_SYSROOT $RVA23_MARCH_RVA23" \
   cargo build --target riscv64gc-unknown-linux-gnu --release
-# K3 一体机产物**不走 .deb**,走镜像化部署(参考 docs/k3-ai-service/)
+# 本地调度器设备产物**不走 .deb**,走镜像化部署(参考 docs/local-scheduler-ai-service/)
 ```
 
 ### GPU / NPU 兼容性
@@ -626,7 +630,7 @@ CFLAGS_riscv64gc_unknown_linux_gnu="--sysroot=$RVA23_CROSS_SYSROOT $RVA23_MARCH_
 
 1. **HTTP（Ollama）** — Embedding / Rerank / Chat / Classify。Ollama 自动选 CPU/CUDA/ROCm/Metal 后端
 2. **Subprocess（捆绑二进制）** — ASR (whisper.cpp) / OCR (PP-OCRv5 mobile (ONNX) + poppler)。安装包捆绑预编译二进制，attune 子进程调用
-3. **HTTP（K3 推理服务）** — K3 一体机形态时，所有底座可走 K3 :8080（参考 `docs/k3-ai-service/`）
+3. **HTTP（local scheduler 推理服务）** — 本地调度器设备形态时，所有底座可走 local scheduler :8090（参考 `docs/local-scheduler-ai-service/`）
 
 | 后端组合 | Embedding/LLM | ASR | OCR |
 |----------|---------------|-----|-----|
@@ -634,7 +638,7 @@ CFLAGS_riscv64gc_unknown_linux_gnu="--sysroot=$RVA23_CROSS_SYSROOT $RVA23_MARCH_
 | AMD GPU + Ollama | Ollama ROCm | whisper.cpp CPU | PP-OCR (ORT, CPU/GPU 自动) |
 | Intel iGPU/NPU + Ollama | Ollama OpenVINO（实验） | whisper.cpp CPU | PP-OCR (ORT, CPU/GPU 自动) |
 | 纯 CPU | Ollama CPU（qwen2.5:3b 远端 / 本地按需） | whisper-small Q8 ~3-5s/段 | PP-OCR (ORT, CPU/GPU 自动) |
-| K3 一体机 | K3 :8080（IME/RVV） | K3 :8080（whisper Q8 IME） | K3 :8080（PPOCRv5） |
+| 本地调度器设备 | local scheduler :8090（IME/RVV） | local scheduler :8090（whisper Q8 IME） | local scheduler :8090（PPOCRv5） |
 
 **开发时不需要 GPU**：测试使用 `MockLlmProvider` / `MockEmbeddingProvider` / `MockAsrProvider`，CI 无需 GPU。
 
@@ -683,7 +687,7 @@ strategy:
       - os: ubuntu-latest
         target: x86_64-unknown-linux-gnu
         name: Linux x86_64
-      # K3 一体机走 rv-gcc 15.2 交叉编译 + 镜像化,**不进 CI matrix**(GH runner 无 RISC-V)
+      # 本地调度器设备走 rv-gcc 15.2 交叉编译 + 镜像化,**不进 CI matrix**(GH runner 无 RISC-V)
       # 见上文「跨平台编译指南」riscv64gc-unknown-linux-gnu 路径
       - os: windows-latest
         target: x86_64-pc-windows-msvc

@@ -109,7 +109,7 @@ attune-pro install --license <YOUR_KEY> law-pro
 不一定。三种模式：
 - **远端 token**（默认）— 用 Anthropic / OpenAI / 阿里通义 等的 API key
 - **本地 Ollama** — 装 qwen2.5:3b 或 deepseek-r1:14b 在自己机器上跑
-- **K3 一体机** — 律所/医院私有部署（v0.7+）
+- **本地调度器设备** — 律所/医院私有部署（v0.7+）
 
 ### Q: 哪些文件类型支持？
 

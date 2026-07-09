@@ -1,16 +1,16 @@
 # SpacemiT IME 私有指令集优化成果（商业产品线）
 
-> 平台：SpacemiT K3 X100 (ime1_v2, xsmtvdotii)
+> 平台：SpacemiT local scheduler X100 (ime1_v2, xsmtvdotii)
 > 工具链：SpacemiT GCC 15.2 (`-march=rv64gcv_xsmtvdotii`)
-> 适用范围：**仅 SpacemiT K1/K3 系列，不提交上游**
-> IP: 192.168.100.209 | 更新: 2026-04-19
+> 适用范围：**仅 SpacemiT K1/local scheduler 系列，不提交上游**
+> 更新: 2026-04-19
 >
 > 本文档记录 SpacemiT 私有指令集（IME vmadot）的优化成果。
 > 标准 RVV 优化见 [RISC-V_AI_Optimization_Results.md](RISC-V_AI_Optimization_Results.md)。
 >
 > **双线策略**：
 > - 标准 RVV → 提交 ORT/llama.cpp 上游 PR
-> - SpacemiT IME → 商业产品部署（K3 AI 服务 :8080）
+> - SpacemiT IME → 商业产品部署（local scheduler AI 服务 :8090）
 
 ---
 

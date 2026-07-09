@@ -340,7 +340,7 @@ mcp.start_heartbeat(Duration::from_secs(30), 3);
 - 1 个账号 = 最多 2 台设备激活
 - 第 3 台设备登录: UI 提示选择"踢下线某台" 或 "取消"
 - 离线时使用 cached license 30 天有效
-- 跨设备 (笔电 ↔ K3 一体机) 共享同一账号但占 2 个 slot
+- 跨设备 (笔电 ↔ 本地调度器设备) 共享同一账号但占 2 个 slot
 
 ### Device Fingerprint
 
@@ -351,7 +351,7 @@ pub struct DeviceFingerprint {
     pub os: String,
     pub cpu_brand: String,
     pub hardware_uuid: Option<String>,
-    pub form_factor: String,     // laptop | desktop | k3_appliance
+    pub form_factor: String,     // laptop | desktop | local_scheduler_appliance
 }
 ```
 
