@@ -96,6 +96,18 @@ function matchedForms(plugins: PluginInfo[], kind: string): FormRef[] {
   return out;
 }
 
+function projectKindOptions(plugins: PluginInfo[]): string[] {
+  const kinds = new Set(['generic', 'collection', 'case', 'paper']);
+  for (const p of plugins) {
+    for (const agent of p.agents ?? []) {
+      for (const kind of agent.case_kinds ?? []) {
+        if (kind.trim()) kinds.add(kind.trim());
+      }
+    }
+  }
+  return [...kinds].sort((a, b) => a.localeCompare(b));
+}
+
 // ── 主视图 ──────────────────────────────────────────────────────────────────
 export function ProjectsView(): JSX.Element {
   const projects = useSignal<Project[]>([]);
@@ -215,6 +227,7 @@ export function ProjectsView(): JSX.Element {
           <CreateProjectModal
             title={newTitle}
             kind={newKind}
+            plugins={plugins.value}
             busy={creating.value}
             onCancel={() => (showCreate.value = false)}
             onConfirm={() => void onCreate()}
@@ -323,6 +336,7 @@ export function ProjectsView(): JSX.Element {
         <CreateProjectModal
           title={newTitle}
           kind={newKind}
+          plugins={plugins.value}
           busy={creating.value}
           onCancel={() => (showCreate.value = false)}
           onConfirm={() => void onCreate()}
@@ -628,16 +642,20 @@ function ProjectDetail({
 function CreateProjectModal({
   title,
   kind,
+  plugins,
   busy,
   onCancel,
   onConfirm,
 }: {
   title: { value: string };
   kind: { value: string };
+  plugins: PluginInfo[];
   busy: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }): JSX.Element {
+  const kindOptions = projectKindOptions(plugins);
+  const selectedKind = kindOptions.includes(kind.value) ? kind.value : '';
   return (
     <Modal open onClose={onCancel} title={t('projects.create.modal_title')}>
       <div
@@ -661,6 +679,19 @@ function CreateProjectModal({
         </label>
         <label style={labelStyle}>
           <span>{t('projects.field.kind')}</span>
+          <select
+            value={selectedKind}
+            onChange={(e) => {
+              const value = (e.currentTarget as HTMLSelectElement).value;
+              if (value) kind.value = value;
+            }}
+            style={inputStyle}
+          >
+            {kindOptions.map((option) => (
+              <option key={option} value={option}>{option}</option>
+            ))}
+            <option value="">{t('projects.field.kind_custom')}</option>
+          </select>
           <input
             type="text"
             value={kind.value}

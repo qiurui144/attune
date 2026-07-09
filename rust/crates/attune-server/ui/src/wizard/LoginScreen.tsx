@@ -20,6 +20,8 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
   const [recoveryKey, setRecoveryKey] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [showWipeModal, setShowWipeModal] = useState(false);
+  const [wipeConfirm, setWipeConfirm] = useState('');
 
   async function handleUnlock(e?: Event) {
     e?.preventDefault();
@@ -50,9 +52,13 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
     });
     if (!first) return;
 
-    // 二次防呆：要求手动键入 RESET（不可逆 wipe 的强 gate，保留 prompt）
-    const typed = window.prompt(t('lock.prompt.reset_confirm'));
-    if (typed !== 'RESET') {
+    // 二次防呆：要求手动键入 RESET（不可逆 wipe 的强 gate）。
+    setWipeConfirm('');
+    setShowWipeModal(true);
+  }
+
+  async function executeForgotPasswordReset() {
+    if (wipeConfirm !== 'RESET') {
       toast('error', t('lock.toast.reset_cancelled'));
       return;
     }
@@ -246,6 +252,50 @@ export function LoginScreen({ onUnlock }: LoginScreenProps): JSX.Element {
               onClick={() => void handleResetWithRecoveryKey()}
             >
               {t('lock.recovery_modal.submit')}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={showWipeModal}
+        onClose={() => {
+          if (!submitting) {
+            setShowWipeModal(false);
+            setWipeConfirm('');
+          }
+        }}
+        title={t('confirm.title.wipePassword')}
+        disableBackdropClose
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+          <p style={{ margin: 0, color: 'var(--color-error)', fontSize: 'var(--text-sm)' }}>
+            {t('lock.prompt.reset_confirm')}
+          </p>
+          <Input
+            value={wipeConfirm}
+            onInput={(e) => setWipeConfirm(e.currentTarget.value)}
+            autoFocus
+            placeholder="RESET"
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+            <Button
+              variant="ghost"
+              disabled={submitting}
+              onClick={() => {
+                setShowWipeModal(false);
+                setWipeConfirm('');
+              }}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="danger"
+              loading={submitting}
+              disabled={wipeConfirm !== 'RESET'}
+              onClick={() => void executeForgotPasswordReset()}
+            >
+              {t('lock.reset_wipe_confirm')}
             </Button>
           </div>
         </div>

@@ -38,7 +38,7 @@ import type { Message } from '../store/signals';
 // 各 provider 已知可选模型（与 SettingsView 的 LLM_PRESETS 对齐）。
 // chip 内切换只改 model（同 provider / endpoint / key），跨 provider 走 Settings。
 const PROVIDER_MODELS: Record<string, string[]> = {
-  ollama: ['auto', 'qwen2.5:3b', 'qwen2.5:1.5b', 'llama3.2:3b'],
+  local_scheduler: ['llm-chat', 'auto'],
   openai: ['gpt-4o-mini', 'gpt-4o'],
   deepseek: ['deepseek-chat', 'deepseek-reasoner'],
   qwen: ['qwen-plus', 'qwen-turbo', 'qwen-max'],
@@ -124,7 +124,7 @@ function getCurrentModel(): string {
   return model;
 }
 
-// 从 settings 判断当前 LLM 是否本地（Ollama / K3 → true；cloud provider → false）
+// 从 settings 判断当前 LLM 是否本地（local scheduler → true；cloud provider → false）
 // settings 未加载时返回 null（未知），TokenChip 据此显示"—"而非误报"本地"
 function isLlmLocal(): boolean | null {
   const s = settings.value;

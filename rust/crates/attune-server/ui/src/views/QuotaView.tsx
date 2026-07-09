@@ -23,6 +23,8 @@ import { Button, EmptyState, Skeleton } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api } from '../store/api';
+import { currentView, settingsInitialTab } from '../store/signals';
+import { openMemberBilling } from '../hooks/useMember';
 
 function friendlyServiceError(raw: string): string {
   const r = raw.toUpperCase();
@@ -42,11 +44,14 @@ function friendlyServiceError(raw: string): string {
 }
 
 interface QuotaUsage {
+  events?: number;
   llm_tokens_input: number;
   llm_tokens_output: number;
   llm_tokens_total: number;
   llm_cost_usd: number;
   plugin_installs: number;
+  cache_hit_rate?: number;
+  prompt_cache_hit_rate?: number;
 }
 
 interface QuotaLimits {
@@ -66,6 +71,7 @@ interface QuotaResponse {
   plan_expires: string | null;
   month: string;
   usage: QuotaUsage;
+  local_usage?: QuotaUsage;
   quota: QuotaLimits;
   history: QuotaHistoryEntry[];
   cross_service_errors: Record<string, string>;
@@ -120,6 +126,16 @@ const warnBannerStyle: JSX.CSSProperties = {
   fontSize: 'var(--text-sm)',
 };
 
+const infoBannerStyle: JSX.CSSProperties = {
+  padding: 'var(--space-3)',
+  background: 'var(--color-surface)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-md)',
+  marginBottom: 'var(--space-4)',
+  fontSize: 'var(--text-sm)',
+  color: 'var(--color-text-secondary)',
+};
+
 const tableStyle: JSX.CSSProperties = {
   width: '100%',
   borderCollapse: 'collapse',
@@ -142,6 +158,7 @@ export function QuotaView(): JSX.Element {
   const data = useSignal<QuotaResponse | null>(null);
   const loading = useSignal(true);
   const error = useSignal<string | null>(null);
+  const openingUpgrade = useSignal(false);
 
   useEffect(() => {
     void refresh();
@@ -161,8 +178,18 @@ export function QuotaView(): JSX.Element {
     }
   }
 
-  function openUpgrade(): void {
-    window.open('https://attune.engi-stack.com/pricing', '_blank');
+  async function openUpgrade(): Promise<void> {
+    if (openingUpgrade.value) return;
+    openingUpgrade.value = true;
+    try {
+      await openMemberBilling('upgrade');
+    } catch {
+      toast('error', t('quota.upgrade_open_failed'));
+      settingsInitialTab.value = 'member';
+      currentView.value = 'settings';
+    } finally {
+      openingUpgrade.value = false;
+    }
   }
 
   if (loading.value && !data.value) {
@@ -188,8 +215,12 @@ export function QuotaView(): JSX.Element {
   }
 
   const d = data.value;
-  const showUpgrade = d.tier === 'individual' && d.quota.percent_used >= UPGRADE_THRESHOLD_PERCENT;
+  const isPaidTier = ['pro', 'pro_plus', 'enterprise', 'paid'].includes(d.tier);
+  const showUpgrade = !isPaidTier || d.quota.percent_used >= UPGRADE_THRESHOLD_PERCENT;
+  const upgradePrompt = isPaidTier ? t('quota.upgrade_prompt') : t('quota.upgrade_prompt_free');
   const hasErrors = Object.keys(d.cross_service_errors).length > 0;
+  const showLocalUsage =
+    Boolean(d.local_usage) && d.local_usage!.llm_tokens_total !== d.usage.llm_tokens_total;
 
   return (
     <div style={containerStyle}>
@@ -207,6 +238,17 @@ export function QuotaView(): JSX.Element {
         </div>
         <Button variant="secondary" onClick={refresh}>{t('quota.refresh')}</Button>
       </header>
+
+      {!isPaidTier && (
+        <div style={infoBannerStyle}>
+          {t('quota.self_managed_note')}
+        </div>
+      )}
+      {isPaidTier && hasErrors && (
+        <div style={infoBannerStyle}>
+          {t('quota.member_unavailable_note')}
+        </div>
+      )}
 
       {/* Cross-service errors banner */}
       {hasErrors && (
@@ -233,6 +275,19 @@ export function QuotaView(): JSX.Element {
           <StatCard label={t('quota.plugin_installs')} value={formatNumber(d.usage.plugin_installs)} />
         </div>
       </section>
+
+      {showLocalUsage && d.local_usage && (
+        <section style={sectionStyle}>
+          <h3 style={sectionTitleStyle}>{t('quota.local_usage_title')}</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
+            <StatCard label={t('quota.tokens_input')} value={formatNumber(d.local_usage.llm_tokens_input)} />
+            <StatCard label={t('quota.tokens_output')} value={formatNumber(d.local_usage.llm_tokens_output)} />
+            <StatCard label={t('quota.tokens_total')} value={formatNumber(d.local_usage.llm_tokens_total)} />
+            <StatCard label={t('quota.cost')} value={formatCost(d.local_usage.llm_cost_usd)} />
+            <StatCard label={t('quota.local_events')} value={formatNumber(d.local_usage.events ?? 0)} />
+          </div>
+        </section>
+      )}
 
       {/* Quota progress */}
       <section style={sectionStyle}>
@@ -263,9 +318,9 @@ export function QuotaView(): JSX.Element {
           {showUpgrade && (
             <div style={{ marginTop: 'var(--space-4)', padding: 'var(--space-3)', background: 'rgba(212, 165, 116, 0.12)', borderRadius: 'var(--radius-md)' }}>
               <p style={{ margin: '0 0 var(--space-2) 0', fontSize: 'var(--text-sm)' }}>
-                <strong>{t('quota.upgrade_prompt')}</strong>
+                <strong>{upgradePrompt}</strong>
               </p>
-              <Button variant="primary" onClick={openUpgrade}>{t('quota.upgrade')}</Button>
+              <Button variant="primary" loading={openingUpgrade.value} onClick={() => void openUpgrade()}>{t('quota.upgrade')}</Button>
             </div>
           )}
         </div>

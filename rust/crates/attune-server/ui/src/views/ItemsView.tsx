@@ -248,7 +248,7 @@ function ItemsHeader(): JSX.Element {
             loading={picking.value}
             disabled={uploading.value}
             onClick={async () => {
-              const { files } = await pickFiles({
+              const { paths, files } = await pickFiles({
                 multiple: true,
                 accept: '.pdf,.md,.txt,.docx,.png,.jpg,.jpeg',
                 title: t('items.upload.button'),
@@ -257,6 +257,8 @@ function ItemsHeader(): JSX.Element {
                 const dt = new DataTransfer();
                 for (const f of files) dt.items.add(f);
                 await onUpload(dt.files);
+              } else if (paths.length > 0) {
+                toast('error', t('picker.toast.read_failed'));
               }
             }}
           >

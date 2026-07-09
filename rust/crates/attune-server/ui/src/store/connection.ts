@@ -21,7 +21,7 @@ type HealthResponse = {
   status: 'starting' | 'ok' | 'degraded' | 'down';
   vault_state?: string;
   db_ok?: boolean;
-  ollama?: string;
+  scheduler?: string;
 };
 
 let timer: ReturnType<typeof setTimeout> | null = null;

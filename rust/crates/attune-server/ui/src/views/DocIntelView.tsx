@@ -16,10 +16,14 @@
 
 import type { JSX } from 'preact';
 import { useSignal } from '@preact/signals';
-import { Button, ExportButton } from '../components';
+import { useEffect } from 'preact/hooks';
+import { Button, EmptyState, ExportButton } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api, ApiError } from '../store/api';
+import { useFilePicker } from '../hooks/useFilePicker';
+import { getItem, loadItems } from '../hooks/useItems';
+import { items } from '../store/signals';
 import {
   documentArtifact,
   tableArtifact,
@@ -55,6 +59,18 @@ interface DocEnvelope {
 }
 
 type Tab = 'compare' | 'summarize' | 'chapters';
+type DocSlot = 'left' | 'right' | 'source';
+type DocRefPayload = { itemId?: string; text?: string; path?: string; name?: string };
+
+const DOC_INTEL_ACCEPT = '.txt,.md,.markdown,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff';
+
+function basename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+function isImageName(name: string): boolean {
+  return /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(name);
+}
 
 /** Turn a doc-intelligence result envelope into a downloadable export artifact
  *  (🆓 zero-cost). The narrative report → a Document (md/docx/pdf); an annotation
@@ -242,6 +258,54 @@ const tabBtnBase: JSX.CSSProperties = {
   color: 'var(--color-text-muted)',
 };
 
+const workbenchGridStyle: JSX.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 380px), 1fr))',
+  gap: 'var(--space-5)',
+  alignItems: 'start',
+};
+
+const panelStyle: JSX.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 'var(--space-4)',
+  minWidth: 0,
+  padding: 'var(--space-4)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-md)',
+  background: 'var(--color-surface)',
+};
+
+const resultPanelStyle: JSX.CSSProperties = {
+  ...panelStyle,
+  minHeight: 420,
+  background: 'var(--color-bg)',
+};
+
+const formBlockStyle: JSX.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 'var(--space-2)',
+  minWidth: 0,
+};
+
+const formActionsStyle: JSX.CSSProperties = {
+  display: 'flex',
+  justifyContent: 'flex-end',
+  gap: 'var(--space-2)',
+  flexWrap: 'wrap',
+};
+
+const inputStyle: JSX.CSSProperties = {
+  padding: 'var(--space-2)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-md)',
+  background: 'var(--color-bg)',
+  color: 'var(--color-text)',
+  fontSize: 'var(--text-sm)',
+  boxSizing: 'border-box',
+};
+
 export function DocIntelView(): JSX.Element {
   const tab = useSignal<Tab>('summarize');
   const loading = useSignal(false);
@@ -251,11 +315,106 @@ export function DocIntelView(): JSX.Element {
   const leftText = useSignal('');
   const rightText = useSignal('');
   const sourceText = useSignal('');
+  const leftItemId = useSignal('');
+  const rightItemId = useSignal('');
+  const sourceItemId = useSignal('');
+  const leftPath = useSignal('');
+  const rightPath = useSignal('');
+  const sourcePath = useSignal('');
   const question = useSignal('');
   const chapterIdx = useSignal(0);
+  const { picking, pickFiles } = useFilePicker();
 
   // results
   const envelope = useSignal<DocEnvelope | null>(null);
+
+  useEffect(() => {
+    void loadItems(200, 0);
+  }, []);
+
+  function slotSignals(slot: DocSlot) {
+    if (slot === 'left') return { text: leftText, itemId: leftItemId, path: leftPath };
+    if (slot === 'right') return { text: rightText, itemId: rightItemId, path: rightPath };
+    return { text: sourceText, itemId: sourceItemId, path: sourcePath };
+  }
+
+  function buildDocRef(slot: DocSlot): DocRefPayload {
+    const s = slotSignals(slot);
+    if (s.itemId.value) return { itemId: s.itemId.value };
+    if (s.path.value) return { path: s.path.value, name: basename(s.path.value) };
+    return { text: s.text.value };
+  }
+
+  async function chooseItem(slot: DocSlot, itemId: string): Promise<void> {
+    const s = slotSignals(slot);
+    s.itemId.value = itemId;
+    if (itemId) {
+      s.path.value = '';
+      s.text.value = '';
+      const item = await getItem(itemId);
+      if (item) s.text.value = item.content;
+    }
+  }
+
+  async function chooseFile(slot: DocSlot): Promise<void> {
+    const s = slotSignals(slot);
+    const { paths, files } = await pickFiles({
+      multiple: false,
+      accept: DOC_INTEL_ACCEPT,
+      title: t('docIntel.pickFile'),
+    });
+    const path = paths[0] ?? '';
+    const file = files[0] ?? null;
+    const name = path ? basename(path) : file?.name ?? '';
+    if (!name) return;
+    s.itemId.value = '';
+    if (path && isImageName(name)) {
+      s.path.value = path;
+      s.text.value = '';
+      return;
+    }
+    if (file && /\.(txt|md|markdown)$/i.test(file.name)) {
+      try {
+        s.text.value = await file.text();
+        s.path.value = '';
+      } catch {
+        toast('error', t('docIntel.fileReadFailed'));
+      }
+      return;
+    }
+    toast('error', t('docIntel.unsupportedFile'));
+  }
+
+  function renderSourcePicker(slot: DocSlot): JSX.Element {
+    const s = slotSignals(slot);
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 'var(--space-2)', alignItems: 'end' }}>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)', minWidth: 0 }}>
+          <span style={labelStyle}>{t('docIntel.itemSource')}</span>
+          <select
+            value={s.itemId.value}
+            onChange={(e) => void chooseItem(slot, (e.target as HTMLSelectElement).value)}
+            style={{ ...inputStyle, width: '100%' }}
+          >
+            <option value="">{t('docIntel.itemSourcePlaceholder')}</option>
+            {items.value.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.title || item.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <Button variant="secondary" size="sm" loading={picking.value} disabled={picking.value} onClick={() => void chooseFile(slot)}>
+          {t('docIntel.pickFile')}
+        </Button>
+        {s.path.value && (
+          <div style={{ gridColumn: '1 / -1', fontSize: 'var(--text-xs)', color: 'var(--color-text-secondary)' }}>
+            {t('docIntel.selectedPath', { path: basename(s.path.value) })}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   async function run(path: string, body: unknown): Promise<void> {
     loading.value = true;
@@ -291,22 +450,263 @@ export function DocIntelView(): JSX.Element {
 
   const env = envelope.value;
 
+  function renderForm(): JSX.Element {
+    if (tab.value === 'compare') {
+      return (
+        <>
+          {renderSourcePicker('left')}
+          <div style={formBlockStyle}>
+            <span style={labelStyle}>{t('docIntel.leftPlaceholder')}</span>
+            <textarea
+              value={leftText.value}
+              placeholder={t('docIntel.leftPlaceholder')}
+              onInput={(e) => {
+                leftText.value = (e.target as HTMLTextAreaElement).value;
+                leftItemId.value = '';
+                leftPath.value = '';
+              }}
+              style={textareaStyle}
+            />
+          </div>
+          {renderSourcePicker('right')}
+          <div style={formBlockStyle}>
+            <span style={labelStyle}>{t('docIntel.rightPlaceholder')}</span>
+            <textarea
+              value={rightText.value}
+              placeholder={t('docIntel.rightPlaceholder')}
+              onInput={(e) => {
+                rightText.value = (e.target as HTMLTextAreaElement).value;
+                rightItemId.value = '';
+                rightPath.value = '';
+              }}
+              style={textareaStyle}
+            />
+          </div>
+          <div style={formActionsStyle}>
+            <Button
+              variant="primary"
+              loading={loading.value}
+              disabled={loading.value}
+              onClick={() =>
+                run('compare', { left: buildDocRef('left'), right: buildDocRef('right'), mode: 'semantic' })
+              }
+            >
+              {t('docIntel.runCompare')}
+            </Button>
+          </div>
+        </>
+      );
+    }
+
+    if (tab.value === 'summarize') {
+      return (
+        <>
+          {renderSourcePicker('source')}
+          <div style={formBlockStyle}>
+            <span style={labelStyle}>{t('docIntel.sourcePlaceholder')}</span>
+            <textarea
+              value={sourceText.value}
+              placeholder={t('docIntel.sourcePlaceholder')}
+              onInput={(e) => {
+                sourceText.value = (e.target as HTMLTextAreaElement).value;
+                sourceItemId.value = '';
+                sourcePath.value = '';
+              }}
+              style={{ ...textareaStyle, minHeight: 260 }}
+            />
+          </div>
+          <div style={formActionsStyle}>
+            <Button
+              variant="primary"
+              loading={loading.value}
+              disabled={loading.value}
+              onClick={() =>
+                run('summarize', { source: buildDocRef('source'), level: 'standard' })
+              }
+            >
+              {t('docIntel.runSummarize')}
+            </Button>
+          </div>
+        </>
+      );
+    }
+
+    return (
+      <>
+        {renderSourcePicker('source')}
+        <div style={formBlockStyle}>
+          <span style={labelStyle}>{t('docIntel.sourcePlaceholder')}</span>
+          <textarea
+            value={sourceText.value}
+            placeholder={t('docIntel.sourcePlaceholder')}
+            onInput={(e) => {
+              sourceText.value = (e.target as HTMLTextAreaElement).value;
+              sourceItemId.value = '';
+              sourcePath.value = '';
+            }}
+            style={{ ...textareaStyle, minHeight: 220 }}
+          />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '96px minmax(0, 1fr)', gap: 'var(--space-3)', alignItems: 'end' }}>
+          <div style={formBlockStyle}>
+            <span style={labelStyle}>{t('docIntel.chapterIdx')}</span>
+            <input
+              type="number"
+              value={chapterIdx.value}
+              min={0}
+              aria-label={t('docIntel.chapterIdx')}
+              onInput={(e) => (chapterIdx.value = Number((e.target as HTMLInputElement).value))}
+              style={{ ...inputStyle, width: '100%' }}
+            />
+          </div>
+          <div style={formBlockStyle}>
+            <span style={labelStyle}>{t('docIntel.questionPlaceholder')}</span>
+            <input
+              type="text"
+              value={question.value}
+              placeholder={t('docIntel.questionPlaceholder')}
+              onInput={(e) => (question.value = (e.target as HTMLInputElement).value)}
+              style={{ ...inputStyle, width: '100%' }}
+            />
+          </div>
+        </div>
+        <div style={formActionsStyle}>
+          <Button
+            variant="secondary"
+            loading={loading.value}
+            disabled={loading.value}
+            onClick={() => run('chapters', { ...buildDocRef('source'), action: 'list' })}
+          >
+            {t('docIntel.listChapters')}
+          </Button>
+          <Button
+            variant="primary"
+            loading={loading.value}
+            disabled={loading.value}
+            onClick={() =>
+              run('chapters', { ...buildDocRef('source'), action: 'ask', chapterIdx: chapterIdx.value, question: question.value })
+            }
+          >
+            {t('docIntel.askChapter')}
+          </Button>
+        </div>
+      </>
+    );
+  }
+
+  function renderResult(): JSX.Element {
+    if (!env) {
+      return (
+        <EmptyState
+          icon="📄"
+          title={t('docIntel.empty.title')}
+          description={t('docIntel.empty.description')}
+        />
+      );
+    }
+
+    const built = buildExportFromEnvelope(env);
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', minWidth: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+          <CostChip bill={env.tokenBill} />
+          {built && (
+            <ExportButton
+              artifact={built.artifact}
+              formats={built.formats}
+              filename={built.filename}
+            />
+          )}
+        </div>
+
+        {env.outputMode === 'marked' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', minWidth: 0 }}>
+            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
+              {t('docIntel.markedHeading')}
+            </h3>
+            {renderOverlay(rightText.value, env.annotations ?? [])}
+          </div>
+        )}
+
+        {env.outputMode === 'narrative' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', minWidth: 0 }}>
+            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
+              {t('docIntel.narrativeHeading')}
+            </h3>
+            <pre
+              style={{
+                maxHeight: 560,
+                overflow: 'auto',
+                padding: 'var(--space-4)',
+                background: 'var(--color-surface)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-md)',
+                fontSize: 'var(--text-sm)',
+                fontFamily: 'inherit',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                lineHeight: 1.6,
+                margin: 0,
+              }}
+            >
+              {env.narrative ?? ''}
+            </pre>
+          </div>
+        )}
+
+        {env.outputMode === 'review' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', minWidth: 0 }}>
+            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
+              {t('docIntel.reviewHeading')}
+            </h3>
+            {renderOverlay(sourceText.value, env.annotations ?? [])}
+          </div>
+        )}
+
+        {env.outputMode === 'structured' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', minWidth: 0 }}>
+            <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
+              {t('docIntel.structuredHeading')}
+            </h3>
+            <pre
+              style={{
+                maxHeight: 560,
+                padding: 'var(--space-4)',
+                background: 'var(--color-surface)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-md)',
+                fontSize: 'var(--text-xs)',
+                fontFamily: 'var(--font-mono, monospace)',
+                overflow: 'auto',
+                margin: 0,
+              }}
+            >
+              {JSON.stringify(env.result, null, 2)}
+            </pre>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div style={{ padding: 'var(--space-5)', maxWidth: 1100, margin: '0 auto' }}>
+    <div style={{ padding: 'var(--space-5)', maxWidth: 1280, margin: '0 auto' }}>
       <header style={{ marginBottom: 'var(--space-4)' }}>
-        <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
+        <h1 style={{ fontSize: 'var(--text-2xl)', fontWeight: 600, margin: 0 }}>
           {t('docIntel.title')}
-        </h2>
+        </h1>
       </header>
 
-      {/* Tab bar */}
       <div
         role="tablist"
+        aria-label={t('docIntel.title')}
         style={{
           display: 'flex',
           gap: 'var(--space-2)',
           borderBottom: '1px solid var(--color-border)',
-          marginBottom: 'var(--space-4)',
+          marginBottom: 'var(--space-5)',
+          overflowX: 'auto',
         }}
       >
         {(['compare', 'summarize', 'chapters'] as Tab[]).map((tkey) => {
@@ -322,6 +722,7 @@ export function DocIntelView(): JSX.Element {
                 color: active ? 'var(--color-text)' : 'var(--color-text-muted)',
                 fontWeight: active ? 600 : 400,
                 borderBottomColor: active ? 'var(--color-accent)' : 'transparent',
+                whiteSpace: 'nowrap',
               }}
             >
               {t(`docIntel.tab${tkey.charAt(0).toUpperCase() + tkey.slice(1)}`)}
@@ -330,247 +731,28 @@ export function DocIntelView(): JSX.Element {
         })}
       </div>
 
-      {/* Panel body */}
-      <div style={{ display: 'flex', gap: 'var(--space-5)', flexDirection: 'column' }}>
-        {/* ── compare ── */}
-        {tab.value === 'compare' && (
-          <div style={{ display: 'flex', gap: 'var(--space-4)', flexDirection: 'column' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-4)' }}>
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                <span style={labelStyle}>{t('docIntel.leftPlaceholder')}</span>
-                <textarea
-                  value={leftText.value}
-                  placeholder={t('docIntel.leftPlaceholder')}
-                  onInput={(e) => (leftText.value = (e.target as HTMLTextAreaElement).value)}
-                  style={textareaStyle}
-                />
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                <span style={labelStyle}>{t('docIntel.rightPlaceholder')}</span>
-                <textarea
-                  value={rightText.value}
-                  placeholder={t('docIntel.rightPlaceholder')}
-                  onInput={(e) => (rightText.value = (e.target as HTMLTextAreaElement).value)}
-                  style={textareaStyle}
-                />
-              </div>
+      <div style={workbenchGridStyle}>
+        <section style={panelStyle}>
+          {renderForm()}
+          {memberGated.value && (
+            <div
+              style={{
+                padding: 'var(--space-3)',
+                background: 'rgba(212, 165, 116, 0.12)',
+                border: '1px solid var(--color-warning)',
+                borderRadius: 'var(--radius-md)',
+                fontSize: 'var(--text-sm)',
+                color: 'var(--color-text)',
+              }}
+            >
+              {t('docIntel.memberGateNotice')}
             </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <Button
-                variant="primary"
-                loading={loading.value}
-                disabled={loading.value}
-                onClick={() =>
-                  run('compare', { left: { text: leftText.value }, right: { text: rightText.value }, mode: 'semantic' })
-                }
-              >
-                {t('docIntel.runCompare')}
-              </Button>
-            </div>
-          </div>
-        )}
+          )}
+        </section>
 
-        {/* ── summarize ── */}
-        {tab.value === 'summarize' && (
-          <div style={{ display: 'flex', gap: 'var(--space-4)', flexDirection: 'column' }}>
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-              <span style={labelStyle}>{t('docIntel.sourcePlaceholder')}</span>
-              <textarea
-                value={sourceText.value}
-                placeholder={t('docIntel.sourcePlaceholder')}
-                onInput={(e) => (sourceText.value = (e.target as HTMLTextAreaElement).value)}
-                style={textareaStyle}
-              />
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <Button
-                variant="primary"
-                loading={loading.value}
-                disabled={loading.value}
-                onClick={() =>
-                  run('summarize', { source: { text: sourceText.value }, level: 'standard' })
-                }
-              >
-                {t('docIntel.runSummarize')}
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {/* ── chapters ── */}
-        {tab.value === 'chapters' && (
-          <div style={{ display: 'flex', gap: 'var(--space-4)', flexDirection: 'column' }}>
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-              <span style={labelStyle}>{t('docIntel.sourcePlaceholder')}</span>
-              <textarea
-                value={sourceText.value}
-                placeholder={t('docIntel.sourcePlaceholder')}
-                onInput={(e) => (sourceText.value = (e.target as HTMLTextAreaElement).value)}
-                style={textareaStyle}
-              />
-            </div>
-            <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'center', flexWrap: 'wrap' }}>
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                <span style={labelStyle}>{t('docIntel.chapterIdx')}</span>
-                <input
-                  type="number"
-                  value={chapterIdx.value}
-                  min={0}
-                  aria-label={t('docIntel.chapterIdx')}
-                  onInput={(e) => (chapterIdx.value = Number((e.target as HTMLInputElement).value))}
-                  style={{
-                    width: 80,
-                    padding: 'var(--space-2)',
-                    border: '1px solid var(--color-border)',
-                    borderRadius: 'var(--radius-md)',
-                    background: 'var(--color-bg)',
-                    color: 'var(--color-text)',
-                    fontSize: 'var(--text-sm)',
-                  }}
-                />
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 200 }}>
-                <span style={labelStyle}>{t('docIntel.questionPlaceholder')}</span>
-                <input
-                  type="text"
-                  value={question.value}
-                  placeholder={t('docIntel.questionPlaceholder')}
-                  onInput={(e) => (question.value = (e.target as HTMLInputElement).value)}
-                  style={{
-                    padding: 'var(--space-2)',
-                    border: '1px solid var(--color-border)',
-                    borderRadius: 'var(--radius-md)',
-                    background: 'var(--color-bg)',
-                    color: 'var(--color-text)',
-                    fontSize: 'var(--text-sm)',
-                  }}
-                />
-              </div>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
-              <Button
-                variant="secondary"
-                loading={loading.value}
-                disabled={loading.value}
-                onClick={() => run('chapters', { text: sourceText.value, action: 'list' })}
-              >
-                {t('docIntel.listChapters')}
-              </Button>
-              <Button
-                variant="primary"
-                loading={loading.value}
-                disabled={loading.value}
-                onClick={() =>
-                  run('chapters', { text: sourceText.value, action: 'ask', chapterIdx: chapterIdx.value, question: question.value })
-                }
-              >
-                {t('docIntel.askChapter')}
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {/* ── member gate ── */}
-        {memberGated.value && (
-          <div
-            style={{
-              padding: 'var(--space-4)',
-              background: 'rgba(212, 165, 116, 0.12)',
-              border: '1px solid var(--color-warning)',
-              borderRadius: 'var(--radius-md)',
-              fontSize: 'var(--text-sm)',
-              color: 'var(--color-text)',
-            }}
-          >
-            {t('docIntel.memberGateNotice')}
-          </div>
-        )}
-
-        {/* ── results ── */}
-        {env && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
-              <CostChip bill={env.tokenBill} />
-              {(() => {
-                const built = buildExportFromEnvelope(env);
-                if (!built) return null;
-                return (
-                  <ExportButton
-                    artifact={built.artifact}
-                    formats={built.formats}
-                    filename={built.filename}
-                  />
-                );
-              })()}
-            </div>
-
-            {/* compare → marked overlay on the source (right doc) */}
-            {env.outputMode === 'marked' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
-                  {t('docIntel.markedHeading')}
-                </h3>
-                {renderOverlay(rightText.value, env.annotations ?? [])}
-              </div>
-            )}
-
-            {/* summarize → narrative report */}
-            {env.outputMode === 'narrative' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
-                  {t('docIntel.narrativeHeading')}
-                </h3>
-                <pre
-                  style={{
-                    padding: 'var(--space-4)',
-                    background: 'var(--color-surface)',
-                    border: '1px solid var(--color-border)',
-                    borderRadius: 'var(--radius-md)',
-                    fontSize: 'var(--text-sm)',
-                    whiteSpace: 'pre-wrap',
-                    lineHeight: 1.6,
-                    margin: 0,
-                  }}
-                >
-                  {env.narrative ?? ''}
-                </pre>
-              </div>
-            )}
-
-            {/* chapters review → margin annotations + citation anchors */}
-            {env.outputMode === 'review' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
-                  {t('docIntel.reviewHeading')}
-                </h3>
-                {renderOverlay(sourceText.value, env.annotations ?? [])}
-              </div>
-            )}
-
-            {/* structured JSON dump — fallback for unrecognized outputMode */}
-            {env.outputMode === 'structured' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
-                <h3 style={{ fontSize: 'var(--text-base)', fontWeight: 600, margin: 0 }}>
-                  {t('docIntel.structuredHeading')}
-                </h3>
-                <pre
-                  style={{
-                    padding: 'var(--space-4)',
-                    background: 'var(--color-surface)',
-                    border: '1px solid var(--color-border)',
-                    borderRadius: 'var(--radius-md)',
-                    fontSize: 'var(--text-xs)',
-                    fontFamily: 'var(--font-mono, monospace)',
-                    overflow: 'auto',
-                    margin: 0,
-                  }}
-                >
-                  {JSON.stringify(env.result, null, 2)}
-                </pre>
-              </div>
-            )}
-          </div>
-        )}
+        <section style={resultPanelStyle}>
+          {renderResult()}
+        </section>
       </div>
     </div>
   );

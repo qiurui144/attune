@@ -8,6 +8,7 @@ import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
 import { Button, EmptyState, Modal, Input } from './index';
+import { confirmDialog } from './ConfirmModal';
 import { toast } from './Toast';
 import { t } from '../i18n';
 import {
@@ -77,7 +78,12 @@ export function AccountsPanel(props: { onChanged?: () => void }): JSX.Element {
   }
 
   async function handleDelete(acc: ThirdPartyAccount) {
-    if (!confirm(t('accounts.confirm.delete', { label: acc.label || acc.username || acc.id }))) {
+    const okToDelete = await confirmDialog({
+      title: t('confirm.title.deleteThirdPartyAccount'),
+      message: t('accounts.confirm.delete', { label: acc.label || acc.username || acc.id }),
+      danger: true,
+    });
+    if (!okToDelete) {
       return;
     }
     const ok = await deleteThirdPartyAccount(acc.id);

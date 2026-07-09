@@ -11,6 +11,7 @@ import type { JSX } from 'preact';
 import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
 import { Button, EmptyState, Modal, Input } from './index';
+import { confirmDialog } from './ConfirmModal';
 import { toast } from './Toast';
 import { t } from '../i18n';
 import {
@@ -83,7 +84,12 @@ export function BrowserLoginPanel(): JSX.Element {
   }
 
   async function handleDelete(s: BrowserLoginSession) {
-    if (!confirm(t('browserLogin.confirm.delete', { name: s.source_name || s.domain || s.id }))) {
+    const okToDelete = await confirmDialog({
+      title: t('confirm.title.deleteBrowserSession'),
+      message: t('browserLogin.confirm.delete', { name: s.source_name || s.domain || s.id }),
+      danger: true,
+    });
+    if (!okToDelete) {
       return;
     }
     const ok = await deleteBrowserLoginSession(s.id);

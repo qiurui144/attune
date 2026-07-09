@@ -25,9 +25,89 @@ export interface PickDirectoryOptions {
   title?: string;
 }
 
+interface LocalFilePayload {
+  file_name: string;
+  bytes: number[];
+}
+
 function isTauriRuntime(): boolean {
   return typeof window !== 'undefined'
     && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
+function basename(path: string): string {
+  const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : 'selected-file';
+}
+
+function mimeFromName(name: string): string {
+  const ext = name.toLowerCase().split('.').pop() ?? '';
+  const map: Record<string, string> = {
+    pdf: 'application/pdf',
+    txt: 'text/plain',
+    md: 'text/markdown',
+    csv: 'text/csv',
+    json: 'application/json',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    bmp: 'image/bmp',
+    tif: 'image/tiff',
+    tiff: 'image/tiff',
+    wav: 'audio/wav',
+    mp3: 'audio/mpeg',
+    m4a: 'audio/mp4',
+    ogg: 'audio/ogg',
+    flac: 'audio/flac',
+    aac: 'audio/aac',
+    opus: 'audio/ogg',
+  };
+  return map[ext] ?? 'application/octet-stream';
+}
+
+function fileUrlFromPath(path: string): string {
+  const normalized = path.replace(/\\/g, '/');
+  if (/^[A-Za-z]:\//.test(normalized)) return `file:///${encodeURI(normalized)}`;
+  if (normalized.startsWith('/')) return `file://${encodeURI(normalized)}`;
+  return `file://${encodeURI(normalized)}`;
+}
+
+async function readDesktopPathAsFile(path: string): Promise<File | null> {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const payload = await invoke<LocalFilePayload>('read_local_file', { path });
+    const name = payload.file_name || basename(path);
+    const type = mimeFromName(name);
+    const blob = new Blob([new Uint8Array(payload.bytes)], { type });
+    return new File([blob], name, { type });
+  } catch {
+    // In tests and some WebView configurations the command may be unavailable;
+    // fall through to the WebView file:// fetch path.
+  }
+
+  try {
+    const name = basename(path);
+    const resp = await fetch(fileUrlFromPath(path));
+    if (!resp.ok) return null;
+    const blob = await resp.blob();
+    const type = blob.type || mimeFromName(name);
+    return new File([blob], name, { type });
+  } catch {
+    return null;
+  }
+}
+
+async function materializeDesktopFiles(paths: string[]): Promise<File[]> {
+  const files: File[] = [];
+  for (const path of paths) {
+    const file = await readDesktopPathAsFile(path);
+    if (file) files.push(file);
+  }
+  return files;
 }
 
 /**
@@ -174,7 +254,11 @@ export function useFilePicker() {
         });
         if (selected === null) return { paths: [], files: [] };
         const paths = Array.isArray(selected) ? selected : [selected];
-        return { paths, files: [] };
+        const files = await materializeDesktopFiles(paths);
+        if (paths.length > 0 && files.length < paths.length) {
+          error.value = 'Unable to read one or more selected files';
+        }
+        return { paths, files };
       }
 
       // Browser fallback: hidden file input

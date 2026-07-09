@@ -24,10 +24,13 @@ export interface SkillInputInfo {
 export interface SkillInfo {
   id: string;
   version: string;
+  current_version?: string;
   title: string;
   description: string;
   cost_tier: string; // 'free' | 'local' | 'llm_multi_step'
   source: string; // 'oss' | 'pro:<vertical>'
+  pinned?: boolean;
+  active_hash?: string | null;
   inputs: SkillInputInfo[];
 }
 
@@ -43,6 +46,52 @@ export interface SkillEstimate {
   est_seconds: number;
   steps: SkillStepEstimate[];
   over_cap: boolean;
+}
+
+export interface SkillDryRunStep {
+  id: string;
+  kind: string;
+  tier: string;
+  detail?: string | null;
+}
+
+export interface SkillDryRunItemRef {
+  id: string;
+  found: boolean;
+  title?: string | null;
+  chars: number;
+}
+
+export interface SkillDryRunResult {
+  skill: SkillInfo;
+  valid_inputs: boolean;
+  can_run: boolean;
+  has_llm: boolean;
+  member_required: boolean;
+  privacy_llm_required: boolean;
+  referenced_items: SkillDryRunItemRef[];
+  steps: SkillDryRunStep[];
+  estimate: SkillEstimate;
+  blockers: string[];
+  warnings: string[];
+}
+
+export interface SkillVersionSnapshot {
+  skill_id: string;
+  version: string;
+  title: string;
+  source: string;
+  hash: string;
+  captured_at: string;
+  note?: string | null;
+}
+
+export interface SkillVersionEntry {
+  skill_id: string;
+  current: SkillVersionSnapshot;
+  active?: SkillVersionSnapshot | null;
+  history: SkillVersionSnapshot[];
+  drift: boolean;
 }
 
 export interface SkillRunResult {
@@ -102,6 +151,63 @@ export async function estimateSkill(
   });
   if (!res.ok) throw await parseError(res, `estimate failed (HTTP ${res.status})`);
   return (await res.json()) as SkillEstimate;
+}
+
+/** POST a no-side-effect dry-run plan (no LLM / no agent / no file export). */
+export async function dryRunSkill(
+  id: string,
+  inputs: Record<string, unknown>,
+): Promise<SkillDryRunResult> {
+  const res = await fetch(`/api/v1/skill-runtime/skills/${encodeURIComponent(id)}/dry-run`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ inputs }),
+  });
+  if (!res.ok) throw await parseError(res, `dry-run failed (HTTP ${res.status})`);
+  return (await res.json()) as SkillDryRunResult;
+}
+
+export async function listSkillVersions(): Promise<SkillVersionEntry[]> {
+  const res = await fetch('/api/v1/skill-runtime/versions', { headers: authHeaders() });
+  if (!res.ok) throw await parseError(res, `list skill versions failed (HTTP ${res.status})`);
+  const body = (await res.json()) as { skills: SkillVersionEntry[] };
+  return body.skills;
+}
+
+export async function captureSkillSnapshot(
+  id: string,
+  note = '',
+  activate = false,
+): Promise<SkillVersionEntry> {
+  const res = await fetch(`/api/v1/skill-runtime/skills/${encodeURIComponent(id)}/versions/snapshot`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ note, activate }),
+  });
+  if (!res.ok) throw await parseError(res, `capture snapshot failed (HTTP ${res.status})`);
+  return (await res.json()) as SkillVersionEntry;
+}
+
+export async function activateSkillSnapshot(
+  id: string,
+  hash: string,
+): Promise<SkillVersionEntry> {
+  const res = await fetch(`/api/v1/skill-runtime/skills/${encodeURIComponent(id)}/versions/activate`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ hash }),
+  });
+  if (!res.ok) throw await parseError(res, `activate snapshot failed (HTTP ${res.status})`);
+  return (await res.json()) as SkillVersionEntry;
+}
+
+export async function clearSkillSnapshot(id: string): Promise<SkillVersionEntry> {
+  const res = await fetch(`/api/v1/skill-runtime/skills/${encodeURIComponent(id)}/versions/active`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw await parseError(res, `clear snapshot failed (HTTP ${res.status})`);
+  return (await res.json()) as SkillVersionEntry;
 }
 
 /** Decode the base64 artifact and trigger a browser download. */

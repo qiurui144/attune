@@ -243,7 +243,7 @@ export function Reader({ itemId }: ReaderProps): JSX.Element {
               cursor: 'pointer',
               fontSize: 'var(--text-base)',
             }}
-            aria-label="Dismiss"
+            aria-label={t('common.dismiss')}
           >
             ×
           </button>
@@ -357,7 +357,7 @@ function AnnotationRow({
       <button
         type="button"
         onClick={onDelete}
-        aria-label="Delete annotation"
+        aria-label={t('reader.delete_annotation')}
         style={{
           background: 'transparent',
           border: 'none',

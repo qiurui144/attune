@@ -15,8 +15,9 @@ import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
 import { Button, EmptyState, Modal, PluginForm, SuggestionsPanel, toast } from '../components';
 import { api } from '../store/api';
-import { currentView, settingsInitialTab, drawerContent } from '../store/signals';
+import { currentView, settingsInitialTab, drawerContent, items, vaultState } from '../store/signals';
 import { t } from '../i18n';
+import { loadItems, getItem } from '../hooks/useItems';
 
 // ── 后端 /scenarios 契约（routes/scenarios.rs） ──────────────────────────────
 interface ScenarioFormRef {
@@ -38,7 +39,8 @@ interface Scenario {
   form_ref: ScenarioFormRef | null;
   output_modes: { default?: string | null; supports?: string[] } | null;
   enabled: boolean;
-  /** EntitlementCache 运行态：free / active / trial / grace / trial-expired / revoked 等 */
+  requires_entitlement?: boolean;
+  /** EntitlementCache 运行态：free / active / trial / grace / degraded / unlicensed / trial-expired / suspended 等 */
   entitlement_status: string;
 }
 interface ScenariosResp {
@@ -47,7 +49,7 @@ interface ScenariosResp {
 
 /** entitlement_status 是否锁定该卡（点击不 dispatch，显示购买引导）。 */
 function isLocked(s: Scenario): boolean {
-  return s.entitlement_status === 'trial-expired' || s.entitlement_status === 'revoked';
+  return !['free', 'active', 'trial', 'grace'].includes(s.entitlement_status);
 }
 
 /** 通用输入（无 form 的 agent）→ POST /agents/{id}/run 的响应形态。 */
@@ -68,6 +70,12 @@ export function WorkbenchView(): JSX.Element {
   const openGeneric = useSignal<Scenario | null>(null);
 
   async function reload(): Promise<void> {
+    if (vaultState.value !== 'unlocked') {
+      scenarios.value = null;
+      loading.value = false;
+      loadError.value = null;
+      return;
+    }
     loading.value = true;
     loadError.value = null;
     try {
@@ -83,6 +91,10 @@ export function WorkbenchView(): JSX.Element {
   useEffect(() => {
     void reload();
   }, []);
+
+  if (vaultState.value !== 'unlocked') {
+    return <Centered>{t('workbench.locked_hint')}</Centered>;
+  }
 
   function onCardClick(s: Scenario): void {
     if (isLocked(s)) {
@@ -275,7 +287,21 @@ function ScenarioCard({ scenario: s, onClick }: { scenario: Scenario; onClick: (
  *  结果走 agent-result drawer（与 PluginForm 一致的展示路径）。 */
 function GenericRunForm({ scenario: s, onClose }: { scenario: Scenario; onClose: () => void }): JSX.Element {
   const text = useSignal('');
+  const selectedItemId = useSignal('');
   const submitting = useSignal(false);
+
+  useEffect(() => {
+    if (items.value.length === 0) void loadItems(100, 0);
+  }, []);
+
+  async function useExistingItem(itemId: string): Promise<void> {
+    selectedItemId.value = itemId;
+    if (!itemId) return;
+    const item = await getItem(itemId);
+    if (item?.content) {
+      text.value = item.content;
+    }
+  }
 
   async function run(): Promise<void> {
     const body = text.value.trim();
@@ -313,6 +339,31 @@ function GenericRunForm({ scenario: s, onClose }: { scenario: Scenario; onClose:
         <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)', margin: 0 }}>
           {s.scenario}
         </p>
+      )}
+      {items.value.length > 0 && (
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)', fontSize: 'var(--text-sm)', color: 'var(--color-text-secondary)' }}>
+          <span>{t('workbench.generic.item_select')}</span>
+          <select
+            value={selectedItemId.value}
+            onChange={(e) => void useExistingItem(e.currentTarget.value)}
+            style={{
+              width: '100%',
+              fontSize: 'var(--text-sm)',
+              padding: 'var(--space-2)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--color-surface)',
+              color: 'var(--color-text)',
+            }}
+          >
+            <option value="">{t('workbench.generic.item_select_placeholder')}</option>
+            {items.value.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.title || item.id}
+              </option>
+            ))}
+          </select>
+        </label>
       )}
       <textarea
         value={text.value}

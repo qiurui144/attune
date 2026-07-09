@@ -16,12 +16,20 @@ import {
   lastCostEstimate,
   lastFailedSend,
 } from '../store/signals';
-import type { ChatSession, Message, CostEstimate, AcpFlow } from '../store/signals';
+import type {
+  ChatSession,
+  Message,
+  CostEstimate,
+  AcpFlow,
+  LocalSchedulerInfo,
+} from '../store/signals';
 import { t } from '../i18n';
 
 // chat 请求超时上限。超过此值视为超时 → 给用户超时提示 + 重试入口，
 // 而非无限转圈让用户怀疑卡死（90s 容忍较慢的本地大模型 / 云端长回答）。
 const CHAT_TIMEOUT_MS = 90_000;
+const LOCAL_SCHEDULER_JOB_POLL_INTERVAL_MS = 1_500;
+const LOCAL_SCHEDULER_JOB_MAX_POLLS = 240;
 
 // ── 后端响应类型 ─────────────────────────────────────────────
 type SessionsResponse = {
@@ -49,6 +57,16 @@ type ChatResponse = {
   hint?: string;
   cost_estimate?: CostEstimate;
   acp_flow?: AcpFlow;
+  local_scheduler?: LocalSchedulerInfo;
+};
+
+type SchedulerJobStatus = LocalSchedulerInfo & {
+  outputs?: unknown;
+  cancel_requested?: boolean | null;
+};
+
+type LocalSchedulerJobResponse = {
+  job: SchedulerJobStatus;
 };
 
 // 刚发送完一条消息后，sendMessage 会回填新 session_id，触发 ChatView 的
@@ -169,9 +187,15 @@ export async function sendMessage(
       content: res.content,
       citations: res.citations,
       acp_flow: res.acp_flow,
+      local_scheduler: res.local_scheduler,
       created_at: new Date().toISOString(),
     };
     messages.value = [...messages.value, assistantMsg];
+
+    const localSchedulerJobId = res.local_scheduler?.job_id;
+    if (localSchedulerJobId && !isLocalSchedulerTerminalStatus(res.local_scheduler?.status)) {
+      void pollLocalSchedulerJob(assistantMsg.id, localSchedulerJobId);
+    }
 
     // 若是第一次发送（无 session_id），回填 + 刷新列表。回填 activeSessionId 会触发
     // ChatView 的 loadSession —— 置 skip 让那次重载跳过，保留刚附 acp_flow 的内存消息。
@@ -217,6 +241,187 @@ export async function sendMessage(
 }
 
 // ── 工具 ─────────────────────────────────────────────────────
+
+function normalizeLocalSchedulerStatus(status: string | null | undefined): string {
+  return (status ?? '').trim().toLowerCase();
+}
+
+function isLocalSchedulerSuccessStatus(status: string | null | undefined): boolean {
+  switch (normalizeLocalSchedulerStatus(status)) {
+    case 'done':
+    case 'completed':
+    case 'complete':
+    case 'success':
+    case 'succeeded':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isLocalSchedulerFailureStatus(status: string | null | undefined): boolean {
+  switch (normalizeLocalSchedulerStatus(status)) {
+    case 'error':
+    case 'failed':
+    case 'failure':
+    case 'canceled':
+    case 'cancelled':
+    case 'expired':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isLocalSchedulerTerminalStatus(status: string | null | undefined): boolean {
+  return isLocalSchedulerSuccessStatus(status) || isLocalSchedulerFailureStatus(status);
+}
+
+function mergeSchedulerJobStatus(
+  current: LocalSchedulerInfo | undefined,
+  job: SchedulerJobStatus,
+): LocalSchedulerInfo {
+  return {
+    ...current,
+    task: job.task ?? current?.task,
+    scheduled_as: job.scheduled_as ?? current?.scheduled_as,
+    job_id: job.job_id ?? current?.job_id,
+    status: job.status ?? current?.status,
+    phase: job.phase ?? current?.phase,
+    reason: job.reason ?? current?.reason,
+    eta_ms: job.eta_ms ?? current?.eta_ms,
+    model: job.model ?? current?.model,
+    service_class: job.service_class ?? current?.service_class,
+    device_used: job.device_used ?? current?.device_used,
+    latency_ms: job.latency_ms ?? current?.latency_ms,
+    queue_wait_ms: job.queue_wait_ms ?? current?.queue_wait_ms,
+    error: job.error ?? current?.error,
+    detail: job.detail ?? current?.detail,
+    admission: current?.admission,
+  };
+}
+
+function patchMessageById(
+  messageId: string,
+  update: (message: Message) => Message,
+): boolean {
+  let found = false;
+  const next = messages.value.map((m) => {
+    if (m.id !== messageId) return m;
+    found = true;
+    return update(m);
+  });
+  if (found) messages.value = next;
+  return found;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function extractLocalSchedulerOutputText(outputs: unknown): string | null {
+  const direct = nonEmptyString(outputs);
+  if (direct) return direct;
+  if (!isRecord(outputs)) return null;
+
+  for (const key of ['answer', 'text', 'content', 'response', 'summary', 'output']) {
+    const value = nonEmptyString(outputs[key]);
+    if (value) return value;
+  }
+
+  const choices = outputs.choices;
+  if (!Array.isArray(choices)) return null;
+  const first = choices[0];
+  if (!isRecord(first)) return null;
+  const text = nonEmptyString(first.text);
+  if (text) return text;
+  const message = first.message;
+  if (!isRecord(message)) return null;
+  return nonEmptyString(message.content);
+}
+
+function localSchedulerFailureContent(job: SchedulerJobStatus): string {
+  const status = normalizeLocalSchedulerStatus(job.status);
+  if (status === 'canceled' || status === 'cancelled') {
+    return t('chat.local_scheduler.canceled');
+  }
+  if (status === 'expired') {
+    return t('chat.local_scheduler.expired');
+  }
+  const message = job.error ?? job.detail ?? job.reason ?? job.status ?? 'unknown';
+  return t('chat.local_scheduler.failed', { message });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pollLocalSchedulerJob(messageId: string, jobId: string): Promise<void> {
+  for (let attempt = 0; attempt < LOCAL_SCHEDULER_JOB_MAX_POLLS; attempt++) {
+    await sleep(LOCAL_SCHEDULER_JOB_POLL_INTERVAL_MS);
+    if (!messages.value.some((m) => m.id === messageId)) return;
+
+    let job: SchedulerJobStatus;
+    try {
+      const res = await api.get<LocalSchedulerJobResponse>(
+        `/chat/local-scheduler/jobs/${encodeURIComponent(jobId)}`,
+      );
+      job = res.job;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      patchMessageById(messageId, (m) => ({
+        ...m,
+        content: t('chat.local_scheduler.poll_failed', { message }),
+        local_scheduler: {
+          ...m.local_scheduler,
+          job_id: jobId,
+          status: 'poll_error',
+          error: message,
+        },
+      }));
+      return;
+    }
+
+    const stillPresent = patchMessageById(messageId, (m) => ({
+      ...m,
+      local_scheduler: mergeSchedulerJobStatus(m.local_scheduler, job),
+    }));
+    if (!stillPresent) return;
+
+    if (isLocalSchedulerSuccessStatus(job.status)) {
+      const content = extractLocalSchedulerOutputText(job.outputs) ?? t('chat.local_scheduler.done_without_text');
+      patchMessageById(messageId, (m) => ({
+        ...m,
+        content,
+        local_scheduler: mergeSchedulerJobStatus(m.local_scheduler, job),
+      }));
+      return;
+    }
+
+    if (isLocalSchedulerFailureStatus(job.status)) {
+      patchMessageById(messageId, (m) => ({
+        ...m,
+        content: localSchedulerFailureContent(job),
+        local_scheduler: mergeSchedulerJobStatus(m.local_scheduler, job),
+      }));
+      return;
+    }
+  }
+
+  patchMessageById(messageId, (m) => ({
+    ...m,
+    content: t('chat.local_scheduler.poll_timeout'),
+    local_scheduler: {
+      ...m.local_scheduler,
+      job_id: jobId,
+      status: 'poll_timeout',
+    },
+  }));
+}
 
 /** 简单 token 估算：中文 ~1 token/字，英文 ~0.25 token/字 */
 export function estimateTokens(text: string): number {

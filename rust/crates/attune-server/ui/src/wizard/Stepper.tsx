@@ -27,7 +27,7 @@ export function Stepper({
 }: StepperProps): JSX.Element {
   return (
     <nav
-      aria-label="Setup progress"
+      aria-label={t('wizard.stepper.aria')}
       className="wizard-stepper-scroll"
       style={{
         display: 'flex',
@@ -43,6 +43,7 @@ export function Stepper({
         const isCurrent = currentStep === step.n;
         const isClickable = isCompleted && onStepClick;
         const label = t(step.labelKey);
+        const status = isCompleted ? t('wizard.stepper.completed_suffix') : '';
 
         return (
           <>
@@ -52,7 +53,7 @@ export function Stepper({
               onClick={isClickable ? () => onStepClick!(step.n) : undefined}
               disabled={!isClickable}
               aria-current={isCurrent ? 'step' : undefined}
-              aria-label={`Step ${step.n}: ${label}${isCompleted ? ' (completed)' : ''}`}
+              aria-label={t('wizard.stepper.step_aria', { step: step.n, label, status })}
               style={{
                 display: 'flex',
                 alignItems: 'center',

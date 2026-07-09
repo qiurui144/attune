@@ -324,7 +324,7 @@ function WebdavForm({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
       <Input
-        label="WebDAV URL"
+        label={t('remote.webdav.url')}
         value={url.value}
         onInput={(e) => (url.value = e.currentTarget.value)}
         placeholder="https://nextcloud.example.com/remote.php/dav/files/user"

@@ -187,13 +187,13 @@ export function Step4Hardware({
     onContinue();
   }
 
-  // K3 一体机:embedding/rerank/OCR/ASR 由 k3-scheduler :8090 提供,模型预装 → 跳过模型下载步
-  // (2026-06-22 K3 调度层集成 spec §2/§4 wizard K3 profile)。仅 K3 形态生效,不影响其他形态。
-  if (ctx.llmMode === 'k3') {
+  // 本地调度器设备:embedding/rerank/OCR/ASR 由 local-scheduler :8090 提供,
+  // 模型预装 → 跳过模型下载步。仅本地调度器形态生效,不影响其他形态。
+  if (ctx.llmMode === 'local_scheduler') {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
         <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 600, margin: 0 }}>
-          {t('wizard.hw.k3.heading')}
+          {t('wizard.hw.local_scheduler.heading')}
         </h2>
         <div
           style={{
@@ -205,11 +205,11 @@ export function Step4Hardware({
             color: 'var(--color-text-secondary)',
           }}
         >
-          {t('wizard.hw.k3.preinstalled')}
+          {t('wizard.hw.local_scheduler.preinstalled')}
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
           <Button variant="primary" size="lg" onClick={onContinue}>
-            {t('wizard.hw.k3.continue')} →
+            {t('wizard.hw.local_scheduler.continue')} →
           </Button>
         </div>
       </div>
@@ -218,10 +218,6 @@ export function Step4Hardware({
 
   // v0.6.0-rc.4: Tier 0 (unsupported) 拒绝继续，显示明确错误信息
   const tierUnsupported = aiStack?.hardware?.supported === false;
-  const localChatBlocked =
-    ctx.llmMode === 'ollama'
-    && aiStack != null
-    && (aiStack.hardware.tier === 'unsupported' || aiStack.hardware.tier === 'low' || aiStack.hardware.tier === 'mid');
 
   if (tierUnsupported && aiStack) {
     return (
@@ -260,7 +256,7 @@ export function Step4Hardware({
         >
           <strong>{t('wizard.hw.unsupported.recommend')}</strong>
           <ul style={{ marginTop: 'var(--space-2)', paddingLeft: 'var(--space-4)' }}>
-            <li>{t('wizard.hw.unsupported.option_k3')}</li>
+            <li>{t('wizard.hw.unsupported.option_local_scheduler')}</li>
             <li>{t('wizard.hw.unsupported.option_device')}</li>
           </ul>
         </div>
@@ -349,22 +345,7 @@ export function Step4Hardware({
         </details>
       )}
 
-      {localChatBlocked && (
-        <div
-          style={{
-            padding: 'var(--space-3)',
-            border: '1px solid var(--color-warning)',
-            background: 'rgba(245, 158, 11, 0.08)',
-            borderRadius: 'var(--radius-md)',
-            color: 'var(--color-text-secondary)',
-            fontSize: 'var(--text-sm)',
-          }}
-        >
-          {t('wizard.hw.local_blocked')}
-        </div>
-      )}
-
-      {hw && !localChatBlocked && (
+      {hw && (
         <div className="fade-slide-in" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
           <div style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>{t('wizard.hw.auto_result')}</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
@@ -382,7 +363,7 @@ export function Step4Hardware({
           variant="primary"
           size="lg"
           loading={applying}
-          disabled={!hw || localChatBlocked}
+          disabled={!hw}
           onClick={applyRecommendation}
         >
           {t('wizard.hw.apply')} →
@@ -498,4 +479,3 @@ function MiniStat({ label, value }: { label: string; value: string }): JSX.Eleme
     </div>
   );
 }
-

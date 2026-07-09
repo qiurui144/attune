@@ -22,6 +22,7 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
   const [folderPaths, setFolderPaths] = useState<string[]>(ctx.boundFolders ?? []);
   const [manualPath, setManualPath] = useState('');
   const [importing, setImporting] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const { isDesktop: canPickFolder, picking: folderPickingSignal, pickDirectory, pickFiles } = useFilePicker();
@@ -74,7 +75,7 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
         onUpdate({ boundFolders: folderPaths });
         toast('success', t('wizard.data.toast.bound_n', { count: folderPaths.length }));
       } else if (mode === 'import') {
-        const file = fileInputRef.current?.files?.[0];
+        const file = importFile ?? fileInputRef.current?.files?.[0];
         if (file) {
           // Critical 1.3 修复：文件大小 + shape 校验，防恶意 profile 打挂后端
           const MAX_SIZE = 50 * 1024 * 1024; // 50 MB
@@ -99,6 +100,10 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
           await api.post('/profile/import', profile);
           onUpdate({ importedProfile: file.name });
           toast('success', t('wizard.data.toast.imported', { name: file.name }));
+        } else {
+          toast('warning', t('wizard.data.err.no_import_file'));
+          setImporting(false);
+          return;
         }
       }
       onFinish();
@@ -253,23 +258,16 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
                 size="sm"
                 onClick={async (e: Event) => {
                   e.stopPropagation();
-                  const { paths } = await pickFiles({
+                  const { paths, files } = await pickFiles({
                     multiple: false,
                     accept: '.json,.vault-profile',
                     title: t('wizard.data.import.dialog_title'),
                   });
-                  if (paths.length > 0 && fileInputRef.current) {
-                    // Read file from path for the existing handleFinish flow
-                    try {
-                      const resp = await fetch(`file://${paths[0]}`);
-                      const blob = await resp.blob();
-                      const file = new File([blob], paths[0].split(/[/\\]/).pop() ?? 'profile.vault-profile');
-                      const dt = new DataTransfer();
-                      dt.items.add(file);
-                      fileInputRef.current.files = dt.files;
-                    } catch {
-                      toast('error', t('wizard.data.err.file_read_failed'));
-                    }
+                  const file = files[0] ?? null;
+                  if (file) {
+                    setImportFile(file);
+                  } else if (paths.length > 0) {
+                    toast('error', t('wizard.data.err.file_read_failed'));
                   }
                 }}
               >
@@ -282,8 +280,12 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
               accept=".json,.vault-profile"
               style={{ display: 'none' }}
               onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                const input = e.currentTarget;
+                setImportFile(input.files?.[0] ?? null);
+              }}
             />
-            {mode === 'import' && fileInputRef.current?.files?.[0] && (
+            {mode === 'import' && (importFile ?? fileInputRef.current?.files?.[0]) && (
               <div
                 style={{
                   marginTop: 'var(--space-2)',
@@ -291,7 +293,7 @@ export function Step5Data({ ctx, onUpdate, onFinish }: Step5Props): JSX.Element 
                   color: 'var(--color-accent)',
                 }}
               >
-                ✓ {fileInputRef.current.files[0].name}
+                ✓ {(importFile ?? fileInputRef.current?.files?.[0])?.name}
               </div>
             )}
           </>

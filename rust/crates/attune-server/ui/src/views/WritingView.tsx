@@ -18,11 +18,14 @@
  */
 
 import type { JSX } from 'preact';
+import { useEffect } from 'preact/hooks';
 import { useSignal } from '@preact/signals';
 import { Button } from '../components';
 import { toast } from '../components/Toast';
 import { t } from '../i18n';
 import { api, ApiError } from '../store/api';
+import { items } from '../store/signals';
+import { loadItems } from '../hooks/useItems';
 
 // ─── response shapes (mirror attune-core writing types) ───
 interface ModelLeg {
@@ -299,6 +302,10 @@ export function WritingView(): JSX.Element {
   const citeResult = useSignal<CiteResponse | null>(null);
   const fillResult = useSignal<FillResult | null>(null);
 
+  useEffect(() => {
+    if (items.value.length === 0) void loadItems(100, 0);
+  }, []);
+
   function clearResults(): void {
     writingResult.value = null;
     outlineResult.value = null;
@@ -311,7 +318,7 @@ export function WritingView(): JSX.Element {
     loading.value = true;
     clearResults();
     try {
-      const v = await api.post<T>(`/api/v1/writing/${path}`, body);
+      const v = await api.post<T>(`/writing/${path}`, body);
       sink(v);
     } catch (e) {
       const { code, message } = parseErr(e);
@@ -330,6 +337,49 @@ export function WritingView(): JSX.Element {
 
   function parseItemIds(): string[] {
     return itemIds.value.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+  }
+  function updateSelectedItemIds(selectedIds: string[]): void {
+    const knownIds = new Set(items.value.map((item) => item.id));
+    const manualIds = parseItemIds().filter((id) => !knownIds.has(id));
+    itemIds.value = [...manualIds, ...selectedIds].join(' ');
+  }
+  function renderItemIdsControl(): JSX.Element {
+    const selected = new Set(parseItemIds());
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: items.value.length > 0 ? 'minmax(220px, 320px) minmax(0, 1fr)' : '1fr', gap: 'var(--space-3)' }}>
+        {items.value.length > 0 && (
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
+            <span style={labelStyle}>{t('writing.itemSelectLabel')}</span>
+            <select
+              multiple
+              aria-label={t('writing.itemSelectLabel')}
+              onChange={(e) => {
+                const values = Array.from((e.currentTarget as HTMLSelectElement).selectedOptions).map((option) => option.value);
+                updateSelectedItemIds(values);
+              }}
+              style={{ ...selectStyle, width: '100%', minHeight: 118, boxSizing: 'border-box' }}
+            >
+              {items.value.map((item) => (
+                <option key={item.id} value={item.id} selected={selected.has(item.id)}>
+                  {item.title || item.id}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
+          <span style={labelStyle}>{t('writing.itemIdsLabel')}</span>
+          <input
+            type="text"
+            value={itemIds.value}
+            placeholder={t('writing.itemIdsPlaceholder')}
+            aria-label={t('writing.itemIdsLabel')}
+            onInput={(e) => (itemIds.value = (e.target as HTMLInputElement).value)}
+            style={{ ...inputStyle, width: '100%', boxSizing: 'border-box' }}
+          />
+        </label>
+      </div>
+    );
   }
   function extraSources(): { externalRef: string; text: string }[] {
     return extraText.value.trim() ? [{ externalRef: '', text: extraText.value }] : [];
@@ -399,14 +449,7 @@ export function WritingView(): JSX.Element {
             onInput={(e) => (outline.value = (e.target as HTMLTextAreaElement).value)}
             style={textareaStyle}
           />
-          <input
-            type="text"
-            value={itemIds.value}
-            placeholder={t('writing.itemIdsPlaceholder')}
-            aria-label={t('writing.itemIdsLabel')}
-            onInput={(e) => (itemIds.value = (e.target as HTMLInputElement).value)}
-            style={inputStyle}
-          />
+          {renderItemIdsControl()}
           <textarea
             value={extraText.value}
             placeholder={t('writing.extraSourcePlaceholder')}
@@ -535,14 +578,7 @@ export function WritingView(): JSX.Element {
       {/* ── synthesis (W5) ── */}
       {tab.value === 'synthesis' && (
         <div style={panelGap}>
-          <input
-            type="text"
-            value={itemIds.value}
-            placeholder={t('writing.itemIdsPlaceholder')}
-            aria-label={t('writing.itemIdsLabel')}
-            onInput={(e) => (itemIds.value = (e.target as HTMLInputElement).value)}
-            style={inputStyle}
-          />
+          {renderItemIdsControl()}
           <textarea
             value={extraText.value}
             placeholder={t('writing.synthesisExtraPlaceholder')}

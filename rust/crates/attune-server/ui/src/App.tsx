@@ -23,10 +23,11 @@ import { MainShell } from './layout';
 import { PrivacyTour } from './views/PrivacyTour';
 import { useShortcut } from './hooks/useShortcut';
 import { api, ApiError, clearToken, getToken } from './store/api';
-import { currentView, settingsInitialTab, vaultState, sidebarCollapsed } from './store/signals';
+import { currentView, memberState, settingsInitialTab, vaultState, sidebarCollapsed } from './store/signals';
 import type { SettingsTabId, View } from './store/signals';
 import { startConnectionMonitor } from './store/connection';
 import { startProgressWS } from './store/ws';
+import { loadMemberState } from './hooks/useMember';
 import { t } from './i18n';
 
 type VaultStatusResponse = {
@@ -216,6 +217,15 @@ export function App(): JSX.Element {
     };
   }, []);
 
+  useEffect(() => {
+    if (phase.value.kind !== 'main') return;
+    void loadMemberState();
+    const id = window.setInterval(() => {
+      void loadMemberState();
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, [phase.value.kind]);
+
   async function lockVaultFromShell(): Promise<void> {
     try {
       await api.post('/vault/lock');
@@ -372,12 +382,81 @@ export function App(): JSX.Element {
     <>
       <MainShell />
       <DesktopUpdateBanner notice={updateNotice} onDismiss={() => setUpdateNotice(null)} />
+      <MemberQuotaBanner />
       <PrivacyTour />
       <CommandPalette open={paletteOpen.value} onClose={() => (paletteOpen.value = false)} />
       <RecommendationOverlay />
       <ConfirmHost />
       <ToastContainer />
     </>
+  );
+}
+
+function MemberQuotaBanner(): JSX.Element | null {
+  const m = memberState.value;
+  if (!m) return null;
+  const quota = m.llm_quota_remaining ?? 0;
+  const quotaText = quota > 0 ? quota.toLocaleString() : '';
+  const isPaid = m.kind === 'paid';
+  const label = isPaid
+    ? quota > 0
+      ? t('member.banner.paid_quota', { quota: quotaText })
+      : t('member.banner.paid')
+    : m.kind === 'free'
+      ? t('member.banner.free')
+      : t('member.banner.logged_out');
+  const borderColor = isPaid && quota > 0 && quota < 10_000 ? 'var(--color-warning)' : 'var(--color-border)';
+
+  function openQuota(): void {
+    currentView.value = 'quota';
+  }
+
+  function openMember(): void {
+    settingsInitialTab.value = 'member';
+    currentView.value = 'settings';
+  }
+
+  return (
+    <div
+      role="status"
+      style={{
+        position: 'fixed',
+        right: 'var(--space-4)',
+        bottom: 'var(--space-4)',
+        zIndex: 1200,
+        width: 'min(420px, calc(100vw - 32px))',
+        padding: 'var(--space-2)',
+        background: 'var(--color-surface)',
+        border: `1px solid ${borderColor}`,
+        borderRadius: 'var(--radius-md)',
+        boxShadow: 'var(--shadow-md)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--space-2)',
+      }}
+    >
+      <div
+        style={{
+          minWidth: 0,
+          flex: 1,
+          fontSize: 'var(--text-xs)',
+          color: 'var(--color-text-secondary)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {label}
+      </div>
+      <Button size="sm" variant="secondary" onClick={openQuota}>
+        {t('member.banner.quota')}
+      </Button>
+      {!isPaid && (
+        <Button size="sm" variant="primary" onClick={openMember}>
+          {t('member.banner.member')}
+        </Button>
+      )}
+    </div>
   );
 }
 

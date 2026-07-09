@@ -50,7 +50,7 @@ export function Sidebar(): JSX.Element {
 
   return (
     <aside
-      aria-label="Navigation"
+      aria-label={t('sidebar.aria.navigation')}
       style={{
         width,
         flexShrink: 0,
@@ -261,7 +261,7 @@ function SessionList({ collapsed }: { collapsed: boolean }): JSX.Element {
 
   return (
     <nav
-      aria-label="Sessions"
+      aria-label={t('sidebar.aria.sessions')}
       style={{
         flex: 1,
         overflow: 'auto',
@@ -399,7 +399,7 @@ function SecondaryNav({ collapsed }: { collapsed: boolean }): JSX.Element {
 
   return (
     <nav
-      aria-label="Features"
+      aria-label={t('sidebar.aria.features')}
       style={{
         borderTop: '1px solid var(--color-border)',
         padding: 'var(--space-2) 0',

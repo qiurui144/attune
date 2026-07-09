@@ -69,7 +69,7 @@ export const connectionState = signal<ConnectionState>('online');
 // ── 业务级 ──────────────────────────────────────────────────────
 export const settings = signal<Record<string, unknown> | null>(null);
 export const hardware = signal<Record<string, unknown> | null>(null);
-export const ollamaStatus = signal<'checking' | 'ready' | 'missing'>('checking');
+export const localSchedulerStatus = signal<'checking' | 'ready' | 'missing'>('checking');
 
 // ── 会员状态 (调 /api/v1/member/state) ────────────────────────────
 export type MemberStateKind = 'logged_out' | 'free' | 'paid';
@@ -77,6 +77,7 @@ export type MemberSnapshot = {
   kind: MemberStateKind;
   account_id?: string | null;
   license_id?: string | null;
+  llm_quota_remaining?: number;
   is_logged_in: boolean;
   is_paid: boolean;
 };
@@ -143,12 +144,42 @@ export type AcpFlow = {
   final_value?: unknown;
 };
 
+// ── local scheduler live trace：chat 响应携带的本地任务状态（live-only） ──
+export type LocalSchedulerAdmission = {
+  task_name?: string;
+  model_id?: string;
+  service_class?: string;
+  context_tokens?: number;
+  max_output_tokens?: number;
+  reason?: string;
+  explicit_async?: boolean;
+};
+
+export type LocalSchedulerInfo = {
+  task?: string | null;
+  scheduled_as?: string | null;
+  job_id?: string | null;
+  status?: string | null;
+  phase?: string | null;
+  reason?: string | null;
+  eta_ms?: number | null;
+  model?: string | null;
+  service_class?: string | null;
+  device_used?: string | null;
+  latency_ms?: number | null;
+  queue_wait_ms?: number | null;
+  error?: string | null;
+  detail?: string | null;
+  admission?: LocalSchedulerAdmission;
+};
+
 export type Message = {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   citations?: Array<{ item_id: string; title: string; relevance: number }>;
   acp_flow?: AcpFlow;
+  local_scheduler?: LocalSchedulerInfo;
   created_at: string;
 };
 export const messages = signal<Message[]>([]);
@@ -231,7 +262,6 @@ export function dismissRecommendation(index: number): void {
 export const canChat = computed(
   () =>
     vaultState.value === 'unlocked' &&
-    ollamaStatus.value === 'ready' &&
     connectionState.value !== 'offline',
 );
 

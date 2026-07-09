@@ -4,6 +4,7 @@ import type { JSX } from 'preact';
 import { signal } from '@preact/signals';
 import { useEffect } from 'preact/hooks';
 import { genId } from '../util';
+import { t as i18n } from '../i18n';
 
 export type ToastKind = 'info' | 'success' | 'warning' | 'error';
 export type ToastItem = {
@@ -92,7 +93,7 @@ function ToastItemView({ toast: t }: { toast: ToastItem }): JSX.Element {
       <button
         type="button"
         onClick={() => dismissToast(t.id)}
-        aria-label="Dismiss"
+        aria-label={i18n('common.dismiss')}
         style={{
           background: 'transparent',
           border: 'none',

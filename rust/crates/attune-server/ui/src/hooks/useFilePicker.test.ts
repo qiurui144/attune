@@ -5,6 +5,10 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
 }));
 
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(),
+}));
+
 // Must import after mock setup
 import { useFilePicker } from './useFilePicker';
 
@@ -112,6 +116,32 @@ describe('useFilePicker', () => {
       expect(callArgs.directory).toBe(false);
       expect(callArgs.multiple).toBe(false);
       expect(callArgs.title).toBe('Select file');
+      delete (window as any).__TAURI_INTERNALS__;
+    });
+
+    it('materializes desktop paths into File objects when native read succeeds', async () => {
+      (window as any).__TAURI_INTERNALS__ = {};
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const { invoke } = await import('@tauri-apps/api/core');
+      (open as any).mockClear();
+      vi.mocked(open).mockResolvedValue('/tmp/doc.pdf');
+      (invoke as any).mockResolvedValueOnce({
+        file_name: 'doc.pdf',
+        bytes: [112, 100, 102],
+      });
+
+      const picker = useFilePicker();
+      const result = await picker.pickFiles({
+        accept: '.pdf',
+        multiple: false,
+        title: 'Select file',
+      });
+
+      expect(result.paths).toEqual(['/tmp/doc.pdf']);
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0].name).toBe('doc.pdf');
+      expect(await result.files[0].text()).toBe('pdf');
+      expect(invoke).toHaveBeenCalledWith('read_local_file', { path: '/tmp/doc.pdf' });
       delete (window as any).__TAURI_INTERNALS__;
     });
 
