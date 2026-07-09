@@ -405,6 +405,7 @@ mod tests {
         let row = EntitlementRow {
             plugin_id: "law-pro".into(),
             license_id: "l".into(),
+            decrypt_key: None,
             tier: "paid".into(),
             status: "suspended".into(),
             trial_expires: None,
@@ -432,6 +433,7 @@ mod tests {
         let row = EntitlementRow {
             plugin_id: "law-pro".into(),
             license_id: "l".into(),
+            decrypt_key: None,
             tier: "paid".into(),
             status: "active".into(),
             trial_expires: None,
@@ -457,6 +459,7 @@ mod tests {
         let row = EntitlementRow {
             plugin_id: "law-pro".into(),
             license_id: "l".into(),
+            decrypt_key: None,
             tier: "paid".into(),
             status: "active".into(),
             trial_expires: None,
@@ -483,6 +486,7 @@ mod tests {
         let row = EntitlementRow {
             plugin_id: "law-pro".into(),
             license_id: "l".into(),
+            decrypt_key: None,
             tier: "paid".into(),
             status: "active".into(),
             trial_expires: None,

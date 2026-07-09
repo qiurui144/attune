@@ -259,7 +259,7 @@ mod tests {
     fn dsar_req_drops_internal_ssrf_targets() {
         for hostile in [
             "http://169.254.169.254/latest/meta-data/", // cloud metadata
-            "http://127.0.0.1:8080/admin",              // loopback
+            "http://127.0.0.1:8090/admin",              // loopback
             "http://[::1]/",                            // ipv6 loopback
             "http://192.168.0.1/router",                // private LAN
             "file:///etc/passwd",                       // local file scheme

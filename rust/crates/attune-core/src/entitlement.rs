@@ -12,7 +12,7 @@
 //! ## 分层 fail(决策 3 + spec §7.2)
 //!
 //! - trial 72h fail-**closed**(到期拒 dispatch);
-//! - paid 14d fail-**open→degrade**(超期仍可用 + 持续橙标,不锁已付费用户);
+//! - paid 14d 宽限;超期进入 Degraded 并 fail-**closed** dispatch(需重新验证);
 //! - revoked / suspended 立即 fail-**closed**(Suspended 态永不返可用)。
 //!
 //! ## 转 Active 的唯一合法路径
@@ -42,7 +42,7 @@ pub const CLOCK_SKEW_SECONDS: i64 = 24 * 3600;
 /// trial 离线宽限期(spec §7.3,fail-closed)。
 pub const TRIAL_GRACE_HOURS: i64 = 72;
 
-/// paid 离线宽限期(spec §7.3,fail-open→degrade)。
+/// paid 离线宽限期(spec §7.3):窗口内可用,超期进入 Degraded 并拒绝 dispatch。
 pub const PAID_GRACE_DAYS: i64 = 14;
 
 /// entitlement 运行期状态(spec §7.3 状态机的可观测态)。
@@ -58,7 +58,7 @@ pub enum EntStatus {
     TrialExpired,
     /// 云不可达,宽限态(trial < 72h / paid < 14d)。
     Grace,
-    /// paid 超 14d 宽限 —— 仍可用 + 持续橙标(fail-open)。
+    /// paid 超 14d 宽限 —— 需要重新验证后才可 dispatch。
     Degraded,
     /// license 吊销 / 挂起 —— fail-closed,永不返可用。
     Suspended,
@@ -82,7 +82,7 @@ impl EntStatus {
 /// dispatch gate 的判定结果(spec §7.2 dispatch 行为)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntitlementDecision {
-    /// 可 dispatch(active / trial 未过期 / paid 宽限 / degraded / free)。
+    /// 可 dispatch(active / trial 未过期 / paid 宽限 / free)。
     Allow,
     /// 拒 dispatch,携带 kebab 错误码(供路由回 `{code}`)。
     Reject(&'static str),
@@ -155,7 +155,7 @@ pub fn detect_clock_rollback(last_verified_at: &DateTime<Utc>, now: &DateTime<Ut
 /// tier=trial,未过期                       ──> Trial
 /// tier=trial,已过期                       ──> TrialExpired (fail-closed)
 /// grace 中:trial >72h                     ──> TrialExpired
-/// grace 中:paid  >14d                     ──> Degraded     (fail-open)
+/// grace 中:paid  >14d                     ──> Degraded     (dispatch fail-closed)
 /// grace 中:未超窗口                        ──> Grace
 /// 否则(active,云最近可达)                 ──> Active
 /// ```
@@ -184,7 +184,7 @@ pub fn grace_transition(ent: &Entitlement, now: &DateTime<Utc>) -> EntStatus {
                     EntStatus::Grace
                 }
             }
-            // paid(及其他付费态):超 14d → Degraded(fail-open,仍可用 + 橙标)。
+            // paid(及其他付费态):超 14d → Degraded(需重新验证后才可执行)。
             _ => {
                 if elapsed > Duration::days(PAID_GRACE_DAYS) {
                     EntStatus::Degraded
@@ -207,7 +207,7 @@ pub fn grace_transition(ent: &Entitlement, now: &DateTime<Utc>) -> EntStatus {
         return EntStatus::Trial;
     }
 
-    // 6) paid + 非宽限 + 时钟回拨:无法确认新鲜 → Degraded(fail-open,不锁付费用户)。
+    // 6) paid + 非宽限 + 时钟回拨:无法确认新鲜 → Degraded(需重新验证)。
     if rolled_back {
         return EntStatus::Degraded;
     }
@@ -218,16 +218,16 @@ pub fn grace_transition(ent: &Entitlement, now: &DateTime<Utc>) -> EntStatus {
 
 /// 把 [`EntStatus`] 映射到 dispatch gate 决策(spec §7.2)。
 ///
-/// fail-open(可用):Free / Active / Trial / Grace / Degraded;
-/// fail-closed(拒):TrialExpired(`trial-expired`)/ Suspended(`license-revoked`)。
+/// fail-open(可用):Free / Active / Trial / Grace;
+/// fail-closed(拒):TrialExpired(`trial-expired`)/ Degraded(`license-reverify-required`)/
+/// Suspended(`license-revoked`)。
 pub fn dispatch_decision(status: EntStatus) -> EntitlementDecision {
     match status {
-        EntStatus::Free
-        | EntStatus::Active
-        | EntStatus::Trial
-        | EntStatus::Grace
-        | EntStatus::Degraded => EntitlementDecision::Allow,
+        EntStatus::Free | EntStatus::Active | EntStatus::Trial | EntStatus::Grace => {
+            EntitlementDecision::Allow
+        }
         EntStatus::TrialExpired => EntitlementDecision::Reject("trial-expired"),
+        EntStatus::Degraded => EntitlementDecision::Reject("license-reverify-required"),
         EntStatus::Suspended => EntitlementDecision::Reject("license-revoked"),
     }
 }
@@ -364,6 +364,7 @@ mod tests {
         EntitlementRow {
             plugin_id: plugin_id.into(),
             license_id: "lic-x".into(),
+            decrypt_key: None,
             tier: tier.into(),
             status: status.into(),
             trial_expires: None,
@@ -466,15 +467,14 @@ mod tests {
     }
 
     #[test]
-    fn paid_grace_14d01m_degraded_but_usable() {
+    fn paid_grace_14d01m_degraded_requires_reverify() {
         let mut e = ent("paid", "active");
         e.grace_started_at = Some(ts("2026-06-01T00:00:00+00:00"));
         let now = ts("2026-06-15T00:01:00+00:00"); // > 14d
         assert_eq!(grace_transition(&e, &now), EntStatus::Degraded);
-        // fail-open: degraded paid is still dispatchable.
         assert_eq!(
             dispatch_decision(EntStatus::Degraded),
-            EntitlementDecision::Allow
+            EntitlementDecision::Reject("license-reverify-required")
         );
     }
 
@@ -567,12 +567,16 @@ mod tests {
     }
 
     #[test]
-    fn clock_rollback_paid_degraded_not_locked() {
-        // paid + clock rollback → Degraded (fail-open, don't lock paying user).
+    fn clock_rollback_paid_degraded_requires_reverify() {
+        // paid + clock rollback → Degraded, and dispatch requires re-verification.
         let mut e = ent("paid", "active");
         e.last_verified_at = ts("2026-06-20T00:00:00+00:00");
         let now = ts("2026-06-12T00:00:00+00:00");
         assert_eq!(grace_transition(&e, &now), EntStatus::Degraded);
+        assert_eq!(
+            dispatch_decision(EntStatus::Degraded),
+            EntitlementDecision::Reject("license-reverify-required")
+        );
     }
 
     // ── PERF-1: O(1) keyed lookup ───────────────────────────────────────────

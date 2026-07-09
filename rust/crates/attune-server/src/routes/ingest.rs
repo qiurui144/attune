@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
-use attune_core::ingest::{ingest_document, IngestOutcome, RawDocument, SourceKind};
+use attune_core::ingest::{ingest_document_with_options, IngestOutcome, RawDocument, SourceKind};
 
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
@@ -28,7 +28,7 @@ const MAX_INGEST_CONTENT: usize = 2 * 1024 * 1024; // 2 MB
 const MAX_INGEST_TITLE: usize = 500;
 
 /// OSS-S15 fix: embedding 队列深度上限。R18 复现 5p mixed 60min 后累积 30K+ pending
-/// embeddings，server 进入 5min hung（后台 worker 串行 drain Ollama HTTP，前端读路径
+/// embeddings，server 进入 5min hung（后台 worker 串行 drain embedding HTTP，前端读路径
 /// 锁竞争阻塞）。超过此阈值 ingest 入口返回 503 backpressure 强制客户端 retry-after。
 const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
 
@@ -47,6 +47,7 @@ pub async fn ingest(
             body.content.len()
         )));
     }
+    let ingest_options = crate::local_scheduler::ingest_options_from_state(&state, None);
     let vault = state
         .vault
         .lock()
@@ -90,7 +91,7 @@ pub async fn ingest(
         metadata: std::collections::HashMap::new(),
     };
 
-    let outcome = ingest_document(vault.store(), &dek, &raw)
+    let outcome = ingest_document_with_options(vault.store(), &dek, &raw, &ingest_options)
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let (id, chunks_queued) = match &outcome {

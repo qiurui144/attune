@@ -16,6 +16,104 @@
 pub const DEFAULT_CHUNK_SIZE: usize = 512;
 pub const DEFAULT_OVERLAP: usize = 128;
 pub const SECTION_TARGET_SIZE: usize = 1500;
+pub const MIN_CONFIGURED_CHUNK_SIZE: usize = 128;
+pub const MAX_CONFIGURED_CHUNK_SIZE: usize = 32 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkingOptions {
+    pub chunk_size: usize,
+    pub overlap: usize,
+    pub include_level1: bool,
+    pub include_level2: bool,
+}
+
+impl Default for ChunkingOptions {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl ChunkingOptions {
+    pub fn new(chunk_size: usize, overlap: usize) -> Self {
+        Self::normalized(chunk_size, overlap, true, true)
+    }
+
+    pub fn with_levels(mut self, include_level1: bool, include_level2: bool) -> Self {
+        self.include_level1 = include_level1;
+        self.include_level2 = include_level2;
+        if !self.include_level1 && !self.include_level2 {
+            self.include_level2 = true;
+        }
+        self
+    }
+
+    pub fn from_env() -> Self {
+        let chunk_size = env_usize_any(
+            &[
+                "ATTUNE_INGEST_CHUNK_SIZE",
+                "ATTUNE_INDEX_CHUNK_SIZE",
+                "ATTUNE_CHUNK_SIZE",
+            ],
+            DEFAULT_CHUNK_SIZE,
+        );
+        let overlap = env_usize_any(
+            &[
+                "ATTUNE_INGEST_CHUNK_OVERLAP",
+                "ATTUNE_INDEX_CHUNK_OVERLAP",
+                "ATTUNE_CHUNK_OVERLAP",
+            ],
+            DEFAULT_OVERLAP,
+        );
+        let include_level1 = env_bool_any(&["ATTUNE_INGEST_INCLUDE_LEVEL1"], true);
+        let include_level2 = env_bool_any(&["ATTUNE_INGEST_INCLUDE_LEVEL2"], true);
+        Self::normalized(chunk_size, overlap, include_level1, include_level2)
+    }
+
+    fn normalized(
+        chunk_size: usize,
+        overlap: usize,
+        include_level1: bool,
+        include_level2: bool,
+    ) -> Self {
+        let chunk_size = chunk_size.clamp(MIN_CONFIGURED_CHUNK_SIZE, MAX_CONFIGURED_CHUNK_SIZE);
+        let overlap = overlap.min(chunk_size.saturating_sub(1));
+        let (include_level1, include_level2) = if !include_level1 && !include_level2 {
+            (false, true)
+        } else {
+            (include_level1, include_level2)
+        };
+        Self {
+            chunk_size,
+            overlap,
+            include_level1,
+            include_level2,
+        }
+    }
+}
+
+fn env_usize_any(keys: &[&str], default: usize) -> usize {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|v| *v > 0)
+        })
+        .unwrap_or(default)
+}
+
+fn env_bool_any(keys: &[&str], default: bool) -> bool {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key).ok().map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+        })
+        .unwrap_or(default)
+}
 
 /// 滑动窗口分块（字符级，句子边界感知 + Markdown code fence 边界保留）
 ///
@@ -373,6 +471,24 @@ fn find_sentence_boundary(chars: &[char], start: usize, end: usize) -> Option<us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunking_options_clamp_size_and_overlap() {
+        let opts = ChunkingOptions::new(1, 999);
+        assert_eq!(opts.chunk_size, MIN_CONFIGURED_CHUNK_SIZE);
+        assert_eq!(opts.overlap, MIN_CONFIGURED_CHUNK_SIZE - 1);
+
+        let opts = ChunkingOptions::new(MAX_CONFIGURED_CHUNK_SIZE * 2, 0);
+        assert_eq!(opts.chunk_size, MAX_CONFIGURED_CHUNK_SIZE);
+        assert_eq!(opts.overlap, 0);
+    }
+
+    #[test]
+    fn chunking_options_keep_at_least_one_level_enabled() {
+        let opts = ChunkingOptions::new(512, 128).with_levels(false, false);
+        assert!(!opts.include_level1);
+        assert!(opts.include_level2);
+    }
 
     #[test]
     fn chunk_short_text_single() {

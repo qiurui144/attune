@@ -24,7 +24,6 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// 从 app_settings JSON 中提取 LLM env vars，供 agent subprocess 使用。
@@ -81,25 +80,6 @@ pub struct RunAgentRequest {
     pub input: serde_json::Value,
 }
 
-fn current_plugin_registry(
-    state: &SharedState,
-) -> Arc<attune_core::plugin_registry::PluginRegistry> {
-    match attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
-        .and_then(|dir| attune_core::plugin_registry::PluginRegistry::scan(&dir))
-    {
-        Ok((registry, warnings)) => {
-            for warning in warnings {
-                tracing::warn!("plugin live-scan warning before agent run: {warning}");
-            }
-            Arc::new(registry)
-        }
-        Err(e) => {
-            tracing::warn!("plugin live-scan failed before agent run; using startup registry: {e}");
-            state.plugin_registry.clone()
-        }
-    }
-}
-
 pub(crate) fn plugin_requires_entitlement(
     registry: &attune_core::plugin_registry::PluginRegistry,
     plugin_id: &str,
@@ -115,9 +95,9 @@ pub(crate) fn plugin_requires_entitlement(
 }
 
 /// Trust-chain T10 (spec §7.2): entitlement dispatch gate. Returns `Ok(())` when the
-/// owning plugin is entitled to run (free / active / trial / paid-grace / degraded);
+/// owning plugin is entitled to run (free / active / trial / paid-grace);
 /// returns a kebab-coded `AppError::Forbidden` when blocked (`plugin-entitlement-required`
-/// / `trial-expired` / `license-revoked`). The plugin's installed data is NOT touched
+/// / `trial-expired` / `license-reverify-required` / `license-revoked`). The plugin's installed data is NOT touched
 /// — only the run is refused, so re-subscribing re-enables it (spec §7.2 "插件保留已装").
 /// Pure read of the in-memory cache (O(1) keyed lookup); no vault / network.
 fn entitlement_gate(
@@ -181,7 +161,7 @@ pub async fn run_agent(
     if agent_id.len() > 128 {
         return Err(AppError::BadRequest("agent_id too long".into()));
     }
-    let registry = current_plugin_registry(&state);
+    let registry = crate::routes::plugins::current_plugin_registry(&state);
 
     // 1. agent_id → 所属 plugin_id + agent spec (registry.list_agents 返回 (plugin_id, AgentSpec))
     let (plugin_id, agent_runtime) = registry
@@ -197,8 +177,8 @@ pub async fn run_agent(
     // Trust-chain T10 (spec §7.2): entitlement gate BEFORE any dispatch work. A
     // pro plugin with no entitlement row is rejected before any subprocess is touched
     // (copied-directory guard). Trial-expired / revoked rejects with a kebab code
-    // (plugin data is preserved — only the run is blocked); paid-grace / degraded
-    // allow (fail-open). O(1) EntitlementCache keyed lookup.
+    // (plugin data is preserved — only the run is blocked). Paid grace allows;
+    // degraded requires re-verification. O(1) EntitlementCache keyed lookup.
     entitlement_gate(&state, &plugin_id, requires_entitlement)?;
 
     // Bug-D: runtime: library 的 agent (如 interest_calculator) 不暴露独立 binary —
@@ -345,6 +325,7 @@ mod tests {
         EntitlementRow {
             plugin_id: plugin_id.into(),
             license_id: "lic-x".into(),
+            decrypt_key: None,
             tier: tier.into(),
             status: status.into(),
             trial_expires: trial_expires.map(|s| s.into()),
@@ -455,6 +436,29 @@ mod tests {
         let decision = cache.is_entitled("law-pro", &now);
         assert_eq!(decision, EntitlementDecision::Allow);
         assert!(gate_decision_to_result("law-pro", decision).is_ok());
+    }
+
+    /// paid past grace → dispatch blocked with kebab code `license-reverify-required`.
+    #[test]
+    fn dispatch_blocked_when_paid_degraded() {
+        let cache = EntitlementCache::new();
+        cache.upsert(row(
+            "law-pro",
+            "paid",
+            "active",
+            None,
+            Some("2026-06-01T00:00:00+00:00"),
+        ));
+        let now = ts("2026-06-16T00:00:00+00:00"); // > 14d into grace
+        let decision = cache.is_entitled("law-pro", &now);
+        assert_eq!(
+            decision,
+            EntitlementDecision::Reject("license-reverify-required")
+        );
+        let res = gate_decision_to_result("law-pro", decision);
+        assert!(
+            matches!(res.unwrap_err(), AppError::Detailed { status, .. } if status == StatusCode::FORBIDDEN)
+        );
     }
 
     /// revoked → dispatch blocked with kebab code `license-revoked` (fail-closed).

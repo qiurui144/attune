@@ -2,7 +2,9 @@
 
 use crate::error::{Result, VaultError};
 use serde::Deserialize;
+use serde_json::Value;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// 共享 Runtime，复用于所有 Ollama embedding 同步调用（与 llm.rs 中 llm_rt 同理）
 fn embed_rt() -> &'static tokio::runtime::Runtime {
@@ -220,7 +222,7 @@ impl EmbeddingProvider for OllamaProvider {
 /// 区别于 [`OllamaProvider`]（Ollama 原生 `/api/embed`）：本 provider 走 OpenAI
 /// `/v1/embeddings` 协议（`{"model","input"}` → `{"data":[{"embedding":[...]}],...}`），
 /// 因此可指向**任意** OpenAI 兼容 endpoint —— OpenAI、DeepSeek、本地 vLLM / LM Studio、
-/// attune Pro gateway，以及 K3 scheduler（G4 — K3 一体机把 embedding 指向本机调度器）。
+/// attune Pro gateway，以及 local scheduler（G4 — 本地调度器设备把 embedding 指向本机调度器）。
 ///
 /// `endpoint` 约定为不含 `/embeddings` 的 base（如 `https://api.openai.com/v1`），
 /// 与 `llm.rs::OpenAiLlmProvider` 一致。`api_key` 为空时不发 `Authorization` 头
@@ -349,6 +351,365 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
                 .unwrap_or(false))
         })
         .unwrap_or(false)
+    }
+}
+
+/// local scheduler-native embedding client.
+///
+/// Current local scheduler builds expose embedding as application KB tasks
+/// (`POST /kb/tasks/kb.query.embed`) rather than the proposed thin
+/// `/v1/embeddings` route. This provider submits the KB task, polls `/jobs/{id}`,
+/// and extracts OpenAI-style `data[].embedding` from the scheduler output.
+pub struct LocalSchedulerEmbeddingProvider {
+    client: reqwest::Client,
+    base_url: String,
+    task: String,
+    model: String,
+    dims: usize,
+    max_input_chars: usize,
+    max_input_tokens: usize,
+    poll_timeout: Duration,
+}
+
+impl LocalSchedulerEmbeddingProvider {
+    pub fn new(base_url: &str, task: &str, model: &str, dims: usize, poll_timeout_ms: u64) -> Self {
+        let base = base_url.trim_end_matches('/');
+        let base = base.strip_suffix("/v1").unwrap_or(base).to_string();
+        let task = task.trim();
+        let model = model.trim();
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .expect("HTTP client"),
+            base_url: base,
+            task: if task.is_empty() {
+                "kb.query.embed".to_string()
+            } else {
+                task.to_string()
+            },
+            model: if model.is_empty() {
+                "embedding-int8".to_string()
+            } else {
+                model.to_string()
+            },
+            dims,
+            max_input_chars: env_usize_any(
+                &[
+                    "ATTUNE_EMBED_MAX_INPUT_CHARS",
+                    "ATTUNE_INDEX_EMBED_MAX_INPUT_CHARS",
+                    "ATTUNE_SCHEDULER_EMBED_MAX_INPUT_CHARS",
+                    "ATTUNE_LOCAL_EMBED_MAX_INPUT_CHARS",
+                ],
+                512,
+            ),
+            max_input_tokens: env_usize_any(
+                &[
+                    "ATTUNE_EMBED_MAX_INPUT_TOKENS",
+                    "ATTUNE_INDEX_EMBED_MAX_INPUT_TOKENS",
+                    "ATTUNE_SCHEDULER_EMBED_MAX_INPUT_TOKENS",
+                    "ATTUNE_LOCAL_EMBED_MAX_INPUT_TOKENS",
+                ],
+                256,
+            ),
+            poll_timeout: Duration::from_millis(poll_timeout_ms.max(1_000)),
+        }
+    }
+
+    fn truncate_input(text: &str, max_chars: usize, max_tokens: usize) -> String {
+        let trimmed = text.trim();
+        let token_units_budget = max_tokens.saturating_mul(2).min(max_chars.max(1)).max(2);
+        if input_units(trimmed) <= token_units_budget {
+            return trimmed.to_string();
+        }
+
+        const ELLIPSIS: &str = "\n...\n";
+        let ellipsis_units = input_units(ELLIPSIS);
+        if token_units_budget <= ellipsis_units + 2 {
+            return take_prefix_units(trimmed, token_units_budget);
+        }
+
+        let body_budget = token_units_budget - ellipsis_units;
+        let head_budget = body_budget / 2 + body_budget % 2;
+        let tail_budget = body_budget / 2;
+        let head = take_prefix_units(trimmed, head_budget);
+        let tail = take_suffix_units(trimmed, tail_budget);
+        format!("{}{}{}", head.trim_end(), ELLIPSIS, tail.trim_start())
+    }
+
+    fn extract_embedding_vector(v: &Value) -> Option<Vec<f32>> {
+        let arr = v.as_array()?;
+        let mut out = Vec::with_capacity(arr.len());
+        for n in arr {
+            out.push(n.as_f64()? as f32);
+        }
+        Some(out)
+    }
+
+    fn extract_data_embeddings(v: &Value) -> Option<Vec<Vec<f32>>> {
+        let data = v.as_array()?;
+        let mut out = Vec::with_capacity(data.len());
+        for datum in data {
+            if let Some(embedding) = datum
+                .get("embedding")
+                .and_then(Self::extract_embedding_vector)
+            {
+                out.push(embedding);
+            } else if let Some(embedding) = Self::extract_embedding_vector(datum) {
+                out.push(embedding);
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    fn extract_embeddings(v: &Value) -> Option<Vec<Vec<f32>>> {
+        for pointer in [
+            "/outputs/data",
+            "/data",
+            "/outputs/embeddings",
+            "/embeddings",
+        ] {
+            if let Some(vecs) = v.pointer(pointer).and_then(Self::extract_data_embeddings) {
+                return Some(vecs);
+            }
+        }
+        for pointer in ["/outputs/embedding", "/embedding"] {
+            if let Some(vec) = v.pointer(pointer).and_then(Self::extract_embedding_vector) {
+                return Some(vec![vec]);
+            }
+        }
+        v.get("outputs").and_then(Self::extract_embeddings)
+    }
+
+    fn reinsert_empty_vectors(
+        embeddings: Vec<Vec<f32>>,
+        empty_indices: &[usize],
+        total_len: usize,
+        dims: usize,
+    ) -> Vec<Vec<f32>> {
+        if empty_indices.is_empty() {
+            return embeddings;
+        }
+        let mut out = Vec::with_capacity(total_len);
+        let mut non_empty_iter = embeddings.into_iter();
+        for i in 0..total_len {
+            if empty_indices.contains(&i) {
+                out.push(vec![0.0f32; dims]);
+            } else {
+                out.push(non_empty_iter.next().unwrap_or_else(|| vec![0.0f32; dims]));
+            }
+        }
+        out
+    }
+}
+
+fn input_units(text: &str) -> usize {
+    text.chars().map(input_char_units).sum()
+}
+
+fn input_char_units(ch: char) -> usize {
+    if ch.is_ascii_whitespace() {
+        1
+    } else if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.') {
+        1
+    } else {
+        2
+    }
+}
+
+fn take_prefix_units(text: &str, max_units: usize) -> String {
+    let mut units = 0usize;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let next = input_char_units(ch);
+        if units + next > max_units {
+            break;
+        }
+        units += next;
+        out.push(ch);
+    }
+    out
+}
+
+fn take_suffix_units(text: &str, max_units: usize) -> String {
+    let mut units = 0usize;
+    let mut chars = Vec::new();
+    for ch in text.chars().rev() {
+        let next = input_char_units(ch);
+        if units + next > max_units {
+            break;
+        }
+        units += next;
+        chars.push(ch);
+    }
+    chars.into_iter().rev().collect()
+}
+
+fn env_usize_any(keys: &[&str], default: usize) -> usize {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|v| *v > 0)
+        })
+        .unwrap_or(default)
+}
+
+impl EmbeddingProvider for LocalSchedulerEmbeddingProvider {
+    fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)> {
+        let mut empty_indices = Vec::new();
+        let mut non_empty: Vec<String> = Vec::new();
+        for (i, t) in texts.iter().enumerate() {
+            if t.trim().is_empty() {
+                empty_indices.push(i);
+            } else {
+                non_empty.push(Self::truncate_input(
+                    t,
+                    self.max_input_chars,
+                    self.max_input_tokens,
+                ));
+            }
+        }
+
+        let joined = non_empty.join("");
+        let est_tokens = crate::cost::estimate_tokens(&joined, &self.model);
+        let usage = crate::usage::TokenUsage {
+            tokens_in: est_tokens as u32,
+            tokens_out: 0,
+            cached_in: 0,
+            model: self.model.clone(),
+            provider: "local_scheduler".into(),
+        };
+
+        if non_empty.is_empty() {
+            return Ok((vec![vec![0.0f32; self.dims]; texts.len()], usage));
+        }
+
+        let submit_url = format!("{}/kb/tasks/{}", self.base_url, self.task);
+        let job_base_url = self.base_url.clone();
+        let input = non_empty;
+        let expected = input.len();
+        let client = self.client.clone();
+        let poll_timeout = self.poll_timeout;
+
+        let response = embed_block_on(async move {
+            let body = serde_json::json!({"input": input});
+            let resp = client
+                .post(&submit_url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    VaultError::LlmUnavailable(format!("local scheduler embed submit: {e}"))
+                })?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                return Err(VaultError::LlmUnavailable(format!(
+                    "local scheduler embed submit HTTP {status}: {text}"
+                )));
+            }
+            let mut value: Value = serde_json::from_str(&text).map_err(|e| {
+                VaultError::LlmUnavailable(format!(
+                    "local scheduler embed submit response: {e}: {text}"
+                ))
+            })?;
+            if status.as_u16() == 202 || value.get("job_id").is_some() {
+                let job_id = value
+                    .get("job_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        VaultError::LlmUnavailable("local scheduler embed missing job_id".into())
+                    })?
+                    .to_string();
+                let deadline = Instant::now() + poll_timeout;
+                loop {
+                    if Instant::now() >= deadline {
+                        return Err(VaultError::LlmUnavailable(format!(
+                            "local scheduler embed job {job_id} timed out after {} ms",
+                            poll_timeout.as_millis()
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let job_url = format!("{job_base_url}/jobs/{job_id}");
+                    let resp = client.get(&job_url).send().await.map_err(|e| {
+                        VaultError::LlmUnavailable(format!("local scheduler embed poll: {e}"))
+                    })?;
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if !status.is_success() {
+                        return Err(VaultError::LlmUnavailable(format!(
+                            "local scheduler embed poll HTTP {status}: {text}"
+                        )));
+                    }
+                    value = serde_json::from_str(&text).map_err(|e| {
+                        VaultError::LlmUnavailable(format!(
+                            "local scheduler embed job response: {e}: {text}"
+                        ))
+                    })?;
+                    match value.get("status").and_then(|v| v.as_str()).unwrap_or("") {
+                        "done" => break,
+                        "error" | "expired" | "canceled" => {
+                            return Err(VaultError::LlmUnavailable(format!(
+                                "local scheduler embed job failed: {value}"
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(value)
+        })?;
+
+        let embeddings = Self::extract_embeddings(&response).ok_or_else(|| {
+            VaultError::LlmUnavailable(format!(
+                "local scheduler embed response missing embeddings: {response}"
+            ))
+        })?;
+        if embeddings.len() != expected {
+            return Err(VaultError::LlmUnavailable(format!(
+                "local scheduler embed returned {} vectors for {expected} inputs",
+                embeddings.len()
+            )));
+        }
+        Ok((
+            Self::reinsert_empty_vectors(embeddings, &empty_indices, texts.len(), self.dims),
+            usage,
+        ))
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dims
+    }
+
+    fn is_available(&self) -> bool {
+        let url = format!("{}/models/{}", self.base_url, self.model);
+        let client = self.client.clone();
+        embed_block_on(async move {
+            let resp = client.get(&url).send().await.map_err(|e| {
+                VaultError::LlmUnavailable(format!("local scheduler embed availability: {e}"))
+            })?;
+            if !resp.status().is_success() {
+                return Ok(false);
+            }
+            let value: Value = resp.json().await.map_err(|e| {
+                VaultError::LlmUnavailable(format!(
+                    "local scheduler embed availability response: {e}"
+                ))
+            })?;
+            let state = value.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            Ok(!matches!(state, "UNAVAILABLE" | "FAILED"))
+        })
+        .unwrap_or(false)
+    }
+
+    fn model_name(&self) -> String {
+        format!("local-scheduler:{}-dim{}", self.model, self.dims)
     }
 }
 
@@ -487,7 +848,7 @@ mod tests {
     /// **configurable** endpoint (not a hardcoded Ollama URL) and parses the
     /// `/v1/embeddings` response shape. Uses a hand-rolled single-shot TcpListener
     /// mock (no new dev-deps); the captured request line + body assert that the
-    /// custom base URL + model were honoured — exactly the K3-scheduler routing G4 wants.
+    /// custom base URL + model were honoured — exactly the local-scheduler routing G4 wants.
     #[test]
     fn openai_embedding_routes_to_custom_endpoint() {
         use std::io::{Read, Write};
@@ -504,7 +865,8 @@ mod tests {
             let n = stream.read(&mut buf).unwrap_or(0);
             *cap2.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
             // OpenAI /v1/embeddings response shape: data[].embedding
-            let body = r#"{"data":[{"embedding":[0.1,0.2,0.3,0.4]}],"model":"k3-embed"}"#;
+            let body =
+                r#"{"data":[{"embedding":[0.1,0.2,0.3,0.4]}],"model":"local-scheduler-embed"}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
@@ -515,15 +877,18 @@ mod tests {
         });
 
         let endpoint = format!("http://127.0.0.1:{port}/v1");
-        let provider = OpenAiEmbeddingProvider::new(&endpoint, "sk-test", "k3-embed", 4);
-        let (vecs, usage) = provider.embed(&["hello k3"]).expect("embed ok");
+        let provider =
+            OpenAiEmbeddingProvider::new(&endpoint, "sk-test", "local-scheduler-embed", 4);
+        let (vecs, usage) = provider
+            .embed(&["hello local scheduler"])
+            .expect("embed ok");
 
         handle.join().unwrap();
 
         assert_eq!(vecs.len(), 1);
         assert_eq!(vecs[0], vec![0.1f32, 0.2, 0.3, 0.4]);
         assert_eq!(usage.provider, "openai_compat");
-        assert_eq!(usage.model, "k3-embed");
+        assert_eq!(usage.model, "local-scheduler-embed");
 
         // reqwest lowercases header names on the wire — match case-insensitively.
         let req = captured.lock().unwrap().clone();
@@ -538,7 +903,7 @@ mod tests {
             "missing bearer auth: {req}"
         );
         assert!(
-            req.contains("\"model\":\"k3-embed\""),
+            req.contains("\"model\":\"local-scheduler-embed\""),
             "model not in body: {req}"
         );
     }
@@ -553,5 +918,98 @@ mod tests {
         assert_eq!(vecs.len(), 2);
         assert_eq!(vecs[0], vec![0.0f32; 3]);
         assert_eq!(vecs[1], vec![0.0f32; 3]);
+    }
+
+    #[test]
+    fn local_scheduler_embedding_polls_async_job() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let cap2 = captured.clone();
+
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                cap2.lock().unwrap().push(req.clone());
+                let body = if req.starts_with("POST /kb/tasks/kb.query.embed ") {
+                    r#"{"job_id":"job_1","status":"queued"}"#
+                } else {
+                    r#"{"job_id":"job_1","status":"done","outputs":{"data":[{"embedding":[0.1,0.2,0.3,0.4]}]}}"#
+                };
+                let status = if req.starts_with("POST ") {
+                    "202 Accepted"
+                } else {
+                    "200 OK"
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let endpoint = format!("http://127.0.0.1:{port}");
+        let provider = LocalSchedulerEmbeddingProvider::new(
+            &endpoint,
+            "kb.query.embed",
+            "embedding-int8",
+            4,
+            1_000,
+        );
+        let (vecs, usage) = provider
+            .embed(&["hello local scheduler"])
+            .expect("embed ok");
+
+        handle.join().unwrap();
+
+        assert_eq!(vecs, vec![vec![0.1f32, 0.2, 0.3, 0.4]]);
+        assert_eq!(usage.provider, "local_scheduler");
+        assert_eq!(usage.model, "embedding-int8");
+        let reqs = captured.lock().unwrap();
+        assert!(reqs[0].starts_with("POST /kb/tasks/kb.query.embed "));
+        assert!(reqs[1].starts_with("GET /jobs/job_1 "));
+    }
+
+    #[test]
+    fn local_scheduler_embedding_truncates_long_inputs() {
+        let text = "  abcdef  ";
+        assert_eq!(
+            LocalSchedulerEmbeddingProvider::truncate_input(text, 3, 480),
+            "abc"
+        );
+        assert_eq!(
+            LocalSchedulerEmbeddingProvider::truncate_input("short", 64, 480),
+            "short"
+        );
+        let projected =
+            LocalSchedulerEmbeddingProvider::truncate_input("a".repeat(2000).as_str(), 2000, 256);
+        assert!(
+            projected.len() <= 512,
+            "projected input too long: {}",
+            projected.len()
+        );
+        assert!(projected.contains("\n...\n"));
+    }
+
+    #[test]
+    fn scheduler_embedding_limits_use_generic_env() {
+        let saved_generic = std::env::var("ATTUNE_EMBED_MAX_INPUT_CHARS").ok();
+        std::env::set_var("ATTUNE_EMBED_MAX_INPUT_CHARS", "123");
+
+        assert_eq!(env_usize_any(&["ATTUNE_EMBED_MAX_INPUT_CHARS"], 512), 123);
+
+        match saved_generic {
+            Some(v) => std::env::set_var("ATTUNE_EMBED_MAX_INPUT_CHARS", v),
+            None => std::env::remove_var("ATTUNE_EMBED_MAX_INPUT_CHARS"),
+        }
     }
 }

@@ -583,7 +583,7 @@ pub const CPU_DB: &[CpuEntry] = &[
         npu_tops: None,
     },
     // ─── ARM 嵌入式 (RPi / RK3588 / SpacemiT) ─────────────────────
-    // 注：SpacemiT X100 (K3 一体机) Passmark 数据不公开，按 8 核 RVA22 估算
+    // 注：SpacemiT X100 (local-scheduler appliance) Passmark 数据不公开，按 8 核 RVA22 估算
     CpuEntry {
         model_substr: "Cortex-A78AE",
         passmark: 6800,
@@ -613,7 +613,7 @@ pub const CPU_DB: &[CpuEntry] = &[
         model_substr: "X100",
         passmark: 5500,
         npu_tops: Some(2.0),
-    }, // K3 SpacemiT 估算
+    }, // local-scheduler SpacemiT 估算
 ];
 
 /// Normalize CPU model 字符串，便于 substring 匹配：

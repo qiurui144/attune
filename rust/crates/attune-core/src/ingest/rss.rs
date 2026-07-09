@@ -627,7 +627,7 @@ mod tests {
     fn real_fetcher_blocks_loopback_and_private_literals() {
         let f = RealFeedFetcher;
         for u in [
-            "http://127.0.0.1:8080/feed.xml",
+            "http://127.0.0.1:8090/feed.xml",
             "http://[::1]/feed.xml",
             "http://192.168.0.1/feed.xml",
             "http://10.0.0.5/feed.xml",

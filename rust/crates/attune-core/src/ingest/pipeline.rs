@@ -21,6 +21,7 @@ use crate::ingest::connector::RawDocument;
 use crate::store::items::compute_content_hash;
 use crate::store::Store;
 use crate::{chunker, parser};
+use std::path::Path;
 
 /// 一次 `ingest_document` 的结果，区分四态便于 caller 统计与回归断言。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,13 +43,99 @@ pub enum IngestOutcome {
     Skipped { reason: String },
 }
 
+#[derive(Debug, Clone)]
+pub struct IngestOptions {
+    pub parser: parser::ParseOptions,
+    pub chunking: chunker::ChunkingOptions,
+}
+
+impl Default for IngestOptions {
+    fn default() -> Self {
+        Self {
+            parser: parser::ParseOptions::default(),
+            chunking: chunker::ChunkingOptions::default(),
+        }
+    }
+}
+
+impl IngestOptions {
+    pub fn with_profile(profile: Option<&str>) -> Self {
+        Self {
+            parser: parser::ParseOptions::with_profile(profile),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_chunking(mut self, chunking: chunker::ChunkingOptions) -> Self {
+        self.chunking = chunking;
+        self
+    }
+
+    pub fn with_scheduler_base(mut self, scheduler_base: Option<&str>) -> Self {
+        self.parser = self.parser.with_scheduler_base(scheduler_base);
+        self
+    }
+
+    pub fn with_scheduler_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.parser = self.parser.with_scheduler_timeout_ms(timeout_ms);
+        self
+    }
+}
+
+pub fn enqueue_content_embeddings(
+    store: &Store,
+    item_id: &str,
+    content: &str,
+    corpus_domain: Option<&str>,
+    chunking: chunker::ChunkingOptions,
+) -> Result<usize> {
+    let active_corpus_domain = corpus_domain.filter(|d| !d.is_empty() && *d != "general");
+    let tag_chunk = |s: &str| -> String {
+        match active_corpus_domain {
+            Some(d) => format!("[领域: {d}] {s}"),
+            None => s.to_string(),
+        }
+    };
+    let mut chunk_counter: usize = 0;
+    let sections = chunker::extract_sections(content);
+
+    if chunking.include_level1 {
+        for (section_idx, section_text) in &sections {
+            if section_text.trim().is_empty() {
+                continue;
+            }
+            let tagged = tag_chunk(section_text);
+            store.enqueue_embedding(item_id, chunk_counter, &tagged, 1, 1, *section_idx)?;
+            chunk_counter += 1;
+        }
+    }
+
+    if chunking.include_level2 {
+        for (section_idx, section_text) in &sections {
+            if section_text.trim().is_empty() {
+                continue;
+            }
+            for chunk_text in chunker::chunk(section_text, chunking.chunk_size, chunking.overlap) {
+                if chunk_text.trim().is_empty() {
+                    continue;
+                }
+                let tagged = tag_chunk(&chunk_text);
+                store.enqueue_embedding(item_id, chunk_counter, &tagged, 2, 2, *section_idx)?;
+                chunk_counter += 1;
+            }
+        }
+    }
+
+    Ok(chunk_counter)
+}
+
 /// 把一份 `RawDocument` 走完统一五步（Inserted / Duplicate / Skipped 三态）。
 ///
 /// `dek` 是 vault 数据加密密钥。caller 必须已确认 vault 处于 Unlocked。
 /// Updated 检测（增量判断 + 旧 item 软删）由 caller 在调用前完成，
 /// 检测到变更时改调 `ingest_document_replacing`。
 pub fn ingest_document(store: &Store, dek: &Key32, raw: &RawDocument) -> Result<IngestOutcome> {
-    ingest_document_inner(store, dek, raw, None, None)
+    ingest_document_inner(store, dek, raw, None, &IngestOptions::default())
 }
 
 /// 带已知 `old_item_id` 的入库函数。caller 在调用前已自行完成旧 item 删除 +
@@ -59,7 +146,13 @@ pub fn ingest_document_replacing(
     raw: &RawDocument,
     old_item_id: &str,
 ) -> Result<IngestOutcome> {
-    ingest_document_inner(store, dek, raw, Some(old_item_id.to_string()), None)
+    ingest_document_inner(
+        store,
+        dek,
+        raw,
+        Some(old_item_id.to_string()),
+        &IngestOptions::default(),
+    )
 }
 
 /// 带 OCR profile 的入库入口。扫描版 PDF / 图片上传时由 caller 传 profile id
@@ -70,7 +163,26 @@ pub fn ingest_document_with_profile(
     raw: &RawDocument,
     profile: Option<&str>,
 ) -> Result<IngestOutcome> {
-    ingest_document_inner(store, dek, raw, None, profile)
+    ingest_document_inner(store, dek, raw, None, &IngestOptions::with_profile(profile))
+}
+
+pub fn ingest_document_with_options(
+    store: &Store,
+    dek: &Key32,
+    raw: &RawDocument,
+    options: &IngestOptions,
+) -> Result<IngestOutcome> {
+    ingest_document_inner(store, dek, raw, None, options)
+}
+
+pub fn ingest_document_replacing_with_options(
+    store: &Store,
+    dek: &Key32,
+    raw: &RawDocument,
+    old_item_id: &str,
+    options: &IngestOptions,
+) -> Result<IngestOutcome> {
+    ingest_document_inner(store, dek, raw, Some(old_item_id.to_string()), options)
 }
 
 fn ingest_document_inner(
@@ -78,20 +190,48 @@ fn ingest_document_inner(
     dek: &Key32,
     raw: &RawDocument,
     old_item_id: Option<String>,
-    profile: Option<&str>,
+    options: &IngestOptions,
 ) -> Result<IngestOutcome> {
-    // 1. parse — profile 非 None 时走 OCR profile 路径（扫描版 PDF / 图片上传）。
+    // 1. parse — server 路径通过 scheduler 承接 OCR/ASR；纯文本/结构化解析仍在 core 内完成。
     let filename = raw.parse_filename();
     let (parsed_title, content) =
-        parser::parse_bytes_with_profile(&raw.content, &filename, profile)?;
+        match parser::parse_bytes_with_options(&raw.content, &filename, &options.parser) {
+            Ok((_parsed_title, content))
+                if content.trim().is_empty() && metadata_fallback_allowed(&filename) =>
+            {
+                log::warn!(
+                    "ingest: parser returned empty content for {}; inserting metadata-only item",
+                    raw.source_ref
+                );
+                (
+                    fallback_title_from_filename(&filename),
+                    metadata_only_content(raw, &filename, Some("empty content after parse")),
+                )
+            }
+            Ok(parsed) => parsed,
+            Err(e) if metadata_fallback_allowed(&filename) => {
+                let reason = e.to_string();
+                log::warn!(
+                    "ingest: parser failed for {}; inserting metadata-only item: {reason}",
+                    raw.source_ref
+                );
+                (
+                    fallback_title_from_filename(&filename),
+                    metadata_only_content(raw, &filename, Some(&reason)),
+                )
+            }
+            Err(e) => return Err(e),
+        };
     if content.trim().is_empty() {
         return Ok(IngestOutcome::Skipped {
             reason: "empty content after parse".into(),
         });
     }
-    // 源给的 title 优先，缺失时用 parser 提取的兜底。
+    // 源给的 title 优先，缺失时用 parser 提取的兜底。对本地文件/附件，把
+    // source_ref 文件名并入标题，让检索能利用机型、手册号、章节号等路径元数据
+    // (e.g. 320FCOM3.pdf, A320-Hydraulic.pdf)，避免扫描件 OCR 后只剩通用标题。
     let title = if raw.title.trim().is_empty() {
-        parsed_title
+        title_with_source_ref(&parsed_title, &raw.source_ref)
     } else {
         raw.title.clone()
     };
@@ -133,45 +273,15 @@ fn ingest_document_inner(
     }
 
     // 5a. embedding：Level-1 章节 + Level-2 段落块。
-    //     corpus_domain 启用时给每个 chunk_text 注入 `[领域: X] ` 前缀，让 bge-m3
-    //     在向量空间把同领域文档聚集、缓解跨域污染。
-    let sections = chunker::extract_sections(&content);
-    let tag_chunk = |s: &str| -> String {
-        match active_corpus_domain {
-            Some(d) => format!("[领域: {d}] {s}"),
-            None => s.to_string(),
-        }
-    };
-    let mut chunk_counter: usize = 0;
-
-    // L1：每个章节作为整体入队（section_idx = 该章节在 sections 中的位置）。
-    for (section_idx, section_text) in &sections {
-        if section_text.trim().is_empty() {
-            continue;
-        }
-        let tagged = tag_chunk(section_text);
-        store.enqueue_embedding(&item_id, chunk_counter, &tagged, 1, 1, *section_idx)?;
-        chunk_counter += 1;
-    }
-
-    // L2：每个章节再按滑动窗口拆成小块入队（跳过空 section）。
-    for (section_idx, section_text) in &sections {
-        if section_text.trim().is_empty() {
-            continue;
-        }
-        for chunk_text in chunker::chunk(
-            section_text,
-            chunker::DEFAULT_CHUNK_SIZE,
-            chunker::DEFAULT_OVERLAP,
-        ) {
-            if chunk_text.trim().is_empty() {
-                continue;
-            }
-            let tagged = tag_chunk(&chunk_text);
-            store.enqueue_embedding(&item_id, chunk_counter, &tagged, 2, 2, *section_idx)?;
-            chunk_counter += 1;
-        }
-    }
+    //     corpus_domain 启用时给每个 chunk_text 注入 `[领域: X] ` 前缀，让 embedding
+    //     空间把同领域文档聚集、缓解跨域污染。
+    let chunk_counter = enqueue_content_embeddings(
+        store,
+        &item_id,
+        &content,
+        active_corpus_domain,
+        options.chunking,
+    )?;
 
     // 5b. item 级 corpus_domain 标签（search 按 query intent 跨域降权依赖此列）。
     if let Some(d) = active_corpus_domain {
@@ -216,13 +326,151 @@ fn ingest_document_inner(
     }
 }
 
+fn title_with_source_ref(parsed_title: &str, source_ref: &str) -> String {
+    let parsed = parsed_title.trim();
+    let source_stem = Path::new(source_ref)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (source_stem, parsed.is_empty()) {
+        (Some(stem), false) if !parsed.eq_ignore_ascii_case(stem) => {
+            format!("{stem} - {parsed}")
+        }
+        (Some(stem), _) => stem.to_string(),
+        (None, false) => parsed.to_string(),
+        (None, true) => source_ref.to_string(),
+    }
+}
+
+fn metadata_fallback_allowed(filename: &str) -> bool {
+    if !metadata_fallback_enabled() {
+        return false;
+    }
+    let ext = Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        "pdf"
+            | "docx"
+            | "pptx"
+            | "xlsx"
+            | "xls"
+            | "epub"
+            | "rtf"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "bmp"
+            | "tiff"
+            | "tif"
+            | "gif"
+            | "mp3"
+            | "wav"
+            | "m4a"
+            | "flac"
+            | "ogg"
+            | "aac"
+            | "opus"
+            | "wma"
+    )
+}
+
+fn metadata_fallback_enabled() -> bool {
+    for key in [
+        "ATTUNE_INGEST_METADATA_FALLBACK",
+        "ATTUNE_PARSE_METADATA_FALLBACK",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            return matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+        }
+    }
+    true
+}
+
+fn fallback_title_from_filename(filename: &str) -> String {
+    Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(filename)
+        .to_string()
+}
+
+fn metadata_only_content(raw: &RawDocument, filename: &str, reason: Option<&str>) -> String {
+    let title = fallback_title_from_filename(filename);
+    let source_ref = truncate_chars(&raw.source_ref, 512);
+    let uri = truncate_chars(&raw.uri, 512);
+    let terms = source_terms(&raw.source_ref, filename);
+    let reason = reason.unwrap_or("parser unavailable");
+    format!(
+        "# {title}\n\n\
+         Document parsing status: metadata-only fallback.\n\
+         Full text extraction, OCR, or ASR did not produce usable content. \
+         This item can be used for source lookup and citation, but detailed \
+         content answers require successful text extraction.\n\n\
+         File name: {filename}\n\
+         Source path: {source_ref}\n\
+         URI: {uri}\n\
+         File size bytes: {}\n\
+         Source terms: {terms}\n\
+         Parse status: {reason}\n",
+        raw.content.len()
+    )
+}
+
+fn source_terms(source_ref: &str, filename: &str) -> String {
+    let mut terms = Vec::new();
+    for value in [source_ref, filename] {
+        let normalized: String = value
+            .chars()
+            .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+            .collect();
+        let collapsed = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !collapsed.is_empty() && !terms.iter().any(|t| t == &collapsed) {
+            terms.push(collapsed);
+        }
+    }
+    terms.join(" | ")
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    value.chars().take(max_chars).collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::IngestOutcome;
+    use super::{title_with_source_ref, IngestOutcome};
 
     // ── IngestOutcome derive trait tests ────────────────────────────────────
     // These verify the #[derive(Debug, Clone, PartialEq, Eq)] bounds that
     // callers rely on for matching / asserting outcomes without SQLite.
+
+    #[test]
+    fn title_with_source_ref_prefixes_file_stem() {
+        assert_eq!(
+            title_with_source_ref(
+                "Flight Crew Operating Manual",
+                "/kb/Airbus/A320/FCOM/320FCOM3.pdf"
+            ),
+            "320FCOM3 - Flight Crew Operating Manual"
+        );
+        assert_eq!(
+            title_with_source_ref("A320-Hydraulic", "/kb/A320-Hydraulic.pdf"),
+            "A320-Hydraulic"
+        );
+    }
 
     #[test]
     fn ingest_outcome_inserted_equality_and_clone() {

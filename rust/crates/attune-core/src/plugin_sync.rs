@@ -73,6 +73,7 @@ pub fn entitlement_row_for(
     EntitlementRow {
         plugin_id: ep.plugin_id.clone(),
         license_id,
+        decrypt_key: ep.decrypt_key.clone(),
         tier: tier.to_string(),
         status: status.to_string(),
         // list_licenses carries no per-plugin trial_expires; T8 re-verify fills it
@@ -196,7 +197,8 @@ pub fn sync_plugins_with_store(
     let licenses = cloud.list_licenses()?;
     let plugins_dir = crate::plugin_registry::PluginRegistry::default_plugins_dir()?;
     std::fs::create_dir_all(&plugins_dir).map_err(VaultError::Io)?;
-    let mut installed_versions = list_installed_plugins(&plugins_dir)?;
+    let decrypt_keys = entitlement_decrypt_keys(&licenses);
+    let mut installed_versions = list_installed_plugins_with_keys(&plugins_dir, &decrypt_keys)?;
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut report = SyncReport {
@@ -258,8 +260,29 @@ fn persist_entitlement(
     store.upsert_entitlement(dek, &row)
 }
 
+fn entitlement_decrypt_keys(licenses: &[License]) -> std::collections::HashMap<String, Vec<u8>> {
+    licenses
+        .iter()
+        .flat_map(|lic| lic.entitled_plugins.iter())
+        .filter_map(|ep| {
+            ep.decrypt_key
+                .as_ref()
+                .filter(|key| !key.is_empty())
+                .map(|key| (ep.plugin_id.clone(), key.as_bytes().to_vec()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn list_installed_plugins(
     plugins_dir: &std::path::Path,
+) -> Result<std::collections::HashMap<String, String>> {
+    list_installed_plugins_with_keys(plugins_dir, &std::collections::HashMap::new())
+}
+
+fn list_installed_plugins_with_keys(
+    plugins_dir: &std::path::Path,
+    decrypt_keys: &std::collections::HashMap<String, Vec<u8>>,
 ) -> Result<std::collections::HashMap<String, String>> {
     let mut out = std::collections::HashMap::new();
     if !plugins_dir.exists() {
@@ -271,11 +294,13 @@ fn list_installed_plugins(
         if !path.is_dir() {
             continue;
         }
-        // 用 Trusted 装载 (绕开 paid/Unsigned 联动 — 用户已装)。
-        // T2 占位: 类型迁移为 Trust enum, 真验证在 T9 接入。
+        let dir_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let decrypt_key = decrypt_keys.get(dir_name).map(|key| key.as_slice());
+        // 用 Trusted 装载已安装清单做版本比对；真实运行时加载仍由
+        // plugin_registry::scan_with_keys_and_trust 执行签名/信任门。
         if let Ok(plugin) = crate::plugin_loader::LoadedPlugin::from_dir_with_key(
             &path,
-            None,
+            decrypt_key,
             Some(crate::plugin_sig::Trust::ThirdParty),
         ) {
             out.insert(plugin.manifest.id, plugin.manifest.version);
@@ -298,6 +323,22 @@ fn plugin_needs_install(
     !installed_versions
         .get(&ep.plugin_id)
         .is_some_and(|version| version == &ep.version)
+}
+
+fn validate_plugin_min_attune_version(plugin_id: &str, min: Option<&str>) -> Result<()> {
+    let Some(min) = min else {
+        return Ok(());
+    };
+    match crate::version::is_compatible(min) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(VaultError::InvalidInput(format!(
+            "plugin-incompatible-version: {plugin_id} requires attune >= {min} (current {})",
+            crate::version::ATTUNE_VERSION
+        ))),
+        Err(e) => Err(VaultError::InvalidInput(format!(
+            "plugin-incompatible-version: invalid min_attune_version for {plugin_id}: {e}"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,10 +434,14 @@ fn install_one_plugin(
 
     // 5. 装载校验 (含解密)
     let key_bytes = ep.decrypt_key.as_ref().map(|k| k.as_bytes().to_vec());
-    let _ = crate::plugin_loader::LoadedPlugin::from_dir_with_key(
+    let loaded = crate::plugin_loader::LoadedPlugin::from_dir_with_key(
         &plugin_src,
         key_bytes.as_deref(),
         Some(crate::plugin_sig::Trust::ThirdParty),
+    )?;
+    validate_plugin_min_attune_version(
+        &ep.plugin_id,
+        loaded.manifest.min_attune_version.as_deref(),
     )?;
 
     // ACP-6 boundary: never let a plugin-dir wipe touch the vault DB.
@@ -448,7 +493,7 @@ pub fn install_plugin_package(
     pkg_bytes: &[u8],
     plugins_dir: &std::path::Path,
 ) -> Result<PathBuf> {
-    install_plugin_package_inner(plugin_id, pkg_bytes, plugins_dir, false)
+    install_plugin_package_inner(plugin_id, pkg_bytes, plugins_dir, false, None)
 }
 
 /// Install a remotely downloaded official plugin package.
@@ -462,7 +507,18 @@ pub fn install_official_plugin_package(
     pkg_bytes: &[u8],
     plugins_dir: &std::path::Path,
 ) -> Result<PathBuf> {
-    install_plugin_package_inner(plugin_id, pkg_bytes, plugins_dir, true)
+    install_plugin_package_inner(plugin_id, pkg_bytes, plugins_dir, true, None)
+}
+
+/// Install a remotely downloaded official plugin package, providing the
+/// device-bound decrypt key when the package carries an encrypted manifest.
+pub fn install_official_plugin_package_with_key(
+    plugin_id: &str,
+    pkg_bytes: &[u8],
+    plugins_dir: &std::path::Path,
+    decrypt_key: Option<&[u8]>,
+) -> Result<PathBuf> {
+    install_plugin_package_inner(plugin_id, pkg_bytes, plugins_dir, true, decrypt_key)
 }
 
 /// Verify a PluginHub package body against the server-declared SHA-256 digest.
@@ -495,6 +551,7 @@ fn install_plugin_package_inner(
     pkg_bytes: &[u8],
     plugins_dir: &std::path::Path,
     require_official_signature: bool,
+    decrypt_key: Option<&[u8]>,
 ) -> Result<PathBuf> {
     // plugin_id 直接落成目录名 —— 白名单校验，杜绝路径穿越 / NUL / 异常字符
     if plugin_id.is_empty()
@@ -521,7 +578,7 @@ fn install_plugin_package_inner(
     // 装载校验：能以 Trusted source 装载即视为结构合法（paid tier 也放行）
     let loaded = crate::plugin_loader::LoadedPlugin::from_dir_with_key(
         &plugin_src,
-        None,
+        decrypt_key,
         Some(crate::plugin_sig::Trust::ThirdParty),
     )?;
     if loaded.manifest.id != plugin_id {
@@ -530,6 +587,7 @@ fn install_plugin_package_inner(
             loaded.manifest.id
         )));
     }
+    validate_plugin_min_attune_version(plugin_id, loaded.manifest.min_attune_version.as_deref())?;
     validate_plugin_binaries_for_os(&plugin_src, std::env::consts::OS)?;
     if require_official_signature {
         match crate::plugin_sig::verify_with_whitelist(
@@ -858,6 +916,29 @@ mod tests {
     }
 
     #[test]
+    fn list_installed_versions_loads_encrypted_manifest_with_entitlement_key() {
+        let tmp = TempDir::new().expect("tmp");
+        let plugin_dir = tmp.path().join("law-pro");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let yaml = "id: law-pro\nname: encrypted\ntype: skill\nversion: 1.2.3\n";
+        let encrypted =
+            crate::plugin_encryption::encrypt_yaml(yaml.as_bytes(), b"device-bound-key")
+                .expect("encrypt plugin yaml");
+        std::fs::write(plugin_dir.join("plugin.yaml.enc"), encrypted).unwrap();
+
+        let without_key = list_installed_plugins(tmp.path()).expect("list without key");
+        assert!(
+            without_key.is_empty(),
+            "encrypted plugin must not be treated as installed without its entitlement key"
+        );
+
+        let mut keys = std::collections::HashMap::new();
+        keys.insert("law-pro".to_string(), b"device-bound-key".to_vec());
+        let with_key = list_installed_plugins_with_keys(tmp.path(), &keys).expect("list with key");
+        assert_eq!(with_key.get("law-pro").map(String::as_str), Some("1.2.3"));
+    }
+
+    #[test]
     fn locate_plugin_dir_finds_in_root() {
         let tmp = TempDir::new().expect("tmp");
         std::fs::write(tmp.path().join("plugin.yaml"), "id: x").unwrap();
@@ -980,13 +1061,21 @@ mod tests {
 
     /// 把一个最小插件目录打成 tar.gz 字节流
     fn make_pkg(parent: &std::path::Path, dir_name: &str, plugin_id: &str) -> Vec<u8> {
+        make_pkg_with_manifest(
+            parent,
+            dir_name,
+            &format!("id: {plugin_id}\nname: Demo\ntype: skill\nversion: 1.0.0\n"),
+        )
+    }
+
+    fn make_pkg_with_manifest(
+        parent: &std::path::Path,
+        dir_name: &str,
+        plugin_yaml: &str,
+    ) -> Vec<u8> {
         let plugin_dir = parent.join(dir_name);
         std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("plugin.yaml"),
-            format!("id: {plugin_id}\nname: Demo\ntype: skill\nversion: 1.0.0\n"),
-        )
-        .unwrap();
+        std::fs::write(plugin_dir.join("plugin.yaml"), plugin_yaml).unwrap();
         // 纯 Rust 打包 —— 与 extract_tarball 一致，测试不依赖系统 tar（Windows P0 CI）
         let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut builder = tar::Builder::new(enc);
@@ -1051,6 +1140,23 @@ mod tests {
         let err = install_plugin_package("expected-other", &bytes, &tmp.path().join("plugins"))
             .unwrap_err();
         assert!(format!("{err}").contains("mismatch"));
+    }
+
+    #[test]
+    fn install_plugin_package_rejects_incompatible_min_attune_version() {
+        let tmp = TempDir::new().expect("tmp");
+        let bytes = make_pkg_with_manifest(
+            tmp.path(),
+            "future-plugin",
+            "id: future-plugin\nname: Demo\ntype: skill\nversion: 1.0.0\nmin_attune_version: \"99.0.0\"\n",
+        );
+        let plugins_dir = tmp.path().join("plugins");
+        let err = install_plugin_package("future-plugin", &bytes, &plugins_dir).unwrap_err();
+        assert!(format!("{err}").contains("plugin-incompatible-version"));
+        assert!(
+            !plugins_dir.join("future-plugin").exists(),
+            "incompatible package must not land on disk"
+        );
     }
 
     #[test]
@@ -1144,6 +1250,7 @@ mod tests {
                     &crate::store::plugin_entitlements::EntitlementRow {
                         plugin_id: "law-pro".into(),
                         license_id: "lic-xyz".into(),
+                        decrypt_key: None,
                         tier: "paid".into(),
                         status: "active".into(),
                         trial_expires: None,

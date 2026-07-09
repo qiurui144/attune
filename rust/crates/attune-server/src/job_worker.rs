@@ -10,6 +10,7 @@ use attune_core::job_handler::{JobControl, JobHandler, JobHandlerRegistry};
 use attune_core::office_job_queue::JobKind;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Max executions per job before the worker parks it (`max-attempts`).
 const JOB_MAX_ATTEMPTS: i64 = 5;
@@ -34,17 +35,9 @@ fn join_text_parts<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
     out
 }
 
-/// ASR handler — runs whisper via subprocess, same pipeline the old inline
-/// office.rs spawn used. Payload: {"file_path": "...", "diarization": bool}.
+/// ASR handler — submits the task to local scheduler. Payload:
+/// {"file_path": "...", "diarization": bool, "scheduler_base": "..."}.
 /// at_least_once: re-transcribing the same file after a crash is idempotent.
-///
-/// **Cancellation limitation (documented, RELEASE.md Known Limitations):** the
-/// core of `run` is a single uninterruptible `transcribe_with_diarization`
-/// subprocess call. We honor cancellation at the boundaries we *can* — before
-/// backend detection and before the subprocess starts — but once whisper is
-/// running we cannot stop it mid-file; cancel flips DB state immediately and the
-/// late result is dropped by the running-guard. True mid-subprocess kill is a
-/// follow-up (needs a child-process handle + SIGTERM path).
 pub struct AsrJobHandler;
 
 impl JobHandler for AsrJobHandler {
@@ -63,6 +56,10 @@ impl JobHandler for AsrJobHandler {
             .as_str()
             .ok_or_else(|| ("bad-payload".to_string(), "missing file_path".to_string()))?;
         let diarization = v["diarization"].as_bool().unwrap_or(false);
+        let scheduler_base = v["scheduler_base"]
+            .as_str()
+            .unwrap_or(attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE)
+            .to_string();
 
         // Source file may have been deleted between enqueue and run (spec §7).
         if !std::path::Path::new(file_path).exists() {
@@ -72,8 +69,6 @@ impl JobHandler for AsrJobHandler {
             ));
         }
 
-        // Honor cancellation at the boundaries we can (pre-detection, pre-subprocess) —
-        // the cheapest savings for a job cancelled while still queued behind a slow one.
         if ctl.is_cancelled() {
             return Err((
                 "cancelled".to_string(),
@@ -81,69 +76,147 @@ impl JobHandler for AsrJobHandler {
             ));
         }
 
-        let backend = attune_core::asr::detect_asr_backend().ok_or_else(|| {
-            (
-                "asr-engine-failed".to_string(),
-                "ASR backend not available (whisper-cli not installed)".to_string(),
-            )
-        })?;
-        let diar_backend = if diarization {
-            attune_core::asr::detect_diarization_backend()
-        } else {
-            None
-        };
-
-        // Last pre-subprocess cancel checkpoint. Beyond this the whisper call is
-        // uninterruptible (see struct doc).
-        if ctl.is_cancelled() {
-            return Err((
-                "cancelled".to_string(),
-                "cancelled before transcribe".to_string(),
-            ));
-        }
-
-        let (segments, _full_text_legacy) = attune_core::asr::transcribe_with_diarization(
-            &backend,
-            std::path::Path::new(file_path),
-            diar_backend.as_ref(),
+        let outputs = crate::scheduler_tasks::submit_kb_task_final_blocking(
+            &scheduler_base,
+            "kb.meeting.asr_frontend",
+            &serde_json::json!({
+                "file_path": file_path,
+                "language": v["language"].as_str().unwrap_or("auto"),
+                "model": v["model"].as_str().unwrap_or("small"),
+                "diarization": diarization,
+                "timeout_ms": 60 * 60 * 1000u64,
+                "ttl_ms": 60 * 60 * 1000u64,
+            }),
+            true,
+            Duration::from_secs(60 * 60),
+            || ctl.is_cancelled(),
         )
         .map_err(|e| ("asr-engine-failed".to_string(), e.to_string()))?;
 
-        // Aggregate speakers (TranscriptSegment uses ms granularity → sec for response).
-        let mut speakers_agg: std::collections::BTreeMap<String, (f64, u64)> =
-            std::collections::BTreeMap::new();
-        for s in &segments {
-            let key = s.speaker.clone().unwrap_or_else(|| "SPEAKER_UNK".into());
-            let dur = (s.end_ms as f64 - s.start_ms as f64).max(0.0) / 1000.0;
-            let entry = speakers_agg.entry(key).or_insert((0.0, 0));
-            entry.0 += dur;
-            entry.1 += 1;
-        }
-        let duration_sec = segments
-            .last()
-            .map(|s| s.end_ms as f64 / 1000.0)
-            .unwrap_or(0.0);
+        let result = scheduler_asr_result(outputs, diarization);
+        Ok(result.to_string())
+    }
+}
 
-        let result = serde_json::json!({
-            "model": backend.model_name,
-            "language_detected": backend.language,
-            "duration_sec": duration_sec,
-            "segments": segments.iter().map(|s| serde_json::json!({
-                "start_sec": s.start_ms as f64 / 1000.0,
-                "end_sec": s.end_ms as f64 / 1000.0,
-                "text": s.text,
-                "speaker": s.speaker,
-            })).collect::<Vec<_>>(),
-            "speakers": speakers_agg.iter().map(|(id, (total, count))| serde_json::json!({
+fn scheduler_asr_result(outputs: serde_json::Value, diarization: bool) -> serde_json::Value {
+    let segments = asr_segments_from_outputs(&outputs);
+    let full_text = if segments.is_empty() {
+        crate::scheduler_tasks::output_text(&outputs).unwrap_or_default()
+    } else {
+        join_text_parts(
+            segments
+                .iter()
+                .filter_map(|s| s.get("text").and_then(|v| v.as_str())),
+        )
+    };
+    let duration_sec = outputs
+        .get("duration_sec")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            segments
+                .last()
+                .and_then(|s| s.get("end_sec").and_then(|v| v.as_f64()))
+        })
+        .unwrap_or(0.0);
+    let speakers = aggregate_speakers(&segments);
+    serde_json::json!({
+        "model": outputs.get("model").and_then(|v| v.as_str()).unwrap_or("scheduler:kb.meeting.asr_frontend"),
+        "language_detected": outputs
+            .get("language_detected")
+            .or_else(|| outputs.get("language"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown"),
+        "duration_sec": duration_sec,
+        "segments": if segments.is_empty() && !full_text.is_empty() {
+            vec![serde_json::json!({
+                "start_sec": 0.0,
+                "end_sec": duration_sec,
+                "text": full_text,
+                "speaker": serde_json::Value::Null,
+            })]
+        } else {
+            segments
+        },
+        "speakers": speakers,
+        "full_text": full_text,
+        "diarization_used": diarization,
+        "raw_scheduler_output": outputs,
+    })
+}
+
+fn asr_segments_from_outputs(outputs: &serde_json::Value) -> Vec<serde_json::Value> {
+    for pointer in [
+        "/segments",
+        "/outputs/segments",
+        "/result/segments",
+        "/data/segments",
+    ] {
+        if let Some(items) = outputs.pointer(pointer).and_then(|v| v.as_array()) {
+            let segments: Vec<_> = items.iter().filter_map(normalize_asr_segment).collect();
+            if !segments.is_empty() {
+                return segments;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn normalize_asr_segment(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let text = value
+        .get("text")
+        .or_else(|| value.get("content"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let start_sec = value
+        .get("start_sec")
+        .or_else(|| value.get("start"))
+        .and_then(|v| v.as_f64())
+        .or_else(|| value.get("start_ms").and_then(|v| v.as_f64()).map(|v| v / 1000.0))
+        .unwrap_or(0.0);
+    let end_sec = value
+        .get("end_sec")
+        .or_else(|| value.get("end"))
+        .and_then(|v| v.as_f64())
+        .or_else(|| value.get("end_ms").and_then(|v| v.as_f64()).map(|v| v / 1000.0))
+        .unwrap_or(start_sec);
+    Some(serde_json::json!({
+        "start_sec": start_sec,
+        "end_sec": end_sec,
+        "text": text,
+        "speaker": value.get("speaker").cloned().unwrap_or(serde_json::Value::Null),
+    }))
+}
+
+fn aggregate_speakers(segments: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut speakers_agg: std::collections::BTreeMap<String, (f64, u64)> =
+        std::collections::BTreeMap::new();
+    for segment in segments {
+        let Some(speaker) = segment.get("speaker").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let start = segment
+            .get("start_sec")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let end = segment
+            .get("end_sec")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(start);
+        let entry = speakers_agg.entry(speaker.to_string()).or_insert((0.0, 0));
+        entry.0 += (end - start).max(0.0);
+        entry.1 += 1;
+    }
+    speakers_agg
+        .into_iter()
+        .map(|(id, (total, count))| {
+            serde_json::json!({
                 "id": id,
                 "total_sec": total,
                 "segment_count": count,
-            })).collect::<Vec<_>>(),
-            "full_text": join_text_parts(segments.iter().map(|s| s.text.as_str())),
-            "diarization_used": diar_backend.is_some(),
-        });
-        Ok(result.to_string())
-    }
+            })
+        })
+        .collect()
 }
 
 /// Build the production handler registry. New kinds register here (spec §6).
@@ -155,7 +228,7 @@ pub fn build_registry() -> JobHandlerRegistry {
 
 /// Spawn the background job worker: per tick, sweep timeouts + TTL-purge, then
 /// drain queued jobs **serially** (one at a time — preserves the office "信号量
-/// 门控防资源踩踏" semantic: never two whisper subprocesses at once). Handlers
+/// 门控防资源踩踏" semantic: never two ASR jobs at once). Handlers
 /// are blocking → each job runs inside `spawn_blocking`.
 pub fn start_job_worker(state: Arc<AppState>) {
     if state
@@ -184,13 +257,13 @@ pub fn start_job_worker(state: Arc<AppState>) {
                 let s = store.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = s.sweep_timeouts(now);
                 // Auto-retry transient failures with exponential backoff before the
-                // TTL purge sees them — an unattended K3 nightly batch retries on its
+                // TTL purge sees them — an unattended local-scheduler nightly batch retries on its
                 // own (spec §7) instead of waiting for an operator requeue.
                 let _ = s.auto_retry_failed_jobs(now, JOB_MAX_ATTEMPTS, JOB_RETRY_BASE_BACKOFF_MS);
                 let _ = s.purge_terminal_jobs(now, JOB_TTL_DAYS);
             }
             // Drain serially until the queue is empty for this tick. run_one_job
-            // blocks on the handler (whisper subprocess) → spawn_blocking so the
+            // blocks on the handler (scheduler job polling) → spawn_blocking so the
             // tokio worker thread is not starved.
             loop {
                 let store_c = store.clone();

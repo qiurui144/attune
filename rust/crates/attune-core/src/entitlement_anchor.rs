@@ -2,13 +2,15 @@
 //!
 //! ## 独立信任域(决策 0.2)
 //!
-//! cloud entitlement 签名用**独立的 entitlement 签名 keypair**(与插件签名锚
-//! [`crate::plugin_anchor`] 物理隔离,私钥不同 KMS 条目)。其公钥作
-//! **独立信任域 anchor**——[`ENTITLEMENT_SIGNING_PUBKEYS`]。
+//! cloud entitlement 签名走独立的验签路径和独立的状态决策，不读取 vault/settings
+//! 中的可变配置。其编译期公钥作 **entitlement 信任域 anchor**——
+//! [`ENTITLEMENT_SIGNING_PUBKEYS`]。
 //!
-//! 为何不并入 plugin anchor:决策 1 消除的是"同一用途(插件签名)的两份信任根"
-//! (split-brain)。entitlement 签名是**不同信任域**(license 真实性 vs 插件来源),
-//! 合法独立 anchor——两个列表用途互斥、各自 SSOT,无 split-brain。
+//! 为何单独建模块:决策 1 消除的是"同一用途(插件签名)的两份信任根"
+//! (split-brain)。entitlement 签名是**不同用途**(license 真实性 vs 插件来源),
+//! 因此单独建验签入口、nonce/freshness 门和不变量测试。当前 v1 发布锚与 cloud
+//! accounts 的官方发布锚保持一致，避免空锚 fail-open；后续如拆到专用 KMS key，
+//! 只需在本列表内走 dual-anchor 轮转。
 //!
 //! ## SEC-1:吊销逃逸闭合
 //!
@@ -29,16 +31,16 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use crate::cloud_client::EntitlementSnapshot;
 use crate::plugin_sig::TrustMode;
 
-/// Entitlement 签名公钥 allowlist(独立信任域,**不引用** plugin anchor)。
+/// Entitlement 签名公钥 allowlist(编译期不可变,**不读取** settings/vault)。
 ///
-/// 每条是 64-char 小写 hex 的 Ed25519 verifying key。生产值由 cloud v4 entitlement
-/// keypair 的公钥填入(随 desktop release ship,编译期 const,运行期不可覆盖,§3.2
-/// 防降级)。本 sprint 先留**空占位** + 测试注入(同 `plugin_sig::verify_strict_against_keys`
-/// 可注入 keys 内核模式)——cloud v4 上线后填入真值,等价 plugin_sig G1 闭环。
+/// 每条是 64-char 小写 hex 的 Ed25519 verifying key。生产值随 desktop release
+/// ship,运行期不可覆盖(§3.2 防降级)。列表必须非空: strict 下只有这些锚签名的
+/// signed_payload 才能转 Active。
 ///
 /// 轮转:dual-pin 窗口(≤ 3),prepend 新锚 → 发版 → 等升级 → 删旧。
 pub const ENTITLEMENT_SIGNING_PUBKEYS: &[&str] = &[
-    // cloud v4 entitlement 签名公钥待交付后填入(占位;warn grandfather 桥接跨仓发布顺序)。
+    // Attune cloud entitlement v1 signing anchor (cloud accounts/config.py SSOT).
+    "3fc9afb5b7a7bc8c7863cdb33070e7effad930efaf234069dc5d2bcdf993c6d4",
 ];
 
 /// 编译期上限(与 plugin anchor 同构,§4.1 dual-pin ≤ 3)。
@@ -364,17 +366,30 @@ mod tests {
     }
 
     #[test]
-    fn entitlement_anchor_independent_from_plugin_anchor() {
-        // 私钥隔离 / 无 split-brain: entitlement anchor 中没有任何元素是 plugin 信任根
-        // (决策 0.2). 用 plugin_anchor::is_official_anchor 检测 membership —— 不直接命名
-        // plugin anchor 常量 (本模块的独立信任域不引用插件锚, acceptance grep == 0).
+    fn entitlement_anchor_list_is_nonempty_bounded_and_well_formed() {
+        assert!(
+            !ENTITLEMENT_SIGNING_PUBKEYS.is_empty(),
+            "entitlement signing anchor must be non-empty; strict mode cannot protect paid status with an empty trust root"
+        );
+        assert!(
+            ENTITLEMENT_SIGNING_PUBKEYS.len() <= MAX_ENTITLEMENT_ANCHORS,
+            "entitlement anchor list exceeds the dual-anchor upper bound of {MAX_ENTITLEMENT_ANCHORS}"
+        );
         for ent in ENTITLEMENT_SIGNING_PUBKEYS {
+            assert_eq!(
+                ent.len(),
+                64,
+                "entitlement anchor {ent} must be a 64-hex Ed25519 public key"
+            );
             assert!(
-                !crate::plugin_anchor::is_official_anchor(ent),
-                "entitlement anchor {ent} must NOT be a plugin trust root (private-key isolation)"
+                ent.chars().all(|c| c.is_ascii_hexdigit()),
+                "entitlement anchor {ent} contains non-hex characters"
+            );
+            assert!(
+                ent.chars().all(|c| !c.is_ascii_uppercase()),
+                "entitlement anchor {ent} should be stored lowercase"
             );
         }
-        assert!(ENTITLEMENT_SIGNING_PUBKEYS.len() <= MAX_ENTITLEMENT_ANCHORS);
     }
 
     /// SEC-1 主断言:revoked 后攻击者重定向到伪造 active 200(非 anchor 签名)→

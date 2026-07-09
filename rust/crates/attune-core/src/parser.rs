@@ -2,6 +2,10 @@
 
 use crate::error::{Result, VaultError};
 use crate::text_norm::collapse_whitespace;
+use base64::Engine;
+use serde_json::Value;
+use std::thread;
+use std::time::{Duration, Instant};
 use std::{io::Write, path::Path};
 
 /// 代码文件扩展名
@@ -10,6 +14,371 @@ const CODE_EXTENSIONS: &[&str] = &[
     ".scala", ".sh", ".bash", ".zsh", ".toml", ".yaml", ".yml", ".json", ".xml", ".html", ".css",
 ];
 
+const DEFAULT_PARSE_SCHEDULER_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_SCHEDULER_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const SCHEDULER_INLINE_JSON_OVERHEAD_BYTES: usize = 4096;
+
+#[derive(Debug, Clone, Default)]
+pub struct ParseOptions {
+    pub profile_id: Option<String>,
+    pub scheduler_base: Option<String>,
+    pub scheduler_timeout_ms: Option<u64>,
+}
+
+impl ParseOptions {
+    pub fn with_profile(profile_id: Option<&str>) -> Self {
+        Self {
+            profile_id: profile_id.map(str::to_string),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_scheduler_base(mut self, scheduler_base: Option<&str>) -> Self {
+        self.scheduler_base = scheduler_base
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        self
+    }
+
+    pub fn with_scheduler_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        if timeout_ms > 0 {
+            self.scheduler_timeout_ms = Some(timeout_ms);
+        }
+        self
+    }
+
+    fn profile_id(&self) -> Option<&str> {
+        self.profile_id.as_deref()
+    }
+
+    fn scheduler_timeout(&self) -> Duration {
+        Duration::from_millis(
+            self.scheduler_timeout_ms
+                .unwrap_or(DEFAULT_PARSE_SCHEDULER_TIMEOUT_MS)
+                .max(1_000),
+        )
+    }
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    let any = payload.as_ref();
+    if let Some(s) = any.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = any.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+fn safe_pdf_extract_text_from_mem(data: &[u8]) -> std::result::Result<String, String> {
+    match std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(data)) {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(payload) => Err(format!(
+            "pdf_extract panic: {}",
+            panic_payload_message(payload)
+        )),
+    }
+}
+
+fn ocrmypdf_fallback_enabled() -> bool {
+    std::env::var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn try_ocrmypdf_sidecar_from_path(path: &Path) -> Option<String> {
+    if !ocrmypdf_fallback_enabled() {
+        return None;
+    }
+    let ocrmypdf = which::which("ocrmypdf").ok()?;
+    let tmp = tempfile::TempDir::new().ok()?;
+    let sidecar = tmp.path().join("ocr.txt");
+    let out_pdf = tmp.path().join("ocr.pdf");
+    let output = match crate::process::command_no_window(&ocrmypdf)
+        .arg("--sidecar")
+        .arg(&sidecar)
+        .arg("--skip-text")
+        .arg("--optimize")
+        .arg("0")
+        .arg("--output-type")
+        .arg("pdf")
+        .arg(path)
+        .arg(&out_pdf)
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            log::warn!("ocrmypdf failed to start for {}: {e}", path.display());
+            return None;
+        }
+    };
+    if !output.status.success() {
+        log::warn!(
+            "ocrmypdf exited {:?} for {}; stderr={}",
+            output.status.code(),
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let text = std::fs::read_to_string(&sidecar).ok()?;
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn scheduler_ocr_path(path: &Path, options: &ParseOptions) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "document".to_string());
+    scheduler_ocr_bytes(&data, &filename, options)
+}
+
+fn env_usize_any(keys: &[&str], default: usize) -> usize {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|v| *v > 0)
+        })
+        .unwrap_or(default)
+}
+
+fn scheduler_max_body_bytes() -> usize {
+    env_usize_any(
+        &[
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+            "ATTUNE_LOCAL_SCHEDULER_MAX_BODY_BYTES",
+        ],
+        DEFAULT_SCHEDULER_MAX_BODY_BYTES,
+    )
+}
+
+fn base64_encoded_len(bytes: usize) -> Option<usize> {
+    bytes.checked_add(2).map(|n| (n / 3) * 4)
+}
+
+fn scheduler_inline_file_fits_body(bytes: usize, max_body_bytes: usize) -> bool {
+    let Some(encoded) = base64_encoded_len(bytes) else {
+        return false;
+    };
+    encoded <= max_body_bytes.saturating_sub(SCHEDULER_INLINE_JSON_OVERHEAD_BYTES)
+}
+
+fn scheduler_inline_file_fits(filename: &str, bytes: usize, task: &str) -> bool {
+    let max_body = scheduler_max_body_bytes();
+    if scheduler_inline_file_fits_body(bytes, max_body) {
+        return true;
+    }
+    let encoded = base64_encoded_len(bytes).unwrap_or(usize::MAX);
+    log::warn!(
+        "scheduler task {task} skipped for {filename}: inline file payload too large \
+         (raw={} bytes, base64~{} bytes, max_body={} bytes); use text extraction or \
+         page/chunk scheduler OCR for large documents",
+        bytes,
+        encoded,
+        max_body
+    );
+    false
+}
+
+fn scheduler_ocr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> Option<String> {
+    let base = options.scheduler_base.as_deref()?;
+    if !scheduler_inline_file_fits(filename, data.len(), "kb.document.ocr_recognize") {
+        return None;
+    }
+    let timeout_ms = options
+        .scheduler_timeout()
+        .as_millis()
+        .min(u32::MAX as u128) as u32;
+    let body = serde_json::json!({
+        "filename": filename,
+        "profile": options.profile_id(),
+        "profile_id": options.profile_id(),
+        "file_base64": base64::engine::general_purpose::STANDARD.encode(data),
+        "timeout_ms": timeout_ms,
+        "ttl_ms": timeout_ms
+    });
+    scheduler_task_text(
+        base,
+        "kb.document.ocr_recognize",
+        body,
+        options.scheduler_timeout(),
+    )
+}
+
+fn scheduler_asr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> Option<String> {
+    let base = options.scheduler_base.as_deref()?;
+    if !scheduler_inline_file_fits(filename, data.len(), "kb.meeting.asr_frontend") {
+        return None;
+    }
+    let timeout_ms = options
+        .scheduler_timeout()
+        .as_millis()
+        .min(u32::MAX as u128) as u32;
+    let body = serde_json::json!({
+        "filename": filename,
+        "file_base64": base64::engine::general_purpose::STANDARD.encode(data),
+        "timeout_ms": timeout_ms,
+        "ttl_ms": timeout_ms
+    });
+    scheduler_task_text(
+        base,
+        "kb.meeting.asr_frontend",
+        body,
+        options.scheduler_timeout(),
+    )
+}
+
+fn scheduler_task_text(
+    base: &str,
+    task: &str,
+    body: Value,
+    poll_timeout: Duration,
+) -> Option<String> {
+    match scheduler_task_outputs(base, task, body, poll_timeout) {
+        Ok(outputs) => scheduler_output_text(&outputs),
+        Err(e) => {
+            log::warn!("scheduler task {task} failed: {e}");
+            None
+        }
+    }
+}
+
+fn scheduler_task_outputs(
+    base: &str,
+    task: &str,
+    body: Value,
+    poll_timeout: Duration,
+) -> Result<Value> {
+    let client = crate::edge_cloud::scheduler::LocalSchedulerClient::with_base(
+        base,
+        Duration::from_secs(10),
+    );
+    let response = client.submit_kb_task(task, &body, true)?;
+    if response
+        .status
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("done"))
+        || response.job_id.is_none()
+    {
+        return Ok(response.outputs);
+    }
+
+    let job_id = response.job_id.ok_or_else(|| {
+        VaultError::LlmUnavailable(format!(
+            "scheduler task {task} returned async without job_id"
+        ))
+    })?;
+    let deadline = Instant::now() + poll_timeout;
+    loop {
+        let job = client.job(&job_id)?;
+        match job.status.to_ascii_lowercase().as_str() {
+            "done" => return Ok(job.outputs),
+            "error" => {
+                return Err(VaultError::LlmUnavailable(format!(
+                    "scheduler task {task} job {job_id} failed: {}",
+                    job.error
+                        .or(job.detail)
+                        .unwrap_or_else(|| "unknown error".to_string())
+                )));
+            }
+            "canceled" | "cancelled" | "expired" => {
+                return Err(VaultError::LlmUnavailable(format!(
+                    "scheduler task {task} job {job_id} ended with status {}",
+                    job.status
+                )));
+            }
+            _ => {
+                if Instant::now() >= deadline {
+                    return Err(VaultError::LlmUnavailable(format!(
+                        "scheduler task {task} job {job_id} timed out after {} ms",
+                        poll_timeout.as_millis()
+                    )));
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+}
+
+fn scheduler_output_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(text.to_string());
+    }
+    for pointer in [
+        "/text",
+        "/answer",
+        "/content",
+        "/full_text",
+        "/transcript",
+        "/markdown",
+        "/outputs/text",
+        "/outputs/full_text",
+        "/outputs/transcript",
+        "/data/text",
+    ] {
+        if let Some(text) = value.pointer(pointer).and_then(Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+    for pointer in [
+        "/lines",
+        "/regions",
+        "/segments",
+        "/outputs/lines",
+        "/outputs/segments",
+    ] {
+        if let Some(text) = value.pointer(pointer).and_then(scheduler_array_text) {
+            return Some(text);
+        }
+    }
+    value.get("outputs").and_then(scheduler_output_text)
+}
+
+fn scheduler_array_text(value: &Value) -> Option<String> {
+    let arr = value.as_array()?;
+    let mut parts = Vec::new();
+    for item in arr {
+        if let Some(text) = item.as_str() {
+            let text = text.trim();
+            if !text.is_empty() {
+                parts.push(text.to_string());
+            }
+            continue;
+        }
+        for key in ["text", "content", "transcript", "line", "value"] {
+            if let Some(text) = item.get(key).and_then(Value::as_str) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    parts.push(text.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
 /// 解析文件 → (title, content). 等价于 `parse_file_with_profile(path, None)`.
 pub fn parse_file(path: &Path) -> Result<(String, String)> {
     parse_file_with_profile(path, None)
@@ -17,6 +386,11 @@ pub fn parse_file(path: &Path) -> Result<(String, String)> {
 
 /// 解析文件, 指定 OCR profile (PDF 扫描件走自定义 DPI). None = 走默认 300 DPI.
 pub fn parse_file_with_profile(path: &Path, profile_id: Option<&str>) -> Result<(String, String)> {
+    parse_file_with_options(path, &ParseOptions::with_profile(profile_id))
+}
+
+/// 解析文件，智能 OCR/ASR 可由 scheduler 统一承接。
+pub fn parse_file_with_options(path: &Path, options: &ParseOptions) -> Result<(String, String)> {
     let ext = path
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
@@ -31,7 +405,12 @@ pub fn parse_file_with_profile(path: &Path, profile_id: Option<&str>) -> Result<
         .unwrap_or_else(|| filename.clone());
 
     match ext.as_str() {
-        ".pdf" => parse_pdf_file_with_dpi(path, &stem, crate::ocr::dpi_for_profile(profile_id)),
+        ".pdf" => parse_pdf_file_with_dpi(
+            path,
+            &stem,
+            crate::ocr::dpi_for_profile(options.profile_id()),
+            options,
+        ),
         ".docx" => parse_docx_file(path, &stem),
         ".html" | ".htm" => parse_html_file(path, &stem),
         ".epub" => parse_epub_file(path, &stem),
@@ -40,10 +419,10 @@ pub fn parse_file_with_profile(path: &Path, profile_id: Option<&str>) -> Result<
         ".rtf" => parse_rtf_file(path, &stem),
         ".csv" => parse_csv_file(path, &stem),
         ".png" | ".jpg" | ".jpeg" | ".webp" | ".bmp" | ".tiff" | ".tif" | ".gif" => {
-            parse_image_file(path, &stem)
+            parse_image_file(path, &stem, options)
         }
         ".mp3" | ".wav" | ".m4a" | ".flac" | ".ogg" | ".aac" | ".opus" | ".wma" => {
-            parse_audio_file(path, &stem)
+            parse_audio_file(path, &stem, options)
         }
         _ => {
             // 允许作为纯文本处理的扩展名：代码文件 + 通用文本格式
@@ -71,6 +450,15 @@ pub fn parse_bytes_with_profile(
     filename: &str,
     profile_id: Option<&str>,
 ) -> Result<(String, String)> {
+    parse_bytes_with_options(data, filename, &ParseOptions::with_profile(profile_id))
+}
+
+/// 从内存解析，智能 OCR/ASR 可由 scheduler 统一承接。
+pub fn parse_bytes_with_options(
+    data: &[u8],
+    filename: &str,
+    options: &ParseOptions,
+) -> Result<(String, String)> {
     let ext = Path::new(filename)
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
@@ -79,21 +467,33 @@ pub fn parse_bytes_with_profile(
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| filename.to_string());
-    let dpi = crate::ocr::dpi_for_profile(profile_id);
+    let dpi = crate::ocr::dpi_for_profile(options.profile_id());
 
     match ext.as_str() {
         ".pdf" => {
             // 上传路径走内存，但 OCR 需要磁盘文件（pdftoppm 读文件）。
-            // 先试文字层提取；失败或文字过少则写临时文件跑 pdftotext / OCR。
-            let extract_result = pdf_extract::extract_text_from_mem(data);
+            // Poppler 的 pdftotext 对大型飞行手册更稳，先用它取文字层；失败后再退回
+            // pdf_extract，最后才走 OCR。
+            if let Some(pdftotext) = try_pdftotext_from_bytes(data) {
+                if !crate::ocr::needs_ocr(&pdftotext) {
+                    let title = first_line_title(&pdftotext, &stem);
+                    return Ok((title, pdftotext));
+                }
+                if let Some(ocr_text) = try_ocr_from_bytes_with_dpi(data, filename, dpi, options) {
+                    let title = first_line_title(&ocr_text, &stem);
+                    return Ok((title, ocr_text));
+                }
+                let title = first_line_title(&pdftotext, &stem);
+                return Ok((title, pdftotext));
+            }
+
+            let extract_result = safe_pdf_extract_text_from_mem(data);
             let content = match extract_result {
                 Ok(text) if !crate::ocr::needs_ocr(&text) => text,
                 Ok(thin_text) => {
-                    if let Some(pdftotext) = try_pdftotext_from_bytes(data) {
-                        let title = first_line_title(&pdftotext, &stem);
-                        return Ok((title, pdftotext));
-                    }
-                    if let Some(ocr_text) = try_ocr_from_bytes_with_dpi(data, dpi) {
+                    if let Some(ocr_text) =
+                        try_ocr_from_bytes_with_dpi(data, filename, dpi, options)
+                    {
                         let title = first_line_title(&ocr_text, &stem);
                         return Ok((title, ocr_text));
                     }
@@ -101,11 +501,9 @@ pub fn parse_bytes_with_profile(
                 }
                 Err(e) => {
                     log::info!("pdf_extract failed for uploaded bytes ({e}); trying pdftotext/OCR");
-                    if let Some(pdftotext) = try_pdftotext_from_bytes(data) {
-                        let title = first_line_title(&pdftotext, &stem);
-                        return Ok((title, pdftotext));
-                    }
-                    if let Some(ocr_text) = try_ocr_from_bytes_with_dpi(data, dpi) {
+                    if let Some(ocr_text) =
+                        try_ocr_from_bytes_with_dpi(data, filename, dpi, options)
+                    {
                         let title = first_line_title(&ocr_text, &stem);
                         return Ok((title, ocr_text));
                     }
@@ -171,6 +569,15 @@ pub fn parse_bytes_with_profile(
             Ok((title, content))
         }
         ".png" | ".jpg" | ".jpeg" | ".webp" | ".bmp" | ".tiff" | ".tif" | ".gif" => {
+            if let Some(text) = scheduler_ocr_bytes(data, filename, options) {
+                let title = first_line_title(&text, &stem);
+                return Ok((title, text));
+            }
+            if options.scheduler_base.is_some() {
+                return Err(VaultError::InvalidInput(
+                    "scheduler OCR unavailable".to_string(),
+                ));
+            }
             let Some(provider) = crate::ocr::detect_default_provider() else {
                 return Err(VaultError::InvalidInput(
                     "OCR provider unavailable".to_string(),
@@ -201,6 +608,15 @@ pub fn parse_bytes_with_profile(
             Ok((title, content))
         }
         ".mp3" | ".wav" | ".m4a" | ".flac" | ".ogg" | ".aac" | ".opus" | ".wma" => {
+            if let Some(text) = scheduler_asr_bytes(data, filename, options) {
+                let title = first_line_title(&text, &stem);
+                return Ok((title, text));
+            }
+            if options.scheduler_base.is_some() {
+                return Err(VaultError::InvalidInput(
+                    "scheduler ASR unavailable".to_string(),
+                ));
+            }
             let Some(engine) = crate::asr::detect_asr_engine() else {
                 return Err(VaultError::InvalidInput(
                     "ASR backend unavailable".to_string(),
@@ -248,13 +664,51 @@ pub fn parse_bytes_with_profile(
     }
 }
 
+fn try_ocr_from_pdf_path_with_dpi(path: &Path, dpi: u32, options: &ParseOptions) -> Option<String> {
+    if let Some(text) = scheduler_ocr_path(path, options) {
+        return Some(text);
+    }
+    if options.scheduler_base.is_some() {
+        return None;
+    }
+    if let Some(text) = try_ocrmypdf_sidecar_from_path(path) {
+        return Some(text);
+    }
+    let provider = crate::ocr::detect_default_provider()?;
+    match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), path, dpi) {
+        Ok(text) if !text.trim().is_empty() => Some(text),
+        Ok(_) => {
+            log::warn!("OCR returned empty text for {}", path.display());
+            None
+        }
+        Err(e) => {
+            log::warn!("OCR failed for {}: {e}", path.display());
+            None
+        }
+    }
+}
+
 /// 把 PDF 字节写到临时文件并调用 OCR provider, 指定 DPI (200 / 300 / 600).
 /// dpi 由调用方按 OcrProfile 决定 — 默认走 `dpi_for_profile(None) = 300`.
-fn try_ocr_from_bytes_with_dpi(data: &[u8], dpi: u32) -> Option<String> {
-    let provider = crate::ocr::detect_default_provider()?;
+fn try_ocr_from_bytes_with_dpi(
+    data: &[u8],
+    filename: &str,
+    dpi: u32,
+    options: &ParseOptions,
+) -> Option<String> {
+    if let Some(text) = scheduler_ocr_bytes(data, filename, options) {
+        return Some(text);
+    }
+    if options.scheduler_base.is_some() {
+        return None;
+    }
     let mut tmp = tempfile::Builder::new().suffix(".pdf").tempfile().ok()?;
     tmp.write_all(data).ok()?;
     tmp.flush().ok()?;
+    if let Some(text) = try_ocrmypdf_sidecar_from_path(tmp.path()) {
+        return Some(text);
+    }
+    let provider = crate::ocr::detect_default_provider()?;
     match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), tmp.path(), dpi) {
         Ok(text) if !text.trim().is_empty() => Some(text),
         Ok(_) => {
@@ -306,29 +760,43 @@ fn try_pdftotext_from_path(path: &Path) -> Option<String> {
     }
 }
 
-fn parse_pdf_file_with_dpi(path: &Path, stem: &str, dpi: u32) -> Result<(String, String)> {
-    // 1. 先尝试 pdf_extract 直接取文字层
-    let bytes = std::fs::read(path)?;
-    let extract_result = pdf_extract::extract_text_from_mem(&bytes);
+fn parse_pdf_file_with_dpi(
+    path: &Path,
+    stem: &str,
+    dpi: u32,
+    options: &ParseOptions,
+) -> Result<(String, String)> {
+    // 1. 本地文件优先走 Poppler。大型手册上 pdf_extract 可能产生海量日志或 panic，
+    //    pdftotext 的流式外部进程路径更适合批量索引。
+    if let Some(pdftotext) = try_pdftotext_from_path(path) {
+        if !crate::ocr::needs_ocr(&pdftotext) {
+            let title = first_line_title(&pdftotext, stem);
+            return Ok((title, pdftotext));
+        }
+        if let Some(ocr_text) = try_ocr_from_pdf_path_with_dpi(path, dpi, options) {
+            let title = first_line_title(&ocr_text, stem);
+            return Ok((title, ocr_text));
+        }
+        let title = first_line_title(&pdftotext, stem);
+        return Ok((title, pdftotext));
+    }
 
-    // 2a. 提取失败（常见于加密/损坏扫描件）→ 立即尝试 OCR；pdftoppm 对许多
+    // 2. Poppler 不可用或失败时，退回 pdf_extract 直接取文字层。
+    let bytes = std::fs::read(path)?;
+    let extract_result = safe_pdf_extract_text_from_mem(&bytes);
+
+    // 2a. 提取失败（常见于加密/损坏扫描件）→ 尝试 OCR；pdftoppm 对许多
     //     pdf_extract 不支持的加密方案容忍度更高
     let content = match extract_result {
         Ok(text) => text,
         Err(e) => {
             log::info!(
-                "pdf_extract failed for {} ({e}); trying OCR directly",
+                "pdf_extract failed for {} ({e}); trying scheduler OCR",
                 path.display()
             );
-            if let Some(provider) = crate::ocr::detect_default_provider() {
-                match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), path, dpi) {
-                    Ok(ocr_text) if !ocr_text.trim().is_empty() => {
-                        let title = first_line_title(&ocr_text, stem);
-                        return Ok((title, ocr_text));
-                    }
-                    Ok(_) => log::warn!("OCR returned empty text for {}", path.display()),
-                    Err(oe) => log::warn!("OCR failed for {}: {oe}", path.display()),
-                }
+            if let Some(ocr_text) = try_ocr_from_pdf_path_with_dpi(path, dpi, options) {
+                let title = first_line_title(&ocr_text, stem);
+                return Ok((title, ocr_text));
             }
             return Err(VaultError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -338,25 +806,26 @@ fn parse_pdf_file_with_dpi(path: &Path, stem: &str, dpi: u32) -> Result<(String,
     };
 
     // 2b. 成功但文字量 < 100 字符（扫描版文字层空，或 pdf_extract 对混排文字层
-    //     退化）→ 先试 poppler 的 pdftotext，再尝试 OCR。
+    //     退化）→ 尝试 OCR。
     if crate::ocr::needs_ocr(&content) {
-        if let Some(pdftotext) = try_pdftotext_from_path(path) {
-            let title = first_line_title(&pdftotext, stem);
-            return Ok((title, pdftotext));
-        }
-        if let Some(provider) = crate::ocr::detect_default_provider() {
+        if options.scheduler_base.is_some() {
             log::info!(
-                "PDF text layer thin ({} chars); falling back to OCR ({})",
+                "PDF text layer thin ({} chars); falling back to scheduler OCR",
+                content.chars().filter(|c| !c.is_whitespace()).count()
+            );
+            if let Some(ocr_text) = try_ocr_from_pdf_path_with_dpi(path, dpi, options) {
+                let title = first_line_title(&ocr_text, stem);
+                return Ok((title, ocr_text));
+            }
+        } else if let Some(provider) = crate::ocr::detect_default_provider() {
+            log::info!(
+                "PDF text layer thin ({} chars); falling back to legacy OCR ({})",
                 content.chars().filter(|c| !c.is_whitespace()).count(),
                 provider.name()
             );
-            match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), path, dpi) {
-                Ok(ocr_text) if !ocr_text.trim().is_empty() => {
-                    let title = first_line_title(&ocr_text, stem);
-                    return Ok((title, ocr_text));
-                }
-                Ok(_) => log::warn!("OCR returned empty text for {}", path.display()),
-                Err(e) => log::warn!("OCR failed for {}: {}", path.display(), e),
+            if let Some(ocr_text) = try_ocr_from_pdf_path_with_dpi(path, dpi, options) {
+                let title = first_line_title(&ocr_text, stem);
+                return Ok((title, ocr_text));
             }
         } else {
             log::debug!(
@@ -888,8 +1357,18 @@ fn parse_csv_file(path: &Path, stem: &str) -> Result<(String, String)> {
     Ok((title, content))
 }
 
-/// 图片文件 → OCR 提取文本（自动场景检测）
-fn parse_image_file(path: &Path, stem: &str) -> Result<(String, String)> {
+/// 图片文件 → OCR 提取文本（server 路径通过 scheduler，legacy 调用保留本地 provider）
+fn parse_image_file(path: &Path, stem: &str, options: &ParseOptions) -> Result<(String, String)> {
+    if let Some(text) = scheduler_ocr_path(path, options) {
+        let title = first_line_title(&text, stem);
+        return Ok((title, text));
+    }
+    if options.scheduler_base.is_some() {
+        return Err(VaultError::InvalidInput(
+            "scheduler OCR unavailable".to_string(),
+        ));
+    }
+
     let filename = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -916,8 +1395,24 @@ fn parse_image_file(path: &Path, stem: &str) -> Result<(String, String)> {
     Ok((title, content))
 }
 
-/// 音频文件 → ASR 转写（引擎派发：SenseVoice in-process / whisper + diarization）
-fn parse_audio_file(path: &Path, stem: &str) -> Result<(String, String)> {
+/// 音频文件 → ASR 转写（server 路径通过 scheduler，legacy 调用保留本地 provider）
+fn parse_audio_file(path: &Path, stem: &str, options: &ParseOptions) -> Result<(String, String)> {
+    if let Ok(data) = std::fs::read(path) {
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| stem.to_string());
+        if let Some(text) = scheduler_asr_bytes(&data, &filename, options) {
+            let title = first_line_title(&text, stem);
+            return Ok((title, text));
+        }
+    }
+    if options.scheduler_base.is_some() {
+        return Err(VaultError::InvalidInput(
+            "scheduler ASR unavailable".to_string(),
+        ));
+    }
+
     let engine = crate::asr::detect_asr_engine().ok_or_else(|| {
         VaultError::InvalidInput(
             "ASR backend unavailable — install whisper.cpp or fetch SenseVoice".to_string(),
@@ -1299,8 +1794,46 @@ mod tests {
         //
         // 注：此测试在有 tesseract 的开发机上可能返回 Some(err_text)（OCR 在错误 PDF 上
         // 失败并返回 None），两种都是"正确不崩"；断言只看"不 panic"。
-        let _ = try_ocr_from_bytes_with_dpi(b"garbage data", 300);
+        let options = ParseOptions::default();
+        let _ = try_ocr_from_bytes_with_dpi(b"garbage data", "test.pdf", 300, &options);
         // 到这里就代表没 panic 了
+    }
+
+    #[test]
+    fn scheduler_inline_file_body_budget_accounts_for_base64() {
+        let max = 16 * 1024 * 1024;
+        assert!(scheduler_inline_file_fits_body(8 * 1024 * 1024, max));
+        assert!(!scheduler_inline_file_fits_body(13 * 1024 * 1024, max));
+    }
+
+    #[test]
+    fn scheduler_inline_file_body_budget_handles_tiny_limits() {
+        assert!(!scheduler_inline_file_fits_body(
+            1,
+            SCHEDULER_INLINE_JSON_OVERHEAD_BYTES
+        ));
+        assert!(scheduler_inline_file_fits_body(
+            3,
+            SCHEDULER_INLINE_JSON_OVERHEAD_BYTES + 4
+        ));
+    }
+
+    #[test]
+    fn scheduler_output_text_accepts_common_shapes() {
+        assert_eq!(
+            scheduler_output_text(&serde_json::json!({"text": "hello"})).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            scheduler_output_text(&serde_json::json!({"segments": [{"text": "a"}, {"text": "b"}]}))
+                .as_deref(),
+            Some("a\nb")
+        );
+        assert_eq!(
+            scheduler_output_text(&serde_json::json!({"outputs": {"full_text": "done"}}))
+                .as_deref(),
+            Some("done")
+        );
     }
 
     #[test]

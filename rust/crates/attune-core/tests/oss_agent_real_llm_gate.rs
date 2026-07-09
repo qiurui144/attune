@@ -161,11 +161,11 @@ fn memory_real_inputs() -> Vec<ConsolidationBundle> {
                 "用户对比了交强险和商业险在事故赔偿里的优先顺序。",
             ],
         ),
-        // Bundle 4: K3 IME INT8 算子优化
+        // Bundle 4: local scheduler IME INT8 算子优化
         bundle_from_summaries(
             1_780_259_200,
             &[
-                "用户研究 SpacemiT K3 的 IME (Integer Matrix Engine) 自定义指令 vmadotu。",
+                "用户研究本地调度器的 IME (Integer Matrix Engine) 自定义指令 vmadotu。",
                 "用户对比了 IME INT8 (vmadotu) 和标准 RVV (vfmacc) 在 GEMM 上的吞吐差异:IME 在 256x256 矩阵上达 135 GOPS,RVV ~30 GOPS。",
                 "用户用 perf stat 测了 IME kernel 的 IPC,大约 1.2 vs 标量 0.4。",
                 "用户记录 IME 受限于跨 cluster TCM 争抢,8 线程反而比 4 线程慢。",

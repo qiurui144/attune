@@ -6,10 +6,12 @@
 //!
 //! ## 加密边界
 //!
-//! `license_id` 是敏感 license 标识 → 字段级 AES-256-GCM 加密(dek,与
-//! `git_sources.token_ref_enc` / `items.content` 同模式)落 `license_id_enc` BLOB。
+//! `license_id` 是敏感 license 标识,`decrypt_key` 是付费插件 manifest 解密密钥 →
+//! 字段级 AES-256-GCM 加密(dek,与 `git_sources.token_ref_enc` / `items.content`
+//! 同模式)分别落 `license_id_enc` / `decrypt_key_enc` BLOB。
 //! `plugin_id` / `tier` / `status` / 时间戳是非敏感(plugin_id 已是 plugins/ 目录名),
-//! 明文存以支持 PRIMARY KEY 查询 + O(1) hydrate(spec §3.3 dispatch 热点)。
+//! 明文存以支持 PRIMARY KEY 查询 + O(1) hydrate(spec §3.3 dispatch 热点)。密钥不进
+//! `plugins/<id>/`,复制插件目录到另一台设备不会携带解密材料。
 //!
 //! ## migration
 //!
@@ -28,6 +30,9 @@ use crate::store::Store;
 pub struct EntitlementRow {
     pub plugin_id: String,
     pub license_id: String,
+    /// Optional paid-plugin manifest decrypt key. Plain only in memory; at rest it
+    /// is encrypted into `decrypt_key_enc` with the vault DEK.
+    pub decrypt_key: Option<String>,
     /// free | trial | paid
     pub tier: String,
     /// active | suspended | revoked
@@ -47,6 +52,7 @@ pub struct EntitlementRow {
 struct EncRow {
     plugin_id: String,
     license_id_enc: Vec<u8>,
+    decrypt_key_enc: Option<Vec<u8>>,
     tier: String,
     status: String,
     trial_expires: Option<String>,
@@ -61,22 +67,32 @@ impl EncRow {
         Ok(EncRow {
             plugin_id: r.get(0)?,
             license_id_enc: r.get(1)?,
-            tier: r.get(2)?,
-            status: r.get(3)?,
-            trial_expires: r.get(4)?,
-            signing_pubkey_hex: r.get(5)?,
-            last_verified_at: r.get(6)?,
-            grace_started_at: r.get(7)?,
-            updated_at: r.get(8)?,
+            decrypt_key_enc: r.get(2)?,
+            tier: r.get(3)?,
+            status: r.get(4)?,
+            trial_expires: r.get(5)?,
+            signing_pubkey_hex: r.get(6)?,
+            last_verified_at: r.get(7)?,
+            grace_started_at: r.get(8)?,
+            updated_at: r.get(9)?,
         })
     }
 
     fn decrypt(self, dek: &Key32) -> Result<EntitlementRow> {
         let license_id = String::from_utf8(crypto::decrypt(dek, &self.license_id_enc)?)
             .map_err(|e| crate::error::VaultError::Crypto(format!("license_id utf8: {e}")))?;
+        let decrypt_key = match self.decrypt_key_enc {
+            None => None,
+            Some(ciphertext) => Some(
+                String::from_utf8(crypto::decrypt(dek, &ciphertext)?).map_err(|e| {
+                    crate::error::VaultError::Crypto(format!("decrypt_key utf8: {e}"))
+                })?,
+            ),
+        };
         Ok(EntitlementRow {
             plugin_id: self.plugin_id,
             license_id,
+            decrypt_key,
             tier: self.tier,
             status: self.status,
             trial_expires: self.trial_expires,
@@ -114,13 +130,19 @@ impl Store {
             }
         }
         let license_id_enc = crypto::encrypt(dek, row.license_id.as_bytes())?;
+        let decrypt_key_enc = row
+            .decrypt_key
+            .as_ref()
+            .map(|k| crypto::encrypt(dek, k.as_bytes()))
+            .transpose()?;
         self.conn.execute(
             "INSERT INTO plugin_entitlements
-                (plugin_id, license_id_enc, tier, status, trial_expires,
+                (plugin_id, license_id_enc, decrypt_key_enc, tier, status, trial_expires,
                  signing_pubkey_hex, last_verified_at, grace_started_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(plugin_id) DO UPDATE SET
                 license_id_enc=excluded.license_id_enc,
+                decrypt_key_enc=excluded.decrypt_key_enc,
                 tier=excluded.tier,
                 status=excluded.status,
                 trial_expires=excluded.trial_expires,
@@ -131,6 +153,7 @@ impl Store {
             rusqlite::params![
                 row.plugin_id,
                 license_id_enc,
+                decrypt_key_enc,
                 row.tier,
                 row.status,
                 row.trial_expires,
@@ -172,7 +195,7 @@ impl Store {
         let enc_row: Option<EncRow> = self
             .conn
             .query_row(
-                "SELECT plugin_id, license_id_enc, tier, status, trial_expires, signing_pubkey_hex,
+                "SELECT plugin_id, license_id_enc, decrypt_key_enc, tier, status, trial_expires, signing_pubkey_hex,
                         last_verified_at, grace_started_at, updated_at
                  FROM plugin_entitlements WHERE plugin_id = ?1",
                 rusqlite::params![plugin_id],
@@ -188,7 +211,7 @@ impl Store {
     /// 列出全部 entitlement(启动 hydrate 用)。
     pub fn list_entitlements(&self, dek: &Key32) -> Result<Vec<EntitlementRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT plugin_id, license_id_enc, tier, status, trial_expires,
+            "SELECT plugin_id, license_id_enc, decrypt_key_enc, tier, status, trial_expires,
                     signing_pubkey_hex, last_verified_at, grace_started_at, updated_at
              FROM plugin_entitlements ORDER BY plugin_id",
         )?;
@@ -218,6 +241,7 @@ mod tests {
         EntitlementRow {
             plugin_id: plugin_id.to_string(),
             license_id: "lic-secret-12345".to_string(),
+            decrypt_key: None,
             tier: "paid".to_string(),
             status: status.to_string(),
             trial_expires: Some("2026-12-31T00:00:00+00:00".to_string()),
@@ -233,7 +257,8 @@ mod tests {
     fn upsert_then_get_roundtrip() {
         let store = Store::open_memory().unwrap();
         let dek = Key32::generate();
-        let r = row("law-pro", "active");
+        let mut r = row("law-pro", "active");
+        r.decrypt_key = Some("device-bound-key".into());
         store.upsert_entitlement(&dek, &r).unwrap();
         let got = store.get_entitlement(&dek, "law-pro").unwrap().unwrap();
         assert_eq!(
@@ -253,6 +278,19 @@ mod tests {
             raw_blob,
             r.license_id.as_bytes(),
             "license_id must be encrypted at rest"
+        );
+        let key_blob: Vec<u8> = store
+            .raw_connection_for_test()
+            .query_row(
+                "SELECT decrypt_key_enc FROM plugin_entitlements WHERE plugin_id='law-pro'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(
+            key_blob,
+            r.decrypt_key.as_deref().unwrap().as_bytes(),
+            "decrypt_key must be encrypted at rest"
         );
     }
 

@@ -151,21 +151,21 @@ UNIT
   done
 fi
 
-# ─── 5. Embedding 模型拉取（必要底座之一）+ K3 路径分支 ─────────────
+# ─── 5. Embedding 模型拉取（必要底座之一）+ local scheduler 路径分支 ─────────────
 # 设计原则（CLAUDE.md "硬件感知的默认底座"）：
 #   本地必装的 4 底座 = Embedding + Reranker + ASR + OCR
-#   LLM **不本地预装** — 笔电默认走远端 token；K3 一体机镜像例外
+#   LLM **不本地预装** — 笔电默认走远端 token；local-scheduler appliance 镜像例外
 #
 # Form factor 检测（与 attune-core::platform::detect_form_factor 同源）:
-# - ATTUNE_FORM_FACTOR=k3 env var override（K3 镜像构建时 systemd-environment.d 写入）
-# - /sys/class/dmi/id/product_name 含 k3 / jetson 关键字
+# - ATTUNE_FORM_FACTOR=local_scheduler env var override（本地调度器镜像构建时 systemd-environment.d 写入）
+# - /sys/class/dmi/id/product_name 含 local-scheduler / attune-appliance 关键字
 FORM_FACTOR="laptop"
-if [ "${ATTUNE_FORM_FACTOR:-}" = "k3" ] || [ "${ATTUNE_FORM_FACTOR:-}" = "k3appliance" ]; then
-  FORM_FACTOR="k3"
+if [ "${ATTUNE_FORM_FACTOR:-}" = "local_scheduler" ] || [ "${ATTUNE_FORM_FACTOR:-}" = "local-scheduler" ] || [ "${ATTUNE_FORM_FACTOR:-}" = "appliance" ]; then
+  FORM_FACTOR="local_scheduler"
 elif [ -r /sys/class/dmi/id/product_name ]; then
   PROD=$(tr 'A-Z' 'a-z' < /sys/class/dmi/id/product_name 2>/dev/null)
   case "$PROD" in
-    *k3*|*jetson*) FORM_FACTOR="k3" ;;
+    *local-scheduler*|*attune-appliance*) FORM_FACTOR="local_scheduler" ;;
   esac
 fi
 
@@ -179,23 +179,23 @@ else
   EMBED_TIER="lite (bge-small, 384-dim, 中英)"
 fi
 
-log "Form factor: $FORM_FACTOR (set ATTUNE_FORM_FACTOR=k3 to force K3 path on non-DMI boxes)"
+log "Form factor: $FORM_FACTOR (set ATTUNE_FORM_FACTOR=local_scheduler to force local scheduler path on non-DMI boxes)"
 log "Embedding tier: RAM=${RAM_GB}GB → $EMBED_TIER"
 
-# K3 路径：预装本地 LLM（笔电不走这条）
+# local scheduler 路径：预装本地 LLM（笔电不走这条）
 LOCAL_LLM=""
-if [ "$FORM_FACTOR" = "k3" ]; then
+if [ "$FORM_FACTOR" = "local_scheduler" ]; then
   if [ "$RAM_GB" -ge 8 ]; then
     LOCAL_LLM="qwen2.5:3b"
   else
     LOCAL_LLM="qwen2.5:1.5b"
   fi
-  log "K3 form factor → preinstall local LLM: $LOCAL_LLM (~2 GB)"
+  log "Local scheduler form factor → preinstall local LLM: $LOCAL_LLM (~2 GB)"
 else
   log "Laptop form factor → LLM 走远端 token 默认；用户在 wizard 配置 cloud API 或 Ollama"
 fi
 
-# 拉模型（embedding + K3-only LLM）
+# 拉模型（embedding + local-scheduler-only LLM）
 pull_one_model() {
   local m="$1"
   if ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$m" \
@@ -363,14 +363,14 @@ fi
 # ─── 7. 验证 4 必要底座完整性 ──────────────────────────────────────
 # 设计契约（CLAUDE.md "硬件感知的默认底座" + "成本感知与触发契约"）：
 #   本地必装 4 底座 = Embedding + Reranker + ASR + OCR
-#   LLM 不在底座清单（远端 token 默认 / K3 镜像例外）
+#   LLM 不在底座清单（远端 token 默认 / local scheduler 镜像例外）
 log "─── 4 foundation stack final check ──"
 log "  Embedding: $(ollama list 2>/dev/null | grep -q bge && echo "OK ($EMBED_MODEL via Ollama)" || echo "MISSING")"
 log "  Reranker:  lazy-load on first search (Xenova/bge-reranker-base ~120 MB via hf_hub)"
 log "  ASR:       $(command -v whisper-cli >/dev/null && [ -f "$ASR_MODEL_FILE" ] && echo "OK (whisper-cli + large-v3-turbo-q5, 中文 WER 5-7%)" || ([ -f "$LEGACY_SMALL" ] && echo "PARTIAL (legacy small-q8 fallback)" || echo "MISSING"))"
 log "  OCR:       $([ -f "$PPOCR_DIR/ch_PP-OCRv5_rec_mobile.onnx" ] && command -v pdftoppm >/dev/null && echo "OK (PP-OCRv5 mobile, 4 ONNX models + pdftoppm)" || echo "MISSING (re-run: apt install --reinstall attune)")"
-if [ "$FORM_FACTOR" = "k3" ]; then
-  log "─── LLM (K3 form factor — preinstalled) ──"
+if [ "$FORM_FACTOR" = "local_scheduler" ]; then
+  log "─── LLM (local scheduler form factor — preinstalled) ──"
   log "  LLM: $(ollama list 2>/dev/null | grep -q qwen && echo "OK ($LOCAL_LLM via Ollama)" || echo "MISSING — user can: ollama pull $LOCAL_LLM")"
 else
   log "─── LLM (Laptop form factor — user choice in wizard) ──"

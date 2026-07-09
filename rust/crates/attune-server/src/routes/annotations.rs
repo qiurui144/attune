@@ -293,7 +293,8 @@ pub async fn ai_analyze(
 
     let llm = llm_arc.ok_or_else(|| {
         AppError::ServiceUnavailable(
-            "LLM not configured. Install Ollama or configure cloud provider in Settings.".into(),
+            "LLM not configured. Start local scheduler or configure cloud provider in Settings."
+                .into(),
         )
     })?;
 

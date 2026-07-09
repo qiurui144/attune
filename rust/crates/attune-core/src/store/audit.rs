@@ -55,7 +55,7 @@ pub enum PrivacyTier {
     L0,
     /// 正则 + 词典脱敏后 → 云
     L1,
-    /// LLM 语义脱敏后 → 云（高端硬件 + K3 一体机）
+    /// LLM 语义脱敏后 → 云（高端硬件 + local-scheduler appliance）
     L3,
 }
 

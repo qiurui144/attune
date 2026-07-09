@@ -27,6 +27,11 @@ fn spawn_post_unlock_services(state: SharedState) {
     // short local reads and make post-login/chat routes usable right away.
     state.reload_llm();
     hydrate_entitlement_cache(&state);
+    let member_restore_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ =
+            crate::routes::member::restore_member_state_from_cloud_session(&member_restore_state);
+    });
 
     tokio::task::spawn_blocking(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

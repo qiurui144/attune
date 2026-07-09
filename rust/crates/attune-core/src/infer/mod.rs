@@ -3,9 +3,11 @@
 pub mod accel;
 pub mod bootstrap_status;
 pub mod catalog;
+#[cfg(feature = "local-inference")]
 pub mod embedding;
 pub mod model_source;
 pub mod model_store;
+#[cfg(feature = "local-inference")]
 pub mod provider;
 pub mod reranker;
 pub mod stack_installer;

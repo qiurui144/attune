@@ -277,8 +277,8 @@ mod tests {
         assert_eq!(k1.as_bytes(), k2.as_bytes());
 
         // 口令不同 → key 不同(同 salt)。
-        let k3 = derive_portable_key("other-pass", &salt).unwrap();
-        assert_ne!(k1.as_bytes(), k3.as_bytes());
+        let other_key = derive_portable_key("other-pass", &salt).unwrap();
+        assert_ne!(k1.as_bytes(), other_key.as_bytes());
     }
 
     #[test]

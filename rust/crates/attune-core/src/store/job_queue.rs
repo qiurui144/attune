@@ -350,7 +350,7 @@ impl Store {
     /// source-missing, no-handler, max-attempts, interrupted-no-retry, cancelled),
     /// stay Failed permanently — that is the dead-letter terminal state.
     ///
-    /// This is the unattended-retry path the 24h K3 box needs: a 3am batch that hits
+    /// This is the unattended-retry path the 24h local-scheduler box needs: a 3am batch that hits
     /// a transient `asr-engine-failed` retries on its own instead of waiting for an
     /// operator to `requeue_job`. Returns the number of jobs scheduled for retry.
     ///
@@ -362,7 +362,7 @@ impl Store {
         max_attempts: i64,
         base_backoff_ms: i64,
     ) -> Result<usize> {
-        /// Cap a single backoff window. 1h is sensible for a nightly K3 batch box.
+        /// Cap a single backoff window. 1h is sensible for a nightly local-scheduler batch box.
         const BACKOFF_CAP_MS: i64 = 3_600_000;
         // Read retry candidates: failed, under the attempts cap, retryable code.
         // `attempts >= 1` is implied (a job only reaches failed after a run that
@@ -414,7 +414,7 @@ impl Store {
 
     /// TTL purge: delete terminal (done/failed/cancelled) jobs whose retention
     /// window *since they finished* has elapsed. Prevents unbounded growth on a
-    /// 24h K3 box (spec §8). Returns count deleted.
+    /// 24h local-scheduler box (spec §8). Returns count deleted.
     ///
     /// Retention is measured from `finished_ms` (when the job entered a terminal
     /// state), NOT `created_ms`: a long-queued or many-times-requeued job that

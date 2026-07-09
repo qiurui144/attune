@@ -523,7 +523,7 @@ pub struct OllamaLlmProvider {
 /// 何时使用本列表：
 /// - 笔电形态默认 LLM provider = `openai_compat`（远端 token），见 `settings.rs::default_settings()` 注释；
 ///   **本列表只在用户在 wizard 主动选 Ollama 模式或 settings.llm.provider="ollama" 时使用**
-/// - K3 一体机形态默认 provider = `ollama`，本列表用于挑预装的本地模型（典型 qwen2.5:1.5b/3b）
+/// - 本地调度器设备默认走配置好的 endpoint；本列表只作为 endpoint 被清空后的本地兜底
 /// - `OllamaLlmProvider::auto_detect()` 是入口，遍历本列表与 Ollama 已下载模型匹配
 /// - 用户可用 `ATTUNE_CHAT_MODEL` env var 直接覆盖（跳过本列表探测）
 ///
@@ -2018,7 +2018,7 @@ mod tests {
         // 真本地 endpoint → true
         assert!(local("http://localhost:11434/v1"));
         assert!(local("http://127.0.0.1:1234/v1"));
-        assert!(local("http://[::1]:8080/v1"));
+        assert!(local("http://[::1]:8090/v1"));
         assert!(local("http://127.0.0.5/v1"), "127.0.0.0/8 回环段应判本地");
         // 正常云端 → false
         assert!(!local("https://api.openai.com/v1"));
@@ -2447,10 +2447,10 @@ mod tests {
         assert_eq!(s, "final-reply");
     }
 
-    /// K3 调度层集成 mock-compat (2026-06-22):证明 OpenAiLlmProvider 把 chat 请求路由到
-    /// **可配置** :8090 端点(k3-scheduler OpenAI-compat 收口),并解析 /chat/completions
+    /// local-scheduler mock-compat:证明 OpenAiLlmProvider 把 chat 请求路由到
+    /// **可配置** :8090 端点(local-scheduler OpenAI-compat 收口),并解析 /chat/completions
     /// 响应。单次 TcpListener mock(无新 dev-dep),验 attune→:8090 契约对接(§6.1 mock-compat
-    /// 维度;真 K3 :8090 端到端是 §7.3 PENDING-真机)。
+    /// 维度;真机 :8090 端到端是 §7.3 PENDING-真机)。
     #[test]
     fn openai_llm_routes_chat_to_custom_8090_endpoint() {
         use std::io::{Read, Write};
@@ -2467,7 +2467,7 @@ mod tests {
             let n = stream.read(&mut buf).unwrap_or(0);
             *cap2.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
             // OpenAI /v1/chat/completions response shape.
-            let body = r#"{"choices":[{"message":{"content":"k3 reply"}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}"#;
+            let body = r#"{"choices":[{"message":{"content":"local scheduler reply"}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
@@ -2477,14 +2477,16 @@ mod tests {
             let _ = stream.flush();
         });
 
-        // Endpoint shaped exactly like the K3-scheduler收口 (loopback :8090/v1).
+        // Endpoint shaped exactly like the local-scheduler收口 (loopback :8090/v1).
         let endpoint = format!("http://127.0.0.1:{port}/v1");
-        let provider = OpenAiLlmProvider::new(&endpoint, "sk-k3", "qwen2.5-0.5b");
-        let (reply, usage) = provider.chat("you are helpful", "hi k3").expect("chat ok");
+        let provider = OpenAiLlmProvider::new(&endpoint, "sk-local-scheduler", "qwen2.5-0.5b");
+        let (reply, usage) = provider
+            .chat("you are helpful", "hi local scheduler")
+            .expect("chat ok");
 
         handle.join().unwrap();
 
-        assert_eq!(reply, "k3 reply");
+        assert_eq!(reply, "local scheduler reply");
         assert_eq!(usage.tokens_in, 5);
         assert_eq!(usage.tokens_out, 2);
 
@@ -2496,7 +2498,7 @@ mod tests {
             "request line was: {req}"
         );
         assert!(
-            req_lc.contains("authorization: bearer sk-k3"),
+            req_lc.contains("authorization: bearer sk-local-scheduler"),
             "missing bearer auth: {req}"
         );
         assert!(

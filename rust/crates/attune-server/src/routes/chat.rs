@@ -2,10 +2,11 @@ use attune_core::chat_reliability::{evaluate_response, ChatReliabilityConfig, Re
 use attune_core::cost;
 use attune_core::llm::ChatMessage;
 use attune_core::pii::Redactor;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
 use crate::eval as eval_surface;
@@ -33,6 +34,346 @@ const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 /// 历史消息最大条数 —— 硬上限 backstop（防超大 payload）。
 /// 真正的窗口感知裁剪由context_budget 在拿到 LLM 后做（见下方）。
 const MAX_HISTORY_DEPTH: usize = 80;
+const LOCAL_SCHEDULER_KB_ASK_TASK: &str = "kb.query.ask";
+const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 64;
+const DEFAULT_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 2048;
+const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 256;
+const MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 16_384;
+const LOCAL_EXTRACTIVE_MODEL_ID: &str = "local-extractive-source-answer";
+
+fn chat_context_chunk_max_chars() -> usize {
+    crate::local_scheduler::env_u32_any(
+        &[
+            "ATTUNE_CHAT_CONTEXT_CHUNK_MAX_CHARS",
+            "ATTUNE_RAG_CONTEXT_CHUNK_MAX_CHARS",
+            "ATTUNE_SCHEDULER_CONTEXT_CHUNK_MAX_CHARS",
+        ],
+        DEFAULT_CHAT_CONTEXT_CHUNK_MAX_CHARS,
+    )
+    .clamp(
+        MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS,
+        MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS,
+    ) as usize
+}
+
+fn bounded_context_text(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let total = trimmed.chars().count();
+    if total <= max_chars {
+        return trimmed.to_string();
+    }
+    const ELLIPSIS: &str = "\n...\n";
+    if max_chars <= ELLIPSIS.chars().count() + 2 {
+        return trimmed.chars().take(max_chars).collect();
+    }
+    let body_budget = max_chars - ELLIPSIS.chars().count();
+    let head_budget = body_budget / 2 + body_budget % 2;
+    let tail_budget = body_budget / 2;
+    let head: String = trimmed.chars().take(head_budget).collect();
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(tail_budget)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{}{}{}", head.trim_end(), ELLIPSIS, tail.trim_start())
+}
+
+fn build_chat_search_params(
+    form_factor: attune_core::platform::FormFactor,
+    use_local_scheduler_profile: bool,
+    expanded_query: &str,
+    detected_domain: Option<&str>,
+    top_k: usize,
+) -> (
+    attune_core::search::SearchParams,
+    Option<attune_core::retrieval_plan::RetrievalPlan>,
+) {
+    crate::retrieval_policy::build_search_params(
+        form_factor,
+        use_local_scheduler_profile,
+        expanded_query,
+        detected_domain,
+        top_k,
+        None,
+        None,
+        None,
+    )
+}
+
+fn build_local_scheduler_kb_contexts(knowledge: &[Value]) -> Vec<Value> {
+    let max_context_chars = chat_context_chunk_max_chars();
+    knowledge
+        .iter()
+        .filter_map(|k| {
+            let text = k
+                .get("inject_content")
+                .and_then(|v| v.as_str())
+                .or_else(|| k.get("content").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .trim();
+            if text.is_empty() {
+                return None;
+            }
+            let text = bounded_context_text(text, max_context_chars);
+            Some(serde_json::json!({
+                "text": text,
+                "source_id": k.get("item_id").and_then(|v| v.as_str()).unwrap_or(""),
+                "title": k.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                "score": k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "breadcrumb": k.get("breadcrumb").cloned().unwrap_or_else(|| serde_json::json!([])),
+                "chunk_offset_start": k.get("chunk_offset_start").cloned().unwrap_or(Value::Null),
+                "chunk_offset_end": k.get("chunk_offset_end").cloned().unwrap_or(Value::Null),
+            }))
+        })
+        .collect()
+}
+
+fn build_local_scheduler_admission_messages(query: &str, contexts: &[Value]) -> Vec<ChatMessage> {
+    let mut user = format!("Question: {query}");
+    if !contexts.is_empty() {
+        user.push_str("\n\nReference material:\n");
+        for (idx, ctx) in contexts.iter().enumerate() {
+            let text = ctx.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            if !text.is_empty() {
+                user.push_str(&format!("[{}] {}\n", idx + 1, text));
+            }
+        }
+    }
+    vec![ChatMessage::user(&user)]
+}
+
+fn local_scheduler_output_text(outputs: &Value) -> Option<String> {
+    for key in ["answer", "text", "content", "response", "summary", "output"] {
+        if let Some(s) = outputs.get(key).and_then(|v| v.as_str()) {
+            if !s.trim().is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    outputs
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+fn local_scheduler_extractive_answer_enabled() -> bool {
+    crate::local_scheduler::env_bool_any(
+        &[
+            "ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER",
+            "ATTUNE_LOCAL_EXTRACTIVE_ANSWER",
+        ],
+        true,
+    )
+}
+
+fn compact_ascii_lower(text: &str) -> String {
+    text.to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect()
+}
+
+fn contains_any_ascii(text: &str, needles: &[&str]) -> bool {
+    let haystack = text.to_ascii_lowercase();
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn local_scheduler_operational_safety_query(query: &str) -> bool {
+    let q = query.to_ascii_lowercase();
+    let operational = contains_any_ascii(
+        &q,
+        &[
+            "real flight",
+            "emergency steps",
+            "engine fire",
+            "flight emergency",
+            "operational",
+            "maintenance signoff",
+            "维修步骤",
+            "真实飞行",
+            "应急步骤",
+        ],
+    );
+    let urgent = contains_any_ascii(
+        &q,
+        &["now", "immediately", "exact steps", "step by step", "马上"],
+    );
+    operational || (urgent && contains_any_ascii(&q, &["qrh", "emergency", "fire", "飞行", "应急"]))
+}
+
+fn local_scheduler_source_lookup_query(query: &str) -> bool {
+    contains_any_ascii(
+        query,
+        &[
+            "source",
+            "manual",
+            "reference",
+            "lookup",
+            "description",
+            "system",
+            "systems",
+            "fcom",
+            "qrh",
+            "fctm",
+            "amm",
+            "ata",
+            "sop",
+            "mel",
+            "abbreviation",
+            "abbreviations",
+            "hydraulic",
+            "electrical",
+            "fuel",
+            "navigation",
+            "powerplant",
+            "landing gear",
+            "flight controls",
+            "air conditioning",
+            "minimum equipment",
+        ],
+    )
+}
+
+fn source_title_from_knowledge(k: &Value) -> String {
+    k.get("title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| k.get("item_id").and_then(|v| v.as_str()).map(str::trim))
+        .unwrap_or("local KB source")
+        .to_string()
+}
+
+fn snippet_from_knowledge(k: &Value, max_chars: usize) -> String {
+    let text = k
+        .get("inject_content")
+        .and_then(|v| v.as_str())
+        .or_else(|| k.get("content").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    let mut snippet: String = text.chars().take(max_chars).collect();
+    snippet.push_str("...");
+    snippet
+}
+
+fn local_scheduler_source_lines(knowledge: &[Value], limit: usize) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut lines = Vec::new();
+    for k in knowledge {
+        let title = source_title_from_knowledge(k);
+        let key = compact_ascii_lower(&title);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        let snippet = snippet_from_knowledge(k, 180);
+        if snippet.is_empty() {
+            lines.push(format!("- {title}"));
+        } else {
+            lines.push(format!("- {title}: {snippet}"));
+        }
+        if lines.len() >= limit {
+            break;
+        }
+    }
+    lines
+}
+
+fn build_local_scheduler_extractive_answer(query: &str, knowledge: &[Value]) -> Option<String> {
+    if knowledge.is_empty() || !local_scheduler_extractive_answer_enabled() {
+        return None;
+    }
+
+    let source_lines = local_scheduler_source_lines(knowledge, 5);
+    if source_lines.is_empty() {
+        return None;
+    }
+
+    if local_scheduler_operational_safety_query(query) {
+        return Some(format!(
+            "I cannot provide exact real-flight or maintenance emergency procedure steps. Do not use this response for operational flight decisions; consult the official QRH/manual and qualified crew or maintenance personnel.\n\nRelevant local KB sources for citation only:\n{}",
+            source_lines.join("\n")
+        ));
+    }
+
+    if !local_scheduler_source_lookup_query(query) {
+        return None;
+    }
+
+    Some(format!(
+        "根据本地知识库检索，优先使用以下已引用来源回答该问题。若需要复杂推理或跨文档综合，应切换到 scheduler answer worker 或云端高质量模式。\n\n{}",
+        source_lines.join("\n")
+    ))
+}
+
+fn local_scheduler_async_content(job_id: Option<&str>, eta_ms: Option<u32>) -> String {
+    match (job_id, eta_ms) {
+        (Some(id), Some(eta)) if eta > 0 => {
+            format!("本地 scheduler 知识库回答任务已提交，job_id={id}，预计等待约 {eta} ms。")
+        }
+        (Some(id), _) => format!("本地 scheduler 知识库回答任务已提交，job_id={id}。"),
+        (None, _) => "本地 scheduler 知识库回答任务已提交。".to_string(),
+    }
+}
+
+fn local_scheduler_ask_max_output_tokens() -> u32 {
+    crate::local_scheduler::env_u32_any(
+        &[
+            "ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
+            "ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS",
+        ],
+        DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+    )
+}
+
+fn local_scheduler_route_error(e: attune_core::error::VaultError) -> AppError {
+    AppError::detailed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "error": "local scheduler 请求失败。",
+            "code": "local-scheduler-job-failed",
+            "detail": e.to_string(),
+        }),
+    )
+}
+
+async fn run_local_scheduler_job_action<F>(
+    state: &SharedState,
+    join_label: &'static str,
+    action: F,
+) -> AppResult<attune_core::edge_cloud::scheduler::SchedulerJobStatus>
+where
+    F: FnOnce(
+            attune_core::edge_cloud::scheduler::LocalSchedulerClient,
+        )
+            -> attune_core::error::Result<attune_core::edge_cloud::scheduler::SchedulerJobStatus>
+        + Send
+        + 'static,
+{
+    let scheduler_base = crate::local_scheduler::base_from_state(state);
+    tokio::task::spawn_blocking(move || {
+        let client = attune_core::edge_cloud::scheduler::LocalSchedulerClient::with_base(
+            &scheduler_base,
+            crate::local_scheduler::SUBMIT_TIMEOUT,
+        );
+        action(client)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("local scheduler {join_label} join error: {e}")))?
+    .map_err(local_scheduler_route_error)
+}
 
 /// F-17 G1 helper — read whether a given outbound point is enabled in
 /// `settings.privacy.<key>`. Defaults to `false` (fail-closed) when the block
@@ -123,6 +464,7 @@ pub async fn chat(
         let drop = body.history.len() - MAX_HISTORY_DEPTH;
         body.history.drain(..drop);
     }
+    let plugin_registry = crate::routes::plugins::current_plugin_registry(&state);
 
     // Sprint 1 Phase B: chat keyword trigger for project recommendation
     // 纯 observer：检测当前 user message 中的项目相关关键词，命中即通过 broadcast 推 ws hint，
@@ -130,8 +472,7 @@ pub async fn chat(
     //
     // v0.6 边界瘦身：keywords 不再硬编码到 attune-core，由 PluginRegistry 聚合各
     // vertical plugin 的 chat_trigger.project_keywords 后传入。无 plugin 时 = []，永不触发。
-    let project_keywords: Vec<&str> = state
-        .plugin_registry
+    let project_keywords: Vec<&str> = plugin_registry
         .all_chat_trigger_project_keywords()
         .into_iter()
         .collect();
@@ -151,7 +492,7 @@ pub async fn chat(
     // 不影响主流程；disabled 集合从 vault settings.skills.disabled 读取（Task 4），
     // has_pending_doc 留 false（Task 5 后由 chat context 决定）
     {
-        let registry = state.plugin_registry.clone();
+        let registry = plugin_registry.clone();
         // 从 vault metadata 读 settings.skills.disabled；锁失败 / 读失败 / 解析失败均回退空集合
         // （observer 路径不能阻断主流程）
         let disabled: std::collections::HashSet<String> = {
@@ -217,7 +558,7 @@ pub async fn chat(
                         StatusCode::SERVICE_UNAVAILABLE,
                         serde_json::json!({
                             "error": "AI 后端不可用",
-                            "hint": "请安装 Ollama，并在本机下载一个 chat 模型（例如轻量模型）"
+                            "hint": "请启动 local scheduler，或在设置中配置云端 LLM"
                         }),
                     ));
                 }
@@ -397,18 +738,38 @@ pub async fn chat(
     // v0.6 Phase B F-Pro Stage 4：query 意图 detect → cross-domain penalty。
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供（attune-pro）。
     // OSS 裸装无 plugin → 空词表 → None → 不降权（generic ranking）。
-    let domain_keywords = state.plugin_registry.all_chat_trigger_keywords_by_domain();
+    let domain_keywords = plugin_registry.all_chat_trigger_keywords_by_domain();
     let detected_domain =
         attune_core::search::detect_query_domain(&expanded_query, &domain_keywords);
 
-    // 1. Search knowledge base via three-stage pipeline (initial_k → rerank → top_k)
-    let mut search_params = attune_core::search::SearchParams::with_defaults(5);
     if let Some(d) = detected_domain.as_ref() {
-        search_params.domain_hint = Some(d.clone());
         // 不把用户 chat query 明文写日志。日志文件 data_dir()/logs/
         // 不加密、保留 7 天 — query 是高隐私数据（用户问的法律/医疗/私事）。
         // 改 debug 级 + 仅打长度与 domain，不打内容。
         tracing::debug!(domain = %d, query_len = body.message.len(), "F-Pro domain detected");
+    }
+    let native_scheduler_kb =
+        crate::local_scheduler::native_kb_enabled(&app_settings, &state.hardware);
+
+    // 1. Search knowledge base via three-stage pipeline. Local scheduler profiles
+    // use the edge-native retrieval planner; other paths keep the existing chat
+    // search defaults.
+    let (search_params, retrieval_plan) = build_chat_search_params(
+        state.hardware.form_factor,
+        native_scheduler_kb,
+        &expanded_query,
+        detected_domain.as_deref(),
+        5,
+    );
+    if let Some(plan) = retrieval_plan.as_ref() {
+        tracing::debug!(
+            target = ?plan.target,
+            top_k = plan.final_top_k,
+            initial_k = search_params.initial_k,
+            intermediate_k = search_params.intermediate_k,
+            evidence_token_budget = plan.evidence_token_budget,
+            "local scheduler retrieval planner applied to chat search"
+        );
     }
     let reranker = state
         .reranker
@@ -471,7 +832,7 @@ pub async fn chat(
             StatusCode::FORBIDDEN,
             serde_json::json!({
                 "error": "敏感模式：本次对话会注入本地知识库证据，但当前 LLM 是云端服务，已阻止外发。",
-                "hint": "请在设置中配置本地 LLM（Ollama），或关闭「敏感案件强制本地 LLM」。",
+                "hint": "请在设置中配置 local scheduler，或关闭「敏感案件强制本地 LLM」。",
                 "code": "sensitive-evidence-cloud-blocked",
             }),
         ));
@@ -783,8 +1144,8 @@ pub async fn chat(
         .to_string();
     // 本地模型一键化 (2026-06-01): summary 模式决定上下文摘要是否跑 + 用哪个 LLM。
     //   off  → 不压缩 (纯检索注入原文，等价 Raw，零 LLM 成本/无需本地模型)
-    //   local→ 用 summary_llm (本地 Ollama)
-    //   cloud→ 复用主 chat LLM (远端 token)，避免要求笔电先装 Ollama
+    //   local→ 用 summary_llm（非 scheduler-native 路径）
+    //   cloud→ 复用主 chat LLM (远端 token)，避免要求笔电先启动 scheduler
     // 缺省: 兼容老 vault (无 summary 字段) → "local" 保持历史行为 (summary_llm or chat 兜底)。
     let summary_mode = app_settings
         .get("summary")
@@ -795,8 +1156,11 @@ pub async fn chat(
     let knowledge: Vec<serde_json::Value> = if web_search_used {
         // 网络搜索结果已经是 snippet，不做二次压缩
         knowledge
-    } else if summary_mode == "off" {
+    } else if summary_mode == "off" || native_scheduler_kb {
         // summary=off：跳过上下文摘要，注入原文 (弱机/离线/省钱)。
+        // scheduler-native KB 路径也跳过 summary_llm，避免本地答案生成前误触云端
+        // 或 OpenAI-compatible 摘要器；后续 build_local_scheduler_kb_contexts 会按
+        // evidence window 对每段做硬上限裁剪。
         knowledge
     } else {
         use attune_core::context_compress::{chunk_hash, CompressedChunk, ContextStrategy};
@@ -911,7 +1275,7 @@ pub async fn chat(
 
                     // Phase 2（无锁）：对真正 miss 调 LLM
                     // Fast-fail: 第 1 个 chunk LLM 调用失败后跳过剩余（避免 5 chunk × 120s timeout 串行
-                    // 把 client 卡到 180s 断开）。第 1 个失败通常表示 Ollama / LLM provider 不健康，
+                    // 把 client 卡到 180s 断开）。第 1 个失败通常表示 LLM provider 不健康，
                     // 重试也是浪费。所有 miss chunk 改用原文降级。
                     let mut llm_unavailable = false;
                     for s in slots.iter_mut() {
@@ -1039,6 +1403,259 @@ pub async fn chat(
             compression_stats.2,
             strategy_str
         );
+    }
+
+    // Local scheduler path: answer generation goes through scheduler-native `/kb/tasks`,
+    // not through the legacy OpenAI-compatible `/v1/chat/completions` path.
+    if native_scheduler_kb && !web_search_used {
+        if let Some(content) = build_local_scheduler_extractive_answer(&body.message, &knowledge) {
+            let citations: Vec<serde_json::Value> =
+                knowledge.iter().map(eval_surface::build_citation).collect();
+            let tokens_in = knowledge
+                .iter()
+                .map(|k| {
+                    k.get("inject_content")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| k.get("content").and_then(|v| v.as_str()))
+                        .map(|s| cost::estimate_tokens(s, LOCAL_EXTRACTIVE_MODEL_ID))
+                        .unwrap_or(0)
+                })
+                .sum::<usize>();
+            let tokens_out = cost::estimate_tokens(&content, LOCAL_EXTRACTIVE_MODEL_ID);
+            let chat_latency_ms = t_chat_start.elapsed().as_millis() as u64;
+            let eval_block = eval_surface::build_eval_block(&parsed_eval, chat_latency_ms);
+            let cost_block = eval_surface::build_cost_block(
+                tokens_in,
+                tokens_out,
+                LOCAL_EXTRACTIVE_MODEL_ID,
+                true,
+            );
+
+            return Ok(Json(serde_json::json!({
+                "content": content,
+                "citations": citations,
+                "knowledge_count": knowledge.len(),
+                "session_id": body.session_id,
+                "web_search_used": false,
+                "confidence": 4,
+                "context_tier": context_tier,
+                "cost_estimate": {
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "cost_usd": null,
+                    "is_local": true,
+                    "input_rate_per_k": null,
+                    "cache_hit": true,
+                    "cached_tokens": tokens_in,
+                    "vendor_tokens_in": 0,
+                    "vendor_tokens_out": 0,
+                },
+                "cost": cost_block,
+                "grounding": null,
+                "eval": eval_block,
+                "latency_ms": chat_latency_ms,
+                "weight_stats": {
+                    "items_total": weight_stats.items_total,
+                    "items_boosted": weight_stats.items_boosted,
+                    "items_dropped": weight_stats.items_dropped,
+                    "items_kept": weight_stats.items_kept,
+                },
+                "compression_stats": {
+                    "chunks": compression_stats.0,
+                    "cache_hits": compression_stats.1,
+                    "orig_chars": compression_stats.2,
+                    "strategy": strategy_str,
+                },
+                "local_scheduler": {
+                    "task": "local.extractive.answer",
+                    "scheduled_as": "sync",
+                    "job_id": null,
+                    "status": "done",
+                    "reason": "high_confidence_retrieval_extractive_answer",
+                    "eta_ms": 0,
+                    "model": LOCAL_EXTRACTIVE_MODEL_ID,
+                    "service_class": "realtime_answer",
+                    "device_used": "attune",
+                    "latency_ms": chat_latency_ms,
+                    "queue_wait_ms": 0,
+                    "admission": {
+                        "task_name": "local.extractive.answer",
+                        "model_id": LOCAL_EXTRACTIVE_MODEL_ID,
+                        "service_class": "realtime_answer",
+                        "context_tokens": tokens_in,
+                        "max_output_tokens": tokens_out,
+                        "reason": "ExtractiveLocalAnswer",
+                        "explicit_async": false,
+                    }
+                }
+            })));
+        }
+
+        let contexts = build_local_scheduler_kb_contexts(&knowledge);
+        let admission_messages = build_local_scheduler_admission_messages(&body.message, &contexts);
+        let task_body = serde_json::json!({
+            "query": body.message,
+            "contexts": contexts,
+            "answer_policy": {
+                "mode": "grounded_cited_answer",
+                "include_source_terms": true,
+                "refuse_operational_flight_or_maintenance_steps": true,
+                "prefer_short_bullets": true
+            }
+        });
+        let scheduler_base = crate::local_scheduler::base_from_settings(&app_settings);
+
+        let scheduler_outcome = tokio::task::spawn_blocking(move || {
+            let client = attune_core::edge_cloud::scheduler::LocalSchedulerClient::with_base(
+                &scheduler_base,
+                crate::local_scheduler::SUBMIT_TIMEOUT,
+            );
+            let profiles =
+                attune_core::edge_cloud::RuntimeProfileResolver::static_local_scheduler_profile(
+                    &scheduler_base,
+                );
+            let adapter = attune_core::edge_cloud::SchedulerKbTaskAdapter::new(&client, &profiles);
+            adapter.submit(
+                attune_core::edge_cloud::SchedulerKbTaskSubmitRequest::interactive(
+                    LOCAL_SCHEDULER_KB_ASK_TASK,
+                    task_body,
+                    &admission_messages,
+                )
+                .with_desired_output_tokens(local_scheduler_ask_max_output_tokens()),
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("local scheduler task join error: {e}")))?
+        .map_err(|e| {
+            AppError::detailed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error": "本地 scheduler 知识库任务提交失败。",
+                    "code": "local-scheduler-submit-failed",
+                    "detail": e.to_string(),
+                }),
+            )
+        })?;
+
+        match scheduler_outcome {
+            attune_core::edge_cloud::SchedulerKbTaskSubmitOutcome::Local(local) => {
+                let response = local.response;
+                let is_async = local.explicit_async
+                    || response.job_id.is_some()
+                    || response.scheduled_as.eq_ignore_ascii_case("async");
+                let content = if is_async {
+                    local_scheduler_async_content(response.job_id.as_deref(), response.eta_ms)
+                } else {
+                    local_scheduler_output_text(&response.outputs).unwrap_or_else(|| {
+                        "本地 scheduler 知识库任务已完成，但未返回可展示文本。".to_string()
+                    })
+                };
+                let confidence = if is_async {
+                    3
+                } else {
+                    attune_core::parse_confidence(&content)
+                };
+                let content = if is_async {
+                    content
+                } else {
+                    attune_core::strip_confidence_marker(&content).to_string()
+                };
+                let citations: Vec<serde_json::Value> =
+                    knowledge.iter().map(eval_surface::build_citation).collect();
+                let tokens_in = local.admission.context_tokens as usize;
+                let tokens_out = cost::estimate_tokens(&content, &local.admission.model_id);
+                let chat_latency_ms = t_chat_start.elapsed().as_millis() as u64;
+                let eval_block = eval_surface::build_eval_block(&parsed_eval, chat_latency_ms);
+                let cost_block = eval_surface::build_cost_block(
+                    tokens_in,
+                    tokens_out,
+                    &local.admission.model_id,
+                    true,
+                );
+
+                return Ok(Json(serde_json::json!({
+                    "content": content,
+                    "citations": citations,
+                    "knowledge_count": knowledge.len(),
+                    "session_id": body.session_id,
+                    "web_search_used": false,
+                    "confidence": confidence,
+                    "context_tier": context_tier,
+                    "cost_estimate": {
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "cost_usd": null,
+                        "is_local": true,
+                        "input_rate_per_k": null,
+                        "cache_hit": false,
+                        "cached_tokens": 0,
+                        "vendor_tokens_in": 0,
+                        "vendor_tokens_out": 0,
+                    },
+                    "cost": cost_block,
+                    "grounding": null,
+                    "eval": eval_block,
+                    "latency_ms": chat_latency_ms,
+                    "weight_stats": {
+                        "items_total": weight_stats.items_total,
+                        "items_boosted": weight_stats.items_boosted,
+                        "items_dropped": weight_stats.items_dropped,
+                        "items_kept": weight_stats.items_kept,
+                    },
+                    "compression_stats": {
+                        "chunks": compression_stats.0,
+                        "cache_hits": compression_stats.1,
+                        "orig_chars": compression_stats.2,
+                        "strategy": strategy_str,
+                    },
+                    "local_scheduler": {
+                        "task": LOCAL_SCHEDULER_KB_ASK_TASK,
+                        "scheduled_as": response.scheduled_as,
+                        "job_id": response.job_id,
+                        "status": response.status,
+                        "reason": response.reason,
+                        "eta_ms": response.eta_ms,
+                        "model": response.model,
+                        "service_class": response.service_class,
+                        "device_used": response.device_used,
+                        "latency_ms": response.latency_ms,
+                        "queue_wait_ms": response.queue_wait_ms,
+                        "admission": {
+                            "task_name": local.admission.task_name,
+                            "model_id": local.admission.model_id,
+                            "service_class": local.admission.service_class,
+                            "context_tokens": local.admission.context_tokens,
+                            "max_output_tokens": local.admission.max_output_tokens,
+                            "reason": format!("{:?}", local.admission.reason),
+                            "explicit_async": local.explicit_async,
+                        }
+                    }
+                })));
+            }
+            attune_core::edge_cloud::SchedulerKbTaskSubmitOutcome::UseCloudIfAllowed(ctx) => {
+                return Err(AppError::detailed(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    serde_json::json!({
+                        "error": "当前问题的最终证据上下文超过本地 scheduler async 上限。",
+                        "code": "local-scheduler-context-too-large",
+                        "model": ctx.model_id,
+                        "estimated_input_tokens": ctx.estimated_input_tokens,
+                        "max_output_tokens": ctx.max_output_tokens,
+                        "reason": format!("{:?}", ctx.reason),
+                    }),
+                ));
+            }
+            attune_core::edge_cloud::SchedulerKbTaskSubmitOutcome::Reject(ctx) => {
+                return Err(AppError::detailed(
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({
+                        "error": "本地 scheduler 上下文准入拒绝了本次请求。",
+                        "code": "local-scheduler-context-rejected",
+                        "reason": format!("{:?}", ctx.reason),
+                    }),
+                ));
+            }
+        }
     }
 
     // 2c. Build RAG system prompt（根据来源调整措辞）
@@ -1288,7 +1905,7 @@ pub async fn chat(
     // v0.6.2 升级 (2026-05-10): plugin_registry::match_chat_trigger() 动态路由替代 hard-code
     // COMPUTE_KEYWORDS. attune-pro 装载 capability 后, 关键词由 plugin.yaml 提供, OSS 不需 hard-code.
     // 兜底: 若无 plugin 命中且仍是结构化计算 query, 保留 hard-code 关键词检查 (OSS 单独使用时不丢防御).
-    let plugin_match = state.plugin_registry.match_chat_trigger(&body.message);
+    let plugin_match = plugin_registry.match_chat_trigger(&body.message);
 
     let response = {
         let max_rel: f64 = citations
@@ -1335,8 +1952,7 @@ pub async fn chat(
         if let Some(m) = &plugin_match {
             // Plugin 命中 — 提示用户触发 agent (避免纯 RAG 数字 hallucination)
             // 提供 form URL 让前端直接跳转 (per attune-plugin-protocol §3 Stage 3 工作流)
-            let form_hint = state
-                .plugin_registry
+            let form_hint = plugin_registry
                 .get_plugin(&m.plugin_id)
                 .and_then(|p| p.manifest.ui_components.first())
                 .map(|c| format!(
@@ -1519,6 +2135,29 @@ pub async fn chat(
     Ok(Json(response_json))
 }
 
+/// GET /api/v1/chat/local-scheduler/jobs/{job_id} -- proxy local scheduler async job status.
+pub async fn local_scheduler_job_status(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let job =
+        run_local_scheduler_job_action(&state, "job", move |client| client.job(&job_id)).await?;
+
+    Ok(Json(serde_json::json!({ "job": job })))
+}
+
+/// DELETE /api/v1/chat/local-scheduler/jobs/{job_id} -- best-effort local scheduler job cancel.
+pub async fn cancel_local_scheduler_job(
+    State(state): State<SharedState>,
+    Path(job_id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let job =
+        run_local_scheduler_job_action(&state, "cancel", move |client| client.cancel_job(&job_id))
+            .await?;
+
+    Ok(Json(serde_json::json!({ "job": job })))
+}
+
 /// GET /api/v1/chat/history -- 已废弃，返回与 /chat/sessions 一致的格式
 /// @deprecated 请使用 GET /api/v1/chat/sessions?limit=50&offset=0
 pub async fn chat_history(State(state): State<SharedState>) -> AppResult<Json<serde_json::Value>> {
@@ -1543,8 +2182,8 @@ pub async fn chat_history(State(state): State<SharedState>) -> AppResult<Json<se
 
 /// 将 LLM provider 返回的 VaultError 映射为客户端可读的 HTTP 响应。
 ///
-/// VaultError::LlmUnavailable 的 message 格式为 "openai HTTP <status>: <body>" 或
-/// "ollama HTTP <status>: <body>"。从中提取上游 status 后按以下规则映射：
+/// VaultError::LlmUnavailable 的 message 格式为 "<provider> HTTP <status>: <body>"。
+/// 从中提取上游 status 后按以下规则映射：
 /// - 429 → 429 Too Many Requests  — quota 耗尽，告知用户等待
 /// - 503 / 529 / 529 (Anthropic overloaded) → 503 Service Unavailable — 上游不可用
 /// - 其他 5xx → 502 Bad Gateway    — 上游内部错误
@@ -1680,7 +2319,7 @@ async fn eval_short_circuit_chat(
     // T1 test-only override: provider label maps directly to the determinism
     // label surfaced in the response — independent of what the underlying
     // provider impl returns from `determinism_level()`. This lets the
-    // integration test simulate both Ollama-style (Exact) and Anthropic-style
+    // integration test simulate both exact/local and Anthropic-style
     // (Temp0) behavior with a single Mock instance.
     //
     // Production callers do not set this header so the chain falls through
@@ -1692,7 +2331,7 @@ async fn eval_short_circuit_chat(
     let det = if let Some(label) = label_override.as_deref() {
         match label {
             "anthropic" => DeterminismLevel::Temp0,
-            "exact" | "mock" | "ollama" | "openai" => DeterminismLevel::Exact,
+            "exact" | "mock" | "local_scheduler" | "openai" => DeterminismLevel::Exact,
             _ => DeterminismLevel::BestEffort,
         }
     } else {
@@ -1799,12 +2438,13 @@ mod tests {
     }
 
     #[test]
-    fn ollama_unreachable_no_status_maps_to_500() {
-        let e = VaultError::LlmUnavailable("ollama unreachable: connection refused".into());
+    fn local_scheduler_unreachable_no_status_maps_to_500() {
+        let e =
+            VaultError::LlmUnavailable("local scheduler unreachable: connection refused".into());
         assert_eq!(status_of(e), 500);
         assert_eq!(
             code_of(VaultError::LlmUnavailable(
-                "ollama unreachable: connection refused".into()
+                "local scheduler unreachable: connection refused".into()
             )),
             "llm-error"
         );
@@ -1817,5 +2457,214 @@ mod tests {
             panic!("expected Detailed");
         };
         assert_eq!(body["upstream_status"], 429);
+    }
+
+    #[test]
+    fn local_scheduler_chat_search_params_use_retrieval_planner() {
+        let (params, plan) = build_chat_search_params(
+            attune_core::platform::FormFactor::LocalSchedulerAppliance,
+            false,
+            "总结法律合同里的违约责任",
+            Some("legal"),
+            5,
+        );
+        let plan = plan.expect("local scheduler profile should use retrieval planner");
+        assert_eq!(plan.rerank_candidate_cap, 20);
+        assert_eq!(plan.evidence_token_budget, 2048);
+        assert_eq!(params.top_k, 5);
+        assert_eq!(params.intermediate_k, 20);
+        assert_eq!(params.min_score, Some(0.65));
+        assert_eq!(params.domain_hint.as_deref(), Some("legal"));
+    }
+
+    #[test]
+    fn non_scheduler_chat_search_params_keep_legacy_defaults() {
+        let (params, plan) = build_chat_search_params(
+            attune_core::platform::FormFactor::Laptop,
+            false,
+            "总结法律合同里的违约责任",
+            Some("legal"),
+            5,
+        );
+        assert!(plan.is_none());
+        assert_eq!(params.top_k, 5);
+        assert_eq!(params.initial_k, 25);
+        assert_eq!(params.intermediate_k, 10);
+        assert_eq!(params.min_score, None);
+        assert_eq!(params.domain_hint.as_deref(), Some("legal"));
+    }
+
+    #[test]
+    fn local_scheduler_base_strips_openai_compat_v1_suffix() {
+        let settings = serde_json::json!({
+            "llm": { "endpoint": "http://127.0.0.1:8090/v1/" }
+        });
+        assert_eq!(
+            crate::local_scheduler::base_from_settings(&settings),
+            "http://127.0.0.1:8090"
+        );
+    }
+
+    #[test]
+    fn local_scheduler_ask_max_output_tokens_defaults_and_allows_env_override() {
+        let previous_generic = std::env::var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS").ok();
+        let previous_local = std::env::var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS").ok();
+        std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS");
+        std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS");
+        assert_eq!(
+            local_scheduler_ask_max_output_tokens(),
+            DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS
+        );
+
+        std::env::set_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS", "80");
+        assert_eq!(local_scheduler_ask_max_output_tokens(), 80);
+        std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "72");
+        assert_eq!(local_scheduler_ask_max_output_tokens(), 72);
+
+        match previous_generic {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS"),
+        }
+        match previous_local {
+            Some(v) => std::env::set_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS", v),
+            None => std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS"),
+        }
+    }
+
+    #[test]
+    fn local_scheduler_native_kb_can_be_enabled_by_provider_settings() {
+        let hardware = attune_core::platform::HardwareProfile::default();
+        let settings = serde_json::json!({
+            "embedding": { "provider": "local_scheduler" }
+        });
+        assert!(crate::local_scheduler::native_kb_enabled(
+            &settings, &hardware
+        ));
+
+        let settings = serde_json::json!({
+            "llm": { "provider": "edge_scheduler" }
+        });
+        assert!(crate::local_scheduler::native_kb_enabled(
+            &settings, &hardware
+        ));
+    }
+
+    #[test]
+    fn local_scheduler_context_builder_uses_injected_content_and_source_metadata() {
+        let knowledge = vec![serde_json::json!({
+            "item_id": "item-1",
+            "title": "合同",
+            "content": "full text",
+            "inject_content": "bounded evidence",
+            "score": 0.91,
+            "breadcrumb": ["第一章"],
+            "chunk_offset_start": 10,
+            "chunk_offset_end": 20
+        })];
+        let contexts = build_local_scheduler_kb_contexts(&knowledge);
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0]["text"], "bounded evidence");
+        assert_eq!(contexts[0]["source_id"], "item-1");
+        assert_eq!(contexts[0]["title"], "合同");
+        assert_eq!(contexts[0]["breadcrumb"][0], "第一章");
+    }
+
+    #[test]
+    fn local_scheduler_context_builder_bounds_large_context_text() {
+        let long_text = format!("{}MID{}", "a".repeat(3000), "z".repeat(3000));
+        let bounded = bounded_context_text(&long_text, 1200);
+        assert!(bounded.chars().count() <= 1200);
+        assert!(bounded.contains("\n...\n"));
+        assert!(bounded.starts_with('a'));
+        assert!(bounded.ends_with('z'));
+    }
+
+    #[test]
+    fn local_scheduler_output_text_accepts_direct_and_openai_chat_shapes() {
+        assert_eq!(
+            local_scheduler_output_text(&serde_json::json!({"answer": "直接答案"})).as_deref(),
+            Some("直接答案")
+        );
+        assert_eq!(
+            local_scheduler_output_text(&serde_json::json!({
+                "choices": [{"message": {"content": "chat answer"}}]
+            }))
+            .as_deref(),
+            Some("chat answer")
+        );
+    }
+
+    #[test]
+    fn local_scheduler_extractive_answer_refuses_operational_steps() {
+        let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
+        std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+
+        let knowledge = vec![serde_json::json!({
+            "item_id": "qrh-320",
+            "title": "QRH320 Quick Reference",
+            "inject_content": "A320 emergency abnormal checklist reference material"
+        })];
+        let answer = build_local_scheduler_extractive_answer(
+            "Give me exact real flight emergency steps from the QRH for an engine fire now",
+            &knowledge,
+        )
+        .expect("safety query should return a refusal template");
+
+        let lower = answer.to_ascii_lowercase();
+        assert!(lower.contains("cannot provide"));
+        assert!(lower.contains("do not use"));
+        assert!(answer.contains("QRH320"));
+
+        match previous {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER"),
+        }
+    }
+
+    #[test]
+    fn local_scheduler_extractive_answer_lists_sources_for_lookup() {
+        let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
+        std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+
+        let knowledge = vec![serde_json::json!({
+            "item_id": "a320-powerplant",
+            "title": "A320 Powerplant",
+            "inject_content": "A320 powerplant system description source for engine indications."
+        })];
+        let answer = build_local_scheduler_extractive_answer(
+            "A320 powerplant system source, avoid A330",
+            &knowledge,
+        )
+        .expect("source lookup should return grounded local KB lines");
+
+        assert!(answer.contains("A320 Powerplant"));
+        assert!(answer.contains("A320 powerplant"));
+
+        match previous {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER"),
+        }
+    }
+
+    #[test]
+    fn local_scheduler_extractive_answer_skips_open_ended_queries() {
+        let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
+        std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+
+        let knowledge = vec![serde_json::json!({
+            "item_id": "memo-source",
+            "title": "Memo Source",
+            "inject_content": "Relevant background for a generated memo."
+        })];
+        assert!(build_local_scheduler_extractive_answer(
+            "write a long persuasive memo from these notes",
+            &knowledge,
+        )
+        .is_none());
+
+        match previous {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER"),
+        }
     }
 }

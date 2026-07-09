@@ -1,6 +1,6 @@
 //! G1 — MCP 6 工具定义 + 派发到既有 REST 业务。
 //!
-//! 工具名 + 参数 **兼容 attune-mcp-bridge 契约**(K3 侧零迁移)。每个工具 **包装既有 REST
+//! 工具名 + 参数 **兼容 attune-mcp-bridge 契约**(local-scheduler side 零迁移)。每个工具 **包装既有 REST
 //! handler**(经 axum handler 函数直接调用,不重写业务逻辑)—— handler 是普通 `async fn`,
 //! 接受 extractor 包装的参数,这里构造同样的 extractor 调用,取出内层 JSON。
 //!

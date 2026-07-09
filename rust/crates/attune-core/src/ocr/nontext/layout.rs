@@ -9,13 +9,13 @@
 //! We run the post-processing here (DFL decode into boxes, then score-threshold and NMS),
 //! verified against the python onnxruntime reference on real document scans before this port.
 //!
-//! R4 (riscv64 / K3 feasibility) — re-measured 2026-06-11 with the real ort layout path:
+//! R4 (riscv64 / local-scheduler feasibility) — re-measured 2026-06-11 with the real ort layout path:
 //! `cargo build -p attune-core --features nontext --target riscv64gc-unknown-linux-gnu`
 //! FAILS, but NOT on ort/onnxruntime — it dies earlier in pre-existing C++ build-deps
 //! (`cxx`, `clipper-sys`) because the riscv64 g++ has no C++ stdlib sysroot wired. This is
 //! a workspace-wide cross-compile toolchain gap, independent of and prior to anything
-//! nontext adds. Mitigation per spec §11 R4: K3 is P2; on riscv the nontext layout pass
-//! degrades to remote K3 :8080 inference or plain OCR. The x86_64 / Windows P0 path is
+//! nontext adds. Mitigation per spec §11 R4: local-scheduler is P2; on riscv the nontext layout pass
+//! degrades to remote local-scheduler :8090 inference or plain OCR. The x86_64 / Windows P0 path is
 //! unaffected (host build + all nontext tests green).
 //!
 //! 💰 VLM Stage4 escalation (NOT wired here; gate is type-enforced in vlm_escalate.rs):

@@ -1,64 +1,89 @@
-//! 端云协同调度 Model 1 —— 容量信号协同（attune governor 接 k3-scheduler /capacity）。
+//! 端云协同调度 Model 1 —— 容量信号协同（attune governor 接 local-scheduler /capacity）。
 //!
 //! Spec: `docs/superpowers/specs/2026-06-22-edge-cloud-model1.md`。
-//! 设计源（attune-k3）: `docs/edge-cloud-scheduler-collaboration.md` Model 1（推荐）。
+//! 设计源：`docs/edge-cloud-scheduler-collaboration.md` Model 1（推荐）。
 //!
-//! **职责分离**：attune = 策略层（隐私/账户/脱敏），k3-scheduler = 机制层（资源决策）。
+//! **职责分离**：attune = 策略层（隐私/账户/脱敏），local-scheduler = 机制层（资源决策）。
 //! 隐私门（redaction + L0 永不出网）永远留 attune —— 本模块只决定「在哪跑」，云分支真出网
 //! 时调用方**必须**经 `OutboundGate::enforce`（脱敏 + L0 二次拦截，defense-in-depth）。
 //!
-//! **仅 K3 形态激活**：`FormFactor::K3Appliance` ∧ scheduler 可达时启用协同路由。
-//! **个人版（Laptop/Server）行为 0 改动** —— `route()` 在非 K3 短路成静态 cloud-preferred
+//! **显式启用本地调度器时激活**：scheduler 可达时启用协同路由。
+//! **个人版（Laptop/Server）行为 0 改动** —— `route()` 在未启用 scheduler 时短路成静态 cloud-preferred
 //! （不查 /capacity，probe 调用计数恒 0，guard 测试守此不变量）。
 
 pub mod capability;
 pub mod capacity;
+pub mod kb_task;
 pub mod router;
+pub mod runtime_profile;
+pub mod scheduler;
 
 pub use capability::{Capability, CapabilityEntry, CapabilityMap, Preference};
 pub use capacity::{
     CapacityProbe, CapacitySignal, CapacityState, HttpCapacityClient, MockCapacityProbe,
 };
+pub use kb_task::{
+    SchedulerKbTaskAdapter, SchedulerKbTaskAdmission, SchedulerKbTaskLocalOutcome,
+    SchedulerKbTaskSubmitOutcome, SchedulerKbTaskSubmitRequest,
+};
 pub use router::{
     decide_route, AccountContext, AccountTier, PrivacyClass, RejectReason, RouteDecision,
+};
+pub use runtime_profile::{
+    ModelRuntimeProfile, RuntimeProfileResolver, RuntimeProfileSet, RuntimeProviderKind,
+    RuntimeTaskProfile,
+};
+pub use scheduler::{
+    LocalSchedulerClient, SchedulerAsyncJobs, SchedulerBenchmarkContract,
+    SchedulerCapacitySnapshot, SchedulerClusterCapacity, SchedulerContractModel,
+    SchedulerJobStatus, SchedulerKbTaskResponse, SchedulerMemorySnapshot, SchedulerModelStatus,
+    SchedulerModels, SchedulerRuntimeTaskSpec, SchedulerServiceClassSpec,
 };
 
 use crate::platform::FormFactor;
 
-/// 端云路由编排器：lookup 能力图 → (K3 时)查 /capacity → decide_route。
+/// 端云路由编排器：lookup 能力图 → 本地 scheduler 可用时查 /capacity → decide_route。
 ///
-/// 非 K3 形态：**不查 /capacity**，决策恒为静态 cloud-preferred（= 现状），probe 不被调用。
+/// 默认构造不启用 scheduler probe；显式 `with_local_scheduler` 后才读取本地容量信号。
 pub struct EdgeCloudRouter {
     map: CapabilityMap,
     probe: Box<dyn CapacityProbe>,
-    form_factor: FormFactor,
+    collaboration_enabled: bool,
 }
 
 impl EdgeCloudRouter {
-    /// 构造。`form_factor` 决定是否激活协同（仅 K3）。
-    pub fn new(form_factor: FormFactor, probe: Box<dyn CapacityProbe>) -> Self {
+    /// 构造默认 router。默认不 probe scheduler，用于普通 cloud/local 静态路径。
+    pub fn new(_form_factor: FormFactor, probe: Box<dyn CapacityProbe>) -> Self {
         EdgeCloudRouter {
             map: CapabilityMap::builtin(),
             probe,
-            form_factor,
+            collaboration_enabled: false,
         }
     }
 
-    /// 便捷：K3 形态 + 默认 HTTP 客户端（:8090）。
-    pub fn for_k3() -> Self {
-        Self::new(FormFactor::K3Appliance, Box::new(HttpCapacityClient::new()))
+    /// 构造启用本地 scheduler 的 router。
+    pub fn with_local_scheduler(probe: Box<dyn CapacityProbe>) -> Self {
+        EdgeCloudRouter {
+            map: CapabilityMap::builtin(),
+            probe,
+            collaboration_enabled: true,
+        }
     }
 
-    /// 是否启用协同路由（仅 K3 形态）。
+    /// 便捷：本地 scheduler + 默认 HTTP 客户端（:8090）。
+    pub fn for_local_scheduler() -> Self {
+        Self::with_local_scheduler(Box::new(HttpCapacityClient::new()))
+    }
+
+    /// 是否启用协同路由。
     pub fn collaboration_active(&self) -> bool {
-        matches!(self.form_factor, FormFactor::K3Appliance)
+        self.collaboration_enabled
     }
 
     /// 路由一次推理任务。
     ///
-    /// - **非 K3**：不查 /capacity（probe 不调用）→ 决策按静态 cloud-preferred（现状 freeze）。
-    ///   L0 红线仍守（即使个人版，L0 永不出网由 decide_route 保证）。
-    /// - **K3**：查 /capacity → 真 load-aware 决策。
+    /// - scheduler 未启用：不查 /capacity（probe 不调用）→ 决策按静态偏好。
+    /// - scheduler 已启用：查 /capacity → load-aware 决策。
     pub fn route(
         &self,
         cap: Capability,
@@ -68,7 +93,7 @@ impl EdgeCloudRouter {
     ) -> RouteDecision {
         let entry = self.map.lookup(cap);
         let signal = if self.collaboration_active() {
-            // K3：查容量信号（失败 → Unknown 降级，由 probe 契约保证不崩）。
+            // 本地 scheduler：查容量信号（失败 → Unknown 降级，由 probe 契约保证不崩）。
             self.probe.query(model)
         } else {
             // 个人版：不查 scheduler（无本地 scheduler）→ Unknown，decide_route 退静态偏好。
@@ -139,40 +164,42 @@ mod tests {
         assert_eq!(d, RouteDecision::Cloud);
     }
 
-    // ── K3 形态：真 load-aware ────────────────────────────────────────────
+    // ── 本地 scheduler：真 load-aware ─────────────────────────────────────
 
     #[test]
-    fn k3_probes_and_routes_local_when_fast() {
+    fn local_scheduler_probes_and_routes_local_when_fast() {
         let spy = std::sync::Arc::new(MockCapacityProbe::with_state(CapacityState::ReadyFast));
-        let router = EdgeCloudRouter::new(FormFactor::K3Appliance, Box::new(ArcProbe(spy.clone())));
+        let router = EdgeCloudRouter::with_local_scheduler(Box::new(ArcProbe(spy.clone())));
         let d = router.route(Capability::ChatLlm7b, "qwen2.5-7b", l1(), &paid(1000));
-        assert_eq!(spy.call_count(), 1, "K3 must probe scheduler exactly once");
+        assert_eq!(
+            spy.call_count(),
+            1,
+            "local scheduler path must probe exactly once"
+        );
         assert_eq!(d, RouteDecision::Local);
         assert!(router.collaboration_active());
     }
 
     #[test]
-    fn k3_busy_spills_to_cloud() {
-        let router = EdgeCloudRouter::new(
-            FormFactor::K3Appliance,
-            Box::new(MockCapacityProbe::with_state(CapacityState::Queued)),
-        );
+    fn local_scheduler_busy_spills_to_cloud() {
+        let router = EdgeCloudRouter::with_local_scheduler(Box::new(
+            MockCapacityProbe::with_state(CapacityState::Queued),
+        ));
         let d = router.route(Capability::ChatLlm7b, "qwen2.5-7b", l1(), &paid(1000));
         assert_eq!(
             d,
             RouteDecision::Cloud,
-            "K3 busy + cloud-admissible → spill to cloud"
+            "local scheduler busy + cloud-admissible → spill to cloud"
         );
     }
 
     // ── L0 红线（与形态无关）──────────────────────────────────────────────
 
     #[test]
-    fn l0_never_cloud_even_on_k3_busy() {
-        let router = EdgeCloudRouter::new(
-            FormFactor::K3Appliance,
-            Box::new(MockCapacityProbe::with_state(CapacityState::Queued)),
-        );
+    fn l0_never_cloud_even_when_local_scheduler_busy() {
+        let router = EdgeCloudRouter::with_local_scheduler(Box::new(
+            MockCapacityProbe::with_state(CapacityState::Queued),
+        ));
         let d = router.route(Capability::ChatLlm7b, "qwen2.5-7b", l0(), &paid(1_000_000));
         assert_eq!(d, RouteDecision::QueueLocal);
         assert!(!d.requires_egress());

@@ -180,6 +180,41 @@ async fn upload_dropped_paths(paths: Vec<String>) -> Result<Vec<String>, String>
     Ok(results)
 }
 
+#[derive(serde::Serialize)]
+struct LocalFilePayload {
+    file_name: String,
+    bytes: Vec<u8>,
+}
+
+/// Tauri command: read a user-selected local file into the web UI.
+///
+/// The UI only calls this after the native file picker returns a path. Keep the
+/// payload bounded so a mistaken selection cannot pin the webview with a huge
+/// byte array.
+#[tauri::command]
+fn read_local_file(path: String) -> Result<LocalFilePayload, String> {
+    const MAX_PICKER_READ_BYTES: u64 = 512 * 1024 * 1024;
+
+    let path = std::path::PathBuf::from(path);
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("selected path is not a file".into());
+    }
+    if meta.len() > MAX_PICKER_READ_BYTES {
+        return Err(format!(
+            "selected file is too large for picker read: {} bytes",
+            meta.len()
+        ));
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "selected-file".to_string());
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(LocalFilePayload { file_name, bytes })
+}
+
 fn app_log_dir() -> std::path::PathBuf {
     desktop::log_dir()
 }
@@ -306,6 +341,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             upload_dropped_paths,
+            read_local_file,
             check_for_update_now,
             restart_for_update,
             desktop_app_info,

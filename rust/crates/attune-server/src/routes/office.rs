@@ -5,14 +5,16 @@
 //! 错误码契约：{error: msg, code: kebab} (per CLAUDE.md error contract).
 
 use crate::state::SharedState;
-use attune_core::ocr::{self, RawLine};
+use attune_core::ocr::{BBox, RawLine};
 use attune_core::office_job_queue::{JobKind, JobRecord, JobState};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Json;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 // ─── OCR (sync) ─────────────────────────────────────────────────────────────
 
@@ -32,6 +34,8 @@ pub struct OcrResponse {
 }
 
 const OCR_SOFT_WARN_BYTES: usize = 50 * 1024 * 1024; // 50 MB
+const OCR_SCHEDULER_TASK: &str = "kb.document.ocr_recognize";
+const OCR_SCHEDULER_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn err(code: &str, msg: &str, status: StatusCode) -> (StatusCode, Json<serde_json::Value>) {
     (
@@ -42,7 +46,7 @@ fn err(code: &str, msg: &str, status: StatusCode) -> (StatusCode, Json<serde_jso
 
 /// POST /api/v1/office/ocr — sync, multipart/form-data
 pub async fn post_ocr(
-    State(_state): State<SharedState>,
+    State(state): State<SharedState>,
     mut multipart: Multipart,
 ) -> Result<Json<OcrResponse>, (StatusCode, Json<serde_json::Value>)> {
     let mut file_bytes: Option<Vec<u8>> = None;
@@ -146,53 +150,30 @@ pub async fn post_ocr(
 
     let start = std::time::Instant::now();
 
-    // write to tmp file (PP-OCR provider 接受 path)
-    let tmp = tempfile::NamedTempFile::new().map_err(|e| {
-        err(
-            "internal-error",
-            &format!("tempfile: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-    std::fs::write(tmp.path(), &bytes).map_err(|e| {
-        err(
-            "internal-error",
-            &format!("write tmp: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-
-    let provider = ocr::detect_default_provider().ok_or_else(|| {
+    let outputs = crate::scheduler_tasks::submit_kb_task_final(
+        &state,
+        OCR_SCHEDULER_TASK,
+        serde_json::json!({
+            "filename": filename.clone(),
+            "profile": profile.clone(),
+            "id_card_subtype": id_card_subtype.clone(),
+            "file_base64": BASE64_STANDARD.encode(&bytes),
+            "timeout_ms": OCR_SCHEDULER_TIMEOUT.as_millis() as u64,
+            "ttl_ms": OCR_SCHEDULER_TIMEOUT.as_millis() as u64,
+        }),
+        true,
+        OCR_SCHEDULER_TIMEOUT,
+    )
+    .await
+    .map_err(|e| {
         err(
             "ocr-engine-failed",
-            "OCR provider not available (PP-OCR models missing). Run `--bootstrap-models`.",
-            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("local scheduler OCR task failed: {e}"),
+            StatusCode::SERVICE_UNAVAILABLE,
         )
     })?;
 
-    let is_pdf = filename
-        .as_deref()
-        .map(|n| n.to_lowercase().ends_with(".pdf"))
-        .unwrap_or(false);
-
-    let ocr_profile = ocr::profile_for_id(Some(&profile));
-
-    // A 档：抽出 lines + bbox
-    // D1: PDF lines 输出留空（pdftoppm 切页 + 逐页 OCR + 合并 lines 在 D2 补完）
-    let lines: Vec<RawLine> = if is_pdf {
-        vec![]
-    } else {
-        let out = provider
-            .extract_structured(tmp.path(), &ocr_profile)
-            .map_err(|e| {
-                err(
-                    "ocr-engine-failed",
-                    &format!("OCR: {e}"),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                )
-            })?;
-        out.lines.unwrap_or_default()
-    };
+    let lines = raw_lines_from_scheduler_outputs(&outputs);
 
     // B 档结构化抽取 (D2 起 wired). A 档场景 (screenshot/contract/ancient/form) 返 None.
     let structured = if !lines.is_empty() {
@@ -206,11 +187,95 @@ pub async fn post_ocr(
         envelope_version: "1",
         profile: profile.clone(),
         elapsed_ms: start.elapsed().as_millis() as u64,
-        engine: provider.name().to_string(),
+        engine: format!("scheduler:{OCR_SCHEDULER_TASK}"),
         lines,
         structured,
         warnings,
     }))
+}
+
+fn raw_lines_from_scheduler_outputs(outputs: &serde_json::Value) -> Vec<RawLine> {
+    for pointer in [
+        "/lines",
+        "/outputs/lines",
+        "/result/lines",
+        "/data/lines",
+        "/results",
+    ] {
+        if let Some(lines) = outputs.pointer(pointer).and_then(|v| v.as_array()) {
+            let parsed: Vec<_> = lines.iter().filter_map(raw_line_from_value).collect();
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+    crate::scheduler_tasks::output_text(outputs)
+        .map(|text| vec![raw_line_from_text(text)])
+        .unwrap_or_default()
+}
+
+fn raw_line_from_value(value: &serde_json::Value) -> Option<RawLine> {
+    if let Ok(line) = serde_json::from_value::<RawLine>(value.clone()) {
+        return Some(line);
+    }
+    if let Some(text) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(raw_line_from_text(text.to_string()));
+    }
+    let text = value
+        .get("text")
+        .or_else(|| value.get("content"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let bbox = value
+        .get("bbox")
+        .and_then(parse_bbox)
+        .unwrap_or(BBox {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        });
+    let confidence = value
+        .get("confidence")
+        .or_else(|| value.get("score"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0) as f32;
+    Some(RawLine {
+        text: text.to_string(),
+        bbox,
+        confidence,
+    })
+}
+
+fn parse_bbox(value: &serde_json::Value) -> Option<BBox> {
+    if let Ok(bbox) = serde_json::from_value::<BBox>(value.clone()) {
+        return Some(bbox);
+    }
+    let arr = value.as_array()?;
+    if arr.len() == 4 && arr.iter().all(|v| v.as_u64().is_some()) {
+        return Some(BBox {
+            x: arr[0].as_u64()? as u32,
+            y: arr[1].as_u64()? as u32,
+            w: arr[2].as_u64()? as u32,
+            h: arr[3].as_u64()? as u32,
+        });
+    }
+    None
+}
+
+fn raw_line_from_text(text: String) -> RawLine {
+    RawLine {
+        text,
+        bbox: BBox {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        },
+        confidence: 1.0,
+    }
 }
 
 // ─── ASR (async) ─────────────────────────────────────────────────────────────
@@ -242,7 +307,7 @@ pub struct TranscribeResponse {
 }
 
 /// ASR jobs that have not finished within this ceiling are failed by the worker's
-/// timeout sweep (`job-timeout`). Generous: K3 long recordings via whisper subprocess.
+/// timeout sweep (`job-timeout`). Generous: local-scheduler long recordings.
 const ASR_JOB_DEADLINE_MS: i64 = 60 * 60 * 1000; // 1h
 
 /// G5: map a durable [`JobRecord`] to the office job-status JSON contract
@@ -321,7 +386,10 @@ pub async fn post_transcribe(
     // language/model are accepted for forward-compat but the backend self-detects.
     let payload = serde_json::json!({
         "file_path": req.file_path,
+        "language": req.language,
+        "model": req.model,
         "diarization": req.diarization,
+        "scheduler_base": crate::local_scheduler::base_from_state(&state),
     })
     .to_string();
     let deadline = chrono::Utc::now().timestamp_millis() + ASR_JOB_DEADLINE_MS;

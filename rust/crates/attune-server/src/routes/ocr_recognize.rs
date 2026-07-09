@@ -5,12 +5,13 @@
 //! layout/recognizer models are missing the pass degrades to empty regions (never 500).
 
 use crate::state::SharedState;
-use attune_core::ocr::nontext::{recognize_page, EngineStatus, OcrCorrectionReport, Region};
-use attune_core::ocr::{self, RawLine};
+use attune_core::ocr::nontext::{EngineStatus, OcrCorrectionReport, Region};
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// Request body for /api/v1/ocr/recognize (multipart file OR { item_id }).
 #[derive(Debug, Deserialize, Default)]
@@ -72,13 +73,15 @@ fn err(code: &str, msg: &str, status: StatusCode) -> (StatusCode, Json<serde_jso
 }
 
 type RouteResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
+const OCR_RECOGNIZE_SCHEDULER_TASK: &str = "kb.document.ocr_recognize";
+const OCR_RECOGNIZE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// POST /api/v1/ocr/recognize — sync, multipart/form-data (file + optional profile/kinds/vlm).
 /// Runs Stage1 layout → Stage2 local recognizers → Stage3 cross-validate. VLM escalation
 /// (Stage4) is gated by the profile's vlm_escalation; build-stage default Off never escalates.
 /// Models missing → regions degrade to empty (200, never 500).
 pub async fn post_recognize(
-    State(_state): State<SharedState>,
+    State(state): State<SharedState>,
     mut multipart: Multipart,
 ) -> RouteResult<Json<OcrRecognizeResponse>> {
     let mut file_bytes: Option<Vec<u8>> = None;
@@ -119,65 +122,122 @@ pub async fn post_recognize(
     // policy is no longer discarded — it is threaded into run_recognize and echoed honestly.
     let policy = parse_escalation(vlm_escalation.as_deref());
 
-    // Write to a tmp file (PP-OCR + layout models accept a path).
-    let tmp = tempfile::NamedTempFile::new().map_err(|e| {
-        err(
-            "internal-error",
-            &format!("tempfile: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-    std::fs::write(tmp.path(), &bytes).map_err(|e| {
-        err(
-            "internal-error",
-            &format!("write tmp: {e}"),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
-
-    let ocr_profile = ocr::profile_for_id(profile_id.as_deref());
-
-    // Second opinion: PP-OCR lines for cross-validation (best-effort; missing engine → none).
-    let ocr_lines: Vec<RawLine> = match ocr::detect_default_provider() {
-        Some(provider) => provider
-            .extract_structured(tmp.path(), &ocr_profile)
-            .ok()
-            .and_then(|o| o.lines)
-            .unwrap_or_default(),
-        None => Vec::new(),
+    let outputs = match crate::scheduler_tasks::submit_kb_task_final(
+        &state,
+        OCR_RECOGNIZE_SCHEDULER_TASK,
+        serde_json::json!({
+            "profile_id": profile_id,
+            "vlm_escalation": vlm_escalation,
+            "file_base64": BASE64_STANDARD.encode(&bytes),
+            "timeout_ms": OCR_RECOGNIZE_TIMEOUT.as_millis() as u64,
+            "ttl_ms": OCR_RECOGNIZE_TIMEOUT.as_millis() as u64,
+        }),
+        true,
+        OCR_RECOGNIZE_TIMEOUT,
+    )
+    .await
+    {
+        Ok(outputs) => outputs,
+        Err(e) => {
+            let response =
+                empty_recognize_response(policy, vec![format!("local-scheduler-ocr-error: {e}")]);
+            return Ok(Json(response));
+        }
     };
 
-    // Shared visual-understanding capability — ONE orchestration path (ADR-0008);
-    // CLI + plugins go through the same `recognize_page`.
-    let response = run_recognize(tmp.path(), &ocr_lines, policy);
+    let response = recognize_response_from_scheduler_outputs(&outputs, policy);
     Ok(Json(response))
 }
 
-/// Run the shared recognition pass and shape it into the HTTP response. The layout/table
-/// model paths follow the PP-OCR model dir convention; when absent the pass degrades to
-/// empty regions (plain OCR) and the response HONESTLY reports `engine_status` (I3/C1). The
-/// applied `policy` is echoed back instead of being discarded. Cost is surfaced (spec §8).
-fn run_recognize(
-    image_path: &std::path::Path,
-    ocr_lines: &[RawLine],
+fn recognize_response_from_scheduler_outputs(
+    outputs: &serde_json::Value,
     policy: attune_core::ocr::profile::VlmEscalationPolicy,
 ) -> OcrRecognizeResponse {
-    let models_dir = ocr::ppocr::PpOcrProvider::models_dir();
-    let layout_model = models_dir.join("layout").join("layout.onnx");
-    let table_model = models_dir.join("table").join("slanet.onnx");
-    let out = recognize_page(image_path, &layout_model, &table_model, ocr_lines);
+    let regions = parse_regions(outputs);
+    let correction_report = parse_correction_report(outputs).unwrap_or_else(empty_report);
+    let local_regions = outputs
+        .get("local_regions")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(regions.len() as u64) as u32;
+    let escalated_regions = outputs
+        .get("escalated_regions")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let engine_status = outputs
+        .get("engine_status")
+        .or_else(|| outputs.get("engine-status"))
+        .cloned()
+        .and_then(|v| serde_json::from_value::<EngineStatus>(v).ok())
+        .unwrap_or(if regions.is_empty() {
+            EngineStatus::ScaffoldNoLayoutModel
+        } else {
+            EngineStatus::Functional
+        });
+    let validation_warnings = outputs
+        .get("validation_warnings")
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+        .unwrap_or_default();
     OcrRecognizeResponse {
-        regions: out.regions,
-        correction_report: out.correction_report,
+        regions,
+        correction_report,
         cost: RecognizeCost {
-            local_regions: out.local_regions,
-            escalated_regions: out.escalated_regions,
+            local_regions,
+            escalated_regions,
         },
-        engine_status: out.engine_status,
+        engine_status,
         vlm_escalation: policy,
-        validation_warnings: out.validation_warnings,
-        // No router telemetry on this sync Stage1-3 route → empty hint (honest no-data, §5.1).
+        validation_warnings,
         vlm_hint: Default::default(),
+    }
+}
+
+fn parse_regions(outputs: &serde_json::Value) -> Vec<Region> {
+    for pointer in ["/regions", "/outputs/regions", "/result/regions", "/data/regions"] {
+        if let Some(value) = outputs.pointer(pointer) {
+            if let Ok(regions) = serde_json::from_value::<Vec<Region>>(value.clone()) {
+                return regions;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn parse_correction_report(outputs: &serde_json::Value) -> Option<OcrCorrectionReport> {
+    for pointer in [
+        "/correction_report",
+        "/outputs/correction_report",
+        "/result/correction_report",
+        "/data/correction_report",
+    ] {
+        if let Some(value) = outputs.pointer(pointer) {
+            if let Ok(report) = serde_json::from_value::<OcrCorrectionReport>(value.clone()) {
+                return Some(report);
+            }
+        }
+    }
+    None
+}
+
+fn empty_recognize_response(
+    policy: attune_core::ocr::profile::VlmEscalationPolicy,
+    validation_warnings: Vec<String>,
+) -> OcrRecognizeResponse {
+    OcrRecognizeResponse {
+        regions: vec![],
+        correction_report: empty_report(),
+        cost: RecognizeCost::default(),
+        engine_status: EngineStatus::ScaffoldNoLayoutModel,
+        vlm_escalation: policy,
+        validation_warnings,
+        vlm_hint: Default::default(),
+    }
+}
+
+fn empty_report() -> OcrCorrectionReport {
+    OcrCorrectionReport {
+        schema_version: 1,
+        entries: vec![],
+        summary: Default::default(),
     }
 }
 
@@ -256,15 +316,18 @@ mod tests {
 
     #[test]
     fn no_models_degrades_to_empty_regions() {
-        // run_recognize with no layout model present → empty (never panics, never 500).
+        // Scheduler unavailable / no OCR output → empty (never panics, never 500 on this route).
         // I3/C1: response honestly reports the scaffold status + echoes the applied policy.
         use attune_core::ocr::profile::VlmEscalationPolicy;
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let resp = run_recognize(tmp.path(), &[], VlmEscalationPolicy::OnDiscrepancy);
+        let resp = empty_recognize_response(
+            VlmEscalationPolicy::OnDiscrepancy,
+            vec!["scheduler unavailable".to_string()],
+        );
         assert!(resp.regions.is_empty());
         assert_eq!(resp.cost.local_regions, 0);
         assert_eq!(resp.correction_report.summary.total, 0);
         assert_eq!(resp.engine_status, EngineStatus::ScaffoldNoLayoutModel);
         assert_eq!(resp.vlm_escalation, VlmEscalationPolicy::OnDiscrepancy);
+        assert_eq!(resp.validation_warnings.len(), 1);
     }
 }

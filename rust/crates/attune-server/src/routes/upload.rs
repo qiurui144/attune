@@ -121,6 +121,9 @@ pub async fn upload_file(
         })));
     }
 
+    let ingest_options =
+        crate::local_scheduler::ingest_options_from_state(&state, q.profile.as_deref());
+
     // Now lock vault for DB operations (no more await points after this)
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault
@@ -143,11 +146,11 @@ pub async fn upload_file(
         metadata: std::collections::HashMap::new(),
     };
 
-    let outcome = attune_core::ingest::ingest_document_with_profile(
+    let outcome = attune_core::ingest::ingest_document_with_options(
         vault.store(),
         &dek,
         &raw,
-        q.profile.as_deref(),
+        &ingest_options,
     )
     .map_err(|e| AppError::Unprocessable(e.to_string()))?;
 
@@ -301,6 +304,10 @@ pub async fn upload_file(
     let item_id_for_wf = item_id.clone();
     let state_for_wf = state.clone();
     tokio::spawn(async move {
+        // Use a live key-aware registry: encrypted paid plugins are intentionally
+        // absent from the startup registry until the vault entitlement keys are
+        // available after unlock.
+        let registry = crate::routes::plugins::current_plugin_registry(&state_for_wf);
         let vault_guard = state_for_wf.vault.lock();
         let vault_guard = vault_guard.unwrap_or_else(|e| e.into_inner());
         if !matches!(
@@ -327,7 +334,6 @@ pub async fn upload_file(
             return; // 未归 project，不触发任何 workflow
         };
         // 从 registry 取所有匹配的 workflow（clone 出来避免 borrow 跨 await）
-        let registry = state_for_wf.plugin_registry.clone();
         let matched: Vec<(String, attune_core::workflow::Workflow)> = registry
             .workflows_by_trigger("file_added")
             .into_iter()

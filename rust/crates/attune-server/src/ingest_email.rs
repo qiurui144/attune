@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use attune_core::ingest::{
-    ingest_document, DocumentSink, EmailConfig, EmailConnector, IngestOutcome, RawDocument,
-    SourceConnector,
+    ingest_document_with_options, DocumentSink, EmailConfig, EmailConnector, IngestOutcome,
+    RawDocument, SourceConnector,
 };
 
 use crate::state::AppState;
@@ -49,6 +49,7 @@ pub fn sync_email_account(
     let mut skipped_items = 0usize;
     let mut errors: Vec<String> = Vec::new();
     let mut outcomes: Vec<(String, u32, bool)> = Vec::new();
+    let ingest_options = crate::local_scheduler::ingest_options_from_state(state, None);
 
     for mut doc in docs {
         total += 1;
@@ -77,7 +78,7 @@ pub fn sync_email_account(
                         skipped_items += 1;
                         handled = true;
                     } else {
-                        match ingest_document(store, &dek, &doc) {
+                        match ingest_document_with_options(store, &dek, &doc, &ingest_options) {
                             Ok(IngestOutcome::Inserted { item_id, .. }) => {
                                 let _ = store.upsert_indexed_file(
                                     dir_id,

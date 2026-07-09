@@ -204,6 +204,7 @@ impl ChatEngine {
                                 title: r.title,
                                 content: r.snippet.clone(),
                                 source_type: "web".into(),
+                                source_path: Some(r.url),
                                 inject_content: Some(r.snippet),
                                 breadcrumb: Vec::new(), // F2: web 无源 item 路径
                                 chunk_offset_start: None,

@@ -11,6 +11,8 @@ use axum::Json;
 use serde_json::json;
 
 use crate::state::SharedState;
+use attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE;
+use attune_core::edge_cloud::scheduler::LocalSchedulerClient;
 
 fn note(available: bool, msg: &str) -> Option<String> {
     if available {
@@ -20,8 +22,52 @@ fn note(available: bool, msg: &str) -> Option<String> {
     }
 }
 
+#[derive(Debug, Default)]
+struct SchedulerRuntimeProbe {
+    status: String,
+    tasks: Vec<String>,
+    models: Vec<String>,
+    error: Option<String>,
+}
+
+async fn probe_scheduler_runtime() -> SchedulerRuntimeProbe {
+    tokio::task::spawn_blocking(|| {
+        let client = LocalSchedulerClient::new();
+        let contract = client.benchmark_contract();
+        let models = client.models().ok();
+        match contract {
+            Ok(contract) => SchedulerRuntimeProbe {
+                status: "ready".to_string(),
+                tasks: contract
+                    .runtime_tasks
+                    .into_iter()
+                    .map(|task| task.name)
+                    .collect(),
+                models: models
+                    .map(|snapshot| snapshot.models.into_iter().map(|m| m.name).collect())
+                    .unwrap_or_default(),
+                error: None,
+            },
+            Err(e) => SchedulerRuntimeProbe {
+                status: "missing".to_string(),
+                tasks: Vec::new(),
+                models: Vec::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    })
+    .await
+    .unwrap_or_else(|e| SchedulerRuntimeProbe {
+        status: "missing".to_string(),
+        tasks: Vec::new(),
+        models: Vec::new(),
+        error: Some(format!("scheduler runtime probe task join failed: {e}")),
+    })
+}
+
 /// GET /api/v1/ai_stack — 返各底座状态 + 硬件 tier + 模型推荐 + region
 pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let scheduler = probe_scheduler_runtime().await;
     let embedding_loaded = state
         .embedding
         .lock()
@@ -46,28 +92,19 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         .map(|g| g.is_some())
         .unwrap_or(false);
 
-    let ocr_provider = attune_core::ocr::detect_default_provider();
-    let ocr_available = ocr_provider.is_some();
-    let ocr_engine: String = ocr_provider
-        .as_ref()
-        .map(|p| p.name().to_string())
-        .unwrap_or_else(|| "none".into());
-
-    // ASR engine is catalog-driven (sensevoice on AMD/Intel-Win + model-present; whisper
-    // CPU fallback). `engine` is no longer hardcoded "whisper.cpp" — it reflects the
-    // actually-selected backend so Settings UI shows the real engine.
-    let asr_engine_sel = attune_core::asr::detect_asr_engine();
-    let asr_available = asr_engine_sel.is_some();
-    let asr_engine: String = asr_engine_sel
-        .as_ref()
-        .map(|e| e.label().to_string())
-        .unwrap_or_else(|| "none".to_string());
-    let asr_model: Option<String> = asr_engine_sel.as_ref().and_then(|e| e.model_label());
-    // F-16 hardware utilization: GPU-build flag only meaningful for whisper.cpp;
-    // SenseVoice is in-process ONNX (CPU int8 ~7x realtime) → no GPU-build concept.
-    let asr_gpu_capable: Option<bool> = match asr_engine_sel.as_ref() {
-        Some(attune_core::asr::AsrEngine::Whisper(b)) => Some(b.gpu_capable),
-        _ => None,
+    let has_scheduler_task = |task: &str| scheduler.tasks.iter().any(|t| t == task);
+    let ocr_available = has_scheduler_task("kb.document.ocr_detect")
+        && has_scheduler_task("kb.document.ocr_recognize");
+    let ocr_engine = if ocr_available {
+        "scheduler:kb.document.ocr_*"
+    } else {
+        "scheduler"
+    };
+    let asr_available = has_scheduler_task("kb.meeting.asr_frontend");
+    let asr_engine = if asr_available {
+        "scheduler:kb.meeting.asr_frontend"
+    } else {
+        "scheduler"
     };
 
     // v0.6.0-rc.4: 硬件 tier + 模型推荐 + region
@@ -131,6 +168,14 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
             "detected": region.label(),
             "hf_endpoint": region.hf_endpoint(),
         },
+        "scheduler": {
+            "managed": true,
+            "endpoint": DEFAULT_SCHEDULER_BASE,
+            "status": scheduler.status,
+            "tasks": scheduler.tasks,
+            "models": scheduler.models,
+            "error": scheduler.error,
+        },
         "recommendation": recommendation.as_ref().map(|r| json!({
             "embedding_repo": r.embedding_repo,
             "embedding_size_mb": r.embedding_size_mb,
@@ -142,35 +187,30 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         })),
         "embedding": {
             "available": embedding_loaded,
-            "model": "bge-m3",
-            "note": note(embedding_loaded, "vault locked / Ollama 未启动")
+            "model": "scheduler:kb.query.embed",
+            "note": note(embedding_loaded, "vault locked / local scheduler unavailable")
         },
         "rerank": {
             "available": rerank_loaded,
-            "model": "bge-reranker-base (Xenova quantized)",
-            "note": note(rerank_loaded, "ONNX 模型加载失败 / HuggingFace 拉取中")
+            "model": "scheduler:kb.query.rerank",
+            "note": note(rerank_loaded, "local scheduler unavailable")
         },
         "ocr": {
             "available": ocr_available,
             "engine": ocr_engine,
-            "note": note(ocr_available, "PP-OCR 模型缺失 — 重新跑 attune deploy 或 apt install --reinstall attune")
+            "note": note(ocr_available, "local scheduler 未暴露 kb.document.ocr_detect / kb.document.ocr_recognize")
         },
         "asr": {
             "available": asr_available,
             "engine": asr_engine,
-            "model": asr_model,
-            // F-16 GPU build flag — false 时 60s 音频转写 ~60s, true 时 GPU build ~5s (10x)
-            "gpu_capable": asr_gpu_capable,
-            "note": note(asr_available, "装 whisper.cpp 或一键拉取 SenseVoice (ai-stack/ensure) 到 ~/.local/share/attune/models/asr/sensevoice/"),
-            "gpu_note": match asr_gpu_capable {
-                Some(false) => Some("⚠ whisper.cpp 是 CPU-only build, 60s 音频可能耗时 60s+. 装 GPU build (CUDA/Metal/Vulkan) 可获 10x 加速.".to_string()),
-                Some(true) => None,
-                None => None,
-            }
+            "model": serde_json::Value::Null,
+            "gpu_capable": serde_json::Value::Null,
+            "note": note(asr_available, "local scheduler 未暴露 kb.meeting.asr_frontend"),
+            "gpu_note": serde_json::Value::Null
         },
         "llm": {
             "configured": llm_configured,
-            "default": "remote token (per CLAUDE.md M2: 不在本地预装 LLM)",
+            "default": "cloud or local scheduler OpenAI-compatible endpoint",
             "note": note(llm_configured, "Settings → AI 模型 配 endpoint + api_key")
         },
         "web_search": {
@@ -184,85 +224,21 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
     }))
 }
 
-/// POST /api/v1/ai-stack/ensure — 一键拉取缺失的本地底座模型（OCR + ASR）。
+/// POST /api/v1/ai-stack/ensure — legacy compatibility.
 ///
-/// 面向非技术用户：底座模型缺失时不再要求用户去终端 / 重装包，应用内一键拉取。
-/// OCR (PP-OCRv5 ~16MB) 与 ASR (whisper ggml) 走 HuggingFace（支持 HF_ENDPOINT 镜像）。
-/// 后台执行（不阻塞请求），UI 轮询 GET /ai_stack 检测 available 翻绿。
-/// Embedding / Rerank 在 vault 解锁 + 首次检索时自动加载，不在此处单独拉取。
-pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    // 按硬件 tier 选 ASR ggml（弱机自动落到更小模型）。
-    let tier = attune_core::platform::classify_hardware(&state.hardware);
-    let asr_ggml =
-        attune_core::platform::ModelRecommendation::for_tier(tier).map(|r| r.asr_ggml.to_string());
-    // Catalog-driven ASR engine: when sensevoice is selected for this hardware, fetch the
-    // SenseVoice ONNX model + tokens instead of the whisper ggml. CPU-tier stays whisper.
-    let asr_is_sensevoice = attune_core::asr::catalog_asr_engine() == "sensevoice";
-
-    let state_for_persist = state.clone();
-    tokio::spawn(async move {
-        // OCR：~16MB，缺失才拉。失败不 panic，仅 log（§4.5 graceful）。
-        let ocr = tokio::task::spawn_blocking(
-            attune_core::ocr::ppocr::PpOcrProvider::ensure_models_downloaded,
-        )
-        .await;
-        match ocr {
-            Ok(Ok(())) => tracing::info!("ai-stack ensure: OCR models ready"),
-            Ok(Err(e)) => tracing::warn!("ai-stack ensure: OCR download failed: {e}"),
-            Err(e) => tracing::warn!("ai-stack ensure: OCR task join error: {e}"),
-        }
-        // ASR 模型：catalog 选 sensevoice → 拉 SenseVoice ONNX + tokens；否则按 tier 拉
-        // whisper ggml。缺失才拉，失败不 panic（§4.5 graceful）。
-        if asr_is_sensevoice {
-            let r =
-                tokio::task::spawn_blocking(attune_core::asr_sensevoice::ensure_sensevoice_model)
-                    .await;
-            match r {
-                Ok(Ok(b)) => tracing::info!(
-                    "ai-stack ensure: SenseVoice model ready at {}",
-                    b.model_path.display()
-                ),
-                Ok(Err(e)) => tracing::warn!("ai-stack ensure: SenseVoice download failed: {e}"),
-                Err(e) => tracing::warn!("ai-stack ensure: SenseVoice task join error: {e}"),
-            }
-        } else if let Some(ggml) = asr_ggml {
-            let r =
-                tokio::task::spawn_blocking(move || attune_core::asr::ensure_whisper_model(&ggml))
-                    .await;
-            match r {
-                Ok(Ok(path)) => {
-                    tracing::info!("ai-stack ensure: ASR model ready at {}", path.display())
-                }
-                Ok(Err(e)) => tracing::warn!("ai-stack ensure: ASR download failed: {e}"),
-                Err(e) => tracing::warn!("ai-stack ensure: ASR task join error: {e}"),
-            }
-        }
-        // S8 cache: persist the source the resolver just selected so the next cold start
-        // seeds it (makes write_selected_source/persist_used_source live, not dead code).
-        // vault guard taken alone — respects lock ordering.
-        if let Some(src_id) = attune_core::infer::model_source::current_top_source_id() {
-            let vault_guard = state_for_persist
-                .vault
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let cur = vault_guard
-                .store()
-                .get_meta("app_settings")
-                .ok()
-                .flatten()
-                .and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok())
-                .unwrap_or_else(|| serde_json::json!({}));
-            let updated = attune_core::infer::model_source::persist_used_source(cur, &src_id);
-            if let Ok(bytes) = serde_json::to_vec(&updated) {
-                if let Err(e) = vault_guard.store().set_meta("app_settings", &bytes) {
-                    tracing::warn!("ai-stack ensure: persist selected source failed: {e}");
-                }
-            }
-        }
-    });
-
+/// Local model lifecycle is scheduler-owned. Attune does not download or start
+/// OCR/ASR/embedding/rerank runtimes directly on any platform.
+pub async fn ensure(State(_state): State<SharedState>) -> Json<serde_json::Value> {
     Json(json!({
-        "status": "queued",
-        "message": "正在后台下载缺失的本地底座模型，完成后将自动可用",
+        "status": "scheduler-managed",
+        "endpoint": DEFAULT_SCHEDULER_BASE,
+        "message": "本地底座模型由 local scheduler 管理；请通过 scheduler ready/models/benchmark contract 检查状态",
+        "tasks": [
+            "kb.query.embed",
+            "kb.query.rerank",
+            "kb.document.ocr_detect",
+            "kb.document.ocr_recognize",
+            "kb.meeting.asr_frontend"
+        ],
     }))
 }

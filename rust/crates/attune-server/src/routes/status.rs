@@ -4,6 +4,8 @@ use axum::Json;
 
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
+use attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE;
+use attune_core::edge_cloud::scheduler::LocalSchedulerClient;
 
 pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
@@ -58,71 +60,37 @@ pub async fn status(State(state): State<SharedState>) -> AppResult<Json<serde_js
     })))
 }
 
-/// Probe Ollama at localhost:11434, return (status, model_names).
-async fn probe_ollama() -> (&'static str, Vec<String>) {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap_or_default();
-    match client.get("http://localhost:11434/api/tags").send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let models: Vec<String> = resp
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|v| v.get("models").cloned())
-                .and_then(|m| serde_json::from_value(m).ok())
-                .map(|arr: Vec<serde_json::Value>| {
-                    arr.iter()
-                        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            ("ready", models)
-        }
-        _ => ("missing", vec![]),
-    }
+#[derive(Debug, Default)]
+struct SchedulerProbe {
+    status: String,
+    models: Vec<String>,
+    error: Option<String>,
 }
 
-/// F-16 hardware utilization: probe Ollama `/api/ps` to detect actual GPU usage.
-///
-/// `/api/ps` returns models currently loaded in memory, with `size_vram` field
-/// indicating VRAM allocation. If any model has `size_vram > 0`, the Ollama
-/// runtime is using GPU acceleration. If all loaded models have `size_vram = 0`,
-/// Ollama is falling back to CPU (the user may have expected GPU).
-///
-/// Returns:
-/// - `None` — Ollama unreachable, or no models currently loaded (can't infer)
-/// - `Some(true)` — at least one loaded model uses GPU VRAM
-/// - `Some(false)` — Ollama is loaded but no model uses GPU (CPU fallback)
-///
-/// This complements `probe_ollama()` (which only checks HTTP reachability +
-/// installed model list) — actual GPU vs CPU is only knowable when a model
-/// is in memory, which happens after the first chat request.
-async fn probe_ollama_gpu_active() -> Option<bool> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap_or_default();
-    let resp = client
-        .get("http://localhost:11434/api/ps")
-        .send()
-        .await
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body: serde_json::Value = resp.json().await.ok()?;
-    let models = body.get("models")?.as_array()?;
-    if models.is_empty() {
-        // No model currently loaded — can't infer GPU usage. Return None.
-        return None;
-    }
-    // any model with size_vram > 0 → GPU active
-    let any_gpu = models
-        .iter()
-        .any(|m| m.get("size_vram").and_then(|v| v.as_u64()).unwrap_or(0) > 0);
-    Some(any_gpu)
+/// Probe scheduler observability only. Attune must not inspect concrete local
+/// inference runtimes directly.
+async fn probe_scheduler_models() -> SchedulerProbe {
+    tokio::task::spawn_blocking(|| {
+        let client = LocalSchedulerClient::new();
+        match client.models() {
+            Ok(snapshot) => SchedulerProbe {
+                status: "ready".to_string(),
+                models: snapshot.models.into_iter().map(|m| m.name).collect(),
+                error: None,
+            },
+            Err(e) => SchedulerProbe {
+                status: "missing".to_string(),
+                models: Vec::new(),
+                error: Some(e.to_string()),
+            },
+        }
+    })
+    .await
+    .unwrap_or_else(|e| SchedulerProbe {
+        status: "missing".to_string(),
+        models: Vec::new(),
+        error: Some(format!("scheduler probe task join failed: {e}")),
+    })
 }
 
 /// GET /api/v1/status/diagnostics — AI 后端健康检查
@@ -196,9 +164,7 @@ pub async fn diagnostics(State(state): State<SharedState>) -> Json<serde_json::V
     let hw = &state.hardware;
     const GB: u64 = 1024 * 1024 * 1024;
 
-    let (ollama_status, ollama_models) = probe_ollama().await;
-    // F-16: probe actual GPU usage (only meaningful when a model is currently loaded)
-    let ollama_gpu_active = probe_ollama_gpu_active().await;
+    let scheduler_probe = probe_scheduler_models().await;
 
     // AMD Ryzen AI NPU 细粒度状态 + consent-gated 安装计划(#6)。只读探测,零成本。
     // 非 AMD/无 NPU 主机 → null。
@@ -214,13 +180,13 @@ pub async fn diagnostics(State(state): State<SharedState>) -> Json<serde_json::V
         "vector_ready": vector_ready,
         "tag_index_items": tag_index_count,
         "pending_tasks": pending_tasks,
-        "ollama_status": ollama_status,
-        "ollama_models": ollama_models,
-        // F-16 hardware utilization: actual GPU usage probe
-        // - null: Ollama unreachable OR no model currently loaded (probe inconclusive)
-        // - true: at least one loaded model has size_vram > 0 (GPU acceleration confirmed)
-        // - false: model(s) loaded but all size_vram = 0 (CPU fallback — user may want to investigate)
-        "ollama_gpu_active": ollama_gpu_active,
+        "scheduler": {
+            "managed": true,
+            "endpoint": DEFAULT_SCHEDULER_BASE,
+            "status": scheduler_probe.status,
+            "models": scheduler_probe.models,
+            "error": scheduler_probe.error,
+        },
         "hardware": {
             "os": hw.os,
             "cpu_model": hw.cpu_model,
@@ -235,10 +201,10 @@ pub async fn diagnostics(State(state): State<SharedState>) -> Json<serde_json::V
             "has_intel_npu": hw.has_intel_npu,
             "has_accelerator": hw.has_accelerator(),
             "recommended_summary_model": hw.recommended_summary_model(),
-            // form_factor 决定 LLM 默认路径：Laptop/Server/Unknown → 远端 token；K3Appliance → 本地推理经 k3-scheduler :8090 收口（不直连 Ollama）
+            // form_factor 决定 LLM 默认路径：Laptop/Server/Unknown → 远端 token；LocalSchedulerAppliance → local-scheduler :8090 收口。
             "form_factor": match hw.form_factor {
                 attune_core::platform::FormFactor::Laptop => "laptop",
-                attune_core::platform::FormFactor::K3Appliance => "k3",
+                attune_core::platform::FormFactor::LocalSchedulerAppliance => "local_scheduler",
                 attune_core::platform::FormFactor::Server => "server",
                 attune_core::platform::FormFactor::Unknown => "unknown",
             },
@@ -247,7 +213,7 @@ pub async fn diagnostics(State(state): State<SharedState>) -> Json<serde_json::V
         // #6: AMD Ryzen AI NPU 细粒度状态 + consent-gated 安装计划(非 AMD/无 NPU → null)
         "amd_npu": amd_npu,
         "hint": if ai_status == "unavailable" {
-            "安装 Ollama 获取 AI 分类能力: curl -fsSL https://ollama.com/install.sh | sh && ollama pull <轻量本地模型>"
+            "请启动 local scheduler，并确认其 /models 与 /kb/tasks/* 可用"
         } else { "" }
     }))
 }

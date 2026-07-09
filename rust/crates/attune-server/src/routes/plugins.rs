@@ -1,12 +1,14 @@
 //! Plugin marketplace routes.
 //! W4 E1 (2026-04-27): 加 enabled 字段 + toggle 端点支持 marketplace UI。
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::routes::errors::{internal, vault_locked};
 use crate::state::SharedState;
+use attune_core::plugin_sig::TrustMode;
 use attune_core::taxonomy::Taxonomy;
 use axum::extract::{Path, State};
 use axum::Json;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 const SETTINGS_KEY: &str = "app_settings";
@@ -37,12 +39,74 @@ fn load_disabled_plugin_ids(state: &SharedState) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn current_plugin_registry(
+fn is_safe_plugin_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && !id.contains("..")
+}
+
+pub(crate) fn plugin_decrypt_keys(state: &SharedState) -> HashMap<String, Vec<u8>> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(dek) = vault.dek_db() else {
+        return HashMap::new();
+    };
+    vault
+        .store()
+        .list_entitlements(&dek)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| {
+            row.decrypt_key
+                .filter(|key| !key.is_empty())
+                .map(|key| (row.plugin_id, key.into_bytes()))
+        })
+        .collect()
+}
+
+pub(crate) fn plugin_trust_settings(state: &SharedState) -> (TrustMode, Vec<String>) {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let raw = match vault.store().get_meta(SETTINGS_KEY) {
+        Ok(Some(b)) => b,
+        _ => return (TrustMode::Warn, Vec::new()),
+    };
+    let json: serde_json::Value = match serde_json::from_slice(&raw) {
+        Ok(v) => v,
+        Err(_) => return (TrustMode::Warn, Vec::new()),
+    };
+    let mode = json
+        .get("plugin_trust_mode")
+        .and_then(|m| serde_json::from_value::<TrustMode>(m.clone()).ok())
+        .unwrap_or(TrustMode::Warn);
+    let pubkeys = json
+        .get("plugin_trusted_pubkeys")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .collect()
+        })
+        .unwrap_or_default();
+    (mode, pubkeys)
+}
+
+pub(crate) fn current_plugin_registry(
     state: &SharedState,
 ) -> Arc<attune_core::plugin_registry::PluginRegistry> {
-    match attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
-        .and_then(|dir| attune_core::plugin_registry::PluginRegistry::scan(&dir))
-    {
+    match attune_core::plugin_registry::PluginRegistry::default_plugins_dir().and_then(|dir| {
+        let decrypt_keys = plugin_decrypt_keys(state);
+        let (trust_mode, trusted_pubkeys) = plugin_trust_settings(state);
+        attune_core::plugin_registry::PluginRegistry::scan_with_keys_and_trust(
+            &dir,
+            &decrypt_keys,
+            trust_mode,
+            &trusted_pubkeys,
+        )
+    }) {
         Ok((registry, warnings)) => {
             for warning in warnings {
                 tracing::warn!("plugin live-scan warning before plugin list: {warning}");
@@ -174,7 +238,10 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
     }
 
     if !list.is_empty() {
-        return Ok(Json(serde_json::json!({"plugins": list})));
+        return Ok(Json(serde_json::json!({
+            "plugins": list,
+            "official_pubkeys": attune_core::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS,
+        })));
     }
 
     // Fallback: vault locked, only return builtins (assumed enabled)
@@ -200,7 +267,10 @@ pub async fn list(State(state): State<SharedState>) -> AppResult<Json<serde_json
             })
         })
         .collect();
-    Ok(Json(serde_json::json!({"plugins": list})))
+    Ok(Json(serde_json::json!({
+        "plugins": list,
+        "official_pubkeys": attune_core::plugin_anchor::OFFICIAL_PLUGIN_ANCHORS,
+    })))
 }
 
 /// POST /api/v1/plugins/{id}/toggle — 翻转 enabled 状态。返回新 enabled 值。
@@ -256,6 +326,62 @@ pub async fn toggle(
     })))
 }
 
+/// DELETE /api/v1/plugins/{id} — 卸载本机插件目录并清理本地 entitlement。
+///
+/// 只删除 default plugins dir 下与 id 同名的目录；id 经字符白名单校验，避免路径穿越。
+/// Paid 会员按 SettingsLocks 锁定卸载，防误删 cloud 自动同步的付费插件。
+pub async fn uninstall(
+    State(state): State<SharedState>,
+    Path(plugin_id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let member = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if !attune_core::member_session::SettingsLocks::for_state(&member).can_edit("plugin_uninstall")
+    {
+        return Err(AppError::Forbidden(
+            "plugin uninstall is locked for paid members".into(),
+        ));
+    }
+    if !is_safe_plugin_id(&plugin_id) {
+        return Err(AppError::BadRequest("invalid plugin id".into()));
+    }
+    let plugins_dir = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
+        .map_err(|e| AppError::Internal(format!("plugins dir unavailable: {e}")))?;
+    let target = plugins_dir.join(&plugin_id);
+    if !target.is_dir() {
+        return Err(AppError::NotFound(format!(
+            "plugin '{plugin_id}' is not installed"
+        )));
+    }
+
+    let target_for_delete = target.clone();
+    tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&target_for_delete))
+        .await
+        .map_err(|e| AppError::Internal(format!("plugin uninstall task join error: {e}")))?
+        .map_err(|e| AppError::Internal(format!("remove plugin directory failed: {e}")))?;
+
+    {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        if vault.dek_db().is_ok() {
+            if let Err(e) = vault.store().delete_entitlement(&plugin_id) {
+                tracing::warn!("plugins: failed to delete entitlement for {plugin_id}: {e}");
+            }
+        }
+    }
+    state
+        .entitlement_cache
+        .set_status(&plugin_id, "revoked", &chrono::Utc::now().to_rfc3339());
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "plugin_id": plugin_id,
+        "removed_path": target.display().to_string(),
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +392,7 @@ mod tests {
         EntitlementRow {
             plugin_id: plugin_id.into(),
             license_id: "lic-x".into(),
+            decrypt_key: None,
             tier: tier.into(),
             status: status.into(),
             trial_expires: None,
@@ -347,5 +474,42 @@ mod tests {
 
         assert_eq!(entry["version"], "1.2.3");
         assert_eq!(entry["entitlement_status"], "unlicensed");
+    }
+
+    #[tokio::test]
+    async fn list_honors_strict_trust_mode_at_runtime() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let data_dir = tmp.path().join("attune");
+        let _dir = crate::test_support::override_data_dir(data_dir.clone());
+
+        let vault = attune_core::vault::Vault::open_memory(tmp.path()).expect("vault");
+        vault.setup("P@ss-plugin-strict").expect("setup");
+        let state = Arc::new(crate::state::AppState::new(vault, false));
+        {
+            let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+            vault
+                .store()
+                .set_meta(
+                    SETTINGS_KEY,
+                    br#"{"plugin_trust_mode":"strict","plugin_trusted_pubkeys":[]}"#,
+                )
+                .expect("set strict trust settings");
+        }
+
+        let plugin_dir = data_dir.join("plugins").join("unsigned-runtime");
+        std::fs::create_dir_all(&plugin_dir).expect("mkdir plugin");
+        std::fs::write(
+            plugin_dir.join("plugin.yaml"),
+            "id: unsigned-runtime\nname: Unsigned Runtime\ntype: industry\nversion: \"1.0.0\"\n",
+        )
+        .expect("write plugin.yaml");
+
+        let resp = list(axum::extract::State(state)).await.expect("list ok");
+        let body = resp.0;
+        let plugins = body["plugins"].as_array().expect("plugins array");
+        assert!(
+            !plugins.iter().any(|p| p["id"] == "unsigned-runtime"),
+            "runtime live scan must enforce plugin_trust_mode=strict"
+        );
     }
 }

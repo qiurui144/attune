@@ -41,7 +41,7 @@ pub struct Entitlement {
     pub paid: bool,
     /// Remaining cloud quota units (e.g. tokens or calls). `0` = exhausted.
     pub cloud_quota_remaining: u64,
-    /// Is a local model available as a fallback (Ollama installed / K3 reachable)?
+    /// Is a local model available as a fallback (Ollama installed / local-scheduler reachable)?
     pub local_available: bool,
 }
 

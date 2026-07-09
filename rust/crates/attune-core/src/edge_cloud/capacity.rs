@@ -1,23 +1,27 @@
-//! k3-scheduler `/capacity` 容量信号客户端。
+//! local-scheduler 容量信号客户端。
 //!
 //! Spec: `docs/superpowers/specs/2026-06-22-edge-cloud-model1.md` §5（HTTP 契约）+ §7（降级）。
+//! Actual local scheduler API: `/models` publishes per-model state/queue and
+//! `/capacity` publishes cluster/memory snapshot.
 //!
-//! attune 提交推理前 `GET http://127.0.0.1:8090/capacity?model=X` →
-//! `{state, eta_ms, mem_headroom_mb}`。**任何失败（超时/连接拒/非200/畸形）→
-//! `CapacityState::Unknown`**（graceful，退回静态二分，绝不崩 / 绝不 block 推理热路径，§7 R2）。
+//! attune 提交推理前读取 `GET http://127.0.0.1:8090/models`，按模型名派生
+//! `{state, eta_ms}`，再用 `GET /capacity` 补充 `mem_headroom_mb`。**模型状态探测
+//! 失败（超时/连接拒/非200/畸形/缺模型）→ `CapacityState::Unknown`**（graceful，
+//! 退回静态二分，绝不崩 / 绝不 block 推理热路径，§7 R2）。资源快照失败只把
+//! `mem_headroom_mb` 置 0，不抹掉已经拿到的模型状态。
 //!
 //! probe 在路由决策前**一次性**查；不进推理热路径，短超时（默认 1.5s）。
 
 use serde::Deserialize;
 use std::time::Duration;
 
-/// k3-scheduler 默认 loopback 端点（:8090，绝不经 frpc 暴露，设计 doc §5.E）。
+/// local-scheduler 默认 loopback 端点（:8090，绝不经 frpc 暴露，设计 doc §5.E）。
 pub const DEFAULT_SCHEDULER_BASE: &str = "http://127.0.0.1:8090";
 
 /// probe 默认超时（短，失败即降级；不拖垮请求路径，§7 R2）。
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// 本地容量状态。`Unknown` = 查询失败 / 非 K3 形态（降级哨兵，非 scheduler 真返回值）。
+/// 本地容量状态。`Unknown` = 查询失败 / scheduler 未启用（降级哨兵，非 scheduler 真返回值）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapacityState {
     /// 本地空闲，可立即快速服务。
@@ -28,7 +32,7 @@ pub enum CapacityState {
     ReadySlow,
     /// 本地此刻不可用（worker 挂 / 内存不足以加载该模型）。
     Unavailable,
-    /// 未知 —— probe 失败或非 K3 形态。决策按静态二分（degrade）。
+    /// 未知 —— probe 失败或 scheduler 未启用。决策按静态二分（degrade）。
     Unknown,
 }
 
@@ -44,7 +48,7 @@ impl CapacityState {
     }
 
     /// 解析 scheduler 大写态串（容忍大小写）。未知串 → `Unknown`（降级，不炸）。
-    fn parse(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_uppercase().as_str() {
             "READY_FAST" | "READY-FAST" | "READYFAST" => CapacityState::ReadyFast,
             "QUEUED" => CapacityState::Queued,
@@ -71,7 +75,7 @@ pub struct CapacitySignal {
 }
 
 impl CapacitySignal {
-    /// 降级哨兵：probe 失败 / 非 K3 → Unknown（eta/headroom 归零）。
+    /// 降级哨兵：probe 失败 / scheduler 未启用 → Unknown（eta/headroom 归零）。
     pub const fn unknown() -> Self {
         CapacitySignal {
             state: CapacityState::Unknown,
@@ -81,15 +85,48 @@ impl CapacitySignal {
     }
 }
 
-/// scheduler `/capacity` 响应反序列化（容忍未知字段 + 缺字段默认）。
+/// scheduler `/models` 响应反序列化（容忍未知字段 + 缺字段默认）。
 #[derive(Debug, Deserialize)]
-struct CapacityResponse {
+struct ModelsResponse {
+    #[serde(default)]
+    models: Vec<ModelStatus>,
+}
+
+/// scheduler 单模型状态。这里只取路由需要的字段。
+#[derive(Debug, Deserialize)]
+struct ModelStatus {
+    #[serde(default)]
+    name: String,
     #[serde(default)]
     state: String,
     #[serde(default)]
-    eta_ms: u32,
+    queue_depth: i32,
     #[serde(default)]
-    mem_headroom_mb: u32,
+    #[allow(dead_code)]
+    queue_capacity: i32,
+    #[serde(default)]
+    last_latency_ms: Option<f64>,
+    #[serde(default)]
+    p50_latency_ms: Option<f64>,
+    #[serde(default)]
+    p99_latency_ms: Option<f64>,
+}
+
+/// scheduler `/capacity` 响应反序列化（容忍不同 scheduler 版本）。
+#[derive(Debug, Deserialize, Default)]
+struct CapacitySnapshotResponse {
+    #[serde(default)]
+    memory: MemorySnapshot,
+    #[serde(default)]
+    dram_used_gb: Option<f64>,
+    #[serde(default)]
+    dram_total_gb: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct MemorySnapshot {
+    #[serde(default)]
+    available_gb: Option<f64>,
 }
 
 /// 容量探测抽象（可换实现：HTTP / mock / 未来 gRPC）。
@@ -100,7 +137,7 @@ pub trait CapacityProbe: Send + Sync {
     fn query(&self, model: &str) -> CapacitySignal;
 }
 
-/// 真 HTTP 客户端：`GET {base}/capacity?model=`。
+/// 真 HTTP 客户端：`GET {base}/models` + `GET {base}/capacity`。
 pub struct HttpCapacityClient {
     base_url: String,
     client: reqwest::blocking::Client,
@@ -120,8 +157,58 @@ impl HttpCapacityClient {
             .build()
             .unwrap_or_default();
         HttpCapacityClient {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: normalize_scheduler_base(base_url),
             client,
+        }
+    }
+
+    fn get_models(&self) -> Option<ModelsResponse> {
+        let url = format!("{}/models", self.base_url);
+        let resp = match self.client.get(&url).send() {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("capacity model probe unreachable ({e}); degrading to Unknown. error-code=capacity-model-probe-unreachable");
+                return None;
+            }
+        };
+        if !resp.status().is_success() {
+            log::warn!(
+                "capacity model probe non-2xx ({}); degrading to Unknown",
+                resp.status()
+            );
+            return None;
+        }
+        match resp.json::<ModelsResponse>() {
+            Ok(body) => Some(body),
+            Err(e) => {
+                log::warn!("capacity model probe parse failed ({e}); degrading to Unknown. error-code=capacity-model-parse-failed");
+                None
+            }
+        }
+    }
+
+    fn get_memory_headroom_mb(&self) -> u32 {
+        let url = format!("{}/capacity", self.base_url);
+        let resp = match self.client.get(&url).send() {
+            Ok(r) => r,
+            Err(e) => {
+                log::debug!("capacity memory probe unreachable ({e}); headroom=0");
+                return 0;
+            }
+        };
+        if !resp.status().is_success() {
+            log::debug!(
+                "capacity memory probe non-2xx ({}); headroom=0",
+                resp.status()
+            );
+            return 0;
+        }
+        match resp.json::<CapacitySnapshotResponse>() {
+            Ok(body) => body.headroom_mb(),
+            Err(e) => {
+                log::debug!("capacity memory probe parse failed ({e}); headroom=0");
+                0
+            }
         }
     }
 }
@@ -134,33 +221,85 @@ impl Default for HttpCapacityClient {
 
 impl CapacityProbe for HttpCapacityClient {
     fn query(&self, model: &str) -> CapacitySignal {
-        let url = format!("{}/capacity", self.base_url);
-        let resp = match self.client.get(&url).query(&[("model", model)]).send() {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("capacity probe unreachable ({e}); degrading to Unknown. error-code=capacity-probe-unreachable");
-                return CapacitySignal::unknown();
-            }
-        };
-        if !resp.status().is_success() {
-            log::warn!(
-                "capacity probe non-2xx ({}); degrading to Unknown",
-                resp.status()
-            );
+        let Some(models) = self.get_models() else {
             return CapacitySignal::unknown();
-        }
-        match resp.json::<CapacityResponse>() {
-            Ok(body) => CapacitySignal {
-                state: CapacityState::parse(&body.state),
-                eta_ms: body.eta_ms,
-                mem_headroom_mb: body.mem_headroom_mb,
-            },
-            Err(e) => {
-                log::warn!("capacity probe parse failed ({e}); degrading to Unknown. error-code=capacity-parse-failed");
-                CapacitySignal::unknown()
-            }
+        };
+        let Some(model_state) = models.models.into_iter().find(|m| m.name == model) else {
+            log::warn!("capacity model probe missing model={model}; degrading to Unknown");
+            return CapacitySignal::unknown();
+        };
+        let state = CapacityState::parse(&model_state.state);
+        let eta_ms = model_state.eta_ms(state);
+        let mem_headroom_mb = self.get_memory_headroom_mb();
+        CapacitySignal {
+            state,
+            eta_ms,
+            mem_headroom_mb,
         }
     }
+}
+
+impl ModelStatus {
+    fn eta_ms(&self, state: CapacityState) -> u32 {
+        match state {
+            CapacityState::ReadyFast => 0,
+            CapacityState::Queued => {
+                let queue_depth = self.queue_depth.max(1) as f64;
+                self.latency_sample_ms()
+                    .map(|ms| clamp_ms(ms * queue_depth))
+                    .unwrap_or_else(|| (self.queue_depth.max(1) as u32).saturating_mul(1000))
+            }
+            CapacityState::ReadySlow => self
+                .p99_latency_ms
+                .or_else(|| self.latency_sample_ms())
+                .map(clamp_ms)
+                .unwrap_or(1000),
+            CapacityState::Unavailable | CapacityState::Unknown => 0,
+        }
+    }
+
+    fn latency_sample_ms(&self) -> Option<f64> {
+        self.p50_latency_ms
+            .or(self.last_latency_ms)
+            .filter(|ms| ms.is_finite() && *ms > 0.0)
+    }
+}
+
+impl CapacitySnapshotResponse {
+    fn headroom_mb(&self) -> u32 {
+        let available_gb =
+            self.memory
+                .available_gb
+                .or_else(|| match (self.dram_total_gb, self.dram_used_gb) {
+                    (Some(total), Some(used)) => Some(total - used),
+                    _ => None,
+                });
+        available_gb.map(gb_to_mb).unwrap_or(0)
+    }
+}
+
+fn gb_to_mb(gb: f64) -> u32 {
+    if !gb.is_finite() || gb <= 0.0 {
+        return 0;
+    }
+    let mb = (gb * 1024.0).round();
+    mb.min(u32::MAX as f64) as u32
+}
+
+fn clamp_ms(ms: f64) -> u32 {
+    if !ms.is_finite() || ms <= 0.0 {
+        return 0;
+    }
+    ms.round().min(u32::MAX as f64) as u32
+}
+
+pub fn normalize_scheduler_base(base_url: &str) -> String {
+    let mut base = base_url.trim_end_matches('/').to_string();
+    if base.ends_with("/v1") {
+        base.truncate(base.len() - 3);
+        base = base.trim_end_matches('/').to_string();
+    }
+    base
 }
 
 /// Mock probe（离线测，§1.6）：预置信号 + 失败模式 + 调用计数（个人版 0 回退 guard 用）。
@@ -264,5 +403,21 @@ mod tests {
         assert_eq!(CapacityState::Queued.as_str(), "queued");
         assert_eq!(CapacityState::Unavailable.as_str(), "unavailable");
         assert_eq!(CapacityState::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn scheduler_base_normalization_strips_openai_compat_suffix_once() {
+        assert_eq!(
+            normalize_scheduler_base("http://127.0.0.1:8090/v1/"),
+            "http://127.0.0.1:8090"
+        );
+        assert_eq!(
+            normalize_scheduler_base("http://127.0.0.1:8090/v1/chat"),
+            "http://127.0.0.1:8090/v1/chat"
+        );
+        assert_eq!(
+            normalize_scheduler_base("http://127.0.0.1:8090///"),
+            "http://127.0.0.1:8090"
+        );
     }
 }

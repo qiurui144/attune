@@ -38,7 +38,7 @@ pub struct UsageAggregator {
 impl UsageAggregator {
     /// Construct a new aggregator.
     ///
-    /// - `flush_interval_ms`: e.g. 100 (laptop) / 500 (K3) per spec §11 risk 6.
+    /// - `flush_interval_ms`: e.g. 100 (laptop) / 500 (local-scheduler) per spec §11 risk 6.
     /// - `cap`: max in-memory events before drop-oldest kicks in (typical 1000
     ///   per spec §11 risk 2 mitigation 5).
     pub fn new(store: Arc<Mutex<Store>>, flush_interval_ms: u64, cap: usize) -> Self {

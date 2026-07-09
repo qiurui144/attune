@@ -112,38 +112,38 @@ pub fn models_dir() -> PathBuf {
 ///
 /// **背景**：attune 在两类形态上有不同的"默认体验"：
 /// - **Laptop**（默认）：本地不预装 LLM，default `llm.provider = "openai_compat"`，wizard 引导用户填远端 endpoint + API key
-/// - **K3Appliance**：K3 一体机本地推理经 **k3-scheduler :8090 统一收口**
+/// - **LocalSchedulerAppliance**：本地高性能设备经 **local-scheduler :8090 统一收口**
 ///   （OpenAI/Ollama-compat），default `llm.provider = "openai_compat"` + endpoint
 ///   `http://127.0.0.1:8090/v1`。**attune 不直连 Ollama :11434** —— Ollama/llama.cpp
-///   是 scheduler 内部 worker，attune 经 :8090 路由，禁旁路直连（2026-06-22 K3 调度层集成 spec §3）。
+///   是 scheduler 内部 worker，attune 经 :8090 路由，禁旁路直连。
 /// - **Server**：headless 服务器，行为同 Laptop（远端 token 默认）
 /// - **Unknown**：检测失败，按 Laptop 处理
 ///
 /// 检测顺序（优先级递减）：
-/// 1. 环境变量 `ATTUNE_FORM_FACTOR` (k3 / laptop / server) — 显式 override，K3 镜像构建时设置
-/// 2. DMI / `/sys/class/dmi/id/product_name` 包含已知 K3 关键字（"K3", "Jetson", 等）
+/// 1. 环境变量 `ATTUNE_FORM_FACTOR` (local_scheduler / laptop / server) — 显式 override
+/// 2. DMI / `/sys/class/dmi/id/product_name` 包含已知本地调度器设备关键字
 /// 3. 默认 Laptop
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormFactor {
     #[default]
     Laptop,
-    K3Appliance,
+    LocalSchedulerAppliance,
     Server,
     Unknown,
 }
 
 impl FormFactor {
-    /// 是否默认走**本地推理收口**（仅 K3 一体机）。
+    /// 是否默认走**本地推理收口**。
     ///
-    /// 语义 = "默认 LLM 在设备本地解决"。K3 形态本地推理经 **k3-scheduler :8090 统一收口**
+    /// 语义 = "默认 LLM 在设备本地解决"。本地调度器形态经 **local-scheduler :8090 统一收口**
     /// （OpenAI/Ollama-compat），**不是**直连 Ollama :11434 —— 命名保留 `local_llm` 是相对
     /// "云端 token"而言（本地 vs 远端），不表示"直连 Ollama"。
     ///
     /// 调用点：`build_llm_from_settings` 在 `settings.llm.endpoint` 为空时的**末位降级兜底**
-    /// 才用本函数走 Ollama auto-detect；K3 默认 settings 已带 :8090 endpoint（优先级 1），
+    /// 才用本函数走 Ollama auto-detect；本地调度器默认 settings 已带 :8090 endpoint（优先级 1），
     /// 正常路径下不会落到该兜底（兜底仅在用户清空 endpoint 的异常态下生效）。
     pub fn prefers_local_llm(&self) -> bool {
-        matches!(self, FormFactor::K3Appliance)
+        matches!(self, FormFactor::LocalSchedulerAppliance)
     }
 }
 
@@ -191,7 +191,7 @@ pub struct HardwareProfile {
     pub has_intel_npu: bool,            // /dev/accel/accel0 + intel_vpu 模块
     pub total_ram_bytes: u64,           // 总内存字节；硬件档位匹配用
     pub os: &'static str,               // "linux" | "macos" | "windows"
-    pub form_factor: FormFactor, // Laptop / K3Appliance / Server / Unknown — 决定 LLM 默认路径
+    pub form_factor: FormFactor, // Laptop / LocalSchedulerAppliance / Server / Unknown — 决定 LLM 默认路径
     pub gpu_label: Option<String>, // 统一给 UI 的 GPU 描述
 }
 
@@ -367,7 +367,7 @@ impl HardwareProfile {
     /// **v0.6.0-rc.3 行为变化**（per CLAUDE.md "M2 决策" + 用户 2026-04-27 反馈）：
     /// - LLM 默认走**远端 token**（不在本地预装），settings.rs::default_settings.llm.provider 默认引导用户填远端 endpoint
     /// - 本函数仅在用户**显式选本地** Ollama 后给"硬件推荐"用，不再被 default_settings 用作 hardcode 默认
-    /// - K3 一体机形态可选装本地 LLM；普通桌面用户应避免本地 chat（避免 OOM / 3B 效果差）
+    /// - 本地调度器设备可选装本地 LLM；普通桌面用户应避免本地 chat（避免 OOM / 3B 效果差）
     ///
     /// 推荐档位（用户显式选本地时）：
     /// | RAM    | 加速器   | 模型            |
@@ -472,30 +472,32 @@ impl HardwareProfile {
 
 /// 检测设备形态：env var > DMI 关键字 > Laptop 默认
 ///
-/// 1. `ATTUNE_FORM_FACTOR=k3|laptop|server` env var（K3 镜像构建时通过 systemd unit 设置）
-/// 2. Linux DMI: `/sys/class/dmi/id/product_name` 包含 "K3"/"Jetson"/"NUC" 等已知关键字
+/// 1. `ATTUNE_FORM_FACTOR=local_scheduler|laptop|server` env var
+/// 2. Linux DMI: `/sys/class/dmi/id/product_name` 包含本地调度器设备关键字
 /// 3. Default: `Laptop`
 ///
 /// 不依赖 GPU/NPU 检测 — 形态决定的是"用户预期"，不是"硬件能力"。一台带 NVIDIA 的桌面
-/// 仍是 Laptop 形态（用户主动配置 K3 路径需显式 env var）。
+/// 仍是 Laptop 形态（用户主动配置本地调度器路径需显式 env var）。
 fn detect_form_factor() -> FormFactor {
     // 1. env var override（最高优先）
     if let Ok(v) = std::env::var("ATTUNE_FORM_FACTOR") {
         match v.trim().to_ascii_lowercase().as_str() {
-            "k3" | "k3appliance" | "appliance" => return FormFactor::K3Appliance,
+            "local_scheduler" | "local-scheduler" | "localscheduler" | "appliance" => {
+                return FormFactor::LocalSchedulerAppliance;
+            }
             "laptop" | "desktop" => return FormFactor::Laptop,
             "server" | "headless" => return FormFactor::Server,
             _ => {} // 未识别值，继续 fallback
         }
     }
 
-    // 2. Linux DMI 关键字（K3 / Jetson 一体机）
+    // 2. Linux DMI 关键字（本地调度器设备）
     #[cfg(target_os = "linux")]
     {
         if let Ok(name) = std::fs::read_to_string("/sys/class/dmi/id/product_name") {
             let n = name.trim().to_ascii_lowercase();
-            if n.contains("k3") || n.contains("jetson") {
-                return FormFactor::K3Appliance;
+            if n.contains("local-scheduler") || n.contains("attune-appliance") {
+                return FormFactor::LocalSchedulerAppliance;
             }
         }
     }
@@ -1130,9 +1132,9 @@ mod tests {
     }
 
     #[test]
-    fn prefers_local_llm_only_for_k3() {
-        // K3 一体机本地推理经 :8090 scheduler 收口(本地解决,非直连 Ollama);其他形态走远端 token
-        assert!(FormFactor::K3Appliance.prefers_local_llm());
+    fn prefers_local_llm_only_for_local_scheduler_appliance() {
+        // 本地调度器设备经 :8090 scheduler 收口(本地解决,非直连 Ollama);其他形态走远端 token
+        assert!(FormFactor::LocalSchedulerAppliance.prefers_local_llm());
         assert!(!FormFactor::Laptop.prefers_local_llm());
         assert!(!FormFactor::Server.prefers_local_llm());
         assert!(!FormFactor::Unknown.prefers_local_llm());
@@ -1140,15 +1142,15 @@ mod tests {
 
     #[test]
     fn detect_form_factor_respects_env_override() {
-        // ATTUNE_FORM_FACTOR env var 是最高优先级 override（K3 镜像构建时用）
-        std::env::set_var("ATTUNE_FORM_FACTOR", "k3");
-        assert_eq!(detect_form_factor(), FormFactor::K3Appliance);
+        // ATTUNE_FORM_FACTOR env var 是最高优先级 override
+        std::env::set_var("ATTUNE_FORM_FACTOR", "local_scheduler");
+        assert_eq!(detect_form_factor(), FormFactor::LocalSchedulerAppliance);
 
-        std::env::set_var("ATTUNE_FORM_FACTOR", "k3appliance");
-        assert_eq!(detect_form_factor(), FormFactor::K3Appliance);
+        std::env::set_var("ATTUNE_FORM_FACTOR", "local-scheduler");
+        assert_eq!(detect_form_factor(), FormFactor::LocalSchedulerAppliance);
 
         std::env::set_var("ATTUNE_FORM_FACTOR", "appliance");
-        assert_eq!(detect_form_factor(), FormFactor::K3Appliance);
+        assert_eq!(detect_form_factor(), FormFactor::LocalSchedulerAppliance);
 
         std::env::set_var("ATTUNE_FORM_FACTOR", "laptop");
         assert_eq!(detect_form_factor(), FormFactor::Laptop);
@@ -1163,13 +1165,13 @@ mod tests {
         assert_eq!(detect_form_factor(), FormFactor::Server);
 
         // 大小写无关
-        std::env::set_var("ATTUNE_FORM_FACTOR", "K3");
-        assert_eq!(detect_form_factor(), FormFactor::K3Appliance);
+        std::env::set_var("ATTUNE_FORM_FACTOR", "LOCAL_SCHEDULER");
+        assert_eq!(detect_form_factor(), FormFactor::LocalSchedulerAppliance);
 
-        std::env::set_var("ATTUNE_FORM_FACTOR", "  K3  ");
+        std::env::set_var("ATTUNE_FORM_FACTOR", "  local_scheduler  ");
         assert_eq!(
             detect_form_factor(),
-            FormFactor::K3Appliance,
+            FormFactor::LocalSchedulerAppliance,
             "trim whitespace"
         );
 
@@ -1188,16 +1190,19 @@ mod tests {
     #[test]
     fn form_factor_in_hardware_profile_detect() {
         // detect() 调用链路验证：HardwareProfile 应正确填充 form_factor 字段
-        std::env::set_var("ATTUNE_FORM_FACTOR", "k3");
+        std::env::set_var("ATTUNE_FORM_FACTOR", "local_scheduler");
         let p = HardwareProfile::detect();
-        assert_eq!(p.form_factor, FormFactor::K3Appliance);
+        assert_eq!(p.form_factor, FormFactor::LocalSchedulerAppliance);
 
         std::env::remove_var("ATTUNE_FORM_FACTOR");
         let p = HardwareProfile::detect();
-        // 默认 Laptop（除非系统 DMI 显示 K3/Jetson，CI 环境正常不会）
+        // 默认 Laptop（除非系统 DMI 显示本地调度器设备，CI 环境正常不会）
         assert!(
-            matches!(p.form_factor, FormFactor::Laptop | FormFactor::K3Appliance),
-            "default form_factor should be Laptop or detected K3, got {:?}",
+            matches!(
+                p.form_factor,
+                FormFactor::Laptop | FormFactor::LocalSchedulerAppliance
+            ),
+            "default form_factor should be Laptop or detected local scheduler appliance, got {:?}",
             p.form_factor
         );
     }

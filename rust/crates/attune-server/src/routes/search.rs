@@ -24,6 +24,18 @@ fn query_rewrite_enabled(state: &crate::state::AppState) -> bool {
         .unwrap_or(false)
 }
 
+fn local_scheduler_native_kb_enabled(state: &crate::state::AppState) -> bool {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let settings = vault
+        .store()
+        .get_meta("app_settings")
+        .ok()
+        .flatten()
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    crate::local_scheduler::native_kb_enabled(&settings, &state.hardware)
+}
+
 /// 若开关开启且 LLM 可用，改写 query；失败或关闭时降级返回原始 query。
 async fn maybe_rewrite_query(state: &crate::state::AppState, query: &str) -> String {
     if !query_rewrite_enabled(state) {
@@ -145,32 +157,21 @@ pub async fn search(
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供（attune-pro），不再硬编码行业词。
     // 命中某 plugin domain（如 'legal'）→ 跨领域文档 score *= 0.4
     // OSS 裸装无 plugin / 未命中（None）→ 不应用 penalty（generic ranking，向后兼容）
-    let domain_keywords = state.plugin_registry.all_chat_trigger_keywords_by_domain();
+    let plugin_registry = crate::routes::plugins::current_plugin_registry(&state);
+    let domain_keywords = plugin_registry.all_chat_trigger_keywords_by_domain();
     let detected_domain =
         attune_core::search::detect_query_domain(&effective_query, &domain_keywords);
 
-    let search_params = {
-        let mut p = attune_core::search::SearchParams::with_defaults(params.top_k);
-        if let Some(ik) = params.initial_k {
-            p.initial_k = ik;
-        }
-        if let Some(imk) = params.intermediate_k {
-            p.intermediate_k = imk;
-        }
-        if let Some(d) = detected_domain.as_ref() {
-            p.domain_hint = Some(d.clone());
-        }
-        // T1 (v1.0.6 KB-bench): forward eval knobs into SearchParams. Today
-        // only `skip_rewrite` actively gates the rewrite call above; `seed`
-        // and `skip_rerank` flow through to attune-core for v1.1 when
-        // SearchTracer lands (per spec §9.5 #6). Keeping the fields
-        // populated means downstream consumers can read which knobs were
-        // active without grepping HTTP headers.
-        p.seed = parsed_eval.seed;
-        p.skip_rewrite = parsed_eval.skip_rewrite;
-        p.skip_rerank = parsed_eval.skip_rerank;
-        p
-    };
+    let (search_params, retrieval_plan) = crate::retrieval_policy::build_search_params(
+        state.hardware.form_factor,
+        local_scheduler_native_kb_enabled(&state),
+        &effective_query,
+        detected_domain.as_deref(),
+        params.top_k,
+        params.initial_k,
+        params.intermediate_k,
+        Some(&parsed_eval),
+    );
 
     let dek = {
         let vault = state
@@ -260,6 +261,7 @@ pub async fn search(
         "results": results,
         "total": results.len(),
         "cutoff_filtered": total_before_cutoff - total_after_cutoff,
+        "retrieval_plan": crate::retrieval_policy::retrieval_plan_trace(retrieval_plan.as_ref()),
         // T2 (v1.0.6 KB-bench): eval block null unless X-Attune-Eval-Mode: 1 header set
         "eval": eval_block,
         "latency_ms": search_latency_ms,
@@ -285,22 +287,20 @@ pub async fn search_relevant(
     let effective_query = maybe_rewrite_query(&state, &body.query).await;
 
     // S4b MU-5 (R8)：domain 词表完全由 vertical plugin 提供；OSS 裸装 → None。
-    let domain_keywords = state.plugin_registry.all_chat_trigger_keywords_by_domain();
+    let plugin_registry = crate::routes::plugins::current_plugin_registry(&state);
+    let domain_keywords = plugin_registry.all_chat_trigger_keywords_by_domain();
     let detected_domain =
         attune_core::search::detect_query_domain(&effective_query, &domain_keywords);
-    let search_params = {
-        let mut p = attune_core::search::SearchParams::with_defaults(top_k);
-        if let Some(ik) = body.initial_k {
-            p.initial_k = ik;
-        }
-        if let Some(imk) = body.intermediate_k {
-            p.intermediate_k = imk;
-        }
-        if let Some(d) = detected_domain.as_ref() {
-            p.domain_hint = Some(d.clone());
-        }
-        p
-    };
+    let (search_params, retrieval_plan) = crate::retrieval_policy::build_search_params(
+        state.hardware.form_factor,
+        local_scheduler_native_kb_enabled(&state),
+        &effective_query,
+        detected_domain.as_deref(),
+        top_k,
+        body.initial_k,
+        body.intermediate_k,
+        None,
+    );
 
     let dek = {
         let vault = state
@@ -348,7 +348,8 @@ pub async fn search_relevant(
 
     Ok(Json(serde_json::json!({
         "results": results,
-        "total": results.len()
+        "total": results.len(),
+        "retrieval_plan": crate::retrieval_policy::retrieval_plan_trace(retrieval_plan.as_ref()),
     })))
 }
 

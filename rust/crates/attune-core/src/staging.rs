@@ -1,4 +1,4 @@
-//! Locked-mode ingest staging (K3 G3①).
+//! Locked-mode ingest staging (local-scheduler G3①).
 //!
 //! When the vault is LOCKED there is no vault DEK in memory, so inbound documents
 //! cannot be parsed/encrypted into the vault. Instead of dropping them (the old

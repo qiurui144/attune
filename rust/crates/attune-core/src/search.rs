@@ -1,6 +1,6 @@
 // npu-vault/crates/vault-core/src/search.rs
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::embed::EmbeddingProvider;
@@ -156,6 +156,220 @@ pub fn apply_cross_domain_penalty(results: &mut [SearchResult], query_domain: Op
     }
 }
 
+fn normalized_ascii_tokens(s: &str) -> HashSet<String> {
+    const STOPWORDS: &[&str] = &[
+        "and", "are", "for", "from", "give", "into", "local", "many", "now", "source", "the",
+        "this", "while", "with", "without",
+    ];
+    let stopwords: HashSet<&str> = STOPWORDS.iter().copied().collect();
+    s.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter_map(|tok| {
+            let tok = tok.trim();
+            if tok.len() < 2 || stopwords.contains(tok) {
+                return None;
+            }
+            let stemmed = if tok.len() > 3 && tok.ends_with('s') {
+                &tok[..tok.len() - 1]
+            } else {
+                tok
+            };
+            Some(stemmed.to_string())
+        })
+        .collect()
+}
+
+fn source_hint_text(r: &SearchResult) -> String {
+    let mut out = String::new();
+    out.push_str(&r.title);
+    out.push('\n');
+    if let Some(path) = &r.source_path {
+        out.push_str(path);
+        out.push('\n');
+    }
+    for crumb in &r.breadcrumb {
+        out.push_str(crumb);
+        out.push('\n');
+    }
+    out.to_ascii_lowercase()
+}
+
+fn source_phrase_boost(query: &str, source: &str) -> f32 {
+    let mut boost = 0.0f32;
+    let q = query.to_ascii_lowercase();
+
+    let has = |needle: &str| source.contains(needle);
+    let q_has = |needle: &str| q.contains(needle);
+
+    boost += aircraft_hint_boost(&q, source);
+
+    if (q_has("qrh") || q_has("quick reference")) && (has("qrh") || has("quick reference")) {
+        boost += 0.14;
+    }
+    if q_has("fctm") && has("fctm") {
+        boost += 0.18;
+    }
+    if (q_has("fcom") || q_has("flight crew operating")) && has("fcom") {
+        boost += 0.10;
+    }
+    if (q_has("separated")
+        || q_has("seperate")
+        || q_has("seperated")
+        || q_has("distinct from fcom")
+        || q_has("not fcom")
+        || q_has("not the full 320fcom"))
+        && has("fcom")
+    {
+        boost -= 0.10;
+    }
+    if (q_has("system") || q_has("systems") || q_has("separated") || q_has("seperated"))
+        && (has("/systems")
+            || has("systems (")
+            || has("-hydraulic")
+            || has("-electrical")
+            || has("-fuel")
+            || has("-navigation")
+            || has("-powerplant")
+            || has("-landing_gear")
+            || has("-flight_controls"))
+    {
+        boost += 0.12;
+    }
+    for code in ["320fcom1", "320fcom3", "qrh320"] {
+        if q_has(code) && has(code) {
+            boost += 0.16;
+        }
+    }
+    if q_has("hydraulic") && has("hydraulic") {
+        boost += 0.14;
+    }
+    if (q_has("landing gear") || q_has("ata 32"))
+        && (has("landing gear") || has("32-landing") || has("ata 32"))
+    {
+        boost += 0.12;
+    }
+    if (q_has("flight controls") || q_has("flight control") || q_has("ata 27"))
+        && (has("flight controls")
+            || has("flight control")
+            || has("flights-controls")
+            || has("flight_controls")
+            || has("ata 27"))
+    {
+        boost += 0.16;
+    }
+    if q_has("electrical") && has("electrical") {
+        boost += 0.14;
+    }
+    if q_has("fuel") && has("fuel") {
+        boost += 0.14;
+    }
+    if q_has("navigation") && has("navigation") {
+        boost += 0.16;
+    }
+    if q_has("powerplant") && has("powerplant") {
+        boost += 0.16;
+    }
+    if (q_has("abbreviation") || q_has("abbreviations"))
+        && (has("abbreviation") || has("abbreviations"))
+    {
+        boost += 0.24;
+    }
+    if q_has("pdf") && has(".pdf") {
+        boost += 0.04;
+    }
+    if q_has("markdown") && (has(".md") || has("markdown")) && !q_has("pdf source") {
+        boost += 0.04;
+    }
+
+    boost
+}
+
+fn aircraft_hint_boost(query: &str, source: &str) -> f32 {
+    const AIRCRAFT_ALIASES: &[(&str, &[&str])] = &[
+        ("a220", &["a220", "cs300", "bd500"]),
+        (
+            "a320",
+            &["a320", "a318/a319/a320", "320fcom", "qrh320", "320-"],
+        ),
+        ("a330", &["a330", "330fcom", "330-"]),
+        ("a340", &["a340", "340fcom", "340-"]),
+        ("a350", &["a350", "350-"]),
+        ("a380", &["a380", "380fcom", "380-"]),
+        (
+            "b737",
+            &["b737", "737max", "737 max", "737-8", "737-tbc", "737-"],
+        ),
+        ("b747", &["b747", "747-8", "747-400", "747-"]),
+        ("b757", &["b757", "757-"]),
+        ("b767", &["b767", "767-"]),
+        ("b777", &["b777", "777-"]),
+        ("b787", &["b787", "787-"]),
+        ("mig29", &["mig-29", "mig29", "mikoyan"]),
+    ];
+
+    let query_tags: Vec<&str> = AIRCRAFT_ALIASES
+        .iter()
+        .filter(|(_, aliases)| aliases.iter().any(|alias| query.contains(alias)))
+        .map(|(tag, _)| *tag)
+        .collect();
+    if query_tags.is_empty() {
+        return 0.0;
+    }
+
+    let source_tags: Vec<&str> = AIRCRAFT_ALIASES
+        .iter()
+        .filter(|(_, aliases)| aliases.iter().any(|alias| source.contains(alias)))
+        .map(|(tag, _)| *tag)
+        .collect();
+    let matches = query_tags
+        .iter()
+        .filter(|tag| source_tags.iter().any(|source_tag| source_tag == *tag))
+        .count();
+
+    let mut boost = (matches as f32 * 0.10).min(0.24);
+    if matches == 0 && !source_tags.is_empty() {
+        boost -= 0.08;
+    }
+    if query.contains("boeing") && source.contains("airbus") {
+        boost -= 0.06;
+    }
+    if query.contains("airbus") && source.contains("boeing") {
+        boost -= 0.06;
+    }
+    if (query.contains("mig") || query.contains("mikoyan")) && !source.contains("mig") {
+        boost -= 0.08;
+    }
+    boost
+}
+
+/// Apply a cheap SRAS-style source selector reward.
+///
+/// Long manuals produce many chunks, which can make large-but-wrong PDFs dominate
+/// vector/RRF scores. This deterministic pass rewards candidates whose title,
+/// source path, or breadcrumb matches explicit source hints in the query
+/// (manual family, ATA number, aircraft code, filename fragments). It is kept
+/// small and local: no LLM call, no corpus-specific schema requirement.
+pub fn apply_source_hint_boost(query: &str, results: &mut [SearchResult]) {
+    if results.is_empty() {
+        return;
+    }
+    let query_tokens = normalized_ascii_tokens(query);
+    if query_tokens.is_empty() {
+        return;
+    }
+
+    for r in results.iter_mut() {
+        let source = source_hint_text(r);
+        let source_tokens = normalized_ascii_tokens(&source);
+        let overlap = query_tokens
+            .iter()
+            .filter(|tok| source_tokens.contains(*tok))
+            .count();
+        let token_boost = (overlap as f32 * 0.018).min(0.12);
+        r.score += token_boost + source_phrase_boost(query, &source);
+    }
+}
+
 /// 搜索结果
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SearchResult {
@@ -164,6 +378,8 @@ pub struct SearchResult {
     pub title: String,
     pub content: String,
     pub source_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
     pub inject_content: Option<String>,
     /// v0.6 Phase B F-Pro：item.corpus_domain（legal/tech/medical/.../general）。
     /// search 阶段按 query intent 跨域降权防止"反洗钱"被 cs-notes 顶占。
@@ -311,6 +527,24 @@ pub fn rrf_fuse(
     sorted
 }
 
+/// Collapse repeated chunk hits to the first/best item hit before RRF.
+///
+/// Vector search returns chunk-level hits. Without this normalization, a long
+/// PDF with thousands of chunks can accumulate many RRF contributions for the
+/// same item and suppress a short but exact source such as a QRH or subsystem
+/// manual. Input is expected to be rank-sorted; the first occurrence is the
+/// best representative for that item.
+pub fn dedup_ranked_results(results: Vec<(String, f32)>) -> Vec<(String, f32)> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(results.len());
+    for (id, score) in results {
+        if seen.insert(id.clone()) {
+            out.push((id, score));
+        }
+    }
+    out
+}
+
 /// 动态注入预算分配
 pub fn allocate_budget(results: &mut [SearchResult], budget: usize) {
     let total_score: f32 = results.iter().map(|r| r.score).sum();
@@ -396,6 +630,7 @@ pub fn search_with_context(
             })
         })
         .unwrap_or_default();
+    let ft_results = dedup_ranked_results(ft_results);
 
     // 2. 向量搜索（initial_k）
     // J3 (per spec §J3)：拿到 vector 结果后立即按 min_score 过滤；
@@ -424,7 +659,7 @@ pub fn search_with_context(
                         }
                         None => raw,
                     };
-                    (filtered, Some(qv))
+                    (dedup_ranked_results(filtered), Some(qv))
                 }
                 _ => (vec![], None),
             },
@@ -471,6 +706,7 @@ pub fn search_with_context(
                 title: item.title,
                 content: item.content,
                 source_type: item.source_type,
+                source_path: item.url,
                 inject_content: None,
                 breadcrumb,
                 chunk_offset_start: off_start,
@@ -491,7 +727,9 @@ pub fn search_with_context(
     // query/doc 语言匹配对 score 做降权，防止大篇幅异语言文档排到前面。
     let query_lang = detect_lang(query);
 
-    if let Some(reranker) = &ctx.reranker {
+    if params.skip_rerank {
+        log::info!("search stages: reranker skipped by SearchParams");
+    } else if let Some(reranker) = &ctx.reranker {
         if results.len() >= RERANK_MIN_CANDIDATES {
             let docs: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
             match reranker.score(query, &docs) {
@@ -525,6 +763,11 @@ pub fn search_with_context(
     // v0.6 Phase B F-Pro：跨领域降权（同语种跨领域污染防御）
     // 如 query="反洗钱"（domain_hint=legal）+ doc.corpus_domain=tech → score *= 0.4
     apply_cross_domain_penalty(&mut results, params.domain_hint.as_deref());
+
+    // SRAS/source selector reward: explicit source hints should beat generic
+    // semantic similarity, especially with 512-dim local embeddings and long
+    // scanned manuals where large PDFs otherwise dominate by chunk count.
+    apply_source_hint_boost(query, &mut results);
 
     // 最终排序
     results.sort_by(|a, b| {
@@ -757,6 +1000,134 @@ mod tests {
         let fused = rrf_fuse(&vec_results, &[], 0.6, 0.4, 10);
         assert_eq!(fused.len(), 1);
         assert_eq!(fused[0].0, "a");
+    }
+
+    #[test]
+    fn dedup_ranked_results_keeps_first_item_hit() {
+        let ranked = vec![
+            ("big-pdf".to_string(), 0.91),
+            ("big-pdf".to_string(), 0.90),
+            ("qrh".to_string(), 0.84),
+            ("big-pdf".to_string(), 0.83),
+        ];
+        let deduped = dedup_ranked_results(ranked);
+        assert_eq!(
+            deduped,
+            vec![("big-pdf".to_string(), 0.91), ("qrh".to_string(), 0.84)]
+        );
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_explicit_manual_source() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "fcom".into(),
+                score: 0.50,
+                title: "320FCOM3 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/FCOM/320FCOM3.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "qrh".into(),
+                score: 0.43,
+                title: "QRH320 - QUICK REFERENCE".into(),
+                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "A320 QRH quick reference handbook abnormal emergency checklist",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "qrh");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_aircraft_specific_fcom() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "a320-fcom".into(),
+                score: 0.52,
+                title: "320FCOM3 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/FCOM/320FCOM3.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "b737max-fcom".into(),
+                score: 0.46,
+                title: "B737 MAX Flight Crew Operations Manual".into(),
+                source_path: Some("file:///Boeing/737MAX/737MAX-FCOM.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "Boeing 737 MAX FCOM flight crew operating manual source",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "b737max-fcom");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_separated_system_manual_over_bulk_fcom() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "a320-fcom".into(),
+                score: 0.56,
+                title: "320FCOM3 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/FCOM/320FCOM3.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "a320-flight-controls".into(),
+                score: 0.43,
+                title: "A320 Flight Controls".into(),
+                source_path: Some("file:///Airbus/A320/Systems/A320-Flight_Controls.pdf".into()),
+                breadcrumb: vec!["systems".into(), "flight controls".into()],
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "A320 flight controls system separated manual distinct from FCOM",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "a320-flight-controls");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_abbreviation_sources() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "generic-qhr".into(),
+                score: 0.49,
+                title: "QRH320 - QUICK REFERENCE".into(),
+                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "abbreviations".into(),
+                score: 0.38,
+                title: "Airplane Manual Abbreviations".into(),
+                source_path: Some("file:///Reference/Abbreviations Manuals.md".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "airplane manual abbreviations ATA FCOM QRH AMM",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "abbreviations");
     }
 
     /// Regression: top_k>20 previously panicked at `intermediate_k = (top_k*2).clamp(top_k, 40)`

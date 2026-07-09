@@ -56,6 +56,7 @@ async fn member_routes_require_bearer_when_auth_enabled() {
         ("POST", "/api/v1/member/login-token"),
         ("POST", "/api/v1/member/login-password"),
         ("POST", "/api/v1/member/logout"),
+        ("POST", "/api/v1/member/plugins/sync"),
     ] {
         let req = match method {
             "GET" => client.get(format!("{base}{path}")),

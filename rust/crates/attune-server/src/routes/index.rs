@@ -96,6 +96,7 @@ pub async fn bind_directory(
     State(state): State<SharedState>,
     Json(body): Json<BindRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let ingest_options = crate::local_scheduler::ingest_options_from_state(&state, None);
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     let dek = vault.dek_db().map_err(|e| {
         (
@@ -145,13 +146,14 @@ pub async fn bind_directory(
         })?;
 
     // Scan directory synchronously
-    let scan_result = scanner::scan_directory(
+    let scan_result = scanner::scan_directory_with_options(
         vault.store(),
         &dek,
         &dir_id,
         &canonical,
         body.recursive,
         &body.file_types,
+        &ingest_options,
     )
     .map_err(|e| {
         let msg = e.to_string();

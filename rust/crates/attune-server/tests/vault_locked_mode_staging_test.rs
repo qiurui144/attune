@@ -1,4 +1,4 @@
-//! E2E for K3 G3① locked-mode ingest staging + drain.
+//! E2E for local-scheduler G3① locked-mode ingest staging + drain.
 //!
 //! Verifies the full degrade chain over the real HTTP server:
 //!   1. setup → unlock → lock (vault LOCKED)

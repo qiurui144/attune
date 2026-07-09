@@ -439,7 +439,7 @@ async fn test_bind_remote_depth_over_2_returns_400() {
     let (status, body) = do_post(
         state,
         "/api/v1/index/bind-remote",
-        serde_json::json!({"url": "http://localhost:8080/webdav/", "depth": 3}),
+        serde_json::json!({"url": "http://localhost:8090/webdav/", "depth": 3}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

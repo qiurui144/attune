@@ -26,7 +26,7 @@
 //!
 //! - L0 🔒 chunk 永不出网 (强制本地 LLM)
 //! - L1 默认 12 PII 类脱敏 → 云端 LLM
-//! - L3 LLM 语义脱敏 (v0.7, K3 一体机)
+//! - L3 LLM 语义脱敏 (v0.7, local-scheduler appliance)
 //!
 //! ## Stable public API for routing consumers (Plan A2 dependency anchor)
 //!
@@ -46,14 +46,17 @@
 //! let _scope = CacheScope::Llm;
 //! ```
 
-// ── ORT 链接模型守卫:恰开 ort-bundled 或 ort-dynamic 之一(见 Cargo.toml [features])──
+// ── ORT 链接模型守卫:启用本地推理时恰开 ort-bundled 或 ort-dynamic 之一──
 #[cfg(all(feature = "ort-bundled", feature = "ort-dynamic"))]
 compile_error!(
     "features `ort-bundled` and `ort-dynamic` are mutually exclusive — pick one onnxruntime linkage model"
 );
-#[cfg(not(any(feature = "ort-bundled", feature = "ort-dynamic")))]
+#[cfg(all(
+    feature = "local-inference",
+    not(any(feature = "ort-bundled", feature = "ort-dynamic"))
+))]
 compile_error!(
-    "one of `ort-bundled` (default, download-binaries) or `ort-dynamic` (load-dynamic) must be enabled"
+    "local-inference requires one of `ort-bundled` (download-binaries) or `ort-dynamic` (load-dynamic)"
 );
 
 pub mod ai_annotator;
@@ -67,8 +70,8 @@ pub mod browser_login;
 // consulted in one place. See docs/superpowers/specs/2026-05-28-privacy-logic-strategy.md.
 pub mod outbound_gate;
 pub use outbound_gate::{OutboundError, OutboundGate, OutboundKind, OutboundPolicy};
-// edge_cloud: 端云协同调度 Model 1 — attune governor 接 k3-scheduler /capacity，
-// 按 capability/load/cost/privacy 四维路由（仅 K3 形态激活；个人版 0 回退）。
+// edge_cloud: 端云协同调度 Model 1 — attune governor 接 local-scheduler /capacity，
+// 按 capability/load/cost/privacy 四维路由（显式启用 local-scheduler；个人版 0 回退）。
 // 隐私门（L0 永不出网 + 脱敏）仍在 OutboundGate；本模块只决定「在哪跑」。
 // spec: docs/superpowers/specs/2026-06-22-edge-cloud-model1.md
 pub mod edge_cloud;
@@ -117,6 +120,7 @@ pub use chat::{parse_confidence, strip_confidence_marker, ChatEngine, ChatRespon
 pub mod capability_dispatch;
 pub mod chat_reliability;
 pub mod chunker;
+pub mod context_admission;
 pub mod context_budget;
 pub mod context_compress;
 pub mod document_intelligence;
@@ -179,6 +183,7 @@ pub mod intent_router;
 pub mod job_handler; // G5: per-kind durable job dispatch (JobHandler + run_one_job)
 pub mod llm;
 pub mod llm_settings;
+pub mod local_resource;
 pub mod memory;
 pub mod memory_consolidation;
 pub mod monitoring; // 信息监控闭环: watch / digest / triage / dedup / deep-research (spec 2026-06-19)
@@ -197,6 +202,7 @@ pub mod queue;
 pub mod redacting_llm;
 pub mod reindex;
 pub mod resource_governor;
+pub mod retrieval_plan;
 pub mod scanner;
 pub mod scanner_webdav;
 pub mod search;

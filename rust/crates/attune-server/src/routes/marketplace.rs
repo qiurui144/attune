@@ -1,7 +1,7 @@
 //! GET /api/v1/marketplace/plugins  — 列 hub 上对当前 license 可见的插件
 //! POST /api/v1/marketplace/plugins/{id}/install — 启动 trial 或安装
 //!
-//! 默认走 Mock 后端；attune-pro 通过覆盖 AppState.plugin_hub 注入真客户端。
+//! 默认走未配置的离线 provider；登录/激活会员后切换到真实 PluginHub。
 //!
 //! Local-fs fallback: when the hub returns an empty plugin list and the provider
 //! is "mock", this route also scans the filesystem plugins directory and merges
@@ -14,6 +14,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::state::SharedState;
 
@@ -24,6 +25,7 @@ pub struct ListResponse {
     pub upgrade_url: String,
     pub plugins: Vec<attune_core::plugin_hub::PluginListing>,
     pub provider: String,
+    pub installed_versions: HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -58,10 +60,13 @@ pub async fn list_plugins(
     // surface locally installed plugins so the Marketplace UI isn't blank.
     let mut plugins = resp.plugins;
     let provider = hub.name().to_string();
+    let registry = crate::routes::plugins::current_plugin_registry(&state);
+    let installed_versions: HashMap<String, String> = registry
+        .plugins()
+        .map(|p| (p.manifest.id.clone(), p.manifest.version.clone()))
+        .collect();
     if provider == "mock" && plugins.is_empty() {
-        let plugins_dir = attune_core::plugin_registry::PluginRegistry::default_plugins_dir()
-            .unwrap_or_default();
-        let local = attune_core::plugin_hub::scan_local_plugins(&plugins_dir);
+        let local = attune_core::plugin_hub::local_plugin_listings_from_registry(&registry);
         if !local.is_empty() {
             plugins = local;
         }
@@ -73,13 +78,14 @@ pub async fn list_plugins(
         upgrade_url: resp.upgrade_url,
         plugins,
         provider,
+        installed_versions,
     }))
 }
 
 pub async fn install_plugin(
     State(state): State<SharedState>,
     Path(plugin_id): Path<String>,
-    Json(req): Json<InstallRequest>,
+    Json(_req): Json<InstallRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let hub = _hub_arc(&state).map_err(|(code, msg)| {
         (
@@ -88,7 +94,7 @@ pub async fn install_plugin(
         )
     })?;
 
-    // P0 (2026-05-20): Mock provider 无真实包体 — 之前 fall-through 返回 HTTP 200 +
+    // P0 (2026-05-20): 未配置 provider 无真实包体 — 之前 fall-through 返回 HTTP 200 +
     // InstallResponse 让 UI 误判"安装成功"实际什么都没装. 改为 503 + actionable error
     // 让 UI 提示用户配 pluginhub.url + license_key 切到真 HttpPluginHubProvider.
     if hub.name() == "mock" {
@@ -97,7 +103,7 @@ pub async fn install_plugin(
             Json(serde_json::json!({
                 "error": "pluginhub_not_configured",
                 "detail": format!(
-                    "Plugin '{plugin_id}' cannot be installed: server is running with the offline Mock pluginhub provider. \
+                    "Plugin '{plugin_id}' cannot be installed: server is running with the offline/unconfigured pluginhub provider. \
                      Configure 'pluginhub.url' and 'pluginhub.license_key' in Settings to switch to the real hub."
                 ),
                 "hint": "Settings → 插件市场 → 填入 pluginhub URL + license key (paid 会员见 Attune Pro 邮件)",
@@ -107,10 +113,11 @@ pub async fn install_plugin(
         ));
     }
 
-    let device_fp = req.device_fp;
+    let device_fp = Some(attune_core::device_fingerprint::device_fingerprint().fingerprint_sig);
 
     // hub 交互 + 下载 .tar.gz + 解压落地都是阻塞 IO，整体移出 async worker。
-    // 真实 hub 才下载落地到 plugins 目录；新插件经一次 attune-server 重启由 registry 装载生效。
+    // 真实 hub 才下载落地到 plugins 目录；后续路由实时扫描，安装后立即可见。
+    let state_for_install = state.clone();
     let resp = tokio::task::spawn_blocking(
         move || -> Result<attune_core::plugin_hub::InstallResponse, (StatusCode, Json<serde_json::Value>)> {
             let resp = hub
@@ -128,7 +135,27 @@ pub async fn install_plugin(
                     (code, Json(serde_json::json!({ "error": "install_failed", "detail": msg })))
                 })?;
 
-            let pkg = hub.download_plugin(&plugin_id, &resp.version).map_err(|e| {
+            if resp.decrypt_key.is_some() {
+                let vault = state_for_install.vault.lock().unwrap_or_else(|e| e.into_inner());
+                if vault.dek_db().is_err() {
+                    return Err((
+                        StatusCode::LOCKED,
+                        Json(serde_json::json!({
+                            "error": "vault_locked",
+                            "detail": "encrypted plugin key requires an unlocked vault",
+                            "plugin_id": plugin_id.clone(),
+                        })),
+                    ));
+                }
+            }
+
+            let download_url = resp.download_url.trim().to_string();
+            let pkg_result = if download_url.is_empty() {
+                hub.download_plugin(&plugin_id, &resp.version)
+            } else {
+                hub.download_plugin_url(&download_url)
+            };
+            let pkg = pkg_result.map_err(|e| {
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(serde_json::json!({
@@ -158,17 +185,25 @@ pub async fn install_plugin(
                             })),
                         )
                     })?;
-            let dst = attune_core::plugin_sync::install_official_plugin_package(
+            let key_bytes = resp.decrypt_key.as_ref().map(|k| k.as_bytes().to_vec());
+            let dst = attune_core::plugin_sync::install_official_plugin_package_with_key(
                 &plugin_id,
                 &pkg,
                 &plugins_dir,
+                key_bytes.as_deref(),
             )
             .map_err(|e| {
+                let detail = format!("plugin install failed: {e}");
+                let incompatible = detail.contains("plugin-incompatible-version");
                 (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    if incompatible {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    },
                     Json(serde_json::json!({
-                        "error": "install_failed",
-                        "detail": format!("plugin install failed: {e}"),
+                        "error": if incompatible { "plugin-incompatible-version" } else { "install_failed" },
+                        "detail": detail,
                     })),
                 )
             })?;
@@ -178,9 +213,26 @@ pub async fn install_plugin(
             // min_attune_version 不满足而被 skip → 返回 plugin-incompatible-version
             // (不 panic, 清晰提示升级 attune)。scan 第二 Vec 含 [incompatible] /
             // [invalid-min-version] 前缀字符串, 匹配本 plugin_id 即拒绝。
-            if let Ok((_, warnings)) =
-                attune_core::plugin_registry::PluginRegistry::scan(&plugins_dir)
-            {
+            let (trust_mode, trusted_pubkeys) =
+                crate::routes::plugins::plugin_trust_settings(&state_for_install);
+            let scan_result = if let Some(key) = key_bytes.as_ref() {
+                let mut keys = std::collections::HashMap::new();
+                keys.insert(plugin_id.clone(), key.clone());
+                attune_core::plugin_registry::PluginRegistry::scan_with_keys_and_trust(
+                    &plugins_dir,
+                    &keys,
+                    trust_mode,
+                    &trusted_pubkeys,
+                )
+            } else {
+                attune_core::plugin_registry::PluginRegistry::scan_with_trust(
+                    &plugins_dir,
+                    None,
+                    trust_mode,
+                    &trusted_pubkeys,
+                )
+            };
+            if let Ok((_, warnings)) = scan_result {
                 if let Some(detail) = warnings.iter().find(|w| {
                     (w.starts_with("[incompatible]") || w.starts_with("[invalid-min-version]"))
                         && w.contains(&plugin_id)
@@ -205,7 +257,96 @@ pub async fn install_plugin(
         Json(serde_json::json!({ "error": "install_task", "detail": e.to_string() })),
     ))??;
 
-    Ok(Json(
-        serde_json::to_value(resp).unwrap_or_else(|_| serde_json::json!({})),
-    ))
+    persist_marketplace_install_entitlement(&state, &resp)?;
+
+    Ok(Json(serde_json::json!({
+        "install_id": resp.install_id,
+        "plugin_id": resp.plugin_id,
+        "version": resp.version,
+        "sha256": resp.sha256,
+        "trial_started": resp.trial_started,
+        "trial_expires": resp.trial_expires,
+    })))
+}
+
+fn persist_marketplace_install_entitlement(
+    state: &SharedState,
+    resp: &attune_core::plugin_hub::InstallResponse,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(dek) = vault.dek_db() else {
+        tracing::warn!(
+            "marketplace: vault locked — entitlement not persisted for {}",
+            resp.plugin_id
+        );
+        return if resp.decrypt_key.is_some() {
+            Err((
+                StatusCode::LOCKED,
+                Json(serde_json::json!({
+                    "error": "vault_locked",
+                    "detail": "encrypted plugin key could not be persisted; unlock the vault and retry",
+                    "plugin_id": resp.plugin_id,
+                })),
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    let existing = vault
+        .store()
+        .get_entitlement(&dek, &resp.plugin_id)
+        .ok()
+        .flatten();
+    let row = attune_core::store::plugin_entitlements::EntitlementRow {
+        plugin_id: resp.plugin_id.clone(),
+        license_id: existing
+            .as_ref()
+            .map(|row| row.license_id.clone())
+            .unwrap_or_else(|| format!("pluginhub-install:{}", resp.install_id)),
+        decrypt_key: resp
+            .decrypt_key
+            .clone()
+            .or_else(|| existing.as_ref().and_then(|row| row.decrypt_key.clone())),
+        tier: existing
+            .as_ref()
+            .map(|row| row.tier.clone())
+            .unwrap_or_else(|| {
+                if resp.trial_expires.is_some() {
+                    "trial".into()
+                } else {
+                    "paid".into()
+                }
+            }),
+        status: "active".into(),
+        trial_expires: resp
+            .trial_expires
+            .clone()
+            .or_else(|| existing.as_ref().and_then(|row| row.trial_expires.clone())),
+        signing_pubkey_hex: existing
+            .as_ref()
+            .map(|row| row.signing_pubkey_hex.clone())
+            .unwrap_or_default(),
+        last_verified_at: now.clone(),
+        grace_started_at: None,
+        updated_at: now,
+    };
+    state.entitlement_cache.upsert(row.clone());
+    if let Err(e) = vault.store().upsert_entitlement(&dek, &row) {
+        tracing::warn!(
+            "marketplace: failed to persist entitlement {}: {e}",
+            resp.plugin_id
+        );
+        if resp.decrypt_key.is_some() {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "entitlement_persist_failed",
+                    "detail": "encrypted plugin key could not be persisted",
+                    "plugin_id": resp.plugin_id,
+                })),
+            ));
+        }
+    }
+    Ok(())
 }

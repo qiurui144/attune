@@ -70,7 +70,7 @@ pub async fn rebuild(State(state): State<SharedState>) -> AppResult<Json<serde_j
                 StatusCode::SERVICE_UNAVAILABLE,
                 serde_json::json!({
                     "error": "LLM 不可用，无法为聚类命名",
-                    "hint": "请确保 Ollama 已安装并拉取 chat 模型"
+                    "hint": "请启动 local scheduler，或在设置中配置云端 LLM"
                 }),
             ))
         }

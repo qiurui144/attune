@@ -990,7 +990,7 @@ pub fn fetch_asr_model(
 /// 启动时按硬件 catalog 选型拉对的 ASR 模型（engine-aware bootstrap 入口）。
 ///
 /// 流程：`catalog_asr_engine()` 解析当前硬件 tier 的 ASR 引擎 → [`fetch_asr_model`] 拉对应模型。
-/// capable tier（amd-win / intel-win / nvidia / k3）→ SenseVoice；CPU-fallback → whisper ggml。
+/// capable tier（amd-win / intel-win / nvidia / local-scheduler）→ SenseVoice；CPU-fallback → whisper ggml。
 ///
 /// 由 `state::spawn_model_bootstrap` 调用，取代之前无脑 `fetch_for_tier`（只拉 whisper）。
 pub fn fetch_asr_for_tier(tier: crate::platform::Tier) -> crate::error::Result<std::path::PathBuf> {

@@ -2,7 +2,7 @@
 //!
 //! attune-server 把私有 REST 业务以 MCP 工具形式暴露给外部 agent host (Hermes /
 //! Claude Desktop / 任意 MCP client)。transport = HTTP `POST /mcp` (+ SSE `GET /mcp/sse`,
-//! headless 24h 常驻)。工具名 + 参数 **兼容 attune-mcp-bridge 契约** → 桥退役 K3 零迁移。
+//! headless 24h 常驻)。工具名 + 参数 **兼容 attune-mcp-bridge 契约** → 桥退役 local-scheduler 零迁移。
 //!
 //! 每个 `tools/call` 经 G2 gate:scoped token 校验 → 高危黑名单 → 权限位 → 审计落盘
 //! (allow/deny 都落, fail-closed)。

@@ -27,9 +27,9 @@
 //! [`crate::store::items::UpdateOutcome`] 上判断 `content_changed`，只有 true 才调
 //! 本函数，避免每次 metadata-only 的 update 都触发 embedding pipeline。
 
-use crate::chunker;
 use crate::error::Result;
 use crate::index::FulltextIndex;
+use crate::ingest;
 use crate::store::Store;
 use crate::vectors::VectorIndex;
 
@@ -72,25 +72,13 @@ pub fn reindex_item(
     let _ = store.delete_chunk_summaries_for_item(item_id);
     fulltext.add_document(item_id, title, content, source_type)?;
 
-    let mut chunk_counter: usize = 0;
-    let sections = chunker::extract_sections(content);
-    for (section_idx, section_text) in &sections {
-        if section_text.trim().is_empty() {
-            continue;
-        }
-        store.enqueue_embedding(item_id, chunk_counter, section_text, 1, 1, *section_idx)?;
-        chunk_counter += 1;
-    }
-    for (section_idx, section_text) in &sections {
-        for chunk_text in chunker::chunk(
-            section_text,
-            chunker::DEFAULT_CHUNK_SIZE,
-            chunker::DEFAULT_OVERLAP,
-        ) {
-            store.enqueue_embedding(item_id, chunk_counter, &chunk_text, 2, 2, *section_idx)?;
-            chunk_counter += 1;
-        }
-    }
+    let chunk_counter = ingest::enqueue_content_embeddings(
+        store,
+        item_id,
+        content,
+        None,
+        crate::chunker::ChunkingOptions::default(),
+    )?;
 
     Ok(ReindexStats {
         vectors_deleted,

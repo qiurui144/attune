@@ -49,8 +49,9 @@ pub async fn list_skills(State(state): State<SharedState>) -> Json<SkillsListRes
             .unwrap_or_default()
     };
 
+    let plugin_registry = crate::routes::plugins::current_plugin_registry(&state);
     let mut skills = Vec::new();
-    for plugin in state.plugin_registry.plugins_by_type("skill") {
+    for plugin in plugin_registry.plugins_by_type("skill") {
         let trigger = plugin.manifest.chat_trigger.as_ref();
         skills.push(SkillSummary {
             id: plugin.manifest.id.clone(),

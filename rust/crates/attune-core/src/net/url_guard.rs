@@ -423,7 +423,7 @@ mod tests {
         // 裸 IP（含 metadata / 八进制 / 十进制 / IPv6）—— 强制走域名。
         for u in [
             "http://169.254.169.254/latest/meta-data/", // cloud metadata 字面量
-            "http://127.0.0.1:8080/feed",               // loopback 字面量
+            "http://127.0.0.1:8090/feed",               // loopback 字面量
             "http://192.168.0.1/feed",                  // 私网字面量
             "http://[::1]/feed",                        // IPv6 loopback 字面量
             "http://[fe80::1]/feed",                    // IPv6 link-local 字面量

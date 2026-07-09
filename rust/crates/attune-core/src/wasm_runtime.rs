@@ -1,7 +1,7 @@
 //! WASM capability runtime — 跨平台 agent 分发执行引擎。
 //!
 //! 把 `runtime: wasm` 的 skill/agent 编到 `wasm32-wasip1`,由内嵌 wasmtime 执行。
-//! 一份 `.wasm` 即在所有目标平台运行(Windows P0 / Linux P1 / riscv64 K3 P2),
+//! 一份 `.wasm` 即在所有目标平台运行(Windows P0 / Linux P1 / riscv64 local-scheduler P2),
 //! 与现有 subprocess 契约对齐:stdin JSON → stdout JSON → exit code 0/1/2/-1。
 //!
 //! ## 契约映射 (spec §5.2)

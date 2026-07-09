@@ -34,6 +34,17 @@ pub struct VersionInfo {
     pub upgrade_available: Option<bool>,
     /// release page URL,user click 直跳。
     pub upgrade_url: Option<String>,
+    /// Latest release notes URL. Usually the same page as `upgrade_url`, kept as
+    /// a separate field so UI can expose "what changed" even when already on
+    /// latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_notes_url: Option<String>,
+    /// Latest release title from GitHub, metadata-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_title: Option<String>,
+    /// Latest release publish timestamp from GitHub, metadata-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_published_at: Option<String>,
     /// 是否为 breaking change(semver major bump)。
     /// `Some(true)` 提示走 docs/UPGRADING.md。
     pub breaking_changes: Option<bool>,
@@ -51,6 +62,14 @@ pub struct VersionInfo {
 struct VersionCache {
     info: VersionInfo,
     fetched_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct LatestRelease {
+    tag_name: String,
+    html_url: Option<String>,
+    name: Option<String>,
+    published_at: Option<String>,
 }
 
 static CACHE: OnceLock<Mutex<Option<VersionCache>>> = OnceLock::new();
@@ -109,18 +128,24 @@ pub async fn get_version(State(state): State<SharedState>) -> Json<VersionInfo> 
 /// Fetch latest release from GitHub, gracefully fall back to current-only on any error.
 async fn fetch_with_fallback(current: &str) -> VersionInfo {
     match fetch_latest_from_github().await {
-        Ok(latest_tag) => {
-            let normalized = normalize_tag(&latest_tag);
+        Ok(release) => {
+            let normalized = normalize_tag(&release.tag_name);
             let upgrade = is_upgrade_available(current, &normalized);
             let breaking = upgrade.then(|| is_major_bump(current, &normalized));
+            let release_url = release.html_url.unwrap_or_else(|| {
+                format!(
+                    "https://github.com/qiurui144/attune/releases/tag/v{}",
+                    normalized
+                )
+            });
             VersionInfo {
                 current: current.to_string(),
                 latest_available: Some(normalized.clone()),
                 upgrade_available: Some(upgrade),
-                upgrade_url: Some(format!(
-                    "https://github.com/qiurui144/attune/releases/tag/v{}",
-                    normalized
-                )),
+                upgrade_url: Some(release_url.clone()),
+                release_notes_url: Some(release_url),
+                latest_title: release.name,
+                latest_published_at: release.published_at,
                 breaking_changes: breaking,
                 rollback_supported: true,
                 update_check: None,
@@ -131,6 +156,9 @@ async fn fetch_with_fallback(current: &str) -> VersionInfo {
             latest_available: None,
             upgrade_available: None,
             upgrade_url: None,
+            release_notes_url: None,
+            latest_title: None,
+            latest_published_at: None,
             breaking_changes: None,
             rollback_supported: true,
             update_check: None,
@@ -147,6 +175,9 @@ fn update_check_disabled_info(current: &str) -> VersionInfo {
         latest_available: None,
         upgrade_available: None,
         upgrade_url: None,
+        release_notes_url: None,
+        latest_title: None,
+        latest_published_at: None,
         breaking_changes: None,
         rollback_supported: true,
         update_check: Some("disabled-by-privacy-settings".to_string()),
@@ -154,7 +185,7 @@ fn update_check_disabled_info(current: &str) -> VersionInfo {
 }
 
 /// GitHub API call. Returns tag like "v1.0.1" or "desktop-v1.0.1".
-async fn fetch_latest_from_github() -> Result<String, reqwest::Error> {
+async fn fetch_latest_from_github() -> Result<LatestRelease, reqwest::Error> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .user_agent(concat!("attune-server/", env!("CARGO_PKG_VERSION")))
@@ -168,12 +199,26 @@ async fn fetch_latest_from_github() -> Result<String, reqwest::Error> {
         .error_for_status()?;
 
     let body: serde_json::Value = resp.json().await?;
-    let tag = body
+    let tag_name = body
         .get("tag_name")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    Ok(tag)
+    Ok(LatestRelease {
+        tag_name,
+        html_url: body
+            .get("html_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        name: body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        published_at: body
+            .get("published_at")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
 }
 
 /// Strip "v" / "desktop-v" prefix → "1.0.1" / "1.0.1-rc.1".
@@ -267,6 +312,11 @@ mod tests {
             latest_available: Some("1.0.1".into()),
             upgrade_available: Some(true),
             upgrade_url: Some("https://github.com/qiurui144/attune/releases/tag/v1.0.1".into()),
+            release_notes_url: Some(
+                "https://github.com/qiurui144/attune/releases/tag/v1.0.1".into(),
+            ),
+            latest_title: Some("v1.0.1".into()),
+            latest_published_at: Some("2026-01-01T00:00:00Z".into()),
             breaking_changes: Some(false),
             rollback_supported: true,
             update_check: None,

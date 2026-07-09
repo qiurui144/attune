@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use attune_core::crypto::Key32;
 use attune_core::ingest::{
-    ingest_document, ingest_document_replacing, IngestOutcome, RawDocument, SourceKind,
+    ingest_document, ingest_document_replacing, ingest_document_with_options, IngestOptions,
+    IngestOutcome, RawDocument, SourceKind,
 };
 use attune_core::store::Store;
 
@@ -57,6 +58,26 @@ fn first_ingest_returns_inserted_and_enqueues_two_levels() {
 
     // breadcrumbs sidecar 必须写入。
     assert!(store.chunk_breadcrumb_count(&item_id).unwrap() >= 1);
+}
+
+#[test]
+fn ingest_options_control_chunking_levels_and_size() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let body = format!("# Dense\n\n{}", "x".repeat(450));
+    let doc = md_doc("/tmp/dense.md", &body);
+    let options = IngestOptions::with_profile(None)
+        .with_chunking(attune_core::chunker::ChunkingOptions::new(200, 0).with_levels(false, true));
+
+    let outcome = ingest_document_with_options(&store, &dek, &doc, &options).unwrap();
+    match outcome {
+        IngestOutcome::Inserted {
+            chunks_enqueued, ..
+        } => assert_eq!(chunks_enqueued, 3),
+        other => panic!("expected Inserted, got {other:?}"),
+    }
+    assert_eq!(store.count_embed_queue_by_level(1).unwrap(), 0);
+    assert_eq!(store.count_embed_queue_by_level(2).unwrap(), 3);
 }
 
 #[test]
@@ -126,6 +147,51 @@ fn empty_content_returns_skipped() {
     let outcome = ingest_document(&store, &dek, &doc).unwrap();
     assert!(matches!(outcome, IngestOutcome::Skipped { .. }));
     assert_eq!(store.item_count().unwrap(), 0);
+}
+
+#[test]
+fn document_parse_failure_ingests_metadata_only_fallback() {
+    let store = Store::open_memory().unwrap();
+    let dek = Key32::generate();
+    let doc = RawDocument {
+        uri: "file:///tmp/Airbus/A320/Systems/A320-Hydraulic.pdf".into(),
+        title: String::new(),
+        content: b"%PDF-1.4\nnot a readable pdf body".to_vec(),
+        mime_hint: Some("application/pdf".into()),
+        source_kind: SourceKind::LocalFolder,
+        source_ref: "/tmp/Airbus/A320/Systems/A320-Hydraulic.pdf".into(),
+        modified_marker: None,
+        domain: None,
+        tags: None,
+        corpus_domain: Some("aviation".into()),
+        metadata: HashMap::new(),
+    };
+
+    let outcome = ingest_document_with_options(&store, &dek, &doc, &IngestOptions::default())
+        .expect("metadata fallback should keep the source searchable");
+    let item_id = match outcome {
+        IngestOutcome::Inserted {
+            item_id,
+            chunks_enqueued,
+        } => {
+            assert!(
+                chunks_enqueued >= 1,
+                "metadata-only fallback must enqueue at least one searchable chunk"
+            );
+            item_id
+        }
+        other => panic!("expected Inserted metadata-only item, got {other:?}"),
+    };
+
+    let item = store
+        .get_item(&dek, &item_id)
+        .unwrap()
+        .expect("metadata-only item exists");
+    assert!(item.title.contains("A320-Hydraulic"), "{}", item.title);
+    assert!(item.content.contains("metadata-only fallback"));
+    assert!(item.content.contains("A320 Hydraulic"));
+    assert!(item.content.contains("successful text extraction"));
+    assert_eq!(store.get_item_corpus_domain(&item_id).unwrap(), "aviation");
 }
 
 #[test]

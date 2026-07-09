@@ -10,9 +10,9 @@
 //!    plugins that passed the scan-time signature/trust gate (`scan_with_trust`); an id not in
 //!    that set is rejected (`agent-not-found`) — no arbitrary binary can be invoked.
 //! 2. **Entitlement gate (T10).** Pro/paid/trial plugins must have a local entitlement row and
-//!    the owning plugin's license must be entitled to run (active/trial/paid-grace/degraded);
-//!    trial-expired / revoked rejects. Same gate as the HTTP dispatch route, so a skill can't
-//!    bypass licensing.
+//!    the owning plugin's license must be entitled to run (active/trial/paid-grace);
+//!    degraded / trial-expired / revoked rejects. Same gate as the HTTP dispatch route, so a
+//!    skill can't bypass licensing.
 //! 3. **`library`-runtime agents are not directly dispatchable** (called internally by other
 //!    agents) — rejected, mirroring the HTTP route.
 //! 4. **Timeout + resource bound.** The subprocess is killed past [`AGENT_RUN_TIMEOUT`]; the
@@ -57,7 +57,7 @@ impl SubprocessAgentDispatcher {
         let plugins_root = PluginRegistry::default_plugins_dir().ok()?;
         let llm_env = resolve_llm_env(state);
         Some(SubprocessAgentDispatcher {
-            registry: state.plugin_registry.clone(),
+            registry: crate::routes::plugins::current_plugin_registry(state),
             entitlement_cache: state.entitlement_cache.clone(),
             llm_env,
             plugins_root,
@@ -86,7 +86,7 @@ impl AgentDispatcher for SubprocessAgentDispatcher {
             .ok_or_else(|| format!("agent '{agent_id}' not found in any installed plugin"))?;
 
         // (2) entitlement gate (T10) — copied pro plugin dirs without entitlement rows are
-        // rejected, and trial-expired / revoked blocks the run.
+        // rejected, and degraded / trial-expired / revoked blocks the run.
         if crate::routes::agents::plugin_requires_entitlement(&self.registry, &plugin_id) {
             let tier = self.entitlement_cache.tier(&plugin_id);
             if tier

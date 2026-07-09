@@ -38,7 +38,7 @@ pub struct DeviceFingerprint {
     /// 平台硬件 UUID(machine-id / MachineGuid);取不到 → `None`(签名计入 `"null"`)。
     #[serde(default)]
     pub hardware_uuid: Option<String>,
-    /// laptop | k3_appliance | server | unknown
+    /// laptop | local_scheduler_appliance | server | unknown
     pub form_factor: String,
     /// SHA-256(device_id|hostname|os|cpu_brand|hardware_uuid) hex.
     pub fingerprint_sig: String,
@@ -87,7 +87,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// - `device_id`:稳定机器标识(machine-id / 持久化 UUID,见 [`stable_device_id`])。
 /// - `hostname` / `os` / `cpu_brand`:复用 `platform` 硬件画像;缺失退回保守默认。
 /// - `hardware_uuid`:平台硬件 UUID(同 machine-id 源);取不到 → `None`。
-/// - `form_factor`:`platform::FormFactor` 映射(laptop/k3_appliance/server/unknown)。
+/// - `form_factor`:`platform::FormFactor` 映射(laptop/local_scheduler_appliance/server/unknown)。
 ///
 /// 同机两次调用返回 **相同** 的 `device_id` 与 `fingerprint_sig`(指纹稳定性,
 /// 是设备数配额 + 幂等激活的前提)。
@@ -126,7 +126,7 @@ fn form_factor_str(ff: crate::platform::FormFactor) -> String {
     use crate::platform::FormFactor as F;
     match ff {
         F::Laptop => "laptop",
-        F::K3Appliance => "k3_appliance",
+        F::LocalSchedulerAppliance => "local_scheduler_appliance",
         F::Server => "server",
         F::Unknown => "unknown",
     }
@@ -391,7 +391,10 @@ mod tests {
     fn form_factor_strings() {
         use crate::platform::FormFactor as F;
         assert_eq!(form_factor_str(F::Laptop), "laptop");
-        assert_eq!(form_factor_str(F::K3Appliance), "k3_appliance");
+        assert_eq!(
+            form_factor_str(F::LocalSchedulerAppliance),
+            "local_scheduler_appliance"
+        );
         assert_eq!(form_factor_str(F::Server), "server");
         assert_eq!(form_factor_str(F::Unknown), "unknown");
     }

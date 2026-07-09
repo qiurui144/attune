@@ -217,49 +217,19 @@ pub async fn update_item(
         // Enqueue embedding chunks and emit doc_update signal.
         let chunks_enqueued = {
             let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-            let mut chunk_counter: usize = 0;
-            let sections = attune_core::chunker::extract_sections(&item.content);
-            let mut enqueue_ok = true;
-            for (section_idx, section_text) in &sections {
-                if section_text.trim().is_empty() {
-                    continue;
+            let chunk_counter = match attune_core::ingest::enqueue_content_embeddings(
+                vault.store(),
+                &id,
+                &item.content,
+                None,
+                attune_core::chunker::ChunkingOptions::default(),
+            ) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!("enqueue_content_embeddings failed for {id}: {e}");
+                    0
                 }
-                if let Err(e) = vault.store().enqueue_embedding(
-                    &id,
-                    chunk_counter,
-                    section_text,
-                    1,
-                    1,
-                    *section_idx,
-                ) {
-                    tracing::warn!("enqueue_embedding L1 failed for {id}: {e}");
-                    enqueue_ok = false;
-                    break;
-                }
-                chunk_counter += 1;
-            }
-            if enqueue_ok {
-                for (section_idx, section_text) in &sections {
-                    for chunk_text in attune_core::chunker::chunk(
-                        section_text,
-                        attune_core::chunker::DEFAULT_CHUNK_SIZE,
-                        attune_core::chunker::DEFAULT_OVERLAP,
-                    ) {
-                        if let Err(e) = vault.store().enqueue_embedding(
-                            &id,
-                            chunk_counter,
-                            &chunk_text,
-                            2,
-                            2,
-                            *section_idx,
-                        ) {
-                            tracing::warn!("enqueue_embedding L2 failed for {id}: {e}");
-                            break;
-                        }
-                        chunk_counter += 1;
-                    }
-                }
-            }
+            };
             // Phase B hook 1: doc_update 信号喂 skill_evolution
             // 失败不阻塞主流程但留 debug 痕（schema drift / WAL 故障可诊断）
             if let Err(e) = vault.store().record_signal_event("doc_update", &id, None) {

@@ -470,8 +470,48 @@ impl PluginRegistry {
         Self::scan_impl(
             plugins_root,
             decrypt_key,
+            None,
             crate::plugin_sig::TrustMode::Off,
             &[],
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+        )
+    }
+
+    /// 扫描 plugins_root, 对每个 plugin 目录按目录名查找对应解密 key。
+    ///
+    /// 商业插件安装约定是 `plugins/<plugin_id>/`;加密 manifest(`plugin.yaml.enc`)
+    /// 在解析前无法知道 manifest id,所以这里用目录名作为本机 entitlement key 的索引。
+    pub fn scan_with_keys(
+        plugins_root: &Path,
+        decrypt_keys: &HashMap<String, Vec<u8>>,
+    ) -> Result<(Self, Vec<String>)> {
+        Self::scan_impl(
+            plugins_root,
+            None,
+            Some(decrypt_keys),
+            crate::plugin_sig::TrustMode::Off,
+            &[],
+            crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
+        )
+    }
+
+    /// Scan plugins using per-plugin decrypt keys plus the configured signature
+    /// trust gate. This is the production path for unlocked desktop/server
+    /// runtimes: encrypted commercial plugins can load, while `plugin_trust_mode`
+    /// and `plugin_trusted_pubkeys` still decide whether a plugin is trusted
+    /// enough to be available.
+    pub fn scan_with_keys_and_trust(
+        plugins_root: &Path,
+        decrypt_keys: &HashMap<String, Vec<u8>>,
+        mode: crate::plugin_sig::TrustMode,
+        user_pubkeys: &[String],
+    ) -> Result<(Self, Vec<String>)> {
+        Self::scan_impl(
+            plugins_root,
+            None,
+            Some(decrypt_keys),
+            mode,
+            user_pubkeys,
             crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
         )
     }
@@ -483,6 +523,7 @@ impl PluginRegistry {
     pub fn scan(plugins_root: &Path) -> Result<(Self, Vec<String>)> {
         Self::scan_impl(
             plugins_root,
+            None,
             None,
             crate::plugin_sig::TrustMode::Off,
             &[],
@@ -504,6 +545,7 @@ impl PluginRegistry {
         Self::scan_impl(
             plugins_root,
             decrypt_key,
+            None,
             mode,
             user_pubkeys,
             crate::plugin_sig::OFFICIAL_PUBLIC_KEYS,
@@ -514,6 +556,7 @@ impl PluginRegistry {
     fn scan_impl(
         plugins_root: &Path,
         decrypt_key: Option<&[u8]>,
+        decrypt_keys: Option<&HashMap<String, Vec<u8>>>,
         mode: crate::plugin_sig::TrustMode,
         user_pubkeys: &[String],
         official_keys: &[&str],
@@ -556,7 +599,11 @@ impl PluginRegistry {
                     }
                     TrustDecision::Allow | TrustDecision::AllowWarn(_) => {}
                 }
-                match LoadedPlugin::from_dir_with_key(&path, decrypt_key, Some(real_trust)) {
+                let plugin_decrypt_key = decrypt_keys
+                    .and_then(|keys| keys.get(&dir_name))
+                    .map(|key| key.as_slice())
+                    .or(decrypt_key);
+                match LoadedPlugin::from_dir_with_key(&path, plugin_decrypt_key, Some(real_trust)) {
                     Ok(p) => {
                         let pid = p.manifest.id.clone();
                         // 跨平台分发 version gate (spec §10): min_attune_version 高于当前 →
@@ -659,11 +706,19 @@ impl PluginRegistry {
     #[cfg(test)]
     fn scan_with_injected_official(
         plugins_root: &Path,
+        decrypt_keys: Option<&HashMap<String, Vec<u8>>>,
         mode: crate::plugin_sig::TrustMode,
         user_pubkeys: &[String],
         official_keys: &[&str],
     ) -> Result<(Self, Vec<String>)> {
-        Self::scan_impl(plugins_root, None, mode, user_pubkeys, official_keys)
+        Self::scan_impl(
+            plugins_root,
+            None,
+            decrypt_keys,
+            mode,
+            user_pubkeys,
+            official_keys,
+        )
     }
 }
 
@@ -706,6 +761,41 @@ version: "1.0.0"
         assert_eq!(reg.plugins().count(), 1);
         assert!(reg.get_plugin("test-plugin").is_some());
         assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn scan_with_keys_loads_encrypted_manifest_by_plugin_dir() {
+        let tmp = TempDir::new().expect("tmp");
+        let dir = tmp.path().join("law-pro");
+        fs::create_dir_all(&dir).expect("mkdir encrypted plugin");
+        let yaml = r#"
+id: law-pro
+name: 加密插件
+type: industry
+version: "1.0.0"
+"#;
+        let encrypted =
+            crate::plugin_encryption::encrypt_yaml(yaml.as_bytes(), b"device-bound-key")
+                .expect("encrypt plugin yaml");
+        fs::write(dir.join("plugin.yaml.enc"), encrypted).expect("write encrypted manifest");
+
+        let (without_key, without_key_errs) = PluginRegistry::scan(tmp.path()).expect("scan");
+        assert!(
+            without_key.get_plugin("law-pro").is_none(),
+            "encrypted plugin must not load without the local entitlement key"
+        );
+        assert!(
+            without_key_errs
+                .iter()
+                .any(|e| e.contains("no decrypt_key provided")),
+            "missing key should be surfaced as a scan warning, got {without_key_errs:?}"
+        );
+
+        let mut keys = HashMap::new();
+        keys.insert("law-pro".to_string(), b"device-bound-key".to_vec());
+        let (with_key, errs) = PluginRegistry::scan_with_keys(tmp.path(), &keys).expect("scan");
+        assert!(errs.is_empty(), "scan with key should be clean: {errs:?}");
+        assert!(with_key.get_plugin("law-pro").is_some());
     }
 
     // ── 跨平台分发 version gate (spec §10) ──
@@ -1529,6 +1619,7 @@ chat_trigger:
         write_signed_plugin(tmp.path(), "off-plug", &signer);
         let (reg, errs) = PluginRegistry::scan_with_injected_official(
             tmp.path(),
+            None,
             crate::plugin_sig::TrustMode::Strict,
             &[],
             &[&official_hex],
@@ -1555,6 +1646,7 @@ chat_trigger:
         write_signed_plugin(tmp.path(), "tampered-plug", &attacker);
         let (reg, errs) = PluginRegistry::scan_with_injected_official(
             tmp.path(),
+            None,
             crate::plugin_sig::TrustMode::Warn,
             &[],
             &[&official_hex],
@@ -1581,6 +1673,7 @@ chat_trigger:
         );
         let (reg, errs) = PluginRegistry::scan_with_injected_official(
             tmp.path(),
+            None,
             crate::plugin_sig::TrustMode::Strict,
             &[],
             &[],
@@ -1608,6 +1701,7 @@ chat_trigger:
         );
         let (reg, _errs) = PluginRegistry::scan_with_injected_official(
             tmp.path(),
+            None,
             crate::plugin_sig::TrustMode::Warn,
             &[],
             &[],
@@ -1633,6 +1727,7 @@ chat_trigger:
         );
         let (reg, _errs) = PluginRegistry::scan_with_injected_official(
             tmp.path(),
+            None,
             crate::plugin_sig::TrustMode::Warn,
             &[],
             &[],
@@ -1658,6 +1753,7 @@ chat_trigger:
         write_signed_plugin(tmp.path(), "tp-plug", &dev);
         let (reg, errs) = PluginRegistry::scan_with_injected_official(
             tmp.path(),
+            None,
             crate::plugin_sig::TrustMode::Strict,
             &[dev_hex],
             &[],

@@ -17,6 +17,7 @@
 
 use crate::error::{Result, VaultError};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// 单个插件在 hub 上的 listing（与 cloud/pluginhub /api/v1/index.json v1.1 schema 对齐）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -55,12 +56,107 @@ pub struct InstallResponse {
     pub plugin_id: String,
     pub version: String,
     pub sha256: String,
+    /// Device-bound manifest decrypt key for encrypted official plugins. This is
+    /// sensitive: callers persist it into the vault entitlement table; it must
+    /// never be serialized back to the browser UI.
+    #[serde(default, skip_serializing)]
+    pub decrypt_key: Option<String>,
     /// trial 启动时间（仅 Free 用户首次启动 trial 时非空）
     pub trial_started: Option<String>,
     /// trial 结束时间
     pub trial_expires: Option<String>,
     /// 相对 hub URL，需配合 base_url 拼成绝对 URL
     pub download_url: String,
+}
+
+/// Best-effort local filesystem marketplace listing.
+///
+/// When the server is running with the offline mock hub, the Marketplace route
+/// uses this to surface already-installed plugins instead of showing an empty
+/// catalog. Invalid plugins are ignored by `PluginRegistry::scan`; callers still
+/// get every successfully loaded manifest.
+pub fn scan_local_plugins(plugins_dir: &Path) -> Vec<PluginListing> {
+    let Ok((registry, _warnings)) = crate::plugin_registry::PluginRegistry::scan(plugins_dir)
+    else {
+        return Vec::new();
+    };
+    local_plugin_listings_from_registry(&registry)
+}
+
+/// Convert an already-loaded plugin registry into Marketplace listing rows.
+///
+/// This is used by the server's key-aware local fallback: encrypted commercial
+/// plugins can only be loaded after the vault entitlement keys are available, so
+/// callers should pass a live registry instead of forcing a plaintext filesystem
+/// scan.
+pub fn local_plugin_listings_from_registry(
+    registry: &crate::plugin_registry::PluginRegistry,
+) -> Vec<PluginListing> {
+    let mut plugins: Vec<PluginListing> = registry
+        .plugins()
+        .filter_map(|plugin| {
+            let manifest = &plugin.manifest;
+            let id = manifest.id.trim();
+            if id.is_empty() {
+                return None;
+            }
+
+            let name = manifest.name.trim();
+            let plugin_type = manifest.plugin_type.trim();
+            let category = manifest.category.trim();
+            let description = manifest.description.trim();
+            let version = manifest.version.trim();
+            let pricing_tier = manifest
+                .pricing
+                .as_ref()
+                .map(|p| p.tier.trim())
+                .unwrap_or("free");
+            let min_plan = match pricing_tier {
+                "paid" | "trial" => "pro",
+                _ => "individual",
+            };
+            let mut tags = Vec::new();
+            if !category.is_empty() {
+                tags.push(category.to_string());
+            }
+            if !plugin_type.is_empty() && plugin_type != category {
+                tags.push(plugin_type.to_string());
+            }
+
+            Some(PluginListing {
+                id: id.to_string(),
+                name: if name.is_empty() {
+                    id.to_string()
+                } else {
+                    name.to_string()
+                },
+                plugin_type: if plugin_type.is_empty() {
+                    "plugin".to_string()
+                } else {
+                    plugin_type.to_string()
+                },
+                category: if category.is_empty() {
+                    "local".to_string()
+                } else {
+                    category.to_string()
+                },
+                description: description.to_string(),
+                latest_version: if version.is_empty() {
+                    "0.0.0".to_string()
+                } else {
+                    version.to_string()
+                },
+                tags,
+                min_plan: min_plan.to_string(),
+                available: true,
+                trial_available: false,
+                trial_days: 0,
+            })
+        })
+        .collect();
+
+    plugins.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    plugins
 }
 
 /// PluginHub 客户端 trait — 由 attune-pro/crates/hub-client 真实 HTTP 实现，
@@ -75,6 +171,16 @@ pub trait PluginHubProvider: Send + Sync {
 
     /// 下载 .tar.gz 字节流
     fn download_plugin(&self, plugin_id: &str, version: &str) -> Result<Vec<u8>>;
+
+    /// 下载 hub install 响应返回的包地址。
+    ///
+    /// 默认实现保留旧 provider 的兼容性；HTTP provider 会支持相对路径、同源绝对
+    /// URL 和签名 CDN URL。
+    fn download_plugin_url(&self, download_url: &str) -> Result<Vec<u8>> {
+        Err(VaultError::ModelLoad(format!(
+            "provider does not support install download_url: {download_url}"
+        )))
+    }
 
     /// hub 名（用于诊断）："real-hub" / "mock"
     fn name(&self) -> &str;
@@ -163,6 +269,41 @@ impl HttpPluginHubProvider {
         format!("Bearer {}", self.license_key)
     }
 
+    fn resolve_download_url(&self, download_url: &str) -> String {
+        let trimmed = download_url.trim();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            trimmed.to_string()
+        } else if trimmed.starts_with('/') {
+            self.url(trimmed)
+        } else {
+            self.url(&format!("/{trimmed}"))
+        }
+    }
+
+    fn should_send_auth_to(&self, url: &str) -> bool {
+        let Ok(base) = reqwest::Url::parse(self.base_url.trim_end_matches('/')) else {
+            return false;
+        };
+        let Ok(target) = reqwest::Url::parse(url) else {
+            return false;
+        };
+        base.scheme() == target.scheme()
+            && base.host_str() == target.host_str()
+            && base.port_or_known_default() == target.port_or_known_default()
+    }
+
+    fn validate_download_url(&self, url: &str) -> Result<()> {
+        if std::env::var_os("ATTUNE_ALLOW_LOCAL_PLUGINHUB").is_some() {
+            return Ok(());
+        }
+        crate::net::url_guard::validate_open_outbound_url(
+            url,
+            &crate::net::url_guard::system_resolve,
+        )
+        .map(|_| ())
+        .map_err(|e| VaultError::InvalidInput(format!("plugin-download-url-blocked: {e}")))
+    }
+
     fn validate_base_url(&self) -> Result<()> {
         if std::env::var_os("ATTUNE_ALLOW_LOCAL_PLUGINHUB").is_some() {
             return Ok(());
@@ -235,6 +376,8 @@ struct ServerInstallResp {
     version: String,
     #[serde(default)]
     sha256: String,
+    #[serde(default)]
+    decrypt_key: Option<String>,
     #[serde(default)]
     trial_started: Option<String>,
     #[serde(default)]
@@ -319,6 +462,7 @@ impl PluginHubProvider for HttpPluginHubProvider {
             plugin_id: r.plugin_id,
             version: r.version,
             sha256: r.sha256,
+            decrypt_key: r.decrypt_key,
             trial_started: r.trial_started,
             trial_expires: r.trial_expires,
             download_url: r.download_url,
@@ -326,12 +470,17 @@ impl PluginHubProvider for HttpPluginHubProvider {
     }
 
     fn download_plugin(&self, plugin_id: &str, version: &str) -> Result<Vec<u8>> {
-        self.validate_base_url()?;
-        let url = self.url(&format!("/api/v1/packages/{plugin_id}-{version}.tar.gz"));
-        let bytes = self
-            .client
-            .get(&url)
-            .header("Authorization", self.auth_header())
+        self.download_plugin_url(&format!("/api/v1/packages/{plugin_id}-{version}.tar.gz"))
+    }
+
+    fn download_plugin_url(&self, download_url: &str) -> Result<Vec<u8>> {
+        let url = self.resolve_download_url(download_url);
+        self.validate_download_url(&url)?;
+        let mut req = self.client.get(&url);
+        if self.should_send_auth_to(&url) {
+            req = req.header("Authorization", self.auth_header());
+        }
+        let bytes = req
             .send()
             .and_then(|r| r.error_for_status())
             .and_then(|r| r.bytes())
@@ -428,9 +577,45 @@ mod tests {
     }
 
     #[test]
+    fn http_provider_resolves_install_download_url() {
+        let h = HttpPluginHubProvider::new("https://hub.engi-stack.com/base", "key");
+        assert_eq!(
+            h.resolve_download_url("/api/v1/packages/law-pro.tar.gz"),
+            "https://hub.engi-stack.com/base/api/v1/packages/law-pro.tar.gz"
+        );
+        assert_eq!(
+            h.resolve_download_url("https://cdn.example.com/signed/law-pro.tar.gz?sig=1"),
+            "https://cdn.example.com/signed/law-pro.tar.gz?sig=1"
+        );
+    }
+
+    #[test]
     fn http_provider_auth_header() {
         let h = HttpPluginHubProvider::new("https://x", "abc");
         assert_eq!(h.auth_header(), "Bearer abc");
+    }
+
+    #[test]
+    fn install_request_carries_device_fingerprint_when_available() {
+        let body = InstallReq {
+            device_fp: Some("fp-device-bound-123"),
+        };
+        let encoded = serde_json::to_value(&body).unwrap();
+        assert_eq!(encoded["device_fp"], "fp-device-bound-123");
+
+        let no_device = InstallReq { device_fp: None };
+        let encoded = serde_json::to_value(&no_device).unwrap();
+        assert!(
+            encoded.get("device_fp").is_none(),
+            "None must omit device_fp rather than sending an empty value"
+        );
+    }
+
+    #[test]
+    fn http_provider_only_sends_auth_to_same_origin_downloads() {
+        let h = HttpPluginHubProvider::new("https://hub.engi-stack.com", "key");
+        assert!(h.should_send_auth_to("https://hub.engi-stack.com/api/v1/packages/a.tar.gz"));
+        assert!(!h.should_send_auth_to("https://cdn.example.com/signed/a.tar.gz"));
     }
 
     #[test]
@@ -441,7 +626,7 @@ mod tests {
 
     #[test]
     fn http_provider_rejects_local_pluginhub_url_by_default() {
-        let h = HttpPluginHubProvider::new("http://localhost:8080", "k");
+        let h = HttpPluginHubProvider::new("http://localhost:8090", "k");
         let err = h.validate_base_url().unwrap_err();
         assert!(
             err.to_string().contains("pluginhub-url-blocked"),

@@ -18,7 +18,9 @@ pub use email::{
 };
 pub use git::GitSourceConfig;
 pub use pipeline::{
-    ingest_document, ingest_document_replacing, ingest_document_with_profile, IngestOutcome,
+    enqueue_content_embeddings, ingest_document, ingest_document_replacing,
+    ingest_document_replacing_with_options, ingest_document_with_options,
+    ingest_document_with_profile, IngestOptions, IngestOutcome,
 };
 pub use rss::{
     parse_feed_bytes, FeedFetcher, FeedHttpResponse, ParsedRssEntry, RealFeedFetcher, RssConnector,

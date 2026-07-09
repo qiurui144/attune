@@ -34,7 +34,7 @@ const ALLOWLIST: &[(&str, usize, &str)] = &[
         3,
         "(1) test_llm: user-initiated BYOK endpoint test — explicit user action on \
          user-supplied endpoint+key, wizard/Settings 'Test connection' button; \
-         payload is the literal 'ping', no vault data. (2) probe_k3: loopback + \
+         payload is the literal 'ping', no vault data. (2) probe_local_scheduler: loopback + \
          RFC1918 subnet scan local; user-supplied non-local candidates gated via \
          OutboundGate kind=Llm (R1.1b). (3) lmstudio_probe: compile-time \
          localhost:1234 constant — local, no gate.",
@@ -47,12 +47,14 @@ const ALLOWLIST: &[(&str, usize, &str)] = &[
     ),
     (
         "attune-core/src/embed.rs",
-        2,
-        "Embedding providers (Ollama / OpenAI-compat). Endpoint from user \
-         settings; default is local Ollama/ONNX (local_destination=true). \
+        3,
+        "Embedding providers (Ollama / OpenAI-compat / local-scheduler-native). \
+         Endpoint from user settings; default is local Ollama/ONNX \
+         (local_destination=true). \
          Cloud endpoints are user-configured BYOK; gated via OutboundKind::Embedding \
          in state.rs::start_queue_worker (L0 item filter) and embed_pending_memories. \
-         AppState::embedding_is_local flag drives gate enforcement (#82 P0 fix).",
+         Local-scheduler-native is explicit provider opt-in and defaults to loopback \
+         :8090; AppState::embedding_is_local flag drives gate enforcement (#82 P0 fix).",
     ),
     (
         "attune-core/src/llm.rs",
@@ -122,11 +124,19 @@ const ALLOWLIST: &[(&str, usize, &str)] = &[
     (
         "attune-core/src/edge_cloud/capacity.rs",
         1,
-        "k3-scheduler /capacity probe (edge-cloud Model 1, #144). Default base is \
+        "local-scheduler /capacity probe (edge-cloud Model 1, #144). Default base is \
          hardcoded loopback http://127.0.0.1:8090 (spec §5.E: never exposed via frpc). \
          Local destination — only the model-name string on the wire, no vault data; any \
          failure degrades to CapacityState::Unknown. Same class as status.rs Ollama \
          loopback probe — local, no OutboundGate required.",
+    ),
+    (
+        "attune-core/src/edge_cloud/scheduler.rs",
+        1,
+        "Local-scheduler control/task client. Default base is loopback :8090; non-loopback \
+         use requires explicit scheduler/provider configuration by the user/admin. Attune \
+         retains privacy policy, retrieval selection, and cloud spill decisions before \
+         submitting scheduler-native tasks.",
     ),
     (
         "attune-core/src/telemetry.rs",

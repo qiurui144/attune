@@ -11,7 +11,7 @@
 //! 决策（用户 2026-04-28）：
 //! - L1 正则脱敏 → OSS 免费层，所有 tier 都有
 //! - L2 ONNX NER → OSS 免费层，Tier T1+ 可选下载
-//! - L3 LLM 脱敏 → 仅 Tier T3 + T4 + K3 一体机解锁
+//! - L3 LLM 脱敏 → 仅 Tier T3 + T4 + local-scheduler appliance 解锁
 //!
 //! UI 用途：Settings → Privacy 页面根据该 endpoint 渲染 toggle 状态 + 升级提示。
 
@@ -57,7 +57,7 @@ pub async fn tier(State(state): State<SharedState>) -> Json<serde_json::Value> {
     // 升级提示
     let upgrade_hint: Option<&'static str> = match tier {
         Tier::Unsupported | Tier::Low => Some(
-            "你的硬件仅支持 L1 正则脱敏（OSS 免费）。如需 L2 NER / L3 LLM 脱敏，建议升级硬件或选购 K3 一体机。",
+            "你的硬件仅支持 L1 正则脱敏（OSS 免费）。如需 L2 NER / L3 LLM 脱敏，建议升级硬件或选购 local-scheduler appliance。",
         ),
         Tier::Mid => Some(
             "你的硬件支持 L1 + L2 NER 脱敏（OSS 免费）。如需 L3 LLM 语义脱敏，建议升级到 16GB+ RAM / 高性能 CPU。",
@@ -317,7 +317,8 @@ fn export_extra_keywords(state: &SharedState) -> Vec<String> {
     use std::collections::HashSet;
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<String> = Vec::new();
-    for kw in state.plugin_registry.all_confidential_keywords() {
+    let plugin_registry = crate::routes::plugins::current_plugin_registry(state);
+    for kw in plugin_registry.all_confidential_keywords() {
         if seen.insert(kw.clone()) {
             out.push(kw);
         }

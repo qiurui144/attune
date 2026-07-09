@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use attune_core::ingest::git::{GitConnector, GitSourceConfig};
 use attune_core::ingest::{
-    ingest_document, ingest_document_replacing, DocumentSink, IngestOutcome, RawDocument,
-    SourceConnector,
+    ingest_document_replacing_with_options, ingest_document_with_options, DocumentSink,
+    IngestOutcome, RawDocument, SourceConnector,
 };
 use attune_core::net::url_guard;
 use attune_core::store::git_sources::GitSourceRow;
@@ -95,6 +95,7 @@ pub fn sync_git_source(
     let mut deleted_files = 0usize;
     let mut errors: Vec<String> = Vec::new();
     let mut seen_refs: HashSet<String> = HashSet::new();
+    let ingest_options = crate::local_scheduler::ingest_options_from_state(state, None);
 
     for doc in docs {
         total += 1;
@@ -134,9 +135,9 @@ pub fn sync_git_source(
         });
 
         let outcome = if let Some(ref old_id) = old_item_id {
-            ingest_document_replacing(store, &dek, &doc, old_id)
+            ingest_document_replacing_with_options(store, &dek, &doc, old_id, &ingest_options)
         } else {
-            ingest_document(store, &dek, &doc)
+            ingest_document_with_options(store, &dek, &doc, &ingest_options)
         };
 
         match outcome {

@@ -1,6 +1,6 @@
 //! Skill registry — built-in OSS skills + a `register_plugin_skills` extension point for pro
 //! verticals (spec §6.4). Built-in skill YAML is embedded via `include_str!` so it ships in the
-//! binary (no on-disk asset lookup, works the same in the desktop bundle and the K3 image).
+//! binary (no on-disk asset lookup, works the same in the desktop bundle and the local-scheduler image).
 
 use crate::skill_runtime::schema::{parse_skill_yaml, validate_skill, Skill};
 use std::collections::BTreeMap;
@@ -18,6 +18,9 @@ pub struct RegisteredSkill {
     pub skill: Skill,
     /// `"oss"` for built-ins, `"pro:<vertical>"` for plugin-registered skills.
     pub source: String,
+    /// Original declarative YAML. Server-side version pinning stores this as the
+    /// rollback payload so a user can keep running a known-good prompt/skill.
+    pub yaml: String,
 }
 
 /// The in-process skill registry. Built once at startup; pro plugin skills are injected via
@@ -46,6 +49,7 @@ impl SkillRegistry {
             RegisteredSkill {
                 skill,
                 source: "oss".to_string(),
+                yaml: yaml.to_string(),
             },
         );
     }
@@ -60,6 +64,7 @@ impl SkillRegistry {
             RegisteredSkill {
                 skill,
                 source: format!("pro:{vertical}"),
+                yaml: yaml.to_string(),
             },
         );
         Ok(())

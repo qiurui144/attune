@@ -1,12 +1,16 @@
-// 插件签名校验（Ed25519）—— P1 骨架
+// 插件签名校验（Ed25519）
 //
 // ## 目的
 //
-// 商业插件（律师 / 售前 / 医疗等）通过 PluginHub 分发，必须签名才能加载。
-// 当前只实现校验器 + 一组官方公钥占位，**PluginHub 上线前所有签名校验默认放行**
-// （`strict_mode = false`），保证本地开发 / 自写插件不被拦。
+// 商业插件（律师 / 售前 / 医疗等）通过 PluginHub 分发，必须签名才能在严格信任
+// 模式下加载。官方公钥来自 `plugin_anchor::OFFICIAL_PLUGIN_ANCHORS`，是编译期
+// 非空信任根；用户自签插件只能通过 `plugin_trusted_pubkeys` 进入 ThirdParty
+// 信任域，不能提升为 Official。
 //
-// 未来 PluginHub 上线后切 `strict_mode = true`，仅加载签名插件。
+// 加载门为三态:
+//   - off: 全放行但标注 trust
+//   - warn: 未签名放行并警示，签名无效/篡改拒载
+//   - strict: 仅 Official / ThirdParty 放行
 //
 // ## 签名格式
 //
@@ -90,7 +94,7 @@ pub struct VerifyResult {
 }
 
 /// 宽松校验：无签名 / 签名无效都返回 `Unsigned` 不 panic。
-/// 生产切 strict 前，`is_allowed()` 决定是否加载。
+/// 旧调用路径由 `is_allowed()` 决定是否加载；新路径应优先使用 [`gate`]。
 ///
 /// 内嵌的 `OFFICIAL_PUBLIC_KEYS` = `plugin_anchor::OFFICIAL_PLUGIN_ANCHORS`（单一信任根
 /// SSOT，非空）。官方私钥签名的插件 → `Trust::Official`；其余 → `Trust::Unsigned`。

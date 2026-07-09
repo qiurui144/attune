@@ -3,7 +3,7 @@
 //!
 //! Spec: `docs/superpowers/specs/2026-06-22-edge-cloud-model1.md` §4 表 / §5。
 //!
-//! 设计源 doc（attune-k3）`edge-cloud-scheduler-collaboration.md` §4 能力图：
+//! 设计源 doc `edge-cloud-scheduler-collaboration.md` §4 能力图：
 //! | 能力 | 本地 | 云 | 默认偏好 |
 //! |---|---|---|---|
 //! | embedding (bge-m3) | ✅ | ✅ | 本地优先 |
@@ -26,7 +26,7 @@ pub enum Capability {
     Asr,
     /// 对话 LLM 3B 档（16G 本地可跑）。
     ChatLlm3b,
-    /// 对话 LLM 7B 档（K3 16G 主推 Qwen2.5-7B q4）。
+    /// 对话 LLM 7B 档（本地 scheduler 常见轻量对话模型）。
     ChatLlm7b,
     /// 对话 LLM 35B-A3B 档（仅 32G 本地；16G 必须走云）。
     ChatLlm35b,
@@ -97,7 +97,7 @@ pub struct CapabilityMap {
 impl CapabilityMap {
     /// 内置 baseline SSOT（编进二进制；离线/首发兜底）。
     ///
-    /// 与设计 doc §4 能力图表一一对应。35B 在 K3 16G 形态本地跑不了 → `local_capable: false`
+    /// 与设计 doc §4 能力图表一一对应。35B 在低内存本地形态跑不了 → `local_capable: false`
     /// + cloud preferred（本地跑不了的大模型走云，spec §2）。
     pub fn builtin() -> Self {
         let mut entries = BTreeMap::new();
@@ -132,7 +132,7 @@ impl CapabilityMap {
                 },
             );
         }
-        // chat 35B-A3B：K3 16G 主推形态本地跑不了 → 仅云。
+        // chat 35B-A3B：低内存本地形态跑不了 → 仅云。
         entries.insert(
             Capability::ChatLlm35b,
             CapabilityEntry {
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn chat_35b_cloud_only() {
-        // 35B-A3B 在 K3 16G 主推形态本地跑不了 → local_capable=false + cloud preferred。
+        // 35B-A3B 在低内存本地形态跑不了 → local_capable=false + cloud preferred。
         let e = CapabilityMap::builtin().lookup(Capability::ChatLlm35b);
         assert!(!e.local_capable, "35B not local-capable on 16G");
         assert!(e.cloud_capable);

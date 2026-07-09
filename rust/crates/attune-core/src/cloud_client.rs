@@ -123,6 +123,26 @@ impl CloudClient {
         resp.json().map_err(http_err)
     }
 
+    /// 拿当前账号的用量/配额 JSON。云端 schema 由 accounts 服务维护,客户端作为
+    /// 代理透传给 UI；本地 server 会在不可达时提供兜底零数据。
+    pub fn me_quota_json(&self) -> Result<serde_json::Value> {
+        let url = format!("{}/api/v1/users/me/quota", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .header_opt_cookie(self.session_cookie.as_deref())
+            .send()
+            .map_err(http_err)?;
+        let status = resp.status();
+        let body = resp.text().map_err(http_err)?;
+        if !status.is_success() {
+            return Err(VaultError::Crypto(format!(
+                "quota failed: status={status} body={body}"
+            )));
+        }
+        serde_json::from_str(&body).map_err(json_err)
+    }
+
     /// `POST /api/v1/member/activate` — 授权码 (license_key) 激活路径.
     ///
     /// manual 会员不走账号密码,而是输入一串授权码即激活 pro 并配 gateway LLM.

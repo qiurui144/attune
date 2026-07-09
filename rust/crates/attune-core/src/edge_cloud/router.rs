@@ -114,7 +114,7 @@ impl RejectReason {
 /// 路由决策。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteDecision {
-    /// 走 :8090 本地（K3 scheduler）。
+    /// 走 :8090 本地（local scheduler）。
     Local,
     /// 等本地（不去云）—— L0 忙 / 本地强偏好忙。
     QueueLocal,
@@ -218,7 +218,7 @@ pub fn decide_route(
     match signal.state {
         // 本地空闲 → 本地（任何偏好）。
         CapacityState::ReadyFast => RouteDecision::Local,
-        // Unknown（probe 失败 / 非 K3）→ 静态二分：按偏好。
+        // Unknown（probe 失败 / scheduler 未启用）→ 静态二分：按偏好。
         CapacityState::Unknown => match entry.preference {
             // 云优先且账户准入 → 云；否则本地兜底。
             Preference::CloudPreferred if cloud_ok => RouteDecision::Cloud,

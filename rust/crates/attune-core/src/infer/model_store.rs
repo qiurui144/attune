@@ -69,7 +69,7 @@ fn verify_or_record_sha256(file_path: &std::path::Path) -> Result<()> {
 }
 
 /// 离线模式：`HF_HUB_OFFLINE` 置 `1` / `true` / `yes` 时，禁止任何 HuggingFace 网络
-/// 下载——只允许命中本地缓存。air-gapped 部署（K3 一体机 / 企业内网）+ 测试套件
+/// 下载——只允许命中本地缓存。air-gapped 部署（local-scheduler appliance / 企业内网）+ 测试套件
 /// 用它阻断 `ensure_models` 的阻塞式 `ureq` 下载（一次 setup/unlock 会同步拉 330MB
 /// reranker + embedding ONNX，无超时；测试里 9 个并发 server 各拉一份会把 CI 卡到超时）。
 /// 沿用 hf-hub 生态既有的 `HF_HUB_OFFLINE` 约定，不另造 attune 专属变量。

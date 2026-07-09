@@ -67,7 +67,7 @@ impl Verdict {
     }
 }
 
-/// 模型角色(attune 本地底座 + K3/RK 本地 LLM)。
+/// 模型角色(attune 本地底座 + RISC-V local-scheduler/RK 本地 LLM)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -75,7 +75,7 @@ pub enum Role {
     Rerank,
     Ocr,
     Asr,
-    /// 本地 LLM(K3 / RK NPU;非云端网关 token,见 spec §2)。
+    /// 本地 LLM(RISC-V local-scheduler / RK NPU;非云端网关 token,见 spec §2)。
     Llm,
 }
 
@@ -269,7 +269,7 @@ pub fn tier_for_hardware(os: &str, hardware: &[AccelKind]) -> String {
         return "intel-win".to_string();
     }
     // 其余(Linux x86 无 dGPU / 纯 CPU / 未识别加速)→ cpu-fallback。
-    // riscv-k3 / rk1820 / rk3588 tier 由专用部署路径显式指定(非通用硬件探测),不在此自动派生。
+    // riscv-local-scheduler / rk1820 / rk3588 tier 由专用部署路径显式指定(非通用硬件探测),不在此自动派生。
     CPU_FALLBACK_TIER.to_string()
 }
 
@@ -506,9 +506,9 @@ mod tests {
     #[test]
     fn npu_tiers_present_with_verdicts() {
         let c = Catalog::builtin_default();
-        // riscv-k3 LLM 选型对齐 bianbu §3.1 / k3-16g(16G 主推 Qwen2.5-7B q4)。
+        // riscv-local-scheduler LLM 选型对齐 bianbu §3.1 / local-scheduler-16g(16G 主推 Qwen2.5-7B q4)。
         assert_eq!(
-            c.resolve("riscv-k3", Role::Llm).unwrap().model,
+            c.resolve("riscv-local-scheduler", Role::Llm).unwrap().model,
             "qwen2.5-7b"
         );
         assert_eq!(
@@ -521,14 +521,14 @@ mod tests {
         );
     }
 
-    // ── K3 调度层集成 (2026-06-22):riscv-k3 本地能力经 k3-scheduler :8090 收口 ──
+    // ── RISC-V local-scheduler 调度层集成 (2026-06-22):riscv-local-scheduler 本地能力经 local-scheduler :8090 收口 ──
 
-    /// K3 一体机:embedding/rerank/ocr/asr **+ llm** 全部 resolve 到 ep=k3-scheduler 哨兵
+    /// RISC-V local-scheduler 一体机:embedding/rerank/ocr/asr **+ llm** 全部 resolve 到 ep=local-scheduler 哨兵
     /// (经 :8090 服务,预置不下载)。这是「:8090 统一收口、禁旁路直连 worker」的 catalog 兑现 ——
-    /// LLM 也归口(2026-06-22 reconcile:由 ep=cpu 直跑改 ep=k3-scheduler,与 settings
+    /// LLM 也归口(2026-06-22 reconcile:由 ep=cpu 直跑改 ep=local-scheduler,与 settings
     /// provider=openai_compat :8090 一致)。
     #[test]
-    fn k3_local_capabilities_route_to_scheduler() {
+    fn local_scheduler_capabilities_route_to_scheduler() {
         let c = Catalog::builtin_default();
         for role in [
             Role::Embedding,
@@ -538,60 +538,68 @@ mod tests {
             Role::Llm,
         ] {
             let (hit_tier, choice) = c
-                .resolve_with_tier("riscv-k3", role)
-                .unwrap_or_else(|| panic!("riscv-k3 must have {} entry", role.id()));
+                .resolve_with_tier("riscv-local-scheduler", role)
+                .unwrap_or_else(|| panic!("riscv-local-scheduler must have {} entry", role.id()));
             assert_eq!(
                 hit_tier,
-                "riscv-k3",
-                "{} must hit riscv-k3 (not cpu-fallback)",
+                "riscv-local-scheduler",
+                "{} must hit riscv-local-scheduler (not cpu-fallback)",
                 role.id()
             );
             assert_eq!(
                 choice.ep,
-                "k3-scheduler",
-                "{} on K3 must route to k3-scheduler :8090 sentinel EP (禁旁路直连)",
+                "local-scheduler",
+                "{} on RISC-V local-scheduler must route to local-scheduler :8090 sentinel EP (禁旁路直连)",
                 role.id()
             );
         }
-        // LLM 选型对齐 bianbu §3.1 / k3-16g(16G 主推 Qwen2.5-7B q4)。
+        // LLM 选型对齐 bianbu §3.1 / local-scheduler-16g(16G 主推 Qwen2.5-7B q4)。
         assert_eq!(
-            c.resolve("riscv-k3", Role::Llm).unwrap().model,
+            c.resolve("riscv-local-scheduler", Role::Llm).unwrap().model,
             "qwen2.5-7b"
         );
     }
 
-    /// riscv-k3 ASR 选型对齐 bianbu §3.1 = sherpa SenseVoice(非 whisper)。
+    /// riscv-local-scheduler ASR 选型对齐 bianbu §3.1 = sherpa SenseVoice(非 whisper)。
     /// 回归门:防止 catalog ASR 引擎漂回 whisper(设备实跑 sensevoice + diarization)。
     #[test]
-    fn k3_asr_is_sensevoice_aligned_with_bianbu() {
+    fn local_scheduler_asr_is_sensevoice_aligned() {
         let c = Catalog::builtin_default();
-        let asr = c.resolve("riscv-k3", Role::Asr).unwrap();
+        let asr = c.resolve("riscv-local-scheduler", Role::Asr).unwrap();
         assert_eq!(
             asr.engine, "sensevoice",
-            "K3 ASR 对齐 bianbu §3.1 = sherpa SenseVoice"
+            "RISC-V local-scheduler ASR 对齐 bianbu §3.1 = sherpa SenseVoice"
         );
-        assert_eq!(asr.ep, "k3-scheduler", "K3 ASR 经 :8090 收口");
+        assert_eq!(
+            asr.ep, "local-scheduler",
+            "RISC-V local-scheduler ASR 经 :8090 收口"
+        );
         // rerank/ocr 选型注解对齐
         assert_eq!(
-            c.resolve("riscv-k3", Role::Rerank).unwrap().model,
+            c.resolve("riscv-local-scheduler", Role::Rerank)
+                .unwrap()
+                .model,
             "bge-reranker-base"
         );
         assert_eq!(
-            c.resolve("riscv-k3", Role::Ocr).unwrap().model,
+            c.resolve("riscv-local-scheduler", Role::Ocr).unwrap().model,
             "pp-ocrv4-layout"
         );
     }
 
-    /// k3-scheduler 哨兵条目无 HF 下载(repo/file 空)—— 预置模型,wizard 跳过下载步。
+    /// local-scheduler 哨兵条目无 HF 下载(repo/file 空)—— 预置模型,wizard 跳过下载步。
     #[test]
-    fn k3_scheduler_entries_have_no_hf_download() {
+    fn local_scheduler_entries_have_no_hf_download() {
         let c = Catalog::builtin_default();
-        let emb = c.resolve("riscv-k3", Role::Embedding).unwrap();
+        let emb = c.resolve("riscv-local-scheduler", Role::Embedding).unwrap();
         assert!(
             emb.repo.is_empty(),
-            "k3-scheduler embedding has no HF repo (served via :8090)"
+            "local-scheduler embedding has no HF repo (served via :8090)"
         );
-        assert!(emb.file.is_empty(), "k3-scheduler embedding has no HF file");
+        assert!(
+            emb.file.is_empty(),
+            "local-scheduler embedding has no HF file"
+        );
     }
 
     // ── 边界:缺 tier / 缺 role / 回退 cpu-fallback ─────────────────────
@@ -620,7 +628,7 @@ mod tests {
     #[test]
     fn resolve_with_tier_reports_fallback() {
         let c = Catalog::builtin_default();
-        // rk3588-rknpu 无 OCR → 回退 cpu-fallback(riscv-k3 现已有自己的 OCR,改用 rk3588)。
+        // rk3588-rknpu 无 OCR → 回退 cpu-fallback(riscv-local-scheduler 现已有自己的 OCR,改用 rk3588)。
         let (hit_tier, _) = c.resolve_with_tier("rk3588-rknpu", Role::Ocr).unwrap();
         assert_eq!(
             hit_tier, CPU_FALLBACK_TIER,

@@ -12,7 +12,7 @@ use attune_core::plugin_sig::TrustMode;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use sha2::{Digest, Sha256};
 
 /// Default public cloud accounts endpoint when the self-host override
@@ -43,6 +43,24 @@ pub(crate) fn resolve_accounts_url(state: &SharedState) -> String {
                 .map(str::to_string)
         });
     configured.unwrap_or_else(|| DEFAULT_ACCOUNTS_URL.to_string())
+}
+
+fn member_billing_json(accounts_url: &str) -> serde_json::Value {
+    let base = accounts_url.trim_end_matches('/');
+    serde_json::json!({
+        "accounts_url": accounts_url,
+        "upgrade_url": format!("{base}/upgrade"),
+        "billing_url": format!("{base}/billing"),
+    })
+}
+
+/// GET /api/v1/member/billing — 会员购买/账单入口。
+///
+/// URL 由服务端 settings 解析，避免前端硬编码公共云，也避免客户端传入 URL
+/// 造成 SSRF / 付费墙绕过。
+pub async fn get_billing(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let accounts_url = resolve_accounts_url(&state);
+    Json(member_billing_json(&accounts_url))
 }
 
 fn resolve_pluginhub_url(state: &SharedState) -> String {
@@ -79,6 +97,14 @@ struct CloudLoginData {
     user: UserInfo,
     license: Option<License>,
     me: Option<UserInfo>,
+    cloud_url: String,
+    session_token: Option<String>,
+    device: Option<
+        std::result::Result<
+            attune_core::cloud_client::DeviceActivateResult,
+            attune_core::cloud_client::DeviceActivateError,
+        >,
+    >,
     /// B5 (2026-06-06): best-effort plugin auto-install report. Computed inside
     /// the SAME blocking thread as the login (sync_plugins does blocking network
     /// I/O — must NOT run on the async worker, same constraint as B4). `None` for
@@ -88,16 +114,38 @@ struct CloudLoginData {
 
 /// GET /api/v1/member/state — 当前会员状态 (UI 展示)
 pub async fn get_state(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let should_restore = {
+        let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner());
+        matches!(*m, MemberState::LoggedOut)
+    };
+    if should_restore {
+        let state_for_restore = state.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            restore_member_state_from_cloud_session(&state_for_restore)
+        })
+        .await;
+    }
+
     let m = state
         .member_state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    let (license_id, llm_quota_remaining) = match &m {
+        MemberState::Paid {
+            license_id,
+            llm_quota_remaining,
+            ..
+        } => (Some(license_id.as_str()), *llm_quota_remaining),
+        _ => (None, 0),
+    };
     Json(serde_json::json!({
         "state": m,
         "is_logged_in": m.is_logged_in(),
         "is_paid": m.is_paid(),
         "account_id": m.account_id(),
+        "license_id": license_id,
+        "llm_quota_remaining": llm_quota_remaining,
     }))
 }
 
@@ -210,16 +258,88 @@ fn paid_verification_error(
 /// session is available (so the `login_token` paid path simply skips). Used only
 /// by `login_token`, which carries no live credentials of its own.
 fn member_session_sync_plugins() -> Option<attune_core::plugin_sync::SyncReport> {
-    let path = attune_core::platform::config_dir().join("cloud-session.json");
-    let json = std::fs::read_to_string(&path).ok()?;
-    let sess: serde_json::Value = serde_json::from_str(&json).ok()?;
-    let cloud_url = sess.get("cloud_url").and_then(|v| v.as_str())?;
-    let session = sess
-        .get("session")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())?;
-    let client = CloudClient::with_session(cloud_url, session);
+    let client = cloud_client_from_session()?;
     Some(attune_core::plugin_sync::best_effort_sync_plugins(&client))
+}
+
+/// Restore the in-memory member state from the persisted cloud session.
+///
+/// This closes the restart gap: `login_password` persists `cloud-session.json`,
+/// but `AppState::new` necessarily starts as LoggedOut. On vault unlock and on a
+/// lazy `/member/state` read, this function replays the authoritative cloud
+/// session into `MemberState`, gateway/pluginhub settings, entitlement rows, and
+/// best-effort plugin sync. It never turns a failed cloud check into Paid.
+pub(crate) fn restore_member_state_from_cloud_session(state: &SharedState) -> Option<MemberState> {
+    let client = cloud_client_from_session()?;
+    let me = match client.me() {
+        Ok(me) => me,
+        Err(e) => {
+            tracing::warn!("member restore: persisted cloud session is not usable: {e}");
+            return None;
+        }
+    };
+    let is_paid = matches!(me.plan.as_str(), "pro" | "pro_plus" | "enterprise");
+    let restored = if is_paid {
+        let selected = match client.list_licenses() {
+            Ok(licenses) => licenses
+                .into_iter()
+                .find(|lic| {
+                    lic.revoked_at.is_none()
+                        && matches!(lic.plan.as_str(), "pro" | "pro_plus" | "enterprise")
+                })
+                .or_else(|| {
+                    tracing::warn!("member restore: paid account has no active paid license");
+                    None
+                })?,
+            Err(e) => {
+                tracing::warn!("member restore: list licenses failed: {e}");
+                return None;
+            }
+        };
+        let fp = attune_core::device_fingerprint::device_fingerprint();
+        match client.device_activate(&selected.license_key, &fp) {
+            Ok(dev) => store_device_binding(state, &dev),
+            Err(e) => {
+                tracing::warn!(
+                    "member restore: device binding failed; paid state not restored: {e}"
+                );
+                return None;
+            }
+        }
+        wire_cloud_gateway(
+            state,
+            me.gateway_url.as_deref(),
+            me.gateway_token.as_deref(),
+            me.gateway_default_model.as_deref(),
+            &me.email,
+        );
+        wire_pluginhub_provider(state, &selected.license_key, &me.email);
+        store_login_entitlements(state, &selected);
+        let sync = attune_core::plugin_sync::best_effort_sync_plugins(&client);
+        if !sync.installed.is_empty() || !sync.updated.is_empty() || !sync.failed.is_empty() {
+            tracing::info!(
+                "member restore: plugin sync installed={}, updated={}, failed={}",
+                sync.installed.len(),
+                sync.updated.len(),
+                sync.failed.len()
+            );
+        }
+        MemberState::Paid {
+            account_id: me.id.to_string(),
+            license_id: selected
+                .license_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| selected.id.to_string()),
+            llm_quota_remaining: 0,
+        }
+    } else {
+        MemberState::Free {
+            account_id: me.id.to_string(),
+        }
+    };
+
+    *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = restored.clone();
+    Some(restored)
 }
 
 /// Serialize a [`SyncReport`] into the stable UI JSON shape (shared by both
@@ -234,6 +354,133 @@ fn sync_report_to_json(r: &attune_core::plugin_sync::SyncReport) -> serde_json::
             .map(|(id, reason)| serde_json::json!({"plugin_id": id, "reason": reason}))
             .collect::<Vec<_>>(),
     })
+}
+
+fn month_window_ms() -> (i64, i64) {
+    let now = Utc::now();
+    let start = now
+        .with_day(1)
+        .and_then(|d| d.date_naive().and_hms_opt(0, 0, 0).map(|dt| dt.and_utc()))
+        .unwrap_or(now);
+    (start.timestamp_millis(), now.timestamp_millis())
+}
+
+fn local_usage_summary_json(state: &SharedState) -> serde_json::Value {
+    let (from_ms, to_ms) = month_window_ms();
+    let summary = {
+        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        vault.store().usage_summary(from_ms, to_ms).ok()
+    };
+    match summary {
+        Some(s) => serde_json::json!({
+            "events": s.events,
+            "llm_tokens_input": s.tokens_in,
+            "llm_tokens_output": s.tokens_out,
+            "llm_tokens_total": s.tokens_in + s.tokens_out,
+            "llm_cost_usd": s.cost_usd,
+            "plugin_installs": 0,
+            "cache_hit_rate": s.cache_hit_rate,
+            "prompt_cache_hit_rate": s.prompt_cache_hit_rate,
+        }),
+        None => serde_json::json!({
+            "events": 0,
+            "llm_tokens_input": 0,
+            "llm_tokens_output": 0,
+            "llm_tokens_total": 0,
+            "llm_cost_usd": 0.0,
+            "plugin_installs": 0,
+            "cache_hit_rate": 0.0,
+            "prompt_cache_hit_rate": 0.0,
+        }),
+    }
+}
+
+fn fallback_quota_json(
+    state: &SharedState,
+    member: &MemberState,
+    error: Option<String>,
+) -> serde_json::Value {
+    let tier = match member {
+        MemberState::Paid { .. } => "pro",
+        MemberState::Free { .. } => "free",
+        MemberState::LoggedOut => "self-managed",
+    };
+    let limit = match member {
+        MemberState::Paid {
+            llm_quota_remaining,
+            ..
+        } => *llm_quota_remaining,
+        _ => 0,
+    };
+    let mut cross_service_errors = serde_json::Map::new();
+    if let Some(e) = error {
+        cross_service_errors.insert("accounts".into(), serde_json::Value::String(e));
+    }
+    let usage = local_usage_summary_json(state);
+    let used = usage
+        .get("llm_tokens_total")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let remaining = if limit > 0 {
+        limit.saturating_sub(used)
+    } else {
+        0
+    };
+    let percent_used = if limit > 0 {
+        ((used as f64 / limit as f64) * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    serde_json::json!({
+        "tier": tier,
+        "plan_expires": null,
+        "month": Utc::now().format("%Y-%m").to_string(),
+        "usage": usage,
+        "quota": {
+            "llm_tokens_monthly": limit,
+            "remaining": remaining,
+            "percent_used": percent_used,
+        },
+        "history": [],
+        "local_usage": local_usage_summary_json(state),
+        "cross_service_errors": cross_service_errors,
+    })
+}
+
+fn attach_local_usage(mut value: serde_json::Value, state: &SharedState) -> serde_json::Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("local_usage".into(), local_usage_summary_json(state));
+    }
+    value
+}
+
+/// GET /api/v1/users/me/quota — 本地配额视图代理。
+///
+/// 有持久化 cloud session 时透传 accounts 的真实 quota；否则返回可渲染的零数据,
+/// 让免费/自配 token 用户也能看到说明和升级入口,而不是空白页。
+pub async fn get_quota(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let member = state
+        .member_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(client) = cloud_client_from_session() else {
+        return Json(fallback_quota_json(&state, &member, None));
+    };
+    let fallback_member = member.clone();
+    match tokio::task::spawn_blocking(move || client.me_quota_json()).await {
+        Ok(Ok(v)) => Json(attach_local_usage(v, &state)),
+        Ok(Err(e)) => Json(fallback_quota_json(
+            &state,
+            &fallback_member,
+            Some(e.to_string()),
+        )),
+        Err(e) => Json(fallback_quota_json(
+            &state,
+            &fallback_member,
+            Some(format!("quota task join error: {e}")),
+        )),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -274,18 +521,23 @@ pub async fn login_password(
     let email = req.email.trim().to_string();
     let password = std::mem::take(&mut req.password);
     let license_code = req.license_code.clone();
+    let cloud_url_for_blocking = cloud_url.clone();
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CloudLoginData, (StatusCode, String)> {
-            let mut client = CloudClient::new(cloud_url);
+            let mut client = CloudClient::new(cloud_url_for_blocking.clone());
             let user = client
                 .login(&email, &password)
                 .map_err(|e| (StatusCode::UNAUTHORIZED, format!("login failed: {e}")))?;
+            let session_token = client.session_token().map(str::to_string);
             let is_paid = matches!(user.plan.as_str(), "pro" | "pro_plus" | "enterprise");
             if !is_paid {
                 return Ok(CloudLoginData {
                     user,
                     license: None,
                     me: None,
+                    cloud_url: cloud_url_for_blocking,
+                    session_token,
+                    device: None,
                     plugin_sync: None,
                 });
             }
@@ -313,6 +565,8 @@ pub async fn login_password(
             ))?;
             // best-effort gateway token fetch — a failure here must not block login.
             let me = client.me().ok();
+            let fp = attune_core::device_fingerprint::device_fingerprint();
+            let device = client.device_activate(&selected.license_key, &fp);
             // B5 (2026-06-06): auto-install entitled pro plugins (e.g. law-pro) so
             // domain-specific agents work right after login, no manual `attune
             // sync-plugins`. Runs on THIS blocking thread (reusing the authenticated
@@ -320,11 +574,18 @@ pub async fn login_password(
             // failure logs + yields an empty report; the login still succeeds (§4.5).
             // Signature verification (verify_with_key) inside sync is NOT bypassed:
             // an unverified package fails closed and is reported in `failed`.
-            let plugin_sync = Some(attune_core::plugin_sync::best_effort_sync_plugins(&client));
+            let plugin_sync = if device.is_ok() {
+                Some(attune_core::plugin_sync::best_effort_sync_plugins(&client))
+            } else {
+                None
+            };
             Ok(CloudLoginData {
                 user,
                 license: Some(selected),
                 me,
+                cloud_url: cloud_url_for_blocking,
+                session_token,
+                device: Some(device),
                 plugin_sync,
             })
         });
@@ -332,6 +593,9 @@ pub async fn login_password(
         user,
         license,
         me,
+        cloud_url,
+        session_token,
+        device,
         plugin_sync,
     } = blocking
         .await
@@ -354,7 +618,26 @@ pub async fn login_password(
         .and_then(|m| m.vertical.clone())
         .or_else(|| user.vertical.clone());
 
-    let new_state = if let Some(selected) = license {
+    let (new_state, device_json) = if let Some(selected) = license {
+        let dev = match device {
+            Some(Ok(dev)) => dev,
+            Some(Err(e)) => return Err(device_binding_error(&e)),
+            None => {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "device binding result missing",
+                        "code": "device-binding-missing",
+                        "paid_applied": false,
+                    })),
+                ));
+            }
+        };
+        if let Some(token) = session_token.as_deref() {
+            if let Err(e) = persist_cloud_session(&cloud_url, token) {
+                tracing::warn!("member login: failed to persist cloud session: {e}");
+            }
+        }
         // 付费会员：拿 cloud gateway token, 合并进 vault app_settings,
         // 桌面 chat 零配置接通云端 LLM。best-effort — 失败不阻断登录。
         match me {
@@ -372,18 +655,35 @@ pub async fn login_password(
             }
         }
 
+        wire_pluginhub_provider(&state, &selected.license_key, &user.email);
         store_login_entitlements(&state, &selected);
+        store_device_binding(&state, &dev);
 
-        MemberState::Paid {
-            account_id: user.id.to_string(),
-            license_id: selected.id.to_string(),
-            // 新 License 不再携带 per-license LLM 配额 —— 配额由 cloud gateway 侧统计。
-            llm_quota_remaining: 0,
-        }
+        (
+            MemberState::Paid {
+                account_id: user.id.to_string(),
+                license_id: selected.id.to_string(),
+                // 新 License 不再携带 per-license LLM 配额 —— 配额由 cloud gateway 侧统计。
+                llm_quota_remaining: 0,
+            },
+            Some(serde_json::json!({
+                "device_id": dev.device_id,
+                "max_activations": dev.max_activations,
+                "current_activations": dev.current_activations,
+            })),
+        )
     } else {
-        MemberState::Free {
-            account_id: user.id.to_string(),
+        if let Some(token) = session_token.as_deref() {
+            if let Err(e) = persist_cloud_session(&cloud_url, token) {
+                tracing::warn!("member login: failed to persist cloud session: {e}");
+            }
         }
+        (
+            MemberState::Free {
+                account_id: user.id.to_string(),
+            },
+            None,
+        )
     };
 
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
@@ -397,6 +697,7 @@ pub async fn login_password(
         "tier": user.plan,
         "vertical": vertical,
         "plugin_sync": plugins_json,
+        "device": device_json,
     })))
 }
 
@@ -447,6 +748,76 @@ pub async fn refresh_entitlements(
             .iter()
             .map(|(id, st)| serde_json::json!({ "plugin_id": id, "status": st }))
             .collect::<Vec<_>>(),
+    })))
+}
+
+/// POST /api/v1/member/plugins/sync — 手动重试会员插件下载/更新。
+///
+/// 账号密码/CLI 登录优先复用 `cloud-session.json` 的 cloud session,以 cloud 返回的
+/// entitled_plugins 做完整签名链同步。授权码激活路径没有账号 session,则回退到本地
+/// entitlement_cache + pluginhub license_key 走 activation 同源的 PluginHub 安装链。
+pub async fn sync_plugins_now(
+    State(state): State<SharedState>,
+) -> AppResult<Json<serde_json::Value>> {
+    {
+        let m = state.member_state.lock().unwrap_or_else(|e| e.into_inner());
+        if !m.is_paid() {
+            return Err(AppError::detailed(
+                StatusCode::FORBIDDEN,
+                serde_json::json!({
+                    "error": "paid membership required",
+                    "code": "membership-required",
+                }),
+            ));
+        }
+    }
+
+    let state_for_sync = state.clone();
+    let report = tokio::task::spawn_blocking(
+        move || -> Result<attune_core::plugin_sync::SyncReport, String> {
+            if let Some(client) = cloud_client_from_session() {
+                return Ok(attune_core::plugin_sync::best_effort_sync_plugins(&client));
+            }
+
+            let (hub_url, license_key) = resolve_pluginhub_config(&state_for_sync);
+            let Some(license_key) = license_key.filter(|s| !s.trim().is_empty()) else {
+                return Err(
+                    "no cloud session or pluginhub license key available for plugin sync".into(),
+                );
+            };
+            let allowed_plugins = entitled_plugin_ids_for_retry(&state_for_sync);
+            if allowed_plugins.is_empty() {
+                return Ok(attune_core::plugin_sync::SyncReport {
+                    installed: Vec::new(),
+                    updated: Vec::new(),
+                    skipped_already_installed: Vec::new(),
+                    failed: Vec::new(),
+                });
+            }
+            let fp = attune_core::device_fingerprint::device_fingerprint();
+            Ok(sync_activation_plugins(
+                &hub_url,
+                &license_key,
+                &allowed_plugins,
+                Some(fp.fingerprint_sig.as_str()),
+            ))
+        },
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("plugin sync task join error: {e}")))?
+    .map_err(|e| {
+        AppError::detailed(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "error": e,
+                "code": "plugin-sync-unavailable",
+            }),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "plugin_sync": sync_report_to_json(&report),
     })))
 }
 
@@ -542,6 +913,123 @@ fn cloud_client_from_session() -> Option<CloudClient> {
     Some(CloudClient::with_session(cloud_url, session))
 }
 
+fn persist_cloud_session(cloud_url: &str, session_token: &str) -> Result<(), String> {
+    let path = attune_core::platform::config_dir().join("cloud-session.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create session dir: {e}"))?;
+    }
+    let data = serde_json::json!({
+        "cloud_url": cloud_url,
+        "session": session_token,
+    });
+    let json =
+        serde_json::to_string_pretty(&data).map_err(|e| format!("session serialize: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("write session: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn resolve_pluginhub_config(state: &SharedState) -> (String, Option<String>) {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let parsed = vault
+        .store()
+        .get_meta(SETTINGS_META_KEY)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let url = parsed
+        .as_ref()
+        .and_then(|v| {
+            v.get("pluginhub")
+                .and_then(|p| p.get("url"))
+                .and_then(|u| u.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| DEFAULT_PLUGINHUB_URL.to_string());
+    let key = parsed.and_then(|v| {
+        v.get("pluginhub")
+            .and_then(|p| p.get("license_key"))
+            .and_then(|k| k.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
+    (url, key)
+}
+
+fn wire_pluginhub_provider(state: &SharedState, license_key: &str, who: &str) {
+    if license_key.trim().is_empty() {
+        return;
+    }
+    let hub_url = resolve_pluginhub_url(state);
+    match apply_pluginhub_to_vault_settings(state, &hub_url, license_key) {
+        Ok(()) => tracing::info!("member pluginhub: configured PluginHub for {who}"),
+        Err(e) => tracing::warn!("member pluginhub: settings not written for {who}: {e}"),
+    }
+    // Hot switch even if vault persistence failed; the current paid session can install
+    // marketplace plugins immediately.
+    state.reload_plugin_hub(Some(&hub_url), Some(license_key));
+}
+
+fn apply_pluginhub_to_vault_settings(
+    state: &SharedState,
+    hub_url: &str,
+    license_key: &str,
+) -> Result<(), String> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = vault.dek_db().map_err(|e| format!("vault locked: {e}"))?;
+    let existing = vault
+        .store()
+        .get_meta(SETTINGS_META_KEY)
+        .map_err(|e| format!("get_meta failed: {e}"))?;
+    let mut current: serde_json::Value = match existing {
+        Some(data) => serde_json::from_slice(&data).unwrap_or_else(|_| serde_json::json!({})),
+        None => serde_json::json!({}),
+    };
+    if !current.is_object() {
+        current = serde_json::json!({});
+    }
+    let obj = current.as_object_mut().expect("current is object");
+    let pluginhub = obj
+        .entry("pluginhub")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "settings.pluginhub must be an object".to_string())?;
+    pluginhub.insert("url".into(), serde_json::Value::String(hub_url.to_string()));
+    pluginhub.insert(
+        "license_key".into(),
+        serde_json::Value::String(license_key.to_string()),
+    );
+    let data = serde_json::to_vec(&current).map_err(|e| format!("settings ser: {e}"))?;
+    vault
+        .store()
+        .set_meta(SETTINGS_META_KEY, &data)
+        .map_err(|e| format!("set_meta failed: {e}"))?;
+    Ok(())
+}
+
+fn entitled_plugin_ids_for_retry(state: &SharedState) -> Vec<String> {
+    state
+        .entitlement_cache
+        .snapshot()
+        .into_iter()
+        .filter(|row| {
+            !row.tier.trim().eq_ignore_ascii_case("free")
+                && !matches!(
+                    row.status.trim().to_ascii_lowercase().as_str(),
+                    "revoked" | "suspended" | "expired"
+                )
+        })
+        .map(|row| row.plugin_id)
+        .collect()
+}
+
 /// 解析当前 `plugin_trust_mode`(app_settings meta);缺失/旧配置/vault 锁 → 默认
 /// [`TrustMode::Warn`](决策 2 + spec §10 grandfather)。T11 加 UI setter;本函数
 /// 只读,默认 Warn 让 client 先于 cloud v4 ship 不破网(跨仓 bootstrap)。
@@ -570,9 +1058,8 @@ pub struct ActivateLicenseReq {
 /// - 阶段一 **authorization**:`/member/activate` 成功 → 用户被授权为 Paid + 拿 gateway。
 /// - 阶段二 **device binding**:`/devices/activate` 把本机指纹绑到 license + 颁 device_token。
 ///
-/// 两阶段语义分离(spec §3 编排):授权成功即视为 Paid(gateway 已可用);设备绑定
-/// 失败(超设备数 / 指纹被拒)是**独立**的可操作问题,不回退已授权状态,但必须明确
-/// surface 给用户(不静默)。device 绑定结果用 `Result` 携带分类错误。
+/// 商业保护语义:云端授权成功后仍必须绑定当前设备；设备绑定失败时不下载付费插件、
+/// 不写 gateway/pluginhub、不置 Paid。device 绑定结果用 `Result` 携带分类错误。
 struct ActivationOutcome {
     activate: attune_core::cloud_client::ActivateResult,
     device: std::result::Result<
@@ -581,9 +1068,10 @@ struct ActivationOutcome {
     >,
     /// Best-effort pro plugin install driven by activation-code entitlements.
     /// Unlike password/session login, this path has no cloud session cookie, so it
-    /// talks to PluginHub with the license key. Failure is surfaced in the report
-    /// but never rolls back Paid/gateway state.
+    /// talks to PluginHub with the license key. Runs only after device binding
+    /// succeeds, so an unbound copied device cannot receive paid plugin packages.
     plugin_sync: attune_core::plugin_sync::SyncReport,
+    plugin_entitlements: Vec<PluginHubInstallEntitlement>,
 }
 
 /// POST /api/v1/member/activate-license — 授权码 (license_key) 激活全链。
@@ -603,7 +1091,7 @@ struct ActivationOutcome {
 ///   - 指纹/license 被拒 → 403 (`device-rejected`);
 ///   - cloud 不可达 → 502 (`device-activate-unavailable`)。
 ///
-/// 这些错误下用户已被授权(gateway 已配),但本机未完成绑定 —— 明确返回而非静默。
+/// 这些错误下不写入 Paid/gateway/pluginhub/entitlement,避免授权码或本地状态被迁移滥用。
 pub async fn activate_license(
     State(state): State<SharedState>,
     Json(req): Json<ActivateLicenseReq>,
@@ -635,13 +1123,31 @@ pub async fn activate_license(
             // 阶段二:绑定本机设备(授权已成功;绑定结果按分类错误带回,不在此抛)。
             let fp = attune_core::device_fingerprint::device_fingerprint();
             let device = client.device_activate(&key_for_blocking, &fp);
-            let plugin_sync = sync_activation_plugins(
-                &pluginhub_url,
-                &key_for_blocking,
-                &activate.allowed_plugins,
-                Some(fp.fingerprint_sig.as_str()),
-            );
-            Ok(ActivationOutcome { activate, device, plugin_sync })
+            let (plugin_sync, plugin_entitlements) = if device.is_ok() {
+                let sync = sync_activation_plugins_detailed(
+                    &pluginhub_url,
+                    &key_for_blocking,
+                    &activate.allowed_plugins,
+                    Some(fp.fingerprint_sig.as_str()),
+                );
+                (sync.report, sync.entitlements)
+            } else {
+                (
+                    attune_core::plugin_sync::SyncReport {
+                        installed: Vec::new(),
+                        updated: Vec::new(),
+                        skipped_already_installed: Vec::new(),
+                        failed: Vec::new(),
+                    },
+                    Vec::new(),
+                )
+            };
+            Ok(ActivationOutcome {
+                activate,
+                device,
+                plugin_sync,
+                plugin_entitlements,
+            })
         },
     )
     .await
@@ -663,7 +1169,12 @@ pub async fn activate_license(
         activate: result,
         device,
         plugin_sync,
+        plugin_entitlements,
     } = outcome;
+    let dev = match device {
+        Ok(dev) => dev,
+        Err(e) => return Err(device_binding_error(&e)),
+    };
 
     // ── 授权成功:配 gateway LLM + 落 entitlement + 置 Paid(与 login_password 同逻辑)──
     // best-effort:写失败不阻断激活(用户仍是 Paid,只是 chat 需手填 key,§4.5)。
@@ -675,9 +1186,15 @@ pub async fn activate_license(
         result.gateway_default_model.as_deref(),
         &redact_license_key(&license_key),
     );
+    wire_pluginhub_provider(&state, &license_key, &redact_license_key(&license_key));
     // 落 entitlement:allowed_plugins 写进缓存 + vault,供 pluginhub 安装授权(②)+
     // 周期 re-verify 基准。best-effort,失败仅 warn。
-    store_activation_entitlements(&state, &license_key, &result.allowed_plugins);
+    store_activation_entitlements(
+        &state,
+        &license_key,
+        &result.allowed_plugins,
+        &plugin_entitlements,
+    );
 
     // 置 Paid。授权码激活无独立 account_id,用 license_key 作 account 标识。
     let new_state = MemberState::Paid {
@@ -687,30 +1204,24 @@ pub async fn activate_license(
     };
     *state.member_state.lock().unwrap_or_else(|e| e.into_inner()) = new_state.clone();
 
-    // ── 设备绑定阶段(①):成功 → 持久化 device_token;失败 → 明确返回可操作错误 ──
-    match device {
-        Ok(dev) => {
-            // 把 device_token + device_id + 配额落 vault(后续 heartbeat / cert 用)。
-            store_device_binding(&state, &dev);
-            Ok(Json(serde_json::json!({
-                "status": "ok",
-                "state": new_state,
-                "plan": result.plan,
-                "expires_at": result.expires_at,
-                // GAP-B: passthrough cloud-issued vertical (UI copy only, never a gate
-                // per §11 R2; client relays, does not self-report).
-                "vertical": result.vertical,
-                "allowed_plugins": result.allowed_plugins,
-                "plugin_sync": sync_report_to_json(&plugin_sync),
-                "device": {
-                    "device_id": dev.device_id,
-                    "max_activations": dev.max_activations,
-                    "current_activations": dev.current_activations,
-                },
-            })))
-        }
-        Err(e) => Err(device_binding_error(&e)),
-    }
+    // 把 device_token + device_id + 配额落 vault(后续 heartbeat / cert 用)。
+    store_device_binding(&state, &dev);
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "state": new_state,
+        "plan": result.plan,
+        "expires_at": result.expires_at,
+        // GAP-B: passthrough cloud-issued vertical (UI copy only, never a gate
+        // per §11 R2; client relays, does not self-report).
+        "vertical": result.vertical,
+        "allowed_plugins": result.allowed_plugins,
+        "plugin_sync": sync_report_to_json(&plugin_sync),
+        "device": {
+            "device_id": dev.device_id,
+            "max_activations": dev.max_activations,
+            "current_activations": dev.current_activations,
+        },
+    })))
 }
 
 fn sync_activation_plugins(
@@ -719,14 +1230,31 @@ fn sync_activation_plugins(
     allowed_plugins: &[String],
     device_fp: Option<&str>,
 ) -> attune_core::plugin_sync::SyncReport {
+    sync_activation_plugins_detailed(hub_url, license_key, allowed_plugins, device_fp).report
+}
+
+fn sync_activation_plugins_detailed(
+    hub_url: &str,
+    license_key: &str,
+    allowed_plugins: &[String],
+    device_fp: Option<&str>,
+) -> ActivationPluginSync {
     let hub = attune_core::plugin_hub::HttpPluginHubProvider::new(hub_url, license_key);
     match attune_core::plugin_registry::PluginRegistry::default_plugins_dir() {
-        Ok(plugins_dir) => {
-            sync_activation_plugins_with_hub(&hub, allowed_plugins, device_fp, &plugins_dir)
-        }
-        Err(e) => {
-            activation_sync_failed_for_all(allowed_plugins, format!("plugins dir unavailable: {e}"))
-        }
+        Ok(plugins_dir) => sync_activation_plugins_with_hub_detailed(
+            &hub,
+            allowed_plugins,
+            device_fp,
+            &plugins_dir,
+            true,
+        ),
+        Err(e) => ActivationPluginSync {
+            report: activation_sync_failed_for_all(
+                allowed_plugins,
+                format!("plugins dir unavailable: {e}"),
+            ),
+            entitlements: Vec::new(),
+        },
     }
 }
 
@@ -745,32 +1273,64 @@ fn activation_sync_failed_for_all(
     }
 }
 
+#[cfg(test)]
 fn sync_activation_plugins_with_hub(
     hub: &dyn PluginHubProvider,
     allowed_plugins: &[String],
     device_fp: Option<&str>,
     plugins_dir: &std::path::Path,
 ) -> attune_core::plugin_sync::SyncReport {
+    sync_activation_plugins_with_hub_detailed(hub, allowed_plugins, device_fp, plugins_dir, false)
+        .report
+}
+
+#[derive(Debug, Clone)]
+struct PluginHubInstallEntitlement {
+    plugin_id: String,
+    decrypt_key: Option<String>,
+    trial_expires: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ActivationPluginSync {
+    report: attune_core::plugin_sync::SyncReport,
+    entitlements: Vec<PluginHubInstallEntitlement>,
+}
+
+fn sync_activation_plugins_with_hub_detailed(
+    hub: &dyn PluginHubProvider,
+    allowed_plugins: &[String],
+    device_fp: Option<&str>,
+    plugins_dir: &std::path::Path,
+    refresh_installed_entitlements: bool,
+) -> ActivationPluginSync {
     let mut report = attune_core::plugin_sync::SyncReport {
         installed: Vec::new(),
         updated: Vec::new(),
         skipped_already_installed: Vec::new(),
         failed: Vec::new(),
     };
+    let mut entitlements = Vec::new();
     if allowed_plugins.is_empty() {
-        return report;
+        return ActivationPluginSync {
+            report,
+            entitlements,
+        };
     }
 
     if let Err(e) = std::fs::create_dir_all(plugins_dir) {
-        return activation_sync_failed_for_all(
-            allowed_plugins,
-            format!("create plugins dir failed: {e}"),
-        );
+        return ActivationPluginSync {
+            report: activation_sync_failed_for_all(
+                allowed_plugins,
+                format!("create plugins dir failed: {e}"),
+            ),
+            entitlements,
+        };
     }
 
     for plugin_id in allowed_plugins {
         let dst = plugins_dir.join(plugin_id);
-        if dst.is_dir() {
+        if dst.is_dir() && !refresh_installed_entitlements {
             report.skipped_already_installed.push(plugin_id.clone());
             continue;
         }
@@ -784,7 +1344,22 @@ fn sync_activation_plugins_with_hub(
                 continue;
             }
         };
-        let pkg = match hub.download_plugin(plugin_id, &install.version) {
+        entitlements.push(PluginHubInstallEntitlement {
+            plugin_id: plugin_id.clone(),
+            decrypt_key: install.decrypt_key.clone(),
+            trial_expires: install.trial_expires.clone(),
+        });
+        if dst.is_dir() {
+            report.skipped_already_installed.push(plugin_id.clone());
+            continue;
+        }
+        let download_url = install.download_url.trim();
+        let pkg_result = if download_url.is_empty() {
+            hub.download_plugin(plugin_id, &install.version)
+        } else {
+            hub.download_plugin_url(download_url)
+        };
+        let pkg = match pkg_result {
             Ok(pkg) => pkg,
             Err(e) => {
                 report
@@ -802,10 +1377,12 @@ fn sync_activation_plugins_with_hub(
             ));
             continue;
         }
-        match attune_core::plugin_sync::install_official_plugin_package(
+        let key_bytes = install.decrypt_key.as_ref().map(|k| k.as_bytes().to_vec());
+        match attune_core::plugin_sync::install_official_plugin_package_with_key(
             plugin_id,
             &pkg,
             plugins_dir,
+            key_bytes.as_deref(),
         ) {
             Ok(path) => {
                 tracing::info!(
@@ -819,12 +1396,14 @@ fn sync_activation_plugins_with_hub(
                 .push((plugin_id.clone(), format!("plugin install failed: {e}"))),
         }
     }
-    report
+    ActivationPluginSync {
+        report,
+        entitlements,
+    }
 }
 
-/// 把设备绑定失败映射为 HTTP 响应(可操作提示)。授权已成功(gateway 已配),
-/// 但本机绑定未完成 —— 明确返回而非静默放行。`status="activated-not-bound"` 让 UI
-/// 知道"会员已生效,但本设备超限/被拒,需处理"。
+/// 把设备绑定失败映射为 HTTP 响应(可操作提示)。失败路径不置 Paid,不写 gateway,
+/// 不下载付费插件；UI 需要提示用户处理设备上限/拒绝/云端不可达后重试。
 fn device_binding_error(
     e: &attune_core::cloud_client::DeviceActivateError,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -849,10 +1428,11 @@ fn device_binding_error(
     (
         status,
         Json(serde_json::json!({
-            "status": "activated-not-bound",
+            "status": "device-binding-failed",
             "error": e.to_string(),
             "code": code,
             "hint": hint,
+            "paid_applied": false,
         })),
     )
 }
@@ -947,6 +1527,7 @@ fn store_activation_entitlements(
     state: &SharedState,
     license_id: &str,
     allowed_plugins: &[String],
+    plugin_entitlements: &[PluginHubInstallEntitlement],
 ) {
     if allowed_plugins.is_empty() {
         return;
@@ -961,12 +1542,16 @@ fn store_activation_entitlements(
         }
     };
     for plugin_id in allowed_plugins {
+        let hub_row = plugin_entitlements
+            .iter()
+            .find(|entry| entry.plugin_id == *plugin_id);
         let row = attune_core::store::plugin_entitlements::EntitlementRow {
             plugin_id: plugin_id.clone(),
             license_id: license_id.to_string(),
+            decrypt_key: hub_row.and_then(|entry| entry.decrypt_key.clone()),
             tier: "paid".into(),
             status: "active".into(),
-            trial_expires: None,
+            trial_expires: hub_row.and_then(|entry| entry.trial_expires.clone()),
             // 授权码路径下 cloud 未随激活下发 per-plugin 公钥;签名校验仍由
             // pluginhub 安装 + 周期 re-verify 时按 EntitledPlugin.signing_pubkey_hex
             // 校验。此处先记账,留空 pubkey。
@@ -1083,6 +1668,7 @@ mod tests {
         EntitlementRow {
             plugin_id: plugin_id.into(),
             license_id: "lic-x".into(),
+            decrypt_key: None,
             tier: "paid".into(),
             status: status.into(),
             trial_expires: None,
@@ -1091,6 +1677,19 @@ mod tests {
             grace_started_at: None,
             updated_at: last_verified.into(),
         }
+    }
+
+    #[test]
+    fn member_billing_urls_trim_trailing_slash() {
+        let v = super::member_billing_json("https://accounts.example.com/");
+        assert_eq!(
+            v.get("upgrade_url").and_then(|u| u.as_str()),
+            Some("https://accounts.example.com/upgrade")
+        );
+        assert_eq!(
+            v.get("billing_url").and_then(|u| u.as_str()),
+            Some("https://accounts.example.com/billing")
+        );
     }
 
     #[test]
@@ -1186,6 +1785,7 @@ mod tests {
                 plugin_id: plugin_id.into(),
                 version: "1.0.0".into(),
                 sha256: "test".into(),
+                decrypt_key: Some("test-device-bound-key".into()),
                 trial_started: None,
                 trial_expires: None,
                 download_url: format!("/api/v1/packages/{plugin_id}-1.0.0.tar.gz"),
@@ -1197,6 +1797,11 @@ mod tests {
             _plugin_id: &str,
             _version: &str,
         ) -> attune_core::error::Result<Vec<u8>> {
+            self.download_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(b"not-a-valid-plugin-tarball".to_vec())
+        }
+
+        fn download_plugin_url(&self, _download_url: &str) -> attune_core::error::Result<Vec<u8>> {
             self.download_calls.fetch_add(1, Ordering::SeqCst);
             Ok(b"not-a-valid-plugin-tarball".to_vec())
         }
@@ -1422,9 +2027,9 @@ mod tests {
 
     #[test]
     fn gateway_skipped_when_user_has_endpoint() {
-        // User has configured a local Ollama endpoint — gateway must not overwrite.
+        // User has configured a local endpoint — gateway must not overwrite.
         let settings =
-            serde_json::json!({"llm": {"api_key": "", "endpoint": "http://localhost:11434/v1"}});
+            serde_json::json!({"llm": {"api_key": "", "endpoint": "http://localhost:18080/v1"}});
         assert!(!gateway_should_apply(&settings));
     }
 
@@ -1696,15 +2301,16 @@ mod tests {
     use attune_core::cloud_client::{DeviceActivateError, DeviceActivateResult};
     use axum::http::StatusCode;
 
-    /// 超设备数 → 409 max-devices-reached + 可操作 hint,且 status=activated-not-bound
-    /// (会员已授权,本机未绑定 —— 明确 surface,不静默)。
+    /// 超设备数 → 409 max-devices-reached + 可操作 hint,且 status=device-binding-failed
+    /// (本机未绑定 —— fail-closed,不置 Paid)。
     #[test]
     fn device_binding_max_devices_maps_to_409() {
         let (status, body) =
             device_binding_error(&DeviceActivateError::MaxDevicesReached("c".into()));
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body.0["code"], "max-devices-reached");
-        assert_eq!(body.0["status"], "activated-not-bound");
+        assert_eq!(body.0["status"], "device-binding-failed");
+        assert_eq!(body.0["paid_applied"], false);
         assert!(
             body.0["hint"].as_str().unwrap().contains("设备上限"),
             "actionable hint present"
@@ -1719,7 +2325,8 @@ mod tests {
         ));
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body.0["code"], "device-rejected");
-        assert_eq!(body.0["status"], "activated-not-bound");
+        assert_eq!(body.0["status"], "device-binding-failed");
+        assert_eq!(body.0["paid_applied"], false);
     }
 
     /// cloud 不可达 → 502 device-activate-unavailable(fail-closed,不静默放行)。

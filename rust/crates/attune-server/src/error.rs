@@ -68,7 +68,7 @@ pub enum AppError {
     #[error("{0}")]
     TooManyRequests(String),
 
-    /// 502 Bad Gateway — 调上游服务 (Ollama / cloud accounts / plugin hub) 失败.
+    /// 502 Bad Gateway — 调上游服务 (scheduler / cloud accounts / plugin hub) 失败.
     #[error("{0}")]
     BadGateway(String),
 

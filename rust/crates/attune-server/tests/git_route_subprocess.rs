@@ -108,7 +108,7 @@ async fn bind_git_rejects_file_scheme() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bind_git_rejects_ssrf_loopback() {
     let (base, client) = server_or_skip!();
-    let (status, body) = post_bind_git(&base, &client, "http://127.0.0.1:8080/o/r").await;
+    let (status, body) = post_bind_git(&base, &client, "http://127.0.0.1:8090/o/r").await;
     assert_eq!(status, 400, "loopback 必须拒");
     let code = body.get("code").and_then(|c| c.as_str()).unwrap_or("");
     assert!(

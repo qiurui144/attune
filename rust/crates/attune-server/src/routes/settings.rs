@@ -91,7 +91,7 @@ fn validate_settings_fields(body: &serde_json::Value) -> Result<(), String> {
 
     // 1. 所有 URL 字段统一 http/https scheme 校验(对齐 llm.endpoint,防 javascript:/data: + 明显无效)
     for (sect, key, label) in [
-        ("embedding", "ollama_url", "embedding.ollama_url"),
+        ("embedding", "endpoint", "embedding.endpoint"),
         ("pluginhub", "url", "pluginhub.url"),
         ("cloud", "accounts_url", "cloud.accounts_url"),
         ("cloud", "gateway_url", "cloud.gateway_url"),
@@ -128,7 +128,7 @@ fn validate_settings_fields(body: &serde_json::Value) -> Result<(), String> {
             "anthropic",
             "deepseek",
             "qwen",
-            "ollama",
+            "local_scheduler",
             "claude",
             "gemini",
         ];
@@ -362,9 +362,9 @@ pub async fn update_settings(
                 }
             }
         }
-        // 本地模型一键化 (2026-06-01): summary 模式枚举校验。
+        // summary 模式枚举校验。
         // off  = 纯检索，不跑文档/上下文摘要 (弱机 / 离线默认)
-        // local= 用本地 summary_model (Ollama)
+        // local= 用 scheduler/local endpoint
         // cloud= 复用 chat LLM (远端 token)
         if let Some(summary) = body_obj.get("summary").and_then(|v| v.as_str()) {
             const SUMMARY_MODES: &[&str] = &["off", "local", "cloud"];
@@ -481,6 +481,7 @@ pub async fn update_settings(
             .map(|s| s.to_string())
     });
     let need_llm_reload = body.get("llm").is_some();
+    let need_embedding_reload = body.get("embedding").is_some();
     drop(vault);
 
     // G2 (2026-05-01) — pluginhub 字段变化时热切 provider
@@ -492,6 +493,11 @@ pub async fn update_settings(
     if need_llm_reload {
         state.reload_llm();
     }
+    // 2026-07-08 — embedding 字段变化时热切 provider。scheduler 模式下
+    // PATCH settings 后 queue worker 必须立即切到 scheduler-native embed。
+    if need_embedding_reload {
+        state.reload_embedding();
+    }
 
     // 返回前先 redact（防 API key 回流）
     redact_api_key(&mut current);
@@ -501,12 +507,12 @@ pub async fn update_settings(
 /// 默认设置。`recommended_summary` 仅作为"用户主动选本地"时的硬件推荐 fallback；
 /// `form_factor` 决定 LLM 默认 provider 路径：
 /// - `Laptop` / `Server` / `Unknown` → `openai_compat`（远端 token，wizard 引导填 endpoint + key）
-/// - `K3Appliance` → `openai_compat` + endpoint `http://127.0.0.1:8090/v1`
-///   （k3-scheduler 统一收口，**不直连 Ollama :11434**；推理经 :8090 OpenAI-compat，
-///   禁旁路直连 worker。2026-06-22 K3 调度层集成 spec §3）
+/// - `LocalSchedulerAppliance` → `openai_compat` + endpoint `http://127.0.0.1:8090/v1`
+///   （local-scheduler 统一收口；推理经 :8090 OpenAI-compat，
+///   禁旁路直连 worker。）
 ///
 /// **v0.6.0-rc.3 起 LLM 默认走远端 token**（per CLAUDE.md M2 决策 + 用户反馈），
-/// 避免本地 3B 模型在大多数硬件上 OOM 或效果差；K3 一体机形态例外（硬件预选过、镜像预装模型）。
+/// 避免本地 3B 模型在大多数硬件上 OOM 或效果差；本地调度器设备形态例外（硬件预选过、镜像预装模型）。
 fn default_settings(
     _recommended_summary: &str,
     form_factor: attune_core::platform::FormFactor,
@@ -514,15 +520,15 @@ fn default_settings(
     use attune_core::platform::FormFactor;
 
     // 形态分裂的 LLM 默认配置
-    let llm_default = if form_factor == FormFactor::K3Appliance {
-        // K3 一体机：本地 LLM 经 k3-scheduler :8090 统一收口(OpenAI/Ollama-compat,推理
-        // 统一收口、禁旁路直连 worker；2026-06-22 K3 调度层集成 spec),不预设具体 chat 模型。
-        // 重 LLM 仍可由用户切云端会员 token(K3 7B q4 主推,小模型兜底)。
+    let llm_default = if form_factor == FormFactor::LocalSchedulerAppliance {
+        // 本地调度器设备：本地 LLM 经 local-scheduler :8090 统一收口(OpenAI-compatible,推理
+        // 统一收口、禁旁路直连 worker),不预设具体 chat 模型。
+        // 重 LLM 仍可由用户切云端会员 token。
         //
-        // provider="openai_compat"(非 "ollama"):K3 不直连 Ollama :11434,而是经 scheduler
+        // provider="openai_compat":Attune 经 scheduler
         // 的 OpenAI-compat /v1。build_llm_from_settings 优先级 1(endpoint 非空 →
-        // OpenAiLlmProvider)使该字段对路由实际生效;写 "ollama" 会误导(K3 收口禁旁路直连
-        // worker,Ollama 是 scheduler 内部 worker,attune 经 :8090 不直连)。
+        // OpenAiLlmProvider)使该字段对路由实际生效;本地推理必须由 scheduler
+        // 在 :8090 统一收口，attune 不直连具体 worker。
         serde_json::json!({
             "provider": "openai_compat",
             "endpoint": "http://127.0.0.1:8090/v1",
@@ -532,7 +538,7 @@ fn default_settings(
     } else {
         // Laptop / Server / Unknown：远端 token 默认，wizard 引导填
         serde_json::json!({
-            "provider": "openai_compat",   // openai_compat / anthropic / deepseek / qwen / ollama / claude
+            "provider": "openai_compat",   // openai_compat / anthropic / deepseek / qwen / claude
             "endpoint": null,              // null → UI 引导填 (e.g. https://api.openai.com/v1)
             "model": null,                 // null → UI 引导填 (e.g. gpt-4o-mini / claude-3-5-haiku / deepseek-chat)
             "api_key": null
@@ -546,9 +552,9 @@ fn default_settings(
         // 摘要模型默认固定为本地可运行且效果较稳的 qwen2.5:3b；可在 Settings 中覆盖。
         "summary_model": "qwen2.5:3b",
         // 本地模型一键化 (2026-06-01): 摘要模式 off / local / cloud。
-        // K3 一体机预装本地模型 → local；其他形态 LLM 默认走远端 token → 摘要也复用云端
-        // (cloud) 避免要求笔电先装 Ollama 才能用摘要。弱机用户可在 Settings 改 off 纯检索。
-        "summary": if form_factor == FormFactor::K3Appliance { "local" } else { "cloud" },
+        // 本地调度器设备预装本地模型 → local；其他形态 LLM 默认走远端 token → 摘要也复用云端
+        // (cloud) 避免要求笔电先启动本地 scheduler 才能用摘要。弱机用户可在 Settings 改 off 纯检索。
+        "summary": if form_factor == FormFactor::LocalSchedulerAppliance { "local" } else { "cloud" },
         "context_strategy": "economical",      // economical(150字) / accurate(300字+片段) / raw(不压缩，仅本地)
         // 后台算力电源策略(L_hw 0.4):电池下后台 KB 建库节流/暂停 + 优先 NPU,避免笔电
         // 后台拉满 GPU 烧电池/热降频。mode: throttle(默认) / pause / off。引擎默认即此值,
@@ -562,37 +568,32 @@ fn default_settings(
         },
         "llm": llm_default,
 
-        // ── 本地 AI 底座（per CLAUDE.md "本地仅捆绑必要底座"决策）──
-        // Embedding / Rerank / OCR / ASR 都是本地零费用，自动加载，用户无需配置。
+        // ── 本地 AI 底座 ──
+        // Embedding / Rerank / OCR / ASR 生命周期由 local scheduler 管理，用户无需配置。
         // 状态查询: GET /api/v1/ai_stack
-        // K3 一体机:embedding 经 k3-scheduler :8090 OpenAI-compat (/v1/embeddings) 收口。
+        // embedding 经 local-scheduler :8090 KB task 收口。
         //   :8090 是 loopback → embedding_endpoint_is_local() 判 local → L0 内容合法留设备
-        //   (隐私不变量:本地能力永不出网,2026-06-22 K3 调度层集成 spec §3)。
-        // 其余形态:本地 ONNX/Ollama in-process,ollama_url 保留兼容。
-        "embedding": if form_factor == FormFactor::K3Appliance {
-            serde_json::json!({
-                "model": "bge-m3",
-                "endpoint": "http://127.0.0.1:8090/v1",   // OpenAI-compat,经 k3-scheduler
-                "dims": 1024
-            })
-        } else {
-            serde_json::json!({
-                "model": "bge-m3",
-                "ollama_url": "http://localhost:11434"
-            })
-        },
+        //   (隐私不变量:本地能力永不出网)。
+        "embedding": serde_json::json!({
+            "provider": "local_scheduler",
+            "model": "embedding-int8",
+            "endpoint": "http://127.0.0.1:8090",
+            "task": "kb.query.embed",
+            "dims": 512
+        }),
         "rerank": {
-            "enabled": true,                  // bge-reranker-v2-m3 自动从 HuggingFace 拉取
-            "model_repo": "Xenova/bge-reranker-base"  // 想换可填 jina-v2-multilingual / bge-base-official
+            "enabled": true,
+            "task": "kb.query.rerank"
         },
         "ocr": {
-            "enabled": true,                  // PP-OCRv5 + pdftoppm 自动检测
+            "enabled": true,
+            "task": "kb.document.ocr_recognize",
             "languages": "chi_sim+eng",
             "active_profile": attune_core::ocr::profile::OcrProfile::DEFAULT_ID
         },
         "asr": {
-            "enabled": false,                 // v0.6: whisper.cpp 集成中；v0.6.x 启用
-            "model": "whisper-small-q8"       // 中文 WER < 20% 实测满足
+            "enabled": true,
+            "task": "kb.meeting.asr_frontend"
         },
 
         "skills": {
@@ -789,7 +790,7 @@ mod tests {
         assert!(validate_settings_fields(&serde_json::json!({
             "theme": "dark", "language": "en", "context_strategy": "accurate",
             "injection_mode": "auto", "injection_budget": 2000,
-            "embedding": {"ollama_url": "http://localhost:11434"},
+            "embedding": {"endpoint": "http://127.0.0.1:8090", "provider": "local_scheduler"},
             "cloud": {"accounts_url": "https://a.example.com", "gateway_url": "https://g.example.com"},
             "pluginhub": {"url": "https://hub.example.com"},
             "llm": {"provider": "deepseek"},
@@ -799,7 +800,7 @@ mod tests {
 
         // 无效 URL(各 url 字段)
         for bad in [
-            serde_json::json!({"embedding": {"ollama_url": "javascript:alert(1)"}}),
+            serde_json::json!({"embedding": {"endpoint": "javascript:alert(1)"}}),
             serde_json::json!({"pluginhub": {"url": "ftp://x"}}),
             serde_json::json!({"cloud": {"accounts_url": "not-a-url"}}),
             serde_json::json!({"cloud": {"gateway_url": "data:text/html,x"}}),
@@ -837,8 +838,8 @@ mod tests {
     #[test]
     fn pluginhub_url_rejects_local_and_raw_ip_hosts() {
         for bad in [
-            serde_json::json!({"pluginhub": {"url": "http://localhost:8080"}}),
-            serde_json::json!({"pluginhub": {"url": "http://127.0.0.1:8080"}}),
+            serde_json::json!({"pluginhub": {"url": "http://localhost:8090"}}),
+            serde_json::json!({"pluginhub": {"url": "http://127.0.0.1:8090"}}),
             serde_json::json!({"pluginhub": {"url": "http://192.168.1.10"}}),
             serde_json::json!({"pluginhub": {"url": "http://169.254.169.254/latest"}}),
             serde_json::json!({"pluginhub": {"url": "https://8.8.8.8"}}),
@@ -881,49 +882,47 @@ mod tests {
         assert!(llm.get("api_key").map_or(true, |v| v.is_null()));
     }
 
-    /// K3 一体机形态:LLM + embedding 默认经 k3-scheduler :8090 统一收口,不预设具体 chat 模型。
-    /// — 2026-06-22 K3 调度层集成:由 :11434 改 :8090(推理统一收口)。
-    /// — 个人版↔K3 reconcile:provider 由 "ollama" 改 "openai_compat"(K3 收口禁旁路直连
-    ///   Ollama :11434;build_llm_from_settings 优先级 1 endpoint 非空 → OpenAiLlmProvider,
-    ///   provider 字段写 "ollama" 会误导且与收口契约矛盾)。
+    /// 本地调度器形态:LLM + embedding 默认经 local-scheduler :8090 统一收口,不预设具体 chat 模型。
+    /// — 调度层集成:经 :8090 推理统一收口。
+    /// — provider 使用 "openai_compat"(本地调度器收口禁旁路直连 worker)。
     #[test]
-    fn k3_form_factor_uses_scheduler_8090() {
-        let s = default_settings("qwen2.5:3b", FormFactor::K3Appliance);
+    fn local_scheduler_form_factor_uses_scheduler_8090() {
+        let s = default_settings("qwen2.5:3b", FormFactor::LocalSchedulerAppliance);
         let llm = s.get("llm").expect("llm key");
         assert_eq!(
             llm.get("provider").and_then(|v| v.as_str()),
             Some("openai_compat"),
-            "K3 LLM provider 必须 openai_compat(经 :8090 收口,不直连 Ollama)"
+            "local scheduler LLM provider 必须 openai_compat(经 :8090 收口)"
         );
         let llm_ep = llm.get("endpoint").and_then(|v| v.as_str());
         assert_eq!(
             llm_ep,
             Some("http://127.0.0.1:8090/v1"),
-            "K3 LLM 经 k3-scheduler :8090(OpenAI/Ollama-compat 统一收口)"
+            "local scheduler LLM 经 :8090(OpenAI-compatible 统一收口)"
         );
-        // 收口不变量:K3 LLM 默认 endpoint 绝不指向 Ollama 直连端口 :11434。
+        // 收口不变量:本地调度器 LLM 默认 endpoint 绝不指向 worker 直连端口。
         assert!(
-            !llm_ep.unwrap_or_default().contains(":11434"),
-            "K3 LLM 禁旁路直连 Ollama :11434(必须经 scheduler :8090),got: {llm_ep:?}"
+            llm_ep.unwrap_or_default().contains(":8090"),
+            "local scheduler LLM 必须经 scheduler :8090,got: {llm_ep:?}"
         );
         assert!(
             llm.get("model").map_or(true, |v| v.is_null()),
-            "K3 model must stay unset so the scheduler picks the served local model, got: {:?}",
+            "local scheduler model must stay unset so the scheduler picks the served local model, got: {:?}",
             llm.get("model")
         );
         // embedding 同样经 :8090(loopback → 判 local → L0 留设备,隐私不变量)。
         let emb = s.get("embedding").expect("embedding key");
         assert_eq!(
             emb.get("endpoint").and_then(|v| v.as_str()),
-            Some("http://127.0.0.1:8090/v1"),
-            "K3 embedding 经 k3-scheduler :8090 OpenAI-compat"
+            Some("http://127.0.0.1:8090"),
+            "local scheduler embedding 经 :8090 scheduler-native KB task"
         );
     }
 
-    /// 个人版无回退证明:Laptop/Server/Unknown 的 LLM 默认 endpoint 必须 null(远端 token
-    /// wizard 引导),绝不被 K3 的 :8090 收口改动污染。这是「个人版行为 0 回退」硬约束的回归门。
+    /// Laptop/Server/Unknown 的 LLM 默认 endpoint 必须 null(远端 token wizard 引导)。
+    /// 本地底座 embedding 仍统一走 scheduler-native,不再生成直连 worker 配置。
     #[test]
-    fn personal_form_factors_llm_endpoint_unchanged_by_k3_wiring() {
+    fn personal_form_factors_keep_cloud_llm_but_scheduler_embedding() {
         for ff in [FormFactor::Laptop, FormFactor::Server, FormFactor::Unknown] {
             let s = default_settings("qwen2.5:3b", ff);
             let llm = s.get("llm").expect("llm key");
@@ -934,18 +933,19 @@ mod tests {
             );
             assert!(
                 llm.get("endpoint").map_or(true, |v| v.is_null()),
-                "FormFactor::{ff:?} endpoint 必须保持 null(个人版无 :8090 / :11434 注入), got: {:?}",
+                "FormFactor::{ff:?} endpoint 必须保持 null(云端 LLM 由 wizard 引导), got: {:?}",
                 llm.get("endpoint")
             );
-            // 个人版 embedding 仍走本地 ollama_url(非 :8090 scheduler endpoint)。
             let emb = s.get("embedding").expect("embedding key");
-            assert!(
-                emb.get("endpoint").is_none(),
-                "FormFactor::{ff:?} embedding 必须无 scheduler endpoint(本地 ONNX/Ollama)"
+            assert_eq!(
+                emb.get("provider").and_then(|v| v.as_str()),
+                Some("local_scheduler"),
+                "FormFactor::{ff:?} embedding 必须经 scheduler-native provider"
             );
-            assert!(
-                emb.get("ollama_url").and_then(|v| v.as_str()).is_some(),
-                "FormFactor::{ff:?} embedding 保留本地 ollama_url 兼容字段"
+            assert_eq!(
+                emb.get("endpoint").and_then(|v| v.as_str()),
+                Some("http://127.0.0.1:8090"),
+                "FormFactor::{ff:?} embedding 必须经 scheduler :8090"
             );
         }
     }
@@ -966,16 +966,16 @@ mod tests {
     }
 
     /// 本地模型一键化 (2026-06-01): summary 默认值随形态分裂。
-    /// K3 一体机预装本地模型 → "local"；其他形态 LLM 走远端 → "cloud"
-    /// (不强制笔电先装 Ollama 才能用摘要)。
+    /// 本地调度器设备预装本地模型 → "local"；其他形态 LLM 走远端 → "cloud"
+    /// (不强制笔电先启动本地 scheduler 才能用摘要)。
     #[test]
     fn summary_default_splits_by_form_factor() {
         assert_eq!(
-            default_settings("qwen2.5:3b", FormFactor::K3Appliance)
+            default_settings("qwen2.5:3b", FormFactor::LocalSchedulerAppliance)
                 .get("summary")
                 .and_then(|v| v.as_str()),
             Some("local"),
-            "K3 预装本地模型 → summary=local"
+            "local scheduler appliance 预装本地模型 → summary=local"
         );
         for ff in [FormFactor::Laptop, FormFactor::Server, FormFactor::Unknown] {
             assert_eq!(
@@ -995,7 +995,7 @@ mod tests {
             FormFactor::Laptop,
             FormFactor::Server,
             FormFactor::Unknown,
-            FormFactor::K3Appliance,
+            FormFactor::LocalSchedulerAppliance,
         ] {
             let v = default_settings("qwen2.5:3b", ff);
             let summary = v.get("summary").and_then(|x| x.as_str()).unwrap_or("");
@@ -1006,29 +1006,22 @@ mod tests {
         }
     }
 
-    /// 关键不变量：本地底座字段在所有形态下保持一致(form_factor 只影响推理路由)。
-    /// 2026-06-22 K3 调度层集成:embedding 现也按形态分裂(K3 经 :8090 收口,余形态本地
-    /// ONNX/Ollama),故从"identical"列移出;web_search / rerank / ocr / asr 仍一致。
+    /// 关键不变量：本地底座字段在所有形态下保持一致(form_factor 只影响 LLM 默认路由)。
     #[test]
     fn non_llm_settings_invariant_across_form_factors() {
         let laptop = default_settings("qwen2.5:3b", FormFactor::Laptop);
-        let k3 = default_settings("qwen2.5:3b", FormFactor::K3Appliance);
+        let local_scheduler =
+            default_settings("qwen2.5:3b", FormFactor::LocalSchedulerAppliance);
 
-        // web_search / rerank / OCR / ASR 这些本地底座配置应跨形态完全相同。
-        for key in &["web_search", "rerank", "ocr", "asr"] {
+        // web_search / embedding / rerank / OCR / ASR 这些本地底座配置应跨形态完全相同。
+        for key in &["web_search", "embedding", "rerank", "ocr", "asr"] {
             assert_eq!(
                 laptop.get(key),
-                k3.get(key),
-                "{} should be identical across form factors (only LLM + embedding routing differ)",
+                local_scheduler.get(key),
+                "{} should be identical across form factors (only LLM default routing differs)",
                 key
             );
         }
-        // embedding 按形态分裂:K3 经 :8090,laptop 本地 ONNX/Ollama → 必然不同。
-        assert_ne!(
-            laptop.get("embedding"),
-            k3.get("embedding"),
-            "K3 embedding routes to :8090 scheduler; laptop stays local — they differ by design"
-        );
     }
 
     // ── Bug-2 fix: SettingsLocks 粒度 (spec 2026-05-24) ─────────────────────
@@ -1077,8 +1070,8 @@ mod tests {
 
     #[test]
     fn paid_user_cannot_change_llm_provider() {
-        // 用户切换 provider(如 ollama) 会绕过 gateway → 锁
-        let body = serde_json::json!({"llm": {"provider": "ollama"}});
+        // 用户切换 provider(如 local_scheduler) 会绕过 gateway → 锁
+        let body = serde_json::json!({"llm": {"provider": "local_scheduler"}});
         assert!(check_settings_locks(&body, &paid_locks()).is_some());
     }
 
@@ -1171,14 +1164,14 @@ mod tests {
         );
     }
 
-    /// privacy block 在 K3 / Server / Unknown 形态下也必须全 false(form_factor 不影响 privacy).
+    /// privacy block 在本地调度器 / Server / Unknown 形态下也必须全 false(form_factor 不影响 privacy).
     #[test]
     fn default_settings_privacy_block_invariant_across_form_factors() {
         for ff in [
             FormFactor::Laptop,
             FormFactor::Server,
             FormFactor::Unknown,
-            FormFactor::K3Appliance,
+            FormFactor::LocalSchedulerAppliance,
         ] {
             let s = default_settings("qwen2.5:3b", ff);
             let privacy = s

@@ -14,7 +14,7 @@
 # 模型按 RAM tier 选（**仅 Embedding，LLM 不本地预装**）：
 #   ≥16GB RAM → bge-m3 (多语言 1024-dim)
 #   <16GB RAM → bge-small (中英 384-dim)
-# LLM 走远端 token 默认，K3 一体机镜像才单独预装 qwen2.5:1.5b/3b
+# LLM 走远端 token 默认，local-scheduler appliance 镜像才单独预装 qwen2.5:1.5b/3b
 #
 # 用法：
 #   ./scripts/deploy-linux.sh              # full auto
@@ -120,7 +120,7 @@ log "  tier: $HW_TIER"
 # ─── 3. Embedding 模型选择 ──────────────────────────────────────────
 # 设计契约（CLAUDE.md "硬件感知的默认底座" + "成本感知与触发契约"）：
 #   本地必装 4 底座 = Embedding + Reranker + ASR + OCR（不含 LLM）
-#   LLM 走远端 token 默认 — 用户在 wizard 自配；K3 镜像才另装本地 LLM
+#   LLM 走远端 token 默认 — 用户在 wizard 自配；local-scheduler 镜像才另装本地 LLM
 case "$HW_TIER" in
   high|mid)     EMBED_MODEL="bge-m3" ;;     # 16GB+ → 多语言 1024-dim
   low|minimal)  EMBED_MODEL="bge-small" ;;  # <16GB → 中英 384-dim

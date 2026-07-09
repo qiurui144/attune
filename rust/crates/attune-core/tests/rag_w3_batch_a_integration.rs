@@ -128,6 +128,7 @@ fn f2_search_result_has_breadcrumb_field() {
         title: "T".into(),
         content: "C".into(),
         source_type: "file".into(),
+        source_path: None,
         inject_content: None,
         breadcrumb: vec!["A".into(), "B".into()],
         chunk_offset_start: Some(0),

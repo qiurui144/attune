@@ -109,7 +109,8 @@ fn export_extra_keywords(state: &SharedState) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
     // 1) Installed pro plugins (primary, no DEK / settings write needed).
-    for kw in state.plugin_registry.all_confidential_keywords() {
+    let plugin_registry = crate::routes::plugins::current_plugin_registry(state);
+    for kw in plugin_registry.all_confidential_keywords() {
         if seen.insert(kw.clone()) {
             out.push(kw);
         }

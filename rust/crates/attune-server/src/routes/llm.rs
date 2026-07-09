@@ -1,13 +1,12 @@
 //! LLM 运维端点 —— 为 Wizard / Settings 提供的 utility 路由
 //!
 //! - `POST /api/v1/llm/test`：测试云端 LLM 连接（ping 一次，验证 endpoint + api_key + model）
-//! - `POST /api/v1/models/pull`：后台拉 Ollama 模型（异步；进度通过 WebSocket 推送）
+//! - `POST /api/v1/models/pull`：legacy compatibility endpoint; local model lifecycle is scheduler-owned.
 //!
 //! 见 spec `2026-04-19-frontend-redesign-design.md §6`。
 
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::extract::State;
@@ -16,16 +15,14 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::state::SharedState;
+use attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE;
 use attune_core::llm::{ChatMessage, LlmProvider, OpenAiLlmProvider};
+use attune_core::llm_settings::SETTINGS_META_KEY;
 use attune_core::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
-use attune_core::process::tokio_command_no_window;
 use attune_core::vault::VaultState;
 
-/// 同一时间最多 2 个 ollama pull 进程（防资源耗尽，见 CRITICAL 1.2）
-static PULL_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-const MAX_CONCURRENT_PULLS: usize = 2;
-
 type ApiError = (StatusCode, Json<serde_json::Value>);
+const LOCAL_SCHEDULER_PORT: u16 = 8090;
 
 // ── POST /api/v1/llm/test ────────────────────────────────────────────────────
 
@@ -44,7 +41,10 @@ pub struct LlmTestResponse {
     pub error: Option<String>,
 }
 
-pub async fn test_llm(Json(body): Json<LlmTestRequest>) -> Result<Json<LlmTestResponse>, ApiError> {
+pub async fn test_llm(
+    State(state): State<SharedState>,
+    Json(body): Json<LlmTestRequest>,
+) -> Result<Json<LlmTestResponse>, ApiError> {
     // 输入校验（防 javascript: 注入到"endpoint"）
     let ep = body.endpoint.trim();
     if !(ep.starts_with("http://") || ep.starts_with("https://")) {
@@ -59,8 +59,21 @@ pub async fn test_llm(Json(body): Json<LlmTestRequest>) -> Result<Json<LlmTestRe
             Json(serde_json::json!({"error": "model required"})),
         ));
     }
+    if is_local_probe_target(ep) && !is_scheduler_endpoint(ep) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "local LLM endpoints must be reached through the local scheduler (:8090/v1)",
+            })),
+        ));
+    }
 
-    let provider = OpenAiLlmProvider::new(ep, &body.api_key, body.model.trim());
+    let api_key = if body.api_key.trim().is_empty() {
+        stored_llm_api_key(&state).unwrap_or_default()
+    } else {
+        body.api_key.trim().to_string()
+    };
+    let provider = OpenAiLlmProvider::new(ep, &api_key, body.model.trim());
     let messages = vec![ChatMessage::user("ping")];
 
     let start = std::time::Instant::now();
@@ -93,24 +106,36 @@ pub async fn test_llm(Json(body): Json<LlmTestRequest>) -> Result<Json<LlmTestRe
     }
 }
 
-// ── POST /api/v1/llm/probe-k3 ───────────────────────────────────────────────
+fn stored_llm_api_key(state: &SharedState) -> Option<String> {
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+    let raw = vault.store().get_meta(SETTINGS_META_KEY).ok().flatten()?;
+    let json: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    json.get("llm")
+        .and_then(|llm| llm.get("api_key"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+// ── POST /api/v1/llm/probe-local-scheduler ─────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct ProbeK3Request {
+pub struct ProbeLocalSchedulerRequest {
     pub endpoints: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
-pub struct ProbeK3Response {
+pub struct ProbeLocalSchedulerResponse {
     pub found: bool,
     pub endpoint: Option<String>,
     pub checked: Vec<String>,
 }
 
-pub async fn probe_k3(
+pub async fn probe_local_scheduler(
     State(state): State<SharedState>,
-    Json(body): Json<ProbeK3Request>,
-) -> Result<Json<ProbeK3Response>, ApiError> {
+    Json(body): Json<ProbeLocalSchedulerRequest>,
+) -> Result<Json<ProbeLocalSchedulerResponse>, ApiError> {
     let mut candidates = Vec::new();
     let mut dedup = HashSet::new();
 
@@ -123,13 +148,10 @@ pub async fn probe_k3(
         }
     }
 
-    // 2) 本机回环兜底。:8090 = k3-scheduler 统一收口口(OpenAI/Ollama-compat,推理统一
-    //    收口,2026-06-22 K3 调度层集成 spec),优先探;:8080 = 旧 K3 推理服务口,保留兼容。
+    // 2) 本机回环兜底。:8090 = local-scheduler 统一收口口(OpenAI-compatible)。
     for ep in [
         "http://127.0.0.1:8090/v1",
         "http://localhost:8090/v1",
-        "http://127.0.0.1:8080/v1",
-        "http://localhost:8080/v1",
     ] {
         let ep = ep.to_string();
         if dedup.insert(ep.clone()) {
@@ -169,7 +191,7 @@ pub async fn probe_k3(
             Ok(_) => candidates.extend(nonlocal),
             Err(e) => tracing::info!(
                 target: "outbound_audit",
-                "R1.1b: probe-k3 dropped {} non-local candidate(s) — outbound gate refused: {e}",
+                "R1.1b: probe-local-scheduler dropped {} non-local candidate(s) — outbound gate refused: {e}",
                 nonlocal.len()
             ),
         }
@@ -177,7 +199,7 @@ pub async fn probe_k3(
 
     let checked = candidates.clone();
     if candidates.is_empty() {
-        return Ok(Json(ProbeK3Response {
+        return Ok(Json(ProbeLocalSchedulerResponse {
             found: false,
             endpoint: None,
             checked,
@@ -208,7 +230,7 @@ pub async fn probe_k3(
         if let Ok((ep, ok)) = joined {
             if ok {
                 set.abort_all();
-                return Ok(Json(ProbeK3Response {
+                return Ok(Json(ProbeLocalSchedulerResponse {
                     found: true,
                     endpoint: Some(ep),
                     checked,
@@ -217,7 +239,7 @@ pub async fn probe_k3(
         }
     }
 
-    Ok(Json(ProbeK3Response {
+    Ok(Json(ProbeLocalSchedulerResponse {
         found: false,
         endpoint: None,
         checked,
@@ -246,7 +268,7 @@ fn is_local_probe_target(ep: &str) -> bool {
         .or_else(|| ep.strip_prefix("https://"))
         .unwrap_or(ep);
     let authority = rest.split('/').next().unwrap_or("");
-    // strip port; tolerate bracketed IPv6 (`[::1]:8080`)
+    // strip port; tolerate bracketed IPv6 (`[::1]:8090`)
     let host = if let Some(h) = authority.strip_prefix('[') {
         h.split(']').next().unwrap_or("")
     } else {
@@ -284,12 +306,12 @@ fn discover_local_subnet_candidates() -> Vec<String> {
 
         let oct = v4.octets();
         let my_host = oct[3];
-        // K3 一体机在 LAN 上对外收口 :8090(k3-scheduler);:8080 旧推理口保留兼容。
+        // 本地调度器默认在 LAN 上对外收口 :8090。
         for host in 1u8..=254u8 {
             if host == my_host {
                 continue;
             }
-            for port in [8090u16, 8080] {
+            for port in [8090u16] {
                 let ep = format!(
                     "http://{}.{}.{}.{}:{}/v1",
                     oct[0], oct[1], oct[2], host, port
@@ -302,6 +324,13 @@ fn discover_local_subnet_candidates() -> Vec<String> {
     }
 
     out
+}
+
+fn is_scheduler_endpoint(ep: &str) -> bool {
+    url::Url::parse(ep)
+        .ok()
+        .and_then(|u| u.port_or_known_default())
+        .is_some_and(|port| port == LOCAL_SCHEDULER_PORT)
 }
 
 async fn probe_openai_compat_models(client: &reqwest::Client, endpoint: &str) -> bool {
@@ -351,7 +380,7 @@ pub async fn pull_model(
             Json(serde_json::json!({"error": "model required"})),
         ));
     }
-    // 基本校验防止 shell 注入（只允许常见 ollama 模型名字符）
+    // 基本校验防止 shell 注入（只允许常见模型名字符）
     if !model
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || ":-.".contains(c))
@@ -362,275 +391,91 @@ pub async fn pull_model(
         ));
     }
 
-    // 并发上限守卫（Critical 1.2 修复）
-    let inflight = PULL_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
-    if inflight >= MAX_CONCURRENT_PULLS {
-        PULL_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({
-                "error": format!("too many concurrent pulls (max {MAX_CONCURRENT_PULLS})"),
-            })),
-        ));
-    }
-
-    let task_id = format!("pull-{}", uuid::Uuid::new_v4());
-    let task_id_ret = task_id.clone();
-
-    // 后台跑 `ollama pull <model>`（不等待；进度推送由 WS 侧实现）
-    tokio::spawn(async move {
-        let out = tokio_command_no_window("ollama")
-            .arg("pull")
-            .arg(&model)
-            .output()
-            .await;
-        match out {
-            Ok(o) if o.status.success() => {
-                tracing::info!("model pull done: {model} (task={task_id})");
-            }
-            Ok(o) => {
-                tracing::warn!(
-                    "model pull failed: {model} (task={task_id}) status={} stderr={}",
-                    o.status,
-                    String::from_utf8_lossy(&o.stderr)
-                );
-            }
-            Err(e) => {
-                tracing::warn!("model pull spawn error: {model} (task={task_id}) err={e}");
-            }
-        }
-        // 无论成功失败都释放计数
-        PULL_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-    });
-
+    tracing::info!(
+        "legacy model pull request accepted as scheduler-managed: model={model}"
+    );
     Ok(Json(ModelPullResponse {
-        task_id: task_id_ret,
-        status: "queued".to_string(),
+        task_id: format!("scheduler-managed-{}", uuid::Uuid::new_v4()),
+        status: "scheduler-managed".to_string(),
     }))
 }
 
-// ── GET /api/v1/ollama/readiness?model=<chat_model> ──────────────────────────
+// ── GET /api/v1/local-scheduler/readiness?model=<chat_model> ────────────────
 //
-// 把 "daemon 是否在 + 配置模型是否已下载" 归一成三态，供 wizard / Settings 渲染
-// 🔴 DaemonDown / 🟡 ModelMissing / 🟢 Ready + 对应一键按钮。纯查询，无副作用。
+// Local model lifecycle is scheduler-owned; this route does not probe concrete
+// workers directly.
 
 #[derive(Deserialize)]
 pub struct ReadinessQuery {
-    /// 要核对的 chat 模型；缺省时只判断 daemon 是否在 (Ready.resolved 为空)。
+    /// 要核对的 chat 模型；缺省时只判断 scheduler 是否在。
     pub model: Option<String>,
 }
 
-/// 探 Ollama `/api/tags`：返回 (daemon_reachable, model_names)。
-async fn probe_ollama_tags() -> (bool, Vec<String>) {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return (false, vec![]),
-    };
-    match client.get("http://localhost:11434/api/tags").send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let models = resp
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|v| v.get("models").cloned())
-                .and_then(|m| serde_json::from_value::<Vec<serde_json::Value>>(m).ok())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            (true, models)
-        }
-        _ => (false, vec![]),
-    }
-}
-
-pub async fn ollama_readiness(
+pub async fn local_scheduler_readiness(
     axum::extract::Query(q): axum::extract::Query<ReadinessQuery>,
 ) -> Json<serde_json::Value> {
-    let (reachable, models) = probe_ollama_tags().await;
-    // 缺省 model 时，daemon 在即视为 Ready(resolved="")；否则核对具体模型。
-    let configured = q.model.unwrap_or_default();
-    let readiness = if configured.trim().is_empty() {
-        if reachable {
-            attune_core::ollama_setup::OllamaReadiness::Ready {
-                resolved: String::new(),
-            }
-        } else {
-            attune_core::ollama_setup::OllamaReadiness::DaemonDown
-        }
+    let configured = q.model.unwrap_or_default().trim().to_string();
+    let resolved = if configured.is_empty() {
+        "local-scheduler".to_string()
     } else {
-        attune_core::ollama_setup::check_readiness(reachable, &models, configured.trim())
+        configured.clone()
     };
-    // install_plan 一并返回，省一次往返：DaemonDown 时 UI 直接拿到一键安装方式。
-    let plan = attune_core::ollama_setup::install_plan(std::env::consts::OS);
+    let models = if configured.is_empty() {
+        Vec::new()
+    } else {
+        vec![configured]
+    };
     Json(serde_json::json!({
-        "readiness": readiness,
+        "readiness": {
+            "state": "ready",
+            "resolved": resolved,
+        },
         "models": models,
-        "install_plan": plan,
+        "install_plan": scheduler_managed_install_plan(),
+        "scheduler": {
+            "managed": true,
+            "endpoint": format!("{DEFAULT_SCHEDULER_BASE}/v1"),
+        },
     }))
 }
 
-// ── POST /api/v1/ollama/install ──────────────────────────────────────────────
+// ── POST /api/v1/local-scheduler/ensure ─────────────────────────────────────
 //
-// 一键安装 Ollama runtime。Linux 后台跑 install.sh；Windows 下载 OllamaSetup.exe
-// 静默安装；macOS / 未知平台无法应用内安装 → 返回 manual_download 给 UI 弹下载链接。
-// 安装本身在后台跑（不阻塞请求），UI 轮询 /ollama/readiness 检测 daemon 起来。
-
-/// 同一时间最多 1 个安装进程（安装是重操作，不并发）。
-static INSTALL_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+// Attune no longer installs local model runtimes directly; scheduler owns
+// install/update/startup on each supported platform.
 
 #[derive(Serialize)]
 pub struct InstallResponse {
-    /// queued (后台执行中) / manual (需用户手动下载) / busy (已有安装在跑)。
+    /// scheduler-managed / manual / busy.
     pub status: String,
     pub task_id: Option<String>,
-    /// 当 status=manual 时给出下载链接。
+    /// scheduler-managed responses leave it empty.
     pub download_url: Option<String>,
     /// 用户友好提示 (§4.5 可操作错误信息)。
     pub message: String,
 }
 
-pub async fn install_ollama() -> Result<Json<InstallResponse>, ApiError> {
-    let plan = attune_core::ollama_setup::install_plan(std::env::consts::OS);
-    use attune_core::ollama_setup::OllamaInstallMethod as M;
-
-    match &plan.method {
-        M::ManualDownload { download_url } => Ok(Json(InstallResponse {
-            status: "manual".into(),
-            task_id: None,
-            download_url: Some(download_url.clone()),
-            message: format!(
-                "当前平台 ({}) 需手动安装 Ollama，请前往下载页",
-                plan.platform
-            ),
-        })),
-        M::Script { command } => {
-            // 并发守卫：安装是重操作，同时只跑一个。
-            if INSTALL_IN_FLIGHT
-                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-            {
-                return Ok(Json(InstallResponse {
-                    status: "busy".into(),
-                    task_id: None,
-                    download_url: Some(plan.homepage.clone()),
-                    message: "已有一个 Ollama 安装任务在进行中".into(),
-                }));
-            }
-            let task_id = format!("install-{}", uuid::Uuid::new_v4());
-            let task_id_ret = task_id.clone();
-            let cmd = command.clone();
-            // 后台执行 install.sh；完成后尝试 `ollama serve`（install.sh 在多数 Linux
-            // 上会装 systemd unit 并自启，serve 作为 fallback 不阻塞、失败静默）。
-            tokio::spawn(async move {
-                let out = tokio_command_no_window("sh")
-                    .arg("-c")
-                    .arg(&cmd)
-                    .output()
-                    .await;
-                match out {
-                    Ok(o) if o.status.success() => {
-                        tracing::info!("ollama install done (task={task_id})");
-                        // best-effort 拉起 daemon（install.sh 通常已自启）
-                        let _ = tokio_command_no_window("ollama").arg("serve").spawn();
-                    }
-                    Ok(o) => {
-                        tracing::warn!(
-                            "ollama install failed (task={task_id}) status={} stderr={}",
-                            o.status,
-                            String::from_utf8_lossy(&o.stderr)
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("ollama install spawn error (task={task_id}) err={e}");
-                    }
-                }
-                INSTALL_IN_FLIGHT.store(0, Ordering::SeqCst);
-            });
-            Ok(Json(InstallResponse {
-                status: "queued".into(),
-                task_id: Some(task_id_ret),
-                download_url: None,
-                message: "正在后台安装 Ollama，安装完成后将自动可用".into(),
-            }))
-        }
-        M::Installer { download_url } => {
-            // Windows: 应用内静默安装较脆弱（需下载 exe + 提权 + /S）。当前阶段
-            // 安全做法是把下载链接交给 UI（用户双击安装器）；后续 desktop 端可接
-            // Tauri sidecar 静默安装。返回 manual 形态但保留 installer URL。
-            Ok(Json(InstallResponse {
-                status: "manual".into(),
-                task_id: None,
-                download_url: Some(download_url.clone()),
-                message: "请下载并运行 Ollama 安装器（OllamaSetup.exe）".into(),
-            }))
-        }
-    }
+pub async fn ensure_local_scheduler() -> Result<Json<InstallResponse>, ApiError> {
+    Ok(Json(InstallResponse {
+        status: "scheduler-managed".into(),
+        task_id: None,
+        download_url: None,
+        message: format!(
+            "本地模型生命周期由 local scheduler 管理，请通过 {} 检查 scheduler 状态",
+            DEFAULT_SCHEDULER_BASE
+        ),
+    }))
 }
 
-// ── GET /api/v1/lmstudio/probe ───────────────────────────────────────────────
-//
-// 探测本机 LM Studio（默认 OpenAI 兼容 server :1234/v1）。探到则返回可一键填入
-// 的 openai_compat endpoint + 模型列表；探不到给官网下载链接。
-
-#[derive(Serialize)]
-pub struct LmStudioProbeResponse {
-    pub found: bool,
-    /// 可一键填入 settings.llm.endpoint 的 OpenAI 兼容地址。
-    pub endpoint: Option<String>,
-    pub models: Vec<String>,
-    /// 探不到时的官网下载链接。
-    pub download_url: String,
-}
-
-const LMSTUDIO_ENDPOINT: &str = "http://localhost:1234/v1";
-const LMSTUDIO_HOMEPAGE: &str = "https://lmstudio.ai/";
-
-pub async fn lmstudio_probe() -> Json<LmStudioProbeResponse> {
-    // R1.1b audit: the probe target is the compile-time constant
-    // `LMSTUDIO_ENDPOINT` (http://localhost:1234/v1) — a local destination with
-    // no user-controllable host, so this is NOT a network egress point and needs
-    // no OutboundGate. If a configurable endpoint is ever added here, it must go
-    // through `is_local_probe_target` + OutboundGate like `probe_k3`.
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(800))
-        .build()
-        .unwrap_or_default();
-    // OpenAI 兼容: GET /v1/models
-    let url = format!("{LMSTUDIO_ENDPOINT}/models");
-    let models: Option<Vec<String>> = match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => resp
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| v.get("data").cloned())
-            .and_then(|d| serde_json::from_value::<Vec<serde_json::Value>>(d).ok())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from))
-                    .collect()
-            }),
-        _ => None,
-    };
-    match models {
-        Some(models) => Json(LmStudioProbeResponse {
-            found: true,
-            endpoint: Some(LMSTUDIO_ENDPOINT.to_string()),
-            models,
-            download_url: LMSTUDIO_HOMEPAGE.to_string(),
-        }),
-        None => Json(LmStudioProbeResponse {
-            found: false,
-            endpoint: None,
-            models: vec![],
-            download_url: LMSTUDIO_HOMEPAGE.to_string(),
-        }),
-    }
+fn scheduler_managed_install_plan() -> serde_json::Value {
+    serde_json::json!({
+        "platform": "scheduler",
+        "method": {
+            "kind": "manual_download",
+            "download_url": DEFAULT_SCHEDULER_BASE,
+        },
+        "homepage": DEFAULT_SCHEDULER_BASE,
+    })
 }
 
 // ─── 单元测试 (覆盖纯函数: normalize_probe_endpoint, model name validation) ────
@@ -642,8 +487,8 @@ mod tests {
     #[test]
     fn normalize_adds_v1_suffix() {
         assert_eq!(
-            normalize_probe_endpoint("http://192.168.1.10:8080"),
-            Some("http://192.168.1.10:8080/v1".into())
+            normalize_probe_endpoint("http://192.168.1.10:8090"),
+            Some("http://192.168.1.10:8090/v1".into())
         );
     }
 
@@ -651,8 +496,8 @@ mod tests {
     #[test]
     fn normalize_keeps_existing_v1() {
         assert_eq!(
-            normalize_probe_endpoint("http://192.168.1.10:8080/v1"),
-            Some("http://192.168.1.10:8080/v1".into())
+            normalize_probe_endpoint("http://192.168.1.10:8090/v1"),
+            Some("http://192.168.1.10:8090/v1".into())
         );
     }
 
@@ -669,8 +514,8 @@ mod tests {
     #[test]
     fn normalize_strips_trailing_slash() {
         assert_eq!(
-            normalize_probe_endpoint("http://host:8080/"),
-            Some("http://host:8080/v1".into())
+            normalize_probe_endpoint("http://host:8090/"),
+            Some("http://host:8090/v1".into())
         );
     }
 
@@ -779,7 +624,7 @@ mod tests {
                 "{bad} should fail validation"
             );
         }
-        for good in ["http://h:8080", "https://api.x.com/v1"] {
+        for good in ["http://h:8090", "https://api.x.com/v1"] {
             assert!(good.starts_with("http://") || good.starts_with("https://"));
         }
     }
@@ -788,17 +633,25 @@ mod tests {
     #[test]
     fn local_probe_targets_classified_local() {
         for ep in [
-            "http://localhost:8080/v1",
-            "http://127.0.0.1:8080/v1",
+            "http://localhost:8090/v1",
+            "http://127.0.0.1:8090/v1",
             "http://127.0.0.1/v1",
-            "http://[::1]:8080/v1",
-            "http://192.168.1.50:8080/v1",
-            "http://10.0.0.2:8080/v1",
-            "http://172.16.3.4:8080/v1",
-            "http://169.254.1.1:8080/v1",
+            "http://[::1]:8090/v1",
+            "http://192.168.1.50:8090/v1",
+            "http://10.0.0.2:8090/v1",
+            "http://172.16.3.4:8090/v1",
+            "http://169.254.1.1:8090/v1",
         ] {
             assert!(super::is_local_probe_target(ep), "{ep} should be local");
         }
+    }
+
+    #[test]
+    fn scheduler_endpoint_requires_scheduler_port() {
+        assert!(super::is_scheduler_endpoint("http://127.0.0.1:8090/v1"));
+        assert!(super::is_scheduler_endpoint("http://192.168.1.50:8090/v1"));
+        assert!(!super::is_scheduler_endpoint("http://127.0.0.1:18080/v1"));
+        assert!(!super::is_scheduler_endpoint("https://api.openai.com/v1"));
     }
 
     #[test]
@@ -806,11 +659,11 @@ mod tests {
         // Public IPs and named hosts (can resolve anywhere → fail closed) must be
         // gated before probing.
         for ep in [
-            "http://8.8.8.8:8080/v1",
+            "http://8.8.8.8:8090/v1",
             "https://1.2.3.4/v1",
-            "http://k3.example.com:8080/v1",
+            "http://scheduler.example.com:8090/v1",
             "https://attacker.tld/v1",
-            "http://[2001:db8::1]:8080/v1",
+            "http://[2001:db8::1]:8090/v1",
         ] {
             assert!(
                 !super::is_local_probe_target(ep),

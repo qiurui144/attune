@@ -1,4 +1,4 @@
-//! attune-server-headless — 纯 axum 模式入口（K3 / NAS / 服务器）。
+//! attune-server-headless — 纯 axum 模式入口（local-scheduler / NAS / 服务器）。
 //!
 //! 笔电桌面用户走 attune-desktop（含 Tauri WebView 壳）。
 //! 两者共享 attune_server::run_in_runtime() 后端逻辑。
@@ -23,12 +23,10 @@ struct Cli {
     tls_key: Option<String>,
     #[arg(long)]
     no_auth: bool,
-    /// 一键化部署: 启动前下载 PP-OCR 必需模型 (~16 MB)，下载完后继续启动 server。
-    /// 标准应用安装时跑此 flag (postinst.sh 调用)，cargo/源码部署也用此一次性补齐。
-    /// HF_ENDPOINT=https://hf-mirror.com 加速 CN 镜像。
+    /// Legacy compatibility flag. Local model lifecycle is scheduler-owned.
     #[arg(long)]
     bootstrap_models: bool,
-    /// 仅下载模型, 完成后退出（不启动 server）。适合 CI / postinst 场景。
+    /// Legacy compatibility flag. Exits successfully after reporting scheduler ownership.
     #[arg(long)]
     bootstrap_only: bool,
 }
@@ -37,40 +35,14 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
 
-    // 一键化部署: bootstrap models 路径 (postinst.sh 或开发者首次部署)
     if cli.bootstrap_models || cli.bootstrap_only {
-        eprintln!("=== Attune bootstrap-models: 下载必需模型 ===");
-        // B4 (2026-06-06): ensure_models_downloaded() uses reqwest::blocking, whose
-        // embedded current-thread runtime panics on drop inside this #[tokio::main]
-        // async context ("Cannot drop a runtime ..."). postinst.sh runs --bootstrap-models
-        // on every install, so this crashed fresh installs. Run it on a blocking thread.
-        let bootstrap = tokio::task::spawn_blocking(
-            attune_core::ocr::ppocr::PpOcrProvider::ensure_models_downloaded,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            Err(attune_core::error::VaultError::ModelLoad(format!(
-                "bootstrap task join error: {e}"
-            )))
-        });
-        match bootstrap {
-            Ok(()) => eprintln!("✓ PP-OCR models ready"),
-            Err(e) => {
-                eprintln!("✗ PP-OCR bootstrap failed: {e}");
-                eprintln!(
-                    "  CN 镜像: HF_ENDPOINT=https://hf-mirror.com {} --bootstrap-only",
-                    std::env::current_exe()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "attune-server-headless".into())
-                );
-                std::process::exit(1);
-            }
-        }
+        eprintln!("=== Attune bootstrap-models: local model lifecycle is scheduler-owned ===");
+        eprintln!("Attune no longer downloads OCR/ASR/embedding/rerank assets directly.");
         if cli.bootstrap_only {
             eprintln!("=== bootstrap-only 完成 ===");
             return;
         }
-        eprintln!("=== bootstrap 完成, 继续启动 server ===");
+        eprintln!("=== bootstrap compatibility step complete, starting server ===");
     }
 
     let config = ServerConfig {

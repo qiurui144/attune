@@ -64,7 +64,9 @@ hex = "0.4"
 [features]
 # 回填 attune-core 默认(dep 已 default-features=false);openvino 变体 --no-default-features
 # 时去掉 ort-bundled + asr-sensevoice,改 ort-dynamic(见 ort-bundled/ort-dynamic 互斥)。
-default = ["ort-bundled", "asr-sensevoice", "wasm-runtime"]
+default = ["ort-bundled", "asr-sensevoice", "wasm-runtime", "artifact-export-rich"]
+scheduler-runtime = ["attune-core/scheduler-runtime"]
+artifact-export-rich = ["attune-core/artifact-export-rich"]
 ort-bundled = ["attune-core/ort-bundled"]
 ort-dynamic = ["attune-core/ort-dynamic"]
 asr-sensevoice = ["attune-core/asr-sensevoice"]

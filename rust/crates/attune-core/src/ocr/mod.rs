@@ -18,6 +18,7 @@
 //!   `extract_text_from_pdf(provider, path)` → 全文
 //!   `needs_ocr(text)` → 文字层薄判定（保留旧 API）
 
+#[cfg(feature = "local-inference")]
 pub mod ppocr;
 pub mod profile;
 pub mod profile_registry;
@@ -83,7 +84,7 @@ pub struct OcrOutput {
 }
 
 /// OCR provider 抽象 — 当前只有 PP-OCRv5 一个实现。
-/// trait 仍然保留是为了：测试用 mock + 未来可能的 K3 远程 provider。
+/// trait 仍然保留是为了：测试用 mock + 未来可能的 local-scheduler 远程 provider。
 pub trait OcrProvider: Send + Sync {
     /// 引擎名（用于日志 / diagnostics 端点）
     fn name(&self) -> &str;
@@ -133,14 +134,19 @@ pub trait OcrProvider: Send + Sync {
 /// - cargo binary / 源码部署 → 用户跑 `attune-server-headless --bootstrap-models`
 /// - 一键工具 ensure_models_downloaded() 仍在 ppocr.rs (供 bootstrap 调用)
 pub fn detect_default_provider() -> Option<Box<dyn OcrProvider>> {
-    if let Some(p) = ppocr::detect() {
-        log::info!("OCR provider: PP-OCRv5 mobile (ORT)");
-        return Some(Box::new(p));
+    #[cfg(feature = "local-inference")]
+    {
+        if let Some(p) = ppocr::detect() {
+            log::info!("OCR provider: PP-OCRv5 mobile (ORT)");
+            return Some(Box::new(p));
+        }
+        log::warn!(
+            "OCR provider: PP-OCR models missing. Run `attune-server-headless --bootstrap-models` \
+             (cargo) or `apt install --reinstall attune` (deb) to download (~21 MB)."
+        );
     }
-    log::warn!(
-        "OCR provider: PP-OCR models missing. Run `attune-server-headless --bootstrap-models` \
-         (cargo) or `apt install --reinstall attune` (deb) to download (~21 MB)."
-    );
+    #[cfg(not(feature = "local-inference"))]
+    log::info!("OCR provider: local inference not compiled; OCR is scheduler-owned");
     None
 }
 

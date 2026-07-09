@@ -273,12 +273,14 @@ CREATE TABLE IF NOT EXISTS git_sources (
 CREATE INDEX IF NOT EXISTS idx_git_sources_synced ON git_sources(last_synced_at);
 
 -- trust-chain (T4): 客户端 entitlement 缓存。付费插件本地授权态,随 vault 字段级
--- 加密(license_id_enc 是 dek-AES-256-GCM 密文 BLOB)。ACP-6 边界:不进 plugins/<id>/,
--- 插件升级 wholesale 替换不触碰。纯追加表:老 vault 下次 open 自动建表,SCHEMA_VERSION 不 bump。
+-- 加密(license_id_enc/decrypt_key_enc 是 dek-AES-256-GCM 密文 BLOB)。ACP-6 边界:
+-- 不进 plugins/<id>/,插件升级 wholesale 替换不触碰。纯追加表:老 vault 下次 open
+-- 自动建表,SCHEMA_VERSION 不 bump。
 -- plugin_id PRIMARY KEY → 同 plugin 只存最优 status 一条(PERF-5 upsert 时归并)。
 CREATE TABLE IF NOT EXISTS plugin_entitlements (
     plugin_id          TEXT PRIMARY KEY,
     license_id_enc     BLOB NOT NULL,      -- AES-256-GCM(license_id) — 敏感,加密
+    decrypt_key_enc    BLOB,               -- AES-256-GCM(plugin decrypt key) — 防移植核心材料
     tier               TEXT NOT NULL,      -- free|trial|paid
     status             TEXT NOT NULL,      -- active|suspended|revoked
     trial_expires      TEXT,               -- RFC3339|NULL
@@ -683,7 +685,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_ms       INTEGER NOT NULL,
     kind        TEXT    NOT NULL,                      -- llm_chat / llm_extract / embed / rerank / ocr / asr / vlm
-    provider    TEXT    NOT NULL,                      -- ollama / openai / gemini / cloud_gateway / k3_local / mock
+    provider    TEXT    NOT NULL,                      -- ollama / openai / gemini / cloud_gateway / local_scheduler / mock
     model       TEXT    NOT NULL,
     agent_id    TEXT,                                  -- NULL = direct chat / non-agent path
     tokens_in   INTEGER NOT NULL,
@@ -918,6 +920,7 @@ impl Store {
         Self::migrate_job_queue_backoff(conn)?;
         Self::migrate_skill_signals_v07(conn)?;
         Self::migrate_memories_multilayer(conn)?;
+        Self::migrate_plugin_entitlement_decrypt_key(conn)?;
         Self::migrate_chunk_summaries_deepsum_strategy(conn)?;
         Self::migrate_organization_proposals(conn)?;
         Self::migrate_memory_migrations(conn)?;
@@ -940,6 +943,7 @@ impl Store {
         Self::migrate_job_queue_backoff(&conn)?;
         Self::migrate_skill_signals_v07(&conn)?;
         Self::migrate_memories_multilayer(&conn)?;
+        Self::migrate_plugin_entitlement_decrypt_key(&conn)?;
         Self::migrate_organization_proposals(&conn)?;
         Self::migrate_memory_migrations(&conn)?;
         Self::migrate_suggestions(&conn)?;
@@ -1193,6 +1197,24 @@ impl Store {
              ON memories(kind, topic_key) WHERE topic_key IS NOT NULL",
             [],
         )?;
+        Ok(())
+    }
+
+    /// Paid plugin anti-portability: add encrypted manifest decrypt key storage to
+    /// the local entitlement snapshot. Existing rows remain valid with NULL key;
+    /// encrypted plugins only load after a member sync/license flow writes one.
+    fn migrate_plugin_entitlement_decrypt_key(conn: &Connection) -> Result<()> {
+        let has_col: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('plugin_entitlements') WHERE name = 'decrypt_key_enc'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_col == 0 {
+            conn.execute(
+                "ALTER TABLE plugin_entitlements ADD COLUMN decrypt_key_enc BLOB",
+                [],
+            )?;
+        }
         Ok(())
     }
 

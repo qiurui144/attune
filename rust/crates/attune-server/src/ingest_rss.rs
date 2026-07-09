@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use attune_core::ingest::{
-    ingest_document, DocumentSink, FeedHttpResponse, IngestOutcome, RawDocument, RssConnector,
-    RssFeedFetch, SourceConnector,
+    ingest_document_with_options, DocumentSink, FeedHttpResponse, IngestOutcome, RawDocument,
+    RssConnector, RssFeedFetch, SourceConnector,
 };
 
 use crate::state::AppState;
@@ -77,6 +77,7 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
     let mut errors: Vec<String> = Vec::new();
     // 记每个成功入库 entry 的 guid，用来推进 last_entry_guid（取首条 = feed 中"最新"）。
     let mut newest_ingested_guid: Option<String> = None;
+    let ingest_options = crate::local_scheduler::ingest_options_from_state(state, None);
 
     for doc in docs {
         total += 1;
@@ -100,7 +101,7 @@ pub fn sync_rss_feed(state: &Arc<AppState>, feed_id: &str) -> Result<serde_json:
             continue;
         }
 
-        match ingest_document(store, &dek, &doc) {
+        match ingest_document_with_options(store, &dek, &doc, &ingest_options) {
             Ok(IngestOutcome::Inserted { item_id, .. }) => {
                 let _ = store.upsert_indexed_file(feed_id, &source_ref, &guid, &item_id);
                 if newest_ingested_guid.is_none() {

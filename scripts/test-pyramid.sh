@@ -10,15 +10,18 @@
 #   4. Corpus        — scripts/run-benchmark-corpus.sh  (~5min, 可选 --with-corpus)
 #   5. Quality       — cargo test --release rag_quality_benchmark  (~10s, 必跑)
 #   6. E2E (browser) — repo tests/e2e (~5min, 可选 --with-e2e)
+#   6b. Long-text E2E — airplane manuals vector DB + chat gate, 可选 --with-longtext-e2e
 #
 # 默认: 跑 1+2+3+5（必跑层），合计 ~3-4 min。
-# 可选: --with-corpus 加第 4 层；--with-e2e 加第 6 层。
+# 可选: --with-corpus 加第 4 层；--with-e2e 加第 6 层；
+#       --with-longtext-e2e 加长文本向量库/对话门禁。
 #
 # 用法:
 #   bash scripts/test-pyramid.sh                # 必跑 4 层
 #   bash scripts/test-pyramid.sh --with-corpus  # + 真语料检索
 #   bash scripts/test-pyramid.sh --with-e2e     # + 浏览器 e2e
-#   bash scripts/test-pyramid.sh --all          # 全跑
+#   bash scripts/test-pyramid.sh --with-longtext-e2e  # + 飞机手册长文本 KB E2E
+#   bash scripts/test-pyramid.sh --all          # 标准全跑，不含长文本大语料
 #
 # 输出:
 #   tests/reports/test-pyramid-<timestamp>.md  生成 Markdown 报告
@@ -38,13 +41,15 @@ phase() { echo -e "\n${CYAN}━━━ $* ━━━${NC}"; }
 # ── 解析参数 ──────────────────────────────────────────────────
 WITH_CORPUS=false
 WITH_E2E=false
+WITH_LONGTEXT_E2E=false
 for arg in "$@"; do
     case "$arg" in
-        --with-corpus) WITH_CORPUS=true ;;
-        --with-e2e)    WITH_E2E=true ;;
-        --all)         WITH_CORPUS=true; WITH_E2E=true ;;
+        --with-corpus)       WITH_CORPUS=true ;;
+        --with-e2e)          WITH_E2E=true ;;
+        --with-longtext-e2e) WITH_E2E=true; WITH_LONGTEXT_E2E=true ;;
+        --all)               WITH_CORPUS=true; WITH_E2E=true ;;
         -h|--help)
-            sed -n '3,30p' "$0" | sed 's/^# *//; s/^#//'
+            sed -n '3,32p' "$0" | sed 's/^# *//; s/^#//'
             exit 0 ;;
     esac
 done
@@ -63,6 +68,7 @@ cat > "$REPORT" <<EOF
 - Commit:    $(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 - With corpus: $WITH_CORPUS
 - With e2e:    $WITH_E2E
+- With longtext e2e: $WITH_LONGTEXT_E2E
 
 ## Layer Results
 
@@ -135,8 +141,12 @@ fi
 
 # ── 6. E2E Browser Tests ──────────────────────────────────────
 if [ "$WITH_E2E" = "true" ]; then
+    E2E_CMD="bash $PROJECT_DIR/tests/e2e/run_all.sh"
+    if [ "$WITH_LONGTEXT_E2E" = "true" ]; then
+        E2E_CMD="ATTUNE_E2E_LONGTEXT=1 bash $PROJECT_DIR/tests/e2e/run_all.sh"
+    fi
     run_layer "e2e" "Layer 6: E2E (server binary + httpx + browser)" \
-    "bash $PROJECT_DIR/tests/e2e/run_all.sh"
+    "$E2E_CMD"
 else
     RESULTS[e2e]="⏭️ SKIP"
     TIMINGS[e2e]="-"
@@ -184,4 +194,10 @@ for name in unit integration smoke quality; do
         ANY_FAIL=true
     fi
 done
+if [ "$WITH_CORPUS" = "true" ] && [[ "${RESULTS[corpus]:-}" == *FAIL* ]]; then
+    ANY_FAIL=true
+fi
+if [ "$WITH_E2E" = "true" ] && [[ "${RESULTS[e2e]:-}" == *FAIL* ]]; then
+    ANY_FAIL=true
+fi
 [ "$ANY_FAIL" = "false" ] || exit 1

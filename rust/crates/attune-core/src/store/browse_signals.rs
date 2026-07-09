@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn url_to_domain_extracts_host() {
         assert_eq!(url_to_domain("https://github.com/foo/bar"), "github.com");
-        assert_eq!(url_to_domain("http://example.com:8080/path"), "example.com");
+        assert_eq!(url_to_domain("http://example.com:8090/path"), "example.com");
         assert_eq!(url_to_domain("https://sub.x.y.com/?q=1"), "sub.x.y.com");
         // 边界：无 protocol
         assert_eq!(url_to_domain("github.com/foo"), "github.com");

@@ -23,7 +23,7 @@ pub async fn classify_one(
                 StatusCode::SERVICE_UNAVAILABLE,
                 serde_json::json!({
                     "error": "classification unavailable",
-                    "hint": "install Ollama and a local chat model suitable for your hardware"
+                    "hint": "start local scheduler or configure a cloud LLM"
                 }),
             ));
         }

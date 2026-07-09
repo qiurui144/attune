@@ -1,10 +1,19 @@
 // npu-vault/crates/vault-core/src/infer/reranker.rs
 
+use crate::edge_cloud::capacity::{DEFAULT_PROBE_TIMEOUT, DEFAULT_SCHEDULER_BASE};
+use crate::edge_cloud::scheduler::{
+    LocalSchedulerClient, SchedulerJobStatus, SchedulerKbTaskResponse,
+};
 use crate::error::{Result, VaultError};
 use crate::infer::RerankProvider;
+#[cfg(feature = "local-inference")]
 use ort::value::Tensor;
+#[cfg(feature = "local-inference")]
 use std::path::Path;
+#[cfg(feature = "local-inference")]
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+#[cfg(feature = "local-inference")]
 use tokenizers::Tokenizer;
 
 /// BGE-reranker-base (BAAI 官方) / Xenova/bge-reranker-base — 均基于 XLM-RoBERTa-base，
@@ -15,13 +24,16 @@ use tokenizers::Tokenizer;
 ///
 /// 注意：bge-reranker-v2-m3（多语言，max 8192）尚未默认启用，若未来切到 v2-m3 这条路径
 /// 时需要把这里改回 8192 或通过 env var 区分。
+#[cfg(feature = "local-inference")]
 const MAX_SEQ_LEN: usize = 512;
 
+#[cfg(feature = "local-inference")]
 pub struct OrtRerankProvider {
     session: Mutex<ort::session::Session>,
     tokenizer: Tokenizer,
 }
 
+#[cfg(feature = "local-inference")]
 impl OrtRerankProvider {
     pub fn new(model_path: &Path, tokenizer_path: &Path) -> Result<Self> {
         let session = super::provider::build_session(model_path)?;
@@ -151,6 +163,7 @@ impl OrtRerankProvider {
     }
 }
 
+#[cfg(feature = "local-inference")]
 impl RerankProvider for OrtRerankProvider {
     fn score(&self, query: &str, documents: &[&str]) -> Result<Vec<f32>> {
         documents
@@ -160,7 +173,213 @@ impl RerankProvider for OrtRerankProvider {
     }
 }
 
+/// Scheduler-native reranker.
+///
+/// Attune submits rerank as an application task and never loads an ORT session in
+/// the server process. The scheduler is responsible for selecting ORT, llama.cpp,
+/// GPU EPs, or any platform-specific implementation.
+pub struct LocalSchedulerRerankProvider {
+    client: LocalSchedulerClient,
+    task: String,
+    poll_timeout: Duration,
+    max_document_chars: usize,
+}
+
+impl LocalSchedulerRerankProvider {
+    pub fn new(base_url: &str, task: &str, poll_timeout_ms: u64) -> Self {
+        let task = task.trim();
+        Self {
+            client: LocalSchedulerClient::with_base(
+                if base_url.trim().is_empty() {
+                    DEFAULT_SCHEDULER_BASE
+                } else {
+                    base_url
+                },
+                DEFAULT_PROBE_TIMEOUT,
+            ),
+            task: if task.is_empty() {
+                "kb.query.rerank".to_string()
+            } else {
+                task.to_string()
+            },
+            poll_timeout: Duration::from_millis(poll_timeout_ms.max(1_000)),
+            max_document_chars: env_usize_any(
+                &[
+                    "ATTUNE_RERANK_MAX_INPUT_CHARS",
+                    "ATTUNE_SCHEDULER_RERANK_MAX_INPUT_CHARS",
+                    "ATTUNE_LOCAL_RERANK_MAX_INPUT_CHARS",
+                ],
+                1024,
+            )
+            .clamp(128, 8192),
+        }
+    }
+
+    fn final_outputs(&self, response: SchedulerKbTaskResponse) -> Result<serde_json::Value> {
+        let is_async =
+            response.job_id.is_some() || response.scheduled_as.eq_ignore_ascii_case("async");
+        if !is_async {
+            return Ok(response.outputs);
+        }
+        let job_id = response.job_id.ok_or_else(|| {
+            VaultError::LlmUnavailable("local scheduler rerank missing job_id".into())
+        })?;
+        let deadline = Instant::now() + self.poll_timeout;
+        loop {
+            if Instant::now() >= deadline {
+                return Err(VaultError::LlmUnavailable(format!(
+                    "local scheduler rerank job {job_id} timed out after {} ms",
+                    self.poll_timeout.as_millis()
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            let job = self.client.job(&job_id)?;
+            if scheduler_job_done(&job) {
+                return Ok(job.outputs);
+            }
+            if scheduler_job_failed(&job) {
+                return Err(VaultError::LlmUnavailable(format!(
+                    "local scheduler rerank job failed: {}",
+                    job.error.or(job.detail).unwrap_or_else(|| job.status)
+                )));
+            }
+        }
+    }
+
+    fn extract_scores(value: &serde_json::Value) -> Option<Vec<f32>> {
+        for pointer in [
+            "/scores",
+            "/outputs/scores",
+            "/results",
+            "/outputs/results",
+            "/data",
+            "/outputs/data",
+        ] {
+            if let Some(scores) = value.pointer(pointer).and_then(scores_from_array) {
+                return Some(scores);
+            }
+        }
+        value.get("outputs").and_then(Self::extract_scores)
+    }
+}
+
+impl RerankProvider for LocalSchedulerRerankProvider {
+    fn score(&self, query: &str, documents: &[&str]) -> Result<Vec<f32>> {
+        if documents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bounded_documents: Vec<String> = documents
+            .iter()
+            .map(|doc| bounded_text(doc, self.max_document_chars))
+            .collect();
+        let body = serde_json::json!({
+            "query": query,
+            "documents": bounded_documents,
+        });
+        let response = self.client.submit_kb_task(&self.task, &body, false)?;
+        let outputs = self.final_outputs(response)?;
+        let scores = Self::extract_scores(&outputs).ok_or_else(|| {
+            VaultError::LlmUnavailable(format!(
+                "local scheduler rerank response missing scores: {outputs}"
+            ))
+        })?;
+        if scores.len() != documents.len() {
+            return Err(VaultError::LlmUnavailable(format!(
+                "local scheduler rerank returned {} scores for {} documents",
+                scores.len(),
+                documents.len()
+            )));
+        }
+        Ok(scores)
+    }
+}
+
+fn scores_from_array(value: &serde_json::Value) -> Option<Vec<f32>> {
+    let arr = value.as_array()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        if let Some(n) = item.as_f64() {
+            out.push(n as f32);
+        } else if let Some(n) = item
+            .get("score")
+            .or_else(|| item.get("relevance"))
+            .or_else(|| item.get("rerank_score"))
+            .and_then(|v| v.as_f64())
+        {
+            out.push(n as f32);
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+fn scheduler_job_done(job: &SchedulerJobStatus) -> bool {
+    matches!(
+        job.status.to_ascii_lowercase().as_str(),
+        "done" | "completed" | "complete" | "success" | "succeeded"
+    )
+}
+
+fn scheduler_job_failed(job: &SchedulerJobStatus) -> bool {
+    matches!(
+        job.status.to_ascii_lowercase().as_str(),
+        "error" | "failed" | "failure" | "canceled" | "cancelled" | "expired"
+    )
+}
+
+fn env_usize_any(keys: &[&str], default: usize) -> usize {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|v| *v > 0)
+        })
+        .unwrap_or(default)
+}
+
+fn bounded_text(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let total = trimmed.chars().count();
+    if total <= max_chars {
+        return trimmed.to_string();
+    }
+    const ELLIPSIS: &str = "\n...\n";
+    if max_chars <= ELLIPSIS.chars().count() + 2 {
+        return trimmed.chars().take(max_chars).collect();
+    }
+    let body_budget = max_chars - ELLIPSIS.chars().count();
+    let head_budget = body_budget / 2 + body_budget % 2;
+    let tail_budget = body_budget / 2;
+    let head: String = trimmed.chars().take(head_budget).collect();
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(tail_budget)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{}{}{}", head.trim_end(), ELLIPSIS, tail.trim_start())
+}
+
 #[cfg(test)]
+mod scheduler_rerank_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_text_keeps_head_and_tail() {
+        let text = format!("{}MID{}", "a".repeat(2000), "z".repeat(2000));
+        let out = bounded_text(&text, 512);
+        assert!(out.chars().count() <= 512);
+        assert!(out.contains("\n...\n"));
+        assert!(out.starts_with('a'));
+        assert!(out.ends_with('z'));
+    }
+}
+
+#[cfg(all(test, feature = "local-inference"))]
 mod tests {
     use super::*;
 

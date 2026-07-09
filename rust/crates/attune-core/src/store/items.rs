@@ -625,7 +625,7 @@ impl Store {
     /// 设置文件的隐私级别。
     /// L0 = 🔒 强制本地（chunk 永不出现在云端 LLM context）
     /// L1 = 默认（脱敏后 → 云）
-    /// L3 = 高敏感（LLM 脱敏后 → 云，仅 Tier T3+/T4+/K3 启用）
+    /// L3 = 高敏感（LLM 脱敏后 → 云，仅 Tier T3+/T4+/local-scheduler 启用）
     pub fn set_item_privacy_tier(&self, item_id: &str, tier: PrivacyTier) -> Result<()> {
         let n = self.conn.execute(
             "UPDATE items SET privacy_tier = ?1, updated_at = ?2 WHERE id = ?3 AND is_deleted = 0",
@@ -851,6 +851,7 @@ mod privacy_tier_tests {
             title: "T".into(),
             content: "secret evidence body".into(),
             source_type: source_type.into(),
+            source_path: None,
             inject_content: Some("secret evidence body".into()),
             corpus_domain: "general".into(),
             breadcrumb: Vec::new(),

@@ -5,8 +5,11 @@
 use super::{Align, Artifact, Block, Document, ExportError, ExportFormat, Table};
 use crate::export::sanitize::escape_cell;
 
+#[cfg(feature = "artifact-export-rich")]
 mod docx_render;
+#[cfg(feature = "artifact-export-rich")]
 mod pdf_render;
+#[cfg(feature = "artifact-export-rich")]
 mod xlsx_render;
 
 /// Render `artifact` to `format`, returning the file bytes. Assumes the artifact
@@ -15,10 +18,26 @@ pub fn render(artifact: &Artifact, format: ExportFormat) -> Result<Vec<u8>, Expo
     match format {
         ExportFormat::Md => Ok(render_md(artifact).into_bytes()),
         ExportFormat::Csv => render_csv(artifact),
+        #[cfg(feature = "artifact-export-rich")]
         ExportFormat::Xlsx => xlsx_render::render(artifact),
+        #[cfg(not(feature = "artifact-export-rich"))]
+        ExportFormat::Xlsx => rich_export_unavailable("xlsx"),
+        #[cfg(feature = "artifact-export-rich")]
         ExportFormat::Docx => docx_render::render(artifact),
+        #[cfg(not(feature = "artifact-export-rich"))]
+        ExportFormat::Docx => rich_export_unavailable("docx"),
+        #[cfg(feature = "artifact-export-rich")]
         ExportFormat::Pdf => pdf_render::render(artifact),
+        #[cfg(not(feature = "artifact-export-rich"))]
+        ExportFormat::Pdf => rich_export_unavailable("pdf"),
     }
+}
+
+#[cfg(not(feature = "artifact-export-rich"))]
+fn rich_export_unavailable(format: &str) -> Result<Vec<u8>, ExportError> {
+    Err(ExportError::UnsupportedArtifact(format!(
+        "{format} export is not compiled in this scheduler-runtime build; use md/csv or enable artifact-export-rich"
+    )))
 }
 
 // ─────────────────────────────── Markdown ───────────────────────────────────

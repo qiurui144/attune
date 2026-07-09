@@ -467,7 +467,7 @@ pub struct SelectedSource {
 
 /// `app_settings` 中模型源缓存节的 key。
 const MODEL_SOURCE_SETTINGS_KEY: &str = "model_source";
-/// 选源缓存新鲜度 TTL(秒)。§3.4:远端可能恢复(K3 回网 / 镜像上线),不宜永久 pin
+/// 选源缓存新鲜度 TTL(秒)。§3.4:远端可能恢复(local-scheduler 回网 / 镜像上线),不宜永久 pin
 /// 一个选定源 —— 过期后下次显式下载重探,自愈到当前最优。1h 平衡"少重探"与"跟上变化"。
 const SELECTED_SOURCE_TTL_SECS: u64 = 3600;
 

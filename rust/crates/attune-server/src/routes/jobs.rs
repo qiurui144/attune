@@ -1,4 +1,4 @@
-//! G5: durable job-queue management routes (K3 nightly batch panel).
+//! G5: durable job-queue management routes (local-scheduler nightly batch panel).
 //! GET /api/v1/jobs?kind=&state=  ·  POST /jobs/{id}/cancel  ·  POST /jobs/{id}/requeue
 //! Spec: docs/superpowers/specs/2026-06-22-durable-job-queue.md §5
 

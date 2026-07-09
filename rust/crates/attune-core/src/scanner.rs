@@ -29,9 +29,31 @@ pub fn scan_directory(
     recursive: bool,
     file_types: &[String],
 ) -> Result<ScanResult> {
+    scan_directory_with_options(
+        store,
+        dek,
+        dir_id,
+        dir_path,
+        recursive,
+        file_types,
+        &crate::ingest::IngestOptions::default(),
+    )
+}
+
+/// 全量扫描指定目录，智能解析经调用方提供的 scheduler/options 承接。
+pub fn scan_directory_with_options(
+    store: &Store,
+    dek: &Key32,
+    dir_id: &str,
+    dir_path: &Path,
+    recursive: bool,
+    file_types: &[String],
+    ingest_options: &crate::ingest::IngestOptions,
+) -> Result<ScanResult> {
     use crate::ingest::local::LocalFolderConnector;
     use crate::ingest::{
-        ingest_document, ingest_document_replacing, IngestOutcome, SourceConnector,
+        ingest_document_replacing_with_options, ingest_document_with_options, IngestOutcome,
+        SourceConnector,
     };
 
     let mut result = ScanResult {
@@ -92,8 +114,10 @@ pub fn scan_directory(
         };
 
         let outcome = match &old_item_id {
-            Some(old) => ingest_document_replacing(store, dek, &doc, old),
-            None => ingest_document(store, dek, &doc),
+            Some(old) => {
+                ingest_document_replacing_with_options(store, dek, &doc, old, ingest_options)
+            }
+            None => ingest_document_with_options(store, dek, &doc, ingest_options),
         };
         match outcome {
             Ok(IngestOutcome::Inserted { item_id, .. }) => {

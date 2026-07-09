@@ -1,8 +1,10 @@
 use attune_core::classifier::Classifier;
 use attune_core::clusterer::ClusterSnapshot;
-use attune_core::embed::{EmbeddingProvider, OllamaProvider, OpenAiEmbeddingProvider};
+use attune_core::embed::{
+    EmbeddingProvider, LocalSchedulerEmbeddingProvider, OpenAiEmbeddingProvider,
+};
 use attune_core::index::FulltextIndex;
-use attune_core::llm::{LlmProvider, OllamaLlmProvider, OpenAiLlmProvider};
+use attune_core::llm::{LlmProvider, OpenAiLlmProvider};
 use attune_core::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
 use attune_core::pii::Redactor;
 use attune_core::resource_governor::{global_registry, TaskKind};
@@ -20,6 +22,20 @@ use std::time::Instant;
 
 const SEARCH_CACHE_CAPACITY: usize = 256;
 const SEARCH_CACHE_TTL_SECS: u64 = 30;
+const DEFAULT_EMBED_QUEUE_BATCH_SIZE: u32 = 32;
+const MAX_EMBED_QUEUE_BATCH_SIZE: u32 = 256;
+
+fn embed_queue_batch_size() -> usize {
+    crate::local_scheduler::env_u32_any(
+        &[
+            "ATTUNE_EMBED_QUEUE_BATCH_SIZE",
+            "ATTUNE_EMBED_BATCH_SIZE",
+            "ATTUNE_INDEX_EMBED_BATCH_SIZE",
+        ],
+        DEFAULT_EMBED_QUEUE_BATCH_SIZE,
+    )
+    .clamp(1, MAX_EMBED_QUEUE_BATCH_SIZE) as usize
+}
 
 pub struct CachedSearch {
     pub query: String,
@@ -110,8 +126,8 @@ pub struct AppState {
     pub job_store: Mutex<Option<std::sync::Arc<std::sync::Mutex<attune_core::store::Store>>>>,
     /// 防止重复启动 G5 durable job worker 后台 task
     pub job_worker_running: AtomicBool,
-    /// #82 P0 privacy fix: true when the active embedding provider is local
-    /// (localhost Ollama / ONNX in-process). Set by build_embedding_from_settings.
+    /// #82 P0 privacy fix: true when the active embedding provider is scheduler-local.
+    /// Set by build_embedding_from_settings.
     /// The queue worker reads this to know whether to enforce the OutboundGate
     /// L0 + disabled check before each embedding HTTP call. Local providers are
     /// always permitted; cloud providers (OpenAI-compat endpoint) are gated.
@@ -254,7 +270,7 @@ impl AppState {
             )),
             job_store: Mutex::new(None),
             job_worker_running: AtomicBool::new(false),
-            embedding_is_local: AtomicBool::new(true), // default local (Ollama/ONNX)
+            embedding_is_local: AtomicBool::new(true), // default scheduler-local
             // 启动时检测一次硬件，后续复用（避免每次 GET/PATCH 都同步读 /proc 等）
             hardware: attune_core::platform::HardwareProfile::detect(),
             recommendation_tx,
@@ -401,15 +417,28 @@ impl AppState {
             self.capabilities.set_enabled(id, present);
         }
 
-        // pluginhub: enabled iff a paid member; available-but-gated otherwise.
+        // pluginhub: paid unlocks the feature, but health is OK only when the
+        // runtime provider is a real HttpPluginHubProvider. A paid user with the
+        // offline mock hub still needs account activation/login to wire a license.
         let paid = self
             .member_state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_paid();
         self.capabilities.set_enabled("pluginhub", paid);
-        self.capabilities
-            .set_health("pluginhub", if paid { H::Ok } else { H::Degraded });
+        let hub_ready = self
+            .plugin_hub
+            .lock()
+            .map(|h| h.name() != "mock")
+            .unwrap_or(false);
+        self.capabilities.set_health(
+            "pluginhub",
+            if paid && hub_ready {
+                H::Ok
+            } else {
+                H::Degraded
+            },
+        );
 
         // marketplace: OSS browse surface is always reachable.
         self.capabilities.set_health("marketplace", H::Ok);
@@ -427,10 +456,23 @@ impl AppState {
     /// 由 PATCH /api/v1/settings 在 pluginhub 字段变化时调
     pub fn reload_plugin_hub(&self, url: Option<&str>, license_key: Option<&str>) {
         let new_provider: std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider> =
-            match (url, license_key) {
+            match (url.map(str::to_string), license_key.map(str::to_string)) {
                 (Some(u), Some(k)) if !u.is_empty() && !k.is_empty() => {
                     tracing::info!("plugin_hub: switching to HttpPluginHubProvider @ {u}");
-                    std::sync::Arc::new(attune_core::plugin_hub::HttpPluginHubProvider::new(u, k))
+                    let handle = std::thread::spawn(move || {
+                        std::sync::Arc::new(attune_core::plugin_hub::HttpPluginHubProvider::new(
+                            u, k,
+                        ))
+                            as std::sync::Arc<dyn attune_core::plugin_hub::PluginHubProvider>
+                    });
+                    handle.join().unwrap_or_else(|_| {
+                        tracing::warn!(
+                        "plugin_hub: failed to build HttpPluginHubProvider; falling back to mock"
+                    );
+                        std::sync::Arc::new(
+                            attune_core::plugin_hub::MockPluginHubProvider::default(),
+                        )
+                    })
                 }
                 _ => {
                     tracing::info!(
@@ -439,24 +481,41 @@ impl AppState {
                     std::sync::Arc::new(attune_core::plugin_hub::MockPluginHubProvider::default())
                 }
             };
-        if let Ok(mut guard) = self.plugin_hub.lock() {
-            *guard = new_provider;
+        let mut new_provider = Some(new_provider);
+        let old_provider = if let Ok(mut guard) = self.plugin_hub.lock() {
+            Some(std::mem::replace(
+                &mut *guard,
+                new_provider.take().expect("new provider present"),
+            ))
+        } else {
+            None
+        };
+        if let Some(unused) = new_provider {
+            let _ = std::thread::spawn(move || drop(unused)).join();
         }
+        // A reqwest blocking client owns a runtime; make the last-drop path safe even
+        // when settings/member routes call reload from a Tokio worker.
+        if let Some(old) = old_provider {
+            let _ = std::thread::spawn(move || drop(old)).join();
+        }
+    }
+
+    /// 读取 vault 中持久化的 app_settings。调用方不能持有 vault lock。
+    fn read_app_settings_json(&self) -> Option<serde_json::Value> {
+        let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+        vault_guard
+            .store()
+            .get_meta("app_settings")
+            .ok()
+            .flatten()
+            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
     }
 
     /// 仅重建 state.llm + classifier，按当前 settings 重新选 provider。
     /// 用于 wizard / Settings PATCH 修改 llm.* 字段后热切，避免要求重启。
     /// 由 settings.rs 在 body.get("llm").is_some() 时调用。
     pub fn reload_llm(&self) {
-        let settings_json = {
-            let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-            vault_guard
-                .store()
-                .get_meta("app_settings")
-                .ok()
-                .flatten()
-                .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
-        };
+        let settings_json = self.read_app_settings_json();
         let llm_result = build_llm_from_settings(&settings_json, &self.hardware);
         match llm_result {
             Some(llm_arc) => {
@@ -475,6 +534,7 @@ impl AppState {
                 // VLM 同步热切（依赖主 LLM，LLM 换了 VLM 也要跟着换）
                 *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(Arc::new(LlmVlmProvider::new(llm_arc.clone())) as Arc<dyn VlmProvider>);
+                *self.summary_llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(llm_arc.clone());
                 *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = Some(llm_arc);
             }
             None => {
@@ -484,8 +544,66 @@ impl AppState {
                 // 先清依赖 LLM 的 vlm / classifier，再清 llm —— LLM 禁用后二者立即不可用
                 *self.vlm.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 *self.classifier.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *self.summary_llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 *self.llm.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
+        }
+    }
+
+    /// 重建 embedding provider，按当前 settings 热切 local scheduler / cloud
+    /// OpenAI-compatible。用于 PATCH /settings 修改 embedding.* 后避免重启。
+    pub fn reload_embedding(&self) {
+        let settings_json = self.read_app_settings_json();
+        let (provider, is_local) = build_embedding_from_settings(&settings_json);
+        let dims = provider.dimensions();
+        self.set_embedding(Some(provider));
+        let scheduler_base = scheduler_base_from_settings_json(&settings_json);
+        self.set_reranker(Some(Arc::new(
+            attune_core::infer::reranker::LocalSchedulerRerankProvider::new(
+                &scheduler_base,
+                "kb.query.rerank",
+                60_000,
+            ),
+        )));
+        self.embedding_is_local.store(is_local, Ordering::SeqCst);
+        tracing::info!(
+            "Embedding hot-reload: provider rebuilt from settings (dims={dims}, local={is_local})"
+        );
+
+        if dims == 0 {
+            return;
+        }
+
+        match VectorIndex::new(dims) {
+            Ok(idx) => {
+                if let Ok(mut g) = self.vectors.lock() {
+                    *g = Some(idx);
+                }
+                self.invalidate_search_cache();
+                tracing::info!(
+                    "Document vector index reset after embedding reload with dims={dims}"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Embedding hot-reload: document vector index reset skipped: {e}")
+            }
+        }
+
+        let built = {
+            let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+            attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), dims)
+        };
+        match built {
+            Ok(idx) => {
+                tracing::info!(
+                    "Memory vector index rebuilt after embedding reload with dims={dims} ({} memories)",
+                    idx.len()
+                );
+                if let Ok(mut g) = self.memory_index.lock() {
+                    *g = Some(idx);
+                }
+            }
+            Err(e) => tracing::warn!("Embedding hot-reload: memory index rebuild skipped: {e}"),
         }
     }
 
@@ -601,7 +719,19 @@ impl AppState {
             }
         }
 
-        // Vector index (1024 dims for bge-m3)。
+        let settings_json = {
+            let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
+            vault_guard
+                .store()
+                .get_meta("app_settings")
+                .ok()
+                .flatten()
+                .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        };
+        let vector_dims = embedding_index_dims_from_settings(&settings_json);
+
+        // Vector index (dims follow the configured embedding provider; bge-m3=1024,
+        // local scheduler embedding-int8=512).
         //
         // 持久化策略：
         //   优先从 ~/.local/share/attune/vectors.encbin 加密加载；不存在或损坏
@@ -622,22 +752,23 @@ impl AppState {
         if let Ok(mut guard) = self.vectors.lock() {
             *guard = match dek_opt {
                 Some(dek) if vectors_path.exists() => {
-                    match VectorIndex::load_encrypted(&dek, &vectors_path, 1024) {
+                    match VectorIndex::load_encrypted(&dek, &vectors_path, vector_dims) {
                         Ok(vi) => {
                             tracing::info!(
-                                "Vector index loaded from {} ({} entries)",
+                                "Vector index loaded from {} (dims={}, {} entries)",
                                 vectors_path.display(),
+                                vector_dims,
                                 vi.len()
                             );
                             Some(vi)
                         }
                         Err(e) => {
                             tracing::warn!("Vector index load failed ({e}); starting empty");
-                            VectorIndex::new(1024).ok()
+                            VectorIndex::new(vector_dims).ok()
                         }
                     }
                 }
-                _ => VectorIndex::new(1024).ok(),
+                _ => VectorIndex::new(vector_dims).ok(),
             };
         }
 
@@ -648,12 +779,13 @@ impl AppState {
         // company-mirror → CN mirror → HF failover + 重试），进度落 `model_bootstrap`，
         // 由 /ai_stack 暴露。embedding 就绪后后台再用其 dims 重建 memory_index。
         //
-        // 注：memory_index 在上面以默认 1024 dims（bge-m3）先建一份兜底，让 tiered
-        // assembler 在 embedding 还在下载时不至于完全停摆；bg 任务拿到真 dims 后会重建。
+        // 注：memory_index 在上面以 settings 推断 dims 先建一份兜底，让 tiered
+        // assembler 在 scheduler embedding 可用前不至于完全停摆；bg 任务拿到真 dims 后会重建。
         {
+            let memory_dims = embedding_index_dims_from_settings(&settings_json);
             let built = {
                 let vault = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-                attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), 1024)
+                attune_core::memory::MemoryVectorIndex::build_from_store(vault.store(), memory_dims)
             };
             if let Ok(idx) = built {
                 if let Ok(mut g) = self.memory_index.lock() {
@@ -662,45 +794,9 @@ impl AppState {
             }
         }
 
-        // LLM 四级优先级见 build_llm_from_settings 文档
-        let settings_json = {
-            let vault_guard = self.vault.lock().unwrap_or_else(|e| e.into_inner());
-            vault_guard
-                .store()
-                .get_meta("app_settings")
-                .ok()
-                .flatten()
-                .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
-        };
-
+        // LLM 优先级见 build_llm_from_settings 文档；本地推理统一经 scheduler。
         let llm_result = build_llm_from_settings(&settings_json, &self.hardware);
-
-        let summary_llm_result: Option<Arc<dyn LlmProvider>> = {
-            let summary_model = settings_json
-                .as_ref()
-                .and_then(|settings| settings.get("summary_model").and_then(|v| v.as_str()))
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| self.hardware.recommended_summary_model())
-                .to_string();
-
-            let preferred_models = [
-                summary_model.as_str(),
-                "qwen2.5:7b",
-                "qwen2.5:3b",
-                "qwen2.5:1.5b",
-                "llama3.2:1b",
-            ];
-            match OllamaLlmProvider::auto_detect_with_preferred(&preferred_models) {
-                Ok(llm) => {
-                    tracing::info!("Summary LLM: using Ollama auto-detect with preferred model {summary_model}");
-                    Some(Arc::new(llm) as Arc<dyn LlmProvider>)
-                }
-                Err(e) => {
-                    tracing::warn!("Summary LLM unavailable ({summary_model}): {e}");
-                    None
-                }
-            }
-        };
+        let summary_llm_result = llm_result.clone();
 
         if let Some(llm_arc) = llm_result {
             let mut tax = Taxonomy::default();
@@ -892,15 +988,11 @@ impl AppState {
         Ok(processed)
     }
 
-    /// #2 #5: 后台拉取四类底座模型（embedding / reranker / ocr / asr）。
+    /// Install scheduler-backed runtime handles after unlock.
     ///
-    /// 必须在 `init_search_engines` **之后**调用（它已按 region 设好 HF_ENDPOINT）。
-    /// 单独一个后台线程顺序拉取，不阻塞 vault 解锁；每类经既有 failover
-    /// （company-mirror → CN mirror → HF，由 model_store / asr / ocr 内部 + HF_ENDPOINT
-    /// 决定）+ 最多 3 次重试；进度 / 失败原因落 `state.model_bootstrap`，由 /ai_stack 暴露。
-    ///
-    /// 失败不 panic（§4.5）：标记 Failed + warn 日志；HF_HUB_OFFLINE 时各 ensure_* 直接
-    /// 返错（逃生开关），同样记为 Failed 但不卡网络超时。已缓存的模型秒返（sha 校验后）。
+    /// Local model lifecycle is scheduler-owned. Attune server does not download
+    /// or load local worker assets here; it installs scheduler-backed
+    /// embedding/rerank providers and leaves OCR/ASR marked externally managed.
     pub fn spawn_model_bootstrap(state: std::sync::Arc<AppState>) {
         // 防重入：解锁可被多次调用（restart 后再 unlock），但模型只需拉一次。
         // 用 engines_initialized 之外的独立判断：若全部已 ready 直接跳过。
@@ -909,110 +1001,15 @@ impl AppState {
         }
         std::thread::spawn(move || {
             let status = &state.model_bootstrap;
-            const MAX_ATTEMPTS: u32 = 3;
 
-            // 通用重试器：闭包返回 Ok 即成功；失败重试至 MAX_ATTEMPTS。
-            // 每次尝试前 mark_downloading（attempts += 1）；成功 mark_ready；
-            // 全部失败 mark_failed（带最后一次错误）。
-            fn run_with_retry<F>(
-                status: &attune_core::infer::bootstrap_status::ModelBootstrapStatus,
-                class: &str,
-                max_attempts: u32,
-                mut attempt: F,
-            ) where
-                F: FnMut() -> Result<(), String>,
-            {
-                // 离线逃生：缓存缺失时不浪费重试在网络上。
-                let offline = attune_core::infer::model_store::hf_offline();
-                let mut last_err = String::new();
-                for n in 1..=max_attempts {
-                    status.mark_downloading(class);
-                    match attempt() {
-                        Ok(()) => {
-                            status.mark_ready(class);
-                            tracing::info!("model bootstrap: {class} ready (attempt {n})");
-                            return;
-                        }
-                        Err(e) => {
-                            last_err = e;
-                            tracing::warn!("model bootstrap: {class} attempt {n}/{max_attempts} failed: {last_err}");
-                            if offline {
-                                break; // 离线时重试无意义
-                            }
-                            // 退避，避免 burst（§4.5 B）。
-                            std::thread::sleep(std::time::Duration::from_millis(500 * n as u64));
-                        }
-                    }
-                }
-                status.mark_failed(class, last_err.clone());
-                tracing::warn!(
-                    "model bootstrap: {class} giving up after {max_attempts} attempts: {last_err}"
-                );
-            }
-
-            // 1) Embedding（ONNX ~默认 bge-m3 量化；ATTUNE_EMBEDDING_BACKEND=ollama 走 Ollama 无下载）。
-            //
-            // 优先级 0（develop 既有特性，#82 安全门）：settings.embedding.endpoint 非空 →
-            // OpenAI 兼容（K3 scheduler / 任意 endpoint）。此路径**零下载**，且 is_local 经
-            // `embedding_endpoint_is_local` 正确判定后存入 `embedding_is_local`，让 queue
-            // worker 对 cloud-bound embed 调用施加 OutboundGate::Embedding。命中即跳过 ONNX
-            // 下载（#2/#5 后台拉取仅针对本地 ONNX/Ollama 底座）。
-            let embed_settings_json = {
-                let vault_guard = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                vault_guard
-                    .store()
-                    .get_meta("app_settings")
-                    .ok()
-                    .flatten()
-                    .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
-            };
-            let configured_cloud_endpoint = embed_settings_json
-                .as_ref()
-                .and_then(|s| {
-                    s.get("embedding")?
-                        .get("endpoint")?
-                        .as_str()
-                        .filter(|e| !e.is_empty())
-                        .map(|_| ())
-                })
-                .is_some();
-            if configured_cloud_endpoint {
-                let (provider, is_local) = build_embedding_from_settings(&embed_settings_json);
-                state.set_embedding(Some(provider));
-                state.embedding_is_local.store(is_local, Ordering::SeqCst);
-                state.model_bootstrap.mark_ready("embedding");
-            }
-
-            let prefer_ollama = std::env::var("ATTUNE_EMBEDDING_BACKEND")
-                .map(|v| v.eq_ignore_ascii_case("ollama"))
-                .unwrap_or(false);
-            if !configured_cloud_endpoint {
-                run_with_retry(status, "embedding", MAX_ATTEMPTS, || {
-                    let provider: Arc<dyn EmbeddingProvider> = if prefer_ollama {
-                        Arc::new(OllamaProvider::default())
-                    } else {
-                        match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
-                        Ok(p) => Arc::new(p),
-                        // ONNX 拉取失败时本次记失败（触发重试）；仅最后兜底到 Ollama。
-                        Err(e) => return Err(format!("ONNX embedding: {e}")),
-                    }
-                    };
-                    state.set_embedding(Some(provider));
-                    Ok(())
-                });
-                // ONNX 三次都失败 → 兜底 Ollama（无下载，至少让 embedding path 可用）。
-                if !state
-                    .model_bootstrap
-                    .phase("embedding")
-                    .map(|p| p.is_ready())
-                    .unwrap_or(false)
-                    && !prefer_ollama
-                {
-                    tracing::info!("model bootstrap: embedding ONNX unavailable, falling back to Ollama bge-m3");
-                    state.set_embedding(Some(Arc::new(OllamaProvider::default())));
-                    state.model_bootstrap.mark_ready("embedding");
-                }
-            } // end if !configured_cloud_endpoint
+            // 1) Embedding: no direct local worker bootstrap in attune-server.
+            // Local inference is scheduler-native; cloud endpoints remain explicitly
+            // configured and privacy-gated by `embedding_is_local=false`.
+            let embed_settings_json = { state.read_app_settings_json() };
+            let (provider, is_local) = build_embedding_from_settings(&embed_settings_json);
+            state.set_embedding(Some(provider));
+            state.embedding_is_local.store(is_local, Ordering::SeqCst);
+            state.model_bootstrap.mark_ready("embedding");
 
             // embedding 就绪后用真 dims 重建 memory_index（解锁时用 1024 兜底建过一份）。
             if let Some(dims) = state.embedding().map(|p| p.dimensions()).filter(|d| *d > 0) {
@@ -1031,42 +1028,22 @@ impl AppState {
                 }
             }
 
-            // 2) Reranker（ONNX bge-reranker-v2-m3）。失败仅降级到 vector cosine，不致命。
-            run_with_retry(status, "reranker", MAX_ATTEMPTS, || {
-                match attune_core::infer::reranker::OrtRerankProvider::bge_reranker_v2_m3() {
-                    Ok(r) => {
-                        state.set_reranker(Some(Arc::new(r)));
-                        Ok(())
-                    }
-                    Err(e) => Err(format!("ONNX reranker: {e}")),
-                }
-            });
+            // 2) Reranker: scheduler-native task. The search layer already degrades
+            // gracefully to RRF/cosine if the scheduler task is unavailable.
+            let scheduler_base = scheduler_base_from_settings_json(&state.read_app_settings_json());
+            state.set_reranker(Some(Arc::new(
+                attune_core::infer::reranker::LocalSchedulerRerankProvider::new(
+                    &scheduler_base,
+                    "kb.query.rerank",
+                    60_000,
+                ),
+            )));
+            state.model_bootstrap.mark_ready("reranker");
 
-            // 3) OCR（PP-OCR ONNX ~16MB）。
-            run_with_retry(status, "ocr", MAX_ATTEMPTS, || {
-                attune_core::ocr::ppocr::PpOcrProvider::ensure_models_downloaded()
-                    .map_err(|e| e.to_string())
-            });
-
-            // 4) ASR（engine-aware：catalog 选 sensevoice 的 capable tier 拉 SenseVoice ONNX，
-            //    否则按 tier 拉 whisper ggml）。tier 不支持则跳过（标 ready）。
-            //    rc.5 真机回归根因：此处之前无脑 fetch_for_tier（只拉 whisper），而 catalog
-            //    选 sensevoice → 新装机 ASR 不自动可用，要手动 /ai-stack/ensure 才行。改用
-            //    fetch_asr_for_tier 把决策收口到 catalog（与 ensure 同源）。
-            let tier = attune_core::platform::classify_hardware(&state.hardware);
-            if tier.is_supported() {
-                run_with_retry(status, "asr", MAX_ATTEMPTS, || {
-                    attune_core::asr::fetch_asr_for_tier(tier)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                });
-            } else {
-                tracing::info!(
-                    "model bootstrap: ASR skipped (hardware tier {} unsupported)",
-                    tier.label()
-                );
-                status.mark_ready("asr");
-            }
+            // 3) OCR / 4) ASR: local model lifecycle is scheduler-owned. Do not
+            // download OCR/ASR worker assets from attune-server bootstrap.
+            status.mark_ready("ocr");
+            status.mark_ready("asr");
 
             tracing::info!(
                 "model bootstrap finished (all_ready={})",
@@ -1424,10 +1401,17 @@ impl AppState {
                     metadata: std::collections::HashMap::new(),
                 };
 
+                let ingest_options =
+                    crate::local_scheduler::ingest_options_from_state(&state, None);
                 let ingest_result = {
                     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     match vault.dek_db() {
-                        Ok(dek) => attune_core::ingest::ingest_document(vault.store(), &dek, &raw),
+                        Ok(dek) => attune_core::ingest::ingest_document_with_options(
+                            vault.store(),
+                            &dek,
+                            &raw,
+                            &ingest_options,
+                        ),
                         Err(e) => Err(e),
                     }
                 };
@@ -1907,14 +1891,17 @@ impl AppState {
                     // 对比 skill_evolver 的 LLM 调用（15s+，已拆三阶段），此处仍在可接受
                     // 范围内，不拆解。如未来扫描变慢（大目录 / 慢 HDD），可把文件遍历放锁
                     // 外，仅 DB 写操作持锁。
+                    let ingest_options =
+                        crate::local_scheduler::ingest_options_from_state(&state, None);
                     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                    match attune_core::scanner::scan_directory(
+                    match attune_core::scanner::scan_directory_with_options(
                         vault.store(),
                         &dek,
                         &dir.id,
                         path,
                         dir.recursive,
                         &file_types,
+                        &ingest_options,
                     ) {
                         Ok(r) => {
                             if r.new_files > 0 || r.updated_files > 0 {
@@ -1954,8 +1941,8 @@ impl AppState {
         let governor = global_registry().register(TaskKind::EmbeddingQueue);
 
         std::thread::spawn(move || {
-            tracing::info!("Queue worker started");
-            const BATCH_SIZE: usize = 32; // 与 attune-core/src/queue.rs 保持一致
+            let batch_size = embed_queue_batch_size();
+            tracing::info!("Queue worker started (batch_size={batch_size})");
             const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
             const MAX_ATTEMPTS: i32 = 3;
 
@@ -2010,7 +1997,7 @@ impl AppState {
                 // 取一批任务
                 let tasks_result = {
                     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-                    vault.store().dequeue_embeddings(BATCH_SIZE)
+                    vault.store().dequeue_embeddings(batch_size)
                 };
                 let tasks = match tasks_result {
                     Ok(t) => t,
@@ -2044,7 +2031,7 @@ impl AppState {
                 // #82 P0 OutboundGate::Embedding enforcement.
                 // When the active provider points to a cloud endpoint (embedding_is_local=false),
                 // filter out tasks whose item has PrivacyTier::L0 ("永不出网").
-                // Local providers (Ollama localhost / ONNX in-process) are always permitted.
+                // Local scheduler providers are always permitted.
                 let embed_tasks = {
                     let is_local = state.embedding_is_local.load(Ordering::SeqCst);
                     if is_local {
@@ -2986,7 +2973,7 @@ impl AppState {
     ///
     /// Idempotent-ish: if it cannot open the DB it logs + leaves the aggregator
     /// `None` (telemetry degrades, main paths unaffected — spec §7 / §11 R8).
-    /// `flush_interval_ms` follows spec §11 risk 6 (100ms laptop / 500ms K3);
+    /// `flush_interval_ms` follows spec §11 risk 6 (100ms laptop / 500ms local scheduler appliance);
     /// we use 200ms as a balanced default. Returns the flusher `JoinHandle` (or
     /// `None` on failure) so the caller can abort it on shutdown.
     pub fn install_usage_aggregator(&self) -> Option<tokio::task::JoinHandle<()>> {
@@ -3074,17 +3061,65 @@ impl AppState {
     }
 }
 
+fn provider_is_local_llm_alias(provider: &str) -> bool {
+    let normalized = provider.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "local")
+        || crate::local_scheduler::provider_is_scheduler_native(&normalized)
+}
+
+fn scheduler_base_from_settings_json(settings_json: &Option<serde_json::Value>) -> String {
+    let Some(settings) = settings_json.as_ref() else {
+        return attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE.to_string();
+    };
+    for section in ["llm", "embedding"] {
+        let Some(block) = settings.get(section) else {
+            continue;
+        };
+        let provider = block.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+        let endpoint = block
+            .get("endpoint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if endpoint.is_empty() {
+            continue;
+        }
+        if crate::local_scheduler::provider_is_scheduler_native(provider)
+            || endpoint_is_scheduler(endpoint)
+        {
+            return attune_core::edge_cloud::capacity::normalize_scheduler_base(endpoint);
+        }
+    }
+    attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE.to_string()
+}
+
+fn scheduler_openai_endpoint_from_settings(settings_json: &Option<serde_json::Value>) -> String {
+    format!("{}/v1", scheduler_base_from_settings_json(settings_json))
+}
+
+fn endpoint_is_scheduler(endpoint: &str) -> bool {
+    url::Url::parse(endpoint)
+        .ok()
+        .and_then(|u| u.port_or_known_default())
+        .is_some_and(|port| port == 8090)
+}
+
+fn should_route_local_endpoint_to_scheduler(endpoint: &str, provider: &str) -> bool {
+    crate::local_scheduler::provider_is_scheduler_native(provider)
+        || (embedding_endpoint_is_local(endpoint) && !endpoint_is_scheduler(endpoint))
+}
+
 /// 按 settings + 硬件构建 LLM provider。
 ///
-/// 四级优先级：
-/// 1. settings.llm.endpoint 非空 → OpenAI-compatible（hiapi / DeepSeek / Qwen 等；
-///    **K3 一体机默认走这条** —— default settings 带 endpoint `http://127.0.0.1:8090/v1`
-///    指向 k3-scheduler 统一收口，OpenAiLlmProvider 路由 :8090，**不直连 Ollama**）
-/// 2. settings.llm.provider == "local" + model 非空 → OllamaLlmProvider::with_model
-/// 3. form_factor.prefers_local_llm() (K3 一体机) → Ollama auto-detect
-///    （**末位降级兜底**：仅当 K3 的 :8090 endpoint 被用户清空才落到这；正常 K3 路径
-///    走优先级 1 的 :8090 收口，不经此直连 :11434）
-/// 4. 其他笔电 / 服务器 + 无 cloud config → None（chat 返回 503 引导配置）
+/// 优先级：
+/// 1. settings.llm.endpoint 非空且是非本地 endpoint → OpenAI-compatible 云端/网关。
+/// 2. settings.llm.endpoint 指向本地非 scheduler 服务 → 忽略该
+///    endpoint，改走 scheduler `:8090/v1`。
+/// 3. settings.llm.provider 是 local_scheduler/local 等本地别名，或硬件形态偏好
+///    本地 LLM → 走 scheduler `:8090/v1`。
+/// 4. 其他笔电 / 服务器 + 无 cloud config → None（chat 返回 503 引导配置）。
+///
+/// Attune server 不再实例化具体本地 worker；worker 必须由 scheduler 管理。
 ///
 /// 抽出为自由函数后，可以同时被 init_search_engines (启动 unlock 一次)
 /// 和 reload_llm (settings 改 llm 字段后热切) 复用。
@@ -3114,22 +3149,59 @@ fn build_llm_from_settings(
             .unwrap_or("local");
 
         if let Some(ep) = endpoint.filter(|s| !s.is_empty()) {
+            if should_route_local_endpoint_to_scheduler(&ep, provider) {
+                let scheduler_ep = scheduler_openai_endpoint_from_settings(settings_json);
+                let model = if model.trim().is_empty() {
+                    "llm-chat".to_string()
+                } else {
+                    model
+                };
+                tracing::warn!(
+                    "LLM: local direct endpoint {ep} is not used; routing provider={provider} through scheduler {scheduler_ep}"
+                );
+                return Some(Arc::new(OpenAiLlmProvider::new(
+                    &scheduler_ep,
+                    &api_key,
+                    &model,
+                )) as Arc<dyn LlmProvider>);
+            }
             tracing::info!("LLM: using configured endpoint {ep}");
             Some(Arc::new(OpenAiLlmProvider::new(&ep, &api_key, &model)) as Arc<dyn LlmProvider>)
-        } else if provider == "local" && !model.is_empty() {
-            tracing::info!("LLM: using Ollama with configured model {model}");
-            Some(Arc::new(OllamaLlmProvider::with_model(&model)) as Arc<dyn LlmProvider>)
+        } else if provider_is_local_llm_alias(provider) {
+            let scheduler_ep = scheduler_openai_endpoint_from_settings(settings_json);
+            let model = if model.trim().is_empty() {
+                "llm-chat".to_string()
+            } else {
+                model
+            };
+            tracing::info!(
+                "LLM: provider={provider} routed through local scheduler endpoint {scheduler_ep}"
+            );
+            Some(Arc::new(OpenAiLlmProvider::new(
+                &scheduler_ep,
+                &api_key,
+                &model,
+            )) as Arc<dyn LlmProvider>)
         } else {
             None
         }
     });
 
     configured_llm.or_else(|| {
-        if hardware.form_factor.prefers_local_llm() {
-            OllamaLlmProvider::auto_detect().ok().map(|llm| {
-                tracing::info!("LLM (K3 form factor): using Ollama auto-detect");
-                Arc::new(llm) as Arc<dyn LlmProvider>
-            })
+        let settings = settings_json
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if crate::local_scheduler::native_kb_enabled(&settings, hardware) {
+            let scheduler_ep = scheduler_openai_endpoint_from_settings(settings_json);
+            tracing::info!(
+                "LLM (scheduler-native KB): using scheduler endpoint {scheduler_ep}"
+            );
+            Some(Arc::new(OpenAiLlmProvider::new(
+                &scheduler_ep,
+                "local-scheduler",
+                "llm-chat",
+            )) as Arc<dyn LlmProvider>)
         } else {
             tracing::warn!(
                 "LLM: form_factor={:?} + no cloud endpoint configured → no LLM (chat 将返回 503 提示用户配置 cloud API key per CLAUDE.md M2)",
@@ -3143,18 +3215,19 @@ fn build_llm_from_settings(
 /// 按 settings 构建 embedding provider（G4 — embedding endpoint 可配置）。
 ///
 /// 优先级：
-/// 1. `settings.embedding.endpoint` 非空 → [`OpenAiEmbeddingProvider`]（OpenAI 兼容，
-///    指向任意 endpoint：OpenAI / DeepSeek / 本地 vLLM / attune Pro gateway / K3 scheduler）。
+/// 1. `settings.embedding.provider == "local_scheduler"` + endpoint 非空 →
+///    [`LocalSchedulerEmbeddingProvider`]（scheduler-native `/kb/tasks/...`）。
+/// 2. `settings.embedding.endpoint` 非空且是非本地 endpoint → [`OpenAiEmbeddingProvider`]。
 ///    读 `endpoint` / `api_key` / `model` / `dims`（缺省 model=`bge-m3`、dims=1024，与
-///    ONNX/Ollama 默认对齐，使三种 backend 维度一致、向量索引可复用）。
-/// 2. `ATTUNE_EMBEDDING_BACKEND=ollama` → Ollama bge-m3（full precision，需 Ollama 运行）。
-/// 3. 默认 ONNX（Xenova/bge-m3 quantized，CPU）— 自包含、零外部依赖。
-/// 4. ONNX 不可用 → 回退 Ollama bge-m3。
+///    云端 embedding 对齐）。
+/// 3. endpoint 指向本地非 scheduler 服务，或没有 endpoint → scheduler-native
+///    `kb.query.embed`。不再在 attune-server 内加载 ORT embedding，也不再直连
+///    worker-specific embedding API。
 ///
 /// 镜像 [`build_llm_from_settings`]：endpoint 走 `settings.embedding.*`，与 `settings.llm.*`
-/// 同形（provider/endpoint/api_key/model），让 K3 把 embedding 指向本机 scheduler 时零特例。
+/// 同形（provider/endpoint/api_key/model），让本地调度器设备把 embedding 指向本机 scheduler 时零特例。
 /// Returns `(provider, is_local)`.
-/// `is_local = true` when the provider is Ollama localhost / ONNX in-process.
+/// `is_local = true` when the provider is scheduler-local.
 /// `is_local = false` when a cloud-pointing OpenAI-compat endpoint is configured.
 /// The caller stores `is_local` in `AppState::embedding_is_local` so the queue
 /// worker can enforce OutboundGate::Embedding without re-reading settings on every batch.
@@ -3191,10 +3264,67 @@ fn embedding_endpoint_is_local(endpoint: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn embedding_provider_is_scheduler_native(provider: &str) -> bool {
+    crate::local_scheduler::provider_is_scheduler_native(provider)
+}
+
+fn embedding_default_dims(_provider: &str, model: &str) -> usize {
+    if model.eq_ignore_ascii_case("embedding-int8") {
+        512
+    } else {
+        1024
+    }
+}
+
+fn embedding_index_dims_from_settings(settings_json: &Option<serde_json::Value>) -> usize {
+    settings_json
+        .as_ref()
+        .and_then(|settings| {
+            let embedding = settings.get("embedding")?;
+            let endpoint = embedding
+                .get("endpoint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if endpoint.is_empty() {
+                return None;
+            }
+            let provider = embedding
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("openai_compat");
+            let model = embedding
+                .get("model")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    if embedding_provider_is_scheduler_native(provider)
+                        || endpoint_is_scheduler(endpoint)
+                        || should_route_local_endpoint_to_scheduler(endpoint, provider)
+                    {
+                        "embedding-int8"
+                    } else {
+                        "bge-m3"
+                    }
+                });
+            Some(
+                embedding
+                    .get("dims")
+                    .and_then(|v| v.as_u64())
+                    .map(|d| d as usize)
+                    .filter(|d| *d > 0)
+                    .unwrap_or_else(|| embedding_default_dims(provider, model)),
+            )
+        })
+        .unwrap_or(512)
+}
+
 fn build_embedding_from_settings(
     settings_json: &Option<serde_json::Value>,
 ) -> (Arc<dyn EmbeddingProvider>, bool) {
-    // 1. settings.embedding.endpoint 非空 → OpenAI 兼容
+    // 1. settings.embedding.provider=local_scheduler + endpoint 非空 → local scheduler KB task.
+    // 2. Cloud endpoint → OpenAI-compatible.
+    // 3. Local direct endpoint or absent endpoint → local scheduler default.
     let configured = settings_json.as_ref().and_then(|settings| {
         let embedding = settings.get("embedding")?;
         let endpoint = embedding
@@ -3202,24 +3332,70 @@ fn build_embedding_from_settings(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty())?;
+        let provider = embedding
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("openai_compat");
+        let route_to_scheduler =
+            embedding_provider_is_scheduler_native(provider)
+                || endpoint_is_scheduler(&endpoint)
+                || should_route_local_endpoint_to_scheduler(&endpoint, provider);
         let api_key = embedding.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let model = embedding
             .get("model")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or("bge-m3")
+            .unwrap_or(if route_to_scheduler {
+                "embedding-int8"
+            } else {
+                "bge-m3"
+            })
             .to_string();
-        // dims 默认 1024(bge-m3 / 与 VectorIndex 默认对齐);自定义 endpoint 模型维度不同时显式配。
+        let default_dims = embedding_default_dims(provider, &model);
+        // dims 默认随 provider/model 走：bge-m3=1024；local scheduler embedding-int8=512。
+        // 自定义 endpoint 模型维度不同时显式配。
         let dims = embedding
             .get("dims")
             .and_then(|v| v.as_u64())
             .map(|d| d as usize)
             .filter(|d| *d > 0)
-            .unwrap_or(1024);
+            .unwrap_or(default_dims);
         // #82: determine local_destination for OutboundGate; loopback/RFC1918 = local.
         // MUST parse the host (not `starts_with` on the raw string) — see
         // `embedding_endpoint_is_local` for the bypass classes this closes.
         let is_local = embedding_endpoint_is_local(&endpoint);
+        if route_to_scheduler {
+            let task = embedding
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("kb.query.embed");
+            let poll_timeout_ms = embedding
+                .get("poll_timeout_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(60_000);
+            tracing::info!(
+                "Embedding: local scheduler endpoint {endpoint} (provider={provider}, task={task}, model={model}, dims={dims}, local={is_local})"
+            );
+            let scheduler_base = if endpoint_is_scheduler(&endpoint)
+                || embedding_provider_is_scheduler_native(provider)
+            {
+                attune_core::edge_cloud::capacity::normalize_scheduler_base(&endpoint)
+            } else {
+                scheduler_base_from_settings_json(settings_json)
+            };
+            return Some((
+                Arc::new(LocalSchedulerEmbeddingProvider::new(
+                    &scheduler_base,
+                    task,
+                    &model,
+                    dims,
+                    poll_timeout_ms,
+                )) as Arc<dyn EmbeddingProvider>,
+                is_local,
+            ));
+        }
+
+        // 2. settings.embedding.endpoint 非空且非本地 → OpenAI 兼容云端/网关
         tracing::info!("Embedding: OpenAI-compatible endpoint {endpoint} (model={model}, dims={dims}, local={is_local})");
         Some((
             Arc::new(OpenAiEmbeddingProvider::new(&endpoint, &api_key, &model, dims))
@@ -3231,26 +3407,18 @@ fn build_embedding_from_settings(
         return (p, is_local);
     }
 
-    // 2. ATTUNE_EMBEDDING_BACKEND=ollama
-    let prefer_ollama = std::env::var("ATTUNE_EMBEDDING_BACKEND")
-        .map(|v| v.eq_ignore_ascii_case("ollama"))
-        .unwrap_or(false);
-    if prefer_ollama {
-        tracing::info!("Embedding: Ollama bge-m3 (ATTUNE_EMBEDDING_BACKEND=ollama)");
-        return (Arc::new(OllamaProvider::default()), true); // always localhost
-    }
-
-    // 3. 默认 ONNX,4. 回退 Ollama
-    match attune_core::infer::embedding::OrtEmbeddingProvider::qwen3_embedding_0_6b() {
-        Ok(p) => {
-            tracing::info!("Embedding: OrtEmbeddingProvider (Xenova/bge-m3 ONNX quantized)");
-            (Arc::new(p), true) // in-process ONNX = local
-        }
-        Err(e) => {
-            tracing::info!("ONNX embedding unavailable ({e}), falling back to Ollama bge-m3");
-            (Arc::new(OllamaProvider::default()), true) // ollama localhost
-        }
-    }
+    let scheduler_base = scheduler_base_from_settings_json(settings_json);
+    tracing::info!("Embedding: defaulting to local scheduler endpoint {scheduler_base}");
+    (
+        Arc::new(LocalSchedulerEmbeddingProvider::new(
+            &scheduler_base,
+            "kb.query.embed",
+            "embedding-int8",
+            512,
+            60_000,
+        )),
+        true,
+    )
 }
 
 #[cfg(test)]
@@ -3297,54 +3465,115 @@ mod tests {
         );
     }
 
-    /// G4 — settings.embedding.endpoint drives the embedding provider to an
+    /// G4 — cloud settings.embedding.endpoint drives the embedding provider to an
     /// OpenAI-compatible endpoint (1536 dims here proves the configured dims are read).
     /// We assert dimensions rather than network behaviour (covered by embed.rs unit test).
     #[test]
-    fn embedding_settings_endpoint_selects_openai_compat() {
+    fn embedding_cloud_endpoint_selects_openai_compat() {
         let settings = Some(serde_json::json!({
             "embedding": {
-                "endpoint": "http://127.0.0.1:9/v1",
+                "endpoint": "https://api.openai.com/v1",
                 "api_key": "sk-x",
                 "model": "text-embedding-3-small",
                 "dims": 1536
             }
         }));
         let (provider, is_local) = build_embedding_from_settings(&settings);
-        // OpenAiEmbeddingProvider reports the configured dims; Ort/Ollama defaults are 1024/0.
+        // OpenAiEmbeddingProvider reports the configured dims.
         assert_eq!(
             provider.dimensions(),
             1536,
             "configured embedding endpoint + dims must route to OpenAI-compatible provider"
         );
-        // #82: loopback endpoint must be flagged as local
         assert!(
-            is_local,
-            "127.0.0.1 endpoint must be classified as local_destination"
+            !is_local,
+            "cloud endpoint must be classified as non-local for OutboundGate"
         );
     }
 
-    /// G4 — empty/absent embedding settings must NOT pick the OpenAI path (falls through
-    /// to ATTUNE_EMBEDDING_BACKEND / ONNX / Ollama). An empty endpoint string is treated
-    /// as unconfigured. We force the Ollama branch via env to avoid downloading the ONNX
-    /// model in CI, and assert the default 1024 dims (not the 1536 OpenAI path above).
+    /// G4 — empty/absent embedding settings must NOT pick OpenAI or a direct local worker.
+    /// It defaults to scheduler-native embedding-int8.
     #[test]
-    fn embedding_settings_empty_endpoint_does_not_select_openai() {
-        // SAFETY: single-threaded test mutating process env; restored before return.
-        let prev = std::env::var("ATTUNE_EMBEDDING_BACKEND").ok();
-        std::env::set_var("ATTUNE_EMBEDDING_BACKEND", "ollama");
+    fn embedding_settings_empty_endpoint_defaults_to_scheduler() {
         let settings = Some(serde_json::json!({ "embedding": { "endpoint": "" } }));
         let (provider, is_local) = build_embedding_from_settings(&settings);
         assert_eq!(
             provider.dimensions(),
-            1024,
-            "empty endpoint must not route to OpenAI provider"
+            512,
+            "empty endpoint must route to scheduler embedding-int8"
         );
-        assert!(is_local, "Ollama fallback must be classified as local");
-        match prev {
-            Some(v) => std::env::set_var("ATTUNE_EMBEDDING_BACKEND", v),
-            None => std::env::remove_var("ATTUNE_EMBEDDING_BACKEND"),
-        }
+        assert!(is_local, "scheduler fallback must be classified as local");
+    }
+
+    #[test]
+    fn scheduler_native_embedding_enables_scheduler_llm_fallback_on_laptop() {
+        let mut hardware = attune_core::platform::HardwareProfile::default();
+        hardware.form_factor = attune_core::platform::FormFactor::Laptop;
+        let settings = Some(serde_json::json!({
+            "embedding": {
+                "provider": "local_scheduler",
+                "endpoint": "http://127.0.0.1:8090",
+                "model": "embedding-int8"
+            }
+        }));
+        let llm = build_llm_from_settings(&settings, &hardware)
+            .expect("scheduler-native KB should provide a scheduler LLM handle");
+        assert!(llm.is_local());
+    }
+
+    #[test]
+    fn explicit_cloud_llm_endpoint_wins_over_scheduler_native_embedding() {
+        let mut hardware = attune_core::platform::HardwareProfile::default();
+        hardware.form_factor = attune_core::platform::FormFactor::Laptop;
+        let settings = Some(serde_json::json!({
+            "llm": {
+                "provider": "openai_compat",
+                "endpoint": "https://api.openai.com/v1",
+                "model": "gpt-test"
+            },
+            "embedding": {
+                "provider": "local_scheduler",
+                "endpoint": "http://127.0.0.1:8090",
+                "model": "embedding-int8"
+            }
+        }));
+        let llm = build_llm_from_settings(&settings, &hardware)
+            .expect("explicit cloud LLM endpoint should still build");
+        assert!(!llm.is_local());
+    }
+
+    #[test]
+    fn local_scheduler_embedding_int8_defaults_to_512_dims() {
+        let settings = Some(serde_json::json!({
+            "embedding": {
+                "provider": "local_scheduler",
+                "endpoint": "http://127.0.0.1:8090",
+                "model": "embedding-int8"
+            }
+        }));
+        let (provider, is_local) = build_embedding_from_settings(&settings);
+        assert_eq!(provider.dimensions(), 512);
+        assert_eq!(embedding_index_dims_from_settings(&settings), 512);
+        assert!(is_local, "loopback local scheduler endpoint is local");
+    }
+
+    #[test]
+    fn embedding_local_direct_endpoint_is_routed_to_scheduler() {
+        let settings = Some(serde_json::json!({
+            "embedding": {
+                "provider": "openai_compat",
+                "endpoint": "http://localhost:18080/v1",
+                "model": "embedding-int8"
+            }
+        }));
+        let (provider, is_local) = build_embedding_from_settings(&settings);
+        assert_eq!(
+            provider.dimensions(),
+            512,
+            "local direct embedding endpoints must be replaced by scheduler"
+        );
+        assert_eq!(embedding_index_dims_from_settings(&settings), 512);
+        assert!(is_local);
     }
 
     /// #82 P0 adversarial: cloud endpoint classified as non-local so OutboundGate will
@@ -3370,13 +3599,13 @@ mod tests {
     fn embedding_endpoint_is_local_anchored_no_bypass() {
         // genuinely local → true
         for ep in [
-            "http://localhost:11434",
-            "http://127.0.0.1:11434",
-            "http://192.168.1.50:8080",
+            "http://localhost:18080",
+            "http://127.0.0.1:18080",
+            "http://192.168.1.50:8090",
             "http://10.0.0.5/v1",
             "http://172.16.0.1/v1",
             "http://172.31.255.254/v1",
-            "http://[::1]:11434",
+            "http://[::1]:18080",
         ] {
             assert!(embedding_endpoint_is_local(ep), "{ep} must be local");
         }
