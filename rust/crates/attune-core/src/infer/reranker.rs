@@ -225,15 +225,25 @@ impl LocalSchedulerRerankProvider {
             VaultError::LlmUnavailable("local scheduler rerank missing job_id".into())
         })?;
         let deadline = Instant::now() + self.poll_timeout;
+        let mut last_poll_error: Option<String> = None;
         loop {
             if Instant::now() >= deadline {
+                let detail = last_poll_error
+                    .map(|err| format!("; last poll error: {err}"))
+                    .unwrap_or_default();
                 return Err(VaultError::LlmUnavailable(format!(
-                    "local scheduler rerank job {job_id} timed out after {} ms",
-                    self.poll_timeout.as_millis()
+                    "local scheduler rerank job {job_id} timed out after {} ms{detail}",
+                    self.poll_timeout.as_millis(),
                 )));
             }
-            std::thread::sleep(Duration::from_millis(50));
-            let job = self.client.job(&job_id)?;
+            std::thread::sleep(Duration::from_millis(100));
+            let job = match self.client.job(&job_id) {
+                Ok(job) => job,
+                Err(err) => {
+                    last_poll_error = Some(err.to_string());
+                    continue;
+                }
+            };
             if scheduler_job_done(&job) {
                 return Ok(job.outputs);
             }
@@ -297,21 +307,46 @@ impl RerankProvider for LocalSchedulerRerankProvider {
 fn scores_from_array(value: &serde_json::Value) -> Option<Vec<f32>> {
     let arr = value.as_array()?;
     let mut out = Vec::with_capacity(arr.len());
+    let mut indexed_out = vec![None; arr.len()];
+    let mut saw_index = false;
     for item in arr {
-        if let Some(n) = item.as_f64() {
-            out.push(n as f32);
-        } else if let Some(n) = item
-            .get("score")
-            .or_else(|| item.get("relevance"))
-            .or_else(|| item.get("rerank_score"))
-            .and_then(|v| v.as_f64())
+        let score = score_from_value(item)?;
+        if let Some(index) = item
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
         {
-            out.push(n as f32);
-        } else {
+            if index >= indexed_out.len() || indexed_out[index].is_some() {
+                return None;
+            }
+            saw_index = true;
+            indexed_out[index] = Some(score);
+        } else if saw_index {
             return None;
+        } else {
+            out.push(score);
         }
     }
-    Some(out)
+    if saw_index {
+        if !out.is_empty() {
+            return None;
+        }
+        indexed_out.into_iter().collect()
+    } else {
+        Some(out)
+    }
+}
+
+fn score_from_value(item: &serde_json::Value) -> Option<f32> {
+    if let Some(n) = item.as_f64() {
+        return Some(n as f32);
+    }
+    item.get("score")
+        .or_else(|| item.get("relevance"))
+        .or_else(|| item.get("rerank_score"))
+        .or_else(|| item.get("relevance_score"))
+        .and_then(|v| v.as_f64())
+        .map(|n| n as f32)
 }
 
 fn scheduler_job_done(job: &SchedulerJobStatus) -> bool {
@@ -376,6 +411,25 @@ mod scheduler_rerank_tests {
         assert!(out.contains("\n...\n"));
         assert!(out.starts_with('a'));
         assert!(out.ends_with('z'));
+    }
+
+    #[test]
+    fn scores_from_array_accepts_scheduler_relevance_score() {
+        let value = serde_json::json!([
+            {"index": 2, "relevance_score": 0.7},
+            {"index": 0, "relevance_score": 0.3},
+            {"index": 1, "relevance_score": 0.5}
+        ]);
+        assert_eq!(scores_from_array(&value), Some(vec![0.3, 0.5, 0.7]));
+    }
+
+    #[test]
+    fn scores_from_array_rejects_duplicate_scheduler_index() {
+        let value = serde_json::json!([
+            {"index": 0, "relevance_score": 0.3},
+            {"index": 0, "relevance_score": 0.5}
+        ]);
+        assert_eq!(scores_from_array(&value), None);
     }
 }
 

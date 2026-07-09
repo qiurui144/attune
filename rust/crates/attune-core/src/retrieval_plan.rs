@@ -206,6 +206,7 @@ pub struct QueryFeatures {
     pub language: Lang,
     pub exactish: bool,
     pub entityish: bool,
+    pub sourceish: bool,
     pub long_or_broad: bool,
     pub asks_summary: bool,
     pub token_estimate: usize,
@@ -243,6 +244,10 @@ impl RetrievalPlan {
             .find(|c| c.channel == RetrievalChannel::Vector)
             .and_then(|c| c.min_score);
         params.domain_hint = self.domain_hint.clone();
+        params.skip_vector = self.target == RetrievalTarget::LocalScheduler
+            && self.latency_class == RetrievalLatencyClass::Interactive
+            && self.query_features.sourceish
+            && !self.query_features.asks_summary;
         params
     }
 }
@@ -400,16 +405,27 @@ pub fn analyze_query(query: &str) -> QueryFeatures {
     .any(|needle| lower.contains(needle));
     let exactish = query_has_exact_marker(query);
     let entityish = exactish || query_has_entity_shape(query);
+    let sourceish = query_has_source_shape(&lower);
     let long_or_broad = token_estimate >= 32 || asks_summary;
 
     QueryFeatures {
         language,
         exactish,
         entityish,
+        sourceish,
         long_or_broad,
         asks_summary,
         token_estimate,
     }
+}
+
+fn query_has_source_shape(lower_query: &str) -> bool {
+    [
+        "source", "manual", "handbook", "fcom", "qrh", "fctm", "amm", "sop", "mel", "ata ", "pdf",
+        "volume", "part ", "来源", "手册", "引用",
+    ]
+    .iter()
+    .any(|needle| lower_query.contains(needle))
 }
 
 fn build_channels(
@@ -588,12 +604,37 @@ fn normalize_top_k(
 }
 
 fn rerank_cap(target: RetrievalTarget, latency_class: RetrievalLatencyClass) -> usize {
-    match (target, latency_class) {
+    let default = match (target, latency_class) {
         (RetrievalTarget::LocalScheduler, RetrievalLatencyClass::Interactive) => 20,
         (RetrievalTarget::LocalScheduler, RetrievalLatencyClass::Background) => 40,
         (_, RetrievalLatencyClass::Interactive) => 40,
         (_, RetrievalLatencyClass::Background) => 80,
+    };
+    if target == RetrievalTarget::LocalScheduler
+        && latency_class == RetrievalLatencyClass::Interactive
+    {
+        env_usize_any(
+            &[
+                "ATTUNE_RETRIEVAL_CANDIDATE_CAP",
+                "ATTUNE_SCHEDULER_RETRIEVAL_CANDIDATE_CAP",
+                "ATTUNE_LOCAL_SCHEDULER_RETRIEVAL_CANDIDATE_CAP",
+            ],
+            default,
+        )
+        .clamp(default, 120)
+    } else {
+        default
     }
+}
+
+fn env_usize_any(keys: &[&str], default: usize) -> usize {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .unwrap_or(default)
 }
 
 fn evidence_budget(
@@ -655,5 +696,66 @@ fn lang_label(lang: Lang) -> &'static str {
         Lang::Zh => "zh",
         Lang::En => "en",
         Lang::Mixed => "mixed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_scheduler_interactive_candidate_cap_defaults_and_clamps_env() {
+        let previous_generic = std::env::var("ATTUNE_RETRIEVAL_CANDIDATE_CAP").ok();
+        let previous_scheduler = std::env::var("ATTUNE_SCHEDULER_RETRIEVAL_CANDIDATE_CAP").ok();
+        let previous_local = std::env::var("ATTUNE_LOCAL_SCHEDULER_RETRIEVAL_CANDIDATE_CAP").ok();
+        std::env::remove_var("ATTUNE_RETRIEVAL_CANDIDATE_CAP");
+        std::env::remove_var("ATTUNE_SCHEDULER_RETRIEVAL_CANDIDATE_CAP");
+        std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_RETRIEVAL_CANDIDATE_CAP");
+
+        let plan = plan_retrieval(RetrievalPlanRequest::local_scheduler_interactive(
+            "A320 QRH source",
+        ));
+        assert_eq!(plan.rerank_candidate_cap, 20);
+
+        std::env::set_var("ATTUNE_LOCAL_SCHEDULER_RETRIEVAL_CANDIDATE_CAP", "80");
+        let plan = plan_retrieval(RetrievalPlanRequest::local_scheduler_interactive(
+            "A320 QRH source",
+        ));
+        assert_eq!(plan.rerank_candidate_cap, 80);
+
+        std::env::set_var("ATTUNE_RETRIEVAL_CANDIDATE_CAP", "999");
+        let plan = plan_retrieval(RetrievalPlanRequest::local_scheduler_interactive(
+            "A320 QRH source",
+        ));
+        assert_eq!(plan.rerank_candidate_cap, 120);
+
+        match previous_generic {
+            Some(v) => std::env::set_var("ATTUNE_RETRIEVAL_CANDIDATE_CAP", v),
+            None => std::env::remove_var("ATTUNE_RETRIEVAL_CANDIDATE_CAP"),
+        }
+        match previous_scheduler {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_RETRIEVAL_CANDIDATE_CAP", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_RETRIEVAL_CANDIDATE_CAP"),
+        }
+        match previous_local {
+            Some(v) => std::env::set_var("ATTUNE_LOCAL_SCHEDULER_RETRIEVAL_CANDIDATE_CAP", v),
+            None => std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_RETRIEVAL_CANDIDATE_CAP"),
+        }
+    }
+
+    #[test]
+    fn local_scheduler_source_queries_skip_vector_fast_path() {
+        let plan = plan_retrieval(RetrievalPlanRequest::local_scheduler_interactive(
+            "A320 QRH quick reference handbook source",
+        ));
+        assert!(plan.query_features.sourceish);
+        assert!(plan.to_search_params().skip_vector);
+
+        let broad = plan_retrieval(RetrievalPlanRequest::local_scheduler_interactive(
+            "compare A320 and A330 hydraulic system sources",
+        ));
+        assert!(broad.query_features.sourceish);
+        assert!(broad.query_features.asks_summary);
+        assert!(!broad.to_search_params().skip_vector);
     }
 }

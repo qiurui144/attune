@@ -17,6 +17,7 @@ pub const RERANK_TOP_K_THRESHOLD: usize = 20;
 pub const DEFAULT_VECTOR_WEIGHT: f32 = 0.6;
 pub const DEFAULT_FULLTEXT_WEIGHT: f32 = 0.4;
 pub const INJECTION_BUDGET: usize = 2000;
+const METADATA_SOURCE_SCAN_LIMIT: usize = 4096;
 
 /// 启用 cross-encoder reranker 的最小候选数。
 /// 候选数 < 此阈值时，RRF 排序比 cross-encoder 重排更稳定（cross-encoder
@@ -202,15 +203,29 @@ fn source_phrase_boost(query: &str, source: &str) -> f32 {
     let q_has = |needle: &str| q.contains(needle);
 
     boost += aircraft_hint_boost(&q, source);
+    boost += source_exclusion_penalty(&q, source);
 
     if (q_has("qrh") || q_has("quick reference")) && (has("qrh") || has("quick reference")) {
-        boost += 0.14;
+        boost += 0.22;
+    }
+    if (q_has("abnormal") || q_has("emergency") || q_has("checklist"))
+        && (has("qrh") || has("quick reference"))
+    {
+        boost += 0.10;
     }
     if q_has("fctm") && has("fctm") {
         boost += 0.18;
     }
     if (q_has("fcom") || q_has("flight crew operating")) && has("fcom") {
         boost += 0.10;
+    }
+    if (q_has("sop") || q_has("standard operating"))
+        && (has("/sop") || has("\\sop") || has("-sop") || has("standard operating"))
+    {
+        boost += 0.24;
+    }
+    if q_has("takeoff") && (has("takeoff") || has("take-off")) {
+        boost += 0.16;
     }
     if (q_has("separated")
         || q_has("seperate")
@@ -272,7 +287,7 @@ fn source_phrase_boost(query: &str, source: &str) -> f32 {
     if (q_has("abbreviation") || q_has("abbreviations"))
         && (has("abbreviation") || has("abbreviations"))
     {
-        boost += 0.24;
+        boost += 0.38;
     }
     if q_has("pdf") && has(".pdf") {
         boost += 0.04;
@@ -282,6 +297,63 @@ fn source_phrase_boost(query: &str, source: &str) -> f32 {
     }
 
     boost
+}
+
+fn source_exclusion_penalty(query: &str, source: &str) -> f32 {
+    const EXCLUSION_MARKERS: &[&str] = &[
+        "不要引入",
+        "不要包含",
+        "不包括",
+        "排除",
+        "without",
+        "exclude",
+        "excluding",
+        "not ",
+    ];
+    let has_exclusion = EXCLUSION_MARKERS
+        .iter()
+        .any(|marker| query.contains(marker));
+    if !has_exclusion {
+        return 0.0;
+    }
+
+    const EXCLUSION_ALIASES: &[(&str, &[&str])] = &[
+        ("a220", &["a220", "cs300", "bd500"]),
+        (
+            "a320",
+            &["a320", "a318/a319/a320", "320fcom", "qrh320", "320-"],
+        ),
+        ("a330", &["a330", "330fcom", "330-"]),
+        ("a340", &["a340", "340fcom", "340-"]),
+        ("a350", &["a350", "350-"]),
+        ("a380", &["a380", "380fcom", "380-"]),
+        (
+            "boeing",
+            &[
+                "boeing", "b737", "b747", "b757", "b767", "b777", "b787", "737-", "747-", "757-",
+                "767-", "777-", "787-",
+            ],
+        ),
+    ];
+
+    let mut penalty = 0.0;
+    for (trigger, aliases) in EXCLUSION_ALIASES {
+        if query_excludes_source_hint(query, trigger, EXCLUSION_MARKERS)
+            && aliases.iter().any(|alias| source.contains(alias))
+        {
+            penalty -= 0.45;
+        }
+    }
+    penalty
+}
+
+fn query_excludes_source_hint(query: &str, trigger: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| {
+        query
+            .find(marker)
+            .map(|idx| query[idx + marker.len()..].contains(trigger))
+            .unwrap_or(false)
+    })
 }
 
 fn aircraft_hint_boost(query: &str, source: &str) -> f32 {
@@ -326,9 +398,9 @@ fn aircraft_hint_boost(query: &str, source: &str) -> f32 {
         .filter(|tag| source_tags.iter().any(|source_tag| source_tag == *tag))
         .count();
 
-    let mut boost = (matches as f32 * 0.10).min(0.24);
+    let mut boost = (matches as f32 * 0.16).min(0.32);
     if matches == 0 && !source_tags.is_empty() {
-        boost -= 0.08;
+        boost -= 0.16;
     }
     if query.contains("boeing") && source.contains("airbus") {
         boost -= 0.06;
@@ -443,6 +515,9 @@ pub struct SearchParams {
     /// Skip query_rewrite LLM call entirely (deterministic retrieval — bench
     /// uses this to isolate retrieval quality from LLM noise).
     pub skip_rewrite: bool,
+    /// Skip vector embedding/search for metadata-source queries that can be
+    /// answered by fulltext + SRAS source selection.
+    pub skip_vector: bool,
     /// Skip rerank LLM call entirely (same motivation as `skip_rewrite`).
     pub skip_rerank: bool,
 }
@@ -470,6 +545,7 @@ impl SearchParams {
             domain_hint: None,
             seed: None,
             skip_rewrite: false,
+            skip_vector: false,
             skip_rerank: false,
         }
     }
@@ -525,6 +601,52 @@ pub fn rrf_fuse(
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     sorted.truncate(top_k);
     sorted
+}
+
+fn merge_ranked_results(
+    primary: Vec<(String, f32)>,
+    secondary: Vec<(String, f32)>,
+    limit: usize,
+) -> Vec<(String, f32)> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(limit.min(primary.len() + secondary.len()));
+    for (id, score) in primary.into_iter().chain(secondary.into_iter()) {
+        if seen.insert(id.clone()) {
+            out.push((id, score));
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn metadata_source_candidates(
+    ctx: &SearchContext<'_>,
+    query: &str,
+    limit: usize,
+) -> Vec<(String, f32)> {
+    let Ok(items) = ctx.store.list_items(METADATA_SOURCE_SCAN_LIMIT, 0) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for item in items {
+        let mut result = SearchResult {
+            item_id: item.id,
+            score: 0.0,
+            title: item.title,
+            source_type: item.source_type,
+            corpus_domain: item.domain.unwrap_or_else(|| "general".to_string()),
+            ..Default::default()
+        };
+        apply_source_hint_boost(query, std::slice::from_mut(&mut result));
+        if result.score > 0.10 {
+            candidates.push((result.item_id, result.score));
+        }
+    }
+    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.truncate(limit);
+    candidates
 }
 
 /// Collapse repeated chunk hits to the first/best item hit before RRF.
@@ -631,11 +753,24 @@ pub fn search_with_context(
         })
         .unwrap_or_default();
     let ft_results = dedup_ranked_results(ft_results);
+    let ft_results = if params.skip_vector {
+        let metadata_results = metadata_source_candidates(ctx, query, params.initial_k);
+        log::info!(
+            "search stages: metadata_source_candidates={}",
+            metadata_results.len()
+        );
+        merge_ranked_results(metadata_results, ft_results, params.initial_k)
+    } else {
+        ft_results
+    };
 
     // 2. 向量搜索（initial_k）
     // J3 (per spec §J3)：拿到 vector 结果后立即按 min_score 过滤；
     // 低于阈值的进 RRF 前丢弃，避免噪音污染融合排序。
-    let (vec_results, query_vec): (Vec<(String, f32)>, Option<Vec<f32>>) =
+    let (vec_results, query_vec): (Vec<(String, f32)>, Option<Vec<f32>>) = if params.skip_vector {
+        log::info!("search stages: vector skipped by SearchParams");
+        (vec![], None)
+    } else {
         match (&ctx.embedding, &ctx.vectors) {
             (Some(emb), Some(vecs)) => match emb.embed(&[query]) {
                 Ok((e, _usage)) if !e.is_empty() => {
@@ -664,7 +799,8 @@ pub fn search_with_context(
                 _ => (vec![], None),
             },
             _ => (vec![], None),
-        };
+        }
+    };
 
     log::info!(
         "search stages: query='{}' fts={} vec={}",
@@ -1003,6 +1139,23 @@ mod tests {
     }
 
     #[test]
+    fn merge_ranked_results_prefers_metadata_and_dedups() {
+        let primary = vec![("qrh".to_string(), 0.8), ("fcom".to_string(), 0.7)];
+        let secondary = vec![("fcom".to_string(), 0.4), ("sop".to_string(), 0.3)];
+
+        let merged = merge_ranked_results(primary, secondary, 3);
+
+        assert_eq!(
+            merged,
+            vec![
+                ("qrh".to_string(), 0.8),
+                ("fcom".to_string(), 0.7),
+                ("sop".to_string(), 0.3)
+            ]
+        );
+    }
+
+    #[test]
     fn dedup_ranked_results_keeps_first_item_hit() {
         let ranked = vec![
             ("big-pdf".to_string(), 0.91),
@@ -1043,6 +1196,34 @@ mod tests {
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
         assert_eq!(results[0].item_id, "qrh");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_aircraft_specific_qrh() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "a220-qhr".into(),
+                score: 0.54,
+                title: "a220-300-cs300-bd500-1a11-quick-reference-handbook".into(),
+                source_path: Some("file:///Airbus/A220/QRH/a220-300-cs300-bd500-1a11-quick-reference-handbook.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "a320-qhr".into(),
+                score: 0.42,
+                title: "QRH320 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "A320 QRH quick reference handbook abnormal emergency checklist",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "a320-qhr");
     }
 
     #[test]
@@ -1100,6 +1281,62 @@ mod tests {
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
         assert_eq!(results[0].item_id, "a320-flight-controls");
+    }
+
+    #[test]
+    fn source_hint_boost_promotes_sop_takeoff_sources() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "a320-qhr".into(),
+                score: 0.50,
+                title: "QRH320 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "a320-sop-takeoff".into(),
+                score: 0.36,
+                title: "4_A320-Takeoff".into(),
+                source_path: Some("file:///Airbus/A320/SOP/4_A320-Takeoff.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "A320 SOP takeoff standard operating procedure",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "a320-sop-takeoff");
+    }
+
+    #[test]
+    fn source_hint_boost_penalizes_explicitly_excluded_sources() {
+        let mut results = vec![
+            SearchResult {
+                item_id: "boeing-qhr".into(),
+                score: 0.58,
+                title: "747-8_QRH - Quick Action".into(),
+                source_path: Some("file:///Boeing/747/QRH/747-8_QRH.pdf".into()),
+                ..Default::default()
+            },
+            SearchResult {
+                item_id: "a320-qhr".into(),
+                score: 0.40,
+                title: "QRH320 - Flight Crew Operating Manual".into(),
+                source_path: Some("file:///Airbus/A320/QRH/QRH320.pdf".into()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_hint_boost(
+            "继续，只基于上一轮引用的 A320 QRH 来源；不要引入 A330、A340 或 Boeing。",
+            &mut results,
+        );
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        assert_eq!(results[0].item_id, "a320-qhr");
     }
 
     #[test]

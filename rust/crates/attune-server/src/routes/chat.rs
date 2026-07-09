@@ -36,10 +36,25 @@ const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 const MAX_HISTORY_DEPTH: usize = 80;
 const LOCAL_SCHEDULER_KB_ASK_TASK: &str = "kb.query.ask";
 const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 64;
+const DEFAULT_CHAT_KB_TOP_K: u32 = 5;
+const MIN_CHAT_KB_TOP_K: u32 = 1;
+const MAX_CHAT_KB_TOP_K: u32 = 20;
 const DEFAULT_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 2048;
 const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 256;
 const MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 16_384;
 const LOCAL_EXTRACTIVE_MODEL_ID: &str = "local-extractive-source-answer";
+
+fn chat_kb_top_k() -> usize {
+    crate::local_scheduler::env_u32_any(
+        &[
+            "ATTUNE_CHAT_KB_TOP_K",
+            "ATTUNE_SCHEDULER_CHAT_TOP_K",
+            "ATTUNE_LOCAL_SCHEDULER_CHAT_TOP_K",
+        ],
+        DEFAULT_CHAT_KB_TOP_K,
+    )
+    .clamp(MIN_CHAT_KB_TOP_K, MAX_CHAT_KB_TOP_K) as usize
+}
 
 fn chat_context_chunk_max_chars() -> usize {
     crate::local_scheduler::env_u32_any(
@@ -226,6 +241,7 @@ fn local_scheduler_source_lookup_query(query: &str) -> bool {
             "amm",
             "ata",
             "sop",
+            "standard operating",
             "mel",
             "abbreviation",
             "abbreviations",
@@ -759,7 +775,7 @@ pub async fn chat(
         native_scheduler_kb,
         &expanded_query,
         detected_domain.as_deref(),
-        5,
+        chat_kb_top_k(),
     );
     if let Some(plan) = retrieval_plan.as_ref() {
         tracing::debug!(
@@ -2529,6 +2545,44 @@ mod tests {
             Some(v) => std::env::set_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS", v),
             None => std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS"),
         }
+    }
+
+    #[test]
+    fn chat_kb_top_k_defaults_allows_override_and_clamps() {
+        let previous_generic = std::env::var("ATTUNE_CHAT_KB_TOP_K").ok();
+        let previous_scheduler = std::env::var("ATTUNE_SCHEDULER_CHAT_TOP_K").ok();
+        let previous_local = std::env::var("ATTUNE_LOCAL_SCHEDULER_CHAT_TOP_K").ok();
+        std::env::remove_var("ATTUNE_CHAT_KB_TOP_K");
+        std::env::remove_var("ATTUNE_SCHEDULER_CHAT_TOP_K");
+        std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_CHAT_TOP_K");
+        assert_eq!(chat_kb_top_k(), DEFAULT_CHAT_KB_TOP_K as usize);
+
+        std::env::set_var("ATTUNE_LOCAL_SCHEDULER_CHAT_TOP_K", "8");
+        assert_eq!(chat_kb_top_k(), 8);
+        std::env::set_var("ATTUNE_SCHEDULER_CHAT_TOP_K", "10");
+        assert_eq!(chat_kb_top_k(), 10);
+        std::env::set_var("ATTUNE_CHAT_KB_TOP_K", "99");
+        assert_eq!(chat_kb_top_k(), MAX_CHAT_KB_TOP_K as usize);
+
+        match previous_generic {
+            Some(v) => std::env::set_var("ATTUNE_CHAT_KB_TOP_K", v),
+            None => std::env::remove_var("ATTUNE_CHAT_KB_TOP_K"),
+        }
+        match previous_scheduler {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_CHAT_TOP_K", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_CHAT_TOP_K"),
+        }
+        match previous_local {
+            Some(v) => std::env::set_var("ATTUNE_LOCAL_SCHEDULER_CHAT_TOP_K", v),
+            None => std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_CHAT_TOP_K"),
+        }
+    }
+
+    #[test]
+    fn local_scheduler_source_lookup_detects_standard_operating_procedure() {
+        assert!(local_scheduler_source_lookup_query(
+            "A320 RNAV GPS approach standard operating procedure"
+        ));
     }
 
     #[test]
