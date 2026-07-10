@@ -233,7 +233,9 @@ Long documents should follow the same pipeline on cloud and local scheduler:
 2. Chunk semantically, preserving section/page boundaries and stable chunk IDs.
 3. Embed locally where possible.
 4. Retrieve top candidates.
-5. Rerank with bounded top-k. For local scheduler interactive use, keep BGE reranker top-k <= 20.
+5. Rerank only when the latency profile allows it. Local/edge interactive chat
+   defaults to RRF order and does not wait on scheduler rerank; enable rerank
+   explicitly for offline search, quality audits, or high-quality async modes.
 6. Build answer-centered evidence windows around retrieved chunks/spans.
 7. Use tokenizer-aware adaptive shrinking until the final message fits the profile.
 8. Require citations/page refs in the answer.
@@ -480,13 +482,46 @@ Priority order for edge-native KB quality:
 3. BM25 with field boosts: title/path/heading > body; exact phrase and identifier boosts.
 4. Dense vector HNSW: semantic recall, partition-scoped.
 5. Hybrid fusion: RRF plus calibrated score features instead of fixed global coefficients only.
-6. Cross-encoder rerank: bounded top-k, local scheduler `<=20` for interactive use.
+6. Cross-encoder rerank: bounded top-k for offline/high-quality modes; local
+   scheduler interactive use defaults to no synchronous rerank unless
+   `ATTUNE_SCHEDULER_RERANK_ENABLED=1` is set.
 7. Summary/memory retrieval: L1/L2/L3 summaries for overview questions, raw span only for citations.
 8. Graph retrieval: citation links, entity co-occurrence, document references, project links.
 9. Multi-query expansion: deterministic synonyms and domain lexicons first; local small LLM rewrite only when cheap.
 10. Async deep retrieval: broad search, map-reduce, verifier, contradiction detection.
 
 This keeps simple local KB questions on local scheduler or equivalent Intel/AMD edge boxes. Cloud or large local 30B+ models should be reserved for complex reasoning, weak evidence, cross-document synthesis, or user-selected high-quality async mode.
+
+### Generic vs Platform-Specific Use, 2026-07-11
+
+The production boundary is now:
+
+| Layer | Generic across X100 / Windows / Linux x86 / cloud | Platform-specific |
+| --- | --- | --- |
+| Attune retrieval policy | SRAS/RRF planning, source-title evidence packets, citation metadata, async job polling, safety refusal | None; no platform branch in product logic |
+| Attune scheduler transport | `kb.query.embed`, `kb.query.rerank`, `kb.query.ask`, `/jobs/{id}` through one scheduler base URL | Scheduler port discovery defaults to `:8090`, but accepts `ATTUNE_SCHEDULER_PORT(S)` for Windows/x86 deployments |
+| Interactive long-text answer | 128-char evidence windows, 28-token generation cap, no synchronous rerank by default | Per deployment may raise caps if local benchmark proves p95 remains under target |
+| Fast local KB answer | Deterministic extractive response for high-confidence simple lookups | Same behavior; hardware only changes latency |
+| Acceleration | Attune consumes scheduler capability/latency behavior and does not call ORT/llama.cpp directly | RVV/RVA23/IME, AVX/OpenVINO/DirectML, model residency, queueing, prompt cache belong to scheduler workers |
+
+Current resolved gaps:
+
+- X100-specific 60s rerank stalls no longer block interactive chat because edge
+  profiles skip synchronous rerank by default.
+- X100 pilot-tuned answer budgets are now generic local-scheduler defaults, validated by
+  the airplane-manual long-text gate at p95 < 10s.
+- Scheduler endpoint handling no longer assumes only port 8090; non-X100 local
+  scheduler deployments can add ports without code changes.
+
+Remaining gaps:
+
+- Scheduler should expose tokenizer/admission metadata so Attune can shrink by
+  real tokens instead of char budgets.
+- Scheduler-side prompt cache reuse is visible in metadata but not yet optimized
+  for stable evidence-prefix reuse across questions.
+- Platform-specific acceleration proof still belongs in scheduler artifacts:
+  X100 RVA23/RVV/IME, Windows AVX/OpenVINO/DirectML, and Linux x86 AVX/AMX lanes
+  need separate worker benchmark gates.
 
 ## 10. 2026-07-09 Pilot Status
 

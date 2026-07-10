@@ -22,7 +22,8 @@ use attune_core::outbound_gate::{OutboundGate, OutboundKind, OutboundPolicy};
 use attune_core::vault::VaultState;
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
-const LOCAL_SCHEDULER_PORT: u16 = 8090;
+const DEFAULT_SCHEDULER_PORT: u16 = 8090;
+const MAX_SCHEDULER_PROBE_PORTS: usize = 8;
 
 // ── POST /api/v1/llm/test ────────────────────────────────────────────────────
 
@@ -63,7 +64,10 @@ pub async fn test_llm(
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": "local LLM endpoints must be reached through the local scheduler (:8090/v1)",
+                "error": format!(
+                    "local LLM endpoints must be reached through configured local scheduler ports: {}",
+                    scheduler_ports_label()
+                ),
             })),
         ));
     }
@@ -148,14 +152,14 @@ pub async fn probe_local_scheduler(
         }
     }
 
-    // 2) 本机回环兜底。:8090 = local-scheduler 统一收口口(OpenAI-compatible)。
-    for ep in [
-        "http://127.0.0.1:8090/v1",
-        "http://localhost:8090/v1",
-    ] {
-        let ep = ep.to_string();
-        if dedup.insert(ep.clone()) {
-            candidates.push(ep);
+    // 2) 本机回环兜底。默认 :8090；其他平台可通过 ATTUNE_SCHEDULER_PORT(S) 扩展。
+    let scheduler_ports = configured_scheduler_ports();
+    for port in &scheduler_ports {
+        for host in ["127.0.0.1", "localhost"] {
+            let ep = format!("http://{host}:{port}/v1");
+            if dedup.insert(ep.clone()) {
+                candidates.push(ep);
+            }
         }
     }
 
@@ -296,6 +300,7 @@ fn discover_local_subnet_candidates() -> Vec<String> {
         Err(_) => return out,
     };
 
+    let scheduler_ports = configured_scheduler_ports();
     for (_name, ip) in ifaces {
         let IpAddr::V4(v4) = ip else {
             continue;
@@ -306,12 +311,12 @@ fn discover_local_subnet_candidates() -> Vec<String> {
 
         let oct = v4.octets();
         let my_host = oct[3];
-        // 本地调度器默认在 LAN 上对外收口 :8090。
+        // Scheduler stays as the only LAN-facing inference endpoint; the port set is deployment-specific.
         for host in 1u8..=254u8 {
             if host == my_host {
                 continue;
             }
-            for port in [8090u16] {
+            for port in &scheduler_ports {
                 let ep = format!(
                     "http://{}.{}.{}.{}:{}/v1",
                     oct[0], oct[1], oct[2], host, port
@@ -327,10 +332,65 @@ fn discover_local_subnet_candidates() -> Vec<String> {
 }
 
 fn is_scheduler_endpoint(ep: &str) -> bool {
+    is_scheduler_endpoint_with_ports(ep, &configured_scheduler_ports())
+}
+
+fn is_scheduler_endpoint_with_ports(ep: &str, ports: &[u16]) -> bool {
     url::Url::parse(ep)
         .ok()
         .and_then(|u| u.port_or_known_default())
-        .is_some_and(|port| port == LOCAL_SCHEDULER_PORT)
+        .is_some_and(|port| ports.contains(&port))
+}
+
+fn configured_scheduler_ports() -> Vec<u16> {
+    let mut values = vec![DEFAULT_SCHEDULER_PORT.to_string()];
+    if let Ok(base) = url::Url::parse(DEFAULT_SCHEDULER_BASE) {
+        if let Some(port) = base.port_or_known_default() {
+            values.push(port.to_string());
+        }
+    }
+    for key in [
+        "ATTUNE_SCHEDULER_PORTS",
+        "ATTUNE_LOCAL_SCHEDULER_PORTS",
+        "ATTUNE_SCHEDULER_PORT",
+        "ATTUNE_LOCAL_SCHEDULER_PORT",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            values.push(value);
+        }
+    }
+    let refs = values.iter().map(String::as_str).collect::<Vec<_>>();
+    scheduler_ports_from_values(&refs)
+}
+
+fn scheduler_ports_from_values(values: &[&str]) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for raw in values {
+        for part in raw.split(|ch: char| ch == ',' || ch == ';' || ch.is_whitespace()) {
+            let Ok(port) = part.trim().parse::<u16>() else {
+                continue;
+            };
+            if port == 0 || ports.contains(&port) {
+                continue;
+            }
+            ports.push(port);
+            if ports.len() >= MAX_SCHEDULER_PROBE_PORTS {
+                return ports;
+            }
+        }
+    }
+    if ports.is_empty() {
+        ports.push(DEFAULT_SCHEDULER_PORT);
+    }
+    ports
+}
+
+fn scheduler_ports_label() -> String {
+    configured_scheduler_ports()
+        .into_iter()
+        .map(|port| format!(":{port}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 async fn probe_openai_compat_models(client: &reqwest::Client, endpoint: &str) -> bool {
@@ -391,9 +451,7 @@ pub async fn pull_model(
         ));
     }
 
-    tracing::info!(
-        "legacy model pull request accepted as scheduler-managed: model={model}"
-    );
+    tracing::info!("legacy model pull request accepted as scheduler-managed: model={model}");
     Ok(Json(ModelPullResponse {
         task_id: format!("scheduler-managed-{}", uuid::Uuid::new_v4()),
         status: "scheduler-managed".to_string(),
@@ -648,10 +706,37 @@ mod tests {
 
     #[test]
     fn scheduler_endpoint_requires_scheduler_port() {
-        assert!(super::is_scheduler_endpoint("http://127.0.0.1:8090/v1"));
-        assert!(super::is_scheduler_endpoint("http://192.168.1.50:8090/v1"));
-        assert!(!super::is_scheduler_endpoint("http://127.0.0.1:18080/v1"));
-        assert!(!super::is_scheduler_endpoint("https://api.openai.com/v1"));
+        let ports = super::scheduler_ports_from_values(&["8090"]);
+        assert!(super::is_scheduler_endpoint_with_ports(
+            "http://127.0.0.1:8090/v1",
+            &ports
+        ));
+        assert!(super::is_scheduler_endpoint_with_ports(
+            "http://192.168.1.50:8090/v1",
+            &ports
+        ));
+        assert!(!super::is_scheduler_endpoint_with_ports(
+            "http://127.0.0.1:18080/v1",
+            &ports
+        ));
+        assert!(!super::is_scheduler_endpoint_with_ports(
+            "https://api.openai.com/v1",
+            &ports
+        ));
+    }
+
+    #[test]
+    fn scheduler_ports_accept_platform_specific_overrides() {
+        let ports = super::scheduler_ports_from_values(&["8090, 19090", "28090;8090", "bad"]);
+        assert_eq!(ports, vec![8090, 19090, 28090]);
+        assert!(super::is_scheduler_endpoint_with_ports(
+            "http://127.0.0.1:19090/v1",
+            &ports
+        ));
+        assert!(super::is_scheduler_endpoint_with_ports(
+            "http://192.168.1.50:28090/v1",
+            &ports
+        ));
     }
 
     #[test]
