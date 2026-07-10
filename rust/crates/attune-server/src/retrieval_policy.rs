@@ -53,10 +53,24 @@ pub(crate) fn build_search_params(
         }
     }
 
+    if use_edge_profile
+        && !env_bool_any(
+            &[
+                "ATTUNE_RERANK_ENABLED",
+                "ATTUNE_SCHEDULER_RERANK_ENABLED",
+                "ATTUNE_LOCAL_RERANK_ENABLED",
+            ],
+            false,
+        )
+    {
+        params.skip_rerank = true;
+    }
     if let Some(eval) = eval {
         params.seed = eval.seed;
         params.skip_rewrite = eval.skip_rewrite;
-        params.skip_rerank = eval.skip_rerank;
+        if eval.skip_rerank {
+            params.skip_rerank = true;
+        }
     }
     if env_bool_any(
         &[
@@ -189,5 +203,6 @@ mod tests {
         assert!(params.initial_k <= 200);
         assert_eq!(params.intermediate_k, 40);
         assert_eq!(params.domain_hint.as_deref(), Some("aviation"));
+        assert!(params.skip_rerank);
     }
 }

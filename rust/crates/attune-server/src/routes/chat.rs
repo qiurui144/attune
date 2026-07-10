@@ -35,14 +35,15 @@ const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 /// 真正的窗口感知裁剪由context_budget 在拿到 LLM 后做（见下方）。
 const MAX_HISTORY_DEPTH: usize = 80;
 const LOCAL_SCHEDULER_KB_ASK_TASK: &str = "kb.query.ask";
-const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 64;
+const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 28;
 const DEFAULT_CHAT_KB_TOP_K: u32 = 5;
 const MIN_CHAT_KB_TOP_K: u32 = 1;
 const MAX_CHAT_KB_TOP_K: u32 = 20;
-const DEFAULT_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 2048;
-const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 256;
+const DEFAULT_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 128;
+const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 96;
 const MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 16_384;
 const LOCAL_EXTRACTIVE_MODEL_ID: &str = "local-extractive-source-answer";
+const LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS: usize = 64;
 
 fn chat_kb_top_k() -> usize {
     crate::local_scheduler::env_u32_any(
@@ -96,6 +97,30 @@ fn bounded_context_text(text: &str, max_chars: usize) -> String {
     format!("{}{}{}", head.trim_end(), ELLIPSIS, tail.trim_start())
 }
 
+fn local_scheduler_source_title(k: &Value) -> &str {
+    k.get("title").and_then(|v| v.as_str()).unwrap_or("").trim()
+}
+
+fn local_scheduler_context_text(title: &str, evidence: &str, max_chars: usize) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        return bounded_context_text(evidence, max_chars);
+    }
+
+    let title_budget = (max_chars / 4).clamp(32, LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS);
+    let title = bounded_context_text(title, title_budget);
+    let prefix = format!("Source: {title}\nEvidence: ");
+    if prefix.chars().count() >= max_chars {
+        return bounded_context_text(&format!("{prefix}{evidence}"), max_chars);
+    }
+
+    let evidence_budget = max_chars - prefix.chars().count();
+    format!(
+        "{prefix}{}",
+        bounded_context_text(evidence, evidence_budget)
+    )
+}
+
 fn build_chat_search_params(
     form_factor: attune_core::platform::FormFactor,
     use_local_scheduler_profile: bool,
@@ -123,6 +148,7 @@ fn build_local_scheduler_kb_contexts(knowledge: &[Value]) -> Vec<Value> {
     knowledge
         .iter()
         .filter_map(|k| {
+            let title = local_scheduler_source_title(k);
             let text = k
                 .get("inject_content")
                 .and_then(|v| v.as_str())
@@ -132,11 +158,11 @@ fn build_local_scheduler_kb_contexts(knowledge: &[Value]) -> Vec<Value> {
             if text.is_empty() {
                 return None;
             }
-            let text = bounded_context_text(text, max_context_chars);
+            let text = local_scheduler_context_text(title, text, max_context_chars);
             Some(serde_json::json!({
                 "text": text,
                 "source_id": k.get("item_id").and_then(|v| v.as_str()).unwrap_or(""),
-                "title": k.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                "title": title,
                 "score": k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
                 "breadcrumb": k.get("breadcrumb").cloned().unwrap_or_else(|| serde_json::json!([])),
                 "chunk_offset_start": k.get("chunk_offset_start").cloned().unwrap_or(Value::Null),
@@ -1749,13 +1775,7 @@ pub async fn chat(
         let admission_messages = build_local_scheduler_admission_messages(&body.message, &contexts);
         let task_body = serde_json::json!({
             "query": body.message,
-            "contexts": contexts,
-            "answer_policy": {
-                "mode": "grounded_cited_answer",
-                "include_source_terms": true,
-                "refuse_operational_flight_or_maintenance_steps": true,
-                "prefer_short_bullets": true
-            }
+            "contexts": contexts
         });
         let scheduler_base = crate::local_scheduler::base_from_settings(&app_settings);
 
@@ -2729,6 +2749,7 @@ mod tests {
         assert_eq!(params.intermediate_k, 20);
         assert_eq!(params.min_score, Some(0.65));
         assert_eq!(params.domain_hint.as_deref(), Some("legal"));
+        assert!(params.skip_rerank);
     }
 
     #[test]
@@ -2890,7 +2911,10 @@ mod tests {
         })];
         let contexts = build_local_scheduler_kb_contexts(&knowledge);
         assert_eq!(contexts.len(), 1);
-        assert_eq!(contexts[0]["text"], "bounded evidence");
+        assert_eq!(
+            contexts[0]["text"],
+            "Source: 合同\nEvidence: bounded evidence"
+        );
         assert_eq!(contexts[0]["source_id"], "item-1");
         assert_eq!(contexts[0]["title"], "合同");
         assert_eq!(contexts[0]["breadcrumb"][0], "第一章");
@@ -2904,6 +2928,16 @@ mod tests {
         assert!(bounded.contains("\n...\n"));
         assert!(bounded.starts_with('a'));
         assert!(bounded.ends_with('z'));
+    }
+
+    #[test]
+    fn local_scheduler_context_builder_bounds_title_and_evidence_together() {
+        let text =
+            local_scheduler_context_text(&"manual-title-".repeat(30), &"e".repeat(2000), 256);
+        assert!(text.chars().count() <= 256);
+        assert!(text.starts_with("Source: manual-title-"));
+        assert!(text.contains("Evidence: "));
+        assert!(text.contains("\n...\n"));
     }
 
     #[test]
