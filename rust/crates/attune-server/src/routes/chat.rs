@@ -494,8 +494,8 @@ fn local_scheduler_source_lines(knowledge: &[Value], limit: usize) -> Vec<String
     lines
 }
 
-fn build_local_scheduler_extractive_answer(query: &str, knowledge: &[Value]) -> Option<String> {
-    if knowledge.is_empty() || !local_scheduler_extractive_answer_enabled() {
+fn build_local_scheduler_safety_refusal(query: &str, knowledge: &[Value]) -> Option<String> {
+    if knowledge.is_empty() || !local_scheduler_operational_safety_query(query) {
         return None;
     }
 
@@ -504,11 +504,20 @@ fn build_local_scheduler_extractive_answer(query: &str, knowledge: &[Value]) -> 
         return None;
     }
 
-    if local_scheduler_operational_safety_query(query) {
-        return Some(format!(
-            "I cannot provide exact real-flight or maintenance emergency procedure steps. Do not use this response for operational flight decisions; consult the official QRH/manual and qualified crew or maintenance personnel.\n\nRelevant local KB sources for citation only:\n{}",
-            source_lines.join("\n")
-        ));
+    Some(format!(
+        "I cannot provide exact real-flight or maintenance emergency procedure steps. Do not use this response for operational flight decisions; consult the official QRH/manual and qualified crew or maintenance personnel.\n\nRelevant local KB sources for citation only:\n{}",
+        source_lines.join("\n")
+    ))
+}
+
+fn build_local_scheduler_extractive_answer(query: &str, knowledge: &[Value]) -> Option<String> {
+    if knowledge.is_empty() || !local_scheduler_extractive_answer_enabled() {
+        return None;
+    }
+
+    let source_lines = local_scheduler_source_lines(knowledge, 5);
+    if source_lines.is_empty() {
+        return None;
     }
 
     if !local_scheduler_source_lookup_query(query) {
@@ -1628,7 +1637,32 @@ pub async fn chat(
     // Local scheduler path: answer generation goes through scheduler-native `/kb/tasks`,
     // not through the legacy OpenAI-compatible `/v1/chat/completions` path.
     if native_scheduler_kb && !web_search_used {
-        if let Some(content) = build_local_scheduler_extractive_answer(&body.message, &knowledge) {
+        let deterministic_local_answer =
+            build_local_scheduler_safety_refusal(&body.message, &knowledge)
+                .map(|content| {
+                    (
+                        content,
+                        "local.safety.refusal",
+                        "deterministic_operational_safety_refusal",
+                        "OperationalSafetyRefusal",
+                    )
+                })
+                .or_else(|| {
+                    build_local_scheduler_extractive_answer(&body.message, &knowledge).map(
+                        |content| {
+                            (
+                                content,
+                                "local.extractive.answer",
+                                "high_confidence_retrieval_extractive_answer",
+                                "ExtractiveLocalAnswer",
+                            )
+                        },
+                    )
+                });
+
+        if let Some((content, local_task, local_reason, admission_reason)) =
+            deterministic_local_answer
+        {
             let citations: Vec<serde_json::Value> =
                 knowledge.iter().map(eval_surface::build_citation).collect();
             let tokens_in = knowledge
@@ -1687,11 +1721,11 @@ pub async fn chat(
                     "strategy": strategy_str,
                 },
                 "local_scheduler": {
-                    "task": "local.extractive.answer",
+                    "task": local_task,
                     "scheduled_as": "sync",
                     "job_id": null,
                     "status": "done",
-                    "reason": "high_confidence_retrieval_extractive_answer",
+                    "reason": local_reason,
                     "eta_ms": 0,
                     "model": LOCAL_EXTRACTIVE_MODEL_ID,
                     "service_class": "realtime_answer",
@@ -1699,12 +1733,12 @@ pub async fn chat(
                     "latency_ms": chat_latency_ms,
                     "queue_wait_ms": 0,
                     "admission": {
-                        "task_name": "local.extractive.answer",
+                        "task_name": local_task,
                         "model_id": LOCAL_EXTRACTIVE_MODEL_ID,
                         "service_class": "realtime_answer",
                         "context_tokens": tokens_in,
                         "max_output_tokens": tokens_out,
-                        "reason": "ExtractiveLocalAnswer",
+                        "reason": admission_reason,
                         "explicit_async": false,
                     }
                 }
@@ -2888,20 +2922,22 @@ mod tests {
     }
 
     #[test]
-    fn local_scheduler_extractive_answer_refuses_operational_steps() {
+    fn local_scheduler_safety_refusal_ignores_extractive_toggle() {
         let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
-        std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
+        std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "0");
 
         let knowledge = vec![serde_json::json!({
             "item_id": "qrh-320",
             "title": "QRH320 Quick Reference",
             "inject_content": "A320 emergency abnormal checklist reference material"
         })];
-        let answer = build_local_scheduler_extractive_answer(
+        let answer = build_local_scheduler_safety_refusal(
             "Give me exact real flight emergency steps from the QRH for an engine fire now",
             &knowledge,
         )
-        .expect("safety query should return a refusal template");
+        .expect(
+            "safety query should return a refusal template even when extractive answers are off",
+        );
 
         let lower = answer.to_ascii_lowercase();
         assert!(lower.contains("cannot provide"));

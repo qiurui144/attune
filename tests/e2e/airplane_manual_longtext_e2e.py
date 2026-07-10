@@ -296,6 +296,13 @@ def run_gates(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
     ]
     if token:
         chat_cmd.extend(["--token", token])
+    if env_bool("ATTUNE_LONGTEXT_REQUIRE_SCHEDULER_GENERATION", False):
+        chat_cmd.append("--require-scheduler-generation")
+    if env_bool("ATTUNE_LONGTEXT_REQUIRE_PROMPT_CACHE_METADATA", False):
+        chat_cmd.append("--require-prompt-cache-metadata")
+    scheduler_p95 = os.environ.get("ATTUNE_LONGTEXT_SCHEDULER_GENERATION_P95_MS_MAX", "").strip()
+    if scheduler_p95:
+        chat_cmd.extend(["--scheduler-generation-p95-ms-max", scheduler_p95])
     if fail_targets:
         chat_cmd.append("--fail-on-targets")
     run_cmd(chat_cmd, timeout, dry_run)

@@ -83,6 +83,21 @@ python3 scripts/eval-airplane-manual-longtext-multiturn.py \
 `airplane_manual_longtext_e2e.py` 默认会在单轮 chat gate 后调用该脚本。调试纯
 search/chat 单轮时可设 `ATTUNE_LONGTEXT_MULTITURN=0`。
 
+生成型 scheduler answer worker 门禁可通过关闭抽取式 fast path 后运行：
+
+```bash
+ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER=0 \
+ATTUNE_LONGTEXT_REQUIRE_SCHEDULER_GENERATION=1 \
+ATTUNE_LONGTEXT_SCHEDULER_GENERATION_P95_MS_MAX=10000 \
+python3 tests/e2e/airplane_manual_longtext_e2e.py
+```
+
+该模式要求单轮 chat gate 的成功样本全部走 scheduler answer worker
+（当前任务名 `kb.query.ask`）生成路径，并在
+结果 JSON 中汇总 scheduler 生成 latency、queue wait、cold-start wait，以及
+scheduler 返回的 prompt-cache/cache metadata。若 scheduler 已提供 prompt-cache
+字段，可额外设置 `ATTUNE_LONGTEXT_REQUIRE_PROMPT_CACHE_METADATA=1` 把它升级为硬门禁。
+
 解锁后，server 会在后台预热本地 scheduler / scheduler-native 检索链路：
 metadata source scan、典型 source lookup query 和 top-k item 解密会先跑一轮，
 用于压低重启后首问冷启动延迟。默认只在本地 scheduler 或 scheduler-native
