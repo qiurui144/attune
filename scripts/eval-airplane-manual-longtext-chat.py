@@ -11,6 +11,7 @@ import json
 import statistics
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -20,8 +21,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tests/e2e"))
 
 from airplane_longtext_support import (  # noqa: E402
+    attune_http_error_from_urllib,
     auth_json_headers,
     citation_hit,
+    exception_error_fields,
     expected_term_hit,
     filtered_queries,
     load_manifest,
@@ -67,6 +70,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def post_chat(args: argparse.Namespace, message: str) -> tuple[float, dict[str, Any]]:
+    path = "/api/v1/chat"
     url = f"{args.base_url.rstrip('/')}/api/v1/chat"
     body = json.dumps({"message": message, "history": []}).encode()
     req = urllib.request.Request(
@@ -76,8 +80,11 @@ def post_chat(args: argparse.Namespace, message: str) -> tuple[float, dict[str, 
         method="POST",
     )
     start = time.perf_counter()
-    with urllib.request.urlopen(req, timeout=args.timeout) as resp:
-        data = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        raise attune_http_error_from_urllib("POST", path, exc) from exc
     elapsed_ms = (time.perf_counter() - start) * 1000
     return elapsed_ms, data
 
@@ -221,6 +228,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 poll_interval=args.poll_interval,
             )
             total_ms = (time.perf_counter() - start) * 1000
+            terminal_error = response.get("local_scheduler_terminal_error")
+            if not isinstance(terminal_error, dict):
+                terminal_error = {}
             content = output_text(response) or str(response.get("content") or "")
             citations = response.get("citations") if isinstance(response.get("citations"), list) else []
             expected_refusal = query.get("expected_behavior") == "retrieve_for_citation_but_refuse_operational_advice"
@@ -236,6 +246,12 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             row = {
                 "id": query["id"],
                 "category": query.get("category"),
+                "error": terminal_error.get("error"),
+                "error_status": terminal_error.get("error_status"),
+                "error_code": terminal_error.get("error_code"),
+                "scheduler_error": terminal_error.get("scheduler_error"),
+                "retryable": terminal_error.get("retryable"),
+                "may_degrade": terminal_error.get("may_degrade"),
                 "latency_ms": total_ms,
                 "initial_chat_latency_ms": chat_ms,
                 "citations_count": len(citations),
@@ -270,13 +286,16 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "scheduler_prompt_tokens": timings.get("prompt_n") or usage.get("prompt_tokens"),
                 "scheduler_output_tokens": timings.get("predicted_n") or usage.get("completion_tokens"),
             }
+            if terminal_error:
+                row["answer_accuracy_hit"] = False
             rows.append(row)
         except Exception as exc:  # noqa: BLE001 - report per-query failure.
+            err = exception_error_fields(exc)
             rows.append(
                 {
                     "id": query["id"],
                     "category": query.get("category"),
-                    "error": str(exc),
+                    **err,
                     "latency_ms": 0.0,
                     "initial_chat_latency_ms": 0.0,
                     "citations_count": 0,
@@ -360,6 +379,13 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "profile": args.profile,
         "queries": len(rows),
         "errors": sum(1 for row in rows if row.get("error")),
+        "error_codes": sorted(
+            {
+                str(row.get("error_code"))
+                for row in rows
+                if row.get("error") and row.get("error_code")
+            }
+        ),
         "citation_hit_rate": (
             statistics.fmean(1.0 if row["citation_hit"] else 0.0 for row in citation_rows)
             if citation_rows

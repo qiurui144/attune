@@ -23,6 +23,42 @@ TERMINAL_LOCAL_SCHEDULER = {
     "cancelled",
     "expired",
 }
+FAILED_LOCAL_SCHEDULER = {
+    "error",
+    "failed",
+    "failure",
+    "canceled",
+    "cancelled",
+    "expired",
+}
+
+
+class AttuneHttpError(RuntimeError):
+    def __init__(self, method: str, path: str, status: int, payload: dict[str, Any]):
+        self.method = method
+        self.path = path
+        self.status = status
+        self.payload = payload
+        code = payload.get("code") if isinstance(payload, dict) else None
+        suffix = f" code={code}" if code else ""
+        super().__init__(f"{method} {path} failed: HTTP {status}{suffix} {payload}")
+
+
+def parse_error_payload(raw: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw) if raw else {}
+    except Exception:
+        return {"raw": raw}
+    return parsed if isinstance(parsed, dict) else {"raw": parsed}
+
+
+def attune_http_error_from_urllib(
+    method: str,
+    path: str,
+    exc: urllib.error.HTTPError,
+) -> AttuneHttpError:
+    raw = exc.read().decode(errors="replace")
+    return AttuneHttpError(method, path, exc.code, parse_error_payload(raw))
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -81,14 +117,24 @@ def request_json(
             payload = resp.read().decode()
             return resp.status, json.loads(payload) if payload else {}
     except urllib.error.HTTPError as exc:
-        payload = exc.read().decode(errors="replace")
-        try:
-            parsed = json.loads(payload) if payload else {}
-        except Exception:
-            parsed = {"raw": payload}
+        parsed = parse_error_payload(exc.read().decode(errors="replace"))
         if exc.code in allow_statuses:
             return exc.code, parsed
-        raise RuntimeError(f"{method} {path} failed: HTTP {exc.code} {parsed}") from exc
+        raise AttuneHttpError(method, path, exc.code, parsed) from exc
+
+
+def exception_error_fields(exc: BaseException) -> dict[str, Any]:
+    payload = getattr(exc, "payload", None)
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "error": str(exc),
+        "error_status": getattr(exc, "status", None),
+        "error_code": payload.get("code"),
+        "scheduler_error": payload.get("scheduler_error"),
+        "retryable": payload.get("retryable"),
+        "may_degrade": payload.get("may_degrade"),
+    }
 
 
 def output_text(value: Any) -> str:
@@ -121,6 +167,27 @@ def unwrap_local_scheduler_job(value: dict[str, Any]) -> dict[str, Any]:
 
 def local_scheduler_status(value: dict[str, Any]) -> str:
     return str(value.get("status") or value.get("state") or "").casefold()
+
+
+def local_scheduler_terminal_error_fields(job: dict[str, Any]) -> dict[str, Any] | None:
+    status = local_scheduler_status(job)
+    if status not in FAILED_LOCAL_SCHEDULER:
+        return None
+    raw_error = job.get("error")
+    if isinstance(raw_error, dict):
+        code = raw_error.get("code")
+        message = raw_error.get("message") or raw_error.get("error") or json.dumps(raw_error, ensure_ascii=False)
+    else:
+        code = job.get("code") or job.get("error_code")
+        message = str(raw_error or job.get("detail") or job.get("reason") or status)
+    return {
+        "error": f"local scheduler job ended with {status}: {message}",
+        "error_status": None,
+        "error_code": code or f"local-scheduler-{status}",
+        "scheduler_error": status,
+        "retryable": False,
+        "may_degrade": False,
+    }
 
 
 def maybe_poll_local_scheduler(
@@ -157,6 +224,9 @@ def maybe_poll_local_scheduler(
             if text:
                 response["content"] = text
             response["local_scheduler_job"] = job
+            terminal_error = local_scheduler_terminal_error_fields(job)
+            if terminal_error is not None:
+                response["local_scheduler_terminal_error"] = terminal_error
             return response
     response["local_scheduler_poll_timeout"] = True
     return response

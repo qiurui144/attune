@@ -1,8 +1,9 @@
 //! POST /api/v1/ocr/recognize + report/accept (spec §5.1). Office-helper semantics:
 //! result is NOT auto-written to vault — user must explicitly accept (spec §2.2/§7).
 //!
-//! Gated behind the `nontext` feature (forwards to attune-core/nontext). When the
-//! layout/recognizer models are missing the pass degrades to empty regions (never 500).
+//! Gated behind the `nontext` feature (forwards to attune-core/nontext). When a
+//! scheduler task succeeds with no layout/recognizer output the route may return
+//! an explicit scaffold result; scheduler delay/failure is surfaced as an error.
 
 use crate::state::SharedState;
 use attune_core::ocr::nontext::{EngineStatus, OcrCorrectionReport, Region};
@@ -44,6 +45,13 @@ pub struct OcrRecognizeResponse {
     /// than fabricate failure rates for calls that did not happen.
     #[serde(default)]
     pub vlm_hint: attune_core::ocr::nontext::vision_capability::VlmHint,
+    /// True only when the route returns a reduced/scaffold result instead of a
+    /// full OCR result. Scheduler delay/failure is returned as an error, not as
+    /// a fabricated empty OCR result.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub degraded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degradation_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -75,6 +83,10 @@ fn err(code: &str, msg: &str, status: StatusCode) -> (StatusCode, Json<serde_jso
 type RouteResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
 const OCR_RECOGNIZE_SCHEDULER_TASK: &str = "kb.document.ocr_recognize";
 const OCR_RECOGNIZE_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 /// POST /api/v1/ocr/recognize — sync, multipart/form-data (file + optional profile/kinds/vlm).
 /// Runs Stage1 layout → Stage2 local recognizers → Stage3 cross-validate. VLM escalation
@@ -138,11 +150,7 @@ pub async fn post_recognize(
     .await
     {
         Ok(outputs) => outputs,
-        Err(e) => {
-            let response =
-                empty_recognize_response(policy, vec![format!("local-scheduler-ocr-error: {e}")]);
-            return Ok(Json(response));
-        }
+        Err(e) => return Err(scheduler_ocr_error(e)),
     };
 
     let response = recognize_response_from_scheduler_outputs(&outputs, policy);
@@ -177,6 +185,21 @@ fn recognize_response_from_scheduler_outputs(
         .get("validation_warnings")
         .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
         .unwrap_or_default();
+    let degraded = outputs
+        .get("degraded")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(engine_status == EngineStatus::ScaffoldNoLayoutModel);
+    let degradation_reason = outputs
+        .get("degradation_reason")
+        .or_else(|| outputs.get("degradationReason"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            degraded.then(|| {
+                "scheduler returned scaffold/no-layout OCR output; no recognized regions were produced"
+                    .to_string()
+            })
+        });
     OcrRecognizeResponse {
         regions,
         correction_report,
@@ -188,11 +211,18 @@ fn recognize_response_from_scheduler_outputs(
         vlm_escalation: policy,
         validation_warnings,
         vlm_hint: Default::default(),
+        degraded,
+        degradation_reason,
     }
 }
 
 fn parse_regions(outputs: &serde_json::Value) -> Vec<Region> {
-    for pointer in ["/regions", "/outputs/regions", "/result/regions", "/data/regions"] {
+    for pointer in [
+        "/regions",
+        "/outputs/regions",
+        "/result/regions",
+        "/data/regions",
+    ] {
         if let Some(value) = outputs.pointer(pointer) {
             if let Ok(regions) = serde_json::from_value::<Vec<Region>>(value.clone()) {
                 return regions;
@@ -230,7 +260,20 @@ fn empty_recognize_response(
         vlm_escalation: policy,
         validation_warnings,
         vlm_hint: Default::default(),
+        degraded: true,
+        degradation_reason: Some("local OCR degraded to scaffold output".to_string()),
     }
+}
+
+fn scheduler_ocr_error(
+    error: attune_core::error::VaultError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let (status, body) = crate::local_scheduler::scheduler_failure_body(
+        &error,
+        crate::local_scheduler::SchedulerDegradationPolicy::HonestFailure,
+        "本地 scheduler OCR 任务未能完成。",
+    );
+    (status, Json(body))
 }
 
 fn empty_report() -> OcrCorrectionReport {
@@ -301,6 +344,8 @@ mod tests {
             vlm_escalation: VlmEscalationPolicy::Off,
             validation_warnings: vec![],
             vlm_hint: Default::default(),
+            degraded: false,
+            degradation_reason: None,
         };
         let j = serde_json::to_string(&resp).unwrap();
         assert!(j.contains(r#""local_regions":3"#));
@@ -312,16 +357,20 @@ mod tests {
         );
         // I3: the applied policy is echoed honestly.
         assert!(j.contains(r#""vlm_escalation":"off""#));
+        assert!(
+            !j.contains("degraded"),
+            "non-degraded response should not emit degraded=false"
+        );
     }
 
     #[test]
-    fn no_models_degrades_to_empty_regions() {
-        // Scheduler unavailable / no OCR output → empty (never panics, never 500 on this route).
-        // I3/C1: response honestly reports the scaffold status + echoes the applied policy.
+    fn scaffold_output_degrades_to_empty_regions_with_metadata() {
+        // No OCR output from a successful scheduler response may degrade, but it
+        // must be explicit so callers do not mistake it for a confident empty OCR.
         use attune_core::ocr::profile::VlmEscalationPolicy;
         let resp = empty_recognize_response(
             VlmEscalationPolicy::OnDiscrepancy,
-            vec!["scheduler unavailable".to_string()],
+            vec!["no layout model".to_string()],
         );
         assert!(resp.regions.is_empty());
         assert_eq!(resp.cost.local_regions, 0);
@@ -329,5 +378,40 @@ mod tests {
         assert_eq!(resp.engine_status, EngineStatus::ScaffoldNoLayoutModel);
         assert_eq!(resp.vlm_escalation, VlmEscalationPolicy::OnDiscrepancy);
         assert_eq!(resp.validation_warnings.len(), 1);
+        assert!(resp.degraded);
+        assert!(resp.degradation_reason.is_some());
+    }
+
+    #[test]
+    fn scheduler_scaffold_output_carries_degraded_metadata() {
+        use attune_core::ocr::profile::VlmEscalationPolicy;
+
+        let resp = recognize_response_from_scheduler_outputs(
+            &serde_json::json!({
+                "engine_status": "scaffold-no-layout-model",
+                "validation_warnings": ["layout model unavailable"]
+            }),
+            VlmEscalationPolicy::Off,
+        );
+
+        assert!(resp.regions.is_empty());
+        assert!(resp.degraded);
+        assert_eq!(resp.validation_warnings, vec!["layout model unavailable"]);
+        assert!(resp
+            .degradation_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("scaffold"));
+    }
+
+    #[test]
+    fn scheduler_failure_is_error_not_empty_ocr() {
+        let err = attune_core::error::VaultError::LlmUnavailable(
+            "local scheduler job job_abc timed out".to_string(),
+        );
+        let (status, Json(body)) = scheduler_ocr_error(err);
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(body["code"], "local-scheduler-delayed");
+        assert_eq!(body["may_degrade"], false);
     }
 }

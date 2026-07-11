@@ -13,6 +13,7 @@ import json
 import statistics
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -22,8 +23,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tests/e2e"))
 
 from airplane_longtext_support import (  # noqa: E402
+    attune_http_error_from_urllib,
     auth_json_headers,
     citation_hit,
+    exception_error_fields,
     expected_term_hit,
     filtered_queries,
     flatten_json,
@@ -78,6 +81,7 @@ def post_chat(
     message: str,
     history: list[dict[str, str]],
 ) -> tuple[float, dict[str, Any]]:
+    path = "/api/v1/chat"
     url = f"{args.base_url.rstrip('/')}/api/v1/chat"
     body = json.dumps({"message": message, "history": history}).encode()
     req = urllib.request.Request(
@@ -87,8 +91,11 @@ def post_chat(
         method="POST",
     )
     start = time.perf_counter()
-    with urllib.request.urlopen(req, timeout=args.timeout) as resp:
-        data = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        raise attune_http_error_from_urllib("POST", path, exc) from exc
     elapsed_ms = (time.perf_counter() - start) * 1000
     return elapsed_ms, data
 
@@ -155,6 +162,9 @@ def run_turn(
         poll_interval=args.poll_interval,
     )
     total_ms = (time.perf_counter() - start) * 1000
+    terminal_error = response.get("local_scheduler_terminal_error")
+    if not isinstance(terminal_error, dict):
+        terminal_error = {}
     content = output_text(response) or str(response.get("content") or "")
     citations = response.get("citations") if isinstance(response.get("citations"), list) else []
 
@@ -178,9 +188,15 @@ def run_turn(
 
     return {
         "id": turn_id,
+        "error": terminal_error.get("error"),
+        "error_status": terminal_error.get("error_status"),
+        "error_code": terminal_error.get("error_code"),
+        "scheduler_error": terminal_error.get("scheduler_error"),
+        "retryable": terminal_error.get("retryable"),
+        "may_degrade": terminal_error.get("may_degrade"),
         "latency_ms": total_ms,
         "initial_chat_latency_ms": chat_ms,
-        "passed": passed,
+        "passed": passed and not terminal_error,
         "citation_hit": cite_hit,
         "answer_term_hit": term_hit,
         "refusal_hit": refusal_hit if require_refusal else None,
@@ -192,6 +208,7 @@ def run_turn(
         if isinstance(response.get("compression_stats"), dict)
         else None,
         "local_scheduler": response.get("local_scheduler"),
+        "local_scheduler_job": response.get("local_scheduler_job"),
         "content_preview": content[:800],
     }
 
@@ -244,10 +261,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
         except Exception as exc:  # noqa: BLE001 - report per-turn failure.
+            err = exception_error_fields(exc)
             rows.append(
                 {
                     "id": spec["turn_id"],
-                    "error": str(exc),
+                    **err,
                     "latency_ms": 0.0,
                     "initial_chat_latency_ms": 0.0,
                     "passed": False,
@@ -273,6 +291,13 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "passed": sum(1 for row in rows if row.get("passed")),
         "all_passed": all(row.get("passed") for row in rows),
         "errors": sum(1 for row in rows if row.get("error")),
+        "error_codes": sorted(
+            {
+                str(row.get("error_code"))
+                for row in rows
+                if row.get("error") and row.get("error_code")
+            }
+        ),
         "citation_hit_rate": statistics.fmean(1.0 if row.get("citation_hit") else 0.0 for row in rows)
         if rows
         else 0.0,

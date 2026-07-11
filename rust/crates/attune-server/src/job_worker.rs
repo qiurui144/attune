@@ -91,7 +91,13 @@ impl JobHandler for AsrJobHandler {
             Duration::from_secs(60 * 60),
             || ctl.is_cancelled(),
         )
-        .map_err(|e| ("asr-engine-failed".to_string(), e.to_string()))?;
+        .map_err(|e| {
+            let view = crate::local_scheduler::classify_scheduler_failure(
+                &e,
+                crate::local_scheduler::SchedulerDegradationPolicy::HonestFailure,
+            );
+            (view.code.to_string(), e.to_string())
+        })?;
 
         let result = scheduler_asr_result(outputs, diarization);
         Ok(result.to_string())
@@ -172,13 +178,23 @@ fn normalize_asr_segment(value: &serde_json::Value) -> Option<serde_json::Value>
         .get("start_sec")
         .or_else(|| value.get("start"))
         .and_then(|v| v.as_f64())
-        .or_else(|| value.get("start_ms").and_then(|v| v.as_f64()).map(|v| v / 1000.0))
+        .or_else(|| {
+            value
+                .get("start_ms")
+                .and_then(|v| v.as_f64())
+                .map(|v| v / 1000.0)
+        })
         .unwrap_or(0.0);
     let end_sec = value
         .get("end_sec")
         .or_else(|| value.get("end"))
         .and_then(|v| v.as_f64())
-        .or_else(|| value.get("end_ms").and_then(|v| v.as_f64()).map(|v| v / 1000.0))
+        .or_else(|| {
+            value
+                .get("end_ms")
+                .and_then(|v| v.as_f64())
+                .map(|v| v / 1000.0)
+        })
         .unwrap_or(start_sec);
     Some(serde_json::json!({
         "start_sec": start_sec,

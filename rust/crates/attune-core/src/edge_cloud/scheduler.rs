@@ -425,6 +425,10 @@ pub enum SchedulerErrorKind {
     Oversize,
     RateLimited,
     Unavailable,
+    Delayed,
+    Cancelled,
+    Expired,
+    JobFailed,
     Http(u16),
     Transport,
     InvalidJson,
@@ -437,6 +441,10 @@ impl SchedulerErrorKind {
             SchedulerErrorKind::Oversize => "oversize",
             SchedulerErrorKind::RateLimited => "rate-limited",
             SchedulerErrorKind::Unavailable => "unavailable",
+            SchedulerErrorKind::Delayed => "delayed",
+            SchedulerErrorKind::Cancelled => "cancelled",
+            SchedulerErrorKind::Expired => "expired",
+            SchedulerErrorKind::JobFailed => "job-failed",
             SchedulerErrorKind::Http(_) => "http-error",
             SchedulerErrorKind::Transport => "transport",
             SchedulerErrorKind::InvalidJson => "invalid-json",
@@ -449,6 +457,10 @@ impl SchedulerErrorKind {
             SchedulerErrorKind::Oversize => Some(422),
             SchedulerErrorKind::RateLimited => Some(429),
             SchedulerErrorKind::Unavailable => Some(503),
+            SchedulerErrorKind::Delayed => Some(504),
+            SchedulerErrorKind::Cancelled => Some(409),
+            SchedulerErrorKind::Expired => Some(410),
+            SchedulerErrorKind::JobFailed => Some(502),
             SchedulerErrorKind::Http(status) => Some(status),
             SchedulerErrorKind::Transport | SchedulerErrorKind::InvalidJson => None,
         }
@@ -460,6 +472,7 @@ impl SchedulerErrorKind {
             SchedulerErrorKind::Busy
                 | SchedulerErrorKind::RateLimited
                 | SchedulerErrorKind::Unavailable
+                | SchedulerErrorKind::Delayed
                 | SchedulerErrorKind::Transport
         )
     }
@@ -477,6 +490,18 @@ pub fn classify_scheduler_error(err: &VaultError) -> Option<SchedulerErrorKind> 
     }
     if message.contains(" invalid json:") {
         return Some(SchedulerErrorKind::InvalidJson);
+    }
+    if message.contains(" job ") && message.contains(" timed out") {
+        return Some(SchedulerErrorKind::Delayed);
+    }
+    if message.contains(" job cancelled") || message.contains(" job canceled") {
+        return Some(SchedulerErrorKind::Cancelled);
+    }
+    if message.contains(" job ") && message.contains(" expired:") {
+        return Some(SchedulerErrorKind::Expired);
+    }
+    if message.contains(" job ") && message.contains(" failed:") {
+        return Some(SchedulerErrorKind::JobFailed);
     }
     let status = parse_scheduler_status(message)?;
     Some(match status {
@@ -587,5 +612,38 @@ mod tests {
 
         let cloud = VaultError::LlmUnavailable("openai HTTP 429: quota".to_string());
         assert_eq!(classify_scheduler_error(&cloud), None);
+    }
+
+    #[test]
+    fn classifies_scheduler_job_terminal_and_delay_errors() {
+        let delayed =
+            VaultError::LlmUnavailable("local scheduler job job_abc timed out".to_string());
+        assert_eq!(
+            classify_scheduler_error(&delayed),
+            Some(SchedulerErrorKind::Delayed)
+        );
+        assert!(classify_scheduler_error(&delayed).unwrap().retryable());
+
+        let cancelled = VaultError::LlmUnavailable("local scheduler job cancelled".to_string());
+        assert_eq!(
+            classify_scheduler_error(&cancelled),
+            Some(SchedulerErrorKind::Cancelled)
+        );
+
+        let expired = VaultError::LlmUnavailable(
+            "local scheduler job job_abc expired: ttl exceeded".to_string(),
+        );
+        assert_eq!(
+            classify_scheduler_error(&expired),
+            Some(SchedulerErrorKind::Expired)
+        );
+
+        let failed = VaultError::LlmUnavailable(
+            "local scheduler job job_abc failed: model crashed".to_string(),
+        );
+        assert_eq!(
+            classify_scheduler_error(&failed),
+            Some(SchedulerErrorKind::JobFailed)
+        );
     }
 }

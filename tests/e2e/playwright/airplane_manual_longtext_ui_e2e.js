@@ -19,6 +19,7 @@ const TERMINAL_LOCAL_SCHEDULER = new Set([
   "cancelled",
   "expired",
 ]);
+const FAILED_LOCAL_SCHEDULER = new Set(["error", "failed", "failure", "canceled", "cancelled", "expired"]);
 
 function args() {
   const out = {
@@ -98,7 +99,12 @@ async function requestJson(opts, method, apiPath, body, token = opts.token, allo
     }
   }
   if (!response.ok && !allowStatuses.has(response.status)) {
-    throw new Error(`${method} ${apiPath} failed HTTP ${response.status}: ${text.slice(0, 300)}`);
+    const code = data && typeof data === "object" ? data.code : undefined;
+    const retryable = data && typeof data === "object" ? data.retryable : undefined;
+    const mayDegrade = data && typeof data === "object" ? data.may_degrade : undefined;
+    throw new Error(
+      `${method} ${apiPath} failed HTTP ${response.status} code=${code} retryable=${retryable} may_degrade=${mayDegrade}: ${text.slice(0, 300)}`,
+    );
   }
   return data;
 }
@@ -143,22 +149,26 @@ function schedulerStatus(value) {
 
 async function maybePollLocalScheduler(opts, response, token) {
   const scheduler = response.local_scheduler;
-  if (!scheduler || typeof scheduler !== "object") return outputText(response);
+  if (!scheduler || typeof scheduler !== "object") return { content: outputText(response), job: null };
   const jobId = scheduler.job_id;
-  if (!jobId || TERMINAL_LOCAL_SCHEDULER.has(schedulerStatus(scheduler))) return outputText(response);
+  if (!jobId || TERMINAL_LOCAL_SCHEDULER.has(schedulerStatus(scheduler))) {
+    return { content: outputText(response), job: scheduler };
+  }
   const deadline = Date.now() + opts.timeoutMs;
   let content = outputText(response);
+  let lastJob = null;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     const data = await requestJson(opts, "GET", `/api/v1/chat/local-scheduler/jobs/${encodeURIComponent(jobId)}`);
     const job = data.job && typeof data.job === "object" ? data.job : data;
+    lastJob = job;
     if (TERMINAL_LOCAL_SCHEDULER.has(schedulerStatus(job))) {
       const outputs = job.outputs || job;
       content = outputText(outputs) || content;
       break;
     }
   }
-  return content;
+  return { content, job: lastJob };
 }
 
 function normalizeCompact(text) {
@@ -283,7 +293,16 @@ async function sendChatAndCapture(page, query, opts) {
   const response = await responsePromise;
   const elapsedMs = performance.now() - start;
   if (response.status() >= 400) {
-    throw new Error(`chat UI request failed HTTP ${response.status()}: ${(await response.text()).slice(0, 500)}`);
+    const text = await response.text();
+    let data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { raw: text };
+    }
+    throw new Error(
+      `chat UI request failed HTTP ${response.status()} code=${data.code} retryable=${data.retryable} may_degrade=${data.may_degrade}: ${text.slice(0, 500)}`,
+    );
   }
   return { elapsedMs, data: await response.json() };
 }
@@ -320,7 +339,12 @@ async function main() {
 
     const turnStart = performance.now();
     const { data: response } = await sendChatAndCapture(page, query, opts);
-    const finalContent = await maybePollLocalScheduler(opts, response, token);
+    const { content: finalContent, job } = await maybePollLocalScheduler(opts, response, token);
+    if (job && FAILED_LOCAL_SCHEDULER.has(schedulerStatus(job))) {
+      throw new Error(
+        `local scheduler job ended with ${schedulerStatus(job)}: ${JSON.stringify(job.error || job).slice(0, 500)}`,
+      );
+    }
     const probe = finalContent.trim().slice(0, 40);
     if (probe) await page.getByText(probe, { exact: false }).first().waitFor({ state: "visible", timeout: opts.timeoutMs });
     if (response.local_scheduler && typeof response.local_scheduler === "object") {

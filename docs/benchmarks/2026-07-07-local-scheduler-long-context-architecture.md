@@ -127,6 +127,14 @@ point to official manuals / qualified crew or maintenance personnel. This rule
 applies equally to X100, future Windows high-performance hosts, Linux x86 hosts,
 and cloud fallback.
 
+Model downgrade is not a blanket fallback. Attune may use a cheaper/lower-tier
+path only when the task remains faithful after reduction, such as cited
+extractive source lookup, deterministic retrieval without optional rerank, or a
+successful OCR scaffold response that is marked `degraded`. For open-ended
+synthesis, ASR/OCR task execution, scheduler delay, TTL expiry, cancellation,
+oversize admission, or safety-critical procedure questions, Attune must report
+the delay/failure/refusal honestly instead of substituting a weaker model answer.
+
 Latency gate target: the full airplane-manual API/Web suite should remain below
 10s p95 for simple local KB queries once retrieval already hit the correct
 source. Any query that needs longer generation should be classified as async or

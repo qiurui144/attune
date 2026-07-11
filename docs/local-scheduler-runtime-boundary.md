@@ -1,6 +1,6 @@
 # Local Scheduler Runtime Boundary
 
-> Updated: 2026-07-08  
+> Updated: 2026-07-11
 > Pilot source inspected: `/data/RV/k3-scheduler`. Public Attune naming uses
 > `local scheduler` / `scheduler` so the same boundary can support RISC-V,
 > Windows high-performance, and Linux x86 platforms.
@@ -111,6 +111,41 @@ flowchart LR
 - Scheduler contract fixtures, runtime profile cache/TTL, and classified
   scheduler error mapping live on the Attune side so non-X100 scheduler
   implementations can reuse the same product path.
+
+## Degradation Policy
+
+Attune defaults to honest scheduler failure. A scheduler delay, cancellation,
+TTL expiry, admission rejection, queue overload, transport failure, invalid
+response, or worker failure must reach the API/Web caller as a structured
+`local-scheduler-*` error unless the call site has an independent reduced
+result and marks it explicitly.
+
+Allowed explicit degradation:
+
+- High-confidence source lookup from already-retrieved KB evidence may answer
+  extractively without local generation, with citations attached.
+- Search/rerank can fall back to deterministic retrieval order, BM25/vector/RRF,
+  or source filters when the optional ranking worker is unavailable; the answer
+  still uses cited evidence windows.
+- OCR recognition may return a successful scaffold/no-layout result only when
+  the payload carries `degraded: true`, `degradation_reason`, honest
+  `engine_status`, and validation warnings.
+- UI/cost telemetry may omit unavailable metrics, but must not fabricate zeroes
+  for paths that did not run.
+
+Not allowed to silently degrade:
+
+- Chat `kb.query.ask`, Office OCR, document OCR task submission, and ASR durable
+  jobs. Queue delay or scheduler failure returns `local-scheduler-delayed`,
+  `local-scheduler-cancelled`, `local-scheduler-expired`,
+  `local-scheduler-job-failed`, or another classified scheduler code.
+- Oversize/admission failures. The caller must shrink evidence, route async, or
+  return the structured error; it must not stretch context or drop citations
+  invisibly.
+- Safety-critical aviation/maintenance procedure answers. If the evidence is
+  missing or generation is not available in the admitted latency budget, Attune
+  refuses or reports delay/failure instead of substituting a weaker procedural
+  answer.
 
 Run `scripts/scheduler-boundary-audit.sh` before merging scheduler changes. The
 audit fails if server/UI code reintroduces direct local runtime symbols,

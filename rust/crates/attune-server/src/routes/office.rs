@@ -165,13 +165,7 @@ pub async fn post_ocr(
         OCR_SCHEDULER_TIMEOUT,
     )
     .await
-    .map_err(|e| {
-        err(
-            "ocr-engine-failed",
-            &format!("local scheduler OCR task failed: {e}"),
-            StatusCode::SERVICE_UNAVAILABLE,
-        )
-    })?;
+    .map_err(scheduler_ocr_error)?;
 
     let lines = raw_lines_from_scheduler_outputs(&outputs);
 
@@ -192,6 +186,17 @@ pub async fn post_ocr(
         structured,
         warnings,
     }))
+}
+
+fn scheduler_ocr_error(
+    error: attune_core::error::VaultError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let (status, body) = crate::local_scheduler::scheduler_failure_body(
+        &error,
+        crate::local_scheduler::SchedulerDegradationPolicy::HonestFailure,
+        "本地 scheduler OCR 任务未能完成。",
+    );
+    (status, Json(body))
 }
 
 fn raw_lines_from_scheduler_outputs(outputs: &serde_json::Value) -> Vec<RawLine> {
@@ -227,15 +232,12 @@ fn raw_line_from_value(value: &serde_json::Value) -> Option<RawLine> {
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())?;
-    let bbox = value
-        .get("bbox")
-        .and_then(parse_bbox)
-        .unwrap_or(BBox {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        });
+    let bbox = value.get("bbox").and_then(parse_bbox).unwrap_or(BBox {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    });
     let confidence = value
         .get("confidence")
         .or_else(|| value.get("score"))

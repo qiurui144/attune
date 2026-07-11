@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "tests/e2e"))
 
 from airplane_longtext_support import (  # noqa: E402
+    FAILED_LOCAL_SCHEDULER,
     TERMINAL_LOCAL_SCHEDULER,
     citation_hit,
     expected_term_hit,
@@ -263,7 +264,18 @@ def send_chat_and_capture(page: Page, query: dict[str, Any], args: argparse.Name
     resp: Response = resp_info.value
     elapsed_ms = (time.perf_counter() - start) * 1000
     if resp.status >= 400:
-        raise RuntimeError(f"chat UI request failed HTTP {resp.status}: {resp.text()[:500]}")
+        text = resp.text()
+        try:
+            parsed = json.loads(text) if text else {}
+        except Exception:
+            parsed = {"raw": text}
+        code = parsed.get("code") if isinstance(parsed, dict) else None
+        retryable = parsed.get("retryable") if isinstance(parsed, dict) else None
+        may_degrade = parsed.get("may_degrade") if isinstance(parsed, dict) else None
+        raise RuntimeError(
+            f"chat UI request failed HTTP {resp.status} code={code} "
+            f"retryable={retryable} may_degrade={may_degrade}: {text[:500]}"
+        )
     data = resp.json()
     if not isinstance(data, dict):
         raise RuntimeError("chat UI response was not a JSON object")
@@ -319,6 +331,11 @@ def main() -> int:
             turn_start = time.perf_counter()
             initial_ms, response = send_chat_and_capture(page, query, args)
             final_content, job = maybe_poll_local_scheduler(args, response, token)
+            if isinstance(job, dict) and local_scheduler_status(job) in FAILED_LOCAL_SCHEDULER:
+                raise RuntimeError(
+                    "local scheduler job ended with "
+                    f"{local_scheduler_status(job)}: {json.dumps(job.get('error') or job, ensure_ascii=False)[:500]}"
+                )
             assert_visible_answer(page, final_content, args)
             if isinstance(response.get("local_scheduler"), dict):
                 wait_visible_any(page, ["本地调度器", "Local scheduler"], min(args.timeout_ms, 30_000))
