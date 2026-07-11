@@ -1,12 +1,15 @@
 use serde_json::Value;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub(crate) const SUBMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const DEFAULT_PROFILE_CACHE_TTL_MS: u32 = 60_000;
+const DEFAULT_PROFILE_PROBE_TIMEOUT_MS: u32 = 500;
+static RUNTIME_PROFILE_CACHE: OnceLock<Mutex<attune_core::edge_cloud::RuntimeProfileCache>> =
+    OnceLock::new();
 
-const SCHEDULER_NATIVE_PROVIDERS: &[&str] = &[
-    "local_scheduler",
-    "edge_scheduler",
-    "scheduler_native",
-];
+const SCHEDULER_NATIVE_PROVIDERS: &[&str] =
+    &["local_scheduler", "edge_scheduler", "scheduler_native"];
 
 pub(crate) fn provider_is_scheduler_native(provider: &str) -> bool {
     let normalized = provider.trim().to_ascii_lowercase();
@@ -82,6 +85,35 @@ pub(crate) fn ingest_options_from_state(
             ],
             120_000,
         ) as u64)
+}
+
+pub(crate) fn runtime_profiles_for_base(base: &str) -> attune_core::edge_cloud::RuntimeProfileSet {
+    let ttl = Duration::from_millis(env_u32_any(
+        &[
+            "ATTUNE_SCHEDULER_PROFILE_CACHE_TTL_MS",
+            "ATTUNE_LOCAL_SCHEDULER_PROFILE_CACHE_TTL_MS",
+        ],
+        DEFAULT_PROFILE_CACHE_TTL_MS,
+    ) as u64);
+    let timeout = Duration::from_millis(env_u32_any(
+        &[
+            "ATTUNE_SCHEDULER_PROFILE_PROBE_TIMEOUT_MS",
+            "ATTUNE_LOCAL_SCHEDULER_PROFILE_PROBE_TIMEOUT_MS",
+        ],
+        DEFAULT_PROFILE_PROBE_TIMEOUT_MS,
+    ) as u64);
+    let cache = RUNTIME_PROFILE_CACHE
+        .get_or_init(|| Mutex::new(attune_core::edge_cloud::RuntimeProfileCache::new(ttl)));
+    let client = attune_core::edge_cloud::LocalSchedulerClient::with_base(base, timeout);
+    cache
+        .lock()
+        .map(|mut guard| {
+            guard.set_ttl(ttl);
+            guard.get_or_refresh(&client, base, Instant::now())
+        })
+        .unwrap_or_else(|_| {
+            attune_core::edge_cloud::RuntimeProfileResolver::static_local_scheduler_profile(base)
+        })
 }
 
 pub(crate) fn env_u32_any(keys: &[&str], default: u32) -> u32 {

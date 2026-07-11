@@ -158,6 +158,7 @@ require_grep 'ocr_intel_igpu_windows_never_picks_directml' "rust/crates/attune-c
 
 # 36-39: CI and release coverage hooks.
 require_grep 'maintenance-audit\.sh' ".github/workflows/ci.yml" "CI runs maintenance audit"
+require_grep 'scheduler-boundary-audit\.sh' ".github/workflows/ci.yml" "CI runs scheduler boundary audit"
 require_grep 'working-directory: rust/crates/attune-server/ui' ".github/workflows/ci.yml" "CI builds embedded UI"
 require_grep 'cargo audit' ".github/workflows/ci.yml" "CI runs cargo security audit"
 require_grep 'openvino' ".github/workflows/desktop-release.yml" "desktop release includes OpenVINO bundle"

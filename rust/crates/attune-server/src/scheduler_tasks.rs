@@ -94,7 +94,11 @@ where
         }
     }
 
-    if response.status.as_deref().is_some_and(is_terminal_error_status) {
+    if response
+        .status
+        .as_deref()
+        .is_some_and(is_terminal_error_status)
+    {
         return Err(VaultError::LlmUnavailable(format!(
             "local scheduler task {} failed: {}",
             response.task,
@@ -130,6 +134,10 @@ pub(crate) fn output_text(outputs: &Value) -> Option<String> {
         "/outputs/text",
         "/outputs/full_text",
         "/outputs/transcript",
+        "/choices/0/message/content",
+        "/choices/0/text",
+        "/outputs/choices/0/message/content",
+        "/outputs/choices/0/text",
     ] {
         if let Some(text) = outputs.pointer(pointer).and_then(|v| v.as_str()) {
             let text = text.trim();
@@ -157,6 +165,13 @@ mod tests {
         assert_eq!(
             output_text(&serde_json::json!({"result": {"text": "ok"}})).as_deref(),
             Some("ok")
+        );
+        assert_eq!(
+            output_text(&serde_json::json!({
+                "choices": [{"message": {"content": "answer"}}]
+            }))
+            .as_deref(),
+            Some("answer")
         );
     }
 }

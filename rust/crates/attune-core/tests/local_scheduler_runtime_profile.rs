@@ -1,121 +1,32 @@
-//! RuntimeProfile resolver tests for the local scheduler pilot.
+//! RuntimeProfile resolver/cache tests for the local scheduler boundary.
 
 use attune_core::edge_cloud::{
-    CapacityState, SchedulerBenchmarkContract, SchedulerCapacitySnapshot, SchedulerModels,
-    RuntimeProfileResolver, RuntimeProviderKind,
+    CapacityState, RuntimeProfileCache, RuntimeProfileResolver, RuntimeProviderKind,
+    SchedulerBenchmarkContract, SchedulerCapacitySnapshot, SchedulerModels,
 };
+use attune_core::error::VaultError;
+use std::cell::Cell;
+use std::time::{Duration, Instant};
+
+const CONTRACT_JSON: &str = include_str!("fixtures/local_scheduler/benchmark_contract.json");
+const MODELS_JSON: &str = include_str!("fixtures/local_scheduler/models.json");
+const CAPACITY_JSON: &str = include_str!("fixtures/local_scheduler/capacity.json");
+
+fn fixture_profile(endpoint: &str) -> attune_core::edge_cloud::RuntimeProfileSet {
+    let contract: SchedulerBenchmarkContract = serde_json::from_str(CONTRACT_JSON).unwrap();
+    let models: SchedulerModels = serde_json::from_str(MODELS_JSON).unwrap();
+    let capacity: SchedulerCapacitySnapshot = serde_json::from_str(CAPACITY_JSON).unwrap();
+    RuntimeProfileResolver::from_scheduler(&contract, &models, &capacity, endpoint)
+}
 
 #[test]
 fn resolves_profiles_from_scheduler_contract_models_and_capacity() {
-    let contract: SchedulerBenchmarkContract = serde_json::from_str(
-        r#"{
-          "contract_version": "local-scheduler-stress-v1",
-          "revision": 10,
-          "runtime_tasks": [
-            {
-              "name": "kb.query.ask",
-              "stage": "query_rag_flow",
-              "model": "llm-summary",
-              "service_class": "realtime_answer",
-              "async_only": true,
-              "avoid_cold_start": true,
-              "timeout_ms": 120000,
-              "deadline_ms": 15000,
-              "context_tokens": 4096,
-              "max_output_tokens": 128,
-              "ttl_ms": 900000
-            }
-          ],
-          "models": [
-            {
-              "name": "llm-summary",
-              "primary_device": "A100",
-              "resource_key": "A100-SVC",
-              "worker_kind": "llama_http",
-              "queue_capacity": 32,
-              "dram_gb": 2.5,
-              "service_class": "realtime_answer",
-              "priority": 96,
-              "estimated_runtime_ms": 15000,
-              "deadline_ms": 20000,
-              "sync_allowed": true,
-              "max_context_tokens_sync": 4096,
-              "max_context_tokens_async": 8192,
-              "max_output_tokens_sync": 256,
-              "max_output_tokens_async": 1024,
-              "backend_profile": {"runtime": "spacemit-llama-cpp-runtime", "requires_no_think": true}
-            },
-            {
-              "name": "vlm",
-              "primary_device": "A100",
-              "resource_key": "A100-SVC",
-              "worker_kind": "llama_http",
-              "queue_capacity": 4,
-              "dram_gb": 5.5,
-              "service_class": "realtime_vlm_compact",
-              "priority": 65,
-              "estimated_runtime_ms": 11000,
-              "deadline_ms": 20000,
-              "sync_allowed": true,
-              "max_context_tokens_sync": 2048,
-              "max_context_tokens_async": 4096,
-              "max_output_tokens_sync": 256,
-              "max_output_tokens_async": 1024,
-              "quality_profile": {
-                "benchmark": "vlm_document_extraction",
-                "field_accuracy": 1.0
-              },
-              "backend_profile": {"runtime": "spacemit-llama-cpp-runtime", "media_backend": "smt"}
-            }
-          ]
-        }"#,
-    )
-    .unwrap();
-    let models: SchedulerModels = serde_json::from_str(
-        r#"{
-          "models": [
-            {
-              "name": "llm-summary",
-              "state": "READY_FAST",
-              "lifecycle": "READY",
-              "dispatchable": "FREE",
-              "queue_depth": 0,
-              "queue_capacity": 32,
-              "state_revision": 11
-            },
-            {
-              "name": "vlm",
-              "state": "QUEUED",
-              "lifecycle": "READY",
-              "dispatchable": "BUSY",
-              "queue_depth": 2,
-              "queue_capacity": 4,
-              "state_revision": 11
-            }
-          ],
-          "revision": 11
-        }"#,
-    )
-    .unwrap();
-    let capacity: SchedulerCapacitySnapshot = serde_json::from_str(
-        r#"{
-          "dram_used_gb": 8.5,
-          "dram_reserved_gb": 7.0,
-          "dram_total_gb": 32.0,
-          "memory": {"status": "ok", "available_gb": 21.5},
-          "active_models": 2,
-          "revision": 12
-        }"#,
-    )
-    .unwrap();
-
-    let set =
-        RuntimeProfileResolver::from_scheduler(&contract, &models, &capacity, "http://127.0.0.1:8090/");
+    let set = fixture_profile("http://127.0.0.1:8090/");
 
     assert_eq!(set.provider_kind, RuntimeProviderKind::LocalScheduler);
-    assert_eq!(set.revision, 12);
+    assert_eq!(set.revision, 4827);
     assert_eq!(set.memory_status, "ok");
-    assert_eq!(set.dram_available_gb, Some(21.5));
+    assert_eq!(set.dram_available_gb, Some(23.5));
 
     let summary = set.model("llm-summary").unwrap();
     assert_eq!(summary.state, CapacityState::ReadyFast);
@@ -129,6 +40,12 @@ fn resolves_profiles_from_scheduler_contract_models_and_capacity() {
         summary.backend_profile["requires_no_think"].as_bool(),
         Some(true)
     );
+
+    let chat = set.model("llm-chat").unwrap();
+    assert_eq!(chat.state, CapacityState::ReadySlow);
+    assert_eq!(chat.queue_depth, 2);
+    assert_eq!(chat.tested_sync_input_tokens, 1024);
+    assert!(!chat.supports_sync_input_tokens(1025, 256));
 
     let vlm = set.model("vlm").unwrap();
     assert_eq!(vlm.state, CapacityState::Queued);
@@ -147,6 +64,65 @@ fn resolves_profiles_from_scheduler_contract_models_and_capacity() {
         set.task_model("kb.query.ask").unwrap().model_id,
         "llm-summary"
     );
+}
+
+#[test]
+fn runtime_profile_cache_uses_ttl_then_refreshes() {
+    let now = Instant::now();
+    let calls = Cell::new(0);
+    let mut cache = RuntimeProfileCache::new(Duration::from_secs(10));
+
+    let first = cache.get_or_refresh_with("http://127.0.0.1:8090/", now, || {
+        calls.set(calls.get() + 1);
+        Ok(fixture_profile("http://127.0.0.1:8090/"))
+    });
+    let second = cache.get_or_refresh_with(
+        "http://127.0.0.1:8090",
+        now + Duration::from_secs(5),
+        || {
+            calls.set(calls.get() + 1);
+            Ok(fixture_profile("http://127.0.0.1:8090/"))
+        },
+    );
+    let third = cache.get_or_refresh_with(
+        "http://127.0.0.1:8090",
+        now + Duration::from_secs(11),
+        || {
+            calls.set(calls.get() + 1);
+            Ok(fixture_profile("http://127.0.0.1:8090/"))
+        },
+    );
+
+    assert_eq!(calls.get(), 2);
+    assert_eq!(first.revision, second.revision);
+    assert_eq!(third.provider_kind, RuntimeProviderKind::LocalScheduler);
+}
+
+#[test]
+fn runtime_profile_cache_falls_back_to_stale_then_static() {
+    let now = Instant::now();
+    let mut cache = RuntimeProfileCache::new(Duration::from_millis(1));
+    let first = cache.get_or_refresh_with("http://127.0.0.1:8090", now, || {
+        Ok(fixture_profile("http://127.0.0.1:8090"))
+    });
+    let stale = cache.get_or_refresh_with(
+        "http://127.0.0.1:8090",
+        now + Duration::from_secs(1),
+        || Err(VaultError::LlmUnavailable("scheduler down".into())),
+    );
+    assert_eq!(stale.provider_kind, RuntimeProviderKind::LocalScheduler);
+    assert_eq!(stale.revision, first.revision);
+
+    let static_fallback = cache.get_or_refresh_with(
+        "http://127.0.0.1:19090",
+        now + Duration::from_secs(2),
+        || Err(VaultError::LlmUnavailable("scheduler down".into())),
+    );
+    assert_eq!(
+        static_fallback.provider_kind,
+        RuntimeProviderKind::StaticLocalScheduler
+    );
+    assert_eq!(static_fallback.endpoint, "http://127.0.0.1:19090");
 }
 
 #[test]

@@ -23,6 +23,7 @@ S1-S5 core have been started in Attune:
 - Added `attune-server::retrieval_policy`, a shared route-level retrieval planner wrapper used by both chat and public search. `/api/v1/search` and `/api/v1/search/relevant` now use the local scheduler SRAS/index-partition plan on local scheduler form factor while preserving legacy explicit `initial_k` / `intermediate_k` overrides on non-local scheduler machines.
 - Added the server runtime boundary: local LLM readiness, embedding, rerank, OCR, ASR, upload ingest, staged drain, folder scan, Git, Email, WebDAV, and RSS now route local intelligent work through scheduler-aware adapters instead of concrete local runtime calls.
 - Added `docs/local-scheduler-runtime-boundary.md` and `scripts/scheduler-boundary-audit.sh` to document and enforce the no-direct-local-runtime boundary.
+- Added Attune-side scheduler contract fixtures, runtime profile cache/TTL, stale/static fallback, scheduler error classification, and CI scheduler-boundary audit.
 
 Verified on 2026-07-07:
 
@@ -357,7 +358,7 @@ Acceptance:
 
 ### S2. Runtime Profile Resolver
 
-Status: core implemented in `edge_cloud::runtime_profile`; cache/TTL wiring pending.
+Status: implemented in `edge_cloud::runtime_profile`; cache/TTL wiring is wired through the server local-scheduler profile resolver.
 
 Deliverables:
 
@@ -409,7 +410,7 @@ Acceptance:
 
 ### S5. SRAS + Index Partition Planner
 
-Status: pure planner implemented in `attune-core::retrieval_plan`; local scheduler chat retrieval planning and public search planning are wired through shared server `retrieval_policy`; document route integration remains pending.
+Status: pure planner implemented in `attune-core::retrieval_plan`; local scheduler chat retrieval planning and public search planning are wired through shared server `retrieval_policy`; document route generation remains cloud/product-specific until scheduler exposes stable document tasks.
 
 Deliverables:
 
@@ -428,7 +429,7 @@ Acceptance:
 
 ### S6. Chat Route Pilot
 
-Status: local scheduler chat retrieval planning, public search planning, scheduler-native `kb.query.ask` answer submission, async job polling, and compact scheduler status UI are wired. Document-route integration remains pending.
+Status: local scheduler chat retrieval planning, public search planning, scheduler-native `kb.query.ask` answer submission, async job polling, and compact scheduler status UI are wired. OCR/ASR document extraction routes use scheduler tasks; document summarize/compare/chapters remain gated cloud product flows until scheduler exposes stable document-intelligence tasks.
 
 Deliverables:
 
@@ -479,7 +480,7 @@ Not required for the first Attune pilot, but useful:
 3. Done: implement S3 ContextAdmission and wire output caps.
 4. Done: implement S4 KB task adapter core and local async submit path.
 5. Done: add S5 SRAS partition planner core.
-6. In progress: pilot S6 only for local scheduler form factor; chat retrieval planning, public search planning, scheduler-native answer submission, and front-end job polling UI are wired. Document route integration remains next.
-7. Re-run long-context and KB longloop gates.
+6. Done: pilot S6 for local scheduler form factor; chat retrieval planning, public search planning, scheduler-native answer submission, front-end job polling UI, runtime profile cache, and scheduler error classification are wired.
+7. Done on the Attune side: long-context API/Web gates and scheduler boundary audit are in the test surface. Remaining execution proof requires a deployed scheduler lane.
 
 The key architectural shift: Attune should stop treating local scheduler as "just another OpenAI-compatible LLM endpoint". local scheduler is a local runtime scheduler with its own application task API, admission policy, and async job model. That is also the right abstraction for a future Windows scheduler.

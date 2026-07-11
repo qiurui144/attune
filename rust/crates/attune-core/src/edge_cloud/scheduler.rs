@@ -419,6 +419,75 @@ pub struct SchedulerKbTaskResponse {
     pub worker_pid: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerErrorKind {
+    Busy,
+    Oversize,
+    RateLimited,
+    Unavailable,
+    Http(u16),
+    Transport,
+    InvalidJson,
+}
+
+impl SchedulerErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SchedulerErrorKind::Busy => "busy",
+            SchedulerErrorKind::Oversize => "oversize",
+            SchedulerErrorKind::RateLimited => "rate-limited",
+            SchedulerErrorKind::Unavailable => "unavailable",
+            SchedulerErrorKind::Http(_) => "http-error",
+            SchedulerErrorKind::Transport => "transport",
+            SchedulerErrorKind::InvalidJson => "invalid-json",
+        }
+    }
+
+    pub fn http_status(self) -> Option<u16> {
+        match self {
+            SchedulerErrorKind::Busy => Some(409),
+            SchedulerErrorKind::Oversize => Some(422),
+            SchedulerErrorKind::RateLimited => Some(429),
+            SchedulerErrorKind::Unavailable => Some(503),
+            SchedulerErrorKind::Http(status) => Some(status),
+            SchedulerErrorKind::Transport | SchedulerErrorKind::InvalidJson => None,
+        }
+    }
+
+    pub fn retryable(self) -> bool {
+        matches!(
+            self,
+            SchedulerErrorKind::Busy
+                | SchedulerErrorKind::RateLimited
+                | SchedulerErrorKind::Unavailable
+                | SchedulerErrorKind::Transport
+        )
+    }
+}
+
+pub fn classify_scheduler_error(err: &VaultError) -> Option<SchedulerErrorKind> {
+    let VaultError::LlmUnavailable(message) = err else {
+        return None;
+    };
+    if !message.starts_with("local scheduler ") {
+        return None;
+    }
+    if message.contains(" request failed:") {
+        return Some(SchedulerErrorKind::Transport);
+    }
+    if message.contains(" invalid json:") {
+        return Some(SchedulerErrorKind::InvalidJson);
+    }
+    let status = parse_scheduler_status(message)?;
+    Some(match status {
+        409 => SchedulerErrorKind::Busy,
+        422 => SchedulerErrorKind::Oversize,
+        429 => SchedulerErrorKind::RateLimited,
+        503 => SchedulerErrorKind::Unavailable,
+        other => SchedulerErrorKind::Http(other),
+    })
+}
+
 fn parse_response<T: DeserializeOwned>(path: &str, resp: reqwest::blocking::Response) -> Result<T> {
     let status = resp.status();
     if !status.is_success() {
@@ -431,6 +500,14 @@ fn parse_response<T: DeserializeOwned>(path: &str, resp: reqwest::blocking::Resp
     resp.json::<T>().map_err(|e| {
         VaultError::LlmUnavailable(format!("local scheduler {path} invalid json: {e}"))
     })
+}
+
+fn parse_scheduler_status(message: &str) -> Option<u16> {
+    message
+        .split(" returned ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|status| status.parse::<u16>().ok())
 }
 
 fn scheduler_transport_error(path: &str, e: reqwest::Error) -> VaultError {
@@ -473,5 +550,42 @@ mod tests {
         assert!(validate_path_segment("task", "kb..query").is_err());
         assert!(validate_path_segment("job", "job_abc-123").is_ok());
         assert!(validate_path_segment("job", "job/abc").is_err());
+    }
+
+    #[test]
+    fn classifies_scheduler_http_and_transport_errors() {
+        let busy = VaultError::LlmUnavailable(
+            "local scheduler /kb/tasks/kb.query.ask returned 409 Conflict: busy".to_string(),
+        );
+        assert_eq!(
+            classify_scheduler_error(&busy),
+            Some(SchedulerErrorKind::Busy)
+        );
+        assert_eq!(
+            classify_scheduler_error(&busy).unwrap().http_status(),
+            Some(409)
+        );
+        assert!(classify_scheduler_error(&busy).unwrap().retryable());
+
+        let oversize = VaultError::LlmUnavailable(
+            "local scheduler /kb/tasks/kb.query.ask returned 422 Unprocessable Entity: too large"
+                .to_string(),
+        );
+        assert_eq!(
+            classify_scheduler_error(&oversize),
+            Some(SchedulerErrorKind::Oversize)
+        );
+        assert!(!classify_scheduler_error(&oversize).unwrap().retryable());
+
+        let transport = VaultError::LlmUnavailable(
+            "local scheduler /capacity request failed: timed out".to_string(),
+        );
+        assert_eq!(
+            classify_scheduler_error(&transport),
+            Some(SchedulerErrorKind::Transport)
+        );
+
+        let cloud = VaultError::LlmUnavailable("openai HTTP 429: quota".to_string());
+        assert_eq!(classify_scheduler_error(&cloud), None);
     }
 }

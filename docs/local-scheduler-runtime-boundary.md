@@ -108,7 +108,11 @@ flowchart LR
   parsing uses scheduler OCR/ASR on server paths.
 - `/api/v1/ai-stack`, `/api/v1/status`, and readiness routes report scheduler
   capability only; they do not inspect concrete local runtimes.
+- Scheduler contract fixtures, runtime profile cache/TTL, and classified
+  scheduler error mapping live on the Attune side so non-X100 scheduler
+  implementations can reuse the same product path.
 
 Run `scripts/scheduler-boundary-audit.sh` before merging scheduler changes. The
 audit fails if server/UI code reintroduces direct local runtime symbols,
 private local runtime endpoints, or legacy parser/ingest entrypoints.
+CI runs this audit as an independent scheduler-boundary gate.

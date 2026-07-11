@@ -512,6 +512,9 @@ Current resolved gaps:
   the airplane-manual long-text gate at p95 < 10s.
 - Scheduler endpoint handling no longer assumes only port 8090; non-X100 local
   scheduler deployments can add ports without code changes.
+- Attune now has scheduler contract fixtures, runtime profile cache/TTL,
+  stale/static fallback, classified scheduler error responses, and CI boundary
+  audit coverage.
 
 Remaining gaps:
 
@@ -522,6 +525,9 @@ Remaining gaps:
 - Platform-specific acceleration proof still belongs in scheduler artifacts:
   X100 RVA23/RVV/IME, Windows AVX/OpenVINO/DirectML, and Linux x86 AVX/AMX lanes
   need separate worker benchmark gates.
+- Scheduler still needs stable document-intelligence task contracts before
+  Attune can route summarize/compare/chapters through local scheduler without
+  changing product semantics.
 
 ## 10. 2026-07-09 Pilot Status
 

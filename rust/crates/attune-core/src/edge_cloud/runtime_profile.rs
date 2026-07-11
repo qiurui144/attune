@@ -6,11 +6,13 @@
 
 use super::capacity::{CapacityState, DEFAULT_SCHEDULER_BASE};
 use super::scheduler::{
-    SchedulerBenchmarkContract, SchedulerCapacitySnapshot, SchedulerContractModel,
-    SchedulerModelStatus, SchedulerModels, SchedulerRuntimeTaskSpec,
+    LocalSchedulerClient, SchedulerBenchmarkContract, SchedulerCapacitySnapshot,
+    SchedulerContractModel, SchedulerModelStatus, SchedulerModels, SchedulerRuntimeTaskSpec,
 };
+use crate::error::Result;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeProviderKind {
@@ -167,6 +169,15 @@ impl RuntimeProfileSet {
 pub struct RuntimeProfileResolver;
 
 impl RuntimeProfileResolver {
+    pub fn from_client(client: &LocalSchedulerClient, endpoint: &str) -> Result<RuntimeProfileSet> {
+        let contract = client.benchmark_contract()?;
+        let models = client.models()?;
+        let capacity = client.capacity()?;
+        Ok(Self::from_scheduler(
+            &contract, &models, &capacity, endpoint,
+        ))
+    }
+
     pub fn from_scheduler(
         contract: &SchedulerBenchmarkContract,
         models: &SchedulerModels,
@@ -260,6 +271,95 @@ impl RuntimeProfileResolver {
             models,
             tasks,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeProfileCache {
+    ttl: Duration,
+    cached: Option<CachedRuntimeProfileSet>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedRuntimeProfileSet {
+    endpoint: String,
+    fetched_at: Instant,
+    profiles: RuntimeProfileSet,
+}
+
+impl RuntimeProfileCache {
+    pub fn new(ttl: Duration) -> Self {
+        RuntimeProfileCache { ttl, cached: None }
+    }
+
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    pub fn set_ttl(&mut self, ttl: Duration) {
+        self.ttl = ttl;
+    }
+
+    pub fn get_or_refresh(
+        &mut self,
+        client: &LocalSchedulerClient,
+        endpoint: &str,
+        now: Instant,
+    ) -> RuntimeProfileSet {
+        self.get_or_refresh_with(endpoint, now, || {
+            RuntimeProfileResolver::from_client(client, endpoint)
+        })
+    }
+
+    pub fn get_or_refresh_with<F>(
+        &mut self,
+        endpoint: &str,
+        now: Instant,
+        fetch: F,
+    ) -> RuntimeProfileSet
+    where
+        F: FnOnce() -> Result<RuntimeProfileSet>,
+    {
+        let endpoint = normalize_endpoint(endpoint);
+        if self.cached_is_fresh(&endpoint, now) {
+            return self
+                .cached
+                .as_ref()
+                .expect("fresh cache exists")
+                .profiles
+                .clone();
+        }
+
+        match fetch() {
+            Ok(profiles) => {
+                self.cached = Some(CachedRuntimeProfileSet {
+                    endpoint,
+                    fetched_at: now,
+                    profiles: profiles.clone(),
+                });
+                profiles
+            }
+            Err(_) => {
+                if let Some(cached) = self.cached.as_ref().filter(|c| c.endpoint == endpoint) {
+                    return cached.profiles.clone();
+                }
+                let fallback = RuntimeProfileResolver::static_local_scheduler_profile(&endpoint);
+                self.cached = Some(CachedRuntimeProfileSet {
+                    endpoint,
+                    fetched_at: now,
+                    profiles: fallback.clone(),
+                });
+                fallback
+            }
+        }
+    }
+
+    fn cached_is_fresh(&self, endpoint: &str, now: Instant) -> bool {
+        self.cached
+            .as_ref()
+            .filter(|cached| cached.endpoint == endpoint)
+            .and_then(|cached| now.checked_duration_since(cached.fetched_at))
+            .is_some_and(|age| age < self.ttl)
     }
 }
 

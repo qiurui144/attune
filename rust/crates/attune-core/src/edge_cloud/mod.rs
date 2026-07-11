@@ -30,14 +30,14 @@ pub use router::{
     decide_route, AccountContext, AccountTier, PrivacyClass, RejectReason, RouteDecision,
 };
 pub use runtime_profile::{
-    ModelRuntimeProfile, RuntimeProfileResolver, RuntimeProfileSet, RuntimeProviderKind,
-    RuntimeTaskProfile,
+    ModelRuntimeProfile, RuntimeProfileCache, RuntimeProfileResolver, RuntimeProfileSet,
+    RuntimeProviderKind, RuntimeTaskProfile,
 };
 pub use scheduler::{
-    LocalSchedulerClient, SchedulerAsyncJobs, SchedulerBenchmarkContract,
+    classify_scheduler_error, LocalSchedulerClient, SchedulerAsyncJobs, SchedulerBenchmarkContract,
     SchedulerCapacitySnapshot, SchedulerClusterCapacity, SchedulerContractModel,
-    SchedulerJobStatus, SchedulerKbTaskResponse, SchedulerMemorySnapshot, SchedulerModelStatus,
-    SchedulerModels, SchedulerRuntimeTaskSpec, SchedulerServiceClassSpec,
+    SchedulerErrorKind, SchedulerJobStatus, SchedulerKbTaskResponse, SchedulerMemorySnapshot,
+    SchedulerModelStatus, SchedulerModels, SchedulerRuntimeTaskSpec, SchedulerServiceClassSpec,
 };
 
 use crate::platform::FormFactor;

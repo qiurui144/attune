@@ -1,0 +1,25 @@
+{
+  "clusters": {
+    "A100": {
+      "cores_total": 8,
+      "cores_used": 1,
+      "busy_ratio": 0.125,
+      "ep_active": true,
+      "ep_session_holder": "llm-chat",
+      "quarantined": false,
+      "running_models": ["llm-chat", "llm-summary"]
+    }
+  },
+  "dram_used_gb": 7.0,
+  "dram_reserved_gb": 7.0,
+  "dram_total_gb": 32.0,
+  "memory": {
+    "status": "ok",
+    "governor_enabled": true,
+    "available_gb": 23.5,
+    "soft_min_available_gb": 6.0,
+    "hard_min_available_gb": 2.0
+  },
+  "active_models": 2,
+  "revision": 4827
+}

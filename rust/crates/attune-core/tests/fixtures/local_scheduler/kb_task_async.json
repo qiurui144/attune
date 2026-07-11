@@ -1,0 +1,10 @@
+{
+  "job_id": "job_def",
+  "status": "queued",
+  "task": "kb.query.ask",
+  "model": "llm-summary",
+  "service_class": "realtime_answer",
+  "scheduled_as": "async",
+  "reason": "task_async_only",
+  "eta_ms": 1500
+}

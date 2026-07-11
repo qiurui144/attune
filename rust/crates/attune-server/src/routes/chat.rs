@@ -1784,10 +1784,7 @@ pub async fn chat(
                 &scheduler_base,
                 crate::local_scheduler::SUBMIT_TIMEOUT,
             );
-            let profiles =
-                attune_core::edge_cloud::RuntimeProfileResolver::static_local_scheduler_profile(
-                    &scheduler_base,
-                );
+            let profiles = crate::local_scheduler::runtime_profiles_for_base(&scheduler_base);
             let adapter = attune_core::edge_cloud::SchedulerKbTaskAdapter::new(&client, &profiles);
             adapter.submit(
                 attune_core::edge_cloud::SchedulerKbTaskSubmitRequest::interactive(
@@ -1800,16 +1797,7 @@ pub async fn chat(
         })
         .await
         .map_err(|e| AppError::Internal(format!("local scheduler task join error: {e}")))?
-        .map_err(|e| {
-            AppError::detailed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                serde_json::json!({
-                    "error": "本地 scheduler 知识库任务提交失败。",
-                    "code": "local-scheduler-submit-failed",
-                    "detail": e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(local_scheduler_submit_error)?;
 
         match scheduler_outcome {
             attune_core::edge_cloud::SchedulerKbTaskSubmitOutcome::Local(local) => {
@@ -2454,6 +2442,103 @@ pub async fn chat_history(State(state): State<SharedState>) -> AppResult<Json<se
     ))
 }
 
+/// 将本地 scheduler 任务提交错误映射为客户端可读的 HTTP 响应。
+fn local_scheduler_submit_error(e: attune_core::error::VaultError) -> AppError {
+    use attune_core::edge_cloud::SchedulerErrorKind;
+
+    let detail = e.to_string();
+    match attune_core::edge_cloud::classify_scheduler_error(&e) {
+        Some(SchedulerErrorKind::Busy) => AppError::detailed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({
+                "error": "本地 scheduler 当前繁忙，请稍后重试或改用高质量异步任务。",
+                "code": "local-scheduler-busy",
+                "scheduler_error": "busy",
+                "upstream_status": 409,
+                "retryable": true,
+                "detail": detail,
+            }),
+        ),
+        Some(SchedulerErrorKind::Oversize) => AppError::detailed(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            serde_json::json!({
+                "error": "本地 scheduler 拒绝了超出准入上限的上下文。",
+                "code": "local-scheduler-oversize",
+                "scheduler_error": "oversize",
+                "upstream_status": 422,
+                "retryable": false,
+                "detail": detail,
+            }),
+        ),
+        Some(SchedulerErrorKind::RateLimited) => AppError::detailed(
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({
+                "error": "本地 scheduler 请求过于频繁，请稍后重试。",
+                "code": "local-scheduler-rate-limited",
+                "scheduler_error": "rate-limited",
+                "upstream_status": 429,
+                "retryable": true,
+                "detail": detail,
+            }),
+        ),
+        Some(kind @ (SchedulerErrorKind::Unavailable | SchedulerErrorKind::Transport)) => {
+            AppError::detailed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({
+                    "error": "本地 scheduler 暂时不可用。",
+                    "code": "local-scheduler-unavailable",
+                    "scheduler_error": kind.as_str(),
+                    "retryable": true,
+                    "detail": detail,
+                }),
+            )
+        }
+        Some(SchedulerErrorKind::InvalidJson) => AppError::detailed(
+            StatusCode::BAD_GATEWAY,
+            serde_json::json!({
+                "error": "本地 scheduler 返回了无法解析的响应。",
+                "code": "local-scheduler-invalid-response",
+                "scheduler_error": "invalid-json",
+                "retryable": false,
+                "detail": detail,
+            }),
+        ),
+        Some(SchedulerErrorKind::Http(status)) if (500..600).contains(&status) => {
+            AppError::detailed(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({
+                    "error": "本地 scheduler 返回上游错误。",
+                    "code": "local-scheduler-upstream-error",
+                    "scheduler_error": "http-error",
+                    "upstream_status": status,
+                    "retryable": true,
+                    "detail": detail,
+                }),
+            )
+        }
+        Some(SchedulerErrorKind::Http(status)) => AppError::detailed(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "error": "本地 scheduler 拒绝了本次请求。",
+                "code": "local-scheduler-request-rejected",
+                "scheduler_error": "http-error",
+                "upstream_status": status,
+                "retryable": false,
+                "detail": detail,
+            }),
+        ),
+        None => AppError::detailed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({
+                "error": "本地 scheduler 知识库任务提交失败。",
+                "code": "local-scheduler-submit-failed",
+                "retryable": true,
+                "detail": detail,
+            }),
+        ),
+    }
+}
+
 /// 将 LLM provider 返回的 VaultError 映射为客户端可读的 HTTP 响应。
 ///
 /// VaultError::LlmUnavailable 的 message 格式为 "<provider> HTTP <status>: <body>"。
@@ -2657,6 +2742,16 @@ mod tests {
         }
     }
 
+    fn scheduler_status_and_code(e: VaultError) -> (u16, String) {
+        match local_scheduler_submit_error(e) {
+            AppError::Detailed { status, body } => (
+                status.as_u16(),
+                body["code"].as_str().unwrap_or("").to_string(),
+            ),
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+    }
+
     #[test]
     fn upstream_429_maps_to_too_many_requests() {
         let e = VaultError::LlmUnavailable("openai HTTP 429: rate limit exceeded".into());
@@ -2731,6 +2826,37 @@ mod tests {
             panic!("expected Detailed");
         };
         assert_eq!(body["upstream_status"], 429);
+    }
+
+    #[test]
+    fn local_scheduler_submit_errors_map_known_statuses() {
+        let (status, code) = scheduler_status_and_code(VaultError::LlmUnavailable(
+            "local scheduler /kb/tasks/kb.query.ask returned 409 Conflict: busy".into(),
+        ));
+        assert_eq!(status, 503);
+        assert_eq!(code, "local-scheduler-busy");
+
+        let (status, code) = scheduler_status_and_code(VaultError::LlmUnavailable(
+            "local scheduler /kb/tasks/kb.query.ask returned 422 Unprocessable Entity: too large"
+                .into(),
+        ));
+        assert_eq!(status, 413);
+        assert_eq!(code, "local-scheduler-oversize");
+
+        let (status, code) = scheduler_status_and_code(VaultError::LlmUnavailable(
+            "local scheduler /kb/tasks/kb.query.ask returned 429 Too Many Requests: wait".into(),
+        ));
+        assert_eq!(status, 429);
+        assert_eq!(code, "local-scheduler-rate-limited");
+    }
+
+    #[test]
+    fn local_scheduler_submit_transport_maps_to_unavailable() {
+        let (status, code) = scheduler_status_and_code(VaultError::LlmUnavailable(
+            "local scheduler /capacity request failed: timed out".into(),
+        ));
+        assert_eq!(status, 503);
+        assert_eq!(code, "local-scheduler-unavailable");
     }
 
     #[test]
