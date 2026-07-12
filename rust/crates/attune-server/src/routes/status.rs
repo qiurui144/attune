@@ -4,7 +4,7 @@ use axum::Json;
 
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
-use attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE;
+use attune_core::edge_cloud::capacity::DEFAULT_PROBE_TIMEOUT;
 use attune_core::edge_cloud::scheduler::LocalSchedulerClient;
 
 pub async fn health() -> Json<serde_json::Value> {
@@ -69,9 +69,9 @@ struct SchedulerProbe {
 
 /// Probe scheduler observability only. Attune must not inspect concrete local
 /// inference runtimes directly.
-async fn probe_scheduler_models() -> SchedulerProbe {
-    tokio::task::spawn_blocking(|| {
-        let client = LocalSchedulerClient::new();
+async fn probe_scheduler_models(base_url: String) -> SchedulerProbe {
+    tokio::task::spawn_blocking(move || {
+        let client = LocalSchedulerClient::with_base(&base_url, DEFAULT_PROBE_TIMEOUT);
         match client.models() {
             Ok(snapshot) => SchedulerProbe {
                 status: "ready".to_string(),
@@ -164,7 +164,8 @@ pub async fn diagnostics(State(state): State<SharedState>) -> Json<serde_json::V
     let hw = &state.hardware;
     const GB: u64 = 1024 * 1024 * 1024;
 
-    let scheduler_probe = probe_scheduler_models().await;
+    let scheduler_base = crate::local_scheduler::base_from_state(&state);
+    let scheduler_probe = probe_scheduler_models(scheduler_base.clone()).await;
 
     // AMD Ryzen AI NPU 细粒度状态 + consent-gated 安装计划(#6)。只读探测,零成本。
     // 非 AMD/无 NPU 主机 → null。
@@ -182,7 +183,7 @@ pub async fn diagnostics(State(state): State<SharedState>) -> Json<serde_json::V
         "pending_tasks": pending_tasks,
         "scheduler": {
             "managed": true,
-            "endpoint": DEFAULT_SCHEDULER_BASE,
+            "endpoint": scheduler_base,
             "status": scheduler_probe.status,
             "models": scheduler_probe.models,
             "error": scheduler_probe.error,

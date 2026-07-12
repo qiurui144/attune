@@ -505,6 +505,91 @@ impl LocalSchedulerEmbeddingProvider {
         }
         out
     }
+
+    fn prepare_inputs(raw: &[String], max_chars: usize, max_tokens: usize) -> Vec<String> {
+        raw.iter()
+            .map(|text| Self::truncate_input(text, max_chars.max(1), max_tokens.max(1)))
+            .collect()
+    }
+
+    fn scheduler_input_too_large(error: &VaultError) -> bool {
+        let message = error.to_string().to_ascii_lowercase();
+        message.contains("too large to process")
+            || message.contains("physical batch size")
+            || message.contains("input too large")
+            || message.contains("context length")
+    }
+
+    async fn submit_embedding_task(
+        client: reqwest::Client,
+        base_url: String,
+        task: String,
+        input: Vec<String>,
+        poll_timeout: Duration,
+    ) -> Result<Value> {
+        let submit_url = format!("{}/kb/tasks/{}", base_url, task);
+        let body = serde_json::json!({"input": input});
+        let resp = client.post(&submit_url).json(&body).send().await.map_err(|e| {
+            VaultError::LlmUnavailable(format!("local scheduler embed submit: {e}"))
+        })?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(VaultError::LlmUnavailable(format!(
+                "local scheduler embed submit HTTP {status}: {text}"
+            )));
+        }
+        let mut value: Value = serde_json::from_str(&text).map_err(|e| {
+            VaultError::LlmUnavailable(format!(
+                "local scheduler embed submit response: {e}: {text}"
+            ))
+        })?;
+        if status.as_u16() == 202 || value.get("job_id").is_some() {
+            let job_id = value
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    VaultError::LlmUnavailable("local scheduler embed missing job_id".into())
+                })?
+                .to_string();
+            let deadline = Instant::now() + poll_timeout;
+            loop {
+                if Instant::now() >= deadline {
+                    return Err(VaultError::LlmUnavailable(format!(
+                        "local scheduler embed job {job_id} timed out after {} ms",
+                        poll_timeout.as_millis()
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let job_url = format!("{base_url}/jobs/{job_id}");
+                let resp = client.get(&job_url).send().await.map_err(|e| {
+                    VaultError::LlmUnavailable(format!("local scheduler embed poll: {e}"))
+                })?;
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if !status.is_success() {
+                    return Err(VaultError::LlmUnavailable(format!(
+                        "local scheduler embed poll HTTP {status}: {text}"
+                    )));
+                }
+                value = serde_json::from_str(&text).map_err(|e| {
+                    VaultError::LlmUnavailable(format!(
+                        "local scheduler embed job response: {e}: {text}"
+                    ))
+                })?;
+                match value.get("status").and_then(|v| v.as_str()).unwrap_or("") {
+                    "done" => break,
+                    "error" | "expired" | "canceled" => {
+                        return Err(VaultError::LlmUnavailable(format!(
+                            "local scheduler embed job failed: {value}"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(value)
+    }
 }
 
 fn input_units(text: &str) -> usize {
@@ -563,20 +648,18 @@ fn env_usize_any(keys: &[&str], default: usize) -> usize {
 impl EmbeddingProvider for LocalSchedulerEmbeddingProvider {
     fn embed(&self, texts: &[&str]) -> Result<(Vec<Vec<f32>>, crate::usage::TokenUsage)> {
         let mut empty_indices = Vec::new();
-        let mut non_empty: Vec<String> = Vec::new();
+        let mut raw_non_empty: Vec<String> = Vec::new();
         for (i, t) in texts.iter().enumerate() {
             if t.trim().is_empty() {
                 empty_indices.push(i);
             } else {
-                non_empty.push(Self::truncate_input(
-                    t,
-                    self.max_input_chars,
-                    self.max_input_tokens,
-                ));
+                raw_non_empty.push(t.trim().to_string());
             }
         }
 
-        let joined = non_empty.join("");
+        let first_attempt =
+            Self::prepare_inputs(&raw_non_empty, self.max_input_chars, self.max_input_tokens);
+        let joined = first_attempt.join("");
         let est_tokens = crate::cost::estimate_tokens(&joined, &self.model);
         let usage = crate::usage::TokenUsage {
             tokens_in: est_tokens as u32,
@@ -586,84 +669,56 @@ impl EmbeddingProvider for LocalSchedulerEmbeddingProvider {
             provider: "local_scheduler".into(),
         };
 
-        if non_empty.is_empty() {
+        if raw_non_empty.is_empty() {
             return Ok((vec![vec![0.0f32; self.dims]; texts.len()], usage));
         }
 
-        let submit_url = format!("{}/kb/tasks/{}", self.base_url, self.task);
-        let job_base_url = self.base_url.clone();
-        let input = non_empty;
-        let expected = input.len();
+        let expected = raw_non_empty.len();
         let client = self.client.clone();
+        let base_url = self.base_url.clone();
+        let task = self.task.clone();
         let poll_timeout = self.poll_timeout;
+        let max_input_chars = self.max_input_chars;
+        let max_input_tokens = self.max_input_tokens;
 
         let response = embed_block_on(async move {
-            let body = serde_json::json!({"input": input});
-            let resp = client
-                .post(&submit_url)
-                .json(&body)
-                .send()
+            let fallback_limits = [
+                (max_input_chars, max_input_tokens),
+                (max_input_chars.min(768), max_input_tokens.min(384)),
+                (max_input_chars.min(512), max_input_tokens.min(256)),
+                (max_input_chars.min(256), max_input_tokens.min(128)),
+            ];
+            let mut last_limits = (0usize, 0usize);
+            let mut last_oversize: Option<VaultError> = None;
+            for (chars, tokens) in fallback_limits {
+                let limits = (chars.max(1), tokens.max(1));
+                if limits == last_limits {
+                    continue;
+                }
+                last_limits = limits;
+                let input = Self::prepare_inputs(&raw_non_empty, limits.0, limits.1);
+                match Self::submit_embedding_task(
+                    client.clone(),
+                    base_url.clone(),
+                    task.clone(),
+                    input,
+                    poll_timeout,
+                )
                 .await
-                .map_err(|e| {
-                    VaultError::LlmUnavailable(format!("local scheduler embed submit: {e}"))
-                })?;
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            if !status.is_success() {
-                return Err(VaultError::LlmUnavailable(format!(
-                    "local scheduler embed submit HTTP {status}: {text}"
-                )));
-            }
-            let mut value: Value = serde_json::from_str(&text).map_err(|e| {
-                VaultError::LlmUnavailable(format!(
-                    "local scheduler embed submit response: {e}: {text}"
-                ))
-            })?;
-            if status.as_u16() == 202 || value.get("job_id").is_some() {
-                let job_id = value
-                    .get("job_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        VaultError::LlmUnavailable("local scheduler embed missing job_id".into())
-                    })?
-                    .to_string();
-                let deadline = Instant::now() + poll_timeout;
-                loop {
-                    if Instant::now() >= deadline {
-                        return Err(VaultError::LlmUnavailable(format!(
-                            "local scheduler embed job {job_id} timed out after {} ms",
-                            poll_timeout.as_millis()
-                        )));
+                {
+                    Ok(value) => return Ok(value),
+                    Err(e) if Self::scheduler_input_too_large(&e) => {
+                        last_oversize = Some(e);
+                        continue;
                     }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    let job_url = format!("{job_base_url}/jobs/{job_id}");
-                    let resp = client.get(&job_url).send().await.map_err(|e| {
-                        VaultError::LlmUnavailable(format!("local scheduler embed poll: {e}"))
-                    })?;
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    if !status.is_success() {
-                        return Err(VaultError::LlmUnavailable(format!(
-                            "local scheduler embed poll HTTP {status}: {text}"
-                        )));
-                    }
-                    value = serde_json::from_str(&text).map_err(|e| {
-                        VaultError::LlmUnavailable(format!(
-                            "local scheduler embed job response: {e}: {text}"
-                        ))
-                    })?;
-                    match value.get("status").and_then(|v| v.as_str()).unwrap_or("") {
-                        "done" => break,
-                        "error" | "expired" | "canceled" => {
-                            return Err(VaultError::LlmUnavailable(format!(
-                                "local scheduler embed job failed: {value}"
-                            )));
-                        }
-                        _ => {}
-                    }
+                    Err(e) => return Err(e),
                 }
             }
-            Ok(value)
+            Err(last_oversize.unwrap_or_else(|| {
+                VaultError::LlmUnavailable(
+                    "local scheduler embed input exceeded scheduler limits".into(),
+                )
+            }))
         })?;
 
         let embeddings = Self::extract_embeddings(&response).ok_or_else(|| {
@@ -998,6 +1053,26 @@ mod tests {
             projected.len()
         );
         assert!(projected.contains("\n...\n"));
+    }
+
+    #[test]
+    fn local_scheduler_embedding_classifies_scheduler_oversize_errors() {
+        let err = VaultError::LlmUnavailable(
+            "local scheduler embed poll HTTP 500: input (673 tokens) is too large to process. increase the physical batch size (current batch size: 512)"
+                .into(),
+        );
+        assert!(
+            LocalSchedulerEmbeddingProvider::scheduler_input_too_large(&err),
+            "scheduler physical batch errors must trigger smaller-input retry"
+        );
+
+        let inputs = vec!["a".repeat(2000)];
+        let prepared = LocalSchedulerEmbeddingProvider::prepare_inputs(&inputs, 512, 256);
+        assert_eq!(prepared.len(), 1);
+        assert!(
+            prepared[0].len() <= 512,
+            "fallback input should respect char cap"
+        );
     }
 
     #[test]

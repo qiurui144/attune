@@ -470,8 +470,10 @@ pub struct ReadinessQuery {
 }
 
 pub async fn local_scheduler_readiness(
+    State(state): State<SharedState>,
     axum::extract::Query(q): axum::extract::Query<ReadinessQuery>,
 ) -> Json<serde_json::Value> {
+    let scheduler_base = crate::local_scheduler::base_from_state(&state);
     let configured = q.model.unwrap_or_default().trim().to_string();
     let resolved = if configured.is_empty() {
         "local-scheduler".to_string()
@@ -489,10 +491,10 @@ pub async fn local_scheduler_readiness(
             "resolved": resolved,
         },
         "models": models,
-        "install_plan": scheduler_managed_install_plan(),
+        "install_plan": scheduler_managed_install_plan(&scheduler_base),
         "scheduler": {
             "managed": true,
-            "endpoint": format!("{DEFAULT_SCHEDULER_BASE}/v1"),
+            "endpoint": format!("{scheduler_base}/v1"),
         },
     }))
 }
@@ -513,26 +515,29 @@ pub struct InstallResponse {
     pub message: String,
 }
 
-pub async fn ensure_local_scheduler() -> Result<Json<InstallResponse>, ApiError> {
+pub async fn ensure_local_scheduler(
+    State(state): State<SharedState>,
+) -> Result<Json<InstallResponse>, ApiError> {
+    let scheduler_base = crate::local_scheduler::base_from_state(&state);
     Ok(Json(InstallResponse {
         status: "scheduler-managed".into(),
         task_id: None,
         download_url: None,
         message: format!(
             "本地模型生命周期由 local scheduler 管理，请通过 {} 检查 scheduler 状态",
-            DEFAULT_SCHEDULER_BASE
+            scheduler_base
         ),
     }))
 }
 
-fn scheduler_managed_install_plan() -> serde_json::Value {
+fn scheduler_managed_install_plan(base_url: &str) -> serde_json::Value {
     serde_json::json!({
         "platform": "scheduler",
         "method": {
             "kind": "manual_download",
-            "download_url": DEFAULT_SCHEDULER_BASE,
+            "download_url": base_url,
         },
-        "homepage": DEFAULT_SCHEDULER_BASE,
+        "homepage": base_url,
     })
 }
 

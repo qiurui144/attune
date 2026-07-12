@@ -999,9 +999,17 @@ impl AppState {
     /// or load local worker assets here; it installs scheduler-backed
     /// embedding/rerank providers and leaves OCR/ASR marked externally managed.
     pub fn spawn_model_bootstrap(state: std::sync::Arc<AppState>) {
-        // 防重入：解锁可被多次调用（restart 后再 unlock），但模型只需拉一次。
-        // 用 engines_initialized 之外的独立判断：若全部已 ready 直接跳过。
-        if state.model_bootstrap.all_ready() {
+        // 防重入：解锁可被多次调用（restart 后再 unlock）。模型状态 ready
+        // 只说明 scheduler 生命周期已托管；vault lock 会清掉 in-memory provider
+        // handles，所以 provider 缺失时仍必须重装 handles。
+        let scheduler_handles_present = state.embedding().is_some()
+            && state
+                .reranker
+                .lock()
+                .ok()
+                .map(|g| g.is_some())
+                .unwrap_or(false);
+        if state.model_bootstrap.all_ready() && scheduler_handles_present {
             return;
         }
         std::thread::spawn(move || {
@@ -3467,6 +3475,40 @@ mod tests {
         assert!(
             state.usage().is_none(),
             "set_usage(None) leaves aggregator None"
+        );
+    }
+
+    #[test]
+    fn model_bootstrap_reinstalls_scheduler_handles_after_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("vault.db");
+        let vault = attune_core::vault::Vault::open(&db, dir.path()).unwrap();
+        let state = std::sync::Arc::new(AppState::new(vault, false));
+
+        for class in attune_core::infer::bootstrap_status::MODEL_CLASSES {
+            state.model_bootstrap.mark_ready(class);
+        }
+        assert!(state.model_bootstrap.all_ready());
+        assert!(state.embedding().is_none());
+
+        AppState::spawn_model_bootstrap(state.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while state.embedding().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            state.embedding().is_some(),
+            "ready bootstrap state must not prevent provider handle reinstall"
+        );
+        assert!(
+            state
+                .reranker
+                .lock()
+                .ok()
+                .map(|g| g.is_some())
+                .unwrap_or(false),
+            "reranker handle should be reinstalled with embedding"
         );
     }
 

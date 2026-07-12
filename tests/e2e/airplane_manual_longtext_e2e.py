@@ -303,6 +303,8 @@ def run_gates(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
         os.environ.get("ATTUNE_LONGTEXT_CHAT_TIMEOUT_SEC", "120"),
         "--poll-timeout",
         os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_TIMEOUT_SEC", "180"),
+        "--poll-interval",
+        os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_INTERVAL_SEC", "0.5"),
         "--out",
         str(result_dir / f"attune-airplane-longtext-{profile}-chat.json"),
     ]
@@ -333,6 +335,8 @@ def run_gates(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
             os.environ.get("ATTUNE_LONGTEXT_CHAT_TIMEOUT_SEC", "120"),
             "--poll-timeout",
             os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_TIMEOUT_SEC", "180"),
+            "--poll-interval",
+            os.environ.get("ATTUNE_LONGTEXT_CHAT_POLL_INTERVAL_SEC", "0.5"),
             "--out",
             str(result_dir / f"attune-airplane-longtext-{profile}-multiturn.json"),
         ]

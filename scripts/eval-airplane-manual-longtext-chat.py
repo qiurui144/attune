@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", default="edge_scheduler_30b")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--poll-timeout", type=float, default=180.0)
-    parser.add_argument("--poll-interval", type=float, default=2.0)
+    parser.add_argument("--poll-interval", type=float, default=0.5)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--fail-on-targets", action="store_true")
     parser.add_argument(
@@ -111,6 +111,10 @@ def scheduler_meta(response: dict[str, Any]) -> dict[str, Any]:
 def scheduler_outputs(response: dict[str, Any]) -> dict[str, Any]:
     job = scheduler_job(response)
     outputs = job.get("outputs")
+    if isinstance(outputs, dict):
+        return outputs
+    meta = scheduler_meta(response)
+    outputs = meta.get("outputs")
     if isinstance(outputs, dict):
         return outputs
     return {}

@@ -11,7 +11,7 @@ use axum::Json;
 use serde_json::json;
 
 use crate::state::SharedState;
-use attune_core::edge_cloud::capacity::DEFAULT_SCHEDULER_BASE;
+use attune_core::edge_cloud::capacity::DEFAULT_PROBE_TIMEOUT;
 use attune_core::edge_cloud::scheduler::LocalSchedulerClient;
 
 fn note(available: bool, msg: &str) -> Option<String> {
@@ -30,9 +30,9 @@ struct SchedulerRuntimeProbe {
     error: Option<String>,
 }
 
-async fn probe_scheduler_runtime() -> SchedulerRuntimeProbe {
-    tokio::task::spawn_blocking(|| {
-        let client = LocalSchedulerClient::new();
+async fn probe_scheduler_runtime(base_url: String) -> SchedulerRuntimeProbe {
+    tokio::task::spawn_blocking(move || {
+        let client = LocalSchedulerClient::with_base(&base_url, DEFAULT_PROBE_TIMEOUT);
         let contract = client.benchmark_contract();
         let models = client.models().ok();
         match contract {
@@ -67,7 +67,8 @@ async fn probe_scheduler_runtime() -> SchedulerRuntimeProbe {
 
 /// GET /api/v1/ai_stack — 返各底座状态 + 硬件 tier + 模型推荐 + region
 pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let scheduler = probe_scheduler_runtime().await;
+    let scheduler_base = crate::local_scheduler::base_from_state(&state);
+    let scheduler = probe_scheduler_runtime(scheduler_base.clone()).await;
     let embedding_loaded = state
         .embedding
         .lock()
@@ -170,7 +171,7 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         },
         "scheduler": {
             "managed": true,
-            "endpoint": DEFAULT_SCHEDULER_BASE,
+            "endpoint": scheduler_base,
             "status": scheduler.status,
             "tasks": scheduler.tasks,
             "models": scheduler.models,
@@ -228,10 +229,11 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
 ///
 /// Local model lifecycle is scheduler-owned. Attune does not download or start
 /// OCR/ASR/embedding/rerank runtimes directly on any platform.
-pub async fn ensure(State(_state): State<SharedState>) -> Json<serde_json::Value> {
+pub async fn ensure(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let scheduler_base = crate::local_scheduler::base_from_state(&state);
     Json(json!({
         "status": "scheduler-managed",
-        "endpoint": DEFAULT_SCHEDULER_BASE,
+        "endpoint": scheduler_base,
         "message": "本地底座模型由 local scheduler 管理；请通过 scheduler ready/models/benchmark contract 检查状态",
         "tasks": [
             "kb.query.embed",

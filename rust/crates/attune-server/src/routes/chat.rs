@@ -41,7 +41,8 @@ const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 /// 真正的窗口感知裁剪由context_budget 在拿到 LLM 后做（见下方）。
 const MAX_HISTORY_DEPTH: usize = 80;
 const LOCAL_SCHEDULER_KB_ASK_TASK: &str = "kb.query.ask";
-const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 28;
+const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 36;
+const LOCAL_SCHEDULER_KB_ASK_SYSTEM: &str = "Answer only from the reference material. Be terse: 1-2 sentences or 3 bullets maximum. Start with the specific manual, topic, or identifier from the question when supported. Do not use generic preambles such as 'Based on the provided reference material'. If the evidence is insufficient, say so briefly. Do not provide operational instructions.";
 const DEFAULT_CHAT_KB_TOP_K: u32 = 5;
 const MIN_CHAT_KB_TOP_K: u32 = 1;
 const MAX_CHAT_KB_TOP_K: u32 = 20;
@@ -219,7 +220,10 @@ fn build_local_scheduler_admission_messages(query: &str, contexts: &[Value]) -> 
             }
         }
     }
-    vec![ChatMessage::user(&user)]
+    vec![
+        ChatMessage::system(LOCAL_SCHEDULER_KB_ASK_SYSTEM),
+        ChatMessage::user(&user),
+    ]
 }
 
 fn local_scheduler_output_text(outputs: &Value) -> Option<String> {
@@ -1870,6 +1874,38 @@ pub async fn chat(
                     &local.admission.model_id,
                     true,
                 );
+                let local_scheduler_meta = serde_json::json!({
+                    "task": LOCAL_SCHEDULER_KB_ASK_TASK,
+                    "scheduled_as": response.scheduled_as,
+                    "job_id": response.job_id,
+                    "status": response.status,
+                    "reason": response.reason,
+                    "eta_ms": response.eta_ms,
+                    "model": response.model,
+                    "service_class": response.service_class,
+                    "device_used": response.device_used,
+                    "latency_ms": response.latency_ms,
+                    "queue_wait_ms": response.queue_wait_ms,
+                    "cold_start_wait_ms": response.cold_start_wait_ms,
+                    "startup_state": response.startup_state,
+                    "startup_wait_ms": response.startup_wait_ms,
+                    "worker_pid": response.worker_pid,
+                    "outputs": response.outputs,
+                    "prompt_cache_key": response.prompt_cache_key,
+                    "cache_hit": response.cache_hit,
+                    "prompt_cache": response.prompt_cache,
+                    "prompt_cache_policy": response.prompt_cache_policy,
+                    "refusal_policy": response.refusal_policy,
+                    "admission": {
+                        "task_name": local.admission.task_name,
+                        "model_id": local.admission.model_id,
+                        "service_class": local.admission.service_class,
+                        "context_tokens": local.admission.context_tokens,
+                        "max_output_tokens": local.admission.max_output_tokens,
+                        "reason": format!("{:?}", local.admission.reason),
+                        "explicit_async": local.explicit_async,
+                    }
+                });
 
                 return Ok(Json(serde_json::json!({
                     "content": content,
@@ -1906,28 +1942,7 @@ pub async fn chat(
                         "orig_chars": compression_stats.2,
                         "strategy": strategy_str,
                     },
-                    "local_scheduler": {
-                        "task": LOCAL_SCHEDULER_KB_ASK_TASK,
-                        "scheduled_as": response.scheduled_as,
-                        "job_id": response.job_id,
-                        "status": response.status,
-                        "reason": response.reason,
-                        "eta_ms": response.eta_ms,
-                        "model": response.model,
-                        "service_class": response.service_class,
-                        "device_used": response.device_used,
-                        "latency_ms": response.latency_ms,
-                        "queue_wait_ms": response.queue_wait_ms,
-                        "admission": {
-                            "task_name": local.admission.task_name,
-                            "model_id": local.admission.model_id,
-                            "service_class": local.admission.service_class,
-                            "context_tokens": local.admission.context_tokens,
-                            "max_output_tokens": local.admission.max_output_tokens,
-                            "reason": format!("{:?}", local.admission.reason),
-                            "explicit_async": local.explicit_async,
-                        }
-                    }
+                    "local_scheduler": local_scheduler_meta
                 })));
             }
             attune_core::edge_cloud::SchedulerKbTaskSubmitOutcome::UseCloudIfAllowed(ctx) => {
