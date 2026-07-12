@@ -23,11 +23,7 @@ sudo dpkg -i Attune_${VERSION}_amd64.deb
 attune-desktop
 ```
 
-post-install 自动准备 4 底座:
-- Embedding: bge-m3 via Ollama (你需手装 Ollama)
-- Reranker: lazy hf_hub (首搜下载 ~120 MB)
-- ASR: whisper-cli + large-v3-turbo Q5 (中文 WER 5-7%)
-- OCR: PP-OCRv5 mobile 21 MB
+post-install 只准备 Attune 本体与用户数据目录，不安装 AI worker 或模型权重。本地 embedding/rerank/OCR/ASR/LLM 统一通过 edge scheduler endpoint 接入；未配置 scheduler 时使用 cloud/BYOK 或基础全文检索降级。
 
 ### Windows
 
@@ -105,20 +101,17 @@ attune 当前是 single-vault. NAS 多用户场景:
 - 每用户独立 vault.db (用户 ID 进 path: ~/attune-{uid}/vault.db)
 - 后端跑多 process port 隔离 (v0.7 候选: 单进程 多 vault 支持)
 
-## 3. 本地调度器设备 (RISC-V)
+## 3. Edge Scheduler 设备 (RISC-V / x86 / Windows)
 
 **目标用户**: 出厂预装, 零配置开机即用.
 
-本地调度器镜像 build pipeline 在 `rv-spine-triton` + `rv-llama-cpp` 项目, 此处仅描述
-attune 端集成. FormFactor 自动检测为 `LocalSchedulerAppliance`, LLM 默认走本地 Ollama (60 TOPS
-INT4 via SpacemiT IME).
+Scheduler 镜像 build pipeline 由 scheduler 项目维护, 此处仅描述 attune 端集成。FormFactor 自动检测为 `LocalSchedulerAppliance`，LLM/embedding/rerank/OCR/ASR 默认经 scheduler `:8090` 统一收口。
 
 ### 系统服务
 
-本地调度器镜像出厂 systemd unit `attune-local-scheduler.service` 启动, 含:
+Edge scheduler 镜像出厂 systemd unit 启动, 含:
 - attune-server-headless on :18900
-- ollama daemon (qwen2.5:3b 预装)
-- 推理服务 :8090 (SpacemiT EP, IME GPU offload)
+- scheduler service :8090 (模型生命周期、队列、硬件加速由 scheduler 管理)
 
 ### 网络
 
@@ -131,7 +124,7 @@ local scheduler 出厂 IP DHCP, 用户:
 
 A/B 双分区 + signed firmware, OTA 拉新版 image:
 ```bash
-attune-cli local-scheduler upgrade  # 从 engi-stack.com/firmware/local-scheduler 拉最新
+attune-cli scheduler upgrade  # 从 engi-stack.com/firmware/edge-scheduler 拉最新（命令名以发行版为准）
 ```
 
 ## 4. Docker / GitHub Container Registry (ghcr.io)
@@ -178,14 +171,14 @@ docker run -d \
 
 ### 与 install pkg（.deb / .exe）的关系
 
-| 形态 | 用途 | UI | Ollama | 推荐场景 |
-|------|------|----|----|------|
-| `.deb` / `.msi` / AppImage | 桌面应用（含系统托盘） | ✅ Tauri WebView | 本机自动检测 | 笔电 / 工作站个人使用 |
-| Docker `attune-server` | Headless server（无桌面） | ✅ 嵌入 Web UI（浏览器访问） | 需宿主机 Ollama 或 local scheduler 推理服务 | NAS / VPS / 团队共享 |
-| Docker `attune-cli` | 命令行工具（无 UI） | ❌ | ❌ | 脚本自动化 / CI 管道 |
+| 形态 | 用途 | UI | AI 执行路径 | 推荐场景 |
+|------|------|----|------------|------|
+| `.deb` / `.msi` / AppImage | 桌面应用（含系统托盘） | ✅ Tauri WebView | cloud/BYOK 或 edge scheduler | 笔电 / 工作站个人使用 |
+| Docker `attune-server` | Headless server（无桌面） | ✅ 嵌入 Web UI（浏览器访问） | cloud/BYOK 或宿主/远端 scheduler | NAS / VPS / 团队共享 |
+| Docker `attune-cli` | 命令行工具（无 UI） | ❌ | 按命令配置 | 脚本自动化 / CI 管道 |
 
-> Docker 镜像不含 Ollama、whisper.cpp 和 PP-OCR 底座模型。
-> 启动后在 Web UI Settings → AI 大脑 配置外部 Ollama 地址或云端 token。
+> Docker 镜像不含第三方 AI runtime 或模型权重。
+> 启动后在 Web UI Settings → AI 大脑配置 cloud/BYOK 或 edge scheduler 地址。
 
 ### 平台支持
 
@@ -275,7 +268,7 @@ scp my-vault-2026-05.profile new-laptop:
 | 现象 | 检查 |
 |------|------|
 | `:18900` 启动失败 | 端口占用 / SSH tunnel 残留 (本次会话踩过, ss -tlpn 看) |
-| Wizard "Ollama 没装" | `curl -fsSL https://ollama.com/install.sh \| sh`, 然后 `ollama pull bge-m3` |
-| Chat "no LLM configured" | Settings → AI 大脑 → 配 cloud token 或选 Ollama |
+| Edge scheduler 探测失败 | `python3 scripts/probe-edge-scheduler-contract.py --base-url http://127.0.0.1:8090 --strict` |
+| Chat "no LLM configured" | Settings → AI 大脑 → 配 cloud/BYOK token 或 edge scheduler |
 | FTS 查询不命中新文件 | 后台 indexer 还在跑, 等几秒 (大 PDF 可能 OCR 慢) |
 | Plugin 装后未显示 | `POST /api/v1/plugins/reload` 或重启 daemon |

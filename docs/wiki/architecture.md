@@ -24,7 +24,7 @@ attune-core/
 ├── classifier/        # 维度分类（按 plugin 注册）
 ├── clusterer/         # HDBSCAN 聚类
 ├── crypto/            # Argon2id + AES-GCM
-├── embed/             # OllamaProvider + OrtEmbeddingProvider (Xenova/bge-m3 量化)
+├── embed/             # EmbeddingProvider + scheduler-native / legacy provider adapters
 ├── entities/          # 通用实体抽取（Person/Money/Date/Org）
 ├── infer/
 │   ├── embedding.rs   # ONNX bge-m3 推理
@@ -196,13 +196,12 @@ agent 可靠性通过三 Phase gate 强制保证，每个 law-pro agent 并入 d
 | Phase 2 | 每次 PR CI | all pass |
 | Phase 3 | LLM holdout eval（手动触发） | F1 = 0.9828 |
 
-## 模型矩阵（按硬件 tier）
+## 执行矩阵（按部署形态）
 
-| Tier | RAM | embedding | reranker | LLM |
-|------|-----|-----------|----------|-----|
-| Low | 4-8GB | bge-small (ORT) | base | qwen2.5:1.5b |
-| Mid | 8-16GB | bge-base (ORT) | base | qwen2.5:3b |
-| **High** | **16-32GB** | **bge-m3 (Ollama F16)** | **bge-reranker-base** | **deepseek-r1:14b** |
-| Flagship | 32+GB | bge-m3 + 自训 fine-tune | v2-m3 multilingual | qwen3.5:35b-a3b |
+| 形态 | embedding / rerank | OCR / ASR | LLM |
+|------|--------------------|-----------|-----|
+| 普通桌面 | 配置 provider；未配置时全文检索降级 | 未配置 scheduler 时降级 | Cloud/BYOK |
+| Edge scheduler | scheduler-native KB task | scheduler task | scheduler 或 cloud 溢出 |
+| 企业/服务器 | 统一 scheduler 或云 provider | 统一 scheduler | 网关/BYOK/scheduler |
 
-`ATTUNE_EMBEDDING_BACKEND=ollama` / `ATTUNE_CHAT_MODEL=<name>` 可手动覆盖。
+具体 RVV/AVX/CUDA/DirectML/ROCm worker 和模型生命周期由 scheduler contract 管理。

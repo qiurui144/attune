@@ -8,7 +8,7 @@
 - **律所 B2B（多人/多租户/RBAC）**：用 Attune Enterprise
 
 ### Q: 必须装 Ollama 吗？
-不必须。Attune 也能用云端 API（OpenAI / Anthropic / 阿里通义等）。但装 Ollama + bge-m3 + qwen2.5:3b 后体验最好（embedding 全本地、LLM 可本地可云）。
+不必须，也不推荐作为默认路径。Attune 默认使用云端/BYOK；本地高性能能力通过 edge scheduler 统一提供。Ollama 只适合显式 legacy 自管环境，Attune 安装包不会安装、启动或调优它。
 
 ### Q: Linux 哪个发行版支持？
 - ✅ **Ubuntu 22.04+** / Debian 12+
@@ -45,7 +45,7 @@ rm -rf ~/.config/attune/
 ### Q: 为什么我的 query 不返回相关文档？
 排查：
 1. 文件**索引完成**了吗？看 `index/status` queue 是否为 0
-2. **embedding 模型**正确？看 `/api/v1/ai_stack` 的 embedding loaded 字段
+2. **embedding / scheduler provider** 正确？看 Settings → AI 和 scheduler readiness
 3. **query 分词**对吗？中文 query 需要 jieba 分词正常工作
 4. 试试 search 直查：`curl http://localhost:18900/api/v1/search?q=xxx`
 
@@ -61,16 +61,14 @@ LLM 没在末尾输出 `【置信度: N/5】` marker。某些模型（如纯 bas
 ## 性能
 
 ### Q: ingest 一个 1000 页 PDF 多久？
-GPU 加速（bge-m3 Ollama F16）：约 50 chunks/s，1000 页 ≈ 5000 chunks ≈ 100 秒。  
-CPU only（ORT 量化）：约 6 chunks/s，1000 页约 14 分钟。
+取决于解析/OCR 比例、chunk 数和 scheduler worker。长文本 E2E 的目标不是把全文塞进上下文，而是通过分区过滤、混合检索、SRAS 选择和 bounded context 在 10 秒内返回有引用的答案。
 
 ### Q: 可以用 NVIDIA / AMD GPU 吗？
-- **NVIDIA**：Ollama 自动 CUDA，attune-server 也 set CUDA_VISIBLE_DEVICES=0
-- **AMD**：Ollama 自动 ROCm（实测 Radeon 780M 可用）
-- **Intel iGPU/NPU**：Ollama 实验级 OpenVINO，建议优先 NVIDIA
+- **NVIDIA / AMD / Intel / RISC-V RVV**：由 edge scheduler 选择 worker 和编译优化。
+- Attune 本体只探测 scheduler contract，不直接管理 CUDA/ROCm/OpenVINO/RVV worker。
 
 ### Q: 能跑在 NAS / 软路由 / Raspberry Pi 上吗？
-- **本地调度器设备**（RK3588 16GB+）：✅ 官方支持，本地 LLM + embedding/rerank
+- **Edge scheduler 设备**：✅ 官方支持，LLM + embedding/rerank/OCR/ASR 经 scheduler 统一收口
 - **Raspberry Pi 4/5**：⚠️ 仅 indexing 路径可行，LLM 跑不动
 - **Synology NAS**：实验级（Docker）
 
@@ -101,7 +99,7 @@ v0.6 还在 EAP（Early Access Program）阶段，订阅未上线。详见 [价�
 
 ### Q: 路线图在哪？
 - v0.7：L3 NER + Settings UI 完整 + macOS preview
-- v0.8：本地调度器设备全本地链路 + 多 vault
+- v0.8：edge scheduler 全本地链路 + 多 vault
 - v0.9：BC2BC 协议（Cross-vault knowledge sharing）
 
 详见 [GitHub milestones](https://github.com/qiurui144/attune/milestones)。

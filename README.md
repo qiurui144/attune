@@ -52,7 +52,7 @@ The v1.0→v1.2 line layers production-grade governance and cross-platform reach
 - **Cross-platform agent distribution (WASM, v1.2.0)** — deterministic agents/skills compile to `wasm32-wasip1` and run via an embedded `wasmtime`; one signed `.tar.gz` plugin package with one `.wasm` runs on Windows / Linux / riscv64. The WASM-safe `attune-agent-sdk` leaf crate keeps the `Agent` trait free of native deps.
 - **GitConnector (v1.2.0)** — import a knowledge base directly from a Git repo (GitHub / GitLab / Gitea / Bitbucket / Codeberg / sr.ht over HTTPS): clone → glob filter → ingest → follow upstream commits. Local-only, zero-LLM import path, with SSRF protection.
 - **Privacy OutboundGate + `PrivacyTier::L0` "never leaves device"** — every network egress (LLM / Cloud / WebDAV / Web Search / Telemetry) is funneled through one gate that consults settings + PII redaction; L0-tagged content refuses any cloud LLM call.
-- **One-click dependency deploy** — Ollama readiness detection + in-app install/pull, base-model auto-ensure, and LM Studio endpoint auto-detect, so non-technical users never touch a terminal.
+- **Cloud/BYOK + edge scheduler setup** — the wizard configures a cloud/OpenAI-compatible endpoint or an edge scheduler; Attune no longer installs or manages concrete local AI workers from the package hook.
 
 > **v1.0 GA (2026-05-25)** delivered the Office Helper (OCR scenes + card/ID checksums + whisper.cpp transcription), 4 OSS deterministic/heuristic agents, a real-LLM verification gate, and the Agent 验证铁律 6-category floor. Per-version notes — including v0.7 Memory Moat and the v0.6 RAG-quality benchmarks — live in [`rust/RELEASE.md`](rust/RELEASE.md) (version SSOT); the benchmark methodology is in [`docs/benchmarks/dual-track-baseline.md`](docs/benchmarks/dual-track-baseline.md).
 
@@ -164,12 +164,12 @@ Attune speaks the **OpenAI-compatible chat protocol**, so you can plug in any pr
 | **Zhipu GLM** | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-plus` | ¥50 / M tok | [open.bigmodel.cn](https://open.bigmodel.cn/usercenter/apikeys) |
 | **Moonshot Kimi** | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` | ¥12 / M tok | [platform.moonshot.cn](https://platform.moonshot.cn/console/api-keys) |
 | **Baichuan** | `https://api.baichuan-ai.com/v1` | `Baichuan4-Turbo` | ¥15 / M tok | [platform.baichuan-ai.com](https://platform.baichuan-ai.com/console/apikey) |
-| **Ollama (local)** | `http://localhost:11434/v1` | `qwen2.5:7b` | free / local | `curl -fsSL https://ollama.com/install.sh \| sh && ollama pull qwen2.5:7b` |
+| **Edge scheduler** | `http://127.0.0.1:8090` | scheduler contract | local device cost | configure/probe scheduler endpoint |
 | **OpenAI** | `https://api.openai.com/v1` | `gpt-4o-mini` | ~¥3 / M tok | [platform.openai.com](https://platform.openai.com/api-keys) |
 
 *Pricing is the input-token rate at the time of writing. Check each provider's pricing page for current rates and output-token rates.
 
-**Recommendation**: DeepSeek for daily use (cheapest non-local), Ollama if you have a 16 GB+ GPU, OpenAI when you need maximum quality.
+**Recommendation**: DeepSeek or Attune Pro gateway for daily use, edge scheduler for local high-performance knowledge-base workloads, OpenAI when you need maximum quality.
 
 ---
 
@@ -218,7 +218,7 @@ Distributing skills to others: package the folder as `<plugin-id>-<version>.tar.
 
 ## Features at a glance (Rust line)
 
-- **First-run wizard**: Welcome · Master Password · LLM backend (local Ollama / cloud API / demo) · Hardware detection with model recommendations · First data binding
+- **First-run wizard**: Welcome · Master Password · LLM backend (cloud/BYOK / edge scheduler / demo) · Hardware and scheduler detection · First data binding
 - **Chat**: RAG with citation chips · session history · typing-stream rendering · Token Chip cost estimator (local free / cloud $ live)
 - **Reader + Annotations**: full-text reading with 5 preset tags × 4 colors, plus AI 4-angle analysis (risk / outdated / highlights / questions)
 - **Items**: search, source-type filter, delete · drawer-based reading
@@ -235,24 +235,23 @@ Distributing skills to others: package the folder as `<plugin-id>-<version>.tar.
 > 面向**非专业用户**（非应用开发者），默认开箱即用，不需要任何技术配置。唯一暴露给用户的"配置"是 plugin（开源标准 MCP / skill / agents）。
 > 产品 = **Tauri 桌面应用窗口**（Windows / Linux / 未来 macOS）。Web UI 仅用于服务器端 API 调试，**不是产品 UI**。
 
-### 默认底座（随二进制打包，hidden 不暴露）
+### 默认执行路径（hidden 不暴露 worker）
 
-| 能力 | 默认引擎 | 用户可改？ |
+| 能力 | 默认路径 | 用户可改？ |
 |------|---------|---------|
-| Embedding | bge-m3 | ❌ |
-| Reranker | bge-reranker-v2-m3 | ❌ |
-| OCR | PP-OCRv5 | ❌（但可选**场景预设**，不暴露引擎） |
-| ASR | whisper-large-v3-turbo（中文 WER 5-7%） | ❌ |
+| Embedding / Rerank | edge scheduler 或配置的 provider；未配置时全文检索可用 | ✅ endpoint |
+| OCR / ASR | edge scheduler；未配置时相关高级能力不可用或降级 | ✅ endpoint |
+| LLM | Cloud/BYOK；高性能本地走 edge scheduler | ✅ endpoint/model |
 | 数据目录 | `~/.local/share/attune`（Linux）/ `%APPDATA%\attune`（Win） | ❌ |
 
 ### LLM 大模型 — 主云端 + 统一 OpenAI 兼容协议
 
-**所有 LLM 调用统一走 OpenAI 兼容协议**（`POST /v1/chat/completions`），不论后端是云端 OpenAI / DeepSeek / 智谱 / 通义 / Anthropic 兼容代理 / Ollama 本地。attune 不为每个 provider 写独立 SDK — 一个 OpenAI client 走天下。
+**所有 LLM 调用统一走 OpenAI 兼容协议**（`POST /v1/chat/completions`），不论后端是云端 OpenAI / DeepSeek / 智谱 / 通义 / Anthropic 兼容代理 / edge scheduler OpenAI-compatible 入口。attune 不为每个 provider 写独立 SDK — 一个 OpenAI client 走天下。
 
 **默认不打包本地 LLM**：
 - 普通免费用户：自己配云端大模型 API key（在应用窗口设置面板）
 - 付费用户：云端 gateway 自动下发（用户不持 raw key）
-- 本地 LLM（可选）：Ollama 自行装（`docs/local-llm-setup.md`），同样走 OpenAI 兼容 endpoint `http://127.0.0.1:11434/v1`
+- 本地高性能（可选）：edge scheduler 统一收口 embedding/rerank/OCR/ASR/LLM；legacy 自管本地 LLM 仅用于高级调试（`docs/local-llm-setup.md`）
 
 **多模态支持**（per OpenAI Vision API）：
 - 文件（PDF / DOCX / TXT / 代码）：attune 自动 OCR/解析 → 拼到 user message 文本
@@ -262,7 +261,7 @@ Distributing skills to others: package the folder as `<plugin-id>-<version>.tar.
 
 | 形态 | 标识 | 网络要求 | LLM 来源 |
 |------|------|---------|---------|
-| **离线 self-host** | LoggedOut | 永不联网；仅 RAG / 搜索可用；LLM Chat 需配自己的云端 API 或自装本地 LLM (Ollama) | 自配（云 / 本地） |
+| **离线 self-host** | LoggedOut | 永不联网；仅 RAG / 搜索可用；LLM Chat 需配 edge scheduler 或自管 OpenAI-compatible endpoint | 自配（scheduler / endpoint） |
 | **免费会员** | Free（云端账号） | 注册/登录 + Chat 时联网 | **自己配云端大模型 API key**（默认） |
 | **付费会员** | Paid（云端 license） | Chat 时联网；30 天 license 离线缓存 | **云端 gateway 自动**（Pro 高级模型，用户不持 raw key） |
 
@@ -288,11 +287,11 @@ Distributing skills to others: package the folder as `<plugin-id>-<version>.tar.
 
 | 平台 | 包格式 | 内含 |
 |------|-------|------|
-| Linux | AppImage（单文件）+ deb（apt 包） | attune binary + 底座模型（embedding/reranker/OCR/ASR）+ poppler-utils |
-| Windows | MSI installer | 同上 + Windows runtime |
+| Linux | AppImage（单文件）+ deb（apt 包） | attune binary + 桌面运行依赖；不安装 AI worker/model weights |
+| Windows | MSI installer | attune binary + Windows runtime；不静默安装第三方 AI runtime |
 | macOS（未来） | dmg + brew tap | 同上 |
 
-**不包含**：Ollama 本地 LLM（用户需用时自行装，见 `docs/local-llm-setup.md`）。默认 attune 走云端大模型，无需 Ollama 也能完整使用。
+**不包含**：Ollama/llama.cpp/ORT worker 和模型权重。默认 Attune 走云端/BYOK；本地生产能力通过 edge scheduler endpoint 接入。
 
 ---
 
@@ -312,16 +311,7 @@ Distributing skills to others: package the folder as `<plugin-id>-<version>.tar.
 
 ## Hardware support
 
-Automatic chip-level detection for recommending the best local model:
-
-| RAM / Accelerator | Recommended summary model |
-|-------------------|---------------------------|
-| ≥32 GB + dGPU/NPU | `qwen2.5:7b` (~1 s/chunk) |
-| 16–32 GB + iGPU/NPU | `qwen2.5:3b` (~2 s/chunk) |
-| 8–16 GB + iGPU | `qwen2.5:1.5b` (~3 s/chunk) |
-| <8 GB, CPU only | `llama3.2:1b` (~5 s/chunk) |
-
-Intel Meteor/Lunar/Arrow Lake NPU, AMD Phoenix/Hawk Point/Strix Point NPU, and NVIDIA/AMD GPUs are auto-detected; Ollama is the default inference backend with ROCm / CUDA / Metal / CPU support.
+Attune detects hardware and form factor to choose defaults, but concrete acceleration is delegated to the edge scheduler. RVV/AVX/CUDA/DirectML/ROCm worker selection, prompt cache, queueing, and model lifecycle should be implemented behind the scheduler contract. Generic laptops default to cloud/BYOK unless the user configures a scheduler endpoint.
 
 ---
 
@@ -383,8 +373,8 @@ Attune is built on the shoulders of outstanding open-source projects. We are gra
 
 **本地 AI 底座 / Local AI**
 
-- [Ollama](https://github.com/ollama/ollama) — local LLM runtime (embedding, chat, rerank); recommended backend (MIT)
-- [ONNX Runtime](https://github.com/microsoft/onnxruntime) (`ort`) — cross-platform inference engine for OCR and embedding models (MIT)
+- [Ollama](https://github.com/ollama/ollama) — optional legacy/self-managed local LLM runtime; not installed or managed by Attune packages (MIT)
+- [ONNX Runtime](https://github.com/microsoft/onnxruntime) (`ort`) — optional inference engine used by legacy/local components; production local acceleration should sit behind edge scheduler (MIT)
 - [kreuzberg-paddle-ocr](https://github.com/Goldziher/kreuzberg) — PP-OCRv5 bindings via ONNX Runtime for in-process document OCR (MIT)
 - [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — fast on-device ASR; bundled binary in desktop packages (MIT)
 - [HuggingFace Hub](https://github.com/huggingface/hf-hub) (`hf-hub`) — model weight fetching from the HF registry (Apache-2.0)
@@ -396,7 +386,7 @@ Attune is built on the shoulders of outstanding open-source projects. We are gra
 
 **网络与协议 / Networking**
 
-- [reqwest](https://github.com/seanmonstar/reqwest) — HTTP client (Ollama API, web fetch, WebDAV) (MIT / Apache-2.0)
+- [reqwest](https://github.com/seanmonstar/reqwest) — HTTP client (scheduler/cloud APIs, web fetch, WebDAV) (MIT / Apache-2.0)
 - [reqwest_dav](https://github.com/niuhuan/reqwest_dav) — WebDAV client built on reqwest (MIT)
 - [async-imap](https://github.com/async-email/async-imap) — async IMAP email ingestion (Apache-2.0 / MIT)
 

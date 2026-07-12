@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# 为 Ollama systemd 服务启用 AMD ROCm（iGPU / APU 适配）
+# Legacy helper: 为自管 Ollama systemd 服务启用 AMD ROCm（iGPU / APU 适配）
+#
+# Attune 默认不再安装、启动或调优 Ollama。生产路径应通过 cloud/BYOK
+# 或 edge scheduler 收口；只有维护旧的自管 Ollama 环境时才使用本脚本。
 #
 # 背景：AMD Radeon 780M (Phoenix/Hawk Point/Strix APU) 的 gfx target 是 gfx1103，
 # 不在 ROCm 官方白名单内，需要 HSA_OVERRIDE_GFX_VERSION 覆盖为一个被支持的值
@@ -13,8 +16,8 @@
 # 需 sudo；CLAUDE.md 记录的密码 123123 可在交互时输入。
 #
 # 用法：
-#   ./scripts/enable-amd-rocm-ollama.sh           # 自动检测
-#   ./scripts/enable-amd-rocm-ollama.sh 11.0.0   # 指定覆盖版本
+#   ATTUNE_ALLOW_LEGACY_DIRECT_OLLAMA=1 ./scripts/enable-amd-rocm-ollama.sh           # 自动检测
+#   ATTUNE_ALLOW_LEGACY_DIRECT_OLLAMA=1 ./scripts/enable-amd-rocm-ollama.sh 11.0.0   # 指定覆盖版本
 #   ./scripts/enable-amd-rocm-ollama.sh --revert  # 移除配置
 
 set -euo pipefail
@@ -28,6 +31,13 @@ if [ "${1:-}" = "--revert" ]; then
   sudo systemctl restart ollama || true
   echo "[revert] done. Ollama restarted without HSA override."
   exit 0
+fi
+
+if [ "${ATTUNE_ALLOW_LEGACY_DIRECT_OLLAMA:-0}" != "1" ]; then
+  echo "error: this is a legacy direct-Ollama helper." >&2
+  echo "       Attune default paths use cloud/BYOK or an edge scheduler." >&2
+  echo "       Set ATTUNE_ALLOW_LEGACY_DIRECT_OLLAMA=1 to manage a self-hosted Ollama runtime." >&2
+  exit 2
 fi
 
 # 1. 获取 gfx target（KFD topology，跳过 CPU 节点即 gfx_target_version=0 的）

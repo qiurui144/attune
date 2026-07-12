@@ -51,7 +51,7 @@ v1.0→v1.2 在 GA 核心之上叠加生产级治理与跨平台能力。完整�
 - **跨平台 agent 分发（WASM，v1.2.0）** — 确定性 agent/skill 可编到 `wasm32-wasip1`，由内嵌 `wasmtime` 执行；一个签名 `.tar.gz` 插件包含一份 `.wasm` 即在 Windows / Linux / riscv64 全平台运行。WASM-safe 的 `attune-agent-sdk` leaf crate 让 `Agent` trait 零 native 依赖。
 - **GitConnector（v1.2.0）** — 直接从 Git 仓库导入知识库（GitHub / GitLab / Gitea / Bitbucket / Codeberg / sr.ht 的 HTTPS）：clone → glob 过滤 → 入库 → 跟随上游 commit。本地完成、导入路径零 LLM 调用，带 SSRF 防护。
 - **隐私出网门 OutboundGate + `PrivacyTier::L0`「永不出网」** — 每个网络 egress（LLM / Cloud / WebDAV / Web Search / Telemetry）统一经一处 gate 裁决 settings + PII 脱敏；标 L0 的内容拒绝任何云端 LLM 调用。
-- **一键依赖部署** — Ollama readiness 检测 + 应用内一键 install/pull、底座模型一键 ensure、LM Studio 端点自动识别，非技术用户无需碰终端。
+- **Cloud/BYOK + edge scheduler 配置** — 首启向导配置云端/OpenAI-compatible endpoint 或 edge scheduler；安装包不再安装或管理具体本地 AI worker。
 
 > **v1.0 GA（2026-05-25）** 交付了 Office Helper（OCR 场景 + 卡证校验位 + whisper.cpp 转写）、4 个 OSS 确定性/启发式 agent、真 LLM 验证门，以及 Agent 验证铁律 6 类下限。逐版本发布说明（含 v0.7 记忆护城河、v0.6 RAG 质量 benchmark）见 [`rust/RELEASE.md`](rust/RELEASE.md)（版本 SSOT）；benchmark 方法论见 [`docs/benchmarks/dual-track-baseline.md`](docs/benchmarks/dual-track-baseline.md)。
 
@@ -139,7 +139,7 @@ RAG Chat 是主界面。每个回答都带可点的 citation chip 在侧栏打�
 
 > 各能力 × 实现模块 × 技术栈选型的完整映射见 [`rust/DEVELOP.md` → 能力矩阵 × 技术栈选型](rust/DEVELOP.md#能力矩阵--技术栈选型)（不在此重复版本号 / 模块清单）。
 
-- **首次运行向导** — 欢迎 · 主密码 · LLM 后端（本地 Ollama / 云端 API / demo）· 硬件检测推荐模型 · 首次绑定数据
+- **首次运行向导** — 欢迎 · 主密码 · LLM 后端（cloud/BYOK / edge scheduler / demo）· 硬件与 scheduler 检测 · 首次绑定数据
 - **内置 Chat + RAG** — citation chip 引用 · session 历史 · Token Chip 成本估算（本地免费 / 云端 $ 实时）
 - **混合搜索** — usearch HNSW 向量 + tantivy BM25（jieba 中文分词 + LowerCaser/Stemmer 多语言）+ RRF 融合；本地未命中时浏览器自动化网搜（驱动系统 Chrome，零 API 费）
 - **多层记忆** — L0 原始 chunk / L1 摘要 / L2 情景 / L3 语义，tier-aware 上下文装配按最省 tier 答题
@@ -174,12 +174,12 @@ Attune 走 **OpenAI 兼容 chat 协议**，任何暴露 `/v1/chat/completions` �
 | **智谱 GLM** | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-plus` | ¥50/M tok | [open.bigmodel.cn](https://open.bigmodel.cn/usercenter/apikeys) |
 | **月之暗面 Kimi** | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` | ¥12/M tok | [platform.moonshot.cn](https://platform.moonshot.cn/console/api-keys) |
 | **百川** | `https://api.baichuan-ai.com/v1` | `Baichuan4-Turbo` | ¥15/M tok | [platform.baichuan-ai.com](https://platform.baichuan-ai.com/console/apikey) |
-| **Ollama 本地** | `http://localhost:11434/v1` | `qwen2.5:7b` | 免费 / 本地算力 | `curl -fsSL https://ollama.com/install.sh \| sh && ollama pull qwen2.5:7b` |
+| **Edge scheduler** | `http://127.0.0.1:8090` | scheduler contract | 本地设备成本 | 配置/探测 scheduler endpoint |
 | **OpenAI** | `https://api.openai.com/v1` | `gpt-4o-mini` | ~¥3/M tok | [platform.openai.com](https://platform.openai.com/api-keys) |
 
 *以上为各家输入 token 价格估算（写作时点）；具体以官方价格页为准（含输出 token 价、首充优惠等）。
 
-**推荐**：日常用 DeepSeek（性价比最高），有 16 GB+ GPU 选 Ollama 本地，重要场景上 OpenAI。
+**推荐**：日常用 DeepSeek 或 Attune Pro gateway，本地高性能知识库走 edge scheduler，重要场景上 OpenAI。
 
 ### Rust 后端
 
@@ -191,18 +191,9 @@ cargo build --release
 
 验证：`curl http://localhost:18900/api/v1/status/health`
 
-#### Embedding 模型
+#### Embedding / Rerank / OCR / ASR
 
-**Ollama（推荐）：**
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull bge-m3
-```
-
-后端默认 `device: auto`，自动连接 Ollama bge-m3（1024 维）。无 Ollama 时回退 ONNX，无模型时回退 FTS5 全文搜索。
-
-**ONNX（可选）：** 将 `model.onnx` + `tokenizer.json` 放到 `~/.local/share/attune/models/bge-m3/`。
+生产本地能力通过 edge scheduler endpoint 接入；Attune 本体不在安装阶段下载或启动具体 worker。未配置 scheduler 时，基础全文检索仍可用，Chat 需要 cloud/BYOK 或 scheduler。
 
 #### Chrome 扩展
 
@@ -285,8 +276,8 @@ sudo apt-get install -y linux-firmware
 # AMD NPU (内核 < 6.14)
 sudo apt install amdxdna-dkms  # 需要 AMD 官方源
 
-# Ollama（通用，推荐）
-curl -fsSL https://ollama.com/install.sh | sh && ollama pull bge-m3
+# Edge scheduler（本地高性能，推荐）
+ATTUNE_EDGE_SCHEDULER_URL=http://127.0.0.1:8090 scripts/deploy-linux.sh
 ```
 
 ## 配置
@@ -295,8 +286,8 @@ curl -fsSL https://ollama.com/install.sh | sh && ollama pull bge-m3
 
 ```yaml
 embedding:
-  model: "bge-m3"            # bge-m3 / bge-small-zh-v1.5 / bge-large-zh-v1.5
-  device: "auto"             # auto / ollama / cpu / directml / rocm / openvino
+  provider: "local_scheduler" # edge scheduler-native KB task（兼容配置值）
+  endpoint: "http://127.0.0.1:8090"
 
 search:
   default_top_k: 10
@@ -309,7 +300,7 @@ ingest:
   excluded_domains: ["mail.google.com", "web.whatsapp.com"]
 ```
 
-`device: auto` 优先 Ollama，失败回退 ONNX。不存在配置文件时使用默认值。
+不存在 scheduler 配置时，Attune 保持可启动并提示用户配置 cloud/BYOK 或 edge scheduler。
 
 ## API
 

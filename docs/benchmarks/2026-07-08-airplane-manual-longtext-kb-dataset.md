@@ -76,7 +76,7 @@ flowchart TD
   SRAS["SRAS selection<br/>reward grounded citations, diversity, exact partition"]
   Admission["ContextAdmission<br/>bounded final chunks and output cap"]
   Ask["/kb/tasks/kb.query.ask<br/>or configured chat provider"]
-  Jobs["/api/v1/chat/local-scheduler/jobs/{job_id}"]
+  Jobs["/api/v1/chat/edge-scheduler/jobs/{job_id}"]
   Answer["Answer + citations"]
   Gates["Regression gates<br/>accuracy, citation hit, p95 under 10s, UI visibility"]
 
@@ -361,7 +361,7 @@ python3 scripts/eval-airplane-manual-longtext-search.py \
   --token "$ATTUNE_TOKEN" \
   --profile edge_scheduler_30b \
   --limit 10 \
-  --out /tmp/airplane-local-scheduler-search.json
+  --out /tmp/airplane-edge-scheduler-search.json
 ```
 
 Use `--profile edge_scheduler_comprehensive` after the 48-document set is indexed, and
@@ -374,11 +374,11 @@ python3 scripts/eval-airplane-manual-longtext-chat.py \
   --base-url http://127.0.0.1:8787 \
   --token "$ATTUNE_TOKEN" \
   --profile edge_scheduler_30b \
-  --out /tmp/airplane-local-scheduler-chat.json \
+  --out /tmp/airplane-edge-scheduler-chat.json \
   --fail-on-targets
 ```
 
-This gate follows scheduler async jobs through `/api/v1/chat/local-scheduler/jobs/{job_id}` and
+This gate follows scheduler async jobs through `/api/v1/chat/edge-scheduler/jobs/{job_id}` and
 checks answer accuracy, citation hit rate, answer latency, context chunk count,
 and safety refusal for operational-flight prompts.
 

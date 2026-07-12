@@ -130,7 +130,7 @@ Block 项：___________
 
 | # | 项目 | 结果 |
 |---|------|------|
-| L1 | .deb 安装 + Ollama 自动安装 + 拉 bge-m3 | PASS |
+| L1 | .deb 安装 + cloud/edge scheduler 配置引导 | PASS |
 | L2 | NSIS exe 安装 + Wizard 完整走通 | PASS |
 | L3 | PDF 上传 + 索引 + Chat RAG 引用 | PASS |
 | L4 | Vault 锁定 + 解锁 + 密码错误处理 | PASS |

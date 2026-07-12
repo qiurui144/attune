@@ -32,7 +32,7 @@
 **模型选型**（per CLAUDE.md §4.5H — 多模态默认 qwen-3.6/3.7，禁用已下架的 qwen-vl）:
 视觉走 `ModelRole::Vision`（`model_routing.rs:24-27`），由客户端侧 `ModelRouter` 解析逻辑模型名，
 网关再做 group + 上游路由（`model_routing.rs:1-11`）。无 `model_routing` 配置时优雅退化到 `default_model`
-（degenerate-but-usable，`model_routing.rs:62-89`），BYOK/Ollama 用户的本地模型映射到所有 role（弱模型 degrade，§4.5.E）。
+（degenerate-but-usable，`model_routing.rs:62-89`）。BYOK 用户或 edge scheduler 用户按各自 endpoint contract 映射 role；legacy 自管本地模型只作为显式高级配置，弱模型会 degrade（§4.5.E）。
 
 > 注:`model_routing.rs:27` 注释举例仍写 `qwen-vl class`——这是历史文档残留，生产默认应为 qwen-3.6/3.7
 > （§4.5H）。逻辑名由 settings/网关决定，代码不硬编码具体模型。

@@ -10,23 +10,23 @@
 #   and records the produced cluster names so a human can judge naming quality /
 #   JSON-parse robustness across tiers, then set the minimum tier in RELEASE.md.
 #
-#   Tiers (per §4.5 D — weak-local / weak-cloud / strong-cloud):
-#     - weak local : qwen2.5:3b      (Ollama)
+#   Tiers (per §4.5 D — weak-cloud / strong-cloud plus legacy local opt-in):
+#     - legacy local : qwen2.5:3b      (self-managed Ollama, opt-in only)
 #     - weak cloud : gemini-1.5-flash | gpt-4o-mini   (BYOK)
 #     - product    : deepseek-v4     (attune product default for text agents, §H)
 #
 # ⚠️  COMPUTE AUTHORIZATION REQUIRED (~/.claude/CLAUDE.md §1.3)
-#   This script starts/uses local LLM inference (Ollama) and/or hits paid cloud
-#   endpoints. Do NOT run it without explicit per-session approval covering the
-#   model name + quant + expected VRAM + duration. It is therefore EXCLUDED from
+#   This script may hit paid cloud endpoints. If ORGANIZE_TIERS contains a local
+#   model (qwen/llama/phi), it also touches a self-managed Ollama endpoint and
+#   requires ATTUNE_ALLOW_LEGACY_DIRECT_OLLAMA=1. It is therefore EXCLUDED from
 #   CI: the corresponding Rust gate is #[ignore]d and never auto-runs.
 #
 # USAGE
-#   bash scripts/run-organize-tier-matrix.sh            # all tiers it can reach
-#   ORGANIZE_TIERS="qwen2.5:3b" bash scripts/run-organize-tier-matrix.sh
+#   bash scripts/run-organize-tier-matrix.sh            # cloud/product tiers
+#   ATTUNE_ALLOW_LEGACY_DIRECT_OLLAMA=1 ORGANIZE_TIERS="qwen2.5:3b" bash scripts/run-organize-tier-matrix.sh
 #
 # ENV (OpenAI-compatible; defaults are placeholders — never hard-code secrets)
-#   OLLAMA_HOST            default http://127.0.0.1:11434
+#   OLLAMA_HOST            legacy direct-local endpoint, default http://127.0.0.1:11434
 #   ATTUNE_LLM_BASE_URL    cloud OpenAI-compat base (BYOK / gateway)
 #   ATTUNE_LLM_API_KEY     read from env ONLY (e.g. source /tmp/secrets-*/key.env)
 #
@@ -34,19 +34,24 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-TIERS="${ORGANIZE_TIERS:-qwen2.5:3b gemini-1.5-flash deepseek-v4}"
+TIERS="${ORGANIZE_TIERS:-gemini-1.5-flash deepseek-v4}"
 OUT_DIR="${1:-$PROJECT_ROOT/reports/runs/organize-tier-matrix-$(date +%Y%m%dT%H%M%S)}"
 
 mkdir -p "$OUT_DIR"
 echo "[organize-matrix] output → $OUT_DIR"
 echo "[organize-matrix] tiers   → $TIERS"
 
-# Preflight: confirm Ollama only if a local model is requested (read-only check,
-# does NOT start the daemon — starting it needs §1.3 approval).
+# Preflight: confirm Ollama only if a legacy local model is explicitly requested
+# (read-only check, does NOT start the daemon).
 if echo "$TIERS" | grep -Eq 'qwen|llama|phi'; then
+  if [ "${ATTUNE_ALLOW_LEGACY_DIRECT_OLLAMA:-0}" != "1" ]; then
+    echo "::error:: local tier requested, but direct Ollama is legacy opt-in." >&2
+    echo "          Set ATTUNE_ALLOW_LEGACY_DIRECT_OLLAMA=1 only for a self-managed local test lane." >&2
+    exit 2
+  fi
   if ! curl -fsS "$OLLAMA_HOST/api/tags" >/dev/null 2>&1; then
     echo "::error:: local tier requested but Ollama not reachable at $OLLAMA_HOST."
-    echo "          Start it ONLY after §1.3 approval, then re-run." >&2
+    echo "          Start it only for the approved self-managed local test lane, then re-run." >&2
     exit 3
   fi
 fi

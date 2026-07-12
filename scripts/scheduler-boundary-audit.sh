@@ -18,6 +18,11 @@ check() {
 }
 
 SERVER_PATHS=(rust/crates/attune-server/src rust/crates/attune-server/ui/src)
+INSTALL_PATHS=(
+  apps/attune-desktop/scripts
+  scripts/deploy-linux.sh
+  scripts/install-local.sh
+)
 
 check "direct local runtime symbols must not appear in server/ui" \
   'OllamaLlmProvider|OllamaProvider|OrtEmbeddingProvider|OrtRerankProvider|PpOcrProvider::ensure|detect_default_provider|detect_asr|transcribe_with_diarization|ensure_whisper|ensure_sensevoice|LMSTUDIO_ENDPOINT' \
@@ -26,6 +31,10 @@ check "direct local runtime symbols must not appear in server/ui" \
 check "direct local runtime endpoints must not appear in server/ui" \
   'localhost:11434|127\.0\.0\.1:11434|/api/tags|/api/ps|/ollama|/lmstudio' \
   "${SERVER_PATHS[@]}"
+
+check "install/deploy scripts must not install or pull direct local runtimes" \
+  'curl -fsSL https://ollama\.com/install\.sh|ollama pull|OllamaSetup\.exe|systemctl enable --now ollama|systemctl restart ollama|/api/tags' \
+  "${INSTALL_PATHS[@]}"
 
 check "server must use scheduler-aware ingest/parser entrypoints" \
   '\b(ingest_document|ingest_document_replacing|ingest_document_with_profile|parse_bytes_with_profile|parse_file_with_profile|parse_bytes|parse_file|scan_directory)\s*\(' \
