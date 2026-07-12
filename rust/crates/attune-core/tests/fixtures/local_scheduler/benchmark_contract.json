@@ -1,11 +1,29 @@
 {
-  "contract_version": "local-scheduler-stress-v1",
+  "contract_version": "edge-scheduler-contract-v2",
+  "schema_versions": {
+    "benchmark_contract": "benchmark_contract.v2",
+    "models": "models.v2",
+    "capacity": "capacity.v2",
+    "jobs": "jobs.v2",
+    "job_status": "job_status.v2",
+    "kb_task": "kb_task.v1",
+    "kb_task_admit": "kb_task_admit.v2"
+  },
   "revision": 4827,
   "queue_order": ["resource_key", "priority_desc", "deadline_ms_asc"],
   "request_fields": ["inputs", "timeout_ms", "context_tokens", "max_output_tokens"],
   "endpoints": {
     "kb_task": "POST /kb/tasks/{task}",
     "job_status": "GET /jobs/{id}"
+  },
+  "application_api": {
+    "ready": "GET /ready",
+    "ready_hot": "GET /ready?hot=1",
+    "health": "GET /health",
+    "kb_task": "POST /kb/tasks/{task}",
+    "kb_task_async": "POST /kb/tasks/{task}:async",
+    "job_status": "GET /jobs/{job_id}",
+    "job_cancel": "POST /jobs/{job_id}:cancel"
   },
   "runtime_tasks": [
     {
@@ -44,9 +62,9 @@
   "models": [
     {
       "name": "llm-summary",
-      "primary_device": "A100",
+      "primary_device": "cpu.vector",
       "fallback_devices": [],
-      "resource_key": "A100-SVC",
+      "resource_key": "answer.cpu.vector",
       "worker_kind": "llama_http",
       "exclusive": true,
       "queue_capacity": 32,
@@ -67,9 +85,9 @@
     },
     {
       "name": "llm-chat",
-      "primary_device": "A100",
+      "primary_device": "cpu.vector",
       "fallback_devices": [],
-      "resource_key": "A100-SVC",
+      "resource_key": "answer.cpu.vector",
       "worker_kind": "llama_http",
       "exclusive": true,
       "queue_capacity": 4,
@@ -90,9 +108,9 @@
     },
     {
       "name": "vlm",
-      "primary_device": "A100",
+      "primary_device": "cpu.vector",
       "fallback_devices": [],
-      "resource_key": "A100-SVC",
+      "resource_key": "vision.cpu.vector",
       "worker_kind": "llama_http",
       "exclusive": true,
       "queue_capacity": 4,
@@ -119,7 +137,16 @@
     "canceled_retained": 1,
     "expired_retained": 0
   },
-  "metrics": ["local_scheduler_context_tokens", "local_scheduler_async_jobs"],
+  "metrics": ["edge_resource_context_tokens", "edge_resource_async_jobs", "local_scheduler_context_tokens"],
   "errors": {"async_required": 409, "oversize": 422, "rate_limited": 429},
+  "prompt_cache": {
+    "policy": "prefix_stable_v1",
+    "metadata_fields": ["prompt_cache_key", "cache_hit", "timings.prompt_ms", "timings.predicted_ms"]
+  },
+  "refusal_policy": {
+    "name": "scheduler_refusal_v1",
+    "no_evidence": true,
+    "safety": true
+  },
   "notes": ["cold-start samples must be bucketed by startup_state"]
 }

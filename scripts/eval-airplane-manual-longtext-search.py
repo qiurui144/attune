@@ -3,7 +3,7 @@
 
 This script measures retrieval accuracy and latency. It intentionally evaluates
 the search/vector layer first; answer/citation evaluation should be layered on
-top after the local scheduler chat path is running against the same corpus.
+top after the edge scheduler or cloud chat path is running against the same corpus.
 
 Usage:
   python3 scripts/eval-airplane-manual-longtext-search.py \

@@ -1,13 +1,15 @@
 # 本地 LLM 部署指导 (可选)
 
-attune **主要使用云版本大模型** — 默认走 OpenAI / Anthropic / Gemini / DeepSeek
-等云端兼容 API. **本文档仅适用于**:
+attune **主要使用云版本大模型或 edge scheduler**。生产本地 AI 路径由
+edge scheduler 统一管理 embedding、rerank、OCR、ASR 和本地 LLM worker。
+本文档只描述自管 OpenAI-compatible 本地服务，**仅适用于**:
 
 - 完全离线 / 隐私敏感场景
 - 自有 GPU 服务器, 希望节省云端 token 成本
 - 开发 / 测试 attune 时本地 mock LLM
+- 个人高级调试，不作为 Attune 默认部署路径
 
-attune **不内置 Ollama, 不打包模型权重**. 本地 LLM 由用户自行部署.
+attune **不内置 Ollama, 不打包模型权重, 不管理本地 worker 生命周期**。需要标准化本地生产部署时，请优先接入 edge scheduler。
 
 ## 1. 装 Ollama
 

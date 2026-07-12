@@ -69,6 +69,18 @@ type LocalSchedulerJobResponse = {
   job: SchedulerJobStatus;
 };
 
+async function getSchedulerJob(jobId: string): Promise<LocalSchedulerJobResponse> {
+  const encoded = encodeURIComponent(jobId);
+  try {
+    return await api.get<LocalSchedulerJobResponse>(`/chat/edge-scheduler/jobs/${encoded}`);
+  } catch (e) {
+    if (String(e).includes('404')) {
+      return await api.get<LocalSchedulerJobResponse>(`/chat/local-scheduler/jobs/${encoded}`);
+    }
+    throw e;
+  }
+}
+
 // 刚发送完一条消息后，sendMessage 会回填新 session_id，触发 ChatView 的
 // activeSessionId effect 去 loadSession —— 但服务端 history 不持久化 acp_flow
 // 流转 trace（live-only），重载会冲掉刚附在内存消息上的 acp_flow 块。
@@ -352,8 +364,22 @@ function localSchedulerFailureContent(job: SchedulerJobStatus): string {
   if (status === 'expired') {
     return t('chat.local_scheduler.expired');
   }
-  const message = job.error ?? job.detail ?? job.reason ?? job.status ?? 'unknown';
+  const message = schedulerErrorText(job.error) ?? job.detail ?? job.reason ?? job.status ?? 'unknown';
   return t('chat.local_scheduler.failed', { message });
+}
+
+function schedulerErrorText(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) return value;
+  if (!isRecord(value)) return null;
+  for (const key of ['message', 'error', 'detail', 'reason', 'code']) {
+    const text = nonEmptyString(value[key]);
+    if (text) return text;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return null;
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -367,9 +393,7 @@ async function pollLocalSchedulerJob(messageId: string, jobId: string): Promise<
 
     let job: SchedulerJobStatus;
     try {
-      const res = await api.get<LocalSchedulerJobResponse>(
-        `/chat/local-scheduler/jobs/${encodeURIComponent(jobId)}`,
-      );
+      const res = await getSchedulerJob(jobId);
       job = res.job;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

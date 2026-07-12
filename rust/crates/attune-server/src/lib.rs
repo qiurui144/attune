@@ -108,13 +108,25 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
             "/api/v1/llm/probe-local-scheduler",
             post(routes::llm::probe_local_scheduler),
         )
+        .route(
+            "/api/v1/llm/probe-edge-scheduler",
+            post(routes::llm::probe_local_scheduler),
+        )
         .route("/api/v1/models/pull", post(routes::llm::pull_model))
         .route(
             "/api/v1/local-scheduler/readiness",
             get(routes::llm::local_scheduler_readiness),
         )
         .route(
+            "/api/v1/edge-scheduler/readiness",
+            get(routes::llm::local_scheduler_readiness),
+        )
+        .route(
             "/api/v1/local-scheduler/ensure",
+            post(routes::llm::ensure_local_scheduler),
+        )
+        .route(
+            "/api/v1/edge-scheduler/ensure",
             post(routes::llm::ensure_local_scheduler),
         )
         // Chat (RAG)
@@ -123,6 +135,11 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         .route("/api/v1/chat/history", get(routes::chat::chat_history))
         .route(
             "/api/v1/chat/local-scheduler/jobs/{job_id}",
+            get(routes::chat::local_scheduler_job_status)
+                .delete(routes::chat::cancel_local_scheduler_job),
+        )
+        .route(
+            "/api/v1/chat/edge-scheduler/jobs/{job_id}",
             get(routes::chat::local_scheduler_job_status)
                 .delete(routes::chat::cancel_local_scheduler_job),
         )

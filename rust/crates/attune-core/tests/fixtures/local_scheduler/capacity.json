@@ -1,6 +1,6 @@
 {
   "clusters": {
-    "A100": {
+    "cpu.vector": {
       "cores_total": 8,
       "cores_used": 1,
       "busy_ratio": 0.125,

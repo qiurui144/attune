@@ -10,13 +10,20 @@ const CONTRACT_JSON: &str = include_str!("fixtures/local_scheduler/benchmark_con
 const MODELS_JSON: &str = include_str!("fixtures/local_scheduler/models.json");
 const CAPACITY_JSON: &str = include_str!("fixtures/local_scheduler/capacity.json");
 const JOB_DONE_JSON: &str = include_str!("fixtures/local_scheduler/job_done.json");
+const JOB_FAILED_STRUCTURED_JSON: &str =
+    include_str!("fixtures/local_scheduler/job_failed_structured_error.json");
 const KB_TASK_ASYNC_JSON: &str = include_str!("fixtures/local_scheduler/kb_task_async.json");
 
 #[test]
 fn parses_benchmark_contract_context_caps_and_runtime_tasks() {
     let contract: SchedulerBenchmarkContract = serde_json::from_str(CONTRACT_JSON).unwrap();
 
-    assert_eq!(contract.contract_version, "local-scheduler-stress-v1");
+    assert_eq!(contract.contract_version, "edge-scheduler-contract-v2");
+    assert_eq!(
+        contract.schema_versions["benchmark_contract"],
+        "benchmark_contract.v2"
+    );
+    assert_eq!(contract.schema_versions["jobs"], "jobs.v2");
     assert_eq!(contract.revision, 4827);
     assert!(contract
         .request_fields
@@ -30,6 +37,18 @@ fn parses_benchmark_contract_context_caps_and_runtime_tasks() {
         .runtime_tasks
         .iter()
         .any(|task| task.name == "kb.query.vlm_extract"));
+    assert_eq!(
+        contract.application_api["kb_task"].as_str(),
+        Some("POST /kb/tasks/{task}")
+    );
+    assert_eq!(
+        contract.prompt_cache["policy"].as_str(),
+        Some("prefix_stable_v1")
+    );
+    assert_eq!(
+        contract.refusal_policy["name"].as_str(),
+        Some("scheduler_refusal_v1")
+    );
 
     let chat = contract
         .models
@@ -77,13 +96,25 @@ fn parses_models_capacity_job_and_kb_task_shapes() {
     let capacity: SchedulerCapacitySnapshot = serde_json::from_str(CAPACITY_JSON).unwrap();
     assert_eq!(capacity.memory.status, "ok");
     assert_eq!(capacity.memory.available_gb, Some(23.5));
-    assert!(capacity.clusters["A100"].ep_active);
+    assert!(capacity.clusters["cpu.vector"].ep_active);
 
     let job: SchedulerJobStatus = serde_json::from_str(JOB_DONE_JSON).unwrap();
     assert_eq!(job.status, "done");
     assert_eq!(
         job.outputs["choices"][0]["message"]["content"].as_str(),
         Some("answer")
+    );
+    assert_eq!(job.device_used.as_deref(), Some("cpu.vector"));
+    assert_eq!(job.prompt_cache_key.as_deref(), Some("kb.query.ask:stable-prefix:abc123"));
+    assert_eq!(job.cache_hit, Some(true));
+    assert_eq!(job.prompt_cache_policy.as_deref(), Some("prefix_stable_v1"));
+    assert_eq!(job.refusal_policy.as_deref(), Some("scheduler_refusal_v1"));
+
+    let failed: SchedulerJobStatus = serde_json::from_str(JOB_FAILED_STRUCTURED_JSON).unwrap();
+    assert_eq!(failed.status, "failed");
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("no grounded evidence was available for this answer")
     );
 
     let task: SchedulerKbTaskResponse = serde_json::from_str(KB_TASK_ASYNC_JSON).unwrap();

@@ -9,7 +9,7 @@
 # Prereqs:
 #   - cargo + rust toolchain
 #   - corpora downloaded (see scripts/download-corpora.sh — TODO: add separate script)
-#   - Ollama running with bge-m3 embedding model (or LLM provider configured)
+#   - cloud LLM or edge scheduler configured for embedding/chat where required
 #
 # Usage:
 #   bash scripts/run-benchmark-corpus.sh [output_json]

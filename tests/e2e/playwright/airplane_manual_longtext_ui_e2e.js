@@ -138,6 +138,18 @@ async function requestJson(opts, method, apiPath, body, token = opts.token, allo
   return data;
 }
 
+async function requestSchedulerJob(opts, jobId, token = opts.token) {
+  const encoded = encodeURIComponent(String(jobId));
+  const edgePath = `/api/v1/chat/edge-scheduler/jobs/${encoded}`;
+  const legacyPath = `/api/v1/chat/local-scheduler/jobs/${encoded}`;
+  try {
+    return await requestJson(opts, "GET", edgePath, undefined, token);
+  } catch (err) {
+    if (!String(err && err.message ? err.message : err).includes("HTTP 404")) throw err;
+  }
+  return requestJson(opts, "GET", legacyPath, undefined, token);
+}
+
 async function ensureToken(opts) {
   if (opts.token) return opts.token;
   await requestJson(opts, "POST", "/api/v1/vault/setup", { password: opts.password }, "", new Set([400, 409]));
@@ -188,7 +200,7 @@ async function maybePollLocalScheduler(opts, response, token) {
   let lastJob = null;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
-    const data = await requestJson(opts, "GET", `/api/v1/chat/local-scheduler/jobs/${encodeURIComponent(jobId)}`);
+    const data = await requestSchedulerJob(opts, jobId, token);
     const job = data.job && typeof data.job === "object" ? data.job : data;
     lastJob = job;
     if (TERMINAL_LOCAL_SCHEDULER.has(schedulerStatus(job))) {
@@ -374,13 +386,13 @@ async function main() {
     const { content: finalContent, job } = await maybePollLocalScheduler(opts, response, token);
     if (job && FAILED_LOCAL_SCHEDULER.has(schedulerStatus(job))) {
       throw new Error(
-        `local scheduler job ended with ${schedulerStatus(job)}: ${JSON.stringify(job.error || job).slice(0, 500)}`,
+        `edge scheduler job ended with ${schedulerStatus(job)}: ${JSON.stringify(job.error || job).slice(0, 500)}`,
       );
     }
     const probe = finalContent.trim().slice(0, 40);
     if (probe) await page.getByText(probe, { exact: false }).first().waitFor({ state: "visible", timeout: opts.timeoutMs });
     if (response.local_scheduler && typeof response.local_scheduler === "object") {
-      await waitTextAny(page, ["本地调度器", "Local scheduler"], Math.min(opts.timeoutMs, 30000));
+      await waitTextAny(page, ["边缘调度器", "Edge scheduler", "本地调度器", "Local scheduler"], Math.min(opts.timeoutMs, 30000));
     }
     if (Array.isArray(response.citations) && response.citations.length > 0) {
       await waitTextAny(page, ["📎 引用", "📎 Citations"], Math.min(opts.timeoutMs, 30000));
@@ -396,7 +408,7 @@ async function main() {
       latency_target: totalMs <= Number(targetMs),
     };
     if (response.local_scheduler && typeof response.local_scheduler === "object") {
-      checks.local_scheduler_status_visible = await visibleTextAny(page, ["本地调度器", "Local scheduler"]);
+      checks.local_scheduler_status_visible = await visibleTextAny(page, ["边缘调度器", "Edge scheduler", "本地调度器", "Local scheduler"]);
     }
     if (consoleErrors.length > 0) checks.console_errors = false;
     console.log(JSON.stringify({ checks, latency_ms: totalMs, target_ms: targetMs }, null, 2));

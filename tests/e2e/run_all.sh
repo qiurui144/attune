@@ -26,6 +26,7 @@ WITH_LONGTEXT="${ATTUNE_E2E_LONGTEXT:-0}"
 LOCAL_SCHEDULER="${ATTUNE_E2E_LOCAL_SCHEDULER:-}"
 [ -z "$LOCAL_SCHEDULER" ] && LOCAL_SCHEDULER="${ATTUNE_E2E_SCHEDULER_ENDPOINT:-}"
 LOCAL_SCHEDULER="${LOCAL_SCHEDULER%/}"
+SCHEDULER_STRICT="${ATTUNE_E2E_SCHEDULER_STRICT:-1}"
 
 cleanup() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
@@ -68,6 +69,17 @@ if [ -n "$LOCAL_SCHEDULER" ]; then
     "ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS=${ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS:-${ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS:-28}}"
     "ATTUNE_SCHEDULER_NATIVE_KB=${ATTUNE_SCHEDULER_NATIVE_KB:-1}"
   )
+fi
+
+if [ -n "$LOCAL_SCHEDULER" ]; then
+  echo "[preflight] probe edge scheduler contract ..."
+  PROBE_ARGS=(--base-url "$LOCAL_SCHEDULER")
+  if [ "$SCHEDULER_STRICT" = "0" ]; then
+    PROBE_ARGS+=(--no-strict)
+  else
+    PROBE_ARGS+=(--strict)
+  fi
+  python3 "$REPO/scripts/probe-edge-scheduler-contract.py" "${PROBE_ARGS[@]}" || exit 1
 fi
 env "${SERVER_ENV[@]}" "$BIN" --no-auth --port "$PORT" > "$DATA/server.log" 2>&1 &
 SERVER_PID=$!
@@ -155,7 +167,7 @@ HAS_EMBEDDING="${SETUP_RESULT##*:}"
 if [ -n "${ATTUNE_E2E_LLM_ENDPOINT:-}" ] && [ "$HAS_LLM" = "1" ]; then
   echo "[4/5] 已按 ATTUNE_E2E_LLM_ENDPOINT 配置 LLM provider"
 elif [ -n "$LOCAL_SCHEDULER" ] && [ "$HAS_LLM" = "1" ]; then
-  echo "[4/5] 已按本地 scheduler 配置 LLM 路由"
+  echo "[4/5] 已按 edge scheduler 配置 LLM 路由"
 else
   echo "[4/5] 未配置 cloud/scheduler LLM，跳过 legacy direct-Ollama chat E2E"
 fi
@@ -168,11 +180,17 @@ if [ "$HAS_EMBEDDING" = "1" ]; then
 fi
 if [ "$WITH_LONGTEXT" = "1" ]; then
   echo "      长文本 E2E 已启用，将使用当前 cloud/scheduler chat 配置"
+  if [ -n "$LOCAL_SCHEDULER" ] && [ "$SCHEDULER_STRICT" != "0" ]; then
+    export ATTUNE_LONGTEXT_REQUIRE_SCHEDULER_GENERATION="${ATTUNE_LONGTEXT_REQUIRE_SCHEDULER_GENERATION:-1}"
+    export ATTUNE_LONGTEXT_REQUIRE_PROMPT_CACHE_METADATA="${ATTUNE_LONGTEXT_REQUIRE_PROMPT_CACHE_METADATA:-1}"
+    export ATTUNE_LONGTEXT_SCHEDULER_GENERATION_P95_MS_MAX="${ATTUNE_LONGTEXT_SCHEDULER_GENERATION_P95_MS_MAX:-10000}"
+    echo "      scheduler strict gate: generation=required prompt-cache=required p95<=${ATTUNE_LONGTEXT_SCHEDULER_GENERATION_P95_MS_MAX}ms"
+  fi
 fi
 RUN_STANDARD_CHAT=0
 if [ -n "$LOCAL_SCHEDULER" ] && [ "${ATTUNE_E2E_RUN_STANDARD_CHAT:-0}" != "1" ]; then
   RUN_STANDARD_CHAT=0
-  echo "      本地 scheduler 模式下跳过 Ollama 专用 memory_moat_chat_e2e.py"
+  echo "      edge scheduler 模式下跳过 Ollama 专用 memory_moat_chat_e2e.py"
 elif [ "${ATTUNE_E2E_RUN_STANDARD_CHAT:-0}" = "1" ]; then
   RUN_STANDARD_CHAT=1
 fi

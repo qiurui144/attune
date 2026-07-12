@@ -2678,6 +2678,11 @@ mod tests {
     use attune_core::error::VaultError;
     use axum::body::to_bytes;
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV_LOCK.lock().expect("test env lock")
+    }
+
     fn status_of(e: VaultError) -> u16 {
         match llm_upstream_error(e) {
             AppError::Detailed { status, .. } => status.as_u16(),
@@ -2921,6 +2926,7 @@ mod tests {
 
     #[test]
     fn local_scheduler_ask_max_output_tokens_defaults_and_allows_env_override() {
+        let _env = env_lock();
         let previous_generic = std::env::var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS").ok();
         let previous_local = std::env::var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS").ok();
         std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS");
@@ -2947,6 +2953,7 @@ mod tests {
 
     #[test]
     fn chat_kb_top_k_defaults_allows_override_and_clamps() {
+        let _env = env_lock();
         let previous_generic = std::env::var("ATTUNE_CHAT_KB_TOP_K").ok();
         let previous_scheduler = std::env::var("ATTUNE_SCHEDULER_CHAT_TOP_K").ok();
         let previous_local = std::env::var("ATTUNE_LOCAL_SCHEDULER_CHAT_TOP_K").ok();
@@ -3096,6 +3103,7 @@ mod tests {
 
     #[test]
     fn local_scheduler_safety_refusal_ignores_extractive_toggle() {
+        let _env = env_lock();
         let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
         std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "0");
 
@@ -3125,6 +3133,7 @@ mod tests {
 
     #[test]
     fn local_scheduler_extractive_answer_lists_sources_for_lookup() {
+        let _env = env_lock();
         let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
         std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
 
@@ -3150,6 +3159,7 @@ mod tests {
 
     #[test]
     fn local_scheduler_extractive_answer_skips_open_ended_queries() {
+        let _env = env_lock();
         let previous = std::env::var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER").ok();
         std::env::set_var("ATTUNE_SCHEDULER_EXTRACTIVE_ANSWER", "1");
 

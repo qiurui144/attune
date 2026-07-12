@@ -168,7 +168,7 @@ export type LocalSchedulerInfo = {
   device_used?: string | null;
   latency_ms?: number | null;
   queue_wait_ms?: number | null;
-  error?: string | null;
+  error?: unknown;
   detail?: string | null;
   admission?: LocalSchedulerAdmission;
 };

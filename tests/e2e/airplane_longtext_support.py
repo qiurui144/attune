@@ -195,6 +195,29 @@ def request_json(
         raise AttuneHttpError(method, path, exc.code, parsed) from exc
 
 
+def scheduler_job_proxy_paths(job_id: str) -> tuple[str, str]:
+    encoded = urllib.parse.quote(str(job_id))
+    return (
+        f"/api/v1/chat/edge-scheduler/jobs/{encoded}",
+        f"/api/v1/chat/local-scheduler/jobs/{encoded}",
+    )
+
+
+def request_scheduler_job(
+    base_url: str,
+    job_id: str,
+    token: str = "",
+    timeout: float = 30.0,
+) -> tuple[int, dict[str, Any]]:
+    edge_path, legacy_path = scheduler_job_proxy_paths(job_id)
+    try:
+        return request_json(base_url, "GET", edge_path, token=token, timeout=timeout)
+    except AttuneHttpError as exc:
+        if exc.status != 404:
+            raise
+    return request_json(base_url, "GET", legacy_path, token=token, timeout=timeout)
+
+
 def exception_error_fields(exc: BaseException) -> dict[str, Any]:
     payload = getattr(exc, "payload", None)
     if not isinstance(payload, dict):
@@ -281,10 +304,9 @@ def maybe_poll_local_scheduler(
     deadline = time.monotonic() + poll_timeout
     while time.monotonic() < deadline:
         time.sleep(poll_interval)
-        _, data = request_json(
+        _, data = request_scheduler_job(
             base_url,
-            "GET",
-            f"/api/v1/chat/local-scheduler/jobs/{urllib.parse.quote(str(job_id))}",
+            str(job_id),
             token=token,
             timeout=request_timeout,
         )

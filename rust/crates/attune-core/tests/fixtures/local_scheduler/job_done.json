@@ -7,12 +7,20 @@
   "reason": "task_async_only",
   "scheduled_as": "async",
   "status": "done",
-  "outputs": {"choices": [{"message": {"content": "answer"}}]},
-  "device_used": "A100",
+  "outputs": {
+    "choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}],
+    "timings": {"prompt_ms": 80.0, "predicted_ms": 320.0, "prompt_n": 512, "predicted_n": 42},
+    "usage": {"prompt_tokens": 512, "completion_tokens": 42}
+  },
+  "device_used": "cpu.vector",
   "latency_ms": 1200.0,
   "queue_wait_ms": 20.0,
   "startup_state": "hot_resident",
   "startup_wait_ms": 0.0,
   "cold_start_wait_ms": 0.0,
-  "worker_pid": 12847
+  "worker_pid": 12847,
+  "prompt_cache_key": "kb.query.ask:stable-prefix:abc123",
+  "cache_hit": true,
+  "prompt_cache_policy": "prefix_stable_v1",
+  "refusal_policy": "scheduler_refusal_v1"
 }

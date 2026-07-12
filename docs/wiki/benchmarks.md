@@ -38,9 +38,9 @@ v1.0 在检索 benchmark 之上新增三阶段 agent 可靠性门控：
 
 | 组件 | 版本 / 配置 |
 |------|------------|
-| Embedding | bge-m3 (Ollama F16, GPU) — `ATTUNE_EMBEDDING_BACKEND=ollama` |
+| Embedding | 历史基线：bge-m3 (Ollama F16, GPU)；当前标准路径：edge scheduler 或云端配置提供 embedding |
 | Reranker | BAAI/bge-reranker-base (官方 ONNX, full precision) |
-| Chat LLM | deepseek-r1:14b (Ollama) — `ATTUNE_CHAT_MODEL=deepseek-r1:14b` |
+| Chat LLM | 历史基线：deepseek-r1:14b (Ollama)；当前标准路径：云端 LLM 或 edge scheduler answer worker |
 | Vector index | usearch HNSW + f16 量化 |
 | BM25 | tantivy 0.22 + tantivy-jieba |
 | Cross-domain penalty | 0.4 (F-Pro) |
@@ -128,8 +128,7 @@ cd attune
 bash scripts/download-corpora.sh
 
 # 2. 启动 attune-server bench 实例（独立 vault，不污染 dev）
-ATTUNE_EMBEDDING_BACKEND=ollama \
-ATTUNE_CHAT_MODEL=deepseek-r1:14b \
+# 使用当前配置的云端 LLM 或 edge scheduler；Attune 不默认安装/启动本地推理 worker。
 bash scripts/bench-orchestrator.sh all
 # 预期：~7 min ingest + reranker 自动下载
 

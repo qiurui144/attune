@@ -4,7 +4,7 @@
 This script assumes the API long-text E2E has already materialized manuals,
 bound the corpus, and drained the embedding queue. It verifies the same corpus
 through the browser surface: indexed item visibility, chat input, visible
-answer/citations, local scheduler status rendering, and end-to-end response latency.
+answer/citations, edge scheduler status rendering, and end-to-end response latency.
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import json
 import os
 import sys
 import time
-import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +32,7 @@ from airplane_longtext_support import (  # noqa: E402
     local_scheduler_status,
     output_text,
     profile_doc_ids,
+    request_scheduler_job,
     request_json as support_request_json,
     unwrap_local_scheduler_job,
 )
@@ -153,7 +153,7 @@ def maybe_poll_local_scheduler(args: argparse.Namespace, response: dict[str, Any
     last_job: dict[str, Any] | None = None
     while time.monotonic() < deadline:
         time.sleep(1.5)
-        _, data = request_json(args, "GET", f"/api/v1/chat/local-scheduler/jobs/{urllib.parse.quote(str(job_id))}", token=token, timeout=30)
+        _, data = request_scheduler_job(args.base_url, str(job_id), token=token, timeout=30)
         job = unwrap_local_scheduler_job(data)
         last_job = job
         status = local_scheduler_status(job)
@@ -335,12 +335,12 @@ def main() -> int:
             final_content, job = maybe_poll_local_scheduler(args, response, token)
             if isinstance(job, dict) and local_scheduler_status(job) in FAILED_LOCAL_SCHEDULER:
                 raise RuntimeError(
-                    "local scheduler job ended with "
+                    "edge scheduler job ended with "
                     f"{local_scheduler_status(job)}: {json.dumps(job.get('error') or job, ensure_ascii=False)[:500]}"
                 )
             assert_visible_answer(page, final_content, args)
             if isinstance(response.get("local_scheduler"), dict):
-                wait_visible_any(page, ["本地调度器", "Local scheduler"], min(args.timeout_ms, 30_000))
+                wait_visible_any(page, ["边缘调度器", "Edge scheduler", "本地调度器", "Local scheduler"], min(args.timeout_ms, 30_000))
             if isinstance(response.get("citations"), list) and response.get("citations"):
                 wait_visible_any(page, ["📎 引用", "📎 Citations"], min(args.timeout_ms, 30_000))
             total_ms = (time.perf_counter() - turn_start) * 1000
@@ -354,7 +354,7 @@ def main() -> int:
                 "latency_target": total_ms <= float(target_ms),
             }
             if isinstance(response.get("local_scheduler"), dict):
-                checks["local_scheduler_status_visible"] = visible_any(page, ["本地调度器", "Local scheduler"])
+                checks["local_scheduler_status_visible"] = visible_any(page, ["边缘调度器", "Edge scheduler", "本地调度器", "Local scheduler"])
 
             failed = [name for name, ok in checks.items() if not ok]
             print(json.dumps({"checks": checks, "latency_ms": total_ms, "target_ms": target_ms}, ensure_ascii=False, indent=2))

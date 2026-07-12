@@ -1,9 +1,9 @@
-# Local Scheduler Runtime Boundary
+# Edge Scheduler Runtime Boundary
 
 > Updated: 2026-07-11
-> Pilot source inspected: `/data/RV/k3-scheduler`. Public Attune naming uses
-> `local scheduler` / `scheduler` so the same boundary can support RISC-V,
-> Windows high-performance, and Linux x86 platforms.
+> Pilot scheduler implementation inspected. Public Attune naming uses
+> `edge scheduler` / `scheduler`; `local scheduler` remains a compatibility
+> alias for existing configs and routes.
 
 ## Rule
 
@@ -13,7 +13,7 @@ model lifecycle, worker selection, hardware arbitration, and platform-specific
 acceleration.
 
 Attune server runtime must not directly call concrete local inference workers
-or probe their private endpoints. Local inference goes through:
+or probe their private endpoints. Local/edge inference goes through:
 
 - `POST /kb/tasks/kb.query.embed`
 - `POST /kb/tasks/kb.query.rerank`
@@ -106,7 +106,7 @@ flowchart LR
 - Upload, staged drain, bound-folder scan, Git, Email, WebDAV, RSS, and JSON
   ingest pass `IngestOptions` into `attune-core` so image/scanned-PDF/audio
   parsing uses scheduler OCR/ASR on server paths.
-- `/api/v1/ai-stack`, `/api/v1/status`, and readiness routes report scheduler
+- `/api/v1/ai-stack`, `/api/v1/status`, and edge-scheduler readiness routes report scheduler
   capability only; they do not inspect concrete local runtimes.
 - Scheduler contract fixtures, runtime profile cache/TTL, and classified
   scheduler error mapping live on the Attune side so non-X100 scheduler
@@ -147,7 +147,7 @@ Not allowed to silently degrade:
   refuses or reports delay/failure instead of substituting a weaker procedural
   answer.
 
-Run `scripts/scheduler-boundary-audit.sh` before merging scheduler changes. The
+Run `scripts/scheduler-boundary-audit.sh` before merging Attune scheduler-boundary changes. The
 audit fails if server/UI code reintroduces direct local runtime symbols,
 private local runtime endpoints, or legacy parser/ingest entrypoints.
 CI runs this audit as an independent scheduler-boundary gate.

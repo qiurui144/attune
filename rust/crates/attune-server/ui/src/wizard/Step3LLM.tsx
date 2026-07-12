@@ -85,7 +85,7 @@ export function Step3LLM({ ctx, onUpdate, onContinue }: Step3Props): JSX.Element
       setLocalSchedulerDetectResult(null);
     }
     try {
-      const res = await api.post<ProbeLocalSchedulerResponse>('/llm/probe-local-scheduler', {});
+      const res = await api.post<ProbeLocalSchedulerResponse>('/llm/probe-edge-scheduler', {});
       if (res.found && res.endpoint) {
         setLocalSchedulerEndpoint(res.endpoint);
         const msg = t('wizard.llm.local_scheduler.detected', { endpoint: res.endpoint });

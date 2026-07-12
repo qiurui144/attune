@@ -10,7 +10,7 @@ bash tests/e2e/run_all.sh
 ```
 
 runner 自动：编译 server → 起隔离 server（独立 XDG dir，port 18905）→
-setup+unlock vault → 配 LLM（若 Ollama 可用）→ 顺序跑全部脚本 → 汇总 → 清理。
+setup+unlock vault → 配 cloud/scheduler LLM（若显式配置）→ 顺序跑全部脚本 → 汇总 → 清理。
 退出码 0 = 全绿。
 
 长文本知识库门禁需要显式开启：
@@ -42,6 +42,9 @@ ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
 
 `ATTUNE_E2E_LOCAL_SCHEDULER` 会派生本地 scheduler chat 路由和 embedding endpoint，
 并默认使用 `llm-summary`、`embedding-int8`、512 维、`/kb/tasks/kb.query.embed`。
+配置 scheduler 时，runner 会先执行 `scripts/probe-edge-scheduler-contract.py`；
+默认严格要求 schema_versions、prompt cache 元数据和 `scheduler_refusal_v1`。临时兼容旧
+scheduler 可设 `ATTUNE_E2E_SCHEDULER_STRICT=0`。
 当前 scheduler 生产接口不是
 尚未落地的 `/v1/embeddings` thin route；需要改 task 时可设
 `ATTUNE_E2E_EMBEDDING_TASK=kb.ingest.embed_batch`。大体量 OCR/解析会让同步 bind
@@ -69,7 +72,7 @@ ATTUNE_E2E_LONGTEXT=1 \
 | `memory_moat_v07routes_e2e.py` | 11 | v0.7 新路由 demo/load（+幂等）、audit/log、audit/log.csv、chat/stream（SSE + 超长拒绝）|
 | `memory_moat_search_quality_e2e.py` | 8 | RRF 混合检索召回质量 — 6 主题语料 + 针对性 query top-1 命中 + 跨主题区分度 |
 | `memory_moat_stress_loop_e2e.py` | 5 | 120 轮持续操作（600 HTTP 调用）；RSS/FD 监控验证无内存/句柄泄漏 |
-| `memory_moat_chat_e2e.py` | 9 | 真实 Ollama qwen2.5:3b RAG 问答；citation 引用；citation_hit 信号落库（需 Ollama）|
+| `memory_moat_chat_e2e.py` | 9 | legacy direct-Ollama RAG 问答；citation 引用；citation_hit 信号落库（默认 runner 不执行）|
 | `airplane_manual_longtext_e2e.py` | gate | 可选长文本 KB E2E；Attune bind 目录建向量库；检索 Hit/Recall/MRR；chat 准确率/citation/10s p95；多轮来源连续性和安全拒答；Web UI 交互 |
 
 长文本多轮 API 子门禁可单独运行：
@@ -145,8 +148,8 @@ API 层时可设 `ATTUNE_LONGTEXT_UI=0`。
   当前标准路径下本地模型应经 scheduler，云模型应经配置的 cloud/OpenAI-compatible
   endpoint。需要验证 chat 能力时优先使用 scheduler/cloud 长文本 gate。
 - 长文本 E2E 额外需要：可访问 GitHub，磁盘空间足够 materialize 所选 PDF；
-  本地 scheduler 模式需 `local-scheduler` 在 loopback `:8090` 可用，或通过
-  `ATTUNE_E2E_LOCAL_SCHEDULER` 指到远端或本机 Windows/Linux x86 本地 scheduler；
+  edge scheduler 模式需 scheduler 在 loopback `:8090` 可用，或通过
+  `ATTUNE_E2E_LOCAL_SCHEDULER` 指到远端或本机 Windows/Linux x86 edge scheduler；
   云端 LLM 可通过
   `ATTUNE_E2E_LLM_*` 注入。Web UI 子门禁需要
   Python Playwright 和 Chrome/Chromium；或 Node.js、`node-playwright`/Playwright

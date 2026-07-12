@@ -63,7 +63,7 @@ export function LocalModelReadiness({
   const probe = useCallback(async (): Promise<ReadinessResponse | null> => {
     try {
       const q = model.trim() ? `?model=${encodeURIComponent(model.trim())}` : '';
-      const r = await api.get<ReadinessResponse>(`/local-scheduler/readiness${q}`);
+      const r = await api.get<ReadinessResponse>(`/edge-scheduler/readiness${q}`);
       setResp(r);
       onReadyChange?.(r.readiness.state === 'ready');
       return r;
@@ -124,7 +124,7 @@ export function LocalModelReadiness({
     setBusy(true);
     setBusyLabel(t('local_model.install.installing'));
     try {
-      const r = await api.post<InstallResponse>('/local-scheduler/ensure', {});
+      const r = await api.post<InstallResponse>('/edge-scheduler/ensure', {});
       if (r.status === 'manual') {
         const url = r.download_url ?? plan.homepage;
         window.open(url, '_blank', 'noopener');

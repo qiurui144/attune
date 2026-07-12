@@ -10,7 +10,7 @@ use crate::edge_cloud::capacity::{
 };
 use crate::error::{Result, VaultError};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -118,6 +118,8 @@ pub struct SchedulerBenchmarkContract {
     #[serde(default)]
     pub contract_version: String,
     #[serde(default)]
+    pub schema_versions: BTreeMap<String, String>,
+    #[serde(default)]
     pub revision: u64,
     #[serde(default)]
     pub queue_order: Vec<String>,
@@ -141,6 +143,10 @@ pub struct SchedulerBenchmarkContract {
     pub metrics: Vec<String>,
     #[serde(default)]
     pub errors: serde_json::Value,
+    #[serde(default)]
+    pub prompt_cache: serde_json::Value,
+    #[serde(default)]
+    pub refusal_policy: serde_json::Value,
     #[serde(default)]
     pub notes: Vec<String>,
 }
@@ -350,6 +356,8 @@ pub struct SchedulerJobStatus {
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
+    pub eta_ms: Option<u32>,
+    #[serde(default)]
     pub scheduled_as: Option<String>,
     #[serde(default)]
     pub status: String,
@@ -377,10 +385,20 @@ pub struct SchedulerJobStatus {
     pub cold_start_wait_ms: Option<f64>,
     #[serde(default)]
     pub worker_pid: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_error_string")]
     pub error: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default)]
+    pub cache_hit: Option<bool>,
+    #[serde(default)]
+    pub prompt_cache: serde_json::Value,
+    #[serde(default)]
+    pub prompt_cache_policy: Option<String>,
+    #[serde(default)]
+    pub refusal_policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -417,6 +435,20 @@ pub struct SchedulerKbTaskResponse {
     pub cold_start_wait_ms: Option<f64>,
     #[serde(default)]
     pub worker_pid: Option<i32>,
+    #[serde(default, deserialize_with = "deserialize_optional_error_string")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default)]
+    pub cache_hit: Option<bool>,
+    #[serde(default)]
+    pub prompt_cache: serde_json::Value,
+    #[serde(default)]
+    pub prompt_cache_policy: Option<String>,
+    #[serde(default)]
+    pub refusal_policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,6 +593,41 @@ fn validate_path_segment(name: &str, value: &str) -> Result<()> {
         Err(VaultError::InvalidInput(format!(
             "invalid local scheduler {name} path segment"
         )))
+    }
+}
+
+fn deserialize_optional_error_string<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(error_value_to_string))
+}
+
+fn error_value_to_string(value: serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => non_empty_string(s),
+        serde_json::Value::Object(map) => {
+            for key in ["message", "error", "detail", "reason", "code"] {
+                if let Some(s) = map.get(key).and_then(|v| v.as_str()) {
+                    if let Some(s) = non_empty_string(s.to_string()) {
+                        return Some(s);
+                    }
+                }
+            }
+            non_empty_string(serde_json::Value::Object(map).to_string())
+        }
+        other => non_empty_string(other.to_string()),
+    }
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
