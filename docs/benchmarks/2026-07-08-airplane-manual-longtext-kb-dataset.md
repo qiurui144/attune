@@ -9,7 +9,7 @@ Pinned commit: `afe8288495338880e165f77bb9afe9946f366a52`
 ## Purpose
 
 This dataset turns `airplane-manual-collection` into a deterministic long-text
-KB benchmark for local scheduler RAG. It is designed to expose failures that still
+KB benchmark for edge scheduler RAG. It is designed to expose failures that still
 exist with very large context windows:
 
 - relevant manual retrieved but buried after too many neighboring chunks;
@@ -27,7 +27,7 @@ procedure advice.
 
 - `tests/e2e/airplane_manual_longtext_cases.json`
   - e2e manifest with selected documents, query expectations, source root,
-    index partitions, and local scheduler profile metadata.
+    index partitions, and edge scheduler profile metadata.
 - `rust/tests/golden/airplane_manual_queries.json`
   - J6/RAG-quality compatible golden query file using stable document ids.
 - `scripts/build-airplane-manual-longtext-dataset.py`
@@ -39,7 +39,7 @@ procedure advice.
     drain, then runs search, API chat, and Web UI gates.
 - `tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py`
   - browser gate against the already-built vector DB. It verifies indexed item
-    visibility, chat input, visible answer/citations, local scheduler status rendering, and
+    visibility, chat input, visible answer/citations, scheduler status rendering, and
     10s visible-response latency.
 
 Default generated set:
@@ -67,7 +67,7 @@ flowchart TD
   Bind["Attune /api/v1/index/bind"]
   Parse["PDF parse + OCR fallback"]
   Chunk["Long-document chunking<br/>section + paragraph windows"]
-  Embed["Embedding task<br/>local scheduler or configured provider"]
+  Embed["Embedding task<br/>edge scheduler or configured provider"]
   Index["Vector + BM25 indexes<br/>partition metadata"]
 
   Query["API/Web query"]
@@ -91,7 +91,14 @@ flowchart TD
 This test intentionally validates the retrieval stack rather than the maximum
 context length of a single model. The expected success path is a small cited
 evidence packet selected from a thousands-page corpus, followed by an answer that
-meets the 10s response target on the configured local scheduler profile.
+meets the 10s response target on the configured edge scheduler profile.
+
+Attune also enforces a product-level final prompt admission cap before any
+LLM call. The default is `ATTUNE_CONTEXT_ADMISSION_MAX_INPUT_TOKENS=65536`,
+even when the provider advertises a 1M-token window. Raise that variable only
+for explicit evaluation runs; the long-text KB path should normally improve
+partitioning, SRAS selection, citation coverage, and compression rather than
+filling the provider window.
 
 ## Profiles
 
@@ -101,14 +108,14 @@ meets the 10s response target on the configured local scheduler profile.
 - Purpose: fast ingest sanity check and index partition routing.
 - Use before running expensive PDF extraction or OCR paths.
 
-`local_scheduler_30b`
+`edge_scheduler_30b`
 
 - 24 documents.
-- Purpose: local scheduler RAG with SRAS and context-admission budget.
+- Purpose: edge scheduler RAG with SRAS and context-admission budget.
 - Expected cap: no more than 4 retrieved context documents and 12 final chunks
   for the answer stage.
 
-`local_scheduler_comprehensive`
+`edge_scheduler_comprehensive`
 
 - 48 documents.
 - Purpose: thousands-page vector DB test across major aircraft/manual types.
@@ -147,7 +154,7 @@ python3 scripts/build-airplane-manual-longtext-dataset.py \
   --no-github-api
 ```
 
-Use `--limit-docs 24` for the first local scheduler pilot, `48` for the comprehensive
+Use `--limit-docs 24` for the first edge scheduler pilot, `48` for the comprehensive
 thousands-page gate, and `74` for stress.
 
 For the comprehensive thousands-page gate, use:
@@ -160,7 +167,7 @@ python3 scripts/build-airplane-manual-longtext-dataset.py \
   --no-github-api
 ```
 
-For the first local scheduler ingest pilot, prefer `--limit-docs 24` and the `local_scheduler_30b`
+For the first edge scheduler ingest pilot, prefer `--limit-docs 24` and the `edge_scheduler_30b`
 profile. Use `--limit-docs 74` only for stress.
 
 ## Evaluation Contract
@@ -184,7 +191,7 @@ Coverage now includes:
 - long-context decay probes;
 - Web chat surface checks.
 
-local scheduler runner should report:
+edge scheduler runner should report:
 
 - Hit@K, Recall@K, and MRR against `acceptable_hits`;
 - partition hit rate before vector/rerank;
@@ -201,12 +208,12 @@ Initial vector-search acceptance targets:
 - warm p50 search latency <= 800 ms
 - warm p95 search latency <= 2500 ms
 
-Initial local scheduler answer targets:
+Initial edge scheduler answer targets:
 
 - answer accuracy rate >= 0.90
 - citation hit rate >= 0.90
 - unsafe operational advice rate = 0
-- local scheduler 30B p95 answer latency <= 10000 ms
+- edge scheduler 30B-class p95 answer latency <= 10000 ms
 
 ## 2026-07-09 X100 Pilot Result
 
@@ -218,7 +225,7 @@ Environment:
 - Scheduler: `:8090`, hot `embedding-int8`, `reranker-int8`, `llm-summary`.
 - Attune: `scheduler-runtime` RVA23 artifact, no direct llama.cpp/ORT worker
   invocation in the server process.
-- Corpus profile: `local_scheduler_comprehensive`, 48 selected manuals, 42
+- Corpus profile: `edge_scheduler_comprehensive`, 48 selected manuals, 42
   applicable evaluation queries.
 
 Root-cause fix before the final run:
@@ -273,7 +280,7 @@ Final Web UI gate:
 | Chat input submits manifest query | pass |
 | Answer term hit | pass |
 | Citation hit and visible citation UI | pass |
-| Local scheduler status visible | pass |
+| Scheduler status visible | pass |
 | Visible latency | 4.22s, pass under 10s |
 
 On the RISC-V host, Python Playwright packages were version-mismatched with the
@@ -297,28 +304,28 @@ The expected regression flow is:
    citations, safety refusal, context size, or 10s p95 latency regress.
 7. Open the Web UI with Playwright, verify the indexed manual is visible in the
    Items view, ask a manifest query through the chat box, and fail if the
-   visible answer/citation/local scheduler status/10s latency surface regresses.
+   visible answer/citation/scheduler status/10s latency surface regresses.
 
 Run the comprehensive gate through the E2E runner:
 
 ```bash
-ATTUNE_E2E_LONGTEXT=1 ATTUNE_LONGTEXT_PROFILE=local_scheduler_comprehensive \
+ATTUNE_E2E_LONGTEXT=1 ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
   bash tests/e2e/run_all.sh
 ```
 
-For a local scheduler pilot. local scheduler is the first profile; Windows/Linux x86
-high-performance local schedulers should reuse the same Attune entrypoint:
+For an edge scheduler pilot. RISC-V/X100 is the first profile host; Windows/Linux x86
+high-performance schedulers should reuse the same Attune entrypoint:
 
 ```bash
 ATTUNE_E2E_LONGTEXT=1 \
-ATTUNE_LONGTEXT_PROFILE=local_scheduler_comprehensive \
+ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
 ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
   bash tests/e2e/run_all.sh
 ```
 
-Current local-scheduler builds expose embedding through KB tasks such as
+Current scheduler builds expose embedding through KB tasks such as
 `/kb/tasks/kb.query.embed`; the proposed `/v1/embeddings` thin route is not
-required for this gate. The runner defaults local scheduler to `llm-summary`,
+required for this gate. The runner defaults edge scheduler to `llm-summary`,
 `embedding-int8`, 512 dimensions, and `kb.query.embed`; override with
 `ATTUNE_E2E_LLM_MODEL`, `ATTUNE_E2E_EMBEDDING_MODEL`,
 `ATTUNE_E2E_EMBEDDING_DIMS`, or `ATTUNE_E2E_EMBEDDING_TASK` when testing a new
@@ -338,9 +345,9 @@ To run only the browser surface after the corpus is already indexed:
 
 ```bash
 python3 tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py \
-  --manifest /tmp/attune-airplane-longtext-local_scheduler_comprehensive.json \
+  --manifest /tmp/attune-airplane-longtext-edge_scheduler_comprehensive.json \
   --base-url http://localhost:18905 \
-  --profile local_scheduler_comprehensive
+  --profile edge_scheduler_comprehensive
 ```
 
 Set `ATTUNE_LONGTEXT_UI=0` only when isolating API/search regressions; the
@@ -352,32 +359,32 @@ Run the search-layer gate after the vector DB is built:
 python3 scripts/eval-airplane-manual-longtext-search.py \
   --base-url http://127.0.0.1:8787 \
   --token "$ATTUNE_TOKEN" \
-  --profile local_scheduler_30b \
+  --profile edge_scheduler_30b \
   --limit 10 \
   --out /tmp/airplane-local-scheduler-search.json
 ```
 
-Use `--profile local_scheduler_comprehensive` after the 48-document set is indexed, and
+Use `--profile edge_scheduler_comprehensive` after the 48-document set is indexed, and
 `--fail-on-targets` when turning this into a blocking regression gate.
 
-Run the answer/citation gate after chat or local scheduler is configured:
+Run the answer/citation gate after chat or edge scheduler is configured:
 
 ```bash
 python3 scripts/eval-airplane-manual-longtext-chat.py \
   --base-url http://127.0.0.1:8787 \
   --token "$ATTUNE_TOKEN" \
-  --profile local_scheduler_30b \
+  --profile edge_scheduler_30b \
   --out /tmp/airplane-local-scheduler-chat.json \
   --fail-on-targets
 ```
 
-This gate follows local scheduler async jobs through `/api/v1/chat/local-scheduler/jobs/{job_id}` and
+This gate follows scheduler async jobs through `/api/v1/chat/local-scheduler/jobs/{job_id}` and
 checks answer accuracy, citation hit rate, answer latency, context chunk count,
 and safety refusal for operational-flight prompts.
 
-## Local Scheduler Retrieval Shape
+## Edge Scheduler Retrieval Shape
 
-The dataset is intentionally partition-friendly. The expected local scheduler pipeline is:
+The dataset is intentionally partition-friendly. The expected edge scheduler pipeline is:
 
 1. Parse aircraft/manual tokens from the query.
 2. Apply index partition filters first:
@@ -391,6 +398,6 @@ The dataset is intentionally partition-friendly. The expected local scheduler pi
 5. Compress per selected document before the final answer.
 6. Answer with citations; do not fill a 1M-token context just because it exists.
 
-For local scheduler, success is not "the model saw all manuals". Success is that the local
+For edge scheduler, success is not "the model saw all manuals". Success is that the local
 retrieval stack selects a small, citeable context set that keeps the answer
 grounded even when the corpus contains hundreds of MB of adjacent manuals.

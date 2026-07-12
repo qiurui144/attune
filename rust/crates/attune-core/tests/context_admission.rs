@@ -2,14 +2,18 @@
 
 use attune_core::context_admission::{
     admit_context, AdmissionReason, ContextAdmissionDecision, ContextAdmissionRequest,
+    CONTEXT_ADMISSION_MAX_INPUT_TOKENS_ENV,
 };
 use attune_core::edge_cloud::{
     CapacityState, ModelRuntimeProfile, RuntimeProfileResolver, RuntimeProviderKind,
 };
 use attune_core::llm::ChatMessage;
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
-fn local_scheduler_30b_small_prompt_admits_sync_with_product_output_cap() {
+fn edge_scheduler_30b_small_prompt_admits_sync_with_product_output_cap() {
     let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
     let chat = profiles.model("llm-chat").unwrap();
     let messages = vec![ChatMessage::user("short operational question")];
@@ -27,7 +31,7 @@ fn local_scheduler_30b_small_prompt_admits_sync_with_product_output_cap() {
 }
 
 #[test]
-fn local_scheduler_30b_over_product_sync_cap_routes_async_before_scheduler() {
+fn edge_scheduler_30b_over_product_sync_cap_routes_async_before_scheduler() {
     let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
     let chat = profiles.model("llm-chat").unwrap();
     assert_eq!(chat.sync_context_cap(), 1024);
@@ -46,7 +50,7 @@ fn local_scheduler_30b_over_product_sync_cap_routes_async_before_scheduler() {
 }
 
 #[test]
-fn local_scheduler_30b_over_async_cap_asks_caller_to_try_cloud_if_allowed() {
+fn edge_scheduler_30b_over_async_cap_asks_caller_to_try_cloud_if_allowed() {
     let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
     let chat = profiles.model("llm-chat").unwrap();
     let messages = vec![ChatMessage::user(&"长".repeat(8000))];
@@ -105,6 +109,40 @@ fn cloud_profile_still_enforces_final_context_cap() {
 }
 
 #[test]
+fn cloud_1m_window_still_respects_product_final_prompt_cap() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvGuard::unset(CONTEXT_ADMISSION_MAX_INPUT_TOKENS_ENV);
+    let cloud = cloud_profile("gemini-2.5-flash", 1_000_000, 8192);
+    let messages = vec![ChatMessage::user(&"长".repeat(70_000))];
+
+    let decision = admit_context(ContextAdmissionRequest::interactive(&messages, &cloud));
+
+    match decision {
+        ContextAdmissionDecision::Reject(ctx) => {
+            assert_eq!(ctx.reason, AdmissionReason::ContextTooLargeForProvider);
+            assert!(ctx.estimated_input_tokens > 65_536);
+            assert!(ctx.estimated_input_tokens < cloud.async_context_cap());
+        }
+        other => panic!("expected product cap rejection before 1M provider window, got {other:?}"),
+    }
+}
+
+#[test]
+fn product_final_prompt_cap_can_be_raised_for_explicit_eval_runs() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvGuard::set(CONTEXT_ADMISSION_MAX_INPUT_TOKENS_ENV, "120000");
+    let cloud = cloud_profile("gemini-2.5-flash", 1_000_000, 8192);
+    let messages = vec![ChatMessage::user(&"长".repeat(70_000))];
+
+    let decision = admit_context(ContextAdmissionRequest::interactive(&messages, &cloud));
+
+    assert!(
+        matches!(decision, ContextAdmissionDecision::AdmitSync(_)),
+        "explicit eval cap should allow the bounded 1M-window cloud prompt, got {decision:?}"
+    );
+}
+
+#[test]
 fn empty_messages_reject() {
     let profiles = RuntimeProfileResolver::static_local_scheduler_profile("");
     let chat = profiles.model("llm-chat").unwrap();
@@ -115,6 +153,34 @@ fn empty_messages_reject() {
         decision,
         ContextAdmissionDecision::Reject(ref ctx) if ctx.reason == AdmissionReason::EmptyMessages
     ));
+}
+
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvGuard {
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::remove_var(key);
+        EnvGuard { key, previous }
+    }
+
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        EnvGuard { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match self.previous.as_ref() {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
 }
 
 fn cloud_profile(model_id: &str, context_cap: u32, output_cap: u32) -> ModelRuntimeProfile {

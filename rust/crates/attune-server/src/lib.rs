@@ -119,6 +119,7 @@ pub fn build_router(shared_state: Arc<state::AppState>) -> Router {
         )
         // Chat (RAG)
         .route("/api/v1/chat", post(routes::chat::chat))
+        .route("/api/v1/chat/stream", post(routes::chat::stream_chat))
         .route("/api/v1/chat/history", get(routes::chat::chat_history))
         .route(
             "/api/v1/chat/local-scheduler/jobs/{job_id}",

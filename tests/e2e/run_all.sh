@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # v0.7 Memory Moat — E2E 套件统一 runner。
 #
-# 一键：编译 server → 起隔离 server → setup+unlock vault → 配 LLM（若 Ollama 可用）
+# 一键：编译 server → 起隔离 server → setup+unlock vault → 配 cloud/scheduler LLM（若显式配置）
 # → 顺序跑全部 E2E 脚本 → 汇总 → 杀 server + 清理数据。
 #
 # 用法：bash tests/e2e/run_all.sh
@@ -35,12 +35,20 @@ trap cleanup EXIT
 
 echo "=== v0.7 Memory Moat E2E 套件 ==="
 
-# 1. 编译 server（产物已存在则跳过）
+# 1. 编译 server（产物不存在、显式强制、或源码比二进制新时重编译）
+NEEDS_BUILD=0
 if [ ! -x "$BIN" ]; then
+  NEEDS_BUILD=1
+elif [ "${ATTUNE_E2E_FORCE_BUILD:-0}" = "1" ]; then
+  NEEDS_BUILD=1
+elif [ -n "$(find "$REPO/rust" -type f \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' \) -newer "$BIN" -print -quit)" ]; then
+  NEEDS_BUILD=1
+fi
+if [ "$NEEDS_BUILD" = "1" ]; then
   echo "[1/5] 编译 attune-server-headless ..."
   ( cd "$REPO/rust" && cargo build --release -p attune-server --bin attune-server-headless ) || exit 1
 else
-  echo "[1/5] server 二进制已存在，跳过编译"
+  echo "[1/5] server 二进制已是最新，跳过编译"
 fi
 
 # 2. 起隔离 server
@@ -69,7 +77,7 @@ try: sys.exit(0 if urllib.request.urlopen('http://localhost:$PORT/health',timeou
 except Exception: sys.exit(1)" \
   || { echo "server 启动失败，见 $DATA/server.log"; exit 1; }
 
-# 3+4. setup + unlock vault + 配 LLM / embedding（若 Ollama 或 local scheduler 可用）
+# 3+4. setup + unlock vault + 配 LLM / embedding（cloud / scheduler）
 echo "[3/5] setup + unlock vault ..."
 SETUP_RESULT=$(python3 - "$PORT" "$PW" <<'PYEOF'
 import json, os, sys, urllib.request, urllib.error
@@ -106,17 +114,6 @@ if endpoint:
         llm["model"] = model
     if call("PATCH", "/api/v1/settings", {"llm": llm}):
         has_llm = 1
-else:
-    try:
-        tags = urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3).read().decode()
-        if "qwen2.5" in tags:
-            if call("PATCH", "/api/v1/settings", {"llm": {"provider": "openai_compat",
-                "endpoint": "http://localhost:11434/v1", "model": "qwen2.5:3b",
-                "api_key": "ollama"}}):
-                has_llm = 1
-    except Exception:
-        pass
-
 has_embedding = 0
 embedding_endpoint = os.environ.get("ATTUNE_E2E_EMBEDDING_ENDPOINT", "").strip()
 if not embedding_endpoint and scheduler:
@@ -159,10 +156,8 @@ if [ -n "${ATTUNE_E2E_LLM_ENDPOINT:-}" ] && [ "$HAS_LLM" = "1" ]; then
   echo "[4/5] 已按 ATTUNE_E2E_LLM_ENDPOINT 配置 LLM provider"
 elif [ -n "$LOCAL_SCHEDULER" ] && [ "$HAS_LLM" = "1" ]; then
   echo "[4/5] 已按本地 scheduler 配置 LLM 路由"
-elif [ "$HAS_LLM" = "1" ]; then
-  echo "[4/5] Ollama 可用，已配 LLM provider"
 else
-  echo "[4/5] Ollama 不可用，跳过 chat E2E"
+  echo "[4/5] 未配置 cloud/scheduler LLM，跳过 legacy direct-Ollama chat E2E"
 fi
 if [ "$HAS_EMBEDDING" = "1" ]; then
   EMBEDDING_PROVIDER_LABEL="${ATTUNE_E2E_EMBEDDING_PROVIDER:-openai_compat}"
@@ -172,12 +167,14 @@ if [ "$HAS_EMBEDDING" = "1" ]; then
   echo "      已配置 embedding provider (${EMBEDDING_PROVIDER_LABEL})"
 fi
 if [ "$WITH_LONGTEXT" = "1" ]; then
-  echo "      长文本 E2E 已启用，将使用当前 cloud/local scheduler/Ollama chat 配置"
+  echo "      长文本 E2E 已启用，将使用当前 cloud/scheduler chat 配置"
 fi
-RUN_STANDARD_CHAT="$HAS_LLM"
+RUN_STANDARD_CHAT=0
 if [ -n "$LOCAL_SCHEDULER" ] && [ "${ATTUNE_E2E_RUN_STANDARD_CHAT:-0}" != "1" ]; then
   RUN_STANDARD_CHAT=0
   echo "      本地 scheduler 模式下跳过 Ollama 专用 memory_moat_chat_e2e.py"
+elif [ "${ATTUNE_E2E_RUN_STANDARD_CHAT:-0}" = "1" ]; then
+  RUN_STANDARD_CHAT=1
 fi
 
 # 5. 顺序跑 E2E 脚本
@@ -201,8 +198,15 @@ export ATTUNE_BASE_URL="http://localhost:$PORT"
 TOTAL_FAIL=0
 for s in "${SCRIPTS[@]}"; do
   echo "────── $s ──────"
-  python3 "$REPO/tests/e2e/$s" 2>&1 | tail -2
-  rc=${PIPESTATUS[0]}
+  script_log="$DATA/${s%.py}.log"
+  python3 "$REPO/tests/e2e/$s" > "$script_log" 2>&1
+  rc=$?
+  tail_lines="${ATTUNE_E2E_LOG_TAIL_LINES:-2}"
+  if [ "$s" = "airplane_manual_longtext_e2e.py" ]; then
+    tail_lines="${ATTUNE_E2E_LONGTEXT_LOG_TAIL_LINES:-40}"
+  fi
+  tail -n "$tail_lines" "$script_log"
+  echo "log: $script_log"
   [ "$rc" -ne 0 ] && TOTAL_FAIL=$((TOTAL_FAIL + 1))
   echo ""
 done

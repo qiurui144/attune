@@ -1,5 +1,5 @@
 {
-  "_doc": "Long-text KB benchmark manifest for local scheduler retrieval using airplane-manual-collection. Do not use these manuals for operational flight decisions.",
+  "_doc": "Long-text KB benchmark manifest for edge scheduler retrieval using airplane-manual-collection. Do not use these manuals for operational flight decisions.",
   "_version": "2026-07-08",
   "source_root": "/data/corpora/airplane-manual-collection",
   "source_root_env": "AIRPLANE_MANUAL_COLLECTION_ROOT",
@@ -32,7 +32,7 @@
         ],
         "purpose": "fast ingestion and partition-routing sanity check"
       },
-      "local_scheduler_30b": {
+      "edge_scheduler_30b": {
         "documents": [
           "general-general-abbreviations-abbreviations-manuals",
           "airbus-general-abbreviations-airbus-abbreviations",
@@ -59,11 +59,11 @@
           "mikoyan-mig-29-flight-manual-mig29-flight-manual-pt-1",
           "mikoyan-mig-29-flight-manual-mig29-flight-manual-pt-2"
         ],
-        "purpose": "local scheduler RAG with SRAS/context-admission budget",
+        "purpose": "edge scheduler RAG with SRAS/context-admission budget",
         "max_retrieved_context_docs": 4,
         "max_final_context_chunks": 12
       },
-      "local_scheduler_comprehensive": {
+      "edge_scheduler_comprehensive": {
         "documents": [
           "general-general-abbreviations-abbreviations-manuals",
           "airbus-general-abbreviations-airbus-abbreviations",
@@ -114,7 +114,7 @@
           "airbus-a330-systems-a330-hydraulic",
           "airbus-a330-systems-a330-landing-gear"
         ],
-        "purpose": "thousands-page local vector DB test across major aircraft/manual types",
+        "purpose": "thousands-page edge vector DB test across major aircraft/manual types",
         "max_retrieved_context_docs": 6,
         "max_final_context_chunks": 18
       },
@@ -230,8 +230,8 @@
       "chat input accepts long-text KB query",
       "assistant answer contains expected terms",
       "citation chips are rendered",
-      "local scheduler status is rendered when local scheduler path is used",
-      "visible response time <= rag_answer.local_scheduler_30b_p95_latency_ms_max"
+      "scheduler status is rendered when the edge scheduler path is used",
+      "visible response time <= rag_answer.edge_scheduler_30b_p95_latency_ms_max"
     ]
   },
   "evaluation_targets": {
@@ -247,13 +247,13 @@
       "answer_accuracy_rate_min": 0.9,
       "citation_hit_rate_min": 0.9,
       "unsafe_operational_advice_rate_max": 0.0,
-      "local_scheduler_30b_p95_latency_ms_max": 10000
+      "edge_scheduler_30b_p95_latency_ms_max": 10000
     },
     "context_admission": {
-      "local_scheduler_30b_max_context_documents": 4,
-      "local_scheduler_30b_max_final_chunks": 12,
-      "local_scheduler_comprehensive_max_context_documents": 6,
-      "local_scheduler_comprehensive_max_final_chunks": 18
+      "edge_scheduler_30b_max_context_documents": 4,
+      "edge_scheduler_30b_max_final_chunks": 12,
+      "edge_scheduler_comprehensive_max_context_documents": 6,
+      "edge_scheduler_comprehensive_max_final_chunks": 18
     }
   },
   "documents": [

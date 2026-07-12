@@ -52,28 +52,6 @@ pub async fn upload_file(
         )));
     }
 
-    // upload 单次可塞大量 chunks，接同款 embedding 队列 backpressure 防 server hung
-    const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
-    {
-        let vault = state
-            .vault
-            .lock()
-            .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
-        if let Ok(pending) = vault.store().pending_count_by_type("embed") {
-            if pending > EMBEDDING_QUEUE_BACKPRESSURE_LIMIT {
-                // rich error: retry 信号字段, 走 Detailed 保完整 body
-                return Err(AppError::detailed(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    serde_json::json!({
-                        "error": format!("embedding queue backpressure ({pending} pending > {EMBEDDING_QUEUE_BACKPRESSURE_LIMIT} limit), retry later"),
-                        "pending_embeddings": pending,
-                        "retry_after_seconds": 30,
-                    }),
-                ));
-            }
-        }
-    }
-
     // G3① locked-mode degrade: when the vault is LOCKED there is no DEK to ingest
     // with. Instead of dropping the upload (the old 403), stage it encrypted-at-rest
     // and return 202; a drain worker ingests it on unlock. Checked under a SHORT vault
@@ -106,9 +84,9 @@ pub async fn upload_file(
                 }),
             ),
             attune_core::error::VaultError::DeviceSecretMissing(_) => AppError::detailed(
-                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::FORBIDDEN,
                 serde_json::json!({
-                    "error": "staging unavailable: vault not yet initialized",
+                    "error": "vault locked and encrypted staging is unavailable: unlock before upload",
                     "code": "staging-unavailable",
                 }),
             ),
@@ -119,6 +97,31 @@ pub async fn upload_file(
             "staging_id": staging_id,
             "note": "vault locked; file queued for ingest on unlock",
         })));
+    }
+
+    // upload 单次可塞大量 chunks，接同款 embedding 队列 backpressure 防 server hung。
+    // This is intentionally after the locked-vault branch: a locked upload either
+    // stages encrypted-at-rest or fails closed, and must not be masked by stale embed
+    // queue pressure from work submitted before the vault was locked.
+    const EMBEDDING_QUEUE_BACKPRESSURE_LIMIT: usize = 10_000;
+    {
+        let vault = state
+            .vault
+            .lock()
+            .map_err(|_| AppError::Internal("vault lock poisoned".into()))?;
+        if let Ok(pending) = vault.store().pending_count_by_type("embed") {
+            if pending > EMBEDDING_QUEUE_BACKPRESSURE_LIMIT {
+                // rich error: retry 信号字段, 走 Detailed 保完整 body
+                return Err(AppError::detailed(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    serde_json::json!({
+                        "error": format!("embedding queue backpressure ({pending} pending > {EMBEDDING_QUEUE_BACKPRESSURE_LIMIT} limit), retry later"),
+                        "pending_embeddings": pending,
+                        "retry_after_seconds": 30,
+                    }),
+                ));
+            }
+        }
     }
 
     let ingest_options =

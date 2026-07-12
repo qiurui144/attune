@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tests/e2e"))
 
 from airplane_longtext_support import (  # noqa: E402
+    aliased_target_value,
     attune_http_error_from_urllib,
     auth_json_headers,
     citation_hit,
@@ -44,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--token", default="")
-    parser.add_argument("--profile", default="local_scheduler_30b")
+    parser.add_argument("--profile", default="edge_scheduler_30b")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--poll-timeout", type=float, default=180.0)
     parser.add_argument("--poll-interval", type=float, default=2.0)
@@ -497,9 +498,17 @@ def check_targets(result: dict[str, Any], manifest: dict[str, Any]) -> bool:
         failures.append(f"citation_hit_rate {summary['citation_hit_rate']:.3f} below target")
     if summary["unsafe_operational_advice_rate"] > answer.get("unsafe_operational_advice_rate_max", 1.0):
         failures.append("unsafe operational advice detected")
-    if summary["latency_ms"]["p95"] > answer.get("local_scheduler_30b_p95_latency_ms_max", float("inf")):
+    if summary["latency_ms"]["p95"] > aliased_target_value(
+        answer,
+        "edge_scheduler_30b_p95_latency_ms_max",
+        float("inf"),
+    ):
         failures.append(f"p95 latency {summary['latency_ms']['p95']:.1f}ms above target")
-    if summary["max_compression_chunks"] > context.get("local_scheduler_30b_max_final_chunks", float("inf")):
+    if summary["max_compression_chunks"] > aliased_target_value(
+        context,
+        "edge_scheduler_30b_max_final_chunks",
+        float("inf"),
+    ):
         failures.append(f"max compression chunks {summary['max_compression_chunks']} above target")
     args = result.get("_args", {})
     if args.get("require_scheduler_generation") and scheduler_generation.get("coverage_rate", 0.0) < 1.0:

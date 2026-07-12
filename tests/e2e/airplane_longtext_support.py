@@ -31,6 +31,60 @@ FAILED_LOCAL_SCHEDULER = {
     "cancelled",
     "expired",
 }
+PROFILE_ALIASES = {
+    "edge_scheduler_30b": ("edge_scheduler_30b", "local_scheduler_30b"),
+    "local_scheduler_30b": ("edge_scheduler_30b", "local_scheduler_30b"),
+    "edge_scheduler_comprehensive": (
+        "edge_scheduler_comprehensive",
+        "local_scheduler_comprehensive",
+    ),
+    "local_scheduler_comprehensive": (
+        "edge_scheduler_comprehensive",
+        "local_scheduler_comprehensive",
+    ),
+}
+TARGET_ALIASES = {
+    "edge_scheduler_30b_p95_latency_ms_max": (
+        "edge_scheduler_30b_p95_latency_ms_max",
+        "local_scheduler_30b_p95_latency_ms_max",
+    ),
+    "local_scheduler_30b_p95_latency_ms_max": (
+        "edge_scheduler_30b_p95_latency_ms_max",
+        "local_scheduler_30b_p95_latency_ms_max",
+    ),
+    "edge_scheduler_30b_max_context_documents": (
+        "edge_scheduler_30b_max_context_documents",
+        "local_scheduler_30b_max_context_documents",
+    ),
+    "local_scheduler_30b_max_context_documents": (
+        "edge_scheduler_30b_max_context_documents",
+        "local_scheduler_30b_max_context_documents",
+    ),
+    "edge_scheduler_30b_max_final_chunks": (
+        "edge_scheduler_30b_max_final_chunks",
+        "local_scheduler_30b_max_final_chunks",
+    ),
+    "local_scheduler_30b_max_final_chunks": (
+        "edge_scheduler_30b_max_final_chunks",
+        "local_scheduler_30b_max_final_chunks",
+    ),
+    "edge_scheduler_comprehensive_max_context_documents": (
+        "edge_scheduler_comprehensive_max_context_documents",
+        "local_scheduler_comprehensive_max_context_documents",
+    ),
+    "local_scheduler_comprehensive_max_context_documents": (
+        "edge_scheduler_comprehensive_max_context_documents",
+        "local_scheduler_comprehensive_max_context_documents",
+    ),
+    "edge_scheduler_comprehensive_max_final_chunks": (
+        "edge_scheduler_comprehensive_max_final_chunks",
+        "local_scheduler_comprehensive_max_final_chunks",
+    ),
+    "local_scheduler_comprehensive_max_final_chunks": (
+        "edge_scheduler_comprehensive_max_final_chunks",
+        "local_scheduler_comprehensive_max_final_chunks",
+    ),
+}
 
 
 class AttuneHttpError(RuntimeError):
@@ -70,10 +124,28 @@ def profile_doc_ids(manifest: dict[str, Any], profile: str) -> set[str]:
     profiles = manifest.get("selection", {}).get("profiles", {})
     if profile == "all":
         return {doc["id"] for doc in manifest.get("documents", [])}
-    if profile not in profiles:
+    resolved = resolve_profile_name(manifest, profile)
+    if resolved not in profiles:
         available = ", ".join(sorted(profiles))
         raise SystemExit(f"unknown profile {profile!r}; available: {available}, all")
-    return set(profiles[profile].get("documents", []))
+    return set(profiles[resolved].get("documents", []))
+
+
+def resolve_profile_name(manifest: dict[str, Any], profile: str) -> str:
+    profiles = manifest.get("selection", {}).get("profiles", {})
+    if profile in profiles or profile == "all":
+        return profile
+    for candidate in PROFILE_ALIASES.get(profile, (profile,)):
+        if candidate in profiles:
+            return candidate
+    return profile
+
+
+def aliased_target_value(mapping: dict[str, Any], key: str, default: Any = None) -> Any:
+    for candidate in TARGET_ALIASES.get(key, (key,)):
+        if candidate in mapping:
+            return mapping[candidate]
+    return default
 
 
 def filtered_queries(manifest: dict[str, Any], doc_ids: set[str]) -> list[dict[str, Any]]:

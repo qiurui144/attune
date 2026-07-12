@@ -9,7 +9,7 @@ Usage:
   python3 scripts/eval-airplane-manual-longtext-search.py \
     --base-url http://127.0.0.1:8787 \
     --token "$ATTUNE_TOKEN" \
-    --profile local_scheduler_30b
+    --profile edge_scheduler_30b
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--token", default="")
-    parser.add_argument("--profile", default="local_scheduler_30b")
+    parser.add_argument("--profile", default="edge_scheduler_30b")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=30.0)

@@ -4,10 +4,16 @@
 //! 1M cloud window or a 4K local scheduler hard cap does not mean the product
 //! should stuff whole documents into a single request. Callers should run this
 //! after retrieval, compression, redaction, and final message assembly.
+//! By default, final input admission is capped at 65,536 estimated tokens even
+//! if a provider advertises a larger context window.
 
 use crate::context_compress::estimate_tokens;
 use crate::edge_cloud::{ModelRuntimeProfile, RuntimeProviderKind, RuntimeTaskProfile};
 use crate::llm::ChatMessage;
+
+pub const CONTEXT_ADMISSION_MAX_INPUT_TOKENS_ENV: &str =
+    "ATTUNE_CONTEXT_ADMISSION_MAX_INPUT_TOKENS";
+pub const DEFAULT_CONTEXT_ADMISSION_MAX_INPUT_TOKENS: u32 = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionLatencyClass {
@@ -153,7 +159,8 @@ pub fn admit_context(req: ContextAdmissionRequest<'_>) -> ContextAdmissionDecisi
     let estimated_input_tokens = estimate_chat_tokens(req.messages);
     let max_output_tokens = requested_output_tokens(req);
 
-    if !cap_allows(req.runtime.async_context_cap(), estimated_input_tokens) {
+    let async_context_cap = effective_context_cap(req.runtime.async_context_cap());
+    if !cap_allows(async_context_cap, estimated_input_tokens) {
         return async_overflow(req, estimated_input_tokens, max_output_tokens);
     }
     if !cap_allows(req.runtime.async_output_cap(), max_output_tokens) {
@@ -205,7 +212,8 @@ fn sync_blocker(
     if !req.runtime.sync_allowed {
         return Some(AdmissionReason::ModelSyncDisabled);
     }
-    if !cap_allows(req.runtime.sync_context_cap(), estimated_input_tokens) {
+    let sync_context_cap = effective_context_cap(req.runtime.sync_context_cap());
+    if !cap_allows(sync_context_cap, estimated_input_tokens) {
         return Some(AdmissionReason::ContextTooLargeForSync);
     }
     if !cap_allows(req.runtime.sync_output_cap(), max_output_tokens) {
@@ -280,4 +288,25 @@ fn output_overflow(
 
 fn cap_allows(cap: u32, requested: u32) -> bool {
     cap == 0 || requested <= cap
+}
+
+fn effective_context_cap(runtime_cap: u32) -> u32 {
+    prefer_smaller_non_zero(runtime_cap, product_context_cap())
+}
+
+fn product_context_cap() -> u32 {
+    std::env::var(CONTEXT_ADMISSION_MAX_INPUT_TOKENS_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_CONTEXT_ADMISSION_MAX_INPUT_TOKENS)
+}
+
+fn prefer_smaller_non_zero(a: u32, b: u32) -> u32 {
+    match (a, b) {
+        (0, 0) => 0,
+        (0, b) => b,
+        (a, 0) => a,
+        (a, b) => a.min(b),
+    }
 }

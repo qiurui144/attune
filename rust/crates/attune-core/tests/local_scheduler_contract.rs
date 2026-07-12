@@ -1,9 +1,10 @@
 //! Fixture tests for the local scheduler contract surface Attune consumes.
 
 use attune_core::edge_cloud::{
-    SchedulerBenchmarkContract, SchedulerCapacitySnapshot, SchedulerJobStatus,
-    SchedulerKbTaskResponse, SchedulerModels,
+    LocalSchedulerClient, RuntimeProfileResolver, SchedulerBenchmarkContract,
+    SchedulerCapacitySnapshot, SchedulerJobStatus, SchedulerKbTaskResponse, SchedulerModels,
 };
+use std::time::Duration;
 
 const CONTRACT_JSON: &str = include_str!("fixtures/local_scheduler/benchmark_contract.json");
 const MODELS_JSON: &str = include_str!("fixtures/local_scheduler/models.json");
@@ -89,4 +90,69 @@ fn parses_models_capacity_job_and_kb_task_shapes() {
     assert_eq!(task.scheduled_as, "async");
     assert_eq!(task.job_id.as_deref(), Some("job_def"));
     assert_eq!(task.eta_ms, Some(1500));
+}
+
+#[test]
+fn live_scheduler_contract_parses_and_resolves_profiles_when_configured() {
+    let Some(base) = live_scheduler_base() else {
+        eprintln!("skipping live scheduler contract test; set ATTUNE_E2E_LOCAL_SCHEDULER");
+        return;
+    };
+    let client = LocalSchedulerClient::with_base(&base, Duration::from_secs(5));
+
+    let contract = client
+        .benchmark_contract()
+        .expect("live scheduler /benchmark/contract must parse");
+    assert!(
+        contract
+            .runtime_tasks
+            .iter()
+            .any(|task| task.name == "kb.query.ask"),
+        "live scheduler must expose kb.query.ask runtime task"
+    );
+    assert!(
+        contract.models.iter().any(|model| {
+            model.max_context_tokens_sync > 0 || model.max_context_tokens_async > 0
+        }),
+        "live scheduler contract should expose context caps for at least one model"
+    );
+
+    let models = client.models().expect("live scheduler /models must parse");
+    assert!(
+        models.models.iter().any(|model| !model.name.is_empty()),
+        "live scheduler /models should include named models"
+    );
+
+    let capacity = client
+        .capacity()
+        .expect("live scheduler /capacity must parse");
+    assert!(
+        !capacity.memory.status.is_empty() || capacity.dram_total_gb > 0.0,
+        "live scheduler capacity should expose memory status or DRAM totals"
+    );
+
+    let profiles = RuntimeProfileResolver::from_scheduler(&contract, &models, &capacity, &base);
+    assert!(
+        profiles.task("kb.query.ask").is_some(),
+        "runtime profile resolver should retain kb.query.ask"
+    );
+    assert!(
+        profiles.task_model("kb.query.ask").is_some(),
+        "kb.query.ask should resolve to a model profile"
+    );
+    assert!(
+        profiles.models.values().any(|profile| profile.is_ready()),
+        "live scheduler should have at least one READY model"
+    );
+}
+
+fn live_scheduler_base() -> Option<String> {
+    ["ATTUNE_E2E_LOCAL_SCHEDULER", "ATTUNE_LOCAL_SCHEDULER_BASE"]
+        .iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|value| value.trim().trim_end_matches('/').to_string())
+                .filter(|value| !value.is_empty())
+        })
 }

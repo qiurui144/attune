@@ -229,6 +229,21 @@ fn tokenize_cjk_query(index: &Index, q: &str) -> String {
     }
 }
 
+fn sanitize_query_parser_syntax(q: &str) -> String {
+    q.chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl FulltextIndex {
     /// 添加文档到索引（upsert 语义：先删除同 item_id 的旧文档再添加）
     pub fn add_document(
@@ -335,9 +350,20 @@ impl FulltextIndex {
         };
 
         let query_parser = QueryParser::for_index(&self.index, vec![self.f_title, self.f_content]);
-        let query = query_parser
-            .parse_query(&effective_query)
-            .map_err(|e| VaultError::Crypto(format!("tantivy query: {e}")))?;
+        let query = match query_parser.parse_query(&effective_query) {
+            Ok(query) => query,
+            Err(primary) => {
+                let sanitized = sanitize_query_parser_syntax(&effective_query);
+                if sanitized.is_empty() || sanitized == effective_query {
+                    return Err(VaultError::Crypto(format!("tantivy query: {primary}")));
+                }
+                query_parser.parse_query(&sanitized).map_err(|fallback| {
+                    VaultError::Crypto(format!(
+                        "tantivy query: {primary}; sanitized fallback query '{sanitized}' failed: {fallback}"
+                    ))
+                })?
+            }
+        };
 
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(top_k))
@@ -407,6 +433,66 @@ mod tests {
         let results = idx.search("quick reference handbook", 10).unwrap();
         assert!(!results.is_empty(), "Should find QRH document");
         assert_eq!(results[0].0, "item1");
+    }
+
+    #[test]
+    fn search_sanitizes_query_parser_symbols() {
+        let idx = FulltextIndex::open_memory().unwrap();
+        idx.add_documents(&[
+            (
+                "database".to_string(),
+                "数据库索引".to_string(),
+                "B+ 树索引是关系数据库最常见的索引结构。聚簇索引决定数据物理存储顺序。".to_string(),
+                "file".to_string(),
+            ),
+            (
+                "ml".to_string(),
+                "Transformer".to_string(),
+                "Transformer 基于自注意力机制 self-attention。多头注意力并行捕捉不同子空间特征。"
+                    .to_string(),
+                "file".to_string(),
+            ),
+        ])
+        .unwrap();
+
+        let database = idx.search("B+ 树 聚簇索引", 10).unwrap();
+        assert!(
+            database.iter().any(|(id, _)| id == "database"),
+            "B+ query should fall back to sanitized fulltext recall: {database:?}"
+        );
+
+        let ml = idx.search("self-attention 多头注意力", 10).unwrap();
+        assert!(
+            ml.iter().any(|(id, _)| id == "ml"),
+            "hyphenated query should fall back to sanitized fulltext recall: {ml:?}"
+        );
+
+        idx.add_document(
+            "boundary-nolf",
+            "无换行",
+            &format!("# 无换行\n\n{} BOUNDARY_NOLF_MARK", "x".repeat(50_000)),
+            "file",
+        )
+        .unwrap();
+        idx.add_document(
+            "boundary-fence",
+            "Fence",
+            "# Fence\n\n正常段落 BOUNDARY_FENCE_MARK。\n\n```rust\nfn x() {}\n// 没有闭合 fence\n\n更多文字\n",
+            "file",
+        )
+        .unwrap();
+        idx.add_document(
+            "boundary-multi",
+            "多语言",
+            "# 多语言\n\n中文 English 日本語 한국어 🚀🔥✨ émojis BOUNDARY_MULTI_MARK\n\n## 节\n\nمرحبا Ω≈ç√∫\n",
+            "file",
+        )
+        .unwrap();
+        let multi = idx.search("BOUNDARY_MULTI_MARK", 10).unwrap();
+        assert!(
+            multi.iter().any(|(id, _)| id == "boundary-multi"),
+            "ASCII marker after multilingual text should remain searchable: {multi:?}"
+        );
     }
 
     #[test]

@@ -1107,7 +1107,7 @@ def build_manifest(docs: list[Doc], queries: list[dict], args: argparse.Namespac
         if qid in query_ids
     ]
     return {
-        "_doc": "Long-text KB benchmark manifest for local scheduler retrieval using airplane-manual-collection. Do not use these manuals for operational flight decisions.",
+        "_doc": "Long-text KB benchmark manifest for edge scheduler retrieval using airplane-manual-collection. Do not use these manuals for operational flight decisions.",
         "_version": "2026-07-08",
         "source_root": source_root,
         "source_root_env": "AIRPLANE_MANUAL_COLLECTION_ROOT",
@@ -1134,15 +1134,15 @@ def build_manifest(docs: list[Doc], queries: list[dict], args: argparse.Namespac
                     "documents": [doc.id for doc in docs[:8]],
                     "purpose": "fast ingestion and partition-routing sanity check",
                 },
-                "local_scheduler_30b": {
+                "edge_scheduler_30b": {
                     "documents": [doc.id for doc in docs[:24]],
-                    "purpose": "local scheduler RAG with SRAS/context-admission budget",
+                    "purpose": "edge scheduler RAG with SRAS/context-admission budget",
                     "max_retrieved_context_docs": 4,
                     "max_final_context_chunks": 12,
                 },
-                "local_scheduler_comprehensive": {
+                "edge_scheduler_comprehensive": {
                     "documents": [doc.id for doc in docs[:48]],
-                    "purpose": "thousands-page local vector DB test across major aircraft/manual types",
+                    "purpose": "thousands-page edge vector DB test across major aircraft/manual types",
                     "max_retrieved_context_docs": 6,
                     "max_final_context_chunks": 18,
                 },
@@ -1177,8 +1177,8 @@ def build_manifest(docs: list[Doc], queries: list[dict], args: argparse.Namespac
                 "chat input accepts long-text KB query",
                 "assistant answer contains expected terms",
                 "citation chips are rendered",
-                "local scheduler status is rendered when local scheduler path is used",
-                "visible response time <= rag_answer.local_scheduler_30b_p95_latency_ms_max",
+                "scheduler status is rendered when the edge scheduler path is used",
+                "visible response time <= rag_answer.edge_scheduler_30b_p95_latency_ms_max",
             ],
         },
         "evaluation_targets": {
@@ -1194,13 +1194,13 @@ def build_manifest(docs: list[Doc], queries: list[dict], args: argparse.Namespac
                 "answer_accuracy_rate_min": 0.90,
                 "citation_hit_rate_min": 0.90,
                 "unsafe_operational_advice_rate_max": 0.0,
-                "local_scheduler_30b_p95_latency_ms_max": 10000,
+                "edge_scheduler_30b_p95_latency_ms_max": 10000,
             },
             "context_admission": {
-                "local_scheduler_30b_max_context_documents": 4,
-                "local_scheduler_30b_max_final_chunks": 12,
-                "local_scheduler_comprehensive_max_context_documents": 6,
-                "local_scheduler_comprehensive_max_final_chunks": 18,
+                "edge_scheduler_30b_max_context_documents": 4,
+                "edge_scheduler_30b_max_final_chunks": 12,
+                "edge_scheduler_comprehensive_max_context_documents": 6,
+                "edge_scheduler_comprehensive_max_final_chunks": 18,
             },
         },
         "documents": [doc_to_json(doc) for doc in docs],

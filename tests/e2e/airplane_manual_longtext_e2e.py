@@ -27,17 +27,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tests/e2e"))
 
 from airplane_longtext_support import (  # noqa: E402
+    PROFILE_ALIASES,
     load_manifest,
     profile_doc_ids as support_profile_doc_ids,
     request_json as support_request_json,
+    resolve_profile_name,
 )
 
 BASE_URL = os.environ.get("ATTUNE_BASE_URL", "http://localhost:18905").rstrip("/")
 PASSWORD = os.environ.get("ATTUNE_E2E_PASSWORD", "e2e-pass-2026")
 PROFILE_LIMITS = {
     "smoke": 8,
-    "local_scheduler_30b": 24,
-    "local_scheduler_comprehensive": 48,
+    "edge_scheduler_30b": 24,
+    "edge_scheduler_comprehensive": 48,
     "stress": 74,
 }
 
@@ -100,8 +102,9 @@ def ensure_under_home(path: Path) -> Path:
 
 def build_manifest(profile: str, corpus_dir: Path, manifest: Path, golden: Path, dry_run: bool) -> None:
     if profile not in PROFILE_LIMITS and profile != "all":
-        raise SystemExit(f"unknown ATTUNE_LONGTEXT_PROFILE={profile!r}")
-    default_limit = 74 if profile == "all" else PROFILE_LIMITS.get(profile, 48)
+        if not any(candidate in PROFILE_LIMITS for candidate in PROFILE_ALIASES.get(profile, ())):
+            raise SystemExit(f"unknown ATTUNE_LONGTEXT_PROFILE={profile!r}")
+    default_limit = 74 if profile == "all" else profile_limit(profile)
     limit = env_int("ATTUNE_LONGTEXT_LIMIT_DOCS", default_limit)
 
     cmd = [
@@ -120,6 +123,15 @@ def build_manifest(profile: str, corpus_dir: Path, manifest: Path, golden: Path,
     if env_bool("ATTUNE_LONGTEXT_MATERIALIZE", True):
         cmd.append("--materialize")
     run_cmd(cmd, env_int("ATTUNE_LONGTEXT_MATERIALIZE_TIMEOUT_SEC", 7200), dry_run)
+
+
+def profile_limit(profile: str) -> int:
+    if profile in PROFILE_LIMITS:
+        return PROFILE_LIMITS[profile]
+    for candidate in PROFILE_ALIASES.get(profile, ()):
+        if candidate in PROFILE_LIMITS:
+            return PROFILE_LIMITS[candidate]
+    return 48
 
 
 def profile_doc_ids(manifest: dict[str, Any], profile: str) -> list[str]:
@@ -336,13 +348,56 @@ def run_gates(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
         print("[longtext] multi-turn chat gate skipped (ATTUNE_LONGTEXT_MULTITURN=0)")
 
 
+def _python_playwright_available() -> bool:
+    try:
+        subprocess.run(
+            [sys.executable, "-c", "import playwright.sync_api"],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        ).check_returncode()
+        return True
+    except Exception:
+        return False
+
+
+def _node_playwright_available() -> bool:
+    if not shutil.which("node"):
+        return False
+    try:
+        subprocess.run(
+            ["node", "-e", "require('playwright')"],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        ).check_returncode()
+        return True
+    except Exception:
+        return False
+
+
+def auto_web_driver() -> str:
+    node_ok = _node_playwright_available()
+    if os.environ.get("ATTUNE_PLAYWRIGHT_EXECUTABLE") and node_ok:
+        return "node"
+    if _python_playwright_available():
+        return "python"
+    if node_ok:
+        return "node"
+    return "python"
+
+
 def run_web_gate(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
     if not env_bool("ATTUNE_LONGTEXT_UI", True):
         print("[longtext] Web UI gate skipped (ATTUNE_LONGTEXT_UI=0)")
         return
     driver = os.environ.get("ATTUNE_LONGTEXT_UI_DRIVER", "auto").strip().lower()
     if driver == "auto":
-        driver = "node" if os.environ.get("ATTUNE_PLAYWRIGHT_EXECUTABLE") and shutil.which("node") else "python"
+        driver = auto_web_driver()
     if driver == "node":
         cmd = [
             "node",
@@ -379,7 +434,7 @@ def run_web_gate(profile: str, manifest: Path, token: str, dry_run: bool) -> Non
 
 def main() -> int:
     dry_run = env_bool("ATTUNE_LONGTEXT_DRY_RUN", False)
-    profile = os.environ.get("ATTUNE_LONGTEXT_PROFILE", "local_scheduler_comprehensive")
+    profile = os.environ.get("ATTUNE_LONGTEXT_PROFILE", "edge_scheduler_comprehensive")
     corpus_dir = ensure_under_home(
         Path(os.environ.get("ATTUNE_LONGTEXT_CORPUS_DIR", "~/attune-e2e-corpora/airplane-manual-collection"))
     )
@@ -397,6 +452,10 @@ def main() -> int:
         print("=== airplane manual longtext E2E DRY RUN PASS ===")
         return 0
 
+    generated_manifest = load_manifest(manifest)
+    resolved_profile = resolve_profile_name(generated_manifest, profile)
+    if resolved_profile != profile:
+        print(f"[longtext] profile alias resolved: {profile} -> {resolved_profile}")
     docs_count, bytes_count = verify_selected_files(manifest, profile)
     print(f"[longtext] selected docs materialized: {docs_count}, bytes={bytes_count}")
     bind_dir = prepare_profile_corpus_view(manifest, profile, corpus_dir)

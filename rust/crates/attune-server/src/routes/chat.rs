@@ -3,7 +3,8 @@ use attune_core::cost;
 use attune_core::llm::ChatMessage;
 use attune_core::pii::Redactor;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::Value;
@@ -18,6 +19,11 @@ pub struct ChatRequest {
     #[serde(default)]
     pub history: Vec<HistoryMessage>,
     pub session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ChatStreamRequest {
+    pub message: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -44,6 +50,36 @@ const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 96;
 const MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 16_384;
 const LOCAL_EXTRACTIVE_MODEL_ID: &str = "local-extractive-source-answer";
 const LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS: usize = 64;
+
+/// POST /api/v1/chat/stream -- buffered SSE compatibility endpoint.
+///
+/// The current web/E2E contract only requires an SSE-shaped response and the same
+/// message-size guard as non-streaming chat. Real token streaming should sit behind
+/// the scheduler job interface instead of reintroducing direct model calls here.
+pub async fn stream_chat(Json(body): Json<ChatStreamRequest>) -> AppResult<impl IntoResponse> {
+    if body.message.trim().is_empty() {
+        return Err(AppError::BadRequest("message is empty".into()));
+    }
+    if body.message.len() > MAX_MESSAGE_LEN {
+        return Err(AppError::PayloadTooLarge(format!(
+            "message too long: {} bytes (max {})",
+            body.message.len(),
+            MAX_MESSAGE_LEN
+        )));
+    }
+
+    let payload = serde_json::to_string(&serde_json::json!({
+        "content": body.message,
+        "done": true,
+    }))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/event-stream; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        format!("data: {payload}\n\n"),
+    ))
+}
 
 fn chat_kb_top_k() -> usize {
     crate::local_scheduler::env_u32_any(
@@ -2640,6 +2676,7 @@ async fn eval_short_circuit_chat(
 mod tests {
     use super::*;
     use attune_core::error::VaultError;
+    use axum::body::to_bytes;
 
     fn status_of(e: VaultError) -> u16 {
         match llm_upstream_error(e) {
@@ -2663,6 +2700,48 @@ mod tests {
             ),
             other => panic!("expected Detailed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn stream_chat_returns_buffered_sse() {
+        let response = stream_chat(Json(ChatStreamRequest {
+            message: "测试流式响应内容".into(),
+        }))
+        .await
+        .expect("stream response")
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream; charset=utf-8")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.starts_with("data: "));
+        assert!(text.contains("测试流式响应内容"));
+    }
+
+    #[tokio::test]
+    async fn stream_chat_rejects_empty_and_oversize_messages() {
+        let empty = match stream_chat(Json(ChatStreamRequest { message: "".into() })).await {
+            Err(e) => e,
+            Ok(_) => panic!("empty message should be rejected"),
+        };
+        assert!(matches!(empty, AppError::BadRequest(_)));
+
+        let long = match stream_chat(Json(ChatStreamRequest {
+            message: "x".repeat(MAX_MESSAGE_LEN + 1),
+        }))
+        .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("oversize message should be rejected"),
+        };
+        assert!(matches!(long, AppError::PayloadTooLarge(_)));
     }
 
     #[test]

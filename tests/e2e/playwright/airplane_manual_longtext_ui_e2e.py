@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests/e2e"))
 from airplane_longtext_support import (  # noqa: E402
     FAILED_LOCAL_SCHEDULER,
     TERMINAL_LOCAL_SCHEDULER,
+    aliased_target_value,
     citation_hit,
     expected_term_hit,
     load_manifest,
@@ -43,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=Path(os.environ.get("ATTUNE_LONGTEXT_MANIFEST", DEFAULT_MANIFEST)))
     parser.add_argument("--base-url", default=os.environ.get("ATTUNE_BASE_URL", "http://localhost:18905"))
-    parser.add_argument("--profile", default=os.environ.get("ATTUNE_LONGTEXT_PROFILE", "local_scheduler_comprehensive"))
+    parser.add_argument("--profile", default=os.environ.get("ATTUNE_LONGTEXT_PROFILE", "edge_scheduler_comprehensive"))
     parser.add_argument("--query-id", default=os.environ.get("ATTUNE_LONGTEXT_UI_QUERY_ID", ""))
     parser.add_argument("--password", default=os.environ.get("ATTUNE_E2E_PASSWORD", os.environ.get("ATTUNE_VAULT_PW", "e2e-pass-2026")))
     parser.add_argument("--token", default=os.environ.get("ATTUNE_TOKEN", ""))
@@ -297,8 +298,9 @@ def main() -> int:
     args = parse_args()
     manifest = load_manifest(args.manifest)
     query = select_query(manifest, args.profile, args.query_id)
-    target_ms = manifest.get("evaluation_targets", {}).get("rag_answer", {}).get(
-        "local_scheduler_30b_p95_latency_ms_max",
+    target_ms = aliased_target_value(
+        manifest.get("evaluation_targets", {}).get("rag_answer", {}),
+        "edge_scheduler_30b_p95_latency_ms_max",
         10_000,
     )
 

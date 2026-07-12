@@ -1010,8 +1010,7 @@ mod tests {
     #[test]
     fn non_llm_settings_invariant_across_form_factors() {
         let laptop = default_settings("qwen2.5:3b", FormFactor::Laptop);
-        let local_scheduler =
-            default_settings("qwen2.5:3b", FormFactor::LocalSchedulerAppliance);
+        let local_scheduler = default_settings("qwen2.5:3b", FormFactor::LocalSchedulerAppliance);
 
         // web_search / embedding / rerank / OCR / ASR 这些本地底座配置应跨形态完全相同。
         for key in &["web_search", "embedding", "rerank", "ocr", "asr"] {

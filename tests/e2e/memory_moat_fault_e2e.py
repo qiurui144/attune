@@ -5,7 +5,7 @@
 
 13 断言：空内容拒绝 / 3.5MB content PATCH 成功（验 body limit 100MB）/
 超长 title 413 / 超长 id 400 / 坏 JSON 4xx / 删&取不存在 item 404 /
-畸形轰炸后 server 健康 / vault lock 后操作 403 / unlock 恢复。
+畸形轰炸后 server 健康 / vault lock 后操作明确拒绝或加密暂存 / unlock 恢复。
 
 前置：起隔离 server + vault setup（密码 e2e-pass-2026）。
 用法：python3 tests/e2e/memory_moat_fault_e2e.py  → 期望 13 PASS / 0 FAIL"""
@@ -112,7 +112,16 @@ req("POST", "/api/v1/vault/lock", {})
 st, body = req("GET", f"/api/v1/items/{base_id}")
 check("vault locked 后 GET item → 403", st == 403, f"st={st}")
 st, body = upload_raw("afterlock.md", "# 锁后上传\n\n内容\n")
-check("vault locked 后 upload → 403", st == 403, f"st={st}")
+try:
+    locked_upload_body = json.loads(body) if body else {}
+except Exception:
+    locked_upload_body = {}
+locked_upload_handled = (
+    st == 403
+    or (st in (200, 202) and locked_upload_body.get("status") == "staged")
+)
+check("vault locked 后 upload 明确拒绝或加密暂存", locked_upload_handled,
+      f"st={st}, body={body[:120] if isinstance(body, str) else body}")
 
 # F10: unlock 恢复 → 操作正常
 print("\nF10: unlock 后恢复正常")

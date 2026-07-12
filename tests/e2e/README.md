@@ -16,7 +16,7 @@ setup+unlock vault → 配 LLM（若 Ollama 可用）→ 顺序跑全部脚本 �
 长文本知识库门禁需要显式开启：
 
 ```bash
-ATTUNE_E2E_LONGTEXT=1 ATTUNE_LONGTEXT_PROFILE=local_scheduler_comprehensive \
+ATTUNE_E2E_LONGTEXT=1 ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
   bash tests/e2e/run_all.sh
 ```
 
@@ -25,15 +25,17 @@ ATTUNE_E2E_LONGTEXT=1 ATTUNE_LONGTEXT_PROFILE=local_scheduler_comprehensive \
 `POST /api/v1/index/bind` 让 Attune 构建向量库，等待
 `pending_embeddings=0`，再跑检索、API 对话评估和 Web UI 评估。对话门禁
 要求综合准确率、citation 命中率达标，多轮追问不能跨机型/跨手册漂移，真实飞行
-操作请求必须拒答，并且 local scheduler 30B p95 响应延迟不超过 10s；Web UI 门禁
+操作请求必须拒答，并且 edge scheduler 30B 级 profile p95 响应延迟不超过 10s；Web UI 门禁
 会打开浏览器验证条目页可见、对话框可问、答案/citation
-可见，以及 本地调度器状态条在本地 local scheduler 路径下渲染。
+可见，以及 scheduler 状态条在 edge scheduler 路径下渲染。
+最终 prompt admission 默认还会受 `ATTUNE_CONTEXT_ADMISSION_MAX_INPUT_TOKENS=65536`
+约束；即使云端模型宣称 1M token 窗口，长文本门禁也要求先检索/筛选/压缩出小证据包。
 
-本地 scheduler 试点可这样跑；local scheduler 是首个 profile，Windows/Linux x86 高性能平台应复用同一入口：
+edge scheduler 试点可这样跑；RISC-V/X100 只是首个落地平台，Windows/Linux x86 高性能平台应复用同一入口：
 
 ```bash
 ATTUNE_E2E_LONGTEXT=1 \
-ATTUNE_LONGTEXT_PROFILE=local_scheduler_comprehensive \
+ATTUNE_LONGTEXT_PROFILE=edge_scheduler_comprehensive \
 ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
   bash tests/e2e/run_all.sh
 ```
@@ -74,9 +76,9 @@ ATTUNE_E2E_LONGTEXT=1 \
 
 ```bash
 python3 scripts/eval-airplane-manual-longtext-multiturn.py \
-  --manifest /tmp/attune-airplane-longtext-local_scheduler_comprehensive.json \
+  --manifest /tmp/attune-airplane-longtext-edge_scheduler_comprehensive.json \
   --base-url http://localhost:18905 \
-  --profile local_scheduler_comprehensive \
+  --profile edge_scheduler_comprehensive \
   --fail-on-targets
 ```
 
@@ -111,9 +113,9 @@ provider 配置下启用；可用 `ATTUNE_RETRIEVAL_WARMUP=0` 关闭，或用
 
 ```bash
 python3 tests/e2e/playwright/airplane_manual_longtext_ui_e2e.py \
-  --manifest /tmp/attune-airplane-longtext-local_scheduler_comprehensive.json \
+  --manifest /tmp/attune-airplane-longtext-edge_scheduler_comprehensive.json \
   --base-url http://localhost:18905 \
-  --profile local_scheduler_comprehensive
+  --profile edge_scheduler_comprehensive
 ```
 
 RISC-V、Windows 或 Linux x86 平台如果 Python Playwright 不可用，使用同语义
@@ -123,9 +125,9 @@ Node fallback，并显式指向系统 Chrome/Chromium：
 ATTUNE_LONGTEXT_UI_DRIVER=node \
 ATTUNE_PLAYWRIGHT_EXECUTABLE=/usr/bin/chromium \
 node tests/e2e/playwright/airplane_manual_longtext_ui_e2e.js \
-  --manifest /tmp/attune-airplane-longtext-local_scheduler_comprehensive.json \
+  --manifest /tmp/attune-airplane-longtext-edge_scheduler_comprehensive.json \
   --base-url http://localhost:18905 \
-  --profile local_scheduler_comprehensive
+  --profile edge_scheduler_comprehensive
 ```
 
 `airplane_manual_longtext_e2e.py` 会在 `ATTUNE_PLAYWRIGHT_EXECUTABLE` 已设置且
@@ -139,8 +141,9 @@ API 层时可设 `ATTUNE_LONGTEXT_UI=0`。
 
 - Rust 工具链（编译 attune-server-headless）
 - Python 3（脚本用 stdlib urllib + sqlite3，无第三方依赖）
-- chat E2E 额外需要：Ollama 运行 + 已 pull `qwen2.5:3b` + `bge-m3`
-  （无 Ollama 时 runner 自动跳过 chat E2E）
+- `memory_moat_chat_e2e.py` 是 legacy direct-Ollama 脚本，不再属于默认 runner；
+  当前标准路径下本地模型应经 scheduler，云模型应经配置的 cloud/OpenAI-compatible
+  endpoint。需要验证 chat 能力时优先使用 scheduler/cloud 长文本 gate。
 - 长文本 E2E 额外需要：可访问 GitHub，磁盘空间足够 materialize 所选 PDF；
   本地 scheduler 模式需 `local-scheduler` 在 loopback `:8090` 可用，或通过
   `ATTUNE_E2E_LOCAL_SCHEDULER` 指到远端或本机 Windows/Linux x86 本地 scheduler；

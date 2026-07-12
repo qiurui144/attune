@@ -25,7 +25,7 @@ function args() {
   const out = {
     manifest: process.env.ATTUNE_LONGTEXT_MANIFEST || "tests/e2e/airplane_manual_longtext_cases.json",
     baseUrl: process.env.ATTUNE_BASE_URL || "http://localhost:18905",
-    profile: process.env.ATTUNE_LONGTEXT_PROFILE || "local_scheduler_comprehensive",
+    profile: process.env.ATTUNE_LONGTEXT_PROFILE || "edge_scheduler_comprehensive",
     queryId: process.env.ATTUNE_LONGTEXT_UI_QUERY_ID || "",
     password: process.env.ATTUNE_E2E_PASSWORD || process.env.ATTUNE_VAULT_PW || "e2e-pass-2026",
     token: process.env.ATTUNE_TOKEN || "",
@@ -60,10 +60,39 @@ function loadJson(file) {
 function profileDocIds(manifest, profile) {
   if (profile === "all") return new Set((manifest.documents || []).map((doc) => doc.id));
   const profiles = manifest.selection && manifest.selection.profiles ? manifest.selection.profiles : {};
-  if (!profiles[profile]) {
+  const resolved = resolveProfileName(manifest, profile);
+  if (!profiles[resolved]) {
     throw new Error(`unknown profile ${profile}`);
   }
-  return new Set(profiles[profile].documents || []);
+  return new Set(profiles[resolved].documents || []);
+}
+
+function resolveProfileName(manifest, profile) {
+  const profiles = manifest.selection && manifest.selection.profiles ? manifest.selection.profiles : {};
+  if (profiles[profile] || profile === "all") return profile;
+  const aliases = {
+    edge_scheduler_30b: ["edge_scheduler_30b", "local_scheduler_30b"],
+    local_scheduler_30b: ["edge_scheduler_30b", "local_scheduler_30b"],
+    edge_scheduler_comprehensive: ["edge_scheduler_comprehensive", "local_scheduler_comprehensive"],
+    local_scheduler_comprehensive: ["edge_scheduler_comprehensive", "local_scheduler_comprehensive"],
+  };
+  for (const candidate of aliases[profile] || [profile]) {
+    if (profiles[candidate]) return candidate;
+  }
+  return profile;
+}
+
+function targetValue(mapping, key, fallback) {
+  const aliases = {
+    edge_scheduler_30b_p95_latency_ms_max: [
+      "edge_scheduler_30b_p95_latency_ms_max",
+      "local_scheduler_30b_p95_latency_ms_max",
+    ],
+  };
+  for (const candidate of aliases[key] || [key]) {
+    if (Object.prototype.hasOwnProperty.call(mapping || {}, candidate)) return mapping[candidate];
+  }
+  return fallback;
 }
 
 function selectQuery(manifest, profile, queryId) {
@@ -311,8 +340,11 @@ async function main() {
   const opts = args();
   const manifest = loadJson(opts.manifest);
   const query = selectQuery(manifest, opts.profile, opts.queryId);
-  const targetMs =
-    (((manifest.evaluation_targets || {}).rag_answer || {}).local_scheduler_30b_p95_latency_ms_max) || 10000;
+  const targetMs = targetValue(
+    ((manifest.evaluation_targets || {}).rag_answer || {}),
+    "edge_scheduler_30b_p95_latency_ms_max",
+    10000,
+  );
   const token = await ensureToken(opts);
   await ensureWizardComplete(opts, token);
 

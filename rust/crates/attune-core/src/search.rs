@@ -18,6 +18,7 @@ pub const DEFAULT_VECTOR_WEIGHT: f32 = 0.6;
 pub const DEFAULT_FULLTEXT_WEIGHT: f32 = 0.4;
 pub const INJECTION_BUDGET: usize = 2000;
 const METADATA_SOURCE_SCAN_LIMIT: usize = 4096;
+const EXACT_SUBSTRING_SCAN_LIMIT: usize = 512;
 
 /// 启用 cross-encoder reranker 的最小候选数。
 /// 候选数 < 此阈值时，RRF 排序比 cross-encoder 重排更稳定（cross-encoder
@@ -650,6 +651,56 @@ fn metadata_source_candidates(
     candidates
 }
 
+fn exact_substring_fallback_query(query: &str) -> bool {
+    let q = query.trim();
+    let len = q.chars().count();
+    (3..=128).contains(&len)
+        && q.chars()
+            .any(|c| matches!(c, '_' | '-' | '/' | '.' | '+' | '#') || c.is_ascii_digit())
+}
+
+fn exact_substring_candidates(
+    ctx: &SearchContext<'_>,
+    query: &str,
+    limit: usize,
+) -> Vec<(String, f32)> {
+    if limit == 0 || !exact_substring_fallback_query(query) {
+        return Vec::new();
+    }
+
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(items) = ctx.store.list_items(EXACT_SUBSTRING_SCAN_LIMIT, 0) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let title = item.title.to_lowercase();
+        let url = item.url.unwrap_or_default().to_lowercase();
+        let title_or_path_hit = title.contains(&needle) || url.contains(&needle);
+        let content_hit = if title_or_path_hit {
+            false
+        } else {
+            ctx.store
+                .get_item(ctx.dek, &item.id)
+                .ok()
+                .flatten()
+                .map(|full| full.content.to_lowercase().contains(&needle))
+                .unwrap_or(false)
+        };
+        if title_or_path_hit || content_hit {
+            out.push((item.id, if title_or_path_hit { 0.35 } else { 0.30 }));
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Collapse repeated chunk hits to the first/best item hit before RRF.
 ///
 /// Vector search returns chunk-level hits. Without this normalization, a long
@@ -818,6 +869,19 @@ pub fn search_with_context(
             },
             _ => (vec![], None),
         }
+    };
+    let ft_results = if ft_results.is_empty() {
+        let exact_results = exact_substring_candidates(ctx, query, params.initial_k);
+        if !exact_results.is_empty() {
+            log::info!(
+                "search stages: exact substring fallback={} query='{}'",
+                exact_results.len(),
+                query.chars().take(50).collect::<String>()
+            );
+        }
+        exact_results
+    } else {
+        ft_results
     };
 
     log::info!(
@@ -1739,6 +1803,40 @@ mod tests {
         let results = search_with_context(&ctx, "any query", &params).unwrap();
         // 无数据源时结果为空，但不应 panic
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_with_context_exact_substring_fallback_for_code_like_queries() {
+        use crate::store::Store;
+
+        let store = Store::open_memory().unwrap();
+        let dek = crate::crypto::Key32::generate();
+        let item_id = store
+            .insert_item(
+                &dek,
+                "multi - 多语言",
+                "# 多语言\n\n中文 English 日本語 한국어 🚀🔥✨ émojis BOUNDARY_MULTI_MARK\n\n## 节\n\nمرحبا Ω≈ç√∫\n",
+                None,
+                "file",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let ctx = SearchContext {
+            fulltext: None,
+            vectors: None,
+            embedding: None,
+            reranker: None,
+            store: &store,
+            dek: &dek,
+        };
+
+        let params = SearchParams::with_defaults(5);
+        let results = search_with_context(&ctx, "BOUNDARY_MULTI_MARK", &params).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id, item_id);
+        assert!(results[0].content.contains("BOUNDARY_MULTI_MARK"));
     }
 }
 

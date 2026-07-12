@@ -19,7 +19,10 @@ fn local_scheduler_interactive_plan_caps_rerank_and_evidence_budget() {
     assert_eq!(plan.final_top_k, 6);
     assert_eq!(plan.rerank_candidate_cap, 20);
     assert_eq!(plan.evidence_token_budget, 2048);
-    assert!(plan.partitions.local_only, "L0 and Local scheduler must stay local");
+    assert!(
+        plan.partitions.local_only,
+        "L0 and Local scheduler must stay local"
+    );
     assert!(plan
         .channels
         .iter()
@@ -76,7 +79,8 @@ fn exact_identifier_query_rewards_metadata_and_bm25() {
 
 #[test]
 fn sras_selector_prefers_grounded_exact_same_domain_candidate() {
-    let selector = SrasSelector::new(attune_core::retrieval_plan::SrasWeights::local_scheduler_interactive());
+    let selector =
+        SrasSelector::new(attune_core::retrieval_plan::SrasWeights::local_scheduler_interactive());
     let candidates = vec!["semantic", "exact", "blocked"];
 
     let ranked = selector.rank(
@@ -125,8 +129,10 @@ fn sras_selector_prefers_grounded_exact_same_domain_candidate() {
 #[test]
 fn local_scheduler_background_broad_query_can_expand_but_stays_bounded() {
     let plan = plan_retrieval(
-        RetrievalPlanRequest::local_scheduler_interactive("对比这些会议纪要和产品文档，综合整理风险点")
-            .background(),
+        RetrievalPlanRequest::local_scheduler_interactive(
+            "对比这些会议纪要和产品文档，综合整理风险点",
+        )
+        .background(),
     );
 
     assert_eq!(plan.latency_class, RetrievalLatencyClass::Background);

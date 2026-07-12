@@ -2,8 +2,8 @@
 
 use attune_core::context_admission::AdmissionReason;
 use attune_core::edge_cloud::{
-    SchedulerKbTaskAdapter, SchedulerKbTaskSubmitOutcome, SchedulerKbTaskSubmitRequest, LocalSchedulerClient,
-    RuntimeProfileResolver,
+    LocalSchedulerClient, RuntimeProfileResolver, SchedulerKbTaskAdapter,
+    SchedulerKbTaskSubmitOutcome, SchedulerKbTaskSubmitRequest,
 };
 use attune_core::llm::ChatMessage;
 use serde_json::{json, Value};
