@@ -17,6 +17,12 @@ const CODE_EXTENSIONS: &[&str] = &[
 const DEFAULT_PARSE_SCHEDULER_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_SCHEDULER_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_OCRMYPDF_MAX_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_SCHEDULER_PDF_OCR_MAX_PAGES: usize = 0;
+const DEFAULT_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES: usize = 256;
+const DEFAULT_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES: usize = 16;
+const DEFAULT_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES: usize = 3;
+const DEFAULT_SCHEDULER_PDF_OCR_MAX_DPI: usize = 200;
+const DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI: usize = 120;
 const SCHEDULER_INLINE_JSON_OVERHEAD_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Default)]
@@ -82,6 +88,22 @@ fn safe_pdf_extract_text_from_mem(data: &[u8]) -> std::result::Result<String, St
             panic_payload_message(payload)
         )),
     }
+}
+
+fn pdf_text_layer_is_usable(text: &str) -> bool {
+    if !crate::ocr::needs_ocr(text) {
+        return true;
+    }
+    // `needs_ocr` intentionally uses a conservative <100 non-whitespace
+    // threshold to catch image-only PDFs. Very short real text-layer PDFs,
+    // however, can still be valid KB material; OCRing them can be worse than
+    // keeping the text layer. Count Unicode word characters so mixed Chinese /
+    // English snippets such as deterministic test fixtures stay on text path.
+    let word_chars = text
+        .chars()
+        .filter(|c| !c.is_control() && c.is_alphanumeric())
+        .count();
+    word_chars >= 32
 }
 
 fn ocrmypdf_fallback_enabled() -> bool {
@@ -177,11 +199,17 @@ fn try_ocrmypdf_sidecar_from_path(path: &Path) -> Option<String> {
 }
 
 fn scheduler_ocr_path(path: &Path, options: &ParseOptions) -> Option<String> {
-    let data = std::fs::read(path).ok()?;
     let filename = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "document".to_string());
+    let size = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| usize::try_from(m.len()).ok())?;
+    if !scheduler_inline_file_fits_with_copies(&filename, size, "kb.document.ocr_recognize", 3) {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
     scheduler_ocr_bytes(&data, &filename, options)
 }
 
@@ -192,6 +220,16 @@ fn env_usize_any(keys: &[&str], default: usize) -> usize {
                 .ok()
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .filter(|v| *v > 0)
+        })
+        .unwrap_or(default)
+}
+
+fn env_usize_any_allow_zero(keys: &[&str], default: usize) -> usize {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
         })
         .unwrap_or(default)
 }
@@ -302,6 +340,47 @@ fn scheduler_ocr_body(data: &[u8], filename: &str, options: &ParseOptions) -> Va
     })
 }
 
+fn scheduler_ocr_image_body(
+    data: &[u8],
+    filename: &str,
+    page_number: usize,
+    page_count: Option<usize>,
+    dpi: u32,
+    options: &ParseOptions,
+) -> Value {
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(data);
+    let timeout_ms = options
+        .scheduler_timeout()
+        .as_millis()
+        .min(u32::MAX as u128) as u32;
+    let input = serde_json::json!({
+        "filename": filename,
+        "profile": options.profile_id(),
+        "profile_id": options.profile_id(),
+        "content_type": "image/png",
+        "page": page_number,
+        "page_number": page_number,
+        "page_count": page_count,
+        "dpi": dpi,
+        "image_base64": image_base64.clone(),
+    });
+    serde_json::json!({
+        "input": input.clone(),
+        "x": input,
+        "filename": filename,
+        "profile": options.profile_id(),
+        "profile_id": options.profile_id(),
+        "content_type": "image/png",
+        "page": page_number,
+        "page_number": page_number,
+        "page_count": page_count,
+        "dpi": dpi,
+        "image_base64": image_base64,
+        "timeout_ms": timeout_ms,
+        "ttl_ms": timeout_ms
+    })
+}
+
 fn scheduler_ocr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> Option<String> {
     let base = options.scheduler_base.as_deref()?;
     if !scheduler_ocr_enabled() {
@@ -317,6 +396,33 @@ fn scheduler_ocr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> O
         scheduler_ocr_body(data, filename, options),
         options.scheduler_timeout(),
     )
+}
+
+fn scheduler_ocr_image_bytes(
+    data: &[u8],
+    filename: &str,
+    page_number: usize,
+    page_count: Option<usize>,
+    dpi: u32,
+    options: &ParseOptions,
+) -> Result<Option<String>> {
+    let base = options.scheduler_base.as_deref().ok_or_else(|| {
+        VaultError::InvalidInput("scheduler OCR base URL unavailable".to_string())
+    })?;
+    if !scheduler_ocr_enabled() {
+        return Ok(None);
+    }
+    if !scheduler_inline_file_fits_with_copies(filename, data.len(), "kb.document.ocr_recognize", 3)
+    {
+        return Ok(None);
+    }
+    let outputs = scheduler_task_outputs(
+        base,
+        "kb.document.ocr_recognize",
+        scheduler_ocr_image_body(data, filename, page_number, page_count, dpi, options),
+        options.scheduler_timeout(),
+    )?;
+    Ok(scheduler_output_text(&outputs))
 }
 
 fn scheduler_asr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> Option<String> {
@@ -575,7 +681,7 @@ pub fn parse_bytes_with_options(
             // Poppler 的 pdftotext 对大型飞行手册更稳，先用它取文字层；失败后再退回
             // pdf_extract，最后才走 OCR。
             if let Some(pdftotext) = try_pdftotext_from_bytes(data) {
-                if !crate::ocr::needs_ocr(&pdftotext) {
+                if pdf_text_layer_is_usable(&pdftotext) {
                     let title = first_line_title(&pdftotext, &stem);
                     return Ok((title, pdftotext));
                 }
@@ -589,7 +695,7 @@ pub fn parse_bytes_with_options(
 
             let extract_result = safe_pdf_extract_text_from_mem(data);
             let content = match extract_result {
-                Ok(text) if !crate::ocr::needs_ocr(&text) => text,
+                Ok(text) if pdf_text_layer_is_usable(&text) => text,
                 Ok(thin_text) => {
                     if let Some(ocr_text) =
                         try_ocr_from_bytes_with_dpi(data, filename, dpi, options)
@@ -768,6 +874,9 @@ fn try_ocr_from_pdf_path_with_dpi(path: &Path, dpi: u32, options: &ParseOptions)
     if let Some(text) = scheduler_ocr_path(path, options) {
         return Some(text);
     }
+    if let Some(text) = try_scheduler_pdf_page_ocr_from_path(path, dpi, options) {
+        return Some(text);
+    }
     if let Some(text) = try_ocrmypdf_sidecar_from_path(path) {
         return Some(text);
     }
@@ -802,6 +911,9 @@ fn try_ocr_from_bytes_with_dpi(
     let mut tmp = tempfile::Builder::new().suffix(".pdf").tempfile().ok()?;
     tmp.write_all(data).ok()?;
     tmp.flush().ok()?;
+    if let Some(text) = try_scheduler_pdf_page_ocr_from_path(tmp.path(), dpi, options) {
+        return Some(text);
+    }
     if let Some(text) = try_ocrmypdf_sidecar_from_path(tmp.path()) {
         return Some(text);
     }
@@ -820,6 +932,322 @@ fn try_ocr_from_bytes_with_dpi(
             None
         }
     }
+}
+
+fn scheduler_pdf_ocr_page_limit(page_count: Option<usize>) -> usize {
+    let configured = env_usize_any_allow_zero(
+        &[
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_PDF_OCR_MAX_PAGES",
+        ],
+        DEFAULT_SCHEDULER_PDF_OCR_MAX_PAGES,
+    );
+    match (configured, page_count) {
+        (0, Some(count)) => count,
+        (0, None) => DEFAULT_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES,
+        (limit, Some(count)) => limit.min(count),
+        (limit, None) => limit,
+    }
+}
+
+fn scheduler_pdf_ocr_max_failed_pages(page_limit: usize) -> usize {
+    env_usize_any(
+        &[
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_PDF_OCR_MAX_FAILED_PAGES",
+        ],
+        DEFAULT_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES,
+    )
+    .min(page_limit.max(1))
+}
+
+fn scheduler_pdf_ocr_max_consecutive_failures() -> usize {
+    env_usize_any(
+        &[
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+        ],
+        DEFAULT_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES,
+    )
+    .max(1)
+}
+
+fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32) -> Vec<u32> {
+    let max_dpi = env_usize_any(
+        &[
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_DPI",
+        ],
+        DEFAULT_SCHEDULER_PDF_OCR_MAX_DPI,
+    )
+    .clamp(72, 1200) as u32;
+    let min_dpi = env_usize_any(
+        &[
+            "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MIN_DPI",
+        ],
+        DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI,
+    )
+    .clamp(72, max_dpi as usize) as u32;
+    let base = env_usize_any(
+        &[
+            "ATTUNE_SCHEDULER_PDF_OCR_DPI",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_DPI",
+        ],
+        requested_dpi.min(max_dpi) as usize,
+    )
+    .clamp(72, 1200) as u32;
+
+    let mut candidates = Vec::new();
+    for dpi in [base, max_dpi, 200, 150, min_dpi] {
+        let dpi = dpi.clamp(min_dpi, max_dpi);
+        if !candidates.contains(&dpi) {
+            candidates.push(dpi);
+        }
+    }
+    candidates
+}
+
+fn pdf_page_count(path: &Path) -> Option<usize> {
+    let pdfinfo = which::which("pdfinfo").ok()?;
+    let output = crate::process::command_no_window(&pdfinfo)
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        log::debug!(
+            "pdfinfo failed for {}: exit {:?}; stderr={}",
+            path.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if !key.trim().eq_ignore_ascii_case("Pages") {
+            return None;
+        }
+        value.trim().parse::<usize>().ok().filter(|v| *v > 0)
+    })
+}
+
+fn render_pdf_page_png(
+    path: &Path,
+    page_number: usize,
+    dpi: u32,
+    tmp_dir: &Path,
+) -> Result<std::path::PathBuf> {
+    let pdftoppm = which::which("pdftoppm").map_err(|_| {
+        VaultError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "pdftoppm not found (poppler-utils required for page OCR)",
+        ))
+    })?;
+    let prefix = tmp_dir.join(format!("page-{page_number:06}-{dpi}dpi"));
+    let prefix_str = prefix.to_str().ok_or_else(|| {
+        VaultError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "non-UTF8 temp path",
+        ))
+    })?;
+    let page = page_number.to_string();
+    let dpi_s = dpi.to_string();
+    let status = crate::process::command_no_window(&pdftoppm)
+        .args([
+            "-r",
+            dpi_s.as_str(),
+            "-png",
+            "-f",
+            page.as_str(),
+            "-l",
+            page.as_str(),
+            "-singlefile",
+        ])
+        .arg(path)
+        .arg(prefix_str)
+        .status()
+        .map_err(VaultError::Io)?;
+    if !status.success() {
+        return Err(VaultError::Io(std::io::Error::other(format!(
+            "pdftoppm page {page_number} failed: exit {}",
+            status.code().unwrap_or(-1)
+        ))));
+    }
+    let png = prefix.with_extension("png");
+    if !png.exists() {
+        return Err(VaultError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("pdftoppm did not produce {}", png.display()),
+        )));
+    }
+    Ok(png)
+}
+
+fn try_scheduler_pdf_page_ocr_from_path(
+    path: &Path,
+    requested_dpi: u32,
+    options: &ParseOptions,
+) -> Option<String> {
+    if options.scheduler_base.is_none() || !scheduler_ocr_enabled() {
+        return None;
+    }
+    if which::which("pdftoppm").is_err() {
+        log::warn!(
+            "scheduler PDF page OCR skipped for {}: pdftoppm not found",
+            path.display()
+        );
+        return None;
+    }
+
+    let filename = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "document.pdf".to_string());
+    let page_count = pdf_page_count(path);
+    let page_limit = scheduler_pdf_ocr_page_limit(page_count);
+    if page_limit == 0 {
+        return None;
+    }
+    let max_failed = scheduler_pdf_ocr_max_failed_pages(page_limit);
+    let max_consecutive_failed = scheduler_pdf_ocr_max_consecutive_failures();
+    let dpi_candidates = scheduler_pdf_ocr_dpi_candidates(requested_dpi);
+    let tmp = tempfile::TempDir::new().ok()?;
+
+    let mut all = String::with_capacity(page_limit.min(32) * 1024);
+    let mut ok_pages = 0usize;
+    let mut empty_pages = 0usize;
+    let mut failed_pages = 0usize;
+    let mut consecutive_failed = 0usize;
+
+    for page in 1..=page_limit {
+        let mut page_rendered = false;
+        let mut page_failed = false;
+        let mut page_too_large = false;
+        let mut page_text: Option<String> = None;
+
+        for dpi in &dpi_candidates {
+            let png = match render_pdf_page_png(path, page, *dpi, tmp.path()) {
+                Ok(png) => png,
+                Err(e) => {
+                    page_failed = true;
+                    log::warn!(
+                        "scheduler PDF page OCR render failed for {} page {} at {}dpi: {}",
+                        path.display(),
+                        page,
+                        dpi,
+                        e
+                    );
+                    continue;
+                }
+            };
+            page_rendered = true;
+            let data = match std::fs::read(&png) {
+                Ok(data) => data,
+                Err(e) => {
+                    page_failed = true;
+                    log::warn!(
+                        "scheduler PDF page OCR failed to read rendered page {} for {}: {}",
+                        page,
+                        path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            if !scheduler_inline_file_fits_with_copies(
+                &format!("{filename}#page={page}"),
+                data.len(),
+                "kb.document.ocr_recognize",
+                3,
+            ) {
+                page_too_large = true;
+                continue;
+            }
+            match scheduler_ocr_image_bytes(&data, &filename, page, page_count, *dpi, options) {
+                Ok(Some(text)) if !text.trim().is_empty() => {
+                    page_text = Some(text);
+                    break;
+                }
+                Ok(_) => {
+                    empty_pages += 1;
+                    page_text = Some(String::new());
+                    break;
+                }
+                Err(e) => {
+                    page_failed = true;
+                    log::warn!(
+                        "scheduler PDF page OCR failed for {} page {} at {}dpi: {}",
+                        path.display(),
+                        page,
+                        dpi,
+                        e
+                    );
+                    break;
+                }
+            }
+        }
+
+        match page_text {
+            Some(text) => {
+                consecutive_failed = 0;
+                if !text.trim().is_empty() {
+                    ok_pages += 1;
+                    all.push_str(&format!("--- Page {page} ---\n"));
+                    all.push_str(text.trim());
+                    all.push_str("\n\n");
+                }
+            }
+            None => {
+                failed_pages += 1;
+                consecutive_failed += 1;
+                let reason = if page_rendered {
+                    if page_too_large {
+                        "page image exceeded scheduler body budget"
+                    } else {
+                        "OCR task returned no usable result"
+                    }
+                } else if page_failed {
+                    "page render failed"
+                } else {
+                    "page image exceeded scheduler body budget"
+                };
+                log::warn!(
+                    "scheduler PDF page OCR skipped {} page {}: {}",
+                    path.display(),
+                    page,
+                    reason
+                );
+                if failed_pages >= max_failed || consecutive_failed >= max_consecutive_failed {
+                    log::warn!(
+                        "scheduler PDF page OCR stopping for {} after {} failed pages ({} consecutive)",
+                        path.display(),
+                        failed_pages,
+                        consecutive_failed
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    if all.trim().is_empty() {
+        return None;
+    }
+    log::info!(
+        "scheduler PDF page OCR completed for {}: text_pages={}, empty_pages={}, failed_pages={}, page_limit={}, detected_pages={:?}",
+        path.display(),
+        ok_pages,
+        empty_pages,
+        failed_pages,
+        page_limit,
+        page_count
+    );
+    Some(all)
 }
 
 fn try_pdftotext_from_bytes(data: &[u8]) -> Option<String> {
@@ -869,7 +1297,7 @@ fn parse_pdf_file_with_dpi(
     // 1. 本地文件优先走 Poppler。大型手册上 pdf_extract 可能产生海量日志或 panic，
     //    pdftotext 的流式外部进程路径更适合批量索引。
     if let Some(pdftotext) = try_pdftotext_from_path(path) {
-        if !crate::ocr::needs_ocr(&pdftotext) {
+        if pdf_text_layer_is_usable(&pdftotext) {
             let title = first_line_title(&pdftotext, stem);
             return Ok((title, pdftotext));
         }
@@ -907,7 +1335,7 @@ fn parse_pdf_file_with_dpi(
 
     // 2b. 成功但文字量 < 100 字符（扫描版文字层空，或 pdf_extract 对混排文字层
     //     退化）→ 尝试 OCR。
-    if crate::ocr::needs_ocr(&content) {
+    if !pdf_text_layer_is_usable(&content) {
         if options.scheduler_base.is_some() {
             log::info!(
                 "PDF text layer thin ({} chars); falling back to scheduler OCR",
@@ -1541,7 +1969,10 @@ fn parse_audio_file(path: &Path, stem: &str, options: &ParseOptions) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::sync::{Mutex, OnceLock};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1918,6 +2349,13 @@ mod tests {
     }
 
     #[test]
+    fn short_mixed_pdf_text_layer_is_usable() {
+        let text = "项目 Running 测试 with embedding\n向量 search 检索 hybrid recall。\n";
+        assert!(crate::ocr::needs_ocr(text));
+        assert!(pdf_text_layer_is_usable(text));
+    }
+
+    #[test]
     fn try_ocr_from_bytes_none_when_backend_absent() {
         // 当 tesseract 不在 PATH（如 CI 无 OCR 依赖），try_ocr_from_bytes 必须返回 None
         // 而非 panic。这保证了 parse_bytes 降级路径的稳定性。
@@ -1997,6 +2435,193 @@ mod tests {
             body.pointer("/timeout_ms").and_then(Value::as_u64),
             Some(1_500)
         );
+    }
+
+    #[test]
+    fn scheduler_ocr_image_body_includes_page_aliases() {
+        let options = ParseOptions::with_profile(Some("scan")).with_scheduler_timeout_ms(1_500);
+        let body = scheduler_ocr_image_body(b"png", "scan.pdf", 7, Some(12), 180, &options);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"png");
+
+        assert_eq!(
+            body.pointer("/filename").and_then(Value::as_str),
+            Some("scan.pdf")
+        );
+        assert_eq!(
+            body.pointer("/content_type").and_then(Value::as_str),
+            Some("image/png")
+        );
+        assert_eq!(
+            body.pointer("/image_base64").and_then(Value::as_str),
+            Some(encoded.as_str())
+        );
+        assert_eq!(
+            body.pointer("/input/image_base64").and_then(Value::as_str),
+            Some(encoded.as_str())
+        );
+        assert_eq!(
+            body.pointer("/x/image_base64").and_then(Value::as_str),
+            Some(encoded.as_str())
+        );
+        assert_eq!(
+            body.pointer("/page_number").and_then(Value::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            body.pointer("/input/page_count").and_then(Value::as_u64),
+            Some(12)
+        );
+        assert_eq!(body.pointer("/x/dpi").and_then(Value::as_u64), Some(180));
+    }
+
+    fn start_scheduler_ocr_mock(
+        expected_requests: usize,
+    ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&requests);
+        let handle = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while seen.load(Ordering::SeqCst) < expected_requests
+                && std::time::Instant::now() < deadline
+            {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                let mut header_end = None;
+                while header_end.is_none() {
+                    let Ok(n) = stream.read(&mut tmp) else {
+                        break;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                    header_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+                }
+                let Some(header_end) = header_end.map(|idx| idx + 4) else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        if name.eq_ignore_ascii_case("content-length") {
+                            value.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                while buf.len().saturating_sub(header_end) < content_length {
+                    let Ok(n) = stream.read(&mut tmp) else {
+                        break;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                let body = String::from_utf8_lossy(&buf[header_end..]).to_string();
+                let page = serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("page_number").and_then(Value::as_u64))
+                    .unwrap_or(0);
+                seen.fetch_add(1, Ordering::SeqCst);
+                let payload = serde_json::json!({
+                    "scheduled_as": "sync",
+                    "status": "done",
+                    "task": "kb.document.ocr_recognize",
+                    "outputs": {"text": format!("OCR page {page}")}
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), requests, handle)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_pdf_ocr_pages_large_pdf_after_whole_file_oversize() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "PATH",
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_SCHEDULER_OCR_ENABLED",
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdfinfo = dir.path().join("pdfinfo");
+        std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 2'\n").unwrap();
+        let pdftoppm = dir.path().join("pdftoppm");
+        std::fs::write(
+            &pdftoppm,
+            "#!/bin/sh\n\
+             page=1\n\
+             prefix=''\n\
+             while [ \"$#\" -gt 0 ]; do\n\
+               case \"$1\" in\n\
+                 -f) page=\"$2\"; shift 2 ;;\n\
+                 -l|-r) shift 2 ;;\n\
+                 -png|-singlefile) shift ;;\n\
+                 *) prefix=\"$1\"; shift ;;\n\
+               esac\n\
+             done\n\
+             printf 'png-page-%s' \"$page\" > \"${prefix}.png\"\n",
+        )
+        .unwrap();
+        for exe in [&pdfinfo, &pdftoppm] {
+            let mut perms = std::fs::metadata(exe).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(exe, perms).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path.to_string_lossy());
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("ATTUNE_SCHEDULER_MAX_BODY_BYTES", "8192");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES", "2");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI", "180");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI", "120");
+        std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+
+        let pdf = dir.path().join("large-scan.pdf");
+        std::fs::write(&pdf, vec![b'x'; 8192]).unwrap();
+        let (base, requests, handle) = start_scheduler_ocr_mock(2);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000);
+
+        let text = try_ocr_from_pdf_path_with_dpi(&pdf, 300, &options).unwrap();
+        assert!(text.contains("--- Page 1 ---"));
+        assert!(text.contains("OCR page 1"));
+        assert!(text.contains("--- Page 2 ---"));
+        assert!(text.contains("OCR page 2"));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        handle.join().unwrap();
     }
 
     #[cfg(unix)]

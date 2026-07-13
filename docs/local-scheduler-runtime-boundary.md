@@ -106,6 +106,12 @@ flowchart LR
 - Upload, staged drain, bound-folder scan, Git, Email, WebDAV, RSS, and JSON
   ingest pass `IngestOptions` into `attune-core` so image/scanned-PDF/audio
   parsing uses scheduler OCR/ASR on server paths.
+- Oversize/scanned PDF OCR is page-scheduled by Attune: extract the text layer
+  first, then render one PDF page at a time with Poppler and submit bounded
+  `image_base64` page payloads to `kb.document.ocr_recognize`. Attune does not
+  inline whole large PDFs, does not render all pages into memory at once, and
+  stops on configured failure thresholds instead of silently falling back to a
+  concrete local OCR worker.
 - `/api/v1/ai-stack`, `/api/v1/status`, and edge-scheduler readiness routes report scheduler
   capability only; they do not inspect concrete local runtimes.
 - Scheduler contract fixtures, runtime profile cache/TTL, and classified
