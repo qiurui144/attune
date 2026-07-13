@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
         help="Fail unless scheduler generation rows expose prompt-cache/cache metadata.",
     )
     parser.add_argument(
+        "--require-answer-budget-metadata",
+        action="store_true",
+        help="Fail unless successful rows expose Attune answer-budget metadata.",
+    )
+    parser.add_argument(
         "--scheduler-generation-p95-ms-max",
         type=float,
         default=None,
@@ -140,6 +145,11 @@ def scheduler_finish_reason(response: dict[str, Any]) -> str | None:
     return None
 
 
+def answer_budget(response: dict[str, Any]) -> dict[str, Any]:
+    value = response.get("answer_budget")
+    return value if isinstance(value, dict) else {}
+
+
 def scheduler_latency_ms(response: dict[str, Any]) -> float | None:
     for obj in (scheduler_job(response), scheduler_meta(response)):
         value = number_value(obj.get("latency_ms"))
@@ -214,6 +224,44 @@ def deterministic_safety_refusal_used(response: dict[str, Any]) -> bool:
     return str(meta.get("task") or "") == "local.safety.refusal"
 
 
+def scheduler_backend_error(row: dict[str, Any]) -> bool:
+    code = str(row.get("error_code") or "")
+    scheduler_error = str(row.get("scheduler_error") or "")
+    if code.startswith("local-scheduler-"):
+        return True
+    return scheduler_error in {
+        "busy",
+        "rate-limited",
+        "transport",
+        "unavailable",
+        "delayed",
+        "job-failed",
+        "http-error",
+        "invalid-json",
+    }
+
+
+def honest_scheduler_failure(row: dict[str, Any]) -> bool:
+    return (
+        scheduler_backend_error(row)
+        and row.get("degradation_policy") == "honest_failure"
+        and row.get("degradation_allowed") is False
+    )
+
+
+def latency_summary(rows: list[dict[str, Any]]) -> dict[str, float]:
+    latencies = [
+        row["latency_ms"]
+        for row in rows
+        if not row.get("error") and isinstance(row.get("latency_ms"), (int, float))
+    ]
+    return {
+        "p50": percentile(latencies, 50),
+        "p95": percentile(latencies, 95),
+        "max": max(latencies) if latencies else 0.0,
+    }
+
+
 def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     manifest = load_manifest(args.manifest)
     doc_ids = profile_doc_ids(manifest, args.profile)
@@ -245,6 +293,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             answer_accuracy_hit = (cite_hit and refusal_hit) if expected_refusal else (cite_hit and term_hit)
             scheduler = scheduler_meta(response)
             scheduler_job_value = scheduler_job(response)
+            budget = answer_budget(response)
             cache_stats = scheduler_cache_stats(response)
             timings = scheduler_timings(response)
             usage = scheduler_usage(response)
@@ -257,6 +306,12 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "scheduler_error": terminal_error.get("scheduler_error"),
                 "retryable": terminal_error.get("retryable"),
                 "may_degrade": terminal_error.get("may_degrade"),
+                "degradation_policy": terminal_error.get("degradation_policy"),
+                "degradation_allowed": terminal_error.get("degradation_allowed"),
+                "component": terminal_error.get("component"),
+                "operation": terminal_error.get("operation"),
+                "task": terminal_error.get("task"),
+                "detail": terminal_error.get("detail"),
                 "latency_ms": total_ms,
                 "initial_chat_latency_ms": chat_ms,
                 "citations_count": len(citations),
@@ -290,6 +345,12 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "scheduler_decode_ms": timings.get("predicted_ms"),
                 "scheduler_prompt_tokens": timings.get("prompt_n") or usage.get("prompt_tokens"),
                 "scheduler_output_tokens": timings.get("predicted_n") or usage.get("completion_tokens"),
+                "answer_budget_profile": budget.get("profile"),
+                "answer_budget_max_output_tokens": budget.get("max_output_tokens"),
+                "answer_budget_context_top_k": budget.get("context_top_k"),
+                "answer_budget_context_chunk_max_chars": budget.get("context_chunk_max_chars"),
+                "answer_budget_source_diverse": budget.get("source_diverse"),
+                "answer_budget_explicit_output_override": budget.get("explicit_output_override"),
             }
             if terminal_error:
                 row["answer_accuracy_hit"] = False
@@ -332,6 +393,12 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                     "scheduler_decode_ms": None,
                     "scheduler_prompt_tokens": None,
                     "scheduler_output_tokens": None,
+                    "answer_budget_profile": None,
+                    "answer_budget_max_output_tokens": None,
+                    "answer_budget_context_top_k": None,
+                    "answer_budget_context_chunk_max_chars": None,
+                    "answer_budget_source_diverse": None,
+                    "answer_budget_explicit_output_override": None,
                 }
             )
 
@@ -371,6 +438,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         for row in rows
         if not row.get("error") and isinstance(row.get("scheduler_output_tokens"), (int, float))
     ]
+    answer_budget_tokens = [
+        row["answer_budget_max_output_tokens"]
+        for row in rows
+        if not row.get("error") and isinstance(row.get("answer_budget_max_output_tokens"), (int, float))
+    ]
     citation_rows = [row for row in rows if not row.get("error") and not row.get("expected_refusal")]
     safety_rows = [row for row in rows if row.get("expected_refusal")]
     successful_rows = [row for row in rows if not row.get("error")]
@@ -379,6 +451,17 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     prompt_cache_metadata_rows = [
         row for row in scheduler_generation_rows if row.get("scheduler_prompt_cache_metadata_count", 0) > 0
     ]
+    answer_budget_rows = [row for row in successful_rows if row.get("answer_budget_profile")]
+    answer_budget_profiles: dict[str, int] = {}
+    for row in answer_budget_rows:
+        profile = str(row.get("answer_budget_profile") or "")
+        if profile:
+            answer_budget_profiles[profile] = answer_budget_profiles.get(profile, 0) + 1
+    error_rows = [row for row in rows if row.get("error")]
+    scheduler_error_rows = [row for row in error_rows if scheduler_backend_error(row)]
+    attune_error_rows = [row for row in error_rows if not scheduler_backend_error(row)]
+    completed_citation_rows = [row for row in successful_rows if not row.get("expected_refusal")]
+    completed_safety_rows = [row for row in successful_rows if row.get("expected_refusal")]
     summary = {
         "manifest": str(args.manifest),
         "profile": args.profile,
@@ -415,6 +498,29 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "p50": percentile(latencies, 50),
             "p95": percentile(latencies, 95),
             "max": max(latencies) if latencies else 0.0,
+        },
+        "failure_classification": {
+            "completed_rows": len(successful_rows),
+            "scheduler_backend_errors": len(scheduler_error_rows),
+            "scheduler_retryable_errors": sum(1 for row in scheduler_error_rows if row.get("retryable")),
+            "scheduler_honest_failure_rows": sum(1 for row in scheduler_error_rows if honest_scheduler_failure(row)),
+            "attune_errors": len(attune_error_rows),
+            "completed_answer_accuracy_rate": (
+                statistics.fmean(1.0 if row["answer_accuracy_hit"] else 0.0 for row in successful_rows)
+                if successful_rows
+                else 0.0
+            ),
+            "completed_citation_hit_rate": (
+                statistics.fmean(1.0 if row["citation_hit"] else 0.0 for row in completed_citation_rows)
+                if completed_citation_rows
+                else 0.0
+            ),
+            "completed_unsafe_operational_advice_rate": (
+                statistics.fmean(1.0 if row["unsafe_operational_advice"] else 0.0 for row in completed_safety_rows)
+                if completed_safety_rows
+                else 0.0
+            ),
+            "completed_latency_ms": latency_summary(successful_rows),
         },
         "scheduler_generation": {
             "rows": len(scheduler_generation_rows),
@@ -478,6 +584,28 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "finish_reason_length_rows": sum(
                 1 for row in scheduler_generation_rows if row.get("scheduler_finish_reason") == "length"
             ),
+            "finish_reason_length_rate": (
+                sum(1 for row in scheduler_generation_rows if row.get("scheduler_finish_reason") == "length")
+                / len(scheduler_generation_rows)
+                if scheduler_generation_rows
+                else 0.0
+            ),
+        },
+        "answer_budget": {
+            "rows": len(answer_budget_rows),
+            "coverage_rate": (
+                len(answer_budget_rows) / len(successful_rows)
+                if successful_rows
+                else 0.0
+            ),
+            "profiles": answer_budget_profiles,
+            "max_output_tokens": {
+                "p50": percentile(answer_budget_tokens, 50),
+                "p95": percentile(answer_budget_tokens, 95),
+                "max": max(answer_budget_tokens) if answer_budget_tokens else 0.0,
+            },
+            "source_diverse_rows": sum(1 for row in answer_budget_rows if row.get("answer_budget_source_diverse")),
+            "explicit_override_rows": sum(1 for row in answer_budget_rows if row.get("answer_budget_explicit_output_override")),
         },
         "max_knowledge_count": max(
             [row["knowledge_count"] for row in rows if isinstance(row.get("knowledge_count"), int)] or [0]
@@ -495,8 +623,22 @@ def check_targets(result: dict[str, Any], manifest: dict[str, Any]) -> bool:
     context = targets.get("context_admission", {})
     summary = result["summary"]
     scheduler_generation = summary.get("scheduler_generation", {})
+    failure_classification = summary.get("failure_classification", {})
     failures = []
-    if summary["answer_accuracy_rate"] < answer.get("answer_accuracy_rate_min", 0.0):
+    scheduler_backend_errors = int(failure_classification.get("scheduler_backend_errors") or 0)
+    if scheduler_backend_errors > 0:
+        failures.append(
+            "scheduler backend errors "
+            f"{scheduler_backend_errors} rows "
+            f"(retryable={failure_classification.get('scheduler_retryable_errors', 0)}, "
+            f"honest_failure={failure_classification.get('scheduler_honest_failure_rows', 0)}); "
+            "completed answer accuracy "
+            f"{failure_classification.get('completed_answer_accuracy_rate', 0.0):.3f}"
+        )
+    if (
+        scheduler_backend_errors == 0
+        and summary["answer_accuracy_rate"] < answer.get("answer_accuracy_rate_min", 0.0)
+    ):
         failures.append(f"answer_accuracy_rate {summary['answer_accuracy_rate']:.3f} below target")
     if summary["citation_hit_rate"] < answer.get("citation_hit_rate_min", 0.0):
         failures.append(f"citation_hit_rate {summary['citation_hit_rate']:.3f} below target")
@@ -523,6 +665,8 @@ def check_targets(result: dict[str, Any], manifest: dict[str, Any]) -> bool:
         failures.append(
             "scheduler prompt-cache metadata missing from one or more generation rows"
         )
+    if args.get("require_answer_budget_metadata") and summary.get("answer_budget", {}).get("coverage_rate", 0.0) < 1.0:
+        failures.append("answer-budget metadata missing from one or more successful rows")
     scheduler_p95_max = args.get("scheduler_generation_p95_ms_max")
     if scheduler_p95_max is not None:
         observed = scheduler_generation.get("latency_ms", {}).get("p95", 0.0)
@@ -544,6 +688,7 @@ def main() -> int:
     result["_args"] = {
         "require_scheduler_generation": args.require_scheduler_generation,
         "require_prompt_cache_metadata": args.require_prompt_cache_metadata,
+        "require_answer_budget_metadata": args.require_answer_budget_metadata,
         "scheduler_generation_p95_ms_max": args.scheduler_generation_p95_ms_max,
     }
     manifest = load_manifest(args.manifest)

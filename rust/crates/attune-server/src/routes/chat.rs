@@ -41,8 +41,10 @@ const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 /// 真正的窗口感知裁剪由context_budget 在拿到 LLM 后做（见下方）。
 const MAX_HISTORY_DEPTH: usize = 80;
 const LOCAL_SCHEDULER_KB_ASK_TASK: &str = "kb.query.ask";
-const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 24;
-const LOCAL_SCHEDULER_KB_ASK_SYSTEM: &str = "Use only refs. Answer in one short sentence, or up to 3 terse bullets for comparisons. Name the relevant manual/topic when supported. If evidence is insufficient, say insufficient. No operational instructions.";
+const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 96;
+const MIN_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 16;
+const MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 512;
+const LOCAL_SCHEDULER_KB_ASK_SYSTEM: &str = "Use only refs. Answer concisely with citations/source names. For simple lookups use 1-2 sentences; for comparisons use up to 4 bullets. If evidence is insufficient, say insufficient. No operational instructions.";
 const DEFAULT_CHAT_KB_TOP_K: u32 = 5;
 const MIN_CHAT_KB_TOP_K: u32 = 1;
 const MAX_CHAT_KB_TOP_K: u32 = 20;
@@ -54,6 +56,16 @@ const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 48;
 const MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 16_384;
 const LOCAL_EXTRACTIVE_MODEL_ID: &str = "local-extractive-source-answer";
 const LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalSchedulerAnswerBudget {
+    profile: &'static str,
+    max_output_tokens: u32,
+    context_top_k: usize,
+    context_chunk_max_chars: usize,
+    source_diverse: bool,
+    explicit_output_override: bool,
+}
 
 /// POST /api/v1/chat/stream -- buffered SSE compatibility endpoint.
 ///
@@ -128,6 +140,104 @@ fn local_scheduler_ask_context_top_k() -> usize {
     ) as usize
 }
 
+fn env_u32_override(keys: &[&str]) -> Option<u32> {
+    keys.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|v| *v > 0)
+    })
+}
+
+fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSchedulerAnswerBudget {
+    let explicit = env_u32_override(&[
+        "ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
+        "ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS",
+    ])
+    .map(|tokens| {
+        tokens.clamp(
+            MIN_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+            MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+        )
+    });
+    let source_diverse = source_diversity_query(query);
+    let base_context_top_k = local_scheduler_ask_context_top_k();
+    let base_chunk_chars = chat_context_chunk_max_chars();
+
+    if let Some(tokens) = explicit {
+        return LocalSchedulerAnswerBudget {
+            profile: "explicit",
+            max_output_tokens: tokens,
+            context_top_k: base_context_top_k,
+            context_chunk_max_chars: base_chunk_chars,
+            source_diverse,
+            explicit_output_override: true,
+        };
+    }
+
+    let query_l = query.to_ascii_lowercase();
+    let asks_detailed = contains_any_ascii(
+        &query_l,
+        &[
+            "explain",
+            "detail",
+            "detailed",
+            "why",
+            "how",
+            "tradeoff",
+            "compare",
+            "contrast",
+            "difference",
+            "differences",
+            "summary",
+            "summarize",
+            "overview",
+            "综合",
+            "总结",
+            "详细",
+            "解释",
+            "对比",
+            "差异",
+        ],
+    );
+    let asks_source_lookup = local_scheduler_source_lookup_query(query);
+    let multi_source = source_diverse || distinct_source_count(knowledge) >= 3;
+
+    let (profile, tokens, min_contexts, min_chars) =
+        if local_scheduler_operational_safety_query(query) {
+            ("safety", 64, 3, 96)
+        } else if asks_detailed && multi_source {
+            ("synthesis", 160, 5, 160)
+        } else if asks_detailed || multi_source {
+            ("balanced", 128, 4, 144)
+        } else if asks_source_lookup {
+            ("lookup", 72, 3, 112)
+        } else {
+            (
+                "concise",
+                DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+                3,
+                112,
+            )
+        };
+
+    LocalSchedulerAnswerBudget {
+        profile,
+        max_output_tokens: tokens.clamp(
+            MIN_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+            MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+        ),
+        context_top_k: base_context_top_k
+            .max(min_contexts)
+            .min(MAX_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K as usize),
+        context_chunk_max_chars: base_chunk_chars
+            .max(min_chars)
+            .min(MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS as usize),
+        source_diverse,
+        explicit_output_override: false,
+    }
+}
+
 fn bounded_context_text(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     let total = trimmed.chars().count();
@@ -155,6 +265,105 @@ fn bounded_context_text(text: &str, max_chars: usize) -> String {
 
 fn local_scheduler_source_title(k: &Value) -> &str {
     k.get("title").and_then(|v| v.as_str()).unwrap_or("").trim()
+}
+
+fn local_scheduler_source_key(k: &Value) -> String {
+    let raw = k
+        .get("item_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| k.get("title").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let compact = compact_ascii_lower(raw);
+    if compact.is_empty() {
+        return "unknown".to_string();
+    }
+    compact
+}
+
+fn distinct_source_count(knowledge: &[Value]) -> usize {
+    knowledge
+        .iter()
+        .map(local_scheduler_source_key)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+fn source_diversity_query(query: &str) -> bool {
+    let q = query.to_ascii_lowercase();
+    contains_any_ascii(
+        &q,
+        &[
+            "compare",
+            "contrast",
+            "cross",
+            "across",
+            "between",
+            "both",
+            "versus",
+            " vs ",
+            "multi",
+            "multiple",
+            "vendor",
+            "vendors",
+            "airbus and boeing",
+            "boeing and airbus",
+            "ata",
+            "sources",
+            "part 1",
+            "part 2",
+            "对比",
+            "比较",
+            "跨",
+            "多个",
+            "多份",
+            "不同",
+        ],
+    )
+}
+
+fn select_local_scheduler_context_knowledge<'a>(
+    query: &str,
+    knowledge: &'a [Value],
+    limit: usize,
+    source_diverse: bool,
+) -> Vec<&'a Value> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    if !source_diverse {
+        return knowledge.iter().take(limit).collect();
+    }
+
+    let mut selected = Vec::new();
+    let mut selected_indexes = std::collections::HashSet::new();
+    let mut seen_sources = std::collections::HashSet::new();
+
+    for (idx, item) in knowledge.iter().enumerate() {
+        let key = local_scheduler_source_key(item);
+        if seen_sources.insert(key) {
+            selected.push(item);
+            selected_indexes.insert(idx);
+            if selected.len() >= limit {
+                return selected;
+            }
+        }
+    }
+
+    for (idx, item) in knowledge.iter().enumerate() {
+        if selected_indexes.insert(idx) {
+            selected.push(item);
+            if selected.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    if selected.is_empty() && !query.trim().is_empty() {
+        knowledge.iter().take(limit).collect()
+    } else {
+        selected
+    }
 }
 
 fn local_scheduler_context_text(title: &str, evidence: &str, max_chars: usize) -> String {
@@ -199,35 +408,58 @@ fn build_chat_search_params(
     )
 }
 
+#[cfg(test)]
 fn build_local_scheduler_kb_contexts(knowledge: &[Value]) -> Vec<Value> {
-    let max_context_chars = chat_context_chunk_max_chars();
-    let context_limit = local_scheduler_ask_context_top_k();
-    knowledge
-        .iter()
-        .take(context_limit)
-        .filter_map(|k| {
-            let title = local_scheduler_source_title(k);
-            let text = k
-                .get("inject_content")
-                .and_then(|v| v.as_str())
-                .or_else(|| k.get("content").and_then(|v| v.as_str()))
-                .unwrap_or("")
-                .trim();
-            if text.is_empty() {
-                return None;
-            }
-            let text = local_scheduler_context_text(title, text, max_context_chars);
-            Some(serde_json::json!({
-                "text": text,
-                "source_id": k.get("item_id").and_then(|v| v.as_str()).unwrap_or(""),
-                "title": title,
-                "score": k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                "breadcrumb": k.get("breadcrumb").cloned().unwrap_or_else(|| serde_json::json!([])),
-                "chunk_offset_start": k.get("chunk_offset_start").cloned().unwrap_or(Value::Null),
-                "chunk_offset_end": k.get("chunk_offset_end").cloned().unwrap_or(Value::Null),
-            }))
-        })
-        .collect()
+    let budget = LocalSchedulerAnswerBudget {
+        profile: "legacy",
+        max_output_tokens: local_scheduler_ask_max_output_tokens(),
+        context_top_k: local_scheduler_ask_context_top_k(),
+        context_chunk_max_chars: chat_context_chunk_max_chars(),
+        source_diverse: false,
+        explicit_output_override: env_u32_override(&[
+            "ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
+            "ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS",
+        ])
+        .is_some(),
+    };
+    build_local_scheduler_kb_contexts_with_budget("", knowledge, budget)
+}
+
+fn build_local_scheduler_kb_contexts_with_budget(
+    query: &str,
+    knowledge: &[Value],
+    budget: LocalSchedulerAnswerBudget,
+) -> Vec<Value> {
+    select_local_scheduler_context_knowledge(
+        query,
+        knowledge,
+        budget.context_top_k,
+        budget.source_diverse,
+    )
+    .into_iter()
+    .filter_map(|k| {
+        let title = local_scheduler_source_title(k);
+        let text = k
+            .get("inject_content")
+            .and_then(|v| v.as_str())
+            .or_else(|| k.get("content").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() {
+            return None;
+        }
+        let text = local_scheduler_context_text(title, text, budget.context_chunk_max_chars);
+        Some(serde_json::json!({
+            "text": text,
+            "source_id": k.get("item_id").and_then(|v| v.as_str()).unwrap_or(""),
+            "title": title,
+            "score": k.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            "breadcrumb": k.get("breadcrumb").cloned().unwrap_or_else(|| serde_json::json!([])),
+            "chunk_offset_start": k.get("chunk_offset_start").cloned().unwrap_or(Value::Null),
+            "chunk_offset_end": k.get("chunk_offset_end").cloned().unwrap_or(Value::Null),
+        }))
+    })
+    .collect()
 }
 
 fn build_local_scheduler_admission_messages(query: &str, contexts: &[Value]) -> Vec<ChatMessage> {
@@ -685,6 +917,18 @@ fn local_scheduler_async_content(job_id: Option<&str>, eta_ms: Option<u32>) -> S
     }
 }
 
+fn local_scheduler_answer_budget_json(budget: LocalSchedulerAnswerBudget) -> serde_json::Value {
+    serde_json::json!({
+        "profile": budget.profile,
+        "max_output_tokens": budget.max_output_tokens,
+        "context_top_k": budget.context_top_k,
+        "context_chunk_max_chars": budget.context_chunk_max_chars,
+        "source_diverse": budget.source_diverse,
+        "explicit_output_override": budget.explicit_output_override,
+    })
+}
+
+#[cfg(test)]
 fn local_scheduler_ask_max_output_tokens() -> u32 {
     crate::local_scheduler::env_u32_any(
         &[
@@ -693,17 +937,22 @@ fn local_scheduler_ask_max_output_tokens() -> u32 {
         ],
         DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
     )
+    .clamp(
+        MIN_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+        MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+    )
 }
 
 fn local_scheduler_route_error(e: attune_core::error::VaultError) -> AppError {
-    AppError::detailed(
-        StatusCode::SERVICE_UNAVAILABLE,
-        serde_json::json!({
-            "error": "local scheduler 请求失败。",
-            "code": "local-scheduler-job-failed",
-            "detail": e.to_string(),
-        }),
-    )
+    let (status, body) = crate::local_scheduler::scheduler_failure_body_with_context(
+        &e,
+        crate::local_scheduler::SchedulerDegradationPolicy::HonestFailure,
+        "local scheduler 请求失败。",
+        None,
+        Some("job_proxy"),
+        Some("chat"),
+    );
+    AppError::detailed(status, body)
 }
 
 async fn run_local_scheduler_job_action<F>(
@@ -1782,6 +2031,8 @@ pub async fn chat(
     // Local scheduler path: answer generation goes through scheduler-native `/kb/tasks`,
     // not through the legacy OpenAI-compatible `/v1/chat/completions` path.
     if native_scheduler_kb && !web_search_used {
+        let answer_budget = local_scheduler_answer_budget(&body.message, &knowledge);
+        let answer_budget_json = local_scheduler_answer_budget_json(answer_budget);
         let deterministic_local_answer =
             build_local_scheduler_safety_refusal(&body.message, &knowledge)
                 .map(|content| {
@@ -1865,6 +2116,7 @@ pub async fn chat(
                     "orig_chars": compression_stats.2,
                     "strategy": strategy_str,
                 },
+                "answer_budget": answer_budget_json,
                 "local_scheduler": {
                     "task": local_task,
                     "scheduled_as": "sync",
@@ -1890,11 +2142,14 @@ pub async fn chat(
             })));
         }
 
-        let contexts = build_local_scheduler_kb_contexts(&knowledge);
+        let contexts =
+            build_local_scheduler_kb_contexts_with_budget(&body.message, &knowledge, answer_budget);
         let admission_messages = build_local_scheduler_admission_messages(&body.message, &contexts);
         let task_body = serde_json::json!({
             "query": body.message,
-            "contexts": contexts
+            "contexts": contexts,
+            "answer_profile": answer_budget.profile,
+            "answer_budget": answer_budget_json.clone(),
         });
         let scheduler_base = crate::local_scheduler::base_from_settings(&app_settings);
 
@@ -1911,7 +2166,7 @@ pub async fn chat(
                     task_body,
                     &admission_messages,
                 )
-                .with_desired_output_tokens(local_scheduler_ask_max_output_tokens()),
+                .with_desired_output_tokens(answer_budget.max_output_tokens),
             )
         })
         .await
@@ -2021,6 +2276,7 @@ pub async fn chat(
                         "orig_chars": compression_stats.2,
                         "strategy": strategy_str,
                     },
+                    "answer_budget": answer_budget_json,
                     "local_scheduler": local_scheduler_meta
                 })));
             }
@@ -2972,6 +3228,21 @@ mod tests {
     }
 
     #[test]
+    fn local_scheduler_job_proxy_error_uses_scheduler_classifier() {
+        let e = VaultError::LlmUnavailable(
+            "local scheduler /jobs/job_abc returned 500 Internal Server Error: {\"detail\":\"worker_error\",\"status\":\"error\"}"
+                .into(),
+        );
+        let AppError::Detailed { status, body } = local_scheduler_route_error(e) else {
+            panic!("expected Detailed");
+        };
+        assert_eq!(status.as_u16(), 502);
+        assert_eq!(body["code"], "local-scheduler-job-failed");
+        assert_eq!(body["operation"], "job_proxy");
+        assert_eq!(body["component"], "chat");
+    }
+
+    #[test]
     fn local_scheduler_chat_search_params_use_retrieval_planner() {
         let (params, plan) = build_chat_search_params(
             attune_core::platform::FormFactor::LocalSchedulerAppliance,
@@ -3034,6 +3305,11 @@ mod tests {
         assert_eq!(local_scheduler_ask_max_output_tokens(), 80);
         std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "72");
         assert_eq!(local_scheduler_ask_max_output_tokens(), 72);
+        std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "9999");
+        assert_eq!(
+            local_scheduler_ask_max_output_tokens(),
+            MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS
+        );
 
         match previous_generic {
             Some(v) => std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", v),
@@ -3234,6 +3510,91 @@ mod tests {
             Some(v) => std::env::set_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K", v),
             None => std::env::remove_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K"),
         }
+    }
+
+    #[test]
+    fn local_scheduler_answer_budget_uses_explicit_realtime_override() {
+        let _env = env_lock();
+        let previous_generic = std::env::var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS").ok();
+        let previous_local = std::env::var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS").ok();
+        std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "24");
+        std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS");
+
+        let budget = local_scheduler_answer_budget("compare A320 and A330 hydraulic sources", &[]);
+        assert_eq!(budget.profile, "explicit");
+        assert_eq!(budget.max_output_tokens, 24);
+        assert!(budget.explicit_output_override);
+        assert!(budget.source_diverse);
+
+        match previous_generic {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS"),
+        }
+        match previous_local {
+            Some(v) => std::env::set_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS", v),
+            None => std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS"),
+        }
+    }
+
+    #[test]
+    fn local_scheduler_answer_budget_expands_for_multisource_synthesis() {
+        let _env = env_lock();
+        let previous_generic = std::env::var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS").ok();
+        let previous_local = std::env::var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS").ok();
+        std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS");
+        std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS");
+
+        let knowledge = vec![
+            serde_json::json!({"item_id": "a320-hydraulic", "title": "A320 Hydraulic"}),
+            serde_json::json!({"item_id": "a330-hydraulic", "title": "A330 Hydraulic"}),
+            serde_json::json!({"item_id": "b737-hydraulic", "title": "B737 Hydraulic"}),
+        ];
+        let budget = local_scheduler_answer_budget(
+            "compare Airbus and Boeing hydraulic sources",
+            &knowledge,
+        );
+        assert_eq!(budget.profile, "synthesis");
+        assert_eq!(budget.max_output_tokens, 160);
+        assert!(budget.context_top_k >= 5);
+        assert!(budget.context_chunk_max_chars >= 160);
+
+        match previous_generic {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS"),
+        }
+        match previous_local {
+            Some(v) => std::env::set_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS", v),
+            None => std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS"),
+        }
+    }
+
+    #[test]
+    fn local_scheduler_context_builder_prefers_distinct_sources_for_cross_document_queries() {
+        let budget = LocalSchedulerAnswerBudget {
+            profile: "test",
+            max_output_tokens: 96,
+            context_top_k: 3,
+            context_chunk_max_chars: 200,
+            source_diverse: true,
+            explicit_output_override: false,
+        };
+        let knowledge = vec![
+            serde_json::json!({"item_id": "a320", "title": "A320 QRH", "inject_content": "first"}),
+            serde_json::json!({"item_id": "a320", "title": "A320 QRH", "inject_content": "second"}),
+            serde_json::json!({"item_id": "a330", "title": "A330 FCOM", "inject_content": "third"}),
+            serde_json::json!({"item_id": "b737", "title": "B737 AMM", "inject_content": "fourth"}),
+        ];
+
+        let contexts = build_local_scheduler_kb_contexts_with_budget(
+            "compare A320 A330 B737",
+            &knowledge,
+            budget,
+        );
+        let source_ids = contexts
+            .iter()
+            .map(|ctx| ctx["source_id"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>();
+        assert_eq!(source_ids, vec!["a320", "a330", "b737"]);
     }
 
     #[test]

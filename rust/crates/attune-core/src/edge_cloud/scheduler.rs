@@ -535,6 +535,13 @@ pub fn classify_scheduler_error(err: &VaultError) -> Option<SchedulerErrorKind> 
     if message.contains(" job ") && message.contains(" failed:") {
         return Some(SchedulerErrorKind::JobFailed);
     }
+    if message.contains("/jobs/")
+        && (message.contains("worker_error")
+            || message.contains("\"status\":\"error\"")
+            || message.contains("\"status\":\"failed\""))
+    {
+        return Some(SchedulerErrorKind::JobFailed);
+    }
     let status = parse_scheduler_status(message)?;
     Some(match status {
         409 => SchedulerErrorKind::Busy,
@@ -712,6 +719,15 @@ mod tests {
         );
         assert_eq!(
             classify_scheduler_error(&failed),
+            Some(SchedulerErrorKind::JobFailed)
+        );
+
+        let worker_error = VaultError::LlmUnavailable(
+            "local scheduler /jobs/job_abc returned 500 Internal Server Error: {\"detail\":\"worker_error: type must be number\",\"status\":\"error\"}"
+                .to_string(),
+        );
+        assert_eq!(
+            classify_scheduler_error(&worker_error),
             Some(SchedulerErrorKind::JobFailed)
         );
     }

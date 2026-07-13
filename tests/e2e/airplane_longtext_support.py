@@ -229,7 +229,21 @@ def exception_error_fields(exc: BaseException) -> dict[str, Any]:
         "scheduler_error": payload.get("scheduler_error"),
         "retryable": payload.get("retryable"),
         "may_degrade": payload.get("may_degrade"),
+        "degradation_policy": payload.get("degradation_policy"),
+        "degradation_allowed": payload.get("degradation_allowed"),
+        "component": payload.get("component"),
+        "operation": payload.get("operation"),
+        "task": payload.get("task"),
+        "detail": payload.get("detail"),
     }
+
+
+def retryable_attune_error(exc: BaseException) -> bool:
+    payload = getattr(exc, "payload", None)
+    status = getattr(exc, "status", None)
+    if not isinstance(payload, dict):
+        return False
+    return bool(payload.get("retryable")) and status in {429, 502, 503, 504}
 
 
 def output_text(value: Any) -> str:
@@ -282,6 +296,10 @@ def local_scheduler_terminal_error_fields(job: dict[str, Any]) -> dict[str, Any]
         "scheduler_error": status,
         "retryable": False,
         "may_degrade": False,
+        "degradation_policy": "honest_failure",
+        "degradation_allowed": False,
+        "component": "chat",
+        "operation": "job_poll",
     }
 
 
@@ -302,14 +320,24 @@ def maybe_poll_local_scheduler(
         return response
 
     deadline = time.monotonic() + poll_timeout
+    last_retryable_error: dict[str, Any] | None = None
     while time.monotonic() < deadline:
         time.sleep(poll_interval)
-        _, data = request_scheduler_job(
-            base_url,
-            str(job_id),
-            token=token,
-            timeout=request_timeout,
-        )
+        try:
+            _, data = request_scheduler_job(
+                base_url,
+                str(job_id),
+                token=token,
+                timeout=request_timeout,
+            )
+        except AttuneHttpError as exc:
+            fields = exception_error_fields(exc)
+            response["local_scheduler_last_poll_error"] = fields
+            if retryable_attune_error(exc):
+                last_retryable_error = fields
+                continue
+            response["local_scheduler_terminal_error"] = fields
+            return response
         job = unwrap_local_scheduler_job(data)
         job_status = local_scheduler_status(job)
         if job_status in TERMINAL_LOCAL_SCHEDULER:
@@ -323,6 +351,24 @@ def maybe_poll_local_scheduler(
                 response["local_scheduler_terminal_error"] = terminal_error
             return response
     response["local_scheduler_poll_timeout"] = True
+    if last_retryable_error is not None:
+        response["local_scheduler_terminal_error"] = {
+            **last_retryable_error,
+            "error": f"local scheduler poll did not recover before timeout: {last_retryable_error.get('error')}",
+        }
+    else:
+        response["local_scheduler_terminal_error"] = {
+            "error": f"local scheduler job did not finish within {poll_timeout:.1f}s",
+            "error_status": None,
+            "error_code": "local-scheduler-delayed",
+            "scheduler_error": "delayed",
+            "retryable": True,
+            "may_degrade": False,
+            "degradation_policy": "honest_failure",
+            "degradation_allowed": False,
+            "component": "chat",
+            "operation": "job_poll",
+        }
     return response
 
 

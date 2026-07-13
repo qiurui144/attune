@@ -249,18 +249,41 @@ pub(crate) fn scheduler_failure_body(
     policy: SchedulerDegradationPolicy,
     human_error: &'static str,
 ) -> (StatusCode, serde_json::Value) {
+    scheduler_failure_body_with_context(error, policy, human_error, None, None, None)
+}
+
+pub(crate) fn scheduler_failure_body_with_context(
+    error: &attune_core::error::VaultError,
+    policy: SchedulerDegradationPolicy,
+    human_error: &'static str,
+    task: Option<&str>,
+    operation: Option<&str>,
+    component: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
     let view = classify_scheduler_failure(error, policy);
-    (
-        view.status,
-        serde_json::json!({
-            "error": human_error,
-            "code": view.code,
-            "scheduler_error": view.scheduler_error,
-            "retryable": view.retryable,
-            "may_degrade": view.may_degrade,
-            "detail": error.to_string(),
-        }),
-    )
+    let mut body = serde_json::json!({
+        "error": human_error,
+        "code": view.code,
+        "scheduler_error": view.scheduler_error,
+        "retryable": view.retryable,
+        "may_degrade": view.may_degrade,
+        "degradation_allowed": view.may_degrade,
+        "degradation_policy": match policy {
+            SchedulerDegradationPolicy::HonestFailure => "honest_failure",
+            SchedulerDegradationPolicy::ExplicitDegradedResult => "explicit_degraded_result",
+        },
+        "detail": error.to_string(),
+    });
+    if let Some(task) = task.filter(|s| !s.trim().is_empty()) {
+        body["task"] = serde_json::Value::String(task.to_string());
+    }
+    if let Some(operation) = operation.filter(|s| !s.trim().is_empty()) {
+        body["operation"] = serde_json::Value::String(operation.to_string());
+    }
+    if let Some(component) = component.filter(|s| !s.trim().is_empty()) {
+        body["component"] = serde_json::Value::String(component.to_string());
+    }
+    (view.status, body)
 }
 
 pub(crate) fn env_u32_any(keys: &[&str], default: u32) -> u32 {
@@ -346,6 +369,28 @@ mod tests {
             classify_scheduler_failure(&failed, SchedulerDegradationPolicy::ExplicitDegradedResult);
         assert!(!strict_view.may_degrade);
         assert!(degrade_view.may_degrade);
+    }
+
+    #[test]
+    fn scheduler_failure_body_includes_task_operation_and_policy() {
+        let failed = attune_core::error::VaultError::LlmUnavailable(
+            "local scheduler /jobs/job_abc returned 500 Internal Server Error: {\"detail\":\"worker_error\"}"
+                .to_string(),
+        );
+        let (_status, body) = scheduler_failure_body_with_context(
+            &failed,
+            SchedulerDegradationPolicy::HonestFailure,
+            "OCR failed",
+            Some("kb.document.ocr_recognize"),
+            Some("ocr_recognize"),
+            Some("ocr"),
+        );
+
+        assert_eq!(body["task"], "kb.document.ocr_recognize");
+        assert_eq!(body["operation"], "ocr_recognize");
+        assert_eq!(body["component"], "ocr");
+        assert_eq!(body["degradation_policy"], "honest_failure");
+        assert_eq!(body["degradation_allowed"], false);
     }
 
     #[test]

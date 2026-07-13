@@ -191,10 +191,13 @@ pub async fn post_ocr(
 fn scheduler_ocr_error(
     error: attune_core::error::VaultError,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let (status, body) = crate::local_scheduler::scheduler_failure_body(
+    let (status, body) = crate::local_scheduler::scheduler_failure_body_with_context(
         &error,
         crate::local_scheduler::SchedulerDegradationPolicy::HonestFailure,
         "本地 scheduler OCR 任务未能完成。",
+        Some(OCR_SCHEDULER_TASK),
+        Some("office_ocr"),
+        Some("ocr"),
     );
     (status, Json(body))
 }

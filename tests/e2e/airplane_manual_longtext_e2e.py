@@ -240,21 +240,34 @@ def bind_corpus(corpus_dir: Path, token: str) -> None:
         raise SystemExit(f"bind scan found no files: {data}")
 
 
-def wait_for_embeddings(token: str) -> None:
+def wait_for_embeddings(token: str) -> dict[str, Any]:
     timeout = env_int("ATTUNE_LONGTEXT_INDEX_TIMEOUT_SEC", 7200)
     deadline = time.monotonic() + timeout
+    started = time.monotonic()
     stable_zero = 0
     last_pending: Any = None
+    max_pending = 0
+    samples = 0
     tick = 0
     while time.monotonic() < deadline:
         _, status = request_json("GET", "/api/v1/index/status", token=token, timeout=30)
         pending = status.get("pending_embeddings", -1)
         last_pending = pending
+        samples += 1
+        if isinstance(pending, int):
+            max_pending = max(max_pending, pending)
         if pending == 0:
             stable_zero += 1
             if stable_zero >= 2:
-                print("[longtext] embedding queue drained")
-                return
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                metrics = {
+                    "duration_ms": elapsed_ms,
+                    "max_pending": max_pending,
+                    "samples": samples,
+                    "final_pending": pending,
+                }
+                print(f"[longtext] embedding queue drained metrics={json_compact(metrics)}")
+                return metrics
         else:
             stable_zero = 0
         tick += 1
@@ -262,6 +275,12 @@ def wait_for_embeddings(token: str) -> None:
             print(f"[longtext] waiting for embeddings: pending={pending}")
         time.sleep(2)
     raise SystemExit(f"embedding queue did not drain within {timeout}s; last pending={last_pending}")
+
+
+def json_compact(value: dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def run_gates(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
@@ -314,6 +333,8 @@ def run_gates(profile: str, manifest: Path, token: str, dry_run: bool) -> None:
         chat_cmd.append("--require-scheduler-generation")
     if env_bool("ATTUNE_LONGTEXT_REQUIRE_PROMPT_CACHE_METADATA", False):
         chat_cmd.append("--require-prompt-cache-metadata")
+    if env_bool("ATTUNE_LONGTEXT_REQUIRE_ANSWER_BUDGET_METADATA", False):
+        chat_cmd.append("--require-answer-budget-metadata")
     scheduler_p95 = os.environ.get("ATTUNE_LONGTEXT_SCHEDULER_GENERATION_P95_MS_MAX", "").strip()
     if scheduler_p95:
         chat_cmd.extend(["--scheduler-generation-p95-ms-max", scheduler_p95])

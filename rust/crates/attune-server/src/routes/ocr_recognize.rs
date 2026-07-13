@@ -268,10 +268,13 @@ fn empty_recognize_response(
 fn scheduler_ocr_error(
     error: attune_core::error::VaultError,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let (status, body) = crate::local_scheduler::scheduler_failure_body(
+    let (status, body) = crate::local_scheduler::scheduler_failure_body_with_context(
         &error,
         crate::local_scheduler::SchedulerDegradationPolicy::HonestFailure,
         "本地 scheduler OCR 任务未能完成。",
+        Some(OCR_RECOGNIZE_SCHEDULER_TASK),
+        Some("ocr_recognize"),
+        Some("ocr"),
     );
     (status, Json(body))
 }
@@ -412,6 +415,8 @@ mod tests {
         let (status, Json(body)) = scheduler_ocr_error(err);
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(body["code"], "local-scheduler-delayed");
+        assert_eq!(body["task"], OCR_RECOGNIZE_SCHEDULER_TASK);
+        assert_eq!(body["operation"], "ocr_recognize");
         assert_eq!(body["may_degrade"], false);
     }
 }

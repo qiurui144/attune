@@ -42,8 +42,9 @@ flowchart LR
     Parse["Parser / ingest options<br/>scheduler-aware OCR/ASR"]
     Index["FTS + vector index<br/>partition filters"]
     SRAS["SRAS retrieval planner<br/>reward-aware selection"]
+    Evidence["Source-diverse cited evidence<br/>bounded windows"]
+    AnswerBudget["Answer budget policy<br/>lookup / balanced / synthesis"]
     Admission["ContextAdmission<br/>sync/async/reject/cloud"]
-    Evidence["Cited evidence windows<br/>not raw long context"]
   end
 
   subgraph Boundary["Scheduler API boundary"]
@@ -79,7 +80,8 @@ flowchart LR
   Parse --> Index
   Index --> SRAS
   SRAS --> Evidence
-  Evidence --> Admission
+  Evidence --> AnswerBudget
+  AnswerBudget --> Admission
   Admission -->|local| Client
   Admission -->|allowed fallback| Cloud
   Client --> Contract
@@ -117,6 +119,18 @@ flowchart LR
 - Scheduler contract fixtures, runtime profile cache/TTL, and classified
   scheduler error mapping live on the Attune side so non-X100 scheduler
   implementations can reuse the same product path.
+- Chat uses Attune-owned answer-budget policy before calling `kb.query.ask`.
+  Realtime test gates may force an explicit short output budget, while product
+  traffic defaults to query-aware `lookup` / `balanced` / `synthesis` budgets
+  and reports the selected budget in the API response.
+- Chat evidence assembly keeps bounded context windows and applies source
+  diversity for cross-document or cross-vendor questions before scheduler
+  answer generation. The scheduler receives compact cited evidence packets, not
+  raw long documents.
+- OCR and job-proxy failures include task, operation, component, retryability,
+  and degradation-policy fields. Scanner/OCR worker failures are not converted
+  into empty OCR success payloads unless the successful scheduler response
+  explicitly marks a degraded scaffold result.
 
 ## Degradation Policy
 
@@ -152,6 +166,27 @@ Not allowed to silently degrade:
   missing or generation is not available in the admitted latency budget, Attune
   refuses or reports delay/failure instead of substituting a weaker procedural
   answer.
+
+## Attune Long-Text Gates
+
+The airplane-manual long-text E2E covers Attune-owned behavior independent of
+the scheduler implementation:
+
+- selected-document materialization and `/api/v1/index/bind`;
+- embedding drain metrics (`duration_ms`, `max_pending`, `samples`);
+- search hit/recall/MRR and latency;
+- chat citation/answer/safety metrics;
+- scheduler generation coverage, prompt-cache metadata, finish reasons, and
+  generation latency;
+- Attune answer-budget metadata coverage;
+- failure classification that separates retryable scheduler backend errors
+  from Attune answer-quality failures while preserving honest-failure metadata;
+  and
+- Web UI answer, citation, latency, and scheduler-status visibility.
+
+Scheduler hardware and model workers remain replaceable behind the contract.
+Attune gates should fail when product policy metadata is missing, even if the
+worker happens to return text.
 
 Run `scripts/scheduler-boundary-audit.sh` before merging Attune scheduler-boundary changes. The
 audit fails if server/UI code reintroduces direct local runtime symbols,
