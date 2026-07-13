@@ -2329,12 +2329,20 @@ mod tests {
 
     #[test]
     fn parse_pdf_bytes_invalid() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&["ATTUNE_ENABLE_OCRMYPDF_FALLBACK"]);
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+
         let result = parse_bytes(b"not a real pdf", "test.pdf");
         assert!(result.is_err(), "Should error on invalid PDF data");
     }
 
     #[test]
     fn parse_pdf_error_surfaces_ocr_context_when_backend_absent() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&["ATTUNE_ENABLE_OCRMYPDF_FALLBACK"]);
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+
         // 契约：pdf_extract 失败 + OCR 后端不可用 → 报错信息必须包含 OCR 路径的上下文，
         // 让用户知道可以装 tesseract 来启用 fallback。这是 Round 1 review 要求的
         // "两路 title 对称"问题的文档化测试；真实加密扫描件的集成测试在

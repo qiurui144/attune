@@ -24,20 +24,13 @@ const ALLOWLIST: &[(&str, usize, &str)] = &[
          honors settings.privacy.telemetry, fail-closed default-off (R1.1b).",
     ),
     (
-        "attune-server/src/routes/status.rs",
-        2,
-        "Ollama localhost:11434 probes (/api/tags + /api/ps). Local destination \
-         (hardcoded loopback) — no egress, gate not required.",
-    ),
-    (
         "attune-server/src/routes/llm.rs",
-        3,
-        "(1) test_llm: user-initiated BYOK endpoint test — explicit user action on \
-         user-supplied endpoint+key, wizard/Settings 'Test connection' button; \
-         payload is the literal 'ping', no vault data. (2) probe_local_scheduler: loopback + \
-         RFC1918 subnet scan local; user-supplied non-local candidates gated via \
-         OutboundGate kind=Llm (R1.1b). (3) lmstudio_probe: compile-time \
-         localhost:1234 constant — local, no gate.",
+        1,
+        "probe_local_scheduler: loopback + RFC1918 subnet scan local; \
+         user-supplied non-local candidates gated via OutboundGate kind=Llm \
+         (R1.1b). LLM endpoint tests and status probes route through shared \
+         providers / LocalSchedulerClient instead of constructing raw HTTP \
+         clients in route handlers.",
     ),
     (
         "attune-server/src/test_support.rs",

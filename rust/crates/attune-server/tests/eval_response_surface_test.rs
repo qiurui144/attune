@@ -295,8 +295,8 @@ fn cost_block_for_local_model() {
     assert_eq!(block["tokens_out"], 80);
     assert_eq!(block["model"], "qwen2.5:3b");
     assert_eq!(
-        block["provider"], "ollama",
-        "qwen models must report ollama provider"
+        block["provider"], "local_scheduler",
+        "local models must report the unified scheduler provider"
     );
     // Local must return 0.0 (not null) so bench can sum without filter
     let usd = block["estimated_usd"]

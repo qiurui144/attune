@@ -5,8 +5,10 @@
 //!   - 0-byte file → empty-file
 //!   - JobRegistry::cancel_all_running flips running job to Cancelled (server restart)
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+static ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 async fn wait_for_server(base: &str) {
     let client = reqwest::Client::new();
@@ -23,6 +25,10 @@ async fn wait_for_server(base: &str) {
 }
 
 async fn start_server() -> String {
+    let _env_guard = ENV_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     let tmp = tempfile::TempDir::new().unwrap();
     std::env::set_var("HOME", tmp.path());
     std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
@@ -55,8 +61,8 @@ async fn start_server() -> String {
 async fn corrupt_pdf_bytes_returns_error_not_panic() {
     let base = start_server().await;
     let client = reqwest::Client::new();
-    // Garbage bytes with .pdf extension → either ocr-engine-failed or invalid-input,
-    // but NOT a 500 panic.
+    // Garbage bytes with .pdf extension → either OCR/parser failure or
+    // scheduler-unavailable honest failure, but NOT a panic.
     let file_part =
         reqwest::multipart::Part::bytes(b"%PDF-garbage-not-a-real-pdf\x00\xff\xfe".to_vec())
             .file_name("corrupt.pdf")
@@ -73,16 +79,23 @@ async fn corrupt_pdf_bytes_returns_error_not_panic() {
         .expect("post");
     let status = resp.status().as_u16();
     let body: serde_json::Value = resp.json().await.expect("json");
-    // Could be 200 (PDF lines empty per D1 limitation) OR 500 ocr-engine-failed.
+    // Could be 200 (PDF lines empty per D1 limitation), 400/500 parser/OCR
+    // failure, or 503 when the required scheduler OCR worker is unavailable.
     // Critical: NOT a panic, server still alive.
     assert!(
-        status == 200 || status == 500 || status == 400,
+        status == 200 || status == 500 || status == 400 || status == 503,
         "unexpected status {status}: {body}"
     );
     if status != 200 {
         let code = body["code"].as_str().expect("error response has code");
         assert!(
-            ["ocr-engine-failed", "invalid-input", "pdf-parse-failed"].contains(&code),
+            [
+                "ocr-engine-failed",
+                "invalid-input",
+                "pdf-parse-failed",
+                "local-scheduler-unavailable"
+            ]
+            .contains(&code),
             "unexpected code {code}: {body}"
         );
     }
@@ -141,10 +154,21 @@ async fn random_junk_bytes_with_image_ext_no_panic() {
         .await
         .expect("post");
     let status = resp.status().as_u16();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .unwrap_or_else(|_| serde_json::json!({"code": null}));
     assert!(
-        status == 200 || status == 500,
-        "expected 200 or 500, got {status}"
+        status == 200 || status == 500 || status == 503,
+        "expected 200, 500, or scheduler honest-failure 503; got {status}: {body}"
     );
+    if status != 200 {
+        let code = body["code"].as_str().expect("error response has code");
+        assert!(
+            ["ocr-engine-failed", "local-scheduler-unavailable"].contains(&code),
+            "unexpected code {code}: {body}"
+        );
+    }
     // Server still alive
     let alive = client
         .get(format!("{}/health", base))
