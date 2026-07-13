@@ -32,6 +32,7 @@ function args() {
     headless: !["0", "false", "no"].includes(String(process.env.ATTUNE_HEADLESS || "1").toLowerCase()),
     executablePath: process.env.ATTUNE_PLAYWRIGHT_EXECUTABLE || "",
     timeoutMs: Number(process.env.ATTUNE_LONGTEXT_UI_TIMEOUT_MS || "120000"),
+    pollIntervalMs: Number(process.env.ATTUNE_LONGTEXT_UI_POLL_INTERVAL_MS || "500"),
     screenshotDir: process.env.ATTUNE_LONGTEXT_UI_SHOTS || "docs/screenshots/airplane-longtext-ui",
   };
   for (let i = 2; i < process.argv.length; i += 1) {
@@ -47,9 +48,11 @@ function args() {
     else if (key === "--token") out.token = value;
     else if (key === "--executable-path") out.executablePath = value;
     else if (key === "--timeout-ms") out.timeoutMs = Number(value);
+    else if (key === "--poll-interval-ms") out.pollIntervalMs = Number(value);
     else if (key === "--screenshot-dir") out.screenshotDir = value;
   }
   out.baseUrl = out.baseUrl.replace(/\/+$/, "");
+  out.pollIntervalMs = Math.max(Number.isFinite(out.pollIntervalMs) ? out.pollIntervalMs : 500, 100);
   return out;
 }
 
@@ -199,7 +202,7 @@ async function maybePollLocalScheduler(opts, response, token) {
   let content = outputText(response);
   let lastJob = null;
   while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await new Promise((resolve) => setTimeout(resolve, opts.pollIntervalMs));
     const data = await requestSchedulerJob(opts, jobId, token);
     const job = data.job && typeof data.job === "object" ? data.job : data;
     lastJob = job;
@@ -210,6 +213,43 @@ async function maybePollLocalScheduler(opts, response, token) {
     }
   }
   return { content, job: lastJob };
+}
+
+function numberValue(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function firstNumber(...values) {
+  for (const value of values) {
+    const parsed = numberValue(value);
+    if (parsed !== undefined) return parsed;
+  }
+  return undefined;
+}
+
+function schedulerJobSummary(job) {
+  if (!job || typeof job !== "object") return null;
+  const outputs = job.outputs && typeof job.outputs === "object" ? job.outputs : {};
+  const timings = outputs.timings && typeof outputs.timings === "object" ? outputs.timings : {};
+  const usage = outputs.usage && typeof outputs.usage === "object" ? outputs.usage : {};
+  const promptDetails =
+    usage.prompt_tokens_details && typeof usage.prompt_tokens_details === "object" ? usage.prompt_tokens_details : {};
+  const summary = {
+    job_id: job.job_id || job.id,
+    status: schedulerStatus(job) || undefined,
+    task: job.task,
+    scheduled_as: job.scheduled_as,
+    service_class: job.service_class,
+    model: job.model || outputs.model,
+    latency_ms: numberValue(job.latency_ms),
+    queue_wait_ms: numberValue(job.queue_wait_ms),
+    prompt_eval_ms: numberValue(timings.prompt_ms),
+    decode_ms: numberValue(timings.predicted_ms),
+    prompt_tokens: firstNumber(timings.prompt_n, usage.prompt_tokens),
+    output_tokens: firstNumber(timings.predicted_n, usage.completion_tokens),
+    prompt_cache_tokens: firstNumber(timings.cache_n, promptDetails.cached_tokens),
+  };
+  return Object.fromEntries(Object.entries(summary).filter(([, value]) => value !== undefined && value !== ""));
 }
 
 function normalizeCompact(text) {
@@ -382,7 +422,7 @@ async function main() {
     console.log(`[ui-js] indexed item visible: ${itemNeedle}`);
 
     const turnStart = performance.now();
-    const { data: response } = await sendChatAndCapture(page, query, opts);
+    const { elapsedMs: initialChatLatencyMs, data: response } = await sendChatAndCapture(page, query, opts);
     const { content: finalContent, job } = await maybePollLocalScheduler(opts, response, token);
     if (job && FAILED_LOCAL_SCHEDULER.has(schedulerStatus(job))) {
       throw new Error(
@@ -411,7 +451,19 @@ async function main() {
       checks.local_scheduler_status_visible = await visibleTextAny(page, ["边缘调度器", "Edge scheduler", "本地调度器", "Local scheduler"]);
     }
     if (consoleErrors.length > 0) checks.console_errors = false;
-    console.log(JSON.stringify({ checks, latency_ms: totalMs, target_ms: targetMs }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          checks,
+          latency_ms: totalMs,
+          initial_chat_latency_ms: initialChatLatencyMs,
+          target_ms: targetMs,
+          scheduler_job: schedulerJobSummary(job),
+        },
+        null,
+        2,
+      ),
+    );
     const failed = Object.entries(checks)
       .filter(([, ok]) => !ok)
       .map(([name]) => name);

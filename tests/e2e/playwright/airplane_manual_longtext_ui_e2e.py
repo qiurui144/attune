@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--channel", default=os.environ.get("ATTUNE_PLAYWRIGHT_CHANNEL", "chrome"))
     parser.add_argument("--executable-path", default=os.environ.get("ATTUNE_PLAYWRIGHT_EXECUTABLE", ""))
     parser.add_argument("--timeout-ms", type=int, default=int(os.environ.get("ATTUNE_LONGTEXT_UI_TIMEOUT_MS", "120000")))
+    parser.add_argument(
+        "--poll-interval-ms",
+        type=int,
+        default=int(os.environ.get("ATTUNE_LONGTEXT_UI_POLL_INTERVAL_MS", "500")),
+    )
     parser.add_argument("--screenshot-dir", type=Path, default=Path(os.environ.get("ATTUNE_LONGTEXT_UI_SHOTS", "docs/screenshots/airplane-longtext-ui")))
     return parser.parse_args()
 
@@ -151,8 +156,9 @@ def maybe_poll_local_scheduler(args: argparse.Namespace, response: dict[str, Any
 
     deadline = time.monotonic() + (args.timeout_ms / 1000)
     last_job: dict[str, Any] | None = None
+    poll_interval = max(args.poll_interval_ms, 100) / 1000.0
     while time.monotonic() < deadline:
-        time.sleep(1.5)
+        time.sleep(poll_interval)
         _, data = request_scheduler_job(args.base_url, str(job_id), token=token, timeout=30)
         job = unwrap_local_scheduler_job(data)
         last_job = job
@@ -162,6 +168,54 @@ def maybe_poll_local_scheduler(args: argparse.Namespace, response: dict[str, Any
             final_text = output_text(outputs)
             return final_text or content, job
     return content, last_job
+
+
+def number_value(value: Any) -> float | int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    return None
+
+
+def first_number(*values: Any) -> float | int | None:
+    for value in values:
+        parsed = number_value(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def scheduler_job_summary(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(job, dict):
+        return None
+    outputs = job.get("outputs") if isinstance(job.get("outputs"), dict) else {}
+    timings = outputs.get("timings") if isinstance(outputs.get("timings"), dict) else {}
+    usage = outputs.get("usage") if isinstance(outputs.get("usage"), dict) else {}
+    prompt_details = (
+        usage.get("prompt_tokens_details")
+        if isinstance(usage.get("prompt_tokens_details"), dict)
+        else {}
+    )
+    summary = {
+        "job_id": job.get("job_id") or job.get("id"),
+        "status": local_scheduler_status(job) or None,
+        "task": job.get("task"),
+        "scheduled_as": job.get("scheduled_as"),
+        "service_class": job.get("service_class"),
+        "model": job.get("model") or outputs.get("model"),
+        "latency_ms": number_value(job.get("latency_ms")),
+        "queue_wait_ms": number_value(job.get("queue_wait_ms")),
+        "prompt_eval_ms": number_value(timings.get("prompt_ms")),
+        "decode_ms": number_value(timings.get("predicted_ms")),
+        "prompt_tokens": first_number(timings.get("prompt_n"), usage.get("prompt_tokens")),
+        "output_tokens": first_number(timings.get("predicted_n"), usage.get("completion_tokens")),
+        "prompt_cache_tokens": first_number(
+            timings.get("cache_n"),
+            prompt_details.get("cached_tokens"),
+        ),
+    }
+    return {key: value for key, value in summary.items() if value not in (None, "")}
 
 
 def screenshot(page: Page, args: argparse.Namespace, name: str) -> None:
@@ -357,7 +411,19 @@ def main() -> int:
                 checks["local_scheduler_status_visible"] = visible_any(page, ["边缘调度器", "Edge scheduler", "本地调度器", "Local scheduler"])
 
             failed = [name for name, ok in checks.items() if not ok]
-            print(json.dumps({"checks": checks, "latency_ms": total_ms, "target_ms": target_ms}, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "checks": checks,
+                        "latency_ms": total_ms,
+                        "initial_chat_latency_ms": initial_ms,
+                        "target_ms": target_ms,
+                        "scheduler_job": scheduler_job_summary(job),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
             if console_errors:
                 print("[ui] console errors:")
                 for err in console_errors[:10]:

@@ -20,9 +20,10 @@ const DEFAULT_OCRMYPDF_MAX_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_SCHEDULER_PDF_OCR_MAX_PAGES: usize = 0;
 const DEFAULT_SCHEDULER_PDF_OCR_UNKNOWN_MAX_PAGES: usize = 256;
 const DEFAULT_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES: usize = 16;
-const DEFAULT_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES: usize = 3;
+const DEFAULT_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES: usize = 8;
+const DEFAULT_SCHEDULER_PDF_OCR_MAX_TOTAL_MS: usize = 45_000;
 const DEFAULT_SCHEDULER_PDF_OCR_MAX_DPI: usize = 200;
-const DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI: usize = 120;
+const DEFAULT_SCHEDULER_PDF_OCR_MIN_DPI: usize = 72;
 const SCHEDULER_INLINE_JSON_OVERHEAD_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Default)]
@@ -104,6 +105,17 @@ fn pdf_text_layer_is_usable(text: &str) -> bool {
         .filter(|c| !c.is_control() && c.is_alphanumeric())
         .count();
     word_chars >= 32
+}
+
+fn pdf_ocr_unavailable_error(label: &str, text_layer: &str) -> VaultError {
+    let status = if text_layer.trim().is_empty() {
+        "empty"
+    } else {
+        "thin/unusable"
+    };
+    VaultError::InvalidInput(format!(
+        "PDF text layer {status} for {label}; OCR produced no usable text"
+    ))
 }
 
 fn ocrmypdf_fallback_enabled() -> bool {
@@ -422,6 +434,11 @@ fn scheduler_ocr_image_bytes(
         scheduler_ocr_image_body(data, filename, page_number, page_count, dpi, options),
         options.scheduler_timeout(),
     )?;
+    if let Some(error) = scheduler_output_error_message(&outputs) {
+        return Err(VaultError::LlmUnavailable(format!(
+            "scheduler OCR returned error: {error}"
+        )));
+    }
     Ok(scheduler_output_text(&outputs))
 }
 
@@ -546,15 +563,54 @@ fn scheduler_output_text(value: &Value) -> Option<String> {
     for pointer in [
         "/lines",
         "/regions",
+        "/pages",
         "/segments",
         "/outputs/lines",
         "/outputs/segments",
+        "/outputs/pages",
     ] {
         if let Some(text) = value.pointer(pointer).and_then(scheduler_array_text) {
             return Some(text);
         }
     }
     value.get("outputs").and_then(scheduler_output_text)
+}
+
+fn scheduler_output_error_message(value: &Value) -> Option<String> {
+    let status = value.get("status").and_then(Value::as_str)?;
+    if !matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "error" | "failed" | "failure" | "unsupported"
+    ) {
+        return None;
+    }
+    let code = value
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("code").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let detail = value
+        .pointer("/error/detail")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("detail").and_then(Value::as_str))
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .unwrap_or("no detail");
+    Some(format!("{code}: {detail}"))
+}
+
+fn scheduler_ocr_error_is_fatal(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    [
+        "unsupported_payload",
+        "unsupported content",
+        "unsupported_content",
+        "requires a numeric tensor",
+        "missing tensor",
+        "invalid payload",
+        "invalid_payload",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
 }
 
 fn scheduler_array_text(value: &Value) -> Option<String> {
@@ -692,6 +748,13 @@ pub fn parse_bytes_with_options(
                 let title = first_line_title(&pdftotext, &stem);
                 return Ok((title, pdftotext));
             }
+            if options.scheduler_base.is_some() {
+                if let Some(ocr_text) = try_ocr_from_bytes_with_dpi(data, filename, dpi, options) {
+                    let title = first_line_title(&ocr_text, &stem);
+                    return Ok((title, ocr_text));
+                }
+                return Err(pdf_ocr_unavailable_error(filename, ""));
+            }
 
             let extract_result = safe_pdf_extract_text_from_mem(data);
             let content = match extract_result {
@@ -702,6 +765,9 @@ pub fn parse_bytes_with_options(
                     {
                         let title = first_line_title(&ocr_text, &stem);
                         return Ok((title, ocr_text));
+                    }
+                    if options.scheduler_base.is_some() && thin_text.trim().is_empty() {
+                        return Err(pdf_ocr_unavailable_error(filename, &thin_text));
                     }
                     thin_text
                 }
@@ -975,6 +1041,22 @@ fn scheduler_pdf_ocr_max_consecutive_failures() -> usize {
     .max(1)
 }
 
+fn scheduler_pdf_ocr_max_total_duration() -> Option<Duration> {
+    let ms = env_usize_any_allow_zero(
+        &[
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
+            "ATTUNE_PDF_OCR_MAX_TOTAL_MS",
+        ],
+        DEFAULT_SCHEDULER_PDF_OCR_MAX_TOTAL_MS,
+    );
+    if ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(u64::try_from(ms).unwrap_or(u64::MAX)))
+    }
+}
+
 fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32) -> Vec<u32> {
     let max_dpi = env_usize_any(
         &[
@@ -1002,7 +1084,7 @@ fn scheduler_pdf_ocr_dpi_candidates(requested_dpi: u32) -> Vec<u32> {
     .clamp(72, 1200) as u32;
 
     let mut candidates = Vec::new();
-    for dpi in [base, max_dpi, 200, 150, min_dpi] {
+    for dpi in [base, max_dpi, 200, 180, 150, 120, 96, min_dpi] {
         let dpi = dpi.clamp(min_dpi, max_dpi);
         if !candidates.contains(&dpi) {
             candidates.push(dpi);
@@ -1116,6 +1198,8 @@ fn try_scheduler_pdf_page_ocr_from_path(
     let max_failed = scheduler_pdf_ocr_max_failed_pages(page_limit);
     let max_consecutive_failed = scheduler_pdf_ocr_max_consecutive_failures();
     let dpi_candidates = scheduler_pdf_ocr_dpi_candidates(requested_dpi);
+    let max_total_duration = scheduler_pdf_ocr_max_total_duration();
+    let started_at = Instant::now();
     let tmp = tempfile::TempDir::new().ok()?;
 
     let mut all = String::with_capacity(page_limit.min(32) * 1024);
@@ -1125,6 +1209,22 @@ fn try_scheduler_pdf_page_ocr_from_path(
     let mut consecutive_failed = 0usize;
 
     for page in 1..=page_limit {
+        if let Some(max_total_duration) = max_total_duration {
+            if started_at.elapsed() >= max_total_duration {
+                log::warn!(
+                    "scheduler PDF page OCR stopping for {} after {} ms (text_pages={}, empty_pages={}, failed_pages={}, page_limit={}, detected_pages={:?})",
+                    path.display(),
+                    started_at.elapsed().as_millis(),
+                    ok_pages,
+                    empty_pages,
+                    failed_pages,
+                    page_limit,
+                    page_count
+                );
+                break;
+            }
+        }
+
         let mut page_rendered = false;
         let mut page_failed = false;
         let mut page_too_large = false;
@@ -1174,32 +1274,57 @@ fn try_scheduler_pdf_page_ocr_from_path(
                     break;
                 }
                 Ok(_) => {
-                    empty_pages += 1;
                     page_text = Some(String::new());
                     break;
                 }
                 Err(e) => {
                     page_failed = true;
+                    let message = e.to_string();
                     log::warn!(
                         "scheduler PDF page OCR failed for {} page {} at {}dpi: {}",
                         path.display(),
                         page,
                         dpi,
-                        e
+                        message
                     );
+                    if scheduler_ocr_error_is_fatal(&message) {
+                        log::warn!(
+                            "scheduler PDF page OCR stopping for {} after fatal scheduler OCR error on page {}",
+                            path.display(),
+                            page
+                        );
+                        return None;
+                    }
                     break;
                 }
             }
         }
 
         match page_text {
-            Some(text) => {
+            Some(text) if !text.trim().is_empty() => {
                 consecutive_failed = 0;
-                if !text.trim().is_empty() {
-                    ok_pages += 1;
-                    all.push_str(&format!("--- Page {page} ---\n"));
-                    all.push_str(text.trim());
-                    all.push_str("\n\n");
+                ok_pages += 1;
+                all.push_str(&format!("--- Page {page} ---\n"));
+                all.push_str(text.trim());
+                all.push_str("\n\n");
+            }
+            Some(_) => {
+                empty_pages += 1;
+                failed_pages += 1;
+                consecutive_failed += 1;
+                log::warn!(
+                    "scheduler PDF page OCR returned empty text for {} page {}",
+                    path.display(),
+                    page
+                );
+                if failed_pages >= max_failed || consecutive_failed >= max_consecutive_failed {
+                    log::warn!(
+                        "scheduler PDF page OCR stopping for {} after {} failed/empty pages ({} consecutive)",
+                        path.display(),
+                        failed_pages,
+                        consecutive_failed
+                    );
+                    break;
                 }
             }
             None => {
@@ -1308,6 +1433,18 @@ fn parse_pdf_file_with_dpi(
         let title = first_line_title(&pdftotext, stem);
         return Ok((title, pdftotext));
     }
+    if options.scheduler_base.is_some() {
+        log::info!(
+            "pdftotext produced no usable text for {}; trying scheduler OCR before pdf_extract",
+            path.display()
+        );
+        if let Some(ocr_text) = try_ocr_from_pdf_path_with_dpi(path, dpi, options) {
+            let title = first_line_title(&ocr_text, stem);
+            return Ok((title, ocr_text));
+        }
+        let label = path.display().to_string();
+        return Err(pdf_ocr_unavailable_error(&label, ""));
+    }
 
     // 2. Poppler 不可用或失败时，退回 pdf_extract 直接取文字层。
     let bytes = std::fs::read(path)?;
@@ -1345,6 +1482,10 @@ fn parse_pdf_file_with_dpi(
                 let title = first_line_title(&ocr_text, stem);
                 return Ok((title, ocr_text));
             }
+            if content.trim().is_empty() {
+                let label = path.display().to_string();
+                return Err(pdf_ocr_unavailable_error(&label, &content));
+            }
         } else if let Some(provider) = crate::ocr::detect_default_provider() {
             log::info!(
                 "PDF text layer thin ({} chars); falling back to legacy OCR ({})",
@@ -1354,6 +1495,10 @@ fn parse_pdf_file_with_dpi(
             if let Some(ocr_text) = try_ocr_from_pdf_path_with_dpi(path, dpi, options) {
                 let title = first_line_title(&ocr_text, stem);
                 return Ok((title, ocr_text));
+            }
+            if content.trim().is_empty() {
+                let label = path.display().to_string();
+                return Err(pdf_ocr_unavailable_error(&label, &content));
             }
         } else {
             log::debug!(
@@ -2410,6 +2555,74 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_pdf_ocr_dpi_candidates_include_low_dpi_payload_fallbacks() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_SCHEDULER_PDF_OCR_DPI",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_DPI",
+        ]);
+        for key in [
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_SCHEDULER_PDF_OCR_DPI",
+            "ATTUNE_LOCAL_SCHEDULER_PDF_OCR_DPI",
+        ] {
+            std::env::remove_var(key);
+        }
+
+        let candidates = scheduler_pdf_ocr_dpi_candidates(300);
+        assert_eq!(candidates.first().copied(), Some(200));
+        assert!(candidates.contains(&120), "candidates={candidates:?}");
+        assert!(candidates.contains(&96), "candidates={candidates:?}");
+        assert!(candidates.contains(&72), "candidates={candidates:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_pdf_file_scheduler_ocr_runs_when_pdftotext_is_empty() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "PATH",
+            "ATTUNE_SCHEDULER_OCR_ENABLED",
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdftotext = dir.path().join("pdftotext");
+        std::fs::write(&pdftotext, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&pdftotext).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&pdftotext, perms).unwrap();
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path.to_string_lossy());
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+        std::env::set_var("ATTUNE_SCHEDULER_MAX_BODY_BYTES", "8192");
+
+        let pdf = dir.path().join("scan.pdf");
+        std::fs::write(&pdf, b"%PDF fake scanned document").unwrap();
+        let (base, requests, handle) = start_scheduler_ocr_mock(1);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000);
+
+        let (_title, text) = parse_file_with_options(&pdf, &options).unwrap();
+        assert!(text.contains("OCR page 0"), "text={text}");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn scheduler_ocr_body_includes_scheduler_worker_aliases() {
         let options = ParseOptions::with_profile(Some("scan")).with_scheduler_timeout_ms(1_500);
         let body = scheduler_ocr_body(b"abc", "scan.pdf", &options);
@@ -2485,6 +2698,44 @@ mod tests {
     fn start_scheduler_ocr_mock(
         expected_requests: usize,
     ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        start_scheduler_ocr_mock_with_outputs(expected_requests, |page| {
+            serde_json::json!({"text": format!("OCR page {page}")})
+        })
+    }
+
+    fn start_scheduler_empty_ocr_mock(
+        expected_requests: usize,
+    ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        start_scheduler_ocr_mock_with_outputs(expected_requests, |_page| {
+            serde_json::json!({"text": ""})
+        })
+    }
+
+    fn start_scheduler_unsupported_ocr_mock(
+        expected_requests: usize,
+    ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        start_scheduler_ocr_mock_with_outputs(expected_requests, |page| {
+            serde_json::json!({
+                "status": "error",
+                "schema_version": "ocr_result.v1",
+                "task": "kb.document.ocr_recognize",
+                "text": "",
+                "pages": [{"page_index": page, "text": ""}],
+                "error": {
+                    "code": "unsupported_payload",
+                    "detail": "OCR worker requires a numeric tensor field named x"
+                }
+            })
+        })
+    }
+
+    fn start_scheduler_ocr_mock_with_outputs<F>(
+        expected_requests: usize,
+        outputs_for_page: F,
+    ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>)
+    where
+        F: Fn(u64) -> Value + Send + 'static,
+    {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2547,11 +2798,12 @@ mod tests {
                     .and_then(|v| v.get("page_number").and_then(Value::as_u64))
                     .unwrap_or(0);
                 seen.fetch_add(1, Ordering::SeqCst);
+                let outputs = outputs_for_page(page);
                 let payload = serde_json::json!({
                     "scheduled_as": "sync",
                     "status": "done",
                     "task": "kb.document.ocr_recognize",
-                    "outputs": {"text": format!("OCR page {page}")}
+                    "outputs": outputs
                 })
                 .to_string();
                 let response = format!(
@@ -2629,6 +2881,146 @@ mod tests {
         assert!(text.contains("--- Page 2 ---"));
         assert!(text.contains("OCR page 2"));
         assert_eq!(requests.load(Ordering::SeqCst), 2);
+        handle.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_pdf_ocr_stops_after_consecutive_empty_pages() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "PATH",
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_SCHEDULER_OCR_ENABLED",
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdfinfo = dir.path().join("pdfinfo");
+        std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 10'\n").unwrap();
+        let pdftoppm = dir.path().join("pdftoppm");
+        std::fs::write(
+            &pdftoppm,
+            "#!/bin/sh\n\
+             page=1\n\
+             prefix=''\n\
+             while [ \"$#\" -gt 0 ]; do\n\
+               case \"$1\" in\n\
+                 -f) page=\"$2\"; shift 2 ;;\n\
+                 -l|-r) shift 2 ;;\n\
+                 -png|-singlefile) shift ;;\n\
+                 *) prefix=\"$1\"; shift ;;\n\
+               esac\n\
+             done\n\
+             printf 'png-page-%s' \"$page\" > \"${prefix}.png\"\n",
+        )
+        .unwrap();
+        for exe in [&pdfinfo, &pdftoppm] {
+            let mut perms = std::fs::metadata(exe).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(exe, perms).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path.to_string_lossy());
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("ATTUNE_SCHEDULER_MAX_BODY_BYTES", "8192");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES", "10");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES", "3");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES", "3");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS", "0");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI", "120");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI", "120");
+        std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+
+        let pdf = dir.path().join("empty-ocr-scan.pdf");
+        std::fs::write(&pdf, vec![b'x'; 8192]).unwrap();
+        let (base, requests, handle) = start_scheduler_empty_ocr_mock(3);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000);
+
+        let text = try_ocr_from_pdf_path_with_dpi(&pdf, 300, &options);
+        assert!(text.is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        handle.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_pdf_ocr_stops_after_fatal_scheduler_payload_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "PATH",
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS",
+            "ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI",
+            "ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI",
+            "ATTUNE_SCHEDULER_OCR_ENABLED",
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdfinfo = dir.path().join("pdfinfo");
+        std::fs::write(&pdfinfo, "#!/bin/sh\necho 'Pages: 10'\n").unwrap();
+        let pdftoppm = dir.path().join("pdftoppm");
+        std::fs::write(
+            &pdftoppm,
+            "#!/bin/sh\n\
+             page=1\n\
+             prefix=''\n\
+             while [ \"$#\" -gt 0 ]; do\n\
+               case \"$1\" in\n\
+                 -f) page=\"$2\"; shift 2 ;;\n\
+                 -l|-r) shift 2 ;;\n\
+                 -png|-singlefile) shift ;;\n\
+                 *) prefix=\"$1\"; shift ;;\n\
+               esac\n\
+             done\n\
+             printf 'png-page-%s' \"$page\" > \"${prefix}.png\"\n",
+        )
+        .unwrap();
+        for exe in [&pdfinfo, &pdftoppm] {
+            let mut perms = std::fs::metadata(exe).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(exe, perms).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path.to_string_lossy());
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("ATTUNE_SCHEDULER_MAX_BODY_BYTES", "8192");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_PAGES", "10");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_FAILED_PAGES", "8");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES", "8");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS", "0");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MAX_DPI", "120");
+        std::env::set_var("ATTUNE_SCHEDULER_PDF_OCR_MIN_DPI", "120");
+        std::env::set_var("ATTUNE_SCHEDULER_OCR_ENABLED", "1");
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "0");
+
+        let pdf = dir.path().join("unsupported-ocr-scan.pdf");
+        std::fs::write(&pdf, vec![b'x'; 8192]).unwrap();
+        let (base, requests, handle) = start_scheduler_unsupported_ocr_mock(1);
+        let options = ParseOptions::default()
+            .with_scheduler_base(Some(&base))
+            .with_scheduler_timeout_ms(5_000);
+
+        let text = try_ocr_from_pdf_path_with_dpi(&pdf, 300, &options);
+        assert!(text.is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
         handle.join().unwrap();
     }
 

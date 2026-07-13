@@ -22,7 +22,7 @@ use std::time::Instant;
 
 const SEARCH_CACHE_CAPACITY: usize = 256;
 const SEARCH_CACHE_TTL_SECS: u64 = 30;
-const DEFAULT_EMBED_QUEUE_BATCH_SIZE: u32 = 32;
+const DEFAULT_EMBED_QUEUE_BATCH_SIZE: u32 = 64;
 const MAX_EMBED_QUEUE_BATCH_SIZE: u32 = 256;
 
 fn embed_queue_batch_size() -> usize {

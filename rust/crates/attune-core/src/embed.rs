@@ -366,10 +366,14 @@ pub struct LocalSchedulerEmbeddingProvider {
     task: String,
     model: String,
     dims: usize,
+    max_batch_size: usize,
     max_input_chars: usize,
     max_input_tokens: usize,
     poll_timeout: Duration,
 }
+
+const DEFAULT_LOCAL_SCHEDULER_EMBED_TASK_BATCH_SIZE: usize = 64;
+const MAX_LOCAL_SCHEDULER_EMBED_TASK_BATCH_SIZE: usize = 256;
 
 impl LocalSchedulerEmbeddingProvider {
     pub fn new(base_url: &str, task: &str, model: &str, dims: usize, poll_timeout_ms: u64) -> Self {
@@ -394,6 +398,15 @@ impl LocalSchedulerEmbeddingProvider {
                 model.to_string()
             },
             dims,
+            max_batch_size: env_usize_any(
+                &[
+                    "ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE",
+                    "ATTUNE_LOCAL_SCHEDULER_EMBED_TASK_BATCH_SIZE",
+                    "ATTUNE_EMBED_TASK_BATCH_SIZE",
+                ],
+                DEFAULT_LOCAL_SCHEDULER_EMBED_TASK_BATCH_SIZE,
+            )
+            .clamp(1, MAX_LOCAL_SCHEDULER_EMBED_TASK_BATCH_SIZE),
             max_input_chars: env_usize_any(
                 &[
                     "ATTUNE_EMBED_MAX_INPUT_CHARS",
@@ -518,6 +531,60 @@ impl LocalSchedulerEmbeddingProvider {
             || message.contains("physical batch size")
             || message.contains("input too large")
             || message.contains("context length")
+    }
+
+    fn scheduler_physical_batch_too_large(error: &VaultError) -> bool {
+        let message = error.to_string().to_ascii_lowercase();
+        message.contains("physical batch size")
+    }
+
+    async fn submit_embedding_task_with_limits(
+        client: reqwest::Client,
+        base_url: String,
+        task: String,
+        raw_input: Vec<String>,
+        max_input_chars: usize,
+        max_input_tokens: usize,
+        poll_timeout: Duration,
+    ) -> Result<Value> {
+        let fallback_limits = [
+            (max_input_chars, max_input_tokens),
+            (max_input_chars.min(768), max_input_tokens.min(384)),
+            (max_input_chars.min(512), max_input_tokens.min(256)),
+            (max_input_chars.min(256), max_input_tokens.min(128)),
+        ];
+        let mut last_limits = (0usize, 0usize);
+        let mut last_oversize: Option<VaultError> = None;
+        for (chars, tokens) in fallback_limits {
+            let limits = (chars.max(1), tokens.max(1));
+            if limits == last_limits {
+                continue;
+            }
+            last_limits = limits;
+            let input = Self::prepare_inputs(&raw_input, limits.0, limits.1);
+            match Self::submit_embedding_task(
+                client.clone(),
+                base_url.clone(),
+                task.clone(),
+                input,
+                poll_timeout,
+            )
+            .await
+            {
+                Ok(value) => return Ok(value),
+                Err(e) if Self::scheduler_physical_batch_too_large(&e) => return Err(e),
+                Err(e) if Self::scheduler_input_too_large(&e) => {
+                    last_oversize = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_oversize.unwrap_or_else(|| {
+            VaultError::LlmUnavailable(
+                "local scheduler embed input exceeded scheduler limits".into(),
+            )
+        }))
     }
 
     async fn submit_embedding_task(
@@ -685,58 +752,63 @@ impl EmbeddingProvider for LocalSchedulerEmbeddingProvider {
         let poll_timeout = self.poll_timeout;
         let max_input_chars = self.max_input_chars;
         let max_input_tokens = self.max_input_tokens;
+        let max_batch_size = self.max_batch_size.max(1);
+        let dims = self.dims;
 
-        let response = embed_block_on(async move {
-            let fallback_limits = [
-                (max_input_chars, max_input_tokens),
-                (max_input_chars.min(768), max_input_tokens.min(384)),
-                (max_input_chars.min(512), max_input_tokens.min(256)),
-                (max_input_chars.min(256), max_input_tokens.min(128)),
-            ];
-            let mut last_limits = (0usize, 0usize);
-            let mut last_oversize: Option<VaultError> = None;
-            for (chars, tokens) in fallback_limits {
-                let limits = (chars.max(1), tokens.max(1));
-                if limits == last_limits {
-                    continue;
-                }
-                last_limits = limits;
-                let input = Self::prepare_inputs(&raw_non_empty, limits.0, limits.1);
-                match Self::submit_embedding_task(
+        let embeddings = embed_block_on(async move {
+            let mut pending = std::collections::VecDeque::new();
+            let mut start = 0usize;
+            while start < expected {
+                let end = (start + max_batch_size).min(expected);
+                pending.push_back((start, end));
+                start = end;
+            }
+
+            let mut output: Vec<Option<Vec<f32>>> = vec![None; expected];
+            while let Some((start, end)) = pending.pop_front() {
+                let raw_batch = raw_non_empty[start..end].to_vec();
+                match Self::submit_embedding_task_with_limits(
                     client.clone(),
                     base_url.clone(),
                     task.clone(),
-                    input,
+                    raw_batch,
+                    max_input_chars,
+                    max_input_tokens,
                     poll_timeout,
                 )
                 .await
                 {
-                    Ok(value) => return Ok(value),
-                    Err(e) if Self::scheduler_input_too_large(&e) => {
-                        last_oversize = Some(e);
-                        continue;
+                    Ok(value) => {
+                        let embeddings = Self::extract_embeddings(&value).ok_or_else(|| {
+                            VaultError::LlmUnavailable(format!(
+                                "local scheduler embed response missing embeddings for range {start}..{end}: {value}"
+                            ))
+                        })?;
+                        let expected_batch = end - start;
+                        if embeddings.len() != expected_batch {
+                            return Err(VaultError::LlmUnavailable(format!(
+                                "local scheduler embed returned {} vectors for {expected_batch} inputs in range {start}..{end}",
+                                embeddings.len()
+                            )));
+                        }
+                        for (offset, embedding) in embeddings.into_iter().enumerate() {
+                            output[start + offset] = Some(embedding);
+                        }
+                    }
+                    Err(e) if Self::scheduler_input_too_large(&e) && end - start > 1 => {
+                        let mid = start + (end - start) / 2;
+                        pending.push_front((mid, end));
+                        pending.push_front((start, mid));
                     }
                     Err(e) => return Err(e),
                 }
             }
-            Err(last_oversize.unwrap_or_else(|| {
-                VaultError::LlmUnavailable(
-                    "local scheduler embed input exceeded scheduler limits".into(),
-                )
-            }))
+            Ok(output
+                .into_iter()
+                .map(|embedding| embedding.unwrap_or_else(|| vec![0.0f32; dims]))
+                .collect::<Vec<_>>())
         })?;
 
-        let embeddings = Self::extract_embeddings(&response).ok_or_else(|| {
-            VaultError::LlmUnavailable(format!(
-                "local scheduler embed response missing embeddings: {response}"
-            ))
-        })?;
-        if embeddings.len() != expected {
-            return Err(VaultError::LlmUnavailable(format!(
-                "local scheduler embed returned {} vectors for {expected} inputs",
-                embeddings.len()
-            )));
-        }
         Ok((
             Self::reinsert_empty_vectors(embeddings, &empty_indices, texts.len(), self.dims),
             usage,
@@ -862,6 +934,81 @@ impl EmbeddingProvider for NoopProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct EnvRestore {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvRestore {
+        fn new(keys: &[&'static str]) -> Self {
+            Self {
+                saved: keys
+                    .iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let mut header_end = None;
+        while header_end.is_none() {
+            let n = stream.read(&mut tmp).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            header_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+        }
+        let Some(header_end) = header_end.map(|idx| idx + 4) else {
+            return String::from_utf8_lossy(&buf).to_string();
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        while buf.len().saturating_sub(header_end) < content_length {
+            let n = stream.read(&mut tmp).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    fn http_request_body(request: &str) -> &str {
+        request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or("")
+    }
 
     #[test]
     fn signature_is_dimension_keyed() {
@@ -1040,6 +1187,79 @@ mod tests {
     }
 
     #[test]
+    fn local_scheduler_embedding_splits_physical_batch_oversize() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let _env = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&["ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE"]);
+        std::env::set_var("ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE", "4");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let seen_lengths = std::sync::Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+        let seen2 = seen_lengths.clone();
+
+        let handle = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let req = read_http_request(&mut stream);
+                let body: Value = serde_json::from_str(http_request_body(&req)).unwrap();
+                let input_len = body
+                    .get("input")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                seen2.lock().unwrap().push(input_len);
+
+                if input_len > 2 {
+                    let body = "physical batch size exceeded";
+                    let resp = format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                    continue;
+                }
+
+                let data = (0..input_len)
+                    .map(|idx| serde_json::json!({"embedding": [input_len as f32, idx as f32]}))
+                    .collect::<Vec<_>>();
+                let body = serde_json::json!({
+                    "status": "done",
+                    "outputs": {"data": data}
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let endpoint = format!("http://127.0.0.1:{port}");
+        let provider = LocalSchedulerEmbeddingProvider::new(
+            &endpoint,
+            "kb.query.embed",
+            "embedding-int8",
+            2,
+            1_000,
+        );
+        let (vecs, _usage) = provider.embed(&["a", "b", "c", "d"]).expect("embed ok");
+
+        handle.join().unwrap();
+        assert_eq!(*seen_lengths.lock().unwrap(), vec![4, 2, 2]);
+        assert_eq!(vecs.len(), 4);
+        assert_eq!(vecs[0], vec![2.0, 0.0]);
+        assert_eq!(vecs[3], vec![2.0, 1.0]);
+    }
+
+    #[test]
     fn local_scheduler_embedding_truncates_long_inputs() {
         let text = "  abcdef  ";
         assert_eq!(
@@ -1082,6 +1302,7 @@ mod tests {
 
     #[test]
     fn scheduler_embedding_limits_use_generic_env() {
+        let _env = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let saved_generic = std::env::var("ATTUNE_EMBED_MAX_INPUT_CHARS").ok();
         std::env::set_var("ATTUNE_EMBED_MAX_INPUT_CHARS", "123");
 

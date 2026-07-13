@@ -330,7 +330,76 @@ required for this gate. The runner defaults edge scheduler to `llm-summary`,
 `ATTUNE_E2E_LLM_MODEL`, `ATTUNE_E2E_EMBEDDING_MODEL`,
 `ATTUNE_E2E_EMBEDDING_DIMS`, or `ATTUNE_E2E_EMBEDDING_TASK` when testing a new
 contract. New tests should use `ATTUNE_E2E_LOCAL_SCHEDULER`. For very large OCR
-runs, raise `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC`.
+runs, raise `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC`; the OCR page loop itself remains
+bounded by Attune-side stop conditions below.
+
+Attune-side defaults for this gate are intentionally platform-neutral:
+
+- local scheduler long-text runs claim embedding queue batches of 64 by default;
+  the scheduler-native embedding provider then uses
+  `ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE` sub-batches and splits again if the
+  scheduler reports a physical batch-size limit.
+- scheduler OCR is enabled by default for long-text local scheduler runs so
+  image-only PDFs exercise the page OCR path. Non-longtext e2e keeps OCR off
+  unless `ATTUNE_SCHEDULER_OCR_ENABLED=1` is set.
+- scheduler PDF page OCR has platform-neutral runaway protection:
+  `ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS` defaults to 45000ms, and consecutive
+  empty OCR pages count toward `ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES`.
+  If OCR produces no usable text, or returns fatal payload/schema errors such as
+  `unsupported_payload`, ingest falls back to metadata-only indexing instead of
+  blocking the full bind on one scanned PDF.
+- Web UI scheduler answer jobs poll every 500ms, matching the Python/Node
+  long-text UI gates, so the browser surface does not lose the 10s answer SLA
+  to coarse job-poll latency after the scheduler has already completed.
+- explicit low answer-token caps still apply to simple lookups, while
+  cross-document/source-diverse questions are raised to
+  `ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS` (default 40) to avoid
+  truncation-only failures under strict latency tests.
+
+## 2026-07-14 Full E2E Retest
+
+Environment:
+
+- Attune branch workspace with the generic edge scheduler path; no direct
+  llama.cpp/ORT answer calls.
+- Scheduler endpoint: `http://192.168.100.233:8090`, contract
+  `edge-scheduler-v1`.
+- Corpus profile: `edge_scheduler_comprehensive`, 48 PDFs from
+  `airplane-manual-collection`, 42 search/chat queries, 3 multiturn checks.
+- Runner: `ATTUNE_E2E_LONGTEXT=1`, scheduler generation, prompt-cache metadata,
+  answer-budget metadata, and 10s scheduler-generation p95 all required.
+
+Results:
+
+| Gate | Result |
+| --- | --- |
+| Full runner | 9/9 e2e scripts pass |
+| Bind/index | 48/48 documents accepted; scanned/empty OCR PDFs degrade to metadata-only instead of blocking |
+| Search | hit@5=1.0, hit@10=1.0, recall@10=0.9643, MRR@10=0.9187, p95=245ms |
+| Chat API | 42/42 pass, citation=1.0, answer accuracy=1.0, unsafe advice=0.0, p95=9689ms |
+| Scheduler generation | 41/41 required rows covered, p95=8841ms, queue p95=501ms, prompt-eval p95=5806ms, decode p95=3139ms |
+| Answer budget | explicit rows=42, source-diverse rows=15, output tokens p50=24/p95=40 |
+| Multiturn | 3/3 pass, p95=9065ms, no forbidden-source or unsafe-advice turns |
+| Web UI | default query `a320_qrh_abnormal` pass, visible latency=8185ms, scheduler job latency=7410ms, output_tokens=24 |
+
+Attune-side status after this retest:
+
+- The UI 10s failure was an Attune answer-budget issue: exact lookup queries with
+  diverse retrieved candidates were being raised from explicit 24 tokens to 40
+  tokens even when the query was not source-diverse. The fixed policy only raises
+  explicit low caps for source-diverse query intent.
+- The browser and API gates now expose scheduler job timing metadata, so future
+  failures can be attributed to initial Attune request latency, UI polling,
+  scheduler queue wait, prompt eval, or decode.
+- OCR large/scanned PDFs no longer block comprehensive ingestion. Attune stops
+  fatal scheduler OCR payload/schema loops and records metadata-only fallback.
+
+Scheduler-side residual gap:
+
+- OCR worker payload compatibility is still incomplete for scanned PDFs in this
+  environment. The scheduler returns `unsupported_payload` with a requirement for
+  a numeric tensor field named `x`; Attune handles that honestly, but searchable
+  OCR text for those scanned manuals requires a scheduler OCR worker/schema fix.
 
 For the test pyramid entrypoint:
 

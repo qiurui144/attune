@@ -47,8 +47,17 @@ ATTUNE_E2E_LOCAL_SCHEDULER=http://127.0.0.1:8090 \
 scheduler 可设 `ATTUNE_E2E_SCHEDULER_STRICT=0`。
 当前 scheduler 生产接口不是
 尚未落地的 `/v1/embeddings` thin route；需要改 task 时可设
-`ATTUNE_E2E_EMBEDDING_TASK=kb.ingest.embed_batch`。大体量 OCR/解析会让同步 bind
-长时间占用，可用 `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC` 提高超时。
+`ATTUNE_E2E_EMBEDDING_TASK=kb.ingest.embed_batch`。本地 scheduler 长文本门禁默认把
+Attune embedding queue batch 设为 64；scheduler-native embedding provider 会按
+`ATTUNE_SCHEDULER_EMBED_TASK_BATCH_SIZE` 自适应子批，并在 scheduler 报 physical
+batch limit 时二分重试。长文本门禁也默认开启 scheduler OCR；普通 e2e 仍默认关闭
+OCR，可用 `ATTUNE_SCHEDULER_OCR_ENABLED=0/1` 显式覆盖。大体量 OCR/解析会让同步
+bind 长时间占用，可用 `ATTUNE_LONGTEXT_BIND_TIMEOUT_SEC` 提高超时。扫描 PDF 的
+page OCR 另有通用保护：`ATTUNE_SCHEDULER_PDF_OCR_MAX_TOTAL_MS` 默认 45000ms，
+连续空 OCR 页也计入 `ATTUNE_SCHEDULER_PDF_OCR_MAX_CONSECUTIVE_FAILURES`，到阈值后
+诚实降级为 metadata-only；如果 scheduler OCR 返回 `unsupported_payload` 等不会随页
+变化的 fatal payload/schema 错误，Attune 会在第一页后直接停止该 PDF 的 page OCR，而不是
+继续扫完整本 PDF。
 
 云端或其它 OpenAI-compatible LLM 可通过 runner 环境变量注入：
 
@@ -104,6 +113,9 @@ python3 tests/e2e/airplane_manual_longtext_e2e.py
 结果 JSON 中汇总 scheduler 生成 latency、queue wait、cold-start wait，以及
 scheduler 返回的 prompt-cache/cache metadata。若 scheduler 已提供 prompt-cache
 字段，可额外设置 `ATTUNE_LONGTEXT_REQUIRE_PROMPT_CACHE_METADATA=1` 把它升级为硬门禁。
+显式输出上限仍可用于压测简单查询；跨文档/多来源查询会由 Attune 自动抬到
+`ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS`（默认 40），避免过短输出造成
+截断式误判。
 
 解锁后，server 会在后台预热本地 scheduler / scheduler-native 检索链路：
 metadata source scan、典型 source lookup query 和 top-k item 解密会先跑一轮，
@@ -139,6 +151,9 @@ node tests/e2e/playwright/airplane_manual_longtext_ui_e2e.js \
 
 `airplane_manual_longtext_e2e.py` 默认会在 API gate 后调用这个脚本。调试纯
 API 层时可设 `ATTUNE_LONGTEXT_UI=0`。
+Web UI 和 UI e2e 驱动对 scheduler answer job 使用 500ms 轮询，避免 1s+
+轮询颗粒度吞掉 10s SLA 的尾部预算；需要压测较慢平台时可通过
+`ATTUNE_LONGTEXT_UI_POLL_INTERVAL_MS` 覆盖。
 
 ## 前置依赖
 

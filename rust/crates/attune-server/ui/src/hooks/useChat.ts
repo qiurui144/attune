@@ -28,8 +28,8 @@ import { t } from '../i18n';
 // chat 请求超时上限。超过此值视为超时 → 给用户超时提示 + 重试入口，
 // 而非无限转圈让用户怀疑卡死（90s 容忍较慢的本地大模型 / 云端长回答）。
 const CHAT_TIMEOUT_MS = 90_000;
-const LOCAL_SCHEDULER_JOB_POLL_INTERVAL_MS = 1_500;
-const LOCAL_SCHEDULER_JOB_MAX_POLLS = 240;
+const LOCAL_SCHEDULER_JOB_POLL_INTERVAL_MS = 500;
+const LOCAL_SCHEDULER_JOB_MAX_POLLS = 720;
 
 // ── 后端响应类型 ─────────────────────────────────────────────
 type SessionsResponse = {

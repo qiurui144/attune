@@ -42,6 +42,7 @@ const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 const MAX_HISTORY_DEPTH: usize = 80;
 const LOCAL_SCHEDULER_KB_ASK_TASK: &str = "kb.query.ask";
 const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 96;
+const DEFAULT_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS: u32 = 40;
 const MIN_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 16;
 const MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 512;
 const LOCAL_SCHEDULER_KB_ASK_SYSTEM: &str = "Use only refs. Answer concisely with citations/source names. For simple lookups use 1-2 sentences; for comparisons use up to 4 bullets. If evidence is insufficient, say insufficient. No operational instructions.";
@@ -56,6 +57,11 @@ const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 48;
 const MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 16_384;
 const LOCAL_EXTRACTIVE_MODEL_ID: &str = "local-extractive-source-answer";
 const LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS: usize = 64;
+const LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS: [&str; 3] = [
+    "ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
+    "ATTUNE_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
+    "ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LocalSchedulerAnswerBudget {
@@ -149,12 +155,22 @@ fn env_u32_override(keys: &[&str]) -> Option<u32> {
     })
 }
 
+fn local_scheduler_source_diverse_min_output_tokens() -> u32 {
+    crate::local_scheduler::env_u32_any(
+        &[
+            "ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS",
+            "ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS",
+        ],
+        DEFAULT_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS,
+    )
+    .clamp(
+        MIN_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+        MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
+    )
+}
+
 fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSchedulerAnswerBudget {
-    let explicit = env_u32_override(&[
-        "ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
-        "ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS",
-    ])
-    .map(|tokens| {
+    let explicit = env_u32_override(&LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS).map(|tokens| {
         tokens.clamp(
             MIN_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
             MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
@@ -163,8 +179,14 @@ fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSched
     let source_diverse = source_diversity_query(query);
     let base_context_top_k = local_scheduler_ask_context_top_k();
     let base_chunk_chars = chat_context_chunk_max_chars();
+    let multi_source = source_diverse || distinct_source_count(knowledge) >= 3;
 
     if let Some(tokens) = explicit {
+        let tokens = if source_diverse {
+            tokens.max(local_scheduler_source_diverse_min_output_tokens())
+        } else {
+            tokens
+        };
         return LocalSchedulerAnswerBudget {
             profile: "explicit",
             max_output_tokens: tokens,
@@ -201,7 +223,6 @@ fn local_scheduler_answer_budget(query: &str, knowledge: &[Value]) -> LocalSched
         ],
     );
     let asks_source_lookup = local_scheduler_source_lookup_query(query);
-    let multi_source = source_diverse || distinct_source_count(knowledge) >= 3;
 
     let (profile, tokens, min_contexts, min_chars) =
         if local_scheduler_operational_safety_query(query) {
@@ -416,11 +437,8 @@ fn build_local_scheduler_kb_contexts(knowledge: &[Value]) -> Vec<Value> {
         context_top_k: local_scheduler_ask_context_top_k(),
         context_chunk_max_chars: chat_context_chunk_max_chars(),
         source_diverse: false,
-        explicit_output_override: env_u32_override(&[
-            "ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
-            "ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS",
-        ])
-        .is_some(),
+        explicit_output_override: env_u32_override(&LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS)
+            .is_some(),
     };
     build_local_scheduler_kb_contexts_with_budget("", knowledge, budget)
 }
@@ -931,10 +949,7 @@ fn local_scheduler_answer_budget_json(budget: LocalSchedulerAnswerBudget) -> ser
 #[cfg(test)]
 fn local_scheduler_ask_max_output_tokens() -> u32 {
     crate::local_scheduler::env_u32_any(
-        &[
-            "ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS",
-            "ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS",
-        ],
+        &LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS,
         DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS,
     )
     .clamp(
@@ -3033,6 +3048,28 @@ mod tests {
         ENV_LOCK.lock().expect("test env lock")
     }
 
+    fn save_answer_token_env() -> Vec<(&'static str, Option<String>)> {
+        LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect()
+    }
+
+    fn clear_answer_token_env() {
+        for key in LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKEN_ENV_KEYS {
+            std::env::remove_var(key);
+        }
+    }
+
+    fn restore_env(saved: Vec<(&'static str, Option<String>)>) {
+        for (key, value) in saved {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
     fn status_of(e: VaultError) -> u16 {
         match llm_upstream_error(e) {
             AppError::Detailed { status, .. } => status.as_u16(),
@@ -3292,10 +3329,8 @@ mod tests {
     #[test]
     fn local_scheduler_ask_max_output_tokens_defaults_and_allows_env_override() {
         let _env = env_lock();
-        let previous_generic = std::env::var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS").ok();
-        let previous_local = std::env::var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS").ok();
-        std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS");
-        std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS");
+        let previous = save_answer_token_env();
+        clear_answer_token_env();
         assert_eq!(
             local_scheduler_ask_max_output_tokens(),
             DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS
@@ -3303,6 +3338,8 @@ mod tests {
 
         std::env::set_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS", "80");
         assert_eq!(local_scheduler_ask_max_output_tokens(), 80);
+        std::env::set_var("ATTUNE_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "76");
+        assert_eq!(local_scheduler_ask_max_output_tokens(), 76);
         std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "72");
         assert_eq!(local_scheduler_ask_max_output_tokens(), 72);
         std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "9999");
@@ -3311,14 +3348,7 @@ mod tests {
             MAX_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS
         );
 
-        match previous_generic {
-            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", v),
-            None => std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS"),
-        }
-        match previous_local {
-            Some(v) => std::env::set_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS", v),
-            None => std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS"),
-        }
+        restore_env(previous);
     }
 
     #[test]
@@ -3515,34 +3545,83 @@ mod tests {
     #[test]
     fn local_scheduler_answer_budget_uses_explicit_realtime_override() {
         let _env = env_lock();
-        let previous_generic = std::env::var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS").ok();
-        let previous_local = std::env::var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS").ok();
+        let previous = save_answer_token_env();
+        clear_answer_token_env();
         std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "24");
-        std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS");
 
-        let budget = local_scheduler_answer_budget("compare A320 and A330 hydraulic sources", &[]);
+        let budget = local_scheduler_answer_budget("A320 hydraulic source", &[]);
         assert_eq!(budget.profile, "explicit");
         assert_eq!(budget.max_output_tokens, 24);
         assert!(budget.explicit_output_override);
+        assert!(!budget.source_diverse);
+
+        restore_env(previous);
+    }
+
+    #[test]
+    fn local_scheduler_answer_budget_keeps_explicit_cap_for_exact_lookup_with_diverse_hits() {
+        let _env = env_lock();
+        let previous = save_answer_token_env();
+        clear_answer_token_env();
+        std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "24");
+
+        let knowledge = vec![
+            serde_json::json!({"item_id": "airbus-a320-qrh", "title": "A320 QRH"}),
+            serde_json::json!({"item_id": "airbus-a320-fcom", "title": "A320 FCOM"}),
+            serde_json::json!({"item_id": "boeing-b737-qrh", "title": "B737 QRH"}),
+        ];
+        let budget = local_scheduler_answer_budget("A320 QRH abnormal procedure source", &knowledge);
+        assert_eq!(budget.profile, "explicit");
+        assert_eq!(budget.max_output_tokens, 24);
+        assert!(budget.explicit_output_override);
+        assert!(!budget.source_diverse);
+
+        restore_env(previous);
+    }
+
+    #[test]
+    fn local_scheduler_answer_budget_protects_source_diverse_explicit_override() {
+        let _env = env_lock();
+        let previous = save_answer_token_env();
+        let previous_floor =
+            std::env::var("ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS").ok();
+        let previous_local_floor =
+            std::env::var("ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS").ok();
+        clear_answer_token_env();
+        std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", "24");
+        std::env::remove_var("ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS");
+        std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS");
+
+        let budget = local_scheduler_answer_budget("compare A320 and A330 hydraulic sources", &[]);
+        assert_eq!(budget.profile, "explicit");
+        assert_eq!(
+            budget.max_output_tokens,
+            DEFAULT_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS
+        );
+        assert!(budget.explicit_output_override);
         assert!(budget.source_diverse);
 
-        match previous_generic {
-            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", v),
-            None => std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS"),
+        restore_env(previous);
+        match previous_floor {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS"),
         }
-        match previous_local {
-            Some(v) => std::env::set_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS", v),
-            None => std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS"),
+        match previous_local_floor {
+            Some(v) => std::env::set_var(
+                "ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS",
+                v,
+            ),
+            None => {
+                std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_SOURCE_DIVERSE_MIN_OUTPUT_TOKENS")
+            }
         }
     }
 
     #[test]
     fn local_scheduler_answer_budget_expands_for_multisource_synthesis() {
         let _env = env_lock();
-        let previous_generic = std::env::var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS").ok();
-        let previous_local = std::env::var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS").ok();
-        std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS");
-        std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS");
+        let previous = save_answer_token_env();
+        clear_answer_token_env();
 
         let knowledge = vec![
             serde_json::json!({"item_id": "a320-hydraulic", "title": "A320 Hydraulic"}),
@@ -3558,14 +3637,7 @@ mod tests {
         assert!(budget.context_top_k >= 5);
         assert!(budget.context_chunk_max_chars >= 160);
 
-        match previous_generic {
-            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS", v),
-            None => std::env::remove_var("ATTUNE_SCHEDULER_ASK_MAX_OUTPUT_TOKENS"),
-        }
-        match previous_local {
-            Some(v) => std::env::set_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS", v),
-            None => std::env::remove_var("ATTUNE_LOCAL_ASK_MAX_OUTPUT_TOKENS"),
-        }
+        restore_env(previous);
     }
 
     #[test]
