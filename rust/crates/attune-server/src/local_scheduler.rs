@@ -86,6 +86,7 @@ pub(crate) fn ingest_options_from_state(
             ],
             120_000,
         ) as u64)
+        .with_chunking(attune_core::chunker::ChunkingOptions::scheduler_from_env())
 }
 
 pub(crate) fn runtime_profiles_for_base(base: &str) -> attune_core::edge_cloud::RuntimeProfileSet {
@@ -345,5 +346,42 @@ mod tests {
             classify_scheduler_failure(&failed, SchedulerDegradationPolicy::ExplicitDegradedResult);
         assert!(!strict_view.may_degrade);
         assert!(degrade_view.may_degrade);
+    }
+
+    #[test]
+    fn scheduler_ingest_uses_coarse_l2_only_chunking_defaults() {
+        for key in [
+            "ATTUNE_SCHEDULER_INGEST_CHUNK_SIZE",
+            "ATTUNE_LOCAL_SCHEDULER_INGEST_CHUNK_SIZE",
+            "ATTUNE_INGEST_CHUNK_SIZE",
+            "ATTUNE_INDEX_CHUNK_SIZE",
+            "ATTUNE_CHUNK_SIZE",
+            "ATTUNE_SCHEDULER_INGEST_CHUNK_OVERLAP",
+            "ATTUNE_LOCAL_SCHEDULER_INGEST_CHUNK_OVERLAP",
+            "ATTUNE_INGEST_CHUNK_OVERLAP",
+            "ATTUNE_INDEX_CHUNK_OVERLAP",
+            "ATTUNE_CHUNK_OVERLAP",
+            "ATTUNE_SCHEDULER_INGEST_INCLUDE_LEVEL1",
+            "ATTUNE_LOCAL_SCHEDULER_INGEST_INCLUDE_LEVEL1",
+            "ATTUNE_INGEST_INCLUDE_LEVEL1",
+            "ATTUNE_SCHEDULER_INGEST_INCLUDE_LEVEL2",
+            "ATTUNE_LOCAL_SCHEDULER_INGEST_INCLUDE_LEVEL2",
+            "ATTUNE_INGEST_INCLUDE_LEVEL2",
+        ] {
+            if std::env::var_os(key).is_some() {
+                return;
+            }
+        }
+        let chunking = attune_core::chunker::ChunkingOptions::scheduler_from_env();
+        assert_eq!(
+            chunking.chunk_size,
+            attune_core::chunker::DEFAULT_SCHEDULER_CHUNK_SIZE
+        );
+        assert_eq!(
+            chunking.overlap,
+            attune_core::chunker::DEFAULT_SCHEDULER_OVERLAP
+        );
+        assert!(!chunking.include_level1);
+        assert!(chunking.include_level2);
     }
 }

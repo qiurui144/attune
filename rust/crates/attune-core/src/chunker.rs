@@ -15,6 +15,8 @@
 
 pub const DEFAULT_CHUNK_SIZE: usize = 512;
 pub const DEFAULT_OVERLAP: usize = 128;
+pub const DEFAULT_SCHEDULER_CHUNK_SIZE: usize = 4096;
+pub const DEFAULT_SCHEDULER_OVERLAP: usize = 256;
 pub const SECTION_TARGET_SIZE: usize = 1500;
 pub const MIN_CONFIGURED_CHUNK_SIZE: usize = 128;
 pub const MAX_CONFIGURED_CHUNK_SIZE: usize = 32 * 1024;
@@ -66,6 +68,53 @@ impl ChunkingOptions {
         );
         let include_level1 = env_bool_any(&["ATTUNE_INGEST_INCLUDE_LEVEL1"], true);
         let include_level2 = env_bool_any(&["ATTUNE_INGEST_INCLUDE_LEVEL2"], true);
+        Self::normalized(chunk_size, overlap, include_level1, include_level2)
+    }
+
+    /// Scheduler-backed edge ingest uses coarser L2-only chunking by default.
+    ///
+    /// On large manuals, the legacy 512-character L1+L2 policy can enqueue tens
+    /// of thousands of redundant embedding jobs per corpus and push the answer
+    /// path behind indexing. The scheduler path is meant to run on constrained
+    /// local CPU/NPU boxes, so the default favors bounded queue size and stable
+    /// recall; operators can still override every knob with env vars.
+    pub fn scheduler_from_env() -> Self {
+        let chunk_size = env_usize_any(
+            &[
+                "ATTUNE_SCHEDULER_INGEST_CHUNK_SIZE",
+                "ATTUNE_LOCAL_SCHEDULER_INGEST_CHUNK_SIZE",
+                "ATTUNE_INGEST_CHUNK_SIZE",
+                "ATTUNE_INDEX_CHUNK_SIZE",
+                "ATTUNE_CHUNK_SIZE",
+            ],
+            DEFAULT_SCHEDULER_CHUNK_SIZE,
+        );
+        let overlap = env_usize_any(
+            &[
+                "ATTUNE_SCHEDULER_INGEST_CHUNK_OVERLAP",
+                "ATTUNE_LOCAL_SCHEDULER_INGEST_CHUNK_OVERLAP",
+                "ATTUNE_INGEST_CHUNK_OVERLAP",
+                "ATTUNE_INDEX_CHUNK_OVERLAP",
+                "ATTUNE_CHUNK_OVERLAP",
+            ],
+            DEFAULT_SCHEDULER_OVERLAP,
+        );
+        let include_level1 = env_bool_any(
+            &[
+                "ATTUNE_SCHEDULER_INGEST_INCLUDE_LEVEL1",
+                "ATTUNE_LOCAL_SCHEDULER_INGEST_INCLUDE_LEVEL1",
+                "ATTUNE_INGEST_INCLUDE_LEVEL1",
+            ],
+            false,
+        );
+        let include_level2 = env_bool_any(
+            &[
+                "ATTUNE_SCHEDULER_INGEST_INCLUDE_LEVEL2",
+                "ATTUNE_LOCAL_SCHEDULER_INGEST_INCLUDE_LEVEL2",
+                "ATTUNE_INGEST_INCLUDE_LEVEL2",
+            ],
+            true,
+        );
         Self::normalized(chunk_size, overlap, include_level1, include_level2)
     }
 

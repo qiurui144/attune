@@ -596,7 +596,9 @@ fn validate_path_segment(name: &str, value: &str) -> Result<()> {
     }
 }
 
-fn deserialize_optional_error_string<'de, D>(deserializer: D) -> std::result::Result<Option<String>, D::Error>
+fn deserialize_optional_error_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
 {

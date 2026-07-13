@@ -2095,9 +2095,27 @@ impl AppState {
                     continue;
                 }
 
-                // 调 attune-core::queue::embed_and_index_batch 共享批处理。
-                // 锁顺序：fulltext → vectors → vault（规范序，与 search/chat 热点路径一致），
-                // 全程持锁直到 done_ids 取出。绝不 vault 先于 fulltext/vectors（ABBA 死锁）。
+                let embedding_result = {
+                    let texts: Vec<&str> =
+                        embed_tasks.iter().map(|t| t.chunk_text.as_str()).collect();
+                    embedding.embed(&texts)
+                };
+                let embeddings = match embedding_result {
+                    Ok((embeddings, _usage)) => embeddings,
+                    Err(e) => {
+                        tracing::warn!("Embedding batch failed: {}", e);
+                        let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                        for task in &embed_tasks {
+                            let _ = vault.store().mark_embedding_failed(task.id, MAX_ATTEMPTS);
+                        }
+                        std::thread::sleep(POLL_INTERVAL);
+                        continue;
+                    }
+                };
+
+                // Embedding generation happens above without hot-path locks.
+                // Only the index/DB writeback takes fulltext → vectors → vault,
+                // so scheduler latency cannot stall search/delete/update.
                 let done_ids: Vec<i64> = {
                     let ft_guard = state.fulltext.lock().unwrap_or_else(|e| e.into_inner());
                     let mut vecs_guard = state.vectors.lock().unwrap_or_else(|e| e.into_inner());
@@ -2114,12 +2132,12 @@ impl AppState {
                         continue;
                     };
 
-                    match attune_core::queue::embed_and_index_batch(
+                    match attune_core::queue::index_embedding_results(
                         vault.store(),
-                        embedding.as_ref(),
                         vi,
                         ft,
                         &embed_tasks,
+                        &embeddings,
                     ) {
                         Ok(ids) => {
                             for id in &ids {

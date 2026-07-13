@@ -16,6 +16,7 @@ const CODE_EXTENSIONS: &[&str] = &[
 
 const DEFAULT_PARSE_SCHEDULER_TIMEOUT_MS: u64 = 120_000;
 const DEFAULT_SCHEDULER_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_OCRMYPDF_MAX_BYTES: usize = 16 * 1024 * 1024;
 const SCHEDULER_INLINE_JSON_OVERHEAD_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Default)]
@@ -84,19 +85,58 @@ fn safe_pdf_extract_text_from_mem(data: &[u8]) -> std::result::Result<String, St
 }
 
 fn ocrmypdf_fallback_enabled() -> bool {
-    std::env::var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    env_bool_any(&["ATTUNE_ENABLE_OCRMYPDF_FALLBACK"], false)
+}
+
+fn ocrmypdf_max_bytes() -> usize {
+    env_usize_any(
+        &[
+            "ATTUNE_OCRMYPDF_MAX_BYTES",
+            "ATTUNE_SCHEDULER_OCRMYPDF_MAX_BYTES",
+            "ATTUNE_LOCAL_SCHEDULER_OCRMYPDF_MAX_BYTES",
+        ],
+        DEFAULT_OCRMYPDF_MAX_BYTES,
+    )
+}
+
+fn scheduler_local_ocr_provider_fallback_enabled() -> bool {
+    env_bool_any(
+        &[
+            "ATTUNE_SCHEDULER_ALLOW_LOCAL_OCR_PROVIDER_FALLBACK",
+            "ATTUNE_LOCAL_SCHEDULER_ALLOW_LOCAL_OCR_PROVIDER_FALLBACK",
+        ],
+        false,
+    )
+}
+
+fn scheduler_ocr_enabled() -> bool {
+    env_bool_any(
+        &[
+            "ATTUNE_SCHEDULER_OCR_ENABLED",
+            "ATTUNE_LOCAL_SCHEDULER_OCR_ENABLED",
+        ],
+        true,
+    )
 }
 
 fn try_ocrmypdf_sidecar_from_path(path: &Path) -> Option<String> {
     if !ocrmypdf_fallback_enabled() {
         return None;
+    }
+    let max_bytes = ocrmypdf_max_bytes();
+    if max_bytes > 0 {
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if metadata.len() > max_bytes as u64 {
+                log::warn!(
+                    "ocrmypdf fallback skipped for {}: file too large ({} bytes > max {} bytes); \
+                     use scheduler page/chunk OCR for large scanned PDFs",
+                    path.display(),
+                    metadata.len(),
+                    max_bytes
+                );
+                return None;
+            }
+        }
     }
     let ocrmypdf = which::which("ocrmypdf").ok()?;
     let tmp = tempfile::TempDir::new().ok()?;
@@ -156,6 +196,19 @@ fn env_usize_any(keys: &[&str], default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn env_bool_any(keys: &[&str], default: bool) -> bool {
+    keys.iter()
+        .find_map(|key| {
+            std::env::var(key).ok().map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+        })
+        .unwrap_or(default)
+}
+
 fn scheduler_max_body_bytes() -> usize {
     env_usize_any(
         &[
@@ -171,50 +224,97 @@ fn base64_encoded_len(bytes: usize) -> Option<usize> {
 }
 
 fn scheduler_inline_file_fits_body(bytes: usize, max_body_bytes: usize) -> bool {
+    scheduler_inline_file_fits_body_with_copies(bytes, max_body_bytes, 1)
+}
+
+fn scheduler_inline_file_fits_body_with_copies(
+    bytes: usize,
+    max_body_bytes: usize,
+    encoded_copies: usize,
+) -> bool {
     let Some(encoded) = base64_encoded_len(bytes) else {
         return false;
     };
-    encoded <= max_body_bytes.saturating_sub(SCHEDULER_INLINE_JSON_OVERHEAD_BYTES)
+    let Some(total_encoded) = encoded.checked_mul(encoded_copies.max(1)) else {
+        return false;
+    };
+    total_encoded <= max_body_bytes.saturating_sub(SCHEDULER_INLINE_JSON_OVERHEAD_BYTES)
 }
 
 fn scheduler_inline_file_fits(filename: &str, bytes: usize, task: &str) -> bool {
+    scheduler_inline_file_fits_with_copies(filename, bytes, task, 1)
+}
+
+fn scheduler_inline_file_fits_with_copies(
+    filename: &str,
+    bytes: usize,
+    task: &str,
+    encoded_copies: usize,
+) -> bool {
     let max_body = scheduler_max_body_bytes();
-    if scheduler_inline_file_fits_body(bytes, max_body) {
+    let encoded_copies = encoded_copies.max(1);
+    let fits = if encoded_copies == 1 {
+        scheduler_inline_file_fits_body(bytes, max_body)
+    } else {
+        scheduler_inline_file_fits_body_with_copies(bytes, max_body, encoded_copies)
+    };
+    if fits {
         return true;
     }
     let encoded = base64_encoded_len(bytes).unwrap_or(usize::MAX);
+    let total_encoded = encoded.saturating_mul(encoded_copies);
     log::warn!(
         "scheduler task {task} skipped for {filename}: inline file payload too large \
-         (raw={} bytes, base64~{} bytes, max_body={} bytes); use text extraction or \
+         (raw={} bytes, base64~{} bytes, encoded_copies={}, total_base64~{} bytes, max_body={} bytes); use text extraction or \
          page/chunk scheduler OCR for large documents",
         bytes,
         encoded,
+        encoded_copies,
+        total_encoded,
         max_body
     );
     false
 }
 
-fn scheduler_ocr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> Option<String> {
-    let base = options.scheduler_base.as_deref()?;
-    if !scheduler_inline_file_fits(filename, data.len(), "kb.document.ocr_recognize") {
-        return None;
-    }
+fn scheduler_ocr_body(data: &[u8], filename: &str, options: &ParseOptions) -> Value {
+    let file_base64 = base64::engine::general_purpose::STANDARD.encode(data);
     let timeout_ms = options
         .scheduler_timeout()
         .as_millis()
         .min(u32::MAX as u128) as u32;
-    let body = serde_json::json!({
+    let input = serde_json::json!({
         "filename": filename,
         "profile": options.profile_id(),
         "profile_id": options.profile_id(),
-        "file_base64": base64::engine::general_purpose::STANDARD.encode(data),
+        "file_base64": file_base64.clone(),
+    });
+    serde_json::json!({
+        // Compatibility aliases: older Attune sent top-level fields, while the
+        // scheduler task wrapper commonly validates an `x` or `input` argument.
+        "input": input.clone(),
+        "x": input,
+        "filename": filename,
+        "profile": options.profile_id(),
+        "profile_id": options.profile_id(),
+        "file_base64": file_base64,
         "timeout_ms": timeout_ms,
         "ttl_ms": timeout_ms
-    });
+    })
+}
+
+fn scheduler_ocr_bytes(data: &[u8], filename: &str, options: &ParseOptions) -> Option<String> {
+    let base = options.scheduler_base.as_deref()?;
+    if !scheduler_ocr_enabled() {
+        return None;
+    }
+    if !scheduler_inline_file_fits_with_copies(filename, data.len(), "kb.document.ocr_recognize", 3)
+    {
+        return None;
+    }
     scheduler_task_text(
         base,
         "kb.document.ocr_recognize",
-        body,
+        scheduler_ocr_body(data, filename, options),
         options.scheduler_timeout(),
     )
 }
@@ -668,11 +768,11 @@ fn try_ocr_from_pdf_path_with_dpi(path: &Path, dpi: u32, options: &ParseOptions)
     if let Some(text) = scheduler_ocr_path(path, options) {
         return Some(text);
     }
-    if options.scheduler_base.is_some() {
-        return None;
-    }
     if let Some(text) = try_ocrmypdf_sidecar_from_path(path) {
         return Some(text);
+    }
+    if options.scheduler_base.is_some() && !scheduler_local_ocr_provider_fallback_enabled() {
+        return None;
     }
     let provider = crate::ocr::detect_default_provider()?;
     match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), path, dpi) {
@@ -699,14 +799,14 @@ fn try_ocr_from_bytes_with_dpi(
     if let Some(text) = scheduler_ocr_bytes(data, filename, options) {
         return Some(text);
     }
-    if options.scheduler_base.is_some() {
-        return None;
-    }
     let mut tmp = tempfile::Builder::new().suffix(".pdf").tempfile().ok()?;
     tmp.write_all(data).ok()?;
     tmp.flush().ok()?;
     if let Some(text) = try_ocrmypdf_sidecar_from_path(tmp.path()) {
         return Some(text);
+    }
+    if options.scheduler_base.is_some() && !scheduler_local_ocr_provider_fallback_enabled() {
+        return None;
     }
     let provider = crate::ocr::detect_default_provider()?;
     match crate::ocr::extract_text_from_pdf_with_dpi(provider.as_ref(), tmp.path(), dpi) {
@@ -1442,6 +1542,36 @@ fn parse_audio_file(path: &Path, stem: &str, options: &ParseOptions) -> Result<(
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct EnvRestore {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvRestore {
+        fn new(keys: &[&'static str]) -> Self {
+            Self {
+                saved: keys
+                    .iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
 
     // ─── HTML ─────────────────────────────────────────────────────────────────
 
@@ -1816,6 +1946,98 @@ mod tests {
             3,
             SCHEDULER_INLINE_JSON_OVERHEAD_BYTES + 4
         ));
+    }
+
+    #[test]
+    fn scheduler_inline_file_body_budget_accounts_for_alias_copies() {
+        let max = 16 * 1024 * 1024;
+        assert!(scheduler_inline_file_fits_body_with_copies(
+            3 * 1024 * 1024,
+            max,
+            3
+        ));
+        assert!(!scheduler_inline_file_fits_body_with_copies(
+            5 * 1024 * 1024,
+            max,
+            3
+        ));
+    }
+
+    #[test]
+    fn scheduler_ocr_body_includes_scheduler_worker_aliases() {
+        let options = ParseOptions::with_profile(Some("scan")).with_scheduler_timeout_ms(1_500);
+        let body = scheduler_ocr_body(b"abc", "scan.pdf", &options);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"abc");
+
+        assert_eq!(
+            body.pointer("/filename").and_then(Value::as_str),
+            Some("scan.pdf")
+        );
+        assert_eq!(
+            body.pointer("/file_base64").and_then(Value::as_str),
+            Some(encoded.as_str())
+        );
+        assert_eq!(
+            body.pointer("/input/file_base64").and_then(Value::as_str),
+            Some(encoded.as_str())
+        );
+        assert_eq!(
+            body.pointer("/x/file_base64").and_then(Value::as_str),
+            Some(encoded.as_str())
+        );
+        assert_eq!(
+            body.pointer("/input/profile").and_then(Value::as_str),
+            Some("scan")
+        );
+        assert_eq!(
+            body.pointer("/x/profile_id").and_then(Value::as_str),
+            Some("scan")
+        );
+        assert_eq!(
+            body.pointer("/timeout_ms").and_then(Value::as_u64),
+            Some(1_500)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_pdf_ocr_uses_ocrmypdf_sidecar_after_inline_skip() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _restore = EnvRestore::new(&[
+            "ATTUNE_ENABLE_OCRMYPDF_FALLBACK",
+            "ATTUNE_SCHEDULER_MAX_BODY_BYTES",
+            "PATH",
+        ]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let fake_ocrmypdf = dir.path().join("ocrmypdf");
+        std::fs::write(
+            &fake_ocrmypdf,
+            "#!/bin/sh\n\
+             sidecar=''\n\
+             while [ \"$#\" -gt 0 ]; do\n\
+               if [ \"$1\" = '--sidecar' ]; then sidecar=\"$2\"; shift 2; continue; fi\n\
+               shift\n\
+             done\n\
+             printf '%s\\n' 'OCR sidecar fallback text' > \"$sidecar\"\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_ocrmypdf).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_ocrmypdf, perms).unwrap();
+
+        let old_path = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), old_path.to_string_lossy());
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("ATTUNE_ENABLE_OCRMYPDF_FALLBACK", "1");
+        std::env::set_var("ATTUNE_SCHEDULER_MAX_BODY_BYTES", "4096");
+
+        let pdf = dir.path().join("scan.pdf");
+        std::fs::write(&pdf, b"%PDF fake scanned page").unwrap();
+        let options = ParseOptions::default().with_scheduler_base(Some("http://127.0.0.1:1"));
+        let text = try_ocr_from_pdf_path_with_dpi(&pdf, 300, &options).unwrap();
+        assert_eq!(text.trim(), "OCR sidecar fallback text");
     }
 
     #[test]

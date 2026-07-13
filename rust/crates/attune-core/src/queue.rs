@@ -148,18 +148,21 @@ impl QueueWorker {
     ) -> Result<usize> {
         let count = tasks.len();
 
-        // 锁顺序：vectors → fulltext → store（与 server::start_queue_worker 一致）
-        let mut vecs = vectors
-            .lock()
-            .map_err(|_| VaultError::Crypto("vectors lock poisoned".into()))?;
+        let texts: Vec<&str> = tasks.iter().map(|t| t.chunk_text.as_str()).collect();
+        let (embeddings, _usage) = embedding.embed(&texts)?;
+
+        // 锁顺序：fulltext → vectors → store（与 server::start_queue_worker 一致）
         let ft = fulltext
             .lock()
             .map_err(|_| VaultError::Crypto("fulltext lock poisoned".into()))?;
+        let mut vecs = vectors
+            .lock()
+            .map_err(|_| VaultError::Crypto("vectors lock poisoned".into()))?;
         let s = store
             .lock()
             .map_err(|_| VaultError::Crypto("store lock poisoned".into()))?;
 
-        let result = embed_and_index_batch(&s, embedding.as_ref(), &mut vecs, &ft, &tasks);
+        let result = index_embedding_results(&s, &mut vecs, &ft, &tasks, &embeddings);
         match result {
             Ok(done_ids) => {
                 for id in done_ids {
@@ -204,9 +207,9 @@ impl QueueWorker {
 /// "embed → 写 vectors → 写 fulltext (Level 1 only)" 逻辑。
 ///
 /// 调用方负责：
-///   - 已加好 `store` / `vectors` / `fulltext` 的锁（外层 Mutex 已 lock）
-///   - 拿到返回的成功 task id 列表后调 `store.mark_embedding_done(id)`
-///   - flush（vector 持久化、fulltext commit）由调用方按节流策略决定
+///   - 不在持有 hot-path locks 时调用本函数；本函数会同步调用 embedding backend。
+///   - 拿到返回的成功 task id 列表后调 `store.mark_embedding_done(id)`。
+///   - flush（vector 持久化、fulltext commit）由调用方按节流策略决定。
 ///
 /// 返回成功处理的 task id；批量 embed 失败抛错（调用方决定是否 mark_failed）。
 pub fn embed_and_index_batch(
@@ -221,7 +224,19 @@ pub fn embed_and_index_batch(
     }
     let texts: Vec<&str> = tasks.iter().map(|t| t.chunk_text.as_str()).collect();
     let (embeddings, _usage) = embedding.embed(&texts)?;
+    index_embedding_results(store, vectors, fulltext, tasks, &embeddings)
+}
 
+/// Write precomputed embeddings into vectors/fulltext and return task ids that
+/// can be marked done. Embedding generation must happen before callers take
+/// hot-path locks; this keeps scheduler latency out of search/delete/update.
+pub fn index_embedding_results(
+    store: &Store,
+    vectors: &mut VectorIndex,
+    fulltext: &FulltextIndex,
+    tasks: &[QueueTask],
+    embeddings: &[Vec<f32>],
+) -> Result<Vec<i64>> {
     // item 存活检查缓存。竞态场景 — embed worker dequeue chunk 任务
     // 时 item 还在，但 embedding 完写向量前 item 已被 delete_item 软删（reindex
     // worker / HTTP delete 并发）。不检查会写 orphan 向量（已删文档仍被搜到）。

@@ -41,13 +41,16 @@ const MAX_HISTORY_CONTENT_LEN: usize = 8_192;
 /// 真正的窗口感知裁剪由context_budget 在拿到 LLM 后做（见下方）。
 const MAX_HISTORY_DEPTH: usize = 80;
 const LOCAL_SCHEDULER_KB_ASK_TASK: &str = "kb.query.ask";
-const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 36;
-const LOCAL_SCHEDULER_KB_ASK_SYSTEM: &str = "Answer only from the reference material. Be terse: 1-2 sentences or 3 bullets maximum. Start with the specific manual, topic, or identifier from the question when supported. Do not use generic preambles such as 'Based on the provided reference material'. If the evidence is insufficient, say so briefly. Do not provide operational instructions.";
+const DEFAULT_LOCAL_SCHEDULER_ASK_MAX_OUTPUT_TOKENS: u32 = 24;
+const LOCAL_SCHEDULER_KB_ASK_SYSTEM: &str = "Use only refs. Answer in one short sentence, or up to 3 terse bullets for comparisons. Name the relevant manual/topic when supported. If evidence is insufficient, say insufficient. No operational instructions.";
 const DEFAULT_CHAT_KB_TOP_K: u32 = 5;
 const MIN_CHAT_KB_TOP_K: u32 = 1;
 const MAX_CHAT_KB_TOP_K: u32 = 20;
-const DEFAULT_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 128;
-const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 96;
+const DEFAULT_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K: u32 = 3;
+const MIN_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K: u32 = 1;
+const MAX_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K: u32 = 8;
+const DEFAULT_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 96;
+const MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 48;
 const MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS: u32 = 16_384;
 const LOCAL_EXTRACTIVE_MODEL_ID: &str = "local-extractive-source-answer";
 const LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS: usize = 64;
@@ -99,6 +102,7 @@ fn chat_context_chunk_max_chars() -> usize {
         &[
             "ATTUNE_CHAT_CONTEXT_CHUNK_MAX_CHARS",
             "ATTUNE_RAG_CONTEXT_CHUNK_MAX_CHARS",
+            "ATTUNE_SCHEDULER_ASK_CONTEXT_CHUNK_MAX_CHARS",
             "ATTUNE_SCHEDULER_CONTEXT_CHUNK_MAX_CHARS",
         ],
         DEFAULT_CHAT_CONTEXT_CHUNK_MAX_CHARS,
@@ -106,6 +110,21 @@ fn chat_context_chunk_max_chars() -> usize {
     .clamp(
         MIN_CHAT_CONTEXT_CHUNK_MAX_CHARS,
         MAX_CHAT_CONTEXT_CHUNK_MAX_CHARS,
+    ) as usize
+}
+
+fn local_scheduler_ask_context_top_k() -> usize {
+    crate::local_scheduler::env_u32_any(
+        &[
+            "ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K",
+            "ATTUNE_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K",
+            "ATTUNE_SCHEDULER_CHAT_CONTEXT_TOP_K",
+        ],
+        DEFAULT_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K,
+    )
+    .clamp(
+        MIN_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K,
+        MAX_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K,
     ) as usize
 }
 
@@ -146,7 +165,7 @@ fn local_scheduler_context_text(title: &str, evidence: &str, max_chars: usize) -
 
     let title_budget = (max_chars / 4).clamp(32, LOCAL_SCHEDULER_CONTEXT_TITLE_MAX_CHARS);
     let title = bounded_context_text(title, title_budget);
-    let prefix = format!("Source: {title}\nEvidence: ");
+    let prefix = format!("{title}: ");
     if prefix.chars().count() >= max_chars {
         return bounded_context_text(&format!("{prefix}{evidence}"), max_chars);
     }
@@ -182,8 +201,10 @@ fn build_chat_search_params(
 
 fn build_local_scheduler_kb_contexts(knowledge: &[Value]) -> Vec<Value> {
     let max_context_chars = chat_context_chunk_max_chars();
+    let context_limit = local_scheduler_ask_context_top_k();
     knowledge
         .iter()
+        .take(context_limit)
         .filter_map(|k| {
             let title = local_scheduler_source_title(k);
             let text = k
@@ -210,9 +231,9 @@ fn build_local_scheduler_kb_contexts(knowledge: &[Value]) -> Vec<Value> {
 }
 
 fn build_local_scheduler_admission_messages(query: &str, contexts: &[Value]) -> Vec<ChatMessage> {
-    let mut user = format!("Question: {query}");
+    let mut user = format!("Q: {query}");
     if !contexts.is_empty() {
-        user.push_str("\n\nReference material:\n");
+        user.push_str("\n\nRefs:\n");
         for (idx, ctx) in contexts.iter().enumerate() {
             let text = ctx.get("text").and_then(|v| v.as_str()).unwrap_or("");
             if !text.is_empty() {
@@ -265,6 +286,17 @@ fn compact_ascii_lower(text: &str) -> String {
 fn contains_any_ascii(text: &str, needles: &[&str]) -> bool {
     let haystack = text.to_ascii_lowercase();
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn normalize_source_hint_text(text: &str) -> Option<String> {
+    let mut hint = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if hint.chars().count() < 4 {
+        return None;
+    }
+    if hint.chars().count() > 260 {
+        hint = hint.chars().take(260).collect();
+    }
+    Some(hint)
 }
 
 fn history_source_followup_query(query: &str) -> bool {
@@ -375,11 +407,7 @@ fn source_hint_line(line: &str) -> Option<String> {
     ) {
         return None;
     }
-    let mut hint = bullet.split_whitespace().collect::<Vec<_>>().join(" ");
-    if hint.chars().count() > 260 {
-        hint = hint.chars().take(260).collect();
-    }
-    Some(hint)
+    normalize_source_hint_text(bullet)
 }
 
 fn score_source_hint_for_query(hint: &str, markers: &[&str]) -> usize {
@@ -396,6 +424,55 @@ fn score_source_hint_for_query(hint: &str, markers: &[&str]) -> usize {
         .count()
 }
 
+fn plain_answer_source_hint_line(line: &str, markers: &[&str]) -> Option<String> {
+    if markers.is_empty() {
+        return None;
+    }
+    let hint = normalize_source_hint_text(line.trim())?;
+    let lower = hint.to_ascii_lowercase();
+    if !contains_any_ascii(
+        &lower,
+        &[
+            "source",
+            "manual",
+            "reference",
+            "handbook",
+            "qrh",
+            "fcom",
+            "fctm",
+            "amm",
+            "sop",
+            "mel",
+            "pdf",
+            "flight crew",
+        ],
+    ) {
+        return None;
+    }
+    let score = score_source_hint_for_query(&hint, markers);
+    let required_score = if markers.len() >= 2 { 2 } else { 1 };
+    if score < required_score {
+        return None;
+    }
+    Some(hint)
+}
+
+fn push_history_source_hint(
+    candidates: &mut Vec<(usize, usize, String)>,
+    seen: &mut std::collections::HashSet<String>,
+    markers: &[&str],
+    hint: String,
+) {
+    let key = compact_ascii_lower(&hint);
+    if key.is_empty() || !seen.insert(key) {
+        return;
+    }
+    let score = score_source_hint_for_query(&hint, markers);
+    if markers.is_empty() || score > 0 {
+        candidates.push((score, candidates.len(), hint));
+    }
+}
+
 fn history_source_hints_for_query(
     query: &str,
     history: &[HistoryMessage],
@@ -408,17 +485,19 @@ fn history_source_hints_for_query(
     let mut candidates = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for h in history.iter().rev().filter(|h| h.role == "assistant") {
+        let candidate_count_before_message = candidates.len();
         for line in h.content.lines() {
             let Some(hint) = source_hint_line(line) else {
                 continue;
             };
-            let key = compact_ascii_lower(&hint);
-            if key.is_empty() || !seen.insert(key) {
-                continue;
-            }
-            let score = score_source_hint_for_query(&hint, &markers);
-            if markers.is_empty() || score > 0 {
-                candidates.push((score, candidates.len(), hint));
+            push_history_source_hint(&mut candidates, &mut seen, &markers, hint);
+        }
+        if candidates.len() == candidate_count_before_message {
+            for line in h.content.lines() {
+                let Some(hint) = plain_answer_source_hint_line(line, &markers) else {
+                    continue;
+                };
+                push_history_source_hint(&mut candidates, &mut seen, &markers, hint);
             }
         }
         if !candidates.is_empty() {
@@ -2999,6 +3078,44 @@ mod tests {
     }
 
     #[test]
+    fn local_scheduler_ask_context_top_k_defaults_allows_override_and_clamps() {
+        let _env = env_lock();
+        let previous_generic = std::env::var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K").ok();
+        let previous_local = std::env::var("ATTUNE_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K").ok();
+        let previous_chat = std::env::var("ATTUNE_SCHEDULER_CHAT_CONTEXT_TOP_K").ok();
+        std::env::remove_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K");
+        std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K");
+        std::env::remove_var("ATTUNE_SCHEDULER_CHAT_CONTEXT_TOP_K");
+        assert_eq!(
+            local_scheduler_ask_context_top_k(),
+            DEFAULT_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K as usize
+        );
+
+        std::env::set_var("ATTUNE_SCHEDULER_CHAT_CONTEXT_TOP_K", "4");
+        assert_eq!(local_scheduler_ask_context_top_k(), 4);
+        std::env::set_var("ATTUNE_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K", "2");
+        assert_eq!(local_scheduler_ask_context_top_k(), 2);
+        std::env::set_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K", "99");
+        assert_eq!(
+            local_scheduler_ask_context_top_k(),
+            MAX_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K as usize
+        );
+
+        match previous_generic {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K"),
+        }
+        match previous_local {
+            Some(v) => std::env::set_var("ATTUNE_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K", v),
+            None => std::env::remove_var("ATTUNE_LOCAL_SCHEDULER_ASK_CONTEXT_TOP_K"),
+        }
+        match previous_chat {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_CHAT_CONTEXT_TOP_K", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_CHAT_CONTEXT_TOP_K"),
+        }
+    }
+
+    #[test]
     fn local_scheduler_source_lookup_detects_standard_operating_procedure() {
         assert!(local_scheduler_source_lookup_query(
             "A320 RNAV GPS approach standard operating procedure"
@@ -3041,6 +3158,21 @@ mod tests {
     }
 
     #[test]
+    fn history_aware_retrieval_query_derives_hint_from_plain_scheduler_answer() {
+        let history = vec![HistoryMessage {
+            role: "assistant".into(),
+            content: "The A320 QRH Quick Reference Handbook (QRH) is a critical document for pilots, containing detailed procedures.".into(),
+        }];
+        let query = build_history_aware_retrieval_query(
+            "Using only the prior A320 QRH cited source, answer in one sentence: which aircraft family and manual type does that source belong to?",
+            &history,
+        );
+
+        assert!(query.contains("Prior cited source hints"));
+        assert!(query.contains("A320 QRH Quick Reference Handbook"));
+    }
+
+    #[test]
     fn local_scheduler_native_kb_can_be_enabled_by_provider_settings() {
         let hardware = attune_core::platform::HardwareProfile::default();
         let settings = serde_json::json!({
@@ -3072,13 +3204,36 @@ mod tests {
         })];
         let contexts = build_local_scheduler_kb_contexts(&knowledge);
         assert_eq!(contexts.len(), 1);
-        assert_eq!(
-            contexts[0]["text"],
-            "Source: 合同\nEvidence: bounded evidence"
-        );
+        assert_eq!(contexts[0]["text"], "合同: bounded evidence");
         assert_eq!(contexts[0]["source_id"], "item-1");
         assert_eq!(contexts[0]["title"], "合同");
         assert_eq!(contexts[0]["breadcrumb"][0], "第一章");
+    }
+
+    #[test]
+    fn local_scheduler_context_builder_limits_answer_contexts() {
+        let _env = env_lock();
+        let previous = std::env::var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K").ok();
+        std::env::set_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K", "2");
+
+        let knowledge = (0..5)
+            .map(|idx| {
+                serde_json::json!({
+                    "item_id": format!("item-{idx}"),
+                    "title": format!("Source {idx}"),
+                    "inject_content": format!("evidence {idx}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let contexts = build_local_scheduler_kb_contexts(&knowledge);
+        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts[0]["source_id"], "item-0");
+        assert_eq!(contexts[1]["source_id"], "item-1");
+
+        match previous {
+            Some(v) => std::env::set_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K", v),
+            None => std::env::remove_var("ATTUNE_SCHEDULER_ASK_CONTEXT_TOP_K"),
+        }
     }
 
     #[test]
@@ -3096,8 +3251,7 @@ mod tests {
         let text =
             local_scheduler_context_text(&"manual-title-".repeat(30), &"e".repeat(2000), 256);
         assert!(text.chars().count() <= 256);
-        assert!(text.starts_with("Source: manual-title-"));
-        assert!(text.contains("Evidence: "));
+        assert!(text.starts_with("manual-title-"));
         assert!(text.contains("\n...\n"));
     }
 

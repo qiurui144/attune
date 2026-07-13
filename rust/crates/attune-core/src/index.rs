@@ -253,23 +253,27 @@ impl FulltextIndex {
         content: &str,
         source_type: &str,
     ) -> Result<()> {
-        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        // Delete existing document with same item_id (upsert semantics)
-        let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
-        writer.delete_term(term);
-        writer
-            .add_document(doc!(
-                self.f_item_id => item_id,
-                self.f_title => title,
-                self.f_content => content,
-                self.f_source_type => source_type,
-            ))
-            .map_err(|e| VaultError::Crypto(format!("tantivy add: {e}")))?;
-        writer
-            .commit()
-            .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
+        {
+            let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            // Delete existing document with same item_id (upsert semantics)
+            let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
+            writer.delete_term(term);
+            writer
+                .add_document(doc!(
+                    self.f_item_id => item_id,
+                    self.f_title => title,
+                    self.f_content => content,
+                    self.f_source_type => source_type,
+                ))
+                .map_err(|e| VaultError::Crypto(format!("tantivy add: {e}")))?;
+            writer
+                .commit()
+                .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
+        }
         // OSS-S13 P0 fix: 写后立即 reload 让全局 reader 看到新 commit，
         // 避免 OnCommitWithDelay 在测试 / 紧跟读场景下的延迟可见性
+        // Keep reload outside the writer mutex; high-churn upload/delete loops can
+        // otherwise pin the writer while Tantivy refreshes readers.
         self.reader
             .reload()
             .map_err(|e| VaultError::Crypto(format!("tantivy reload: {e}")))?;
@@ -284,22 +288,24 @@ impl FulltextIndex {
         if docs.is_empty() {
             return Ok(());
         }
-        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        for (item_id, title, content, source_type) in docs {
-            let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
-            writer.delete_term(term);
+        {
+            let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            for (item_id, title, content, source_type) in docs {
+                let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
+                writer.delete_term(term);
+                writer
+                    .add_document(doc!(
+                        self.f_item_id => item_id.as_str(),
+                        self.f_title => title.as_str(),
+                        self.f_content => content.as_str(),
+                        self.f_source_type => source_type.as_str(),
+                    ))
+                    .map_err(|e| VaultError::Crypto(format!("tantivy add: {e}")))?;
+            }
             writer
-                .add_document(doc!(
-                    self.f_item_id => item_id.as_str(),
-                    self.f_title => title.as_str(),
-                    self.f_content => content.as_str(),
-                    self.f_source_type => source_type.as_str(),
-                ))
-                .map_err(|e| VaultError::Crypto(format!("tantivy add: {e}")))?;
+                .commit()
+                .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
         }
-        writer
-            .commit()
-            .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
         self.reader
             .reload()
             .map_err(|e| VaultError::Crypto(format!("tantivy reload: {e}")))?;
@@ -308,16 +314,19 @@ impl FulltextIndex {
 
     /// 删除文档（by item_id）
     pub fn delete_document(&self, item_id: &str) -> Result<()> {
-        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
-        writer.delete_term(term);
-        writer
-            .commit()
-            .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
-        // OSS-S13 P0 fix: 写后立即 reload，同 add_document 注释
-        self.reader
-            .reload()
-            .map_err(|e| VaultError::Crypto(format!("tantivy reload: {e}")))?;
+        {
+            let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            let term = tantivy::Term::from_field_text(self.f_item_id, item_id);
+            writer.delete_term(term);
+            writer
+                .commit()
+                .map_err(|e| VaultError::Crypto(format!("tantivy commit: {e}")))?;
+        }
+        // Do not synchronously reload on delete. Under high-churn upload/search/
+        // patch/search/delete loops Tantivy can block in reader.reload() after a
+        // delete commit. Search still remains correct because the product search
+        // path resolves candidate ids through Store, where deleted items are
+        // filtered; the reader follows this commit via OnCommitWithDelay.
         Ok(())
     }
 
@@ -503,7 +512,15 @@ mod tests {
         assert_eq!(idx.doc_count().unwrap(), 1);
 
         idx.delete_document("item1").unwrap();
-        assert_eq!(idx.doc_count().unwrap(), 0);
+        let mut last = idx.doc_count().unwrap();
+        for _ in 0..20 {
+            if last == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            last = idx.doc_count().unwrap();
+        }
+        assert_eq!(last, 0);
     }
 
     #[test]

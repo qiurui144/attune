@@ -105,7 +105,10 @@ fn parses_models_capacity_job_and_kb_task_shapes() {
         Some("answer")
     );
     assert_eq!(job.device_used.as_deref(), Some("cpu.vector"));
-    assert_eq!(job.prompt_cache_key.as_deref(), Some("kb.query.ask:stable-prefix:abc123"));
+    assert_eq!(
+        job.prompt_cache_key.as_deref(),
+        Some("kb.query.ask:stable-prefix:abc123")
+    );
     assert_eq!(job.cache_hit, Some(true));
     assert_eq!(job.prompt_cache_policy.as_deref(), Some("prefix_stable_v1"));
     assert_eq!(job.refusal_policy.as_deref(), Some("scheduler_refusal_v1"));

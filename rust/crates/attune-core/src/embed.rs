@@ -529,9 +529,14 @@ impl LocalSchedulerEmbeddingProvider {
     ) -> Result<Value> {
         let submit_url = format!("{}/kb/tasks/{}", base_url, task);
         let body = serde_json::json!({"input": input});
-        let resp = client.post(&submit_url).json(&body).send().await.map_err(|e| {
-            VaultError::LlmUnavailable(format!("local scheduler embed submit: {e}"))
-        })?;
+        let resp = client
+            .post(&submit_url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                VaultError::LlmUnavailable(format!("local scheduler embed submit: {e}"))
+            })?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
